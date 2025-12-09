@@ -1,0 +1,12 @@
+---
+BasedOnStyle: llvm
+ColumnLimit: 100
+IncludeBlocks: Preserve
+SortIncludes: CaseSensitive
+---
+Language: Cpp
+IndentWidth: 4
+AllowShortBlocksOnASingleLine: Empty
+AllowShortFunctionsOnASingleLine: Empty
+InsertNewlineAtEOF: true # 16
+InsertBraces: true # 15

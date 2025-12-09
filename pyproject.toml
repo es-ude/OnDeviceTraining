@@ -1,0 +1,15 @@
+[project]
+name = "elasticai.usbprotocol"
+dynamic = ["version"]
+authors = [
+    { name = "Intelligent Embedded Systems - University Duisburg Essen" },
+]
+license = { text = "MIT" }
+description = "Framework for Inference and Training of Deep Neural Networks on MCU + PC."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pyserial>=3.5",
+]
+
+

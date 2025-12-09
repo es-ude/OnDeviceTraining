@@ -1,0 +1,415 @@
+{
+	"artifacts" : 
+	[
+		{
+			"path" : "test/unit/loss_functions/UnitTestMSE"
+		}
+	],
+	"backtrace" : 2,
+	"backtraceGraph" : 
+	{
+		"commands" : 
+		[
+			"add_executable",
+			"add_elastic_ai_unit_test",
+			"target_link_libraries"
+		],
+		"files" : 
+		[
+			"test/unit/unit_test.cmake",
+			"test/unit/loss_functions/CMakeLists.txt",
+			"src/layer/CMakeLists.txt",
+			"src/loss_functions/CMakeLists.txt",
+			"src/arithmetic/CMakeLists.txt",
+			"src/tensor/CMakeLists.txt"
+		],
+		"nodes" : 
+		[
+			{
+				"file" : 1
+			},
+			{
+				"command" : 1,
+				"file" : 1,
+				"line" : 9,
+				"parent" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 36,
+				"parent" : 1
+			},
+			{
+				"command" : 2,
+				"file" : 0,
+				"line" : 37,
+				"parent" : 1
+			},
+			{
+				"file" : 2
+			},
+			{
+				"command" : 2,
+				"file" : 2,
+				"line" : 69,
+				"parent" : 4
+			},
+			{
+				"command" : 2,
+				"file" : 2,
+				"line" : 50,
+				"parent" : 4
+			},
+			{
+				"file" : 3
+			},
+			{
+				"command" : 2,
+				"file" : 3,
+				"line" : 13,
+				"parent" : 7
+			},
+			{
+				"file" : 4
+			},
+			{
+				"command" : 2,
+				"file" : 4,
+				"line" : 106,
+				"parent" : 9
+			},
+			{
+				"command" : 2,
+				"file" : 4,
+				"line" : 16,
+				"parent" : 9
+			},
+			{
+				"file" : 5
+			},
+			{
+				"command" : 2,
+				"file" : 5,
+				"line" : 39,
+				"parent" : 12
+			}
+		]
+	},
+	"compileGroups" : 
+	[
+		{
+			"compileCommandFragments" : 
+			[
+				{
+					"fragment" : "-O3 -DNDEBUG -fdiagnostics-color=always"
+				}
+			],
+			"includes" : 
+			[
+				{
+					"backtrace" : 3,
+					"path" : "/home/jan/Arbeit/OnDeviceTraining/src/loss_functions/include"
+				},
+				{
+					"backtrace" : 3,
+					"path" : "/home/jan/Arbeit/OnDeviceTraining/build/env5_rev2_release/_deps/unity-src/src"
+				},
+				{
+					"backtrace" : 3,
+					"path" : "/home/jan/Arbeit/OnDeviceTraining/build/env5_rev2_release/_deps/unity-build"
+				},
+				{
+					"backtrace" : 3,
+					"path" : "/home/jan/Arbeit/OnDeviceTraining/src/layer/include"
+				},
+				{
+					"backtrace" : 3,
+					"path" : "/home/jan/Arbeit/OnDeviceTraining/src/arithmetic/include"
+				},
+				{
+					"backtrace" : 3,
+					"path" : "/home/jan/Arbeit/OnDeviceTraining/src/tensor/include"
+				}
+			],
+			"language" : "C",
+			"sourceIndexes" : 
+			[
+				0
+			]
+		}
+	],
+	"dependencies" : 
+	[
+		{
+			"backtrace" : 3,
+			"id" : "unity::@e7b0562af20a4d8c3b3c"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "DTypes::@02d4e26d8980b35ab564"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "DataStorage::@02d4e26d8980b35ab564"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "Quantization::@02d4e26d8980b35ab564"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "TensorConversion::@02d4e26d8980b35ab564"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "Add::@f6e23f78b14b5ecc9c3b"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "Comparison::@f6e23f78b14b5ecc9c3b"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "Rounding::@f6e23f78b14b5ecc9c3b"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "Square::@f6e23f78b14b5ecc9c3b"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "Conv1d::@1c728babf99f9e00369f"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "Layer::@1c728babf99f9e00369f"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "Softmax::@1c728babf99f9e00369f"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "MSE::@15eff212935c7e656fe1"
+		}
+	],
+	"id" : "UnitTestMSE::@5261642802893699d060",
+	"link" : 
+	{
+		"commandFragments" : 
+		[
+			{
+				"fragment" : "-O3 -DNDEBUG",
+				"role" : "flags"
+			},
+			{
+				"fragment" : "",
+				"role" : "flags"
+			},
+			{
+				"backtrace" : 3,
+				"fragment" : "src/loss_functions/libMSE.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 3,
+				"fragment" : "_deps/unity-build/libunity.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 5,
+				"fragment" : "src/layer/libLayer.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 5,
+				"fragment" : "src/layer/libLinear.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 5,
+				"fragment" : "src/layer/libRelu.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 5,
+				"fragment" : "src/layer/libLayer.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 5,
+				"fragment" : "src/layer/libLinear.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 5,
+				"fragment" : "src/layer/libRelu.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 6,
+				"fragment" : "src/arithmetic/libComparison.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 5,
+				"fragment" : "src/layer/libConv1d.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 5,
+				"fragment" : "src/layer/libSoftmax.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 8,
+				"fragment" : "src/arithmetic/libSub.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 10,
+				"fragment" : "src/arithmetic/libArithmetic.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 11,
+				"fragment" : "src/arithmetic/libAdd.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 11,
+				"fragment" : "src/arithmetic/libDiv.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 11,
+				"fragment" : "src/arithmetic/libMatmul.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 11,
+				"fragment" : "src/arithmetic/libMul.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 8,
+				"fragment" : "src/arithmetic/libSub.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 10,
+				"fragment" : "src/arithmetic/libArithmetic.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 11,
+				"fragment" : "src/arithmetic/libAdd.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 11,
+				"fragment" : "src/arithmetic/libDiv.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 11,
+				"fragment" : "src/arithmetic/libMatmul.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 11,
+				"fragment" : "src/arithmetic/libMul.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 8,
+				"fragment" : "src/arithmetic/libSquare.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 8,
+				"fragment" : "src/tensor/libTensorConversion.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 8,
+				"fragment" : "src/tensor/libTensor.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 13,
+				"fragment" : "src/tensor/libDataStorage.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 13,
+				"fragment" : "src/arithmetic/libMinMax.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 8,
+				"fragment" : "src/tensor/libTensor.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 13,
+				"fragment" : "src/tensor/libDataStorage.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 13,
+				"fragment" : "src/arithmetic/libMinMax.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 13,
+				"fragment" : "src/tensor/libQuantization.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 13,
+				"fragment" : "src/tensor/libDTypes.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 5,
+				"fragment" : "src/arithmetic/libRounding.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 13,
+				"fragment" : "-lm",
+				"role" : "libraries"
+			}
+		],
+		"language" : "C"
+	},
+	"name" : "UnitTestMSE",
+	"nameOnDisk" : "UnitTestMSE",
+	"paths" : 
+	{
+		"build" : "test/unit/loss_functions",
+		"source" : "test/unit/loss_functions"
+	},
+	"sourceGroups" : 
+	[
+		{
+			"name" : "Source Files",
+			"sourceIndexes" : 
+			[
+				0
+			]
+		}
+	],
+	"sources" : 
+	[
+		{
+			"backtrace" : 2,
+			"compileGroupIndex" : 0,
+			"path" : "test/unit/loss_functions/UnitTestMSE.c",
+			"sourceGroupIndex" : 0
+		}
+	],
+	"type" : "EXECUTABLE"
+}

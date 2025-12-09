@@ -1,0 +1,108 @@
+#include "Comparison.h"
+#include "Tensor.h"
+#include "unity.h"
+
+#include "DTypes.h"
+
+void setUp() {}
+void tearDown() {}
+
+void testGteInt32Value() {
+    size_t numberOfValues = 3;
+
+    int32_t aData[] = {-1, 0, 1};
+    uint8_t *aDataBytes = (uint8_t *)aData;
+
+
+    size_t numberOfDims = 1;
+    size_t dims[] = {3};
+    size_t orderOfDims[] = {0};
+    shape_t shape = {
+        .dimensions = dims,
+        .orderOfDimensions = orderOfDims,
+        .numberOfDimensions = numberOfDims
+    };
+
+    quantization_t aQ;
+    initInt32Quantization(&aQ);
+
+    tensor_t aTensor;
+    setTensorValues(&aTensor, aDataBytes, &shape, &aQ, NULL);
+
+    int32_t b = 0;
+    int32_t altNumber = 0;
+
+    int32_t resultData[numberOfValues];
+    uint8_t *resultDataBytes = (uint8_t *)resultData;
+
+    quantization_t resultQ;
+    initInt32Quantization(&resultQ);
+
+    tensor_t resultTensor;
+    setTensorValues(&resultTensor, resultDataBytes, &shape, &resultQ, NULL);
+
+    gteInt32Value(&aTensor, b, altNumber, &resultTensor);
+
+    int32_t expected[] = {0, 0, 1};
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, resultTensor.data, numberOfValues);
+}
+
+void testGteFloatTensors() {
+    size_t numberOfValues = 3;
+
+    float aData[] = {-1, -2, 1};
+    uint8_t *aDataBytes = (uint8_t *)aData;
+
+    size_t numberOfDims = 1;
+    size_t dims[] = {3};
+    size_t orderOfDims[] = {0};
+    shape_t shape = {
+        .dimensions = dims,
+        .orderOfDimensions = orderOfDims,
+        .numberOfDimensions = numberOfDims
+    };
+
+    quantization_t aQ;
+    initFloat32Quantization(&aQ);
+
+    tensor_t aTensor;
+    setTensorValues(&aTensor, aDataBytes, &shape, &aQ, NULL);
+
+    float bData[] = {-2, -1, 0};
+    uint8_t *bDataBytes = (uint8_t *)bData;
+
+    quantization_t bQ;
+    initFloat32Quantization(&bQ);
+
+    tensor_t bTensor;
+    setTensorValues(&bTensor, bDataBytes, &shape, &bQ, NULL);
+
+    float altNumber = 0;
+
+    float resultData[numberOfValues];
+    uint8_t *resultDataBytes = (uint8_t *)resultData;
+
+
+    quantization_t resultQ;
+    initFloat32Quantization(&resultQ);
+
+    tensor_t resultTensor;
+    setTensorValues(&resultTensor, resultDataBytes, &shape, &resultQ, NULL);
+
+    gteFloatTensor(&aTensor, &bTensor, altNumber, &resultTensor);
+
+    float expected[] = {-1, 0, 1};
+
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, resultTensor.data, numberOfValues);
+}
+
+
+int main(void) {
+    UNITY_BEGIN();
+
+    RUN_TEST(testGteInt32Value);
+    RUN_TEST(testGteFloatTensors);
+
+    UNITY_END();
+}

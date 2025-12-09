@@ -1,0 +1,451 @@
+{
+	"artifacts" : 
+	[
+		{
+			"path" : "test/unit/models/UnitTestModelAPI"
+		}
+	],
+	"backtrace" : 2,
+	"backtraceGraph" : 
+	{
+		"commands" : 
+		[
+			"add_executable",
+			"add_elastic_ai_unit_test",
+			"target_link_libraries"
+		],
+		"files" : 
+		[
+			"test/unit/unit_test.cmake",
+			"test/unit/models/CMakeLists.txt",
+			"src/models/CMakeLists.txt",
+			"src/layer/CMakeLists.txt",
+			"src/optimizer/CMakeLists.txt",
+			"src/loss_functions/CMakeLists.txt",
+			"src/arithmetic/CMakeLists.txt",
+			"src/tensor/CMakeLists.txt"
+		],
+		"nodes" : 
+		[
+			{
+				"file" : 1
+			},
+			{
+				"command" : 1,
+				"file" : 1,
+				"line" : 1,
+				"parent" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 36,
+				"parent" : 1
+			},
+			{
+				"command" : 2,
+				"file" : 0,
+				"line" : 37,
+				"parent" : 1
+			},
+			{
+				"file" : 2
+			},
+			{
+				"command" : 2,
+				"file" : 2,
+				"line" : 3,
+				"parent" : 4
+			},
+			{
+				"file" : 3
+			},
+			{
+				"command" : 2,
+				"file" : 3,
+				"line" : 69,
+				"parent" : 6
+			},
+			{
+				"command" : 2,
+				"file" : 3,
+				"line" : 50,
+				"parent" : 6
+			},
+			{
+				"file" : 4
+			},
+			{
+				"command" : 2,
+				"file" : 4,
+				"line" : 5,
+				"parent" : 9
+			},
+			{
+				"file" : 5
+			},
+			{
+				"command" : 2,
+				"file" : 5,
+				"line" : 13,
+				"parent" : 11
+			},
+			{
+				"file" : 6
+			},
+			{
+				"command" : 2,
+				"file" : 6,
+				"line" : 16,
+				"parent" : 13
+			},
+			{
+				"file" : 7
+			},
+			{
+				"command" : 2,
+				"file" : 7,
+				"line" : 39,
+				"parent" : 15
+			}
+		]
+	},
+	"compileGroups" : 
+	[
+		{
+			"compileCommandFragments" : 
+			[
+				{
+					"fragment" : "-g -fdiagnostics-color=always"
+				}
+			],
+			"includes" : 
+			[
+				{
+					"backtrace" : 3,
+					"path" : "/home/jan/Arbeit/OnDeviceTraining/src/models/include"
+				},
+				{
+					"backtrace" : 3,
+					"path" : "/home/jan/Arbeit/OnDeviceTraining/build/env5_rev2_debug/_deps/unity-src/src"
+				},
+				{
+					"backtrace" : 3,
+					"path" : "/home/jan/Arbeit/OnDeviceTraining/build/env5_rev2_debug/_deps/unity-build"
+				},
+				{
+					"backtrace" : 3,
+					"path" : "/home/jan/Arbeit/OnDeviceTraining/src/layer/include"
+				},
+				{
+					"backtrace" : 3,
+					"path" : "/home/jan/Arbeit/OnDeviceTraining/src/arithmetic/include"
+				},
+				{
+					"backtrace" : 3,
+					"path" : "/home/jan/Arbeit/OnDeviceTraining/src/tensor/include"
+				},
+				{
+					"backtrace" : 3,
+					"path" : "/home/jan/Arbeit/OnDeviceTraining/src/optimizer/include"
+				}
+			],
+			"language" : "C",
+			"sourceIndexes" : 
+			[
+				0
+			]
+		}
+	],
+	"dependencies" : 
+	[
+		{
+			"backtrace" : 3,
+			"id" : "unity::@e7b0562af20a4d8c3b3c"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "DTypes::@02d4e26d8980b35ab564"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "DataStorage::@02d4e26d8980b35ab564"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "Quantization::@02d4e26d8980b35ab564"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "TensorConversion::@02d4e26d8980b35ab564"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "Add::@f6e23f78b14b5ecc9c3b"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "Comparison::@f6e23f78b14b5ecc9c3b"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "Rounding::@f6e23f78b14b5ecc9c3b"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "Square::@f6e23f78b14b5ecc9c3b"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "Conv1d::@1c728babf99f9e00369f"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "Layer::@1c728babf99f9e00369f"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "Softmax::@1c728babf99f9e00369f"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "ModelAPI::@defad1a87623d8bf2693"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "MSE::@15eff212935c7e656fe1"
+		},
+		{
+			"backtrace" : 3,
+			"id" : "SGD::@c5fe013df27d67b382af"
+		}
+	],
+	"id" : "UnitTestModelAPI::@7fb96c291421d8d739da",
+	"link" : 
+	{
+		"commandFragments" : 
+		[
+			{
+				"fragment" : "-g",
+				"role" : "flags"
+			},
+			{
+				"fragment" : "",
+				"role" : "flags"
+			},
+			{
+				"backtrace" : 3,
+				"fragment" : "src/models/libModelAPI.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 3,
+				"fragment" : "_deps/unity-build/libunity.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 3,
+				"fragment" : "src/optimizer/libSGD.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 5,
+				"fragment" : "src/loss_functions/libMSE.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 7,
+				"fragment" : "src/layer/libConv1d.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 7,
+				"fragment" : "src/layer/libSoftmax.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 5,
+				"fragment" : "src/layer/libLayer.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 7,
+				"fragment" : "src/layer/libLinear.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 7,
+				"fragment" : "src/layer/libRelu.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 5,
+				"fragment" : "src/layer/libLayer.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 7,
+				"fragment" : "src/layer/libLinear.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 7,
+				"fragment" : "src/layer/libRelu.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 8,
+				"fragment" : "src/arithmetic/libComparison.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 10,
+				"fragment" : "src/arithmetic/libArithmetic.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 12,
+				"fragment" : "src/arithmetic/libSub.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 14,
+				"fragment" : "src/arithmetic/libAdd.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 14,
+				"fragment" : "src/arithmetic/libDiv.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 14,
+				"fragment" : "src/arithmetic/libMatmul.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 14,
+				"fragment" : "src/arithmetic/libMul.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 10,
+				"fragment" : "src/arithmetic/libArithmetic.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 12,
+				"fragment" : "src/arithmetic/libSub.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 14,
+				"fragment" : "src/arithmetic/libAdd.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 14,
+				"fragment" : "src/arithmetic/libDiv.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 14,
+				"fragment" : "src/arithmetic/libMatmul.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 14,
+				"fragment" : "src/arithmetic/libMul.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 12,
+				"fragment" : "src/arithmetic/libSquare.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 12,
+				"fragment" : "src/tensor/libTensorConversion.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 5,
+				"fragment" : "src/tensor/libTensor.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 16,
+				"fragment" : "src/tensor/libDataStorage.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 16,
+				"fragment" : "src/arithmetic/libMinMax.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 5,
+				"fragment" : "src/tensor/libTensor.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 16,
+				"fragment" : "src/tensor/libDataStorage.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 16,
+				"fragment" : "src/arithmetic/libMinMax.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 16,
+				"fragment" : "src/tensor/libQuantization.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 10,
+				"fragment" : "src/tensor/libDTypes.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 5,
+				"fragment" : "src/arithmetic/libRounding.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 16,
+				"fragment" : "-lm",
+				"role" : "libraries"
+			}
+		],
+		"language" : "C"
+	},
+	"name" : "UnitTestModelAPI",
+	"nameOnDisk" : "UnitTestModelAPI",
+	"paths" : 
+	{
+		"build" : "test/unit/models",
+		"source" : "test/unit/models"
+	},
+	"sourceGroups" : 
+	[
+		{
+			"name" : "Source Files",
+			"sourceIndexes" : 
+			[
+				0
+			]
+		}
+	],
+	"sources" : 
+	[
+		{
+			"backtrace" : 2,
+			"compileGroupIndex" : 0,
+			"path" : "test/unit/models/UnitTestModelAPI.c",
+			"sourceGroupIndex" : 0
+		}
+	],
+	"type" : "EXECUTABLE"
+}

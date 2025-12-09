@@ -1,0 +1,9 @@
+/home/jan/.local/share/JetBrains/Toolbox/apps/clion/bin/cmake/linux/x64/bin/cmake -DCMAKE_BUILD_TYPE=Debug --preset env5_rev2_debug -S /home/jan/Arbeit/OnDeviceTraining -B /home/jan/Arbeit/OnDeviceTraining/build/env5_rev2_debug
+Preset CMake variables:
+
+  DEBUG_MODE="ON"
+  ELASTIC_AI_TARGET="ENV5_2"
+
+-- Configuring done (0.1s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/jan/Arbeit/OnDeviceTraining/build/env5_rev2_debug

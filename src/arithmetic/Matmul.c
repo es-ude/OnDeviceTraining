@@ -1,3 +1,4 @@
+#include "Common.h"
 #include "Matmul.h"
 #include "Mul.h"
 #include "Tensor.h"
@@ -20,7 +21,7 @@ size_t matmulInstructionCounter = 0;
 
 void matmulIntTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor) {
     if (aTensor->shape->numberOfDimensions > 2 || bTensor->shape->numberOfDimensions > 2) {
-        printf("Error: Matmul only supports up to 2D Tensors\n");
+        PRINT_ERROR("Error: Matmul only supports up to 2D Tensors\n");
         return;
     }
 

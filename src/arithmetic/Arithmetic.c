@@ -1,5 +1,7 @@
 #include "Arithmetic.h"
 
+#include "../common/include/Common.h"
+
 #include <DTypes.h>
 #include <Matmul.h>
 #include <stdio.h>
@@ -86,6 +88,7 @@ size_t calcElementIndexByIndices(size_t numberOfDims, size_t *dims, size_t *indi
 
 void int32PointWiseArithmetic(tensor_t *aTensor, tensor_t *bTensor,
                               int32ElementArithmeticFunc_t arithmeticFunc, tensor_t *outputTensor) {
+    PRINT_INFO("TEST");
     if (!doDimensionsMatch(aTensor, bTensor)) {
         printf("Error: Dimensions dont match\n");
         return;

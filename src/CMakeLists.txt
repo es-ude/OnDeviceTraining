@@ -1,3 +1,4 @@
+add_subdirectory(common)
 add_subdirectory(tensor)
 add_subdirectory(arithmetic)
 add_subdirectory(layer)

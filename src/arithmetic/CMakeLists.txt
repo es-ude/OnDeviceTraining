@@ -58,6 +58,7 @@ add_library(Matmul
 )
 target_include_directories(Matmul PUBLIC include)
 target_link_libraries(Matmul PRIVATE
+        Common
         Tensor
         DTypes
         Mul

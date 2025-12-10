@@ -10,13 +10,11 @@ odt_is_top_level_project(ODT_TOP_LEVEL_PROJECT)
 
 add_subdirectory(src)
 
+set(DEBUG_LEVEL "0" CACHE STRING "Debug verbosity: 0=off, 1=error, 2=warn, 3=info")
+
 if(ODT_TOP_LEVEL_PROJECT)
     if(NOT ODT_PATH)
         set(ODT_PATH ${CMAKE_CURRENT_LIST_DIR})
-    endif()
-
-    if(DEBUG_OUTPUT)
-        add_definitions(-DDEBUG_MODE)
     endif()
 
     add_unity()

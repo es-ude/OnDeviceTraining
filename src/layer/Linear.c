@@ -3,7 +3,7 @@
 #include "DTypes.h"
 #include "Layer.h"
 #include "Matmul.h"
-#include "Rounding.h";
+#include "Rounding.h"
 #include "TensorConversion.h"
 
 #include <stdio.h>

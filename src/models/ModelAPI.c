@@ -9,9 +9,12 @@
 #include <string.h>
 #include <tgmath.h>
 
-// Important: For now the calloc abstraction layer is located in sequential, because it is not needed anywhere else
-static void *reserveMemory(size_t numberOfBytes) {
-    return calloc(1, numberOfBytes);
+// Important: For now the abstraction layer for memory allocation is located in ModelAPI, because it is not needed anywhere else
+static void **reserveMemory(size_t numberOfBytes) {
+    void *ptr = calloc(1, numberOfBytes);
+    void **handle = malloc(sizeof(void *));
+    *handle = ptr;
+    return handle;
 }
 
 static void freeReservedMemory(void *ptr) {
@@ -152,9 +155,9 @@ static void initLayerOutputs(tensor_t **layerOutputs, layer_t **model, size_t si
         calcOutputShapeFn_t calcOutputShape = layerFunctions[currentLayerType].calcOutputShape;
         size_t numberOfDims = layerOutputs[i]->shape->numberOfDimensions;
 
-        size_t *dims = reserveMemory(numberOfDims * sizeof(size_t));
-        size_t *order = reserveMemory(numberOfDims * sizeof(size_t));
-        shape_t *outShape = reserveMemory(sizeof(shape_t));
+        size_t *dims = *reserveMemory(numberOfDims * sizeof(size_t));
+        size_t *order = *reserveMemory(numberOfDims * sizeof(size_t));
+        shape_t *outShape = *reserveMemory(sizeof(shape_t));
 
         outShape->dimensions = dims;
         outShape->numberOfDimensions = numberOfDims;
@@ -164,10 +167,10 @@ static void initLayerOutputs(tensor_t **layerOutputs, layer_t **model, size_t si
 
         size_t numberOfValues = calcNumberOfElementsByShape(outShape);
         size_t sizeData = calcBytesOutputData(currentLayer->outputQ, numberOfValues);
-        uint8_t *data = reserveMemory(sizeData);
-        uint8_t *sparsityBitmask = reserveMemory(numberOfValues);
+        uint8_t *data = *reserveMemory(sizeData);
+        uint8_t *sparsityBitmask = *reserveMemory(numberOfValues);
 
-        quantization_t *q = reserveMemory(sizeof(quantization_t));
+        quantization_t *q = *reserveMemory(sizeof(quantization_t));
         switch (currentQ->type) {
         case FLOAT32:
             q->type = FLOAT32;
@@ -176,7 +179,7 @@ static void initLayerOutputs(tensor_t **layerOutputs, layer_t **model, size_t si
         case ASYM:
             q->type = ASYM;
             asymQConfig_t *currentQC = currentQ->qConfig;
-            asymQConfig_t *qC = reserveMemory(sizeof(asymQConfig_t));
+            asymQConfig_t *qC = *reserveMemory(sizeof(asymQConfig_t));
             qC->scale = currentQC->scale;
             qC->qBits = currentQC->qBits;
             qC->roundingMode = currentQC->roundingMode;
@@ -187,7 +190,7 @@ static void initLayerOutputs(tensor_t **layerOutputs, layer_t **model, size_t si
             break;
         }
 
-        tensor_t *tensor = reserveMemory(sizeof(tensor_t));
+        tensor_t *tensor = *reserveMemory(sizeof(tensor_t));
         tensor->data = data;
         tensor->quantization = q;
         tensor->shape = outShape;
@@ -202,9 +205,9 @@ static void initGrads(tensor_t **grads, tensor_t **layerOutputs, size_t sizeNetw
         shape_t *currentShape = layerOutputs[i]->shape;
         quantization_t *currentQ = layerOutputs[i]->quantization;
 
-        size_t *dims = reserveMemory(currentShape->numberOfDimensions * sizeof(size_t));
-        size_t *order = reserveMemory(currentShape->numberOfDimensions * sizeof(size_t));
-        shape_t *inShape = reserveMemory(sizeof(shape_t));
+        size_t *dims = *reserveMemory(currentShape->numberOfDimensions * sizeof(size_t));
+        size_t *order = *reserveMemory(currentShape->numberOfDimensions * sizeof(size_t));
+        shape_t *inShape = *reserveMemory(sizeof(shape_t));
 
         inShape->dimensions = dims;
         inShape->numberOfDimensions = currentShape->numberOfDimensions;
@@ -219,10 +222,10 @@ static void initGrads(tensor_t **grads, tensor_t **layerOutputs, size_t sizeNetw
 
         size_t numberOfValues = calcNumberOfElementsByShape(currentShape);
         size_t sizeData = calcBytesOutputData(currentQ, numberOfValues);
-        uint8_t *data = reserveMemory(sizeData);
-        uint8_t *sparsityBitmask = reserveMemory(numberOfValues);
+        uint8_t *data = *reserveMemory(sizeData);
+        uint8_t *sparsityBitmask = *reserveMemory(numberOfValues);
 
-        quantization_t *q = reserveMemory(sizeof(quantization_t));
+        quantization_t *q = *reserveMemory(sizeof(quantization_t));
         switch (currentQ->type) {
         case FLOAT32:
             q->type = FLOAT32;
@@ -231,7 +234,7 @@ static void initGrads(tensor_t **grads, tensor_t **layerOutputs, size_t sizeNetw
         case ASYM:
             q->type = ASYM;
             asymQConfig_t *currentQC = currentQ->qConfig;
-            asymQConfig_t *qC = reserveMemory(sizeof(asymQConfig_t));
+            asymQConfig_t *qC = *reserveMemory(sizeof(asymQConfig_t));
             qC->scale = currentQC->scale;
             qC->qBits = currentQC->qBits;
             qC->roundingMode = currentQC->roundingMode;
@@ -242,7 +245,7 @@ static void initGrads(tensor_t **grads, tensor_t **layerOutputs, size_t sizeNetw
             break;
         }
 
-        tensor_t *tensor = reserveMemory(sizeof(tensor_t));
+        tensor_t *tensor = *reserveMemory(sizeof(tensor_t));
         tensor->data = data;
         tensor->quantization = q;
         tensor->shape = inShape;

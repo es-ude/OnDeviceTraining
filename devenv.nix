@@ -17,6 +17,7 @@ in
     ];
 
   languages.c.enable = true;
+  #languages.c.compiler = gcc13;
   languages.python = {
     enable = true;
     package = pkgs.python312;
@@ -34,8 +35,6 @@ in
     setup_cmake = {
       exec = ''
         cmake --preset unit_test
-        cmake --preset env5_rev2_debug
-        cmake --preset env5_rev2_release
       '';
       package = pkgs.bash;
       description = "setup cmake";
@@ -43,8 +42,6 @@ in
     clean_cmake = {
       exec = ''
         cmake --build --target clean --preset unit_test
-        cmake --build --target clean --preset env5_rev2_debug
-        cmake --build --target clean --preset env5_rev2_release
       '';
       package = pkgs.bash;
       description = "clean cmake";
@@ -58,29 +55,7 @@ in
     };
 		run_ai_unit_tests = {
 			exec = ''
-				build_unit_tests
-				TEST_DIR="build/unit_test/test/unit"
-
-				test_results=""
-
-				tests=$(find "$TEST_DIR" -maxdepth 2 -mindepth 2 -type f -executable)
-
-				for test in $tests; do
-					test_name=$(basename "$test")
-					echo "Running $test_name"
-
-					output=$("$test" 2>&1)
-					exitcode=$?
-
-					if [[ $exitcode -eq 0 ]]; then
-						test_results+="  \e[32mOK\e[0m    | $test_name"$'\n'
-					else
-						test_results+="  \e[31mFAIL\e[0m  | $test_name"$'\n'
-					fi
-				done
-
-				echo "----------------"
-				echo -e "Result:\n$test_results"
+				ctest --preset unit_test
 			'';
 			package = pkgs.bash;
 			description = "Run all Unity unit tests and print their result";

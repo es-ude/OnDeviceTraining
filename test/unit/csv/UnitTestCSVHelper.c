@@ -73,10 +73,10 @@ void testCSVWriteRowsByBufferSize() {
 
     FILE *fp;
     fp = fopen(filePath, "r");
-    fgets(actual, MAX_ROW_SIZE, fp);
+    char *ptr = fgets(actual, MAX_ROW_SIZE, fp);
     fclose(fp);
 
-    TEST_ASSERT_EQUAL_STRING("1, 2, 3, 4, 5, 6", actual);
+    TEST_ASSERT_EQUAL_STRING("1, 2, 3, 4, 5, 6", ptr);
 }
 
 

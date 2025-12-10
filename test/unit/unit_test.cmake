@@ -36,7 +36,7 @@ function(add_elastic_ai_unit_test)
     add_executable(${NAME} ${NAME}.c)
     target_link_libraries(${NAME} PRIVATE
             ${arg_LIB_UNDER_TEST}
-            unity::framework
+            unity
             ${arg_MORE_LIBS})
     __register_target_as_unit_test(${NAME})
 

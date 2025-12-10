@@ -30,8 +30,8 @@ void csvReadRowsByBufferSize(char *filePath, csvData_t *csvData) {
     }
 
     for (size_t i = 0; i < csvData->numberOfRows; i++) {
-        fgets(csvData->rows[i], MAX_ROW_SIZE, fp);
-        csvData->entriesInRow[i] = countCsvEntries(csvData->rows[i]);
+        char *ptr = fgets(csvData->rows[i], MAX_ROW_SIZE, fp);
+        csvData->entriesInRow[i] = countCsvEntries(ptr);
     }
 
     fclose(fp);

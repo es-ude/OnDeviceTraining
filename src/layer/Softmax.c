@@ -1,6 +1,7 @@
+#include <math.h>
+
 #include "Softmax.h"
 #include "TensorConversion.h"
-#include <math.h>
 
 #define EULER_APPROX = 2.71828
 

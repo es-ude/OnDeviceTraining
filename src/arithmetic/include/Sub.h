@@ -1,5 +1,9 @@
 #ifndef ENV5_RUNTIME_SUB_H
 #define ENV5_RUNTIME_SUB_H
+
+#include <stddef.h>
+#include <stdint.h>
+
 #include "Tensor.h"
 
 int32_t subInt32s(int32_t a, int32_t b);

@@ -1,9 +1,8 @@
 #ifndef ENV5_RUNTIME_LAYER_H
 #define ENV5_RUNTIME_LAYER_H
+
 #include "Tensor.h"
 #include "Linear.h"
-
-#include <stddef.h>
 
 typedef struct linearConfig linearConfig_t;
 
@@ -28,7 +27,8 @@ typedef enum layerQType
     ASYM_LAYER
 } layerQType_t;
 
-typedef union layerConfig {
+typedef union layerConfig
+{
     linearConfig_t* linear;
 } layerConfig_t;
 
@@ -41,7 +41,7 @@ typedef struct layer
 
     quantization_t* inputQ;
     quantization_t* outputQ;
-}layer_t;
+} layer_t;
 
 typedef void (*forwardFn_t)(layer_t* layer, tensor_t* inputTensor, tensor_t* outputTensor);
 typedef void (*backwardFn_t)(layer_t* layer, tensor_t* forwardInput, tensor_t* loss, tensor_t* propLoss);
@@ -58,7 +58,8 @@ typedef struct layerFunctions
 
 extern layerFunctions_t layerFunctions[];
 
-void initLayer(layer_t* layer, layerType_t layerType, layerConfig_t* config, layerQType_t layerQType, quantization_t* inputQ,
+void initLayer(layer_t* layer, layerType_t layerType, layerConfig_t* config, layerQType_t layerQType,
+               quantization_t* inputQ,
                quantization_t* outputQ);
 
 #endif

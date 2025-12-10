@@ -1,5 +1,6 @@
-#include "Square.h"
+#include <stddef.h>
 
+#include "Square.h"
 
 #ifdef TRACK_INSTRUCTIONS
 #define SQUARE_FUNC_INT squareInt32WithInstructionCounter

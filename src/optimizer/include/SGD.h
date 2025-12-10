@@ -1,10 +1,11 @@
 #ifndef SGD_H
 #define SGD_H
-#include "Tensor.h"
-#include "Layer.h"
 
 #include <stddef.h>
 #include <stdint.h>
+
+#include "Tensor.h"
+#include "Layer.h"
 
 typedef struct momentumBuffer
 {

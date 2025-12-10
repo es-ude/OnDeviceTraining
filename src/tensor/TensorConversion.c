@@ -1,12 +1,11 @@
+#include <stdio.h>
+#include <string.h>
+
 #include "TensorConversion.h"
 #include "Tensor.h"
 #include "DTypes.h"
 #include "math.h"
 #include "MinMax.h"
-
-#include <inttypes.h>
-#include <stdio.h>
-#include <string.h>
 
 void zeroTensorData(tensor_t *tensor) {
     size_t numberOfElements = calcNumberOfElementsByTensor(tensor);

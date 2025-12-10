@@ -1,10 +1,10 @@
 #ifndef ELASTIC_AI_RUNTIME_ENV5_TENSOR_H
 #define ELASTIC_AI_RUNTIME_ENV5_TENSOR_H
 
-#include "Quantization.h"
-
 #include <stddef.h>
 #include <stdint.h>
+
+#include "Quantization.h"
 
 typedef void* tensorStorageId;
 

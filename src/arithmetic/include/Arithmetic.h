@@ -1,9 +1,11 @@
 #ifndef ENV5_RUNTIME_TENSOR_MATH_H
 #define ENV5_RUNTIME_TENSOR_MATH_H
-#include "Tensor.h"
 
+#include <stddef.h>
+#include <stdint.h>
 #include <stdbool.h>
 
+#include "Tensor.h"
 
 typedef int32_t(*int32ElementArithmeticFunc_t)(int32_t a, int32_t b);
 typedef float(*floatElementArithmeticFunc_t)(float a, float b);

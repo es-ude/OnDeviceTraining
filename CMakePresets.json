@@ -22,7 +22,31 @@
       "displayName": "Unit-Test",
       "inherits": "host",
       "cacheVariables": {
-        "DEBUG_MODE": "ON"
+        "DEBUG_LEVEL": "0"
+      }
+    },
+    {
+      "name": "unit_test_error",
+      "displayName": "Unit-Test-Error",
+      "inherits": "host",
+      "cacheVariables": {
+        "DEBUG_LEVEL": "1"
+      }
+    },
+    {
+      "name": "unit_test_warn",
+      "displayName": "Unit-Test-Warn",
+      "inherits": "host",
+      "cacheVariables": {
+        "DEBUG_LEVEL": "2"
+      }
+    },
+    {
+      "name": "unit_test_info",
+      "displayName": "Unit-Test-Info",
+      "inherits": "host",
+      "cacheVariables": {
+        "DEBUG_LEVEL": "3"
       }
     }
   ],
@@ -38,6 +62,24 @@
       "inherits": "host",
       "configurePreset": "unit_test",
       "targets": "all_unit_tests"
+    },
+    {
+      "name": "unit_test_error",
+      "inherits": "host",
+      "configurePreset": "unit_test_error",
+      "targets": "all_unit_tests"
+    },
+    {
+      "name": "unit_test_warn",
+      "inherits": "host",
+      "configurePreset": "unit_test_warn",
+      "targets": "all_unit_tests"
+    },
+    {
+      "name": "unit_test_info",
+      "inherits": "host",
+      "configurePreset": "unit_test_info",
+      "targets": "all_unit_tests"
     }
   ],
   "testPresets": [
@@ -45,6 +87,48 @@
       "name": "unit_test",
       "displayName": "Unit Tests",
       "configurePreset": "unit_test",
+      "output": {
+        "outputJUnitFile": "unit-test.junit",
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "unit"
+        }
+      }
+    },
+    {
+      "name": "unit_test_error",
+      "displayName": "Unit Tests Error",
+      "configurePreset": "unit_test_error",
+      "output": {
+        "outputJUnitFile": "unit-test.junit",
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "unit"
+        }
+      }
+    },
+    {
+      "name": "unit_test_warn",
+      "displayName": "Unit Tests Warn",
+      "configurePreset": "unit_test_warn",
+      "output": {
+        "outputJUnitFile": "unit-test.junit",
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "unit"
+        }
+      }
+    },
+    {
+      "name": "unit_test_info",
+      "displayName": "Unit Tests Info",
+      "configurePreset": "unit_test_info",
       "output": {
         "outputJUnitFile": "unit-test.junit",
         "outputOnFailure": true

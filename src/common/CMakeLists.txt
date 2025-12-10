@@ -1,6 +1,3 @@
-## provides helper macros to improve
-## - print output
-
 add_library(Common__hdrs INTERFACE)
 target_include_directories(Common__hdrs INTERFACE
         include

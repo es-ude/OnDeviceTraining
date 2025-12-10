@@ -1,14 +1,12 @@
-#include "Tensor.h"
-#include "Rounding.h"
-
-#include "Quantization.h"
-#include "MinMax.h"
-#include "DTypes.h"
-
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+
+#include "Tensor.h"
+#include "Quantization.h"
+#include "MinMax.h"
+#include "DTypes.h"
 
 size_t calcNumberOfElementsByShape(shape_t *shape) {
     size_t numElem = 1;

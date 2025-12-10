@@ -1,14 +1,11 @@
+#include <stdio.h>
+
 #include "Linear.h"
 #include "Add.h"
-#include "DTypes.h"
 #include "Layer.h"
 #include "Matmul.h"
 #include "Rounding.h"
 #include "TensorConversion.h"
-
-#include <stdio.h>
-#include <string.h>
-#include <tgmath.h>
 
 void linearInitConfig(linearConfig_t *linearConfig, parameter_t *weights, parameter_t *bias) {
     linearConfig->weights = weights;

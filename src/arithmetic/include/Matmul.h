@@ -1,7 +1,7 @@
 #ifndef ENV5_RUNTIME_MATMUL_H
 #define ENV5_RUNTIME_MATMUL_H
 
-#include <stdbool.h>
+#include <stddef.h>
 
 #include "Tensor.h"
 

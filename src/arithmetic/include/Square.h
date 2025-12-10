@@ -1,7 +1,7 @@
 #ifndef ENV5_RUNTIME_SQUARE_H
 #define ENV5_RUNTIME_SQUARE_H
 
-#include "Tensor.h"
+#include <stdint.h>
 
 int32_t squareInt32(int32_t a);
 

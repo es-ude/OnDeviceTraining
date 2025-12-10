@@ -1,5 +1,8 @@
 #ifndef MODEL_API_H
 #define MODEL_API_H
+
+#include <stddef.h>
+
 #include "Layer.h"
 #include "Tensor.h"
 

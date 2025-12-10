@@ -1,6 +1,8 @@
 #ifndef ENV5_RUNTIME_ADD_H
 #define ENV5_RUNTIME_ADD_H
 
+#include <stddef.h>
+#include <stdint.h>
 #include "Tensor.h"
 
 float addFloat32s(float a, float b);

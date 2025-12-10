@@ -1,7 +1,9 @@
 #ifndef ENV5_RUNTIME_SOFTMAX_H
 #define ENV5_RUNTIME_SOFTMAX_H
-#include "Layer.h"
+
 #include <stddef.h>
+
+#include "Layer.h"
 
 typedef struct softmaxConfig
 {

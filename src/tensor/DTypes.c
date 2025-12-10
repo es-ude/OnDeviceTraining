@@ -1,8 +1,7 @@
+#include <string.h>
+
 #include "DTypes.h"
 #include "Tensor.h"
-
-#include <stdlib.h>
-#include <string.h>
 
 int32_t readBytesAsInt32(uint8_t *bytes) {
     int32_t x;

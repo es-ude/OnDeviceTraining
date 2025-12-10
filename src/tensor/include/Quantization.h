@@ -1,5 +1,6 @@
 #ifndef ENV5_RUNTIME_QUANTIZATION_H
 #define ENV5_RUNTIME_QUANTIZATION_H
+
 #include "Rounding.h"
 
 typedef enum qtype

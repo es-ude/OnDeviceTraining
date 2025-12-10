@@ -1,11 +1,10 @@
+#include <string.h>
+
 #include "Relu.h"
 #include "Tensor.h"
-
 #include "Comparison.h"
 #include "DTypes.h"
 #include "TensorConversion.h"
-#include <stdio.h>
-#include <string.h>
 
 static void forwardFloat32(tensor_t *input, tensor_t *output) {
     gteFloatValue(input, 0, 0, output);

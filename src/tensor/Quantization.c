@@ -1,5 +1,6 @@
+#include <stddef.h>
+
 #include "Quantization.h"
-#include <stdio.h>
 
 void initSymInt32QConfig(roundingMode_t roundingMode, symInt32QConfig_t *symInt32QConfig) {
     symInt32QConfig->roundingMode = roundingMode;

@@ -1,6 +1,8 @@
 #ifndef ENV5_RUNTIME_DIV_H
 #define ENV5_RUNTIME_DIV_H
-#include <stdbool.h>
+
+#include <stddef.h>
+#include <stdint.h>
 
 #include "Tensor.h"
 

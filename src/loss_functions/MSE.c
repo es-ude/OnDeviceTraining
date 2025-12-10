@@ -1,10 +1,10 @@
+#include <Mul.h>
+#include <stdio.h>
+
 #include "MSE.h"
 #include "Tensor.h"
 #include "TensorConversion.h"
 #include "Sub.h"
-
-#include <Mul.h>
-#include <stdio.h>
 
 void MSELossBackwardFloat(tensor_t *modelOutput, tensor_t *label, tensor_t *result) {
     size_t numberOfElements = calcNumberOfElementsByTensor(modelOutput);

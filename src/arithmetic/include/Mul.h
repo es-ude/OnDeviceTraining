@@ -1,8 +1,8 @@
 #ifndef ENV5_RUNTIME_MUL_H
 #define ENV5_RUNTIME_MUL_H
 
-#include <stdbool.h>
-
+#include <stddef.h>
+#include <stdint.h>
 #include "Tensor.h"
 
 int32_t mulInt32s(int32_t a, int32_t b);

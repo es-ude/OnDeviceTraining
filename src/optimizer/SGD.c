@@ -1,16 +1,14 @@
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <tgmath.h>
+
 #include "SGD.h"
 #include "Tensor.h"
 #include "Layer.h"
 #include "Linear.h"
-
 #include "TensorConversion.h"
-#include <stddef.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <tgmath.h>
-
 
 typedef struct numParams {
     size_t numParams;

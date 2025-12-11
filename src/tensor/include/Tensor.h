@@ -1,5 +1,5 @@
-#ifndef ELASTIC_AI_RUNTIME_ENV5_TENSOR_H
-#define ELASTIC_AI_RUNTIME_ENV5_TENSOR_H
+#ifndef ODT_TENSOR_H
+#define ODT_TENSOR_H
 
 #include <stddef.h>
 #include <stdint.h>

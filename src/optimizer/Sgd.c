@@ -4,11 +4,11 @@
 #include <string.h>
 #include <tgmath.h>
 
-#include "SGD.h"
 #include "Tensor.h"
 #include "Layer.h"
 #include "Linear.h"
 #include "TensorConversion.h"
+#include "Sgd.h"
 
 typedef struct numParams {
     size_t numParams;
@@ -42,37 +42,37 @@ uint32_t calcTotalNumberOfMomentumBuffers(layer_t *model, size_t sizeModel) {
     return number;
 }
 
-void initSGDConfig(SGDConfig_t *config, float learningRate, float momentumFactor, float weightDecay,
+void initSGDConfig(sgd_t *sgd, float learningRate, float momentumFactor, float weightDecay,
                    momentumBuffer_t **momentumBuffers, size_t sizeMomentumBuffers) {
-    config->learningRate = learningRate;
-    config->momentumFactor = momentumFactor;
-    config->weightDecay = weightDecay;
-    config->momentumBuffers = momentumBuffers;
-    config->sizeMomentumBuffers = sizeMomentumBuffers;
+    sgd->learningRate = learningRate;
+    sgd->momentumFactor = momentumFactor;
+    sgd->weightDecay = weightDecay;
+    sgd->momentumBuffers = momentumBuffers;
+    sgd->sizeMomentumBuffers = sizeMomentumBuffers;
 }
 
 
-void SGDStepFloat(SGDConfig_t *config) {
-    for (size_t i = 0; i < config->sizeMomentumBuffers; i++) {
-        parameter_t *param = config->momentumBuffers[i]->parameter;
-        float *momentums = (float *)config->momentumBuffers[i]->momentums->data;
+void SGDStepFloat(sgd_t *sgd) {
+    for (size_t i = 0; i < sgd->sizeMomentumBuffers; i++) {
+        parameter_t *param = sgd->momentumBuffers[i]->parameter;
+        float *momentums = (float *)sgd->momentumBuffers[i]->momentums->data;
 
         size_t paramSize = calcNumberOfElementsByParameter(param);
         float *gradFloat = (float *)param->grad->data;
         float *dataFloat = (float *)param->param->data;
 
         for (size_t j = 0; j < paramSize; ++j) {
-            float grad = gradFloat[j] + config->weightDecay * dataFloat[j];
-            momentums[j] = config->momentumFactor * momentums[j] + grad;
-            dataFloat[j] -= config->learningRate * momentums[j];
+            float grad = gradFloat[j] + sgd->weightDecay * dataFloat[j];
+            momentums[j] = sgd->momentumFactor * momentums[j] + grad;
+            dataFloat[j] -= sgd->learningRate * momentums[j];
         }
     }
 }
 
-void SGDStepAsym(SGDConfig_t *config) {
-    for (size_t i = 0; i < config->sizeMomentumBuffers; i++) {
-        parameter_t *param = config->momentumBuffers[i]->parameter;
-        tensor_t *momentums = config->momentumBuffers[i]->momentums;
+void SGDStepAsym(sgd_t *sgd) {
+    for (size_t i = 0; i < sgd->sizeMomentumBuffers; i++) {
+        parameter_t *param = sgd->momentumBuffers[i]->parameter;
+        tensor_t *momentums = sgd->momentumBuffers[i]->momentums;
 
         size_t numberOfValues = calcNumberOfElementsByShape(momentums->shape);
 
@@ -104,9 +104,9 @@ void SGDStepAsym(SGDConfig_t *config) {
         float *gradFloatArr = (float *)gradFloat.data;
 
         for (size_t j = 0; j < numberOfValues; ++j) {
-            float grad = gradFloatArr[j] + config->weightDecay * paramFloatArr[j];
-            momentumsFloatArr[j] = config->momentumFactor * momentumsFloatArr[j] + grad;
-            paramFloatArr[j] -= config->learningRate * momentumsFloatArr[j];
+            float grad = gradFloatArr[j] + sgd->weightDecay * paramFloatArr[j];
+            momentumsFloatArr[j] = sgd->momentumFactor * momentumsFloatArr[j] + grad;
+            paramFloatArr[j] -= sgd->learningRate * momentumsFloatArr[j];
         }
 
         convertTensor(&momentumsFloat, momentums);
@@ -116,9 +116,9 @@ void SGDStepAsym(SGDConfig_t *config) {
     }
 }
 
-void SGDZeroGrad(SGDConfig_t *config) {
-    for (size_t i = 0; i < config->sizeMomentumBuffers; i++) {
-        parameter_t *param = config->momentumBuffers[i]->parameter;
+void SGDZeroGrad(sgd_t *sgd) {
+    for (size_t i = 0; i < sgd->sizeMomentumBuffers; i++) {
+        parameter_t *param = sgd->momentumBuffers[i]->parameter;
         size_t paramSize = calcNumberOfElementsByParameter(param);
         size_t bitsPerElement = calcBitsPerElement(param->grad->quantization);
         size_t totalNumberOfBytes = ceil(paramSize * bitsPerElement / 8);

@@ -1,8 +1,8 @@
-add_library(SGD
-        SGD.c
+add_library(Sgd
+        Sgd.c
 )
-target_include_directories(SGD PUBLIC include)
-target_link_libraries(SGD PRIVATE
+target_include_directories(Sgd PUBLIC include)
+target_link_libraries(Sgd PRIVATE
         DTypes
         Tensor
         Arithmetic

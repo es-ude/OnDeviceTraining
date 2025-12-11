@@ -39,6 +39,7 @@ static void forwardAsym(tensor_t *input, tensor_t *output) {
 }
 
 void reluForward(layer_t *reluLayer, tensor_t *input, tensor_t *output) {
+    qtype_t inputQType = input->quantization->type;
 
     switch (reluLayer->qType) {
     case FLOAT_LAYER:

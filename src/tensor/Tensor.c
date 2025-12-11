@@ -323,7 +323,7 @@ void copyData(tensor_t *dest, tensor_t *src) {
     size_t bytesPerElement = calcBytesPerElement(src->quantization);
     memcpy(dest->data, src->data, numberOfValues * bytesPerElement);
 
-    if (dest->sparsityBitmask != NULL) {
+    if (src->sparsityBitmask != NULL) {
         memcpy(dest->sparsityBitmask, src->sparsityBitmask, numberOfValues);
     }
 }
@@ -351,8 +351,8 @@ void copyQuantization(quantization_t *dest, quantization_t *src) {
     }
 }
 
+// TODO copy sparsity
 void copyTensor(tensor_t *dest, tensor_t *src) {
-
     copyShape(dest->shape, src->shape);
     copyQuantization(dest->quantization, src->quantization);
     copyData(dest, src);

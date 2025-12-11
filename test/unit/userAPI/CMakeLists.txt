@@ -1,0 +1,21 @@
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
+        InferenceAPI
+        MORE_LIBS
+        CommonLayerLibs
+        TensorAPI
+        LinearAPI
+        ReluAPI
+        QuantizationAPI
+)
+
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
+        TrainingAPI
+        MORE_LIBS
+        CommonLayerLibs
+        TensorAPI
+        LinearAPI
+        ReluAPI
+        SgdAPI
+)

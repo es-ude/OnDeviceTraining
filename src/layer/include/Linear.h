@@ -2,9 +2,7 @@
 #define ENV5_RUNTIME_LINEAR_H
 #include "Tensor.h"
 
-struct layer;
 typedef struct layer layer_t;
-
 
 typedef struct linearConfig
 {

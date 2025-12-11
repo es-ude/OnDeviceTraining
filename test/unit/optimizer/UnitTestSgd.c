@@ -1,11 +1,11 @@
 #define SOURCE_FILE "SGD-UTEST"
 
-#include "SGD.h"
 #include "Linear.h"
 #include "unity.h"
 #include "Layer.h"
 #include "Tensor.h"
-#include "Rounding.h"
+#include "Sgd.h"
+
 
 #include <stdlib.h>
 #include <string.h>
@@ -103,13 +103,13 @@ void unitTestInitSGDConfig() {
     linearConfig_t linCfg;
     linearConfig.linear = &linCfg;
     linearInitConfig(linearConfig.linear, &weights, &bias);
-    initLayer(&linear0, LINEAR, &linearConfig, FLOAT_LAYER, NULL, NULL);
+    initLayer(&linear0, LINEAR, &linearConfig, FLOAT_LAYER, FLOAT32, NULL);
 
     layer_t relu0;
-    initLayer(&relu0, RELU, NULL, FLOAT_LAYER, NULL, NULL);
+    initLayer(&relu0, RELU, NULL, FLOAT_LAYER, FLOAT32, NULL);
 
     layer_t linear1;
-    initLayer(&linear1, LINEAR, &linearConfig, FLOAT_LAYER, NULL, NULL);
+    initLayer(&linear1, LINEAR, &linearConfig, FLOAT_LAYER, FLOAT32, NULL);
 
     layer_t model[3] = {linear0, relu0, linear1};
     size_t sizeModel = sizeof(model) / sizeof(model[0]);
@@ -169,36 +169,36 @@ void unitTestInitSGDConfig() {
     momentumBuffer_t *momentumBuffers[] = {&weight0MomentumBuffer, &bias0MomentumBuffer,
                                            &weight1MomentumBuffer, &bias1MomentumBuffer};
 
-    SGDConfig_t sgdConfig;
-    initSGDConfig(&sgdConfig, lr, momentumFactor, weightDecay, momentumBuffers,
+    sgd_t sgd;
+    initSGDConfig(&sgd, lr, momentumFactor, weightDecay, momentumBuffers,
                   sizeMomentumBuffers);
 
     linearConfig_t *linear0Conf = linear0.config->linear;
     linearConfig_t *linear1Conf = linear1.config->linear;
 
-    TEST_ASSERT_EQUAL_FLOAT(lr, sgdConfig.learningRate);
-    TEST_ASSERT_EQUAL_FLOAT(momentumFactor, sgdConfig.momentumFactor);
-    TEST_ASSERT_EQUAL_FLOAT(weightDecay, sgdConfig.weightDecay);
-    TEST_ASSERT_EQUAL_size_t(4, sgdConfig.sizeMomentumBuffers);
+    TEST_ASSERT_EQUAL_FLOAT(lr, sgd.learningRate);
+    TEST_ASSERT_EQUAL_FLOAT(momentumFactor, sgd.momentumFactor);
+    TEST_ASSERT_EQUAL_FLOAT(weightDecay, sgd.weightDecay);
+    TEST_ASSERT_EQUAL_size_t(4, sgd.sizeMomentumBuffers);
 
-    TEST_ASSERT_EQUAL_PTR(linear0Conf->weights, sgdConfig.momentumBuffers[0]->parameter);
-    TEST_ASSERT_EQUAL_PTR(linear0Conf->bias, sgdConfig.momentumBuffers[1]->parameter);
-    TEST_ASSERT_EQUAL_PTR(linear1Conf->weights, sgdConfig.momentumBuffers[2]->parameter);
-    TEST_ASSERT_EQUAL_PTR(linear1Conf->bias, sgdConfig.momentumBuffers[3]->parameter);
+    TEST_ASSERT_EQUAL_PTR(linear0Conf->weights, sgd.momentumBuffers[0]->parameter);
+    TEST_ASSERT_EQUAL_PTR(linear0Conf->bias, sgd.momentumBuffers[1]->parameter);
+    TEST_ASSERT_EQUAL_PTR(linear1Conf->weights, sgd.momentumBuffers[2]->parameter);
+    TEST_ASSERT_EQUAL_PTR(linear1Conf->bias, sgd.momentumBuffers[3]->parameter);
 
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(linear0Conf->weights->grad->data,
-                                  sgdConfig.momentumBuffers[0]->momentums->data,
+                                  sgd.momentumBuffers[0]->momentums->data,
                                   calcNumberOfElementsByParameter(linear0Conf->weights));
 
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(linear0Conf->bias->grad->data,
-                                  sgdConfig.momentumBuffers[1]->momentums->data,
+                                  sgd.momentumBuffers[1]->momentums->data,
                                   calcNumberOfElementsByParameter(linear0Conf->bias));
 
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(linear1Conf->weights->grad->data,
-                                  sgdConfig.momentumBuffers[2]->momentums->data,
+                                  sgd.momentumBuffers[2]->momentums->data,
                                   calcNumberOfElementsByParameter(linear1Conf->weights));
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(linear1Conf->bias->grad->data,
-                                  sgdConfig.momentumBuffers[3]->momentums->data,
+                                  sgd.momentumBuffers[3]->momentums->data,
                                   calcNumberOfElementsByParameter(linear1Conf->bias));
 }
 
@@ -256,7 +256,7 @@ void unitTestSGDStep() {
     linearConfig_t linCfg;
     linearConfig.linear = &linCfg;
     linearInitConfig(linearConfig.linear, &weights, &bias);
-    initLayer(&linear0, LINEAR, &linearConfig, FLOAT_LAYER, NULL, NULL);
+    initLayer(&linear0, LINEAR, &linearConfig, FLOAT_LAYER, FLOAT32, NULL);
 
     layer_t model[] = {linear0};
     float lr = 0.1f;
@@ -288,10 +288,10 @@ void unitTestSGDStep() {
 
     momentumBuffer_t *momentumBuffers[] = {&weightMomentumBuffer, &biasMomentumBuffer};
 
-    SGDConfig_t config;
-    initSGDConfig(&config, lr, momentumFactor, weightDecay, momentumBuffers, sizeMomentumBuffers);
+    sgd_t sgd;
+    initSGDConfig(&sgd, lr, momentumFactor, weightDecay, momentumBuffers, sizeMomentumBuffers);
 
-    SGDStepFloat(&config);
+    SGDStepFloat(&sgd);
 
     float wPExpected[] = {0.899f, 2.098f, -3.197f};
     float bPExpected[] = {-1.099f, 2.697f};
@@ -302,7 +302,7 @@ void unitTestSGDStep() {
                                   sizeof(bPExpected)/sizeof(float));
 
     // Second Step with same grads but with momentum now
-    SGDStepFloat(&config);
+    SGDStepFloat(&sgd);
 
     float wPExpected2[] = {0.707201f, 2.284102f, -3.571103f};
     float bPExpected2[] = {-1.287001f, 2.121603f};
@@ -366,7 +366,7 @@ void unitTestSGDZeroGrad() {
     linearConfig_t linCfg;
     linearConfig.linear = &linCfg;
     linearInitConfig(linearConfig.linear, &weights, &bias);
-    initLayer(&linear0, LINEAR, &linearConfig, FLOAT_LAYER, NULL, NULL);
+    initLayer(&linear0, LINEAR, &linearConfig, FLOAT_LAYER, FLOAT32, NULL);
 
     layer_t model[] = {linear0};
     float lr = 0.1f;
@@ -412,11 +412,11 @@ void unitTestSGDZeroGrad() {
 
     momentumBuffer_t *momentumBuffers[] = {&weightMomentumBuffer, &biasMomentumBuffer};
 
-    SGDConfig_t sgdConfig;
-    initSGDConfig(&sgdConfig, lr, momentumFactor, weightDecay, momentumBuffers,
+    sgd_t sgd;
+    initSGDConfig(&sgd, lr, momentumFactor, weightDecay, momentumBuffers,
                   sizeMomentumBuffers);
 
-    SGDZeroGrad(&sgdConfig);
+    SGDZeroGrad(&sgd);
     float wGradExpected[] = {0.f, 0.f, 0.f};
     float bGradExpected[] = {0.f, 0.f};
 

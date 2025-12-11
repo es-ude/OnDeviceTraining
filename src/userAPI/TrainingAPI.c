@@ -1,145 +1,27 @@
 #include <stdbool.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <tgmath.h>
+#include <stdlib.h>
 
-#include "ModelAPI.h"
 #include "Layer.h"
 #include "MSE.h"
-#include "Linear.h"
+#include "TrainingAPI.h"
+#include "TensorAPI.h"
+#include "StorageAPI.h"
 
-// Important: For now the abstraction layer for memory allocation is located in ModelAPI, because it is not needed anywhere else
-static void **reserveMemory(size_t numberOfBytes) {
-    void *ptr = calloc(1, numberOfBytes);
-    void **handle = malloc(sizeof(void *));
-    *handle = ptr;
-    return handle;
-}
-
-static void freeReservedMemory(void *ptr) {
-    free(ptr);
-}
-
-static void freeShape(shape_t *shape) {
-    freeReservedMemory(shape->dimensions);
-    freeReservedMemory(shape->orderOfDimensions);
-    freeReservedMemory(shape);
-}
-
-static void freeData(tensor_t *tensor) {
-    freeReservedMemory(tensor->data);
-    if (tensor->sparsityBitmask != NULL) {
-        freeReservedMemory(tensor->sparsityBitmask);
-    }
-}
-
-static void freeQuantization(quantization_t *quantization) {
-    freeReservedMemory(quantization->qConfig);
-    freeReservedMemory((uint8_t *)quantization);
-}
-
-static void freeTensorPointer(tensor_t *tensor) {
-    freeReservedMemory((uint8_t *)tensor);
+void deInitGradTensor(tensor_t *tensor) {
+    freeData(tensor);
+    freeShape(tensor->shape);
+    freeQuantization(tensor->quantization);
 }
 
 static void deInitTensorPtrArray(tensor_t **tensorPtrArray, size_t sizeNetwork, size_t startIndex) {
     for (size_t i = startIndex; i <= sizeNetwork; i++) {
-        freeShape(tensorPtrArray[i]->shape);
-        freeData(tensorPtrArray[i]);
-        freeQuantization(tensorPtrArray[i]->quantization);
-        freeTensorPointer(tensorPtrArray[i]);
+        freeTensor(tensorPtrArray[i]);
     }
 }
 
-static void deInitGradTensor(tensor_t *tensor) {
-    freeShape(tensor->shape);
-    freeData(tensor);
-    freeQuantization(tensor->quantization);
-}
-
-
-static size_t calcBytesOutputData(quantization_t *outputQ, size_t numberOfValues) {
-    switch (outputQ->type) {
-    case FLOAT32:
-        return numberOfValues * sizeof(float);
-    case ASYM:
-        size_t bitsPerElement = calcBitsPerElement(outputQ);
-        return ceil((bitsPerElement * numberOfValues) / 8);
-    default:
-        return 0;
-    }
-}
-
-void inference(layer_t **model, size_t numberOfLayers, tensor_t *input, tensor_t *output) {
-    for (size_t i = 0; i < numberOfLayers; i++) {
-        layer_t *currentLayer = model[i];
-        layerType_t currentLayerType = currentLayer->type;
-        quantization_t *currentQ = currentLayer->outputQ;
-
-        size_t outputNumberOfDims = input->shape->numberOfDimensions;
-        size_t sizeDims = outputNumberOfDims * sizeof(size_t);
-        size_t outDims[sizeDims];
-        size_t outOrder[sizeDims];
-
-        shape_t outShape;
-        outShape.dimensions = outDims;
-        outShape.numberOfDimensions = outputNumberOfDims;
-        outShape.orderOfDimensions = outOrder;
-
-        calcOutputShapeFn_t calcOutputShape = layerFunctions[currentLayerType].calcOutputShape;
-        calcOutputShape(currentLayer, input->shape, &outShape);
-
-        size_t numValues =
-            calcNumberOfElementsByShape(&outShape);
-
-        size_t sizeData = calcBytesOutputData(currentLayer->outputQ, numValues);
-        uint8_t data[sizeData];
-        void *maybeSparsityBitmask = NULL;
-        if (input->sparsityBitmask != NULL) {
-            uint8_t sparsityBitmask[sizeData];
-            maybeSparsityBitmask = sparsityBitmask;
-        }
-
-        quantization_t q;
-        asymQConfig_t asymQConfig;
-        switch (currentQ->type) {
-        case FLOAT32:
-            q.type = FLOAT32;
-            q.qConfig = NULL;
-            break;
-        case ASYM:
-            q.type = ASYM;
-            asymQConfig_t *currentQC = currentQ->qConfig;
-            asymQConfig.scale = currentQC->scale;
-            asymQConfig.qBits = currentQC->qBits;
-            asymQConfig.roundingMode = currentQC->roundingMode;
-            asymQConfig.zeroPoint = currentQC->zeroPoint;
-            q.qConfig = &asymQConfig;
-            break;
-        default:
-            break;
-        }
-
-        tensor_t intermediateOutput;
-        setTensorValues(&intermediateOutput, data, &outShape, &q, maybeSparsityBitmask);
-
-        forwardFn_t forward = layerFunctions[currentLayerType].forward;
-        forward(currentLayer, input, &intermediateOutput);
-
-        /*printf("Sequential Output [%lu]:\n", i);
-        printTensor(&intermediateOutput);*/
-
-        if (i == numberOfLayers - 1) {
-            copyTensor(output, &intermediateOutput);
-            break;
-        }
-
-        copyTensor(input, &intermediateOutput);
-    }
-}
-
-void getLossFunctionByType(lossFunctionType_t lossType, lossFn_t *lossFunction) {
+static void getLossFunctionByType(lossFunctionType_t lossType, lossFn_t *lossFunction) {
     switch (lossType) {
     case MSE:
         *lossFunction = MSELossBackward;
@@ -208,7 +90,7 @@ static void initLayerOutputs(tensor_t **layerOutputs, layer_t **model, size_t si
 
 static void initGradTensor(tensor_t *grad, tensor_t *layerOutput, layer_t *layer) {
     shape_t *currentShape = layerOutput->shape;
-    quantization_t *currentQ = layer->inputQ;
+    quantization_t *currentQ = layerOutput->quantization;
 
     size_t *dims = *reserveMemory(currentShape->numberOfDimensions * sizeof(size_t));
     size_t *order = *reserveMemory(currentShape->numberOfDimensions * sizeof(size_t));
@@ -256,15 +138,60 @@ static void initGradTensor(tensor_t *grad, tensor_t *layerOutput, layer_t *layer
     grad->sparsityBitmask = sparsityBitmask;
 }
 
+static quantization_t *getLikeQuantization(quantization_t *quantization) {
+    quantization_t *likeQ = calloc(1, sizeof(quantization_t));
+    likeQ->type = quantization->type;
+
+    switch(quantization->type) {
+    case FLOAT32:
+        likeQ->qConfig = NULL;
+        break;
+    case ASYM:
+        asymQConfig_t *asymQC = quantization->qConfig;
+        asymQConfig_t *likeAsymQC = calloc(1, sizeof(asymQConfig_t));
+        likeAsymQC->qBits = asymQC->qBits;
+        likeAsymQC->roundingMode = asymQC->roundingMode;
+        likeQ->qConfig = likeAsymQC;
+    default:
+        break;
+    }
+    return likeQ;
+}
+
+trainingStats_t * initTrainingStats(tensor_t *label) {
+
+
+    trainingStats_t *trainingStats = calloc(1, sizeof(trainingStats_t));
+
+    size_t sizeOutput = calcNumberOfElementsByTensor(label);
+    size_t sizeTrainingStatsEntryData = calcBytesOutputData(label->quantization, sizeOutput);
+
+    uint8_t *outputData = calloc(1, sizeTrainingStatsEntryData);
+    size_t outputNumberOfDims = label->shape->numberOfDimensions;
+    size_t *outputDims = calloc(outputNumberOfDims, sizeof(size_t));
+    quantization_t *outputQ = getLikeQuantization(label->quantization);
+    tensor_t *output = tensorInit(outputData, outputDims, outputNumberOfDims, false);
+
+    // TODO implement tensorInit by quantization
+
+    uint8_t *lossData = calloc(1, sizeTrainingStatsEntryData);
+    size_t lossNumberOfDims = label->shape->numberOfDimensions;
+    size_t *lossDims = calloc(lossNumberOfDims, sizeof(size_t));
+    quantization_t *lossQ = getLikeQuantization(label->quantization);
+    tensor_t *loss = tensorInit(lossData, lossDims, lossNumberOfDims, false);
+
+    trainingStats->loss = loss;
+    trainingStats->output = output;
+}
+
 
 /*! IMPORTANT: We assume, that if you use Cross Entropy as your loss function,
  * you also use Softmax with it. We introduce Softmax as a dedicated Layer,
  * but in the backward pass it is ignored. We do this, because the Cross Entropy Backward
  * already takes the Softmax Backward into account.
  */
-void calculateGrads(layer_t **model, size_t sizeNetwork,
-                    lossFunctionType_t lossFunctionType, tensor_t *input, tensor_t *label,
-                    trainingStats_t *trainingStats) {
+trainingStats_t *calculateGrads(layer_t **model, size_t sizeNetwork,
+                    lossFunctionType_t lossFunctionType, tensor_t *input, tensor_t *label) {
 
     tensor_t *layerOutputs[sizeNetwork + 1];
     layerOutputs[0] = input;
@@ -316,4 +243,14 @@ void calculateGrads(layer_t **model, size_t sizeNetwork,
         }
     }
     deInitTensorPtrArray(layerOutputs, sizeNetwork, 1);
+    freeTensor(&ping);
+    freeTensor(&pong);
+
+    return trainingStats;
+}
+
+void freeTrainingStats(trainingStats_t *trainingStats) {
+    freeTensor(trainingStats->loss);
+    freeTensor(trainingStats->output);
+    freeReservedMemory(trainingStats);
 }

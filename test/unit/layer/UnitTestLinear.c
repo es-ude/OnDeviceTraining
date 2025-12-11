@@ -71,7 +71,7 @@ void testLinearForwardFloat() {
     linearConfig.linear = &linCfg;
     linearInitConfig(linearConfig.linear, &weights, &bias);
 
-    initLayer(&linearLayer, LINEAR, &linearConfig, FLOAT_LAYER, &inputQ, &outputQ);
+    initLayer(&linearLayer, LINEAR, &linearConfig, FLOAT_LAYER, inputQ.type, &outputQ);
 
     linearForward(&linearLayer, &input, &output);
 
@@ -169,7 +169,7 @@ void testLinearForwardAsym() {
     linearConfig_t linCfg;
     linearConfig.linear = &linCfg;
     linearInitConfig(linearConfig.linear, &weights, &bias);
-    initLayer(&linearLayer, LINEAR, &linearConfig, ASYM_LAYER, &inputAsymQ, &outputAsymQ);
+    initLayer(&linearLayer, LINEAR, &linearConfig, ASYM_LAYER, inputAsymQ.type, &outputAsymQ);
 
     linearForward(&linearLayer, &inputAsym, &outputAsym);
 
@@ -273,7 +273,7 @@ void testLinearBackwardFloat() {
     linearConfig_t linCfg;
     linearConfig.linear = &linCfg;
     linearInitConfig(linearConfig.linear, &weights, &bias);
-    initLayer(&linearLayer, LINEAR, &linearConfig, FLOAT_LAYER, &forwardInputQ, &lossQ);
+    initLayer(&linearLayer, LINEAR, &linearConfig, FLOAT_LAYER, forwardInputQ.type, &lossQ);
 
     linearBackward(&linearLayer, &forwardInput, &loss, &propLoss);
 
@@ -435,7 +435,7 @@ void testLinearBackwardAsym() {
     linearConfig_t linCfg;
     linearConfig.linear = &linCfg;
     linearInitConfig(linearConfig.linear, &weights, &bias);
-    initLayer(&linearLayer, LINEAR, &linearConfig, ASYM_LAYER, &forwardInputAsymQ, &lossAsymQ);
+    initLayer(&linearLayer, LINEAR, &linearConfig, ASYM_LAYER, forwardInputAsymQ.type, &lossAsymQ);
 
     linearBackward(&linearLayer, &forwardInputAsym, &lossAsym, &propLossAsym);
 

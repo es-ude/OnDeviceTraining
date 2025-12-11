@@ -224,15 +224,15 @@ void setTensorValuesForConversion(uint8_t *data, quantization_t *q, tensor_t *or
     outputTensor->data = data;
     outputTensor->shape = originalTensor->shape;
     outputTensor->quantization = q;
-    outputTensor->sparsityBitmask = originalTensor->sparsityBitmask;
+    outputTensor->sparsity = originalTensor->sparsity;
 }
 
 void setTensorValues(tensor_t *tensor, uint8_t *data, shape_t *shape,
-                     quantization_t *quantization, uint8_t *sparsityBitmask) {
+                     quantization_t *quantization, sparsity_t* sparsity) {
     tensor->data = data;
     tensor->shape = shape;
     tensor->quantization = quantization;
-    tensor->sparsityBitmask = sparsityBitmask;
+    tensor->sparsity = sparsity;
 }
 
 void setParameterValues(parameter_t *parameter, tensor_t *param, tensor_t *grad) {
@@ -321,10 +321,11 @@ void initOrderOfDimensions(size_t *orderOfDims, size_t numberOfDims) {
 void copyData(tensor_t *dest, tensor_t *src) {
     size_t numberOfValues = calcNumberOfElementsByShape(src->shape);
     size_t bytesPerElement = calcBytesPerElement(src->quantization);
+
     memcpy(dest->data, src->data, numberOfValues * bytesPerElement);
 
-    if (dest->sparsityBitmask != NULL) {
-        memcpy(dest->sparsityBitmask, src->sparsityBitmask, numberOfValues);
+    if (src->sparsity != NULL) {
+        memcpy(dest->sparsity, src->sparsity, sizeof(sparsity_t));
     }
 }
 
@@ -351,8 +352,8 @@ void copyQuantization(quantization_t *dest, quantization_t *src) {
     }
 }
 
+// TODO copy sparsity
 void copyTensor(tensor_t *dest, tensor_t *src) {
-
     copyShape(dest->shape, src->shape);
     copyQuantization(dest->quantization, src->quantization);
     copyData(dest, src);

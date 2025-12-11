@@ -38,7 +38,7 @@ void testReluForwardFloat() {
     setTensorValues(&output, (uint8_t *)outputData, &outputShape, &outputQ, NULL);
 
     layer_t reluLayer;
-    initLayer(&reluLayer, RELU, NULL, FLOAT_LAYER, &inputQ, &outputQ);
+    initLayer(&reluLayer, RELU, NULL, FLOAT_LAYER, inputQ.type, &outputQ);
 
     reluForward(&reluLayer, &input, &output);
 
@@ -100,7 +100,7 @@ void testReluForwardAsym() {
     convertTensor(&outputFloat, &outputAsym);
 
     layer_t reluLayer;
-    initLayer(&reluLayer, RELU, NULL, ASYM_LAYER, &inputAsymQ, &outputAsymQ);
+    initLayer(&reluLayer, RELU, NULL, ASYM_LAYER, inputAsymQ.type, &outputAsymQ);
     reluForward(&reluLayer, &inputAsym, &outputAsym);
 
     convertTensor(&outputAsym, &outputFloat);
@@ -145,7 +145,7 @@ void testReluBackwardFloat() {
     setTensorValues(&propLoss, (uint8_t *)propLossData, &shape, &propLossQ, NULL);
 
     layer_t reluLayer;
-    initLayer(&reluLayer, RELU, NULL, FLOAT_LAYER, &forwardInputQ, &propLossQ);
+    initLayer(&reluLayer, RELU, NULL, FLOAT_LAYER, forwardInputQ.type, &propLossQ);
 
     reluBackward(&reluLayer, &forwardInput, &loss, &propLoss);
 
@@ -215,7 +215,7 @@ void testReluBackwardAsym() {
     convertTensor(&propLossFloat, &propLossAsym);
 
     layer_t reluLayer;
-    initLayer(&reluLayer, RELU, NULL, ASYM_LAYER, &forwardInputQ, &propLossAsymQ);
+    initLayer(&reluLayer, RELU, NULL, ASYM_LAYER, forwardInputQ.type, &propLossAsymQ);
 
     reluBackward(&reluLayer, &forwardInputAsym, &lossAsym, &propLossAsym);
 

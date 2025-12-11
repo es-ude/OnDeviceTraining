@@ -1,8 +1,14 @@
-add_library(SGD
-        SGD.c
+add_library(Optimizer Optimizer.c)
+target_include_directories(Optimizer PUBLIC include)
+target_link_libraries(Optimizer PRIVATE
+        Quantization
+        Rounding
+        Layer
 )
-target_include_directories(SGD PUBLIC include)
-target_link_libraries(SGD PRIVATE
+
+add_library(Sgd Sgd.c)
+target_include_directories(Sgd PUBLIC include)
+target_link_libraries(Sgd PRIVATE
         DTypes
         Tensor
         Arithmetic

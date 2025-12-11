@@ -35,7 +35,7 @@ void testAddInt32TensorsInplace() {
         .data = aDataBytes,
         .shape = &aShape,
         .quantization = &aQ,
-        .sparsityBitmask = NULL,
+        .sparsity = NULL,
     };
 
     int32_t bData[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
@@ -58,7 +58,7 @@ void testAddInt32TensorsInplace() {
         .data = bDataBytes,
         .shape = &bShape,
         .quantization = &bQ,
-        .sparsityBitmask = NULL,
+        .sparsity = NULL,
     };
 
     transposeTensor(&bTensor, 0, 1);
@@ -93,7 +93,7 @@ void testAddInt32ElementWithInt32TensorInplace() {
         .data = aDataBytes,
         .shape = &aShape,
         .quantization = &aQ,
-        .sparsityBitmask = NULL,
+        .sparsity = NULL,
     };
 
     int32_t x = 5;

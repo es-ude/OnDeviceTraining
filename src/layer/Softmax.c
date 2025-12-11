@@ -59,7 +59,7 @@ static void softmaxForwardAsym(tensor_t *input, tensor_t *output) {
 }
 
 void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output) {
-    switch (softmaxLayer->inputQ->type) {
+    switch (input->quantization->type) {
     case FLOAT32:
         softmaxForwardFloat(input, output);
         break;
@@ -151,7 +151,7 @@ static void softmaxBackwardAsym(tensor_t *input, tensor_t *loss, tensor_t *propL
 }
 
 void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, tensor_t *propLoss) {
-    switch (softmaxLayer->inputQ->type) {
+    switch (loss->quantization->type) {
     case FLOAT32:
         softmaxBackwardFloat(input, loss, propLoss);
         break;

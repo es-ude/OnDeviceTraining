@@ -1,11 +1,12 @@
 #include <stdio.h>
 
-#include "Linear.h"
 #include "Add.h"
 #include "Layer.h"
 #include "Matmul.h"
 #include "Rounding.h"
 #include "TensorConversion.h"
+#include "Linear.h"
+
 
 void linearInitConfig(linearConfig_t *linearConfig, parameter_t *weights, parameter_t *bias) {
     linearConfig->weights = weights;
@@ -65,12 +66,14 @@ void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output) {
     tensor_t *weights = getTensorFromParameter(linearConfig->weights);
     tensor_t *bias = getTensorFromParameter(linearConfig->bias);
 
-    if (linearLayer->qType == FLOAT_LAYER) {
-        // TODO mismatched inputQ and layerQType
+    // TODO mismatched inputQ and layerQType
+    switch(linearLayer->qType) {
+    case FLOAT_LAYER:
         forwardFloat32(weights, bias, input, output);
-    } else if (linearLayer->qType == ASYM_LAYER) {
-
+        break;
+    case ASYM_LAYER:
         forwardAsym(weights, bias, input, output);
+        break;
     }
 }
 
@@ -100,7 +103,7 @@ static void backwardFloat(linearConfig_t *linearConfig, tensor_t *forwardInput, 
     tensor_t intermediateWGrad;
     uint8_t intermediateWGradData[numberOfWeights * sizeof(float)];
     setTensorValues(&intermediateWGrad, intermediateWGradData, weightGrad->shape,
-                    weightGrad->quantization, weightGrad->sparsityBitmask);
+                    weightGrad->quantization, weightGrad->sparsity);
 
     linearCalcWeightGradsFloat32(forwardInput, loss, &intermediateWGrad);
     addFloat32TensorsInplace(weightGrad, &intermediateWGrad);
@@ -251,11 +254,14 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
 
     linearConfig_t *lConfig = linearLayer->config->linear;
 
-    if (linearLayer->qType == FLOAT_LAYER) {
-        backwardFloat(lConfig, forwardInput, loss, propLoss);
 
-    } else if (linearLayer->qType == ASYM_LAYER) {
+    switch(linearLayer->qType) {
+    case FLOAT_LAYER:
+        backwardFloat(lConfig, forwardInput, loss, propLoss);
+        break;
+    case ASYM_LAYER:
         backwardAsym(lConfig, forwardInput, loss, propLoss);
+        break;
     }
 }
 

@@ -33,7 +33,7 @@ void testMatmulInt32() {
         .data = (uint8_t *)aData,
         .shape = &aShape,
         .quantization = &aQ,
-        .sparsityBitmask = NULL,
+        .sparsity = NULL,
     };
 
     /*
@@ -59,7 +59,7 @@ void testMatmulInt32() {
         .data = (uint8_t *)bData,
         .shape = &bShape,
         .quantization = &bQ,
-        .sparsityBitmask = NULL,
+        .sparsity = NULL,
     };
 
     int32_t outputData[] = {0, 0, 0, 0};
@@ -80,7 +80,7 @@ void testMatmulInt32() {
         .data = (uint8_t *)outputData,
         .shape = &outputShape,
         .quantization = &outputQ,
-        .sparsityBitmask = NULL,
+        .sparsity = NULL,
     };
 
     matmulInt32Tensors(&aTensor, &bTensor, &outputTensor);
@@ -113,7 +113,7 @@ void testMatmulInt32WithVector() {
         .data = (uint8_t *)aData,
         .shape = &aShape,
         .quantization = &aQ,
-        .sparsityBitmask = NULL,
+        .sparsity = NULL,
     };
 
     /*
@@ -139,7 +139,7 @@ void testMatmulInt32WithVector() {
         .data = (uint8_t *)bData,
         .shape = &bShape,
         .quantization = &bQ,
-        .sparsityBitmask = NULL,
+        .sparsity = NULL,
     };
 
     int32_t outputData[] = {0, 0};
@@ -160,7 +160,7 @@ void testMatmulInt32WithVector() {
         .data = (uint8_t *)outputData,
         .shape = &outputShape,
         .quantization = &outputQ,
-        .sparsityBitmask = NULL,
+        .sparsity = NULL,
     };
 
     matmulInt32Tensors(&aTensor, &bTensor, &outputTensor);
@@ -192,7 +192,7 @@ void testMatmulFloatVectors() {
         .data = (uint8_t *)aData,
         .shape = &aShape,
         .quantization = &aQ,
-        .sparsityBitmask = NULL,
+        .sparsity = NULL,
     };
 
     /*
@@ -218,7 +218,7 @@ void testMatmulFloatVectors() {
         .data = (uint8_t *)bData,
         .shape = &bShape,
         .quantization = &bQ,
-        .sparsityBitmask = NULL,
+        .sparsity = NULL,
     };
 
     float outputData[] = {0};
@@ -239,7 +239,7 @@ void testMatmulFloatVectors() {
         .data = (uint8_t *)outputData,
         .shape = &outputShape,
         .quantization = &outputQ,
-        .sparsityBitmask = NULL,
+        .sparsity = NULL,
     };
 
     matmulFloat32Tensors(&aTensor, &bTensor, &outputTensor);

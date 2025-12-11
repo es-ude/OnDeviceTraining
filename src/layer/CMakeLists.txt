@@ -74,5 +74,6 @@ target_link_libraries(CommonLayerLibs INTERFACE
         Softmax
         Rounding
         Tensor
+        Sgd
 )
 

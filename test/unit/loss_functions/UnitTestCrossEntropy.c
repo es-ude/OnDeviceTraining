@@ -28,7 +28,7 @@ void unitTestCrossEntropyForward() {
 
     layer_t softmaxLayer;
     initSoftmaxLayer(&softmaxLayer);
-    softmaxLayer.inputQ = &logitQ;
+    softmaxLayer.inputQType = logitQ.type;
 
     softmaxForward(&softmaxLayer, &logits, &softmaxOutput);
 
@@ -77,7 +77,7 @@ void unitTestCrossEntropySoftmaxBackward() {
 
     layer_t softmaxLayer;
     initSoftmaxLayer(&softmaxLayer);
-    softmaxLayer.inputQ = &softmaxOutputQ;
+    softmaxLayer.inputQType = softmaxOutputQ.type;
 
     softmaxForward(&softmaxLayer, &logits, &softmaxOutput);
 

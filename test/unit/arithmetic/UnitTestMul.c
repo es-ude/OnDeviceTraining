@@ -24,7 +24,7 @@ void testMulFloatTensors() {
         .data = (uint8_t *)aData,
         .shape = &aShape,
         .quantization = &aQ,
-        .sparsityBitmask = NULL,
+        .sparsity = NULL,
     };
 
     float bData[] = {1.5f, 3.3f, 8.2f, 0.2f, 5.5f, 0.9f};
@@ -43,7 +43,7 @@ void testMulFloatTensors() {
         .data = (uint8_t *)bData,
         .shape = &bShape,
         .quantization = &bQ,
-        .sparsityBitmask = NULL,
+        .sparsity = NULL,
     };
 
     transposeTensor(&bTensor, 0, 1);
@@ -76,7 +76,7 @@ void testMulFloatElementWithTensor() {
         .data = (uint8_t *)aData,
         .shape = &aShape,
         .quantization = &aQ,
-        .sparsityBitmask = NULL,
+        .sparsity = NULL,
     };
 
     float x = 0.5;

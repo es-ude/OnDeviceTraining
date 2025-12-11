@@ -3,8 +3,20 @@ add_library(CrossEntropy
 target_include_directories(CrossEntropy PUBLIC include)
 target_link_libraries(CrossEntropy PRIVATE
         Tensor
+        Log
         CommonLayerLibs
 )
+
+add_library(LossFunction
+        LossFunction.c)
+target_include_directories(LossFunction PUBLIC include)
+target_link_libraries(LossFunction PRIVATE
+        Tensor
+        Rounding
+        MSE
+        CrossEntropy
+)
+
 
 add_library(MSE
         MSE.c

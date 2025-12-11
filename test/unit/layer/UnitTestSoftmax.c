@@ -30,7 +30,7 @@ void unitTestSoftmaxForwardFloat() {
 
     layer_t softmaxLayer;
     initSoftmaxLayer(&softmaxLayer);
-    softmaxLayer.inputQ = &inputQ;
+    softmaxLayer.inputQType = inputQ.type;
 
     softmaxForward(&softmaxLayer, &input, &output);
 
@@ -88,7 +88,7 @@ void unitTestSoftmaxForwardAsym() {
 
     layer_t softmaxLayer;
     initSoftmaxLayer(&softmaxLayer);
-    softmaxLayer.inputQ = &inputAsymQ;
+    softmaxLayer.inputQType = inputAsymQ.type;
 
     softmaxForward(&softmaxLayer, &inputAsym, &outputAsym);
 
@@ -141,7 +141,7 @@ void unitTestSoftmaxBackwardFloat() {
 
     layer_t softmaxLayer;
     initSoftmaxLayer(&softmaxLayer);
-    softmaxLayer.inputQ = &inputQ;
+    softmaxLayer.inputQType = inputQ.type;
 
     softmaxBackward(&softmaxLayer, &input, &loss, &propLoss);
 
@@ -220,7 +220,7 @@ void unitTestSoftmaxBackwardAsym() {
 
     layer_t softmaxLayer;
     initSoftmaxLayer(&softmaxLayer);
-    softmaxLayer.inputQ = &inputAsymQ;
+    softmaxLayer.inputQType = inputAsymQ.type;
 
     softmaxBackward(&softmaxLayer, &inputAsym, &lossAsym, &propLossAsym);
 

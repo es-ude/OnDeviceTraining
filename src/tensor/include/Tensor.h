@@ -1,5 +1,5 @@
-#ifndef ELASTIC_AI_RUNTIME_ENV5_TENSOR_H
-#define ELASTIC_AI_RUNTIME_ENV5_TENSOR_H
+#ifndef ODT_TENSOR_H
+#define ODT_TENSOR_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -15,12 +15,28 @@ typedef struct shape
     size_t* orderOfDimensions;
 } shape_t;
 
+typedef enum
+{
+    SPARSITY_TYPE_1,
+    SPARSITY_TYPE_2
+} sparsityType_t;
+
+typedef struct sparsityConfig
+{
+} sparsityConfig;
+
+typedef struct sparsity
+{
+    sparsityType_t type;
+    sparsityConfig* config;
+} sparsity_t;
+
 typedef struct tensor
 {
     uint8_t* data;
     shape_t* shape;
     quantization_t* quantization;
-    uint8_t* sparsityBitmask;
+    sparsity_t* sparsity;
 } tensor_t;
 
 typedef struct parameter
@@ -52,14 +68,14 @@ void transposeTensor(tensor_t* tensor, size_t dim0Index, size_t dim1Index);
 
 void setTensorValuesForConversion(uint8_t* data, quantization_t* q, tensor_t* originalTensor, tensor_t* outputTensor);
 void setTensorValues(tensor_t* tensor, uint8_t* data, shape_t* shape, quantization_t* quantization,
-                     uint8_t* sparsityBitmask);
+                     sparsity_t *sparsity);
 void setParameterValues(parameter_t* parameter, tensor_t* param, tensor_t* grad);
 void setOrderOfDimsForNewTensor(size_t numberOfDimensions, size_t* orderOfDimensions);
-void setShape(shape_t *shape, size_t *dims, size_t numberOfDims, size_t *orderOfDims);
+void setShape(shape_t* shape, size_t* dims, size_t numberOfDims, size_t* orderOfDims);
 
 void printTensor(tensor_t* t);
 void printShape(shape_t* shape);
 
 void copyTensor(tensor_t* dest, tensor_t* src);
 
-#endif // ELASTIC_AI_RUNTIME_ENV5_TENSOR_H
+#endif // ODT_TENSOR_H

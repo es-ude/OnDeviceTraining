@@ -6,7 +6,67 @@
 #include "TensorConversion.h"
 #include "Sub.h"
 
-void MSELossBackwardFloat(tensor_t *modelOutput, tensor_t *label, tensor_t *result) {
+float mseLossForwardFloat(tensor_t *output, tensor_t *label) {
+    size_t size = calcNumberOfElementsByTensor(output);
+
+    float *outputFloat = (float *)output->data;
+    float *labelFloat = (float *)label->data;
+
+    float sum = 0.0f;
+
+    for (size_t i = 0; i < size; ++i) {
+        float delta = outputFloat[i] - labelFloat[i];
+        sum += delta * delta;
+    }
+
+    return sum / (float)size;
+}
+
+float mseLossForwardAsym(tensor_t *output, tensor_t *label) {
+    size_t size = calcNumberOfElementsByTensor(output);
+
+    tensor_t outputFloat;
+    float outputFloatData[size];
+    quantization_t outputFloatQ;
+    initFloat32Quantization(&outputFloatQ);
+    setTensorValuesForConversion((uint8_t *)outputFloatData, &outputFloatQ, output, &outputFloat);
+    convertTensor(output, &outputFloat);
+
+    tensor_t labelFloat;
+    float labelFloatData[size];
+    quantization_t labelFloatQ;
+    initFloat32Quantization(&labelFloatQ);
+    setTensorValuesForConversion((uint8_t *)labelFloatData, &labelFloatQ, label, &labelFloat);
+    convertTensor(label, &labelFloat);
+
+
+
+    float *outputFloatArr = (float *)outputFloat.data;
+    float *labelFloatArr = (float *)labelFloat.data;
+
+    float sum = 0.0f;
+
+    for (size_t i = 0; i < size; ++i) {
+        float delta = outputFloatArr[i] - labelFloatArr[i];
+        sum += delta * delta;
+    }
+
+    return sum / (float)size;
+}
+
+float mseLossForward(tensor_t *output, tensor_t *label) {
+    switch (output->quantization->type) {
+    case FLOAT32:
+        return mseLossForwardFloat(output, label);
+    case ASYM:
+        return mseLossForwardAsym(output, label);
+    default:
+        // TODO this is shit
+        return 0.f;
+    }
+}
+
+void mseLossBackwardFloat(tensor_t *modelOutput, tensor_t *label, tensor_t *result) {
     size_t numberOfElements = calcNumberOfElementsByTensor(modelOutput);
 
     float mean = 2.f / (float)numberOfElements;
@@ -20,7 +80,7 @@ void MSELossBackwardFloat(tensor_t *modelOutput, tensor_t *label, tensor_t *resu
     }
 }
 
-void MSELossBackwardAsym(tensor_t *modelOutput, tensor_t *label, tensor_t *result) {
+void mseLossBackwardAsym(tensor_t *modelOutput, tensor_t *label, tensor_t *result) {
     size_t numberOfElements = calcNumberOfElementsByTensor(modelOutput);
 
     tensor_t modelOutputFloat;
@@ -58,15 +118,15 @@ void MSELossBackwardAsym(tensor_t *modelOutput, tensor_t *label, tensor_t *resul
     convertTensor(&resultFloat, result);
 }
 
-void MSELossBackward(tensor_t *modelOutput, tensor_t *label, tensor_t *result) {
+void mseLossBackward(tensor_t *modelOutput, tensor_t *label, tensor_t *result) {
     qtype_t modelOutputQType = modelOutput->quantization->type;
 
     switch (modelOutputQType) {
     case FLOAT32:
-        MSELossBackwardFloat(modelOutput, label, result);
+        mseLossBackwardFloat(modelOutput, label, result);
         break;
     case ASYM:
-        MSELossBackwardAsym(modelOutput, label, result);
+        mseLossBackwardAsym(modelOutput, label, result);
         break;
     default:
         printf("Error in MSE Backward: qtype not supported\n");

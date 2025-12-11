@@ -2,11 +2,13 @@
 #define MSE_H
 #include "Tensor.h"
 
-void MSELossBackwardFloat(tensor_t *modelOutput, tensor_t *label, tensor_t *result);
+float mseLossForward(tensor_t *output, tensor_t *label);
 
-void MSELossBackwardAsym(tensor_t *modelOutput, tensor_t *label, tensor_t *result);
+void mseLossBackwardFloat(tensor_t *modelOutput, tensor_t *label, tensor_t *result);
 
-void MSELossBackward(tensor_t *modelOutput, tensor_t *label, tensor_t *result);
+void mseLossBackwardAsym(tensor_t *modelOutput, tensor_t *label, tensor_t *result);
+
+void mseLossBackward(tensor_t *modelOutput, tensor_t *label, tensor_t *result);
 
 
 #endif //MSE_H

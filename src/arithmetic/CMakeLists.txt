@@ -1,6 +1,4 @@
-add_library(Add
-        Add.c
-)
+add_library(Add Add.c)
 target_include_directories(Add PUBLIC include)
 target_link_libraries(Add PRIVATE
         Tensor
@@ -9,9 +7,7 @@ target_link_libraries(Add PRIVATE
         TensorConversion
 )
 
-add_library(Arithmetic
-        Arithmetic.c
-)
+add_library(Arithmetic Arithmetic.c)
 target_include_directories(Arithmetic PUBLIC include)
 target_link_libraries(Arithmetic PRIVATE
         Tensor
@@ -24,18 +20,14 @@ target_link_libraries(Arithmetic PRIVATE
         Sub
 )
 
-add_library(Comparison
-        Comparison.c
-)
+add_library(Comparison Comparison.c)
 target_include_directories(Comparison PUBLIC include)
 target_link_libraries(Comparison PRIVATE
         Tensor
         DTypes
 )
 
-add_library(Div
-        Div.c
-)
+add_library(Div Div.c)
 target_include_directories(Div PUBLIC include)
 target_link_libraries(Div PRIVATE
         Tensor
@@ -43,9 +35,7 @@ target_link_libraries(Div PRIVATE
         Arithmetic
 )
 
-add_library(Log
-        Log.c
-)
+add_library(Log Log.c)
 target_include_directories(Log PUBLIC include)
 target_link_libraries(Log PRIVATE
         Tensor
@@ -53,9 +43,7 @@ target_link_libraries(Log PRIVATE
         Arithmetic
 )
 
-add_library(Matmul
-        Matmul.c
-)
+add_library(Matmul Matmul.c)
 target_include_directories(Matmul PUBLIC include)
 target_link_libraries(Matmul PRIVATE
         Common
@@ -64,9 +52,7 @@ target_link_libraries(Matmul PRIVATE
         Mul
 )
 
-add_library(Mul
-        Mul.c
-)
+add_library(Mul Mul.c)
 target_include_directories(Mul PUBLIC include)
 target_link_libraries(Mul PRIVATE
         Tensor
@@ -74,40 +60,41 @@ target_link_libraries(Mul PRIVATE
         Arithmetic
 )
 
-add_library(MinMax
-        MinMax.c
-)
+add_library(MinMax MinMax.c)
 target_include_directories(MinMax PUBLIC include)
 target_link_libraries(MinMax PRIVATE
         Tensor
         DTypes
 )
 
-add_library(Rounding
-        Rounding.c
-)
+add_library(Rounding Rounding.c)
 target_include_directories(Rounding PUBLIC include)
 target_link_libraries(Rounding PRIVATE
         m
 )
 
-add_library(Square
-        Square.c
-)
+add_library(Square Square.c)
 target_include_directories(Square PUBLIC include)
 target_link_libraries(Square PRIVATE
         Tensor
         DTypes
 )
 
-add_library(Sub
-        Sub.c
-)
+add_library(Sub Sub.c)
 target_include_directories(Sub PUBLIC include)
 target_link_libraries(Sub PRIVATE
         Tensor
         DTypes
         Arithmetic
 )
+
+add_library(Sum Sum.c)
+target_include_directories(Sum PUBLIC include)
+target_link_libraries(Sum PRIVATE
+        Add
+        Tensor
+        Rounding
+)
+
 
 

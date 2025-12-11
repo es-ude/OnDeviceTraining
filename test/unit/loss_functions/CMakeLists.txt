@@ -11,4 +11,5 @@ add_elastic_ai_unit_test(
         MSE
         MORE_LIBS
         CommonLayerLibs
+        TensorAPI
 )

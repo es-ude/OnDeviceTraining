@@ -15,13 +15,10 @@ void zeroTensorData(tensor_t *tensor) {
 
 void copyDimsAndSparsityToTensor(tensor_t *inputTensor, tensor_t *outputTensor) {
     outputTensor->shape = inputTensor->shape;
-    if (inputTensor->sparsityBitmask) {
-        memcpy(outputTensor->sparsityBitmask,
-               inputTensor->sparsityBitmask,
-               (calcNumberOfElementsByShape(outputTensor->shape) - 1) / 8 + 1);
+    if (inputTensor->sparsity) {
+        memcpy(outputTensor->sparsity, inputTensor->sparsity, sizeof(sparsity_t));
     }
 }
-
 
 void convertInt32TensorToFloatTensor(tensor_t *inputTensor, tensor_t *outputTensor) {
     size_t numberOfElements = calcNumberOfElementsByTensor(inputTensor);
@@ -227,7 +224,8 @@ void convertSymInt32TensorToAsymTensor(tensor_t *inputTensor, tensor_t *outputTe
             outputAsymQConfig->roundingMode);
     }
 
-    byteConversion((uint8_t *)outputInt, 32, outputTensor->data, outputAsymQConfig->qBits, numberOfValues);
+    byteConversion((uint8_t *)outputInt, 32, outputTensor->data, outputAsymQConfig->qBits,
+                   numberOfValues);
 }
 
 
@@ -256,7 +254,8 @@ void convertAsymTensorToFloatTensor(tensor_t *inputTensor, tensor_t *outputTenso
     asymQConfig_t *asymQConfig = inputTensor->quantization->qConfig;
     int16_t zeroPoint = asymQConfig->zeroPoint;
     int32_t inputInt[numberOfElements];
-    byteConversion(inputTensor->data, asymQConfig->qBits, (uint8_t *)inputInt, 32, numberOfElements);
+    byteConversion(inputTensor->data, asymQConfig->qBits, (uint8_t *)inputInt, 32,
+                   numberOfElements);
     float *outputElements = (float *)outputTensor->data;
 
     for (size_t elementIndex = 0; elementIndex < numberOfElements; elementIndex++) {
@@ -279,7 +278,8 @@ void convertAsymTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTe
 
     int32_t inputAsInt32[numberOfElements];
 
-    byteConversion(inputTensor->data, bitsPerInputElement, (uint8_t *)inputAsInt32, 32, numberOfElements);
+    byteConversion(inputTensor->data, bitsPerInputElement, (uint8_t *)inputAsInt32, 32,
+                   numberOfElements);
 
     for (size_t i = 0; i < numberOfElements; i++) {
         inputAsInt32[i] += zeroPoint;

@@ -1,155 +1,23 @@
 #include <stdbool.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <tgmath.h>
 
-#include "ModelAPI.h"
 #include "Layer.h"
-#include "MSE.h"
-#include "Linear.h"
+#include "LossFunction.h"
+#include "Optimizer.h"
+#include "TensorAPI.h"
+#include "StorageAPI.h"
+#include "TrainingAPI.h"
 
-// Important: For now the abstraction layer for memory allocation is located in ModelAPI, because it is not needed anywhere else
-static void **reserveMemory(size_t numberOfBytes) {
-    void *ptr = calloc(1, numberOfBytes);
-    void **handle = malloc(sizeof(void *));
-    *handle = ptr;
-    return handle;
-}
-
-static void freeReservedMemory(void *ptr) {
-    free(ptr);
-}
-
-static void freeShape(shape_t *shape) {
-    freeReservedMemory(shape->dimensions);
-    freeReservedMemory(shape->orderOfDimensions);
-    freeReservedMemory(shape);
-}
-
-static void freeData(tensor_t *tensor) {
-    freeReservedMemory(tensor->data);
-    if (tensor->sparsityBitmask != NULL) {
-        freeReservedMemory(tensor->sparsityBitmask);
-    }
-}
-
-static void freeQuantization(quantization_t *quantization) {
-    freeReservedMemory(quantization->qConfig);
-    freeReservedMemory((uint8_t *)quantization);
-}
-
-static void freeTensorPointer(tensor_t *tensor) {
-    freeReservedMemory((uint8_t *)tensor);
-}
-
-static void deInitTensorPtrArray(tensor_t **tensorPtrArray, size_t sizeNetwork, size_t startIndex) {
-    for (size_t i = startIndex; i <= sizeNetwork; i++) {
-        freeShape(tensorPtrArray[i]->shape);
-        freeData(tensorPtrArray[i]);
-        freeQuantization(tensorPtrArray[i]->quantization);
-        freeTensorPointer(tensorPtrArray[i]);
-    }
-}
-
-static void deInitGradTensor(tensor_t *tensor) {
-    freeShape(tensor->shape);
+void deInitGradTensor(tensor_t *tensor) {
     freeData(tensor);
+    freeShape(tensor->shape);
     freeQuantization(tensor->quantization);
 }
 
-
-static size_t calcBytesOutputData(quantization_t *outputQ, size_t numberOfValues) {
-    switch (outputQ->type) {
-    case FLOAT32:
-        return numberOfValues * sizeof(float);
-    case ASYM:
-        size_t bitsPerElement = calcBitsPerElement(outputQ);
-        return ceil((bitsPerElement * numberOfValues) / 8);
-    default:
-        return 0;
-    }
-}
-
-void inference(layer_t **model, size_t numberOfLayers, tensor_t *input, tensor_t *output) {
-    for (size_t i = 0; i < numberOfLayers; i++) {
-        layer_t *currentLayer = model[i];
-        layerType_t currentLayerType = currentLayer->type;
-        quantization_t *currentQ = currentLayer->outputQ;
-
-        size_t outputNumberOfDims = input->shape->numberOfDimensions;
-        size_t sizeDims = outputNumberOfDims * sizeof(size_t);
-        size_t outDims[sizeDims];
-        size_t outOrder[sizeDims];
-
-        shape_t outShape;
-        outShape.dimensions = outDims;
-        outShape.numberOfDimensions = outputNumberOfDims;
-        outShape.orderOfDimensions = outOrder;
-
-        calcOutputShapeFn_t calcOutputShape = layerFunctions[currentLayerType].calcOutputShape;
-        calcOutputShape(currentLayer, input->shape, &outShape);
-
-        size_t numValues =
-            calcNumberOfElementsByShape(&outShape);
-
-        size_t sizeData = calcBytesOutputData(currentLayer->outputQ, numValues);
-        uint8_t data[sizeData];
-        void *maybeSparsityBitmask = NULL;
-        if (input->sparsityBitmask != NULL) {
-            uint8_t sparsityBitmask[sizeData];
-            maybeSparsityBitmask = sparsityBitmask;
-        }
-
-        quantization_t q;
-        asymQConfig_t asymQConfig;
-        switch (currentQ->type) {
-        case FLOAT32:
-            q.type = FLOAT32;
-            q.qConfig = NULL;
-            break;
-        case ASYM:
-            q.type = ASYM;
-            asymQConfig_t *currentQC = currentQ->qConfig;
-            asymQConfig.scale = currentQC->scale;
-            asymQConfig.qBits = currentQC->qBits;
-            asymQConfig.roundingMode = currentQC->roundingMode;
-            asymQConfig.zeroPoint = currentQC->zeroPoint;
-            q.qConfig = &asymQConfig;
-            break;
-        default:
-            break;
-        }
-
-        tensor_t intermediateOutput;
-        setTensorValues(&intermediateOutput, data, &outShape, &q, maybeSparsityBitmask);
-
-        forwardFn_t forward = layerFunctions[currentLayerType].forward;
-        forward(currentLayer, input, &intermediateOutput);
-
-        /*printf("Sequential Output [%lu]:\n", i);
-        printTensor(&intermediateOutput);*/
-
-        if (i == numberOfLayers - 1) {
-            copyTensor(output, &intermediateOutput);
-            break;
-        }
-
-        copyTensor(input, &intermediateOutput);
-    }
-}
-
-void getLossFunctionByType(lossFunctionType_t lossType, lossFn_t *lossFunction) {
-    switch (lossType) {
-    case MSE:
-        *lossFunction = MSELossBackward;
-        break;
-    case CROSS_ENTROPY:
-        // lossFunction = crossEntropySoftmaxBackward;
-        break;
-    default:
-        printf("Loss type not found");
-        break;
+static void deInitLayerOutputs(tensor_t **layerOutputs, size_t sizeNetwork) {
+    for (size_t i = 1; i <= sizeNetwork; i++) {
+        freeTensor(layerOutputs[i]);
     }
 }
 
@@ -174,7 +42,6 @@ static void initLayerOutputs(tensor_t **layerOutputs, layer_t **model, size_t si
         size_t numberOfValues = calcNumberOfElementsByShape(outShape);
         size_t sizeData = calcBytesOutputData(currentLayer->outputQ, numberOfValues);
         uint8_t *data = *reserveMemory(sizeData);
-        uint8_t *sparsityBitmask = *reserveMemory(numberOfValues);
 
         quantization_t *q = *reserveMemory(sizeof(quantization_t));
         switch (currentQ->type) {
@@ -200,7 +67,12 @@ static void initLayerOutputs(tensor_t **layerOutputs, layer_t **model, size_t si
         tensor->data = data;
         tensor->quantization = q;
         tensor->shape = outShape;
-        tensor->sparsityBitmask = sparsityBitmask;
+
+        tensor->sparsity = NULL;
+        if (layerOutputs[i]->sparsity != NULL) {
+            sparsity_t *sparsity = *reserveMemory(sizeof(sparsity_t));
+            tensor->sparsity = sparsity;
+        }
 
         layerOutputs[i + 1] = tensor;
     }
@@ -208,7 +80,7 @@ static void initLayerOutputs(tensor_t **layerOutputs, layer_t **model, size_t si
 
 static void initGradTensor(tensor_t *grad, tensor_t *layerOutput, layer_t *layer) {
     shape_t *currentShape = layerOutput->shape;
-    quantization_t *currentQ = layer->inputQ;
+    quantization_t *currentQ = layerOutput->quantization;
 
     size_t *dims = *reserveMemory(currentShape->numberOfDimensions * sizeof(size_t));
     size_t *order = *reserveMemory(currentShape->numberOfDimensions * sizeof(size_t));
@@ -228,7 +100,6 @@ static void initGradTensor(tensor_t *grad, tensor_t *layerOutput, layer_t *layer
     size_t numberOfValues = calcNumberOfElementsByShape(currentShape);
     size_t sizeData = calcBytesOutputData(currentQ, numberOfValues);
     uint8_t *data = *reserveMemory(sizeData);
-    uint8_t *sparsityBitmask = *reserveMemory(numberOfValues);
 
     quantization_t *q = *reserveMemory(sizeof(quantization_t));
     switch (currentQ->type) {
@@ -253,7 +124,33 @@ static void initGradTensor(tensor_t *grad, tensor_t *layerOutput, layer_t *layer
     grad->data = data;
     grad->quantization = q;
     grad->shape = inShape;
-    grad->sparsityBitmask = sparsityBitmask;
+
+    grad->sparsity = NULL;
+    if (layerOutput->sparsity != NULL) {
+        sparsity_t *sparsity = *reserveMemory(sizeof(sparsity_t));
+        grad->sparsity = sparsity;
+    }
+}
+
+trainingStats_t *initTrainingStats(tensor_t *label) {
+    trainingStats_t *trainingStats = *reserveMemory(sizeof(trainingStats_t));
+
+    size_t sizeOutput = calcNumberOfElementsByTensor(label);
+
+    float *outputData = *reserveMemory(sizeOutput * sizeof(float));
+    size_t outputNumberOfDims = label->shape->numberOfDimensions;
+    size_t *outputDims = *reserveMemory(outputNumberOfDims * sizeof(size_t));
+    quantization_t *outputQ = getQLike(label->quantization);
+    tensor_t *output = tensorInit(outputData, outputDims, outputNumberOfDims, outputQ, NULL);
+
+    trainingStats->output = output;
+
+    return trainingStats;
+}
+
+void freeTrainingStats(trainingStats_t *trainingStats) {
+    freeTensor(trainingStats->output);
+    freeReservedMemory(trainingStats);
 }
 
 
@@ -262,9 +159,9 @@ static void initGradTensor(tensor_t *grad, tensor_t *layerOutput, layer_t *layer
  * but in the backward pass it is ignored. We do this, because the Cross Entropy Backward
  * already takes the Softmax Backward into account.
  */
-void calculateGrads(layer_t **model, size_t sizeNetwork,
-                    lossFunctionType_t lossFunctionType, tensor_t *input, tensor_t *label,
-                    trainingStats_t *trainingStats) {
+trainingStats_t *calculateGrads(layer_t **model, size_t sizeNetwork,
+                                lossType_t lossType, tensor_t *input,
+                                tensor_t *label) {
 
     tensor_t *layerOutputs[sizeNetwork + 1];
     layerOutputs[0] = input;
@@ -278,19 +175,92 @@ void calculateGrads(layer_t **model, size_t sizeNetwork,
         forward(currentLayer, layerOutputs[i], layerOutputs[i + 1]);
     }
 
+    trainingStats_t *trainingStats = initTrainingStats(label);
     copyTensor(trainingStats->output, layerOutputs[sizeNetwork]);
 
     // LOSS
-    lossFn_t lossFn;
-    getLossFunctionByType(lossFunctionType, &lossFn);
+    lossFunctions_t mseFns = lossFunctions[MSE];
+
+    float loss = mseFns.forward(layerOutputs[sizeNetwork], label);
+    trainingStats->loss = loss;
+
+    tensor_t ping;
+    initGradTensor(&ping, layerOutputs[sizeNetwork], model[sizeNetwork - 1]);
+    tensor_t pong;
+    bool toggle = 0;
+    mseFns.backward(layerOutputs[sizeNetwork], label, &ping);
+
+    // Backward pass
+    size_t backwardIndex = sizeNetwork - 1;
+    if (lossType == CROSS_ENTROPY) {
+        backwardIndex -= 1;
+    }
+
+    for (int i = (int)backwardIndex; i >= 0; i--) {
+        if (!toggle) {
+            initGradTensor(&pong, layerOutputs[backwardIndex], model[backwardIndex]);
+            layerType_t layerType = model[i]->type;
+            backwardFn_t backward = layerFunctions[layerType].backward;
+            backward(model[i], layerOutputs[i], &ping, &pong);
+            deInitGradTensor(&ping);
+            toggle = true;
+        } else {
+            initGradTensor(&ping, layerOutputs[backwardIndex], model[backwardIndex]);
+            layerType_t layerType = model[i]->type;
+            backwardFn_t backward = layerFunctions[layerType].backward;
+            backward(model[i], layerOutputs[i], &pong, &ping);
+            deInitGradTensor(&pong);
+            toggle = false;
+        }
+    }
+
+    deInitLayerOutputs(layerOutputs, sizeNetwork);
+
+    if(!toggle) {
+        deInitGradTensor(&ping);
+    }
+    else {
+        deInitGradTensor(&pong);
+    }
+
+    return trainingStats;
+}
+
+/*! IMPORTANT: We assume, that if you use Cross Entropy as your loss function,
+ * you also use Softmax with it. We introduce Softmax as a dedicated Layer,
+ * but in the backward pass it is ignored. We do this, because the Cross Entropy Backward
+ * already takes the Softmax Backward into account.
+ */
+trainingStats_t *trainingEpoch(layer_t **model, size_t sizeNetwork,
+                                lossType_t lossFunctionType, tensor_t *input,
+                                tensor_t *label, optimizer_t *optimizer) {
+
+    tensor_t *layerOutputs[sizeNetwork + 1];
+    layerOutputs[0] = input;
+    initLayerOutputs(layerOutputs, model, sizeNetwork);
+
+    // Forward pass
+    for (size_t i = 0; i < sizeNetwork; i++) {
+        layer_t *currentLayer = model[i];
+        layerType_t currentLayerType = currentLayer->type;
+        forwardFn_t forward = layerFunctions[currentLayerType].forward;
+        forward(currentLayer, layerOutputs[i], layerOutputs[i + 1]);
+    }
+
+    trainingStats_t *trainingStats = initTrainingStats(label);
+    copyTensor(trainingStats->output, layerOutputs[sizeNetwork]);
+
+    // LOSS
+    lossFunctions_t mseFns = lossFunctions[MSE];
+    float loss = mseFns.forward(layerOutputs[sizeNetwork], label);
+    trainingStats->loss = loss;
 
     tensor_t ping;
     initGradTensor(&ping, layerOutputs[sizeNetwork], model[sizeNetwork - 1]);
     tensor_t pong;
     bool toggle = 0;
 
-    lossFn(layerOutputs[sizeNetwork], label, &ping);
-    copyTensor(trainingStats->loss, &ping);
+    mseFns.backward(layerOutputs[sizeNetwork], label, &ping);
 
     // Backward pass
     size_t backwardIndex = sizeNetwork - 1;
@@ -315,5 +285,18 @@ void calculateGrads(layer_t **model, size_t sizeNetwork,
             toggle = false;
         }
     }
-    deInitTensorPtrArray(layerOutputs, sizeNetwork, 1);
+
+    deInitLayerOutputs(layerOutputs, sizeNetwork);
+
+    if(!toggle) {
+        deInitGradTensor(&ping);
+    }
+    else {
+        deInitGradTensor(&pong);
+    }
+
+    optimizerFunctions_t optimFns = optimizerFunctions[optimizer->type];
+    optimFns.step(optimizer);
+
+    return trainingStats;
 }

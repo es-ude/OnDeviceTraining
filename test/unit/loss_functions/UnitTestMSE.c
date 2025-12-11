@@ -3,9 +3,25 @@
 #include "MSE.h"
 #include "unity.h"
 #include "TensorConversion.h"
+#include "TensorAPI.h"
 
-void setUp(){}
-void tearDown(){}
+void testMSEForward() {
+    float outputData[] = {1.f, 2.f, 3.f};
+    size_t outputDims[] = {3};
+    size_t outputNumberOfDims = 1;
+    tensor_t *output = tensorInitFloat(outputData, outputDims, outputNumberOfDims, NULL);
+
+    float labelData[] = {2.f, 4.f, 6.f};
+    size_t labelDims[] = {3};
+    size_t labelNumberOfDims = 1;
+    tensor_t *label = tensorInitFloat(labelData, labelDims, labelNumberOfDims, NULL);
+
+    float loss = mseLossForward(output, label);
+
+    float expected = 4.67f;
+
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, expected, loss);
+}
 
 void testMSELossBackwardFloat() {
 
@@ -37,7 +53,7 @@ void testMSELossBackwardFloat() {
     float resultData[numberOfElements];
     setTensorValues(&result, (uint8_t *)resultData, &shape, &resultQ, NULL);
 
-    MSELossBackwardFloat(&modelOutput, &label, &result);
+    mseLossBackwardFloat(&modelOutput, &label, &result);
 
     float expected[] = {4.f, 4.f, -3.3333f};
 
@@ -107,7 +123,7 @@ void testMSELossBackwardAsym() {
     convertTensor(&result, &resultAsym);
 
 
-    MSELossBackward(&modelOutputAsym, &labelAsym, &resultAsym);
+    mseLossBackward(&modelOutputAsym, &labelAsym, &resultAsym);
 
     convertTensor(&resultAsym, &result);
 
@@ -120,8 +136,13 @@ void testMSELossBackwardAsym() {
     }
 }
 
+void setUp(){}
+void tearDown(){}
+
 int main(void) {
     UNITY_BEGIN();
+
+    RUN_TEST(testMSEForward);
 
     RUN_TEST(testMSELossBackwardFloat);
     RUN_TEST(testMSELossBackwardAsym);

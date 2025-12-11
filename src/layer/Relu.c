@@ -6,6 +6,8 @@
 #include "DTypes.h"
 #include "TensorConversion.h"
 
+#include <stdio.h>
+
 static void forwardFloat32(tensor_t *input, tensor_t *output) {
     gteFloatValue(input, 0, 0, output);
 }
@@ -39,7 +41,6 @@ static void forwardAsym(tensor_t *input, tensor_t *output) {
 }
 
 void reluForward(layer_t *reluLayer, tensor_t *input, tensor_t *output) {
-
     switch (reluLayer->qType) {
     case FLOAT_LAYER:
         forwardFloat32(input, output);

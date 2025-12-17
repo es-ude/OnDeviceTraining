@@ -59,6 +59,7 @@ tensor_t* getGradTensorFromParameter(parameter_t* parameter);
 size_t calcBytesPerElement(quantization_t* quantization);
 size_t calcBitsPerElement(quantization_t* quantization);
 size_t calcBytesPerTensor(tensor_t* tensor);
+size_t calcNumberOfBytesForData(quantization_t *q, size_t numberOfElements);
 
 size_t calcNumberOfElementsByShape(shape_t* shape);
 size_t calcNumberOfElementsByTensor(tensor_t* tensor);

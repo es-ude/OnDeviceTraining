@@ -1,5 +1,5 @@
-#ifndef ENV5_RUNTIME_TENSORCONVERSION_H
-#define ENV5_RUNTIME_TENSORCONVERSION_H
+#ifndef TENSOR_CONVERSION_H
+#define TENSOR_CONVERSION_H
 
 #include "Tensor.h"
 
@@ -7,4 +7,6 @@ typedef void (*conversionFunction_t)(tensor_t* inputTensor, tensor_t* outputTens
 
 void convertTensor(tensor_t* inputTensor, tensor_t* outputTensor);
 
-#endif // ENV5_RUNTIME_TENSORCONVERSION_H
+extern conversionFunction_t conversionMatrix[5][5];
+
+#endif // TENSOR_CONVERSION_H

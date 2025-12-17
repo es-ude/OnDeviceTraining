@@ -3,6 +3,7 @@
 #include "StorageAPI.h"
 #include "SgdAPI.h"
 #include "TensorAPI.h"
+#include "Linear.h"
 
 #include <stdio.h>
 

@@ -7,55 +7,6 @@
 #include <stddef.h>
 #include <stdlib.h>
 
-/*void testConversionFloatInt32() {
-    float expected[] = {1, 2, 3};
-
-    size_t num_values = 3;
-    float floatData[] = {1.f, 2.f, 3.f};
-    size_t floatDims[] = {3};
-    size_t floatOrders[] = {0};
-    uint8_t floatSparsityBitmask[] = {0x03};
-    quantization_t floatQ = {
-        .type = FLOAT32,
-        .qConfig = NULL
-    };
-    size_t FloatNumBytes = calcBitsPerElement(&floatQ) * num_values;
-    uint8_t floatUInt8Data[FloatNumBytes];
-    writeFloatArrayToByteArray(num_values, floatData, floatUInt8Data);
-    tensor_t floatTensor = {
-        .data = floatUInt8Data,
-        .quantization = &floatQ,
-        .sparsityBitmask = floatSparsityBitmask,
-        .numberOfDimensions = 1,
-        .dimensions = floatDims,
-        .orderOfDimensions = floatOrders
-    };
-
-    int32_t intData[3];
-    size_t intDims[1];
-    size_t intOrders[1];
-    uint8_t IntSparsityBitmask[num_values / 8 + 1];
-    quantization_t intQ = {
-        .type = INT32,
-        .qConfig = NULL
-    };
-    size_t IntNumBytes = calcBitsPerElement(&intQ) * num_values;
-    uint8_t uint8Data[IntNumBytes];
-    tensor_t intTensor = {
-        .data = uint8Data,
-        .quantization = &intQ,
-        .sparsityBitmask = IntSparsityBitmask,
-        .numberOfDimensions = 1,
-        .dimensions = intDims,
-        .orderOfDimensions = intOrders
-    };
-
-    convertTensor(&floatTensor, &intTensor);
-    readBytesAsInt32Array(num_values, uint8Data, intData);
-    TEST_ASSERT_EQUAL_INT_ARRAY(expected, intData, num_values);
-}*/
-
-
 void testConversionIntFloat() {
     uint8_t numValues = 6;
 
@@ -90,6 +41,7 @@ void testConversionIntFloat() {
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, actual, numValues);
 
 }
+
 void testConversionIntSymInt32() {
     uint8_t numValues = 6;
 
@@ -124,6 +76,7 @@ void testConversionIntSymInt32() {
     TEST_ASSERT_EQUAL_INT32_ARRAY(intTensor.data, symInt32Tensor.data, numValues);
 
 }
+
 void testConversionIntAsym() {
     size_t numValues = 6;
     size_t dims[] = {numValues};
@@ -202,6 +155,7 @@ void testConversionFloatInt() {
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, actual, numValues);
 }
+
 void testConversionFloatSymInt32() {
     uint8_t numValues = 6;
 
@@ -235,6 +189,7 @@ void testConversionFloatSymInt32() {
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, symInt32Tensor.data, numValues);
 }
+
 void testConversionFloatAsym() {
     size_t numValues = 6;
     size_t dims[] = {numValues};
@@ -298,7 +253,6 @@ void testConversionSymInt32Int() {
     tensor_t symInt32Tensor;
     setTensorValues(&symInt32Tensor, (uint8_t *)symInt32Data, &shape, &symInt32Q, NULL);
 
-
     int32_t intData[numValues];
     quantization_t intQ;
     initInt32Quantization(&intQ);
@@ -311,6 +265,7 @@ void testConversionSymInt32Int() {
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, intTensor.data, numValues);
 }
+
 void testConversionSymInt32Float() {
     uint8_t numValues = 6;
 
@@ -353,6 +308,7 @@ void testConversionSymInt32Float() {
 
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, floatTensor.data, numValues);
 }
+
 void testConversionSymInt32Asym() {
     uint8_t numValues = 6;
 
@@ -439,6 +395,7 @@ void testConversionAsymInt() {
     int32_t expectedData[] = {5, 11, 16, 20, -5, -11};
     TEST_ASSERT_EQUAL_INT32_ARRAY(expectedData, actual, numValues);
 }
+
 void testConversionAsymFloat() {
     size_t numValues = 6;
     size_t dims[] = {numValues};
@@ -476,6 +433,7 @@ void testConversionAsymFloat() {
     float expectedData[] = {0.9375f, 2.0625f, 3.f, 3.75f, -0.9375f, -2.0625f};
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expectedData, actual, numValues);
 }
+
 void testConversionAsymSymInt32() {
     size_t numValues = 6;
     size_t dims[] = {numValues};
@@ -525,25 +483,21 @@ void tearDown() {}
 int main(void) {
     UNITY_BEGIN();
 
-
     RUN_TEST(testConversionIntFloat);
     RUN_TEST(testConversionIntSymInt32);
     RUN_TEST(testConversionIntAsym);
-
 
     RUN_TEST(testConversionFloatInt);
     RUN_TEST(testConversionFloatSymInt32);
     RUN_TEST(testConversionFloatAsym);
 
-
     RUN_TEST(testConversionSymInt32Int);
     RUN_TEST(testConversionSymInt32Float);
     RUN_TEST(testConversionSymInt32Asym);
-
 
     RUN_TEST(testConversionAsymInt);
     RUN_TEST(testConversionAsymFloat);
     RUN_TEST(testConversionAsymSymInt32);
 
-    UNITY_END();
+    return UNITY_END();
 }

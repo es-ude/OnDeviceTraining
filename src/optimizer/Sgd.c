@@ -32,7 +32,7 @@ static void sgdStepFloat(optimizer_t *optim) {
     }
 }
 
-static void sgdStepAsym(optimizer_t *optim) {
+static void sgdStepSymInt32(optimizer_t *optim) {
     sgd_t *sgd = (sgd_t *)optim->impl;
 
     for (size_t stateIndex = 0; stateIndex < optim->sizeStates; stateIndex++) {
@@ -73,8 +73,8 @@ void sgdStep(optimizer_t *optimizer) {
     case FLOAT32:
         sgdStepFloat(optimizer);
         break;
-    case ASYM:
-        sgdStepAsym(optimizer);
+    case SYM_INT32:
+        sgdStepSymInt32(optimizer);
         break;
     default:
         break;
@@ -102,7 +102,7 @@ static void sgdStepMFloat(optimizer_t *optim) {
     }
 }
 
-static void sgdStepMAsym(optimizer_t *optim) {
+static void sgdStepMSymInt32(optimizer_t *optim) {
     sgd_t *sgd = optim->impl->sgd;
 
     for (size_t i = 0; i < optim->sizeStates; i++) {
@@ -151,7 +151,6 @@ static void sgdStepMAsym(optimizer_t *optim) {
 
         convertTensor(&stateFloat, state);
         convertTensor(&paramFloat, param->param);
-        convertTensor(&gradFloat, param->grad);
     }
 }
 
@@ -160,8 +159,8 @@ void sgdStepM(optimizer_t *optimizer) {
     case FLOAT32:
         sgdStepMFloat(optimizer);
         break;
-    case ASYM:
-        sgdStepMAsym(optimizer);
+    case SYM_INT32:
+        sgdStepMSymInt32(optimizer);
         break;
     default:
         break;
@@ -176,10 +175,10 @@ void sgdZeroGrad(optimizer_t *optimizer) {
         size_t totalNumberOfBytes = ceil(paramSize * bitsPerElement / 8);
 
         memset(param->grad->data, 0, totalNumberOfBytes);
-        qtype_t currentQType = param->grad->quantization->type;
-        if (currentQType == ASYM) {
-            asymQConfig_t *currentAsymQC = param->grad->quantization->qConfig;
-            currentAsymQC->zeroPoint = 0;
+
+        if(param->grad->quantization->type == SYM_INT32) {
+            symInt32QConfig_t *symIntQ = param->grad->quantization->qConfig;
+            symIntQ->scale = 0.f;
         }
     }
 }

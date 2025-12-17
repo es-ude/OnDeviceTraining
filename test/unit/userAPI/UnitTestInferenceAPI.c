@@ -32,12 +32,11 @@ void testInferenceLinearReluFloat() {
     size_t inputNumberOfDims = 2;
     tensor_t *input = tensorInitFloat(inputData, inputDims, inputNumberOfDims, NULL);
 
-    quantization_t *outputQ = quantizationInitFloat();
+    quantization_t *test = quantizationInitFloat();
 
-    layer_t *linear = linearLayerInit(weights, bias, FLOAT_LAYER, input->quantization->type,
-                                      outputQ);
+    layer_t *linear = linearLayerInit(weights, bias, test, test, test, test);
 
-    layer_t *relu = reluLayerInit(FLOAT_LAYER, linear->outputQ->type, outputQ);
+    layer_t *relu = reluLayerInit(test, test);
 
     layer_t *model[] = {linear, relu};
 
@@ -48,61 +47,42 @@ void testInferenceLinearReluFloat() {
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, output->data, 2);
 }
 
-void testInferenceLinearReluAsym() {
-    size_t numberOfWeights = 6;
-    size_t numberOfBiases = 2;
-    size_t numberOfInputs = 3;
+void testInferenceLinearReluSymInt32() {
     size_t numberOfOutputs = 2;
 
     float weightDataFloat[] = {-1.f, 2.f, -3.f, 4.f, 5.f, 6.f};
     size_t weightDims[] = {2, 3};
     size_t weightNumberOfDims = 2;
-    tensor_t *weightsParamFloat = tensorInitFloat(weightDataFloat, weightDims, weightNumberOfDims,
-                                                  NULL);
+    tensor_t *weightsParam = tensorInitSymInt32(weightDataFloat, weightDims, weightNumberOfDims,
+                                                HTE, NULL);
+    tensor_t *weightGrad = gradInitSymInt32(weightsParam, HTE, NULL);
+    parameter_t *weights = parameterInit(weightsParam, weightGrad);
 
-    float weightDataAsym[numberOfWeights];
-    quantization_t *weightAsymQ = quantizationInitAsym(8, HTE);
-    tensor_t *weightsParamAsym = tensorInit(weightDataAsym, weightDims, weightNumberOfDims,
-                                            weightAsymQ, NULL);
-
-    convertTensor(weightsParamFloat, weightsParamAsym);
-
-    tensor_t *weightGradAsym = gradInitAsym(weightsParamAsym, 8, HTE, NULL);
-    parameter_t *weights = parameterInit(weightsParamAsym, weightGradAsym);
-
-    // IMPORTANT: WHEN ASYM --> BIASQ = INT32!
     float biasData[] = {-1, 3};
     size_t biasDims[] = {2, 1};
     size_t biasNumberOfDims = 2;
-    quantization_t *biasQ = quantizationInitInt32();
-    tensor_t *biasParamInt = tensorInit(biasData, biasDims, biasNumberOfDims, biasQ, NULL);
-
-    tensor_t *biasGradAsym = gradInitAsym(biasParamInt, 8, HTE, NULL);
-    parameter_t *bias = parameterInit(biasParamInt, biasGradAsym);
+    tensor_t *biasParam = tensorInitSymInt32(biasData, biasDims, biasNumberOfDims, HTE, NULL);
+    tensor_t *biasGrad = gradInitSymInt32(biasParam, HTE, NULL);
+    parameter_t *bias = parameterInit(biasParam, biasGrad);
 
     float inputDataFloat[] = {0.f, 1.f, 2.f};
     size_t inputDims[] = {1, 3};
     size_t inputNumberOfDims = 2;
-    tensor_t *inputFloat = tensorInitFloat(inputDataFloat, inputDims, inputNumberOfDims, NULL);
+    tensor_t *input = tensorInitSymInt32(inputDataFloat, inputDims, inputNumberOfDims, HTE, NULL);
 
-    float inputDataAsym[numberOfInputs];
-    quantization_t *inputAsymQ = quantizationInitAsym(8, HTE);
-    tensor_t *inputAsym = tensorInit(inputDataAsym, inputDims, inputNumberOfDims, inputAsymQ, NULL);
-    convertTensor(inputFloat, inputAsym);
+    quantization_t *test = quantizationInitSymInt32(HTE);
+    layer_t *linear = linearLayerInit(weights, bias, test, test, test, test);
 
-    quantization_t *outputQ = quantizationInitAsym(8, HTE);
-    layer_t *linear = linearLayerInit(weights, bias, ASYM_LAYER, ASYM, outputQ);
-
-    layer_t *relu = reluLayerInit(ASYM_LAYER, ASYM, outputQ);
+    layer_t *relu = reluLayerInit(test, test);
 
     layer_t *model[] = {linear, relu};
 
-    tensor_t *outputAsym = inference(model, 2, inputAsym);
+    tensor_t *outputSymInt32 = inference(model, 2, input);
 
-    float expected[] = {0.f, 20.f - (float)biasData[1]};
+    float expected[] = {0.f, 20.f};
     float outputData[numberOfOutputs];
     tensor_t *outputFloat = tensorInitFloat(outputData, biasDims, biasNumberOfDims, NULL);
-    convertTensor(outputAsym, outputFloat);
+    convertTensor(outputSymInt32, outputFloat);
     float *actual = (float *)outputFloat->data;
 
     for (size_t i = 0; i < numberOfOutputs; i++) {
@@ -117,7 +97,6 @@ void testInferenceWithLossLinearReluFloat() {
     size_t weightNumberOfDims = 2;
 
     tensor_t *weightParam = tensorInitFloat(weightData, weightDims, weightNumberOfDims, NULL);
-
     tensor_t *weightGrad = gradInitFloat(weightParam, NULL);
     parameter_t *weights = parameterInit(weightParam, weightGrad);
 
@@ -134,12 +113,11 @@ void testInferenceWithLossLinearReluFloat() {
     size_t inputNumberOfDims = 2;
     tensor_t *input = tensorInitFloat(inputData, inputDims, inputNumberOfDims, NULL);
 
-    quantization_t *outputQ = quantizationInitFloat();
+    quantization_t *test = quantizationInitFloat();
 
-    layer_t *linear = linearLayerInit(weights, bias, FLOAT_LAYER, input->quantization->type,
-                                      outputQ);
+    layer_t *linear = linearLayerInit(weights, bias, test, test, test, test);
 
-    layer_t *relu = reluLayerInit(FLOAT_LAYER, linear->outputQ->type, outputQ);
+    layer_t *relu = reluLayerInit(test, test);
 
     layer_t *model[] = {linear, relu};
 
@@ -165,8 +143,8 @@ void tearDown() {}
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testInferenceLinearReluFloat);
-    RUN_TEST(testInferenceLinearReluAsym);
+    RUN_TEST(testInferenceLinearReluSymInt32);
 
     RUN_TEST(testInferenceWithLossLinearReluFloat);
-    UNITY_END();
+    return UNITY_END();
 }

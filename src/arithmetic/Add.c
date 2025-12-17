@@ -179,42 +179,23 @@ void addSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor) {
         printf("Error in addSymInt32Tensors: mismatched number of values\n");
     }
 
-    symInt32QConfig_t *aSymInt32QConfig = aTensor->quantization->qConfig;
-    symInt32QConfig_t *bSymInt32QConfig = bTensor->quantization->qConfig;
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
 
-    float aScale = aSymInt32QConfig->scale;
-    float bScale = bSymInt32QConfig->scale;
+    uint8_t aFloatData[aNumberOfValues * sizeof(float)];
+    tensor_t aFloat;
+    setTensorValuesForConversion(aFloatData, &floatQ, aTensor, &aFloat);
+    convertTensor(aTensor, &aFloat);
 
-    if (aScale == bScale) {
-        int32_t aValues[aNumberOfValues];
-        readBytesAsInt32Array(aNumberOfValues, aTensor->data, aValues);
-        int32_t bValues[aNumberOfValues];
-        readBytesAsInt32Array(aNumberOfValues, bTensor->data, bValues);
+    uint8_t bFloatData[aNumberOfValues * sizeof(float)];
+    tensor_t bFloat;
+    setTensorValuesForConversion(bFloatData, &floatQ, bTensor, &bFloat);
+    convertTensor(bTensor, &bFloat);
 
-        int32_t outputValues[aNumberOfValues];;
+    addFloat32TensorsInplace(&aFloat, &bFloat);
 
-        for (size_t i = 0; i < aNumberOfValues; i++) {
-            outputValues[i] = addInt32s(aValues[i], bValues[i]);
-        }
-        writeInt32ArrayToByteArray(aNumberOfValues, outputValues, aTensor->data);
-    } else {
-        quantization_t floatQ;
-        initFloat32Quantization(&floatQ);
+    convertTensor(&aFloat, aTensor);
 
-        uint8_t aFloatData[aNumberOfValues * sizeof(float)];
-        tensor_t aFloat;
-        setTensorValuesForConversion(aFloatData, &floatQ, aTensor, &aFloat);
-        convertTensor(aTensor, &aFloat);
-
-        uint8_t bFloatData[aNumberOfValues * sizeof(float)];
-        tensor_t bFloat;
-        setTensorValuesForConversion(bFloatData, &floatQ, bTensor, &bFloat);
-        convertTensor(bTensor, &bFloat);
-
-        addFloat32TensorsInplace(&aFloat, &bFloat);
-
-        convertTensor(&aFloat, aTensor);
-    }
 }
 
 size_t getAddInstructionCounter() {

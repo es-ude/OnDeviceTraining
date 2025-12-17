@@ -1,6 +1,8 @@
 #include "unity.h"
 #include "Softmax.h"
 #include "CrossEntropy.h"
+#include "QuantizationAPI.h"
+#include "SoftmaxAPI.h"
 
 
 void unitTestCrossEntropyForward() {
@@ -26,11 +28,10 @@ void unitTestCrossEntropyForward() {
     initFloat32Quantization(&outputQ);
     setTensorValues(&softmaxOutput, (uint8_t *)outputData, &outputShape, &outputQ, NULL);
 
-    layer_t softmaxLayer;
-    initSoftmaxLayer(&softmaxLayer);
-    softmaxLayer.inputQType = logitQ.type;
-
-    softmaxForward(&softmaxLayer, &logits, &softmaxOutput);
+    quantization_t *floatQ = quantizationInitFloat();
+    layer_t *softmaxLayer = softmaxLayerInit(floatQ, floatQ);
+    layerFunctions_t softmaxFns = layerFunctions[SOFTMAX];
+    softmaxFns.forward(softmaxLayer, &logits, &softmaxOutput);
 
     tensor_t distribution;
     float distData[] = {0.9f, 0.1f, 0.0f};
@@ -73,13 +74,13 @@ void unitTestCrossEntropySoftmaxBackward() {
     setShape(&softmaxOutputShape, softmaxOutputDims, softmaxOutputNumberOfDims, softmaxOutputOrder);
     quantization_t softmaxOutputQ;
     initFloat32Quantization(&softmaxOutputQ);
-    setTensorValues(&softmaxOutput, (uint8_t *)softmaxOutputData, &softmaxOutputShape, &softmaxOutputQ, NULL);
+    setTensorValues(&softmaxOutput, (uint8_t *)softmaxOutputData, &softmaxOutputShape,
+                    &softmaxOutputQ, NULL);
 
-    layer_t softmaxLayer;
-    initSoftmaxLayer(&softmaxLayer);
-    softmaxLayer.inputQType = softmaxOutputQ.type;
-
-    softmaxForward(&softmaxLayer, &logits, &softmaxOutput);
+    quantization_t *floatQ = quantizationInitFloat();
+    layer_t *softmaxLayer = softmaxLayerInit(floatQ, floatQ);
+    layerFunctions_t softmaxFns = layerFunctions[SOFTMAX];
+    softmaxFns.forward(softmaxLayer, &logits, &softmaxOutput);
 
     tensor_t distribution;
     float distData[] = {0.9f, 0.1f, 0.0f};
@@ -122,5 +123,5 @@ int main() {
     UNITY_BEGIN();
     RUN_TEST(unitTestCrossEntropyForward);
     RUN_TEST(unitTestCrossEntropySoftmaxBackward);
-    UNITY_END();
+    return UNITY_END();
 }

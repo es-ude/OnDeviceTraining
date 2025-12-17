@@ -3,6 +3,9 @@ add_elastic_ai_unit_test(
         Linear
         MORE_LIBS
         CommonLayerLibs
+        TensorAPI
+        QuantizationAPI
+        LinearAPI
 )
 
 
@@ -11,6 +14,9 @@ add_elastic_ai_unit_test(
         Relu
         MORE_LIBS
         CommonLayerLibs
+        ReluAPI
+        TensorAPI
+        QuantizationAPI
 )
 
 add_elastic_ai_unit_test(
@@ -18,4 +24,7 @@ add_elastic_ai_unit_test(
         Softmax
         MORE_LIBS
         CommonLayerLibs
+        TensorAPI
+        SoftmaxAPI
+        QuantizationAPI
 )

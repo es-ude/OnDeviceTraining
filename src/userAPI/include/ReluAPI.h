@@ -3,7 +3,7 @@
 
 #include "Layer.h"
 
-layer_t* reluLayerInit(layerQType_t layerQType, qtype_t inputQType, quantization_t* outputQ);
+layer_t *reluLayerInit(quantization_t *forwardQ, quantization_t *backwardQ);
 
 void freeReluLayer(layer_t* reluLayer);
 

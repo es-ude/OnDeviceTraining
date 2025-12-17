@@ -5,56 +5,42 @@
 #include "Comparison.h"
 #include "DTypes.h"
 #include "TensorConversion.h"
+#include "Layer.h"
 
 #include <stdio.h>
 
-static void forwardFloat32(tensor_t *input, tensor_t *output) {
+void reluInitConfig(reluConfig_t *reluConfig, quantization_t *forwardQ, quantization_t *backwardQ) {
+    reluConfig->forwardQ = forwardQ;
+    reluConfig->backwardQ = backwardQ;
+}
+
+void reluForwardFloat(tensor_t *input, tensor_t *output) {
     gteFloatValue(input, 0, 0, output);
 }
 
-static void forwardAsym(tensor_t *input, tensor_t *output) {
-    size_t numberOfElements = calcNumberOfElementsByTensor(input);
-
-    asymQConfig_t *inputAsymQC = input->quantization->qConfig;
-    symInt32QConfig_t inputSymInt32QC;
-    initSymInt32QConfig(inputAsymQC->roundingMode, &inputSymInt32QC);
-    quantization_t inputSymInt32Q;
-    initSymInt32Quantization(&inputSymInt32QC, &inputSymInt32Q);
-    uint8_t inputSymInt32Data[numberOfElements * sizeof(int32_t)];
-    tensor_t inputSymInt32;
-    setTensorValuesForConversion(inputSymInt32Data, &inputSymInt32Q, input, &inputSymInt32);
-    convertTensor(input, &inputSymInt32);
-
-    asymQConfig_t *outputAsymQC = output->quantization->qConfig;
-    symInt32QConfig_t outputSymInt32QC;
-    initSymInt32QConfig(outputAsymQC->roundingMode, &outputSymInt32QC);
-    quantization_t outputSymInt32Q;
-    initSymInt32Quantization(&outputSymInt32QC, &outputSymInt32Q);
-    uint8_t outputSymInt32Data[numberOfElements * sizeof(int32_t)];
-    tensor_t outputSymInt32;
-    setTensorValuesForConversion(outputSymInt32Data, &outputSymInt32Q, output, &outputSymInt32);
-    convertTensor(output, &outputSymInt32);
-
-    gteSymInt32Zero(&inputSymInt32, 0, &outputSymInt32);
-    outputSymInt32QC.scale = inputSymInt32QC.scale;
-    convertTensor(&outputSymInt32, output);
+void reluForwardSymInt32(tensor_t *input, tensor_t *output) {
+    symInt32QConfig_t *inputSymInt32QC = input->quantization->qConfig;
+    symInt32QConfig_t *outputSymInt32QC = output->quantization->qConfig;
+    gteSymInt32Zero(input, 0, output);
+    outputSymInt32QC->scale = inputSymInt32QC->scale;
 }
 
 void reluForward(layer_t *reluLayer, tensor_t *input, tensor_t *output) {
-    switch (reluLayer->qType) {
-    case FLOAT_LAYER:
-        forwardFloat32(input, output);
+    reluConfig_t *reluConfig = reluLayer->config->relu;
+
+    switch (reluConfig->forwardQ->type) {
+    case FLOAT32:
+        reluForwardFloat(input, output);
         break;
-    case ASYM_LAYER:
-        forwardAsym(input, output);
+    case SYM_INT32:
+        reluForwardSymInt32(input, output);
         break;
     default:
         break;
     }
 }
 
-
-static void backwardFloat32(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
+void reluBackwardFloat(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
     size_t numberOfElements = calcNumberOfElementsByTensor(forwardInput);
 
     float *inputArray = (float *)forwardInput->data;
@@ -70,45 +56,12 @@ static void backwardFloat32(tensor_t *forwardInput, tensor_t *loss, tensor_t *pr
     }
 }
 
-
-static void backwardAsym(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
-
+void reluBackwardSymInt32(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
     size_t numberOfElements = calcNumberOfElementsByTensor(forwardInput);
 
-    tensor_t inputSymInt32;
-    uint8_t inputSymInt32Data[numberOfElements * sizeof(int32_t)];
-    asymQConfig_t *inputAsymQC = forwardInput->quantization->qConfig;
-    symInt32QConfig_t inputSymInt32QC;
-    initSymInt32QConfig(inputAsymQC->roundingMode, &inputSymInt32QC);
-    quantization_t inputSymInt32Q;
-    initSymInt32Quantization(&inputSymInt32QC, &inputSymInt32Q);
-    setTensorValuesForConversion(inputSymInt32Data, &inputSymInt32Q, forwardInput, &inputSymInt32);
-    convertTensor(forwardInput, &inputSymInt32);
-
-    tensor_t gradOutputSymInt32;
-    uint8_t gradOutputSymInt32Data[numberOfElements * sizeof(int32_t)];
-    asymQConfig_t *gradOutputAsymQC = loss->quantization->qConfig;
-    symInt32QConfig_t gradOutputSymInt32QC;
-    initSymInt32QConfig(gradOutputAsymQC->roundingMode, &gradOutputSymInt32QC);
-    quantization_t gradOutputSymInt32Q;
-    initSymInt32Quantization(&gradOutputSymInt32QC, &gradOutputSymInt32Q);
-    setTensorValuesForConversion(gradOutputSymInt32Data, &gradOutputSymInt32Q,
-                                 loss, &gradOutputSymInt32);
-    convertTensor(loss, &gradOutputSymInt32);
-
-    tensor_t gradInputSymInt32;
-    uint8_t gradInputSymInt32Data[numberOfElements * sizeof(int32_t)];
-    asymQConfig_t *gradInputAsymQC = propLoss->quantization->qConfig;
-    symInt32QConfig_t gradInputSymInt32QC;
-    initSymInt32QConfig(gradInputAsymQC->roundingMode, &gradInputSymInt32QC);
-    quantization_t gradInputSymInt32Q;
-    initSymInt32Quantization(&gradInputSymInt32QC, &gradInputSymInt32Q);
-    setTensorValuesForConversion(gradInputSymInt32Data, &gradInputSymInt32Q, propLoss,
-                                 &gradInputSymInt32);
-
-    int32_t *inputArray = (int32_t *)inputSymInt32.data;
-    int32_t *gradOutputArray = (int32_t *)gradOutputSymInt32.data;
-    int32_t *gradInputArray = (int32_t *)gradInputSymInt32.data;
+    int32_t *inputArray = (int32_t *)forwardInput->data;
+    int32_t *gradOutputArray = (int32_t *)loss->data;
+    int32_t *gradInputArray = (int32_t *)propLoss->data;
 
     for (size_t i = 0; i < numberOfElements; i++) {
         if (inputArray[i] <= 0) {
@@ -118,18 +71,21 @@ static void backwardAsym(tensor_t *forwardInput, tensor_t *loss, tensor_t *propL
         }
     }
 
-    gradInputSymInt32QC.scale = gradOutputSymInt32QC.scale;
-    convertTensor(&gradInputSymInt32, propLoss);
+    symInt32QConfig_t *lossQC = loss->quantization->qConfig;
+    symInt32QConfig_t *propLossQC = propLoss->quantization->qConfig;
+    propLossQC->scale = lossQC->scale;
 }
 
 void reluBackward(layer_t *reluLayer, tensor_t *forwardInput, tensor_t *loss,
                   tensor_t *propLoss) {
-    switch (reluLayer->qType) {
-    case FLOAT_LAYER:
-        backwardFloat32(forwardInput, loss, propLoss);
+    reluConfig_t *reluConfig = reluLayer->config->relu;
+
+    switch (reluConfig->backwardQ->type) {
+    case FLOAT32:
+        reluBackwardFloat(forwardInput, loss, propLoss);
         break;
-    case ASYM_LAYER:
-        backwardAsym(forwardInput, loss, propLoss);
+    case SYM_INT32:
+        reluBackwardSymInt32(forwardInput, loss, propLoss);
         break;
     default:
         break;

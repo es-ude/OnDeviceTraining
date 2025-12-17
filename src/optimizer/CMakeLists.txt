@@ -4,6 +4,7 @@ target_link_libraries(Optimizer PRIVATE
         Quantization
         Rounding
         Layer
+        Tensor
 )
 
 add_library(Sgd Sgd.c)

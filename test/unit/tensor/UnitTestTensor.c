@@ -182,5 +182,5 @@ int main(void) {
     RUN_TEST(testReadByte);
 
     RUN_TEST(testCopyTensor);
-    UNITY_END();
+    return UNITY_END();
 }

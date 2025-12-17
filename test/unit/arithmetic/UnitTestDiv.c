@@ -105,5 +105,6 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testDivFloatTensors);
     RUN_TEST(testDivSymInt32TensorsInplace);
-    UNITY_END();
+
+    return UNITY_END();
 }

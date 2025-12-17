@@ -135,5 +135,6 @@ int main(void) {
     RUN_TEST(testSubInt32Tensors);
     RUN_TEST(testSubInt32ElementWithTensor);
     RUN_TEST(testSubSymInt32Tensors);
-    UNITY_END();
+
+    return UNITY_END();
 }

@@ -4,6 +4,8 @@ add_elastic_ai_unit_test(
         MORE_LIBS
         CommonLayerLibs
         Log
+        SoftmaxAPI
+        QuantizationAPI
 )
 
 add_elastic_ai_unit_test(

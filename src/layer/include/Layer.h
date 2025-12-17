@@ -2,9 +2,10 @@
 #define ODT_LAYER_H
 
 #include "Tensor.h"
-#include "Linear.h"
 
 typedef struct linearConfig linearConfig_t;
+typedef struct reluConfig reluConfig_t;
+typedef struct softmaxConfig softmaxConfig_t;
 
 typedef enum layerType
 {
@@ -12,7 +13,8 @@ typedef enum layerType
     RELU,
     CONV1D,
     SOFTMAX,
-    SEQUENTIAL
+    SEQUENTIAL,
+    QUANTIZATION
 } layerType_t;
 
 typedef enum layerQType
@@ -24,15 +26,14 @@ typedef enum layerQType
 typedef union layerConfig
 {
     linearConfig_t* linear;
+    reluConfig_t* relu;
+    softmaxConfig_t* softmax;
 } layerConfig_t;
 
 typedef struct layer
 {
     layerType_t type;
     layerConfig_t* config;
-    layerQType_t qType;
-    qtype_t inputQType;
-    quantization_t* outputQ;
 } layer_t;
 
 typedef void (*forwardFn_t)(layer_t* layer, tensor_t* inputTensor, tensor_t* outputTensor);
@@ -49,10 +50,6 @@ typedef struct layerFunctions
 
 extern layerFunctions_t layerFunctions[];
 
-void initLayer(layer_t* layer, layerType_t layerType, layerConfig_t* config, layerQType_t qType, qtype_t inputQType,
-               quantization_t* outputQ);
-
-
-size_t calcBytesOutputData(quantization_t* outputQ, size_t numberOfOutputs);
+void initLayer(layer_t* layer, layerType_t layerType, layerConfig_t* config);
 
 #endif

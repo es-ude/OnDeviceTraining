@@ -64,7 +64,7 @@ void testMSELossBackwardFloat() {
     }
 }
 
-void testMSELossBackwardAsym() {
+void testMSELossBackwardSymInt32() {
     size_t numberOfElements = 3;
 
     size_t dims[] = {numberOfElements};
@@ -82,14 +82,14 @@ void testMSELossBackwardAsym() {
     float modelOutputData[] = {1.f, 2.f, -3.f};
     setTensorValues(&modelOutput, (uint8_t *)modelOutputData, &shape, &modelOutputQ, NULL);
 
-    tensor_t modelOutputAsym;
-    asymQConfig_t modelOutputAsymQC;
-    initAsymQConfig(8, HTE, &modelOutputAsymQC);
-    quantization_t modelOutputAsymQ;
-    initAsymQuantization(&modelOutputAsymQC, &modelOutputAsymQ);
-    uint8_t modelOutputAsymData[numberOfElements];
-    setTensorValuesForConversion(modelOutputAsymData, &modelOutputAsymQ, &modelOutput, &modelOutputAsym);
-    convertTensor(&modelOutput, &modelOutputAsym);
+    tensor_t modelOutputSymInt32;
+    symInt32QConfig_t modelOutputSymInt32QC;
+    initSymInt32QConfig(HTE, &modelOutputSymInt32QC);
+    quantization_t modelOutputSymInt32Q;
+    initSymInt32Quantization(&modelOutputSymInt32QC, &modelOutputSymInt32Q);
+    uint8_t modelOutputSymInt32Data[numberOfElements];
+    setTensorValuesForConversion(modelOutputSymInt32Data, &modelOutputSymInt32Q, &modelOutput, &modelOutputSymInt32);
+    convertTensor(&modelOutput, &modelOutputSymInt32);
 
     tensor_t label;
     quantization_t labelQ;
@@ -97,14 +97,14 @@ void testMSELossBackwardAsym() {
     float labelData[] = {-5.f, -4.f, 2.f};
     setTensorValues(&label, (uint8_t *)labelData, &shape, &labelQ, NULL);
 
-    tensor_t labelAsym;
-    asymQConfig_t labelAsymQC;
-    initAsymQConfig(8, HTE, &labelAsymQC);
-    quantization_t labelAsymQ;
-    initAsymQuantization(&labelAsymQC, &labelAsymQ);
-    uint8_t labelAsymData[numberOfElements];
-    setTensorValuesForConversion(labelAsymData, &labelAsymQ, &label, &labelAsym);
-    convertTensor(&label, &labelAsym);
+    tensor_t labelSymInt32;
+    symInt32QConfig_t labelSymInt32QC;
+    initSymInt32QConfig(HTE, &labelSymInt32QC);
+    quantization_t labelSymInt32Q;
+    initSymInt32Quantization(&labelSymInt32QC, &labelSymInt32Q);
+    uint8_t labelSymInt32Data[numberOfElements];
+    setTensorValuesForConversion(labelSymInt32Data, &labelSymInt32Q, &label, &labelSymInt32);
+    convertTensor(&label, &labelSymInt32);
 
 
     tensor_t result;
@@ -113,26 +113,26 @@ void testMSELossBackwardAsym() {
     float resultData[numberOfElements];
     setTensorValues(&result, (uint8_t *)resultData, &shape, &resultQ, NULL);
 
-    tensor_t resultAsym;
-    asymQConfig_t resultAsymQC;
-    initAsymQConfig(8, HTE, &resultAsymQC);
-    quantization_t resultAsymQ;
-    initAsymQuantization(&resultAsymQC, &resultAsymQ);
-    uint8_t resultAsymData[numberOfElements];
-    setTensorValuesForConversion(resultAsymData, &resultAsymQ, &result, &resultAsym);
-    convertTensor(&result, &resultAsym);
+    tensor_t resultSymInt32;
+    symInt32QConfig_t resultSymInt32QC;
+    initSymInt32QConfig(HTE, &resultSymInt32QC);
+    quantization_t resultSymInt32Q;
+    initSymInt32Quantization(&resultSymInt32QC, &resultSymInt32Q);
+    uint8_t resultSymInt32Data[numberOfElements];
+    setTensorValuesForConversion(resultSymInt32Data, &resultSymInt32Q, &result, &resultSymInt32);
+    convertTensor(&result, &resultSymInt32);
 
 
-    mseLossBackward(&modelOutputAsym, &labelAsym, &resultAsym);
+    mseLossBackward(&modelOutputSymInt32, &labelSymInt32, &resultSymInt32);
 
-    convertTensor(&resultAsym, &result);
+    convertTensor(&resultSymInt32, &result);
 
-    float expected[] = {4.f, 4.f, -4.f};
+    float expected[] = {4.f, 4.f, -3.f};
 
     float *actual = (float *)result.data;
 
     for(size_t i = 0; i < numberOfElements; i++) {
-        TEST_ASSERT_FLOAT_WITHIN(1.f, expected[i], actual[i]);
+        TEST_ASSERT_FLOAT_WITHIN(0.1f, expected[i], actual[i]);
     }
 }
 
@@ -145,7 +145,7 @@ int main(void) {
     RUN_TEST(testMSEForward);
 
     RUN_TEST(testMSELossBackwardFloat);
-    RUN_TEST(testMSELossBackwardAsym);
+    RUN_TEST(testMSELossBackwardSymInt32);
 
-    UNITY_END();
+    return UNITY_END();
 }

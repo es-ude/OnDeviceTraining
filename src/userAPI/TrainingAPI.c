@@ -8,6 +8,8 @@
 #include "TensorAPI.h"
 #include "StorageAPI.h"
 #include "TrainingAPI.h"
+#include "Linear.h"
+#include "Relu.h"
 
 void deInitGradTensor(tensor_t *tensor) {
     freeData(tensor);
@@ -24,9 +26,23 @@ static void deInitLayerOutputs(tensor_t **layerOutputs, size_t sizeNetwork) {
 static void initLayerOutputs(tensor_t **layerOutputs, layer_t **model, size_t sizeNetwork) {
     for (size_t i = 0; i < sizeNetwork; i++) {
         layer_t *currentLayer = model[i];
-        quantization_t *currentQ = currentLayer->outputQ;
-        layerType_t currentLayerType = currentLayer->type;
-        calcOutputShapeFn_t calcOutputShape = layerFunctions[currentLayerType].calcOutputShape;
+        quantization_t *currentQ = NULL;
+
+        switch (currentLayer->type) {
+        case LINEAR:
+            linearConfig_t *linearConfig = currentLayer->config->linear;
+            currentQ = linearConfig->propLossQ;
+            break;
+        case RELU:
+            reluConfig_t *reluConfig = currentLayer->config->relu;
+            currentQ = reluConfig->backwardQ;
+            break;
+        default:
+            break;
+        }
+
+
+        calcOutputShapeFn_t calcOutputShape = layerFunctions[currentLayer->type].calcOutputShape;
         size_t numberOfDims = layerOutputs[i]->shape->numberOfDimensions;
 
         size_t *dims = *reserveMemory(numberOfDims * sizeof(size_t));
@@ -40,7 +56,7 @@ static void initLayerOutputs(tensor_t **layerOutputs, layer_t **model, size_t si
         calcOutputShape(currentLayer, layerOutputs[i]->shape, outShape);
 
         size_t numberOfValues = calcNumberOfElementsByShape(outShape);
-        size_t sizeData = calcBytesOutputData(currentLayer->outputQ, numberOfValues);
+        size_t sizeData = calcNumberOfBytesForData(currentQ, numberOfValues);
         uint8_t *data = *reserveMemory(sizeData);
 
         quantization_t *q = *reserveMemory(sizeof(quantization_t));
@@ -49,14 +65,12 @@ static void initLayerOutputs(tensor_t **layerOutputs, layer_t **model, size_t si
             q->type = FLOAT32;
             q->qConfig = NULL;
             break;
-        case ASYM:
-            q->type = ASYM;
-            asymQConfig_t *currentQC = currentQ->qConfig;
-            asymQConfig_t *qC = *reserveMemory(sizeof(asymQConfig_t));
+        case SYM_INT32:
+            q->type = SYM_INT32;
+            symInt32QConfig_t *currentQC = currentQ->qConfig;
+            symInt32QConfig_t *qC = *reserveMemory(sizeof(symInt32QConfig_t));
             qC->scale = currentQC->scale;
-            qC->qBits = currentQC->qBits;
             qC->roundingMode = currentQC->roundingMode;
-            qC->zeroPoint = currentQC->zeroPoint;
             q->qConfig = qC;
             break;
         default:
@@ -98,7 +112,7 @@ static void initGradTensor(tensor_t *grad, tensor_t *layerOutput, layer_t *layer
     setOrderOfDimsForNewTensor(inShape->numberOfDimensions, inShape->orderOfDimensions);
 
     size_t numberOfValues = calcNumberOfElementsByShape(currentShape);
-    size_t sizeData = calcBytesOutputData(currentQ, numberOfValues);
+    size_t sizeData = calcNumberOfBytesForData(currentQ, numberOfValues);
     uint8_t *data = *reserveMemory(sizeData);
 
     quantization_t *q = *reserveMemory(sizeof(quantization_t));
@@ -107,14 +121,12 @@ static void initGradTensor(tensor_t *grad, tensor_t *layerOutput, layer_t *layer
         q->type = FLOAT32;
         q->qConfig = NULL;
         break;
-    case ASYM:
-        q->type = ASYM;
-        asymQConfig_t *currentQC = currentQ->qConfig;
-        asymQConfig_t *qC = *reserveMemory(sizeof(asymQConfig_t));
+    case SYM_INT32:
+        q->type = SYM_INT32;
+        symInt32QConfig_t *currentQC = currentQ->qConfig;
+        symInt32QConfig_t *qC = *reserveMemory(sizeof(symInt32QConfig_t));
         qC->scale = currentQC->scale;
-        qC->qBits = currentQC->qBits;
         qC->roundingMode = currentQC->roundingMode;
-        qC->zeroPoint = currentQC->zeroPoint;
         q->qConfig = qC;
         break;
     default:
@@ -216,10 +228,9 @@ trainingStats_t *calculateGrads(layer_t **model, size_t sizeNetwork,
 
     deInitLayerOutputs(layerOutputs, sizeNetwork);
 
-    if(!toggle) {
+    if (!toggle) {
         deInitGradTensor(&ping);
-    }
-    else {
+    } else {
         deInitGradTensor(&pong);
     }
 
@@ -232,8 +243,8 @@ trainingStats_t *calculateGrads(layer_t **model, size_t sizeNetwork,
  * already takes the Softmax Backward into account.
  */
 trainingStats_t *trainingEpoch(layer_t **model, size_t sizeNetwork,
-                                lossType_t lossFunctionType, tensor_t *input,
-                                tensor_t *label, optimizer_t *optimizer) {
+                               lossType_t lossFunctionType, tensor_t *input,
+                               tensor_t *label, optimizer_t *optimizer) {
 
     tensor_t *layerOutputs[sizeNetwork + 1];
     layerOutputs[0] = input;
@@ -288,10 +299,9 @@ trainingStats_t *trainingEpoch(layer_t **model, size_t sizeNetwork,
 
     deInitLayerOutputs(layerOutputs, sizeNetwork);
 
-    if(!toggle) {
+    if (!toggle) {
         deInitGradTensor(&ping);
-    }
-    else {
+    } else {
         deInitGradTensor(&pong);
     }
 

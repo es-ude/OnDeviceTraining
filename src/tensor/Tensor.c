@@ -66,6 +66,20 @@ size_t calcBytesPerTensor(tensor_t *tensor) {
     return bitsPerTensor / 8;
 }
 
+size_t calcNumberOfBytesForData(quantization_t *q, size_t numberOfElements) {
+    switch (q->type) {
+    case FLOAT32:
+        return numberOfElements * sizeof(float);
+    case SYM_INT32:
+        return numberOfElements * sizeof(int32_t);
+    case ASYM:
+        size_t bitsPerElement = calcBitsPerElement(q);
+        return ceilf((float)(bitsPerElement * numberOfElements / 8));
+    default:
+        return 0;
+    }
+}
+
 void setOrderOfDimsForNewTensor(size_t numberOfDimensions, size_t *orderOfDimensions) {
     for (size_t i = 0; i < numberOfDimensions; i++) {
         orderOfDimensions[i] = i;
@@ -319,10 +333,10 @@ void initOrderOfDimensions(size_t *orderOfDims, size_t numberOfDims) {
 }
 
 void copyData(tensor_t *dest, tensor_t *src) {
-    size_t numberOfValues = calcNumberOfElementsByShape(src->shape);
-    size_t bytesPerElement = calcBytesPerElement(src->quantization);
+    size_t numberOfValues = calcNumberOfElementsByShape(dest->shape);
+    size_t sizeData = calcNumberOfBytesForData(src->quantization, numberOfValues);
 
-    memcpy(dest->data, src->data, numberOfValues * bytesPerElement);
+    memcpy(dest->data, src->data, sizeData);
 
     if (src->sparsity != NULL) {
         memcpy(dest->sparsity, src->sparsity, sizeof(sparsity_t));
@@ -342,11 +356,11 @@ void copyQuantization(quantization_t *dest, quantization_t *src) {
         dest->type = FLOAT32;
         dest->qConfig = NULL;
         break;
-    case ASYM:
-        dest->type = ASYM;
-        asymQConfig_t *destQC = dest->qConfig;
-        asymQConfig_t *srcQC = src->qConfig;
-        memcpy(destQC, srcQC, sizeof(asymQConfig_t));
+    case SYM_INT32:
+        dest->type = SYM_INT32;
+        symInt32QConfig_t *destQC = dest->qConfig;
+        symInt32QConfig_t *srcQC = src->qConfig;
+        memcpy(destQC, srcQC, sizeof(symInt32QConfig_t));
     default:
         break;
     }

@@ -22,7 +22,7 @@ float mseLossForwardFloat(tensor_t *output, tensor_t *label) {
     return sum / (float)size;
 }
 
-float mseLossForwardAsym(tensor_t *output, tensor_t *label) {
+float mseLossForwardSymInt32(tensor_t *output, tensor_t *label) {
     size_t size = calcNumberOfElementsByTensor(output);
 
     tensor_t outputFloat;
@@ -58,11 +58,8 @@ float mseLossForward(tensor_t *output, tensor_t *label) {
     switch (output->quantization->type) {
     case FLOAT32:
         return mseLossForwardFloat(output, label);
-    case ASYM:
-        return mseLossForwardAsym(output, label);
-    default:
-        // TODO this is shit
-        return 0.f;
+    case SYM_INT32:
+        return mseLossForwardSymInt32(output, label);
     }
 }
 
@@ -80,7 +77,7 @@ void mseLossBackwardFloat(tensor_t *modelOutput, tensor_t *label, tensor_t *resu
     }
 }
 
-void mseLossBackwardAsym(tensor_t *modelOutput, tensor_t *label, tensor_t *result) {
+void mseLossBackwardSymInt32(tensor_t *modelOutput, tensor_t *label, tensor_t *result) {
     size_t numberOfElements = calcNumberOfElementsByTensor(modelOutput);
 
     tensor_t modelOutputFloat;
@@ -125,8 +122,8 @@ void mseLossBackward(tensor_t *modelOutput, tensor_t *label, tensor_t *result) {
     case FLOAT32:
         mseLossBackwardFloat(modelOutput, label, result);
         break;
-    case ASYM:
-        mseLossBackwardAsym(modelOutput, label, result);
+    case SYM_INT32:
+        mseLossBackwardSymInt32(modelOutput, label, result);
         break;
     default:
         printf("Error in MSE Backward: qtype not supported\n");

@@ -15,5 +15,6 @@ void tearDown(){}
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLogFloat);
-    UNITY_END();
+
+    return UNITY_END();
 }

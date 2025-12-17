@@ -52,6 +52,15 @@ target_link_libraries(SgdAPI PRIVATE
         Optimizer
 )
 
+add_library(SoftmaxAPI SoftmaxAPI.c)
+target_include_directories(SoftmaxAPI PUBLIC include)
+target_link_libraries(SoftmaxAPI PRIVATE
+        Layer
+        Tensor
+        Rounding
+        StorageAPI
+)
+
 add_library(StorageAPI StorageAPI.c)
 target_include_directories(StorageAPI PUBLIC include)
 target_link_libraries(StorageAPI PRIVATE

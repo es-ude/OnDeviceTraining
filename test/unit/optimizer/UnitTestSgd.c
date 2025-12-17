@@ -11,6 +11,8 @@
 #include "TensorAPI.h"
 #include "OptimizerAPI.h"
 
+#include <ReluAPI.h>
+
 void setUp() {}
 void tearDown() {}
 
@@ -32,16 +34,15 @@ void testSgdMCreateOptim() {
     tensor_t *biasGrad = tensorInitFloat(biasGradData, biasDims, biasNumberOfDims, NULL);
     parameter_t *bias = parameterInit(biasParam, biasGrad);
 
-    quantization_t outputQ;
-    initFloat32Quantization(&outputQ);
-    layer_t *linear0 = linearLayerInit(weights, bias, FLOAT32, FLOAT32, &outputQ);
+    quantization_t testQ;
+    initFloat32Quantization(&testQ);
+    layer_t *linear0 = linearLayerInit(weights, bias, &testQ, &testQ, &testQ, &testQ);
 
-    layer_t relu0;
-    initLayer(&relu0, RELU, NULL, FLOAT_LAYER, FLOAT32, NULL);
+    layer_t *relu0 = reluLayerInit(&testQ, &testQ);
 
-    layer_t *linear1 = linearLayerInit(weights, bias, FLOAT32, FLOAT32, &outputQ);
+    layer_t *linear1 = linearLayerInit(weights, bias, &testQ, &testQ, &testQ, &testQ);
 
-    layer_t *model[] = {linear0, &relu0, linear1};
+    layer_t *model[] = {linear0, relu0, linear1};
     size_t sizeModel = sizeof(model) / sizeof(model[0]);
     float lr = 0.1f;
     float momentumFactor = 0.9f;
@@ -98,9 +99,9 @@ void testSGDStep() {
     biasGrad->data = (uint8_t *) biasGradData;
     parameter_t *bias = parameterInit(biasParam, biasGrad);
 
-    quantization_t outputQ;
-    initFloat32Quantization(&outputQ);
-    layer_t *linear = linearLayerInit(weights, bias, FLOAT_LAYER, FLOAT32, &outputQ);
+    quantization_t testQ;
+    initFloat32Quantization(&testQ);
+    layer_t *linear = linearLayerInit(weights, bias, &testQ, &testQ, &testQ, &testQ);
 
     layer_t *model[] = {linear};
     size_t modelSize = 1;
@@ -152,9 +153,9 @@ void testSGDZeroGrad() {
     biasGrad->data = (uint8_t *)biasGradData;
     parameter_t *bias = parameterInit(biasParam, biasGrad);
 
-    quantization_t outputQ;
-    initFloat32Quantization(&outputQ);
-    layer_t *linear = linearLayerInit(weights, bias, FLOAT_LAYER, FLOAT32, &outputQ);
+    quantization_t testQ;
+    initFloat32Quantization(&testQ);
+    layer_t *linear = linearLayerInit(weights, bias, &testQ, &testQ, &testQ, &testQ);
 
     layer_t *model[] = {linear};
     size_t modelSize = 1;
@@ -180,5 +181,5 @@ int main() {
     RUN_TEST(testSgdMCreateOptim);
     RUN_TEST(testSGDStep);
     RUN_TEST(testSGDZeroGrad);
-    UNITY_END();
+    return UNITY_END();
 }

@@ -3,8 +3,10 @@
 
 #include "Layer.h"
 
-layer_t* linearLayerInit(parameter_t* weights, parameter_t* bias, layerQType_t layerQType, qtype_t inputQType,
-                         quantization_t* outputQ);
+layer_t* linearLayerInit(parameter_t* weights, parameter_t* bias, quantization_t* forwardQ,
+                         quantization_t* weightGradsQ, quantization_t* biasGradsQ, quantization_t* propLossQ);
+
+layer_t* linearLayerInitNonTrainable(tensor_t* weights, tensor_t* bias, quantization_t* forwardQ);
 
 void freeLinearLayer(layer_t* linearLayer);
 

@@ -317,5 +317,5 @@ int main(void) {
     RUN_TEST(testAddInt32TensorWithSymInt32TensorInplace);
     RUN_TEST(testAddFloat32TensorToSymInt32TensorInplace);
 
-    UNITY_END();
+    return UNITY_END();
 }

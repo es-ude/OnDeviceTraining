@@ -316,5 +316,6 @@ int main(void) {
     RUN_TEST(testMatmulInt32WithVector);
     RUN_TEST(testMatmulFloatVectors);
     RUN_TEST(testMatmulSymInt32Tensors);
-    UNITY_END();
+
+    return UNITY_END();
 }

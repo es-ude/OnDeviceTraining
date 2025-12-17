@@ -4,6 +4,9 @@
 #include "DTypes.h"
 #include "Tensor.h"
 #include "TensorConversion.h"
+#include "ReluAPI.h"
+#include "TensorAPI.h"
+#include "QuantizationAPI.h"
 
 void testReluForwardFloat() {
     size_t numberOfElements = 6;
@@ -37,10 +40,11 @@ void testReluForwardFloat() {
     initFloat32Quantization(&outputQ);
     setTensorValues(&output, (uint8_t *)outputData, &outputShape, &outputQ, NULL);
 
-    layer_t reluLayer;
-    initLayer(&reluLayer, RELU, NULL, FLOAT_LAYER, inputQ.type, &outputQ);
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    layer_t *reluLayer = reluLayerInit(&floatQ, &floatQ);
 
-    reluForward(&reluLayer, &input, &output);
+    reluForward(reluLayer, &input, &output);
 
     float expected[] = {0.f, 0.f, 1.f, 2.f, 5.f, 0.f};
 
@@ -50,68 +54,26 @@ void testReluForwardFloat() {
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, actual, numberOfElements);
 }
 
-void testReluForwardAsym() {
-    size_t numberOfElements = 6;
-
-    tensor_t inputFloat;
-    float inputFloatData[] = {-1.f, 0.f, 1.f, 2.f, 5.f, -6.f};
+void testReluForwardSymInt32() {
+    float inputData[] = {-1.f, 0.f, 1.f, 2.f, 5.f, -6.f};
     size_t inputDims[] = {2, 3};
     size_t inputNumberOfDims = 2;
-    size_t inputOrderOfDims[] = {0, 1};
-    shape_t inputShape = {
-        .dimensions = inputDims,
-        .orderOfDimensions = inputOrderOfDims,
-        .numberOfDimensions = inputNumberOfDims
-    };
-    quantization_t inputFloatQ;
-    initFloat32Quantization(&inputFloatQ);
-    setTensorValues(&inputFloat, (uint8_t *)inputFloatData, &inputShape, &inputFloatQ, NULL);
+    tensor_t *input = tensorInitSymInt32(inputData, inputDims, inputNumberOfDims, HTE, NULL);
 
-    tensor_t inputAsym;
-    uint8_t inputAsymData[numberOfElements];
-    asymQConfig_t inputAsymQConfig;
-    initAsymQConfig(8, HTE, &inputAsymQConfig);
-    quantization_t inputAsymQ;
-    initAsymQuantization(&inputAsymQConfig, &inputAsymQ);
-    setTensorValues(&inputAsym, inputAsymData, &inputShape, &inputAsymQ, NULL);
-    convertTensor(&inputFloat, &inputAsym);
-
-    tensor_t outputFloat;
-    float outputFloatData[] = {-1.f, 0.f, 1.f, 2.f, 5.f, -6.f};
+    float outputData[6];
     size_t outputDims[] = {2, 3};
     size_t outputNumberOfDims = 2;
-    size_t outputOrderOfDims[] = {0, 1};
-    shape_t outputShape = {
-        .dimensions = outputDims,
-        .orderOfDimensions = outputOrderOfDims,
-        .numberOfDimensions = outputNumberOfDims
-    };
-    quantization_t outputFloatQ;
-    initFloat32Quantization(&outputFloatQ);
-    setTensorValues(&outputFloat, (uint8_t *)outputFloatData, &outputShape, &outputFloatQ, NULL);
+    tensor_t *output = tensorInitSymInt32(outputData, outputDims, outputNumberOfDims, HTE, NULL);
 
-    tensor_t outputAsym;
-    uint8_t outputAsymData[numberOfElements];
-    asymQConfig_t outputAsymQConfig;
-    initAsymQConfig(8, HTE, &outputAsymQConfig);
-    quantization_t outputAsymQ;
-    initAsymQuantization(&outputAsymQConfig, &outputAsymQ);
-    setTensorValues(&outputAsym, outputAsymData, &outputShape, &outputAsymQ, NULL);
-    convertTensor(&outputFloat, &outputAsym);
+    quantization_t *symIntQ = quantizationInitSymInt32(HTE);
+    layer_t *reluLayer = reluLayerInit(symIntQ, symIntQ);
+    layerFunctions_t reluFns = layerFunctions[RELU];
+    reluFns.forward(reluLayer, input, output);
 
-    layer_t reluLayer;
-    initLayer(&reluLayer, RELU, NULL, ASYM_LAYER, inputAsymQ.type, &outputAsymQ);
-    reluForward(&reluLayer, &inputAsym, &outputAsym);
+    int32_t expected[] = {0, 0, 1, 2, 5, 0};
+    int32_t *actual = (int32_t *)output->data;
 
-    convertTensor(&outputAsym, &outputFloat);
-    float actual[numberOfElements];
-    readBytesAsFloatArray(numberOfElements, outputFloat.data, actual);
-
-    float expected[] = {0.f, 0.f, 1.f, 2.f, 5.f, 0.f};
-
-    for (size_t i = 0; i < numberOfElements; i++) {
-        TEST_ASSERT_FLOAT_WITHIN(0.1f, expected[i], actual[i]);
-    }
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, actual, 6);
 }
 
 void testReluBackwardFloat() {
@@ -119,116 +81,52 @@ void testReluBackwardFloat() {
 
     size_t dims[] = {numberOfElements};
     size_t numberOfDims = 1;
-    size_t orderOfDims[] = {0};
-    shape_t shape = {
-        .dimensions = dims,
-        .orderOfDimensions = orderOfDims,
-        .numberOfDimensions = numberOfDims
-    };
 
-    tensor_t forwardInput;
     float forwardInputData[] = {-1.f, 0.f, 1.f, 2.f, 5.f, -6.f};
-    quantization_t forwardInputQ;
-    initFloat32Quantization(&forwardInputQ);
-    setTensorValues(&forwardInput, (uint8_t *)forwardInputData, &shape, &forwardInputQ, NULL);
+    tensor_t *forwardInput = tensorInitFloat(forwardInputData, dims, numberOfDims, NULL);
 
-    tensor_t loss;
     float lossData[] = {0.f, 2.f, -4.f, 6.f, 3.f, 2.f};
-    quantization_t lossQ;
-    initFloat32Quantization(&lossQ);
-    setTensorValues(&loss, (uint8_t *)lossData, &shape, &lossQ, NULL);
+    tensor_t *loss = tensorInitFloat(lossData, dims, numberOfDims, NULL);
 
-    tensor_t propLoss;
     float propLossData[numberOfElements];
-    quantization_t propLossQ;
-    initFloat32Quantization(&propLossQ);
-    setTensorValues(&propLoss, (uint8_t *)propLossData, &shape, &propLossQ, NULL);
+    tensor_t *propLoss = tensorInitFloat(propLossData, dims, numberOfDims, NULL);
 
-    layer_t reluLayer;
-    initLayer(&reluLayer, RELU, NULL, FLOAT_LAYER, forwardInputQ.type, &propLossQ);
-
-    reluBackward(&reluLayer, &forwardInput, &loss, &propLoss);
+    quantization_t *floatQ = quantizationInitFloat();
+    layer_t *reluLayer = reluLayerInit(floatQ, floatQ);
+    layerFunctions_t reluFns = layerFunctions[RELU];
+    reluFns.backward(reluLayer, forwardInput, loss, propLoss);
 
     float expected[] = {0.f, 0.f, -4.f, 6.f, 3.f, 0.f};
 
-    float actual[numberOfElements];
-    readBytesAsFloatArray(numberOfElements, propLoss.data, actual);
+    float *actual = (float *)propLoss->data;
 
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, actual, numberOfElements);
 }
 
-void testReluBackwardAsym() {
+void testReluBackwardSymInt32() {
     size_t numberOfElements = 6;
 
-    size_t dims[] = {numberOfElements};
+    size_t dims[] = {6};
     size_t numberOfDims = 1;
-    size_t orderOfDims[] = {0};
-    shape_t shape = {
-        .dimensions = dims,
-        .orderOfDimensions = orderOfDims,
-        .numberOfDimensions = numberOfDims
-    };
 
-    tensor_t forwardInputFloat;
-    float forwardInputData[] = {-1, 0, 1, 2, 5, -6};
-    quantization_t forwardInputQ;
-    initFloat32Quantization(&forwardInputQ);
-    setTensorValues(&forwardInputFloat, (uint8_t *)forwardInputData, &shape, &forwardInputQ, NULL);
+    float forwardInputData[] = {-1.f, 0.f, 1.f, 2.f, 5.f, -6.f};
+    tensor_t *forwardInput = tensorInitSymInt32(forwardInputData, dims, numberOfDims, HTE, NULL);
 
-    tensor_t lossFloat;
-    float lossFloatData[] = {0, 2, -4, 6, 3, 2};
-    quantization_t lossFloatQ;
-    initFloat32Quantization(&lossFloatQ);
-    setTensorValues(&lossFloat, (uint8_t *)lossFloatData, &shape, &lossFloatQ, NULL);
+    float lossData[] = {0.f, 2.f, -4.f, 6.f, 3.f, 2.f};
+    tensor_t *loss = tensorInitSymInt32(lossData, dims, numberOfDims, HTE, NULL);
 
-    tensor_t propLossFloat;
     float propLossData[numberOfElements];
-    quantization_t propLossQ;
-    initFloat32Quantization(&propLossQ);
-    setTensorValues(&propLossFloat, (uint8_t *)propLossData, &shape, &propLossQ, NULL);
+    tensor_t *propLoss = tensorInitSymInt32(propLossData, dims, numberOfDims, HTE, NULL);
 
-    tensor_t forwardInputAsym;
-    asymQConfig_t forwardInputAsymQConfig;
-    initAsymQConfig(8, HTE, &forwardInputAsymQConfig);
-    quantization_t forwardInputAsymQ;
-    initAsymQuantization(&forwardInputAsymQConfig, &forwardInputAsymQ);
-    uint8_t forwardInputDataAsym[numberOfElements * calcBytesPerElement(&forwardInputAsymQ)];
-    setTensorValuesForConversion(forwardInputDataAsym, &forwardInputAsymQ, &forwardInputFloat, &forwardInputAsym);
-    convertTensor(&forwardInputFloat, &forwardInputAsym);
+    quantization_t *symIntQ = quantizationInitSymInt32(HTE);
+    layer_t *reluLayer = reluLayerInit(symIntQ, symIntQ);
+    layerFunctions_t reluFns = layerFunctions[RELU];
+    reluFns.backward(reluLayer, forwardInput, loss, propLoss);
 
-    tensor_t lossAsym;
-    asymQConfig_t lossAsymQC;
-    initAsymQConfig(8, HTE, &lossAsymQC);
-    quantization_t lossAsymQ;
-    initAsymQuantization(&lossAsymQC, &lossAsymQ);
-    uint8_t lossAsymData[numberOfElements * calcBytesPerElement(&lossAsymQ)];
-    setTensorValuesForConversion(lossAsymData, &lossAsymQ, &lossFloat, &lossAsym);
-    convertTensor(&lossFloat, &lossAsym);
+    int32_t expected[] = {0, 0, -4, 6, 3, 0};
+    int32_t *actual = (int32_t *)propLoss->data;
 
-    tensor_t propLossAsym;
-    asymQConfig_t propLossAsymQConfig;
-    initAsymQConfig(8, HTE, &propLossAsymQConfig);
-    quantization_t propLossAsymQ;
-    initAsymQuantization(&propLossAsymQConfig, &propLossAsymQ);
-    uint8_t propLossDataAsym[numberOfElements*calcBytesPerElement(&propLossAsymQ)];
-    setTensorValuesForConversion(propLossDataAsym, &propLossAsymQ, &propLossFloat, &propLossAsym);
-    convertTensor(&propLossFloat, &propLossAsym);
-
-    layer_t reluLayer;
-    initLayer(&reluLayer, RELU, NULL, ASYM_LAYER, forwardInputQ.type, &propLossAsymQ);
-
-    reluBackward(&reluLayer, &forwardInputAsym, &lossAsym, &propLossAsym);
-
-    convertTensor(&propLossAsym, &propLossFloat);
-
-    float actual[numberOfElements];
-    readBytesAsFloatArray(numberOfElements, propLossFloat.data, actual);
-
-    float expected[] = {0.f, 0.f, -4.f, 6.f, 3.f, 0.f};
-
-    for(size_t i = 0; i < numberOfElements; i++) {
-        TEST_ASSERT_FLOAT_WITHIN(0.1f, expected[i], actual[i]);
-    }
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, actual, numberOfElements);
 }
 
 
@@ -238,9 +136,9 @@ void tearDown() {}
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testReluForwardFloat);
-    RUN_TEST(testReluForwardAsym);
+    RUN_TEST(testReluForwardSymInt32);
 
     RUN_TEST(testReluBackwardFloat);
-    RUN_TEST(testReluBackwardAsym);
-    UNITY_END();
+    RUN_TEST(testReluBackwardSymInt32);
+    return UNITY_END();
 }

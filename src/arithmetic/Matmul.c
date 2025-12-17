@@ -98,7 +98,8 @@ void matmulIntTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTens
     }
 }
 
-void matmulIntTensorsWithInstructionCounter(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor) {
+void matmulIntTensorsWithInstructionCounter(tensor_t *aTensor, tensor_t *bTensor,
+                                            tensor_t *outputTensor) {
     if (aTensor->shape->numberOfDimensions > 2 || bTensor->shape->numberOfDimensions > 2) {
         printf("Error: Matmul only supports up to 2D Tensors\n");
         return;
@@ -264,7 +265,8 @@ void matmulFloatTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTe
     }
 }
 
-void matmulFloatTensorsWithInstructionCounter(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor) {
+void matmulFloatTensorsWithInstructionCounter(tensor_t *aTensor, tensor_t *bTensor,
+                                              tensor_t *outputTensor) {
     if (aTensor->shape->numberOfDimensions > 2 || bTensor->shape->numberOfDimensions > 2) {
         printf("Error: Matmul only supports up to 2D Tensors\n");
         return;
@@ -351,7 +353,7 @@ void matmulFloat32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *output
     MATMUL_FUNC_FLOAT(aTensor, bTensor, outputTensor);
 }
 
-void matmulSymIntTensors(tensor_t* aTensor, tensor_t* bTensor, tensor_t* outputTensor) {
+void matmulSymIntTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor) {
     matmulInt32Tensors(aTensor, bTensor, outputTensor);
 
     symInt32QConfig_t *aSymInt32QC = aTensor->quantization->qConfig;
@@ -360,7 +362,8 @@ void matmulSymIntTensors(tensor_t* aTensor, tensor_t* bTensor, tensor_t* outputT
     outputSymInt32QC->scale = aSymInt32QC->scale * bSymInt32QC->scale;
 }
 
-void matmulSymIntTensorsWithInstructionCounter(tensor_t* aTensor, tensor_t* bTensor, tensor_t* outputTensor) {
+void matmulSymIntTensorsWithInstructionCounter(tensor_t *aTensor, tensor_t *bTensor,
+                                               tensor_t *outputTensor) {
     matmulInt32Tensors(aTensor, bTensor, outputTensor);
 
     symInt32QConfig_t *aSymInt32QC = aTensor->quantization->qConfig;
@@ -371,7 +374,7 @@ void matmulSymIntTensorsWithInstructionCounter(tensor_t* aTensor, tensor_t* bTen
     ++matmulInstructionCounter;
 }
 
-void matmulSymInt32Tensors(tensor_t* aTensor, tensor_t* bTensor, tensor_t* outputTensor) {
+void matmulSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor) {
     MATMUL_FUNC_SYM_INT32(aTensor, bTensor, outputTensor);
 }
 

@@ -178,5 +178,6 @@ int main(void) {
     RUN_TEST(testCalcIndexByRawIndex);
     RUN_TEST(testInt32PointWiseArithmetic);
     RUN_TEST(testFloat32ElementWithTensorArithmetic);
-    UNITY_END();
+
+    return UNITY_END();
 }

@@ -64,21 +64,32 @@ tensor_t *tensorInitFloat(float *data, size_t *dims, size_t numberOfDims, sparsi
 
 static tensor_t *initTensorWithQSymInt32(float *data, size_t *dims, size_t numberOfDims,
                                          quantization_t *quantization, sparsity_t *sparsity) {
-    tensor_t *floatTensor = tensorInitFloat(data, dims, numberOfDims, sparsity);
-
-    tensor_t *symInt32Tensor = *reserveMemory(sizeof(tensor_t));
 
     shape_t *shape = *reserveMemory(sizeof(shape_t));
     size_t *order = *reserveMemory(numberOfDims * sizeof(size_t));
     setOrderOfDimsForNewTensor(numberOfDims, order);
     setShape(shape, dims, numberOfDims, order);
 
+    tensor_t floatTensor;
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+
+    floatTensor.data = (uint8_t *)data;
+    floatTensor.shape = shape;
+    floatTensor.quantization = &floatQ;
+    floatTensor.sparsity = sparsity;
+
+    tensor_t *symInt32Tensor = *reserveMemory(sizeof(tensor_t));
+
+
+    size_t numberOfValues = calcNumberOfElementsByTensor(&floatTensor);
+    int32_t *symInt32Data = *reserveMemory(numberOfValues * sizeof(int32_t));
+
+    symInt32Tensor->data = (uint8_t *)symInt32Data;
     symInt32Tensor->shape = shape;
     symInt32Tensor->quantization = quantization;
-    convertTensor(floatTensor, symInt32Tensor);
+    convertTensor(&floatTensor, symInt32Tensor);
     symInt32Tensor->sparsity = sparsity;
-
-    freeTensor(floatTensor);
 
     return symInt32Tensor;
 }
@@ -353,7 +364,7 @@ void freeShape(shape_t *shape) {
 
 void freeQuantization(quantization_t *quantization) {
     freeReservedMemory(quantization->qConfig);
-    freeReservedMemory((uint8_t *)quantization);
+    freeReservedMemory(quantization);
 }
 
 static void freeTensorPointer(tensor_t *tensor) {
@@ -361,8 +372,8 @@ static void freeTensorPointer(tensor_t *tensor) {
 }
 
 void freeTensor(tensor_t *tensor) {
-    freeData(tensor);
-    freeShape(tensor->shape);
+    //freeData(tensor);
+    //freeShape(tensor->shape);
     freeQuantization(tensor->quantization);
     freeSparsity(tensor->sparsity);
     freeTensorPointer(tensor);

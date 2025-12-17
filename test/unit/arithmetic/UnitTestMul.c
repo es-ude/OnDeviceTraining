@@ -97,5 +97,6 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMulFloatTensors);
     RUN_TEST(testMulFloatElementWithTensor);
-    UNITY_END();
+
+    return UNITY_END();
 }

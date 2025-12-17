@@ -104,5 +104,5 @@ int main(void) {
     RUN_TEST(testGteInt32Value);
     RUN_TEST(testGteFloatTensors);
 
-    UNITY_END();
+    return UNITY_END();
 }

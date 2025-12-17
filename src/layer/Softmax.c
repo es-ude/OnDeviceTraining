@@ -3,12 +3,20 @@
 #include "Softmax.h"
 #include "TensorConversion.h"
 
+#include <stdio.h>
+#include <string.h>
+
 #define EULER_APPROX = 2.71828
 
-void initSoftmaxLayer(layer_t *softmaxLayer) {
-    softmaxLayer->type = SOFTMAX;
+void softmaxInitConfig(softmaxConfig_t *softmaxConfig, quantization_t *forwardQ, quantization_t *backwardQ) {
+    softmaxConfig->forwardQ = forwardQ;
+    softmaxConfig->backwardQ = backwardQ;
 }
 
+void softmaxInitLayer(layerConfig_t *softmaxConfig, layer_t *softmaxLayer) {
+    softmaxLayer->type = SOFTMAX;
+    softmaxLayer->config = softmaxConfig;
+}
 
 static void softmaxForwardFloat(tensor_t *input, tensor_t *output) {
     size_t inputSize = calcNumberOfElementsByTensor(input);
@@ -26,7 +34,7 @@ static void softmaxForwardFloat(tensor_t *input, tensor_t *output) {
     }
 }
 
-static void softmaxForwardAsym(tensor_t *input, tensor_t *output) {
+static void softmaxForwardSymInt32(tensor_t *input, tensor_t *output) {
     size_t inputSize = calcNumberOfElementsByTensor(input);
 
     tensor_t inputFloat;
@@ -63,8 +71,8 @@ void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output) {
     case FLOAT32:
         softmaxForwardFloat(input, output);
         break;
-    case ASYM:
-        softmaxForwardAsym(input, output);
+    case SYM_INT32:
+        softmaxForwardSymInt32(input, output);
     default:
         break;
     }
@@ -99,7 +107,7 @@ static void softmaxBackwardFloat(tensor_t *input, tensor_t *loss, tensor_t *prop
     }
 }
 
-static void softmaxBackwardAsym(tensor_t *input, tensor_t *loss, tensor_t *propLoss) {
+static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *propLoss) {
     size_t inputSize = calcNumberOfElementsByTensor(input);
 
     tensor_t inputFloat;
@@ -146,7 +154,6 @@ static void softmaxBackwardAsym(tensor_t *input, tensor_t *loss, tensor_t *propL
         }
         propLossFloatArr[i] = sum;
     }
-
     convertTensor(&propLossFloat, propLoss);
 }
 
@@ -155,10 +162,18 @@ void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, ten
     case FLOAT32:
         softmaxBackwardFloat(input, loss, propLoss);
         break;
-    case ASYM:
-        softmaxBackwardAsym(input, loss, propLoss);
+    case SYM_INT32:
+        softmaxBackwardSymInt32(input, loss, propLoss);
         break;
     default:
         break;
     }
+}
+
+void softmaxCalcOutputShape(layer_t *softmaxLayer, shape_t *inputShape, shape_t *outputShape) {
+    memcpy(outputShape->dimensions, inputShape->dimensions,
+           inputShape->numberOfDimensions * sizeof(size_t));
+    memcpy(outputShape->orderOfDimensions, inputShape->orderOfDimensions,
+           inputShape->numberOfDimensions * sizeof(size_t));
+    outputShape->numberOfDimensions = inputShape->numberOfDimensions;
 }

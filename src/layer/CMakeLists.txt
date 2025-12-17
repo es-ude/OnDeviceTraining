@@ -1,6 +1,4 @@
-add_library(Conv1d
-        Conv1d.c
-)
+add_library(Conv1d Conv1d.c)
 target_include_directories(Conv1d PUBLIC include)
 target_link_libraries(Conv1d PRIVATE
         DTypes
@@ -8,9 +6,7 @@ target_link_libraries(Conv1d PRIVATE
         Arithmetic
 )
 
-add_library(Conv1dTransposed
-        Conv1dTransposed.c
-)
+add_library(Conv1dTransposed Conv1dTransposed.c)
 target_include_directories(Conv1dTransposed PUBLIC include)
 target_link_libraries(Conv1dTransposed PRIVATE
         DTypes
@@ -18,9 +14,7 @@ target_link_libraries(Conv1dTransposed PRIVATE
         Arithmetic
 )
 
-add_library(Layer
-        Layer.c
-)
+add_library(Layer Layer.c)
 target_include_directories(Layer PUBLIC include)
 target_link_libraries(Layer PRIVATE
         DTypes
@@ -28,11 +22,10 @@ target_link_libraries(Layer PRIVATE
         Arithmetic
         Linear
         Relu
+        Softmax
 )
 
-add_library(Linear
-        Linear.c
-)
+add_library(Linear Linear.c)
 target_include_directories(Linear PUBLIC include)
 target_link_libraries(Linear PRIVATE
         DTypes
@@ -43,9 +36,15 @@ target_link_libraries(Linear PRIVATE
         Layer
 )
 
-add_library(Relu
-        Relu.c
+add_library(QuantizationLayer QuantizationLayer.c)
+target_include_directories(QuantizationLayer PUBLIC include)
+target_link_libraries(QuantizationLayer PRIVATE
+        TensorConversion
+        Tensor
+        Rounding
 )
+
+add_library(Relu Relu.c)
 target_include_directories(Relu PUBLIC include)
 target_link_libraries(Relu PRIVATE
         DTypes
@@ -55,14 +54,13 @@ target_link_libraries(Relu PRIVATE
         Layer
 )
 
-add_library(Softmax
-        Softmax.c
-)
+add_library(Softmax Softmax.c)
 target_include_directories(Softmax PUBLIC include)
 target_link_libraries(Softmax PRIVATE
         DTypes
         Tensor
         Arithmetic
+        Layer
 )
 
 add_library(CommonLayerLibs INTERFACE)

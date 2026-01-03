@@ -1,5 +1,9 @@
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
+        DataStorage
+)
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
         Quantization
         MORE_LIBS
         Tensor

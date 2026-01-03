@@ -9,9 +9,6 @@ target_link_libraries(DTypes PRIVATE
 add_library(DataStorage DataStorage.c)
 
 target_include_directories(DataStorage PUBLIC include)
-target_link_libraries(DataStorage PRIVATE
-        Tensor
-)
 
 add_library(Quantization
         Quantization.c

@@ -94,6 +94,7 @@ target_link_libraries(TrainingAPI PRIVATE
         MSE
         Optimizer
         Common
+        LossFunction
 )
 
 

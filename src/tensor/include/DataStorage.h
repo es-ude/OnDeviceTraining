@@ -60,7 +60,6 @@ dataStorageErrorCode_t initDataStorage(size_t totalSizeForAllocatedMemory, uint8
  */
 void deinitDataStorage(void);
 
-uint8_t *getDataFromStorage(dataStorage_t storage, void *dataPTR);
 /*!
  * @brief Adds slot for writing data to the storage and creates a corresponding entry.
  * Does not write any Data.
@@ -132,6 +131,8 @@ static dataStorageErrorCode_t evaluateStorageForNewData(size_t sizeOfNewData,
  */
 static size_t getIndexOfLastEntry(void);
 
+
+
 /*!
  *@brief Assigns the data pointer and size for a storage entry.
  *
@@ -148,7 +149,7 @@ static dataStorageErrorCode_t setDataPointerAndSizeOfEntry(const size_t sizeOfDa
  *
  * This (internal) function assigns a suiting data pointer and the given data size to the first free
  * storage entry (with the lowest index) and returns a pointer to the data pointer via @p data.
- * @param[in]  data        Pointer to the data pointer to be stored.
+ * @param[out]  data        Pointer to the data pointer to be stored.
  * @param[in]  sizeOfData  Size of the data to be stored (in bytes).
  *
  * @return Error code indicating the result:
@@ -156,5 +157,7 @@ static dataStorageErrorCode_t setDataPointerAndSizeOfEntry(const size_t sizeOfDa
  *         - DATASTORAGE_FRAGMENTATION_ERROR: the storage needs to be fragmented.
  */
 static dataStorageErrorCode_t createEntry(void **data, const size_t sizeOfData);
+
+static void initFirstEntry (size_t sizeForEntriesStorage);
 /* endregion INTERNAL HEADER FUNCTIONS */
 #endif // ENV5_RUNTIME_DATASTORAGE_H

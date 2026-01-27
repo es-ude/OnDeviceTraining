@@ -1,8 +1,12 @@
 #include "DataStorage.h"
 #include "unity.h"
+#include <stdlib.h>
 
-static uint8_t totalSizeForAllocatedMemory = 1000;
+static uint16_t totalSizeForAllocatedMemory = 1000;
 static uint8_t memoryFraction = 4;
+static uint16_t sizeOfNewData = 0;
+void **dataPTR = NULL;
+
 /*! should work if called first (before other init tests) */
 void testInitDataStorageSuccessful() {
     dataStorageErrorCode_t errorCode;
@@ -24,44 +28,59 @@ void testInitDataStorageGetInitError() {
  * }
  */
 void testAddDataToStorageSuccessful() {
-    uint8_t sizeOfNewData = 50;
-    void *dataPTR = NULL;
+    sizeOfNewData = 50;
     dataStorageErrorCode_t errorCode;
-    errorCode = addDataToStorage(sizeOfNewData, &dataPTR);
+    errorCode = addDataToStorage(sizeOfNewData, dataPTR);
     TEST_ASSERT_EQUAL_HEX8(DATASTORAGE_NO_ERROR, errorCode);
 }
 
+void testAddDataToStorageFirstEntryCorrectInitialized(void) {
+    sizeOfNewData = 1;
+    TEST_ASSERT_EQUAL(0, addDataToStorage(sizeOfNewData, dataPTR));
+    uint8_t* dataInStorage = (uint8_t*) *dataPTR;
+    TEST_ASSERT_NOT_NULL(dataInStorage);
+    TEST_ASSERT_EQUAL_UINT8(0,dataInStorage[0]);
+
+}
+
+void testAddDataToStorageCanWriteCorrectValue(){
+    sizeOfNewData = 100;
+    addDataToStorage(sizeOfNewData, dataPTR);
+    uint8_t* dataInStorage = (uint8_t*) *dataPTR;
+
+    if(dataInStorage){
+        ((uint8_t*)(*dataPTR))[0] = 42;
+        TEST_ASSERT_EQUAL_UINT8(42, ((uint8_t*)(*dataPTR))[0]);
+    }else{
+        TEST_FAIL_MESSAGE("dataInStorage does not exist");}}
+
 void testAddDataToStorageGetSizeError() {
-    uint8_t sizeOfNewData = 1000;
-    void *dataPTR = NULL;
+    sizeOfNewData = 1000;
     dataStorageErrorCode_t errorCode;
-    errorCode = addDataToStorage(sizeOfNewData, &dataPTR);
+    errorCode = addDataToStorage(sizeOfNewData, dataPTR);
     TEST_ASSERT_EQUAL_HEX8(DATASTORAGE_SIZE_ERROR, errorCode);
 }
 
 void testAddDataToStorageGetNotInitializedError() {
-    uint8_t sizeOfNewData = 50;
-    void *dataPTR = NULL;
+    sizeOfNewData = 50;
     dataStorageErrorCode_t errorCode;
-    errorCode = addDataToStorage(sizeOfNewData, &dataPTR);
+    errorCode = addDataToStorage(sizeOfNewData, dataPTR);
     TEST_ASSERT_EQUAL_HEX8(DATASTORAGE_NOT_INITIALIZED_ERROR, errorCode);
 }
 
 void testAddDataToStorageGetMemoryFractionErrorCaseData() {
-    uint8_t sizeOfNewData = totalSizeForAllocatedMemory -
+    sizeOfNewData = totalSizeForAllocatedMemory -
                             totalSizeForAllocatedMemory / memoryFraction + sizeof(dataEntry_t);
-    void *dataPTR = NULL;
     dataStorageErrorCode_t errorCode;
-    errorCode = addDataToStorage(sizeOfNewData, &dataPTR);
+    errorCode = addDataToStorage(sizeOfNewData, dataPTR);
     TEST_ASSERT_EQUAL_HEX8(DATASTORAGE_MEMORY_FRACTION_ERROR, errorCode);
 }
 
 void testAddDataToStorageGetMemoryFractionErrorCaseEntries() {
-    uint8_t sizeOfNewData = 1;
-    void *dataPTR = NULL;
+    sizeOfNewData = 1;
     dataStorageErrorCode_t errorCode;
     for (int i = 0; i < totalSizeForAllocatedMemory / memoryFraction; i++) {
-        errorCode = addDataToStorage(sizeOfNewData, &dataPTR);
+        errorCode = addDataToStorage(sizeOfNewData, dataPTR);
         if (errorCode != DATASTORAGE_NO_ERROR) {
             break;
         }
@@ -69,14 +88,16 @@ void testAddDataToStorageGetMemoryFractionErrorCaseEntries() {
     TEST_ASSERT_EQUAL_HEX8(DATASTORAGE_MEMORY_FRACTION_ERROR, errorCode);
 }
 
-void setUp() {}
-void tearDown() {}
+void setUp() {dataPTR = calloc(1, sizeof(void*));}
+void tearDown() {free(dataPTR);}
 
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testInitDataStorageSuccessful);
     RUN_TEST(testInitDataStorageGetInitError);
     RUN_TEST(testAddDataToStorageSuccessful);
+    RUN_TEST(testAddDataToStorageFirstEntryCorrectInitialized);
+    RUN_TEST(testAddDataToStorageCanWriteCorrectValue);
     RUN_TEST(testAddDataToStorageGetSizeError);
     deinitDataStorage();
     RUN_TEST(testAddDataToStorageGetNotInitializedError);

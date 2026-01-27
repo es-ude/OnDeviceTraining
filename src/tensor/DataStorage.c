@@ -32,16 +32,20 @@ dataStorageErrorCode_t initDataStorage(size_t totalSizeForAllocatedMemory, uint8
     storage->entries = calloc(1, totalSizeForAllocatedMemory);
     if (!storage->entries) {
         errorCode = DATASTORAGE_ALLOC_ERROR;
+        free(storage);
+        storage = NULL;
         return errorCode;
     }
     size_t sizeForEntriesStorage =
         calculateSizeForEntriesStorage(totalSizeForAllocatedMemory, memoryFraction);
 
+    initFirstEntry(sizeForEntriesStorage);
+
     storage->maxSizeOfDataStorage = totalSizeForAllocatedMemory - sizeForEntriesStorage;
     storage->maxNumberOfEntries = sizeForEntriesStorage / sizeof(dataEntry_t);
-
     storage->currentSizeOfUsedDataStorage = 0;
     storage->currentNumberOfEntries = 0;
+
     return errorCode;
 }
 
@@ -152,10 +156,14 @@ static dataStorageErrorCode_t createEntry(void **data, const size_t sizeOfData) 
     if (errorCode != DATASTORAGE_NO_ERROR) {
         return errorCode;
     }
-    data = &(storage->entries[index].pointerToData);
+    *data = storage->entries[index].pointerToData;
     (storage->currentNumberOfEntries)++;
     (storage->currentSizeOfUsedDataStorage) += sizeOfData;
     return errorCode;
+}
+
+static void initFirstEntry (size_t sizeForEntriesStorage){
+    storage->entries[0].pointerToData = storage->entries + sizeForEntriesStorage;
 }
 
 /* endregion INTERNAL HEADER FUNCTIONS */

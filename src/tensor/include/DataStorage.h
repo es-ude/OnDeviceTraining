@@ -14,6 +14,7 @@ typedef struct dataStorage dataStorage_t;
 typedef enum dataStorageErrorCode {
     DATASTORAGE_NO_ERROR = 0x00,
     DATASTORAGE_INIT_ERROR = 0x10,
+    DATASTORAGE_INDEX_ERROR = 0x14,
     DATASTORAGE_FRAGMENTATION_ERROR = 0x15,
     DATASTORAGE_NOT_INITIALIZED_ERROR = 0x16,
     DATASTORAGE_MEMORY_FRACTION_ERROR = 0x17,
@@ -83,6 +84,24 @@ void deinitDataStorage(void);
  * mean many entries with small data size or few entries with huge data size.
  */
 dataStorageErrorCode_t addDataToStorage(const size_t sizeOfData, void **data);
+
+/*!
+ * @brief Invalidates user access to a stored data entry.
+ *
+ * NOTE: The storage entry remains allocated, but its data pointer is set to NULL.
+ * The user-facing pointer is also set to NULL, preventing further access.
+ *
+ * @IMPORTANT:
+ * The underlying data memory is not freed or modified and may remain in memory
+ * until explicitly overwritten or the storage is deinitialized.
+ *
+ * @param[in,out] data Pointer to the user data pointer. Set to NULL on success.
+ *
+ * @return
+ * - DATASTORAGE_NO_ERROR: If successful.
+ * - DATASTORAGE_INDEX_ERROR : No matching storage entry found.
+ */
+dataStorageErrorCode_t removeDataFromStorage(void **data);
 /* endregion PUBLIC HEADER FUNCTIONS */
 
 /* region INTERNAL HEADER FUNCTIONS */
@@ -123,18 +142,27 @@ static dataStorageErrorCode_t evaluateStorageForNewData(size_t sizeOfNewData,
                                                         size_t amountOfEntriesToAdd);
 /*!
  * @brief Returns the index of the most recently added entry.
- *
  * This (internal) function returns the index of the entry that was added last
  * and therefore represents the entry with the highest address in the data array.
  *
+ * @IMPORTANT: caller needs to ensure that storage exists.
  * @return Index of the last added entry in the data array.
  */
 static size_t getIndexOfLastEntry(void);
 
-
+/*!
+ * @brief This (internal) function finds the index of the storage entry.
+ * @IMPORTANT: caller needs to ensure that storage exists.
+ * @param[in] entry Pointer to entry with unknown index
+ * @param[out] index
+ * @return The error code indicating the result of the look up :
+ *         - DATASTORAGE_NO_ERROR: Searching for index was successful.
+ *         - DATASTORAGE_INDEX_ERROR: Can't find index.
+ */
+static dataStorageErrorCode_t getIndexOfEntryInStorage(const dataEntry_t *entry, size_t *index);
 
 /*!
- *@brief Assigns the data pointer and size for a storage entry.
+ * @brief Assigns the data pointer and size for a storage entry.
  *
  * @param[in] sizeOfData     Size of the data to be stored (in bytes).
  * @param[in] indexOfEntry  Index of the storage entry to update.
@@ -158,6 +186,7 @@ static dataStorageErrorCode_t setDataPointerAndSizeOfEntry(const size_t sizeOfDa
  */
 static dataStorageErrorCode_t createEntry(void **data, const size_t sizeOfData);
 
-static void initFirstEntry (size_t sizeForEntriesStorage);
+static void initFirstEntry(size_t sizeForEntriesStorage);
+
 /* endregion INTERNAL HEADER FUNCTIONS */
 #endif // ENV5_RUNTIME_DATASTORAGE_H

@@ -68,6 +68,28 @@ dataStorageErrorCode_t addDataToStorage(const size_t sizeOfNewData, void **data)
     errorCode = createEntry(data, sizeOfNewData);
     return errorCode;
 }
+
+dataStorageErrorCode_t removeDataFromStorage(void **data) {
+    dataStorageErrorCode_t errorCode = DATASTORAGE_NO_ERROR;
+    if (!storage) {
+        if (!data) {
+            return errorCode;
+        }
+        *data = NULL;
+        return errorCode;
+    }
+    size_t indexOfEntry = 0;
+    errorCode = getIndexOfEntryInStorage(data, &indexOfEntry);
+    if (errorCode != DATASTORAGE_NO_ERROR) {
+        return errorCode;
+    }
+    storage->currentSizeOfUsedDataStorage -= storage->entries[indexOfEntry].sizeOfData;
+    (storage->currentNumberOfEntries)--;
+    storage->entries[indexOfEntry].pointerToData = NULL;
+    *data = NULL;
+    return errorCode;
+}
+
 /* endregion PUBLIC HEADER FUNCTIONS */
 
 /* region INTERNAL HEADER FUNCTIONS */
@@ -126,6 +148,18 @@ static size_t getIndexOfLastEntry() {
     return indexOfLastEntry;
 }
 
+static dataStorageErrorCode_t getIndexOfEntryInStorage(const dataEntry_t *entry, size_t *index) {
+    dataStorageErrorCode_t errorCode = DATASTORAGE_NO_ERROR;
+    for (size_t i = 0; i < storage->maxNumberOfEntries; i++) {
+        if (storage->entries[i].pointerToData == entry->pointerToData) {
+            *index = i;
+            return errorCode;
+        }
+    }
+    errorCode = DATASTORAGE_INDEX_ERROR;
+    return errorCode;
+}
+
 static dataStorageErrorCode_t setDataPointerAndSizeOfEntry(const size_t sizeOfData,
                                                            const size_t indexOfEntry) {
     dataStorageErrorCode_t errorCode = DATASTORAGE_NO_ERROR;
@@ -162,8 +196,12 @@ static dataStorageErrorCode_t createEntry(void **data, const size_t sizeOfData) 
     return errorCode;
 }
 
-static void initFirstEntry (size_t sizeForEntriesStorage){
+static void initFirstEntry(size_t sizeForEntriesStorage) {
     storage->entries[0].pointerToData = storage->entries + sizeForEntriesStorage;
+}
+
+static void getPointerToDataArray(uint8_t *data) {
+    data = storage->entries + storage->maxNumberOfEntries * sizeof(dataEntry_t);
 }
 
 /* endregion INTERNAL HEADER FUNCTIONS */

@@ -3,6 +3,20 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/*! @file dataStorage.h
+ * @brief Simple memory management library for data within a fixed memory block.
+ *
+ * The DataStorage library provides functions in a pre-allocated memory region. The Memory is
+ * divided into entry management structures
+ * (`dataEntry_t`) and actual data storage.
+ *
+ *
+ * @warning   - Security vulnerability: Removing a data entry only invalidates its pointer.
+ *              The underlying memory is not cleared and may still contain sensitive data.
+ *            - This library is **not thread-safe**. Concurrent access from multiple threads
+ *              without external synchronization may lead to undefined behavior.
+ */
+
 /* region TYPE_DEFINITIONS */
 typedef struct dataEntry {
     uint8_t *pointerToData;
@@ -210,8 +224,6 @@ static dataStorageErrorCode_t createEntry(void **data, const size_t sizeOfData);
  * @note The function assumes that `storage` has already been allocated and initialized.
  *       The first entry's `pointerToData` will point past the entries array by the given offset.
  */
-static void initFirstEntry(size_t sizeForEntriesStorage);
-
 static void initFirstEntry(size_t sizeForEntriesStorage);
 
 /*!

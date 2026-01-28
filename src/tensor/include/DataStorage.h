@@ -14,6 +14,7 @@ typedef struct dataStorage dataStorage_t;
 typedef enum dataStorageErrorCode {
     DATASTORAGE_NO_ERROR = 0x00,
     DATASTORAGE_INIT_ERROR = 0x10,
+    DATASTORAGE_INVALID_ENTRY_ERROR = 0x13, // index does not exist or can't be found
     DATASTORAGE_INDEX_ERROR = 0x14,
     DATASTORAGE_FRAGMENTATION_ERROR = 0x15,
     DATASTORAGE_NOT_INITIALIZED_ERROR = 0x16,
@@ -102,6 +103,19 @@ dataStorageErrorCode_t addDataToStorage(const size_t sizeOfData, void **data);
  * - DATASTORAGE_INDEX_ERROR : No matching storage entry found.
  */
 dataStorageErrorCode_t removeDataFromStorage(void **data);
+
+/*!
+ * @return Error codes:
+ *         - DATASTORAGE_NO_ERROR: successful
+ *         - DATASTORAGE_NOT_INITIALIZED_ERROR: storage is not initialized
+ *         - DATASTORAGE_SIZE_ERROR: the storage can't hold that much data.
+ *         - DATASTORAGE_MEMORY_FRACTION_ERROR: insufficient space for data or entries. This could
+ * mean many entries with small data size or few entries with huge data size.
+ *         - DATASTORAGE_INVALID_ENTRY_ERROR: Can't find entry.
+ *
+ */
+dataStorageErrorCode_t resizeDataInStorage(void **dataPTR, size_t newSizeOfData);
+
 /* endregion PUBLIC HEADER FUNCTIONS */
 
 /* region INTERNAL HEADER FUNCTIONS */
@@ -138,8 +152,8 @@ static size_t calculateSizeForEntriesStorage(size_t totalSizeForDataAndEntriesSt
  *         - DATASTORAGE_MEMORY_FRACTION_ERROR: insufficient space for data or entries. This could
  * mean many entries with small data size or few entries with huge data size.
  */
-static dataStorageErrorCode_t evaluateStorageForNewData(size_t sizeOfNewData,
-                                                        size_t amountOfEntriesToAdd);
+static dataStorageErrorCode_t evaluateStorageForNewData(const size_t sizeOfNewData,
+                                                        const size_t amountOfEntriesToAdd);
 /*!
  * @brief Returns the index of the most recently added entry.
  * This (internal) function returns the index of the entry that was added last
@@ -150,6 +164,7 @@ static dataStorageErrorCode_t evaluateStorageForNewData(size_t sizeOfNewData,
  */
 static size_t getIndexOfLastEntry(void);
 
+static dataStorageErrorCode_t getEntryFromPointer(const void **dataPTR, dataEntry_t **entry);
 /*!
  * @brief This (internal) function finds the index of the storage entry.
  * @IMPORTANT: caller needs to ensure that storage exists.
@@ -186,7 +201,50 @@ static dataStorageErrorCode_t setDataPointerAndSizeOfEntry(const size_t sizeOfDa
  */
 static dataStorageErrorCode_t createEntry(void **data, const size_t sizeOfData);
 
+/*!
+ * @brief Initializes the first entry in storage by setting its data pointer.
+ *
+ * @param sizeForEntriesStorage [in] Offset in storage to assign as the data pointer for the first
+ * entry
+ *
+ * @note The function assumes that `storage` has already been allocated and initialized.
+ *       The first entry's `pointerToData` will point past the entries array by the given offset.
+ */
 static void initFirstEntry(size_t sizeForEntriesStorage);
+
+static void initFirstEntry(size_t sizeForEntriesStorage);
+
+/*!
+ * Adjusts an entry while keeping the entry itself, but updates the data pointer and size.
+ * @WARNING: Undesired behavior occurs if called with newSizeOfData smaller than the current entry
+ * size.
+ *
+ * @param entry [in/out] Pointer to the data entry to grow
+ * @param newSizeOfData [in] Desired new size of the entry
+ *
+ * @return Error codes:
+ *         - DATASTORAGE_NO_ERROR: Growing entry was successful
+ *         - DATASTORAGE_NOT_INITIALIZED_ERROR: Storage is not initialized
+ *         - DATASTORAGE_SIZE_ERROR: Storage cannot hold the requested size
+ *         - DATASTORAGE_MEMORY_FRACTION_ERROR: Insufficient space for data or entries.
+ *           This may occur due to many small entries or few large entries
+ *         - DATASTORAGE_INDEX_ERROR: Entry index could not be found in storage
+ */
+static dataStorageErrorCode_t growEntry(dataEntry_t *entry, const size_t newSizeOfData);
+
+/*!
+ * Adjusts an entry to a smaller size.
+ * @WARNING: Undesired behavior occurs if called with newSizeOfData larger than the current entry
+ * size.
+ *
+ * @param entry [in/out] Pointer to the data entry to shrink
+ * @param newSizeOfData [in] Desired new size of the entry
+ *
+ * @return Error codes:
+ *         - DATASTORAGE_NO_ERROR: Shrinking entry was successful
+ *         - DATASTORAGE_INDEX_ERROR: Entry index could not be found in storage
+ */
+static dataStorageErrorCode_t shrinkEntry(dataEntry_t *entry, const size_t newSizeOfData);
 
 /* endregion INTERNAL HEADER FUNCTIONS */
 #endif // ENV5_RUNTIME_DATASTORAGE_H

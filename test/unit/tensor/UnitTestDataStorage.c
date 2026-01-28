@@ -1,6 +1,5 @@
 #include "DataStorage.h"
 #include "unity.h"
-#include <stdlib.h>
 
 static uint16_t totalSizeForAllocatedMemory = 1000;
 static uint8_t memoryFraction = 4;
@@ -113,6 +112,74 @@ void testRemoveDataFromStorageGeIndexError() {
     TEST_ASSERT_EQUAL_HEX8(DATASTORAGE_INDEX_ERROR, errorCode);
 }
 
+void testResizeDataInStorageSuccessful() {
+    dataStorageErrorCode_t errorCode;
+    sizeOfNewData = 10;
+    addDataToStorage(sizeOfNewData, dataPTR);
+    errorCode = resizeDataInStorage(dataPTR, 100);
+    TEST_ASSERT_EQUAL_HEX8(DATASTORAGE_NO_ERROR, errorCode);
+}
+
+void testResizeDataInStorageGrowEntry() {
+    dataStorageErrorCode_t errorCode;
+    sizeOfNewData = 10;
+    addDataToStorage(sizeOfNewData, dataPTR);
+    errorCode = resizeDataInStorage(dataPTR, 100);
+    TEST_ASSERT_EQUAL_HEX8(DATASTORAGE_NO_ERROR, errorCode);
+}
+
+void testResizeDataInStorageShrinkEntry() {
+    dataStorageErrorCode_t errorCode;
+    sizeOfNewData = 100;
+    addDataToStorage(sizeOfNewData, dataPTR);
+    errorCode = resizeDataInStorage(dataPTR, 10);
+    TEST_ASSERT_EQUAL_HEX8(DATASTORAGE_NO_ERROR, errorCode);
+}
+
+void testResizeDataInStorageGetNotInitializedError() {
+    dataStorageErrorCode_t errorCode;
+    sizeOfNewData = 10;
+    addDataToStorage(sizeOfNewData, dataPTR);
+    errorCode = resizeDataInStorage(dataPTR, 100);
+    TEST_ASSERT_EQUAL_HEX8(DATASTORAGE_NOT_INITIALIZED_ERROR, errorCode);
+}
+
+/*! 1000/4 = 250
+        * totalSizeForAllocatedMemory/memoryFraction = a
+        ----
+       * sizeof(dataEntry_t) = 16
+        * ----
+       * -> 250/16 = 15.625
+        * -> a/sizeof(dataEntry_t)
+        * ----
+        * -> storage for entries should be: 240 bytes with 15 entries
+        */
+void testResizeDataInStorageGetSizeError() {
+    dataStorageErrorCode_t errorCode;
+    sizeOfNewData = 15;
+    for (int i = 0; i < 16; i++) {
+        addDataToStorage(sizeOfNewData, dataPTR);
+    }
+    errorCode = resizeDataInStorage(dataPTR, 1000);
+    TEST_ASSERT_EQUAL_HEX8(DATASTORAGE_SIZE_ERROR, errorCode);
+}
+
+void testResizeDataInStorageGetMemoryFractionError() {
+    dataStorageErrorCode_t errorCode;
+    sizeOfNewData = 750;
+    errorCode = addDataToStorage(sizeOfNewData, dataPTR);
+    errorCode = resizeDataInStorage(dataPTR, 100);
+    TEST_ASSERT_EQUAL_HEX8(DATASTORAGE_MEMORY_FRACTION_ERROR, errorCode);
+}
+
+void testResizeDataInStorageGetIndexError() {
+    dataStorageErrorCode_t errorCode;
+    sizeOfNewData = 10;
+    addDataToStorage(sizeOfNewData, dataPTR);
+    errorCode = resizeDataInStorage(dataPTR + 10, 100);
+    TEST_ASSERT_EQUAL_HEX8(DATASTORAGE_INVALID_ENTRY_ERROR, errorCode);
+}
+
 void setUp() {
     dataPTR = calloc(1, sizeof(void *));
 }
@@ -138,5 +205,17 @@ int main(void) {
     RUN_TEST(testRemoveDataFromStorageSuccessful);
     RUN_TEST(testRemoveDataFromStorageCorrectValue);
     RUN_TEST(testRemoveDataFromStorageGeIndexError);
+    RUN_TEST(testResizeDataInStorageSuccessful);
+    RUN_TEST(testResizeDataInStorageGrowEntry);
+    RUN_TEST(testResizeDataInStorageShrinkEntry);
+    deinitDataStorage();
+    RUN_TEST(testResizeDataInStorageGetNotInitializedError);
+    initDataStorage(totalSizeForAllocatedMemory, memoryFraction);
+    RUN_TEST(testResizeDataInStorageGetSizeError);
+    deinitDataStorage();
+    initDataStorage(totalSizeForAllocatedMemory, memoryFraction);
+    RUN_TEST(testResizeDataInStorageGetMemoryFractionError);
+    RUN_TEST(testResizeDataInStorageGetIndexError);
+
     UNITY_END();
 }

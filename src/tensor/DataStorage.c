@@ -59,6 +59,7 @@ void deinitDataStorage(void) {
     storage = NULL;
     return;
 }
+
 dataStorageErrorCode_t addDataToStorage(const size_t sizeOfNewData, void **data) {
     dataStorageErrorCode_t errorCode = DATASTORAGE_NO_ERROR;
     errorCode = evaluateStorageForNewData(sizeOfNewData, 1);
@@ -90,6 +91,30 @@ dataStorageErrorCode_t removeDataFromStorage(void **data) {
     return errorCode;
 }
 
+dataStorageErrorCode_t resizeDataInStorage(void **dataPTR, size_t newSizeOfData) {
+    dataStorageErrorCode_t errorCode = DATASTORAGE_NO_ERROR;
+    if (!storage) {
+        errorCode = DATASTORAGE_NOT_INITIALIZED_ERROR;
+        return errorCode;
+    }
+    dataEntry_t *entry = NULL;
+    errorCode = getEntryFromPointer(dataPTR, &entry);
+    if (errorCode != DATASTORAGE_NO_ERROR) {
+        return errorCode;
+    }
+
+    size_t currentSizeOfData = entry->sizeOfData;
+
+    if (newSizeOfData <= currentSizeOfData) {
+        errorCode = shrinkEntry(entry, newSizeOfData);
+    } else {
+        errorCode = growEntry(entry, newSizeOfData);
+    }
+    if (errorCode == DATASTORAGE_INDEX_ERROR) {
+        errorCode = DATASTORAGE_INVALID_ENTRY_ERROR;
+    }
+    return errorCode;
+}
 /* endregion PUBLIC HEADER FUNCTIONS */
 
 /* region INTERNAL HEADER FUNCTIONS */
@@ -102,8 +127,8 @@ static size_t calculateSizeForEntriesStorage(size_t totalSizeForDataAndEntriesSt
     return entriesStorageSize;
 }
 
-static dataStorageErrorCode_t evaluateStorageForNewData(size_t sizeOfNewData,
-                                                        size_t amountOfEntriesToAdd) {
+static dataStorageErrorCode_t evaluateStorageForNewData(const size_t sizeOfNewData,
+                                                        const size_t amountOfEntriesToAdd) {
     dataStorageErrorCode_t errorCode = DATASTORAGE_NO_ERROR;
     if (!storage) {
         errorCode = DATASTORAGE_NOT_INITIALIZED_ERROR;
@@ -146,6 +171,21 @@ static size_t getIndexOfLastEntry() {
         }
     }
     return indexOfLastEntry;
+}
+
+static dataStorageErrorCode_t getEntryFromPointer(const void **dataPTR, dataEntry_t **entry) {
+    dataStorageErrorCode_t errorCode = DATASTORAGE_NO_ERROR;
+    for (size_t i = 0; i < storage->maxNumberOfEntries; i++) {
+        if (storage->entries[i].pointerToData == *dataPTR) {
+            *entry = &storage->entries[i];
+            break;
+        }
+    }
+
+    if (!*entry) {
+        errorCode = DATASTORAGE_INVALID_ENTRY_ERROR;
+    }
+    return errorCode;
 }
 
 static dataStorageErrorCode_t getIndexOfEntryInStorage(const dataEntry_t *entry, size_t *index) {
@@ -200,8 +240,39 @@ static void initFirstEntry(size_t sizeForEntriesStorage) {
     storage->entries[0].pointerToData = storage->entries + sizeForEntriesStorage;
 }
 
-static void getPointerToDataArray(uint8_t *data) {
-    data = storage->entries + storage->maxNumberOfEntries * sizeof(dataEntry_t);
+static dataStorageErrorCode_t growEntry(dataEntry_t *entry, const size_t newSizeOfData) {
+    dataStorageErrorCode_t errorCode = DATASTORAGE_NO_ERROR;
+    errorCode = evaluateStorageForNewData(newSizeOfData, 0);
+    if (errorCode != DATASTORAGE_NO_ERROR) {
+        return errorCode;
+    }
+    size_t indexOfEntry;
+    errorCode = getIndexOfEntryInStorage(entry, &indexOfEntry);
+    if (errorCode != DATASTORAGE_NO_ERROR) {
+        return errorCode;
+    }
+    size_t currentSizeOfData = storage->entries[indexOfEntry].sizeOfData;
+    errorCode = setDataPointerAndSizeOfEntry(newSizeOfData, indexOfEntry);
+    if (errorCode != DATASTORAGE_NO_ERROR) {
+        return errorCode;
+    }
+    size_t addedSizeOfData = newSizeOfData - currentSizeOfData;
+    (storage->currentSizeOfUsedDataStorage) += addedSizeOfData;
+    return errorCode;
+}
+static dataStorageErrorCode_t shrinkEntry(dataEntry_t *entry, const size_t newSizeOfData) {
+    dataStorageErrorCode_t errorCode = DATASTORAGE_NO_ERROR;
+    size_t indexOfEntry;
+    errorCode = getIndexOfEntryInStorage(entry, &indexOfEntry);
+    if (errorCode != DATASTORAGE_NO_ERROR) {
+        return errorCode;
+    }
+    size_t currentSizeOfData = storage->entries[indexOfEntry].sizeOfData;
+
+    size_t removedSizeOfData = currentSizeOfData - newSizeOfData;
+    (storage->currentSizeOfUsedDataStorage) -= removedSizeOfData;
+    (storage->entries[indexOfEntry].sizeOfData) = newSizeOfData;
+    return errorCode;
 }
 
 /* endregion INTERNAL HEADER FUNCTIONS */

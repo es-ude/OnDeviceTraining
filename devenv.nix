@@ -60,6 +60,16 @@ in
 			package = pkgs.bash;
 			description = "Run all Unity unit tests and print their result";
 		};
+		ci = {
+			exec = ''
+				set -e
+				cmake --preset unit_test
+				cmake --build --preset unit_test
+				ctest --preset unit_test
+			'';
+			package = pkgs.bash;
+			description = "Run the full CI pipeline locally (configure, build, test)";
+		};
 
 };
 

@@ -2,6 +2,7 @@ add_library(LinearApi LinearApi.c)
 target_include_directories(LinearApi PUBLIC include)
 target_link_libraries(LinearApi PRIVATE
         Tensor
+        TensorApi
         Rounding
         Layer
         Linear

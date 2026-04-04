@@ -34,6 +34,7 @@ add_library(Distributions Distributions.c)
 target_include_directories(Distributions PUBLIC include)
 target_link_libraries(Distributions PRIVATE
         Common
+        RNG
         m
 )
 
@@ -86,8 +87,9 @@ add_library(Rounding Rounding.c)
 target_include_directories(Rounding PUBLIC include)
 target_link_libraries(Rounding PRIVATE
         m
+        RNG
         Common
-)#include "Common.h"
+)
 
 
 add_library(Square Square.c)

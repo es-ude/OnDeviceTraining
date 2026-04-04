@@ -5,6 +5,7 @@
 #include "Layer.h"
 #include "Tensor.h"
 #include "StorageApi.h"
+#include "TensorApi.h"
 #include "LinearApi.h"
 #include "Linear.h"
 
@@ -38,10 +39,8 @@ layer_t *linearLayerInitNonTrainable(tensor_t *weights, tensor_t *bias, quantiza
     linearConfig_t *linearConfig = *reserveMemory(sizeof(linearConfig_t));
     layerConfig->linear = linearConfig;
 
-    linearConfig->weights->param = weights;
-    linearConfig->weights->grad = NULL;
-    linearConfig->bias->param = bias;
-    linearConfig->bias->grad = NULL;
+    linearConfig->weights = parameterInit(weights, NULL);
+    linearConfig->bias = parameterInit(bias, NULL);
     linearConfig->forwardQ = forwardQ;
 
     linearLayer->config = layerConfig;

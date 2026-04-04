@@ -9,18 +9,14 @@
 #define SOURCE_FILE "no Source file defined!"
 #endif
 
-#define DLEVEL 0
-
 #ifdef DEBUG_MODE_DEBUG
 #define DLEVEL 3
-#endif
-
-#ifdef DEBUG_MODE_INFO
+#elif defined(DEBUG_MODE_INFO)
 #define DLEVEL 2
-#endif
-
-#ifdef DEBUG_MODE_ERROR
+#elif defined(DEBUG_MODE_ERROR)
 #define DLEVEL 1
+#else
+#define DLEVEL 0
 #endif
 
 #define PRINT_DEBUG(str, ...) \

@@ -93,7 +93,9 @@ tensor_t *tensorInitWithDistribution(distributionType_t distributionType, float 
         memset(data, 0, numberOfValues * sizeof(float));
         break;
     case ONES:
-        memset(data, 1, numberOfValues * sizeof(float));
+        for (size_t i = 0; i < numberOfValues; i++) {
+            data[i] = 1.0f;
+        }
         break;
     case NORMAL:
         for (size_t i = 0; i < numberOfValues; i++) {
@@ -106,27 +108,23 @@ tensor_t *tensorInitWithDistribution(distributionType_t distributionType, float 
         }
         break;
     case XAVIER_NORMAL:
-        float xavierStd = sqrtf(6.0f / (float)(inputFeatures + outputFeatures));
         for (size_t i = 0; i < numberOfValues; i++) {
-            data[i] = randomNormal(0.0f, xavierStd);
+            data[i] = xavierNormal(1.0f, inputFeatures, outputFeatures);
         }
         break;
     case XAVIER_UNIFORM:
-        float xavierLimit = sqrtf(6.0f / (float)(inputFeatures + outputFeatures));
         for (size_t i = 0; i < numberOfValues; i++) {
-            data[i] = randomUniform(-xavierLimit, xavierLimit);
+            data[i] = xavierUniform(1.0f, inputFeatures, outputFeatures);
         }
         break;
-    case HE_NORMAL:
-        float heStd = sqrtf(2.0f / (float)inputFeatures);
+    case KAIMING_NORMAL:
         for (size_t i = 0; i < numberOfValues; i++) {
-            data[i] = randomNormal(0.0f, heStd);
+            data[i] = kaimingNormal(sqrtf(2.0f), inputFeatures);
         }
         break;
-    case HE_UNIFORM:
-        float heLimit = sqrtf(2.0f / (float)inputFeatures);
+    case KAIMING_UNIFORM:
         for (size_t i = 0; i < numberOfValues; i++) {
-            data[i] = randomNormal(-heLimit, heLimit);
+            data[i] = kaimingUniform(sqrtf(2.0f), inputFeatures);
         }
         break;
     default:

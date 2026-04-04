@@ -113,32 +113,18 @@ void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output) {
 }
 
 static void softmaxBackwardFloat(tensor_t *input, tensor_t *loss, tensor_t *propLoss) {
+    size_t n = calcNumberOfElementsByTensor(input);
 
-    size_t inputSize = calcNumberOfElementsByTensor(input);
+    float *s = (float *)input->data;
+    float *dLds = (float *)loss->data;
+    float *dLdx = (float *)propLoss->data;
 
-    float *inputFloat = (float *)input->data;
-    float *lossFloat = (float *)loss->data;
-    float *propLossFloat = (float *)propLoss->data;
+    float dot = 0.0f;
+    for (size_t i = 0; i < n; i++)
+        dot += s[i] * dLds[i];
 
-    float jacobian[inputSize][inputSize];
-
-    for (size_t i = 0; i < inputSize; i++) {
-        for (size_t j = 0; j < inputSize; j++) {
-            if (i == j) {
-                jacobian[i][j] = inputFloat[i] * (1 - inputFloat[i]);
-            } else {
-                jacobian[i][j] = -inputFloat[i] * inputFloat[j];
-            }
-        }
-    }
-
-    for (size_t i = 0; i < inputSize; i++) {
-        float sum = 0;
-        for (size_t j = 0; j < inputSize; j++) {
-            sum += jacobian[i][j] * lossFloat[j];
-        }
-        propLossFloat[i] = sum;
-    }
+    for (size_t i = 0; i < n; i++)
+        dLdx[i] = s[i] * (dLds[i] - dot);
 }
 
 static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *propLoss) {
@@ -165,29 +151,17 @@ static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *p
     setTensorValuesForConversion(propLossFloatData, &propLossFloatQ, propLoss, &propLossFloat);
     convertTensor(propLoss, &propLossFloat);
 
-    float *inputFloatArr = (float *)inputFloat.data;
-    float *lossFloatArr = (float *)lossFloat.data;
-    float *propLossFloatArr = (float *)propLossFloat.data;
+    float *s = (float *)inputFloat.data;
+    float *dLds = (float *)lossFloat.data;
+    float *dLdx = (float *)propLossFloat.data;
 
-    float jacobian[inputSize][inputSize];
+    float dot = 0.0f;
+    for (size_t i = 0; i < inputSize; i++)
+        dot += s[i] * dLds[i];
 
-    for (size_t i = 0; i < inputSize; i++) {
-        for (size_t j = 0; j < inputSize; j++) {
-            if (i == j) {
-                jacobian[i][j] = inputFloatArr[i] * (1 - inputFloatArr[i]);
-            } else {
-                jacobian[i][j] = -inputFloatArr[i] * inputFloatArr[j];
-            }
-        }
-    }
+    for (size_t i = 0; i < inputSize; i++)
+        dLdx[i] = s[i] * (dLds[i] - dot);
 
-    for (size_t i = 0; i < inputSize; i++) {
-        float sum = 0;
-        for (size_t j = 0; j < inputSize; j++) {
-            sum += jacobian[i][j] * lossFloatArr[j];
-        }
-        propLossFloatArr[i] = sum;
-    }
     convertTensor(&propLossFloat, propLoss);
 }
 

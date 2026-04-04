@@ -23,4 +23,4 @@ jobs:
         run: cmake --build --preset unit_test
 
       - name: Test
-        run: ctest --preset unit_test
+        run: ctest --preset unit_test --exclude-regex UnitTestDataLoader

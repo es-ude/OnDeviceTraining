@@ -92,7 +92,8 @@ void testShuffle() {
     size_t numberOfIndices = 10;
     size_t indices[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
 
-    rngShuffleIndices(indices, 10, 1);
+    rngSetSeed(1);
+    rngShuffleIndices(indices, 10);
 
     /*for (size_t i = 0; i < numberOfIndices; i++) {
         printf("%lu\n", indices[i]);

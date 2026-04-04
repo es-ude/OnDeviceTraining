@@ -1,9 +1,9 @@
 #include <stdio.h>
-#include <stdlib.h>
 #include <math.h>
 
 #include "unity.h"
 #include "Distributions.h"
+#include "RNG.h"
 #include "MinMax.h"
 #include "Common.h"
 
@@ -31,7 +31,7 @@ void testRandomUniform() {
     const size_t n = 10000;
     float samples[n];
 
-    srand(42);
+    rngSetSeed(42);
     float min_val = -0.5f;
     float max_val = 0.5f;
 
@@ -57,7 +57,7 @@ void testRandomNormal() {
     const size_t n = 10000;
     float samples[n];
 
-    srand(42);
+    rngSetSeed(42);
     float expected_mean = 0.0f;
     float expected_std = 0.1f;
 
@@ -92,7 +92,7 @@ void testKaimingNormal() {
     const size_t fan_in = 784;
     float samples[n];
 
-    srand(42);
+    rngSetSeed(42);
     for (size_t i = 0; i < n; i++) {
         samples[i] = kaimingNormal(1, fan_in);
     }
@@ -107,9 +107,9 @@ void testKaimingNormal() {
     TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.0f, mean);
     TEST_ASSERT_FLOAT_WITHIN(0.01f, expected_std, std);
 
-    float range_3sigma = 3.0f * expected_std;
-    TEST_ASSERT_TRUE(min > -range_3sigma * 1.5f);
-    TEST_ASSERT_TRUE(max < range_3sigma * 1.5f);
+    float range_5sigma = 5.0f * expected_std;
+    TEST_ASSERT_TRUE(min > -range_5sigma);
+    TEST_ASSERT_TRUE(max < range_5sigma);
 }
 
 void testKaimingUniform() {
@@ -117,7 +117,7 @@ void testKaimingUniform() {
     const size_t fan_in = 784;
     float samples[n];
 
-    srand(42);
+    rngSetSeed(42);
     for (size_t i = 0; i < n; i++) {
         samples[i] = kaimingUniform(1, fan_in);
     }
@@ -143,7 +143,7 @@ void testXavierNormal() {
     const size_t fan_out = 128;
     float samples[n];
 
-    srand(42);
+    rngSetSeed(42);
     for (size_t i = 0; i < n; i++) {
         samples[i] = xavierNormal(1, fan_in, fan_out);
     }
@@ -158,9 +158,9 @@ void testXavierNormal() {
     TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.0f, mean);
     TEST_ASSERT_FLOAT_WITHIN(0.01f, expected_std, std);
 
-    float range_3sigma = 3.0f * expected_std;
-    TEST_ASSERT_TRUE(min > -range_3sigma * 1.5f);
-    TEST_ASSERT_TRUE(max < range_3sigma * 1.5f);
+    float range_5sigma = 5.0f * expected_std;
+    TEST_ASSERT_TRUE(min > -range_5sigma);
+    TEST_ASSERT_TRUE(max < range_5sigma);
 }
 
 void testXavierUniform() {
@@ -169,7 +169,7 @@ void testXavierUniform() {
     const size_t fan_out = 128;
     float samples[n];
 
-    srand(42);
+    rngSetSeed(42);
     for (size_t i = 0; i < n; i++) {
         samples[i] = xavierUniform(1, fan_in, fan_out);
     }

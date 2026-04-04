@@ -30,6 +30,7 @@ add_elastic_ai_unit_test(
         Distributions
         MORE_LIBS
         MinMax
+        RNG
         Common
 )
 

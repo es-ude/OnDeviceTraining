@@ -40,7 +40,8 @@ void initDataLoader(dataLoader_t *dataLoader, getSampleFn_t getSample,
         indices[i] = i;
 
     if (shuffle) {
-        rngShuffleIndices(indices, numberOfIndices, shuffleSeed);
+        rngSetSeed(shuffleSeed);
+        rngShuffleIndices(indices, numberOfIndices);
     }
 }
 

@@ -1,27 +1,26 @@
 #define SOURCE_FILE "DISTRIBUTIONS"
 
 #include <math.h>
-#include <stdlib.h>
 
 #include "Distributions.h"
-#include "math.h"
+#include "RNG.h"
 
 
 float randomNormal(float mean, float standardDeviation) {
-    float u1 = (float)rand() / RAND_MAX;
-    float u2 = (float)rand() / RAND_MAX;
+    float u1 = rngNextFloat();
+    float u2 = rngNextFloat();
 
     // Avoid log(0)
     while (u1 <= 1e-7f) {
-        u1 = (float)rand() / RAND_MAX;
+        u1 = rngNextFloat();
     }
 
-    float z = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * M_PI * u2);
+    float z = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2);
     return mean + standardDeviation * z;
 }
 
 float randomUniform(float min, float max) {
-    float r = (float)rand() / RAND_MAX;
+    float r = rngNextFloat();
     return min + r * (max - min);
 }
 

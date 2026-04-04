@@ -439,6 +439,42 @@ void testLinearBackwardFloatWithMismatchedQuantizations() {
     }
 }
 
+void testLinearLayerInitNonTrainable(void) {
+    float weightData[] = {-1.f, 2.f, -3.f, 4.f, 5.f, -6.f};
+    size_t weightDims[] = {2, 3};
+    tensor_t *weights = tensorInitFloat(weightData, weightDims, 2, NULL);
+
+    float biasData[] = {-1.f, 3.f};
+    size_t biasDims[] = {1, 2};
+    tensor_t *bias = tensorInitFloat(biasData, biasDims, 2, NULL);
+
+    quantization_t *forwardQ = quantizationInitFloat();
+
+    layer_t *layer = linearLayerInitNonTrainable(weights, bias, forwardQ);
+
+    TEST_ASSERT_NOT_NULL(layer);
+    TEST_ASSERT_EQUAL(LINEAR, layer->type);
+
+    linearConfig_t *config = layer->config->linear;
+    TEST_ASSERT_NULL(config->weights->grad);
+    TEST_ASSERT_NULL(config->bias->grad);
+
+    // Forward pass should work
+    float inputData[] = {0.f, 1.f, 2.f};
+    size_t inputDims[] = {1, 3};
+    tensor_t *input = tensorInitFloat(inputData, inputDims, 2, NULL);
+
+    float outputData[2];
+    size_t outputDims[] = {1, 2};
+    tensor_t *output = tensorInitFloat(outputData, outputDims, 2, NULL);
+
+    linearForward(layer, input, output);
+
+    float *actual = (float *)output->data;
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, -5.f, actual[0]);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, -4.f, actual[1]);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLinearForwardFloat);
@@ -448,5 +484,6 @@ int main(void) {
     RUN_TEST(testLinearBackwardSymInt32);
 
     RUN_TEST(testLinearBackwardFloatWithMismatchedQuantizations);
+    RUN_TEST(testLinearLayerInitNonTrainable);
     return UNITY_END();
 }

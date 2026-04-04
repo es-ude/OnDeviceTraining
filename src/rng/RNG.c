@@ -27,11 +27,9 @@ static size_t rngBounded(rng32_t *rng, size_t bound)
     return x % bound;
 }
 
-void rngShuffleIndices(size_t *indices, size_t n, uint32_t seed)
+void rngShuffleIndices(size_t *indices, size_t n)
 {
     if (n < 2) return;
-
-    rng32_t rng = { .state = seed ? seed : 1 };
 
     for (size_t i = n - 1; i > 0; --i) {
         size_t j = rngBounded(&rng, i + 1);
@@ -43,9 +41,13 @@ void rngShuffleIndices(size_t *indices, size_t n, uint32_t seed)
 }
 
 void rngSetSeed(uint32_t seed) {
-    rng.state = seed;
+    rng.state = seed ? seed : 1;
 }
 
-uint32_t rngGetSeed() {
+uint32_t rngGetSeed(void) {
     return rng.state;
+}
+
+float rngNextFloat(void) {
+    return (float)(rngNext(&rng) >> 8) / (float)(1 << 24);
 }

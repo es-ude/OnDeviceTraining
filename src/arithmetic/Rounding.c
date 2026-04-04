@@ -1,10 +1,10 @@
 #define SOURCE_FILE "ROUNDING"
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <math.h>
 
 #include "Rounding.h"
+#include "RNG.h"
 
 
 // round to even, when fractional is EXACTLY 0.5
@@ -13,7 +13,7 @@ int32_t roundHTE(float input) {
 }
 
 float randfloat() {
-    return (float)rand() / ((float)RAND_MAX + 1);
+    return rngNextFloat();
 }
 
 int32_t roundSRHTE(const float input) {

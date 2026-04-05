@@ -87,7 +87,7 @@ void testMSELossBackwardSymInt32() {
     initSymInt32QConfig(HTE, &modelOutputSymInt32QC);
     quantization_t modelOutputSymInt32Q;
     initSymInt32Quantization(&modelOutputSymInt32QC, &modelOutputSymInt32Q);
-    uint8_t modelOutputSymInt32Data[numberOfElements];
+    uint8_t modelOutputSymInt32Data[numberOfElements * sizeof(int32_t)];
     setTensorValuesForConversion(modelOutputSymInt32Data, &modelOutputSymInt32Q, &modelOutput, &modelOutputSymInt32);
     convertTensor(&modelOutput, &modelOutputSymInt32);
 
@@ -102,7 +102,7 @@ void testMSELossBackwardSymInt32() {
     initSymInt32QConfig(HTE, &labelSymInt32QC);
     quantization_t labelSymInt32Q;
     initSymInt32Quantization(&labelSymInt32QC, &labelSymInt32Q);
-    uint8_t labelSymInt32Data[numberOfElements];
+    uint8_t labelSymInt32Data[numberOfElements * sizeof(int32_t)];
     setTensorValuesForConversion(labelSymInt32Data, &labelSymInt32Q, &label, &labelSymInt32);
     convertTensor(&label, &labelSymInt32);
 
@@ -118,7 +118,7 @@ void testMSELossBackwardSymInt32() {
     initSymInt32QConfig(HTE, &resultSymInt32QC);
     quantization_t resultSymInt32Q;
     initSymInt32Quantization(&resultSymInt32QC, &resultSymInt32Q);
-    uint8_t resultSymInt32Data[numberOfElements];
+    uint8_t resultSymInt32Data[numberOfElements * sizeof(int32_t)];
     setTensorValuesForConversion(resultSymInt32Data, &resultSymInt32Q, &result, &resultSymInt32);
     convertTensor(&result, &resultSymInt32);
 

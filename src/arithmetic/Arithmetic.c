@@ -30,6 +30,11 @@ bool doDimensionsMatch(tensor_t *a, tensor_t *b) {
     size_t aNumberOfDims = a->shape->numberOfDimensions;
     size_t bNumberOfDims = b->shape->numberOfDimensions;
 
+    if (aNumberOfDims != bNumberOfDims) {
+        PRINT_ERROR("Rank mismatch: %lu vs %lu\n", aNumberOfDims, bNumberOfDims);
+        exit(1);
+    }
+
     size_t aOrderedDims[aNumberOfDims];
     size_t bOrderedDims[bNumberOfDims];
 
@@ -43,7 +48,7 @@ bool doDimensionsMatch(tensor_t *a, tensor_t *b) {
         }
     }
     return true;
-};
+}
 
 size_t calcTensorIndexByIndices(size_t numberOfDimensions, size_t *dimensions, size_t *indices) {
     size_t index = indices[numberOfDimensions - 1];

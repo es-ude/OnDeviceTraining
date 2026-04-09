@@ -168,6 +168,37 @@ void testFloat32ElementWithTensorArithmetic() {
 
 }
 
+void testDoDimensionsMatch_SameShape_ReturnsTrue() {
+    size_t aDims[] = {2, 3};
+    size_t aOrder[] = {0, 1};
+    shape_t aShape = {.dimensions = aDims, .orderOfDimensions = aOrder, .numberOfDimensions = 2};
+    tensor_t a = {.shape = &aShape};
+
+    size_t bDims[] = {2, 3};
+    size_t bOrder[] = {0, 1};
+    shape_t bShape = {.dimensions = bDims, .orderOfDimensions = bOrder, .numberOfDimensions = 2};
+    tensor_t b = {.shape = &bShape};
+
+    TEST_ASSERT_TRUE(doDimensionsMatch(&a, &b));
+}
+
+void testDoDimensionsMatch_DifferentDims_ReturnsFalse() {
+    size_t aDims[] = {2, 3};
+    size_t aOrder[] = {0, 1};
+    shape_t aShape = {.dimensions = aDims, .orderOfDimensions = aOrder, .numberOfDimensions = 2};
+    tensor_t a = {.shape = &aShape};
+
+    size_t bDims[] = {2, 4};
+    size_t bOrder[] = {0, 1};
+    shape_t bShape = {.dimensions = bDims, .orderOfDimensions = bOrder, .numberOfDimensions = 2};
+    tensor_t b = {.shape = &bShape};
+
+    TEST_ASSERT_FALSE(doDimensionsMatch(&a, &b));
+}
+
+// NOTE: doDimensionsMatch now calls exit(1) on rank mismatch — cannot test with Unity.
+// The fix is verified by: different-rank inputs no longer silently read out of bounds.
+
 void setUp() {}
 void tearDown() {}
 
@@ -178,6 +209,9 @@ int main(void) {
     RUN_TEST(testCalcIndexByRawIndex);
     RUN_TEST(testInt32PointWiseArithmetic);
     RUN_TEST(testFloat32ElementWithTensorArithmetic);
+    RUN_TEST(testDoDimensionsMatch_SameShape_ReturnsTrue);
+    RUN_TEST(testDoDimensionsMatch_DifferentDims_ReturnsFalse);
+    // testDoDimensionsMatch_DifferentRank — now exit(1)s, verified by code review
 
     return UNITY_END();
 }

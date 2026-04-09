@@ -21,3 +21,12 @@ add_elastic_ai_unit_test(
         Rounding
         Quantization
 )
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
+        TensorApi
+        MORE_LIBS
+        Tensor
+        Rounding
+        Quantization
+        StorageApi
+)

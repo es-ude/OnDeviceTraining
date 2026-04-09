@@ -83,9 +83,9 @@ tensor_t *tensorInitWithDistribution(distributionType_t distributionType, float 
                                      size_t numberOfDims, quantization_t *quantization,
                                      sparsity_t *sparsity, size_t inputFeatures,
                                      size_t outputFeatures) {
-    size_t numberOfValues = 0;
+    size_t numberOfValues = 1;
     for (size_t i = 0; i < numberOfDims; i++) {
-        numberOfValues += dims[i];
+        numberOfValues *= dims[i];
     }
 
     switch (distributionType) {

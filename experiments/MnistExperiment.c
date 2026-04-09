@@ -176,12 +176,60 @@ static void epochCallback(size_t epoch, float trainLoss, float evalLoss) {
     writeCsvRow(LOG, epoch, 0, trainLoss, evalLoss);
 }
 
+static void writeCsvHeader(char *filePath) {
+    char *header = "epoch, batch, train_loss, eval_loss\n";
+    char *row[] = {header};
+    size_t entriesInRow[] = {4};
+    csvData_t csvData;
+    setCSVData(&csvData, row, 1, entriesInRow);
+    csvWriteRowsByBufferSize(filePath, &csvData, "w");
+}
+
+#define MODEL_SIZE 4
+
+static void buildModel(layer_t **model) {
+    quantization_t *q = quantizationInitFloat();
+
+    // Linear 784→20
+    static float weight0Data[20 * 28 * 28] = {0};
+    size_t weight0Dims[] = {20, 28 * 28};
+    tensor_t *weight0Param = tensorInitWithDistribution(XAVIER_UNIFORM, weight0Data, weight0Dims, 2, q, NULL, 28*28, 20);
+    tensor_t *weight0Grad = gradInitFloat(weight0Param, NULL);
+    parameter_t *weight0 = parameterInit(weight0Param, weight0Grad);
+
+    static float bias0Data[20] = {0};
+    size_t bias0Dims[] = {1, 20};
+    tensor_t *bias0Param = tensorInitWithDistribution(ZEROS, bias0Data, bias0Dims, 2, q, NULL, 1, 20);
+    tensor_t *bias0Grad = gradInitFloat(bias0Param, NULL);
+    parameter_t *bias0 = parameterInit(bias0Param, bias0Grad);
+
+    model[0] = linearLayerInit(weight0, bias0, q, q, q, q);
+
+    // ReLU
+    model[1] = reluLayerInit(q, q);
+
+    // Linear 20→10
+    static float weight1Data[10 * 20] = {0};
+    size_t weight1Dims[] = {10, 20};
+    tensor_t *weight1Param = tensorInitWithDistribution(XAVIER_UNIFORM, weight1Data, weight1Dims, 2, q, NULL, 20, 10);
+    tensor_t *weight1Grad = gradInitFloat(weight1Param, NULL);
+    parameter_t *weight1 = parameterInit(weight1Param, weight1Grad);
+
+    static float bias1Data[10] = {0};
+    size_t bias1Dims[] = {1, 10};
+    tensor_t *bias1Param = tensorInitWithDistribution(ZEROS, bias1Data, bias1Dims, 2, q, NULL, 1, 10);
+    tensor_t *bias1Grad = gradInitFloat(bias1Param, NULL);
+    parameter_t *bias1 = parameterInit(bias1Param, bias1Grad);
+
+    model[2] = linearLayerInit(weight1, bias1, q, q, q, q);
+
+    // Softmax
+    model[3] = softmaxLayerInit(q, q);
+}
+
 
 int main(void) {
-    // this clears the old file
-    // also creates file if non-existent
-    FILE *fp = fopen(LOG, "w");
-    fclose(fp);
+    writeCsvHeader(LOG);
 
     size_t numberOfEpochs = 10;
     initDataSets();
@@ -205,52 +253,14 @@ int main(void) {
                                                   0,
                                                   true);
 
-    quantization_t *q = quantizationInitFloat();
+    layer_t *model[MODEL_SIZE];
+    buildModel(model);
 
-    float weight0Data[20 * 28 * 28] = {0};
-    size_t weight0Dims[] = {20, 28 * 28};
-    size_t weight0NumberOfDims = 2;
-    tensor_t *weight0Param = tensorInitWithDistribution(XAVIER_UNIFORM, weight0Data, weight0Dims, weight0NumberOfDims, q, NULL, 28*28, 20);
-    tensor_t *weight0Grad = gradInitFloat(weight0Param, NULL);
-    parameter_t *weight0 = parameterInit(weight0Param, weight0Grad);
-
-    float bias0Data[20] = {0};
-    size_t bias0Dims[] = {1, 20};
-    size_t bias0NumberOfDims = 2;
-    tensor_t *bias0Param = tensorInitWithDistribution(ZEROS, bias0Data, bias0Dims, bias0NumberOfDims, q, NULL, 1, 20);
-    tensor_t *bias0Grad = gradInitFloat(bias0Param, NULL);
-    parameter_t *bias0 = parameterInit(bias0Param, bias0Grad);
-
-    layer_t *linear0 = linearLayerInit(weight0, bias0, q, q, q, q);
-
-    layer_t *relu = reluLayerInit(q, q);
-
-    float weight1Data[10 * 20] = {0};
-    size_t weight1Dims[] = {10, 20};
-    size_t weight1NumberOfDims = 2;
-    tensor_t *weight1Param = tensorInitWithDistribution(XAVIER_UNIFORM, weight1Data, weight1Dims, weight1NumberOfDims, q, NULL, 20, 10);
-    tensor_t *weight1Grad = gradInitFloat(weight1Param, NULL);
-    parameter_t *weight1 = parameterInit(weight1Param, weight1Grad);
-
-    float bias1Data[10] = {0};
-    size_t bias1Dims[] = {1, 10};
-    size_t bias1NumberOfDims = 2;
-    tensor_t *bias1Param = tensorInitWithDistribution(ZEROS, bias1Data, bias1Dims, bias1NumberOfDims, q, NULL, 1, 10);
-    tensor_t *bias1Grad = gradInitFloat(bias1Param, NULL);
-    parameter_t *bias1 = parameterInit(bias1Param, bias1Grad);
-
-    layer_t *linear1 = linearLayerInit(weight1, bias1, q, q, q, q);
-
-    layer_t *softmax = softmaxLayerInit(q, q);
-
-    layer_t *model[] = {linear0, relu, linear1, softmax};
-    size_t sizeModel = 4;
-
-    optimizer_t *sgd = sgdMCreateOptim(0.001f, 0.f, 0.f, model, sizeModel, FLOAT32);
+    optimizer_t *sgd = sgdMCreateOptim(0.001f, 0.f, 0.f, model, MODEL_SIZE, FLOAT32);
 
     clock_t start = clock();
 
-    trainingRunResult_t result = trainingRun(model, sizeModel, CROSS_ENTROPY,
+    trainingRunResult_t result = trainingRun(model, MODEL_SIZE, CROSS_ENTROPY,
                                              trainDataloader, testDataloader, sgd,
                                              numberOfEpochs, calculateGradsSequential,
                                              inferenceWithLoss, epochCallback);
@@ -261,7 +271,7 @@ int main(void) {
     PRINT_INFO("Training finished in %f seconds\n", duration_sec);
     PRINT_INFO("Final train loss: %f, eval loss: %f\n", result.finalTrainLoss, result.finalEvalLoss);
 
-    float accuracy = evaluationEpochAccuracy(model, sizeModel, testDataloader, 10, inference);
+    float accuracy = evaluationEpochAccuracy(model, MODEL_SIZE, testDataloader, 10, inference);
 
     PRINT_INFO("Integration test accuracy: %.2f%%\n", accuracy * 100.0f);
 }

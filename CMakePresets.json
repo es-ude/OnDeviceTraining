@@ -45,6 +45,15 @@
       "cacheVariables": {
         "DEBUG_MODE_DEBUG": "ON"
       }
+    },
+    {
+      "name": "unit_test_asan",
+      "displayName": "Unit-Test-ASan",
+      "inherits": "host",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS": "-fsanitize=address,undefined -fno-sanitize=function -fno-omit-frame-pointer -fno-sanitize-recover=all -g -O1",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined"
+      }
     }
   ],
   "buildPresets": [
@@ -76,6 +85,12 @@
       "name": "unit_test_debug",
       "inherits": "host",
       "configurePreset": "unit_test_debug",
+      "targets": "all_unit_tests"
+    },
+    {
+      "name": "unit_test_asan",
+      "inherits": "host",
+      "configurePreset": "unit_test_asan",
       "targets": "all_unit_tests"
     }
   ],
@@ -134,6 +149,24 @@
         "include": {
           "label": "unit"
         }
+      }
+    },
+    {
+      "name": "unit_test_asan",
+      "displayName": "Unit Tests (ASan + UBSan)",
+      "configurePreset": "unit_test_asan",
+      "output": {
+        "outputJUnitFile": "unit-test-asan.junit",
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "unit"
+        }
+      },
+      "environment": {
+        "ASAN_OPTIONS": "detect_leaks=0:abort_on_error=1:halt_on_error=1:strict_string_checks=1:check_initialization_order=1",
+        "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1"
       }
     }
   ]

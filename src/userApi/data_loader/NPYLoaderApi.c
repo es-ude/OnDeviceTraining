@@ -20,7 +20,7 @@ tensorArray_t *npyLoad(char *path) {
     checkMagic(f);
 
     uint32_t headerSize = readHeaderSize(f);
-    char *header = *reserveMemory(headerSize);
+    char *header = *reserveMemory(headerSize + 1);
     readHeader(header, headerSize, f);
 
     dtype_t dtype = getDTypeFromHeader(header);

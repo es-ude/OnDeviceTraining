@@ -53,7 +53,7 @@ tensorArray_t *npyLoad(char *path) {
     for (size_t i = 0; i < numberOfTensors; i++) {
         float *data = *reserveMemory(numberOfValuesInRow * bytesPerValue);
         size_t *dims = *reserveMemory(numberOfDims * sizeof(size_t));
-        memcpy(dims, rowDims, numberOfDims * sizeof(size_t));
+        memcpy(dims, rowDims, rowNumberOfDims * sizeof(size_t));
 
         size_t n = fread(data, bytesPerValue, numberOfValuesInRow, f);
         tensorArr->array[i] = tensorInit(data, dims, rowShape.numberOfDimensions, q, NULL);

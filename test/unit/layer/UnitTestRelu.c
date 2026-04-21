@@ -1,12 +1,12 @@
-#include "Relu.h"
-#include "Quantization.h"
-#include "unity.h"
 #include "DTypes.h"
-#include "Tensor.h"
-#include "TensorConversion.h"
-#include "ReluApi.h"
-#include "TensorApi.h"
+#include "Quantization.h"
 #include "QuantizationApi.h"
+#include "Relu.h"
+#include "ReluApi.h"
+#include "Tensor.h"
+#include "TensorApi.h"
+#include "TensorConversion.h"
+#include "unity.h"
 
 void testReluForwardFloat() {
     size_t numberOfElements = 6;
@@ -16,26 +16,21 @@ void testReluForwardFloat() {
     size_t inputDims[] = {2, 3};
     size_t inputNumberOfDims = 2;
     size_t inputOrderOfDims[] = {0, 1};
-    shape_t inputShape = {
-        .dimensions = inputDims,
-        .orderOfDimensions = inputOrderOfDims,
-        .numberOfDimensions = inputNumberOfDims
-    };
+    shape_t inputShape = {.dimensions = inputDims,
+                          .orderOfDimensions = inputOrderOfDims,
+                          .numberOfDimensions = inputNumberOfDims};
     quantization_t inputQ;
     initFloat32Quantization(&inputQ);
-    setTensorValues(&input, (uint8_t *)inputData, &inputShape,
-                    &inputQ, NULL);
+    setTensorValues(&input, (uint8_t *)inputData, &inputShape, &inputQ, NULL);
 
     tensor_t output;
     float outputData[numberOfElements];
     size_t outputDims[] = {2, 3};
     size_t outputNumberOfDims = 2;
     size_t outputOrderOfDims[] = {0, 1};
-    shape_t outputShape = {
-        .dimensions = outputDims,
-        .orderOfDimensions = outputOrderOfDims,
-        .numberOfDimensions = outputNumberOfDims
-    };
+    shape_t outputShape = {.dimensions = outputDims,
+                           .orderOfDimensions = outputOrderOfDims,
+                           .numberOfDimensions = outputNumberOfDims};
     quantization_t outputQ;
     initFloat32Quantization(&outputQ);
     setTensorValues(&output, (uint8_t *)outputData, &outputShape, &outputQ, NULL);
@@ -62,7 +57,7 @@ void testReluForwardSymInt32() {
     float inputData[] = {-1.f, 0.f, 1.f, 2.f, 5.f, -6.f};
     tensor_t *input = tensorInitSymInt32(inputData, dims, numberOfDims, HTE, NULL);
 
-    float outputData[6];
+    float outputData[6] = {0};
     tensor_t *output = tensorInitSymInt32(outputData, dims, numberOfDims, HTE, NULL);
 
     quantization_t *symIntQ = quantizationInitSymInt32(HTE);
@@ -77,7 +72,7 @@ void testReluForwardSymInt32() {
     float expected[] = {0, 0, 1, 2, 5, 0};
     float *actual = (float *)outputFloat->data;
 
-    for(size_t i = 0; i < numberOfValues; i++) {
+    for (size_t i = 0; i < numberOfValues; i++) {
         TEST_ASSERT_FLOAT_WITHIN(0.1f, expected[i], actual[i]);
     }
 }
@@ -136,11 +131,10 @@ void testReluBackwardSymInt32() {
     convertTensor(propLoss, propLossFloat);
     float *actual = (float *)propLossFloat->data;
 
-    for(size_t i = 0; i < numberOfValues; i++) {
+    for (size_t i = 0; i < numberOfValues; i++) {
         TEST_ASSERT_FLOAT_WITHIN(0.1f, expected[i], actual[i]);
     }
 }
-
 
 void setUp() {}
 void tearDown() {}

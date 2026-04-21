@@ -1,11 +1,12 @@
 #include <stdlib.h>
+#include <string.h>
 
+#include "QuantizationApi.h"
 #include "Softmax.h"
-#include "unity.h"
-#include "TensorConversion.h"
 #include "SoftmaxApi.h"
 #include "TensorApi.h"
-#include "QuantizationApi.h"
+#include "TensorConversion.h"
+#include "unity.h"
 
 void unitTestSoftmaxForwardFloat() {
     size_t inputSize = 6;
@@ -25,7 +26,8 @@ void unitTestSoftmaxForwardFloat() {
     layerFunctions_t softmaxFns = layerFunctions[SOFTMAX];
     softmaxFns.forward(softmaxLayer, input, output);
 
-    float expected[] = {2.3008e-03f, 6.2543e-03f, 1.7001e-02f, 4.6213e-02f, 9.2822e-01f, 1.5503e-05f};
+    float expected[] = {2.3008e-03f, 6.2543e-03f, 1.7001e-02f,
+                        4.6213e-02f, 9.2822e-01f, 1.5503e-05f};
 
     float *actual = (float *)output->data;
 
@@ -56,10 +58,11 @@ void unitTestSoftmaxForwardSymInt32() {
     tensor_t *outputFloat = tensorInitFloat(outputFloatData, dims, numberOfDims, NULL);
     convertTensor(output, outputFloat);
 
-    float expected[] = {2.3008e-03f, 6.2543e-03f, 1.7001e-02f, 4.6213e-02f, 9.2822e-01f, 1.5503e-05f};
+    float expected[] = {2.3008e-03f, 6.2543e-03f, 1.7001e-02f,
+                        4.6213e-02f, 9.2822e-01f, 1.5503e-05f};
     float *actual = (float *)outputFloat->data;
 
-    for(size_t i = 0; i < inputSize; i++) {
+    for (size_t i = 0; i < inputSize; i++) {
         TEST_ASSERT_FLOAT_WITHIN(0.1f, expected[i], actual[i]);
     }
 }
@@ -71,7 +74,6 @@ void unitTestSoftmaxBackwardFloat() {
     size_t inputDims[] = {2, 3};
     size_t inputNumberOfDims = 2;
     tensor_t *input = tensorInitFloat(inputData, inputDims, inputNumberOfDims, NULL);
-
 
     float lossData[] = {0.f, 2.f, -4.f, 6.f, 3.f, 2.f};
     size_t lossDims[] = {2, 3};
@@ -88,8 +90,8 @@ void unitTestSoftmaxBackwardFloat() {
     layerFunctions_t softmaxFns = layerFunctions[SOFTMAX];
     softmaxFns.backward(softmaxLayer, input, loss, propLoss);
 
-    float expected[] = {-6.9173e-03f, -6.2947e-03f, -1.1912e-01f, 1.3834e-01f, -5.9973e-03f,
-                        -1.5603e-05f};
+    float expected[] = {-6.9173e-03f, -6.2947e-03f, -1.1912e-01f,
+                        1.3834e-01f,  -5.9973e-03f, -1.5603e-05f};
 
     float *actual = (float *)propLoss->data;
 
@@ -101,7 +103,8 @@ void unitTestSoftmaxBackwardFloat() {
 void unitTestSoftmaxBackwardSymInt32() {
     size_t inputSize = 6;
 
-    float inputData[] = {2.3008e-03f, 6.2543e-03f, 1.7001e-02f, 4.6213e-02f, 9.2822e-01f, 1.5503e-05f};
+    float inputData[] = {2.3008e-03f, 6.2543e-03f, 1.7001e-02f,
+                         4.6213e-02f, 9.2822e-01f, 1.5503e-05f};
     size_t inputDims[] = {2, 3};
     size_t inputNumberOfDims = 2;
     tensor_t *input = tensorInitSymInt32(inputData, inputDims, inputNumberOfDims, HTE, NULL);
@@ -109,23 +112,26 @@ void unitTestSoftmaxBackwardSymInt32() {
     float lossData[] = {0.f, 2.f, -4.f, 6.f, 3.f, 2.f};
     size_t lossDims[] = {2, 3};
     size_t lossNumberOfDims = 2;
-    tensor_t *loss = tensorInitSymInt32(lossData, lossDims, lossNumberOfDims,HTE, NULL);
+    tensor_t *loss = tensorInitSymInt32(lossData, lossDims, lossNumberOfDims, HTE, NULL);
 
     float propLossData[inputSize];
+    memset(propLossData, 0, sizeof(propLossData));
     size_t propLossDims[] = {2, 3};
     size_t propLossNumberOfDims = 2;
-    tensor_t *propLoss = tensorInitSymInt32(propLossData, propLossDims, propLossNumberOfDims, HTE, NULL);
+    tensor_t *propLoss =
+        tensorInitSymInt32(propLossData, propLossDims, propLossNumberOfDims, HTE, NULL);
 
     quantization_t *symIntQ = quantizationInitSymInt32(HTE);
     layer_t *softmaxLayer = softmaxLayerInit(symIntQ, symIntQ);
     layerFunctions_t softmaxFns = layerFunctions[SOFTMAX];
     softmaxFns.backward(softmaxLayer, input, loss, propLoss);
 
-    float expected[] = {-6.9173e-03f, -6.2947e-03f, -1.1912e-01f, 1.3834e-01f, -5.9973e-03f,
-                        -1.5603e-05f};
+    float expected[] = {-6.9173e-03f, -6.2947e-03f, -1.1912e-01f,
+                        1.3834e-01f,  -5.9973e-03f, -1.5603e-05f};
 
     float propLossDataFloat[inputSize];
-    tensor_t *propLossFloat = tensorInitFloat(propLossDataFloat, propLossDims, propLossNumberOfDims, NULL);
+    tensor_t *propLossFloat =
+        tensorInitFloat(propLossDataFloat, propLossDims, propLossNumberOfDims, NULL);
     convertTensor(propLoss, propLossFloat);
     float *actual = (float *)propLossFloat->data;
 

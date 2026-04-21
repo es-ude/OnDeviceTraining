@@ -3,16 +3,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "TensorApi.h"
-#include "Tensor.h"
 #include "Common.h"
-#include "StorageApi.h"
 #include "Dataset.h"
-#include "NPYLoaderApiInternal.h"
 #include "NPYLoader.h"
-#include "QuantizationApi.h"
+#include "NPYLoaderApiInternal.h"
 #include "Quantization.h"
-
+#include "QuantizationApi.h"
+#include "StorageApi.h"
+#include "Tensor.h"
+#include "TensorApi.h"
 
 tensorArray_t *npyLoad(char *path) {
     FILE *f = openNPYFile(path);
@@ -57,11 +56,7 @@ tensorArray_t *npyLoad(char *path) {
         memcpy(dims, rowDims, numberOfDims * sizeof(size_t));
 
         size_t n = fread(data, bytesPerValue, numberOfValuesInRow, f);
-        tensorArr->array[i] = tensorInit(data,
-                                         dims,
-                                         rowShape.numberOfDimensions,
-                                         q,
-                                         NULL);
+        tensorArr->array[i] = tensorInit(data, dims, rowShape.numberOfDimensions, q, NULL);
         if (n != numberOfValuesInRow) {
             PRINT_ERROR("fread did not read the correct number of bytes!");
             exit(1);
@@ -80,7 +75,6 @@ sample_t *npyGetSample(dataset_t *dataset, size_t index) {
 
     return sample;
 }
-
 
 static void getRowShape(shape_t *totalShape, shape_t *rowShape) {
     for (size_t i = 0; i < rowShape->numberOfDimensions; i++) {

@@ -12,7 +12,6 @@
 
 #include "Square.h"
 
-
 size_t squareInstructionCounter = 0;
 
 int32_t squareInt(int32_t a) {

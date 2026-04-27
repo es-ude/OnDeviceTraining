@@ -1,5 +1,5 @@
-#include "unity.h"
 #include "RNG.h"
+#include "unity.h"
 
 void setUp(void) {}
 
@@ -23,7 +23,9 @@ void testRngNextFloatDistribution(void) {
     for (size_t i = 0; i < n; i++) {
         float val = rngNextFloat();
         size_t bucket = (size_t)(val * buckets);
-        if (bucket >= buckets) bucket = buckets - 1;
+        if (bucket >= buckets) {
+            bucket = buckets - 1;
+        }
         counts[bucket]++;
     }
 

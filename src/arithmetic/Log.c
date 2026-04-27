@@ -4,7 +4,6 @@
 
 #include "Log.h"
 
-
 float logFloat(float x) {
     return logf(x);
 }

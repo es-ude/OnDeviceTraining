@@ -5,4 +5,4 @@
 
 optimizer_t *optimizerInit(optimizerType_t type, void *optimizerConfig);
 
-#endif //OPTIMIZER_API_H
+#endif // OPTIMIZER_API_H

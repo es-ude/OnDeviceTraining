@@ -4,13 +4,12 @@
 #include <stdlib.h>
 
 #include "Add.h"
+#include "Common.h"
 #include "Layer.h"
+#include "Linear.h"
 #include "Matmul.h"
 #include "Rounding.h"
 #include "TensorConversion.h"
-#include "Common.h"
-#include "Linear.h"
-
 
 void linearInitConfig(linearConfig_t *linearConfig, parameter_t *weights, parameter_t *bias,
                       quantization_t *forwardQ, quantization_t *weightGradQ,
@@ -56,7 +55,6 @@ void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output) {
         exit(1);
     }
 }
-
 
 void linearCalcWeightGradsFloat32(tensor_t *forwardInput, tensor_t *loss, tensor_t *weightGrads) {
     size_t numberOfWeights = calcNumberOfElementsByTensor(weightGrads);
@@ -124,7 +122,6 @@ void linearCalcWeightGradsFloatWithConversion(linearConfig_t *linearConfig, tens
     convertTensor(wG, paramWG);
 }
 
-
 void linearCalcBiasGradsFloat32(tensor_t *loss, tensor_t *biasGrad) {
     addFloat32TensorsInplace(biasGrad, loss);
 }
@@ -163,7 +160,6 @@ void linearCalcBiasGradsFloatWithConversion(linearConfig_t *linearConfig, tensor
     convertTensor(bG, paramBG);
 }
 
-
 void linearCalcPropLossFloat32(tensor_t *loss, tensor_t *weights, tensor_t *propLoss) {
     matmulFloat32Tensors(loss, weights, propLoss);
 }
@@ -181,8 +177,7 @@ void linearCalcPropLossFloatWithConversion(linearConfig_t *linearConfig, tensor_
     initFloat32Quantization(&weightsFloatQ);
 
     if (w->quantization->type != FLOAT32) {
-        setTensorValuesForConversion((uint8_t *)weightsFloatData, &weightsFloatQ, w,
-                                     &weightsFloat);
+        setTensorValuesForConversion((uint8_t *)weightsFloatData, &weightsFloatQ, w, &weightsFloat);
         convertTensor(w, &weightsFloat);
         w = &weightsFloat;
     }
@@ -202,11 +197,9 @@ void linearCalcPropLossFloatWithConversion(linearConfig_t *linearConfig, tensor_
     linearCalcPropLossFloat32(l, w, pL);
 }
 
-
 void backwardFloat(linearConfig_t *linearConfig, tensor_t *forwardInput, tensor_t *loss,
                    tensor_t *propLossTensor) {
-    size_t numberOfWeights =
-        calcNumberOfElementsByShape(linearConfig->weights->param->shape);
+    size_t numberOfWeights = calcNumberOfElementsByShape(linearConfig->weights->param->shape);
 
     tensor_t *weightGrad = getGradFromParameter(linearConfig->weights);
 
@@ -226,7 +219,6 @@ void backwardFloat(linearConfig_t *linearConfig, tensor_t *forwardInput, tensor_
 
     linearCalcPropLossFloat32(loss, weightData, propLossTensor);
 }
-
 
 void linearCalcWeightGradsSymInt32(tensor_t *loss, tensor_t *forwardInput, tensor_t *weightGrads) {
     size_t numberOfWeights = calcNumberOfElementsByTensor(weightGrads);
@@ -307,7 +299,6 @@ void linearCalcWeightGradsSymInt32WithConversion(linearConfig_t *linearConfig, t
     convertTensor(wG, paramWG);
 }
 
-
 void linearCalcBiasGradsSymInt32(tensor_t *biasGrads, tensor_t *loss) {
     addSymInt32TensorsInplace(biasGrads, loss);
 }
@@ -352,7 +343,6 @@ void linearCalcBiasGradsSymInt32WithConversion(linearConfig_t *linearConfig, ten
     convertTensor(bG, paramBG);
 }
 
-
 void linearCalcPropLossSymInt32(tensor_t *weights, tensor_t *loss, tensor_t *propLoss) {
     matmulSymInt32Tensors(loss, weights, propLoss);
 }
@@ -396,11 +386,9 @@ void linearCalcPropLossSymInt32WithConversion(linearConfig_t *linearConfig, tens
     linearCalcPropLossSymInt32(w, l, propLoss);
 }
 
-
 void backwardSymInt32(linearConfig_t *linearConfig, tensor_t *forwardInput, tensor_t *loss,
                       tensor_t *propLoss) {
-    size_t numberOfWeights =
-        calcNumberOfElementsByShape(linearConfig->weights->param->shape);
+    size_t numberOfWeights = calcNumberOfElementsByShape(linearConfig->weights->param->shape);
 
     tensor_t *weights = getParamFromParameter(linearConfig->weights);
     tensor_t *weightGrads = getGradFromParameter(linearConfig->weights);
@@ -417,8 +405,7 @@ void backwardSymInt32(linearConfig_t *linearConfig, tensor_t *forwardInput, tens
     setTensorValues(&intermediateWeightGradsSymInt32, (uint8_t *)intermediateWeightGradsData,
                     weightGrads->shape, &intermediateWeightGradsQ, NULL);
 
-    linearCalcWeightGradsSymInt32(loss, forwardInput,
-                                  &intermediateWeightGradsSymInt32);
+    linearCalcWeightGradsSymInt32(loss, forwardInput, &intermediateWeightGradsSymInt32);
     addSymInt32TensorsInplace(weightGrads, &intermediateWeightGradsSymInt32);
 
     linearCalcBiasGradsSymInt32(biasGrads, loss);
@@ -468,7 +455,7 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
 }
 
 void linearCalcOutputShape(layer_t *linearLayer, shape_t *inputShape, shape_t *outputShape) {
-    if(inputShape->numberOfDimensions != 2) {
+    if (inputShape->numberOfDimensions != 2) {
         PRINT_ERROR("Linear layer expects 2D input, got %luD\n", inputShape->numberOfDimensions);
     }
 

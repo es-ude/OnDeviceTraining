@@ -17,7 +17,6 @@ void deserializeTensor(tensor_t *tensor, FILE *f);
  */
 void deserializeParameter(parameter_t *parameter, FILE *f);
 
-
 /*! Deserializes model from a given file.
  *
  * \param model: Pointer to model to write deserialized data to
@@ -26,4 +25,4 @@ void deserializeParameter(parameter_t *parameter, FILE *f);
  */
 void deserializeModel(layer_t **model, size_t sizeModel, FILE *f);
 
-#endif //DESERIALIZE_H
+#endif // DESERIALIZE_H

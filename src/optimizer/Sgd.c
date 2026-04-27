@@ -1,15 +1,14 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <tgmath.h>
-#include <stdlib.h>
 
-#include "Tensor.h"
-#include "TensorConversion.h"
 #include "Common.h"
 #include "Sgd.h"
-
+#include "Tensor.h"
+#include "TensorConversion.h"
 
 void sgdInit(sgd_t *sgd, float learningRate, float momentumFactor, float weightDecay) {
     sgd->learningRate = learningRate;
@@ -136,8 +135,7 @@ static void sgdStepMSymInt32(optimizer_t *optim) {
         quantization_t stateFloatQ;
         initFloat32Quantization(&stateFloatQ);
         uint8_t stateFloatData[numberOfValues * sizeof(float)];
-        setTensorValuesForConversion(stateFloatData, &stateFloatQ, state,
-                                     &stateFloat);
+        setTensorValuesForConversion(stateFloatData, &stateFloatQ, state, &stateFloat);
         convertTensor(state, &stateFloat);
         float *stateFloatArr = (float *)stateFloat.data;
 
@@ -162,7 +160,8 @@ void sgdStepM(optimizer_t *optimizer) {
         break;
     default:
         PRINT_ERROR("Unknown Layer Type!");
-        exit(1);    }
+        exit(1);
+    }
 }
 
 void sgdZeroGrad(optimizer_t *optimizer) {

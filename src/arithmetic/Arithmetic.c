@@ -3,11 +3,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "Arithmetic.h"
 #include "Common.h"
 #include "DTypes.h"
 #include "Matmul.h"
-#include "Arithmetic.h"
-
 
 size_t getDimensionsByIndex(tensor_t *tensor, size_t index) {
     size_t numberOfDims = tensor->shape->numberOfDimensions;
@@ -96,7 +95,6 @@ size_t calcElementIndexByIndices(size_t numberOfDims, size_t *dims, size_t *indi
     }
     return outputIndex;
 }
-
 
 void int32PointWiseArithmetic(tensor_t *aTensor, tensor_t *bTensor,
                               int32ElementArithmeticFunc_t arithmeticFunc, tensor_t *outputTensor) {
@@ -220,10 +218,8 @@ void int32ElementWithTensorArithmetic(tensor_t *tensor, int32_t x,
     }
 }
 
-
 void floatPointWiseArithmetic(tensor_t *aTensor, tensor_t *bTensor,
-                              floatElementArithmeticFunc_t arithmeticFunc,
-                              tensor_t *outputTensor) {
+                              floatElementArithmeticFunc_t arithmeticFunc, tensor_t *outputTensor) {
     if (!doDimensionsMatch(aTensor, bTensor)) {
         PRINT_ERROR("Dimensions don't match");
         exit(1);
@@ -309,7 +305,6 @@ void floatPointWiseArithmeticInplace(tensor_t *aTensor, tensor_t *bTensor,
         size_t outputByteIndex = i * bytesPerElement;
 
         writeFloatToByteArray(result, &aTensor->data[outputByteIndex]);
-
     }
 }
 

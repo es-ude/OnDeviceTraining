@@ -4,7 +4,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-
 typedef struct {
     uint32_t state;
 } rng32_t;
@@ -20,4 +19,4 @@ uint32_t rngGetSeed(void);
 
 float rngNextFloat(void);
 
-#endif //RNG_H
+#endif // RNG_H

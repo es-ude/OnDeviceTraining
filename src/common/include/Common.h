@@ -19,33 +19,32 @@
 #define DLEVEL 0
 #endif
 
-#define PRINT_DEBUG(str, ...) \
-do { \
-if (DLEVEL >= 3) { \
-printf("\033[0;33m[%s: %s] ", SOURCE_FILE, __FUNCTION__); \
-printf(str, ##__VA_ARGS__); \
-printf("\033[0m\n"); \
-} \
-} while (false)
-
-#define PRINT_INFO(str, ...)                                                    \
-    do {                                                                        \
-        if (DLEVEL >= 2) {                                                 \
-            printf("[%s: %s] ", SOURCE_FILE, __FUNCTION__); \
-            printf(str, ##__VA_ARGS__); \
-            printf("\n"); \
-        } \
+#define PRINT_DEBUG(str, ...)                                                                      \
+    do {                                                                                           \
+        if (DLEVEL >= 3) {                                                                         \
+            printf("\033[0;33m[%s: %s] ", SOURCE_FILE, __FUNCTION__);                              \
+            printf(str, ##__VA_ARGS__);                                                            \
+            printf("\033[0m\n");                                                                   \
+        }                                                                                          \
     } while (false)
 
-#define PRINT_ERROR(str, ...) \
-    do { \
-        if (DLEVEL >= 1) { \
-            printf("\033[0;31m[%s: %s] ", SOURCE_FILE, __FUNCTION__); \
-            printf(str, ##__VA_ARGS__); \
-            printf("\033[0m\n"); \
-        } \
-    } while (false)                                      \
+#define PRINT_INFO(str, ...)                                                                       \
+    do {                                                                                           \
+        if (DLEVEL >= 2) {                                                                         \
+            printf("[%s: %s] ", SOURCE_FILE, __FUNCTION__);                                        \
+            printf(str, ##__VA_ARGS__);                                                            \
+            printf("\n");                                                                          \
+        }                                                                                          \
+    } while (false)
 
+#define PRINT_ERROR(str, ...)                                                                      \
+    do {                                                                                           \
+        if (DLEVEL >= 1) {                                                                         \
+            printf("\033[0;31m[%s: %s] ", SOURCE_FILE, __FUNCTION__);                              \
+            printf(str, ##__VA_ARGS__);                                                            \
+            printf("\033[0m\n");                                                                   \
+        }                                                                                          \
+    } while (false)
 
 // TODO
 
@@ -58,6 +57,5 @@ printf("\033[0m\n"); \
         }                                                                                          \
         printf("\n");                                                                              \
     } while (false)
-
 
 #endif

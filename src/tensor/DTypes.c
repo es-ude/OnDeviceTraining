@@ -5,7 +5,6 @@
 #include "DTypes.h"
 #include "Tensor.h"
 
-
 int32_t readBytesAsInt32(uint8_t *bytes) {
     int32_t x;
     memcpy(&x, bytes, sizeof(int32_t));

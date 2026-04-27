@@ -1,7 +1,7 @@
 #define SOURCE_FILE "QUANTIZATION_LAYER"
 
-#include "TensorConversion.h"
 #include "QuantizationLayer.h"
+#include "TensorConversion.h"
 
 void quantization(tensor_t *input, tensor_t *output) {
     qtype_t inputQType = input->quantization->type;

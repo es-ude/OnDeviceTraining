@@ -1,8 +1,7 @@
-#include "Mul.h"
 #include "Arithmetic.h"
+#include "Mul.h"
 #include "Tensor.h"
 #include "unity.h"
-
 
 void testMulFloatTensors() {
     size_t numberOfElements = 6;
@@ -11,14 +10,10 @@ void testMulFloatTensors() {
     size_t aNumberOfDims = 2;
     size_t aDims[] = {2, 3};
     size_t aOrderOfDims[] = {0, 1};
-    shape_t aShape = {
-        .dimensions = aDims,
-        .orderOfDimensions = aOrderOfDims,
-        .numberOfDimensions = aNumberOfDims
-    };
-    quantization_t aQ = {
-        .type = FLOAT32
-    };
+    shape_t aShape = {.dimensions = aDims,
+                      .orderOfDimensions = aOrderOfDims,
+                      .numberOfDimensions = aNumberOfDims};
+    quantization_t aQ = {.type = FLOAT32};
 
     tensor_t aTensor = {
         .data = (uint8_t *)aData,
@@ -31,14 +26,10 @@ void testMulFloatTensors() {
     size_t bNumberOfDims = 2;
     size_t bDims[] = {2, 3};
     size_t bOrderOfDims[] = {1, 0};
-    shape_t bShape = {
-        .dimensions = bDims,
-        .orderOfDimensions = bOrderOfDims,
-        .numberOfDimensions = bNumberOfDims
-    };
-    quantization_t bQ = {
-        .type = FLOAT32
-    };
+    shape_t bShape = {.dimensions = bDims,
+                      .orderOfDimensions = bOrderOfDims,
+                      .numberOfDimensions = bNumberOfDims};
+    quantization_t bQ = {.type = FLOAT32};
     tensor_t bTensor = {
         .data = (uint8_t *)bData,
         .shape = &bShape,
@@ -63,14 +54,10 @@ void testMulFloatElementWithTensor() {
     size_t aNumberOfDims = 2;
     size_t aDims[] = {2, 3};
     size_t aOrderOfDims[] = {0, 1};
-    shape_t aShape = {
-        .dimensions = aDims,
-        .orderOfDimensions = aOrderOfDims,
-        .numberOfDimensions = aNumberOfDims
-    };
-    quantization_t aQ = {
-        .type = FLOAT32
-    };
+    shape_t aShape = {.dimensions = aDims,
+                      .orderOfDimensions = aOrderOfDims,
+                      .numberOfDimensions = aNumberOfDims};
+    quantization_t aQ = {.type = FLOAT32};
 
     tensor_t aTensor = {
         .data = (uint8_t *)aData,
@@ -88,7 +75,6 @@ void testMulFloatElementWithTensor() {
 
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, aTensor.data, numberOfElements);
 }
-
 
 void setUp() {}
 void tearDown() {}

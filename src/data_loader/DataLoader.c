@@ -4,9 +4,8 @@
 #include <stdlib.h>
 
 #include "Common.h"
-#include "RNG.h"
 #include "DataLoader.h"
-
+#include "RNG.h"
 
 void initDataLoader(dataLoader_t *dataLoader, getSampleFn_t getSample,
                     getDatasetSizeFn_t getDatasetSize, getBatchFn_t getBatch, uint16_t batchSize,
@@ -35,8 +34,9 @@ void initDataLoader(dataLoader_t *dataLoader, getSampleFn_t getSample,
 
     size_t sizeDataset = getDatasetSize();
 
-    for (size_t i = 0; i < sizeDataset; ++i)
+    for (size_t i = 0; i < sizeDataset; ++i) {
         indices[i] = i;
+    }
 
     if (shuffle) {
         rngSetSeed(shuffleSeed);

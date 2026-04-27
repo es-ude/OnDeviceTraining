@@ -3,24 +3,23 @@
 
 #include <stdbool.h>
 
-#include "Tensor.h"
 #include "Dataset.h"
-
+#include "Tensor.h"
 
 typedef struct dataLoader dataLoader_t;
 
-typedef tensor_t* (*transformFn_t)(tensor_t* tensor);
-typedef sample_t* (*getSampleFn_t)(size_t id);
+typedef tensor_t *(*transformFn_t)(tensor_t *tensor);
+typedef sample_t *(*getSampleFn_t)(size_t id);
 typedef size_t (*getDatasetSizeFn_t)();
-typedef batch_t* (*getBatchFn_t)(dataLoader_t *dataLoader, size_t index);
+typedef batch_t *(*getBatchFn_t)(dataLoader_t *dataLoader, size_t index);
 
-struct dataLoader
-{
-    getSampleFn_t getSample; /*!< Pointer to function to get a sample from the dataset*/
+struct dataLoader {
+    getSampleFn_t getSample;           /*!< Pointer to function to get a sample from the dataset*/
     getDatasetSizeFn_t getDatasetSize; /*!< Pointer to function to get the size of the dataset */
 
     uint16_t batchSize;
-    getBatchFn_t getBatch; /*!< Pointer to function to get a batch with batchSize many samples form the dataset */
+    getBatchFn_t getBatch; /*!< Pointer to function to get a batch with batchSize many samples form
+                              the dataset */
 
     transformFn_t transform; /*!< Pointer to function to be used once after loading the dataset */
     transformFn_t targetTransform; /*!< Pointer to function to be used after each getBatch */
@@ -51,4 +50,4 @@ void initDataLoader(dataLoader_t *dataLoader, getSampleFn_t getSample,
                     transformFn_t transform, transformFn_t targetTransform, bool shuffle,
                     uint64_t shuffleSeed, size_t *indices, bool dropLast);
 
-#endif //DATALOADER_H
+#endif // DATALOADER_H

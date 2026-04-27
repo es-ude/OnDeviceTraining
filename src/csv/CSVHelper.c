@@ -4,9 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "Common.h"
 #include "CSVHelper.h"
-
+#include "Common.h"
 
 void setCSVData(csvData_t *csvData, char **rows, size_t numberOfRows, size_t *entriesInRow) {
     csvData->rows = rows;
@@ -23,7 +22,6 @@ static size_t countCsvEntries(const char *row) {
     }
     return count;
 }
-
 
 void csvReadRowsByBufferSize(char *filePath, csvData_t *csvData) {
     FILE *fp;

@@ -1,11 +1,11 @@
 #ifndef TRAINING_LOOP_API_H
 #define TRAINING_LOOP_API_H
 
-#include "Tensor.h"
-#include "Optimizer.h"
-#include "LossFunction.h"
 #include "DataLoader.h"
 #include "InferenceApi.h"
+#include "LossFunction.h"
+#include "Optimizer.h"
+#include "Tensor.h"
 
 typedef struct trainingStats {
     tensor_t *output;
@@ -100,16 +100,14 @@ epochStats_t evaluationEpochWithMetrics(layer_t **model, size_t modelSize, lossT
  * \return Report with epoch metrics and non-owning pointer to cmBuffer
  */
 classificationReport_t evaluationEpochWithReport(layer_t **model, size_t modelSize,
-                                                  lossType_t lossType,
-                                                  dataLoader_t *dataLoader,
-                                                  inferenceWithLossFn_t inferenceFn,
-                                                  size_t *cmBuffer, size_t numClasses);
+                                                 lossType_t lossType, dataLoader_t *dataLoader,
+                                                 inferenceWithLossFn_t inferenceFn,
+                                                 size_t *cmBuffer, size_t numClasses);
 
 trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossType_t lossType,
                                 dataLoader_t *trainDataLoader, dataLoader_t *evalDataLoader,
                                 optimizer_t *optimizer, size_t numberOfEpochs,
                                 calculateGradsFn_t calculateGradsFn,
-                                inferenceWithLossFn_t inferenceFn,
-                                epochCallbackFn_t callback);
+                                inferenceWithLossFn_t inferenceFn, epochCallbackFn_t callback);
 
 #endif // TRAINING_LOOP_API_H

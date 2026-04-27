@@ -8,13 +8,13 @@
  *
  * \returns Pointer to initialized quantization
  */
-quantization_t* quantizationInitFloat();
+quantization_t *quantizationInitFloat();
 
 /*! Initializes int32 quantization.
  *
  * \returns Pointer to initialized quantization
  */
-quantization_t* quantizationInitInt32();
+quantization_t *quantizationInitInt32();
 
 /*! Initializes symInt32 quantization.
  *
@@ -22,7 +22,7 @@ quantization_t* quantizationInitInt32();
  *
  * \returns Pointer to initialized quantization
  */
-quantization_t* quantizationInitSymInt32(roundingMode_t roundingMode);
+quantization_t *quantizationInitSymInt32(roundingMode_t roundingMode);
 
 /*! Initializes asym quantization.
  *
@@ -31,6 +31,6 @@ quantization_t* quantizationInitSymInt32(roundingMode_t roundingMode);
  *
  * \returns Pointer to initialized quantization
  */
-quantization_t* quantizationInitAsym(uint8_t qBits, roundingMode_t roundingMode);
+quantization_t *quantizationInitAsym(uint8_t qBits, roundingMode_t roundingMode);
 
-#endif //QUANTIZATIONAPI_H
+#endif // QUANTIZATIONAPI_H

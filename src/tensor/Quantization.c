@@ -3,8 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "Rounding.h"
 #include "Quantization.h"
+#include "Rounding.h"
 
 void initSymInt32QConfig(roundingMode_t roundingMode, symInt32QConfig_t *symInt32QConfig) {
     symInt32QConfig->roundingMode = roundingMode;
@@ -12,7 +12,8 @@ void initSymInt32QConfig(roundingMode_t roundingMode, symInt32QConfig_t *symInt3
     symInt32QConfig->qMaxBits = 16;
 }
 
-void initSymInt32QConfigWithQMaxBits(roundingMode_t roundingMode, symInt32QConfig_t *symInt32QConfig, uint8_t qMaxBits) {
+void initSymInt32QConfigWithQMaxBits(roundingMode_t roundingMode,
+                                     symInt32QConfig_t *symInt32QConfig, uint8_t qMaxBits) {
     symInt32QConfig->roundingMode = roundingMode;
     symInt32QConfig->scale = 1.f;
     symInt32QConfig->qMaxBits = qMaxBits;
@@ -30,7 +31,6 @@ void initAsymQConfig(uint8_t qBits, roundingMode_t roundingMode, asymQConfig_t *
     asymQConfig->scale = 1.f;
     asymQConfig->zeroPoint = (uint16_t)0;
 }
-
 
 void initInt32Quantization(quantization_t *quantization) {
     quantization->type = INT32;
@@ -56,4 +56,3 @@ void initAsymQuantization(asymQConfig_t *asymQConfig, quantization_t *quantizati
     quantization->type = ASYM;
     quantization->qConfig = asymQConfig;
 }
-

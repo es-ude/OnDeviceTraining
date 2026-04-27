@@ -1,15 +1,14 @@
 #define SOURCE_FILE "RELU"
 
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 
-#include "Tensor.h"
+#include "Common.h"
 #include "Comparison.h"
 #include "DTypes.h"
 #include "Layer.h"
-#include "Common.h"
 #include "Relu.h"
-
+#include "Tensor.h"
 
 void reluInitConfig(reluConfig_t *reluConfig, quantization_t *forwardQ, quantization_t *backwardQ) {
     reluConfig->forwardQ = forwardQ;
@@ -79,8 +78,7 @@ void reluBackwardSymInt32(tensor_t *forwardInput, tensor_t *loss, tensor_t *prop
     propLossQC->scale = lossQC->scale;
 }
 
-void reluBackward(layer_t *reluLayer, tensor_t *forwardInput, tensor_t *loss,
-                  tensor_t *propLoss) {
+void reluBackward(layer_t *reluLayer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
     reluConfig_t *reluConfig = reluLayer->config->relu;
 
     switch (reluConfig->backwardQ->type) {

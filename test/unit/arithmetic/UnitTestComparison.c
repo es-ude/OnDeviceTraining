@@ -13,15 +13,11 @@ void testGteInt32Value() {
     int32_t aData[] = {-1, 0, 1};
     uint8_t *aDataBytes = (uint8_t *)aData;
 
-
     size_t numberOfDims = 1;
     size_t dims[] = {3};
     size_t orderOfDims[] = {0};
     shape_t shape = {
-        .dimensions = dims,
-        .orderOfDimensions = orderOfDims,
-        .numberOfDimensions = numberOfDims
-    };
+        .dimensions = dims, .orderOfDimensions = orderOfDims, .numberOfDimensions = numberOfDims};
 
     quantization_t aQ;
     initInt32Quantization(&aQ);
@@ -58,10 +54,7 @@ void testGteFloatTensors() {
     size_t dims[] = {3};
     size_t orderOfDims[] = {0};
     shape_t shape = {
-        .dimensions = dims,
-        .orderOfDimensions = orderOfDims,
-        .numberOfDimensions = numberOfDims
-    };
+        .dimensions = dims, .orderOfDimensions = orderOfDims, .numberOfDimensions = numberOfDims};
 
     quantization_t aQ;
     initFloat32Quantization(&aQ);
@@ -83,7 +76,6 @@ void testGteFloatTensors() {
     float resultData[numberOfValues];
     uint8_t *resultDataBytes = (uint8_t *)resultData;
 
-
     quantization_t resultQ;
     initFloat32Quantization(&resultQ);
 
@@ -96,7 +88,6 @@ void testGteFloatTensors() {
 
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, resultTensor.data, numberOfValues);
 }
-
 
 int main(void) {
     UNITY_BEGIN();

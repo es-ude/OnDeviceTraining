@@ -1,13 +1,12 @@
 #define SOURCE_FILE "NPY_LOADER"
 
+#include "string.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include "string.h"
 
 #include "Common.h"
 #include "DataLoader.h"
 #include "NPYLoader.h"
-
 
 FILE *openNPYFile(char *path) {
     FILE *f = fopen(path, "rb");
@@ -50,10 +49,12 @@ void readHeader(char *header, uint32_t headerSize, FILE *f) {
 }
 
 static dtype_t parseHeaderDescription(char *s) {
-    if (strcmp(s, "<f4") == 0)
+    if (strcmp(s, "<f4") == 0) {
         return FLOAT_32;
-    if (strcmp(s, "<i4") == 0)
+    }
+    if (strcmp(s, "<i4") == 0) {
         return INT_32;
+    }
 
     fprintf(stderr, "Unsupported dtype: %s\n", s);
     exit(1);
@@ -73,25 +74,27 @@ size_t getNumberOfDimsFromHeader(char *header) {
     size_t numberOfDims = 0;
 
     while (*p != ')') {
-        while (*p == ' ')
+        while (*p == ' ') {
             p++;
+        }
 
         if (*p >= '0' && *p <= '9') {
             numberOfDims++;
-            while (*p >= '0' && *p <= '9')
+            while (*p >= '0' && *p <= '9') {
                 p++;
+            }
         }
 
-        if (*p == ',')
+        if (*p == ',') {
             p++;
+        }
     }
 
     return numberOfDims;
 }
 
-
 void getShapeFromHeader(shape_t *shape, size_t *dims, size_t *orderOfDims, char *header,
-                            size_t numberOfDims) {
+                        size_t numberOfDims) {
     shape->numberOfDimensions = numberOfDims;
     shape->dimensions = dims;
     shape->orderOfDimensions = orderOfDims;
@@ -101,8 +104,9 @@ void getShapeFromHeader(shape_t *shape, size_t *dims, size_t *orderOfDims, char 
     p++;
 
     for (size_t i = 0; i < numberOfDims; i++) {
-        while (*p == ' ')
+        while (*p == ' ') {
             p++;
+        }
 
         char *end;
         size_t value = strtoull(p, &end, 10);
@@ -112,7 +116,8 @@ void getShapeFromHeader(shape_t *shape, size_t *dims, size_t *orderOfDims, char 
 
         p = end;
 
-        if (*p == ',')
+        if (*p == ',') {
             p++;
+        }
     }
 }

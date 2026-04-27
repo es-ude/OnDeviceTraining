@@ -1,12 +1,11 @@
-#include <stdio.h>
 #include <math.h>
+#include <stdio.h>
 
-#include "unity.h"
-#include "Distributions.h"
-#include "RNG.h"
-#include "MinMax.h"
 #include "Common.h"
-
+#include "Distributions.h"
+#include "MinMax.h"
+#include "RNG.h"
+#include "unity.h"
 
 static float calculateMean(float *samples, size_t n) {
     float sum = 0.0f;
@@ -74,17 +73,20 @@ void testRandomNormal() {
     int in_1sigma = 0, in_2sigma = 0, in_3sigma = 0;
     for (size_t i = 0; i < n; i++) {
         float z = fabsf((samples[i] - expected_mean) / expected_std);
-        if (z <= 1.0f)
+        if (z <= 1.0f) {
             in_1sigma++;
-        if (z <= 2.0f)
+        }
+        if (z <= 2.0f) {
             in_2sigma++;
-        if (z <= 3.0f)
+        }
+        if (z <= 3.0f) {
             in_3sigma++;
+        }
     }
 
     TEST_ASSERT_INT_WITHIN(100, 6827, in_1sigma); // ~68.27%
     TEST_ASSERT_INT_WITHIN(100, 9545, in_2sigma); // ~95.45%
-    TEST_ASSERT_INT_WITHIN(50, 9973, in_3sigma); // ~99.73%
+    TEST_ASSERT_INT_WITHIN(50, 9973, in_3sigma);  // ~99.73%
 }
 
 void testKaimingNormal() {

@@ -17,7 +17,6 @@ void serializeTensor(tensor_t *tensor, FILE *f);
  */
 void serializeParameter(parameter_t *parameter, FILE *f);
 
-
 /*! Serializes model to a given file.
  *
  * \param model: Pointer to model
@@ -26,4 +25,4 @@ void serializeParameter(parameter_t *parameter, FILE *f);
  */
 void serializeModel(layer_t **model, size_t sizeModel, FILE *f);
 
-#endif //MODELSTORAGE_H
+#endif // MODELSTORAGE_H

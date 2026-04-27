@@ -11,4 +11,4 @@ float findMinFloat(uint8_t *bytes, size_t numberOfElements);
 int32_t findMaxInt32(uint8_t *bytes, size_t numberOfElements);
 int32_t findMinInt32(uint8_t *bytes, size_t numberOfElements);
 
-#endif //MINMAX_H
+#endif // MINMAX_H

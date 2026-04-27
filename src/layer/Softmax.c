@@ -4,13 +4,12 @@
 
 #include <math.h>
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 
+#include "Common.h"
 #include "Softmax.h"
 #include "TensorConversion.h"
-#include "Common.h"
-
 
 void softmaxInitConfig(softmaxConfig_t *softmaxConfig, quantization_t *forwardQ,
                        quantization_t *backwardQ) {
@@ -32,7 +31,9 @@ static void softmaxForwardFloat(tensor_t *input, tensor_t *output) {
     // 1. find max
     float max = x[0];
     for (size_t i = 1; i < n; i++) {
-        if (x[i] > max) max = x[i];
+        if (x[i] > max) {
+            max = x[i];
+        }
     }
 
     // 2. exp and sum
@@ -48,7 +49,6 @@ static void softmaxForwardFloat(tensor_t *input, tensor_t *output) {
         y[i] /= sum;
     }
 }
-
 
 /*static void softmaxForwardFloat(tensor_t *input, tensor_t *output) {
     size_t inputSize = calcNumberOfElementsByTensor(input);
@@ -120,11 +120,13 @@ static void softmaxBackwardFloat(tensor_t *input, tensor_t *loss, tensor_t *prop
     float *dLdx = (float *)propLoss->data;
 
     float dot = 0.0f;
-    for (size_t i = 0; i < n; i++)
+    for (size_t i = 0; i < n; i++) {
         dot += s[i] * dLds[i];
+    }
 
-    for (size_t i = 0; i < n; i++)
+    for (size_t i = 0; i < n; i++) {
         dLdx[i] = s[i] * (dLds[i] - dot);
+    }
 }
 
 static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *propLoss) {
@@ -156,11 +158,13 @@ static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *p
     float *dLdx = (float *)propLossFloat.data;
 
     float dot = 0.0f;
-    for (size_t i = 0; i < inputSize; i++)
+    for (size_t i = 0; i < inputSize; i++) {
         dot += s[i] * dLds[i];
+    }
 
-    for (size_t i = 0; i < inputSize; i++)
+    for (size_t i = 0; i < inputSize; i++) {
         dLdx[i] = s[i] * (dLds[i] - dot);
+    }
 
     convertTensor(&propLossFloat, propLoss);
 }

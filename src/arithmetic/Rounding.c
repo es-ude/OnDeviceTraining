@@ -1,11 +1,10 @@
 #define SOURCE_FILE "ROUNDING"
 
-#include <stdio.h>
 #include <math.h>
+#include <stdio.h>
 
-#include "Rounding.h"
 #include "RNG.h"
-
+#include "Rounding.h"
 
 // round to even, when fractional is EXACTLY 0.5
 int32_t roundHTE(float input) {

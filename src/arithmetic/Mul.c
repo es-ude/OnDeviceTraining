@@ -17,7 +17,6 @@
 
 #include <Common.h>
 
-
 size_t mulInstructionCounter = 0;
 
 int32_t mulInts(int32_t a, int32_t b) {
@@ -119,7 +118,8 @@ void mulSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor) {
 
     if (aNumberOfValues != bNumberOfValues) {
         PRINT_ERROR("Mismatched number of values!");
-        exit(1);    }
+        exit(1);
+    }
 
     int32_t aValues[aNumberOfValues];
     int32_t bValues[aNumberOfValues];

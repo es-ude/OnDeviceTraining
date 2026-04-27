@@ -3,8 +3,8 @@
 
 #include <stddef.h>
 
-#include "Tensor.h"
 #include "Layer.h"
+#include "Tensor.h"
 #include "TrainingLoopApi.h"
 
 static void initLayerOutputs(tensor_t **layerOutputs, layer_t **model, size_t sizeNetwork);

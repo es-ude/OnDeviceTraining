@@ -7,7 +7,7 @@ typedef struct sgd {
     float learningRate;
     float momentumFactor;
     float weightDecay;
-}sgd_t;
+} sgd_t;
 
 void sgdInit(sgd_t *sgd, float learningRate, float momentumFactor, float weightDecay);
 

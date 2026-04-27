@@ -1,9 +1,9 @@
 #ifndef ENV5_RUNTIME_ADD_H
 #define ENV5_RUNTIME_ADD_H
 
+#include "Tensor.h"
 #include <stddef.h>
 #include <stdint.h>
-#include "Tensor.h"
 
 /*!
  * Calculates the sum of two floats.
@@ -102,7 +102,7 @@ void addFloat32ElementWithFloat32TensorInplace(tensor_t *a, float b);
  * \param symInt32Tensor: symInt32Tensor
  * \param int32Tensor: int32Tensor
  */
-void addInt32TensorToSymInt32TensorInplace(tensor_t* symInt32Tensor, tensor_t* int32Tensor);
+void addInt32TensorToSymInt32TensorInplace(tensor_t *symInt32Tensor, tensor_t *int32Tensor);
 /*!
  * Calculates the sum of symInt32 tensor and float tensor inplace.
  *
@@ -111,7 +111,7 @@ void addInt32TensorToSymInt32TensorInplace(tensor_t* symInt32Tensor, tensor_t* i
  * \param symInt32Tensor: symInt32Tensor
  * \param float32Tensor: float32Tensor
  */
-void addFloat32TensorToSymInt32TensorInplace(tensor_t* symInt32Tensor, tensor_t* float32Tensor);
+void addFloat32TensorToSymInt32TensorInplace(tensor_t *symInt32Tensor, tensor_t *float32Tensor);
 /*!
  * Calculates the sum of two symInt32 tensors.
  *
@@ -119,7 +119,7 @@ void addFloat32TensorToSymInt32TensorInplace(tensor_t* symInt32Tensor, tensor_t*
  * \param bTensor: Second tensor
  * \param outputTensor: Tensor for results
  */
-void addSymInt32Tensors(tensor_t* aTensor, tensor_t* bTensor, tensor_t* outputTensor);
+void addSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor);
 /*!
  * Calculates the sum of two symInt32 tensors inplace.
  *
@@ -128,7 +128,7 @@ void addSymInt32Tensors(tensor_t* aTensor, tensor_t* bTensor, tensor_t* outputTe
  * \param aTensor: First tensor
  * \param bTensor: Second tensor
  */
-void addSymInt32TensorsInplace(tensor_t* aTensor, tensor_t* bTensor);
+void addSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor);
 
 /*!
  * Gets the current value of the add instruction counter.

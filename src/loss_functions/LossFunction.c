@@ -6,5 +6,4 @@
 
 lossFunctions_t lossFunctions[] = {
     [MSE] = {mseLossForward, mseLossBackward},
-    [CROSS_ENTROPY] = {crossEntropyForwardFloat, crossEntropySoftmaxBackward}
-};
+    [CROSS_ENTROPY] = {crossEntropyForwardFloat, crossEntropySoftmaxBackward}};

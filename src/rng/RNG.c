@@ -2,11 +2,9 @@
 
 #include "RNG.h"
 
-
 static rng32_t rng = {.state = 1};
 
-static uint32_t rngNext(rng32_t *rng)
-{
+static uint32_t rngNext(rng32_t *rng) {
     uint32_t x = rng->state;
     x ^= x << 13;
     x ^= x >> 17;
@@ -15,8 +13,7 @@ static uint32_t rngNext(rng32_t *rng)
     return x;
 }
 
-static size_t rngBounded(rng32_t *rng, size_t bound)
-{
+static size_t rngBounded(rng32_t *rng, size_t bound) {
     uint32_t x;
     uint32_t limit = UINT32_MAX - (UINT32_MAX % bound);
 
@@ -27,9 +24,10 @@ static size_t rngBounded(rng32_t *rng, size_t bound)
     return x % bound;
 }
 
-void rngShuffleIndices(size_t *indices, size_t n)
-{
-    if (n < 2) return;
+void rngShuffleIndices(size_t *indices, size_t n) {
+    if (n < 2) {
+        return;
+    }
 
     for (size_t i = n - 1; i > 0; --i) {
         size_t j = rngBounded(&rng, i + 1);

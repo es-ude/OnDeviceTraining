@@ -2,20 +2,15 @@
 
 #include <stdlib.h>
 
-#include "DataLoaderApiInternal.h"
-#include "DataLoaderApi.h"
-#include "DataLoader.h"
 #include "Common.h"
+#include "DataLoader.h"
+#include "DataLoaderApi.h"
+#include "DataLoaderApiInternal.h"
 #include "StorageApi.h"
 
-
-dataLoader_t *dataLoaderInit(getSampleFn_t getSample,
-                             getDatasetSizeFn_t getDatasetSize,
-                             uint16_t batchSize,
-                             transformFn_t transform,
-                             transformFn_t targetTransform,
-                             bool shuffle,
-                             uint64_t shuffleSeed,
+dataLoader_t *dataLoaderInit(getSampleFn_t getSample, getDatasetSizeFn_t getDatasetSize,
+                             uint16_t batchSize, transformFn_t transform,
+                             transformFn_t targetTransform, bool shuffle, uint64_t shuffleSeed,
                              bool dropLast) {
 
     if (dropLast == false) {
@@ -29,12 +24,10 @@ dataLoader_t *dataLoaderInit(getSampleFn_t getSample,
     size_t *indices = reserveMemory(numberOfIndices * sizeof(size_t));
 
     initDataLoader(dataLoader, getSample, getDatasetSize, getBatch, batchSize, transform,
-                   targetTransform, shuffle,
-                   shuffleSeed, indices, dropLast);
+                   targetTransform, shuffle, shuffleSeed, indices, dropLast);
 
     return dataLoader;
 }
-
 
 void freeSample(sample_t *sample) {
     freeReservedMemory(sample);
@@ -49,7 +42,6 @@ void freeDataLoader(dataLoader_t *dataloader) {
     freeReservedMemory(dataloader->indices);
     freeReservedMemory(dataloader);
 }
-
 
 static sample_t *getSampleByIndex(dataLoader_t *dataLoader, size_t index) {
     size_t shuffledIndex = dataLoader->indices[index];

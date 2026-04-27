@@ -12,10 +12,9 @@
 #include <stdlib.h>
 
 #include "Arithmetic.h"
+#include "Common.h"
 #include "DTypes.h"
 #include "Div.h"
-#include "Common.h"
-
 
 size_t divInstructionCounter = 0;
 
@@ -83,7 +82,8 @@ void divSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTe
 
     if (aNumberOfValues != bNumberOfValues) {
         PRINT_ERROR("Mismatched number of values!");
-        exit(1);    }
+        exit(1);
+    }
 
     int32_t aValues[aNumberOfValues];
     int32_t bValues[aNumberOfValues];
@@ -109,7 +109,8 @@ void divSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor) {
 
     if (aNumberOfValues != bNumberOfValues) {
         PRINT_ERROR("Mismatched number of values!");
-        exit(1);    }
+        exit(1);
+    }
 
     int32_t aValues[aNumberOfValues];
     int32_t bValues[aNumberOfValues];

@@ -1,11 +1,10 @@
-#include "Matmul.h"
 #include "Arithmetic.h"
+#include "Matmul.h"
 #include "Tensor.h"
 #include "unity.h"
 
 #include <DTypes.h>
 #include <TensorConversion.h>
-
 
 void testMatmulInt32() {
     size_t numberOfElements = 6;
@@ -19,15 +18,11 @@ void testMatmulInt32() {
     size_t aNumberOfDims = 2;
     size_t aDims[] = {2, 3};
     size_t aOrderOfDims[] = {0, 1};
-    shape_t aShape = {
-        .dimensions = aDims,
-        .orderOfDimensions = aOrderOfDims,
-        .numberOfDimensions = aNumberOfDims
-    };
+    shape_t aShape = {.dimensions = aDims,
+                      .orderOfDimensions = aOrderOfDims,
+                      .numberOfDimensions = aNumberOfDims};
 
-    quantization_t aQ = {
-        .type = INT32
-    };
+    quantization_t aQ = {.type = INT32};
 
     tensor_t aTensor = {
         .data = (uint8_t *)aData,
@@ -45,15 +40,11 @@ void testMatmulInt32() {
     size_t bNumberOfDims = 2;
     size_t bDims[] = {3, 2};
     size_t bOrderOfDims[] = {0, 1};
-    shape_t bShape = {
-        .dimensions = bDims,
-        .orderOfDimensions = bOrderOfDims,
-        .numberOfDimensions = bNumberOfDims
-    };
+    shape_t bShape = {.dimensions = bDims,
+                      .orderOfDimensions = bOrderOfDims,
+                      .numberOfDimensions = bNumberOfDims};
 
-    quantization_t bQ = {
-        .type = INT32
-    };
+    quantization_t bQ = {.type = INT32};
 
     tensor_t bTensor = {
         .data = (uint8_t *)bData,
@@ -66,15 +57,11 @@ void testMatmulInt32() {
     size_t outputNumberOfDims = 2;
     size_t outputDims[] = {2, 2};
     size_t outputOrderOfDims[] = {0, 1};
-    shape_t outputShape = {
-        .dimensions = outputDims,
-        .orderOfDimensions = outputOrderOfDims,
-        .numberOfDimensions = outputNumberOfDims
-    };
+    shape_t outputShape = {.dimensions = outputDims,
+                           .orderOfDimensions = outputOrderOfDims,
+                           .numberOfDimensions = outputNumberOfDims};
 
-    quantization_t outputQ = {
-        .type = INT32
-    };
+    quantization_t outputQ = {.type = INT32};
 
     tensor_t outputTensor = {
         .data = (uint8_t *)outputData,
@@ -99,15 +86,11 @@ void testMatmulInt32WithVector() {
     size_t aNumberOfDims = 2;
     size_t aDims[] = {2, 3};
     size_t aOrderOfDims[] = {0, 1};
-    shape_t aShape = {
-        .dimensions = aDims,
-        .orderOfDimensions = aOrderOfDims,
-        .numberOfDimensions = aNumberOfDims
-    };
+    shape_t aShape = {.dimensions = aDims,
+                      .orderOfDimensions = aOrderOfDims,
+                      .numberOfDimensions = aNumberOfDims};
 
-    quantization_t aQ = {
-        .type = INT32
-    };
+    quantization_t aQ = {.type = INT32};
 
     tensor_t aTensor = {
         .data = (uint8_t *)aData,
@@ -125,15 +108,11 @@ void testMatmulInt32WithVector() {
     size_t bNumberOfDims = 1;
     size_t bDims[] = {3};
     size_t bOrderOfDims[] = {0};
-    shape_t bShape = {
-        .dimensions = bDims,
-        .orderOfDimensions = bOrderOfDims,
-        .numberOfDimensions = bNumberOfDims
-    };
+    shape_t bShape = {.dimensions = bDims,
+                      .orderOfDimensions = bOrderOfDims,
+                      .numberOfDimensions = bNumberOfDims};
 
-    quantization_t bQ = {
-        .type = INT32
-    };
+    quantization_t bQ = {.type = INT32};
 
     tensor_t bTensor = {
         .data = (uint8_t *)bData,
@@ -146,15 +125,11 @@ void testMatmulInt32WithVector() {
     size_t outputNumberOfDims = 1;
     size_t outputDims[] = {2};
     size_t outputOrderOfDims[] = {0};
-    shape_t outputShape = {
-        .dimensions = outputDims,
-        .orderOfDimensions = outputOrderOfDims,
-        .numberOfDimensions = outputNumberOfDims
-    };
+    shape_t outputShape = {.dimensions = outputDims,
+                           .orderOfDimensions = outputOrderOfDims,
+                           .numberOfDimensions = outputNumberOfDims};
 
-    quantization_t outputQ = {
-        .type = INT32
-    };
+    quantization_t outputQ = {.type = INT32};
 
     tensor_t outputTensor = {
         .data = (uint8_t *)outputData,
@@ -178,15 +153,11 @@ void testMatmulFloatVectors() {
     size_t aNumberOfDims = 1;
     size_t aDims[] = {3};
     size_t aOrderOfDims[] = {0};
-    shape_t aShape = {
-        .dimensions = aDims,
-        .orderOfDimensions = aOrderOfDims,
-        .numberOfDimensions = aNumberOfDims
-    };
+    shape_t aShape = {.dimensions = aDims,
+                      .orderOfDimensions = aOrderOfDims,
+                      .numberOfDimensions = aNumberOfDims};
 
-    quantization_t aQ = {
-        .type = FLOAT32
-    };
+    quantization_t aQ = {.type = FLOAT32};
 
     tensor_t aTensor = {
         .data = (uint8_t *)aData,
@@ -204,15 +175,11 @@ void testMatmulFloatVectors() {
     size_t bNumberOfDims = 1;
     size_t bDims[] = {3};
     size_t bOrderOfDims[] = {0};
-    shape_t bShape = {
-        .dimensions = bDims,
-        .orderOfDimensions = bOrderOfDims,
-        .numberOfDimensions = bNumberOfDims
-    };
+    shape_t bShape = {.dimensions = bDims,
+                      .orderOfDimensions = bOrderOfDims,
+                      .numberOfDimensions = bNumberOfDims};
 
-    quantization_t bQ = {
-        .type = FLOAT32
-    };
+    quantization_t bQ = {.type = FLOAT32};
 
     tensor_t bTensor = {
         .data = (uint8_t *)bData,
@@ -225,15 +192,11 @@ void testMatmulFloatVectors() {
     size_t outputNumberOfDims = 1;
     size_t outputDims[] = {1};
     size_t outputOrderOfDims[] = {0};
-    shape_t outputShape = {
-        .dimensions = outputDims,
-        .orderOfDimensions = outputOrderOfDims,
-        .numberOfDimensions = outputNumberOfDims
-    };
+    shape_t outputShape = {.dimensions = outputDims,
+                           .orderOfDimensions = outputOrderOfDims,
+                           .numberOfDimensions = outputNumberOfDims};
 
-    quantization_t outputQ = {
-        .type = FLOAT32
-    };
+    quantization_t outputQ = {.type = FLOAT32};
 
     tensor_t outputTensor = {
         .data = (uint8_t *)outputData,

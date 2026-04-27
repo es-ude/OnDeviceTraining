@@ -8,7 +8,7 @@
 #include <stdint.h>
 
 typedef struct Entry {
-    uint8_t* dataPTR; // PTR for starting address in uint8_t array
+    uint8_t *dataPTR; // PTR for starting address in uint8_t array
     size_t numberOfElements;
 } dataEntry_t;
 
@@ -17,11 +17,9 @@ typedef struct DataStorage {
     size_t size;
     dataEntry_t *entries;
     size_t numberOfEntries;
-}dataStorage_t;
+} dataStorage_t;
 
-
-uint8_t* getDataFromStorage(dataStorage_t storage, void* dataPTR);
-dataEntry_t* addDataToStorage(dataStorage_t storage, void* dataPTR, size_t numberOfElements);
-
+uint8_t *getDataFromStorage(dataStorage_t storage, void *dataPTR);
+dataEntry_t *addDataToStorage(dataStorage_t storage, void *dataPTR, size_t numberOfElements);
 
 #endif // ENV5_RUNTIME_DATASTORAGE_H

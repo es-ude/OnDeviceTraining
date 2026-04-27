@@ -2,15 +2,12 @@
 
 #include <stdlib.h>
 
-#include "Sgd.h"
 #include "Common.h"
 #include "Optimizer.h"
-
+#include "Sgd.h"
 
 optimizerFunctions_t optimizerFunctions[] = {
-    [SGD] = {sgdStep, sgdZeroGrad},
-    [SGD_M] = {sgdStepM, sgdZeroGrad}
-};
+    [SGD] = {sgdStep, sgdZeroGrad}, [SGD_M] = {sgdStepM, sgdZeroGrad}};
 
 static size_t calcNumberOfStatesByLayerType(const layerType_t type) {
     switch (type) {

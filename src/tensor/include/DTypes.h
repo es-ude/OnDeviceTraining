@@ -11,12 +11,10 @@ void readBytesAsInt32Array(size_t numberOfValues, uint8_t *bytes, int32_t *outpu
 float readBytesAsFloat(uint8_t *bytes);
 void readBytesAsFloatArray(size_t numberOfValues, uint8_t *bytes, float *outputArray);
 
-
 void writeInt32ToByteArray(int32_t value, uint8_t *bytes);
 void writeInt32ArrayToByteArray(size_t numberOfValues, int32_t *valueArray, uint8_t *bytes);
 
 void writeFloatToByteArray(float value, uint8_t *bytes);
 void writeFloatArrayToByteArray(size_t numberOfValues, float *valueArray, uint8_t *bytes);
-
 
 #endif // ELASTIC_AI_RUNTIME_ENV5_DTYPES_H

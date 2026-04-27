@@ -19,5 +19,4 @@ static void getRowShape(shape_t *totalShape, shape_t *rowShape);
  */
 static quantization_t *initQByDType(dtype_t dtype);
 
-#endif //INTERNALNPYLOADERAPI_H
-
+#endif // INTERNALNPYLOADERAPI_H

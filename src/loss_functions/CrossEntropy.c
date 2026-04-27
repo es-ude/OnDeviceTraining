@@ -2,13 +2,12 @@
 
 #include <stdlib.h>
 
-#include "CrossEntropy.h"
-#include "TensorConversion.h"
-#include "Log.h"
 #include "Common.h"
+#include "CrossEntropy.h"
+#include "Log.h"
+#include "TensorConversion.h"
 
 #include <math.h>
-
 
 float crossEntropyForwardFloat(tensor_t *softmaxOutput, tensor_t *distribution) {
     size_t n = calcNumberOfElementsByTensor(softmaxOutput);
@@ -30,7 +29,6 @@ float crossEntropyForwardFloat(tensor_t *softmaxOutput, tensor_t *distribution) 
     }
     return loss;
 }
-
 
 /*float crossEntropyForwardFloat(tensor_t *softmaxOutput, tensor_t *distribution) {
     size_t numberOfValues = calcNumberOfElementsByTensor(softmaxOutput);
@@ -54,7 +52,8 @@ float crossEntropyForwardFloat(tensor_t *softmaxOutput, tensor_t *distribution) 
     return loss;
 }*/
 
-static void crossEntropySoftmaxBackwardFloat(tensor_t *softmaxOutput, tensor_t *distribution, tensor_t *loss) {
+static void crossEntropySoftmaxBackwardFloat(tensor_t *softmaxOutput, tensor_t *distribution,
+                                             tensor_t *loss) {
     size_t totalInputSize = calcNumberOfElementsByTensor(softmaxOutput);
 
     float *softmaxOutputFloat = (float *)softmaxOutput->data;
@@ -66,21 +65,24 @@ static void crossEntropySoftmaxBackwardFloat(tensor_t *softmaxOutput, tensor_t *
     }
 }
 
-static void crossEntropySoftmaxBackwardAsym(tensor_t *softmaxOutput, tensor_t *distribution, tensor_t *loss) {
+static void crossEntropySoftmaxBackwardAsym(tensor_t *softmaxOutput, tensor_t *distribution,
+                                            tensor_t *loss) {
     size_t inputSize = calcNumberOfElementsByTensor(softmaxOutput);
 
     tensor_t softmaxOutputFloat;
     quantization_t softmaxOutputFloatQ;
     initFloat32Quantization(&softmaxOutputFloatQ);
     uint8_t softmaxOutputFloatData[inputSize * sizeof(float)];
-    setTensorValuesForConversion(softmaxOutputFloatData, &softmaxOutputFloatQ, softmaxOutput, &softmaxOutputFloat);
+    setTensorValuesForConversion(softmaxOutputFloatData, &softmaxOutputFloatQ, softmaxOutput,
+                                 &softmaxOutputFloat);
     convertTensor(softmaxOutput, &softmaxOutputFloat);
 
     tensor_t distributionFloat;
     quantization_t distributionFloatQ;
     initFloat32Quantization(&distributionFloatQ);
     uint8_t distributionFloatData[inputSize * sizeof(float)];
-    setTensorValuesForConversion(distributionFloatData, &distributionFloatQ, distribution, &distributionFloat);
+    setTensorValuesForConversion(distributionFloatData, &distributionFloatQ, distribution,
+                                 &distributionFloat);
     convertTensor(distribution, &distributionFloat);
 
     tensor_t lossFloat;
@@ -89,7 +91,6 @@ static void crossEntropySoftmaxBackwardAsym(tensor_t *softmaxOutput, tensor_t *d
     uint8_t lossFloatData[inputSize * sizeof(float)];
     setTensorValuesForConversion(lossFloatData, &lossFloatQ, loss, &lossFloat);
     convertTensor(loss, &lossFloat);
-
 
     float *softmaxOutputFloatArr = (float *)softmaxOutputFloat.data;
     float *distributionFloatArr = (float *)distributionFloat.data;
@@ -104,7 +105,7 @@ static void crossEntropySoftmaxBackwardAsym(tensor_t *softmaxOutput, tensor_t *d
 
 // IMPORTANT: This implementation already takes the softmax backward into account
 void crossEntropySoftmaxBackward(tensor_t *softmaxOutput, tensor_t *distribution, tensor_t *loss) {
-    switch(softmaxOutput->quantization->type) {
+    switch (softmaxOutput->quantization->type) {
     case FLOAT32:
         crossEntropySoftmaxBackwardFloat(softmaxOutput, distribution, loss);
         break;

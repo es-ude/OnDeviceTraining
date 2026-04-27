@@ -12,10 +12,10 @@
 #include <stdlib.h>
 
 #include "Arithmetic.h"
-#include "DTypes.h"
-#include "TensorConversion.h"
 #include "Common.h"
+#include "DTypes.h"
 #include "Sub.h"
+#include "TensorConversion.h"
 
 size_t subInstructionCounter = 0;
 

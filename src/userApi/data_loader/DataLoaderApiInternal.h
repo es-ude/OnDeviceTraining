@@ -5,7 +5,6 @@
 
 #include "DataLoader.h"
 
-
 /*!
  * Returns sample by (shuffled) index.
  *
@@ -25,4 +24,4 @@ static sample_t *getSampleByIndex(dataLoader_t *dataLoader, size_t index);
  */
 static batch_t *getBatch(dataLoader_t *dataLoader, size_t index);
 
-#endif //DATALOADERAPIINTERNAL_H
+#endif // DATALOADERAPIINTERNAL_H

@@ -17,8 +17,8 @@
  * \param dropLast: If last batch can't be filled, drop or not
  * \return Pointer to initialized data loader
  */
-dataLoader_t* dataLoaderInit(getSampleFn_t getSample, getDatasetSizeFn_t getDatasetSize, uint16_t batchSize,
-                             transformFn_t transform,
+dataLoader_t *dataLoaderInit(getSampleFn_t getSample, getDatasetSizeFn_t getDatasetSize,
+                             uint16_t batchSize, transformFn_t transform,
                              transformFn_t targetTransform, bool shuffle, uint64_t shuffleSeed,
                              bool dropLast);
 
@@ -31,7 +31,7 @@ dataLoader_t* dataLoaderInit(getSampleFn_t getSample, getDatasetSizeFn_t getData
  * \param sample: Pointer to be freed
  * \return void
  */
-void freeSample(sample_t* sample);
+void freeSample(sample_t *sample);
 
 /*!
  * Free batch_t pointer and contained **sample_t.
@@ -42,7 +42,7 @@ void freeSample(sample_t* sample);
  * \param batch: Pointer to be freed
  * \return void
  */
-void freeBatch(batch_t* batch);
+void freeBatch(batch_t *batch);
 
 /*!
  * Free dataloader pointer and contained indices array.
@@ -52,6 +52,6 @@ void freeBatch(batch_t* batch);
  * \param dataloader: Pointer to be freed
  * \return void
  */
-void freeDataLoader(dataLoader_t* dataloader);
+void freeDataLoader(dataLoader_t *dataloader);
 
-#endif //DATALOADERAPI_H
+#endif // DATALOADERAPI_H

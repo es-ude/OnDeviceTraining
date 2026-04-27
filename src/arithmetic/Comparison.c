@@ -3,10 +3,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "DTypes.h"
 #include "Common.h"
 #include "Comparison.h"
-
+#include "DTypes.h"
 
 void gteInt32Value(tensor_t *a, int32_t b, int32_t altNumber, tensor_t *result) {
     size_t numberOfValues = calcNumberOfElementsByTensor(a);
@@ -51,8 +50,7 @@ void gteFloatValue(tensor_t *a, float b, float altNumber, tensor_t *result) {
     for (size_t i = 0; i < numberOfValues; i++) {
         if (inputValues[i] < b) {
             outputValues[i] = altNumber;
-        }
-        else {
+        } else {
             outputValues[i] = inputValues[i];
         }
     }
@@ -117,7 +115,8 @@ void gteSymInt32Tensor(tensor_t *a, tensor_t *b, int32_t altNumber, tensor_t *re
     size_t bNumberOfValues = calcNumberOfElementsByTensor(b);
     if (aNumberOfValues != bNumberOfValues) {
         PRINT_ERROR("Mismatched number of values!");
-        exit(1);    }
+        exit(1);
+    }
 
     float aValues[aNumberOfValues];
     float bValues[bNumberOfValues];

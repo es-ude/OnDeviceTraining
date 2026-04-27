@@ -5,6 +5,6 @@
 
 layer_t *reluLayerInit(quantization_t *forwardQ, quantization_t *backwardQ);
 
-void freeReluLayer(layer_t* reluLayer);
+void freeReluLayer(layer_t *reluLayer);
 
-#endif //ODT_RELU_H
+#endif // ODT_RELU_H

@@ -33,8 +33,8 @@ void testRoundHTE() {
     TEST_ASSERT_EQUAL(expected, actual);
 }
 
-void setUp(){}
-void tearDown(){}
+void setUp() {}
+void tearDown() {}
 
 int main(void) {
     UNITY_BEGIN();

@@ -67,4 +67,4 @@ static tensor_t *initTensorWithQAsym(float *data, size_t *dims, size_t numberOfD
  */
 static void freeTensorPointer(tensor_t *tensor);
 
-#endif //TENSORAPIINTERNAL_H
+#endif // TENSORAPIINTERNAL_H

@@ -1,10 +1,10 @@
 #define SOURCE_FILE "TRAINING_EPOCH_DEFAULT"
 
 #include "TrainingEpochDefault.h"
-#include "TrainingBatchDefault.h"
+#include "Common.h"
 #include "DataLoaderApi.h"
 #include "Optimizer.h"
-#include "Common.h"
+#include "TrainingBatchDefault.h"
 
 float trainingEpochDefault(layer_t **model, size_t modelSize, lossType_t lossType,
                            dataLoader_t *dataLoader, optimizer_t *optimizer,

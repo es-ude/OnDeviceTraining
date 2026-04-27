@@ -14,10 +14,7 @@ void testConversionIntFloat() {
     size_t numberOfDims = 1;
     size_t orderOfDims[] = {0};
     shape_t shape = {
-        .dimensions = dims,
-        .numberOfDimensions = numberOfDims,
-        .orderOfDimensions = orderOfDims
-    };
+        .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
     int32_t intData[] = {1, 2, 3, 4, -1, -2};
     quantization_t intQ;
@@ -39,7 +36,6 @@ void testConversionIntFloat() {
     float expected[] = {1.f, 2.f, 3.f, 4.f, -1.f, -2.f};
 
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, actual, numValues);
-
 }
 
 void testConversionIntSymInt32() {
@@ -49,10 +45,7 @@ void testConversionIntSymInt32() {
     size_t numberOfDims = 1;
     size_t orderOfDims[] = {0};
     shape_t shape = {
-        .dimensions = dims,
-        .numberOfDimensions = numberOfDims,
-        .orderOfDimensions = orderOfDims
-    };
+        .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
     int32_t intData[] = {1, 2, 3, 4, -1, -2};
 
@@ -74,7 +67,6 @@ void testConversionIntSymInt32() {
     convertTensor(&intTensor, &symInt32Tensor);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(intTensor.data, symInt32Tensor.data, numValues);
-
 }
 
 void testConversionIntAsym() {
@@ -83,10 +75,7 @@ void testConversionIntAsym() {
     size_t numberOfDims = 1;
     size_t orderOfDims[] = {0};
     shape_t shape = {
-        .dimensions = dims,
-        .numberOfDimensions = numberOfDims,
-        .orderOfDimensions = orderOfDims
-    };
+        .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
     int32_t intData[] = {1, 2, 3, 4, -1, -2};
 
     quantization_t intQ;
@@ -121,7 +110,6 @@ void testConversionIntAsym() {
     TEST_ASSERT_EQUAL_FLOAT(expectedScale, asymQConfig.scale);
 }
 
-
 void testConversionFloatInt() {
     uint8_t numValues = 6;
 
@@ -130,10 +118,7 @@ void testConversionFloatInt() {
     size_t numberOfDims = 1;
     size_t orderOfDims[] = {0};
     shape_t shape = {
-        .dimensions = dims,
-        .numberOfDimensions = numberOfDims,
-        .orderOfDimensions = orderOfDims
-    };
+        .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
     quantization_t floatQ;
     initFloat32Quantization(&floatQ);
@@ -164,10 +149,7 @@ void testConversionFloatSymInt32() {
     size_t numberOfDims = 1;
     size_t orderOfDims[] = {0};
     shape_t shape = {
-        .dimensions = dims,
-        .numberOfDimensions = numberOfDims,
-        .orderOfDimensions = orderOfDims
-    };
+        .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
     quantization_t floatQ;
     initFloat32Quantization(&floatQ);
@@ -206,10 +188,7 @@ void testConversionFloatAsym() {
     size_t numberOfDims = 1;
     size_t orderOfDims[] = {0};
     shape_t shape = {
-        .dimensions = dims,
-        .numberOfDimensions = numberOfDims,
-        .orderOfDimensions = orderOfDims
-    };
+        .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
     float floatData[] = {1.f, 2.f, 3.f, 4.f, -1.f, -2.f};
 
@@ -249,10 +228,7 @@ void testConversionSymInt32Int() {
     size_t numberOfDims = 1;
     size_t orderOfDims[] = {0};
     shape_t shape = {
-        .dimensions = dims,
-        .numberOfDimensions = numberOfDims,
-        .orderOfDimensions = orderOfDims
-    };
+        .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
     symInt32QConfig_t symInt32QConfig;
     initSymInt32QConfig(HTE, &symInt32QConfig);
@@ -283,10 +259,7 @@ void testConversionSymInt32Float() {
     size_t numberOfDims = 1;
     size_t orderOfDims[] = {0};
     shape_t shape = {
-        .dimensions = dims,
-        .numberOfDimensions = numberOfDims,
-        .orderOfDimensions = orderOfDims
-    };
+        .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
     symInt32QConfig_t symInt32QConfig;
     initSymInt32QConfig(HTE, &symInt32QConfig);
@@ -326,10 +299,7 @@ void testConversionSymInt32Asym() {
     size_t numberOfDims = 1;
     size_t orderOfDims[] = {0};
     shape_t shape = {
-        .dimensions = dims,
-        .numberOfDimensions = numberOfDims,
-        .orderOfDimensions = orderOfDims
-    };
+        .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
     symInt32QConfig_t symInt32QConfig;
     initSymInt32QConfig(HTE, &symInt32QConfig);
@@ -374,10 +344,7 @@ void testConversionAsymInt() {
     size_t numberOfDims = 1;
     size_t orderOfDims[] = {0};
     shape_t shape = {
-        .dimensions = dims,
-        .numberOfDimensions = numberOfDims,
-        .orderOfDimensions = orderOfDims
-    };
+        .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
     asymQConfig_t asymQConfig;
     initAsymQConfig(5, HTE, &asymQConfig);
@@ -412,10 +379,7 @@ void testConversionAsymFloat() {
     size_t numberOfDims = 1;
     size_t orderOfDims[] = {0};
     shape_t shape = {
-        .dimensions = dims,
-        .numberOfDimensions = numberOfDims,
-        .orderOfDimensions = orderOfDims
-    };
+        .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
     asymQConfig_t asymQConfig;
     initAsymQConfig(5, HTE, &asymQConfig);
@@ -450,10 +414,7 @@ void testConversionAsymSymInt32() {
     size_t numberOfDims = 1;
     size_t orderOfDims[] = {0};
     shape_t shape = {
-        .dimensions = dims,
-        .numberOfDimensions = numberOfDims,
-        .orderOfDimensions = orderOfDims
-    };
+        .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
     asymQConfig_t asymQConfig;
     initAsymQConfig(5, HTE, &asymQConfig);
@@ -485,7 +446,6 @@ void testConversionAsymSymInt32() {
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(expectedData, actual, numValues);
 }
-
 
 void setUp() {}
 void tearDown() {}

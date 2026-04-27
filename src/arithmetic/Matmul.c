@@ -13,13 +13,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "Arithmetic.h"
 #include "Common.h"
+#include "DTypes.h"
 #include "Matmul.h"
 #include "Mul.h"
 #include "Tensor.h"
-#include "Arithmetic.h"
-#include "DTypes.h"
-
 
 size_t matmulInstructionCounter = 0;
 
@@ -90,7 +89,6 @@ void matmulIntTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTens
                 int32_t bValue = readBytesAsInt32(&bTensor->data[bByteIndex]);
 
                 result += mulInt32s(aValue, bValue);
-
             }
 
             size_t outputByteIndex = resultCounter * sizeof(int32_t);
@@ -169,7 +167,6 @@ void matmulIntTensorsWithInstructionCounter(tensor_t *aTensor, tensor_t *bTensor
                 int32_t bValue = readBytesAsInt32(&bTensor->data[bByteIndex]);
 
                 result += mulInt32s(aValue, bValue);
-
             }
 
             size_t outputByteIndex = resultCounter * sizeof(int32_t);
@@ -191,8 +188,6 @@ void matmulFloatTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTe
         PRINT_ERROR("Matmul only supports up to 2D Tensors");
         exit(1);
     }
-
-
 
     size_t aNumberOfDims = aTensor->shape->numberOfDimensions;
     size_t *aDims = aTensor->shape->dimensions;
@@ -216,7 +211,6 @@ void matmulFloatTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTe
     } else {
         bRows = getDimensionsByIndex(bTensor, 0);
         bColumns = getDimensionsByIndex(bTensor, 1);
-
     }
 
     size_t resultCounter = 0;
@@ -258,7 +252,6 @@ void matmulFloatTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTe
 
                 float bValue = readBytesAsFloat(&bTensor->data[bByteIndex]);
                 result += mulFloat32s(aValue, bValue);
-
             }
 
             size_t outputByteIndex = resultCounter * sizeof(float);
@@ -298,12 +291,11 @@ void matmulFloatTensorsWithInstructionCounter(tensor_t *aTensor, tensor_t *bTens
     } else {
         bRows = getDimensionsByIndex(bTensor, 0);
         bColumns = getDimensionsByIndex(bTensor, 1);
-
     }
 
     size_t resultCounter = 0;
 
-    //printf("aCol: %lu, bRows: %lu\n", aColumns, bRows);
+    // printf("aCol: %lu, bRows: %lu\n", aColumns, bRows);
 
     if (aColumns != bRows) {
         PRINT_ERROR("Rows dont match Columns");
@@ -342,7 +334,6 @@ void matmulFloatTensorsWithInstructionCounter(tensor_t *aTensor, tensor_t *bTens
 
                 float bValue = readBytesAsFloat(&bTensor->data[bByteIndex]);
                 result += mulFloat32s(aValue, bValue);
-
             }
 
             size_t outputByteIndex = resultCounter * sizeof(float);

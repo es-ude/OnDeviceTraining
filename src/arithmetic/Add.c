@@ -9,15 +9,14 @@
 #endif
 
 #include "Add.h"
-#include "Tensor.h"
-#include "DTypes.h"
 #include "Arithmetic.h"
-#include "TensorConversion.h"
 #include "Common.h"
+#include "DTypes.h"
+#include "Tensor.h"
+#include "TensorConversion.h"
 
 #include <stdio.h>
 #include <stdlib.h>
-
 
 size_t addInstructionCounter = 0;
 
@@ -153,7 +152,8 @@ void addSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTe
         int32_t bValues[aNumberOfValues];
         readBytesAsInt32Array(aNumberOfValues, bTensor->data, bValues);
 
-        int32_t outputValues[aNumberOfValues];;
+        int32_t outputValues[aNumberOfValues];
+        ;
 
         for (size_t i = 0; i < aNumberOfValues; i++) {
             outputValues[i] = ADD_FUNC_INT(aValues[i], bValues[i]);
@@ -202,7 +202,6 @@ void addSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor) {
     addFloat32TensorsInplace(&aFloat, &bFloat);
 
     convertTensor(&aFloat, aTensor);
-
 }
 
 size_t getAddInstructionCounter() {

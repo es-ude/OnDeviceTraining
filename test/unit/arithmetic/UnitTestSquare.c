@@ -1,8 +1,8 @@
 #include "Square.h"
 #include "unity.h"
 
-void setUp(){}
-void tearDown(){}
+void setUp() {}
+void tearDown() {}
 
 void testSquareInt32() {
     int32_t a = 3;

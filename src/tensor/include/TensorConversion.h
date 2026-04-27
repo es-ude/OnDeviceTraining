@@ -3,9 +3,9 @@
 
 #include "Tensor.h"
 
-typedef void (*conversionFunction_t)(tensor_t* inputTensor, tensor_t* outputTensor);
+typedef void (*conversionFunction_t)(tensor_t *inputTensor, tensor_t *outputTensor);
 
-void convertTensor(tensor_t* inputTensor, tensor_t* outputTensor);
+void convertTensor(tensor_t *inputTensor, tensor_t *outputTensor);
 
 extern conversionFunction_t conversionMatrix[5][5];
 

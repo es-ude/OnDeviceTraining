@@ -1,38 +1,36 @@
+#include "Arithmetic.h"
 #include "Sub.h"
 #include "Tensor.h"
-#include "Arithmetic.h"
 #include "unity.h"
 
-void setUp(){}
-void tearDown(){}
+void setUp() {}
+void tearDown() {}
 
 void testSubInt32Tensors() {
     size_t numberOfElements = 24;
 
-    int32_t aData[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23};
+    int32_t aData[] = {0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11,
+                       12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23};
     size_t aNumberOfDims = 3;
     size_t aDims[] = {2, 3, 4};
     size_t aOrderOfDims[] = {0, 1, 2};
-    shape_t aShape = {
-        .dimensions = aDims,
-        .orderOfDimensions = aOrderOfDims,
-        .numberOfDimensions = aNumberOfDims
-    };
+    shape_t aShape = {.dimensions = aDims,
+                      .orderOfDimensions = aOrderOfDims,
+                      .numberOfDimensions = aNumberOfDims};
     quantization_t aQ;
     initInt32Quantization(&aQ);
 
     tensor_t aTensor;
     setTensorValues(&aTensor, (uint8_t *)aData, &aShape, &aQ, NULL);
 
-    int32_t bData[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23};
+    int32_t bData[] = {0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11,
+                       12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23};
     size_t bNumberOfDims = 3;
     size_t bDims[] = {2, 3, 4};
     size_t bOrderOfDims[] = {1, 0, 2};
-    shape_t bShape = {
-        .dimensions = bDims,
-        .orderOfDimensions = bOrderOfDims,
-        .numberOfDimensions = bNumberOfDims
-    };
+    shape_t bShape = {.dimensions = bDims,
+                      .orderOfDimensions = bOrderOfDims,
+                      .numberOfDimensions = bNumberOfDims};
 
     quantization_t bQ;
     initInt32Quantization(&bQ);
@@ -57,11 +55,9 @@ void testSubInt32ElementWithTensor() {
     size_t aNumberOfDims = 2;
     size_t aDims[] = {2, 3};
     size_t aOrderOfDims[] = {0, 1};
-    shape_t aShape = {
-        .dimensions = aDims,
-        .orderOfDimensions = aOrderOfDims,
-        .numberOfDimensions = aNumberOfDims
-    };
+    shape_t aShape = {.dimensions = aDims,
+                      .orderOfDimensions = aOrderOfDims,
+                      .numberOfDimensions = aNumberOfDims};
     quantization_t aQ;
     initInt32Quantization(&aQ);
 
@@ -75,24 +71,21 @@ void testSubInt32ElementWithTensor() {
 
     int32_t expected[] = {-4, -3, -2, -1, 0, 1};
 
-
-
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, aTensor.data, numberOfElements);
 }
 
 void testSubSymInt32Tensors() {
     size_t numberOfElements = 24;
 
-    int32_t aData[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23};
+    int32_t aData[] = {0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11,
+                       12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23};
 
     size_t aNumberOfDims = 3;
     size_t aDims[] = {2, 3, 4};
     size_t aOrderOfDims[] = {0, 1, 2};
-    shape_t aShape = {
-        .dimensions = aDims,
-        .orderOfDimensions = aOrderOfDims,
-        .numberOfDimensions = aNumberOfDims
-    };
+    shape_t aShape = {.dimensions = aDims,
+                      .orderOfDimensions = aOrderOfDims,
+                      .numberOfDimensions = aNumberOfDims};
     symInt32QConfig_t aSymInt32QC;
     initSymInt32QConfig(HTE, &aSymInt32QC);
     quantization_t aQ;
@@ -101,16 +94,15 @@ void testSubSymInt32Tensors() {
     tensor_t aTensor;
     setTensorValues(&aTensor, (uint8_t *)aData, &aShape, &aQ, NULL);
 
-    int32_t bData[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23};
+    int32_t bData[] = {0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11,
+                       12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23};
 
     size_t bNumberOfDims = 3;
     size_t bDims[] = {2, 3, 4};
     size_t bOrderOfDims[] = {1, 0, 2};
-    shape_t bShape = {
-        .dimensions = bDims,
-        .orderOfDimensions = bOrderOfDims,
-        .numberOfDimensions = bNumberOfDims
-    };
+    shape_t bShape = {.dimensions = bDims,
+                      .orderOfDimensions = bOrderOfDims,
+                      .numberOfDimensions = bNumberOfDims};
 
     symInt32QConfig_t bSymInt32QC;
     initSymInt32QConfig(HTE, &bSymInt32QC);

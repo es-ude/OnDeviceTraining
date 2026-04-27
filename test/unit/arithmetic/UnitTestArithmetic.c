@@ -1,29 +1,24 @@
+#include "Add.h"
+#include "Arithmetic.h"
+#include "DTypes.h"
+#include "Mul.h"
+#include "Quantization.h"
 #include "Tensor.h"
 #include "unity.h"
-#include "Quantization.h"
-#include "Arithmetic.h"
-#include "Add.h"
-#include "Mul.h"
-#include "DTypes.h"
 
 #include <stdlib.h>
 #include <string.h>
-
 
 void testOrderDims() {
     size_t dimensions[] = {2, 3, 4};
     size_t orderOfDimensions[] = {1, 0, 2};
     size_t numberOfDims = 3;
 
-    shape_t shape = {
-        .dimensions = dimensions,
-        .orderOfDimensions = orderOfDimensions,
-        .numberOfDimensions = numberOfDims
-    };
+    shape_t shape = {.dimensions = dimensions,
+                     .orderOfDimensions = orderOfDimensions,
+                     .numberOfDimensions = numberOfDims};
 
-    tensor_t tensor = {
-        .shape = &shape
-    };
+    tensor_t tensor = {.shape = &shape};
 
     size_t expected[] = {3, 2, 4};
 
@@ -32,7 +27,6 @@ void testOrderDims() {
 
     TEST_ASSERT_EQUAL_size_t_ARRAY(expected, actual, numberOfDims);
 }
-
 
 /*23 = [2, 1, 3]
 
@@ -86,10 +80,7 @@ void testInt32PointWiseArithmetic() {
     size_t aOrderDims[] = {0, 1, 2};
     size_t aNumberOfDims = 3;
     shape_t aShape = {
-        .dimensions = aDims,
-        .orderOfDimensions = aOrderDims,
-        .numberOfDimensions = aNumberOfDims
-    };
+        .dimensions = aDims, .orderOfDimensions = aOrderDims, .numberOfDimensions = aNumberOfDims};
 
     quantization_t aQuantization;
     initInt32Quantization(&aQuantization);
@@ -103,10 +94,7 @@ void testInt32PointWiseArithmetic() {
     size_t bDims[] = {2, 1, 4};
     size_t bOrderDims[] = {1, 0, 2};
     shape_t bShape = {
-        .dimensions = bDims,
-        .orderOfDimensions = bOrderDims,
-        .numberOfDimensions = bNumberOfDims
-    };
+        .dimensions = bDims, .orderOfDimensions = bOrderDims, .numberOfDimensions = bNumberOfDims};
 
     quantization_t bQuantization;
     initInt32Quantization(&bQuantization);
@@ -119,18 +107,15 @@ void testInt32PointWiseArithmetic() {
     size_t outputNumberOfDims = 3;
     size_t outputDims[] = {4, 2, 1};
     size_t outputOrderDims[] = {2, 1, 0};
-    shape_t outputShape = {
-        .dimensions = outputDims,
-        .orderOfDimensions = outputOrderDims,
-        .numberOfDimensions = outputNumberOfDims
-    };
+    shape_t outputShape = {.dimensions = outputDims,
+                           .orderOfDimensions = outputOrderDims,
+                           .numberOfDimensions = outputNumberOfDims};
 
     quantization_t outputQuantization;
     initInt32Quantization(&outputQuantization);
 
     tensor_t outputTensor;
-    setTensorValues(&outputTensor, (uint8_t *)outputData, &outputShape,
-                    &outputQuantization, NULL);
+    setTensorValues(&outputTensor, (uint8_t *)outputData, &outputShape, &outputQuantization, NULL);
 
     int32_t expectedValues[] = {-2, 4, 6, 8, 10, 12, -14, 16};
 
@@ -151,11 +136,9 @@ void testFloat32ElementWithTensorArithmetic() {
     size_t aDims[] = {4};
     size_t aNumberOfDims = 1;
     size_t aOrderOfDims[] = {0};
-    shape_t aShape = {
-        .dimensions = aDims,
-        .orderOfDimensions = aOrderOfDims,
-        .numberOfDimensions = aNumberOfDims
-    };
+    shape_t aShape = {.dimensions = aDims,
+                      .orderOfDimensions = aOrderOfDims,
+                      .numberOfDimensions = aNumberOfDims};
 
     tensor_t aTensor;
     setTensorValues(&aTensor, (uint8_t *)aData, &aShape, &aQ, NULL);
@@ -165,7 +148,6 @@ void testFloat32ElementWithTensorArithmetic() {
     float expected[] = {2.f, 4.f, 6.f, 8.f};
 
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, aData, 4);
-
 }
 
 void testDoDimensionsMatch_SameShape_ReturnsTrue() {

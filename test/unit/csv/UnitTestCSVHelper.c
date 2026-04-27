@@ -1,11 +1,10 @@
 #include "CSVHelper.h"
 #include "unity.h"
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define CSV_INPUT_PATH "../../../../../test/unit/csv/input.csv"
 #define CSV_OUTPUT_PATH "../../../../../test/unit/csv/output.csv"
-
 
 void testCSVReadRowsByBufferSize() {
     char *filePath = CSV_INPUT_PATH;
@@ -78,7 +77,6 @@ void testCSVWriteRowsByBufferSize() {
 
     TEST_ASSERT_EQUAL_STRING("1, 2, 3, 4, 5, 6", ptr);
 }
-
 
 void setUp() {}
 void tearDown() {}

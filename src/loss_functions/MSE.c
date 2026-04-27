@@ -4,12 +4,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "Common.h"
 #include "MSE.h"
+#include "Sub.h"
 #include "Tensor.h"
 #include "TensorConversion.h"
-#include "Sub.h"
-#include "Common.h"
-
 
 float mseLossForwardFloat(tensor_t *output, tensor_t *label) {
     size_t size = calcNumberOfElementsByTensor(output);

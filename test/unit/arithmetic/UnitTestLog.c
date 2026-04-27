@@ -9,8 +9,8 @@ void testLogFloat() {
     TEST_ASSERT_EQUAL_FLOAT(expected, actual);
 }
 
-void setUp(){}
-void tearDown(){}
+void setUp() {}
+void tearDown() {}
 
 int main(void) {
     UNITY_BEGIN();

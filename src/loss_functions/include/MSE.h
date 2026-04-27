@@ -10,5 +10,4 @@ void mseLossBackwardAsym(tensor_t *modelOutput, tensor_t *label, tensor_t *resul
 
 void mseLossBackward(tensor_t *modelOutput, tensor_t *label, tensor_t *result);
 
-
-#endif //MSE_H
+#endif // MSE_H

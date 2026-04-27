@@ -5,7 +5,6 @@
 #include "Distributions.h"
 #include "RNG.h"
 
-
 float randomNormal(float mean, float standardDeviation) {
     float u1 = rngNextFloat();
     float u2 = rngNextFloat();

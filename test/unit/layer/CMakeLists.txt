@@ -1,5 +1,18 @@
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
+        Conv1d
+        MORE_LIBS
+        CommonLayerLibs
+        TensorApi
+        QuantizationApi
+        Conv1dApi
+        Kernel
+        QuantizationApi
+        StorageApi
+)
+
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
         Linear
         MORE_LIBS
         CommonLayerLibs
@@ -8,7 +21,6 @@ add_elastic_ai_unit_test(
         LinearApi
         StorageApi
 )
-
 
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST

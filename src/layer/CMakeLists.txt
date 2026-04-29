@@ -4,6 +4,8 @@ target_link_libraries(Conv1d PRIVATE
         DTypes
         Tensor
         Arithmetic
+        Common
+        Kernel
 )
 
 add_library(Conv1dTransposed Conv1dTransposed.c)
@@ -22,6 +24,7 @@ target_link_libraries(Layer PRIVATE
         Arithmetic
         Linear
         Relu
+        Conv1d
         Softmax
         Flatten
 )

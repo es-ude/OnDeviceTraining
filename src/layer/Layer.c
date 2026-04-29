@@ -1,6 +1,7 @@
 #define SOURCE_FILE "LAYER"
 
 #include "Layer.h"
+#include "Conv1d.h"
 #include "Flatten.h"
 #include "Linear.h"
 #include "Relu.h"
@@ -9,7 +10,7 @@
 layerFunctions_t layerFunctions[] = {
     [LINEAR] = {linearForward, linearBackward, linearCalcOutputShape},
     [RELU] = {reluForward, reluBackward, reluCalcOutputShape},
-    [CONV1D] = {NULL, NULL, NULL},
+    [CONV1D] = {conv1dForward, conv1dBackward, conv1dCalcOutputShape},
     [SOFTMAX] = {softmaxForward, softmaxBackward, softmaxCalcOutputShape},
     [FLATTEN] = {flattenForward, flattenBackward, flattenCalcOutputShape}};
 

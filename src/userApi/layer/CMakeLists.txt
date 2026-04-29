@@ -1,3 +1,15 @@
+add_library(Conv1dApi Conv1dApi.c)
+target_include_directories(Conv1dApi PUBLIC include)
+target_link_libraries(Conv1dApi PRIVATE
+        Tensor
+        Rounding
+        Layer
+        Conv1d
+        Common
+        StorageApi
+        TensorApi
+)
+
 add_library(LinearApi LinearApi.c)
 target_include_directories(LinearApi PUBLIC include)
 target_link_libraries(LinearApi PRIVATE

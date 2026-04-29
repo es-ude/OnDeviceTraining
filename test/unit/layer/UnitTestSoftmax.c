@@ -1,8 +1,6 @@
 #include <stdlib.h>
-#include <string.h>
 
 #include "QuantizationApi.h"
-#include "Softmax.h"
 #include "SoftmaxApi.h"
 #include "StorageApi.h"
 #include "Tensor.h"

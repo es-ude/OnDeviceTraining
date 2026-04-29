@@ -47,6 +47,16 @@ target_link_libraries(Div PRIVATE
         Common
 )
 
+add_library(Kernel Kernel.c)
+target_include_directories(Kernel PUBLIC include)
+target_link_libraries(Kernel PRIVATE
+        Tensor
+        DTypes
+        Arithmetic
+        Common
+        Layer
+)
+
 add_library(Log Log.c)
 target_include_directories(Log PUBLIC include)
 target_link_libraries(Log PRIVATE

@@ -14,7 +14,7 @@
 #define MNIST_TEST_Y "../../../test/unit/data_loader/mnist_test_y.npy"
 #define MNIST_TRAIN_X "../../../test/unit/data_loader/mnist_train_x.npy"
 #define MNIST_TRAIN_Y "../../../test/unit/data_loader/mnist_train_y.npy"
-#define LOG "../../../experiments/MnistExperimentLog.csv"
+#define LOG "../../../example/MnistExperimentLog.csv"
 
 // used for running experiment on remote workstation
 #else
@@ -172,7 +172,7 @@ int main(void) {
     layer_t *model[MODEL_SIZE];
     buildModel(model);
 
-    optimizer_t *sgd = sgdMCreateOptim(0.001f, 0.f, 0.f, model, MODEL_SIZE, FLOAT32);
+    optimizer_t *sgd = sgdMCreateOptim(0.001f, 0.9f, 0.f, model, MODEL_SIZE, FLOAT32);
 
     clock_t start = clock();
 

@@ -73,7 +73,7 @@ in
 		ci = {
 			exec = ''
 				set -e
-				find src test experiments \( -name '*.c' -o -name '*.h' \) -print0 \
+				find src test example \( -name '*.c' -o -name '*.h' \) -print0 \
 					| xargs -0 clang-format --dry-run -Werror
 				cmake --preset unit_test
 				cmake --build --preset unit_test

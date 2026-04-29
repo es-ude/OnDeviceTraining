@@ -234,6 +234,8 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
 
         result.finalTrainLoss = trainLoss;
         result.finalEvalStats = evalStats;
+
+        trainDataLoader->batchSize +=1;
     }
 
     return result;

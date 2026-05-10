@@ -9,7 +9,7 @@ checking and visualizations.
 | Directory | Task | Status |
 |---|---|---|
 | `har_classifier/` | UCI HAR 6-class activity classification | Stage 1 |
-| `ecg_anomaly_ae/` | ECG5000 reconstruction-based anomaly detection | Stage 2 (planned) |
+| `ecg_anomaly_ae/` | ECG5000 reconstruction-based anomaly detection | Stage 2 ✅ |
 | `kws_classifier/` | SpeechCommands 6-class keyword spotting | Stage 3 (planned) |
 | `kws_denoising_ae/` | SpeechCommands additive-noise denoising | Stage 4 (planned) |
 

@@ -86,3 +86,100 @@ def plot_confusion_matrix(
     fig.tight_layout()
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
+
+
+def plot_reconstructions(
+    out_path: Path | str,
+    test_inputs: np.ndarray,    # shape [N, 1, L]
+    pt_recons: np.ndarray,      # shape [N, 1, L]
+    c_recons: np.ndarray,       # shape [N, 1, L]
+    normal_idx: Iterable[int],  # length-K indices into test_inputs of class-1 samples
+    anomaly_idx: Iterable[int], # length-K indices of non-class-1 samples
+    title: str = "Reconstructions",
+) -> None:
+    """Overlay input / PyTorch-recon / C-recon for K normal + K anomaly samples.
+
+    Layout: 2 rows × K columns. Row 0 = normal examples, row 1 = anomaly
+    examples. Each subplot has three lines: input (black solid), PT-recon
+    (blue dashed), C-recon (orange dashed).
+    """
+    normal_idx = list(normal_idx)
+    anomaly_idx = list(anomaly_idx)
+    K = min(len(normal_idx), len(anomaly_idx))
+    if K == 0:
+        raise ValueError("plot_reconstructions: need >=1 normal and >=1 anomaly sample")
+
+    fig, axes = plt.subplots(2, K, figsize=(2.5 * K, 4), sharey=True)
+    if K == 1:
+        axes = np.array([[axes[0]], [axes[1]]])
+
+    for col, ix in enumerate(normal_idx[:K]):
+        ax = axes[0, col]
+        ax.plot(test_inputs[ix, 0], "-",  color="black",  linewidth=1.0, label="input")
+        ax.plot(pt_recons[ix, 0],   "--", color="#1f77b4", linewidth=1.0, label="PT")
+        ax.plot(c_recons[ix, 0],    "--", color="#ff7f0e", linewidth=1.0, label="C")
+        ax.set_title(f"normal #{ix}", fontsize=8)
+        ax.tick_params(labelsize=7)
+        if col == 0:
+            ax.set_ylabel("normal", fontsize=9)
+            ax.legend(fontsize=7, loc="upper right")
+
+    for col, ix in enumerate(anomaly_idx[:K]):
+        ax = axes[1, col]
+        ax.plot(test_inputs[ix, 0], "-",  color="black",  linewidth=1.0)
+        ax.plot(pt_recons[ix, 0],   "--", color="#1f77b4", linewidth=1.0)
+        ax.plot(c_recons[ix, 0],    "--", color="#ff7f0e", linewidth=1.0)
+        ax.set_title(f"anomaly #{ix}", fontsize=8)
+        ax.tick_params(labelsize=7)
+        if col == 0:
+            ax.set_ylabel("anomaly", fontsize=9)
+
+    fig.suptitle(title)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+
+
+def plot_anomaly_score_hist(
+    out_path: Path | str,
+    pt_scores: np.ndarray,      # shape [N], per-test-sample reconstruction MSE (PyTorch)
+    c_scores: np.ndarray,       # shape [N], same (C)
+    test_labels: np.ndarray,    # shape [N], class IDs in {1, 2, 3, 4, 5}
+    class_names: Iterable[str], # e.g. ["normal", "R-on-T", "PVC", "SP", "UB"]
+    title: str = "Reconstruction-MSE histograms (per class)",
+) -> None:
+    """Side-by-side PyTorch / C histograms of reconstruction MSE, stacked by class.
+
+    Two subplots; each has one histogram per class colored differently,
+    superimposed in `histtype='step'` so distributions are comparable.
+    """
+    class_names = list(class_names)
+    unique_labels = sorted(set(int(v) for v in test_labels))
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4), sharex=True, sharey=True)
+
+    cmap = plt.get_cmap("tab10")
+    bins = np.linspace(
+        min(pt_scores.min(), c_scores.min()),
+        max(pt_scores.max(), c_scores.max()),
+        50,
+    )
+
+    for ax, scores, label in zip(axes, [pt_scores, c_scores], ["PyTorch", "C"]):
+        for ci, cls in enumerate(unique_labels):
+            mask = test_labels == cls
+            name = class_names[cls - 1] if 1 <= cls <= len(class_names) else f"class {cls}"
+            ax.hist(
+                scores[mask], bins=bins, histtype="step", linewidth=1.5,
+                color=cmap(ci % 10), label=name,
+            )
+        ax.set_title(label)
+        ax.set_xlabel("reconstruction MSE")
+        ax.legend(fontsize=8)
+        ax.set_yscale("log")
+        ax.grid(True, alpha=0.3)
+
+    axes[0].set_ylabel("count (log)")
+    fig.suptitle(title)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)

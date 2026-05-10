@@ -1,9 +1,11 @@
 #define SOURCE_FILE "har_classifier_train_c"
 
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 
 #include "AvgPool1d.h"
@@ -328,7 +330,25 @@ static void epochCallback(size_t epoch, float trainLoss, epochStats_t evalStats)
     clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
 }
 
+static int ensureDir(const char *p) {
+    if (mkdir(p, S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH) == 0) {
+        return 0;
+    }
+    if (errno == EEXIST) {
+        return 0;
+    }
+    fprintf(stderr, "ERROR: cannot create %s: %s\n", p, strerror(errno));
+    return 1;
+}
+
 int main(void) {
+    if (ensureDir("examples/har_classifier/logs") != 0) {
+        return 1;
+    }
+    if (ensureDir("examples/har_classifier/outputs") != 0) {
+        return 1;
+    }
+
     initDataSets();
 
     dataLoader_t *trainLoader = dataLoaderInit(getTrainSample, getTrainSize, BATCH, NULL, NULL,
@@ -414,12 +434,14 @@ int main(void) {
     }
 
     size_t outShape[] = {numTest};
+    int status = 0;
     int rc = npyWriteInt32("examples/har_classifier/outputs/c_predictions.npy", predictions,
                            outShape, 1);
     if (rc != 0) {
         fprintf(stderr, "ERROR: npyWriteInt32 failed (rc=%d)\n", rc);
+        status = 1;
     }
     free(predictions);
 
-    return 0;
+    return status;
 }

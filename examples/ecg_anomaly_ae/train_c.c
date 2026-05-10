@@ -1,9 +1,11 @@
 #define SOURCE_FILE "ecg_anomaly_ae_train_c"
 
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 
 #include "AvgPool1d.h"
@@ -378,7 +380,25 @@ static int writeAllReconstructions(layer_t **model, size_t modelSize,
     return rc;
 }
 
+static int ensureDir(const char *p) {
+    if (mkdir(p, S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH) == 0) {
+        return 0;
+    }
+    if (errno == EEXIST) {
+        return 0;
+    }
+    fprintf(stderr, "ERROR: cannot create %s: %s\n", p, strerror(errno));
+    return 1;
+}
+
 int main(void) {
+    if (ensureDir("examples/ecg_anomaly_ae/logs") != 0) {
+        return 1;
+    }
+    if (ensureDir("examples/ecg_anomaly_ae/outputs") != 0) {
+        return 1;
+    }
+
     initDataSets();
 
     dataLoader_t *trainLoader = dataLoaderInit(getTrainSample, getTrainSize, BATCH, NULL, NULL,
@@ -436,17 +456,20 @@ int main(void) {
 
     fprintf(stdout, "FINAL test_loss=%.6f\n", (double)testLoss);
 
+    int status = 0;
     int rc = writeAllReconstructions(model, MODEL_SIZE, getTestSample, getTestSize(),
                                      "examples/ecg_anomaly_ae/outputs/c_reconstructions.npy");
     if (rc != 0) {
         fprintf(stderr, "ERROR: c_reconstructions.npy write failed (rc=%d)\n", rc);
+        status = 1;
     }
 
     rc = writeAllReconstructions(model, MODEL_SIZE, getTrainSample, getTrainSize(),
                                  "examples/ecg_anomaly_ae/outputs/c_train_recons.npy");
     if (rc != 0) {
         fprintf(stderr, "ERROR: c_train_recons.npy write failed (rc=%d)\n", rc);
+        status = 1;
     }
 
-    return 0;
+    return status;
 }

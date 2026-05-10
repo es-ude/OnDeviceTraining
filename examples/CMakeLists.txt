@@ -1,2 +1,3 @@
 add_subdirectory(_shared)
 add_subdirectory(har_classifier)
+add_subdirectory(ecg_anomaly_ae)

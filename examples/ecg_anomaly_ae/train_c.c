@@ -67,6 +67,171 @@
 /* Forward declaration; defined in Task 6. */
 static void buildModel(layer_t **model);
 
+/* ------------------------------------------------------------------------- */
+/* Model parameters (file-static — must outlive buildModel).                 */
+/* ------------------------------------------------------------------------- */
+
+/* Conv1d weights: [Cout, Cin, K]. Bias: [Cout] rank-1 (matches Conv1d.c). */
+static float e1_w_data[E1_OUT * IN_CHANNELS * E1_K];
+static size_t e1_w_dims[3] = {E1_OUT, IN_CHANNELS, E1_K};
+static float e1_b_data[E1_OUT];
+static size_t e1_b_dims[1] = {E1_OUT};
+
+static float e2_w_data[E2_OUT * E1_OUT * E2_K];
+static size_t e2_w_dims[3] = {E2_OUT, E1_OUT, E2_K};
+static float e2_b_data[E2_OUT];
+static size_t e2_b_dims[1] = {E2_OUT};
+
+/* Conv1dTransposed weights: [Cin, Cout/groups, K]  (note the SWAP from Conv1d).
+ * Per src/layer/include/Conv1dTransposed.h:14. Bias: [Cout] rank-1. */
+static float d1_w_data[E2_OUT * D1_OUT * D1_K];
+static size_t d1_w_dims[3] = {E2_OUT, D1_OUT, D1_K};
+static float d1_b_data[D1_OUT];
+static size_t d1_b_dims[1] = {D1_OUT};
+
+static float d2_w_data[D1_OUT * D2_OUT * D2_K];
+static size_t d2_w_dims[3] = {D1_OUT, D2_OUT, D2_K};
+static float d2_b_data[D2_OUT];
+static size_t d2_b_dims[1] = {D2_OUT};
+
+static float d3_w_data[D2_OUT * D3_OUT * D3_K];
+static size_t d3_w_dims[3] = {D2_OUT, D3_OUT, D3_K};
+static float d3_b_data[D3_OUT];
+static size_t d3_b_dims[1] = {D3_OUT};
+
+static parameter_t *buildParam(distributionType_t dist, float *data, size_t *dims, size_t ndim,
+                               size_t fanIn, size_t fanOut) {
+    quantization_t *q = quantizationInitFloat();
+    tensor_t *p = tensorInitWithDistribution(dist, data, dims, ndim, q, NULL, fanIn, fanOut);
+    tensor_t *g = gradInitFloat(p, NULL);
+    return parameterInit(p, g);
+}
+
+static layer_t *buildMaxPool1dLayer(size_t kSize, size_t stride, size_t outC, size_t outLen) {
+    quantization_t *q = quantizationInitFloat();
+
+    kernel_t *kernel = reserveMemory(sizeof(kernel_t));
+    initKernel(kernel, kSize, VALID, /*dilation*/ 1, stride);
+
+    /* Argmax buffer is sized for B=1 (training_batch iterates microbatch-by-
+     * microbatch), shape [1, outC, outLen]. */
+    size_t numArgmax = 1 * outC * outLen;
+    int32_t *argmaxBuf = reserveMemory(numArgmax * sizeof(int32_t));
+    size_t *argmaxDims = reserveMemory(3 * sizeof(size_t));
+    argmaxDims[0] = 1;
+    argmaxDims[1] = outC;
+    argmaxDims[2] = outLen;
+    tensor_t *argmax = tensorInitInt32(argmaxBuf, argmaxDims, 3, NULL);
+
+    maxPool1dConfig_t *cfg = reserveMemory(sizeof(maxPool1dConfig_t));
+    initMaxPool1dConfig(cfg, kernel, argmax, q, q);
+
+    layer_t *layer = reserveMemory(sizeof(layer_t));
+    layerConfig_t *lc = reserveMemory(sizeof(layerConfig_t));
+    layer->type = MAXPOOL1D;
+    lc->maxPool1d = cfg;
+    layer->config = lc;
+    return layer;
+}
+
+static layer_t *buildAvgPool1dLayer(size_t kSize, size_t stride) {
+    quantization_t *q = quantizationInitFloat();
+
+    kernel_t *kernel = reserveMemory(sizeof(kernel_t));
+    initKernel(kernel, kSize, VALID, /*dilation*/ 1, stride);
+
+    avgPool1dConfig_t *cfg = reserveMemory(sizeof(avgPool1dConfig_t));
+    initAvgPool1dConfig(cfg, kernel, q, q);
+
+    layer_t *layer = reserveMemory(sizeof(layer_t));
+    layerConfig_t *lc = reserveMemory(sizeof(layerConfig_t));
+    layer->type = AVGPOOL1D;
+    lc->avgPool1d = cfg;
+    layer->config = lc;
+    return layer;
+}
+
+/* Conv1dTransposed has no userApi yet (Phase 1 contract: paddingType_t = VALID
+ * mandatory; SAME is rejected with PRINT_ERROR + exit). We mirror the manual
+ * idiom from test/unit/layer/UnitTestConv1dTransposed.c, but use reserveMemory
+ * so the cfg/layer survive across multiple buildModel calls (which doesn't
+ * happen here, but is consistent with the rest of the file). */
+static layer_t *buildConv1dTransposedLayer(parameter_t *w, parameter_t *b, size_t kSize,
+                                           size_t stride, size_t outputPadding, size_t groups) {
+    quantization_t *q = quantizationInitFloat();
+
+    kernel_t *kernel = reserveMemory(sizeof(kernel_t));
+    initKernel(kernel, kSize, VALID, /*dilation*/ 1, stride);
+
+    conv1dTransposedConfig_t *cfg = reserveMemory(sizeof(conv1dTransposedConfig_t));
+    initConv1dTransposedConfigWithWeightsAndBias(cfg, kernel, w, b, groups, outputPadding, q, q, q,
+                                                 q);
+
+    layer_t *layer = reserveMemory(sizeof(layer_t));
+    layerConfig_t *lc = reserveMemory(sizeof(layerConfig_t));
+    layer->type = CONV1D_TRANSPOSED;
+    lc->conv1dTransposed = cfg;
+    layer->config = lc;
+    return layer;
+}
+
+static void buildModel(layer_t **model) {
+    quantization_t *q = quantizationInitFloat();
+
+    /* ---- Encoder ---- */
+
+    /* Block E1: Conv1d(1→8, K=7, S=2, padding=SAME), ReLU.
+     * SAME with stride=2 on len 140 → len 70. */
+    kernel_t *e1k = reserveMemory(sizeof(kernel_t));
+    initKernel(e1k, E1_K, SAME, /*dilation*/ 1, /*stride*/ E1_S);
+    parameter_t *e1_w =
+        buildParam(XAVIER_UNIFORM, e1_w_data, e1_w_dims, 3, IN_CHANNELS * E1_K, E1_OUT * E1_K);
+    parameter_t *e1_b = buildParam(ZEROS, e1_b_data, e1_b_dims, 1, 1, E1_OUT);
+    model[0] = conv1dLayerInit(e1_w, e1_b, e1k, q, q, q, q);
+    model[1] = reluLayerInit(quantizationInitFloat(), quantizationInitFloat());
+
+    /* Block P1: MaxPool1d(K=2, S=2). 70 → 35. */
+    model[2] = buildMaxPool1dLayer(/*K*/ 2, /*S*/ 2, /*outC*/ E1_OUT, /*outLen*/ 35);
+
+    /* Block E2: Conv1d(8→16, K=5, padding=SAME), ReLU. */
+    kernel_t *e2k = reserveMemory(sizeof(kernel_t));
+    initKernel(e2k, E2_K, SAME, 1, 1);
+    parameter_t *e2_w =
+        buildParam(XAVIER_UNIFORM, e2_w_data, e2_w_dims, 3, E1_OUT * E2_K, E2_OUT * E2_K);
+    parameter_t *e2_b = buildParam(ZEROS, e2_b_data, e2_b_dims, 1, 1, E2_OUT);
+    model[3] = conv1dLayerInit(e2_w, e2_b, e2k, quantizationInitFloat(), quantizationInitFloat(),
+                               quantizationInitFloat(), quantizationInitFloat());
+    model[4] = reluLayerInit(quantizationInitFloat(), quantizationInitFloat());
+
+    /* Block P2: AvgPool1d(K=5, S=5). 35 → 7 (bottleneck). */
+    model[5] = buildAvgPool1dLayer(/*K*/ 5, /*S*/ 5);
+
+    /* ---- Decoder ---- */
+
+    /* Block D1: Conv1dTransposed(16→8, K=5, S=5, op=0). 7 → 35. ReLU. */
+    parameter_t *d1_w =
+        buildParam(XAVIER_UNIFORM, d1_w_data, d1_w_dims, 3, E2_OUT * D1_K, D1_OUT * D1_K);
+    parameter_t *d1_b = buildParam(ZEROS, d1_b_data, d1_b_dims, 1, 1, D1_OUT);
+    model[6] = buildConv1dTransposedLayer(d1_w, d1_b, /*K*/ D1_K, /*S*/ D1_S,
+                                          /*outputPadding*/ 0, /*groups*/ 1);
+    model[7] = reluLayerInit(quantizationInitFloat(), quantizationInitFloat());
+
+    /* Block D2: Conv1dTransposed(8→4, K=2, S=2, op=0). 35 → 70. ReLU. */
+    parameter_t *d2_w =
+        buildParam(XAVIER_UNIFORM, d2_w_data, d2_w_dims, 3, D1_OUT * D2_K, D2_OUT * D2_K);
+    parameter_t *d2_b = buildParam(ZEROS, d2_b_data, d2_b_dims, 1, 1, D2_OUT);
+    model[8] = buildConv1dTransposedLayer(d2_w, d2_b, /*K*/ D2_K, /*S*/ D2_S,
+                                          /*outputPadding*/ 0, /*groups*/ 1);
+    model[9] = reluLayerInit(quantizationInitFloat(), quantizationInitFloat());
+
+    /* Block D3: Conv1dTransposed(4→1, K=2, S=2, op=0). 70 → 140. NO ReLU on final. */
+    parameter_t *d3_w =
+        buildParam(XAVIER_UNIFORM, d3_w_data, d3_w_dims, 3, D2_OUT * D3_K, D3_OUT * D3_K);
+    parameter_t *d3_b = buildParam(ZEROS, d3_b_data, d3_b_dims, 1, 1, D3_OUT);
+    model[10] = buildConv1dTransposedLayer(d3_w, d3_b, /*K*/ D3_K, /*S*/ D3_S,
+                                           /*outputPadding*/ 0, /*groups*/ 1);
+}
+
 int main(void) {
     return 0;
 }

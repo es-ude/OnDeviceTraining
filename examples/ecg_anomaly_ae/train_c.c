@@ -175,6 +175,88 @@ static layer_t *buildConv1dTransposedLayer(parameter_t *w, parameter_t *b, size_
     return layer;
 }
 
+/* ------------------------------------------------------------------------- */
+/* Datasets and dataloader thunks.                                           */
+/* ------------------------------------------------------------------------- */
+
+static dataset_t g_trainDataset;
+static dataset_t g_valDataset;
+static dataset_t g_testDataset;
+
+/* npyLoad strips the leading N dim, leaving each item with shape [1, 140]
+ * rank-2. The C model expects rank-3 inputs [B=1, 1, 140] for Conv1d. The MSE
+ * loss expects the label to have the same shape as the model output. Both
+ * items AND labels are reshaped to [1, 1, 140]. */
+static void reshapeItemsAddBatchDim(tensorArray_t *items) {
+    for (size_t i = 0; i < items->size; ++i) {
+        tensor_t *t = items->array[i];
+        size_t oldRank = t->shape->numberOfDimensions;
+        size_t newRank = oldRank + 1;
+
+        size_t *newDims = reserveMemory(newRank * sizeof(size_t));
+        size_t *newOrder = reserveMemory(newRank * sizeof(size_t));
+        newDims[0] = 1;
+        for (size_t d = 0; d < oldRank; ++d) {
+            newDims[d + 1] = t->shape->dimensions[d];
+        }
+        for (size_t d = 0; d < newRank; ++d) {
+            newOrder[d] = d;
+        }
+
+        freeReservedMemory(t->shape->dimensions);
+        freeReservedMemory(t->shape->orderOfDimensions);
+        t->shape->dimensions = newDims;
+        t->shape->orderOfDimensions = newOrder;
+        t->shape->numberOfDimensions = newRank;
+    }
+}
+
+/* AE: label IS the input. We re-load the same .npy file as the label tensor.
+ * Two npyLoad calls produce two independent copies (no aliasing); RAM cost is
+ * trivial (≤ 200 KB doubled for ECG5000). */
+static void initDataSets(void) {
+    tensorArray_t *trainItems = npyLoad("examples/ecg_anomaly_ae/data/train_x.npy");
+    tensorArray_t *trainLabels = npyLoad("examples/ecg_anomaly_ae/data/train_x.npy");
+    reshapeItemsAddBatchDim(trainItems);
+    reshapeItemsAddBatchDim(trainLabels);
+    g_trainDataset.items = trainItems;
+    g_trainDataset.labels = trainLabels;
+
+    tensorArray_t *valItems = npyLoad("examples/ecg_anomaly_ae/data/val_x.npy");
+    tensorArray_t *valLabels = npyLoad("examples/ecg_anomaly_ae/data/val_x.npy");
+    reshapeItemsAddBatchDim(valItems);
+    reshapeItemsAddBatchDim(valLabels);
+    g_valDataset.items = valItems;
+    g_valDataset.labels = valLabels;
+
+    tensorArray_t *testItems = npyLoad("examples/ecg_anomaly_ae/data/test_x.npy");
+    tensorArray_t *testLabels = npyLoad("examples/ecg_anomaly_ae/data/test_x.npy");
+    reshapeItemsAddBatchDim(testItems);
+    reshapeItemsAddBatchDim(testLabels);
+    g_testDataset.items = testItems;
+    g_testDataset.labels = testLabels;
+}
+
+static sample_t *getTrainSample(size_t id) {
+    return npyGetSample(&g_trainDataset, id);
+}
+static sample_t *getValSample(size_t id) {
+    return npyGetSample(&g_valDataset, id);
+}
+static sample_t *getTestSample(size_t id) {
+    return npyGetSample(&g_testDataset, id);
+}
+
+static size_t getTrainSize(void) {
+    return g_trainDataset.items->size;
+}
+static size_t getValSize(void) {
+    return g_valDataset.items->size;
+}
+static size_t getTestSize(void) {
+    return g_testDataset.items->size;
+}
+
 static void buildModel(layer_t **model) {
     quantization_t *q = quantizationInitFloat();
 
@@ -232,6 +314,99 @@ static void buildModel(layer_t **model) {
                                            /*outputPadding*/ 0, /*groups*/ 1);
 }
 
+/* ------------------------------------------------------------------------- */
+/* Per-epoch JSON log writer + epoch callback.                               */
+/* ------------------------------------------------------------------------- */
+
+static FILE *g_log_file = NULL;
+static int g_first_epoch = 1;
+static struct timespec g_epoch_t0;
+
+static void epochCallback(size_t epoch, float trainLoss, epochStats_t evalStats) {
+    /* trainingRun's eval pass derives numClasses from label_num_elements (140
+     * for our AE), so evalStats.accuracy / .precision / .recall / .f1 contain
+     * argmax-based 140-class noise. We drop them; only evalStats.loss is
+     * meaningful (it's the MSE-mean-per-element, matching PyTorch). val_acc
+     * is null in the JSON to match the PyTorch side. */
+    struct timespec t1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double wall_s =
+        (double)(t1.tv_sec - g_epoch_t0.tv_sec) + (double)(t1.tv_nsec - g_epoch_t0.tv_nsec) * 1e-9;
+
+    if (!g_first_epoch) {
+        fprintf(g_log_file, ",\n");
+    }
+    fprintf(g_log_file,
+            "    {\"epoch\": %zu, \"step_losses\": [], \"train_loss\": %.6f, "
+            "\"val_loss\": %.6f, \"val_acc\": null, \"wall_s\": %.4f}",
+            epoch, (double)trainLoss, (double)evalStats.loss, wall_s);
+    fflush(g_log_file);
+    g_first_epoch = 0;
+
+    fprintf(stdout, "epoch %zu: train_loss=%.6f val_loss=%.6f wall_s=%.2f\n", epoch,
+            (double)trainLoss, (double)evalStats.loss, wall_s);
+    fflush(stdout);
+
+    clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
+}
+
 int main(void) {
+    initDataSets();
+
+    dataLoader_t *trainLoader = dataLoaderInit(getTrainSample, getTrainSize, BATCH, NULL, NULL,
+                                               /*shuffle*/ true, /*shuffleSeed*/ SHUFFLE_SEED,
+                                               /*dropLast*/ true);
+    dataLoader_t *valLoader = dataLoaderInit(getValSample, getValSize, 1, NULL, NULL,
+                                             /*shuffle*/ false, /*shuffleSeed*/ 0,
+                                             /*dropLast*/ true);
+    dataLoader_t *testLoader = dataLoaderInit(getTestSample, getTestSize, 1, NULL, NULL,
+                                              /*shuffle*/ false, /*shuffleSeed*/ 0,
+                                              /*dropLast*/ true);
+
+    layer_t *model[MODEL_SIZE];
+    buildModel(model);
+
+    optimizer_t *sgd =
+        sgdMCreateOptim(LR, MOMENTUM, /*weightDecay*/ 0.0f, model, MODEL_SIZE, FLOAT32);
+
+    g_log_file = fopen("examples/ecg_anomaly_ae/logs/c.json", "w");
+    if (!g_log_file) {
+        fprintf(stderr, "ERROR: cannot open log file for writing\n");
+        return 1;
+    }
+    fprintf(g_log_file,
+            "{\n"
+            "  \"impl\": \"c\",\n"
+            "  \"example\": \"ecg_anomaly_ae\",\n"
+            "  \"config\": {\"epochs\": %d, \"batch\": %d, \"lr\": %.6f, "
+            "\"momentum\": %.6f, \"seed\": %d, \"shuffle_seed\": %d},\n"
+            "  \"epochs\": [\n",
+            EPOCHS, BATCH, (double)LR, (double)MOMENTUM, SEED, SHUFFLE_SEED);
+    fflush(g_log_file);
+
+    clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
+
+    trainingRunResult_t result = trainingRun(
+        model, MODEL_SIZE,
+        (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL},
+        trainLoader, valLoader, sgd, EPOCHS, calculateGradsSequential, inferenceWithLoss,
+        epochCallback);
+    (void)result;
+
+    /* Final test-set eval. Use evaluationEpoch (loss-only) to skip the
+     * argmax-based metric pass that would do 140-class accuracy on this AE. */
+    float testLoss =
+        evaluationEpoch(model, MODEL_SIZE, MSE, testLoader, inferenceWithLoss, REDUCTION_MEAN);
+
+    fprintf(g_log_file,
+            "\n  ],\n"
+            "  \"final\": {\"test_loss\": %.6f, \"test_acc\": null, "
+            "\"test_auc\": null}\n"
+            "}\n",
+            (double)testLoss);
+    fclose(g_log_file);
+
+    fprintf(stdout, "FINAL test_loss=%.6f\n", (double)testLoss);
+
     return 0;
 }

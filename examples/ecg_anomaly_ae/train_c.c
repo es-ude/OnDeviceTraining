@@ -350,6 +350,34 @@ static void epochCallback(size_t epoch, float trainLoss, epochStats_t evalStats)
     clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
 }
 
+/* Run forward inference on every sample of the given dataset, allocate a
+ * single contiguous [N, 1, 140] float buffer, fill it, and write it to
+ * `outPath` via npyWriteFloat32. The buffer is malloc-owned and freed by
+ * this function. */
+static int writeAllReconstructions(layer_t **model, size_t modelSize,
+                                   sample_t *(*getSample)(size_t), size_t n, const char *outPath) {
+    size_t totalElems = n * IN_CHANNELS * LEN_INPUT;
+    float *buf = malloc(totalElems * sizeof(float));
+    if (!buf) {
+        fprintf(stderr, "OOM allocating reconstruction buffer (n=%zu)\n", n);
+        return 1;
+    }
+
+    for (size_t i = 0; i < n; ++i) {
+        sample_t *s = getSample(i);
+        tensor_t *out = inference(model, modelSize, s->item);
+        const float *recon = (const float *)out->data;
+        memcpy(buf + i * IN_CHANNELS * LEN_INPUT, recon, IN_CHANNELS * LEN_INPUT * sizeof(float));
+        freeTensor(out);
+        freeSample(s);
+    }
+
+    size_t outShape[3] = {n, IN_CHANNELS, LEN_INPUT};
+    int rc = npyWriteFloat32(outPath, buf, outShape, 3);
+    free(buf);
+    return rc;
+}
+
 int main(void) {
     initDataSets();
 
@@ -407,6 +435,18 @@ int main(void) {
     fclose(g_log_file);
 
     fprintf(stdout, "FINAL test_loss=%.6f\n", (double)testLoss);
+
+    int rc = writeAllReconstructions(model, MODEL_SIZE, getTestSample, getTestSize(),
+                                     "examples/ecg_anomaly_ae/outputs/c_reconstructions.npy");
+    if (rc != 0) {
+        fprintf(stderr, "ERROR: c_reconstructions.npy write failed (rc=%d)\n", rc);
+    }
+
+    rc = writeAllReconstructions(model, MODEL_SIZE, getTrainSample, getTrainSize(),
+                                 "examples/ecg_anomaly_ae/outputs/c_train_recons.npy");
+    if (rc != 0) {
+        fprintf(stderr, "ERROR: c_train_recons.npy write failed (rc=%d)\n", rc);
+    }
 
     return 0;
 }

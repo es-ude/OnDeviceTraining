@@ -158,11 +158,11 @@ def plot_anomaly_score_hist(
     fig, axes = plt.subplots(1, 2, figsize=(11, 4), sharex=True, sharey=True)
 
     cmap = plt.get_cmap("tab10")
-    bins = np.linspace(
-        min(pt_scores.min(), c_scores.min()),
-        max(pt_scores.max(), c_scores.max()),
-        50,
-    )
+    lo = float(min(pt_scores.min(), c_scores.min()))
+    hi = float(max(pt_scores.max(), c_scores.max()))
+    if hi <= lo:
+        hi = lo + 1.0  # degenerate; render a single visible bar
+    bins = np.linspace(lo, hi, 50)
 
     for ax, scores, label in zip(axes, [pt_scores, c_scores], ["PyTorch", "C"]):
         for ci, cls in enumerate(unique_labels):

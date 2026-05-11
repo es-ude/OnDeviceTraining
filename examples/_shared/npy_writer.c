@@ -2,9 +2,28 @@
 
 #include "npy_writer.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Append a printf-formatted string into `buf` starting at `offset`. Returns
+ * the new offset on success, or -1 on truncation, encoding error, or if the
+ * caller passed an already-out-of-range offset. Avoids the unsigned underflow
+ * trap of computing `buf_size - offset` when `offset >= buf_size`. */
+static int appendBounded(char *buf, size_t buf_size, int offset, const char *fmt, ...) {
+    if (offset < 0 || (size_t)offset >= buf_size) {
+        return -1;
+    }
+    va_list args;
+    va_start(args, fmt);
+    int written = vsnprintf(buf + offset, buf_size - (size_t)offset, fmt, args);
+    va_end(args);
+    if (written < 0 || (size_t)written >= buf_size - (size_t)offset) {
+        return -1;
+    }
+    return offset + written;
+}
 
 static int writeNpy(const char *path, const void *data, const size_t *shape, size_t ndim,
                     const char *dtype_descr, /* "<f4" or "<i4" */
@@ -17,17 +36,20 @@ static int writeNpy(const char *path, const void *data, const size_t *shape, siz
     /* Build dict header: {'descr': '<f4', 'fortran_order': False, 'shape': (a, b, c), } */
     char shape_buf[256];
     int shape_len = 0;
-    shape_len += snprintf(shape_buf + shape_len, sizeof(shape_buf) - shape_len, "(");
+    shape_len = appendBounded(shape_buf, sizeof(shape_buf), shape_len, "(");
     for (size_t i = 0; i < ndim; ++i) {
-        shape_len += snprintf(shape_buf + shape_len, sizeof(shape_buf) - (size_t)shape_len, "%zu,",
-                              shape[i]);
+        shape_len = appendBounded(shape_buf, sizeof(shape_buf), shape_len, "%zu,", shape[i]);
     }
     if (ndim == 0) {
-        shape_len += snprintf(shape_buf + shape_len, sizeof(shape_buf) - (size_t)shape_len, ",");
+        shape_len = appendBounded(shape_buf, sizeof(shape_buf), shape_len, ",");
     }
     /* ndim == 1: already has trailing comma from the loop above */
     /* ndim > 1:  numpy accepts trailing comma in tuple literal */
-    shape_len += snprintf(shape_buf + shape_len, sizeof(shape_buf) - (size_t)shape_len, ")");
+    shape_len = appendBounded(shape_buf, sizeof(shape_buf), shape_len, ")");
+    if (shape_len < 0) {
+        fclose(f);
+        return 6;
+    }
 
     char dict[512];
     int dict_len =

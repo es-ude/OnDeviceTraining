@@ -208,6 +208,76 @@ void convertSymInt32TensorToFloat32Tensor(tensor_t *inputTensor, tensor_t *outpu
     memcpy(outputTensor->data, output, numberOfValues * bytesPerOutputElement);
 }
 
+void requantSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTensor) {
+    size_t numberOfElements = calcNumberOfElementsByTensor(inputTensor);
+
+    symInt32QConfig_t *inputSymInt32QC = inputTensor->quantization->qConfig;
+    symInt32QConfig_t *outputSymInt32QC = outputTensor->quantization->qConfig;
+    /* latch BEFORE writing outputSymInt32QC->scale: when called in-place
+     * (inputTensor == outputTensor) both pointers alias the same config */
+    float inScale = inputSymInt32QC->scale;
+
+    const float qMax = powf(2, (float)outputSymInt32QC->qMaxBits - 1) - 1;
+    const float qMin = -powf(2, (float)outputSymInt32QC->qMaxBits - 1);
+
+    int32_t *inputInt32 = (int32_t *)inputTensor->data;
+    int32_t *outputInt32 = (int32_t *)outputTensor->data;
+
+    /* pass A: absmax over dequantized values — reads only (alias-safe) */
+    float absMax = 0.f;
+    for (size_t i = 0; i < numberOfElements; i++) {
+        float dequant = fabsf((float)inputInt32[i] * inScale);
+        if (dequant > absMax) {
+            absMax = dequant;
+        }
+    }
+
+    float scale;
+    if (absMax == 0.f) {
+        scale = 1.f;
+    } else {
+        scale = absMax / qMax;
+    }
+    outputSymInt32QC->scale = scale;
+
+    /* pass B: same-index read-then-write — in-place safe (int32 both sides) */
+    for (size_t i = 0; i < numberOfElements; i++) {
+        outputInt32[i] = roundByMode(clamp(((float)inputInt32[i] * inScale) / scale, qMin, qMax),
+                                     outputSymInt32QC->roundingMode);
+    }
+}
+
+void requantSymInt32TensorToScale(tensor_t *inputTensor, tensor_t *outputTensor) {
+    size_t numberOfElements = calcNumberOfElementsByTensor(inputTensor);
+
+    symInt32QConfig_t *inputSymInt32QC = inputTensor->quantization->qConfig;
+    symInt32QConfig_t *outputSymInt32QC = outputTensor->quantization->qConfig;
+    float inScale = inputSymInt32QC->scale;
+    float targetScale = outputSymInt32QC->scale;
+
+    /* NaN-robust: !(x > 0.f) is also true for NaN, unlike (x <= 0.f) */
+    if (!(targetScale > 0.f)) {
+        PRINT_ERROR("requantSymInt32TensorToScale: target scale must be pre-set and > 0 on "
+                    "the output qConfig, got %f",
+                    targetScale);
+        exit(1);
+    }
+
+    const float qMax = powf(2, (float)outputSymInt32QC->qMaxBits - 1) - 1;
+    const float qMin = -powf(2, (float)outputSymInt32QC->qMaxBits - 1);
+
+    int32_t *inputInt32 = (int32_t *)inputTensor->data;
+    int32_t *outputInt32 = (int32_t *)outputTensor->data;
+
+    /* single same-index read-then-write pass — shared-buffer in-place safe;
+     * clamp saturates at qMin/qMax BY DESIGN (Deutel Eq. 4 analog) */
+    for (size_t i = 0; i < numberOfElements; i++) {
+        outputInt32[i] =
+            roundByMode(clamp(((float)inputInt32[i] * inScale) / targetScale, qMin, qMax),
+                        outputSymInt32QC->roundingMode);
+    }
+}
+
 void convertSymInt32TensorToAsymTensor(tensor_t *inputTensor, tensor_t *outputTensor) {
     size_t numberOfValues = calcNumberOfElementsByTensor(inputTensor);
 
@@ -349,7 +419,7 @@ conversionFunction_t conversionMatrix[6][6] = {
                  [BOOL] = unsupportedConversionTypes},
     [SYM_INT32] = {[INT32] = extractInt32TensorFromSymInt32Tensor,
                    [FLOAT32] = convertSymInt32TensorToFloat32Tensor,
-                   [SYM_INT32] = NULL,
+                   [SYM_INT32] = requantSymInt32Tensor,
                    [SYM] = unsupportedConversionTypes,
                    [ASYM] = convertSymInt32TensorToAsymTensor,
                    [BOOL] = unsupportedConversionTypes},

@@ -107,7 +107,6 @@ void mseLossBackwardSymInt32(tensor_t *modelOutput, tensor_t *label, tensor_t *r
     initFloat32Quantization(&resultFloatQ);
     uint8_t resultFloatData[numberOfElements * sizeof(float)];
     setTensorValuesForConversion(resultFloatData, &resultFloatQ, result, &resultFloat);
-    convertTensor(result, &resultFloat);
 
     float *modelOutputArray = (float *)modelOutputFloat.data;
     float *labelArray = (float *)labelFloat.data;

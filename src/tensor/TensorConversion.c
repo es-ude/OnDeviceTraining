@@ -330,32 +330,45 @@ void unsupportedConversionTypes(tensor_t *inputTensor, tensor_t *outputTensor) {
            quantTypeToString(inputQType), quantTypeToString(outputQType));
 }
 
-conversionFunction_t conversionMatrix[5][5] = {
+_Static_assert(BOOL + 1 == 6, "extend conversionMatrix when adding qtype_t entries");
+
+conversionFunction_t conversionMatrix[6][6] = {
     [INT32] = {[INT32] = NULL,
                [FLOAT32] = convertInt32TensorToFloatTensor,
                [SYM_INT32] = convertInt32TensorToSymInt32Tensor,
                [SYM] = unsupportedConversionTypes,
-               [ASYM] = convertInt32TensorToAsymTensor},
+               [ASYM] = convertInt32TensorToAsymTensor,
+               [BOOL] = unsupportedConversionTypes},
     [FLOAT32] = {[INT32] = convertFloatTensorToInt32Tensor,
                  [FLOAT32] = NULL,
                  [SYM_INT32] = convertFloatTensorToSymInt32Tensor,
                  [SYM] = unsupportedConversionTypes,
-                 [ASYM] = convertFloatTensorToAsymTensor},
+                 [ASYM] = convertFloatTensorToAsymTensor,
+                 [BOOL] = unsupportedConversionTypes},
     [SYM_INT32] = {[INT32] = extractInt32TensorFromSymInt32Tensor,
                    [FLOAT32] = convertSymInt32TensorToFloat32Tensor,
                    [SYM_INT32] = NULL,
                    [SYM] = unsupportedConversionTypes,
-                   [ASYM] = convertSymInt32TensorToAsymTensor},
+                   [ASYM] = convertSymInt32TensorToAsymTensor,
+                   [BOOL] = unsupportedConversionTypes},
     [SYM] = {[INT32] = unsupportedConversionTypes,
              [FLOAT32] = unsupportedConversionTypes,
              [SYM_INT32] = unsupportedConversionTypes,
              [SYM] = NULL,
-             [ASYM] = unsupportedConversionTypes},
+             [ASYM] = unsupportedConversionTypes,
+             [BOOL] = unsupportedConversionTypes},
     [ASYM] = {[INT32] = convertAsymTensorToInt32Tensor,
               [FLOAT32] = convertAsymTensorToFloatTensor,
               [SYM_INT32] = convertAsymTensorToSymInt32Tensor,
               [SYM] = unsupportedConversionTypes,
-              [ASYM] = NULL}};
+              [ASYM] = NULL,
+              [BOOL] = unsupportedConversionTypes},
+    [BOOL] = {[INT32] = unsupportedConversionTypes,
+              [FLOAT32] = unsupportedConversionTypes,
+              [SYM_INT32] = unsupportedConversionTypes,
+              [SYM] = unsupportedConversionTypes,
+              [ASYM] = unsupportedConversionTypes,
+              [BOOL] = NULL}};
 
 static void convertTensorsWithSameType(tensor_t *inputTensor, tensor_t *outputTensor,
                                        qtype_t qType) {

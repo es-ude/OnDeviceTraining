@@ -324,6 +324,8 @@ target_link_libraries(UnitTestQuantLayerIntegration PRIVATE
         LayerQuant
         LayerCommon
         LinearApi
+        QuantLayerApi
+        ModelValidationApi
         TensorApi
         QuantizationApi
         LossFunction

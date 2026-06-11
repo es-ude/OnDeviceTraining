@@ -358,9 +358,9 @@ conversionFunction_t conversionMatrix[5][5] = {
 static void convertTensorsWithSameType(tensor_t *inputTensor, tensor_t *outputTensor,
                                        qtype_t qType) {
     size_t numberOfElements = calcNumberOfElementsByTensor(inputTensor);
-    size_t bytesPerElement = calcBytesPerElement(inputTensor->quantization);
+    size_t numberOfBytes = calcNumberOfBytesForData(inputTensor->quantization, numberOfElements);
 
-    memmove(outputTensor->data, inputTensor->data, numberOfElements * bytesPerElement);
+    memmove(outputTensor->data, inputTensor->data, numberOfBytes);
 
     switch (qType) {
     case SYM_INT32:

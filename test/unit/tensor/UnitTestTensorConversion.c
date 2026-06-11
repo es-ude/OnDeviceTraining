@@ -1,11 +1,16 @@
 #include "DTypes.h"
 #include "Quantization.h"
+#include "StorageApi.h"
 #include "Tensor.h"
+#include "TensorApi.h"
 #include "TensorConversion.h"
 #include "unity.h"
 
+#include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 void testConversionIntFloat() {
     uint8_t numValues = 6;
@@ -447,6 +452,55 @@ void testConversionAsymSymInt32() {
     TEST_ASSERT_EQUAL_INT32_ARRAY(expectedData, actual, numValues);
 }
 
+void testConversionBoolBoolCopiesOnlyPackedBytes() {
+    /* N=9 BOOL elements occupy (9+7)/8 = 2 packed bytes; the same-type copy
+     * must move exactly 2 bytes. Canary: the output payload sits at the start
+     * of a 16-byte guard allocation whose bytes 2..15 hold sentinel 0xAA.
+     * Before the fix, convertTensor memmoves N * calcBytesPerElement(BOOL)
+     * = 9 bytes and clobbers the sentinels with the input buffer's 0x55
+     * filler. Both buffers are oversized on purpose so the buggy 9-byte
+     * memmove stays inside owned allocations and the RED run is
+     * well-defined. initTensor is not used here because it allocates the
+     * exact packed size (2 bytes), which would make the buggy copy run out
+     * of bounds. */
+    enum { N = 9, GUARD_BYTES = 16, PAYLOAD_BYTES = 2 };
+
+    size_t dims[] = {N};
+    size_t orderOfDims[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
+
+    quantization_t inQ;
+    initBoolQuantization(&inQ);
+    uint8_t *inBuffer = reserveMemory(GUARD_BYTES);
+    memset(inBuffer, 0x55, GUARD_BYTES);
+    tensor_t inTensor;
+    setTensorValues(&inTensor, inBuffer, &shape, &inQ, NULL);
+
+    const bool pattern[N] = {true, false, true, true, false, false, true, false, true};
+    tensorFillFromBoolBuffer(&inTensor, pattern, N);
+
+    quantization_t outQ;
+    initBoolQuantization(&outQ);
+    uint8_t *outBuffer = reserveMemory(GUARD_BYTES);
+    memset(outBuffer, 0xAA, GUARD_BYTES);
+    tensor_t outTensor;
+    setTensorValues(&outTensor, outBuffer, &shape, &outQ, NULL);
+
+    convertTensor(&inTensor, &outTensor);
+
+    /* Under-copy guard: all 9 bits must arrive. */
+    for (size_t i = 0; i < N; i++) {
+        TEST_ASSERT_EQUAL(pattern[i], tensorBoolGet(&outTensor, i));
+    }
+    /* Over-copy guard: every byte after the packed payload is untouched. */
+    for (size_t i = PAYLOAD_BYTES; i < GUARD_BYTES; i++) {
+        TEST_ASSERT_EQUAL_UINT8(0xAA, outBuffer[i]);
+    }
+
+    freeReservedMemory(inBuffer);
+    freeReservedMemory(outBuffer);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -468,6 +522,7 @@ int main(void) {
     RUN_TEST(testConversionAsymInt);
     RUN_TEST(testConversionAsymFloat);
     RUN_TEST(testConversionAsymSymInt32);
+    RUN_TEST(testConversionBoolBoolCopiesOnlyPackedBytes);
 
     return UNITY_END();
 }

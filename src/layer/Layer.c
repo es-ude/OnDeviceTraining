@@ -10,6 +10,7 @@
 #include "LayerNorm.h"
 #include "Linear.h"
 #include "MaxPool1d.h"
+#include "QuantizationLayer.h"
 #include "Relu.h"
 #include "Softmax.h"
 
@@ -23,6 +24,7 @@ layerFunctions_t layerFunctions[] = {
     [AVGPOOL1D] = {avgPool1dForward, avgPool1dBackward, avgPool1dCalcOutputShape},
     [SOFTMAX] = {softmaxForward, softmaxBackward, softmaxCalcOutputShape},
     [FLATTEN] = {flattenForward, flattenBackward, flattenCalcOutputShape},
+    [QUANTIZATION] = {quantizationForward, quantizationBackward, quantizationCalcOutputShape},
     [ADAPTIVE_AVGPOOL1D] = {adaptiveAvgPool1dForward, adaptiveAvgPool1dBackward,
                             adaptiveAvgPool1dCalcOutputShape},
     [DROPOUT] = {dropoutForward, dropoutBackward, dropoutCalcOutputShape},

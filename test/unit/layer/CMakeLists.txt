@@ -251,3 +251,17 @@ add_dependencies(UnitTestLayerNorm generate_expected_layernorm)
 add_dependencies(UnitTestLayerNorm generate_expected_layernorm_sym)
 add_dependencies(UnitTestLayerNorm generate_expected_layernorm_sym_bwd)
 target_include_directories(UnitTestLayerNorm PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
+        QuantizationLayer
+        MORE_LIBS
+        CommonLayerLibs
+        TensorApi
+        TensorConversion
+        QuantizationApi
+        LayerQuant
+        Quantization
+        Rounding
+        StorageApi
+)

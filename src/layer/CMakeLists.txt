@@ -95,6 +95,7 @@ target_link_libraries(Layer PRIVATE
         AdaptiveAvgPool1d
         Softmax
         Flatten
+        QuantizationLayer
         Dropout
         LayerNorm
 )
@@ -114,9 +115,11 @@ target_link_libraries(Linear PRIVATE
 add_library(QuantizationLayer QuantizationLayer.c)
 target_include_directories(QuantizationLayer PUBLIC include)
 target_link_libraries(QuantizationLayer PRIVATE
-        TensorConversion
-        Tensor
+        Common
+        Quantization
         Rounding
+        Tensor
+        TensorConversion
 )
 
 add_library(Relu Relu.c)
@@ -162,6 +165,7 @@ target_link_libraries(CommonLayerLibs INTERFACE
         AdaptiveAvgPool1d
         Softmax
         Flatten
+        QuantizationLayer
         Dropout
         LayerNorm
         Rounding

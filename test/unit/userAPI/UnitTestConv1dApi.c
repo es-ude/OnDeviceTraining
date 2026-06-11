@@ -200,7 +200,7 @@ void testConv1dLayerInitKeepsFloat32GradEvenWithSymInt32BackwardMath(void) {
     /* Conv1d backward is FLOAT32-only; its grad must stay FLOAT32 regardless of
      * backwardMath, so the gradInit plumbing defaults Conv1d to FLOAT32. */
     quantization_t *fwd = quantizationInitFloat();
-    quantization_t *bwd = quantizationInitSymInt32(HTE);
+    quantization_t *bwd = quantizationInitSymInt32(HALF_AWAY);
     layerQuant_t lq = {
         .forwardMath = fwd,
         .backwardMath = bwd,

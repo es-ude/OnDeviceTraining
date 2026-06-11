@@ -125,7 +125,7 @@ void testFlattenForwardSymInt32_PropagatesScaleAndValues(void) {
     setOrderOfDimsForNewTensor(3, inputOrder);
     shape_t *inputShape = reserveMemory(sizeof(shape_t));
     setShape(inputShape, inputDims, 3, inputOrder);
-    tensor_t *input = initTensor(inputShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *input = initTensor(inputShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(input, inputFloatData, n);
 
     /* 2. Build heap output tensor (SymInt32, shape 1x6). */
@@ -136,7 +136,7 @@ void testFlattenForwardSymInt32_PropagatesScaleAndValues(void) {
     setOrderOfDimsForNewTensor(2, outputOrder);
     shape_t *outputShape = reserveMemory(sizeof(shape_t));
     setShape(outputShape, outputDims, 2, outputOrder);
-    tensor_t *output = initTensor(outputShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *output = initTensor(outputShape, quantizationInitSymInt32(HALF_AWAY), NULL);
 
     /* Clobber the output's scale so we can verify flattenForward writes it. */
     symInt32QConfig_t *outputQC = output->quantization->qConfig;
@@ -250,7 +250,7 @@ void testFlattenBackwardSymInt32_PropagatesScale(void) {
     setOrderOfDimsForNewTensor(3, forwardOrder);
     shape_t *forwardShape = reserveMemory(sizeof(shape_t));
     setShape(forwardShape, forwardDims, 3, forwardOrder);
-    tensor_t *forwardInput = initTensor(forwardShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *forwardInput = initTensor(forwardShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(forwardInput, (float[]){-1.f, 0.f, 1.f, 2.f, 5.f, -6.f}, 6);
 
     /* 2. Build heap loss tensor (SymInt32, shape 1x6). */
@@ -261,7 +261,7 @@ void testFlattenBackwardSymInt32_PropagatesScale(void) {
     setOrderOfDimsForNewTensor(2, lossOrder);
     shape_t *lossShape = reserveMemory(sizeof(shape_t));
     setShape(lossShape, lossDims, 2, lossOrder);
-    tensor_t *loss = initTensor(lossShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *loss = initTensor(lossShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(loss, lossFloatData, n);
 
     /* 3. Build heap propLoss tensor (SymInt32, shape 1x2x3). */
@@ -273,7 +273,7 @@ void testFlattenBackwardSymInt32_PropagatesScale(void) {
     setOrderOfDimsForNewTensor(3, propLossOrder);
     shape_t *propLossShape = reserveMemory(sizeof(shape_t));
     setShape(propLossShape, propLossDims, 3, propLossOrder);
-    tensor_t *propLoss = initTensor(propLossShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *propLoss = initTensor(propLossShape, quantizationInitSymInt32(HALF_AWAY), NULL);
 
     /* Clobber propLoss scale so we can verify flattenBackward writes it. */
     symInt32QConfig_t *propLossQC = propLoss->quantization->qConfig;

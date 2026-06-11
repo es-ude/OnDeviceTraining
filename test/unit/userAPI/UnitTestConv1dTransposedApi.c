@@ -168,7 +168,7 @@ void testConv1dTransposedLayerInitOwningFreesAllAllocationsWithoutLeak(void) {
 
 void testConv1dTransposedLayerInitKeepsFloat32Grad(void) {
     quantization_t *fwd = quantizationInitFloat();
-    quantization_t *bwd = quantizationInitSymInt32(HTE);
+    quantization_t *bwd = quantizationInitSymInt32(HALF_AWAY);
     layerQuant_t lq = {
         .forwardMath = fwd,
         .backwardMath = bwd,

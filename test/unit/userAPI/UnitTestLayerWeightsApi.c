@@ -195,7 +195,7 @@ void testLayerLoadWeightsLayerNormQuantizesForSymStorage(void) {
     size_t normShape[] = {3};
     layerNormInit_t init = {.normalizedShape = normShape, .numNormDims = 1, .eps = 1e-5f};
 
-    quantization_t *symQ = quantizationInitSymInt32(HTE);
+    quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
     quantization_t *bwd = quantizationInitFloat();
     layerQuant_t lq = {
         .forwardMath = symQ, .backwardMath = bwd, .weightStorage = symQ, .biasStorage = symQ};
@@ -220,7 +220,7 @@ void testLayerLoadWeightsLayerNormQuantizesForSymStorage(void) {
     freeQuantization(symQ);
 
     /* gamma absmax 4 -> scale 4/32767; mantissas round(v*32767/4):
-     * 16383.5 -> 16384 (half-away-from-zero: the framework's roundHTE is C
+     * 16383.5 -> 16384 (half-away-from-zero: the framework's roundHalfAway is C
      * round() — see #188), 24575.25 -> 24575, 32767 exact. INT_WITHIN(1)
      * on the non-absmax elements (float division may land a hair off the
      * exact midpoint); exact on the absmax element. */

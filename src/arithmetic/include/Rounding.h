@@ -3,10 +3,11 @@
 #include <stdint.h>
 
 /*! @brief Describes rounding
- * HTE = Half to Even
- * SRHTE = Stochastic Rounding Half to Even
+ * HALF_AWAY = round half away from zero (C round(), C17 7.12.9.6)
+ * SR_HALF_AWAY = stochastic rounding: uniform jitter in [-0.5, 0.5) is added
+ *                before rounding half away from zero
  */
-typedef enum roundingMode { HTE, SRHTE } roundingMode_t;
+typedef enum roundingMode { HALF_AWAY, SR_HALF_AWAY } roundingMode_t;
 
 int32_t roundByMode(float input, roundingMode_t roundingMode);
 

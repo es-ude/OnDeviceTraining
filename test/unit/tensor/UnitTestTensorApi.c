@@ -475,8 +475,8 @@ void testGradInitSymInt32_DoesNotAliasParentShape(void) {
     shape_t *shape = reserveMemory(sizeof(shape_t));
     setShape(shape, dims, 2, order);
 
-    tensor_t *param = initTensor(shape, quantizationInitSymInt32(HTE), NULL);
-    tensor_t *grad = gradInitSymInt32(param, HTE, NULL);
+    tensor_t *param = initTensor(shape, quantizationInitSymInt32(HALF_AWAY), NULL);
+    tensor_t *grad = gradInitSymInt32(param, HALF_AWAY, NULL);
 
     TEST_ASSERT_TRUE_MESSAGE(grad->shape != param->shape,
                              "gradInitSymInt32 aliases parent shape (H2 hazard)");
@@ -494,8 +494,8 @@ void testGradInitAsym_DoesNotAliasParentShape(void) {
     shape_t *shape = reserveMemory(sizeof(shape_t));
     setShape(shape, dims, 2, order);
 
-    tensor_t *param = initTensor(shape, quantizationInitAsym(8, HTE), NULL);
-    tensor_t *grad = gradInitAsym(param, 8, HTE, NULL);
+    tensor_t *param = initTensor(shape, quantizationInitAsym(8, HALF_AWAY), NULL);
+    tensor_t *grad = gradInitAsym(param, 8, HALF_AWAY, NULL);
 
     TEST_ASSERT_TRUE_MESSAGE(grad->shape != param->shape,
                              "gradInitAsym aliases parent shape (H2 hazard)");
@@ -509,7 +509,7 @@ void testGradInitAsym_DoesNotAliasParentShape(void) {
  * on the already-truncated result — under-allocating by one byte whenever the
  * total bit count was not a multiple of 8. */
 void testCalcNumberOfBytesForData_AsymSubByte_RoundsUpInsteadOfTruncating(void) {
-    quantization_t *q = quantizationInitAsym(3, HTE);
+    quantization_t *q = quantizationInitAsym(3, HALF_AWAY);
     /* 10 elements * 3 bits = 30 bits => ceil(30/8) = 4 bytes. */
     size_t bytes = calcNumberOfBytesForData(q, 10);
     freeQuantization(q);
@@ -522,7 +522,7 @@ void testCalcNumberOfBytesForData_AsymSubByte_RoundsUpInsteadOfTruncating(void) 
  * trips heap-buffer-overflow; the value-assertion test above catches the
  * arithmetic itself. */
 void testGetDataLike_AsymSubByte_AllocatesCeilingOfBits(void) {
-    quantization_t *q = quantizationInitAsym(3, HTE);
+    quantization_t *q = quantizationInitAsym(3, HALF_AWAY);
     uint8_t *data = getDataLike(q, 10);
     /* 30 bits => 4 bytes; pre-fix only 3 are allocated. */
     for (size_t i = 0; i < 4; ++i) {
@@ -634,7 +634,7 @@ void testGradInit_SymInt32_MatchesParamShapeAndDtype(void) {
     /* Param can stay FLOAT32; grad dtype is driven solely by gradQ. */
     tensor_t *param = initTensor(shape, quantizationInitFloat(), NULL);
 
-    quantization_t *gradQ = quantizationInitSymInt32(HTE);
+    quantization_t *gradQ = quantizationInitSymInt32(HALF_AWAY);
     tensor_t *grad = gradInit(param, gradQ, NULL);
 
     int gradTypeMatches = (grad->quantization->type == SYM_INT32);

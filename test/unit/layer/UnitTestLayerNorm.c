@@ -50,7 +50,7 @@ static parameter_t *buildFloatParam(size_t numDims, const size_t *dimsIn, const 
     return parameterInit(p, g);
 }
 
-/* Build a SYM_INT32 (HTE, qMaxBits=16) tensor; float vals are quantized via
+/* Build a SYM_INT32 (HALF_AWAY, qMaxBits=16) tensor; float vals are quantized via
  * tensorFillFromFloatBuffer -> convertFloatTensorToSymInt32Tensor (absmax ->
  * scale, round-clamp; absmax==0 -> scale 1.0). NULL vals -> zero mantissas,
  * default scale 1.0. Caller frees via freeTensor. */
@@ -63,7 +63,7 @@ static tensor_t *buildSymInt32TensorND(size_t numDims, const size_t *dimsIn, con
     setOrderOfDimsForNewTensor(numDims, order);
     shape_t *shape = reserveMemory(sizeof(shape_t));
     setShape(shape, dims, numDims, order);
-    tensor_t *t = initTensor(shape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *t = initTensor(shape, quantizationInitSymInt32(HALF_AWAY), NULL);
     if (vals != NULL) {
         tensorFillFromFloatBuffer(t, vals, calcNumberOfElementsByShape(shape));
     }
@@ -73,7 +73,7 @@ static tensor_t *buildSymInt32TensorND(size_t numDims, const size_t *dimsIn, con
 /* SYM_INT32 parameter with SYM_INT32 grad (grads unused in forward-only tests). */
 static parameter_t *buildSymParam(size_t numDims, const size_t *dimsIn, const float *vals) {
     tensor_t *p = buildSymInt32TensorND(numDims, dimsIn, vals);
-    tensor_t *g = gradInitSymInt32(p, HTE, NULL);
+    tensor_t *g = gradInitSymInt32(p, HALF_AWAY, NULL);
     return parameterInit(p, g);
 }
 
@@ -167,7 +167,7 @@ void testSymForwardDequantInvariantsMultiGroup(void) {
     size_t *normShape = reserveMemory(sizeof(size_t));
     normShape[0] = 4;
 
-    quantization_t *fq = quantizationInitSymInt32(HTE);
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
     quantization_t *bq = quantizationInitFloat();
     layerNormConfig_t cfg;
     initLayerNormConfig(&cfg, gamma, beta, normShape, 1, 1e-5f, fq, bq);
@@ -851,7 +851,7 @@ static void runSymGoldForward(size_t numDims, const size_t *dims, size_t numNorm
     for (size_t i = 0; i < numNormDims; i++) {
         normShape[i] = normShapeIn[i];
     }
-    quantization_t *fq = quantizationInitSymInt32(HTE);
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
     quantization_t *bq = quantizationInitFloat();
     layerNormConfig_t cfg;
     initLayerNormConfig(&cfg, gamma, beta, normShape, numNormDims, 1e-5f, fq, bq);
@@ -932,8 +932,8 @@ static void runSymGoldBackward(
     for (size_t i = 0; i < numNormDims; i++) {
         normShape[i] = normShapeIn[i];
     }
-    quantization_t *fq = quantizationInitSymInt32(HTE);
-    quantization_t *bq = quantizationInitSymInt32(HTE);
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *bq = quantizationInitSymInt32(HALF_AWAY);
     layerNormConfig_t cfg;
     initLayerNormConfig(&cfg, gamma, beta, normShape, numNormDims, 1e-5f, fq, bq);
     layerConfig_t lcfg;
@@ -1017,8 +1017,8 @@ void testSymBackwardZeroLossGradEmitsZerosNeutralScale(void) {
     size_t *normShape = reserveMemory(sizeof(size_t));
     normShape[0] = 4;
 
-    quantization_t *fq = quantizationInitSymInt32(HTE);
-    quantization_t *bq = quantizationInitSymInt32(HTE);
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *bq = quantizationInitSymInt32(HALF_AWAY);
     layerNormConfig_t cfg;
     initLayerNormConfig(&cfg, gamma, beta, normShape, 1, 1e-5f, fq, bq);
     layerConfig_t lcfg;
@@ -1196,7 +1196,7 @@ void testSymForwardConstantInputEmitsZeros(void) {
     size_t *normShape = reserveMemory(sizeof(size_t));
     normShape[0] = 3;
 
-    quantization_t *fq = quantizationInitSymInt32(HTE);
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
     quantization_t *bq = quantizationInitFloat();
     layerNormConfig_t cfg;
     initLayerNormConfig(&cfg, gamma, beta, normShape, 1, 1e-5f, fq, bq);
@@ -1242,7 +1242,7 @@ void testSymForwardMantissaInvariantsViaOnesGamma(void) {
     size_t *normShape = reserveMemory(sizeof(size_t));
     normShape[0] = 4;
 
-    quantization_t *fq = quantizationInitSymInt32(HTE);
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
     quantization_t *bq = quantizationInitFloat();
     layerNormConfig_t cfg;
     initLayerNormConfig(&cfg, gamma, beta, normShape, 1, 1e-5f, fq, bq);
@@ -1299,7 +1299,7 @@ void testSymForwardConstantInputAppliesBeta(void) {
     size_t *normShape = reserveMemory(sizeof(size_t));
     normShape[0] = 3;
 
-    quantization_t *fq = quantizationInitSymInt32(HTE);
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
     quantization_t *bq = quantizationInitFloat();
     layerNormConfig_t cfg;
     initLayerNormConfig(&cfg, gamma, beta, normShape, 1, 1e-5f, fq, bq);
@@ -1356,7 +1356,7 @@ void testSymForwardVarNearEpsReconstructsHalf(void) {
     size_t *normShape = reserveMemory(sizeof(size_t));
     normShape[0] = 3;
 
-    quantization_t *fq = quantizationInitSymInt32(HTE);
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
     quantization_t *bq = quantizationInitFloat();
     layerNormConfig_t cfg;
     initLayerNormConfig(&cfg, gamma, beta, normShape, 1, 1e-5f, fq, bq);
@@ -1419,7 +1419,7 @@ void testSymForwardTransposedMatchesContiguous(void) {
     size_t *normShape = reserveMemory(sizeof(size_t));
     normShape[0] = 4;
 
-    quantization_t *fq = quantizationInitSymInt32(HTE);
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
     quantization_t *bq = quantizationInitFloat();
     layerNormConfig_t cfg;
     initLayerNormConfig(&cfg, gamma, beta, normShape, 1, 1e-5f, fq, bq);
@@ -1462,7 +1462,7 @@ void testFactorySymInt32StorageQuantizesGammaBeta(void) {
     size_t normShape[] = {4};
     layerNormInit_t init = {.normalizedShape = normShape, .numNormDims = 1, .eps = 0.0f};
 
-    quantization_t *symQ = quantizationInitSymInt32(HTE);
+    quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
     quantization_t *bwdMath = quantizationInitFloat();
     layerQuant_t lq = {
         .forwardMath = symQ, .backwardMath = bwdMath, .weightStorage = symQ, .biasStorage = symQ};
@@ -1514,7 +1514,7 @@ void testFactoryOwningSymInt32DeepCopiesQuantizations(void) {
     size_t normShape[] = {3};
     layerNormInit_t init = {.normalizedShape = normShape, .numNormDims = 1, .eps = 1e-5f};
 
-    quantization_t *symQ = quantizationInitSymInt32(HTE);
+    quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
     quantization_t *bwdMath = quantizationInitFloat();
     layerQuant_t lq = {
         .forwardMath = symQ, .backwardMath = bwdMath, .weightStorage = symQ, .biasStorage = symQ};
@@ -1555,8 +1555,8 @@ void testSymBackwardPropLossScaleRefreshedEveryCall(void) {
     size_t *normShape = reserveMemory(sizeof(size_t));
     normShape[0] = 4;
 
-    quantization_t *fq = quantizationInitSymInt32(HTE);
-    quantization_t *bq = quantizationInitSymInt32(HTE);
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *bq = quantizationInitSymInt32(HALF_AWAY);
     layerNormConfig_t cfg;
     initLayerNormConfig(&cfg, gamma, beta, normShape, 1, 1e-5f, fq, bq);
     layerConfig_t lcfg;
@@ -1614,8 +1614,8 @@ void testSymBackwardGradsAccumulateAcrossCalls(void) {
     size_t *normShape = reserveMemory(sizeof(size_t));
     normShape[0] = 4;
 
-    quantization_t *fq = quantizationInitSymInt32(HTE);
-    quantization_t *bq = quantizationInitSymInt32(HTE);
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *bq = quantizationInitSymInt32(HALF_AWAY);
     layerNormConfig_t cfg;
     initLayerNormConfig(&cfg, gamma, beta, normShape, 1, 1e-5f, fq, bq);
     layerConfig_t lcfg;
@@ -1700,8 +1700,8 @@ void testSymBackwardDivergentLayoutsBitIdentical(void) {
     parameter_t *betaC = buildSymParam(1, ns, NULL);
     size_t *normShapeC = reserveMemory(sizeof(size_t));
     normShapeC[0] = 4;
-    quantization_t *fqC = quantizationInitSymInt32(HTE);
-    quantization_t *bqC = quantizationInitSymInt32(HTE);
+    quantization_t *fqC = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *bqC = quantizationInitSymInt32(HALF_AWAY);
     layerNormConfig_t cfgC;
     initLayerNormConfig(&cfgC, gammaC, betaC, normShapeC, 1, 1e-5f, fqC, bqC);
     layerConfig_t lcfgC;
@@ -1725,8 +1725,8 @@ void testSymBackwardDivergentLayoutsBitIdentical(void) {
     parameter_t *betaT = buildSymParam(1, ns, NULL);
     size_t *normShapeT = reserveMemory(sizeof(size_t));
     normShapeT[0] = 4;
-    quantization_t *fqT = quantizationInitSymInt32(HTE);
-    quantization_t *bqT = quantizationInitSymInt32(HTE);
+    quantization_t *fqT = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *bqT = quantizationInitSymInt32(HALF_AWAY);
     layerNormConfig_t cfgT;
     initLayerNormConfig(&cfgT, gammaT, betaT, normShapeT, 1, 1e-5f, fqT, bqT);
     layerConfig_t lcfgT;
@@ -1790,7 +1790,7 @@ void testFactoryFullSymProfileTrainsSymGrads(void) {
     size_t normShape[] = {4};
     layerNormInit_t init = {.normalizedShape = normShape, .numNormDims = 1, .eps = 1e-5f};
 
-    quantization_t *symQ = quantizationInitSymInt32(HTE);
+    quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
     layerQuant_t lq = {
         .forwardMath = symQ, .backwardMath = symQ, .weightStorage = symQ, .biasStorage = symQ};
     layer_t *layer = layerNormLayerInit(&init, &lq);

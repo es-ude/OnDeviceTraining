@@ -87,7 +87,7 @@ void testSubSymInt32Tensors() {
                       .orderOfDimensions = aOrderOfDims,
                       .numberOfDimensions = aNumberOfDims};
     symInt32QConfig_t aSymInt32QC;
-    initSymInt32QConfig(HTE, &aSymInt32QC);
+    initSymInt32QConfig(HALF_AWAY, &aSymInt32QC);
     quantization_t aQ;
     initSymInt32Quantization(&aSymInt32QC, &aQ);
 
@@ -105,7 +105,7 @@ void testSubSymInt32Tensors() {
                       .numberOfDimensions = bNumberOfDims};
 
     symInt32QConfig_t bSymInt32QC;
-    initSymInt32QConfig(HTE, &bSymInt32QC);
+    initSymInt32QConfig(HALF_AWAY, &bSymInt32QC);
     quantization_t bQ;
     initSymInt32Quantization(&bSymInt32QC, &bQ);
 

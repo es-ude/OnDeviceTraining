@@ -89,7 +89,7 @@ void testForwardEvalIdentitySymInt32(void) {
     setOrderOfDimsForNewTensor(1, order);
     shape_t *shape = reserveMemory(sizeof(shape_t));
     setShape(shape, dims, 1, order);
-    tensor_t *symIn = initTensor(shape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *symIn = initTensor(shape, quantizationInitSymInt32(HALF_AWAY), NULL);
     int32_t inInts[] = {10, -20, 30, -40};
     for (size_t i = 0; i < n; i++) {
         ((int32_t *)symIn->data)[i] = inInts[i];
@@ -102,11 +102,11 @@ void testForwardEvalIdentitySymInt32(void) {
     setOrderOfDimsForNewTensor(1, oorder);
     shape_t *oshape = reserveMemory(sizeof(shape_t));
     setShape(oshape, odims, 1, oorder);
-    tensor_t *symOut = initTensor(oshape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *symOut = initTensor(oshape, quantizationInitSymInt32(HALF_AWAY), NULL);
 
     tensor_t *mask = buildBoolMask(n);
-    quantization_t *fq = quantizationInitSymInt32(HTE);
-    quantization_t *bq = quantizationInitSymInt32(HTE);
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *bq = quantizationInitSymInt32(HALF_AWAY);
     dropoutConfig_t dcfg;
     initDropoutConfig(&dcfg, 0.5f, mask, fq, bq); // eval mode
     layerConfig_t lcfg;
@@ -183,7 +183,7 @@ void testForwardTrainingSymInt32ScaleFold(void) {
     setOrderOfDimsForNewTensor(1, order);
     shape_t *shape = reserveMemory(sizeof(shape_t));
     setShape(shape, dims, 1, order);
-    tensor_t *symIn = initTensor(shape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *symIn = initTensor(shape, quantizationInitSymInt32(HALF_AWAY), NULL);
     int32_t inInts[] = {10, -20, 30, 40};
     for (size_t i = 0; i < n; i++) {
         ((int32_t *)symIn->data)[i] = inInts[i];
@@ -196,11 +196,11 @@ void testForwardTrainingSymInt32ScaleFold(void) {
     setOrderOfDimsForNewTensor(1, oorder);
     shape_t *oshape = reserveMemory(sizeof(shape_t));
     setShape(oshape, odims, 1, oorder);
-    tensor_t *symOut = initTensor(oshape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *symOut = initTensor(oshape, quantizationInitSymInt32(HALF_AWAY), NULL);
 
     tensor_t *mask = buildBoolMask(n);
-    quantization_t *fq = quantizationInitSymInt32(HTE);
-    quantization_t *bq = quantizationInitSymInt32(HTE);
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *bq = quantizationInitSymInt32(HALF_AWAY);
     dropoutConfig_t dcfg;
     initDropoutConfig(&dcfg, 0.5f, mask, fq, bq);
     dcfg.training = true;
@@ -282,7 +282,7 @@ void testBackwardSymInt32UsesMaskAndScaleFold(void) {
     setOrderOfDimsForNewTensor(1, lorder);
     shape_t *lshape = reserveMemory(sizeof(shape_t));
     setShape(lshape, ldims, 1, lorder);
-    tensor_t *loss = initTensor(lshape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *loss = initTensor(lshape, quantizationInitSymInt32(HALF_AWAY), NULL);
     int32_t gradInts[] = {5, 6, 7, 8};
     for (size_t i = 0; i < n; i++) {
         ((int32_t *)loss->data)[i] = gradInts[i];
@@ -295,13 +295,13 @@ void testBackwardSymInt32UsesMaskAndScaleFold(void) {
     setOrderOfDimsForNewTensor(1, porder);
     shape_t *pshape = reserveMemory(sizeof(shape_t));
     setShape(pshape, pdims, 1, porder);
-    tensor_t *propLoss = initTensor(pshape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *propLoss = initTensor(pshape, quantizationInitSymInt32(HALF_AWAY), NULL);
 
     tensor_t *mask = buildBoolMask(n);
     fillMaskKeepEven(mask);
 
-    quantization_t *fq = quantizationInitSymInt32(HTE);
-    quantization_t *bq = quantizationInitSymInt32(HTE);
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *bq = quantizationInitSymInt32(HALF_AWAY);
     dropoutConfig_t dcfg;
     initDropoutConfig(&dcfg, 0.5f, mask, fq, bq);
     dcfg.training = true;

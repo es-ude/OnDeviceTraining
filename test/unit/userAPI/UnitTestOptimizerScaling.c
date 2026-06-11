@@ -179,9 +179,9 @@ static optimizer_t *buildSymInt32OneLayerOptim(layer_t **modelOut, parameter_t *
         setOrderOfDimsForNewTensor(2, order);
         shape_t *shape = reserveMemory(sizeof(shape_t));
         setShape(shape, dims, 2, order);
-        wParam = initTensor(shape, quantizationInitSymInt32(HTE), NULL);
+        wParam = initTensor(shape, quantizationInitSymInt32(HALF_AWAY), NULL);
     }
-    tensor_t *wGrad = gradInitSymInt32(wParam, HTE, NULL);
+    tensor_t *wGrad = gradInitSymInt32(wParam, HALF_AWAY, NULL);
     {
         int32_t *gradData = (int32_t *)wGrad->data;
         memcpy(gradData, wInitialGradInt32, 6 * sizeof(int32_t));
@@ -200,9 +200,9 @@ static optimizer_t *buildSymInt32OneLayerOptim(layer_t **modelOut, parameter_t *
         setOrderOfDimsForNewTensor(2, order);
         shape_t *shape = reserveMemory(sizeof(shape_t));
         setShape(shape, dims, 2, order);
-        bParam = initTensor(shape, quantizationInitSymInt32(HTE), NULL);
+        bParam = initTensor(shape, quantizationInitSymInt32(HALF_AWAY), NULL);
     }
-    tensor_t *bGrad = gradInitSymInt32(bParam, HTE, NULL);
+    tensor_t *bGrad = gradInitSymInt32(bParam, HALF_AWAY, NULL);
     {
         int32_t *gradData = (int32_t *)bGrad->data;
         memcpy(gradData, bInitialGradInt32, 2 * sizeof(int32_t));
@@ -211,7 +211,7 @@ static optimizer_t *buildSymInt32OneLayerOptim(layer_t **modelOut, parameter_t *
     }
     parameter_t *b = parameterInit(bParam, bGrad);
 
-    quantization_t *layerQ = quantizationInitSymInt32(HTE);
+    quantization_t *layerQ = quantizationInitSymInt32(HALF_AWAY);
     layer_t *linear = linearLayerInitLegacy(w, b, layerQ, layerQ, layerQ, layerQ);
     modelOut[0] = linear;
     *wOut = w;

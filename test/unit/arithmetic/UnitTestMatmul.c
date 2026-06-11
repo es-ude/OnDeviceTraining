@@ -222,7 +222,7 @@ void testMatmulSymInt32Tensors() {
     shape_t aShape;
     setShape(&aShape, aDims, aNumberOfDims, aOrderOfDims);
     symInt32QConfig_t aSymInt32QC;
-    initSymInt32QConfig(HTE, &aSymInt32QC);
+    initSymInt32QConfig(HALF_AWAY, &aSymInt32QC);
     aSymInt32QC.scale = 2.f;
     quantization_t aQ;
     initSymInt32Quantization(&aSymInt32QC, &aQ);
@@ -236,7 +236,7 @@ void testMatmulSymInt32Tensors() {
     shape_t bShape;
     setShape(&bShape, bDims, bNumberOfDims, bOrderOfDims);
     symInt32QConfig_t bSymInt32QC;
-    initSymInt32QConfig(HTE, &bSymInt32QC);
+    initSymInt32QConfig(HALF_AWAY, &bSymInt32QC);
     quantization_t bQ;
     initSymInt32Quantization(&bSymInt32QC, &bQ);
     setTensorValues(&bTensor, (uint8_t *)bData, &bShape, &bQ, NULL);
@@ -249,7 +249,7 @@ void testMatmulSymInt32Tensors() {
     shape_t outputShape;
     setShape(&outputShape, outputDims, outputNumberOfDims, outputOrderOfDims);
     symInt32QConfig_t outputSymInt32QC;
-    initSymInt32QConfig(HTE, &outputSymInt32QC);
+    initSymInt32QConfig(HALF_AWAY, &outputSymInt32QC);
     quantization_t outputQ;
     initSymInt32Quantization(&outputSymInt32QC, &outputQ);
     setTensorValues(&outputTensor, (uint8_t *)outputData, &outputShape, &outputQ, NULL);
@@ -357,7 +357,7 @@ void testMatmulSymInt32TensorsWithBiasRescalesBias() {
     shape_t aShape;
     setShape(&aShape, aDims, 2, aOrder);
     symInt32QConfig_t aQC;
-    initSymInt32QConfig(HTE, &aQC);
+    initSymInt32QConfig(HALF_AWAY, &aQC);
     aQC.scale = 2.f;
     quantization_t aQ;
     initSymInt32Quantization(&aQC, &aQ);
@@ -370,7 +370,7 @@ void testMatmulSymInt32TensorsWithBiasRescalesBias() {
     shape_t bShape;
     setShape(&bShape, bDims, 2, bOrder);
     symInt32QConfig_t bQC;
-    initSymInt32QConfig(HTE, &bQC);
+    initSymInt32QConfig(HALF_AWAY, &bQC);
     bQC.scale = 1.f;
     quantization_t bQ;
     initSymInt32Quantization(&bQC, &bQ);
@@ -383,7 +383,7 @@ void testMatmulSymInt32TensorsWithBiasRescalesBias() {
     shape_t biasShape;
     setShape(&biasShape, biasDims, 1, biasOrder);
     symInt32QConfig_t biasQC;
-    initSymInt32QConfig(HTE, &biasQC);
+    initSymInt32QConfig(HALF_AWAY, &biasQC);
     biasQC.scale = 4.f;
     quantization_t biasQ;
     initSymInt32Quantization(&biasQC, &biasQ);
@@ -396,7 +396,7 @@ void testMatmulSymInt32TensorsWithBiasRescalesBias() {
     shape_t outputShape;
     setShape(&outputShape, outputDims, 2, outputOrder);
     symInt32QConfig_t outputQC;
-    initSymInt32QConfig(HTE, &outputQC);
+    initSymInt32QConfig(HALF_AWAY, &outputQC);
     quantization_t outputQ;
     initSymInt32Quantization(&outputQC, &outputQ);
     setTensorValues(&outputTensor, (uint8_t *)outputData, &outputShape, &outputQ, NULL);

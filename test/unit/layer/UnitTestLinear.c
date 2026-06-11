@@ -88,7 +88,7 @@ void testLinearForwardSymInt32Rank1BiasRank2Output() {
     setOrderOfDimsForNewTensor(2, weightOrder);
     shape_t *weightShape = reserveMemory(sizeof(shape_t));
     setShape(weightShape, weightDims, 2, weightOrder);
-    tensor_t *weightsParam = initTensor(weightShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *weightsParam = initTensor(weightShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(weightsParam, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, -6.f}, 6);
     parameter_t *weights = parameterInit(weightsParam, NULL);
 
@@ -99,7 +99,7 @@ void testLinearForwardSymInt32Rank1BiasRank2Output() {
     setOrderOfDimsForNewTensor(1, biasOrder);
     shape_t *biasShape = reserveMemory(sizeof(shape_t));
     setShape(biasShape, biasDims, 1, biasOrder);
-    tensor_t *biasParam = initTensor(biasShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *biasParam = initTensor(biasShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(biasParam, (float[]){-1.f, 3.f}, 2);
     parameter_t *bias = parameterInit(biasParam, NULL);
 
@@ -110,7 +110,7 @@ void testLinearForwardSymInt32Rank1BiasRank2Output() {
     setOrderOfDimsForNewTensor(2, inputOrder);
     shape_t *inputShape = reserveMemory(sizeof(shape_t));
     setShape(inputShape, inputDims, 2, inputOrder);
-    tensor_t *input = initTensor(inputShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *input = initTensor(inputShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(input, (float[]){0.f, 1.f, 2.f}, 3);
 
     size_t *outputDims = reserveMemory(2 * sizeof(size_t));
@@ -120,9 +120,9 @@ void testLinearForwardSymInt32Rank1BiasRank2Output() {
     setOrderOfDimsForNewTensor(2, outputOrder);
     shape_t *outputShape = reserveMemory(sizeof(shape_t));
     setShape(outputShape, outputDims, 2, outputOrder);
-    tensor_t *output = initTensor(outputShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *output = initTensor(outputShape, quantizationInitSymInt32(HALF_AWAY), NULL);
 
-    quantization_t *test = quantizationInitSymInt32(HTE);
+    quantization_t *test = quantizationInitSymInt32(HALF_AWAY);
     layer_t *linearLayer = linearLayerInitLegacy(weights, bias, test, test, test, test);
 
     linearForward(linearLayer, input, output);
@@ -262,9 +262,9 @@ void testLinearBackwardSymInt32Rank1Bias() {
     setOrderOfDimsForNewTensor(2, weightOrder);
     shape_t *weightShape = reserveMemory(sizeof(shape_t));
     setShape(weightShape, weightDims, 2, weightOrder);
-    tensor_t *weightsParam = initTensor(weightShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *weightsParam = initTensor(weightShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(weightsParam, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, -6.f}, 6);
-    tensor_t *weightsGrad = gradInitSymInt32(weightsParam, HTE, NULL);
+    tensor_t *weightsGrad = gradInitSymInt32(weightsParam, HALF_AWAY, NULL);
     parameter_t *weights = parameterInit(weightsParam, weightsGrad);
 
     /* 2. Build heap bias parameter (SymInt32, RANK-1 shape [2]) with grad. */
@@ -274,9 +274,9 @@ void testLinearBackwardSymInt32Rank1Bias() {
     setOrderOfDimsForNewTensor(1, biasOrder);
     shape_t *biasShape = reserveMemory(sizeof(shape_t));
     setShape(biasShape, biasDims, 1, biasOrder);
-    tensor_t *biasParam = initTensor(biasShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *biasParam = initTensor(biasShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(biasParam, (float[]){-1.f, 3.f}, 2);
-    tensor_t *biasGrad = gradInitSymInt32(biasParam, HTE, NULL);
+    tensor_t *biasGrad = gradInitSymInt32(biasParam, HALF_AWAY, NULL);
     parameter_t *bias = parameterInit(biasParam, biasGrad);
 
     /* 3. Build heap forwardInput tensor (SymInt32, shape 1x3). */
@@ -287,7 +287,7 @@ void testLinearBackwardSymInt32Rank1Bias() {
     setOrderOfDimsForNewTensor(2, fwdOrder);
     shape_t *fwdShape = reserveMemory(sizeof(shape_t));
     setShape(fwdShape, fwdDims, 2, fwdOrder);
-    tensor_t *forwardInput = initTensor(fwdShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *forwardInput = initTensor(fwdShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(forwardInput, (float[]){0.f, 1.f, 2.f}, 3);
 
     /* 4. Build heap loss tensor (SymInt32, shape 1x2). */
@@ -298,7 +298,7 @@ void testLinearBackwardSymInt32Rank1Bias() {
     setOrderOfDimsForNewTensor(2, lossOrder);
     shape_t *lossShape = reserveMemory(sizeof(shape_t));
     setShape(lossShape, lossDims, 2, lossOrder);
-    tensor_t *loss = initTensor(lossShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *loss = initTensor(lossShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(loss, (float[]){-4.f, -3.f}, 2);
 
     /* 5. Build heap propLoss tensor (SymInt32, shape (3,)). */
@@ -308,10 +308,10 @@ void testLinearBackwardSymInt32Rank1Bias() {
     setOrderOfDimsForNewTensor(1, propLossOrder);
     shape_t *propLossShape = reserveMemory(sizeof(shape_t));
     setShape(propLossShape, propLossDims, 1, propLossOrder);
-    tensor_t *propLoss = initTensor(propLossShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *propLoss = initTensor(propLossShape, quantizationInitSymInt32(HALF_AWAY), NULL);
 
     /* 6. Build layer (shared SymInt32 quantization). */
-    quantization_t *test = quantizationInitSymInt32(HTE);
+    quantization_t *test = quantizationInitSymInt32(HALF_AWAY);
     layer_t *linearLayer = linearLayerInitLegacy(weights, bias, test, test, test, test);
 
     linearBackward(linearLayer, forwardInput, loss, propLoss);
@@ -573,9 +573,9 @@ void testLinearForwardSymInt32() {
     setOrderOfDimsForNewTensor(2, weightOrder);
     shape_t *weightShape = reserveMemory(sizeof(shape_t));
     setShape(weightShape, weightDims, 2, weightOrder);
-    tensor_t *weightsParam = initTensor(weightShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *weightsParam = initTensor(weightShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(weightsParam, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, -6.f}, 6);
-    tensor_t *weightsGrad = gradInitSymInt32(weightsParam, HTE, NULL);
+    tensor_t *weightsGrad = gradInitSymInt32(weightsParam, HALF_AWAY, NULL);
     parameter_t *weights = parameterInit(weightsParam, weightsGrad);
 
     /* 2. Build heap bias parameter (SymInt32, shape 1x2) with grad. */
@@ -586,9 +586,9 @@ void testLinearForwardSymInt32() {
     setOrderOfDimsForNewTensor(2, biasOrder);
     shape_t *biasShape = reserveMemory(sizeof(shape_t));
     setShape(biasShape, biasDims, 2, biasOrder);
-    tensor_t *biasParam = initTensor(biasShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *biasParam = initTensor(biasShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(biasParam, (float[]){-1.f, 3.f}, 2);
-    tensor_t *biasGrad = gradInitSymInt32(biasParam, HTE, NULL);
+    tensor_t *biasGrad = gradInitSymInt32(biasParam, HALF_AWAY, NULL);
     parameter_t *bias = parameterInit(biasParam, biasGrad);
 
     /* 3. Build heap input tensor (SymInt32, shape 1x3). */
@@ -599,7 +599,7 @@ void testLinearForwardSymInt32() {
     setOrderOfDimsForNewTensor(2, inputOrder);
     shape_t *inputShape = reserveMemory(sizeof(shape_t));
     setShape(inputShape, inputDims, 2, inputOrder);
-    tensor_t *input = initTensor(inputShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *input = initTensor(inputShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(input, (float[]){0.f, 1.f, 2.f}, 3);
 
     /* 4. Build heap output tensor (SymInt32, shape 1x2). */
@@ -610,10 +610,10 @@ void testLinearForwardSymInt32() {
     setOrderOfDimsForNewTensor(2, outputOrder);
     shape_t *outputShape = reserveMemory(sizeof(shape_t));
     setShape(outputShape, outputDims, 2, outputOrder);
-    tensor_t *output = initTensor(outputShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *output = initTensor(outputShape, quantizationInitSymInt32(HALF_AWAY), NULL);
 
     /* 5. Build layer (shared SymInt32 quantization). */
-    quantization_t *test = quantizationInitSymInt32(HTE);
+    quantization_t *test = quantizationInitSymInt32(HALF_AWAY);
     layer_t *linearLayer = linearLayerInitLegacy(weights, bias, test, test, test, test);
 
     linearForward(linearLayer, input, output);
@@ -664,9 +664,9 @@ void testLinearBackwardSymInt32() {
     setOrderOfDimsForNewTensor(2, weightOrder);
     shape_t *weightShape = reserveMemory(sizeof(shape_t));
     setShape(weightShape, weightDims, 2, weightOrder);
-    tensor_t *weightsParam = initTensor(weightShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *weightsParam = initTensor(weightShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(weightsParam, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, -6.f}, 6);
-    tensor_t *weightsGrad = gradInitSymInt32(weightsParam, HTE, NULL);
+    tensor_t *weightsGrad = gradInitSymInt32(weightsParam, HALF_AWAY, NULL);
     parameter_t *weights = parameterInit(weightsParam, weightsGrad);
 
     /* 2. Build heap bias parameter (SymInt32, shape 1x2) with grad. */
@@ -677,9 +677,9 @@ void testLinearBackwardSymInt32() {
     setOrderOfDimsForNewTensor(2, biasOrder);
     shape_t *biasShape = reserveMemory(sizeof(shape_t));
     setShape(biasShape, biasDims, 2, biasOrder);
-    tensor_t *biasParam = initTensor(biasShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *biasParam = initTensor(biasShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(biasParam, (float[]){-1.f, 3.f}, 2);
-    tensor_t *biasGrad = gradInitSymInt32(biasParam, HTE, NULL);
+    tensor_t *biasGrad = gradInitSymInt32(biasParam, HALF_AWAY, NULL);
     parameter_t *bias = parameterInit(biasParam, biasGrad);
 
     /* 3. Build heap forwardInput tensor (SymInt32, shape 1x3). */
@@ -690,7 +690,7 @@ void testLinearBackwardSymInt32() {
     setOrderOfDimsForNewTensor(2, fwdOrder);
     shape_t *fwdShape = reserveMemory(sizeof(shape_t));
     setShape(fwdShape, fwdDims, 2, fwdOrder);
-    tensor_t *forwardInput = initTensor(fwdShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *forwardInput = initTensor(fwdShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(forwardInput, (float[]){0.f, 1.f, 2.f}, 3);
 
     /* 4. Build heap loss tensor (SymInt32, shape 1x2). */
@@ -701,7 +701,7 @@ void testLinearBackwardSymInt32() {
     setOrderOfDimsForNewTensor(2, lossOrder);
     shape_t *lossShape = reserveMemory(sizeof(shape_t));
     setShape(lossShape, lossDims, 2, lossOrder);
-    tensor_t *loss = initTensor(lossShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *loss = initTensor(lossShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(loss, (float[]){-4.f, -3.f}, 2);
 
     /* 5. Build heap propLoss tensor (SymInt32, shape (3,)). */
@@ -711,10 +711,10 @@ void testLinearBackwardSymInt32() {
     setOrderOfDimsForNewTensor(1, propLossOrder);
     shape_t *propLossShape = reserveMemory(sizeof(shape_t));
     setShape(propLossShape, propLossDims, 1, propLossOrder);
-    tensor_t *propLoss = initTensor(propLossShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *propLoss = initTensor(propLossShape, quantizationInitSymInt32(HALF_AWAY), NULL);
 
     /* 6. Build layer (shared SymInt32 quantization). */
-    quantization_t *test = quantizationInitSymInt32(HTE);
+    quantization_t *test = quantizationInitSymInt32(HALF_AWAY);
     layer_t *linearLayer = linearLayerInitLegacy(weights, bias, test, test, test, test);
 
     linearBackward(linearLayer, forwardInput, loss, propLoss);
@@ -850,7 +850,7 @@ void testLinearBackwardFloatWithMismatchedQuantizations() {
     setOrderOfDimsForNewTensor(2, lossAsymOrder);
     shape_t *lossAsymShape = reserveMemory(sizeof(shape_t));
     setShape(lossAsymShape, lossAsymDims, 2, lossAsymOrder);
-    tensor_t *lossAsym = initTensor(lossAsymShape, quantizationInitAsym(8, HTE), NULL);
+    tensor_t *lossAsym = initTensor(lossAsymShape, quantizationInitAsym(8, HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(lossAsym, (float[]){-4.f, -3.f}, 2);
 
     /* 5. Build heap propLoss tensor (Float, shape 1x3). */
@@ -1116,8 +1116,8 @@ void testLinearLayerInitBorrowingBiasFalseLeavesBiasNull(void) {
 void testLinearLayerInitSymInt32BackwardMathYieldsSymInt32Grad(void) {
     /* Regression for the "config lies" bug: a Linear built with a SYM_INT32
      * backwardMath must store SYM_INT32 parameter gradients, not FLOAT32. */
-    quantization_t *fwd = quantizationInitFloat();       /* FLOAT32 forward + storage */
-    quantization_t *bwd = quantizationInitSymInt32(HTE); /* SYM_INT32 backward */
+    quantization_t *fwd = quantizationInitFloat();             /* FLOAT32 forward + storage */
+    quantization_t *bwd = quantizationInitSymInt32(HALF_AWAY); /* SYM_INT32 backward */
     layerQuant_t lq = {
         .forwardMath = fwd,
         .backwardMath = bwd,
@@ -1243,7 +1243,7 @@ static tensor_t *e2eMakeSym1x3(void) {
     setOrderOfDimsForNewTensor(2, o);
     shape_t *s = reserveMemory(sizeof(shape_t));
     setShape(s, d, 2, o);
-    return initTensor(s, quantizationInitSymInt32(HTE), NULL);
+    return initTensor(s, quantizationInitSymInt32(HALF_AWAY), NULL);
 }
 
 void testLinearSymInt32GradAccumulatesOverTwoMicrobatchesAndSteps(void) {
@@ -1254,7 +1254,7 @@ void testLinearSymInt32GradAccumulatesOverTwoMicrobatchesAndSteps(void) {
 
     /* ---- SYM_INT32-backward layer (under test) ---- */
     quantization_t *fwd = quantizationInitFloat();
-    quantization_t *bwd = quantizationInitSymInt32(HTE);
+    quantization_t *bwd = quantizationInitSymInt32(HALF_AWAY);
     layerQuant_t lqSym = {
         .forwardMath = fwd, .backwardMath = bwd, .weightStorage = fwd, .biasStorage = fwd};
     layer_t *symLayer = linearLayerInit(

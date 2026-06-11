@@ -47,7 +47,7 @@ static tensor_t *build2DSym(size_t b, size_t f, const float *data, size_t n) {
     setOrderOfDimsForNewTensor(2, order);
     shape_t *shape = reserveMemory(sizeof(shape_t));
     setShape(shape, dims, 2, order);
-    tensor_t *t = initTensor(shape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *t = initTensor(shape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(t, (float *)data, n);
     return t;
 }
@@ -158,7 +158,7 @@ void testLayerNormSymInt32SingleLayerTrainingStep(void) {
 
     /* ---- SYM model (under test) ---- */
     layerNormInit_t initSym = {.normalizedShape = normShape, .numNormDims = 1, .eps = 1e-5f};
-    quantization_t *symQ = quantizationInitSymInt32(HTE);
+    quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
     layerQuant_t lqSym = {
         .forwardMath = symQ, .backwardMath = symQ, .weightStorage = symQ, .biasStorage = symQ};
     layer_t *lnSym = layerNormLayerInit(&initSym, &lqSym);

@@ -55,7 +55,7 @@ void testConversionIntSymInt32() {
     setTensorValues(&intTensor, (uint8_t *)intData, &shape, &intQ, NULL);
 
     symInt32QConfig_t symInt32QConfig;
-    initSymInt32QConfig(HTE, &symInt32QConfig);
+    initSymInt32QConfig(HALF_AWAY, &symInt32QConfig);
     quantization_t symInt32Q;
     initSymInt32Quantization(&symInt32QConfig, &symInt32Q);
 
@@ -85,7 +85,7 @@ void testConversionIntAsym() {
     setTensorValues(&intTensor, (uint8_t *)intData, &shape, &intQ, NULL);
 
     asymQConfig_t asymQConfig;
-    initAsymQConfig(5, HTE, &asymQConfig);
+    initAsymQConfig(5, HALF_AWAY, &asymQConfig);
     quantization_t asymQ;
     initAsymQuantization(&asymQConfig, &asymQ);
     uint8_t asymData[numValues * calcBytesPerElement(&asymQ)];
@@ -158,7 +158,7 @@ void testConversionFloatSymInt32() {
     setTensorValues(&floatTensor, (uint8_t *)floatData, &shape, &floatQ, NULL);
 
     symInt32QConfig_t symInt32QConfig;
-    initSymInt32QConfig(HTE, &symInt32QConfig);
+    initSymInt32QConfig(HALF_AWAY, &symInt32QConfig);
     quantization_t symInt32Q;
     initSymInt32Quantization(&symInt32QConfig, &symInt32Q);
 
@@ -198,7 +198,7 @@ void testConversionFloatAsym() {
     setTensorValues(&floatTensor, (uint8_t *)floatData, &shape, &floatQ, NULL);
 
     asymQConfig_t asymQConfig;
-    initAsymQConfig(5, HTE, &asymQConfig);
+    initAsymQConfig(5, HALF_AWAY, &asymQConfig);
     quantization_t asymQ;
     initAsymQuantization(&asymQConfig, &asymQ);
 
@@ -231,7 +231,7 @@ void testConversionSymInt32Int() {
         .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
     symInt32QConfig_t symInt32QConfig;
-    initSymInt32QConfig(HTE, &symInt32QConfig);
+    initSymInt32QConfig(HALF_AWAY, &symInt32QConfig);
     quantization_t symInt32Q;
     initSymInt32Quantization(&symInt32QConfig, &symInt32Q);
 
@@ -262,7 +262,7 @@ void testConversionSymInt32Float() {
         .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
     symInt32QConfig_t symInt32QConfig;
-    initSymInt32QConfig(HTE, &symInt32QConfig);
+    initSymInt32QConfig(HALF_AWAY, &symInt32QConfig);
     symInt32QConfig.scale = 1.f;
     quantization_t symInt32Q;
     initSymInt32Quantization(&symInt32QConfig, &symInt32Q);
@@ -302,7 +302,7 @@ void testConversionSymInt32Asym() {
         .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
     symInt32QConfig_t symInt32QConfig;
-    initSymInt32QConfig(HTE, &symInt32QConfig);
+    initSymInt32QConfig(HALF_AWAY, &symInt32QConfig);
     symInt32QConfig.scale = 1.f;
     quantization_t symInt32Q;
     initSymInt32Quantization(&symInt32QConfig, &symInt32Q);
@@ -312,7 +312,7 @@ void testConversionSymInt32Asym() {
     setTensorValues(&symInt32Tensor, (uint8_t *)symInt32Data, &shape, &symInt32Q, NULL);
 
     asymQConfig_t asymQConfig;
-    initAsymQConfig(5, HTE, &asymQConfig);
+    initAsymQConfig(5, HALF_AWAY, &asymQConfig);
     quantization_t asymQ;
     initAsymQuantization(&asymQConfig, &asymQ);
 
@@ -347,7 +347,7 @@ void testConversionAsymInt() {
         .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
     asymQConfig_t asymQConfig;
-    initAsymQConfig(5, HTE, &asymQConfig);
+    initAsymQConfig(5, HALF_AWAY, &asymQConfig);
     asymQConfig.scale = 0.1875f;
     asymQConfig.zeroPoint = -11;
 
@@ -382,7 +382,7 @@ void testConversionAsymFloat() {
         .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
     asymQConfig_t asymQConfig;
-    initAsymQConfig(5, HTE, &asymQConfig);
+    initAsymQConfig(5, HALF_AWAY, &asymQConfig);
     asymQConfig.scale = 0.1875f;
     asymQConfig.zeroPoint = -11;
     quantization_t asymQ;
@@ -417,7 +417,7 @@ void testConversionAsymSymInt32() {
         .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
     asymQConfig_t asymQConfig;
-    initAsymQConfig(5, HTE, &asymQConfig);
+    initAsymQConfig(5, HALF_AWAY, &asymQConfig);
     asymQConfig.scale = 0.1875f;
     asymQConfig.zeroPoint = -11;
     quantization_t asymQ;
@@ -429,7 +429,7 @@ void testConversionAsymSymInt32() {
     setTensorValues(&asymTensor, asymData, &shape, &asymQ, NULL);
 
     symInt32QConfig_t symInt32QConfig;
-    initSymInt32QConfig(HTE, &symInt32QConfig);
+    initSymInt32QConfig(HALF_AWAY, &symInt32QConfig);
     quantization_t symInt32Q;
     initSymInt32Quantization(&symInt32QConfig, &symInt32Q);
     int32_t symInt32Data[numValues];

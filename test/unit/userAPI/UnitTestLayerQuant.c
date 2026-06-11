@@ -50,7 +50,7 @@ void testDeepCopyQuantizationFloat32ReturnsFreshAllocationWithNullQConfig(void) 
 }
 
 void testDeepCopyQuantizationSymInt32DuplicatesQConfigBytes(void) {
-    quantization_t *src = quantizationInitSymInt32(HTE);
+    quantization_t *src = quantizationInitSymInt32(HALF_AWAY);
     quantization_t *dst = deepCopyQuantization(src);
 
     TEST_ASSERT_NOT_NULL(dst);

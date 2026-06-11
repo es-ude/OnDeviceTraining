@@ -62,7 +62,7 @@ void testDivSymInt32TensorsInplace() {
         .dimensions = dims, .orderOfDimensions = orderOfDims, .numberOfDimensions = numberOfDims};
 
     symInt32QConfig_t aSymInt32QC;
-    initSymInt32QConfig(HTE, &aSymInt32QC);
+    initSymInt32QConfig(HALF_AWAY, &aSymInt32QC);
     quantization_t aQ;
     initSymInt32Quantization(&aSymInt32QC, &aQ);
 
@@ -73,7 +73,7 @@ void testDivSymInt32TensorsInplace() {
     uint8_t *bDataBytes = (uint8_t *)bData;
 
     symInt32QConfig_t bSymInt32QC;
-    initSymInt32QConfig(HTE, &bSymInt32QC);
+    initSymInt32QConfig(HALF_AWAY, &bSymInt32QC);
     quantization_t bQ;
     initSymInt32Quantization(&bSymInt32QC, &bQ);
 

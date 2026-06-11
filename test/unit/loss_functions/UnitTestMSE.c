@@ -114,7 +114,7 @@ void testMSELossBackward_SymInt32WritesRawPerElementGrad() {
 
     tensor_t modelOutputSymInt32;
     symInt32QConfig_t modelOutputSymInt32QC;
-    initSymInt32QConfig(HTE, &modelOutputSymInt32QC);
+    initSymInt32QConfig(HALF_AWAY, &modelOutputSymInt32QC);
     quantization_t modelOutputSymInt32Q;
     initSymInt32Quantization(&modelOutputSymInt32QC, &modelOutputSymInt32Q);
     uint8_t modelOutputSymInt32Data[numberOfElements * sizeof(int32_t)];
@@ -130,7 +130,7 @@ void testMSELossBackward_SymInt32WritesRawPerElementGrad() {
 
     tensor_t labelSymInt32;
     symInt32QConfig_t labelSymInt32QC;
-    initSymInt32QConfig(HTE, &labelSymInt32QC);
+    initSymInt32QConfig(HALF_AWAY, &labelSymInt32QC);
     quantization_t labelSymInt32Q;
     initSymInt32Quantization(&labelSymInt32QC, &labelSymInt32Q);
     uint8_t labelSymInt32Data[numberOfElements * sizeof(int32_t)];
@@ -145,7 +145,7 @@ void testMSELossBackward_SymInt32WritesRawPerElementGrad() {
 
     tensor_t resultSymInt32;
     symInt32QConfig_t resultSymInt32QC;
-    initSymInt32QConfig(HTE, &resultSymInt32QC);
+    initSymInt32QConfig(HALF_AWAY, &resultSymInt32QC);
     quantization_t resultSymInt32Q;
     initSymInt32Quantization(&resultSymInt32QC, &resultSymInt32Q);
     uint8_t resultSymInt32Data[numberOfElements * sizeof(int32_t)];

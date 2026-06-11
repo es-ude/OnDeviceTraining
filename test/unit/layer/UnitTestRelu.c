@@ -68,7 +68,7 @@ void testReluForwardSymInt32() {
     setOrderOfDimsForNewTensor(2, inputOrder);
     shape_t *inputShape = reserveMemory(sizeof(shape_t));
     setShape(inputShape, inputDims, 2, inputOrder);
-    tensor_t *input = initTensor(inputShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *input = initTensor(inputShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(input, (float[]){-1.f, 0.f, 1.f, 2.f, 5.f, -6.f}, 6);
 
     /* 2. Build heap output tensor (SymInt32, shape 2x3). */
@@ -79,10 +79,10 @@ void testReluForwardSymInt32() {
     setOrderOfDimsForNewTensor(2, outputOrder);
     shape_t *outputShape = reserveMemory(sizeof(shape_t));
     setShape(outputShape, outputDims, 2, outputOrder);
-    tensor_t *output = initTensor(outputShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *output = initTensor(outputShape, quantizationInitSymInt32(HALF_AWAY), NULL);
 
     /* 3. Shared SymInt32 quantization for the layer. */
-    quantization_t *symIntQ = quantizationInitSymInt32(HTE);
+    quantization_t *symIntQ = quantizationInitSymInt32(HALF_AWAY);
     layer_t *reluLayer = reluLayerInitLegacy(symIntQ, symIntQ);
     layerFunctions_t reluFns = layerFunctions[RELU];
     reluFns.forward(reluLayer, input, output);
@@ -185,7 +185,7 @@ void testReluBackwardSymInt32() {
     setOrderOfDimsForNewTensor(1, fwdOrder);
     shape_t *fwdShape = reserveMemory(sizeof(shape_t));
     setShape(fwdShape, fwdDims, 1, fwdOrder);
-    tensor_t *forwardInput = initTensor(fwdShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *forwardInput = initTensor(fwdShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(forwardInput, (float[]){-1.f, 0.f, 1.f, 2.f, 5.f, -6.f}, 6);
 
     /* 2. Build heap loss tensor (SymInt32). */
@@ -195,7 +195,7 @@ void testReluBackwardSymInt32() {
     setOrderOfDimsForNewTensor(1, lossOrder);
     shape_t *lossShape = reserveMemory(sizeof(shape_t));
     setShape(lossShape, lossDims, 1, lossOrder);
-    tensor_t *loss = initTensor(lossShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *loss = initTensor(lossShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(loss, (float[]){0.f, 2.f, -4.f, 6.f, 3.f, 2.f}, 6);
 
     /* 3. Build heap propLoss tensor (SymInt32). */
@@ -205,10 +205,10 @@ void testReluBackwardSymInt32() {
     setOrderOfDimsForNewTensor(1, propLossOrder);
     shape_t *propLossShape = reserveMemory(sizeof(shape_t));
     setShape(propLossShape, propLossDims, 1, propLossOrder);
-    tensor_t *propLoss = initTensor(propLossShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *propLoss = initTensor(propLossShape, quantizationInitSymInt32(HALF_AWAY), NULL);
 
     /* 4. Build layer with shared SymInt32 quantization. */
-    quantization_t *symIntQ = quantizationInitSymInt32(HTE);
+    quantization_t *symIntQ = quantizationInitSymInt32(HALF_AWAY);
     layer_t *reluLayer = reluLayerInitLegacy(symIntQ, symIntQ);
     layerFunctions_t reluFns = layerFunctions[RELU];
     reluFns.backward(reluLayer, forwardInput, loss, propLoss);

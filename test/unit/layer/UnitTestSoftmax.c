@@ -71,7 +71,7 @@ void unitTestSoftmaxForwardSymInt32() {
     setOrderOfDimsForNewTensor(2, inputOrder);
     shape_t *inputShape = reserveMemory(sizeof(shape_t));
     setShape(inputShape, inputDims, 2, inputOrder);
-    tensor_t *input = initTensor(inputShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *input = initTensor(inputShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(input, (float[]){-1.f, 0.f, 1.f, 2.f, 5.f, -6.f}, 6);
 
     /* 2. Build heap output tensor (SymInt32, shape 2x3). */
@@ -82,10 +82,10 @@ void unitTestSoftmaxForwardSymInt32() {
     setOrderOfDimsForNewTensor(2, outputOrder);
     shape_t *outputShape = reserveMemory(sizeof(shape_t));
     setShape(outputShape, outputDims, 2, outputOrder);
-    tensor_t *output = initTensor(outputShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *output = initTensor(outputShape, quantizationInitSymInt32(HALF_AWAY), NULL);
 
     /* 3. Shared SymInt32 quantization for the layer. */
-    quantization_t *symIntQ = quantizationInitSymInt32(HTE);
+    quantization_t *symIntQ = quantizationInitSymInt32(HALF_AWAY);
     layer_t *softmaxLayer = softmaxLayerInitLegacy(symIntQ, symIntQ);
     layerFunctions_t softmaxFns = layerFunctions[SOFTMAX];
     softmaxFns.forward(softmaxLayer, input, output);
@@ -197,7 +197,7 @@ void unitTestSoftmaxBackwardSymInt32() {
     setOrderOfDimsForNewTensor(2, inputOrder);
     shape_t *inputShape = reserveMemory(sizeof(shape_t));
     setShape(inputShape, inputDims, 2, inputOrder);
-    tensor_t *input = initTensor(inputShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *input = initTensor(inputShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(
         input,
         (float[]){2.3008e-03f, 6.2543e-03f, 1.7001e-02f, 4.6213e-02f, 9.2822e-01f, 1.5503e-05f}, 6);
@@ -210,7 +210,7 @@ void unitTestSoftmaxBackwardSymInt32() {
     setOrderOfDimsForNewTensor(2, lossOrder);
     shape_t *lossShape = reserveMemory(sizeof(shape_t));
     setShape(lossShape, lossDims, 2, lossOrder);
-    tensor_t *loss = initTensor(lossShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *loss = initTensor(lossShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(loss, (float[]){0.f, 2.f, -4.f, 6.f, 3.f, 2.f}, 6);
 
     /* 3. Build heap propLoss tensor (SymInt32). */
@@ -221,10 +221,10 @@ void unitTestSoftmaxBackwardSymInt32() {
     setOrderOfDimsForNewTensor(2, propLossOrder);
     shape_t *propLossShape = reserveMemory(sizeof(shape_t));
     setShape(propLossShape, propLossDims, 2, propLossOrder);
-    tensor_t *propLoss = initTensor(propLossShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *propLoss = initTensor(propLossShape, quantizationInitSymInt32(HALF_AWAY), NULL);
 
     /* 4. Build layer. */
-    quantization_t *symIntQ = quantizationInitSymInt32(HTE);
+    quantization_t *symIntQ = quantizationInitSymInt32(HALF_AWAY);
     layer_t *softmaxLayer = softmaxLayerInitLegacy(symIntQ, symIntQ);
     layerFunctions_t softmaxFns = layerFunctions[SOFTMAX];
     softmaxFns.backward(softmaxLayer, input, loss, propLoss);

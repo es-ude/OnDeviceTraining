@@ -92,7 +92,7 @@ void testInferenceLinearReluSymInt32() {
     size_t numberOfOutputs = 2;
 
     /* Shared SymInt32 quantization for layers. */
-    quantization_t *q = quantizationInitSymInt32(HTE);
+    quantization_t *q = quantizationInitSymInt32(HALF_AWAY);
 
     /* Weights (2x3). */
     size_t *weightDims = reserveMemory(2 * sizeof(size_t));
@@ -102,9 +102,9 @@ void testInferenceLinearReluSymInt32() {
     setOrderOfDimsForNewTensor(2, weightOrder);
     shape_t *weightShape = reserveMemory(sizeof(shape_t));
     setShape(weightShape, weightDims, 2, weightOrder);
-    tensor_t *weightsParam = initTensor(weightShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *weightsParam = initTensor(weightShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(weightsParam, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, 6.f}, 6);
-    tensor_t *weightGrad = gradInitSymInt32(weightsParam, HTE, NULL);
+    tensor_t *weightGrad = gradInitSymInt32(weightsParam, HALF_AWAY, NULL);
     parameter_t *weights = parameterInit(weightsParam, weightGrad);
 
     /* Bias (1x2). */
@@ -115,9 +115,9 @@ void testInferenceLinearReluSymInt32() {
     setOrderOfDimsForNewTensor(2, biasOrder);
     shape_t *biasShape = reserveMemory(sizeof(shape_t));
     setShape(biasShape, biasDims, 2, biasOrder);
-    tensor_t *biasParam = initTensor(biasShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *biasParam = initTensor(biasShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(biasParam, (float[]){-1.f, 3.f}, 2);
-    tensor_t *biasGrad = gradInitSymInt32(biasParam, HTE, NULL);
+    tensor_t *biasGrad = gradInitSymInt32(biasParam, HALF_AWAY, NULL);
     parameter_t *bias = parameterInit(biasParam, biasGrad);
 
     /* Input (1x3). */
@@ -128,7 +128,7 @@ void testInferenceLinearReluSymInt32() {
     setOrderOfDimsForNewTensor(2, inputOrder);
     shape_t *inputShape = reserveMemory(sizeof(shape_t));
     setShape(inputShape, inputDims, 2, inputOrder);
-    tensor_t *input = initTensor(inputShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *input = initTensor(inputShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(input, (float[]){0.f, 1.f, 2.f}, 3);
 
     /* Layers. */
@@ -261,7 +261,7 @@ void testInferenceLayerNormSymInt32(void) {
     size_t normShape[] = {4};
     layerNormInit_t init = {.normalizedShape = normShape, .numNormDims = 1, .eps = 1e-5f};
 
-    quantization_t *symQ = quantizationInitSymInt32(HTE);
+    quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
     quantization_t *bwd = quantizationInitFloat();
     layerQuant_t lq = {
         .forwardMath = symQ, .backwardMath = bwd, .weightStorage = symQ, .biasStorage = symQ};
@@ -281,7 +281,7 @@ void testInferenceLayerNormSymInt32(void) {
     setOrderOfDimsForNewTensor(2, inOrder);
     shape_t *inShape = reserveMemory(sizeof(shape_t));
     setShape(inShape, inDims, 2, inOrder);
-    tensor_t *input = initTensor(inShape, quantizationInitSymInt32(HTE), NULL);
+    tensor_t *input = initTensor(inShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(input, (float[]){1.f, 2.f, 3.f, 4.f, 10.f, 20.f, 30.f, 40.f}, 8);
 
     tensor_t *output = inference(model, 1, input);

@@ -144,7 +144,7 @@ void testAddSymInt32TensorsInplace() {
     size_t numberOfValues = 6;
 
     symInt32QConfig_t aQC;
-    initSymInt32QConfig(HTE, &aQC);
+    initSymInt32QConfig(HALF_AWAY, &aQC);
     aQC.scale = 1.f;
     quantization_t aQ;
     initSymInt32Quantization(&aQC, &aQ);
@@ -162,7 +162,7 @@ void testAddSymInt32TensorsInplace() {
     setTensorValues(&aTensor, aDataBytes, &shape, &aQ, NULL);
 
     symInt32QConfig_t bQC;
-    initSymInt32QConfig(HTE, &bQC);
+    initSymInt32QConfig(HALF_AWAY, &bQC);
     bQC.scale = 2.f;
     quantization_t bQ;
     initSymInt32Quantization(&bQC, &bQ);
@@ -208,7 +208,7 @@ void testAddInt32TensorWithSymInt32TensorInplace() {
     size_t numberOfValues = 6;
 
     symInt32QConfig_t aQC;
-    initSymInt32QConfig(HTE, &aQC);
+    initSymInt32QConfig(HALF_AWAY, &aQC);
     aQC.scale = 100.f;
     quantization_t aQ;
     initSymInt32Quantization(&aQC, &aQ);
@@ -240,7 +240,7 @@ void testAddFloat32TensorToSymInt32TensorInplace() {
     size_t numberOfValues = 6;
 
     symInt32QConfig_t aQC;
-    initSymInt32QConfig(HTE, &aQC);
+    initSymInt32QConfig(HALF_AWAY, &aQC);
     aQC.scale = 100.f;
     quantization_t aQ;
     initSymInt32Quantization(&aQC, &aQ);

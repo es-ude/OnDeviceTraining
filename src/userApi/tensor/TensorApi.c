@@ -98,6 +98,12 @@ void tensorFillFromFloatBuffer(tensor_t *tensor, const float *source, size_t cou
         exit(1);
     }
 
+    if (tensor->quantization->type == BOOL) {
+        PRINT_ERROR("tensorFillFromFloatBuffer does not support BOOL tensors; "
+                    "use tensorFillFromBoolBuffer instead");
+        exit(1);
+    }
+
     if (tensor->quantization->type == FLOAT32) {
         memcpy(tensor->data, source, count * sizeof(float));
         return;

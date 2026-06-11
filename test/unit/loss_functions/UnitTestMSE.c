@@ -6,6 +6,7 @@
 #include "TensorApi.h"
 #include "TensorConversion.h"
 #include "unity.h"
+#include <string.h>
 
 void testMSEForward_MeanReturnsPerSampleMean() {
     /* Output (1D, 3 elements). Today B=1, so numFeaturesPerSample = 3. */
@@ -149,8 +150,8 @@ void testMSELossBackward_SymInt32WritesRawPerElementGrad() {
     quantization_t resultSymInt32Q;
     initSymInt32Quantization(&resultSymInt32QC, &resultSymInt32Q);
     uint8_t resultSymInt32Data[numberOfElements * sizeof(int32_t)];
+    memset(resultSymInt32Data, 0, numberOfElements * sizeof(int32_t));
     setTensorValuesForConversion(resultSymInt32Data, &resultSymInt32Q, &result, &resultSymInt32);
-    convertTensor(&result, &resultSymInt32);
 
     mseLossBackward(&modelOutputSymInt32, &labelSymInt32, &resultSymInt32);
     convertTensor(&resultSymInt32, &result);

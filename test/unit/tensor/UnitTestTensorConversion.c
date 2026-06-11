@@ -4,6 +4,7 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
+#include "expected_requant.h"
 #include "unity.h"
 
 #include <stdbool.h>
@@ -541,6 +542,345 @@ void testConversionSymInt32SameTypeCopyPropagatesScale() {
     TEST_ASSERT_EQUAL_FLOAT(0.03125f, outQC.scale);
 }
 
+void testRequantDynamicAccumulatorRangeMatchesGold() {
+    size_t dims[] = {input_requant_f1AccumRange_len};
+    size_t orderOfDims[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
+
+    symInt32QConfig_t inQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &inQc, (uint8_t)qMaxBits_requant);
+    inQc.scale = inputScale_requant_f1AccumRange;
+    quantization_t inQ;
+    initSymInt32Quantization(&inQc, &inQ);
+    int32_t inData[input_requant_f1AccumRange_len];
+    memcpy(inData, input_requant_f1AccumRange, sizeof(inData));
+    tensor_t inTensor;
+    setTensorValues(&inTensor, (uint8_t *)inData, &shape, &inQ, NULL);
+
+    symInt32QConfig_t outQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &outQc, (uint8_t)qMaxBits_requant);
+    quantization_t outQ;
+    initSymInt32Quantization(&outQc, &outQ);
+    int32_t outData[input_requant_f1AccumRange_len];
+    tensor_t outTensor;
+    setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    requantSymInt32Tensor(&inTensor, &outTensor);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected_requant_f1AccumRange, outData,
+                                  expected_requant_f1AccumRange_len);
+    TEST_ASSERT_FLOAT_WITHIN(scaleTol_requant_f1AccumRange, expectedScale_requant_f1AccumRange,
+                             outQc.scale);
+    // out-of-place: the input tensor must be untouched (pass A reads only)
+    TEST_ASSERT_EQUAL_INT32_ARRAY(input_requant_f1AccumRange, inData,
+                                  input_requant_f1AccumRange_len);
+    TEST_ASSERT_EQUAL_FLOAT(inputScale_requant_f1AccumRange, inQc.scale);
+}
+
+void testRequantDynamicAbsmaxZeroGivesZerosScaleOne() {
+    size_t dims[] = {input_requant_f2AbsmaxZero_len};
+    size_t orderOfDims[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
+
+    symInt32QConfig_t inQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &inQc, (uint8_t)qMaxBits_requant);
+    inQc.scale = inputScale_requant_f2AbsmaxZero;
+    quantization_t inQ;
+    initSymInt32Quantization(&inQc, &inQ);
+    int32_t inData[input_requant_f2AbsmaxZero_len];
+    memcpy(inData, input_requant_f2AbsmaxZero, sizeof(inData));
+    tensor_t inTensor;
+    setTensorValues(&inTensor, (uint8_t *)inData, &shape, &inQ, NULL);
+
+    symInt32QConfig_t outQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &outQc, (uint8_t)qMaxBits_requant);
+    quantization_t outQ;
+    initSymInt32Quantization(&outQc, &outQ);
+    int32_t outData[input_requant_f2AbsmaxZero_len];
+    tensor_t outTensor;
+    setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    requantSymInt32Tensor(&inTensor, &outTensor);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected_requant_f2AbsmaxZero, outData,
+                                  expected_requant_f2AbsmaxZero_len);
+    TEST_ASSERT_FLOAT_WITHIN(scaleTol_requant_f2AbsmaxZero, expectedScale_requant_f2AbsmaxZero,
+                             outQc.scale);
+}
+
+void testRequantDynamicScaleTracksInputRescale() {
+    // ONE output tensor + qConfig reused across BOTH calls (no re-init):
+    // a kernel that fails to recompute/write the scale per call keeps the
+    // stale value and fails the second assert (freeze-the-scale class).
+    size_t dims[] = {input_requant_f3Rescale_len};
+    size_t orderOfDims[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
+
+    symInt32QConfig_t inQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &inQc, (uint8_t)qMaxBits_requant);
+    inQc.scale = inputScaleA_requant_f3Rescale;
+    quantization_t inQ;
+    initSymInt32Quantization(&inQc, &inQ);
+    int32_t inData[input_requant_f3Rescale_len];
+    memcpy(inData, input_requant_f3Rescale, sizeof(inData));
+    tensor_t inTensor;
+    setTensorValues(&inTensor, (uint8_t *)inData, &shape, &inQ, NULL);
+
+    symInt32QConfig_t outQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &outQc, (uint8_t)qMaxBits_requant);
+    quantization_t outQ;
+    initSymInt32Quantization(&outQc, &outQ);
+    int32_t outData[input_requant_f3Rescale_len];
+    tensor_t outTensor;
+    setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    requantSymInt32Tensor(&inTensor, &outTensor);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expectedA_requant_f3Rescale, outData,
+                                  expectedA_requant_f3Rescale_len);
+    TEST_ASSERT_FLOAT_WITHIN(scaleTolA_requant_f3Rescale, expectedScaleA_requant_f3Rescale,
+                             outQc.scale);
+
+    // same mantissas, input scale x10 -> fresh scale must track ~x10
+    inQc.scale = inputScaleB_requant_f3Rescale;
+    requantSymInt32Tensor(&inTensor, &outTensor);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expectedB_requant_f3Rescale, outData,
+                                  expectedB_requant_f3Rescale_len);
+    TEST_ASSERT_FLOAT_WITHIN(scaleTolB_requant_f3Rescale, expectedScaleB_requant_f3Rescale,
+                             outQc.scale);
+}
+
+void testRequantDynamicTieRoundsHalfAwayFromZero() {
+    // quotients land on exact .5 ties (gold construction: scale == 4.0f);
+    // half-to-even AND floor/trunc casts produce different mantissas.
+    size_t dims[] = {input_requant_f4Tie_len};
+    size_t orderOfDims[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
+
+    symInt32QConfig_t inQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &inQc, (uint8_t)qMaxBits_requant);
+    inQc.scale = inputScale_requant_f4Tie;
+    quantization_t inQ;
+    initSymInt32Quantization(&inQc, &inQ);
+    int32_t inData[input_requant_f4Tie_len];
+    memcpy(inData, input_requant_f4Tie, sizeof(inData));
+    tensor_t inTensor;
+    setTensorValues(&inTensor, (uint8_t *)inData, &shape, &inQ, NULL);
+
+    symInt32QConfig_t outQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &outQc, (uint8_t)qMaxBits_requant);
+    quantization_t outQ;
+    initSymInt32Quantization(&outQc, &outQ);
+    int32_t outData[input_requant_f4Tie_len];
+    tensor_t outTensor;
+    setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    requantSymInt32Tensor(&inTensor, &outTensor);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected_requant_f4Tie, outData, expected_requant_f4Tie_len);
+    TEST_ASSERT_FLOAT_WITHIN(scaleTol_requant_f4Tie, expectedScale_requant_f4Tie, outQc.scale);
+}
+
+void testRequantDynamicInPlaceAliasMatchesGold() {
+    // In-place contract: ONE tensor_t passed as input AND output. Its single
+    // qConfig is read in the input role (scale on entry) and written in the
+    // output role (fresh scale on exit); qMaxBits/roundingMode of that same
+    // config define the target. Pass B rewrites the mantissas index-by-index.
+    // Result must be bit-identical to the out-of-place gold.
+    size_t dims[] = {input_requant_f1AccumRange_len};
+    size_t orderOfDims[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
+
+    symInt32QConfig_t qc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &qc, (uint8_t)qMaxBits_requant);
+    qc.scale = inputScale_requant_f1AccumRange;
+    quantization_t q;
+    initSymInt32Quantization(&qc, &q);
+    int32_t data[input_requant_f1AccumRange_len];
+    memcpy(data, input_requant_f1AccumRange, sizeof(data));
+    tensor_t tensor;
+    setTensorValues(&tensor, (uint8_t *)data, &shape, &q, NULL);
+
+    requantSymInt32Tensor(&tensor, &tensor);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected_requant_f1AccumRange, data,
+                                  expected_requant_f1AccumRange_len);
+    TEST_ASSERT_FLOAT_WITHIN(scaleTol_requant_f1AccumRange, expectedScale_requant_f1AccumRange,
+                             qc.scale);
+}
+
+void testRequantDynamicViaConversionMatrixDiagonal() {
+    // The Quant layer (PR D) dispatches directly over the matrix; pin the
+    // diagonal wiring and that it behaves identically to a direct call.
+    conversionFunction_t conversionFn = conversionMatrix[SYM_INT32][SYM_INT32];
+    TEST_ASSERT_NOT_NULL(conversionFn);
+
+    size_t dims[] = {input_requant_f1AccumRange_len};
+    size_t orderOfDims[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
+
+    symInt32QConfig_t inQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &inQc, (uint8_t)qMaxBits_requant);
+    inQc.scale = inputScale_requant_f1AccumRange;
+    quantization_t inQ;
+    initSymInt32Quantization(&inQc, &inQ);
+    int32_t inData[input_requant_f1AccumRange_len];
+    memcpy(inData, input_requant_f1AccumRange, sizeof(inData));
+    tensor_t inTensor;
+    setTensorValues(&inTensor, (uint8_t *)inData, &shape, &inQ, NULL);
+
+    symInt32QConfig_t outQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &outQc, (uint8_t)qMaxBits_requant);
+    quantization_t outQ;
+    initSymInt32Quantization(&outQc, &outQ);
+    int32_t outData[input_requant_f1AccumRange_len];
+    tensor_t outTensor;
+    setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    conversionFn(&inTensor, &outTensor);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected_requant_f1AccumRange, outData,
+                                  expected_requant_f1AccumRange_len);
+    TEST_ASSERT_FLOAT_WITHIN(scaleTol_requant_f1AccumRange, expectedScale_requant_f1AccumRange,
+                             outQc.scale);
+}
+
+void testConvertTensorSymInt32SameTypeKeepsCopySemantics() {
+    // Pins the spec-D1 invariant the PR-D Quant layer relies on:
+    // convertTensor's same-type branch short-circuits BEFORE the matrix
+    // lookup and stays memmove + scale copy — wiring the diagonal must NOT
+    // change it. A requant here would yield {10922, -21845, 32767} with a
+    // fresh scale 150/32767 instead of the copied mantissas + scale 0.5f.
+    size_t dims[] = {3};
+    size_t orderOfDims[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
+
+    symInt32QConfig_t inQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &inQc, 16);
+    inQc.scale = 0.5f;
+    quantization_t inQ;
+    initSymInt32Quantization(&inQc, &inQ);
+    int32_t inData[] = {100, -200, 300};
+    tensor_t inTensor;
+    setTensorValues(&inTensor, (uint8_t *)inData, &shape, &inQ, NULL);
+
+    symInt32QConfig_t outQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &outQc, 16);
+    outQc.scale = 999.f;
+    quantization_t outQ;
+    initSymInt32Quantization(&outQc, &outQ);
+    int32_t outData[3];
+    tensor_t outTensor;
+    setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    convertTensor(&inTensor, &outTensor);
+
+    int32_t expectedCopy[] = {100, -200, 300};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expectedCopy, outData, 3);
+    TEST_ASSERT_EQUAL_FLOAT(0.5f, outQc.scale);
+}
+
+void testRequantToScaleNonSaturatingMatchesGold() {
+    size_t dims[] = {input_requant_f5ToScaleFit_len};
+    size_t orderOfDims[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
+
+    symInt32QConfig_t inQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &inQc, (uint8_t)qMaxBits_requant);
+    inQc.scale = inputScale_requant_f5ToScaleFit;
+    quantization_t inQ;
+    initSymInt32Quantization(&inQc, &inQ);
+    int32_t inData[input_requant_f5ToScaleFit_len];
+    memcpy(inData, input_requant_f5ToScaleFit, sizeof(inData));
+    tensor_t inTensor;
+    setTensorValues(&inTensor, (uint8_t *)inData, &shape, &inQ, NULL);
+
+    symInt32QConfig_t outQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &outQc, (uint8_t)qMaxBits_requant);
+    outQc.scale = targetScale_requant_f5ToScaleFit; // pre-set target (fixed-scale contract)
+    quantization_t outQ;
+    initSymInt32Quantization(&outQc, &outQ);
+    int32_t outData[input_requant_f5ToScaleFit_len];
+    tensor_t outTensor;
+    setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    requantSymInt32TensorToScale(&inTensor, &outTensor);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected_requant_f5ToScaleFit, outData,
+                                  expected_requant_f5ToScaleFit_len);
+    // fixed-scale contract: the pre-set target scale is NEVER modified
+    TEST_ASSERT_EQUAL_FLOAT(targetScale_requant_f5ToScaleFit, outQc.scale);
+}
+
+void testRequantToScaleSaturatesAtQMinQMax() {
+    // target scale deliberately too small: quotients overshoot BOTH bounds;
+    // clamping at qMin/qMax is the documented Deutel-Eq.4 semantics.
+    size_t dims[] = {input_requant_f6ToScaleSat_len};
+    size_t orderOfDims[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
+
+    symInt32QConfig_t inQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &inQc, (uint8_t)qMaxBits_requant);
+    inQc.scale = inputScale_requant_f6ToScaleSat;
+    quantization_t inQ;
+    initSymInt32Quantization(&inQc, &inQ);
+    int32_t inData[input_requant_f6ToScaleSat_len];
+    memcpy(inData, input_requant_f6ToScaleSat, sizeof(inData));
+    tensor_t inTensor;
+    setTensorValues(&inTensor, (uint8_t *)inData, &shape, &inQ, NULL);
+
+    symInt32QConfig_t outQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &outQc, (uint8_t)qMaxBits_requant);
+    outQc.scale = targetScale_requant_f6ToScaleSat;
+    quantization_t outQ;
+    initSymInt32Quantization(&outQc, &outQ);
+    int32_t outData[input_requant_f6ToScaleSat_len];
+    tensor_t outTensor;
+    setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    requantSymInt32TensorToScale(&inTensor, &outTensor);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected_requant_f6ToScaleSat, outData,
+                                  expected_requant_f6ToScaleSat_len);
+    TEST_ASSERT_EQUAL_FLOAT(targetScale_requant_f6ToScaleSat, outQc.scale);
+}
+
+void testRequantToScaleSharedBufferAliasMatchesGold() {
+    // In-place for the fixed-scale variant = SHARED DATA BUFFER with two
+    // tensor_t views, each with its OWN qConfig (input scale vs pre-set
+    // target). Passing one tensor_t twice would force inScale == targetScale
+    // (both roles share a single scale field) — a no-op requant — so the
+    // two-view setup is the realistic aliasing mode. Pins the single
+    // same-index read-then-write pass.
+    size_t dims[] = {input_requant_f6ToScaleSat_len};
+    size_t orderOfDims[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
+
+    int32_t data[input_requant_f6ToScaleSat_len];
+    memcpy(data, input_requant_f6ToScaleSat, sizeof(data));
+
+    symInt32QConfig_t inQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &inQc, (uint8_t)qMaxBits_requant);
+    inQc.scale = inputScale_requant_f6ToScaleSat;
+    quantization_t inQ;
+    initSymInt32Quantization(&inQc, &inQ);
+    tensor_t inView;
+    setTensorValues(&inView, (uint8_t *)data, &shape, &inQ, NULL);
+
+    symInt32QConfig_t outQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &outQc, (uint8_t)qMaxBits_requant);
+    outQc.scale = targetScale_requant_f6ToScaleSat;
+    quantization_t outQ;
+    initSymInt32Quantization(&outQc, &outQ);
+    tensor_t outView;
+    setTensorValues(&outView, (uint8_t *)data, &shape, &outQ, NULL);
+
+    requantSymInt32TensorToScale(&inView, &outView);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected_requant_f6ToScaleSat, data,
+                                  expected_requant_f6ToScaleSat_len);
+    TEST_ASSERT_EQUAL_FLOAT(targetScale_requant_f6ToScaleSat, outQc.scale);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -562,6 +902,16 @@ int main(void) {
     RUN_TEST(testConversionAsymInt);
     RUN_TEST(testConversionAsymFloat);
     RUN_TEST(testConversionAsymSymInt32);
+    RUN_TEST(testRequantDynamicAccumulatorRangeMatchesGold);
+    RUN_TEST(testRequantDynamicAbsmaxZeroGivesZerosScaleOne);
+    RUN_TEST(testRequantDynamicScaleTracksInputRescale);
+    RUN_TEST(testRequantDynamicTieRoundsHalfAwayFromZero);
+    RUN_TEST(testRequantDynamicInPlaceAliasMatchesGold);
+    RUN_TEST(testRequantDynamicViaConversionMatrixDiagonal);
+    RUN_TEST(testConvertTensorSymInt32SameTypeKeepsCopySemantics);
+    RUN_TEST(testRequantToScaleNonSaturatingMatchesGold);
+    RUN_TEST(testRequantToScaleSaturatesAtQMinQMax);
+    RUN_TEST(testRequantToScaleSharedBufferAliasMatchesGold);
     RUN_TEST(testConversionBoolBoolCopiesOnlyPackedBytes);
     RUN_TEST(testConversionSymInt32SameTypeCopyPropagatesScale);
     RUN_TEST(testQuantTypeToStringBool);

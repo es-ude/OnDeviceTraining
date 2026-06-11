@@ -7,6 +7,12 @@
 float crossEntropyForwardFloat(tensor_t *softmaxOutput, tensor_t *distribution,
                                reduction_t reduction);
 
+/* Dtype dispatcher registered as lossFunctions[CROSS_ENTROPY].forward.
+ * FLOAT32 -> crossEntropyForwardFloat; any other dtype fails fast — the raw
+ * float impl casts the data buffer to float*, so e.g. SYM_INT32 mantissas
+ * would be silently reinterpreted as float bit patterns. */
+float crossEntropyForward(tensor_t *softmaxOutput, tensor_t *distribution, reduction_t reduction);
+
 void crossEntropySoftmaxBackward(tensor_t *softmaxOutput, tensor_t *distribution, tensor_t *loss);
 
 /* Per-loss MEAN-reduction scale factor (PyTorch parity).

@@ -6,7 +6,7 @@
 
 lossFunctions_t lossFunctions[] = {
     [MSE] = {mseLossForward, mseLossBackward, computeMeanScaleMSE},
-    [CROSS_ENTROPY] = {crossEntropyForwardFloat, crossEntropySoftmaxBackward, computeMeanScaleCE},
+    [CROSS_ENTROPY] = {crossEntropyForward, crossEntropySoftmaxBackward, computeMeanScaleCE},
 };
 
 lossConfig_t defaultLossConfig(lossFuncType_t funcType) {

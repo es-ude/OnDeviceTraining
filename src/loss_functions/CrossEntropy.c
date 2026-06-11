@@ -36,6 +36,16 @@ float crossEntropyForwardFloat(tensor_t *softmaxOutput, tensor_t *distribution,
     return loss;
 }
 
+float crossEntropyForward(tensor_t *softmaxOutput, tensor_t *distribution, reduction_t reduction) {
+    switch (softmaxOutput->quantization->type) {
+    case FLOAT32:
+        return crossEntropyForwardFloat(softmaxOutput, distribution, reduction);
+    default:
+        PRINT_ERROR("CrossEntropy forward only implemented for FLOAT32!");
+        exit(1);
+    }
+}
+
 /*float crossEntropyForwardFloat(tensor_t *softmaxOutput, tensor_t *distribution) {
     size_t numberOfValues = calcNumberOfElementsByTensor(softmaxOutput);
 

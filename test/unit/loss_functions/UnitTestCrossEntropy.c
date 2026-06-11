@@ -223,6 +223,34 @@ void testCrossEntropyForward_Mean1DTensorReturnsSum() {
     TEST_ASSERT_FLOAT_WITHIN(1e-5f, capturedSum, capturedMean);
 }
 
+void testCrossEntropyForward_DispatcherFloat32MatchesFloatImpl() {
+    /* The dispatcher's FLOAT32 arm must be behavior-identical to the direct
+     * float implementation. Synthetic softmax output with B=2 so the MEAN
+     * branch of the float impl is exercised through the dispatcher too. */
+    tensor_t softmaxOutput;
+    float softmaxData[] = {0.6f, 0.4f, 0.7f, 0.3f};
+    size_t dims[] = {2, 2};
+    size_t order[] = {0, 1};
+    shape_t shape;
+    setShape(&shape, dims, 2, order);
+    quantization_t softmaxQ;
+    initFloat32Quantization(&softmaxQ);
+    setTensorValues(&softmaxOutput, (uint8_t *)softmaxData, &shape, &softmaxQ, NULL);
+
+    tensor_t distribution;
+    float distData[] = {1.f, 0.f, 1.f, 0.f};
+    quantization_t distQ;
+    initFloat32Quantization(&distQ);
+    setTensorValues(&distribution, (uint8_t *)distData, &shape, &distQ, NULL);
+
+    float viaDispatcher = crossEntropyForward(&softmaxOutput, &distribution, REDUCTION_MEAN);
+    float viaFloatImpl = crossEntropyForwardFloat(&softmaxOutput, &distribution, REDUCTION_MEAN);
+
+    TEST_ASSERT_EQUAL_FLOAT(viaFloatImpl, viaDispatcher);
+    /* Anchor against both-wrong drift: (-log 0.6 - log 0.7) / 2 (B=2 MEAN). */
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f, (-logf(0.6f) - logf(0.7f)) / 2.0f, viaDispatcher);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -233,5 +261,6 @@ int main() {
     RUN_TEST(testCrossEntropyForward_SumReturnsRawSum);
     RUN_TEST(testCrossEntropyForward_MeanDividesByMicrobatch);
     RUN_TEST(testCrossEntropyForward_Mean1DTensorReturnsSum);
+    RUN_TEST(testCrossEntropyForward_DispatcherFloat32MatchesFloatImpl);
     return UNITY_END();
 }

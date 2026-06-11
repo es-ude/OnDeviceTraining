@@ -73,6 +73,13 @@ void testLossFunctionsVtable_ComputeMeanScaleDispatchesToFamilyImpl() {
     TEST_ASSERT_FLOAT_WITHIN(1e-7f, 0.5f, ceScale);
 }
 
+void testLossFunctionsVtable_ForwardSlotBindsCrossEntropyDispatcher() {
+    /* The vtable must route through the dtype dispatcher, not the raw float
+     * impl — otherwise SYM_INT32 mantissas reaching CE forward are silently
+     * reinterpreted as float bit patterns (no error, garbage loss). */
+    TEST_ASSERT_TRUE(lossFunctions[CROSS_ENTROPY].forward == crossEntropyForward);
+}
+
 /* === defaultLossConfig === */
 
 void testDefaultLossConfig_MSE() {
@@ -96,6 +103,7 @@ int main(void) {
     RUN_TEST(testComputeMeanScaleCE_ScaleIsOneOverN);
     RUN_TEST(testComputeMeanScaleCE_FeatureCountDoesNotAffectScale);
     RUN_TEST(testLossFunctionsVtable_ComputeMeanScaleDispatchesToFamilyImpl);
+    RUN_TEST(testLossFunctionsVtable_ForwardSlotBindsCrossEntropyDispatcher);
     RUN_TEST(testDefaultLossConfig_MSE);
     RUN_TEST(testDefaultLossConfig_CrossEntropy);
     return UNITY_END();

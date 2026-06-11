@@ -22,9 +22,10 @@ Self-checks:
    within analytic quantization bounds;
  - the var~eps fixture really sits in the eps-visible regime (0.5 < var/eps < 2).
 
-Rounding: the framework's roundByMode(HTE) is C round() = half-AWAY-from-zero
-(Rounding.c, #188 misnomer) — emulate with sign(x)*floor(|x|+0.5), NEVER
-torch.round (true half-to-even, silently diverges on ties).
+Rounding: the framework's roundByMode(HALF_AWAY) is C round() =
+half-AWAY-from-zero (Rounding.c, roundHalfAway; renamed in #188) — emulate
+with sign(x)*floor(|x|+0.5), NEVER torch.round (true half-to-even, silently
+diverges on ties).
 Run via `uv run` (CMake wires this automatically).
 """
 import argparse
@@ -39,8 +40,8 @@ QMIN = -32768.0
 
 
 def round_half_away(x: torch.Tensor) -> torch.Tensor:
-    """Match the C kernel: roundByMode(HTE) is C round() = half-away-from-zero
-    (Rounding.c — the HTE name is a misnomer, #188)."""
+    """Match the C kernel: roundByMode(HALF_AWAY) is C round() =
+    half-away-from-zero (Rounding.c, roundHalfAway; renamed in #188)."""
     return torch.sign(x) * torch.floor(torch.abs(x) + 0.5)
 
 

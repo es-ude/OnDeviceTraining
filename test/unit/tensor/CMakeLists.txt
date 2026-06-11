@@ -24,6 +24,20 @@ add_elastic_ai_unit_test(
         TensorApi
         StorageApi
 )
+set(GEN_REQUANT_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_requant.h)
+add_custom_command(
+        OUTPUT ${GEN_REQUANT_HEADER}
+        COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_requant.py
+                --out ${GEN_REQUANT_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_requant.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+        COMMENT "Generating expected_requant.h via PyTorch"
+        VERBATIM
+)
+add_custom_target(generate_expected_requant
+        DEPENDS ${GEN_REQUANT_HEADER})
+add_dependencies(UnitTestTensorConversion generate_expected_requant)
+target_include_directories(UnitTestTensorConversion PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         TensorApi

@@ -315,6 +315,8 @@ char *quantTypeToString(qtype_t t) {
         return "SYM";
     case ASYM:
         return "ASYM";
+    case BOOL:
+        return "BOOL";
     default:
         return "UNKNOWN";
     }

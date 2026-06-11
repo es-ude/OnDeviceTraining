@@ -6,6 +6,7 @@
 typedef void (*conversionFunction_t)(tensor_t *inputTensor, tensor_t *outputTensor);
 
 void convertTensor(tensor_t *inputTensor, tensor_t *outputTensor);
+char *quantTypeToString(qtype_t t);
 
 extern conversionFunction_t conversionMatrix[5][5];
 

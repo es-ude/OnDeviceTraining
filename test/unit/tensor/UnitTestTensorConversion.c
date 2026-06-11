@@ -501,6 +501,10 @@ void testConversionBoolBoolCopiesOnlyPackedBytes() {
     freeReservedMemory(outBuffer);
 }
 
+void testQuantTypeToStringBool() {
+    TEST_ASSERT_EQUAL_STRING("BOOL", quantTypeToString(BOOL));
+}
+
 void testConversionSymInt32SameTypeCopyPropagatesScale() {
     /* Pins the same-type copy semantics PR C builds on: mantissas memmoved,
      * input scale overwrites any pre-set output scale, NO rescale happens.
@@ -560,6 +564,7 @@ int main(void) {
     RUN_TEST(testConversionAsymSymInt32);
     RUN_TEST(testConversionBoolBoolCopiesOnlyPackedBytes);
     RUN_TEST(testConversionSymInt32SameTypeCopyPropagatesScale);
+    RUN_TEST(testQuantTypeToStringBool);
 
     return UNITY_END();
 }

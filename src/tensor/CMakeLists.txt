@@ -30,6 +30,7 @@ target_link_libraries(TensorConversion PRIVATE
         Tensor
         Quantization
         Rounding
+        Common
 )
 
 add_library(Tensor

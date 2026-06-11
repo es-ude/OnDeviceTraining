@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "Common.h"
 #include "DTypes.h"
 #include "MinMax.h"
 #include "Tensor.h"
@@ -326,8 +327,9 @@ void unsupportedConversionTypes(tensor_t *inputTensor, tensor_t *outputTensor) {
     qtype_t inputQType = inputTensor->quantization->type;
     qtype_t outputQType = outputTensor->quantization->type;
 
-    printf("Error in tensor conversion: Conversion from %s to %s is not supported\n",
-           quantTypeToString(inputQType), quantTypeToString(outputQType));
+    PRINT_ERROR("Conversion from %s to %s is not supported", quantTypeToString(inputQType),
+                quantTypeToString(outputQType));
+    exit(1);
 }
 
 _Static_assert(BOOL + 1 == 6, "extend conversionMatrix when adding qtype_t entries");

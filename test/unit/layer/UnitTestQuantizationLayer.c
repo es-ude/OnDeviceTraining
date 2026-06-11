@@ -5,6 +5,8 @@
 #include <string.h>
 
 #include "Layer.h"
+#include "LayerQuant.h"
+#include "QuantLayerApi.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
 #include "QuantizationLayer.h"
@@ -178,6 +180,60 @@ void testQuantizationConfigUnionMemberRoundTrip(void) {
     freeQuantization(fq);
 }
 
+void testQuantLayerInitBorrowingStoresQuantPointersVerbatim(void) {
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *bq = quantizationInitSymInt32(HALF_AWAY);
+    layerQuant_t lq = {.forwardMath = fq, .backwardMath = bq};
+
+    layer_t *layer = quantLayerInit(&lq);
+
+    TEST_ASSERT_NOT_NULL(layer);
+    TEST_ASSERT_EQUAL_INT(QUANTIZATION, layer->type);
+    quantizationConfig_t *cfg = layer->config->quantization;
+    TEST_ASSERT_NOT_NULL(cfg);
+    TEST_ASSERT_FALSE(cfg->ownsQuantizations);
+    TEST_ASSERT_EQUAL_PTR(fq, cfg->forwardQ);
+    TEST_ASSERT_EQUAL_PTR(bq, cfg->backwardQ);
+
+    freeQuantLayer(layer);
+    /* Borrowing: caller-owned quantizations survive the layer teardown. */
+    TEST_ASSERT_EQUAL_INT(SYM_INT32, fq->type);
+    freeQuantization(bq);
+    freeQuantization(fq);
+}
+
+void testQuantLayerInitOwningDeepCopiesQuantizations(void) {
+    quantization_t *q = quantizationInitSymInt32(HALF_AWAY);
+    layerQuant_t lq = {.forwardMath = q, .backwardMath = q};
+
+    layer_t *layer = quantLayerInitOwning(&lq);
+
+    quantizationConfig_t *cfg = layer->config->quantization;
+    TEST_ASSERT_TRUE(cfg->ownsQuantizations);
+    TEST_ASSERT_NOT_EQUAL(q, cfg->forwardQ);
+    TEST_ASSERT_NOT_EQUAL(q, cfg->backwardQ);
+    TEST_ASSERT_NOT_EQUAL(cfg->forwardQ, cfg->backwardQ); /* two separate copies */
+    TEST_ASSERT_EQUAL_INT(SYM_INT32, cfg->forwardQ->type);
+    TEST_ASSERT_EQUAL_INT(SYM_INT32, cfg->backwardQ->type);
+
+    freeQuantLayer(layer);
+    freeQuantization(q);
+}
+
+void testQuantLayerInitOwningFreesAllAllocationsWithoutLeak(void) {
+    /* Build + free 5 layers — leak-checked by the CI valgrind/LSan sweep
+     * (UnitTestLinear testLinearLayerInitOwningFreesAllAllocationsWithoutLeak
+     * precedent). */
+    for (int i = 0; i < 5; i++) {
+        quantization_t *q = quantizationInitSymInt32(HALF_AWAY);
+        layerQuant_t lq = {.forwardMath = q, .backwardMath = q};
+        layer_t *layer = quantLayerInitOwning(&lq);
+        freeQuantLayer(layer);
+        freeQuantization(q);
+    }
+    TEST_PASS();
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testQuantizationForwardSymToSymMatchesDirectRequant);
@@ -186,5 +242,8 @@ int main(void) {
     RUN_TEST(testQuantizationCalcOutputShapeIdentityIncludingPermutedOrder);
     RUN_TEST(testLayerFunctionsVtableHasQuantizationRow);
     RUN_TEST(testQuantizationConfigUnionMemberRoundTrip);
+    RUN_TEST(testQuantLayerInitBorrowingStoresQuantPointersVerbatim);
+    RUN_TEST(testQuantLayerInitOwningDeepCopiesQuantizations);
+    RUN_TEST(testQuantLayerInitOwningFreesAllAllocationsWithoutLeak);
     return UNITY_END();
 }

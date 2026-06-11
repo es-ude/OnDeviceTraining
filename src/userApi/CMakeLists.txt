@@ -69,3 +69,15 @@ target_link_libraries(StateDictApi PRIVATE
         Rounding
 )
 
+
+add_library(ModelValidationApi ModelValidationApi.c)
+target_include_directories(ModelValidationApi PUBLIC include)
+target_link_libraries(ModelValidationApi PRIVATE
+        Common
+        Layer
+        LayerNorm
+        Linear
+        Quantization
+        Rounding
+        Tensor
+)

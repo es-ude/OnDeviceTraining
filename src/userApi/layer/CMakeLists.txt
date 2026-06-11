@@ -140,3 +140,16 @@ target_link_libraries(LayerNormApi PRIVATE
         Common
         StorageApi
 )
+
+add_library(QuantLayerApi QuantLayerApi.c)
+target_include_directories(QuantLayerApi PUBLIC include)
+target_link_libraries(QuantLayerApi PRIVATE
+        Common
+        Layer
+        LayerQuant
+        Quantization
+        QuantizationLayer
+        Rounding
+        StorageApi
+        Tensor
+)

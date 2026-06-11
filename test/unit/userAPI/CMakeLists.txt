@@ -332,3 +332,19 @@ target_link_libraries(UnitTestQuantLayerIntegration PRIVATE
         StorageApi
 )
 __register_target_as_unit_test(UnitTestQuantLayerIntegration)
+
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
+        ModelValidationApi
+        MORE_LIBS
+        CommonLayerLibs
+        QuantizationLayer
+        LinearApi
+        LayerCommon
+        LayerQuant
+        QuantizationApi
+        Quantization
+        Rounding
+        TensorApi
+        StorageApi
+)

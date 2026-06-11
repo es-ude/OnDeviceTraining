@@ -103,6 +103,33 @@ jobs:
       - name: Test
         run: ctest --preset unit_test_asan
 
+  c-ubsan-build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build gcc
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync Python deps for build-time generators
+        run: uv sync
+
+      - name: Configure
+        run: CC=gcc cmake --preset unit_test_ubsan
+
+      - name: Build
+        run: cmake --build --preset unit_test_ubsan
+
+      - name: Test
+        run: ctest --preset unit_test_ubsan
+
   c-bit-parity:
     runs-on: ubuntu-latest
 

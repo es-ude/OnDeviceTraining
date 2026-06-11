@@ -501,6 +501,42 @@ void testConversionBoolBoolCopiesOnlyPackedBytes() {
     freeReservedMemory(outBuffer);
 }
 
+void testConversionSymInt32SameTypeCopyPropagatesScale() {
+    /* Pins the same-type copy semantics PR C builds on: mantissas memmoved,
+     * input scale overwrites any pre-set output scale, NO rescale happens.
+     * symInt32QConfig_t is zero-initialized instead of using
+     * initSymInt32QConfig so this test references no roundingMode_t
+     * enumerator (PR A renames them in parallel); the same-type copy path
+     * never reads roundingMode. */
+    size_t numValues = 4;
+    size_t dims[] = {4};
+    size_t orderOfDims[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
+
+    symInt32QConfig_t inQC = {0};
+    inQC.scale = 0.03125f;
+    inQC.qMaxBits = 16;
+    quantization_t inQ;
+    initSymInt32Quantization(&inQC, &inQ);
+    int32_t inData[] = {100, -200, 300, -400};
+    tensor_t inTensor;
+    setTensorValues(&inTensor, (uint8_t *)inData, &shape, &inQ, NULL);
+
+    symInt32QConfig_t outQC = {0};
+    outQC.scale = 999.0f; /* pre-set garbage; the copy must overwrite it */
+    outQC.qMaxBits = 16;
+    quantization_t outQ;
+    initSymInt32Quantization(&outQC, &outQ);
+    int32_t outData[4] = {0, 0, 0, 0};
+    tensor_t outTensor;
+    setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    convertTensor(&inTensor, &outTensor);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(inData, outData, numValues);
+    TEST_ASSERT_EQUAL_FLOAT(0.03125f, outQC.scale);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -523,6 +559,7 @@ int main(void) {
     RUN_TEST(testConversionAsymFloat);
     RUN_TEST(testConversionAsymSymInt32);
     RUN_TEST(testConversionBoolBoolCopiesOnlyPackedBytes);
+    RUN_TEST(testConversionSymInt32SameTypeCopyPropagatesScale);
 
     return UNITY_END();
 }

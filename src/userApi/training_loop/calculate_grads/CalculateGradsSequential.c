@@ -17,6 +17,7 @@
 #include "Linear.h"
 #include "LossFunction.h"
 #include "MaxPool1d.h"
+#include "QuantizationLayer.h"
 #include "Relu.h"
 #include "Softmax.h"
 #include "StorageApi.h"
@@ -129,6 +130,9 @@ static void initLayerOutputs(tensor_t **layerOutputs, layer_t **model, size_t si
             break;
         case LAYERNORM:
             currentQ = currentLayer->config->layerNorm->forwardQ;
+            break;
+        case QUANTIZATION:
+            currentQ = currentLayer->config->quantization->forwardQ;
             break;
         default:
             PRINT_ERROR("Unknown Layer Type!");

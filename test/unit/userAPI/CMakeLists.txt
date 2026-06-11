@@ -309,3 +309,26 @@ target_link_libraries(UnitTestQuantizationApiBitsControl PRIVATE
         Rounding
 )
 __register_target_as_unit_test(UnitTestQuantizationApiBitsControl)
+add_executable(UnitTestQuantLayerIntegration UnitTestQuantLayerIntegration.c)
+target_link_libraries(UnitTestQuantLayerIntegration PRIVATE
+        unity
+        TrainingLoopApi
+        CalculateGradsSequential
+        CommonLayerLibs
+        LayerNormApi
+        LayerNorm
+        QuantizationLayer
+        SgdApi
+        Sgd
+        Optimizer
+        LayerQuant
+        LayerCommon
+        LinearApi
+        TensorApi
+        QuantizationApi
+        LossFunction
+        InferenceApi
+        DataLoader
+        StorageApi
+)
+__register_target_as_unit_test(UnitTestQuantLayerIntegration)

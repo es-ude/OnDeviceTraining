@@ -156,6 +156,7 @@ optimizer_t *sgdMCreateOptim(float learningRate, float momentumFactor, float wei
         case AVGPOOL1D:
         case ADAPTIVE_AVGPOOL1D:
         case DROPOUT:
+        case QUANTIZATION:
             break;
         default:
             PRINT_ERROR("Unknown Layer Type");

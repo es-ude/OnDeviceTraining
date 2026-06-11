@@ -21,6 +21,7 @@ target_link_libraries(InferenceApi PRIVATE
         AvgPool1d
         AdaptiveAvgPool1d
         LayerNorm
+        QuantizationLayer
         LossFunction
         Common
         DataLoader

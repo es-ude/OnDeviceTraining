@@ -404,6 +404,11 @@ void convertTensor(tensor_t *inputTensor, tensor_t *outputTensor) {
         convertTensorsWithSameType(inputTensor, outputTensor, inputDType);
     } else {
         conversionFunction_t conversionFn = conversionMatrix[inputDType][outputDType];
+        if (conversionFn == NULL) {
+            PRINT_ERROR("No conversion function registered for %s to %s",
+                        quantTypeToString(inputDType), quantTypeToString(outputDType));
+            exit(1);
+        }
         conversionFn(inputTensor, outputTensor);
     }
 }

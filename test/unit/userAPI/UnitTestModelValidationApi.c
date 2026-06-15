@@ -66,6 +66,34 @@ static void freeQuantStub(layer_t *layer) {
     freeReservedMemory(layer);
 }
 
+void testValidatorAcceptsEmptyModel(void) {
+    /* modelSize == 0: loop never runs, valid stays true. */
+    layer_t *model[1] = {NULL}; /* pointer needed; element never read */
+    bool valid = validateModelQuantization(model, 0);
+    TEST_ASSERT_TRUE_MESSAGE(valid, "empty model (size 0) should be accepted");
+}
+
+void testValidatorRejectsNullModel(void) {
+    /* model == NULL: guarded at entry, returns false. */
+    bool valid = validateModelQuantization(NULL, 0);
+    TEST_ASSERT_FALSE_MESSAGE(valid, "NULL model pointer should be rejected");
+}
+
+void testValidatorRejectsNullElementMidArray(void) {
+    /* NULL element mid-array: guarded in loop body (model[i]==NULL branch),
+     * sets valid=false and continues without crashing. */
+    quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
+    layer_t *linear = buildLinearStub(symQ);
+    layer_t *model[2] = {linear, NULL};
+
+    bool valid = validateModelQuantization(model, 2);
+
+    freeLinearLayerLegacy(linear);
+    freeQuantization(symQ);
+
+    TEST_ASSERT_FALSE_MESSAGE(valid, "NULL element in model array should be rejected");
+}
+
 void testValidatorRejectsSymProducerFollowedByNonQuantLayer(void) {
     quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
     layer_t *linear = buildLinearStub(symQ);
@@ -133,6 +161,9 @@ void testValidatorAcceptsFloatOnlyModel(void) {
 
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testValidatorAcceptsEmptyModel);
+    RUN_TEST(testValidatorRejectsNullModel);
+    RUN_TEST(testValidatorRejectsNullElementMidArray);
     RUN_TEST(testValidatorRejectsSymProducerFollowedByNonQuantLayer);
     RUN_TEST(testValidatorAcceptsChainWithQuantLayersBetweenProducers);
     RUN_TEST(testValidatorAcceptsSymProducerInLastPosition);

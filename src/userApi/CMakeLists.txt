@@ -4,7 +4,6 @@ add_subdirectory(optimizer)
 add_subdirectory(tensor)
 add_subdirectory(training_loop)
 
-
 add_library(LayerCommon INTERFACE)
 target_include_directories(LayerCommon INTERFACE include)
 

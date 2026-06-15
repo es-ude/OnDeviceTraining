@@ -44,9 +44,10 @@ void quantizationForward(layer_t *layer, tensor_t *inputTensor, tensor_t *output
 void quantizationBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss,
                           tensor_t *propLoss) {
     (void)layer;
-    (void)forwardInput; /* straight-through: dy does not depend on x. The dynamic
-                         * forward never saturates (absmax maps exactly onto qMax),
-                         * so no STE clipping mask is needed (spec D3). */
+    (void)forwardInput; /* straight-through: dy does not depend on x. Both forward
+                         * and backward requant map their own absmax exactly onto
+                         * qMax, so neither pass saturates and no STE clipping mask
+                         * is needed (spec D3). */
     dispatchQuantization(loss, propLoss);
 }
 

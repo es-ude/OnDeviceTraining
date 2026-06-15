@@ -331,7 +331,10 @@ void linearCalcBiasGradsSymInt32(tensor_t *biasGrads, tensor_t *loss) {
     float lossScale = ((symInt32QConfig_t *)loss->quantization->qConfig)->scale;
     float bgScale = ((symInt32QConfig_t *)biasGrads->quantization->qConfig)->scale;
     for (size_t f = 0; f < numFeatures; f++) {
-        int64_t sum = 0;
+        /* int32 accumulator (NO int64 in SYM paths): loss mantissas are
+         * int16-range per the qMaxBits<=16 contract, so the batch sum stays
+         * within int32 for any batch <= 65536 — far beyond any real batch. */
+        int32_t sum = 0;
         for (size_t n = 0; n < batch; n++) {
             sum += l[n * numFeatures + f];
         }

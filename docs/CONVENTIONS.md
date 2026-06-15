@@ -351,18 +351,20 @@ quantized training know this is a known, expected limitation rather than a bug.
   re-derived during accumulation. The coarser resolution (LSB pinned by the
   running scale, which inits to 1.0) is inherent to the scheme.
 
-  **Attribution note (corrected 2026-06-15):** this fixed-scale integer
-  bias-GRADIENT accumulation is ODT's own construction. Deutel et al.
-  (arXiv:2407.10734) DO use a bias — the forward QGEMM/QConv (Fig. 2) adds an
-  int32 bias onto the int32 MAC accumulator at a STATIC scale (s_w*s_x, fixed
-  offline); the bias/forward scales are not dynamic. The paper's dynamic scale
-  re-derivation (Eqs. 6-7) applies only to *weight* tensors during the SGD
-  update, which itself runs in floating-point space. The paper describes NO
-  bias-*gradient* accumulation scheme (its gradient formalization, Eq. 3-4,
-  omits the bias). So our bias-grad accumulation is *consistent with* Deutel's
-  static-scale bias philosophy but is not prescribed by the paper for
-  gradients — do not cite it as "following Deutel" without this nuance. What
-  ODT clearly DOES follow: per-layer error requant (~Eq. 4) and the
+  **Attribution note:** this fixed-scale integer bias-GRADIENT accumulation is
+  ODT's own construction and is NOT prescribed by Deutel et al.
+  (arXiv:2407.10734). The paper's quantization is *dynamic*: scales are
+  re-derived from observed data — weights every SGD update (Eqs. 6-7) — and the
+  method is framed throughout as "dynamic adaptation of the zero-point and
+  scale parameters" (Sec. IV-E). The paper has a forward bias (int32 bias on
+  the int32 MAC accumulator, Fig. 2) but describes no bias-*gradient*
+  accumulation, and it nowhere states that any scale is held static *during
+  training* (the only static/PTQ mention is post-training, at deployment) — so
+  absent evidence to the contrary, assume its scales are dynamic. ODT's
+  fixed-scale bias-grad scheme, which never re-derives the scale during
+  accumulation, therefore DEVIATES from the paper's dynamic scaling; the ODT
+  scheme that corresponds to Deutel is Strategy A (dynamic-rescale, above).
+  What ODT also follows from Deutel: per-layer error requant (~Eq. 4) and the
   float-space SGD step (~Eqs. 5-7). Scheme choice + the init-scale resolution
   limit: #218.
 

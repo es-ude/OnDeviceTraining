@@ -335,9 +335,9 @@ We deliberately ship strategy A now and do **not** adopt B/C or any homegrown
 numerical scheme. The resolution path is a literature review (stochastic-rounding
 accumulators, error-feedback / residual accumulation, higher-precision master
 grads, block/group scaling, …) → implement or improve a **published** technique.
-Tracked as a separate research task. This note is intentionally public (not
-buried in a private spec) so contributors hitting accuracy issues in quantized
-training know this is a known, expected limitation rather than a bug.
+Tracked as a separate research task (#218). This note is intentionally public
+(not buried in a private spec) so contributors hitting accuracy issues in
+quantized training know this is a known, expected limitation rather than a bug.
 
 ### Two accumulation schemes in-tree (both intentional)
 
@@ -348,12 +348,18 @@ training know this is a known, expected limitation rather than a bug.
 - **Fixed-scale integer accumulation** — Linear SYM bias grads
   (`linearCalcBiasGradsSymInt32`): increments are rescaled into the running
   grad's EXISTING scale and added in integer arithmetic; the scale is never
-  re-derived during accumulation (float-free, following M. Deutel, F. Hannig,
-  C. Mutschler, J. Teich, "On-Device Training of Fully Quantized Deep Neural
-  Networks on Cortex-M Microcontrollers", IEEE TCAD, vol. 44, no. 4,
-  pp. 1250-1261, Apr. 2025, doi:10.1109/TCAD.2024.3484354, arXiv:2407.10734 —
-  the same paper #137 builds on). The coarser resolution (LSB pinned by the
-  running scale) is part of that design.
+  re-derived during accumulation. The coarser resolution (LSB pinned by the
+  running scale, which inits to 1.0) is inherent to the scheme.
+
+  **Attribution note (corrected 2026-06-15):** this is ODT's own float-free
+  extension, NOT prescribed by Deutel et al. (arXiv:2407.10734). Verified
+  against the v2 full text: the paper has no bias term, performs gradient
+  descent in floating-point space ("we omit the re-quantization of grad_W
+  since we perform gradient descent locally in floating-point space",
+  Sec. III-A), and re-derives scale/zero-point every update (Eqs. 6-7) — the
+  opposite of fixed-scale integer accumulation. What ODT *does* follow from
+  Deutel: per-layer error requant (~Eq. 4) and the float-space SGD step
+  (~Eqs. 5-7). Scheme choice + the init-scale resolution limit: #218.
 
 This is a research framework: deliberate scheme differences like this one
 MUST be documented here, so experimental design stays separable from

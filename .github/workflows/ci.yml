@@ -148,6 +148,19 @@ jobs:
       - name: Sync Python deps
         run: uv sync
 
+      # Cache the raw dataset downloads (zip + extracted files). The flaky
+      # external hosts (timeseriesclassification.com, archive.ics.uci.edu) are
+      # only hit on a cache miss; _download_if_missing() skips the network call
+      # when the zip is already present. Keyed on the prep scripts so a URL or
+      # download-logic change invalidates the cache and forces a fresh fetch.
+      - name: Cache raw datasets
+        uses: actions/cache@v4
+        with:
+          path: |
+            examples/har_classifier/data/raw
+            examples/ecg_anomaly_ae/data/raw
+          key: datasets-raw-${{ hashFiles('examples/har_classifier/prepare_data.py', 'examples/ecg_anomaly_ae/prepare_data.py') }}
+
       - name: Prepare HAR data
         run: uv run examples/har_classifier/prepare_data.py
 

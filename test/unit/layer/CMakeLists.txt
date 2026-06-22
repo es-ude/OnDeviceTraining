@@ -62,6 +62,7 @@ add_elastic_ai_unit_test(
         ConvTranspose1dKernel
         Kernel
         StorageApi
+        odt_test_death
 )
 add_dependencies(UnitTestConv1d generate_expected_conv1d)
 target_include_directories(UnitTestConv1d PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
@@ -134,6 +135,7 @@ add_elastic_ai_unit_test(
         ConvTranspose1dKernel
         Kernel
         StorageApi
+        odt_test_death
 )
 add_dependencies(UnitTestConv1dTransposed generate_expected_conv1d_transposed)
 target_include_directories(UnitTestConv1dTransposed PRIVATE ${CMAKE_CURRENT_BINARY_DIR})

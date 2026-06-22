@@ -105,6 +105,21 @@ static void conv1dTransposedCalcWeightGradsFloat32(conv1dTransposedConfig_t *cfg
     size_t inChPerGroup = inChannels / groups;
     size_t outChPerGroup = outChannels / groups;
 
+    // Conv1dTransposed weight shape [Cin, Cout/groups, K] -> Cout = dim[1] * groups.
+    size_t weightOutChannels = cfg->weights->param->shape->dimensions[1] * groups;
+    if (batch != lossGrad->shape->dimensions[0]) {
+        PRINT_ERROR("Conv1dTransposed backward (weightGrad): lossGrad batch (%zu) does not "
+                    "match forwardInput batch (%zu)",
+                    lossGrad->shape->dimensions[0], batch);
+        exit(1);
+    }
+    if (outChannels != weightOutChannels) {
+        PRINT_ERROR("Conv1dTransposed backward (weightGrad): lossGrad outChannels (%zu) does "
+                    "not match weight Cout (%zu)",
+                    outChannels, weightOutChannels);
+        exit(1);
+    }
+
     long long outputLengthSigned = (long long)outputLength;
     long long dilation = (long long)cfg->kernel->dilation;
     size_t stride = cfg->kernel->stride;
@@ -148,6 +163,14 @@ static void conv1dTransposedCalcBiasGradsFloat32(conv1dTransposedConfig_t *cfg,
     size_t outChannels = lossGrad->shape->dimensions[1];
     size_t outputLength = lossGrad->shape->dimensions[2];
 
+    size_t biasOutChannels = cfg->bias->param->shape->dimensions[0];
+    if (outChannels != biasOutChannels) {
+        PRINT_ERROR("Conv1dTransposed backward (biasGrad): lossGrad outChannels (%zu) does not "
+                    "match bias Cout (%zu)",
+                    outChannels, biasOutChannels);
+        exit(1);
+    }
+
     float const *gyArr = (float const *)lossGrad->data;
     float *gbArr = (float *)cfg->bias->grad->data;
 
@@ -183,6 +206,21 @@ void conv1dTransposedCalcWeightGradsSymInt32(conv1dTransposedConfig_t *cfg, tens
     size_t groups = cfg->groups;
     size_t inChPerGroup = inChannels / groups;
     size_t outChPerGroup = outChannels / groups;
+
+    // Conv1dTransposed weight shape [Cin, Cout/groups, K] -> Cout = dim[1] * groups.
+    size_t weightOutChannels = cfg->weights->param->shape->dimensions[1] * groups;
+    if (batch != lossGrad->shape->dimensions[0]) {
+        PRINT_ERROR("Conv1dTransposed backward (weightGrad): lossGrad batch (%zu) does not "
+                    "match forwardInput batch (%zu)",
+                    lossGrad->shape->dimensions[0], batch);
+        exit(1);
+    }
+    if (outChannels != weightOutChannels) {
+        PRINT_ERROR("Conv1dTransposed backward (weightGrad): lossGrad outChannels (%zu) does "
+                    "not match weight Cout (%zu)",
+                    outChannels, weightOutChannels);
+        exit(1);
+    }
 
     float inScale = ((symInt32QConfig_t *)forwardInput->quantization->qConfig)->scale;
     float lossScale = ((symInt32QConfig_t *)lossGrad->quantization->qConfig)->scale;
@@ -247,6 +285,14 @@ void conv1dTransposedCalcBiasGradsSymInt32(conv1dTransposedConfig_t *cfg, tensor
     size_t batch = lossGrad->shape->dimensions[0];
     size_t outChannels = lossGrad->shape->dimensions[1];
     size_t outputLength = lossGrad->shape->dimensions[2];
+
+    size_t biasOutChannels = cfg->bias->param->shape->dimensions[0];
+    if (outChannels != biasOutChannels) {
+        PRINT_ERROR("Conv1dTransposed backward (biasGrad): lossGrad outChannels (%zu) does not "
+                    "match bias Cout (%zu)",
+                    outChannels, biasOutChannels);
+        exit(1);
+    }
 
     int32_t const *gyArr = (int32_t const *)lossGrad->data;
     tensor_t *biasGrad = cfg->bias->grad;

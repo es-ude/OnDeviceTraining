@@ -24,6 +24,12 @@ cmake --build --preset examples --target train_c_<name>
 uv run python examples/<name>/compare.py
 ```
 
+Each `train_c_<name>` binary also has a **bit-parity** mode: run it with
+`BIT_PARITY=1` and it loads the PyTorch reference weights (instead of training
+from scratch) and emits predictions that must match PyTorch exactly. This is
+the deterministic check CI runs; see each example's README for the precise
+`compare_predictions.py` invocation.
+
 The C-side executables only build when configured with the `examples`
 preset (`BUILD_EXAMPLES=ON`); the default `unit_test_*` presets do not
 build them.

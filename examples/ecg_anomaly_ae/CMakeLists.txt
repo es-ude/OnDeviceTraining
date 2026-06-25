@@ -10,11 +10,14 @@ target_link_libraries(train_c_ecg_anomaly_ae PRIVATE
 
         Conv1dApi
         Conv1d
+
+        Conv1dTransposedApi
         Conv1dTransposed
 
         ReluApi
         Relu
 
+        Pool1dApi
         MaxPool1d
         AvgPool1d
 
@@ -38,6 +41,12 @@ target_link_libraries(train_c_ecg_anomaly_ae PRIVATE
         SgdApi
 
         InferenceApi
+
+        StateDictApi
+        LayerWeightsApi
+        LayerQuant
+        LayerCommon
+        Distributions
 
         Common
         StorageApi

@@ -20,6 +20,7 @@ target_link_libraries(train_c_har_classifier PRIVATE
         FlattenApi
         Flatten
 
+        Pool1dApi
         MaxPool1d
         AvgPool1d
 
@@ -46,6 +47,12 @@ target_link_libraries(train_c_har_classifier PRIVATE
         SgdApi
 
         InferenceApi
+
+        StateDictApi
+        LayerWeightsApi
+        LayerQuant
+        LayerCommon
+        Distributions
 
         Common
         StorageApi

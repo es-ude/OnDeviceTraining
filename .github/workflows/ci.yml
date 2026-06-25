@@ -176,29 +176,29 @@ jobs:
       - name: Configure
         run: cmake --preset examples
 
-      - name: Build v2 binaries
+      - name: Build example binaries
         run: |
-          cmake --build --preset examples --target train_c_har_classifier_v2
-          cmake --build --preset examples --target train_c_ecg_anomaly_ae_v2
+          cmake --build --preset examples --target train_c_har_classifier
+          cmake --build --preset examples --target train_c_ecg_anomaly_ae
 
-      - name: Run HAR v2 in BIT_PARITY mode
-        run: BIT_PARITY=1 build/examples/examples/har_classifier_v2/train_c_har_classifier_v2
+      - name: Run HAR in BIT_PARITY mode
+        run: BIT_PARITY=1 build/examples/examples/har_classifier/train_c_har_classifier
 
-      - name: Run ECG v2 in BIT_PARITY mode
-        run: BIT_PARITY=1 build/examples/examples/ecg_anomaly_ae_v2/train_c_ecg_anomaly_ae_v2
+      - name: Run ECG in BIT_PARITY mode
+        run: BIT_PARITY=1 build/examples/examples/ecg_anomaly_ae/train_c_ecg_anomaly_ae
 
       - name: Diff HAR predictions (int32, exact match required)
         run: |
           uv run examples/_shared/compare_predictions.py \
             --pytorch examples/har_classifier/outputs/pytorch_predictions.npy \
-            --c examples/har_classifier_v2/outputs/c_predictions.npy \
+            --c examples/har_classifier/outputs/c_predictions.npy \
             --dtype int32
 
       - name: Diff ECG reconstructions (float32, allclose)
         run: |
           uv run examples/_shared/compare_predictions.py \
             --pytorch examples/ecg_anomaly_ae/outputs/pytorch_reconstructions.npy \
-            --c examples/ecg_anomaly_ae_v2/outputs/c_reconstructions.npy \
+            --c examples/ecg_anomaly_ae/outputs/c_reconstructions.npy \
             --dtype float32 \
             --rtol 1e-4 \
             --atol 1e-5

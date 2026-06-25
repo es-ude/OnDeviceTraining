@@ -97,7 +97,7 @@ in
 					echo "$matches"
 					exit 1
 				fi
-				find src test example \( -name '*.c' -o -name '*.h' \) -print0 \
+				find src test examples \( -name '*.c' -o -name '*.h' \) -print0 \
 					| xargs -0 clang-format --dry-run -Werror
 				CC=gcc cmake --preset unit_test
 				cmake --build --preset unit_test

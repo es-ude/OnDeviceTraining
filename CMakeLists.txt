@@ -39,7 +39,6 @@ if(ODT_TOP_LEVEL_PROJECT)
     add_ctest()
 
     add_subdirectory(test/unit)
-    add_subdirectory(example)
     if(BUILD_EXAMPLES)
         add_subdirectory(examples)
     endif()

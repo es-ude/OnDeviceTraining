@@ -6,7 +6,6 @@
 #include "Common.h"
 #include "Conv1dTransposed.h"
 #include "Conv1dTransposedApi.h"
-#include "Distributions.h"
 #include "Kernel.h"
 #include "Layer.h"
 #include "LayerCommon.h"
@@ -44,6 +43,7 @@ static shape_t *buildOwnedShape(const size_t *srcDims, size_t numberOfDims) {
 
 static parameter_t *allocateConv1dTransposedWeights(size_t inChannels, size_t outChannels,
                                                     size_t groups, size_t kernelSize,
+                                                    weightInit_t weightInit,
                                                     quantization_t *storageQ,
                                                     quantization_t *gradQ) {
     /* Conv1dTransposed weight shape: [inChannels, outChannels/groups, kernelSize].
@@ -65,25 +65,24 @@ static parameter_t *allocateConv1dTransposedWeights(size_t inChannels, size_t ou
     shape_t *shape = buildOwnedShape((size_t[]){inChannels, outPerGroup, kernelSize}, 3);
     tensor_t *paramTensor = initTensor(shape, getQLike(storageQ), NULL);
 
-    if (storageQ->type != FLOAT32) {
-        PRINT_ERROR("conv1dTransposedLayerInit: KAIMING_UNIFORM init currently requires FLOAT32 "
-                    "weight storage (Issue C will lift this limit)");
-        exit(1);
-    }
-    distribution_t dist = {
-        .type = KAIMING_UNIFORM,
-        .params.kaiming = {.gain = 1.4142135623730951f, .fanMode = outPerGroup * kernelSize},
-    };
-    initDistribution(paramTensor, &dist);
+    /* ConvTranspose weight layout [inChannels, outPerGroup, kernelSize]:
+     * PyTorch fan_in = weight.size(1)*k = outPerGroup*kernelSize,
+     *         fan_out = weight.size(0)*k = inChannels*kernelSize. */
+    size_t fanIn = outPerGroup * kernelSize;
+    size_t fanOut = inChannels * kernelSize;
+    initWeightTensor(paramTensor, weightInit, fanIn, fanOut);
 
     tensor_t *gradTensor = gradInit(paramTensor, gradQ, NULL);
     return parameterInit(paramTensor, gradTensor);
 }
 
-static parameter_t *allocateConv1dTransposedBias(size_t outChannels, quantization_t *storageQ,
-                                                 quantization_t *gradQ) {
+static parameter_t *allocateConv1dTransposedBias(size_t outChannels, size_t fanIn,
+                                                 quantization_t *storageQ, quantization_t *gradQ) {
+    /* PyTorch draws bias from uniform(+/- 1/sqrt(fan_in)) using the WEIGHT's
+     * fan_in (= outPerGroup*kernelSize). */
     shape_t *shape = buildOwnedShape((size_t[]){outChannels}, 1);
     tensor_t *paramTensor = initTensor(shape, getQLike(storageQ), NULL);
+    initBiasTensor(paramTensor, fanIn);
     tensor_t *gradTensor = gradInit(paramTensor, gradQ, NULL);
     return parameterInit(paramTensor, gradTensor);
 }
@@ -150,11 +149,14 @@ static layer_t *buildConv1dTransposedLayerSkeleton(conv1dTransposedInit_t *init,
     layer->config = layerCfg;
 
     cfg->kernel = buildConv1dTransposedKernel(init);
+    size_t fanIn = (init->outChannels / groups) * init->kernelSize;
     quantization_t *gradQ = quantizationInitFloat(); /* Conv1dTransposed backward is FLOAT32-only */
     cfg->weights = allocateConv1dTransposedWeights(init->inChannels, init->outChannels, groups,
-                                                   init->kernelSize, lq->weightStorage, gradQ);
-    cfg->bias =
-        hasBias ? allocateConv1dTransposedBias(init->outChannels, lq->biasStorage, gradQ) : NULL;
+                                                   init->kernelSize, init->weightInit,
+                                                   lq->weightStorage, gradQ);
+    cfg->bias = hasBias
+                    ? allocateConv1dTransposedBias(init->outChannels, fanIn, lq->biasStorage, gradQ)
+                    : NULL;
     freeQuantization(gradQ);
     cfg->groups = groups;
     cfg->outputPadding = init->outputPadding;

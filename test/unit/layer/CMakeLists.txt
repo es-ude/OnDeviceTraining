@@ -80,6 +80,8 @@ add_elastic_ai_unit_test(
         Rounding
         StorageApi
         Add
+        Distributions
+        RNG
         SgdApi
         Sgd
         Optimizer

@@ -4,7 +4,6 @@
 #include <stdlib.h>
 
 #include "Common.h"
-#include "Distributions.h"
 #include "Layer.h"
 #include "LayerCommon.h"
 #include "LayerQuant.h"
@@ -98,39 +97,30 @@ static shape_t *buildOwnedShape(const size_t *srcDims, size_t numberOfDims) {
 }
 
 static parameter_t *allocateLinearWeights(size_t inFeatures, size_t outFeatures,
-                                          quantization_t *storageQ, quantization_t *gradQ) {
+                                          weightInit_t weightInit, quantization_t *storageQ,
+                                          quantization_t *gradQ) {
     /* Weight tensor: shape [outFeatures, inFeatures]. The tensor takes ownership
      * of `shape` and `quantization`, so we clone the borrowed storageQ via
      * getQLike to avoid tying the tensor's lifetime to the caller's quant. */
     shape_t *shape = buildOwnedShape((size_t[]){outFeatures, inFeatures}, 2);
     tensor_t *paramTensor = initTensor(shape, getQLike(storageQ), NULL);
 
-    /* PyTorch-aligned default: Kaiming uniform with fan_in mode.
-     * Note: PyTorch's actual default uses a=sqrt(5); bit-identical parity
-     * requires Issue C (distribution parametrization). The current
-     * tensorInitWithDistribution gain (sqrtf(2.0f)) is preserved here. */
-    if (storageQ->type != FLOAT32) {
-        PRINT_ERROR("linearLayerInit: KAIMING_UNIFORM init currently requires FLOAT32 "
-                    "weight storage (Issue C will lift this limit)");
-        exit(1);
-    }
-    distribution_t dist = {
-        .type = KAIMING_UNIFORM,
-        .params.kaiming = {.gain = 1.4142135623730951f /* sqrtf(2.0f) */, .fanMode = inFeatures},
-    };
-    initDistribution(paramTensor, &dist);
+    /* Linear: fan_in = inFeatures, fan_out = outFeatures (PyTorch
+     * _calculate_fan_in_and_fan_out for a 2-D weight). Default scheme is
+     * PyTorch parity: uniform(+/- 1/sqrt(fan_in)). */
+    initWeightTensor(paramTensor, weightInit, inFeatures, outFeatures);
 
     tensor_t *gradTensor = gradInit(paramTensor, gradQ, NULL);
     return parameterInit(paramTensor, gradTensor);
 }
 
-static parameter_t *allocateLinearBias(size_t outFeatures, quantization_t *storageQ,
+static parameter_t *allocateLinearBias(size_t outFeatures, size_t fanIn, quantization_t *storageQ,
                                        quantization_t *gradQ) {
-    /* Bias tensor: shape [outFeatures]. Initialized to ZEROS, which initTensor
-     * already provides (reserveMemory == calloc), so no fill is needed. */
+    /* Bias tensor: shape [outFeatures]. PyTorch draws bias from
+     * uniform(+/- 1/sqrt(fan_in)) using the WEIGHT's fan_in (= inFeatures). */
     shape_t *shape = buildOwnedShape((size_t[]){outFeatures}, 1);
     tensor_t *paramTensor = initTensor(shape, getQLike(storageQ), NULL);
-    /* No initDistribution(ZEROS) call needed: data is already zero from calloc. */
+    initBiasTensor(paramTensor, fanIn);
 
     tensor_t *gradTensor = gradInit(paramTensor, gradQ, NULL);
     return parameterInit(paramTensor, gradTensor);
@@ -187,10 +177,11 @@ layer_t *linearLayerInit(linearInit_t *init, layerQuant_t *lq) {
     layerCfg->linear = cfg;
     layer->config = layerCfg;
 
-    cfg->weights = allocateLinearWeights(init->inFeatures, init->outFeatures, lq->weightStorage,
-                                         lq->backwardMath);
-    cfg->bias =
-        hasBias ? allocateLinearBias(init->outFeatures, lq->biasStorage, lq->backwardMath) : NULL;
+    cfg->weights = allocateLinearWeights(init->inFeatures, init->outFeatures, init->weightInit,
+                                         lq->weightStorage, lq->backwardMath);
+    cfg->bias = hasBias ? allocateLinearBias(init->outFeatures, init->inFeatures, lq->biasStorage,
+                                             lq->backwardMath)
+                        : NULL;
 
     /* Borrowing: store the four quant pointers verbatim, no copy.
      * Per design spec section 4: collapse to a single math Q for forward and
@@ -223,10 +214,11 @@ layer_t *linearLayerInitOwning(linearInit_t *init, layerQuant_t *lq) {
      * T12) internally clone via getQLike, so the parameter tensors hold their
      * own quantization_t copies — the caller can immediately drop the lq's
      * weightStorage/biasStorage pointers without breaking the parameters. */
-    cfg->weights = allocateLinearWeights(init->inFeatures, init->outFeatures, lq->weightStorage,
-                                         lq->backwardMath);
-    cfg->bias =
-        hasBias ? allocateLinearBias(init->outFeatures, lq->biasStorage, lq->backwardMath) : NULL;
+    cfg->weights = allocateLinearWeights(init->inFeatures, init->outFeatures, init->weightInit,
+                                         lq->weightStorage, lq->backwardMath);
+    cfg->bias = hasBias ? allocateLinearBias(init->outFeatures, init->inFeatures, lq->biasStorage,
+                                             lq->backwardMath)
+                        : NULL;
 
     /* Owning: deep-copy each of the four math quantizations.  Always allocate
      * four separate copies, even if multiple lq slots pointed to the same

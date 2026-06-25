@@ -4,8 +4,14 @@ add_subdirectory(optimizer)
 add_subdirectory(tensor)
 add_subdirectory(training_loop)
 
-add_library(LayerCommon INTERFACE)
-target_include_directories(LayerCommon INTERFACE include)
+add_library(LayerCommon LayerCommon.c)
+target_include_directories(LayerCommon PUBLIC include)
+target_link_libraries(LayerCommon PRIVATE
+        Common
+        Distributions
+        Tensor
+        TensorApi
+)
 
 add_library(InferenceApi InferenceApi.c)
 target_include_directories(InferenceApi PUBLIC include)

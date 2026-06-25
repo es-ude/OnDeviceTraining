@@ -9,6 +9,7 @@
 #include "LinearApi.h"
 #include "Optimizer.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "Rounding.h"
 #include "SgdApi.h"
 #include "StorageApi.h"
@@ -1361,6 +1362,99 @@ void testLinearSymInt32GradAccumulatesOverTwoMicrobatchesAndSteps(void) {
                              "SYM_INT32 optimizer step left a non-finite weight param");
 }
 
+/*! Returns the max |value| over a FLOAT32 tensor's data buffer. */
+static float linearMaxAbsFloat(const tensor_t *t) {
+    const float *vals = (const float *)t->data;
+    size_t n = t->shape->dimensions[0];
+    for (size_t d = 1; d < t->shape->numberOfDimensions; d++) {
+        n *= t->shape->dimensions[d];
+    }
+    float m = 0.0f;
+    for (size_t i = 0; i < n; i++) {
+        float a = fabsf(vals[i]);
+        if (a > m) {
+            m = a;
+        }
+    }
+    return m;
+}
+
+void testLinearLayerInitDefaultWeightsWithinPyTorchBound(void) {
+    /* PyTorch default Linear init: weight ~ U(-1/sqrt(fan_in), +1/sqrt(fan_in)),
+     * bias ~ U(-1/sqrt(fan_in), +1/sqrt(fan_in)); fan_in = inFeatures. */
+    const size_t inFeatures = 256, outFeatures = 64;
+    const float bound = 1.0f / sqrtf((float)inFeatures);
+
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+
+    rngSetSeed(7);
+    layer_t *layer = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = inFeatures,
+            .outFeatures = outFeatures,
+            .bias = BIAS_TRUE,
+        },
+        &lq);
+
+    linearConfig_t *cfg = layer->config->linear;
+    float weightMaxAbs = linearMaxAbsFloat(cfg->weights->param);
+    float biasMaxAbs = linearMaxAbsFloat(cfg->bias->param);
+
+    freeLinearLayer(layer);
+    freeQuantization(q);
+
+    TEST_ASSERT_TRUE_MESSAGE(weightMaxAbs <= bound * 1.001f,
+                             "Linear default weights exceed PyTorch bound 1/sqrt(fan_in)");
+    TEST_ASSERT_TRUE_MESSAGE(weightMaxAbs >= bound * 0.85f,
+                             "Linear default weights far below PyTorch bound -> wrong scale");
+    TEST_ASSERT_TRUE_MESSAGE(biasMaxAbs > 0.0f,
+                             "Linear default bias is zero (PyTorch draws it from a uniform)");
+    TEST_ASSERT_TRUE_MESSAGE(biasMaxAbs <= bound * 1.001f,
+                             "Linear default bias exceeds PyTorch bound 1/sqrt(fan_in)");
+}
+
+void testLinearLayerInitXavierUniformOverrideUsesGlorotBound(void) {
+    /* Explicit weightInit = {INIT_XAVIER_UNIFORM} -> Glorot, default gain 1:
+     * xavierUniform(1, fan_in, fan_out) = uniform(+/- sqrt(6/(fan_in+fan_out))).
+     * Distinct from the default bound 1/sqrt(fan_in). Bias stays PyTorch
+     * default uniform(+/- 1/sqrt(fan_in)). */
+    const size_t inFeatures = 256, outFeatures = 64;
+    const float defaultBound = 1.0f / sqrtf((float)inFeatures);
+    const float xavierBound = sqrtf(6.0f / (float)(inFeatures + outFeatures));
+
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+
+    rngSetSeed(7);
+    layer_t *layer = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = inFeatures,
+            .outFeatures = outFeatures,
+            .bias = BIAS_TRUE,
+            .weightInit = {INIT_XAVIER_UNIFORM},
+        },
+        &lq);
+
+    linearConfig_t *cfg = layer->config->linear;
+    float weightMaxAbs = linearMaxAbsFloat(cfg->weights->param);
+    float biasMaxAbs = linearMaxAbsFloat(cfg->bias->param);
+
+    freeLinearLayer(layer);
+    freeQuantization(q);
+
+    /* Xavier bound here (~0.137) is wider than the default bound (~0.0625):
+     * confirms the override changed the scale. */
+    TEST_ASSERT_TRUE_MESSAGE(weightMaxAbs > defaultBound,
+                             "Xavier override did not change weights away from the default bound");
+    TEST_ASSERT_TRUE_MESSAGE(weightMaxAbs <= xavierBound * 1.001f,
+                             "Xavier weights exceed the sqrt(6/(fan_in+fan_out)) bound");
+    TEST_ASSERT_TRUE_MESSAGE(biasMaxAbs <= defaultBound * 1.001f,
+                             "Bias must stay PyTorch default uniform regardless of weight scheme");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLinearForwardFloat);
@@ -1386,5 +1480,7 @@ int main(void) {
 
     RUN_TEST(testLinearLayerInitOwningDeepCopiesQuantizations);
     RUN_TEST(testLinearLayerInitOwningFreesAllAllocationsWithoutLeak);
+    RUN_TEST(testLinearLayerInitDefaultWeightsWithinPyTorchBound);
+    RUN_TEST(testLinearLayerInitXavierUniformOverrideUsesGlorotBound);
     return UNITY_END();
 }

@@ -6,7 +6,6 @@
 #include "Common.h"
 #include "Conv1d.h"
 #include "Conv1dApi.h"
-#include "Distributions.h"
 #include "Kernel.h"
 #include "Layer.h"
 #include "LayerCommon.h"
@@ -87,8 +86,8 @@ static shape_t *buildOwnedShape(const size_t *srcDims, size_t numberOfDims) {
 }
 
 static parameter_t *allocateConv1dWeights(size_t outChannels, size_t inChannels, size_t groups,
-                                          size_t kernelSize, quantization_t *storageQ,
-                                          quantization_t *gradQ) {
+                                          size_t kernelSize, weightInit_t weightInit,
+                                          quantization_t *storageQ, quantization_t *gradQ) {
     /* Conv1d weight shape: [outChannels, inChannels/groups, kernelSize].
      * Per Conv1d.h:11. */
     if (inChannels % groups != 0) {
@@ -106,31 +105,23 @@ static parameter_t *allocateConv1dWeights(size_t outChannels, size_t inChannels,
     shape_t *shape = buildOwnedShape((size_t[]){outChannels, inPerGroup, kernelSize}, 3);
     tensor_t *paramTensor = initTensor(shape, getQLike(storageQ), NULL);
 
-    /* PyTorch-aligned default: Kaiming uniform with fan_in mode.
-     * Note: PyTorch's actual default uses a=sqrt(5); bit-identical parity
-     * requires Issue C (distribution parametrization). */
-    if (storageQ->type != FLOAT32) {
-        PRINT_ERROR("conv1dLayerInit: KAIMING_UNIFORM init currently requires FLOAT32 "
-                    "weight storage (Issue C will lift this limit)");
-        exit(1);
-    }
-    distribution_t dist = {
-        .type = KAIMING_UNIFORM,
-        .params.kaiming = {.gain = 1.4142135623730951f /* sqrtf(2.0f) */,
-                           .fanMode = inPerGroup * kernelSize},
-    };
-    initDistribution(paramTensor, &dist);
+    /* fan_in = inPerGroup*kernelSize; fan_out = outPerGroup*kernelSize
+     * (PyTorch _calculate_fan_in_and_fan_out for the Conv1d weight layout). */
+    size_t fanIn = inPerGroup * kernelSize;
+    size_t fanOut = (outChannels / groups) * kernelSize;
+    initWeightTensor(paramTensor, weightInit, fanIn, fanOut);
 
     tensor_t *gradTensor = gradInit(paramTensor, gradQ, NULL);
     return parameterInit(paramTensor, gradTensor);
 }
 
-static parameter_t *allocateConv1dBias(size_t outChannels, quantization_t *storageQ,
+static parameter_t *allocateConv1dBias(size_t outChannels, size_t fanIn, quantization_t *storageQ,
                                        quantization_t *gradQ) {
-    /* Bias tensor: shape [outChannels]. Zero-initialized via calloc (reserveMemory). */
+    /* Bias tensor: shape [outChannels]. PyTorch draws bias from
+     * uniform(+/- 1/sqrt(fan_in)) using the WEIGHT's fan_in. */
     shape_t *shape = buildOwnedShape((size_t[]){outChannels}, 1);
     tensor_t *paramTensor = initTensor(shape, getQLike(storageQ), NULL);
-    /* No initDistribution(ZEROS) — calloc already gave us zeros. */
+    initBiasTensor(paramTensor, fanIn);
 
     tensor_t *gradTensor = gradInit(paramTensor, gradQ, NULL);
     return parameterInit(paramTensor, gradTensor);
@@ -211,10 +202,13 @@ layer_t *conv1dLayerInit(conv1dInit_t *init, layerQuant_t *lq) {
     layer->config = layerCfg;
 
     cfg->kernel = buildConv1dKernel(init);
+    size_t fanIn = (init->inChannels / groups) * init->kernelSize;
     quantization_t *gradQ = quantizationInitFloat(); /* Conv1d backward is FLOAT32-only */
-    cfg->weights = allocateConv1dWeights(init->outChannels, init->inChannels, groups,
-                                         init->kernelSize, lq->weightStorage, gradQ);
-    cfg->bias = hasBias ? allocateConv1dBias(init->outChannels, lq->biasStorage, gradQ) : NULL;
+    cfg->weights =
+        allocateConv1dWeights(init->outChannels, init->inChannels, groups, init->kernelSize,
+                              init->weightInit, lq->weightStorage, gradQ);
+    cfg->bias =
+        hasBias ? allocateConv1dBias(init->outChannels, fanIn, lq->biasStorage, gradQ) : NULL;
     freeQuantization(gradQ);
     cfg->groups = groups;
     cfg->forwardQ = lq->forwardMath;
@@ -245,10 +239,13 @@ layer_t *conv1dLayerInitOwning(conv1dInit_t *init, layerQuant_t *lq) {
     /* allocateConv1dWeights / allocateConv1dBias internally clone via getQLike,
      * so the parameter tensors own their quantization_t — caller can drop
      * lq->weightStorage / lq->biasStorage immediately. */
+    size_t fanIn = (init->inChannels / groups) * init->kernelSize;
     quantization_t *gradQ = quantizationInitFloat(); /* Conv1d backward is FLOAT32-only */
-    cfg->weights = allocateConv1dWeights(init->outChannels, init->inChannels, groups,
-                                         init->kernelSize, lq->weightStorage, gradQ);
-    cfg->bias = hasBias ? allocateConv1dBias(init->outChannels, lq->biasStorage, gradQ) : NULL;
+    cfg->weights =
+        allocateConv1dWeights(init->outChannels, init->inChannels, groups, init->kernelSize,
+                              init->weightInit, lq->weightStorage, gradQ);
+    cfg->bias =
+        hasBias ? allocateConv1dBias(init->outChannels, fanIn, lq->biasStorage, gradQ) : NULL;
     freeQuantization(gradQ);
     cfg->groups = groups;
 

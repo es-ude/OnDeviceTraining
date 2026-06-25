@@ -106,6 +106,8 @@ add_elastic_ai_unit_test(
         Quantization
         Rounding
         Conv1d
+        Distributions
+        RNG
         Kernel
         Tensor
         TensorApi
@@ -121,6 +123,8 @@ add_elastic_ai_unit_test(
         Quantization
         Rounding
         Conv1dTransposed
+        Distributions
+        RNG
         Kernel
         Tensor
         TensorApi

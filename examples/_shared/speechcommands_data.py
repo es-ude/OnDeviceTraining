@@ -21,10 +21,10 @@ per the repo's data-shape convention.
 """
 from __future__ import annotations
 
+import wave
 from pathlib import Path
 
 import numpy as np
-import torch
 from torchaudio.datasets import SPEECHCOMMANDS
 
 SAMPLE_RATE = 16000
@@ -47,14 +47,40 @@ def _fix_length(wav: np.ndarray) -> np.ndarray:
     return out
 
 
-def _collect_by_label(ds) -> dict[str, list[np.ndarray]]:
-    """Group every clip in a subset by its label string, length-fixed float32."""
-    by_label: dict[str, list[np.ndarray]] = {}
-    for waveform, sample_rate, label, *_ in ds:
+def _read_wav_int16(path) -> np.ndarray:
+    """Read a 16 kHz mono 16-bit PCM .wav as float32 in [-1, 1] (stdlib only).
+
+    torchaudio 2.11 (maintenance mode) routes its dataset decode through
+    torchcodec, which needs a system FFmpeg. We sidestep that with the stdlib
+    `wave` reader the spec blessed as the fallback: int16 PCM / 32768 reproduces
+    exactly what torchaudio/torchcodec would yield from these clips.
+    """
+    with wave.open(str(path), "rb") as w:
+        frames = w.readframes(w.getnframes())
+    return np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+
+
+def _paths_by_label(ds) -> dict[str, list[Path]]:
+    """Map each label string to its list of absolute .wav paths for a subset.
+
+    Uses ds.get_metadata (which does NOT decode audio, so no torchcodec / FFmpeg
+    dependency); the metadata path is relative to ds._archive (pinned to
+    torchaudio 2.11's SPEECHCOMMANDS layout). Returning paths instead of decoded
+    waveforms lets the 6-class build decode only the clips it keeps, bounding
+    peak memory (the CI runner has ~7 GB; decoding all 35 words would exceed it).
+    """
+    by_label: dict[str, list[Path]] = {}
+    archive = Path(ds._archive)
+    for i in range(len(ds)):
+        relpath, sample_rate, label, *_ = ds.get_metadata(i)
         assert sample_rate == SAMPLE_RATE, sample_rate
-        wav = _fix_length(waveform.squeeze(0).numpy().astype(np.float32))
-        by_label.setdefault(label, []).append(wav)
+        by_label.setdefault(label, []).append(archive / relpath)
     return by_label
+
+
+def _decode(paths: list[Path]) -> list[np.ndarray]:
+    """Decode + length-fix a list of .wav paths to float32 [16000] waveforms."""
+    return [_fix_length(_read_wav_int16(p)) for p in paths]
 
 
 def _stack(clips: list[np.ndarray], label_id: int) -> tuple[np.ndarray, np.ndarray]:
@@ -63,14 +89,13 @@ def _stack(clips: list[np.ndarray], label_id: int) -> tuple[np.ndarray, np.ndarr
     return x, y
 
 
-def _build_split_6(by_label, split_index: int) -> tuple[np.ndarray, np.ndarray]:
+def _build_split_6(paths_by_label, split_index: int) -> tuple[np.ndarray, np.ndarray]:
     xs, ys = [], []
     for label_id, kw in enumerate(KEYWORDS_6):
-        clips = by_label.get(kw, [])
-        x, y = _stack(clips, label_id)
+        x, y = _stack(_decode(paths_by_label.get(kw, [])), label_id)
         xs.append(x)
         ys.append(y)
-    n_per = int(round(np.mean([len(by_label.get(kw, [])) for kw in KEYWORDS_6])))
+    n_per = int(round(np.mean([len(paths_by_label.get(kw, [])) for kw in KEYWORDS_6])))
 
     rng = np.random.default_rng(SHUFFLE_SEED + split_index)
     # silence (label 4): synthetic low-amplitude Gaussian noise
@@ -78,23 +103,24 @@ def _build_split_6(by_label, split_index: int) -> tuple[np.ndarray, np.ndarray]:
     silence = np.clip(silence, -1.0, 1.0)
     xs.append(silence[:, None, :])
     ys.append(np.full((n_per,), 4, dtype=np.int32))
-    # unknown (label 5): random draw from the other 31 keywords in THIS split
-    pool = [w for lab, clips in by_label.items() if lab not in KEYWORDS_6 for w in clips]
+    # unknown (label 5): random draw of paths from the other 31 keywords in THIS
+    # split, decoding only the selected clips (memory-bounded).
+    pool = [p for lab, ps in paths_by_label.items() if lab not in KEYWORDS_6 for p in ps]
     idx = rng.choice(len(pool), size=min(n_per, len(pool)), replace=False)
-    unknown = np.stack([pool[i] for i in idx]).astype(np.float32)
+    unknown = np.stack(_decode([pool[i] for i in idx])).astype(np.float32)
     xs.append(unknown[:, None, :])
     ys.append(np.full((unknown.shape[0],), 5, dtype=np.int32))
 
     return np.concatenate(xs, axis=0), np.concatenate(ys, axis=0)
 
 
-def _build_split_35(by_label, keywords_35) -> tuple[np.ndarray, np.ndarray]:
+def _build_split_35(paths_by_label, keywords_35) -> tuple[np.ndarray, np.ndarray]:
     xs, ys = [], []
     for label_id, kw in enumerate(keywords_35):
-        clips = by_label.get(kw, [])
-        if not clips:
+        paths = paths_by_label.get(kw, [])
+        if not paths:
             continue
-        x, y = _stack(clips, label_id)
+        x, y = _stack(_decode(paths), label_id)
         xs.append(x)
         ys.append(y)
     return np.concatenate(xs, axis=0), np.concatenate(ys, axis=0)
@@ -108,7 +134,7 @@ def load_speechcommands(root, num_classes: int) -> dict:
     grouped = {}
     for split, subset in _SUBSETS.items():
         ds = SPEECHCOMMANDS(root=str(root), download=True, subset=subset)
-        grouped[split] = _collect_by_label(ds)
+        grouped[split] = _paths_by_label(ds)
 
     if num_classes == 35:
         keywords_35 = sorted({lab for g in grouped.values() for lab in g})

@@ -163,6 +163,12 @@ jobs:
             examples/mnist_cnn/data/raw
           key: datasets-raw-${{ hashFiles('examples/har_classifier/prepare_data.py', 'examples/ecg_anomaly_ae/prepare_data.py', 'examples/mnist_mlp/prepare_data.py', 'examples/mnist_cnn/prepare_data.py') }}
 
+      - name: Cache SpeechCommands raw download (shared, ~2.3 GB)
+        uses: actions/cache@v4
+        with:
+          path: examples/_shared/data/speech_commands
+          key: speechcommands-raw-${{ hashFiles('examples/_shared/speechcommands_data.py') }}
+
       - name: Prepare HAR data
         run: uv run examples/har_classifier/prepare_data.py
 
@@ -186,6 +192,20 @@ jobs:
 
       - name: Train PyTorch MNIST CNN (produces reference predictions + weights)
         run: uv run examples/mnist_cnn/train_pytorch.py
+
+      - name: Cache kws_mfcc processed data (6-class)
+        id: kws-mfcc-cache
+        uses: actions/cache@v4
+        with:
+          path: examples/kws_mfcc/data/6class
+          key: kws-mfcc-6class-${{ hashFiles('examples/kws_mfcc/prepare_data.py', 'examples/_shared/speechcommands_data.py') }}
+
+      - name: Prepare kws_mfcc data (6-class; only on cache miss)
+        if: steps.kws-mfcc-cache.outputs.cache-hit != 'true'
+        run: uv run examples/kws_mfcc/prepare_data.py
+
+      - name: Train PyTorch kws_mfcc (produces reference predictions + weights)
+        run: uv run examples/kws_mfcc/train_pytorch.py
 
       - name: Configure
         run: cmake --preset examples
@@ -236,6 +256,16 @@ jobs:
           uv run examples/_shared/compare_predictions.py \
             --pytorch examples/mnist_cnn/outputs/pytorch_predictions.npy \
             --c examples/mnist_cnn/outputs/c_predictions.npy \
+            --dtype int32
+
+      - name: Run kws_mfcc in BIT_PARITY mode
+        run: BIT_PARITY=1 build/examples/examples/kws_mfcc/train_c_kws_mfcc
+
+      - name: Diff kws_mfcc predictions (int32, exact match required)
+        run: |
+          uv run examples/_shared/compare_predictions.py \
+            --pytorch examples/kws_mfcc/outputs/6class/pytorch_predictions.npy \
+            --c examples/kws_mfcc/outputs/6class/c_predictions.npy \
             --dtype int32
 
   python-test:

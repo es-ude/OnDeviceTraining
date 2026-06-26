@@ -207,6 +207,20 @@ jobs:
       - name: Train PyTorch kws_mfcc (produces reference predictions + weights)
         run: uv run examples/kws_mfcc/train_pytorch.py
 
+      - name: Cache kws_raw processed data (6-class)
+        id: kws-raw-cache
+        uses: actions/cache@v4
+        with:
+          path: examples/kws_raw/data/6class
+          key: kws-raw-6class-${{ hashFiles('examples/kws_raw/prepare_data.py', 'examples/_shared/speechcommands_data.py') }}
+
+      - name: Prepare kws_raw data (6-class; only on cache miss)
+        if: steps.kws-raw-cache.outputs.cache-hit != 'true'
+        run: uv run examples/kws_raw/prepare_data.py
+
+      - name: Train PyTorch kws_raw (produces reference predictions + weights)
+        run: uv run examples/kws_raw/train_pytorch.py
+
       - name: Configure
         run: cmake --preset examples
 
@@ -266,6 +280,16 @@ jobs:
           uv run examples/_shared/compare_predictions.py \
             --pytorch examples/kws_mfcc/outputs/6class/pytorch_predictions.npy \
             --c examples/kws_mfcc/outputs/6class/c_predictions.npy \
+            --dtype int32
+
+      - name: Run kws_raw in BIT_PARITY mode
+        run: BIT_PARITY=1 build/examples/examples/kws_raw/train_c_kws_raw
+
+      - name: Diff kws_raw predictions (int32, exact match required)
+        run: |
+          uv run examples/_shared/compare_predictions.py \
+            --pytorch examples/kws_raw/outputs/6class/pytorch_predictions.npy \
+            --c examples/kws_raw/outputs/6class/c_predictions.npy \
             --dtype int32
 
   python-test:

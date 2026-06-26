@@ -56,6 +56,10 @@ def _read_wav_int16(path) -> np.ndarray:
     exactly what torchaudio/torchcodec would yield from these clips.
     """
     with wave.open(str(path), "rb") as w:
+        assert w.getnchannels() == 1 and w.getsampwidth() == 2, (
+            f"{path}: expected mono 16-bit PCM, got "
+            f"{w.getnchannels()}ch/{w.getsampwidth() * 8}bit (int16/32768 decode would be wrong)"
+        )
         frames = w.readframes(w.getnframes())
     return np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
 

@@ -176,10 +176,11 @@ jobs:
       - name: Configure
         run: cmake --preset examples
 
-      - name: Build example binaries
-        run: |
-          cmake --build --preset examples --target train_c_har_classifier
-          cmake --build --preset examples --target train_c_ecg_anomaly_ae
+      - name: Build ALL example binaries (rot guard — any broken example fails CI)
+        # Builds the default `all` target so every example executable is compiled,
+        # not just the two run below. Closes the gap that let example/MnistExperiment
+        # (#235) and the legacy v1 trainers silently rot — nothing built them.
+        run: cmake --build --preset examples
 
       - name: Run HAR in BIT_PARITY mode
         run: BIT_PARITY=1 build/examples/examples/har_classifier/train_c_har_classifier

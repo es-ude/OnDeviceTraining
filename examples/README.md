@@ -12,7 +12,8 @@ checking and visualizations.
 | `mnist_cnn/` | MNIST 1D-CNN digit classification | ✅ |
 | `har_classifier/` | UCI HAR 6-class activity classification | Stage 1 |
 | `ecg_anomaly_ae/` | ECG5000 reconstruction-based anomaly detection | Stage 2 ✅ |
-| `kws_classifier/` | SpeechCommands 6-class keyword spotting | Stage 3 (planned) |
+| `kws_mfcc/` | SpeechCommands keyword spotting (MFCC features) | Stage 3 ✅ |
+| `kws_raw/` | SpeechCommands keyword spotting (raw waveform + in-model downsample) | Stage 3 ✅ |
 | `kws_denoising_ae/` | SpeechCommands additive-noise denoising | Stage 4 (planned) |
 
 ## Running an example

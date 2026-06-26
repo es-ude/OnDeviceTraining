@@ -16,7 +16,7 @@ from torchvision import datasets, transforms
 NUM_CLASSES = 10
 
 
-def load_mnist(root, split: str) -> tuple[np.ndarray, np.ndarray]:
+def load_mnist(root: str | Path, split: str) -> tuple[np.ndarray, np.ndarray]:
     assert split in ("train", "test"), split
     ds = datasets.MNIST(
         root=str(root), train=(split == "train"),

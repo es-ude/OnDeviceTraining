@@ -18,6 +18,7 @@
 #include "InferenceApi.h"
 #include "Layer.h"
 #include "LayerCommon.h"
+#include "LayerNormApi.h"
 #include "LayerQuant.h"
 #include "LinearApi.h"
 #include "LossFunction.h"
@@ -36,9 +37,9 @@
 
 #include "npy_writer.h"
 
-#define EPOCHS 15
+#define EPOCHS 20
 #define BATCH 32
-#define LR 0.001f
+#define LR 0.005f
 #define MOMENTUM 0.9f
 #define SEED 42
 #define SHUFFLE_SEED 42
@@ -55,9 +56,9 @@
 #define C3_OUT 64
 #define C3_K 3
 
-/* AvgPool(ds) + 3x(Conv1d+ReLU+MaxPool) + AdaptiveAvgPool + Flatten + Linear + Softmax = 14 layers
- */
-#define MODEL_SIZE 14
+/* AvgPool(ds) + 3x(Conv1d+ReLU+MaxPool) + AdaptiveAvgPool + Flatten + LayerNorm + Linear + Softmax
+ * = 15 layers */
+#define MODEL_SIZE 15
 
 static dataset_t g_trainDataset;
 static dataset_t g_valDataset;
@@ -213,12 +214,17 @@ static void buildModel(layer_t **model, layerQuant_t *lq) {
             .kernelSize = 4, .stride = 4, .inputChannels = C3_OUT, .inputLength = LEN_DS / 16},
         lq);
 
-    /* Rate-agnostic head: AdaptiveAvgPool1d(1) -> Flatten -> Linear -> Softmax. */
+    /* Rate-agnostic head: AdaptiveAvgPool1d(1) -> Flatten -> LayerNorm -> Linear -> Softmax.
+     * LayerNorm(C3_OUT) over the 64 pooled features stabilises raw-model training (mirrors the
+     * PyTorch nn.LayerNorm(64)); eps 1e-5 matches PyTorch's default. */
     model[10] = adaptiveAvgPool1dLayerInit(&(adaptiveAvgPool1dInit_t){.outputSize = 1}, lq);
     model[11] = flattenLayerInit();
-    model[12] =
+    model[12] = layerNormLayerInit(
+        &(layerNormInit_t){.normalizedShape = (size_t[]){C3_OUT}, .numNormDims = 1, .eps = 1e-5f},
+        lq);
+    model[13] =
         linearLayerInit(&(linearInit_t){.inFeatures = C3_OUT, .outFeatures = g_numClasses}, lq);
-    model[13] = softmaxLayerInit(lq);
+    model[14] = softmaxLayerInit(lq);
 }
 
 /* Load PyTorch state_dict from per-layer .npy files written by
@@ -227,11 +233,13 @@ static void buildModel(layer_t **model, layerQuant_t *lq) {
  * Returns 0 on success, non-zero on first missing file. */
 static int loadStateDictFromDir(layer_t **model, const char *weightsDir) {
     char wPath[300], bPath[300];
-    const char *names[4] = {"conv1", "conv2", "conv3", "fc"};
-    tensor_t *w[4] = {0};
-    tensor_t *b[4] = {0};
+    /* Param layers in order: conv1=model[1], conv2=model[4], conv3=model[7],
+     * ln=model[12] (gamma/beta), fc=model[13]. 5 entries. */
+    const char *names[5] = {"conv1", "conv2", "conv3", "ln", "fc"};
+    tensor_t *w[5] = {0};
+    tensor_t *b[5] = {0};
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
         snprintf(wPath, sizeof(wPath), "%s/%s.weight.npy", weightsDir, names[i]);
         snprintf(bPath, sizeof(bPath), "%s/%s.bias.npy", weightsDir, names[i]);
         w[i] = npyLoadFlat(wPath);
@@ -249,10 +257,11 @@ static int loadStateDictFromDir(layer_t **model, const char *weightsDir) {
             {.name = names[1], .weightData = (float *)w[1]->data, .biasData = (float *)b[1]->data},
             {.name = names[2], .weightData = (float *)w[2]->data, .biasData = (float *)b[2]->data},
             {.name = names[3], .weightData = (float *)w[3]->data, .biasData = (float *)b[3]->data},
+            {.name = names[4], .weightData = (float *)w[4]->data, .biasData = (float *)b[4]->data},
         },
-        4);
+        5);
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
         freeTensor(w[i]);
         freeTensor(b[i]);
     }

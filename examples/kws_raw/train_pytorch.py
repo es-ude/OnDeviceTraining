@@ -2,8 +2,9 @@
 
 Input: raw [1,16000] waveform from prepare_data.py. The model downsamples
 16 kHz -> 1 kHz via a front AvgPool1d(K=16), then 3 Conv blocks + a rate-agnostic
-AdaptiveAvgPool1d(1) head. Output: logs/<n>class/pytorch.json +
-outputs/<n>class/pytorch_predictions.npy + weights/<n>class/{conv1,conv2,conv3,fc}.{weight,bias}.npy
+AdaptiveAvgPool1d(1) head + LayerNorm(64). Output: logs/<n>class/pytorch.json +
+outputs/<n>class/pytorch_predictions.npy +
+weights/<n>class/{conv1,conv2,conv3,ln,fc}.{weight,bias}.npy
 for the C-side BIT_PARITY mode. num_classes from KWS_CLASSES (default 6).
 """
 from __future__ import annotations
@@ -33,9 +34,9 @@ LOGS = HERE / "logs" / TAG
 OUTPUTS = HERE / "outputs" / TAG
 WEIGHTS = HERE / "weights" / TAG
 
-EPOCHS = 15
+EPOCHS = 20
 BATCH = 32
-LR = 0.001
+LR = 0.005
 MOMENTUM = 0.9
 
 
@@ -70,6 +71,10 @@ class KwsRawCnn(nn.Module):
         self.conv1 = nn.Conv1d(1, 16, kernel_size=3, padding=1)  # SAME (K odd, stride 1)
         self.conv2 = nn.Conv1d(16, 32, kernel_size=3, padding=1)
         self.conv3 = nn.Conv1d(32, 64, kernel_size=3, padding=1)
+        # LayerNorm over the 64 pooled features (rate-agnostic, 1-D). Stabilises
+        # training of the raw model, which otherwise stalls at random init; the
+        # C framework has bit-parity LayerNorm so the gate is preserved.
+        self.ln = nn.LayerNorm(64)
         self.fc = nn.Linear(64, num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -82,6 +87,7 @@ class KwsRawCnn(nn.Module):
         x = F.max_pool1d(x, 4)             # [B,64,15]
         x = F.adaptive_avg_pool1d(x, 1)    # [B,64,1]
         x = x.flatten(start_dim=1)         # [B,64]
+        x = self.ln(x)                     # LayerNorm(64)
         return self.fc(x)
 
 
@@ -157,7 +163,13 @@ def main() -> None:
     print(f"FINAL test_loss={test_loss:.4f} test_acc={test_acc:.4f}", flush=True)
 
     WEIGHTS.mkdir(parents=True, exist_ok=True)
-    layer_map = {"conv1": model.conv1, "conv2": model.conv2, "conv3": model.conv3, "fc": model.fc}
+    layer_map = {
+        "conv1": model.conv1,
+        "conv2": model.conv2,
+        "conv3": model.conv3,
+        "ln": model.ln,
+        "fc": model.fc,
+    }
     print("Saving per-layer weights:", flush=True)
     for name, layer in layer_map.items():
         w = layer.weight.detach().cpu().numpy().astype(np.float32)

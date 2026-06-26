@@ -27,6 +27,9 @@ target_link_libraries(train_c_kws_raw PRIVATE
         AdaptivePool1dApi
         AdaptiveAvgPool1d
 
+        LayerNormApi
+        LayerNorm
+
         QuantizationApi
         Quantization
 

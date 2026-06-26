@@ -7,6 +7,7 @@ dependencies = [
     "elasticai-creator @ git+https://github.com/es-ude/elastic-ai.creator.git@training-implementation-provider",
     "matplotlib>=3.10.9",
     "torch>=2.11.0",
+    "torchaudio>=2.11.0",
     "torchvision>=0.26.0",
 ]
 

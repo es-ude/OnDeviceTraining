@@ -8,6 +8,8 @@ checking and visualizations.
 
 | Directory | Task | Status |
 |---|---|---|
+| `mnist_mlp/` | MNIST dense-MLP digit classification | ✅ |
+| `mnist_cnn/` | MNIST 1D-CNN digit classification | ✅ |
 | `har_classifier/` | UCI HAR 6-class activity classification | Stage 1 |
 | `ecg_anomaly_ae/` | ECG5000 reconstruction-based anomaly detection | Stage 2 ✅ |
 | `kws_classifier/` | SpeechCommands 6-class keyword spotting | Stage 3 (planned) |

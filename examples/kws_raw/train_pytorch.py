@@ -1,10 +1,10 @@
 """PyTorch reference implementation of the kws_raw 1D-CNN classifier.
 
 Input: raw [1,16000] waveform from prepare_data.py. The model downsamples
-16 kHz -> 1 kHz via a front AvgPool1d(K=16), then 3 Conv blocks + a rate-agnostic
-AdaptiveAvgPool1d(1) head + LayerNorm(64). Output: logs/<n>class/pytorch.json +
-outputs/<n>class/pytorch_predictions.npy +
-weights/<n>class/{conv1,conv2,conv3,ln,fc}.{weight,bias}.npy
+16 kHz -> 1 kHz via a front AvgPool1d(K=16), then 3 Conv blocks each with a
+per-conv LayerNorm([C,L]) (pre-ReLU) + a rate-agnostic AdaptiveAvgPool1d(1) head.
+Output: logs/<n>class/pytorch.json + outputs/<n>class/pytorch_predictions.npy +
+weights/<n>class/{conv1,ln1,conv2,ln2,conv3,ln3,fc}.{weight,bias}.npy
 for the C-side BIT_PARITY mode. num_classes from KWS_CLASSES (default 6).
 """
 from __future__ import annotations
@@ -34,7 +34,7 @@ LOGS = HERE / "logs" / TAG
 OUTPUTS = HERE / "outputs" / TAG
 WEIGHTS = HERE / "weights" / TAG
 
-EPOCHS = 20
+EPOCHS = 50
 BATCH = 32
 LR = 0.005
 MOMENTUM = 0.9
@@ -68,26 +68,27 @@ class KwsRawCnn(nn.Module):
     def __init__(self, num_classes: int) -> None:
         super().__init__()
         self.pool0 = nn.AvgPool1d(kernel_size=16, stride=16)     # 16 kHz -> 1 kHz downsample
+        # Per-conv LayerNorm over the full [C, L] feature map, pre-ReLU. Normalising
+        # INSIDE the conv stack (not just before the classifier) is what gives the raw
+        # model stable, reproducible convergence: a 10-seed sweep showed end-feature
+        # LayerNorm collapses on ~40% of seeds (test_acc 0.47 +/- 0.25), while per-conv
+        # LayerNorm converges on 10/10 (0.72 +/- 0.01). The C framework has bit-parity
+        # LayerNorm so the gate is preserved.
         self.conv1 = nn.Conv1d(1, 16, kernel_size=3, padding=1)  # SAME (K odd, stride 1)
+        self.ln1 = nn.LayerNorm([16, 1000])
         self.conv2 = nn.Conv1d(16, 32, kernel_size=3, padding=1)
+        self.ln2 = nn.LayerNorm([32, 250])
         self.conv3 = nn.Conv1d(32, 64, kernel_size=3, padding=1)
-        # LayerNorm over the 64 pooled features (rate-agnostic, 1-D). Stabilises
-        # training of the raw model, which otherwise stalls at random init; the
-        # C framework has bit-parity LayerNorm so the gate is preserved.
-        self.ln = nn.LayerNorm(64)
+        self.ln3 = nn.LayerNorm([64, 62])
         self.fc = nn.Linear(64, num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.pool0(x)                  # [B,1,16000] -> [B,1,1000]
-        x = F.relu(self.conv1(x))          # [B,16,1000]
-        x = F.max_pool1d(x, 4)             # [B,16,250]
-        x = F.relu(self.conv2(x))          # [B,32,250]
-        x = F.max_pool1d(x, 4)             # [B,32,62]
-        x = F.relu(self.conv3(x))          # [B,64,62]
-        x = F.max_pool1d(x, 4)             # [B,64,15]
-        x = F.adaptive_avg_pool1d(x, 1)    # [B,64,1]
-        x = x.flatten(start_dim=1)         # [B,64]
-        x = self.ln(x)                     # LayerNorm(64)
+        x = self.pool0(x)                                      # [B,1,16000] -> [B,1,1000]
+        x = F.max_pool1d(F.relu(self.ln1(self.conv1(x))), 4)  # [B,16,1000] -> [B,16,250]
+        x = F.max_pool1d(F.relu(self.ln2(self.conv2(x))), 4)  # [B,32,250]  -> [B,32,62]
+        x = F.max_pool1d(F.relu(self.ln3(self.conv3(x))), 4)  # [B,64,62]   -> [B,64,15]
+        x = F.adaptive_avg_pool1d(x, 1)                        # [B,64,1]
+        x = x.flatten(start_dim=1)                             # [B,64]
         return self.fc(x)
 
 
@@ -165,9 +166,11 @@ def main() -> None:
     WEIGHTS.mkdir(parents=True, exist_ok=True)
     layer_map = {
         "conv1": model.conv1,
+        "ln1": model.ln1,
         "conv2": model.conv2,
+        "ln2": model.ln2,
         "conv3": model.conv3,
-        "ln": model.ln,
+        "ln3": model.ln3,
         "fc": model.fc,
     }
     print("Saving per-layer weights:", flush=True)

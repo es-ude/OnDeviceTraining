@@ -15,21 +15,30 @@ One binary, two modes — **bit-parity** (`BIT_PARITY=1`, the exact CI gate) and
 explanation and the `KWS_CLASSES` knob; commands are identical with `kws_raw`
 substituted.
 
-## Why LayerNorm + a longer schedule
+## Why per-conv LayerNorm + a longer schedule
 
 Raw waveforms are far harder to train than MFCC features: at the `kws_mfcc`
-settings (lr=0.001, 15 epochs) the raw model never escapes its random-init
-fixed point (flat loss, every clip predicted as one class), which would make the
-bit-parity gate degenerate. Two changes fix it without leaving the framework's
-bit-parity-covered layers:
+settings (lr=0.001) the raw model just trains *very* slowly and looks stuck at
+random init within 15–20 epochs, which would make the bit-parity gate degenerate
+(a one-class reference). The fix uses **LayerNorm**, the framework's only
+bit-parity-covered normalizer (BatchNorm is not), at **lr=0.005, 50 epochs**.
 
-- a rate-agnostic **`LayerNorm(64)`** on the pooled features before the classifier
-  (the C framework has bit-parity LayerNorm; BatchNorm is not covered), and
-- **lr=0.005, 20 epochs** (the model breaks through around epoch 15).
+A 10-seed sweep (3 placements × 3 learning rates × 10 seeds × 50 epochs) settled
+*where* the LayerNorm goes:
 
-The reference then reaches ~0.59 test accuracy with predictions spread across all
-six classes, so the gate genuinely exercises the `AvgPool1d[1,16000]` + Conv +
-LayerNorm arithmetic (C reproduces PyTorch's predictions int32-exactly).
+| placement | mean ± std test_acc | seeds converged |
+|---|---|---|
+| no LayerNorm | 0.70 ± 0.02 | 10/10 |
+| LayerNorm(64) after pooling | **0.47 ± 0.25** | **~6/10** |
+| **per-conv `LayerNorm([C,L])`** | **0.72 ± 0.01** | **10/10** |
+
+A single LayerNorm *after* global pooling is the **worst** option — it amplifies a
+bad init and collapses on ~40 % of seeds. Per-conv LayerNorm (one over each conv's
+full `[C, L]` feature map, pre-ReLU) normalises *inside* the stack and converges
+reliably (`0.72 ± 0.01`, every seed, all six classes), so the gate genuinely
+exercises the `AvgPool1d[1,16000]` + Conv + LayerNorm arithmetic (C reproduces
+PyTorch's predictions int32-exactly). Even plain no-LayerNorm trains fine given 50
+epochs — the model was never un-trainable, just slow.
 
 ## Run it (6-class)
 
@@ -48,12 +57,12 @@ uv run python examples/_shared/compare_predictions.py \
 ## Model
 
 - Input: `[1, 16000]` → `reshapeItemsAddBatchDim` → `[1, 1, 16000]`
-- `AvgPool1d(16) → Conv1d(1→16,K3,SAME) → ReLU → MaxPool(4) → Conv1d(16→32,K3,SAME)
-  → ReLU → MaxPool(4) → Conv1d(32→64,K3,SAME) → ReLU → MaxPool(4) →
-  AdaptiveAvgPool1d(1) → Flatten → LayerNorm(64) → Linear(64→C) → Softmax → CE`
-- Lengths: 16000 → 1000 → 250 → 62 → 15 → 1; ~10 K params
-- State-dict layers: `conv1`, `conv2`, `conv3`, `ln`, `fc`
-- Hyperparameters: SGD lr=0.005, momentum=0.9, batch=32, 20 epochs
+- `AvgPool1d(16) → 3× [Conv1d(K3,SAME) → LayerNorm([C,L]) → ReLU → MaxPool(4)] →
+  AdaptiveAvgPool1d(1) → Flatten → Linear(64→C) → Softmax → CE`
+  (channels 1→16→32→64; LayerNorm shapes `[16,1000]`, `[32,250]`, `[64,62]`)
+- Lengths: 16000 → 1000 → 250 → 62 → 15 → 1; ~64 K params (the LayerNorm gamma/beta dominate)
+- State-dict layers: `conv1`, `ln1`, `conv2`, `ln2`, `conv3`, `ln3`, `fc`
+- Hyperparameters: SGD lr=0.005, momentum=0.9, batch=32, 50 epochs
 
 The train-from-scratch demo is the slowest in the suite (raw `[1,16000]` is the
 heaviest input even after the AvgPool downsample) — run it offline. Bit-parity

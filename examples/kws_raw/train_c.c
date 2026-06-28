@@ -37,7 +37,7 @@
 
 #include "npy_writer.h"
 
-#define EPOCHS 20
+#define EPOCHS 50
 #define BATCH 32
 #define LR 0.005f
 #define MOMENTUM 0.9f
@@ -56,9 +56,9 @@
 #define C3_OUT 64
 #define C3_K 3
 
-/* AvgPool(ds) + 3x(Conv1d+ReLU+MaxPool) + AdaptiveAvgPool + Flatten + LayerNorm + Linear + Softmax
- * = 15 layers */
-#define MODEL_SIZE 15
+/* AvgPool(ds) + 3x(Conv1d+LayerNorm+ReLU+MaxPool) + AdaptiveAvgPool + Flatten + Linear + Softmax
+ * = 17 layers */
+#define MODEL_SIZE 17
 
 static dataset_t g_trainDataset;
 static dataset_t g_valDataset;
@@ -184,47 +184,59 @@ static void buildModel(layer_t **model, layerQuant_t *lq) {
     /* Front downsample: AvgPool1d(K=16,S=16) -> length 1000 (16 kHz -> 1 kHz). */
     model[0] = avgPool1dLayerInit(&(avgPool1dInit_t){.kernelSize = DS_K, .stride = DS_K}, lq);
 
+    /* 3x [Conv1d -> LayerNorm([C,L]) -> ReLU -> MaxPool(4)]. Per-conv LayerNorm over the full
+     * feature map (mirrors PyTorch nn.LayerNorm([C,L]), eps 1e-5) is what gives the raw model
+     * stable convergence: a 10-seed sweep showed end-feature LayerNorm collapses on ~40% of
+     * seeds while per-conv converges 10/10. normalizedShape is L-coupled like the MaxPool
+     * inputLengths, so it tracks the downsample rate. */
     model[1] = conv1dLayerInit(
         &(conv1dInit_t){
             .inChannels = IN_CHANNELS, .outChannels = C1_OUT, .kernelSize = C1_K, .padding = SAME},
         lq);
-    model[2] = reluLayerInit(lq);
-    model[3] = maxPool1dLayerInit(
+    model[2] = layerNormLayerInit(&(layerNormInit_t){.normalizedShape = (size_t[]){C1_OUT, LEN_DS},
+                                                     .numNormDims = 2,
+                                                     .eps = 1e-5f},
+                                  lq);
+    model[3] = reluLayerInit(lq);
+    model[4] = maxPool1dLayerInit(
         &(maxPool1dInit_t){
             .kernelSize = 4, .stride = 4, .inputChannels = C1_OUT, .inputLength = LEN_DS},
         lq);
 
-    model[4] = conv1dLayerInit(
+    model[5] = conv1dLayerInit(
         &(conv1dInit_t){
             .inChannels = C1_OUT, .outChannels = C2_OUT, .kernelSize = C2_K, .padding = SAME},
         lq);
-    model[5] = reluLayerInit(lq);
-    model[6] = maxPool1dLayerInit(
+    model[6] = layerNormLayerInit(
+        &(layerNormInit_t){
+            .normalizedShape = (size_t[]){C2_OUT, LEN_DS / 4}, .numNormDims = 2, .eps = 1e-5f},
+        lq);
+    model[7] = reluLayerInit(lq);
+    model[8] = maxPool1dLayerInit(
         &(maxPool1dInit_t){
             .kernelSize = 4, .stride = 4, .inputChannels = C2_OUT, .inputLength = LEN_DS / 4},
         lq);
 
-    model[7] = conv1dLayerInit(
+    model[9] = conv1dLayerInit(
         &(conv1dInit_t){
             .inChannels = C2_OUT, .outChannels = C3_OUT, .kernelSize = C3_K, .padding = SAME},
         lq);
-    model[8] = reluLayerInit(lq);
-    model[9] = maxPool1dLayerInit(
+    model[10] = layerNormLayerInit(
+        &(layerNormInit_t){
+            .normalizedShape = (size_t[]){C3_OUT, LEN_DS / 16}, .numNormDims = 2, .eps = 1e-5f},
+        lq);
+    model[11] = reluLayerInit(lq);
+    model[12] = maxPool1dLayerInit(
         &(maxPool1dInit_t){
             .kernelSize = 4, .stride = 4, .inputChannels = C3_OUT, .inputLength = LEN_DS / 16},
         lq);
 
-    /* Rate-agnostic head: AdaptiveAvgPool1d(1) -> Flatten -> LayerNorm -> Linear -> Softmax.
-     * LayerNorm(C3_OUT) over the 64 pooled features stabilises raw-model training (mirrors the
-     * PyTorch nn.LayerNorm(64)); eps 1e-5 matches PyTorch's default. */
-    model[10] = adaptiveAvgPool1dLayerInit(&(adaptiveAvgPool1dInit_t){.outputSize = 1}, lq);
-    model[11] = flattenLayerInit();
-    model[12] = layerNormLayerInit(
-        &(layerNormInit_t){.normalizedShape = (size_t[]){C3_OUT}, .numNormDims = 1, .eps = 1e-5f},
-        lq);
-    model[13] =
+    /* Rate-agnostic head: AdaptiveAvgPool1d(1) -> Flatten -> Linear -> Softmax. */
+    model[13] = adaptiveAvgPool1dLayerInit(&(adaptiveAvgPool1dInit_t){.outputSize = 1}, lq);
+    model[14] = flattenLayerInit();
+    model[15] =
         linearLayerInit(&(linearInit_t){.inFeatures = C3_OUT, .outFeatures = g_numClasses}, lq);
-    model[14] = softmaxLayerInit(lq);
+    model[16] = softmaxLayerInit(lq);
 }
 
 /* Load PyTorch state_dict from per-layer .npy files written by
@@ -233,13 +245,13 @@ static void buildModel(layer_t **model, layerQuant_t *lq) {
  * Returns 0 on success, non-zero on first missing file. */
 static int loadStateDictFromDir(layer_t **model, const char *weightsDir) {
     char wPath[300], bPath[300];
-    /* Param layers in order: conv1=model[1], conv2=model[4], conv3=model[7],
-     * ln=model[12] (gamma/beta), fc=model[13]. 5 entries. */
-    const char *names[5] = {"conv1", "conv2", "conv3", "ln", "fc"};
-    tensor_t *w[5] = {0};
-    tensor_t *b[5] = {0};
+    /* Param layers in order: conv1=model[1], ln1=model[2], conv2=model[5], ln2=model[6],
+     * conv3=model[9], ln3=model[10], fc=model[15]. 7 entries (each ln = gamma/beta). */
+    const char *names[7] = {"conv1", "ln1", "conv2", "ln2", "conv3", "ln3", "fc"};
+    tensor_t *w[7] = {0};
+    tensor_t *b[7] = {0};
 
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 7; i++) {
         snprintf(wPath, sizeof(wPath), "%s/%s.weight.npy", weightsDir, names[i]);
         snprintf(bPath, sizeof(bPath), "%s/%s.bias.npy", weightsDir, names[i]);
         w[i] = npyLoadFlat(wPath);
@@ -258,10 +270,12 @@ static int loadStateDictFromDir(layer_t **model, const char *weightsDir) {
             {.name = names[2], .weightData = (float *)w[2]->data, .biasData = (float *)b[2]->data},
             {.name = names[3], .weightData = (float *)w[3]->data, .biasData = (float *)b[3]->data},
             {.name = names[4], .weightData = (float *)w[4]->data, .biasData = (float *)b[4]->data},
+            {.name = names[5], .weightData = (float *)w[5]->data, .biasData = (float *)b[5]->data},
+            {.name = names[6], .weightData = (float *)w[6]->data, .biasData = (float *)b[6]->data},
         },
-        5);
+        7);
 
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 7; i++) {
         freeTensor(w[i]);
         freeTensor(b[i]);
     }

@@ -22,6 +22,7 @@ in
       pkgs.cmake
       pkgs.ninja
       u.gcc-arm-embedded-13
+      pkgs.zlib
     ];
 
   languages.c.enable = true;

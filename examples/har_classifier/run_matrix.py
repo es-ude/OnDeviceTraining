@@ -40,7 +40,9 @@ BUILD_DIR = ROOT / "build" / "examples_memprofile" / "examples" / "har_classifie
 CONFIGS: dict[str, tuple[str, dict[str, str]]] = {
     "float": ("train_c_har_classifier", {}),
     "sym12": ("train_c_har_classifier_sym", {"SYM_BITS": "12"}),
+    "sym10": ("train_c_har_classifier_sym", {"SYM_BITS": "10"}),
     "sym8": ("train_c_har_classifier_sym", {"SYM_BITS": "8"}),
+    "sym6": ("train_c_har_classifier_sym", {"SYM_BITS": "6"}),
     "sym4": ("train_c_har_classifier_sym", {"SYM_BITS": "4"}),
 }
 
@@ -126,8 +128,8 @@ def main() -> None:
 
     done = 0
     t_start = time.monotonic()
-    for config in args.configs:
-        for seed in args.seeds:
+    for seed in args.seeds:
+        for config in args.configs:
             done += 1
             acc, wall = run_one(config, seed, args.epochs, logs_dir)
             acc_str = f"{acc:.4f}" if acc is not None else "N/A"

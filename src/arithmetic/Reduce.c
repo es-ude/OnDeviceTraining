@@ -25,6 +25,23 @@
  * ODT_SYM_GRAD_QMAXBITS (same numeric value, different contract). */
 #define REDUCE_SYM_VALUESUM_QMAXBITS 16
 
+/* Width bound for the SYM_INT32 REQUANT TARGET (rsqrtSymInt32's `out`), NOT an
+ * operand-guard alias. Numerically identical to REDUCE_SYM_VALUESUM_QMAXBITS
+ * (16) but for a wholly different reason -- do NOT fold the two guards:
+ *   - The operand guard (reduceValidateSymOperand) bounds an int32
+ *     ACCUMULATOR reading pre-existing mantissas (overflow argument).
+ *   - This bound polices a WRITE target instead: rsqrtSymInt32 derives out's
+ *     scale dynamically every call (scale = absMax/qMax) and requantizes into
+ *     it. Widths above 16 bits are, by design, reserved for scale=1
+ *     raw-integer semantics (see the wide-SYM design intent in
+ *     docs/conventions -- qMaxBits > 16 only makes sense at scale=1). A
+ *     dynamic per-call scale on a >16-bit target would silently violate that
+ *     contract, and a scale=1 rsqrt output is meaningless anyway (rsqrt
+ *     results are fractional, not raw integers). So <=16 here is a
+ *     DELIBERATE contract for requant targets, not a leftover overflow bound
+ *     -- it would stay 16 even if the operand guard's bound ever changed. */
+#define REDUCE_SYM_REQUANT_QMAXBITS 16
+
 /* K = product of the leading (rank-k) logical dims (block count); N = product of
  * the trailing k logical dims (per-block element count). Logical sizes honor
  * orderOfDimensions via getDimensionsByIndex. k == rank -> K = 1 (whole-tensor
@@ -125,16 +142,47 @@ float rsqrtFloat32(float x, float eps) {
  * mantissas sum in an int32 accumulator without overflow for N < 2^(32-qMaxBits)
  * (>= 65536 terms at qMaxBits = 16) -- no int12 product-headroom argument
  * applies. (mirrors layerNormValidateSymTensor, whose value-sum path is likewise
- * sound at qMaxBits <= 16.) */
+ * sound at qMaxBits <= 16.) Also rejects qMaxBits == 0: a zero-width SYM operand
+ * is degenerate/invalid, and excluding it guarantees qMaxBits in [1,16] for every
+ * downstream user -- notably the N-guard's `32 - qMaxBits` shift in
+ * meanOverTrailingAxesSymInt32, which would otherwise shift by 32 and be UB on
+ * 32-bit size_t targets. */
 static void reduceValidateSymOperand(tensor_t *t, const char *what) {
     if (t->quantization->type != SYM_INT32) {
         PRINT_ERROR("Reduce SYM_INT32: %s must be SYM_INT32", what);
         exit(1);
     }
     symInt32QConfig_t *qc = t->quantization->qConfig;
+    if (qc->qMaxBits == 0) {
+        PRINT_ERROR("Reduce SYM_INT32: %s qMaxBits is 0 -- a zero-width SYM operand is "
+                    "degenerate/invalid",
+                    what);
+        exit(1);
+    }
     if (qc->qMaxBits > REDUCE_SYM_VALUESUM_QMAXBITS) {
         PRINT_ERROR("Reduce SYM_INT32: %s qMaxBits (%u) exceeds the value-sum bound (%u)", what,
                     (unsigned)qc->qMaxBits, (unsigned)REDUCE_SYM_VALUESUM_QMAXBITS);
+        exit(1);
+    }
+}
+
+/* Guard for a SYM_INT32 REQUANT TARGET (a tensor rsqrtSymInt32 writes into,
+ * not reads from) -- distinct contract from reduceValidateSymOperand above.
+ * A FLOAT32 buffer written with int32 mantissas is silent garbage, so the
+ * dtype check is shared. The width bound is NOT shared: see
+ * REDUCE_SYM_REQUANT_QMAXBITS for why <=16 here is a requant-target contract
+ * (dynamic-scale write validity), not a value-sum accumulator bound. Use this
+ * guard ONLY on tensors being requantized into, never on read-only operands
+ * (those use reduceValidateSymOperand). */
+static void reduceValidateSymRequantTarget(tensor_t *t, const char *what) {
+    if (t->quantization->type != SYM_INT32) {
+        PRINT_ERROR("Reduce SYM_INT32: %s must be SYM_INT32", what);
+        exit(1);
+    }
+    symInt32QConfig_t *qc = t->quantization->qConfig;
+    if (qc->qMaxBits > REDUCE_SYM_REQUANT_QMAXBITS) {
+        PRINT_ERROR("Reduce SYM_INT32: %s qMaxBits (%u) exceeds the requant-target bound (%u)",
+                    what, (unsigned)qc->qMaxBits, (unsigned)REDUCE_SYM_REQUANT_QMAXBITS);
         exit(1);
     }
 }
@@ -144,6 +192,20 @@ void meanOverTrailingAxesSymInt32(tensor_t *in, size_t k, tensor_t *meanOut) {
     size_t K;
     size_t N;
     blockGeom(in, k, &K, &N);
+    uint8_t qMaxBits = ((symInt32QConfig_t *)in->quantization->qConfig)->qMaxBits;
+    /* Shift safety: reduceValidateSymOperand now guarantees qMaxBits in [1,16], so
+     * the shift amount (32 - qMaxBits) is in [16,31] -- the relevant fact is the
+     * upper bound (<= 31, no UB on a 32-bit size_t), not the lower one (>= 16 was
+     * never what made this safe). Conservative bound -- the worst-case value-sum
+     * reaches exactly INT32_MIN at N = 2^(32-qMaxBits); the guard rejects from
+     * that boundary on. */
+    size_t bound = (size_t)1 << (32u - qMaxBits);
+    if (N >= bound) {
+        PRINT_ERROR("meanOverTrailingAxesSymInt32: N (%zu) exceeds the value-sum bound for "
+                    "qMaxBits (%u) -- must be < 2^(32-qMaxBits) (%zu)",
+                    N, (unsigned)qMaxBits, bound);
+        exit(1);
+    }
     int32_t *q = (int32_t *)in->data;
     float *m = (float *)meanOut->data;
     float s = ((symInt32QConfig_t *)in->quantization->qConfig)->scale;
@@ -179,7 +241,7 @@ void varianceBiasedOverTrailingAxesSymInt32(tensor_t *in, size_t k, tensor_t *me
 
 void rsqrtSymInt32(tensor_t *in, float eps, tensor_t *out) {
     reduceValidateSymOperand(in, "input");
-    reduceValidateSymOperand(out, "output");
+    reduceValidateSymRequantTarget(out, "output");
     size_t n = calcNumberOfElementsByTensor(in);
     int32_t *qIn = (int32_t *)in->data;
     int32_t *qOut = (int32_t *)out->data;

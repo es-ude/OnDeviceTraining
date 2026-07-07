@@ -6,6 +6,7 @@ target_link_libraries(Optimizer PRIVATE
         Layer
         Conv1d
         Conv1dTransposed
+        Linear
         Tensor
         Common
 )

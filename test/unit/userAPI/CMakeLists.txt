@@ -356,6 +356,8 @@ target_link_libraries(UnitTestBiaslessConvOptim PRIVATE
         ConvTranspose1dKernel
         Conv1dKernel
         SlidingWindow1d
+        LinearApi
+        Linear
         SgdApi
         Sgd
         Optimizer

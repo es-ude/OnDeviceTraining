@@ -57,24 +57,30 @@ optimizer_t *sgdMCreateOptim(float learningRate, float momentumFactor, float wei
             optim->parameter[paramSlot] = weights;
             tensor_t *weightStateBuffer = momentumStateInit(weights->param, momentumQuant);
 
-            parameter_t *bias = linearConfig->bias;
-            optim->parameter[paramSlot + 1] = bias;
-            tensor_t *biasStateBuffer = momentumStateInit(bias->param, momentumQuant);
-
             states_t *weightStates = reserveMemory(sizeof(states_t));
             weightStates->statesPerParameter = statesPerParam;
             weightStates->stateBuffers = reserveMemory(sizeof(tensor_t *));
             weightStates->stateBuffers[0] = weightStateBuffer;
 
-            states_t *biasStates = reserveMemory(sizeof(states_t));
-            biasStates->statesPerParameter = statesPerParam;
-            biasStates->stateBuffers = reserveMemory(sizeof(tensor_t *));
-            biasStates->stateBuffers[0] = biasStateBuffer;
-
             states[paramSlot] = weightStates;
-            states[paramSlot + 1] = biasStates;
 
-            paramSlot += 2;
+            /* BIAS_FALSE (header-sanctioned): no bias parameter to collect. */
+            if (linearConfig->bias != NULL) {
+                parameter_t *bias = linearConfig->bias;
+                optim->parameter[paramSlot + 1] = bias;
+                tensor_t *biasStateBuffer = momentumStateInit(bias->param, momentumQuant);
+
+                states_t *biasStates = reserveMemory(sizeof(states_t));
+                biasStates->statesPerParameter = statesPerParam;
+                biasStates->stateBuffers = reserveMemory(sizeof(tensor_t *));
+                biasStates->stateBuffers[0] = biasStateBuffer;
+
+                states[paramSlot + 1] = biasStates;
+
+                paramSlot += 2;
+            } else {
+                paramSlot += 1;
+            }
             break;
         case CONV1D: {
             conv1dConfig_t *conv1dCfg = layerConfig->conv1d;

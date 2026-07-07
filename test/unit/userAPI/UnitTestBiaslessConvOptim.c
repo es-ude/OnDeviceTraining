@@ -9,6 +9,8 @@
 #include "Layer.h"
 #include "LayerCommon.h"
 #include "LayerQuant.h"
+#include "Linear.h"
+#include "LinearApi.h"
 #include "Optimizer.h"
 #include "QuantizationApi.h"
 #include "SgdApi.h"
@@ -39,6 +41,16 @@ static void freeConv1dLayerShell(layer_t *layer) {
 static void freeConv1dTransposedLayerShell(layer_t *layer) {
     freeReservedMemory(layer->config->conv1dTransposed->kernel);
     freeReservedMemory(layer->config->conv1dTransposed);
+    freeReservedMemory(layer->config);
+    freeReservedMemory(layer);
+}
+
+/* Linear counterpart of freeConv1dLayerShell: freeOptimSgdM already freed the
+ * linear's weights parameter_t (its bias slot is NULL and never registered),
+ * so this only tears down the config/layer wrapper. Linear has no kernel
+ * (unlike Conv1d/Conv1dTransposed), so there is one fewer level to free. */
+static void freeLinearLayerShell(layer_t *layer) {
+    freeReservedMemory(layer->config->linear);
     freeReservedMemory(layer->config);
     freeReservedMemory(layer);
 }
@@ -148,10 +160,46 @@ void testOptimizer_OneStateForBiaslessConv1dTransposed(void) {
     TEST_ASSERT_TRUE(optimNotNull);
 }
 
+/* Same bias-less state-count/collection guard as the Conv1d test, but for a
+ * LINEAR layer (BIAS_FALSE, header-sanctioned, cfg->bias == NULL): the
+ * CASE LINEAR arm in calcNumberOfStatesByLayer must count 1 (not the fixed
+ * 2), and sgdMCreateOptim's LINEAR collection block must skip the bias
+ * momentum state instead of NULL-dereferencing linearConfig->bias->param
+ * (issue #292, mirrors the CONV1D fix from PR #291). */
+void testBiaslessLinearCountsOneStateAndOptimizerSurvives(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+
+    layer_t *linear = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 3,
+            .outFeatures = 2,
+            .bias = BIAS_FALSE,
+        },
+        &lq);
+    layer_t *model[1] = {linear};
+
+    size_t numStates = calcTotalNumberOfStates(model, 1);
+
+    quantization_t *momentumQuant = quantizationInitFloat();
+    optimizer_t *optim = sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 1, FLOAT32, momentumQuant);
+    bool optimNotNull = (optim != NULL);
+
+    freeOptimSgdM(optim); /* frees the linear's weights parameter_t */
+    freeLinearLayerShell(linear);
+    freeQuantization(momentumQuant);
+    freeQuantization(q);
+
+    TEST_ASSERT_EQUAL_UINT(1, numStates);
+    TEST_ASSERT_TRUE(optimNotNull);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testOptimizer_OneStateForBiaslessConv1d);
     RUN_TEST(testOptimizer_TwoStatesForBiasedConv1d);
     RUN_TEST(testOptimizer_OneStateForBiaslessConv1dTransposed);
+    RUN_TEST(testBiaslessLinearCountsOneStateAndOptimizerSurvives);
     return UNITY_END();
 }

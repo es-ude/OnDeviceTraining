@@ -295,6 +295,21 @@ void testRsqrtSymInt32MatchesFloatTwin(void) {
     }
 }
 
+void testRsqrtSymInt32RejectsWideOutput(void) {
+    // Valid <=16-bit input; out configured with qMaxBits=17. This must be
+    // rejected by the OUTPUT's own requant-target guard (dynamic-scale write),
+    // not the input's value-sum operand guard -> fail fast either way, but the
+    // two guards police different contracts (see reduceValidateSymRequantTarget).
+    size_t dims[] = {3};
+    tensor_t *symIn = buildSymInt32TensorND(1, dims, (float[]){1.25f, 4.0f, 0.25f});
+    tensor_t *wideOut = buildSymInt32TensorNDBits(1, dims, NULL, 17);
+
+    ASSERT_EXITS_WITH_FAILURE(rsqrtSymInt32(symIn, 1e-5f, wideOut));
+
+    freeTensor(wideOut);
+    freeTensor(symIn);
+}
+
 void testMeanWholeTensorKEqualsRank(void) {
     // k == rank -> K = 1 (whole-tensor reduction). mean over all six elements
     // {1..6} of a [2,3] tensor = 21/6 = 3.5.
@@ -341,6 +356,38 @@ void testMeanSymInt32RejectsWideOperand(void) {
     freeTensor(wideIn);
 }
 
+void testMeanSymInt32RejectsOverlongAxis(void) {
+    // N == 2^(32-qMaxBits) with qMaxBits=16 -> N == 65536, exactly AT the
+    // value-sum boundary. Conservative bound -- the worst-case sum reaches
+    // exactly INT32_MIN at N = 2^(32-qMaxBits); the guard rejects from the
+    // boundary on.
+    size_t inDims[] = {1, 65536};
+    tensor_t *in = buildSymInt32TensorNDBits(2, inDims, NULL, 16);
+    size_t outDims[] = {1};
+    tensor_t *meanOut = buildFloatTensorND(1, outDims, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(meanOverTrailingAxesSymInt32(in, 1, meanOut));
+
+    freeTensor(meanOut);
+    freeTensor(in);
+}
+
+void testMeanSymInt32RejectsZeroWidthOperand(void) {
+    // qMaxBits=0 is a degenerate/invalid SYM operand -- it is also the one value
+    // that would make the N-guard's shift amount (32-qMaxBits) hit 32, which is
+    // UB for a size_t shift on 32-bit MCU targets. reduceValidateSymOperand must
+    // reject it before the shift is ever computed.
+    size_t inDims[] = {1, 3};
+    tensor_t *in = buildSymInt32TensorNDBits(2, inDims, NULL, 0);
+    size_t outDims[] = {1};
+    tensor_t *meanOut = buildFloatTensorND(1, outDims, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(meanOverTrailingAxesSymInt32(in, 1, meanOut));
+
+    freeTensor(meanOut);
+    freeTensor(in);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testAbsFloat32);
@@ -356,6 +403,9 @@ int main(void) {
     RUN_TEST(testMeanSymInt32MatchesFloatTwin);
     RUN_TEST(testVarianceSymInt32MatchesFloatTwin);
     RUN_TEST(testRsqrtSymInt32MatchesFloatTwin);
+    RUN_TEST(testRsqrtSymInt32RejectsWideOutput);
     RUN_TEST(testMeanSymInt32RejectsWideOperand);
+    RUN_TEST(testMeanSymInt32RejectsOverlongAxis);
+    RUN_TEST(testMeanSymInt32RejectsZeroWidthOperand);
     return UNITY_END();
 }

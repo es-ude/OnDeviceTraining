@@ -5,18 +5,21 @@
 #include "Common.h"
 #include "Conv1d.h"
 #include "Conv1dTransposed.h"
+#include "Linear.h"
 #include "Optimizer.h"
 #include "Sgd.h"
 
 optimizerFunctions_t optimizerFunctions[] = {
     [SGD] = {sgdStep, sgdZeroGrad}, [SGD_M] = {sgdStepM, sgdZeroGrad}};
 
-/* Conv1d/Conv1dTransposed are bias-optional (BIAS_FALSE, header-sanctioned):
- * a bias-less conv contributes only its weight state, not a weight+bias
- * pair. Every other trainable layer type still has a fixed contribution. */
+/* Linear/Conv1d/Conv1dTransposed are bias-optional (BIAS_FALSE,
+ * header-sanctioned): a bias-less layer contributes only its weight state,
+ * not a weight+bias pair. Every other trainable layer type still has a
+ * fixed contribution. */
 static size_t calcNumberOfStatesByLayer(const layer_t *layer) {
     switch (layer->type) {
     case LINEAR:
+        return layer->config->linear->bias != NULL ? 2 : 1;
     case LAYERNORM:
     case GROUPNORM:
         return 2;

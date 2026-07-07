@@ -9,6 +9,7 @@
 #include "Conv1d.h"
 #include "Conv1dTransposed.h"
 #include "Dropout.h"
+#include "GroupNorm.h"
 #include "Kernel.h"
 #include "Layer.h"
 #include "LayerNorm.h"
@@ -254,6 +255,20 @@ static void serializeLayer(layer_t *layer, FILE *f) {
         serializeArithmetic(&layerNormConfig->propLossMath, f);
         serializeQuantization(layerNormConfig->outputQ, f);
         serializeQuantization(layerNormConfig->propLossQ, f);
+        break;
+    case GROUPNORM:
+        groupNormConfig_t *groupNormConfig = layer->config->groupNorm;
+        uint32_t groupNormNumGroups = (uint32_t)groupNormConfig->numGroups;
+        serialize(&groupNormNumGroups, 1, sizeof(uint32_t), f);
+        uint32_t groupNormNumChannels = (uint32_t)groupNormConfig->numChannels;
+        serialize(&groupNormNumChannels, 1, sizeof(uint32_t), f);
+        serialize(&groupNormConfig->eps, 1, sizeof(float), f);
+        serializeParameter(groupNormConfig->gamma, f);
+        serializeParameter(groupNormConfig->beta, f);
+        serializeArithmetic(&groupNormConfig->forwardMath, f);
+        serializeArithmetic(&groupNormConfig->propLossMath, f);
+        serializeQuantization(groupNormConfig->outputQ, f);
+        serializeQuantization(groupNormConfig->propLossQ, f);
         break;
     default:
         PRINT_ERROR("Unsupported layer type!\n");

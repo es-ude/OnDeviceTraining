@@ -8,6 +8,7 @@
 #include "Conv1d.h"
 #include "Conv1dTransposed.h"
 #include "Dropout.h"
+#include "GroupNorm.h"
 #include "LayerConfigAccess.h"
 #include "LayerNorm.h"
 #include "Linear.h"
@@ -45,6 +46,8 @@ quantization_t *layerOutputQ(layer_t *layer) {
         return layer->config->dropout->outputQ;
     case LAYERNORM:
         return layer->config->layerNorm->outputQ;
+    case GROUPNORM:
+        return layer->config->groupNorm->outputQ;
     case QUANTIZATION:
         return layer->config->quantization->outputQ;
     default:
@@ -79,6 +82,8 @@ quantization_t *backwardWireQ(layer_t *layer) {
         return layer->config->dropout->propLossQ;
     case LAYERNORM:
         return layer->config->layerNorm->propLossQ;
+    case GROUPNORM:
+        return layer->config->groupNorm->propLossQ;
     case QUANTIZATION:
         return layer->config->quantization->propLossQ;
     case FLATTEN:
@@ -113,6 +118,8 @@ arithmetic_t layerForwardMath(layer_t *layer) {
         return layer->config->dropout->forwardMath;
     case LAYERNORM:
         return layer->config->layerNorm->forwardMath;
+    case GROUPNORM:
+        return layer->config->groupNorm->forwardMath;
     case QUANTIZATION:
         // Pure conversion node (D4): no consumed arithmetic.
         return NO_ARITHMETIC;

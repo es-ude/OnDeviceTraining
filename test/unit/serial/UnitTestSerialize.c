@@ -15,6 +15,8 @@
 #include "DropoutApi.h"
 #include "Flatten.h"
 #include "FlattenApi.h"
+#include "GroupNorm.h"
+#include "GroupNormApi.h"
 #include "Kernel.h"
 #include "Layer.h"
 #include "LayerNorm.h"
@@ -1126,6 +1128,157 @@ static void testRoundTripLayerNorm(void) {
     freeReservedMemory(capturedDeserialBetaGrad);
 }
 
+/*! GROUPNORM round trip. numGroups=2 / numChannels=4 (channels-per-group 2) and
+ *  a non-default eps (1e-3f) exercise the two uint32 geometry fields distinctly:
+ *  a numGroups<->numChannels swap still divides evenly but mis-maps, and a
+ *  dropped field misaligns every later byte. gamma/beta are constant-initialized
+ *  (all-1 / all-0) by the factory, so BOTH layers would start identical without
+ *  an explicit seed — gamma/beta PARAM (and grad) values are seeded with
+ *  distinct non-constant floats (same pattern as testRoundTripLayerNorm) so the
+ *  round trip is genuinely distinguishable from a no-op. `forwardMath`/
+ *  `propLossMath` are both FLOAT32 but differ only in roundingMode (HALF_AWAY vs
+ *  SR_HALF_AWAY) — sufficient to catch a field-order swap without tripping
+ *  GroupNorm's SYM_INT32 forward/backward coupling validation. */
+static void testRoundTripGroupNorm(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    lq.forwardMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
+    lq.propLossMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = SR_HALF_AWAY};
+
+    groupNormInit_t init = {
+        .numGroups = 2,
+        .numChannels = 4,
+        .eps = 1e-3f,
+    };
+
+    layer_t *serialLayer = groupNormLayerInitOwning(&init, &lq);
+    layer_t *deserialLayer = groupNormLayerInitOwning(&init, &lq);
+
+    groupNormConfig_t *serialCfg = serialLayer->config->groupNorm;
+
+    size_t numberOfGammaElements = calcNumberOfElementsByTensor(serialCfg->gamma->param);
+    float *gammaSeed = reserveMemory(numberOfGammaElements * sizeof(float));
+    for (size_t i = 0; i < numberOfGammaElements; i++) {
+        gammaSeed[i] = 2.0f + (float)i * 0.1f;
+    }
+    tensorFillFromFloatBuffer(serialCfg->gamma->param, gammaSeed, numberOfGammaElements);
+
+    size_t numberOfBetaElements = calcNumberOfElementsByTensor(serialCfg->beta->param);
+    float *betaSeed = reserveMemory(numberOfBetaElements * sizeof(float));
+    for (size_t i = 0; i < numberOfBetaElements; i++) {
+        betaSeed[i] = -1.0f - (float)i * 0.2f;
+    }
+    tensorFillFromFloatBuffer(serialCfg->beta->param, betaSeed, numberOfBetaElements);
+
+    /* Grads are zero at construction; seed non-zero so the round trip is
+     * distinguishable from a no-op. */
+    float *gammaGradSeed = reserveMemory(numberOfGammaElements * sizeof(float));
+    for (size_t i = 0; i < numberOfGammaElements; i++) {
+        gammaGradSeed[i] = (float)i + 0.3f;
+    }
+    tensorFillFromFloatBuffer(serialCfg->gamma->grad, gammaGradSeed, numberOfGammaElements);
+
+    float *betaGradSeed = reserveMemory(numberOfBetaElements * sizeof(float));
+    for (size_t i = 0; i < numberOfBetaElements; i++) {
+        betaGradSeed[i] = (float)i - 0.4f;
+    }
+    tensorFillFromFloatBuffer(serialCfg->beta->grad, betaGradSeed, numberOfBetaElements);
+
+    layer_t *serialModel[] = {serialLayer};
+    layer_t *deserialModel[] = {deserialLayer};
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(serialModel, 1, f);
+    fclose(f);
+
+    f = fopen(FILE_PATH, "rb");
+    deserializeModel(deserialModel, 1, f);
+    fclose(f);
+
+    groupNormConfig_t *deserialCfg = deserialLayer->config->groupNorm;
+
+    size_t capturedSerialNumGroups = serialCfg->numGroups;
+    size_t capturedDeserialNumGroups = deserialCfg->numGroups;
+    size_t capturedSerialNumChannels = serialCfg->numChannels;
+    size_t capturedDeserialNumChannels = deserialCfg->numChannels;
+    float capturedSerialEps = serialCfg->eps;
+    float capturedDeserialEps = deserialCfg->eps;
+
+    float *capturedSerialGamma = reserveMemory(numberOfGammaElements * sizeof(float));
+    float *capturedDeserialGamma = reserveMemory(numberOfGammaElements * sizeof(float));
+    float *capturedSerialGammaGrad = reserveMemory(numberOfGammaElements * sizeof(float));
+    float *capturedDeserialGammaGrad = reserveMemory(numberOfGammaElements * sizeof(float));
+    for (size_t i = 0; i < numberOfGammaElements; i++) {
+        capturedSerialGamma[i] = ((float *)serialCfg->gamma->param->data)[i];
+        capturedDeserialGamma[i] = ((float *)deserialCfg->gamma->param->data)[i];
+        capturedSerialGammaGrad[i] = ((float *)serialCfg->gamma->grad->data)[i];
+        capturedDeserialGammaGrad[i] = ((float *)deserialCfg->gamma->grad->data)[i];
+    }
+    float *capturedSerialBeta = reserveMemory(numberOfBetaElements * sizeof(float));
+    float *capturedDeserialBeta = reserveMemory(numberOfBetaElements * sizeof(float));
+    float *capturedSerialBetaGrad = reserveMemory(numberOfBetaElements * sizeof(float));
+    float *capturedDeserialBetaGrad = reserveMemory(numberOfBetaElements * sizeof(float));
+    for (size_t i = 0; i < numberOfBetaElements; i++) {
+        capturedSerialBeta[i] = ((float *)serialCfg->beta->param->data)[i];
+        capturedDeserialBeta[i] = ((float *)deserialCfg->beta->param->data)[i];
+        capturedSerialBetaGrad[i] = ((float *)serialCfg->beta->grad->data)[i];
+        capturedDeserialBetaGrad[i] = ((float *)deserialCfg->beta->grad->data)[i];
+    }
+
+    arithmetic_t capturedSerialForward = serialCfg->forwardMath;
+    arithmetic_t capturedDeserialForward = deserialCfg->forwardMath;
+    arithmetic_t capturedSerialPropLoss = serialCfg->propLossMath;
+    arithmetic_t capturedDeserialPropLoss = deserialCfg->propLossMath;
+    qtype_t capturedSerialOutputQ = serialCfg->outputQ->type;
+    qtype_t capturedDeserialOutputQ = deserialCfg->outputQ->type;
+    qtype_t capturedSerialPropLossQ = serialCfg->propLossQ->type;
+    qtype_t capturedDeserialPropLossQ = deserialCfg->propLossQ->type;
+
+    freeReservedMemory(betaGradSeed);
+    freeReservedMemory(gammaGradSeed);
+    freeReservedMemory(betaSeed);
+    freeReservedMemory(gammaSeed);
+    freeGroupNormLayer(deserialLayer);
+    freeGroupNormLayer(serialLayer);
+    freeQuantization(floatQ);
+
+    TEST_ASSERT_EQUAL(2, capturedSerialNumGroups);
+    TEST_ASSERT_EQUAL(capturedSerialNumGroups, capturedDeserialNumGroups);
+    TEST_ASSERT_EQUAL(4, capturedSerialNumChannels);
+    TEST_ASSERT_EQUAL(capturedSerialNumChannels, capturedDeserialNumChannels);
+    TEST_ASSERT_EQUAL_FLOAT(1e-3f, capturedSerialEps);
+    TEST_ASSERT_EQUAL_FLOAT(capturedSerialEps, capturedDeserialEps);
+
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedSerialGamma, capturedDeserialGamma,
+                                  numberOfGammaElements);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedSerialGammaGrad, capturedDeserialGammaGrad,
+                                  numberOfGammaElements);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedSerialBeta, capturedDeserialBeta, numberOfBetaElements);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedSerialBetaGrad, capturedDeserialBetaGrad,
+                                  numberOfBetaElements);
+
+    TEST_ASSERT_EQUAL(capturedSerialForward.type, capturedDeserialForward.type);
+    TEST_ASSERT_EQUAL(capturedSerialForward.roundingMode, capturedDeserialForward.roundingMode);
+    TEST_ASSERT_EQUAL(capturedSerialPropLoss.type, capturedDeserialPropLoss.type);
+    TEST_ASSERT_EQUAL(capturedSerialPropLoss.roundingMode, capturedDeserialPropLoss.roundingMode);
+    TEST_ASSERT_EQUAL(HALF_AWAY, capturedSerialForward.roundingMode);
+    TEST_ASSERT_EQUAL(SR_HALF_AWAY, capturedSerialPropLoss.roundingMode);
+
+    TEST_ASSERT_EQUAL(capturedSerialOutputQ, capturedDeserialOutputQ);
+    TEST_ASSERT_EQUAL(capturedSerialPropLossQ, capturedDeserialPropLossQ);
+
+    freeReservedMemory(capturedSerialGamma);
+    freeReservedMemory(capturedDeserialGamma);
+    freeReservedMemory(capturedSerialGammaGrad);
+    freeReservedMemory(capturedDeserialGammaGrad);
+    freeReservedMemory(capturedSerialBeta);
+    freeReservedMemory(capturedDeserialBeta);
+    freeReservedMemory(capturedSerialBetaGrad);
+    freeReservedMemory(capturedDeserialBetaGrad);
+}
+
 /*! QUANTIZATION round trip. `outputQ`/`propLossQ` are set to DIFFERENT
  *  storage dtypes (SYM / ASYM) so the record exercises BOTH the SYM
  *  roundingMode fix and ASYM's full qConfig (scale, qBits, roundingMode,
@@ -1317,6 +1470,7 @@ int main(void) {
     RUN_TEST(testRoundTripAdaptiveAvgPool1d);
     RUN_TEST(testRoundTripDropout);
     RUN_TEST(testRoundTripLayerNorm);
+    RUN_TEST(testRoundTripGroupNorm);
     RUN_TEST(testRoundTripQuantizationLayer);
     RUN_TEST(testSerializeTensorSymSubByteRoundTripsPackedData);
     RUN_TEST(testSerializeTensorBoolRoundTripsPackedData);

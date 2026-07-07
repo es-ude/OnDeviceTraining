@@ -14,7 +14,7 @@ and the grad-storage knobs. `SYM_INT32` is a **compute** format, never durable g
 storage (#261); `SYM`/`ASYM` are packed **storage** formats. Active training paths are
 FLOAT32 and SYM_INT32; SYM/ASYM/BOOL are partial.
 
-## Layers (`layerType_t`, 12 total)
+## Layers (`layerType_t`, 13 total)
 
 | Layer | Trainable | FLOAT32 arith | SYM_INT32 arith | Quant params | Quant grads | (De)serialize |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|
@@ -22,6 +22,7 @@ FLOAT32 and SYM_INT32; SYM/ASYM/BOOL are partial.
 | `CONV1D` | ✓ | ✓ | ✓ native (all 4 ops) | ✗ (#270 gate) | ✓ SYM/ASYM | ✓ |
 | `CONV1D_TRANSPOSED` | ✓ | ✓ | ✓ native (all 4 ops) | ✗ (#270 gate) | ✓ SYM/ASYM | ✓ |
 | `LAYERNORM` | ✓ | ✓ | ✓ native (fwd+bwd) | ~ SYM_INT32 only | ~ SYM path only | ✓ |
+| `GROUPNORM` | ✓ | ✓ | ✓ native (fwd+bwd) | ~ SYM_INT32 only | ~ SYM path only | ✓ |
 | `RELU` | – | ✓ | ✓ native (fwd+bwd) | n/a | n/a | ✓ |
 | `SOFTMAX` | – | ✓ | ~ dequant-to-float | n/a | n/a | ✓ |
 | `FLATTEN` | – | ✓ | ✓ scale-transparent | n/a | n/a | ✓ |
@@ -46,17 +47,17 @@ Notes on the qualified cells:
   conversionMatrix), not an arithmetic layer — it deliberately changes dtype/scale.
 - **Quant params** — trainable weight/bias storage. Linear/Conv are hard-gated to
   FLOAT32 by the `requireFloat32` init gate (#270); `getQLike` can clone SYM_INT32/
-  SYM/ASYM but `initWeightTensor`/`initBiasTensor` fail fast. **LayerNorm is the
-  exception**: gamma/beta may be stored SYM_INT32 (no requireFloat32 gate), but SYM/
-  ASYM are rejected by factory validation — hence "partial". No layer supports SYM/ASYM
-  native param storage.
+  SYM/ASYM but `initWeightTensor`/`initBiasTensor` fail fast. **LayerNorm and GroupNorm
+  are the exceptions**: gamma/beta may be stored SYM_INT32 (no requireFloat32 gate), but
+  SYM/ASYM are rejected by factory validation — hence "partial". No layer supports SYM/
+  ASYM native param storage.
 - **Quant grads** — the `weightGradStorage`/`biasGradStorage` knobs in `layerQuant_t`
   (plus `weightGradAccMode`/`biasGradAccMode`). Default is FLOAT32 everywhere; SYM and
   ASYM packed grad storage work for the four trainable layers via `gradInit`→`getQLike`
   (BOOL rejected, #269). Accumulate epilogue: SYM target honors both `OUT_ACC_FIXED_SCALE`
-  and `OUT_ACC_DYNAMIC_RESCALE`; ASYM honors `DYNAMIC_RESCALE` only. **LayerNorm caveat**:
-  packed grads are only writable on the SYM_INT32 backward path — its FLOAT32 backward
-  raw-casts grads and rejects packed storage.
+  and `OUT_ACC_DYNAMIC_RESCALE`; ASYM honors `DYNAMIC_RESCALE` only. **LayerNorm/GroupNorm
+  caveat**: packed grads are only writable on the SYM_INT32 backward path — their FLOAT32
+  backward raw-casts grads (and the dx wire) and rejects packed storage.
 
 ## Optimizer (`optimizerType_t`)
 

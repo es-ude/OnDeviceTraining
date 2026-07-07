@@ -29,7 +29,7 @@ trainingStats_t *tracedGrads(layer_t **model, size_t modelSize, lossConfig_t los
 
 /*! Fire `sink` for each trainable layer's weight and bias PARAM tensors, with
  *  phase "<tag>.weight" / "<tag>.bias". Param-less layers and NULL bias are
- *  skipped. (Trainable: LINEAR, CONV1D, CONV1D_TRANSPOSED, LAYERNORM.) */
+ *  skipped. (Trainable: LINEAR, CONV1D, CONV1D_TRANSPOSED, LAYERNORM, GROUPNORM.) */
 void traceModelWeights(layer_t **model, size_t modelSize, const char *tag, traceSink_t sink,
                        void *ctx);
 

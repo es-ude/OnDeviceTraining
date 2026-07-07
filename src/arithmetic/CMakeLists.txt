@@ -100,6 +100,10 @@ target_link_libraries(MinMax PRIVATE
         Common
 )
 
+add_library(Reduce Reduce.c)
+target_include_directories(Reduce PUBLIC include)
+target_link_libraries(Reduce PRIVATE m Common Div Sub Add Mul Square Arithmetic Tensor DTypes Quantization Rounding MinMax)
+
 add_library(Rounding Rounding.c)
 target_include_directories(Rounding PUBLIC include)
 target_link_libraries(Rounding PRIVATE

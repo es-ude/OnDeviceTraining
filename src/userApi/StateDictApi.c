@@ -12,6 +12,7 @@ static bool layerHasParameters(layer_t *layer) {
     case CONV1D:
     case CONV1D_TRANSPOSED:
     case LAYERNORM:
+    case GROUPNORM:
         return true;
     case RELU:
     case SOFTMAX:

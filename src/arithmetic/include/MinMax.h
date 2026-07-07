@@ -4,6 +4,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+float absFloat32(float a);
+float maxFloat32s(float a, float b);
+
 float findAbsMaxFloat(uint8_t *bytes, size_t numberOfElements);
 float findMaxFloat(uint8_t *bytes, size_t numberOfElements);
 float findMinFloat(uint8_t *bytes, size_t numberOfElements);

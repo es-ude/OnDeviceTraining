@@ -128,7 +128,7 @@ void testInference_DropoutIsIdentity(void) {
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, captured, 4);
 }
 
-// Exercises Optimizer.calcNumberOfStatesByLayerType + SgdApi state-alloc:
+// Exercises Optimizer.calcNumberOfStatesByLayer + SgdApi state-alloc:
 // Dropout is parameter-less => zero optimizer state.
 void testOptimizer_ZeroStatesForDropout(void) {
     quantization_t *fq = quantizationInitFloat();

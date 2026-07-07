@@ -7,6 +7,7 @@
 #include "Conv1dTransposed.h"
 #include "Dropout.h"
 #include "Flatten.h"
+#include "GroupNorm.h"
 #include "LayerNorm.h"
 #include "Linear.h"
 #include "MaxPool1d.h"
@@ -28,7 +29,8 @@ layerFunctions_t layerFunctions[] = {
     [ADAPTIVE_AVGPOOL1D] = {adaptiveAvgPool1dForward, adaptiveAvgPool1dBackward,
                             adaptiveAvgPool1dCalcOutputShape},
     [DROPOUT] = {dropoutForward, dropoutBackward, dropoutCalcOutputShape},
-    [LAYERNORM] = {layerNormForward, layerNormBackward, layerNormCalcOutputShape}};
+    [LAYERNORM] = {layerNormForward, layerNormBackward, layerNormCalcOutputShape},
+    [GROUPNORM] = {groupNormForward, groupNormBackward, groupNormCalcOutputShape}};
 
 void initLayer(layer_t *layer, layerType_t type, layerConfig_t *config) {
     layer->type = type;

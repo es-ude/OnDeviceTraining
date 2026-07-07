@@ -105,6 +105,20 @@ add_elastic_ai_unit_test(
 
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
+        Reduce
+        MORE_LIBS
+        m
+        Tensor
+        TensorApi
+        QuantizationApi
+        Arithmetic
+        StorageApi
+        MinMax
+        odt_test_death
+)
+
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
         Rounding
         MORE_LIBS
         Tensor

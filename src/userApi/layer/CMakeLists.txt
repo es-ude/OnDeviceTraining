@@ -150,6 +150,21 @@ target_link_libraries(LayerNormApi PRIVATE
         StorageApi
 )
 
+add_library(GroupNormApi GroupNormApi.c)
+target_include_directories(GroupNormApi PUBLIC include)
+target_link_libraries(GroupNormApi PRIVATE
+        ArithmeticType
+        Tensor
+        TensorApi
+        QuantizationApi
+        Rounding
+        Layer
+        GroupNorm
+        LayerQuant
+        Common
+        StorageApi
+)
+
 add_library(QuantLayerApi QuantLayerApi.c)
 target_include_directories(QuantLayerApi PUBLIC include)
 target_link_libraries(QuantLayerApi PRIVATE

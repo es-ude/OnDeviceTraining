@@ -5,6 +5,14 @@
 #include "DTypes.h"
 #include "MinMax.h"
 
+float absFloat32(float a) {
+    return fabsf(a);
+}
+
+float maxFloat32s(float a, float b) {
+    return a > b ? a : b;
+}
+
 float findAbsMaxFloat(uint8_t *bytes, size_t numberOfElements) {
     float *values = (float *)bytes;
     float max = fabsf(values[0]);

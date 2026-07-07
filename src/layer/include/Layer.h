@@ -13,6 +13,7 @@ typedef struct avgPool1dConfig avgPool1dConfig_t;
 typedef struct adaptiveAvgPool1dConfig adaptiveAvgPool1dConfig_t;
 typedef struct dropoutConfig dropoutConfig_t;
 typedef struct layerNormConfig layerNormConfig_t;
+typedef struct groupNormConfig groupNormConfig_t;
 typedef struct quantizationConfig quantizationConfig_t;
 
 typedef enum layerType {
@@ -27,7 +28,8 @@ typedef enum layerType {
     QUANTIZATION,
     ADAPTIVE_AVGPOOL1D,
     DROPOUT,
-    LAYERNORM
+    LAYERNORM,
+    GROUPNORM
 } layerType_t;
 
 typedef enum layerQType { FLOAT_LAYER, ASYM_LAYER } layerQType_t;
@@ -43,6 +45,7 @@ typedef union layerConfig {
     adaptiveAvgPool1dConfig_t *adaptiveAvgPool1d;
     dropoutConfig_t *dropout;
     layerNormConfig_t *layerNorm;
+    groupNormConfig_t *groupNorm;
     quantizationConfig_t *quantization;
 } layerConfig_t;
 

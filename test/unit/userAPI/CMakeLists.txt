@@ -224,6 +224,40 @@ target_link_libraries(UnitTestLayerNormIntegration PRIVATE
 )
 __register_target_as_unit_test(UnitTestLayerNormIntegration)
 
+add_executable(UnitTestGroupNormIntegration UnitTestGroupNormIntegration.c)
+target_link_libraries(UnitTestGroupNormIntegration PRIVATE
+        unity
+        TrainingLoopApi
+        TrainingEpochDefault
+        TrainingBatchDefault
+        CalculateGradsSequential
+        CommonLayerLibs
+        GroupNormApi
+        GroupNorm
+        Reduce
+        Conv1dApi
+        Conv1d
+        AdaptivePool1dApi
+        FlattenApi
+        SoftmaxApi
+        ReluApi
+        LinearApi
+        SgdApi
+        Sgd
+        Optimizer
+        StateDictApi
+        LayerQuant
+        LayerCommon
+        TensorApi
+        QuantizationApi
+        LossFunction
+        InferenceApi
+        DataLoader
+        DataLoaderApi
+        StorageApi
+)
+__register_target_as_unit_test(UnitTestGroupNormIntegration)
+
 add_executable(UnitTestAdaptiveAvgPool1dIntegration UnitTestAdaptiveAvgPool1dIntegration.c)
 target_link_libraries(UnitTestAdaptiveAvgPool1dIntegration PRIVATE
         unity
@@ -311,6 +345,35 @@ target_link_libraries(UnitTestFlattenIntegration PRIVATE
         StorageApi
 )
 __register_target_as_unit_test(UnitTestFlattenIntegration)
+
+add_executable(UnitTestBiaslessConvOptim UnitTestBiaslessConvOptim.c)
+target_link_libraries(UnitTestBiaslessConvOptim PRIVATE
+        unity
+        Conv1dApi
+        Conv1d
+        Conv1dTransposedApi
+        Conv1dTransposed
+        ConvTranspose1dKernel
+        Conv1dKernel
+        SlidingWindow1d
+        SgdApi
+        Sgd
+        Optimizer
+        ArithmeticType
+        Common
+        LayerQuant
+        LayerCommon
+        QuantizationApi
+        Quantization
+        Rounding
+        Distributions
+        RNG
+        Kernel
+        Tensor
+        TensorApi
+        StorageApi
+)
+__register_target_as_unit_test(UnitTestBiaslessConvOptim)
 
 add_executable(UnitTestOptimizerScaling UnitTestOptimizerScaling.c)
 target_link_libraries(UnitTestOptimizerScaling PRIVATE

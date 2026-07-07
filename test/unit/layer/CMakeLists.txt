@@ -267,6 +267,38 @@ add_dependencies(UnitTestLayerNorm generate_expected_layernorm_sym)
 add_dependencies(UnitTestLayerNorm generate_expected_layernorm_sym_bwd)
 target_include_directories(UnitTestLayerNorm PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
+set(GEN_GROUPNORM_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_groupnorm.h)
+add_custom_command(
+        OUTPUT ${GEN_GROUPNORM_HEADER}
+        COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_groupnorm.py
+                --out ${GEN_GROUPNORM_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_groupnorm.py
+        COMMENT "Generating expected_groupnorm.h via PyTorch"
+        VERBATIM
+)
+add_custom_target(generate_expected_groupnorm
+        DEPENDS ${GEN_GROUPNORM_HEADER})
+
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
+        GroupNorm
+        MORE_LIBS
+        ArithmeticType
+        CommonLayerLibs
+        TensorApi
+        QuantizationApi
+        GroupNormApi
+        LayerQuant
+        Quantization
+        Rounding
+        Arithmetic
+        StorageApi
+        Reduce
+        odt_test_death
+)
+add_dependencies(UnitTestGroupNorm generate_expected_groupnorm)
+target_include_directories(UnitTestGroupNorm PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         QuantizationLayer

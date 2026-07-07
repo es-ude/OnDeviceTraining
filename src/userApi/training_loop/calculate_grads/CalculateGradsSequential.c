@@ -12,6 +12,7 @@
 #include "Conv1d.h"
 #include "Conv1dTransposed.h"
 #include "Dropout.h"
+#include "GroupNorm.h"
 #include "Layer.h"
 #include "LayerConfigAccess.h"
 #include "LayerNorm.h"
@@ -132,6 +133,10 @@ static bool layerParameters(layer_t *layer, parameter_t **weightOut, parameter_t
     case LAYERNORM:
         *weightOut = layer->config->layerNorm->gamma;
         *biasOut = layer->config->layerNorm->beta;
+        return true;
+    case GROUPNORM:
+        *weightOut = layer->config->groupNorm->gamma;
+        *biasOut = layer->config->groupNorm->beta;
         return true;
     default:
         return false;

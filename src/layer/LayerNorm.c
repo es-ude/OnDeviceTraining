@@ -13,8 +13,11 @@
 #include "Common.h"
 #include "ExecuteOp.h"
 #include "Layer.h"
+#include "Mul.h"
 #include "Quantization.h"
+#include "Reduce.h"
 #include "Rounding.h"
+#include "Sub.h"
 #include "Tensor.h"
 #include "TensorConversion.h"
 
@@ -112,33 +115,61 @@ static size_t layerNormPhysOffset(tensor_t *t, size_t numNormDims, size_t g, siz
     return calcElementIndexByIndices(rank, t->shape->dimensions, idx, t->shape->orderOfDimensions);
 }
 
-/* Two-pass per-group stats: pass 1 mean, pass 2 biased variance (÷N, NOT N-1),
- * eps inside the sqrt. Shared by forward and backward so the backward
- * recompute can never desync from the forward definition. */
-static void layerNormGroupStats(tensor_t *t, size_t numNormDims, size_t g, size_t N, float eps,
-                                float *outMean, float *outInvSigma) {
-    float mean = 0.0f;
-    for (size_t j = 0; j < N; j++) {
-        mean += ((float *)t->data)[layerNormPhysOffset(t, numNormDims, g, j)];
-    }
-    mean /= (float)N;
+/* All-groups stats via the Reduce arithmetic module: fills mean[G] and
+ * invSigma[G] (caller stack scratch) for the WHOLE tensor with one pass each of
+ * meanOverTrailingAxes* + varianceBiasedOverTrailingAxes* (k = numNormDims
+ * collapses the trailing D norm dims into the G leading blocks; Reduce's block
+ * order == layerNormPhysOffset's group order, so mean[g]/invSigma[g] index the
+ * same group g the layer iterates), then invSigma[g] = 1/sqrt(var[g]+eps).
+ * Variance is BIASED (÷N, NOT N-1); eps is INSIDE the sqrt.
+ *
+ * ONE helper for BOTH FLOAT32 and SYM_INT32, forward AND backward, so a layer's
+ * passes can never desync on the stats definition. The path is chosen by input
+ * dtype: SYM_INT32 dequants+centers in float INSIDE Reduce (guarded
+ * qMaxBits <= 16) — same math as the old inline mantissa loops (d = q*scale -
+ * mean, acc += d*d, ÷N).
+ *
+ * Memory: this deliberately trades the old per-group recompute-over-store (no
+ * scratch at all, not even G floats) for 3*G floats of stack at peak (the
+ * caller's mean[G] + invSigma[G], plus var[G] local to this helper), computed
+ * ONCE and SHARED across both passes — not 2*G per pass. The approved tradeoff
+ * (spec §6) keeps the statistics math in the arithmetic module, not the layer.
+ * Callers MUST guarantee G > 0 (the stats
+ * VLAs and Reduce's block loop are undefined at G == 0); every caller early-outs
+ * on G == 0 || N == 0 before calling here. */
+static void layerNormAllGroupStats(tensor_t *t, size_t numNormDims, size_t G, float eps,
+                                   float *mean, float *invSigma) {
+    size_t statsDims[1] = {G};
+    size_t statsOrder[1] = {0};
+    shape_t statsShape;
+    setShape(&statsShape, statsDims, 1, statsOrder);
+    quantization_t statsQ;
+    initFloat32Quantization(&statsQ);
 
-    float var = 0.0f;
-    for (size_t j = 0; j < N; j++) {
-        float d = ((float *)t->data)[layerNormPhysOffset(t, numNormDims, g, j)] - mean;
-        var += d * d;
-    }
-    var /= (float)N; /* BIASED — divide by N, not N-1 */
+    float var[G];
+    tensor_t meanT;
+    setTensorValues(&meanT, (uint8_t *)mean, &statsShape, &statsQ, NULL);
+    tensor_t varT;
+    setTensorValues(&varT, (uint8_t *)var, &statsShape, &statsQ, NULL);
 
-    *outMean = mean;
-    *outInvSigma = 1.0f / sqrtf(var + eps); /* eps INSIDE sqrt */
+    if (t->quantization->type == SYM_INT32) {
+        meanOverTrailingAxesSymInt32(t, numNormDims, &meanT);
+        varianceBiasedOverTrailingAxesSymInt32(t, numNormDims, &meanT, &varT);
+    } else {
+        meanOverTrailingAxesFloat32(t, numNormDims, &meanT);
+        varianceBiasedOverTrailingAxesFloat32(t, numNormDims, &meanT, &varT);
+    }
+    for (size_t g = 0; g < G; g++) {
+        invSigma[g] = rsqrtFloat32(var[g], eps); /* eps INSIDE sqrt */
+    }
 }
 
 /* The SYM_INT32 path reinterprets tensor data as int32 mantissas; a FLOAT32
  * buffer read that way is silent garbage, so fail fast. The int12 bound
  * (ODT_SYM_OPERAND_QMAXBITS) is required by the affine product q*gamma_q
- * (out[off]*gammaQ[j]); the per-group mantissa-SUM is a value-sum and is
- * sound at any qMaxBits <= 16. (#227) */
+ * (out[off]*gammaQ[j]); the mantissa-SUM behind the stats is a value-sum and is
+ * sound at any qMaxBits <= 16 (it now lives in the Reduce module, which enforces
+ * that looser <= 16 bound itself). (#227) */
 static void layerNormValidateSymTensor(tensor_t *t, const char *what) {
     if (t->quantization->type != SYM_INT32) {
         PRINT_ERROR("LayerNorm SYM_INT32: %s must be SYM_INT32", what);
@@ -150,33 +181,6 @@ static void layerNormValidateSymTensor(tensor_t *t, const char *what) {
                     (unsigned)qc->qMaxBits, (unsigned)ODT_SYM_OPERAND_QMAXBITS);
         exit(1);
     }
-}
-
-/* Per-group stats from SYM_INT32 mantissas: int32 accumulator for the mantissa
- * sum (mantissas are int16-range per the qMaxBits<=16 guard, so an int32 sum
- * holds ~65536 terms), then a float pass for the biased variance (/N, NOT N-1)
- * with eps INSIDE the sqrt. SYM twin of layerNormGroupStats (which reads float
- * data directly and remains the single source of truth for the FLOAT32
- * forward+backward); PR-3's SYM backward must recompute through THIS helper. */
-static void layerNormGroupStatsSymInt32(tensor_t *t, size_t numNormDims, size_t g, size_t N,
-                                        float eps, float inScale, float *outMean,
-                                        float *outInvSigma) {
-    int32_t *in = (int32_t *)t->data;
-    int32_t sumQ = 0;
-    for (size_t j = 0; j < N; j++) {
-        sumQ += in[layerNormPhysOffset(t, numNormDims, g, j)];
-    }
-    float mean = inScale * ((float)sumQ / (float)N);
-
-    float var = 0.0f;
-    for (size_t j = 0; j < N; j++) {
-        float d = (float)in[layerNormPhysOffset(t, numNormDims, g, j)] * inScale - mean;
-        var += d * d;
-    }
-    var /= (float)N; /* BIASED — divide by N, not N-1 */
-
-    *outMean = mean;
-    *outInvSigma = 1.0f / sqrtf(var + eps); /* eps INSIDE sqrt */
 }
 
 /* Affine y = gamma*n + beta as a SEPARATE quantized elementwise stage, applied
@@ -237,9 +241,15 @@ static void layerNormAffineSymInt32(size_t numNormDims, tensor_t *gamma, tensor_
  *         Multi-group REQUIRES the per-group 1/sigma_g to hit the DATA — one
  *         per-tensor scale cannot encode G different sigmas; only the global
  *         stretch lives in the scale.
- * pass 2: recompute stats per group (recompute-over-store: no scratch at all,
- *         not even G floats — stateless and MCU-friendly), normalize, stretch
- *         by K = qMax/absmax, round-clamp.
+ * pass 2: normalize the stored per-group stats, stretch by K = qMax/absmax,
+ *         round-clamp. Stats come ONCE from the Reduce module into G-float stack
+ *         scratch (layerNormAllGroupStats) and both passes read them — the
+ *         approved tradeoff (spec §6) of 3*G floats of stack at peak (mean[G] +
+ *         invSigma[G] + the helper-local var[G]), computed once and shared
+ *         across both passes, for keeping the stats math in the arithmetic
+ *         module (was: per-group recompute-over-store, no scratch at all).
+ *         Stats are computed only when
+ *         !allConstant (the constant/zero-absmax branch never reads them).
  * Output scale s_norm = 1/K, then the affine stage folds in gamma/beta and
  * writes the (raw, unrestored) producer scale. gamma/beta are passed
  * explicitly (funnel operands, PR1b.2) rather than read via cfg, mirroring
@@ -294,17 +304,17 @@ static void layerNormForwardSymInt32(layerNormConfig_t *cfg, tensor_t *gamma, te
 
     /* Pass 1: global absmax of n = (x_q*s_x - mu)/sigma over all groups.
      * Skipped when allConstant — absMax stays 0.0f, caught by the unified guard
-     * below. */
+     * below; stats are only materialized on this branch (mean/invSigma are dead
+     * in the constant/zero-absmax branch). */
+    float mean[G];
+    float invSigma[G];
     float absMax = 0.0f;
     if (!allConstant) {
+        layerNormAllGroupStats(input, cfg->numNormDims, G, cfg->eps, mean, invSigma);
         for (size_t g = 0; g < G; g++) {
-            float mean;
-            float invSigma;
-            layerNormGroupStatsSymInt32(input, cfg->numNormDims, g, N, cfg->eps, inScale, &mean,
-                                        &invSigma);
             for (size_t j = 0; j < N; j++) {
                 size_t off = layerNormPhysOffset(input, cfg->numNormDims, g, j);
-                float a = fabsf(((float)in[off] * inScale - mean) * invSigma);
+                float a = fabsf(((float)in[off] * inScale - mean[g]) * invSigma[g]);
                 if (a > absMax) {
                     absMax = a;
                 }
@@ -328,15 +338,11 @@ static void layerNormForwardSymInt32(layerNormConfig_t *cfg, tensor_t *gamma, te
         float K = qMax / absMax;
         sNorm = 1.0f / K;
 
-        /* Pass 2: recompute stats, normalize, quantize. */
+        /* Pass 2: normalize the stored stats, quantize. */
         for (size_t g = 0; g < G; g++) {
-            float mean;
-            float invSigma;
-            layerNormGroupStatsSymInt32(input, cfg->numNormDims, g, N, cfg->eps, inScale, &mean,
-                                        &invSigma);
             for (size_t j = 0; j < N; j++) {
                 size_t inOff = layerNormPhysOffset(input, cfg->numNormDims, g, j);
-                float n = ((float)in[inOff] * inScale - mean) * invSigma;
+                float n = ((float)in[inOff] * inScale - mean[g]) * invSigma[g];
                 size_t outOff = layerNormPhysOffset(output, cfg->numNormDims, g, j);
                 out[outOff] = roundByMode(clamp(n * K, qMin, qMax), outQC->roundingMode);
             }
@@ -355,17 +361,20 @@ static void layerNormForwardFloat(layerNormConfig_t *cfg, tensor_t *gamma, tenso
 
     size_t G, N;
     layerNormGroupSizes(input, cfg->numNormDims, &G, &N);
+    if (G == 0 || N == 0) {
+        return; /* nothing to normalize (empty group geometry); cf. #160 */
+    }
+
+    float mean[G];
+    float invSigma[G];
+    layerNormAllGroupStats(input, cfg->numNormDims, G, cfg->eps, mean, invSigma);
 
     for (size_t grp = 0; grp < G; grp++) {
-        float mean;
-        float invSigma;
-        layerNormGroupStats(input, cfg->numNormDims, grp, N, cfg->eps, &mean, &invSigma);
-
         for (size_t j = 0; j < N; j++) {
             size_t off = layerNormPhysOffset(input, cfg->numNormDims, grp, j);
-            float nval = (in[off] - mean) * invSigma;
+            float nval = mulFloat32s(subFloat32s(in[off], mean[grp]), invSigma[grp]);
             size_t outOff = layerNormPhysOffset(output, cfg->numNormDims, grp, j);
-            out[outOff] = g[j] * nval + b[j];
+            out[outOff] = addFloat32s(mulFloat32s(g[j], nval), b[j]);
         }
     }
 }
@@ -418,13 +427,18 @@ static void layerNormBackwardFloat(layerNormConfig_t *cfg, tensor_t *forwardInpu
 
     size_t G, N;
     layerNormGroupSizes(forwardInput, cfg->numNormDims, &G, &N);
+    if (G == 0 || N == 0) {
+        return; /* empty group geometry: no grad increments, nothing to scatter */
+    }
+
+    /* Stats computed ONCE up front through the shared Reduce helper (was:
+     * per-group recompute-over-store); mean[g]/invSigma[g] feed both the grad
+     * pass and the dx scatter, so they cannot desync from the forward. */
+    float mean[G];
+    float invSigma[G];
+    layerNormAllGroupStats(forwardInput, cfg->numNormDims, G, cfg->eps, mean, invSigma);
 
     for (size_t g = 0; g < G; g++) {
-        /* Recompute stats from forwardInput (no cache). */
-        float mean;
-        float invSigma;
-        layerNormGroupStats(forwardInput, cfg->numNormDims, g, N, cfg->eps, &mean, &invSigma);
-
         /* Pass over the group: build n, accumulate dgamma/dbeta, and the two
          * reductions meanDn, meanDnN. */
         float meanDn = 0.0f;
@@ -432,7 +446,7 @@ static void layerNormBackwardFloat(layerNormConfig_t *cfg, tensor_t *forwardInpu
         for (size_t j = 0; j < N; j++) {
             size_t xoff = layerNormPhysOffset(forwardInput, cfg->numNormDims, g, j);
             size_t dyoff = layerNormPhysOffset(loss, cfg->numNormDims, g, j);
-            float nval = (x[xoff] - mean) * invSigma;
+            float nval = (x[xoff] - mean[g]) * invSigma[g];
             float dyv = dy[dyoff];
             dbeta[j] += dyv;         /* SUM over groups */
             dgamma[j] += dyv * nval; /* SUM over groups */
@@ -447,24 +461,25 @@ static void layerNormBackwardFloat(layerNormConfig_t *cfg, tensor_t *forwardInpu
         for (size_t j = 0; j < N; j++) {
             size_t xoff = layerNormPhysOffset(forwardInput, cfg->numNormDims, g, j);
             size_t dyoff = layerNormPhysOffset(loss, cfg->numNormDims, g, j);
-            float nval = (x[xoff] - mean) * invSigma;
+            float nval = (x[xoff] - mean[g]) * invSigma[g];
             float dn = dy[dyoff] * gamma[j];
-            float dxv = invSigma * (dn - meanDn - nval * meanDnN);
+            float dxv = invSigma[g] * (dn - meanDn - nval * meanDnN);
             size_t dxoff = layerNormPhysOffset(propLoss, cfg->numNormDims, g, j);
             dx[dxoff] = dxv;
         }
     }
 }
 
-/* SYM_INT32 backward (spec 2026-06-05, verified scheme). mu/sigma/n are
- * RECOMPUTED from forwardInput through layerNormGroupStatsSymInt32 — the SAME
+/* SYM_INT32 backward (spec 2026-06-05, verified scheme). mu/sigma are computed
+ * ONCE from forwardInput through layerNormAllGroupStats — the SAME shared Reduce
  * helper the forward uses, so backward can never desync from the forward
- * definition (no cache). dy and gamma are dequantized per element via their
- * own scales (float math; dy/gamma mantissas are never integer-summed — only
- * forwardInput is subject to the int32 mantissa-sum bound).
- * pass A: per-group recompute; grad increments (SUM over groups) + global
- *         |dx| absmax (recompute-over-store, no scratch).
- * pass B: recompute stats per group, recompute dx, quantize into propLoss via
+ * definition — into G-float stack scratch that both passes read (was: per-group
+ * recompute-over-store; approved 2*G-float tradeoff, spec §6). dy and gamma are
+ * dequantized per element via their own scales (float math; dy/gamma mantissas
+ * are never integer-summed — only forwardInput is subject to the int32
+ * mantissa-sum bound).
+ * pass A: grad increments (SUM over groups) + global |dx| absmax.
+ * pass B: recompute dx from the same stored stats and quantize into propLoss via
  *         the convertFloatTensorToSymInt32Tensor idiom (scale = absmax/qMax,
  *         round-clamp; absmax==0 -> zeros, scale 1.0). The propLoss scale is
  *         data-dependent and REFRESHED ON EVERY CALL. */
@@ -502,19 +517,21 @@ static void layerNormBackwardSymInt32(layerNormConfig_t *cfg, tensor_t *forwardI
         dbetaInc[j] = 0.0f;
     }
 
+    /* Stats once from forwardInput via the shared Reduce helper; mean[g]/
+     * invSigma[g] drive both pass A and pass B (was: per-group recompute). */
+    float mean[G];
+    float invSigma[G];
+    layerNormAllGroupStats(forwardInput, cfg->numNormDims, G, cfg->eps, mean, invSigma);
+
     float absMax = 0.0f;
-    /* Pass A: per-group recompute; grad increments (SUM over groups). */
+    /* Pass A: grad increments (SUM over groups) + global |dx| absmax. */
     for (size_t g = 0; g < G; g++) {
-        float mean;
-        float invSigma;
-        layerNormGroupStatsSymInt32(forwardInput, cfg->numNormDims, g, N, cfg->eps, inScale, &mean,
-                                    &invSigma);
         float meanDn = 0.0f;
         float meanDnN = 0.0f;
         for (size_t j = 0; j < N; j++) {
             size_t xoff = layerNormPhysOffset(forwardInput, cfg->numNormDims, g, j);
             size_t dyoff = layerNormPhysOffset(loss, cfg->numNormDims, g, j);
-            float nval = ((float)xq[xoff] * inScale - mean) * invSigma;
+            float nval = ((float)xq[xoff] * inScale - mean[g]) * invSigma[g];
             float dyv = (float)dyq[dyoff] * dyScale;
             dbetaInc[j] += dyv;         /* SUM over groups */
             dgammaInc[j] += dyv * nval; /* SUM over groups */
@@ -527,9 +544,9 @@ static void layerNormBackwardSymInt32(layerNormConfig_t *cfg, tensor_t *forwardI
         for (size_t j = 0; j < N; j++) {
             size_t xoff = layerNormPhysOffset(forwardInput, cfg->numNormDims, g, j);
             size_t dyoff = layerNormPhysOffset(loss, cfg->numNormDims, g, j);
-            float nval = ((float)xq[xoff] * inScale - mean) * invSigma;
+            float nval = ((float)xq[xoff] * inScale - mean[g]) * invSigma[g];
             float dn = ((float)dyq[dyoff] * dyScale) * ((float)gammaQ[j] * gammaScale);
-            float a = fabsf(invSigma * (dn - meanDn - nval * meanDnN));
+            float a = fabsf(invSigma[g] * (dn - meanDn - nval * meanDnN));
             if (a > absMax) {
                 absMax = a;
             }
@@ -582,22 +599,18 @@ static void layerNormBackwardSymInt32(layerNormConfig_t *cfg, tensor_t *forwardI
     }
 
     float dxScale = absMax / qMax;
-    /* Pass B: recompute and quantize. The dx expression is textually IDENTICAL
-     * to pass A's absmax expression so gcc's -ffp-contract=fast contracts both
-     * the same way; the clamp absorbs any residual divergence. The propLoss
-     * scale is data-dependent and REFRESHED ON EVERY CALL — a stale scale
-     * silently corrupts the downstream layer. */
+    /* Pass B: recompute dx from the stored stats and quantize. The dx expression
+     * is textually IDENTICAL to pass A's absmax expression so gcc's
+     * -ffp-contract=fast contracts both the same way; the clamp absorbs any
+     * residual divergence. The propLoss scale is data-dependent and REFRESHED ON
+     * EVERY CALL — a stale scale silently corrupts the downstream layer. */
     for (size_t g = 0; g < G; g++) {
-        float mean;
-        float invSigma;
-        layerNormGroupStatsSymInt32(forwardInput, cfg->numNormDims, g, N, cfg->eps, inScale, &mean,
-                                    &invSigma);
         float meanDn = 0.0f;
         float meanDnN = 0.0f;
         for (size_t j = 0; j < N; j++) {
             size_t xoff = layerNormPhysOffset(forwardInput, cfg->numNormDims, g, j);
             size_t dyoff = layerNormPhysOffset(loss, cfg->numNormDims, g, j);
-            float nval = ((float)xq[xoff] * inScale - mean) * invSigma;
+            float nval = ((float)xq[xoff] * inScale - mean[g]) * invSigma[g];
             float dyv = (float)dyq[dyoff] * dyScale;
             float dn = dyv * ((float)gammaQ[j] * gammaScale);
             meanDn += dn;
@@ -608,9 +621,9 @@ static void layerNormBackwardSymInt32(layerNormConfig_t *cfg, tensor_t *forwardI
         for (size_t j = 0; j < N; j++) {
             size_t xoff = layerNormPhysOffset(forwardInput, cfg->numNormDims, g, j);
             size_t dyoff = layerNormPhysOffset(loss, cfg->numNormDims, g, j);
-            float nval = ((float)xq[xoff] * inScale - mean) * invSigma;
+            float nval = ((float)xq[xoff] * inScale - mean[g]) * invSigma[g];
             float dn = ((float)dyq[dyoff] * dyScale) * ((float)gammaQ[j] * gammaScale);
-            float dxv = invSigma * (dn - meanDn - nval * meanDnN);
+            float dxv = invSigma[g] * (dn - meanDn - nval * meanDnN);
             size_t dxoff = layerNormPhysOffset(propLoss, cfg->numNormDims, g, j);
             dxq[dxoff] = roundByMode(clamp(dxv / dxScale, qMin, qMax), plQC->roundingMode);
         }
@@ -649,6 +662,18 @@ void layerNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
                         "issue, #261) — got gamma grad dtype %d, beta grad dtype %d",
                         (int)cfg->gamma->grad->quantization->type,
                         (int)cfg->beta->grad->quantization->type);
+            exit(1);
+        }
+        /* layerNormBackwardFloat also writes propLoss->data (dx) via a raw
+         * float* cast. A SYM-storage propLossQ (SYM_INT32 fixed-point, or packed
+         * sub-byte SYM) paired with FLOAT32 propLossMath is factory-constructible,
+         * and that raw write silently corrupts the mantissa/packed buffer — fail
+         * fast instead (same #261 gap the gamma/beta grad guard closes). */
+        if (propLoss->quantization->type != FLOAT32) {
+            PRINT_ERROR("LayerNorm backward: FLOAT32 backward writes propLoss (dx) via a raw "
+                        "float* cast — SYM/packed propLoss storage requires the funnel route "
+                        "(follow-up issue, #261) — got propLoss dtype %d",
+                        (int)propLoss->quantization->type);
             exit(1);
         }
         layerNormBackwardFloat(cfg, forwardInput, loss, propLoss);

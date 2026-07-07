@@ -4,6 +4,8 @@ target_link_libraries(Optimizer PRIVATE
         Quantization
         Rounding
         Layer
+        Conv1d
+        Conv1dTransposed
         Tensor
         Common
 )

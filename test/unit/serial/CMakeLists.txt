@@ -61,6 +61,9 @@ add_elastic_ai_unit_test(
         DropoutApi
         LayerNorm
         LayerNormApi
+        GroupNorm
+        GroupNormApi
+        Reduce
         QuantizationLayer
         QuantLayerApi
 

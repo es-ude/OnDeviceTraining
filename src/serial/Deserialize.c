@@ -12,6 +12,7 @@
 #include "Deserialize.h"
 #include "DeserializeInternal.h"
 #include "Dropout.h"
+#include "GroupNorm.h"
 #include "Kernel.h"
 #include "LayerNorm.h"
 #include "Linear.h"
@@ -281,6 +282,22 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         deserializeArithmetic(&layerNormConfig->propLossMath, f);
         deserializeQuantization(layerNormConfig->outputQ, f);
         deserializeQuantization(layerNormConfig->propLossQ, f);
+        break;
+    case GROUPNORM:
+        groupNormConfig_t *groupNormConfig = layer->config->groupNorm;
+        uint32_t groupNormNumGroups;
+        deserialize(&groupNormNumGroups, 1, sizeof(uint32_t), f);
+        groupNormConfig->numGroups = (size_t)groupNormNumGroups;
+        uint32_t groupNormNumChannels;
+        deserialize(&groupNormNumChannels, 1, sizeof(uint32_t), f);
+        groupNormConfig->numChannels = (size_t)groupNormNumChannels;
+        deserialize(&groupNormConfig->eps, 1, sizeof(float), f);
+        deserializeParameter(groupNormConfig->gamma, f);
+        deserializeParameter(groupNormConfig->beta, f);
+        deserializeArithmetic(&groupNormConfig->forwardMath, f);
+        deserializeArithmetic(&groupNormConfig->propLossMath, f);
+        deserializeQuantization(groupNormConfig->outputQ, f);
+        deserializeQuantization(groupNormConfig->propLossQ, f);
         break;
     default:
         PRINT_ERROR("Unsupported layer type!\n");

@@ -4,6 +4,7 @@
 #include "Common.h"
 #include "Conv1d.h"
 #include "Conv1dTransposed.h"
+#include "GroupNorm.h"
 #include "LayerNorm.h"
 #include "Linear.h"
 #include "Tensor.h"
@@ -85,6 +86,29 @@ void layerLoadWeights(layer_t *layer, float *weightData, float *biasData) {
         }
         if (biasData == NULL) {
             PRINT_ERROR("layerLoadWeights LAYERNORM: beta required but biasData is NULL");
+            exit(1);
+        }
+        tensor_t *betaTensor = cfg->beta->param;
+        size_t numBeta = calcNumberOfElementsByTensor(betaTensor);
+        tensorFillFromFloatBuffer(betaTensor, biasData, numBeta);
+        break;
+    }
+    case GROUPNORM: {
+        groupNormConfig_t *cfg = layer->config->groupNorm;
+        if (cfg->gamma == NULL) {
+            PRINT_ERROR("layerLoadWeights GROUPNORM: layer has no gamma parameter");
+            exit(1);
+        }
+        tensor_t *gammaTensor = cfg->gamma->param;
+        size_t numGamma = calcNumberOfElementsByTensor(gammaTensor);
+        tensorFillFromFloatBuffer(gammaTensor, weightData, numGamma);
+
+        if (cfg->beta == NULL) {
+            PRINT_ERROR("layerLoadWeights GROUPNORM: layer has no beta parameter");
+            exit(1);
+        }
+        if (biasData == NULL) {
+            PRINT_ERROR("layerLoadWeights GROUPNORM: beta required but biasData is NULL");
             exit(1);
         }
         tensor_t *betaTensor = cfg->beta->param;

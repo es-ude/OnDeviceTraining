@@ -46,3 +46,37 @@ add_elastic_ai_unit_test(
 )
 add_dependencies(UnitTestLrScheduler generate_expected_lr_scheduler)
 target_include_directories(UnitTestLrScheduler PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+
+set(GEN_ADAMW_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_adamw.h)
+add_custom_command(
+        OUTPUT ${GEN_ADAMW_HEADER}
+        COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_adamw.py
+                --out ${GEN_ADAMW_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_adamw.py
+        COMMENT "Generating expected_adamw.h (documented-order replication + torch sanity)"
+        VERBATIM
+)
+add_custom_target(generate_expected_adamw DEPENDS ${GEN_ADAMW_HEADER})
+
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
+        AdamW
+        MORE_LIBS
+        Optimizer
+        Sgd
+        LrScheduler
+        ArithmeticType
+        TensorApi
+        QuantizationApi
+        StorageApi
+        Layer
+        Tensor
+        Common
+        m
+        odt_test_death
+        AdamWApi
+        OptimizerApi
+        ExecuteOp
+)
+add_dependencies(UnitTestAdamW generate_expected_adamw)
+target_include_directories(UnitTestAdamW PRIVATE ${CMAKE_CURRENT_BINARY_DIR})

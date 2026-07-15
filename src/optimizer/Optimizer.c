@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "AdamW.h"
 #include "Common.h"
 #include "Conv1d.h"
 #include "Conv1dTransposed.h"
@@ -48,7 +49,9 @@ void optimizerZeroGrad(optimizer_t *optimizer) {
 }
 
 optimizerFunctions_t optimizerFunctions[] = {
-    [SGD_M] = {.step = sgdStepM, .zero = optimizerZeroGrad, .getLr = sgdGetLr, .setLr = sgdSetLr}};
+    [SGD_M] = {.step = sgdStepM, .zero = optimizerZeroGrad, .getLr = sgdGetLr, .setLr = sgdSetLr},
+    [ADAM_W] = {
+        .step = adamWStep, .zero = optimizerZeroGrad, .getLr = adamWGetLr, .setLr = adamWSetLr}};
 
 /* Linear/Conv1d/Conv1dTransposed are bias-optional (BIAS_FALSE,
  * header-sanctioned): a bias-less layer contributes only its weight state,

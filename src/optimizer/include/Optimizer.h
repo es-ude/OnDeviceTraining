@@ -6,6 +6,7 @@
 #include "Tensor.h"
 
 typedef struct sgd sgd_t;
+typedef struct adamW adamW_t;
 
 typedef struct states {
     tensor_t **stateBuffers;
@@ -14,9 +15,10 @@ typedef struct states {
 
 typedef union optimImpl {
     sgd_t *sgd;
+    adamW_t *adamW;
 } optimImpl_t;
 
-typedef enum { SGD_M } optimizerType_t;
+typedef enum { SGD_M, ADAM_W } optimizerType_t;
 
 typedef struct optimizer {
     optimizerType_t type;

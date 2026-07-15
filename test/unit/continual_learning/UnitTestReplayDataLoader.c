@@ -284,6 +284,164 @@ void testPpcaModeStillRequiresStream(void) {
     freeFakeDataset();
 }
 
+void testExemplarBufferKeepsFirstKAndCopies(void) {
+    /* First-K policy: adds beyond capacity are ignored; stored exemplars are
+     * COPIES (mutating the source afterwards must not reach the buffer). */
+    exemplarBuffer_t *buf = exemplarBufferCreate(2, 2);
+    TEST_ASSERT_EQUAL_size_t(2, buf->numClasses);
+    TEST_ASSERT_EQUAL_size_t(2, buf->capacity);
+    float v0[6] = {0, 1, 2, 3, 4, 5};
+    float v1[6] = {10, 11, 12, 13, 14, 15};
+    float v2[6] = {20, 21, 22, 23, 24, 25};
+    tensor_t *src = buildFloat32TensorND(1, (size_t[]){6}, v0);
+    exemplarBufferAdd(buf, src, 0);
+    float *d = (float *)src->data;
+    for (size_t j = 0; j < 6; j++) {
+        d[j] = v1[j];
+    }
+    exemplarBufferAdd(buf, src, 0);
+    for (size_t j = 0; j < 6; j++) {
+        d[j] = v2[j]; /* over capacity: must be dropped, and must not alias */
+    }
+    exemplarBufferAdd(buf, src, 0);
+    TEST_ASSERT_EQUAL_UINT32(2, buf->counts[0]);
+    TEST_ASSERT_EQUAL_UINT32(0, buf->counts[1]);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(v0, (float *)buf->items[0]->data, 6);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(v1, (float *)buf->items[1]->data, 6);
+    freeTensor(src);
+    freeExemplarBuffer(buf);
+}
+
+void testExemplarBufferRejectsBadClassAndShape(void) {
+    exemplarBuffer_t *buf = exemplarBufferCreate(2, 2);
+    tensor_t *ok = buildFloat32TensorND(1, (size_t[]){6}, NULL);
+    tensor_t *bad = buildFloat32TensorND(1, (size_t[]){5}, NULL);
+    ASSERT_EXITS_WITH_FAILURE(exemplarBufferAdd(buf, ok, 2)); /* class OOB */
+    exemplarBufferAdd(buf, ok, 0);
+    ASSERT_EXITS_WITH_FAILURE(exemplarBufferAdd(buf, bad, 0)); /* element mismatch */
+    freeTensor(bad);
+    freeTensor(ok);
+    freeExemplarBuffer(buf);
+}
+
+void testExemplarModeReplaysStoredSamplesZeroCopy(void) {
+    /* REPLAY_MODE_EXEMPLAR: slots point INTO the buffer (no copy); classes
+     * with an empty buffer are skipped; the PPCA set is not required. */
+    buildFakeDataset();
+    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, 0, true);
+    exemplarBuffer_t *buf = exemplarBufferCreate(2, 2);
+    float e0[6] = {1, 1, 1, 1, 1, 1};
+    float e1[6] = {2, 2, 2, 2, 2, 2};
+    tensor_t *t0 = buildFloat32TensorND(1, (size_t[]){6}, e0);
+    tensor_t *t1 = buildFloat32TensorND(1, (size_t[]){6}, e1);
+    exemplarBufferAdd(buf, t0, 0);
+    exemplarBufferAdd(buf, t1, 0); /* class 1 stays empty -> not eligible */
+    freeTensor(t1);
+    freeTensor(t0);
+    rng32_t stream = {.state = 77};
+    replayLoaderConfig_t rcfg = {.exemplars = buf,
+                                 .samplesPerClass = 2,
+                                 .minCount = 1,
+                                 .stream = &stream,
+                                 .mode = REPLAY_MODE_EXEMPLAR};
+    dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
+
+    /* over several batches the uniform pick must reach BOTH stored
+     * exemplars of class 0 (kills a fixed-index pick) */
+    int seen[2] = {0, 0};
+    for (size_t b = 0; b < 6; b++) {
+        batch_t *batch = wrapped->getBatch(wrapped, b % 2);
+        TEST_ASSERT_EQUAL_size_t(2 + 2, batch->size); /* only class 0 adds r=2 */
+        for (size_t s = 2; s < 4; s++) {
+            tensor_t *item = batch->samples[s]->item;
+            if (item == buf->items[0]) {
+                seen[0] = 1;
+            } else if (item == buf->items[1]) {
+                seen[1] = 1;
+            } else {
+                TEST_FAIL_MESSAGE("synthetic item is not a buffer tensor (copy?)");
+            }
+            float *lab = (float *)batch->samples[s]->label->data;
+            TEST_ASSERT_EQUAL_FLOAT(1.0f, lab[0]);
+        }
+        for (size_t s = 0; s < batch->size; s++) {
+            freeSample(batch->samples[s]);
+        }
+        freeBatch(batch);
+    }
+    TEST_ASSERT_TRUE(seen[0]);
+    TEST_ASSERT_TRUE(seen[1]);
+    freeReplayDataLoader(wrapped);
+    freeDataLoader(base);
+    freeExemplarBuffer(buf);
+    freeFakeDataset();
+}
+
+void testExemplarModePicksDeterministic(void) {
+    buildFakeDataset();
+    static size_t firstRun[4];
+    for (int run = 0; run < 2; run++) {
+        dataLoader_t *base =
+            dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, 0, true);
+        exemplarBuffer_t *buf = exemplarBufferCreate(2, 3);
+        tensor_t *t = buildFloat32TensorND(1, (size_t[]){6}, NULL);
+        for (size_t c = 0; c < 2; c++) {
+            for (size_t i = 0; i < 3; i++) {
+                exemplarBufferAdd(buf, t, c);
+            }
+        }
+        freeTensor(t);
+        rng32_t stream = {.state = 4242};
+        replayLoaderConfig_t rcfg = {.exemplars = buf,
+                                     .samplesPerClass = 2,
+                                     .minCount = 1,
+                                     .stream = &stream,
+                                     .mode = REPLAY_MODE_EXEMPLAR};
+        dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
+        batch_t *batch = wrapped->getBatch(wrapped, 0);
+        for (size_t s = 2; s < 6; s++) {
+            /* compare picked buffer SLOT indices across runs via pointer
+             * offsets (tensors are per-run heap objects) */
+            size_t slot = SIZE_MAX;
+            for (size_t k = 0; k < 6; k++) {
+                if (batch->samples[s]->item == buf->items[k]) {
+                    slot = k;
+                }
+            }
+            TEST_ASSERT_TRUE(slot != SIZE_MAX);
+            if (run == 0) {
+                firstRun[s - 2] = slot;
+            } else {
+                TEST_ASSERT_EQUAL_size_t(firstRun[s - 2], slot);
+            }
+        }
+        for (size_t s = 0; s < batch->size; s++) {
+            freeSample(batch->samples[s]);
+        }
+        freeBatch(batch);
+        freeReplayDataLoader(wrapped);
+        freeDataLoader(base);
+        freeExemplarBuffer(buf);
+    }
+    freeFakeDataset();
+}
+
+void testExemplarModeRequiresBufferAndStream(void) {
+    buildFakeDataset();
+    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, 0, true);
+    exemplarBuffer_t *buf = exemplarBufferCreate(2, 2);
+    rng32_t stream = {.state = 1};
+    replayLoaderConfig_t noBuf = {
+        .samplesPerClass = 1, .minCount = 1, .stream = &stream, .mode = REPLAY_MODE_EXEMPLAR};
+    ASSERT_EXITS_WITH_FAILURE(replayDataLoaderWrap(base, &noBuf));
+    replayLoaderConfig_t noStream = {
+        .exemplars = buf, .samplesPerClass = 1, .minCount = 1, .mode = REPLAY_MODE_EXEMPLAR};
+    ASSERT_EXITS_WITH_FAILURE(replayDataLoaderWrap(base, &noStream));
+    freeExemplarBuffer(buf);
+    freeDataLoader(base);
+    freeFakeDataset();
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testWrappedBatchAppendsSyntheticSamples);
@@ -292,5 +450,10 @@ int main(void) {
     RUN_TEST(testSyntheticSamplingDeterministic);
     RUN_TEST(testMeanModeReplaysClassCentroidsWithoutStream);
     RUN_TEST(testPpcaModeStillRequiresStream);
+    RUN_TEST(testExemplarBufferKeepsFirstKAndCopies);
+    RUN_TEST(testExemplarBufferRejectsBadClassAndShape);
+    RUN_TEST(testExemplarModeReplaysStoredSamplesZeroCopy);
+    RUN_TEST(testExemplarModePicksDeterministic);
+    RUN_TEST(testExemplarModeRequiresBufferAndStream);
     return UNITY_END();
 }

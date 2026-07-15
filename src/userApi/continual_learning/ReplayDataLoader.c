@@ -5,9 +5,11 @@
 #include "Common.h"
 #include "DataLoader.h"
 #include "DataLoaderApi.h"
+#include "ExemplarBuffer.h"
 #include "PpcaReplay.h"
 #include "PpcaReplayApi.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "StorageApi.h"
 #include "TensorApi.h"
 
@@ -20,8 +22,13 @@ typedef struct {
     tensor_t **labelPool; /* [numClasses] shared one-hot labels */
 } replayLoader_t;
 
+static size_t loaderNumClasses(const replayLoader_t *rl) {
+    return rl->cfg.mode == REPLAY_MODE_EXEMPLAR ? rl->cfg.exemplars->numClasses
+                                                : rl->cfg.set->numClasses;
+}
+
 static void initPoolsFromFirstSample(replayLoader_t *rl, const sample_t *first) {
-    size_t numClasses = rl->cfg.set->numClasses;
+    size_t numClasses = loaderNumClasses(rl);
     size_t r = rl->cfg.samplesPerClass;
     if (first->label->quantization->type != FLOAT32 ||
         calcNumberOfElementsByTensor(first->label) != numClasses) {
@@ -29,19 +36,39 @@ static void initPoolsFromFirstSample(replayLoader_t *rl, const sample_t *first) 
                     numClasses);
         exit(1);
     }
-    size_t dim = rl->cfg.set->generators[0]->dim;
-    if (calcNumberOfElementsByTensor(first->item) != dim) {
-        PRINT_ERROR("replayDataLoader: item element count %zu != generator dim %zu",
-                    calcNumberOfElementsByTensor(first->item), dim);
-        exit(1);
+    if (rl->cfg.mode == REPLAY_MODE_EXEMPLAR) {
+        /* exemplars are lent out as-is — the element check runs against the
+         * first stored one (if the buffer is still empty, nothing will be
+         * appended anyway); no item pool: replay is zero-copy */
+        exemplarBuffer_t *buf = rl->cfg.exemplars;
+        for (size_t c = 0; c < numClasses; c++) {
+            if (buf->counts[c] > 0) {
+                size_t stored = calcNumberOfElementsByTensor(buf->items[c * buf->capacity]);
+                if (calcNumberOfElementsByTensor(first->item) != stored) {
+                    PRINT_ERROR("replayDataLoader: item element count %zu != exemplar %zu",
+                                calcNumberOfElementsByTensor(first->item), stored);
+                    exit(1);
+                }
+                break;
+            }
+        }
+    } else {
+        size_t dim = rl->cfg.set->generators[0]->dim;
+        if (calcNumberOfElementsByTensor(first->item) != dim) {
+            PRINT_ERROR("replayDataLoader: item element count %zu != generator dim %zu",
+                        calcNumberOfElementsByTensor(first->item), dim);
+            exit(1);
+        }
+        rl->itemPool = reserveMemory(numClasses * r * sizeof(tensor_t *));
+        for (size_t c = 0; c < numClasses; c++) {
+            for (size_t i = 0; i < r; i++) {
+                rl->itemPool[c * r + i] = initTensor(getShapeLike(first->item->shape),
+                                                     getQLike(first->item->quantization), NULL);
+            }
+        }
     }
-    rl->itemPool = reserveMemory(numClasses * r * sizeof(tensor_t *));
     rl->labelPool = reserveMemory(numClasses * sizeof(tensor_t *));
     for (size_t c = 0; c < numClasses; c++) {
-        for (size_t i = 0; i < r; i++) {
-            rl->itemPool[c * r + i] = initTensor(getShapeLike(first->item->shape),
-                                                 getQLike(first->item->quantization), NULL);
-        }
         rl->labelPool[c] = initTensor(getShapeLike(first->label->shape),
                                       getQLike(first->label->quantization), NULL);
         float *lab = (float *)rl->labelPool[c]->data;
@@ -52,6 +79,13 @@ static void initPoolsFromFirstSample(replayLoader_t *rl, const sample_t *first) 
     rl->poolsReady = true;
 }
 
+static bool classEligible(const replayLoader_t *rl, size_t c) {
+    if (rl->cfg.mode == REPLAY_MODE_EXEMPLAR) {
+        return rl->cfg.exemplars->counts[c] > 0;
+    }
+    return rl->cfg.set->generators[c]->count >= rl->cfg.minCount;
+}
+
 static batch_t *replayGetBatch(dataLoader_t *dl, size_t index) {
     replayLoader_t *rl = (replayLoader_t *)dl;
     batch_t *baseBatch = rl->base->getBatch(rl->base, index);
@@ -59,11 +93,11 @@ static batch_t *replayGetBatch(dataLoader_t *dl, size_t index) {
         initPoolsFromFirstSample(rl, baseBatch->samples[0]);
     }
 
-    size_t numClasses = rl->cfg.set->numClasses;
+    size_t numClasses = loaderNumClasses(rl);
     size_t r = rl->cfg.samplesPerClass;
     size_t eligible = 0;
     for (size_t c = 0; c < numClasses; c++) {
-        if (rl->cfg.set->generators[c]->count >= rl->cfg.minCount) {
+        if (classEligible(rl, c)) {
             eligible++;
         }
     }
@@ -78,19 +112,31 @@ static batch_t *replayGetBatch(dataLoader_t *dl, size_t index) {
     }
     size_t w = baseBatch->size;
     for (size_t c = 0; c < numClasses; c++) {
-        ppcaReplay_t *g = rl->cfg.set->generators[c];
-        if (g->count < rl->cfg.minCount) {
+        if (!classEligible(rl, c)) {
             continue;
         }
         for (size_t i = 0; i < r; i++) {
-            tensor_t *item = rl->itemPool[c * r + i];
-            if (rl->cfg.mode == REPLAY_MODE_CLASS_MEAN) {
-                ppcaReplayMean(g, item);
+            tensor_t *item;
+            if (rl->cfg.mode == REPLAY_MODE_EXEMPLAR) {
+                /* uniform pick WITH replacement (mirrors PPCA's independent
+                 * per-slot draws); zero-copy: the buffer lends the tensor */
+                exemplarBuffer_t *buf = rl->cfg.exemplars;
+                size_t pick = (size_t)(rngNextFloatCtx(rl->cfg.stream) * (float)buf->counts[c]);
+                if (pick >= buf->counts[c]) {
+                    pick = buf->counts[c] - 1;
+                }
+                item = buf->items[c * buf->capacity + pick];
             } else {
-                ppcaReplaySample(g, rl->cfg.stream, item);
+                ppcaReplay_t *g = rl->cfg.set->generators[c];
+                item = rl->itemPool[c * r + i]; /* pool-owned, reused every batch */
+                if (rl->cfg.mode == REPLAY_MODE_CLASS_MEAN) {
+                    ppcaReplayMean(g, item);
+                } else {
+                    ppcaReplaySample(g, rl->cfg.stream, item);
+                }
             }
             sample_t *s = reserveMemory(sizeof(sample_t));
-            s->item = item;              /* pool-owned, reused every batch */
+            s->item = item;
             s->label = rl->labelPool[c]; /* shared one-hot, never freed by loop */
             samples[w++] = s;
         }
@@ -106,10 +152,12 @@ static batch_t *replayGetBatch(dataLoader_t *dl, size_t index) {
 }
 
 dataLoader_t *replayDataLoaderWrap(dataLoader_t *base, const replayLoaderConfig_t *cfg) {
-    if (base == NULL || cfg == NULL || cfg->set == NULL || cfg->samplesPerClass == 0 ||
+    if (base == NULL || cfg == NULL || cfg->samplesPerClass == 0 ||
+        (cfg->mode == REPLAY_MODE_EXEMPLAR ? cfg->exemplars == NULL : cfg->set == NULL) ||
         (cfg->stream == NULL && cfg->mode != REPLAY_MODE_CLASS_MEAN)) {
-        PRINT_ERROR("replayDataLoaderWrap: base/set required, samplesPerClass >= 1, "
-                    "stream required unless REPLAY_MODE_CLASS_MEAN");
+        PRINT_ERROR("replayDataLoaderWrap: base required, samplesPerClass >= 1, source "
+                    "required (set, or exemplars for REPLAY_MODE_EXEMPLAR), stream "
+                    "required unless REPLAY_MODE_CLASS_MEAN");
         exit(1);
     }
     replayLoader_t *rl = reserveMemory(sizeof(replayLoader_t));
@@ -129,15 +177,19 @@ void freeReplayDataLoader(dataLoader_t *wrapped) {
     }
     replayLoader_t *rl = (replayLoader_t *)wrapped;
     if (rl->poolsReady) {
-        size_t numClasses = rl->cfg.set->numClasses;
+        size_t numClasses = loaderNumClasses(rl);
         size_t r = rl->cfg.samplesPerClass;
         for (size_t c = 0; c < numClasses; c++) {
-            for (size_t i = 0; i < r; i++) {
-                freeTensor(rl->itemPool[c * r + i]);
+            if (rl->itemPool != NULL) { /* EXEMPLAR mode lends buffer tensors */
+                for (size_t i = 0; i < r; i++) {
+                    freeTensor(rl->itemPool[c * r + i]);
+                }
             }
             freeTensor(rl->labelPool[c]);
         }
-        freeReservedMemory(rl->itemPool);
+        if (rl->itemPool != NULL) {
+            freeReservedMemory(rl->itemPool);
+        }
         freeReservedMemory(rl->labelPool);
     }
     freeReservedMemory(rl); /* base loader + its indices stay caller-owned */

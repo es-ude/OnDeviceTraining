@@ -14,6 +14,7 @@
 #include "Conv1dApi.h"
 #include "DataLoader.h"
 #include "DataLoaderApi.h"
+#include "ExemplarBuffer.h"
 #include "FlattenApi.h"
 #include "InferenceApi.h"
 #include "Layer.h"
@@ -74,6 +75,9 @@ static int g_rPerClass = 2;
 static int g_rank = 8;
 static int g_minCount = 16;
 static int g_maxSessionSamples = 512;
+/* REPLAY_MODE=exemplar buffer capacity; default 9 = iso-memory with the
+ * rank-8 PPCA generator (9 * 4608 B raw windows = 41,472 B vs 41,592 B). */
+static int g_exemplarsPerClass = 9;
 
 static float envFloat(const char *name, float dflt) {
     const char *v = getenv(name);
@@ -307,6 +311,24 @@ static float evalDomain(layer_t **model, dataset_t *evalSet) {
     return stats.accuracy;
 }
 
+/* First-K semantics run over the GLOBAL sample stream: called after every
+ * domain (mirroring absorbDomain's sequencing), but the buffer drops adds
+ * once a class is full — in practice it freezes to the first
+ * EXEMPLARS_PER_CLASS samples per class of domain 0. */
+static void exemplarAbsorbDomain(exemplarBuffer_t *buf, dataset_t *domainTrain) {
+    size_t n = domainTrain->items->size;
+    for (size_t i = 0; i < n; i++) {
+        float *label = (float *)domainTrain->labels->array[i]->data;
+        size_t cls = 0;
+        for (size_t j = 1; j < buf->numClasses; j++) {
+            if (label[j] > label[cls]) {
+                cls = j;
+            }
+        }
+        exemplarBufferAdd(buf, domainTrain->items->array[i], cls);
+    }
+}
+
 static int ensureDir(const char *p) {
     if (mkdir(p, S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH) == 0) {
         return 0;
@@ -334,11 +356,15 @@ int main(void) {
     if (modeStr != NULL && modeStr[0] != '\0') {
         if (strcmp(modeStr, "mean") == 0) {
             g_replayMode = REPLAY_MODE_CLASS_MEAN;
+        } else if (strcmp(modeStr, "exemplar") == 0) {
+            g_replayMode = REPLAY_MODE_EXEMPLAR;
         } else if (strcmp(modeStr, "ppca") != 0) {
-            fprintf(stderr, "ERROR: REPLAY_MODE must be 'ppca' or 'mean' (got '%s')\n", modeStr);
+            fprintf(stderr, "ERROR: REPLAY_MODE must be 'ppca', 'mean' or 'exemplar' (got '%s')\n",
+                    modeStr);
             return 1;
         }
     }
+    g_exemplarsPerClass = envInt("EXEMPLARS_PER_CLASS", g_exemplarsPerClass);
     g_rPerClass = envInt("R_PER_CLASS", g_rPerClass);
     g_rank = envInt("RANK", g_rank);
     g_minCount = envInt("MIN_COUNT", g_minCount);
@@ -377,10 +403,14 @@ int main(void) {
         sgdMCreateOptim(g_lr, g_momentum, /*weightDecay*/ 0.0f, model, MODEL_SIZE, momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
-    /* Replay set (only when REPLAY=1). */
+    /* Replay source (only when REPLAY=1): PPCA set for ppca/mean modes, raw
+     * exemplar buffer for exemplar mode (no generators, no workspace). */
     ppcaReplaySet_t *set = NULL;
+    exemplarBuffer_t *exemplars = NULL;
     rng32_t replayStream = {.state = g_seed * 2654435761u | 1u};
-    if (g_replay) {
+    if (g_replay && g_replayMode == REPLAY_MODE_EXEMPLAR) {
+        exemplars = exemplarBufferCreate(NUM_CLASSES, (size_t)g_exemplarsPerClass);
+    } else if (g_replay) {
         quantization_t *meanQ = quantizationInitFloat();
         quantization_t *basisQ = quantizationInitFloat();
         quantization_t *eigvalsQ = quantizationInitFloat();
@@ -419,7 +449,9 @@ int main(void) {
     trainEpochs(model, sgd, loader0, g_pretrainEpochs, 0, "pretrain");
     freeDataLoader(loader0);
 
-    if (g_replay) {
+    if (g_replay && exemplars != NULL) {
+        exemplarAbsorbDomain(exemplars, &trainSets[0]);
+    } else if (g_replay) {
         absorbDomain(set, &trainSets[0]);
         bytesAfterDomain0 = ppcaReplayBytes(set->generators[0]);
         bytesFinal = bytesAfterDomain0; /* holds if T == 1 */
@@ -438,6 +470,7 @@ int main(void) {
         if (g_replay) {
             loader = replayDataLoaderWrap(
                 base, &(replayLoaderConfig_t){.set = set,
+                                              .exemplars = exemplars,
                                               .samplesPerClass = (size_t)g_rPerClass,
                                               .minCount = (uint32_t)g_minCount,
                                               .stream = &replayStream,
@@ -456,15 +489,18 @@ int main(void) {
             fprintf(stdout, "R[%zu][%zu] = %.4f\n", t, j, (double)R[t * T + j]);
         }
 
-        if (g_replay) {
+        if (g_replay && exemplars != NULL) {
+            exemplarAbsorbDomain(exemplars, &trainSets[t]); /* no-op once full */
+        } else if (g_replay) {
             absorbDomain(set, &trainSets[t]);
             bytesFinal = ppcaReplayBytes(set->generators[0]);
         }
     }
 
     /* Constant-footprint machinery check: per-class generator bytes after the
-     * final domain must equal those after domain 0. */
-    if (g_replay && bytesFinal != bytesAfterDomain0) {
+     * final domain must equal those after domain 0 (exemplar buffer is frozen
+     * at capacity by construction — nothing to check). */
+    if (g_replay && set != NULL && bytesFinal != bytesAfterDomain0) {
         fprintf(stderr,
                 "ERROR: replay footprint not constant: %zu bytes/class after domain 0 vs "
                 "%zu after final domain\n",
@@ -499,7 +535,13 @@ int main(void) {
     fprintf(log, "  ],\n");
 
     fprintf(log, "  \"replay\": {");
-    if (g_replay) {
+    if (g_replay && exemplars != NULL) {
+        fprintf(log,
+                "\"enabled\": 1, \"mode\": \"exemplar\", \"exemplars_per_class\": %d, "
+                "\"exemplar_state_bytes_per_class\": %zu, \"footprint_constant\": true",
+                g_exemplarsPerClass,
+                (size_t)g_exemplarsPerClass * D_FEATURES * sizeof(float) + sizeof(uint32_t));
+    } else if (g_replay) {
         size_t wsBytes =
             ppcaWorkspaceBytes(D_FEATURES, (size_t)g_rank, (size_t)g_maxSessionSamples);
         size_t isoExemplars =
@@ -525,6 +567,7 @@ int main(void) {
     fprintf(stdout, "wrote %s\n", outLog);
 
     /* Cleanup. */
+    freeExemplarBuffer(exemplars);
     freePpcaReplaySet(set);
     freeReservedMemory(R);
     freeReservedMemory(trainSets);

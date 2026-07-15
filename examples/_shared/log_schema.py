@@ -16,11 +16,13 @@ class TrainConfig(TypedDict):
     epochs: int
     batch: int
     lr: float
-    momentum: float
+    momentum: NotRequired[float]  # absent for optimizers without momentum (#328)
     seed: int
     shuffle_seed: int
     lr_schedule: NotRequired[str]  # "none" | "cosine" (#327); absent = constant LR
     lr_min: NotRequired[float]
+    optimizer: NotRequired[str]  # "sgd" | "adamw" (#328); absent = sgd
+    weight_decay: NotRequired[float]
 
 
 class EpochLog(TypedDict):

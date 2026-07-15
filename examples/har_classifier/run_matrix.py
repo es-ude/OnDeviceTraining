@@ -1,16 +1,18 @@
 """Offline sweep driver for the HAR FLOAT32-vs-packed-SYM memory/accuracy study.
 
-Runs the config matrix {float, sym12, sym10, sym8, sym6, sym4, sym8cos, sym4cos}
-x seed 1..10 = 80 runs. Each run invokes the memory-profiling build of the
+Runs the config matrix {float, sym12, sym10, sym8, sym6, sym4, sym8cos, sym4cos,
+adamw} x seed 1..10 = 90 runs. Each run invokes the memory-profiling build of the
 appropriate trainer binary with per-run env and collects one extended RunLog
 JSON under ``logs/``.
 
-Two BINARIES, not one MODE-switched binary: ``train_c_har_classifier`` (FLOAT32)
-and ``train_c_har_classifier_sym`` (packed SYM@x weights, x = SYM_BITS). The SYM
-configs are the SAME binary at different packed widths. LR is left to each
-binary's per-config default (both binaries default LR=0.01); momentum 0.9.
+THREE BINARIES, not one MODE-switched binary: ``train_c_har_classifier`` (FLOAT32),
+``train_c_har_classifier_sym`` (packed SYM@x weights, x = SYM_BITS), and
+``train_c_har_classifier_adamw`` (AdamW, ignores MOMENTUM). The SYM configs are
+the SAME binary at different packed widths. LR is left to each binary's
+per-config default (float/SYM default LR=0.01, adamw defaults LR=0.001);
+momentum 0.9 (adamw ignores it).
 
-This is a LONG offline job (~40-63 s/epoch x 50 epochs x 80 runs ~= 60+ h) and is
+This is a LONG offline job (~40-63 s/epoch x 50 epochs x 90 runs ~= 60+ h) and is
 deliberately NOT wired into CI — CI keeps only the fast FLOAT32 BIT_PARITY gate.
 Use --configs / --seeds / --epochs to smoke a subset before committing to the
 full run, e.g.::
@@ -47,6 +49,7 @@ CONFIGS: dict[str, tuple[str, dict[str, str]]] = {
     "sym4": ("train_c_har_classifier_sym", {"SYM_BITS": "4"}),
     "sym8cos": ("train_c_har_classifier_sym", {"SYM_BITS": "8", "LR_SCHEDULE": "cosine"}),
     "sym4cos": ("train_c_har_classifier_sym", {"SYM_BITS": "4", "LR_SCHEDULE": "cosine"}),
+    "adamw": ("train_c_har_classifier_adamw", {}),
 }
 
 

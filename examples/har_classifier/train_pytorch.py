@@ -31,6 +31,13 @@ LR = 0.01
 MOMENTUM = 0.9
 NUM_CLASSES = 6
 
+# Optimizer mirror of the C binaries (#328): "sgd" -> train_c.c (LR=0.01,
+# MOMENTUM), "adamw" -> train_c_adamw.c (set LR = 0.001 to mirror its
+# default; MOMENTUM is ignored). foreach=False pins torch's single-tensor
+# kernel sequence, the one the C optimizer is bit-modeled on.
+OPTIMIZER: str = "sgd"
+WEIGHT_DECAY = 0.01
+
 # LR schedule mirror of the C SYM binary's LR_SCHEDULE/LR_MIN env knobs
 # (#327). None = constant LR (the FLOAT32 parity baseline stays constant-LR).
 SCHEDULER: str | None = None
@@ -112,7 +119,14 @@ def main() -> None:
     loader = torch.utils.data.DataLoader(train_ds, batch_size=BATCH, sampler=sampler, drop_last=True)
 
     model = HarModel()
-    optimizer = torch.optim.SGD(model.parameters(), lr=LR, momentum=MOMENTUM)
+    if OPTIMIZER not in ("sgd", "adamw"):
+        raise ValueError(f"OPTIMIZER={OPTIMIZER!r} not supported ('sgd' or 'adamw')")
+    optimizer = (
+        torch.optim.SGD(model.parameters(), lr=LR, momentum=MOMENTUM)
+        if OPTIMIZER == "sgd"
+        else torch.optim.AdamW(model.parameters(), lr=LR, betas=(0.9, 0.999), eps=1e-8,
+                               weight_decay=WEIGHT_DECAY, foreach=False)
+    )
     if SCHEDULER not in (None, "cosine"):
         raise ValueError(f"SCHEDULER={SCHEDULER!r} not supported (None or 'cosine')")
     scheduler = (
@@ -149,14 +163,18 @@ def main() -> None:
             scheduler.step()
 
     test_loss, test_acc = evaluate(model, test_x, test_y, BATCH)
+    config = {
+        "epochs": EPOCHS, "batch": BATCH, "lr": LR, "momentum": MOMENTUM,
+        "seed": SEED, "shuffle_seed": SHUFFLE_SEED,
+        "lr_schedule": SCHEDULER or "none", "lr_min": LR_MIN,
+        "optimizer": OPTIMIZER,
+    }
+    if OPTIMIZER == "adamw":
+        config["weight_decay"] = WEIGHT_DECAY
     log: RunLog = {
         "impl": "pytorch",
         "example": "har_classifier",
-        "config": {
-            "epochs": EPOCHS, "batch": BATCH, "lr": LR, "momentum": MOMENTUM,
-            "seed": SEED, "shuffle_seed": SHUFFLE_SEED,
-            "lr_schedule": SCHEDULER or "none", "lr_min": LR_MIN,
-        },
+        "config": config,  # type: ignore[typeddict-item]
         "epochs": epoch_records,  # type: ignore[typeddict-item]
         "final": {"test_loss": test_loss, "test_acc": test_acc, "test_auc": None},
     }

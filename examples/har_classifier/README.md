@@ -112,6 +112,42 @@ comparable in magnitude to sym4's own sd (0.0210) — not clearly outside noise
 on 10 seeds — but cosine also cuts the run-to-run spread roughly in half (sd
 0.0114 vs 0.0210), a variance-reduction pattern absent at 8-bit.
 
+### SGD vs AdamW (#328)
+
+`train_c_adamw.c` (target `train_c_har_classifier_adamw`) trains the same
+model/data as `train_c.c` with `adamWCreateOptim` — decoupled weight decay
+(`torch.optim.AdamW` single-tensor sequence, op-for-op) at the PyTorch
+defaults: betas 0.9/0.999, eps 1e-8, weight decay 0.01, constant LR 0.001.
+This is a defaults-vs-defaults comparison: the SGD demo runs lr 0.01 with
+momentum 0.9 and **no** weight decay, the AdamW demo runs lr 0.001 with
+decoupled wd 0.01 — the arms differ in both step size and regularization by
+design. The PyTorch twin mirrors the arm via its `OPTIMIZER` module constant
+(set `LR = 0.001` alongside `OPTIMIZER = "adamw"`).
+
+Sweep results (10 seeds, 20 epochs, `run_matrix.py --configs float adamw`):
+
+| config | test_acc (mean±sd) | min    | max    | test_loss (mean±sd) | n  |
+|--------|---------------------|--------|--------|----------------------|----|
+| float  | 0.8953 ± 0.0050     | 0.8870 | 0.9033 | 0.3280 ± 0.0571      | 10 |
+| adamw  | 0.8988 ± 0.0038     | 0.8938 | 0.9053 | 0.4177 ± 0.0547      | 10 |
+
+Accuracy is a wash (Δmean = 0.0035, within 1 sd of either arm; AdamW's spread
+is slightly tighter). AdamW's final cross-entropy is consistently higher
+(0.42 vs 0.33) at these defaults — the demo demonstrates the optimizer's
+mechanics and cost, it does not claim a convergence win on this task.
+
+Memory cost (darwin `examples_memprofile` RunLogs, this tree): optimizer
+state is exactly 2× SGD-momentum's — 81 712 B analytic (m + v, two FLOAT32
+buffers per parameter) vs 40 856 B (one momentum buffer); 83 848 B vs
+42 076 B measured including the per-parameter `states_t` shells. Stack peak
+is identical (27 784 B for both binaries — moment buffers live on the heap,
+not the training-step stack; the absolute value is toolchain-dependent, the
+SGD-vs-AdamW identity is not).
+On the Linux CI runner (warn-only watermark REPORT job, PR #363) the same
+identity holds: 31 920 B stack peak for both the SGD and AdamW binaries —
+which is also why the AdamW binary shares the `float` watermark budget
+bucket rather than getting its own key.
+
 ### Build with memory profiling
 
 Memory instrumentation is compiled in only under the `examples_memprofile` preset
@@ -124,10 +160,10 @@ cmake --build --preset examples_memprofile --target \
     train_c_har_classifier train_c_har_classifier_sym
 ```
 
-Both binaries are env-configured: `SEED`, `EPOCHS`, `LR`, `MOMENTUM`, `LOG_PATH`
-(+ `SYM_BITS`, `SYM_ROUNDING`, `LR_SCHEDULE`, `LR_MIN` for the SYM binary). Each
-writes an extended RunLog JSON whose `memory` block carries per-category
-analytic bytes, instrumented heap/stack/RSS peaks, and the **reconciliation
+All three binaries are env-configured: `SEED`, `EPOCHS`, `LR`, `MOMENTUM`, `LOG_PATH`
+(+ `SYM_BITS`, `SYM_ROUNDING`, `LR_SCHEDULE`, `LR_MIN` for the SYM binary; the AdamW
+binary ignores `MOMENTUM`). Each writes an extended RunLog JSON whose `memory` block
+carries per-category analytic bytes, instrumented heap/stack/RSS peaks, and the **reconciliation
 gap** (`heap_peak − mcu_total`, ≈ the host-resident dataset the MCU would
 stream — recorded, never massaged).
 

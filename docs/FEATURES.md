@@ -61,13 +61,36 @@ Notes on the qualified cells:
 
 ## Optimizer (`optimizerType_t`)
 
-- **One optimizer type**: `SGD_M` — the plain-`SGD` enum value and its unreachable
-  code arm were deleted (#308). No Adam/RMSProp/Nesterov. `sgdMCreateOptim` is the
-  only public factory; passing `momentumFactor == 0.0f` is how a caller gets plain
+- **Two optimizer types**: `SGD_M` and `ADAM_W` (#328). The plain-`SGD` enum value
+  and its unreachable code arm were deleted earlier (#308). `sgdMCreateOptim` is the
+  only public SGD factory; passing `momentumFactor == 0.0f` is how a caller gets plain
   SGD, not a separate type: the factory allocates **no** momentum-state buffers in
   that case (`optim->states == NULL`) and `sgdStepM` runs a single stateless update
   op per parameter instead of the two-op momentum path (mathematically identical at
   momentum 0).
+- **AdamW** (`adamWCreateOptim(lr, beta1, beta2, eps, weightDecay, model, sizeModel,
+  momentQuant, updateMath)`, torch.optim.AdamW-faithful (documented-order replication;
+  torch cross-checked to ≤1 ulp)) — weight decay is
+  **decoupled** (`param *= 1 - lr*wd`), unlike SGD's coupled L2 (`grad += wd*param`).
+  `beta1`/`beta2`/`eps`/`weightDecay` are stored **double**; every per-step scalar
+  (`1-beta1`, `1-beta2`, the bias corrections, `-(lr/bc1)`, `1-lr*wd`) is composed in
+  double and cast to float exactly once at the kernel-call boundary, mirroring
+  PyTorch's own python-double composition — float-stored betas lose `1-beta` bits
+  unrecoverably. The step is an op-for-op replication of torch's single-tensor
+  AdamW sequence over the `PointwiseFused` primitives via three `executeOp` kernels
+  (m: lerp / v: mul+addcmul / param: mul+addcdivDenom) — 5 elementwise passes per
+  parameter per step, no denom tensor materialized. Each trainable parameter gets
+  **2 moment buffers** (`m = stateBuffers[0]`, `v = stateBuffers[1]`), each a
+  `getQLike` deep clone of the single caller-owned `momentQuant` template (FLOAT32
+  default; quantized moment storage is a memory knob routed through the executeOp
+  funnel like any other dtype, with no bit-parity claim). `updateMath` is
+  FLOAT32-only, fail-fast at both create time and every `adamWStep` call (the #310
+  pattern). `stepCount` (bias-correction exponent `t`) is **not** checkpointed —
+  `StateDictApi` serializes only weights/biases, so a resumed run restarts bias
+  correction at `t=1` (#350). The `m`-update's `lerp` bit-parity holds only for
+  `beta1 > 0.5` (documented, not branched — validation still admits `[0, 1)`).
+  Scheduler-compatible via the same `getLr`/`setLr` vtable row as SGD. Exercised by
+  the `train_c_har_classifier_adamw` example.
 - **Arithmetic** — `sgdMCreateOptim`'s `updateMath` parameter (by-value `arithmetic_t`,
   #310) selects what the update kernels compute in. Only `ARITH_FLOAT32` is
   implemented; any other type fails fast at optimizer-create time and again at
@@ -89,17 +112,20 @@ Notes on the qualified cells:
   dispatch but not yet exercised by any example. Support is bounded only by what
   `conversionMatrix` covers for that dtype (BOOL has no conversion cell in either
   direction).
-- **Features**: learning rate, coupled L2 weight decay, classic heavy-ball momentum
-  (no Nesterov/dampening), per-parameter momentum state (2 states for Linear/Conv/
-  ConvT/LayerNorm, 0 for the rest, and 0 for every parameter when
-  `momentumFactor == 0`), dtype-aware `scaleOptimizerGradients` (O(1) scale fold for
-  quantized grads), and `optimizerZeroGrad`. No bias-correction.
+- **Features**: learning rate, coupled L2 weight decay (SGD) or decoupled weight
+  decay (AdamW), classic heavy-ball momentum (SGD, no Nesterov/dampening),
+  per-parameter momentum state (2 states for Linear/Conv/ConvT/LayerNorm, 0 for the
+  rest, and 0 for every parameter when `momentumFactor == 0`), dtype-aware
+  `scaleOptimizerGradients` (O(1) scale fold for quantized grads), and
+  `optimizerZeroGrad` — shared across both rows. No bias-correction on SGD; AdamW
+  has PyTorch-standard bias correction (`bc1`/`bc2`).
 - **LR schedulers** (#327): `lrScheduler_t` (caller-owned, zero-alloc) with
   `STEP_LR`, `EXPONENTIAL_LR`, `COSINE_ANNEALING_LR` — PyTorch closed-form
   parity (double math, float cast at `setLr`), stepped by `trainingRun`
   (NULL-able param, once per epoch after the callback) or manually via
   `lrSchedulerStep` at any boundary. Optimizer-agnostic through the
-  `getLr`/`setLr` vtable entries.
+  `getLr`/`setLr` vtable entries — both `SGD_M` and `ADAM_W` rows implement them,
+  so a scheduler works unchanged across either optimizer.
 
 ## Serialization (`src/serial/`)
 
@@ -178,8 +204,9 @@ checkpointing, limitations, literature).
   fwd/activation-grad/loss-grad/param tensors to a caller-supplied sink; used for
   layer-by-layer C-vs-PyTorch parity debugging (`npyDumpSink`, kws_raw harness).
 - **Fused pointwise primitives** (`src/arithmetic/PointwiseFused.c`, #328) — three
-  single-pass fused elementwise ops built for optimizer-state updates (AdamW's moment
-  math), each with a torch-parity **rounding contract**: `lerpFloat32TensorsInplace`
+  single-pass fused elementwise ops that are the compute core of AdamW's moment/param
+  updates (`adamWStep`, see Optimizer section above — the only consumer today), each
+  with a torch-parity **rounding contract**: `lerpFloat32TensorsInplace`
   (`Tensor.lerp_`, small-weight branch) uses an explicit `fmaf()`, bit-identical to
   ATen's FMA-fused CPU kernel for `|weight| < 0.5`; `addcmulFloat32TensorsInplace`
   (`Tensor.addcmul_`) and `addcdivDenomFloat32TensorsInplace` (`Tensor.addcdiv_` parity

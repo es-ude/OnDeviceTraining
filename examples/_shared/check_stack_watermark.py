@@ -30,6 +30,11 @@ SLACK_B = 8192
 # linux: deliberately uncalibrated until the CI job has produced peaks;
 # calibrate from the c-stack-watermark job logs, then set + --enforce in a
 # dedicated PR.
+#
+# "float" covers BOTH float HAR trainers (train_c_har_classifier and
+# train_c_har_classifier_adamw, #328): same model + microbatch, optimizer
+# state is heap-side. The darwin number was calibrated on the SGD binary;
+# re-key per-binary if calibration ever shows the two diverging.
 BUDGETS_B: dict[str, dict[str, int | None]] = {
     "darwin": {"float": 27768 + SLACK_B, "sym": 51968 + SLACK_B},
     "linux": {"float": None, "sym": None},

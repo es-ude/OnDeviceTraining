@@ -531,7 +531,7 @@ jobs:
         run: cmake --preset examples_memprofile
 
       - name: Build instrumented HAR trainers
-        run: cmake --build --preset examples_memprofile --target train_c_har_classifier train_c_har_classifier_sym
+        run: cmake --build --preset examples_memprofile --target train_c_har_classifier train_c_har_classifier_sym train_c_har_classifier_adamw
 
       - name: Run 1-epoch watermark probes
         run: |
@@ -539,9 +539,11 @@ jobs:
             build/examples_memprofile/examples/har_classifier/train_c_har_classifier
           EPOCHS=1 SEED=1 SYM_BITS=8 LOG_PATH=/tmp/wm_sym8.json \
             build/examples_memprofile/examples/har_classifier/train_c_har_classifier_sym
+          EPOCHS=1 SEED=1 LOG_PATH=/tmp/wm_adamw.json \
+            build/examples_memprofile/examples/har_classifier/train_c_har_classifier_adamw
 
       - name: Check stack watermarks (report-only)
-        run: uv run examples/_shared/check_stack_watermark.py --platform linux /tmp/wm_float.json /tmp/wm_sym8.json
+        run: uv run examples/_shared/check_stack_watermark.py --platform linux /tmp/wm_float.json /tmp/wm_sym8.json /tmp/wm_adamw.json
 
   python-test:
     needs: gate

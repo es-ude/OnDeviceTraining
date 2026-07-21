@@ -459,35 +459,39 @@ void conv1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
      * design D3) instead of the old direct kernel write of raw, unrestored
      * accumulator-range mantissas — the #187 dtype guard is superseded by the
      * funnel's own prologue/epilogue and is deleted (recon-conv-backward §4:
-     * zero test coverage, confirmed tautology post-#221). */
-    switch (cfg->propLossMath.type) {
-    case ARITH_FLOAT32:
-        executeOp(
-            &(opSpec_t){
-                .kernel = propLossKernelFloat,
-                .ctx = cfg,
-                .inputs = (tensor_t *[]){lossGrad, cfg->weights->param},
-                .nInputs = 2,
-                .arithmetic = cfg->propLossMath,
-                .mode = OUT_WRITE,
-            },
-            propLoss);
-        break;
-    case ARITH_SYM_INT32:
-        executeOp(
-            &(opSpec_t){
-                .kernel = propLossKernelSym,
-                .ctx = cfg,
-                .inputs = (tensor_t *[]){lossGrad, cfg->weights->param},
-                .nInputs = 2,
-                .arithmetic = cfg->propLossMath,
-                .mode = OUT_WRITE,
-            },
-            propLoss);
-        break;
-    default:
-        PRINT_ERROR("Conv1d backward (propLoss): quantization type not implemented");
-        exit(1);
+     * zero test coverage, confirmed tautology post-#221).
+     * propLoss == NULL (#380 PR2): grads-only call -- skip the dx write
+     * entirely rather than dereference the absent buffer. */
+    if (propLoss != NULL) {
+        switch (cfg->propLossMath.type) {
+        case ARITH_FLOAT32:
+            executeOp(
+                &(opSpec_t){
+                    .kernel = propLossKernelFloat,
+                    .ctx = cfg,
+                    .inputs = (tensor_t *[]){lossGrad, cfg->weights->param},
+                    .nInputs = 2,
+                    .arithmetic = cfg->propLossMath,
+                    .mode = OUT_WRITE,
+                },
+                propLoss);
+            break;
+        case ARITH_SYM_INT32:
+            executeOp(
+                &(opSpec_t){
+                    .kernel = propLossKernelSym,
+                    .ctx = cfg,
+                    .inputs = (tensor_t *[]){lossGrad, cfg->weights->param},
+                    .nInputs = 2,
+                    .arithmetic = cfg->propLossMath,
+                    .mode = OUT_WRITE,
+                },
+                propLoss);
+            break;
+        default:
+            PRINT_ERROR("Conv1d backward (propLoss): quantization type not implemented");
+            exit(1);
+        }
     }
 }
 

@@ -2314,6 +2314,151 @@ void testLayerNormBackwardFrozenFactoryLayerRunsWithoutGradBuffers(void) {
     TEST_ASSERT_TRUE(gradStillNull);
 }
 
+/* #380 PR2 Task 1: propLoss == NULL is a grads-only call -- dgamma/dbeta must
+ * be computed exactly as with a real propLoss, and no dx memory may be
+ * touched. Based on the testBackwardFloatFrozenTwinDxIdenticalGradsZero
+ * fixture (dgamma/dbeta both gold-verified nonzero) into two independent
+ * twins that are BOTH trainable; only the propLoss argument differs (twin A:
+ * real buffer, twin B: literal NULL). loss is non-uniform per row (unlike
+ * that fixture's all-ones) -- a uniform loss/gamma combination makes dx
+ * identically zero (the per-group mean of the centered value is always 0),
+ * which would make the propLossA non-degeneracy assertion below vacuous.
+ * Pre-guard, twin B's call dereferences the NULL propLoss and crashes (RED);
+ * post-guard, dgamma/dbeta match twin A's byte-for-byte and twin A's dx is
+ * non-degenerate. */
+void testBackwardFloatNullPropLossComputesGradsOnly(void) {
+    size_t dims[] = {2, 2};
+    tensor_t *fwdIn = buildFloatTensorND(2, dims, (float[]){-1.f, 1.f, 2.f, 4.f});
+    tensor_t *loss = buildFloatTensorND(2, dims, (float[]){1.f, 2.f, 3.f, 4.f});
+    tensor_t *propLossA = buildFloatTensorND(2, dims, NULL);
+
+    size_t ns[] = {2};
+    parameter_t *gammaA = buildFloatParam(1, ns, (float[]){1.f, 1.f});
+    parameter_t *betaA = buildFloatParam(1, ns, NULL);
+    parameter_t *gammaB = buildFloatParam(1, ns, (float[]){1.f, 1.f});
+    parameter_t *betaB = buildFloatParam(1, ns, NULL);
+    size_t *normShape = reserveMemory(sizeof(size_t));
+    normShape[0] = 2;
+
+    quantization_t *fq = quantizationInitFloat();
+    quantization_t *bq = quantizationInitFloat();
+
+    layerNormConfig_t cfgA;
+    initLayerNormConfig(&cfgA, gammaA, betaA, normShape, 1, 1e-5f, fq, bq);
+    layerConfig_t lcfgA;
+    layer_t twinA = makeLayerNormLayer(&cfgA, &lcfgA);
+
+    layerNormConfig_t cfgB;
+    initLayerNormConfig(&cfgB, gammaB, betaB, normShape, 1, 1e-5f, fq, bq);
+    layerConfig_t lcfgB;
+    layer_t twinB = makeLayerNormLayer(&cfgB, &lcfgB);
+
+    layerNormBackward(&twinA, fwdIn, loss, propLossA);
+    layerNormBackward(&twinB, fwdIn, loss, NULL);
+
+    bool gammaGradIdentical = memcmp(gammaA->grad->data, gammaB->grad->data,
+                                     calcNumberOfBytesForData(gammaA->grad->quantization, 2)) == 0;
+    bool betaGradIdentical = memcmp(betaA->grad->data, betaB->grad->data,
+                                    calcNumberOfBytesForData(betaA->grad->quantization, 2)) == 0;
+    bool propLossANonDegenerate = false;
+    for (size_t i = 0; i < 4; i++) {
+        if (((float *)propLossA->data)[i] != 0.0f) {
+            propLossANonDegenerate = true;
+        }
+    }
+
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeReservedMemory(normShape);
+    freeParameter(betaB);
+    freeParameter(gammaB);
+    freeParameter(betaA);
+    freeParameter(gammaA);
+    freeTensor(propLossA);
+    freeTensor(loss);
+    freeTensor(fwdIn);
+
+    TEST_ASSERT_TRUE_MESSAGE(
+        gammaGradIdentical,
+        "dgamma must be byte-identical between the real-propLoss and NULL-propLoss twins");
+    TEST_ASSERT_TRUE_MESSAGE(
+        betaGradIdentical,
+        "dbeta must be byte-identical between the real-propLoss and NULL-propLoss twins");
+    TEST_ASSERT_TRUE_MESSAGE(propLossANonDegenerate,
+                             "twin A's dx must be non-degenerate (nonzero), proving the NULL "
+                             "round only skipped dx");
+}
+
+/* #380 PR2 Task 1: SYM variant. Duplicates the
+ * testSymBackwardFrozenTwinDxIdenticalGradsUntouched fixture into two
+ * independent twins that are BOTH trainable; only the propLoss argument
+ * differs. No propLoss-scale assertion here (unlike the frozen-twin SYM
+ * test): when propLoss is NULL, pass B (dx requant + the propLoss scale
+ * refresh) is skipped entirely for twin B -- there is nothing to compare
+ * against twin A's refreshed scale. */
+void testSymBackwardNullPropLossComputesGradsOnly(void) {
+    size_t dims[] = {3, 4};
+    size_t ns[] = {4};
+    tensor_t *fwdIn = buildSymInt32TensorND(2, dims, input_layerNormSymBwd_bwdBase);
+    tensor_t *loss = buildSymInt32TensorND(2, dims, lossGrad_layerNormSymBwd_bwdBase);
+    tensor_t *propLossA = buildSymInt32TensorND(2, dims, NULL);
+
+    parameter_t *gammaA = buildSymParam(1, ns, gamma_layerNormSymBwd_bwdBase);
+    parameter_t *betaA = buildSymParam(1, ns, NULL);
+    parameter_t *gammaB = buildSymParam(1, ns, gamma_layerNormSymBwd_bwdBase);
+    parameter_t *betaB = buildSymParam(1, ns, NULL);
+    size_t *normShape = reserveMemory(sizeof(size_t));
+    normShape[0] = 4;
+
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *bq = quantizationInitSymInt32(HALF_AWAY);
+
+    layerNormConfig_t cfgA;
+    initLayerNormConfig(&cfgA, gammaA, betaA, normShape, 1, 1e-5f, fq, bq);
+    layerConfig_t lcfgA;
+    layer_t twinA = makeLayerNormLayer(&cfgA, &lcfgA);
+
+    layerNormConfig_t cfgB;
+    initLayerNormConfig(&cfgB, gammaB, betaB, normShape, 1, 1e-5f, fq, bq);
+    layerConfig_t lcfgB;
+    layer_t twinB = makeLayerNormLayer(&cfgB, &lcfgB);
+
+    layerNormBackward(&twinA, fwdIn, loss, propLossA);
+    layerNormBackward(&twinB, fwdIn, loss, NULL);
+
+    bool gammaGradIdentical = memcmp(gammaA->grad->data, gammaB->grad->data,
+                                     calcNumberOfBytesForData(gammaA->grad->quantization, 4)) == 0;
+    bool betaGradIdentical = memcmp(betaA->grad->data, betaB->grad->data,
+                                    calcNumberOfBytesForData(betaA->grad->quantization, 4)) == 0;
+    bool propLossANonDegenerate = false;
+    for (size_t i = 0; i < 12; i++) {
+        if (((int32_t *)propLossA->data)[i] != 0) {
+            propLossANonDegenerate = true;
+        }
+    }
+
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeReservedMemory(normShape);
+    freeParameter(betaB);
+    freeParameter(gammaB);
+    freeParameter(betaA);
+    freeParameter(gammaA);
+    freeTensor(propLossA);
+    freeTensor(loss);
+    freeTensor(fwdIn);
+
+    TEST_ASSERT_TRUE_MESSAGE(
+        gammaGradIdentical,
+        "dgamma must be byte-identical between the real-propLoss and NULL-propLoss twins");
+    TEST_ASSERT_TRUE_MESSAGE(
+        betaGradIdentical,
+        "dbeta must be byte-identical between the real-propLoss and NULL-propLoss twins");
+    TEST_ASSERT_TRUE_MESSAGE(propLossANonDegenerate,
+                             "twin A's dx must be non-degenerate (nonzero), proving the NULL "
+                             "round only skipped dx");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConfigStructIsPopulated);
@@ -2365,5 +2510,7 @@ int main(void) {
     RUN_TEST(testLayerNormFactoryFrozenElidesGrads);
     RUN_TEST(testLayerNormFactoryDefaultAllocatesGrads);
     RUN_TEST(testLayerNormBackwardFrozenFactoryLayerRunsWithoutGradBuffers);
+    RUN_TEST(testBackwardFloatNullPropLossComputesGradsOnly);
+    RUN_TEST(testSymBackwardNullPropLossComputesGradsOnly);
     return UNITY_END();
 }

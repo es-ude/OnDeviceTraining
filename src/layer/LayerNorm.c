@@ -421,7 +421,10 @@ static void layerNormBackwardFloat(layerNormConfig_t *cfg, tensor_t *forwardInpu
                                    tensor_t *propLoss) {
     float *x = (float *)forwardInput->data;
     float *dy = (float *)loss->data;
-    float *dx = (float *)propLoss->data;
+    /* propLoss == NULL (#380 PR2): grads-only call -- fetch NULL instead of
+     * dereferencing the absent buffer; the scatter loop below is guarded on
+     * dx and never touches propLoss in that case. */
+    float *dx = (propLoss != NULL) ? (float *)propLoss->data : NULL;
     float *gamma = (float *)cfg->gamma->param->data;
     const bool frozen = cfg->frozen;
     /* Frozen: no grad tensors exist (Task 1 elides them) -- fetch NULL instead
@@ -463,15 +466,19 @@ static void layerNormBackwardFloat(layerNormConfig_t *cfg, tensor_t *forwardInpu
         meanDn /= (float)N;
         meanDnN /= (float)N;
 
-        /* dx scattered back to the same physical offset its x came from. */
-        for (size_t j = 0; j < N; j++) {
-            size_t xoff = layerNormPhysOffset(forwardInput, cfg->numNormDims, g, j);
-            size_t dyoff = layerNormPhysOffset(loss, cfg->numNormDims, g, j);
-            float nval = (x[xoff] - mean[g]) * invSigma[g];
-            float dn = dy[dyoff] * gamma[j];
-            float dxv = invSigma[g] * (dn - meanDn - nval * meanDnN);
-            size_t dxoff = layerNormPhysOffset(propLoss, cfg->numNormDims, g, j);
-            dx[dxoff] = dxv;
+        /* dx scattered back to the same physical offset its x came from.
+         * propLoss == NULL (#380 PR2): grads-only call -- skip the scatter
+         * entirely (no propLoss->... touch, no dx write). */
+        if (dx != NULL) {
+            for (size_t j = 0; j < N; j++) {
+                size_t xoff = layerNormPhysOffset(forwardInput, cfg->numNormDims, g, j);
+                size_t dyoff = layerNormPhysOffset(loss, cfg->numNormDims, g, j);
+                float nval = (x[xoff] - mean[g]) * invSigma[g];
+                float dn = dy[dyoff] * gamma[j];
+                float dxv = invSigma[g] * (dn - meanDn - nval * meanDnN);
+                size_t dxoff = layerNormPhysOffset(propLoss, cfg->numNormDims, g, j);
+                dx[dxoff] = dxv;
+            }
         }
     }
 }
@@ -493,7 +500,11 @@ static void layerNormBackwardSymInt32(layerNormConfig_t *cfg, tensor_t *forwardI
                                       tensor_t *loss, tensor_t *propLoss) {
     layerNormValidateSymTensor(forwardInput, "forwardInput");
     layerNormValidateSymTensor(loss, "loss");
-    layerNormValidateSymTensor(propLoss, "propLoss");
+    /* propLoss == NULL (#380 PR2): grads-only call -- skip validating and
+     * fetching the absent buffer; pass B (below) never runs in that case. */
+    if (propLoss != NULL) {
+        layerNormValidateSymTensor(propLoss, "propLoss");
+    }
     layerNormValidateSymTensor(cfg->gamma->param, "gamma");
     /* beta->param is never read here (beta does not enter dx; dbeta needs only
      * dy) — deliberately not validated. */
@@ -501,18 +512,19 @@ static void layerNormBackwardSymInt32(layerNormConfig_t *cfg, tensor_t *forwardI
     int32_t *xq = (int32_t *)forwardInput->data;
     int32_t *dyq = (int32_t *)loss->data;
     int32_t *gammaQ = (int32_t *)cfg->gamma->param->data;
-    int32_t *dxq = (int32_t *)propLoss->data;
+    int32_t *dxq = (propLoss != NULL) ? (int32_t *)propLoss->data : NULL;
     float inScale = ((symInt32QConfig_t *)forwardInput->quantization->qConfig)->scale;
     float dyScale = ((symInt32QConfig_t *)loss->quantization->qConfig)->scale;
     float gammaScale = ((symInt32QConfig_t *)cfg->gamma->param->quantization->qConfig)->scale;
-    symInt32QConfig_t *plQC = propLoss->quantization->qConfig;
-    const float qMax = powf(2, (float)plQC->qMaxBits - 1) - 1;
-    const float qMin = -powf(2, (float)plQC->qMaxBits - 1);
+    symInt32QConfig_t *plQC =
+        (propLoss != NULL) ? (symInt32QConfig_t *)propLoss->quantization->qConfig : NULL;
 
     size_t G, N;
     layerNormGroupSizes(forwardInput, cfg->numNormDims, &G, &N);
     if (G == 0 || N == 0) {
-        plQC->scale = 1.0f; /* nothing to do; neutral scale (cf. #160, forward) */
+        if (propLoss != NULL) {
+            plQC->scale = 1.0f; /* nothing to do; neutral scale (cf. #160, forward) */
+        }
         return;
     }
 
@@ -595,48 +607,57 @@ static void layerNormBackwardSymInt32(layerNormConfig_t *cfg, tensor_t *forwardI
      * (unlike the forward's constant-input case): the only realistic
      * absmax==0 source is dy == 0, and zero PROPAGATES exactly through
      * products and sums even under -ffp-contract=fast, so the float check is
-     * reliable here. */
-    if (absMax == 0.0f) {
+     * reliable here.
+     * propLoss == NULL (#380 PR2): grads-only call -- skip pass B entirely
+     * (no dx write, no propLoss scale refresh; stats/absmax bookkeeping in
+     * pass A above already ran unconditionally). */
+    if (propLoss != NULL) {
+        const float qMax = powf(2, (float)plQC->qMaxBits - 1) - 1;
+        const float qMin = -powf(2, (float)plQC->qMaxBits - 1);
+
+        if (absMax == 0.0f) {
+            for (size_t g = 0; g < G; g++) {
+                for (size_t j = 0; j < N; j++) {
+                    dxq[layerNormPhysOffset(propLoss, cfg->numNormDims, g, j)] = 0;
+                }
+            }
+            plQC->scale = 1.0f;
+            return;
+        }
+
+        float dxScale = absMax / qMax;
+        /* Pass B: recompute dx from the stored stats and quantize. The dx
+         * expression is textually IDENTICAL to pass A's absmax expression so
+         * gcc's -ffp-contract=fast contracts both the same way; the clamp
+         * absorbs any residual divergence. The propLoss scale is
+         * data-dependent and REFRESHED ON EVERY CALL — a stale scale
+         * silently corrupts the downstream layer. */
         for (size_t g = 0; g < G; g++) {
+            float meanDn = 0.0f;
+            float meanDnN = 0.0f;
             for (size_t j = 0; j < N; j++) {
-                dxq[layerNormPhysOffset(propLoss, cfg->numNormDims, g, j)] = 0;
+                size_t xoff = layerNormPhysOffset(forwardInput, cfg->numNormDims, g, j);
+                size_t dyoff = layerNormPhysOffset(loss, cfg->numNormDims, g, j);
+                float nval = ((float)xq[xoff] * inScale - mean[g]) * invSigma[g];
+                float dyv = (float)dyq[dyoff] * dyScale;
+                float dn = dyv * ((float)gammaQ[j] * gammaScale);
+                meanDn += dn;
+                meanDnN += dn * nval;
+            }
+            meanDn /= (float)N;
+            meanDnN /= (float)N;
+            for (size_t j = 0; j < N; j++) {
+                size_t xoff = layerNormPhysOffset(forwardInput, cfg->numNormDims, g, j);
+                size_t dyoff = layerNormPhysOffset(loss, cfg->numNormDims, g, j);
+                float nval = ((float)xq[xoff] * inScale - mean[g]) * invSigma[g];
+                float dn = ((float)dyq[dyoff] * dyScale) * ((float)gammaQ[j] * gammaScale);
+                float dxv = invSigma[g] * (dn - meanDn - nval * meanDnN);
+                size_t dxoff = layerNormPhysOffset(propLoss, cfg->numNormDims, g, j);
+                dxq[dxoff] = roundByMode(clamp(dxv / dxScale, qMin, qMax), plQC->roundingMode);
             }
         }
-        plQC->scale = 1.0f;
-        return;
+        plQC->scale = dxScale;
     }
-
-    float dxScale = absMax / qMax;
-    /* Pass B: recompute dx from the stored stats and quantize. The dx expression
-     * is textually IDENTICAL to pass A's absmax expression so gcc's
-     * -ffp-contract=fast contracts both the same way; the clamp absorbs any
-     * residual divergence. The propLoss scale is data-dependent and REFRESHED ON
-     * EVERY CALL — a stale scale silently corrupts the downstream layer. */
-    for (size_t g = 0; g < G; g++) {
-        float meanDn = 0.0f;
-        float meanDnN = 0.0f;
-        for (size_t j = 0; j < N; j++) {
-            size_t xoff = layerNormPhysOffset(forwardInput, cfg->numNormDims, g, j);
-            size_t dyoff = layerNormPhysOffset(loss, cfg->numNormDims, g, j);
-            float nval = ((float)xq[xoff] * inScale - mean[g]) * invSigma[g];
-            float dyv = (float)dyq[dyoff] * dyScale;
-            float dn = dyv * ((float)gammaQ[j] * gammaScale);
-            meanDn += dn;
-            meanDnN += dn * nval;
-        }
-        meanDn /= (float)N;
-        meanDnN /= (float)N;
-        for (size_t j = 0; j < N; j++) {
-            size_t xoff = layerNormPhysOffset(forwardInput, cfg->numNormDims, g, j);
-            size_t dyoff = layerNormPhysOffset(loss, cfg->numNormDims, g, j);
-            float nval = ((float)xq[xoff] * inScale - mean[g]) * invSigma[g];
-            float dn = ((float)dyq[dyoff] * dyScale) * ((float)gammaQ[j] * gammaScale);
-            float dxv = invSigma[g] * (dn - meanDn - nval * meanDnN);
-            size_t dxoff = layerNormPhysOffset(propLoss, cfg->numNormDims, g, j);
-            dxq[dxoff] = roundByMode(clamp(dxv / dxScale, qMin, qMax), plQC->roundingMode);
-        }
-    }
-    plQC->scale = dxScale;
 }
 
 void layerNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
@@ -677,8 +698,10 @@ void layerNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
          * float* cast. A SYM-storage propLossQ (SYM_INT32 fixed-point, or packed
          * sub-byte SYM) paired with FLOAT32 propLossMath is factory-constructible,
          * and that raw write silently corrupts the mantissa/packed buffer — fail
-         * fast instead (same #261 gap the gamma/beta grad guard closes). */
-        if (propLoss->quantization->type != FLOAT32) {
+         * fast instead (same #261 gap the gamma/beta grad guard closes).
+         * propLoss == NULL (#380 PR2): grads-only call -- nothing to
+         * validate, skip the whole check. */
+        if (propLoss != NULL && propLoss->quantization->type != FLOAT32) {
             PRINT_ERROR("LayerNorm backward: FLOAT32 backward writes propLoss (dx) via a raw "
                         "float* cast — SYM/packed propLoss storage requires the funnel route "
                         "(follow-up issue, #261) — got propLoss dtype %d",

@@ -223,16 +223,20 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
         }
     }
 
-    executeOp(
-        &(opSpec_t){
-            .kernel =
-                cfg->propLossMath.type == ARITH_SYM_INT32 ? propLossKernelSym : propLossKernelFloat,
-            .inputs = (tensor_t *[]){loss, getParamFromParameter(cfg->weights)},
-            .nInputs = 2,
-            .arithmetic = cfg->propLossMath,
-            .mode = OUT_WRITE,
-        },
-        propLoss);
+    /* propLoss == NULL (#380 PR2): grads-only call -- skip the dx write
+     * entirely rather than dereference the absent buffer. */
+    if (propLoss != NULL) {
+        executeOp(
+            &(opSpec_t){
+                .kernel = cfg->propLossMath.type == ARITH_SYM_INT32 ? propLossKernelSym
+                                                                    : propLossKernelFloat,
+                .inputs = (tensor_t *[]){loss, getParamFromParameter(cfg->weights)},
+                .nInputs = 2,
+                .arithmetic = cfg->propLossMath,
+                .mode = OUT_WRITE,
+            },
+            propLoss);
+    }
 }
 
 void linearCalcOutputShape(layer_t *linearLayer, shape_t *inputShape, shape_t *outputShape) {

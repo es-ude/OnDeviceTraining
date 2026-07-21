@@ -440,7 +440,10 @@ static void groupNormBackwardFloat(groupNormConfig_t *cfg, tensor_t *forwardInpu
                                    tensor_t *propLoss) {
     float *x = (float *)forwardInput->data;
     float *dy = (float *)loss->data;
-    float *dx = (float *)propLoss->data;
+    /* propLoss == NULL (#380 PR2): grads-only call -- fetch NULL instead of
+     * dereferencing the absent buffer; the scatter loop below is guarded on
+     * dx and never touches propLoss in that case. */
+    float *dx = (propLoss != NULL) ? (float *)propLoss->data : NULL;
     float *gamma = (float *)cfg->gamma->param->data;
     const bool frozen = cfg->frozen;
     /* Frozen: no grad tensors exist (Task 1 elides them) -- fetch NULL instead
@@ -494,14 +497,18 @@ static void groupNormBackwardFloat(groupNormConfig_t *cfg, tensor_t *forwardInpu
             meanDnN = divFloat32s(meanDnN, (float)N);
 
             /* dx scattered back to the same physical offset its x came from
-             * (overwrite, not accumulate). */
-            for (size_t j = 0; j < N; j++) {
-                size_t c = grp * cpg + j / T;
-                size_t off = base + j;
-                float nval = mulFloat32s(subFloat32s(x[off], mean[k]), invSigma[k]);
-                float dn = mulFloat32s(dy[off], gamma[c]);
-                dx[off] = mulFloat32s(
-                    invSigma[k], subFloat32s(subFloat32s(dn, meanDn), mulFloat32s(nval, meanDnN)));
+             * (overwrite, not accumulate). propLoss == NULL (#380 PR2):
+             * grads-only call -- skip the scatter entirely (no propLoss->...
+             * touch, no dx write). */
+            if (dx != NULL) {
+                for (size_t j = 0; j < N; j++) {
+                    size_t c = grp * cpg + j / T;
+                    size_t off = base + j;
+                    float nval = mulFloat32s(subFloat32s(x[off], mean[k]), invSigma[k]);
+                    float dn = mulFloat32s(dy[off], gamma[c]);
+                    dx[off] = mulFloat32s(invSigma[k], subFloat32s(subFloat32s(dn, meanDn),
+                                                                   mulFloat32s(nval, meanDnN)));
+                }
             }
         }
     }
@@ -528,7 +535,11 @@ static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardI
                                       tensor_t *loss, tensor_t *propLoss) {
     groupNormValidateSymTensor(forwardInput, "forwardInput");
     groupNormValidateSymTensor(loss, "loss");
-    groupNormValidateSymTensor(propLoss, "propLoss");
+    /* propLoss == NULL (#380 PR2): grads-only call -- skip validating and
+     * fetching the absent buffer; pass B (below) never runs in that case. */
+    if (propLoss != NULL) {
+        groupNormValidateSymTensor(propLoss, "propLoss");
+    }
     groupNormValidateSymTensor(cfg->gamma->param, "gamma");
     /* beta->param is never read here (beta does not enter dx; dbeta needs only
      * dy) — deliberately not validated. */
@@ -536,15 +547,12 @@ static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardI
     int32_t *xq = (int32_t *)forwardInput->data;
     int32_t *dyq = (int32_t *)loss->data;
     int32_t *gammaQ = (int32_t *)cfg->gamma->param->data;
-    int32_t *dxq = (int32_t *)propLoss->data;
+    int32_t *dxq = (propLoss != NULL) ? (int32_t *)propLoss->data : NULL;
     float inScale = ((symInt32QConfig_t *)forwardInput->quantization->qConfig)->scale;
     float dyScale = ((symInt32QConfig_t *)loss->quantization->qConfig)->scale;
     float gammaScale = ((symInt32QConfig_t *)cfg->gamma->param->quantization->qConfig)->scale;
-    symInt32QConfig_t *plQC = propLoss->quantization->qConfig;
-    /* One-time config-derived range constants — orchestration (see forward). */
-    const float qHalfRange = powf(2, (float)(plQC->qMaxBits - 1));
-    const float qMax = subFloat32s(qHalfRange, 1.0f);
-    const float qMin = -qHalfRange;
+    symInt32QConfig_t *plQC =
+        (propLoss != NULL) ? (symInt32QConfig_t *)propLoss->quantization->qConfig : NULL;
 
     size_t K;
     size_t N;
@@ -553,7 +561,9 @@ static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardI
     size_t T;
     groupNormGroupGeom(forwardInput, cfg, &K, &N, &cpg, &B, &T);
     if (K == 0 || N == 0) {
-        plQC->scale = 1.0f; /* nothing to do; neutral scale (cf. #160, forward) */
+        if (propLoss != NULL) {
+            plQC->scale = 1.0f; /* nothing to do; neutral scale (cf. #160, forward) */
+        }
         return;
     }
 
@@ -642,55 +652,66 @@ static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardI
      * absmax -> scale -> round-clamp). NO integer dy==0 pre-check is needed
      * (unlike the forward's constant-input case): the only realistic
      * absmax==0 source is dy == 0, and zero PROPAGATES exactly through
-     * products and sums — the float check is reliable here. */
-    if (absMax == 0.0f) {
-        size_t total = K * N;
-        for (size_t i = 0; i < total; i++) {
-            dxq[i] = 0;
-        }
-        plQC->scale = 1.0f;
-        return;
-    }
+     * products and sums — the float check is reliable here.
+     * propLoss == NULL (#380 PR2): grads-only call -- skip pass B entirely
+     * (no dx write, no propLoss scale refresh; stats/absmax bookkeeping in
+     * pass A above already ran unconditionally). */
+    if (propLoss != NULL) {
+        /* One-time config-derived range constants — orchestration (see forward). */
+        const float qHalfRange = powf(2, (float)(plQC->qMaxBits - 1));
+        const float qMax = subFloat32s(qHalfRange, 1.0f);
+        const float qMin = -qHalfRange;
 
-    float dxScale = divFloat32s(absMax, qMax);
-    /* Pass B: recompute dx from the stored stats and quantize. The dx
-     * expression is IDENTICAL to pass A's absmax expression (all scalar-op
-     * calls, no contraction divergence); the clamp absorbs any residual
-     * boundary case. The propLoss scale is data-dependent and REFRESHED ON
-     * EVERY CALL — a stale scale silently corrupts the downstream layer. */
-    for (size_t b = 0; b < B; b++) {
-        for (size_t grp = 0; grp < G; grp++) {
-            size_t k = b * G + grp;
-            size_t base = (b * C + grp * cpg) * T;
-            float meanDn = 0.0f;
-            float meanDnN = 0.0f;
-            for (size_t j = 0; j < N; j++) {
-                size_t c = grp * cpg + j / T;
-                size_t off = base + j;
-                float nval = mulFloat32s(subFloat32s(mulFloat32s((float)xq[off], inScale), mean[k]),
-                                         invSigma[k]);
-                float dyv = mulFloat32s((float)dyq[off], dyScale);
-                float dn = mulFloat32s(dyv, mulFloat32s((float)gammaQ[c], gammaScale));
-                meanDn = addFloat32s(meanDn, dn);
-                meanDnN = addFloat32s(meanDnN, mulFloat32s(dn, nval));
+        if (absMax == 0.0f) {
+            size_t total = K * N;
+            for (size_t i = 0; i < total; i++) {
+                dxq[i] = 0;
             }
-            meanDn = divFloat32s(meanDn, (float)N);
-            meanDnN = divFloat32s(meanDnN, (float)N);
-            for (size_t j = 0; j < N; j++) {
-                size_t c = grp * cpg + j / T;
-                size_t off = base + j;
-                float nval = mulFloat32s(subFloat32s(mulFloat32s((float)xq[off], inScale), mean[k]),
-                                         invSigma[k]);
-                float dn = mulFloat32s(mulFloat32s((float)dyq[off], dyScale),
-                                       mulFloat32s((float)gammaQ[c], gammaScale));
-                float dxv = mulFloat32s(
-                    invSigma[k], subFloat32s(subFloat32s(dn, meanDn), mulFloat32s(nval, meanDnN)));
-                dxq[off] =
-                    roundByMode(clamp(divFloat32s(dxv, dxScale), qMin, qMax), plQC->roundingMode);
+            plQC->scale = 1.0f;
+            return;
+        }
+
+        float dxScale = divFloat32s(absMax, qMax);
+        /* Pass B: recompute dx from the stored stats and quantize. The dx
+         * expression is IDENTICAL to pass A's absmax expression (all
+         * scalar-op calls, no contraction divergence); the clamp absorbs
+         * any residual boundary case. The propLoss scale is data-dependent
+         * and REFRESHED ON EVERY CALL — a stale scale silently corrupts the
+         * downstream layer. */
+        for (size_t b = 0; b < B; b++) {
+            for (size_t grp = 0; grp < G; grp++) {
+                size_t k = b * G + grp;
+                size_t base = (b * C + grp * cpg) * T;
+                float meanDn = 0.0f;
+                float meanDnN = 0.0f;
+                for (size_t j = 0; j < N; j++) {
+                    size_t c = grp * cpg + j / T;
+                    size_t off = base + j;
+                    float nval = mulFloat32s(
+                        subFloat32s(mulFloat32s((float)xq[off], inScale), mean[k]), invSigma[k]);
+                    float dyv = mulFloat32s((float)dyq[off], dyScale);
+                    float dn = mulFloat32s(dyv, mulFloat32s((float)gammaQ[c], gammaScale));
+                    meanDn = addFloat32s(meanDn, dn);
+                    meanDnN = addFloat32s(meanDnN, mulFloat32s(dn, nval));
+                }
+                meanDn = divFloat32s(meanDn, (float)N);
+                meanDnN = divFloat32s(meanDnN, (float)N);
+                for (size_t j = 0; j < N; j++) {
+                    size_t c = grp * cpg + j / T;
+                    size_t off = base + j;
+                    float nval = mulFloat32s(
+                        subFloat32s(mulFloat32s((float)xq[off], inScale), mean[k]), invSigma[k]);
+                    float dn = mulFloat32s(mulFloat32s((float)dyq[off], dyScale),
+                                           mulFloat32s((float)gammaQ[c], gammaScale));
+                    float dxv = mulFloat32s(invSigma[k], subFloat32s(subFloat32s(dn, meanDn),
+                                                                     mulFloat32s(nval, meanDnN)));
+                    dxq[off] = roundByMode(clamp(divFloat32s(dxv, dxScale), qMin, qMax),
+                                           plQC->roundingMode);
+                }
             }
         }
+        plQC->scale = dxScale;
     }
-    plQC->scale = dxScale;
 }
 
 void groupNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
@@ -732,8 +753,10 @@ void groupNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
          * float* cast. A SYM-storage propLossQ (SYM_INT32 fixed-point, or packed
          * sub-byte SYM) paired with FLOAT32 propLossMath is factory-constructible,
          * and that raw write silently corrupts the mantissa/packed buffer — fail
-         * fast instead (same #261 gap the gamma/beta grad guard closes). */
-        if (propLoss->quantization->type != FLOAT32) {
+         * fast instead (same #261 gap the gamma/beta grad guard closes).
+         * propLoss == NULL (#380 PR2): grads-only call -- nothing to
+         * validate, skip the whole check. */
+        if (propLoss != NULL && propLoss->quantization->type != FLOAT32) {
             PRINT_ERROR("GroupNorm backward: FLOAT32 backward writes propLoss (dx) via a raw "
                         "float* cast — SYM/packed propLoss storage requires the funnel route "
                         "(follow-up issue, #261) — got propLoss dtype %d",

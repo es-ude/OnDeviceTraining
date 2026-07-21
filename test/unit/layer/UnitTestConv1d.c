@@ -1521,6 +1521,74 @@ void testConv1dBackwardFrozenFactoryLayerRunsWithoutGradBuffers(void) {
     TEST_ASSERT_TRUE(gradStillNull);
 }
 
+/* #380 PR2 Task 1: propLoss == NULL is a grads-only call -- weight/bias grads
+ * must be computed exactly as with a real propLoss, and no dx memory may be
+ * touched. Twin fixture (both TRAINABLE, hand-seeded, bit-identical) mirrors
+ * the PR1 frozen-twin idiom above: twin A gets a real propLoss buffer, twin B
+ * gets a literal NULL. Pre-guard, twin B's call dereferences the NULL
+ * propLoss and crashes (RED); post-guard, weight/bias grads match twin A's
+ * byte-for-byte and twin A's propLoss is non-degenerate. */
+void testConv1dBackwardNullPropLossComputesGradsOnly(void) {
+    size_t weightDims[] = {1, 1, 2};
+    size_t biasDims[] = {1};
+    size_t inputDims[] = {1, 1, 4};
+
+    tensor_t *weightParamA = makeFloatTensor(weightDims, 3, (float[]){1.f, -1.f});
+    tensor_t *weightGradA = gradInitFloat(weightParamA, NULL);
+    parameter_t *weightsA = parameterInit(weightParamA, weightGradA);
+    tensor_t *biasParamA = makeFloatTensor(biasDims, 1, (float[]){0.5f});
+    tensor_t *biasGradA = gradInitFloat(biasParamA, NULL);
+    parameter_t *biasA = parameterInit(biasParamA, biasGradA);
+    kernel_t kernelA;
+    initKernel(&kernelA, 2, VALID, 1, 1);
+    quantization_t *q = quantizationInitFloat();
+    layer_t *twinA = buildBorrowedConv1dLayer(weightsA, biasA, &kernelA, q);
+
+    tensor_t *weightParamB = makeFloatTensor(weightDims, 3, (float[]){1.f, -1.f});
+    tensor_t *weightGradB = gradInitFloat(weightParamB, NULL);
+    parameter_t *weightsB = parameterInit(weightParamB, weightGradB);
+    tensor_t *biasParamB = makeFloatTensor(biasDims, 1, (float[]){0.5f});
+    tensor_t *biasGradB = gradInitFloat(biasParamB, NULL);
+    parameter_t *biasB = parameterInit(biasParamB, biasGradB);
+    kernel_t kernelB;
+    initKernel(&kernelB, 2, VALID, 1, 1);
+    layer_t *twinB = buildBorrowedConv1dLayer(weightsB, biasB, &kernelB, q);
+
+    tensor_t *input = makeFloatTensor(inputDims, 3, (float[]){1.f, 2.f, 3.f, 4.f});
+    tensor_t *lossGrad = makeFloatTensor((size_t[]){1, 1, 3}, 3, (float[]){1.f, 1.f, 1.f});
+    tensor_t *propLossA = makeFloatTensor(inputDims, 3, NULL);
+
+    conv1dBackward(twinA, input, lossGrad, propLossA);
+    conv1dBackward(twinB, input, lossGrad, NULL);
+
+    size_t numWeights = calcNumberOfElementsByTensor(weightParamA);
+    size_t numBias = calcNumberOfElementsByTensor(biasParamA);
+    size_t numPropLoss = calcNumberOfElementsByTensor(propLossA);
+
+    bool weightGradsIdentical =
+        memcmp(weightGradA->data, weightGradB->data,
+               calcNumberOfBytesForData(weightGradA->quantization, numWeights)) == 0;
+    bool biasGradsIdentical =
+        memcmp(biasGradA->data, biasGradB->data,
+               calcNumberOfBytesForData(biasGradA->quantization, numBias)) == 0;
+    bool propLossANonDegenerate = false;
+    for (size_t i = 0; i < numPropLoss; i++) {
+        if (((float *)propLossA->data)[i] != 0.0f) {
+            propLossANonDegenerate = true;
+        }
+    }
+
+    TEST_ASSERT_TRUE_MESSAGE(
+        weightGradsIdentical,
+        "weight grads must be byte-identical between the real-propLoss and NULL-propLoss twins");
+    TEST_ASSERT_TRUE_MESSAGE(
+        biasGradsIdentical,
+        "bias grads must be byte-identical between the real-propLoss and NULL-propLoss twins");
+    TEST_ASSERT_TRUE_MESSAGE(propLossANonDegenerate,
+                             "twin A's propLoss must be non-degenerate (nonzero), proving the "
+                             "NULL round only skipped dx");
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -1564,5 +1632,6 @@ int main() {
     RUN_TEST(testConv1dFactoryDefaultAllocatesGrads);
     RUN_TEST(testConv1dBackwardFrozenTwinPropLossIdenticalGradsZero);
     RUN_TEST(testConv1dBackwardFrozenFactoryLayerRunsWithoutGradBuffers);
+    RUN_TEST(testConv1dBackwardNullPropLossComputesGradsOnly);
     return UNITY_END();
 }

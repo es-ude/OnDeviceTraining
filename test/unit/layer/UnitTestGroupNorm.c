@@ -1182,6 +1182,144 @@ void testGroupNormBackwardFrozenFactoryLayerRunsWithoutGradBuffers(void) {
     TEST_ASSERT_TRUE(gradStillNull);
 }
 
+/* #380 PR2 Task 1: propLoss == NULL is a grads-only call -- dgamma/dbeta must
+ * be computed exactly as with a real propLoss, and no dx memory may be
+ * touched. Duplicates the testBackwardFloatFrozenTwinDxIdenticalGradsZero
+ * fixture (dgamma/dbeta both gold-verified nonzero) into two independent
+ * twins that are BOTH trainable; only the propLoss argument differs (twin A:
+ * real buffer, twin B: literal NULL). Pre-guard, twin B's call
+ * dereferences the NULL propLoss and crashes (RED); post-guard,
+ * dgamma/dbeta match twin A's byte-for-byte and twin A's dx is
+ * non-degenerate. */
+void testBackwardFloatNullPropLossComputesGradsOnly(void) {
+    size_t B = 1;
+    size_t C = 8;
+    size_t T = 3;
+    size_t G = 2;
+    size_t dims[] = {B, C, T};
+    tensor_t *fwdIn = buildFloatTensorND(3, dims, input_groupNorm_twoGroups);
+    tensor_t *loss = buildFloatTensorND(3, dims, lossGrad_groupNorm_twoGroups);
+    tensor_t *propLossA = buildFloatTensorND(3, dims, NULL);
+
+    parameter_t *gammaA = buildFloatParam(C, gamma_groupNorm_twoGroups);
+    parameter_t *betaA = buildFloatParam(C, beta_groupNorm_twoGroups);
+    parameter_t *gammaB = buildFloatParam(C, gamma_groupNorm_twoGroups);
+    parameter_t *betaB = buildFloatParam(C, beta_groupNorm_twoGroups);
+
+    quantization_t *fq = quantizationInitFloat();
+    quantization_t *bq = quantizationInitFloat();
+
+    groupNormConfig_t cfgA;
+    initGroupNormConfig(&cfgA, gammaA, betaA, G, C, 1e-5f, fq, bq);
+    layerConfig_t lcfgA;
+    layer_t twinA = makeGroupNormLayer(&cfgA, &lcfgA);
+
+    groupNormConfig_t cfgB;
+    initGroupNormConfig(&cfgB, gammaB, betaB, G, C, 1e-5f, fq, bq);
+    layerConfig_t lcfgB;
+    layer_t twinB = makeGroupNormLayer(&cfgB, &lcfgB);
+
+    groupNormBackward(&twinA, fwdIn, loss, propLossA);
+    groupNormBackward(&twinB, fwdIn, loss, NULL);
+
+    bool gammaGradIdentical = memcmp(gammaA->grad->data, gammaB->grad->data,
+                                     calcNumberOfBytesForData(gammaA->grad->quantization, C)) == 0;
+    bool betaGradIdentical = memcmp(betaA->grad->data, betaB->grad->data,
+                                    calcNumberOfBytesForData(betaA->grad->quantization, C)) == 0;
+    bool propLossANonDegenerate = false;
+    for (size_t i = 0; i < B * C * T; i++) {
+        if (((float *)propLossA->data)[i] != 0.0f) {
+            propLossANonDegenerate = true;
+        }
+    }
+
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeParameter(betaB);
+    freeParameter(gammaB);
+    freeParameter(betaA);
+    freeParameter(gammaA);
+    freeTensor(propLossA);
+    freeTensor(loss);
+    freeTensor(fwdIn);
+
+    TEST_ASSERT_TRUE_MESSAGE(
+        gammaGradIdentical,
+        "dgamma must be byte-identical between the real-propLoss and NULL-propLoss twins");
+    TEST_ASSERT_TRUE_MESSAGE(
+        betaGradIdentical,
+        "dbeta must be byte-identical between the real-propLoss and NULL-propLoss twins");
+    TEST_ASSERT_TRUE_MESSAGE(propLossANonDegenerate,
+                             "twin A's dx must be non-degenerate (nonzero), proving the NULL "
+                             "round only skipped dx");
+}
+
+/* #380 PR2 Task 1: SYM variant (mirrors
+ * testSymBackwardFrozenTwinDxIdenticalGradsUntouched). Duplicates the
+ * testSymBackwardTwinSanityTwoGroups fixture into two independent twins that
+ * are BOTH trainable; only the propLoss argument differs. No propLoss-scale
+ * assertion here: when propLoss is NULL, pass B (dx requant + the propLoss
+ * scale refresh) is skipped entirely for twin B -- there is nothing to
+ * compare against twin A's refreshed scale. */
+void testSymBackwardNullPropLossComputesGradsOnly(void) {
+    size_t dims[] = {1, 8, 3};
+    tensor_t *fwdIn = buildSymInt32TensorND(3, dims, input_groupNorm_twoGroups);
+    tensor_t *loss = buildSymInt32TensorND(3, dims, lossGrad_groupNorm_twoGroups);
+    tensor_t *propLossA = buildSymInt32TensorND(3, dims, NULL);
+
+    parameter_t *gammaA = buildSymParamFloatGrad(8, gamma_groupNorm_twoGroups);
+    parameter_t *betaA = buildSymParamFloatGrad(8, beta_groupNorm_twoGroups);
+    parameter_t *gammaB = buildSymParamFloatGrad(8, gamma_groupNorm_twoGroups);
+    parameter_t *betaB = buildSymParamFloatGrad(8, beta_groupNorm_twoGroups);
+
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *bq = quantizationInitSymInt32(HALF_AWAY);
+
+    groupNormConfig_t cfgA;
+    initGroupNormConfig(&cfgA, gammaA, betaA, 2, 8, 1e-5f, fq, bq);
+    layerConfig_t lcfgA;
+    layer_t twinA = makeGroupNormLayer(&cfgA, &lcfgA);
+
+    groupNormConfig_t cfgB;
+    initGroupNormConfig(&cfgB, gammaB, betaB, 2, 8, 1e-5f, fq, bq);
+    layerConfig_t lcfgB;
+    layer_t twinB = makeGroupNormLayer(&cfgB, &lcfgB);
+
+    layerFunctions[GROUPNORM].backward(&twinA, fwdIn, loss, propLossA);
+    layerFunctions[GROUPNORM].backward(&twinB, fwdIn, loss, NULL);
+
+    bool gammaGradIdentical = memcmp(gammaA->grad->data, gammaB->grad->data,
+                                     calcNumberOfBytesForData(gammaA->grad->quantization, 8)) == 0;
+    bool betaGradIdentical = memcmp(betaA->grad->data, betaB->grad->data,
+                                    calcNumberOfBytesForData(betaA->grad->quantization, 8)) == 0;
+    bool propLossANonDegenerate = false;
+    for (size_t i = 0; i < 24; i++) {
+        if (((int32_t *)propLossA->data)[i] != 0) {
+            propLossANonDegenerate = true;
+        }
+    }
+
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeParameter(betaB);
+    freeParameter(gammaB);
+    freeParameter(betaA);
+    freeParameter(gammaA);
+    freeTensor(propLossA);
+    freeTensor(loss);
+    freeTensor(fwdIn);
+
+    TEST_ASSERT_TRUE_MESSAGE(
+        gammaGradIdentical,
+        "dgamma must be byte-identical between the real-propLoss and NULL-propLoss twins");
+    TEST_ASSERT_TRUE_MESSAGE(
+        betaGradIdentical,
+        "dbeta must be byte-identical between the real-propLoss and NULL-propLoss twins");
+    TEST_ASSERT_TRUE_MESSAGE(propLossANonDegenerate,
+                             "twin A's dx must be non-degenerate (nonzero), proving the NULL "
+                             "round only skipped dx");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConfigStructIsPopulated);
@@ -1222,5 +1360,7 @@ int main(void) {
     RUN_TEST(testGroupNormFactoryFrozenElidesGrads);
     RUN_TEST(testGroupNormFactoryDefaultAllocatesGrads);
     RUN_TEST(testGroupNormBackwardFrozenFactoryLayerRunsWithoutGradBuffers);
+    RUN_TEST(testBackwardFloatNullPropLossComputesGradsOnly);
+    RUN_TEST(testSymBackwardNullPropLossComputesGradsOnly);
     return UNITY_END();
 }

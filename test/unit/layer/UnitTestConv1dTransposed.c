@@ -1152,6 +1152,66 @@ void testConv1dTransposedBackwardFrozenFactoryLayerRunsWithoutGradBuffers(void) 
     TEST_ASSERT_TRUE(gradStillNull);
 }
 
+/* #380 PR2 Task 1: propLoss == NULL is a grads-only call -- weight/bias grads
+ * must be computed exactly as with a real propLoss, and no dx memory may be
+ * touched. Twin fixture (both TRAINABLE, hand-seeded, bit-identical) via the
+ * file's own convT1dBuild helper (no borrowed builder exists for ConvT1d),
+ * mirroring the PR1 frozen-twin fixture above: twin A gets a real propLoss
+ * buffer, twin B gets a literal NULL. Pre-guard, twin B's call dereferences
+ * the NULL propLoss and crashes (RED); post-guard, weight/bias grads match
+ * twin A's byte-for-byte and twin A's propLoss is non-degenerate. */
+void testConv1dTransposedBackwardNullPropLossComputesGradsOnly(void) {
+    convT1dRunResult_t rA, rB;
+    size_t weightDims[] = {1, 1, 2};
+    size_t biasDims[] = {1};
+    size_t inputDims[] = {1, 1, 3};
+    size_t outputDims[] = {1, 1, 4};
+    float outputDataA[1 * 1 * 4] = {0};
+    float outputDataB[1 * 1 * 4] = {0};
+
+    convT1dBuild(&rA, (float[]){1.f, -1.f}, weightDims, (float[]){0.5f}, biasDims, 1,
+                 (float[]){1.f, 2.f, 3.f}, inputDims, 2, 1, 1, 1, 0, outputDataA, outputDims);
+    convT1dBuild(&rB, (float[]){1.f, -1.f}, weightDims, (float[]){0.5f}, biasDims, 1,
+                 (float[]){1.f, 2.f, 3.f}, inputDims, 2, 1, 1, 1, 0, outputDataB, outputDims);
+
+    /* Non-uniform lossGrad (unlike the frozen-twin fixture's all-ones): with
+     * weight [1,-1], a uniform lossGrad makes the adjoint-conv propLoss
+     * identically zero (lossGrad[i]-lossGrad[i+1] == 0), which would make the
+     * propLossA non-degeneracy assertion below vacuous. */
+    tensor_t *lossGrad = makeFloatTensor(outputDims, 3, (float[]){1.f, 2.f, 3.f, 4.f});
+    tensor_t *propLossA = makeFloatTensor(inputDims, 3, NULL);
+
+    conv1dTransposedBackward(&rA.layer, rA.input, lossGrad, propLossA);
+    conv1dTransposedBackward(&rB.layer, rB.input, lossGrad, NULL);
+
+    size_t numWeights = calcNumberOfElementsByTensor(rA.weights->param);
+    size_t numBias = calcNumberOfElementsByTensor(rA.bias->param);
+    size_t numPropLoss = calcNumberOfElementsByTensor(propLossA);
+
+    bool weightGradsIdentical =
+        memcmp(rA.weights->grad->data, rB.weights->grad->data,
+               calcNumberOfBytesForData(rA.weights->grad->quantization, numWeights)) == 0;
+    bool biasGradsIdentical =
+        memcmp(rA.bias->grad->data, rB.bias->grad->data,
+               calcNumberOfBytesForData(rA.bias->grad->quantization, numBias)) == 0;
+    bool propLossANonDegenerate = false;
+    for (size_t i = 0; i < numPropLoss; i++) {
+        if (((float *)propLossA->data)[i] != 0.0f) {
+            propLossANonDegenerate = true;
+        }
+    }
+
+    TEST_ASSERT_TRUE_MESSAGE(
+        weightGradsIdentical,
+        "weight grads must be byte-identical between the real-propLoss and NULL-propLoss twins");
+    TEST_ASSERT_TRUE_MESSAGE(
+        biasGradsIdentical,
+        "bias grads must be byte-identical between the real-propLoss and NULL-propLoss twins");
+    TEST_ASSERT_TRUE_MESSAGE(propLossANonDegenerate,
+                             "twin A's propLoss must be non-degenerate (nonzero), proving the "
+                             "NULL round only skipped dx");
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -1190,5 +1250,6 @@ int main() {
     RUN_TEST(testConv1dTransposedFactoryDefaultAllocatesGrads);
     RUN_TEST(testConv1dTransposedBackwardFrozenTwinPropLossIdenticalGradsZero);
     RUN_TEST(testConv1dTransposedBackwardFrozenFactoryLayerRunsWithoutGradBuffers);
+    RUN_TEST(testConv1dTransposedBackwardNullPropLossComputesGradsOnly);
     return UNITY_END();
 }

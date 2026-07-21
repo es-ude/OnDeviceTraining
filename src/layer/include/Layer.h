@@ -62,6 +62,11 @@ typedef struct layer {
 } layer_t;
 
 typedef void (*forwardFn_t)(layer_t *layer, tensor_t *inputTensor, tensor_t *outputTensor);
+/*! propLoss == NULL is a grads-only call, valid ONLY for the five param-layer
+ *  backwards (Linear/Conv1d/Conv1dTransposed/LayerNorm/GroupNorm, #380 PR2):
+ *  they compute weight/bias (resp. gamma/beta) grads exactly as with a real
+ *  propLoss and touch no dx memory. Non-param layers (Relu, Softmax, Pool,
+ *  ...) require a non-NULL propLoss. */
 typedef void (*backwardFn_t)(layer_t *layer, tensor_t *forwardInput, tensor_t *loss,
                              tensor_t *propLoss);
 typedef void (*calcOutputShapeFn_t)(layer_t *layer, shape_t *inputShape, shape_t *outputShape);

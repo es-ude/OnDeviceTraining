@@ -68,9 +68,15 @@ Notes on the qualified cells:
   `trainable_t` tri-state (`TRAINABLE_FALSE`) on their init structs (#380 PR1): a
   frozen layer allocates no grad buffers, is invisible to the optimizer (skipped by
   count/collection/state allocation, see Optimizer below), and its backward computes
-  only the dx wire — weight/bias grads are never touched. Truncating the dx chain
-  past a frozen layer (skipping earlier layers' backward entirely) is deferred to
-  #380 PR2.
+  only the dx wire — weight/bias grads are never touched. Dx-chain truncation
+  (#380 PR2) is shipped: backward truncates at the deepest trainable layer — dx
+  wires below it, and the deepest trainable layer's own dx, are neither computed
+  nor allocated; trace emits backward events only for the executed range.
+  The cut is at the deepest **parameter** layer: leading non-param layers
+  (Flatten/Pool/Dropout/Quant — the repo's standard model heads) no longer run
+  backward at all, and their previously-fired `agrad` events (e.g. kws_raw's
+  `pool0` probe) vanish from traces; fully-trainable param-first models save
+  layer-0's previously wasted dx.
 
 ## Optimizer (`optimizerType_t`)
 
@@ -228,6 +234,10 @@ checkpointing, limitations, literature).
   A "batch" is gradient accumulation over B=1 microbatches. Metrics: loss, accuracy,
   macro precision/recall/F1, and a caller-owned confusion matrix
   (`epochStats_t` / `classificationReport_t`). Three eval entry points.
+  `calculateGradsSequential`'s backward pass truncates at `deepestTrainableIndex`
+  — the closest-to-input layer whose params still train (#380 PR2); when no
+  layer trains, the whole backward pass (loss-grad seed + layer loop) is
+  skipped, though the forward loss value is always computed.
 - **Data loading** — `.npy` (`<f4`/`<i4`) and CSV; `DataLoader` with batch + shuffle
   (once at init, **no per-epoch reshuffle**) + `dropLast` (only `true` supported).
   No dedicated MNIST loader in `src/` (examples preprocess to `.npy`).

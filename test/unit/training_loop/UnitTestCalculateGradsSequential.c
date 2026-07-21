@@ -1,5 +1,6 @@
 #define SOURCE_FILE "UnitTestCalculateGradsSequential"
 
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -45,6 +46,20 @@ static tensor_t *makeRowVec2(float a, float b) {
     tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
     float vals[2] = {a, b};
     tensorFillFromFloatBuffer(t, vals, 2);
+    return t;
+}
+
+/* Build a [1,n] float32 tensor from a caller-owned buffer (data is copied into the tensor). */
+static tensor_t *makeRowVecN(const float *vals, size_t n) {
+    size_t *dims = reserveMemory(2 * sizeof(size_t));
+    size_t *order = reserveMemory(2 * sizeof(size_t));
+    dims[0] = 1;
+    dims[1] = n;
+    setOrderOfDimsForNewTensor(2, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 2, order);
+    tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(t, vals, n);
     return t;
 }
 
@@ -736,6 +751,229 @@ void testFrozenLayerSurvivesTrainingUntouched(void) {
                              "loss must decrease over training");
 }
 
+/* ── #380 PR2 Task 2: backward truncation at the deepest trainable layer ──
+ * model: [frozen Linear(4->4), RELU, trainable Linear(4->2)], MSE loss.
+ * Below the deepest trainable layer (index 2, the only trainable one — index
+ * 0 is frozen, index 1 has no params) no dx is consumed, so the backward
+ * loop must truncate there: "agrad" fires exactly once (i == 2), never for
+ * i == 1 or i == 0, and exactly one "lossgrad" fires. The trainable layer's
+ * weight grad must still be non-zero -- backward really ran for it. */
+void testBackwardStopsAtDeepestTrainableLayer(void) {
+    g_eventCount = 0;
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, quantizationInitFloat());
+
+    layer_t *frozenL = linearLayerInit(
+        &(linearInit_t){.inFeatures = 4, .outFeatures = 4, .trainable = TRAINABLE_FALSE}, &lq);
+    layer_t *reluL = reluLayerInit(&lq);
+    layer_t *trainL = linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = 2}, &lq);
+    layer_t *model[3] = {frozenL, reluL, trainL};
+
+    float frozenW[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    float frozenB[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float trainW[8] = {0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f};
+    float trainB[2] = {0.0f, 0.0f};
+    modelLoadStateDict(
+        model, 3,
+        (stateDictEntry_t[]){{.name = "frozen", .weightData = frozenW, .biasData = frozenB},
+                             {.name = "trainable", .weightData = trainW, .biasData = trainB}},
+        2);
+
+    tensor_t *x = makeRowVecN((float[]){1.0f, 1.0f, 1.0f, 1.0f}, 4);
+    tensor_t *label = makeRowVecN((float[]){1.0f, 0.0f}, 2);
+
+    trainingStats_t *stats = tracedGrads(
+        model, 3,
+        (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM, .classWeights = NULL},
+        REDUCTION_SUM, x, label, recordingSink, NULL);
+
+    size_t agradAt0 = 0, agradAt1 = 0, agradAt2 = 0, lossgradCount = 0;
+    for (size_t i = 0; i < g_eventCount; i++) {
+        if (strcmp(g_events[i].phase, "agrad") == 0) {
+            if (g_events[i].idx == 0) {
+                agradAt0++;
+            } else if (g_events[i].idx == 1) {
+                agradAt1++;
+            } else if (g_events[i].idx == 2) {
+                agradAt2++;
+            }
+        } else if (strcmp(g_events[i].phase, "lossgrad") == 0) {
+            lossgradCount++;
+        }
+    }
+
+    float *wg = (float *)getGradFromParameter(trainL->config->linear->weights)->data;
+    bool weightGradNonZero = false;
+    for (size_t i = 0; i < 8; i++) {
+        if (wg[i] != 0.0f) {
+            weightGradNonZero = true;
+        }
+    }
+
+    /* CAPTURE (before any free touches the layers). */
+    size_t capturedAgradAt0 = agradAt0;
+    size_t capturedAgradAt1 = agradAt1;
+    size_t capturedAgradAt2 = agradAt2;
+    size_t capturedLossgrad = lossgradCount;
+    bool capturedWeightGradNonZero = weightGradNonZero;
+
+    freeTrainingStats(stats);
+    freeTensor(x);
+    freeTensor(label);
+    freeLinearLayer(frozenL);
+    freeReluLayer(reluL);
+    freeLinearLayer(trainL);
+
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(0, capturedAgradAt0,
+                                     "agrad must not fire below the deepest "
+                                     "trainable layer (index 0)");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(0, capturedAgradAt1,
+                                     "agrad must not fire below the deepest "
+                                     "trainable layer (index 1)");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(1, capturedAgradAt2,
+                                     "agrad must fire exactly once, at the deepest trainable "
+                                     "layer (index 2)");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(1, capturedLossgrad, "lossgrad must fire exactly once");
+    TEST_ASSERT_TRUE_MESSAGE(capturedWeightGradNonZero,
+                             "trainable top layer's weight grad must be non-zero (backward ran)");
+}
+
+/* ── #380 PR2 Task 2: upper-layer grads don't depend on lower dx ──
+ * M1: [frozen Linear(seed S), RELU, trainable Linear(seed T)] -- top layer is
+ * the deepest trainable one, so its backward runs via the grads-only
+ * (propLoss == NULL) path.
+ * M2: [trainable Linear(seed S), RELU, trainable Linear(seed T)] -- the
+ * bottom layer is now the deepest trainable one, so the top layer's backward
+ * runs via the normal (propLoss != NULL) path and the loop continues to
+ * compute dx all the way down.
+ * Same input/label, same weights for both layers across both models. The
+ * top layer's own weight+bias grads must be byte-identical either way --
+ * truncating the loop below it must not perturb its own computation. */
+void testTruncationPreservesUpperLayerGrads(void) {
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, quantizationInitFloat());
+
+    float seedS[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    float seedSBias[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float seedT[8] = {0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f};
+    float seedTBias[2] = {0.0f, 0.0f};
+
+    layer_t *m1Bottom = linearLayerInit(
+        &(linearInit_t){.inFeatures = 4, .outFeatures = 4, .trainable = TRAINABLE_FALSE}, &lq);
+    layer_t *m1Relu = reluLayerInit(&lq);
+    layer_t *m1Top = linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = 2}, &lq);
+    layer_t *m1[3] = {m1Bottom, m1Relu, m1Top};
+
+    layer_t *m2Bottom = linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = 4}, &lq);
+    layer_t *m2Relu = reluLayerInit(&lq);
+    layer_t *m2Top = linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = 2}, &lq);
+    layer_t *m2[3] = {m2Bottom, m2Relu, m2Top};
+
+    modelLoadStateDict(
+        m1, 3,
+        (stateDictEntry_t[]){{.name = "bottom", .weightData = seedS, .biasData = seedSBias},
+                             {.name = "top", .weightData = seedT, .biasData = seedTBias}},
+        2);
+    modelLoadStateDict(
+        m2, 3,
+        (stateDictEntry_t[]){{.name = "bottom", .weightData = seedS, .biasData = seedSBias},
+                             {.name = "top", .weightData = seedT, .biasData = seedTBias}},
+        2);
+
+    tensor_t *x1 = makeRowVecN((float[]){1.0f, 1.0f, 1.0f, 1.0f}, 4);
+    tensor_t *label1 = makeRowVecN((float[]){1.0f, 0.0f}, 2);
+    tensor_t *x2 = makeRowVecN((float[]){1.0f, 1.0f, 1.0f, 1.0f}, 4);
+    tensor_t *label2 = makeRowVecN((float[]){1.0f, 0.0f}, 2);
+
+    lossConfig_t lossConfig = {
+        .funcType = MSE, .backwardReduction = REDUCTION_SUM, .classWeights = NULL};
+    trainingStats_t *stats1 =
+        calculateGradsSequential(m1, 3, lossConfig, REDUCTION_SUM, x1, label1);
+    trainingStats_t *stats2 =
+        calculateGradsSequential(m2, 3, lossConfig, REDUCTION_SUM, x2, label2);
+
+    float *wg1 = (float *)getGradFromParameter(m1Top->config->linear->weights)->data;
+    float *wg2 = (float *)getGradFromParameter(m2Top->config->linear->weights)->data;
+    float *bg1 = (float *)getGradFromParameter(m1Top->config->linear->bias)->data;
+    float *bg2 = (float *)getGradFromParameter(m2Top->config->linear->bias)->data;
+
+    /* CAPTURE (before any free touches the layers). */
+    bool weightGradsIdentical = memcmp(wg1, wg2, 8 * sizeof(float)) == 0;
+    bool biasGradsIdentical = memcmp(bg1, bg2, 2 * sizeof(float)) == 0;
+
+    freeTrainingStats(stats1);
+    freeTrainingStats(stats2);
+    freeTensor(x1);
+    freeTensor(label1);
+    freeTensor(x2);
+    freeTensor(label2);
+    freeLinearLayer(m1Bottom);
+    freeReluLayer(m1Relu);
+    freeLinearLayer(m1Top);
+    freeLinearLayer(m2Bottom);
+    freeReluLayer(m2Relu);
+    freeLinearLayer(m2Top);
+
+    TEST_ASSERT_TRUE_MESSAGE(weightGradsIdentical,
+                             "top layer's weight grad must be byte-identical regardless of "
+                             "whether the layer below it is frozen (truncated) or trainable "
+                             "(full backward)");
+    TEST_ASSERT_TRUE_MESSAGE(biasGradsIdentical,
+                             "top layer's bias grad must be byte-identical regardless of "
+                             "whether the layer below it is frozen (truncated) or trainable "
+                             "(full backward)");
+}
+
+/* ── #380 PR2 Task 2: all-frozen model skips backward entirely ──
+ * model: [frozen Linear(4->2)], MSE loss. No layer trains, so
+ * deepestTrainableIndex returns the sentinel (modelSize) and the entire
+ * backward block -- including the loss-gradient seed -- must be skipped: no
+ * "lossgrad", no "agrad". The forward pass and loss must still run (finite
+ * loss value), and nothing may crash. */
+void testAllFrozenModelSkipsBackwardEntirely(void) {
+    g_eventCount = 0;
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, quantizationInitFloat());
+
+    layer_t *frozenL = linearLayerInit(
+        &(linearInit_t){.inFeatures = 4, .outFeatures = 2, .trainable = TRAINABLE_FALSE}, &lq);
+    layer_t *model[1] = {frozenL};
+
+    float W[8] = {0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f};
+    float B[2] = {0.0f, 0.0f};
+    modelLoadStateDict(model, 1,
+                       (stateDictEntry_t[]){{.name = "frozen", .weightData = W, .biasData = B}}, 1);
+
+    tensor_t *x = makeRowVecN((float[]){1.0f, 1.0f, 1.0f, 1.0f}, 4);
+    tensor_t *label = makeRowVecN((float[]){1.0f, 0.0f}, 2);
+
+    trainingStats_t *stats = tracedGrads(
+        model, 1,
+        (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM, .classWeights = NULL},
+        REDUCTION_SUM, x, label, recordingSink, NULL);
+
+    size_t backwardEvents = 0;
+    for (size_t i = 0; i < g_eventCount; i++) {
+        if (strcmp(g_events[i].phase, "agrad") == 0 || strcmp(g_events[i].phase, "lossgrad") == 0) {
+            backwardEvents++;
+        }
+    }
+
+    /* CAPTURE (before any free touches the layers). */
+    bool lossFinite = isfinite(stats->loss);
+    size_t capturedBackwardEvents = backwardEvents;
+
+    freeTrainingStats(stats);
+    freeTensor(x);
+    freeTensor(label);
+    freeLinearLayer(frozenL);
+
+    TEST_ASSERT_TRUE_MESSAGE(lossFinite, "loss must still be computed for an all-frozen model");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(0, capturedBackwardEvents,
+                                     "all-frozen model must fire zero backward events (no "
+                                     "lossgrad, no agrad)");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testCalculateGradsSequentialClosedForm);
@@ -746,5 +984,8 @@ int main(void) {
     RUN_TEST(testDxWireHonorsProducerPropLossQMaxBits);
     RUN_TEST(testForwardWireHonorsDeclaredOutputQMaxBits);
     RUN_TEST(testFrozenLayerSurvivesTrainingUntouched);
+    RUN_TEST(testBackwardStopsAtDeepestTrainableLayer);
+    RUN_TEST(testTruncationPreservesUpperLayerGrads);
+    RUN_TEST(testAllFrozenModelSkipsBackwardEntirely);
     return UNITY_END();
 }

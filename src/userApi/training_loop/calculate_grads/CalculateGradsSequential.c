@@ -35,6 +35,23 @@ static void setDropoutLayersTraining(layer_t **model, size_t modelSize, bool tra
     }
 }
 
+/* Defined below (needed here); forward-declared because layerParameters lives
+ * further down in this file. */
+static bool layerParameters(layer_t *layer, parameter_t **weightOut, parameter_t **biasOut);
+
+/* Deepest (closest-to-input) layer whose parameters still train (#380 PR2).
+ * Below it no dx is consumed, so backward truncates there; modelSize = none. */
+static size_t deepestTrainableIndex(layer_t **model, size_t modelSize) {
+    for (size_t i = 0; i < modelSize; i++) {
+        parameter_t *w = NULL;
+        parameter_t *b = NULL;
+        if (layerParameters(model[i], &w, &b) && !layerIsFrozen(model[i])) {
+            return i;
+        }
+    }
+    return modelSize;
+}
+
 static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
                                            lossConfig_t lossConfig, reduction_t forwardReduction,
                                            tensor_t *input, tensor_t *label, traceSink_t sink,
@@ -71,29 +88,40 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
         backwardIndex -= 1;
     }
 
-    tensor_t gradNext;
-    initGradTensor(&gradNext, layerOutputs[modelSize], NULL);
-    lossFns.backward(layerOutputs[modelSize], label, &gradNext);
-    if (sink != NULL) {
-        sink(sinkCtx, modelSize, model[modelSize - 1]->type, "lossgrad", &gradNext);
-    }
-
-    for (int i = (int)backwardIndex; i >= 0; i--) {
-        layerType_t layerType = model[i]->type;
-        /* agrad@i = gradient w.r.t. layer i's OUTPUT (the wire grad entering layer i's
-         * backward), matching the PyTorch forward-hook activation.grad. */
+    /* #380 PR2: backward truncates at the deepest trainable layer -- below it
+     * no dx is consumed, so the loss-grad seed and the whole loop are skipped
+     * entirely when no layer trains (deepest == modelSize sentinel). */
+    size_t deepest = deepestTrainableIndex(model, modelSize);
+    if (deepest < modelSize) {
+        tensor_t gradNext;
+        initGradTensor(&gradNext, layerOutputs[modelSize], NULL);
+        lossFns.backward(layerOutputs[modelSize], label, &gradNext);
         if (sink != NULL) {
-            sink(sinkCtx, (size_t)i, layerType, "agrad", &gradNext);
+            sink(sinkCtx, modelSize, model[modelSize - 1]->type, "lossgrad", &gradNext);
         }
-        tensor_t gradCurr;
-        initGradTensor(&gradCurr, layerOutputs[i], backwardWireQ(model[i]));
-        backwardFn_t backward = layerFunctions[layerType].backward;
-        backward(model[i], layerOutputs[i], &gradNext, &gradCurr);
+
+        for (int i = (int)backwardIndex; i >= (int)deepest; i--) {
+            layerType_t layerType = model[i]->type;
+            /* agrad@i = gradient w.r.t. layer i's OUTPUT (the wire grad entering layer i's
+             * backward), matching the PyTorch forward-hook activation.grad. */
+            if (sink != NULL) {
+                sink(sinkCtx, (size_t)i, layerType, "agrad", &gradNext);
+            }
+            backwardFn_t backward = layerFunctions[layerType].backward;
+            if ((size_t)i == deepest) {
+                /* deepest trainable layer: grads only -- nothing below consumes dx */
+                backward(model[i], layerOutputs[i], &gradNext, NULL);
+            } else {
+                tensor_t gradCurr;
+                initGradTensor(&gradCurr, layerOutputs[i], backwardWireQ(model[i]));
+                backward(model[i], layerOutputs[i], &gradNext, &gradCurr);
+                deInitGradTensor(&gradNext);
+                gradNext = gradCurr;
+            }
+        }
         deInitGradTensor(&gradNext);
-        gradNext = gradCurr;
     }
 
-    deInitGradTensor(&gradNext);
     deInitLayerOutputs(layerOutputs, modelSize);
 
     setDropoutLayersTraining(model, modelSize, false);

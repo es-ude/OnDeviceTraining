@@ -22,7 +22,14 @@ typedef void (*traceSink_t)(void *ctx, size_t layerIdx, layerType_t layerType, c
 
 /*! Same forward+backward as calculateGradsSequential, but fires `sink` after
  *  each layer's forward ("fwd"), after the loss backward ("lossgrad",
- *  layerIdx == modelSize), and after each layer's backward ("agrad"). */
+ *  layerIdx == modelSize), and after each layer's backward ("agrad").
+ *
+ *  Backward truncates at the deepest (closest-to-input) trainable layer
+ *  (#380 PR2): "lossgrad"/"agrad" fire only for that layer and everything
+ *  above it, never for a layer below it (no dx is consumed there). If no
+ *  layer in the model trains, backward is skipped entirely -- NO "lossgrad"
+ *  and NO "agrad" events fire (the loss value is still computed and "fwd"
+ *  still fires for every layer). */
 trainingStats_t *tracedGrads(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
                              reduction_t forwardReduction, tensor_t *input, tensor_t *label,
                              traceSink_t sink, void *ctx);

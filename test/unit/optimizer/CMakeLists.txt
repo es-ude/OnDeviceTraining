@@ -71,6 +71,12 @@ add_elastic_ai_unit_test(
         QuantizationApi
         StorageApi
         Layer
+        Linear
+        LinearApi
+        LayerQuant
+        LayerCommon
+        Distributions
+        RNG
         Tensor
         Common
         m

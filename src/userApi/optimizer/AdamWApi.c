@@ -1,7 +1,10 @@
 #define SOURCE_FILE "ADAM-W-API"
 
-#include "AdamWApi.h"
+#include <stdlib.h>
+
 #include "AdamW.h"
+#include "AdamWApi.h"
+#include "Common.h"
 #include "OptimizerApi.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -30,6 +33,17 @@ optimizer_t *adamWCreateOptim(float learningRate, double beta1, double beta2, do
     optim->impl = impl;
 
     size_t sizeStates = calcTotalNumberOfStates(model, sizeModel);
+    /* #380: a zero-state model is only an error when it's DEGENERATE -- every
+     * parameter-bearing layer got frozen (nothing to optimize). A model that
+     * simply has no parameter-bearing layer types at all (e.g. a lone
+     * Dropout/pooling layer) is a pre-existing, deliberately-supported
+     * zero-state configuration (SgdApi sibling contract) and must keep
+     * working. */
+    if (sizeStates == 0 && modelHasFrozenLayer(model, sizeModel)) {
+        PRINT_ERROR("adamWCreateOptim: model has no trainable parameters "
+                    "(every parameter-bearing layer is frozen) - nothing to optimize");
+        exit(1);
+    }
     optim->sizeStates = sizeStates;
     parameter_t **parameter = reserveMemory(sizeStates * sizeof(parameter_t *));
     optim->parameter = parameter;

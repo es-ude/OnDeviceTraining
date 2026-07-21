@@ -24,19 +24,31 @@ void scaleOptimizerGradients(optimizer_t *optimizer, float factor);
  * switch: LINEAR/CONV1D/CONV1D_TRANSPOSED contribute weights (+ bias, if
  * present -- BIAS_FALSE layers carry none); LAYERNORM/GROUPNORM contribute
  * gamma + beta; layers with no trainable parameters are skipped; an unknown
- * layer type fails fast (PRINT_ERROR + exit(1)).
+ * layer type fails fast (PRINT_ERROR + exit(1)). Frozen layers (#380) are
+ * skipped entirely -- none of their parameters land in `slots`.
  *
  * Extracted from SgdApi.c (#328 groundwork) so non-SGD factories (e.g. PR C's
  * adamWCreateOptim) can reuse the same collection logic. */
 void collectTrainableParameters(layer_t **model, size_t sizeModel, parameter_t **slots);
+
+/* #380: true iff at least one layer in `model` is frozen (layerIsFrozen).
+ * Distinguishes "every parameter-bearing layer got frozen" (a mis-built,
+ * nothing-to-train model -- the factories fail-fast on this) from "the model
+ * simply has no parameter-bearing layer types at all" (e.g. a lone Dropout/
+ * pooling layer -- a pre-existing, deliberately-supported zero-state
+ * configuration, #279/#308 sibling contracts): sizeStates == 0 alone can't
+ * tell the two apart, since both land on zero collected parameters. */
+bool modelHasFrozenLayer(layer_t **model, size_t sizeModel);
 
 /* #261, PR3: validates that every parameter's grad storage tracked by `optim`
  * is one of the accepted dtypes -- FLOAT32 (default), SYM_INT32 (explicit
  * low-level knob), or packed SYM/ASYM (explicit grad-storage knob,
  * memory-constrained targets). INT32/BOOL grad storage remains unimplemented:
  * fails fast (PRINT_ERROR naming `factoryName` + exit(1)) rather than
- * silently misreading bytes in an unsupported layout. Non-trainable params
- * carry no grad (NULL) and are skipped.
+ * silently misreading bytes in an unsupported layout. Frozen layers (#380)
+ * are skipped before collection, so they never reach `optim->parameter[]`;
+ * a NULL grad in a COLLECTED slot is therefore a mis-built model, not a
+ * frozen layer, and fails fast here rather than crashing mid-training.
  *
  * Extracted from SgdApi.c (#328 groundwork) so non-SGD factories reuse the
  * same guard; `factoryName` names the caller in the error message. */

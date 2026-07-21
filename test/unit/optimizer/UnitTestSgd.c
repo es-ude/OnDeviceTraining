@@ -45,11 +45,68 @@ _Static_assert(_Generic(&validateOptimizerGradStorage,
                    void (*)(optimizer_t *, const char *): 1,
                    default: 0),
                "#328: validateOptimizerGradStorage must be (optim, factoryName)");
+_Static_assert(_Generic(&modelHasFrozenLayer, bool (*)(layer_t **, size_t): 1, default: 0),
+               "#380: modelHasFrozenLayer must be (model, sizeModel)");
 _Static_assert(_Generic(&freeOptim, void (*)(optimizer_t *): 1, default: 0),
                "#328: freeOptim must be (optim)");
 
 void setUp() {}
 void tearDown() {}
+
+/* Local copy of the Task-1 helper (test/unit/layer/UnitTestLinear.c:355) --
+ * tests are independent binaries, so this file builds its own frozen/
+ * trainable Linear layer instead of including across test directories. */
+static layer_t *buildFloatLinearWithTrainable(trainable_t trainable) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *layer = linearLayerInitOwning(
+        &(linearInit_t){.inFeatures = 3, .outFeatures = 2, .trainable = trainable}, &lq);
+    freeQuantization(q);
+    return layer;
+}
+
+/* #380 PR1 Task 4: frozen layers must contribute zero states and never be
+ * collected -- a 2-layer model (frozen + trainable) must count/collect as if
+ * only the trainable layer existed. */
+void testOptimizerSkipsFrozenLayerInCountAndCollection(void) {
+    layer_t *frozenL = buildFloatLinearWithTrainable(TRAINABLE_FALSE);
+    layer_t *trainL = buildFloatLinearWithTrainable(TRAINABLE_DEFAULT);
+    layer_t *model[] = {frozenL, trainL};
+    size_t count = calcTotalNumberOfStates(model, 2);
+
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *optim = sgdMCreateOptim(0.1f, 0.9f, 0.0f, model, 2, momentumQ,
+                                         (arithmetic_t){.type = ARITH_FLOAT32});
+    size_t sizeStates = optim->sizeStates;
+    bool slot0IsTrainWeights = optim->parameter[0] == trainL->config->linear->weights;
+    bool slot1IsTrainBias = optim->parameter[1] == trainL->config->linear->bias;
+    bool statesAllocated = optim->states != NULL;
+
+    freeOptim(optim);                 /* frees ONLY the collected (trainable) params */
+    freeLinearLayerShellOnly(trainL); /* BorrowedLayer.h helper — params already freed */
+    freeLinearLayer(frozenL);         /* frozen params NOT collected — full free */
+    freeQuantization(momentumQ);
+
+    TEST_ASSERT_EQUAL_size_t(2, count);
+    TEST_ASSERT_EQUAL_size_t(2, sizeStates);
+    TEST_ASSERT_TRUE(slot0IsTrainWeights);
+    TEST_ASSERT_TRUE(slot1IsTrainBias);
+    TEST_ASSERT_TRUE(statesAllocated);
+}
+
+/* #380 PR1 Task 4: an all-frozen model has zero trainable states -- the
+ * factory must fail fast (exit(1)) rather than build a degenerate optimizer
+ * (also forecloses the reserveMemory(0)/#160 N=0 edge). */
+void testSgdCreateAllFrozenModelExits(void) {
+    ASSERT_EXITS_WITH(1, {
+        layer_t *frozenL = buildFloatLinearWithTrainable(TRAINABLE_FALSE);
+        layer_t *model[] = {frozenL};
+        quantization_t *momentumQ = quantizationInitFloat();
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32});
+    });
+}
 
 void testSgdMCreateOptim() {
     /* Shared layer-config quantization (caller-owned). */
@@ -581,7 +638,14 @@ void testSgdMCreateOptimRegistersLayerNormGammaAndBeta(void) {
 }
 
 void testLayerNormContributesTwoOptimizerStates(void) {
-    layer_t layer = {.type = LAYERNORM, .config = NULL};
+    /* #380: calcNumberOfStatesByLayer now checks layerIsFrozen(layer) first,
+     * which for LAYERNORM dereferences layer->config->layerNorm->frozen -- a
+     * bare .config = NULL fixture (the pre-#380 shortcut) would crash. A
+     * stack-local layerNormConfig_t with frozen left at its zero-init default
+     * (false, the trainable case) keeps this a minimal, config-only fixture. */
+    layerNormConfig_t lnCfg = {0};
+    layerConfig_t lcfg = {.layerNorm = &lnCfg};
+    layer_t layer = {.type = LAYERNORM, .config = &lcfg};
     layer_t *model[] = {&layer};
     size_t sizeModel = 1;
 
@@ -1604,6 +1668,8 @@ void testOptimizerVtableGetSetLrRoundTripsSgdLearningRate(void) {
 
 int main() {
     UNITY_BEGIN();
+    RUN_TEST(testOptimizerSkipsFrozenLayerInCountAndCollection);
+    RUN_TEST(testSgdCreateAllFrozenModelExits);
     RUN_TEST(testSgdMCreateOptim);
     RUN_TEST(testSGDStep);
     RUN_TEST(testSGDZeroGrad);

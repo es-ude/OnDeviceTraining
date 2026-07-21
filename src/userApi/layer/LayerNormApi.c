@@ -51,11 +51,12 @@ static void fillParamTensorWithConstant(tensor_t *paramTensor, float value) {
  * mantissa 2047, scale 1/2047 (#227 int12 operand default)); grad dtype from
  * gradQ (= the profile's backwardMath). */
 static parameter_t *allocateLayerNormGamma(const size_t *normalizedShape, size_t numNormDims,
-                                           quantization_t *storageQ, quantization_t *gradQ) {
+                                           quantization_t *storageQ, quantization_t *gradQ,
+                                           bool trainable) {
     shape_t *shape = buildOwnedShape(normalizedShape, numNormDims);
     tensor_t *paramTensor = initTensor(shape, getQLike(storageQ), NULL);
     fillParamTensorWithConstant(paramTensor, 1.0f);
-    tensor_t *gradTensor = gradInit(paramTensor, gradQ, NULL);
+    tensor_t *gradTensor = trainable ? gradInit(paramTensor, gradQ, NULL) : NULL;
     return parameterInit(paramTensor, gradTensor);
 }
 
@@ -63,11 +64,12 @@ static parameter_t *allocateLayerNormGamma(const size_t *normalizedShape, size_t
  * mantissa 0, scale 1.0 — the explicit fill exercises the absMax==0 constant
  * guard instead of relying on calloc zeros + the default scale). */
 static parameter_t *allocateLayerNormBeta(const size_t *normalizedShape, size_t numNormDims,
-                                          quantization_t *storageQ, quantization_t *gradQ) {
+                                          quantization_t *storageQ, quantization_t *gradQ,
+                                          bool trainable) {
     shape_t *shape = buildOwnedShape(normalizedShape, numNormDims);
     tensor_t *paramTensor = initTensor(shape, getQLike(storageQ), NULL);
     fillParamTensorWithConstant(paramTensor, 0.0f);
-    tensor_t *gradTensor = gradInit(paramTensor, gradQ, NULL);
+    tensor_t *gradTensor = trainable ? gradInit(paramTensor, gradQ, NULL) : NULL;
     return parameterInit(paramTensor, gradTensor);
 }
 
@@ -156,6 +158,7 @@ static layer_t *layerNormLayerInitCommon(layerNormInit_t *init, layerQuant_t *lq
                                          layerNormConfig_t **outCfg) {
     validateLayerNormInit(init);
     validateLayerQuantForLayerNorm(lq);
+    bool trainable = resolveTrainable(init->trainable, "layerNormLayerInit");
 
     float eps = (init->eps == 0.0f) ? LAYERNORM_DEFAULT_EPS : init->eps;
 
@@ -175,9 +178,9 @@ static layer_t *layerNormLayerInitCommon(layerNormInit_t *init, layerQuant_t *lq
     quantization_t *gammaGradQ = lq->weightGradStorage != NULL ? lq->weightGradStorage : floatGradQ;
     quantization_t *betaGradQ = lq->biasGradStorage != NULL ? lq->biasGradStorage : floatGradQ;
     parameter_t *gamma = allocateLayerNormGamma(init->normalizedShape, init->numNormDims,
-                                                lq->weightStorage, gammaGradQ);
-    parameter_t *beta =
-        allocateLayerNormBeta(init->normalizedShape, init->numNormDims, lq->biasStorage, betaGradQ);
+                                                lq->weightStorage, gammaGradQ, trainable);
+    parameter_t *beta = allocateLayerNormBeta(init->normalizedShape, init->numNormDims,
+                                              lq->biasStorage, betaGradQ, trainable);
     freeQuantization(floatGradQ);
 
     /* Factory-owned copy of normalizedShape (caller may free its own array). */
@@ -188,6 +191,7 @@ static layer_t *layerNormLayerInitCommon(layerNormInit_t *init, layerQuant_t *lq
 
     /* forwardQ/backwardQ filled by the variant below; pass NULL here. */
     initLayerNormConfig(cfg, gamma, beta, normShapeCopy, init->numNormDims, eps, NULL, NULL);
+    cfg->frozen = !trainable;
 
     *outCfg = cfg;
     return layer;

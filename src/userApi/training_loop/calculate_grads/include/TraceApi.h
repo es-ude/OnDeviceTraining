@@ -29,7 +29,10 @@ trainingStats_t *tracedGrads(layer_t **model, size_t modelSize, lossConfig_t los
 
 /*! Fire `sink` for each trainable layer's weight and bias PARAM tensors, with
  *  phase "<tag>.weight" / "<tag>.bias". Param-less layers and NULL bias are
- *  skipped. (Trainable: LINEAR, CONV1D, CONV1D_TRANSPOSED, LAYERNORM, GROUPNORM.) */
+ *  skipped; a frozen layer's weight/bias GRAD is also skipped (#380 --
+ *  frozen layers carry grad == NULL, and the sink contract promises a
+ *  borrowed VALID tensor, never NULL). (Trainable: LINEAR, CONV1D,
+ *  CONV1D_TRANSPOSED, LAYERNORM, GROUPNORM.) */
 void traceModelWeights(layer_t **model, size_t modelSize, const char *tag, traceSink_t sink,
                        void *ctx);
 

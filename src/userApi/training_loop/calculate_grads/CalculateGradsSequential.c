@@ -151,13 +151,20 @@ static void traceModelParams(layer_t **model, size_t modelSize, const char *tag,
         if (!layerParameters(model[i], &w, &b)) {
             continue;
         }
+        /* Frozen layers (#380): getGradFromParameter returns NULL (Task 1 elides
+         * the grad tensor). The TraceApi contract promises sinks a borrowed VALID
+         * tensor -- skip the call entirely rather than handing them NULL. */
         tensor_t *wt = wantGrad ? getGradFromParameter(w) : getParamFromParameter(w);
-        snprintf(phase, sizeof(phase), "%s.weight", tag);
-        sink(ctx, i, model[i]->type, phase, wt);
+        if (wt != NULL) {
+            snprintf(phase, sizeof(phase), "%s.weight", tag);
+            sink(ctx, i, model[i]->type, phase, wt);
+        }
         if (b != NULL) {
             tensor_t *bt = wantGrad ? getGradFromParameter(b) : getParamFromParameter(b);
-            snprintf(phase, sizeof(phase), "%s.bias", tag);
-            sink(ctx, i, model[i]->type, phase, bt);
+            if (bt != NULL) {
+                snprintf(phase, sizeof(phase), "%s.bias", tag);
+                sink(ctx, i, model[i]->type, phase, bt);
+            }
         }
     }
 }

@@ -144,6 +144,7 @@ target_link_libraries(LayerNormApi PRIVATE
         QuantizationApi
         Rounding
         Layer
+        LayerCommon
         LayerNorm
         LayerQuant
         Common
@@ -160,6 +161,7 @@ target_link_libraries(GroupNormApi PRIVATE
         Rounding
         Layer
         GroupNorm
+        LayerCommon
         LayerQuant
         Common
         StorageApi

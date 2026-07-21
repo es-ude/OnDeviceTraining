@@ -35,6 +35,7 @@ void linearInitConfig(linearConfig_t *linearConfig, parameter_t *weights, parame
      * (LinearApi.c) if the caller opted into a different mode. */
     linearConfig->weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
     linearConfig->biasGradAccMode = OUT_ACC_FIXED_SCALE;
+    linearConfig->frozen = false;
 }
 
 void linearForwardFloat(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output) {
@@ -194,30 +195,32 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
                     tensor_t *propLoss) {
     linearConfig_t *cfg = linearLayer->config->linear;
 
-    executeOpValidateAccMode(cfg->weightGradAccMode, "Linear weightGradAccMode");
-    executeOp(
-        &(opSpec_t){
-            .kernel = cfg->weightGradMath.type == ARITH_SYM_INT32 ? weightGradKernelSym
-                                                                  : weightGradKernelFloat,
-            .inputs = (tensor_t *[]){loss, forwardInput},
-            .nInputs = 2,
-            .arithmetic = cfg->weightGradMath,
-            .mode = cfg->weightGradAccMode,
-        },
-        getGradFromParameter(cfg->weights));
-
-    if (cfg->bias != NULL) {
-        executeOpValidateAccMode(cfg->biasGradAccMode, "Linear biasGradAccMode");
+    if (!cfg->frozen) {
+        executeOpValidateAccMode(cfg->weightGradAccMode, "Linear weightGradAccMode");
         executeOp(
             &(opSpec_t){
-                .kernel = cfg->biasGradMath.type == ARITH_SYM_INT32 ? biasGradKernelSym
-                                                                    : biasGradKernelFloat,
-                .inputs = (tensor_t *[]){loss},
-                .nInputs = 1,
-                .arithmetic = cfg->biasGradMath,
-                .mode = cfg->biasGradAccMode,
+                .kernel = cfg->weightGradMath.type == ARITH_SYM_INT32 ? weightGradKernelSym
+                                                                      : weightGradKernelFloat,
+                .inputs = (tensor_t *[]){loss, forwardInput},
+                .nInputs = 2,
+                .arithmetic = cfg->weightGradMath,
+                .mode = cfg->weightGradAccMode,
             },
-            getGradFromParameter(cfg->bias));
+            getGradFromParameter(cfg->weights));
+
+        if (cfg->bias != NULL) {
+            executeOpValidateAccMode(cfg->biasGradAccMode, "Linear biasGradAccMode");
+            executeOp(
+                &(opSpec_t){
+                    .kernel = cfg->biasGradMath.type == ARITH_SYM_INT32 ? biasGradKernelSym
+                                                                        : biasGradKernelFloat,
+                    .inputs = (tensor_t *[]){loss},
+                    .nInputs = 1,
+                    .arithmetic = cfg->biasGradMath,
+                    .mode = cfg->biasGradAccMode,
+                },
+                getGradFromParameter(cfg->bias));
+        }
     }
 
     executeOp(

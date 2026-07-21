@@ -47,6 +47,7 @@ void initLayerNormConfig(layerNormConfig_t *cfg, parameter_t *gamma, parameter_t
      * (LayerNormApi.c) if the caller opted into a different mode. */
     cfg->weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
     cfg->biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
+    cfg->frozen = false;
 }
 
 /* Compute G (groups) and N (per-group element count) from a logical shape:
@@ -422,8 +423,11 @@ static void layerNormBackwardFloat(layerNormConfig_t *cfg, tensor_t *forwardInpu
     float *dy = (float *)loss->data;
     float *dx = (float *)propLoss->data;
     float *gamma = (float *)cfg->gamma->param->data;
-    float *dgamma = (float *)cfg->gamma->grad->data; /* accumulated += */
-    float *dbeta = (float *)cfg->beta->grad->data;   /* accumulated += */
+    const bool frozen = cfg->frozen;
+    /* Frozen: no grad tensors exist (Task 1 elides them) -- fetch NULL instead
+     * of dereferencing cfg->gamma->grad / cfg->beta->grad. */
+    float *dgamma = frozen ? NULL : (float *)cfg->gamma->grad->data; /* accumulated += */
+    float *dbeta = frozen ? NULL : (float *)cfg->beta->grad->data;   /* accumulated += */
 
     size_t G, N;
     layerNormGroupSizes(forwardInput, cfg->numNormDims, &G, &N);
@@ -448,8 +452,10 @@ static void layerNormBackwardFloat(layerNormConfig_t *cfg, tensor_t *forwardInpu
             size_t dyoff = layerNormPhysOffset(loss, cfg->numNormDims, g, j);
             float nval = (x[xoff] - mean[g]) * invSigma[g];
             float dyv = dy[dyoff];
-            dbeta[j] += dyv;         /* SUM over groups */
-            dgamma[j] += dyv * nval; /* SUM over groups */
+            if (!frozen) {
+                dbeta[j] += dyv;         /* SUM over groups */
+                dgamma[j] += dyv * nval; /* SUM over groups */
+            }
             float dn = dyv * gamma[j];
             meanDn += dn;
             meanDnN += dn * nval;
@@ -553,34 +559,36 @@ static void layerNormBackwardSymInt32(layerNormConfig_t *cfg, tensor_t *forwardI
         }
     }
 
-    quantization_t incQ;
-    initFloat32Quantization(&incQ);
-    tensor_t dgammaT;
-    setTensorValues(&dgammaT, (uint8_t *)dgammaInc, cfg->gamma->grad->shape, &incQ,
-                    cfg->gamma->grad->sparsity);
-    tensor_t dbetaT;
-    setTensorValues(&dbetaT, (uint8_t *)dbetaInc, cfg->beta->grad->shape, &incQ,
-                    cfg->beta->grad->sparsity);
-    executeOpValidateAccMode(cfg->weightGradAccMode, "LayerNorm weightGradAccMode");
-    executeOp(
-        &(opSpec_t){
-            .kernel = executeOpIdentityKernel,
-            .inputs = (tensor_t *[]){&dgammaT},
-            .nInputs = 1,
-            .arithmetic = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY},
-            .mode = cfg->weightGradAccMode,
-        },
-        cfg->gamma->grad);
-    executeOpValidateAccMode(cfg->biasGradAccMode, "LayerNorm biasGradAccMode");
-    executeOp(
-        &(opSpec_t){
-            .kernel = executeOpIdentityKernel,
-            .inputs = (tensor_t *[]){&dbetaT},
-            .nInputs = 1,
-            .arithmetic = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY},
-            .mode = cfg->biasGradAccMode,
-        },
-        cfg->beta->grad);
+    if (!cfg->frozen) {
+        quantization_t incQ;
+        initFloat32Quantization(&incQ);
+        tensor_t dgammaT;
+        setTensorValues(&dgammaT, (uint8_t *)dgammaInc, cfg->gamma->grad->shape, &incQ,
+                        cfg->gamma->grad->sparsity);
+        tensor_t dbetaT;
+        setTensorValues(&dbetaT, (uint8_t *)dbetaInc, cfg->beta->grad->shape, &incQ,
+                        cfg->beta->grad->sparsity);
+        executeOpValidateAccMode(cfg->weightGradAccMode, "LayerNorm weightGradAccMode");
+        executeOp(
+            &(opSpec_t){
+                .kernel = executeOpIdentityKernel,
+                .inputs = (tensor_t *[]){&dgammaT},
+                .nInputs = 1,
+                .arithmetic = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY},
+                .mode = cfg->weightGradAccMode,
+            },
+            cfg->gamma->grad);
+        executeOpValidateAccMode(cfg->biasGradAccMode, "LayerNorm biasGradAccMode");
+        executeOp(
+            &(opSpec_t){
+                .kernel = executeOpIdentityKernel,
+                .inputs = (tensor_t *[]){&dbetaT},
+                .nInputs = 1,
+                .arithmetic = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY},
+                .mode = cfg->biasGradAccMode,
+            },
+            cfg->beta->grad);
+    }
 
     /* dx requant: convertFloatTensorToSymInt32Tensor idiom (whole-tensor
      * absmax -> scale -> round-clamp). NO integer dy==0 pre-check is needed
@@ -654,9 +662,10 @@ void layerNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
          * is silent memory corruption, not garbage values — fail fast instead.
          * PR3 (#261): routing float dgamma/dbeta through the funnel like the
          * SYM_INT32 path is a follow-up issue; this guard only closes the gap
-         * until then. */
-        if (cfg->gamma->grad->quantization->type != FLOAT32 ||
-            cfg->beta->grad->quantization->type != FLOAT32) {
+         * until then. Frozen (#380): no grad tensors exist (Task 1 elides
+         * them), so there is nothing to validate -- skip the whole check. */
+        if (!cfg->frozen && (cfg->gamma->grad->quantization->type != FLOAT32 ||
+                             cfg->beta->grad->quantization->type != FLOAT32)) {
             PRINT_ERROR("LayerNorm backward: FLOAT32 backward writes gamma/beta grads via a raw "
                         "float* cast — packed grad storage requires the funnel route (follow-up "
                         "issue, #261) — got gamma grad dtype %d, beta grad dtype %d",

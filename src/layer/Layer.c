@@ -36,3 +36,20 @@ void initLayer(layer_t *layer, layerType_t type, layerConfig_t *config) {
     layer->type = type;
     layer->config = config;
 }
+
+bool layerIsFrozen(const layer_t *layer) {
+    switch (layer->type) {
+    case LINEAR:
+        return layer->config->linear->frozen;
+    case CONV1D:
+        return layer->config->conv1d->frozen;
+    case CONV1D_TRANSPOSED:
+        return layer->config->conv1dTransposed->frozen;
+    case LAYERNORM:
+        return layer->config->layerNorm->frozen;
+    case GROUPNORM:
+        return layer->config->groupNorm->frozen;
+    default:
+        return false;
+    }
+}

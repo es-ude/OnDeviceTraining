@@ -29,6 +29,8 @@ typedef struct groupNormConfig {
     outputMode_t biasGradAccMode;   /* dbeta executeOp accumulate mode (PR3 spec D1) */
     bool ownsQuantizations;         /* true → freeGroupNormLayer tears down outputQ/propLossQ
                                      * (Owning factory); false → caller owns them (Borrowing). */
+    bool frozen; /* create-time freeze (#380): no grad buffers; optimizer collection,
+                    state allocation and backward weight/bias-grad ops skip this layer */
 } groupNormConfig_t;
 
 void initGroupNormConfig(groupNormConfig_t *cfg, parameter_t *gamma, parameter_t *beta,

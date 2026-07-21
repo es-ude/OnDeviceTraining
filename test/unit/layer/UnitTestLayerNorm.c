@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "Arithmetic.h"
 #include "ArithmeticType.h"
@@ -579,6 +580,77 @@ void testBackwardFloatDivergentLayouts(void) {
     }
 }
 
+/* #380 PR1 Task 6: a frozen twin's backward must skip the dgamma/dbeta
+ * accumulate lines entirely (buffers stay all-zero) while still producing a
+ * dx byte-identical to its trainable twin. Duplicates the
+ * testBackwardFloatMultiGroupAccumulatesGradients fixture (dgamma/dbeta both
+ * gold-verified nonzero) into two independent twins that differ only in
+ * cfg.frozen -- forwardInput/loss are read-only in backward, so a single
+ * shared instance of each is safe to reuse across both calls. */
+void testBackwardFloatFrozenTwinDxIdenticalGradsZero(void) {
+    size_t dims[] = {2, 2};
+    tensor_t *fwdIn = buildFloatTensorND(2, dims, (float[]){-1.f, 1.f, 2.f, 4.f});
+    tensor_t *loss = buildFloatTensorND(2, dims, (float[]){1.f, 1.f, 1.f, 1.f});
+    tensor_t *propLossTrainable = buildFloatTensorND(2, dims, NULL);
+    tensor_t *propLossFrozen = buildFloatTensorND(2, dims, NULL);
+
+    size_t ns[] = {2};
+    parameter_t *gammaA = buildFloatParam(1, ns, (float[]){1.f, 1.f});
+    parameter_t *betaA = buildFloatParam(1, ns, NULL);
+    parameter_t *gammaB = buildFloatParam(1, ns, (float[]){1.f, 1.f});
+    parameter_t *betaB = buildFloatParam(1, ns, NULL);
+    size_t *normShape = reserveMemory(sizeof(size_t));
+    normShape[0] = 2;
+
+    quantization_t *fq = quantizationInitFloat();
+    quantization_t *bq = quantizationInitFloat();
+
+    layerNormConfig_t cfgTrainable;
+    initLayerNormConfig(&cfgTrainable, gammaA, betaA, normShape, 1, 1e-5f, fq, bq);
+    layerConfig_t lcfgTrainable;
+    layer_t layerTrainable = makeLayerNormLayer(&cfgTrainable, &lcfgTrainable);
+
+    layerNormConfig_t cfgFrozen;
+    initLayerNormConfig(&cfgFrozen, gammaB, betaB, normShape, 1, 1e-5f, fq, bq);
+    cfgFrozen.frozen = true;
+    layerConfig_t lcfgFrozen;
+    layer_t layerFrozen = makeLayerNormLayer(&cfgFrozen, &lcfgFrozen);
+
+    layerNormBackward(&layerTrainable, fwdIn, loss, propLossTrainable);
+    layerNormBackward(&layerFrozen, fwdIn, loss, propLossFrozen);
+
+    bool trainableGradNonzero = false;
+    bool frozenGradAllZero = true;
+    for (size_t i = 0; i < 2; i++) {
+        if (((float *)gammaA->grad->data)[i] != 0.0f || ((float *)betaA->grad->data)[i] != 0.0f) {
+            trainableGradNonzero = true;
+        }
+        if (((float *)gammaB->grad->data)[i] != 0.0f || ((float *)betaB->grad->data)[i] != 0.0f) {
+            frozenGradAllZero = false;
+        }
+    }
+    bool dxIdentical = memcmp(propLossTrainable->data, propLossFrozen->data,
+                              calcNumberOfBytesForData(propLossTrainable->quantization, 4)) == 0;
+
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeReservedMemory(normShape);
+    freeParameter(betaB);
+    freeParameter(gammaB);
+    freeParameter(betaA);
+    freeParameter(gammaA);
+    freeTensor(propLossFrozen);
+    freeTensor(propLossTrainable);
+    freeTensor(loss);
+    freeTensor(fwdIn);
+
+    TEST_ASSERT_TRUE_MESSAGE(trainableGradNonzero,
+                             "trainable twin dgamma/dbeta must be written (nonzero)");
+    TEST_ASSERT_TRUE_MESSAGE(frozenGradAllZero,
+                             "frozen twin dgamma/dbeta must stay untouched (all-zero)");
+    TEST_ASSERT_TRUE_MESSAGE(dxIdentical, "dx must be byte-identical between twins");
+}
+
 void testFactoryBuildsGammaOnesBetaZerosAndForwards(void) {
     size_t normShape[] = {4};
     layerNormInit_t init = {.normalizedShape = normShape, .numNormDims = 1, .eps = 0.0f};
@@ -1035,6 +1107,106 @@ void testSymBackwardGoldMultiGroup(void) {
         gradMantissaTol_layerNormSymBwd_bwdBase, expectedDgammaDequant_layerNormSymBwd_bwdBase,
         expectedDbetaDequant_layerNormSymBwd_bwdBase, gradDequantTol_layerNormSymBwd_bwdBase, 12,
         4);
+}
+
+/* #380 PR1 Task 6: SYM twin of the frozen-backward guard. Duplicates the
+ * testSymBackwardGoldMultiGroup fixture (dgamma/dbeta gold-verified nonzero,
+ * scales ~7e-5/8e-5) into two independent twins differing only in
+ * cfg.frozen. Pass B (dx requant + propLoss scale refresh) stays
+ * unconditional per spec, so dx mantissas AND the refreshed propLoss scale
+ * must be IDENTICAL between twins; the frozen twin's dgamma/dbeta must stay
+ * at their fresh zero-mantissa/scale-1.0 init (the emission block never runs). */
+void testSymBackwardFrozenTwinDxIdenticalGradsUntouched(void) {
+    size_t dims[] = {3, 4};
+    size_t ns[] = {4};
+    tensor_t *fwdIn = buildSymInt32TensorND(2, dims, input_layerNormSymBwd_bwdBase);
+    tensor_t *loss = buildSymInt32TensorND(2, dims, lossGrad_layerNormSymBwd_bwdBase);
+    tensor_t *propLossTrainable = buildSymInt32TensorND(2, dims, NULL);
+    tensor_t *propLossFrozen = buildSymInt32TensorND(2, dims, NULL);
+
+    parameter_t *gammaA = buildSymParam(1, ns, gamma_layerNormSymBwd_bwdBase);
+    parameter_t *betaA = buildSymParam(1, ns, NULL);
+    parameter_t *gammaB = buildSymParam(1, ns, gamma_layerNormSymBwd_bwdBase);
+    parameter_t *betaB = buildSymParam(1, ns, NULL);
+    size_t *normShape = reserveMemory(sizeof(size_t));
+    normShape[0] = 4;
+
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *bq = quantizationInitSymInt32(HALF_AWAY);
+
+    layerNormConfig_t cfgTrainable;
+    initLayerNormConfig(&cfgTrainable, gammaA, betaA, normShape, 1, 1e-5f, fq, bq);
+    layerConfig_t lcfgTrainable;
+    layer_t layerTrainable = makeLayerNormLayer(&cfgTrainable, &lcfgTrainable);
+
+    layerNormConfig_t cfgFrozen;
+    initLayerNormConfig(&cfgFrozen, gammaB, betaB, normShape, 1, 1e-5f, fq, bq);
+    cfgFrozen.frozen = true;
+    layerConfig_t lcfgFrozen;
+    layer_t layerFrozen = makeLayerNormLayer(&cfgFrozen, &lcfgFrozen);
+
+    layerNormBackward(&layerTrainable, fwdIn, loss, propLossTrainable);
+    layerNormBackward(&layerFrozen, fwdIn, loss, propLossFrozen);
+
+    int32_t dxTrainable[12], dxFrozen[12];
+    for (size_t i = 0; i < 12; i++) {
+        dxTrainable[i] = ((int32_t *)propLossTrainable->data)[i];
+        dxFrozen[i] = ((int32_t *)propLossFrozen->data)[i];
+    }
+    float scaleTrainable = symScaleOf(propLossTrainable);
+    float scaleFrozen = symScaleOf(propLossFrozen);
+
+    bool trainableGammaGradNonzero = false;
+    bool trainableBetaGradNonzero = false;
+    bool frozenGammaGradAllZero = true;
+    bool frozenBetaGradAllZero = true;
+    for (size_t i = 0; i < 4; i++) {
+        if (((int32_t *)gammaA->grad->data)[i] != 0) {
+            trainableGammaGradNonzero = true;
+        }
+        if (((int32_t *)betaA->grad->data)[i] != 0) {
+            trainableBetaGradNonzero = true;
+        }
+        if (((int32_t *)gammaB->grad->data)[i] != 0) {
+            frozenGammaGradAllZero = false;
+        }
+        if (((int32_t *)betaB->grad->data)[i] != 0) {
+            frozenBetaGradAllZero = false;
+        }
+    }
+    bool frozenGammaScaleUntouched = symScaleOf(gammaB->grad) == 1.0f;
+    bool frozenBetaScaleUntouched = symScaleOf(betaB->grad) == 1.0f;
+
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeReservedMemory(normShape);
+    freeParameter(betaB);
+    freeParameter(gammaB);
+    freeParameter(betaA);
+    freeParameter(gammaA);
+    freeTensor(propLossFrozen);
+    freeTensor(propLossTrainable);
+    freeTensor(loss);
+    freeTensor(fwdIn);
+
+    for (size_t i = 0; i < 12; i++) {
+        TEST_ASSERT_EQUAL_INT32_MESSAGE(dxTrainable[i], dxFrozen[i],
+                                        "dx mantissas must be identical between twins");
+    }
+    TEST_ASSERT_EQUAL_FLOAT_MESSAGE(scaleTrainable, scaleFrozen,
+                                    "refreshed propLoss scale must be identical between twins");
+    TEST_ASSERT_TRUE_MESSAGE(trainableGammaGradNonzero,
+                             "trainable twin dgamma must be written (nonzero)");
+    TEST_ASSERT_TRUE_MESSAGE(trainableBetaGradNonzero,
+                             "trainable twin dbeta must be written (nonzero)");
+    TEST_ASSERT_TRUE_MESSAGE(frozenGammaGradAllZero,
+                             "frozen twin dgamma must stay untouched (all-zero)");
+    TEST_ASSERT_TRUE_MESSAGE(frozenBetaGradAllZero,
+                             "frozen twin dbeta must stay untouched (all-zero)");
+    TEST_ASSERT_TRUE_MESSAGE(frozenGammaScaleUntouched,
+                             "frozen twin dgamma scale must stay at fresh-init 1.0");
+    TEST_ASSERT_TRUE_MESSAGE(frozenBetaScaleUntouched,
+                             "frozen twin dbeta scale must stay at fresh-init 1.0");
 }
 
 /* dy == 0: dx must be all-zero mantissas with the NEUTRAL scale 1.0 (the
@@ -2075,6 +2247,73 @@ void testLayerNormSymRejectsOperandWiderThanInt12(void) {
     freeTensor(in);
 }
 
+/* #380 PR1 Task 3: create-time trainable knob (trainable_t). */
+static layer_t *buildFloatLayerNormWithTrainable(trainable_t trainable) {
+    size_t normShape[] = {4};
+    layerNormInit_t init = {
+        .normalizedShape = normShape, .numNormDims = 1, .eps = 0.0f, .trainable = trainable};
+
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq = {.forwardMath = arithmeticFromQuantization(q),
+                       .propLossMath = arithmeticFromQuantization(q),
+                       .outputQ = q,
+                       .propLossQ = q,
+                       .weightStorage = q,
+                       .biasStorage = q};
+
+    layer_t *layer = layerNormLayerInitOwning(&init, &lq);
+    freeQuantization(q);
+    return layer;
+}
+
+void testLayerNormFactoryFrozenElidesGrads(void) {
+    layer_t *layer = buildFloatLayerNormWithTrainable(TRAINABLE_FALSE);
+    layerNormConfig_t *cfg = layer->config->layerNorm;
+    bool gammaGradNull = cfg->gamma->grad == NULL;
+    bool betaGradNull = cfg->beta->grad == NULL;
+    bool frozen = layerIsFrozen(layer);
+    freeLayerNormLayer(layer);
+    TEST_ASSERT_TRUE(gammaGradNull);
+    TEST_ASSERT_TRUE(betaGradNull);
+    TEST_ASSERT_TRUE(frozen);
+}
+
+void testLayerNormFactoryDefaultAllocatesGrads(void) {
+    layer_t *layer = buildFloatLayerNormWithTrainable(TRAINABLE_DEFAULT);
+    layerNormConfig_t *cfg = layer->config->layerNorm;
+    bool gammaGradPresent = cfg->gamma->grad != NULL;
+    bool betaGradPresent = cfg->beta->grad != NULL;
+    bool frozen = layerIsFrozen(layer);
+    freeLayerNormLayer(layer);
+    TEST_ASSERT_TRUE(gammaGradPresent);
+    TEST_ASSERT_TRUE(betaGradPresent);
+    TEST_ASSERT_FALSE(frozen);
+}
+
+/* #380 PR1 Task 6: factory-frozen layer (grad == NULL, Task 1) -- layerNormBackward
+ * must complete without dereferencing the (absent) grad buffers. Forked via the
+ * death-test harness (DeathTest.h) so a missing/misplaced guard's SIGSEGV fails
+ * only this test instead of taking down the whole suite. */
+void testLayerNormBackwardFrozenFactoryLayerRunsWithoutGradBuffers(void) {
+    layer_t *layer = buildFloatLayerNormWithTrainable(TRAINABLE_FALSE);
+    bool gradStillNull = layer->config->layerNorm->gamma->grad == NULL &&
+                         layer->config->layerNorm->beta->grad == NULL;
+
+    size_t dims[] = {4};
+    tensor_t *fwdIn = buildFloatTensorND(1, dims, (float[]){1.f, -1.f, 1.f, -1.f});
+    tensor_t *loss = buildFloatTensorND(1, dims, (float[]){1.f, 2.f, 3.f, 4.f});
+    tensor_t *propLoss = buildFloatTensorND(1, dims, NULL);
+
+    ASSERT_EXITS_WITH(0, layerNormBackward(layer, fwdIn, loss, propLoss));
+
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(fwdIn);
+    freeLayerNormLayer(layer);
+
+    TEST_ASSERT_TRUE(gradStillNull);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConfigStructIsPopulated);
@@ -2086,6 +2325,7 @@ int main(void) {
     RUN_TEST(testBackwardFloatSingleGroup);
     RUN_TEST(testBackwardFloatMultiGroupAccumulatesGradients);
     RUN_TEST(testBackwardFloatDivergentLayouts);
+    RUN_TEST(testBackwardFloatFrozenTwinDxIdenticalGradsZero);
     RUN_TEST(testFactoryBuildsGammaOnesBetaZerosAndForwards);
     RUN_TEST(testFactoryOwningDeepCopiesQuantizations);
     RUN_TEST(testFactoryBorrowingDoesNotFreeCallerQuantizations);
@@ -2111,6 +2351,7 @@ int main(void) {
     RUN_TEST(testFactorySymInt32StorageQuantizesGammaBeta);
     RUN_TEST(testFactoryOwningSymInt32DeepCopiesQuantizations);
     RUN_TEST(testSymBackwardGoldMultiGroup);
+    RUN_TEST(testSymBackwardFrozenTwinDxIdenticalGradsUntouched);
     RUN_TEST(testSymBackwardZeroLossGradEmitsZerosNeutralScale);
     RUN_TEST(testSymBackwardPropLossScaleRefreshedEveryCall);
     RUN_TEST(testSymBackwardGradsAccumulateAcrossCalls);
@@ -2121,5 +2362,8 @@ int main(void) {
     RUN_TEST(testBackwardFloatGuardsNonFloat32GammaGrad);
     RUN_TEST(testBackwardFloatGuardsNonFloat32PropLoss);
     RUN_TEST(testLayerNormSymRejectsOperandWiderThanInt12);
+    RUN_TEST(testLayerNormFactoryFrozenElidesGrads);
+    RUN_TEST(testLayerNormFactoryDefaultAllocatesGrads);
+    RUN_TEST(testLayerNormBackwardFrozenFactoryLayerRunsWithoutGradBuffers);
     return UNITY_END();
 }

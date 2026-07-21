@@ -74,6 +74,9 @@ void collectTrainableParameters(layer_t **model, size_t sizeModel, parameter_t *
     size_t paramSlot = 0;
     for (size_t i = 0; i < sizeModel; i++) {
         layer_t *currentLayer = model[i];
+        if (layerIsFrozen(currentLayer)) {
+            continue;
+        }
         layerConfig_t *layerConfig = currentLayer->config;
 
         switch (currentLayer->type) {
@@ -153,15 +156,24 @@ void collectTrainableParameters(layer_t **model, size_t sizeModel, parameter_t *
     }
 }
 
+bool modelHasFrozenLayer(layer_t **model, size_t sizeModel) {
+    for (size_t i = 0; i < sizeModel; i++) {
+        if (layerIsFrozen(model[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void validateOptimizerGradStorage(optimizer_t *optim, const char *factoryName) {
     /* #261, PR3: grads may be stored FLOAT32 (default), SYM_INT32 (explicit
      * low-level knob), or packed SYM/ASYM (explicit grad-storage knob,
      * memory-constrained targets). INT32/BOOL grad storage remains
      * unimplemented - fail fast rather than silently misread bytes in an
      * unsupported layout. A NULL grad in a collected slot is a mis-built
-     * model (no freeze mechanism exists; every factory allocates grads, and
-     * step/zeroGrad dereference them unconditionally) - fail fast here
-     * instead of crashing mid-training (PR #366 review). */
+     * model (frozen layers are skipped before collection (#380); a collected
+     * slot must always carry an allocated grad) - fail fast here instead of
+     * crashing mid-training (PR #366 review). */
     for (size_t s = 0; s < optim->sizeStates; s++) {
         tensor_t *grad = optim->parameter[s]->grad;
         if (grad == NULL) {

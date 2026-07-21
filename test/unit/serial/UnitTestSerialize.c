@@ -206,6 +206,78 @@ static void testRoundTripLinear(void) {
     freeReservedMemory(capturedDeserialBGrad);
 }
 
+/*! LINEAR frozen round trip (#380 ODTS v3): both mirrors are built via the
+ *  TRAINABLE_FALSE factory knob, so parameter_t.grad is NULL for weights AND
+ *  bias on both sides. Pre-v3, serializeParameter/deserializeParameter always
+ *  touched parameter->grad unconditionally -- a NULL-deref crash for a frozen
+ *  model. The presence byte lets the wire skip the grad tensor entirely: param
+ *  values round-trip byte-identical, no crash, and grad stays NULL. */
+static void testRoundTripLinearFrozen(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+
+    linearInit_t init = {.inFeatures = 4, .outFeatures = 3, .trainable = TRAINABLE_FALSE};
+
+    layer_t *serialLayer = linearLayerInitOwning(&init, &lq);
+    layer_t *deserialLayer = linearLayerInitOwning(&init, &lq);
+
+    linearConfig_t *serialCfg = serialLayer->config->linear;
+    linearConfig_t *deserialCfg = deserialLayer->config->linear;
+
+    size_t numberOfWeights = calcNumberOfElementsByTensor(serialCfg->weights->param);
+    size_t numberOfBiases = calcNumberOfElementsByTensor(serialCfg->bias->param);
+
+    layer_t *serialModel[] = {serialLayer};
+    layer_t *deserialModel[] = {deserialLayer};
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(serialModel, 1, f);
+    fclose(f);
+
+    f = fopen(FILE_PATH, "rb");
+    deserializeModel(deserialModel, 1, f);
+    fclose(f);
+
+    /* CAPTURE every assertion value before any free. */
+    bool capturedSerialWeightsGradNull = (serialCfg->weights->grad == NULL);
+    bool capturedDeserialWeightsGradNull = (deserialCfg->weights->grad == NULL);
+    bool capturedSerialBiasGradNull = (serialCfg->bias->grad == NULL);
+    bool capturedDeserialBiasGradNull = (deserialCfg->bias->grad == NULL);
+
+    float *capturedSerialW = reserveMemory(numberOfWeights * sizeof(float));
+    float *capturedDeserialW = reserveMemory(numberOfWeights * sizeof(float));
+    for (size_t i = 0; i < numberOfWeights; i++) {
+        capturedSerialW[i] = ((float *)serialCfg->weights->param->data)[i];
+        capturedDeserialW[i] = ((float *)deserialCfg->weights->param->data)[i];
+    }
+    float *capturedSerialB = reserveMemory(numberOfBiases * sizeof(float));
+    float *capturedDeserialB = reserveMemory(numberOfBiases * sizeof(float));
+    for (size_t i = 0; i < numberOfBiases; i++) {
+        capturedSerialB[i] = ((float *)serialCfg->bias->param->data)[i];
+        capturedDeserialB[i] = ((float *)deserialCfg->bias->param->data)[i];
+    }
+
+    /* FREE in reverse-init order. */
+    freeLinearLayer(deserialLayer);
+    freeLinearLayer(serialLayer);
+    freeQuantization(floatQ);
+
+    /* ASSERT on captured. */
+    TEST_ASSERT_TRUE(capturedSerialWeightsGradNull);
+    TEST_ASSERT_TRUE(capturedDeserialWeightsGradNull);
+    TEST_ASSERT_TRUE(capturedSerialBiasGradNull);
+    TEST_ASSERT_TRUE(capturedDeserialBiasGradNull);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedSerialW, capturedDeserialW, numberOfWeights);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedSerialB, capturedDeserialB, numberOfBiases);
+
+    freeReservedMemory(capturedSerialW);
+    freeReservedMemory(capturedDeserialW);
+    freeReservedMemory(capturedSerialB);
+    freeReservedMemory(capturedDeserialB);
+}
+
 /*! RELU round trip. `outputQ`/`propLossQ` are pure quantization_t configs
  *  (Relu owns no tensor keyed on them at construction time), so this is a
  *  safe place to exercise the two NEW quantization-payload fixes directly:
@@ -1559,11 +1631,13 @@ static void testGoldenBytesTensorFloat32V2(void) {
     TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, got, sizeof(expected));
 }
 
-/*! GOLDEN BYTES (#370, wire format v2): full-model header (magic + version 2 +
- *  layerCount, all u32 LE) plus a RELU record whose outputQ/propLossQ pin the
- *  SYM_INT32 and ASYM qConfig payload encodings — ASYM zeroPoint is i32 LE on
- *  the wire, matching the int32 in-memory field (#246). */
-static void testGoldenBytesModelReluV2(void) {
+/*! GOLDEN BYTES (#370/#380, wire format v3): full-model header (magic +
+ *  version 3 + layerCount, all u32 LE) plus a RELU record whose
+ *  outputQ/propLossQ pin the SYM_INT32 and ASYM qConfig payload encodings —
+ *  ASYM zeroPoint is i32 LE on the wire, matching the int32 in-memory field
+ *  (#246). RELU carries no parameters, so the v3 grad-presence byte does not
+ *  appear in this record (see testGoldenBytesModelLinearFrozenV3 for that). */
+static void testGoldenBytesModelReluV3(void) {
     quantization_t *floatQ = quantizationInitFloat();
     quantization_t *symIntOutputQ = quantizationInitSymInt32WithBits(SR_HALF_AWAY, 12);
     quantization_t *asymPropLossQ = quantizationInitAsym(8, HALF_AWAY);
@@ -1592,7 +1666,7 @@ static void testGoldenBytesModelReluV2(void) {
 
     static const uint8_t expected[] = {
         /* magic */ 'O', 'D', 'T', 'S',
-        /* version u32 LE */ 0x02, 0x00, 0x00, 0x00,
+        /* version u32 LE */ 0x03, 0x00, 0x00, 0x00,
         /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
         /* tag RELU */ 0x01,
         /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
@@ -1611,10 +1685,12 @@ static void testGoldenBytesModelReluV2(void) {
     TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, got, sizeof(expected));
 }
 
-/*! GOLDEN BYTES (#370, wire format v2): MAXPOOL1D record pinning the kernel
- *  geometry encoding (size/stride/dilation/padding as u32 LE + paddingType
- *  u8) — the fields that were raw host size_t in v1. */
-static void testGoldenBytesModelMaxPool1dV2(void) {
+/*! GOLDEN BYTES (#370/#380, wire format v3): MAXPOOL1D record pinning the
+ *  kernel geometry encoding (size/stride/dilation/padding as u32 LE +
+ *  paddingType u8) — the fields that were raw host size_t in v1. MAXPOOL1D
+ *  carries no parameters, so (like RELU above) no grad-presence byte appears
+ *  in this record. */
+static void testGoldenBytesModelMaxPool1dV3(void) {
     quantization_t *floatQ = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, floatQ);
@@ -1629,11 +1705,11 @@ static void testGoldenBytesModelMaxPool1dV2(void) {
     freeMaxPool1dLayer(layer);
     freeQuantization(floatQ);
 
-    static const uint8_t expected[] = {/* magic + version 2 + layerCount 1 */ 'O',
+    static const uint8_t expected[] = {/* magic + version 3 + layerCount 1 */ 'O',
                                        'D',
                                        'T',
                                        'S',
-                                       0x02,
+                                       0x03,
                                        0x00,
                                        0x00,
                                        0x00,
@@ -1662,6 +1738,109 @@ static void testGoldenBytesModelMaxPool1dV2(void) {
                                        /* forwardMath + propLossMath */ 0x00,
                                        0x00,
                                        0x00,
+                                       0x00,
+                                       /* outputQ FLOAT32, propLossQ FLOAT32 */ 0x01,
+                                       0x01};
+
+    uint8_t got[sizeof(expected) + 8] = {0};
+    f = fopen(FILE_PATH, "rb");
+    size_t fileBytes = fread(got, 1, sizeof(got), f);
+    fclose(f);
+
+    TEST_ASSERT_EQUAL_size_t(sizeof(expected), fileBytes);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, got, sizeof(expected));
+}
+
+/*! GOLDEN BYTES (#380, wire format v3): a FROZEN Linear layer's weight AND
+ *  bias parameter records each lead with a hasGrad=0x00 presence byte
+ *  followed directly by the param tensor — no grad tensor on the wire at
+ *  all. Pins the exact byte layout the new grad-presence byte introduces
+ *  (the counterpart to the trainable case, which round-trips a hasGrad=0x01
+ *  byte followed by param THEN grad in testRoundTripLinear). Values are
+ *  overwritten post-construction (random Kaiming init is not pin-stable). */
+static void testGoldenBytesModelLinearFrozenV3(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+
+    linearInit_t init = {.inFeatures = 1, .outFeatures = 1, .trainable = TRAINABLE_FALSE};
+    layer_t *layer = linearLayerInitOwning(&init, &lq);
+    linearConfig_t *cfg = layer->config->linear;
+
+    tensorFillFromFloatBuffer(cfg->weights->param, (float[]){2.0f}, 1);
+    tensorFillFromFloatBuffer(cfg->bias->param, (float[]){-1.0f}, 1);
+
+    layer_t *model[] = {layer};
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(model, 1, f);
+    fclose(f);
+    freeLinearLayer(layer);
+    freeQuantization(floatQ);
+
+    static const uint8_t expected[] = {/* magic */ 'O',
+                                       'D',
+                                       'T',
+                                       'S',
+                                       /* version u32 LE */ 0x03,
+                                       0x00,
+                                       0x00,
+                                       0x00,
+                                       /* layerCount u32 LE */ 0x01,
+                                       0x00,
+                                       0x00,
+                                       0x00,
+                                       /* tag LINEAR */ 0x00,
+                                       /* weights: hasGrad=0 (v3 grad-presence byte) */ 0x00,
+                                       /* weights param shape: rank 2 u32 LE */ 0x02,
+                                       0x00,
+                                       0x00,
+                                       0x00,
+                                       /* dims [1,1] u32 LE */ 0x01,
+                                       0x00,
+                                       0x00,
+                                       0x00,
+                                       0x01,
+                                       0x00,
+                                       0x00,
+                                       0x00,
+                                       /* orderOfDimensions [0,1] u32 LE */ 0x00,
+                                       0x00,
+                                       0x00,
+                                       0x00,
+                                       0x01,
+                                       0x00,
+                                       0x00,
+                                       0x00,
+                                       /* qtype FLOAT32 */ 0x01,
+                                       /* data payload: 1x f32 LE = 2.0f */ 0x00,
+                                       0x00,
+                                       0x00,
+                                       0x40,
+                                       /* bias: hasGrad=0 (v3 grad-presence byte) */ 0x00,
+                                       /* bias param shape: rank 1 u32 LE */ 0x01,
+                                       0x00,
+                                       0x00,
+                                       0x00,
+                                       /* dims [1] u32 LE */ 0x01,
+                                       0x00,
+                                       0x00,
+                                       0x00,
+                                       /* orderOfDimensions [0] u32 LE */ 0x00,
+                                       0x00,
+                                       0x00,
+                                       0x00,
+                                       /* qtype FLOAT32 */ 0x01,
+                                       /* data payload: 1x f32 LE = -1.0f */ 0x00,
+                                       0x00,
+                                       0x80,
+                                       0xBF,
+                                       /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00,
+                                       0x00,
+                                       /* weightGradMath: ARITH_FLOAT32, HALF_AWAY */ 0x00,
+                                       0x00,
+                                       /* biasGradMath: ARITH_FLOAT32, HALF_AWAY */ 0x00,
+                                       0x00,
+                                       /* propLossMath: ARITH_FLOAT32, HALF_AWAY */ 0x00,
                                        0x00,
                                        /* outputQ FLOAT32, propLossQ FLOAT32 */ 0x01,
                                        0x01};
@@ -1759,6 +1938,39 @@ static void testDeserializeLayerNormRejectsNumNormDimsMismatch(void) {
     freeQuantization(floatQ);
 }
 
+/*! #380: a TRAINABLE-serialized Linear model's grad-presence byte (1 for
+ *  weights and bias) must be rejected when deserialized into a FROZEN-built
+ *  skeleton (parameter->grad == NULL on both) — frozen/trainable construction
+ *  must match the serialized model. Pre-v3 this NULL-derefed inside
+ *  deserializeTensor(parameter->grad, f) instead of failing fast. */
+static void testDeserializeRejectsGradPresenceMismatch(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+
+    linearInit_t trainableInit = {.inFeatures = 4, .outFeatures = 3};
+    linearInit_t frozenInit = trainableInit;
+    frozenInit.trainable = TRAINABLE_FALSE;
+
+    layer_t *serialLayer = linearLayerInitOwning(&trainableInit, &lq);
+    layer_t *skeletonLayer = linearLayerInitOwning(&frozenInit, &lq);
+
+    layer_t *serialModel[] = {serialLayer};
+    layer_t *skeletonModel[] = {skeletonLayer};
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(serialModel, 1, f);
+    fclose(f);
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(skeletonModel, 1, f));
+    fclose(f);
+
+    freeLinearLayer(skeletonLayer);
+    freeLinearLayer(serialLayer);
+    freeQuantization(floatQ);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testRoundTripLinear);
@@ -1777,12 +1989,15 @@ int main(void) {
     RUN_TEST(testSerializeTensorSymSubByteRoundTripsPackedData);
     RUN_TEST(testSerializeTensorBoolRoundTripsPackedData);
     RUN_TEST(testGoldenBytesTensorFloat32V2);
-    RUN_TEST(testGoldenBytesModelReluV2);
-    RUN_TEST(testGoldenBytesModelMaxPool1dV2);
+    RUN_TEST(testGoldenBytesModelReluV3);
+    RUN_TEST(testGoldenBytesModelMaxPool1dV3);
+    RUN_TEST(testGoldenBytesModelLinearFrozenV3);
     RUN_TEST(testSerializeFailsFastOnUnwritableStream);
 #if SIZE_MAX > UINT32_MAX
     RUN_TEST(testSerializeFailsFastOnDimensionBeyondU32);
 #endif
     RUN_TEST(testDeserializeLayerNormRejectsNumNormDimsMismatch);
+    RUN_TEST(testDeserializeRejectsGradPresenceMismatch);
+    RUN_TEST(testRoundTripLinearFrozen);
     return UNITY_END();
 }

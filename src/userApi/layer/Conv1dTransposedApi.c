@@ -45,8 +45,8 @@ static shape_t *buildOwnedShape(const size_t *srcDims, size_t numberOfDims) {
 static parameter_t *allocateConv1dTransposedWeights(size_t inChannels, size_t outChannels,
                                                     size_t groups, size_t kernelSize,
                                                     weightInit_t weightInit,
-                                                    quantization_t *storageQ,
-                                                    quantization_t *gradQ) {
+                                                    quantization_t *storageQ, quantization_t *gradQ,
+                                                    bool trainable) {
     /* Conv1dTransposed weight shape: [inChannels, outChannels/groups, kernelSize].
      * Note SWAP relative to Conv1d. Per Conv1dTransposed.h:12. */
     if (outChannels % groups != 0) {
@@ -73,18 +73,19 @@ static parameter_t *allocateConv1dTransposedWeights(size_t inChannels, size_t ou
     size_t fanOut = inChannels * kernelSize;
     initWeightTensor(paramTensor, weightInit, fanIn, fanOut);
 
-    tensor_t *gradTensor = gradInit(paramTensor, gradQ, NULL);
+    tensor_t *gradTensor = trainable ? gradInit(paramTensor, gradQ, NULL) : NULL;
     return parameterInit(paramTensor, gradTensor);
 }
 
 static parameter_t *allocateConv1dTransposedBias(size_t outChannels, size_t fanIn,
-                                                 quantization_t *storageQ, quantization_t *gradQ) {
+                                                 quantization_t *storageQ, quantization_t *gradQ,
+                                                 bool trainable) {
     /* PyTorch draws bias from uniform(+/- 1/sqrt(fan_in)) using the WEIGHT's
      * fan_in (= outPerGroup*kernelSize). */
     shape_t *shape = buildOwnedShape((size_t[]){outChannels}, 1);
     tensor_t *paramTensor = initTensor(shape, getQLike(storageQ), NULL);
     initBiasTensor(paramTensor, fanIn);
-    tensor_t *gradTensor = gradInit(paramTensor, gradQ, NULL);
+    tensor_t *gradTensor = trainable ? gradInit(paramTensor, gradQ, NULL) : NULL;
     return parameterInit(paramTensor, gradTensor);
 }
 
@@ -140,7 +141,7 @@ static kernel_t *buildConv1dTransposedKernel(conv1dTransposedInit_t *init) {
 }
 
 static layer_t *buildConv1dTransposedLayerSkeleton(conv1dTransposedInit_t *init, layerQuant_t *lq,
-                                                   bool hasBias, size_t groups) {
+                                                   bool hasBias, size_t groups, bool trainable) {
     layer_t *layer = reserveMemory(sizeof(layer_t));
     layer->type = CONV1D_TRANSPOSED;
 
@@ -160,13 +161,14 @@ static layer_t *buildConv1dTransposedLayerSkeleton(conv1dTransposedInit_t *init,
     quantization_t *biasGradQ = lq->biasGradStorage != NULL ? lq->biasGradStorage : floatGradQ;
     cfg->weights = allocateConv1dTransposedWeights(init->inChannels, init->outChannels, groups,
                                                    init->kernelSize, init->weightInit,
-                                                   lq->weightStorage, weightGradQ);
-    cfg->bias =
-        hasBias ? allocateConv1dTransposedBias(init->outChannels, fanIn, lq->biasStorage, biasGradQ)
-                : NULL;
+                                                   lq->weightStorage, weightGradQ, trainable);
+    cfg->bias = hasBias ? allocateConv1dTransposedBias(init->outChannels, fanIn, lq->biasStorage,
+                                                       biasGradQ, trainable)
+                        : NULL;
     freeQuantization(floatGradQ);
     cfg->groups = groups;
     cfg->outputPadding = init->outputPadding;
+    cfg->frozen = !trainable;
     return layer;
 }
 
@@ -174,10 +176,11 @@ layer_t *conv1dTransposedLayerInit(conv1dTransposedInit_t *init, layerQuant_t *l
     validateConv1dTransposedInit(init);
     bool hasBias = resolveConv1dTransposedBias(init->bias);
     validateLayerQuantForConv1dTransposed(lq, hasBias);
+    bool trainable = resolveTrainable(init->trainable, "conv1dTransposedLayerInit");
 
     size_t groups = init->groups == 0 ? 1 : init->groups;
 
-    layer_t *layer = buildConv1dTransposedLayerSkeleton(init, lq, hasBias, groups);
+    layer_t *layer = buildConv1dTransposedLayerSkeleton(init, lq, hasBias, groups, trainable);
     conv1dTransposedConfig_t *cfg = layer->config->conv1dTransposed;
 
     /* Borrowing: store the forward-wire/dx-wire storage configs verbatim, no copy.
@@ -198,10 +201,11 @@ layer_t *conv1dTransposedLayerInitOwning(conv1dTransposedInit_t *init, layerQuan
     validateConv1dTransposedInit(init);
     bool hasBias = resolveConv1dTransposedBias(init->bias);
     validateLayerQuantForConv1dTransposed(lq, hasBias);
+    bool trainable = resolveTrainable(init->trainable, "conv1dTransposedLayerInitOwning");
 
     size_t groups = init->groups == 0 ? 1 : init->groups;
 
-    layer_t *layer = buildConv1dTransposedLayerSkeleton(init, lq, hasBias, groups);
+    layer_t *layer = buildConv1dTransposedLayerSkeleton(init, lq, hasBias, groups, trainable);
     conv1dTransposedConfig_t *cfg = layer->config->conv1dTransposed;
 
     /* Owning: same arithmetic as Borrowing; deep-copy the two storage configs

@@ -10,11 +10,15 @@
 #include "CalculateGradsSequential.h"
 #include "Common.h"
 #include "Layer.h"
+#include "LayerCommon.h"
 #include "LayerQuant.h"
 #include "Linear.h"
 #include "LinearApi.h"
+#include "OptimizerApi.h"
 #include "QuantizationApi.h"
 #include "QuantizationLayer.h"
+#include "ReluApi.h"
+#include "SgdApi.h"
 #include "SoftmaxApi.h"
 #include "StateDictApi.h"
 #include "StorageApi.h"
@@ -184,6 +188,65 @@ void testTraceModelParamsFiresPerTrainableParam() {
     freeTensor(label);
     freeLinearLayer(model[0]);
     freeSoftmaxLayer(model[1]);
+}
+
+/* #380 final-review Fix 1: traceModelGrads must never hand a NULL tensor to
+ * the sink. A frozen layer's parameter_t carries grad == NULL (Task 1 elides
+ * it), so the pre-fix traceModelParams unconditionally dereferenced it inside
+ * sink(); every real sink (npyDumpSink, paramGateSink) dereferences
+ * unconditionally too, so this is a hard crash, not a soft no-op. Model:
+ * [frozen Linear, trainable Linear] -- the sink must fire ONLY for the
+ * trainable layer's weight+bias, and never with a NULL tensor pointer. */
+typedef struct {
+    size_t callCount;
+    size_t layerIdx[MAX_EVENTS];
+    bool sawNoNull;
+} gradTraceCounts_t;
+
+static void countingSink(void *ctx, size_t layerIdx, layerType_t type, const char *phase,
+                         tensor_t *t) {
+    (void)type;
+    (void)phase;
+    gradTraceCounts_t *c = (gradTraceCounts_t *)ctx;
+    if (t == NULL) {
+        c->sawNoNull = false;
+        return;
+    }
+    if (c->callCount < MAX_EVENTS) {
+        c->layerIdx[c->callCount] = layerIdx;
+    }
+    c->callCount++;
+}
+
+void testTraceModelGradsSkipsFrozenLayerNeverPassesNull(void) {
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, quantizationInitFloat());
+    layer_t *model[2];
+    model[0] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .trainable = TRAINABLE_FALSE}, &lq);
+    model[1] = linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &lq);
+
+    gradTraceCounts_t counts = {.callCount = 0, .sawNoNull = true};
+    traceModelGrads(model, 2, "grad", countingSink, &counts);
+
+    /* CAPTURE (before any free touches the layers). */
+    size_t callCount = counts.callCount;
+    bool sawNoNull = counts.sawNoNull;
+    size_t firstIdx = counts.callCount > 0 ? counts.layerIdx[0] : (size_t)-1;
+    size_t secondIdx = counts.callCount > 1 ? counts.layerIdx[1] : (size_t)-1;
+
+    freeLinearLayer(model[0]);
+    freeLinearLayer(model[1]);
+
+    TEST_ASSERT_TRUE_MESSAGE(sawNoNull, "sink must never receive a NULL tensor");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(
+        2, callCount, "sink must fire exactly twice (trainable layer's weight+bias only)");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(1, firstIdx,
+                                     "sink must fire for the trainable layer (index 1), not the "
+                                     "frozen layer (index 0)");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(1, secondIdx,
+                                     "sink must fire for the trainable layer (index 1) twice "
+                                     "(weight+bias)");
 }
 
 /* ── #221 regression: dx wire must honor the producer's declared propLossQ ── */
@@ -549,13 +612,139 @@ void testForwardWireHonorsDeclaredOutputQMaxBits(void) {
                                     "qMaxBits, not the re-defaulted int12 operand width");
 }
 
+/* ── #380 PR1 Task 8: end-to-end frozen-layer integration gate ──
+ * model: frozen Linear(4->4) -> RELU -> trainable Linear(4->2), MSE loss.
+ * The frozen layer is wired as an identity map (W=I4, b=0) and fed a
+ * strictly-positive input, so ReLU is a no-op -- this isolates the freeze
+ * mechanism from any incidental dead-ReLU zero-gradient effect on the
+ * trainable layer's weight grad (x=0 through a dead ReLU would zero the
+ * outer-product weight grad regardless of freezing). Both Linear layers use
+ * the Borrowing factory (linearLayerInit, not …Owning): they share one
+ * long-lived quantization_t (freed once at the end), which is what lets the
+ * frozen layer take a FULL freeLinearLayer teardown while the trainable
+ * layer takes freeOptim + freeLinearLayerShellOnly (freeOptim already frees
+ * its param/bias tensors) without leaking an Owning-cloned outputQ/propLossQ.
+ */
+void testFrozenLayerSurvivesTrainingUntouched(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+
+    layer_t *frozenL = linearLayerInit(
+        &(linearInit_t){.inFeatures = 4, .outFeatures = 4, .trainable = TRAINABLE_FALSE}, &lq);
+    layer_t *reluL = reluLayerInit(&lq);
+    layer_t *trainL = linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = 2}, &lq);
+    layer_t *model[3] = {frozenL, reluL, trainL};
+
+    float frozenW[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    float frozenB[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float trainW[8] = {0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f};
+    float trainB[2] = {0.0f, 0.0f};
+    modelLoadStateDict(
+        model, 3,
+        (stateDictEntry_t[]){{.name = "frozen", .weightData = frozenW, .biasData = frozenB},
+                             {.name = "trainable", .weightData = trainW, .biasData = trainB}},
+        2);
+
+    size_t *inDims = reserveMemory(2 * sizeof(size_t));
+    inDims[0] = 1;
+    inDims[1] = 4;
+    size_t *inOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, inOrder);
+    shape_t *inShape = reserveMemory(sizeof(shape_t));
+    setShape(inShape, inDims, 2, inOrder);
+    tensor_t *input = initTensor(inShape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(input, (float[]){1.0f, 1.0f, 1.0f, 1.0f}, 4);
+
+    size_t *labelDims = reserveMemory(2 * sizeof(size_t));
+    labelDims[0] = 1;
+    labelDims[1] = 2;
+    size_t *labelOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, labelOrder);
+    shape_t *labelShape = reserveMemory(sizeof(shape_t));
+    setShape(labelShape, labelDims, 2, labelOrder);
+    tensor_t *label = initTensor(labelShape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(label, (float[]){1.0f, 0.0f}, 2);
+
+    /* Snapshot frozen + trainable weight/bias bytes BEFORE training. */
+    size_t frozenWBytes = calcBytesPerTensor(frozenL->config->linear->weights->param);
+    uint8_t *beforeFrozenW = reserveMemory(frozenWBytes);
+    memcpy(beforeFrozenW, frozenL->config->linear->weights->param->data, frozenWBytes);
+
+    size_t frozenBBytes = calcBytesPerTensor(frozenL->config->linear->bias->param);
+    uint8_t *beforeFrozenB = reserveMemory(frozenBBytes);
+    memcpy(beforeFrozenB, frozenL->config->linear->bias->param->data, frozenBBytes);
+
+    size_t trainWBytes = calcBytesPerTensor(trainL->config->linear->weights->param);
+    uint8_t *beforeTrainW = reserveMemory(trainWBytes);
+    memcpy(beforeTrainW, trainL->config->linear->weights->param->data, trainWBytes);
+
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *optim =
+        sgdMCreateOptim(0.05f, 0.0f, 0.0f, model, 3, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    optimizerFunctions_t optimFns = optimizerFunctions[optim->type];
+
+    lossConfig_t lossConfig = {
+        .funcType = MSE, .backwardReduction = REDUCTION_SUM, .classWeights = NULL};
+
+    float firstLoss = 0.0f, lastLoss = 0.0f;
+    for (size_t step = 0; step < 5; step++) {
+        optimFns.zero(optim);
+        trainingStats_t *stats =
+            calculateGradsSequential(model, 3, lossConfig, REDUCTION_SUM, input, label);
+        if (step == 0) {
+            firstLoss = stats->loss;
+        }
+        lastLoss = stats->loss;
+        freeTrainingStats(stats);
+        optimFns.step(optim);
+    }
+
+    /* CAPTURE (before any free touches the parameter data). */
+    bool frozenWUnchanged =
+        memcmp(beforeFrozenW, frozenL->config->linear->weights->param->data, frozenWBytes) == 0;
+    bool frozenBUnchanged =
+        memcmp(beforeFrozenB, frozenL->config->linear->bias->param->data, frozenBBytes) == 0;
+    bool trainWChanged =
+        memcmp(beforeTrainW, trainL->config->linear->weights->param->data, trainWBytes) != 0;
+    float capturedFirstLoss = firstLoss;
+    float capturedLastLoss = lastLoss;
+
+    /* FREE. freeOptim frees only the COLLECTED (trainable-layer) parameters
+     * (trainL's weights+bias) -- frozenL was never collected (#380), so it
+     * needs a full teardown here; trainL gets shell-only (its param/bias
+     * parameter_t's are already gone via freeOptim's cascade). */
+    freeReservedMemory(beforeFrozenW);
+    freeReservedMemory(beforeFrozenB);
+    freeReservedMemory(beforeTrainW);
+    freeTensor(input);
+    freeTensor(label);
+    freeOptim(optim);
+    freeLinearLayerShellOnly(trainL);
+    freeLinearLayer(frozenL);
+    freeReluLayer(reluL);
+    freeQuantization(momentumQ);
+    freeQuantization(q);
+
+    TEST_ASSERT_TRUE_MESSAGE(frozenWUnchanged,
+                             "frozen layer's weights must survive training untouched");
+    TEST_ASSERT_TRUE_MESSAGE(frozenBUnchanged,
+                             "frozen layer's bias must survive training untouched");
+    TEST_ASSERT_TRUE_MESSAGE(trainWChanged, "trainable layer's weights must change under training");
+    TEST_ASSERT_TRUE_MESSAGE(capturedLastLoss < capturedFirstLoss,
+                             "loss must decrease over training");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testCalculateGradsSequentialClosedForm);
     RUN_TEST(testTracedGradsFiresInOrder);
     RUN_TEST(testTraceModelParamsFiresPerTrainableParam);
+    RUN_TEST(testTraceModelGradsSkipsFrozenLayerNeverPassesNull);
     RUN_TEST(testDxWireHonorsProducerPropLossQ);
     RUN_TEST(testDxWireHonorsProducerPropLossQMaxBits);
     RUN_TEST(testForwardWireHonorsDeclaredOutputQMaxBits);
+    RUN_TEST(testFrozenLayerSurvivesTrainingUntouched);
     return UNITY_END();
 }

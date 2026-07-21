@@ -103,7 +103,7 @@ void testSerializeAndDeserializeTensor() {
 static void testDeserializeRejectsBadMagic(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("XXXX", 1, 4, f);
-    writeU32LE(f, 2); /* version */
+    writeU32LE(f, 3); /* version */
     writeU32LE(f, 1); /* layerCount */
     uint8_t tag = (uint8_t)FLATTEN;
     fwrite(&tag, sizeof(uint8_t), 1, f);
@@ -141,7 +141,7 @@ static void testDeserializeRejectsWrongVersion(void) {
 static void testDeserializeRejectsLayerCountMismatch(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 2); /* version */
+    writeU32LE(f, 3); /* version */
     writeU32LE(f, 2); /* layerCount; caller below passes sizeModel = 1 */
     uint8_t tag = (uint8_t)FLATTEN;
     fwrite(&tag, sizeof(uint8_t), 1, f);
@@ -160,7 +160,7 @@ static void testDeserializeRejectsLayerCountMismatch(void) {
 static void testDeserializeRejectsTagMismatch(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 2);              /* version */
+    writeU32LE(f, 3);              /* version */
     writeU32LE(f, 1);              /* layerCount */
     uint8_t tag = (uint8_t)LINEAR; /* pre-built mirror layer below is FLATTEN */
     fwrite(&tag, sizeof(uint8_t), 1, f);

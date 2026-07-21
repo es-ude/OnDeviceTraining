@@ -29,9 +29,13 @@
  * little-endian and every scalar goes through the checked SerialWire
  * primitives, so a model written on a 64-bit host loads bit-identically on
  * 32-bit MCU targets. ASYM zeroPoint is i32 LE on the wire, matching the
- * int32 in-memory field (#246). */
+ * int32 in-memory field (#246).
+ * v3: parameter records carry a grad-presence byte (#380). Frozen layers
+ * (parameter->grad == NULL, layer freezing epic) write hasGrad=0 and skip the
+ * grad tensor entirely; deserialize fails fast on a presence/skeleton
+ * mismatch instead of NULL-dereferencing. */
 #define SERIALIZE_MAGIC "ODTS"
-#define SERIALIZE_FORMAT_VERSION 2u
+#define SERIALIZE_FORMAT_VERSION 3u
 
 void serializeTensor(tensor_t *tensor, FILE *f) {
     size_t numberOfValues = calcNumberOfElementsByTensor(tensor);
@@ -46,8 +50,13 @@ void serializeTensor(tensor_t *tensor, FILE *f) {
 }
 
 void serializeParameter(parameter_t *parameter, FILE *f) {
+    /* v3 (#380): frozen layers carry no grad tensor - presence byte first. */
+    uint8_t hasGrad = parameter->grad != NULL ? 1u : 0u;
+    serialWriteU8(hasGrad, f);
     serializeTensor(parameter->param, f);
-    serializeTensor(parameter->grad, f);
+    if (hasGrad) {
+        serializeTensor(parameter->grad, f);
+    }
 }
 
 void serializeModel(layer_t **model, size_t sizeModel, FILE *f) {

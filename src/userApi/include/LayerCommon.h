@@ -2,6 +2,7 @@
 #define LAYER_COMMON_H
 
 #include <assert.h>
+#include <stdbool.h>
 #include <stddef.h>
 
 #include "Tensor.h"
@@ -38,6 +39,24 @@ typedef struct weightInit {
     initScheme_t scheme;
     float gain; /*!< 0 selects the scheme's default gain. Ignored for INIT_DEFAULT. */
 } weightInit_t;
+
+/*! Trainability tri-state for layer init structs (#380).
+ *  TRAINABLE_DEFAULT lands at C99 zero-init; factories resolve it to
+ *  trainable (PyTorch requires_grad=True parity). TRAINABLE_FALSE freezes
+ *  the layer at create time: no grad buffers are allocated, the optimizer
+ *  skips its parameters, and backward skips its weight/bias grads. */
+typedef enum {
+    TRAINABLE_DEFAULT = 0,
+    TRAINABLE_TRUE = 1,
+    TRAINABLE_FALSE = 2,
+} trainable_t;
+
+_Static_assert(
+    TRAINABLE_DEFAULT == 0,
+    "TRAINABLE_DEFAULT must be enum value 0 so .trainable zero-init defaults to trainable");
+
+/*! Resolve the tri-state; aborts on out-of-range values. */
+bool resolveTrainable(trainable_t t, const char *factoryName);
 
 /*! Initialize a FLOAT32 weight tensor in place according to `cfg`.
  *  Resolves scheme -> distribution and calls initDistribution.

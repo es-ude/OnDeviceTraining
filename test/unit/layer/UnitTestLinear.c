@@ -351,6 +351,41 @@ void testLinearBackwardSymInt32Rank1Bias() {
     }
 }
 
+/* #380 PR1 Task 1: create-time trainable knob (trainable_t). */
+static layer_t *buildFloatLinearWithTrainable(trainable_t trainable) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *layer = linearLayerInitOwning(
+        &(linearInit_t){.inFeatures = 3, .outFeatures = 2, .trainable = trainable}, &lq);
+    freeQuantization(q);
+    return layer;
+}
+
+void testLinearFactoryFrozenElidesGrads(void) {
+    layer_t *layer = buildFloatLinearWithTrainable(TRAINABLE_FALSE);
+    linearConfig_t *cfg = layer->config->linear;
+    bool weightsGradNull = cfg->weights->grad == NULL;
+    bool biasGradNull = cfg->bias->grad == NULL;
+    bool frozen = layerIsFrozen(layer);
+    freeLinearLayer(layer);
+    TEST_ASSERT_TRUE(weightsGradNull);
+    TEST_ASSERT_TRUE(biasGradNull);
+    TEST_ASSERT_TRUE(frozen);
+}
+
+void testLinearFactoryDefaultAllocatesGrads(void) {
+    layer_t *layer = buildFloatLinearWithTrainable(TRAINABLE_DEFAULT);
+    linearConfig_t *cfg = layer->config->linear;
+    bool weightsGradPresent = cfg->weights->grad != NULL;
+    bool biasGradPresent = cfg->bias->grad != NULL;
+    bool frozen = layerIsFrozen(layer);
+    freeLinearLayer(layer);
+    TEST_ASSERT_TRUE(weightsGradPresent);
+    TEST_ASSERT_TRUE(biasGradPresent);
+    TEST_ASSERT_FALSE(frozen);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -1462,6 +1497,107 @@ static tensor_t *e2eMakeSym1x3(void) {
     return initTensor(s, quantizationInitSymInt32(HALF_AWAY), NULL);
 }
 
+/* #380 PR1 Task 5: backward guard -- a frozen twin must skip the weight/bias
+ * grad writes entirely (buffers stay all-zero) while still producing a
+ * propLoss byte-identical to its trainable twin. Hand-seeded FLOAT32
+ * fixtures via buildBorrowedLinearLayer (deterministic, no RNG) so the two
+ * twins start out bit-identical; only `frozen` differs. */
+void testLinearBackwardFrozenTwinPropLossIdenticalGradsZero(void) {
+    quantization_t *q = quantizationInitFloat();
+
+    tensor_t *weightsParamA = buildFloatTensor2d(2, 3, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, -6.f});
+    tensor_t *weightsGradA = gradInitFloat(weightsParamA, NULL);
+    parameter_t *weightsA = parameterInit(weightsParamA, weightsGradA);
+    tensor_t *biasParamA = buildFloatTensor2d(1, 2, (float[]){-1.f, 3.f});
+    tensor_t *biasGradA = gradInitFloat(biasParamA, NULL);
+    parameter_t *biasA = parameterInit(biasParamA, biasGradA);
+    layer_t *trainableTwin = buildBorrowedLinearLayer(weightsA, biasA, q);
+
+    tensor_t *weightsParamB = buildFloatTensor2d(2, 3, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, -6.f});
+    tensor_t *weightsGradB = gradInitFloat(weightsParamB, NULL);
+    parameter_t *weightsB = parameterInit(weightsParamB, weightsGradB);
+    tensor_t *biasParamB = buildFloatTensor2d(1, 2, (float[]){-1.f, 3.f});
+    tensor_t *biasGradB = gradInitFloat(biasParamB, NULL);
+    parameter_t *biasB = parameterInit(biasParamB, biasGradB);
+    layer_t *frozenTwin = buildBorrowedLinearLayer(weightsB, biasB, q);
+    frozenTwin->config->linear->frozen = true;
+
+    tensor_t *forwardInput = buildFloatTensor2d(1, 3, (float[]){1.f, 2.f, 3.f});
+    tensor_t *loss = buildFloatTensor2d(1, 2, (float[]){-4.f, -3.f});
+    tensor_t *propLossTrainable = buildFloatTensor2d(1, 3, (float[]){0.f, 0.f, 0.f});
+    tensor_t *propLossFrozen = buildFloatTensor2d(1, 3, (float[]){0.f, 0.f, 0.f});
+
+    linearBackward(trainableTwin, forwardInput, loss, propLossTrainable);
+    linearBackward(frozenTwin, forwardInput, loss, propLossFrozen);
+
+    size_t numWeights = calcNumberOfElementsByTensor(weightsParamA);
+    size_t numBias = calcNumberOfElementsByTensor(biasParamA);
+    size_t numPropLoss = calcNumberOfElementsByTensor(propLossTrainable);
+
+    bool trainableWeightGradNonzero = false;
+    bool frozenWeightGradAllZero = true;
+    for (size_t i = 0; i < numWeights; i++) {
+        if (((float *)weightsGradA->data)[i] != 0.0f) {
+            trainableWeightGradNonzero = true;
+        }
+        if (((float *)weightsGradB->data)[i] != 0.0f) {
+            frozenWeightGradAllZero = false;
+        }
+    }
+    bool trainableBiasGradNonzero = false;
+    bool frozenBiasGradAllZero = true;
+    for (size_t i = 0; i < numBias; i++) {
+        if (((float *)biasGradA->data)[i] != 0.0f) {
+            trainableBiasGradNonzero = true;
+        }
+        if (((float *)biasGradB->data)[i] != 0.0f) {
+            frozenBiasGradAllZero = false;
+        }
+    }
+    bool propLossIdentical =
+        memcmp(propLossTrainable->data, propLossFrozen->data,
+               calcNumberOfBytesForData(propLossTrainable->quantization, numPropLoss)) == 0;
+
+    freeLinearLayer(trainableTwin);
+    freeLinearLayer(frozenTwin);
+    freeTensor(propLossFrozen);
+    freeTensor(propLossTrainable);
+    freeTensor(loss);
+    freeTensor(forwardInput);
+    freeQuantization(q);
+
+    TEST_ASSERT_TRUE_MESSAGE(trainableWeightGradNonzero,
+                             "trainable twin weight grad must be written (nonzero)");
+    TEST_ASSERT_TRUE_MESSAGE(frozenWeightGradAllZero,
+                             "frozen twin weight grad must stay untouched (all-zero)");
+    TEST_ASSERT_TRUE_MESSAGE(trainableBiasGradNonzero,
+                             "trainable twin bias grad must be written (nonzero)");
+    TEST_ASSERT_TRUE_MESSAGE(frozenBiasGradAllZero,
+                             "frozen twin bias grad must stay untouched (all-zero)");
+    TEST_ASSERT_TRUE_MESSAGE(propLossIdentical, "propLoss must be byte-identical between twins");
+}
+
+/* Factory-frozen layer (grads == NULL, Task 1): linearBackward must complete
+ * without dereferencing the (absent) grad buffers -- the ASan gate catches
+ * any NULL/OOB deref if the guard is missing or misplaced. */
+void testLinearBackwardFrozenFactoryLayerRunsWithoutGradBuffers(void) {
+    layer_t *layer = buildFloatLinearWithTrainable(TRAINABLE_FALSE);
+    tensor_t *forwardInput = e2eMakeInput((float[]){1.f, 2.f, 3.f});
+    tensor_t *loss = e2eMake1x2((float[]){-4.f, -3.f});
+    tensor_t *propLoss = e2eMakeInput(NULL);
+
+    linearBackward(layer, forwardInput, loss, propLoss);
+
+    bool gradStillNull = layer->config->linear->weights->grad == NULL;
+
+    freeLinearLayer(layer);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(forwardInput);
+
+    TEST_ASSERT_TRUE(gradStillNull);
+}
+
 void testLinearSymInt32GradAccumulatesOverTwoMicrobatchesAndSteps(void) {
     /* outFeatures=2, inFeatures=3. forward input [1,2,3], loss [0.5, -0.25].
      * Two identical microbatches => accumulated weight grad ~= 2 * (loss^T @ input).
@@ -1787,5 +1923,10 @@ int main(void) {
     RUN_TEST(testLinearLayerInitXavierUniformOverrideUsesGlorotBound);
     RUN_TEST(testLinearBackwardWithoutBiasDoesNotCrash);
     RUN_TEST(testLinearForwardWithoutBiasDoesNotCrash);
+
+    RUN_TEST(testLinearFactoryFrozenElidesGrads);
+    RUN_TEST(testLinearFactoryDefaultAllocatesGrads);
+    RUN_TEST(testLinearBackwardFrozenTwinPropLossIdenticalGradsZero);
+    RUN_TEST(testLinearBackwardFrozenFactoryLayerRunsWithoutGradBuffers);
     return UNITY_END();
 }

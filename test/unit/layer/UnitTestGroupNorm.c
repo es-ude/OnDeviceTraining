@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "Arithmetic.h"
 #include "ArithmeticType.h"
@@ -358,6 +359,78 @@ void testBackwardAccumulatesGradsOverwritesDx(void) {
                     expectedDbeta_groupNorm_twoGroups, expectedForward_groupNorm_twoGroups_len);
 }
 
+/* #380 PR1 Task 6: a frozen twin's backward must skip the dgamma/dbeta
+ * accumulate lines entirely (buffers stay all-zero) while still producing a
+ * dx byte-identical to its trainable twin. Duplicates the twoGroups gold
+ * fixture (dgamma/dbeta both gold-verified nonzero) into two independent
+ * twins that differ only in cfg.frozen -- forwardInput/loss are read-only in
+ * backward, so a single shared instance of each is safe to reuse across both
+ * calls. */
+void testBackwardFloatFrozenTwinDxIdenticalGradsZero(void) {
+    size_t B = 1;
+    size_t C = 8;
+    size_t T = 3;
+    size_t G = 2;
+    size_t dims[] = {B, C, T};
+    tensor_t *fwdIn = buildFloatTensorND(3, dims, input_groupNorm_twoGroups);
+    tensor_t *loss = buildFloatTensorND(3, dims, lossGrad_groupNorm_twoGroups);
+    tensor_t *propLossTrainable = buildFloatTensorND(3, dims, NULL);
+    tensor_t *propLossFrozen = buildFloatTensorND(3, dims, NULL);
+
+    parameter_t *gammaA = buildFloatParam(C, gamma_groupNorm_twoGroups);
+    parameter_t *betaA = buildFloatParam(C, beta_groupNorm_twoGroups);
+    parameter_t *gammaB = buildFloatParam(C, gamma_groupNorm_twoGroups);
+    parameter_t *betaB = buildFloatParam(C, beta_groupNorm_twoGroups);
+
+    quantization_t *fq = quantizationInitFloat();
+    quantization_t *bq = quantizationInitFloat();
+
+    groupNormConfig_t cfgTrainable;
+    initGroupNormConfig(&cfgTrainable, gammaA, betaA, G, C, 1e-5f, fq, bq);
+    layerConfig_t lcfgTrainable;
+    layer_t layerTrainable = makeGroupNormLayer(&cfgTrainable, &lcfgTrainable);
+
+    groupNormConfig_t cfgFrozen;
+    initGroupNormConfig(&cfgFrozen, gammaB, betaB, G, C, 1e-5f, fq, bq);
+    cfgFrozen.frozen = true;
+    layerConfig_t lcfgFrozen;
+    layer_t layerFrozen = makeGroupNormLayer(&cfgFrozen, &lcfgFrozen);
+
+    groupNormBackward(&layerTrainable, fwdIn, loss, propLossTrainable);
+    groupNormBackward(&layerFrozen, fwdIn, loss, propLossFrozen);
+
+    bool trainableGradNonzero = false;
+    bool frozenGradAllZero = true;
+    for (size_t i = 0; i < C; i++) {
+        if (((float *)gammaA->grad->data)[i] != 0.0f || ((float *)betaA->grad->data)[i] != 0.0f) {
+            trainableGradNonzero = true;
+        }
+        if (((float *)gammaB->grad->data)[i] != 0.0f || ((float *)betaB->grad->data)[i] != 0.0f) {
+            frozenGradAllZero = false;
+        }
+    }
+    bool dxIdentical =
+        memcmp(propLossTrainable->data, propLossFrozen->data,
+               calcNumberOfBytesForData(propLossTrainable->quantization, B * C * T)) == 0;
+
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeParameter(betaB);
+    freeParameter(gammaB);
+    freeParameter(betaA);
+    freeParameter(gammaA);
+    freeTensor(propLossFrozen);
+    freeTensor(propLossTrainable);
+    freeTensor(loss);
+    freeTensor(fwdIn);
+
+    TEST_ASSERT_TRUE_MESSAGE(trainableGradNonzero,
+                             "trainable twin dgamma/dbeta must be written (nonzero)");
+    TEST_ASSERT_TRUE_MESSAGE(frozenGradAllZero,
+                             "frozen twin dgamma/dbeta must stay untouched (all-zero)");
+    TEST_ASSERT_TRUE_MESSAGE(dxIdentical, "dx must be byte-identical between twins");
+}
+
 /* FLOAT32-backward guard set (spec §5.4): FLOAT32 forwardInput/loss/gamma
  * dtypes AND FLOAT32 gamma/beta grad storage AND FLOAT32 propLoss (dx) storage —
  * each violation exits(1). whichSym selects the tensor built as SYM_INT32:
@@ -657,6 +730,88 @@ void testSymBackwardTwinSanityTwoGroups(void) {
         TEST_ASSERT_FLOAT_WITHIN(1e-1f, 2.0f * expectedDgamma_groupNorm_twoGroups[i], dg2[i]);
         TEST_ASSERT_FLOAT_WITHIN(1e-1f, 2.0f * expectedDbeta_groupNorm_twoGroups[i], db2[i]);
     }
+}
+
+/* #380 final-review Fix 2: SYM twin of the frozen-backward guard (mirrors
+ * UnitTestLayerNorm.c's testSymBackwardFrozenTwinDxIdenticalGradsUntouched).
+ * Duplicates the testSymBackwardTwinSanityTwoGroups fixture (dgamma/dbeta
+ * gold-verified nonzero) into two independent twins that differ only in
+ * cfg.frozen -- forwardInput/loss are read-only in backward, so a single
+ * shared instance of each is safe to reuse across both calls. Pass B (dx
+ * requant + propLoss scale refresh) stays unconditional per spec, so dx
+ * mantissas AND the refreshed propLoss scale must be IDENTICAL between
+ * twins; the frozen twin's dgamma/dbeta (FLOAT32 grad storage, the #261
+ * repo default) must stay at their fresh zero init -- the `if (!cfg->frozen)`
+ * emission block (incQ -> setTensorValues -> executeOp) never runs for it. */
+void testSymBackwardFrozenTwinDxIdenticalGradsUntouched(void) {
+    size_t dims[] = {1, 8, 3};
+    tensor_t *fwdIn = buildSymInt32TensorND(3, dims, input_groupNorm_twoGroups);
+    tensor_t *loss = buildSymInt32TensorND(3, dims, lossGrad_groupNorm_twoGroups);
+    tensor_t *propLossTrainable = buildSymInt32TensorND(3, dims, NULL);
+    tensor_t *propLossFrozen = buildSymInt32TensorND(3, dims, NULL);
+
+    parameter_t *gammaA = buildSymParamFloatGrad(8, gamma_groupNorm_twoGroups);
+    parameter_t *betaA = buildSymParamFloatGrad(8, beta_groupNorm_twoGroups);
+    parameter_t *gammaB = buildSymParamFloatGrad(8, gamma_groupNorm_twoGroups);
+    parameter_t *betaB = buildSymParamFloatGrad(8, beta_groupNorm_twoGroups);
+
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *bq = quantizationInitSymInt32(HALF_AWAY);
+
+    groupNormConfig_t cfgTrainable;
+    initGroupNormConfig(&cfgTrainable, gammaA, betaA, 2, 8, 1e-5f, fq, bq);
+    layerConfig_t lcfgTrainable;
+    layer_t layerTrainable = makeGroupNormLayer(&cfgTrainable, &lcfgTrainable);
+
+    groupNormConfig_t cfgFrozen;
+    initGroupNormConfig(&cfgFrozen, gammaB, betaB, 2, 8, 1e-5f, fq, bq);
+    cfgFrozen.frozen = true;
+    layerConfig_t lcfgFrozen;
+    layer_t layerFrozen = makeGroupNormLayer(&cfgFrozen, &lcfgFrozen);
+
+    layerFunctions[GROUPNORM].backward(&layerTrainable, fwdIn, loss, propLossTrainable);
+    layerFunctions[GROUPNORM].backward(&layerFrozen, fwdIn, loss, propLossFrozen);
+
+    int32_t dxTrainable[24], dxFrozen[24];
+    for (size_t i = 0; i < 24; i++) {
+        dxTrainable[i] = ((int32_t *)propLossTrainable->data)[i];
+        dxFrozen[i] = ((int32_t *)propLossFrozen->data)[i];
+    }
+    float scaleTrainable = symScaleOf(propLossTrainable);
+    float scaleFrozen = symScaleOf(propLossFrozen);
+
+    bool trainableGradNonzero = false;
+    bool frozenGradAllZero = true;
+    for (size_t i = 0; i < 8; i++) {
+        if (((float *)gammaA->grad->data)[i] != 0.0f || ((float *)betaA->grad->data)[i] != 0.0f) {
+            trainableGradNonzero = true;
+        }
+        if (((float *)gammaB->grad->data)[i] != 0.0f || ((float *)betaB->grad->data)[i] != 0.0f) {
+            frozenGradAllZero = false;
+        }
+    }
+
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeParameter(betaB);
+    freeParameter(gammaB);
+    freeParameter(betaA);
+    freeParameter(gammaA);
+    freeTensor(propLossFrozen);
+    freeTensor(propLossTrainable);
+    freeTensor(loss);
+    freeTensor(fwdIn);
+
+    for (size_t i = 0; i < 24; i++) {
+        TEST_ASSERT_EQUAL_INT32_MESSAGE(dxTrainable[i], dxFrozen[i],
+                                        "dx mantissas must be identical between twins");
+    }
+    TEST_ASSERT_EQUAL_FLOAT_MESSAGE(scaleTrainable, scaleFrozen,
+                                    "refreshed propLoss scale must be identical between twins");
+    TEST_ASSERT_TRUE_MESSAGE(trainableGradNonzero,
+                             "trainable twin dgamma/dbeta must be written (nonzero)");
+    TEST_ASSERT_TRUE_MESSAGE(frozenGradAllZero,
+                             "frozen twin dgamma/dbeta must stay untouched (all-zero)");
 }
 
 /* The SYM backward must validate ITS operands too: a loss tensor wider than
@@ -960,6 +1115,73 @@ void testFactoryOwningSymInt32DeepCopies(void) {
     TEST_ASSERT_TRUE(owns);
 }
 
+/* #380 PR1 Task 3: create-time trainable knob (trainable_t). */
+static layer_t *buildFloatGroupNormWithTrainable(trainable_t trainable) {
+    groupNormInit_t init = {.numGroups = 2, .numChannels = 4, .eps = 0.0f, .trainable = trainable};
+
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq = {.forwardMath = arithmeticFromQuantization(q),
+                       .propLossMath = arithmeticFromQuantization(q),
+                       .outputQ = q,
+                       .propLossQ = q,
+                       .weightStorage = q,
+                       .biasStorage = q};
+
+    layer_t *layer = groupNormLayerInitOwning(&init, &lq);
+    freeQuantization(q);
+    return layer;
+}
+
+void testGroupNormFactoryFrozenElidesGrads(void) {
+    layer_t *layer = buildFloatGroupNormWithTrainable(TRAINABLE_FALSE);
+    groupNormConfig_t *cfg = layer->config->groupNorm;
+    bool gammaGradNull = cfg->gamma->grad == NULL;
+    bool betaGradNull = cfg->beta->grad == NULL;
+    bool frozen = layerIsFrozen(layer);
+    freeGroupNormLayer(layer);
+    TEST_ASSERT_TRUE(gammaGradNull);
+    TEST_ASSERT_TRUE(betaGradNull);
+    TEST_ASSERT_TRUE(frozen);
+}
+
+void testGroupNormFactoryDefaultAllocatesGrads(void) {
+    layer_t *layer = buildFloatGroupNormWithTrainable(TRAINABLE_DEFAULT);
+    groupNormConfig_t *cfg = layer->config->groupNorm;
+    bool gammaGradPresent = cfg->gamma->grad != NULL;
+    bool betaGradPresent = cfg->beta->grad != NULL;
+    bool frozen = layerIsFrozen(layer);
+    freeGroupNormLayer(layer);
+    TEST_ASSERT_TRUE(gammaGradPresent);
+    TEST_ASSERT_TRUE(betaGradPresent);
+    TEST_ASSERT_FALSE(frozen);
+}
+
+/* #380 PR1 Task 6: factory-frozen layer (grad == NULL, Task 1) --
+ * groupNormBackward must complete without dereferencing the (absent) grad
+ * buffers. Forked via the death-test harness (DeathTest.h) so a
+ * missing/misplaced guard's SIGSEGV fails only this test instead of taking
+ * down the whole suite. */
+void testGroupNormBackwardFrozenFactoryLayerRunsWithoutGradBuffers(void) {
+    layer_t *layer = buildFloatGroupNormWithTrainable(TRAINABLE_FALSE);
+    bool gradStillNull = layer->config->groupNorm->gamma->grad == NULL &&
+                         layer->config->groupNorm->beta->grad == NULL;
+
+    size_t dims[] = {1, 4, 2};
+    float xVals[8] = {1.f, -1.f, 1.f, -1.f, 2.f, -2.f, 2.f, -2.f};
+    tensor_t *fwdIn = buildFloatTensorND(3, dims, xVals);
+    tensor_t *loss = buildFloatTensorND(3, dims, xVals);
+    tensor_t *propLoss = buildFloatTensorND(3, dims, NULL);
+
+    ASSERT_EXITS_WITH(0, groupNormBackward(layer, fwdIn, loss, propLoss));
+
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(fwdIn);
+    freeGroupNormLayer(layer);
+
+    TEST_ASSERT_TRUE(gradStillNull);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConfigStructIsPopulated);
@@ -978,6 +1200,7 @@ int main(void) {
     RUN_TEST(testGoldBackwardBatch2ThreeGroups);
     RUN_TEST(testGoldBackwardGroupEqualsChannels);
     RUN_TEST(testBackwardAccumulatesGradsOverwritesDx);
+    RUN_TEST(testBackwardFloatFrozenTwinDxIdenticalGradsZero);
     RUN_TEST(testBackwardFloatGuardsSymForwardInput);
     RUN_TEST(testBackwardFloatGuardsSymLoss);
     RUN_TEST(testBackwardFloatGuardsSymGammaParam);
@@ -987,6 +1210,7 @@ int main(void) {
     RUN_TEST(testSymForwardTwinSanityTwoGroups);
     RUN_TEST(testSymForwardRejectsOperandWiderThanInt12);
     RUN_TEST(testSymBackwardTwinSanityTwoGroups);
+    RUN_TEST(testSymBackwardFrozenTwinDxIdenticalGradsUntouched);
     RUN_TEST(testSymBackwardRejectsOperandWiderThanInt12);
     RUN_TEST(testFactoryBuildsGammaOnesBetaZerosAndForwards);
     RUN_TEST(testFactoryAppliesDefaultEpsWhenZero);
@@ -995,5 +1219,8 @@ int main(void) {
     RUN_TEST(testFactoryRejectsNonDivisibleGroups);
     RUN_TEST(testFactorySymInt32StorageQuantizesGammaBeta);
     RUN_TEST(testFactoryOwningSymInt32DeepCopies);
+    RUN_TEST(testGroupNormFactoryFrozenElidesGrads);
+    RUN_TEST(testGroupNormFactoryDefaultAllocatesGrads);
+    RUN_TEST(testGroupNormBackwardFrozenFactoryLayerRunsWithoutGradBuffers);
     return UNITY_END();
 }

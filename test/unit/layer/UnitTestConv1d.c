@@ -7,6 +7,8 @@
 #include "ConvTranspose1dKernel.h"
 #include "DeathTest.h"
 #include "Layer.h"
+#include "LayerCommon.h"
+#include "LayerQuant.h"
 #include "QuantizationApi.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -1381,6 +1383,144 @@ void testConv1dBiasGradSymRejectsOutChannelMismatch() {
     ASSERT_EXITS_WITH_FAILURE(conv1dCalcBiasGradsSymInt32(&cfg, lossGrad));
 }
 
+/* #380 PR1 Task 2: create-time trainable knob (trainable_t). */
+static layer_t *buildFloatConv1dWithTrainable(trainable_t trainable) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *layer = conv1dLayerInitOwning(
+        &(conv1dInit_t){.inChannels = 2, .outChannels = 3, .kernelSize = 3, .trainable = trainable},
+        &lq);
+    freeQuantization(q);
+    return layer;
+}
+
+void testConv1dFactoryFrozenElidesGrads(void) {
+    layer_t *layer = buildFloatConv1dWithTrainable(TRAINABLE_FALSE);
+    conv1dConfig_t *cfg = layer->config->conv1d;
+    bool weightsGradNull = cfg->weights->grad == NULL;
+    bool biasGradNull = cfg->bias->grad == NULL;
+    bool frozen = layerIsFrozen(layer);
+    freeConv1dLayer(layer);
+    TEST_ASSERT_TRUE(weightsGradNull);
+    TEST_ASSERT_TRUE(biasGradNull);
+    TEST_ASSERT_TRUE(frozen);
+}
+
+void testConv1dFactoryDefaultAllocatesGrads(void) {
+    layer_t *layer = buildFloatConv1dWithTrainable(TRAINABLE_DEFAULT);
+    conv1dConfig_t *cfg = layer->config->conv1d;
+    bool weightsGradPresent = cfg->weights->grad != NULL;
+    bool biasGradPresent = cfg->bias->grad != NULL;
+    bool frozen = layerIsFrozen(layer);
+    freeConv1dLayer(layer);
+    TEST_ASSERT_TRUE(weightsGradPresent);
+    TEST_ASSERT_TRUE(biasGradPresent);
+    TEST_ASSERT_FALSE(frozen);
+}
+
+/* #380 PR1 Task 5: backward guard -- a frozen twin must skip the weight/bias
+ * grad writes entirely (buffers stay all-zero) while still producing a
+ * propLoss byte-identical to its trainable twin. Hand-seeded FLOAT32
+ * fixtures via buildBorrowedConv1dLayer (deterministic, no RNG) so the two
+ * twins start out bit-identical; only `frozen` differs. */
+void testConv1dBackwardFrozenTwinPropLossIdenticalGradsZero(void) {
+    size_t weightDims[] = {1, 1, 2};
+    size_t biasDims[] = {1};
+    size_t inputDims[] = {1, 1, 4};
+    size_t outputDims[] = {1, 1, 3};
+
+    tensor_t *weightParamA = makeFloatTensor(weightDims, 3, (float[]){1.f, -1.f});
+    tensor_t *weightGradA = gradInitFloat(weightParamA, NULL);
+    parameter_t *weightsA = parameterInit(weightParamA, weightGradA);
+    tensor_t *biasParamA = makeFloatTensor(biasDims, 1, (float[]){0.5f});
+    tensor_t *biasGradA = gradInitFloat(biasParamA, NULL);
+    parameter_t *biasA = parameterInit(biasParamA, biasGradA);
+    kernel_t kernelA;
+    initKernel(&kernelA, 2, VALID, 1, 1);
+    quantization_t *q = quantizationInitFloat();
+    layer_t *trainableTwin = buildBorrowedConv1dLayer(weightsA, biasA, &kernelA, q);
+
+    tensor_t *weightParamB = makeFloatTensor(weightDims, 3, (float[]){1.f, -1.f});
+    tensor_t *weightGradB = gradInitFloat(weightParamB, NULL);
+    parameter_t *weightsB = parameterInit(weightParamB, weightGradB);
+    tensor_t *biasParamB = makeFloatTensor(biasDims, 1, (float[]){0.5f});
+    tensor_t *biasGradB = gradInitFloat(biasParamB, NULL);
+    parameter_t *biasB = parameterInit(biasParamB, biasGradB);
+    kernel_t kernelB;
+    initKernel(&kernelB, 2, VALID, 1, 1);
+    layer_t *frozenTwin = buildBorrowedConv1dLayer(weightsB, biasB, &kernelB, q);
+    frozenTwin->config->conv1d->frozen = true;
+
+    tensor_t *input = makeFloatTensor(inputDims, 3, (float[]){1.f, 2.f, 3.f, 4.f});
+    tensor_t *lossGrad = makeFloatTensor(outputDims, 3, (float[]){1.f, 1.f, 1.f});
+    tensor_t *propLossTrainable = makeFloatTensor(inputDims, 3, NULL);
+    tensor_t *propLossFrozen = makeFloatTensor(inputDims, 3, NULL);
+
+    conv1dBackward(trainableTwin, input, lossGrad, propLossTrainable);
+    conv1dBackward(frozenTwin, input, lossGrad, propLossFrozen);
+
+    size_t numWeights = calcNumberOfElementsByTensor(weightParamA);
+    size_t numBias = calcNumberOfElementsByTensor(biasParamA);
+    size_t numPropLoss = calcNumberOfElementsByTensor(propLossTrainable);
+
+    bool trainableWeightGradNonzero = false;
+    bool frozenWeightGradAllZero = true;
+    for (size_t i = 0; i < numWeights; i++) {
+        if (((float *)weightGradA->data)[i] != 0.0f) {
+            trainableWeightGradNonzero = true;
+        }
+        if (((float *)weightGradB->data)[i] != 0.0f) {
+            frozenWeightGradAllZero = false;
+        }
+    }
+    bool trainableBiasGradNonzero = false;
+    bool frozenBiasGradAllZero = true;
+    for (size_t i = 0; i < numBias; i++) {
+        if (((float *)biasGradA->data)[i] != 0.0f) {
+            trainableBiasGradNonzero = true;
+        }
+        if (((float *)biasGradB->data)[i] != 0.0f) {
+            frozenBiasGradAllZero = false;
+        }
+    }
+    bool propLossIdentical =
+        memcmp(propLossTrainable->data, propLossFrozen->data,
+               calcNumberOfBytesForData(propLossTrainable->quantization, numPropLoss)) == 0;
+
+    TEST_ASSERT_TRUE_MESSAGE(trainableWeightGradNonzero,
+                             "trainable twin weight grad must be written (nonzero)");
+    TEST_ASSERT_TRUE_MESSAGE(frozenWeightGradAllZero,
+                             "frozen twin weight grad must stay untouched (all-zero)");
+    TEST_ASSERT_TRUE_MESSAGE(trainableBiasGradNonzero,
+                             "trainable twin bias grad must be written (nonzero)");
+    TEST_ASSERT_TRUE_MESSAGE(frozenBiasGradAllZero,
+                             "frozen twin bias grad must stay untouched (all-zero)");
+    TEST_ASSERT_TRUE_MESSAGE(propLossIdentical, "propLoss must be byte-identical between twins");
+}
+
+/* Factory-frozen layer (grads == NULL, Task 2): conv1dBackward must complete
+ * without dereferencing the (absent) grad buffers -- the ASan gate catches
+ * any NULL/OOB deref if the guard is missing or misplaced. */
+void testConv1dBackwardFrozenFactoryLayerRunsWithoutGradBuffers(void) {
+    layer_t *layer = buildFloatConv1dWithTrainable(TRAINABLE_FALSE);
+
+    size_t inputDims[] = {1, 2, 5};
+    size_t outputDims[] = {1, 3, 3};
+    tensor_t *input =
+        makeFloatTensor(inputDims, 3, (float[]){1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f, 8.f, 9.f, 10.f});
+    tensor_t *lossGrad =
+        makeFloatTensor(outputDims, 3, (float[]){1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f});
+    tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
+
+    conv1dBackward(layer, input, lossGrad, propLoss);
+
+    bool gradStillNull = layer->config->conv1d->weights->grad == NULL;
+    freeConv1dLayer(layer);
+
+    TEST_ASSERT_TRUE(gradStillNull);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -1420,5 +1560,9 @@ int main() {
     RUN_TEST(testConv1dWeightGradSymRejectsOutChannelMismatch);
     RUN_TEST(testConv1dBiasGradFloatRejectsOutChannelMismatch);
     RUN_TEST(testConv1dBiasGradSymRejectsOutChannelMismatch);
+    RUN_TEST(testConv1dFactoryFrozenElidesGrads);
+    RUN_TEST(testConv1dFactoryDefaultAllocatesGrads);
+    RUN_TEST(testConv1dBackwardFrozenTwinPropLossIdenticalGradsZero);
+    RUN_TEST(testConv1dBackwardFrozenFactoryLayerRunsWithoutGradBuffers);
     return UNITY_END();
 }

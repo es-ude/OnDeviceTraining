@@ -10,7 +10,9 @@
 #include "BorrowedLayer.h"
 #include "DeathTest.h"
 #include "ExecuteOp.h"
+#include "LayerQuant.h"
 #include "Linear.h"
+#include "LinearApi.h"
 #include "LrScheduler.h"
 #include "Optimizer.h"
 #include "OptimizerApi.h"
@@ -828,8 +830,61 @@ void testAdamWMomentWriteBacksHonorOptimizerSrRounding(void) {
                              "(decoded v identical to the deterministic run)");
 }
 
+/* Local copy of the Task-1 helper (test/unit/layer/UnitTestLinear.c:355) --
+ * tests are independent binaries, so this file builds its own frozen/
+ * trainable Linear layer instead of including across test directories. */
+static layer_t *buildFloatLinearWithTrainable(trainable_t trainable) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *layer = linearLayerInitOwning(
+        &(linearInit_t){.inFeatures = 3, .outFeatures = 2, .trainable = trainable}, &lq);
+    freeQuantization(q);
+    return layer;
+}
+
+/* #380 PR1 Task 4: AdamW twin of the SGD count/collection test -- frozen
+ * layers must contribute zero states and never be collected. */
+void testAdamWOptimizerSkipsFrozenLayerInCountAndCollection(void) {
+    layer_t *frozenL = buildFloatLinearWithTrainable(TRAINABLE_FALSE);
+    layer_t *trainL = buildFloatLinearWithTrainable(TRAINABLE_DEFAULT);
+    layer_t *model[] = {frozenL, trainL};
+    size_t count = calcTotalNumberOfStates(model, 2);
+
+    quantization_t *momentQ = quantizationInitFloat();
+    optimizer_t *optim =
+        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, model, 2, momentQ,
+                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    size_t sizeStates = optim->sizeStates;
+    bool slot0IsTrainWeights = optim->parameter[0] == trainL->config->linear->weights;
+    bool slot1IsTrainBias = optim->parameter[1] == trainL->config->linear->bias;
+
+    freeOptim(optim);                 /* frees ONLY the collected (trainable) params */
+    freeLinearLayerShellOnly(trainL); /* BorrowedLayer.h helper — params already freed */
+    freeLinearLayer(frozenL);         /* frozen params NOT collected — full free */
+    freeQuantization(momentQ);
+
+    TEST_ASSERT_EQUAL_size_t(2, count);
+    TEST_ASSERT_EQUAL_size_t(2, sizeStates);
+    TEST_ASSERT_TRUE(slot0IsTrainWeights);
+    TEST_ASSERT_TRUE(slot1IsTrainBias);
+}
+
+/* #380 PR1 Task 4: AdamW twin of the SGD all-frozen death test. */
+void testAdamWCreateAllFrozenModelExits(void) {
+    ASSERT_EXITS_WITH(1, {
+        layer_t *frozenL = buildFloatLinearWithTrainable(TRAINABLE_FALSE);
+        layer_t *model[] = {frozenL};
+        quantization_t *momentQ = quantizationInitFloat();
+        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, model, 1, momentQ,
+                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    });
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testAdamWOptimizerSkipsFrozenLayerInCountAndCollection);
+    RUN_TEST(testAdamWCreateAllFrozenModelExits);
     RUN_TEST(testAdamWInitStoresDoubleHyperparamsAndZeroStepCount);
     RUN_TEST(testAdamWGetSetLrRoundTripThroughImpl);
     RUN_TEST(testAdamWInitRejectsNonFloat32UpdateMath);

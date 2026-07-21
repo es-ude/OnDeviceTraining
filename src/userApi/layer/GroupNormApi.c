@@ -51,11 +51,11 @@ static void fillParamTensorWithConstant(tensor_t *paramTensor, float value) {
  * mantissa 2047, scale 1/2047 (#227 int12 operand default)); grad dtype from
  * gradQ (= the profile's backwardMath). */
 static parameter_t *allocateGroupNormGamma(size_t numChannels, quantization_t *storageQ,
-                                           quantization_t *gradQ) {
+                                           quantization_t *gradQ, bool trainable) {
     shape_t *shape = buildOwnedShape((size_t[]){numChannels}, 1);
     tensor_t *paramTensor = initTensor(shape, getQLike(storageQ), NULL);
     fillParamTensorWithConstant(paramTensor, 1.0f);
-    tensor_t *gradTensor = gradInit(paramTensor, gradQ, NULL);
+    tensor_t *gradTensor = trainable ? gradInit(paramTensor, gradQ, NULL) : NULL;
     return parameterInit(paramTensor, gradTensor);
 }
 
@@ -63,11 +63,11 @@ static parameter_t *allocateGroupNormGamma(size_t numChannels, quantization_t *s
  * mantissa 0, scale 1.0 — the explicit fill exercises the absMax==0 constant
  * guard instead of relying on calloc zeros + the default scale). */
 static parameter_t *allocateGroupNormBeta(size_t numChannels, quantization_t *storageQ,
-                                          quantization_t *gradQ) {
+                                          quantization_t *gradQ, bool trainable) {
     shape_t *shape = buildOwnedShape((size_t[]){numChannels}, 1);
     tensor_t *paramTensor = initTensor(shape, getQLike(storageQ), NULL);
     fillParamTensorWithConstant(paramTensor, 0.0f);
-    tensor_t *gradTensor = gradInit(paramTensor, gradQ, NULL);
+    tensor_t *gradTensor = trainable ? gradInit(paramTensor, gradQ, NULL) : NULL;
     return parameterInit(paramTensor, gradTensor);
 }
 
@@ -155,6 +155,7 @@ static layer_t *groupNormLayerInitCommon(groupNormInit_t *init, layerQuant_t *lq
                                          groupNormConfig_t **outCfg) {
     validateGroupNormInit(init);
     validateLayerQuantForGroupNorm(lq);
+    bool trainable = resolveTrainable(init->trainable, "groupNormLayerInit");
 
     float eps = (init->eps == 0.0f) ? GROUPNORM_DEFAULT_EPS : init->eps;
 
@@ -173,12 +174,15 @@ static layer_t *groupNormLayerInitCommon(groupNormInit_t *init, layerQuant_t *lq
     quantization_t *floatGradQ = quantizationInitFloat();
     quantization_t *gammaGradQ = lq->weightGradStorage != NULL ? lq->weightGradStorage : floatGradQ;
     quantization_t *betaGradQ = lq->biasGradStorage != NULL ? lq->biasGradStorage : floatGradQ;
-    parameter_t *gamma = allocateGroupNormGamma(init->numChannels, lq->weightStorage, gammaGradQ);
-    parameter_t *beta = allocateGroupNormBeta(init->numChannels, lq->biasStorage, betaGradQ);
+    parameter_t *gamma =
+        allocateGroupNormGamma(init->numChannels, lq->weightStorage, gammaGradQ, trainable);
+    parameter_t *beta =
+        allocateGroupNormBeta(init->numChannels, lq->biasStorage, betaGradQ, trainable);
     freeQuantization(floatGradQ);
 
     /* forwardQ/backwardQ filled by the variant below; pass NULL here. */
     initGroupNormConfig(cfg, gamma, beta, init->numGroups, init->numChannels, eps, NULL, NULL);
+    cfg->frozen = !trainable;
 
     *outCfg = cfg;
     return layer;

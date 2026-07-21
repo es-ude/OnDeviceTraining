@@ -61,6 +61,7 @@ void initConv1dTransposedConfigWithWeightsAndBias(
      * (Conv1dTransposedApi.c) if the caller opted into a different mode. */
     cfg->weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
     cfg->biasGradAccMode = OUT_ACC_FIXED_SCALE;
+    cfg->frozen = false;
 }
 
 /* executeOp forward kernel adapters — ctx = conv1dTransposedConfig_t* for
@@ -454,32 +455,35 @@ void conv1dTransposedBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *
                               tensor_t *propLoss) {
     conv1dTransposedConfig_t *cfg = layer->config->conv1dTransposed;
 
-    switch (cfg->weightGradMath.type) {
-    case ARITH_FLOAT32:
-        conv1dTransposedCalcWeightGradsFloat32(cfg, forwardInput, lossGrad);
-        break;
-    case ARITH_SYM_INT32:
-        conv1dTransposedCalcWeightGradsSymInt32(cfg, forwardInput, lossGrad);
-        break;
-    default:
-        PRINT_ERROR("Conv1dTransposed backward (weightGrad): quantization type not implemented");
-        exit(1);
-    }
+    if (!cfg->frozen) {
+        switch (cfg->weightGradMath.type) {
+        case ARITH_FLOAT32:
+            conv1dTransposedCalcWeightGradsFloat32(cfg, forwardInput, lossGrad);
+            break;
+        case ARITH_SYM_INT32:
+            conv1dTransposedCalcWeightGradsSymInt32(cfg, forwardInput, lossGrad);
+            break;
+        default:
+            PRINT_ERROR(
+                "Conv1dTransposed backward (weightGrad): quantization type not implemented");
+            exit(1);
+        }
 
-    switch (cfg->biasGradMath.type) {
-    case ARITH_FLOAT32:
-        if (cfg->bias) {
-            conv1dTransposedCalcBiasGradsFloat32(cfg, lossGrad);
+        switch (cfg->biasGradMath.type) {
+        case ARITH_FLOAT32:
+            if (cfg->bias) {
+                conv1dTransposedCalcBiasGradsFloat32(cfg, lossGrad);
+            }
+            break;
+        case ARITH_SYM_INT32:
+            if (cfg->bias) {
+                conv1dTransposedCalcBiasGradsSymInt32(cfg, lossGrad);
+            }
+            break;
+        default:
+            PRINT_ERROR("Conv1dTransposed backward (biasGrad): quantization type not implemented");
+            exit(1);
         }
-        break;
-    case ARITH_SYM_INT32:
-        if (cfg->bias) {
-            conv1dTransposedCalcBiasGradsSymInt32(cfg, lossGrad);
-        }
-        break;
-    default:
-        PRINT_ERROR("Conv1dTransposed backward (biasGrad): quantization type not implemented");
-        exit(1);
     }
 
     /* propLoss (dx wire): OUT_WRITE. For a SYM_INT32 target this now requants

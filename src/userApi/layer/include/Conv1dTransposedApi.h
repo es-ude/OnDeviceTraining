@@ -34,6 +34,7 @@ typedef struct conv1dTransposedInit {
     size_t outputPadding;    /* PyTorch parity; default 0; must be < max(stride, dilation) */
     bias_t bias;             /* BIAS_DEFAULT (0) → resolves to true */
     weightInit_t weightInit; /* zero-init → INIT_DEFAULT (PyTorch kaiming a=√5) */
+    trainable_t trainable;   /* zero-init → TRAINABLE_DEFAULT (trainable) */
 } conv1dTransposedInit_t;
 
 /*! Borrowing variant — allocates kernel, weights, bias; stores the four

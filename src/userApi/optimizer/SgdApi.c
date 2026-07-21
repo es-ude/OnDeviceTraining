@@ -39,6 +39,17 @@ optimizer_t *sgdMCreateOptim(float learningRate, float momentumFactor, float wei
     optim->impl = sgdImpl;
 
     size_t sizeStates = calcTotalNumberOfStates(model, sizeModel);
+    /* #380: a zero-state model is only an error when it's DEGENERATE -- every
+     * parameter-bearing layer got frozen (nothing to optimize). A model that
+     * simply has no parameter-bearing layer types at all (e.g. a lone
+     * Dropout/pooling layer) is a pre-existing, deliberately-supported
+     * zero-state configuration (UnitTestDropoutIntegration/
+     * UnitTestAdaptiveAvgPool1dIntegration) and must keep working. */
+    if (sizeStates == 0 && modelHasFrozenLayer(model, sizeModel)) {
+        PRINT_ERROR("sgdMCreateOptim: model has no trainable parameters "
+                    "(every parameter-bearing layer is frozen) - nothing to optimize");
+        exit(1);
+    }
     optim->sizeStates = sizeStates;
     parameter_t **parameter = reserveMemory(sizeStates * sizeof(parameter_t *));
     optim->parameter = parameter;

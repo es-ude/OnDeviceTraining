@@ -50,7 +50,8 @@ static shape_t *buildOwnedShape(const size_t *srcDims, size_t numberOfDims) {
 
 static parameter_t *allocateConv1dWeights(size_t outChannels, size_t inChannels, size_t groups,
                                           size_t kernelSize, weightInit_t weightInit,
-                                          quantization_t *storageQ, quantization_t *gradQ) {
+                                          quantization_t *storageQ, quantization_t *gradQ,
+                                          bool trainable) {
     /* Conv1d weight shape: [outChannels, inChannels/groups, kernelSize].
      * Per Conv1d.h:11. */
     if (inChannels % groups != 0) {
@@ -74,19 +75,19 @@ static parameter_t *allocateConv1dWeights(size_t outChannels, size_t inChannels,
     size_t fanOut = (outChannels / groups) * kernelSize;
     initWeightTensor(paramTensor, weightInit, fanIn, fanOut);
 
-    tensor_t *gradTensor = gradInit(paramTensor, gradQ, NULL);
+    tensor_t *gradTensor = trainable ? gradInit(paramTensor, gradQ, NULL) : NULL;
     return parameterInit(paramTensor, gradTensor);
 }
 
 static parameter_t *allocateConv1dBias(size_t outChannels, size_t fanIn, quantization_t *storageQ,
-                                       quantization_t *gradQ) {
+                                       quantization_t *gradQ, bool trainable) {
     /* Bias tensor: shape [outChannels]. PyTorch draws bias from
      * uniform(+/- 1/sqrt(fan_in)) using the WEIGHT's fan_in. */
     shape_t *shape = buildOwnedShape((size_t[]){outChannels}, 1);
     tensor_t *paramTensor = initTensor(shape, getQLike(storageQ), NULL);
     initBiasTensor(paramTensor, fanIn);
 
-    tensor_t *gradTensor = gradInit(paramTensor, gradQ, NULL);
+    tensor_t *gradTensor = trainable ? gradInit(paramTensor, gradQ, NULL) : NULL;
     return parameterInit(paramTensor, gradTensor);
 }
 
@@ -153,6 +154,7 @@ layer_t *conv1dLayerInit(conv1dInit_t *init, layerQuant_t *lq) {
     validateConv1dInit(init);
     bool hasBias = resolveConv1dBias(init->bias);
     validateLayerQuantForConv1d(lq, hasBias);
+    bool trainable = resolveTrainable(init->trainable, "conv1dLayerInit");
 
     size_t groups = init->groups == 0 ? 1 : init->groups;
 
@@ -175,9 +177,10 @@ layer_t *conv1dLayerInit(conv1dInit_t *init, layerQuant_t *lq) {
     quantization_t *biasGradQ = lq->biasGradStorage != NULL ? lq->biasGradStorage : floatGradQ;
     cfg->weights =
         allocateConv1dWeights(init->outChannels, init->inChannels, groups, init->kernelSize,
-                              init->weightInit, lq->weightStorage, weightGradQ);
-    cfg->bias =
-        hasBias ? allocateConv1dBias(init->outChannels, fanIn, lq->biasStorage, biasGradQ) : NULL;
+                              init->weightInit, lq->weightStorage, weightGradQ, trainable);
+    cfg->bias = hasBias ? allocateConv1dBias(init->outChannels, fanIn, lq->biasStorage, biasGradQ,
+                                             trainable)
+                        : NULL;
     freeQuantization(floatGradQ);
     cfg->groups = groups;
 
@@ -192,6 +195,7 @@ layer_t *conv1dLayerInit(conv1dInit_t *init, layerQuant_t *lq) {
     cfg->weightGradAccMode = lq->weightGradAccMode;
     cfg->biasGradAccMode = lq->biasGradAccMode;
     cfg->ownsQuantizations = false;
+    cfg->frozen = !trainable;
 
     return layer;
 }
@@ -200,6 +204,7 @@ layer_t *conv1dLayerInitOwning(conv1dInit_t *init, layerQuant_t *lq) {
     validateConv1dInit(init);
     bool hasBias = resolveConv1dBias(init->bias);
     validateLayerQuantForConv1d(lq, hasBias);
+    bool trainable = resolveTrainable(init->trainable, "conv1dLayerInitOwning");
 
     size_t groups = init->groups == 0 ? 1 : init->groups;
 
@@ -225,9 +230,10 @@ layer_t *conv1dLayerInitOwning(conv1dInit_t *init, layerQuant_t *lq) {
     quantization_t *biasGradQ = lq->biasGradStorage != NULL ? lq->biasGradStorage : floatGradQ;
     cfg->weights =
         allocateConv1dWeights(init->outChannels, init->inChannels, groups, init->kernelSize,
-                              init->weightInit, lq->weightStorage, weightGradQ);
-    cfg->bias =
-        hasBias ? allocateConv1dBias(init->outChannels, fanIn, lq->biasStorage, biasGradQ) : NULL;
+                              init->weightInit, lq->weightStorage, weightGradQ, trainable);
+    cfg->bias = hasBias ? allocateConv1dBias(init->outChannels, fanIn, lq->biasStorage, biasGradQ,
+                                             trainable)
+                        : NULL;
     freeQuantization(floatGradQ);
     cfg->groups = groups;
 
@@ -242,6 +248,7 @@ layer_t *conv1dLayerInitOwning(conv1dInit_t *init, layerQuant_t *lq) {
     cfg->weightGradAccMode = lq->weightGradAccMode;
     cfg->biasGradAccMode = lq->biasGradAccMode;
     cfg->ownsQuantizations = true;
+    cfg->frozen = !trainable;
 
     return layer;
 }

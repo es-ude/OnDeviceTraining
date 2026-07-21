@@ -63,6 +63,14 @@ Notes on the qualified cells:
   and `OUT_ACC_DYNAMIC_RESCALE`; ASYM honors `DYNAMIC_RESCALE` only. **LayerNorm/GroupNorm
   caveat**: packed grads are only writable on the SYM_INT32 backward path — their FLOAT32
   backward raw-casts grads (and the dx wire) and rejects packed storage.
+- **Trainable / freezing** — the five ✓-parameter layer types (Linear/Conv1d/
+  Conv1dTransposed/LayerNorm/GroupNorm) support create-time **freezing** via the
+  `trainable_t` tri-state (`TRAINABLE_FALSE`) on their init structs (#380 PR1): a
+  frozen layer allocates no grad buffers, is invisible to the optimizer (skipped by
+  count/collection/state allocation, see Optimizer below), and its backward computes
+  only the dx wire — weight/bias grads are never touched. Truncating the dx chain
+  past a frozen layer (skipping earlier layers' backward entirely) is deferred to
+  #380 PR2.
 
 ## Optimizer (`optimizerType_t`)
 
@@ -137,6 +145,15 @@ Notes on the qualified cells:
   `lrSchedulerStep` at any boundary. Optimizer-agnostic through the
   `getLr`/`setLr` vtable entries — both `SGD_M` and `ADAM_W` rows implement them,
   so a scheduler works unchanged across either optimizer.
+- **Frozen layers** (#380 PR1) — `collectTrainableParameters` and
+  `calcTotalNumberOfStates` both skip any layer with `layerIsFrozen() == true`:
+  zero contribution to the parameter count, the collected slot array, and
+  momentum/moment state allocation. `sgdMCreateOptim`/`adamWCreateOptim` fail
+  fast (`PRINT_ERROR` + `exit(1)`) when `sizeStates == 0`, but **only** when
+  `modelHasFrozenLayer()` is also true — i.e. only when freezing itself caused
+  the degenerate all-frozen model. A model whose layers simply have no
+  parameters at all (e.g. a lone Dropout/pooling stage) keeps the pre-existing,
+  deliberately-supported zero-state behavior.
 
 ## Serialization (`src/serial/`)
 
@@ -146,11 +163,14 @@ Notes on the qualified cells:
   FLOAT32/BOOL = type byte only; SYM_INT32/SYM/ASYM carry scale + rounding + bits [+
   zeroPoint]). Packed tensor data (SYM/ASYM sub-byte, BOOL 1-bit) is byte-tight via
   `calcNumberOfBytesForData` and round-trips exactly.
-- **Model format** — `"ODTS"` magic + `version` (=2) + `layerCount` + per-layer type
+- **Model format** — `"ODTS"` magic + `version` (=3) + `layerCount` + per-layer type
   tag. Deserialize fail-fasts on magic / version / count / tag mismatch. Since v2
   (#370) every count/dim/kernel field is `u32` little-endian via the checked
   `SerialWire` primitives (ASYM zeroPoint: `i32` LE), so a 64-bit host writes files a
-  32-bit MCU loads bit-identically; all short reads/writes fail fast.
+  32-bit MCU loads bit-identically; all short reads/writes fail fast. Since v3 (#380)
+  every parameter record leads with a `u8` grad-presence byte: frozen layers
+  (`parameter->grad == NULL`) write 0 and the record carries the param tensor only;
+  deserialize fail-fasts on a presence/skeleton mismatch instead of NULL-dereferencing.
 - **Contract** — deserialize **fills a pre-constructed model in place** (no allocation
   in the serial path); the caller must build a matching model first. A tensor record
   whose file dtype, rank, or payload size mismatches the pre-built skeleton fail-fasts

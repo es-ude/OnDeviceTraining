@@ -62,6 +62,19 @@ void initWeightTensor(tensor_t *weight, weightInit_t cfg, size_t fanIn, size_t f
     initDistribution(weight, &dist);
 }
 
+bool resolveTrainable(trainable_t t, const char *factoryName) {
+    switch (t) {
+    case TRAINABLE_DEFAULT:
+    case TRAINABLE_TRUE:
+        return true;
+    case TRAINABLE_FALSE:
+        return false;
+    default:
+        PRINT_ERROR("%s: invalid trainable value (got %d)", factoryName, (int)t);
+        exit(1);
+    }
+}
+
 void initBiasTensor(tensor_t *bias, size_t fanIn) {
     requireFloat32(bias, "initBiasTensor");
 

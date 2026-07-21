@@ -4,6 +4,7 @@ add_elastic_ai_unit_test(
         MORE_LIBS
         CommonLayerLibs
         LinearApi
+        ReluApi
         SoftmaxApi
         LayerQuant
         ArithmeticType
@@ -18,6 +19,8 @@ add_elastic_ai_unit_test(
         StorageApi
         Common
         Optimizer
+        OptimizerApi
+        SgdApi
         TrainingLoopApi
         InferenceApi
         DataLoader

@@ -29,6 +29,9 @@ typedef struct conv1dConfig {
 
     bool ownsQuantizations; /* true -> free* will tear down outputQ/propLossQ and their
                                qConfigs */
+
+    bool frozen; /* create-time freeze (#380): no grad buffers; optimizer collection,
+                    state allocation and backward weight/bias-grad ops skip this layer */
 } conv1dConfig_t;
 
 void initConv1dConfigWithWeightsAndBias(conv1dConfig_t *conv1dConfig, kernel_t *kernel,

@@ -4,6 +4,7 @@
 #include <stddef.h>
 
 #include "Layer.h"
+#include "LayerCommon.h"
 #include "LayerNorm.h"
 #include "LayerQuant.h"
 
@@ -12,6 +13,7 @@ typedef struct layerNormInit {
     size_t numNormDims;      /* REQUIRED — D, must be > 0 */
     float eps;               /* 0 → default 1e-5 */
     /* affine is ALWAYS ON for v1 (gamma + beta present). */
+    trainable_t trainable; /* zero-init → TRAINABLE_DEFAULT (trainable) */
 } layerNormInit_t;
 
 /*! Borrowing factory — stores lq->outputQ / lq->propLossQ verbatim

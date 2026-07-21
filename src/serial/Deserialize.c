@@ -26,9 +26,10 @@
 
 /* Mirrors Serialize.c's locked format v2 constants (#370): fixed-width
  * little-endian scalars via the checked SerialWire primitives; no v1
- * back-compat shim — v1 files were host-local artifacts. */
+ * back-compat shim — v1 files were host-local artifacts.
+ * v3: parameter records carry a grad-presence byte (#380). */
 #define SERIALIZE_MAGIC "ODTS"
-#define SERIALIZE_FORMAT_VERSION 2u
+#define SERIALIZE_FORMAT_VERSION 3u
 
 void deserializeTensor(tensor_t *tensor, FILE *f) {
     /* #316: capture the skeleton's expected payload size BEFORE the shape /
@@ -58,8 +59,17 @@ void deserializeTensor(tensor_t *tensor, FILE *f) {
 }
 
 void deserializeParameter(parameter_t *parameter, FILE *f) {
+    uint8_t hasGrad = serialReadU8(f);
+    if ((hasGrad != 0u) != (parameter->grad != NULL)) {
+        PRINT_ERROR("deserializeParameter: grad-presence mismatch (file %u, skeleton %u) - "
+                    "frozen/trainable construction must match the serialized model (#380)",
+                    (unsigned)hasGrad, (unsigned)(parameter->grad != NULL));
+        exit(1);
+    }
     deserializeTensor(parameter->param, f);
-    deserializeTensor(parameter->grad, f);
+    if (hasGrad) {
+        deserializeTensor(parameter->grad, f);
+    }
 }
 
 void deserializeModel(layer_t **model, size_t sizeModel, FILE *f) {

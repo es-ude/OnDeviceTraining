@@ -32,6 +32,7 @@ typedef struct conv1dInit {
     size_t groups;           /* 0 → 1 */
     bias_t bias;             /* BIAS_DEFAULT (0) → resolves to true (PyTorch parity) */
     weightInit_t weightInit; /* zero-init → INIT_DEFAULT (PyTorch kaiming a=√5) */
+    trainable_t trainable;   /* zero-init → TRAINABLE_DEFAULT (trainable) */
 } conv1dInit_t;
 
 /*! Borrowing variant — factory allocates weights/bias/kernel internally

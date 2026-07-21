@@ -307,7 +307,9 @@ class: `u32 dim`, `u32 rank`, `u32 count`, `f32 sigma2`, `f32 totalVar`,
 followed by the three tensors (`mean`, `basis`, `eigvals`) via the existing
 tensor-tier `serializeTensor`/`deserializeTensor`. Since v2 (#370) every
 scalar is fixed-width little-endian via the checked `SerialWire` primitives,
-matching the embedded ODTS v2 tensor records.
+matching the embedded ODTS v2/v3 tensor records (the tensor-tier record
+format is unchanged between the two; v3 only adds a leading grad-presence
+byte per parameter, #380).
 
 **Deserialize fills a pre-built skeleton in place** — it does not allocate a
 set for you. Build the skeleton with `ppcaReplaySetCreate(numClasses, cfg)`

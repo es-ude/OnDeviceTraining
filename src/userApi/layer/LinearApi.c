@@ -49,7 +49,7 @@ static shape_t *buildOwnedShape(const size_t *srcDims, size_t numberOfDims) {
 
 static parameter_t *allocateLinearWeights(size_t inFeatures, size_t outFeatures,
                                           weightInit_t weightInit, quantization_t *storageQ,
-                                          quantization_t *gradQ) {
+                                          quantization_t *gradQ, bool trainable) {
     /* Weight tensor: shape [outFeatures, inFeatures]. The tensor takes ownership
      * of `shape` and `quantization`, so we clone the borrowed storageQ via
      * getQLike to avoid tying the tensor's lifetime to the caller's quant. */
@@ -61,19 +61,19 @@ static parameter_t *allocateLinearWeights(size_t inFeatures, size_t outFeatures,
      * PyTorch parity: uniform(+/- 1/sqrt(fan_in)). */
     initWeightTensor(paramTensor, weightInit, inFeatures, outFeatures);
 
-    tensor_t *gradTensor = gradInit(paramTensor, gradQ, NULL);
+    tensor_t *gradTensor = trainable ? gradInit(paramTensor, gradQ, NULL) : NULL;
     return parameterInit(paramTensor, gradTensor);
 }
 
 static parameter_t *allocateLinearBias(size_t outFeatures, size_t fanIn, quantization_t *storageQ,
-                                       quantization_t *gradQ) {
+                                       quantization_t *gradQ, bool trainable) {
     /* Bias tensor: shape [outFeatures]. PyTorch draws bias from
      * uniform(+/- 1/sqrt(fan_in)) using the WEIGHT's fan_in (= inFeatures). */
     shape_t *shape = buildOwnedShape((size_t[]){outFeatures}, 1);
     tensor_t *paramTensor = initTensor(shape, getQLike(storageQ), NULL);
     initBiasTensor(paramTensor, fanIn);
 
-    tensor_t *gradTensor = gradInit(paramTensor, gradQ, NULL);
+    tensor_t *gradTensor = trainable ? gradInit(paramTensor, gradQ, NULL) : NULL;
     return parameterInit(paramTensor, gradTensor);
 }
 
@@ -119,6 +119,7 @@ layer_t *linearLayerInit(linearInit_t *init, layerQuant_t *lq) {
     validateLinearInit(init);
     bool hasBias = resolveLinearBias(init->bias);
     validateLayerQuantForLinear(lq, hasBias);
+    bool trainable = resolveTrainable(init->trainable, "linearLayerInit");
 
     layer_t *layer = reserveMemory(sizeof(layer_t));
     layer->type = LINEAR;
@@ -137,9 +138,9 @@ layer_t *linearLayerInit(linearInit_t *init, layerQuant_t *lq) {
         lq->weightGradStorage != NULL ? lq->weightGradStorage : floatGradQ;
     quantization_t *biasGradQ = lq->biasGradStorage != NULL ? lq->biasGradStorage : floatGradQ;
     cfg->weights = allocateLinearWeights(init->inFeatures, init->outFeatures, init->weightInit,
-                                         lq->weightStorage, weightGradQ);
+                                         lq->weightStorage, weightGradQ, trainable);
     cfg->bias = hasBias ? allocateLinearBias(init->outFeatures, init->inFeatures, lq->biasStorage,
-                                             biasGradQ)
+                                             biasGradQ, trainable)
                         : NULL;
     freeQuantization(floatGradQ);
 
@@ -154,6 +155,7 @@ layer_t *linearLayerInit(linearInit_t *init, layerQuant_t *lq) {
     cfg->weightGradAccMode = lq->weightGradAccMode;
     cfg->biasGradAccMode = lq->biasGradAccMode;
     cfg->ownsQuantizations = false;
+    cfg->frozen = !trainable;
 
     return layer;
 }
@@ -162,6 +164,7 @@ layer_t *linearLayerInitOwning(linearInit_t *init, layerQuant_t *lq) {
     validateLinearInit(init);
     bool hasBias = resolveLinearBias(init->bias);
     validateLayerQuantForLinear(lq, hasBias);
+    bool trainable = resolveTrainable(init->trainable, "linearLayerInitOwning");
 
     layer_t *layer = reserveMemory(sizeof(layer_t));
     layer->type = LINEAR;
@@ -185,9 +188,9 @@ layer_t *linearLayerInitOwning(linearInit_t *init, layerQuant_t *lq) {
         lq->weightGradStorage != NULL ? lq->weightGradStorage : floatGradQ;
     quantization_t *biasGradQ = lq->biasGradStorage != NULL ? lq->biasGradStorage : floatGradQ;
     cfg->weights = allocateLinearWeights(init->inFeatures, init->outFeatures, init->weightInit,
-                                         lq->weightStorage, weightGradQ);
+                                         lq->weightStorage, weightGradQ, trainable);
     cfg->bias = hasBias ? allocateLinearBias(init->outFeatures, init->inFeatures, lq->biasStorage,
-                                             biasGradQ)
+                                             biasGradQ, trainable)
                         : NULL;
     freeQuantization(floatGradQ);
 
@@ -202,6 +205,7 @@ layer_t *linearLayerInitOwning(linearInit_t *init, layerQuant_t *lq) {
     cfg->weightGradAccMode = lq->weightGradAccMode;
     cfg->biasGradAccMode = lq->biasGradAccMode;
     cfg->ownsQuantizations = true;
+    cfg->frozen = !trainable;
 
     return layer;
 }

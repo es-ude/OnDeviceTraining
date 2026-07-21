@@ -25,6 +25,9 @@ typedef struct linearConfig {
 
     bool ownsQuantizations; /* true → free* will tear down outputQ/propLossQ and their
                                qConfigs */
+
+    bool frozen; /* create-time freeze (#380): no grad buffers; optimizer collection,
+                    state allocation and backward weight/bias-grad ops skip this layer */
 } linearConfig_t;
 
 void linearInitConfig(linearConfig_t *linearConfig, parameter_t *weights, parameter_t *bias,

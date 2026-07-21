@@ -7,6 +7,7 @@
 #include "Common.h"
 #include "Conv1d.h"
 #include "Conv1dTransposed.h"
+#include "Layer.h"
 #include "Linear.h"
 #include "Optimizer.h"
 #include "Sgd.h"
@@ -62,6 +63,9 @@ optimizerFunctions_t optimizerFunctions[] = {
  * not a weight+bias pair. Every other trainable layer type still has a
  * fixed contribution. */
 static size_t calcNumberOfStatesByLayer(const layer_t *layer) {
+    if (layerIsFrozen(layer)) {
+        return 0;
+    }
     switch (layer->type) {
     case LINEAR:
         return layer->config->linear->bias != NULL ? 2 : 1;

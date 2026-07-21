@@ -5,6 +5,7 @@
 
 #include "GroupNorm.h"
 #include "Layer.h"
+#include "LayerCommon.h"
 #include "LayerQuant.h"
 
 typedef struct groupNormInit {
@@ -12,6 +13,7 @@ typedef struct groupNormInit {
     size_t numChannels; /* REQUIRED — C, must be > 0 */
     float eps;          /* 0 -> default 1e-5 */
     /* affine is ALWAYS ON for v1 (gamma + beta present), shape [C]. */
+    trainable_t trainable; /* zero-init → TRAINABLE_DEFAULT (trainable) */
 } groupNormInit_t;
 
 /*! Borrowing factory — stores lq->outputQ / lq->propLossQ verbatim

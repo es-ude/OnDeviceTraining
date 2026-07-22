@@ -76,7 +76,9 @@ Notes on the qualified cells:
   (Flatten/Pool/Dropout/Quant — the repo's standard model heads) no longer run
   backward at all, and their previously-fired `agrad` events (e.g. kws_raw's
   `pool0` probe) vanish from traces; fully-trainable param-first models save
-  layer-0's previously wasted dx.
+  layer-0's previously wasted dx. The canonical pretrain → freeze → fine-tune
+  flow (#380 PR3) ships as `examples/har_classifier/train_c_finetune.c`,
+  enabled by the tolerant grad-presence deserialize (see Serialization).
 
 ## Optimizer (`optimizerType_t`)
 
@@ -287,8 +289,10 @@ checkpointing, limitations, literature).
   only), `LayerWeightsApi`, `ModelValidationApi` (near-stub after PR1b.2 retired the
   SYM-producer rule), `LayerQuant` uniform config, and `StorageApi` as the single
   allocation seam (alloc primitives only in `src/userApi/`).
-- **Examples** — 7 end-to-end: `har_classifier`, `ecg_anomaly_ae`, `mnist_mlp`,
-  `mnist_cnn`, `kws_mfcc`, `kws_raw` (+ trace harness), `mixed_width_mlp`.
+- **Examples** — 8 end-to-end: `har_classifier` (+ `train_c_finetune`:
+  pretrain → ODTS checkpoint → frozen-backbone head fine-tune, #380 PR3),
+  `ecg_anomaly_ae`, `mnist_mlp`, `mnist_cnn`, `kws_mfcc`, `kws_raw`
+  (+ trace harness), `mixed_width_mlp`.
 
 ## Known gaps / partial features
 

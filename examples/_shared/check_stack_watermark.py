@@ -35,13 +35,36 @@ SLACK_B = 8192
 # train_c_har_classifier_adamw, #328): same model + microbatch, optimizer
 # state is heap-side. The darwin number was calibrated on the SGD binary;
 # re-key per-binary if calibration ever shows the two diverging.
+#
+# "finetune" (#380 PR3, train_c_har_classifier_finetune): a THIRD bucket, not
+# a re-key of "float" — its RunLog reflects STAGE 2 (frozen conv backbone,
+# head-only optimizer), not the fully-trainable model the other two float
+# binaries measure. PR2's backward truncation means stage 2's training step
+# never touches conv1/conv2/conv3's backward (no weight-grad conversion
+# scratch, no dx ping-pong), so its stack peak sits an order of magnitude
+# below the "float" budget rather than sharing it — sharing would silently
+# stop calibrating this binary's own regressions. Provenance: 2026-07-22,
+# devenv build (nix clang-wrapper 21.1.8), macOS arm64, STAGE1_EPOCHS=1
+# STAGE2_EPOCHS=1, bit-exact across SEED=1 and SEED=7 — darwin 4016 B (vs
+# float's 27768 B measured 2026-07-10: no conv weight-grad conversion
+# scratch, no dx ping-pong buffer). Re-measuring "float" on today's devenv
+# clang gives 27088 B, ~2.5% below its recorded 27768 B — within the 8 KiB
+# slack, not a regression; recorded here rather than silently reused as the
+# "finetune" comparison baseline.
 BUDGETS_B: dict[str, dict[str, int | None]] = {
-    "darwin": {"float": 27768 + SLACK_B, "sym": 51968 + SLACK_B},
-    "linux": {"float": None, "sym": None},
+    "darwin": {
+        "float": 27768 + SLACK_B,
+        "sym": 51968 + SLACK_B,
+        "finetune": 4016 + SLACK_B,
+    },
+    "linux": {"float": None, "sym": None, "finetune": None},
 }
 
 
-def _config_of(memory: dict) -> str:
+def _config_of(log: dict) -> str:
+    if log.get("impl") == "c-finetune":
+        return "finetune"
+    memory = log.get("memory", {})
     return "float" if memory.get("sym_bits", -1) < 0 else "sym"
 
 
@@ -57,12 +80,13 @@ def main(argv: list[str]) -> int:
     rc = 0
     for path in args.logs:
         with open(path) as f:
-            memory = json.load(f).get("memory", {})
+            log = json.load(f)
+        memory = log.get("memory", {})
         peak = memory.get("stack_peak_b", 0)
         if not peak:
             print(f"ERROR {path}: no stack_peak_b — not an ODT_MEM_PROFILE build?")
             return 2
-        config = _config_of(memory)
+        config = _config_of(log)
         budget = BUDGETS_B[args.platform][config]
         if budget is None:
             print(f"UNCALIBRATED {path}: {config} peak {peak} B on {args.platform} "

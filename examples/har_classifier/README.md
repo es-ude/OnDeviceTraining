@@ -151,6 +151,48 @@ identity holds: 31 920 B stack peak for both the SGD and AdamW binaries —
 which is also why the AdamW binary shares the `float` watermark budget
 bucket rather than getting its own key.
 
+### Pretrain -> freeze -> finetune (#380)
+
+`train_c_finetune.c` (target `train_c_har_classifier_finetune`) demonstrates
+layer freezing end to end. **Stage 1** trains the full model exactly like
+`train_c.c` and serializes it (`serializeModel`, ODTS v3) to
+`outputs/har_pretrained.odts`. **Stage 2** rebuilds the identical topology but
+with `.trainable = TRAINABLE_FALSE` on the three Conv1d factories, loads the
+stage-1 checkpoint into it (deserialization is grad-presence *tolerant*: a
+fully-trainable file loads cleanly into a frozen-backbone skeleton, the
+conv layers' grad records are parsed and discarded), builds an optimizer over
+it, and fine-tunes. Freezing makes the three conv layers optimizer-invisible
+— the optimizer collects only the head `Linear`'s weight + bias
+(`optim->sizeStates == 2`, asserted in the binary).
+
+Env-overridable like the rest of the file's config: `STAGE1_EPOCHS`,
+`STAGE2_EPOCHS` (default 20 each), plus the usual `LR`/`MOMENTUM`/`SEED`/
+`SHUFFLE_SEED`/`LOG_PATH`.
+
+Three memory metrics tell the freezing story — run the binary and read the
+`FREEZE`-prefixed stdout lines:
+
+- **`optstate_analytic_*_b` / `grads_*_b`** (full vs. frozen): the optimizer's
+  momentum buffers and gradient buffers shrink from all four param layers to
+  the head alone — 40 856 B -> 1 560 B in a 3-epoch/3-epoch smoke run (~96%
+  smaller). `params_*_b` does **not** shrink (40 856 B either way) — freezing
+  stops a layer from *training*, it doesn't evict its weights from memory;
+  the conv backbone stays resident for inference.
+- **`dx_peak_stage{1,2}_b`** (the headline number): PR2's backward truncation
+  means stage 2 never computes or allocates a gradient wire below the head —
+  there is no dx ping-pong at all, just the single CE+Softmax lossGrad seed.
+  Measured: 16 384 B (stage 1) -> 24 B (stage 2), a ~683x collapse.
+- **`stack_peak_b`** (watermarked in CI): stage 2's training step skips the
+  conv layers' backward entirely (no weight-grad conversion scratch), so its
+  stack high-water sits an order of magnitude below the plain/AdamW `float`
+  binaries' budget — measured 4 016 B vs. their 27 768 B (darwin;
+  `check_stack_watermark.py`'s dedicated `finetune` bucket, not a re-key of
+  `float`).
+
+A 3-epoch/3-epoch smoke run (`STAGE1_EPOCHS=3 STAGE2_EPOCHS=3 SEED=1`):
+stage-1 test_acc 0.6871, stage-2 test_acc 0.7170 — the head continues
+improving on the same data after the backbone freezes, as expected.
+
 ### Full-SYM wires — the #206 acceptance run
 
 `SYM_WIRES=1` switches `train_c_sym.c` from FLOAT32 activation/dx wires to the

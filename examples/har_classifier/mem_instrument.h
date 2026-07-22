@@ -57,7 +57,12 @@ typedef struct memReport {
  * the optimizer already holds exactly the trainable weight/bias parameters and
  * their grads + momentum buffers, and calcBytesPerTensor is dtype-aware (packed
  * SYM weights count as ceil(qBits*N/8), FLOAT32 grads as 4*N), so this measures
- * the ACTUAL storage whatever it is. */
+ * the ACTUAL storage whatever it is.
+ * CAVEAT (#380): frozen layers are optimizer-invisible, so on a frozen-layer
+ * model memInstrumentParamBytes UNDER-COUNTS resident params (it sums only
+ * trainable ones) — for the resident total, walk traceModelWeights instead
+ * (see train_c_finetune.c's sumParamBytesSink). Grad/OptState sums stay
+ * correct: frozen layers genuinely have neither. */
 size_t memInstrumentParamBytes(optimizer_t *optim);
 size_t memInstrumentGradBytes(optimizer_t *optim);
 size_t memInstrumentOptStateBytes(optimizer_t *optim);

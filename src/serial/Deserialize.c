@@ -27,7 +27,9 @@
 /* Mirrors Serialize.c's locked format v2 constants (#370): fixed-width
  * little-endian scalars via the checked SerialWire primitives; no v1
  * back-compat shim — v1 files were host-local artifacts.
- * v3: parameter records carry a grad-presence byte (#380). */
+ * v3: parameter records carry a grad-presence byte (#380). The reader is
+ * TOLERANT of a presence/skeleton mismatch (#380 PR3, superseding PR1's
+ * fail-fast): see deserializeParameter / skipSerializedTensor below. */
 #define SERIALIZE_MAGIC "ODTS"
 #define SERIALIZE_FORMAT_VERSION 3u
 
@@ -60,16 +62,17 @@ void deserializeTensor(tensor_t *tensor, FILE *f) {
 
 void deserializeParameter(parameter_t *parameter, FILE *f) {
     uint8_t hasGrad = serialReadU8(f);
-    if ((hasGrad != 0u) != (parameter->grad != NULL)) {
-        PRINT_ERROR("deserializeParameter: grad-presence mismatch (file %u, skeleton %u) - "
-                    "frozen/trainable construction must match the serialized model (#380)",
-                    (unsigned)hasGrad, (unsigned)(parameter->grad != NULL));
-        exit(1);
-    }
     deserializeTensor(parameter->param, f);
-    if (hasGrad) {
+    if (hasGrad && parameter->grad != NULL) {
         deserializeTensor(parameter->grad, f);
+    } else if (hasGrad) {
+        /* Frozen skeleton, full checkpoint (#380 PR3): grads are transient
+         * (zeroed before every batch) and a frozen layer allocates none -
+         * parse past the record so the stream stays synced. */
+        skipSerializedTensor(f);
     }
+    /* hasGrad == 0 with a trainable skeleton: grads stay as built (zeroed);
+     * optimizerZeroGrad re-zeros before every batch anyway. */
 }
 
 void deserializeModel(layer_t **model, size_t sizeModel, FILE *f) {
@@ -189,6 +192,89 @@ static void deserializeQConfig(quantization_t *q, FILE *f) {
     }
     default:
         PRINT_ERROR("Unknown qType!");
+        exit(1);
+    }
+}
+
+/* Stack-scratch bound for skipSerializedTensor: no shipped tensor exceeds
+ * rank 8, and the allocation-locality rule (src/serial is not src/userApi)
+ * forbids a heap array sized from the untrusted file rank. */
+#define SKIP_TENSOR_MAX_DIMS 8
+
+static void skipSerializedTensor(FILE *f) {
+    long recordStart = ftell(f);
+    if (recordStart < 0) {
+        PRINT_ERROR("skipSerializedTensor: stream not seekable (grad-record skip requires "
+                    "fseek/ftell support, #380 PR3)");
+        exit(1);
+    }
+
+    uint32_t numDims = serialReadU32LE(f);
+    if (numDims > SKIP_TENSOR_MAX_DIMS) {
+        PRINT_ERROR("skipSerializedTensor: rank %u exceeds the %d-dim skip-helper cap",
+                    (unsigned)numDims, SKIP_TENSOR_MAX_DIMS);
+        exit(1);
+    }
+    size_t dims[SKIP_TENSOR_MAX_DIMS];
+    size_t numberOfElements = 1;
+    for (uint32_t d = 0; d < numDims; d++) {
+        dims[d] = (size_t)serialReadU32LE(f);
+        numberOfElements *= dims[d];
+    }
+    /* orderOfDimensions: positional only, irrelevant to a discarded record. */
+    if (fseek(f, (long)numDims * (long)sizeof(uint32_t), SEEK_CUR) != 0) {
+        PRINT_ERROR("skipSerializedTensor: seek past orderOfDimensions failed");
+        exit(1);
+    }
+
+    uint8_t type = serialReadU8(f);
+    quantization_t scratchQ = {.type = (qtype_t)type, .qConfig = NULL};
+    symInt32QConfig_t symIntScratch;
+    symQConfig_t symScratch;
+    asymQConfig_t asymScratch;
+    switch (scratchQ.type) {
+    case INT32:
+    case FLOAT32:
+    case BOOL:
+        break;
+    case SYM_INT32:
+        scratchQ.qConfig = &symIntScratch;
+        break;
+    case SYM:
+        scratchQ.qConfig = &symScratch;
+        break;
+    case ASYM:
+        scratchQ.qConfig = &asymScratch;
+        break;
+    default:
+        PRINT_ERROR("skipSerializedTensor: unknown qtype %u", (unsigned)type);
+        exit(1);
+    }
+    deserializeQConfig(&scratchQ, f);
+
+    size_t payloadBytes = calcNumberOfBytesForData(&scratchQ, numberOfElements);
+    if (fseek(f, (long)payloadBytes, SEEK_CUR) != 0) {
+        PRINT_ERROR("skipSerializedTensor: seek past payload failed");
+        exit(1);
+    }
+    /* deserializeSparsity() is a zero-byte TODO stub -- nothing to skip. */
+
+    /* Post-skip truncation guard (mirrors the ODTR/PPCA ftell precedent,
+     * #316 wave): fseek past a genuinely truncated file's real end succeeds
+     * silently (POSIX allows seeking beyond EOF), so only comparing against
+     * the actual on-disk size catches it. */
+    long recordEnd = ftell(f);
+    if (recordEnd < 0 || fseek(f, 0, SEEK_END) != 0) {
+        PRINT_ERROR("skipSerializedTensor: position query failed after skip");
+        exit(1);
+    }
+    long fileSize = ftell(f);
+    if (fileSize < 0 || recordEnd > fileSize) {
+        PRINT_ERROR("skipSerializedTensor: skipped record extends past end of file (truncated?)");
+        exit(1);
+    }
+    if (fseek(f, recordEnd, SEEK_SET) != 0) {
+        PRINT_ERROR("skipSerializedTensor: reposition after truncation check failed");
         exit(1);
     }
 }

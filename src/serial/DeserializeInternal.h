@@ -51,6 +51,20 @@ static void deserializeQConfig(quantization_t *q, FILE *f);
  */
 static void deserializeSparsity();
 
+/*! Parses past one full tensor record (shape + quantization header + packed
+ *  payload + sparsity stub) without writing any output. Used by
+ *  deserializeParameter to discard a grad record whose file hasGrad=1
+ *  disagrees with a frozen skeleton (parameter->grad == NULL) — #380 PR3.
+ *  Leaves the stream positioned right after the record, so a following
+ *  sibling record parses in sync. Never allocates (dims live in an 8-deep
+ *  stack array; the payload is skipped via fseek, not read into a scratch
+ *  buffer) and requires a seekable stream (fseek/ftell), matching the
+ *  ODTR/PPCA deserialize precedent (#316 wave).
+ *
+ * \param f: Pointer of file to skip a tensor record from
+ */
+static void skipSerializedTensor(FILE *f);
+
 /*! Deserializes layer from given file.
  *
  * \param layer: Pointer to layer to deserialize into

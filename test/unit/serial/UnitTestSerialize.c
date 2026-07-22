@@ -1938,37 +1938,140 @@ static void testDeserializeLayerNormRejectsNumNormDimsMismatch(void) {
     freeQuantization(floatQ);
 }
 
-/*! #380: a TRAINABLE-serialized Linear model's grad-presence byte (1 for
- *  weights and bias) must be rejected when deserialized into a FROZEN-built
- *  skeleton (parameter->grad == NULL on both) — frozen/trainable construction
- *  must match the serialized model. Pre-v3 this NULL-derefed inside
- *  deserializeTensor(parameter->grad, f) instead of failing fast. */
-static void testDeserializeRejectsGradPresenceMismatch(void) {
+/*! #380 PR3: relaxes the old PR1 STRICT mismatch contract pinned above
+ *  (Leo approved 2026-07-22) — a TRAINABLE-serialized model's grad-presence
+ *  byte (1) deserialized into a FROZEN-built skeleton (parameter->grad ==
+ *  NULL) must now be TOLERATED: the grad record is parsed and discarded
+ *  (skipSerializedTensor), not treated as file corruption. Two stacked
+ *  Linear layers with DIFFERENT in/out feature counts (so a stream desync
+ *  produces garbage rather than a coincidental pass): layer 1 deserializes
+ *  into a frozen skeleton (its weights+bias grad records get skipped, twice
+ *  in a row), layer 2 into a trainable one — layer 2's param AND grad
+ *  values parsing correctly right after those two skips is the stream-sync
+ *  proof. */
+static void testDeserializeSkipsGradIntoFrozenSkeleton(void) {
     quantization_t *floatQ = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, floatQ);
 
-    linearInit_t trainableInit = {.inFeatures = 4, .outFeatures = 3};
-    linearInit_t frozenInit = trainableInit;
-    frozenInit.trainable = TRAINABLE_FALSE;
+    linearInit_t init1 = {.inFeatures = 4, .outFeatures = 3};
+    linearInit_t init2 = {.inFeatures = 3, .outFeatures = 5};
 
-    layer_t *serialLayer = linearLayerInitOwning(&trainableInit, &lq);
-    layer_t *skeletonLayer = linearLayerInitOwning(&frozenInit, &lq);
+    layer_t *serialLayer1 = linearLayerInitOwning(&init1, &lq);
+    layer_t *serialLayer2 = linearLayerInitOwning(&init2, &lq);
 
-    layer_t *serialModel[] = {serialLayer};
-    layer_t *skeletonModel[] = {skeletonLayer};
+    linearConfig_t *serialCfg1 = serialLayer1->config->linear;
+    linearConfig_t *serialCfg2 = serialLayer2->config->linear;
+
+    size_t numWeights1 = calcNumberOfElementsByTensor(serialCfg1->weights->param);
+    size_t numBiases1 = calcNumberOfElementsByTensor(serialCfg1->bias->param);
+    size_t numWeights2 = calcNumberOfElementsByTensor(serialCfg2->weights->param);
+    size_t numBiases2 = calcNumberOfElementsByTensor(serialCfg2->bias->param);
+
+    /* Seed layer2's grads non-zero so its round trip is distinguishable from
+     * a no-op. Layer1's grads are irrelevant on the serial side: its
+     * skeleton is frozen, so they never get read regardless of their value. */
+    float *weightGradSeed2 = reserveMemory(numWeights2 * sizeof(float));
+    for (size_t i = 0; i < numWeights2; i++) {
+        weightGradSeed2[i] = (float)i + 0.5f;
+    }
+    tensorFillFromFloatBuffer(serialCfg2->weights->grad, weightGradSeed2, numWeights2);
+
+    float *biasGradSeed2 = reserveMemory(numBiases2 * sizeof(float));
+    for (size_t i = 0; i < numBiases2; i++) {
+        biasGradSeed2[i] = (float)i - 1.5f;
+    }
+    tensorFillFromFloatBuffer(serialCfg2->bias->grad, biasGradSeed2, numBiases2);
+
+    layer_t *serialModel[] = {serialLayer1, serialLayer2};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 1, f);
+    serializeModel(serialModel, 2, f);
     fclose(f);
+
+    linearInit_t frozenInit1 = init1;
+    frozenInit1.trainable = TRAINABLE_FALSE;
+    layer_t *skeletonLayer1 = linearLayerInitOwning(&frozenInit1, &lq);
+    layer_t *skeletonLayer2 = linearLayerInitOwning(&init2, &lq);
+    layer_t *skeletonModel[] = {skeletonLayer1, skeletonLayer2};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(skeletonModel, 1, f));
+    deserializeModel(skeletonModel, 2, f);
     fclose(f);
 
-    freeLinearLayer(skeletonLayer);
-    freeLinearLayer(serialLayer);
+    linearConfig_t *skeletonCfg1 = skeletonLayer1->config->linear;
+    linearConfig_t *skeletonCfg2 = skeletonLayer2->config->linear;
+
+    /* CAPTURE every assertion value before any free. */
+    bool capturedSkeletonWeights1GradNull = (skeletonCfg1->weights->grad == NULL);
+    bool capturedSkeletonBias1GradNull = (skeletonCfg1->bias->grad == NULL);
+
+    float *capturedSerialW1 = reserveMemory(numWeights1 * sizeof(float));
+    float *capturedSkeletonW1 = reserveMemory(numWeights1 * sizeof(float));
+    for (size_t i = 0; i < numWeights1; i++) {
+        capturedSerialW1[i] = ((float *)serialCfg1->weights->param->data)[i];
+        capturedSkeletonW1[i] = ((float *)skeletonCfg1->weights->param->data)[i];
+    }
+    float *capturedSerialB1 = reserveMemory(numBiases1 * sizeof(float));
+    float *capturedSkeletonB1 = reserveMemory(numBiases1 * sizeof(float));
+    for (size_t i = 0; i < numBiases1; i++) {
+        capturedSerialB1[i] = ((float *)serialCfg1->bias->param->data)[i];
+        capturedSkeletonB1[i] = ((float *)skeletonCfg1->bias->param->data)[i];
+    }
+
+    float *capturedSerialW2 = reserveMemory(numWeights2 * sizeof(float));
+    float *capturedSkeletonW2 = reserveMemory(numWeights2 * sizeof(float));
+    float *capturedSerialWGrad2 = reserveMemory(numWeights2 * sizeof(float));
+    float *capturedSkeletonWGrad2 = reserveMemory(numWeights2 * sizeof(float));
+    for (size_t i = 0; i < numWeights2; i++) {
+        capturedSerialW2[i] = ((float *)serialCfg2->weights->param->data)[i];
+        capturedSkeletonW2[i] = ((float *)skeletonCfg2->weights->param->data)[i];
+        capturedSerialWGrad2[i] = ((float *)serialCfg2->weights->grad->data)[i];
+        capturedSkeletonWGrad2[i] = ((float *)skeletonCfg2->weights->grad->data)[i];
+    }
+    float *capturedSerialB2 = reserveMemory(numBiases2 * sizeof(float));
+    float *capturedSkeletonB2 = reserveMemory(numBiases2 * sizeof(float));
+    float *capturedSerialBGrad2 = reserveMemory(numBiases2 * sizeof(float));
+    float *capturedSkeletonBGrad2 = reserveMemory(numBiases2 * sizeof(float));
+    for (size_t i = 0; i < numBiases2; i++) {
+        capturedSerialB2[i] = ((float *)serialCfg2->bias->param->data)[i];
+        capturedSkeletonB2[i] = ((float *)skeletonCfg2->bias->param->data)[i];
+        capturedSerialBGrad2[i] = ((float *)serialCfg2->bias->grad->data)[i];
+        capturedSkeletonBGrad2[i] = ((float *)skeletonCfg2->bias->grad->data)[i];
+    }
+
+    /* FREE in reverse-init order. */
+    freeReservedMemory(biasGradSeed2);
+    freeReservedMemory(weightGradSeed2);
+    freeLinearLayer(skeletonLayer2);
+    freeLinearLayer(skeletonLayer1);
+    freeLinearLayer(serialLayer2);
+    freeLinearLayer(serialLayer1);
     freeQuantization(floatQ);
+
+    /* ASSERT on captured. */
+    TEST_ASSERT_TRUE(capturedSkeletonWeights1GradNull);
+    TEST_ASSERT_TRUE(capturedSkeletonBias1GradNull);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedSerialW1, capturedSkeletonW1, numWeights1);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedSerialB1, capturedSkeletonB1, numBiases1);
+
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedSerialW2, capturedSkeletonW2, numWeights2);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedSerialWGrad2, capturedSkeletonWGrad2, numWeights2);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedSerialB2, capturedSkeletonB2, numBiases2);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedSerialBGrad2, capturedSkeletonBGrad2, numBiases2);
+
+    freeReservedMemory(capturedSerialW1);
+    freeReservedMemory(capturedSkeletonW1);
+    freeReservedMemory(capturedSerialB1);
+    freeReservedMemory(capturedSkeletonB1);
+    freeReservedMemory(capturedSerialW2);
+    freeReservedMemory(capturedSkeletonW2);
+    freeReservedMemory(capturedSerialWGrad2);
+    freeReservedMemory(capturedSkeletonWGrad2);
+    freeReservedMemory(capturedSerialB2);
+    freeReservedMemory(capturedSkeletonB2);
+    freeReservedMemory(capturedSerialBGrad2);
+    freeReservedMemory(capturedSkeletonBGrad2);
 }
 
 int main(void) {
@@ -1997,7 +2100,7 @@ int main(void) {
     RUN_TEST(testSerializeFailsFastOnDimensionBeyondU32);
 #endif
     RUN_TEST(testDeserializeLayerNormRejectsNumNormDimsMismatch);
-    RUN_TEST(testDeserializeRejectsGradPresenceMismatch);
+    RUN_TEST(testDeserializeSkipsGradIntoFrozenSkeleton);
     RUN_TEST(testRoundTripLinearFrozen);
     return UNITY_END();
 }

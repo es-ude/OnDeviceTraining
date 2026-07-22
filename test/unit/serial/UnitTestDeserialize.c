@@ -400,6 +400,50 @@ static void testDeserializeQConfigAcceptsWideZeroPoint(void) {
     TEST_ASSERT_EQUAL_INT32(40000, capturedZeroPoint);
 }
 
+/*! #380 PR3: a FROZEN-serialized parameter (hasGrad=0, no grad tensor in the
+ *  file) deserialized into a TRAINABLE skeleton (parameter->grad != NULL)
+ *  must load the param and leave the skeleton's grad untouched — it was
+ *  zero-initialized at construction (reserveMemory is calloc-backed), and
+ *  optimizerZeroGrad re-zeros it before every batch regardless, so
+ *  "untouched" and "all-zero" coincide here. Exercises deserializeParameter
+ *  directly, mirroring this file's tensor-level style. */
+static void testDeserializeWeightsOnlyIntoTrainableSkeleton(void) {
+    float data[] = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f};
+    tensor_t *srcParamTensor = makeFloatTensor2D(2, 3, data, 6);
+    parameter_t srcParameter = {.param = srcParamTensor, .grad = NULL};
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeParameter(&srcParameter, f);
+    fclose(f);
+
+    tensor_t *skeletonParamTensor = makeFloatTensor2D(2, 3, NULL, 0);
+    tensor_t *skeletonGradTensor = makeFloatTensor2D(2, 3, NULL, 0);
+    parameter_t skeletonParameter = {.param = skeletonParamTensor, .grad = skeletonGradTensor};
+
+    f = fopen(FILE_PATH, "rb");
+    deserializeParameter(&skeletonParameter, f);
+    fclose(f);
+
+    /* CAPTURE every assertion value before any free. */
+    float capturedParam[6];
+    float capturedGrad[6];
+    for (size_t i = 0; i < 6; i++) {
+        capturedParam[i] = ((float *)skeletonParamTensor->data)[i];
+        capturedGrad[i] = ((float *)skeletonGradTensor->data)[i];
+    }
+
+    /* FREE in reverse-init order. */
+    freeTensor(skeletonGradTensor);
+    freeTensor(skeletonParamTensor);
+    freeTensor(srcParamTensor);
+
+    /* ASSERT on captured. */
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(data, capturedParam, 6);
+    for (size_t i = 0; i < 6; i++) {
+        TEST_ASSERT_EQUAL_FLOAT(0.0f, capturedGrad[i]);
+    }
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -418,5 +462,6 @@ int main(void) {
     RUN_TEST(testDeserializeTensorRejectsRankMismatch);
     RUN_TEST(testDeserializeTensorRoundTripsAsymZeroPoint);
     RUN_TEST(testDeserializeQConfigAcceptsWideZeroPoint);
+    RUN_TEST(testDeserializeWeightsOnlyIntoTrainableSkeleton);
     return UNITY_END();
 }

@@ -175,8 +175,12 @@ Notes on the qualified cells:
   `SerialWire` primitives (ASYM zeroPoint: `i32` LE), so a 64-bit host writes files a
   32-bit MCU loads bit-identically; all short reads/writes fail fast. Since v3 (#380)
   every parameter record leads with a `u8` grad-presence byte: frozen layers
-  (`parameter->grad == NULL`) write 0 and the record carries the param tensor only;
-  deserialize fail-fasts on a presence/skeleton mismatch instead of NULL-dereferencing.
+  (`parameter->grad == NULL`) write 0 and the record carries the param tensor only.
+  Deserialize is TOLERANT of a presence/skeleton mismatch (#380 PR3): file hasGrad=1
+  into a frozen skeleton parses-and-discards the grad record (`skipSerializedTensor`,
+  no allocation, stream stays in sync for the next record) and file hasGrad=0 into a
+  trainable skeleton leaves its already-zeroed grad untouched — this path requires a
+  seekable stream (fseek/ftell).
 - **Contract** — deserialize **fills a pre-constructed model in place** (no allocation
   in the serial path); the caller must build a matching model first. A tensor record
   whose file dtype, rank, or payload size mismatches the pre-built skeleton fail-fasts

@@ -245,8 +245,14 @@ checkpointing, limitations, literature).
   layer trains, the whole backward pass (loss-grad seed + layer loop) is
   skipped, though the forward loss value is always computed.
 - **Data loading** — `.npy` (`<f4`/`<i4`) and CSV; `DataLoader` with batch + shuffle
-  (once at init, **no per-epoch reshuffle**) + `dropLast` (only `true` supported).
-  No dedicated MNIST loader in `src/` (examples preprocess to `.npy`).
+  (once at init) + opt-in per-epoch reshuffle (`dataLoaderSetReshufflePerEpoch`,
+  default off, #381): `trainingRun` calls `dataLoaderReshuffle` on the TRAIN
+  loader only, skipping epoch 0 (already permuted by init) and never touching
+  the eval loader; reshuffling draws from the live RNG stream instead of
+  re-seeding, so every epoch gets a distinct permutation while the whole run
+  stays reproducible under the one top-level seed. Plus `dropLast` (only
+  `true` supported). No dedicated MNIST loader in `src/` (examples preprocess
+  to `.npy`).
 - **RNG** — global XorShift32, seedable and reproducible, **byte-mirrored in Python**
   and CI-verified. Drives weight init, the Dropout Bernoulli mask (swappable fill hook),
   and DataLoader shuffle.

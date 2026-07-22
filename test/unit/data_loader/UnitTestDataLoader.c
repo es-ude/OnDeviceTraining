@@ -326,6 +326,128 @@ void testShuffle() {
     TEST_ASSERT_EQUAL_size_t_ARRAY(expected, indices, 10);
 }
 
+/* #381 reshuffle fixtures: dataLoaderReshuffle only touches indices/RNG state
+ * (never getSample/getBatch), so a stack-only dummy dataset (no tensors, no
+ * heap) is enough — mirrors testShuffle's stack-only tier. Size 8 keeps the
+ * identity-permutation coincidence for a real shuffle negligible (1/8!). */
+#define RESHUFFLE_DATASET_SIZE 8
+
+static sample_t *reshuffleDummyGetSample(size_t id) {
+    (void)id;
+    return NULL; /* never invoked: these tests only exercise indices/RNG */
+}
+
+static size_t reshuffleDummyGetDatasetSize(void) {
+    return RESHUFFLE_DATASET_SIZE;
+}
+
+static batch_t *reshuffleDummyGetBatch(dataLoader_t *dataLoader, size_t index) {
+    (void)dataLoader;
+    (void)index;
+    return NULL; /* never invoked */
+}
+
+void testReshuffleDisabledKeepsIndices() {
+    size_t indices[RESHUFFLE_DATASET_SIZE];
+    dataLoader_t dl;
+    initDataLoader(&dl, reshuffleDummyGetSample, reshuffleDummyGetDatasetSize,
+                   reshuffleDummyGetBatch, 1, NULL, NULL, true, 42, indices, true);
+
+    /* reshufflePerEpoch defaults false (initDataLoader sets it explicitly) —
+     * do NOT call dataLoaderSetReshufflePerEpoch here. */
+    size_t snapshot[RESHUFFLE_DATASET_SIZE];
+    for (size_t i = 0; i < RESHUFFLE_DATASET_SIZE; i++) {
+        snapshot[i] = indices[i];
+    }
+
+    dataLoaderReshuffle(&dl);
+
+    TEST_ASSERT_EQUAL_size_t_ARRAY(snapshot, indices, RESHUFFLE_DATASET_SIZE);
+}
+
+void testReshufflePermutesDeterministically() {
+    size_t indicesA[RESHUFFLE_DATASET_SIZE];
+    dataLoader_t dlA;
+    initDataLoader(&dlA, reshuffleDummyGetSample, reshuffleDummyGetDatasetSize,
+                   reshuffleDummyGetBatch, 1, NULL, NULL, true, 42, indicesA, true);
+    dataLoaderSetReshufflePerEpoch(&dlA, true);
+
+    size_t snapshot[RESHUFFLE_DATASET_SIZE];
+    for (size_t i = 0; i < RESHUFFLE_DATASET_SIZE; i++) {
+        snapshot[i] = indicesA[i];
+    }
+
+    dataLoaderReshuffle(&dlA);
+
+    /* Re-init a SECOND, identically-seeded loader from scratch. initDataLoader
+     * always reseeds the global RNG (rngSetSeed(shuffleSeed)) before its own
+     * init-shuffle, so dlB's whole trajectory (init-shuffle + one reshuffle)
+     * reproduces dlA's trajectory exactly, regardless of what dlA already
+     * consumed from the module-global RNG stream in between. */
+    size_t indicesB[RESHUFFLE_DATASET_SIZE];
+    dataLoader_t dlB;
+    initDataLoader(&dlB, reshuffleDummyGetSample, reshuffleDummyGetDatasetSize,
+                   reshuffleDummyGetBatch, 1, NULL, NULL, true, 42, indicesB, true);
+    dataLoaderSetReshufflePerEpoch(&dlB, true);
+    dataLoaderReshuffle(&dlB);
+
+    TEST_ASSERT_EQUAL_size_t_ARRAY(indicesA, indicesB, RESHUFFLE_DATASET_SIZE);
+
+    bool differsFromInit = false;
+    for (size_t i = 0; i < RESHUFFLE_DATASET_SIZE; i++) {
+        if (indicesA[i] != snapshot[i]) {
+            differsFromInit = true;
+            break;
+        }
+    }
+    TEST_ASSERT_TRUE(differsFromInit);
+}
+
+/* Mutation canary for the "no re-seed" contract (#381 brief Step 5): a naive
+ * `rngSetSeed(shuffleSeed)` re-added inside dataLoaderReshuffle does NOT
+ * reproduce the init permutation (Fisher-Yates re-applied to an
+ * already-shuffled array with the same draw sequence yields sigma^2, not
+ * sigma again) — so testReshufflePermutesDeterministically's "differs from
+ * init" assertion alone cannot catch that regression (see task report for the
+ * derivation). What DOES distinguish "continues the live RNG stream" from
+ * "resets to shuffleSeed every call": the live-stream behavior is sensitive to
+ * whatever the global RNG state is at call time, while a reseed is not. */
+void testReshuffleDrawsFromLiveRngStateNotFixedSeed() {
+    size_t indicesRef[RESHUFFLE_DATASET_SIZE];
+    dataLoader_t dlRef;
+    initDataLoader(&dlRef, reshuffleDummyGetSample, reshuffleDummyGetDatasetSize,
+                   reshuffleDummyGetBatch, 1, NULL, NULL, true, 7, indicesRef, true);
+    dataLoaderSetReshufflePerEpoch(&dlRef, true);
+    dataLoaderReshuffle(&dlRef); /* consumes the live stream right after init */
+    size_t resultUnperturbed[RESHUFFLE_DATASET_SIZE];
+    for (size_t i = 0; i < RESHUFFLE_DATASET_SIZE; i++) {
+        resultUnperturbed[i] = indicesRef[i];
+    }
+
+    /* Identical loader, but perturb the module-global RNG stream between init
+     * and reshuffle (simulating "some other draw happened first"). A
+     * no-reseed reshuffle must produce a DIFFERENT result, because it
+     * continues from wherever the (now-perturbed) stream is; a reseed
+     * mutation would force the SAME result every time, ignoring the
+     * perturbation entirely. */
+    size_t indicesPerturbed[RESHUFFLE_DATASET_SIZE];
+    dataLoader_t dlPerturbed;
+    initDataLoader(&dlPerturbed, reshuffleDummyGetSample, reshuffleDummyGetDatasetSize,
+                   reshuffleDummyGetBatch, 1, NULL, NULL, true, 7, indicesPerturbed, true);
+    dataLoaderSetReshufflePerEpoch(&dlPerturbed, true);
+    rngNextFloat(); /* perturb: advance the live stream before reshuffling */
+    dataLoaderReshuffle(&dlPerturbed);
+
+    bool differsFromUnperturbed = false;
+    for (size_t i = 0; i < RESHUFFLE_DATASET_SIZE; i++) {
+        if (indicesPerturbed[i] != resultUnperturbed[i]) {
+            differsFromUnperturbed = true;
+            break;
+        }
+    }
+    TEST_ASSERT_TRUE(differsFromUnperturbed);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testGetSample);
@@ -334,5 +456,8 @@ int main() {
     RUN_TEST(testGetBatch_NpyBackedDataset);
     RUN_TEST(testNpyLoadFlat_LoadsFullMultiDimTensor);
     RUN_TEST(testShuffle);
+    RUN_TEST(testReshuffleDisabledKeepsIndices);
+    RUN_TEST(testReshufflePermutesDeterministically);
+    RUN_TEST(testReshuffleDrawsFromLiveRngStateNotFixedSeed);
     return UNITY_END();
 }

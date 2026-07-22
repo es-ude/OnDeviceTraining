@@ -279,6 +279,16 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
     const reduction_t forwardReduction = REDUCTION_MEAN;
 
     for (size_t epoch = 0; epoch < numberOfEpochs; epoch++) {
+        /* epoch 0 already got its permutation from dataLoaderInit's
+         * init-shuffle; from epoch 1 on, opt in to a fresh per-epoch
+         * permutation (#381). dataLoaderReshuffle self-gates on
+         * shuffle/reshufflePerEpoch, so this is a no-op unless the caller
+         * explicitly enabled it via dataLoaderSetReshufflePerEpoch. The eval
+         * loader is NEVER reshuffled — evaluation stays order-stable. */
+        if (epoch > 0) {
+            dataLoaderReshuffle(trainDataLoader);
+        }
+
         float trainLoss = trainingEpochDefault(model, modelSize, lossConfig, trainDataLoader,
                                                optimizer, calculateGradsFn, forwardReduction);
         epochStats_t evalStats =

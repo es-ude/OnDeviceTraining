@@ -30,6 +30,11 @@ _Static_assert(_Generic(&cosineAnnealingLrInit,
                "#327: cosineAnnealingLrInit must be (sched, optimizer, tMax, etaMin)");
 _Static_assert(_Generic(&lrSchedulerStep, void (*)(lrScheduler_t *): 1, default: 0),
                "#327: lrSchedulerStep must be (sched)");
+_Static_assert(_Generic(&linearWarmupLrInit,
+                   void (*)(lrScheduler_t *, optimizer_t *, size_t, float, lrScheduler_t *): 1,
+                   default: 0),
+               "#383: linearWarmupLrInit must be (sched, optimizer, warmupEpochs, startFactor, "
+               "mainSched)");
 
 void setUp() {}
 void tearDown() {}
@@ -134,6 +139,113 @@ void testCosineAnnealingLrAssociationDiscriminator(void) {
                     lr_gold_cos_discrim_b005_t26_e001_len);
 }
 
+void testLinearWarmupLrWithCosineMainMatchesTorchGold(void) {
+    optimizer_t optim = makeSgdOptimizer(0.1f);
+    /* mainSched initialized FIRST, per the ordering requirement documented on
+     * linearWarmupLrInit: it must capture baseLr while the optimizer's LR is
+     * still pristine, before linearWarmupLrInit overwrites it below. */
+    lrScheduler_t main;
+    cosineAnnealingLrInit(&main, &optim, 10, 0.0f);
+    lrScheduler_t warmup;
+    linearWarmupLrInit(&warmup, &optim, 5, 0.3f, &main);
+    runGoldSequence(&warmup, &optim, lr_gold_warmup_cos_b01_w5_sf03_t10_e0,
+                    lr_gold_warmup_cos_b01_w5_sf03_t10_e0_len);
+}
+
+void testLinearWarmupLrWithCosineMainCoarseMatchesTorchGold(void) {
+    optimizer_t optim = makeSgdOptimizer(0.05f);
+    lrScheduler_t main;
+    cosineAnnealingLrInit(&main, &optim, 15, 0.005f);
+    lrScheduler_t warmup;
+    linearWarmupLrInit(&warmup, &optim, 3, 0.1f, &main);
+    runGoldSequence(&warmup, &optim, lr_gold_warmup_cos_b005_w3_sf01_t15_e0005,
+                    lr_gold_warmup_cos_b005_w3_sf01_t15_e0005_len);
+}
+
+void testLinearWarmupLrNullMainMatchesTorchGold(void) {
+    optimizer_t optim = makeSgdOptimizer(0.05f);
+    lrScheduler_t warmup;
+    linearWarmupLrInit(&warmup, &optim, 4, 0.2f, NULL);
+    runGoldSequence(&warmup, &optim, lr_gold_warmup_null_b005_w4_sf02,
+                    lr_gold_warmup_null_b005_w4_sf02_len);
+}
+
+void testLinearWarmupLrNullMainWideMatchesTorchGold(void) {
+    optimizer_t optim = makeSgdOptimizer(0.2f);
+    lrScheduler_t warmup;
+    linearWarmupLrInit(&warmup, &optim, 6, 0.5f, NULL);
+    runGoldSequence(&warmup, &optim, lr_gold_warmup_null_b02_w6_sf05,
+                    lr_gold_warmup_null_b02_w6_sf05_len);
+}
+
+void testLinearWarmupLrInitTimeLrIsBaseTimesStartFactor(void) {
+    /* Isolated from the full-sequence tests above so this pins EXACTLY the
+     * init-time setLr write: dropping it (mutation check) fails only here,
+     * not via the sequence tests (which would also fail, but less legibly). */
+    optimizer_t optim = makeSgdOptimizer(0.2f);
+    lrScheduler_t warmup;
+    linearWarmupLrInit(&warmup, &optim, 6, 0.5f, NULL);
+    assertLrBitsEqual(lr_gold_warmup_null_b02_w6_sf05[0], optimizerFunctions[SGD_M].getLr(&optim),
+                      0);
+}
+
+void testLinearWarmupLrBoundarySteps(void) {
+    /* W-1/W/W+1 explicitly, per the #383 brief: pins the SequentialLR
+     * transition point where the ramp hands off to main's own computeLr at
+     * main's local epoch 0 exactly when lastEpoch == warmupEpochs (not
+     * before, not after -- an off-by-one here would desync the delegated
+     * local epoch from what torch's SequentialLR produces). */
+    optimizer_t optim = makeSgdOptimizer(0.1f);
+    lrScheduler_t main;
+    cosineAnnealingLrInit(&main, &optim, 10, 0.0f);
+    lrScheduler_t warmup;
+    linearWarmupLrInit(&warmup, &optim, 5, 0.3f, &main);
+    for (size_t epoch = 1; epoch <= 4; epoch++) {
+        lrSchedulerStep(&warmup);
+    }
+    assertLrBitsEqual(lr_gold_warmup_cos_b01_w5_sf03_t10_e0[4],
+                      optimizerFunctions[SGD_M].getLr(&optim), 4); /* W-1 = 4: still ramping */
+    lrSchedulerStep(&warmup);
+    assertLrBitsEqual(lr_gold_warmup_cos_b01_w5_sf03_t10_e0[5],
+                      optimizerFunctions[SGD_M].getLr(&optim), 5); /* W = 5: boundary */
+    lrSchedulerStep(&warmup);
+    assertLrBitsEqual(lr_gold_warmup_cos_b01_w5_sf03_t10_e0[6],
+                      optimizerFunctions[SGD_M].getLr(&optim), 6); /* W+1 = 6: main's epoch 1 */
+}
+
+void testLinearWarmupLrInitRejectsZeroWarmupEpochs(void) {
+    optimizer_t optim = makeSgdOptimizer(0.1f);
+    lrScheduler_t sched;
+    ASSERT_EXITS_WITH_FAILURE(linearWarmupLrInit(&sched, &optim, 0, 0.3f, NULL));
+}
+
+void testLinearWarmupLrInitRejectsZeroStartFactor(void) {
+    optimizer_t optim = makeSgdOptimizer(0.1f);
+    lrScheduler_t sched;
+    ASSERT_EXITS_WITH_FAILURE(linearWarmupLrInit(&sched, &optim, 5, 0.0f, NULL));
+}
+
+void testLinearWarmupLrInitRejectsStartFactorAboveOne(void) {
+    optimizer_t optim = makeSgdOptimizer(0.1f);
+    lrScheduler_t sched;
+    ASSERT_EXITS_WITH_FAILURE(linearWarmupLrInit(&sched, &optim, 5, 1.5f, NULL));
+}
+
+void testLinearWarmupLrInitRejectsNonFiniteStartFactor(void) {
+    optimizer_t optim = makeSgdOptimizer(0.1f);
+    lrScheduler_t sched;
+    ASSERT_EXITS_WITH_FAILURE(linearWarmupLrInit(&sched, &optim, 5, NAN, NULL));
+}
+
+void testLinearWarmupLrInitRejectsMainWiredToDifferentOptimizer(void) {
+    optimizer_t optimA = makeSgdOptimizer(0.1f);
+    optimizer_t optimB = makeSgdOptimizer(0.2f);
+    lrScheduler_t main;
+    cosineAnnealingLrInit(&main, &optimB, 10, 0.0f);
+    lrScheduler_t sched;
+    ASSERT_EXITS_WITH_FAILURE(linearWarmupLrInit(&sched, &optimA, 5, 0.3f, &main));
+}
+
 void testSchedulerOverwritesExternalLrMutationAbsolutely(void) {
     /* baseLr is captured ONCE at init; each step computes the closed form
      * from baseLr and OVERWRITES the optimizer LR. External mutation between
@@ -192,6 +304,17 @@ int main() {
     RUN_TEST(testCosineAnnealingLrMatchesTorchGold);
     RUN_TEST(testCosineAnnealingLrPastTMaxMatchesTorchGold);
     RUN_TEST(testCosineAnnealingLrAssociationDiscriminator);
+    RUN_TEST(testLinearWarmupLrWithCosineMainMatchesTorchGold);
+    RUN_TEST(testLinearWarmupLrWithCosineMainCoarseMatchesTorchGold);
+    RUN_TEST(testLinearWarmupLrNullMainMatchesTorchGold);
+    RUN_TEST(testLinearWarmupLrNullMainWideMatchesTorchGold);
+    RUN_TEST(testLinearWarmupLrInitTimeLrIsBaseTimesStartFactor);
+    RUN_TEST(testLinearWarmupLrBoundarySteps);
+    RUN_TEST(testLinearWarmupLrInitRejectsZeroWarmupEpochs);
+    RUN_TEST(testLinearWarmupLrInitRejectsZeroStartFactor);
+    RUN_TEST(testLinearWarmupLrInitRejectsStartFactorAboveOne);
+    RUN_TEST(testLinearWarmupLrInitRejectsNonFiniteStartFactor);
+    RUN_TEST(testLinearWarmupLrInitRejectsMainWiredToDifferentOptimizer);
     RUN_TEST(testSchedulerOverwritesExternalLrMutationAbsolutely);
     RUN_TEST(testStepLrInitRejectsZeroStepSize);
     RUN_TEST(testCosineAnnealingLrInitRejectsZeroTMax);

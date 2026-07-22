@@ -167,6 +167,23 @@ Notes on the qualified cells:
   `lrSchedulerStep` at any boundary. Optimizer-agnostic through the
   `getLr`/`setLr` vtable entries — both `SGD_M` and `ADAM_W` rows implement them,
   so a scheduler works unchanged across either optimizer.
+- **Linear LR warmup** (#383): `LINEAR_WARMUP_LR` composes a linear ramp with an
+  optional `main` scheduler (caller-owned, NULLABLE) — `lr = baseLr *
+  (startFactor + (1-startFactor)*lastEpoch/warmupEpochs)` while `lastEpoch <
+  warmupEpochs`, then delegates to `main`'s own `computeLr` evaluated at
+  `lastEpoch - warmupEpochs` (or holds at `baseLr` when `main == NULL`) —
+  torch `SequentialLR(opt, [LinearLR(startFactor, end_factor=1.0,
+  total_iters=warmupEpochs), main], milestones=[warmupEpochs])` parity,
+  goldgen-verified. `linearWarmupLrInit` writes `baseLr*startFactor` through
+  `setLr` immediately (torch applies `LinearLR`'s factor at construction) —
+  the one scheduler type whose LR right after init is not `baseLr`. Delegation
+  reads a **local copy** of `main` with `lastEpoch` patched to the delegated
+  epoch, so `main`'s own struct is never mutated. Ordering requirement: if
+  `main` is used, it must be initialized (capturing `baseLr` via `getLr`)
+  *before* `linearWarmupLrInit` runs — mirrors torch's `initial_lr` group-dict
+  semantics, where the pristine LR is locked in by whichever scheduler
+  attaches to the optimizer first, regardless of construction order between
+  `LinearLR` and `main`.
 - **Frozen layers** (#380 PR1) — `collectTrainableParameters` and
   `calcTotalNumberOfStates` both skip any layer with `layerIsFrozen() == true`:
   zero contribution to the parameter count, the collected slot array, and

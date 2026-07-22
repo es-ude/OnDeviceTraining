@@ -174,18 +174,21 @@ Three memory metrics tell the freezing story — run the binary and read the
 
 - **`optstate_analytic_*_b` / `grads_*_b`** (full vs. frozen): the optimizer's
   momentum buffers and gradient buffers shrink from all four param layers to
-  the head alone — 40 856 B -> 1 560 B in a 3-epoch/3-epoch smoke run (~96%
-  smaller). `params_*_b` does **not** shrink (40 856 B either way) — freezing
-  stops a layer from *training*, it doesn't evict its weights from memory;
-  the conv backbone stays resident for inference.
+  the head alone — 40 856 B -> 1 560 B (~96% smaller). Analytic: formula-derived
+  from topology + dtype, so the figure is fixed regardless of how many epochs
+  either stage runs. `params_*_b` does **not** shrink (40 856 B either way,
+  same analytic basis) — freezing stops a layer from *training*, it doesn't
+  evict its weights from memory; the conv backbone stays resident for
+  inference.
 - **`dx_peak_stage{1,2}_b`** (the headline number): PR2's backward truncation
   means stage 2 never computes or allocates a gradient wire below the head —
   there is no dx ping-pong at all, just the single CE+Softmax lossGrad seed.
-  Measured: 16 384 B (stage 1) -> 24 B (stage 2), a ~683x collapse.
+  Analytic: 16 384 B (stage 1) -> 24 B (stage 2), a ~683x collapse —
+  formula-derived from topology/dtype, not a per-run measurement.
 - **`stack_peak_b`** (watermarked in CI): stage 2's training step skips the
   conv layers' backward entirely (no weight-grad conversion scratch), so its
   stack high-water sits an order of magnitude below the plain/AdamW `float`
-  binaries' budget — measured 4 016 B vs. their 27 768 B (darwin;
+  binaries' budget. Measured: 4 016 B vs. their 27 768 B (darwin;
   `check_stack_watermark.py`'s dedicated `finetune` bucket, not a re-key of
   `float`).
 

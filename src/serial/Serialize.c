@@ -32,8 +32,9 @@
  * int32 in-memory field (#246).
  * v3: parameter records carry a grad-presence byte (#380). Frozen layers
  * (parameter->grad == NULL, layer freezing epic) write hasGrad=0 and skip the
- * grad tensor entirely; deserialize fails fast on a presence/skeleton
- * mismatch instead of NULL-dereferencing. */
+ * grad tensor entirely; deserialize is TOLERANT of a presence/skeleton
+ * mismatch (#380 PR3) -- grads are skipped into frozen skeletons or left
+ * zeroed when absent, never NULL-dereferenced; see Deserialize.c. */
 #define SERIALIZE_MAGIC "ODTS"
 #define SERIALIZE_FORMAT_VERSION 3u
 

@@ -289,10 +289,9 @@ checkpointing, limitations, literature).
   only), `LayerWeightsApi`, `ModelValidationApi` (near-stub after PR1b.2 retired the
   SYM-producer rule), `LayerQuant` uniform config, and `StorageApi` as the single
   allocation seam (alloc primitives only in `src/userApi/`).
-- **Examples** — 8 end-to-end: `har_classifier` (+ `train_c_finetune`:
-  pretrain → ODTS checkpoint → frozen-backbone head fine-tune, #380 PR3),
-  `ecg_anomaly_ae`, `mnist_mlp`, `mnist_cnn`, `kws_mfcc`, `kws_raw`
-  (+ trace harness), `mixed_width_mlp`.
+- **Examples** — 7 end-to-end: `har_classifier` (incl. the pretrain → freeze →
+  fine-tune flow `train_c_finetune`, #380 PR3), `ecg_anomaly_ae`, `mnist_mlp`,
+  `mnist_cnn`, `kws_mfcc`, `kws_raw` (+ trace harness), `mixed_width_mlp`.
 
 ## Known gaps / partial features
 

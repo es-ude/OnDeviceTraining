@@ -196,9 +196,10 @@ static void deserializeQConfig(quantization_t *q, FILE *f) {
     }
 }
 
-/* Stack-scratch bound for skipSerializedTensor: no shipped tensor exceeds
- * rank 8, and the allocation-locality rule (src/serial is not src/userApi)
- * forbids a heap array sized from the untrusted file rank. */
+/* Sanity cap on skipSerializedTensor's untrusted file rank: no shipped tensor
+ * exceeds rank 8, so a larger value is a corrupt/malicious record. Bounds the
+ * dims-read loop below -- no dims[] array is sized off this value (#380 PR3
+ * review: the array was write-only, dropped in favor of an inline product). */
 #define SKIP_TENSOR_MAX_DIMS 8
 
 static void skipSerializedTensor(FILE *f) {
@@ -215,11 +216,9 @@ static void skipSerializedTensor(FILE *f) {
                     (unsigned)numDims, SKIP_TENSOR_MAX_DIMS);
         exit(1);
     }
-    size_t dims[SKIP_TENSOR_MAX_DIMS];
     size_t numberOfElements = 1;
     for (uint32_t d = 0; d < numDims; d++) {
-        dims[d] = (size_t)serialReadU32LE(f);
-        numberOfElements *= dims[d];
+        numberOfElements *= (size_t)serialReadU32LE(f);
     }
     /* orderOfDimensions: positional only, irrelevant to a discarded record. */
     if (fseek(f, (long)numDims * (long)sizeof(uint32_t), SEEK_CUR) != 0) {

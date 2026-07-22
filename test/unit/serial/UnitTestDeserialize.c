@@ -444,6 +444,95 @@ static void testDeserializeWeightsOnlyIntoTrainableSkeleton(void) {
     }
 }
 
+/*! #380 PR3 review: skipSerializedTensor's rank-cap guard (SKIP_TENSOR_MAX_DIMS
+ *  == 8) must reject a grad record announcing a rank above that bound BEFORE
+ *  reading a single dim value. The grad record is hand-crafted as an
+ *  otherwise-well-formed rank-9 FLOAT32/1-element tensor (9 dims of 1, 9
+ *  positional order values, FLOAT32 type byte, 4-byte payload) rather than a
+ *  truncated stub: a record that is merely too-short-to-be-rank-9 would still
+ *  fail downstream via the unrelated short-read guard in serialReadBytes even
+ *  with the rank cap disabled, silently passing the death-test assertion
+ *  (exit code 1 either way) without ever exercising the rank-cap PRINT_ERROR
+ *  itself. Only a well-formed rank-9 record makes the two guards
+ *  distinguishable: guarded code exits(1) immediately on the oversized rank;
+ *  with the guard removed (verified by temporary mutation, see PR3
+ *  final-review report) the record parses to completion and the function
+ *  returns normally. Only a frozen skeleton (parameter->grad == NULL) reaches
+ *  skipSerializedTensor. */
+static void testSkipSerializedTensorRejectsRankAboveCap(void) {
+    float paramData[] = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f};
+    tensor_t *paramTensor = makeFloatTensor2D(2, 3, paramData, 6);
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    uint8_t hasGrad = 1;
+    fwrite(&hasGrad, sizeof(uint8_t), 1, f);
+    serializeTensor(paramTensor, f);
+
+    const uint32_t oversizedRank = 9; /* > SKIP_TENSOR_MAX_DIMS (8) */
+    writeU32LE(f, oversizedRank);
+    for (uint32_t d = 0; d < oversizedRank; d++) {
+        writeU32LE(f, 1); /* dims[d] = 1 -> 1 element total, well-formed */
+    }
+    for (uint32_t d = 0; d < oversizedRank; d++) {
+        writeU32LE(f, d); /* orderOfDimensions: positional only */
+    }
+    uint8_t floatType = (uint8_t)FLOAT32;
+    fwrite(&floatType, 1, 1, f);       /* FLOAT32 qConfig is empty (no bytes) */
+    uint8_t payload[4] = {0, 0, 0, 0}; /* 1 FLOAT32 element */
+    fwrite(payload, 1, 4, f);
+    fclose(f);
+
+    tensor_t *skeletonParamTensor = makeFloatTensor2D(2, 3, NULL, 0);
+    parameter_t frozenSkeleton = {.param = skeletonParamTensor, .grad = NULL};
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeParameter(&frozenSkeleton, f));
+    fclose(f);
+
+    freeTensor(skeletonParamTensor);
+    freeTensor(paramTensor);
+}
+
+/*! #380 PR3 review: skipSerializedTensor's post-skip truncation guard (the
+ *  ftell/SEEK_END comparison after the payload fseek) is the only thing that
+ *  catches a payload cut short -- fseek past a genuinely truncated file's real
+ *  end succeeds silently (POSIX), so the earlier fseek-past-payload call
+ *  cannot fail on its own. A genuine hasGrad=1 parameter record has nothing
+ *  after the grad tensor (serializeSparsity is a zero-byte stub), so
+ *  shortening the whole file trims the grad tensor's payload tail; mirrors
+ *  testDeserializeTensorFailsFastOnTruncatedPayload's file-shortening idiom. */
+static void testSkipSerializedTensorRejectsTruncatedPayload(void) {
+    float paramData[] = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f};
+    tensor_t *paramTensor = makeFloatTensor2D(2, 3, paramData, 6);
+    tensor_t *gradTensor = makeFloatTensor2D(2, 3, paramData, 6);
+    parameter_t srcParameter = {.param = paramTensor, .grad = gradTensor};
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeParameter(&srcParameter, f);
+    long full = ftell(f);
+    fclose(f);
+
+    FILE *in = fopen(FILE_PATH, "rb");
+    uint8_t *buf = reserveMemory((size_t)full);
+    fread(buf, 1, (size_t)full, in);
+    fclose(in);
+    f = fopen(FILE_PATH, "wb");
+    fwrite(buf, 1, (size_t)full - 2, f); /* cuts into the grad tensor's payload tail */
+    fclose(f);
+    freeReservedMemory(buf);
+
+    tensor_t *skeletonParamTensor = makeFloatTensor2D(2, 3, NULL, 0);
+    parameter_t frozenSkeleton = {.param = skeletonParamTensor, .grad = NULL};
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeParameter(&frozenSkeleton, f));
+    fclose(f);
+
+    freeTensor(skeletonParamTensor);
+    freeTensor(gradTensor);
+    freeTensor(paramTensor);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -463,5 +552,7 @@ int main(void) {
     RUN_TEST(testDeserializeTensorRoundTripsAsymZeroPoint);
     RUN_TEST(testDeserializeQConfigAcceptsWideZeroPoint);
     RUN_TEST(testDeserializeWeightsOnlyIntoTrainableSkeleton);
+    RUN_TEST(testSkipSerializedTensorRejectsRankAboveCap);
+    RUN_TEST(testSkipSerializedTensorRejectsTruncatedPayload);
     return UNITY_END();
 }

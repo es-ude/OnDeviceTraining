@@ -19,6 +19,40 @@
  * this with a proper PRINT_WARN). */
 void scaleOptimizerGradients(optimizer_t *optimizer, float factor);
 
+/* #382: global-norm gradient clipping, `torch.nn.utils.clip_grad_norm_`
+ * parity. Call-site contract: AFTER grad accumulation and mean-scaling
+ * (computeMeanScale -> scaleOptimizerGradients) and BEFORE the optimizer
+ * step -- clipping a not-yet-mean-scaled or already-stepped gradient set
+ * clips the wrong quantity.
+ *
+ * Computes ONE joint L2 norm over every element of every parameter's grad
+ * tracked by `optimizer` (as if every grad tensor were concatenated into a
+ * single vector -- NOT a per-tensor norm), dtype-aware:
+ *   - FLOAT32: sum of squares over elements.
+ *   - SYM_INT32: scale^2 * sum(mantissa^2) per tensor (int32 mantissa reads
+ *     widened to double before squaring -- NO int64, mirroring the SYM-kernel
+ *     accumulator rule in spirit).
+ *   - packed SYM/ASYM: unsupported in v1 -- fails fast (PRINT_ERROR + exit(1)).
+ *     The O(1) scale-fold this function reuses from scaleOptimizerGradients
+ *     only helps APPLYING an already-computed clip coefficient; computing the
+ *     norm itself needs unpacked element values, which packed storage doesn't
+ *     expose without a full unpack. Follow-up, not implemented here.
+ * The running sum of squares accumulates in double across every tensor
+ * (joint, not per-tensor), then one sqrt casts to float32 once.
+ *
+ * Torch parity: `clipCoef = maxNorm / (totalNorm + 1e-6f)`; gradients are
+ * scaled (via scaleOptimizerGradients, which O(1)-folds the factor into the
+ * per-tensor scale for quantized grads) only when `clipCoef < 1.0f` --
+ * maxNorm >= totalNorm is a no-op, gradients are left byte-untouched (never
+ * multiplied by a clamped 1.0). Returns totalNorm (PRE-clip, torch
+ * convention).
+ *
+ * Validation: `maxNorm` must be positive and finite, else PRINT_ERROR +
+ * exit(1) (hard fail -- unlike scaleOptimizerGradients's own factor check,
+ * which only warns; an invalid maxNorm here means the caller's clipping
+ * config itself is broken, not a transient scale value). */
+float optimizerClipGradNorm(optimizer_t *optimizer, float maxNorm);
+
 /* Fills the caller-allocated `slots` array (sized via calcTotalNumberOfStates)
  * with every trainable parameter_t* in `model`, in model order. Per-layer-type
  * switch: LINEAR/CONV1D/CONV1D_TRANSPOSED contribute weights (+ bias, if

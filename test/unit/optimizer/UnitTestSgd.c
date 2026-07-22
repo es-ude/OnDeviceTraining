@@ -1,4 +1,5 @@
 #define SOURCE_FILE "SGD-UTEST"
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -23,6 +24,8 @@
 #include "unity.h"
 
 #include <ReluApi.h>
+
+#include "expected_clip_grad_norm.h"
 
 /* #310 contract: sgdMCreateOptim takes a by-value arithmetic_t updateMath
  * (mirroring the layer-side forwardMath/weightGradMath knobs) as its last
@@ -49,6 +52,8 @@ _Static_assert(_Generic(&modelHasFrozenLayer, bool (*)(layer_t **, size_t): 1, d
                "#380: modelHasFrozenLayer must be (model, sizeModel)");
 _Static_assert(_Generic(&freeOptim, void (*)(optimizer_t *): 1, default: 0),
                "#328: freeOptim must be (optim)");
+_Static_assert(_Generic(&optimizerClipGradNorm, float (*)(optimizer_t *, float): 1, default: 0),
+               "#382: optimizerClipGradNorm must be (optim, maxNorm)");
 
 void setUp() {}
 void tearDown() {}
@@ -1666,6 +1671,207 @@ void testOptimizerVtableGetSetLrRoundTripsSgdLearningRate(void) {
     TEST_ASSERT_EQUAL_FLOAT(0.125f, sgd.learningRate);
 }
 
+/* #382: shared 1-D FLOAT32 tensor builder for the clip-grad-norm fixtures
+ * below (heap shape per file convention; src == NULL leaves the tensor
+ * zero-filled -- fine for the dummy param half of a parameter_t, since
+ * clip-norm only ever reads grads). */
+static tensor_t *buildFloatTensor1D(const float *src, size_t n) {
+    size_t *dims = reserveMemory(1 * sizeof(size_t));
+    dims[0] = n;
+    size_t *order = reserveMemory(1 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
+    if (src != NULL) {
+        tensorFillFromFloatBuffer(t, src, n);
+    }
+    return t;
+}
+
+/* Two-parameter FLOAT32 hand-assembled optimizer over the clip_grad_a/
+ * clip_grad_b gold fixtures (expected_clip_grad_norm.h, #382). The
+ * designated-initializer literal below zero-fills every optimizer_t field
+ * this fixture doesn't name (type, impl, states) -- sidesteps the
+ * uninitialized-stack-field trap a field-by-field `optim.x = ...` build
+ * would hit on future struct growth. */
+typedef struct {
+    parameter_t *a;
+    parameter_t *b;
+    parameter_t *parArr[2];
+    optimizer_t optim;
+} clipGradNormHarness_t;
+
+static optimizer_t *clipGradNormHarnessInit(clipGradNormHarness_t *h, const float *gradA,
+                                            size_t lenA, const float *gradB, size_t lenB) {
+    h->a = parameterInit(buildFloatTensor1D(NULL, lenA), buildFloatTensor1D(gradA, lenA));
+    h->b = parameterInit(buildFloatTensor1D(NULL, lenB), buildFloatTensor1D(gradB, lenB));
+    h->parArr[0] = h->a;
+    h->parArr[1] = h->b;
+    h->optim =
+        (optimizer_t){.parameter = h->parArr, .sizeStates = 2, .writeBackRounding = HALF_AWAY};
+    return &h->optim;
+}
+
+static void clipGradNormHarnessFree(clipGradNormHarness_t *h) {
+    freeParameter(h->a);
+    freeParameter(h->b);
+}
+
+void testOptimizerClipGradNormNoClipLeavesGradsByteIdenticalAndReturnsNorm(void) {
+    /* #382: max_norm clearly above total_norm -> clip_coef > 1, clamped to 1
+     * -> optimizerClipGradNorm must skip the scale call entirely (per
+     * scaleOptimizerGradients's own "caller must not call with factor==1"
+     * contract), leaving grad bytes byte-for-byte untouched -- not merely
+     * numerically close after a no-op *= 1.0f rounding. */
+    clipGradNormHarness_t h;
+    optimizer_t *optim =
+        clipGradNormHarnessInit(&h, clip_grad_a, clip_grad_a_len, clip_grad_b, clip_grad_b_len);
+
+    float preA[5], preB[7];
+    memcpy(preA, h.a->grad->data, sizeof preA);
+    memcpy(preB, h.b->grad->data, sizeof preB);
+
+    float totalNorm = optimizerClipGradNorm(optim, clip_noclip_max_norm);
+
+    float postA[5], postB[7];
+    memcpy(postA, h.a->grad->data, sizeof postA);
+    memcpy(postB, h.b->grad->data, sizeof postB);
+
+    clipGradNormHarnessFree(&h);
+
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, clip_total_norm, totalNorm);
+    TEST_ASSERT_EQUAL_MEMORY(preA, postA, sizeof preA);
+    TEST_ASSERT_EQUAL_MEMORY(preB, postB, sizeof preB);
+}
+
+void testOptimizerClipGradNormClipBranchMatchesGold(void) {
+    /* #382: max_norm clearly below total_norm -> FLOAT32 grads must land on
+     * the torch-cross-checked post-clip gold (expected_clip_grad_norm.h). */
+    clipGradNormHarness_t h;
+    optimizer_t *optim =
+        clipGradNormHarnessInit(&h, clip_grad_a, clip_grad_a_len, clip_grad_b, clip_grad_b_len);
+
+    float totalNorm = optimizerClipGradNorm(optim, clip_clip_max_norm);
+
+    float postA[5], postB[7];
+    memcpy(postA, h.a->grad->data, sizeof postA);
+    memcpy(postB, h.b->grad->data, sizeof postB);
+
+    clipGradNormHarnessFree(&h);
+
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, clip_total_norm, totalNorm);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(clip_clip_a, postA, clip_clip_a_len);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(clip_clip_b, postB, clip_clip_b_len);
+}
+
+void testOptimizerClipGradNormExactlyAtNormStillClipsByEpsilon(void) {
+    /* #382 mutation guard: max_norm == total_norm exactly. Dropping the
+     * +1e-6 epsilon (or the <1 clamp) collapses clip_coef to exactly 1.0, so
+     * this fixture's grads would come back unchanged instead of the
+     * torch-matching scale-down below -- a generic no-clip/clip pair alone
+     * cannot see that regression. Deliberately uses the clip_eps_grad_a/b
+     * fixture (~1000x smaller magnitude than clip_grad_a/b, see
+     * generate_expected_clip_grad_norm.py's module docstring): shrinking
+     * total_norm inflates the epsilon's RELATIVE effect on the post-clip
+     * values from ~5e-7 (sub-tolerance, would false-pass) to ~5e-4 (40x+
+     * above both TEST_ASSERT_EQUAL_FLOAT_ARRAY's ~1e-5 default tolerance and
+     * any plausible cross-toolchain FMA/rounding noise), so this test can use
+     * the same tolerant comparison as every other gold fixture instead of a
+     * toolchain-fragile bit-exact one. */
+    clipGradNormHarness_t h;
+    optimizer_t *optim = clipGradNormHarnessInit(&h, clip_eps_grad_a, clip_eps_grad_a_len,
+                                                 clip_eps_grad_b, clip_eps_grad_b_len);
+
+    float totalNorm = optimizerClipGradNorm(optim, clip_exact_max_norm);
+
+    float postA[5], postB[7];
+    memcpy(postA, h.a->grad->data, sizeof postA);
+    memcpy(postB, h.b->grad->data, sizeof postB);
+
+    clipGradNormHarnessFree(&h);
+
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, clip_eps_total_norm, totalNorm);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(clip_exact_a, postA, clip_exact_a_len);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(clip_exact_b, postB, clip_exact_b_len);
+}
+
+void testOptimizerClipGradNormSymInt32FoldsCoefIntoScaleMantissasUntouched(void) {
+    /* #382: single SYM_INT32 grad parameter -- norm must match the
+     * scale*sqrt(sum(mantissa^2)) derivation, and applying a clip_coef < 1
+     * must fold the coefficient into the qConfig scale (O(1), exact) --
+     * reusing scaleOptimizerGradients's own SYM_INT32 fold (OptimizerApi.c)
+     * as the application mechanism -- leaving the int32 mantissas
+     * byte-identical. */
+    size_t *pDims = reserveMemory(1 * sizeof(size_t));
+    pDims[0] = 3;
+    size_t *pOrder = reserveMemory(1 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, pOrder);
+    shape_t *pShape = reserveMemory(sizeof(shape_t));
+    setShape(pShape, pDims, 1, pOrder);
+    tensor_t *p = initTensor(pShape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(p, (float[]){0.f, 0.f, 0.f}, 3);
+    tensor_t *g = gradInitSymInt32(p, HALF_AWAY, NULL);
+    parameter_t *param = parameterInit(p, g);
+
+    ((int32_t *)g->data)[0] = 10;
+    ((int32_t *)g->data)[1] = -20;
+    ((int32_t *)g->data)[2] = 30;
+    symInt32QConfig_t *gradQ = g->quantization->qConfig;
+    const float scaleBefore = 0.05f;
+    gradQ->scale = scaleBefore;
+
+    parameter_t *params[1] = {param};
+    optimizer_t optim = {.parameter = params, .sizeStates = 1, .writeBackRounding = HALF_AWAY};
+
+    /* scaleBefore*sqrt(10^2+20^2+30^2) = 0.05*sqrt(1400) ~= 1.8708 -- pick a
+     * maxNorm comfortably below it so this test exercises the clip branch. */
+    const float maxNorm = 0.5f;
+    float totalNorm = optimizerClipGradNorm(&optim, maxNorm);
+
+    /* CAPTURE -> free -> assert (file convention). */
+    int32_t m0 = ((int32_t *)g->data)[0];
+    int32_t m1 = ((int32_t *)g->data)[1];
+    int32_t m2 = ((int32_t *)g->data)[2];
+    float scaleAfter = gradQ->scale;
+
+    freeParameter(param);
+
+    float expectedNorm = scaleBefore * sqrtf(10.f * 10.f + 20.f * 20.f + 30.f * 30.f);
+    float expectedCoef = maxNorm / (expectedNorm + 1e-6f);
+    float expectedScaleAfter = scaleBefore * expectedCoef;
+
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedNorm, totalNorm);
+    TEST_ASSERT_EQUAL_INT32(10, m0);
+    TEST_ASSERT_EQUAL_INT32(-20, m1);
+    TEST_ASSERT_EQUAL_INT32(30, m2);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, expectedScaleAfter, scaleAfter);
+}
+
+void testOptimizerClipGradNormRejectsPackedSymGradStorage(void) {
+    /* #382 v1 fail-fast: packed SYM/ASYM grad storage needs unpacked element
+     * values to compute a norm -- the O(1) scale-fold only helps APPLYING an
+     * already-computed clip coefficient, not computing the norm itself
+     * (follow-up noted in optimizerClipGradNorm's doc comment). */
+    size_t *pDims = reserveMemory(1 * sizeof(size_t));
+    pDims[0] = 4;
+    size_t *pOrder = reserveMemory(1 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, pOrder);
+    shape_t *pShape = reserveMemory(sizeof(shape_t));
+    setShape(pShape, pDims, 1, pOrder);
+    tensor_t *p = initTensor(pShape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(p, (float[]){0.f, 0.f, 0.f, 0.f}, 4);
+    tensor_t *g = gradInitSym(p, 8, HALF_AWAY, NULL);
+    parameter_t *param = parameterInit(p, g);
+
+    parameter_t *params[1] = {param};
+    optimizer_t optim = {.parameter = params, .sizeStates = 1, .writeBackRounding = HALF_AWAY};
+
+    ASSERT_EXITS_WITH_FAILURE(optimizerClipGradNorm(&optim, 1.0f));
+
+    freeParameter(param);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testOptimizerSkipsFrozenLayerInCountAndCollection);
@@ -1697,5 +1903,10 @@ int main() {
     RUN_TEST(testSgdMCreateOptimDefaultsWriteBackRoundingToSr);
     RUN_TEST(testOptimizerSetWriteBackRoundingOptsOutToDeterministic);
     RUN_TEST(testOptimizerVtableGetSetLrRoundTripsSgdLearningRate);
+    RUN_TEST(testOptimizerClipGradNormNoClipLeavesGradsByteIdenticalAndReturnsNorm);
+    RUN_TEST(testOptimizerClipGradNormClipBranchMatchesGold);
+    RUN_TEST(testOptimizerClipGradNormExactlyAtNormStillClipsByEpsilon);
+    RUN_TEST(testOptimizerClipGradNormSymInt32FoldsCoefIntoScaleMantissasUntouched);
+    RUN_TEST(testOptimizerClipGradNormRejectsPackedSymGradStorage);
     return UNITY_END();
 }

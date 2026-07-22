@@ -88,3 +88,16 @@ add_elastic_ai_unit_test(
 )
 add_dependencies(UnitTestAdamW generate_expected_adamw)
 target_include_directories(UnitTestAdamW PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+
+set(GEN_CLIP_GRAD_NORM_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_clip_grad_norm.h)
+add_custom_command(
+        OUTPUT ${GEN_CLIP_GRAD_NORM_HEADER}
+        COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_clip_grad_norm.py
+                --out ${GEN_CLIP_GRAD_NORM_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_clip_grad_norm.py
+        COMMENT "Generating expected_clip_grad_norm.h (flat-concat replication + torch sanity)"
+        VERBATIM
+)
+add_custom_target(generate_expected_clip_grad_norm DEPENDS ${GEN_CLIP_GRAD_NORM_HEADER})
+add_dependencies(UnitTestSgd generate_expected_clip_grad_norm)
+target_include_directories(UnitTestSgd PRIVATE ${CMAKE_CURRENT_BINARY_DIR})

@@ -146,6 +146,20 @@ Notes on the qualified cells:
   `scaleOptimizerGradients` (O(1) scale fold for quantized grads), and
   `optimizerZeroGrad` — shared across both rows. No bias-correction on SGD; AdamW
   has PyTorch-standard bias correction (`bc1`/`bc2`).
+- **Global-norm gradient clipping** (`optimizerClipGradNorm(optim, maxNorm)`, #382,
+  `torch.nn.utils.clip_grad_norm_` parity): ONE joint L2 norm over every element of
+  every tracked grad (as if concatenated into a single vector, not a per-tensor
+  norm) — FLOAT32 sums squares over elements, SYM_INT32 folds to
+  `scale² · Σ mantissa²` per tensor (int32 mantissas widen to double before
+  squaring, no int64); `clipCoef = maxNorm / (totalNorm + 1e-6)`, applied via
+  `scaleOptimizerGradients` (so quantized grads get the same O(1) scale fold) only
+  when `clipCoef < 1.0` — `maxNorm ≥ totalNorm` is a no-op, grads stay
+  byte-untouched. Returns `totalNorm` (pre-clip, torch convention). Call between
+  grad accumulation/mean-scaling and the optimizer step. **v1 limitation**: packed
+  SYM/ASYM grad storage fails fast (PRINT_ERROR + exit(1)) — computing a norm needs
+  unpacked element values, which the O(1) scale-fold trick (that works for
+  *applying* an already-known coefficient) does not provide; unpacking-on-read is a
+  follow-up, not implemented here.
 - **LR schedulers** (#327): `lrScheduler_t` (caller-owned, zero-alloc) with
   `STEP_LR`, `EXPONENTIAL_LR`, `COSINE_ANNEALING_LR` — PyTorch closed-form
   parity (double math, float cast at `setLr`), stepped by `trainingRun`

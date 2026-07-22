@@ -70,6 +70,71 @@ void scaleOptimizerGradients(optimizer_t *optimizer, float factor) {
     }
 }
 
+float optimizerClipGradNorm(optimizer_t *optimizer, float maxNorm) {
+    if (!(maxNorm > 0.0f && isfinite(maxNorm))) {
+        PRINT_ERROR("optimizerClipGradNorm: invalid maxNorm %f (expected positive, finite)",
+                    (double)maxNorm);
+        exit(1);
+    }
+
+    /* Joint norm: ONE running sum of squares over every element of every
+     * tracked grad (not a per-tensor norm) -- double accumulator, one sqrt
+     * cast to float32 at the very end. */
+    double sumSquares = 0.0;
+    for (size_t i = 0; i < optimizer->sizeStates; i++) {
+        parameter_t *param = optimizer->parameter[i];
+        tensor_t *grad = param->grad;
+
+        switch (grad->quantization->type) {
+        case FLOAT32: {
+            size_t numberOfValues = calcNumberOfElementsByParameter(param);
+            float *gradArr = (float *)grad->data;
+            for (size_t j = 0; j < numberOfValues; j++) {
+                double v = (double)gradArr[j];
+                sumSquares += v * v;
+            }
+            break;
+        }
+        case SYM_INT32: {
+            /* scale^2 * sum(mantissa^2): mantissas widen to double BEFORE
+             * squaring (no int32*int32 product, no int64) -- mirrors the
+             * SYM-kernel int32-accumulator rule in spirit. */
+            size_t numberOfValues = calcNumberOfElementsByParameter(param);
+            int32_t *mantissas = (int32_t *)grad->data;
+            symInt32QConfig_t *gradQ = grad->quantization->qConfig;
+            double scale = (double)gradQ->scale;
+            double tensorSumSquares = 0.0;
+            for (size_t j = 0; j < numberOfValues; j++) {
+                double m = (double)mantissas[j];
+                tensorSumSquares += m * m;
+            }
+            sumSquares += scale * scale * tensorSumSquares;
+            break;
+        }
+        case SYM:
+        case ASYM:
+            PRINT_ERROR("optimizerClipGradNorm: packed SYM/ASYM grad storage not supported "
+                        "(v1) -- computing a norm needs unpacked element values; the O(1) "
+                        "scale-fold only helps APPLYING an already-computed clip coefficient, "
+                        "not computing the norm itself (follow-up, not implemented). accepted: "
+                        "FLOAT32, SYM_INT32");
+            exit(1);
+        default:
+            PRINT_ERROR("optimizerClipGradNorm: unsupported gradient qtype (accepted: FLOAT32, "
+                        "SYM_INT32; packed SYM/ASYM rejected above, INT32/BOOL grad storage "
+                        "remains unsupported, #261)");
+            exit(1);
+        }
+    }
+
+    float totalNorm = (float)sqrt(sumSquares);
+    float clipCoef = maxNorm / (totalNorm + 1e-6f);
+    if (clipCoef < 1.0f) {
+        scaleOptimizerGradients(optimizer, clipCoef);
+    }
+    return totalNorm;
+}
+
 void collectTrainableParameters(layer_t **model, size_t sizeModel, parameter_t **slots) {
     size_t paramSlot = 0;
     for (size_t i = 0; i < sizeModel; i++) {

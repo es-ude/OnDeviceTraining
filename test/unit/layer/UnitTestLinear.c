@@ -2045,7 +2045,10 @@ static layer_t *buildGroupedFixtureLayer(quantization_t *q, tensor_t **inputOut)
  * FLOAT32 + a tolerance rather than raw mantissas. Tolerance: 1.0 *
  * kGroupedOutScale (the kernel's own rescale-combine rounding, see the
  * float-path test below) + one more HALF_AWAY rounding at the requant's
- * fresh scale (max(|kGroupedOutMantissas|)=53, int12 qMax=2047). */
+ * fresh scale. requantSymInt32Tensor derives that fresh scale from the
+ * absmax over DEQUANTIZED values (mantissa * inScale), not raw mantissas
+ * (TensorConversion.c), so requantFreshScale = max(|kGroupedOutMantissas|) *
+ * kGroupedOutScale / int12 qMax = 53 * kGroupedOutScale / 2047. */
 void testLinearForwardGroupedSymWeights(void) {
     quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
     tensor_t *input = NULL;
@@ -2083,7 +2086,7 @@ void testLinearForwardGroupedSymWeights(void) {
     freeTensor(input);
     freeQuantization(testQ);
 
-    const float requantFreshScale = 53.0f / 2047.0f;
+    const float requantFreshScale = 53.0f / 2047.0f * kGroupedOutScale;
     const float tolerance = 1.0f * kGroupedOutScale + 0.5f * requantFreshScale + 1e-6f;
     for (size_t i = 0; i < 6; i++) {
         float expected = (float)kGroupedOutMantissas[i] * kGroupedOutScale;

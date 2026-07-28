@@ -790,6 +790,60 @@ void testMatmulGroupedHonorsOpRoundingMode(void) {
                              "grouped combine did not honor SR_HALF_AWAY (hardcoded rounding?)");
 }
 
+/* The public grouped entry must reject the per-tensor sentinel {numGroups=1,
+ * groupSize=0} (see symQConfig_t's field comments, Quantization.h): without
+ * this guard, matmulIntCoreGrouped's `wStorageIdx / weightGroups->groupSize`
+ * divides by the sentinel's groupSize=0. Per-tensor weights have their own
+ * scalar entries (matmulSymInt32Tensors[WithBias]); this entry is grouped-
+ * only. */
+void testMatmulGroupedWeightRejectsPerTensorSentinel(void) {
+    tensor_t aTensor;
+    int32_t aData[] = {1, 1};
+    size_t aDims[] = {1, 2};
+    size_t aOrder[] = {0, 1};
+    shape_t aShape;
+    setShape(&aShape, aDims, 2, aOrder);
+    symInt32QConfig_t aQC;
+    initSymInt32QConfig(HALF_AWAY, &aQC);
+    quantization_t aQ;
+    initSymInt32Quantization(&aQC, &aQ);
+    setTensorValues(&aTensor, (uint8_t *)aData, &aShape, &aQ, NULL);
+
+    tensor_t bTensor;
+    int32_t bData[] = {1, 1};
+    size_t bDims[] = {1, 2};
+    size_t bOrder[] = {1, 0}; /* post-transpose logical view: reduction axis first */
+    shape_t bShape;
+    setShape(&bShape, bDims, 2, bOrder);
+    symInt32QConfig_t bQC;
+    initSymInt32QConfig(HALF_AWAY, &bQC);
+    quantization_t bQ;
+    initSymInt32Quantization(&bQC, &bQ);
+    setTensorValues(&bTensor, (uint8_t *)bData, &bShape, &bQ, NULL);
+
+    float sentinelScale = 1.0f;
+    symQConfig_t weightGroups = {.scales = &sentinelScale,
+                                 .numGroups = 1,
+                                 .groupSize = 0,
+                                 .qBits = 8,
+                                 .roundingMode = HALF_AWAY};
+
+    tensor_t outputTensor;
+    int32_t outputData[1];
+    size_t outDims[] = {1, 1};
+    size_t outOrder[] = {0, 1};
+    shape_t outShape;
+    setShape(&outShape, outDims, 2, outOrder);
+    symInt32QConfig_t outputQC;
+    initSymInt32QConfig(HALF_AWAY, &outputQC);
+    quantization_t outputQ;
+    initSymInt32Quantization(&outputQC, &outputQ);
+    setTensorValues(&outputTensor, (uint8_t *)outputData, &outShape, &outputQ, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(
+        matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &outputTensor, &weightGroups));
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -809,6 +863,7 @@ int main(void) {
     RUN_TEST(testMatmulGroupedWeightGeneralGroupsMatchesGold);
     RUN_TEST(testMatmulGroupedEqualScalesBitIdenticalToScalar);
     RUN_TEST(testMatmulGroupedHonorsOpRoundingMode);
+    RUN_TEST(testMatmulGroupedWeightRejectsPerTensorSentinel);
 
     return UNITY_END();
 }

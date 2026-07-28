@@ -433,6 +433,11 @@ static void matmulValidateWeightGroups(const symQConfig_t *weightGroups) {
                     (unsigned)weightGroups->qBits, (unsigned)ODT_SYM_OPERAND_QMAXBITS);
         exit(1);
     }
+    if (weightGroups->numGroups <= 1) {
+        PRINT_ERROR("matmulSymInt32TensorsGroupedWeight: weightGroups must be grouped "
+                    "(numGroups>1); per-tensor weights take the scalar matmul entries");
+        exit(1);
+    }
 }
 
 void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,

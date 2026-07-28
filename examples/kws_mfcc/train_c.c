@@ -25,6 +25,7 @@
 #include "Pool1dApi.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "ReluApi.h"
 #include "SgdApi.h"
 #include "SoftmaxApi.h"
@@ -302,6 +303,11 @@ int main(void) {
 
     layerQuant_t lq;
     layerQuantInitUniform(&lq, quantizationInitFloat());
+
+    /* Seed weight init so the run log's "seed" is the seed actually used
+     * (DETERMINISM.md contract; previously the RNG ran from its default
+     * state=1). BIT_PARITY loads a state_dict over these weights. */
+    rngSetSeed(SEED);
 
     layer_t *model[MODEL_SIZE];
     buildModel(model, &lq);

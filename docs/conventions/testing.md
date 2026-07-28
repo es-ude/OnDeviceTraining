@@ -109,6 +109,25 @@ initializers) stay in the **stack-only tier** and need no cleanup. Any test
 that calls `*Init*` (= heap allocation through `reserveMemory`) is in the
 **heap tier** and follows three rules.
 
+### Stack-fixture idiom for `symQConfig_t` (group-quant PR1)
+
+Since the always-array migration, `initSymQConfig` heap-allocates the
+1-element `scales` array (`reserveMemory`), so every call needs a paired
+`freeReservedMemory(qc.scales)` / `freeQuantization`. Tests that only need
+a fixed per-tensor scale stay in the stack-only tier by building the struct
+directly over a local backing array — never passed to any free call:
+
+```c
+float s[1] = {0.5f};
+symQConfig_t qc = {
+    .scales = s, .numGroups = 1, .groupSize = 0,
+    .roundingMode = HALF_AWAY, .qBits = 8};
+```
+
+The array must outlive every use of the config (beware `tensorInitFloat`-style
+dangling if the config escapes the scope). Reach for `initSymQConfig` + free
+only when the test exercises the allocation topology itself.
+
 ### Rule 1 — Build via the post-#106 primitives
 
 Heap tensors are built by:

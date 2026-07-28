@@ -44,8 +44,14 @@ static void testStorageOnlyDtypesDeriveFloatArithmetic(void) {
     TEST_ASSERT_EQUAL(ARITH_FLOAT32, a.type);
     TEST_ASSERT_EQUAL(SR_HALF_AWAY, a.roundingMode); /* roundingMode carried over */
 
-    symQConfig_t sqc;
-    initSymQConfig(8, SR_HALF_AWAY, &sqc);
+    /* Stack-fixture idiom (docs/conventions/testing.md): a heap-allocating
+     * initSymQConfig call here would leak its scales array. */
+    float symScales[1] = {1.f};
+    symQConfig_t sqc = {.scales = symScales,
+                        .numGroups = 1,
+                        .groupSize = 0,
+                        .roundingMode = SR_HALF_AWAY,
+                        .qBits = 8};
     quantization_t symQ;
     initSymQuantization(&sqc, &symQ);
     arithmetic_t s = arithmeticFromQuantization(&symQ);

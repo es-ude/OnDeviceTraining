@@ -202,9 +202,10 @@ Notes on the qualified cells:
 - **Layers** — all 12 `layerType_t` have matching `serialize` + `deserialize` arms,
   each round-trip tested under `test/unit/serial/`.
 - **Dtypes** — all 6 `qtype_t` qconfigs serialize/deserialize symmetrically (INT32/
-  FLOAT32/BOOL = type byte only; SYM_INT32/SYM/ASYM carry scale + rounding + bits [+
-  zeroPoint]). Packed tensor data (SYM/ASYM sub-byte, BOOL 1-bit) is byte-tight via
-  `calcNumberOfBytesForData` and round-trips exactly.
+  FLOAT32/BOOL = type byte only; SYM_INT32/ASYM carry scale + rounding + bits [+
+  zeroPoint]; SYM carries the v4 group record `numGroups`/`groupSize`/`scales[]` +
+  bits + rounding — see Model format below). Packed tensor data (SYM/ASYM sub-byte,
+  BOOL 1-bit) is byte-tight via `calcNumberOfBytesForData` and round-trips exactly.
 - **Model format** — `"ODTS"` magic + `version` (=4) + `layerCount` + per-layer type
   tag. Deserialize fail-fasts on magic / version / count / tag mismatch. Since v2
   (#370) every count/dim/kernel field is `u32` little-endian via the checked

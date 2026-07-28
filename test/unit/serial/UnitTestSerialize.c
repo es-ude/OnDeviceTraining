@@ -1792,7 +1792,7 @@ static void testGoldenBytesModelReluV4(void) {
  *  so its offset is the drift alarm for the record's new +8-byte width
  *  (numGroups u32 + groupSize u32) versus the old v3 layout.
  *  Mutation guard: swapping the numGroups/groupSize write order in
- *  Serialize.c's SYM arm flips bytes 17-24 below and fails this pin. */
+ *  Serialize.c's SYM arm flips bytes 18-25 below and fails this pin. */
 static void testGoldenBytesModelReluSymOutputV4(void) {
     quantization_t *floatQ = quantizationInitFloat();
     quantization_t *symOutputQ = quantizationInitSym(6, HALF_AWAY);

@@ -13,7 +13,12 @@
 #define PPCA_SERIALIZE_MAGIC "ODTR"
 /* v2 (#370): embedded ODTS tensor records switched to fixed-width LE fields
  * and the ODTR scalars are LE-pinned via SerialWire — v1 checkpoints were
- * host-local artifacts, no back-compat shim. */
+ * host-local artifacts, no back-compat shim. The ODTR container version
+ * itself does NOT track the embedded ODTS tensor record's own wire version
+ * (group-quant PR1 bumped that to v4) -- peekValidateThenDeserializeTensor's
+ * SYM arm below duplicates (a subset of) Serialize.c/Deserialize.c's SYM
+ * qConfig layout and must stay in lockstep with it by hand; see that arm's
+ * comment. */
 #define PPCA_SERIALIZE_FORMAT_VERSION 2u
 /* PPCA state tensors are rank 1 or 2 by construction (mean/eigvals, basis). */
 #define PPCA_MAX_TENSOR_RANK 2
@@ -81,10 +86,27 @@ static void peekValidateThenDeserializeTensor(tensor_t *skeleton, FILE *f, const
     case BOOL:
         break;
     case SYM: {
-        (void)serialReadF32LE(f); /* scale */
+        /* v4 (group-quant PR1): numGroups/groupSize precede the scales array
+         * -- duplicates Deserialize.c's deserializeQConfig SYM arm layout
+         * (numGroups u32, groupSize u32, f32 scales[numGroups], qBits u8,
+         * roundingMode u8) since this peek runs BEFORE the trusted
+         * deserializeTensor call below. PPCA state is always numGroups=1
+         * (create() builds via quantizationInitSym); a file claiming
+         * otherwise cannot be a PPCA checkpoint this build produced. */
+        uint32_t numGroups = serialReadU32LE(f);
+        symQConfig_t *skelQc = skeleton->quantization->qConfig;
+        if ((size_t)numGroups != skelQc->numGroups) {
+            PRINT_ERROR("ppcaReplaySetDeserialize: %s SYM numGroups mismatch (file %u, skeleton "
+                        "%zu)",
+                        what, (unsigned)numGroups, skelQc->numGroups);
+            exit(1);
+        }
+        (void)serialReadU32LE(f); /* groupSize */
+        for (uint32_t g = 0; g < numGroups; g++) {
+            (void)serialReadF32LE(f); /* scales[g] */
+        }
         uint8_t qBits = serialReadU8(f);
         (void)serialReadU8(f); /* roundingMode */
-        symQConfig_t *skelQc = skeleton->quantization->qConfig;
         if (qBits != skelQc->qBits) {
             PRINT_ERROR("ppcaReplaySetDeserialize: %s SYM qBits mismatch (file %u, skeleton "
                         "%u) — same-dtype width mismatch is the #316 2x-overflow case",

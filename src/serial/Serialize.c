@@ -34,9 +34,16 @@
  * (parameter->grad == NULL, layer freezing epic) write hasGrad=0 and skip the
  * grad tensor entirely; deserialize is TOLERANT of a presence/skeleton
  * mismatch (#380 PR3) -- grads are skipped into frozen skeletons or left
- * zeroed when absent, never NULL-dereferenced; see Deserialize.c. */
+ * zeroed when absent, never NULL-dereferenced; see Deserialize.c.
+ * v4 (group-quant PR1, spec
+ * docs/superpowers/specs/2026-07-28-group-quantization-design.md §6): the SYM
+ * qConfig record grows `u32 numGroups`, `u32 groupSize` ahead of the scales
+ * array -- `f32 scales[numGroups]` -- then the unchanged `u8 qBits`/`u8
+ * rounding` tail. PR1 always writes numGroups=1, groupSize=0 (no grouping
+ * functionality yet); every other record (ASYM/FLOAT32/INT32/SYM_INT32/BOOL,
+ * layer arms, the v3 grad-presence byte) is untouched. */
 #define SERIALIZE_MAGIC "ODTS"
-#define SERIALIZE_FORMAT_VERSION 3u
+#define SERIALIZE_FORMAT_VERSION 4u
 
 void serializeTensor(tensor_t *tensor, FILE *f) {
     size_t numberOfValues = calcNumberOfElementsByTensor(tensor);
@@ -118,10 +125,16 @@ static void serializeQConfig(quantization_t *q, FILE *f) {
     }
     case SYM: {
         symQConfig_t *symQC = q->qConfig;
-        /* v3 wire layout unchanged (Task 1 is wire-stable): scales[0] is the
-         * same float that used to live in the scalar `scale` field. Group-
-         * quant PR2 introduces the v4 layout (numGroups/groupSize/scales[]). */
-        serialWriteF32LE(symQC->scales[0], f);
+        /* v4 (group-quant PR1): numGroups/groupSize precede the scales array
+         * so a reader can size its group-aware handling before touching any
+         * per-group data. PR1: numGroups is always 1 (no grouping
+         * functionality yet) -- scales[0] carries exactly the float the
+         * deleted scalar `scale` field used to hold. */
+        serialWriteSizeAsU32LE(symQC->numGroups, f);
+        serialWriteSizeAsU32LE(symQC->groupSize, f);
+        for (size_t g = 0; g < symQC->numGroups; g++) {
+            serialWriteF32LE(symQC->scales[g], f);
+        }
         serialWriteU8(symQC->qBits, f);
         serialWriteU8((uint8_t)symQC->roundingMode, f);
         break;

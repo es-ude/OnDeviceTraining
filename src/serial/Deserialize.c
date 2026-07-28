@@ -29,9 +29,18 @@
  * back-compat shim — v1 files were host-local artifacts.
  * v3: parameter records carry a grad-presence byte (#380). The reader is
  * TOLERANT of a presence/skeleton mismatch (#380 PR3, superseding PR1's
- * fail-fast): see deserializeParameter / skipSerializedTensor below. */
+ * fail-fast): see deserializeParameter / skipSerializedTensor below.
+ * v4 (group-quant PR1, spec
+ * docs/superpowers/specs/2026-07-28-group-quantization-design.md §6): the SYM
+ * qConfig record grows `u32 numGroups`, `u32 groupSize` ahead of the scales
+ * array. A file whose numGroups does not match the skeleton's (PR1: always
+ * 1, from initSymQConfig) fails fast -- reallocating the skeleton's scales[]
+ * to match is a PR2 concern (#316 no-silent-misparse discipline holds until
+ * then). The sentinel invariant (numGroups==1 <=> groupSize==0,
+ * Quantization.h) is checked on the FILE's values; a violation is a corrupt
+ * or from-the-future record. */
 #define SERIALIZE_MAGIC "ODTS"
-#define SERIALIZE_FORMAT_VERSION 3u
+#define SERIALIZE_FORMAT_VERSION 4u
 
 void deserializeTensor(tensor_t *tensor, FILE *f) {
     /* #316: capture the skeleton's expected payload size BEFORE the shape /
@@ -177,12 +186,35 @@ static void deserializeQConfig(quantization_t *q, FILE *f) {
     }
     case SYM: {
         symQConfig_t *symQC = q->qConfig;
-        /* v3 wire layout unchanged (Task 1 is wire-stable): scales[0] is the
-         * same float the scalar `scale` field used to hold. symQC->scales
-         * must already point at a valid (>=1-element) array -- callers build
-         * the skeleton via initSymQConfig or the stack-fixture idiom before
-         * deserializing into it. */
-        symQC->scales[0] = serialReadF32LE(f);
+        /* v4 (group-quant PR1): symQC->scales must already point at a valid
+         * (>=1-element) array sized for the skeleton's OWN numGroups --
+         * callers build the skeleton via initSymQConfig or the stack-fixture
+         * idiom before deserializing into it. A file numGroups that does not
+         * match the skeleton's cannot be safely read into that fixed-size
+         * array (PR2 relaxes this by reallocating); fail fast instead of
+         * guessing. */
+        size_t fileNumGroups = (size_t)serialReadU32LE(f);
+        size_t fileGroupSize = (size_t)serialReadU32LE(f);
+        if (fileNumGroups != symQC->numGroups) {
+            PRINT_ERROR("deserializeQConfig: SYM file numGroups %zu does not match the "
+                        "skeleton's numGroups %zu (group-aware deserialize lands in PR2)",
+                        fileNumGroups, symQC->numGroups);
+            exit(1);
+        }
+        /* Sentinel invariant (Quantization.h): numGroups == 1 <=> groupSize
+         * == 0. Checked on the FILE values -- a violation means a corrupt
+         * record or one written by a future (group-aware) format this build
+         * cannot interpret. */
+        if ((fileNumGroups == 1) != (fileGroupSize == 0)) {
+            PRINT_ERROR("deserializeQConfig: SYM file violates the numGroups==1<=>groupSize==0 "
+                        "sentinel invariant (numGroups=%zu, groupSize=%zu)",
+                        fileNumGroups, fileGroupSize);
+            exit(1);
+        }
+        symQC->groupSize = fileGroupSize;
+        for (size_t g = 0; g < fileNumGroups; g++) {
+            symQC->scales[g] = serialReadF32LE(f);
+        }
         symQC->qBits = serialReadU8(f);
         symQC->roundingMode = (roundingMode_t)serialReadU8(f);
         break;
@@ -238,7 +270,11 @@ static void skipSerializedTensor(FILE *f) {
      * a valid backing array before deserializeQConfig writes scales[0] --
      * an uninitialized `symQConfig_t symScratch;` would leave `.scales`
      * dangling. Never freed (matches the stack-fixture convention: this
-     * config is discarded at function exit, not owned/heap). */
+     * config is discarded at function exit, not owned/heap).
+     * v4: this scratch's numGroups=1 doubles as the skip-path's group-aware
+     * guard -- deserializeQConfig's SYM arm fails fast on a skipped grad
+     * record whose file numGroups != 1 (same PR2-relaxation note as the
+     * main path), so the 1-element scratch array can never overflow. */
     float symScratchScale[1];
     symQConfig_t symScratch = {.scales = symScratchScale, .numGroups = 1, .groupSize = 0};
     asymQConfig_t asymScratch;

@@ -103,7 +103,7 @@ void testSerializeAndDeserializeTensor() {
 static void testDeserializeRejectsBadMagic(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("XXXX", 1, 4, f);
-    writeU32LE(f, 3); /* version */
+    writeU32LE(f, 4); /* version (dead value: bad magic short-circuits first) */
     writeU32LE(f, 1); /* layerCount */
     uint8_t tag = (uint8_t)FLATTEN;
     fwrite(&tag, sizeof(uint8_t), 1, f);
@@ -138,10 +138,34 @@ static void testDeserializeRejectsWrongVersion(void) {
     freeFlattenLayer(layer);
 }
 
+/*! group-quant PR1: v3 was a REAL shipped format (pre-group-quant SYM record:
+ *  scale/qBits/rounding only, no numGroups/groupSize) -- distinct from the
+ *  arbitrary-old-version case above (v1). A v3 file must fail cleanly at the
+ *  version check now that SERIALIZE_FORMAT_VERSION is 4, exactly like any
+ *  other stale version (no back-compat shim, established policy). */
+static void testDeserializeRejectsV3Version(void) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    fwrite("ODTS", 1, 4, f);
+    writeU32LE(f, 3); /* v3: pre-group-quant SYM record layout */
+    writeU32LE(f, 1); /* layerCount */
+    uint8_t tag = (uint8_t)FLATTEN;
+    fwrite(&tag, sizeof(uint8_t), 1, f);
+    fclose(f);
+
+    layer_t *layer = flattenLayerInit();
+    layer_t *model[] = {layer};
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    fclose(f);
+
+    freeFlattenLayer(layer);
+}
+
 static void testDeserializeRejectsLayerCountMismatch(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 3); /* version */
+    writeU32LE(f, 4); /* version */
     writeU32LE(f, 2); /* layerCount; caller below passes sizeModel = 1 */
     uint8_t tag = (uint8_t)FLATTEN;
     fwrite(&tag, sizeof(uint8_t), 1, f);
@@ -160,7 +184,7 @@ static void testDeserializeRejectsLayerCountMismatch(void) {
 static void testDeserializeRejectsTagMismatch(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 3);              /* version */
+    writeU32LE(f, 4);              /* version */
     writeU32LE(f, 1);              /* layerCount */
     uint8_t tag = (uint8_t)LINEAR; /* pre-built mirror layer below is FLATTEN */
     fwrite(&tag, sizeof(uint8_t), 1, f);
@@ -400,6 +424,101 @@ static void testDeserializeQConfigAcceptsWideZeroPoint(void) {
     TEST_ASSERT_EQUAL_INT32(40000, capturedZeroPoint);
 }
 
+static tensor_t *makeSymTensor1D(size_t d0, uint8_t qBits, roundingMode_t roundingMode) {
+    size_t *dims = reserveMemory(1 * sizeof(size_t));
+    dims[0] = d0;
+    size_t *order = reserveMemory(1 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    return initTensor(shape, quantizationInitSym(qBits, roundingMode), NULL);
+}
+
+/*! group-quant PR1: a v4 SYM qConfig record whose file numGroups (2) does not
+ *  match the skeleton's numGroups (always 1 in PR1 -- initSymQConfig's only
+ *  output, see quantizationInitSym) must fail fast rather than silently
+ *  misparsing into the fixed-size 1-element scales[] array. Group-aware
+ *  deserialize (reallocating the skeleton's scales[] to match the file) is a
+ *  PR2 concern; PR1 keeps the #316 no-silent-misparse discipline instead.
+ *
+ *  The record is otherwise WELL-FORMED (real qBits, a correctly-sized
+ *  trailing payload) rather than truncated/garbage -- mirrors
+ *  testSkipSerializedTensorRejectsRankAboveCap's rationale above: a record
+ *  that is merely malformed would still trip some OTHER, unrelated guard
+ *  (e.g. the #316 payload-size check misreading a stale parser's
+ *  garbage-aligned qBits), silently passing this assertion without ever
+ *  exercising the numGroups-mismatch guard itself. groupSize=3 here is
+ *  deliberately chosen so a pre-v4 (scale/qBits/rounding-only) parser's
+ *  misaligned "qBits" byte (groupSize's low byte) still computes the SAME
+ *  packed byte count as the real qBits=4 at 4 elements (ceil(4*3/8) ==
+ *  ceil(4*4/8) == 2) -- i.e. this fixture is the drift alarm for THIS guard
+ *  specifically, not a stand-in for any parser that merely notices
+ *  something is wrong. */
+static void testDeserializeQConfigRejectsNumGroupsMismatch(void) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    writeU32LE(f, 1); /* numberOfDimensions */
+    writeU32LE(f, 4); /* dimensions[0] */
+    writeU32LE(f, 0); /* orderOfDimensions[0] */
+    uint8_t symType = (uint8_t)SYM;
+    fwrite(&symType, 1, 1, f);
+    writeU32LE(f, 2); /* numGroups = 2, mismatches the skeleton's 1 */
+    writeU32LE(f, 3); /* groupSize (consistent w/ numGroups=2; see comment re: 3 vs 4) */
+    uint8_t scaleBytes[8] = {0x00, 0x00, 0x00, 0x3F, 0x00, 0x00, 0x00, 0x3F}; /* two 0.5f scales */
+    fwrite(scaleBytes, 1, 8, f);
+    uint8_t qBits = 4;
+    fwrite(&qBits, 1, 1, f);
+    uint8_t roundingMode = 0; /* HALF_AWAY */
+    fwrite(&roundingMode, 1, 1, f);
+    uint8_t payload[2] = {0xAB, 0xCD}; /* qBits=4, 4 elems -> ceil(16/8) = 2 packed bytes */
+    fwrite(payload, 1, 2, f);
+    fclose(f);
+
+    tensor_t *skeleton = makeSymTensor1D(4, 4, HALF_AWAY);
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeTensor(skeleton, f));
+    fclose(f);
+
+    freeTensor(skeleton);
+}
+
+/*! group-quant PR1: numGroups==1 but groupSize!=0 violates the sentinel
+ *  invariant documented in Quantization.h (numGroups==1 <=> groupSize==0).
+ *  Checked on the FILE values, independent of the numGroups-matches-skeleton
+ *  check above -- a file this corrupt (or written by a future format this
+ *  build cannot fully interpret) must fail fast rather than silently
+ *  accepting a nonsensical per-tensor "group size".
+ *
+ *  Well-formed-record rationale and the groupSize=3 choice: same as
+ *  testDeserializeQConfigRejectsNumGroupsMismatch above -- an otherwise
+ *  valid record isolates THIS guard from the unrelated #316 payload-size
+ *  check a stale parser's misaligned read would otherwise trip. */
+static void testDeserializeQConfigRejectsSentinelViolation(void) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    writeU32LE(f, 1); /* numberOfDimensions */
+    writeU32LE(f, 4); /* dimensions[0] */
+    writeU32LE(f, 0); /* orderOfDimensions[0] */
+    uint8_t symType = (uint8_t)SYM;
+    fwrite(&symType, 1, 1, f);
+    writeU32LE(f, 1); /* numGroups = 1, matches the skeleton */
+    writeU32LE(f, 3); /* groupSize = 3, violates numGroups==1 <=> groupSize==0 */
+    uint8_t scaleBytes[4] = {0x00, 0x00, 0x00, 0x3F};
+    fwrite(scaleBytes, 1, 4, f);
+    uint8_t qBits = 4;
+    fwrite(&qBits, 1, 1, f);
+    uint8_t roundingMode = 0; /* HALF_AWAY */
+    fwrite(&roundingMode, 1, 1, f);
+    uint8_t payload[2] = {0xAB, 0xCD}; /* qBits=4, 4 elems -> ceil(16/8) = 2 packed bytes */
+    fwrite(payload, 1, 2, f);
+    fclose(f);
+
+    tensor_t *skeleton = makeSymTensor1D(4, 4, HALF_AWAY);
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeTensor(skeleton, f));
+    fclose(f);
+
+    freeTensor(skeleton);
+}
+
 /*! #380 PR3: a FROZEN-serialized parameter (hasGrad=0, no grad tensor in the
  *  file) deserialized into a TRAINABLE skeleton (parameter->grad != NULL)
  *  must load the param and leave the skeleton's grad untouched — it was
@@ -541,6 +660,7 @@ int main(void) {
     RUN_TEST(testSerializeAndDeserializeTensor);
     RUN_TEST(testDeserializeRejectsBadMagic);
     RUN_TEST(testDeserializeRejectsWrongVersion);
+    RUN_TEST(testDeserializeRejectsV3Version);
     RUN_TEST(testDeserializeRejectsLayerCountMismatch);
     RUN_TEST(testDeserializeRejectsTagMismatch);
     RUN_TEST(testDeserializeTensorRejectsDtypeMismatch);
@@ -551,6 +671,8 @@ int main(void) {
     RUN_TEST(testDeserializeTensorRejectsRankMismatch);
     RUN_TEST(testDeserializeTensorRoundTripsAsymZeroPoint);
     RUN_TEST(testDeserializeQConfigAcceptsWideZeroPoint);
+    RUN_TEST(testDeserializeQConfigRejectsNumGroupsMismatch);
+    RUN_TEST(testDeserializeQConfigRejectsSentinelViolation);
     RUN_TEST(testDeserializeWeightsOnlyIntoTrainableSkeleton);
     RUN_TEST(testSkipSerializedTensorRejectsRankAboveCap);
     RUN_TEST(testSkipSerializedTensorRejectsTruncatedPayload);

@@ -304,6 +304,20 @@ tensor_t *getTensorLike(tensor_t *tensor) {
     return likeTensor;
 }
 
+void requantizeTensorInPlace(tensor_t *t, quantization_t *targetQ) {
+    size_t numElements = calcNumberOfElementsByTensor(t);
+    quantization_t *newQ = getQLike(targetQ);
+    uint8_t *newData = getDataLike(newQ, numElements);
+
+    tensor_t view = {.data = newData, .shape = t->shape, .quantization = newQ, .sparsity = NULL};
+    convertTensor(t, &view);
+
+    freeData(t);
+    freeQuantization(t->quantization);
+    t->data = view.data;
+    t->quantization = view.quantization;
+}
+
 // Free Functions
 
 static void freeTensorPointer(tensor_t *tensor);

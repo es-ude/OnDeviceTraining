@@ -107,26 +107,6 @@ static tensorArray_t *buildOneHotLabels(tensorArray_t *intLabels) {
     return out;
 }
 
-/* Requantize `t` (currently FLOAT32) into `targetQ`'s dtype in place: builds a
- * fresh buffer sized for t's own element count, dynamically quantizes via
- * convertTensor (the same path tensorFillFromFloatBuffer / layerLoadWeights
- * use for non-FLOAT32 targets — TensorApi.c), then swaps t's data +
- * quantization pointers and frees the old FLOAT32 ones. shape/sparsity are
- * untouched. */
-static void requantizeTensorInPlace(tensor_t *t, quantization_t *targetQ) {
-    size_t numElements = calcNumberOfElementsByTensor(t);
-    quantization_t *newQ = getQLike(targetQ);
-    uint8_t *newData = getDataLike(newQ, numElements);
-
-    tensor_t view = {.data = newData, .shape = t->shape, .quantization = newQ, .sparsity = NULL};
-    convertTensor(t, &view);
-
-    freeData(t);
-    freeQuantization(t->quantization);
-    t->data = view.data;
-    t->quantization = view.quantization;
-}
-
 static void initDataSets(void) {
     tensorArray_t *trainItems = npyLoad("examples/mnist_mlp/data/train_x.npy");
     tensorArray_t *trainLabelsRaw = npyLoad("examples/mnist_mlp/data/train_y.npy");

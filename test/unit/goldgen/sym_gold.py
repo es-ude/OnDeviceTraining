@@ -77,6 +77,53 @@ def stable_dequant(x: torch.Tensor):
     return q, s, deq32
 
 
+# ---- Group-quant PR2: per-group (storage-order) symmetric quantization,
+# mirroring packFloatBufferAsSym's grouped path (group of element i =
+# i // group_size, groups are group_size consecutive elements). ----
+
+
+def quantize_sym_grouped(values, q_bits: int, group_size: int):
+    """Per-group absmax symmetric quantization, storage-order groups.
+    Mirrors packFloatBufferAsSym's grouped path: absMax_g -> scale_g =
+    absMax_g/qMax (1.0 if absMax_g == 0), round-half-away, per group.
+    `values` is any array-like (list or tensor); returns (codes, scales) as
+    plain Python lists (codes: int, scales: float)."""
+    x = torch.as_tensor(values, dtype=torch.float64).flatten()
+    n = x.numel()
+    assert n % group_size == 0, (
+        f"quantize_sym_grouped: n={n} not divisible by group_size={group_size}")
+    q_max = 2.0 ** (q_bits - 1) - 1
+    codes, scales = [], []
+    for g0 in range(0, n, group_size):
+        grp = x[g0:g0 + group_size]
+        abs_max = grp.abs().max().item()
+        scale = 1.0 if abs_max == 0.0 else abs_max / q_max
+        scales.append(scale)
+        q = round_half_away(grp / scale)
+        codes.extend(int(v) for v in q.tolist())
+    assert all(abs(c) <= q_max for c in codes), (
+        "quantize_sym_grouped: code out of range")
+    return codes, scales
+
+
+def stable_dequant_grouped(values, q_bits: int, group_size: int):
+    """Grouped variant of stable_dequant: quantize per-group once, return
+    (codes, scales, dequantized float64 list) with a round-trip stability
+    assertion so the C side's tensorFillFromFloatBuffer lands on exactly
+    these codes under the SAME per-group grid it was quantized from."""
+    codes, scales = quantize_sym_grouped(values, q_bits, group_size)
+    n = len(codes)
+    deq = [0.0] * n
+    for gi, g0 in enumerate(range(0, n, group_size)):
+        for i in range(group_size):
+            deq[g0 + i] = float(codes[g0 + i]) * scales[gi]
+    codes2, scales2 = quantize_sym_grouped(deq, q_bits, group_size)
+    assert codes2 == codes, "grouped fixture is not dequantization round-trip stable (codes)"
+    assert scales2 == scales, (
+        "grouped fixture is not dequantization round-trip stable (scales)")
+    return codes, scales, deq
+
+
 # ---- int12 operand helpers (#227 operand flip; default quantizationInitSymInt32
 # tensors carry qMaxBits = ODT_SYM_OPERAND_QMAXBITS = 12). Additive: existing
 # int16-era users above keep their semantics; pool/conv generators use these. ----

@@ -184,6 +184,22 @@ void freeShape(shape_t *shape);
  */
 void freeQuantization(quantization_t *quantization);
 
+/*! Requantizes `t`'s data + quantization to `targetQ`'s dtype/shape-of-
+ * quantization IN PLACE: builds a fresh buffer sized for t's own element
+ * count, dynamically quantizes via convertTensor (the same path
+ * tensorFillFromFloatBuffer / layerLoadWeights use for non-FLOAT32 targets),
+ * then swaps t's data + quantization pointers and frees the old ones. t's
+ * shape and sparsity are untouched. `targetQ` is read-only (its dtype/config
+ * is cloned via getQLike); caller retains ownership of `targetQ` and must
+ * free it separately if heap-allocated.
+ *
+ * \param t: Tensor to requantize in place; must already own heap-allocated
+ *           data + quantization (e.g. via initTensor).
+ * \param targetQ: Quantization template to requantize into (cloned, not
+ *                 taken over).
+ */
+void requantizeTensorInPlace(tensor_t *t, quantization_t *targetQ);
+
 /*! Frees tensor.
  *
  * \param tensor: Pointer to tensor

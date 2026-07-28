@@ -5,6 +5,7 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
+#include "expected_group_quant.h"
 #include "expected_requant.h"
 #include "unity.h"
 
@@ -2952,6 +2953,443 @@ void testAccumulateTensorIntoSymRescaleRejectsSelfAliasedIncrement(void) {
     ASSERT_EXITS_WITH_FAILURE(accumulateTensorIntoSymRescale(&t, &t));
 }
 
+/* Group-quant PR2 (Task 2): group-aware FLOAT32<->SYM conversion cells, the
+ * scalar-only-cell fail-fast net, group-faithful same-type copy, and the
+ * promoted requantizeTensorInPlace API. Fixtures from expected_group_quant.h
+ * (goldgen, cross-checked against torch.quantize_per_channel). */
+
+void testFloatToSymGroupedDerivesPerGroupScales(void) {
+    /* FLOAT32 -> SYM with a grouped target derives PER-GROUP absmax scales
+     * (group of element i = i / groupSize), not one whole-tensor scale. */
+    size_t n = kGroupQuantInput_len;
+    size_t dims[] = {n};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    tensor_t floatTensor;
+    setTensorValues(&floatTensor, (uint8_t *)kGroupQuantInput, &shape, &floatQ, NULL);
+
+    float scales[3] = {1.f, 1.f, 1.f};
+    symQConfig_t outQC = {.scales = scales,
+                          .numGroups = (size_t)kGroupQuantNumGroups,
+                          .groupSize = (size_t)kGroupQuantGroupSize,
+                          .roundingMode = HALF_AWAY,
+                          .qBits = (uint8_t)kGroupQuantQBits};
+    quantization_t outQ;
+    initSymQuantization(&outQC, &outQ);
+    uint8_t symData[calcNumberOfBytesForData(&outQ, n)];
+    tensor_t symTensor;
+    setTensorValues(&symTensor, symData, &shape, &outQ, NULL);
+
+    convertTensor(&floatTensor, &symTensor);
+
+    TEST_ASSERT_EQUAL_FLOAT(kGroupQuantScales[0], outQC.scales[0]);
+    TEST_ASSERT_EQUAL_FLOAT(kGroupQuantScales[1], outQC.scales[1]);
+    TEST_ASSERT_EQUAL_FLOAT(kGroupQuantScales[2], outQC.scales[2]);
+
+    int32_t codes[12];
+    symTestUnpackSignExtend(symTensor.data, (size_t)kGroupQuantQBits, codes, n);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(kGroupQuantCodes, codes, n);
+}
+
+void testFloatToSymGroupedMatchesTorchPerChannel(void) {
+    /* Cross-checked in the generator against torch.quantize_per_channel
+     * (axis=0, per-out-channel groups of 4) over an 8x4 GEMM-weight-shaped
+     * fixture at qBits=8 -- the exact grouping a linear/conv weight would
+     * use for per-out-channel quantization. */
+    size_t n = kTorchXCheckInput_len;
+    size_t dims[] = {n};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    tensor_t floatTensor;
+    setTensorValues(&floatTensor, (uint8_t *)kTorchXCheckInput, &shape, &floatQ, NULL);
+
+    float scales[8];
+    for (size_t i = 0; i < 8; i++) {
+        scales[i] = 1.f;
+    }
+    symQConfig_t outQC = {.scales = scales,
+                          .numGroups = (size_t)kTorchXCheckNumGroups,
+                          .groupSize = (size_t)kTorchXCheckGroupSize,
+                          .roundingMode = HALF_AWAY,
+                          .qBits = (uint8_t)kTorchXCheckQBits};
+    quantization_t outQ;
+    initSymQuantization(&outQC, &outQ);
+    uint8_t symData[calcNumberOfBytesForData(&outQ, n)];
+    tensor_t symTensor;
+    setTensorValues(&symTensor, symData, &shape, &outQ, NULL);
+
+    convertTensor(&floatTensor, &symTensor);
+
+    for (size_t g = 0; g < 8; g++) {
+        TEST_ASSERT_EQUAL_FLOAT(kTorchXCheckScales[g], outQC.scales[g]);
+    }
+    int32_t codes[32];
+    symTestUnpackSignExtend(symTensor.data, (size_t)kTorchXCheckQBits, codes, n);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(kTorchXCheckCodes, codes, n);
+}
+
+void testSymGroupedToFloatDequantsPerGroup(void) {
+    /* SYM(grouped) -> FLOAT32: build the packed tensor directly from the gold
+     * codes+scales (no conversion involved on the way in) and check the
+     * dequant matches the round-trip-stable float fixture (the SAME array
+     * FLOAT32->SYM quantizes FROM in the sibling test above). */
+    size_t n = kGroupQuantInput_len;
+    size_t dims[] = {n};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    float scales[3];
+    memcpy(scales, kGroupQuantScales, sizeof(scales));
+    symQConfig_t inQC = {.scales = scales,
+                         .numGroups = (size_t)kGroupQuantNumGroups,
+                         .groupSize = (size_t)kGroupQuantGroupSize,
+                         .roundingMode = HALF_AWAY,
+                         .qBits = (uint8_t)kGroupQuantQBits};
+    quantization_t inQ;
+    initSymQuantization(&inQC, &inQ);
+    uint8_t symData[calcNumberOfBytesForData(&inQ, n)];
+    byteConversion((uint8_t *)kGroupQuantCodes, 32, symData, (size_t)kGroupQuantQBits, n);
+    tensor_t symTensor;
+    setTensorValues(&symTensor, symData, &shape, &inQ, NULL);
+
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    float floatData[12] = {0};
+    tensor_t floatTensor;
+    setTensorValues(&floatTensor, (uint8_t *)floatData, &shape, &floatQ, NULL);
+
+    convertTensor(&symTensor, &floatTensor);
+
+    for (size_t i = 0; i < n; i++) {
+        TEST_ASSERT_EQUAL_FLOAT(kGroupQuantInput[i], floatData[i]);
+    }
+}
+
+void testGroupedSymToSymInt32Dies(void) {
+    /* SYM(grouped) -> SYM_INT32 via convertTensor must fail-fast, not
+     * silently fold scales[0] onto the whole tensor (the pre-PR2 hazard: a
+     * scalar-only cell reading only scales[0] would quietly misinterpret
+     * every group but the first). */
+    size_t n = 8;
+    size_t dims[] = {n};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    float scales[2] = {0.1f, 0.2f};
+    symQConfig_t inQC = {
+        .scales = scales, .numGroups = 2, .groupSize = 4, .roundingMode = HALF_AWAY, .qBits = 6};
+    quantization_t inQ;
+    initSymQuantization(&inQC, &inQ);
+    uint8_t symData[calcNumberOfBytesForData(&inQ, n)];
+    memset(symData, 0, sizeof(symData));
+    tensor_t symTensor;
+    setTensorValues(&symTensor, symData, &shape, &inQ, NULL);
+
+    symInt32QConfig_t outQC = {0};
+    outQC.qMaxBits = 16;
+    quantization_t outQ;
+    initSymInt32Quantization(&outQC, &outQ);
+    int32_t outData[8] = {0};
+    tensor_t outTensor;
+    setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&symTensor, &outTensor));
+}
+
+void testGroupedSymInt32ToSymTargetDies(void) {
+    /* SYM_INT32 -> SYM(grouped target): the no-rescale-into-groups hazard's
+     * rescale-route sibling; a single dynamically-derived scale has nowhere
+     * group-shaped to land. */
+    size_t n = 8;
+    size_t dims[] = {n};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    symInt32QConfig_t inQC = {.scale = 0.5f, .qMaxBits = 16};
+    quantization_t inQ;
+    initSymInt32Quantization(&inQC, &inQ);
+    int32_t inData[] = {1, 2, 3, 4, 5, 6, 7, 8};
+    tensor_t inTensor;
+    setTensorValues(&inTensor, (uint8_t *)inData, &shape, &inQ, NULL);
+
+    float scales[2] = {1.f, 1.f};
+    symQConfig_t outQC = {
+        .scales = scales, .numGroups = 2, .groupSize = 4, .roundingMode = HALF_AWAY, .qBits = 6};
+    quantization_t outQ;
+    initSymQuantization(&outQC, &outQ);
+    uint8_t outData[calcNumberOfBytesForData(&outQ, n)];
+    tensor_t outTensor;
+    setTensorValues(&outTensor, outData, &shape, &outQ, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor));
+}
+
+void testGroupedSymToAsymDies(void) {
+    /* SYM(grouped) -> ASYM: the affine-grid derivation reads scales[0] only
+     * today; a grouped source must fail-fast rather than dequantize every
+     * group but the first at the wrong scale. */
+    size_t n = 8;
+    size_t dims[] = {n};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    float scales[2] = {0.1f, 0.2f};
+    symQConfig_t inQC = {
+        .scales = scales, .numGroups = 2, .groupSize = 4, .roundingMode = HALF_AWAY, .qBits = 6};
+    quantization_t inQ;
+    initSymQuantization(&inQC, &inQ);
+    uint8_t symData[calcNumberOfBytesForData(&inQ, n)];
+    memset(symData, 0, sizeof(symData));
+    tensor_t symTensor;
+    setTensorValues(&symTensor, symData, &shape, &inQ, NULL);
+
+    asymQConfig_t outQC = {.scale = 1.f, .zeroPoint = 0, .qBits = 5, .roundingMode = HALF_AWAY};
+    quantization_t outQ;
+    initAsymQuantization(&outQC, &outQ);
+    uint8_t outData[calcNumberOfBytesForData(&outQ, n)];
+    tensor_t outTensor;
+    setTensorValues(&outTensor, outData, &shape, &outQ, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&symTensor, &outTensor));
+}
+
+void testGroupedAsymToSymTargetDies(void) {
+    /* ASYM -> SYM(grouped target): the absmax-derivation cell writes
+     * scales[0] only today; a grouped target must fail-fast. */
+    size_t n = 8;
+    size_t dims[] = {n};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    asymQConfig_t inQC = {.scale = 0.5f, .zeroPoint = -3, .qBits = 5, .roundingMode = HALF_AWAY};
+    quantization_t inQ;
+    initAsymQuantization(&inQC, &inQ);
+    uint8_t inData[calcNumberOfBytesForData(&inQ, n)];
+    memset(inData, 0, sizeof(inData));
+    tensor_t inTensor;
+    setTensorValues(&inTensor, inData, &shape, &inQ, NULL);
+
+    float scales[2] = {1.f, 1.f};
+    symQConfig_t outQC = {
+        .scales = scales, .numGroups = 2, .groupSize = 4, .roundingMode = HALF_AWAY, .qBits = 6};
+    quantization_t outQ;
+    initSymQuantization(&outQC, &outQ);
+    uint8_t outData[calcNumberOfBytesForData(&outQ, n)];
+    tensor_t outTensor;
+    setTensorValues(&outTensor, outData, &shape, &outQ, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor));
+}
+
+void testGroupedInt32ToSymTargetDies(void) {
+    /* INT32 -> SYM(grouped target): this cell packs raw codes with scale
+     * fixed at 1.0 (scales[0] only) -- a grouped target must fail-fast. */
+    size_t n = 8;
+    size_t dims[] = {n};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    quantization_t inQ;
+    initInt32Quantization(&inQ);
+    int32_t inData[] = {1, 2, 3, 4, 5, 6, 7, 8};
+    tensor_t inTensor;
+    setTensorValues(&inTensor, (uint8_t *)inData, &shape, &inQ, NULL);
+
+    float scales[2] = {1.f, 1.f};
+    symQConfig_t outQC = {
+        .scales = scales, .numGroups = 2, .groupSize = 4, .roundingMode = HALF_AWAY, .qBits = 6};
+    quantization_t outQ;
+    initSymQuantization(&outQC, &outQ);
+    uint8_t outData[calcNumberOfBytesForData(&outQ, n)];
+    tensor_t outTensor;
+    setTensorValues(&outTensor, outData, &shape, &outQ, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor));
+}
+
+void testGroupedRepackSymInt32ToSymNoRescaleTargetDies(void) {
+    /* repackSymInt32ToSymNoRescale into a grouped SYM target: a single
+     * carried scale cannot fan out into per-group scales -- must fail-fast
+     * (direct-call helper, not a conversionMatrix cell). */
+    size_t n = 8;
+    size_t dims[] = {n};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    symInt32QConfig_t inQC = {.scale = 0.5f, .qMaxBits = 16};
+    quantization_t inQ;
+    initSymInt32Quantization(&inQC, &inQ);
+    int32_t inData[] = {1, -2, 3, -4, 5, -6, 7, -8};
+    tensor_t inTensor;
+    setTensorValues(&inTensor, (uint8_t *)inData, &shape, &inQ, NULL);
+
+    float scales[2] = {1.f, 1.f};
+    symQConfig_t outQC = {
+        .scales = scales, .numGroups = 2, .groupSize = 4, .roundingMode = HALF_AWAY, .qBits = 6};
+    quantization_t outQ;
+    initSymQuantization(&outQC, &outQ);
+    uint8_t outData[calcNumberOfBytesForData(&outQ, n)];
+    tensor_t outTensor;
+    setTensorValues(&outTensor, outData, &shape, &outQ, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(repackSymInt32ToSymNoRescale(&inTensor, &outTensor));
+}
+
+void testDequantChunkToFloatRejectsGroupedSymSource(void) {
+    /* dequantChunkToFloat's SYM cell is a grad-accumulate-only helper
+     * (gradInit rejects grouped SYM templates); a grouped source reaching it
+     * anyway must fail-fast rather than read scales[0] for every group. */
+    size_t n = 8;
+    size_t dims[] = {n};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    float scales[2] = {0.1f, 0.2f};
+    symQConfig_t qc = {
+        .scales = scales, .numGroups = 2, .groupSize = 4, .roundingMode = HALF_AWAY, .qBits = 6};
+    quantization_t q;
+    initSymQuantization(&qc, &q);
+    uint8_t data[calcNumberOfBytesForData(&q, n)];
+    memset(data, 0, sizeof(data));
+    tensor_t t;
+    setTensorValues(&t, data, &shape, &q, NULL);
+
+    float out[8];
+    ASSERT_EXITS_WITH_FAILURE(dequantChunkToFloat(&t, 0, 8, out));
+}
+
+void testSameTypeSymCopyCarriesGroupArrays(void) {
+    /* SYM(grouped) -> SYM(grouped) same-width same-type copy must carry the
+     * FULL scales array + groupSize, not just scales[0] (the pre-PR2 hazard:
+     * a partial copy would leave group 1's scale at the output's stale
+     * default and drop groupSize entirely). */
+    size_t n = 8;
+    size_t dims[] = {n};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t mantissas[] = {3, -3, 31, -32, 10, -10, 20, -20};
+    float inScales[2] = {0.25f, 0.5f};
+    symQConfig_t inQC = {
+        .scales = inScales, .numGroups = 2, .groupSize = 4, .roundingMode = HALF_AWAY, .qBits = 6};
+    quantization_t inQ;
+    initSymQuantization(&inQC, &inQ);
+    uint8_t inData[calcNumberOfBytesForData(&inQ, n)];
+    byteConversion((uint8_t *)mantissas, 32, inData, 6, n);
+    tensor_t in;
+    setTensorValues(&in, inData, &shape, &inQ, NULL);
+
+    float outScales[2] = {1.f, 1.f};
+    symQConfig_t outQC = {.scales = outScales,
+                          .numGroups = 2,
+                          .groupSize = 999, /* garbage; must be overwritten from src */
+                          .roundingMode = HALF_AWAY,
+                          .qBits = 6};
+    quantization_t outQ;
+    initSymQuantization(&outQC, &outQ);
+    uint8_t outData[calcNumberOfBytesForData(&outQ, n)];
+    tensor_t out;
+    setTensorValues(&out, outData, &shape, &outQ, NULL);
+
+    convertTensor(&in, &out);
+
+    TEST_ASSERT_EQUAL_FLOAT(0.25f, outQC.scales[0]);
+    TEST_ASSERT_EQUAL_FLOAT(0.5f, outQC.scales[1]);
+    TEST_ASSERT_EQUAL_size_t(4, outQC.groupSize);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(inData, outData, calcNumberOfBytesForData(&inQ, n));
+}
+
+void testSameTypeSymCopyRejectsGroupShapeMismatch(void) {
+    /* SYM(grouped, numGroups=2) -> SYM(per-tensor, numGroups=1): dest's
+     * 1-element scales array cannot hold src's 2 group scales -- must
+     * fail-fast rather than overrun dest->scales. */
+    size_t n = 8;
+    size_t dims[] = {n};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    float inScales[2] = {0.25f, 0.5f};
+    symQConfig_t inQC = {
+        .scales = inScales, .numGroups = 2, .groupSize = 4, .roundingMode = HALF_AWAY, .qBits = 6};
+    quantization_t inQ;
+    initSymQuantization(&inQC, &inQ);
+    uint8_t inData[calcNumberOfBytesForData(&inQ, n)];
+    memset(inData, 0, sizeof(inData));
+    tensor_t in;
+    setTensorValues(&in, inData, &shape, &inQ, NULL);
+
+    float outScales[1] = {1.f};
+    symQConfig_t outQC = {
+        .scales = outScales, .numGroups = 1, .groupSize = 0, .roundingMode = HALF_AWAY, .qBits = 6};
+    quantization_t outQ;
+    initSymQuantization(&outQC, &outQ);
+    uint8_t outData[calcNumberOfBytesForData(&outQ, n)];
+    tensor_t out;
+    setTensorValues(&out, outData, &shape, &outQ, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&in, &out));
+}
+
+void testRequantizeTensorInPlaceGrouped(void) {
+    /* FLOAT32 12-elem -> grouped SYM target via the PROMOTED public API
+     * (requantizeTensorInPlace, TensorApi.h); then back to FLOAT32; compare
+     * vs the round-trip-stable gold fixture. Exercises the promotion (the
+     * two example-local copies are gone, this is the single source now) AND
+     * the grouped conversion together. */
+    size_t n = kGroupQuantInput_len;
+    size_t *dims = reserveMemory(sizeof(size_t));
+    dims[0] = n;
+    size_t *order = reserveMemory(sizeof(size_t));
+    order[0] = 0;
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    shape->dimensions = dims;
+    shape->orderOfDimensions = order;
+    shape->numberOfDimensions = 1;
+
+    quantization_t *floatQ = reserveMemory(sizeof(quantization_t));
+    initFloat32Quantization(floatQ);
+    tensor_t *t = initTensor(shape, floatQ, NULL);
+    tensorFillFromFloatBuffer(t, kGroupQuantInput, n);
+
+    float targetScales[3] = {1.f, 1.f, 1.f};
+    symQConfig_t targetQC = {.scales = targetScales,
+                             .numGroups = (size_t)kGroupQuantNumGroups,
+                             .groupSize = (size_t)kGroupQuantGroupSize,
+                             .roundingMode = HALF_AWAY,
+                             .qBits = (uint8_t)kGroupQuantQBits};
+    quantization_t targetQ;
+    initSymQuantization(&targetQC, &targetQ);
+
+    requantizeTensorInPlace(t, &targetQ);
+
+    TEST_ASSERT_EQUAL_INT32(SYM, t->quantization->type);
+    symQConfig_t *gotQC = t->quantization->qConfig;
+    TEST_ASSERT_EQUAL_FLOAT(kGroupQuantScales[0], gotQC->scales[0]);
+    TEST_ASSERT_EQUAL_FLOAT(kGroupQuantScales[1], gotQC->scales[1]);
+    TEST_ASSERT_EQUAL_FLOAT(kGroupQuantScales[2], gotQC->scales[2]);
+    int32_t codes[12];
+    symTestUnpackSignExtend(t->data, (size_t)kGroupQuantQBits, codes, n);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(kGroupQuantCodes, codes, n);
+
+    quantization_t backQ;
+    initFloat32Quantization(&backQ);
+    requantizeTensorInPlace(t, &backQ);
+
+    TEST_ASSERT_EQUAL_INT32(FLOAT32, t->quantization->type);
+    float *gotFloat = (float *)t->data;
+    for (size_t i = 0; i < n; i++) {
+        TEST_ASSERT_EQUAL_FLOAT(kGroupQuantInput[i], gotFloat[i]);
+    }
+
+    freeTensor(t);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -3038,6 +3476,20 @@ int main(void) {
     RUN_TEST(testUnpackSignExtendOffsetZeroCoversFullSignedRange);
     RUN_TEST(testQuantizeFloatToAsymNoOpOnEmptyTensor);
     RUN_TEST(testAccumulateTensorIntoSymRescaleRejectsSelfAliasedIncrement);
+
+    RUN_TEST(testFloatToSymGroupedDerivesPerGroupScales);
+    RUN_TEST(testFloatToSymGroupedMatchesTorchPerChannel);
+    RUN_TEST(testSymGroupedToFloatDequantsPerGroup);
+    RUN_TEST(testGroupedSymToSymInt32Dies);
+    RUN_TEST(testGroupedSymInt32ToSymTargetDies);
+    RUN_TEST(testGroupedSymToAsymDies);
+    RUN_TEST(testGroupedAsymToSymTargetDies);
+    RUN_TEST(testGroupedInt32ToSymTargetDies);
+    RUN_TEST(testGroupedRepackSymInt32ToSymNoRescaleTargetDies);
+    RUN_TEST(testDequantChunkToFloatRejectsGroupedSymSource);
+    RUN_TEST(testSameTypeSymCopyCarriesGroupArrays);
+    RUN_TEST(testSameTypeSymCopyRejectsGroupShapeMismatch);
+    RUN_TEST(testRequantizeTensorInPlaceGrouped);
 
     return UNITY_END();
 }

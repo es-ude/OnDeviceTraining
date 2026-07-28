@@ -177,25 +177,6 @@ static tensorArray_t *buildOneHotLabels(tensorArray_t *intLabels) {
     return out;
 }
 
-/* Requantize FLOAT32 tensor `t` into targetQ's dtype in place (mixed_width_mlp
- * pattern): fresh buffer sized for t's element count, dynamic-quantize via
- * convertTensor, then swap data + quantization pointers and free the old ones.
- * shape/sparsity untouched. Here targetQ is packed SYM@SYM_BITS, so the
- * conversion is convertFloatTensorToSymTensor (packFloatBufferAsSym). */
-static void requantizeTensorInPlace(tensor_t *t, quantization_t *targetQ) {
-    size_t numElements = calcNumberOfElementsByTensor(t);
-    quantization_t *newQ = getQLike(targetQ);
-    uint8_t *newData = getDataLike(newQ, numElements);
-
-    tensor_t view = {.data = newData, .shape = t->shape, .quantization = newQ, .sparsity = NULL};
-    convertTensor(t, &view);
-
-    freeData(t);
-    freeQuantization(t->quantization);
-    t->data = view.data;
-    t->quantization = view.quantization;
-}
-
 static void initDataSets(void) {
     tensorArray_t *trainItems = npyLoad("examples/har_classifier/data/train_x.npy");
     tensorArray_t *trainLabelsRaw = npyLoad("examples/har_classifier/data/train_y.npy");

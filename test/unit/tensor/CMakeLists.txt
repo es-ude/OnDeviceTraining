@@ -42,6 +42,19 @@ add_custom_target(generate_expected_requant
         DEPENDS ${GEN_REQUANT_HEADER})
 add_dependencies(UnitTestTensorConversion generate_expected_requant)
 target_include_directories(UnitTestTensorConversion PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+set(GEN_GROUP_QUANT_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_group_quant.h)
+add_custom_command(
+        OUTPUT ${GEN_GROUP_QUANT_HEADER}
+        COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_group_quant.py
+                --out ${GEN_GROUP_QUANT_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_group_quant.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+        COMMENT "Generating expected_group_quant.h via PyTorch"
+        VERBATIM
+)
+add_custom_target(generate_expected_group_quant
+        DEPENDS ${GEN_GROUP_QUANT_HEADER})
+add_dependencies(UnitTestTensorConversion generate_expected_group_quant)
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         TensorApi

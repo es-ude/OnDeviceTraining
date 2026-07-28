@@ -129,6 +129,22 @@ void dequantChunkToFloat(const tensor_t *src, size_t elemOffset, size_t count, f
     }
     case SYM: {
         symQConfig_t *qc = src->quantization->qConfig;
+        if (qc->numGroups > 1) {
+            /* Group-quant PR2: this helper's only callers are the grad-accumulate
+             * engines (accumulateIntoSym*Engine via incSrcChunk, and
+             * accumulateTensorIntoFloat32Inplace), all of which operate on grad
+             * tensors -- gradInit fail-fasts on a grouped SYM template (#300 axis),
+             * so a grouped source here would indicate a caller contract violation,
+             * not a reachable production path. Dequantize via
+             * convertSymTensorToFloat32Tensor first if a grouped SYM source ever
+             * needs to feed this helper. */
+            PRINT_ERROR("dequantChunkToFloat: grouped SYM (numGroups=%zu) has no per-tensor "
+                        "dequant image here; grad-accumulate paths only ever see per-tensor "
+                        "SYM (gradInit rejects grouped templates) -- convert to FLOAT32 first "
+                        "for any other route",
+                        qc->numGroups);
+            exit(1);
+        }
         float scale = qc->scales[0]; /* hoisted: no per-element array indexing */
         int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
         unpackSignExtendChunk(src->data, qc->qBits, elemOffset, count, mant);
@@ -303,6 +319,13 @@ void convertFloatTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputT
 void convertInt32TensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTensor) {
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     symQConfig_t *outQC = outputTensor->quantization->qConfig;
+    if (outQC->numGroups > 1) {
+        PRINT_ERROR("convertInt32TensorToSymTensor: grouped SYM target (numGroups=%zu) has no "
+                    "scalar compute image here; target a per-tensor SYM config, or convert "
+                    "INT32->FLOAT32 then FLOAT32->SYM(grouped) instead",
+                    outQC->numGroups);
+        exit(1);
+    }
     outQC->scales[0] = 1.f;
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
@@ -529,14 +552,41 @@ void convertSymTensorToInt32Tensor(tensor_t *inputTensor, tensor_t *outputTensor
 void convertSymTensorToFloat32Tensor(tensor_t *inputTensor, tensor_t *outputTensor) {
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     symQConfig_t *inQC = inputTensor->quantization->qConfig;
-    float scale = inQC->scales[0]; /* hoisted: no per-element array indexing */
     float *out = (float *)outputTensor->data;
     int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
+
+    if (inQC->numGroups == 1) {
+        /* Per-tensor fast path -- byte-identical to the pre-group-quant code. */
+        float scale = inQC->scales[0]; /* hoisted: no per-element array indexing */
+        for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+            size_t count =
+                n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+            unpackSignExtendChunk(inputTensor->data, inQC->qBits, off, count, mant);
+            for (size_t i = 0; i < count; i++) {
+                out[off + i] = (float)mant[i] * scale;
+            }
+        }
+        return;
+    }
+
+    /* Grouped path: same run-walking pattern as packFloatBufferAsSym's
+     * grouped path, mirrored for dequant (out[i] = mant[i] * scales[g]). */
+    const size_t groupSize = inQC->groupSize;
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackSignExtendChunk(inputTensor->data, inQC->qBits, off, count, mant);
-        for (size_t i = 0; i < count; i++) {
-            out[off + i] = (float)mant[i] * scale;
+        size_t chunkEnd = off + count;
+        size_t idx = off;
+        while (idx < chunkEnd) {
+            size_t g = idx / groupSize;
+            size_t groupEnd = (g + 1) * groupSize;
+            size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
+            size_t runLen = runEnd - idx;
+            const float scale = inQC->scales[g];
+            for (size_t i = 0; i < runLen; i++) {
+                out[idx + i] = (float)mant[idx - off + i] * scale;
+            }
+            idx = runEnd;
         }
     }
 }
@@ -545,6 +595,13 @@ void convertSymTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTen
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     symQConfig_t *inQC = inputTensor->quantization->qConfig;
     symInt32QConfig_t *outQC = outputTensor->quantization->qConfig;
+    if (inQC->numGroups > 1) {
+        PRINT_ERROR("convertSymTensorToSymInt32Tensor: grouped SYM (numGroups=%zu) has no "
+                    "scalar compute image; group-aware ops consume it via the executeOp "
+                    "grouped-operand path (later PR of this epic), dequant to FLOAT32 otherwise",
+                    inQC->numGroups);
+        exit(1);
+    }
 
     unpackSignExtend(inputTensor->data, inQC->qBits, 0, (int32_t *)outputTensor->data, n);
     outQC->scale = inQC->scales[0];
@@ -555,6 +612,13 @@ void convertSymTensorToAsymTensor(tensor_t *inputTensor, tensor_t *outputTensor)
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     symQConfig_t *inQC = inputTensor->quantization->qConfig;
     asymQConfig_t *outQC = outputTensor->quantization->qConfig;
+    if (inQC->numGroups > 1) {
+        PRINT_ERROR("convertSymTensorToAsymTensor: grouped SYM (numGroups=%zu) has no scalar "
+                    "compute image; dequantize to FLOAT32 first (convertSymTensorToFloat32Tensor), "
+                    "then FLOAT32->ASYM",
+                    inQC->numGroups);
+        exit(1);
+    }
     if (n == 0) {
         /* No first element to seed mn/mx from; old code's unpackSignExtend +
          * deq[0] VLA read (via quantizeFloatToAsym) was UB. New code no-ops
@@ -604,6 +668,13 @@ void convertAsymTensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTensor)
     asymQConfig_t *inQC = inputTensor->quantization->qConfig;
     size_t inBits = calcBitsPerElement(inputTensor->quantization);
     symQConfig_t *outQC = outputTensor->quantization->qConfig;
+    if (outQC->numGroups > 1) {
+        PRINT_ERROR("convertAsymTensorToSymTensor: grouped SYM target (numGroups=%zu) has no "
+                    "scalar compute image; target a per-tensor SYM config, or dequantize "
+                    "ASYM->FLOAT32 first then FLOAT32->SYM(grouped)",
+                    outQC->numGroups);
+        exit(1);
+    }
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     /* pass 1: absmax over dequantized values, chunked unpack (no O(n) scratch) */
     float absMax = 0.f;
@@ -665,17 +736,59 @@ void unsupportedConversionTypes(tensor_t *inputTensor, tensor_t *outputTensor) {
 
 static void packFloatBufferAsSym(const float *values, size_t n, symQConfig_t *outQC, uint8_t *dst,
                                  const char *what) {
-    float absMax = findAbsMaxFloat((uint8_t *)values, n);
     const float qMax = powf(2, (float)outQC->qBits - 1) - 1;
     const float qMin = -powf(2, (float)outQC->qBits - 1);
-    float scale = (absMax == 0.f) ? 1.f : absMax / qMax;
-    outQC->scales[0] = scale;
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
+
+    if (outQC->numGroups == 1) {
+        /* Per-tensor fast path -- byte-identical to the pre-group-quant code
+         * (regression gate: the existing suite pins this verbatim). */
+        float absMax = findAbsMaxFloat((uint8_t *)values, n);
+        float scale = (absMax == 0.f) ? 1.f : absMax / qMax;
+        outQC->scales[0] = scale;
+        for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+            size_t count =
+                n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+            for (size_t i = 0; i < count; i++) {
+                codes[i] = clampInt32(roundByMode(values[off + i] / scale, outQC->roundingMode),
+                                      (int32_t)qMin, (int32_t)qMax);
+            }
+            packChunkGuarded(codes, count, dst, outQC->qBits, off, what);
+        }
+        return;
+    }
+
+    /* Grouped path (#groups>1): groups are groupSize consecutive elements in
+     * STORAGE order (group of element i = i / groupSize). Phase 1: per-group
+     * absmax -> scales[g], one findAbsMaxFloat call per group (never a single
+     * whole-tensor pass, or every group would collapse onto one scale). */
+    const size_t groupSize = outQC->groupSize;
+    for (size_t g = 0; g < outQC->numGroups; g++) {
+        float absMax = findAbsMaxFloat((uint8_t *)(values + g * groupSize), groupSize);
+        outQC->scales[g] = (absMax == 0.f) ? 1.f : absMax / qMax;
+    }
+    /* Phase 2: sequential quantize+pack, chunked exactly like the per-tensor
+     * path above (packChunkGuarded keeps its byte-alignment contract: `off`
+     * is always a multiple of ODT_CONVERSION_CHUNK_ELEMS, itself a multiple
+     * of 8). WITHIN a chunk, walk per-RUN -- a run is the span from the
+     * current index to min(chunkEnd, groupEnd) -- so the scale is derived
+     * once per run (one `idx / groupSize` division), never per element. */
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
-        for (size_t i = 0; i < count; i++) {
-            codes[i] = clampInt32(roundByMode(values[off + i] / scale, outQC->roundingMode),
-                                  (int32_t)qMin, (int32_t)qMax);
+        size_t chunkEnd = off + count;
+        size_t idx = off;
+        while (idx < chunkEnd) {
+            size_t g = idx / groupSize;
+            size_t groupEnd = (g + 1) * groupSize;
+            size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
+            size_t runLen = runEnd - idx;
+            const float scale = outQC->scales[g];
+            for (size_t i = 0; i < runLen; i++) {
+                codes[idx - off + i] =
+                    clampInt32(roundByMode(values[idx + i] / scale, outQC->roundingMode),
+                               (int32_t)qMin, (int32_t)qMax);
+            }
+            idx = runEnd;
         }
         packChunkGuarded(codes, count, dst, outQC->qBits, off, what);
     }
@@ -685,6 +798,13 @@ void convertSymInt32TensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTen
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     symInt32QConfig_t *inQC = inputTensor->quantization->qConfig;
     symQConfig_t *outQC = outputTensor->quantization->qConfig;
+    if (outQC->numGroups > 1) {
+        PRINT_ERROR("convertSymInt32TensorToSymTensor: grouped SYM target (numGroups=%zu) has no "
+                    "scalar compute image; target a per-tensor SYM config, or dequantize "
+                    "SYM_INT32->FLOAT32 first then FLOAT32->SYM(grouped)",
+                    outQC->numGroups);
+        exit(1);
+    }
     float inScale = inQC->scale;
     const int32_t *in = (const int32_t *)inputTensor->data;
     /* pass 1: absmax over dequantized values (requantSymInt32Tensor precedent) */
@@ -717,6 +837,14 @@ void repackSymInt32ToSymNoRescale(tensor_t *inputTensor, tensor_t *outputTensor)
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     symInt32QConfig_t *inQC = inputTensor->quantization->qConfig;
     symQConfig_t *outQC = outputTensor->quantization->qConfig;
+    if (outQC->numGroups > 1) {
+        PRINT_ERROR("repackSymInt32ToSymNoRescale: grouped SYM target (numGroups=%zu) has no "
+                    "no-rescale repack image (a single carried scale cannot fan out to per-group "
+                    "scales); target a per-tensor SYM config, or use the rescale route "
+                    "(convertSymInt32TensorToSymTensor) into a per-tensor target",
+                    outQC->numGroups);
+        exit(1);
+    }
     outQC->scales[0] = inQC->scale;
     const int32_t *in = (const int32_t *)inputTensor->data;
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
@@ -1102,7 +1230,20 @@ static void convertTensorsWithSameType(tensor_t *inputTensor, tensor_t *outputTe
     case SYM: {
         symQConfig_t *inputSymQC = inputTensor->quantization->qConfig;
         symQConfig_t *outputSymQC = outputTensor->quantization->qConfig;
-        outputSymQC->scales[0] = inputSymQC->scales[0];
+        /* Group-quant PR2: dest->scales is a fixed-size (numGroups-element) heap
+         * array -- a numGroups mismatch means src's group shape doesn't fit
+         * dest's array, so this must fail fast rather than over/under-copy
+         * (mirrors copySymQConfigInto, Tensor.c ~:442-459). groupSize is
+         * adopted from src unconditionally, same precedent. */
+        if (outputSymQC->numGroups != inputSymQC->numGroups) {
+            PRINT_ERROR("convertTensorsWithSameType: SYM group-shape mismatch (dest "
+                        "numGroups=%zu groupSize=%zu, src numGroups=%zu groupSize=%zu)",
+                        outputSymQC->numGroups, outputSymQC->groupSize, inputSymQC->numGroups,
+                        inputSymQC->groupSize);
+            exit(1);
+        }
+        memcpy(outputSymQC->scales, inputSymQC->scales, inputSymQC->numGroups * sizeof(float));
+        outputSymQC->groupSize = inputSymQC->groupSize;
         break;
     }
     case ASYM: {

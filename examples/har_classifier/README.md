@@ -155,7 +155,7 @@ bucket rather than getting its own key.
 
 `train_c_finetune.c` (target `train_c_har_classifier_finetune`) demonstrates
 layer freezing end to end. **Stage 1** trains the full model exactly like
-`train_c.c` and serializes it (`serializeModel`, ODTS v3) to
+`train_c.c` and serializes it (`serializeModel`, ODTS v4) to
 `outputs/har_pretrained.odts`. **Stage 2** rebuilds the identical topology but
 with `.trainable = TRAINABLE_FALSE` on the three Conv1d factories, loads the
 stage-1 checkpoint into it (deserialization is grad-presence *tolerant*: a

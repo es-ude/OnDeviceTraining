@@ -306,10 +306,12 @@ Wire format: `"ODTR"` magic, `u32 version(=2)`, `u32 numClasses`, then per
 class: `u32 dim`, `u32 rank`, `u32 count`, `f32 sigma2`, `f32 totalVar`,
 followed by the three tensors (`mean`, `basis`, `eigvals`) via the existing
 tensor-tier `serializeTensor`/`deserializeTensor`. Since v2 (#370) every
-scalar is fixed-width little-endian via the checked `SerialWire` primitives,
-matching the embedded ODTS v2/v3 tensor records (the tensor-tier record
-format is unchanged between the two; v3 only adds a leading grad-presence
-byte per parameter, #380).
+scalar is fixed-width little-endian via the checked `SerialWire` primitives.
+The embedded tensor records follow the CURRENT ODTS tensor-tier layout —
+since group-quant PR1 that means the v4 SYM qconfig record (numGroups/
+groupSize/scales[]); the ODTR container version does NOT track ODTS record
+changes (an old checkpoint with SYM tensors fails only via downstream
+guards — formal linkage tracked in #401).
 
 **Deserialize fills a pre-built skeleton in place** — it does not allocate a
 set for you. Build the skeleton with `ppcaReplaySetCreate(numClasses, cfg)`

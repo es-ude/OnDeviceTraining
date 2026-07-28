@@ -205,7 +205,7 @@ Notes on the qualified cells:
   FLOAT32/BOOL = type byte only; SYM_INT32/SYM/ASYM carry scale + rounding + bits [+
   zeroPoint]). Packed tensor data (SYM/ASYM sub-byte, BOOL 1-bit) is byte-tight via
   `calcNumberOfBytesForData` and round-trips exactly.
-- **Model format** — `"ODTS"` magic + `version` (=3) + `layerCount` + per-layer type
+- **Model format** — `"ODTS"` magic + `version` (=4) + `layerCount` + per-layer type
   tag. Deserialize fail-fasts on magic / version / count / tag mismatch. Since v2
   (#370) every count/dim/kernel field is `u32` little-endian via the checked
   `SerialWire` primitives (ASYM zeroPoint: `i32` LE), so a 64-bit host writes files a
@@ -216,7 +216,10 @@ Notes on the qualified cells:
   into a frozen skeleton parses-and-discards the grad record (`skipSerializedTensor`,
   no allocation, stream stays in sync for the next record) and file hasGrad=0 into a
   trainable skeleton leaves its already-zeroed grad untouched — this path requires a
-  seekable stream (fseek/ftell).
+  seekable stream (fseek/ftell). Since v4 (group-quant PR1) the SYM qconfig record is
+  `u32 numGroups`, `u32 groupSize`, `f32 scales[numGroups]`, `u8 qBits`, `u8 rounding`
+  (PR1 writes numGroups=1/groupSize=0 only; file-vs-skeleton numGroups mismatch and
+  sentinel violations fail fast until PR2 relaxes them).
 - **Contract** — deserialize **fills a pre-constructed model in place** (no allocation
   in the serial path); the caller must build a matching model first. A tensor record
   whose file dtype, rank, or payload size mismatches the pre-built skeleton fail-fasts
@@ -322,7 +325,10 @@ checkpointing, limitations, literature).
 - **Quantization machinery** — the 4-phase `executeOp` funnel + `executeConvert`, a
   6×6 `conversionMatrix` (every FLOAT32/INT32/SYM_INT32/SYM/ASYM pair; BOOL unsupported
   in every direction), grad-accumulate modes, and `quantizeFloatToAsym` as the single
-  `*→ASYM` helper.
+  `*→ASYM` helper. `symQConfig_t` is **always-array** (group-quant PR1, spec
+  `docs/superpowers/specs/2026-07-28-group-quantization-design.md`): `scales[numGroups]`
+  with per-tensor = numGroups 1 / groupSize 0 sentinel — group-granular scales (>1)
+  land with the epic's PR2+; `symInt32QConfig_t` (compute/wires) stays scalar by design.
 - **Weight init** — PyTorch-compatible: `INIT_DEFAULT` reproduces
   `kaiming_uniform_(a=√5)`, plus kaiming/xavier schemes (`weightInit_t`). FLOAT32-only.
 - **userApi** — `inference` (single/batched/with-loss), `StateDictApi` (weight **load**

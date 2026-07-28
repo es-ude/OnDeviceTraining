@@ -140,7 +140,10 @@ Notes on the qualified cells:
   `conversionMatrix` covers for that dtype (BOOL has no conversion cell in either
   direction).
 - **Features**: learning rate, coupled L2 weight decay (SGD) or decoupled weight
-  decay (AdamW), classic heavy-ball momentum (SGD, no Nesterov/dampening),
+  decay (AdamW), PyTorch-convention momentum (SGD: `v = μ·v + g`, `p -= lr·v`; no
+  Nesterov, no dampening — NOT classic Polyak heavy ball: the trajectories
+  coincide only at constant LR, and under an LR schedule the effective momentum
+  term is rescaled by `lr_t/lr_{t-1}`, exactly as in `torch.optim.SGD`),
   per-parameter momentum state (2 states for Linear/Conv/ConvT/LayerNorm, 0 for the
   rest, and 0 for every parameter when `momentumFactor == 0`), dtype-aware
   `scaleOptimizerGradients` (O(1) scale fold for quantized grads), and

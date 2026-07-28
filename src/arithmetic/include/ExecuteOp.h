@@ -67,6 +67,21 @@ typedef struct opSpec {
      * pointer equality; overlapping sub-views (raw-pointer tensor wiring) are
      * outside the contract. */
     bool writesInPlaceSafe;
+    /* Group-quant PR2 (Task 3): opt-in for a grouped SYM operand (symQConfig_t
+     * numGroups > 1) under ARITH_SYM_INT32. Zero-init (false) = DENY — a
+     * grouped SYM input reaching the prologue without this flag fail-fasts
+     * (only the group-aware forward paths accept grouped weights in PR2;
+     * backward/optimizer land in PR3). When true, the prologue unpacks the
+     * operand's mantissas (unpackSignExtend, sign-extended raw int32 — the
+     * same mechanics the SYM->SYM_INT32 conversionMatrix cell would use, were
+     * it not fail-fasting on grouped sources) into scratch and POISONS the
+     * scratch symInt32QConfig_t's scale to 1.0f and qMaxBits to the source's
+     * qBits: a grouped operand has no single scalar scale, so any kernel
+     * reading scratch->quantization->scale here is a bug — group-aware
+     * kernels MUST take per-group scales from their own ctx (e.g. Matmul's
+     * weightGroups), never this field. Set together with a ctx that actually
+     * carries the group shape (Linear.c: both or neither). */
+    bool allowGroupedSymOperands;
 } opSpec_t;
 
 void executeOp(const opSpec_t *spec, tensor_t *target);

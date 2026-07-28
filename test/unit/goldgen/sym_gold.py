@@ -124,6 +124,85 @@ def stable_dequant_grouped(values, q_bits: int, group_size: int):
     return codes, scales, deq
 
 
+# ---- Group-quant PR2 Task 3: grouped-weight GEMM reference (GGUF rescale-
+# combine pattern), matmulSymInt32TensorsGroupedWeight's kernel emulation. ----
+
+
+def rescale_f32(param_q: int, param_scale: float, accumulator_scale: float) -> int:
+    """Mirrors rescaleIntoAccumulatorScale(..., HALF_AWAY) (Rounding.c):
+    float rescaled = (float)paramQ * paramScale / accumulatorScale;
+    return roundByMode(rescaled, HALF_AWAY); -- every intermediate stays in
+    float32 (torch.float32 tensors), matching the C `float` arithmetic
+    left-to-right (multiply THEN divide), not a float64 shortcut."""
+    pq = torch.tensor(float(param_q), dtype=torch.float32)
+    ps = torch.tensor(param_scale, dtype=torch.float32)
+    acc_s = torch.tensor(accumulator_scale, dtype=torch.float32)
+    rescaled = pq * ps / acc_s
+    return int(round_half_away(rescaled).item())
+
+
+def combine_quotient_f32(param_q: int, param_scale: float, accumulator_scale: float) -> float:
+    """The float32 quotient BEFORE rounding (rescale_f32's `rescaled`) -- used
+    by generators to self-check that a fixture actually exercises a rounding
+    decision (|frac| >= 0.5, where round-half-away and truncate-toward-zero
+    diverge), not just to compute the final int."""
+    pq = torch.tensor(float(param_q), dtype=torch.float32)
+    ps = torch.tensor(param_scale, dtype=torch.float32)
+    acc_s = torch.tensor(accumulator_scale, dtype=torch.float32)
+    return (pq * ps / acc_s).item()
+
+
+def matmul_grouped_ref(a_mantissas, a_scale: float, w_mantissas, w_scales, group_size: int,
+                       out_rows: int, out_cols: int, reduce_len: int,
+                       bias_mantissas=None, bias_scale=None, bias_rounding_mode="HALF_AWAY"):
+    """Emulates matmulSymInt32TensorsGroupedWeight/matmulIntCoreGrouped exactly:
+    python-int MACs per group (exact, arbitrary precision), a rescale-combine
+    at every group boundary AND at the end of the reduction (`rescale_f32`),
+    bias seeded via the same rescale primitive. `w_mantissas` is `b`'s
+    STORAGE-order flat array (row `c` of length `reduce_len` = output channel
+    c's weights, contiguous -- the GEMM-weight wiring Linear.c always
+    produces via transposeTensor(w,0,1)); `w_idx = c * reduce_len + k` is
+    therefore the SAME physical index matmulIntCoreGrouped derives via
+    calcElementIndexByIndices. `a_mantissas` is `a`'s row-major [out_rows,
+    reduce_len] flat array. Only HALF_AWAY is emulated (bias_rounding_mode is
+    accepted for signature symmetry with the C bias seed's own roundingMode
+    field but must be "HALF_AWAY" -- SR_HALF_AWAY needs the C RNG stream and
+    is exercised in C directly, see testMatmulGroupedHonorsOpRoundingMode).
+    Returns (out_mantissas flat list [out_rows*out_cols], s_acc)."""
+    assert bias_rounding_mode == "HALF_AWAY", "matmul_grouped_ref only emulates HALF_AWAY"
+    max_scale = max(w_scales)
+    s_acc = (torch.tensor(a_scale, dtype=torch.float32) *
+            torch.tensor(max_scale, dtype=torch.float32)).item()
+
+    out = []
+    for r in range(out_rows):
+        for c in range(out_cols):
+            acc = 0
+            if bias_mantissas is not None:
+                acc = rescale_f32(bias_mantissas[c], bias_scale, s_acc)
+            partial = 0
+            current_group = None
+            for k in range(reduce_len):
+                w_idx = c * reduce_len + k
+                g = w_idx // group_size
+                if g != current_group:
+                    if current_group is not None:
+                        param_scale = (torch.tensor(a_scale, dtype=torch.float32) *
+                                      torch.tensor(w_scales[current_group],
+                                                   dtype=torch.float32)).item()
+                        acc += rescale_f32(partial, param_scale, s_acc)
+                    partial = 0
+                    current_group = g
+                a_val = a_mantissas[r * reduce_len + k]
+                w_val = w_mantissas[w_idx]
+                partial += a_val * w_val
+            param_scale = (torch.tensor(a_scale, dtype=torch.float32) *
+                          torch.tensor(w_scales[current_group], dtype=torch.float32)).item()
+            acc += rescale_f32(partial, param_scale, s_acc)
+            out.append(acc)
+    return out, s_acc
+
+
 # ---- int12 operand helpers (#227 operand flip; default quantizationInitSymInt32
 # tensors carry qMaxBits = ODT_SYM_OPERAND_QMAXBITS = 12). Additive: existing
 # int16-era users above keep their semantics; pool/conv generators use these. ----

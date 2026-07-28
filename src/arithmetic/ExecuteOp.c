@@ -253,13 +253,43 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
         }
         if (arithmetic.type == ARITH_FLOAT32) {
             initFloat32Quantization(&scratchQ[i]);
+            setTensorValuesForConversion(&scratch[scratchOffset], &scratchQ[i], inputs[i],
+                                         &scratchTensors[i]);
+            convertTensor(inputs[i], &scratchTensors[i]);
         } else { /* ARITH_SYM_INT32 — validated above */
             initSymInt32QConfig(arithmetic.roundingMode, &scratchQC[i]);
             initSymInt32Quantization(&scratchQC[i], &scratchQ[i]);
+            setTensorValuesForConversion(&scratch[scratchOffset], &scratchQ[i], inputs[i],
+                                         &scratchTensors[i]);
+
+            /* Group-quant PR2 (Task 3): a grouped SYM operand (numGroups > 1)
+             * has no scalar compute image — the SYM->SYM_INT32
+             * conversionMatrix cell fail-fasts on it (Task 2). Intercept it
+             * HERE, before convertTensor would ever reach that cell. */
+            symQConfig_t *symQC = (inputs[i]->quantization->type == SYM)
+                                      ? (symQConfig_t *)inputs[i]->quantization->qConfig
+                                      : NULL;
+            if (symQC != NULL && symQC->numGroups > 1) {
+                if (!spec->allowGroupedSymOperands) {
+                    PRINT_ERROR(
+                        "executeOp: grouped SYM operand (numGroups=%zu) reached an op without "
+                        "group support — only the group-aware forward paths accept grouped "
+                        "weights in PR2 (backward/optimizer land in PR3)",
+                        symQC->numGroups);
+                    exit(1);
+                }
+                size_t n = calcNumberOfElementsByTensor(inputs[i]);
+                unpackSignExtend(inputs[i]->data, symQC->qBits, 0,
+                                 (int32_t *)scratchTensors[i].data, n);
+                /* Poison: a grouped operand has no single scalar scale — the
+                 * group-aware kernel MUST read per-group scales via its own
+                 * ctx (e.g. Matmul's weightGroups), never this field. */
+                scratchQC[i].scale = 1.0f;
+                scratchQC[i].qMaxBits = symQC->qBits;
+            } else {
+                convertTensor(inputs[i], &scratchTensors[i]);
+            }
         }
-        setTensorValuesForConversion(&scratch[scratchOffset], &scratchQ[i], inputs[i],
-                                     &scratchTensors[i]);
-        convertTensor(inputs[i], &scratchTensors[i]);
         ops[i] = &scratchTensors[i];
         scratchOffset += rowBytes[i];
     }

@@ -1331,6 +1331,112 @@ void testExecuteConvertFloatToSymMatchesConvertTensor(void) {
     TEST_ASSERT_EQUAL_INT32_ARRAY(want, got, 3);
 }
 
+/* ---- Group-quant PR2 (Task 3): funnel grouped-operand gate ------------- */
+
+/* Packed grouped SYM tensor: mantissas packed verbatim (byteConversion),
+ * per-group scales written directly (Task 1's quantizationInitSymGrouped
+ * allocates scales[numGroups], initialized to 1.f each — overwritten here). */
+static tensor_t *buildPackedSymGrouped(size_t n, const int32_t *mantissas, uint8_t qBits,
+                                       size_t numGroups, size_t groupSize, const float *scales) {
+    size_t *dims = reserveMemory(sizeof(size_t));
+    dims[0] = n;
+    size_t *order = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    tensor_t *t =
+        initTensor(shape, quantizationInitSymGrouped(qBits, HALF_AWAY, numGroups, groupSize), NULL);
+    byteConversion((uint8_t *)mantissas, 32, t->data, qBits, n);
+    symQConfig_t *qc = t->quantization->qConfig;
+    for (size_t g = 0; g < numGroups; g++) {
+        qc->scales[g] = scales[g];
+    }
+    return t;
+}
+
+/* Default-deny death test: a grouped SYM input (numGroups=2) reaching an
+ * ARITH_SYM_INT32 op WITHOUT allowGroupedSymOperands must fail-fast, not
+ * silently misinterpret the operand via the SYM->SYM_INT32 conversionMatrix
+ * cell (which itself fail-fasts on grouped sources, Task 2) or any other
+ * path. */
+void testExecuteOpRejectsGroupedSymOperandByDefault(void) {
+    ASSERT_EXITS_WITH_FAILURE({
+        tensor_t *in = buildPackedSymGrouped(8, (int32_t[]){1, -2, 3, -4, 5, -6, 7, -8}, 6, 2, 4,
+                                             (float[]){0.1f, 0.2f});
+        tensor_t *out = buildSym(8, (int32_t[]){0, 0, 0, 0, 0, 0, 0, 0}, 1.0f);
+        quantization_t arith;
+        symInt32QConfig_t arithQC;
+        initSymInt32QConfig(HALF_AWAY, &arithQC);
+        initSymInt32Quantization(&arithQC, &arith);
+
+        executeOp(
+            &(opSpec_t){
+                .kernel = executeOpIdentityKernel,
+                .inputs = (tensor_t *[]){in},
+                .nInputs = 1,
+                .arithmetic = arithmeticFromQuantization(&arith),
+                .mode = OUT_WRITE,
+                /* allowGroupedSymOperands intentionally NOT set (zero-init = deny) */
+            },
+            out);
+    });
+}
+
+static int32_t g_capturedGroupedMantissas[8];
+static float g_capturedGroupedScale;
+static uint8_t g_capturedGroupedQMaxBits;
+
+static void captureGroupedOperandKernel(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
+                                        tensor_t *auxOut, const void *ctx) {
+    (void)nOperands;
+    (void)auxOut;
+    (void)ctx;
+    size_t n = calcNumberOfElementsByTensor(operands[0]);
+    for (size_t i = 0; i < n; i++) {
+        g_capturedGroupedMantissas[i] = ((int32_t *)operands[0]->data)[i];
+    }
+    symInt32QConfig_t *qc = operands[0]->quantization->qConfig;
+    g_capturedGroupedScale = qc->scale;
+    g_capturedGroupedQMaxBits = qc->qMaxBits;
+    /* rawOut written deterministically (zero) -- this test only inspects the
+     * PROLOGUE's scratch, not the epilogue. */
+    size_t outN = calcNumberOfElementsByTensor(rawOut);
+    for (size_t i = 0; i < outN; i++) {
+        ((int32_t *)rawOut->data)[i] = 0;
+    }
+}
+
+/* Allowed path: allowGroupedSymOperands=true unpacks the grouped SYM operand
+ * into scratch — mantissas equal the packed codes (sign-extended), scratch
+ * scale is poisoned to 1.0f (never a real scale), qMaxBits carries the
+ * source's qBits. */
+void testExecuteOpUnpacksGroupedSymWhenAllowed(void) {
+    int32_t mantissas[] = {1, -2, 3, -4, 5, -6, 7, -8};
+    tensor_t *in = buildPackedSymGrouped(8, mantissas, 6, 2, 4, (float[]){0.1f, 0.2f});
+    tensor_t *out = buildSym(8, (int32_t[]){0, 0, 0, 0, 0, 0, 0, 0}, 1.0f);
+    quantization_t arith;
+    symInt32QConfig_t arithQC;
+    initSymInt32QConfig(HALF_AWAY, &arithQC);
+    initSymInt32Quantization(&arithQC, &arith);
+
+    executeOp(
+        &(opSpec_t){
+            .kernel = captureGroupedOperandKernel,
+            .inputs = (tensor_t *[]){in},
+            .nInputs = 1,
+            .arithmetic = arithmeticFromQuantization(&arith),
+            .mode = OUT_WRITE,
+            .allowGroupedSymOperands = true,
+        },
+        out);
+
+    freeTensor(out);
+    freeTensor(in);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(mantissas, g_capturedGroupedMantissas, 8);
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, g_capturedGroupedScale);
+    TEST_ASSERT_EQUAL_UINT8(6, g_capturedGroupedQMaxBits);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testProloguePassesMatchingOperandThroughUntouched);
@@ -1365,5 +1471,7 @@ int main(void) {
     RUN_TEST(testExecuteOpDoesNotAliasWhenTargetIsAnInput);
     RUN_TEST(testExecuteOpAliasesSelfTargetWithWritesInPlaceSafe);
     RUN_TEST(testExecuteOpNeverAliasesSymTarget);
+    RUN_TEST(testExecuteOpRejectsGroupedSymOperandByDefault);
+    RUN_TEST(testExecuteOpUnpacksGroupedSymWhenAllowed);
     return UNITY_END();
 }

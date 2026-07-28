@@ -24,6 +24,19 @@ add_custom_command(
 add_custom_target(generate_expected_conv_transpose_1d_kernel
         DEPENDS ${GEN_CONVT_1D_KERNEL_HEADER})
 
+set(GEN_GROUP_MATMUL_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_group_matmul.h)
+add_custom_command(
+        OUTPUT ${GEN_GROUP_MATMUL_HEADER}
+        COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_group_matmul.py
+                --out ${GEN_GROUP_MATMUL_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_group_matmul.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+        COMMENT "Generating expected_group_matmul.h via PyTorch"
+        VERBATIM
+)
+add_custom_target(generate_expected_group_matmul
+        DEPENDS ${GEN_GROUP_MATMUL_HEADER})
+
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Add
@@ -123,8 +136,12 @@ add_elastic_ai_unit_test(
         MORE_LIBS
         Arithmetic
         Tensor
+        Quantization
+        RNG
         odt_test_death
 )
+add_dependencies(UnitTestMatmul generate_expected_group_matmul)
+target_include_directories(UnitTestMatmul PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST

@@ -50,9 +50,26 @@ void linearForwardSymInt32(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *
     transposeTensor(w, 0, 1);
 }
 
+/* Group-quant PR2 (Task 3): `w` here is the executeOp prologue's grouped-SYM
+ * scratch (unpacked mantissas, poisoned scale=1.0f — matmulSymInt32Tensors-
+ * GroupedWeight ignores it, reading real per-group scales from
+ * `weightGroups` instead). Same transpose dance as linearForwardSymInt32:
+ * groups bind to STORAGE order, which transposeTensor exposes as the
+ * physically-innermost (contiguous) axis for the reduction. */
+void linearForwardSymInt32Grouped(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output,
+                                  const symQConfig_t *weightGroups) {
+    transposeTensor(w, 0, 1);
+    matmulSymInt32TensorsGroupedWeight(input, w, b, output, weightGroups);
+    transposeTensor(w, 0, 1);
+}
+
 /* executeOp forward kernel adapters — operands are {input, weights} or
  * {input, weights, bias} (bias omitted, not NULL-padded, when the layer has
- * no bias); ctx unused (matmul infers geometry from the tensors themselves). */
+ * no bias); ctx unused (matmul infers geometry from the tensors themselves),
+ * EXCEPT linearForwardKernelSym: ctx carries the stored weight's own
+ * symQConfig_t* (non-NULL) iff it is grouped SYM (linearForward sets ctx +
+ * allowGroupedSymOperands together, see below) — that routes to the grouped
+ * matmul entry instead of the scalar one. */
 static void linearForwardKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                                      const void *ctx) {
     (void)auxOut;
@@ -63,9 +80,13 @@ static void linearForwardKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut,
 static void linearForwardKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                                    const void *ctx) {
     (void)auxOut;
-    (void)ctx;
     tensor_t *bias = (n > 2) ? ops[2] : NULL;
-    linearForwardSymInt32(ops[1], bias, ops[0], rawOut);
+    const symQConfig_t *weightGroups = (const symQConfig_t *)ctx;
+    if (weightGroups != NULL) {
+        linearForwardSymInt32Grouped(ops[1], bias, ops[0], rawOut, weightGroups);
+    } else {
+        linearForwardSymInt32(ops[1], bias, ops[0], rawOut);
+    }
 }
 
 void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output) {
@@ -74,15 +95,30 @@ void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output) {
     tensor_t *weights = getParamFromParameter(linearConfig->weights);
     tensor_t *bias = linearConfig->bias != NULL ? getParamFromParameter(linearConfig->bias) : NULL;
 
+    /* Group-quant PR2: a stored SYM weight with numGroups > 1 routes the SYM
+     * kernel adapter to the grouped matmul entry (weightGroups carried via
+     * ctx) AND opts the funnel's prologue into unpacking the grouped operand
+     * (allowGroupedSymOperands) — always together, never independently (an
+     * unpack without the routing has nowhere group-shaped to go; the
+     * routing without the unpack would hand the kernel a still-packed
+     * tensor). Per-tensor SYM (numGroups==1) and SYM_INT32 weights are
+     * untouched — ctx stays NULL, exactly like before this PR. */
+    bool grouped = weights->quantization->type == SYM &&
+                   ((symQConfig_t *)weights->quantization->qConfig)->numGroups > 1;
+    const symQConfig_t *weightGroups =
+        grouped ? (const symQConfig_t *)weights->quantization->qConfig : NULL;
+
     executeOp(
         &(opSpec_t){
             .kernel = linearConfig->forwardMath.type == ARITH_SYM_INT32 ? linearForwardKernelSym
                                                                         : linearForwardKernelFloat,
+            .ctx = weightGroups,
             .inputs = bias != NULL ? (tensor_t *[]){input, weights, bias}
                                    : (tensor_t *[]){input, weights},
             .nInputs = bias != NULL ? 3 : 2,
             .arithmetic = linearConfig->forwardMath,
             .mode = OUT_WRITE,
+            .allowGroupedSymOperands = grouped,
         },
         output);
 }

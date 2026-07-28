@@ -1957,6 +1957,196 @@ void testLinearForwardWithoutBiasDoesNotCrash(void) {
     TEST_ASSERT_EQUAL_FLOAT(-7.f, out1); /*  4*0 + 5*1 + -6*2 = -7 */
 }
 
+/* ---- Group-quant PR2 (Task 3): Linear forward with a grouped SYM weight -
+ *
+ * Same fixture as UnitTestMatmul.c's testMatmulGroupedWeightPerChannelMatchesGold
+ * (test/unit/arithmetic/generate_expected_group_matmul.py's "perChannel" case:
+ * 2x6 input, 3x6 weight, groupSize=6 == the full reduction length per output
+ * channel -- exactly ONE combine per output element). The numbers are
+ * duplicated here rather than sharing the generated header across two
+ * unrelated test binaries/directories (no existing precedent for that in
+ * this tree, see the per-directory CMakeLists.txt files) — kept in sync
+ * manually; if the shared fixture ever changes, update both call sites. */
+static const int32_t kGroupedAMantissas[] = {1, -2, 3, -1, 2, -3, 2, 1, -1, 3, -2, 1};
+static const float kGroupedAScale = 0.5f;
+static const int32_t kGroupedWMantissas[] = {4, -3, 2, -1, 5, -2, 1,  2, -4,
+                                             3, -1, 2, -2, 3, 1,  -5, 4, -3};
+static const float kGroupedWScales[] = {0.019999999552965164f, 0.05000000074505806f,
+                                        0.009999999776482582f};
+static const int32_t kGroupedBiasMantissas[] = {10, -5, 3};
+static const float kGroupedBiasScale = 0.1f;
+static const int32_t kGroupedOutMantissas[] = {53, -46, 15, 35, 1, 6};
+static const float kGroupedOutScale = 0.02500000037252903f;
+
+/*! Builds the shared grouped-SYM weight/bias/input parameters (borrowed,
+ *  caller frees via freeLinearLayer + freeTensor(input) as usual). `q` is
+ *  the layer's forward arithmetic (SYM_INT32 or FLOAT32 — independent of the
+ *  weight tensor's OWN grouped-SYM storage, exactly like every other SYM
+ *  Linear fixture in this file: `q` only derives forwardMath/outputQ). */
+static layer_t *buildGroupedFixtureLayer(quantization_t *q, tensor_t **inputOut) {
+    size_t *weightDims = reserveMemory(2 * sizeof(size_t));
+    weightDims[0] = 3;
+    weightDims[1] = 6;
+    size_t *weightOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, weightOrder);
+    shape_t *weightShape = reserveMemory(sizeof(shape_t));
+    setShape(weightShape, weightDims, 2, weightOrder);
+    tensor_t *weightsParam =
+        initTensor(weightShape, quantizationInitSymGrouped(8, HALF_AWAY, 3, 6), NULL);
+    byteConversion((uint8_t *)kGroupedWMantissas, 32, weightsParam->data, 8, 18);
+    symQConfig_t *weightQC = weightsParam->quantization->qConfig;
+    for (size_t g = 0; g < 3; g++) {
+        weightQC->scales[g] = kGroupedWScales[g];
+    }
+    parameter_t *weights = parameterInit(weightsParam, NULL);
+
+    size_t *biasDims = reserveMemory(sizeof(size_t));
+    biasDims[0] = 3;
+    size_t *biasOrder = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, biasOrder);
+    shape_t *biasShape = reserveMemory(sizeof(shape_t));
+    setShape(biasShape, biasDims, 1, biasOrder);
+    tensor_t *biasParam = initTensor(biasShape, quantizationInitSymInt32(HALF_AWAY), NULL);
+    for (size_t i = 0; i < 3; i++) {
+        ((int32_t *)biasParam->data)[i] = kGroupedBiasMantissas[i];
+    }
+    ((symInt32QConfig_t *)biasParam->quantization->qConfig)->scale = kGroupedBiasScale;
+    parameter_t *bias = parameterInit(biasParam, NULL);
+
+    size_t *inputDims = reserveMemory(2 * sizeof(size_t));
+    inputDims[0] = 2;
+    inputDims[1] = 6;
+    size_t *inputOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, inputOrder);
+    shape_t *inputShape = reserveMemory(sizeof(shape_t));
+    setShape(inputShape, inputDims, 2, inputOrder);
+    tensor_t *input = initTensor(inputShape, quantizationInitSymInt32(HALF_AWAY), NULL);
+    for (size_t i = 0; i < 12; i++) {
+        ((int32_t *)input->data)[i] = kGroupedAMantissas[i];
+    }
+    ((symInt32QConfig_t *)input->quantization->qConfig)->scale = kGroupedAScale;
+    *inputOut = input;
+
+    return buildBorrowedLinearLayer(weights, bias, q);
+}
+
+/* Compares DEQUANTIZED values, not raw mantissas/scale: the funnel's
+ * OUT_WRITE epilogue for a SYM_INT32 target ALWAYS requants through the
+ * conversionMatrix diagonal (requantSymInt32Tensor, TensorConversion.c) —
+ * same-dtype SYM_INT32->SYM_INT32 is never a raw memmove (ExecuteOp.c's
+ * writeOutConversion doc). That cell derives a FRESH scale from a
+ * whole-tensor absmax over the kernel's raw output and re-encodes at int12
+ * width, so the mantissas/scale captured here differ from
+ * matmulSymInt32TensorsGroupedWeight's OWN raw output (kGroupedOutMantissas
+ * at kGroupedOutScale, pinned directly in UnitTestMatmul.c's
+ * testMatmulGroupedWeightPerChannelMatchesGold) by design — exactly like
+ * every OTHER SYM Linear forward test in this file (e.g.
+ * testLinearForwardSymInt32 above), which all compare via convertTensor to
+ * FLOAT32 + a tolerance rather than raw mantissas. Tolerance: 1.0 *
+ * kGroupedOutScale (the kernel's own rescale-combine rounding, see the
+ * float-path test below) + one more HALF_AWAY rounding at the requant's
+ * fresh scale (max(|kGroupedOutMantissas|)=53, int12 qMax=2047). */
+void testLinearForwardGroupedSymWeights(void) {
+    quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
+    tensor_t *input = NULL;
+    layer_t *linearLayer = buildGroupedFixtureLayer(testQ, &input);
+
+    size_t *outputDims = reserveMemory(2 * sizeof(size_t));
+    outputDims[0] = 2;
+    outputDims[1] = 3;
+    size_t *outputOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, outputOrder);
+    shape_t *outputShape = reserveMemory(sizeof(shape_t));
+    setShape(outputShape, outputDims, 2, outputOrder);
+    tensor_t *output = initTensor(outputShape, quantizationInitSymInt32(HALF_AWAY), NULL);
+
+    linearForward(linearLayer, input, output);
+
+    size_t *outFloatDims = reserveMemory(2 * sizeof(size_t));
+    outFloatDims[0] = 2;
+    outFloatDims[1] = 3;
+    size_t *outFloatOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, outFloatOrder);
+    shape_t *outFloatShape = reserveMemory(sizeof(shape_t));
+    setShape(outFloatShape, outFloatDims, 2, outFloatOrder);
+    tensor_t *outputFloat = initTensor(outFloatShape, quantizationInitFloat(), NULL);
+    convertTensor(output, outputFloat);
+
+    float captured[6];
+    for (size_t i = 0; i < 6; i++) {
+        captured[i] = ((float *)outputFloat->data)[i];
+    }
+
+    freeTensor(outputFloat);
+    freeLinearLayer(linearLayer);
+    freeTensor(output);
+    freeTensor(input);
+    freeQuantization(testQ);
+
+    const float requantFreshScale = 53.0f / 2047.0f;
+    const float tolerance = 1.0f * kGroupedOutScale + 0.5f * requantFreshScale + 1e-6f;
+    for (size_t i = 0; i < 6; i++) {
+        float expected = (float)kGroupedOutMantissas[i] * kGroupedOutScale;
+        TEST_ASSERT_FLOAT_WITHIN(tolerance, expected, captured[i]);
+    }
+}
+
+/* FLOAT32 forward path on the SAME grouped-SYM weight/bias/input: the
+ * executeOp prologue dequantizes every mismatched operand via
+ * convertTensor (SYM(grouped)->FLOAT32 is convertSymTensorToFloat32Tensor,
+ * group-aware since Task 2), so this exercises Task 2's grouped dequant
+ * against Task 3's grouped SYM_INT32 forward with NO quantization noise of
+ * its own (both paths read the identical mantissas/scales — there is no
+ * separate "true float" source upstream of either path here).
+ *
+ * Tolerance derivation (per-channel fixture: exactly 2 rescale-combines per
+ * output element -- one weight-group combine, one bias combine):
+ *   Each rescaleIntoAccumulatorScale call rounds HALF_AWAY, so its output
+ *   (an integer count of sAcc-quanta) differs from the exact real-valued
+ *   contribution/sAcc by at most 0.5 (strictly less, except exactly at a
+ *   tie). Two independent combines contribute per output element, so the
+ *   SYM_INT32 path's integer accumulator differs from the exact real sum by
+ *   at most 0.5 + 0.5 = 1.0, i.e. the float output (acc * sAcc) differs from
+ *   the true value by at most 1.0 * sAcc = 1.0 * kGroupedOutScale. The
+ *   FLOAT32 path computes that true value directly (float32 dot product, no
+ *   combine rounding at all) up to float32 arithmetic noise, which is
+ *   ~1e-7 relative here and negligible next to the quantization-rounding
+ *   term above. Bound used: 1.0 * kGroupedOutScale (a small explicit
+ *   headroom -- 1e-6 absolute -- covers that residual float32 noise without
+ *   loosening the combine-rounding argument itself). */
+void testLinearForwardGroupedFloatPathAgreesWithinTolerance(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    tensor_t *input = NULL;
+    layer_t *linearLayer = buildGroupedFixtureLayer(floatQ, &input);
+
+    size_t *outputDims = reserveMemory(2 * sizeof(size_t));
+    outputDims[0] = 2;
+    outputDims[1] = 3;
+    size_t *outputOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, outputOrder);
+    shape_t *outputShape = reserveMemory(sizeof(shape_t));
+    setShape(outputShape, outputDims, 2, outputOrder);
+    tensor_t *output = initTensor(outputShape, quantizationInitFloat(), NULL);
+
+    linearForward(linearLayer, input, output);
+
+    float captured[6];
+    for (size_t i = 0; i < 6; i++) {
+        captured[i] = ((float *)output->data)[i];
+    }
+
+    freeLinearLayer(linearLayer);
+    freeTensor(output);
+    freeTensor(input);
+    freeQuantization(floatQ);
+
+    const float tolerance = 1.0f * kGroupedOutScale + 1e-6f;
+    for (size_t i = 0; i < 6; i++) {
+        float expected = (float)kGroupedOutMantissas[i] * kGroupedOutScale;
+        TEST_ASSERT_FLOAT_WITHIN(tolerance, expected, captured[i]);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLinearForwardFloat);
@@ -1998,5 +2188,7 @@ int main(void) {
     RUN_TEST(testLinearBackwardFrozenTwinPropLossIdenticalGradsZero);
     RUN_TEST(testLinearBackwardFrozenFactoryLayerRunsWithoutGradBuffers);
     RUN_TEST(testLinearBackwardNullPropLossComputesGradsOnly);
+    RUN_TEST(testLinearForwardGroupedSymWeights);
+    RUN_TEST(testLinearForwardGroupedFloatPathAgreesWithinTolerance);
     return UNITY_END();
 }

@@ -38,6 +38,12 @@ void linearInitConfig(linearConfig_t *linearConfig, parameter_t *weights, parame
 void linearForwardFloat(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output);
 // IMPORTANT: Assumes all tensors have SYM_INT32 quantization
 void linearForwardSymInt32(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output);
+/* Group-quant PR2 (Task 3): `w` is the executeOp prologue's unpacked grouped-
+ * SYM scratch (SYM_INT32 dtype, poisoned scale); `weightGroups` carries the
+ * real per-group scales/qBits/groupSize. Routed to by linearForwardKernelSym
+ * when the stored weight is grouped SYM — not a direct public entry point. */
+void linearForwardSymInt32Grouped(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output,
+                                  const symQConfig_t *weightGroups);
 // IMPORTANT: Used for mismatched quantizations
 void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output);
 

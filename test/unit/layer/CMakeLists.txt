@@ -13,6 +13,19 @@ add_custom_command(
 add_custom_target(generate_expected_conv1d
         DEPENDS ${GEN_CONV1D_HEADER})
 
+set(GEN_CONV1D_GROUPED_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_conv1d_grouped.h)
+add_custom_command(
+        OUTPUT ${GEN_CONV1D_GROUPED_HEADER}
+        COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_conv1d_grouped.py
+                --out ${GEN_CONV1D_GROUPED_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_conv1d_grouped.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+        COMMENT "Generating expected_conv1d_grouped.h via PyTorch"
+        VERBATIM
+)
+add_custom_target(generate_expected_conv1d_grouped
+        DEPENDS ${GEN_CONV1D_GROUPED_HEADER})
+
 set(GEN_CONV1D_TRANSPOSED_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_conv1d_transposed.h)
 add_custom_command(
         OUTPUT ${GEN_CONV1D_TRANSPOSED_HEADER}
@@ -64,11 +77,13 @@ add_elastic_ai_unit_test(
         Conv1dKernel
         ConvTranspose1dKernel
         Kernel
+        Quantization
         StorageApi
         odt_test_death
         odt_test_layer_builders
 )
 add_dependencies(UnitTestConv1d generate_expected_conv1d)
+add_dependencies(UnitTestConv1d generate_expected_conv1d_grouped)
 target_include_directories(UnitTestConv1d PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 add_elastic_ai_unit_test(

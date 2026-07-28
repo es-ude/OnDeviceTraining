@@ -1212,6 +1212,55 @@ void testConv1dTransposedBackwardNullPropLossComputesGradsOnly(void) {
                              "NULL round only skipped dx");
 }
 
+/* Group-quant PR2 (Task 4): ConvT1d's forward path gets NO code change --
+ * this death test pins that a grouped-SYM weight reaching
+ * conv1dTransposedForward still hits the Task-3 funnel's default-deny
+ * (ExecuteOp.c's allowGroupedSymOperands gate, zero-init == false here,
+ * unlike Conv1d.c/Linear.c which opt in), exactly as it did before Task 4
+ * existed. The scatter-core grouped entry (ConvT1d's own group-partial
+ * gather, mirror of Conv1dKernel's) is deferred to PR3 -- this is that
+ * pointer. Reuses the simplest existing SYM ConvT1d geometry
+ * (singleChannelWithBias's weightDims/inputDims/outputDims) with a trivial
+ * 2-element grouped weight (numGroups=2, groupSize=1, one scale per element)
+ * instead of a per-tensor one -- the funnel's prologue rejects it before any
+ * arithmetic runs, so the exact mantissas/scales are irrelevant. */
+void testConvT1dForwardGroupedWeightsFailFast(void) {
+    size_t weightDims[] = {1, 1, 2};
+    size_t *dims = reserveMemory(3 * sizeof(size_t));
+    memcpy(dims, weightDims, sizeof(weightDims));
+    size_t *order = reserveMemory(3 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(3, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 3, order);
+    tensor_t *weightParam =
+        initTensor(shape, quantizationInitSymGrouped(12, HALF_AWAY, 2, 1), NULL);
+    int32_t wMantissas[2] = {3, -5};
+    byteConversion((uint8_t *)wMantissas, 32, weightParam->data, 12, 2);
+    symQConfig_t *wQC = weightParam->quantization->qConfig;
+    wQC->scales[0] = 0.01f;
+    wQC->scales[1] = 0.02f;
+    parameter_t *weights = parameterInit(weightParam, NULL);
+
+    size_t inputDims[] = {1, 1, 3};
+    size_t outputDims[] = {1, 1, 4};
+    tensor_t *input = buildSymTensor(3, inputDims, NULL);
+    tensor_t *output = buildSymTensor(3, outputDims, NULL);
+
+    kernel_t kernel;
+    initKernel(&kernel, 2, VALID, 1, 1);
+    quantization_t *sq = quantizationInitSymInt32(HALF_AWAY);
+    conv1dTransposedConfig_t cfg;
+    static layerConfig_t lc;
+    static layer_t layer;
+    initConv1dTransposedConfigWithWeightsAndBias(&cfg, &kernel, weights, NULL, 1, 0, sq, sq, sq,
+                                                 sq);
+    layer.type = CONV1D_TRANSPOSED;
+    lc.conv1dTransposed = &cfg;
+    layer.config = &lc;
+
+    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedForward(&layer, input, output));
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -1251,5 +1300,6 @@ int main() {
     RUN_TEST(testConv1dTransposedBackwardFrozenTwinPropLossIdenticalGradsZero);
     RUN_TEST(testConv1dTransposedBackwardFrozenFactoryLayerRunsWithoutGradBuffers);
     RUN_TEST(testConv1dTransposedBackwardNullPropLossComputesGradsOnly);
+    RUN_TEST(testConvT1dForwardGroupedWeightsFailFast);
     return UNITY_END();
 }

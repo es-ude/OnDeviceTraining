@@ -305,3 +305,104 @@ def window_slice_1d(geom, out_pos):
     if first_k > last_k:
         return 0, 0
     return input_start + first_k * d, last_k - first_k + 1
+
+
+def window_slice_1d_full(geom, out_pos):
+    """Full windowSlice1dAt mirror: returns (first_valid_input_idx,
+    first_valid_kernel_offset, valid_count) -- the same three fields as the C
+    windowSlice1d_t struct. window_slice_1d (above) only returns the first two
+    of these collapsed into one value, which is enough for pool/conv
+    generators that only ever read AT the returned input index; a grouped-
+    weight reduction needs the actual kernel tap index (firstValidKernelOffset
+    + i) to bind each visited weight element to its STORAGE index, so this
+    variant exposes it directly instead of assuming it is always 0 (true only
+    for VALID padding, where every window is fully in-bounds)."""
+    input_start = out_pos * geom["stride"] - geom["pad_left"]
+    length = geom["input_length"]
+    if input_start >= length:
+        return 0, 0, 0
+    d = geom["dilation"]
+    first_k = 0 if input_start >= 0 else (-input_start + d - 1) // d
+    last_k = geom["kernel_size"] - 1
+    max_k = (length - 1 - input_start) // d
+    if max_k < last_k:
+        last_k = max_k
+    if first_k > last_k:
+        return 0, 0, 0
+    return input_start + first_k * d, first_k, last_k - first_k + 1
+
+
+# ---- Group-quant PR2 Task 4: grouped-weight Conv1d gather-core reference
+# (GGUF rescale-combine pattern), conv1dKernelSymInt32Grouped's kernel
+# emulation. Mirrors matmul_grouped_ref's running-partial idiom exactly, but
+# walks the (icOffset, kernelIdx) reduction via sliding-window geometry
+# instead of a flat dot product. ----
+
+
+def conv1d_grouped_ref(x_mantissas, in_scale: float, w_mantissas, w_scales, group_size: int,
+                       batch: int, in_channels: int, out_channels: int, kernel_size: int,
+                       input_length: int, stride: int = 1, dilation: int = 1,
+                       padding_type: str = "VALID", padding: int = 0,
+                       bias_mantissas=None, bias_scale=None):
+    """Emulates conv1dKernelSymInt32Grouped exactly: python-int MACs per group
+    (exact), a rescale-combine (rescale_f32, HALF_AWAY) at every group
+    boundary AND at the end of EACH (batch, outChannel, outPos) reduction --
+    conv-groups (the `groups` kernel param) is always 1 here (quantization
+    groups only; conv-groups>1 is out of this fixture's scope, see
+    Conv1dKernel.h). `w_mantissas` is [out_channels, in_channels, kernel_size]
+    row-major flat (weight storage index for (oc, ic, k) is
+    (oc*in_channels + ic)*kernel_size + k -- the SAME index
+    conv1dKernelSymInt32Grouped computes for its weight reads, since the
+    (icOffset, kernelIdx) nested-loop order visits it monotonically
+    increasing). `x_mantissas` is [batch, in_channels, input_length]
+    row-major flat. Asserts every window is fully valid (validCount ==
+    kernel_size for every out_pos) -- true for VALID padding, the only
+    padding this fixture uses; a partial window would still visit weight
+    storage monotonically (skipped taps just contribute nothing), but the
+    kernel-tap index bookkeeping below assumes the full range for simplicity.
+    Returns (out_mantissas flat [batch*out_channels*out_len], s_acc, out_len).
+    """
+    geom = window_geometry_1d(input_length, kernel_size, stride, dilation, padding_type, padding)
+    out_len = geom["out_len"]
+    max_scale = max(w_scales)
+    s_acc = (torch.tensor(in_scale, dtype=torch.float32) *
+            torch.tensor(max_scale, dtype=torch.float32)).item()
+
+    out = []
+    for b in range(batch):
+        for oc in range(out_channels):
+            w_base = oc * in_channels * kernel_size
+            seed = 0
+            if bias_mantissas is not None:
+                seed = rescale_f32(bias_mantissas[oc], bias_scale, s_acc)
+            for out_pos in range(out_len):
+                first_valid_idx, first_valid_k, valid_count = window_slice_1d_full(geom, out_pos)
+                assert valid_count == kernel_size, (
+                    f"conv1d_grouped_ref: partial window at out_pos={out_pos} "
+                    f"(validCount={valid_count} != kernelSize={kernel_size}) -- "
+                    "only fully-valid (VALID padding) windows are supported here")
+                acc = seed
+                partial = 0
+                current_group = None
+                for ic in range(in_channels):
+                    for i in range(valid_count):
+                        kernel_idx = first_valid_k + i
+                        w_idx = w_base + ic * kernel_size + kernel_idx
+                        g = w_idx // group_size
+                        if g != current_group:
+                            if current_group is not None:
+                                param_scale = (torch.tensor(in_scale, dtype=torch.float32) *
+                                              torch.tensor(w_scales[current_group],
+                                                           dtype=torch.float32)).item()
+                                acc += rescale_f32(partial, param_scale, s_acc)
+                            partial = 0
+                            current_group = g
+                        input_idx = first_valid_idx + i * dilation
+                        x_val = x_mantissas[(b * in_channels + ic) * input_length + input_idx]
+                        w_val = w_mantissas[w_idx]
+                        partial += x_val * w_val
+                param_scale = (torch.tensor(in_scale, dtype=torch.float32) *
+                              torch.tensor(w_scales[current_group], dtype=torch.float32)).item()
+                acc += rescale_f32(partial, param_scale, s_acc)
+                out.append(acc)
+    return out, s_acc, out_len

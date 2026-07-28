@@ -194,6 +194,7 @@ target_link_libraries(Conv1dKernel PRIVATE
         SlidingWindow1d
         Mul
         Rounding
+        Quantization
         Common
 )
 

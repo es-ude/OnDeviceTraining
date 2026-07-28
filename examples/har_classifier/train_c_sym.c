@@ -443,8 +443,8 @@ static void epochCallback(size_t epoch, float trainLoss, epochStats_t evalStats)
             fprintf(g_log_file, ",\n");
         }
         fprintf(g_log_file,
-                "    {\"epoch\": %zu, \"train_loss\": %.6f, \"val_loss\": %.6f, "
-                "\"val_acc\": %.6f, \"wall_s\": %.4f, \"lr\": %.8f",
+                "    {\"epoch\": %zu, \"step_losses\": [], \"train_loss\": %.6f, "
+                "\"val_loss\": %.6f, \"val_acc\": %.6f, \"wall_s\": %.4f, \"lr\": %.8f",
                 epoch, (double)trainLoss, (double)evalStats.loss, (double)evalStats.accuracy,
                 wall_s, (double)optimizerFunctions[g_optim->type].getLr(g_optim));
         if (g_trackMovement) {
@@ -691,7 +691,9 @@ int main(void) {
 #endif
 
     if (g_log_file != NULL) {
-        fprintf(g_log_file, "\n  ],\n  \"final\": {\"test_loss\": %.6f, \"test_acc\": %.6f}",
+        fprintf(g_log_file,
+                "\n  ],\n  \"final\": {\"test_loss\": %.6f, \"test_acc\": %.6f, "
+                "\"test_auc\": null}",
                 (double)testStats.loss, (double)testStats.accuracy);
 #ifdef ODT_MEM_PROFILE
         fprintf(g_log_file, ",\n  \"memory\": ");

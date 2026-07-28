@@ -33,6 +33,39 @@ parameter grads remain available and legitimate only via the explicit
   zeroing, serialization). `calcBytesPerElement` is an unpacked per-element
   stride — multiplying it by N over-counts packed sub-byte payloads (#172).
 
+## Group-granular quantization (group-quant epic, #300 axis)
+
+`symQConfig_t` is **always-array**: `scales[numGroups]`, `numGroups`, `groupSize`.
+Exactly two shapes are valid — `{numGroups: 1, groupSize: 0}` (per-tensor, the
+sentinel: `groupSize == 0` means "spans everything", N-agnostic) or
+`{numGroups: >1, groupSize: >0}` with `numGroups * groupSize == N` (real
+groups). `{1, N>0}` is never a valid alternate per-tensor spelling. The
+divisibility identity is validated everywhere a config attaches to a concrete
+element count — `initTensor` (`validateSymQConfigShape`), `requantizeTensorInPlace`,
+and the ODTS/ODTR deserialize path (which additionally REALLOCATES a
+skeleton's `scales[]` when the file's `numGroups` differs from its own,
+rather than failing fast — see `docs/FEATURES.md`'s Serialization section).
+
+**Storage-order binding.** A group is `groupSize` consecutive elements in
+STORAGE order (flat index, not the logical/viewed shape): group id =
+`flatIdx / groupSize`. Scales bind to storage order and are untouched by
+`orderOfDimensions` view permutations — zero-copy transpose is a view, and
+kernels compute flat storage offsets regardless of the permutation.
+
+**Carriers** (spec §3 — YAGNI cuts, reversible later):
+
+| Tensor class | Granularity |
+|---|---|
+| GEMM-family weights (Linear/Conv1d/ConvT1d) | groups allowed (any valid groupSize, SYM) |
+| Bias | per-tensor only |
+| LayerNorm/GroupNorm gamma/beta | per-tensor only; factories reject numGroups > 1 |
+| Gradients (packed storage) | per-tensor only; grouped grads are a future #300 axis |
+| Wires (`outputQ`/`propLossQ`), momentum | per-tensor only (`symInt32QConfig_t` stays scalar) |
+
+For a row-major GEMM weight `[oc, ...]`, `groupSize == N/oc` IS the
+per-output-channel special case — no separate axis field. Full design:
+`docs/superpowers/specs/2026-07-28-group-quantization-design.md`.
+
 ## SYM ↔ * conversion bridge (#227)
 
 `SYM` is the sub-byte bit-packed **storage** dtype; `SYM_INT32` is the int32-slot

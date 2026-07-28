@@ -320,8 +320,14 @@ with, then call `ppcaReplaySetDeserialize(skeleton, f)`. The skeleton's
 `dim`, `rank`, dtype, and (for SYM/ASYM) `qBits` must match the checkpoint's
 recorded values **per tensor** (`mean`, `basis`, `eigvals` independently) —
 any mismatch is a fail-fast `PRINT_ERROR + exit(1)` (the "#316-class"
-guard). Mechanism: each tensor record's header (shape, dtype, qConfig) is
-read into locals and validated against the skeleton *before* the public
+guard). A SYM tensor's `numGroups` is the one exception (group-quant PR2):
+a file `numGroups` that differs from the skeleton's own is tolerated —
+the shared ODTS tensor-tier deserialize reallocates the skeleton's
+`scales[]` to the file's shape (same relax as any other ODTS SYM record);
+the sentinel invariant (`numGroups==1 <=> groupSize==0`) and the
+divisibility identity (`numGroups * groupSize == N`) are still enforced.
+Mechanism: each tensor record's header (shape, dtype, qConfig) is read into
+locals and validated against the skeleton *before* the public
 `deserializeTensor` is allowed to touch it, then the stream is rewound and
 the real read happens — this works around an open bug (#316) where
 `deserializeTensor` itself overwrites the destination's shape/dtype from

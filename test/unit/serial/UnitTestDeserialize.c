@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "DeathTest.h"
 #include "Deserialize.h"
@@ -434,27 +435,35 @@ static tensor_t *makeSymTensor1D(size_t d0, uint8_t qBits, roundingMode_t roundi
     return initTensor(shape, quantizationInitSym(qBits, roundingMode), NULL);
 }
 
-/*! group-quant PR1: a v4 SYM qConfig record whose file numGroups (2) does not
- *  match the skeleton's numGroups (always 1 in PR1 -- initSymQConfig's only
- *  output, see quantizationInitSym) must fail fast rather than silently
- *  misparsing into the fixed-size 1-element scales[] array. Group-aware
- *  deserialize (reallocating the skeleton's scales[] to match the file) is a
- *  PR2 concern; PR1 keeps the #316 no-silent-misparse discipline instead.
- *
- *  The record is otherwise WELL-FORMED (real qBits, a correctly-sized
- *  trailing payload) rather than truncated/garbage -- mirrors
- *  testSkipSerializedTensorRejectsRankAboveCap's rationale above: a record
- *  that is merely malformed would still trip some OTHER, unrelated guard
- *  (e.g. the #316 payload-size check misreading a stale parser's
- *  garbage-aligned qBits), silently passing this assertion without ever
- *  exercising the numGroups-mismatch guard itself. groupSize=3 here is
- *  deliberately chosen so a pre-v4 (scale/qBits/rounding-only) parser's
- *  misaligned "qBits" byte (groupSize's low byte) still computes the SAME
- *  packed byte count as the real qBits=4 at 4 elements (ceil(4*3/8) ==
- *  ceil(4*4/8) == 2) -- i.e. this fixture is the drift alarm for THIS guard
- *  specifically, not a stand-in for any parser that merely notices
- *  something is wrong. */
-static void testDeserializeQConfigRejectsNumGroupsMismatch(void) {
+/*! Group-quant PR2 (Task 5): grouped-SYM twin of makeSymTensor1D above --
+ *  numGroups/groupSize must divide d0 (validateSymQConfigShape, called by
+ *  initTensor, enforces it at construction). */
+static tensor_t *makeSymGroupedTensor1D(size_t d0, uint8_t qBits, roundingMode_t roundingMode,
+                                        size_t numGroups, size_t groupSize) {
+    size_t *dims = reserveMemory(1 * sizeof(size_t));
+    dims[0] = d0;
+    size_t *order = reserveMemory(1 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    return initTensor(shape, quantizationInitSymGrouped(qBits, roundingMode, numGroups, groupSize),
+                      NULL);
+}
+
+/*! Group-quant PR2 (Task 5): PR1's fail-fast on ANY file-vs-skeleton
+ *  numGroups mismatch is now LEGAL, provided the file's group shape divides
+ *  the skeleton's element count -- deserializeQConfig REALLOCATES the
+ *  skeleton's scales[] to the file's numGroups instead of dying
+ *  (Deserialize.c's PR1-era comment explicitly named this the PR2 relax).
+ *  This is the OLD testDeserializeQConfigRejectsNumGroupsMismatch fixture
+ *  with its expectation INVERTED: same hand-crafted-bytes numGroups=2
+ *  mismatch (skeleton built PER-TENSOR, numGroups=1), but groupSize is now 2
+ *  (not the old fixture's 3) so 2*2 == 4 == the skeleton's element count --
+ *  a mismatch this well-formed no longer has any guard left to fail at. See
+ *  testDeserializeGroupedSymIntoPerTensorSkeleton below for the same relax
+ *  exercised through the real serializeTensor/quantizationInitSymGrouped API
+ *  instead of hand-assembled bytes. */
+static void testDeserializeQConfigAcceptsNumGroupsMismatchViaReallocation(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     writeU32LE(f, 1); /* numberOfDimensions */
     writeU32LE(f, 4); /* dimensions[0] */
@@ -462,8 +471,8 @@ static void testDeserializeQConfigRejectsNumGroupsMismatch(void) {
     uint8_t symType = (uint8_t)SYM;
     fwrite(&symType, 1, 1, f);
     writeU32LE(f, 2); /* numGroups = 2, mismatches the skeleton's 1 */
-    writeU32LE(f, 3); /* groupSize (consistent w/ numGroups=2; see comment re: 3 vs 4) */
-    uint8_t scaleBytes[8] = {0x00, 0x00, 0x00, 0x3F, 0x00, 0x00, 0x00, 0x3F}; /* two 0.5f scales */
+    writeU32LE(f, 2); /* groupSize = 2; 2*2 == 4 == the skeleton's element count */
+    uint8_t scaleBytes[8] = {0x00, 0x00, 0x00, 0x3F, 0x00, 0x00, 0x80, 0x3E}; /* 0.5f, 0.25f */
     fwrite(scaleBytes, 1, 8, f);
     uint8_t qBits = 4;
     fwrite(&qBits, 1, 1, f);
@@ -475,23 +484,134 @@ static void testDeserializeQConfigRejectsNumGroupsMismatch(void) {
 
     tensor_t *skeleton = makeSymTensor1D(4, 4, HALF_AWAY);
     f = fopen(FILE_PATH, "rb");
+    deserializeTensor(skeleton, f);
+    fclose(f);
+
+    symQConfig_t *dstQc = skeleton->quantization->qConfig;
+    /* CAPTURE before any free. */
+    size_t capturedNumGroups = dstQc->numGroups;
+    size_t capturedGroupSize = dstQc->groupSize;
+    float capturedScale0 = dstQc->scales[0];
+    float capturedScale1 = dstQc->scales[1];
+    uint8_t capturedPayload[2];
+    memcpy(capturedPayload, skeleton->data, 2);
+
+    freeTensor(skeleton);
+
+    /* ASSERT on captured. */
+    TEST_ASSERT_EQUAL_size_t(2, capturedNumGroups);
+    TEST_ASSERT_EQUAL_size_t(2, capturedGroupSize);
+    TEST_ASSERT_EQUAL_FLOAT(0.5f, capturedScale0);
+    TEST_ASSERT_EQUAL_FLOAT(0.25f, capturedScale1);
+    TEST_ASSERT_EQUAL_UINT8(0xAB, capturedPayload[0]);
+    TEST_ASSERT_EQUAL_UINT8(0xCD, capturedPayload[1]);
+}
+
+/*! Group-quant PR2 (Task 5): a hand-crafted v4 record whose SYM group shape
+ *  passes the numGroups==1<=>groupSize==0 sentinel (numGroups=3, groupSize=2
+ *  is a well-formed GROUPED shape) but whose numGroups*groupSize (6) does
+ *  not equal the skeleton's element count (4) must still die --
+ *  validateSymQConfigShape's divisibility check, not the (now relaxed)
+ *  numGroups-mismatch guard above. Golden-bytes style (hand-assembled bytes,
+ *  UnitTestSerialize.c's testGoldenBytesModelReluSymOutputV4 pattern) rather
+ *  than a real serializeTensor call, since no producer in this tree can be
+ *  coaxed into emitting a shape this invalid. */
+static void testDeserializeGroupedSymRejectsBadDivisibility(void) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    writeU32LE(f, 1); /* numberOfDimensions */
+    writeU32LE(f, 4); /* dimensions[0] = 4 elements */
+    writeU32LE(f, 0); /* orderOfDimensions[0] */
+    uint8_t symType = (uint8_t)SYM;
+    fwrite(&symType, 1, 1, f);
+    writeU32LE(f, 3); /* numGroups = 3 */
+    writeU32LE(f, 2); /* groupSize = 2 -> 3*2 == 6 != 4 elements */
+    uint8_t scaleBytes[12] = {0x00, 0x00, 0x00, 0x3F, 0x00, 0x00,
+                              0x00, 0x3F, 0x00, 0x00, 0x00, 0x3F}; /* three 0.5f scales */
+    fwrite(scaleBytes, 1, 12, f);
+    uint8_t qBits = 4;
+    fwrite(&qBits, 1, 1, f);
+    uint8_t roundingMode = 0; /* HALF_AWAY */
+    fwrite(&roundingMode, 1, 1, f);
+    uint8_t payload[2] = {0xAB, 0xCD}; /* never reached: the validate dies first */
+    fwrite(payload, 1, 2, f);
+    fclose(f);
+
+    tensor_t *skeleton = makeSymTensor1D(4, 4, HALF_AWAY);
+    f = fopen(FILE_PATH, "rb");
     ASSERT_EXITS_WITH_FAILURE(deserializeTensor(skeleton, f));
     fclose(f);
 
     freeTensor(skeleton);
 }
 
+/*! Group-quant PR2 (Task 5): a GROUPED file record (numGroups=3, groupSize=2,
+ *  general -- not the per-channel special case) deserialized into a
+ *  freshly-built PER-TENSOR skeleton (numGroups=1, groupSize=0) must
+ *  reallocate the skeleton's scales[] and load every group's scale, and the
+ *  packed tensor DATA must round-trip too -- proving the payload read (sized
+ *  by qBits x element count only, independent of numGroups) is unaffected by
+ *  the group-shape relax. Built through the real API (quantizationInitSymGrouped
+ *  + serializeTensor), unlike the hand-crafted-bytes twin above. */
+static void testDeserializeGroupedSymIntoPerTensorSkeleton(void) {
+    tensor_t *src = makeSymGroupedTensor1D(6, 8, HALF_AWAY, 3, 2);
+    int32_t mantissas[] = {1, -2, 3, -4, 5, -6};
+    byteConversion((uint8_t *)mantissas, 32, src->data, 8, 6);
+    symQConfig_t *srcQc = src->quantization->qConfig;
+    srcQc->scales[0] = 0.1f;
+    srcQc->scales[1] = 0.2f;
+    srcQc->scales[2] = 0.3f;
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeTensor(src, f);
+    fclose(f);
+
+    tensor_t *skeleton = makeSymTensor1D(6, 8, HALF_AWAY); /* per-tensor: {1,0} */
+
+    f = fopen(FILE_PATH, "rb");
+    deserializeTensor(skeleton, f);
+    fclose(f);
+
+    symQConfig_t *dstQc = skeleton->quantization->qConfig;
+    /* CAPTURE before any free. */
+    size_t capturedNumGroups = dstQc->numGroups;
+    size_t capturedGroupSize = dstQc->groupSize;
+    float capturedScales[3];
+    for (size_t g = 0; g < 3; g++) {
+        capturedScales[g] = dstQc->scales[g];
+    }
+    size_t dataBytes = calcNumberOfBytesForData(skeleton->quantization, 6);
+    uint8_t capturedSrcData[8];
+    uint8_t capturedDstData[8];
+    memcpy(capturedSrcData, src->data, dataBytes);
+    memcpy(capturedDstData, skeleton->data, dataBytes);
+
+    /* FREE in reverse-init order. */
+    freeTensor(skeleton);
+    freeTensor(src);
+
+    /* ASSERT on captured. */
+    TEST_ASSERT_EQUAL_size_t(3, capturedNumGroups);
+    TEST_ASSERT_EQUAL_size_t(2, capturedGroupSize);
+    TEST_ASSERT_EQUAL_FLOAT(0.1f, capturedScales[0]);
+    TEST_ASSERT_EQUAL_FLOAT(0.2f, capturedScales[1]);
+    TEST_ASSERT_EQUAL_FLOAT(0.3f, capturedScales[2]);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(capturedSrcData, capturedDstData, dataBytes);
+}
+
 /*! group-quant PR1: numGroups==1 but groupSize!=0 violates the sentinel
  *  invariant documented in Quantization.h (numGroups==1 <=> groupSize==0).
- *  Checked on the FILE values, independent of the numGroups-matches-skeleton
- *  check above -- a file this corrupt (or written by a future format this
+ *  Checked on the FILE values, independent of the numGroups-mismatch
+ *  relax above -- a file this corrupt (or written by a future format this
  *  build cannot fully interpret) must fail fast rather than silently
- *  accepting a nonsensical per-tensor "group size".
+ *  accepting a nonsensical per-tensor "group size". STAYS a death test
+ *  post-PR2 (Task 5): the sentinel check is untouched by the reallocation
+ *  relax.
  *
- *  Well-formed-record rationale and the groupSize=3 choice: same as
- *  testDeserializeQConfigRejectsNumGroupsMismatch above -- an otherwise
- *  valid record isolates THIS guard from the unrelated #316 payload-size
- *  check a stale parser's misaligned read would otherwise trip. */
+ *  Well-formed-record rationale and the groupSize=3 choice: mirrors
+ *  testSkipSerializedTensorRejectsRankAboveCap's rationale above -- an
+ *  otherwise valid record isolates THIS guard from the unrelated #316
+ *  payload-size check a stale parser's misaligned read would otherwise
+ *  trip. */
 static void testDeserializeQConfigRejectsSentinelViolation(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     writeU32LE(f, 1); /* numberOfDimensions */
@@ -652,6 +772,80 @@ static void testSkipSerializedTensorRejectsTruncatedPayload(void) {
     freeTensor(paramTensor);
 }
 
+/*! Group-quant PR2 (Task 5) mutation guard: skipSerializedTensor's SYM branch
+ *  must parse a GROUPED v4 record (numGroups=3, groupSize=2) exactly -- the
+ *  payload byte count is independent of numGroups (sized by qBits x element
+ *  count only), but the scratch qConfig's scales[] must grow past its
+ *  1-element stack array (symScratchScale) to fileNumGroups and be freed
+ *  again afterwards (the mutation this guards: dropping that free leaks the
+ *  reallocated array, see the report for the ASan/LSan evidence) -- or the
+ *  stream desyncs and the sibling record right after misparses.
+ *
+ *  Built directly via deserializeParameter/serializeTensor rather than
+ *  through a real layer's gradInit: Quantization.h's "Carrier gate" note
+ *  fail-fasts a grad TEMPLATE with numGroups > 1 (grouped grads are a future
+ *  #300 axis), but skipSerializedTensor itself has no such restriction --
+ *  it only consumes wire bytes, never attaches the qConfig to a live
+ *  gradient tensor. The "grad" here is a real grouped-SYM tensor_t (v4's SYM
+ *  arm has been group-general in Serialize.c since PR1) that happens to be
+ *  discarded because the skeleton is frozen (parameter->grad == NULL); the
+ *  trailing sibling FLOAT32 tensor's correct round-trip is the stream-sync
+ *  proof, mirroring testDeserializeSkipsSymGradIntoFrozenSkeleton
+ *  (UnitTestSerialize.c)'s bias-round-trips-after-the-skip idiom. */
+static void testSkipSerializedGroupedSymGrad(void) {
+    float paramData[] = {1.f, 2.f, 3.f, 4.f};
+    tensor_t *paramTensor = makeFloatTensor2D(2, 2, paramData, 4);
+
+    tensor_t *gradTensor = makeSymGroupedTensor1D(6, 8, HALF_AWAY, 3, 2);
+    int32_t gradMantissas[] = {1, -2, 3, -4, 5, -6};
+    byteConversion((uint8_t *)gradMantissas, 32, gradTensor->data, 8, 6);
+    symQConfig_t *gradQc = gradTensor->quantization->qConfig;
+    gradQc->scales[0] = 0.1f;
+    gradQc->scales[1] = 0.2f;
+    gradQc->scales[2] = 0.3f;
+
+    float siblingData[] = {9.f, 8.f, 7.f};
+    tensor_t *siblingTensor = makeFloatTensor2D(1, 3, siblingData, 3);
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    uint8_t hasGrad = 1;
+    fwrite(&hasGrad, sizeof(uint8_t), 1, f);
+    serializeTensor(paramTensor, f);
+    serializeTensor(gradTensor, f);
+    serializeTensor(siblingTensor, f);
+    fclose(f);
+
+    tensor_t *skeletonParamTensor = makeFloatTensor2D(2, 2, NULL, 0);
+    parameter_t frozenSkeleton = {.param = skeletonParamTensor, .grad = NULL};
+    tensor_t *skeletonSibling = makeFloatTensor2D(1, 3, NULL, 0);
+
+    f = fopen(FILE_PATH, "rb");
+    deserializeParameter(&frozenSkeleton, f);
+    deserializeTensor(skeletonSibling, f);
+    fclose(f);
+
+    /* CAPTURE before any free. */
+    float capturedParam[4];
+    for (size_t i = 0; i < 4; i++) {
+        capturedParam[i] = ((float *)skeletonParamTensor->data)[i];
+    }
+    float capturedSibling[3];
+    for (size_t i = 0; i < 3; i++) {
+        capturedSibling[i] = ((float *)skeletonSibling->data)[i];
+    }
+
+    /* FREE in reverse-init order. */
+    freeTensor(skeletonSibling);
+    freeTensor(skeletonParamTensor);
+    freeTensor(siblingTensor);
+    freeTensor(gradTensor);
+    freeTensor(paramTensor);
+
+    /* ASSERT on captured. */
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(paramData, capturedParam, 4);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(siblingData, capturedSibling, 3);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -671,10 +865,13 @@ int main(void) {
     RUN_TEST(testDeserializeTensorRejectsRankMismatch);
     RUN_TEST(testDeserializeTensorRoundTripsAsymZeroPoint);
     RUN_TEST(testDeserializeQConfigAcceptsWideZeroPoint);
-    RUN_TEST(testDeserializeQConfigRejectsNumGroupsMismatch);
+    RUN_TEST(testDeserializeQConfigAcceptsNumGroupsMismatchViaReallocation);
+    RUN_TEST(testDeserializeGroupedSymRejectsBadDivisibility);
+    RUN_TEST(testDeserializeGroupedSymIntoPerTensorSkeleton);
     RUN_TEST(testDeserializeQConfigRejectsSentinelViolation);
     RUN_TEST(testDeserializeWeightsOnlyIntoTrainableSkeleton);
     RUN_TEST(testSkipSerializedTensorRejectsRankAboveCap);
     RUN_TEST(testSkipSerializedTensorRejectsTruncatedPayload);
+    RUN_TEST(testSkipSerializedGroupedSymGrad);
     return UNITY_END();
 }

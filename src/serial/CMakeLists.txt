@@ -36,6 +36,7 @@ target_link_libraries(Deserialize PRIVATE
         Quantization
         Rounding
         ArithmeticType
+        StorageApi
 
         Layer
 

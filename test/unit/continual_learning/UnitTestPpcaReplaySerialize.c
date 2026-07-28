@@ -69,6 +69,33 @@ static ppcaReplayConfig_t packedConfig(size_t dim, size_t rank, size_t maxM, qty
     return cfg;
 }
 
+/*! Group-quant PR2 (Task 5): GROUPED-SYM twin of packedConfig's SYM branch --
+ *  numGroups=3, groupSize=4 (rank*dim = 2*6 = 12 = 3*4, matching
+ *  floatConfig(6,2,...)'s basis shape [rank=2,dim=6]). getQLike's grouped
+ *  clone (Task 1) deep-copies both numGroups/groupSize AND these scale
+ *  VALUES into every generator built from this config -- unlike
+ *  packedConfig's per-tensor template, which getQLike instead resets to
+ *  scale=1.f (no group grid to preserve). Never freed, per the
+ *  stack-fixture convention (see packedConfig above). */
+static ppcaReplayConfig_t groupedPackedConfig(size_t dim, size_t rank, size_t maxM) {
+    ppcaReplayConfig_t cfg = floatConfig(dim, rank, maxM);
+    static float groupedScales[3] = {0.1f, 0.2f, 0.3f};
+    static symQConfig_t groupedSymQc = {.scales = groupedScales,
+                                        .numGroups = 3,
+                                        .groupSize = 4,
+                                        .roundingMode = HALF_AWAY,
+                                        .qBits = 8};
+    static quantization_t groupedSymQ;
+    initSymQuantization(&groupedSymQc, &groupedSymQ);
+    static asymQConfig_t asymQc;
+    static quantization_t asymQ;
+    initAsymQConfig(8, HALF_AWAY, &asymQc);
+    initAsymQuantization(&asymQc, &asymQ);
+    cfg.basisQ = &groupedSymQ;
+    cfg.meanQ = &asymQ; /* mean has an offset -> ASYM, mirrors packedConfig */
+    return cfg;
+}
+
 /* Seed a set with NON-UNIFORM state so field-order swaps corrupt bytes
  * detectably (serial-module fixture discipline). */
 static void seedSet(ppcaReplaySet_t *set) {
@@ -166,6 +193,70 @@ void testRoundTripPacked(void) {
     freePpcaReplaySet(deserial);
     freePpcaReplaySet(serial);
     freePpcaReplaySet(train);
+}
+
+/*! Group-quant PR2 (Task 5): a GROUPED SYM basis (numGroups=3, groupSize=4)
+ *  deserialized into a PER-TENSOR skeleton (numGroups=1, groupSize=0, from
+ *  packedConfig) round-trips via the same reallocation relax
+ *  testDeserializeGroupedSymIntoPerTensorSkeleton pins directly at the
+ *  Deserialize.c layer -- exercised here through PPCA's OWN peek-parser,
+ *  whose numGroups-equality fail-fast this task drops. Pre-Task-5 this dies
+ *  in peekValidateThenDeserializeTensor's SYM arm (file numGroups=3 !=
+ *  skeleton's 1) before ever reaching the shared deserializeTensor call. */
+void testRoundTripPackedGroupedSym(void) {
+    ppcaReplayConfig_t cfgF = floatConfig(6, 2, 8);
+    ppcaReplaySet_t *train = ppcaReplaySetCreate(1, &cfgF);
+    seedSet(train);
+    ppcaReplayConfig_t cfgGrouped = groupedPackedConfig(6, 2, 8);
+    ppcaReplaySet_t *serial = ppcaReplaySetCreate(1, &cfgGrouped);
+    executeConvert(train->generators[0]->mean, serial->generators[0]->mean);
+    executeConvert(train->generators[0]->basis, serial->generators[0]->basis);
+    executeConvert(train->generators[0]->eigvals, serial->generators[0]->eigvals);
+    serial->generators[0]->sigma2 = 0.75f;
+    serial->generators[0]->totalVar = 12.5f;
+    serial->generators[0]->count = 9;
+
+    /* Skeleton is built PER-TENSOR (not from cfgGrouped) -- the whole point
+     * is the numGroups MISMATCH the relax must tolerate. */
+    ppcaReplayConfig_t cfgPerTensor = packedConfig(6, 2, 8, SYM);
+    ppcaReplaySet_t *deserial = ppcaReplaySetCreate(1, &cfgPerTensor);
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    ppcaReplaySetSerialize(serial, f);
+    fclose(f);
+    f = fopen(FILE_PATH, "rb");
+    ppcaReplaySetDeserialize(deserial, f);
+    fclose(f);
+
+    symQConfig_t *serialBasisQc = serial->generators[0]->basis->quantization->qConfig;
+    symQConfig_t *deserialBasisQc = deserial->generators[0]->basis->quantization->qConfig;
+    size_t basisBytes = calcNumberOfBytesForData(serial->generators[0]->basis->quantization, 12);
+
+    /* CAPTURE before any free. */
+    bool numGroupsMatch = deserialBasisQc->numGroups == serialBasisQc->numGroups;
+    bool groupSizeMatch = deserialBasisQc->groupSize == serialBasisQc->groupSize;
+    float capturedSerialScales[3];
+    float capturedDeserialScales[3];
+    for (size_t g = 0; g < 3; g++) {
+        capturedSerialScales[g] = serialBasisQc->scales[g];
+        capturedDeserialScales[g] = deserialBasisQc->scales[g];
+    }
+    uint8_t capturedSerialBasisData[64];
+    uint8_t capturedDeserialBasisData[64];
+    memcpy(capturedSerialBasisData, serial->generators[0]->basis->data, basisBytes);
+    memcpy(capturedDeserialBasisData, deserial->generators[0]->basis->data, basisBytes);
+    uint32_t capturedCount = deserial->generators[0]->count;
+
+    freePpcaReplaySet(deserial);
+    freePpcaReplaySet(serial);
+    freePpcaReplaySet(train);
+
+    /* ASSERT on captured. */
+    TEST_ASSERT_TRUE(numGroupsMatch);
+    TEST_ASSERT_TRUE(groupSizeMatch);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedSerialScales, capturedDeserialScales, 3);
+    TEST_ASSERT_EQUAL_MEMORY(capturedSerialBasisData, capturedDeserialBasisData, basisBytes);
+    TEST_ASSERT_EQUAL_UINT32(9, capturedCount);
 }
 
 void testDeserializeRejectsDtypeMismatch(void) {
@@ -296,6 +387,7 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testRoundTripFloat);
     RUN_TEST(testRoundTripPacked);
+    RUN_TEST(testRoundTripPackedGroupedSym);
     RUN_TEST(testDeserializeRejectsDtypeMismatch);
     RUN_TEST(testDeserializeRejectsQBitsMismatch);
     RUN_TEST(testDeserializeRejectsDimMismatch);

@@ -1787,7 +1787,8 @@ static void testGoldenBytesModelReluV4(void) {
  *  `f32 scales[numGroups]`, THEN the pre-existing `u8 qBits`/`u8 rounding`
  *  tail (unchanged order/width from v3). PR1 is always numGroups=1,
  *  groupSize=0 (the "whole tensor" sentinel — Quantization.h), so this pins
- *  the minimal one-scale case; PR2 adds a numGroups>1 golden. propLossQ
+ *  the minimal one-scale case; see testGoldenBytesModelReluSymGroupedOutputV4
+ *  below for the numGroups>1 golden (group-quant PR2, Task 5). propLossQ
  *  (FLOAT32, a single 0x01 tag byte) sits immediately after the SYM record,
  *  so its offset is the drift alarm for the record's new +8-byte width
  *  (numGroups u32 + groupSize u32) versus the old v3 layout.
@@ -1824,6 +1825,57 @@ static void testGoldenBytesModelReluSymOutputV4(void) {
                                         * scales[0] 0.5f f32 LE, qBits 6, HALF_AWAY */
                                        0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                                        0x00, 0x00, 0x3F, 0x06, 0x00,
+                                       /* propLossQ FLOAT32 */ 0x01};
+
+    uint8_t got[sizeof(expected) + 8] = {0};
+    f = fopen(FILE_PATH, "rb");
+    size_t fileBytes = fread(got, 1, sizeof(got), f);
+    fclose(f);
+
+    TEST_ASSERT_EQUAL_size_t(sizeof(expected), fileBytes);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, got, sizeof(expected));
+}
+
+/*! GOLDEN BYTES (group-quant PR2, Task 5): the numGroups>1 sibling of
+ *  testGoldenBytesModelReluSymOutputV4 above -- pins that a GROUPED SYM
+ *  record (numGroups=2, groupSize=3) serializes with every group's scale in
+ *  order, not just scales[0]. Serialize.c's SYM arm needed no changes for
+ *  this (group-general since PR1 — it already loops `symQC->numGroups`
+ *  writes); this golden is the writer-side regression net Task 5 owes per
+ *  the comment above. */
+static void testGoldenBytesModelReluSymGroupedOutputV4(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *symGroupedOutputQ = quantizationInitSymGrouped(6, HALF_AWAY, 2, 3);
+
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    lq.outputQ = symGroupedOutputQ;
+
+    layer_t *layer = reluLayerInitOwning(&lq);
+    reluConfig_t *cfg = layer->config->relu;
+    symQConfig_t *outputCfg = cfg->outputQ->qConfig;
+    outputCfg->scales[0] = 0.5f;
+    outputCfg->scales[1] = 0.25f;
+
+    layer_t *model[] = {layer};
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(model, 1, f);
+    fclose(f);
+    freeReluLayer(layer);
+    freeQuantization(symGroupedOutputQ);
+    freeQuantization(floatQ);
+
+    static const uint8_t expected[] = {/* magic */ 'O', 'D', 'T', 'S',
+                                       /* version u32 LE */ 0x04, 0x00, 0x00, 0x00,
+                                       /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
+                                       /* tag RELU */ 0x01,
+                                       /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
+                                       /* propLossMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
+                                       /* outputQ: SYM, numGroups 2 u32 LE, groupSize 3 u32 LE,
+                                        * scales[0] 0.5f / scales[1] 0.25f f32 LE, qBits 6,
+                                        * HALF_AWAY */
+                                       0x03, 0x02, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
+                                       0x00, 0x00, 0x3F, 0x00, 0x00, 0x80, 0x3E, 0x06, 0x00,
                                        /* propLossQ FLOAT32 */ 0x01};
 
     uint8_t got[sizeof(expected) + 8] = {0};
@@ -2321,6 +2373,7 @@ int main(void) {
     RUN_TEST(testGoldenBytesTensorFloat32V2);
     RUN_TEST(testGoldenBytesModelReluV4);
     RUN_TEST(testGoldenBytesModelReluSymOutputV4);
+    RUN_TEST(testGoldenBytesModelReluSymGroupedOutputV4);
     RUN_TEST(testGoldenBytesModelMaxPool1dV4);
     RUN_TEST(testGoldenBytesModelLinearFrozenV4);
     RUN_TEST(testSerializeFailsFastOnUnwritableStream);

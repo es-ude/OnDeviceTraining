@@ -86,22 +86,32 @@ static void peekValidateThenDeserializeTensor(tensor_t *skeleton, FILE *f, const
     case BOOL:
         break;
     case SYM: {
-        /* v4 (group-quant PR1): numGroups/groupSize precede the scales array
-         * -- duplicates Deserialize.c's deserializeQConfig SYM arm layout
-         * (numGroups u32, groupSize u32, f32 scales[numGroups], qBits u8,
-         * roundingMode u8) since this peek runs BEFORE the trusted
-         * deserializeTensor call below. PPCA state is always numGroups=1
-         * (create() builds via quantizationInitSym); a file claiming
-         * otherwise cannot be a PPCA checkpoint this build produced. */
+        /* v4 (group-quant PR1/PR2): numGroups/groupSize precede the scales
+         * array -- duplicates (a subset of) Deserialize.c's deserializeQConfig
+         * SYM arm layout (numGroups u32, groupSize u32, f32 scales[numGroups],
+         * qBits u8, roundingMode u8) since this peek runs BEFORE the trusted
+         * deserializeTensor call below, which is where the REAL group-aware
+         * read (reallocating the skeleton's scales[] to the file's numGroups,
+         * Task 5) happens. This peek never writes the skeleton, only reads
+         * past the record to size the post-peek length check further down --
+         * so unlike Deserialize.c it has no numGroups to reallocate, and a
+         * file numGroups that differs from the skeleton's own is NOT an
+         * error here (dropped, PR2): the scales loop already iterates the
+         * FILE's numGroups regardless. The sentinel invariant
+         * (numGroups==1 <=> groupSize==0, Quantization.h) is still checked,
+         * mirroring Deserialize.c's own (unrelaxed) sentinel guard. qBits
+         * MUST still match the skeleton's -- same-dtype width mismatch is
+         * the #316 2x-overflow case, independent of group shape. */
         uint32_t numGroups = serialReadU32LE(f);
         symQConfig_t *skelQc = skeleton->quantization->qConfig;
-        if ((size_t)numGroups != skelQc->numGroups) {
-            PRINT_ERROR("ppcaReplaySetDeserialize: %s SYM numGroups mismatch (file %u, skeleton "
-                        "%zu)",
-                        what, (unsigned)numGroups, skelQc->numGroups);
+        uint32_t groupSize = serialReadU32LE(f);
+        if ((numGroups == 1) != (groupSize == 0)) {
+            PRINT_ERROR("ppcaReplaySetDeserialize: %s SYM file violates the "
+                        "numGroups==1<=>groupSize==0 sentinel invariant (numGroups=%u, "
+                        "groupSize=%u)",
+                        what, (unsigned)numGroups, (unsigned)groupSize);
             exit(1);
         }
-        (void)serialReadU32LE(f); /* groupSize */
         for (uint32_t g = 0; g < numGroups; g++) {
             (void)serialReadF32LE(f); /* scales[g] */
         }

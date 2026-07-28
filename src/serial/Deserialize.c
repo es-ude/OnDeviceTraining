@@ -22,6 +22,7 @@
 #include "Rounding.h"
 #include "SerialWire.h"
 #include "Softmax.h"
+#include "StorageApi.h"
 #include "Tensor.h"
 
 /* Mirrors Serialize.c's locked format v2 constants (#370): fixed-width
@@ -30,15 +31,17 @@
  * v3: parameter records carry a grad-presence byte (#380). The reader is
  * TOLERANT of a presence/skeleton mismatch (#380 PR3, superseding PR1's
  * fail-fast): see deserializeParameter / skipSerializedTensor below.
- * v4 (group-quant PR1, spec
+ * v4 (group-quant PR1/PR2, spec
  * docs/superpowers/specs/2026-07-28-group-quantization-design.md §6): the SYM
  * qConfig record grows `u32 numGroups`, `u32 groupSize` ahead of the scales
- * array. A file whose numGroups does not match the skeleton's (PR1: always
- * 1, from initSymQConfig) fails fast -- reallocating the skeleton's scales[]
- * to match is a PR2 concern (#316 no-silent-misparse discipline holds until
- * then). The sentinel invariant (numGroups==1 <=> groupSize==0,
- * Quantization.h) is checked on the FILE's values; a violation is a corrupt
- * or from-the-future record. */
+ * array. A file whose numGroups does not match the skeleton's own (PR1:
+ * always 1, from initSymQConfig) REALLOCATES the skeleton's scales[] to the
+ * file's numGroups (PR2, Task 5) rather than failing fast; the #316
+ * no-silent-misparse discipline now lives in validateSymQConfigShape's
+ * post-reallocation divisibility check (Quantization.h) instead. The
+ * sentinel invariant (numGroups==1 <=> groupSize==0, Quantization.h) is
+ * checked on the FILE's values and is untouched by the relax; a violation is
+ * a corrupt or from-the-future record. */
 #define SERIALIZE_MAGIC "ODTS"
 #define SERIALIZE_FORMAT_VERSION 4u
 
@@ -52,9 +55,14 @@ void deserializeTensor(tensor_t *tensor, FILE *f) {
         calcNumberOfBytesForData(tensor->quantization, calcNumberOfElementsByShape(tensor->shape));
 
     deserializeShape(tensor->shape, f);
-    deserializeQuantization(tensor->quantization, f);
-
+    /* Group-quant PR2 (Task 5): computed here (not after deserializeQuantization,
+     * as before) because a SYM record's divisibility validate needs it — shape
+     * already holds the FILE's dimensions at this point (deserializeShape wrote
+     * them), so this is the tensor's true element count, not the skeleton's
+     * pre-overwrite one. */
     size_t numberOfValues = calcNumberOfElementsByShape(tensor->shape);
+    deserializeQuantization(tensor->quantization, f, numberOfValues);
+
     /* Mirrors Serialize.c: payload length is the packed size. */
     size_t dataBytes = calcNumberOfBytesForData(tensor->quantization, numberOfValues);
 
@@ -141,7 +149,7 @@ static void deserializeShape(shape_t *shape, FILE *f) {
     }
 }
 
-static void deserializeQuantization(quantization_t *q, FILE *f) {
+static void deserializeQuantization(quantization_t *q, FILE *f, size_t numberOfElements) {
     uint8_t type = serialReadU8(f);
     /* #316: the skeleton was built with a fixed dtype whose qConfig struct (or
      * NULL, for FLOAT32/INT32/BOOL) is fixed. A file record claiming a different
@@ -155,7 +163,7 @@ static void deserializeQuantization(quantization_t *q, FILE *f) {
         exit(1);
     }
     q->type = (qtype_t)type;
-    deserializeQConfig(q, f);
+    deserializeQConfig(q, f, numberOfElements);
 }
 
 static void deserializeArithmetic(arithmetic_t *arithmetic, FILE *f) {
@@ -171,7 +179,7 @@ static void deserializeKernel(kernel_t *kernel, FILE *f) {
     kernel->padding = (size_t)serialReadU32LE(f);
 }
 
-static void deserializeQConfig(quantization_t *q, FILE *f) {
+static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElements) {
     switch (q->type) {
     case INT32:
     case FLOAT32:
@@ -186,25 +194,25 @@ static void deserializeQConfig(quantization_t *q, FILE *f) {
     }
     case SYM: {
         symQConfig_t *symQC = q->qConfig;
-        /* v4 (group-quant PR1): symQC->scales must already point at a valid
-         * (>=1-element) array sized for the skeleton's OWN numGroups --
-         * callers build the skeleton via initSymQConfig or the stack-fixture
-         * idiom before deserializing into it. A file numGroups that does not
-         * match the skeleton's cannot be safely read into that fixed-size
-         * array (PR2 relaxes this by reallocating); fail fast instead of
-         * guessing. */
+        /* v4 (group-quant PR1/PR2): symQC->scales must already point at a
+         * valid (>=1-element) array -- callers build the skeleton via
+         * initSymQConfig/initSymQConfigGrouped or the stack-fixture idiom
+         * before deserializing into it. A file numGroups that differs from
+         * the skeleton's own is no longer a fail-fast (PR1's #316
+         * no-silent-misparse discipline): REALLOCATE the scales array to the
+         * file's shape instead -- the resulting shape is validated below
+         * (validateSymQConfigShape), which is the discipline's PR2 form. */
         size_t fileNumGroups = (size_t)serialReadU32LE(f);
-        size_t fileGroupSize = (size_t)serialReadU32LE(f);
         if (fileNumGroups != symQC->numGroups) {
-            PRINT_ERROR("deserializeQConfig: SYM file numGroups %zu does not match the "
-                        "skeleton's numGroups %zu (group-aware deserialize lands in PR2)",
-                        fileNumGroups, symQC->numGroups);
-            exit(1);
+            freeReservedMemory(symQC->scales);
+            symQC->scales = reserveMemory(fileNumGroups * sizeof(float));
+            symQC->numGroups = fileNumGroups;
         }
+        size_t fileGroupSize = (size_t)serialReadU32LE(f);
         /* Sentinel invariant (Quantization.h): numGroups == 1 <=> groupSize
          * == 0. Checked on the FILE values -- a violation means a corrupt
          * record or one written by a future (group-aware) format this build
-         * cannot interpret. */
+         * cannot interpret. Untouched by the reallocation relax above. */
         if ((fileNumGroups == 1) != (fileGroupSize == 0)) {
             PRINT_ERROR("deserializeQConfig: SYM file violates the numGroups==1<=>groupSize==0 "
                         "sentinel invariant (numGroups=%zu, groupSize=%zu)",
@@ -217,6 +225,15 @@ static void deserializeQConfig(quantization_t *q, FILE *f) {
         }
         symQC->qBits = serialReadU8(f);
         symQC->roundingMode = (roundingMode_t)serialReadU8(f);
+        /* numberOfElements == 0 marks the skip-path (skipSerializedTensor's
+         * scratch qConfig is discarded, never attached to a live tensor) --
+         * no divisibility check is possible or needed there. Everywhere a
+         * real tensor backs q, this is the choke point that turns "the
+         * reallocation succeeded" into "the resulting shape actually
+         * describes this tensor". */
+        if (numberOfElements != 0) {
+            validateSymQConfigShape(symQC, numberOfElements);
+        }
         break;
     }
     case ASYM: {
@@ -266,17 +283,25 @@ static void skipSerializedTensor(FILE *f) {
     uint8_t type = serialReadU8(f);
     quantization_t scratchQ = {.type = (qtype_t)type, .qConfig = NULL};
     symInt32QConfig_t symIntScratch;
-    /* Stack-fixture idiom (group-quant PR1): symScratch.scales must point at
-     * a valid backing array before deserializeQConfig writes scales[0] --
-     * an uninitialized `symQConfig_t symScratch;` would leave `.scales`
-     * dangling. Never freed (matches the stack-fixture convention: this
-     * config is discarded at function exit, not owned/heap).
-     * v4: this scratch's numGroups=1 doubles as the skip-path's group-aware
-     * guard -- deserializeQConfig's SYM arm fails fast on a skipped grad
-     * record whose file numGroups != 1 (same PR2-relaxation note as the
-     * main path), so the 1-element scratch array can never overflow. */
-    float symScratchScale[1];
-    symQConfig_t symScratch = {.scales = symScratchScale, .numGroups = 1, .groupSize = 0};
+    /* v4/group-quant PR2 (Task 5): unlike the OTHER scratch qConfigs here
+     * (symIntScratch/asymScratch, plain stack locals never freed), symScratch
+     * needs a REAL heap-allocated scales[1] from the start, not a stack
+     * array -- a GROUPED skipped record (file numGroups > 1) is no longer
+     * rejected, and deserializeQConfig's SYM arm unconditionally
+     * freeReservedMemory()s the OLD scales pointer before reserveMemory()ing
+     * a differently-sized one whenever the file's numGroups differs from
+     * the qConfig's own (the same contract every live tensor's heap-owned
+     * symQConfig relies on, Quantization.h's ownership note). A stack-backed
+     * initial array would make that free() undefined behavior -- verified:
+     * SIGABRT with no PRINT_ERROR on this host's allocator before this fix,
+     * exactly the "drop the free = leak" mutation's mirror image. Freed
+     * unconditionally below regardless of whether a reallocation actually
+     * happened: this whole qConfig is discarded at function exit, never
+     * attached to a real tensor, so nothing else owns whatever it ends up
+     * pointing at. numberOfElements == 0 passed to deserializeQConfig below
+     * (the skip-path marker) skips the divisibility validate for the same
+     * reason. */
+    symQConfig_t symScratch = {0};
     asymQConfig_t asymScratch;
     switch (scratchQ.type) {
     case INT32:
@@ -287,6 +312,9 @@ static void skipSerializedTensor(FILE *f) {
         scratchQ.qConfig = &symIntScratch;
         break;
     case SYM:
+        symScratch.scales = reserveMemory(sizeof(float));
+        symScratch.numGroups = 1;
+        symScratch.groupSize = 0;
         scratchQ.qConfig = &symScratch;
         break;
     case ASYM:
@@ -296,7 +324,10 @@ static void skipSerializedTensor(FILE *f) {
         PRINT_ERROR("skipSerializedTensor: unknown qtype %u", (unsigned)type);
         exit(1);
     }
-    deserializeQConfig(&scratchQ, f);
+    deserializeQConfig(&scratchQ, f, 0);
+    if (scratchQ.type == SYM) {
+        freeReservedMemory(symScratch.scales);
+    }
 
     size_t payloadBytes = calcNumberOfBytesForData(&scratchQ, numberOfElements);
     if (fseek(f, (long)payloadBytes, SEEK_CUR) != 0) {
@@ -338,16 +369,16 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         deserializeArithmetic(&linearConfig->weightGradMath, f);
         deserializeArithmetic(&linearConfig->biasGradMath, f);
         deserializeArithmetic(&linearConfig->propLossMath, f);
-        deserializeQuantization(linearConfig->outputQ, f);
-        deserializeQuantization(linearConfig->propLossQ, f);
+        deserializeQuantization(linearConfig->outputQ, f, 0);
+        deserializeQuantization(linearConfig->propLossQ, f, 0);
         break;
     }
     case RELU: {
         reluConfig_t *reluConfig = layer->config->relu;
         deserializeArithmetic(&reluConfig->forwardMath, f);
         deserializeArithmetic(&reluConfig->propLossMath, f);
-        deserializeQuantization(reluConfig->outputQ, f);
-        deserializeQuantization(reluConfig->propLossQ, f);
+        deserializeQuantization(reluConfig->outputQ, f, 0);
+        deserializeQuantization(reluConfig->propLossQ, f, 0);
         break;
     }
     case CONV1D: {
@@ -363,8 +394,8 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         deserializeArithmetic(&conv1dConfig->weightGradMath, f);
         deserializeArithmetic(&conv1dConfig->biasGradMath, f);
         deserializeArithmetic(&conv1dConfig->propLossMath, f);
-        deserializeQuantization(conv1dConfig->outputQ, f);
-        deserializeQuantization(conv1dConfig->propLossQ, f);
+        deserializeQuantization(conv1dConfig->outputQ, f, 0);
+        deserializeQuantization(conv1dConfig->propLossQ, f, 0);
         break;
     }
     case CONV1D_TRANSPOSED: {
@@ -381,8 +412,8 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         deserializeArithmetic(&conv1dTransposedConfig->weightGradMath, f);
         deserializeArithmetic(&conv1dTransposedConfig->biasGradMath, f);
         deserializeArithmetic(&conv1dTransposedConfig->propLossMath, f);
-        deserializeQuantization(conv1dTransposedConfig->outputQ, f);
-        deserializeQuantization(conv1dTransposedConfig->propLossQ, f);
+        deserializeQuantization(conv1dTransposedConfig->outputQ, f, 0);
+        deserializeQuantization(conv1dTransposedConfig->propLossQ, f, 0);
         break;
     }
     case MAXPOOL1D: {
@@ -390,8 +421,8 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         deserializeKernel(maxPool1dConfig->kernel, f);
         deserializeArithmetic(&maxPool1dConfig->forwardMath, f);
         deserializeArithmetic(&maxPool1dConfig->propLossMath, f);
-        deserializeQuantization(maxPool1dConfig->outputQ, f);
-        deserializeQuantization(maxPool1dConfig->propLossQ, f);
+        deserializeQuantization(maxPool1dConfig->outputQ, f, 0);
+        deserializeQuantization(maxPool1dConfig->propLossQ, f, 0);
         break;
     }
     case AVGPOOL1D: {
@@ -399,16 +430,16 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         deserializeKernel(avgPool1dConfig->kernel, f);
         deserializeArithmetic(&avgPool1dConfig->forwardMath, f);
         deserializeArithmetic(&avgPool1dConfig->propLossMath, f);
-        deserializeQuantization(avgPool1dConfig->outputQ, f);
-        deserializeQuantization(avgPool1dConfig->propLossQ, f);
+        deserializeQuantization(avgPool1dConfig->outputQ, f, 0);
+        deserializeQuantization(avgPool1dConfig->propLossQ, f, 0);
         break;
     }
     case SOFTMAX: {
         softmaxConfig_t *softmaxConfig = layer->config->softmax;
         deserializeArithmetic(&softmaxConfig->forwardMath, f);
         deserializeArithmetic(&softmaxConfig->propLossMath, f);
-        deserializeQuantization(softmaxConfig->outputQ, f);
-        deserializeQuantization(softmaxConfig->propLossQ, f);
+        deserializeQuantization(softmaxConfig->outputQ, f, 0);
+        deserializeQuantization(softmaxConfig->propLossQ, f, 0);
         break;
     }
     case FLATTEN:
@@ -416,8 +447,8 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         break;
     case QUANTIZATION: {
         quantizationConfig_t *quantizationConfig = layer->config->quantization;
-        deserializeQuantization(quantizationConfig->outputQ, f);
-        deserializeQuantization(quantizationConfig->propLossQ, f);
+        deserializeQuantization(quantizationConfig->outputQ, f, 0);
+        deserializeQuantization(quantizationConfig->propLossQ, f, 0);
         break;
     }
     case ADAPTIVE_AVGPOOL1D: {
@@ -425,8 +456,8 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         adaptiveAvgPool1dConfig->outputSize = (size_t)serialReadU32LE(f);
         deserializeArithmetic(&adaptiveAvgPool1dConfig->forwardMath, f);
         deserializeArithmetic(&adaptiveAvgPool1dConfig->propLossMath, f);
-        deserializeQuantization(adaptiveAvgPool1dConfig->outputQ, f);
-        deserializeQuantization(adaptiveAvgPool1dConfig->propLossQ, f);
+        deserializeQuantization(adaptiveAvgPool1dConfig->outputQ, f, 0);
+        deserializeQuantization(adaptiveAvgPool1dConfig->propLossQ, f, 0);
         break;
     }
     case DROPOUT: {
@@ -434,8 +465,8 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         dropoutConfig->p = serialReadF32LE(f);
         deserializeArithmetic(&dropoutConfig->forwardMath, f);
         deserializeArithmetic(&dropoutConfig->propLossMath, f);
-        deserializeQuantization(dropoutConfig->outputQ, f);
-        deserializeQuantization(dropoutConfig->propLossQ, f);
+        deserializeQuantization(dropoutConfig->outputQ, f, 0);
+        deserializeQuantization(dropoutConfig->propLossQ, f, 0);
         break;
     }
     case LAYERNORM: {
@@ -458,8 +489,8 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         deserializeParameter(layerNormConfig->beta, f);
         deserializeArithmetic(&layerNormConfig->forwardMath, f);
         deserializeArithmetic(&layerNormConfig->propLossMath, f);
-        deserializeQuantization(layerNormConfig->outputQ, f);
-        deserializeQuantization(layerNormConfig->propLossQ, f);
+        deserializeQuantization(layerNormConfig->outputQ, f, 0);
+        deserializeQuantization(layerNormConfig->propLossQ, f, 0);
         break;
     }
     case GROUPNORM: {
@@ -471,8 +502,8 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         deserializeParameter(groupNormConfig->beta, f);
         deserializeArithmetic(&groupNormConfig->forwardMath, f);
         deserializeArithmetic(&groupNormConfig->propLossMath, f);
-        deserializeQuantization(groupNormConfig->outputQ, f);
-        deserializeQuantization(groupNormConfig->propLossQ, f);
+        deserializeQuantization(groupNormConfig->outputQ, f, 0);
+        deserializeQuantization(groupNormConfig->propLossQ, f, 0);
         break;
     }
     default:

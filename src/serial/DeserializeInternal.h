@@ -57,11 +57,25 @@ static void deserializeKernel(kernel_t *kernel, FILE *f);
  *  (numGroups==1 <=> groupSize==0) is checked on the file's raw values
  *  first and is untouched by this relax.
  *
+ *  Task-5 review fix (Critical): the file's numGroups is untrusted wire
+ *  input read directly into an allocation size (fileNumGroups *
+ *  sizeof(float)) BEFORE any of the above -- SERIAL_MAX_SYM_GROUPS (see the
+ *  .c file) rejects it outright before the realloc runs, and whenever
+ *  numberOfElements != 0 it is additionally rejected if it already exceeds
+ *  the element count (a config cannot have more groups than elements).
+ *  SERIAL_MAX_SYM_GROUPS alone protects the numberOfElements == 0 call
+ *  sites, where the elements-bound guard cannot apply.
+ *
  * \param q: Pointer to quantization to deserialize into
  * \param f: Pointer of file to deserialize from
- * \param numberOfElements: element count q attaches to; 0 = skip-path/unknown
- *  (no divisibility validation) — see skipSerializedTensor, whose scratch
- *  qConfig is discarded rather than attached to a live tensor
+ * \param numberOfElements: element count q attaches to; 0 only at the layer
+ *  outputQ/propLossQ wire-config call sites in deserializeLayer, where no
+ *  live tensor backs q (group-quant PR2's carrier gate keeps those
+ *  per-tensor anyway, so skipping the divisibility validate there costs
+ *  nothing). Every other caller — including skipSerializedTensor's grad-skip
+ *  path (Task-5 review fix: it now threads the real element count it just
+ *  parsed off the wire, not a hardcoded 0) — passes its true count and gets
+ *  the full validate.
  */
 static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElements);
 
@@ -81,8 +95,12 @@ static void deserializeSparsity();
  *  makes deserializeQConfig reallocate it via the same free-then-reserveMemory
  *  path a live tensor's qConfig would take — a stack-backed array there would
  *  make that free() undefined behavior. Freed unconditionally after the call
- *  (see the .c file). Requires a seekable stream (fseek/ftell), matching the
- *  ODTR/PPCA deserialize precedent (#316 wave).
+ *  (see the .c file). Also threads the record's OWN element count (computed
+ *  from the dims it just read, Task-5 review fix) into deserializeQConfig
+ *  instead of a hardcoded 0, so a grouped record whose numGroups*groupSize
+ *  does not divide its own element count fails fast on this path too, not
+ *  just when a live tensor backs the config. Requires a seekable stream
+ *  (fseek/ftell), matching the ODTR/PPCA deserialize precedent (#316 wave).
  *
  * \param f: Pointer of file to skip a tensor record from
  */

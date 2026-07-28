@@ -128,6 +128,20 @@ The array must outlive every use of the config (beware `tensorInitFloat`-style
 dangling if the config escapes the scope). Reach for `initSymQConfig` + free
 only when the test exercises the allocation topology itself.
 
+**Never as a deserialize destination (group-quant PR2, Task 5 review fix).**
+"Never passed to any free call" also rules out handing a stack fixture to
+`deserializeTensor` / `deserializeParameter` / `ppcaReplaySetDeserialize` as
+the skeleton being deserialized INTO. A file record whose `numGroups` differs
+from the skeleton's own makes `deserializeQConfig`'s SYM arm
+`freeReservedMemory()` the skeleton's *current* `scales` pointer before
+`reserveMemory()`-ing a differently-sized one — there is no explicit
+`free(qc.scales)` at the test's own call site to catch, but a stack-backed
+array reaching that implicit free is exactly the same undefined behavior the
+"never freed" rule exists to avoid. Build deserialize-destination fixtures
+with `initSymQConfig`/`initSymQConfigGrouped` (or a real tensor via
+`initTensor`) instead, even when the test only cares about a fixed
+per-tensor scale.
+
 ### Rule 1 — Build via the post-#106 primitives
 
 Heap tensors are built by:

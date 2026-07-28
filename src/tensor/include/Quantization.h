@@ -52,6 +52,21 @@ typedef struct symInt32QConfig {
  * initSymQConfig (see docs/conventions/testing.md) -- such fixtures are
  * never passed to freeQuantization or freeReservedMemory.
  *
+ * Task-5 review fix (group-quant PR2): that "never passed to
+ * freeQuantization or freeReservedMemory" rule is not just about explicit
+ * free calls — it also rules out ANY use as a DESERIALIZE destination
+ * (deserializeTensor / deserializeParameter / ppcaReplaySetDeserialize
+ * skeletons, Deserialize.c / PpcaReplaySerialize.c). A file record whose
+ * numGroups differs from the skeleton's own makes deserializeQConfig's SYM
+ * arm freeReservedMemory() the skeleton's CURRENT scales pointer before
+ * reserveMemory()ing a new one — implicitly, with no call-site free() to
+ * spot. A stack-fixture symQConfig_t handed a mismatched grouped record
+ * therefore has free() called on its stack-backed array: the same
+ * undefined-behavior hazard the "never freed" rule already exists to avoid,
+ * just reached through a deserialize call instead of an explicit free.
+ * Deserialize destinations must be built via initSymQConfig /
+ * initSymQConfigGrouped (or attached to a real tensor via initTensor).
+ *
  * Group-quant PR2 (Task 1): the shape invariant is now a real constraint,
  * not just a PR1 sentinel pin. Exactly two shapes are valid:
  *   - per-tensor: numGroups == 1 && groupSize == 0 (unchanged PR1 sentinel).

@@ -2,6 +2,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Deserialize
         MORE_LIBS
+        Common
         TensorApi
         Tensor
         Rounding
@@ -12,6 +13,10 @@ add_elastic_ai_unit_test(
         Layer
         Flatten
         FlattenApi
+        Relu
+        ReluApi
+        LayerQuant
+        ArithmeticType
 
         StorageApi
         odt_test_death

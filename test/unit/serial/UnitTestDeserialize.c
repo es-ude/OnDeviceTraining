@@ -7,7 +7,10 @@
 #include "Flatten.h"
 #include "FlattenApi.h"
 #include "Layer.h"
+#include "LayerQuant.h"
 #include "QuantizationApi.h"
+#include "Relu.h"
+#include "ReluApi.h"
 #include "Serialize.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -26,6 +29,15 @@ static void writeU32LE(FILE *f, uint32_t value) {
     uint8_t bytes[4] = {(uint8_t)value, (uint8_t)(value >> 8), (uint8_t)(value >> 16),
                         (uint8_t)(value >> 24)};
     fwrite(bytes, 1, 4, f);
+}
+
+/* Companion to writeU32LE for fixtures that need to write more than a
+ * handful of scale floats (e.g. an over-cap group count) without hand-typing
+ * every byte. */
+static void writeF32LE(FILE *f, float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    writeU32LE(f, bits);
 }
 
 static tensor_t *makeFloatTensor2D(size_t d0, size_t d1, const float *src, size_t count) {
@@ -846,6 +858,181 @@ static void testSkipSerializedGroupedSymGrad(void) {
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(siblingData, capturedSibling, 3);
 }
 
+/*! Task-5 review fix (Finding 1, CRITICAL): fileNumGroups is untrusted wire
+ *  input read directly into an allocation size (fileNumGroups *
+ *  sizeof(float)) with no bound before this fix -- on a 32-bit size_t (MCU
+ *  target) a value like 0x40000001 makes that multiplication wrap to 4
+ *  bytes (a 1-float buffer) while the scales-read loop still iterates the
+ *  file's full unwrapped count, a heap overflow; on a 64-bit host the same
+ *  value survives the multiply intact but makes reserveMemory's calloc
+ *  return NULL, and the write loop dereferences it unconditionally.
+ *  SERIAL_MAX_SYM_GROUPS (Deserialize.c) rejects it before any allocation.
+ *
+ *  Exercised through a RELU layer's outputQ -- a layer wire-config call site
+ *  (deserializeLayer passes numberOfElements=0 there, no live tensor backs
+ *  it) -- rather than deserializeTensor, specifically to isolate
+ *  SERIAL_MAX_SYM_GROUPS from the sibling elements-bound guard (Finding
+ *  1.2): that guard is gated on numberOfElements != 0 and would otherwise
+ *  ALSO reject any oversized fileNumGroups against a small skeleton tensor,
+ *  making a deserializeTensor-based test pass even with SERIAL_MAX_SYM_GROUPS
+ *  itself removed.
+ *
+ *  The record is otherwise COMPLETE and well-formed (real scale floats,
+ *  qBits/rounding, a matching propLossQ tag) all the way through, on
+ *  purpose: numberOfElements==0 here means no divisibility validate ever
+ *  runs regardless, so an incomplete record would die at the next truncated
+ *  read instead -- exit(1) for an unrelated reason that would make the
+ *  mutation check below a false positive (verified empirically while
+ *  designing this test, see the report). fileNumGroups is
+ *  SERIAL_MAX_SYM_GROUPS+1 -- the smallest value that is both over the cap
+ *  and cheap to fully materialize on the wire. */
+static void testDeserializeSymRejectsOversizedNumGroupsInWireConfig(void) {
+    const uint32_t oversizedNumGroups = 65537u; /* SERIAL_MAX_SYM_GROUPS (65536) + 1 */
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    fwrite("ODTS", 1, 4, f);
+    writeU32LE(f, 4); /* version */
+    writeU32LE(f, 1); /* layerCount */
+    uint8_t tag = (uint8_t)RELU;
+    fwrite(&tag, 1, 1, f);
+    uint8_t arithByte = 0; /* ARITH_FLOAT32, HALF_AWAY -- forwardMath */
+    fwrite(&arithByte, 1, 1, f);
+    fwrite(&arithByte, 1, 1, f);
+    fwrite(&arithByte, 1, 1, f); /* propLossMath */
+    fwrite(&arithByte, 1, 1, f);
+    uint8_t symType = (uint8_t)SYM;
+    fwrite(&symType, 1, 1, f);         /* outputQ dtype */
+    writeU32LE(f, oversizedNumGroups); /* fileNumGroups: past the cap */
+    writeU32LE(f, 1);                  /* groupSize: nonzero, satisfies the sentinel */
+    for (uint32_t g = 0; g < oversizedNumGroups; g++) {
+        writeF32LE(f, 0.5f);
+    }
+    uint8_t qBits = 6;
+    fwrite(&qBits, 1, 1, f);
+    uint8_t roundingMode = 0; /* HALF_AWAY */
+    fwrite(&roundingMode, 1, 1, f);
+    uint8_t propLossFloatTag = (uint8_t)FLOAT32; /* matches the skeleton's default propLossQ */
+    fwrite(&propLossFloatTag, 1, 1, f);
+    fclose(f);
+
+    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *symOutputQ = quantizationInitSym(6, HALF_AWAY);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    lq.outputQ = symOutputQ;
+    layer_t *layer = reluLayerInit(&lq);
+    layer_t *model[] = {layer};
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    fclose(f);
+
+    freeReluLayer(layer);
+    freeQuantization(symOutputQ);
+    freeQuantization(floatQ);
+}
+
+/*! Companion to the above, same isolation rationale: fileNumGroups == 0 is
+ *  equally invalid (numGroups == 1 is the per-tensor floor; 0 groups
+ *  describes no tensor at all) and must be rejected by
+ *  SERIAL_MAX_SYM_GROUPS's guard directly, not merely happen to survive as
+ *  an always-false branch further down (validateSymQConfigShape also rejects
+ *  numGroups==0, but never runs at a numberOfElements==0 wire-config call
+ *  site, so it cannot be the thing catching this here). Record is likewise
+ *  complete (0 scale floats follow, since fileNumGroups == 0) so removing
+ *  the guard would let the whole model parse successfully instead of dying
+ *  for an unrelated reason. */
+static void testDeserializeSymRejectsZeroNumGroupsInWireConfig(void) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    fwrite("ODTS", 1, 4, f);
+    writeU32LE(f, 4); /* version */
+    writeU32LE(f, 1); /* layerCount */
+    uint8_t tag = (uint8_t)RELU;
+    fwrite(&tag, 1, 1, f);
+    uint8_t arithByte = 0;
+    fwrite(&arithByte, 1, 1, f);
+    fwrite(&arithByte, 1, 1, f);
+    fwrite(&arithByte, 1, 1, f);
+    fwrite(&arithByte, 1, 1, f);
+    uint8_t symType = (uint8_t)SYM;
+    fwrite(&symType, 1, 1, f);
+    writeU32LE(f, 0); /* fileNumGroups = 0 */
+    writeU32LE(f, 1); /* groupSize: nonzero, satisfies the sentinel (numGroups
+                       * != 1 requires groupSize != 0) */
+    uint8_t qBits = 6;
+    fwrite(&qBits, 1, 1, f);
+    uint8_t roundingMode = 0;
+    fwrite(&roundingMode, 1, 1, f);
+    uint8_t propLossFloatTag = (uint8_t)FLOAT32;
+    fwrite(&propLossFloatTag, 1, 1, f);
+    fclose(f);
+
+    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *symOutputQ = quantizationInitSym(6, HALF_AWAY);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    lq.outputQ = symOutputQ;
+    layer_t *layer = reluLayerInit(&lq);
+    layer_t *model[] = {layer};
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    fclose(f);
+
+    freeReluLayer(layer);
+    freeQuantization(symOutputQ);
+    freeQuantization(floatQ);
+}
+
+/*! Task-5 review fix (Finding 1, point 3): skipSerializedTensor now threads
+ *  the real element count it just parsed from the record's own dims into
+ *  deserializeQConfig instead of a hardcoded 0 -- proven here by a GROUPED
+ *  grad record on the SKIP path (frozen skeleton, deserializeParameter)
+ *  whose numGroups*groupSize (9) does not equal its own element count (6):
+ *  before this fix numberOfElements==0 suppressed validateSymQConfigShape
+ *  unconditionally on the skip path, so this record would have silently
+ *  "succeeded" past skip parsing despite being corrupt. Hand-crafted bytes,
+ *  mirroring testDeserializeGroupedSymRejectsBadDivisibility -- no producer
+ *  in this tree emits an invalid-divisibility record (initSymQConfigGrouped
+ *  enforces the shape at construction). */
+static void testSkipSerializedGroupedSymGradRejectsBadDivisibility(void) {
+    float paramData[] = {1.f, 2.f, 3.f, 4.f};
+    tensor_t *paramTensor = makeFloatTensor2D(2, 2, paramData, 4);
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    uint8_t hasGrad = 1;
+    fwrite(&hasGrad, sizeof(uint8_t), 1, f);
+    serializeTensor(paramTensor, f);
+
+    writeU32LE(f, 1); /* grad numberOfDimensions */
+    writeU32LE(f, 6); /* grad dimensions[0] = 6 elements */
+    writeU32LE(f, 0); /* grad orderOfDimensions[0] */
+    uint8_t symType = (uint8_t)SYM;
+    fwrite(&symType, 1, 1, f);
+    writeU32LE(f, 3); /* numGroups = 3 */
+    writeU32LE(f, 3); /* groupSize = 3 -> 3*3 == 9 != 6 elements */
+    uint8_t scaleBytes[12] = {0x00, 0x00, 0x00, 0x3F, 0x00, 0x00,
+                              0x00, 0x3F, 0x00, 0x00, 0x00, 0x3F}; /* three 0.5f scales */
+    fwrite(scaleBytes, 1, 12, f);
+    uint8_t qBits = 4;
+    fwrite(&qBits, 1, 1, f);
+    uint8_t roundingMode = 0; /* HALF_AWAY */
+    fwrite(&roundingMode, 1, 1, f);
+    uint8_t payload[3] = {0xAB, 0xCD, 0xEF}; /* never reached: the validate dies first */
+    fwrite(payload, 1, 3, f);
+    fclose(f);
+
+    tensor_t *skeletonParamTensor = makeFloatTensor2D(2, 2, NULL, 0);
+    parameter_t frozenSkeleton = {.param = skeletonParamTensor, .grad = NULL};
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeParameter(&frozenSkeleton, f));
+    fclose(f);
+
+    freeTensor(skeletonParamTensor);
+    freeTensor(paramTensor);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -873,5 +1060,8 @@ int main(void) {
     RUN_TEST(testSkipSerializedTensorRejectsRankAboveCap);
     RUN_TEST(testSkipSerializedTensorRejectsTruncatedPayload);
     RUN_TEST(testSkipSerializedGroupedSymGrad);
+    RUN_TEST(testDeserializeSymRejectsOversizedNumGroupsInWireConfig);
+    RUN_TEST(testDeserializeSymRejectsZeroNumGroupsInWireConfig);
+    RUN_TEST(testSkipSerializedGroupedSymGradRejectsBadDivisibility);
     return UNITY_END();
 }

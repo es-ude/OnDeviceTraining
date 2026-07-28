@@ -35,13 +35,21 @@
  * grad tensor entirely; deserialize is TOLERANT of a presence/skeleton
  * mismatch (#380 PR3) -- grads are skipped into frozen skeletons or left
  * zeroed when absent, never NULL-dereferenced; see Deserialize.c.
- * v4 (group-quant PR1, spec
+ * v4 (group-quant PR1/PR2, spec
  * docs/superpowers/specs/2026-07-28-group-quantization-design.md §6): the SYM
  * qConfig record grows `u32 numGroups`, `u32 groupSize` ahead of the scales
  * array -- `f32 scales[numGroups]` -- then the unchanged `u8 qBits`/`u8
- * rounding` tail. PR1 always writes numGroups=1, groupSize=0 (no grouping
- * functionality yet); every other record (ASYM/FLOAT32/INT32/SYM_INT32/BOOL,
- * layer arms, the v3 grad-presence byte) is untouched. */
+ * rounding` tail. The writer is group-GENERAL and always has been: it writes
+ * symQC->numGroups/groupSize verbatim and every group's scale (not just
+ * scales[0]), whatever shape the in-memory config holds -- see
+ * testGoldenBytesModelReluSymGroupedOutputV4 (UnitTestSerialize.c), the
+ * numGroups>1 golden that pins this. PR1 shipped with no producer able to
+ * BUILD a numGroups>1 config yet, so every PR1-era file happened to carry
+ * numGroups=1, groupSize=0 (the per-tensor sentinel, Quantization.h); PR2's
+ * initSymQConfigGrouped (Task 1) and the Deserialize.c read-side relax
+ * (Task 5) are what actually exercise a numGroups>1 record end to end. Every
+ * other record (ASYM/FLOAT32/INT32/SYM_INT32/BOOL, layer arms, the v3
+ * grad-presence byte) is untouched. */
 #define SERIALIZE_MAGIC "ODTS"
 #define SERIALIZE_FORMAT_VERSION 4u
 
@@ -125,11 +133,13 @@ static void serializeQConfig(quantization_t *q, FILE *f) {
     }
     case SYM: {
         symQConfig_t *symQC = q->qConfig;
-        /* v4 (group-quant PR1): numGroups/groupSize precede the scales array
-         * so a reader can size its group-aware handling before touching any
-         * per-group data. PR1: numGroups is always 1 (no grouping
-         * functionality yet) -- scales[0] carries exactly the float the
-         * deleted scalar `scale` field used to hold. */
+        /* v4 (group-quant PR1/PR2): numGroups/groupSize precede the scales
+         * array so a reader can size its group-aware handling before
+         * touching any per-group data. Group-general: writes whatever shape
+         * the in-memory config holds, numGroups==1 (scales[0] carries
+         * exactly the float the deleted scalar `scale` field used to hold)
+         * or numGroups>1 (initSymQConfigGrouped, PR2 Task 1) alike -- see
+         * the top-of-file v4 comment. */
         serialWriteSizeAsU32LE(symQC->numGroups, f);
         serialWriteSizeAsU32LE(symQC->groupSize, f);
         for (size_t g = 0; g < symQC->numGroups; g++) {

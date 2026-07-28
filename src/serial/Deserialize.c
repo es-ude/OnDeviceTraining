@@ -179,6 +179,23 @@ static void deserializeKernel(kernel_t *kernel, FILE *f) {
     kernel->padding = (size_t)serialReadU32LE(f);
 }
 
+/* Task-5 review fix (Critical): sanity cap on the untrusted wire
+ * fileNumGroups (SYM qConfig record) read below, mirroring
+ * SKIP_TENSOR_MAX_DIMS's role for the untrusted wire rank further down --
+ * generous against any real model (a group count is bounded by the element
+ * count of the largest parameter tensor it groups, never in the tens of
+ * thousands), so this is headroom, not a real limit. It exists purely to
+ * foreclose the allocation-size trust boundary a raw u32 * sizeof(float)
+ * would otherwise cross: on a 32-bit size_t (MCU target), a value like
+ * 0x40000001 makes fileNumGroups * sizeof(float) wrap around to 4 before it
+ * ever reaches reserveMemory, handing back a 1-float buffer while the
+ * scales-read loop below still iterates the file's full (unwrapped) count --
+ * a heap overflow; on a 64-bit host the multiply does not wrap, but a
+ * multi-gigabyte request makes reserveMemory's calloc return NULL, and nothing
+ * downstream expects that. The cap bounds the allocation at 256 KiB and rules
+ * out both. */
+#define SERIAL_MAX_SYM_GROUPS 65536u
+
 static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElements) {
     switch (q->type) {
     case INT32:
@@ -203,6 +220,36 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
          * file's shape instead -- the resulting shape is validated below
          * (validateSymQConfigShape), which is the discipline's PR2 form. */
         size_t fileNumGroups = (size_t)serialReadU32LE(f);
+        /* Task-5 review fix (Critical): fileNumGroups is untrusted wire input
+         * about to size an allocation -- bound it BEFORE touching
+         * symQC->scales at all. Zero is never valid (numGroups==1 is the
+         * per-tensor floor; the sentinel check below would catch it too, but
+         * only after a pointless free+realloc(0) round trip), and
+         * SERIAL_MAX_SYM_GROUPS forecloses the size_t-wrap-on-32-bit /
+         * NULL-calloc-on-64-bit pair a multi-GB value would otherwise invite
+         * (see the macro's own comment above). */
+        if (fileNumGroups == 0 || fileNumGroups > SERIAL_MAX_SYM_GROUPS) {
+            PRINT_ERROR("deserializeQConfig: SYM file numGroups %zu is zero or exceeds the "
+                        "%u-group sanity cap",
+                        fileNumGroups, (unsigned)SERIAL_MAX_SYM_GROUPS);
+            exit(1);
+        }
+        /* Whenever a live tensor backs this config (numberOfElements != 0 --
+         * the skip path now passes its own real count too, see
+         * skipSerializedTensor below), a config cannot have more groups than
+         * elements; reject that here, before the realloc, so the later
+         * validateSymQConfigShape call downstream keeps its own job
+         * (divisibility) uncomplicated by an out-of-range numGroups it would
+         * otherwise have to multiply against. numberOfElements == 0 (the
+         * layer outputQ/propLossQ wire-config call sites) has no tensor to
+         * bound against -- SERIAL_MAX_SYM_GROUPS above is the only guard
+         * there, and is sized generously enough to cover it alone. */
+        if (numberOfElements != 0 && fileNumGroups > numberOfElements) {
+            PRINT_ERROR("deserializeQConfig: SYM file numGroups %zu exceeds the %zu-element "
+                        "tensor it attaches to",
+                        fileNumGroups, numberOfElements);
+            exit(1);
+        }
         if (fileNumGroups != symQC->numGroups) {
             freeReservedMemory(symQC->scales);
             symQC->scales = reserveMemory(fileNumGroups * sizeof(float));
@@ -225,12 +272,18 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
         }
         symQC->qBits = serialReadU8(f);
         symQC->roundingMode = (roundingMode_t)serialReadU8(f);
-        /* numberOfElements == 0 marks the skip-path (skipSerializedTensor's
-         * scratch qConfig is discarded, never attached to a live tensor) --
-         * no divisibility check is possible or needed there. Everywhere a
-         * real tensor backs q, this is the choke point that turns "the
-         * reallocation succeeded" into "the resulting shape actually
-         * describes this tensor". */
+        /* numberOfElements == 0 marks ONLY the layer outputQ/propLossQ
+         * wire-config call sites in deserializeLayer -- no live tensor backs
+         * q there (group-quant PR2's carrier gate keeps those per-tensor
+         * anyway, so skipping this validate there costs nothing). Every
+         * other caller reaches this validate, INCLUDING skipSerializedTensor's
+         * grad-skip path (Task-5 review fix: it now threads the real element
+         * count it just parsed off the wire, not 0) -- a grouped grad record
+         * whose numGroups*groupSize does not divide its own element count is
+         * corrupt whether or not the resulting scratch qConfig ever attaches
+         * to a live tensor, so it fails fast here too. This is the choke
+         * point that turns "the reallocation succeeded" into "the resulting
+         * shape actually describes this record's own element count". */
         if (numberOfElements != 0) {
             validateSymQConfigShape(symQC, numberOfElements);
         }
@@ -298,9 +351,13 @@ static void skipSerializedTensor(FILE *f) {
      * unconditionally below regardless of whether a reallocation actually
      * happened: this whole qConfig is discarded at function exit, never
      * attached to a real tensor, so nothing else owns whatever it ends up
-     * pointing at. numberOfElements == 0 passed to deserializeQConfig below
-     * (the skip-path marker) skips the divisibility validate for the same
-     * reason. */
+     * pointing at. Task-5 review fix: the record's own numberOfElements
+     * (computed above from the dims it just read, not a hardcoded 0) is
+     * threaded into deserializeQConfig below, so a grouped record whose
+     * numGroups*groupSize does not divide its own element count fails fast
+     * here too -- the discarded scratch qConfig no longer exempts a
+     * corrupt/malformed grouped grad record from the divisibility check a
+     * live tensor's qConfig would get. */
     symQConfig_t symScratch = {0};
     asymQConfig_t asymScratch;
     switch (scratchQ.type) {
@@ -324,7 +381,7 @@ static void skipSerializedTensor(FILE *f) {
         PRINT_ERROR("skipSerializedTensor: unknown qtype %u", (unsigned)type);
         exit(1);
     }
-    deserializeQConfig(&scratchQ, f, 0);
+    deserializeQConfig(&scratchQ, f, numberOfElements);
     if (scratchQ.type == SYM) {
         freeReservedMemory(symScratch.scales);
     }

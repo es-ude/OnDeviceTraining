@@ -4,6 +4,7 @@
 #include "LayerQuant.h"
 #include "QuantizationApi.h"
 #include "StorageApi.h"
+#include "TensorApi.h"
 #include "unity.h"
 
 void setUp() {}
@@ -121,6 +122,37 @@ void testDeepCopyQuantizationSymInt32DuplicatesQConfigBytes(void) {
     freeReservedMemory(dst);
 }
 
+void testDeepCopyQuantizationSymDeepCopiesScalesArray(void) {
+    /* Group-quant PR1: symQConfig_t carries a heap `scales` pointer, so a
+     * blind memcpy of the qConfig struct (the SYM_INT32/ASYM pattern above)
+     * would alias dst's scales onto src's -- a double-free once both sides
+     * are freed, and a value assertion alone wouldn't catch it (the aliased
+     * array reads the same float). Mutation guard: reverting the SYM branch
+     * in deepCopyQuantization to the generic byte-memcpy path makes the
+     * pointer-independence assertion below FAIL (and a subsequent
+     * freeQuantization of both configs double-frees under ASan). */
+    quantization_t *src = quantizationInitSym(6, SR_HALF_AWAY);
+    quantization_t *dst = deepCopyQuantization(src);
+
+    TEST_ASSERT_NOT_NULL(dst);
+    TEST_ASSERT_NOT_EQUAL(src, dst);
+    TEST_ASSERT_EQUAL_INT(SYM, dst->type);
+    TEST_ASSERT_NOT_NULL(dst->qConfig);
+    TEST_ASSERT_NOT_EQUAL(src->qConfig, dst->qConfig);
+
+    symQConfig_t *srcCfg = (symQConfig_t *)src->qConfig;
+    symQConfig_t *dstCfg = (symQConfig_t *)dst->qConfig;
+    TEST_ASSERT_NOT_EQUAL(srcCfg->scales, dstCfg->scales); /* independent arrays */
+    TEST_ASSERT_EQUAL_FLOAT(srcCfg->scales[0], dstCfg->scales[0]);
+    TEST_ASSERT_EQUAL_UINT8(srcCfg->qBits, dstCfg->qBits);
+    TEST_ASSERT_EQUAL_INT(srcCfg->roundingMode, dstCfg->roundingMode);
+    TEST_ASSERT_EQUAL_size_t(srcCfg->numGroups, dstCfg->numGroups);
+    TEST_ASSERT_EQUAL_size_t(srcCfg->groupSize, dstCfg->groupSize);
+
+    freeQuantization(dst);
+    freeQuantization(src);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLayerQuantInitUniformFloat32DerivesFloatArithmeticAndSharesStorage);
@@ -130,5 +162,6 @@ int main(void) {
     RUN_TEST(testDeepCopyQuantizationReturnsNullForNullInput);
     RUN_TEST(testDeepCopyQuantizationFloat32ReturnsFreshAllocationWithNullQConfig);
     RUN_TEST(testDeepCopyQuantizationSymInt32DuplicatesQConfigBytes);
+    RUN_TEST(testDeepCopyQuantizationSymDeepCopiesScalesArray);
     return UNITY_END();
 }

@@ -44,11 +44,18 @@ static ppcaReplayConfig_t floatConfig(size_t dim, size_t rank, size_t maxM) {
 
 static ppcaReplayConfig_t packedConfig(size_t dim, size_t rank, size_t maxM, qtype_t basisType) {
     ppcaReplayConfig_t cfg = floatConfig(dim, rank, maxM);
-    static symQConfig_t symQc;
+    /* Stack/static-fixture idiom (group-quant PR1): this helper is called
+     * from multiple tests in the same binary, and `static` storage means a
+     * heap-allocating initSymQConfig call here would leak its previous
+     * scales array on every call after the first. Build the config directly
+     * instead (same values initSymQConfig(8, HALF_AWAY, ...) would produce);
+     * never freed, per the stack-fixture convention. */
+    static float symScale[1] = {1.f};
+    static symQConfig_t symQc = {
+        .scales = symScale, .numGroups = 1, .groupSize = 0, .roundingMode = HALF_AWAY, .qBits = 8};
     static quantization_t symQ;
     static asymQConfig_t asymQc;
     static quantization_t asymQ;
-    initSymQConfig(8, HALF_AWAY, &symQc);
     initSymQuantization(&symQc, &symQ);
     initAsymQConfig(8, HALF_AWAY, &asymQc);
     initAsymQuantization(&asymQc, &asymQ);
@@ -148,8 +155,8 @@ void testRoundTripPacked(void) {
      * tensor) -- pin it so packed payload bytes can never silently decode
      * against a drifted grid (PR #366 review). */
     TEST_ASSERT_EQUAL_FLOAT(
-        ((symQConfig_t *)serial->generators[0]->basis->quantization->qConfig)->scale,
-        ((symQConfig_t *)deserial->generators[0]->basis->quantization->qConfig)->scale);
+        ((symQConfig_t *)serial->generators[0]->basis->quantization->qConfig)->scales[0],
+        ((symQConfig_t *)deserial->generators[0]->basis->quantization->qConfig)->scales[0]);
     TEST_ASSERT_EQUAL_FLOAT(
         ((asymQConfig_t *)serial->generators[0]->mean->quantization->qConfig)->scale,
         ((asymQConfig_t *)deserial->generators[0]->mean->quantization->qConfig)->scale);
@@ -190,9 +197,11 @@ void testDeserializeRejectsQBitsMismatch(void) {
     fclose(f);
 
     ppcaReplayConfig_t cfg4 = floatConfig(6, 2, 8);
-    static symQConfig_t qc4;
+    /* Stack-fixture idiom (group-quant PR1): see packedConfig above. */
+    static float qc4Scale[1] = {1.f};
+    static symQConfig_t qc4 = {
+        .scales = qc4Scale, .numGroups = 1, .groupSize = 0, .roundingMode = HALF_AWAY, .qBits = 4};
     static quantization_t q4;
-    initSymQConfig(4, HALF_AWAY, &qc4);
     initSymQuantization(&qc4, &q4);
     cfg4.basisQ = &q4;
     static asymQConfig_t aqc;

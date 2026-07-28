@@ -840,7 +840,7 @@ void testSgdZeroGradSymSubByteZeroesAllPackedBytesAndResetsScale(void) {
     parameter_t *param = parameterInit(p, g);
     memset(g->data, 0xFF, 4); /* poison all packed grad bytes */
     symQConfig_t *gSymQ = g->quantization->qConfig;
-    gSymQ->scale = 0.42f; /* poison the scale too */
+    gSymQ->scales[0] = 0.42f; /* poison the scale too */
 
     sgd_t sgd;
     sgdInit(&sgd, 0.1f, 0.0f, 0.0f,
@@ -862,7 +862,7 @@ void testSgdZeroGradSymSubByteZeroesAllPackedBytesAndResetsScale(void) {
     uint8_t b1 = g->data[1];
     uint8_t b2 = g->data[2];
     uint8_t b3 = g->data[3];
-    float scaleAfter = gSymQ->scale;
+    float scaleAfter = gSymQ->scales[0];
     freeParameter(param);
 
     TEST_ASSERT_EQUAL_UINT8(0, b0);

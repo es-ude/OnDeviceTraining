@@ -830,7 +830,7 @@ void testLinearBackwardPackedSymWeightGradFixedScaleFirstStore(void) {
     symQConfig_t *gradQC = (symQConfig_t *)weightsGrad->quantization->qConfig;
     bool gradTypeIsSym = (weightsGrad->quantization->type == SYM);
     uint8_t gradQBits = gradQC->qBits;
-    float scaleAfterCall1 = gradQC->scale;
+    float scaleAfterCall1 = gradQC->scales[0];
 
     int32_t mant1[6];
     symTestUnpackSignExtend(weightsGrad->data, gradQC->qBits, mant1, numberOfWeights);
@@ -852,7 +852,7 @@ void testLinearBackwardPackedSymWeightGradFixedScaleFirstStore(void) {
     tensor_t *loss2 = initTensor(getShapeLike(loss->shape), quantizationInitFloat(), NULL);
     tensorFillFromFloatBuffer(loss2, (float[]){4.f, 3.f}, 2);
     linearBackward(linearLayer, forwardInput, loss2, propLoss);
-    float scaleAfterCall2 = gradQC->scale;
+    float scaleAfterCall2 = gradQC->scales[0];
 
     freeTensor(loss2);
     freeLinearLayer(linearLayer);

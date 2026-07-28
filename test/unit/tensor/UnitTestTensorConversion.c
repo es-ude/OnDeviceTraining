@@ -40,7 +40,9 @@ void testZeroTensorDataSymSubByteZeroesOnlyPackedBytes() {
     size_t dims[] = {1, 10};
     size_t order[] = {0, 1};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 2, .orderOfDimensions = order};
-    symQConfig_t cfg = {.scale = 1.0f, .qBits = 3, .roundingMode = HALF_AWAY};
+    float cfgScale[1] = {1.0f};
+    symQConfig_t cfg = {
+        .scales = cfgScale, .numGroups = 1, .groupSize = 0, .qBits = 3, .roundingMode = HALF_AWAY};
     quantization_t q;
     initSymQuantization(&cfg, &q);
     tensor_t t;
@@ -684,7 +686,9 @@ void testConversionSymSameTypeCopyPropagatesScale() {
     size_t order[] = {0, 1};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 2, .orderOfDimensions = order};
 
-    symQConfig_t inQC = {.scale = 0.25f, .qBits = 6, .roundingMode = HALF_AWAY};
+    float inQCScale[1] = {0.25f};
+    symQConfig_t inQC = {
+        .scales = inQCScale, .numGroups = 1, .groupSize = 0, .qBits = 6, .roundingMode = HALF_AWAY};
     quantization_t inQ;
     initSymQuantization(&inQC, &inQ);
     uint8_t inData[3];
@@ -692,7 +696,12 @@ void testConversionSymSameTypeCopyPropagatesScale() {
     tensor_t in;
     setTensorValues(&in, inData, &shape, &inQ, NULL);
 
-    symQConfig_t outQC = {.scale = 1.f, .qBits = 6, .roundingMode = HALF_AWAY};
+    float outQCScale[1] = {1.f};
+    symQConfig_t outQC = {.scales = outQCScale,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .qBits = 6,
+                          .roundingMode = HALF_AWAY};
     quantization_t outQ;
     initSymQuantization(&outQC, &outQ);
     uint8_t outData[4];
@@ -703,7 +712,7 @@ void testConversionSymSameTypeCopyPropagatesScale() {
 
     convertTensor(&in, &out);
 
-    TEST_ASSERT_EQUAL_FLOAT(0.25f, outQC.scale);
+    TEST_ASSERT_EQUAL_FLOAT(0.25f, outQC.scales[0]);
     TEST_ASSERT_EQUAL_UINT8(6, outQC.qBits);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(inData, outData, 3);
     TEST_ASSERT_EQUAL_UINT8(0xAA, outData[3]);
@@ -719,7 +728,9 @@ void testConversionSymSameTypeWidthMismatchDies() {
     size_t order[] = {0, 1};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 2, .orderOfDimensions = order};
 
-    symQConfig_t inQC = {.scale = 0.25f, .qBits = 6, .roundingMode = HALF_AWAY};
+    float inQCScale[1] = {0.25f};
+    symQConfig_t inQC = {
+        .scales = inQCScale, .numGroups = 1, .groupSize = 0, .qBits = 6, .roundingMode = HALF_AWAY};
     quantization_t inQ;
     initSymQuantization(&inQC, &inQ);
     uint8_t inData[2];
@@ -727,7 +738,12 @@ void testConversionSymSameTypeWidthMismatchDies() {
     tensor_t in;
     setTensorValues(&in, inData, &shape, &inQ, NULL);
 
-    symQConfig_t outQC = {.scale = 1.f, .qBits = 4, .roundingMode = HALF_AWAY};
+    float outQCScale[1] = {1.f};
+    symQConfig_t outQC = {.scales = outQCScale,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .qBits = 4,
+                          .roundingMode = HALF_AWAY};
     quantization_t outQ;
     initSymQuantization(&outQC, &outQ);
     uint8_t outData[1] = {0};
@@ -1108,8 +1124,9 @@ void testConversionSymSymInt32SignExtends() {
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
 
     /* SYM source, qBits=6, scale 0.5; mantissas {3,-3,31,-32} packed */
-    symQConfig_t inQC = {0};
-    inQC.scale = 0.5f;
+    float inQCScaleArr[1] = {0.f};
+    symQConfig_t inQC = {.scales = inQCScaleArr, .numGroups = 1, .groupSize = 0};
+    inQC.scales[0] = 0.5f;
     inQC.qBits = 6;
     quantization_t inQ;
     initSymQuantization(&inQC, &inQ);
@@ -1142,8 +1159,9 @@ void testConversionSymFloat32Dequantizes() {
     size_t dims[] = {3};
     size_t order[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
-    symQConfig_t inQC = {0};
-    inQC.scale = 0.25f;
+    float inQCScaleArr[1] = {0.f};
+    symQConfig_t inQC = {.scales = inQCScaleArr, .numGroups = 1, .groupSize = 0};
+    inQC.scales[0] = 0.25f;
     inQC.qBits = 6;
     quantization_t inQ;
     initSymQuantization(&inQC, &inQ);
@@ -1171,8 +1189,9 @@ void testConversionSymInt32CodesDropScale() {
     size_t dims[] = {4};
     size_t order[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
-    symQConfig_t inQC = {0};
-    inQC.scale = 7.5f;
+    float inQCScaleArr[1] = {0.f};
+    symQConfig_t inQC = {.scales = inQCScaleArr, .numGroups = 1, .groupSize = 0};
+    inQC.scales[0] = 7.5f;
     inQC.qBits = 6; /* scale must be IGNORED */
     quantization_t inQ;
     initSymQuantization(&inQC, &inQ);
@@ -1212,8 +1231,9 @@ void testConversionSymAsymRescaleRoundTrips() {
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
 
     /* Build SYM input */
-    symQConfig_t inQC = {0};
-    inQC.scale = 0.5f;
+    float inQCScaleArr[1] = {0.f};
+    symQConfig_t inQC = {.scales = inQCScaleArr, .numGroups = 1, .groupSize = 0};
+    inQC.scales[0] = 0.5f;
     inQC.qBits = 6;
     quantization_t inQ;
     initSymQuantization(&inQC, &inQ);
@@ -1283,8 +1303,12 @@ void testConversionSymInt32ToSymRescaleRoundTrips() {
 
     /* Output: SYM with qBits=6.
      * Expected fresh scale = absmax / (2^(6-1) - 1) = 10.0 / 31 ≈ 0.322580645. */
-    symQConfig_t outQC;
-    initSymQConfig(6, HALF_AWAY, &outQC);
+    float outQCScale[1] = {1.f};
+    symQConfig_t outQC = {.scales = outQCScale,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .qBits = 6};
     quantization_t outQ;
     initSymQuantization(&outQC, &outQ);
     uint8_t symData[calcNumberOfBytesForData(&outQ, n)];
@@ -1294,7 +1318,7 @@ void testConversionSymInt32ToSymRescaleRoundTrips() {
     convertTensor(&inTensor, &symTensor);
 
     /* Assert fresh output scale. */
-    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 10.0f / 31.0f, outQC.scale);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 10.0f / 31.0f, outQC.scales[0]);
 
     /* Manually unpack codes and dequantize; verify within one quant step.
      * One quant step = scale ≈ 0.323; tolerance = 0.33f. */
@@ -1302,7 +1326,7 @@ void testConversionSymInt32ToSymRescaleRoundTrips() {
     symTestUnpackSignExtend(symTensor.data, 6, codes, 6);
     float expectedVal[] = {10.f, -8.f, 4.f, -2.f, 6.f, -10.f};
     for (size_t i = 0; i < n; i++) {
-        float rec = (float)codes[i] * outQC.scale;
+        float rec = (float)codes[i] * outQC.scales[0];
         TEST_ASSERT_FLOAT_WITHIN(0.33f, expectedVal[i], rec);
     }
 
@@ -1326,9 +1350,13 @@ void testRepackSymInt32ToSymNoRescaleFittingCarriesScale() {
     tensor_t inTensor;
     setTensorValues(&inTensor, (uint8_t *)inData, &shape, &inQ, NULL);
 
-    symQConfig_t outQC;
-    initSymQConfig(6, HALF_AWAY, &outQC);
-    outQC.scale = 999.0f;
+    float outQCScale[1] = {1.f};
+    symQConfig_t outQC = {.scales = outQCScale,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .qBits = 6};
+    outQC.scales[0] = 999.0f;
     quantization_t outQ;
     initSymQuantization(&outQC, &outQ);
     uint8_t symData[calcNumberOfBytesForData(&outQ, n)];
@@ -1340,7 +1368,7 @@ void testRepackSymInt32ToSymNoRescaleFittingCarriesScale() {
     int32_t codes[6];
     symTestUnpackSignExtend(symTensor.data, 6, codes, 6);
     TEST_ASSERT_EQUAL_INT32_ARRAY(inData, codes, 6);
-    TEST_ASSERT_EQUAL_FLOAT(0.5f, outQC.scale);
+    TEST_ASSERT_EQUAL_FLOAT(0.5f, outQC.scales[0]);
 }
 
 void testRepackSymInt32ToSymNoRescaleRejectsOverflow() {
@@ -1358,9 +1386,13 @@ void testRepackSymInt32ToSymNoRescaleRejectsOverflow() {
     tensor_t inTensor;
     setTensorValues(&inTensor, (uint8_t *)inData, &shape, &inQ, NULL);
 
-    symQConfig_t outQC;
-    initSymQConfig(6, HALF_AWAY, &outQC);
-    outQC.scale = 999.0f;
+    float outQCScale[1] = {1.f};
+    symQConfig_t outQC = {.scales = outQCScale,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .qBits = 6};
+    outQC.scales[0] = 999.0f;
     quantization_t outQ;
     initSymQuantization(&outQC, &outQ);
     uint8_t symData[calcNumberOfBytesForData(&outQ, n)];
@@ -1385,8 +1417,12 @@ void testConversionFloatToSymRoundTripsSymmetric() {
     tensor_t floatTensor;
     setTensorValues(&floatTensor, (uint8_t *)floatData, &shape, &floatQ, NULL);
 
-    symQConfig_t outQC;
-    initSymQConfig(6, HALF_AWAY, &outQC);
+    float outQCScale[1] = {1.f};
+    symQConfig_t outQC = {.scales = outQCScale,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .qBits = 6};
     quantization_t outQ;
     initSymQuantization(&outQC, &outQ);
     uint8_t symData[calcNumberOfBytesForData(&outQ, n)];
@@ -1395,12 +1431,12 @@ void testConversionFloatToSymRoundTripsSymmetric() {
 
     convertTensor(&floatTensor, &symTensor);
 
-    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 3.5f / 31.0f, outQC.scale);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 3.5f / 31.0f, outQC.scales[0]);
 
     int32_t codes[6];
     symTestUnpackSignExtend(symTensor.data, 6, codes, 6);
     for (size_t i = 0; i < n; i++) {
-        float rec = (float)codes[i] * outQC.scale;
+        float rec = (float)codes[i] * outQC.scales[0];
         TEST_ASSERT_FLOAT_WITHIN(0.12f, floatData[i], rec);
     }
 
@@ -1423,9 +1459,13 @@ void testConversionInt32ToSymNoRescaleScale1() {
     tensor_t intTensor;
     setTensorValues(&intTensor, (uint8_t *)intData, &shape, &intQ, NULL);
 
-    symQConfig_t outQC;
-    initSymQConfig(6, HALF_AWAY, &outQC);
-    outQC.scale = 999.0f; /* garbage — proves scale=1 is written by the cell */
+    float outQCScale[1] = {1.f};
+    symQConfig_t outQC = {.scales = outQCScale,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .qBits = 6};
+    outQC.scales[0] = 999.0f; /* garbage — proves scale=1 is written by the cell */
     quantization_t outQ;
     initSymQuantization(&outQC, &outQ);
     uint8_t symData[calcNumberOfBytesForData(&outQ, n)];
@@ -1437,7 +1477,7 @@ void testConversionInt32ToSymNoRescaleScale1() {
     int32_t codes[6];
     symTestUnpackSignExtend(symTensor.data, 6, codes, 6);
     TEST_ASSERT_EQUAL_INT32_ARRAY(intData, codes, 6);
-    TEST_ASSERT_EQUAL_FLOAT(1.0f, outQC.scale);
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, outQC.scales[0]);
 }
 
 void testConversionInt32ToSymRejectsOutOfRange() {
@@ -1455,8 +1495,12 @@ void testConversionInt32ToSymRejectsOutOfRange() {
     tensor_t intTensor;
     setTensorValues(&intTensor, (uint8_t *)intData, &shape, &intQ, NULL);
 
-    symQConfig_t outQC;
-    initSymQConfig(6, HALF_AWAY, &outQC);
+    float outQCScale[1] = {1.f};
+    symQConfig_t outQC = {.scales = outQCScale,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .qBits = 6};
     quantization_t outQ;
     initSymQuantization(&outQC, &outQ);
     uint8_t symData[calcNumberOfBytesForData(&outQ, n)];
@@ -1487,8 +1531,12 @@ void testChunkedFloatToSymRoundTripsAtChunkBoundary(void) {
     tensor_t floatIn;
     setTensorValues(&floatIn, (uint8_t *)vals, &shape, &floatInQ, NULL);
 
-    symQConfig_t symQC;
-    initSymQConfig(qBits, HALF_AWAY, &symQC);
+    float symQCScale[1] = {1.f};
+    symQConfig_t symQC = {.scales = symQCScale,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .qBits = qBits};
     quantization_t symQ;
     initSymQuantization(&symQC, &symQ);
     uint8_t *symData = (uint8_t *)reserveMemory(calcNumberOfBytesForData(&symQ, n));
@@ -1504,7 +1552,7 @@ void testChunkedFloatToSymRoundTripsAtChunkBoundary(void) {
     setTensorValues(&floatOut, (uint8_t *)decoded, &shape, &floatOutQ, NULL);
     convertTensor(&symOut, &floatOut);
 
-    float tol = symQC.scale * 0.5f + 1e-3f;
+    float tol = symQC.scales[0] * 0.5f + 1e-3f;
     for (size_t i = 0; i < n; i++) {
         TEST_ASSERT_FLOAT_WITHIN(tol, vals[i], decoded[i]);
     }
@@ -1584,8 +1632,12 @@ void testConversionAsymToSymRescaleOffCenterRoundTrips() {
     float reference[] = {2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 2.5f};
 
     /* SYM output qBits=6. */
-    symQConfig_t outQC;
-    initSymQConfig(6, HALF_AWAY, &outQC);
+    float outQCScale[1] = {1.f};
+    symQConfig_t outQC = {.scales = outQCScale,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .qBits = 6};
     quantization_t outQ;
     initSymQuantization(&outQC, &outQ);
     uint8_t symData[calcNumberOfBytesForData(&outQ, 6)];
@@ -1596,7 +1648,7 @@ void testConversionAsymToSymRescaleOffCenterRoundTrips() {
 
     /* Assert FRESH symmetric scale proves rescale (NOT the carried asym 0.25):
      * absMax = 6.0; scale = 6.0 / (2^(6-1) - 1) = 6.0/31. */
-    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 6.0f / 31.0f, outQC.scale);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 6.0f / 31.0f, outQC.scales[0]);
 
     /* Manual unpack + dequant + compare.
      * asym codes are exact integers so the only error is the SYM requantization step
@@ -1604,7 +1656,7 @@ void testConversionAsymToSymRescaleOffCenterRoundTrips() {
     int32_t symCodes[6];
     symTestUnpackSignExtend(symTensor.data, 6, symCodes, 6);
     for (size_t i = 0; i < 6; i++) {
-        float rec = (float)symCodes[i] * outQC.scale;
+        float rec = (float)symCodes[i] * outQC.scales[0];
         TEST_ASSERT_FLOAT_WITHIN(0.2f, reference[i], rec);
     }
 
@@ -1623,8 +1675,9 @@ void testConvertSymToInt32RejectsZeroQBits() {
     size_t order[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
 
-    symQConfig_t inQC = {0};
-    inQC.scale = 0.5f;
+    float inQCScaleArr[1] = {0.f};
+    symQConfig_t inQC = {.scales = inQCScaleArr, .numGroups = 1, .groupSize = 0};
+    inQC.scales[0] = 0.5f;
     inQC.qBits = 0; /* degenerate */
     quantization_t inQ;
     initSymQuantization(&inQC, &inQ);
@@ -1655,7 +1708,8 @@ void testConvertInt32ToSymRejectsZeroQBits() {
     tensor_t intTensor;
     setTensorValues(&intTensor, (uint8_t *)intData, &shape, &intQ, NULL);
 
-    symQConfig_t outQC = {0};
+    float outQCScaleArr[1] = {0.f};
+    symQConfig_t outQC = {.scales = outQCScaleArr, .numGroups = 1, .groupSize = 0};
     outQC.qBits = 0; /* degenerate */
     quantization_t outQ;
     initSymQuantization(&outQC, &outQ);
@@ -1752,7 +1806,9 @@ void testAccumulateSymFixedGridFirstStoreDerivesGridThenCarries(void) {
     size_t dims[] = {1, 4};
     size_t order[] = {0, 1};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 2, .orderOfDimensions = order};
-    symQConfig_t qc = {.scale = 1.f, .qBits = 6, .roundingMode = HALF_AWAY};
+    float qcScale[1] = {1.f};
+    symQConfig_t qc = {
+        .scales = qcScale, .numGroups = 1, .groupSize = 0, .qBits = 6, .roundingMode = HALF_AWAY};
     quantization_t q;
     initSymQuantization(&qc, &q);
     tensor_t target;
@@ -1760,7 +1816,7 @@ void testAccumulateSymFixedGridFirstStoreDerivesGridThenCarries(void) {
 
     float inc1[] = {3.1f, -1.55f, 0.775f, 0.3875f};
     accumulateFloatIntoSymTensorFixedGrid(&target, inc1, 4);
-    float scaleAfter1 = qc.scale;
+    float scaleAfter1 = qc.scales[0];
     TEST_ASSERT_FLOAT_WITHIN(1e-6f, 3.1f / 31.0f, scaleAfter1);
 
     int32_t codes1[4];
@@ -1771,7 +1827,7 @@ void testAccumulateSymFixedGridFirstStoreDerivesGridThenCarries(void) {
     float inc2[] = {-0.1f, 0.1f, 0.f, 0.f};
     accumulateFloatIntoSymTensorFixedGrid(&target, inc2, 4);
 
-    TEST_ASSERT_EQUAL_FLOAT(scaleAfter1, qc.scale); /* carried, not re-derived */
+    TEST_ASSERT_EQUAL_FLOAT(scaleAfter1, qc.scales[0]); /* carried, not re-derived */
 
     int32_t codes2[4];
     symTestUnpackSignExtend(data, 6, codes2, 4);
@@ -1807,7 +1863,9 @@ void testAccumulateSymFixedGridZeroIncrementIsBitExact(void) {
     size_t dims[] = {1, 4};
     size_t order[] = {0, 1};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 2, .orderOfDimensions = order};
-    symQConfig_t qc = {.scale = 0.1f, .qBits = 6, .roundingMode = HALF_AWAY};
+    float qcScale[1] = {0.1f};
+    symQConfig_t qc = {
+        .scales = qcScale, .numGroups = 1, .groupSize = 0, .qBits = 6, .roundingMode = HALF_AWAY};
     quantization_t q;
     initSymQuantization(&qc, &q);
     tensor_t target;
@@ -1815,13 +1873,13 @@ void testAccumulateSymFixedGridZeroIncrementIsBitExact(void) {
 
     uint8_t snapshotBytes[3];
     memcpy(snapshotBytes, data, 3);
-    float snapshotScale = qc.scale;
+    float snapshotScale = qc.scales[0];
 
     float zeroInc[] = {0.f, 0.f, 0.f, 0.f};
     accumulateFloatIntoSymTensorFixedGrid(&target, zeroInc, 4);
 
     TEST_ASSERT_EQUAL_UINT8_ARRAY(snapshotBytes, data, 3);
-    TEST_ASSERT_EQUAL_FLOAT(snapshotScale, qc.scale);
+    TEST_ASSERT_EQUAL_FLOAT(snapshotScale, qc.scales[0]);
 }
 
 void testAccumulateSymFixedGridOverflowAborts(void) {
@@ -1837,7 +1895,9 @@ void testAccumulateSymFixedGridOverflowAborts(void) {
     size_t order[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
 
-    symQConfig_t qc = {.scale = 0.1f, .qBits = 6, .roundingMode = HALF_AWAY};
+    float qcScale[1] = {0.1f};
+    symQConfig_t qc = {
+        .scales = qcScale, .numGroups = 1, .groupSize = 0, .qBits = 6, .roundingMode = HALF_AWAY};
     quantization_t q;
     initSymQuantization(&qc, &q);
     uint8_t data[calcNumberOfBytesForData(&q, n)];
@@ -1875,7 +1935,9 @@ void testAccumulateSymRescaleRederivesGridEachCall(void) {
     int32_t seedMant[] = {2, -1, 0, 0};
     uint8_t data[3];
     byteConversion((uint8_t *)seedMant, 32, data, 6, 4);
-    symQConfig_t qc = {.scale = 0.5f, .qBits = 6, .roundingMode = HALF_AWAY};
+    float qcScale[1] = {0.5f};
+    symQConfig_t qc = {
+        .scales = qcScale, .numGroups = 1, .groupSize = 0, .qBits = 6, .roundingMode = HALF_AWAY};
     quantization_t q;
     initSymQuantization(&qc, &q);
     tensor_t target;
@@ -1883,7 +1945,7 @@ void testAccumulateSymRescaleRederivesGridEachCall(void) {
 
     float inc1[] = {0.f, 0.f, 0.f, 0.f};
     accumulateFloatIntoSymTensorRescale(&target, inc1, n);
-    float scale1 = qc.scale;
+    float scale1 = qc.scales[0];
     TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.0f / 31.0f, scale1);
 
     int32_t codes1[4];
@@ -1898,7 +1960,7 @@ void testAccumulateSymRescaleRederivesGridEachCall(void) {
 
     float inc2[] = {50.f, 50.f, 50.f, 50.f};
     accumulateFloatIntoSymTensorRescale(&target, inc2, n);
-    float scale2 = qc.scale;
+    float scale2 = qc.scales[0];
 
     /* Rederivation, not carry: scale2 reflects the new (much larger) absmax. */
     TEST_ASSERT_TRUE(scale2 > scale1 * 10.f);
@@ -2030,8 +2092,12 @@ void testAccumulateSymFixedGridMatchesReferenceAtChunkBoundary(void) {
     size_t order[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
 
-    symQConfig_t qc;
-    initSymQConfig(qBits, HALF_AWAY, &qc);
+    float qcScale[1] = {1.f};
+    symQConfig_t qc = {.scales = qcScale,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .qBits = qBits};
     quantization_t q;
     initSymQuantization(&qc, &q);
     uint8_t *data = (uint8_t *)reserveMemory(calcNumberOfBytesForData(&q, n));
@@ -2049,13 +2115,13 @@ void testAccumulateSymFixedGridMatchesReferenceAtChunkBoundary(void) {
 
     const float qMax = powf(2, (float)qBits - 1) - 1; /* 127 */
     float expectedScale = 500.f / qMax;
-    TEST_ASSERT_FLOAT_WITHIN(1e-3f, expectedScale, qc.scale);
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, expectedScale, qc.scales[0]);
 
     int32_t *codes = (int32_t *)reserveMemory(n * sizeof(int32_t));
     symTestUnpackSignExtend(data, qBits, codes, n);
     for (size_t i = 0; i < n; i++) {
-        float recon = (float)codes[i] * qc.scale;
-        TEST_ASSERT_FLOAT_WITHIN(qc.scale, inc[i], recon);
+        float recon = (float)codes[i] * qc.scales[0];
+        TEST_ASSERT_FLOAT_WITHIN(qc.scales[0], inc[i], recon);
     }
 
     freeReservedMemory(codes);
@@ -2078,9 +2144,13 @@ void testAccumulateSymRescaleMatchesReferenceAtChunkBoundary(void) {
     size_t order[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
 
-    symQConfig_t qc;
-    initSymQConfig(qBits, HALF_AWAY, &qc);
-    qc.scale = 0.01f;
+    float qcScale[1] = {1.f};
+    symQConfig_t qc = {.scales = qcScale,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .qBits = qBits};
+    qc.scales[0] = 0.01f;
     quantization_t q;
     initSymQuantization(&qc, &q);
     uint8_t *data = (uint8_t *)reserveMemory(calcNumberOfBytesForData(&q, n));
@@ -2114,13 +2184,13 @@ void testAccumulateSymRescaleMatchesReferenceAtChunkBoundary(void) {
     }
     const float qMax = powf(2, (float)qBits - 1) - 1;
     float expectedScale = absMax / qMax;
-    TEST_ASSERT_FLOAT_WITHIN(1e-3f, expectedScale, qc.scale);
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, expectedScale, qc.scales[0]);
 
     int32_t *codes = (int32_t *)reserveMemory(n * sizeof(int32_t));
     symTestUnpackSignExtend(data, qBits, codes, n);
     for (size_t i = 0; i < n; i++) {
-        float recon = (float)codes[i] * qc.scale;
-        TEST_ASSERT_FLOAT_WITHIN(qc.scale, reference[i], recon);
+        float recon = (float)codes[i] * qc.scales[0];
+        TEST_ASSERT_FLOAT_WITHIN(qc.scales[0], reference[i], recon);
     }
 
     freeReservedMemory(codes);
@@ -2149,8 +2219,12 @@ void testAccumulateTensorIntoSymRescaleStreamsIncrementAcrossChunks(void) {
     size_t order[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
 
-    symQConfig_t qc;
-    initSymQConfig(qBits, HALF_AWAY, &qc);
+    float qcScale[1] = {1.f};
+    symQConfig_t qc = {.scales = qcScale,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .qBits = qBits};
     quantization_t q;
     initSymQuantization(&qc, &q);
     uint8_t *data = (uint8_t *)reserveMemory(calcNumberOfBytesForData(&q, n));
@@ -2175,16 +2249,16 @@ void testAccumulateTensorIntoSymRescaleStreamsIncrementAcrossChunks(void) {
 
     const float qMax = powf(2, (float)qBits - 1) - 1; /* 127 */
     float expectedScale = 100.f / qMax; /* target started zero, so absmax == the dominant value */
-    TEST_ASSERT_FLOAT_WITHIN(1e-3f, expectedScale, qc.scale);
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, expectedScale, qc.scales[0]);
 
     int32_t *codes = (int32_t *)reserveMemory(n * sizeof(int32_t));
     symTestUnpackSignExtend(data, qBits, codes, n);
-    float tol = qc.scale * 0.5f + 1e-4f;
+    float tol = qc.scales[0] * 0.5f + 1e-4f;
     size_t spotIdx[] = {0, 255, 256, 400, 516};
     for (size_t s = 0; s < sizeof(spotIdx) / sizeof(spotIdx[0]); s++) {
         size_t i = spotIdx[s];
         float expectedVal = (float)incData[i] * incQC.scale;
-        float recon = (float)codes[i] * qc.scale;
+        float recon = (float)codes[i] * qc.scales[0];
         TEST_ASSERT_FLOAT_WITHIN(tol, expectedVal, recon);
     }
 
@@ -2278,8 +2352,12 @@ void testChunkedSymInt32ToSymRoundTripsAtChunkBoundary(void) {
     tensor_t inTensor;
     setTensorValues(&inTensor, (uint8_t *)inData, &shape, &inQ, NULL);
 
-    symQConfig_t outQC;
-    initSymQConfig(qBits, HALF_AWAY, &outQC);
+    float outQCScale[1] = {1.f};
+    symQConfig_t outQC = {.scales = outQCScale,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .qBits = qBits};
     quantization_t outQ;
     initSymQuantization(&outQC, &outQ);
     uint8_t *symData = (uint8_t *)reserveMemory(calcNumberOfBytesForData(&outQ, n));
@@ -2289,7 +2367,7 @@ void testChunkedSymInt32ToSymRoundTripsAtChunkBoundary(void) {
     convertTensor(&inTensor, &symOut);
 
     float expectedScale = (100000.f * inQC.scale) / 31.f; /* qMax = 2^(6-1) - 1 */
-    TEST_ASSERT_FLOAT_WITHIN(1e-3f, expectedScale, outQC.scale);
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, expectedScale, outQC.scales[0]);
 
     float *decoded = (float *)reserveMemory(n * sizeof(float));
     quantization_t floatOutQ;
@@ -2298,7 +2376,7 @@ void testChunkedSymInt32ToSymRoundTripsAtChunkBoundary(void) {
     setTensorValues(&floatOut, (uint8_t *)decoded, &shape, &floatOutQ, NULL);
     convertTensor(&symOut, &floatOut);
 
-    float tol = outQC.scale * 0.5f + 1e-3f;
+    float tol = outQC.scales[0] * 0.5f + 1e-3f;
     for (size_t i = 0; i < n; i++) {
         float expectedVal = (float)inData[i] * inQC.scale;
         TEST_ASSERT_FLOAT_WITHIN(tol, expectedVal, decoded[i]);
@@ -2337,8 +2415,12 @@ void testChunkedAsymToSymRoundTripsAtChunkBoundary(void) {
     tensor_t asymTensor;
     setTensorValues(&asymTensor, asymData, &shape, &inQ, NULL);
 
-    symQConfig_t outQC;
-    initSymQConfig(qBits, HALF_AWAY, &outQC);
+    float outQCScale[1] = {1.f};
+    symQConfig_t outQC = {.scales = outQCScale,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .qBits = qBits};
     quantization_t outQ;
     initSymQuantization(&outQC, &outQ);
     uint8_t *symData = (uint8_t *)reserveMemory(calcNumberOfBytesForData(&outQ, n));
@@ -2348,7 +2430,7 @@ void testChunkedAsymToSymRoundTripsAtChunkBoundary(void) {
     convertTensor(&asymTensor, &symOut);
 
     float expectedScale = 127.0f / 31.0f; /* qMax = 2^(6-1) - 1 */
-    TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedScale, outQC.scale);
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedScale, outQC.scales[0]);
 
     float *decoded = (float *)reserveMemory(n * sizeof(float));
     quantization_t floatOutQ;
@@ -2357,7 +2439,7 @@ void testChunkedAsymToSymRoundTripsAtChunkBoundary(void) {
     setTensorValues(&floatOut, (uint8_t *)decoded, &shape, &floatOutQ, NULL);
     convertTensor(&symOut, &floatOut);
 
-    float tol = outQC.scale * 0.5f + 1e-3f;
+    float tol = outQC.scales[0] * 0.5f + 1e-3f;
     for (size_t i = 0; i < n; i++) {
         float expectedVal = ((float)asymData[i] + (float)inQC.zeroPoint) * inQC.scale;
         TEST_ASSERT_FLOAT_WITHIN(tol, expectedVal, decoded[i]);
@@ -2383,9 +2465,13 @@ void testChunkedSymToAsymRoundTripsAtChunkBoundary(void) {
     size_t order[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
 
-    symQConfig_t inQC;
-    initSymQConfig(qBits, HALF_AWAY, &inQC);
-    inQC.scale = 0.2f;
+    float inQCScale[1] = {1.f};
+    symQConfig_t inQC = {.scales = inQCScale,
+                         .numGroups = 1,
+                         .groupSize = 0,
+                         .roundingMode = HALF_AWAY,
+                         .qBits = qBits};
+    inQC.scales[0] = 0.2f;
     quantization_t inQ;
     initSymQuantization(&inQC, &inQ);
     int32_t *mant = (int32_t *)reserveMemory(n * sizeof(int32_t));
@@ -2417,7 +2503,7 @@ void testChunkedSymToAsymRoundTripsAtChunkBoundary(void) {
 
     float tol = outQC.scale * 0.5f + 1e-3f;
     for (size_t i = 0; i < n; i++) {
-        float expectedVal = (float)mant[i] * inQC.scale;
+        float expectedVal = (float)mant[i] * inQC.scales[0];
         TEST_ASSERT_FLOAT_WITHIN(tol, expectedVal, decoded[i]);
     }
 
@@ -2494,7 +2580,12 @@ void testChunkedSymToFloat32DequantizesAtChunkBoundary(void) {
     size_t order[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
 
-    symQConfig_t inQC = {.scale = 0.5f, .qBits = qBits, .roundingMode = HALF_AWAY};
+    float inQCScale[1] = {0.5f};
+    symQConfig_t inQC = {.scales = inQCScale,
+                         .numGroups = 1,
+                         .groupSize = 0,
+                         .qBits = qBits,
+                         .roundingMode = HALF_AWAY};
     quantization_t inQ;
     initSymQuantization(&inQC, &inQ);
     int32_t *mant = (int32_t *)reserveMemory(n * sizeof(int32_t));
@@ -2515,7 +2606,7 @@ void testChunkedSymToFloat32DequantizesAtChunkBoundary(void) {
     convertTensor(&inTensor, &outTensor);
 
     for (size_t i = 0; i < n; i++) {
-        float expected = (float)mant[i] * inQC.scale;
+        float expected = (float)mant[i] * inQC.scales[0];
         TEST_ASSERT_EQUAL_FLOAT(expected, decoded[i]);
     }
 
@@ -2641,7 +2732,9 @@ void testDequantChunkToFloatSymUnpacksSignExtendedAtOffsets(void) {
     for (size_t i = 0; i < n; i++) {
         mant[i] = (int32_t)(i % 64) - 32; /* spans [-32, 31]: exactly qBits=6 range */
     }
-    symQConfig_t qc = {.scale = 0.5f, .qBits = 6, .roundingMode = HALF_AWAY};
+    float qcScale[1] = {0.5f};
+    symQConfig_t qc = {
+        .scales = qcScale, .numGroups = 1, .groupSize = 0, .qBits = 6, .roundingMode = HALF_AWAY};
     quantization_t q;
     initSymQuantization(&qc, &q);
     uint8_t *packed = (uint8_t *)reserveMemory(calcNumberOfBytesForData(&q, n));
@@ -2656,7 +2749,7 @@ void testDequantChunkToFloatSymUnpacksSignExtendedAtOffsets(void) {
         float out[8];
         dequantChunkToFloat(&t, offset, count, out);
         for (size_t i = 0; i < count; i++) {
-            float expected = (float)mant[offset + i] * qc.scale;
+            float expected = (float)mant[offset + i] * qc.scales[0];
             TEST_ASSERT_EQUAL_FLOAT(expected, out[i]);
         }
     }
@@ -2845,7 +2938,9 @@ void testAccumulateTensorIntoSymRescaleRejectsSelfAliasedIncrement(void) {
     size_t order[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
 
-    symQConfig_t qc = {.scale = 0.1f, .qBits = 6, .roundingMode = HALF_AWAY};
+    float qcScale[1] = {0.1f};
+    symQConfig_t qc = {
+        .scales = qcScale, .numGroups = 1, .groupSize = 0, .qBits = 6, .roundingMode = HALF_AWAY};
     quantization_t q;
     initSymQuantization(&qc, &q);
     uint8_t data[calcNumberOfBytesForData(&q, n)];

@@ -1,6 +1,8 @@
 #ifndef ENV5_RUNTIME_QUANTIZATION_H
 #define ENV5_RUNTIME_QUANTIZATION_H
 
+#include <stddef.h>
+
 #include "Rounding.h"
 
 typedef enum qtype { INT32, FLOAT32, SYM_INT32, SYM, ASYM, BOOL } qtype_t;
@@ -34,10 +36,29 @@ typedef struct symInt32QConfig {
 #define ODT_SYM_GRAD_QMAXBITS 16
 #endif
 
+/* Group-quant PR1 (spec docs/superpowers/specs/2026-07-28-group-quantization-design.md
+ * §2/D3): always-array representation, behavior-identical for PR1 (numGroups
+ * is always 1; no grouping functionality yet -- PR2 introduces real groups).
+ * groupSize == 0 is the "whole tensor" sentinel: standalone-built configs
+ * (initSymQConfig, without a tensor in hand) cannot know N, so per-tensor
+ * quantization keeps groupSize == 0 ("spans everything"), exactly as
+ * N-agnostic as the old scalar scale. Invariant, enforced where checkable:
+ * numGroups == 1 <=> groupSize == 0. Ownership: scales is heap-allocated
+ * (reserveMemory) by whichever call filled the struct -- initSymQConfig
+ * (PR1's only producer) always allocates a fresh 1-element array; pair with
+ * freeReservedMemory (bare qConfig) or freeQuantization (config wrapped in a
+ * quantization_t, e.g. via quantizationInitSym / getQLike). Stack test
+ * fixtures that only need a fixed per-tensor scale should build the struct
+ * directly with a local backing array instead of calling initSymQConfig (see
+ * docs/conventions/testing.md) -- such fixtures are never passed to
+ * freeQuantization or freeReservedMemory. */
 typedef struct symQConfig {
-    float scale;
-    uint8_t qBits;
+    float *scales;    /* [numGroups], owned by the qconfig (see ownership note above) */
+    size_t numGroups; /* PR1: always 1 */
+    size_t groupSize; /* 0 = "whole tensor" sentinel (per-tensor, N-agnostic);
+                        >0 only for real groups (PR2+). PR1: always 0. */
     roundingMode_t roundingMode;
+    uint8_t qBits;
 } symQConfig_t;
 
 typedef struct asymQConfig {

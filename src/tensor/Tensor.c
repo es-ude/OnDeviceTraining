@@ -422,6 +422,34 @@ static void copyQConfigInto(quantization_t *dest, quantization_t *src, size_t qC
     memcpy(dest->qConfig, src->qConfig, qConfigSize);
 }
 
+/* SYM's qConfig carries a heap `scales` pointer (group-quant PR1) -- a byte
+ * memcpy of the struct would overwrite dest->qConfig->scales with src's
+ * pointer, aliasing the two configs and leaking dest's own array. Copy the
+ * VALUES into dest's own (caller-allocated, already-owned) array instead,
+ * same contract as copyQConfigInto otherwise: dest->qConfig must be
+ * caller-allocated, dest keeps owning its own scales block. PR1 invariant
+ * (numGroups == 1 for both sides) makes a 1-for-1 value copy exact; a
+ * mismatched numGroups here would indicate a caller contract violation, not
+ * something PR1's per-tensor-only paths can produce. */
+static void copySymQConfigInto(quantization_t *dest, quantization_t *src) {
+    if (dest->qConfig == NULL) {
+        PRINT_ERROR("copyQuantization: dest->qConfig for SYM must be caller-allocated");
+        exit(1);
+    }
+    dest->type = src->type;
+    symQConfig_t *srcQC = src->qConfig;
+    symQConfig_t *dstQC = dest->qConfig;
+    if (dstQC->numGroups != srcQC->numGroups) {
+        PRINT_ERROR("copyQuantization: SYM numGroups mismatch (dest %zu, src %zu)",
+                    dstQC->numGroups, srcQC->numGroups);
+        exit(1);
+    }
+    memcpy(dstQC->scales, srcQC->scales, srcQC->numGroups * sizeof(float));
+    dstQC->groupSize = srcQC->groupSize;
+    dstQC->roundingMode = srcQC->roundingMode;
+    dstQC->qBits = srcQC->qBits;
+}
+
 void copyQuantization(quantization_t *dest, quantization_t *src) {
     switch (src->type) {
     case INT32:
@@ -436,7 +464,7 @@ void copyQuantization(quantization_t *dest, quantization_t *src) {
         copyQConfigInto(dest, src, sizeof(symInt32QConfig_t), "SYM_INT32");
         break;
     case SYM:
-        copyQConfigInto(dest, src, sizeof(symQConfig_t), "SYM");
+        copySymQConfigInto(dest, src);
         break;
     case ASYM:
         copyQConfigInto(dest, src, sizeof(asymQConfig_t), "ASYM");

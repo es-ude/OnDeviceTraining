@@ -177,7 +177,12 @@ static void deserializeQConfig(quantization_t *q, FILE *f) {
     }
     case SYM: {
         symQConfig_t *symQC = q->qConfig;
-        symQC->scale = serialReadF32LE(f);
+        /* v3 wire layout unchanged (Task 1 is wire-stable): scales[0] is the
+         * same float the scalar `scale` field used to hold. symQC->scales
+         * must already point at a valid (>=1-element) array -- callers build
+         * the skeleton via initSymQConfig or the stack-fixture idiom before
+         * deserializing into it. */
+        symQC->scales[0] = serialReadF32LE(f);
         symQC->qBits = serialReadU8(f);
         symQC->roundingMode = (roundingMode_t)serialReadU8(f);
         break;
@@ -229,7 +234,13 @@ static void skipSerializedTensor(FILE *f) {
     uint8_t type = serialReadU8(f);
     quantization_t scratchQ = {.type = (qtype_t)type, .qConfig = NULL};
     symInt32QConfig_t symIntScratch;
-    symQConfig_t symScratch;
+    /* Stack-fixture idiom (group-quant PR1): symScratch.scales must point at
+     * a valid backing array before deserializeQConfig writes scales[0] --
+     * an uninitialized `symQConfig_t symScratch;` would leave `.scales`
+     * dangling. Never freed (matches the stack-fixture convention: this
+     * config is discarded at function exit, not owned/heap). */
+    float symScratchScale[1];
+    symQConfig_t symScratch = {.scales = symScratchScale, .numGroups = 1, .groupSize = 0};
     asymQConfig_t asymScratch;
     switch (scratchQ.type) {
     case INT32:

@@ -129,10 +129,11 @@ void dequantChunkToFloat(const tensor_t *src, size_t elemOffset, size_t count, f
     }
     case SYM: {
         symQConfig_t *qc = src->quantization->qConfig;
+        float scale = qc->scales[0]; /* hoisted: no per-element array indexing */
         int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
         unpackSignExtendChunk(src->data, qc->qBits, elemOffset, count, mant);
         for (size_t i = 0; i < count; i++) {
-            out[i] = (float)mant[i] * qc->scale;
+            out[i] = (float)mant[i] * scale;
         }
         return;
     }
@@ -302,7 +303,7 @@ void convertFloatTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputT
 void convertInt32TensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTensor) {
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     symQConfig_t *outQC = outputTensor->quantization->qConfig;
-    outQC->scale = 1.f;
+    outQC->scales[0] = 1.f;
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
@@ -528,13 +529,14 @@ void convertSymTensorToInt32Tensor(tensor_t *inputTensor, tensor_t *outputTensor
 void convertSymTensorToFloat32Tensor(tensor_t *inputTensor, tensor_t *outputTensor) {
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     symQConfig_t *inQC = inputTensor->quantization->qConfig;
+    float scale = inQC->scales[0]; /* hoisted: no per-element array indexing */
     float *out = (float *)outputTensor->data;
     int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackSignExtendChunk(inputTensor->data, inQC->qBits, off, count, mant);
         for (size_t i = 0; i < count; i++) {
-            out[off + i] = (float)mant[i] * inQC->scale;
+            out[off + i] = (float)mant[i] * scale;
         }
     }
 }
@@ -545,7 +547,7 @@ void convertSymTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTen
     symInt32QConfig_t *outQC = outputTensor->quantization->qConfig;
 
     unpackSignExtend(inputTensor->data, inQC->qBits, 0, (int32_t *)outputTensor->data, n);
-    outQC->scale = inQC->scale;
+    outQC->scale = inQC->scales[0];
     outQC->qMaxBits = inQC->qBits;
 }
 
@@ -559,6 +561,7 @@ void convertSymTensorToAsymTensor(tensor_t *inputTensor, tensor_t *outputTensor)
          * (matches packFloatBufferAsSym's n=0 no-op; #296 Stage 2). */
         return;
     }
+    float scale = inQC->scales[0]; /* hoisted: no per-element array indexing */
     int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
     /* pass 1: min/max over dequantized values, chunked unpack (no O(n) scratch) */
     float mn = 0.f, mx = 0.f;
@@ -567,7 +570,7 @@ void convertSymTensorToAsymTensor(tensor_t *inputTensor, tensor_t *outputTensor)
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackSignExtendChunk(inputTensor->data, inQC->qBits, off, count, mant);
         for (size_t i = 0; i < count; i++) {
-            float v = (float)mant[i] * inQC->scale;
+            float v = (float)mant[i] * scale;
             if (!seeded) {
                 mn = v;
                 mx = v;
@@ -590,7 +593,7 @@ void convertSymTensorToAsymTensor(tensor_t *inputTensor, tensor_t *outputTensor)
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackSignExtendChunk(inputTensor->data, inQC->qBits, off, count, mant);
         for (size_t i = 0; i < count; i++) {
-            vals[i] = (float)mant[i] * inQC->scale;
+            vals[i] = (float)mant[i] * scale;
         }
         emitAsymChunk(vals, count, outQC, outputTensor->data, off);
     }
@@ -616,14 +619,15 @@ void convertAsymTensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTensor)
     }
     const float qMax = powf(2, (float)outQC->qBits - 1) - 1;
     const float qMin = -powf(2, (float)outQC->qBits - 1);
-    outQC->scale = (absMax == 0.f) ? 1.f : absMax / qMax;
+    float outScale = (absMax == 0.f) ? 1.f : absMax / qMax;
+    outQC->scales[0] = outScale;
     /* pass 2: chunked unpack + emit -- one roundByMode per element, element order */
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackZeroExtendChunk(inputTensor->data, inBits, off, count, codes);
         for (size_t i = 0; i < count; i++) {
             float v = ((float)codes[i] + (float)inQC->zeroPoint) * inQC->scale;
-            codes[i] = clampInt32(roundByMode(v / outQC->scale, outQC->roundingMode), (int32_t)qMin,
+            codes[i] = clampInt32(roundByMode(v / outScale, outQC->roundingMode), (int32_t)qMin,
                                   (int32_t)qMax);
         }
         packChunkGuarded(codes, count, outputTensor->data, outQC->qBits, off,
@@ -665,7 +669,7 @@ static void packFloatBufferAsSym(const float *values, size_t n, symQConfig_t *ou
     const float qMax = powf(2, (float)outQC->qBits - 1) - 1;
     const float qMin = -powf(2, (float)outQC->qBits - 1);
     float scale = (absMax == 0.f) ? 1.f : absMax / qMax;
-    outQC->scale = scale;
+    outQC->scales[0] = scale;
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
@@ -693,14 +697,15 @@ void convertSymInt32TensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTen
     }
     const float qMax = powf(2, (float)outQC->qBits - 1) - 1;
     const float qMin = -powf(2, (float)outQC->qBits - 1);
-    outQC->scale = (absMax == 0.f) ? 1.f : absMax / qMax;
+    float outScale = (absMax == 0.f) ? 1.f : absMax / qMax;
+    outQC->scales[0] = outScale;
     /* pass 2: chunked emit -- one roundByMode per element, element order */
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         for (size_t i = 0; i < count; i++) {
             float v = (float)in[off + i] * inScale;
-            codes[i] = clampInt32(roundByMode(v / outQC->scale, outQC->roundingMode), (int32_t)qMin,
+            codes[i] = clampInt32(roundByMode(v / outScale, outQC->roundingMode), (int32_t)qMin,
                                   (int32_t)qMax);
         }
         packChunkGuarded(codes, count, outputTensor->data, outQC->qBits, off,
@@ -712,7 +717,7 @@ void repackSymInt32ToSymNoRescale(tensor_t *inputTensor, tensor_t *outputTensor)
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     symInt32QConfig_t *inQC = inputTensor->quantization->qConfig;
     symQConfig_t *outQC = outputTensor->quantization->qConfig;
-    outQC->scale = inQC->scale;
+    outQC->scales[0] = inQC->scale;
     const int32_t *in = (const int32_t *)inputTensor->data;
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
@@ -791,7 +796,7 @@ static void accumulateIntoSymFixedGridEngine(tensor_t *target, const incSrc_t *i
             }
         }
         const float qMax = powf(2, (float)qc->qBits - 1) - 1;
-        qc->scale = (absMax == 0.f) ? 1.f : absMax / qMax;
+        qc->scales[0] = (absMax == 0.f) ? 1.f : absMax / qMax;
     }
     /* else: carry the grid verbatim -- no re-derivation, no renorm (D1/D2). */
 
@@ -799,7 +804,7 @@ static void accumulateIntoSymFixedGridEngine(tensor_t *target, const incSrc_t *i
      * element order (SR stream identical to the old whole-tensor pass);
      * in-place safe: chunk k is fully read before chunk k is rewritten and
      * the code width is unchanged, so offsets never shift. */
-    float scale = qc->scale;
+    float scale = qc->scales[0];
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackSignExtendChunk(target->data, qc->qBits, off, count, mant);
@@ -835,10 +840,10 @@ static void accumulateIntoSymRescaleEngine(tensor_t *target, const incSrc_t *inc
     float incBuf[ODT_CONVERSION_CHUNK_ELEMS];
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
 
-    /* latch the OLD scale before phase B overwrites qc->scale below --
+    /* latch the OLD scale before phase B overwrites qc->scales[0] below --
      * dequanting the packed accumulator always uses the grid it was stored
      * under, never the freshly derived one. */
-    float oldScale = qc->scale;
+    float oldScale = qc->scales[0];
 
     /* phase A: chunked absmax of (mant*oldScale + inc), no rounding, no
      * writes -- fresh absmax every call, no carried grid (unlike the
@@ -858,7 +863,7 @@ static void accumulateIntoSymRescaleEngine(tensor_t *target, const incSrc_t *inc
     const float qMax = powf(2, (float)qc->qBits - 1) - 1;
     const float qMin = -powf(2, (float)qc->qBits - 1);
     float scale = (absMax == 0.f) ? 1.f : absMax / qMax;
-    qc->scale = scale;
+    qc->scales[0] = scale;
 
     /* phase B: chunked read-modify-write, one roundByMode per element in
      * element order (replicates packFloatBufferAsSym's clamp+round); chunk k
@@ -1097,7 +1102,7 @@ static void convertTensorsWithSameType(tensor_t *inputTensor, tensor_t *outputTe
     case SYM: {
         symQConfig_t *inputSymQC = inputTensor->quantization->qConfig;
         symQConfig_t *outputSymQC = outputTensor->quantization->qConfig;
-        outputSymQC->scale = inputSymQC->scale;
+        outputSymQC->scales[0] = inputSymQC->scales[0];
         break;
     }
     case ASYM: {

@@ -801,11 +801,18 @@ void testStreamingRejectsBoolInput(void) {
 
 static ppcaReplayConfig_t packedConfig(size_t dim, size_t rank, size_t maxM, qtype_t basisType) {
     ppcaReplayConfig_t cfg = floatConfig(dim, rank, maxM);
-    static symQConfig_t symQc;
+    /* Stack/static-fixture idiom (group-quant PR1): this helper is called
+     * from multiple tests in the same binary, and `static` storage means a
+     * heap-allocating initSymQConfig call here would leak its previous
+     * scales array on every call after the first. Build the config directly
+     * instead (same values initSymQConfig(8, HALF_AWAY, ...) would produce);
+     * never freed, per the stack-fixture convention. */
+    static float symScale[1] = {1.f};
+    static symQConfig_t symQc = {
+        .scales = symScale, .numGroups = 1, .groupSize = 0, .roundingMode = HALF_AWAY, .qBits = 8};
     static quantization_t symQ;
     static asymQConfig_t asymQc;
     static quantization_t asymQ;
-    initSymQConfig(8, HALF_AWAY, &symQc);
     initSymQuantization(&symQc, &symQ);
     initAsymQConfig(8, HALF_AWAY, &asymQc);
     initAsymQuantization(&asymQc, &asymQ);

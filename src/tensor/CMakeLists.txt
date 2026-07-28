@@ -20,6 +20,7 @@ target_include_directories(Quantization PUBLIC include)
 target_link_libraries(Quantization PRIVATE
         Common
         Rounding
+        StorageApi
         m
 )
 

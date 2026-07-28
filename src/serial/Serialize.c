@@ -118,7 +118,10 @@ static void serializeQConfig(quantization_t *q, FILE *f) {
     }
     case SYM: {
         symQConfig_t *symQC = q->qConfig;
-        serialWriteF32LE(symQC->scale, f);
+        /* v3 wire layout unchanged (Task 1 is wire-stable): scales[0] is the
+         * same float that used to live in the scalar `scale` field. Group-
+         * quant PR2 introduces the v4 layout (numGroups/groupSize/scales[]). */
+        serialWriteF32LE(symQC->scales[0], f);
         serialWriteU8(symQC->qBits, f);
         serialWriteU8((uint8_t)symQC->roundingMode, f);
         break;

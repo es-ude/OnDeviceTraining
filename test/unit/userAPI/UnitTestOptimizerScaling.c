@@ -485,8 +485,8 @@ void testScaleOptimizerGradients_Sym_ScalesScaleOnly(void) {
     uint8_t bBytesBefore[bBytes];
     memcpy(wBytesBefore, w->grad->data, wBytes);
     memcpy(bBytesBefore, b->grad->data, bBytes);
-    float wScaleBefore = ((symQConfig_t *)w->grad->quantization->qConfig)->scale;
-    float bScaleBefore = ((symQConfig_t *)b->grad->quantization->qConfig)->scale;
+    float wScaleBefore = ((symQConfig_t *)w->grad->quantization->qConfig)->scales[0];
+    float bScaleBefore = ((symQConfig_t *)b->grad->quantization->qConfig)->scales[0];
 
     scaleOptimizerGradients(sgd, factor);
 
@@ -495,8 +495,8 @@ void testScaleOptimizerGradients_Sym_ScalesScaleOnly(void) {
     uint8_t bBytesAfter[bBytes];
     memcpy(wBytesAfter, w->grad->data, wBytes);
     memcpy(bBytesAfter, b->grad->data, bBytes);
-    float wScaleAfter = ((symQConfig_t *)w->grad->quantization->qConfig)->scale;
-    float bScaleAfter = ((symQConfig_t *)b->grad->quantization->qConfig)->scale;
+    float wScaleAfter = ((symQConfig_t *)w->grad->quantization->qConfig)->scales[0];
+    float bScaleAfter = ((symQConfig_t *)b->grad->quantization->qConfig)->scales[0];
 
     freeOptim(sgd);
     freeLinearLayerShellOnly(model[0]);

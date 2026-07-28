@@ -68,6 +68,18 @@ quantization_t *deepCopyQuantization(quantization_t *src) {
     } else {
         dst->qConfig = reserveMemory(cfgSize);
         memcpy(dst->qConfig, src->qConfig, cfgSize);
+        if (src->type == SYM) {
+            /* Group-quant PR1: symQConfig_t carries a heap `scales` pointer --
+             * the memcpy above just copied that POINTER, so dst and src now
+             * alias the same array (double-free / shared-mutation hazard).
+             * Replace it with a genuine deep copy: a fresh array, sized from
+             * src's own numGroups (PR1: always 1), values copied. */
+            symQConfig_t *srcQC = src->qConfig;
+            symQConfig_t *dstQC = dst->qConfig;
+            float *scales = reserveMemory(srcQC->numGroups * sizeof(float));
+            memcpy(scales, srcQC->scales, srcQC->numGroups * sizeof(float));
+            dstQC->scales = scales;
+        }
     }
     return dst;
 }

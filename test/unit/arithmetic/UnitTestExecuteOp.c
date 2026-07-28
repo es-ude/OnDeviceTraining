@@ -80,7 +80,7 @@ static tensor_t *buildPackedSym(size_t n, const int32_t *mantissas, uint8_t qBit
     setShape(shape, dims, 1, order);
     tensor_t *t = initTensor(shape, quantizationInitSym(qBits, HALF_AWAY), NULL);
     byteConversion((uint8_t *)mantissas, 32, t->data, qBits, n);
-    ((symQConfig_t *)t->quantization->qConfig)->scale = scale;
+    ((symQConfig_t *)t->quantization->qConfig)->scales[0] = scale;
     return t;
 }
 
@@ -520,7 +520,7 @@ void testAccFixedIntoPackedSymDerivesThenCarriesGrid(void) {
         target);
     float inc1[] = {2.0f, -0.9f, 0.37f};
     accumulateFloatIntoSymTensorFixedGrid(ref, inc1, n);
-    float scaleAfterCall1 = ((symQConfig_t *)target->quantization->qConfig)->scale;
+    float scaleAfterCall1 = ((symQConfig_t *)target->quantization->qConfig)->scales[0];
 
     tensor_t *inc2T = buildFloat(n, (float[]){-1.8f, 0.05f, -0.1f});
     executeOp(
@@ -539,8 +539,8 @@ void testAccFixedIntoPackedSymDerivesThenCarriesGrid(void) {
     int32_t want[3];
     symTestUnpackSignExtend(target->data, 8, got, n);
     symTestUnpackSignExtend(ref->data, 8, want, n);
-    float gotScale = ((symQConfig_t *)target->quantization->qConfig)->scale;
-    float wantScale = ((symQConfig_t *)ref->quantization->qConfig)->scale;
+    float gotScale = ((symQConfig_t *)target->quantization->qConfig)->scales[0];
+    float wantScale = ((symQConfig_t *)ref->quantization->qConfig)->scales[0];
     freeTensor(inc2T);
     freeTensor(inc1T);
     freeTensor(ref);
@@ -599,8 +599,8 @@ void testAccFixedSymPackedAcceptsSymInt32IntermediateBitIdenticalToFloatBridge(v
     int32_t gotSymInt32[3];
     symTestUnpackSignExtend(targetViaFloat->data, 8, gotFloat, n);
     symTestUnpackSignExtend(targetViaSymInt32->data, 8, gotSymInt32, n);
-    float scaleFloat = ((symQConfig_t *)targetViaFloat->quantization->qConfig)->scale;
-    float scaleSymInt32 = ((symQConfig_t *)targetViaSymInt32->quantization->qConfig)->scale;
+    float scaleFloat = ((symQConfig_t *)targetViaFloat->quantization->qConfig)->scales[0];
+    float scaleSymInt32 = ((symQConfig_t *)targetViaSymInt32->quantization->qConfig)->scales[0];
     freeTensor(incSymInt32);
     freeTensor(incFloat);
     freeTensor(targetViaSymInt32);
@@ -641,8 +641,8 @@ void testAccDynamicSymPackedRederivesScaleMatchesRescalePrimitive(void) {
     int32_t want[2];
     symTestUnpackSignExtend(target->data, 8, got, n);
     symTestUnpackSignExtend(ref->data, 8, want, n);
-    float gotScale = ((symQConfig_t *)target->quantization->qConfig)->scale;
-    float wantScale = ((symQConfig_t *)ref->quantization->qConfig)->scale;
+    float gotScale = ((symQConfig_t *)target->quantization->qConfig)->scales[0];
+    float wantScale = ((symQConfig_t *)ref->quantization->qConfig)->scales[0];
     freeTensor(inc);
     freeTensor(ref);
     freeTensor(target);
@@ -700,8 +700,8 @@ void testAccDynamicSymPackedAcceptsSymInt32IntermediateBitIdenticalToFloatBridge
     int32_t gotSymInt32[3];
     symTestUnpackSignExtend(targetViaFloat->data, 8, gotFloat, n);
     symTestUnpackSignExtend(targetViaSymInt32->data, 8, gotSymInt32, n);
-    float scaleFloat = ((symQConfig_t *)targetViaFloat->quantization->qConfig)->scale;
-    float scaleSymInt32 = ((symQConfig_t *)targetViaSymInt32->quantization->qConfig)->scale;
+    float scaleFloat = ((symQConfig_t *)targetViaFloat->quantization->qConfig)->scales[0];
+    float scaleSymInt32 = ((symQConfig_t *)targetViaSymInt32->quantization->qConfig)->scales[0];
     freeTensor(incSymInt32);
     freeTensor(incFloat);
     freeTensor(targetViaSymInt32);

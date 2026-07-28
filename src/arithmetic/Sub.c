@@ -96,7 +96,7 @@ void subSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTe
 
     symInt32QConfig_t *aSymInt32QConfig = aTensor->quantization->qConfig;
     symInt32QConfig_t *bSymInt32QConfig = bTensor->quantization->qConfig;
-    symQConfig_t *outputSymInt32QConfig = outputTensor->quantization->qConfig;
+    symInt32QConfig_t *outputSymInt32QConfig = outputTensor->quantization->qConfig;
 
     float aScale = aSymInt32QConfig->scale;
     float bScale = bSymInt32QConfig->scale;

@@ -50,7 +50,7 @@ void scaleOptimizerGradients(optimizer_t *optimizer, float factor) {
              * like the SYM_INT32 case above — fold the factor into the
              * per-tensor scale, packed codes untouched (O(1), exact). */
             symQConfig_t *gradQ = param->grad->quantization->qConfig;
-            gradQ->scale *= factor;
+            gradQ->scales[0] *= factor;
             break;
         }
         case ASYM: {

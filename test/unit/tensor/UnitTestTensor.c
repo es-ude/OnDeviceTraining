@@ -446,14 +446,18 @@ void testCopyTensor() {
 }
 
 void test_calcBitsPerElement_Sym_qBits3() {
-    symQConfig_t cfg = {.scale = 1.0f, .qBits = 3, .roundingMode = HALF_AWAY};
+    float cfgScale[1] = {1.0f};
+    symQConfig_t cfg = {
+        .scales = cfgScale, .numGroups = 1, .groupSize = 0, .qBits = 3, .roundingMode = HALF_AWAY};
     quantization_t q;
     initSymQuantization(&cfg, &q);
     TEST_ASSERT_EQUAL_size_t(3, calcBitsPerElement(&q));
 }
 
 void test_calcBytesPerElement_Sym_qBits3() {
-    symQConfig_t cfg = {.scale = 1.0f, .qBits = 3, .roundingMode = HALF_AWAY};
+    float cfgScale[1] = {1.0f};
+    symQConfig_t cfg = {
+        .scales = cfgScale, .numGroups = 1, .groupSize = 0, .qBits = 3, .roundingMode = HALF_AWAY};
     quantization_t q;
     initSymQuantization(&cfg, &q);
     /* ceil(3/8) = 1 */
@@ -461,7 +465,9 @@ void test_calcBytesPerElement_Sym_qBits3() {
 }
 
 void test_calcNumberOfBytesForData_Sym_qBits3_N10() {
-    symQConfig_t cfg = {.scale = 1.0f, .qBits = 3, .roundingMode = HALF_AWAY};
+    float cfgScale[1] = {1.0f};
+    symQConfig_t cfg = {
+        .scales = cfgScale, .numGroups = 1, .groupSize = 0, .qBits = 3, .roundingMode = HALF_AWAY};
     quantization_t q;
     initSymQuantization(&cfg, &q);
     /* ceil(3*10 / 8) = ceil(30/8) = 4 */
@@ -469,7 +475,9 @@ void test_calcNumberOfBytesForData_Sym_qBits3_N10() {
 }
 
 void test_calcNumberOfBytesForData_Sym_qBits5_N4() {
-    symQConfig_t cfg = {.scale = 1.0f, .qBits = 5, .roundingMode = HALF_AWAY};
+    float cfgScale[1] = {1.0f};
+    symQConfig_t cfg = {
+        .scales = cfgScale, .numGroups = 1, .groupSize = 0, .qBits = 5, .roundingMode = HALF_AWAY};
     quantization_t q;
     initSymQuantization(&cfg, &q);
     /* ceil(5*4 / 8) = ceil(20/8) = 3 */
@@ -482,7 +490,9 @@ void test_calcBytesPerTensor_SymQBits3N10_Ceils() {
     size_t dims[] = {1, 10};
     size_t order[] = {0, 1};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 2, .orderOfDimensions = order};
-    symQConfig_t cfg = {.scale = 1.0f, .qBits = 3, .roundingMode = HALF_AWAY};
+    float cfgScale[1] = {1.0f};
+    symQConfig_t cfg = {
+        .scales = cfgScale, .numGroups = 1, .groupSize = 0, .qBits = 3, .roundingMode = HALF_AWAY};
     quantization_t q;
     initSymQuantization(&cfg, &q);
     tensor_t t;
@@ -536,7 +546,14 @@ void testCopyTensorSymCarriesConfigAndPackedBytes() {
     /* 4 mantissas at qBits=6 -> ceil(24/8) = 3 packed bytes. Dest starts with a
      * deliberately different config (scale 1.f, SR_HALF_AWAY): every field must be
      * overwritten by the copy, INTO the caller's storage (no pointer swap).
-     * Mutation guard: re-removing the SYM arm exits the run ("Unknown QType!"). */
+     * Mutation guard: re-removing the SYM arm exits the run ("Unknown QType!").
+     * Group-quant PR1 mutation guard: dstQC.scales must stay dst's OWN array
+     * after the copy (values copied in, not the pointer swapped) -- reverting
+     * copySymQConfigInto to a blind memcpy of the whole struct (the pre-PR1
+     * shape) would alias dstQC.scales onto srcQCScale, silently leaking dst's
+     * own array and double-freeing srcQCScale later; the VALUE assertions
+     * below would still pass under that mutation (aliased array reads the
+     * same float), so the pointer-identity check is the one that catches it. */
     int32_t mantissas[] = {3, -3, 31, -32};
     uint8_t srcData[3];
     byteConversion((uint8_t *)mantissas, 32, srcData, 6, 4);
@@ -544,7 +561,12 @@ void testCopyTensorSymCarriesConfigAndPackedBytes() {
     size_t srcOrder[] = {0, 1};
     shape_t srcShape = {
         .dimensions = srcDims, .numberOfDimensions = 2, .orderOfDimensions = srcOrder};
-    symQConfig_t srcQC = {.scale = 0.25f, .qBits = 6, .roundingMode = HALF_AWAY};
+    float srcQCScale[1] = {0.25f};
+    symQConfig_t srcQC = {.scales = srcQCScale,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .qBits = 6,
+                          .roundingMode = HALF_AWAY};
     quantization_t qSrc;
     initSymQuantization(&srcQC, &qSrc);
     tensor_t src;
@@ -555,7 +577,12 @@ void testCopyTensorSymCarriesConfigAndPackedBytes() {
     size_t dstOrder[2];
     shape_t dstShape = {
         .dimensions = dstDims, .numberOfDimensions = 2, .orderOfDimensions = dstOrder};
-    symQConfig_t dstQC = {.scale = 1.f, .qBits = 6, .roundingMode = SR_HALF_AWAY};
+    float dstQCScale[1] = {1.f};
+    symQConfig_t dstQC = {.scales = dstQCScale,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .qBits = 6,
+                          .roundingMode = SR_HALF_AWAY};
     quantization_t qDst;
     initSymQuantization(&dstQC, &qDst);
     tensor_t dst;
@@ -565,7 +592,8 @@ void testCopyTensorSymCarriesConfigAndPackedBytes() {
 
     TEST_ASSERT_EQUAL_INT(SYM, dst.quantization->type);
     TEST_ASSERT_EQUAL_PTR(&dstQC, dst.quantization->qConfig);
-    TEST_ASSERT_EQUAL_FLOAT(0.25f, dstQC.scale);
+    TEST_ASSERT_EQUAL_PTR(dstQCScale, dstQC.scales); /* dst keeps its OWN array */
+    TEST_ASSERT_EQUAL_FLOAT(0.25f, dstQC.scales[0]);
     TEST_ASSERT_EQUAL_UINT8(6, dstQC.qBits);
     TEST_ASSERT_EQUAL_INT(HALF_AWAY, dstQC.roundingMode);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(srcData, dstData, 3);
@@ -620,7 +648,12 @@ void testCopyTensorSymIntoNullConfigDestDies() {
     size_t srcOrder[] = {0, 1};
     shape_t srcShape = {
         .dimensions = srcDims, .numberOfDimensions = 2, .orderOfDimensions = srcOrder};
-    symQConfig_t srcQC = {.scale = 1.f, .qBits = 6, .roundingMode = HALF_AWAY};
+    float srcQCScale[1] = {1.f};
+    symQConfig_t srcQC = {.scales = srcQCScale,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .qBits = 6,
+                          .roundingMode = HALF_AWAY};
     quantization_t qSrc;
     initSymQuantization(&srcQC, &qSrc);
     tensor_t src;

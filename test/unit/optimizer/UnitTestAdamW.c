@@ -551,9 +551,9 @@ void testAdamWCreateOptimSymMomentSmoke(void) {
     memcpy(vSFinal, vSDecoded->data, sizeof vSFinal);
     memcpy(pSFinal, weightsS->param->data, sizeof pSFinal);
     float finalMScale =
-        ((symQConfig_t *)optimS->states[0]->stateBuffers[0]->quantization->qConfig)->scale;
+        ((symQConfig_t *)optimS->states[0]->stateBuffers[0]->quantization->qConfig)->scales[0];
     float finalVScale =
-        ((symQConfig_t *)optimS->states[0]->stateBuffers[1]->quantization->qConfig)->scale;
+        ((symQConfig_t *)optimS->states[0]->stateBuffers[1]->quantization->qConfig)->scales[0];
 
     int allFinite = 1;
     for (size_t i = 0; i < 32; i++) {

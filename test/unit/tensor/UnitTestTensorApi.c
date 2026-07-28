@@ -685,18 +685,68 @@ void testGetQLikeSymPreservesWidthAndRoundingResetsScale(void) {
      * reset to 1.f — a fresh clone is an ungridded zero-state. Mutation guard:
      * re-removing the SYM arm exits the run ("Unknown QType"). */
     quantization_t *src = quantizationInitSym(6, SR_HALF_AWAY);
-    ((symQConfig_t *)src->qConfig)->scale = 0.25f; /* carried scale must NOT be cloned */
+    ((symQConfig_t *)src->qConfig)->scales[0] = 0.25f; /* carried scale must NOT be cloned */
     quantization_t *like = getQLike(src);
 
     qtype_t likeType = like->type;
-    symQConfig_t likeQC = *(symQConfig_t *)like->qConfig;
+    /* Group-quant PR1: capture the scalar VALUES here, not a whole-struct copy
+     * -- symQConfig_t now carries a heap `scales` pointer, so `*(symQConfig_t
+     * *)like->qConfig` would copy that pointer into a stack local that then
+     * dangles once freeQuantization(like) below frees the array (assert-last
+     * per Rule 3 still requires reading AFTER the free otherwise). */
+    symQConfig_t *likeQC = (symQConfig_t *)like->qConfig;
+    uint8_t likeQBits = likeQC->qBits;
+    roundingMode_t likeRoundingMode = likeQC->roundingMode;
+    float likeScale = likeQC->scales[0];
     freeQuantization(src);
     freeQuantization(like);
 
     TEST_ASSERT_EQUAL_INT(SYM, likeType);
-    TEST_ASSERT_EQUAL_UINT8(6, likeQC.qBits);
-    TEST_ASSERT_EQUAL_INT(SR_HALF_AWAY, likeQC.roundingMode);
-    TEST_ASSERT_EQUAL_FLOAT(1.f, likeQC.scale);
+    TEST_ASSERT_EQUAL_UINT8(6, likeQBits);
+    TEST_ASSERT_EQUAL_INT(SR_HALF_AWAY, likeRoundingMode);
+    TEST_ASSERT_EQUAL_FLOAT(1.f, likeScale);
+}
+
+void testGetQLikeSymDeepCopiesScalesArray(void) {
+    /* Group-quant PR1 new mechanics: scales is now a heap array owned by
+     * each qconfig independently. Mutate the SOURCE's scales[0] AFTER
+     * getQLike -- if getQLike aliased the array pointer instead of
+     * allocating a fresh one (via initSymQConfig), the clone would observe
+     * the mutation and/or share the same pointer. Mutation guard: making
+     * getQLike copy the pointer (`likeQC->scales = srcQC->scales;`) instead
+     * of calling initSymQConfig makes this FAIL both assertions. */
+    quantization_t *src = quantizationInitSym(6, SR_HALF_AWAY);
+    quantization_t *like = getQLike(src);
+
+    float *srcScales = ((symQConfig_t *)src->qConfig)->scales;
+    float *likeScales = ((symQConfig_t *)like->qConfig)->scales;
+
+    ((symQConfig_t *)src->qConfig)->scales[0] = 0.75f; /* mutate AFTER clone */
+
+    float likeScaleAfterSrcMutation = likeScales[0];
+
+    freeQuantization(src);
+    freeQuantization(like);
+
+    TEST_ASSERT_NOT_EQUAL(srcScales, likeScales);
+    TEST_ASSERT_EQUAL_FLOAT(1.f, likeScaleAfterSrcMutation);
+}
+
+void testFreeQuantizationSymFreesScalesArrayWithoutLeak(void) {
+    /* Group-quant PR1 new mechanics: the SYM qconfig now owns a second heap
+     * block (the scales array) beyond the qConfig struct itself and the
+     * quantization_t wrapper. freeQuantization must release all of it.
+     * Verified leak-free via the LSan opt-in recipe (docs/conventions/
+     * testing.md) run against this focused binary -- see the PR1 report.
+     * Mutation guard: dropping the array free in freeQuantization leaves
+     * this test still "passing" under the default ASan build (no crash),
+     * but LSan flags the leak (see report). */
+    quantization_t *q = quantizationInitSym(4, HALF_AWAY);
+    float *scales = ((symQConfig_t *)q->qConfig)->scales;
+
+    freeQuantization(q);
+
+    TEST_ASSERT_NOT_NULL(scales);
 }
 
 void testGetDataLikeSymAllocatesPackedCeiling(void) {
@@ -778,6 +828,8 @@ int main(void) {
     RUN_TEST(testTensorFillFromBoolBuffer_RoundTrip_N12);
     RUN_TEST(testGradInitSymInt32StaysInt16WhileDefaultIsInt12);
     RUN_TEST(testGetQLikeSymPreservesWidthAndRoundingResetsScale);
+    RUN_TEST(testGetQLikeSymDeepCopiesScalesArray);
+    RUN_TEST(testFreeQuantizationSymFreesScalesArrayWithoutLeak);
     RUN_TEST(testGetDataLikeSymAllocatesPackedCeiling);
     RUN_TEST(testGradInitSymAllocatesPackedZeroGrad);
     return UNITY_END();

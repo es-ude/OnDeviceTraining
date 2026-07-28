@@ -320,8 +320,8 @@ static void testRoundTripRelu(void) {
     qtype_t capturedDeserialOutputQType = deserialCfg->outputQ->type;
     symQConfig_t *serialOutputCfg = serialCfg->outputQ->qConfig;
     symQConfig_t *deserialOutputCfg = deserialCfg->outputQ->qConfig;
-    float capturedSerialOutputScale = serialOutputCfg->scale;
-    float capturedDeserialOutputScale = deserialOutputCfg->scale;
+    float capturedSerialOutputScale = serialOutputCfg->scales[0];
+    float capturedDeserialOutputScale = deserialOutputCfg->scales[0];
     uint8_t capturedSerialOutputQBits = serialOutputCfg->qBits;
     uint8_t capturedDeserialOutputQBits = deserialOutputCfg->qBits;
     roundingMode_t capturedSerialOutputRM = serialOutputCfg->roundingMode;
@@ -1412,8 +1412,8 @@ static void testRoundTripQuantizationLayer(void) {
     qtype_t capturedDeserialOutputQType = deserialCfg->outputQ->type;
     symQConfig_t *serialOutputCfg = serialCfg->outputQ->qConfig;
     symQConfig_t *deserialOutputCfg = deserialCfg->outputQ->qConfig;
-    float capturedSerialOutputScale = serialOutputCfg->scale;
-    float capturedDeserialOutputScale = deserialOutputCfg->scale;
+    float capturedSerialOutputScale = serialOutputCfg->scales[0];
+    float capturedDeserialOutputScale = deserialOutputCfg->scales[0];
     uint8_t capturedSerialOutputQBits = serialOutputCfg->qBits;
     uint8_t capturedDeserialOutputQBits = deserialOutputCfg->qBits;
     roundingMode_t capturedSerialOutputRM = serialOutputCfg->roundingMode;
@@ -1470,7 +1470,7 @@ static void testSerializeTensorSymSubByteRoundTripsPackedData(void) {
     tensor_t *src = initTensor(shape, quantizationInitSym(4, HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(src, (float[]){1.f, -2.f, 3.f, -4.f, 5.f, -6.f, 7.f, -6.f, 5.f, -4.f},
                               10);
-    float srcScale = ((symQConfig_t *)src->quantization->qConfig)->scale;
+    float srcScale = ((symQConfig_t *)src->quantization->qConfig)->scales[0];
     uint8_t srcBytes[5];
     memcpy(srcBytes, src->data, 5);
 
@@ -1496,7 +1496,7 @@ static void testSerializeTensorSymSubByteRoundTripsPackedData(void) {
     fclose(f);
 
     /* CAPTURE -> free -> assert (file convention). */
-    float dstScale = ((symQConfig_t *)dst->quantization->qConfig)->scale;
+    float dstScale = ((symQConfig_t *)dst->quantization->qConfig)->scales[0];
     uint8_t dstBytes[5];
     memcpy(dstBytes, dst->data, 5);
     freeTensor(src);

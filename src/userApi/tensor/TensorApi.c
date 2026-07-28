@@ -303,6 +303,13 @@ void freeShape(shape_t *shape) {
 }
 
 void freeQuantization(quantization_t *quantization) {
+    /* Group-quant PR1: SYM's qConfig owns a second heap block (the scales
+     * array) beyond the qConfig struct itself -- free it first, then the
+     * qConfig struct, then the wrapper (reverse-init order). */
+    if (quantization->type == SYM) {
+        symQConfig_t *symQC = quantization->qConfig;
+        freeReservedMemory(symQC->scales);
+    }
     freeReservedMemory(quantization->qConfig);
     freeReservedMemory(quantization);
 }

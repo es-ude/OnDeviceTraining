@@ -7,6 +7,7 @@
 #include "Common.h"
 #include "Quantization.h"
 #include "Rounding.h"
+#include "StorageApi.h"
 
 void initSymInt32QConfig(roundingMode_t roundingMode, symInt32QConfig_t *symInt32QConfig) {
     symInt32QConfig->roundingMode = roundingMode;
@@ -31,9 +32,19 @@ void initSymInt32QConfigWithQMaxBits(roundingMode_t roundingMode,
 }
 
 void initSymQConfig(uint8_t qBits, roundingMode_t roundingMode, symQConfig_t *symQConfig) {
+    /* Group-quant PR1: caller allocates the outer struct; this init now also
+     * allocates the 1-element scales array (contract change, see the header
+     * doc) -- the filled config owns a heap scales array, pair with
+     * freeReservedMemory (bare qConfig) or freeQuantization (qConfig wrapped
+     * in a quantization_t). PR1 is always per-tensor: numGroups=1,
+     * groupSize=0 (the "whole tensor" sentinel). */
+    float *scales = reserveMemory(sizeof(float));
+    scales[0] = 1.f;
+    symQConfig->scales = scales;
+    symQConfig->numGroups = 1;
+    symQConfig->groupSize = 0;
     symQConfig->qBits = qBits;
     symQConfig->roundingMode = roundingMode;
-    symQConfig->scale = 1.f;
 }
 
 void initAsymQConfig(uint8_t qBits, roundingMode_t roundingMode, asymQConfig_t *asymQConfig) {

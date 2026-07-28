@@ -34,7 +34,7 @@ void optimizerZeroGrad(optimizer_t *optimizer) {
         }
         case SYM: {
             symQConfig_t *symQ = param->grad->quantization->qConfig;
-            symQ->scale = 1.f;
+            symQ->scales[0] = 1.f;
             break;
         }
         case ASYM: {

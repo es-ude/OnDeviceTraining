@@ -32,6 +32,13 @@ quantization_t *quantizationInitSymInt32WithBits(roundingMode_t roundingMode, ui
 /*! Sub-byte symmetric quantization with explicit bit width and rounding. */
 quantization_t *quantizationInitSym(uint8_t qBits, roundingMode_t roundingMode);
 
+/*! Group-quant PR2: sub-byte symmetric quantization with an explicit group
+ *  shape (numGroups, groupSize), mirroring quantizationInitSym's per-tensor
+ *  {1,0}. Pairs with freeQuantization. See initSymQConfigGrouped for the
+ *  shape invariant enforced at construction. */
+quantization_t *quantizationInitSymGrouped(uint8_t qBits, roundingMode_t roundingMode,
+                                           size_t numGroups, size_t groupSize);
+
 /*! Initializes asym quantization.
  *
  * \param qBits: Number of bits for qMax

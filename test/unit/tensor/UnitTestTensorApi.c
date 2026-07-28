@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "DeathTest.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
 #include "StorageApi.h"
@@ -61,6 +62,11 @@ void tearDown() {}
 
 /* Forward decl for the file-local factory (definition further down). */
 static tensor_t *makeFloatTensorForDistTest(size_t d0, size_t d1);
+
+/* Group-quant PR2 (Task 1) file-local Rule-1 factories: a 1-D shape and a
+ * FLOAT32 tensor built over it. */
+static shape_t *makeShape1d(size_t n);
+static tensor_t *makeFloatTensor1d(size_t n);
 
 void testTensorInitWithDistribution_Zeros_InitializesProductOfDimsValues() {
     /* dims = {2, 5} -> product = 10, sum = 7. Pre-fill with sentinel 42.0f,
@@ -166,6 +172,20 @@ static tensor_t *makeFloatTensorForDistTest(size_t d0, size_t d1) {
     shape_t *shape = reserveMemory(sizeof(shape_t));
     setShape(shape, dims, 2, order);
     return initTensor(shape, quantizationInitFloat(), NULL);
+}
+
+static shape_t *makeShape1d(size_t n) {
+    size_t *dims = reserveMemory(1 * sizeof(size_t));
+    dims[0] = n;
+    size_t *order = reserveMemory(1 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    return shape;
+}
+
+static tensor_t *makeFloatTensor1d(size_t n) {
+    return initTensor(makeShape1d(n), quantizationInitFloat(), NULL);
 }
 
 static tensor_t *makeBoolTensorN(size_t n) {
@@ -799,6 +819,41 @@ void testGradInitSymAllocatesPackedZeroGrad(void) {
     TEST_ASSERT_EQUAL_UINT8(0, byte0);   /* calloc zero-fill */
 }
 
+/* Group-quant PR2 (Task 1): attach-time validation, group-faithful getQLike,
+ * and the grad-carrier gate. */
+
+void testInitTensorValidatesGroupedSymShape(void) {
+    /* 10-element tensor, groupSize 4 -> 2*4 != 10 must fail-fast at attach */
+    ASSERT_EXITS_WITH(1, {
+        quantization_t *q = quantizationInitSymGrouped(4, HALF_AWAY, 2, 4);
+        initTensor(makeShape1d(10), q, NULL);
+    });
+}
+
+void testGetQLikeSymPreservesGroups(void) {
+    quantization_t *src = quantizationInitSymGrouped(4, HALF_AWAY, 2, 5);
+    ((symQConfig_t *)src->qConfig)->scales[1] = 0.25f;
+    quantization_t *like = getQLike(src);
+    symQConfig_t *likeQC = like->qConfig;
+    size_t ng = likeQC->numGroups, gs = likeQC->groupSize;
+    float s1 = likeQC->scales[1];
+    int distinct = likeQC->scales != ((symQConfig_t *)src->qConfig)->scales;
+    freeQuantization(like);
+    freeQuantization(src);
+    TEST_ASSERT_EQUAL_size_t(2, ng);
+    TEST_ASSERT_EQUAL_size_t(5, gs);
+    TEST_ASSERT_EQUAL_FLOAT(0.25f, s1); /* scales VALUES carried over */
+    TEST_ASSERT_TRUE(distinct);         /* but deep-copied, not aliased */
+}
+
+void testGradInitRejectsGroupedSymTemplate(void) {
+    ASSERT_EXITS_WITH(1, {
+        quantization_t *gq = quantizationInitSymGrouped(8, HALF_AWAY, 2, 5);
+        tensor_t *p = makeFloatTensor1d(10); /* file-local Rule-1 factory */
+        gradInit(p, gq, NULL);
+    });
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testTensorInitWithDistribution_Zeros_InitializesProductOfDimsValues);
@@ -832,5 +887,8 @@ int main(void) {
     RUN_TEST(testFreeQuantizationSymFreesScalesArrayWithoutLeak);
     RUN_TEST(testGetDataLikeSymAllocatesPackedCeiling);
     RUN_TEST(testGradInitSymAllocatesPackedZeroGrad);
+    RUN_TEST(testInitTensorValidatesGroupedSymShape);
+    RUN_TEST(testGetQLikeSymPreservesGroups);
+    RUN_TEST(testGradInitRejectsGroupedSymTemplate);
     return UNITY_END();
 }

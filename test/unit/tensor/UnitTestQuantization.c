@@ -1,3 +1,6 @@
+#include <stdbool.h>
+
+#include "DeathTest.h"
 #include "Quantization.h"
 #include "Rounding.h"
 #include "StorageApi.h"
@@ -64,9 +67,53 @@ void testInitSymQConfigAllocatesIndependentScalesArrays(void) {
     TEST_ASSERT_NOT_EQUAL(aScales, bScales);
 }
 
+/* Group-quant PR2 (docs/superpowers/specs/2026-07-28-group-quantization-design.md
+ * §2/D3, Task 1): the grouped-creation API this PR2 introduces, plus the
+ * shape-validation choke point PR1 deferred (see the disclosure above --
+ * initTensor is the attach point; PR2 wires validateSymQConfigShape there). */
+
+void testInitSymQConfigGroupedAllocatesPerGroupScales(void) {
+    symQConfig_t qc;
+    initSymQConfigGrouped(4, SR_HALF_AWAY, 3, 5, &qc);
+    size_t numGroups = qc.numGroups;
+    size_t groupSize = qc.groupSize;
+    float s0 = qc.scales[0], s2 = qc.scales[2];
+    qc.scales[2] = 7.f; /* writable per-group slot */
+    float s2w = qc.scales[2];
+    freeReservedMemory(qc.scales);
+    TEST_ASSERT_EQUAL_size_t(3, numGroups);
+    TEST_ASSERT_EQUAL_size_t(5, groupSize);
+    TEST_ASSERT_EQUAL_FLOAT(1.f, s0);
+    TEST_ASSERT_EQUAL_FLOAT(1.f, s2);
+    TEST_ASSERT_EQUAL_FLOAT(7.f, s2w);
+}
+
+void testInitSymQConfigGroupedRejectsSentinelViolations(void) {
+    symQConfig_t qc;
+    /* numGroups>1 with groupSize==0 violates the invariant */
+    ASSERT_EXITS_WITH(1, { initSymQConfigGrouped(4, HALF_AWAY, 2, 0, &qc); });
+    /* numGroups==1 with groupSize!=0 is the non-canonical {1,N} form */
+    ASSERT_EXITS_WITH(1, { initSymQConfigGrouped(4, HALF_AWAY, 1, 8, &qc); });
+    ASSERT_EXITS_WITH(1, { initSymQConfigGrouped(4, HALF_AWAY, 0, 0, &qc); });
+}
+
+void testValidateSymQConfigShapeDivisibility(void) {
+    float s[2] = {1.f, 1.f};
+    symQConfig_t ok = {
+        .scales = s, .numGroups = 2, .groupSize = 5, .roundingMode = HALF_AWAY, .qBits = 4};
+    validateSymQConfigShape(&ok, 10); /* must NOT exit */
+    symQConfig_t bad = {
+        .scales = s, .numGroups = 2, .groupSize = 4, .roundingMode = HALF_AWAY, .qBits = 4};
+    ASSERT_EXITS_WITH(1, { validateSymQConfigShape(&bad, 10); });
+    TEST_ASSERT_TRUE(true); /* reached ⇒ ok-case did not exit */
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testInitSymQConfigProducesPerTensorSentinel);
     RUN_TEST(testInitSymQConfigAllocatesIndependentScalesArrays);
+    RUN_TEST(testInitSymQConfigGroupedAllocatesPerGroupScales);
+    RUN_TEST(testInitSymQConfigGroupedRejectsSentinelViolations);
+    RUN_TEST(testValidateSymQConfigShapeDivisibility);
     return UNITY_END();
 }

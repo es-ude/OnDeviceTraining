@@ -21,6 +21,9 @@ tensor_t *initTensor(shape_t *shape, quantization_t *quantization, sparsity_t *s
     tensor->sparsity = sparsity;
 
     size_t numberOfElements = calcNumberOfElementsByShape(shape);
+    if (quantization->type == SYM) {
+        validateSymQConfigShape(quantization->qConfig, numberOfElements);
+    }
     size_t bytes = calcNumberOfBytesForData(quantization, numberOfElements);
     tensor->data = reserveMemory(bytes);
 
@@ -146,6 +149,16 @@ tensor_t *gradInitInt32(tensor_t *param, sparsity_t *sparsity) {
 }
 
 tensor_t *gradInit(tensor_t *param, quantization_t *gradQ, sparsity_t *sparsity) {
+    /* Group-quant PR2 carrier gate: groups are legal ONLY on GEMM-family
+     * weight tensors -- grads stay per-tensor unconditionally. */
+    if (gradQ->type == SYM) {
+        symQConfig_t *symQC = gradQ->qConfig;
+        if (symQC->numGroups > 1) {
+            PRINT_ERROR("gradInit: grouped SYM grad templates are unsupported -- "
+                        "grouped grads are a future #300 axis (spec §3)");
+            exit(1);
+        }
+    }
     return initTensor(getShapeLike(param->shape), getQLike(gradQ), sparsity);
 }
 
@@ -222,9 +235,24 @@ quantization_t *getQLike(quantization_t *quantization) {
     case SYM: {
         symQConfig_t *likeSymQC = reserveMemory(sizeof(symQConfig_t));
         symQConfig_t *symQC = quantization->qConfig;
-        /* Precedent A clone: width + rounding preserved, scale reset — a fresh
-         * clone is an ungridded zero-state (first accumulate derives the grid). */
-        initSymQConfig(symQC->qBits, symQC->roundingMode, likeSymQC);
+        if (symQC->numGroups > 1) {
+            /* Group-quant PR2: a grouped source's group SHAPE is an
+             * attach-time fact, not an ungridded zero-state -- preserve
+             * numGroups/groupSize and deep-copy the scales VALUES (matches
+             * deepCopyQuantization's semantics, LayerQuant.c:71-82), unlike
+             * the per-tensor fresh-reset clone below. */
+            float *likeScales = reserveMemory(symQC->numGroups * sizeof(float));
+            memcpy(likeScales, symQC->scales, symQC->numGroups * sizeof(float));
+            likeSymQC->scales = likeScales;
+            likeSymQC->numGroups = symQC->numGroups;
+            likeSymQC->groupSize = symQC->groupSize;
+            likeSymQC->roundingMode = symQC->roundingMode;
+            likeSymQC->qBits = symQC->qBits;
+        } else {
+            /* Precedent A clone: width + rounding preserved, scale reset — a fresh
+             * clone is an ungridded zero-state (first accumulate derives the grid). */
+            initSymQConfig(symQC->qBits, symQC->roundingMode, likeSymQC);
+        }
         initSymQuantization(likeSymQC, likeQ);
         break;
     }

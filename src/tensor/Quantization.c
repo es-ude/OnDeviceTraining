@@ -32,19 +32,48 @@ void initSymInt32QConfigWithQMaxBits(roundingMode_t roundingMode,
 }
 
 void initSymQConfig(uint8_t qBits, roundingMode_t roundingMode, symQConfig_t *symQConfig) {
-    /* Group-quant PR1: caller allocates the outer struct; this init now also
-     * allocates the 1-element scales array (contract change, see the header
-     * doc) -- the filled config owns a heap scales array, pair with
-     * freeReservedMemory (bare qConfig) or freeQuantization (qConfig wrapped
-     * in a quantization_t). PR1 is always per-tensor: numGroups=1,
-     * groupSize=0 (the "whole tensor" sentinel). */
-    float *scales = reserveMemory(sizeof(float));
-    scales[0] = 1.f;
-    symQConfig->scales = scales;
-    symQConfig->numGroups = 1;
-    symQConfig->groupSize = 0;
-    symQConfig->qBits = qBits;
-    symQConfig->roundingMode = roundingMode;
+    /* Group-quant PR2: delegates to the general-shape init with the PR1
+     * per-tensor sentinel (numGroups=1, groupSize=0) -- keeps this producer's
+     * behavior bit-identical to PR1 (the PR1 sentinel tests in
+     * UnitTestQuantization.c are the regression net for that claim). */
+    initSymQConfigGrouped(qBits, roundingMode, 1, 0, symQConfig);
+}
+
+void validateSymQConfigShape(const symQConfig_t *qC, size_t numberOfElements) {
+    bool perTensor = qC->numGroups == 1 && qC->groupSize == 0;
+    bool grouped =
+        qC->numGroups > 1 && qC->groupSize > 0 && qC->numGroups * qC->groupSize == numberOfElements;
+    if (!perTensor && !grouped) {
+        PRINT_ERROR("validateSymQConfigShape: invalid SYM group shape numGroups=%zu "
+                    "groupSize=%zu for %zu elements (per-tensor is {1,0}; grouped needs "
+                    "numGroups*groupSize == elements)",
+                    qC->numGroups, qC->groupSize, numberOfElements);
+        exit(1);
+    }
+}
+
+void initSymQConfigGrouped(uint8_t qBits, roundingMode_t roundingMode, size_t numGroups,
+                           size_t groupSize, symQConfig_t *qC) {
+    /* Caller allocates the outer struct; this init allocates the
+     * numGroups-element scales array (contract per the header doc) -- the
+     * filled config owns a heap scales array, pair with freeReservedMemory
+     * (bare qConfig) or freeQuantization (qConfig wrapped in a
+     * quantization_t). Only {1,0} (per-tensor) or {>1,>0} (grouped) are
+     * constructible -- {1,N>0} and {0,*} are rejected here. */
+    if (numGroups == 0 || (numGroups == 1) != (groupSize == 0)) {
+        PRINT_ERROR("initSymQConfigGrouped: invalid group shape numGroups=%zu groupSize=%zu "
+                    "(per-tensor is {1,0}; grouped needs numGroups>1 and groupSize>0)",
+                    numGroups, groupSize);
+        exit(1);
+    }
+    qC->scales = reserveMemory(numGroups * sizeof(float));
+    for (size_t g = 0; g < numGroups; g++) {
+        qC->scales[g] = 1.f;
+    }
+    qC->numGroups = numGroups;
+    qC->groupSize = groupSize;
+    qC->roundingMode = roundingMode;
+    qC->qBits = qBits;
 }
 
 void initAsymQConfig(uint8_t qBits, roundingMode_t roundingMode, asymQConfig_t *asymQConfig) {

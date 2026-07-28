@@ -439,9 +439,17 @@ static void copySymQConfigInto(quantization_t *dest, quantization_t *src) {
     dest->type = src->type;
     symQConfig_t *srcQC = src->qConfig;
     symQConfig_t *dstQC = dest->qConfig;
+    /* Group-quant PR2: dest->scales is a fixed-size (numGroups-element) heap
+     * array allocated when dest's own config was constructed -- a numGroups
+     * mismatch means src's group shape doesn't fit dest's array, so this
+     * must fail fast rather than over/under-copy. groupSize/qBits/
+     * roundingMode are adopted from src unconditionally below (dest's shape
+     * was already made src-identical by copyShape, so a matching numGroups
+     * with a differing groupSize cannot occur via copyTensor's own callers). */
     if (dstQC->numGroups != srcQC->numGroups) {
-        PRINT_ERROR("copyQuantization: SYM numGroups mismatch (dest %zu, src %zu)",
-                    dstQC->numGroups, srcQC->numGroups);
+        PRINT_ERROR("copyQuantization: SYM group-shape mismatch (dest numGroups=%zu "
+                    "groupSize=%zu, src numGroups=%zu groupSize=%zu)",
+                    dstQC->numGroups, dstQC->groupSize, srcQC->numGroups, srcQC->groupSize);
         exit(1);
     }
     memcpy(dstQC->scales, srcQC->scales, srcQC->numGroups * sizeof(float));

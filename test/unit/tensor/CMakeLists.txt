@@ -6,6 +6,7 @@ add_elastic_ai_unit_test(
         Rounding
         Quantization
         StorageApi
+        odt_test_death
 )
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
@@ -50,6 +51,7 @@ add_elastic_ai_unit_test(
         Quantization
         QuantizationApi
         StorageApi
+        odt_test_death
 )
 add_executable(UnitTestTensorBool UnitTestTensorBool.c)
 target_link_libraries(UnitTestTensorBool PRIVATE

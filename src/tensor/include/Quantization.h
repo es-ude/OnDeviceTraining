@@ -42,21 +42,43 @@ typedef struct symInt32QConfig {
  * groupSize == 0 is the "whole tensor" sentinel: standalone-built configs
  * (initSymQConfig, without a tensor in hand) cannot know N, so per-tensor
  * quantization keeps groupSize == 0 ("spans everything"), exactly as
- * N-agnostic as the old scalar scale. Invariant, enforced where checkable:
- * numGroups == 1 <=> groupSize == 0. Ownership: scales is heap-allocated
- * (reserveMemory) by whichever call filled the struct -- initSymQConfig
- * (PR1's only producer) always allocates a fresh 1-element array; pair with
- * freeReservedMemory (bare qConfig) or freeQuantization (config wrapped in a
- * quantization_t, e.g. via quantizationInitSym / getQLike). Stack test
- * fixtures that only need a fixed per-tensor scale should build the struct
- * directly with a local backing array instead of calling initSymQConfig (see
- * docs/conventions/testing.md) -- such fixtures are never passed to
- * freeQuantization or freeReservedMemory. */
+ * N-agnostic as the old scalar scale. Ownership: scales is heap-allocated
+ * (reserveMemory) by whichever call filled the struct -- initSymQConfig /
+ * initSymQConfigGrouped always allocate a fresh `numGroups`-element array;
+ * pair with freeReservedMemory (bare qConfig) or freeQuantization (config
+ * wrapped in a quantization_t, e.g. via quantizationInitSym / getQLike).
+ * Stack test fixtures that only need a fixed per-tensor scale should build
+ * the struct directly with a local backing array instead of calling
+ * initSymQConfig (see docs/conventions/testing.md) -- such fixtures are
+ * never passed to freeQuantization or freeReservedMemory.
+ *
+ * Group-quant PR2 (Task 1): the shape invariant is now a real constraint,
+ * not just a PR1 sentinel pin. Exactly two shapes are valid:
+ *   - per-tensor: numGroups == 1 && groupSize == 0 (unchanged PR1 sentinel).
+ *   - grouped:    numGroups > 1 && groupSize > 0, with
+ *                 numGroups * groupSize == numberOfElements at attach time.
+ * {1, N} (N > 0) is NOT a valid alternate per-tensor spelling -- the
+ * canonical per-tensor form is always {1, 0}. initSymQConfigGrouped enforces
+ * the shape at construction (no tensor in hand yet, so it cannot check
+ * against N); validateSymQConfigShape enforces the numGroups*groupSize == N
+ * identity where a config attaches to a tensor (initTensor, for SYM types).
+ *
+ * getQLike's SYM arm (TensorApi.c) branches on numGroups: numGroups == 1
+ * keeps the existing "Precedent A" fresh-reset clone (scale -> 1.f, pinned by
+ * testGetQLikeSymPreservesWidthAndRoundingResetsScale) since a per-tensor
+ * clone has no group SHAPE to lose; numGroups > 1 instead deep-copies
+ * numGroups/groupSize AND the scales VALUES (matching deepCopyQuantization's
+ * semantics, LayerQuant.c:71-82) since a grouped clone's group grid is an
+ * attach-time fact the clone must retain, not an ungridded zero-state.
+ *
+ * Carrier gate: groups are legal ONLY on GEMM-family weight tensors. Grad
+ * tensors stay per-tensor unconditionally -- gradInit fail-fasts if handed a
+ * SYM template with numGroups > 1 (grouped grads are a future #300 axis). */
 typedef struct symQConfig {
     float *scales;    /* [numGroups], owned by the qconfig (see ownership note above) */
-    size_t numGroups; /* PR1: always 1 */
+    size_t numGroups; /* 1 = per-tensor sentinel; >1 = real groups (PR2+) */
     size_t groupSize; /* 0 = "whole tensor" sentinel (per-tensor, N-agnostic);
-                        >0 only for real groups (PR2+). PR1: always 0. */
+                        >0 only for real groups (PR2+), numGroups*groupSize == N */
     roundingMode_t roundingMode;
     uint8_t qBits;
 } symQConfig_t;
@@ -81,6 +103,20 @@ void initSymInt32QConfig(roundingMode_t roundingMode, symInt32QConfig_t *symInt3
 void initSymInt32QConfigWithQMaxBits(roundingMode_t roundingMode,
                                      symInt32QConfig_t *symInt32QConfig, uint8_t qMaxBits);
 void initSymQConfig(uint8_t qBits, roundingMode_t roundingMode, symQConfig_t *symQConfig);
+/*! Group-quant PR2: general-shape SYM config init. initSymQConfig delegates
+ * here with (numGroups=1, groupSize=0). Allocates scales[numGroups] (each
+ * 1.f); fail-fasts on numGroups == 0, on (numGroups == 1) != (groupSize == 0),
+ * and on numGroups > 1 && groupSize == 0 -- i.e. only {1,0} (per-tensor) or
+ * {>1,>0} (grouped) are constructible; {1,N>0} is rejected here even before
+ * any tensor exists to validate group*groupSize against. */
+void initSymQConfigGrouped(uint8_t qBits, roundingMode_t roundingMode, size_t numGroups,
+                           size_t groupSize, symQConfig_t *qC);
+/*! Group-quant PR2: attach-time shape check for a SYM config against a
+ * concrete element count. Fail-fasts unless (numGroups==1 && groupSize==0)
+ * or (numGroups>1 && groupSize>0 && numGroups*groupSize==numberOfElements).
+ * Called by initTensor for SYM tensors; also the choke point Task 5's
+ * deserialize path re-validates against. */
+void validateSymQConfigShape(const symQConfig_t *qC, size_t numberOfElements);
 void initAsymQConfig(uint8_t qBits, roundingMode_t roundingMode, asymQConfig_t *asymQConfig);
 
 void initInt32Quantization(quantization_t *quantization);

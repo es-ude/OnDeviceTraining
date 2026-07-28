@@ -40,6 +40,15 @@ quantization_t *quantizationInitSym(uint8_t qBits, roundingMode_t roundingMode) 
     return q;
 }
 
+quantization_t *quantizationInitSymGrouped(uint8_t qBits, roundingMode_t roundingMode,
+                                           size_t numGroups, size_t groupSize) {
+    quantization_t *q = reserveMemory(sizeof(quantization_t));
+    symQConfig_t *qC = reserveMemory(sizeof(symQConfig_t));
+    initSymQConfigGrouped(qBits, roundingMode, numGroups, groupSize, qC);
+    initSymQuantization(qC, q);
+    return q;
+}
+
 quantization_t *quantizationInitAsym(uint8_t qBits, roundingMode_t roundingMode) {
     quantization_t *q = reserveMemory(sizeof(quantization_t));
     asymQConfig_t *qC = reserveMemory(sizeof(asymQConfig_t));

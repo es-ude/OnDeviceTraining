@@ -17,6 +17,11 @@ void serialWriteU8(uint8_t value, FILE *f) {
     serialWriteBytes(&value, 1, f);
 }
 
+void serialWriteU16LE(uint16_t value, FILE *f) {
+    uint8_t bytes[2] = {(uint8_t)value, (uint8_t)(value >> 8)};
+    serialWriteBytes(bytes, 2, f);
+}
+
 void serialWriteU32LE(uint32_t value, FILE *f) {
     uint8_t bytes[4] = {(uint8_t)value, (uint8_t)(value >> 8), (uint8_t)(value >> 16),
                         (uint8_t)(value >> 24)};
@@ -54,6 +59,12 @@ uint8_t serialReadU8(FILE *f) {
     uint8_t value;
     serialReadBytes(&value, 1, f);
     return value;
+}
+
+uint16_t serialReadU16LE(FILE *f) {
+    uint8_t bytes[2];
+    serialReadBytes(bytes, 2, f);
+    return (uint16_t)((uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8));
 }
 
 uint32_t serialReadU32LE(FILE *f) {

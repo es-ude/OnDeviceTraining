@@ -28,10 +28,7 @@
  * one Record per layer (u8 tag + payload). Every count/dim/kernel field is u32
  * little-endian and every scalar goes through the checked SerialWire
  * primitives, so a model written on a 64-bit host loads bit-identically on
- * 32-bit MCU targets. ASYM zeroPoint is i32 LE on the wire (historically
- * matching the old int32 in-memory field, #246; since group-quant PR4 the
- * in-memory zp is a code-domain uint16 bridged through the same i32 slot
- * until Task 4's v5 record -- see serializeQConfig's ASYM arm).
+ * 32-bit MCU targets.
  * v3: parameter records carry a grad-presence byte (#380). Frozen layers
  * (parameter->grad == NULL, layer freezing epic) write hasGrad=0 and skip the
  * grad tensor entirely; deserialize is TOLERANT of a presence/skeleton
@@ -44,16 +41,35 @@
  * rounding` tail. The writer is group-GENERAL and always has been: it writes
  * symQC->numGroups/groupSize verbatim and every group's scale (not just
  * scales[0]), whatever shape the in-memory config holds -- see
- * testGoldenBytesModelReluSymGroupedOutputV4 (UnitTestSerialize.c), the
+ * testGoldenBytesModelReluSymGroupedOutputV5 (UnitTestSerialize.c), the
  * numGroups>1 golden that pins this. PR1 shipped with no producer able to
  * BUILD a numGroups>1 config yet, so every PR1-era file happened to carry
  * numGroups=1, groupSize=0 (the per-tensor sentinel, Quantization.h); PR2's
  * initSymQConfigGrouped (Task 1) and the Deserialize.c read-side relax
- * (Task 5) are what actually exercise a numGroups>1 record end to end. Every
- * other record (ASYM/FLOAT32/INT32/SYM_INT32/BOOL, layer arms, the v3
- * grad-presence byte) is untouched. */
+ * (Task 5) are what actually exercise a numGroups>1 record end to end. v4's
+ * ASYM record was left on an INTRA-BRANCH BRIDGE (old per-tensor v4 shape,
+ * scale/qBits/rounding/i32-zeroPoint, but with the i32 slot repurposed to
+ * carry a code-domain uint16 value, #246/D6) -- superseded by v5 below.
+ * v5 (group-quant PR4, Task 4): the ASYM qConfig record adopts the SAME
+ * numGroups/groupSize-prefixed, group-general layout the v4 SYM record
+ * introduced, PLUS a second per-group array: `u16 zeroPoints[numGroups]`
+ * (LE) placed after `f32 scales[numGroups]`, D6's code-domain zp made
+ * possible by the qBits<=16 ceiling. Full ASYM record: `u32 numGroups`,
+ * `u32 groupSize`, `f32 scales[numGroups]`, `u16 zeroPoints[numGroups]`,
+ * `u8 qBits`, `u8 rounding` -- replacing Task 1's bridge above entirely (no
+ * migration path from a v4 ASYM record: its value decoded WRONG under the
+ * code-domain grid by design of that interim state, so v4 files -- INCLUDING
+ * ones this same branch's Tasks 1-3 produced -- now fail cleanly at the
+ * version check below, consistent with the v1->v4 no-back-compat-shim
+ * policy). SYM/SYM_INT32/FLOAT32/INT32/BOOL records, layer arms, and the v3
+ * grad-presence byte are untouched by this bump.
+ * Coordination note: the parallel BFP (block floating point) epic (spec
+ * dated 2026-07-29) plans its own qconfig wire record as an append-only new
+ * qtype tag. If BFP ships before v5 checkpoints circulate widely, its record
+ * may fold into this v5 bump; otherwise it becomes v6. This v5 carries ONLY
+ * the ASYM re-layout described above. */
 #define SERIALIZE_MAGIC "ODTS"
-#define SERIALIZE_FORMAT_VERSION 4u
+#define SERIALIZE_FORMAT_VERSION 5u
 
 void serializeTensor(tensor_t *tensor, FILE *f) {
     size_t numberOfValues = calcNumberOfElementsByTensor(tensor);
@@ -153,25 +169,25 @@ static void serializeQConfig(quantization_t *q, FILE *f) {
     }
     case ASYM: {
         asymQConfig_t *asymQC = q->qConfig;
-        /* Group-quant PR4 Task 1 INTRA-BRANCH BRIDGE: the v4 record shape
-         * (f32 scale, u8 qBits, u8 rounding, i32 zeroPoint) is kept, with
-         * the new per-tensor arrays' element 0 written through the old
-         * slots. The i32 slot now carries a CODE-domain uint16 zp -- a v4
-         * file written by PRE-PR4 code holds value-domain semantics and
-         * would decode WRONG under the new grid; that mismatch is resolved
-         * by Task 4's v5 bump (grouped ASYM record + version reject), not
-         * here. Until then this writer round-trips only against this
-         * branch's own reader. Grouped configs need the v5 record. */
-        if (asymQC->numGroups > 1) {
-            PRINT_ERROR("serializeQConfig: grouped ASYM (numGroups=%zu) has no v4 record -- "
-                        "the grouped ASYM wire format lands with the v5 bump (PR4 Task 4)",
-                        asymQC->numGroups);
-            exit(1);
+        /* v5 (group-quant PR4 Task 4): the ASYM twin of the SYM arm above --
+         * numGroups/groupSize precede the per-group arrays, THEN a second
+         * per-group array (zeroPoints, u16 LE) after scales, THEN the
+         * unchanged qBits/rounding tail. Group-general like the SYM arm: it
+         * writes asymQC->numGroups/groupSize verbatim and every group's
+         * scale/zeroPoint, whatever shape the in-memory config holds -- see
+         * testGoldenBytesModelReluAsymGroupedPropLossV5 (UnitTestSerialize.c)
+         * for the numGroups>1 golden. Replaces Task 1's v4 bridge (which
+         * capped numGroups at 1) entirely. */
+        serialWriteSizeAsU32LE(asymQC->numGroups, f);
+        serialWriteSizeAsU32LE(asymQC->groupSize, f);
+        for (size_t g = 0; g < asymQC->numGroups; g++) {
+            serialWriteF32LE(asymQC->scales[g], f);
         }
-        serialWriteF32LE(asymQC->scales[0], f);
+        for (size_t g = 0; g < asymQC->numGroups; g++) {
+            serialWriteU16LE(asymQC->zeroPoints[g], f);
+        }
         serialWriteU8(asymQC->qBits, f);
         serialWriteU8((uint8_t)asymQC->roundingMode, f);
-        serialWriteI32LE((int32_t)asymQC->zeroPoints[0], f);
         break;
     }
     default:

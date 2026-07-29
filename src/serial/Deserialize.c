@@ -41,9 +41,22 @@
  * post-reallocation divisibility check (Quantization.h) instead. The
  * sentinel invariant (numGroups==1 <=> groupSize==0, Quantization.h) is
  * checked on the FILE's values and is untouched by the relax; a violation is
- * a corrupt or from-the-future record. */
+ * a corrupt or from-the-future record. v4's ASYM record was an INTRA-BRANCH
+ * BRIDGE (old per-tensor shape, i32 zeroPoint slot repurposed to carry a
+ * code-domain uint16 value) -- superseded by v5 below.
+ * v5 (group-quant PR4, Task 4): the ASYM qConfig record gets the SAME
+ * numGroups/groupSize-prefixed, reallocate-on-mismatch treatment the v4 SYM
+ * record (and PR2/Task 5's relax) already gave SYM, PLUS a second per-group
+ * array -- `u16 zeroPoints[numGroups]` (LE) after `f32 scales[numGroups]` --
+ * both reallocated together whenever the file's numGroups differs from the
+ * skeleton's own. No migration path from v4: that record's ASYM value
+ * decoded WRONG under the code-domain grid by design of the interim bridge,
+ * so a v4 file (including ones this branch's own Tasks 1-3 produced) now
+ * fails cleanly at the version check below -- consistent with the v1->v4
+ * no-back-compat-shim policy. See Serialize.c's v5 comment for the
+ * BFP-coordination note. */
 #define SERIALIZE_MAGIC "ODTS"
-#define SERIALIZE_FORMAT_VERSION 4u
+#define SERIALIZE_FORMAT_VERSION 5u
 
 void deserializeTensor(tensor_t *tensor, FILE *f) {
     /* #316: capture the skeleton's expected payload size BEFORE the shape /
@@ -193,8 +206,14 @@ static void deserializeKernel(kernel_t *kernel, FILE *f) {
  * a heap overflow; on a 64-bit host the multiply does not wrap, but a
  * multi-gigabyte request makes reserveMemory's calloc return NULL, and nothing
  * downstream expects that. The cap bounds the allocation at 256 KiB and rules
- * out both. */
-#define SERIAL_MAX_SYM_GROUPS 65536u
+ * out both.
+ * group-quant PR4 (Task 4): renamed from SERIAL_MAX_SYM_GROUPS -- the v5
+ * ASYM arm below reuses this exact cap for its own untrusted fileNumGroups
+ * (same rationale, same value; ASYM's second array (zeroPoints, u16) is even
+ * smaller per-group than SYM's, so the 256 KiB sizing headroom above is
+ * conservative for it too). Keep PpcaReplaySerialize.c's PPCA_MAX_QCONFIG_GROUPS
+ * literal equal to this by hand (see that file's lockstep comment). */
+#define SERIAL_MAX_QCONFIG_GROUPS 65536u
 
 static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElements) {
     switch (q->type) {
@@ -225,13 +244,13 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
          * symQC->scales at all. Zero is never valid (numGroups==1 is the
          * per-tensor floor; the sentinel check below would catch it too, but
          * only after a pointless free+realloc(0) round trip), and
-         * SERIAL_MAX_SYM_GROUPS forecloses the size_t-wrap-on-32-bit /
+         * SERIAL_MAX_QCONFIG_GROUPS forecloses the size_t-wrap-on-32-bit /
          * NULL-calloc-on-64-bit pair a multi-GB value would otherwise invite
          * (see the macro's own comment above). */
-        if (fileNumGroups == 0 || fileNumGroups > SERIAL_MAX_SYM_GROUPS) {
+        if (fileNumGroups == 0 || fileNumGroups > SERIAL_MAX_QCONFIG_GROUPS) {
             PRINT_ERROR("deserializeQConfig: SYM file numGroups %zu is zero or exceeds the "
                         "%u-group sanity cap",
-                        fileNumGroups, (unsigned)SERIAL_MAX_SYM_GROUPS);
+                        fileNumGroups, (unsigned)SERIAL_MAX_QCONFIG_GROUPS);
             exit(1);
         }
         /* Whenever a live tensor backs this config (numberOfElements != 0 --
@@ -242,7 +261,7 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
          * (divisibility) uncomplicated by an out-of-range numGroups it would
          * otherwise have to multiply against. numberOfElements == 0 (the
          * layer outputQ/propLossQ wire-config call sites) has no tensor to
-         * bound against -- SERIAL_MAX_SYM_GROUPS above is the only guard
+         * bound against -- SERIAL_MAX_QCONFIG_GROUPS above is the only guard
          * there, and is sized generously enough to cover it alone. */
         if (numberOfElements != 0 && fileNumGroups > numberOfElements) {
             PRINT_ERROR("deserializeQConfig: SYM file numGroups %zu exceeds the %zu-element "
@@ -291,31 +310,81 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
     }
     case ASYM: {
         asymQConfig_t *asymQC = q->qConfig;
-        /* Group-quant PR4 Task 1 INTRA-BRANCH BRIDGE (see Serialize.c's ASYM
-         * arm): v4 record shape kept, values are the NEW code-domain
-         * semantics through the OLD slots. A genuinely-old (pre-PR4) v4
-         * file's value-domain zp decodes wrong here BY DESIGN of the interim
-         * state -- Task 4's v5 bump adds the version reject. The skeleton
-         * must be per-tensor (a v4 ASYM record has no group data to fill a
-         * grouped skeleton's arrays from). */
-        if (asymQC->numGroups != 1) {
-            PRINT_ERROR("deserializeQConfig: v4 ASYM record cannot fill a grouped skeleton "
-                        "(numGroups=%zu) -- grouped ASYM wire format lands with v5 (PR4 Task 4)",
-                        asymQC->numGroups);
+        /* v5 (group-quant PR4, Task 4): the ASYM twin of the SYM arm above --
+         * same caps-before-allocation discipline, same reallocate-on-mismatch
+         * relax, PLUS a second array (zeroPoints) reallocated in lockstep
+         * with scales. Replaces Task 1's v4 bridge (which rejected any
+         * grouped skeleton outright) entirely. */
+        size_t fileNumGroups = (size_t)serialReadU32LE(f);
+        /* Untrusted wire input about to size TWO allocations -- bound it
+         * BEFORE touching asymQC's arrays at all (mirrors the SYM arm's
+         * Task-5 review fix). */
+        if (fileNumGroups == 0 || fileNumGroups > SERIAL_MAX_QCONFIG_GROUPS) {
+            PRINT_ERROR("deserializeQConfig: ASYM file numGroups %zu is zero or exceeds the "
+                        "%u-group sanity cap",
+                        fileNumGroups, (unsigned)SERIAL_MAX_QCONFIG_GROUPS);
             exit(1);
         }
-        asymQC->scales[0] = serialReadF32LE(f);
+        /* Whenever a live tensor backs this config (numberOfElements != 0),
+         * a config cannot have more groups than elements; reject before the
+         * realloc, mirroring the SYM arm's identical guard. */
+        if (numberOfElements != 0 && fileNumGroups > numberOfElements) {
+            PRINT_ERROR("deserializeQConfig: ASYM file numGroups %zu exceeds the %zu-element "
+                        "tensor it attaches to",
+                        fileNumGroups, numberOfElements);
+            exit(1);
+        }
+        if (fileNumGroups != asymQC->numGroups) {
+            /* Both arrays are reallocated together -- a mismatch always
+             * resizes the whole config, never just one array (the mutation
+             * this guards against: sizing only scales[] leaves zeroPoints[]
+             * stale, an ASan-visible heap-buffer-overflow the moment the
+             * zeroPoints loop below writes past it). */
+            freeReservedMemory(asymQC->scales);
+            freeReservedMemory(asymQC->zeroPoints);
+            asymQC->scales = reserveMemory(fileNumGroups * sizeof(float));
+            asymQC->zeroPoints = reserveMemory(fileNumGroups * sizeof(uint16_t));
+            asymQC->numGroups = fileNumGroups;
+        }
+        size_t fileGroupSize = (size_t)serialReadU32LE(f);
+        /* Sentinel invariant (Quantization.h): numGroups == 1 <=> groupSize
+         * == 0. Checked on the FILE values, mirroring the SYM arm. */
+        if ((fileNumGroups == 1) != (fileGroupSize == 0)) {
+            PRINT_ERROR("deserializeQConfig: ASYM file violates the numGroups==1<=>groupSize==0 "
+                        "sentinel invariant (numGroups=%zu, groupSize=%zu)",
+                        fileNumGroups, fileGroupSize);
+            exit(1);
+        }
+        asymQC->groupSize = fileGroupSize;
+        /* scales THEN zeroPoints, matching Serialize.c's write order exactly
+         * (the mutation this order guards against: swapping the two loops
+         * decodes every scale as a zeroPoint's bit pattern and vice versa --
+         * an immediate golden-bytes and round-trip failure, never a silent
+         * pass). */
+        for (size_t g = 0; g < fileNumGroups; g++) {
+            asymQC->scales[g] = serialReadF32LE(f);
+        }
+        for (size_t g = 0; g < fileNumGroups; g++) {
+            asymQC->zeroPoints[g] = serialReadU16LE(f);
+        }
         uint8_t fileQBits = serialReadU8(f);
         if (fileQBits == 0 || fileQBits > 16) {
             /* D6: uint16 code-domain zp requires qBits <= 16; a wider record
-             * is corrupt or written by an incompatible (pre-PR4) build. */
+             * is corrupt or written by an incompatible/future build. Checked
+             * unconditionally (independent of numberOfElements) since it
+             * does not depend on a live tensor's element count -- same
+             * immediacy as the pre-v5 bridge's inline check. */
             PRINT_ERROR("deserializeQConfig: ASYM file qBits %u outside [1, 16] (D6)",
                         (unsigned)fileQBits);
             exit(1);
         }
         asymQC->qBits = fileQBits;
         asymQC->roundingMode = (roundingMode_t)serialReadU8(f);
-        asymQC->zeroPoints[0] = (uint16_t)clampInt32(serialReadI32LE(f), 0, 65535);
+        /* numberOfElements == 0 marks ONLY the layer outputQ/propLossQ
+         * wire-config call sites (mirrors the SYM arm's identical note). */
+        if (numberOfElements != 0) {
+            validateAsymQConfigShape(asymQC, numberOfElements);
+        }
         break;
     }
     default:
@@ -380,20 +449,16 @@ static void skipSerializedTensor(FILE *f) {
      * corrupt/malformed grouped grad record from the divisibility check a
      * live tensor's qConfig would get. */
     symQConfig_t symScratch = {0};
-    /* asymScratch (group-quant PR4): unlike symScratch, the ASYM arm of
-     * deserializeQConfig never frees/reallocates its arrays (the v4 ASYM
-     * record is per-tensor and fills element 0 in place), so STACK backing
-     * arrays are safe here -- the whole scratch is discarded at exit and
-     * nothing ever calls free on them. Revisit when Task 4's v5 grouped
-     * ASYM record makes the read path reallocate, symScratch-style. */
-    float asymScratchScale[1] = {1.f};
-    uint16_t asymScratchZp[1] = {0};
-    asymQConfig_t asymScratch = {.scales = asymScratchScale,
-                                 .zeroPoints = asymScratchZp,
-                                 .numGroups = 1,
-                                 .groupSize = 0,
-                                 .qBits = 8,
-                                 .roundingMode = HALF_AWAY};
+    /* asymScratch (group-quant PR4, Task 4): now the ASYM twin of symScratch
+     * above -- the v5 ASYM arm of deserializeQConfig unconditionally
+     * freeReservedMemory()s BOTH of asymScratch's current arrays before
+     * reserveMemory()ing differently-sized ones whenever the file's
+     * numGroups differs from the qConfig's own, exactly the SYM contract. A
+     * stack-backed initial array would make that free() undefined behavior
+     * (the same SIGABRT hazard symScratch's comment documents). Freed
+     * unconditionally below regardless of whether a reallocation actually
+     * happened, mirroring symScratch's disposal. */
+    asymQConfig_t asymScratch = {0};
     switch (scratchQ.type) {
     case INT32:
     case FLOAT32:
@@ -409,6 +474,12 @@ static void skipSerializedTensor(FILE *f) {
         scratchQ.qConfig = &symScratch;
         break;
     case ASYM:
+        asymScratch.scales = reserveMemory(sizeof(float));
+        asymScratch.zeroPoints = reserveMemory(sizeof(uint16_t));
+        asymScratch.numGroups = 1;
+        asymScratch.groupSize = 0;
+        asymScratch.qBits = 8;
+        asymScratch.roundingMode = HALF_AWAY;
         scratchQ.qConfig = &asymScratch;
         break;
     default:
@@ -418,6 +489,15 @@ static void skipSerializedTensor(FILE *f) {
     deserializeQConfig(&scratchQ, f, numberOfElements);
     if (scratchQ.type == SYM) {
         freeReservedMemory(symScratch.scales);
+    }
+    if (scratchQ.type == ASYM) {
+        /* Task 4 mutation guard: dropping either free here leaks the
+         * reallocated array whenever a grouped grad's numGroups differs from
+         * this scratch's initial 1 -- LSan/ASan-visible (see the report's
+         * mutation transcript), never a functional test failure on its own
+         * since the scratch is discarded either way. */
+        freeReservedMemory(asymScratch.scales);
+        freeReservedMemory(asymScratch.zeroPoints);
     }
 
     size_t payloadBytes = calcNumberOfBytesForData(&scratchQ, numberOfElements);

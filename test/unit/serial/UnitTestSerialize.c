@@ -1724,17 +1724,19 @@ static void testGoldenBytesTensorFloat32V2(void) {
     TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, got, sizeof(expected));
 }
 
-/*! GOLDEN BYTES (#370/#380, wire format v4): full-model header (magic +
- *  version 4 + layerCount, all u32 LE) plus a RELU record whose
- *  outputQ/propLossQ pin the SYM_INT32 and ASYM qConfig payload encodings —
- *  ASYM zeroPoint stays i32 LE on the wire; since group-quant PR4 the value
- *  in that slot is the code-domain uint16 zp (D6), bridged until Task 4's
- *  v5 record. SYM_INT32/ASYM records are unchanged by the group-quant v4 bump
- *  (only the SYM record grew numGroups/groupSize — see
- *  testGoldenBytesModelReluSymOutputV4). RELU carries no parameters, so the
+/*! GOLDEN BYTES (#370/#380, wire format v5): full-model header (magic +
+ *  version 5 + layerCount, all u32 LE) plus a RELU record whose
+ *  outputQ/propLossQ pin the SYM_INT32 and ASYM qConfig payload encodings.
+ *  SYM_INT32 is untouched by group-quant. ASYM (group-quant PR4, Task 4) now
+ *  carries the full v5 record: `u32 numGroups`, `u32 groupSize`,
+ *  `f32 scales[numGroups]`, `u16 zeroPoints[numGroups]` (LE), THEN the
+ *  pre-existing `u8 qBits`/`u8 rounding` tail — replacing Task 1's v4 bridge
+ *  (f32 scale, u8 qBits, u8 rounding, i32 zeroPoint). This is the minimal
+ *  numGroups=1 case; see testGoldenBytesModelReluAsymGroupedPropLossV5 below
+ *  for the numGroups>1 golden. RELU carries no parameters, so the
  *  v3-introduced grad-presence byte does not appear in this record (see
- *  testGoldenBytesModelLinearFrozenV4 for that). */
-static void testGoldenBytesModelReluV4(void) {
+ *  testGoldenBytesModelLinearFrozenV5 for that). */
+static void testGoldenBytesModelReluV5(void) {
     quantization_t *floatQ = quantizationInitFloat();
     quantization_t *symIntOutputQ = quantizationInitSymInt32WithBits(SR_HALF_AWAY, 12);
     quantization_t *asymPropLossQ = quantizationInitAsym(8, HALF_AWAY);
@@ -1749,9 +1751,8 @@ static void testGoldenBytesModelReluV4(void) {
     symInt32QConfig_t *outputCfg = cfg->outputQ->qConfig;
     outputCfg->scale = 0.5f;
     asymQConfig_t *propLossCfg = cfg->propLossQ->qConfig;
-    /* code-domain re-pin (group-quant PR4, D6): the in-memory zp is now a
-     * uint16 CODE-domain value; +3 replaces the old value-domain -3 (the
-     * wire slot stays i32 LE until Task 4's v5 record). */
+    /* code-domain re-pin (group-quant PR4, D6): the in-memory zp is a
+     * uint16 CODE-domain value; +3 replaces the old value-domain -3. */
     propLossCfg->scales[0] = 0.25f;
     propLossCfg->zeroPoints[0] = 3;
 
@@ -1766,16 +1767,17 @@ static void testGoldenBytesModelReluV4(void) {
 
     static const uint8_t expected[] = {
         /* magic */ 'O', 'D', 'T', 'S',
-        /* version u32 LE */ 0x04, 0x00, 0x00, 0x00,
+        /* version u32 LE */ 0x05, 0x00, 0x00, 0x00,
         /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
         /* tag RELU */ 0x01,
         /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
         /* propLossMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
         /* outputQ: SYM_INT32, scale 0.5f f32 LE, SR_HALF_AWAY, qMaxBits 12 */
         0x02, 0x00, 0x00, 0x00, 0x3F, 0x01, 0x0C,
-        /* propLossQ: ASYM, scale 0.25f f32 LE, qBits 8, HALF_AWAY, zeroPoint +3
-         * i32 LE (PR4 code-domain value through the unchanged v4 slot) */
-        0x04, 0x00, 0x00, 0x80, 0x3E, 0x08, 0x00, 0x03, 0x00, 0x00, 0x00};
+        /* propLossQ: ASYM, numGroups 1 u32 LE, groupSize 0 u32 LE, scales[0]
+         * 0.25f f32 LE, zeroPoints[0] 3 u16 LE, qBits 8, HALF_AWAY */
+        0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x3E, 0x03, 0x00,
+        0x08, 0x00};
 
     uint8_t got[sizeof(expected) + 8] = {0};
     f = fopen(FILE_PATH, "rb");
@@ -1786,20 +1788,77 @@ static void testGoldenBytesModelReluV4(void) {
     TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, got, sizeof(expected));
 }
 
-/*! GOLDEN BYTES (group-quant PR1, wire format v4, spec
- *  docs/superpowers/specs/2026-07-28-group-quantization-design.md §6): the
- *  SYM qConfig record itself — `u32 numGroups`, `u32 groupSize`, then
+/*! GOLDEN BYTES (group-quant PR4, Task 4, wire format v5): the numGroups>1
+ *  sibling of testGoldenBytesModelReluV5 above -- pins that a GROUPED ASYM
+ *  record (numGroups=2, groupSize=3) serializes with every group's scale
+ *  AND zeroPoint in order (scales[] array fully, THEN zeroPoints[] array
+ *  fully -- not interleaved), not just element 0. Mirrors
+ *  testGoldenBytesModelReluSymGroupedOutputV5's role for SYM. zeroPoints are
+ *  chosen non-trivial and byte-order-sensitive (3 and 0x1234) so an
+ *  endianness or field-order bug in the u16 write is caught byte-exact. */
+static void testGoldenBytesModelReluAsymGroupedPropLossV5(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *asymGroupedPropLossQ = quantizationInitAsymGrouped(8, HALF_AWAY, 2, 3);
+
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    lq.propLossQ = asymGroupedPropLossQ;
+
+    layer_t *layer = reluLayerInitOwning(&lq);
+    reluConfig_t *cfg = layer->config->relu;
+    asymQConfig_t *propLossCfg = cfg->propLossQ->qConfig;
+    propLossCfg->scales[0] = 0.5f;
+    propLossCfg->scales[1] = 0.25f;
+    propLossCfg->zeroPoints[0] = 3;
+    propLossCfg->zeroPoints[1] = 0x1234;
+
+    layer_t *model[] = {layer};
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(model, 1, f);
+    fclose(f);
+    freeReluLayer(layer);
+    freeQuantization(asymGroupedPropLossQ);
+    freeQuantization(floatQ);
+
+    static const uint8_t expected[] = {/* magic */ 'O', 'D', 'T', 'S',
+                                       /* version u32 LE */ 0x05, 0x00, 0x00, 0x00,
+                                       /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
+                                       /* tag RELU */ 0x01,
+                                       /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
+                                       /* propLossMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
+                                       /* outputQ FLOAT32 */ 0x01,
+                                       /* propLossQ: ASYM, numGroups 2 u32 LE, groupSize 3 u32 LE,
+                                        * scales[0] 0.5f / scales[1] 0.25f f32 LE,
+                                        * zeroPoints[0] 3 / zeroPoints[1] 0x1234 u16 LE,
+                                        * qBits 8, HALF_AWAY */
+                                       0x04, 0x02, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
+                                       0x00, 0x00, 0x3F, 0x00, 0x00, 0x80, 0x3E, 0x03, 0x00, 0x34,
+                                       0x12, 0x08, 0x00};
+
+    uint8_t got[sizeof(expected) + 8] = {0};
+    f = fopen(FILE_PATH, "rb");
+    size_t fileBytes = fread(got, 1, sizeof(got), f);
+    fclose(f);
+
+    TEST_ASSERT_EQUAL_size_t(sizeof(expected), fileBytes);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, got, sizeof(expected));
+}
+
+/*! GOLDEN BYTES (group-quant PR1, wire format v5 -- record layout unchanged
+ *  since v4, only the header version byte bumped by Task 4's ASYM re-layout,
+ *  spec docs/superpowers/specs/2026-07-28-group-quantization-design.md §6):
+ *  the SYM qConfig record itself — `u32 numGroups`, `u32 groupSize`, then
  *  `f32 scales[numGroups]`, THEN the pre-existing `u8 qBits`/`u8 rounding`
  *  tail (unchanged order/width from v3). PR1 is always numGroups=1,
  *  groupSize=0 (the "whole tensor" sentinel — Quantization.h), so this pins
- *  the minimal one-scale case; see testGoldenBytesModelReluSymGroupedOutputV4
+ *  the minimal one-scale case; see testGoldenBytesModelReluSymGroupedOutputV5
  *  below for the numGroups>1 golden (group-quant PR2, Task 5). propLossQ
  *  (FLOAT32, a single 0x01 tag byte) sits immediately after the SYM record,
  *  so its offset is the drift alarm for the record's new +8-byte width
  *  (numGroups u32 + groupSize u32) versus the old v3 layout.
  *  Mutation guard: swapping the numGroups/groupSize write order in
  *  Serialize.c's SYM arm flips bytes 18-25 below and fails this pin. */
-static void testGoldenBytesModelReluSymOutputV4(void) {
+static void testGoldenBytesModelReluSymOutputV5(void) {
     quantization_t *floatQ = quantizationInitFloat();
     quantization_t *symOutputQ = quantizationInitSym(6, HALF_AWAY);
 
@@ -1821,7 +1880,7 @@ static void testGoldenBytesModelReluSymOutputV4(void) {
     freeQuantization(floatQ);
 
     static const uint8_t expected[] = {/* magic */ 'O', 'D', 'T', 'S',
-                                       /* version u32 LE */ 0x04, 0x00, 0x00, 0x00,
+                                       /* version u32 LE */ 0x05, 0x00, 0x00, 0x00,
                                        /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
                                        /* tag RELU */ 0x01,
                                        /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
@@ -1841,14 +1900,15 @@ static void testGoldenBytesModelReluSymOutputV4(void) {
     TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, got, sizeof(expected));
 }
 
-/*! GOLDEN BYTES (group-quant PR2, Task 5): the numGroups>1 sibling of
- *  testGoldenBytesModelReluSymOutputV4 above -- pins that a GROUPED SYM
+/*! GOLDEN BYTES (group-quant PR2, Task 5, wire format v5 -- record layout
+ *  unchanged since v4): the numGroups>1 sibling of
+ *  testGoldenBytesModelReluSymOutputV5 above -- pins that a GROUPED SYM
  *  record (numGroups=2, groupSize=3) serializes with every group's scale in
  *  order, not just scales[0]. Serialize.c's SYM arm needed no changes for
  *  this (group-general since PR1 — it already loops `symQC->numGroups`
  *  writes); this golden is the writer-side regression net Task 5 owes per
  *  the comment above. */
-static void testGoldenBytesModelReluSymGroupedOutputV4(void) {
+static void testGoldenBytesModelReluSymGroupedOutputV5(void) {
     quantization_t *floatQ = quantizationInitFloat();
     quantization_t *symGroupedOutputQ = quantizationInitSymGrouped(6, HALF_AWAY, 2, 3);
 
@@ -1871,7 +1931,7 @@ static void testGoldenBytesModelReluSymGroupedOutputV4(void) {
     freeQuantization(floatQ);
 
     static const uint8_t expected[] = {/* magic */ 'O', 'D', 'T', 'S',
-                                       /* version u32 LE */ 0x04, 0x00, 0x00, 0x00,
+                                       /* version u32 LE */ 0x05, 0x00, 0x00, 0x00,
                                        /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
                                        /* tag RELU */ 0x01,
                                        /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
@@ -1892,12 +1952,13 @@ static void testGoldenBytesModelReluSymGroupedOutputV4(void) {
     TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, got, sizeof(expected));
 }
 
-/*! GOLDEN BYTES (#370/#380, wire format v4): MAXPOOL1D record pinning the
+/*! GOLDEN BYTES (#370/#380, wire format v5): MAXPOOL1D record pinning the
  *  kernel geometry encoding (size/stride/dilation/padding as u32 LE +
  *  paddingType u8) — the fields that were raw host size_t in v1. MAXPOOL1D
  *  carries no parameters, so (like RELU above) no grad-presence byte appears
- *  in this record. */
-static void testGoldenBytesModelMaxPool1dV4(void) {
+ *  in this record. FLOAT32-only (no SYM/ASYM qConfig), so only the header
+ *  version byte changes for Task 4's v5 bump. */
+static void testGoldenBytesModelMaxPool1dV5(void) {
     quantization_t *floatQ = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, floatQ);
@@ -1912,11 +1973,11 @@ static void testGoldenBytesModelMaxPool1dV4(void) {
     freeMaxPool1dLayer(layer);
     freeQuantization(floatQ);
 
-    static const uint8_t expected[] = {/* magic + version 4 + layerCount 1 */ 'O',
+    static const uint8_t expected[] = {/* magic + version 5 + layerCount 1 */ 'O',
                                        'D',
                                        'T',
                                        'S',
-                                       0x04,
+                                       0x05,
                                        0x00,
                                        0x00,
                                        0x00,
@@ -1958,17 +2019,17 @@ static void testGoldenBytesModelMaxPool1dV4(void) {
     TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, got, sizeof(expected));
 }
 
-/*! GOLDEN BYTES (#380, wire format v4): a FROZEN Linear layer's weight AND
+/*! GOLDEN BYTES (#380, wire format v5): a FROZEN Linear layer's weight AND
  *  bias parameter records each lead with a hasGrad=0x00 presence byte
  *  followed directly by the param tensor — no grad tensor on the wire at
  *  all. Pins the exact byte layout the v3-introduced grad-presence byte
  *  introduces (the counterpart to the trainable case, which round-trips a
  *  hasGrad=0x01 byte followed by param THEN grad in testRoundTripLinear).
- *  Both weight and bias here are FLOAT32, so the group-quant v4 SYM record
- *  bump does not touch this record's bytes beyond the header version.
- *  Values are overwritten post-construction (random Kaiming init is not
- *  pin-stable). */
-static void testGoldenBytesModelLinearFrozenV4(void) {
+ *  Both weight and bias here are FLOAT32, so neither the group-quant v4 SYM
+ *  bump nor Task 4's v5 ASYM bump touches this record's bytes beyond the
+ *  header version. Values are overwritten post-construction (random Kaiming
+ *  init is not pin-stable). */
+static void testGoldenBytesModelLinearFrozenV5(void) {
     quantization_t *floatQ = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, floatQ);
@@ -1991,7 +2052,7 @@ static void testGoldenBytesModelLinearFrozenV4(void) {
                                        'D',
                                        'T',
                                        'S',
-                                       /* version u32 LE */ 0x04,
+                                       /* version u32 LE */ 0x05,
                                        0x00,
                                        0x00,
                                        0x00,
@@ -2376,11 +2437,12 @@ int main(void) {
     RUN_TEST(testSerializeTensorSymSubByteRoundTripsPackedData);
     RUN_TEST(testSerializeTensorBoolRoundTripsPackedData);
     RUN_TEST(testGoldenBytesTensorFloat32V2);
-    RUN_TEST(testGoldenBytesModelReluV4);
-    RUN_TEST(testGoldenBytesModelReluSymOutputV4);
-    RUN_TEST(testGoldenBytesModelReluSymGroupedOutputV4);
-    RUN_TEST(testGoldenBytesModelMaxPool1dV4);
-    RUN_TEST(testGoldenBytesModelLinearFrozenV4);
+    RUN_TEST(testGoldenBytesModelReluV5);
+    RUN_TEST(testGoldenBytesModelReluAsymGroupedPropLossV5);
+    RUN_TEST(testGoldenBytesModelReluSymOutputV5);
+    RUN_TEST(testGoldenBytesModelReluSymGroupedOutputV5);
+    RUN_TEST(testGoldenBytesModelMaxPool1dV5);
+    RUN_TEST(testGoldenBytesModelLinearFrozenV5);
     RUN_TEST(testSerializeFailsFastOnUnwritableStream);
 #if SIZE_MAX > UINT32_MAX
     RUN_TEST(testSerializeFailsFastOnDimensionBeyondU32);

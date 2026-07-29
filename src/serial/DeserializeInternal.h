@@ -59,12 +59,14 @@ static void deserializeKernel(kernel_t *kernel, FILE *f);
  *
  *  Task-5 review fix (Critical): the file's numGroups is untrusted wire
  *  input read directly into an allocation size (fileNumGroups *
- *  sizeof(float)) BEFORE any of the above -- SERIAL_MAX_SYM_GROUPS (see the
- *  .c file) rejects it outright before the realloc runs, and whenever
+ *  sizeof(float)) BEFORE any of the above -- SERIAL_MAX_QCONFIG_GROUPS (see
+ *  the .c file) rejects it outright before the realloc runs, and whenever
  *  numberOfElements != 0 it is additionally rejected if it already exceeds
  *  the element count (a config cannot have more groups than elements).
- *  SERIAL_MAX_SYM_GROUPS alone protects the numberOfElements == 0 call
- *  sites, where the elements-bound guard cannot apply.
+ *  SERIAL_MAX_QCONFIG_GROUPS alone protects the numberOfElements == 0 call
+ *  sites, where the elements-bound guard cannot apply. The ASYM arm
+ *  (group-quant PR4, Task 4) applies the identical discipline to its own
+ *  numGroups, reallocating BOTH its scales[] and zeroPoints[] arrays.
  *
  * \param q: Pointer to quantization to deserialize into
  * \param f: Pointer of file to deserialize from

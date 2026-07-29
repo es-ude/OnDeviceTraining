@@ -14,6 +14,8 @@
 
 static void packFloatBufferAsSym(const float *values, size_t n, symQConfig_t *outQC, uint8_t *dst,
                                  const char *what);
+static void packFloatBufferAsBfp(const float *values, size_t n, bfpQConfig_t *outQC, uint8_t *dst,
+                                 const char *what);
 static void quantizeFloatToAsym(const float *values, size_t n, asymQConfig_t *outQC, uint8_t *dst);
 
 _Static_assert(ODT_CONVERSION_CHUNK_ELEMS % 8 == 0,
@@ -173,6 +175,19 @@ void dequantChunkToFloat(const tensor_t *src, size_t elemOffset, size_t count, f
         unpackZeroExtendChunk(src->data, qc->qBits, elemOffset, count, codes);
         for (size_t i = 0; i < count; i++) {
             out[i] = (float)(codes[i] - zp) * scale;
+        }
+        return;
+    }
+    case BFP: {
+        /* Grouped-capable by construction (per-element group lookup) -- unlike
+         * the grouped-SYM deny above, whose only callers are per-tensor grad
+         * paths. */
+        bfpQConfig_t *qc = src->quantization->qConfig;
+        int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
+        unpackSignExtendChunk(src->data, qc->mantissaBits, elemOffset, count, mant);
+        for (size_t i = 0; i < count; i++) {
+            out[i] = (float)mant[i] *
+                     bfpGroupScale(qc, qc->groupSize == 0 ? 0 : (elemOffset + i) / qc->groupSize);
         }
         return;
     }
@@ -938,6 +953,85 @@ static void packFloatBufferAsSym(const float *values, size_t n, symQConfig_t *ou
     }
 }
 
+/* Smallest E with absMax / 2^E <= qMax, derived via frexpf so exact powers of
+ * two land on the boundary with no log2f rounding surprises: frexpf returns
+ * ratio = frac * 2^e with frac in [0.5, 1), so ceil(log2(ratio)) is e except
+ * when ratio is itself a power of two (frac == 0.5), where it is e - 1. The
+ * stored-range clamp IS the D6 saturation: stored > max -> the emit pass
+ * clamps mantissas to +-qMax (high regime); stored < 0 -> quotients round to
+ * 0 (flush-toward-zero regime). */
+static void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint8_t maxStored,
+                                    uint8_t *storedOut) {
+    if (absMax == 0.f) {
+        *storedOut = (uint8_t)bias; /* zero-state parity: E = 0 */
+        return;
+    }
+    int e;
+    float frac = frexpf(absMax / qMax, &e);
+    int E = (frac == 0.5f) ? e - 1 : e; /* smallest E with absMax/2^E <= qMax */
+    int stored = E + (int)bias;
+    if (stored < 0) {
+        stored = 0; /* D6: flush-toward-zero regime */
+    }
+    if (stored > (int)maxStored) {
+        stored = (int)maxStored; /* D6: mantissa-saturation regime */
+    }
+    *storedOut = (uint8_t)stored;
+}
+
+static void packFloatBufferAsBfp(const float *values, size_t n, bfpQConfig_t *outQC, uint8_t *dst,
+                                 const char *what) {
+    const float qMax = powf(2, (float)outQC->mantissaBits - 1) - 1;
+    const float qMin = -powf(2, (float)outQC->mantissaBits - 1);
+    const int32_t bias = bfpExponentBias(outQC);
+    const uint8_t maxStored = (uint8_t)((1u << outQC->exponentBits) - 1u);
+    const size_t gsz = outQC->groupSize == 0 ? n : outQC->groupSize;
+    /* pass 1: sequential groups (contiguous runs), running absmax scalar */
+    for (size_t g = 0; g < outQC->numGroups; g++) {
+        float absMax = 0.f;
+        size_t start = g * gsz;
+        size_t end = start + gsz > n ? n : start + gsz;
+        for (size_t i = start; i < end; i++) {
+            float v = fabsf(values[i]);
+            if (v > absMax) {
+                absMax = v;
+            }
+        }
+        deriveBfpStoredExponent(absMax, qMax, bias, maxStored, &outQC->exponents[g]);
+    }
+    /* pass 2: chunked quantize + pack; saturation via clamp BEFORE the guard
+     * (value-domain quantization saturates by design -- D6; raw code packing
+     * elsewhere keeps the #227 abort) */
+    int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
+    for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+        for (size_t i = 0; i < count; i++) {
+            size_t g = outQC->groupSize == 0 ? 0 : (off + i) / outQC->groupSize;
+            float scale = bfpGroupScale(outQC, g);
+            codes[i] = clampInt32(roundByMode(values[off + i] / scale, outQC->roundingMode),
+                                  (int32_t)qMin, (int32_t)qMax);
+        }
+        packChunkGuarded(codes, count, dst, outQC->mantissaBits, off, what);
+    }
+}
+
+void convertFloatTensorToBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor) {
+    size_t n = calcNumberOfElementsByTensor(inputTensor);
+    packFloatBufferAsBfp((float *)inputTensor->data, n, outputTensor->quantization->qConfig,
+                         outputTensor->data, "convertFloatTensorToBfpTensor");
+}
+
+void convertBfpTensorToFloat32Tensor(tensor_t *inputTensor, tensor_t *outputTensor) {
+    size_t n = calcNumberOfElementsByTensor(inputTensor);
+    float *out = (float *)outputTensor->data;
+    float buf[ODT_CONVERSION_CHUNK_ELEMS];
+    for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+        dequantChunkToFloat(inputTensor, off, count, buf);
+        memcpy(out + off, buf, count * sizeof(float));
+    }
+}
+
 void convertSymInt32TensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTensor) {
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     symInt32QConfig_t *inQC = inputTensor->quantization->qConfig;
@@ -1327,7 +1421,7 @@ conversionFunction_t conversionMatrix[7][7] = {
                  [SYM] = convertFloatTensorToSymTensor,
                  [ASYM] = convertFloatTensorToAsymTensor,
                  [BOOL] = unsupportedConversionTypes,
-                 [BFP] = unsupportedConversionTypes},
+                 [BFP] = convertFloatTensorToBfpTensor},
     [SYM_INT32] = {[INT32] = extractInt32TensorFromSymInt32Tensor,
                    [FLOAT32] = convertSymInt32TensorToFloat32Tensor,
                    [SYM_INT32] = requantSymInt32Tensor,
@@ -1357,7 +1451,7 @@ conversionFunction_t conversionMatrix[7][7] = {
               [BOOL] = NULL,
               [BFP] = unsupportedConversionTypes},
     [BFP] = {[INT32] = unsupportedConversionTypes,
-             [FLOAT32] = unsupportedConversionTypes,
+             [FLOAT32] = convertBfpTensorToFloat32Tensor,
              [SYM_INT32] = unsupportedConversionTypes,
              [SYM] = unsupportedConversionTypes,
              [ASYM] = unsupportedConversionTypes,

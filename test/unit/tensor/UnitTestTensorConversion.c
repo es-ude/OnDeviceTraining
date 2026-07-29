@@ -5231,6 +5231,242 @@ void testBfpToAsymGroupedTargetDenies(void) {
     ASSERT_EXITS_WITH_FAILURE(convertTensor(&src, &dst));
 }
 
+void testSameTypeBfpConvertCopiesWhenIdentical(void) {
+    /* BFP(grouped {2,2}) -> BFP(identical config) same-type copy via
+     * convertTensor: verbatim packed-byte copy + exponent VALUE copy into the
+     * dest's OWN backing array (never the pointer -- the SYM scales-copy
+     * precedent, testSameTypeSymCopyCarriesGroupArrays). */
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t goldMant[4] = {3, -1, 7, -2};
+    uint8_t inExponents[2] = {127, 129};
+    bfpQConfig_t inQC = {.exponents = inExponents,
+                         .numGroups = 2,
+                         .groupSize = 2,
+                         .roundingMode = HALF_AWAY,
+                         .mantissaBits = 4,
+                         .exponentBits = 8};
+    quantization_t inQ;
+    initBfpQuantization(&inQC, &inQ);
+    uint8_t inData[calcNumberOfBytesForData(&inQ, n)];
+    byteConversion((uint8_t *)goldMant, 32, inData, 4, n);
+    tensor_t src;
+    setTensorValues(&src, inData, &shape, &inQ, NULL);
+
+    uint8_t outExponents[2] = {9, 9}; /* sentinels != expected {127, 129} */
+    bfpQConfig_t outQC = {.exponents = outExponents,
+                          .numGroups = 2,
+                          .groupSize = 2,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t outQ;
+    initBfpQuantization(&outQC, &outQ);
+    uint8_t outData[calcNumberOfBytesForData(&outQ, n)];
+    memset(outData, 0xFF, sizeof(outData)); /* sentinel != src bytes */
+    tensor_t dst;
+    setTensorValues(&dst, outData, &shape, &outQ, NULL);
+
+    convertTensor(&src, &dst);
+
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(inData, outData, calcNumberOfBytesForData(&inQ, n));
+    TEST_ASSERT_EQUAL_UINT8(127, outQC.exponents[0]);
+    TEST_ASSERT_EQUAL_UINT8(129, outQC.exponents[1]);
+    /* VALUES copied, pointer untouched: dest still owns its backing array. */
+    TEST_ASSERT_EQUAL_PTR(outExponents, outQC.exponents);
+    TEST_ASSERT_TRUE(outQC.exponents != inQC.exponents);
+}
+
+void testSameTypeBfpConvertRejectsGeometryMismatch(void) {
+    /* Same widths (m=4, e=8) on BOTH sides -- the bits-per-element width
+     * guard passes -- but per-tensor {1,0} vs grouped {2,2}: exponents[]
+     * indexing would silently reinterpret the copied payload. Must fail-fast;
+     * geometry changes go through conversionMatrix[BFP][BFP]. */
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    uint8_t inExponents[1] = {127};
+    bfpQConfig_t inQC = {.exponents = inExponents,
+                         .numGroups = 1,
+                         .groupSize = 0,
+                         .roundingMode = HALF_AWAY,
+                         .mantissaBits = 4,
+                         .exponentBits = 8};
+    quantization_t inQ;
+    initBfpQuantization(&inQC, &inQ);
+    uint8_t inData[calcNumberOfBytesForData(&inQ, n)];
+    memset(inData, 0, sizeof(inData));
+    tensor_t src;
+    setTensorValues(&src, inData, &shape, &inQ, NULL);
+
+    uint8_t outExponents[2] = {9, 9};
+    bfpQConfig_t outQC = {.exponents = outExponents,
+                          .numGroups = 2,
+                          .groupSize = 2,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t outQ;
+    initBfpQuantization(&outQC, &outQ);
+    uint8_t outData[calcNumberOfBytesForData(&outQ, n)];
+    tensor_t dst;
+    setTensorValues(&dst, outData, &shape, &outQ, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&src, &dst));
+}
+
+void testSameTypeBfpConvertRejectsExponentWidthMismatch(void) {
+    /* Same mantissaBits (the ONLY field the bits-per-element width guard
+     * sees) and same geometry, but e=4 vs e=8: the bias differs (7 vs 127),
+     * so a copied stored exponent silently changes the value grid by 2^-120.
+     * The four-field BFP arm must fail-fast on exponentBits too. */
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    uint8_t inExponents[1] = {7}; /* E=0 under e=4 (bias 7) */
+    bfpQConfig_t inQC = {.exponents = inExponents,
+                         .numGroups = 1,
+                         .groupSize = 0,
+                         .roundingMode = HALF_AWAY,
+                         .mantissaBits = 4,
+                         .exponentBits = 4};
+    quantization_t inQ;
+    initBfpQuantization(&inQC, &inQ);
+    uint8_t inData[calcNumberOfBytesForData(&inQ, n)];
+    memset(inData, 0, sizeof(inData));
+    tensor_t src;
+    setTensorValues(&src, inData, &shape, &inQ, NULL);
+
+    uint8_t outExponents[1] = {9};
+    bfpQConfig_t outQC = {.exponents = outExponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t outQ;
+    initBfpQuantization(&outQC, &outQ);
+    uint8_t outData[calcNumberOfBytesForData(&outQ, n)];
+    tensor_t dst;
+    setTensorValues(&dst, outData, &shape, &outQ, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&src, &dst));
+}
+
+void testRequantBfpReblocksToTargetGeometry(void) {
+    /* conversionMatrix[BFP][BFP] re-block: per-tensor m=8 source @ stored 126
+     * (E=-1, scale 0.5), mantissas {12,2,-4,0,56,-14,6,28} = values
+     * {6,1,-2,0,28,-7,3,14}. Grouped {2,4} m=4 target (qMax 7): BOTH target
+     * exponents derived independently FRESH from the source VALUES on the
+     * TARGET's geometry -- group0 absMax 6 -> 6/7 in (0.5,1) -> E=0 (stored
+     * 127, scale 1), mantissas {6,1,-2,0}; group1 absMax 28 -> 28/7 = 4 =
+     * 2^2 (frac==0.5 boundary) -> E=+2 (stored 129, scale 4), mantissas
+     * {7,-2,1,4} (-7/4=-1.75 and 14/4=3.5 HALF_AWAY). Neither 127 nor 129
+     * equals the source's 126 -- a copied exponent cannot pass. */
+    size_t n = 8;
+    size_t dims[] = {8};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t goldMant[8] = {12, 2, -4, 0, 56, -14, 6, 28};
+    uint8_t inExponents[1] = {126}; /* E=-1, scale 0.5 */
+    /* SOURCE roundingMode SR: dequant is rounding-free, so the requant must
+     * never read it -- the fractional target quotients would turn stochastic
+     * (testBfpToSymInt32FreshAbsmaxGrid precedent). */
+    bfpQConfig_t inQC = {.exponents = inExponents,
+                         .numGroups = 1,
+                         .groupSize = 0,
+                         .roundingMode = SR_HALF_AWAY,
+                         .mantissaBits = 8,
+                         .exponentBits = 8};
+    quantization_t inQ;
+    initBfpQuantization(&inQC, &inQ);
+    uint8_t inData[calcNumberOfBytesForData(&inQ, n)];
+    byteConversion((uint8_t *)goldMant, 32, inData, 8, n);
+    tensor_t src;
+    setTensorValues(&src, inData, &shape, &inQ, NULL);
+
+    uint8_t outExponents[2] = {9, 9}; /* sentinels != expected {127, 129} */
+    bfpQConfig_t outQC = {.exponents = outExponents,
+                          .numGroups = 2,
+                          .groupSize = 4,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t outQ;
+    initBfpQuantization(&outQC, &outQ);
+    uint8_t outData[calcNumberOfBytesForData(&outQ, n)];
+    tensor_t dst;
+    setTensorValues(&dst, outData, &shape, &outQ, NULL);
+
+    conversionMatrix[BFP][BFP](&src, &dst);
+
+    TEST_ASSERT_EQUAL_UINT8(127, outQC.exponents[0]);
+    TEST_ASSERT_EQUAL_UINT8(129, outQC.exponents[1]);
+    int32_t mant[8];
+    unpackSignExtend(dst.data, 4, 0, mant, 8);
+    int32_t expected[8] = {6, 1, -2, 0, 7, -2, 1, 4};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, mant, 8);
+    TEST_ASSERT_EQUAL_UINT8(126, inQC.exponents[0]); /* source untouched */
+}
+
+void testRequantBfpWidthChange(void) {
+    /* Mantissa-width change on unchanged geometry (per-tensor -> per-tensor):
+     * m=8 source @ stored 127 (E=0, scale 1), mantissas {100,-50,25,0} =
+     * values. m=4 target (qMax 7): absMax 100 -> 100/7 = 14.29 in (2^3, 2^4)
+     * -> E=+4 (stored 131, scale 16) -- the exponent GROWS to absorb the lost
+     * mantissa range, values track: {6.25->6, -3.125->-3, 1.5625->2, 0}. */
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t goldMant[4] = {100, -50, 25, 0};
+    uint8_t inExponents[1] = {127};
+    bfpQConfig_t inQC = {.exponents = inExponents,
+                         .numGroups = 1,
+                         .groupSize = 0,
+                         .roundingMode = SR_HALF_AWAY, /* never read (see re-block test) */
+                         .mantissaBits = 8,
+                         .exponentBits = 8};
+    quantization_t inQ;
+    initBfpQuantization(&inQC, &inQ);
+    uint8_t inData[calcNumberOfBytesForData(&inQ, n)];
+    byteConversion((uint8_t *)goldMant, 32, inData, 8, n);
+    tensor_t src;
+    setTensorValues(&src, inData, &shape, &inQ, NULL);
+
+    uint8_t outExponents[1] = {9}; /* sentinel != expected 131 */
+    bfpQConfig_t outQC = {.exponents = outExponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t outQ;
+    initBfpQuantization(&outQC, &outQ);
+    uint8_t outData[calcNumberOfBytesForData(&outQ, n)];
+    tensor_t dst;
+    setTensorValues(&dst, outData, &shape, &outQ, NULL);
+
+    conversionMatrix[BFP][BFP](&src, &dst);
+
+    TEST_ASSERT_EQUAL_UINT8(131, outQC.exponents[0]); /* E=+4, scale 16 */
+    int32_t mant[4];
+    unpackSignExtend(dst.data, 4, 0, mant, 4);
+    TEST_ASSERT_EQUAL_INT32(6, mant[0]);
+    TEST_ASSERT_EQUAL_INT32(-3, mant[1]);
+    TEST_ASSERT_EQUAL_INT32(2, mant[2]);
+    TEST_ASSERT_EQUAL_INT32(0, mant[3]);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -5373,6 +5609,12 @@ int main(void) {
     RUN_TEST(testAsymGroupedSourceToBfpUsesPerGroupGrids);
     RUN_TEST(testBfpToAsymUsesCanonicalGrid);
     RUN_TEST(testBfpToAsymGroupedTargetDenies);
+
+    RUN_TEST(testSameTypeBfpConvertCopiesWhenIdentical);
+    RUN_TEST(testSameTypeBfpConvertRejectsGeometryMismatch);
+    RUN_TEST(testSameTypeBfpConvertRejectsExponentWidthMismatch);
+    RUN_TEST(testRequantBfpReblocksToTargetGeometry);
+    RUN_TEST(testRequantBfpWidthChange);
 
     return UNITY_END();
 }

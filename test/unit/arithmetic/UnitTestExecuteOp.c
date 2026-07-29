@@ -1333,6 +1333,63 @@ void testExecuteConvertFloatToSymMatchesConvertTensor(void) {
     TEST_ASSERT_EQUAL_INT32_ARRAY(want, got, 3);
 }
 
+/* executeConvert BFP->BFP must route through the conversionMatrix[BFP][BFP]
+ * diagonal, exactly parallel to the SYM_INT32 test above. The fixture makes
+ * the two candidate paths unambiguous: src m=8 per-tensor vs dst m=4 grouped
+ * {2,4} -- convertTensor's same-type branch would DIE on the width guard
+ * (8 != 4 bits), and a stale-exponent copy could only yield the source's
+ * stored 126; the diagonal instead derives BOTH target exponents FRESH from
+ * the source VALUES on the TARGET's geometry (testRequantBfpReblocksToTarget-
+ * Geometry's hand-derived gold: {127, 129}, mantissas {6,1,-2,0,7,-2,1,4}).
+ * Stack fixtures (Task 2-4 idiom): initTensor-built BFP tensors would leak
+ * exponents[] through freeTensor until the owner-chain task of this epic PR
+ * adds the freeQuantization BFP arm. */
+void testExecuteConvertBfpToBfpRoutesDiagonal(void) {
+    size_t n = 8;
+    size_t dims[] = {8};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t goldMant[8] = {12, 2, -4, 0, 56, -14, 6, 28};
+    uint8_t inExponents[1] = {126}; /* E=-1, scale 0.5 -> values {6,1,-2,0,28,-7,3,14} */
+    bfpQConfig_t inQC = {.exponents = inExponents,
+                         .numGroups = 1,
+                         .groupSize = 0,
+                         .roundingMode = SR_HALF_AWAY, /* never read: dequant is rounding-free */
+                         .mantissaBits = 8,
+                         .exponentBits = 8};
+    quantization_t inQ;
+    initBfpQuantization(&inQC, &inQ);
+    uint8_t inData[calcNumberOfBytesForData(&inQ, n)];
+    byteConversion((uint8_t *)goldMant, 32, inData, 8, n);
+    tensor_t src;
+    setTensorValues(&src, inData, &shape, &inQ, NULL);
+
+    uint8_t outExponents[2] = {9, 9}; /* sentinels != expected {127, 129} */
+    bfpQConfig_t outQC = {.exponents = outExponents,
+                          .numGroups = 2,
+                          .groupSize = 4,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t outQ;
+    initBfpQuantization(&outQC, &outQ);
+    uint8_t outData[calcNumberOfBytesForData(&outQ, n)];
+    tensor_t dst;
+    setTensorValues(&dst, outData, &shape, &outQ, NULL);
+
+    executeConvert(&src, &dst);
+
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(127, outQC.exponents[0],
+                                    "diagonal must derive the target exponent FRESH "
+                                    "(a same-type copy would die or carry stored 126)");
+    TEST_ASSERT_EQUAL_UINT8(129, outQC.exponents[1]);
+    int32_t mant[8];
+    unpackSignExtend(dst.data, 4, 0, mant, 8);
+    int32_t expected[8] = {6, 1, -2, 0, 7, -2, 1, 4};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, mant, 8);
+}
+
 /* ---- Group-quant PR2 (Task 3): funnel grouped-operand gate ------------- */
 
 /* Packed grouped SYM tensor: mantissas packed verbatim (byteConversion),
@@ -1684,6 +1741,7 @@ int main(void) {
     RUN_TEST(testExecuteConvertKeepsTargetStorageRounding);
     RUN_TEST(testExecuteConvertSymToSymRequantsThroughDiagonal);
     RUN_TEST(testExecuteConvertFloatToSymMatchesConvertTensor);
+    RUN_TEST(testExecuteConvertBfpToBfpRoutesDiagonal);
     RUN_TEST(testExecuteOpAliasesTargetForMatchingFloatWrite);
     RUN_TEST(testExecuteOpDoesNotAliasWhenTargetIsAnInput);
     RUN_TEST(testExecuteOpAliasesSelfTargetWithWritesInPlaceSafe);

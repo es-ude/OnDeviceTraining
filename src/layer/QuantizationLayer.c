@@ -9,16 +9,18 @@
 
 /* The Quantization layer is a pure conversion node (#266): no arithmetic, no
  * kernel — executeConvert dispatches straight through the conversionMatrix
- * (SYM_INT32->SYM_INT32 routes through the diagonal / requant). A same-dtype
- * non-SYM pair stays a config error: a Quantization layer that neither
- * changes dtype nor requantizes is a misconfigured no-op. */
+ * (same-dtype SYM_INT32 and BFP route through their diagonals: SYM_INT32 is
+ * the sanctioned requant, BFP the sanctioned re-block/width-change point).
+ * Any other same-dtype pair stays a config error: a Quantization layer that
+ * neither changes dtype nor requantizes is a misconfigured no-op. */
 static void dispatchQuantization(tensor_t *input, tensor_t *output) {
     qtype_t inputDType = input->quantization->type;
     qtype_t outputDType = output->quantization->type;
 
-    if (inputDType == outputDType && inputDType != SYM_INT32) {
+    if (inputDType == outputDType && inputDType != SYM_INT32 && inputDType != BFP) {
         PRINT_ERROR("Quantization layer: same input/output dtype %d is only supported "
-                    "for SYM_INT32 (requant); other same-dtype pairs are a config error",
+                    "for SYM_INT32 (requant) and BFP (re-block/width change); other "
+                    "same-dtype pairs are a config error",
                     (int)inputDType);
         exit(1);
     }

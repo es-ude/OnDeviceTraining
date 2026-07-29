@@ -40,6 +40,13 @@ static void writeOutConversion(tensor_t *intermediate, tensor_t *target) {
         conversionMatrix[SYM_INT32][SYM_INT32](intermediate, target);
         return;
     }
+    /* Same trap class for BFP: the same-type branch either dies on the width
+     * guard or copies stale exponents verbatim; the diagonal re-derives the
+     * target's per-group exponents fresh on the target's geometry. */
+    if (intermediate->quantization->type == BFP && target->quantization->type == BFP) {
+        conversionMatrix[BFP][BFP](intermediate, target);
+        return;
+    }
     convertTensor(intermediate, target);
 }
 

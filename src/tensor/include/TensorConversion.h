@@ -56,6 +56,26 @@ void requantSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTensor);
  * touched. NOT wired into conversionMatrix (the dynamic variant owns the
  * diagonal). */
 void requantSymInt32TensorToScale(tensor_t *inputTensor, tensor_t *outputTensor);
+/*! @brief BFP -> BFP requantization onto the TARGET's geometry/widths.
+ *
+ * Two-pass value-domain repack: pass 1 streams the source through
+ * dequantChunkToFloat (the source's OWN group scales apply per element) and
+ * derives one FRESH stored exponent per TARGET group (absmax -> smallest E
+ * with absmax/2^E <= qMax, D6 clamps at the stored-range ends); pass 2
+ * re-streams and packs mantissas at the target's mantissaBits with the
+ * TARGET config's roundingMode. Source exponents are never copied. This one
+ * cell covers the OUT_WRITE width-restore, mantissa/exponent-width changes,
+ * and re-blocking (any source geometry -> any target geometry). n == 0
+ * writes zero-state exponents (= bias) and no payload.
+ *
+ * NOT in-place capable (unlike requantSymInt32Tensor): pass 2 re-reads the
+ * source under its original exponents. Flat storage order; orderOfDimensions
+ * is ignored; shape/sparsity are not touched. Wired into
+ * conversionMatrix[BFP][BFP]; convertTensor's same-type branch (verbatim
+ * copy between IDENTICAL configs) short-circuits BEFORE the matrix, so this
+ * is reachable only via direct matrix dispatch (executeConvert / the
+ * OUT_WRITE epilogue). */
+void requantBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor);
 char *quantTypeToString(qtype_t t);
 /*! SYM_INT32 -> SYM with NO rescale: carry the input scale, pack mantissas
  *  verbatim. Exits if any mantissa exceeds the target qBits. The no-rescale

@@ -1320,6 +1320,22 @@ void convertBfpTensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTensor) 
     }
 }
 
+/* BFP -> BFP requant onto the TARGET's geometry/widths: per-group exponents
+ * derived FRESH from the source's dequantized VALUES (never copied) -- this
+ * one cell is simultaneously the OUT_WRITE width-restore, the mantissa- and
+ * exponent-width change, and the re-block point (spec §3/§5). The source is
+ * read per-element with its OWN group scales (dequantChunkToFloat's
+ * grouped-capable BFP arm), so any source geometry converts to any target
+ * geometry. n == 0 falls through to packStreamAsBfp's zero-state arm.
+ * NOT in-place capable (unlike requantSymInt32Tensor): pass 2 re-reads the
+ * source under its original exponents, which an aliased pass-1 write would
+ * already have clobbered; the funnel always passes distinct tensors. */
+void requantBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor) {
+    size_t n = calcNumberOfElementsByTensor(inputTensor);
+    packDequantStreamAsBfp(inputTensor, n, outputTensor->quantization->qConfig, outputTensor->data,
+                           "requantBfpTensor");
+}
+
 /* BFP -> ASYM derives the affine grid via the canonical
  * deriveAsymGridFromMinMax (group-quant PR4 D6: nudged CODE-domain grid,
  * single grid source) -- convertSymInt32TensorToAsymTensor's two-pass shape
@@ -1791,7 +1807,7 @@ conversionFunction_t conversionMatrix[7][7] = {
              [SYM] = convertBfpTensorToSymTensor,
              [ASYM] = convertBfpTensorToAsymTensor,
              [BOOL] = unsupportedConversionTypes,
-             [BFP] = NULL}};
+             [BFP] = requantBfpTensor}};
 
 static void convertTensorsWithSameType(tensor_t *inputTensor, tensor_t *outputTensor,
                                        qtype_t qType) {
@@ -1854,6 +1870,35 @@ static void convertTensorsWithSameType(tensor_t *inputTensor, tensor_t *outputTe
         memcpy(outputAsymQC->zeroPoints, inputAsymQC->zeroPoints,
                inputAsymQC->numGroups * sizeof(uint16_t));
         outputAsymQC->groupSize = inputAsymQC->groupSize;
+        break;
+    }
+    case BFP: {
+        bfpQConfig_t *inputBfpQC = inputTensor->quantization->qConfig;
+        bfpQConfig_t *outputBfpQC = outputTensor->quantization->qConfig;
+        /* The width guard above only sees mantissaBits; a same-type copy is
+         * only meaningful between IDENTICAL BFP configs -- a numGroups/
+         * groupSize mismatch re-blocks the exponents[] indexing (and can
+         * over/under-run dest's fixed-size array, the SYM precedent above)
+         * and an exponentBits mismatch shifts the bias, silently re-gridding
+         * every copied exponent. Geometry/width changes are real conversions:
+         * route them through a Quantization layer (the conversionMatrix
+         * [BFP][BFP] requant). */
+        if (outputBfpQC->numGroups != inputBfpQC->numGroups ||
+            outputBfpQC->groupSize != inputBfpQC->groupSize ||
+            outputBfpQC->mantissaBits != inputBfpQC->mantissaBits ||
+            outputBfpQC->exponentBits != inputBfpQC->exponentBits) {
+            PRINT_ERROR("convertTensorsWithSameType: BFP config mismatch (dest numGroups=%zu "
+                        "groupSize=%zu m=%u e=%u, src numGroups=%zu groupSize=%zu m=%u e=%u) "
+                        "-- re-block/width changes go through conversionMatrix[BFP][BFP] "
+                        "(Quantization layer)",
+                        outputBfpQC->numGroups, outputBfpQC->groupSize,
+                        (unsigned)outputBfpQC->mantissaBits, (unsigned)outputBfpQC->exponentBits,
+                        inputBfpQC->numGroups, inputBfpQC->groupSize,
+                        (unsigned)inputBfpQC->mantissaBits, (unsigned)inputBfpQC->exponentBits);
+            exit(1);
+        }
+        memcpy(outputBfpQC->exponents, inputBfpQC->exponents,
+               inputBfpQC->numGroups * sizeof(uint8_t));
         break;
     }
     default:

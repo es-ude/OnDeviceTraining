@@ -9,6 +9,7 @@
 #include "BorrowedLayer.h"
 #include "CalculateGradsSequential.h"
 #include "Conv1dTransposed.h"
+#include "DeathTest.h"
 #include "InferenceApi.h"
 #include "Kernel.h"
 #include "Layer.h"
@@ -29,6 +30,7 @@
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
+#include "TensorConversion.h"
 #include "unity.h"
 
 void setUp(void) {}
@@ -534,6 +536,87 @@ void testValidatorAcceptsChainWithoutQuantLayers(void) {
                                     "restored width at each producer's wire");
 }
 
+/* BFP epic PR1: a same-dtype BFP pair is a LEGAL Quantization-layer config
+ * beside SYM_INT32 -- it is the documented re-block/width-change point
+ * (conversionMatrix[BFP][BFP]). Config-acceptance level: the layer's forward
+ * runs once over stack tensors (heap BFP tensors would leak exponents[]
+ * until the owner-chain task adds the freeQuantization BFP arm; layers
+ * cannot allocate BFP wires yet for the same reason, so no model loop).
+ * Fixture = testRequantBfpWidthChange's hand-derived gold: m=8 values
+ * {100,-50,25,0} -> m=4 stored exponent 131 (E=+4, scale 16), mantissas
+ * {6,-3,2,0} -- FRESH exponent proves the forward reached the diagonal. */
+void testQuantLayerAcceptsSameDtypeBfpPairForward(void) {
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t goldMant[4] = {100, -50, 25, 0};
+    uint8_t inExponents[1] = {127}; /* E=0, scale 1 */
+    bfpQConfig_t inQC = {.exponents = inExponents,
+                         .numGroups = 1,
+                         .groupSize = 0,
+                         .roundingMode = HALF_AWAY,
+                         .mantissaBits = 8,
+                         .exponentBits = 8};
+    quantization_t inQ;
+    initBfpQuantization(&inQC, &inQ);
+    uint8_t inData[calcNumberOfBytesForData(&inQ, n)];
+    byteConversion((uint8_t *)goldMant, 32, inData, 8, n);
+    tensor_t input;
+    setTensorValues(&input, inData, &shape, &inQ, NULL);
+
+    uint8_t outExponents[1] = {9}; /* sentinel != expected 131 */
+    bfpQConfig_t outQC = {.exponents = outExponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t outQ;
+    initBfpQuantization(&outQC, &outQ);
+    uint8_t outData[calcNumberOfBytesForData(&outQ, n)];
+    tensor_t output;
+    setTensorValues(&output, outData, &shape, &outQ, NULL);
+
+    layer_t *quant = buildQuantLayer(&inQ, &outQ); /* documents the config contract */
+    quantizationForward(quant, &input, &output);
+    freeQuantLayerShell(quant);
+
+    TEST_ASSERT_EQUAL_UINT8(131, outQC.exponents[0]);
+    int32_t mant[4];
+    unpackSignExtend(output.data, 4, 0, mant, 4);
+    TEST_ASSERT_EQUAL_INT32(6, mant[0]);
+    TEST_ASSERT_EQUAL_INT32(-3, mant[1]);
+    TEST_ASSERT_EQUAL_INT32(2, mant[2]);
+    TEST_ASSERT_EQUAL_INT32(0, mant[3]);
+}
+
+/* Counter-pin for the widened allowance: same-dtype pairs OTHER than
+ * SYM_INT32/BFP (here FLOAT32->FLOAT32) stay a config error -- a Quantization
+ * layer that neither changes dtype nor requantizes is a misconfigured no-op. */
+void testQuantLayerStillRejectsSameDtypeFloatPair(void) {
+    size_t n = 2;
+    size_t dims[] = {2};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    float inVals[2] = {1.f, -2.f};
+    quantization_t inQ;
+    initFloat32Quantization(&inQ);
+    tensor_t input;
+    setTensorValues(&input, (uint8_t *)inVals, &shape, &inQ, NULL);
+
+    float outVals[2] = {0.f, 0.f};
+    quantization_t outQ;
+    initFloat32Quantization(&outQ);
+    tensor_t output;
+    setTensorValues(&output, (uint8_t *)outVals, &shape, &outQ, NULL);
+
+    layer_t qLayer = {.type = QUANTIZATION, .config = NULL}; /* dispatch reads only tensors */
+    ASSERT_EXITS_WITH_FAILURE(quantizationForward(&qLayer, &input, &output));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testSgdMCreateOptimSkipsQuantizationLayer);
@@ -542,5 +625,7 @@ int main(void) {
     RUN_TEST(testFullSymChainTrainingStepMatchesFloatTwin);
     RUN_TEST(testValidatorAcceptsChainWithoutQuantLayers);
     RUN_TEST(testConv1dTransposedSymChainTrains);
+    RUN_TEST(testQuantLayerAcceptsSameDtypeBfpPairForward);
+    RUN_TEST(testQuantLayerStillRejectsSameDtypeFloatPair);
     return UNITY_END();
 }

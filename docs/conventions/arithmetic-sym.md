@@ -303,7 +303,12 @@ scale `s_acc = s_in · max_g(scales[g])` via `rescaleIntoAccumulatorScale`
 (factors `scales[g]/s_wmax ≤ 1`, so combines never grow mantissas). Every
 combine is one rounding of ≤ 0.5·ulp(s_acc). Per output element with C
 combine-roundings: worst case |err| ≤ 0.5·C·s_acc; under the
-independent-rounding assumption RMS ≈ 0.5·√C·s_acc. C by path:
+independent-rounding assumption RMS ≈ 0.5·√C·s_acc. This entire analysis
+applies UNCHANGED to grouped **ASYM** weights (PR4): the funnel's per-group
+zp shift (`mantissa = code − zp[g]`) is exact, so an ASYM grouped operand
+presents the identical signed-mantissa image at the identical per-group
+scales — the kernels, s_acc, and every bound below are dtype-blind (D5).
+C by path:
 
 | path | structure | C per output element |
 |---|---|---|

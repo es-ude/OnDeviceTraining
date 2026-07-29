@@ -56,7 +56,7 @@ kernels compute flat storage offsets regardless of the permutation.
 
 | Tensor class | Granularity |
 |---|---|
-| GEMM-family weights (Linear/Conv1d/ConvT1d) | groups allowed (any valid groupSize, SYM); trainable end-to-end since PR3 (forward + dx + optimizer updates; error bounds in `docs/conventions/arithmetic-sym.md`) |
+| GEMM-family weights (Linear/Conv1d/ConvT1d) | groups allowed (any valid groupSize, SYM **and ASYM** since PR4); trainable end-to-end (forward + dx + optimizer updates; ASYM runs through the same symmetric kernels after the exact per-group zp shift, D5; error bounds in `docs/conventions/arithmetic-sym.md`) |
 | Bias | per-tensor only |
 | LayerNorm/GroupNorm gamma/beta | per-tensor only (the factories reject SYM/ASYM gamma/beta wholesale — the pre-existing dtype gate subsumes the group question) |
 | Gradients (packed storage) | per-tensor only; grouped grads are a future #300 axis |
@@ -102,29 +102,32 @@ near-useless for `scale ≪ 1`).
 pack): a symmetric code grid cannot hold an off-center `+zeroPoint` band at the
 carried scale, independent of width.
 
-**Asymmetric quantization convention (#243).** Every `* → ASYM` cell builds a float
-buffer (from its own preamble) and routes through one shared helper,
-`quantizeFloatToAsym` (`src/tensor/TensorConversion.c`) — the single source of truth.
-Standard affine: `scale = (max − min) / (2^qBits − 1)`, `zeroPoint = round(min/scale)`,
-`code = clamp(round(v/scale − zeroPoint), 0, 2^qBits − 1)` (HALF_AWAY). Dequant is
-`(code + zeroPoint)·scale` — note the **additive** `zeroPoint` (ODT's sign convention,
-the inverse of PyTorch's `q − zeroPoint`). A constant tensor (`min == max`) uses
-`scale = (min != 0) ? |min| : 1` to avoid divide-by-zero. The denominator is
-`2^qBits − 1`, **not** `2^qBits` — the latter is an off-by-one that leaves the top code
-unreachable. New asym-producing converters MUST call this helper and never re-derive the
-grid inline: hand-rolled copies are exactly how the four `*→ASYM` converters drifted
-before #243. The float→SYM pack sibling is `packFloatBufferAsSym`.
+**Asymmetric quantization convention (group-quant PR4, supersedes #243's grid).**
+Every `* → ASYM` cell builds a float buffer (from its own preamble) and routes
+through one shared helper, `quantizeFloatToAsym` (`src/tensor/TensorConversion.c`)
+— the single source of truth. **Nudged code-domain affine** (TFLite convention):
+the band is first extended to include 0 (`mn = min(mn, 0)`, `mx = max(mx, 0)` —
+guarantees 0 is exactly representable and bounds the zero-point into the code
+domain by construction); `scale = (mx − mn) / (2^qBits − 1)`;
+`zp = clamp(round(−mn/scale), 0, 2^qBits − 1)` stored as **uint16** per group;
+`code = clamp(round(v/scale) + zp, 0, 2^qBits − 1)`. Dequant is
+`(code − zp)·scale` — the same sign convention as PyTorch/TFLite (the old #243
+value-domain grid used an additive signed `zeroPoint = round(min/scale)`; it is
+gone, see the width contract below). An all-zero buffer uses `scale = 1` to avoid
+divide-by-zero. The denominator is `2^qBits − 1`, **not** `2^qBits`. New
+asym-producing converters MUST call this helper and never re-derive the grid
+inline (#243's drift lesson). Grouped configs derive the grid **per group**
+(`deriveAsymGridForGroup`). The float→SYM pack sibling is `packFloatBufferAsSym`.
 
-**ASYM width/zeroPoint contract (#246).** `zeroPoint` is `int32_t`: it reaches
-`−(2^qBits − 1)` for negative bands and overshoots that by `min/(min − max)` for
-all-negative ones, so `int16` already wraps at `qBits = 16`. ASYM `qBits` is capped
-at **[1, 30]** — at 31 the unsigned code ceiling `(int32_t)(powf(2, qBits) − 1)`
-rounds to `2^31` and the cast is UB (the unsigned twin of the #202 SYM_INT32
-ceiling at 31); enforced in `initAsymQConfig` and re-checked in the
-`deriveAsymGridFromMinMax` funnel, which also fail-fasts when `round(min/scale)`
-itself would leave int32 (a narrow band far from zero does that at any `qBits`).
-On the ODTS wire, zeroPoint rides as 4 bytes (int32) — the format break is owned
-by the serialization v2 bump (#370).
+**ASYM width/zeroPoint contract (D6, supersedes #246).** `zeroPoints[]` are
+**uint16 code-domain** values in `[0, 2^qBits − 1]`; the nudge makes that range
+an invariant, not a hope (the old int32 value-domain zp provably exceeded uint16
+even at `qBits = 16` — the −72817 wide-band pin was the proof, and the reason
+D6 mandates the code domain). ASYM `qBits` is therefore capped at **[1, 16]**
+(uint16 code ceiling; was [1, 30] under the value-domain grid), enforced in
+`initAsymQConfigGrouped`, re-checked in `deriveAsymGridForGroup`, and validated
+against untrusted wire input in the ODTS v5 deserializer. On the wire, zeroPoints
+ride as `u16` LE per group (ODTS v5; the old v4 `i32` slot died with the v5 bump).
 
 **Grad-accumulate primitives (PR3, #261).** `accumulateFloatIntoSymTensorFixedGrid` /
 `accumulateFloatIntoSymTensorRescale` / `accumulateFloatIntoAsymTensorRescale`

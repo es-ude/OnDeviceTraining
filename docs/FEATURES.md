@@ -202,14 +202,15 @@ Notes on the qualified cells:
 - **Layers** — all 12 `layerType_t` have matching `serialize` + `deserialize` arms,
   each round-trip tested under `test/unit/serial/`.
 - **Dtypes** — all 6 `qtype_t` qconfigs serialize/deserialize symmetrically (INT32/
-  FLOAT32/BOOL = type byte only; SYM_INT32/ASYM carry scale + rounding + bits [+
-  zeroPoint]; SYM carries the v4 group record `numGroups`/`groupSize`/`scales[]` +
-  bits + rounding — see Model format below). Packed tensor data (SYM/ASYM sub-byte,
+  FLOAT32/BOOL = type byte only; SYM_INT32 carries scale + rounding + bits; SYM and
+  ASYM carry group records — SYM: `numGroups`/`groupSize`/`scales[]` + bits +
+  rounding (v4); ASYM: `numGroups`/`groupSize`/`scales[]`/`u16 zeroPoints[]` + bits +
+  rounding (v5) — see Model format below). Packed tensor data (SYM/ASYM sub-byte,
   BOOL 1-bit) is byte-tight via `calcNumberOfBytesForData` and round-trips exactly.
-- **Model format** — `"ODTS"` magic + `version` (=4) + `layerCount` + per-layer type
+- **Model format** — `"ODTS"` magic + `version` (=5) + `layerCount` + per-layer type
   tag. Deserialize fail-fasts on magic / version / count / tag mismatch. Since v2
   (#370) every count/dim/kernel field is `u32` little-endian via the checked
-  `SerialWire` primitives (ASYM zeroPoint: `i32` LE), so a 64-bit host writes files a
+  `SerialWire` primitives, so a 64-bit host writes files a
   32-bit MCU loads bit-identically; all short reads/writes fail fast. Since v3 (#380)
   every parameter record leads with a `u8` grad-presence byte: frozen layers
   (`parameter->grad == NULL`) write 0 and the record carries the param tensor only.
@@ -224,7 +225,14 @@ Notes on the qualified cells:
   included) rather than failing fast; the resulting shape is validated against the
   tensor's element count (`validateSymQConfigShape`) — divisibility violations
   (`numGroups * groupSize != N`) still fail fast. The `numGroups==1 <=> groupSize==0`
-  sentinel invariant is unconditional and untouched by the relax.
+  sentinel invariant is unconditional and untouched by the relax. Since v5 (group-quant
+  PR4) the ASYM qconfig record follows the same shape — `u32 numGroups`, `u32 groupSize`,
+  `f32 scales[numGroups]`, `u16 zeroPoints[numGroups]` (LE), `u8 qBits`, `u8 rounding` —
+  with the identical cap/realloc/sentinel/validate machinery (both arrays), and the
+  in-memory zp semantics are the nudged CODE-domain values (`dequant = (code − zp)·scale`,
+  see `docs/conventions/tensor.md`); pre-v5 files fail cleanly at the version check
+  (their `i32` value-domain zeroPoint slot cannot be reinterpreted). The v5 bump is
+  coordinated with the parallel BFP epic (its record joins v5 as an append or bumps v6).
 - **Contract** — deserialize **fills a pre-constructed model in place** (no allocation
   in the serial path); the caller must build a matching model first. A tensor record
   whose file dtype, rank, or payload size mismatches the pre-built skeleton fail-fasts
@@ -342,7 +350,13 @@ checkpointing, limitations, literature).
   elemsPerOutChannel`) plus **optimizer updates** on grouped params (SGD/AdamW,
   per-group dynamic absmax requant each write-back). Rounding-error bounds for the
   backward/update paths: `docs/conventions/arithmetic-sym.md` §"Grouped backward".
-  ASYM groups and the HAR sweep wiring are PR4–PR5. Grads, bias, gamma/beta, wires,
+  **ASYM groups are SHIPPED too (PR4)**: `asymQConfig_t` is always-array
+  (`scales[]` + uint16 code-domain `zeroPoints[]`, nudged affine, qBits ≤ 16 — see
+  `docs/conventions/tensor.md`), grouped FLOAT32↔ASYM conversion, and grouped ASYM
+  weights train end-to-end through the SAME symmetric grouped kernels (the funnel
+  shifts codes by the per-group zp into the identical signed-mantissa image — zero
+  kernel changes, spec D5; layers pass a symQConfig-shaped view of the asym scales).
+  The HAR sweep wiring is PR5. Grads, bias, gamma/beta, wires,
   and momentum stay per-tensor (funnel-enforced); `symInt32QConfig_t` (compute/wires)
   stays scalar by design.
 - **Weight init** — PyTorch-compatible: `INIT_DEFAULT` reproduces

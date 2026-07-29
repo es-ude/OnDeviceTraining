@@ -307,6 +307,20 @@ tensor_t *getTensorLike(tensor_t *tensor) {
 void requantizeTensorInPlace(tensor_t *t, quantization_t *targetQ) {
     size_t numElements = calcNumberOfElementsByTensor(t);
     quantization_t *newQ = getQLike(targetQ);
+    /* Group-quant PR2 final-review Fix 1 (CRITICAL, heap-OOB): this internal
+     * view is built by hand (getQLike + getDataLike), bypassing initTensor's
+     * validateSymQConfigShape choke point entirely -- unlike every tensor a
+     * caller builds through the public API, nothing here checks that a
+     * grouped SYM target's numGroups*groupSize actually equals `t`'s element
+     * count. A mismatch (e.g. a 12-element source against a {numGroups=2,
+     * groupSize=4} target, which implies only 8) sizes the data buffer off
+     * `numElements` while the pack/unpack path indexes scales[] by group
+     * (up to numElements/groupSize - 1), reading past the target's
+     * numGroups-sized scales array. Validate against the SAME numElements the
+     * buffer below is sized with, before either buffer exists. */
+    if (newQ->type == SYM) {
+        validateSymQConfigShape(newQ->qConfig, numElements);
+    }
     uint8_t *newData = getDataLike(newQ, numElements);
 
     tensor_t view = {.data = newData, .shape = t->shape, .quantization = newQ, .sparsity = NULL};

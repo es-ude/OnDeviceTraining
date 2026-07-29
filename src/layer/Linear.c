@@ -68,7 +68,7 @@ void linearForwardSymInt32Grouped(tensor_t *w, tensor_t *b, tensor_t *input, ten
  * no bias); ctx unused (matmul infers geometry from the tensors themselves),
  * EXCEPT linearForwardKernelSym: ctx carries the stored weight's own
  * symQConfig_t* (non-NULL) iff it is grouped SYM (linearForward sets ctx +
- * allowGroupedSymOperands together, see below) — that routes to the grouped
+ * groupedSymOperandPos together, see below) — that routes to the grouped
  * matmul entry instead of the scalar one. */
 static void linearForwardKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                                      const void *ctx) {
@@ -98,11 +98,13 @@ void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output) {
     /* Group-quant PR2: a stored SYM weight with numGroups > 1 routes the SYM
      * kernel adapter to the grouped matmul entry (weightGroups carried via
      * ctx) AND opts the funnel's prologue into unpacking the grouped operand
-     * (allowGroupedSymOperands) — always together, never independently (an
+     * (groupedSymOperandPos) — always together, never independently (an
      * unpack without the routing has nowhere group-shaped to go; the
      * routing without the unpack would hand the kernel a still-packed
      * tensor). Per-tensor SYM (numGroups==1) and SYM_INT32 weights are
-     * untouched — ctx stays NULL, exactly like before this PR. */
+     * untouched — ctx stays NULL, exactly like before this PR. weights is
+     * always inputs[1] (bias present or not, see the .inputs literal below),
+     * so the declared position is a constant 2 (i+1 for i=1). */
     bool grouped = weights->quantization->type == SYM &&
                    ((symQConfig_t *)weights->quantization->qConfig)->numGroups > 1;
     const symQConfig_t *weightGroups =
@@ -118,7 +120,7 @@ void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output) {
             .nInputs = bias != NULL ? 3 : 2,
             .arithmetic = linearConfig->forwardMath,
             .mode = OUT_WRITE,
-            .allowGroupedSymOperands = grouped,
+            .groupedSymOperandPos = grouped ? 2 : 0,
         },
         output);
 }

@@ -427,10 +427,12 @@ static void copyQConfigInto(quantization_t *dest, quantization_t *src, size_t qC
  * pointer, aliasing the two configs and leaking dest's own array. Copy the
  * VALUES into dest's own (caller-allocated, already-owned) array instead,
  * same contract as copyQConfigInto otherwise: dest->qConfig must be
- * caller-allocated, dest keeps owning its own scales block. PR1 invariant
- * (numGroups == 1 for both sides) makes a 1-for-1 value copy exact; a
- * mismatched numGroups here would indicate a caller contract violation, not
- * something PR1's per-tensor-only paths can produce. */
+ * caller-allocated, dest keeps owning its own scales block. Group shape
+ * (numGroups/groupSize) is a CALLER contract, not something this function
+ * derives or reconciles: dest->scales was sized at construction to dest's
+ * own config, so src's group shape must match exactly (checked below) --
+ * per-tensor ({1,0}) or grouped (PR2, numGroups > 1) alike -- and any
+ * mismatch fail-fasts rather than over/under-copying. */
 static void copySymQConfigInto(quantization_t *dest, quantization_t *src) {
     if (dest->qConfig == NULL) {
         PRINT_ERROR("copyQuantization: dest->qConfig for SYM must be caller-allocated");

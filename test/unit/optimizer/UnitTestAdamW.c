@@ -881,10 +881,49 @@ void testAdamWCreateAllFrozenModelExits(void) {
     });
 }
 
+/* Final-review Fix 3(c): AdamW twin of the SGD momentum-carrier-gate death
+ * test (UnitTestSgd.c's testSgdCreateGroupedSymMomentumQuantExits) --
+ * momentStateInit (AdamWApi.c) builds BOTH moment buffers via
+ * getQLike(momentQuant) with no carrier gate of its own, mirroring SgdApi's
+ * momentumStateInit exactly (#277 precedent noted in both files' comments).
+ * A grouped SYM momentQuant template must fail-fast just like gradInit's
+ * gate (TensorApi.c) -- grouped moments are a future #300 axis, not
+ * something PR2's optimizer paths support. The weight tensor's OWN element
+ * count (2*4=8) deliberately EQUALS the momentQuant template's
+ * numGroups*groupSize (2*4=8), so the death observed here cannot be the
+ * UNRELATED, pre-existing initTensor/validateSymQConfigShape guard
+ * (TensorApi.c) tripping on a coincidental shape mismatch instead of the new
+ * gate under test (mutation-vacuity guard, same reasoning as the SGD twin).
+ * bias=NULL keeps the model to exactly one trainable state. */
+void testAdamWCreateGroupedSymMomentQuantExits(void) {
+    ASSERT_EXITS_WITH(1, {
+        quantization_t *layerQ = quantizationInitFloat();
+        size_t *wDims = reserveMemory(2 * sizeof(size_t));
+        wDims[0] = 2;
+        wDims[1] = 4;
+        size_t *wOrder = reserveMemory(2 * sizeof(size_t));
+        setOrderOfDimsForNewTensor(2, wOrder);
+        shape_t *wShape = reserveMemory(sizeof(shape_t));
+        setShape(wShape, wDims, 2, wOrder);
+        tensor_t *wParam = initTensor(wShape, quantizationInitFloat(), NULL);
+        tensorFillFromFloatBuffer(wParam, (float[]){0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f}, 8);
+        tensor_t *wGrad = gradInitFloat(wParam, NULL);
+        parameter_t *weights = parameterInit(wParam, wGrad);
+
+        layer_t *linear = buildBorrowedLinearLayer(weights, NULL, layerQ);
+        layer_t *model[] = {linear};
+
+        quantization_t *momentQ = quantizationInitSymGrouped(4, HALF_AWAY, 2, 4);
+        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, model, 1, momentQ,
+                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    });
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testAdamWOptimizerSkipsFrozenLayerInCountAndCollection);
     RUN_TEST(testAdamWCreateAllFrozenModelExits);
+    RUN_TEST(testAdamWCreateGroupedSymMomentQuantExits);
     RUN_TEST(testAdamWInitStoresDoubleHyperparamsAndZeroStepCount);
     RUN_TEST(testAdamWGetSetLrRoundTripThroughImpl);
     RUN_TEST(testAdamWInitRejectsNonFloat32UpdateMath);

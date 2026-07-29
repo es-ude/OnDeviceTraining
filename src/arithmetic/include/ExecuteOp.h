@@ -67,21 +67,34 @@ typedef struct opSpec {
      * pointer equality; overlapping sub-views (raw-pointer tensor wiring) are
      * outside the contract. */
     bool writesInPlaceSafe;
-    /* Group-quant PR2 (Task 3): opt-in for a grouped SYM operand (symQConfig_t
-     * numGroups > 1) under ARITH_SYM_INT32. Zero-init (false) = DENY — a
-     * grouped SYM input reaching the prologue without this flag fail-fasts
+    /* Group-quant PR2 (Task 3; final-review Fix 2/3): per-OPERAND opt-in for
+     * a grouped SYM input (symQConfig_t numGroups > 1), under EITHER
+     * arithmetic type. 0 = no grouped operand allowed anywhere (zero-init
+     * safe — every existing opSpec compound literal that never heard of
+     * grouped operands still denies them); i+1 = inputs[i] (and ONLY
+     * inputs[i]) may be grouped SYM. A grouped SYM input reaching the
+     * prologue at any OTHER position, or at all when this is 0, fail-fasts
      * (only the group-aware forward paths accept grouped weights in PR2;
-     * backward/optimizer land in PR3). When true, the prologue unpacks the
-     * operand's mantissas (unpackSignExtend, sign-extended raw int32 — the
-     * same mechanics the SYM->SYM_INT32 conversionMatrix cell would use, were
-     * it not fail-fasting on grouped sources) into scratch and POISONS the
-     * scratch symInt32QConfig_t's scale to 1.0f and qMaxBits to the source's
-     * qBits: a grouped operand has no single scalar scale, so any kernel
-     * reading scratch->quantization->scale here is a bug — group-aware
-     * kernels MUST take per-group scales from their own ctx (e.g. Matmul's
-     * weightGroups), never this field. Set together with a ctx that actually
-     * carries the group shape (Linear.c: both or neither). */
-    bool allowGroupedSymOperands;
+     * backward/optimizer land in PR3 — this is the funnel-wide seam that
+     * keeps that boundary, on BOTH the ARITH_SYM_INT32 and ARITH_FLOAT32
+     * prologue arms).
+     *
+     * ARITH_SYM_INT32: the prologue unpacks the declared operand's mantissas
+     * (unpackSignExtend, sign-extended raw int32 — the same mechanics the
+     * SYM->SYM_INT32 conversionMatrix cell would use, were it not
+     * fail-fasting on grouped sources) into scratch and POISONS the scratch
+     * symInt32QConfig_t's scale to 1.0f and qMaxBits to the source's qBits: a
+     * grouped operand has no single scalar scale, so any kernel reading
+     * scratch->quantization->scale here is a bug — group-aware kernels MUST
+     * take per-group scales from their own ctx (e.g. Matmul's weightGroups),
+     * never this field. Set together with a ctx that actually carries the
+     * group shape (Linear.c: both or neither).
+     *
+     * ARITH_FLOAT32: no poisoning/unpack mechanics — the declared operand
+     * proceeds through the EXISTING group-aware convertTensor dequant
+     * (convertSymTensorToFloat32Tensor, group-aware since Task 2); this field
+     * is purely a gate on that path, not a different mechanism. */
+    size_t groupedSymOperandPos;
 } opSpec_t;
 
 void executeOp(const opSpec_t *spec, tensor_t *target);

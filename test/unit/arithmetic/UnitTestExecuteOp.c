@@ -1355,10 +1355,10 @@ static tensor_t *buildPackedSymGrouped(size_t n, const int32_t *mantissas, uint8
 }
 
 /* Default-deny death test: a grouped SYM input (numGroups=2) reaching an
- * ARITH_SYM_INT32 op WITHOUT allowGroupedSymOperands must fail-fast, not
- * silently misinterpret the operand via the SYM->SYM_INT32 conversionMatrix
- * cell (which itself fail-fasts on grouped sources, Task 2) or any other
- * path. */
+ * ARITH_SYM_INT32 op WITHOUT a matching groupedSymOperandPos must fail-fast,
+ * not silently misinterpret the operand via the SYM->SYM_INT32
+ * conversionMatrix cell (which itself fail-fasts on grouped sources, Task 2)
+ * or any other path. */
 void testExecuteOpRejectsGroupedSymOperandByDefault(void) {
     ASSERT_EXITS_WITH_FAILURE({
         tensor_t *in = buildPackedSymGrouped(8, (int32_t[]){1, -2, 3, -4, 5, -6, 7, -8}, 6, 2, 4,
@@ -1376,7 +1376,37 @@ void testExecuteOpRejectsGroupedSymOperandByDefault(void) {
                 .nInputs = 1,
                 .arithmetic = arithmeticFromQuantization(&arith),
                 .mode = OUT_WRITE,
-                /* allowGroupedSymOperands intentionally NOT set (zero-init = deny) */
+                /* groupedSymOperandPos intentionally NOT set (zero-init = deny) */
+            },
+            out);
+    });
+}
+
+/* Final-review Fix 2: a grouped SYM input at a position OTHER than the one
+ * declared must still fail-fast — an opt-in for SOME position must not be
+ * read as a blanket opt-in for grouped operands anywhere in the operand
+ * list. groupedSymOperandPos=2 declares inputs[1] as the only allowed
+ * grouped position; the (single) actual input here is inputs[0] (position
+ * 1), so this must deny exactly like the zero-init case above. */
+void testExecuteOpRejectsGroupedSymOperandAtWrongPosition(void) {
+    ASSERT_EXITS_WITH_FAILURE({
+        tensor_t *in = buildPackedSymGrouped(8, (int32_t[]){1, -2, 3, -4, 5, -6, 7, -8}, 6, 2, 4,
+                                             (float[]){0.1f, 0.2f});
+        tensor_t *out = buildSym(8, (int32_t[]){0, 0, 0, 0, 0, 0, 0, 0}, 1.0f);
+        quantization_t arith;
+        symInt32QConfig_t arithQC;
+        initSymInt32QConfig(HALF_AWAY, &arithQC);
+        initSymInt32Quantization(&arithQC, &arith);
+
+        executeOp(
+            &(opSpec_t){
+                .kernel = executeOpIdentityKernel,
+                .inputs = (tensor_t *[]){in},
+                .nInputs = 1,
+                .arithmetic = arithmeticFromQuantization(&arith),
+                .mode = OUT_WRITE,
+                .groupedSymOperandPos = 2, /* declares inputs[1] (nonexistent here) —
+                                            * inputs[0] being grouped must still deny */
             },
             out);
     });
@@ -1406,10 +1436,10 @@ static void captureGroupedOperandKernel(tensor_t **operands, size_t nOperands, t
     }
 }
 
-/* Allowed path: allowGroupedSymOperands=true unpacks the grouped SYM operand
- * into scratch — mantissas equal the packed codes (sign-extended), scratch
- * scale is poisoned to 1.0f (never a real scale), qMaxBits carries the
- * source's qBits. */
+/* Allowed path: groupedSymOperandPos=1 (declares inputs[0]) unpacks the
+ * grouped SYM operand into scratch — mantissas equal the packed codes
+ * (sign-extended), scratch scale is poisoned to 1.0f (never a real scale),
+ * qMaxBits carries the source's qBits. */
 void testExecuteOpUnpacksGroupedSymWhenAllowed(void) {
     int32_t mantissas[] = {1, -2, 3, -4, 5, -6, 7, -8};
     tensor_t *in = buildPackedSymGrouped(8, mantissas, 6, 2, 4, (float[]){0.1f, 0.2f});
@@ -1426,7 +1456,7 @@ void testExecuteOpUnpacksGroupedSymWhenAllowed(void) {
             .nInputs = 1,
             .arithmetic = arithmeticFromQuantization(&arith),
             .mode = OUT_WRITE,
-            .allowGroupedSymOperands = true,
+            .groupedSymOperandPos = 1,
         },
         out);
 
@@ -1435,6 +1465,35 @@ void testExecuteOpUnpacksGroupedSymWhenAllowed(void) {
     TEST_ASSERT_EQUAL_INT32_ARRAY(mantissas, g_capturedGroupedMantissas, 8);
     TEST_ASSERT_EQUAL_FLOAT(1.0f, g_capturedGroupedScale);
     TEST_ASSERT_EQUAL_UINT8(6, g_capturedGroupedQMaxBits);
+}
+
+/* Final-review Fix 3(a): the grouped-operand deny gate must apply under
+ * ARITH_FLOAT32 too, not just ARITH_SYM_INT32 — before this fix, a grouped
+ * SYM operand reaching an ARITH_FLOAT32 op would silently succeed (the
+ * FLOAT32 prologue's convertTensor call dispatches to the group-aware
+ * convertSymTensorToFloat32Tensor cell regardless of any gate), letting
+ * FLOAT32-math ops (e.g. an optimizer update or a FLOAT32-math backward dx)
+ * quietly dequantize a grouped weight/param that PR2's contract says must be
+ * denied outside the two declared gather-forward call sites. No position
+ * declared here (zero-init deny), so this must fail-fast exactly like the
+ * SYM_INT32 default-deny sibling above. */
+void testExecuteOpRejectsGroupedSymOperandUnderFloat32ByDefault(void) {
+    ASSERT_EXITS_WITH_FAILURE({
+        tensor_t *in = buildPackedSymGrouped(8, (int32_t[]){1, -2, 3, -4, 5, -6, 7, -8}, 6, 2, 4,
+                                             (float[]){0.1f, 0.2f});
+        tensor_t *out = buildFloat(8, (float[]){0, 0, 0, 0, 0, 0, 0, 0});
+
+        executeOp(
+            &(opSpec_t){
+                .kernel = executeOpIdentityKernel,
+                .inputs = (tensor_t *[]){in},
+                .nInputs = 1,
+                .arithmetic = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY},
+                .mode = OUT_WRITE,
+                /* groupedSymOperandPos intentionally NOT set (zero-init = deny) */
+            },
+            out);
+    });
 }
 
 int main(void) {
@@ -1472,6 +1531,8 @@ int main(void) {
     RUN_TEST(testExecuteOpAliasesSelfTargetWithWritesInPlaceSafe);
     RUN_TEST(testExecuteOpNeverAliasesSymTarget);
     RUN_TEST(testExecuteOpRejectsGroupedSymOperandByDefault);
+    RUN_TEST(testExecuteOpRejectsGroupedSymOperandAtWrongPosition);
     RUN_TEST(testExecuteOpUnpacksGroupedSymWhenAllowed);
+    RUN_TEST(testExecuteOpRejectsGroupedSymOperandUnderFloat32ByDefault);
     return UNITY_END();
 }

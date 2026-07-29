@@ -59,7 +59,7 @@ void initConv1dConfigWithWeightsAndBias(conv1dConfig_t *conv1dConfig, kernel_t *
  * exactly like Linear's linearForwardKernelSym (which gets away with ctx ==
  * weightGroups alone because matmul infers geometry from the tensors
  * themselves; Conv1d's kernel additionally needs kernel_t/groups, hence this
- * wrapper). Set together with allowGroupedSymOperands (conv1dForward, below)
+ * wrapper). Set together with groupedSymOperandPos (conv1dForward, below)
  * -- both or neither, same invariant as Linear.c. */
 typedef struct conv1dForwardCtx {
     const conv1dConfig_t *cfg;
@@ -99,9 +99,17 @@ void conv1dForward(layer_t *layer, tensor_t *input, tensor_t *output) {
     /* Group-quant PR2: a stored SYM weight with numGroups > 1 routes the SYM
      * kernel adapter to the grouped gather-core entry (weightGroups carried
      * via ctx) AND opts the funnel's prologue into unpacking the grouped
-     * operand (allowGroupedSymOperands), always together -- mirrors
+     * operand (groupedSymOperandPos), always together -- mirrors
      * linearForward's identical wiring (Linear.c) exactly. Per-tensor SYM
-     * (numGroups==1) and SYM_INT32 weights are untouched. */
+     * (numGroups==1) and SYM_INT32 weights are untouched. weightTensor is
+     * always inputs[1] (bias present or not, see the .inputs literals below)
+     * in BOTH math arms -- final-review Fix 3(b): the FLOAT32 arm must
+     * declare the SAME position as the SYM arm (a grouped weight forwarded
+     * under FLOAT32 math dequantizes via the funnel's group-aware
+     * convertTensor cell, Task 2 -- gated on this field exactly like the SYM
+     * arm's unpack, not a different mechanism) -- omitting it here (as
+     * pre-final-review code did) would make Conv1d's FLOAT32-math grouped
+     * forward regress once the funnel's FLOAT32 arm gate lands. */
     bool grouped = weightTensor->quantization->type == SYM &&
                    ((symQConfig_t *)weightTensor->quantization->qConfig)->numGroups > 1;
     const symQConfig_t *weightGroups =
@@ -119,6 +127,7 @@ void conv1dForward(layer_t *layer, tensor_t *input, tensor_t *output) {
                 .nInputs = biasTensor != NULL ? 3 : 2,
                 .arithmetic = cfg->forwardMath,
                 .mode = OUT_WRITE,
+                .groupedSymOperandPos = grouped ? 2 : 0,
             },
             output);
         break;
@@ -132,7 +141,7 @@ void conv1dForward(layer_t *layer, tensor_t *input, tensor_t *output) {
                 .nInputs = biasTensor != NULL ? 3 : 2,
                 .arithmetic = cfg->forwardMath,
                 .mode = OUT_WRITE,
-                .allowGroupedSymOperands = grouped,
+                .groupedSymOperandPos = grouped ? 2 : 0,
             },
             output);
         break;

@@ -1872,6 +1872,51 @@ void testOptimizerClipGradNormRejectsPackedSymGradStorage(void) {
     freeParameter(param);
 }
 
+/* Final-review Fix 3(c): momentumStateInit (SgdApi.c) builds the momentum
+ * buffer via getQLike(momentumQuant) with no carrier gate of its own --
+ * unlike gradInit (TensorApi.c), which already fail-fasts a grouped SYM
+ * template (grouped grads are a future #300 axis). A grouped SYM
+ * momentumQuant would silently getQLike-clone into a grouped momentum
+ * buffer today, contradicting the plan's PR3 boundary (groups are legal
+ * ONLY as GEMM-family weights in the two gather forwards) -- momentum must
+ * fail-fast exactly like grads do. momentumFactor=0.9f (nonzero) so
+ * momentumStateInit actually runs (momentumFactor==0 allocates no states at
+ * all). The gate is on the momentumQuant TEMPLATE, mirroring gradInit's
+ * gate on gradQ, not on the param being decorated -- so the weight tensor's
+ * OWN element count (2*4=8) is deliberately made to EQUAL the momentumQuant
+ * template's numGroups*groupSize (2*4=8): this rules out the death coming
+ * from the UNRELATED, pre-existing initTensor/validateSymQConfigShape guard
+ * (TensorApi.c) tripping on a coincidental group-shape/element-count
+ * mismatch instead of the new gate under test (mutation-vacuity guard --
+ * confirmed by construction, not just by inspection, since an earlier draft
+ * of this test used a mismatched shape and passed for the WRONG reason
+ * before this gate existed). bias=NULL keeps the model to exactly one
+ * trainable state (the weight), so there is no second momentumStateInit
+ * call to reason about. */
+void testSgdCreateGroupedSymMomentumQuantExits(void) {
+    ASSERT_EXITS_WITH(1, {
+        quantization_t *layerQ = quantizationInitFloat();
+        size_t *wDims = reserveMemory(2 * sizeof(size_t));
+        wDims[0] = 2;
+        wDims[1] = 4;
+        size_t *wOrder = reserveMemory(2 * sizeof(size_t));
+        setOrderOfDimsForNewTensor(2, wOrder);
+        shape_t *wShape = reserveMemory(sizeof(shape_t));
+        setShape(wShape, wDims, 2, wOrder);
+        tensor_t *wParam = initTensor(wShape, quantizationInitFloat(), NULL);
+        tensorFillFromFloatBuffer(wParam, (float[]){0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f}, 8);
+        tensor_t *wGrad = gradInitFloat(wParam, NULL);
+        parameter_t *weights = parameterInit(wParam, wGrad);
+
+        layer_t *linear = buildBorrowedLinearLayer(weights, NULL, layerQ);
+        layer_t *model[] = {linear};
+
+        quantization_t *momentumQ = quantizationInitSymGrouped(4, HALF_AWAY, 2, 4);
+        sgdMCreateOptim(0.1f, 0.9f, 0.0f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    });
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testOptimizerSkipsFrozenLayerInCountAndCollection);
@@ -1908,5 +1953,6 @@ int main() {
     RUN_TEST(testOptimizerClipGradNormExactlyAtNormStillClipsByEpsilon);
     RUN_TEST(testOptimizerClipGradNormSymInt32FoldsCoefIntoScaleMantissasUntouched);
     RUN_TEST(testOptimizerClipGradNormRejectsPackedSymGradStorage);
+    RUN_TEST(testSgdCreateGroupedSymMomentumQuantExits);
     return UNITY_END();
 }

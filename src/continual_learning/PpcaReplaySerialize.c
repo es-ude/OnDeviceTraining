@@ -22,6 +22,15 @@
 #define PPCA_SERIALIZE_FORMAT_VERSION 2u
 /* PPCA state tensors are rank 1 or 2 by construction (mean/eigvals, basis). */
 #define PPCA_MAX_TENSOR_RANK 2
+/* Lockstep literal with Deserialize.c's SERIAL_MAX_SYM_GROUPS (same value,
+ * same rationale) -- this module has no allocation sized by the file's
+ * numGroups (the peek below only fseek-skips past scales[], never reserves
+ * memory for them), but an untrusted, unbounded numGroups still drives an
+ * unbounded serialReadF32LE loop on a corrupt/foreign file, so the same
+ * sanity cap applies for uniform reader hardening. Keep this literal equal
+ * to Deserialize.c's by hand; there is no shared header both modules already
+ * depend on to hoist it into (see final-review Fix 7). */
+#define PPCA_MAX_SYM_GROUPS 65536u
 
 void ppcaReplaySetSerialize(const ppcaReplaySet_t *set, FILE *f) {
     serialWriteBytes(PPCA_SERIALIZE_MAGIC, 4, f);
@@ -104,6 +113,16 @@ static void peekValidateThenDeserializeTensor(tensor_t *skeleton, FILE *f, const
          * the #316 2x-overflow case, independent of group shape. */
         uint32_t numGroups = serialReadU32LE(f);
         symQConfig_t *skelQc = skeleton->quantization->qConfig;
+        /* Task-5-style review fix: bound the untrusted file numGroups before
+         * the skip loop below reads that many floats off the stream (mirrors
+         * Deserialize.c's deserializeQConfig guard -- see PPCA_MAX_SYM_GROUPS
+         * above). */
+        if (numGroups == 0 || numGroups > PPCA_MAX_SYM_GROUPS) {
+            PRINT_ERROR("ppcaReplaySetDeserialize: %s SYM file numGroups %u is zero or exceeds "
+                        "the %u-group sanity cap",
+                        what, (unsigned)numGroups, (unsigned)PPCA_MAX_SYM_GROUPS);
+            exit(1);
+        }
         uint32_t groupSize = serialReadU32LE(f);
         if ((numGroups == 1) != (groupSize == 0)) {
             PRINT_ERROR("ppcaReplaySetDeserialize: %s SYM file violates the "

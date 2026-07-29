@@ -20,6 +20,20 @@
  * quantization (`momentumQuant`, deep-cloned via getQLike) -- decouples the
  * accumulator's dtype from the parameter's storage dtype (#277 Task 2). */
 static tensor_t *momentumStateInit(tensor_t *param, quantization_t *momentumQuant) {
+    /* Group-quant PR2 final-review Fix 3(c) carrier gate (mirrors gradInit,
+     * TensorApi.c): groups are legal ONLY on GEMM-family weight tensors --
+     * momentum states stay per-tensor unconditionally until PR3. Without
+     * this, getQLike would silently clone a grouped SYM momentumQuant
+     * template into a grouped momentum buffer -- a state PR2's contract
+     * never intended to support. */
+    if (momentumQuant->type == SYM) {
+        symQConfig_t *symQC = momentumQuant->qConfig;
+        if (symQC->numGroups > 1) {
+            PRINT_ERROR("momentumStateInit: grouped SYM momentum templates are unsupported -- "
+                        "grouped momentum is a future #300 axis (spec §3)");
+            exit(1);
+        }
+    }
     return initTensor(getShapeLike(param->shape), getQLike(momentumQuant), NULL);
 }
 

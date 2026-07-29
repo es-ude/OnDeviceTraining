@@ -1686,7 +1686,7 @@ static layer_t *buildGroupedConv1dFixtureLayer(quantization_t *q, size_t numGrou
  * the kernel's internal arithmetic (wrong s_acc, dropped combine, wrong
  * rounding mode) changes the compared value measurably. Still routes through
  * conv1dForward -> executeOp's grouped-operand gate, so mutation (iv) (the
- * layer's allowGroupedSymOperands wiring) still applies. */
+ * layer's groupedSymOperandPos wiring) still applies. */
 void testConv1dForwardGroupedPerChannelMatchesGold(void) {
     quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
     tensor_t *input = NULL;
@@ -1780,6 +1780,46 @@ void testConv1dForwardGroupedEqualScalesBitIdenticalToScalar(void) {
                                   kPerChannelOutMantissas_len);
 }
 
+/* Final-review Fix 3(b): Conv1d had no FLOAT32-math grouped-forward coverage
+ * at all (unlike Linear, which pins both arms via
+ * testLinearForwardGroupedFloatPathAgreesWithinTolerance) -- the review found
+ * conv1dForward's FLOAT32 arm never declared groupedSymOperandPos, an
+ * asymmetry that would have made Conv1d's FLOAT32-math grouped forward
+ * regress the moment the funnel's FLOAT32-arm deny gate landed (Fix 3a).
+ * Same perChannel fixture as testConv1dForwardGroupedPerChannelMatchesGold
+ * (buildGroupedConv1dFixtureLayer with a FLOAT32 `q` instead of SYM_INT32 --
+ * the weight/bias/input tensors are STILL grouped-SYM/SYM_INT32 storage,
+ * exactly like the SYM_INT32-math sibling; only forwardMath differs),
+ * exercising Task 2's grouped dequant (convertSymTensorToFloat32Tensor)
+ * gated by Fix 3(a)'s FLOAT32-arm check instead of skipping it entirely.
+ *
+ * Tolerance (same 2-combines-per-output-element structure as
+ * testLinearForwardGroupedFloatPathAgreesWithinTolerance's per-channel
+ * fixture: groupSize==the full reduction length per output channel, so ONE
+ * weight tail-combine + ONE bias-seed combine per output element, each
+ * HALF_AWAY-rounding by at most 0.5 quanta): 1.0 * kPerChannelOutScale +
+ * 1e-6f headroom for float32 arithmetic noise. */
+void testConv1dForwardGroupedPerChannelFloatPathAgreesWithinTolerance(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    tensor_t *input = NULL;
+    layer_t *conv1d =
+        buildGroupedConv1dFixtureLayer(floatQ, (size_t)kPerChannelNumGroups,
+                                       (size_t)kPerChannelGroupSize, kPerChannelWScales, &input);
+
+    size_t outputDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kConv1dGroupedOutChannels,
+                           (size_t)kPerChannelOutLen};
+    tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
+
+    conv1dForward(conv1d, input, output);
+
+    float *captured = (float *)output->data;
+    const float tolerance = 1.0f * kPerChannelOutScale + 1e-6f;
+    for (size_t i = 0; i < kPerChannelOutMantissas_len; i++) {
+        float expected = (float)kPerChannelOutMantissas[i] * kPerChannelOutScale;
+        TEST_ASSERT_FLOAT_WITHIN(tolerance, expected, captured[i]);
+    }
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -1827,5 +1867,6 @@ int main() {
     RUN_TEST(testConv1dForwardGroupedPerChannelMatchesGold);
     RUN_TEST(testConv1dForwardGroupedGeneralMatchesGold);
     RUN_TEST(testConv1dForwardGroupedEqualScalesBitIdenticalToScalar);
+    RUN_TEST(testConv1dForwardGroupedPerChannelFloatPathAgreesWithinTolerance);
     return UNITY_END();
 }

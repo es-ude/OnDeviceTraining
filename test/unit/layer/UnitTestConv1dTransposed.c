@@ -1215,8 +1215,8 @@ void testConv1dTransposedBackwardNullPropLossComputesGradsOnly(void) {
 /* Group-quant PR2 (Task 4): ConvT1d's forward path gets NO code change --
  * this death test pins that a grouped-SYM weight reaching
  * conv1dTransposedForward still hits the Task-3 funnel's default-deny
- * (ExecuteOp.c's allowGroupedSymOperands gate, zero-init == false here,
- * unlike Conv1d.c/Linear.c which opt in), exactly as it did before Task 4
+ * (ExecuteOp.c's groupedSymOperandPos gate, zero-init == 0 here, unlike
+ * Conv1d.c/Linear.c which opt in), exactly as it did before Task 4
  * existed. The scatter-core grouped entry (ConvT1d's own group-partial
  * gather, mirror of Conv1dKernel's) is deferred to PR3 -- this is that
  * pointer. Reuses the simplest existing SYM ConvT1d geometry

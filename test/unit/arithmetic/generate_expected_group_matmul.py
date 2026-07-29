@@ -45,6 +45,13 @@ test):
         and asserts the outputs differ -- proving the combine's rounding
         mode is not hardcoded. Disclosed substitution, see task-3-report.md.)
 
+test/unit/layer/UnitTestLinear.c hand-duplicates this SAME a/weight/bias/
+output data as its own file-local literals (kGroupedWMantissas,
+kGroupedWScales, kGroupedBiasMantissas, kGroupedOutMantissas, etc. -- see
+that file's comment for why it isn't shared across test binaries). If you
+regenerate this fixture, update those literals by hand to match -- they do
+NOT update automatically.
+
 Run via `uv run` (CMake wires this automatically, see CMakeLists.txt).
 """
 import argparse

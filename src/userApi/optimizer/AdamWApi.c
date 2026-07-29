@@ -14,6 +14,20 @@
  * of momentQuant) -- accumulator dtype decoupled from the parameter's
  * storage dtype (SgdApi momentumStateInit precedent, #277). */
 static tensor_t *momentStateInit(tensor_t *param, quantization_t *momentQuant) {
+    /* Group-quant PR2 final-review Fix 3(c) carrier gate (mirrors gradInit,
+     * TensorApi.c, and SgdApi's momentumStateInit twin): groups are legal
+     * ONLY on GEMM-family weight tensors -- moment states stay per-tensor
+     * unconditionally until PR3. Without this, getQLike would silently
+     * clone a grouped SYM momentQuant template into a grouped moment
+     * buffer -- a state PR2's contract never intended to support. */
+    if (momentQuant->type == SYM) {
+        symQConfig_t *symQC = momentQuant->qConfig;
+        if (symQC->numGroups > 1) {
+            PRINT_ERROR("momentStateInit: grouped SYM moment templates are unsupported -- "
+                        "grouped moments are a future #300 axis (spec §3)");
+            exit(1);
+        }
+    }
     return initTensor(getShapeLike(param->shape), getQLike(momentQuant), NULL);
 }
 

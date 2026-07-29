@@ -854,6 +854,26 @@ void testGradInitRejectsGroupedSymTemplate(void) {
     });
 }
 
+/* Final-review Fix 1 (CRITICAL, heap-OOB): requantizeTensorInPlace builds its
+ * destination view directly (getQLike + getDataLike), bypassing initTensor's
+ * validateSymQConfigShape choke point entirely. A grouped SYM target whose
+ * numGroups*groupSize does not equal the SOURCE tensor's actual element
+ * count sizes the data buffer/view off the SOURCE's count while the group
+ * shape (and therefore the number of scales the SYM pack/unpack path will
+ * index) come from the TARGET template -- a 12-element FLOAT32 source
+ * requantized against a {numGroups=2, groupSize=4} target (implies 8
+ * elements) walks group indices up to 12/4-1=2, reading scales[2] out of a
+ * 2-element scales[] array (ASan-confirmed heap-OOB read in
+ * packFloatBufferAsSym's Phase 2). Must fail-fast before either buffer is
+ * touched. */
+void testRequantizeTensorInPlaceRejectsMismatchedGroupShape(void) {
+    ASSERT_EXITS_WITH(1, {
+        tensor_t *t = makeFloatTensor1d(12); /* file-local Rule-1 factory */
+        quantization_t *targetQ = quantizationInitSymGrouped(4, HALF_AWAY, 2, 4);
+        requantizeTensorInPlace(t, targetQ);
+    });
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testTensorInitWithDistribution_Zeros_InitializesProductOfDimsValues);
@@ -890,5 +910,6 @@ int main(void) {
     RUN_TEST(testInitTensorValidatesGroupedSymShape);
     RUN_TEST(testGetQLikeSymPreservesGroups);
     RUN_TEST(testGradInitRejectsGroupedSymTemplate);
+    RUN_TEST(testRequantizeTensorInPlaceRejectsMismatchedGroupShape);
     return UNITY_END();
 }

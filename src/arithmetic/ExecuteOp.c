@@ -251,6 +251,31 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
             ops[i] = inputs[i];
             continue;
         }
+
+        /* Group-quant PR2 (Task 3; final-review Fix 2/3): a grouped SYM
+         * operand (numGroups > 1) has no scalar compute image under EITHER
+         * arithmetic type -- the SYM->SYM_INT32 conversionMatrix cell
+         * fail-fasts on it (Task 2), and the SYM->FLOAT32 cell, while
+         * group-aware, is only meant to be reachable from the two declared
+         * gather-forward call sites (PR2's contract), not e.g. an optimizer
+         * update or a FLOAT32-math backward dx. Gate BOTH arms here, before
+         * either arm's convertTensor call, on the declared position alone --
+         * a grouped operand at any other position (or when nothing is
+         * declared, groupedSymOperandPos == 0) fail-fasts. */
+        symQConfig_t *symQC = (inputs[i]->quantization->type == SYM)
+                                  ? (symQConfig_t *)inputs[i]->quantization->qConfig
+                                  : NULL;
+        bool grouped = symQC != NULL && symQC->numGroups > 1;
+        if (grouped && spec->groupedSymOperandPos != i + 1) {
+            PRINT_ERROR(
+                "executeOp: grouped SYM operand (numGroups=%zu) at inputs[%zu] reached an op "
+                "without a matching groupedSymOperandPos declaration — only the declared "
+                "position's group-aware forward paths accept grouped operands in PR2 "
+                "(backward/optimizer land in PR3)",
+                symQC->numGroups, i);
+            exit(1);
+        }
+
         if (arithmetic.type == ARITH_FLOAT32) {
             initFloat32Quantization(&scratchQ[i]);
             setTensorValuesForConversion(&scratch[scratchOffset], &scratchQ[i], inputs[i],
@@ -262,22 +287,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
             setTensorValuesForConversion(&scratch[scratchOffset], &scratchQ[i], inputs[i],
                                          &scratchTensors[i]);
 
-            /* Group-quant PR2 (Task 3): a grouped SYM operand (numGroups > 1)
-             * has no scalar compute image — the SYM->SYM_INT32
-             * conversionMatrix cell fail-fasts on it (Task 2). Intercept it
-             * HERE, before convertTensor would ever reach that cell. */
-            symQConfig_t *symQC = (inputs[i]->quantization->type == SYM)
-                                      ? (symQConfig_t *)inputs[i]->quantization->qConfig
-                                      : NULL;
-            if (symQC != NULL && symQC->numGroups > 1) {
-                if (!spec->allowGroupedSymOperands) {
-                    PRINT_ERROR(
-                        "executeOp: grouped SYM operand (numGroups=%zu) reached an op without "
-                        "group support — only the group-aware forward paths accept grouped "
-                        "weights in PR2 (backward/optimizer land in PR3)",
-                        symQC->numGroups);
-                    exit(1);
-                }
+            if (grouped) {
                 size_t n = calcNumberOfElementsByTensor(inputs[i]);
                 unpackSignExtend(inputs[i]->data, symQC->qBits, 0,
                                  (int32_t *)scratchTensors[i].data, n);

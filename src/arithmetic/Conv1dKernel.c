@@ -272,6 +272,12 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                             size_t inputIdx = slice.firstValidInputIdx + i * geom.dilation;
                             size_t kernelIdx = slice.firstValidKernelOffset + i;
                             size_t wStorageIdx = wBase + icOffset * kernelSize + kernelIdx;
+                            /* Per-element division, unlike Matmul's grouped kernel (which
+                             * precomputes a run length to the next group boundary): padding
+                             * (VALID/SAME/EXPLICIT) makes slice.validCount skip invalid kernel
+                             * positions, so consecutive wStorageIdx values here can have gaps --
+                             * a precomputed run length would overshoot past a skipped index.
+                             * Dividing the actual visited index is gap-robust. */
                             size_t elemGroup = wStorageIdx / weightGroups->groupSize;
 
                             if (elemGroup != currentGroup) {

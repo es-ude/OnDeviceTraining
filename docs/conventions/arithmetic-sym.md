@@ -309,7 +309,7 @@ independent-rounding assumption RMS ≈ 0.5·√C·s_acc. C by path:
 |---|---|---|
 | forward gather (Linear/Conv1d) | running group-partial | groups crossed by the reduction; per-channel = **1** |
 | dx gather (Linear dx, ConvT1d dx) | running group-partial, strided/adjoint orientation | distinct groups crossed; per-channel Linear dx = **outFeatures** |
-| scatter (ConvT1d forward, Conv1d dx) | per-product rescale (scatter targets change per product — no running partial exists) | contributing products; worst case ≈ IC·K |
+| scatter (ConvT1d forward, Conv1d dx) | per-product rescale (scatter targets change per product — no running partial exists) | contributing products = (scatter-input channels)·K — ConvT1d fwd: Cin·K, Conv1d dx: **Cout**·K (the products arrive per lossGrad channel) |
 
 The RELATIVE error stays in the single-quantization-step class: the signal is
 itself a sum of C-many O(qMax²·s_acc) terms, so √C rounding noise rides on a

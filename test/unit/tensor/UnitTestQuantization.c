@@ -108,6 +108,139 @@ void testValidateSymQConfigShapeDivisibility(void) {
     TEST_ASSERT_TRUE(true); /* reached ⇒ ok-case did not exit */
 }
 
+/* Group-quant PR4 (Task 1, spec D6): asymQConfig_t goes always-array
+ * (scales[numGroups] + CODE-domain uint16 zeroPoints[numGroups]) with the
+ * same {1,0}-per-tensor / {>1,>0}-grouped shape grammar as symQConfig_t.
+ * ASYM's qBits ceiling drops 30 -> 16 (uint16 zp domain, D6). */
+
+void testInitAsymQConfigProducesPerTensorSentinelWithZeroZp(void) {
+    /* Mutation guard: hardcoding a different shape pair, or seeding
+     * zeroPoints[0] != 0 / scales[0] != 1, fails this. */
+    asymQConfig_t qc;
+    initAsymQConfig(6, SR_HALF_AWAY, &qc);
+
+    size_t numGroups = qc.numGroups;
+    size_t groupSize = qc.groupSize;
+    uint8_t qBits = qc.qBits;
+    roundingMode_t roundingMode = qc.roundingMode;
+    float scale0 = qc.scales[0];
+    uint16_t zp0 = qc.zeroPoints[0];
+
+    freeReservedMemory(qc.zeroPoints);
+    freeReservedMemory(qc.scales);
+
+    TEST_ASSERT_EQUAL_size_t(1, numGroups);
+    TEST_ASSERT_EQUAL_size_t(0, groupSize);
+    TEST_ASSERT_EQUAL_UINT8(6, qBits);
+    TEST_ASSERT_EQUAL_INT(SR_HALF_AWAY, roundingMode);
+    TEST_ASSERT_EQUAL_FLOAT(1.f, scale0);
+    TEST_ASSERT_EQUAL_UINT16(0, zp0);
+}
+
+void testInitAsymQConfigAllocatesIndependentArrays(void) {
+    /* Both owned blocks (scales AND zeroPoints) must be per-config heap
+     * arrays -- no shared/static storage, and the two blocks are distinct
+     * allocations (SYM ownership pattern, one block per array). */
+    asymQConfig_t a;
+    asymQConfig_t b;
+    initAsymQConfig(4, HALF_AWAY, &a);
+    initAsymQConfig(4, HALF_AWAY, &b);
+
+    float *aScales = a.scales;
+    float *bScales = b.scales;
+    uint16_t *aZps = a.zeroPoints;
+    uint16_t *bZps = b.zeroPoints;
+
+    freeReservedMemory(a.zeroPoints);
+    freeReservedMemory(a.scales);
+    freeReservedMemory(b.zeroPoints);
+    freeReservedMemory(b.scales);
+
+    TEST_ASSERT_NOT_NULL(aScales);
+    TEST_ASSERT_NOT_NULL(aZps);
+    TEST_ASSERT_NOT_EQUAL(aScales, bScales);
+    TEST_ASSERT_NOT_EQUAL(aZps, bZps);
+    TEST_ASSERT_NOT_EQUAL((void *)aScales, (void *)aZps);
+}
+
+void testInitAsymQConfigGroupedAllocatesPerGroupArrays(void) {
+    asymQConfig_t qc;
+    initAsymQConfigGrouped(4, SR_HALF_AWAY, 3, 5, &qc);
+    size_t numGroups = qc.numGroups;
+    size_t groupSize = qc.groupSize;
+    float s0 = qc.scales[0], s2 = qc.scales[2];
+    uint16_t z0 = qc.zeroPoints[0], z2 = qc.zeroPoints[2];
+    qc.scales[2] = 7.f; /* writable per-group slots */
+    qc.zeroPoints[2] = 9;
+    float s2w = qc.scales[2];
+    uint16_t z2w = qc.zeroPoints[2];
+    freeReservedMemory(qc.zeroPoints);
+    freeReservedMemory(qc.scales);
+    TEST_ASSERT_EQUAL_size_t(3, numGroups);
+    TEST_ASSERT_EQUAL_size_t(5, groupSize);
+    TEST_ASSERT_EQUAL_FLOAT(1.f, s0);
+    TEST_ASSERT_EQUAL_FLOAT(1.f, s2);
+    TEST_ASSERT_EQUAL_UINT16(0, z0);
+    TEST_ASSERT_EQUAL_UINT16(0, z2);
+    TEST_ASSERT_EQUAL_FLOAT(7.f, s2w);
+    TEST_ASSERT_EQUAL_UINT16(9, z2w);
+}
+
+void testInitAsymQConfigGroupedRejectsSentinelViolations(void) {
+    asymQConfig_t qc;
+    /* numGroups>1 with groupSize==0 violates the invariant */
+    ASSERT_EXITS_WITH(1, { initAsymQConfigGrouped(4, HALF_AWAY, 2, 0, &qc); });
+    /* numGroups==1 with groupSize!=0 is the non-canonical {1,N} form */
+    ASSERT_EXITS_WITH(1, { initAsymQConfigGrouped(4, HALF_AWAY, 1, 8, &qc); });
+    ASSERT_EXITS_WITH(1, { initAsymQConfigGrouped(4, HALF_AWAY, 0, 0, &qc); });
+}
+
+void testInitAsymQConfigGroupedRejectsQBitsOutside1To16(void) {
+    /* D6: the code-domain zeroPoint is uint16, so qBits > 16 has no zp
+     * representation (supersedes the old [1, 30] #246 ceiling); 0 would
+     * underflow the sub-byte packer, as before. */
+    asymQConfig_t qc;
+    ASSERT_EXITS_WITH(1, { initAsymQConfigGrouped(17, HALF_AWAY, 1, 0, &qc); });
+    ASSERT_EXITS_WITH(1, { initAsymQConfigGrouped(0, HALF_AWAY, 1, 0, &qc); });
+}
+
+void testValidateAsymQConfigShapeDivisibilityAndQBits(void) {
+    float s[2] = {1.f, 1.f};
+    uint16_t z[2] = {0, 0};
+    asymQConfig_t ok = {.scales = s,
+                        .zeroPoints = z,
+                        .numGroups = 2,
+                        .groupSize = 5,
+                        .roundingMode = HALF_AWAY,
+                        .qBits = 4};
+    validateAsymQConfigShape(&ok, 10); /* must NOT exit */
+    asymQConfig_t bad = {.scales = s,
+                         .zeroPoints = z,
+                         .numGroups = 2,
+                         .groupSize = 4,
+                         .roundingMode = HALF_AWAY,
+                         .qBits = 4};
+    ASSERT_EXITS_WITH(1, { validateAsymQConfigShape(&bad, 10); });
+    /* {1,N} is not a per-tensor spelling (same grammar as SYM) */
+    asymQConfig_t oneN = {.scales = s,
+                          .zeroPoints = z,
+                          .numGroups = 1,
+                          .groupSize = 10,
+                          .roundingMode = HALF_AWAY,
+                          .qBits = 4};
+    ASSERT_EXITS_WITH(1, { validateAsymQConfigShape(&oneN, 10); });
+    /* the attach-time validator re-checks the D6 width ceiling for
+     * field-assigned configs that never went through the init funnel */
+    asymQConfig_t wide = {.scales = s,
+                          .zeroPoints = z,
+                          .numGroups = 2,
+                          .groupSize = 5,
+                          .roundingMode = HALF_AWAY,
+                          .qBits = 17};
+    ASSERT_EXITS_WITH(1, { validateAsymQConfigShape(&wide, 10); });
+    TEST_ASSERT_TRUE(true); /* reached ⇒ ok-case did not exit */
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testInitSymQConfigProducesPerTensorSentinel);
@@ -115,5 +248,11 @@ int main(void) {
     RUN_TEST(testInitSymQConfigGroupedAllocatesPerGroupScales);
     RUN_TEST(testInitSymQConfigGroupedRejectsSentinelViolations);
     RUN_TEST(testValidateSymQConfigShapeDivisibility);
+    RUN_TEST(testInitAsymQConfigProducesPerTensorSentinelWithZeroZp);
+    RUN_TEST(testInitAsymQConfigAllocatesIndependentArrays);
+    RUN_TEST(testInitAsymQConfigGroupedAllocatesPerGroupArrays);
+    RUN_TEST(testInitAsymQConfigGroupedRejectsSentinelViolations);
+    RUN_TEST(testInitAsymQConfigGroupedRejectsQBitsOutside1To16);
+    RUN_TEST(testValidateAsymQConfigShapeDivisibilityAndQBits);
     return UNITY_END();
 }

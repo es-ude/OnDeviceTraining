@@ -72,11 +72,22 @@ void scaleOptimizerGradients(optimizer_t *optimizer, float factor) {
             break;
         }
         case ASYM: {
-            /* Packed-ASYM dequant is (code + zeroPoint) * scale: still linear
-             * in scale, so the fold is exact the same way; zeroPoint is an
-             * additive offset on the code axis and is untouched. */
+            /* Packed-ASYM dequant is (code - zeroPoint) * scale (D6 code
+             * domain): still linear in scale, so the fold is exact the same
+             * way; zeroPoint is an additive offset on the code axis and is
+             * untouched. Same defensive grouped gate as the SYM arm above
+             * (grads are per-tensor by gradInit's carrier gate, but a
+             * hand-assembled optimizer could bypass it -- folding into
+             * scales[0] alone would corrupt every other group). */
             asymQConfig_t *gradQ = param->grad->quantization->qConfig;
-            gradQ->scale *= factor;
+            if (gradQ->numGroups > 1) {
+                PRINT_ERROR("scaleOptimizerGradients: grouped ASYM grad storage "
+                            "(numGroups=%zu) is not supported — grads are per-tensor "
+                            "unconditionally (gradInit's carrier gate, #300 axis)",
+                            gradQ->numGroups);
+                exit(1);
+            }
+            gradQ->scales[0] *= factor;
             break;
         }
         default:

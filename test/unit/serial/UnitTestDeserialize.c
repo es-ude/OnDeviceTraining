@@ -378,13 +378,17 @@ static tensor_t *makeAsymTensor1D(size_t d0) {
     return initTensor(shape, quantizationInitAsym(8, HALF_AWAY), NULL);
 }
 
-/* #370/#246: ASYM zeroPoint travels as i32 LE and must round-trip losslessly;
- * -72817 is the qBits=16 worst case that used to wrap in the int16 field. */
+/* #370, re-pinned for group-quant PR4 (D6): the zeroPoint slot is still i32
+ * LE on the wire but now carries the code-domain uint16 zp; 40000 (> INT16_MAX,
+ * < 2^16) is the widest-band class that must round-trip losslessly. The old
+ * -72817 value-domain pin has no uint16 representation -- it re-derives as the
+ * 65535 ceiling under the nudge (see UnitTestTensorConversion's
+ * f2NegBand16 pin). */
 static void testDeserializeTensorRoundTripsAsymZeroPoint(void) {
     tensor_t *src = makeAsymTensor1D(4);
     asymQConfig_t *srcQc = src->quantization->qConfig;
-    srcQc->scale = 0.5f;
-    srcQc->zeroPoint = -72817;
+    srcQc->scales[0] = 0.5f;
+    srcQc->zeroPoints[0] = 40000;
 
     FILE *f = fopen(FILE_PATH, "wb");
     serializeTensor(src, f);
@@ -396,17 +400,18 @@ static void testDeserializeTensorRoundTripsAsymZeroPoint(void) {
     fclose(f);
 
     asymQConfig_t *dstQc = dst->quantization->qConfig;
-    float capturedScale = dstQc->scale;
-    int32_t capturedZeroPoint = dstQc->zeroPoint;
+    float capturedScale = dstQc->scales[0];
+    uint16_t capturedZeroPoint = dstQc->zeroPoints[0];
     freeTensor(dst);
     freeTensor(src);
 
     TEST_ASSERT_EQUAL_FLOAT(0.5f, capturedScale);
-    TEST_ASSERT_EQUAL_INT32(-72817, capturedZeroPoint);
+    TEST_ASSERT_EQUAL_UINT16(40000, capturedZeroPoint);
 }
 
-/* #370/#246: hand-crafted record pins the i32 LE zeroPoint wire slot — a value
- * outside the old int16 range must arrive intact in the widened field. */
+/* #370/PR4: hand-crafted record pins the i32 LE zeroPoint wire slot — a value
+ * outside int16 but inside the uint16 code domain must arrive intact (the
+ * reader clamps the i32 slot into [0, 65535], a no-op here). */
 static void testDeserializeQConfigAcceptsWideZeroPoint(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     writeU32LE(f, 1); /* numberOfDimensions */
@@ -431,10 +436,10 @@ static void testDeserializeQConfigAcceptsWideZeroPoint(void) {
     fclose(f);
 
     asymQConfig_t *skelQc = skeleton->quantization->qConfig;
-    int32_t capturedZeroPoint = skelQc->zeroPoint;
+    uint16_t capturedZeroPoint = skelQc->zeroPoints[0];
     freeTensor(skeleton);
 
-    TEST_ASSERT_EQUAL_INT32(40000, capturedZeroPoint);
+    TEST_ASSERT_EQUAL_UINT16(40000, capturedZeroPoint);
 }
 
 static tensor_t *makeSymTensor1D(size_t d0, uint8_t qBits, roundingMode_t roundingMode) {

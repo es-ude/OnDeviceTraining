@@ -55,6 +55,19 @@ add_custom_command(
 add_custom_target(generate_expected_group_quant
         DEPENDS ${GEN_GROUP_QUANT_HEADER})
 add_dependencies(UnitTestTensorConversion generate_expected_group_quant)
+set(GEN_ASYM_NUDGED_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_asym_nudged.h)
+add_custom_command(
+        OUTPUT ${GEN_ASYM_NUDGED_HEADER}
+        COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_asym_nudged.py
+                --out ${GEN_ASYM_NUDGED_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_asym_nudged.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+        COMMENT "Generating expected_asym_nudged.h via PyTorch"
+        VERBATIM
+)
+add_custom_target(generate_expected_asym_nudged
+        DEPENDS ${GEN_ASYM_NUDGED_HEADER})
+add_dependencies(UnitTestTensorConversion generate_expected_asym_nudged)
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         TensorApi

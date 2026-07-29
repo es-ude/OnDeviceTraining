@@ -36,8 +36,16 @@ static void testSymInt32QuantizationDerivesSymArithmeticWithItsRoundingMode(void
 static void testStorageOnlyDtypesDeriveFloatArithmetic(void) {
     /* ASYM/SYM/BOOL/INT32 are storage formats; compute bridges through float
      * (spec D5, project ASYM design: conversion between native ops). */
-    asymQConfig_t aqc;
-    initAsymQConfig(8, SR_HALF_AWAY, &aqc);
+    /* Stack-fixture idiom (PR4): initAsymQConfig would heap-allocate two
+     * arrays this test never frees. */
+    float aqcScales[1] = {1.f};
+    uint16_t aqcZps[1] = {0};
+    asymQConfig_t aqc = {.scales = aqcScales,
+                         .zeroPoints = aqcZps,
+                         .numGroups = 1,
+                         .groupSize = 0,
+                         .qBits = 8,
+                         .roundingMode = SR_HALF_AWAY};
     quantization_t asymQ;
     initAsymQuantization(&aqc, &asymQ);
     arithmetic_t a = arithmeticFromQuantization(&asymQ);

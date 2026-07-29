@@ -617,10 +617,10 @@ void testScaleOptimizerGradients_Asym_ScalesScaleOnly(void) {
     memcpy(bBytesBefore, b->grad->data, bBytes);
     asymQConfig_t *wQ = w->grad->quantization->qConfig;
     asymQConfig_t *bQ = b->grad->quantization->qConfig;
-    float wScaleBefore = wQ->scale;
-    float bScaleBefore = bQ->scale;
-    int32_t wZeroPointBefore = wQ->zeroPoint;
-    int32_t bZeroPointBefore = bQ->zeroPoint;
+    float wScaleBefore = wQ->scales[0];
+    float bScaleBefore = bQ->scales[0];
+    uint16_t wZeroPointBefore = wQ->zeroPoints[0];
+    uint16_t bZeroPointBefore = bQ->zeroPoints[0];
 
     scaleOptimizerGradients(sgd, factor);
 
@@ -629,10 +629,10 @@ void testScaleOptimizerGradients_Asym_ScalesScaleOnly(void) {
     uint8_t bBytesAfter[bBytes];
     memcpy(wBytesAfter, w->grad->data, wBytes);
     memcpy(bBytesAfter, b->grad->data, bBytes);
-    float wScaleAfter = wQ->scale;
-    float bScaleAfter = bQ->scale;
-    int32_t wZeroPointAfter = wQ->zeroPoint;
-    int32_t bZeroPointAfter = bQ->zeroPoint;
+    float wScaleAfter = wQ->scales[0];
+    float bScaleAfter = bQ->scales[0];
+    uint16_t wZeroPointAfter = wQ->zeroPoints[0];
+    uint16_t bZeroPointAfter = bQ->zeroPoints[0];
 
     freeOptim(sgd);
     freeLinearLayerShellOnly(model[0]);

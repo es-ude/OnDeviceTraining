@@ -85,9 +85,10 @@ static tensor_t *buildPackedSym(size_t n, const int32_t *mantissas, uint8_t qBit
 }
 
 /* Packed ASYM tensor (PR3 targets); codes are non-negative, no sign-extend
- * needed on the seeding side (byteConversion narrows verbatim). */
+ * needed on the seeding side (byteConversion narrows verbatim). zeroPoint is
+ * the CODE-domain uint16 (PR4, D6): dequant = (code - zeroPoint)*scale. */
 static tensor_t *buildAsymPacked(size_t n, const int32_t *codes, uint8_t qBits, float scale,
-                                 int32_t zeroPoint) {
+                                 uint16_t zeroPoint) {
     size_t *dims = reserveMemory(sizeof(size_t));
     dims[0] = n;
     size_t *order = reserveMemory(sizeof(size_t));
@@ -97,8 +98,8 @@ static tensor_t *buildAsymPacked(size_t n, const int32_t *codes, uint8_t qBits, 
     tensor_t *t = initTensor(shape, quantizationInitAsym(qBits, HALF_AWAY), NULL);
     byteConversion((uint8_t *)codes, 32, t->data, qBits, n);
     asymQConfig_t *qc = t->quantization->qConfig;
-    qc->scale = scale;
-    qc->zeroPoint = zeroPoint;
+    qc->scales[0] = scale;
+    qc->zeroPoints[0] = zeroPoint;
     return t;
 }
 
@@ -714,12 +715,12 @@ void testAccDynamicSymPackedAcceptsSymInt32IntermediateBitIdenticalToFloatBridge
  * mode) must match accumulateFloatIntoAsymTensorRescale exactly (fresh
  * affine grid every store). Fixture matches Task 2's own ASYM-rescale
  * fixture (recon-pack precedent): ASYM@5 codes {12,16,20,24} @
- * scale=0.25/zeroPoint=-4 dequant to {2,3,4,5}. */
+ * scale=0.25/zeroPoint=+4 (code-domain, PR4) dequant to {2,3,4,5}. */
 void testAccDynamicAsymPackedMatchesRescalePrimitive(void) {
     size_t n = 4;
     int32_t seedCodes[] = {12, 16, 20, 24};
-    tensor_t *target = buildAsymPacked(n, seedCodes, 5, 0.25f, -4);
-    tensor_t *ref = buildAsymPacked(n, seedCodes, 5, 0.25f, -4);
+    tensor_t *target = buildAsymPacked(n, seedCodes, 5, 0.25f, 4);
+    tensor_t *ref = buildAsymPacked(n, seedCodes, 5, 0.25f, 4);
     tensor_t *inc = buildFloat(n, (float[]){1.0f, -0.5f, 2.0f, 0.25f});
     quantization_t floatArith;
     initFloat32Quantization(&floatArith);
@@ -741,10 +742,10 @@ void testAccDynamicAsymPackedMatchesRescalePrimitive(void) {
     byteConversion(target->data, 5, (uint8_t *)got, 32,
                    n); /* asym codes: non-negative, no sign-extend */
     byteConversion(ref->data, 5, (uint8_t *)want, 32, n);
-    float gotScale = ((asymQConfig_t *)target->quantization->qConfig)->scale;
-    float wantScale = ((asymQConfig_t *)ref->quantization->qConfig)->scale;
-    int32_t gotZp = ((asymQConfig_t *)target->quantization->qConfig)->zeroPoint;
-    int32_t wantZp = ((asymQConfig_t *)ref->quantization->qConfig)->zeroPoint;
+    float gotScale = ((asymQConfig_t *)target->quantization->qConfig)->scales[0];
+    float wantScale = ((asymQConfig_t *)ref->quantization->qConfig)->scales[0];
+    uint16_t gotZp = ((asymQConfig_t *)target->quantization->qConfig)->zeroPoints[0];
+    uint16_t wantZp = ((asymQConfig_t *)ref->quantization->qConfig)->zeroPoints[0];
     freeTensor(inc);
     freeTensor(ref);
     freeTensor(target);
@@ -764,8 +765,8 @@ void testAccDynamicAsymPackedMatchesRescalePrimitive(void) {
 void testAccDynamicAsymPackedAcceptsSymInt32IntermediateBitIdenticalToFloatBridge(void) {
     size_t n = 4;
     int32_t seedCodes[] = {12, 16, 20, 24};
-    tensor_t *targetViaFloat = buildAsymPacked(n, seedCodes, 5, 0.25f, -4);
-    tensor_t *targetViaSymInt32 = buildAsymPacked(n, seedCodes, 5, 0.25f, -4);
+    tensor_t *targetViaFloat = buildAsymPacked(n, seedCodes, 5, 0.25f, 4);
+    tensor_t *targetViaSymInt32 = buildAsymPacked(n, seedCodes, 5, 0.25f, 4);
 
     tensor_t *incFloat = buildFloat(n, (float[]){1.0f, -0.5f, 2.0f, 0.25f});
     quantization_t floatArith;
@@ -799,10 +800,11 @@ void testAccDynamicAsymPackedAcceptsSymInt32IntermediateBitIdenticalToFloatBridg
     int32_t gotSymInt32[4];
     byteConversion(targetViaFloat->data, 5, (uint8_t *)gotFloat, 32, n);
     byteConversion(targetViaSymInt32->data, 5, (uint8_t *)gotSymInt32, 32, n);
-    float scaleFloat = ((asymQConfig_t *)targetViaFloat->quantization->qConfig)->scale;
-    float scaleSymInt32 = ((asymQConfig_t *)targetViaSymInt32->quantization->qConfig)->scale;
-    int32_t zpFloat = ((asymQConfig_t *)targetViaFloat->quantization->qConfig)->zeroPoint;
-    int32_t zpSymInt32 = ((asymQConfig_t *)targetViaSymInt32->quantization->qConfig)->zeroPoint;
+    float scaleFloat = ((asymQConfig_t *)targetViaFloat->quantization->qConfig)->scales[0];
+    float scaleSymInt32 = ((asymQConfig_t *)targetViaSymInt32->quantization->qConfig)->scales[0];
+    uint16_t zpFloat = ((asymQConfig_t *)targetViaFloat->quantization->qConfig)->zeroPoints[0];
+    uint16_t zpSymInt32 =
+        ((asymQConfig_t *)targetViaSymInt32->quantization->qConfig)->zeroPoints[0];
     freeTensor(incSymInt32);
     freeTensor(incFloat);
     freeTensor(targetViaSymInt32);

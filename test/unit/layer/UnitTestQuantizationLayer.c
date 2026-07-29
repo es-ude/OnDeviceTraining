@@ -134,16 +134,19 @@ void testQuantLayerConvertsAsymToSymInt32MatchesConvertTensor(void) {
      * happens to reconstruct the same float detour that convertFloatTensorTo*
      * /convertAsymTensorToFloatTensor already do). ASYM->SYM_INT32 is
      * genuinely broken by the shim: convertAsymTensorToSymInt32Tensor
-     * preserves the ASYM tensor's OWN scale exactly (mantissa = code +
-     * zeroPoint, scale unchanged - a lossless code shift). The shim instead
+     * preserves the ASYM tensor's OWN scale exactly (mantissa = code -
+     * zeroPoint under the PR4 code domain, scale unchanged - a lossless
+     * code shift). The shim instead
      * routes ASYM through a FLOAT32 detour (arithmeticFromQuantization(ASYM)
      * falls back to ARITH_FLOAT32), landing on convertFloatTensorToSymInt32Tensor,
      * which derives a FRESH absmax-based scale - a different mantissa AND a
      * different scale than the direct conversionMatrix path. */
     tensor_t *input = buildAsym2D(2, 2, 8);
     asymQConfig_t *inputAsymQC = input->quantization->qConfig;
-    inputAsymQC->scale = 0.25f;
-    inputAsymQC->zeroPoint = -10;
+    /* code-domain re-pin (PR4, D6): old value-domain zp -10 becomes +10;
+     * mantissa image code - 10 reproduces the same integers. */
+    inputAsymQC->scales[0] = 0.25f;
+    inputAsymQC->zeroPoints[0] = 10;
     const uint8_t codes[4] = {0, 40, 80, 255};
     memcpy(input->data, codes, sizeof(codes));
 

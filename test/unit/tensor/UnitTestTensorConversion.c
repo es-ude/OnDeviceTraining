@@ -5,6 +5,7 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
+#include "expected_asym_nudged.h"
 #include "expected_group_quant.h"
 #include "expected_requant.h"
 #include "unity.h"
@@ -134,8 +135,16 @@ void testConversionIntAsym() {
     tensor_t intTensor;
     setTensorValues(&intTensor, (uint8_t *)intData, &shape, &intQ, NULL);
 
-    asymQConfig_t asymQConfig;
-    initAsymQConfig(5, HALF_AWAY, &asymQConfig);
+    /* Stack-fixture idiom (group-quant PR4): local backing arrays, never
+     * freed -- the converter derives the grid into them. */
+    float asymScales[1] = {1.f};
+    uint16_t asymZps[1] = {0};
+    asymQConfig_t asymQConfig = {.scales = asymScales,
+                                 .zeroPoints = asymZps,
+                                 .numGroups = 1,
+                                 .groupSize = 0,
+                                 .qBits = 5,
+                                 .roundingMode = HALF_AWAY};
     quantization_t asymQ;
     initAsymQuantization(&asymQConfig, &asymQ);
     uint8_t asymData[numValues * calcBytesPerElement(&asymQ)];
@@ -147,13 +156,17 @@ void testConversionIntAsym() {
     uint8_t flattenedAsymData[numValues];
     byteConversion(asymTensor.data, asymQConfig.qBits, flattenedAsymData, 8, numValues);
 
-    uint8_t expectedAsym[] = {15, 20, 26, 31, 5, 0};
-    int32_t expectedZeroPoint = -10;
-    float expectedScale = 0.1935484f;
-
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(expectedAsym, flattenedAsymData, numValues);
-    TEST_ASSERT_EQUAL_INT32(expectedZeroPoint, asymQConfig.zeroPoint);
-    TEST_ASSERT_EQUAL_FLOAT(expectedScale, asymQConfig.scale);
+    /* Re-pinned to the nudged code-domain grid (group-quant PR4, D6): zp is
+     * now the CODE-domain +10 (old value-domain zp was -10); the codes
+     * happen to coincide with the old grid for this zero-spanning band
+     * (verified by the goldgen, not assumed). Gold: expected_asym_nudged.h
+     * f1SpanZero (same {1,2,3,4,-1,-2} values as this int fixture). */
+    TEST_ASSERT_EQUAL_size_t(numValues, codes_asym_nudged_f1SpanZero_len);
+    for (size_t i = 0; i < numValues; i++) {
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)codes_asym_nudged_f1SpanZero[i], flattenedAsymData[i]);
+    }
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)zp_asym_nudged_f1SpanZero, asymQConfig.zeroPoints[0]);
+    TEST_ASSERT_EQUAL_FLOAT(scale_asym_nudged_f1SpanZero, asymQConfig.scales[0]);
 }
 
 void testConversionFloatInt() {
@@ -240,15 +253,19 @@ void testConversionFloatAsym() {
     shape_t shape = {
         .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
-    float floatData[] = {1.f, 2.f, 3.f, 4.f, -1.f, -2.f};
-
     quantization_t floatQ;
     initFloat32Quantization(&floatQ);
     tensor_t floatTensor;
-    setTensorValues(&floatTensor, (uint8_t *)floatData, &shape, &floatQ, NULL);
+    setTensorValues(&floatTensor, (uint8_t *)input_asym_nudged_f1SpanZero, &shape, &floatQ, NULL);
 
-    asymQConfig_t asymQConfig;
-    initAsymQConfig(5, HALF_AWAY, &asymQConfig);
+    float asymScales[1] = {1.f};
+    uint16_t asymZps[1] = {0};
+    asymQConfig_t asymQConfig = {.scales = asymScales,
+                                 .zeroPoints = asymZps,
+                                 .numGroups = 1,
+                                 .groupSize = 0,
+                                 .qBits = 5,
+                                 .roundingMode = HALF_AWAY};
     quantization_t asymQ;
     initAsymQuantization(&asymQConfig, &asymQ);
 
@@ -262,37 +279,47 @@ void testConversionFloatAsym() {
     uint8_t flattenedAsymData[numValues];
     byteConversion(asymTensor.data, asymQConfig.qBits, flattenedAsymData, 8, numValues);
 
-    uint8_t expectedAsym[] = {15, 20, 26, 31, 5, 0};
-    int32_t expectedZeroPoint = -10;
-    float expectedScale = 6.0f / 31.0f;
-
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(expectedAsym, flattenedAsymData, numValues);
-    TEST_ASSERT_EQUAL_INT32(expectedZeroPoint, asymQConfig.zeroPoint);
-    TEST_ASSERT_EQUAL_FLOAT(expectedScale, asymQConfig.scale);
+    /* Re-pinned to the nudged code-domain grid (group-quant PR4, D6): the
+     * band {1..4, -1, -2} spans zero so the nudge is a no-op and the scale
+     * stays 6/31; zp becomes the code-domain +10 (old value-domain -10) and
+     * the codes coincide with the old grid here (goldgen-verified). */
+    TEST_ASSERT_EQUAL_size_t(numValues, input_asym_nudged_f1SpanZero_len);
+    for (size_t i = 0; i < numValues; i++) {
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)codes_asym_nudged_f1SpanZero[i], flattenedAsymData[i]);
+    }
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)zp_asym_nudged_f1SpanZero, asymQConfig.zeroPoints[0]);
+    TEST_ASSERT_EQUAL_FLOAT(scale_asym_nudged_f1SpanZero, asymQConfig.scales[0]);
 }
 
-void testConversionFloatAsymQBits16NegativeBandWideZeroPoint() {
-    /* #246: an all-negative band at qBits=16 puts zeroPoint far outside int16.
-     * min=-10, max=-1 -> scale = 9/65535, zeroPoint = round(-10*65535/9)
-     * = -72817; the old int16 field wrapped that to -7281, corrupting every
-     * (code + zeroPoint)*scale dequantization.
-     * Mutation guard: re-narrowing asymQConfig_t.zeroPoint (or the cast in
-     * deriveAsymGridFromMinMax) to int16 wraps zeroPoint -> both the exact
-     * assert and the round-trip go RED. */
+void testConversionFloatAsymQBits16NegativeBandZeroPointAtCodeCeiling() {
+    /* Re-pinned to the nudged code-domain grid (group-quant PR4, D6). This
+     * used to be the -72817 int32-zeroPoint width pin (#246); the nudge
+     * extends the all-negative band [-10, -1] to [-10, 0], so the code-domain
+     * zp lands EXACTLY on the uint16 ceiling 2^16-1 = 65535 -- the D6
+     * boundary this fixture now pins (zpReal = -mn/scale = qMax by
+     * construction whenever mx nudges to 0). The old max value -1 no longer
+     * maps to code 65535 (that code now represents 0.0); the min still maps
+     * to code 0. Gold: expected_asym_nudged.h f2NegBand16.
+     * Mutation guard: dropping the nudge re-derives the old [-10,-1] band
+     * whose zpReal -72817 is outside the uint16 clamp -> zp pins RED. */
     size_t numValues = 6;
     size_t dims[] = {numValues};
     size_t orderOfDims[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
 
-    float floatData[] = {-10.f, -1.f, -5.5f, -2.5f, -9.25f, -3.75f};
-
     quantization_t floatQ;
     initFloat32Quantization(&floatQ);
     tensor_t floatTensor;
-    setTensorValues(&floatTensor, (uint8_t *)floatData, &shape, &floatQ, NULL);
+    setTensorValues(&floatTensor, (uint8_t *)input_asym_nudged_f2NegBand16, &shape, &floatQ, NULL);
 
-    asymQConfig_t asymQConfig;
-    initAsymQConfig(16, HALF_AWAY, &asymQConfig);
+    float asymScales[1] = {1.f};
+    uint16_t asymZps[1] = {0};
+    asymQConfig_t asymQConfig = {.scales = asymScales,
+                                 .zeroPoints = asymZps,
+                                 .numGroups = 1,
+                                 .groupSize = 0,
+                                 .qBits = 16,
+                                 .roundingMode = HALF_AWAY};
     quantization_t asymQ;
     initAsymQuantization(&asymQConfig, &asymQ);
     uint8_t asymData[numValues * 2];
@@ -301,14 +328,13 @@ void testConversionFloatAsymQBits16NegativeBandWideZeroPoint() {
 
     convertTensor(&floatTensor, &asymTensor);
 
-    TEST_ASSERT_EQUAL_INT32(-72817, asymQConfig.zeroPoint);
-    TEST_ASSERT_EQUAL_FLOAT(9.f / 65535.f, asymQConfig.scale);
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)zp_asym_nudged_f2NegBand16, asymQConfig.zeroPoints[0]);
+    TEST_ASSERT_EQUAL_UINT16(65535, asymQConfig.zeroPoints[0]); /* the uint16 ceiling itself */
+    TEST_ASSERT_EQUAL_FLOAT(scale_asym_nudged_f2NegBand16, asymQConfig.scales[0]);
 
-    /* min/max land on codes 0 / 65535 on the affine grid. */
     int32_t codes[6];
     byteConversion(asymTensor.data, 16, (uint8_t *)codes, 32, numValues);
-    TEST_ASSERT_EQUAL_INT32(0, codes[0]);
-    TEST_ASSERT_EQUAL_INT32(65535, codes[1]);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(codes_asym_nudged_f2NegBand16, codes, numValues);
 
     float decoded[6];
     quantization_t floatOutQ;
@@ -317,50 +343,138 @@ void testConversionFloatAsymQBits16NegativeBandWideZeroPoint() {
     setTensorValues(&floatOut, (uint8_t *)decoded, &shape, &floatOutQ, NULL);
     convertTensor(&asymTensor, &floatOut);
 
-    float tol = asymQConfig.scale * 0.5f + 1e-4f;
+    float tol = asymQConfig.scales[0] * 0.5f + 1e-4f;
     for (size_t i = 0; i < numValues; i++) {
-        TEST_ASSERT_FLOAT_WITHIN(tol, floatData[i], decoded[i]);
+        TEST_ASSERT_FLOAT_WITHIN(tol, input_asym_nudged_f2NegBand16[i], decoded[i]);
     }
 }
 
-void testInitAsymQConfigRejectsQBitsAbove30(void) {
-    /* #246 ceiling: at qBits=31 the unsigned code ceiling powf(2,31)-1 rounds
-     * to 2^31 in float, so emitAsymChunk's (int32_t) cast is out of range (the
-     * unsigned twin of the #202 SYM_INT32 ceiling at 31).
+void testInitAsymQConfigRejectsQBitsAbove16(void) {
+    /* D6 ceiling (was [1, 30], #246): the code-domain zeroPoint is uint16,
+     * so qBits=17 has codes/zp up to 2^17-1 with no uint16 representation.
      * Mutation guard: removing the initAsymQConfig guard lets the child exit
      * 0 -> RED. */
     asymQConfig_t qc;
-    ASSERT_EXITS_WITH_FAILURE(initAsymQConfig(31, HALF_AWAY, &qc));
+    ASSERT_EXITS_WITH_FAILURE(initAsymQConfig(17, HALF_AWAY, &qc));
 }
 
-void testConversionFloatAsymZeroPointBeyondInt32Dies(void) {
-    /* #246: qBits alone does not bound zeroPoint -- a tight all-negative band
-     * far from zero pushes round(min/scale) past int32 even at qBits=8:
-     * min=-5e6, max=-4999999.5 -> scale = 0.5/255, zeroPoint ~= -2.55e9 <
-     * INT32_MIN. The derive funnel must fail fast instead of letting
-     * roundByMode's float->int32 cast go out of range (UB).
-     * Mutation guard: removing the range check lets the child exit 0 -> RED. */
+void testConversionFloatAsymFarNegativeBandDerivesNudgedGrid(void) {
+    /* Replaces testConversionFloatAsymZeroPointBeyondInt32Dies (group-quant
+     * PR4, D6): under the zero-inclusion nudge this data's zpReal is BOUNDED
+     * into [0, 2^b-1] by construction -- the old int32-overflow death regime
+     * (un-nudged zpReal ~ -2.55e9) is unreachable, so the death test is
+     * obsolete. The property that replaces it: the far-negative band
+     * [-5e6, -4999999.5] nudges to [-5e6, 0], derives zp = 255 (the qBits=8
+     * code ceiling) and a VALID grid whose code zp decodes to EXACTLY 0.0f
+     * (zero-representability, the nudge's raison d'etre). Gold:
+     * expected_asym_nudged.h f3NegFar.
+     * Mutation guard (i): dropping the nudge derives the old [-5e6,
+     * -4999999.5] band -> scale collapses to 0.5/255 (vs 19607.84) and the
+     * codes change -> the scale pin and code pins go RED. (The exact-zero
+     * decode alone cannot catch (i): code==zp decodes to 0 on ANY affine
+     * grid -- what the nudge buys is that zp is a VALID grid anchor, which
+     * the scale/code pins witness.) */
     size_t numValues = 2;
     size_t dims[] = {numValues};
     size_t orderOfDims[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
 
-    float floatData[] = {-5000000.f, -4999999.5f};
-
     quantization_t floatQ;
     initFloat32Quantization(&floatQ);
     tensor_t floatTensor;
-    setTensorValues(&floatTensor, (uint8_t *)floatData, &shape, &floatQ, NULL);
+    setTensorValues(&floatTensor, (uint8_t *)input_asym_nudged_f3NegFar, &shape, &floatQ, NULL);
 
-    asymQConfig_t asymQConfig;
-    initAsymQConfig(8, HALF_AWAY, &asymQConfig);
+    float asymScales[1] = {1.f};
+    uint16_t asymZps[1] = {0};
+    asymQConfig_t asymQConfig = {.scales = asymScales,
+                                 .zeroPoints = asymZps,
+                                 .numGroups = 1,
+                                 .groupSize = 0,
+                                 .qBits = 8,
+                                 .roundingMode = HALF_AWAY};
     quantization_t asymQ;
     initAsymQuantization(&asymQConfig, &asymQ);
     uint8_t asymData[2];
     tensor_t asymTensor;
     setTensorValues(&asymTensor, asymData, &shape, &asymQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&floatTensor, &asymTensor));
+    convertTensor(&floatTensor, &asymTensor);
+
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)zp_asym_nudged_f3NegFar, asymQConfig.zeroPoints[0]);
+    TEST_ASSERT_EQUAL_FLOAT(scale_asym_nudged_f3NegFar, asymQConfig.scales[0]);
+    uint8_t codes[2];
+    byteConversion(asymTensor.data, 8, codes, 8, numValues);
+    for (size_t i = 0; i < numValues; i++) {
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)codes_asym_nudged_f3NegFar[i], codes[i]);
+    }
+    /* zero-representability: the code equal to zp must decode to EXACTLY
+     * 0.0f THROUGH THE REAL DECODE FUNNEL (not a hand-inlined formula, which
+     * would be tautological): pack code == zp into the tensor and convert.
+     * Mutation guard: a (code + zp)*scale decode regression yields
+     * 2*zp*scale = 1e7, not 0. */
+    int32_t zpCodes[2] = {(int32_t)asymQConfig.zeroPoints[0], (int32_t)asymQConfig.zeroPoints[0]};
+    byteConversion((uint8_t *)zpCodes, 32, asymTensor.data, 8, numValues);
+    float decoded[2];
+    quantization_t floatOutQ;
+    initFloat32Quantization(&floatOutQ);
+    tensor_t floatOut;
+    setTensorValues(&floatOut, (uint8_t *)decoded, &shape, &floatOutQ, NULL);
+    convertTensor(&asymTensor, &floatOut);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, decoded[0]);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, decoded[1]);
+}
+
+void testConversionFloatAsymEncodeClampAtBandEdgeTie(void) {
+    /* Encode-clamp pin (group-quant PR4, mutation guard (ii)): with scale
+     * exactly 1.0 and zpReal = 1.5 (an exact HALF_AWAY tie -> zp = 2), the
+     * band-max 5.5 ALSO rounds up (round(5.5) = 6), so the un-clamped code
+     * 6 + 2 = 8 exceeds qMax = 2^3-1 = 7 -- the ONE fixture whose emitted
+     * code depends on emitAsymChunk's clamp. Removing the clamp packs 8 into
+     * 3 bits (wraps to 0) -> the code pin goes RED. Also pins
+     * zero-representability on a 0.0-CONTAINING buffer: 0.0 encodes to code
+     * == zp and decodes to exactly 0.0f. Gold: expected_asym_nudged.h
+     * f4ClampTie. */
+    size_t numValues = 4;
+    size_t dims[] = {numValues};
+    size_t orderOfDims[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
+
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    tensor_t floatTensor;
+    setTensorValues(&floatTensor, (uint8_t *)input_asym_nudged_f4ClampTie, &shape, &floatQ, NULL);
+
+    float asymScales[1] = {1.f};
+    uint16_t asymZps[1] = {0};
+    asymQConfig_t asymQConfig = {.scales = asymScales,
+                                 .zeroPoints = asymZps,
+                                 .numGroups = 1,
+                                 .groupSize = 0,
+                                 .qBits = 3,
+                                 .roundingMode = HALF_AWAY};
+    quantization_t asymQ;
+    initAsymQuantization(&asymQConfig, &asymQ);
+    uint8_t asymData[calcNumberOfBytesForData(&asymQ, numValues)];
+    tensor_t asymTensor;
+    setTensorValues(&asymTensor, asymData, &shape, &asymQ, NULL);
+
+    convertTensor(&floatTensor, &asymTensor);
+
+    int32_t codes[4];
+    byteConversion(asymTensor.data, 3, (uint8_t *)codes, 32, numValues);
+
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)zp_asym_nudged_f4ClampTie, asymQConfig.zeroPoints[0]);
+    TEST_ASSERT_EQUAL_FLOAT(scale_asym_nudged_f4ClampTie, asymQConfig.scales[0]);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(codes_asym_nudged_f4ClampTie, codes, numValues);
+
+    /* the 0.0 element (index 2) decodes back to EXACTLY 0.0f */
+    float decoded[4];
+    quantization_t floatOutQ;
+    initFloat32Quantization(&floatOutQ);
+    tensor_t floatOut;
+    setTensorValues(&floatOut, (uint8_t *)decoded, &shape, &floatOutQ, NULL);
+    convertTensor(&asymTensor, &floatOut);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, decoded[2]);
 }
 
 void testConversionSymInt32Int() {
@@ -453,8 +567,14 @@ void testConversionSymInt32Asym() {
     tensor_t symInt32Tensor;
     setTensorValues(&symInt32Tensor, (uint8_t *)symInt32Data, &shape, &symInt32Q, NULL);
 
-    asymQConfig_t asymQConfig;
-    initAsymQConfig(5, HALF_AWAY, &asymQConfig);
+    float asymScales[1] = {1.f};
+    uint16_t asymZps[1] = {0};
+    asymQConfig_t asymQConfig = {.scales = asymScales,
+                                 .zeroPoints = asymZps,
+                                 .numGroups = 1,
+                                 .groupSize = 0,
+                                 .qBits = 5,
+                                 .roundingMode = HALF_AWAY};
     quantization_t asymQ;
     initAsymQuantization(&asymQConfig, &asymQ);
 
@@ -471,13 +591,14 @@ void testConversionSymInt32Asym() {
     uint32_t output[numValues];
     byteConversion(asymTensor.data, asymQConfig.qBits, (uint8_t *)output, 32, numValues);
 
-    float expectedScale = 0.193548f;
-    int32_t expectedZeroPoint = -10;
-    uint32_t expectedValues[] = {15, 20, 26, 31, 5, 0};
-
-    TEST_ASSERT_EQUAL_FLOAT(expectedScale, asymQConfig.scale);
-    TEST_ASSERT_EQUAL_INT32(expectedZeroPoint, asymQConfig.zeroPoint);
-    TEST_ASSERT_EQUAL_UINT32_ARRAY(expectedValues, output, numValues);
+    /* Re-pinned to the nudged code-domain grid (group-quant PR4, D6): the
+     * scale=1 mantissas dequantize to the same {1..4,-1,-2} values as
+     * f1SpanZero -- zp +10 (code domain), codes goldgen-verified. */
+    TEST_ASSERT_EQUAL_FLOAT(scale_asym_nudged_f1SpanZero, asymQConfig.scales[0]);
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)zp_asym_nudged_f1SpanZero, asymQConfig.zeroPoints[0]);
+    for (size_t i = 0; i < numValues; i++) {
+        TEST_ASSERT_EQUAL_UINT32((uint32_t)codes_asym_nudged_f1SpanZero[i], output[i]);
+    }
 }
 
 void testConversionAsymInt() {
@@ -488,10 +609,17 @@ void testConversionAsymInt() {
     shape_t shape = {
         .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
-    asymQConfig_t asymQConfig;
-    initAsymQConfig(5, HALF_AWAY, &asymQConfig);
-    asymQConfig.scale = 0.1875f;
-    asymQConfig.zeroPoint = -11;
+    /* Code-domain re-pin (group-quant PR4, D6): the old value-domain zp -11
+     * becomes code-domain +11; the mantissa image code - zp reproduces the
+     * exact same integers the old code + (-11) did. */
+    float asymScales[1] = {0.1875f};
+    uint16_t asymZps[1] = {11};
+    asymQConfig_t asymQConfig = {.scales = asymScales,
+                                 .zeroPoints = asymZps,
+                                 .numGroups = 1,
+                                 .groupSize = 0,
+                                 .qBits = 5,
+                                 .roundingMode = HALF_AWAY};
 
     quantization_t asymQ;
     initAsymQuantization(&asymQConfig, &asymQ);
@@ -523,10 +651,16 @@ void testConversionAsymFloat() {
     shape_t shape = {
         .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
-    asymQConfig_t asymQConfig;
-    initAsymQConfig(5, HALF_AWAY, &asymQConfig);
-    asymQConfig.scale = 0.1875f;
-    asymQConfig.zeroPoint = -11;
+    /* Code-domain re-pin (group-quant PR4, D6): zp -11 -> +11, decode
+     * (code - 11)*scale reproduces the old (code + (-11))*scale exactly. */
+    float asymScales[1] = {0.1875f};
+    uint16_t asymZps[1] = {11};
+    asymQConfig_t asymQConfig = {.scales = asymScales,
+                                 .zeroPoints = asymZps,
+                                 .numGroups = 1,
+                                 .groupSize = 0,
+                                 .qBits = 5,
+                                 .roundingMode = HALF_AWAY};
     quantization_t asymQ;
     initAsymQuantization(&asymQConfig, &asymQ);
 
@@ -558,10 +692,17 @@ void testConversionAsymSymInt32() {
     shape_t shape = {
         .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
-    asymQConfig_t asymQConfig;
-    initAsymQConfig(5, HALF_AWAY, &asymQConfig);
-    asymQConfig.scale = 0.1875f;
-    asymQConfig.zeroPoint = -11;
+    /* Code-domain re-pin (group-quant PR4, D6): zp -11 -> +11; the ASYM ->
+     * SYM_INT32 mantissa image is now code - zp (was code + zeroPoint),
+     * producing the same integers. */
+    float asymScales[1] = {0.1875f};
+    uint16_t asymZps[1] = {11};
+    asymQConfig_t asymQConfig = {.scales = asymScales,
+                                 .zeroPoints = asymZps,
+                                 .numGroups = 1,
+                                 .groupSize = 0,
+                                 .qBits = 5,
+                                 .roundingMode = HALF_AWAY};
     quantization_t asymQ;
     initAsymQuantization(&asymQConfig, &asymQ);
 
@@ -761,7 +902,14 @@ void testConversionAsymSameTypeWidthMismatchDies() {
     size_t order[] = {0, 1};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 2, .orderOfDimensions = order};
 
-    asymQConfig_t inQC = {.scale = 0.5f, .zeroPoint = -7, .qBits = 5, .roundingMode = HALF_AWAY};
+    float inScales[1] = {0.5f};
+    uint16_t inZps[1] = {7};
+    asymQConfig_t inQC = {.scales = inScales,
+                          .zeroPoints = inZps,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .qBits = 5,
+                          .roundingMode = HALF_AWAY};
     quantization_t inQ;
     initAsymQuantization(&inQC, &inQ);
     uint8_t inData[2];
@@ -769,7 +917,14 @@ void testConversionAsymSameTypeWidthMismatchDies() {
     tensor_t in;
     setTensorValues(&in, inData, &shape, &inQ, NULL);
 
-    asymQConfig_t outQC = {.scale = 1.f, .zeroPoint = 0, .qBits = 3, .roundingMode = HALF_AWAY};
+    float outScales[1] = {1.f};
+    uint16_t outZps[1] = {0};
+    asymQConfig_t outQC = {.scales = outScales,
+                           .zeroPoints = outZps,
+                           .numGroups = 1,
+                           .groupSize = 0,
+                           .qBits = 3,
+                           .roundingMode = HALF_AWAY};
     quantization_t outQ;
     initAsymQuantization(&outQC, &outQ);
     uint8_t outData[1] = {0};
@@ -1245,8 +1400,14 @@ void testConversionSymAsymRescaleRoundTrips() {
     byteConversion((uint8_t *)srcMant, 32, inTensor.data, 6, n);
 
     /* ASYM output tensor */
-    asymQConfig_t asymQC;
-    initAsymQConfig(5, HALF_AWAY, &asymQC);
+    float asymScalesArr[1] = {1.f};
+    uint16_t asymZpsArr[1] = {0};
+    asymQConfig_t asymQC = {.scales = asymScalesArr,
+                            .zeroPoints = asymZpsArr,
+                            .numGroups = 1,
+                            .groupSize = 0,
+                            .qBits = 5,
+                            .roundingMode = HALF_AWAY};
     quantization_t asymQ;
     initAsymQuantization(&asymQC, &asymQ);
     uint8_t asymData[n * calcBytesPerElement(&asymQ)];
@@ -1262,15 +1423,21 @@ void testConversionSymAsymRescaleRoundTrips() {
 
     /* Convert SYM -> ASYM -> FLOAT32 */
     convertTensor(&inTensor, &asymTensor);
-    /* #243: standard affine asym scale = range/(2^qBits-1) = 10/31 (was 10/32). */
-    TEST_ASSERT_FLOAT_WITHIN(1e-5f, 10.0f / 31.0f, asymQC.scale);
-    /* Pin the grid exactly: the 0.35 round-trip tolerance below cannot distinguish
-     * 10/31 from the old 10/32, so assert zeroPoint and the unpacked codes directly. */
-    TEST_ASSERT_EQUAL_INT32(-16, asymQC.zeroPoint);
+    /* Re-pinned to the nudged code-domain grid (group-quant PR4, D6): the
+     * dequantized band {5,-4,2,-1,3,-5} spans zero (nudge no-op), scale stays
+     * 10/31, zp becomes code-domain +16 -- and unlike f1SpanZero the CODES
+     * genuinely change here: the old single-round encode gave code 1 for
+     * -5.0 (round(-15.5 + 16) = round(0.5) = 1) while the new
+     * round-then-shift encode gives 0 (round(-15.5) = -16, +16 = 0):
+     * HALF_AWAY's "away" direction flips with the shift. Gold:
+     * expected_asym_nudged.h f5SymDeq. */
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f, scale_asym_nudged_f5SymDeq, asymQC.scales[0]);
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)zp_asym_nudged_f5SymDeq, asymQC.zeroPoints[0]);
     uint8_t flattenedAsymData[n];
     byteConversion(asymTensor.data, asymQC.qBits, flattenedAsymData, 8, n);
-    uint8_t expectedCodes[] = {31, 4, 22, 13, 25, 1};
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(expectedCodes, flattenedAsymData, n);
+    for (size_t i = 0; i < n; i++) {
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)codes_asym_nudged_f5SymDeq[i], flattenedAsymData[i]);
+    }
     convertTensor(&asymTensor, &floatTensor);
 
     /* Expected: dequantized SYM values */
@@ -1582,8 +1749,14 @@ void testConversionSymInt32AsymConstantTensorNoDivByZero() {
     tensor_t inTensor;
     setTensorValues(&inTensor, (uint8_t *)inData, &shape, &inQ, NULL);
 
-    asymQConfig_t asymQC;
-    initAsymQConfig(5, HALF_AWAY, &asymQC);
+    float asymScalesArr[1] = {1.f};
+    uint16_t asymZpsArr[1] = {0};
+    asymQConfig_t asymQC = {.scales = asymScalesArr,
+                            .zeroPoints = asymZpsArr,
+                            .numGroups = 1,
+                            .groupSize = 0,
+                            .qBits = 5,
+                            .roundingMode = HALF_AWAY};
     quantization_t asymQ;
     initAsymQuantization(&asymQC, &asymQ);
     uint8_t asymData[n * calcBytesPerElement(&asymQ)];
@@ -1602,6 +1775,22 @@ void testConversionSymInt32AsymConstantTensorNoDivByZero() {
     for (size_t i = 0; i < n; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-4f, 4.0f, outF[i]);
     }
+
+    /* Group-quant PR4: under the nudge a NONZERO constant no longer reaches
+     * the mn==mx fallback (the band [0, 4] is non-degenerate); only the
+     * all-zero tensor does. Pin the adapted fallback: scale 1.f, zp 0,
+     * codes 0 -- the value-zero state code 0 decodes from exactly. */
+    int32_t zeroData[] = {0, 0, 0, 0};
+    tensor_t zeroTensor;
+    setTensorValues(&zeroTensor, (uint8_t *)zeroData, &shape, &inQ, NULL);
+    convertTensor(&zeroTensor, &asymTensor);
+    TEST_ASSERT_EQUAL_FLOAT(1.f, asymQC.scales[0]);
+    TEST_ASSERT_EQUAL_UINT16(0, asymQC.zeroPoints[0]);
+    uint8_t zeroCodes[4];
+    byteConversion(asymTensor.data, 5, zeroCodes, 8, n);
+    for (size_t i = 0; i < n; i++) {
+        TEST_ASSERT_EQUAL_UINT8(0, zeroCodes[i]);
+    }
 }
 
 void testConversionAsymToSymRescaleOffCenterRoundTrips() {
@@ -1614,13 +1803,17 @@ void testConversionAsymToSymRescaleOffCenterRoundTrips() {
     size_t orderOfDims[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
 
-    /* Build ASYM input: qBits=5, scale=0.25, zeroPoint=-4.
-     * asym codes {12,16,20,24,28,14} -> reals = (code + zeroPoint)*scale = (code-4)*0.25
+    /* Build ASYM input: qBits=5, scale=0.25, code-domain zeroPoint=+4 (PR4).
+     * asym codes {12,16,20,24,28,14} -> reals = (code - zeroPoint)*scale = (code-4)*0.25
      * = {2.0, 3.0, 4.0, 5.0, 6.0, 2.5} — off-center all-positive band [2, 6]. */
-    asymQConfig_t inQC;
-    initAsymQConfig(5, HALF_AWAY, &inQC);
-    inQC.scale = 0.25f;
-    inQC.zeroPoint = -4;
+    float inScalesArr[1] = {0.25f};
+    uint16_t inZpsArr[1] = {4};
+    asymQConfig_t inQC = {.scales = inScalesArr,
+                          .zeroPoints = inZpsArr,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .qBits = 5,
+                          .roundingMode = HALF_AWAY};
     quantization_t inQ;
     initAsymQuantization(&inQC, &inQ);
 
@@ -1742,8 +1935,14 @@ void testConvertersPreserveCallerOutputShape() {
     initFloat32Quantization(&floatInQ);
     tensor_t floatIn;
     setTensorValues(&floatIn, (uint8_t *)floatData, &inShape, &floatInQ, NULL);
-    asymQConfig_t asymQC;
-    initAsymQConfig(5, HALF_AWAY, &asymQC);
+    float asymScalesArr[1] = {1.f};
+    uint16_t asymZpsArr[1] = {0};
+    asymQConfig_t asymQC = {.scales = asymScalesArr,
+                            .zeroPoints = asymZpsArr,
+                            .numGroups = 1,
+                            .groupSize = 0,
+                            .qBits = 5,
+                            .roundingMode = HALF_AWAY};
     quantization_t asymQ;
     initAsymQuantization(&asymQC, &asymQ);
     uint8_t asymData[calcNumberOfBytesForData(&asymQ, 6)];
@@ -1767,10 +1966,14 @@ void testConvertersPreserveCallerOutputShape() {
     TEST_ASSERT_EQUAL_PTR(&outShape, floatOut.shape);
 
     /* ASYM -> FLOAT32 */
-    asymQConfig_t asymInQC;
-    initAsymQConfig(5, HALF_AWAY, &asymInQC);
-    asymInQC.scale = 0.25f;
-    asymInQC.zeroPoint = -4;
+    float asymInScales[1] = {0.25f};
+    uint16_t asymInZps[1] = {4};
+    asymQConfig_t asymInQC = {.scales = asymInScales,
+                              .zeroPoints = asymInZps,
+                              .numGroups = 1,
+                              .groupSize = 0,
+                              .qBits = 5,
+                              .roundingMode = HALF_AWAY};
     quantization_t asymInQ;
     initAsymQuantization(&asymInQC, &asymInQ);
     int32_t asymCodes[6] = {12, 16, 20, 8, 24, 14};
@@ -1985,25 +2188,31 @@ void testAccumulateSymRescaleRederivesGridEachCall(void) {
 void testAccumulateAsymRescaleMatchesFloatReference(void) {
     /* ASYM: decode+add+requant equals numpy-style float reference within one
      * affine grid step; zeroPoint/scale re-derived per store (D4).
-     * Mutation guard: carrying the OLD scale/zeroPoint (0.25/-4) instead of
-     * rederiving would leave qc.scale/qc.zeroPoint unchanged -> the exact
-     * asserts below RED.
+     * Mutation guard: carrying the OLD scale/zeroPoint (0.25/+4) instead of
+     * rederiving would leave qc.scales[0]/qc.zeroPoints[0] unchanged -> the
+     * exact asserts below RED.
      *
-     * Seed ASYM@5 codes {12,16,20,24} at scale=0.25, zeroPoint=-4 -> dequant
-     * = (code+zeroPoint)*scale = {2, 3, 4, 5} (exact integers).
-     * inc = {1.0, -0.5, 2.0, 0.25} -> reference = {3, 2.5, 6, 5.25}.
-     * Fresh affine grid: min=2.5, max=6.0, qMax=2^5-1=31;
-     * scale' = (6.0-2.5)/31 = 3.5/31 ~= 0.112903;
-     * zeroPoint' = round(2.5/scale') = round(22.142857) = 22. */
+     * Re-pinned to the nudged code-domain grid (group-quant PR4, D6) -- the
+     * nudge is LIVE here, this is a real semantics change: seed ASYM@5 codes
+     * {12,16,20,24} at scale=0.25, zp=+4 -> dequant = (code-zp)*scale =
+     * {2, 3, 4, 5} (exact integers). inc = {1.0, -0.5, 2.0, 0.25} ->
+     * reference = {3, 2.5, 6, 5.25}: an ALL-POSITIVE band, which the nudge
+     * extends to [0, 6], so scale' = 6/31 (old un-nudged: 3.5/31) and
+     * zp' = round(0/scale') = 0 (old: 22). Gold: expected_asym_nudged.h
+     * f6AccumRef (same reference values). */
     size_t n = 4;
     size_t dims[] = {4};
     size_t order[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
 
-    asymQConfig_t qc;
-    initAsymQConfig(5, HALF_AWAY, &qc);
-    qc.scale = 0.25f;
-    qc.zeroPoint = -4;
+    float qcScales[1] = {0.25f};
+    uint16_t qcZps[1] = {4};
+    asymQConfig_t qc = {.scales = qcScales,
+                        .zeroPoints = qcZps,
+                        .numGroups = 1,
+                        .groupSize = 0,
+                        .qBits = 5,
+                        .roundingMode = HALF_AWAY};
     quantization_t q;
     initAsymQuantization(&qc, &q);
     uint8_t data[calcNumberOfBytesForData(&q, n)];
@@ -2017,14 +2226,15 @@ void testAccumulateAsymRescaleMatchesFloatReference(void) {
 
     accumulateFloatIntoAsymTensorRescale(&target, inc, n);
 
-    TEST_ASSERT_EQUAL_FLOAT(3.5f / 31.0f, qc.scale);
-    TEST_ASSERT_EQUAL_INT32(22, qc.zeroPoint);
+    TEST_ASSERT_EQUAL_FLOAT(scale_asym_nudged_f6AccumRef, qc.scales[0]);
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)zp_asym_nudged_f6AccumRef, qc.zeroPoints[0]);
 
     int32_t codes[4];
     byteConversion(data, 5, (uint8_t *)codes, 32, n); /* asym codes: non-negative, no sign-extend */
+    TEST_ASSERT_EQUAL_INT32_ARRAY(codes_asym_nudged_f6AccumRef, codes, n);
     for (size_t i = 0; i < n; i++) {
-        float recon = ((float)codes[i] + (float)qc.zeroPoint) * qc.scale;
-        TEST_ASSERT_FLOAT_WITHIN(qc.scale, reference[i], recon);
+        float recon = (float)(codes[i] - (int32_t)qc.zeroPoints[0]) * qc.scales[0];
+        TEST_ASSERT_FLOAT_WITHIN(qc.scales[0], reference[i], recon);
     }
 }
 
@@ -2043,10 +2253,14 @@ void testAccumulateAsymValueZeroAfterConfigReset(void) {
     size_t order[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
 
-    asymQConfig_t qc;
-    initAsymQConfig(5, HALF_AWAY, &qc);
-    qc.scale = 1.f;
-    qc.zeroPoint = 0;
+    float qcScales[1] = {1.f};
+    uint16_t qcZps[1] = {0};
+    asymQConfig_t qc = {.scales = qcScales,
+                        .zeroPoints = qcZps,
+                        .numGroups = 1,
+                        .groupSize = 0,
+                        .qBits = 5,
+                        .roundingMode = HALF_AWAY};
     quantization_t q;
     initAsymQuantization(&qc, &q);
     uint8_t data[calcNumberOfBytesForData(&q, n)];
@@ -2057,8 +2271,14 @@ void testAccumulateAsymValueZeroAfterConfigReset(void) {
     float inc[] = {2.0f, -3.5f, 0.0f};
     accumulateFloatIntoAsymTensorRescale(&target, inc, n);
 
-    asymQConfig_t refQC;
-    initAsymQConfig(5, HALF_AWAY, &refQC);
+    float refScales[1] = {1.f};
+    uint16_t refZps[1] = {0};
+    asymQConfig_t refQC = {.scales = refScales,
+                           .zeroPoints = refZps,
+                           .numGroups = 1,
+                           .groupSize = 0,
+                           .qBits = 5,
+                           .roundingMode = HALF_AWAY};
     quantization_t refQ;
     initAsymQuantization(&refQC, &refQ);
     uint8_t refData[calcNumberOfBytesForData(&refQ, n)];
@@ -2071,8 +2291,8 @@ void testAccumulateAsymValueZeroAfterConfigReset(void) {
     setTensorValues(&floatTensor, (uint8_t *)inc, &shape, &floatQ, NULL);
     convertTensor(&floatTensor, &refTensor);
 
-    TEST_ASSERT_EQUAL_FLOAT(refQC.scale, qc.scale);
-    TEST_ASSERT_EQUAL_INT32(refQC.zeroPoint, qc.zeroPoint);
+    TEST_ASSERT_EQUAL_FLOAT(refQC.scales[0], qc.scales[0]);
+    TEST_ASSERT_EQUAL_UINT16(refQC.zeroPoints[0], qc.zeroPoints[0]);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(refData, data, calcNumberOfBytesForData(&refQ, n));
 }
 
@@ -2296,8 +2516,14 @@ void testChunkedFloatToAsymMatchesReferenceAcrossChunkBoundaries(void) {
             tensor_t floatIn;
             setTensorValues(&floatIn, (uint8_t *)vals, &shape, &floatInQ, NULL);
 
-            asymQConfig_t asymQC;
-            initAsymQConfig(qBits, HALF_AWAY, &asymQC);
+            float asymScalesArr[1] = {1.f};
+            uint16_t asymZpsArr[1] = {0};
+            asymQConfig_t asymQC = {.scales = asymScalesArr,
+                                    .zeroPoints = asymZpsArr,
+                                    .numGroups = 1,
+                                    .groupSize = 0,
+                                    .qBits = qBits,
+                                    .roundingMode = HALF_AWAY};
             quantization_t asymQ;
             initAsymQuantization(&asymQC, &asymQ);
             uint8_t *asymData = (uint8_t *)reserveMemory(calcNumberOfBytesForData(&asymQ, n));
@@ -2313,7 +2539,7 @@ void testChunkedFloatToAsymMatchesReferenceAcrossChunkBoundaries(void) {
             setTensorValues(&floatOut, (uint8_t *)decoded, &shape, &floatOutQ, NULL);
             convertTensor(&asymOut, &floatOut);
 
-            float tol = asymQC.scale * 0.5f + 1e-3f;
+            float tol = asymQC.scales[0] * 0.5f + 1e-3f;
             for (size_t i = 0; i < n; i++) {
                 TEST_ASSERT_FLOAT_WITHIN(tol, vals[i], decoded[i]);
             }
@@ -2402,10 +2628,14 @@ void testChunkedAsymToSymRoundTripsAtChunkBoundary(void) {
     size_t order[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
 
-    asymQConfig_t inQC;
-    initAsymQConfig(8, HALF_AWAY, &inQC);
-    inQC.scale = 1.0f;
-    inQC.zeroPoint = -128;
+    float inScalesArr[1] = {1.0f};
+    uint16_t inZpsArr[1] = {128}; /* code-domain (PR4): dequant = code - 128 */
+    asymQConfig_t inQC = {.scales = inScalesArr,
+                          .zeroPoints = inZpsArr,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .qBits = 8,
+                          .roundingMode = HALF_AWAY};
     quantization_t inQ;
     initAsymQuantization(&inQC, &inQ);
     uint8_t *asymData = (uint8_t *)reserveMemory(n);
@@ -2442,7 +2672,8 @@ void testChunkedAsymToSymRoundTripsAtChunkBoundary(void) {
 
     float tol = outQC.scales[0] * 0.5f + 1e-3f;
     for (size_t i = 0; i < n; i++) {
-        float expectedVal = ((float)asymData[i] + (float)inQC.zeroPoint) * inQC.scale;
+        float expectedVal =
+            (float)((int32_t)asymData[i] - (int32_t)inQC.zeroPoints[0]) * inQC.scales[0];
         TEST_ASSERT_FLOAT_WITHIN(tol, expectedVal, decoded[i]);
     }
 
@@ -2485,8 +2716,14 @@ void testChunkedSymToAsymRoundTripsAtChunkBoundary(void) {
     tensor_t symTensor;
     setTensorValues(&symTensor, symData, &shape, &inQ, NULL);
 
-    asymQConfig_t outQC;
-    initAsymQConfig(5, HALF_AWAY, &outQC);
+    float outScalesArr[1] = {1.f};
+    uint16_t outZpsArr[1] = {0};
+    asymQConfig_t outQC = {.scales = outScalesArr,
+                           .zeroPoints = outZpsArr,
+                           .numGroups = 1,
+                           .groupSize = 0,
+                           .qBits = 5,
+                           .roundingMode = HALF_AWAY};
     quantization_t outQ;
     initAsymQuantization(&outQC, &outQ);
     uint8_t *asymData = (uint8_t *)reserveMemory(calcNumberOfBytesForData(&outQ, n));
@@ -2502,7 +2739,7 @@ void testChunkedSymToAsymRoundTripsAtChunkBoundary(void) {
     setTensorValues(&floatOut, (uint8_t *)decoded, &shape, &floatOutQ, NULL);
     convertTensor(&asymOut, &floatOut);
 
-    float tol = outQC.scale * 0.5f + 1e-3f;
+    float tol = outQC.scales[0] * 0.5f + 1e-3f;
     for (size_t i = 0; i < n; i++) {
         float expectedVal = (float)mant[i] * inQC.scales[0];
         TEST_ASSERT_FLOAT_WITHIN(tol, expectedVal, decoded[i]);
@@ -2539,8 +2776,14 @@ void testChunkedSymInt32ToAsymRoundTripsAtChunkBoundary(void) {
     tensor_t inTensor;
     setTensorValues(&inTensor, (uint8_t *)inData, &shape, &inQ, NULL);
 
-    asymQConfig_t outQC;
-    initAsymQConfig(5, HALF_AWAY, &outQC);
+    float outScalesArr[1] = {1.f};
+    uint16_t outZpsArr[1] = {0};
+    asymQConfig_t outQC = {.scales = outScalesArr,
+                           .zeroPoints = outZpsArr,
+                           .numGroups = 1,
+                           .groupSize = 0,
+                           .qBits = 5,
+                           .roundingMode = HALF_AWAY};
     quantization_t outQ;
     initAsymQuantization(&outQC, &outQ);
     uint8_t *asymData = (uint8_t *)reserveMemory(calcNumberOfBytesForData(&outQ, n));
@@ -2556,7 +2799,7 @@ void testChunkedSymInt32ToAsymRoundTripsAtChunkBoundary(void) {
     setTensorValues(&floatOut, (uint8_t *)decoded, &shape, &floatOutQ, NULL);
     convertTensor(&asymOut, &floatOut);
 
-    float tol = outQC.scale * 0.5f + 1e-3f;
+    float tol = outQC.scales[0] * 0.5f + 1e-3f;
     for (size_t i = 0; i < n; i++) {
         float expectedVal = (float)inData[i] * inQC.scale;
         TEST_ASSERT_FLOAT_WITHIN(tol, expectedVal, decoded[i]);
@@ -2627,10 +2870,14 @@ void testChunkedAsymToFloat32DequantizesAtChunkBoundary(void) {
     size_t order[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
 
-    asymQConfig_t inQC;
-    initAsymQConfig(5, HALF_AWAY, &inQC);
-    inQC.scale = 0.25f;
-    inQC.zeroPoint = -4;
+    float inScalesArr[1] = {0.25f};
+    uint16_t inZpsArr[1] = {4}; /* code-domain (PR4): decode = (code - 4)*0.25 */
+    asymQConfig_t inQC = {.scales = inScalesArr,
+                          .zeroPoints = inZpsArr,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .qBits = 5,
+                          .roundingMode = HALF_AWAY};
     quantization_t inQ;
     initAsymQuantization(&inQC, &inQ);
     int32_t *codes = (int32_t *)reserveMemory(n * sizeof(int32_t));
@@ -2651,7 +2898,7 @@ void testChunkedAsymToFloat32DequantizesAtChunkBoundary(void) {
     convertTensor(&inTensor, &outTensor);
 
     for (size_t i = 0; i < n; i++) {
-        float expected = ((float)codes[i] + (float)inQC.zeroPoint) * inQC.scale;
+        float expected = (float)(codes[i] - (int32_t)inQC.zeroPoints[0]) * inQC.scales[0];
         TEST_ASSERT_EQUAL_FLOAT(expected, decoded[i]);
     }
 
@@ -2760,8 +3007,8 @@ void testDequantChunkToFloatSymUnpacksSignExtendedAtOffsets(void) {
 
 void testDequantChunkToFloatAsymUnpacksZeroExtendedAtOffsets(void) {
     /* dequantChunkToFloat direct test, ASYM cell: zero-extend unpack via
-     * unpackZeroExtendChunk (byteConversion only, no sign bit), then
-     * (code+zeroPoint)*scale. */
+     * unpackZeroExtendChunk (byteConversion only, no sign bit), then the
+     * code-domain decode (code - zp)*scale (PR4). */
     size_t n = 264;
     size_t dims[] = {n};
     size_t order[] = {0};
@@ -2771,10 +3018,14 @@ void testDequantChunkToFloatAsymUnpacksZeroExtendedAtOffsets(void) {
     for (size_t i = 0; i < n; i++) {
         codes[i] = (int32_t)(i % 32); /* spans [0, 31]: exactly qBits=5 range */
     }
-    asymQConfig_t qc;
-    initAsymQConfig(5, HALF_AWAY, &qc);
-    qc.scale = 0.25f;
-    qc.zeroPoint = -4;
+    float qcScales[1] = {0.25f};
+    uint16_t qcZps[1] = {4}; /* code-domain (PR4): decode = (code - 4)*0.25 */
+    asymQConfig_t qc = {.scales = qcScales,
+                        .zeroPoints = qcZps,
+                        .numGroups = 1,
+                        .groupSize = 0,
+                        .qBits = 5,
+                        .roundingMode = HALF_AWAY};
     quantization_t q;
     initAsymQuantization(&qc, &q);
     uint8_t *packed = (uint8_t *)reserveMemory(calcNumberOfBytesForData(&q, n));
@@ -2789,7 +3040,7 @@ void testDequantChunkToFloatAsymUnpacksZeroExtendedAtOffsets(void) {
         float out[8];
         dequantChunkToFloat(&t, offset, count, out);
         for (size_t i = 0; i < count; i++) {
-            float expected = ((float)codes[offset + i] + (float)qc.zeroPoint) * qc.scale;
+            float expected = (float)(codes[offset + i] - (int32_t)qc.zeroPoints[0]) * qc.scales[0];
             TEST_ASSERT_EQUAL_FLOAT(expected, out[i]);
         }
     }
@@ -2892,9 +3143,9 @@ void testQuantizeFloatToAsymNoOpOnEmptyTensor(void) {
      * quantize. Pin: pre-set sentinel scale/zeroPoint on the output qConfig
      * and a deterministic non-zero value at the input's element 0; both must
      * survive the n==0 call untouched.
-     * Mutation guard: dropping the n==0 guard lets deriveAsymGridFromMinMax's
-     * mn==mx branch overwrite scale with fabsf(42.f)=42.f and zeroPoint with
-     * round(42/42)=1, failing both asserts below -> RED. */
+     * Mutation guard: dropping the n==0 guard lets deriveAsymGridFromMinMax
+     * derive from the seeded 42.f (post-nudge band [0, 42]: scale 42/31,
+     * zeroPoints[0] = 0), failing both sentinel asserts below -> RED. */
     size_t dims[] = {0};
     size_t order[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
@@ -2907,10 +3158,14 @@ void testQuantizeFloatToAsymNoOpOnEmptyTensor(void) {
     tensor_t floatTensor;
     setTensorValues(&floatTensor, (uint8_t *)&floatDummy, &shape, &floatQ, NULL);
 
-    asymQConfig_t asymQC;
-    initAsymQConfig(5, HALF_AWAY, &asymQC);
-    asymQC.scale = 123.f; /* sentinel: must survive untouched */
-    asymQC.zeroPoint = 7;
+    float asymScalesArr[1] = {123.f}; /* sentinel: must survive untouched */
+    uint16_t asymZpsArr[1] = {7};
+    asymQConfig_t asymQC = {.scales = asymScalesArr,
+                            .zeroPoints = asymZpsArr,
+                            .numGroups = 1,
+                            .groupSize = 0,
+                            .qBits = 5,
+                            .roundingMode = HALF_AWAY};
     quantization_t asymQ;
     initAsymQuantization(&asymQC, &asymQ);
     uint8_t asymDummy;
@@ -2919,8 +3174,8 @@ void testQuantizeFloatToAsymNoOpOnEmptyTensor(void) {
 
     convertTensor(&floatTensor, &asymTensor);
 
-    TEST_ASSERT_EQUAL_FLOAT(123.f, asymQC.scale);
-    TEST_ASSERT_EQUAL_INT32(7, asymQC.zeroPoint);
+    TEST_ASSERT_EQUAL_FLOAT(123.f, asymQC.scales[0]);
+    TEST_ASSERT_EQUAL_UINT16(7, asymQC.zeroPoints[0]);
 }
 
 void testAccumulateTensorIntoSymRescaleRejectsSelfAliasedIncrement(void) {
@@ -3149,7 +3404,14 @@ void testGroupedSymToAsymDies(void) {
     tensor_t symTensor;
     setTensorValues(&symTensor, symData, &shape, &inQ, NULL);
 
-    asymQConfig_t outQC = {.scale = 1.f, .zeroPoint = 0, .qBits = 5, .roundingMode = HALF_AWAY};
+    float outScalesArr[1] = {1.f};
+    uint16_t outZpsArr[1] = {0};
+    asymQConfig_t outQC = {.scales = outScalesArr,
+                           .zeroPoints = outZpsArr,
+                           .numGroups = 1,
+                           .groupSize = 0,
+                           .qBits = 5,
+                           .roundingMode = HALF_AWAY};
     quantization_t outQ;
     initAsymQuantization(&outQC, &outQ);
     uint8_t outData[calcNumberOfBytesForData(&outQ, n)];
@@ -3167,7 +3429,14 @@ void testGroupedAsymToSymTargetDies(void) {
     size_t order[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
 
-    asymQConfig_t inQC = {.scale = 0.5f, .zeroPoint = -3, .qBits = 5, .roundingMode = HALF_AWAY};
+    float inScalesArr[1] = {0.5f};
+    uint16_t inZpsArr[1] = {3};
+    asymQConfig_t inQC = {.scales = inScalesArr,
+                          .zeroPoints = inZpsArr,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .qBits = 5,
+                          .roundingMode = HALF_AWAY};
     quantization_t inQ;
     initAsymQuantization(&inQC, &inQ);
     uint8_t inData[calcNumberOfBytesForData(&inQ, n)];
@@ -3185,6 +3454,73 @@ void testGroupedAsymToSymTargetDies(void) {
     setTensorValues(&outTensor, outData, &shape, &outQ, NULL);
 
     ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor));
+}
+
+void testGroupedAsymSourceDequantDies(void) {
+    /* Group-quant PR4 Task 1: grouped ASYM configs are CONSTRUCTIBLE now
+     * (initAsymQConfigGrouped) but every ASYM converter/dequant cell still
+     * reads scales[0]/zeroPoints[0] only -- a grouped SOURCE must fail-fast
+     * rather than decode groups 1..k-1 on group 0's grid (mirrors the SYM
+     * PR1->PR2 scalar-cell gates). */
+    size_t n = 8;
+    size_t dims[] = {n};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    float scales[2] = {0.1f, 0.2f};
+    uint16_t zps[2] = {1, 2};
+    asymQConfig_t inQC = {.scales = scales,
+                          .zeroPoints = zps,
+                          .numGroups = 2,
+                          .groupSize = 4,
+                          .qBits = 5,
+                          .roundingMode = HALF_AWAY};
+    quantization_t inQ;
+    initAsymQuantization(&inQC, &inQ);
+    uint8_t inData[calcNumberOfBytesForData(&inQ, n)];
+    memset(inData, 0, sizeof(inData));
+    tensor_t inTensor;
+    setTensorValues(&inTensor, inData, &shape, &inQ, NULL);
+
+    quantization_t outQ;
+    initFloat32Quantization(&outQ);
+    float outData[8];
+    tensor_t outTensor;
+    setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor));
+}
+
+void testGroupedAsymTargetDeriveDies(void) {
+    /* Grouped ASYM TARGET: deriveAsymGridFromMinMax writes scales[0]/
+     * zeroPoints[0] only -- the per-tensor choke point must fail-fast on a
+     * grouped destination (grouped ASYM emit is a later PR4 task). */
+    size_t n = 8;
+    size_t dims[] = {n};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    float floatData[8] = {1.f, 2.f, 3.f, 4.f, -1.f, -2.f, -3.f, -4.f};
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    tensor_t floatTensor;
+    setTensorValues(&floatTensor, (uint8_t *)floatData, &shape, &floatQ, NULL);
+
+    float scales[2] = {1.f, 1.f};
+    uint16_t zps[2] = {0, 0};
+    asymQConfig_t outQC = {.scales = scales,
+                           .zeroPoints = zps,
+                           .numGroups = 2,
+                           .groupSize = 4,
+                           .qBits = 5,
+                           .roundingMode = HALF_AWAY};
+    quantization_t outQ;
+    initAsymQuantization(&outQC, &outQ);
+    uint8_t outData[calcNumberOfBytesForData(&outQ, n)];
+    tensor_t outTensor;
+    setTensorValues(&outTensor, outData, &shape, &outQ, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&floatTensor, &outTensor));
 }
 
 void testGroupedInt32ToSymTargetDies(void) {
@@ -3404,9 +3740,10 @@ int main(void) {
     RUN_TEST(testConversionFloatInt);
     RUN_TEST(testConversionFloatSymInt32);
     RUN_TEST(testConversionFloatAsym);
-    RUN_TEST(testConversionFloatAsymQBits16NegativeBandWideZeroPoint);
-    RUN_TEST(testInitAsymQConfigRejectsQBitsAbove30);
-    RUN_TEST(testConversionFloatAsymZeroPointBeyondInt32Dies);
+    RUN_TEST(testConversionFloatAsymQBits16NegativeBandZeroPointAtCodeCeiling);
+    RUN_TEST(testInitAsymQConfigRejectsQBitsAbove16);
+    RUN_TEST(testConversionFloatAsymFarNegativeBandDerivesNudgedGrid);
+    RUN_TEST(testConversionFloatAsymEncodeClampAtBandEdgeTie);
 
     RUN_TEST(testConversionSymInt32Int);
     RUN_TEST(testConversionSymInt32Float);
@@ -3484,6 +3821,8 @@ int main(void) {
     RUN_TEST(testGroupedSymInt32ToSymTargetDies);
     RUN_TEST(testGroupedSymToAsymDies);
     RUN_TEST(testGroupedAsymToSymTargetDies);
+    RUN_TEST(testGroupedAsymSourceDequantDies);
+    RUN_TEST(testGroupedAsymTargetDeriveDies);
     RUN_TEST(testGroupedInt32ToSymTargetDies);
     RUN_TEST(testGroupedRepackSymInt32ToSymNoRescaleTargetDies);
     RUN_TEST(testDequantChunkToFloatRejectsGroupedSymSource);

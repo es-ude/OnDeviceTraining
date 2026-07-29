@@ -874,6 +874,93 @@ void testRequantizeTensorInPlaceRejectsMismatchedGroupShape(void) {
     });
 }
 
+/* Group-quant PR4 (Task 1): ASYM always-array siblings of the SYM tests
+ * above -- attach-time validation, the getQLike per-tensor-fresh-reset /
+ * grouped-deep-copy split, and the grad-carrier gate. */
+
+void testGetQLikeAsymPreservesWidthAndRoundingResetsGrid(void) {
+    /* Precedent A (per-tensor): qBits + roundingMode carried, the affine grid
+     * (scales[0]/zeroPoints[0]) reset to 1.f/0 -- a fresh clone is an
+     * ungridded zero-state (first store derives the grid; zp==0 also makes
+     * code 0 decode to exactly 0.0, the zero-grad reset state). */
+    quantization_t *src = quantizationInitAsym(5, SR_HALF_AWAY);
+    asymQConfig_t *srcQC = src->qConfig;
+    srcQC->scales[0] = 0.25f; /* carried grid must NOT be cloned */
+    srcQC->zeroPoints[0] = 7;
+    quantization_t *like = getQLike(src);
+
+    qtype_t likeType = like->type;
+    asymQConfig_t *likeQC = like->qConfig;
+    uint8_t likeQBits = likeQC->qBits;
+    roundingMode_t likeRoundingMode = likeQC->roundingMode;
+    size_t likeNumGroups = likeQC->numGroups;
+    size_t likeGroupSize = likeQC->groupSize;
+    float likeScale = likeQC->scales[0];
+    uint16_t likeZp = likeQC->zeroPoints[0];
+    freeQuantization(src);
+    freeQuantization(like);
+
+    TEST_ASSERT_EQUAL_INT(ASYM, likeType);
+    TEST_ASSERT_EQUAL_UINT8(5, likeQBits);
+    TEST_ASSERT_EQUAL_INT(SR_HALF_AWAY, likeRoundingMode);
+    TEST_ASSERT_EQUAL_size_t(1, likeNumGroups);
+    TEST_ASSERT_EQUAL_size_t(0, likeGroupSize);
+    TEST_ASSERT_EQUAL_FLOAT(1.f, likeScale);
+    TEST_ASSERT_EQUAL_UINT16(0, likeZp);
+}
+
+void testGetQLikeAsymGroupedDeepCopiesGridValues(void) {
+    /* Grouped clone: the group grid is an attach-time fact the clone must
+     * retain (mirrors the SYM grouped arm) -- numGroups/groupSize AND both
+     * per-group arrays' VALUES carried, into FRESH arrays. Mutation guard:
+     * aliasing either array pointer instead of deep-copying makes the
+     * distinctness asserts (and the mutate-after-clone probe) FAIL. */
+    quantization_t *src = quantizationInitAsymGrouped(4, HALF_AWAY, 2, 5);
+    asymQConfig_t *srcQC = src->qConfig;
+    srcQC->scales[1] = 0.25f;
+    srcQC->zeroPoints[1] = 9;
+    quantization_t *like = getQLike(src);
+    asymQConfig_t *likeQC = like->qConfig;
+    size_t ng = likeQC->numGroups, gs = likeQC->groupSize;
+    float s1 = likeQC->scales[1];
+    uint16_t z1 = likeQC->zeroPoints[1];
+    int scalesDistinct = likeQC->scales != srcQC->scales;
+    int zpsDistinct = likeQC->zeroPoints != srcQC->zeroPoints;
+    srcQC->scales[1] = 0.75f; /* mutate AFTER clone */
+    srcQC->zeroPoints[1] = 3;
+    float s1AfterSrcMutation = likeQC->scales[1];
+    uint16_t z1AfterSrcMutation = likeQC->zeroPoints[1];
+    freeQuantization(like);
+    freeQuantization(src);
+    TEST_ASSERT_EQUAL_size_t(2, ng);
+    TEST_ASSERT_EQUAL_size_t(5, gs);
+    TEST_ASSERT_EQUAL_FLOAT(0.25f, s1);
+    TEST_ASSERT_EQUAL_UINT16(9, z1);
+    TEST_ASSERT_TRUE(scalesDistinct);
+    TEST_ASSERT_TRUE(zpsDistinct);
+    TEST_ASSERT_EQUAL_FLOAT(0.25f, s1AfterSrcMutation);
+    TEST_ASSERT_EQUAL_UINT16(9, z1AfterSrcMutation);
+}
+
+void testInitTensorValidatesGroupedAsymShape(void) {
+    /* 10-element tensor, groupSize 4 -> 2*4 != 10 must fail-fast at attach
+     * (initTensor's validation branch now covers ASYM, not just SYM). */
+    ASSERT_EXITS_WITH(1, {
+        quantization_t *q = quantizationInitAsymGrouped(4, HALF_AWAY, 2, 4);
+        initTensor(makeShape1d(10), q, NULL);
+    });
+}
+
+void testGradInitRejectsGroupedAsymTemplate(void) {
+    /* Carrier gate: grads stay per-tensor unconditionally (#300 axis), for
+     * ASYM exactly as for SYM. */
+    ASSERT_EXITS_WITH(1, {
+        quantization_t *gq = quantizationInitAsymGrouped(8, HALF_AWAY, 2, 5);
+        tensor_t *p = makeFloatTensor1d(10); /* file-local Rule-1 factory */
+        gradInit(p, gq, NULL);
+    });
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testTensorInitWithDistribution_Zeros_InitializesProductOfDimsValues);
@@ -911,5 +998,9 @@ int main(void) {
     RUN_TEST(testGetQLikeSymPreservesGroups);
     RUN_TEST(testGradInitRejectsGroupedSymTemplate);
     RUN_TEST(testRequantizeTensorInPlaceRejectsMismatchedGroupShape);
+    RUN_TEST(testGetQLikeAsymPreservesWidthAndRoundingResetsGrid);
+    RUN_TEST(testGetQLikeAsymGroupedDeepCopiesGridValues);
+    RUN_TEST(testInitTensorValidatesGroupedAsymShape);
+    RUN_TEST(testGradInitRejectsGroupedAsymTemplate);
     return UNITY_END();
 }

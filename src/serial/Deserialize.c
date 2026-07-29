@@ -291,10 +291,31 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
     }
     case ASYM: {
         asymQConfig_t *asymQC = q->qConfig;
-        asymQC->scale = serialReadF32LE(f);
-        asymQC->qBits = serialReadU8(f);
+        /* Group-quant PR4 Task 1 INTRA-BRANCH BRIDGE (see Serialize.c's ASYM
+         * arm): v4 record shape kept, values are the NEW code-domain
+         * semantics through the OLD slots. A genuinely-old (pre-PR4) v4
+         * file's value-domain zp decodes wrong here BY DESIGN of the interim
+         * state -- Task 4's v5 bump adds the version reject. The skeleton
+         * must be per-tensor (a v4 ASYM record has no group data to fill a
+         * grouped skeleton's arrays from). */
+        if (asymQC->numGroups != 1) {
+            PRINT_ERROR("deserializeQConfig: v4 ASYM record cannot fill a grouped skeleton "
+                        "(numGroups=%zu) -- grouped ASYM wire format lands with v5 (PR4 Task 4)",
+                        asymQC->numGroups);
+            exit(1);
+        }
+        asymQC->scales[0] = serialReadF32LE(f);
+        uint8_t fileQBits = serialReadU8(f);
+        if (fileQBits == 0 || fileQBits > 16) {
+            /* D6: uint16 code-domain zp requires qBits <= 16; a wider record
+             * is corrupt or written by an incompatible (pre-PR4) build. */
+            PRINT_ERROR("deserializeQConfig: ASYM file qBits %u outside [1, 16] (D6)",
+                        (unsigned)fileQBits);
+            exit(1);
+        }
+        asymQC->qBits = fileQBits;
         asymQC->roundingMode = (roundingMode_t)serialReadU8(f);
-        asymQC->zeroPoint = serialReadI32LE(f);
+        asymQC->zeroPoints[0] = (uint16_t)clampInt32(serialReadI32LE(f), 0, 65535);
         break;
     }
     default:
@@ -359,7 +380,20 @@ static void skipSerializedTensor(FILE *f) {
      * corrupt/malformed grouped grad record from the divisibility check a
      * live tensor's qConfig would get. */
     symQConfig_t symScratch = {0};
-    asymQConfig_t asymScratch;
+    /* asymScratch (group-quant PR4): unlike symScratch, the ASYM arm of
+     * deserializeQConfig never frees/reallocates its arrays (the v4 ASYM
+     * record is per-tensor and fills element 0 in place), so STACK backing
+     * arrays are safe here -- the whole scratch is discarded at exit and
+     * nothing ever calls free on them. Revisit when Task 4's v5 grouped
+     * ASYM record makes the read path reallocate, symScratch-style. */
+    float asymScratchScale[1] = {1.f};
+    uint16_t asymScratchZp[1] = {0};
+    asymQConfig_t asymScratch = {.scales = asymScratchScale,
+                                 .zeroPoints = asymScratchZp,
+                                 .numGroups = 1,
+                                 .groupSize = 0,
+                                 .qBits = 8,
+                                 .roundingMode = HALF_AWAY};
     switch (scratchQ.type) {
     case INT32:
     case FLOAT32:

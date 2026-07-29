@@ -1424,14 +1424,14 @@ static void testRoundTripQuantizationLayer(void) {
     qtype_t capturedDeserialPropLossQType = deserialCfg->propLossQ->type;
     asymQConfig_t *serialPropLossCfg = serialCfg->propLossQ->qConfig;
     asymQConfig_t *deserialPropLossCfg = deserialCfg->propLossQ->qConfig;
-    float capturedSerialPropLossScale = serialPropLossCfg->scale;
-    float capturedDeserialPropLossScale = deserialPropLossCfg->scale;
+    float capturedSerialPropLossScale = serialPropLossCfg->scales[0];
+    float capturedDeserialPropLossScale = deserialPropLossCfg->scales[0];
     uint8_t capturedSerialPropLossQBits = serialPropLossCfg->qBits;
     uint8_t capturedDeserialPropLossQBits = deserialPropLossCfg->qBits;
     roundingMode_t capturedSerialPropLossRM = serialPropLossCfg->roundingMode;
     roundingMode_t capturedDeserialPropLossRM = deserialPropLossCfg->roundingMode;
-    int32_t capturedSerialPropLossZP = serialPropLossCfg->zeroPoint;
-    int32_t capturedDeserialPropLossZP = deserialPropLossCfg->zeroPoint;
+    uint16_t capturedSerialPropLossZP = serialPropLossCfg->zeroPoints[0];
+    uint16_t capturedDeserialPropLossZP = deserialPropLossCfg->zeroPoints[0];
 
     freeQuantLayer(deserialLayer);
     freeQuantLayer(serialLayer);
@@ -1727,8 +1727,9 @@ static void testGoldenBytesTensorFloat32V2(void) {
 /*! GOLDEN BYTES (#370/#380, wire format v4): full-model header (magic +
  *  version 4 + layerCount, all u32 LE) plus a RELU record whose
  *  outputQ/propLossQ pin the SYM_INT32 and ASYM qConfig payload encodings —
- *  ASYM zeroPoint is i32 LE on the wire, matching the int32 in-memory field
- *  (#246). SYM_INT32/ASYM records are unchanged by the group-quant v4 bump
+ *  ASYM zeroPoint stays i32 LE on the wire; since group-quant PR4 the value
+ *  in that slot is the code-domain uint16 zp (D6), bridged until Task 4's
+ *  v5 record. SYM_INT32/ASYM records are unchanged by the group-quant v4 bump
  *  (only the SYM record grew numGroups/groupSize — see
  *  testGoldenBytesModelReluSymOutputV4). RELU carries no parameters, so the
  *  v3-introduced grad-presence byte does not appear in this record (see
@@ -1748,8 +1749,11 @@ static void testGoldenBytesModelReluV4(void) {
     symInt32QConfig_t *outputCfg = cfg->outputQ->qConfig;
     outputCfg->scale = 0.5f;
     asymQConfig_t *propLossCfg = cfg->propLossQ->qConfig;
-    propLossCfg->scale = 0.25f;
-    propLossCfg->zeroPoint = -3;
+    /* code-domain re-pin (group-quant PR4, D6): the in-memory zp is now a
+     * uint16 CODE-domain value; +3 replaces the old value-domain -3 (the
+     * wire slot stays i32 LE until Task 4's v5 record). */
+    propLossCfg->scales[0] = 0.25f;
+    propLossCfg->zeroPoints[0] = 3;
 
     layer_t *model[] = {layer};
     FILE *f = fopen(FILE_PATH, "wb");
@@ -1769,8 +1773,9 @@ static void testGoldenBytesModelReluV4(void) {
         /* propLossMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
         /* outputQ: SYM_INT32, scale 0.5f f32 LE, SR_HALF_AWAY, qMaxBits 12 */
         0x02, 0x00, 0x00, 0x00, 0x3F, 0x01, 0x0C,
-        /* propLossQ: ASYM, scale 0.25f f32 LE, qBits 8, HALF_AWAY, zeroPoint -3 i32 LE */
-        0x04, 0x00, 0x00, 0x80, 0x3E, 0x08, 0x00, 0xFD, 0xFF, 0xFF, 0xFF};
+        /* propLossQ: ASYM, scale 0.25f f32 LE, qBits 8, HALF_AWAY, zeroPoint +3
+         * i32 LE (PR4 code-domain value through the unchanged v4 slot) */
+        0x04, 0x00, 0x00, 0x80, 0x3E, 0x08, 0x00, 0x03, 0x00, 0x00, 0x00};
 
     uint8_t got[sizeof(expected) + 8] = {0};
     f = fopen(FILE_PATH, "rb");

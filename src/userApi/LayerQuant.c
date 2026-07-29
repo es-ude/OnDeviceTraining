@@ -80,6 +80,18 @@ quantization_t *deepCopyQuantization(quantization_t *src) {
             memcpy(scales, srcQC->scales, srcQC->numGroups * sizeof(float));
             dstQC->scales = scales;
         }
+        if (src->type == ASYM) {
+            /* Group-quant PR4: same pointer-alias hazard, two arrays --
+             * fresh owned blocks for scales AND zeroPoints. */
+            asymQConfig_t *srcQC = src->qConfig;
+            asymQConfig_t *dstQC = dst->qConfig;
+            float *scales = reserveMemory(srcQC->numGroups * sizeof(float));
+            memcpy(scales, srcQC->scales, srcQC->numGroups * sizeof(float));
+            dstQC->scales = scales;
+            uint16_t *zeroPoints = reserveMemory(srcQC->numGroups * sizeof(uint16_t));
+            memcpy(zeroPoints, srcQC->zeroPoints, srcQC->numGroups * sizeof(uint16_t));
+            dstQC->zeroPoints = zeroPoints;
+        }
     }
     return dst;
 }

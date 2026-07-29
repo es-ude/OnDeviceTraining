@@ -98,13 +98,33 @@ typedef struct symQConfig {
     uint8_t qBits;
 } symQConfig_t;
 
+/* Group-quant PR4 (Task 1, spec D6): always-array ASYM with a NUDGED
+ * CODE-DOMAIN affine parametrization (TFLite-standard). Ownership and shape
+ * grammar are exactly symQConfig_t's (see the block comment above): both
+ * arrays are heap blocks owned by the config (reserveMemory, one block per
+ * array), {1,0} is the per-tensor sentinel, {>1,>0} with
+ * numGroups*groupSize == N the grouped form, {1,N>0} invalid; stack test
+ * fixtures build the struct directly with local backing arrays and are never
+ * freed / never used as deserialize destinations.
+ *
+ * zeroPoints are CODE-domain: dequant = (code - zp) * scale with
+ * zp in [0, 2^qBits - 1]. The grid derivation nudges the band to include
+ * zero (mn = min(mn, 0), mx = max(mx, 0)), which guarantees (a) 0.0 is
+ * exactly representable (code == zp decodes to exactly 0.0f) and (b)
+ * zpReal = -mn/scale lands in [0, 2^qBits - 1] BY CONSTRUCTION -- that
+ * boundedness is what lets zp be uint16, and is also why qBits is now
+ * capped at 16 (a 17-bit code domain would not fit uint16). This supersedes
+ * the old value-domain int32 zeroPoint (dequant = (code + zp)*scale,
+ * zp = round(min/scale)), whose #246 rationale -- wide all-negative bands
+ * pushing zp past int16/int32 -- is void under the nudge. */
 typedef struct asymQConfig {
-    float scale;
-    /* int32: zeroPoint = round(min/scale) reaches -(2^qBits - 1) for negative
-     * bands and exceeds it by min/(min - max) for all-negative ones -- far
-     * outside int16 already at qBits=16 (#246). */
-    int32_t zeroPoint;
-    uint8_t qBits;
+    float *scales;        /* [numGroups], owned (symQConfig ownership rules) */
+    uint16_t *zeroPoints; /* [numGroups], owned; CODE-domain zp in
+                             [0, 2^qBits - 1] (see block comment above) */
+    size_t numGroups;     /* 1 = per-tensor sentinel; >1 = real groups */
+    size_t groupSize;     /* 0 = "whole tensor" sentinel (per-tensor);
+                            >0 only for real groups, numGroups*groupSize == N */
+    uint8_t qBits;        /* ASYM range [1, 16] (was [1, 30] pre-D6) */
     roundingMode_t roundingMode;
 } asymQConfig_t;
 
@@ -136,6 +156,18 @@ void initSymQConfigGrouped(uint8_t qBits, roundingMode_t roundingMode, size_t nu
  * future concern. */
 void validateSymQConfigShape(const symQConfig_t *qC, size_t numberOfElements);
 void initAsymQConfig(uint8_t qBits, roundingMode_t roundingMode, asymQConfig_t *asymQConfig);
+/*! Group-quant PR4: general-shape ASYM config init, the exact ASYM twin of
+ * initSymQConfigGrouped (same shape grammar, same fail-fasts) plus the D6
+ * qBits ceiling [1, 16]. Allocates scales[numGroups] (each 1.f) AND
+ * zeroPoints[numGroups] (each 0) as two separate owned blocks.
+ * initAsymQConfig delegates here with (numGroups=1, groupSize=0). */
+void initAsymQConfigGrouped(uint8_t qBits, roundingMode_t rm, size_t numGroups, size_t groupSize,
+                            asymQConfig_t *qC);
+/*! Group-quant PR4: attach-time shape check for an ASYM config against a
+ * concrete element count (validateSymQConfigShape twin), PLUS the D6
+ * qBits-in-[1,16] re-check for field-assigned configs. Called by initTensor
+ * for ASYM tensors. */
+void validateAsymQConfigShape(const asymQConfig_t *qC, size_t numberOfElements);
 
 void initInt32Quantization(quantization_t *quantization);
 void initFloat32Quantization(quantization_t *quantization);

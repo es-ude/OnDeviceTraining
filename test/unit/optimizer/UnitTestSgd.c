@@ -778,11 +778,12 @@ void testSgdZeroGradAsymSubByteZeroesAllPackedBytes(void) {
     parameter_t *param = parameterInit(p, g);
     memset(g->data, 0xFF, 4); /* poison all packed grad bytes */
     /* Poison the config too (PR3, spec §5.3): byte-zero alone is not
-     * VALUE-zero for ASYM (code 0 decodes to zeroPoint*scale) — the config
+     * VALUE-zero for ASYM (code 0 decodes to -zeroPoint*scale, PR4 code
+     * domain) — the config
      * reset asserted below is the fix for the PR2 watch-list item. */
     asymQConfig_t *gAsymQ = g->quantization->qConfig;
-    gAsymQ->scale = 0.42f;
-    gAsymQ->zeroPoint = 5;
+    gAsymQ->scales[0] = 0.42f;
+    gAsymQ->zeroPoints[0] = 5;
 
     /* Hand-built optimizer: sgdMCreateOptim rejects sub-byte grad storage until
      * PR3, but optimizerZeroGrad reads only sizeStates/parameter — this characterizes
@@ -807,8 +808,8 @@ void testSgdZeroGradAsymSubByteZeroesAllPackedBytes(void) {
     uint8_t b1 = g->data[1];
     uint8_t b2 = g->data[2];
     uint8_t b3 = g->data[3];
-    float scaleAfter = gAsymQ->scale;
-    int32_t zeroPointAfter = gAsymQ->zeroPoint;
+    float scaleAfter = gAsymQ->scales[0];
+    uint16_t zeroPointAfter = gAsymQ->zeroPoints[0];
     freeParameter(param);
 
     TEST_ASSERT_EQUAL_UINT8(0, b0);
@@ -819,7 +820,7 @@ void testSgdZeroGradAsymSubByteZeroesAllPackedBytes(void) {
      * exactly 0.0f, which requires zeroPoint==0 (scale is irrelevant to that
      * particular identity, but reset for hygiene/consistency with SYM/SYM_INT32). */
     TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.0f, scaleAfter);
-    TEST_ASSERT_EQUAL_INT32(0, zeroPointAfter);
+    TEST_ASSERT_EQUAL_UINT16(0, zeroPointAfter);
 }
 
 void testSgdZeroGradSymSubByteZeroesAllPackedBytesAndResetsScale(void) {

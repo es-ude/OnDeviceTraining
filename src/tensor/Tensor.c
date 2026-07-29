@@ -339,8 +339,11 @@ void printTensor(tensor_t *t) {
     case ASYM: {
         asymQConfig_t *lq = q->qConfig;
         printf("ASYM\n");
-        printf("scale=%e\n", lq->scale);
-        printf("offset=%i\n", lq->zeroPoint);
+        printf("numGroups=%zu groupSize=%zu\n", lq->numGroups, lq->groupSize);
+        for (size_t g = 0; g < lq->numGroups; g++) {
+            printf("scale[%zu]=%e zeroPoint[%zu]=%u\n", g, lq->scales[g], g,
+                   (unsigned)lq->zeroPoints[g]);
+        }
         printf("Data \n");
         for (size_t i = 0; i < numValues; i++) {
             printf("%i\n", t->data[i]);
@@ -460,6 +463,32 @@ static void copySymQConfigInto(quantization_t *dest, quantization_t *src) {
     dstQC->qBits = srcQC->qBits;
 }
 
+/* ASYM twin of copySymQConfigInto (group-quant PR4): TWO owned heap arrays
+ * (scales + zeroPoints) -- a byte memcpy of the struct would alias both.
+ * Same caller contract: dest->qConfig and its arrays are caller-allocated
+ * and stay owned by dest; src's group shape must match dest's numGroups
+ * exactly (fail-fast, never over/under-copy). */
+static void copyAsymQConfigInto(quantization_t *dest, quantization_t *src) {
+    if (dest->qConfig == NULL) {
+        PRINT_ERROR("copyQuantization: dest->qConfig for ASYM must be caller-allocated");
+        exit(1);
+    }
+    dest->type = src->type;
+    asymQConfig_t *srcQC = src->qConfig;
+    asymQConfig_t *dstQC = dest->qConfig;
+    if (dstQC->numGroups != srcQC->numGroups) {
+        PRINT_ERROR("copyQuantization: ASYM group-shape mismatch (dest numGroups=%zu "
+                    "groupSize=%zu, src numGroups=%zu groupSize=%zu)",
+                    dstQC->numGroups, dstQC->groupSize, srcQC->numGroups, srcQC->groupSize);
+        exit(1);
+    }
+    memcpy(dstQC->scales, srcQC->scales, srcQC->numGroups * sizeof(float));
+    memcpy(dstQC->zeroPoints, srcQC->zeroPoints, srcQC->numGroups * sizeof(uint16_t));
+    dstQC->groupSize = srcQC->groupSize;
+    dstQC->roundingMode = srcQC->roundingMode;
+    dstQC->qBits = srcQC->qBits;
+}
+
 void copyQuantization(quantization_t *dest, quantization_t *src) {
     switch (src->type) {
     case INT32:
@@ -477,7 +506,7 @@ void copyQuantization(quantization_t *dest, quantization_t *src) {
         copySymQConfigInto(dest, src);
         break;
     case ASYM:
-        copyQConfigInto(dest, src, sizeof(asymQConfig_t), "ASYM");
+        copyAsymQConfigInto(dest, src);
         break;
     case BOOL:
         dest->type = BOOL;

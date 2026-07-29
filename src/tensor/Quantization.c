@@ -77,19 +77,62 @@ void initSymQConfigGrouped(uint8_t qBits, roundingMode_t roundingMode, size_t nu
 }
 
 void initAsymQConfig(uint8_t qBits, roundingMode_t roundingMode, asymQConfig_t *asymQConfig) {
-    /* #246: qBits > 30 makes the unsigned code ceiling powf(2, qBits) - 1 round
-     * to 2^31 in float, so the (int32_t) cast in the ASYM emit path is out of
-     * range (UB) -- the unsigned twin of the #202 SYM_INT32 ceiling at 31. 0
-     * would underflow the sub-byte packer. deriveAsymGridFromMinMax re-checks
-     * for configs built without this init. */
-    if (qBits == 0 || qBits > 30) {
-        PRINT_ERROR("qBits (%u) outside the ASYM range [1, 30] (#246)", (unsigned)qBits);
+    /* Group-quant PR4: delegates to the general-shape init with the
+     * per-tensor sentinel (numGroups=1, groupSize=0), mirroring
+     * initSymQConfig's delegation. */
+    initAsymQConfigGrouped(qBits, roundingMode, 1, 0, asymQConfig);
+}
+
+/* D6 width ceiling shared by the init and attach-time funnels: the
+ * code-domain zeroPoint is uint16, so qBits > 16 has codes/zp with no uint16
+ * representation (supersedes the old [1, 30] #246 ceiling, whose wide-band
+ * int32-zp rationale is void under the zero-inclusion nudge -- see
+ * Quantization.h). qBits == 0 would underflow the sub-byte packer. */
+static void validateAsymQBits(uint8_t qBits, const char *what) {
+    if (qBits == 0 || qBits > 16) {
+        PRINT_ERROR("%s: qBits (%u) outside the ASYM range [1, 16] (D6)", what, (unsigned)qBits);
         exit(1);
     }
-    asymQConfig->qBits = qBits;
-    asymQConfig->roundingMode = roundingMode;
-    asymQConfig->scale = 1.f;
-    asymQConfig->zeroPoint = 0;
+}
+
+void initAsymQConfigGrouped(uint8_t qBits, roundingMode_t rm, size_t numGroups, size_t groupSize,
+                            asymQConfig_t *qC) {
+    /* Caller allocates the outer struct; this init allocates the two
+     * numGroups-element arrays (scales all 1.f, zeroPoints all 0 -- the
+     * zp==0 zero-state makes code 0 decode to exactly 0.0f). Shape grammar
+     * identical to initSymQConfigGrouped: only {1,0} (per-tensor) or
+     * {>1,>0} (grouped) are constructible. */
+    validateAsymQBits(qBits, "initAsymQConfigGrouped");
+    if (numGroups == 0 || (numGroups == 1) != (groupSize == 0)) {
+        PRINT_ERROR("initAsymQConfigGrouped: invalid group shape numGroups=%zu groupSize=%zu "
+                    "(per-tensor is {1,0}; grouped needs numGroups>1 and groupSize>0)",
+                    numGroups, groupSize);
+        exit(1);
+    }
+    qC->scales = reserveMemory(numGroups * sizeof(float));
+    qC->zeroPoints = reserveMemory(numGroups * sizeof(uint16_t));
+    for (size_t g = 0; g < numGroups; g++) {
+        qC->scales[g] = 1.f;
+        qC->zeroPoints[g] = 0;
+    }
+    qC->numGroups = numGroups;
+    qC->groupSize = groupSize;
+    qC->roundingMode = rm;
+    qC->qBits = qBits;
+}
+
+void validateAsymQConfigShape(const asymQConfig_t *qC, size_t numberOfElements) {
+    validateAsymQBits(qC->qBits, "validateAsymQConfigShape");
+    bool perTensor = qC->numGroups == 1 && qC->groupSize == 0;
+    bool grouped =
+        qC->numGroups > 1 && qC->groupSize > 0 && qC->numGroups * qC->groupSize == numberOfElements;
+    if (!perTensor && !grouped) {
+        PRINT_ERROR("validateAsymQConfigShape: invalid ASYM group shape numGroups=%zu "
+                    "groupSize=%zu for %zu elements (per-tensor is {1,0}; grouped needs "
+                    "numGroups*groupSize == elements)",
+                    qC->numGroups, qC->groupSize, numberOfElements);
+        exit(1);
+    }
 }
 
 void initInt32Quantization(quantization_t *quantization) {

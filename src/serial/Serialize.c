@@ -28,8 +28,10 @@
  * one Record per layer (u8 tag + payload). Every count/dim/kernel field is u32
  * little-endian and every scalar goes through the checked SerialWire
  * primitives, so a model written on a 64-bit host loads bit-identically on
- * 32-bit MCU targets. ASYM zeroPoint is i32 LE on the wire, matching the
- * int32 in-memory field (#246).
+ * 32-bit MCU targets. ASYM zeroPoint is i32 LE on the wire (historically
+ * matching the old int32 in-memory field, #246; since group-quant PR4 the
+ * in-memory zp is a code-domain uint16 bridged through the same i32 slot
+ * until Task 4's v5 record -- see serializeQConfig's ASYM arm).
  * v3: parameter records carry a grad-presence byte (#380). Frozen layers
  * (parameter->grad == NULL, layer freezing epic) write hasGrad=0 and skip the
  * grad tensor entirely; deserialize is TOLERANT of a presence/skeleton
@@ -151,10 +153,25 @@ static void serializeQConfig(quantization_t *q, FILE *f) {
     }
     case ASYM: {
         asymQConfig_t *asymQC = q->qConfig;
-        serialWriteF32LE(asymQC->scale, f);
+        /* Group-quant PR4 Task 1 INTRA-BRANCH BRIDGE: the v4 record shape
+         * (f32 scale, u8 qBits, u8 rounding, i32 zeroPoint) is kept, with
+         * the new per-tensor arrays' element 0 written through the old
+         * slots. The i32 slot now carries a CODE-domain uint16 zp -- a v4
+         * file written by PRE-PR4 code holds value-domain semantics and
+         * would decode WRONG under the new grid; that mismatch is resolved
+         * by Task 4's v5 bump (grouped ASYM record + version reject), not
+         * here. Until then this writer round-trips only against this
+         * branch's own reader. Grouped configs need the v5 record. */
+        if (asymQC->numGroups > 1) {
+            PRINT_ERROR("serializeQConfig: grouped ASYM (numGroups=%zu) has no v4 record -- "
+                        "the grouped ASYM wire format lands with the v5 bump (PR4 Task 4)",
+                        asymQC->numGroups);
+            exit(1);
+        }
+        serialWriteF32LE(asymQC->scales[0], f);
         serialWriteU8(asymQC->qBits, f);
         serialWriteU8((uint8_t)asymQC->roundingMode, f);
-        serialWriteI32LE(asymQC->zeroPoint, f);
+        serialWriteI32LE((int32_t)asymQC->zeroPoints[0], f);
         break;
     }
     default:

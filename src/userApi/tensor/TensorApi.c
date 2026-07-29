@@ -23,6 +23,8 @@ tensor_t *initTensor(shape_t *shape, quantization_t *quantization, sparsity_t *s
     size_t numberOfElements = calcNumberOfElementsByShape(shape);
     if (quantization->type == SYM) {
         validateSymQConfigShape(quantization->qConfig, numberOfElements);
+    } else if (quantization->type == ASYM) {
+        validateAsymQConfigShape(quantization->qConfig, numberOfElements);
     }
     size_t bytes = calcNumberOfBytesForData(quantization, numberOfElements);
     tensor->data = reserveMemory(bytes);
@@ -149,12 +151,20 @@ tensor_t *gradInitInt32(tensor_t *param, sparsity_t *sparsity) {
 }
 
 tensor_t *gradInit(tensor_t *param, quantization_t *gradQ, sparsity_t *sparsity) {
-    /* Group-quant PR2 carrier gate: groups are legal ONLY on GEMM-family
+    /* Group-quant PR2/PR4 carrier gate: groups are legal ONLY on GEMM-family
      * weight tensors -- grads stay per-tensor unconditionally. */
     if (gradQ->type == SYM) {
         symQConfig_t *symQC = gradQ->qConfig;
         if (symQC->numGroups > 1) {
             PRINT_ERROR("gradInit: grouped SYM grad templates are unsupported -- "
+                        "grouped grads are a future #300 axis (spec §3)");
+            exit(1);
+        }
+    }
+    if (gradQ->type == ASYM) {
+        asymQConfig_t *asymQC = gradQ->qConfig;
+        if (asymQC->numGroups > 1) {
+            PRINT_ERROR("gradInit: grouped ASYM grad templates are unsupported -- "
                         "grouped grads are a future #300 axis (spec §3)");
             exit(1);
         }
@@ -178,6 +188,11 @@ tensor_t *gradInitSymInt32(tensor_t *param, roundingMode_t roundingMode, sparsit
 
 tensor_t *gradInitAsym(tensor_t *param, uint8_t qBits, roundingMode_t roundingMode,
                        sparsity_t *sparsity) {
+    /* Bypasses gradInit's carrier gate BY SHAPE of its signature: it takes
+     * qBits/roundingMode scalars, so quantizationInitAsym can only ever build
+     * the per-tensor {1,0} form -- there is no grouped template to reject.
+     * If this signature ever grows a quantization_t template, route it
+     * through gradInit so the grouped-ASYM gate applies (PR4 Task 1). */
     return initTensor(getShapeLike(param->shape), quantizationInitAsym(qBits, roundingMode),
                       sparsity);
 }
@@ -227,8 +242,27 @@ quantization_t *getQLike(quantization_t *quantization) {
     case ASYM: {
         asymQConfig_t *likeAsymQC = reserveMemory(sizeof(asymQConfig_t));
         asymQConfig_t *asymQC = quantization->qConfig;
-
-        initAsymQConfig(asymQC->qBits, asymQC->roundingMode, likeAsymQC);
+        if (asymQC->numGroups > 1) {
+            /* Group-quant PR4: mirror the SYM grouped arm below -- the group
+             * grid is an attach-time fact the clone must retain: preserve
+             * numGroups/groupSize and deep-copy BOTH per-group arrays'
+             * VALUES into fresh owned blocks. */
+            float *likeScales = reserveMemory(asymQC->numGroups * sizeof(float));
+            memcpy(likeScales, asymQC->scales, asymQC->numGroups * sizeof(float));
+            uint16_t *likeZps = reserveMemory(asymQC->numGroups * sizeof(uint16_t));
+            memcpy(likeZps, asymQC->zeroPoints, asymQC->numGroups * sizeof(uint16_t));
+            likeAsymQC->scales = likeScales;
+            likeAsymQC->zeroPoints = likeZps;
+            likeAsymQC->numGroups = asymQC->numGroups;
+            likeAsymQC->groupSize = asymQC->groupSize;
+            likeAsymQC->roundingMode = asymQC->roundingMode;
+            likeAsymQC->qBits = asymQC->qBits;
+        } else {
+            /* Precedent A clone (per-tensor): width + rounding preserved,
+             * grid reset (scale 1.f, zp 0 -- code 0 decodes to exactly 0.0f,
+             * the zero-grad state). */
+            initAsymQConfig(asymQC->qBits, asymQC->roundingMode, likeAsymQC);
+        }
         initAsymQuantization(likeAsymQC, likeQ);
         break;
     }
@@ -320,6 +354,10 @@ void requantizeTensorInPlace(tensor_t *t, quantization_t *targetQ) {
      * buffer below is sized with, before either buffer exists. */
     if (newQ->type == SYM) {
         validateSymQConfigShape(newQ->qConfig, numElements);
+    } else if (newQ->type == ASYM) {
+        /* Same bypass-hazard as SYM (PR4): a grouped ASYM target template
+         * must describe exactly `t`'s element count. */
+        validateAsymQConfigShape(newQ->qConfig, numElements);
     }
     uint8_t *newData = getDataLike(newQ, numElements);
 
@@ -359,12 +397,18 @@ void freeShape(shape_t *shape) {
 }
 
 void freeQuantization(quantization_t *quantization) {
-    /* Group-quant PR1: SYM's qConfig owns a second heap block (the scales
-     * array) beyond the qConfig struct itself -- free it first, then the
-     * qConfig struct, then the wrapper (reverse-init order). */
+    /* Group-quant PR1/PR4: SYM's qConfig owns a second heap block (scales)
+     * and ASYM's owns two (scales + zeroPoints) beyond the qConfig struct
+     * itself -- free them first, then the qConfig struct, then the wrapper
+     * (reverse-init order). */
     if (quantization->type == SYM) {
         symQConfig_t *symQC = quantization->qConfig;
         freeReservedMemory(symQC->scales);
+    }
+    if (quantization->type == ASYM) {
+        asymQConfig_t *asymQC = quantization->qConfig;
+        freeReservedMemory(asymQC->zeroPoints);
+        freeReservedMemory(asymQC->scales);
     }
     freeReservedMemory(quantization->qConfig);
     freeReservedMemory(quantization);

@@ -54,10 +54,18 @@ static ppcaReplayConfig_t packedConfig(size_t dim, size_t rank, size_t maxM, qty
     static symQConfig_t symQc = {
         .scales = symScale, .numGroups = 1, .groupSize = 0, .roundingMode = HALF_AWAY, .qBits = 8};
     static quantization_t symQ;
-    static asymQConfig_t asymQc;
+    /* PR4: same idiom for ASYM's TWO arrays (initAsymQConfig would leak two
+     * heap blocks per call after the first). */
+    static float asymScale[1] = {1.f};
+    static uint16_t asymZp[1] = {0};
+    static asymQConfig_t asymQc = {.scales = asymScale,
+                                   .zeroPoints = asymZp,
+                                   .numGroups = 1,
+                                   .groupSize = 0,
+                                   .roundingMode = HALF_AWAY,
+                                   .qBits = 8};
     static quantization_t asymQ;
     initSymQuantization(&symQc, &symQ);
-    initAsymQConfig(8, HALF_AWAY, &asymQc);
     initAsymQuantization(&asymQc, &asymQ);
     if (basisType == SYM) {
         cfg.basisQ = &symQ;
@@ -87,9 +95,15 @@ static ppcaReplayConfig_t groupedPackedConfig(size_t dim, size_t rank, size_t ma
                                         .qBits = 8};
     static quantization_t groupedSymQ;
     initSymQuantization(&groupedSymQc, &groupedSymQ);
-    static asymQConfig_t asymQc;
+    static float asymScale[1] = {1.f};
+    static uint16_t asymZp[1] = {0};
+    static asymQConfig_t asymQc = {.scales = asymScale,
+                                   .zeroPoints = asymZp,
+                                   .numGroups = 1,
+                                   .groupSize = 0,
+                                   .roundingMode = HALF_AWAY,
+                                   .qBits = 8};
     static quantization_t asymQ;
-    initAsymQConfig(8, HALF_AWAY, &asymQc);
     initAsymQuantization(&asymQc, &asymQ);
     cfg.basisQ = &groupedSymQ;
     cfg.meanQ = &asymQ; /* mean has an offset -> ASYM, mirrors packedConfig */
@@ -185,11 +199,11 @@ void testRoundTripPacked(void) {
         ((symQConfig_t *)serial->generators[0]->basis->quantization->qConfig)->scales[0],
         ((symQConfig_t *)deserial->generators[0]->basis->quantization->qConfig)->scales[0]);
     TEST_ASSERT_EQUAL_FLOAT(
-        ((asymQConfig_t *)serial->generators[0]->mean->quantization->qConfig)->scale,
-        ((asymQConfig_t *)deserial->generators[0]->mean->quantization->qConfig)->scale);
-    TEST_ASSERT_EQUAL_INT32(
-        ((asymQConfig_t *)serial->generators[0]->mean->quantization->qConfig)->zeroPoint,
-        ((asymQConfig_t *)deserial->generators[0]->mean->quantization->qConfig)->zeroPoint);
+        ((asymQConfig_t *)serial->generators[0]->mean->quantization->qConfig)->scales[0],
+        ((asymQConfig_t *)deserial->generators[0]->mean->quantization->qConfig)->scales[0]);
+    TEST_ASSERT_EQUAL_UINT16(
+        ((asymQConfig_t *)serial->generators[0]->mean->quantization->qConfig)->zeroPoints[0],
+        ((asymQConfig_t *)deserial->generators[0]->mean->quantization->qConfig)->zeroPoints[0]);
     freePpcaReplaySet(deserial);
     freePpcaReplaySet(serial);
     freePpcaReplaySet(train);
@@ -295,9 +309,15 @@ void testDeserializeRejectsQBitsMismatch(void) {
     static quantization_t q4;
     initSymQuantization(&qc4, &q4);
     cfg4.basisQ = &q4;
-    static asymQConfig_t aqc;
+    static float aqcScale[1] = {1.f};
+    static uint16_t aqcZp[1] = {0};
+    static asymQConfig_t aqc = {.scales = aqcScale,
+                                .zeroPoints = aqcZp,
+                                .numGroups = 1,
+                                .groupSize = 0,
+                                .roundingMode = HALF_AWAY,
+                                .qBits = 8};
     static quantization_t aq;
-    initAsymQConfig(8, HALF_AWAY, &aqc);
     initAsymQuantization(&aqc, &aq);
     cfg4.meanQ = &aq;
     ppcaReplaySet_t *skeleton = ppcaReplaySetCreate(1, &cfg4);

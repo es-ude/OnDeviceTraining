@@ -811,10 +811,18 @@ static ppcaReplayConfig_t packedConfig(size_t dim, size_t rank, size_t maxM, qty
     static symQConfig_t symQc = {
         .scales = symScale, .numGroups = 1, .groupSize = 0, .roundingMode = HALF_AWAY, .qBits = 8};
     static quantization_t symQ;
-    static asymQConfig_t asymQc;
+    /* PR4: same idiom for ASYM's TWO arrays (initAsymQConfig would leak two
+     * heap blocks per call after the first). */
+    static float asymScale[1] = {1.f};
+    static uint16_t asymZp[1] = {0};
+    static asymQConfig_t asymQc = {.scales = asymScale,
+                                   .zeroPoints = asymZp,
+                                   .numGroups = 1,
+                                   .groupSize = 0,
+                                   .roundingMode = HALF_AWAY,
+                                   .qBits = 8};
     static quantization_t asymQ;
     initSymQuantization(&symQc, &symQ);
-    initAsymQConfig(8, HALF_AWAY, &asymQc);
     initAsymQuantization(&asymQc, &asymQ);
     if (basisType == SYM) {
         cfg.basisQ = &symQ;

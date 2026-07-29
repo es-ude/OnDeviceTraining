@@ -35,6 +35,11 @@ static void packChunkGuarded(const int32_t *codes, size_t count, uint8_t *dstBas
 static void deriveAsymGridFromMinMax(float mn, float mx, asymQConfig_t *outQC);
 static void emitAsymChunk(const float *vals, size_t count, const asymQConfig_t *qc,
                           uint8_t *dstBase, size_t elemOffset);
+/* Group-quant PR4 Task 1: grouped ASYM configs are constructible but every
+ * ASYM converter/dequant/accumulate cell still reads scales[0]/zeroPoints[0]
+ * only -- the per-tensor choke point each such cell calls first (mirrors the
+ * SYM scalar-cell gates). Grouped ASYM compute is a later PR4 task. */
+static void requirePerTensorAsym(const asymQConfig_t *qc, const char *what);
 
 void zeroTensorData(tensor_t *tensor) {
     size_t numberOfElements = calcNumberOfElementsByTensor(tensor);
@@ -155,10 +160,13 @@ void dequantChunkToFloat(const tensor_t *src, size_t elemOffset, size_t count, f
     }
     case ASYM: {
         asymQConfig_t *qc = src->quantization->qConfig;
+        requirePerTensorAsym(qc, "dequantChunkToFloat");
+        float scale = qc->scales[0]; /* hoisted like the SYM arm above */
+        int32_t zp = (int32_t)qc->zeroPoints[0];
         int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
         unpackZeroExtendChunk(src->data, qc->qBits, elemOffset, count, codes);
         for (size_t i = 0; i < count; i++) {
-            out[i] = ((float)codes[i] + (float)qc->zeroPoint) * qc->scale;
+            out[i] = (float)(codes[i] - zp) * scale;
         }
         return;
     }
@@ -168,56 +176,83 @@ void dequantChunkToFloat(const tensor_t *src, size_t elemOffset, size_t count, f
     }
 }
 
+static void requirePerTensorAsym(const asymQConfig_t *qc, const char *what) {
+    if (qc->numGroups > 1) {
+        PRINT_ERROR("%s: grouped ASYM (numGroups=%zu) has no per-tensor compute image here -- "
+                    "every ASYM cell reads scales[0]/zeroPoints[0] only (grouped ASYM compute "
+                    "is a later PR4 task)",
+                    what, qc->numGroups);
+        exit(1);
+    }
+}
+
 static void deriveAsymGridFromMinMax(float mn, float mx, asymQConfig_t *outQC) {
-    if (outQC->qBits == 0 || outQC->qBits > 30) {
+    if (outQC->qBits == 0 || outQC->qBits > 16) {
         /* Funnel re-check of the initAsymQConfig ceiling for field-assigned
-         * configs (#246): 31+ breaks the (int32_t)qMax cast in emitAsymChunk. */
-        PRINT_ERROR("deriveAsymGridFromMinMax: qBits (%u) outside the ASYM range [1, 30] (#246)",
+         * configs: the code-domain zeroPoint is uint16, so 17+ has no zp
+         * representation (D6; supersedes the [1, 30] #246 ceiling). */
+        PRINT_ERROR("deriveAsymGridFromMinMax: qBits (%u) outside the ASYM range [1, 16] (D6)",
                     (unsigned)outQC->qBits);
         exit(1);
     }
+    requirePerTensorAsym(outQC, "deriveAsymGridFromMinMax");
     const float qMax = powf(2, (float)outQC->qBits) - 1;
+    /* Zero-inclusion nudge (D6, TFLite-standard): extend the band to contain
+     * 0 so (a) 0.0 is exactly representable (code == zp decodes to exactly
+     * 0.0f) and (b) zpReal = -mn/scale is bounded into [0, qMax] BY
+     * CONSTRUCTION (mn <= 0 gives zpReal >= 0; mx >= 0 gives -mn <= mx - mn
+     * so zpReal <= qMax). */
+    mn = fminf(mn, 0.f);
+    mx = fmaxf(mx, 0.f);
     float scale;
     if (mn == mx) {
-        scale = (mn != 0.f) ? fabsf(mn) : 1.f;
+        /* post-nudge mn == mx only for the all-zero buffer (mn >= 0 and
+         * mx <= 0 force both to 0) -- keep a nonzero scale; zp derives to 0
+         * below, so code 0 decodes to exactly 0.0f. */
+        scale = 1.f;
     } else {
         scale = (mx - mn) / qMax;
     }
-    float zpReal = mn / scale;
-    /* qBits bounds only the mn < 0 < mx case; a narrow band far from zero pushes
-     * min/scale = min*qMax/(max-min) arbitrarily far past int32, where
-     * roundByMode's float->int32 cast is UB (#246). !(in-range) also catches NaN.
-     * The bounds are asymmetric because -2^31 (INT32_MIN) is representable and
-     * cast-safe while +2^31 is not. */
-    if (!(zpReal >= -2147483648.f && zpReal < 2147483648.f)) {
-        PRINT_ERROR("deriveAsymGridFromMinMax: zeroPoint round(%g) overflows int32 (#246)",
-                    (double)zpReal);
-        exit(1);
-    }
-    outQC->scale = scale;
-    outQC->zeroPoint = roundByMode(zpReal, outQC->roundingMode);
+    float zpReal = -mn / scale;
+    /* Belt-and-suspenders: the nudge bounds zpReal into [0, qMax] (proof
+     * above), so this clamp only ever trims rounding at the band edges
+     * (e.g. an exact .5 tie at qMax rounding up) -- it cannot mask a
+     * genuinely out-of-band zpReal on any reachable path. */
+    outQC->scales[0] = scale;
+    outQC->zeroPoints[0] =
+        (uint16_t)clampInt32(roundByMode(zpReal, outQC->roundingMode), 0, (int32_t)qMax);
 }
 
 static void emitAsymChunk(const float *vals, size_t count, const asymQConfig_t *qc,
                           uint8_t *dstBase, size_t elemOffset) {
     const float qMax = powf(2, (float)qc->qBits) - 1;
+    const float scale = qc->scales[0];
+    const int32_t zp = (int32_t)qc->zeroPoints[0];
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t i = 0; i < count; i++) {
+        /* Code-domain encode (D6): round the VALUE quotient first, add the
+         * integer zp after -- NOT the old single-round round(v/scale - zp),
+         * whose HALF_AWAY ties land differently under the shift. The clamp
+         * is load-bearing at the band edges: a .5 tie at both the zp
+         * derivation and the max value (e.g. scale 1.0, band [-1.5, 5.5]@3)
+         * rounds both up, overshooting qMax by 1. */
         codes[i] =
-            clampInt32(roundByMode(vals[i] / qc->scale - (float)qc->zeroPoint, qc->roundingMode), 0,
-                       (int32_t)qMax);
+            clampInt32(roundByMode(vals[i] / scale, qc->roundingMode) + zp, 0, (int32_t)qMax);
     }
     byteConversion((uint8_t *)codes, 32, dstBase + packedByteOffset(elemOffset, qc->qBits),
                    qc->qBits, count);
 }
 
-/* Standard affine asymmetric quantization (#243). scale = (max-min)/(2^qBits-1),
- * zeroPoint = round(min/scale), code = clamp(round(v/scale - zeroPoint), 0, 2^qBits-1).
- * Dequant (elsewhere) is (code + zeroPoint)*scale. Constant tensor (min==max) uses a
- * nonzero scale to avoid divide-by-zero. The single source of truth for all four
- * *ToAsymTensor converters. Grid derivation scans the WHOLE buffer once (min/max,
- * no rounding); emission then streams in ODT_CONVERSION_CHUNK_ELEMS chunks so no
- * VLA/heap scratch scales with n (#296 Stage 2). */
+/* Nudged code-domain asymmetric quantization (group-quant PR4, D6; replaces
+ * the #243 value-domain grid): band nudged to include 0, scale =
+ * (max-min)/(2^qBits-1), zeroPoint = clamp(round(-min/scale), 0, 2^qBits-1)
+ * [uint16 code domain], code = clamp(round(v/scale) + zp, 0, 2^qBits-1).
+ * Dequant (elsewhere) is (code - zp)*scale. Constant tensor: after the nudge
+ * min==max only for the all-zero buffer -> scale 1.f, zp 0. The single
+ * source of truth for all four *ToAsymTensor converters. Grid derivation
+ * scans the WHOLE buffer once (min/max, no rounding); emission then streams
+ * in ODT_CONVERSION_CHUNK_ELEMS chunks so no VLA/heap scratch scales with n
+ * (#296 Stage 2). */
 static void quantizeFloatToAsym(const float *values, size_t n, asymQConfig_t *outQC, uint8_t *dst) {
     if (n == 0) {
         /* n == 0: no grid can be derived from an empty payload -- leave the
@@ -480,13 +515,17 @@ void convertSymInt32TensorToAsymTensor(tensor_t *inputTensor, tensor_t *outputTe
 void convertAsymTensorToInt32Tensor(tensor_t *inputTensor, tensor_t *outputTensor) {
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     asymQConfig_t *inQC = inputTensor->quantization->qConfig;
+    requirePerTensorAsym(inQC, "convertAsymTensorToInt32Tensor");
+    const int32_t zp = (int32_t)inQC->zeroPoints[0];
     int32_t *out = (int32_t *)outputTensor->data;
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackZeroExtendChunk(inputTensor->data, inQC->qBits, off, count, codes);
         for (size_t i = 0; i < count; i++) {
-            out[off + i] = codes[i] + inQC->zeroPoint;
+            /* code-domain mantissa image (D6): code - zp (was code + zp
+             * under the old value-domain signed zeroPoint) */
+            out[off + i] = codes[i] - zp;
         }
     }
 }
@@ -494,13 +533,18 @@ void convertAsymTensorToInt32Tensor(tensor_t *inputTensor, tensor_t *outputTenso
 void convertAsymTensorToFloatTensor(tensor_t *inputTensor, tensor_t *outputTensor) {
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     asymQConfig_t *inQC = inputTensor->quantization->qConfig;
+    requirePerTensorAsym(inQC, "convertAsymTensorToFloatTensor");
+    const float scale = inQC->scales[0];
+    const int32_t zp = (int32_t)inQC->zeroPoints[0];
     float *out = (float *)outputTensor->data;
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackZeroExtendChunk(inputTensor->data, inQC->qBits, off, count, codes);
         for (size_t i = 0; i < count; i++) {
-            out[off + i] = ((float)codes[i] + (float)inQC->zeroPoint) * inQC->scale;
+            /* code-domain decode (D6): (code - zp)*scale, integer subtract
+             * exact (both operands <= 2^16-1) */
+            out[off + i] = (float)(codes[i] - zp) * scale;
         }
     }
 }
@@ -508,6 +552,8 @@ void convertAsymTensorToFloatTensor(tensor_t *inputTensor, tensor_t *outputTenso
 void convertAsymTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTensor) {
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     asymQConfig_t *inQC = inputTensor->quantization->qConfig;
+    requirePerTensorAsym(inQC, "convertAsymTensorToSymInt32Tensor");
+    const int32_t zp = (int32_t)inQC->zeroPoints[0];
     symInt32QConfig_t *outQC = outputTensor->quantization->qConfig;
     int32_t *out = (int32_t *)outputTensor->data;
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
@@ -515,10 +561,11 @@ void convertAsymTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTe
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackZeroExtendChunk(inputTensor->data, inQC->qBits, off, count, codes);
         for (size_t i = 0; i < count; i++) {
-            out[off + i] = codes[i] + inQC->zeroPoint;
+            /* code-domain mantissa image (D6): code - zp */
+            out[off + i] = codes[i] - zp;
         }
     }
-    outQC->scale = inQC->scale; /* scale copy unchanged */
+    outQC->scale = inQC->scales[0]; /* scale copy unchanged */
 }
 
 void unpackSignExtend(const uint8_t *src, size_t srcBits, size_t srcStartBit, int32_t *dst,
@@ -666,6 +713,9 @@ void convertSymTensorToAsymTensor(tensor_t *inputTensor, tensor_t *outputTensor)
 void convertAsymTensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTensor) {
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     asymQConfig_t *inQC = inputTensor->quantization->qConfig;
+    requirePerTensorAsym(inQC, "convertAsymTensorToSymTensor");
+    const float inScale = inQC->scales[0];
+    const int32_t inZp = (int32_t)inQC->zeroPoints[0];
     size_t inBits = calcBitsPerElement(inputTensor->quantization);
     symQConfig_t *outQC = outputTensor->quantization->qConfig;
     if (outQC->numGroups > 1) {
@@ -682,7 +732,7 @@ void convertAsymTensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTensor)
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackZeroExtendChunk(inputTensor->data, inBits, off, count, codes);
         for (size_t i = 0; i < count; i++) {
-            float v = ((float)codes[i] + (float)inQC->zeroPoint) * inQC->scale;
+            float v = (float)(codes[i] - inZp) * inScale;
             if (fabsf(v) > absMax) {
                 absMax = fabsf(v);
             }
@@ -697,7 +747,7 @@ void convertAsymTensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTensor)
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackZeroExtendChunk(inputTensor->data, inBits, off, count, codes);
         for (size_t i = 0; i < count; i++) {
-            float v = ((float)codes[i] + (float)inQC->zeroPoint) * inQC->scale;
+            float v = (float)(codes[i] - inZp) * inScale;
             codes[i] = clampInt32(roundByMode(v / outScale, outQC->roundingMode), (int32_t)qMin,
                                   (int32_t)qMax);
         }
@@ -1029,13 +1079,18 @@ void accumulateTensorIntoSymRescale(tensor_t *target, const tensor_t *increment)
 
 static void accumulateIntoAsymRescaleEngine(tensor_t *target, const incSrc_t *inc, size_t n) {
     asymQConfig_t *qc = target->quantization->qConfig;
+    /* grads are per-tensor unconditionally (gradInit's carrier gate) -- a
+     * grouped target here is a caller contract violation, same rationale as
+     * dequantChunkToFloat's gate. */
+    requirePerTensorAsym(qc, "accumulateIntoAsymRescaleEngine");
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     float incBuf[ODT_CONVERSION_CHUNK_ELEMS];
     float vals[ODT_CONVERSION_CHUNK_ELEMS];
 
-    /* latch the OLD grid before deriveAsymGridFromMinMax overwrites it below. */
-    float oldScale = qc->scale;
-    int32_t oldZeroPoint = qc->zeroPoint;
+    /* latch the OLD grid (element 0: per-tensor by the gate above) before
+     * deriveAsymGridFromMinMax overwrites it below. */
+    float oldScale = qc->scales[0];
+    int32_t oldZeroPoint = (int32_t)qc->zeroPoints[0];
 
     /* phase A: chunked min/max of the decoded-plus-increment values (no
      * rounding, no writes) -- fresh affine grid every call (D4: no
@@ -1047,7 +1102,7 @@ static void accumulateIntoAsymRescaleEngine(tensor_t *target, const incSrc_t *in
         unpackZeroExtendChunk(target->data, qc->qBits, off, count, codes);
         incSrcChunk(inc, off, count, incBuf);
         for (size_t i = 0; i < count; i++) {
-            float v = ((float)codes[i] + (float)oldZeroPoint) * oldScale + incBuf[i];
+            float v = (float)(codes[i] - oldZeroPoint) * oldScale + incBuf[i];
             if (!seeded) {
                 mn = v;
                 mx = v;
@@ -1073,7 +1128,7 @@ static void accumulateIntoAsymRescaleEngine(tensor_t *target, const incSrc_t *in
         unpackZeroExtendChunk(target->data, qc->qBits, off, count, codes);
         incSrcChunk(inc, off, count, incBuf);
         for (size_t i = 0; i < count; i++) {
-            vals[i] = ((float)codes[i] + (float)oldZeroPoint) * oldScale + incBuf[i];
+            vals[i] = (float)(codes[i] - oldZeroPoint) * oldScale + incBuf[i];
         }
         emitAsymChunk(vals, count, qc, target->data, off);
     }
@@ -1249,8 +1304,20 @@ static void convertTensorsWithSameType(tensor_t *inputTensor, tensor_t *outputTe
     case ASYM: {
         asymQConfig_t *inputAsymQC = inputTensor->quantization->qConfig;
         asymQConfig_t *outputAsymQC = outputTensor->quantization->qConfig;
-        outputAsymQC->scale = inputAsymQC->scale;
-        outputAsymQC->zeroPoint = inputAsymQC->zeroPoint;
+        /* Group-quant PR4: group-faithful, mirroring the SYM arm above (and
+         * copyAsymQConfigInto, Tensor.c) -- dest's arrays are fixed-size
+         * numGroups blocks, so a shape mismatch must fail fast. */
+        if (outputAsymQC->numGroups != inputAsymQC->numGroups) {
+            PRINT_ERROR("convertTensorsWithSameType: ASYM group-shape mismatch (dest "
+                        "numGroups=%zu groupSize=%zu, src numGroups=%zu groupSize=%zu)",
+                        outputAsymQC->numGroups, outputAsymQC->groupSize, inputAsymQC->numGroups,
+                        inputAsymQC->groupSize);
+            exit(1);
+        }
+        memcpy(outputAsymQC->scales, inputAsymQC->scales, inputAsymQC->numGroups * sizeof(float));
+        memcpy(outputAsymQC->zeroPoints, inputAsymQC->zeroPoints,
+               inputAsymQC->numGroups * sizeof(uint16_t));
+        outputAsymQC->groupSize = inputAsymQC->groupSize;
         break;
     }
     default:

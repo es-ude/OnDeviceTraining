@@ -687,6 +687,98 @@ def requant_absmax_grouped_f32(values, q_bits: int, group_size: int):
     return codes, scales
 
 
+# ---- Group-quant PR4 Task 1: nudged code-domain ASYM affine (TFLite-standard),
+# deriveAsymGridFromMinMax + emitAsymChunk's per-tensor emulation. DELIBERATE
+# numerics change vs the old value-domain int32-zeroPoint grid (spec D6):
+# the band is nudged to include 0 (mn=min(mn,0), mx=max(mx,0)), which (a)
+# makes 0.0 exactly representable (code == zp decodes to exactly 0.0) and
+# (b) bounds zpReal into [0, 2^b-1] BY CONSTRUCTION, so the code-domain
+# zeroPoint fits uint16 for qBits <= 16. Encode rounds the value quotient
+# FIRST and adds the integer zp AFTER (round(v/scale) + zp), unlike the old
+# single-round round(v/scale - zp_old) -- ties on negative values land
+# differently (HALF_AWAY's "away" flips with the shift), so old pins
+# re-derive through here, never by sign-flipping the old codes. ----
+
+
+def quantize_asym_nudged(values, q_bits: int):
+    """float32 mirror of the nudged code-domain ASYM quantizer
+    (deriveAsymGridFromMinMax + emitAsymChunk, TensorConversion.c): EVERY
+    intermediate stays float32, matching the C `float` arithmetic exactly.
+      mn = min(min(values), 0); mx = max(max(values), 0)
+      scale = (mx - mn)/(2^b - 1)   (mn == mx only for the all-zero buffer
+                                     -> scale = 1.0, the adapted constant-band
+                                     fallback)
+      zp    = clamp(round_half_away(-mn/scale), 0, 2^b - 1)   [uint16 domain]
+      code  = clamp(round_half_away(v/scale) + zp, 0, 2^b - 1)
+      deq   = (code - zp) * scale
+    Self-checks: zp in [0, 2^b-1]; any 0.0 input decodes to EXACTLY 0.0;
+    every in-band value round-trips within 0.5*scale (+1 ulp headroom).
+    Returns (codes: list[int], scale: float, zp: int)."""
+    assert 1 <= q_bits <= 16, f"quantize_asym_nudged: qBits {q_bits} outside [1, 16] (D6)"
+    x = torch.as_tensor(values, dtype=torch.float32).flatten()
+    assert x.numel() > 0, "quantize_asym_nudged: empty buffer has no grid (n==0 is a C no-op)"
+    q_max = 2 ** q_bits - 1
+    zero = torch.tensor(0.0, dtype=torch.float32)
+    mn = torch.minimum(x.min(), zero)
+    mx = torch.maximum(x.max(), zero)
+    if mn.item() == mx.item():
+        # post-nudge mn == mx only when the whole buffer is 0.0
+        assert mn.item() == 0.0
+        scale = torch.tensor(1.0, dtype=torch.float32)
+    else:
+        scale = (mx - mn) / torch.tensor(float(q_max), dtype=torch.float32)
+    zp_real = (-mn) / scale
+    zp = int(round_half_away(zp_real).item())
+    zp = max(0, min(q_max, zp))
+    codes = []
+    for v in x.tolist():
+        q = int(round_half_away(torch.as_tensor(v, dtype=torch.float32) / scale).item()) + zp
+        codes.append(max(0, min(q_max, q)))
+    # -- self-checks (generator aborts rather than emit a self-contradiction) --
+    assert 0 <= zp <= q_max, f"quantize_asym_nudged: zp {zp} outside [0, {q_max}]"
+    s = scale.item()
+    for c, v in zip(codes, x.tolist()):
+        deq = float((torch.tensor(float(c - zp), dtype=torch.float32) *
+                     scale).item())
+        if v == 0.0:
+            assert deq == 0.0, (
+                f"quantize_asym_nudged: 0.0 decodes to {deq}, not exactly 0.0")
+        # 0.5*scale is the exact rounding bound; the additive term covers the
+        # float32 v/scale division drift (<= ~1 ulp of the quotient, i.e.
+        # ~|v|*2^-23 in value space, doubled for headroom) which matters when
+        # a band-edge quotient crosses a tie and the encode clamp folds the
+        # overshoot back (e.g. v == mx rounding up).
+        assert abs(deq - v) <= 0.5 * s + (abs(v) + s) * 2.0 ** -20, (
+            f"quantize_asym_nudged: value {v} round-trips to {deq} "
+            f"(err {abs(deq - v)} > scale/2 = {0.5 * s} + drift)")
+    return codes, s, zp
+
+
+def quantize_asym_old_value_domain(values, q_bits: int):
+    """The PRE-PR4 value-domain grid (un-nudged, int32 zeroPoint), kept ONLY
+    as the generators' old!=new self-check reference: scale = (mx-mn)/(2^b-1)
+    on the RAW band, zp_old = round_half_away(mn/scale), code =
+    clamp(round_half_away(v/scale - zp_old), 0, 2^b-1) -- the single-round
+    encode the old emitAsymChunk used. Returns (codes, scale, zp_old)."""
+    x = torch.as_tensor(values, dtype=torch.float32).flatten()
+    q_max = 2 ** q_bits - 1
+    mn = x.min()
+    mx = x.max()
+    if mn.item() == mx.item():
+        scale = torch.tensor(1.0 if mn.item() == 0.0 else abs(mn.item()),
+                             dtype=torch.float32)
+    else:
+        scale = (mx - mn) / torch.tensor(float(q_max), dtype=torch.float32)
+    zp_old = int(round_half_away(mn / scale).item())
+    codes = []
+    for v in x.tolist():
+        q = int(round_half_away(
+            torch.as_tensor(v, dtype=torch.float32) / scale -
+            torch.tensor(float(zp_old), dtype=torch.float32)).item())
+        codes.append(max(0, min(q_max, q)))
+    return codes, scale.item(), zp_old
+
+
 def sgd_grouped_step_ref(param_mantissas, param_scales, group_size: int, q_bits: int, grad,
                          lr: float, weight_decay: float = 0.0):
     """Group-quant PR3 Task 4: SGD momentum==0 update on a grouped-SYM param

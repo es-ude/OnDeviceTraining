@@ -48,6 +48,13 @@ quantization_t *quantizationInitSymGrouped(uint8_t qBits, roundingMode_t roundin
  */
 quantization_t *quantizationInitAsym(uint8_t qBits, roundingMode_t roundingMode);
 
+/*! Group-quant PR4: packed asymmetric quantization with an explicit group
+ *  shape (numGroups, groupSize), mirroring quantizationInitSymGrouped. Pairs
+ *  with freeQuantization. See initAsymQConfigGrouped for the shape invariant
+ *  and the D6 qBits ceiling enforced at construction. */
+quantization_t *quantizationInitAsymGrouped(uint8_t qBits, roundingMode_t rm, size_t numGroups,
+                                            size_t groupSize);
+
 /* Note: uses (void) explicitly; siblings use () for historical K&R-style; the
  * _Static_assert in UnitTestTensorApi pattern-matches (*)(void). */
 /*! Initializes bool quantization.

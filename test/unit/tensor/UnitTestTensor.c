@@ -609,7 +609,15 @@ void testCopyTensorAsymCarriesConfigAndPackedBytes() {
     size_t srcOrder[] = {0, 1};
     shape_t srcShape = {
         .dimensions = srcDims, .numberOfDimensions = 2, .orderOfDimensions = srcOrder};
-    asymQConfig_t srcQC = {.scale = 0.5f, .zeroPoint = -7, .qBits = 5, .roundingMode = HALF_AWAY};
+    /* code-domain re-pin (PR4, D6): old value-domain zp -7 becomes +7. */
+    float srcScales[1] = {0.5f};
+    uint16_t srcZps[1] = {7};
+    asymQConfig_t srcQC = {.scales = srcScales,
+                           .zeroPoints = srcZps,
+                           .numGroups = 1,
+                           .groupSize = 0,
+                           .qBits = 5,
+                           .roundingMode = HALF_AWAY};
     quantization_t qSrc;
     initAsymQuantization(&srcQC, &qSrc);
     tensor_t src;
@@ -620,7 +628,14 @@ void testCopyTensorAsymCarriesConfigAndPackedBytes() {
     size_t dstOrder[2];
     shape_t dstShape = {
         .dimensions = dstDims, .numberOfDimensions = 2, .orderOfDimensions = dstOrder};
-    asymQConfig_t dstQC = {.scale = 1.f, .zeroPoint = 0, .qBits = 5, .roundingMode = SR_HALF_AWAY};
+    float dstScales[1] = {1.f};
+    uint16_t dstZps[1] = {0};
+    asymQConfig_t dstQC = {.scales = dstScales,
+                           .zeroPoints = dstZps,
+                           .numGroups = 1,
+                           .groupSize = 0,
+                           .qBits = 5,
+                           .roundingMode = SR_HALF_AWAY};
     quantization_t qDst;
     initAsymQuantization(&dstQC, &qDst);
     tensor_t dst;
@@ -629,8 +644,10 @@ void testCopyTensorAsymCarriesConfigAndPackedBytes() {
     copyTensor(&dst, &src);
 
     TEST_ASSERT_EQUAL_INT(ASYM, dst.quantization->type);
-    TEST_ASSERT_EQUAL_FLOAT(0.5f, dstQC.scale);
-    TEST_ASSERT_EQUAL_INT32(-7, dstQC.zeroPoint);
+    TEST_ASSERT_EQUAL_PTR(dstScales, dstQC.scales); /* dst keeps its OWN arrays */
+    TEST_ASSERT_EQUAL_PTR(dstZps, dstQC.zeroPoints);
+    TEST_ASSERT_EQUAL_FLOAT(0.5f, dstQC.scales[0]);
+    TEST_ASSERT_EQUAL_UINT16(7, dstQC.zeroPoints[0]);
     TEST_ASSERT_EQUAL_UINT8(5, dstQC.qBits);
     TEST_ASSERT_EQUAL_INT(HALF_AWAY, dstQC.roundingMode);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(srcData, dstData, 3);

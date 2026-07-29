@@ -241,6 +241,60 @@ void testValidateAsymQConfigShapeDivisibilityAndQBits(void) {
     TEST_ASSERT_TRUE(true); /* reached ⇒ ok-case did not exit */
 }
 
+/* BFP epic PR1 (docs/superpowers/specs/2026-07-28-group-quantization-design.md,
+ * Task 1): bfpQConfig_t mirrors symQConfig_t's always-array group shape
+ * exactly ({1,0} per-tensor sentinel or {>1,>0} grouped), swapping the SYM
+ * per-group float scale for a per-group biased exponent byte -- the group
+ * grid itself (numGroups/groupSize/validate) is identical machinery. */
+
+void testInitBfpQConfigPerTensorZeroState(void) {
+    bfpQConfig_t qc;
+    initBfpQConfig(8, 8, HALF_AWAY, &qc);
+    TEST_ASSERT_EQUAL_size_t(1, qc.numGroups);
+    TEST_ASSERT_EQUAL_size_t(0, qc.groupSize);
+    TEST_ASSERT_EQUAL_UINT8(8, qc.mantissaBits);
+    TEST_ASSERT_EQUAL_UINT8(8, qc.exponentBits);
+    TEST_ASSERT_EQUAL_INT32(127, bfpExponentBias(&qc));
+    TEST_ASSERT_EQUAL_UINT8(127, qc.exponents[0]); /* zero-state = bias, scale 1.0 */
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, bfpGroupScale(&qc, 0));
+    freeReservedMemory(qc.exponents);
+}
+
+void testInitBfpQConfigGroupedAllocatesPerGroup(void) {
+    bfpQConfig_t qc;
+    initBfpQConfigGrouped(4, 5, SR_HALF_AWAY, 3, 8, &qc);
+    TEST_ASSERT_EQUAL_size_t(3, qc.numGroups);
+    TEST_ASSERT_EQUAL_size_t(8, qc.groupSize);
+    TEST_ASSERT_EQUAL_INT32(15, bfpExponentBias(&qc)); /* 2^(5-1)-1 */
+    for (size_t g = 0; g < 3; g++) {
+        TEST_ASSERT_EQUAL_UINT8(15, qc.exponents[g]);
+    }
+    freeReservedMemory(qc.exponents);
+}
+
+void testInitBfpQConfigGroupedRejectsInvalidShape(void) {
+    bfpQConfig_t qc;
+    ASSERT_EXITS_WITH_FAILURE(initBfpQConfigGrouped(8, 8, HALF_AWAY, 1, 8, &qc)); /* {1,N>0} */
+    ASSERT_EXITS_WITH_FAILURE(initBfpQConfigGrouped(8, 8, HALF_AWAY, 0, 0, &qc)); /* {0,*} */
+    ASSERT_EXITS_WITH_FAILURE(initBfpQConfigGrouped(8, 8, HALF_AWAY, 4, 0, &qc)); /* {>1,0} */
+}
+
+void testInitBfpQConfigRejectsWidthCaps(void) {
+    bfpQConfig_t qc;
+    ASSERT_EXITS_WITH_FAILURE(initBfpQConfig(1, 8, HALF_AWAY, &qc));  /* mantissa < 2 */
+    ASSERT_EXITS_WITH_FAILURE(initBfpQConfig(17, 8, HALF_AWAY, &qc)); /* mantissa > 16 */
+    ASSERT_EXITS_WITH_FAILURE(initBfpQConfig(8, 1, HALF_AWAY, &qc));  /* exponent < 2 */
+    ASSERT_EXITS_WITH_FAILURE(initBfpQConfig(8, 9, HALF_AWAY, &qc));  /* exponent > 8 */
+}
+
+void testValidateBfpQConfigShapeEnforcesElementIdentity(void) {
+    bfpQConfig_t qc;
+    initBfpQConfigGrouped(8, 8, HALF_AWAY, 3, 8, &qc);
+    validateBfpQConfigShape(&qc, 24); /* 3*8 == 24: passes */
+    ASSERT_EXITS_WITH_FAILURE(validateBfpQConfigShape(&qc, 23));
+    freeReservedMemory(qc.exponents);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testInitSymQConfigProducesPerTensorSentinel);
@@ -254,5 +308,10 @@ int main(void) {
     RUN_TEST(testInitAsymQConfigGroupedRejectsSentinelViolations);
     RUN_TEST(testInitAsymQConfigGroupedRejectsQBitsOutside1To16);
     RUN_TEST(testValidateAsymQConfigShapeDivisibilityAndQBits);
+    RUN_TEST(testInitBfpQConfigPerTensorZeroState);
+    RUN_TEST(testInitBfpQConfigGroupedAllocatesPerGroup);
+    RUN_TEST(testInitBfpQConfigGroupedRejectsInvalidShape);
+    RUN_TEST(testInitBfpQConfigRejectsWidthCaps);
+    RUN_TEST(testValidateBfpQConfigShapeEnforcesElementIdentity);
     return UNITY_END();
 }

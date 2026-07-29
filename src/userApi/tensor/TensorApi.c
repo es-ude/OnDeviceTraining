@@ -26,6 +26,9 @@ tensor_t *initTensor(shape_t *shape, quantization_t *quantization, sparsity_t *s
     } else if (quantization->type == ASYM) {
         validateAsymQConfigShape(quantization->qConfig, numberOfElements);
     }
+    if (quantization->type == BFP) {
+        validateBfpQConfigShape(quantization->qConfig, numberOfElements);
+    }
     size_t bytes = calcNumberOfBytesForData(quantization, numberOfElements);
     tensor->data = reserveMemory(bytes);
 

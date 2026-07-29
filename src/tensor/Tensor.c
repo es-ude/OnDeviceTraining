@@ -48,6 +48,10 @@ size_t calcBytesPerElement(quantization_t *quantization) {
     }
     case BOOL:
         return 1;
+    case BFP: {
+        bfpQConfig_t *bfpQC = quantization->qConfig;
+        return (size_t)ceilf((float)bfpQC->mantissaBits / 8.0f);
+    }
     default:
         PRINT_ERROR("Unknown QType!");
         exit(1);
@@ -72,6 +76,10 @@ size_t calcBitsPerElement(quantization_t *quantization) {
     }
     case BOOL:
         return 1;
+    case BFP: {
+        bfpQConfig_t *bfpQC = quantization->qConfig;
+        return bfpQC->mantissaBits;
+    }
     default:
         PRINT_ERROR("Unknown QType!");
         exit(1);
@@ -99,6 +107,8 @@ size_t calcNumberOfBytesForData(quantization_t *q, size_t numberOfElements) {
     }
     case BOOL:
         return (numberOfElements + 7) / 8;
+    case BFP:
+        return (calcBitsPerElement(q) * numberOfElements + 7) / 8;
     default:
         PRINT_ERROR("Unknown QType!");
         exit(1);
@@ -489,6 +499,32 @@ static void copyAsymQConfigInto(quantization_t *dest, quantization_t *src) {
     dstQC->qBits = srcQC->qBits;
 }
 
+/* BFP's qConfig carries a heap `exponents` pointer (mirrors SYM's `scales`) --
+ * same VALUE-copy contract as copySymQConfigInto: dest->exponents is a
+ * fixed-size (numGroups-element) heap array allocated when dest's own config
+ * was constructed, so a numGroups mismatch means src's group shape doesn't
+ * fit dest's array and must fail fast rather than over/under-copy. */
+static void copyBfpQConfigInto(quantization_t *dest, quantization_t *src) {
+    if (dest->qConfig == NULL) {
+        PRINT_ERROR("copyQuantization: dest->qConfig for BFP must be caller-allocated");
+        exit(1);
+    }
+    dest->type = src->type;
+    bfpQConfig_t *srcQC = src->qConfig;
+    bfpQConfig_t *dstQC = dest->qConfig;
+    if (dstQC->numGroups != srcQC->numGroups) {
+        PRINT_ERROR("copyQuantization: BFP group-shape mismatch (dest numGroups=%zu "
+                    "groupSize=%zu, src numGroups=%zu groupSize=%zu)",
+                    dstQC->numGroups, dstQC->groupSize, srcQC->numGroups, srcQC->groupSize);
+        exit(1);
+    }
+    memcpy(dstQC->exponents, srcQC->exponents, srcQC->numGroups * sizeof(uint8_t));
+    dstQC->groupSize = srcQC->groupSize;
+    dstQC->roundingMode = srcQC->roundingMode;
+    dstQC->mantissaBits = srcQC->mantissaBits;
+    dstQC->exponentBits = srcQC->exponentBits;
+}
+
 void copyQuantization(quantization_t *dest, quantization_t *src) {
     switch (src->type) {
     case INT32:
@@ -511,6 +547,9 @@ void copyQuantization(quantization_t *dest, quantization_t *src) {
     case BOOL:
         dest->type = BOOL;
         dest->qConfig = NULL;
+        break;
+    case BFP:
+        copyBfpQConfigInto(dest, src);
         break;
     default:
         PRINT_ERROR("Unknown QType!");

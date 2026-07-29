@@ -1,5 +1,6 @@
 #define SOURCE_FILE "QUANTIZATION"
 
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -135,6 +136,61 @@ void validateAsymQConfigShape(const asymQConfig_t *qC, size_t numberOfElements) 
     }
 }
 
+void initBfpQConfigGrouped(uint8_t mantissaBits, uint8_t exponentBits, roundingMode_t roundingMode,
+                           size_t numGroups, size_t groupSize, bfpQConfig_t *qC) {
+    if (mantissaBits < 2 || mantissaBits > 16) {
+        PRINT_ERROR("initBfpQConfigGrouped: mantissaBits (%u) outside [2, 16]",
+                    (unsigned)mantissaBits);
+        exit(1);
+    }
+    if (exponentBits < 2 || exponentBits > 8) {
+        PRINT_ERROR("initBfpQConfigGrouped: exponentBits (%u) outside [2, 8]",
+                    (unsigned)exponentBits);
+        exit(1);
+    }
+    if (numGroups == 0 || (numGroups == 1) != (groupSize == 0)) {
+        PRINT_ERROR("initBfpQConfigGrouped: invalid group shape numGroups=%zu groupSize=%zu "
+                    "(per-tensor is {1,0}; grouped needs numGroups>1 and groupSize>0)",
+                    numGroups, groupSize);
+        exit(1);
+    }
+    qC->mantissaBits = mantissaBits;
+    qC->exponentBits = exponentBits;
+    qC->roundingMode = roundingMode;
+    qC->numGroups = numGroups;
+    qC->groupSize = groupSize;
+    qC->exponents = reserveMemory(numGroups * sizeof(uint8_t));
+    uint8_t bias = (uint8_t)((1 << (exponentBits - 1)) - 1);
+    for (size_t g = 0; g < numGroups; g++) {
+        qC->exponents[g] = bias; /* zero-state: E = 0, scale 1.0 (SYM's scales=1.f parity) */
+    }
+}
+
+void initBfpQConfig(uint8_t mantissaBits, uint8_t exponentBits, roundingMode_t roundingMode,
+                    bfpQConfig_t *qC) {
+    initBfpQConfigGrouped(mantissaBits, exponentBits, roundingMode, 1, 0, qC);
+}
+
+void validateBfpQConfigShape(const bfpQConfig_t *qC, size_t numberOfElements) {
+    bool perTensor = qC->numGroups == 1 && qC->groupSize == 0;
+    bool grouped =
+        qC->numGroups > 1 && qC->groupSize > 0 && qC->numGroups * qC->groupSize == numberOfElements;
+    if (!perTensor && !grouped) {
+        PRINT_ERROR("validateBfpQConfigShape: invalid BFP group shape numGroups=%zu "
+                    "groupSize=%zu for %zu elements",
+                    qC->numGroups, qC->groupSize, numberOfElements);
+        exit(1);
+    }
+}
+
+int32_t bfpExponentBias(const bfpQConfig_t *qC) {
+    return (1 << (qC->exponentBits - 1)) - 1;
+}
+
+float bfpGroupScale(const bfpQConfig_t *qC, size_t group) {
+    return ldexpf(1.f, (int)qC->exponents[group] - bfpExponentBias(qC));
+}
+
 void initInt32Quantization(quantization_t *quantization) {
     quantization->type = INT32;
     quantization->qConfig = NULL;
@@ -163,4 +219,9 @@ void initSymQuantization(symQConfig_t *symQConfig, quantization_t *quantization)
 void initAsymQuantization(asymQConfig_t *asymQConfig, quantization_t *quantization) {
     quantization->type = ASYM;
     quantization->qConfig = asymQConfig;
+}
+
+void initBfpQuantization(bfpQConfig_t *bfpQConfig, quantization_t *quantization) {
+    quantization->type = BFP;
+    quantization->qConfig = bfpQConfig;
 }

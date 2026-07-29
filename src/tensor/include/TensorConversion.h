@@ -97,6 +97,6 @@ void accumulateTensorIntoAsymRescale(tensor_t *target, const tensor_t *increment
 void accumulateTensorIntoFloat32Inplace(tensor_t *target, const tensor_t *increment);
 void accumulateSymInt32IntoSymInt32Rescale(tensor_t *target, const tensor_t *increment);
 
-extern conversionFunction_t conversionMatrix[6][6];
+extern conversionFunction_t conversionMatrix[7][7];
 
 #endif // TENSOR_CONVERSION_H

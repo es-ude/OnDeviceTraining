@@ -512,6 +512,17 @@ void test_calcBytesPerTensor_BoolN3_CeilsTo1() {
     TEST_ASSERT_EQUAL_size_t(1, calcBytesPerTensor(&t));
 }
 
+void testCalcSizesForBfp() {
+    bfpQConfig_t qc;
+    initBfpQConfigGrouped(6, 8, HALF_AWAY, 2, 5, &qc);
+    quantization_t q;
+    initBfpQuantization(&qc, &q);
+    TEST_ASSERT_EQUAL_size_t(6, calcBitsPerElement(&q));
+    TEST_ASSERT_EQUAL_size_t(1, calcBytesPerElement(&q));          /* ceil(6/8) */
+    TEST_ASSERT_EQUAL_size_t(8, calcNumberOfBytesForData(&q, 10)); /* (6*10+7)/8 */
+    freeReservedMemory(qc.exponents);
+}
+
 void testCopyTensorInt32CarriesTypeAndData() {
     /* Mutation guard: re-removing the INT32 arm makes copyQuantization exit(1)
      * ("Unknown QType!"), killing the test run — RED. */
@@ -735,5 +746,6 @@ int main(void) {
     RUN_TEST(test_calcNumberOfBytesForData_Sym_qBits5_N4);
     RUN_TEST(test_calcBytesPerTensor_SymQBits3N10_Ceils);
     RUN_TEST(test_calcBytesPerTensor_BoolN3_CeilsTo1);
+    RUN_TEST(testCalcSizesForBfp);
     return UNITY_END();
 }

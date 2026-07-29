@@ -961,6 +961,21 @@ void testGradInitRejectsGroupedAsymTemplate(void) {
     });
 }
 
+void testRequantizeTensorInPlaceRejectsMismatchedAsymGroupShape(void) {
+    /* ASYM twin of the SYM bypass-hazard death test above (group-quant PR4
+     * Task 2 verify): requantizeTensorInPlace's hand-built view skips
+     * initTensor's validateAsymQConfigShape choke point, so its own validate
+     * branch must catch a grouped ASYM target whose numGroups*groupSize (2*4)
+     * does not equal the SOURCE tensor's element count (12) BEFORE the data
+     * buffer is sized -- otherwise the grouped pack path indexes
+     * scales[]/zeroPoints[] past their numGroups-sized arrays. */
+    ASSERT_EXITS_WITH(1, {
+        tensor_t *t = makeFloatTensor1d(12); /* file-local Rule-1 factory */
+        quantization_t *targetQ = quantizationInitAsymGrouped(4, HALF_AWAY, 2, 4);
+        requantizeTensorInPlace(t, targetQ);
+    });
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testTensorInitWithDistribution_Zeros_InitializesProductOfDimsValues);
@@ -1002,5 +1017,6 @@ int main(void) {
     RUN_TEST(testGetQLikeAsymGroupedDeepCopiesGridValues);
     RUN_TEST(testInitTensorValidatesGroupedAsymShape);
     RUN_TEST(testGradInitRejectsGroupedAsymTemplate);
+    RUN_TEST(testRequantizeTensorInPlaceRejectsMismatchedAsymGroupShape);
     return UNITY_END();
 }

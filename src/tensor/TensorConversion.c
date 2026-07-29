@@ -33,12 +33,18 @@ static void packChunkGuarded(const int32_t *codes, size_t count, uint8_t *dstBas
  * roundByMode draw -- called BEFORE any per-element round (bit-identity
  * invariant: exactly one roundByMode call per element, in element order). */
 static void deriveAsymGridFromMinMax(float mn, float mx, asymQConfig_t *outQC);
+/* Group-quant PR4 Task 2: the nudge+derive core, writing group g's grid
+ * (scales[g]/zeroPoints[g]). deriveAsymGridFromMinMax is the per-tensor
+ * wrapper (qBits + per-tensor gates, then g=0); quantizeFloatToAsym's
+ * grouped phase 1 calls this once per group. */
+static void deriveAsymGridForGroup(float mn, float mx, asymQConfig_t *outQC, size_t g);
 static void emitAsymChunk(const float *vals, size_t count, const asymQConfig_t *qc,
                           uint8_t *dstBase, size_t elemOffset);
-/* Group-quant PR4 Task 1: grouped ASYM configs are constructible but every
- * ASYM converter/dequant/accumulate cell still reads scales[0]/zeroPoints[0]
- * only -- the per-tensor choke point each such cell calls first (mirrors the
- * SYM scalar-cell gates). Grouped ASYM compute is a later PR4 task. */
+/* Group-quant PR4 Task 2: the two PRIMARY ASYM cells -- quantizeFloatToAsym
+ * (FLOAT32->ASYM) and convertAsymTensorToFloatTensor (ASYM->FLOAT32) -- are
+ * group-aware; every OTHER ASYM converter/dequant/accumulate cell reads
+ * scales[0]/zeroPoints[0] only and calls this per-tensor choke point first
+ * (mirrors the SYM scalar-cell gates). */
 static void requirePerTensorAsym(const asymQConfig_t *qc, const char *what);
 
 void zeroTensorData(tensor_t *tensor) {
@@ -178,24 +184,32 @@ void dequantChunkToFloat(const tensor_t *src, size_t elemOffset, size_t count, f
 
 static void requirePerTensorAsym(const asymQConfig_t *qc, const char *what) {
     if (qc->numGroups > 1) {
-        PRINT_ERROR("%s: grouped ASYM (numGroups=%zu) has no per-tensor compute image here -- "
-                    "every ASYM cell reads scales[0]/zeroPoints[0] only (grouped ASYM compute "
-                    "is a later PR4 task)",
+        PRINT_ERROR("%s: grouped ASYM (numGroups=%zu) has no compute image in this cell -- only "
+                    "FLOAT32->ASYM and ASYM->FLOAT32 are group-aware; route through FLOAT32 "
+                    "instead",
                     what, qc->numGroups);
         exit(1);
     }
 }
 
-static void deriveAsymGridFromMinMax(float mn, float mx, asymQConfig_t *outQC) {
-    if (outQC->qBits == 0 || outQC->qBits > 16) {
-        /* Funnel re-check of the initAsymQConfig ceiling for field-assigned
-         * configs: the code-domain zeroPoint is uint16, so 17+ has no zp
-         * representation (D6; supersedes the [1, 30] #246 ceiling). */
-        PRINT_ERROR("deriveAsymGridFromMinMax: qBits (%u) outside the ASYM range [1, 16] (D6)",
-                    (unsigned)outQC->qBits);
+/* Funnel re-check of the initAsymQConfig ceiling for field-assigned configs:
+ * the code-domain zeroPoint is uint16, so 17+ has no zp representation (D6;
+ * supersedes the [1, 30] #246 ceiling). */
+static void requireAsymComputeQBits(const asymQConfig_t *qc, const char *what) {
+    if (qc->qBits == 0 || qc->qBits > 16) {
+        PRINT_ERROR("%s: qBits (%u) outside the ASYM range [1, 16] (D6)", what,
+                    (unsigned)qc->qBits);
         exit(1);
     }
+}
+
+static void deriveAsymGridFromMinMax(float mn, float mx, asymQConfig_t *outQC) {
+    requireAsymComputeQBits(outQC, "deriveAsymGridFromMinMax");
     requirePerTensorAsym(outQC, "deriveAsymGridFromMinMax");
+    deriveAsymGridForGroup(mn, mx, outQC, 0);
+}
+
+static void deriveAsymGridForGroup(float mn, float mx, asymQConfig_t *outQC, size_t g) {
     const float qMax = powf(2, (float)outQC->qBits) - 1;
     /* Zero-inclusion nudge (D6, TFLite-standard): extend the band to contain
      * 0 so (a) 0.0 is exactly representable (code == zp decodes to exactly
@@ -218,8 +232,8 @@ static void deriveAsymGridFromMinMax(float mn, float mx, asymQConfig_t *outQC) {
      * above), so this clamp only ever trims rounding at the band edges
      * (e.g. an exact .5 tie at qMax rounding up) -- it cannot mask a
      * genuinely out-of-band zpReal on any reachable path. */
-    outQC->scales[0] = scale;
-    outQC->zeroPoints[0] =
+    outQC->scales[g] = scale;
+    outQC->zeroPoints[g] =
         (uint16_t)clampInt32(roundByMode(zpReal, outQC->roundingMode), 0, (int32_t)qMax);
 }
 
@@ -248,11 +262,14 @@ static void emitAsymChunk(const float *vals, size_t count, const asymQConfig_t *
  * (max-min)/(2^qBits-1), zeroPoint = clamp(round(-min/scale), 0, 2^qBits-1)
  * [uint16 code domain], code = clamp(round(v/scale) + zp, 0, 2^qBits-1).
  * Dequant (elsewhere) is (code - zp)*scale. Constant tensor: after the nudge
- * min==max only for the all-zero buffer -> scale 1.f, zp 0. The single
- * source of truth for all four *ToAsymTensor converters. Grid derivation
+ * min==max only for the all-zero buffer -> scale 1.f, zp 0. Grid derivation
  * scans the WHOLE buffer once (min/max, no rounding); emission then streams
  * in ODT_CONVERSION_CHUNK_ELEMS chunks so no VLA/heap scratch scales with n
- * (#296 Stage 2). */
+ * (#296 Stage 2). numGroups > 1 (PR4 Task 2, FLOAT32 source only -- the
+ * other three *ToAsymTensor converters stay per-tensor-gated): the same
+ * affine applied per storage-order group (group of element i = i/groupSize),
+ * packFloatBufferAsSym's grouped shape -- phase-1 per-group min/max ->
+ * per-group nudged grid, phase-2 run-based sequential emit. */
 static void quantizeFloatToAsym(const float *values, size_t n, asymQConfig_t *outQC, uint8_t *dst) {
     if (n == 0) {
         /* n == 0: no grid can be derived from an empty payload -- leave the
@@ -260,12 +277,59 @@ static void quantizeFloatToAsym(const float *values, size_t n, asymQConfig_t *ou
          * the sibling n==0 guards; the old code read values[0] here, UB). */
         return;
     }
-    float mn = findMinFloat((uint8_t *)values, n);
-    float mx = findMaxFloat((uint8_t *)values, n);
-    deriveAsymGridFromMinMax(mn, mx, outQC);
+    if (outQC->numGroups == 1) {
+        /* Per-tensor fast path -- byte-identical to the pre-group-quant code
+         * (regression gate: the Task-1 re-pinned suite pins this verbatim). */
+        float mn = findMinFloat((uint8_t *)values, n);
+        float mx = findMaxFloat((uint8_t *)values, n);
+        deriveAsymGridFromMinMax(mn, mx, outQC);
+        for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+            size_t count =
+                n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+            emitAsymChunk(values + off, count, outQC, dst, off);
+        }
+        return;
+    }
+
+    /* Grouped path (#groups>1). Phase 1: per-group min/max -> per-group
+     * nudged grid (never a single whole-tensor pass, or every group would
+     * collapse onto one grid). qBits funnel re-check hoisted out of the loop
+     * (deriveAsymGridForGroup trusts it). */
+    requireAsymComputeQBits(outQC, "quantizeFloatToAsym");
+    const size_t groupSize = outQC->groupSize;
+    for (size_t g = 0; g < outQC->numGroups; g++) {
+        float mn = findMinFloat((uint8_t *)(values + g * groupSize), groupSize);
+        float mx = findMaxFloat((uint8_t *)(values + g * groupSize), groupSize);
+        deriveAsymGridForGroup(mn, mx, outQC, g);
+    }
+    /* Phase 2: sequential encode+pack, chunked exactly like the per-tensor
+     * path above. WITHIN a chunk, walk per-RUN -- a run is the span from the
+     * current index to min(chunkEnd, groupEnd) -- so the grid is fetched
+     * once per run (one `idx / groupSize` division), never per element
+     * (packFloatBufferAsSym's grouped shape; encode math is emitAsymChunk's
+     * verbatim, with scales[g]/zeroPoints[g] instead of element 0). */
+    const float qMax = powf(2, (float)outQC->qBits) - 1;
+    int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
-        emitAsymChunk(values + off, count, outQC, dst, off);
+        size_t chunkEnd = off + count;
+        size_t idx = off;
+        while (idx < chunkEnd) {
+            size_t g = idx / groupSize;
+            size_t groupEnd = (g + 1) * groupSize;
+            size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
+            size_t runLen = runEnd - idx;
+            const float scale = outQC->scales[g];
+            const int32_t zp = (int32_t)outQC->zeroPoints[g];
+            for (size_t i = 0; i < runLen; i++) {
+                codes[idx - off + i] =
+                    clampInt32(roundByMode(values[idx + i] / scale, outQC->roundingMode) + zp, 0,
+                               (int32_t)qMax);
+            }
+            idx = runEnd;
+        }
+        byteConversion((uint8_t *)codes, 32, dst + packedByteOffset(off, outQC->qBits),
+                       outQC->qBits, count);
     }
 }
 
@@ -533,18 +597,46 @@ void convertAsymTensorToInt32Tensor(tensor_t *inputTensor, tensor_t *outputTenso
 void convertAsymTensorToFloatTensor(tensor_t *inputTensor, tensor_t *outputTensor) {
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     asymQConfig_t *inQC = inputTensor->quantization->qConfig;
-    requirePerTensorAsym(inQC, "convertAsymTensorToFloatTensor");
-    const float scale = inQC->scales[0];
-    const int32_t zp = (int32_t)inQC->zeroPoints[0];
     float *out = (float *)outputTensor->data;
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
+
+    if (inQC->numGroups == 1) {
+        /* Per-tensor fast path -- byte-identical to the pre-group-quant code. */
+        const float scale = inQC->scales[0];
+        const int32_t zp = (int32_t)inQC->zeroPoints[0];
+        for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+            size_t count =
+                n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+            unpackZeroExtendChunk(inputTensor->data, inQC->qBits, off, count, codes);
+            for (size_t i = 0; i < count; i++) {
+                /* code-domain decode (D6): (code - zp)*scale, integer subtract
+                 * exact (both operands <= 2^16-1) */
+                out[off + i] = (float)(codes[i] - zp) * scale;
+            }
+        }
+        return;
+    }
+
+    /* Grouped path (PR4 Task 2): same run-walking pattern as the grouped
+     * convertSymTensorToFloat32Tensor, with the affine decode per run --
+     * out[i] = (code - zeroPoints[g]) * scales[g], grid fetched once per run. */
+    const size_t groupSize = inQC->groupSize;
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackZeroExtendChunk(inputTensor->data, inQC->qBits, off, count, codes);
-        for (size_t i = 0; i < count; i++) {
-            /* code-domain decode (D6): (code - zp)*scale, integer subtract
-             * exact (both operands <= 2^16-1) */
-            out[off + i] = (float)(codes[i] - zp) * scale;
+        size_t chunkEnd = off + count;
+        size_t idx = off;
+        while (idx < chunkEnd) {
+            size_t g = idx / groupSize;
+            size_t groupEnd = (g + 1) * groupSize;
+            size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
+            size_t runLen = runEnd - idx;
+            const float scale = inQC->scales[g];
+            const int32_t zp = (int32_t)inQC->zeroPoints[g];
+            for (size_t i = 0; i < runLen; i++) {
+                out[idx + i] = (float)(codes[idx - off + i] - zp) * scale;
+            }
+            idx = runEnd;
         }
     }
 }

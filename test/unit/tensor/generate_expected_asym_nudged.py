@@ -39,17 +39,49 @@ Fixtures:
                decode+increment reference); all-positive band, so the nudge
                is LIVE here: scale 3.5/31 -> 6/31, zp 22 -> 0.
 
+Grouped fixtures (group-quant PR4 Task 2 -- quantizeFloatToAsym's grouped
+path + convertAsymTensorToFloatTensor's grouped dequant):
+  AsymGrouped  12 floats @ qBits=4, groupSize=4 (3 groups): one all-positive
+               group (zp 0), one span-zero group (mid zp), one all-negative
+               group (zp at the code ceiling 15). Self-checks (collapse
+               discriminators): per-group zps are PAIRWISE DISTINCT (so a
+               dequant that reads zeroPoints[0] for every group diverges on
+               groups 1..2 -- mutation (ii) guard) and every per-group scale
+               differs from the WHOLE-TENSOR derivation's scale (so a phase-1
+               min/max over the whole tensor instead of the group diverges on
+               every group -- mutation (i) guard). Also emits the round-trip
+               dequant array (dequant_asym_grouped over the pinned codes),
+               the expected output of ASYM(grouped) -> FLOAT32.
+  AsymTorchXCheck
+               8x4 row-major weight (32 floats) @ qBits=8, groupSize=4 -- one
+               group per output row (per-out-channel, axis=0), the layout a
+               GEMM weight groups over. Cross-checked in-generator against
+               torch.quantize_per_channel(w, scales, zps, axis=0,
+               dtype=torch.quint8).int_repr(). ZP-CONVENTION MAPPING: torch's
+               quint8 zero_point is already CODE-domain (q = clamp(round(v/s)
+               + zp, 0, 255), dequant = (q - zp)*s), the same affine we use --
+               BUT torch does NOT derive the grid with our zero-inclusion
+               nudge (torch observers have their own reduce_range/eps rules),
+               so the grid is derived with OUR nudged rule and passed TO
+               torch, which takes explicit scales/zero_points and derives
+               nothing. The remaining divergence is rounding only: torch
+               rounds half-to-even, we round half-away-from-zero, so a code
+               may differ by exactly 1 on an exact x.5 quotient (genuine tie);
+               any other mismatch aborts generation.
+
 Run via `uv run` (CMake wires this automatically).
 """
 import argparse
 import sys
 from pathlib import Path
 
+import torch
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 
-from sym_gold import (emit_float_array, emit_float_scalar, emit_int32_array,
-                      emit_int32_scalar, quantize_asym_nudged,
-                      quantize_asym_old_value_domain)
+from sym_gold import (dequant_asym_grouped, emit_float_array, emit_float_scalar,
+                      emit_int32_array, emit_int32_scalar, quantize_asym_grouped,
+                      quantize_asym_nudged, quantize_asym_old_value_domain)
 
 FIXTURES = [
     ("f1SpanZero", [1.0, 2.0, 3.0, 4.0, -1.0, -2.0], 5),
@@ -74,6 +106,93 @@ def emit_fixture(parts, name, values, q_bits):
     parts.append(emit_int32_scalar(f"zp_{pre}", zp))
     parts.append(emit_int32_scalar(f"qBits_{pre}", q_bits))
     return codes, scale, zp
+
+
+def fixture_asym_grouped():
+    # 3 groups of 4 @ qBits=4 (qMax 15), bands chosen so the zps are pairwise
+    # distinct AND every group scale differs from the whole-tensor derivation:
+    #   g0 all-positive  [0, 3]   -> scale 3/15  = 0.2f, zp 0
+    #   g1 span-zero     [-1, 2]  -> scale 3/15  = 0.2f, zp 5
+    #   g2 all-negative  [-6, 0]  -> scale 6/15  = 0.4f, zp 15 (code ceiling)
+    #   whole tensor     [-6, 3]  -> scale 9/15  = 0.6f, zp 10
+    raw = [0.5, 1.5, 3.0, 2.0,
+          -1.0, 2.0, 0.5, -0.5,
+          -6.0, -1.5, -3.0, -0.75]
+    q_bits, group_size = 4, 4
+    codes, scales, zps = quantize_asym_grouped(raw, q_bits, group_size)
+
+    # Collapse discriminators (see module docstring):
+    assert len(set(zps)) == len(zps), (
+        f"AsymGrouped: per-group zps {zps} are not pairwise distinct -- the "
+        f"zeroPoints[0]-lookup mutation (ii) would not be discriminated")
+    _wc, wscales, wzps = quantize_asym_grouped(raw, q_bits, len(raw))
+    for g, s in enumerate(scales):
+        assert s != wscales[0], (
+            f"AsymGrouped: group {g} scale {s} equals the whole-tensor scale "
+            f"{wscales[0]} -- the whole-tensor-min/max mutation (i) would not "
+            f"be discriminated on this group")
+
+    dequant = dequant_asym_grouped(codes, scales, zps, group_size)
+    return {"input": raw, "codes": codes, "scales": scales, "zps": zps,
+           "dequant": dequant, "qBits": q_bits, "groupSize": group_size,
+           "numGroups": len(scales)}
+
+
+def fixture_asym_torch_cross_check():
+    # 8x4 row-major weight, one group per row (per-out-channel axis=0),
+    # qBits=8 (quint8 code domain [0, 255]). Rows mix all-positive (zp 0),
+    # all-negative (zp 255) and span-zero bands.
+    raw = [0.3, -0.7, 1.1, -1.3,
+          2.0, 0.1, 0.05, 0.9,
+          -3.3, -3.1, -0.15, -0.02,
+          0.6, -0.6, 0.61, -0.59,
+          4.4, -1.1, 0.02, 0.03,
+          1.9, -1.85, 0.5001, -0.4999,
+          0.11, 0.12, 0.13, 0.14,
+          -5.5, 5.6, 0.001, -0.001]
+    q_bits, group_size, num_groups = 8, 4, 8
+    codes, scales, zps = quantize_asym_grouped(raw, q_bits, group_size)
+    assert 0 in zps and (2 ** q_bits - 1) in zps, (
+        f"AsymTorchXCheck: zps {zps} miss the {0}/{2 ** q_bits - 1} band "
+        f"edges -- fixture no longer exercises the nudge at both ends")
+
+    # torch cross-check: OUR nudged grid handed TO torch (it derives nothing;
+    # see the module docstring for the zp-convention mapping).
+    w = torch.tensor(raw, dtype=torch.float32).reshape(num_groups, group_size)
+    torch_q = torch.quantize_per_channel(
+        w, torch.tensor(scales, dtype=torch.float64),
+        torch.tensor(zps, dtype=torch.int64), axis=0, dtype=torch.quint8)
+    torch_codes = torch_q.int_repr().flatten().tolist()
+    for i, (c, t) in enumerate(zip(codes, torch_codes)):
+        if c == t:
+            continue
+        # Only an exact half-integer quotient can legitimately disagree
+        # between round-half-away-from-zero (ours) and round-half-to-even
+        # (torch) -- and only by exactly 1 code.
+        g = i // group_size
+        quotient = (torch.tensor(raw[i], dtype=torch.float32) /
+                    torch.tensor(scales[g], dtype=torch.float32)).item()
+        is_tie = abs(abs(quotient) - (abs(quotient) // 1) - 0.5) < 1e-9
+        assert is_tie and abs(c - t) == 1, (
+            f"AsymTorchXCheck: element {i} mismatches torch.quantize_per_channel "
+            f"beyond a rounding-tie boundary (ours={c}, torch's={t}, "
+            f"quotient={quotient}) -- investigate, do not loosen this assert")
+
+    dequant = dequant_asym_grouped(codes, scales, zps, group_size)
+    return {"input": raw, "codes": codes, "scales": scales, "zps": zps,
+           "dequant": dequant, "qBits": q_bits, "groupSize": group_size,
+           "numGroups": num_groups}
+
+
+def emit_grouped_fixture(parts, prefix, fx):
+    parts.append(emit_float_array(f"k{prefix}Input", torch.tensor(fx["input"], dtype=torch.float32)))
+    parts.append(emit_int32_array(f"k{prefix}Codes", torch.tensor(fx["codes"], dtype=torch.int32)))
+    parts.append(emit_float_array(f"k{prefix}Scales", torch.tensor(fx["scales"], dtype=torch.float32)))
+    parts.append(emit_int32_array(f"k{prefix}Zps", torch.tensor(fx["zps"], dtype=torch.int32)))
+    parts.append(emit_float_array(f"k{prefix}Dequant", torch.tensor(fx["dequant"], dtype=torch.float32)))
+    parts.append(emit_int32_scalar(f"k{prefix}QBits", fx["qBits"]))
+    parts.append(emit_int32_scalar(f"k{prefix}GroupSize", fx["groupSize"]))
+    parts.append(emit_int32_scalar(f"k{prefix}NumGroups", fx["numGroups"]))
 
 
 def main() -> int:
@@ -113,6 +232,9 @@ def main() -> int:
         f"f4ClampTie: un-clamped top code {unclamped} != 8 -- fixture no "
         f"longer exercises the encode clamp (mutation (ii) guard vacuous)")
     assert codes4[2] == zp4, "f4ClampTie: 0.0 must encode to code == zp"
+
+    emit_grouped_fixture(parts, "AsymGrouped", fixture_asym_grouped())
+    emit_grouped_fixture(parts, "AsymTorchXCheck", fixture_asym_torch_cross_check())
 
     parts.append("\n#endif // ODT_EXPECTED_ASYM_NUDGED_H\n")
     args.out.parent.mkdir(parents=True, exist_ok=True)

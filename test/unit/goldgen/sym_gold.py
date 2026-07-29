@@ -779,6 +779,51 @@ def quantize_asym_old_value_domain(values, q_bits: int):
     return codes, scale.item(), zp_old
 
 
+# ---- Group-quant PR4 Task 2: per-group (storage-order) nudged code-domain
+# ASYM quantization, quantizeFloatToAsym's grouped path (group of element i =
+# i // group_size, exactly the SYM grouped grammar) -- each group derives its
+# OWN nudged grid via quantize_asym_nudged over the group slice, so all of
+# that helper's self-checks (zp bounds, exact-zero decode, round-trip bound)
+# run per group. ----
+
+
+def quantize_asym_grouped(values, q_bits: int, group_size: int):
+    """Per-group nudged code-domain ASYM quantization, storage-order groups.
+    Mirrors quantizeFloatToAsym's grouped path (TensorConversion.c): phase-1
+    per-group min/max + nudge -> scales[g]/zps[g], phase-2 encode each element
+    against ITS group's grid (round_half_away(v/scale) + zp, clamped to
+    [0, 2^b-1]) -- float32 intermediates throughout (via quantize_asym_nudged).
+    Returns (codes: list[int], scales: list[float], zps: list[int])."""
+    x = torch.as_tensor(values, dtype=torch.float32).flatten()
+    n = x.numel()
+    assert n % group_size == 0, (
+        f"quantize_asym_grouped: n={n} not divisible by group_size={group_size}")
+    codes, scales, zps = [], [], []
+    for g0 in range(0, n, group_size):
+        c, s, z = quantize_asym_nudged(x[g0:g0 + group_size].tolist(), q_bits)
+        codes.extend(c)
+        scales.append(s)
+        zps.append(z)
+    return codes, scales, zps
+
+
+def dequant_asym_grouped(codes, scales, zps, group_size: int):
+    """float32 mirror of convertAsymTensorToFloatTensor's grouped path
+    (TensorConversion.c): out[i] = (float)(code[i] - zps[g]) * scales[g],
+    g = i // group_size -- the integer subtract is exact (both operands
+    <= 2^16-1), the multiply is a single float32 op, matching the C `float`
+    arithmetic exactly. Returns a plain list of floats."""
+    n = len(codes)
+    assert n % group_size == 0, (
+        f"dequant_asym_grouped: n={n} not divisible by group_size={group_size}")
+    out = []
+    for i, c in enumerate(codes):
+        g = i // group_size
+        out.append(float((torch.tensor(float(c - zps[g]), dtype=torch.float32) *
+                          torch.tensor(scales[g], dtype=torch.float32)).item()))
+    return out
+
+
 def sgd_grouped_step_ref(param_mantissas, param_scales, group_size: int, q_bits: int, grad,
                          lr: float, weight_decay: float = 0.0):
     """Group-quant PR3 Task 4: SGD momentum==0 update on a grouped-SYM param

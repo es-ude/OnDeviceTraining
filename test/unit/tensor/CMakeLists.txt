@@ -25,6 +25,7 @@ add_elastic_ai_unit_test(
         Rounding
         Quantization
         TensorApi
+        QuantizationApi
         StorageApi
         odt_test_death
 )

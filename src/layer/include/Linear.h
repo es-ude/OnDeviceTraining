@@ -59,6 +59,14 @@ void linearCalcPropLossFloat32(tensor_t *loss, tensor_t *weights, tensor_t *prop
 void linearCalcWeightGradsSymInt32(tensor_t *loss, tensor_t *forwardInput, tensor_t *weightGrads);
 void linearCalcBiasGradsSymInt32(tensor_t *biasGrads, tensor_t *loss);
 void linearCalcPropLossSymInt32(tensor_t *weights, tensor_t *loss, tensor_t *propLoss);
+/* Group-quant PR3 (Task 1): dx sibling of linearForwardSymInt32Grouped —
+ * `weights` is the executeOp prologue's unpacked grouped-SYM scratch,
+ * `weightGroups` the real per-group scales/qBits/groupSize. NO transpose:
+ * dx reduces over weight dim-0 (outFeatures), storage-strided by inFeatures;
+ * the unified matmul core binds groups per visited storage element. Routed
+ * to by propLossKernelSym when the stored weight is grouped SYM. */
+void linearCalcPropLossSymInt32Grouped(tensor_t *weights, tensor_t *loss, tensor_t *propLoss,
+                                       const symQConfig_t *weightGroups);
 
 void linearCalcOutputShape(layer_t *linearLayer, shape_t *inputShape, shape_t *outputShape);
 

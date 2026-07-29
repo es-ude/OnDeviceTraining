@@ -184,8 +184,23 @@ void linearCalcPropLossSymInt32(tensor_t *weights, tensor_t *loss, tensor_t *pro
     matmulSymInt32Tensors(loss, weights, propLoss);
 }
 
+/* Group-quant PR3 (Task 1): unlike the forward's transpose dance
+ * (linearForwardSymInt32Grouped), dx consumes the weight AS STORED — the
+ * reduction runs over dim-0 (outFeatures), storage-strided by inFeatures.
+ * The unified matmulIntCoreGrouped binds each visited element's group to its
+ * actual storage index, so no orientation fix-up is needed (or possible:
+ * groups partition flat storage, not the logical view). dx has no bias. */
+void linearCalcPropLossSymInt32Grouped(tensor_t *weights, tensor_t *loss, tensor_t *propLoss,
+                                       const symQConfig_t *weightGroups) {
+    matmulSymInt32TensorsGroupedWeight(loss, weights, NULL, propLoss, weightGroups);
+}
+
 /* executeOp kernel adapters — ops convention: weight-grad {loss, fwdIn},
- * bias-grad {loss}, propLoss {loss, weightsParam}. auxOut/ctx unused here. */
+ * bias-grad {loss}, propLoss {loss, weightsParam}. auxOut unused; ctx unused
+ * EXCEPT propLossKernelSym, which mirrors linearForwardKernelSym: ctx carries
+ * the stored weight's own symQConfig_t* (non-NULL iff grouped SYM,
+ * linearBackward sets ctx + groupedSymOperandPos together) and routes to the
+ * grouped matmul entry. */
 static void weightGradKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                                   const void *ctx) {
     (void)n;
@@ -225,8 +240,12 @@ static void propLossKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
                               const void *ctx) {
     (void)n;
     (void)auxOut;
-    (void)ctx;
-    linearCalcPropLossSymInt32(ops[1], ops[0], rawOut);
+    const symQConfig_t *weightGroups = (const symQConfig_t *)ctx;
+    if (weightGroups != NULL) {
+        linearCalcPropLossSymInt32Grouped(ops[1], ops[0], rawOut, weightGroups);
+    } else {
+        linearCalcPropLossSymInt32(ops[1], ops[0], rawOut);
+    }
 }
 
 void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss,
@@ -264,14 +283,28 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
     /* propLoss == NULL (#380 PR2): grads-only call -- skip the dx write
      * entirely rather than dereference the absent buffer. */
     if (propLoss != NULL) {
+        tensor_t *weights = getParamFromParameter(cfg->weights);
+
+        /* Group-quant PR3 (Task 1): same detection + always-together wiring
+         * as linearForward (see the comment there) — ctx routes the SYM
+         * kernel adapter to the grouped matmul entry, groupedSymOperandPos
+         * opts the funnel prologue into unpacking (SYM arm) / group-aware
+         * dequant (FLOAT32 arm) of the weight at inputs[1] (position 2). */
+        bool grouped = weights->quantization->type == SYM &&
+                       ((symQConfig_t *)weights->quantization->qConfig)->numGroups > 1;
+        const symQConfig_t *weightGroups =
+            grouped ? (const symQConfig_t *)weights->quantization->qConfig : NULL;
+
         executeOp(
             &(opSpec_t){
                 .kernel = cfg->propLossMath.type == ARITH_SYM_INT32 ? propLossKernelSym
                                                                     : propLossKernelFloat,
-                .inputs = (tensor_t *[]){loss, getParamFromParameter(cfg->weights)},
+                .ctx = weightGroups,
+                .inputs = (tensor_t *[]){loss, weights},
                 .nInputs = 2,
                 .arithmetic = cfg->propLossMath,
                 .mode = OUT_WRITE,
+                .groupedSymOperandPos = grouped ? 2 : 0,
             },
             propLoss);
     }

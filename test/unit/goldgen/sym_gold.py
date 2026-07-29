@@ -203,6 +203,55 @@ def matmul_grouped_ref(a_mantissas, a_scale: float, w_mantissas, w_scales, group
     return out, s_acc
 
 
+def matmul_grouped_dx_ref(a_mantissas, a_scale: float, w_mantissas, w_scales, group_size: int,
+                          out_rows: int, out_cols: int, reduce_len: int):
+    """Group-quant PR3 Task 1: emulates matmulSymInt32TensorsGroupedWeight on
+    the Linear dx (propLoss) orientation: out[r][k] = sum_o a[r][o] * W[o][k]
+    with `a` the loss ([out_rows(=batch), reduce_len(=outFeatures)] row-major
+    flat) and W passed in its RAW [reduce_len(=outFeatures),
+    out_cols(=inFeatures)] storage order -- Linear dx hands the weight over
+    UNtransposed, so the visited weight storage index at reduction step o for
+    output column k is `w_idx = o * out_cols + k`: STRIDED by out_cols, not
+    contiguous like matmul_grouped_ref's forward orientation. Groups still
+    bind to flat storage (`g = w_idx // group_size`), so consecutive
+    reduction steps hop groups; the emulation folds the running int partial
+    via rescale_f32 EVERY time the visited element's group changes (for
+    per-channel weights that is EVERY step -- one rescale per term) plus the
+    final tail combine: the exact sequence the unified per-element C core
+    (matmulIntCoreGrouped) produces. dx has no bias operand. Only HALF_AWAY
+    is emulated (see matmul_grouped_ref's docstring for why SR is excluded).
+    Returns (out_mantissas flat list [out_rows*out_cols], s_acc)."""
+    max_scale = max(w_scales)
+    s_acc = (torch.tensor(a_scale, dtype=torch.float32) *
+            torch.tensor(max_scale, dtype=torch.float32)).item()
+
+    out = []
+    for r in range(out_rows):
+        for k in range(out_cols):
+            acc = 0
+            partial = 0
+            current_group = None
+            for o in range(reduce_len):
+                w_idx = o * out_cols + k
+                g = w_idx // group_size
+                if g != current_group:
+                    if current_group is not None:
+                        param_scale = (torch.tensor(a_scale, dtype=torch.float32) *
+                                      torch.tensor(w_scales[current_group],
+                                                   dtype=torch.float32)).item()
+                        acc += rescale_f32(partial, param_scale, s_acc)
+                    partial = 0
+                    current_group = g
+                a_val = a_mantissas[r * reduce_len + o]
+                w_val = w_mantissas[w_idx]
+                partial += a_val * w_val
+            param_scale = (torch.tensor(a_scale, dtype=torch.float32) *
+                          torch.tensor(w_scales[current_group], dtype=torch.float32)).item()
+            acc += rescale_f32(partial, param_scale, s_acc)
+            out.append(acc)
+    return out, s_acc
+
+
 # ---- int12 operand helpers (#227 operand flip; default quantizationInitSymInt32
 # tensors carry qMaxBits = ODT_SYM_OPERAND_QMAXBITS = 12). Additive: existing
 # int16-era users above keep their semantics; pool/conv generators use these. ----

@@ -40,9 +40,13 @@ void matmulSymInt32TensorsWithBias(tensor_t *aTensor, tensor_t *bTensor, tensor_
  *  rescaleIntoAccumulatorScale call (one rounding per boundary, honoring the
  *  weight scratch operand's own roundingMode — the same plumbing the funnel
  *  prologue already uses to carry the op's rounding mode into SYM kernels).
- *  Per-channel weights (groupSize == the full reduction length per output
- *  channel) never cross a boundary mid-reduction, so exactly ONE combine
- *  runs per output element. */
+ *  Group membership binds to each visited element's actual STORAGE index
+ *  (PR3 Task 1), so ANY weight orientation of `b` works: in the contiguous
+ *  forward orientation (Linear.c's transposeTensor(w,0,1)) per-channel
+ *  weights fold exactly ONE combine per output element, while the strided
+ *  Linear-dx orientation (RAW [outFeatures, inFeatures] view, reduction over
+ *  logical dim 0) hops groups on every reduction step and folds one combine
+ *  per visited-group change. */
 void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
                                         tensor_t *outputTensor, const symQConfig_t *weightGroups);
 

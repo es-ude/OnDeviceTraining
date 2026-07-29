@@ -2150,6 +2150,119 @@ void testLinearForwardGroupedFloatPathAgreesWithinTolerance(void) {
     }
 }
 
+/* ---- Group-quant PR3 (Task 1): Linear backward dx with a grouped SYM
+ * weight. Hand-duplicated from generate_expected_group_matmul.py's
+ * DxPerChannel fixture (same weight mantissas/scales as kGroupedW* above;
+ * seeded row-distinct pseudo-random loss) — same manual-sync rule as the
+ * kGrouped* literals, see the comment there. */
+static const int32_t kGroupedDxLossMantissas[] = {33, -12, -2, -29, 13, 40};
+static const float kGroupedDxLossScale = 0.5f;
+static const int32_t kGroupedDxOutMantissas[] = {42,  -65, 74,  -47, 76,  -49,
+                                                 -49, 85,  -67, 11,  -39, 25};
+static const float kGroupedDxOutScale = 0.02500000037252903f;
+
+/*! Shared dx-fixture plumbing for the two backward tests below: builds the
+ *  grouped layer (via buildGroupedFixtureLayer), the SYM_INT32 loss and the
+ *  FLOAT32 propLoss wire, then runs linearBackward. The layer is FROZEN: the
+ *  borrowed fixture parameters carry no grad buffers, and dx is the ONLY
+ *  backward op that consumes the (grouped) weight tensor — the weight/bias
+ *  grad ops take {loss, fwdIn}/{loss} and are pinned by the existing SYM
+ *  backward tests — so freezing scopes these tests to the dx wire (#380:
+ *  frozen layers still propagate loss). `propLossQ` is overridden to the
+ *  FLOAT32 wire config, mirroring linearInitConfig's backwardMath/propLossQ
+ *  split (SYM compute, FLOAT32-stored propLoss wire). */
+static void runGroupedDxBackward(quantization_t *mathQ, quantization_t *wireQ,
+                                 float capturedOut[12]) {
+    tensor_t *input = NULL;
+    layer_t *linearLayer = buildGroupedFixtureLayer(mathQ, &input);
+    linearLayer->config->linear->propLossQ = wireQ;
+    linearLayer->config->linear->frozen = true;
+
+    size_t *lossDims = reserveMemory(2 * sizeof(size_t));
+    lossDims[0] = 2;
+    lossDims[1] = 3;
+    size_t *lossOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, lossOrder);
+    shape_t *lossShape = reserveMemory(sizeof(shape_t));
+    setShape(lossShape, lossDims, 2, lossOrder);
+    tensor_t *loss = initTensor(lossShape, quantizationInitSymInt32(HALF_AWAY), NULL);
+    for (size_t i = 0; i < 6; i++) {
+        ((int32_t *)loss->data)[i] = kGroupedDxLossMantissas[i];
+    }
+    ((symInt32QConfig_t *)loss->quantization->qConfig)->scale = kGroupedDxLossScale;
+
+    size_t *propLossDims = reserveMemory(2 * sizeof(size_t));
+    propLossDims[0] = 2;
+    propLossDims[1] = 6;
+    size_t *propLossOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, propLossOrder);
+    shape_t *propLossShape = reserveMemory(sizeof(shape_t));
+    setShape(propLossShape, propLossDims, 2, propLossOrder);
+    tensor_t *propLoss = initTensor(propLossShape, quantizationInitFloat(), NULL);
+
+    linearBackward(linearLayer, input, loss, propLoss);
+
+    for (size_t i = 0; i < 12; i++) {
+        capturedOut[i] = ((float *)propLoss->data)[i];
+    }
+
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeLinearLayer(linearLayer);
+    freeTensor(input);
+}
+
+/* Exact FLOAT32-wire compare against the RAW dx gold (the Conv1d grouped
+ * forward tests' PR2-ratified design, see
+ * testConv1dForwardGroupedPerChannelMatchesGold's comment): propLossMath
+ * stays SYM_INT32, but the propLoss WIRE is FLOAT32, so the executeOp
+ * OUT_WRITE epilogue takes the SYM_INT32->FLOAT32 conversionMatrix cell —
+ * one exact `(float)mantissa * scale` per element, bit-for-bit the same
+ * float32 formula this expected-value loop computes — instead of the
+ * absmax-fresh-scale SYM requant whose generous tolerance could mask a
+ * wrong-but-sound s_acc. Any divergence in the kernel's internal arithmetic
+ * (wrong group binding, dropped combine, wrong s_acc) changes the compared
+ * value measurably. */
+void testLinearBackwardGroupedSymWeightsDxMatchesGold(void) {
+    quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *wireQ = quantizationInitFloat();
+    float captured[12];
+    runGroupedDxBackward(testQ, wireQ, captured);
+    freeQuantization(wireQ);
+    freeQuantization(testQ);
+
+    for (size_t i = 0; i < 12; i++) {
+        float expected = (float)kGroupedDxOutMantissas[i] * kGroupedDxOutScale;
+        TEST_ASSERT_EQUAL_FLOAT(expected, captured[i]);
+    }
+}
+
+/* FLOAT32 dx path on the SAME grouped-SYM weight and loss: the executeOp
+ * prologue dequantizes both operands via convertTensor (grouped weight
+ * through the group-aware SYM->FLOAT32 cell), then the float matmul computes
+ * the reference value directly with NO combine rounding.
+ *
+ * Tolerance derivation (per-channel dx fixture): the dx reduction visits
+ * outFeatures = 3 weight rows per output element, each row its OWN group
+ * (per-channel), so the SYM_INT32 path folds C = 3 rescale-combines per
+ * element (no bias in dx). Each combine rounds HALF_AWAY once: <= 0.5 quanta
+ * of s_acc error, so |int path - true| <= 0.5 * C * s_acc = 1.5 *
+ * kGroupedDxOutScale = 1.5 * 0.025 = 0.0375. The float path here IS that
+ * true value up to ~1e-7 relative float32 noise — covered by the 1e-6
+ * absolute headroom. */
+void testLinearBackwardGroupedDxFloatPathAgreesWithinTolerance(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    float captured[12];
+    runGroupedDxBackward(floatQ, floatQ, captured);
+    freeQuantization(floatQ);
+
+    const float tolerance = 1.5f * kGroupedDxOutScale + 1e-6f;
+    for (size_t i = 0; i < 12; i++) {
+        float expected = (float)kGroupedDxOutMantissas[i] * kGroupedDxOutScale;
+        TEST_ASSERT_FLOAT_WITHIN(tolerance, expected, captured[i]);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLinearForwardFloat);
@@ -2193,5 +2306,7 @@ int main(void) {
     RUN_TEST(testLinearBackwardNullPropLossComputesGradsOnly);
     RUN_TEST(testLinearForwardGroupedSymWeights);
     RUN_TEST(testLinearForwardGroupedFloatPathAgreesWithinTolerance);
+    RUN_TEST(testLinearBackwardGroupedSymWeightsDxMatchesGold);
+    RUN_TEST(testLinearBackwardGroupedDxFloatPathAgreesWithinTolerance);
     return UNITY_END();
 }

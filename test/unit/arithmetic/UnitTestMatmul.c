@@ -790,6 +790,200 @@ void testMatmulGroupedHonorsOpRoundingMode(void) {
                              "grouped combine did not honor SR_HALF_AWAY (hardcoded rounding?)");
 }
 
+/* ---- Group-quant PR3 (Task 1): dx (Linear propLoss) orientation ---------
+ *
+ * The weight `b` is passed in its RAW [outFeatures, inFeatures] storage
+ * order (order {0,1}, NO transpose — exactly what linearBackward's propLoss
+ * op hands the kernel): logical dim 0 (the reduction axis, outFeatures)
+ * strides weight STORAGE by inFeatures. Groups still bind to flat storage,
+ * so consecutive reduction steps hop groups — the unified per-element group
+ * lookup must fold the running partial on every visited-group change (for
+ * per-channel weights that is EVERY step) plus the tail. Fixtures:
+ * generate_expected_group_matmul.py's Dx* cases (same weight mantissas as
+ * the forward fixtures, seeded row-distinct pseudo-random loss). */
+
+void testMatmulGroupedWeightStridedReductionMatchesGold(void) {
+    tensor_t aTensor;
+    size_t aDims[] = {(size_t)kDxPerChannelOutRows, (size_t)kDxPerChannelReduceLen};
+    size_t aOrder[] = {0, 1};
+    shape_t aShape;
+    setShape(&aShape, aDims, 2, aOrder);
+    symInt32QConfig_t aQC;
+    initSymInt32QConfig(HALF_AWAY, &aQC);
+    aQC.scale = kDxPerChannelLossScale;
+    quantization_t aQ;
+    initSymInt32Quantization(&aQC, &aQ);
+    setTensorValues(&aTensor, (uint8_t *)kDxPerChannelLossMantissas, &aShape, &aQ, NULL);
+
+    tensor_t bTensor;
+    size_t bDims[] = {(size_t)kDxPerChannelReduceLen, (size_t)kDxPerChannelOutCols};
+    size_t bOrder[] = {0, 1}; /* RAW storage view: reduction axis strided by outCols */
+    shape_t bShape;
+    setShape(&bShape, bDims, 2, bOrder);
+    symInt32QConfig_t bQC;
+    initSymInt32QConfig(HALF_AWAY, &bQC);
+    bQC.scale = 1.0f; /* poison, per the funnel's grouped-scratch contract */
+    bQC.qMaxBits = 8;
+    quantization_t bQ;
+    initSymInt32Quantization(&bQC, &bQ);
+    setTensorValues(&bTensor, (uint8_t *)kDxPerChannelWMantissas, &bShape, &bQ, NULL);
+
+    float wScales[3];
+    memcpy(wScales, kDxPerChannelWScales, sizeof(wScales));
+    symQConfig_t weightGroups = {.scales = wScales,
+                                 .numGroups = (size_t)kDxPerChannelNumGroups,
+                                 .groupSize = (size_t)kDxPerChannelGroupSize,
+                                 .qBits = 8,
+                                 .roundingMode = HALF_AWAY};
+
+    tensor_t outputTensor;
+    int32_t outputData[12];
+    size_t outputDims[] = {(size_t)kDxPerChannelOutRows, (size_t)kDxPerChannelOutCols};
+    size_t outputOrder[] = {0, 1};
+    shape_t outputShape;
+    setShape(&outputShape, outputDims, 2, outputOrder);
+    symInt32QConfig_t outputQC;
+    initSymInt32QConfig(HALF_AWAY, &outputQC);
+    quantization_t outputQ;
+    initSymInt32Quantization(&outputQC, &outputQ);
+    setTensorValues(&outputTensor, (uint8_t *)outputData, &outputShape, &outputQ, NULL);
+
+    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &outputTensor, &weightGroups);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(kDxPerChannelOutMantissas, outputData, 12);
+    TEST_ASSERT_FLOAT_WITHIN(1e-9f, kDxPerChannelOutScale, outputQC.scale);
+}
+
+void testMatmulGroupedWeightStridedGeneralGroupsMatchesGold(void) {
+    tensor_t aTensor;
+    size_t aDims[] = {(size_t)kDxGeneralOutRows, (size_t)kDxGeneralReduceLen};
+    size_t aOrder[] = {0, 1};
+    shape_t aShape;
+    setShape(&aShape, aDims, 2, aOrder);
+    symInt32QConfig_t aQC;
+    initSymInt32QConfig(HALF_AWAY, &aQC);
+    aQC.scale = kDxGeneralLossScale;
+    quantization_t aQ;
+    initSymInt32Quantization(&aQC, &aQ);
+    setTensorValues(&aTensor, (uint8_t *)kDxGeneralLossMantissas, &aShape, &aQ, NULL);
+
+    tensor_t bTensor;
+    size_t bDims[] = {(size_t)kDxGeneralReduceLen, (size_t)kDxGeneralOutCols};
+    size_t bOrder[] = {0, 1}; /* RAW storage view: reduction axis strided by outCols */
+    shape_t bShape;
+    setShape(&bShape, bDims, 2, bOrder);
+    symInt32QConfig_t bQC;
+    initSymInt32QConfig(HALF_AWAY, &bQC);
+    bQC.scale = 1.0f;
+    bQC.qMaxBits = 8;
+    quantization_t bQ;
+    initSymInt32Quantization(&bQC, &bQ);
+    setTensorValues(&bTensor, (uint8_t *)kDxGeneralWMantissas, &bShape, &bQ, NULL);
+
+    float wScales[6];
+    memcpy(wScales, kDxGeneralWScales, sizeof(wScales));
+    symQConfig_t weightGroups = {.scales = wScales,
+                                 .numGroups = (size_t)kDxGeneralNumGroups,
+                                 .groupSize = (size_t)kDxGeneralGroupSize,
+                                 .qBits = 8,
+                                 .roundingMode = HALF_AWAY};
+
+    tensor_t outputTensor;
+    int32_t outputData[12];
+    size_t outputDims[] = {(size_t)kDxGeneralOutRows, (size_t)kDxGeneralOutCols};
+    size_t outputOrder[] = {0, 1};
+    shape_t outputShape;
+    setShape(&outputShape, outputDims, 2, outputOrder);
+    symInt32QConfig_t outputQC;
+    initSymInt32QConfig(HALF_AWAY, &outputQC);
+    quantization_t outputQ;
+    initSymInt32Quantization(&outputQC, &outputQ);
+    setTensorValues(&outputTensor, (uint8_t *)outputData, &outputShape, &outputQ, NULL);
+
+    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &outputTensor, &weightGroups);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(kDxGeneralOutMantissas, outputData, 12);
+    TEST_ASSERT_FLOAT_WITHIN(1e-9f, kDxGeneralOutScale, outputQC.scale);
+}
+
+/* dx-orientation twin of testMatmulGroupedEqualScalesBitIdenticalToScalar
+ * (same power-of-two exactness argument, see that test's comment): every
+ * group's scale is 0.25f and aScale is 0.5f, so every combine's rescale is
+ * an exact identity and the grouped kernel's strided-reduction output must
+ * be BIT-IDENTICAL to the scalar matmulSymInt32Tensors run on the same RAW
+ * weight view with b's scale == the common group scale. Pins the per-element
+ * walk's bookkeeping (every element folded exactly once) independently of
+ * any rescale rounding. */
+void testMatmulGroupedDxEqualScalesBitIdenticalToScalar(void) {
+    const float commonScale = 0.25f;
+    const float aScaleVal = 0.5f;
+
+    tensor_t aTensor;
+    size_t aDims[] = {(size_t)kDxPerChannelOutRows, (size_t)kDxPerChannelReduceLen};
+    size_t aOrder[] = {0, 1};
+    shape_t aShape;
+    setShape(&aShape, aDims, 2, aOrder);
+    symInt32QConfig_t aQC;
+    initSymInt32QConfig(HALF_AWAY, &aQC);
+    aQC.scale = aScaleVal;
+    quantization_t aQ;
+    initSymInt32Quantization(&aQC, &aQ);
+    setTensorValues(&aTensor, (uint8_t *)kDxPerChannelLossMantissas, &aShape, &aQ, NULL);
+
+    size_t bDims[] = {(size_t)kDxPerChannelReduceLen, (size_t)kDxPerChannelOutCols};
+    size_t bOrder[] = {0, 1}; /* RAW storage view: reduction axis strided by outCols */
+    shape_t bShape;
+    setShape(&bShape, bDims, 2, bOrder);
+
+    tensor_t bTensorGrouped;
+    symInt32QConfig_t bGroupedQC;
+    initSymInt32QConfig(HALF_AWAY, &bGroupedQC);
+    bGroupedQC.scale = 1.0f;
+    quantization_t bGroupedQ;
+    initSymInt32Quantization(&bGroupedQC, &bGroupedQ);
+    setTensorValues(&bTensorGrouped, (uint8_t *)kDxPerChannelWMantissas, &bShape, &bGroupedQ, NULL);
+
+    float scales[3] = {commonScale, commonScale, commonScale};
+    symQConfig_t weightGroups = {
+        .scales = scales, .numGroups = 3, .groupSize = 6, .qBits = 8, .roundingMode = HALF_AWAY};
+
+    size_t outDims[] = {(size_t)kDxPerChannelOutRows, (size_t)kDxPerChannelOutCols};
+    size_t outOrder[] = {0, 1};
+    shape_t outShape;
+    setShape(&outShape, outDims, 2, outOrder);
+
+    tensor_t outGrouped;
+    int32_t outGroupedData[12];
+    symInt32QConfig_t outGroupedQC;
+    initSymInt32QConfig(HALF_AWAY, &outGroupedQC);
+    quantization_t outGroupedQ;
+    initSymInt32Quantization(&outGroupedQC, &outGroupedQ);
+    setTensorValues(&outGrouped, (uint8_t *)outGroupedData, &outShape, &outGroupedQ, NULL);
+
+    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensorGrouped, NULL, &outGrouped, &weightGroups);
+
+    tensor_t bTensorScalar;
+    symInt32QConfig_t bScalarQC;
+    initSymInt32QConfig(HALF_AWAY, &bScalarQC);
+    bScalarQC.scale = commonScale;
+    quantization_t bScalarQ;
+    initSymInt32Quantization(&bScalarQC, &bScalarQ);
+    setTensorValues(&bTensorScalar, (uint8_t *)kDxPerChannelWMantissas, &bShape, &bScalarQ, NULL);
+
+    tensor_t outScalar;
+    int32_t outScalarData[12];
+    symInt32QConfig_t outScalarQC;
+    initSymInt32QConfig(HALF_AWAY, &outScalarQC);
+    quantization_t outScalarQ;
+    initSymInt32Quantization(&outScalarQC, &outScalarQ);
+    setTensorValues(&outScalar, (uint8_t *)outScalarData, &outShape, &outScalarQ, NULL);
+
+    matmulSymInt32Tensors(&aTensor, &bTensorScalar, &outScalar);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(outScalarData, outGroupedData, 12);
+    TEST_ASSERT_EQUAL_FLOAT(outScalarQC.scale, outGroupedQC.scale);
+}
+
 /* The public grouped entry must reject the per-tensor sentinel {numGroups=1,
  * groupSize=0} (see symQConfig_t's field comments, Quantization.h): without
  * this guard, matmulIntCoreGrouped's `wStorageIdx / weightGroups->groupSize`
@@ -863,6 +1057,9 @@ int main(void) {
     RUN_TEST(testMatmulGroupedWeightGeneralGroupsMatchesGold);
     RUN_TEST(testMatmulGroupedEqualScalesBitIdenticalToScalar);
     RUN_TEST(testMatmulGroupedHonorsOpRoundingMode);
+    RUN_TEST(testMatmulGroupedWeightStridedReductionMatchesGold);
+    RUN_TEST(testMatmulGroupedWeightStridedGeneralGroupsMatchesGold);
+    RUN_TEST(testMatmulGroupedDxEqualScalesBitIdenticalToScalar);
     RUN_TEST(testMatmulGroupedWeightRejectsPerTensorSentinel);
 
     return UNITY_END();

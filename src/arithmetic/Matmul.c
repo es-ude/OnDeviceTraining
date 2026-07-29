@@ -295,19 +295,20 @@ void matmulSymInt32TensorsWithBias(tensor_t *aTensor, tensor_t *bTensor, tensor_
     outputQC->scale = aQC->scale * bQC->scale;
 }
 
-/* Group-quant PR2 (Task 3): sibling of matmulIntCore, adding the running
- * group-partial rescale-combine. `b` must be 2D (a GEMM-family weight,
- * [outCols, reduceLen] storage order) with its reduction axis (logical dim
- * 0) storage-CONTIGUOUS -- true for every real weight wiring today (Linear.c
- * always exposes the physically-innermost axis as the reduction dim via
- * transposeTensor(w,0,1)); groups partition b's flat STORAGE array, so a
- * non-contiguous reduction would make "group of storage index" meaningless
- * and fail-fasts instead of silently misgrouping. Given that contiguity, the
- * per-(row,column) reduction loop below walks RUNS bounded by the next group
- * boundary (one division per RUN, not per element) — mirroring
- * packFloatBufferAsSym's grouped pack loop (Task 2) — rather than
- * re-deriving `b`'s storage index via calcElementIndexByIndices (itself
- * O(numberOfDims) divisions) on every reduction step. */
+/* Group-quant PR2 (Task 3) / PR3 (Task 1): sibling of matmulIntCore, adding
+ * the running group-partial rescale-combine. `b` must be 2D (a GEMM-family
+ * weight); groups partition b's flat STORAGE array, and the walk supports
+ * ANY orientation of the reduction axis: the group of each visited element
+ * is derived from that element's actual storage index — the same
+ * calcElementIndexByIndices result the weight read itself uses. Forward
+ * wirings expose the reduction axis storage-contiguously (Linear.c's
+ * transposeTensor(w,0,1)), but Linear dx reduces over weight dim-0 of the
+ * RAW [outFeatures, inFeatures] view, storage-strided by inFeatures:
+ * consecutive visited indices jump a full row, hopping groups on every
+ * step. For a contiguous reduction the per-element walk crosses group
+ * boundaries at exactly the same points as PR2's precomputed-run walk, so
+ * the combine sequence (and every PR2 forward gold) is preserved
+ * bit-for-bit. */
 static void matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,
                                  const int32_t *biasSeed, const symQConfig_t *weightGroups,
                                  float aScale, float sAcc, roundingMode_t roundingMode) {
@@ -338,41 +339,22 @@ static void matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor_t 
         exit(1);
     }
 
-    /* Contiguity check (once, not per element): b's logical-dim-0 (the
-     * reduction axis) must advance the physical storage index by exactly 1
-     * per step. */
-    size_t strideI = 1;
-    if (aColumns > 1) {
-        size_t idx0[] = {0, 0};
-        size_t idx1[] = {1, 0};
-        size_t v0 = calcElementIndexByIndices(2, bDims, idx0, bOrder);
-        size_t v1 = calcElementIndexByIndices(2, bDims, idx1, bOrder);
-        if (v1 != v0 + 1) {
-            PRINT_ERROR("matmulIntCoreGrouped: grouped weight reduction axis is not storage-"
-                        "contiguous (stride %zu) — groups bind to storage order, only a "
-                        "contiguous reduction is supported",
-                        (size_t)(v1 - v0));
-            exit(1);
-        }
-    }
-
     size_t resultCounter = 0;
     for (size_t rowIndex = 0; rowIndex < aRows; rowIndex++) {
         for (size_t columnIndex = 0; columnIndex < bColumns; columnIndex++) {
-            size_t idxStart[] = {0, columnIndex};
-            size_t wBase = calcElementIndexByIndices(2, bDims, idxStart, bOrder);
-
             int32_t acc = biasSeed ? biasSeed[columnIndex] : 0;
             int32_t partial = 0;
             size_t currentGroup = SIZE_MAX;
-            size_t k = 0;
-            while (k < aColumns) {
-                size_t wStorageIdx = wBase + k;
+            for (size_t i = 0; i < aColumns; i++) {
+                size_t bIndices[] = {i, columnIndex};
+                size_t wStorageIdx = calcElementIndexByIndices(2, bDims, bIndices, bOrder);
+                /* Per-element division (Conv1dKernel.c's grouped-loop
+                 * precedent): the reduction axis may be storage-strided
+                 * (Linear dx: stride = inFeatures), so consecutive visited
+                 * indices can jump groups arbitrarily — a precomputed run
+                 * length to the next boundary would overshoot past skipped
+                 * indices. Dividing the actual visited index is gap-robust. */
                 size_t g = wStorageIdx / weightGroups->groupSize;
-                size_t groupEnd = (g + 1) * weightGroups->groupSize;
-                size_t reduceEnd = wBase + aColumns;
-                size_t runEnd = groupEnd < reduceEnd ? groupEnd : reduceEnd;
-                size_t runLen = runEnd - wStorageIdx;
 
                 if (g != currentGroup) {
                     if (currentGroup != SIZE_MAX) {
@@ -388,28 +370,24 @@ static void matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor_t 
                     currentGroup = g;
                 }
 
-                for (size_t r = 0; r < runLen; r++) {
-                    size_t i = k + r;
-                    size_t aByteIndex;
-                    if (aNumberOfDims == 1) {
-                        aByteIndex = i * sizeof(int32_t);
-                    } else {
-                        size_t aIndices[] = {rowIndex, i};
-                        size_t aValueIndex = calcElementIndexByIndices(
-                            aNumberOfDims, aDims, aIndices, aTensor->shape->orderOfDimensions);
-                        aByteIndex = aValueIndex * sizeof(int32_t);
-                    }
-                    int32_t aValue = readBytesAsInt32(&aTensor->data[aByteIndex]);
-                    int32_t bValue =
-                        readBytesAsInt32(&bTensor->data[(wStorageIdx + r) * sizeof(int32_t)]);
-                    partial += mulInt32s(aValue, bValue);
+                size_t aByteIndex;
+                if (aNumberOfDims == 1) {
+                    aByteIndex = i * sizeof(int32_t);
+                } else {
+                    size_t aIndices[] = {rowIndex, i};
+                    size_t aValueIndex = calcElementIndexByIndices(
+                        aNumberOfDims, aDims, aIndices, aTensor->shape->orderOfDimensions);
+                    aByteIndex = aValueIndex * sizeof(int32_t);
                 }
-                k += runLen;
+                int32_t aValue = readBytesAsInt32(&aTensor->data[aByteIndex]);
+                int32_t bValue = readBytesAsInt32(&bTensor->data[wStorageIdx * sizeof(int32_t)]);
+                partial += mulInt32s(aValue, bValue);
             }
-            /* Tail combine: the LAST group never crosses a further boundary,
-             * so its partial only ever gets folded in here. Per-channel
-             * weights (groupSize == aColumns) never hit the mid-loop branch
-             * at all -- this is their ONLY combine. */
+            /* Tail combine: the LAST group visited never crosses a further
+             * boundary, so its partial only ever gets folded in here. In the
+             * contiguous forward orientation, per-channel weights (groupSize
+             * == aColumns) never hit the mid-loop branch at all -- this is
+             * their ONLY combine. */
             if (currentGroup != SIZE_MAX) {
                 acc += rescaleIntoAccumulatorScale(
                     partial, aScale * weightGroups->scales[currentGroup], sAcc, roundingMode);

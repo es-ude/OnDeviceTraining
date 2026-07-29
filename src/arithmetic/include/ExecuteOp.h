@@ -73,11 +73,13 @@ typedef struct opSpec {
      * safe — every existing opSpec compound literal that never heard of
      * grouped operands still denies them); i+1 = inputs[i] (and ONLY
      * inputs[i]) may be grouped SYM. A grouped SYM input reaching the
-     * prologue at any OTHER position, or at all when this is 0, fail-fasts
-     * (only the group-aware forward paths accept grouped weights in PR2;
-     * backward/optimizer land in PR3 — this is the funnel-wide seam that
-     * keeps that boundary, on BOTH the ARITH_SYM_INT32 and ARITH_FLOAT32
-     * prologue arms).
+     * prologue at any OTHER position, or at all when this is 0, fail-fasts.
+     * Declaring ops as of group-quant PR3: the GEMM-family forward AND dx
+     * weights (Linear/Conv1d/ConvT1d, both directions) and the optimizer
+     * param-update ops (SGD stateless/mState/mParam, AdamW param). Every
+     * other op is a non-carrier (spec §3: grads, bias, gamma/beta, wires,
+     * momentum stay per-tensor) — this funnel-wide seam enforces that, on
+     * BOTH the ARITH_SYM_INT32 and ARITH_FLOAT32 prologue arms.
      *
      * ARITH_SYM_INT32: the prologue unpacks the declared operand's mantissas
      * (unpackSignExtend, sign-extended raw int32 — the same mechanics the

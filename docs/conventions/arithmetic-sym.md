@@ -294,6 +294,44 @@ default these bounds are unreachable; they exist for the legal wider-wire
 configs (`quantizationInitSymInt32WithBits` allows up to 31 bits, where even a
 2-term window sum overflows int32). Death-tested per call site.
 
+## Grouped backward & update — error analysis and path choice
+
+Group-quantized weights (group-quant epic PR2/PR3, spec
+`docs/superpowers/specs/2026-07-28-group-quantization-design.md`) keep raw
+int32 MACs *within* a group and fold partials into the common accumulator
+scale `s_acc = s_in · max_g(scales[g])` via `rescaleIntoAccumulatorScale`
+(factors `scales[g]/s_wmax ≤ 1`, so combines never grow mantissas). Every
+combine is one rounding of ≤ 0.5·ulp(s_acc). Per output element with C
+combine-roundings: worst case |err| ≤ 0.5·C·s_acc; under the
+independent-rounding assumption RMS ≈ 0.5·√C·s_acc. C by path:
+
+| path | structure | C per output element |
+|---|---|---|
+| forward gather (Linear/Conv1d) | running group-partial | groups crossed by the reduction; per-channel = **1** |
+| dx gather (Linear dx, ConvT1d dx) | running group-partial, strided/adjoint orientation | distinct groups crossed; per-channel Linear dx = **outFeatures** |
+| scatter (ConvT1d forward, Conv1d dx) | per-product rescale (scatter targets change per product — no running partial exists) | contributing products; worst case ≈ IC·K |
+
+The RELATIVE error stays in the single-quantization-step class: the signal is
+itself a sum of C-many O(qMax²·s_acc) terms, so √C rounding noise rides on a
+√C-growing signal. This is a deliberate, documented deviation with no
+literature precedent for per-group *backward* (TFLite/CMSIS have no backward;
+Deutel arXiv:2407.10734 is per-tensor) — per the research-deviation rule.
+When the noise matters (coarse groups, deep chains), `propLossMath =
+ARITH_FLOAT32` is the exact alternative: the funnel prologue dequantizes the
+grouped weight per-group (exact per element) and computes in float. The
+integer path exists per ratified spec decision D2; convergence validation at
+scale is the #300-methodology sweep (PR5, ≥10 seeds, Leo).
+
+**Optimizer updates on grouped params** (SGD/AdamW, PR3): the value-space
+update dequantizes the param per-group in the FLOAT32 prologue, updates in
+float, and the OUT_WRITE epilogue re-derives **fresh per-group absmax scales**
+on every write-back (grouped `packFloatBufferAsSym`). This is Deutel's
+dynamic scale re-derivation (Sec. IV-E, weights every SGD update) generalized
+per-group — scales track the data every step, consistent with the dynamic
+Strategy-A discipline below. A fixed-grid per-group write-back (scale held
+constant, mantissa-only update) is future work if the PR5 sweep shows
+scale-churn artifacts.
+
 ## Quantized gradient accumulation — known precision Open Problem
 
 As of the quantized-gradient prerequisite (`gradInit`, 2026-06-05) a trainable

@@ -333,12 +333,18 @@ checkpointing, limitations, literature).
   `*→ASYM` helper. `symQConfig_t` is **always-array** (group-quant epic, spec
   `docs/superpowers/specs/2026-07-28-group-quantization-design.md`): `scales[numGroups]`
   with per-tensor = numGroups 1 / groupSize 0 sentinel. Groups (numGroups > 1) are
-  SHIPPED (PR2) for creation (`quantizationInitSymGrouped`/`requantizeTensorInPlace`),
-  FLOAT32↔SYM conversion, the `executeOp` grouped-operand gate, Linear/Conv1d group-partial
-  forward (per-channel = the special case `groupSize == elemsPerOutChannel`), and the
-  ODTS/ODTR serial read/write path (reallocation-based, see Serialization above);
-  backward, ConvT1d forward, ASYM groups, and the HAR sweep wiring are PR3–PR5.
-  `symInt32QConfig_t` (compute/wires) stays scalar by design.
+  SHIPPED for creation (`quantizationInitSymGrouped`/`requantizeTensorInPlace`),
+  FLOAT32↔SYM conversion, the `executeOp` grouped-operand gate, the ODTS/ODTR serial
+  read/write path (reallocation-based, see Serialization above), and — end-to-end
+  trainable — group-partial **forward AND dx** on the full GEMM family
+  (Linear/Conv1d/ConvT1d, gather cores via running group-partial, scatter core via
+  per-product rescale; per-channel = the special case `groupSize ==
+  elemsPerOutChannel`) plus **optimizer updates** on grouped params (SGD/AdamW,
+  per-group dynamic absmax requant each write-back). Rounding-error bounds for the
+  backward/update paths: `docs/conventions/arithmetic-sym.md` §"Grouped backward".
+  ASYM groups and the HAR sweep wiring are PR4–PR5. Grads, bias, gamma/beta, wires,
+  and momentum stay per-tensor (funnel-enforced); `symInt32QConfig_t` (compute/wires)
+  stays scalar by design.
 - **Weight init** — PyTorch-compatible: `INIT_DEFAULT` reproduces
   `kaiming_uniform_(a=√5)`, plus kaiming/xavier schemes (`weightInit_t`). FLOAT32-only.
 - **userApi** — `inference` (single/batched/with-loss), `StateDictApi` (weight **load**

@@ -269,9 +269,9 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
         if (grouped && spec->groupedSymOperandPos != i + 1) {
             PRINT_ERROR(
                 "executeOp: grouped SYM operand (numGroups=%zu) at inputs[%zu] reached an op "
-                "without a matching groupedSymOperandPos declaration — only the declared "
-                "position's group-aware forward paths accept grouped operands in PR2 "
-                "(backward/optimizer land in PR3)",
+                "without a matching groupedSymOperandPos declaration — grouped tensors are "
+                "legal only where an op declares them (GEMM-family forward/dx weights, "
+                "optimizer param updates); everything else is a non-carrier (spec §3)",
                 symQC->numGroups, i);
             exit(1);
         }

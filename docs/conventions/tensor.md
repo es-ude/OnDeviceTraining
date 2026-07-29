@@ -56,9 +56,9 @@ kernels compute flat storage offsets regardless of the permutation.
 
 | Tensor class | Granularity |
 |---|---|
-| GEMM-family weights (Linear/Conv1d/ConvT1d) | groups allowed (any valid groupSize, SYM) |
+| GEMM-family weights (Linear/Conv1d/ConvT1d) | groups allowed (any valid groupSize, SYM); trainable end-to-end since PR3 (forward + dx + optimizer updates; error bounds in `docs/conventions/arithmetic-sym.md`) |
 | Bias | per-tensor only |
-| LayerNorm/GroupNorm gamma/beta | per-tensor only; factories reject numGroups > 1 |
+| LayerNorm/GroupNorm gamma/beta | per-tensor only (the factories reject SYM/ASYM gamma/beta wholesale — the pre-existing dtype gate subsumes the group question) |
 | Gradients (packed storage) | per-tensor only; grouped grads are a future #300 axis |
 | Wires (`outputQ`/`propLossQ`), momentum | per-tensor only (`symInt32QConfig_t` stays scalar) |
 

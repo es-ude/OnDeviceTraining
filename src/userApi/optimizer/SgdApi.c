@@ -34,6 +34,18 @@ static tensor_t *momentumStateInit(tensor_t *param, quantization_t *momentumQuan
             exit(1);
         }
     }
+    /* Group-quant PR4 (Task 3): ASYM twin of the gate above -- same carrier
+     * contract (getQLike's ASYM arm deep-clones grouped grids, scales AND
+     * zeroPoints, so without this a grouped template would silently become a
+     * grouped momentum buffer). */
+    if (momentumQuant->type == ASYM) {
+        asymQConfig_t *asymQC = momentumQuant->qConfig;
+        if (asymQC->numGroups > 1) {
+            PRINT_ERROR("momentumStateInit: grouped ASYM momentum templates are unsupported -- "
+                        "grouped momentum is a future #300 axis (spec §3)");
+            exit(1);
+        }
+    }
     return initTensor(getShapeLike(param->shape), getQLike(momentumQuant), NULL);
 }
 

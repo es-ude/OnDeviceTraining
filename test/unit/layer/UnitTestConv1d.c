@@ -2067,6 +2067,121 @@ void testConv1dForwardGroupedConvGroupsMatchesGold(void) {
     }
 }
 
+/* ---- Group-quant PR4 (Task 3): grouped-ASYM Conv1d twins ----------------
+ *
+ * D5 smoke at the Conv1d layer: after the funnel's ASYM grouped-unpack arm
+ * shifts the codes (code - zp[g]) the compute path IS the grouped-SYM path
+ * on the resulting mantissas -- same mantissas + same scales through the
+ * same gather core give BIT-IDENTICAL raw output and s_acc, so no ASYM conv
+ * gold needs deriving: the SYM-grouped fixture layer on the identical
+ * mantissas/scales is the reference, both compared over exact FLOAT32
+ * wires. Pairwise-distinct zps keep group 1/2 sensitive to a
+ * zp[0]-everywhere shift (the mutation-(ii) direction; its named
+ * discriminators live in UnitTestExecuteOp.c/UnitTestLinear.c). */
+
+static const uint16_t kConv1dAsymZps[3] = {10, 25, 40};
+
+/*! Grouped-ASYM twin of buildGroupedAsymFixtureLayer's Linear analogue:
+ *  same weight geometry as buildGroupedConv1dFixtureLayer's perChannel shape
+ *  (numGroups=3, groupSize=6, qBits=12), codes = kConv1dGroupedWMantissas +
+ *  zp[g] (|mantissa| <= 5, so codes land in [5, 45] of the 12-bit code
+ *  domain). */
+static layer_t *buildGroupedAsymConv1dTwinLayer(quantization_t *q, tensor_t **inputOut) {
+    size_t weightDims[] = {(size_t)kConv1dGroupedOutChannels, (size_t)kConv1dGroupedInChannels,
+                           (size_t)kConv1dGroupedKernelSize};
+    size_t *ownedWeightDims = reserveMemory(3 * sizeof(size_t));
+    memcpy(ownedWeightDims, weightDims, sizeof(weightDims));
+    size_t *weightOrder = reserveMemory(3 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(3, weightOrder);
+    shape_t *weightShape = reserveMemory(sizeof(shape_t));
+    setShape(weightShape, ownedWeightDims, 3, weightOrder);
+    tensor_t *weightsParam =
+        initTensor(weightShape, quantizationInitAsymGrouped(12, HALF_AWAY, 3, 6), NULL);
+    size_t numWeightElems = (size_t)kConv1dGroupedOutChannels * (size_t)kConv1dGroupedInChannels *
+                            (size_t)kConv1dGroupedKernelSize;
+    int32_t codes[18];
+    for (size_t i = 0; i < numWeightElems; i++) {
+        codes[i] = kConv1dGroupedWMantissas[i] + (int32_t)kConv1dAsymZps[i / 6];
+    }
+    byteConversion((uint8_t *)codes, 32, weightsParam->data, 12, numWeightElems);
+    asymQConfig_t *weightQC = weightsParam->quantization->qConfig;
+    for (size_t g = 0; g < 3; g++) {
+        weightQC->scales[g] = kPerChannelWScales[g];
+        weightQC->zeroPoints[g] = kConv1dAsymZps[g];
+    }
+    parameter_t *weights = parameterInit(weightsParam, NULL);
+
+    size_t biasDims[] = {(size_t)kConv1dGroupedOutChannels};
+    tensor_t *biasParam =
+        buildSymInt32TensorExact(1, biasDims, kConv1dGroupedBiasMantissas, kConv1dGroupedBiasScale);
+    parameter_t *bias = parameterInit(biasParam, NULL);
+
+    size_t inputDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kConv1dGroupedInChannels,
+                          (size_t)kConv1dGroupedInputLength};
+    *inputOut =
+        buildSymInt32TensorExact(3, inputDims, kConv1dGroupedXMantissas, kConv1dGroupedXScale);
+
+    kernel_t *kernel = reserveMemory(sizeof(kernel_t));
+    initKernel(kernel, (size_t)kConv1dGroupedKernelSize, VALID, 1, 1);
+
+    return buildBorrowedConv1dLayer(weights, bias, kernel, q);
+}
+
+void testConv1dForwardGroupedAsymBitIdenticalToSymGroupedTwin(void) {
+    quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
+
+    tensor_t *symInput = NULL;
+    layer_t *symLayer = buildGroupedConv1dFixtureLayer(testQ, (size_t)kPerChannelNumGroups,
+                                                       (size_t)kPerChannelGroupSize,
+                                                       kPerChannelWScales, VALID, &symInput);
+    size_t outputDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kConv1dGroupedOutChannels,
+                           (size_t)kPerChannelOutLen};
+    tensor_t *symOutput = makeFloatTensor(outputDims, 3, NULL);
+    conv1dForward(symLayer, symInput, symOutput);
+
+    tensor_t *asymInput = NULL;
+    layer_t *asymLayer = buildGroupedAsymConv1dTwinLayer(testQ, &asymInput);
+    tensor_t *asymOutput = makeFloatTensor(outputDims, 3, NULL);
+    conv1dForward(asymLayer, asymInput, asymOutput);
+
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY((float *)symOutput->data, (float *)asymOutput->data,
+                                  kPerChannelOutMantissas_len);
+}
+
+/* dx twin (the adjoint scatter consumes the SAME stored weight): both layers
+ * frozen (dx-only, the grouped-dx test convention above), same SYM_INT32
+ * lossGrad, exact FLOAT32 dx wires -- bit-identity for the same reason as
+ * the forward twin. */
+void testConv1dBackwardGroupedAsymDxBitIdenticalToSymGroupedTwin(void) {
+    quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
+
+    tensor_t *symPropLoss = runGroupedConv1dDxBackward(
+        testQ, (size_t)kPerChannelNumGroups, (size_t)kPerChannelGroupSize, kPerChannelWScales);
+
+    tensor_t *asymInput = NULL;
+    layer_t *asymLayer = buildGroupedAsymConv1dTwinLayer(testQ, &asymInput);
+    asymLayer->config->conv1d->frozen = true;
+
+    size_t lossDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kConv1dGroupedOutChannels,
+                         (size_t)kConv1dDxFwdOutLen};
+    tensor_t *lossGrad =
+        buildSymInt32TensorExact(3, lossDims, kConv1dDxLossMantissas, kConv1dDxLossScale);
+    size_t propLossDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kConv1dGroupedInChannels,
+                             (size_t)kConv1dGroupedInputLength};
+    tensor_t *asymPropLoss = makeFloatTensor(propLossDims, 3, NULL);
+    conv1dBackward(asymLayer, asymInput, lossGrad, asymPropLoss);
+
+    bool nonDegenerate = false;
+    for (size_t i = 0; i < kDxPerChannelOutMantissas_len; i++) {
+        if (((float *)symPropLoss->data)[i] != 0.0f) {
+            nonDegenerate = true;
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(nonDegenerate, "grouped dx twin is vacuously all-zero");
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY((float *)symPropLoss->data, (float *)asymPropLoss->data,
+                                  kDxPerChannelOutMantissas_len);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -2121,5 +2236,7 @@ int main() {
     RUN_TEST(testConv1dBackwardGroupedDxFloatPathAgreesWithinTolerance);
     RUN_TEST(testConv1dForwardGroupedSamePaddingMatchesGold);
     RUN_TEST(testConv1dForwardGroupedConvGroupsMatchesGold);
+    RUN_TEST(testConv1dForwardGroupedAsymBitIdenticalToSymGroupedTwin);
+    RUN_TEST(testConv1dBackwardGroupedAsymDxBitIdenticalToSymGroupedTwin);
     return UNITY_END();
 }

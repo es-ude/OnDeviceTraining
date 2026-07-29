@@ -2050,6 +2050,121 @@ void testSgdStepGroupedSymParamMomentumMatchesGold(void) {
     TEST_ASSERT_EQUAL_FLOAT(sgdGroupedMomentumNewScales[1], scale1);
 }
 
+/* ---- Group-quant PR4 (Task 3): SGD updates a grouped-ASYM param ----------
+ *
+ * Same funnel wiring as the grouped-SYM tests above (the pos declarations in
+ * Sgd.c are dtype-agnostic): the FLOAT32 prologue dequants the grouped ASYM
+ * param per-group AFFINE ((code - zp[g]) * scale[g],
+ * convertAsymTensorToFloatTensor's grouped path, Task 2), the kernel runs
+ * the identical float32 update, and the OUT_WRITE epilogue re-derives a
+ * fresh NUDGED code-domain grid PER GROUP (quantizeFloatToAsym's grouped
+ * path): scales AND zeroPoints both move each step, so all three are pinned
+ * exactly. Golds from generate_expected_sgd_grouped.py's asymStep0 fixture
+ * (its self-checks pin pre/post zp distinctness and group-collapse
+ * discriminability). */
+
+/* Grouped-ASYM sibling of buildGroupedSymParam1D: packed non-negative codes
+ * (byteConversion, no sign bit) + per-group scales AND code-domain
+ * zeroPoints written directly. */
+static tensor_t *buildGroupedAsymParam1D(const int32_t *codes, const float *scales,
+                                         const int32_t *zps, size_t n, size_t groupSize,
+                                         size_t numGroups, uint8_t qBits) {
+    size_t *dims = reserveMemory(1 * sizeof(size_t));
+    dims[0] = n;
+    size_t *order = reserveMemory(1 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    tensor_t *t = initTensor(
+        shape, quantizationInitAsymGrouped(qBits, HALF_AWAY, numGroups, groupSize), NULL);
+    byteConversion((uint8_t *)codes, 32, t->data, qBits, n);
+    asymQConfig_t *qc = t->quantization->qConfig;
+    for (size_t g = 0; g < numGroups; g++) {
+        qc->scales[g] = scales[g];
+        qc->zeroPoints[g] = (uint16_t)zps[g];
+    }
+    return t;
+}
+
+void testSgdStepGroupedAsymParamMatchesGold(void) {
+    /* momentumFactor == 0 -- the single-op fast path (sgdUpdateKernel
+     * {param, grad}, param declared at groupedSymOperandPos==1), on a
+     * grouped-ASYM param. */
+    tensor_t *p = buildGroupedAsymParam1D(
+        sgdGroupedAsymStep0ParamCodes, sgdGroupedAsymStep0ParamScales, sgdGroupedAsymStep0ParamZps,
+        6, (size_t)sgdGroupedGroupSize, (size_t)sgdGroupedNumGroups, (uint8_t)sgdGroupedQBits);
+    tensor_t *g = gradInitFloat(p, NULL);
+    tensorFillFromFloatBuffer(g, sgdGroupedAsymStep0Grad, 6);
+    parameter_t *param = parameterInit(p, g);
+
+    sgd_t sgd;
+    sgdInit(&sgd, sgdGroupedAsymStep0Lr, 0.0f, sgdGroupedAsymStep0WeightDecay,
+            (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    parameter_t *params[1] = {param};
+    optimImpl_t impl = {.sgd = &sgd};
+    optimizer_t optim = {.parameter = params,
+                         .states = NULL,
+                         .sizeStates = 1,
+                         .impl = &impl,
+                         /* #279 explicit opt-out: deterministic write-back for
+                          * a bit-exact gold (factories default to seeded
+                          * SR_HALF_AWAY). */
+                         .writeBackRounding = HALF_AWAY};
+
+    sgdStepM(&optim);
+
+    /* CAPTURE -> free -> assert (file convention). Codes are non-negative:
+     * zero-extend readback (byteConversion widen), no sign restore. */
+    int32_t codes[6] = {0};
+    byteConversion(p->data, (size_t)sgdGroupedQBits, (uint8_t *)codes, 32, 6);
+    asymQConfig_t *qc = p->quantization->qConfig;
+    float scale0 = qc->scales[0];
+    float scale1 = qc->scales[1];
+    int32_t zp0 = (int32_t)qc->zeroPoints[0];
+    int32_t zp1 = (int32_t)qc->zeroPoints[1];
+    freeParameter(param);
+
+    for (size_t i = 0; i < 6; i++) {
+        TEST_ASSERT_EQUAL_INT32(sgdGroupedAsymStep0NewCodes[i], codes[i]);
+    }
+    TEST_ASSERT_EQUAL_FLOAT(sgdGroupedAsymStep0NewScales[0], scale0);
+    TEST_ASSERT_EQUAL_FLOAT(sgdGroupedAsymStep0NewScales[1], scale1);
+    TEST_ASSERT_EQUAL_INT32(sgdGroupedAsymStep0NewZps[0], zp0);
+    TEST_ASSERT_EQUAL_INT32(sgdGroupedAsymStep0NewZps[1], zp1);
+}
+
+/* ASYM twin of testSgdCreateGroupedSymMomentumQuantExits: the momentum-state
+ * carrier gate must reject a grouped ASYM template exactly like the grouped
+ * SYM one -- getQLike would otherwise deep-clone the grouped grid into a
+ * momentum buffer (its ASYM arm copies scales AND zeroPoints), a state the
+ * carrier contract never admits (spec §3, #300 axis). Same
+ * shape-coincidence discipline as the SYM twin: the weight's element count
+ * (2*4=8) EQUALS the template's numGroups*groupSize so the death cannot come
+ * from the unrelated attach-time shape guard. */
+void testSgdCreateGroupedAsymMomentumQuantExits(void) {
+    ASSERT_EXITS_WITH(1, {
+        quantization_t *layerQ = quantizationInitFloat();
+        size_t *wDims = reserveMemory(2 * sizeof(size_t));
+        wDims[0] = 2;
+        wDims[1] = 4;
+        size_t *wOrder = reserveMemory(2 * sizeof(size_t));
+        setOrderOfDimsForNewTensor(2, wOrder);
+        shape_t *wShape = reserveMemory(sizeof(shape_t));
+        setShape(wShape, wDims, 2, wOrder);
+        tensor_t *wParam = initTensor(wShape, quantizationInitFloat(), NULL);
+        tensorFillFromFloatBuffer(wParam, (float[]){0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f}, 8);
+        tensor_t *wGrad = gradInitFloat(wParam, NULL);
+        parameter_t *weights = parameterInit(wParam, wGrad);
+
+        layer_t *linear = buildBorrowedLinearLayer(weights, NULL, layerQ);
+        layer_t *model[] = {linear};
+
+        quantization_t *momentumQ = quantizationInitAsymGrouped(4, HALF_AWAY, 2, 4);
+        sgdMCreateOptim(0.1f, 0.9f, 0.0f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    });
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testOptimizerSkipsFrozenLayerInCountAndCollection);
@@ -2089,5 +2204,7 @@ int main() {
     RUN_TEST(testSgdCreateGroupedSymMomentumQuantExits);
     RUN_TEST(testSgdStepGroupedSymParamMatchesGold);
     RUN_TEST(testSgdStepGroupedSymParamMomentumMatchesGold);
+    RUN_TEST(testSgdStepGroupedAsymParamMatchesGold);
+    RUN_TEST(testSgdCreateGroupedAsymMomentumQuantExits);
     return UNITY_END();
 }

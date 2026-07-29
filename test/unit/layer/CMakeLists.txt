@@ -52,6 +52,19 @@ add_custom_command(
 add_custom_target(generate_expected_convT1d_grouped
         DEPENDS ${GEN_CONVT1D_GROUPED_HEADER})
 
+set(GEN_LINEAR_GROUPED_ASYM_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_linear_grouped_asym.h)
+add_custom_command(
+        OUTPUT ${GEN_LINEAR_GROUPED_ASYM_HEADER}
+        COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_linear_grouped_asym.py
+                --out ${GEN_LINEAR_GROUPED_ASYM_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_linear_grouped_asym.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+        COMMENT "Generating expected_linear_grouped_asym.h via PyTorch"
+        VERBATIM
+)
+add_custom_target(generate_expected_linear_grouped_asym
+        DEPENDS ${GEN_LINEAR_GROUPED_ASYM_HEADER})
+
 set(GEN_MAX_POOL_1D_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_max_pool_1d.h)
 add_custom_command(
         OUTPUT ${GEN_MAX_POOL_1D_HEADER}
@@ -122,6 +135,8 @@ add_elastic_ai_unit_test(
         odt_test_death
         odt_test_layer_builders
 )
+add_dependencies(UnitTestLinear generate_expected_linear_grouped_asym)
+target_include_directories(UnitTestLinear PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST

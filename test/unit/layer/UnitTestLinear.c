@@ -21,6 +21,7 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
+#include "expected_linear_grouped_asym.h"
 #include "unity.h"
 
 void testLinearForwardFloatRank1BiasRank2Output() {
@@ -2263,6 +2264,325 @@ void testLinearBackwardGroupedDxFloatPathAgreesWithinTolerance(void) {
     }
 }
 
+/* ---- Group-quant PR4 (Task 3): Linear with a grouped ASYM weight ---------
+ *
+ * D5 made executable: the grouped ASYM forward/dx IS the grouped SYM
+ * forward/dx on SHIFTED mantissas. The funnel's ASYM grouped-unpack arm
+ * (ExecuteOp.c) zero-extends the packed codes and subtracts each element's
+ * group zeroPoint (code - zp[g]) -- from there on the compute path is
+ * IDENTICAL to the grouped SYM one: the layer passes a symQConfig-shaped
+ * VIEW of the asym config (scales BORROWED, numGroups/groupSize copied) as
+ * weightGroups, and matmulSymInt32TensorsGroupedWeight runs unchanged. The
+ * golds in expected_linear_grouped_asym.h are therefore the EXISTING
+ * symmetric references (matmul_grouped_ref / matmul_grouped_dx_ref) fed with
+ * mantissas = codes - zps and the asym scales -- the generator asserts that
+ * shifted-mantissa equivalence in-place (self-check iii). */
+
+/*! Grouped-ASYM twin of buildGroupedFixtureLayer: 3x6 weight with packed
+ *  qBits=8 codes + per-group scales AND code-domain zeroPoints from the
+ *  generated fixture; SYM_INT32 bias and input unchanged in kind. */
+static layer_t *buildGroupedAsymFixtureLayer(quantization_t *q, tensor_t **inputOut) {
+    size_t *weightDims = reserveMemory(2 * sizeof(size_t));
+    weightDims[0] = 3;
+    weightDims[1] = 6;
+    size_t *weightOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, weightOrder);
+    shape_t *weightShape = reserveMemory(sizeof(shape_t));
+    setShape(weightShape, weightDims, 2, weightOrder);
+    tensor_t *weightsParam = initTensor(
+        weightShape,
+        quantizationInitAsymGrouped((uint8_t)kLinAsymQBits, HALF_AWAY, (size_t)kLinAsymNumGroups,
+                                    (size_t)kLinAsymGroupSize),
+        NULL);
+    byteConversion((uint8_t *)kLinAsymWCodes, 32, weightsParam->data, (size_t)kLinAsymQBits,
+                   kLinAsymWCodes_len);
+    asymQConfig_t *weightQC = weightsParam->quantization->qConfig;
+    for (size_t g = 0; g < (size_t)kLinAsymNumGroups; g++) {
+        weightQC->scales[g] = kLinAsymWScales[g];
+        weightQC->zeroPoints[g] = (uint16_t)kLinAsymWZps[g];
+    }
+    parameter_t *weights = parameterInit(weightsParam, NULL);
+
+    size_t *biasDims = reserveMemory(sizeof(size_t));
+    biasDims[0] = 3;
+    size_t *biasOrder = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, biasOrder);
+    shape_t *biasShape = reserveMemory(sizeof(shape_t));
+    setShape(biasShape, biasDims, 1, biasOrder);
+    tensor_t *biasParam = initTensor(biasShape, quantizationInitSymInt32(HALF_AWAY), NULL);
+    for (size_t i = 0; i < 3; i++) {
+        ((int32_t *)biasParam->data)[i] = kLinAsymBiasMantissas[i];
+    }
+    ((symInt32QConfig_t *)biasParam->quantization->qConfig)->scale = kLinAsymBiasScale;
+    parameter_t *bias = parameterInit(biasParam, NULL);
+
+    size_t *inputDims = reserveMemory(2 * sizeof(size_t));
+    inputDims[0] = 2;
+    inputDims[1] = 6;
+    size_t *inputOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, inputOrder);
+    shape_t *inputShape = reserveMemory(sizeof(shape_t));
+    setShape(inputShape, inputDims, 2, inputOrder);
+    tensor_t *input = initTensor(inputShape, quantizationInitSymInt32(HALF_AWAY), NULL);
+    for (size_t i = 0; i < 12; i++) {
+        ((int32_t *)input->data)[i] = kLinAsymAMantissas[i];
+    }
+    ((symInt32QConfig_t *)input->quantization->qConfig)->scale = kLinAsymAScale;
+    *inputOut = input;
+
+    return buildBorrowedLinearLayer(weights, bias, q);
+}
+
+/* Exact FLOAT32-wire compare against the RAW grouped gold (the PR2 Conv1d
+ * grouped-test design, see testConv1dForwardGroupedPerChannelMatchesGold's
+ * comment in UnitTestConv1d.c): forwardMath stays SYM_INT32 but the output
+ * wire is FLOAT32, so the OUT_WRITE epilogue is one exact (float)mantissa *
+ * scale per element -- bit-for-bit the formula this expected loop computes --
+ * and ANY divergence (wrong zp shift, wrong per-group scale, wrong s_acc)
+ * changes the compared value measurably. */
+void testLinearForwardGroupedAsymWeightsMatchesGold(void) {
+    quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
+    tensor_t *input = NULL;
+    layer_t *linearLayer = buildGroupedAsymFixtureLayer(testQ, &input);
+
+    size_t *outputDims = reserveMemory(2 * sizeof(size_t));
+    outputDims[0] = 2;
+    outputDims[1] = 3;
+    size_t *outputOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, outputOrder);
+    shape_t *outputShape = reserveMemory(sizeof(shape_t));
+    setShape(outputShape, outputDims, 2, outputOrder);
+    tensor_t *output = initTensor(outputShape, quantizationInitFloat(), NULL);
+
+    linearForward(linearLayer, input, output);
+
+    float captured[6];
+    for (size_t i = 0; i < 6; i++) {
+        captured[i] = ((float *)output->data)[i];
+    }
+
+    freeLinearLayer(linearLayer);
+    freeTensor(output);
+    freeTensor(input);
+    freeQuantization(testQ);
+
+    for (size_t i = 0; i < 6; i++) {
+        float expected = (float)kLinAsymOutMantissas[i] * kLinAsymOutScale;
+        TEST_ASSERT_EQUAL_FLOAT(expected, captured[i]);
+    }
+}
+
+/* FLOAT32 forward path on the SAME grouped-ASYM weight: the executeOp
+ * prologue dequantizes the declared operand via the group-aware
+ * ASYM->FLOAT32 cell (convertAsymTensorToFloatTensor, Task 2), gated by the
+ * FLOAT32-arm carrier check exactly like grouped SYM. Tolerance derivation is
+ * testLinearForwardGroupedFloatPathAgreesWithinTolerance's verbatim
+ * (per-channel fixture, 2 rescale-combines per output element -> 1.0 quanta
+ * of the accumulator scale, + 1e-6 float32-noise headroom). */
+void testLinearForwardGroupedAsymFloatPathAgreesWithinTolerance(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    tensor_t *input = NULL;
+    layer_t *linearLayer = buildGroupedAsymFixtureLayer(floatQ, &input);
+
+    size_t *outputDims = reserveMemory(2 * sizeof(size_t));
+    outputDims[0] = 2;
+    outputDims[1] = 3;
+    size_t *outputOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, outputOrder);
+    shape_t *outputShape = reserveMemory(sizeof(shape_t));
+    setShape(outputShape, outputDims, 2, outputOrder);
+    tensor_t *output = initTensor(outputShape, quantizationInitFloat(), NULL);
+
+    linearForward(linearLayer, input, output);
+
+    float captured[6];
+    for (size_t i = 0; i < 6; i++) {
+        captured[i] = ((float *)output->data)[i];
+    }
+
+    freeLinearLayer(linearLayer);
+    freeTensor(output);
+    freeTensor(input);
+    freeQuantization(floatQ);
+
+    const float tolerance = 1.0f * kLinAsymOutScale + 1e-6f;
+    for (size_t i = 0; i < 6; i++) {
+        float expected = (float)kLinAsymOutMantissas[i] * kLinAsymOutScale;
+        TEST_ASSERT_FLOAT_WITHIN(tolerance, expected, captured[i]);
+    }
+}
+
+/* Equal-scales-equal-zp bit-identity twin: a grouped ASYM weight whose groups
+ * all share ONE scale AND ONE zeroPoint represents exactly the same affine
+ * grid as the per-tensor ASYM spelling of it -- so the grouped path (funnel
+ * unpack-shift + grouped kernel) and the scalar path (per-tensor
+ * ASYM->SYM_INT32 conversion cell + scalar kernel) must produce BIT-IDENTICAL
+ * output. Exactness argument (the Conv1d equal-scales twin's, adapted): the
+ * common scale 0.25f and the input scale 0.5f are powers of two, so s_acc =
+ * 0.125f and every grouped combine's paramScale are the SAME float32 value
+ * and rescaleIntoAccumulatorScale(partial, s, s) is an exact round trip
+ * (pure exponent shifts) -- the grouped kernel's raw output equals the
+ * scalar kernel's raw MAC; the bias seed rescale is the identical
+ * rescaleIntoAccumulatorScale(bias, 0.1f, 0.125f, HALF_AWAY) call on both
+ * sides; both FLOAT32 wires then dequantize identical (mantissa, scale)
+ * pairs. Codes are the PR2 kGroupedWMantissas shifted by the common zp
+ * (mantissa + 100, all within [95, 105] of the 8-bit code domain). */
+void testLinearForwardGroupedAsymEqualScalesEqualZpBitIdenticalToPerTensor(void) {
+    enum { kCommonZp = 100 };
+    const float commonScale = 0.25f;
+    quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
+
+    int32_t codes[18];
+    for (size_t i = 0; i < 18; i++) {
+        codes[i] = kGroupedWMantissas[i] + kCommonZp;
+    }
+
+    /* Grouped side: 3 groups of 6, every group {0.25f, zp 100}. */
+    size_t *gwDims = reserveMemory(2 * sizeof(size_t));
+    gwDims[0] = 3;
+    gwDims[1] = 6;
+    size_t *gwOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, gwOrder);
+    shape_t *gwShape = reserveMemory(sizeof(shape_t));
+    setShape(gwShape, gwDims, 2, gwOrder);
+    tensor_t *groupedWParam =
+        initTensor(gwShape, quantizationInitAsymGrouped(8, HALF_AWAY, 3, 6), NULL);
+    byteConversion((uint8_t *)codes, 32, groupedWParam->data, 8, 18);
+    asymQConfig_t *groupedWQC = groupedWParam->quantization->qConfig;
+    for (size_t g = 0; g < 3; g++) {
+        groupedWQC->scales[g] = commonScale;
+        groupedWQC->zeroPoints[g] = kCommonZp;
+    }
+    parameter_t *groupedWeights = parameterInit(groupedWParam, NULL);
+
+    /* Per-tensor side: the SAME codes under one {0.25f, zp 100} grid. */
+    size_t *swDims = reserveMemory(2 * sizeof(size_t));
+    swDims[0] = 3;
+    swDims[1] = 6;
+    size_t *swOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, swOrder);
+    shape_t *swShape = reserveMemory(sizeof(shape_t));
+    setShape(swShape, swDims, 2, swOrder);
+    tensor_t *scalarWParam = initTensor(swShape, quantizationInitAsym(8, HALF_AWAY), NULL);
+    byteConversion((uint8_t *)codes, 32, scalarWParam->data, 8, 18);
+    asymQConfig_t *scalarWQC = scalarWParam->quantization->qConfig;
+    scalarWQC->scales[0] = commonScale;
+    scalarWQC->zeroPoints[0] = kCommonZp;
+    parameter_t *scalarWeights = parameterInit(scalarWParam, NULL);
+
+    float groupedOut[6];
+    float scalarOut[6];
+    parameter_t *weightsPerRun[2] = {groupedWeights, scalarWeights};
+    float *outPerRun[2] = {groupedOut, scalarOut};
+    for (size_t run = 0; run < 2; run++) {
+        size_t *biasDims = reserveMemory(sizeof(size_t));
+        biasDims[0] = 3;
+        size_t *biasOrder = reserveMemory(sizeof(size_t));
+        setOrderOfDimsForNewTensor(1, biasOrder);
+        shape_t *biasShape = reserveMemory(sizeof(shape_t));
+        setShape(biasShape, biasDims, 1, biasOrder);
+        tensor_t *biasParam = initTensor(biasShape, quantizationInitSymInt32(HALF_AWAY), NULL);
+        for (size_t i = 0; i < 3; i++) {
+            ((int32_t *)biasParam->data)[i] = kGroupedBiasMantissas[i];
+        }
+        ((symInt32QConfig_t *)biasParam->quantization->qConfig)->scale = kGroupedBiasScale;
+        parameter_t *bias = parameterInit(biasParam, NULL);
+
+        size_t *inputDims = reserveMemory(2 * sizeof(size_t));
+        inputDims[0] = 2;
+        inputDims[1] = 6;
+        size_t *inputOrder = reserveMemory(2 * sizeof(size_t));
+        setOrderOfDimsForNewTensor(2, inputOrder);
+        shape_t *inputShape = reserveMemory(sizeof(shape_t));
+        setShape(inputShape, inputDims, 2, inputOrder);
+        tensor_t *input = initTensor(inputShape, quantizationInitSymInt32(HALF_AWAY), NULL);
+        for (size_t i = 0; i < 12; i++) {
+            ((int32_t *)input->data)[i] = kGroupedAMantissas[i];
+        }
+        ((symInt32QConfig_t *)input->quantization->qConfig)->scale = kGroupedAScale;
+
+        layer_t *linearLayer = buildBorrowedLinearLayer(weightsPerRun[run], bias, testQ);
+
+        size_t *outputDims = reserveMemory(2 * sizeof(size_t));
+        outputDims[0] = 2;
+        outputDims[1] = 3;
+        size_t *outputOrder = reserveMemory(2 * sizeof(size_t));
+        setOrderOfDimsForNewTensor(2, outputOrder);
+        shape_t *outputShape = reserveMemory(sizeof(shape_t));
+        setShape(outputShape, outputDims, 2, outputOrder);
+        tensor_t *output = initTensor(outputShape, quantizationInitFloat(), NULL);
+
+        linearForward(linearLayer, input, output);
+
+        for (size_t i = 0; i < 6; i++) {
+            outPerRun[run][i] = ((float *)output->data)[i];
+        }
+
+        freeLinearLayer(linearLayer); /* frees this run's weights + bias */
+        freeTensor(output);
+        freeTensor(input);
+    }
+    freeQuantization(testQ);
+
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(scalarOut, groupedOut, 6);
+}
+
+/* dx twin of testLinearBackwardGroupedSymWeightsDxMatchesGold on the grouped
+ * ASYM weight: propLossMath SYM_INT32, FLOAT32 propLoss wire -> exact
+ * compare against matmul_grouped_dx_ref fed with the SHIFTED mantissas (the
+ * strided grouped core: the dx reduction visits weight storage strided by
+ * inFeatures, per-element group binding). Frozen layer scopes the test to
+ * the dx wire (borrowed params carry no grads). */
+void testLinearBackwardGroupedAsymDxMatchesGold(void) {
+    quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *wireQ = quantizationInitFloat();
+    tensor_t *input = NULL;
+    layer_t *linearLayer = buildGroupedAsymFixtureLayer(testQ, &input);
+    linearLayer->config->linear->propLossQ = wireQ;
+    linearLayer->config->linear->frozen = true;
+
+    size_t *lossDims = reserveMemory(2 * sizeof(size_t));
+    lossDims[0] = 2;
+    lossDims[1] = 3;
+    size_t *lossOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, lossOrder);
+    shape_t *lossShape = reserveMemory(sizeof(shape_t));
+    setShape(lossShape, lossDims, 2, lossOrder);
+    tensor_t *loss = initTensor(lossShape, quantizationInitSymInt32(HALF_AWAY), NULL);
+    for (size_t i = 0; i < 6; i++) {
+        ((int32_t *)loss->data)[i] = kLinAsymDxLossMantissas[i];
+    }
+    ((symInt32QConfig_t *)loss->quantization->qConfig)->scale = kLinAsymDxLossScale;
+
+    size_t *propLossDims = reserveMemory(2 * sizeof(size_t));
+    propLossDims[0] = 2;
+    propLossDims[1] = 6;
+    size_t *propLossOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, propLossOrder);
+    shape_t *propLossShape = reserveMemory(sizeof(shape_t));
+    setShape(propLossShape, propLossDims, 2, propLossOrder);
+    tensor_t *propLoss = initTensor(propLossShape, quantizationInitFloat(), NULL);
+
+    linearBackward(linearLayer, input, loss, propLoss);
+
+    float captured[12];
+    for (size_t i = 0; i < 12; i++) {
+        captured[i] = ((float *)propLoss->data)[i];
+    }
+
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeLinearLayer(linearLayer);
+    freeTensor(input);
+    freeQuantization(wireQ);
+    freeQuantization(testQ);
+
+    for (size_t i = 0; i < 12; i++) {
+        float expected = (float)kLinAsymDxOutMantissas[i] * kLinAsymDxOutScale;
+        TEST_ASSERT_EQUAL_FLOAT(expected, captured[i]);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLinearForwardFloat);
@@ -2308,5 +2628,9 @@ int main(void) {
     RUN_TEST(testLinearForwardGroupedFloatPathAgreesWithinTolerance);
     RUN_TEST(testLinearBackwardGroupedSymWeightsDxMatchesGold);
     RUN_TEST(testLinearBackwardGroupedDxFloatPathAgreesWithinTolerance);
+    RUN_TEST(testLinearForwardGroupedAsymWeightsMatchesGold);
+    RUN_TEST(testLinearForwardGroupedAsymFloatPathAgreesWithinTolerance);
+    RUN_TEST(testLinearForwardGroupedAsymEqualScalesEqualZpBitIdenticalToPerTensor);
+    RUN_TEST(testLinearBackwardGroupedAsymDxMatchesGold);
     return UNITY_END();
 }

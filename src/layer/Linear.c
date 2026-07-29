@@ -38,6 +38,44 @@ void linearInitConfig(linearConfig_t *linearConfig, parameter_t *weights, parame
     linearConfig->frozen = false;
 }
 
+/* Group-quant PR4 (Task 3): grouped-weight detection across BOTH grouped
+ * carrier dtypes (SYM and ASYM share the {numGroups, groupSize} shape
+ * grammar, D6). Returns the symQConfig_t* to pass as the kernels'
+ * weightGroups ctx iff the stored weight is grouped (numGroups > 1), else
+ * NULL. Grouped SYM: the weight's OWN qConfig. Grouped ASYM: *asymView (the
+ * CALLER's stack storage) is filled as a symQConfig-shaped VIEW of the asym
+ * config — legitimate because the kernels read only
+ * scales/numGroups/groupSize (plus the qBits operand-width validate), fields
+ * both grammars share, and the funnel prologue has already shifted the codes
+ * into the same signed-mantissa image the SYM arm produces (ExecuteOp.c —
+ * D5: the grouped ASYM compute path IS the grouped SYM path on shifted
+ * mantissas), so the zeroPoints never reach the kernel at all. VIEW
+ * LIFETIME: scales is BORROWED from the asym config (never free through the
+ * view) and the view lives in the caller's frame — valid for the duration of
+ * the executeOp call it is passed into as ctx, never stored beyond it.
+ * Duplicated verbatim in Conv1d.c / Conv1dTransposed.c (this copy is
+ * canonical). */
+static const symQConfig_t *groupedWeightViewOrNull(const tensor_t *weights,
+                                                   symQConfig_t *asymView) {
+    if (weights->quantization->type == SYM) {
+        const symQConfig_t *qc = weights->quantization->qConfig;
+        return qc->numGroups > 1 ? qc : NULL;
+    }
+    if (weights->quantization->type == ASYM) {
+        const asymQConfig_t *qc = weights->quantization->qConfig;
+        if (qc->numGroups <= 1) {
+            return NULL;
+        }
+        *asymView = (symQConfig_t){.scales = qc->scales, /* BORROWED (see above) */
+                                   .numGroups = qc->numGroups,
+                                   .groupSize = qc->groupSize,
+                                   .roundingMode = qc->roundingMode,
+                                   .qBits = qc->qBits};
+        return asymView;
+    }
+    return NULL;
+}
+
 void linearForwardFloat(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output) {
     transposeTensor(w, 0, 1);
     matmulFloat32TensorsWithBias(input, w, output, b);
@@ -95,20 +133,20 @@ void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output) {
     tensor_t *weights = getParamFromParameter(linearConfig->weights);
     tensor_t *bias = linearConfig->bias != NULL ? getParamFromParameter(linearConfig->bias) : NULL;
 
-    /* Group-quant PR2: a stored SYM weight with numGroups > 1 routes the SYM
+    /* Group-quant PR2 (+PR4: grouped ASYM via the symQConfig-shaped view,
+     * see groupedWeightViewOrNull): a stored grouped weight routes the SYM
      * kernel adapter to the grouped matmul entry (weightGroups carried via
      * ctx) AND opts the funnel's prologue into unpacking the grouped operand
      * (groupedSymOperandPos) — always together, never independently (an
      * unpack without the routing has nowhere group-shaped to go; the
      * routing without the unpack would hand the kernel a still-packed
-     * tensor). Per-tensor SYM (numGroups==1) and SYM_INT32 weights are
+     * tensor). Per-tensor SYM/ASYM (numGroups==1) and SYM_INT32 weights are
      * untouched — ctx stays NULL, exactly like before this PR. weights is
      * always inputs[1] (bias present or not, see the .inputs literal below),
      * so the declared position is a constant 2 (i+1 for i=1). */
-    bool grouped = weights->quantization->type == SYM &&
-                   ((symQConfig_t *)weights->quantization->qConfig)->numGroups > 1;
-    const symQConfig_t *weightGroups =
-        grouped ? (const symQConfig_t *)weights->quantization->qConfig : NULL;
+    symQConfig_t asymWeightView; /* lifetime: this frame (view doc above) */
+    const symQConfig_t *weightGroups = groupedWeightViewOrNull(weights, &asymWeightView);
+    bool grouped = weightGroups != NULL;
 
     executeOp(
         &(opSpec_t){
@@ -285,15 +323,15 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
     if (propLoss != NULL) {
         tensor_t *weights = getParamFromParameter(cfg->weights);
 
-        /* Group-quant PR3 (Task 1): same detection + always-together wiring
-         * as linearForward (see the comment there) — ctx routes the SYM
-         * kernel adapter to the grouped matmul entry, groupedSymOperandPos
-         * opts the funnel prologue into unpacking (SYM arm) / group-aware
-         * dequant (FLOAT32 arm) of the weight at inputs[1] (position 2). */
-        bool grouped = weights->quantization->type == SYM &&
-                       ((symQConfig_t *)weights->quantization->qConfig)->numGroups > 1;
-        const symQConfig_t *weightGroups =
-            grouped ? (const symQConfig_t *)weights->quantization->qConfig : NULL;
+        /* Group-quant PR3 (Task 1) + PR4 (grouped ASYM via the view): same
+         * detection + always-together wiring as linearForward (see the
+         * comment there) — ctx routes the SYM kernel adapter to the grouped
+         * matmul entry, groupedSymOperandPos opts the funnel prologue into
+         * unpacking (SYM arm) / group-aware dequant (FLOAT32 arm) of the
+         * weight at inputs[1] (position 2). */
+        symQConfig_t asymWeightView; /* lifetime: this frame (view doc above) */
+        const symQConfig_t *weightGroups = groupedWeightViewOrNull(weights, &asymWeightView);
+        bool grouped = weightGroups != NULL;
 
         executeOp(
             &(opSpec_t){

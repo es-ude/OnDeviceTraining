@@ -1633,6 +1633,85 @@ void testConvT1dBackwardGroupedDxFloatPathAgreesWithinTolerance(void) {
     }
 }
 
+/* ---- Group-quant PR4 (Task 3): grouped-ASYM ConvT1d forward twin --------
+ *
+ * D5 smoke at the ConvT1d layer (the UnitTestConv1d.c ASYM-twin design,
+ * transplanted to the scatter core): after the funnel's ASYM grouped-unpack
+ * arm shifts the codes (code - zp[g]) the compute path IS the grouped-SYM
+ * scatter on the resulting mantissas -- same mantissas + same scales give
+ * BIT-IDENTICAL raw output and s_acc, so the grouped-SYM fixture layer on
+ * the identical mantissas/scales is the reference (exact FLOAT32 wires, no
+ * new ConvT gold). Pairwise-distinct zps; |mantissa| <= 55
+ * (kConvTGroupedWMantissas), so codes = mantissa + zp land in [5, 130] of
+ * the 12-bit code domain. */
+static const uint16_t kConvTAsymZps[2] = {60, 75};
+
+static void buildGroupedAsymConvTTwinFixture(convTGroupedFixture_t *f, quantization_t *q) {
+    size_t weightDims[] = {(size_t)kConvTGroupedInChannels, (size_t)kConvTGroupedOutChannels,
+                           (size_t)kConvTGroupedKernelSize};
+    size_t *ownedWeightDims = reserveMemory(3 * sizeof(size_t));
+    memcpy(ownedWeightDims, weightDims, sizeof(weightDims));
+    size_t *weightOrder = reserveMemory(3 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(3, weightOrder);
+    shape_t *weightShape = reserveMemory(sizeof(shape_t));
+    setShape(weightShape, ownedWeightDims, 3, weightOrder);
+    tensor_t *weightsParam =
+        initTensor(weightShape,
+                   quantizationInitAsymGrouped(12, HALF_AWAY, (size_t)kConvTPerChannelNumGroups,
+                                               (size_t)kConvTPerChannelGroupSize),
+                   NULL);
+    size_t numWeightElems = (size_t)kConvTGroupedInChannels * (size_t)kConvTGroupedOutChannels *
+                            (size_t)kConvTGroupedKernelSize;
+    int32_t codes[18];
+    for (size_t i = 0; i < numWeightElems; i++) {
+        codes[i] = kConvTGroupedWMantissas[i] +
+                   (int32_t)kConvTAsymZps[i / (size_t)kConvTPerChannelGroupSize];
+    }
+    byteConversion((uint8_t *)codes, 32, weightsParam->data, 12, numWeightElems);
+    asymQConfig_t *weightQC = weightsParam->quantization->qConfig;
+    for (size_t g = 0; g < (size_t)kConvTPerChannelNumGroups; g++) {
+        weightQC->scales[g] = kConvTPerChannelWScales[g];
+        weightQC->zeroPoints[g] = kConvTAsymZps[g];
+    }
+    parameter_t *weights = parameterInit(weightsParam, NULL);
+
+    size_t biasDims[] = {(size_t)kConvTGroupedOutChannels};
+    tensor_t *biasParam =
+        buildSymInt32TensorExact(1, biasDims, kConvTGroupedBiasMantissas, kConvTGroupedBiasScale);
+    parameter_t *bias = parameterInit(biasParam, NULL);
+
+    size_t inputDims[] = {(size_t)kConvTGroupedBatch, (size_t)kConvTGroupedInChannels,
+                          (size_t)kConvTGroupedInputLength};
+    f->input = buildSymInt32TensorExact(3, inputDims, kConvTGroupedXMantissas, kConvTGroupedXScale);
+
+    initKernel(&f->kernel, (size_t)kConvTGroupedKernelSize, VALID, 1, 1);
+    initConv1dTransposedConfigWithWeightsAndBias(&f->cfg, &f->kernel, weights, bias, 1, 0, q, q, q,
+                                                 q);
+    f->layer.type = CONV1D_TRANSPOSED;
+    f->lc.conv1dTransposed = &f->cfg;
+    f->layer.config = &f->lc;
+}
+
+void testConvT1dForwardGroupedAsymBitIdenticalToSymGroupedTwin(void) {
+    quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
+
+    convTGroupedFixture_t symF;
+    buildGroupedConvTFixture(&symF, testQ, (size_t)kConvTPerChannelNumGroups,
+                             (size_t)kConvTPerChannelGroupSize, kConvTPerChannelWScales);
+    size_t outputDims[] = {(size_t)kConvTGroupedBatch, (size_t)kConvTGroupedOutChannels,
+                           (size_t)kConvTGroupedOutLen};
+    tensor_t *symOutput = makeFloatTensor(outputDims, 3, NULL);
+    conv1dTransposedForward(&symF.layer, symF.input, symOutput);
+
+    convTGroupedFixture_t asymF;
+    buildGroupedAsymConvTTwinFixture(&asymF, testQ);
+    tensor_t *asymOutput = makeFloatTensor(outputDims, 3, NULL);
+    conv1dTransposedForward(&asymF.layer, asymF.input, asymOutput);
+
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY((float *)symOutput->data, (float *)asymOutput->data,
+                                  kConvTPerChannelOutMantissas_len);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -1680,5 +1759,6 @@ int main() {
     RUN_TEST(testConvT1dBackwardGroupedDxGeneralMatchesGold);
     RUN_TEST(testConvT1dBackwardGroupedDxEqualScalesBitIdenticalToScalar);
     RUN_TEST(testConvT1dBackwardGroupedDxFloatPathAgreesWithinTolerance);
+    RUN_TEST(testConvT1dForwardGroupedAsymBitIdenticalToSymGroupedTwin);
     return UNITY_END();
 }

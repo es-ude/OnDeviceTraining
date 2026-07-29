@@ -1498,6 +1498,162 @@ void testExecuteOpRejectsGroupedSymOperandUnderFloat32ByDefault(void) {
     });
 }
 
+/* ---- Group-quant PR4 (Task 3): funnel grouped-ASYM operand gate --------- */
+
+/* Packed grouped ASYM tensor: codes packed verbatim (byteConversion,
+ * non-negative, no sign bit), per-group scales AND code-domain zeroPoints
+ * written directly (Task 1's quantizationInitAsymGrouped allocates both
+ * arrays). Mirrors buildPackedSymGrouped above. */
+static tensor_t *buildPackedAsymGrouped(size_t n, const int32_t *codes, uint8_t qBits,
+                                        size_t numGroups, size_t groupSize, const float *scales,
+                                        const uint16_t *zeroPoints) {
+    size_t *dims = reserveMemory(sizeof(size_t));
+    dims[0] = n;
+    size_t *order = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    tensor_t *t = initTensor(
+        shape, quantizationInitAsymGrouped(qBits, HALF_AWAY, numGroups, groupSize), NULL);
+    byteConversion((uint8_t *)codes, 32, t->data, qBits, n);
+    asymQConfig_t *qc = t->quantization->qConfig;
+    for (size_t g = 0; g < numGroups; g++) {
+        qc->scales[g] = scales[g];
+        qc->zeroPoints[g] = zeroPoints[g];
+    }
+    return t;
+}
+
+/* Shared grouped-ASYM gate fixture: 2 groups of 4, qBits=6 (codes in [0, 63]),
+ * PAIRWISE-DISTINCT zeroPoints (a zp[g] -> zp[0] shift bug must change the
+ * mantissas) chosen so the shifted mantissas carry BOTH signs in BOTH groups. */
+static const int32_t kAsymGateCodes[8] = {21, 5, 60, 12, 63, 0, 50, 30};
+static const uint16_t kAsymGateZps[2] = {20, 41};
+static const float kAsymGateScales[2] = {0.1f, 0.2f};
+/* mantissas = code - zp[i/4]: {1, -15, 40, -8} (zp 20) ++ {22, -41, 9, -11}
+ * (zp 41). */
+static const int32_t kAsymGateMantissas[8] = {1, -15, 40, -8, 22, -41, 9, -11};
+
+/* Default-deny death test, ASYM twin of
+ * testExecuteOpRejectsGroupedSymOperandByDefault: a grouped ASYM input
+ * reaching an ARITH_SYM_INT32 op WITHOUT a matching groupedSymOperandPos must
+ * fail-fast AT THE GATE. RED evidence (pre-Task-3): this test already "dies",
+ * but in the WRONG place -- Task 1's requirePerTensorAsym inside the
+ * ASYM->SYM_INT32 conversionMatrix cell ("grouped ASYM ... has no compute
+ * image in this cell"), not the funnel's carrier-contract deny ("reached an
+ * op without a matching groupedSymOperandPos declaration"); the exit-code
+ * harness cannot tell them apart, so the message difference is pinned in the
+ * task report's RED transcript instead. */
+void testExecuteOpRejectsGroupedAsymOperandByDefault(void) {
+    ASSERT_EXITS_WITH_FAILURE({
+        tensor_t *in =
+            buildPackedAsymGrouped(8, kAsymGateCodes, 6, 2, 4, kAsymGateScales, kAsymGateZps);
+        tensor_t *out = buildSym(8, (int32_t[]){0, 0, 0, 0, 0, 0, 0, 0}, 1.0f);
+        quantization_t arith;
+        symInt32QConfig_t arithQC;
+        initSymInt32QConfig(HALF_AWAY, &arithQC);
+        initSymInt32Quantization(&arithQC, &arith);
+
+        executeOp(
+            &(opSpec_t){
+                .kernel = executeOpIdentityKernel,
+                .inputs = (tensor_t *[]){in},
+                .nInputs = 1,
+                .arithmetic = arithmeticFromQuantization(&arith),
+                .mode = OUT_WRITE,
+                /* groupedSymOperandPos intentionally NOT set (zero-init = deny) */
+            },
+            out);
+    });
+}
+
+/* Wrong-position deny, ASYM twin of
+ * testExecuteOpRejectsGroupedSymOperandAtWrongPosition: declaring SOME
+ * position must not read as a blanket ASYM opt-in either. */
+void testExecuteOpRejectsGroupedAsymOperandAtWrongPosition(void) {
+    ASSERT_EXITS_WITH_FAILURE({
+        tensor_t *in =
+            buildPackedAsymGrouped(8, kAsymGateCodes, 6, 2, 4, kAsymGateScales, kAsymGateZps);
+        tensor_t *out = buildSym(8, (int32_t[]){0, 0, 0, 0, 0, 0, 0, 0}, 1.0f);
+        quantization_t arith;
+        symInt32QConfig_t arithQC;
+        initSymInt32QConfig(HALF_AWAY, &arithQC);
+        initSymInt32Quantization(&arithQC, &arith);
+
+        executeOp(
+            &(opSpec_t){
+                .kernel = executeOpIdentityKernel,
+                .inputs = (tensor_t *[]){in},
+                .nInputs = 1,
+                .arithmetic = arithmeticFromQuantization(&arith),
+                .mode = OUT_WRITE,
+                .groupedSymOperandPos = 2, /* declares inputs[1] (nonexistent here) --
+                                            * inputs[0] being grouped must still deny */
+            },
+            out);
+    });
+}
+
+/* THE Task-3 vulnerability pin (RED = this test FAILS pre-gate): under
+ * ARITH_FLOAT32 a grouped ASYM operand at a NON-declared position passes
+ * SILENTLY today -- Task 2 made the ASYM->FLOAT32 conversionMatrix cell
+ * group-aware, and the funnel's grouped-operand gate keys on type == SYM
+ * only, so the FLOAT32 prologue dequantizes a grouped ASYM tensor at ANY
+ * position with no carrier-contract check at all (unlike grouped SYM, which
+ * the PR2 gate denies). Same deny semantics as the SYM sibling
+ * testExecuteOpRejectsGroupedSymOperandUnderFloat32ByDefault. */
+void testExecuteOpRejectsGroupedAsymOperandUnderFloat32ByDefault(void) {
+    ASSERT_EXITS_WITH_FAILURE({
+        tensor_t *in =
+            buildPackedAsymGrouped(8, kAsymGateCodes, 6, 2, 4, kAsymGateScales, kAsymGateZps);
+        tensor_t *out = buildFloat(8, (float[]){0, 0, 0, 0, 0, 0, 0, 0});
+
+        executeOp(
+            &(opSpec_t){
+                .kernel = executeOpIdentityKernel,
+                .inputs = (tensor_t *[]){in},
+                .nInputs = 1,
+                .arithmetic = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY},
+                .mode = OUT_WRITE,
+                /* groupedSymOperandPos intentionally NOT set (zero-init = deny) */
+            },
+            out);
+    });
+}
+
+/* Allowed path, ASYM twin of testExecuteOpUnpacksGroupedSymWhenAllowed: the
+ * declared grouped ASYM operand is zero-extended and SHIFTED into the
+ * signed-mantissa image (mantissa[i] == code[i] - zp[i / groupSize] -- the
+ * pairwise-distinct fixture zps make a zp[0]-everywhere shift visibly wrong
+ * in group 1), scratch scale is poisoned to 1.0f, qMaxBits carries the
+ * source's qBits (the same contract as the SYM arm). */
+void testExecuteOpUnpacksGroupedAsymWhenAllowed(void) {
+    tensor_t *in =
+        buildPackedAsymGrouped(8, kAsymGateCodes, 6, 2, 4, kAsymGateScales, kAsymGateZps);
+    tensor_t *out = buildSym(8, (int32_t[]){0, 0, 0, 0, 0, 0, 0, 0}, 1.0f);
+    quantization_t arith;
+    symInt32QConfig_t arithQC;
+    initSymInt32QConfig(HALF_AWAY, &arithQC);
+    initSymInt32Quantization(&arithQC, &arith);
+
+    executeOp(
+        &(opSpec_t){
+            .kernel = captureGroupedOperandKernel,
+            .inputs = (tensor_t *[]){in},
+            .nInputs = 1,
+            .arithmetic = arithmeticFromQuantization(&arith),
+            .mode = OUT_WRITE,
+            .groupedSymOperandPos = 1,
+        },
+        out);
+
+    freeTensor(out);
+    freeTensor(in);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(kAsymGateMantissas, g_capturedGroupedMantissas, 8);
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, g_capturedGroupedScale);
+    TEST_ASSERT_EQUAL_UINT8(6, g_capturedGroupedQMaxBits);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testProloguePassesMatchingOperandThroughUntouched);
@@ -1536,5 +1692,9 @@ int main(void) {
     RUN_TEST(testExecuteOpRejectsGroupedSymOperandAtWrongPosition);
     RUN_TEST(testExecuteOpUnpacksGroupedSymWhenAllowed);
     RUN_TEST(testExecuteOpRejectsGroupedSymOperandUnderFloat32ByDefault);
+    RUN_TEST(testExecuteOpRejectsGroupedAsymOperandByDefault);
+    RUN_TEST(testExecuteOpRejectsGroupedAsymOperandAtWrongPosition);
+    RUN_TEST(testExecuteOpRejectsGroupedAsymOperandUnderFloat32ByDefault);
+    RUN_TEST(testExecuteOpUnpacksGroupedAsymWhenAllowed);
     return UNITY_END();
 }

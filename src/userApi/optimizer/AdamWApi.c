@@ -28,6 +28,18 @@ static tensor_t *momentStateInit(tensor_t *param, quantization_t *momentQuant) {
             exit(1);
         }
     }
+    /* Group-quant PR4 (Task 3): ASYM twin of the gate above (SgdApi's
+     * momentumStateInit mirror) -- getQLike's ASYM arm deep-clones grouped
+     * grids, so without this a grouped template would silently become a
+     * grouped moment buffer. */
+    if (momentQuant->type == ASYM) {
+        asymQConfig_t *asymQC = momentQuant->qConfig;
+        if (asymQC->numGroups > 1) {
+            PRINT_ERROR("momentStateInit: grouped ASYM moment templates are unsupported -- "
+                        "grouped moments are a future #300 axis (spec §3)");
+            exit(1);
+        }
+    }
     return initTensor(getShapeLike(param->shape), getQLike(momentQuant), NULL);
 }
 

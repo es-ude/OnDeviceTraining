@@ -45,6 +45,18 @@ factories default to seeded SR_HALF_AWAY, which this generator does NOT
 emulate, consistent with every other goldgen script in this tree, see
 matmul_grouped_ref's docstring).
 
+Group-quant PR4 Task 3 adds the grouped-ASYM twin of step0 (asymStep0): the
+SAME single-op funnel path, only the param's dtype differs -- the FLOAT32
+prologue dequants per-group AFFINE ((code - zp[g]) * scale[g],
+convertAsymTensorToFloatTensor's grouped path, PR4 Task 2), the kernel is the
+identical float32 sgdUpdateKernel, and the OUT_WRITE epilogue re-derives a
+fresh NUDGED code-domain grid PER GROUP (quantizeFloatToAsym's grouped path):
+scales AND zeroPoints both move every step, so the C test pins post-step
+codes AND all scales AND all zps exactly. Extra self-checks for the affine
+fixture: pre- AND post-step zps pairwise distinct (a zp[g] -> zp[0] shift
+bug must change the result), post-step scales pairwise distinct, and the
+group-collapse discriminability check as above.
+
 Self-checks (mutation-discriminating fixture properties, asserted here so a
 broken fixture aborts generation rather than silently passing a vacuous
 test):
@@ -69,9 +81,9 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 
-from sym_gold import (dequant_sym_grouped_f32, emit_float_array, emit_float_scalar,
-                      emit_int32_array, emit_int32_scalar, requant_absmax_grouped_f32,
-                      sgd_grouped_step_ref)
+from sym_gold import (dequant_asym_grouped, dequant_sym_grouped_f32, emit_float_array,
+                      emit_float_scalar, emit_int32_array, emit_int32_scalar,
+                      quantize_asym_grouped, requant_absmax_grouped_f32, sgd_grouped_step_ref)
 
 Q_BITS = 8
 GROUP_SIZE = 3
@@ -171,6 +183,66 @@ def fixture_momentum():
     }
 
 
+def fixture_asym_step0():
+    """Grouped-ASYM twin of fixture_step0 (PR4 Task 3) -- see the module
+    docstring for the exact funnel path this mirrors. The update composes the
+    two Task-2 affine primitives (dequant_asym_grouped in,
+    quantize_asym_grouped out) around the SAME float32 kernel arithmetic as
+    sgd_grouped_step_ref."""
+    param_codes = [40, 190, 100, 30, 210, 120]
+    param_scales = [0.05, 0.02]
+    param_zps = [90, 150]
+    grad = [0.3, -0.15, 0.05, 0.2, -0.25, 0.1]
+    lr = 0.1
+    weight_decay = 0.01
+
+    # Pre-step zp distinctness: a zp[g] -> zp[0] dequant bug must not be able
+    # to reproduce the gold.
+    assert len(set(param_zps)) == len(param_zps), (
+        "asymStep0: pre-step zps must be pairwise distinct")
+
+    # prologue: per-group affine dequant, float32 throughout.
+    param_deq = torch.tensor(dequant_asym_grouped(param_codes, param_scales, param_zps,
+                                                  GROUP_SIZE), dtype=torch.float32)
+    # kernel: g = grad + wd*paramDeq; new = paramDeq - lr*g (sgdUpdateKernel's
+    # exact float32 op order, Sgd.c).
+    g = torch.as_tensor(grad, dtype=torch.float32)
+    combined = g + torch.tensor(weight_decay, dtype=torch.float32) * param_deq
+    new_param_float = param_deq - torch.tensor(lr, dtype=torch.float32) * combined
+    # epilogue: per-group NUDGED code-domain requant (scales AND zps re-derived).
+    new_codes, new_scales, new_zps = quantize_asym_grouped(new_param_float.tolist(), Q_BITS,
+                                                           GROUP_SIZE)
+
+    # Self-checks (module docstring): post-step grid discriminability.
+    assert len(set(new_zps)) == len(new_zps), (
+        "asymStep0: post-step zps are not pairwise distinct -- fixture cannot "
+        "discriminate a per-group zp re-derivation from a shared one")
+    assert len(set(new_scales)) == len(new_scales), (
+        "asymStep0: post-step scales are not pairwise distinct")
+    collapsed_codes, _, _ = quantize_asym_grouped(new_param_float.tolist(), Q_BITS, N)
+    assert new_codes != collapsed_codes, (
+        "asymStep0: per-group result is indistinguishable from a whole-tensor "
+        "(collapsed) requant -- fixture is vacuous against the group-collapse mutation")
+
+    return {
+        "paramCodes": param_codes, "paramScales": param_scales, "paramZps": param_zps,
+        "grad": grad, "lr": lr, "weightDecay": weight_decay,
+        "newCodes": new_codes, "newScales": new_scales, "newZps": new_zps,
+    }
+
+
+def emit_asym_fixture(parts, prefix, fx):
+    parts.append(emit_int32_array(f"{prefix}ParamCodes", torch.tensor(fx["paramCodes"])))
+    parts.append(emit_float_array(f"{prefix}ParamScales", torch.tensor(fx["paramScales"])))
+    parts.append(emit_int32_array(f"{prefix}ParamZps", torch.tensor(fx["paramZps"])))
+    parts.append(emit_float_array(f"{prefix}Grad", torch.tensor(fx["grad"])))
+    parts.append(emit_float_scalar(f"{prefix}Lr", fx["lr"]))
+    parts.append(emit_float_scalar(f"{prefix}WeightDecay", fx["weightDecay"]))
+    parts.append(emit_int32_array(f"{prefix}NewCodes", torch.tensor(fx["newCodes"])))
+    parts.append(emit_float_array(f"{prefix}NewScales", torch.tensor(fx["newScales"])))
+    parts.append(emit_int32_array(f"{prefix}NewZps", torch.tensor(fx["newZps"])))
+
+
 def emit_fixture(parts, prefix, fx, momentum: bool):
     parts.append(emit_int32_array(f"{prefix}ParamMantissas", torch.tensor(fx["paramMantissas"])))
     parts.append(emit_float_array(f"{prefix}ParamScales", torch.tensor(fx["paramScales"])))
@@ -205,6 +277,8 @@ def main() -> int:
     emit_fixture(parts, "sgdGroupedStep0", fixture_step0(), momentum=False)
     parts.append("\n")
     emit_fixture(parts, "sgdGroupedMomentum", fixture_momentum(), momentum=True)
+    parts.append("\n")
+    emit_asym_fixture(parts, "sgdGroupedAsymStep0", fixture_asym_step0())
 
     parts.append("\n#endif // ODT_EXPECTED_SGD_GROUPED_H\n")
 

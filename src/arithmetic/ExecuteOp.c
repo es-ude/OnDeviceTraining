@@ -252,27 +252,35 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
             continue;
         }
 
-        /* Group-quant PR2 (Task 3; final-review Fix 2/3): a grouped SYM
-         * operand (numGroups > 1) has no scalar compute image under EITHER
-         * arithmetic type -- the SYM->SYM_INT32 conversionMatrix cell
-         * fail-fasts on it (Task 2), and the SYM->FLOAT32 cell, while
-         * group-aware, is only meant to be reachable from the two declared
-         * gather-forward call sites (PR2's contract), not e.g. an optimizer
-         * update or a FLOAT32-math backward dx. Gate BOTH arms here, before
+        /* Group-quant PR2 (Task 3; final-review Fix 2/3) + PR4 (Task 3): a
+         * grouped operand (numGroups > 1) -- SYM or ASYM, the two grouped
+         * carrier dtypes share the {numGroups, groupSize} shape grammar (D6)
+         * -- has no scalar compute image under EITHER arithmetic type: the
+         * SYM->SYM_INT32 and ASYM->SYM_INT32 conversionMatrix cells
+         * fail-fast on grouped sources (PR2 Task 2 / PR4 Task 1), and the
+         * group-aware SYM->FLOAT32 / ASYM->FLOAT32 cells are only meant to
+         * be reachable from declared carrier positions (GEMM-family
+         * forward/dx weights, optimizer param updates), not e.g. an
+         * arbitrary non-carrier operand slot. Gate BOTH arms here, before
          * either arm's convertTensor call, on the declared position alone --
          * a grouped operand at any other position (or when nothing is
          * declared, groupedSymOperandPos == 0) fail-fasts. */
         symQConfig_t *symQC = (inputs[i]->quantization->type == SYM)
                                   ? (symQConfig_t *)inputs[i]->quantization->qConfig
                                   : NULL;
-        bool grouped = symQC != NULL && symQC->numGroups > 1;
+        asymQConfig_t *asymQC = (inputs[i]->quantization->type == ASYM)
+                                    ? (asymQConfig_t *)inputs[i]->quantization->qConfig
+                                    : NULL;
+        size_t operandNumGroups =
+            symQC != NULL ? symQC->numGroups : (asymQC != NULL ? asymQC->numGroups : 1);
+        bool grouped = operandNumGroups > 1;
         if (grouped && spec->groupedSymOperandPos != i + 1) {
             PRINT_ERROR(
-                "executeOp: grouped SYM operand (numGroups=%zu) at inputs[%zu] reached an op "
+                "executeOp: grouped %s operand (numGroups=%zu) at inputs[%zu] reached an op "
                 "without a matching groupedSymOperandPos declaration — grouped tensors are "
                 "legal only where an op declares them (GEMM-family forward/dx weights, "
                 "optimizer param updates); everything else is a non-carrier (spec §3)",
-                symQC->numGroups, i);
+                symQC != NULL ? "SYM" : "ASYM", operandNumGroups, i);
             exit(1);
         }
 
@@ -289,13 +297,42 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
 
             if (grouped) {
                 size_t n = calcNumberOfElementsByTensor(inputs[i]);
-                unpackSignExtend(inputs[i]->data, symQC->qBits, 0,
-                                 (int32_t *)scratchTensors[i].data, n);
+                if (symQC != NULL) {
+                    unpackSignExtend(inputs[i]->data, symQC->qBits, 0,
+                                     (int32_t *)scratchTensors[i].data, n);
+                    scratchQC[i].qMaxBits = symQC->qBits;
+                } else {
+                    /* PR4 (Task 3), grouped ASYM: zero-extend the packed
+                     * codes (byteConversion widen -- ASYM codes carry no
+                     * sign bit), then shift each element into the
+                     * signed-mantissa domain by ITS group's code-domain
+                     * zeroPoint: mantissa = code - zp[g], g = i/groupSize
+                     * (exact int32 subtract, both operands <= 2^16-1, D6).
+                     * After the shift the scratch is the SAME mantissa image
+                     * the SYM arm produces -- the group-aware kernel then
+                     * applies per-group scales from its own ctx identically
+                     * for both dtypes (D5: the grouped ASYM compute path IS
+                     * the grouped SYM path on shifted mantissas). The zp is
+                     * hoisted per run (one i/groupSize division per group,
+                     * never per element); numGroups*groupSize == n by the
+                     * attach-time shape validation. */
+                    int32_t *mant = (int32_t *)scratchTensors[i].data;
+                    byteConversion(inputs[i]->data, asymQC->qBits, (uint8_t *)mant, 32, n);
+                    size_t idx = 0;
+                    while (idx < n) {
+                        size_t g = idx / asymQC->groupSize;
+                        size_t runEnd = (g + 1) * asymQC->groupSize;
+                        const int32_t zp = (int32_t)asymQC->zeroPoints[g];
+                        for (; idx < runEnd; idx++) {
+                            mant[idx] -= zp;
+                        }
+                    }
+                    scratchQC[i].qMaxBits = asymQC->qBits;
+                }
                 /* Poison: a grouped operand has no single scalar scale — the
                  * group-aware kernel MUST read per-group scales via its own
                  * ctx (e.g. Matmul's weightGroups), never this field. */
                 scratchQC[i].scale = 1.0f;
-                scratchQC[i].qMaxBits = symQC->qBits;
             } else {
                 convertTensor(inputs[i], &scratchTensors[i]);
             }

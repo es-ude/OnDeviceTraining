@@ -976,6 +976,165 @@ void testRequantizeTensorInPlaceRejectsMismatchedAsymGroupShape(void) {
     });
 }
 
+/* BFP epic PR1 Task 6: owner-chain arms (getQLike/getDataLike/
+ * freeQuantization), the two userApi factories, and the requantize pin. */
+
+void testGetQLikeBfpPerTensorResetsExponents(void) {
+    /* BFP twin of testGetQLikeSymPreservesWidthAndRoundingResetsScale:
+     * widths + rounding carried, exponent reset to the fresh zero-state
+     * (bias) -- a fresh per-tensor clone is an ungridded zero-state.
+     * Mutation guard: re-removing the BFP arm exits the run ("Unknown
+     * QType"). */
+    quantization_t *src = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    ((bfpQConfig_t *)src->qConfig)->exponents[0] = 200; /* non-bias sentinel */
+    quantization_t *like = getQLike(src);
+
+    qtype_t likeType = like->type;
+    bfpQConfig_t *likeQC = (bfpQConfig_t *)like->qConfig;
+    uint8_t likeMantissaBits = likeQC->mantissaBits;
+    uint8_t likeExponentBits = likeQC->exponentBits;
+    roundingMode_t likeRoundingMode = likeQC->roundingMode;
+    uint8_t likeExponent0 = likeQC->exponents[0];
+    int32_t bias = bfpExponentBias(likeQC);
+    int notAliased = likeQC->exponents != ((bfpQConfig_t *)src->qConfig)->exponents;
+    freeQuantization(src);
+    freeQuantization(like);
+
+    TEST_ASSERT_EQUAL_INT(BFP, likeType);
+    TEST_ASSERT_EQUAL_UINT8(8, likeMantissaBits);
+    TEST_ASSERT_EQUAL_UINT8(8, likeExponentBits);
+    TEST_ASSERT_EQUAL_INT(SR_HALF_AWAY, likeRoundingMode);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)bias, likeExponent0);
+    TEST_ASSERT_TRUE(notAliased);
+}
+
+void testGetQLikeBfpGroupedDeepCopiesGrid(void) {
+    /* BFP twin of testGetQLikeSymPreservesGroups: a grouped source's group
+     * SHAPE is an attach-time fact -- the clone must preserve
+     * numGroups/groupSize AND deep-copy the exponent VALUES, not alias the
+     * array. Mutation guard: aliasing (`likeQC->exponents = qc->exponents`)
+     * makes the post-clone-mutation assertion below FAIL. */
+    quantization_t *src = quantizationInitBfpGrouped(3, 8, HALF_AWAY, 3, 8);
+    bfpQConfig_t *srcQC = (bfpQConfig_t *)src->qConfig;
+    srcQC->exponents[0] = 10;
+    srcQC->exponents[1] = 20;
+    srcQC->exponents[2] = 30;
+    quantization_t *like = getQLike(src);
+    bfpQConfig_t *likeQC = (bfpQConfig_t *)like->qConfig;
+
+    size_t ng = likeQC->numGroups, gs = likeQC->groupSize;
+    uint8_t e0 = likeQC->exponents[0];
+    uint8_t e1 = likeQC->exponents[1];
+    uint8_t e2 = likeQC->exponents[2];
+    int notAliased = likeQC->exponents != srcQC->exponents;
+
+    likeQC->exponents[0] = 99; /* mutate the CLONE after capture */
+    uint8_t srcExponent0AfterCloneMutation = srcQC->exponents[0];
+
+    freeQuantization(like);
+    freeQuantization(src);
+
+    TEST_ASSERT_EQUAL_size_t(3, ng);
+    TEST_ASSERT_EQUAL_size_t(8, gs);
+    TEST_ASSERT_EQUAL_UINT8(10, e0);
+    TEST_ASSERT_EQUAL_UINT8(20, e1);
+    TEST_ASSERT_EQUAL_UINT8(30, e2);
+    TEST_ASSERT_TRUE(notAliased);
+    TEST_ASSERT_EQUAL_UINT8(10, srcExponent0AfterCloneMutation); /* source untouched */
+}
+
+void testGetDataLikeBfpSizesPacked(void) {
+    /* mantissaBits=6, N=10 -> ceil(60/8) = 8 packed bytes via the single
+     * ceiling authority (calcNumberOfBytesForData), same idiom as
+     * testGetDataLikeSymAllocatesPackedCeiling. */
+    quantization_t *q = quantizationInitBfp(6, 8, HALF_AWAY);
+    uint8_t *data = getDataLike(q, 10);
+    for (size_t i = 0; i < 8; i++) {
+        data[i] = 0xFF;
+    }
+
+    quantization_t *q2 = quantizationInitBfp(6, 8, HALF_AWAY);
+    size_t expectedBytes = calcNumberOfBytesForData(q2, 10);
+
+    freeReservedMemory(data);
+    freeQuantization(q);
+    freeQuantization(q2);
+
+    TEST_ASSERT_EQUAL_size_t(8, expectedBytes);
+}
+
+void testFreeQuantizationBfpFreesExponents(void) {
+    /* BFP twin of testFreeQuantizationSymFreesScalesArrayWithoutLeak: the
+     * BFP qconfig owns a second heap block (the exponents array) beyond the
+     * qConfig struct and the quantization_t wrapper -- freeQuantization must
+     * release all of it. Leak-freedom is enforced by CI's Linux ASan/LSan
+     * job on this binary (macOS ASan init hangs locally, known issue); this
+     * test's own pass/fail signal is that the free completes without a
+     * double-free/invalid-free abort. */
+    quantization_t *q = quantizationInitBfp(8, 8, HALF_AWAY);
+    uint8_t *exponents = ((bfpQConfig_t *)q->qConfig)->exponents;
+
+    freeQuantization(q);
+
+    TEST_ASSERT_NOT_NULL(exponents);
+}
+
+void testRequantizeTensorInPlaceFloatToBfp(void) {
+    /* Task 6 Step 1 pin: requantizeTensorInPlace needs NO code change to
+     * support a BFP target -- it is already dtype-generic (getQLike +
+     * getDataLike + convertTensor). Round-trip FLOAT32 -> grouped BFP ->
+     * FLOAT32 via the promoted public API twice (mirrors
+     * testRequantizeTensorInPlaceGrouped's SYM idiom, UnitTestTensorConversion.c).
+     * Values chosen so both groups round-trip EXACTLY: group0 {8,-2,4,0}
+     * absMax 8 -> derived E=+1 (stored 128, scale 2, matches
+     * testFloatToBfpSnapsUpAndPowerOfTwoIsExact's known-good derivation);
+     * group1 {28,-8,4,16} absMax 28 -> derived E=+2 (stored 129, scale 4,
+     * matches testFloatToBfpGroupedIndependentExponents' absMax). Neither
+     * stored exponent equals the zero-state bias (127), so a mutation that
+     * silently resets exponents to bias (instead of deriving them from the
+     * pack) is caught even though getQLike's OWN grouped clone deep-copies
+     * -- the derivation under test happens inside convertTensor, downstream
+     * of getQLike's zero-state-valued clone of the target template. */
+    tensor_t *t = makeFloatTensor1d(8);
+    tensorFillFromFloatBuffer(t, (float[]){8.f, -2.f, 4.f, 0.f, 28.f, -8.f, 4.f, 16.f}, 8);
+
+    quantization_t *targetQ = quantizationInitBfpGrouped(4, 8, HALF_AWAY, 2, 4);
+    requantizeTensorInPlace(t, targetQ);
+    freeQuantization(targetQ); /* getQLike deep-clones -- template unused after */
+
+    TEST_ASSERT_EQUAL_INT(BFP, t->quantization->type);
+    bfpQConfig_t *qc = t->quantization->qConfig;
+    TEST_ASSERT_EQUAL_size_t(2, qc->numGroups);
+    TEST_ASSERT_EQUAL_size_t(4, qc->groupSize);
+    TEST_ASSERT_EQUAL_UINT8(128, qc->exponents[0]);     /* derived E=+1 */
+    TEST_ASSERT_EQUAL_UINT8(129, qc->exponents[1]);     /* derived E=+2 */
+    TEST_ASSERT_EQUAL_size_t(4, calcBytesPerTensor(t)); /* ceil(4bits*8/8) packed */
+
+    quantization_t *backQ = quantizationInitFloat();
+    requantizeTensorInPlace(t, backQ);
+    freeQuantization(backQ);
+
+    TEST_ASSERT_EQUAL_INT(FLOAT32, t->quantization->type);
+    float expected[8] = {8.f, -2.f, 4.f, 0.f, 28.f, -8.f, 4.f, 16.f};
+    float *got = (float *)t->data;
+    for (size_t i = 0; i < 8; i++) {
+        TEST_ASSERT_EQUAL_FLOAT(expected[i], got[i]);
+    }
+
+    freeTensor(t);
+}
+
+void testGradInitRejectsBfpTemplate(void) {
+    /* BFP twin of testGradInitRejectsGroupedSymTemplate: BFP grad/state
+     * storage is out of scope for this epic PR (lands with BFP epic PR3) --
+     * gradInit must reject ANY BFP template, not just a grouped one. */
+    ASSERT_EXITS_WITH(1, {
+        quantization_t *bfpQ = quantizationInitBfp(8, 8, HALF_AWAY);
+        tensor_t *p = makeFloatTensor1d(4); /* file-local Rule-1 factory */
+        gradInit(p, bfpQ, NULL);
+    });
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testTensorInitWithDistribution_Zeros_InitializesProductOfDimsValues);
@@ -1018,5 +1177,11 @@ int main(void) {
     RUN_TEST(testInitTensorValidatesGroupedAsymShape);
     RUN_TEST(testGradInitRejectsGroupedAsymTemplate);
     RUN_TEST(testRequantizeTensorInPlaceRejectsMismatchedAsymGroupShape);
+    RUN_TEST(testGetQLikeBfpPerTensorResetsExponents);
+    RUN_TEST(testGetQLikeBfpGroupedDeepCopiesGrid);
+    RUN_TEST(testGetDataLikeBfpSizesPacked);
+    RUN_TEST(testFreeQuantizationBfpFreesExponents);
+    RUN_TEST(testRequantizeTensorInPlaceFloatToBfp);
+    RUN_TEST(testGradInitRejectsBfpTemplate);
     return UNITY_END();
 }

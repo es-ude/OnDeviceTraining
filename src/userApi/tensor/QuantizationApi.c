@@ -49,6 +49,25 @@ quantization_t *quantizationInitSymGrouped(uint8_t qBits, roundingMode_t roundin
     return q;
 }
 
+quantization_t *quantizationInitBfp(uint8_t mantissaBits, uint8_t exponentBits,
+                                    roundingMode_t roundingMode) {
+    quantization_t *q = reserveMemory(sizeof(quantization_t));
+    bfpQConfig_t *qC = reserveMemory(sizeof(bfpQConfig_t));
+    initBfpQConfig(mantissaBits, exponentBits, roundingMode, qC);
+    initBfpQuantization(qC, q);
+    return q;
+}
+
+quantization_t *quantizationInitBfpGrouped(uint8_t mantissaBits, uint8_t exponentBits,
+                                           roundingMode_t roundingMode, size_t numGroups,
+                                           size_t groupSize) {
+    quantization_t *q = reserveMemory(sizeof(quantization_t));
+    bfpQConfig_t *qC = reserveMemory(sizeof(bfpQConfig_t));
+    initBfpQConfigGrouped(mantissaBits, exponentBits, roundingMode, numGroups, groupSize, qC);
+    initBfpQuantization(qC, q);
+    return q;
+}
+
 quantization_t *quantizationInitAsym(uint8_t qBits, roundingMode_t roundingMode) {
     quantization_t *q = reserveMemory(sizeof(quantization_t));
     asymQConfig_t *qC = reserveMemory(sizeof(asymQConfig_t));

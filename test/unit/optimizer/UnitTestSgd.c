@@ -1919,6 +1919,39 @@ void testSgdCreateGroupedSymMomentumQuantExits(void) {
     });
 }
 
+/* BFP epic PR1 carrier-gate twin of testSgdCreateGroupedSymMomentumQuantExits
+ * (message points at "BFP epic PR3" instead of "#300"): BFP grad/state
+ * storage is out of scope for this epic PR -- momentumStateInit must
+ * fail-fast on ANY BFP momentumQuant template, not just a grouped one
+ * (unlike the SYM gate above, which only restricts numGroups>1). Per-tensor
+ * BFP (numGroups=1, groupSize=0) sidesteps any incidental
+ * initTensor/validateBfpQConfigShape mismatch, isolating the death to the
+ * new gate under test (mutation-vacuity guard, same reasoning as the SYM
+ * twin above). */
+void testSgdCreateBfpMomentumQuantExits(void) {
+    ASSERT_EXITS_WITH(1, {
+        quantization_t *layerQ = quantizationInitFloat();
+        size_t *wDims = reserveMemory(2 * sizeof(size_t));
+        wDims[0] = 2;
+        wDims[1] = 4;
+        size_t *wOrder = reserveMemory(2 * sizeof(size_t));
+        setOrderOfDimsForNewTensor(2, wOrder);
+        shape_t *wShape = reserveMemory(sizeof(shape_t));
+        setShape(wShape, wDims, 2, wOrder);
+        tensor_t *wParam = initTensor(wShape, quantizationInitFloat(), NULL);
+        tensorFillFromFloatBuffer(wParam, (float[]){0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f}, 8);
+        tensor_t *wGrad = gradInitFloat(wParam, NULL);
+        parameter_t *weights = parameterInit(wParam, wGrad);
+
+        layer_t *linear = buildBorrowedLinearLayer(weights, NULL, layerQ);
+        layer_t *model[] = {linear};
+
+        quantization_t *momentumQ = quantizationInitBfp(8, 8, HALF_AWAY);
+        sgdMCreateOptim(0.1f, 0.9f, 0.0f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    });
+}
+
 /* ---- Group-quant PR3 Task 4: SGD updates a grouped-SYM param -------------
  *
  * The update opSpecs now declare the param's groupedSymOperandPos, so the
@@ -2202,6 +2235,7 @@ int main() {
     RUN_TEST(testOptimizerClipGradNormSymInt32FoldsCoefIntoScaleMantissasUntouched);
     RUN_TEST(testOptimizerClipGradNormRejectsPackedSymGradStorage);
     RUN_TEST(testSgdCreateGroupedSymMomentumQuantExits);
+    RUN_TEST(testSgdCreateBfpMomentumQuantExits);
     RUN_TEST(testSgdStepGroupedSymParamMatchesGold);
     RUN_TEST(testSgdStepGroupedSymParamMomentumMatchesGold);
     RUN_TEST(testSgdStepGroupedAsymParamMatchesGold);

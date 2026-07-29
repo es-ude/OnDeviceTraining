@@ -107,16 +107,16 @@ typedef struct symQConfig {
  * initBfpQConfigGrouped always allocate a fresh `numGroups`-element array).
  * A bare qConfig (not wrapped in a quantization_t) is freed directly with
  * freeReservedMemory on `exponents` -- every Task 1 test does exactly this.
- * freeQuantization does NOT have a BFP arm yet: that lands in a later task
- * of this epic PR (owner-chain task, alongside getQLike/deepCopyQuantization
- * BFP support); calling freeQuantization on a BFP-wrapped quantization_t
- * before then frees the qConfig struct but leaks `exponents`. Stack test
- * fixtures that only need a fixed per-tensor exponent should build the
- * struct directly with a local backing array instead of calling
- * initBfpQConfig (see docs/conventions/testing.md) -- such fixtures are
- * never passed to freeQuantization or freeReservedMemory, and (mirroring
- * the SYM deserialize-destination rule) are never handed to a deserialize
- * call as the destination skeleton.
+ * freeQuantization has a BFP arm (owner-chain task, epic PR1 Task 6): a
+ * BFP-wrapped quantization_t (e.g. via quantizationInitBfp /
+ * quantizationInitBfpGrouped / getQLike) is freed with freeQuantization,
+ * which frees `exponents` before the qConfig struct, mirroring the SYM
+ * pairing rule above. Stack test fixtures that only need a fixed per-tensor
+ * exponent should build the struct directly with a local backing array
+ * instead of calling initBfpQConfig (see docs/conventions/testing.md) --
+ * such fixtures are never passed to freeQuantization or freeReservedMemory,
+ * and (mirroring the SYM deserialize-destination rule) are never handed to
+ * a deserialize call as the destination skeleton.
  *
  * Shape invariant (identical to symQConfig_t): exactly two shapes are valid --
  * per-tensor {numGroups=1, groupSize=0}, or grouped {numGroups>1, groupSize>0}

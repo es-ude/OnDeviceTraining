@@ -39,6 +39,19 @@ quantization_t *quantizationInitSym(uint8_t qBits, roundingMode_t roundingMode);
 quantization_t *quantizationInitSymGrouped(uint8_t qBits, roundingMode_t roundingMode,
                                            size_t numGroups, size_t groupSize);
 
+/*! BFP epic PR1: per-tensor block-floating-point quantization with explicit
+ *  mantissa/exponent widths and rounding. Pairs with freeQuantization. */
+quantization_t *quantizationInitBfp(uint8_t mantissaBits, uint8_t exponentBits,
+                                    roundingMode_t roundingMode);
+
+/*! BFP epic PR1: block-floating-point quantization with an explicit group
+ *  shape (numGroups, groupSize), mirroring quantizationInitSymGrouped's
+ *  per-tensor {1,0}. Pairs with freeQuantization. See initBfpQConfigGrouped
+ *  for the shape invariant enforced at construction. */
+quantization_t *quantizationInitBfpGrouped(uint8_t mantissaBits, uint8_t exponentBits,
+                                           roundingMode_t roundingMode, size_t numGroups,
+                                           size_t groupSize);
+
 /*! Initializes asym quantization.
  *
  * \param qBits: Number of bits for qMax

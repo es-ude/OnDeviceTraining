@@ -46,6 +46,14 @@ static tensor_t *momentumStateInit(tensor_t *param, quantization_t *momentumQuan
             exit(1);
         }
     }
+    /* BFP epic PR1 carrier gate (mirrors gradInit, TensorApi.c): BFP
+     * grad/state storage is out of scope for this epic PR -- reject any BFP
+     * momentum template outright. */
+    if (momentumQuant->type == BFP) {
+        PRINT_ERROR("momentumStateInit: BFP momentum templates are unsupported -- "
+                    "BFP grad/state storage arrives with BFP epic PR3");
+        exit(1);
+    }
     return initTensor(getShapeLike(param->shape), getQLike(momentumQuant), NULL);
 }
 

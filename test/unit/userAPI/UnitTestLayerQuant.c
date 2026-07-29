@@ -153,6 +153,41 @@ void testDeepCopyQuantizationSymDeepCopiesScalesArray(void) {
     freeQuantization(src);
 }
 
+void testDeepCopyQuantizationBfpGrouped(void) {
+    /* BFP epic PR1 twin of testDeepCopyQuantizationSymDeepCopiesScalesArray:
+     * bfpQConfig_t carries a heap `exponents` pointer, so a blind memcpy of
+     * the qConfig struct would alias dst's exponents onto src's -- deep-copy
+     * the array instead. Mutation guard: reverting the BFP branch in
+     * deepCopyQuantization to the generic byte-memcpy path makes the
+     * pointer-independence assertion below FAIL (and a subsequent
+     * freeQuantization of both configs double-frees under ASan). */
+    quantization_t *src = quantizationInitBfpGrouped(4, 8, HALF_AWAY, 2, 4);
+    bfpQConfig_t *srcCfg = (bfpQConfig_t *)src->qConfig;
+    srcCfg->exponents[0] = 130;
+    srcCfg->exponents[1] = 140;
+
+    quantization_t *dst = deepCopyQuantization(src);
+
+    TEST_ASSERT_NOT_NULL(dst);
+    TEST_ASSERT_NOT_EQUAL(src, dst);
+    TEST_ASSERT_EQUAL_INT(BFP, dst->type);
+    TEST_ASSERT_NOT_NULL(dst->qConfig);
+    TEST_ASSERT_NOT_EQUAL(src->qConfig, dst->qConfig);
+
+    bfpQConfig_t *dstCfg = (bfpQConfig_t *)dst->qConfig;
+    TEST_ASSERT_NOT_EQUAL(srcCfg->exponents, dstCfg->exponents); /* independent arrays */
+    TEST_ASSERT_EQUAL_UINT8(srcCfg->exponents[0], dstCfg->exponents[0]);
+    TEST_ASSERT_EQUAL_UINT8(srcCfg->exponents[1], dstCfg->exponents[1]);
+    TEST_ASSERT_EQUAL_UINT8(srcCfg->mantissaBits, dstCfg->mantissaBits);
+    TEST_ASSERT_EQUAL_UINT8(srcCfg->exponentBits, dstCfg->exponentBits);
+    TEST_ASSERT_EQUAL_INT(srcCfg->roundingMode, dstCfg->roundingMode);
+    TEST_ASSERT_EQUAL_size_t(srcCfg->numGroups, dstCfg->numGroups);
+    TEST_ASSERT_EQUAL_size_t(srcCfg->groupSize, dstCfg->groupSize);
+
+    freeQuantization(dst);
+    freeQuantization(src);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLayerQuantInitUniformFloat32DerivesFloatArithmeticAndSharesStorage);
@@ -163,5 +198,6 @@ int main(void) {
     RUN_TEST(testDeepCopyQuantizationFloat32ReturnsFreshAllocationWithNullQConfig);
     RUN_TEST(testDeepCopyQuantizationSymInt32DuplicatesQConfigBytes);
     RUN_TEST(testDeepCopyQuantizationSymDeepCopiesScalesArray);
+    RUN_TEST(testDeepCopyQuantizationBfpGrouped);
     return UNITY_END();
 }

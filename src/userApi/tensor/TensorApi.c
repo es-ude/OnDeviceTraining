@@ -172,6 +172,15 @@ tensor_t *gradInit(tensor_t *param, quantization_t *gradQ, sparsity_t *sparsity)
             exit(1);
         }
     }
+    /* BFP epic PR1 carrier gate: BFP grad/state storage is out of scope for
+     * this epic PR (native ARITH_BFP compute + grad/state storage land in
+     * BFP epic PR3) -- reject any BFP grad template outright, mirroring the
+     * SYM grouped gate above. */
+    if (gradQ->type == BFP) {
+        PRINT_ERROR("gradInit: BFP grad templates are unsupported -- "
+                    "BFP grad/state storage arrives with BFP epic PR3");
+        exit(1);
+    }
     return initTensor(getShapeLike(param->shape), getQLike(gradQ), sparsity);
 }
 
@@ -293,6 +302,33 @@ quantization_t *getQLike(quantization_t *quantization) {
         initSymQuantization(likeSymQC, likeQ);
         break;
     }
+    case BFP: {
+        bfpQConfig_t *likeBfpQC = reserveMemory(sizeof(bfpQConfig_t));
+        bfpQConfig_t *bfpQC = quantization->qConfig;
+        if (bfpQC->numGroups > 1) {
+            /* BFP epic PR1 (mirrors the SYM grouped branch above): a grouped
+             * source's group SHAPE is an attach-time fact, not an ungridded
+             * zero-state -- preserve numGroups/groupSize and deep-copy the
+             * exponent VALUES (matches deepCopyQuantization's semantics),
+             * unlike the per-tensor fresh-reset clone below. */
+            uint8_t *likeExponents = reserveMemory(bfpQC->numGroups * sizeof(uint8_t));
+            memcpy(likeExponents, bfpQC->exponents, bfpQC->numGroups * sizeof(uint8_t));
+            likeBfpQC->exponents = likeExponents;
+            likeBfpQC->numGroups = bfpQC->numGroups;
+            likeBfpQC->groupSize = bfpQC->groupSize;
+            likeBfpQC->roundingMode = bfpQC->roundingMode;
+            likeBfpQC->mantissaBits = bfpQC->mantissaBits;
+            likeBfpQC->exponentBits = bfpQC->exponentBits;
+        } else {
+            /* Precedent A clone: widths + rounding preserved, exponent reset
+             * to the fresh zero-state (bias) -- a fresh per-tensor clone is
+             * an ungridded zero-state (first accumulate derives the grid). */
+            initBfpQConfig(bfpQC->mantissaBits, bfpQC->exponentBits, bfpQC->roundingMode,
+                           likeBfpQC);
+        }
+        initBfpQuantization(likeBfpQC, likeQ);
+        break;
+    }
     /* BOOL deliberately unsupported here: grad/state clones must fail fast at
      * construction (see UnitTestLinear BOOL-knob death test); add an arm only
      * when a real BOOL-clone consumer appears (#269 deviation). */
@@ -313,6 +349,7 @@ uint8_t *getDataLike(quantization_t *quantization, size_t numberOfValues) {
         return reserveMemory(numberOfValues * sizeof(int32_t));
     case ASYM:
     case SYM:
+    case BFP:
         /* Packed/sub-byte payloads size via the single ceiling authority
          * (calcNumberOfBytesForData) — never re-derive the bit-packing
          * arithmetic inline (#269). */
@@ -400,10 +437,11 @@ void freeShape(shape_t *shape) {
 }
 
 void freeQuantization(quantization_t *quantization) {
-    /* Group-quant PR1/PR4: SYM's qConfig owns a second heap block (scales)
-     * and ASYM's owns two (scales + zeroPoints) beyond the qConfig struct
-     * itself -- free them first, then the qConfig struct, then the wrapper
-     * (reverse-init order). */
+    /* Group-quant PR1/PR4 / BFP epic PR1: SYM's qConfig owns a second heap
+     * block (scales), ASYM's owns two (scales + zeroPoints), and BFP's owns
+     * one (exponents) beyond the qConfig struct itself -- free the owned
+     * arrays first, then the qConfig struct, then the wrapper (reverse-init
+     * order). */
     if (quantization->type == SYM) {
         symQConfig_t *symQC = quantization->qConfig;
         freeReservedMemory(symQC->scales);
@@ -412,6 +450,10 @@ void freeQuantization(quantization_t *quantization) {
         asymQConfig_t *asymQC = quantization->qConfig;
         freeReservedMemory(asymQC->zeroPoints);
         freeReservedMemory(asymQC->scales);
+    }
+    if (quantization->type == BFP) {
+        bfpQConfig_t *bfpQC = quantization->qConfig;
+        freeReservedMemory(bfpQC->exponents);
     }
     freeReservedMemory(quantization->qConfig);
     freeReservedMemory(quantization);

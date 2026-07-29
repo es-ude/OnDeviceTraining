@@ -58,6 +58,9 @@ quantization_t *deepCopyQuantization(quantization_t *src) {
     case ASYM:
         cfgSize = sizeof(asymQConfig_t);
         break;
+    case BFP:
+        cfgSize = sizeof(bfpQConfig_t);
+        break;
     default:
         PRINT_ERROR("deepCopyQuantization: unknown quantization type %d", (int)src->type);
         exit(1);
@@ -91,6 +94,16 @@ quantization_t *deepCopyQuantization(quantization_t *src) {
             uint16_t *zeroPoints = reserveMemory(srcQC->numGroups * sizeof(uint16_t));
             memcpy(zeroPoints, srcQC->zeroPoints, srcQC->numGroups * sizeof(uint16_t));
             dstQC->zeroPoints = zeroPoints;
+        }
+        if (src->type == BFP) {
+            /* BFP epic PR1 twin of the SYM fix above: bfpQConfig_t carries a
+             * heap `exponents` pointer -- deep-copy the array (not the
+             * pointer) so dst and src own independent memory. */
+            bfpQConfig_t *srcQC = src->qConfig;
+            bfpQConfig_t *dstQC = dst->qConfig;
+            uint8_t *exponents = reserveMemory(srcQC->numGroups * sizeof(uint8_t));
+            memcpy(exponents, srcQC->exponents, srcQC->numGroups * sizeof(uint8_t));
+            dstQC->exponents = exponents;
         }
     }
     return dst;

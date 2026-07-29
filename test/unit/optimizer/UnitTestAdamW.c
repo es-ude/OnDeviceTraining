@@ -950,6 +950,39 @@ void testAdamWCreateGroupedAsymMomentQuantExits(void) {
     });
 }
 
+/* BFP epic PR1 carrier-gate twin of testAdamWCreateGroupedSymMomentQuantExits
+ * (message points at "BFP epic PR3" instead of "#300"): BFP grad/state
+ * storage is out of scope for this epic PR -- momentStateInit must fail-fast
+ * on ANY BFP momentQuant template, not just a grouped one (unlike the SYM
+ * gate above, which only restricts numGroups>1). Per-tensor BFP
+ * (numGroups=1, groupSize=0) sidesteps any incidental
+ * initTensor/validateBfpQConfigShape mismatch, isolating the death to the
+ * new gate under test (mutation-vacuity guard, same reasoning as the SYM
+ * twin above). */
+void testAdamWCreateBfpMomentQuantExits(void) {
+    ASSERT_EXITS_WITH(1, {
+        quantization_t *layerQ = quantizationInitFloat();
+        size_t *wDims = reserveMemory(2 * sizeof(size_t));
+        wDims[0] = 2;
+        wDims[1] = 4;
+        size_t *wOrder = reserveMemory(2 * sizeof(size_t));
+        setOrderOfDimsForNewTensor(2, wOrder);
+        shape_t *wShape = reserveMemory(sizeof(shape_t));
+        setShape(wShape, wDims, 2, wOrder);
+        tensor_t *wParam = initTensor(wShape, quantizationInitFloat(), NULL);
+        tensorFillFromFloatBuffer(wParam, (float[]){0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f}, 8);
+        tensor_t *wGrad = gradInitFloat(wParam, NULL);
+        parameter_t *weights = parameterInit(wParam, wGrad);
+
+        layer_t *linear = buildBorrowedLinearLayer(weights, NULL, layerQ);
+        layer_t *model[] = {linear};
+
+        quantization_t *momentQ = quantizationInitBfp(8, 8, HALF_AWAY);
+        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, model, 1, momentQ,
+                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    });
+}
+
 /* ---- Group-quant PR3 Task 4: AdamW updates a grouped-SYM param ----------
  *
  * Same funnel wiring as SGD (UnitTestSgd.c's *MatchesGold tests): the param
@@ -1087,6 +1120,7 @@ int main(void) {
     RUN_TEST(testAdamWCreateAllFrozenModelExits);
     RUN_TEST(testAdamWCreateGroupedSymMomentQuantExits);
     RUN_TEST(testAdamWCreateGroupedAsymMomentQuantExits);
+    RUN_TEST(testAdamWCreateBfpMomentQuantExits);
     RUN_TEST(testAdamWInitStoresDoubleHyperparamsAndZeroStepCount);
     RUN_TEST(testAdamWGetSetLrRoundTripThroughImpl);
     RUN_TEST(testAdamWInitRejectsNonFloat32UpdateMath);

@@ -399,6 +399,18 @@ void requantizeTensorInPlace(tensor_t *t, quantization_t *targetQ) {
          * must describe exactly `t`'s element count. */
         validateAsymQConfigShape(newQ->qConfig, numElements);
     }
+    /* Final-review CRITICAL fix (post-Task-6): the BFP twin of the SYM guard
+     * above -- Task 6's new getQLike/getDataLike BFP arms made this same
+     * unvalidated hand-built view reachable for BFP targets (previously
+     * getQLike's default arm killed any BFP target with "Unknown QType"
+     * before this path could run). A grouped BFP target whose
+     * numGroups*groupSize != numElements sizes newData off numElements while
+     * packFloatBufferAsBfp's pass-2 loop derives a group index unbounded by
+     * numGroups and indexes qC->exponents[group] with no bounds check -- a
+     * heap-buffer-overflow read. */
+    if (newQ->type == BFP) {
+        validateBfpQConfigShape(newQ->qConfig, numElements);
+    }
     uint8_t *newData = getDataLike(newQ, numElements);
 
     tensor_t view = {.data = newData, .shape = t->shape, .quantization = newQ, .sparsity = NULL};

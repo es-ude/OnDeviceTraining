@@ -1124,6 +1124,27 @@ void testRequantizeTensorInPlaceFloatToBfp(void) {
     freeTensor(t);
 }
 
+/* Final-review CRITICAL fix (post-Task-6): BFP twin of
+ * testRequantizeTensorInPlaceRejectsMismatchedGroupShape above. This task's
+ * new getQLike/getDataLike BFP arms made requantizeTensorInPlace's hand-built
+ * destination view (which bypasses initTensor's validateBfpQConfigShape
+ * choke point entirely, same as the pre-existing SYM gap) reachable for BFP
+ * targets -- previously getQLike's default arm killed any BFP target with
+ * "Unknown QType" before this path could run. A grouped BFP target whose
+ * numGroups*groupSize does not equal the SOURCE tensor's actual element
+ * count sizes newData off the SOURCE's numElements while
+ * packFloatBufferAsBfp's pass-2 loop computes g = (off+i)/groupSize
+ * unbounded by numGroups and feeds it to bfpGroupScale, which indexes
+ * qC->exponents[group] with no bounds check -- a heap-buffer-overflow READ.
+ * Must fail-fast before either buffer is touched. */
+void testRequantizeTensorInPlaceRejectsMismatchedGroupShapeBfp(void) {
+    ASSERT_EXITS_WITH(1, {
+        tensor_t *t = makeFloatTensor1d(12); /* file-local Rule-1 factory */
+        quantization_t *targetQ = quantizationInitBfpGrouped(4, 8, HALF_AWAY, 2, 4);
+        requantizeTensorInPlace(t, targetQ);
+    });
+}
+
 void testGradInitRejectsBfpTemplate(void) {
     /* BFP twin of testGradInitRejectsGroupedSymTemplate: BFP grad/state
      * storage is out of scope for this epic PR (lands with BFP epic PR3) --
@@ -1182,6 +1203,7 @@ int main(void) {
     RUN_TEST(testGetDataLikeBfpSizesPacked);
     RUN_TEST(testFreeQuantizationBfpFreesExponents);
     RUN_TEST(testRequantizeTensorInPlaceFloatToBfp);
+    RUN_TEST(testRequantizeTensorInPlaceRejectsMismatchedGroupShapeBfp);
     RUN_TEST(testGradInitRejectsBfpTemplate);
     return UNITY_END();
 }

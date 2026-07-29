@@ -16,6 +16,8 @@ static void packFloatBufferAsSym(const float *values, size_t n, symQConfig_t *ou
                                  const char *what);
 static void packFloatBufferAsBfp(const float *values, size_t n, bfpQConfig_t *outQC, uint8_t *dst,
                                  const char *what);
+static void packDequantStreamAsBfp(const tensor_t *src, size_t n, bfpQConfig_t *outQC, uint8_t *dst,
+                                   const char *what);
 static void quantizeFloatToAsym(const float *values, size_t n, asymQConfig_t *outQC, uint8_t *dst);
 
 _Static_assert(ODT_CONVERSION_CHUNK_ELEMS % 8 == 0,
@@ -1015,6 +1017,65 @@ static void packFloatBufferAsBfp(const float *values, size_t n, bfpQConfig_t *ou
     }
 }
 
+/* packFloatBufferAsBfp's streaming twin: identical two-pass value-domain BFP
+ * pack, but the SOURCE is read chunk-wise via dequantChunkToFloat (any dtype
+ * that helper dispatches on) instead of a contiguous float buffer -- so no
+ * O(n) dequant scratch is ever allocated. Shared by the SYM_INT32 -> BFP cell
+ * here and the SYM/ASYM -> BFP cells plus the BFP diagonal (later tasks of
+ * this epic PR). */
+static void packDequantStreamAsBfp(const tensor_t *src, size_t n, bfpQConfig_t *outQC, uint8_t *dst,
+                                   const char *what) {
+    const float qMax = powf(2, (float)outQC->mantissaBits - 1) - 1;
+    const float qMin = -powf(2, (float)outQC->mantissaBits - 1);
+    const int32_t bias = bfpExponentBias(outQC);
+    const uint8_t maxStored = (uint8_t)((1u << outQC->exponentBits) - 1u);
+    if (n == 0) {
+        /* No values to derive exponents from: zero-state outcome (stored =
+         * bias), parity with packFloatBufferAsBfp's empty-group absMax==0. */
+        for (size_t g = 0; g < outQC->numGroups; g++) {
+            deriveBfpStoredExponent(0.f, qMax, bias, maxStored, &outQC->exponents[g]);
+        }
+        return;
+    }
+    const size_t gsz = outQC->groupSize == 0 ? n : outQC->groupSize;
+    float buf[ODT_CONVERSION_CHUNK_ELEMS];
+    /* pass 1: running per-group absmax over dequanted chunks -- target groups
+     * are contiguous element runs, so a group closes exactly when the running
+     * index reaches a gsz multiple (groups may straddle chunk boundaries,
+     * hence boundary detection by index arithmetic, not per-chunk resets). */
+    float absMax = 0.f;
+    size_t g = 0;
+    for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+        dequantChunkToFloat(src, off, count, buf);
+        for (size_t i = 0; i < count; i++) {
+            float v = fabsf(buf[i]);
+            if (v > absMax) {
+                absMax = v;
+            }
+            if ((off + i + 1) % gsz == 0) {
+                deriveBfpStoredExponent(absMax, qMax, bias, maxStored, &outQC->exponents[g]);
+                g++;
+                absMax = 0.f;
+            }
+        }
+    }
+    /* pass 2: chunked quantize + pack; saturation via clamp BEFORE the guard
+     * (value-domain quantization saturates by design -- D6), one roundByMode
+     * per element in element order. */
+    int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
+    for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+        dequantChunkToFloat(src, off, count, buf);
+        for (size_t i = 0; i < count; i++) {
+            float scale = bfpGroupScale(outQC, (off + i) / gsz);
+            codes[i] = clampInt32(roundByMode(buf[i] / scale, outQC->roundingMode), (int32_t)qMin,
+                                  (int32_t)qMax);
+        }
+        packChunkGuarded(codes, count, dst, outQC->mantissaBits, off, what);
+    }
+}
+
 void convertFloatTensorToBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor) {
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     packFloatBufferAsBfp((float *)inputTensor->data, n, outputTensor->quantization->qConfig,
@@ -1029,6 +1090,80 @@ void convertBfpTensorToFloat32Tensor(tensor_t *inputTensor, tensor_t *outputTens
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         dequantChunkToFloat(inputTensor, off, count, buf);
         memcpy(out + off, buf, count * sizeof(float));
+    }
+}
+
+/* INT32 -> BFP is codes-in (#227 code domain): mantissas verbatim, ABORT on
+ * overflow via packChunkGuarded (D6 saturation is value-domain only). Every
+ * group exponent is reset to the zero state (= bias, E=0, scale 1) so a
+ * reused destination cannot carry a stale grid -- the BFP image of
+ * convertInt32TensorToSymTensor's scales[0] = 1.f reset. */
+void convertInt32TensorToBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor) {
+    size_t n = calcNumberOfElementsByTensor(inputTensor);
+    bfpQConfig_t *outQC = outputTensor->quantization->qConfig;
+    const int32_t bias = bfpExponentBias(outQC);
+    for (size_t g = 0; g < outQC->numGroups; g++) {
+        outQC->exponents[g] = (uint8_t)bias;
+    }
+    int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
+    for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+        /* alignment-safe staging, like readBytesAsInt32Array's whole-buffer memcpy */
+        memcpy(codes, (const int32_t *)inputTensor->data + off, count * sizeof(int32_t));
+        packChunkGuarded(codes, count, outputTensor->data, outQC->mantissaBits, off,
+                         "convertInt32TensorToBfpTensor");
+    }
+}
+
+// Important: Exponents are ignored! Emits sign-extended mantissa codes (int_repr).
+void convertBfpTensorToInt32Tensor(tensor_t *inputTensor, tensor_t *outputTensor) {
+    size_t n = calcNumberOfElementsByTensor(inputTensor);
+    bfpQConfig_t *inQC = inputTensor->quantization->qConfig;
+    unpackSignExtend(inputTensor->data, inQC->mantissaBits, 0, (int32_t *)outputTensor->data, n);
+}
+
+void convertSymInt32TensorToBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor) {
+    size_t n = calcNumberOfElementsByTensor(inputTensor);
+    packDequantStreamAsBfp(inputTensor, n, outputTensor->quantization->qConfig, outputTensor->data,
+                           "convertSymInt32TensorToBfpTensor");
+}
+
+/* BFP -> SYM_INT32 is value-preserving onto a FRESH scalar absmax grid
+ * (convertAsymTensorToSymTensor's two-pass shape); the target payload is
+ * unpacked int32, so plain stores -- no pack guard. Never saturates by
+ * construction (absMax maps exactly to +-qMax); the clamp mirrors the
+ * fresh-grid sibling cells. */
+void convertBfpTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTensor) {
+    size_t n = calcNumberOfElementsByTensor(inputTensor);
+    symInt32QConfig_t *outQC = outputTensor->quantization->qConfig;
+    int32_t *out = (int32_t *)outputTensor->data;
+    float buf[ODT_CONVERSION_CHUNK_ELEMS];
+    /* pass 1: absmax over dequantized values, chunked (grouped-capable via
+     * dequantChunkToFloat's per-element group lookup) */
+    float absMax = 0.f;
+    for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+        dequantChunkToFloat(inputTensor, off, count, buf);
+        for (size_t i = 0; i < count; i++) {
+            float v = fabsf(buf[i]);
+            if (v > absMax) {
+                absMax = v;
+            }
+        }
+    }
+    const float qMax = powf(2, (float)outQC->qMaxBits - 1) - 1;
+    const float qMin = -powf(2, (float)outQC->qMaxBits - 1);
+    float scale = (absMax == 0.f) ? 1.f : absMax / qMax;
+    outQC->scale = scale;
+    /* pass 2: chunked emit -- one roundByMode per element (TARGET config's
+     * roundingMode), element order */
+    for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+        dequantChunkToFloat(inputTensor, off, count, buf);
+        for (size_t i = 0; i < count; i++) {
+            out[off + i] = clampInt32(roundByMode(buf[i] / scale, outQC->roundingMode),
+                                      (int32_t)qMin, (int32_t)qMax);
+        }
     }
 }
 
@@ -1414,7 +1549,7 @@ conversionFunction_t conversionMatrix[7][7] = {
                [SYM] = convertInt32TensorToSymTensor,
                [ASYM] = convertInt32TensorToAsymTensor,
                [BOOL] = unsupportedConversionTypes,
-               [BFP] = unsupportedConversionTypes},
+               [BFP] = convertInt32TensorToBfpTensor},
     [FLOAT32] = {[INT32] = convertFloatTensorToInt32Tensor,
                  [FLOAT32] = NULL,
                  [SYM_INT32] = convertFloatTensorToSymInt32Tensor,
@@ -1428,7 +1563,7 @@ conversionFunction_t conversionMatrix[7][7] = {
                    [SYM] = convertSymInt32TensorToSymTensor,
                    [ASYM] = convertSymInt32TensorToAsymTensor,
                    [BOOL] = unsupportedConversionTypes,
-                   [BFP] = unsupportedConversionTypes},
+                   [BFP] = convertSymInt32TensorToBfpTensor},
     [SYM] = {[INT32] = convertSymTensorToInt32Tensor,
              [FLOAT32] = convertSymTensorToFloat32Tensor,
              [SYM_INT32] = convertSymTensorToSymInt32Tensor,
@@ -1450,9 +1585,9 @@ conversionFunction_t conversionMatrix[7][7] = {
               [ASYM] = unsupportedConversionTypes,
               [BOOL] = NULL,
               [BFP] = unsupportedConversionTypes},
-    [BFP] = {[INT32] = unsupportedConversionTypes,
+    [BFP] = {[INT32] = convertBfpTensorToInt32Tensor,
              [FLOAT32] = convertBfpTensorToFloat32Tensor,
-             [SYM_INT32] = unsupportedConversionTypes,
+             [SYM_INT32] = convertBfpTensorToSymInt32Tensor,
              [SYM] = unsupportedConversionTypes,
              [ASYM] = unsupportedConversionTypes,
              [BOOL] = unsupportedConversionTypes,

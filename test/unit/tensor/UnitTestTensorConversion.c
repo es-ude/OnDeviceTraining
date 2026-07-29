@@ -4606,6 +4606,241 @@ void testFloatToBfpSrRoundingIsSeededDeterministic(void) {
     TEST_ASSERT_TRUE(anyDiffers);
 }
 
+void testInt32ToBfpIsCodesInWithZeroStateExponent(void) {
+    /* INT32 -> BFP is codes-in (#227 code domain): int32 {5, -3} fits the m=4
+     * code range [-8, 7] verbatim. The exponent is WRITTEN to the zero state
+     * (= bias 127 for e=8, scale 1.0), mirroring convertInt32TensorToSymTensor's
+     * scales[0] = 1.f reset -- sentinel 9 proves the converter wrote it. */
+    size_t n = 2;
+    size_t dims[] = {2};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t intData[2] = {5, -3};
+    quantization_t intQ;
+    initInt32Quantization(&intQ);
+    tensor_t src;
+    setTensorValues(&src, (uint8_t *)intData, &shape, &intQ, NULL);
+
+    uint8_t exponents[1] = {9}; /* sentinel != expected 127 */
+    bfpQConfig_t outQC = {.exponents = exponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t bfpQ;
+    initBfpQuantization(&outQC, &bfpQ);
+    uint8_t bfpData[calcNumberOfBytesForData(&bfpQ, n)];
+    tensor_t dst;
+    setTensorValues(&dst, bfpData, &shape, &bfpQ, NULL);
+
+    convertTensor(&src, &dst);
+
+    TEST_ASSERT_EQUAL_UINT8(127, outQC.exponents[0]); /* bias: E=0, scale 1 */
+    int32_t mant[2];
+    unpackSignExtend(dst.data, 4, 0, mant, 2);
+    TEST_ASSERT_EQUAL_INT32(5, mant[0]);
+    TEST_ASSERT_EQUAL_INT32(-3, mant[1]);
+}
+
+void testInt32ToBfpOverflowAborts(void) {
+    /* 200 > 7 = m=4 code max: codes-in must ABORT via packChunkGuarded (#227
+     * code-domain discipline) -- D6 saturation covers value-domain quantization
+     * only, never raw code stuffing. */
+    size_t n = 1;
+    size_t dims[] = {1};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t intData[1] = {200};
+    quantization_t intQ;
+    initInt32Quantization(&intQ);
+    tensor_t src;
+    setTensorValues(&src, (uint8_t *)intData, &shape, &intQ, NULL);
+
+    uint8_t exponents[1] = {9};
+    bfpQConfig_t outQC = {.exponents = exponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t bfpQ;
+    initBfpQuantization(&outQC, &bfpQ);
+    uint8_t bfpData[calcNumberOfBytesForData(&bfpQ, n)];
+    tensor_t dst;
+    setTensorValues(&dst, bfpData, &shape, &bfpQ, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&src, &dst));
+}
+
+void testBfpToInt32DropsExponent(void) {
+    /* int_repr: mantissas {6, -3} sign-extend to int32 verbatim; the E=+2
+     * exponent (stored 129) is DROPPED, not applied (dequantized values would
+     * be {24, -12}). Sentinel -777 proves the converter wrote the payload. */
+    size_t n = 2;
+    size_t dims[] = {2};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t goldMant[2] = {6, -3};
+    uint8_t exponents[1] = {129}; /* E=+2, scale 4 */
+    bfpQConfig_t inQC = {.exponents = exponents,
+                         .numGroups = 1,
+                         .groupSize = 0,
+                         .roundingMode = HALF_AWAY,
+                         .mantissaBits = 4,
+                         .exponentBits = 8};
+    quantization_t inQ;
+    initBfpQuantization(&inQC, &inQ);
+    uint8_t bfpData[calcNumberOfBytesForData(&inQ, n)];
+    byteConversion((uint8_t *)goldMant, 32, bfpData, 4, n);
+    tensor_t src;
+    setTensorValues(&src, bfpData, &shape, &inQ, NULL);
+
+    quantization_t intQ;
+    initInt32Quantization(&intQ);
+    int32_t outData[2] = {-777, -777}; /* sentinel != expected */
+    tensor_t dst;
+    setTensorValues(&dst, (uint8_t *)outData, &shape, &intQ, NULL);
+
+    convertTensor(&src, &dst);
+
+    TEST_ASSERT_EQUAL_INT32(6, ((int32_t *)dst.data)[0]);
+    TEST_ASSERT_EQUAL_INT32(-3, ((int32_t *)dst.data)[1]);
+}
+
+void testSymInt32ToBfpPreservesValues(void) {
+    /* value-preserving: mantissas {10, -4} * scale 0.5 = values {5, -2}.
+     * BFP m=4 -> qMax 7; absMax 5 -> ratio 5/7 in (0.5, 1) -> E=0 (stored
+     * 127, scale 1); mantissas round(5/1)=5, round(-2/1)=-2 -- NOT the raw
+     * input mantissas {10, -4}. */
+    size_t n = 2;
+    size_t dims[] = {2};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t symData[2] = {10, -4};
+    symInt32QConfig_t inQC = {.scale = 0.5f, .roundingMode = HALF_AWAY, .qMaxBits = 12};
+    quantization_t symQ;
+    initSymInt32Quantization(&inQC, &symQ);
+    tensor_t src;
+    setTensorValues(&src, (uint8_t *)symData, &shape, &symQ, NULL);
+
+    uint8_t exponents[1] = {9}; /* sentinel != expected 127 */
+    bfpQConfig_t outQC = {.exponents = exponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t bfpQ;
+    initBfpQuantization(&outQC, &bfpQ);
+    uint8_t bfpData[calcNumberOfBytesForData(&bfpQ, n)];
+    tensor_t dst;
+    setTensorValues(&dst, bfpData, &shape, &bfpQ, NULL);
+
+    convertTensor(&src, &dst);
+
+    TEST_ASSERT_EQUAL_UINT8(127, outQC.exponents[0]); /* E=0, scale 1 */
+    int32_t mant[2];
+    unpackSignExtend(dst.data, 4, 0, mant, 2);
+    TEST_ASSERT_EQUAL_INT32(5, mant[0]);
+    TEST_ASSERT_EQUAL_INT32(-2, mant[1]);
+}
+
+void testBfpToSymInt32FreshAbsmaxGrid(void) {
+    /* mantissas {6, -3} @ E=+1 (stored 128, scale 2) = values {12, -6};
+     * target qMaxBits=12 -> qMax 2047, fresh grid: scale = 12/2047.
+     * codes = roundByMode(v/scale, target HALF_AWAY), float32-exact:
+     *   12.f / (12.f/2047.f)  = 2047.0f  -> 2047
+     *   -6.f / (12.f/2047.f)  = -1023.5f (exact float tie) -> -1024. */
+    size_t n = 2;
+    size_t dims[] = {2};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t goldMant[2] = {6, -3};
+    uint8_t exponents[1] = {128}; /* E=+1, scale 2 */
+    /* SOURCE roundingMode deliberately SR: dequant is rounding-free, so the
+     * converter must never read it -- rounding with the source's mode instead
+     * of the TARGET's HALF_AWAY would turn the exact -1023.5 tie (and the
+     * exact asserts below) stochastic. */
+    bfpQConfig_t inQC = {.exponents = exponents,
+                         .numGroups = 1,
+                         .groupSize = 0,
+                         .roundingMode = SR_HALF_AWAY,
+                         .mantissaBits = 4,
+                         .exponentBits = 8};
+    quantization_t inQ;
+    initBfpQuantization(&inQC, &inQ);
+    uint8_t bfpData[calcNumberOfBytesForData(&inQ, n)];
+    byteConversion((uint8_t *)goldMant, 32, bfpData, 4, n);
+    tensor_t src;
+    setTensorValues(&src, bfpData, &shape, &inQ, NULL);
+
+    /* scale sentinel -1: the converter must derive and write the fresh grid */
+    symInt32QConfig_t outQC = {.scale = -1.f, .roundingMode = HALF_AWAY, .qMaxBits = 12};
+    quantization_t outQ;
+    initSymInt32Quantization(&outQC, &outQ);
+    int32_t outData[2] = {-777, -777}; /* sentinel != expected */
+    tensor_t dst;
+    setTensorValues(&dst, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    convertTensor(&src, &dst);
+
+    TEST_ASSERT_EQUAL_FLOAT(12.f / 2047.f, outQC.scale);
+    TEST_ASSERT_EQUAL_INT32(2047, ((int32_t *)dst.data)[0]);
+    TEST_ASSERT_EQUAL_INT32(-1024, ((int32_t *)dst.data)[1]);
+}
+
+void testBfpGroupedToSymInt32UsesPerGroupScales(void) {
+    /* grouped source dequants per group BEFORE the fresh scalar grid:
+     * group0 E=+2 (stored 129, scale 4) mantissas {6, -5} = values {24, -20};
+     * group1 E=0  (stored 127, scale 1) mantissas {2, -3} = values {2, -3}.
+     * absMax 24, qMaxBits=8 -> qMax 127, scale = 24/127. codes (float32-checked,
+     * no half ties): 24 -> 127; -20 -> -105.8333 -> -106; 2 -> 10.5833 -> 11;
+     * -3 -> -15.875 -> -16. A whole-tensor scale-4 misread would give {2, -3}
+     * the codes of {8, -12} instead. */
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t goldMant[4] = {6, -5, 2, -3};
+    uint8_t exponents[2] = {129, 127};
+    /* SOURCE roundingMode SR for the same never-read reason as
+     * testBfpToSymInt32FreshAbsmaxGrid (three fractional quotients here). */
+    bfpQConfig_t inQC = {.exponents = exponents,
+                         .numGroups = 2,
+                         .groupSize = 2,
+                         .roundingMode = SR_HALF_AWAY,
+                         .mantissaBits = 4,
+                         .exponentBits = 8};
+    quantization_t inQ;
+    initBfpQuantization(&inQC, &inQ);
+    uint8_t bfpData[calcNumberOfBytesForData(&inQ, n)];
+    byteConversion((uint8_t *)goldMant, 32, bfpData, 4, n);
+    tensor_t src;
+    setTensorValues(&src, bfpData, &shape, &inQ, NULL);
+
+    symInt32QConfig_t outQC = {.scale = -1.f, .roundingMode = HALF_AWAY, .qMaxBits = 8};
+    quantization_t outQ;
+    initSymInt32Quantization(&outQC, &outQ);
+    int32_t outData[4] = {-777, -777, -777, -777};
+    tensor_t dst;
+    setTensorValues(&dst, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    convertTensor(&src, &dst);
+
+    TEST_ASSERT_EQUAL_FLOAT(24.f / 127.f, outQC.scale);
+    TEST_ASSERT_EQUAL_INT32(127, ((int32_t *)dst.data)[0]);
+    TEST_ASSERT_EQUAL_INT32(-106, ((int32_t *)dst.data)[1]);
+    TEST_ASSERT_EQUAL_INT32(11, ((int32_t *)dst.data)[2]);
+    TEST_ASSERT_EQUAL_INT32(-16, ((int32_t *)dst.data)[3]);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -4732,6 +4967,13 @@ int main(void) {
     RUN_TEST(testBfpToFloatRoundTripExactForRepresentable);
     RUN_TEST(testBfpGroupedToFloatDequantsPerGroup);
     RUN_TEST(testFloatToBfpSrRoundingIsSeededDeterministic);
+
+    RUN_TEST(testInt32ToBfpIsCodesInWithZeroStateExponent);
+    RUN_TEST(testInt32ToBfpOverflowAborts);
+    RUN_TEST(testBfpToInt32DropsExponent);
+    RUN_TEST(testSymInt32ToBfpPreservesValues);
+    RUN_TEST(testBfpToSymInt32FreshAbsmaxGrid);
+    RUN_TEST(testBfpGroupedToSymInt32UsesPerGroupScales);
 
     return UNITY_END();
 }

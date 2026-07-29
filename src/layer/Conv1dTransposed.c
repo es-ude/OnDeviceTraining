@@ -79,7 +79,8 @@ void initConv1dTransposedConfigWithWeightsAndBias(
  * directions. */
 typedef struct convT1dForwardCtx {
     const conv1dTransposedConfig_t *cfg;
-    const symQConfig_t *weightGroups; /* NULL unless cfg->weights->param is grouped SYM */
+    const symQConfig_t *weightGroups; /* NULL unless the weight is grouped SYM or ASYM (then a STACK
+                                         VIEW, see groupedWeightViewOrNull) */
 } convT1dForwardCtx_t;
 
 /* executeOp forward kernel adapters — operands are {input, weights} or

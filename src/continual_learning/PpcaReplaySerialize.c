@@ -117,7 +117,7 @@ static void peekValidateThenDeserializeTensor(tensor_t *skeleton, FILE *f, const
         symQConfig_t *skelQc = skeleton->quantization->qConfig;
         /* Task-5-style review fix: bound the untrusted file numGroups before
          * the skip loop below reads that many floats off the stream (mirrors
-         * Deserialize.c's deserializeQConfig guard -- see PPCA_MAX_SYM_GROUPS
+         * Deserialize.c's deserializeQConfig guard -- see PPCA_MAX_QCONFIG_GROUPS
          * above). */
         if (numGroups == 0 || numGroups > PPCA_MAX_QCONFIG_GROUPS) {
             PRINT_ERROR("ppcaReplaySetDeserialize: %s SYM file numGroups %u is zero or exceeds "

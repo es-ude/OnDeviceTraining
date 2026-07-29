@@ -700,6 +700,154 @@ void testCopyTensorSymIntoNullConfigDestDies() {
     ASSERT_EXITS_WITH_FAILURE(copyTensor(&dst, &src));
 }
 
+void testCopyTensorBfpCarriesConfigAndPackedBytes() {
+    /* Mirrors testCopyTensorSymCarriesConfigAndPackedBytes: 4 mantissas at
+     * mantissaBits=6 -> ceil(24/8) = 3 packed bytes, 2 groups of 2. Dest
+     * starts with a deliberately different config (different exponents,
+     * groupSize, roundingMode): every field must be overwritten by the
+     * copy, INTO the caller's storage (no pointer swap).
+     * Mutation guard: re-removing the BFP arm exits the run ("Unknown
+     * QType!"). Mutation guard: dstQC.exponents must stay dst's OWN array
+     * after the copy (values copied in, not the pointer swapped) --
+     * reverting copyBfpQConfigInto to a blind memcpy of the whole struct
+     * would alias dstQC.exponents onto srcQC.exponents, silently leaking
+     * dst's own array and double-freeing srcQC.exponents later; the VALUE
+     * assertions below would still pass under that mutation (aliased array
+     * reads the same byte), so the pointer-identity check is the one that
+     * catches it. */
+    int32_t mantissas[] = {3, -3, 31, -32};
+    uint8_t srcData[3];
+    byteConversion((uint8_t *)mantissas, 32, srcData, 6, 4);
+    size_t srcDims[] = {1, 4};
+    size_t srcOrder[] = {0, 1};
+    shape_t srcShape = {
+        .dimensions = srcDims, .numberOfDimensions = 2, .orderOfDimensions = srcOrder};
+    uint8_t srcExponents[2] = {200, 50};
+    bfpQConfig_t srcQC = {.exponents = srcExponents,
+                          .numGroups = 2,
+                          .groupSize = 2,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 6,
+                          .exponentBits = 8};
+    quantization_t qSrc;
+    initBfpQuantization(&srcQC, &qSrc);
+    tensor_t src;
+    setTensorValues(&src, srcData, &srcShape, &qSrc, NULL);
+
+    uint8_t dstData[3] = {0};
+    size_t dstDims[2];
+    size_t dstOrder[2];
+    shape_t dstShape = {
+        .dimensions = dstDims, .numberOfDimensions = 2, .orderOfDimensions = dstOrder};
+    uint8_t dstExponents[2] = {127, 127};
+    bfpQConfig_t dstQC = {.exponents = dstExponents,
+                          .numGroups = 2,
+                          .groupSize = 4, /* deliberately different, must be overwritten */
+                          .roundingMode = SR_HALF_AWAY,
+                          .mantissaBits = 6,
+                          .exponentBits = 8};
+    quantization_t qDst;
+    initBfpQuantization(&dstQC, &qDst);
+    tensor_t dst;
+    setTensorValues(&dst, dstData, &dstShape, &qDst, NULL);
+
+    copyTensor(&dst, &src);
+
+    TEST_ASSERT_EQUAL_INT(BFP, dst.quantization->type);
+    TEST_ASSERT_EQUAL_PTR(&dstQC, dst.quantization->qConfig);
+    TEST_ASSERT_EQUAL_PTR(dstExponents, dstQC.exponents); /* dst keeps its OWN array */
+    TEST_ASSERT_EQUAL_UINT8(200, dstQC.exponents[0]);
+    TEST_ASSERT_EQUAL_UINT8(50, dstQC.exponents[1]);
+    TEST_ASSERT_EQUAL_size_t(2, dstQC.groupSize);
+    TEST_ASSERT_EQUAL_INT(HALF_AWAY, dstQC.roundingMode);
+    TEST_ASSERT_EQUAL_UINT8(6, dstQC.mantissaBits);
+    TEST_ASSERT_EQUAL_UINT8(8, dstQC.exponentBits);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(srcData, dstData, 3);
+}
+
+void testCopyTensorBfpIntoNullConfigDestDies() {
+    /* Mirrors testCopyTensorSymIntoNullConfigDestDies: config-carrying BFP
+     * src into a dest whose qConfig is NULL (FLOAT32-initialized) must fail
+     * fast, not memcpy through NULL. Mutation guard: without the NULL check
+     * the child dies by SIGSEGV (signal, not exit(1)) and
+     * ASSERT_EXITS_WITH_FAILURE flags the wrong termination kind. */
+    int32_t mantissas[] = {1, -1};
+    uint8_t srcData[2];
+    byteConversion((uint8_t *)mantissas, 32, srcData, 6, 2);
+    size_t srcDims[] = {1, 2};
+    size_t srcOrder[] = {0, 1};
+    shape_t srcShape = {
+        .dimensions = srcDims, .numberOfDimensions = 2, .orderOfDimensions = srcOrder};
+    uint8_t srcExponents[1] = {127};
+    bfpQConfig_t srcQC = {.exponents = srcExponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 6,
+                          .exponentBits = 8};
+    quantization_t qSrc;
+    initBfpQuantization(&srcQC, &qSrc);
+    tensor_t src;
+    setTensorValues(&src, srcData, &srcShape, &qSrc, NULL);
+
+    uint8_t dstData[2] = {0};
+    size_t dstDims[2];
+    size_t dstOrder[2];
+    shape_t dstShape = {
+        .dimensions = dstDims, .numberOfDimensions = 2, .orderOfDimensions = dstOrder};
+    quantization_t qDst;
+    initFloat32Quantization(&qDst); /* qConfig == NULL on purpose */
+    tensor_t dst;
+    setTensorValues(&dst, dstData, &dstShape, &qDst, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(copyTensor(&dst, &src));
+}
+
+void testCopyTensorBfpGroupShapeMismatchDies() {
+    /* BFP(grouped, numGroups=2) -> BFP(per-tensor, numGroups=1): dest's
+     * 1-element exponents array cannot hold src's 2 group exponents -- must
+     * fail-fast rather than overrun dest->exponents (mirrors
+     * testSameTypeSymCopyRejectsGroupShapeMismatch, UnitTestTensorConversion.c,
+     * but through copyTensor/copyQuantization instead of convertTensor). */
+    int32_t mantissas[] = {3, -3, 31, -32};
+    uint8_t srcData[3];
+    byteConversion((uint8_t *)mantissas, 32, srcData, 6, 4);
+    size_t srcDims[] = {1, 4};
+    size_t srcOrder[] = {0, 1};
+    shape_t srcShape = {
+        .dimensions = srcDims, .numberOfDimensions = 2, .orderOfDimensions = srcOrder};
+    uint8_t srcExponents[2] = {200, 50};
+    bfpQConfig_t srcQC = {.exponents = srcExponents,
+                          .numGroups = 2,
+                          .groupSize = 2,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 6,
+                          .exponentBits = 8};
+    quantization_t qSrc;
+    initBfpQuantization(&srcQC, &qSrc);
+    tensor_t src;
+    setTensorValues(&src, srcData, &srcShape, &qSrc, NULL);
+
+    uint8_t dstData[3] = {0};
+    size_t dstDims[2];
+    size_t dstOrder[2];
+    shape_t dstShape = {
+        .dimensions = dstDims, .numberOfDimensions = 2, .orderOfDimensions = dstOrder};
+    uint8_t dstExponents[1] = {127};
+    bfpQConfig_t dstQC = {.exponents = dstExponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 6,
+                          .exponentBits = 8};
+    quantization_t qDst;
+    initBfpQuantization(&dstQC, &qDst);
+    tensor_t dst;
+    setTensorValues(&dst, dstData, &dstShape, &qDst, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(copyTensor(&dst, &src));
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -739,6 +887,9 @@ int main(void) {
     RUN_TEST(testCopyTensorSymCarriesConfigAndPackedBytes);
     RUN_TEST(testCopyTensorAsymCarriesConfigAndPackedBytes);
     RUN_TEST(testCopyTensorSymIntoNullConfigDestDies);
+    RUN_TEST(testCopyTensorBfpCarriesConfigAndPackedBytes);
+    RUN_TEST(testCopyTensorBfpIntoNullConfigDestDies);
+    RUN_TEST(testCopyTensorBfpGroupShapeMismatchDies);
 
     RUN_TEST(test_calcBitsPerElement_Sym_qBits3);
     RUN_TEST(test_calcBytesPerElement_Sym_qBits3);

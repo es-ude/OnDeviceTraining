@@ -177,7 +177,15 @@ void adamWStep(optimizer_t *optim) {
                               .arithmetic = updateMath,
                               .mode = OUT_WRITE,
                               .auxOut = NULL,
-                              .writesInPlaceSafe = true},
+                              .writesInPlaceSafe = true,
+                              /* Group-quant PR3 Task 4: param is inputs[0]
+                               * here -- m/v are per-tensor FLOAT32 states
+                               * (the momentum-state carrier gate, PR2), so
+                               * param is the only operand allowed to be
+                               * grouped-SYM. The moment/variance opSpecs
+                               * above take no param operand at all, so they
+                               * need no declaration. */
+                              .groupedSymOperandPos = 1},
                   p->param);
     }
 }

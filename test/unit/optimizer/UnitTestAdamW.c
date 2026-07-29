@@ -21,6 +21,7 @@
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
+#include "TensorConversion.h"
 #include "unity.h"
 
 #include "expected_adamw.h"
@@ -919,6 +920,137 @@ void testAdamWCreateGroupedSymMomentQuantExits(void) {
     });
 }
 
+/* ---- Group-quant PR3 Task 4: AdamW updates a grouped-SYM param ----------
+ *
+ * Same funnel wiring as SGD (UnitTestSgd.c's *MatchesGold tests): the param
+ * opSpec now declares groupedSymOperandPos, so the FLOAT32 prologue dequants
+ * the grouped param per-group and the OUT_WRITE epilogue re-derives fresh
+ * per-group absmax scales -- no new conversion code. m/v are per-tensor
+ * FLOAT32 (the momentum-state carrier gate, PR2) and NEVER see the param's
+ * grouping at all -- adamWMomentKernel/adamWVarianceKernel take {state,
+ * grad} only, no param operand -- so with m0=v0=0 (fresh states) they
+ * collapse to the trivial m1=w1*grad, v1=s2*grad^2 and are asserted with a
+ * tight tolerance.
+ *
+ * GOLD CHOICE (disclosed, task-4-brief.md): the param path chains six
+ * float32 roundings through a sqrt/div (adamWParamKernel ->
+ * addcdivDenomFloat32TensorsInplace, PointwiseFused.c) on top of the
+ * per-group dequant/requant. Reproducing that exact float32 rounding
+ * sequence in an independent second implementation -- the bar the SGD gold
+ * generator hits for SGD's much simpler single-mul-add kernels -- is
+ * disproportionate scaffolding for one test's worth of coverage, so this
+ * test takes the brief's documented minimum bar instead:
+ *   (1) the two post-step group scales must be DISTINCT -- proves a real
+ *       per-group requant happened (not a collapse onto one shared scale);
+ *   (2) a DOUBLE-precision float reference of the param update, computed
+ *       from the SAME formula/inputs (not hand-transcribed constants -- see
+ *       the loop below, which mirrors AdamW.c:98-111's t=1 scalars and
+ *       addcdivDenomFloat32TensorsInplace's exact op order: d=sqrt(v);
+ *       d/=bc2sqrt; d+=eps; numer=stepScale*m; quotient=numer/d;
+ *       out=decay*paramDeq+quotient), compared against the actual
+ *       per-group-dequantized output within a tolerance DERIVED from that
+ *       group's own re-derived scale (0.5*scale = the requant's own
+ *       rounding-error bound) plus a small slack for the float32-vs-double
+ *       arithmetic gap through the sqrt/div chain (negligible at this
+ *       magnitude, included for rigor, not because it is expected to bite). */
+void testAdamWStepGroupedSymParamRunsAndRequantsPerGroup(void) {
+    const size_t n = 6, groupSize = 3, numGroups = 2;
+    const uint8_t qBits = 8;
+    const int32_t paramMantissas[6] = {50, -80, 20, -60, 90, -40};
+    const float paramScales[2] = {0.02f, 0.015f};
+    const float gradVals[6] = {0.2f, -0.1f, 0.3f, -0.2f, 0.1f, -0.3f};
+    const float lr = 0.1f;
+    const double beta1 = 0.5, beta2 = 0.75, eps = 0.01, wd = 0.1;
+
+    size_t *pDims = reserveMemory(1 * sizeof(size_t));
+    pDims[0] = n;
+    size_t *pOrder = reserveMemory(1 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, pOrder);
+    shape_t *pShape = reserveMemory(sizeof(shape_t));
+    setShape(pShape, pDims, 1, pOrder);
+    tensor_t *p = initTensor(
+        pShape, quantizationInitSymGrouped(qBits, HALF_AWAY, numGroups, groupSize), NULL);
+    byteConversion((uint8_t *)paramMantissas, 32, p->data, qBits, n);
+    symQConfig_t *paramQC = p->quantization->qConfig;
+    for (size_t grp = 0; grp < numGroups; grp++) {
+        paramQC->scales[grp] = paramScales[grp];
+    }
+    tensor_t *g = gradInitFloat(p, NULL);
+    tensorFillFromFloatBuffer(g, gradVals, n);
+    parameter_t *par = parameterInit(p, g);
+
+    adamW_t adamW;
+    adamWInit(&adamW, lr, beta1, beta2, eps, wd,
+              (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    optimImpl_t impl = {.adamW = &adamW};
+    tensor_t *m = makeFloatTensor1D(NULL, n);
+    tensor_t *v = makeFloatTensor1D(NULL, n);
+    tensor_t *stateBuffers[2] = {m, v};
+    states_t st = {.stateBuffers = stateBuffers, .statesPerParameter = 2};
+    parameter_t *parArr[1] = {par};
+    states_t *stArr[1] = {&st};
+    optimizer_t optim = {.type = ADAM_W,
+                         .impl = &impl,
+                         .parameter = parArr,
+                         .states = stArr,
+                         .sizeStates = 1,
+                         /* #279 explicit opt-out: deterministic write-back so
+                          * the requant's rounding is reproducible. */
+                         .writeBackRounding = HALF_AWAY};
+
+    adamWStep(&optim);
+
+    /* CAPTURE -> free -> assert (file convention). */
+    int32_t mant[6];
+    unpackSignExtend(p->data, qBits, 0, mant, n);
+    float scale0 = ((symQConfig_t *)p->quantization->qConfig)->scales[0];
+    float scale1 = ((symQConfig_t *)p->quantization->qConfig)->scales[1];
+    float mOut[6], vOut[6];
+    memcpy(mOut, m->data, sizeof mOut);
+    memcpy(vOut, v->data, sizeof vOut);
+    freeTensor(m);
+    freeTensor(v);
+    freeParameter(par);
+
+    /* (1) per-group requant actually happened (not collapsed onto one scale). */
+    TEST_ASSERT_TRUE_MESSAGE(scale0 != scale1,
+                             "post-step group scales must differ -- a real per-group "
+                             "requant, not an accidental single scale");
+
+    /* m/v never see the param's grouping (no param operand in their
+     * kernels); m0=v0=0 makes the exact formula trivial. */
+    const double w1 = 1.0 - beta1, s2 = 1.0 - beta2;
+    for (size_t i = 0; i < n; i++) {
+        double expectedM = w1 * (double)gradVals[i];
+        double expectedV = s2 * (double)gradVals[i] * (double)gradVals[i];
+        TEST_ASSERT_FLOAT_WITHIN(1e-6f, (float)expectedM, mOut[i]);
+        TEST_ASSERT_FLOAT_WITHIN(1e-6f, (float)expectedV, vOut[i]);
+    }
+
+    /* (2) double-precision float reference of the param update, from the
+     * SAME formula/inputs -- t=1 so bc1==w1 and bc2sqrt==sqrt(1-beta2). */
+    const double bc1 = 1.0 - beta1, bc2sqrt = sqrt(1.0 - beta2);
+    const double stepScale = -((double)lr / bc1);
+    const double decay = 1.0 - (double)lr * wd;
+    double paramNew[6];
+    for (size_t i = 0; i < n; i++) {
+        size_t grp = i / groupSize;
+        double paramDeq = (double)paramMantissas[i] * (double)paramScales[grp];
+        double mI = w1 * (double)gradVals[i];
+        double vI = s2 * (double)gradVals[i] * (double)gradVals[i];
+        double d = sqrt(vI) / bc2sqrt + eps;
+        paramNew[i] = decay * paramDeq + stepScale * mI / d;
+    }
+
+    for (size_t i = 0; i < n; i++) {
+        size_t grp = i / groupSize;
+        float scale = (grp == 0) ? scale0 : scale1;
+        float actualDeq = (float)mant[i] * scale;
+        float tolerance = 0.5f * scale + 1e-3f;
+        TEST_ASSERT_FLOAT_WITHIN(tolerance, (float)paramNew[i], actualDeq);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testAdamWOptimizerSkipsFrozenLayerInCountAndCollection);
@@ -947,5 +1079,6 @@ int main(void) {
     RUN_TEST(testAdamWStepOptimizerSrWriteBackEscapesSymDeadZone);
     RUN_TEST(testAdamWMomentWriteBacksHonorOptimizerSrRounding);
     RUN_TEST(testAdamWCreateOptimRejectsInt32GradStorage);
+    RUN_TEST(testAdamWStepGroupedSymParamRunsAndRequantsPerGroup);
     return UNITY_END();
 }

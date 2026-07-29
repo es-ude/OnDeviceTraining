@@ -48,8 +48,26 @@ void scaleOptimizerGradients(optimizer_t *optimizer, float factor) {
         case SYM: {
             /* Packed-SYM dequant (mantissa * scale) is linear in scale exactly
              * like the SYM_INT32 case above — fold the factor into the
-             * per-tensor scale, packed codes untouched (O(1), exact). */
+             * per-tensor scale, packed codes untouched (O(1), exact).
+             * Defensive (belt-and-suspenders, group-quant PR3 Task 4):
+             * gradInit's own carrier gate already rejects a grouped SYM
+             * template before a grad tensor is ever built (grads are
+             * per-tensor unconditionally, #300 axis), so numGroups > 1
+             * should be unreachable here — but a hand-assembled optimizer
+             * (this file's own comment above, and the pattern every
+             * hand-built optimizer_t test in this tree exercises) could
+             * still hand it a grad tensor that bypassed that gate. Folding
+             * `factor` into scales[0] alone would silently scale ONLY group
+             * 0 and leave every other group's scale untouched — fail fast
+             * instead of corrupting the gradient. */
             symQConfig_t *gradQ = param->grad->quantization->qConfig;
+            if (gradQ->numGroups > 1) {
+                PRINT_ERROR("scaleOptimizerGradients: grouped SYM grad storage "
+                            "(numGroups=%zu) is not supported — grads are per-tensor "
+                            "unconditionally (gradInit's carrier gate, #300 axis)",
+                            gradQ->numGroups);
+                exit(1);
+            }
             gradQ->scales[0] *= factor;
             break;
         }

@@ -26,6 +26,7 @@
 #include <ReluApi.h>
 
 #include "expected_clip_grad_norm.h"
+#include "expected_sgd_grouped.h"
 
 /* #310 contract: sgdMCreateOptim takes a by-value arithmetic_t updateMath
  * (mirroring the layer-side forwardMath/weightGradMath knobs) as its last
@@ -1917,6 +1918,137 @@ void testSgdCreateGroupedSymMomentumQuantExits(void) {
     });
 }
 
+/* ---- Group-quant PR3 Task 4: SGD updates a grouped-SYM param -------------
+ *
+ * The update opSpecs now declare the param's groupedSymOperandPos, so the
+ * EXISTING funnel machinery does the requant -- no new C-side conversion
+ * code: the FLOAT32 prologue dequants the grouped param per-group
+ * (convertSymTensorToFloat32Tensor's grouped path, PR2 Task 2), the kernel
+ * runs its usual float32 arithmetic, and the OUT_WRITE epilogue re-derives
+ * fresh per-group absmax scales (packFloatBufferAsSym's grouped path).
+ * Gold values come from generate_expected_sgd_grouped.py, whose module
+ * docstring discloses the exact op sequence each fixture emulates.
+ * writeBackRounding is set to the deterministic HALF_AWAY opt-out (#279) so
+ * the comparison is bit-exact -- factories default to seeded SR_HALF_AWAY,
+ * which the gold generator does NOT emulate (consistent with every other
+ * goldgen script in this tree). RED before Task 4's pos declarations: the
+ * funnel's grouped-operand gate (ExecuteOp.c ~:269) fail-fasts with
+ * "reached an op without a matching groupedSymOperandPos declaration". */
+
+/* Builds a 1-D grouped-SYM tensor (n elements) with EXACT mantissas/scales
+ * from a gold fixture -- direct low-level construction (NOT FLOAT32-init +
+ * requantizeTensorInPlace, since the gold pins SPECIFIC mantissas a fresh
+ * absmax pass would not necessarily reproduce). Mirrors UnitTestLinear.c's
+ * buildGroupedFixtureLayer. Caller frees via freeTensor. */
+static tensor_t *buildGroupedSymParam1D(const int32_t *mantissas, const float *scales, size_t n,
+                                        size_t groupSize, size_t numGroups, uint8_t qBits) {
+    size_t *dims = reserveMemory(1 * sizeof(size_t));
+    dims[0] = n;
+    size_t *order = reserveMemory(1 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    tensor_t *t =
+        initTensor(shape, quantizationInitSymGrouped(qBits, HALF_AWAY, numGroups, groupSize), NULL);
+    byteConversion((uint8_t *)mantissas, 32, t->data, qBits, n);
+    symQConfig_t *qc = t->quantization->qConfig;
+    for (size_t g = 0; g < numGroups; g++) {
+        qc->scales[g] = scales[g];
+    }
+    return t;
+}
+
+void testSgdStepGroupedSymParamMatchesGold(void) {
+    /* momentumFactor == 0 -- the single-op fast path (sgdUpdateKernel
+     * {param, grad}, param declared at groupedSymOperandPos==1). */
+    tensor_t *p = buildGroupedSymParam1D(sgdGroupedStep0ParamMantissas, sgdGroupedStep0ParamScales,
+                                         6, (size_t)sgdGroupedGroupSize,
+                                         (size_t)sgdGroupedNumGroups, (uint8_t)sgdGroupedQBits);
+    tensor_t *g = gradInitFloat(p, NULL);
+    tensorFillFromFloatBuffer(g, sgdGroupedStep0Grad, 6);
+    parameter_t *param = parameterInit(p, g);
+
+    sgd_t sgd;
+    sgdInit(&sgd, sgdGroupedStep0Lr, 0.0f, sgdGroupedStep0WeightDecay,
+            (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    parameter_t *params[1] = {param};
+    optimImpl_t impl = {.sgd = &sgd};
+    optimizer_t optim = {.parameter = params,
+                         .states = NULL,
+                         .sizeStates = 1,
+                         .impl = &impl,
+                         /* #279 explicit opt-out: deterministic write-back for
+                          * a bit-exact gold (factories default to seeded
+                          * SR_HALF_AWAY). */
+                         .writeBackRounding = HALF_AWAY};
+
+    sgdStepM(&optim);
+
+    /* CAPTURE -> free -> assert (file convention). */
+    int32_t mant[6];
+    unpackSignExtend(p->data, (size_t)sgdGroupedQBits, 0, mant, 6);
+    float scale0 = ((symQConfig_t *)p->quantization->qConfig)->scales[0];
+    float scale1 = ((symQConfig_t *)p->quantization->qConfig)->scales[1];
+    freeParameter(param);
+
+    for (size_t i = 0; i < 6; i++) {
+        TEST_ASSERT_EQUAL_INT32(sgdGroupedStep0NewMantissas[i], mant[i]);
+    }
+    TEST_ASSERT_EQUAL_FLOAT(sgdGroupedStep0NewScales[0], scale0);
+    TEST_ASSERT_EQUAL_FLOAT(sgdGroupedStep0NewScales[1], scale1);
+}
+
+void testSgdStepGroupedSymParamMomentumMatchesGold(void) {
+    /* momentumFactor > 0 -- the TWO-op path: exercises the pos-3 declaration
+     * on sgdMStateKernel's opSpec ({state, grad, param} -> param at
+     * inputs[2]) AND the pos-1 declaration on sgdMParamKernel's opSpec
+     * ({param, state} -> param at inputs[0]). The momentum-state carrier
+     * gate (PR2) holds: state stays per-tensor FLOAT32, no grouping. The
+     * exact op sequence the gold emulates is disclosed in
+     * generate_expected_sgd_grouped.py's module docstring. */
+    tensor_t *p = buildGroupedSymParam1D(
+        sgdGroupedMomentumParamMantissas, sgdGroupedMomentumParamScales, 6,
+        (size_t)sgdGroupedGroupSize, (size_t)sgdGroupedNumGroups, (uint8_t)sgdGroupedQBits);
+    tensor_t *g = gradInitFloat(p, NULL);
+    tensorFillFromFloatBuffer(g, sgdGroupedMomentumGrad, 6);
+    parameter_t *param = parameterInit(p, g);
+
+    tensor_t *state = buildFloatTensor1D(sgdGroupedMomentumStatePrev, 6);
+
+    sgd_t sgd;
+    sgdInit(&sgd, sgdGroupedMomentumLr, sgdGroupedMomentumMomentum, sgdGroupedMomentumWeightDecay,
+            (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    parameter_t *params[1] = {param};
+    optimImpl_t impl = {.sgd = &sgd};
+    tensor_t *stateBuffers[1] = {state};
+    states_t paramStates = {.stateBuffers = stateBuffers, .statesPerParameter = 1};
+    states_t *states[1] = {&paramStates};
+    optimizer_t optim = {.parameter = params,
+                         .states = states,
+                         .sizeStates = 1,
+                         .impl = &impl,
+                         .writeBackRounding = HALF_AWAY};
+
+    sgdStepM(&optim);
+
+    /* CAPTURE -> free -> assert. */
+    int32_t mant[6];
+    unpackSignExtend(p->data, (size_t)sgdGroupedQBits, 0, mant, 6);
+    float scale0 = ((symQConfig_t *)p->quantization->qConfig)->scales[0];
+    float scale1 = ((symQConfig_t *)p->quantization->qConfig)->scales[1];
+    float stateOut[6];
+    memcpy(stateOut, state->data, sizeof stateOut);
+    freeTensor(state);
+    freeParameter(param);
+
+    for (size_t i = 0; i < 6; i++) {
+        TEST_ASSERT_EQUAL_INT32(sgdGroupedMomentumNewMantissas[i], mant[i]);
+        TEST_ASSERT_EQUAL_FLOAT(sgdGroupedMomentumNewState[i], stateOut[i]);
+    }
+    TEST_ASSERT_EQUAL_FLOAT(sgdGroupedMomentumNewScales[0], scale0);
+    TEST_ASSERT_EQUAL_FLOAT(sgdGroupedMomentumNewScales[1], scale1);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testOptimizerSkipsFrozenLayerInCountAndCollection);
@@ -1954,5 +2086,7 @@ int main() {
     RUN_TEST(testOptimizerClipGradNormSymInt32FoldsCoefIntoScaleMantissasUntouched);
     RUN_TEST(testOptimizerClipGradNormRejectsPackedSymGradStorage);
     RUN_TEST(testSgdCreateGroupedSymMomentumQuantExits);
+    RUN_TEST(testSgdStepGroupedSymParamMatchesGold);
+    RUN_TEST(testSgdStepGroupedSymParamMomentumMatchesGold);
     return UNITY_END();
 }

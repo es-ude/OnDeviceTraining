@@ -410,6 +410,7 @@ target_link_libraries(UnitTestOptimizerScaling PRIVATE
         QuantizationApi
         StorageApi
         odt_test_layer_builders
+        odt_test_death
 )
 __register_target_as_unit_test(UnitTestOptimizerScaling)
 

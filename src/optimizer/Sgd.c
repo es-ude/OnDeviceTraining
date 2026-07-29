@@ -135,6 +135,9 @@ void sgdStepM(optimizer_t *optim) {
                     .mode = OUT_WRITE,
                     .auxOut = NULL,
                     .writesInPlaceSafe = true,
+                    /* Group-quant PR3 Task 4: param is inputs[0] -- the only
+                     * operand allowed to be a grouped-SYM tensor here. */
+                    .groupedSymOperandPos = 1,
                 },
                 p->param);
         }
@@ -156,6 +159,11 @@ void sgdStepM(optimizer_t *optim) {
                 .mode = OUT_WRITE,
                 .auxOut = NULL,
                 .writesInPlaceSafe = true,
+                /* Group-quant PR3 Task 4: param is inputs[2] here (state,
+                 * then grad, then param) -- the momentum-state carrier gate
+                 * (PR2) keeps state/grad per-tensor, so param is the only
+                 * operand allowed to be grouped-SYM. */
+                .groupedSymOperandPos = 3,
             },
             state);
 
@@ -170,6 +178,8 @@ void sgdStepM(optimizer_t *optim) {
                 .mode = OUT_WRITE,
                 .auxOut = NULL,
                 .writesInPlaceSafe = true,
+                /* Group-quant PR3 Task 4: param is inputs[0] here. */
+                .groupedSymOperandPos = 1,
             },
             p->param);
     }

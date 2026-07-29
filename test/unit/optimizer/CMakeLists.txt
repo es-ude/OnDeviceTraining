@@ -78,6 +78,7 @@ add_elastic_ai_unit_test(
         Distributions
         RNG
         Tensor
+        TensorConversion
         Common
         m
         odt_test_death
@@ -101,3 +102,16 @@ add_custom_command(
 add_custom_target(generate_expected_clip_grad_norm DEPENDS ${GEN_CLIP_GRAD_NORM_HEADER})
 add_dependencies(UnitTestSgd generate_expected_clip_grad_norm)
 target_include_directories(UnitTestSgd PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+
+set(GEN_SGD_GROUPED_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_sgd_grouped.h)
+add_custom_command(
+        OUTPUT ${GEN_SGD_GROUPED_HEADER}
+        COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_sgd_grouped.py
+                --out ${GEN_SGD_GROUPED_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_sgd_grouped.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+        COMMENT "Generating expected_sgd_grouped.h (group-quant PR3 Task 4)"
+        VERBATIM
+)
+add_custom_target(generate_expected_sgd_grouped DEPENDS ${GEN_SGD_GROUPED_HEADER})
+add_dependencies(UnitTestSgd generate_expected_sgd_grouped)

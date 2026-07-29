@@ -627,3 +627,87 @@ def convT1d_dx_grouped_ref(loss_mantissas, loss_scale: float, w_mantissas, w_sca
         f"convT1d_dx_grouped_ref: adjoint gather length {dx_len} != forward "
         f"input length {input_length}")
     return out, s_acc
+
+
+# ---- Group-quant PR3 Task 4: optimizer enablement on grouped params. The
+# update opSpecs declare the param's groupedSymOperandPos, so the existing
+# funnel machinery does the requant -- no new C-side conversion code, just
+# these two float32-precise primitives (mirroring the FLOAT32-arithmetic
+# prologue's dequant and the OUT_WRITE epilogue's requant bit-for-bit) plus
+# the SGD momentum==0 update they compose into. ----
+
+
+def dequant_sym_grouped_f32(mantissas, scales, group_size: int) -> torch.Tensor:
+    """float32 mirror of convertSymTensorToFloat32Tensor's grouped path
+    (TensorConversion.c): out[i] = (float)mant[i] * scales[g], g = i //
+    group_size -- EVERY intermediate stays float32 (never float64, unlike
+    stable_dequant_grouped's fixture-construction helper above), matching the
+    C `float` arithmetic exactly. Returns a torch.float32 tensor."""
+    mant = torch.as_tensor(mantissas, dtype=torch.int32).flatten()
+    n = mant.numel()
+    assert n % group_size == 0, (
+        f"dequant_sym_grouped_f32: n={n} not divisible by group_size={group_size}")
+    scales_t = torch.as_tensor(scales, dtype=torch.float32)
+    num_groups = n // group_size
+    assert scales_t.numel() == num_groups, (
+        f"dequant_sym_grouped_f32: {scales_t.numel()} scales for {num_groups} groups")
+    per_elem_scale = scales_t.repeat_interleave(group_size)
+    return mant.to(torch.float32) * per_elem_scale
+
+
+def requant_absmax_grouped_f32(values, q_bits: int, group_size: int):
+    """float32 mirror of packFloatBufferAsSym's grouped path
+    (TensorConversion.c): per-group absMax -> scale = absMax/qMax (1.0 if
+    absMax == 0), codes = round_half_away(clamp(value/scale)) -- EVERY
+    intermediate stays float32 (the C kernel's `float` arithmetic; never
+    float64). group_size == len(values) emulates the whole-tensor (numGroups
+    == 1) requant -- used by generators as the "group collapse" mutation
+    reference, not a real per-tensor path. Returns (codes: list[int],
+    scales: list[float])."""
+    x = torch.as_tensor(values, dtype=torch.float32).flatten()
+    n = x.numel()
+    assert n % group_size == 0, (
+        f"requant_absmax_grouped_f32: n={n} not divisible by group_size={group_size}")
+    num_groups = n // group_size
+    q_max = torch.tensor(2.0 ** (q_bits - 1) - 1, dtype=torch.float32)
+    q_min = torch.tensor(-(2.0 ** (q_bits - 1)), dtype=torch.float32)
+    codes = []
+    scales = []
+    for g in range(num_groups):
+        grp = x[g * group_size:(g + 1) * group_size]
+        abs_max = grp.abs().max()
+        if abs_max.item() == 0.0:
+            scale = torch.tensor(1.0, dtype=torch.float32)
+        else:
+            scale = abs_max / q_max
+        scales.append(scale.item())
+        q = round_half_away(grp / scale)
+        q = torch.clamp(q, q_min, q_max)
+        codes.extend(int(v) for v in q.tolist())
+    return codes, scales
+
+
+def sgd_grouped_step_ref(param_mantissas, param_scales, group_size: int, q_bits: int, grad,
+                         lr: float, weight_decay: float = 0.0):
+    """Group-quant PR3 Task 4: SGD momentum==0 update on a grouped-SYM param
+    (sgdStepM's single-op fast path, sgdUpdateKernel {param, grad} -> the
+    funnel's declared groupedSymOperandPos==1). Mirrors the executeOp funnel
+    exactly:
+      prologue: paramDeq = dequant_sym_grouped_f32(param) (float32, per-group)
+      kernel:   g = grad + wd*paramDeq;  new = paramDeq - lr*g  (float32,
+                same left-to-right op order as sgdUpdateKernel, Sgd.c)
+      epilogue: per-group absmax requant (packFloatBufferAsSym's grouped
+                path), HALF_AWAY -- holds only if the optimizer's
+                writeBackRounding is HALF_AWAY (the fixture must call
+                optimizerSetWriteBackRounding(optim, HALF_AWAY); factories
+                default to seeded SR_HALF_AWAY, #279).
+    `grad` is per-tensor FLOAT32 (the gradInit default -- no dequant/prologue
+    conversion needed for it). Returns (new_mantissas: list[int],
+    new_scales: list[float])."""
+    param_deq = dequant_sym_grouped_f32(param_mantissas, param_scales, group_size)
+    g = torch.as_tensor(grad, dtype=torch.float32)
+    lr_t = torch.tensor(lr, dtype=torch.float32)
+    wd_t = torch.tensor(weight_decay, dtype=torch.float32)
+    combined = g + wd_t * param_deq
+    new_param = param_deq - lr_t * combined
+    return requant_absmax_grouped_f32(new_param, q_bits, group_size)

@@ -6,6 +6,7 @@
 
 #include "ArithmeticType.h"
 #include "BorrowedLayer.h"
+#include "DeathTest.h"
 #include "Layer.h"
 #include "Linear.h"
 #include "LinearApi.h"
@@ -682,6 +683,51 @@ void testScaleOptimizerGradients_Asym_DequantEquivalence(void) {
     }
 }
 
+/* Group-quant PR3 Task 4: defensive belt-and-suspenders fail-fast on the
+ * SYM grad arm. gradInit's own carrier gate already rejects a grouped SYM
+ * template before a grad tensor is ever built through the sanctioned API
+ * (grads are per-tensor unconditionally, symQConfig_t's carrier-gate doc
+ * comment, #300 axis) -- so this fixture bypasses gradInit entirely and
+ * hand-builds a grouped SYM grad tensor directly (initTensor +
+ * quantizationInitSymGrouped), exactly the kind of hand-assembled optimizer
+ * this file's other builders (buildSymOneLayerOptim etc.) and the SGD/AdamW
+ * hand-built optimizer_t tests already exercise elsewhere in this tree.
+ * Folding `factor` into scales[0] alone (the per-tensor SYM arm's existing
+ * code) would silently scale ONLY group 0 and leave every other group
+ * untouched -- scaleOptimizerGradients must fail fast instead. */
+void testScaleOptimizerGradientsRejectsGroupedSymGrad(void) {
+    ASSERT_EXITS_WITH_FAILURE({
+        size_t *pDims = reserveMemory(1 * sizeof(size_t));
+        pDims[0] = 6;
+        size_t *pOrder = reserveMemory(1 * sizeof(size_t));
+        setOrderOfDimsForNewTensor(1, pOrder);
+        shape_t *pShape = reserveMemory(sizeof(shape_t));
+        setShape(pShape, pDims, 1, pOrder);
+        tensor_t *wParam = initTensor(pShape, quantizationInitFloat(), NULL);
+        tensorFillFromFloatBuffer(wParam, (float[]){0.f, 0.f, 0.f, 0.f, 0.f, 0.f}, 6);
+
+        size_t *gDims = reserveMemory(1 * sizeof(size_t));
+        gDims[0] = 6;
+        size_t *gOrder = reserveMemory(1 * sizeof(size_t));
+        setOrderOfDimsForNewTensor(1, gOrder);
+        shape_t *gShape = reserveMemory(sizeof(shape_t));
+        setShape(gShape, gDims, 1, gOrder);
+        tensor_t *wGrad = initTensor(gShape, quantizationInitSymGrouped(8, HALF_AWAY, 2, 3), NULL);
+
+        parameter_t *w = parameterInit(wParam, wGrad);
+        parameter_t *parArr[1] = {w};
+        /* Extra parens (not just the usual designated-initializer literal):
+         * the preprocessor's macro-argument comma scan only tracks real
+         * parentheses, not braces, so a bare `{a, b}` initializer here would
+         * split ASSERT_EXITS_WITH_FAILURE's single block argument in two --
+         * wrapping the whole compound literal in one more `()` pair keeps
+         * the comma enclosed. */
+        optimizer_t optim = ((optimizer_t){.parameter = parArr, .sizeStates = 1});
+
+        scaleOptimizerGradients(&optim, 2.0f);
+    });
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testScaleOptimizerGradients_DoublesGradients);
@@ -694,5 +740,6 @@ int main(void) {
     RUN_TEST(testScaleOptimizerGradients_Sym_DequantEquivalence);
     RUN_TEST(testScaleOptimizerGradients_Asym_ScalesScaleOnly);
     RUN_TEST(testScaleOptimizerGradients_Asym_DequantEquivalence);
+    RUN_TEST(testScaleOptimizerGradientsRejectsGroupedSymGrad);
     return UNITY_END();
 }

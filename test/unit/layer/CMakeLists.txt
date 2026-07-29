@@ -39,6 +39,19 @@ add_custom_command(
 add_custom_target(generate_expected_conv1d_transposed
         DEPENDS ${GEN_CONV1D_TRANSPOSED_HEADER})
 
+set(GEN_CONVT1D_GROUPED_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_convT1d_grouped.h)
+add_custom_command(
+        OUTPUT ${GEN_CONVT1D_GROUPED_HEADER}
+        COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_convT1d_grouped.py
+                --out ${GEN_CONVT1D_GROUPED_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_convT1d_grouped.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+        COMMENT "Generating expected_convT1d_grouped.h via PyTorch"
+        VERBATIM
+)
+add_custom_target(generate_expected_convT1d_grouped
+        DEPENDS ${GEN_CONVT1D_GROUPED_HEADER})
+
 set(GEN_MAX_POOL_1D_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_max_pool_1d.h)
 add_custom_command(
         OUTPUT ${GEN_MAX_POOL_1D_HEADER}
@@ -168,6 +181,7 @@ add_elastic_ai_unit_test(
         odt_test_death
 )
 add_dependencies(UnitTestConv1dTransposed generate_expected_conv1d_transposed)
+add_dependencies(UnitTestConv1dTransposed generate_expected_convT1d_grouped)
 target_include_directories(UnitTestConv1dTransposed PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 add_elastic_ai_unit_test(

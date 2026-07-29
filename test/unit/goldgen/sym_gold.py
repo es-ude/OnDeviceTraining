@@ -455,3 +455,76 @@ def conv1d_grouped_ref(x_mantissas, in_scale: float, w_mantissas, w_scales, grou
                 acc += rescale_f32(partial, param_scale, s_acc)
                 out.append(acc)
     return out, s_acc, out_len
+
+
+# ---- Group-quant PR3 Task 2: grouped-weight ConvT1d SCATTER-core reference
+# (per-PRODUCT rescale-combine), convTranspose1dKernelSymInt32Grouped's kernel
+# emulation. Deliberately NOT the running-partial idiom of matmul_grouped_ref/
+# conv1d_grouped_ref: a scatter's consecutive products land in DIFFERENT
+# output elements (outIdx = inPos*stride + k*dilation moves with k), so there
+# is no per-(target, group) run across which a raw int partial could be
+# carried -- each product is folded into the accumulator scale immediately.
+# Error consequence: every contributing product rounds independently (<= 0.5
+# quanta of s_acc each), so an output element that C products scatter into
+# carries |err| <= 0.5*C*s_acc worst case vs exact arithmetic. ----
+
+
+def convT1d_grouped_ref(x_mantissas, in_scale: float, w_mantissas, w_scales, group_size: int,
+                        batch: int, in_channels: int, out_channels: int, kernel_size: int,
+                        input_length: int, stride: int = 1, dilation: int = 1,
+                        output_padding: int = 0, bias_mantissas=None, bias_scale=None):
+    """Emulates convTranspose1dKernelSymInt32Grouped exactly: python-int
+    products (exact), ONE rescale_f32 (HALF_AWAY) per product into s_acc =
+    float32(in_scale) * float32(max(w_scales)), accumulated (exact int adds)
+    into the scattered output element; bias AFTER the scatter, per the C pass
+    order (rescale_f32(bias[oc], bias_scale, s_acc) added to every (b, oc, l)).
+
+    VALID-only geometry (Phase-1 ConvT1d forward contract, and the only
+    padding these fixtures use): pad_left = 0, out_len = (input_length-1)*
+    stride + dilation*(kernel_size-1) + output_padding + 1.
+
+    `w_mantissas` is ConvT1d's [in_channels, out_channels, kernel_size]
+    row-major flat storage (conv-groups == 1 here -- quantization groups
+    only, mirroring conv1d_grouped_ref's scope): the weight index for
+    (ic, oc, k) is (ic*out_channels + oc)*kernel_size + k -- the SAME flat
+    index convTranspose1dKernelSymInt32Grouped reads at (:235's wArr[...]),
+    so the per-product group is g = w_idx // group_size directly.
+
+    NOTE on "per-channel" in THIS layout: a contiguous storage group only
+    ever spans consecutive flat indices, and ConvT1d storage interleaves
+    output channels INSIDE each input-channel slab -- so groupSize =
+    out_channels*kernel_size ("per-channel" fixture) means one group per
+    INPUT channel (one ic-slab), NOT per output channel. A per-OUTPUT-channel
+    grouping is not expressible as contiguous groups in this layout at all.
+
+    `x_mantissas` is [batch, in_channels, input_length] row-major flat.
+    Returns (out flat [batch*out_channels*out_len], s_acc, out_len)."""
+    out_len = (input_length - 1) * stride + dilation * (kernel_size - 1) + output_padding + 1
+    max_scale = max(w_scales)
+    s_acc = (torch.tensor(in_scale, dtype=torch.float32) *
+            torch.tensor(max_scale, dtype=torch.float32)).item()
+    # Per-group product scale, float32-mirrored exactly like the C kernel's
+    # inScale * weightGroups->scales[g] (both float32 operands, float32 mul).
+    param_scales = [(torch.tensor(in_scale, dtype=torch.float32) *
+                    torch.tensor(s, dtype=torch.float32)).item() for s in w_scales]
+
+    out = [0] * (batch * out_channels * out_len)
+    for b in range(batch):
+        for ic in range(in_channels):
+            for in_pos in range(input_length):
+                x_val = x_mantissas[(b * in_channels + ic) * input_length + in_pos]
+                for oc in range(out_channels):
+                    for k in range(kernel_size):
+                        out_idx = in_pos * stride + k * dilation
+                        w_idx = (ic * out_channels + oc) * kernel_size + k
+                        g = w_idx // group_size
+                        out[(b * out_channels + oc) * out_len + out_idx] += rescale_f32(
+                            x_val * w_mantissas[w_idx], param_scales[g], s_acc)
+
+    if bias_mantissas is not None:
+        for oc in range(out_channels):
+            seed = rescale_f32(bias_mantissas[oc], bias_scale, s_acc)
+            for b in range(batch):
+                for l in range(out_len):
+                    out[(b * out_channels + oc) * out_len + l] += seed
+    return out, s_acc, out_len

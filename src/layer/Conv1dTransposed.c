@@ -64,15 +64,28 @@ void initConv1dTransposedConfigWithWeightsAndBias(
     cfg->frozen = false;
 }
 
-/* executeOp forward kernel adapters — ctx = conv1dTransposedConfig_t* for
- * kernel_t/groups/outputPadding geometry (mirrors the backward adapters
- * below and Conv1d.c's forward adapters). operands are {input, weights} or
+/* Group-quant PR3 (Task 2): forward's ctx must carry BOTH the layer's
+ * kernel_t/groups/outputPadding geometry (conv1dTransposedConfig_t, needed
+ * by every adapter below) AND -- only when the stored weight is grouped SYM
+ * -- the ORIGINAL symQConfig_t carrying the real per-group scales.
+ * executeOp's prologue hands the kernel only the UNPACKED, poisoned-scale
+ * scratch (ops[1]), never the source tensor (ExecuteOp.c), so the group
+ * shape must travel via ctx -- the identical wrapper Conv1d.c grew in PR2.
+ * Set together with groupedSymOperandPos (conv1dTransposedForward, below)
+ * -- both or neither, same invariant as Linear.c/Conv1d.c. */
+typedef struct convT1dForwardCtx {
+    const conv1dTransposedConfig_t *cfg;
+    const symQConfig_t *weightGroups; /* NULL unless cfg->weights->param is grouped SYM */
+} convT1dForwardCtx_t;
+
+/* executeOp forward kernel adapters — operands are {input, weights} or
  * {input, weights, bias} (bias omitted, not NULL-padded, when the layer has
  * no bias). */
 static void forwardKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                                const void *ctx) {
     (void)auxOut;
-    const conv1dTransposedConfig_t *cfg = ctx;
+    const convT1dForwardCtx_t *fctx = ctx;
+    const conv1dTransposedConfig_t *cfg = fctx->cfg;
     tensor_t *bias = (n > 2) ? ops[2] : NULL;
     convTranspose1dKernelFloat32(ops[0], ops[1], bias, cfg->kernel, cfg->groups, cfg->outputPadding,
                                  rawOut);
@@ -80,10 +93,16 @@ static void forwardKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tenso
 static void forwardKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                              const void *ctx) {
     (void)auxOut;
-    const conv1dTransposedConfig_t *cfg = ctx;
+    const convT1dForwardCtx_t *fctx = ctx;
+    const conv1dTransposedConfig_t *cfg = fctx->cfg;
     tensor_t *bias = (n > 2) ? ops[2] : NULL;
-    convTranspose1dKernelSymInt32(ops[0], ops[1], bias, cfg->kernel, cfg->groups,
-                                  cfg->outputPadding, rawOut);
+    if (fctx->weightGroups != NULL) {
+        convTranspose1dKernelSymInt32Grouped(ops[0], ops[1], bias, cfg->kernel, cfg->groups,
+                                             cfg->outputPadding, rawOut, fctx->weightGroups);
+    } else {
+        convTranspose1dKernelSymInt32(ops[0], ops[1], bias, cfg->kernel, cfg->groups,
+                                      cfg->outputPadding, rawOut);
+    }
 }
 
 void conv1dTransposedForward(layer_t *layer, tensor_t *input, tensor_t *output) {
@@ -91,17 +110,36 @@ void conv1dTransposedForward(layer_t *layer, tensor_t *input, tensor_t *output) 
     tensor_t *weightTensor = cfg->weights->param;
     tensor_t *biasTensor = cfg->bias ? cfg->bias->param : NULL;
 
+    /* Group-quant PR3 (Task 2, inverting PR2's ConvT deny-pin): a stored SYM
+     * weight with numGroups > 1 routes the SYM kernel adapter to the grouped
+     * SCATTER-core entry (weightGroups carried via ctx) AND opts the
+     * funnel's prologue into unpacking the grouped operand
+     * (groupedSymOperandPos), always together -- mirrors conv1dForward's
+     * identical wiring (Conv1d.c) exactly. Per-tensor SYM (numGroups==1) and
+     * SYM_INT32 weights are untouched. weightTensor is always inputs[1]
+     * (bias present or not) in BOTH math arms -- the FLOAT32 arm must
+     * declare the SAME position as the SYM arm (PR2 final-review Fix 3(b)
+     * lesson: a grouped weight forwarded under FLOAT32 math dequantizes via
+     * the funnel's group-aware convertTensor cell, gated on this field
+     * exactly like the SYM arm's unpack). */
+    bool grouped = weightTensor->quantization->type == SYM &&
+                   ((symQConfig_t *)weightTensor->quantization->qConfig)->numGroups > 1;
+    const symQConfig_t *weightGroups =
+        grouped ? (const symQConfig_t *)weightTensor->quantization->qConfig : NULL;
+    convT1dForwardCtx_t fctx = {.cfg = cfg, .weightGroups = weightGroups};
+
     switch (cfg->forwardMath.type) {
     case ARITH_FLOAT32:
         executeOp(
             &(opSpec_t){
                 .kernel = forwardKernelFloat,
-                .ctx = cfg,
+                .ctx = &fctx,
                 .inputs = biasTensor != NULL ? (tensor_t *[]){input, weightTensor, biasTensor}
                                              : (tensor_t *[]){input, weightTensor},
                 .nInputs = biasTensor != NULL ? 3 : 2,
                 .arithmetic = cfg->forwardMath,
                 .mode = OUT_WRITE,
+                .groupedSymOperandPos = grouped ? 2 : 0,
             },
             output);
         break;
@@ -109,12 +147,13 @@ void conv1dTransposedForward(layer_t *layer, tensor_t *input, tensor_t *output) 
         executeOp(
             &(opSpec_t){
                 .kernel = forwardKernelSym,
-                .ctx = cfg,
+                .ctx = &fctx,
                 .inputs = biasTensor != NULL ? (tensor_t *[]){input, weightTensor, biasTensor}
                                              : (tensor_t *[]){input, weightTensor},
                 .nInputs = biasTensor != NULL ? 3 : 2,
                 .arithmetic = cfg->forwardMath,
                 .mode = OUT_WRITE,
+                .groupedSymOperandPos = grouped ? 2 : 0,
             },
             output);
         break;

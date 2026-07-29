@@ -1624,11 +1624,13 @@ static tensor_t *buildSymInt32TensorExact(size_t numDims, const size_t *dimsIn,
 /*! Builds the shared grouped-SYM weight/bias/input Conv1d layer (borrowed,
  *  no grad buffers -- grouped grads are a future axis, #300 -- mirrors
  *  UnitTestLinear.c's buildGroupedFixtureLayer exactly). `numGroups`/
- *  `groupSize`/`wScales` vary per fixture (perChannel vs general); the
- *  weight/bias/input mantissas are the SAME shared fixture data. */
+ *  `groupSize`/`wScales` vary per fixture (perChannel vs general vs the PR3
+ *  samePad shape); `padding` is VALID for all PR2 fixtures and SAME for the
+ *  PR3 padding-coverage fixture; the weight/bias/input mantissas are the
+ *  SAME shared fixture data. */
 static layer_t *buildGroupedConv1dFixtureLayer(quantization_t *q, size_t numGroups,
                                                size_t groupSize, const float *wScales,
-                                               tensor_t **inputOut) {
+                                               paddingType_t padding, tensor_t **inputOut) {
     size_t weightDims[] = {(size_t)kConv1dGroupedOutChannels, (size_t)kConv1dGroupedInChannels,
                            (size_t)kConv1dGroupedKernelSize};
     size_t *ownedWeightDims = reserveMemory(3 * sizeof(size_t));
@@ -1660,7 +1662,7 @@ static layer_t *buildGroupedConv1dFixtureLayer(quantization_t *q, size_t numGrou
     *inputOut = input;
 
     kernel_t *kernel = reserveMemory(sizeof(kernel_t));
-    initKernel(kernel, (size_t)kConv1dGroupedKernelSize, VALID, 1, 1);
+    initKernel(kernel, (size_t)kConv1dGroupedKernelSize, padding, 1, 1);
 
     return buildBorrowedConv1dLayer(weights, bias, kernel, q);
 }
@@ -1690,9 +1692,9 @@ static layer_t *buildGroupedConv1dFixtureLayer(quantization_t *q, size_t numGrou
 void testConv1dForwardGroupedPerChannelMatchesGold(void) {
     quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
     tensor_t *input = NULL;
-    layer_t *conv1d =
-        buildGroupedConv1dFixtureLayer(testQ, (size_t)kPerChannelNumGroups,
-                                       (size_t)kPerChannelGroupSize, kPerChannelWScales, &input);
+    layer_t *conv1d = buildGroupedConv1dFixtureLayer(testQ, (size_t)kPerChannelNumGroups,
+                                                     (size_t)kPerChannelGroupSize,
+                                                     kPerChannelWScales, VALID, &input);
 
     size_t outputDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kConv1dGroupedOutChannels,
                            (size_t)kPerChannelOutLen};
@@ -1710,8 +1712,9 @@ void testConv1dForwardGroupedPerChannelMatchesGold(void) {
 void testConv1dForwardGroupedGeneralMatchesGold(void) {
     quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
     tensor_t *input = NULL;
-    layer_t *conv1d = buildGroupedConv1dFixtureLayer(
-        testQ, (size_t)kGeneralNumGroups, (size_t)kGeneralGroupSize, kGeneralWScales, &input);
+    layer_t *conv1d =
+        buildGroupedConv1dFixtureLayer(testQ, (size_t)kGeneralNumGroups, (size_t)kGeneralGroupSize,
+                                       kGeneralWScales, VALID, &input);
 
     size_t outputDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kConv1dGroupedOutChannels,
                            (size_t)kGeneralOutLen};
@@ -1746,7 +1749,8 @@ void testConv1dForwardGroupedEqualScalesBitIdenticalToScalar(void) {
 
     float groupScales[3] = {commonScale, commonScale, commonScale};
     tensor_t *groupedInput = NULL;
-    layer_t *groupedLayer = buildGroupedConv1dFixtureLayer(testQ, 3, 6, groupScales, &groupedInput);
+    layer_t *groupedLayer =
+        buildGroupedConv1dFixtureLayer(testQ, 3, 6, groupScales, VALID, &groupedInput);
 
     size_t outputDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kConv1dGroupedOutChannels,
                            (size_t)kPerChannelOutLen};
@@ -1802,9 +1806,9 @@ void testConv1dForwardGroupedEqualScalesBitIdenticalToScalar(void) {
 void testConv1dForwardGroupedPerChannelFloatPathAgreesWithinTolerance(void) {
     quantization_t *floatQ = quantizationInitFloat();
     tensor_t *input = NULL;
-    layer_t *conv1d =
-        buildGroupedConv1dFixtureLayer(floatQ, (size_t)kPerChannelNumGroups,
-                                       (size_t)kPerChannelGroupSize, kPerChannelWScales, &input);
+    layer_t *conv1d = buildGroupedConv1dFixtureLayer(floatQ, (size_t)kPerChannelNumGroups,
+                                                     (size_t)kPerChannelGroupSize,
+                                                     kPerChannelWScales, VALID, &input);
 
     size_t outputDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kConv1dGroupedOutChannels,
                            (size_t)kPerChannelOutLen};
@@ -1817,6 +1821,249 @@ void testConv1dForwardGroupedPerChannelFloatPathAgreesWithinTolerance(void) {
     for (size_t i = 0; i < kPerChannelOutMantissas_len; i++) {
         float expected = (float)kPerChannelOutMantissas[i] * kPerChannelOutScale;
         TEST_ASSERT_FLOAT_WITHIN(tolerance, expected, captured[i]);
+    }
+}
+
+/* ---- Group-quant PR3 (Task 3): Conv1d backward dx with a grouped SYM
+ * weight -- the adjoint SCATTER (convTranspose1dKernelSymInt32Grouped in the
+ * adjoint role, per-PRODUCT rescale into s_acc = lossScale*max(scales)).
+ * Fixture: the VALID forward fixture's weight/group shapes with a seeded
+ * random SYM_INT32 lossGrad [1, 3, 4] (generate_expected_conv1d_grouped.py's
+ * dx fixtures, torch-autograd cross-checked there). ---- */
+
+/*! Shared dx-fixture plumbing (mirrors UnitTestLinear.c's
+ *  runGroupedDxBackward): builds the grouped VALID fixture layer, FREEZES it
+ *  (the borrowed fixture parameters carry no grad buffers, and dx is the
+ *  ONLY backward op that consumes the (grouped) weight tensor -- the
+ *  weight/bias grad ops take {fwdIn, loss}/{loss} and are pinned by the
+ *  existing SYM backward tests -- so freezing scopes these tests to the dx
+ *  wire; #380: frozen layers still propagate loss), then runs conv1dBackward
+ *  with the gold lossGrad into a FLOAT32 propLoss wire and returns it. */
+static tensor_t *runGroupedConv1dDxBackward(quantization_t *q, size_t numGroups, size_t groupSize,
+                                            const float *wScales) {
+    tensor_t *input = NULL;
+    layer_t *conv1d =
+        buildGroupedConv1dFixtureLayer(q, numGroups, groupSize, wScales, VALID, &input);
+    conv1d->config->conv1d->frozen = true;
+
+    size_t lossDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kConv1dGroupedOutChannels,
+                         (size_t)kConv1dDxFwdOutLen};
+    tensor_t *lossGrad =
+        buildSymInt32TensorExact(3, lossDims, kConv1dDxLossMantissas, kConv1dDxLossScale);
+
+    size_t propLossDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kConv1dGroupedInChannels,
+                             (size_t)kConv1dGroupedInputLength};
+    tensor_t *propLoss = makeFloatTensor(propLossDims, 3, NULL);
+
+    conv1dBackward(conv1d, input, lossGrad, propLoss);
+    return propLoss;
+}
+
+/* Exact FLOAT32-wire compare against the RAW adjoint-scatter gold (the
+ * grouped forward tests' ratified design, see
+ * testConv1dForwardGroupedPerChannelMatchesGold's comment on why the exact
+ * dequant wire has no wrong-but-sound-scale blind spot): propLossMath stays
+ * SYM_INT32, the propLoss WIRE is FLOAT32, so the OUT_WRITE epilogue takes
+ * the exact SYM_INT32->FLOAT32 cell. Routes through conv1dBackward ->
+ * executeOp's grouped-operand gate, so the dx opSpec's groupedSymOperandPos
+ * declaration is under test too (removing it dies with the funnel deny). */
+void testConv1dBackwardGroupedDxPerChannelMatchesGold(void) {
+    quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
+    tensor_t *propLoss = runGroupedConv1dDxBackward(
+        testQ, (size_t)kPerChannelNumGroups, (size_t)kPerChannelGroupSize, kPerChannelWScales);
+
+    float *captured = (float *)propLoss->data;
+    for (size_t i = 0; i < kDxPerChannelOutMantissas_len; i++) {
+        float expected = (float)kDxPerChannelOutMantissas[i] * kDxPerChannelOutScale;
+        TEST_ASSERT_EQUAL_FLOAT(expected, captured[i]);
+    }
+}
+
+void testConv1dBackwardGroupedDxGeneralMatchesGold(void) {
+    quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
+    tensor_t *propLoss = runGroupedConv1dDxBackward(testQ, (size_t)kGeneralNumGroups,
+                                                    (size_t)kGeneralGroupSize, kGeneralWScales);
+
+    float *captured = (float *)propLoss->data;
+    for (size_t i = 0; i < kDxGeneralOutMantissas_len; i++) {
+        float expected = (float)kDxGeneralOutMantissas[i] * kDxGeneralOutScale;
+        TEST_ASSERT_EQUAL_FLOAT(expected, captured[i]);
+    }
+}
+
+/* Equal-scales dx twin: same argument as
+ * testConv1dForwardGroupedEqualScalesBitIdenticalToScalar, transplanted to
+ * the adjoint scatter. All group scales are the SAME power-of-two value
+ * (0.25f) and the loss scale (0.5f) is a power of two, so sAcc and every
+ * product's paramScale are BIT-IDENTICAL float32 values and each per-product
+ * rescale is an EXACT identity (multiply/divide by the same power of two are
+ * pure exponent shifts; the products, <= 40*5 = 200, are exactly
+ * representable) -- the grouped scatter's raw dx must be BIT-IDENTICAL to
+ * the scalar convTranspose1dKernelSymInt32 adjoint on the same mantissas
+ * with weight scale == the common group scale. Both wires are FLOAT32, so
+ * identical raw (mantissa, scale) pairs dequantize to identical floats. */
+void testConv1dBackwardGroupedDxEqualScalesBitIdenticalToScalar(void) {
+    const float commonScale = 0.25f;
+    quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
+
+    float groupScales[3] = {commonScale, commonScale, commonScale};
+    tensor_t *groupedPropLoss = runGroupedConv1dDxBackward(testQ, 3, 6, groupScales);
+
+    size_t weightDims[] = {(size_t)kConv1dGroupedOutChannels, (size_t)kConv1dGroupedInChannels,
+                           (size_t)kConv1dGroupedKernelSize};
+    tensor_t *scalarWeightParam =
+        buildSymInt32TensorExact(3, weightDims, kConv1dGroupedWMantissas, commonScale);
+    parameter_t *scalarWeights = parameterInit(scalarWeightParam, NULL);
+
+    size_t biasDims[] = {(size_t)kConv1dGroupedOutChannels};
+    tensor_t *scalarBiasParam =
+        buildSymInt32TensorExact(1, biasDims, kConv1dGroupedBiasMantissas, kConv1dGroupedBiasScale);
+    parameter_t *scalarBias = parameterInit(scalarBiasParam, NULL);
+
+    size_t inputDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kConv1dGroupedInChannels,
+                          (size_t)kConv1dGroupedInputLength};
+    tensor_t *scalarInput =
+        buildSymInt32TensorExact(3, inputDims, kConv1dGroupedXMantissas, kConv1dGroupedXScale);
+
+    kernel_t *scalarKernel = reserveMemory(sizeof(kernel_t));
+    initKernel(scalarKernel, (size_t)kConv1dGroupedKernelSize, VALID, 1, 1);
+    layer_t *scalarLayer = buildBorrowedConv1dLayer(scalarWeights, scalarBias, scalarKernel, testQ);
+    scalarLayer->config->conv1d->frozen = true;
+
+    size_t lossDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kConv1dGroupedOutChannels,
+                         (size_t)kConv1dDxFwdOutLen};
+    tensor_t *lossGrad =
+        buildSymInt32TensorExact(3, lossDims, kConv1dDxLossMantissas, kConv1dDxLossScale);
+    tensor_t *scalarPropLoss = makeFloatTensor(inputDims, 3, NULL);
+    conv1dBackward(scalarLayer, scalarInput, lossGrad, scalarPropLoss);
+
+    bool nonDegenerate = false;
+    for (size_t i = 0; i < kDxPerChannelOutMantissas_len; i++) {
+        if (((float *)groupedPropLoss->data)[i] != 0.0f) {
+            nonDegenerate = true;
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(nonDegenerate, "grouped dx twin is vacuously all-zero");
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY((float *)scalarPropLoss->data, (float *)groupedPropLoss->data,
+                                  kDxPerChannelOutMantissas_len);
+}
+
+/* FLOAT32 dx path on the SAME grouped-SYM weight and SYM_INT32 lossGrad
+ * (only propLossMath differs): the executeOp prologue dequantizes both
+ * operands (grouped weight through the group-aware SYM->FLOAT32 cell, gated
+ * by the FLOAT32 arm's groupedSymOperandPos declaration -- the arm-parity
+ * lesson from PR2's final review), then the float scatter computes the
+ * reference value with NO per-product rounding.
+ *
+ * Tolerance derivation (scatter error model, |err| <= 0.5*C*s_acc): the SYM
+ * gold rounds ONCE PER CONTRIBUTING PRODUCT. C for this geometry (VALID
+ * forward K=3, stride=1, L=6, Lout=4): dx[l] receives one product per
+ * (outPos, k) with outPos + k == l, i.e. 1,2,3,3,2,1 for l = 0..5, times
+ * Cout = 3 => C = 3,6,9,9,6,3; C_max = Cout*K = 9
+ * (= kConv1dDxMaxProductsPerOut, generator-asserted). dx has NO bias seed
+ * (unlike the forward's +1 term). Bound: 0.5*C_max*s_acc = 4.5 *
+ * kDxPerChannelOutScale, plus 1e-6f headroom for float32 noise. */
+void testConv1dBackwardGroupedDxFloatPathAgreesWithinTolerance(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    tensor_t *propLoss = runGroupedConv1dDxBackward(
+        floatQ, (size_t)kPerChannelNumGroups, (size_t)kPerChannelGroupSize, kPerChannelWScales);
+
+    float *captured = (float *)propLoss->data;
+    const float tolerance =
+        0.5f * (float)kConv1dDxMaxProductsPerOut * kDxPerChannelOutScale + 1e-6f;
+    for (size_t i = 0; i < kDxPerChannelOutMantissas_len; i++) {
+        float expected = (float)kDxPerChannelOutMantissas[i] * kDxPerChannelOutScale;
+        TEST_ASSERT_FLOAT_WITHIN(tolerance, expected, captured[i]);
+    }
+}
+
+/* ---- Group-quant PR3 (Task 3): PR2's two disclosed forward coverage gaps.
+ * (a) SAME padding x quant-groups: groupSize=2 places a group boundary
+ * between two VISITED taps INSIDE a padding-clipped window (out_pos=0 clips
+ * to taps k=1,2; their w_idx 1|2 straddle the g0|g1 boundary --
+ * generator-PROVED geometry, assert_same_padding_geometry) -- the
+ * per-element group lookup's raison d'être: a lookup held per (oc, ic) row
+ * (run-based assumption) misattributes tap k=2 and FAILS this gold. ---- */
+void testConv1dForwardGroupedSamePaddingMatchesGold(void) {
+    quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
+    tensor_t *input = NULL;
+    layer_t *conv1d = buildGroupedConv1dFixtureLayer(
+        testQ, (size_t)kSamePadNumGroups, (size_t)kSamePadGroupSize, kSamePadWScales, SAME, &input);
+
+    size_t outputDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kConv1dGroupedOutChannels,
+                           (size_t)kSamePadOutLen};
+    tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
+
+    conv1dForward(conv1d, input, output);
+
+    float *captured = (float *)output->data;
+    for (size_t i = 0; i < kSamePadOutMantissas_len; i++) {
+        float expected = (float)kSamePadOutMantissas[i] * kSamePadOutScale;
+        TEST_ASSERT_EQUAL_FLOAT(expected, captured[i]);
+    }
+}
+
+/* (b) conv-groups=2 x quant-groups: weight [4, 2, 3] (24 elements), quant
+ * groupSize=4 -- quant boundaries {4,8,12,16,20} vs channel-row starts
+ * {6,12,18}: the two group systems disagree (generator-asserted), so a
+ * kernel that bound the quant group to channel structure instead of flat
+ * storage would diverge. Layer hand-wired (the borrowed builder is
+ * groups=1-only). */
+static layer_t *buildConvGroupsGroupedFixtureLayer(quantization_t *q, tensor_t **inputOut) {
+    size_t weightDims[] = {(size_t)kCgOutChannels, (size_t)kCgInChannels / (size_t)kCgConvGroups,
+                           (size_t)kCgKernelSize};
+    size_t *ownedWeightDims = reserveMemory(3 * sizeof(size_t));
+    memcpy(ownedWeightDims, weightDims, sizeof(weightDims));
+    size_t *weightOrder = reserveMemory(3 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(3, weightOrder);
+    shape_t *weightShape = reserveMemory(sizeof(shape_t));
+    setShape(weightShape, ownedWeightDims, 3, weightOrder);
+    tensor_t *weightsParam = initTensor(
+        weightShape,
+        quantizationInitSymGrouped(12, HALF_AWAY, (size_t)kCgNumGroups, (size_t)kCgGroupSize),
+        NULL);
+    byteConversion((uint8_t *)kCgWMantissas, 32, weightsParam->data, 12, kCgWMantissas_len);
+    symQConfig_t *weightQC = weightsParam->quantization->qConfig;
+    for (size_t g = 0; g < (size_t)kCgNumGroups; g++) {
+        weightQC->scales[g] = kCgWScales[g];
+    }
+    parameter_t *weights = parameterInit(weightsParam, NULL);
+
+    size_t biasDims[] = {(size_t)kCgOutChannels};
+    tensor_t *biasParam = buildSymInt32TensorExact(1, biasDims, kCgBiasMantissas, kCgBiasScale);
+    parameter_t *bias = parameterInit(biasParam, NULL);
+
+    size_t inputDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kCgInChannels,
+                          (size_t)kCgInputLength};
+    *inputOut = buildSymInt32TensorExact(3, inputDims, kCgXMantissas, kCgXScale);
+
+    kernel_t *kernel = reserveMemory(sizeof(kernel_t));
+    initKernel(kernel, (size_t)kCgKernelSize, VALID, 1, 1);
+
+    conv1dConfig_t *cfg = reserveMemory(sizeof(conv1dConfig_t));
+    initConv1dConfigWithWeightsAndBias(cfg, kernel, weights, bias, (size_t)kCgConvGroups, q, q, q,
+                                       q);
+    layerConfig_t *layerCfg = reserveMemory(sizeof(layerConfig_t));
+    layerCfg->conv1d = cfg;
+    layer_t *layer = reserveMemory(sizeof(layer_t));
+    initLayer(layer, CONV1D, layerCfg);
+    return layer;
+}
+
+void testConv1dForwardGroupedConvGroupsMatchesGold(void) {
+    quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
+    tensor_t *input = NULL;
+    layer_t *conv1d = buildConvGroupsGroupedFixtureLayer(testQ, &input);
+
+    size_t outputDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kCgOutChannels, (size_t)kCgOutLen};
+    tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
+
+    conv1dForward(conv1d, input, output);
+
+    float *captured = (float *)output->data;
+    for (size_t i = 0; i < kCgOutMantissas_len; i++) {
+        float expected = (float)kCgOutMantissas[i] * kCgOutScale;
+        TEST_ASSERT_EQUAL_FLOAT(expected, captured[i]);
     }
 }
 
@@ -1868,5 +2115,11 @@ int main() {
     RUN_TEST(testConv1dForwardGroupedGeneralMatchesGold);
     RUN_TEST(testConv1dForwardGroupedEqualScalesBitIdenticalToScalar);
     RUN_TEST(testConv1dForwardGroupedPerChannelFloatPathAgreesWithinTolerance);
+    RUN_TEST(testConv1dBackwardGroupedDxPerChannelMatchesGold);
+    RUN_TEST(testConv1dBackwardGroupedDxGeneralMatchesGold);
+    RUN_TEST(testConv1dBackwardGroupedDxEqualScalesBitIdenticalToScalar);
+    RUN_TEST(testConv1dBackwardGroupedDxFloatPathAgreesWithinTolerance);
+    RUN_TEST(testConv1dForwardGroupedSamePaddingMatchesGold);
+    RUN_TEST(testConv1dForwardGroupedConvGroupsMatchesGold);
     return UNITY_END();
 }

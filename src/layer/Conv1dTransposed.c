@@ -72,7 +72,11 @@ void initConv1dTransposedConfigWithWeightsAndBias(
  * scratch (ops[1]), never the source tensor (ExecuteOp.c), so the group
  * shape must travel via ctx -- the identical wrapper Conv1d.c grew in PR2.
  * Set together with groupedSymOperandPos (conv1dTransposedForward, below)
- * -- both or neither, same invariant as Linear.c/Conv1d.c. */
+ * -- both or neither, same invariant as Linear.c/Conv1d.c. PR3 (Task 3):
+ * the dx (propLoss) adapters carry the SAME wrapper -- dx consumes the
+ * weight AS STORED through the adjoint gather, whose group binding is to
+ * flat storage, so the identical {cfg, weightGroups} pair serves both
+ * directions. */
 typedef struct convT1dForwardCtx {
     const conv1dTransposedConfig_t *cfg;
     const symQConfig_t *weightGroups; /* NULL unless cfg->weights->param is grouped SYM */
@@ -473,12 +477,20 @@ void conv1dTransposedCalcBiasGradsSymInt32(conv1dTransposedConfig_t *cfg, tensor
 
 /* dL/dx via the adjoint: conv1d-correlation of lossGrad with weight. The
  * kernel here uses VALID (Phase-1 contract); conv1dKernelFloat32/SymInt32
- * accept the same weight tensor (no flip needed, per spec §5.2). */
+ * accept the same weight tensor (no flip needed, per spec §5.2).
+ * PR3 (Task 3): ctx = convT1dForwardCtx_t* (the same wrapper as forward) --
+ * the gather kernel's weight index arithmetic
+ * ((oc*inChPerGroup + icOffset)*K + k, Conv1dKernel.c) computes exactly the
+ * ConvT1d weight's [Cin, Cout/groups, K] flat storage index in this adjoint
+ * role, so a grouped weight's storage-bound quantization groups apply
+ * unchanged: route to the grouped GATHER entry with the stored weight's own
+ * symQConfig_t. */
 static void propLossKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                                 const void *ctx) {
     (void)n;
     (void)auxOut;
-    const conv1dTransposedConfig_t *cfg = ctx;
+    const convT1dForwardCtx_t *fctx = ctx;
+    const conv1dTransposedConfig_t *cfg = fctx->cfg;
     conv1dKernelFloat32(ops[0], ops[1], NULL, cfg->kernel, cfg->groups, rawOut);
 }
 
@@ -486,8 +498,14 @@ static void propLossKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
                               const void *ctx) {
     (void)n;
     (void)auxOut;
-    const conv1dTransposedConfig_t *cfg = ctx;
-    conv1dKernelSymInt32(ops[0], ops[1], NULL, cfg->kernel, cfg->groups, rawOut);
+    const convT1dForwardCtx_t *fctx = ctx;
+    const conv1dTransposedConfig_t *cfg = fctx->cfg;
+    if (fctx->weightGroups != NULL) {
+        conv1dKernelSymInt32Grouped(ops[0], ops[1], NULL, cfg->kernel, cfg->groups, rawOut,
+                                    fctx->weightGroups);
+    } else {
+        conv1dKernelSymInt32(ops[0], ops[1], NULL, cfg->kernel, cfg->groups, rawOut);
+    }
 }
 
 void conv1dTransposedBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
@@ -534,16 +552,32 @@ void conv1dTransposedBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *
      * propLoss == NULL (#380 PR2): grads-only call -- skip the dx write
      * entirely rather than dereference the absent buffer. */
     if (propLoss != NULL) {
+        tensor_t *weightTensor = cfg->weights->param;
+
+        /* Group-quant PR3 (Task 3): same detection + always-together wiring
+         * as conv1dTransposedForward (see the comment there) -- ctx routes
+         * the SYM dx adapter to the grouped GATHER entry,
+         * groupedSymOperandPos opts the funnel prologue into unpacking (SYM
+         * arm) / group-aware dequant (FLOAT32 arm) of the weight at
+         * inputs[1] (position 2), declared on BOTH math arms (PR2
+         * final-review arm-parity lesson). */
+        bool grouped = weightTensor->quantization->type == SYM &&
+                       ((symQConfig_t *)weightTensor->quantization->qConfig)->numGroups > 1;
+        const symQConfig_t *weightGroups =
+            grouped ? (const symQConfig_t *)weightTensor->quantization->qConfig : NULL;
+        convT1dForwardCtx_t fctx = {.cfg = cfg, .weightGroups = weightGroups};
+
         switch (cfg->propLossMath.type) {
         case ARITH_FLOAT32:
             executeOp(
                 &(opSpec_t){
                     .kernel = propLossKernelFloat,
-                    .ctx = cfg,
-                    .inputs = (tensor_t *[]){lossGrad, cfg->weights->param},
+                    .ctx = &fctx,
+                    .inputs = (tensor_t *[]){lossGrad, weightTensor},
                     .nInputs = 2,
                     .arithmetic = cfg->propLossMath,
                     .mode = OUT_WRITE,
+                    .groupedSymOperandPos = grouped ? 2 : 0,
                 },
                 propLoss);
             break;
@@ -551,11 +585,12 @@ void conv1dTransposedBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *
             executeOp(
                 &(opSpec_t){
                     .kernel = propLossKernelSym,
-                    .ctx = cfg,
-                    .inputs = (tensor_t *[]){lossGrad, cfg->weights->param},
+                    .ctx = &fctx,
+                    .inputs = (tensor_t *[]){lossGrad, weightTensor},
                     .nInputs = 2,
                     .arithmetic = cfg->propLossMath,
                     .mode = OUT_WRITE,
+                    .groupedSymOperandPos = grouped ? 2 : 0,
                 },
                 propLoss);
             break;

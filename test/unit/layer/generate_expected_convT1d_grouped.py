@@ -57,6 +57,17 @@ test):
         exactly the value emitted as kConvTGroupedMaxProductsPerOut -- the C
         float-path test derives its tolerance bound 0.5*(C+1)*s_acc from it.
 
+Group-quant PR3 (Task 3) addition -- ConvT1d dx (adjoint GATHER): backward
+propLoss consumes the grouped weight through conv1dKernelSymInt32Grouped in
+the adjoint role (running group-partial, one rescale-combine per group RUN of
+the reduction, s_acc = lossScale*max(scales)). Gold via
+sym_gold.convT1d_dx_grouped_ref (the PR2 gather emulation under the
+ConvT1d-adjoint parameter remapping); cross-checked against a PyTorch float
+autograd reference (y.backward(lossGrad)) within the per-element bound
+0.5*C_i*s_acc, C_i = combines (group runs) per output reduction -- the gather
+error model, vs the scatter's per-product model above. The per-fixture max
+C_i is emitted (kConvTDx*MaxCombines) for the C float-path tolerance.
+
 Run via `uv run` (CMake wires this automatically, see CMakeLists.txt).
 """
 import argparse
@@ -65,12 +76,13 @@ import sys
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 
-from sym_gold import (assert_rounding_canary, combine_quotient_f32, convT1d_grouped_ref,
-                      emit_float_array, emit_float_scalar, emit_int32_array, emit_int32_scalar,
-                      rescale_f32)
+from sym_gold import (assert_rounding_canary, combine_quotient_f32, convT1d_dx_grouped_ref,
+                      convT1d_grouped_ref, emit_float_array, emit_float_scalar, emit_int32_array,
+                      emit_int32_scalar, rescale_f32, window_geometry_1d, window_slice_1d_full)
 
 BATCH = 1
 IN_CHANNELS = 2
@@ -236,6 +248,72 @@ def max_products_per_out():
     return max(len(v) for v in scatter_targets().values())
 
 
+# ---- PR3 Task 3: ConvT1d dx (adjoint gather) fixture. Seeded random
+# lossGrad [B, Cout, Lout] (vacuity lesson), power-of-two loss scale (the
+# equal-scales twin's exactness argument). Reuses the forward fixtures'
+# weight mantissas and group shapes. ----
+
+torch.manual_seed(20260732)
+DX_LOSS_MANTISSAS = [int(v) for v in torch.randint(
+    -40, 41, (BATCH * OUT_CHANNELS * OUT_LEN,)).tolist()]
+DX_LOSS_SCALE = 0.5
+
+
+def dx_combine_counts(group_size):
+    """Per-dx-element combine counts C_i for the adjoint gather: the
+    reduction for dx[(ic, inPos)] walks the weight slab
+    (ic*Cout + oc)*K + k monotonically (oc rows ascending, visited taps
+    ascending); each group RUN in that visited sequence folds into s_acc
+    exactly once. VALID geometry on Lout (fully-valid windows here). Flat
+    [Cin*Lin] list."""
+    geom = window_geometry_1d(OUT_LEN, KERNEL_SIZE, STRIDE, DILATION, "VALID", 0)
+    assert geom["out_len"] == INPUT_LENGTH
+    counts = []
+    for ic in range(IN_CHANNELS):
+        for in_pos in range(INPUT_LENGTH):
+            _, fvk, vc = window_slice_1d_full(geom, in_pos)
+            visited = [(ic * OUT_CHANNELS + oc) * KERNEL_SIZE + fvk + i
+                       for oc in range(OUT_CHANNELS) for i in range(vc)]
+            combines = 0
+            cur = None
+            for g in (w // group_size for w in visited):
+                if g != cur:
+                    combines += 1
+                    cur = g
+            counts.append(combines)
+    return counts
+
+
+def fixture_dx(name, w_scales, group_size):
+    out, s_acc = convT1d_dx_grouped_ref(
+        DX_LOSS_MANTISSAS, DX_LOSS_SCALE, W_MANTISSAS, w_scales, group_size,
+        BATCH, IN_CHANNELS, OUT_CHANNELS, KERNEL_SIZE, INPUT_LENGTH,
+        STRIDE, DILATION, OUTPUT_PADDING)
+    assert any(v != 0 for v in out), f"dx {name}: gold is vacuously all-zero"
+
+    # Cross-check vs the PyTorch float autograd reference on the SAME
+    # dequantized operands: the only divergence is the emulation's
+    # once-per-group-run combine rounding, <= 0.5*C_i*s_acc per element.
+    w_deq = torch.tensor(
+        [float(m) * w_scales[i // group_size] for i, m in enumerate(W_MANTISSAS)],
+        dtype=torch.float32).reshape(IN_CHANNELS, OUT_CHANNELS, KERNEL_SIZE)
+    gy = (torch.tensor(DX_LOSS_MANTISSAS, dtype=torch.float32) * DX_LOSS_SCALE).reshape(
+        BATCH, OUT_CHANNELS, OUT_LEN)
+    x = torch.zeros(BATCH, IN_CHANNELS, INPUT_LENGTH, dtype=torch.float32, requires_grad=True)
+    y = F.conv_transpose1d(x, w_deq, stride=STRIDE, dilation=DILATION,
+                           output_padding=OUTPUT_PADDING)
+    y.backward(gy)
+    ref = x.grad.flatten().tolist()
+    counts = dx_combine_counts(group_size)
+    assert len(ref) == len(out) == len(counts)
+    for i, (g, r) in enumerate(zip(out, ref)):
+        bound = 0.5 * counts[i] * s_acc + 1e-4
+        assert abs(g * s_acc - r) <= bound, (
+            f"dx {name}: emulation deviates from torch autograd beyond the gather "
+            f"bound at {i}: |{g * s_acc} - {r}| > {bound}")
+    return {"outMantissas": out, "outScale": s_acc, "maxCombines": max(counts)}
+
+
 def emit_fixture(parts, prefix, fx):
     parts.append(emit_float_array(f"k{prefix}WScales", torch.tensor(fx["wScales"])))
     parts.append(emit_int32_scalar(f"k{prefix}GroupSize", fx["groupSize"]))
@@ -292,6 +370,32 @@ def main() -> int:
 
     emit_fixture(parts, "ConvTPerChannel", per_channel)
     emit_fixture(parts, "ConvTGeneral", general)
+
+    # PR3 Task 3: dx fixtures reuse the forward fixtures' group shapes/scales.
+    dx_pc = fixture_dx("perChannel", per_channel["wScales"], per_channel["groupSize"])
+    dx_gen = fixture_dx("general", general["wScales"], general["groupSize"])
+    assert ([v * dx_pc["outScale"] for v in dx_pc["outMantissas"]] !=
+            [v * dx_gen["outScale"] for v in dx_gen["outMantissas"]]), (
+        "dx: perChannel and general golds dequantize identically -- the group "
+        "shape does not reach the dx path (fixture vacuous)")
+    # Concrete combine counts for the C float-path tolerance derivation:
+    # perChannel groups are whole Cin slabs, so every reduction stays in ONE
+    # group (C=1); general groups are single (ic, oc) tap-rows, so every
+    # reduction crosses Cout=3 groups (C=3).
+    assert dx_pc["maxCombines"] == 1, "dx perChannel: expected exactly 1 combine per element"
+    assert dx_gen["maxCombines"] == OUT_CHANNELS, (
+        f"dx general: expected {OUT_CHANNELS} combines per element")
+
+    parts.append(emit_int32_array("kConvTDxLossMantissas", torch.tensor(DX_LOSS_MANTISSAS)))
+    parts.append(emit_float_scalar("kConvTDxLossScale", DX_LOSS_SCALE))
+    parts.append(emit_int32_array("kConvTDxPerChannelOutMantissas",
+                                  torch.tensor(dx_pc["outMantissas"])))
+    parts.append(emit_float_scalar("kConvTDxPerChannelOutScale", dx_pc["outScale"]))
+    parts.append(emit_int32_scalar("kConvTDxPerChannelMaxCombines", dx_pc["maxCombines"]))
+    parts.append(emit_int32_array("kConvTDxGeneralOutMantissas",
+                                  torch.tensor(dx_gen["outMantissas"])))
+    parts.append(emit_float_scalar("kConvTDxGeneralOutScale", dx_gen["outScale"]))
+    parts.append(emit_int32_scalar("kConvTDxGeneralMaxCombines", dx_gen["maxCombines"]))
 
     parts.append("\n#endif // ODT_EXPECTED_CONVT1D_GROUPED_H\n")
 

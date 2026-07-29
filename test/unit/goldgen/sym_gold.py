@@ -392,25 +392,39 @@ def conv1d_grouped_ref(x_mantissas, in_scale: float, w_mantissas, w_scales, grou
                        batch: int, in_channels: int, out_channels: int, kernel_size: int,
                        input_length: int, stride: int = 1, dilation: int = 1,
                        padding_type: str = "VALID", padding: int = 0,
-                       bias_mantissas=None, bias_scale=None):
+                       bias_mantissas=None, bias_scale=None, conv_groups: int = 1):
     """Emulates conv1dKernelSymInt32Grouped exactly: python-int MACs per group
     (exact), a rescale-combine (rescale_f32, HALF_AWAY) at every group
-    boundary AND at the end of EACH (batch, outChannel, outPos) reduction --
-    conv-groups (the `groups` kernel param) is always 1 here (quantization
-    groups only; conv-groups>1 is out of this fixture's scope, see
-    Conv1dKernel.h). `w_mantissas` is [out_channels, in_channels, kernel_size]
-    row-major flat (weight storage index for (oc, ic, k) is
-    (oc*in_channels + ic)*kernel_size + k -- the SAME index
+    boundary AND at the end of EACH (batch, outChannel, outPos) reduction.
+    `w_mantissas` is [out_channels, in_channels/conv_groups, kernel_size]
+    row-major flat (weight storage index for (oc, icOffset, k) is
+    (oc*inChPerGroup + icOffset)*kernel_size + k -- the SAME index
     conv1dKernelSymInt32Grouped computes for its weight reads, since the
     (icOffset, kernelIdx) nested-loop order visits it monotonically
     increasing). `x_mantissas` is [batch, in_channels, input_length]
-    row-major flat. Asserts every window is fully valid (validCount ==
-    kernel_size for every out_pos) -- true for VALID padding, the only
-    padding this fixture uses; a partial window would still visit weight
-    storage monotonically (skipped taps just contribute nothing), but the
-    kernel-tap index bookkeeping below assumes the full range for simplicity.
+    row-major flat.
+
+    PR3 Task 3 extensions (closing PR2's two disclosed emulation gaps):
+    - Partial windows (SAME/EXPLICIT padding, or VALID with a too-short tail)
+      are emulated exactly like the C kernel: the (first_valid_k, valid_count)
+      walk from window_slice_1d_full skips out-of-bounds taps, so visited
+      weight storage indices can have GAPS -- the per-element group division
+      below (g = w_idx // group_size, never a precomputed run) binds each
+      visited element to its true group across those gaps, mirroring the C
+      kernel's gap-robust per-element division.
+    - conv_groups > 1: channel grouping (the kernel's `groups` param),
+      INDEPENDENT of the quantization groups. oc's conv group is
+      oc // (out_channels/conv_groups); its reduction covers icOffset in
+      [0, in_channels/conv_groups) at actual input channel
+      convG*inChPerGroup + icOffset -- iteration (global oc ascending) visits
+      the same (b, oc, outPos) cells in the same flat order as the C kernel's
+      (g, ocOffset) nesting, and each cell's reduction order is identical.
     Returns (out_mantissas flat [batch*out_channels*out_len], s_acc, out_len).
     """
+    assert in_channels % conv_groups == 0 and out_channels % conv_groups == 0, (
+        "conv1d_grouped_ref: conv_groups must divide in_channels and out_channels")
+    in_ch_per_group = in_channels // conv_groups
+    out_ch_per_group = out_channels // conv_groups
     geom = window_geometry_1d(input_length, kernel_size, stride, dilation, padding_type, padding)
     out_len = geom["out_len"]
     max_scale = max(w_scales)
@@ -420,23 +434,22 @@ def conv1d_grouped_ref(x_mantissas, in_scale: float, w_mantissas, w_scales, grou
     out = []
     for b in range(batch):
         for oc in range(out_channels):
-            w_base = oc * in_channels * kernel_size
+            conv_g = oc // out_ch_per_group
+            in_lo = conv_g * in_ch_per_group
+            w_base = oc * in_ch_per_group * kernel_size
             seed = 0
             if bias_mantissas is not None:
                 seed = rescale_f32(bias_mantissas[oc], bias_scale, s_acc)
             for out_pos in range(out_len):
                 first_valid_idx, first_valid_k, valid_count = window_slice_1d_full(geom, out_pos)
-                assert valid_count == kernel_size, (
-                    f"conv1d_grouped_ref: partial window at out_pos={out_pos} "
-                    f"(validCount={valid_count} != kernelSize={kernel_size}) -- "
-                    "only fully-valid (VALID padding) windows are supported here")
                 acc = seed
                 partial = 0
                 current_group = None
-                for ic in range(in_channels):
+                for ic_offset in range(in_ch_per_group):
+                    ic = in_lo + ic_offset
                     for i in range(valid_count):
                         kernel_idx = first_valid_k + i
-                        w_idx = w_base + ic * kernel_size + kernel_idx
+                        w_idx = w_base + ic_offset * kernel_size + kernel_idx
                         g = w_idx // group_size
                         if g != current_group:
                             if current_group is not None:
@@ -450,9 +463,11 @@ def conv1d_grouped_ref(x_mantissas, in_scale: float, w_mantissas, w_scales, grou
                         x_val = x_mantissas[(b * in_channels + ic) * input_length + input_idx]
                         w_val = w_mantissas[w_idx]
                         partial += x_val * w_val
-                param_scale = (torch.tensor(in_scale, dtype=torch.float32) *
-                              torch.tensor(w_scales[current_group], dtype=torch.float32)).item()
-                acc += rescale_f32(partial, param_scale, s_acc)
+                if current_group is not None:
+                    param_scale = (torch.tensor(in_scale, dtype=torch.float32) *
+                                  torch.tensor(w_scales[current_group],
+                                               dtype=torch.float32)).item()
+                    acc += rescale_f32(partial, param_scale, s_acc)
                 out.append(acc)
     return out, s_acc, out_len
 
@@ -528,3 +543,87 @@ def convT1d_grouped_ref(x_mantissas, in_scale: float, w_mantissas, w_scales, gro
                 for l in range(out_len):
                     out[(b * out_channels + oc) * out_len + l] += seed
     return out, s_acc, out_len
+
+
+# ---- Group-quant PR3 Task 3: dx-orientation references for the two conv
+# adjoints. Both are pure PARAMETER REMAPPINGS of the forward emulations above
+# -- the flat weight STORAGE index each core computes in the adjoint role is
+# identical to the layer's own storage index, so the group binding
+# (g = w_idx // group_size) carries over unchanged. VALID-only (the dx
+# fixtures' scope; the C kernels additionally handle the SAME/EXPLICIT
+# adjoint, exercised by the FORWARD SAME fixture instead). ----
+
+
+def conv1d_dx_grouped_ref(loss_mantissas, loss_scale: float, w_mantissas, w_scales,
+                          group_size: int, batch: int, in_channels: int, out_channels: int,
+                          kernel_size: int, input_length: int, stride: int = 1,
+                          dilation: int = 1):
+    """Conv1d dx (propLoss) with a grouped weight: the adjoint of a VALID
+    forward Conv1d is a SCATTER of lossGrad through the SAME weight --
+    conv1dBackward routes it to convTranspose1dKernelSymInt32Grouped
+    (per-product rescale), so this ref delegates to convT1d_grouped_ref with
+    the roles swapped: the scatter's "input" is lossGrad [batch, out_channels,
+    forward_out_len] and its "output" is dx [batch, in_channels,
+    input_length]. Parameters are named from the FORWARD Conv1d's perspective
+    (in_channels/out_channels/input_length = x's channels/L; loss length is
+    derived).
+
+    Weight-index identity (why no re-layout is needed): convT1d_grouped_ref
+    reads w at (ic_ref*outC_ref + oc_ref)*K + k with ic_ref over ITS
+    in-channels (= Conv1d's out_channels) and oc_ref over ITS out-channels
+    (= Conv1d's in_channels) -- i.e. (oc_conv*in_channels + ic_conv)*K + k,
+    exactly Conv1d's [out_channels, in_channels, K] flat storage index (the
+    same index ConvTranspose1dKernel.c computes at its wArr read in the
+    adjoint role). `w_mantissas` is therefore passed in Conv1d's OWN storage
+    order, and g = w_idx // group_size binds to the stored weight unchanged.
+    conv-groups==1 only (the dx fixtures' scope). No bias (dx never has one).
+    Returns (out flat [batch*in_channels*input_length], s_acc)."""
+    eff_k = dilation * (kernel_size - 1) + 1
+    assert input_length >= eff_k, "conv1d_dx_grouped_ref: forward geometry is empty"
+    forward_out_len = (input_length - eff_k) // stride + 1
+    assert (forward_out_len - 1) * stride + eff_k == input_length, (
+        "conv1d_dx_grouped_ref: VALID forward geometry does not invert exactly "
+        "(stride leaves a remainder) -- pick L with (L - effK) % stride == 0")
+    out, s_acc, out_len = convT1d_grouped_ref(
+        loss_mantissas, loss_scale, w_mantissas, w_scales, group_size,
+        batch, out_channels, in_channels, kernel_size, forward_out_len,
+        stride, dilation, 0)
+    assert out_len == input_length
+    return out, s_acc
+
+
+def convT1d_dx_grouped_ref(loss_mantissas, loss_scale: float, w_mantissas, w_scales,
+                           group_size: int, batch: int, in_channels: int, out_channels: int,
+                           kernel_size: int, input_length: int, stride: int = 1,
+                           dilation: int = 1, output_padding: int = 0):
+    """ConvT1d dx (propLoss) with a grouped weight: the adjoint of a VALID
+    forward ConvT1d is a GATHER (correlation) of lossGrad with the SAME
+    weight -- conv1dTransposedBackward routes it to conv1dKernelSymInt32Grouped
+    (running group-partial), so this ref delegates to conv1d_grouped_ref with
+    the roles swapped: the gather's "input" is lossGrad [batch, out_channels,
+    out_len] and its "output" is dx [batch, in_channels, input_length].
+    Parameters are named from the FORWARD ConvT1d's perspective
+    (in_channels/out_channels/input_length = x's channels/Lin).
+
+    Weight-index identity: conv1d_grouped_ref reads w at
+    (oc_ref*inC_ref + ic_ref)*K + k with oc_ref over ITS out-channels
+    (= ConvT1d's in_channels) and ic_ref over ITS in-channels (= ConvT1d's
+    out_channels) -- i.e. (ic_convT*out_channels + oc_convT)*K + k, exactly
+    ConvT1d's [in_channels, out_channels, K] flat storage index (the same
+    index Conv1dKernel.c computes at its wArr read in the adjoint role), so
+    `w_mantissas` is passed in ConvT1d's OWN storage order and the group
+    binding carries over unchanged. outputPadding only pads trailing zeros of
+    the forward output; the adjoint gather walks the padded length, whose
+    tail windows the geometry then clips -- fixtures here use 0.
+    conv-groups==1 only. No bias. Returns (out flat
+    [batch*in_channels*input_length], s_acc)."""
+    out_len = ((input_length - 1) * stride + dilation * (kernel_size - 1) +
+               output_padding + 1)
+    out, s_acc, dx_len = conv1d_grouped_ref(
+        loss_mantissas, loss_scale, w_mantissas, w_scales, group_size,
+        batch, out_channels, in_channels, kernel_size, out_len,
+        stride, dilation, "VALID", 0)
+    assert dx_len == input_length, (
+        f"convT1d_dx_grouped_ref: adjoint gather length {dx_len} != forward "
+        f"input length {input_length}")
+    return out, s_acc

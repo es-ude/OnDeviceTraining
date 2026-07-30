@@ -266,6 +266,27 @@ most interesting): see the `CONFIGS` dict's own header comment in
 `run_matrix.py` for the exact per-arm env. Aggregate with the same
 `compare_memory.py` used by the rest of this sweep.
 
+**The #300 epic-acceptance sweep** (spec §8; run offline, NOT in CI — same
+regime as the full study above):
+
+```bash
+uv run examples/har_classifier/run_matrix.py \
+  --configs sym4 sym4pc sym4g64 sym4g32 asym4 asym4pc asym4g64 asym4g32 \
+            sym6 sym6pc sym6g64 sym6g32 asym6 asym6pc asym6g64 asym6g32 \
+  --seeds 1 2 3 4 5 6 7 8 9 10 --logs examples/har_classifier/logs_300_groups
+```
+
+16 arms × 10 seeds = 160 runs (~2× the full-study wall clock; `--jobs 8` and
+`--resume` apply). Honest-aggregation rules are unchanged (multi-seed
+aggregate only, ≥10 seeds for shippable claims, convergence failures are
+recorded findings) with ONE addition for the frontier: the per-arm weight
+footprint is `params_b + group_overhead_b` — the per-group scale/zero-point
+metadata is real on-device memory and the whole point of the finer-granularity
+arms is paying it for accuracy, so the frontier is reported against the SUM,
+never `params_b` alone (spec §8's "including the §4 overhead, honestly
+reported"). `groups_resolved` in each log is the ground truth for what a
+config name actually ran (see the fallback table above).
+
 **ODTS v5 round-trip demo** (`ODTS_ROUNDTRIP=1`, default off): after the final
 test eval, `train_c_sym.c` serializes the trained model to
 `outputs/har_sym_group.odts`, builds a **fresh per-tensor skeleton** (same

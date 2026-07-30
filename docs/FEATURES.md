@@ -356,7 +356,14 @@ checkpointing, limitations, literature).
   weights train end-to-end through the SAME symmetric grouped kernels (the funnel
   shifts codes by the per-group zp into the identical signed-mantissa image — zero
   kernel changes, spec D5; layers pass a symQConfig-shaped view of the asym scales).
-  The HAR sweep wiring is PR5. Grads, bias, gamma/beta, wires,
+  **The HAR sweep wiring is SHIPPED (PR5, epic wiring complete)**: the
+  `har_classifier` sym trainer carries the `GROUP_MODE`/`GROUP_SIZE`/`WEIGHT_DTYPE`
+  env axis (per-layer divisibility fallback, resolved shapes + `group_overhead_b`
+  in every log), 14 `run_matrix.py` arms cover sym/asym{4,6} × per-channel/G64/G32,
+  and an `ODTS_ROUNDTRIP=1` demo proves grouped-file→per-tensor-skeleton format
+  parity on the real model (see `examples/har_classifier/README.md` §"Group-granular
+  quantization"). The #300 acceptance sweep itself runs offline (≥10 seeds).
+  Grads, bias, gamma/beta, wires,
   and momentum stay per-tensor (funnel-enforced); `symInt32QConfig_t` (compute/wires)
   stays scalar by design.
 - **Weight init** — PyTorch-compatible: `INIT_DEFAULT` reproduces

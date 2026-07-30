@@ -193,14 +193,18 @@ static void peekValidateThenDeserializeTensor(tensor_t *skeleton, FILE *f, const
     case BFP: {
         /* BFP epic PR1 (Task 7, #400): numGroups/groupSize/exponents/
          * mantissaBits/exponentBits/roundingMode -- mirrors Deserialize.c's
-         * deserializeQConfig BFP arm layout. Unlike the SYM arm above,
-         * nothing here needs per-field validation against the skeleton (raw
-         * exponent bytes carry no float to sanity-check, and a width
-         * mismatch is Deserialize.c's job on the trusted read below): read
-         * numGroups to size the skip, then fseek past the rest of the
-         * record (groupSize + exponents[numGroups] + mantissaBits +
-         * exponentBits + roundingMode = 4 + numGroups + 3 bytes) in one
-         * call. */
+         * deserializeQConfig BFP arm layout. groupSize and the opaque
+         * exponent bytes are skipped (positional only, nothing to validate
+         * against the skeleton here), but mantissaBits/exponentBits are
+         * read EXPLICITLY and compared to the skeleton's own -- same #316
+         * reason as the SYM/ASYM qBits guards above: two widths can pack to
+         * the SAME total byte count for some element counts, so the generic
+         * post-peek length check further down does not always catch a
+         * width mismatch on its own. roundingMode carries no such risk and
+         * is skipped, mirroring SYM/ASYM. Skip-plus-read total is unchanged
+         * from a pure fseek: groupSize(4) + exponents[numGroups] +
+         * mantissaBits(1) + exponentBits(1) + roundingMode(1) = 4 +
+         * numGroups + 3 bytes. */
         uint32_t numGroups = serialReadU32LE(f);
         if (numGroups == 0 || numGroups > PPCA_MAX_QCONFIG_GROUPS) {
             PRINT_ERROR("ppcaReplaySetDeserialize: %s BFP file numGroups %u is zero or exceeds "
@@ -208,8 +212,20 @@ static void peekValidateThenDeserializeTensor(tensor_t *skeleton, FILE *f, const
                         what, (unsigned)numGroups, (unsigned)PPCA_MAX_QCONFIG_GROUPS);
             exit(1);
         }
-        if (fseek(f, 4 + (long)numGroups + 3, SEEK_CUR) != 0) {
+        if (fseek(f, 4 + (long)numGroups, SEEK_CUR) != 0) {
             PRINT_ERROR("ppcaReplaySetDeserialize: %s BFP record seek failed", what);
+            exit(1);
+        }
+        uint8_t mantissaBits = serialReadU8(f);
+        uint8_t exponentBits = serialReadU8(f);
+        (void)serialReadU8(f); /* roundingMode */
+        bfpQConfig_t *skelQc = skeleton->quantization->qConfig;
+        if (mantissaBits != skelQc->mantissaBits || exponentBits != skelQc->exponentBits) {
+            PRINT_ERROR("ppcaReplaySetDeserialize: %s BFP width mismatch (file m=%u/e=%u, "
+                        "skeleton m=%u/e=%u) — same-dtype width mismatch is the #316 "
+                        "2x-overflow class",
+                        what, (unsigned)mantissaBits, (unsigned)exponentBits,
+                        (unsigned)skelQc->mantissaBits, (unsigned)skelQc->exponentBits);
             exit(1);
         }
         break;

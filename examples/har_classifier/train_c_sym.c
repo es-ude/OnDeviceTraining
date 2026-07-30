@@ -115,6 +115,39 @@ static int g_useCosine = 0;         /* LR_SCHEDULE=cosine */
 static float g_lrMin = 0.0f;        /* LR_MIN (cosine floor) */
 static optimizer_t *g_optim = NULL; /* for per-epoch LR logging in epochCallback */
 
+/* Group-quant PR5 axis (#300): GROUP_MODE/GROUP_SIZE/WEIGHT_DTYPE env knobs.
+ * Enum names carry a _SWEEP/_MODE_/_DTYPE_ prefix to avoid colliding with
+ * qtype_t's own SYM/ASYM enumerators (Quantization.h) -- C enums share one
+ * flat namespace. */
+typedef enum groupModeSweep {
+    GROUP_MODE_TENSOR, /* default: per-tensor, today's behavior (byte-identical) */
+    GROUP_MODE_CHANNEL,
+    GROUP_MODE_SIZE
+} groupModeSweep_t;
+typedef enum weightDtypeSweep { WEIGHT_DTYPE_SYM, WEIGHT_DTYPE_ASYM } weightDtypeSweep_t;
+
+/* Resolved {numGroups, groupSize} for one weight tensor -- the shape grammar
+ * from Quantization.h: per-tensor = {1,0}; grouped = {k>1, g>0, k*g==N};
+ * {1,N} is never valid and must never be emitted by resolveGroupShape below. */
+typedef struct groupShape {
+    size_t numGroups;
+    size_t groupSize;
+} groupShape_t;
+
+/* dtype-generic read of a SYM or ASYM tensor's {qBits, numGroups, groupSize}.
+ * symQConfig_t and asymQConfig_t share these three field NAMES but differ in
+ * layout (asymQConfig_t also carries zeroPoints), so the qtype decides which
+ * struct qConfig actually points to. */
+typedef struct qShapeView {
+    uint8_t qBits;
+    size_t numGroups;
+    size_t groupSize;
+} qShapeView_t;
+
+static groupModeSweep_t g_groupMode = GROUP_MODE_TENSOR;    /* GROUP_MODE=tensor|channel|size */
+static int g_groupSize = 0;                                 /* GROUP_SIZE (mode=size only) */
+static weightDtypeSweep_t g_weightDtype = WEIGHT_DTYPE_SYM; /* WEIGHT_DTYPE=sym|asym */
+
 static float envFloat(const char *name, float dflt) {
     const char *v = getenv(name);
     return (v != NULL && v[0] != '\0') ? strtof(v, NULL) : dflt;
@@ -122,6 +155,74 @@ static float envFloat(const char *name, float dflt) {
 static int envInt(const char *name, int dflt) {
     const char *v = getenv(name);
     return (v != NULL && v[0] != '\0') ? (int)strtol(v, NULL, 10) : dflt;
+}
+
+/* Group-quant PR5 (#300): per-layer group-shape resolution.
+ *
+ * HAR weight tensors (N = element count, outCh = dim-0 size, pc = N/outCh =
+ * elements per output channel; Conv weight = [outCh, inCh/groups, K], Linear
+ * = [outFeatures, inFeatures], so outCh is always dim 0):
+ *   layer   shape         N      outCh  pc   G64                G32
+ *   conv1   [16, 9, 7]    1008   16     63   FALLBACK->pc=63    FALLBACK->pc=63
+ *   conv2   [32,16, 5]    2560   32     80   ->40 groups        ->80 groups
+ *   conv3   [64,32, 3]    6144   64     96   ->96 groups        ->192 groups
+ *   linear  [6, 64]       384    6      64   ->6 groups (==pc)  ->12 groups
+ * (conv1's N=1008=2^4*3^2*7: neither 64 nor 32 divide it, so both G64 and G32
+ * fall back to per-channel (pc=63=3^2*7) for that layer only.)
+ *
+ * mode=tensor:  always per-tensor {1,0} (today's behavior).
+ * mode=channel: one group per output channel -- groupSize = N/outCh, which
+ *               is always an exact divisor of N by construction.
+ * mode=size:    groupSize = GROUP_SIZE if it evenly divides N, else FALL
+ *               BACK to the per-channel groupSize (N/outCh) for that layer.
+ * Either grouped branch collapses to the canonical per-tensor shape {1,0} if
+ * the resolved groupSize would leave numGroups <= 1 (a single-output-channel
+ * layer, not present in HAR but handled safely) -- {1,N} is never valid. */
+static groupShape_t resolveGroupShape(size_t N, size_t outCh, groupModeSweep_t mode,
+                                      int groupSizeEnv) {
+    if (mode == GROUP_MODE_TENSOR) {
+        return (groupShape_t){.numGroups = 1, .groupSize = 0};
+    }
+    size_t groupSize;
+    if (mode == GROUP_MODE_CHANNEL) {
+        groupSize = N / outCh;
+    } else { /* GROUP_MODE_SIZE */
+        size_t requested = (size_t)groupSizeEnv;
+        groupSize = (requested > 0 && N % requested == 0) ? requested : N / outCh;
+    }
+    size_t numGroups = N / groupSize;
+    if (numGroups <= 1) {
+        return (groupShape_t){.numGroups = 1, .groupSize = 0};
+    }
+    return (groupShape_t){.numGroups = numGroups, .groupSize = groupSize};
+}
+
+static qShapeView_t viewQShape(quantization_t *q) {
+    if (q->type == ASYM) {
+        asymQConfig_t *ac = q->qConfig;
+        return (qShapeView_t){
+            .qBits = ac->qBits, .numGroups = ac->numGroups, .groupSize = ac->groupSize};
+    }
+    symQConfig_t *sc = q->qConfig;
+    return (qShapeView_t){
+        .qBits = sc->qBits, .numGroups = sc->numGroups, .groupSize = sc->groupSize};
+}
+
+/* Builds a fresh weight-quantization template matching the resolved group
+ * shape: per-tensor (numGroups==1) uses the plain quantizationInitSym/Asym,
+ * grouped uses the *Grouped variant. Caller owns the returned template and
+ * must freeQuantization it after the one requantizeTensorInPlace call it is
+ * built for (requantizeTensorInPlace clones via getQLike; caller keeps
+ * ownership of the original). */
+static quantization_t *buildWeightQuant(groupShape_t gs, bool isAsym) {
+    if (gs.numGroups == 1) {
+        return isAsym ? quantizationInitAsym((uint8_t)g_symBits, HALF_AWAY)
+                      : quantizationInitSym((uint8_t)g_symBits, HALF_AWAY);
+    }
+    return isAsym ? quantizationInitAsymGrouped((uint8_t)g_symBits, HALF_AWAY, gs.numGroups,
+                                                gs.groupSize)
+                  : quantizationInitSymGrouped((uint8_t)g_symBits, HALF_AWAY, gs.numGroups,
+                                               gs.groupSize);
 }
 
 static void reshapeItemsAddBatchDim(tensorArray_t *items) {
@@ -219,7 +320,6 @@ static size_t getTestSize(void) {
 /* Shared quantization templates (borrowed by every layer for the whole run). */
 typedef struct symQuant {
     quantization_t *floatQ;   /* FLOAT32 wire + temp weight/bias init storage */
-    quantization_t *symQ;     /* packed SYM@SYM_BITS — post-init weight+bias storage */
     quantization_t *symWireQ; /* SYM_INT32 int12 wires (SYM_WIRES=1, #206) */
 } symQuant_t;
 
@@ -295,21 +395,46 @@ static void buildModel(layer_t **model, symQuant_t *sq, layerQuant_t *lqNontrain
     model[11] = softmaxLayerInit(lqNontrain);
 }
 
-/* Requantize weights + bias -> packed SYM@SYM_BITS for the 4 trainable layers.
- * Grad tensors are untouched (they stay FLOAT32, derived from the NULL grad
- * knob at construction). */
-static void requantizeParamsToSym(layer_t **model, symQuant_t *sq) {
+/* Requantize weights -> per-layer SYM/ASYM (grouped per GROUP_MODE) and bias
+ * -> per-tensor SYM/ASYM (SAME dtype as the weights, but a SEPARATE template:
+ * a grouped weight template has the wrong element count for the bias tensor)
+ * for the 4 trainable layers. Weight groups are resolved from each tensor's
+ * OWN shape (N = element count, outCh = dim-0 size) via resolveGroupShape --
+ * see the HAR table on that function. Grad tensors are untouched (FLOAT32,
+ * from the NULL grad knob at construction). Every weight template is a
+ * throwaway built for exactly one requantizeTensorInPlace call (which
+ * deep-clones it; caller keeps ownership) and is freed immediately after;
+ * the bias template is shared across all 4 biases (identical dtype/bits/
+ * per-tensor shape for every layer) and freed once at the end. */
+static void requantizeParamsToSym(layer_t **model) {
+    bool isAsym = (g_weightDtype == WEIGHT_DTYPE_ASYM);
+    quantization_t *biasQ = isAsym ? quantizationInitAsym((uint8_t)g_symBits, HALF_AWAY)
+                                   : quantizationInitSym((uint8_t)g_symBits, HALF_AWAY);
+
     const size_t convIdx[3] = {0, 3, 6};
     for (size_t k = 0; k < 3; k++) {
         conv1dConfig_t *cfg = model[convIdx[k]]->config->conv1d;
-        requantizeTensorInPlace(cfg->weights->param, sq->symQ);
+        tensor_t *w = cfg->weights->param;
+        groupShape_t gs = resolveGroupShape(calcNumberOfElementsByTensor(w),
+                                            w->shape->dimensions[0], g_groupMode, g_groupSize);
+        quantization_t *weightQ = buildWeightQuant(gs, isAsym);
+        requantizeTensorInPlace(w, weightQ);
+        freeQuantization(weightQ);
         if (cfg->bias != NULL) {
-            requantizeTensorInPlace(cfg->bias->param, sq->symQ);
+            requantizeTensorInPlace(cfg->bias->param, biasQ);
         }
     }
+
     linearConfig_t *fc = model[10]->config->linear;
-    requantizeTensorInPlace(fc->weights->param, sq->symQ);
-    requantizeTensorInPlace(fc->bias->param, sq->symQ);
+    tensor_t *lw = fc->weights->param;
+    groupShape_t linGs = resolveGroupShape(calcNumberOfElementsByTensor(lw),
+                                           lw->shape->dimensions[0], g_groupMode, g_groupSize);
+    quantization_t *linWeightQ = buildWeightQuant(linGs, isAsym);
+    requantizeTensorInPlace(lw, linWeightQ);
+    freeQuantization(linWeightQ);
+    requantizeTensorInPlace(fc->bias->param, biasQ);
+
+    freeQuantization(biasQ);
 }
 
 /* ---- Gates -------------------------------------------------------------- */
@@ -321,7 +446,11 @@ typedef struct paramGateCtx {
     int fails;
 } paramGateCtx_t;
 
-/* PARAM gate: every trainable weight/bias tensor is packed SYM@SYM_BITS.
+/* PARAM gate: every trainable weight/bias tensor is packed SYM-or-ASYM (per
+ * WEIGHT_DTYPE) @SYM_BITS, in the group SHAPE GROUP_MODE/GROUP_SIZE should
+ * have produced for that specific tensor (weights: resolveGroupShape on the
+ * tensor's own N/outCh; biases: always per-tensor {1,0}) -- an independent
+ * recheck of what requantizeParamsToSym built, via the same shared helper.
  * GRAD gate: every trainable grad tensor is FLOAT32 (the NULL grad-knob
  * default). */
 static void paramGateSink(void *ctxVoid, size_t layerIdx, layerType_t layerType, const char *phase,
@@ -342,20 +471,83 @@ static void paramGateSink(void *ctxVoid, size_t layerIdx, layerType_t layerType,
         return;
     }
 
-    if (tensor->quantization->type != SYM) {
-        fprintf(stderr, "GATE FAIL: layer %zu %s expected SYM param, got qtype %d\n", layerIdx,
-                phase, (int)tensor->quantization->type);
+    qtype_t expectType = (g_weightDtype == WEIGHT_DTYPE_ASYM) ? ASYM : SYM;
+    if (tensor->quantization->type != expectType) {
+        fprintf(stderr, "GATE FAIL: layer %zu %s expected %s param, got qtype %d\n", layerIdx,
+                phase, expectType == ASYM ? "ASYM" : "SYM", (int)tensor->quantization->type);
         ctx->fails++;
         return;
     }
-    symQConfig_t *qc = tensor->quantization->qConfig;
-    if ((int)qc->qBits != ctx->expectBits) {
-        fprintf(stderr, "GATE FAIL: layer %zu %s expected SYM qBits %d, got %u\n", layerIdx, phase,
-                ctx->expectBits, (unsigned)qc->qBits);
+
+    qShapeView_t actual = viewQShape(tensor->quantization);
+    if ((int)actual.qBits != ctx->expectBits) {
+        fprintf(stderr, "GATE FAIL: layer %zu %s expected qBits %d, got %u\n", layerIdx, phase,
+                ctx->expectBits, (unsigned)actual.qBits);
         ctx->fails++;
         return;
     }
+
+    bool isBias = strstr(phase, ".bias") != NULL;
+    groupShape_t expectShape;
+    if (isBias) {
+        expectShape = (groupShape_t){.numGroups = 1, .groupSize = 0};
+    } else {
+        size_t N = calcNumberOfElementsByTensor(tensor);
+        size_t outCh = tensor->shape->dimensions[0];
+        expectShape = resolveGroupShape(N, outCh, g_groupMode, g_groupSize);
+    }
+    if (actual.numGroups != expectShape.numGroups || actual.groupSize != expectShape.groupSize) {
+        fprintf(stderr, "GATE FAIL: layer %zu %s expected group shape {%zu,%zu}, got {%zu,%zu}\n",
+                layerIdx, phase, expectShape.numGroups, expectShape.groupSize, actual.numGroups,
+                actual.groupSize);
+        ctx->fails++;
+        return;
+    }
+
     ctx->count++;
+}
+
+typedef struct groupLogInfo {
+    groupShape_t conv1, conv2, conv3, linear;
+    size_t overheadBytes;
+} groupLogInfo_t;
+
+/* Reads the ACTUAL post-requantize group shape off each of the 8 trainable
+ * param tensors -- single source of truth, no separate bookkeeping to drift
+ * from what requantizeParamsToSym actually built -- for the log's
+ * "groups_resolved" (the 4 weight tensors) and "group_overhead_b" (all 8:
+ * weights AND biases, since even a per-tensor {1,0} tensor carries one float
+ * scale [+ one uint16 zero-point if ASYM] of metadata; spec-§8-mandatory
+ * honest accuracy-per-byte accounting). */
+static groupLogInfo_t computeGroupLogInfo(layer_t **model, bool isAsym) {
+    size_t bytesPerGroup = sizeof(float) + (isAsym ? sizeof(uint16_t) : 0);
+    const size_t convIdx[3] = {0, 3, 6};
+    groupShape_t convShapes[3];
+    size_t totalGroups = 0;
+
+    for (size_t k = 0; k < 3; k++) {
+        conv1dConfig_t *cfg = model[convIdx[k]]->config->conv1d;
+        qShapeView_t wv = viewQShape(cfg->weights->param->quantization);
+        convShapes[k] = (groupShape_t){.numGroups = wv.numGroups, .groupSize = wv.groupSize};
+        totalGroups += wv.numGroups;
+        if (cfg->bias != NULL) {
+            totalGroups += viewQShape(cfg->bias->param->quantization).numGroups;
+        }
+    }
+
+    linearConfig_t *fc = model[10]->config->linear;
+    qShapeView_t lwv = viewQShape(fc->weights->param->quantization);
+    groupShape_t linearShape = {.numGroups = lwv.numGroups, .groupSize = lwv.groupSize};
+    totalGroups += lwv.numGroups;
+    totalGroups += viewQShape(fc->bias->param->quantization).numGroups;
+
+    return (groupLogInfo_t){
+        .conv1 = convShapes[0],
+        .conv2 = convShapes[1],
+        .conv3 = convShapes[2],
+        .linear = linearShape,
+        .overheadBytes = totalGroups * bytesPerGroup,
+    };
 }
 
 static FILE *g_log_file = NULL;
@@ -461,14 +653,52 @@ int main(void) {
         g_useCosine = 1;
     }
     g_lrMin = envFloat("LR_MIN", g_lrMin);
+
+    /* Group-quant PR5 axis (#300): GROUP_MODE/GROUP_SIZE/WEIGHT_DTYPE. */
+    const char *groupModeEnv = getenv("GROUP_MODE");
+    if (groupModeEnv != NULL && groupModeEnv[0] != '\0') {
+        if (strcmp(groupModeEnv, "tensor") == 0) {
+            g_groupMode = GROUP_MODE_TENSOR;
+        } else if (strcmp(groupModeEnv, "channel") == 0) {
+            g_groupMode = GROUP_MODE_CHANNEL;
+        } else if (strcmp(groupModeEnv, "size") == 0) {
+            g_groupMode = GROUP_MODE_SIZE;
+        } else {
+            fprintf(stderr, "GROUP_MODE=%s not supported (only: tensor, channel, size)\n",
+                    groupModeEnv);
+            exit(1);
+        }
+    }
+    if (g_groupMode == GROUP_MODE_SIZE) {
+        g_groupSize = envInt("GROUP_SIZE", 0);
+        if (g_groupSize <= 0) {
+            fprintf(stderr, "GROUP_SIZE must be > 0 when GROUP_MODE=size (got %d)\n", g_groupSize);
+            exit(1);
+        }
+    }
+    const char *weightDtypeEnv = getenv("WEIGHT_DTYPE");
+    if (weightDtypeEnv != NULL && weightDtypeEnv[0] != '\0') {
+        if (strcmp(weightDtypeEnv, "sym") == 0) {
+            g_weightDtype = WEIGHT_DTYPE_SYM;
+        } else if (strcmp(weightDtypeEnv, "asym") == 0) {
+            g_weightDtype = WEIGHT_DTYPE_ASYM;
+        } else {
+            fprintf(stderr, "WEIGHT_DTYPE=%s not supported (only: sym, asym)\n", weightDtypeEnv);
+            exit(1);
+        }
+    }
+
     const char *logPath = getenv("LOG_PATH");
 
-    /* Packed-SYM STORAGE supports up to 31 bits, but this example's forward is
-     * ARITH_SYM_INT32: it multiplies the packed-SYM weights as integer operands
+    /* Packed-SYM/ASYM STORAGE supports wide widths, but this example's forward
+     * is ARITH_SYM_INT32: it multiplies the packed weights as integer operands
      * accumulated in an int32 accumulator, and matmul/conv cap the SYM_INT32
      * operand at 12 bits (#227) — wider weights (e.g. 16) would overflow int32
      * over the conv accumulation length, so the kernel rejects them mid-forward.
-     * Fail fast here with the reason instead of crashing deep in the matmul. */
+     * Fail fast here with the reason instead of crashing deep in the matmul.
+     * This ceiling applies to WEIGHT_DTYPE=asym too (ASYM's own D6 ceiling is
+     * [1,16], looser): the ASYM-stored weight still converts to the same
+     * SYM_INT32 forward operand every step (conversionMatrix[ASYM][SYM_INT32]). */
     if (g_symBits < 1 || g_symBits > 12) {
         fprintf(stderr,
                 "SYM_BITS must be in [1, 12]: the SYM_INT32 forward operand contract caps at 12 "
@@ -477,8 +707,17 @@ int main(void) {
         return 2;
     }
 
-    fprintf(stdout, "CONFIG sym_bits=%d lr=%.5f momentum=%.3f epochs=%d seed=%u shuffle_seed=%u\n",
-            g_symBits, (double)g_lr, (double)g_momentum, g_epochs, g_seed, g_shuffleSeed);
+    const char *weightDtypeStr = (g_weightDtype == WEIGHT_DTYPE_ASYM) ? "asym" : "sym";
+    const char *groupModeStr = (g_groupMode == GROUP_MODE_CHANNEL) ? "channel"
+                               : (g_groupMode == GROUP_MODE_SIZE)  ? "size"
+                                                                   : "tensor";
+    int groupSizeForLog = (g_groupMode == GROUP_MODE_SIZE) ? g_groupSize : 0;
+
+    fprintf(stdout,
+            "CONFIG sym_bits=%d lr=%.5f momentum=%.3f epochs=%d seed=%u shuffle_seed=%u "
+            "group_mode=%s group_size=%d weight_dtype=%s\n",
+            g_symBits, (double)g_lr, (double)g_momentum, g_epochs, g_seed, g_shuffleSeed,
+            groupModeStr, groupSizeForLog, weightDtypeStr);
 
 #ifdef ODT_MEM_PROFILE
     /* Reset the heap counter to 0 BEFORE the first allocation so dataset_b is
@@ -509,7 +748,6 @@ int main(void) {
 
     symQuant_t sq = {
         .floatQ = quantizationInitFloat(),
-        .symQ = quantizationInitSym((uint8_t)g_symBits, HALF_AWAY),
         .symWireQ = quantizationInitSymInt32(HALF_AWAY),
     };
 
@@ -526,7 +764,7 @@ int main(void) {
     size_t markBeforeModel = memProfileMark();
 #endif
     buildModel(model, &sq, &lqNontrain);
-    requantizeParamsToSym(model, &sq);
+    requantizeParamsToSym(model);
 #ifdef ODT_MEM_PROFILE
     size_t markAfterModel = memProfileMark(); /* params_grads_b = delta */
 #endif
@@ -542,8 +780,8 @@ int main(void) {
                 wCtx.fails, gCtx.count, gCtx.fails);
         return 2;
     }
-    fprintf(stdout, "GATES PASS: weights+bias=SYM@%d grads=FLOAT32 (8 param + 8 grad checks)\n",
-            g_symBits);
+    fprintf(stdout, "GATES PASS: weights+bias=%s@%d grads=FLOAT32 (8 param + 8 grad checks)\n",
+            weightDtypeStr, g_symBits);
     fflush(stdout);
 
     dataLoader_t *trainLoader = dataLoaderInit(getTrainSample, getTrainSize, BATCH, NULL, NULL,
@@ -604,6 +842,8 @@ int main(void) {
         sched = &cosineSched;
     }
 
+    groupLogInfo_t groupInfo = computeGroupLogInfo(model, g_weightDtype == WEIGHT_DTYPE_ASYM);
+
     if (logPath != NULL && logPath[0] != '\0') {
         g_log_file = fopen(logPath, "w");
         if (g_log_file != NULL) {
@@ -611,9 +851,18 @@ int main(void) {
                     "{\n  \"impl\": \"c-sym-weights\", \"example\": \"har_classifier\",\n"
                     "  \"config\": {\"sym_bits\": %d, \"epochs\": %d, \"batch\": %d, \"lr\": %.6f, "
                     "\"momentum\": %.6f, \"seed\": %u, \"shuffle_seed\": %u, "
-                    "\"lr_schedule\": \"%s\", \"lr_min\": %.6f},\n  \"epochs\": [\n",
+                    "\"lr_schedule\": \"%s\", \"lr_min\": %.6f, "
+                    "\"weight_dtype\": \"%s\", \"group_mode\": \"%s\", \"group_size\": %d, "
+                    "\"groups_resolved\": {\"conv1\": [%zu, %zu], \"conv2\": [%zu, %zu], "
+                    "\"conv3\": [%zu, %zu], \"linear\": [%zu, %zu]}, "
+                    "\"group_overhead_b\": %zu},\n  \"epochs\": [\n",
                     g_symBits, g_epochs, BATCH, (double)g_lr, (double)g_momentum, g_seed,
-                    g_shuffleSeed, g_useCosine ? "cosine" : "none", (double)g_lrMin);
+                    g_shuffleSeed, g_useCosine ? "cosine" : "none", (double)g_lrMin, weightDtypeStr,
+                    groupModeStr, groupSizeForLog, groupInfo.conv1.numGroups,
+                    groupInfo.conv1.groupSize, groupInfo.conv2.numGroups, groupInfo.conv2.groupSize,
+                    groupInfo.conv3.numGroups, groupInfo.conv3.groupSize,
+                    groupInfo.linear.numGroups, groupInfo.linear.groupSize,
+                    groupInfo.overheadBytes);
         }
     }
 

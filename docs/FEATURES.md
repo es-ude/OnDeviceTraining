@@ -11,8 +11,11 @@ declares compute per op as a by-value `arithmetic_t {ARITH_FLOAT32 | ARITH_SYM_I
 roundingMode}` (`forwardMath`, GEMM family also `weightGradMath`/`biasGradMath`, dx op
 `propLossMath`); storage is the produced-wire `quantization_t*` (`outputQ`/`propLossQ`)
 and the grad-storage knobs. `SYM_INT32` is a **compute** format, never durable grad
-storage (#261); `SYM`/`ASYM` are packed **storage** formats. Active training paths are
-FLOAT32 and SYM_INT32; SYM/ASYM/BOOL are partial.
+storage (#261); `SYM`/`ASYM` are packed **storage** formats. `BFP` (block-floating-point,
+epic PR1) is a packed **storage** format too — storage dtype, full conversion matrix,
+ODTS v5, fake-quant training via the `ARITH_FLOAT32` bridge; native `ARITH_BFP` kernels
+are epic PR2+. Active training paths are FLOAT32 and SYM_INT32; SYM/ASYM/BOOL/BFP(fake-quant)
+are partial.
 
 ## Layers (`layerType_t`, 13 total)
 
@@ -201,12 +204,14 @@ Notes on the qualified cells:
 
 - **Layers** — all 12 `layerType_t` have matching `serialize` + `deserialize` arms,
   each round-trip tested under `test/unit/serial/`.
-- **Dtypes** — all 6 `qtype_t` qconfigs serialize/deserialize symmetrically (INT32/
-  FLOAT32/BOOL = type byte only; SYM_INT32 carries scale + rounding + bits; SYM and
-  ASYM carry group records — SYM: `numGroups`/`groupSize`/`scales[]` + bits +
+- **Dtypes** — all 7 `qtype_t` qconfigs serialize/deserialize symmetrically (INT32/
+  FLOAT32/BOOL = type byte only; SYM_INT32 carries scale + rounding + bits; SYM, ASYM,
+  and BFP carry group records — SYM: `numGroups`/`groupSize`/`scales[]` + bits +
   rounding (v4); ASYM: `numGroups`/`groupSize`/`scales[]`/`u16 zeroPoints[]` + bits +
-  rounding (v5) — see Model format below). Packed tensor data (SYM/ASYM sub-byte,
-  BOOL 1-bit) is byte-tight via `calcNumberOfBytesForData` and round-trips exactly.
+  rounding (v5); BFP: `numGroups`/`groupSize`/`exponents[]` + `mantissaBits` +
+  `exponentBits` + rounding (v5) — see Model format below). Packed tensor data
+  (SYM/ASYM sub-byte, BFP sub-byte mantissas, BOOL 1-bit) is byte-tight via
+  `calcNumberOfBytesForData` and round-trips exactly.
 - **Model format** — `"ODTS"` magic + `version` (=5) + `layerCount` + per-layer type
   tag. Deserialize fail-fasts on magic / version / count / tag mismatch. Since v2
   (#370) every count/dim/kernel field is `u32` little-endian via the checked
@@ -231,8 +236,14 @@ Notes on the qualified cells:
   with the identical cap/realloc/sentinel/validate machinery (both arrays), and the
   in-memory zp semantics are the nudged CODE-domain values (`dequant = (code − zp)·scale`,
   see `docs/conventions/tensor.md`); pre-v5 files fail cleanly at the version check
-  (their `i32` value-domain zeroPoint slot cannot be reinterpreted). The v5 bump is
-  coordinated with the parallel BFP epic (its record joins v5 as an append or bumps v6).
+  (their `i32` value-domain zeroPoint slot cannot be reinterpreted). The same v5 bump
+  (a coordinated single bump with the parallel BFP epic) adds the BFP qconfig record:
+  `u32 numGroups`, `u32 groupSize`, `u8 exponents[numGroups]`, `u8 mantissaBits`,
+  `u8 exponentBits`, `u8 rounding`, following the same group-general-since-day-one and
+  reallocate-on-mismatch rules as the SYM v4 arm. The PPCA replay checkpoint's
+  (`"ODTR"`) peek-validate-rewind guard (see Continual learning below) was extended in
+  lockstep for the ASYM and BFP qconfig records' wider layouts (#316-class
+  width-mismatch parity).
 - **Contract** — deserialize **fills a pre-constructed model in place** (no allocation
   in the serial path); the caller must build a matching model first. A tensor record
   whose file dtype, rank, or payload size mismatches the pre-built skeleton fail-fasts
@@ -336,9 +347,9 @@ checkpointing, limitations, literature).
   this is the first library wired for the mechanism (#351 tracks enabling it on the
   legacy `Square`/`Matmul` libs, which predate it and have known blockers).
 - **Quantization machinery** — the 4-phase `executeOp` funnel + `executeConvert`, a
-  6×6 `conversionMatrix` (every FLOAT32/INT32/SYM_INT32/SYM/ASYM pair; BOOL unsupported
-  in every direction), grad-accumulate modes, and `quantizeFloatToAsym` as the single
-  `*→ASYM` helper. `symQConfig_t` is **always-array** (group-quant epic, spec
+  7×7 `conversionMatrix` (every FLOAT32/INT32/SYM_INT32/SYM/ASYM/BFP pair; BOOL
+  unsupported in every direction), grad-accumulate modes, and `quantizeFloatToAsym` as
+  the single `*→ASYM` helper. `symQConfig_t` is **always-array** (group-quant epic, spec
   `docs/superpowers/specs/2026-07-28-group-quantization-design.md`): `scales[numGroups]`
   with per-tensor = numGroups 1 / groupSize 0 sentinel. Groups (numGroups > 1) are
   SHIPPED for creation (`quantizationInitSymGrouped`/`requantizeTensorInPlace`),
@@ -366,6 +377,26 @@ checkpointing, limitations, literature).
   Grads, bias, gamma/beta, wires,
   and momentum stay per-tensor (funnel-enforced); `symInt32QConfig_t` (compute/wires)
   stays scalar by design.
+- **BFP** (`qtype_t BFP`, block-floating-point epic PR1, spec
+  `docs/superpowers/specs/2026-07-29-block-floating-point-design.md`) — packed
+  two's-complement mantissas + per-group `u8` biased exponents (`bfpQConfig_t`), the
+  same always-array group shape as `symQConfig_t`. The dtype-core epic PR1 ships:
+  the **complete 7×7 matrix** (all 10 `BFP` cross cells + the `[BFP][BFP]`
+  per-block width-restore diagonal; the one directional gap is `BFP → SYM`(grouped),
+  which fails fast with dequant-first guidance rather than silently picking a
+  scalar target), the full owner chain (`getQLike`/copy/`freeQuantization`/
+  `deepCopyQuantization`, mirroring SYM — per-tensor clone resets to zero-state,
+  grouped clone deep-copies the exponent grid), `requantizeTensorInPlace` (BFP
+  shape-gated), and ODTS v5. Compute is `ARITH_FLOAT32` only —
+  `arithmeticFromQuantization` bridges every BFP-typed op to float
+  (`ARITH_BFP` does not exist yet); fake-quant BFP training is exercised
+  end-to-end by the multi-layer training capstone test. BFP grad and
+  optimizer-state templates (`gradInit`, per-parameter `m`/`v` cloning) are
+  explicit **carrier gates** that fail fast today — native `ARITH_BFP`
+  compute and BFP grad/state storage are epic PR2/PR3. Deviations from the
+  cited literature (two's-complement mantissas, D6 exponent saturation vs. the
+  #227 abort discipline, the absmax-snap-up exponent rule vs. MX/MSFP) are in
+  `docs/conventions/arithmetic-bfp.md`.
 - **Weight init** — PyTorch-compatible: `INIT_DEFAULT` reproduces
   `kaiming_uniform_(a=√5)`, plus kaiming/xavier schemes (`weightInit_t`). FLOAT32-only.
 - **userApi** — `inference` (single/batched/with-loss), `StateDictApi` (weight **load**
@@ -393,3 +424,7 @@ checkpointing, limitations, literature).
 - `TRACK_INSTRUCTIONS` counters exist on the legacy `Square`/`Matmul` libs but are
   unsafe to enable: a name mismatch fails compilation for `Square`, both libs lack a
   reset helper, and `Matmul`'s SYM_INT32 path double-increments (#351).
+- BFP (block-floating-point epic PR1) has no native compute kernel yet —
+  `ARITH_BFP` arrives epic PR2 (GEMM-family forward) → PR3 (backward + grad/
+  optimizer-state storage); BFP grad and optimizer-state templates fail fast
+  today (`gradInit`, per-parameter state cloning).

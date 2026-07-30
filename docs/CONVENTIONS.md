@@ -42,6 +42,10 @@ something that will drift again.
   seed-rescale guard; Conv1d/Conv1dTransposed SYM_INT32 (#45); the int12-operand /
   int32-accumulator contract (no int64); the quantized grad-accumulation open
   problem (#218).
+- [`conventions/arithmetic-bfp.md`](conventions/arithmetic-bfp.md) — block-floating-point
+  PR1 deviations register: two's-complement mantissas vs. sign-magnitude, D6
+  exponent saturation vs. the #227 abort discipline, the absmax-snap-up
+  exponent rule vs. MX/MSFP, and BFP clone semantics.
 - [`conventions/loss.md`](conventions/loss.md) — loss forward/backward/reduction
   microbatch contracts; where the macro-batch divisor lives.
 - [`conventions/allocation.md`](conventions/allocation.md) — allocation locality

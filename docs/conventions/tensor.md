@@ -138,3 +138,54 @@ increment) and **aborts** on grid overflow (#227 discipline — never clamps); R
 re-derives a fresh grid every store (absmax for SYM, affine min/max for ASYM). Both are
 direct-call only, not `conversionMatrix` cells (there is no dtype-pair to key a matrix
 cell on — the second operand is a raw float increment, not a tensor).
+
+## BFP — block-floating-point storage (BFP epic PR1, spec `docs/superpowers/specs/2026-07-29-block-floating-point-design.md`)
+
+`BFP` is qtype #7 (`qtype_t = {INT32, FLOAT32, SYM_INT32, SYM, ASYM, BOOL,
+BFP}`, appended last — mid-enum insertion would corrupt old checkpoints): a
+packed **two's-complement** `mantissaBits`-wide mantissa per element, plus one
+**per-group** biased `exponentBits`-wide exponent (`bfpQConfig_t.exponents`, a
+`uint8_t` SoA — 1 byte per GROUP, never interleaved into the payload, so
+`packedByteOffset` chunk-streaming arithmetic stays untouched). `value =
+mantissa · 2^(storedExponent − bias)`, `bias = 2^(exponentBits-1) - 1`. Group
+geometry mirrors `symQConfig_t` exactly (storage-order-contiguous runs, the
+`{1,0}` per-tensor / `{>1,>0}` grouped shapes, the `numGroups·groupSize == N`
+identity validated at attach — see "Group-granular quantization" above); the
+practical difference from grouped `SYM` is the shared-scale cost: **1
+byte/group** (a biased exponent) vs. grouped SYM's **4 bytes/group** (a
+`float` absmax scale) — the accuracy-per-byte comparison the BFP sweep epic
+exists to measure (deviations from literature exponent conventions, the
+saturation-not-abort exponent rule, and clone semantics are in
+`docs/conventions/arithmetic-bfp.md`).
+
+**`BFP` IS a storage dtype — "compute format, not storage" (above) does NOT
+apply to it.** Unlike `SYM_INT32`, `BFP` costs `mantissaBits/8` bytes/element
+plus the per-group exponent overhead and is meant to be persisted. Compute is
+a separate, independent axis: as of this PR (dtype core only), BFP has no
+native compute kernel — `arithmeticFromQuantization` derives `ARITH_FLOAT32`
+for a `BFP`-typed quantization (the universal float bridge), so training a
+BFP-stored model today is fake-quant (unpack → float compute → repack).
+Native `ARITH_BFP` kernels (int32 block-partial MACs, float32 cross-block
+accumulation) land in epic PR2; the derivation flips to `ARITH_BFP` then — a
+documented breaking change.
+
+**`int_repr`/`dequantize` convention holds.** `BFP → INT32` emits the packed
+mantissa **codes** with the exponent dropped (`int_repr`, matching every other
+`* → INT32` cell); `BFP → FLOAT32` **dequantizes** (`mantissa · 2^E` per
+element, matching every other `* → FLOAT32` cell).
+
+**Conversion-matrix coverage.** The 7×7 `conversionMatrix` is complete for
+BFP: all 10 cross cells (`{FLOAT32, INT32, SYM_INT32, SYM, ASYM} × BFP`, both
+directions) plus the `[BFP][BFP]` diagonal — the `SYM_INT32` "requant" analog:
+a per-block width/geometry-restore that `writeOutConversion` routes
+producer-restored BFP wires through explicitly, never a same-type memmove.
+`BFP → SYM` has one directional gap: a **grouped** SYM target has no single
+scalar compute image to land a BFP source on, so it fails fast with
+dequant-first guidance (dequantize `BFP → FLOAT32`, then `FLOAT32 →
+SYM`(grouped)); `BFP → SYM`(per-tensor) works directly (fresh absmax pack).
+`BOOL` stays fail-fast in every direction, as elsewhere. Same-dtype BFP pairs
+with differing geometry/width are the one `QuantizationLayer` same-dtype
+exception besides `SYM_INT32`: a same-type convert requires **identical**
+geometry and widths (`numGroups`, `groupSize`, `mantissaBits`,
+`exponentBits`) — a mismatch is a real re-block/width-change, routed through
+the `[BFP][BFP]` diagonal via a Quantization layer, never a verbatim copy.

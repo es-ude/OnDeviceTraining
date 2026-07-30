@@ -359,7 +359,7 @@ checkpointing, limitations, literature).
   **The HAR sweep wiring is SHIPPED (PR5, epic wiring complete)**: the
   `har_classifier` sym trainer carries the `GROUP_MODE`/`GROUP_SIZE`/`WEIGHT_DTYPE`
   env axis (per-layer divisibility fallback, resolved shapes + `group_overhead_b`
-  in every log), 14 `run_matrix.py` arms cover sym/asym{4,6} × per-channel/G64/G32,
+  in every log), 14 `run_matrix.py` arms cover sym/asym{4,6} × per-channel/G64/G32 (12) plus the per-tensor asym{4,6} twins,
   and an `ODTS_ROUNDTRIP=1` demo proves grouped-file→per-tensor-skeleton format
   parity on the real model (see `examples/har_classifier/README.md` §"Group-granular
   quantization"). The #300 acceptance sweep itself runs offline (≥10 seeds).

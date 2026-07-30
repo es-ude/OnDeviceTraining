@@ -254,8 +254,8 @@ Resolved shapes on HAR's actual topology (`N` = weight element count, `outCh`
 | conv3  | [64, 32, 3] | 6144 | 64    | 96 | [64, 96] | [96, 64]             | [192, 32]            |
 | linear | [6, 64]     | 384  | 6     | 64 | [6, 64]  | [6, 64]              | [12, 32]             |
 
-conv1 is the one layer whose element count (1008) shares no common factor of
-64 or 32 with the requested group size, so it silently runs at per-channel
+conv1 is the one layer whose element count (1008) is divisible by neither
+64 nor 32, so it silently runs at per-channel
 granularity under both `g64` and `g32` while the other three layers get their
 requested group size — a property of the topology, not a bug; always read
 `groups_resolved` rather than inferring group shapes from a config name.
@@ -284,7 +284,8 @@ footprint is `params_b + group_overhead_b` — the per-group scale/zero-point
 metadata is real on-device memory and the whole point of the finer-granularity
 arms is paying it for accuracy, so the frontier is reported against the SUM,
 never `params_b` alone (spec §8's "including the §4 overhead, honestly
-reported"). `groups_resolved` in each log is the ground truth for what a
+reported"). Note `compare_memory.py` reports `params_b` only — add each arm's
+constant `config.group_overhead_b` from any of its logs by hand. `groups_resolved` in each log is the ground truth for what a
 config name actually ran (see the fallback table above).
 
 **ODTS v5 round-trip demo** (`ODTS_ROUNDTRIP=1`, default off): after the final
@@ -313,7 +314,8 @@ cmake --build --preset examples_memprofile --target \
 ```
 
 All three binaries are env-configured: `SEED`, `EPOCHS`, `LR`, `MOMENTUM`, `LOG_PATH`
-(+ `SYM_BITS`, `SYM_ROUNDING`, `LR_SCHEDULE`, `LR_MIN` for the SYM binary; the AdamW
+(+ `SYM_BITS`, `SYM_ROUNDING`, `SYM_WIRES`, `LR_SCHEDULE`, `LR_MIN`, `GROUP_MODE`,
+`GROUP_SIZE`, `WEIGHT_DTYPE`, `ODTS_ROUNDTRIP` for the SYM binary; the AdamW
 binary ignores `MOMENTUM`). Each writes an extended RunLog JSON whose `memory` block
 carries per-category analytic bytes, instrumented heap/stack/RSS peaks, and the **reconciliation
 gap** (`heap_peak − mcu_total`, ≈ the host-resident dataset the MCU would

@@ -179,6 +179,10 @@ def run_one(
         "EPOCHS": str(epochs),
         "LOG_PATH": str(log_path),
     }
+    # A shell-exported ODTS_ROUNDTRIP=1 would leak into every parallel run and
+    # race the fixed outputs/har_sym_group.odts path (spurious MISMATCH exits).
+    # The round-trip demo is a standalone check, never a sweep dimension.
+    env.pop("ODTS_ROUNDTRIP", None)
     t0 = time.monotonic()
     result = subprocess.run(
         [str(binary)], cwd=ROOT, env=env, capture_output=True, text=True, check=True

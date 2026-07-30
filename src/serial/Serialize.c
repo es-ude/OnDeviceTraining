@@ -50,24 +50,33 @@
  * ASYM record was left on an INTRA-BRANCH BRIDGE (old per-tensor v4 shape,
  * scale/qBits/rounding/i32-zeroPoint, but with the i32 slot repurposed to
  * carry a code-domain uint16 value, #246/D6) -- superseded by v5 below.
- * v5 (group-quant PR4, Task 4): the ASYM qConfig record adopts the SAME
- * numGroups/groupSize-prefixed, group-general layout the v4 SYM record
- * introduced, PLUS a second per-group array: `u16 zeroPoints[numGroups]`
- * (LE) placed after `f32 scales[numGroups]`, D6's code-domain zp made
- * possible by the qBits<=16 ceiling. Full ASYM record: `u32 numGroups`,
- * `u32 groupSize`, `f32 scales[numGroups]`, `u16 zeroPoints[numGroups]`,
- * `u8 qBits`, `u8 rounding` -- replacing Task 1's bridge above entirely (no
- * migration path from a v4 ASYM record: its value decoded WRONG under the
- * code-domain grid by design of that interim state, so v4 files -- INCLUDING
- * ones this same branch's Tasks 1-3 produced -- now fail cleanly at the
+ * v5 is a COORDINATED single bump (spec D12) carrying two independent
+ * additions that landed together:
+ * (a) group-quant PR4, Task 4 (spec
+ * docs/superpowers/specs/2026-07-28-group-quantization-design.md §6): the
+ * ASYM qConfig record adopts the SAME numGroups/groupSize-prefixed,
+ * group-general layout the v4 SYM record introduced, PLUS a second per-group
+ * array: `u16 zeroPoints[numGroups]` (LE) placed after
+ * `f32 scales[numGroups]`, D6's code-domain zp made possible by the
+ * qBits<=16 ceiling. Full ASYM record: `u32 numGroups`, `u32 groupSize`,
+ * `f32 scales[numGroups]`, `u16 zeroPoints[numGroups]`, `u8 qBits`,
+ * `u8 rounding` -- replacing the bridge above entirely (no migration path
+ * from a v4 ASYM record: its value decoded WRONG under the code-domain grid
+ * by design of that interim state, so v4 files -- INCLUDING ones the
+ * group-quant branch's own earlier tasks produced -- now fail cleanly at the
  * version check below, consistent with the v1->v4 no-back-compat-shim
- * policy). SYM/SYM_INT32/FLOAT32/INT32/BOOL records, layer arms, and the v3
- * grad-presence byte are untouched by this bump.
- * Coordination note: the parallel BFP (block floating point) epic (spec
- * dated 2026-07-29) plans its own qconfig wire record as an append-only new
- * qtype tag. If BFP ships before v5 checkpoints circulate widely, its record
- * may fold into this v5 bump; otherwise it becomes v6. This v5 carries ONLY
- * the ASYM re-layout described above. */
+ * policy).
+ * (b) BFP epic PR1, Task 7 (spec
+ * docs/superpowers/specs/2026-07-29-block-floating-point-design.md §6): new
+ * BFP qConfig record -- `u32 numGroups`, `u32 groupSize`, `u8
+ * exponents[numGroups]`, then `u8 mantissaBits`, `u8 exponentBits`, `u8
+ * roundingMode` -- mirrors the SYM v4 arm field-for-field (group shape ahead
+ * of the per-group data, then a fixed-width tail), group-general from day
+ * one (writes whatever numGroups/groupSize the in-memory config holds). BFP
+ * is a purely additive wire dtype: a pre-BFP v5 reader hitting the BFP tag
+ * fails fast on the unknown tag, never misparses.
+ * SYM/SYM_INT32/FLOAT32/INT32/BOOL records, layer arms, and the v3
+ * grad-presence byte are untouched by this bump. */
 #define SERIALIZE_MAGIC "ODTS"
 #define SERIALIZE_FORMAT_VERSION 5u
 
@@ -188,6 +197,21 @@ static void serializeQConfig(quantization_t *q, FILE *f) {
         }
         serialWriteU8(asymQC->qBits, f);
         serialWriteU8((uint8_t)asymQC->roundingMode, f);
+        break;
+    }
+    case BFP: {
+        bfpQConfig_t *bfpQC = q->qConfig;
+        /* v5 (BFP epic PR1): numGroups/groupSize precede the exponents array,
+         * mirroring the SYM v4 arm above -- group-general since day one,
+         * writes bfpQC->numGroups/groupSize verbatim and every group's
+         * exponent (not just exponents[0]), whatever shape the in-memory
+         * config holds. See the top-of-file v5 comment. */
+        serialWriteSizeAsU32LE(bfpQC->numGroups, f);
+        serialWriteSizeAsU32LE(bfpQC->groupSize, f);
+        serialWriteBytes(bfpQC->exponents, bfpQC->numGroups, f);
+        serialWriteU8(bfpQC->mantissaBits, f);
+        serialWriteU8(bfpQC->exponentBits, f);
+        serialWriteU8((uint8_t)bfpQC->roundingMode, f);
         break;
     }
     default:

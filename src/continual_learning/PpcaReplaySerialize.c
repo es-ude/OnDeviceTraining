@@ -15,23 +15,26 @@
  * and the ODTR scalars are LE-pinned via SerialWire — v1 checkpoints were
  * host-local artifacts, no back-compat shim. The ODTR container version
  * itself does NOT track the embedded ODTS tensor record's own wire version
- * (group-quant PR1 bumped that to v4, Task 4 to v5) --
- * peekValidateThenDeserializeTensor's SYM and ASYM arms below duplicate (a
- * subset of) Serialize.c/Deserialize.c's qConfig layouts and must stay in
- * lockstep with them by hand; see each arm's comment. */
+ * (group-quant PR1 bumped that to v4; group-quant PR4 Task 4 and BFP epic
+ * PR1 Task 7 bumped it together to v5) --
+ * peekValidateThenDeserializeTensor's SYM, ASYM, and BFP arms below each
+ * duplicate (a subset of) Serialize.c/Deserialize.c's own qConfig layout
+ * (#400) and must stay in lockstep with them by hand; see each arm's
+ * comment. */
 #define PPCA_SERIALIZE_FORMAT_VERSION 2u
 /* PPCA state tensors are rank 1 or 2 by construction (mean/eigvals, basis). */
 #define PPCA_MAX_TENSOR_RANK 2
 /* Lockstep literal with Deserialize.c's SERIAL_MAX_QCONFIG_GROUPS (same
  * value, same rationale) -- this module has no allocation sized by the
  * file's numGroups (the peek below only fseek-skips past scales[]/
- * zeroPoints[], never reserves memory for them), but an untrusted, unbounded
- * numGroups still drives an unbounded serialReadF32LE/serialReadU16LE loop
+ * zeroPoints[]/exponents[], never reserves memory for them), but an
+ * untrusted, unbounded numGroups still drives an unbounded read/skip loop
  * on a corrupt/foreign file, so the same sanity cap applies for uniform
  * reader hardening. Keep this literal equal to Deserialize.c's by hand;
  * there is no shared header both modules already depend on to hoist it into
  * (see final-review Fix 7). Renamed from PPCA_MAX_SYM_GROUPS (group-quant
- * PR4 Task 4): the v5 ASYM peek arm below reuses it too. */
+ * PR4 Task 4): the v5 ASYM and BFP (epic PR1 Task 7) peek arms below reuse
+ * it too. */
 #define PPCA_MAX_QCONFIG_GROUPS 65536u
 
 void ppcaReplaySetSerialize(const ppcaReplaySet_t *set, FILE *f) {
@@ -183,6 +186,30 @@ static void peekValidateThenDeserializeTensor(tensor_t *skeleton, FILE *f, const
         if (qBits != skelQc->qBits) {
             PRINT_ERROR("ppcaReplaySetDeserialize: %s ASYM qBits mismatch (file %u, skeleton %u)",
                         what, (unsigned)qBits, (unsigned)skelQc->qBits);
+            exit(1);
+        }
+        break;
+    }
+    case BFP: {
+        /* BFP epic PR1 (Task 7, #400): numGroups/groupSize/exponents/
+         * mantissaBits/exponentBits/roundingMode -- mirrors Deserialize.c's
+         * deserializeQConfig BFP arm layout. Unlike the SYM arm above,
+         * nothing here needs per-field validation against the skeleton (raw
+         * exponent bytes carry no float to sanity-check, and a width
+         * mismatch is Deserialize.c's job on the trusted read below): read
+         * numGroups to size the skip, then fseek past the rest of the
+         * record (groupSize + exponents[numGroups] + mantissaBits +
+         * exponentBits + roundingMode = 4 + numGroups + 3 bytes) in one
+         * call. */
+        uint32_t numGroups = serialReadU32LE(f);
+        if (numGroups == 0 || numGroups > PPCA_MAX_QCONFIG_GROUPS) {
+            PRINT_ERROR("ppcaReplaySetDeserialize: %s BFP file numGroups %u is zero or exceeds "
+                        "the %u-group sanity cap",
+                        what, (unsigned)numGroups, (unsigned)PPCA_MAX_QCONFIG_GROUPS);
+            exit(1);
+        }
+        if (fseek(f, 4 + (long)numGroups + 3, SEEK_CUR) != 0) {
+            PRINT_ERROR("ppcaReplaySetDeserialize: %s BFP record seek failed", what);
             exit(1);
         }
         break;

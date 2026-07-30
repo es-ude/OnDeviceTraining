@@ -2125,6 +2125,65 @@ static void testGoldenBytesModelLinearFrozenV5(void) {
     TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, got, sizeof(expected));
 }
 
+/*! GOLDEN BYTES (BFP epic PR1, Task 7, wire format v5, spec
+ *  docs/superpowers/specs/2026-07-29-block-floating-point-design.md §6): the
+ *  BFP qConfig record -- `u32 numGroups`, `u32 groupSize`, `u8
+ *  exponents[numGroups]`, then `u8 mantissaBits`, `u8 exponentBits`, `u8
+ *  roundingMode` -- followed by the packed mantissa payload
+ *  (calcNumberOfBytesForData, mirroring every other dtype). Shape {2,4}
+ *  grouped per-row (numGroups=2, groupSize=4): the packed nibbles are
+ *  hand-computed from mantissa codes {1,-1,2,-2,3,-3,4,-4} (4-bit two's
+ *  complement, low nibble = even-indexed element, high nibble = odd-indexed
+ *  element, byte-for-byte per packChunkGuarded/byteConversion's bit order)
+ *  and written directly into the tensor's data buffer -- no conversion
+ *  routine involved, isolating this test from the separate quantize/pack-path
+ *  coverage (epic PR1 Tasks 2-4). Exponents are set to arbitrary non-bias
+ *  values (init's zero-state is the bias, 127 for exponentBits=8) to pin
+ *  that the writer emits the CURRENT config, not a derived one.
+ *  Mutation guard: swapping the mantissaBits/exponentBits write order in
+ *  Serialize.c's BFP arm flips bytes 31-32 below and fails this pin. */
+static void testGoldenBytesBfpQConfigRecordV5(void) {
+    size_t *dims = reserveMemory(2 * sizeof(size_t));
+    dims[0] = 2;
+    dims[1] = 4;
+    size_t *order = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 2, order);
+    tensor_t *src = initTensor(shape, quantizationInitBfpGrouped(4, 8, HALF_AWAY, 2, 4), NULL);
+
+    bfpQConfig_t *qc = src->quantization->qConfig;
+    qc->exponents[0] = 5;
+    qc->exponents[1] = 250;
+    uint8_t payload[] = {0xF1, 0xE2, 0xD3, 0xC4}; /* codes {1,-1,2,-2,3,-3,4,-4}, 4-bit packed */
+    memcpy(src->data, payload, sizeof(payload));
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeTensor(src, f);
+    fclose(f);
+    freeTensor(src);
+
+    static const uint8_t expected[] = {
+        /* numberOfDimensions u32 LE */ 0x02, 0x00, 0x00, 0x00,
+        /* dimensions[2] u32 LE */ 0x02, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+        /* orderOfDimensions[2] u32 LE */ 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+        /* qtype BFP */ 0x06,
+        /* numGroups 2 u32 LE */ 0x02, 0x00, 0x00, 0x00,
+        /* groupSize 4 u32 LE */ 0x04, 0x00, 0x00, 0x00,
+        /* exponents[2] */ 0x05, 0xFA,
+        /* mantissaBits 4, exponentBits 8, roundingMode HALF_AWAY */ 0x04, 0x08, 0x00,
+        /* payload: packed 4-bit mantissas, codes {1,-1,2,-2,3,-3,4,-4} */
+        0xF1, 0xE2, 0xD3, 0xC4};
+
+    uint8_t got[sizeof(expected) + 8] = {0};
+    f = fopen(FILE_PATH, "rb");
+    size_t fileBytes = fread(got, 1, sizeof(got), f);
+    fclose(f);
+
+    TEST_ASSERT_EQUAL_size_t(sizeof(expected), fileBytes);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, got, sizeof(expected));
+}
+
 /*! #370: every fwrite is length-checked — a stream that accepts no bytes (here:
  *  a read-only FILE*) must fail fast instead of silently producing a partial
  *  file. */
@@ -2443,6 +2502,7 @@ int main(void) {
     RUN_TEST(testGoldenBytesModelReluSymGroupedOutputV5);
     RUN_TEST(testGoldenBytesModelMaxPool1dV5);
     RUN_TEST(testGoldenBytesModelLinearFrozenV5);
+    RUN_TEST(testGoldenBytesBfpQConfigRecordV5);
     RUN_TEST(testSerializeFailsFastOnUnwritableStream);
 #if SIZE_MAX > UINT32_MAX
     RUN_TEST(testSerializeFailsFastOnDimensionBeyondU32);

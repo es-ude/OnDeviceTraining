@@ -44,17 +44,27 @@
  * a corrupt or from-the-future record. v4's ASYM record was an INTRA-BRANCH
  * BRIDGE (old per-tensor shape, i32 zeroPoint slot repurposed to carry a
  * code-domain uint16 value) -- superseded by v5 below.
- * v5 (group-quant PR4, Task 4): the ASYM qConfig record gets the SAME
+ * v5 is a coordinated single bump (see Serialize.c's v5 comment for the
+ * full record layouts and spec pointers) carrying two additions:
+ * (a) group-quant PR4, Task 4: the ASYM qConfig record gets the SAME
  * numGroups/groupSize-prefixed, reallocate-on-mismatch treatment the v4 SYM
  * record (and PR2/Task 5's relax) already gave SYM, PLUS a second per-group
  * array -- `u16 zeroPoints[numGroups]` (LE) after `f32 scales[numGroups]` --
  * both reallocated together whenever the file's numGroups differs from the
  * skeleton's own. No migration path from v4: that record's ASYM value
  * decoded WRONG under the code-domain grid by design of the interim bridge,
- * so a v4 file (including ones this branch's own Tasks 1-3 produced) now
- * fails cleanly at the version check below -- consistent with the v1->v4
- * no-back-compat-shim policy. See Serialize.c's v5 comment for the
- * BFP-coordination note. */
+ * so a v4 file (including ones the group-quant branch's own earlier tasks
+ * produced) now fails cleanly at the version check below -- consistent with
+ * the v1->v4 no-back-compat-shim policy.
+ * (b) BFP epic PR1, Task 7 (spec
+ * docs/superpowers/specs/2026-07-29-block-floating-point-design.md §6): new
+ * BFP qConfig record, read by a deserializeQConfig arm mirroring the SYM v4
+ * arm's discipline exactly -- a file numGroups differing from the
+ * skeleton's own REALLOCATES the skeleton's exponents[] to the file's shape
+ * (same relax as SYM's, same validateBfpQConfigShape choke point
+ * afterwards) rather than failing fast. The sentinel invariant
+ * (numGroups==1 <=> groupSize==0) and the shared SERIAL_MAX_QCONFIG_GROUPS
+ * sanity cap are checked on the FILE's values, exactly as for SYM/ASYM. */
 #define SERIALIZE_MAGIC "ODTS"
 #define SERIALIZE_FORMAT_VERSION 5u
 
@@ -211,8 +221,13 @@ static void deserializeKernel(kernel_t *kernel, FILE *f) {
  * ASYM arm below reuses this exact cap for its own untrusted fileNumGroups
  * (same rationale, same value; ASYM's second array (zeroPoints, u16) is even
  * smaller per-group than SYM's, so the 256 KiB sizing headroom above is
- * conservative for it too). Keep PpcaReplaySerialize.c's PPCA_MAX_QCONFIG_GROUPS
- * literal equal to this by hand (see that file's lockstep comment). */
+ * conservative for it too). BFP epic PR1 (Task 7): the v5 BFP arm reuses it
+ * as well -- it sizes a reserveMemory(fileNumGroups * sizeof(uint8_t))
+ * allocation and an fread of that many bytes, so an unbounded value still
+ * invites a multi-gigabyte request (calloc-NULL) even though the
+ * byte-per-element multiplier makes the 32-bit size_t-wrap risk above moot
+ * for it. Keep PpcaReplaySerialize.c's PPCA_MAX_QCONFIG_GROUPS literal equal
+ * to this by hand (see that file's lockstep comment). */
 #define SERIAL_MAX_QCONFIG_GROUPS 65536u
 
 static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElements) {
@@ -387,6 +402,61 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
         }
         break;
     }
+    case BFP: {
+        bfpQConfig_t *bfpQC = q->qConfig;
+        /* BFP epic PR1 (Task 7): mirrors the SYM v4 arm's discipline exactly
+         * -- bfpQC->exponents must already point at a valid (>=1-element)
+         * array (callers build the skeleton via initBfpQConfig/
+         * initBfpQConfigGrouped or the stack-fixture idiom first). A file
+         * numGroups differing from the skeleton's own REALLOCATES the
+         * exponents array to the file's shape instead of failing fast -- the
+         * resulting shape is validated below (validateBfpQConfigShape). */
+        size_t fileNumGroups = (size_t)serialReadU32LE(f);
+        /* Same untrusted-wire-input rationale as the SYM arm's cap: bound
+         * fileNumGroups BEFORE it sizes any allocation (shared
+         * SERIAL_MAX_QCONFIG_GROUPS cap, see its comment). */
+        if (fileNumGroups == 0 || fileNumGroups > SERIAL_MAX_QCONFIG_GROUPS) {
+            PRINT_ERROR("deserializeQConfig: BFP file numGroups %zu is zero or exceeds the "
+                        "%u-group sanity cap",
+                        fileNumGroups, (unsigned)SERIAL_MAX_QCONFIG_GROUPS);
+            exit(1);
+        }
+        /* Mirrors the SYM arm: a live tensor (numberOfElements != 0) cannot
+         * have more groups than elements. numberOfElements == 0 (layer
+         * outputQ/propLossQ wire-config call sites) has no tensor to bound
+         * against -- SERIAL_MAX_QCONFIG_GROUPS above is the only guard there. */
+        if (numberOfElements != 0 && fileNumGroups > numberOfElements) {
+            PRINT_ERROR("deserializeQConfig: BFP file numGroups %zu exceeds the %zu-element "
+                        "tensor it attaches to",
+                        fileNumGroups, numberOfElements);
+            exit(1);
+        }
+        if (fileNumGroups != bfpQC->numGroups) {
+            freeReservedMemory(bfpQC->exponents);
+            bfpQC->exponents = reserveMemory(fileNumGroups * sizeof(uint8_t));
+            bfpQC->numGroups = fileNumGroups;
+        }
+        size_t fileGroupSize = (size_t)serialReadU32LE(f);
+        /* Sentinel invariant (Quantization.h): numGroups == 1 <=> groupSize
+         * == 0. Checked on the FILE values, mirroring the SYM arm. */
+        if ((fileNumGroups == 1) != (fileGroupSize == 0)) {
+            PRINT_ERROR("deserializeQConfig: BFP file violates the numGroups==1<=>groupSize==0 "
+                        "sentinel invariant (numGroups=%zu, groupSize=%zu)",
+                        fileNumGroups, fileGroupSize);
+            exit(1);
+        }
+        bfpQC->groupSize = fileGroupSize;
+        serialReadBytes(bfpQC->exponents, fileNumGroups, f);
+        bfpQC->mantissaBits = serialReadU8(f);
+        bfpQC->exponentBits = serialReadU8(f);
+        bfpQC->roundingMode = (roundingMode_t)serialReadU8(f);
+        /* numberOfElements == 0 marks ONLY the layer outputQ/propLossQ
+         * wire-config call sites -- mirrors the SYM arm's validate gate. */
+        if (numberOfElements != 0) {
+            validateBfpQConfigShape(bfpQC, numberOfElements);
+        }
+        break;
+    }
     default:
         PRINT_ERROR("Unknown qType!");
         exit(1);
@@ -459,6 +529,14 @@ static void skipSerializedTensor(FILE *f) {
      * unconditionally below regardless of whether a reallocation actually
      * happened, mirroring symScratch's disposal. */
     asymQConfig_t asymScratch = {0};
+    /* BFP epic PR1 (Task 7): same heap-backed-scratch requirement as
+     * symScratch above (see its comment) -- a GROUPED skipped BFP record
+     * (file numGroups > 1) is not rejected either, and deserializeQConfig's
+     * BFP arm unconditionally freeReservedMemory()s the OLD exponents
+     * pointer before reserveMemory()ing a differently-sized one whenever the
+     * file's numGroups differs from the qConfig's own. A stack-backed
+     * initial array would make that free() undefined behavior. */
+    bfpQConfig_t bfpScratch = {0};
     switch (scratchQ.type) {
     case INT32:
     case FLOAT32:
@@ -482,6 +560,12 @@ static void skipSerializedTensor(FILE *f) {
         asymScratch.roundingMode = HALF_AWAY;
         scratchQ.qConfig = &asymScratch;
         break;
+    case BFP:
+        bfpScratch.exponents = reserveMemory(sizeof(uint8_t));
+        bfpScratch.numGroups = 1;
+        bfpScratch.groupSize = 0;
+        scratchQ.qConfig = &bfpScratch;
+        break;
     default:
         PRINT_ERROR("skipSerializedTensor: unknown qtype %u", (unsigned)type);
         exit(1);
@@ -498,6 +582,9 @@ static void skipSerializedTensor(FILE *f) {
          * since the scratch is discarded either way. */
         freeReservedMemory(asymScratch.scales);
         freeReservedMemory(asymScratch.zeroPoints);
+    }
+    if (scratchQ.type == BFP) {
+        freeReservedMemory(bfpScratch.exponents);
     }
 
     size_t payloadBytes = calcNumberOfBytesForData(&scratchQ, numberOfElements);

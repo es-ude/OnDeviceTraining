@@ -123,7 +123,7 @@ void testSerializeAndDeserializeTensor() {
 static void testDeserializeRejectsBadMagic(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("XXXX", 1, 4, f);
-    writeU32LE(f, 4); /* version (dead value: bad magic short-circuits first) */
+    writeU32LE(f, 5); /* version (dead value: bad magic short-circuits first) */
     writeU32LE(f, 1); /* layerCount */
     uint8_t tag = (uint8_t)FLATTEN;
     fwrite(&tag, sizeof(uint8_t), 1, f);
@@ -692,6 +692,245 @@ static void testDeserializeQConfigRejectsSentinelViolation(void) {
     fclose(f);
 
     tensor_t *skeleton = makeSymTensor1D(4, 4, HALF_AWAY);
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeTensor(skeleton, f));
+    fclose(f);
+
+    freeTensor(skeleton);
+}
+
+/*! BFP epic PR1 (Task 7): per-tensor BFP tensor builder, mirroring
+ *  makeSymTensor1D above. */
+static tensor_t *makeBfpTensor1D(size_t d0, uint8_t mantissaBits, uint8_t exponentBits,
+                                 roundingMode_t roundingMode) {
+    size_t *dims = reserveMemory(1 * sizeof(size_t));
+    dims[0] = d0;
+    size_t *order = reserveMemory(1 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    return initTensor(shape, quantizationInitBfp(mantissaBits, exponentBits, roundingMode), NULL);
+}
+
+/*! BFP epic PR1 (Task 7): grouped-BFP twin of makeBfpTensor1D above --
+ *  numGroups/groupSize must divide d0 (validateBfpQConfigShape, called by
+ *  initTensor, enforces it at construction), mirroring
+ *  makeSymGroupedTensor1D. */
+static tensor_t *makeBfpGroupedTensor1D(size_t d0, uint8_t mantissaBits, uint8_t exponentBits,
+                                        roundingMode_t roundingMode, size_t numGroups,
+                                        size_t groupSize) {
+    size_t *dims = reserveMemory(1 * sizeof(size_t));
+    dims[0] = d0;
+    size_t *order = reserveMemory(1 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    return initTensor(
+        shape,
+        quantizationInitBfpGrouped(mantissaBits, exponentBits, roundingMode, numGroups, groupSize),
+        NULL);
+}
+
+/*! BFP epic PR1 (Task 7): grouped-BFP round trip, mirroring
+ *  testDeserializeGroupedSymIntoPerTensorSkeleton's style but into a
+ *  SAME-SHAPE skeleton (numGroups/groupSize match on both sides) -- proves
+ *  every qConfig field (exponents, mantissaBits, exponentBits, roundingMode)
+ *  and the packed payload round-trip intact. Mantissas are written via
+ *  byteConversion directly (raw codes, no quantize/pack-path dependency),
+ *  mirroring testDeserializeGroupedSymIntoPerTensorSkeleton's own mantissa
+ *  setup. */
+static void testBfpRoundTripGrouped(void) {
+    tensor_t *src = makeBfpGroupedTensor1D(6, 4, 8, HALF_AWAY, 3, 2);
+    bfpQConfig_t *srcQc = src->quantization->qConfig;
+    srcQc->exponents[0] = 120;
+    srcQc->exponents[1] = 130;
+    srcQc->exponents[2] = 140;
+    int32_t mantissas[] = {1, -2, 3, -4, 5, -6};
+    byteConversion((uint8_t *)mantissas, 32, src->data, 4, 6);
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeTensor(src, f);
+    fclose(f);
+
+    tensor_t *dst = makeBfpGroupedTensor1D(6, 4, 8, HALF_AWAY, 3, 2);
+
+    f = fopen(FILE_PATH, "rb");
+    deserializeTensor(dst, f);
+    fclose(f);
+
+    bfpQConfig_t *dstQc = dst->quantization->qConfig;
+    /* CAPTURE before any free. */
+    size_t capturedNumGroups = dstQc->numGroups;
+    size_t capturedGroupSize = dstQc->groupSize;
+    uint8_t capturedExponents[3];
+    for (size_t g = 0; g < 3; g++) {
+        capturedExponents[g] = dstQc->exponents[g];
+    }
+    uint8_t capturedMantissaBits = dstQc->mantissaBits;
+    uint8_t capturedExponentBits = dstQc->exponentBits;
+    roundingMode_t capturedRoundingMode = dstQc->roundingMode;
+    size_t dataBytes = calcNumberOfBytesForData(dst->quantization, 6);
+    uint8_t capturedSrcData[3];
+    uint8_t capturedDstData[3];
+    memcpy(capturedSrcData, src->data, dataBytes);
+    memcpy(capturedDstData, dst->data, dataBytes);
+
+    /* FREE in reverse-init order. */
+    freeTensor(dst);
+    freeTensor(src);
+
+    /* ASSERT on captured. */
+    TEST_ASSERT_EQUAL_size_t(3, capturedNumGroups);
+    TEST_ASSERT_EQUAL_size_t(2, capturedGroupSize);
+    TEST_ASSERT_EQUAL_UINT8(120, capturedExponents[0]);
+    TEST_ASSERT_EQUAL_UINT8(130, capturedExponents[1]);
+    TEST_ASSERT_EQUAL_UINT8(140, capturedExponents[2]);
+    TEST_ASSERT_EQUAL_UINT8(4, capturedMantissaBits);
+    TEST_ASSERT_EQUAL_UINT8(8, capturedExponentBits);
+    TEST_ASSERT_EQUAL_INT(HALF_AWAY, capturedRoundingMode);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(capturedSrcData, capturedDstData, dataBytes);
+}
+
+/*! BFP epic PR1 (Task 7): PR2-style relax sibling of
+ *  testDeserializeGroupedSymIntoPerTensorSkeleton -- a GROUPED file record
+ *  (numGroups=4, groupSize=2) deserialized into a freshly-built PER-TENSOR
+ *  skeleton (numGroups=1, groupSize=0) must REALLOCATE the skeleton's
+ *  exponents[] and load every group's exponent, and the packed tensor DATA
+ *  must round-trip too. */
+static void testBfpDeserializeReallocatesExponentsOnShapeChange(void) {
+    tensor_t *src = makeBfpGroupedTensor1D(8, 4, 8, HALF_AWAY, 4, 2);
+    bfpQConfig_t *srcQc = src->quantization->qConfig;
+    srcQc->exponents[0] = 100;
+    srcQc->exponents[1] = 110;
+    srcQc->exponents[2] = 120;
+    srcQc->exponents[3] = 130;
+    int32_t mantissas[] = {1, -2, 3, -4, 5, -6, 7, -8};
+    byteConversion((uint8_t *)mantissas, 32, src->data, 4, 8);
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeTensor(src, f);
+    fclose(f);
+
+    tensor_t *skeleton = makeBfpTensor1D(8, 4, 8, HALF_AWAY); /* per-tensor: {1,0} */
+
+    f = fopen(FILE_PATH, "rb");
+    deserializeTensor(skeleton, f);
+    fclose(f);
+
+    bfpQConfig_t *dstQc = skeleton->quantization->qConfig;
+    /* CAPTURE before any free. */
+    size_t capturedNumGroups = dstQc->numGroups;
+    size_t capturedGroupSize = dstQc->groupSize;
+    uint8_t capturedExponents[4];
+    for (size_t g = 0; g < 4; g++) {
+        capturedExponents[g] = dstQc->exponents[g];
+    }
+    size_t dataBytes = calcNumberOfBytesForData(skeleton->quantization, 8);
+    uint8_t capturedSrcData[4];
+    uint8_t capturedDstData[4];
+    memcpy(capturedSrcData, src->data, dataBytes);
+    memcpy(capturedDstData, skeleton->data, dataBytes);
+
+    /* FREE in reverse-init order. */
+    freeTensor(skeleton);
+    freeTensor(src);
+
+    /* ASSERT on captured. */
+    TEST_ASSERT_EQUAL_size_t(4, capturedNumGroups);
+    TEST_ASSERT_EQUAL_size_t(2, capturedGroupSize);
+    TEST_ASSERT_EQUAL_UINT8(100, capturedExponents[0]);
+    TEST_ASSERT_EQUAL_UINT8(110, capturedExponents[1]);
+    TEST_ASSERT_EQUAL_UINT8(120, capturedExponents[2]);
+    TEST_ASSERT_EQUAL_UINT8(130, capturedExponents[3]);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(capturedSrcData, capturedDstData, dataBytes);
+}
+
+/*! BFP epic PR1 (Task 7): sibling of testDeserializeSymRejectsZeroNumGroupsInWireConfig
+ *  -- fileNumGroups == 0 must be rejected by SERIAL_MAX_BFP_GROUPS's guard
+ *  DIRECTLY, not merely happen to survive as an always-false branch further
+ *  down (validateBfpQConfigShape also rejects numGroups==0, but never runs
+ *  at a numberOfElements==0 wire-config call site, so it cannot be the thing
+ *  catching this here -- a live-tensor fixture like
+ *  testDeserializeQConfigRejectsSentinelViolation's would let
+ *  validateBfpQConfigShape backstop it instead, verified empirically while
+ *  designing this test: a bare-tensor fixture with fileNumGroups=0 still
+ *  dies with the explicit guard removed, because numGroups==0 is never a
+ *  valid shape for validateBfpQConfigShape either -- so ONLY the layer-level,
+ *  numberOfElements==0 call site isolates this guard's own necessity, per
+ *  the SYM sibling's own comment making the identical point). groupSize is
+ *  written nonzero (1) so the sentinel check does not fire first either. */
+static void testBfpDeserializeRejectsZeroNumGroupsInWireConfig(void) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    fwrite("ODTS", 1, 4, f);
+    writeU32LE(f, 5); /* version */
+    writeU32LE(f, 1); /* layerCount */
+    uint8_t tag = (uint8_t)RELU;
+    fwrite(&tag, 1, 1, f);
+    uint8_t arithByte = 0; /* ARITH_FLOAT32, HALF_AWAY -- forwardMath */
+    fwrite(&arithByte, 1, 1, f);
+    fwrite(&arithByte, 1, 1, f);
+    fwrite(&arithByte, 1, 1, f); /* propLossMath */
+    fwrite(&arithByte, 1, 1, f);
+    uint8_t bfpType = (uint8_t)BFP;
+    fwrite(&bfpType, 1, 1, f); /* outputQ dtype */
+    writeU32LE(f, 0);          /* fileNumGroups = 0 */
+    writeU32LE(f, 1);          /* groupSize: nonzero, satisfies the sentinel */
+    uint8_t mantissaBits = 4;
+    fwrite(&mantissaBits, 1, 1, f);
+    uint8_t exponentBits = 8;
+    fwrite(&exponentBits, 1, 1, f);
+    uint8_t roundingMode = 0; /* HALF_AWAY */
+    fwrite(&roundingMode, 1, 1, f);
+    uint8_t propLossFloatTag = (uint8_t)FLOAT32; /* matches the skeleton's default propLossQ */
+    fwrite(&propLossFloatTag, 1, 1, f);
+    fclose(f);
+
+    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *bfpOutputQ = quantizationInitBfp(4, 8, HALF_AWAY);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    lq.outputQ = bfpOutputQ;
+    layer_t *layer = reluLayerInit(&lq);
+    layer_t *model[] = {layer};
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    fclose(f);
+
+    freeReluLayer(layer);
+    freeQuantization(bfpOutputQ);
+    freeQuantization(floatQ);
+}
+
+/*! BFP epic PR1 (Task 7): sibling of testDeserializeQConfigRejectsSentinelViolation
+ *  -- numGroups==1 but groupSize!=0 violates the sentinel invariant
+ *  (Quantization.h), checked on the FILE values. Well-formed-record
+ *  rationale mirrors the SYM sibling: an otherwise valid record isolates
+ *  THIS guard from the unrelated #316 payload-size check a stale parser's
+ *  misaligned read would otherwise trip. */
+static void testBfpDeserializeRejectsSentinelViolation(void) {
+    uint8_t bfpType = (uint8_t)BFP;
+    uint8_t mantissaBits = 4;
+    uint8_t exponentBits = 8;
+    uint8_t roundingMode = 0;    /* HALF_AWAY */
+    uint8_t payload[2] = {0, 0}; /* mantissaBits=4, 4 elems -> ceil(16/8) = 2 packed bytes */
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    writeU32LE(f, 1); /* numberOfDimensions */
+    writeU32LE(f, 4); /* dimensions[0] */
+    writeU32LE(f, 0); /* orderOfDimensions[0] */
+    fwrite(&bfpType, 1, 1, f);
+    writeU32LE(f, 1); /* numGroups = 1, matches the skeleton */
+    writeU32LE(f, 3); /* groupSize = 3, violates numGroups==1 <=> groupSize==0 */
+    uint8_t exponentByte = 130;
+    fwrite(&exponentByte, 1, 1, f);
+    fwrite(&mantissaBits, 1, 1, f);
+    fwrite(&exponentBits, 1, 1, f);
+    fwrite(&roundingMode, 1, 1, f);
+    fwrite(payload, 1, 2, f);
+    fclose(f);
+
+    tensor_t *skeleton = makeBfpTensor1D(4, 4, 8, HALF_AWAY);
     f = fopen(FILE_PATH, "rb");
     ASSERT_EXITS_WITH_FAILURE(deserializeTensor(skeleton, f));
     fclose(f);
@@ -1473,6 +1712,10 @@ int main(void) {
     RUN_TEST(testDeserializeGroupedSymRejectsBadDivisibility);
     RUN_TEST(testDeserializeGroupedSymIntoPerTensorSkeleton);
     RUN_TEST(testDeserializeQConfigRejectsSentinelViolation);
+    RUN_TEST(testBfpRoundTripGrouped);
+    RUN_TEST(testBfpDeserializeReallocatesExponentsOnShapeChange);
+    RUN_TEST(testBfpDeserializeRejectsZeroNumGroupsInWireConfig);
+    RUN_TEST(testBfpDeserializeRejectsSentinelViolation);
     RUN_TEST(testDeserializeWeightsOnlyIntoTrainableSkeleton);
     RUN_TEST(testSkipSerializedTensorRejectsRankAboveCap);
     RUN_TEST(testSkipSerializedTensorRejectsTruncatedPayload);

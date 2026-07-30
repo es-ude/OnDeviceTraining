@@ -1259,6 +1259,64 @@ void testOutWriteSymDiagonalRoundsByArithmetic(void) {
     TEST_ASSERT_EQUAL_INT(HALF_AWAY, storageModeAfter); /* restored */
 }
 
+/* BFP epic PR1 (Task 8): the #282 swap must also reach a BFP target's
+ * storage slot, or the optimizer's writeBackRounding (and any other
+ * OUT_WRITE op rounding) silently drops onto the target's OWN storage
+ * roundingMode instead. Fixture: intermediate floats {3.5, 7.0} into a
+ * per-tensor BFP target (m=4, e=8). Group absMax = 7.0 (element 1) -> qMax=7
+ * (m=4) -> derived E=0, scale=1.0f EXACTLY, so element 0's quotient 3.5/1.0
+ * is a TRUE HALF_AWAY tie: the op's HALF_AWAY rounding must give mantissa 4
+ * deterministically. The target's OWN storage config is SR_HALF_AWAY (seed
+ * 99, first draw 0.005865...): 3.5 + 0.005865 - 0.5 = 3.005865 -> rounds to
+ * 3 -- the value storageRoundingSlot returning NULL for BFP would silently
+ * substitute instead (op rounding ignored, storage mode leaks through). */
+void testOutWriteBfpTargetUsesOpRoundingAndRestoresSlot(void) {
+    tensor_t *in = buildFloat(2, (float[]){3.5f, 7.0f});
+
+    uint8_t exponents[1] = {9}; /* sentinel, must be overwritten */
+    bfpQConfig_t outQC = {.exponents = exponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = SR_HALF_AWAY, /* storage mode */
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t outQ;
+    initBfpQuantization(&outQC, &outQ);
+    size_t dims[] = {2};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    uint8_t outData[calcNumberOfBytesForData(&outQ, 2)];
+    tensor_t out;
+    setTensorValues(&out, outData, &shape, &outQ, NULL);
+
+    rngSetSeed(99);
+    executeOp(
+        &(opSpec_t){
+            .kernel = executeOpIdentityKernel,
+            .inputs = (tensor_t *[]){in},
+            .nInputs = 1,
+            .arithmetic = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY},
+            .mode = OUT_WRITE,
+        },
+        &out);
+
+    int32_t mant[2];
+    unpackSignExtend(out.data, 4, 0, mant, 2);
+    roundingMode_t storageModeAfter = outQC.roundingMode;
+    uint8_t exponentAfter = outQC.exponents[0];
+    freeTensor(in);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(4, mant[0],
+                                  "BFP OUT_WRITE must round by the op's HALF_AWAY mode, "
+                                  "not the target's SR_HALF_AWAY storage config");
+    TEST_ASSERT_EQUAL_INT(7, mant[1]);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(127, exponentAfter,
+                                    "exponent derived fresh from absMax 7 -> qMax 7 -> E=0");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_HALF_AWAY, storageModeAfter,
+                                  "#282: the target's storage roundingMode must be restored "
+                                  "(it is serialized into checkpoints)");
+}
+
 /* Counter-pin: executeConvert is a BARE storage-to-storage conversion — a
  * conversion node's rounding IS a storage encode, so the TARGET's qConfig
  * roundingMode applies there (unlike the OUT_WRITE epilogue above). Same
@@ -1738,6 +1796,7 @@ int main(void) {
     RUN_TEST(testOutWriteEpilogueRoundsByArithmeticNotTargetQConfig);
     RUN_TEST(testOutWriteDetArithmeticOverridesSrTargetQConfig);
     RUN_TEST(testOutWriteSymDiagonalRoundsByArithmetic);
+    RUN_TEST(testOutWriteBfpTargetUsesOpRoundingAndRestoresSlot);
     RUN_TEST(testExecuteConvertKeepsTargetStorageRounding);
     RUN_TEST(testExecuteConvertSymToSymRequantsThroughDiagonal);
     RUN_TEST(testExecuteConvertFloatToSymMatchesConvertTensor);

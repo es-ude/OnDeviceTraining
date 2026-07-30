@@ -60,6 +60,8 @@ static roundingMode_t *storageRoundingSlot(tensor_t *tensor) {
         return &((symQConfig_t *)tensor->quantization->qConfig)->roundingMode;
     case ASYM:
         return &((asymQConfig_t *)tensor->quantization->qConfig)->roundingMode;
+    case BFP:
+        return &((bfpQConfig_t *)tensor->quantization->qConfig)->roundingMode;
     default:
         return NULL;
     }

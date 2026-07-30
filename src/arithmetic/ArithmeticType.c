@@ -17,6 +17,15 @@ arithmetic_t arithmeticFromQuantization(const quantization_t *q) {
     case ASYM:
         a.roundingMode = ((asymQConfig_t *)q->qConfig)->roundingMode;
         break;
+    case BFP:
+        /* D5 float-bridge staging rule (epic PR1): BFP is storage-only until
+         * the native ARITH_BFP kernels land in epic PR2 -- compute runs in
+         * ARITH_FLOAT32 (the universal bridge), but the config's OWN
+         * roundingMode still seeds the derived arithmetic, mirroring the
+         * SYM/SYM_INT32/ASYM arms above. This derivation FLIPS to ARITH_BFP
+         * once native BFP kernels exist -- a documented breaking change. */
+        a.roundingMode = ((bfpQConfig_t *)q->qConfig)->roundingMode;
+        break;
     case FLOAT32:
     case INT32:
     case BOOL:

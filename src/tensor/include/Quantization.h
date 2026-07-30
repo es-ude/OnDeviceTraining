@@ -98,7 +98,9 @@ typedef struct symQConfig {
     uint8_t qBits;
 } symQConfig_t;
 
-/* BFP epic PR1 (spec docs/superpowers/specs/2026-07-28-group-quantization-design.md):
+/* BFP epic PR1 (spec docs/superpowers/specs/2026-07-29-block-floating-point-design.md;
+ * group shape mechanics below mirror the group-quant design's
+ * docs/superpowers/specs/2026-07-28-group-quantization-design.md):
  * block-floating-point storage -- one packed `mantissaBits`-wide mantissa per
  * element plus one shared `exponentBits`-wide biased exponent per GROUP
  * (value = mantissa * 2^(storedExponent - bias), bias = 2^(exponentBits-1)-1).

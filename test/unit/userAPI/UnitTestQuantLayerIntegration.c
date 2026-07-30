@@ -539,9 +539,13 @@ void testValidatorAcceptsChainWithoutQuantLayers(void) {
 /* BFP epic PR1: a same-dtype BFP pair is a LEGAL Quantization-layer config
  * beside SYM_INT32 -- it is the documented re-block/width-change point
  * (conversionMatrix[BFP][BFP]). Config-acceptance level: the layer's forward
- * runs once over stack tensors (heap BFP tensors would leak exponents[]
- * until the owner-chain task adds the freeQuantization BFP arm; layers
- * cannot allocate BFP wires yet for the same reason, so no model loop).
+ * runs once over stack tensors, NOT because heap BFP tensors would leak --
+ * freeQuantization's BFP arm (TensorApi.c) frees exponents[] cleanly through
+ * freeTensor/freeQuantization, same as SYM. The real reason is that the WIRE
+ * ALLOCATORS (initLayerOutputs/initGradTensor, CalculateGradsSequential.c;
+ * InferenceApi.c) have no BFP arm yet -- they default to "Unknown QType!"
+ * until epic PR2 -- so no model training/inference loop can allocate a live
+ * BFP output/grad tensor today; stack fixtures sidestep that gap entirely.
  * Fixture = testRequantBfpWidthChange's hand-derived gold: m=8 values
  * {100,-50,25,0} -> m=4 stored exponent 131 (E=+4, scale 16), mantissas
  * {6,-3,2,0} -- FRESH exponent proves the forward reached the diagonal. */
@@ -579,7 +583,7 @@ void testQuantLayerAcceptsSameDtypeBfpPairForward(void) {
     tensor_t output;
     setTensorValues(&output, outData, &shape, &outQ, NULL);
 
-    layer_t *quant = buildQuantLayer(&inQ, &outQ); /* documents the config contract */
+    layer_t *quant = buildQuantLayer(&outQ, &inQ); /* documents the config contract */
     quantizationForward(quant, &input, &output);
     freeQuantLayerShell(quant);
 

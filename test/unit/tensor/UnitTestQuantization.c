@@ -241,8 +241,10 @@ void testValidateAsymQConfigShapeDivisibilityAndQBits(void) {
     TEST_ASSERT_TRUE(true); /* reached ⇒ ok-case did not exit */
 }
 
-/* BFP epic PR1 (docs/superpowers/specs/2026-07-28-group-quantization-design.md,
- * Task 1): bfpQConfig_t mirrors symQConfig_t's always-array group shape
+/* BFP epic PR1 (docs/superpowers/specs/2026-07-29-block-floating-point-design.md,
+ * Task 1; the group shape itself mirrors the group-quant design's
+ * docs/superpowers/specs/2026-07-28-group-quantization-design.md): bfpQConfig_t
+ * mirrors symQConfig_t's always-array group shape
  * exactly ({1,0} per-tensor sentinel or {>1,>0} grouped), swapping the SYM
  * per-group float scale for a per-group biased exponent byte -- the group
  * grid itself (numGroups/groupSize/validate) is identical machinery. */

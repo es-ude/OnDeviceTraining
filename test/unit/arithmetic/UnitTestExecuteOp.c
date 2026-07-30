@@ -1399,9 +1399,13 @@ void testExecuteConvertFloatToSymMatchesConvertTensor(void) {
  * stored 126; the diagonal instead derives BOTH target exponents FRESH from
  * the source VALUES on the TARGET's geometry (testRequantBfpReblocksToTarget-
  * Geometry's hand-derived gold: {127, 129}, mantissas {6,1,-2,0,7,-2,1,4}).
- * Stack fixtures (Task 2-4 idiom): initTensor-built BFP tensors would leak
- * exponents[] through freeTensor until the owner-chain task of this epic PR
- * adds the freeQuantization BFP arm. */
+ * Stack fixtures (Task 2-4 idiom), NOT because a heap tensor would leak --
+ * freeQuantization's BFP arm (TensorApi.c) already frees exponents[] cleanly
+ * through freeTensor/freeQuantization, same as SYM. The actual reason:
+ * executeConvert operates on tensor_t values directly, no layer/wire
+ * allocation is involved here at all, so the stack-fixture idiom is simply
+ * the lightest-weight way to build the two operand tensors -- it carries no
+ * BFP-specific limitation. */
 void testExecuteConvertBfpToBfpRoutesDiagonal(void) {
     size_t n = 8;
     size_t dims[] = {8};

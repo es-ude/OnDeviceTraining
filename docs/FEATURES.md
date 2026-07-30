@@ -427,4 +427,9 @@ checkpointing, limitations, literature).
 - BFP (block-floating-point epic PR1) has no native compute kernel yet —
   `ARITH_BFP` arrives epic PR2 (GEMM-family forward) → PR3 (backward + grad/
   optimizer-state storage); BFP grad and optimizer-state templates fail fast
-  today (`gradInit`, per-parameter state cloning).
+  today (`gradInit`, per-parameter state cloning). BFP **wires** (a layer's
+  `outputQ`/`propLossQ`) are a separate gap: the wire allocators
+  (`initLayerOutputs`/`initGradTensor`, `InferenceApi.c`) have no BFP arm
+  either and fail fast with "Unknown QType!" until epic PR2, even though
+  ODTS v5 can already round-trip a model config carrying a BFP wire — you
+  can serialize a model you cannot yet run.

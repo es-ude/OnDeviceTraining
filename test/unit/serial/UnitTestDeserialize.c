@@ -846,7 +846,8 @@ static void testBfpDeserializeReallocatesExponentsOnShapeChange(void) {
 }
 
 /*! BFP epic PR1 (Task 7): sibling of testDeserializeSymRejectsZeroNumGroupsInWireConfig
- *  -- fileNumGroups == 0 must be rejected by SERIAL_MAX_BFP_GROUPS's guard
+ *  -- fileNumGroups == 0 must be rejected by the shared
+ *  SERIAL_MAX_QCONFIG_GROUPS guard
  *  DIRECTLY, not merely happen to survive as an always-false branch further
  *  down (validateBfpQConfigShape also rejects numGroups==0, but never runs
  *  at a numberOfElements==0 wire-config call site, so it cannot be the thing
@@ -936,6 +937,131 @@ static void testBfpDeserializeRejectsSentinelViolation(void) {
     fclose(f);
 
     freeTensor(skeleton);
+}
+
+/*! Final-review fix (BFP epic PR1): the BFP arm's mantissaBits/exponentBits
+ *  wire bytes were overwritten into the skeleton's qConfig VERBATIM, with no
+ *  range check -- unlike every other BFP wire field (numGroups, the sentinel
+ *  invariant), which the arm already validates. A corrupt v5 record
+ *  announcing a mantissaBits outside initBfpQConfigGrouped's own construction
+ *  cap ([2,16], Quantization.c) reaches downstream UB the moment anything
+ *  quantizes against it (mantissaBits=1 -> qMax=0, div-by-zero in
+ *  packFloatBufferAsBfp) with no guard at the trust boundary where the value
+ *  first arrives off the wire.
+ *
+ *  Isolation: exercised at a layer's outputQ wire-config call site
+ *  (numberOfElements == 0, RELU's outputQ, mirroring
+ *  testBfpDeserializeRejectsZeroNumGroupsInWireConfig) rather than a live
+ *  tensor -- a live-tensor fixture risks the #316 payload-size check firing
+ *  first for an unrelated reason (mantissaBits also drives
+ *  calcNumberOfBytesForData), which would make this test pass even with the
+ *  new guard removed. At a bare wire config there is no payload read to
+ *  incidentally catch it: verified empirically pre-fix (TDD RED) -- this
+ *  record parsed to completion (deserializeModel returned normally, no
+ *  exit(1)) because deserializeLayer simply moves on to propLossQ next,
+ *  which matches the skeleton's default FLOAT32 tag. The record is otherwise
+ *  complete and well-formed (matching numGroups/groupSize, a real exponent
+ *  byte, valid roundingMode, a matching propLossQ tag) for that same reason. */
+static void testBfpDeserializeRejectsMantissaBitsOutOfRange(void) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    fwrite("ODTS", 1, 4, f);
+    writeU32LE(f, 5); /* version */
+    writeU32LE(f, 1); /* layerCount */
+    uint8_t tag = (uint8_t)RELU;
+    fwrite(&tag, 1, 1, f);
+    uint8_t arithByte = 0; /* ARITH_FLOAT32, HALF_AWAY -- forwardMath */
+    fwrite(&arithByte, 1, 1, f);
+    fwrite(&arithByte, 1, 1, f);
+    fwrite(&arithByte, 1, 1, f); /* propLossMath */
+    fwrite(&arithByte, 1, 1, f);
+    uint8_t bfpType = (uint8_t)BFP;
+    fwrite(&bfpType, 1, 1, f); /* outputQ dtype */
+    writeU32LE(f, 1);          /* fileNumGroups = 1, matches the skeleton */
+    writeU32LE(f, 0);          /* groupSize = 0, matches the sentinel */
+    uint8_t exponentByte = 127;
+    fwrite(&exponentByte, 1, 1, f);
+    uint8_t mantissaBitsTooNarrow = 1; /* < 2, initBfpQConfigGrouped's own cap */
+    fwrite(&mantissaBitsTooNarrow, 1, 1, f);
+    uint8_t exponentBits = 8;
+    fwrite(&exponentBits, 1, 1, f);
+    uint8_t roundingMode = 0; /* HALF_AWAY */
+    fwrite(&roundingMode, 1, 1, f);
+    uint8_t propLossFloatTag = (uint8_t)FLOAT32; /* matches the skeleton's default propLossQ */
+    fwrite(&propLossFloatTag, 1, 1, f);
+    fclose(f);
+
+    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *bfpOutputQ = quantizationInitBfp(4, 8, HALF_AWAY);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    lq.outputQ = bfpOutputQ;
+    layer_t *layer = reluLayerInit(&lq);
+    layer_t *model[] = {layer};
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    fclose(f);
+
+    freeReluLayer(layer);
+    freeQuantization(bfpOutputQ);
+    freeQuantization(floatQ);
+}
+
+/*! Sibling of testBfpDeserializeRejectsMantissaBitsOutOfRange above, same
+ *  isolation rationale (bare wire config, no payload read to incidentally
+ *  catch it) -- exponentBits outside initBfpQConfigGrouped's own [2,8] cap.
+ *  An unvalidated exponentBits=0 would make bfpExponentBias compute
+ *  `1 << -1` (UB) the moment anything derives a scale from this config;
+ *  exponentBits > 31 would make `1u << exponentBits` UB in
+ *  packFloatBufferAsBfp. Unlike mantissaBits, exponentBits never factors into
+ *  calcNumberOfBytesForData at all, so no live-tensor fixture could ever
+ *  isolate this guard from the payload-size check by construction -- the
+ *  bare wire-config call site is the ONLY place this guard's necessity is
+ *  observable, mirroring the SYM SERIAL_MAX_QCONFIG_GROUPS sibling tests' own
+ *  reasoning for the same call-site choice. */
+static void testBfpDeserializeRejectsExponentBitsOutOfRange(void) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    fwrite("ODTS", 1, 4, f);
+    writeU32LE(f, 5); /* version */
+    writeU32LE(f, 1); /* layerCount */
+    uint8_t tag = (uint8_t)RELU;
+    fwrite(&tag, 1, 1, f);
+    uint8_t arithByte = 0; /* ARITH_FLOAT32, HALF_AWAY -- forwardMath */
+    fwrite(&arithByte, 1, 1, f);
+    fwrite(&arithByte, 1, 1, f);
+    fwrite(&arithByte, 1, 1, f); /* propLossMath */
+    fwrite(&arithByte, 1, 1, f);
+    uint8_t bfpType = (uint8_t)BFP;
+    fwrite(&bfpType, 1, 1, f); /* outputQ dtype */
+    writeU32LE(f, 1);          /* fileNumGroups = 1, matches the skeleton */
+    writeU32LE(f, 0);          /* groupSize = 0, matches the sentinel */
+    uint8_t exponentByte = 127;
+    fwrite(&exponentByte, 1, 1, f);
+    uint8_t mantissaBits = 4;
+    fwrite(&mantissaBits, 1, 1, f);
+    uint8_t exponentBitsTooWide = 9; /* > 8, initBfpQConfigGrouped's own cap */
+    fwrite(&exponentBitsTooWide, 1, 1, f);
+    uint8_t roundingMode = 0; /* HALF_AWAY */
+    fwrite(&roundingMode, 1, 1, f);
+    uint8_t propLossFloatTag = (uint8_t)FLOAT32; /* matches the skeleton's default propLossQ */
+    fwrite(&propLossFloatTag, 1, 1, f);
+    fclose(f);
+
+    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *bfpOutputQ = quantizationInitBfp(4, 8, HALF_AWAY);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    lq.outputQ = bfpOutputQ;
+    layer_t *layer = reluLayerInit(&lq);
+    layer_t *model[] = {layer};
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    fclose(f);
+
+    freeReluLayer(layer);
+    freeQuantization(bfpOutputQ);
+    freeQuantization(floatQ);
 }
 
 /*! #380 PR3: a FROZEN-serialized parameter (hasGrad=0, no grad tensor in the
@@ -1716,6 +1842,8 @@ int main(void) {
     RUN_TEST(testBfpDeserializeReallocatesExponentsOnShapeChange);
     RUN_TEST(testBfpDeserializeRejectsZeroNumGroupsInWireConfig);
     RUN_TEST(testBfpDeserializeRejectsSentinelViolation);
+    RUN_TEST(testBfpDeserializeRejectsMantissaBitsOutOfRange);
+    RUN_TEST(testBfpDeserializeRejectsExponentBitsOutOfRange);
     RUN_TEST(testDeserializeWeightsOnlyIntoTrainableSkeleton);
     RUN_TEST(testSkipSerializedTensorRejectsRankAboveCap);
     RUN_TEST(testSkipSerializedTensorRejectsTruncatedPayload);

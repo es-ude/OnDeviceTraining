@@ -447,8 +447,33 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
         }
         bfpQC->groupSize = fileGroupSize;
         serialReadBytes(bfpQC->exponents, fileNumGroups, f);
-        bfpQC->mantissaBits = serialReadU8(f);
-        bfpQC->exponentBits = serialReadU8(f);
+        /* Final-review fix: mantissaBits/exponentBits are untrusted wire bytes
+         * about to be written verbatim into the skeleton's qConfig -- unlike
+         * every field validated above, these two had NO range check, so a
+         * corrupt v5 record reaches undefined behavior downstream the moment
+         * anything quantizes against it: exponentBits==0 makes
+         * bfpExponentBias compute `1 << -1`; exponentBits>31 makes
+         * `1u << exponentBits` UB in packFloatBufferAsBfp; mantissaBits==1
+         * (or 0) drives qMax to 0, a div-by-zero. exponentBits never affects
+         * calcNumberOfBytesForData, so no byte-count check catches it
+         * either. The caps mirror initBfpQConfigGrouped's own construction-time
+         * caps (Quantization.c) -- a wire value this build's own factories
+         * could never produce is corrupt or from-the-future, exactly like the
+         * sentinel-invariant check above. */
+        uint8_t fileMantissaBits = serialReadU8(f);
+        if (fileMantissaBits < 2 || fileMantissaBits > 16) {
+            PRINT_ERROR("deserializeQConfig: BFP file mantissaBits (%u) outside [2, 16]",
+                        (unsigned)fileMantissaBits);
+            exit(1);
+        }
+        uint8_t fileExponentBits = serialReadU8(f);
+        if (fileExponentBits < 2 || fileExponentBits > 8) {
+            PRINT_ERROR("deserializeQConfig: BFP file exponentBits (%u) outside [2, 8]",
+                        (unsigned)fileExponentBits);
+            exit(1);
+        }
+        bfpQC->mantissaBits = fileMantissaBits;
+        bfpQC->exponentBits = fileExponentBits;
         bfpQC->roundingMode = (roundingMode_t)serialReadU8(f);
         /* numberOfElements == 0 marks ONLY the layer outputQ/propLossQ
          * wire-config call sites -- mirrors the SYM arm's validate gate. */

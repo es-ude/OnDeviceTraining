@@ -223,6 +223,62 @@ FLOAT32, so parity here is consistent with the paper rather than contradicting
 it. Quantizing the gradient path is the open research axis (#218, Jan's
 #137–#142 ladder), not this run.
 
+### Group-granular quantization (#300)
+
+`train_c_sym.c` also carries a `GROUP_MODE`/`GROUP_SIZE`/`WEIGHT_DTYPE` env
+axis on top of everything above, wiring the group-quant epic's grouped
+SYM/ASYM machinery (design spec:
+`docs/superpowers/specs/2026-07-28-group-quantization-design.md`) into a real
+model:
+
+- `WEIGHT_DTYPE=sym|asym` (default `sym`) — packed SYM (scale-only) or ASYM
+  (scale + uint16 code-domain zero-point) weight/bias storage, both at
+  `SYM_BITS`. Biases are always per-tensor regardless of the weight axis below.
+- `GROUP_MODE=tensor|channel|size` (default `tensor`, today's original
+  behavior, byte-identical) — `channel` gives one scale/zero-point per output
+  channel (`groupSize = N/outCh`); `size` takes an explicit `GROUP_SIZE=<n>`
+  and, **whenever `n` does not evenly divide a given layer's own element
+  count**, falls back to that layer's per-channel groupSize instead (never a
+  short last group). The framework never guesses silently: every run's true
+  per-layer resolved shape is in the log's `groups_resolved` field
+  (`{"conv1": [numGroups, groupSize], ...}`), and `group_overhead_b` totals the
+  scale/zero-point metadata bytes across all 8 param tensors.
+
+Resolved shapes on HAR's actual topology (`N` = weight element count, `outCh`
+= output channels, `pc = N/outCh` = the per-channel groupSize):
+
+| layer  | shape       | N    | outCh | pc | channel  | G64 (GROUP_SIZE=64) | G32 (GROUP_SIZE=32) |
+|--------|-------------|------|-------|----|----------|----------------------|----------------------|
+| conv1  | [16, 9, 7]  | 1008 | 16    | 63 | [16, 63] | **[16, 63] (fallback: 1008 = 2⁴·3²·7, neither 64 nor 32 divides it)** | **[16, 63] (fallback)** |
+| conv2  | [32, 16, 5] | 2560 | 32    | 80 | [32, 80] | [40, 64]             | [80, 32]             |
+| conv3  | [64, 32, 3] | 6144 | 64    | 96 | [64, 96] | [96, 64]             | [192, 32]            |
+| linear | [6, 64]     | 384  | 6     | 64 | [6, 64]  | [6, 64]              | [12, 32]             |
+
+conv1 is the one layer whose element count (1008) shares no common factor of
+64 or 32 with the requested group size, so it silently runs at per-channel
+granularity under both `g64` and `g32` while the other three layers get their
+requested group size — a property of the topology, not a bug; always read
+`groups_resolved` rather than inferring group shapes from a config name.
+
+**`run_matrix.py` arms** (`sym{4,6}pc`/`g64`/`g32`, `asym{4,6}`/`pc`/`g64`/`g32`
+— 14 total, at the two coarse widths where the accuracy-per-byte frontier is
+most interesting): see the `CONFIGS` dict's own header comment in
+`run_matrix.py` for the exact per-arm env. Aggregate with the same
+`compare_memory.py` used by the rest of this sweep.
+
+**ODTS v5 round-trip demo** (`ODTS_ROUNDTRIP=1`, default off): after the final
+test eval, `train_c_sym.c` serializes the trained model to
+`outputs/har_sym_group.odts`, builds a **fresh per-tensor skeleton** (same
+topology, same `WEIGHT_DTYPE`, but always `GROUP_MODE=tensor` regardless of
+the run's own group mode), deserializes the file into it, re-runs the same
+test eval, and asserts the result is bit-identical to the original — loud
+`stderr` + exit 1 on any mismatch. This is the concrete format-parity
+evidence for the group-quant spec's ODTS §6: a file written by a **grouped**
+run must load cleanly into a **per-tensor** reader via
+`deserializeQConfig`'s realloc-on-numGroups-mismatch relax, not just in the
+unit-test fixtures. On success the run's JSON log gains
+`"config": {..., "odts_roundtrip": "ok"}`.
+
 ### Build with memory profiling
 
 Memory instrumentation is compiled in only under the `examples_memprofile` preset

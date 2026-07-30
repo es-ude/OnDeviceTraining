@@ -50,6 +50,7 @@
 #include "Conv1dApi.h"
 #include "DataLoader.h"
 #include "DataLoaderApi.h"
+#include "Deserialize.h"
 #include "FlattenApi.h"
 #include "InferenceApi.h"
 #include "Layer.h"
@@ -67,6 +68,7 @@
 #include "RNG.h"
 #include "ReluApi.h"
 #include "Rounding.h"
+#include "Serialize.h"
 #include "SgdApi.h"
 #include "SoftmaxApi.h"
 #include "StateDictApi.h"
@@ -437,6 +439,44 @@ static void requantizeParamsToSym(layer_t **model) {
     freeQuantization(biasQ);
 }
 
+/* Group-quant PR5 (#300) Part A -- ODTS round-trip demo skeleton builder.
+ * ALWAYS builds PER-TENSOR (numGroups=1) weight templates, regardless of this
+ * run's own GROUP_MODE: the point of the demo is exercising
+ * deserializeQConfig's realloc-on-numGroups-mismatch relax (Deserialize.c,
+ * group-quant PR2/PR4 Task 5) on a REAL model -- a file written by a GROUPED
+ * run must load cleanly into a per-tensor reader, reallocating its scales[]
+ * (and, for ASYM, zeroPoints[]) to the file's shape. dtype (SYM vs ASYM) DOES
+ * still have to match the run's WEIGHT_DTYPE: deserializeQuantization
+ * fail-fasts on a dtype mismatch (#316) before any group-shape reconciliation
+ * happens. Mirrors requantizeParamsToSym's structure exactly, minus the
+ * resolveGroupShape call (gs is the {1,0} per-tensor sentinel unconditionally
+ * for every weight tensor, biases are per-tensor already). */
+static void requantizeParamsToPerTensorSym(layer_t **model) {
+    bool isAsym = (g_weightDtype == WEIGHT_DTYPE_ASYM);
+    groupShape_t perTensor = {.numGroups = 1, .groupSize = 0};
+    quantization_t *biasQ = isAsym ? quantizationInitAsym((uint8_t)g_symBits, HALF_AWAY)
+                                   : quantizationInitSym((uint8_t)g_symBits, HALF_AWAY);
+
+    const size_t convIdx[3] = {0, 3, 6};
+    for (size_t k = 0; k < 3; k++) {
+        conv1dConfig_t *cfg = model[convIdx[k]]->config->conv1d;
+        quantization_t *weightQ = buildWeightQuant(perTensor, isAsym);
+        requantizeTensorInPlace(cfg->weights->param, weightQ);
+        freeQuantization(weightQ);
+        if (cfg->bias != NULL) {
+            requantizeTensorInPlace(cfg->bias->param, biasQ);
+        }
+    }
+
+    linearConfig_t *fc = model[10]->config->linear;
+    quantization_t *linWeightQ = buildWeightQuant(perTensor, isAsym);
+    requantizeTensorInPlace(fc->weights->param, linWeightQ);
+    freeQuantization(linWeightQ);
+    requantizeTensorInPlace(fc->bias->param, biasQ);
+
+    freeQuantization(biasQ);
+}
+
 /* ---- Gates -------------------------------------------------------------- */
 
 typedef struct paramGateCtx {
@@ -635,6 +675,95 @@ static void epochCallback(size_t epoch, float trainLoss, epochStats_t evalStats)
     clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
 }
 
+static int ensureDir(const char *p) {
+    if (mkdir(p, S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH) == 0) {
+        return 0;
+    }
+    if (errno == EEXIST) {
+        return 0;
+    }
+    fprintf(stderr, "ERROR: cannot create %s: %s\n", p, strerror(errno));
+    return 1;
+}
+
+/* Group-quant PR5 (#300) Part A -- ODTS v5 round-trip demo (env
+ * `ODTS_ROUNDTRIP=1`, default off). Serializes the just-trained model,
+ * deserializes it into a FRESH per-tensor skeleton (ALWAYS per-tensor,
+ * regardless of this run's own GROUP_MODE -- requantizeParamsToPerTensorSym
+ * above), re-evaluates on the SAME test set, and asserts the result is
+ * bit-identical to `original` (the final eval this file already ran). This is
+ * the format-parity evidence the group-quant spec's §6 calls for: a file
+ * written by a GROUPED run loads cleanly into a per-tensor reader via
+ * deserializeQConfig's realloc-on-numGroups-mismatch relax (Deserialize.c),
+ * exercised here on a REAL model rather than only the unit-test fixtures. A
+ * mismatch is a genuine round-trip defect (loud stderr + exit 1), not a
+ * recorded finding, unlike the convergence diagnostic at the end of main. */
+static void runOdtsRoundtrip(layer_t **model, dataLoader_t *testLoader, epochStats_t original) {
+    if (ensureDir("examples/har_classifier/outputs") != 0) {
+        exit(1);
+    }
+    const char *path = "examples/har_classifier/outputs/har_sym_group.odts";
+
+    FILE *fOut = fopen(path, "wb");
+    if (fOut == NULL) {
+        fprintf(stderr, "ODTS_ROUNDTRIP: cannot open %s for writing\n", path);
+        exit(1);
+    }
+    serializeModel(model, MODEL_SIZE, fOut);
+    fclose(fOut);
+
+    /* Fresh per-tensor skeleton: same topology (buildModel), same WEIGHT_DTYPE
+     * (deserializeQuantization fail-fasts on a dtype mismatch, #316) --
+     * requantized to per-tensor BEFORE deserialize so the skeleton's own
+     * qConfig arrays exist and can be reallocated to whatever shape the file
+     * actually carries (numGroups==1 already if this run itself used
+     * GROUP_MODE=tensor -- the realloc is then a same-size no-op). */
+    symQuant_t sq2 = {
+        .floatQ = quantizationInitFloat(),
+        .symWireQ = quantizationInitSymInt32(HALF_AWAY),
+    };
+    layerQuant_t lqNontrain2;
+    layerQuantInitUniform(&lqNontrain2, g_symWires ? sq2.symWireQ : quantizationInitFloat());
+    layer_t *model2[MODEL_SIZE];
+    buildModel(model2, &sq2, &lqNontrain2);
+    requantizeParamsToPerTensorSym(model2);
+
+    FILE *fIn = fopen(path, "rb");
+    if (fIn == NULL) {
+        fprintf(stderr, "ODTS_ROUNDTRIP: cannot open %s for reading\n", path);
+        exit(1);
+    }
+    deserializeModel(model2, MODEL_SIZE, fIn);
+    fclose(fIn);
+
+    epochStats_t reloaded = evaluationEpochWithMetrics(
+        model2, MODEL_SIZE, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN);
+
+    if (reloaded.loss != original.loss || reloaded.accuracy != original.accuracy) {
+        fprintf(stderr,
+                "ODTS_ROUNDTRIP MISMATCH: original test_loss=%.6f test_acc=%.6f, reloaded "
+                "test_loss=%.6f test_acc=%.6f\n",
+                (double)original.loss, (double)original.accuracy, (double)reloaded.loss,
+                (double)reloaded.accuracy);
+        exit(1);
+    }
+    fprintf(stdout,
+            "ODTS_ROUNDTRIP ok: test_loss=%.6f test_acc=%.6f (group_mode=%s weight_dtype=%s -> "
+            "per-tensor skeleton realloc verified)\n",
+            (double)reloaded.loss, (double)reloaded.accuracy,
+            (g_groupMode == GROUP_MODE_CHANNEL) ? "channel"
+            : (g_groupMode == GROUP_MODE_SIZE)  ? "size"
+                                                : "tensor",
+            (g_weightDtype == WEIGHT_DTYPE_ASYM) ? "asym" : "sym");
+    fflush(stdout);
+
+    /* No optimizer for model2 (eval-only) -- nothing to freeOptim. model2's
+     * layer shells/tensors and sq2's two templates are left unfreed, matching
+     * this file's own discipline for the FIRST model/optimizer (main() never
+     * calls freeOptim(sgd) either): every HAR example binary leaves its model
+     * torn down by process exit, not explicit teardown. */
+}
+
 int main(void) {
     g_symBits = envInt("SYM_BITS", g_symBits);
     g_symWires = envInt("SYM_WIRES", g_symWires);
@@ -687,6 +816,9 @@ int main(void) {
             exit(1);
         }
     }
+    /* Group-quant PR5 (#300) Part A: env-gated ODTS round-trip demo, default
+     * off (see runOdtsRoundtrip above). */
+    int odtsRoundtrip = envInt("ODTS_ROUNDTRIP", 0);
 
     const char *logPath = getenv("LOG_PATH");
 
@@ -844,6 +976,18 @@ int main(void) {
 
     groupLogInfo_t groupInfo = computeGroupLogInfo(model, g_weightDtype == WEIGHT_DTYPE_ASYM);
 
+    /* Group-quant PR5 Part A: "odts_roundtrip" is written into the config
+     * block HERE (header time), speculatively, guarded only by whether the
+     * env is set -- NOT by whether the round trip (which runs much later,
+     * after the final eval) actually succeeds. This is safe because a FAILED
+     * round trip calls exit(1) from runOdtsRoundtrip before this JSON object's
+     * closing brace / "final" block are ever written, leaving a truncated,
+     * unparseable file -- exactly how every other fatal gate in this file
+     * already behaves (the param/grad gates and the initial-loss gate also
+     * exit before touching the log). Any log that DOES parse successfully is
+     * therefore guaranteed to reflect a real bit-identical round trip. */
+    const char *odtsRoundtripFrag = odtsRoundtrip ? ", \"odts_roundtrip\": \"ok\"" : "";
+
     if (logPath != NULL && logPath[0] != '\0') {
         g_log_file = fopen(logPath, "w");
         if (g_log_file != NULL) {
@@ -855,14 +999,14 @@ int main(void) {
                     "\"weight_dtype\": \"%s\", \"group_mode\": \"%s\", \"group_size\": %d, "
                     "\"groups_resolved\": {\"conv1\": [%zu, %zu], \"conv2\": [%zu, %zu], "
                     "\"conv3\": [%zu, %zu], \"linear\": [%zu, %zu]}, "
-                    "\"group_overhead_b\": %zu},\n  \"epochs\": [\n",
+                    "\"group_overhead_b\": %zu%s},\n  \"epochs\": [\n",
                     g_symBits, g_epochs, BATCH, (double)g_lr, (double)g_momentum, g_seed,
                     g_shuffleSeed, g_useCosine ? "cosine" : "none", (double)g_lrMin, weightDtypeStr,
                     groupModeStr, groupSizeForLog, groupInfo.conv1.numGroups,
                     groupInfo.conv1.groupSize, groupInfo.conv2.numGroups, groupInfo.conv2.groupSize,
                     groupInfo.conv3.numGroups, groupInfo.conv3.groupSize,
-                    groupInfo.linear.numGroups, groupInfo.linear.groupSize,
-                    groupInfo.overheadBytes);
+                    groupInfo.linear.numGroups, groupInfo.linear.groupSize, groupInfo.overheadBytes,
+                    odtsRoundtripFrag);
         }
     }
 
@@ -882,6 +1026,23 @@ int main(void) {
     fprintf(stdout, "FINAL test_loss=%.4f test_acc=%.4f\n", (double)testStats.loss,
             (double)testStats.accuracy);
     fflush(stdout);
+
+    /* Group-quant PR5 (#300) Part A: opt-in ODTS round-trip demo. Placed BEFORE
+     * the ODT_MEM_PROFILE stack probe below (which runs one further REAL
+     * training step, mutating model + momentum) so the round trip serializes
+     * and re-evaluates the EXACT model this FINAL line just measured, not a
+     * subsequently-mutated one. */
+#ifdef ODT_MEM_PROFILE
+    /* Snapshot BEFORE the optional round-trip demo: its second model would
+     * otherwise inflate the honest heap peak (~+60 KB) — the demo is study
+     * evidence, not part of the training footprint the report accounts for.
+     * (The probe step below only repeats allocations already inside the
+     * training peak, so the pre-roundtrip snapshot loses nothing.) */
+    size_t heapPeakBeforeRoundtrip = memProfilePeakBytes();
+#endif
+    if (odtsRoundtrip) {
+        runOdtsRoundtrip(model, testLoader, testStats);
+    }
 
 #ifdef ODT_MEM_PROFILE
     /* Honest per-run memory breakdown. The stack probe below runs one REAL
@@ -914,7 +1075,7 @@ int main(void) {
     report.stack_peak_b = memInstrumentStackPeakBytes(&stepCtx, 1u << 20);
     freeSample(stepSample);
 
-    report.heap_peak_b = memProfilePeakBytes();
+    report.heap_peak_b = odtsRoundtrip ? heapPeakBeforeRoundtrip : memProfilePeakBytes();
     report.rss_peak_kb = memProfileRssPeakKb();
     memInstrumentFinalize(&report);
     memInstrumentPrintReconciliation(&report);

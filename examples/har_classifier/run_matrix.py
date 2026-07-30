@@ -67,6 +67,55 @@ CONFIGS: dict[str, tuple[str, dict[str, str]]] = {
     "sym8det": ("train_c_har_classifier_sym", {"SYM_BITS": "8", "SYM_ROUNDING": "det"}),
     "sym6det": ("train_c_har_classifier_sym", {"SYM_BITS": "6", "SYM_ROUNDING": "det"}),
     "sym4det": ("train_c_har_classifier_sym", {"SYM_BITS": "4", "SYM_ROUNDING": "det"}),
+    # Group-granular quantization (#300 axis, group-quant PR5): {per-channel, G64,
+    # G32} x {SYM, ASYM} at the two coarse widths where the accuracy-per-byte
+    # frontier is most interesting (sym4/sym6 -- see the design spec's §8
+    # acceptance grid, docs/superpowers/specs/2026-07-28-group-quantization-design.md).
+    # "pc" = per-channel (one scale/zero-point per output channel, GROUP_MODE=channel);
+    # "g64"/"g32" = fixed group size via GROUP_MODE=size. Bare "sym{W}"/"asym{W}"
+    # (no pc/g64/g32 suffix) are per-TENSOR (today's default GROUP_MODE) -- the
+    # asym twin of the existing sym4/sym6 arms above, added here since ASYM only
+    # exists as an axis from this PR on.
+    #
+    # DIVISIBILITY FALLBACK: a GROUP_MODE=size request only takes if GROUP_SIZE
+    # evenly divides a layer's own element count N; otherwise that layer alone
+    # falls back to its per-channel groupSize (see resolveGroupShape in
+    # train_c_sym.c). On HAR, conv1's weight is N=1008=2^4*3^2*7 over 16 output
+    # channels (pc=63=3^2*7) -- neither 64 nor 32 divides 1008, so EVERY g64/g32
+    # arm below silently runs conv1 at per-channel while conv2/conv3/linear get
+    # their requested group size. This is not a bug to chase; it is recorded
+    # per-run in the log's `groups_resolved` field (per-layer [numGroups,
+    # groupSize]) -- read that field, don't infer group shapes from the config
+    # name alone. See README.md's "Group-granular quantization" section for the
+    # full per-layer resolved-shape table and the ODTS round-trip demo.
+    "sym4pc": ("train_c_har_classifier_sym", {"SYM_BITS": "4", "GROUP_MODE": "channel"}),
+    "sym4g64": ("train_c_har_classifier_sym",
+                {"SYM_BITS": "4", "GROUP_MODE": "size", "GROUP_SIZE": "64"}),
+    "sym4g32": ("train_c_har_classifier_sym",
+                {"SYM_BITS": "4", "GROUP_MODE": "size", "GROUP_SIZE": "32"}),
+    "asym4": ("train_c_har_classifier_sym", {"SYM_BITS": "4", "WEIGHT_DTYPE": "asym"}),
+    "asym4pc": ("train_c_har_classifier_sym",
+                {"SYM_BITS": "4", "WEIGHT_DTYPE": "asym", "GROUP_MODE": "channel"}),
+    "asym4g64": ("train_c_har_classifier_sym",
+                 {"SYM_BITS": "4", "WEIGHT_DTYPE": "asym", "GROUP_MODE": "size",
+                  "GROUP_SIZE": "64"}),
+    "asym4g32": ("train_c_har_classifier_sym",
+                 {"SYM_BITS": "4", "WEIGHT_DTYPE": "asym", "GROUP_MODE": "size",
+                  "GROUP_SIZE": "32"}),
+    "sym6pc": ("train_c_har_classifier_sym", {"SYM_BITS": "6", "GROUP_MODE": "channel"}),
+    "sym6g64": ("train_c_har_classifier_sym",
+                {"SYM_BITS": "6", "GROUP_MODE": "size", "GROUP_SIZE": "64"}),
+    "sym6g32": ("train_c_har_classifier_sym",
+                {"SYM_BITS": "6", "GROUP_MODE": "size", "GROUP_SIZE": "32"}),
+    "asym6": ("train_c_har_classifier_sym", {"SYM_BITS": "6", "WEIGHT_DTYPE": "asym"}),
+    "asym6pc": ("train_c_har_classifier_sym",
+                {"SYM_BITS": "6", "WEIGHT_DTYPE": "asym", "GROUP_MODE": "channel"}),
+    "asym6g64": ("train_c_har_classifier_sym",
+                 {"SYM_BITS": "6", "WEIGHT_DTYPE": "asym", "GROUP_MODE": "size",
+                  "GROUP_SIZE": "64"}),
+    "asym6g32": ("train_c_har_classifier_sym",
+                 {"SYM_BITS": "6", "WEIGHT_DTYPE": "asym", "GROUP_MODE": "size",
+                  "GROUP_SIZE": "32"}),
 }
 
 

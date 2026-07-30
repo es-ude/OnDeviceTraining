@@ -28,6 +28,7 @@ class TrainConfig(TypedDict):
     group_size: NotRequired[int]  # GROUP_SIZE when group_mode == "size"; 0 otherwise
     groups_resolved: NotRequired[dict[str, list[int]]]  # per-layer [numGroups, groupSize] (#300)
     group_overhead_b: NotRequired[int]  # Σ per-tensor numGroups·(4 + asym?2:0), all 8 param tensors (#300)
+    odts_roundtrip: NotRequired[str]  # "ok" iff ODTS_ROUNDTRIP=1 demo passed; absent otherwise (#300)
 
 
 class EpochLog(TypedDict):

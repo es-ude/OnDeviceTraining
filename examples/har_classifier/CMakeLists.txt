@@ -352,6 +352,10 @@ target_link_libraries(train_c_har_classifier_sym PRIVATE
         LayerCommon
         Distributions
 
+        Serialize
+        Deserialize
+        SerialWire
+
         Common
         StorageApi
         RNG

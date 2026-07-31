@@ -195,12 +195,27 @@ def plot_anomaly_score_hist(
 # ---------------------------------------------------------------------------
 
 # Real run_matrix.py sweep set (#322 — was drifted: sym16 never ran, sym10/sym6 missing).
-_MEM_CONFIG_ORDER = ["float", "sym12", "sym10", "sym8", "sym6", "sym4", "sym8cos", "sym4cos"]
-_MEM_CATEGORIES = ["params_b", "grads_b", "optstate_analytic_b", "activations_b", "io_b",
-                   "pool_backward_b", "dx_peak_b"]
+_MEM_CONFIG_ORDER = [
+    "float", "sym12", "sym10", "sym8", "sym6", "sym4", "sym8cos", "sym4cos",
+    # #300 granularity axis — keep in sync with CONFIG_ORDER in compare_memory.py.
+    "sym6pc", "sym6g64", "sym6g32",
+    "sym4pc", "sym4g64", "sym4g32",
+    "asym6", "asym6pc", "asym6g64", "asym6g32",
+    "asym4", "asym4pc", "asym4g64", "asym4g32",
+]
+# MUST stay in sync with CATEGORIES in compare_memory.py: the stacked bar labels each
+# bar with the sum of these, so an omission here silently prints a total that
+# disagrees with mcu_total_b in the summary JSON.
+_MEM_CATEGORIES = ["params_b", "group_overhead_b", "grads_b", "optstate_analytic_b",
+                   "activations_b", "io_b", "pool_backward_b", "dx_peak_b"]
 # Okabe-Ito palette, one per analytic category (colorblind-safe, distinguishable).
 _MEM_CAT_COLORS = {
     "params_b": "#0072B2",             # blue   — the category that shrinks
+    # Brown, NOT the 8th Okabe-Ito yellow (#F0E442 fails the lightness band at
+    # 1.29:1 contrast on the light surface) and NOT vermillion (already taken by
+    # pool_backward_b below — a duplicate would render two segments identically).
+    # Validated at its insertion slot: params | THIS | grads.
+    "group_overhead_b": "#A6761D",     # brown — group scale/zp metadata (#300)
     "grads_b": "#E69F00",              # orange
     "optstate_analytic_b": "#009E73",  # green
     "activations_b": "#CC79A7",        # pink   — dominates at batch 64
@@ -208,6 +223,10 @@ _MEM_CAT_COLORS = {
     "pool_backward_b": "#D55E00",      # vermillion — MaxPool argmax backward state (#321)
     "dx_peak_b": "#56B4E9",            # sky blue   — dx ping-pong transient (#321)
 }
+# The weight chart is a TWO-series part-to-whole, not a slice of the 8-category
+# stack, so it gets its own validated pair (all checks pass, light AND dark)
+# rather than borrowing two hues tuned for 8-way separation.
+_WEIGHT_SPLIT_COLORS = {"payload": "#0072B2", "metadata": "#D55E00"}
 
 
 def _mem_theme(dark: bool) -> tuple[str, str, str]:
@@ -253,7 +272,9 @@ def plot_peak_ram_stacked_bar(out_path: Path | str, agg: dict, dark: bool = Fals
     for cat in _MEM_CATEGORIES:
         vals = np.array([per[c]["stats"][cat]["mean"] for c in configs])
         ax.bar(x, vals, bottom=bottom, width=0.62,
-               color=_MEM_CAT_COLORS[cat], label=cat.replace("_b", ""))
+               # removesuffix, not replace: "pool_backward_b".replace("_b","") also
+               # eats the "_b" inside "_backward" and renders as "poolackward".
+               color=_MEM_CAT_COLORS[cat], label=cat.removesuffix("_b"))
         bottom += vals
     for xi, total in zip(x, bottom):
         ax.text(xi, total, f"{total / (1 << 20):.2f}MB", ha="center", va="bottom",
@@ -312,35 +333,52 @@ def plot_accuracy_vs_memory_scatter(out_path: Path | str, agg: dict, dark: bool 
 
 
 def plot_weight_compression_bar(out_path: Path | str, agg: dict, dark: bool = False) -> None:
-    """Weight storage (params_b) per config, with %-drop vs FLOAT32 annotated.
+    """Weight storage per config, split into packed payload + group metadata.
 
     The compression 'money shot' on its own axis — invisible inside the
-    activation-dominated stacked bar. Bars annotated with the mean weight bytes
-    and (for SYM configs) the percent reduction vs FLOAT32.
+    activation-dominated stacked bar. STACKED on purpose (#300): a group config
+    buys accuracy with scale/zero-point bytes, and at 4 bits that surcharge
+    reaches ~24% of the payload. Drawing params_b alone made per-tensor,
+    per-channel, g64 and g32 render as four identical bars, i.e. it showed finer
+    granularity as free — the exact claim this chart exists to test.
+
+    Bars annotated with the mean TOTAL weight bytes (payload + metadata) and,
+    where a baseline exists, the percent reduction vs FLOAT32.
     """
     bg, fg, grid = _mem_theme(dark)
     configs = _mem_configs_present(agg)
     per = agg["per_config"]
     comps = agg.get("comparisons", {})
 
-    fig, ax = plt.subplots(figsize=(7, 4.5))
+    payload = np.array([per[c]["stats"]["params_b"]["mean"] for c in configs])
+    meta = np.array([per[c]["stats"]["group_overhead_b"]["mean"] for c in configs])
+    totals = payload + meta
+
+    # Widen with the config count: the #300 sweep is 16 arms, the pre-#300 set was 8.
+    fig, ax = plt.subplots(figsize=(max(7.0, 0.62 * len(configs) + 2.0), 4.8))
     x = np.arange(len(configs))
-    means = np.array([per[c]["stats"]["params_b"]["mean"] for c in configs])
-    stds = np.array([per[c]["stats"]["params_b"]["std"] for c in configs])
-    ax.bar(x, means, yerr=stds, width=0.6, color=_MEM_CAT_COLORS["params_b"],
-           capsize=3, error_kw={"ecolor": fg})
-    for xi, c, m in zip(x, configs, means):
-        label = f"{m / 1024:.1f}KB"
+    # edgecolor=bg draws the surface-colored gap the design system wants between
+    # stacked segments, so the two fills never touch.
+    ax.bar(x, payload, width=0.6, color=_WEIGHT_SPLIT_COLORS["payload"],
+           edgecolor=bg, linewidth=1.2, label="packed payload")
+    ax.bar(x, meta, bottom=payload, width=0.6, color=_WEIGHT_SPLIT_COLORS["metadata"],
+           edgecolor=bg, linewidth=1.2, label="group scale/zp metadata")
+
+    for xi, c, total in zip(x, configs, totals):
+        label = f"{total / 1024:.1f}KB"
         if c in comps:
             label += f"\n-{comps[c]['weight_bytes_drop_pct']:.0f}%"
-        ax.text(xi, m, label, ha="center", va="bottom", fontsize=8, color=fg)
+        ax.text(xi, total, label, ha="center", va="bottom", fontsize=7.5, color=fg)
 
     ax.set_xticks(x)
-    ax.set_xticklabels(configs)
+    ax.set_xticklabels(configs, rotation=45, ha="right", fontsize=8)
     ax.set_ylabel("weight storage (bytes)")
-    ax.set_title("Weight-storage compression (packed SYM@x vs FLOAT32)")
-    ax.set_ylim(0, means.max() * 1.18)
+    ax.set_title("Weight storage: packed payload + group metadata")
+    ax.set_ylim(0, totals.max() * 1.20)
     _mem_apply_theme(fig, ax, bg, fg, grid)
+    leg = ax.legend(fontsize=8, loc="upper right", framealpha=0.3)
+    for text in leg.get_texts():
+        text.set_color(fg)
     fig.tight_layout()
     fig.savefig(out_path, dpi=120, facecolor=bg)
     plt.close(fig)

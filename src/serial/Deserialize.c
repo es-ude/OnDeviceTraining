@@ -189,9 +189,25 @@ static void deserializeQuantization(quantization_t *q, FILE *f, size_t numberOfE
     deserializeQConfig(q, f, numberOfElements);
 }
 
+/* BFP epic PR2 (Task 1): the wire tag was a bare cast until now -- an
+ * out-of-range value silently aliased to whatever future enum member gets
+ * appended next, misinterpreting the record's compute representation instead
+ * of failing fast at the trust boundary where it first arrives off the wire. */
 static void deserializeArithmetic(arithmetic_t *arithmetic, FILE *f) {
-    arithmetic->type = (arithmeticType_t)serialReadU8(f);
-    arithmetic->roundingMode = (roundingMode_t)serialReadU8(f);
+    uint8_t typeTag = serialReadU8(f);
+    if (typeTag > (uint8_t)ARITH_BFP) {
+        PRINT_ERROR("deserializeArithmetic: unknown arithmetic wire tag %u (max %u)", typeTag,
+                    (unsigned)ARITH_BFP);
+        exit(1);
+    }
+    arithmetic->type = (arithmeticType_t)typeTag;
+
+    uint8_t roundingTag = serialReadU8(f);
+    if (roundingTag > (uint8_t)SR_HALF_AWAY) {
+        PRINT_ERROR("deserializeArithmetic: unknown roundingMode wire tag %u", roundingTag);
+        exit(1);
+    }
+    arithmetic->roundingMode = (roundingMode_t)roundingTag;
 }
 
 static void deserializeKernel(kernel_t *kernel, FILE *f) {

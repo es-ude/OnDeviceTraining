@@ -67,6 +67,17 @@ _Static_assert(GROUPNORM == 12, "layerType_t wire tag: GROUPNORM must stay 12 (a
 _Static_assert(GROUPNORM + 1 == 13,
                "new layerType_t member: append at the END and add its wire-tag pin above");
 
+/* WIRE-FORMAT PINS (#serial): the serialized arithmetic record's uint8 tag IS the
+   arithmeticType_t enum position (serializeArithmetic, Serialize.c) -- append-only. */
+_Static_assert(ARITH_FLOAT32 == 0,
+               "arithmeticType_t wire tag: ARITH_FLOAT32 must stay 0 (append-only enum)");
+_Static_assert(ARITH_SYM_INT32 == 1,
+               "arithmeticType_t wire tag: ARITH_SYM_INT32 must stay 1 (append-only enum)");
+_Static_assert(ARITH_BFP == 2,
+               "arithmeticType_t wire tag: ARITH_BFP must stay 2 (append-only enum)");
+_Static_assert(ARITH_BFP + 1 == 3,
+               "new arithmeticType_t member: append at the END and add its wire-tag pin above");
+
 /* SERIALIZE_TEST_FILE_PATH is injected by the CMake target_compile_definitions
  * in test/unit/serial/CMakeLists.txt as an absolute path so the test does not
  * depend on the working directory (which differs between host runs and

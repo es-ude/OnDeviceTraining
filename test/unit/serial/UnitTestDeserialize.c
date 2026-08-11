@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "ArithmeticType.h"
 #include "DeathTest.h"
 #include "Deserialize.h"
 #include "Flatten.h"
@@ -1814,6 +1815,135 @@ static void testSkipSerializedGroupedSymGradRejectsBadDivisibility(void) {
     freeTensor(paramTensor);
 }
 
+/*! BFP epic PR2 (Task 1): arithmetic wire-tag round trip -- a layer's
+ *  forwardMath hand-set to {ARITH_BFP, SR_HALF_AWAY} on the SERIAL side only
+ *  (mirroring testRoundTripLinear's grad-seed rationale in
+ *  UnitTestSerialize.c: a round trip that actually moves bytes is
+ *  distinguishable from one that leaves the deserial mirror's uniform
+ *  FLOAT32/HALF_AWAY default untouched) survives serializeModel /
+ *  deserializeModel intact. RELU is the minimal layer with a forwardMath
+ *  field. The derivation flip (arithmeticFromQuantization producing
+ *  ARITH_BFP) is Task 9 -- this test only proves the wire tag itself
+ *  round-trips once a caller hand-sets it. */
+static void testDeserializeArithmeticRoundTripsBfp(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+
+    layer_t *serialLayer = reluLayerInit(&lq);
+    layer_t *deserialLayer = reluLayerInit(&lq);
+
+    serialLayer->config->relu->forwardMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = SR_HALF_AWAY};
+
+    layer_t *serialModel[] = {serialLayer};
+    layer_t *deserialModel[] = {deserialLayer};
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(serialModel, 1, f);
+    fclose(f);
+
+    f = fopen(FILE_PATH, "rb");
+    deserializeModel(deserialModel, 1, f);
+    fclose(f);
+
+    /* CAPTURE before any free. */
+    arithmetic_t loadedForwardMath = deserialLayer->config->relu->forwardMath;
+
+    freeReluLayer(deserialLayer);
+    freeReluLayer(serialLayer);
+    freeQuantization(floatQ);
+
+    /* ASSERT on captured. */
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, loadedForwardMath.type);
+    TEST_ASSERT_EQUAL_INT(SR_HALF_AWAY, loadedForwardMath.roundingMode);
+}
+
+/*! BFP epic PR2 (Task 1): corruption guard sibling -- an arithmetic-type wire
+ *  tag one past ARITH_BFP (3) has no matching enum member yet. Hand-crafted
+ *  ODTS v5 bytes, mirroring the neighboring BFP width-rejection tests'
+ *  well-formed-except-one-byte idiom (testBfpDeserializeRejectsMantissaBitsOutOfRange
+ *  et al. above): every other byte in the record is what a real serialize of
+ *  the RELU skeleton below would produce, EXCEPT the forwardMath type byte,
+ *  which is patched to the out-of-range value 3. deserializeArithmetic reads
+ *  and range-checks the type byte before the roundingMode byte, so this dies
+ *  before the rest of the record is even read -- an unvalidated read here
+ *  would instead alias to whatever future 4th arithmeticType_t member gets
+ *  appended, silently misinterpreting the compute representation. */
+static void testDeserializeArithmeticRejectsUnknownTypeTag(void) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    fwrite("ODTS", 1, 4, f);
+    writeU32LE(f, 5); /* version */
+    writeU32LE(f, 1); /* layerCount */
+    uint8_t tag = (uint8_t)RELU;
+    fwrite(&tag, 1, 1, f);
+    uint8_t badArithType = 3;       /* one past ARITH_BFP (2) -- unknown wire tag */
+    fwrite(&badArithType, 1, 1, f); /* forwardMath.type */
+    uint8_t halfAway = (uint8_t)HALF_AWAY;
+    fwrite(&halfAway, 1, 1, f); /* forwardMath.roundingMode */
+    uint8_t floatType = (uint8_t)ARITH_FLOAT32;
+    fwrite(&floatType, 1, 1, f); /* propLossMath.type */
+    fwrite(&halfAway, 1, 1, f);  /* propLossMath.roundingMode */
+    uint8_t floatQType = (uint8_t)FLOAT32;
+    fwrite(&floatQType, 1, 1, f); /* outputQ dtype */
+    fwrite(&floatQType, 1, 1, f); /* propLossQ dtype */
+    fclose(f);
+
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *layer = reluLayerInit(&lq);
+    layer_t *model[] = {layer};
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    fclose(f);
+
+    freeReluLayer(layer);
+    freeQuantization(floatQ);
+}
+
+/*! BFP epic PR2 (Task 1): roundingMode-tag sibling of
+ *  testDeserializeArithmeticRejectsUnknownTypeTag above -- an unvalidated
+ *  roundingMode byte one past SR_HALF_AWAY (2) would alias to whatever future
+ *  3rd roundingMode_t member gets appended, silently misinterpreting the
+ *  op's rounding policy. The type tag is left VALID (ARITH_FLOAT32) so this
+ *  isolates the second guard from the first -- if only the type-tag guard
+ *  existed, this record would parse the type byte fine and only misbehave
+ *  on the untested roundingMode byte. */
+static void testDeserializeArithmeticRejectsUnknownRoundingModeTag(void) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    fwrite("ODTS", 1, 4, f);
+    writeU32LE(f, 5); /* version */
+    writeU32LE(f, 1); /* layerCount */
+    uint8_t tag = (uint8_t)RELU;
+    fwrite(&tag, 1, 1, f);
+    uint8_t floatType = (uint8_t)ARITH_FLOAT32;
+    fwrite(&floatType, 1, 1, f);       /* forwardMath.type -- valid */
+    uint8_t badRoundingMode = 2;       /* one past SR_HALF_AWAY (1) -- unknown wire tag */
+    fwrite(&badRoundingMode, 1, 1, f); /* forwardMath.roundingMode */
+    fwrite(&floatType, 1, 1, f);       /* propLossMath.type */
+    uint8_t halfAway = (uint8_t)HALF_AWAY;
+    fwrite(&halfAway, 1, 1, f); /* propLossMath.roundingMode */
+    uint8_t floatQType = (uint8_t)FLOAT32;
+    fwrite(&floatQType, 1, 1, f); /* outputQ dtype */
+    fwrite(&floatQType, 1, 1, f); /* propLossQ dtype */
+    fclose(f);
+
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *layer = reluLayerInit(&lq);
+    layer_t *model[] = {layer};
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    fclose(f);
+
+    freeReluLayer(layer);
+    freeQuantization(floatQ);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -1858,5 +1988,8 @@ int main(void) {
     RUN_TEST(testSkipSerializedGroupedAsymGrad);
     RUN_TEST(testSkipSerializedGroupedAsymGradRejectsBadDivisibility);
     RUN_TEST(testSkipSerializedGroupedSymGradRejectsBadDivisibility);
+    RUN_TEST(testDeserializeArithmeticRoundTripsBfp);
+    RUN_TEST(testDeserializeArithmeticRejectsUnknownTypeTag);
+    RUN_TEST(testDeserializeArithmeticRejectsUnknownRoundingModeTag);
     return UNITY_END();
 }

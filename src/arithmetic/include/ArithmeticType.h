@@ -8,7 +8,7 @@
  * arithmetic-type-split, D1). BY VALUE in layer configs: no ownership,
  * no teardown. Only compute-capable representations exist here — storage
  * dtypes (SYM/ASYM/BOOL/INT32) are expressed on tensors/storage configs. */
-typedef enum arithmeticType { ARITH_FLOAT32, ARITH_SYM_INT32 } arithmeticType_t;
+typedef enum arithmeticType { ARITH_FLOAT32, ARITH_SYM_INT32, ARITH_BFP } arithmeticType_t;
 
 typedef struct arithmetic {
     arithmeticType_t type;

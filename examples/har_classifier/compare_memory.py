@@ -126,11 +126,21 @@ def baseline_incompatibilities(
             b = _budget(log)
             if b in sweep_budgets:
                 continue
+            # key=repr: the values are heterogeneous (int/float/str/None once a key is
+            # absent everywhere), so a natural sort raises TypeError on mixed types.
             diffs = sorted(
-                f"{k}={v!r} vs sweep {sorted({dict(sb)[k] for sb in sweep_budgets})!r}"
+                f"{k}={v!r} vs sweep {sorted({dict(sb)[k] for sb in sweep_budgets}, key=repr)!r}"
                 for k, v in b
                 if all(dict(sb)[k] != v for sb in sweep_budgets)
             )
+            if not diffs:
+                # Mixed-budget sweep: every individual value occurs somewhere, but no
+                # single sweep config combines them the way the baseline does. Without
+                # this branch the message ended at the dash and stated no reason at all.
+                diffs = [
+                    f"no single sweep config combines {dict(b)} — sweep budgets are "
+                    f"{[dict(sb) for sb in sweep_budgets]}"
+                ]
             problems.append(
                 f"baseline {config}_seed{seed}: training budget differs — " + "; ".join(diffs)
             )
@@ -194,6 +204,12 @@ def _run_scalars(log: RunLog) -> dict[str, float]:
             f"about the MCU model — reconcile them, do not paper over the gap."
         )
     out["mcu_total_b"] = analytic + out["group_overhead_b"]
+    # gap == heap_peak - mcu_total is a documented identity (log_schema.MemoryLog), and
+    # heap_peak/mcu_total are the primitives — the gap is derived from them. Copying the
+    # C-computed gap while widening the total would break the identity by exactly
+    # group_overhead_b and understate the unaccounted host-resident bytes, which is the
+    # one number the header promises is never massaged.
+    out["reconciliation_gap_b"] = out["heap_peak_b"] - out["mcu_total_b"]
     return out
 
 
@@ -264,6 +280,26 @@ def aggregate(runs: dict[str, dict[int, RunLog]]) -> dict:
                 "mcu_total_drop_pct": _drop_pct(fp["mcu_total_b"]["mean"], cp["mcu_total_b"]["mean"]),
             }
     return {"per_config": per_config, "comparisons": comparisons}
+
+
+def merge_baseline(
+    runs: dict[str, dict[int, RunLog]], baseline: dict[str, dict[int, RunLog]], config: str
+) -> None:
+    """Splice ``config`` from ``baseline`` into ``runs``, refusing to shadow one.
+
+    An unconditional assignment would discard the sweep's OWN runs of that name in
+    favour of the cross-run ones — and it would do so right after the drift check
+    reported the collision, so the tool would diagnose the problem and then commit
+    it. If the sweep already carries the reference arm, that arm is the better data
+    by construction: same build, same session.
+    """
+    if config in runs:
+        raise ValueError(
+            f"--logs already contains '{config}' runs, so merging a cross-run baseline would "
+            f"replace same-build data with older data. Drop --baseline-logs and use the "
+            f"in-sweep '{config}' arm, or point --baseline-config at a name the sweep lacks."
+        )
+    runs[config] = baseline[config]
 
 
 def _drop_pct(ref: float, val: float) -> float:
@@ -444,7 +480,10 @@ def main() -> None:
                       file=sys.stderr)
             print("", file=sys.stderr)
         if merged:
-            runs[args.baseline_config] = braw[args.baseline_config]
+            try:
+                merge_baseline(runs, braw, args.baseline_config)
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
 
     agg = aggregate(runs)
     if baseline_meta is not None:

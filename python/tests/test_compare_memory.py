@@ -19,6 +19,7 @@ from examples.har_classifier.compare_memory import (  # noqa: E402
     CATEGORIES,
     aggregate,
     baseline_incompatibilities,
+    merge_baseline,
 )
 from examples._shared.log_schema import RunLog  # noqa: E402
 
@@ -171,6 +172,51 @@ def test_comparisons_populated_once_baseline_is_merged():
     assert comps["sym4"]["weight_bytes_drop_pct"] == pytest.approx(
         (1 - 5139 / 40856) * 100, abs=1e-9
     )
+
+
+def test_reconciliation_gap_tracks_the_widened_total():
+    """gap == heap_peak - mcu_total is a documented identity (log_schema.MemoryLog).
+    Widening mcu_total_b with the metadata while copying the C-computed gap verbatim
+    broke it by exactly group_overhead_b, understating the unaccounted host bytes."""
+    runs = {"sym4g32": {1: _log(params_b=5107, overhead=1216, acc=0.8976)}}
+    stats = aggregate(runs)["per_config"]["sym4g32"]["stats"]
+    assert stats["reconciliation_gap_b"]["mean"] == (
+        stats["heap_peak_b"]["mean"] - stats["mcu_total_b"]["mean"]
+    )
+
+
+def test_merge_baseline_refuses_to_shadow_in_sweep_runs():
+    """A cross-run baseline must never silently replace the sweep's own runs of the
+    same name — the drift check would flag the collision and the merge would then
+    discard the fresher data anyway."""
+    runs = {"float": {1: _log(params_b=40856, overhead=None, acc=0.9053)}}
+    braw = {"float": {1: _log(params_b=40856, overhead=None, acc=0.8953)}}
+    with pytest.raises(ValueError, match="already contains"):
+        merge_baseline(runs, braw, "float")
+    assert runs["float"][1]["final"]["test_acc"] == 0.9053  # untouched
+
+
+def test_merge_baseline_splices_a_config_absent_from_the_sweep():
+    runs = {"sym4": {1: _log(params_b=5107, overhead=32, acc=0.8957)}}
+    braw = {"float": {1: _log(params_b=40856, overhead=None, acc=0.8953)}}
+    merge_baseline(runs, braw, "float")
+    assert runs["float"][1]["final"]["test_acc"] == 0.8953
+
+
+def test_budget_mismatch_always_states_a_reason():
+    """With a mixed-budget sweep a baseline can match no single budget while every
+    individual key value appears somewhere, which produced a bare
+    'training budget differs — ' with nothing after the dash."""
+    a = _budget_log(epochs=50, acc=0.89)
+    a["config"]["momentum"] = 0.9
+    b = _budget_log(epochs=20, acc=0.88)  # no momentum key -> normalises to 0.0
+    base = _budget_log(epochs=20, acc=0.90, params_b=40856)
+    base["config"]["momentum"] = 0.9  # matches a's momentum, b's epochs, neither tuple
+
+    problems = baseline_incompatibilities({"symA": {1: a}, "symB": {1: b}}, {"float": {1: base}})
+    assert len(problems) == 1
+    assert not problems[0].rstrip().endswith("—"), problems[0]
+    assert "epochs" in problems[0] and "momentum" in problems[0], problems[0]
 
 
 def test_c_python_total_drift_is_rejected():

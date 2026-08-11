@@ -5467,6 +5467,108 @@ void testRequantBfpWidthChange(void) {
     TEST_ASSERT_EQUAL_INT32(0, mant[3]);
 }
 
+void testQuantizeFloatBufferToBfpCodesPerTensor(void) {
+    /* same fixture as testRequantBfpWidthChange: {100,-50,25,0} at m=4,e=8
+     * -> stored exponent 131 (E=+4, scale 16), codes {6,-3,2,0}
+     * (25/16 = 1.5625 -> 2 pins HALF_AWAY over truncation) */
+    float values[] = {100.f, -50.f, 25.f, 0.f};
+    uint8_t exponents[1] = {9}; /* sentinel != expected 131 */
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 4,
+                       .exponentBits = 8};
+    int32_t codes[4];
+    quantizeFloatBufferToBfpCodes(values, 4, &qc, codes);
+    TEST_ASSERT_EQUAL_UINT8(131, exponents[0]);
+    int32_t expected[] = {6, -3, 2, 0};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, codes, 4);
+}
+
+void testQuantizeFloatBufferToBfpCodesGroupedIndependentExponents(void) {
+    /* two groups of 4 with very different magnitudes -> independent exponents;
+     * mirrors testFloatToBfpGroupedIndependentExponents' values: group0
+     * absMax 6 -> E=0 (stored 127, scale 1); group1 absMax 28 -> 28/7 = 4 =
+     * 2^2 (frac==0.5 exact-power boundary) -> E=+2 (stored 129, scale 4) */
+    float values[8] = {6.f, 1.f, -2.f, 0.f, 28.f, -7.f, 3.f, 14.f};
+    uint8_t exponents[2] = {9, 9}; /* sentinels != expected {127, 129} */
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 2,
+                       .groupSize = 4,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 4,
+                       .exponentBits = 8};
+    int32_t codes[8];
+    quantizeFloatBufferToBfpCodes(values, 8, &qc, codes);
+    TEST_ASSERT_EQUAL_UINT8(127, exponents[0]);
+    TEST_ASSERT_EQUAL_UINT8(129, exponents[1]);
+    int32_t expected[8] = {6, 1, -2, 0, 7, -2, 1, 4};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, codes, 8);
+}
+
+void testQuantizeFloatBufferToBfpCodesSaturatesHighAndFlushesLow(void) {
+    /* e=2 (bias 1, stored max 3), m=4: mirrors the narrow-exponent pack tests.
+     * High: absMax 1000 needs E=8 -> stored clamps to 3 (scale 4), codes clamp
+     * to +-qMax. Low: absMax 0.001 needs E<<-1 -> stored clamps to 0
+     * (scale 0.5), quotients round to 0 (flush toward zero). */
+    float high[2] = {1000.f, -5.f};
+    uint8_t highExponents[1] = {0}; /* sentinel at the OTHER end of the range */
+    bfpQConfig_t highQc = {.exponents = highExponents,
+                           .numGroups = 1,
+                           .groupSize = 0,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = 4,
+                           .exponentBits = 2};
+    int32_t highCodes[2];
+    quantizeFloatBufferToBfpCodes(high, 2, &highQc, highCodes);
+    TEST_ASSERT_EQUAL_UINT8(3, highExponents[0]);
+    TEST_ASSERT_EQUAL_INT32(7, highCodes[0]);  /* saturated */
+    TEST_ASSERT_EQUAL_INT32(-1, highCodes[1]); /* -5/4 -> -1.25 -> -1 */
+
+    float low[2] = {0.001f, -0.0005f};
+    uint8_t lowExponents[1] = {3}; /* sentinel at the OTHER end of the range */
+    bfpQConfig_t lowQc = {.exponents = lowExponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 2};
+    int32_t lowCodes[2];
+    quantizeFloatBufferToBfpCodes(low, 2, &lowQc, lowCodes);
+    TEST_ASSERT_EQUAL_UINT8(0, lowExponents[0]);
+    TEST_ASSERT_EQUAL_INT32(0, lowCodes[0]);
+    TEST_ASSERT_EQUAL_INT32(0, lowCodes[1]);
+}
+
+void testQuantizeFloatBufferToBfpCodesAllZeroKeepsZeroState(void) {
+    /* all-zero group -> exponent == bias (scale 1), codes all 0 -- mirrors
+     * testFloatToBfpAllZeroGroupKeepsZeroStateExponent */
+    float values[4] = {0.f, 0.f, 0.f, 0.f};
+    uint8_t exponents[1] = {9}; /* sentinel != expected bias 127 */
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 4,
+                       .exponentBits = 8};
+    int32_t codes[4];
+    quantizeFloatBufferToBfpCodes(values, 4, &qc, codes);
+    TEST_ASSERT_EQUAL_UINT8(127, exponents[0]);
+    int32_t expected[4] = {0, 0, 0, 0};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, codes, 4);
+}
+
+void testDeriveBfpStoredExponentPublicBoundaries(void) {
+    uint8_t stored;
+    deriveBfpStoredExponent(0.f, 7.f, 127, 255, &stored);
+    TEST_ASSERT_EQUAL_UINT8(127, stored);                 /* zero-state */
+    deriveBfpStoredExponent(7.f, 7.f, 127, 255, &stored); /* absMax == qMax exactly -> E=0 */
+    TEST_ASSERT_EQUAL_UINT8(127, stored);
+    deriveBfpStoredExponent(14.f, 7.f, 127, 255, &stored); /* exactly 2*qMax -> E=1 (snap-up) */
+    TEST_ASSERT_EQUAL_UINT8(128, stored);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -5615,6 +5717,12 @@ int main(void) {
     RUN_TEST(testSameTypeBfpConvertRejectsExponentWidthMismatch);
     RUN_TEST(testRequantBfpReblocksToTargetGeometry);
     RUN_TEST(testRequantBfpWidthChange);
+
+    RUN_TEST(testQuantizeFloatBufferToBfpCodesPerTensor);
+    RUN_TEST(testQuantizeFloatBufferToBfpCodesGroupedIndependentExponents);
+    RUN_TEST(testQuantizeFloatBufferToBfpCodesSaturatesHighAndFlushesLow);
+    RUN_TEST(testQuantizeFloatBufferToBfpCodesAllZeroKeepsZeroState);
+    RUN_TEST(testDeriveBfpStoredExponentPublicBoundaries);
 
     return UNITY_END();
 }

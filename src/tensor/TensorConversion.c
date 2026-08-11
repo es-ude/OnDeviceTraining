@@ -972,9 +972,11 @@ static void packFloatBufferAsSym(const float *values, size_t n, symQConfig_t *ou
  * when ratio is itself a power of two (frac == 0.5), where it is e - 1. The
  * stored-range clamp IS the D6 saturation: stored > max -> the emit pass
  * clamps mantissas to +-qMax (high regime); stored < 0 -> quotients round to
- * 0 (flush-toward-zero regime). */
-static void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint8_t maxStored,
-                                    uint8_t *storedOut) {
+ * 0 (flush-toward-zero regime). Public since epic PR2 (TensorConversion.h):
+ * the funnel's staging quantizer and PR3's op-local re-blocking derive
+ * exponents through this single authority. */
+void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint8_t maxStored,
+                             uint8_t *storedOut) {
     if (absMax == 0.f) {
         *storedOut = (uint8_t)bias; /* zero-state parity: E = 0 */
         return;
@@ -992,6 +994,8 @@ static void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint
     *storedOut = (uint8_t)stored;
 }
 
+/* Packed sibling of quantizeFloatBufferToBfpCodes below: same two-pass
+ * value-domain quantization, but chunked and emitting a PACKED payload. */
 static void packFloatBufferAsBfp(const float *values, size_t n, bfpQConfig_t *outQC, uint8_t *dst,
                                  const char *what) {
     const float qMax = powf(2, (float)outQC->mantissaBits - 1) - 1;
@@ -1025,6 +1029,38 @@ static void packFloatBufferAsBfp(const float *values, size_t n, bfpQConfig_t *ou
                                   (int32_t)qMin, (int32_t)qMax);
         }
         packChunkGuarded(codes, count, dst, outQC->mantissaBits, off, what);
+    }
+}
+
+/* Unpacked sibling of packFloatBufferAsBfp above (same two-pass value-domain
+ * quantization, but caller-buffer codes instead of a packed payload): the
+ * executeOp funnel stages FLOAT32 operands as unpacked int32 codes, so
+ * pack-then-unpack would be wasted work. Writes into the CALLER's codesOut
+ * (n entries) -- exempt from the no-O(n)-internal-scratch converter contract
+ * by design; allocates nothing. Contract details in TensorConversion.h. */
+void quantizeFloatBufferToBfpCodes(const float *values, size_t n, bfpQConfig_t *outQC,
+                                   int32_t *codesOut) {
+    float qMax = (float)((1 << (outQC->mantissaBits - 1)) - 1);
+    int32_t qMin = -(1 << (outQC->mantissaBits - 1));
+    int32_t bias = bfpExponentBias(outQC);
+    uint8_t maxStored = (uint8_t)((1u << outQC->exponentBits) - 1u);
+    size_t gsz = outQC->groupSize == 0 ? (n > 0 ? n : 1) : outQC->groupSize;
+    for (size_t g = 0; g < outQC->numGroups; g++) {
+        size_t start = g * gsz;
+        size_t end = (start + gsz > n) ? n : start + gsz;
+        float absMax = 0.f;
+        for (size_t i = start; i < end; i++) {
+            float a = fabsf(values[i]);
+            if (a > absMax) {
+                absMax = a;
+            }
+        }
+        deriveBfpStoredExponent(absMax, qMax, bias, maxStored, &outQC->exponents[g]);
+        float scale = bfpGroupScale(outQC, g);
+        for (size_t i = start; i < end; i++) {
+            codesOut[i] = clampInt32(roundByMode(values[i] / scale, outQC->roundingMode), qMin,
+                                     (int32_t)qMax);
+        }
     }
 }
 

@@ -76,6 +76,21 @@ void requantSymInt32TensorToScale(tensor_t *inputTensor, tensor_t *outputTensor)
  * is reachable only via direct matrix dispatch (executeConvert / the
  * OUT_WRITE epilogue). */
 void requantBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor);
+/* The single BFP exponent authority (frexpf snap-up, D6 clamp both ends).
+   Public since epic PR2: funnel staging and (PR3) op-local re-blocking derive
+   through it. */
+void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint8_t maxStored,
+                             uint8_t *storedOut);
+/* Quantize a float buffer into UNPACKED int32 BFP mantissa codes (no payload
+   packing). Two passes per group: absmax -> deriveBfpStoredExponent into
+   outQC->exponents[g], then round/clamp codes. outQC supplies
+   geometry/widths/roundingMode; its exponents array must have numGroups
+   entries and is overwritten. codesOut is caller-owned, n entries. Writing
+   into the CALLER's codesOut is exempt from the no-O(n)-internal-scratch
+   converter contract by design -- this function allocates nothing.
+   Value-domain: saturates (D6), never aborts. */
+void quantizeFloatBufferToBfpCodes(const float *values, size_t n, bfpQConfig_t *outQC,
+                                   int32_t *codesOut);
 char *quantTypeToString(qtype_t t);
 /*! SYM_INT32 -> SYM with NO rescale: carry the input scale, pack mantissas
  *  verbatim. Exits if any mantissa exceeds the target qBits. The no-rescale

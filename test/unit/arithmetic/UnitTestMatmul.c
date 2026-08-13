@@ -1,6 +1,7 @@
 #include <string.h>
 
 #include "Arithmetic.h"
+#include "BfpKernelSupport.h"
 #include "DeathTest.h"
 #include "Matmul.h"
 #include "RNG.h"
@@ -10,6 +11,7 @@
 #include <DTypes.h>
 #include <TensorConversion.h>
 
+#include "expected_bfp_matmul.h"
 #include "expected_group_matmul.h"
 
 void testMatmulInt32() {
@@ -1038,6 +1040,285 @@ void testMatmulGroupedWeightRejectsPerTensorSentinel(void) {
         matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &outputTensor, &weightGroups));
 }
 
+/* ---- BFP epic PR2 (Task 3): matmulBfpTensors ----------------------------
+ *
+ * Operands arrive in the funnel's UNPACKED-BFP scratch form: ->data holds
+ * int32 sign-extended mantissa codes, ->quantization is BFP with a live
+ * bfpQConfig_t (stack-fixture idiom, Quantization.h). Output is RAW FLOAT32
+ * -- the kernel never rounds and never width-restores (both are the funnel's
+ * job, not the kernel's). The gold fixture lives in the exact float regime
+ * (generate_expected_bfp_matmul.py asserts it), so expectations are BIT-
+ * pinned via TEST_ASSERT_EQUAL_MEMORY, not a tolerance. */
+
+void testMatmulBfpMatchesGold(void) {
+    tensor_t aTensor;
+    size_t aDims[] = {(size_t)kBfpOutRows, (size_t)kBfpReduceLen};
+    size_t aOrder[] = {0, 1};
+    shape_t aShape;
+    setShape(&aShape, aDims, 2, aOrder);
+    uint8_t aExponents[3];
+    memcpy(aExponents, kBfpAExponents, sizeof(aExponents));
+    bfpQConfig_t aQC = {.exponents = aExponents,
+                        .numGroups = (size_t)kBfpANumGroups,
+                        .groupSize = (size_t)kBfpAGroupSize,
+                        .roundingMode = HALF_AWAY,
+                        .mantissaBits = (uint8_t)kBfpAMantissaBits,
+                        .exponentBits = (uint8_t)kBfpAExponentBits};
+    quantization_t aQ;
+    initBfpQuantization(&aQC, &aQ);
+    setTensorValues(&aTensor, (uint8_t *)kBfpACodes, &aShape, &aQ, NULL);
+
+    tensor_t bTensor;
+    size_t bDims[] = {(size_t)kBfpOutCols, (size_t)kBfpReduceLen};
+    size_t bOrder[] = {1, 0}; /* post-transpose logical view: reduction axis first */
+    shape_t bShape;
+    setShape(&bShape, bDims, 2, bOrder);
+    uint8_t bExponents[9];
+    memcpy(bExponents, kBfpBExponents, sizeof(bExponents));
+    bfpQConfig_t bQC = {.exponents = bExponents,
+                        .numGroups = (size_t)kBfpBNumGroups,
+                        .groupSize = (size_t)kBfpBGroupSize,
+                        .roundingMode = HALF_AWAY,
+                        .mantissaBits = (uint8_t)kBfpBMantissaBits,
+                        .exponentBits = (uint8_t)kBfpBExponentBits};
+    quantization_t bQ;
+    initBfpQuantization(&bQC, &bQ);
+    setTensorValues(&bTensor, (uint8_t *)kBfpBCodes, &bShape, &bQ, NULL);
+
+    tensor_t biasTensor;
+    size_t biasDims[] = {(size_t)kBfpOutCols};
+    size_t biasOrder[] = {0};
+    shape_t biasShape;
+    setShape(&biasShape, biasDims, 1, biasOrder);
+    uint8_t biasExponents[1];
+    memcpy(biasExponents, kBfpBiasExponents, sizeof(biasExponents));
+    bfpQConfig_t biasQC = {.exponents = biasExponents,
+                           .numGroups = 1,
+                           .groupSize = 0,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = (uint8_t)kBfpBiasMantissaBits,
+                           .exponentBits = (uint8_t)kBfpBiasExponentBits};
+    quantization_t biasQ;
+    initBfpQuantization(&biasQC, &biasQ);
+    setTensorValues(&biasTensor, (uint8_t *)kBfpBiasCodes, &biasShape, &biasQ, NULL);
+
+    tensor_t outTensor;
+    float outData[6];
+    size_t outDims[] = {(size_t)kBfpOutRows, (size_t)kBfpOutCols};
+    size_t outOrder[] = {0, 1};
+    shape_t outShape;
+    setShape(&outShape, outDims, 2, outOrder);
+    quantization_t outQ;
+    initFloat32Quantization(&outQ);
+    setTensorValues(&outTensor, (uint8_t *)outData, &outShape, &outQ, NULL);
+
+    matmulBfpTensors(&aTensor, &bTensor, &biasTensor, &outTensor);
+
+    TEST_ASSERT_EQUAL_MEMORY(kBfpMatmulExpected, outTensor.data,
+                             kBfpMatmulExpected_len * sizeof(float));
+}
+
+void testMatmulBfpNoBiasZeroSeeds(void) {
+    tensor_t aTensor;
+    size_t aDims[] = {(size_t)kBfpOutRows, (size_t)kBfpReduceLen};
+    size_t aOrder[] = {0, 1};
+    shape_t aShape;
+    setShape(&aShape, aDims, 2, aOrder);
+    uint8_t aExponents[3];
+    memcpy(aExponents, kBfpAExponents, sizeof(aExponents));
+    bfpQConfig_t aQC = {.exponents = aExponents,
+                        .numGroups = (size_t)kBfpANumGroups,
+                        .groupSize = (size_t)kBfpAGroupSize,
+                        .roundingMode = HALF_AWAY,
+                        .mantissaBits = (uint8_t)kBfpAMantissaBits,
+                        .exponentBits = (uint8_t)kBfpAExponentBits};
+    quantization_t aQ;
+    initBfpQuantization(&aQC, &aQ);
+    setTensorValues(&aTensor, (uint8_t *)kBfpACodes, &aShape, &aQ, NULL);
+
+    tensor_t bTensor;
+    size_t bDims[] = {(size_t)kBfpOutCols, (size_t)kBfpReduceLen};
+    size_t bOrder[] = {1, 0}; /* post-transpose logical view: reduction axis first */
+    shape_t bShape;
+    setShape(&bShape, bDims, 2, bOrder);
+    uint8_t bExponents[9];
+    memcpy(bExponents, kBfpBExponents, sizeof(bExponents));
+    bfpQConfig_t bQC = {.exponents = bExponents,
+                        .numGroups = (size_t)kBfpBNumGroups,
+                        .groupSize = (size_t)kBfpBGroupSize,
+                        .roundingMode = HALF_AWAY,
+                        .mantissaBits = (uint8_t)kBfpBMantissaBits,
+                        .exponentBits = (uint8_t)kBfpBExponentBits};
+    quantization_t bQ;
+    initBfpQuantization(&bQC, &bQ);
+    setTensorValues(&bTensor, (uint8_t *)kBfpBCodes, &bShape, &bQ, NULL);
+
+    tensor_t outTensor;
+    float outData[6];
+    size_t outDims[] = {(size_t)kBfpOutRows, (size_t)kBfpOutCols};
+    size_t outOrder[] = {0, 1};
+    shape_t outShape;
+    setShape(&outShape, outDims, 2, outOrder);
+    quantization_t outQ;
+    initFloat32Quantization(&outQ);
+    setTensorValues(&outTensor, (uint8_t *)outData, &outShape, &outQ, NULL);
+
+    matmulBfpTensors(&aTensor, &bTensor, NULL, &outTensor);
+
+    TEST_ASSERT_EQUAL_MEMORY(kBfpMatmulNoBiasExpected, outTensor.data,
+                             kBfpMatmulNoBiasExpected_len * sizeof(float));
+}
+
+/* BFP power-of-two twin (spec §8c), the BFP sibling of
+ * testMatmulGroupedEqualScalesBitIdenticalToScalar above (see its comment
+ * for the exactness argument): identical mantissas; BFP b grouped
+ * {numGroups=3, groupSize=6} with every stored exponent 125 (e=8, bias 127
+ * -> 2^-2 == 0.25f) <-> SYM twin scales {0.25f, 0.25f, 0.25f}; BFP a
+ * per-tensor stored 126 (2^-1 == 0.5f) <-> SYM aScale 0.5f. All products
+ * and partials are < 2^24 (exact floats), every BFP fold is a pure exponent
+ * shift, and the SYM side's equal-power-of-two rescales are exact round
+ * trips -- so the BFP float output must be BIT-IDENTICAL to the SYM path's
+ * dequantized output. */
+void testMatmulBfpPowerOfTwoBitIdenticalToGroupedSym(void) {
+    size_t aDims[] = {2, 6};
+    size_t aOrder[] = {0, 1};
+    shape_t aShape;
+    setShape(&aShape, aDims, 2, aOrder);
+    size_t bDims[] = {3, 6};
+    size_t bOrder[] = {1, 0}; /* post-transpose logical view: reduction axis first */
+    shape_t bShape;
+    setShape(&bShape, bDims, 2, bOrder);
+    size_t outDims[] = {2, 3};
+    size_t outOrder[] = {0, 1};
+    shape_t outShape;
+    setShape(&outShape, outDims, 2, outOrder);
+
+    tensor_t aBfpTensor;
+    uint8_t aExponents[] = {126}; /* 2^(126-127) == 0.5f */
+    bfpQConfig_t aBfpQC = {.exponents = aExponents,
+                           .numGroups = 1,
+                           .groupSize = 0,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = 8,
+                           .exponentBits = 8};
+    quantization_t aBfpQ;
+    initBfpQuantization(&aBfpQC, &aBfpQ);
+    setTensorValues(&aBfpTensor, (uint8_t *)kPerChannelAMantissas, &aShape, &aBfpQ, NULL);
+
+    tensor_t bBfpTensor;
+    uint8_t bExponents[] = {125, 125, 125}; /* 2^(125-127) == 0.25f */
+    bfpQConfig_t bBfpQC = {.exponents = bExponents,
+                           .numGroups = 3,
+                           .groupSize = 6,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = 8,
+                           .exponentBits = 8};
+    quantization_t bBfpQ;
+    initBfpQuantization(&bBfpQC, &bBfpQ);
+    setTensorValues(&bBfpTensor, (uint8_t *)kPerChannelWMantissas, &bShape, &bBfpQ, NULL);
+
+    tensor_t outBfpTensor;
+    float outBfpData[6];
+    quantization_t outBfpQ;
+    initFloat32Quantization(&outBfpQ);
+    setTensorValues(&outBfpTensor, (uint8_t *)outBfpData, &outShape, &outBfpQ, NULL);
+
+    matmulBfpTensors(&aBfpTensor, &bBfpTensor, NULL, &outBfpTensor);
+
+    tensor_t aSymTensor;
+    symInt32QConfig_t aSymQC;
+    initSymInt32QConfig(HALF_AWAY, &aSymQC);
+    aSymQC.scale = 0.5f;
+    quantization_t aSymQ;
+    initSymInt32Quantization(&aSymQC, &aSymQ);
+    setTensorValues(&aSymTensor, (uint8_t *)kPerChannelAMantissas, &aShape, &aSymQ, NULL);
+
+    tensor_t bSymTensor;
+    symInt32QConfig_t bSymQC;
+    initSymInt32QConfig(HALF_AWAY, &bSymQC);
+    bSymQC.scale = 1.0f;
+    quantization_t bSymQ;
+    initSymInt32Quantization(&bSymQC, &bSymQ);
+    setTensorValues(&bSymTensor, (uint8_t *)kPerChannelWMantissas, &bShape, &bSymQ, NULL);
+
+    float scales[3] = {0.25f, 0.25f, 0.25f};
+    symQConfig_t weightGroups = {
+        .scales = scales, .numGroups = 3, .groupSize = 6, .qBits = 8, .roundingMode = HALF_AWAY};
+
+    tensor_t outSymTensor;
+    int32_t outSymData[6];
+    symInt32QConfig_t outSymQC;
+    initSymInt32QConfig(HALF_AWAY, &outSymQC);
+    quantization_t outSymQ;
+    initSymInt32Quantization(&outSymQC, &outSymQ);
+    setTensorValues(&outSymTensor, (uint8_t *)outSymData, &outShape, &outSymQ, NULL);
+
+    matmulSymInt32TensorsGroupedWeight(&aSymTensor, &bSymTensor, NULL, &outSymTensor,
+                                       &weightGroups);
+
+    for (size_t i = 0; i < 6; i++) {
+        float symDequant = (float)outSymData[i] * outSymQC.scale;
+        TEST_ASSERT_EQUAL_MEMORY(&symDequant, &outBfpData[i], sizeof(float));
+    }
+}
+
+void testMatmulBfpHeadroomGuardDies(void) {
+    /* per-tensor m=16 operands with K = 2 > bfpSegmentLimit(16, 16) == 1 --
+     * boundary-tight on purpose: a limit+1 off-by-one in the guard would let
+     * exactly this K through (K = 3 would still die under that mutation). */
+    tensor_t aWide;
+    int32_t aData[] = {1, 1};
+    size_t aDims[] = {1, 2};
+    size_t aOrder[] = {0, 1};
+    shape_t aShape;
+    setShape(&aShape, aDims, 2, aOrder);
+    uint8_t aExponents[] = {127};
+    bfpQConfig_t aQC = {.exponents = aExponents,
+                        .numGroups = 1,
+                        .groupSize = 0,
+                        .roundingMode = HALF_AWAY,
+                        .mantissaBits = 16,
+                        .exponentBits = 8};
+    quantization_t aQ;
+    initBfpQuantization(&aQC, &aQ);
+    setTensorValues(&aWide, (uint8_t *)aData, &aShape, &aQ, NULL);
+
+    tensor_t bWide;
+    int32_t bData[] = {1, 1};
+    size_t bDims[] = {2, 1};
+    size_t bOrder[] = {0, 1};
+    shape_t bShape;
+    setShape(&bShape, bDims, 2, bOrder);
+    uint8_t bExponents[] = {127};
+    bfpQConfig_t bQC = {.exponents = bExponents,
+                        .numGroups = 1,
+                        .groupSize = 0,
+                        .roundingMode = HALF_AWAY,
+                        .mantissaBits = 16,
+                        .exponentBits = 8};
+    quantization_t bQ;
+    initBfpQuantization(&bQC, &bQ);
+    setTensorValues(&bWide, (uint8_t *)bData, &bShape, &bQ, NULL);
+
+    tensor_t outTensor;
+    float outData[1];
+    size_t outDims[] = {1, 1};
+    size_t outOrder[] = {0, 1};
+    shape_t outShape;
+    setShape(&outShape, outDims, 2, outOrder);
+    quantization_t outQ;
+    initFloat32Quantization(&outQ);
+    setTensorValues(&outTensor, (uint8_t *)outData, &outShape, &outQ, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(matmulBfpTensors(&aWide, &bWide, NULL, &outTensor));
+}
+
+void testBfpSegmentLimitTableValues(void) {
+    TEST_ASSERT_EQUAL_size_t(131071, bfpSegmentLimit(8, 8));
+    TEST_ASSERT_EQUAL_size_t(511, bfpSegmentLimit(12, 12));
+    TEST_ASSERT_EQUAL_size_t(1, bfpSegmentLimit(16, 16));
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -1061,6 +1342,11 @@ int main(void) {
     RUN_TEST(testMatmulGroupedWeightStridedGeneralGroupsMatchesGold);
     RUN_TEST(testMatmulGroupedDxEqualScalesBitIdenticalToScalar);
     RUN_TEST(testMatmulGroupedWeightRejectsPerTensorSentinel);
+    RUN_TEST(testMatmulBfpMatchesGold);
+    RUN_TEST(testMatmulBfpNoBiasZeroSeeds);
+    RUN_TEST(testMatmulBfpPowerOfTwoBitIdenticalToGroupedSym);
+    RUN_TEST(testMatmulBfpHeadroomGuardDies);
+    RUN_TEST(testBfpSegmentLimitTableValues);
 
     return UNITY_END();
 }

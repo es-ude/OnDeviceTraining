@@ -12,6 +12,9 @@ half-away-from-zero — emulate with sign(x)*floor(|x|+0.5), NEVER torch.round
 Generators import via a sys.path bootstrap relative to the script:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 """
+import math
+
+import numpy as np
 import torch
 
 QMAX = 32767.0
@@ -848,3 +851,143 @@ def sgd_grouped_step_ref(param_mantissas, param_scales, group_size: int, q_bits:
     combined = g + wd_t * param_deq
     new_param = param_deq - lr_t * combined
     return requant_absmax_grouped_f32(new_param, q_bits, group_size)
+
+
+# ---- BFP epic PR2 Task 3: block-floating-point emulation, matmulBfpTensors'
+# kernel reference (spec docs/superpowers/specs/2026-07-29-block-floating-point-design.md).
+# The fold arithmetic mirrors the C kernel in np.float32 (never float64): one
+# int partial per (a-group, b-group) segment, folded via float32 ldexp into a
+# float32 accumulator whenever EITHER operand's group changes, plus a tail
+# fold. The int partial itself is exact Python arithmetic guarded by an
+# INT32-range assert -- the C kernel guarantees that bound via
+# bfpValidateBlockHeadroom, never via int64 (int32 partials only). ----
+
+_INT32_MAX = 2 ** 31 - 1
+
+
+def bfp_derive_stored_exponent(abs_max, q_max, bias, max_stored):
+    """Mirror C deriveBfpStoredExponent (TensorConversion.c): frexp snap-up,
+    clamp [0, max_stored]. The quotient is computed in float32 first (the C
+    divides absMax / qMax in float32 before frexpf); frexp of that exact
+    float32 value in double preserves frac/exponent bit-for-bit."""
+    if abs_max == 0.0:
+        return bias
+    frac, e = math.frexp(float(np.float32(abs_max) / np.float32(q_max)))
+    E = e - 1 if frac == 0.5 else e
+    return max(0, min(max_stored, E + bias))
+
+
+def bfp_quantize_grouped(values, mantissa_bits, exponent_bits, group_size):
+    """HALF_AWAY only (SR is exercised in C). Mirrors
+    quantizeFloatBufferToBfpCodes (TensorConversion.c): per-group float32
+    absmax -> bfp_derive_stored_exponent -> round_half_away(v / scale), clamp
+    to [-2^(m-1), 2^(m-1)-1]; scale = 2^(stored - bias) exactly. group_size
+    == 0 is the per-tensor sentinel (one group spanning all n). Returns
+    (codes int32 list, stored exponents list)."""
+    x = torch.as_tensor(values, dtype=torch.float32).flatten()
+    n = x.numel()
+    gsz = n if group_size == 0 else group_size
+    assert n % gsz == 0, f"bfp_quantize_grouped: n={n} not divisible by group_size={gsz}"
+    q_max = 2 ** (mantissa_bits - 1) - 1
+    q_min = -(2 ** (mantissa_bits - 1))
+    bias = 2 ** (exponent_bits - 1) - 1
+    max_stored = 2 ** exponent_bits - 1
+    codes, exps = [], []
+    for g0 in range(0, n, gsz):
+        grp = x[g0:g0 + gsz]
+        abs_max = grp.abs().max().item()
+        stored = bfp_derive_stored_exponent(abs_max, float(q_max), bias, max_stored)
+        exps.append(stored)
+        scale = torch.tensor(math.ldexp(1.0, stored - bias), dtype=torch.float32)
+        q = torch.clamp(round_half_away(grp / scale), float(q_min), float(q_max))
+        codes.extend(int(v) for v in q.tolist())
+    return codes, exps
+
+
+def _bfp_group_of(idx, group_size):
+    """bfpGroupOf's twin (BfpKernelSupport.h): 0 for the per-tensor sentinel."""
+    return 0 if group_size == 0 else idx // group_size
+
+
+def matmul_bfp_ref(a_codes, a_exp, a_qc, b_codes, b_exp, b_qc, bias_codes, bias_exp, bias_qc,
+                   rows, cols, K, b_transposed, self_check=True):
+    """Mirror the C fold order exactly: int partial (assert |partial| <=
+    2**31-1 -- the C kernel guarantees this via bfpValidateBlockHeadroom),
+    np.float32 acc, np.ldexp folds, bias seeds acc first. Each *_qc is a dict
+    with keys mantissa_bits / exponent_bits / group_size; codes are storage-
+    order flat, exponents are stored (biased) per-group bytes. b's storage is
+    [cols, K] when b_transposed (the GEMM-weight bOrder {1,0} view: b_idx =
+    c*K + k), else [K, cols] (b_idx = k*cols + c). Self-checks (skipped on
+    the collapse rerun): (i) >= 2 groups crossed on EACH operand somewhere,
+    (ii) >= 1 fold with a NONZERO partial whose float conversion is exact
+    (regression anchor), (iii) result differs from an all-per-tensor run
+    (group structure matters). Returns the float32 outputs as Python floats,
+    row-major [rows*cols]."""
+    a_bias = 2 ** (a_qc["exponent_bits"] - 1) - 1
+    b_bias = 2 ** (b_qc["exponent_bits"] - 1) - 1
+    out = []
+    fold_partials = []
+    max_a_groups_crossed = 0
+    max_b_groups_crossed = 0
+    for r in range(rows):
+        for c in range(cols):
+            acc = np.float32(0.0)
+            if bias_codes is not None:
+                bg = _bfp_group_of(c, bias_qc["group_size"])
+                bias_bias = 2 ** (bias_qc["exponent_bits"] - 1) - 1
+                scale = np.float32(math.ldexp(1.0, bias_exp[bg] - bias_bias))
+                acc = np.float32(np.float32(bias_codes[c]) * scale)
+            partial = 0
+            cur_ga, cur_gb = 0, 0
+            a_groups_seen, b_groups_seen = set(), set()
+            for k in range(K):
+                a_idx = r * K + k
+                b_idx = c * K + k if b_transposed else k * cols + c
+                ga = _bfp_group_of(a_idx, a_qc["group_size"])
+                gb = _bfp_group_of(b_idx, b_qc["group_size"])
+                a_groups_seen.add(ga)
+                b_groups_seen.add(gb)
+                if k == 0:
+                    cur_ga, cur_gb = ga, gb
+                elif ga != cur_ga or gb != cur_gb:
+                    shift = (a_exp[cur_ga] - a_bias) + (b_exp[cur_gb] - b_bias)
+                    fold_partials.append(partial)
+                    acc = np.float32(acc + np.ldexp(np.float32(partial), np.int32(shift)))
+                    partial = 0
+                    cur_ga, cur_gb = ga, gb
+                partial += a_codes[a_idx] * b_codes[b_idx]
+                assert abs(partial) <= _INT32_MAX, (
+                    f"matmul_bfp_ref: partial {partial} exceeds int32 -- fixture violates "
+                    "the bfpValidateBlockHeadroom bound the C kernel enforces")
+            if K > 0:
+                shift = (a_exp[cur_ga] - a_bias) + (b_exp[cur_gb] - b_bias)
+                fold_partials.append(partial)
+                acc = np.float32(acc + np.ldexp(np.float32(partial), np.int32(shift)))
+            max_a_groups_crossed = max(max_a_groups_crossed, len(a_groups_seen))
+            max_b_groups_crossed = max(max_b_groups_crossed, len(b_groups_seen))
+            out.append(float(acc))
+
+    if self_check:
+        # (i) group tracking is exercised on BOTH operands.
+        assert max_a_groups_crossed >= 2, (
+            "matmul_bfp_ref: no reduction crosses >= 2 a-groups -- a's group "
+            "tracking is unexercised")
+        assert max_b_groups_crossed >= 2, (
+            "matmul_bfp_ref: no reduction crosses >= 2 b-groups -- b's group "
+            "tracking is unexercised")
+        # (ii) regression anchor: >= 1 fold whose (float)partial conversion is
+        # exact AND nonzero (a zero partial is vacuously exact).
+        assert any(p != 0 and float(np.float32(p)) == float(p) for p in fold_partials), (
+            "matmul_bfp_ref: no fold has a nonzero exactly-float-convertible "
+            "partial -- fixture lost its exact-regime anchor")
+        # (iii) group structure matters: collapsing both operands to per-tensor
+        # (exponents[0] everywhere) must change the result.
+        collapsed = matmul_bfp_ref(
+            a_codes, [a_exp[0]], {**a_qc, "group_size": 0},
+            b_codes, [b_exp[0]], {**b_qc, "group_size": 0},
+            bias_codes, bias_exp, bias_qc, rows, cols, K, b_transposed,
+            self_check=False)
+        assert collapsed != out, (
+            "matmul_bfp_ref: per-tensor collapse is indistinguishable from the "
+            "grouped run -- fixture is vacuous against group-structure bugs")
+    return out

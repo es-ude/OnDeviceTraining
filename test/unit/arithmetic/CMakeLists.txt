@@ -37,6 +37,19 @@ add_custom_command(
 add_custom_target(generate_expected_group_matmul
         DEPENDS ${GEN_GROUP_MATMUL_HEADER})
 
+set(GEN_BFP_MATMUL_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_bfp_matmul.h)
+add_custom_command(
+        OUTPUT ${GEN_BFP_MATMUL_HEADER}
+        COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_bfp_matmul.py
+                --out ${GEN_BFP_MATMUL_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_bfp_matmul.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+        COMMENT "Generating expected_bfp_matmul.h via NumPy emulation"
+        VERBATIM
+)
+add_custom_target(generate_expected_bfp_matmul
+        DEPENDS ${GEN_BFP_MATMUL_HEADER})
+
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Add
@@ -138,9 +151,10 @@ add_elastic_ai_unit_test(
         Tensor
         Quantization
         RNG
+        Common
         odt_test_death
 )
-add_dependencies(UnitTestMatmul generate_expected_group_matmul)
+add_dependencies(UnitTestMatmul generate_expected_group_matmul generate_expected_bfp_matmul)
 target_include_directories(UnitTestMatmul PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 add_elastic_ai_unit_test(

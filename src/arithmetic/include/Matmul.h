@@ -50,6 +50,30 @@ void matmulSymInt32TensorsWithBias(tensor_t *aTensor, tensor_t *bTensor, tensor_
 void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
                                         tensor_t *outputTensor, const symQConfig_t *weightGroups);
 
+/*! BFP epic PR2 (Task 3): block-floating-point GEMM forward. Operands are in
+ *  the executeOp funnel's UNPACKED-BFP scratch form: ->data holds int32
+ *  sign-extended mantissa codes, ->quantization is BFP with a live
+ *  bfpQConfig_t (the form exists only between funnel prologue and kernel).
+ *  `bias` is NULL-able, same form, element count == output columns; it is a
+ *  VALUE-seed dequantized to float BEFORE the reduction ((float)mantissa *
+ *  bfpGroupScale), so it is exempt from the product-operand headroom bound.
+ *  Output is raw FLOAT32 -- no width-restore here (that is the funnel
+ *  epilogue's OUT_WRITE job, never the kernel's).
+ *
+ *  Kernel contract (shared across the BFP GEMM family): per output element
+ *  ONE int32 partial; per reduction step both operands' STORAGE indices map
+ *  to group ids (bfpGroupOf -- gap-robust on strided walks, exactly like
+ *  matmulIntCoreGrouped's per-element division); when EITHER id changes, the
+ *  finished segment folds via acc += ldexpf((float)partial, Ea + Eb - biasA
+ *  - biasB) and the partial resets; tail-fold after the loop. The kernel
+ *  never rounds (rounding lives at staging and the OUT_WRITE epilogue).
+ *  int32 overflow is excluded up front by bfpValidateBlockHeadroom
+ *  (BfpKernelSupport.h): a same-exponent segment never accumulates more than
+ *  min(runA, runB, K) products, which must stay within
+ *  bfpSegmentLimit(ma, mb) == INT32_MAX >> (ma+mb-2) (#227 headroom, no
+ *  int64 anywhere). */
+void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias, tensor_t *outputTensor);
+
 size_t getMatmulInstructionCounter();
 
 #endif // ENV5_RUNTIME_MATMUL_H

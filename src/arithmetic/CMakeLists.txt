@@ -106,6 +106,7 @@ target_link_libraries(Matmul PRIVATE
         Mul
         Rounding
         Quantization
+        m
 )
 
 add_library(Mul Mul.c)

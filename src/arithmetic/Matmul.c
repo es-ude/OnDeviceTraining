@@ -10,10 +10,12 @@
 #define MATMUL_FUNC_SYM_INT32 matmulSymIntTensors
 #endif
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 #include "Arithmetic.h"
+#include "BfpKernelSupport.h"
 #include "Common.h"
 #include "DTypes.h"
 #include "Matmul.h"
@@ -471,6 +473,132 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
 
     symInt32QConfig_t *outputQC = outputTensor->quantization->qConfig;
     outputQC->scale = sAcc;
+}
+
+/* BFP epic PR2 (Task 3): matmulIntCoreGrouped's BFP twin (see Matmul.h for
+ * the full contract). Differences from the SYM grouped core: BOTH operands
+ * are group-tracked (not just the weight), the boundary combine is a
+ * rounding-free ldexpf fold into a float accumulator (never
+ * rescaleIntoAccumulatorScale), and the output is raw FLOAT32. */
+void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
+                      tensor_t *outputTensor) {
+    if (aTensor->shape->numberOfDimensions > 2 || bTensor->shape->numberOfDimensions > 2) {
+        PRINT_ERROR("Matmul only supports up to 2D Tensors");
+        exit(1);
+    }
+    if (aTensor->quantization->type != BFP || bTensor->quantization->type != BFP) {
+        PRINT_ERROR("matmulBfpTensors: operands must be BFP (unpacked scratch form)");
+        exit(1);
+    }
+    if (outputTensor->quantization->type != FLOAT32) {
+        PRINT_ERROR("matmulBfpTensors: output must be raw FLOAT32");
+        exit(1);
+    }
+
+    bfpQConfig_t *aQC = aTensor->quantization->qConfig;
+    bfpQConfig_t *bQC = bTensor->quantization->qConfig;
+
+    size_t aNumberOfDims = aTensor->shape->numberOfDimensions;
+    size_t *aDims = aTensor->shape->dimensions;
+    size_t bNumberOfDims = bTensor->shape->numberOfDimensions;
+    size_t *bDims = bTensor->shape->dimensions;
+
+    size_t aRows, aColumns;
+    if (aNumberOfDims < 2) {
+        aRows = 1;
+        aColumns = getDimensionsByIndex(aTensor, 0);
+    } else {
+        aRows = getDimensionsByIndex(aTensor, 0);
+        aColumns = getDimensionsByIndex(aTensor, 1);
+    }
+    size_t bRows = getDimensionsByIndex(bTensor, 0);
+    size_t bColumns = (bNumberOfDims < 2) ? 1 : getDimensionsByIndex(bTensor, 1);
+
+    if (aColumns != bRows) {
+        PRINT_ERROR("Rows dont match Columns");
+        PRINT_DEBUG("aColumns: %lu, bRows: %lu\n", aColumns, bRows);
+        exit(1);
+    }
+
+    bfpQConfig_t *biasQC = NULL;
+    if (bias != NULL) {
+        if (bias->quantization->type != BFP) {
+            PRINT_ERROR("matmulBfpTensors: bias must be BFP");
+            exit(1);
+        }
+        if (calcNumberOfElementsByTensor(bias) != bColumns) {
+            PRINT_ERROR("matmulBfpTensors: bias element count != output columns");
+            exit(1);
+        }
+        biasQC = bias->quantization->qConfig;
+    }
+
+    bfpValidateBlockHeadroom(aQC, bQC, aColumns, "matmulBfpTensors");
+
+    int32_t aExpBias = bfpExponentBias(aQC);
+    int32_t bExpBias = bfpExponentBias(bQC);
+
+    size_t resultCounter = 0;
+    for (size_t rowIndex = 0; rowIndex < aRows; rowIndex++) {
+        for (size_t columnIndex = 0; columnIndex < bColumns; columnIndex++) {
+            float acc = 0.f;
+            if (bias != NULL) {
+                /* Value-seed: dequantized to float BEFORE the reduction, so
+                 * it never touches the int32 partial (headroom-exempt). */
+                int32_t biasMantissa = readBytesAsInt32(&bias->data[columnIndex * sizeof(int32_t)]);
+                acc = (float)biasMantissa * bfpGroupScale(biasQC, bfpGroupOf(biasQC, columnIndex));
+            }
+            int32_t partial = 0;
+            size_t currentAGroup = 0;
+            size_t currentBGroup = 0;
+            for (size_t i = 0; i < aColumns; i++) {
+                size_t aValueIndex;
+                if (aNumberOfDims == 1) {
+                    aValueIndex = i;
+                } else {
+                    size_t aIndices[] = {rowIndex, i};
+                    aValueIndex = calcElementIndexByIndices(aNumberOfDims, aDims, aIndices,
+                                                            aTensor->shape->orderOfDimensions);
+                }
+                size_t bValueIndex;
+                if (bNumberOfDims == 1) {
+                    bValueIndex = i;
+                } else {
+                    size_t bIndices[] = {i, columnIndex};
+                    bValueIndex = calcElementIndexByIndices(bNumberOfDims, bDims, bIndices,
+                                                            bTensor->shape->orderOfDimensions);
+                }
+                size_t aGroup = bfpGroupOf(aQC, aValueIndex);
+                size_t bGroup = bfpGroupOf(bQC, bValueIndex);
+                if (i == 0) {
+                    currentAGroup = aGroup;
+                    currentBGroup = bGroup;
+                } else if (aGroup != currentAGroup || bGroup != currentBGroup) {
+                    /* Boundary fold: the finished same-exponent segment's raw
+                     * int32 partial enters the float accumulator via a pure
+                     * exponent shift -- rounding-free by kernel contract. */
+                    acc +=
+                        ldexpf((float)partial, (int)aQC->exponents[currentAGroup] - aExpBias +
+                                                   (int)bQC->exponents[currentBGroup] - bExpBias);
+                    partial = 0;
+                    currentAGroup = aGroup;
+                    currentBGroup = bGroup;
+                }
+                int32_t aValue = readBytesAsInt32(&aTensor->data[aValueIndex * sizeof(int32_t)]);
+                int32_t bValue = readBytesAsInt32(&bTensor->data[bValueIndex * sizeof(int32_t)]);
+                partial += mulInt32s(aValue, bValue);
+            }
+            /* Tail fold: the LAST segment never crosses a further boundary,
+             * so this is its only fold (and the ONLY fold when neither
+             * operand changes groups over the walk). */
+            if (aColumns > 0) {
+                acc += ldexpf((float)partial, (int)aQC->exponents[currentAGroup] - aExpBias +
+                                                  (int)bQC->exponents[currentBGroup] - bExpBias);
+            }
+            writeFloatToByteArray(acc, &outputTensor->data[resultCounter * sizeof(float)]);
+            resultCounter++;
+        }
+    }
 }
 
 size_t getMatmulInstructionCounter() {

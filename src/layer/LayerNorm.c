@@ -714,8 +714,8 @@ void layerNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
         layerNormBackwardSymInt32(cfg, forwardInput, loss, propLoss);
         break;
     default:
-        PRINT_ERROR(
-            "LayerNorm backward: quantization type not implemented (FLOAT32/SYM_INT32 only)");
+        PRINT_ERROR("LayerNorm backward: quantization type not implemented (FLOAT32/SYM_INT32 "
+                    "only) -- native BFP norms arrive with epic PR5");
         exit(1);
     }
 }

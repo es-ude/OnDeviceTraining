@@ -79,9 +79,9 @@ void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output) {
 /* BFP epic PR2 Task 8: softmaxBackward is the fourth outside-funnel site (after
  * Relu/Dropout/Flatten). Its ARITH_FLOAT32 arm raw-casts all three wires to
  * float* with no dtype check at all, and it is selected by the layer's DECLARED
- * propLossMath -- so pre-flip, when arithmeticFromQuantization(BFP) is still
- * ARITH_FLOAT32, a BFP dx wire lands straight in the raw casts: a 4x heap
- * over-read on input/loss and an over-write into the packed propLoss buffer.
+ * propLossMath -- so a BFP dx wire whose math slot is pinned to (or, before the
+ * Task 9 flip, derived as) ARITH_FLOAT32 lands straight in the raw casts: a 4x
+ * heap over-read on input/loss and an over-write into the packed propLoss buffer.
  * That became reachable only with this task's initGradTensor BFP arm (before it,
  * a BFP propLossQ died in the allocator's default arm).
  *
@@ -170,7 +170,9 @@ void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, ten
         softmaxBackwardSymInt32(input, loss, propLoss);
         break;
     default:
-        PRINT_ERROR("Unknown QType!");
+        PRINT_ERROR("Softmax backward: declared propLossMath %d not implemented "
+                    "(FLOAT32/SYM_INT32 only) -- native BFP softmax arrives with epic PR6",
+                    (int)softmaxLayer->config->softmax->propLossMath.type);
         exit(1);
     }
 }

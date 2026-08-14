@@ -488,8 +488,8 @@ void tearDown(void) {}
 
 /* BFP epic PR2 Task 8: avgPool1dBackward's ARITH_FLOAT32 arm runs outside
  * executeOp and raw-casts lossGrad/propLoss to float*. Task 8 made BFP dx wires
- * allocatable and pre-flip they select exactly that arm -- guard the storage
- * dtype. */
+ * allocatable, and an ARITH_FLOAT32 propLossMath -- pinned, or derived as such
+ * before the Task 9 flip -- selects exactly that arm; guard the storage dtype. */
 void testAvgPool1dBackwardRejectsBfpWire(void) {
     size_t inputDims[] = {1, 1, 4};
     size_t outputDims[] = {1, 1, 3};

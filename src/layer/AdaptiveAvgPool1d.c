@@ -184,17 +184,17 @@ void adaptiveAvgPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output)
 
 /* BFP epic PR2 Task 8: same outside-funnel hole as Softmax backward. The
  * ARITH_FLOAT32 arm below runs OUTSIDE executeOp and raw-casts lossGrad/propLoss
- * to float*, selected by the layer's DECLARED propLossMath -- so pre-flip, when
- * arithmeticFromQuantization(BFP) is still ARITH_FLOAT32, a BFP dx wire lands
- * straight in those casts (4x heap over-read on lossGrad, over-write into the
+ * to float*, selected by the layer's DECLARED propLossMath -- so a BFP dx wire
+ * whose math slot is pinned to (or, before the Task 9 flip, derived as)
+ * ARITH_FLOAT32 lands straight in those casts (4x heap over-read on lossGrad, over-write into the
  * packed propLoss buffer). Reachable only since this task's initGradTensor BFP
  * arm; before it a BFP propLossQ died in the allocator's default arm. Forward
- * needs no guard (it runs inside executeOp). No epic PR is assigned to BFP
- * pooling yet -- the message states the gap rather than promising a milestone.
+ * needs no guard (it runs inside executeOp). BFP pooling is epic PR4 (spec
+ * section 7), named in the message so the failure points at the roadmap.
  * forwardInput is NOT guarded: this layer never dereferences it. */
 static void requireNoBfpWire(const tensor_t *t, const char *what) {
     if (t->quantization->type == BFP) {
-        PRINT_ERROR("%s: BFP pooling semantics are not implemented -- keep BFP off this wire "
+        PRINT_ERROR("%s: BFP pooling semantics arrive with epic PR4 -- keep BFP off this wire "
                     "or use FLOAT32 wires",
                     what);
         exit(1);

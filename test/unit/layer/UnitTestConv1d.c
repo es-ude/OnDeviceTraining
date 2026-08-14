@@ -2188,11 +2188,11 @@ void tearDown() {}
 
 /* ---- BFP epic PR2 (Task 7): Conv1d ARITH_BFP forward arm -----------------
  *
- * PRE-FLIP: arithmeticFromQuantization still derives ARITH_FLOAT32 for BFP
- * storage (the flip is Task 9), so every test here hand-sets forwardMath to
- * {ARITH_BFP, HALF_AWAY} POST-build. Weights reach BFP storage the
- * documented user way: FLOAT32 init + requantizeTensorInPlace
- * (docs/conventions/arithmetic-bfp.md). */
+ * Every test here hand-sets forwardMath to {ARITH_BFP, HALF_AWAY} POST-build:
+ * the builders take a single FLOAT32 `q`, and pinning keeps the arm selection
+ * independent of the derivation (which since Task 9 yields ARITH_BFP for a BFP
+ * config anyway). Weights reach BFP storage the documented user way: FLOAT32
+ * init + requantizeTensorInPlace (docs/conventions/arithmetic-bfp.md). */
 
 /*! Native-fixture layer: FLOAT32 weights [2,2,3] from the generated fixture,
  *  requantized IN PLACE to the fixture's grouped BFP config; no bias (bias
@@ -2302,7 +2302,7 @@ void testConv1dForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer(void) {
     }
 
     { /* BFP side: the SAME values as FLOAT32, weights requantized to grouped
-       * BFP {3,4} m=8, forwardMath hand-set (pre-flip). */
+       * BFP {3,4} m=8, forwardMath hand-set (pinned). */
         float wVals[12];
         for (size_t i = 0; i < 12; i++) {
             wVals[i] = (float)kTwinWMantissas[i] * 0.25f;

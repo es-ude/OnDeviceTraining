@@ -432,8 +432,10 @@ void testMultiLayerTraining_MultipleSteps_GradsAccumulate() {
  *  per output row (numGroups=outFeatures, groupSize=inFeatures), so
  *  numGroups*groupSize equals the weight's element count exactly (the
  *  Task-6 validateBfpQConfigShape gate). Forward dequantizes the BFP weight
- *  through the float bridge (arithmeticFromQuantization(BFP)==ARITH_FLOAT32,
- *  Task 8 Arm 1); backward computes FLOAT32 grads untouched; the optimizer's
+ *  through the float bridge: every math slot here derives from the FLOAT32 `q`,
+ *  so the Task 9 flip (BFP now derives ARITH_BFP) leaves this fake-quant
+ *  profile untouched -- BFP is storage only, the compute is declared FLOAT32
+ *  (Task 8 Arm 1); backward computes FLOAT32 grads untouched; the optimizer's
  *  OUT_WRITE write-back re-quantizes the updated weight fresh into BFP via
  *  the conversionMatrix diagonal, honoring writeBackRounding through the
  *  target's storage slot (Task 8 Arm 2) -- textbook fake-quant training. */
@@ -717,11 +719,18 @@ static tensor_t *buildFloatTensor2D(size_t d0, size_t d1, const float *values) {
  *  against BFP storage until epic PR4, so a BFP wire may only ever land between
  *  two funnel layers.
  *
- *  Pre-flip (arithmeticFromQuantization still maps BFP -> ARITH_FLOAT32) this is
- *  textbook fake-quant: layer 0's GEMM runs in float, the funnel's OUT_WRITE
+ *  Textbook fake-quant: layer 0's GEMM runs in float, the funnel's OUT_WRITE
  *  epilogue packs the activations into the BFP wire and DERIVES its exponents,
  *  and layer 1's IN_READ dequantizes them back. propLossQ, both weight/bias
  *  params and all grads stay FLOAT32.
+ *
+ *  Since the Task 9 derivation flip, fake-quant is EXPLICIT: forwardMath is
+ *  pinned to {ARITH_FLOAT32, SR_HALF_AWAY} -- bit-identical to what deriving
+ *  from the BFP template used to yield -- because deriving now selects the
+ *  native ARITH_BFP arm, which fail-fasts on this fixture's FLOAT32-stored
+ *  weights (Task 7 rule 1). Native forward has its own capstone
+ *  (testBfpNativeForwardTrainingLossDecreasesAndGridMoves); the subject HERE
+ *  is the wire ALLOCATOR's derived geometry, which is arithmetic-agnostic.
  *
  *  `templateNumGroups` is the numGroups the caller declares in the template --
  *  deliberately decoupled from the truth: the allocator DERIVES
@@ -738,10 +747,12 @@ static void buildBfpWireFixture(bfpWireFixture_t *f, size_t hidden, size_t templ
 
     f->linear0 = buildBorrowedLinearLayer(f->w0, f->b0, f->floatQ);
     /* Only the forward wire goes BFP; propLossQ and the grad math stay FLOAT32.
-     * forwardMath is DERIVED from the wire template (pre-flip: ARITH_FLOAT32),
-     * so this test tracks the derivation rather than hardcoding it. */
+     * forwardMath is PINNED to the float bridge (see the fake-quant note in the
+     * doc comment above): {ARITH_FLOAT32, SR_HALF_AWAY} is exactly what
+     * arithmeticFromQuantization(bfpWireQ) returned before the Task 9 flip. */
     f->linear0->config->linear->outputQ = f->bfpWireQ;
-    f->linear0->config->linear->forwardMath = arithmeticFromQuantization(f->bfpWireQ);
+    f->linear0->config->linear->forwardMath =
+        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = SR_HALF_AWAY};
     f->linear1 = buildBorrowedLinearLayer(f->w1, f->b1, f->floatQ);
     f->model[0] = f->linear0;
     f->model[1] = f->linear1;
@@ -892,14 +903,19 @@ static void moveBfpTemplateToDxWire(bfpWireFixture_t *f) {
     f->linear0->config->linear->outputQ = f->floatQ;
     f->linear0->config->linear->forwardMath = arithmeticFromQuantization(f->floatQ);
     f->linear1->config->linear->propLossQ = f->bfpWireQ;
-    f->linear1->config->linear->propLossMath = arithmeticFromQuantization(f->bfpWireQ);
+    /* Same explicit-fake-quant pin as the forward wire (Task 9 flip): a derived
+     * ARITH_BFP dx wire would select the native backward arm, which epic PR3
+     * has yet to write. */
+    f->linear1->config->linear->propLossMath =
+        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = SR_HALF_AWAY};
 }
 
 /*! initGradTensor's BFP arm, live: the dx wire between the two Linears is
  *  [1, 6] -> 6 elements, groupSize 2 -> derived numGroups 3 (the template's
  *  numGroups=2 is ignored, same Decision 5 rule as the forward allocators).
- *  Pre-flip this is the dx-side fake-quant bridge: layer 1's backward OUT_WRITEs
- *  its dx into the BFP wire, layer 0's weight-grad GEMM IN_READs it back. */
+ *  The dx-side fake-quant bridge (propLossMath pinned ARITH_FLOAT32, see
+ *  moveBfpTemplateToDxWire): layer 1's backward OUT_WRITEs its dx into the BFP
+ *  wire, layer 0's weight-grad GEMM IN_READs it back. */
 void testBfpDxWireAllocatesThroughInitGradTensor(void) {
     rngSetSeed(4242u);
     bfpWireFixture_t f;
@@ -981,6 +997,227 @@ void testOwningFactoryBfpOutputQFreesExponents(void) {
                                     "template exponents must be untouched (zero state, bias 127)");
 }
 
+/* ===========================================================================
+ * BFP epic PR2 Task 9 capstone: NATIVE ARITH_BFP forward.
+ * ======================================================================== */
+
+typedef struct bfpNativeFixture {
+    quantization_t *floatQ;
+    quantization_t *bfpWireQ;
+    quantization_t *momentumQ;
+    layer_t *linear0;
+    layer_t *linear1;
+    layer_t *model[2];
+    optimizer_t *sgd;
+    tensor_t *input;
+    tensor_t *label;
+    /* What layerQuantInitUniform(bfpWireQ) DERIVED, captured before the
+     * backward slots are pinned -- the flip-sensitive observable (every other
+     * assertion in the capstone is storage-side and holds pre-flip too). */
+    arithmetic_t derivedForward;
+    arithmeticType_t derivedWeightGrad;
+    arithmeticType_t derivedBiasGrad;
+    arithmeticType_t derivedPropLoss;
+} bfpNativeFixture_t;
+
+/*! Linear(3->4) -> Linear(4->2) + MSE with layer 0 running NATIVE ARITH_BFP
+ *  forward: its forward wire, weights and bias are all BFP, and the GEMM is
+ *  matmulBfpTensors (block partials folded per same-exponent segment), not a
+ *  float bridge over dequantized operands.
+ *
+ *  Layer 0's whole profile DERIVES from one grouped BFP template via
+ *  layerQuantInitUniform -- which since the Task 9 flip yields ARITH_BFP in all
+ *  FOUR math slots. PR2 ships the forward only, so the three BACKWARD slots are
+ *  pinned back to ARITH_FLOAT32 (plan Decision 8); `pinWeightGradMath == false`
+ *  leaves one of them derived, which is what testBfpUniformModelDiesOnBackward-
+ *  UntilPr3 pins as the failure mode until epic PR3.
+ *
+ *  Storage slots follow #270: parameters are FLOAT32-init (the factory rejects
+ *  anything else) and reach BFP storage through requantizeTensorInPlace --
+ *  mandatory here, since Task 7's rule 1 fail-fasts an ARITH_BFP forward with
+ *  non-BFP weights (a FLOAT32 weight has no width source to stage at).
+ *
+ *  Layer 1 is entirely FLOAT32 (Decision 9: the loss-facing wire stays FLOAT32
+ *  -- no loss function has a BFP arm before epic PR4); it consumes the BFP
+ *  hidden wire through the funnel's IN_READ dequantization. No Relu: BFP
+ *  storage is guarded out of Relu/Dropout/Flatten until epic PR4. */
+static void buildBfpNativeFixture(bfpNativeFixture_t *f, bool pinWeightGradMath) {
+    f->floatQ = quantizationInitFloat();
+    /* groupSize 2 over the [1, 4] hidden wire -> derived numGroups 2. */
+    f->bfpWireQ = quantizationInitBfpGrouped(6, 8, SR_HALF_AWAY, 2, 2);
+
+    layerQuant_t lq0;
+    layerQuantInitUniform(&lq0, f->bfpWireQ);
+    f->derivedForward = lq0.forwardMath;
+    f->derivedWeightGrad = lq0.weightGradMath.type;
+    f->derivedBiasGrad = lq0.biasGradMath.type;
+    f->derivedPropLoss = lq0.propLossMath.type;
+
+    if (pinWeightGradMath) {
+        lq0.weightGradMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
+    }
+    lq0.biasGradMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
+    lq0.propLossMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
+    lq0.propLossQ = f->floatQ;
+    lq0.weightStorage = f->floatQ; /* #270: FLOAT32 init, then requantize below */
+    lq0.biasStorage = f->floatQ;
+    f->linear0 = linearLayerInit(
+        &(linearInit_t){.inFeatures = 3, .outFeatures = 4, .bias = BIAS_TRUE}, &lq0);
+
+    /* Weights: one group per output row (4 rows x 3 in-features == the element
+     * count, the validateBfpQConfigShape gate). Bias: per-tensor {1, 0} -- the
+     * matmul dequantizes the bias seed through its own group scale, so its
+     * widths need not match the weights'. */
+    quantization_t *w0BfpQ = quantizationInitBfpGrouped(8, 8, SR_HALF_AWAY, 4, 3);
+    requantizeTensorInPlace(getParamFromParameter(f->linear0->config->linear->weights), w0BfpQ);
+    freeQuantization(w0BfpQ);
+    quantization_t *b0BfpQ = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    requantizeTensorInPlace(getParamFromParameter(f->linear0->config->linear->bias), b0BfpQ);
+    freeQuantization(b0BfpQ);
+
+    layerQuant_t lq1;
+    layerQuantInitUniform(&lq1, f->floatQ);
+    f->linear1 = linearLayerInit(
+        &(linearInit_t){.inFeatures = 4, .outFeatures = 2, .bias = BIAS_TRUE}, &lq1);
+
+    f->model[0] = f->linear0;
+    f->model[1] = f->linear1;
+
+    f->momentumQ = quantizationInitFloat();
+    f->sgd = sgdMCreateOptim(0.002f, 0.f, 0.f, f->model, 2, f->momentumQ,
+                             (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+
+    f->input = buildFloatTensor2D(1, 3, (float[]){1.0f, 2.0f, 3.0f});
+    f->label = buildFloatTensor2D(1, 2, (float[]){0.2f, -0.3f});
+}
+
+/* Reverse-init order; freeOptim cascades into every parameter the factories
+ * allocated (SgdApi), so the layers are torn down shell-only. Both layers
+ * BORROW their wire configs (linearLayerInit, ownsQuantizations == false), so
+ * the templates are freed here exactly once. */
+static void freeBfpNativeFixture(bfpNativeFixture_t *f) {
+    freeTensor(f->label);
+    freeTensor(f->input);
+    freeOptim(f->sgd);
+    freeLinearLayerShellOnly(f->linear1);
+    freeLinearLayerShellOnly(f->linear0);
+    freeQuantization(f->momentumQ);
+    freeQuantization(f->bfpWireQ);
+    freeQuantization(f->floatQ);
+}
+
+/*! THE Task 9 capstone: 25 training steps whose forward GEMM is native BFP.
+ *  Asserts, in one run, that (a) the derivation flipped -- one BFP template
+ *  yields ARITH_BFP in all four slots, (b) the native forward trains: finite,
+ *  decreasing loss, (c) the hidden wire is BFP with the DERIVED geometry and a
+ *  grid that left the zero state, (d) the weights stay BFP with their own
+ *  geometry and a grid the optimizer's OUT_WRITE requant moved, and (e) grads
+ *  stay FLOAT32 (#261). */
+void testBfpNativeForwardTrainingLossDecreasesAndGridMoves(void) {
+    rngSetSeed(1717u);
+    bfpNativeFixture_t f;
+    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/true);
+
+    tensor_t *w0Param = getParamFromParameter(f.linear0->config->linear->weights);
+    tensor_t *w0Grad = getGradFromParameter(f.linear0->config->linear->weights);
+    tensor_t *b0Grad = getGradFromParameter(f.linear0->config->linear->bias);
+    uint8_t w0ExpBefore[4];
+    memcpy(w0ExpBefore, ((bfpQConfig_t *)w0Param->quantization->qConfig)->exponents, 4);
+
+    bfpWireCapture_t cap = {0};
+    optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
+    float firstLoss = NAN;
+    float lastLoss = NAN;
+    for (size_t step = 0; step < 25; step++) {
+        trainingStats_t *stats = tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
+                                             f.input, f.label, captureLayer0ForwardWire, &cap);
+        if (step == 0) {
+            firstLoss = stats->loss;
+        }
+        lastLoss = stats->loss;
+        freeTrainingStats(stats);
+        sgdFns.step(f.sgd);
+        sgdFns.zero(f.sgd);
+    }
+
+    /* CAPTURE, then FREE, then assert (Unity longjmps out of the first failure). */
+    bool wireExponentMoved = false;
+    uint8_t zeroState = (uint8_t)((1 << (8 - 1)) - 1); /* exponentBits=8 -> bias 127 */
+    for (size_t g = 0; g < cap.numGroups && g < BFP_WIRE_MAX_GROUPS; g++) {
+        if (cap.exponents[g] != zeroState) {
+            wireExponentMoved = true;
+        }
+    }
+    int derivedForwardType = (int)f.derivedForward.type;
+    int derivedForwardRounding = (int)f.derivedForward.roundingMode;
+    bool allFourSlotsDerivedBfp = f.derivedWeightGrad == ARITH_BFP &&
+                                  f.derivedBiasGrad == ARITH_BFP && f.derivedPropLoss == ARITH_BFP;
+    int configuredForwardType = (int)f.linear0->config->linear->forwardMath.type;
+    int weightStorageType = (int)w0Param->quantization->type;
+    bfpQConfig_t *w0QC = w0Param->quantization->qConfig;
+    bool weightGeometryUnchanged = w0QC->numGroups == 4 && w0QC->groupSize == 3 &&
+                                   w0QC->mantissaBits == 8 && w0QC->exponentBits == 8;
+    bool weightExponentMoved = false;
+    for (size_t i = 0; i < 4; i++) {
+        if (w0QC->exponents[i] != w0ExpBefore[i]) {
+            weightExponentMoved = true;
+        }
+    }
+    bool gradsStillFloat =
+        w0Grad->quantization->type == FLOAT32 && b0Grad->quantization->type == FLOAT32;
+
+    freeBfpNativeFixture(&f);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(ARITH_BFP, derivedForwardType,
+                                  "BFP storage must DERIVE native ARITH_BFP (the epic PR2 flip)");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_HALF_AWAY, derivedForwardRounding,
+                                  "the derived arithmetic carries the config's own roundingMode");
+    TEST_ASSERT_TRUE_MESSAGE(allFourSlotsDerivedBfp,
+                             "layerQuantInitUniform over a BFP template must derive ARITH_BFP in "
+                             "ALL FOUR math slots -- backward is pinned back by hand until PR3");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(ARITH_BFP, configuredForwardType,
+                                  "layer 0's forward must have RUN native ARITH_BFP");
+    TEST_ASSERT_TRUE_MESSAGE(cap.seen, "layer-0 forward probe must have fired");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, cap.type, "the hidden wire tensor must be BFP-stored");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(4, cap.numElements, "hidden wire is [1, 4]");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2, cap.numGroups, "wire numGroups is DERIVED: 4 elements / 2");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2, cap.groupSize, "groupSize comes from the template");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(6, cap.mantissaBits, "mantissa width comes from the template");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(8, cap.exponentBits, "exponent width comes from the template");
+    TEST_ASSERT_TRUE_MESSAGE(wireExponentMoved,
+                             "the forward OUT_WRITE must derive the wire's grid: at least one "
+                             "group exponent must leave the zero state");
+    TEST_ASSERT_TRUE_MESSAGE(isfinite(firstLoss) && isfinite(lastLoss),
+                             "native BFP forward training losses must be finite");
+    TEST_ASSERT_TRUE_MESSAGE(lastLoss < firstLoss,
+                             "native BFP forward training must converge (loss must decrease)");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, weightStorageType,
+                                  "weight params must remain BFP after training");
+    TEST_ASSERT_TRUE_MESSAGE(weightGeometryUnchanged,
+                             "weight geometry/widths must be unchanged after training");
+    TEST_ASSERT_TRUE_MESSAGE(weightExponentMoved,
+                             "the optimizer's OUT_WRITE requant must re-derive at least one "
+                             "weight group's exponent (the grid must move)");
+    TEST_ASSERT_TRUE_MESSAGE(gradsStillFloat, "grad storage must stay FLOAT32 (default, #261)");
+}
+
+/*! Decision 8, pinned as a permanent regression: PR2 ships the FORWARD only.
+ *  A model that lets a BACKWARD math slot derive ARITH_BFP (here weightGradMath
+ *  -- what layerQuantInitUniform hands out for a BFP template) must die at the
+ *  funnel gate, not silently compute garbage: the weight-grad executeOp gets
+ *  FLOAT32-stored operands under ARITH_BFP with no bfpStage template and
+ *  fail-fasts. Delete this test when epic PR3 lands the BFP backward arms. */
+void testBfpUniformModelDiesOnBackwardUntilPr3(void) {
+    rngSetSeed(1717u);
+    bfpNativeFixture_t f;
+    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false);
+
+    ASSERT_EXITS_WITH_FAILURE(freeTrainingStats(calculateGradsSequential(
+        f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label)));
+
+    freeBfpNativeFixture(&f);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMultiLayerBackward_WithCrossEntropy_DoesNotCrash);
@@ -993,5 +1230,7 @@ int main(void) {
     RUN_TEST(testBfpDxWireAllocatesThroughInitGradTensor);
     RUN_TEST(testInitGradTensorBfpGroupSizeMismatchDies);
     RUN_TEST(testOwningFactoryBfpOutputQFreesExponents);
+    RUN_TEST(testBfpNativeForwardTrainingLossDecreasesAndGridMoves);
+    RUN_TEST(testBfpUniformModelDiesOnBackwardUntilPr3);
     return UNITY_END();
 }

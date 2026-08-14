@@ -68,7 +68,10 @@ float mseLossForward(tensor_t *output, tensor_t *label, reduction_t reduction) {
     case SYM_INT32:
         return mseLossForwardSymInt32(output, label, reduction);
     default:
-        PRINT_ERROR("Unknown QType!");
+        PRINT_ERROR("mseLossForward: model-output dtype %d not supported (FLOAT32/SYM_INT32) -- "
+                    "BFP loss arms arrive with epic PR4; keep the loss-facing wire FLOAT32 (see "
+                    "docs/conventions/arithmetic-bfp.md)",
+                    (int)output->quantization->type);
         exit(1);
     }
 }
@@ -130,7 +133,10 @@ void mseLossBackward(tensor_t *modelOutput, tensor_t *label, tensor_t *result) {
         mseLossBackwardSymInt32(modelOutput, label, result);
         break;
     default:
-        PRINT_ERROR("Unknown QType!");
+        PRINT_ERROR("mseLossBackward: model-output dtype %d not supported (FLOAT32/SYM_INT32) -- "
+                    "BFP loss arms arrive with epic PR4; keep the loss-facing wire FLOAT32 (see "
+                    "docs/conventions/arithmetic-bfp.md)",
+                    (int)modelOutputQType);
         exit(1);
     }
 }

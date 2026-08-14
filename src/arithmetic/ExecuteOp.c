@@ -403,8 +403,17 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
             } else if (stored == FLOAT32) {
                 const bfpQConfig_t *stage = spec->bfpStage[i];
                 if (stage == NULL) {
+                    /* Two causes, both worth naming: a forward arm that forgot
+                     * its bfpStage wiring (layer bug), and -- since the epic
+                     * PR2 derivation flip -- a BACKWARD math slot left derived
+                     * as ARITH_BFP, which is the common one: no backward op
+                     * stages operands yet. */
                     PRINT_ERROR("executeOp: FLOAT32-stored operand %zu under ARITH_BFP needs "
-                                "a bfpStage geometry template (layer bug)",
+                                "a bfpStage geometry template -- either the layer's forward arm "
+                                "forgot to wire one (layer bug), or a backward math slot was left "
+                                "ARITH_BFP: native BFP backward arrives with epic PR3, until then "
+                                "pin the backward slots to ARITH_FLOAT32 (see "
+                                "docs/conventions/arithmetic-bfp.md)",
                                 i);
                     exit(1);
                 }

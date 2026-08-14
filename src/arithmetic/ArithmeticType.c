@@ -18,12 +18,21 @@ arithmetic_t arithmeticFromQuantization(const quantization_t *q) {
         a.roundingMode = ((asymQConfig_t *)q->qConfig)->roundingMode;
         break;
     case BFP:
-        /* D5 float-bridge staging rule (epic PR1): BFP is storage-only until
-         * the native ARITH_BFP kernels land in epic PR2 -- compute runs in
-         * ARITH_FLOAT32 (the universal bridge), but the config's OWN
-         * roundingMode still seeds the derived arithmetic, mirroring the
-         * SYM/SYM_INT32/ASYM arms above. This derivation FLIPS to ARITH_BFP
-         * once native BFP kernels exist -- a documented breaking change. */
+        /* Epic PR2: BFP is a COMPUTE representation, not just storage -- the
+         * D5 float-bridge staging rule of PR1 is retired and BFP derives
+         * native ARITH_BFP (the documented breaking change of this PR).
+         * Consequences worth knowing at this seam:
+         *  - Fake-quant over BFP storage is still available, but no longer
+         *    free: pin the math slots to ARITH_FLOAT32 explicitly instead of
+         *    deriving them (the funnel then dequantizes BFP operands as it
+         *    does for any other storage-only dtype).
+         *  - PR2 ships the FORWARD only (Linear/Conv1d/ConvT1d). A model that
+         *    derives all four layer slots from one BFP config -- what
+         *    layerQuantInitUniform does -- trains its forward natively and
+         *    then dies at the funnel on the first backward op, guided by
+         *    executeOp's prologue/accumulate messages, until epic PR3 lands
+         *    the BFP backward arms. See docs/conventions/arithmetic-bfp.md. */
+        a.type = ARITH_BFP;
         a.roundingMode = ((bfpQConfig_t *)q->qConfig)->roundingMode;
         break;
     case FLOAT32:

@@ -23,9 +23,9 @@ void reluInitConfig(reluConfig_t *reluConfig, quantization_t *forwardQ, quantiza
  * scale. A BFP wire stores PACKED mantissa codes under a per-GROUP exponent, so
  * such a view reads packed bytes as wide scalars and leaves the destination's
  * exponents stale: silent corruption, never a crash. Keyed on the wire's STORAGE
- * dtype, not the declared arithmetic — pre-flip a BFP wire arrives here under
- * ARITH_FLOAT32, and post-flip it would arrive under ARITH_BFP; both are wrong
- * for this layer until it grows real BFP semantics. */
+ * dtype, not the declared arithmetic — a BFP wire reaches this layer under
+ * ARITH_FLOAT32 (fake-quant, pinned) just as under ARITH_BFP (derived); both
+ * are wrong for this layer until it grows real BFP semantics. */
 static void requireNoBfpWire(const tensor_t *t, const char *what) {
     if (t->quantization->type == BFP) {
         PRINT_ERROR("%s: BFP Relu semantics arrive with epic PR4 -- keep BFP off this wire or use "

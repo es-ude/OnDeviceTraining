@@ -22,12 +22,15 @@ typedef struct arithmetic {
     roundingMode_t roundingMode;
 } arithmetic_t;
 
-/* Derivation rule (spec D5): FLOAT32 -> ARITH_FLOAT32; SYM_INT32 ->
- * ARITH_SYM_INT32; storage-only dtypes -> ARITH_FLOAT32 (float is the
- * universal compute bridge). roundingMode is taken from the qConfig when
- * the dtype carries one, else HALF_AWAY — the storage mode is the DEFAULT
- * the op's rounding seeds from (#282); ops needing a different rounding
- * overwrite the field after deriving. */
+/* Derivation rule (spec D5, as amended by BFP epic PR2): FLOAT32 ->
+ * ARITH_FLOAT32; SYM_INT32 -> ARITH_SYM_INT32; BFP -> ARITH_BFP; the
+ * remaining storage-only dtypes (SYM/ASYM/BOOL/INT32) -> ARITH_FLOAT32
+ * (float is the universal compute bridge). roundingMode is taken from the
+ * qConfig when the dtype carries one, else HALF_AWAY — the storage mode is
+ * the DEFAULT the op's rounding seeds from (#282); ops needing a different
+ * rounding overwrite the field after deriving. Fake-quant over a NATIVE
+ * dtype (BFP/SYM_INT32 storage, float compute) is expressed by pinning the
+ * slot to ARITH_FLOAT32 rather than deriving it. */
 arithmetic_t arithmeticFromQuantization(const quantization_t *q);
 
 /* NULL -> {ARITH_FLOAT32, HALF_AWAY}; else identical to

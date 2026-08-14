@@ -33,14 +33,13 @@ static void testSymInt32QuantizationDerivesSymArithmeticWithItsRoundingMode(void
     TEST_ASSERT_EQUAL(SR_HALF_AWAY, a.roundingMode);
 }
 
-/* BFP epic PR1 (D5 float-bridge staging): BFP derives ARITH_FLOAT32 like the
- * other storage-only dtypes, but -- mirroring the SYM_INT32/SYM/ASYM arms --
- * its OWN roundingMode still seeds the derived arithmetic (mirrors
- * testSymInt32QuantizationDerivesSymArithmeticWithItsRoundingMode above).
- * This derivation FLIPS to ARITH_BFP once native BFP compute kernels land
- * (epic PR2) -- a documented breaking change for anything relying on
- * ARITH_FLOAT32 here. */
-static void testDerivationBfpIsFloatBridgeWithConfigRounding(void) {
+/* BFP epic PR2: the D5 float-bridge staging rule is RETIRED -- BFP storage
+ * derives NATIVE ARITH_BFP, like SYM_INT32 derives ARITH_SYM_INT32, and its
+ * OWN roundingMode seeds the derived arithmetic. Fake-quant over BFP storage
+ * stays available, but is now EXPLICIT: pin the math slots to ARITH_FLOAT32
+ * instead of letting them derive (see
+ * testBfpWireFakeQuantTrainingLossDecreasesAndWirePacks). */
+static void testDerivationBfpIsNativeArithBfpWithConfigRounding(void) {
     /* Stack-fixture idiom (docs/conventions/testing.md): avoid initBfpQConfig's
      * heap allocation for a fixture never passed to freeQuantization. */
     uint8_t exponents[1] = {127};
@@ -53,7 +52,7 @@ static void testDerivationBfpIsFloatBridgeWithConfigRounding(void) {
     quantization_t q;
     initBfpQuantization(&qc, &q);
     arithmetic_t a = arithmeticFromQuantization(&q);
-    TEST_ASSERT_EQUAL(ARITH_FLOAT32, a.type);
+    TEST_ASSERT_EQUAL(ARITH_BFP, a.type);
     TEST_ASSERT_EQUAL(SR_HALF_AWAY, a.roundingMode);
 }
 
@@ -123,7 +122,7 @@ int main(void) {
     RUN_TEST(testFloat32QuantizationDerivesFloatArithmeticWithHalfAway);
     RUN_TEST(testInt32QuantizationDerivesFloatArithmeticWithHalfAway);
     RUN_TEST(testSymInt32QuantizationDerivesSymArithmeticWithItsRoundingMode);
-    RUN_TEST(testDerivationBfpIsFloatBridgeWithConfigRounding);
+    RUN_TEST(testDerivationBfpIsNativeArithBfpWithConfigRounding);
     RUN_TEST(testStorageOnlyDtypesDeriveFloatArithmetic);
     RUN_TEST(testOrDefaultReturnsFloat32HalfAwayForNull);
     RUN_TEST(testOrDefaultMatchesArithmeticFromQuantizationForNonNull);

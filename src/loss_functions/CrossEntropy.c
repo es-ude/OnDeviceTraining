@@ -72,7 +72,10 @@ float crossEntropyForward(tensor_t *softmaxOutput, tensor_t *distribution, reduc
     case SYM_INT32:
         return crossEntropyForwardFakeQuant(softmaxOutput, distribution, reduction);
     default:
-        PRINT_ERROR("CrossEntropy forward only implemented for FLOAT32 and SYM_INT32!");
+        PRINT_ERROR("crossEntropyForward: model-output dtype %d not supported (FLOAT32/SYM_INT32) "
+                    "-- BFP loss arms arrive with epic PR4; keep the loss-facing wire FLOAT32 (see "
+                    "docs/conventions/arithmetic-bfp.md)",
+                    (int)softmaxOutput->quantization->type);
         exit(1);
     }
 }
@@ -146,7 +149,10 @@ void crossEntropySoftmaxBackward(tensor_t *softmaxOutput, tensor_t *distribution
         crossEntropySoftmaxBackwardFakeQuant(softmaxOutput, distribution, loss);
         break;
     default:
-        PRINT_ERROR("Unknown QType!");
+        PRINT_ERROR("crossEntropySoftmaxBackward: model-output dtype %d not supported "
+                    "(FLOAT32/SYM_INT32/ASYM) -- BFP loss arms arrive with epic PR4; keep the "
+                    "loss-facing wire FLOAT32 (see docs/conventions/arithmetic-bfp.md)",
+                    (int)softmaxOutput->quantization->type);
         exit(1);
     }
 }

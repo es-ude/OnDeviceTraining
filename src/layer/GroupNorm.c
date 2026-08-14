@@ -769,8 +769,8 @@ void groupNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
         groupNormBackwardSymInt32(cfg, forwardInput, loss, propLoss);
         break;
     default:
-        PRINT_ERROR(
-            "GroupNorm backward: quantization type not implemented (FLOAT32/SYM_INT32 only)");
+        PRINT_ERROR("GroupNorm backward: quantization type not implemented (FLOAT32/SYM_INT32 "
+                    "only) -- native BFP norms arrive with epic PR5");
         exit(1);
     }
 }

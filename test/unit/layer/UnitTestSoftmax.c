@@ -468,8 +468,9 @@ void tearDown() {}
  *
  * This became REACHABLE with Task 8: before it, a BFP propLossQ died in
  * initGradTensor's default arm, so no BFP wire could ever arrive here. Now the
- * dx wire allocates, and pre-flip arithmeticFromQuantization(BFP) ==
- * ARITH_FLOAT32 routes it straight into the raw casts -- a ~4x heap over-read on
+ * dx wire allocates, and an ARITH_FLOAT32 propLossMath -- pinned, or derived
+ * as such before the Task 9 flip -- routes it straight into the raw casts: a
+ * ~4x heap over-read on
  * the input/loss side and an over-WRITE into the (4x smaller at 8 mantissa bits)
  * packed propLoss buffer. Keyed on each wire's STORAGE dtype, checked before the
  * dispatch. */

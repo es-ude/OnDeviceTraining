@@ -1912,6 +1912,98 @@ void testExecuteOpFloat32OperandStagedToBfpCodes(void) {
     TEST_ASSERT_EQUAL_UINT8(4, g_bfpCapMantissaBits);
 }
 
+static const uint8_t *g_bfpCap2ExponentsPtr[2];
+static uint8_t g_bfpCap2Exponents[2][2];
+static int32_t g_bfpCap2Codes[2][8];
+static size_t g_bfpCap2NumGroups[2];
+
+static void captureTwoBfpOperandsKernel(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
+                                        tensor_t *auxOut, const void *ctx) {
+    (void)auxOut;
+    (void)ctx;
+    for (size_t k = 0; k < nOperands && k < 2; k++) {
+        bfpQConfig_t *qc = operands[k]->quantization->qConfig;
+        g_bfpCap2ExponentsPtr[k] = qc->exponents;
+        g_bfpCap2NumGroups[k] = qc->numGroups;
+        for (size_t g = 0; g < qc->numGroups && g < 2; g++) {
+            g_bfpCap2Exponents[k][g] = qc->exponents[g];
+        }
+        size_t n = calcNumberOfElementsByTensor(operands[k]);
+        for (size_t i = 0; i < n && i < 8; i++) {
+            g_bfpCap2Codes[k][i] = ((int32_t *)operands[k]->data)[i];
+        }
+    }
+    size_t outN = calcNumberOfElementsByTensor(rawOut);
+    for (size_t i = 0; i < outN; i++) {
+        ((float *)rawOut->data)[i] = 0.f;
+    }
+}
+
+/* Grouped stage template under real staging (review fix): TWO FLOAT32-stored
+ * operands in ONE call — operand 0 under a GROUPED {2,4} template, operand 1
+ * under {1,0} — so the stage-exponent VLA sizing (sum of the templates'
+ * numGroups) and the per-operand slice advance are both load-bearing.
+ * Hand-derived golds (m=4 -> qMax 7, e=8 -> bias 127, HALF_AWAY):
+ *   op0 group0 {6,1,-2,0}: absMax 6, 6/7 in (1/2, 1] -> E=0 -> stored 127,
+ *     scale 1, codes {6,1,-2,0} exact;
+ *   op0 group1 {28,-7,3,14}: absMax 28, 28/7 = 4 = 2^2 (snap-up boundary)
+ *     -> E=+2 -> stored 129, scale 4, codes {7, -1.75->-2, 0.75->1, 3.5->4};
+ *   op1 {100,-50,25,0}: absMax 100, 100/7 ~ 14.29 in (2^3, 2^4] -> E=+4 ->
+ *     stored 131, scale 16, codes {6.25->6, -3.125->-3, 1.5625->2, 0}.
+ * All three stored exponents are pairwise distinct, so any slice mix-up is
+ * visible in the values; the distinct-address assert additionally kills a
+ * dropped stageOffset advance (both operands would alias the same funnel
+ * slice AND op1's staging would overwrite op0's exponent). An undersized
+ * VLA (totalStageExponents miscounted, e.g. counting a grouped template as
+ * 1) is a stack OOB WRITE past the VLA end — locally that scribble can go
+ * unnoticed by these asserts; the CI ASan job (unit_test_asan) is the
+ * intended catcher for that mutation class. */
+void testExecuteOpStagesGroupedAndPerTensorOperandsDistinctSlices(void) {
+    tensor_t *a = buildFloat(8, (float[]){6.f, 1.f, -2.f, 0.f, 28.f, -7.f, 3.f, 14.f});
+    tensor_t *b = buildFloat(4, (float[]){100.f, -50.f, 25.f, 0.f});
+    tensor_t *out = buildFloat(8, (float[]){0, 0, 0, 0, 0, 0, 0, 0});
+    uint8_t sentinelsA[2] = {9, 9};
+    bfpQConfig_t stageA = {.exponents = sentinelsA,
+                           .numGroups = 2,
+                           .groupSize = 4,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = 4,
+                           .exponentBits = 8};
+    uint8_t sentinelB[1] = {9};
+    bfpQConfig_t stageB = {.exponents = sentinelB,
+                           .numGroups = 1,
+                           .groupSize = 0,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = 4,
+                           .exponentBits = 8};
+
+    executeOp(
+        &(opSpec_t){
+            .kernel = captureTwoBfpOperandsKernel,
+            .inputs = (tensor_t *[]){a, b},
+            .nInputs = 2,
+            .arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY},
+            .mode = OUT_WRITE,
+            .bfpStage = {&stageA, &stageB},
+        },
+        out);
+
+    freeTensor(out);
+    freeTensor(b);
+    freeTensor(a);
+    TEST_ASSERT_EQUAL_size_t(2, g_bfpCap2NumGroups[0]);
+    TEST_ASSERT_EQUAL_size_t(1, g_bfpCap2NumGroups[1]);
+    TEST_ASSERT_EQUAL_UINT8(127, g_bfpCap2Exponents[0][0]);
+    TEST_ASSERT_EQUAL_UINT8(129, g_bfpCap2Exponents[0][1]);
+    int32_t expectedA[8] = {6, 1, -2, 0, 7, -2, 1, 4};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expectedA, g_bfpCap2Codes[0], 8);
+    TEST_ASSERT_EQUAL_UINT8(131, g_bfpCap2Exponents[1][0]);
+    int32_t expectedB[4] = {6, -3, 2, 0};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expectedB, g_bfpCap2Codes[1], 4);
+    /* distinct funnel slices — a dropped stageOffset advance aliases these */
+    TEST_ASSERT_TRUE(g_bfpCap2ExponentsPtr[0] != g_bfpCap2ExponentsPtr[1]);
+}
+
 /* (c) death: FLOAT32-stored operand under ARITH_BFP with no stage template. */
 void testExecuteOpBfpMissingStageDies(void) {
     ASSERT_EXITS_WITH_FAILURE({
@@ -2243,6 +2335,7 @@ int main(void) {
     RUN_TEST(testExecuteOpBfpStageGeometryMismatchDies);
     RUN_TEST(testExecuteOpBfpStoredOperandUnpacksAndBorrows);
     RUN_TEST(testExecuteOpFloat32OperandStagedToBfpCodes);
+    RUN_TEST(testExecuteOpStagesGroupedAndPerTensorOperandsDistinctSlices);
     RUN_TEST(testExecuteOpBfpStagingSrIsSeededDeterministic);
     RUN_TEST(testExecuteOpBfpRawIsFloat32AndPacksTarget);
     return UNITY_END();

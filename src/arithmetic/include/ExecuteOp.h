@@ -120,7 +120,15 @@ typedef struct opSpec {
      * owns transient scratch exponent backing and stages with the OP's
      * arithmetic.roundingMode. NULL entry (zero-init) = the operand must
      * already be BFP-stored (its exponents are then borrowed zero-copy).
-     * Ignored under other arithmetic types. */
+     * Ignored under other arithmetic types.
+     *
+     * Kernel-side contract under ARITH_BFP: every operand reaches the kernel
+     * as UNPACKED int32 mantissa codes under a BFP-typed quantization — a
+     * packed-storage byte count (calcNumberOfBytesForData) on such an
+     * operand is wrong-by-design. Borrowed exponent arrays (BFP-stored
+     * operands) are READ-ONLY: writing through them corrupts the source
+     * tensor. Borrowed configs carry the source's STORAGE roundingMode;
+     * staged configs carry the OP's arithmetic.roundingMode. */
     const bfpQConfig_t *bfpStage[EXECUTE_OP_MAX_INPUTS];
 } opSpec_t;
 
@@ -148,7 +156,9 @@ static inline void executeOpValidateAccMode(outputMode_t mode, const char *conte
 /* Copies operand 0 into rawOut (data + SYM scale if applicable). For ops whose
  * increment is produced inline (LayerNorm dgamma/dbeta only — the Quantization
  * layer is a pure conversion node routed through executeConvert instead).
- * Ignores auxOut/ctx. */
+ * Ignores auxOut/ctx. Incompatible with the unpacked-BFP scratch form (its
+ * byte-count-based copy reads packed-storage sizes) — never pair with
+ * ARITH_BFP. */
 void executeOpIdentityKernel(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
                              tensor_t *auxOut, const void *ctx);
 

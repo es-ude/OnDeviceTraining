@@ -192,15 +192,36 @@ void dequantChunkToFloat(const tensor_t *src, size_t elemOffset, size_t count, f
         return;
     }
     case BFP: {
-        /* Grouped-capable by construction (per-element group lookup) -- unlike
-         * the grouped-SYM deny above, whose only callers are per-tensor grad
-         * paths. */
+        /* Grouped-capable by construction -- unlike the grouped-SYM deny
+         * above, whose only callers are per-tensor grad paths. Native hot
+         * path since epic PR2 (OUT_WRITE re-packs a BFP wire every producer
+         * step), so the 2^E scale is derived once per group RUN
+         * (dequantGroupedSymChunkToFloat's run-walking shape) instead of
+         * ldexpf+bias per element -- same multiply per element in element
+         * order, bit-identical. */
         bfpQConfig_t *qc = src->quantization->qConfig;
         int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
         unpackSignExtendChunk(src->data, qc->mantissaBits, elemOffset, count, mant);
-        for (size_t i = 0; i < count; i++) {
-            out[i] = (float)mant[i] *
-                     bfpGroupScale(qc, qc->groupSize == 0 ? 0 : (elemOffset + i) / qc->groupSize);
+        const size_t groupSize = qc->groupSize;
+        if (groupSize == 0) {
+            const float scale = bfpGroupScale(qc, 0);
+            for (size_t i = 0; i < count; i++) {
+                out[i] = (float)mant[i] * scale;
+            }
+            return;
+        }
+        size_t chunkEnd = elemOffset + count;
+        size_t idx = elemOffset;
+        while (idx < chunkEnd) {
+            size_t g = idx / groupSize;
+            size_t groupEnd = (g + 1) * groupSize;
+            size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
+            size_t runLen = runEnd - idx;
+            const float scale = bfpGroupScale(qc, g);
+            for (size_t i = 0; i < runLen; i++) {
+                out[idx - elemOffset + i] = (float)mant[idx - elemOffset + i] * scale;
+            }
+            idx = runEnd;
         }
         return;
     }
@@ -1018,15 +1039,28 @@ static void packFloatBufferAsBfp(const float *values, size_t n, bfpQConfig_t *ou
     }
     /* pass 2: chunked quantize + pack; saturation via clamp BEFORE the guard
      * (value-domain quantization saturates by design -- D6; raw code packing
-     * elsewhere keeps the #227 abort) */
+     * elsewhere keeps the #227 abort). WITHIN a chunk, walk per-RUN -- span
+     * to min(chunkEnd, groupEnd) -- so the ldexpf+bias scale derivation
+     * leaves the inner loop (packFloatBufferAsSym's grouped phase-2 shape;
+     * native hot path since epic PR2). gsz = n for per-tensor keeps g = 0.
+     * One roundByMode per element in element order -- bit-identical. */
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
-        for (size_t i = 0; i < count; i++) {
-            size_t g = outQC->groupSize == 0 ? 0 : (off + i) / outQC->groupSize;
-            float scale = bfpGroupScale(outQC, g);
-            codes[i] = clampInt32(roundByMode(values[off + i] / scale, outQC->roundingMode),
-                                  (int32_t)qMin, (int32_t)qMax);
+        size_t chunkEnd = off + count;
+        size_t idx = off;
+        while (idx < chunkEnd) {
+            size_t g = idx / gsz;
+            size_t groupEnd = (g + 1) * gsz;
+            size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
+            size_t runLen = runEnd - idx;
+            const float scale = bfpGroupScale(outQC, g);
+            for (size_t i = 0; i < runLen; i++) {
+                codes[idx - off + i] =
+                    clampInt32(roundByMode(values[idx + i] / scale, outQC->roundingMode),
+                               (int32_t)qMin, (int32_t)qMax);
+            }
+            idx = runEnd;
         }
         packChunkGuarded(codes, count, dst, outQC->mantissaBits, off, what);
     }
@@ -1111,15 +1145,28 @@ static void packStreamAsBfp(const tensor_t *src, bfpSrcChunkReader_t readChunk, 
     }
     /* pass 2: chunked quantize + pack; saturation via clamp BEFORE the guard
      * (value-domain quantization saturates by design -- D6), one roundByMode
-     * per element in element order. */
+     * per element in element order -- bit-identical under the run-walk.
+     * WITHIN a chunk, walk per-RUN so the ldexpf+bias scale derivation
+     * leaves the inner loop (packFloatBufferAsBfp's pass-2 shape; native hot
+     * path since epic PR2). gsz = n for per-tensor keeps g = 0. */
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         readChunk(src, off, count, buf);
-        for (size_t i = 0; i < count; i++) {
-            float scale = bfpGroupScale(outQC, (off + i) / gsz);
-            codes[i] = clampInt32(roundByMode(buf[i] / scale, outQC->roundingMode), (int32_t)qMin,
-                                  (int32_t)qMax);
+        size_t chunkEnd = off + count;
+        size_t idx = off;
+        while (idx < chunkEnd) {
+            size_t g = idx / gsz;
+            size_t groupEnd = (g + 1) * gsz;
+            size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
+            size_t runLen = runEnd - idx;
+            const float scale = bfpGroupScale(outQC, g);
+            for (size_t i = 0; i < runLen; i++) {
+                codes[idx - off + i] =
+                    clampInt32(roundByMode(buf[idx - off + i] / scale, outQC->roundingMode),
+                               (int32_t)qMin, (int32_t)qMax);
+            }
+            idx = runEnd;
         }
         packChunkGuarded(codes, count, dst, outQC->mantissaBits, off, what);
     }
@@ -1194,11 +1241,12 @@ void convertFloatTensorToBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor
 void convertBfpTensorToFloat32Tensor(tensor_t *inputTensor, tensor_t *outputTensor) {
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     float *out = (float *)outputTensor->data;
-    float buf[ODT_CONVERSION_CHUNK_ELEMS];
+    /* no bounce buffer: each chunk dequants straight into its own span of the
+     * caller's float storage -- the staging memcpy added nothing (native hot
+     * path since epic PR2) */
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
-        dequantChunkToFloat(inputTensor, off, count, buf);
-        memcpy(out + off, buf, count * sizeof(float));
+        dequantChunkToFloat(inputTensor, off, count, out + off);
     }
 }
 
@@ -1367,6 +1415,11 @@ void convertBfpTensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTensor) 
  * source under its original exponents, which an aliased pass-1 write would
  * already have clobbered; the funnel always passes distinct tensors. */
 void requantBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor) {
+    if (inputTensor->data == outputTensor->data) {
+        PRINT_ERROR("requantBfpTensor: in-place requant is unsupported -- pass 2 re-reads the "
+                    "source under its original exponents (see TensorConversion.h)");
+        exit(1);
+    }
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     packDequantStreamAsBfp(inputTensor, n, outputTensor->quantization->qConfig, outputTensor->data,
                            "requantBfpTensor");

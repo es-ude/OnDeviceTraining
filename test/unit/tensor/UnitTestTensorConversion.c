@@ -12,6 +12,7 @@
 #include "expected_requant.h"
 #include "unity.h"
 
+#include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -5467,6 +5468,357 @@ void testRequantBfpWidthChange(void) {
     TEST_ASSERT_EQUAL_INT32(0, mant[3]);
 }
 
+/* --- Task 10 multi-chunk pins (n > ODT_CONVERSION_CHUNK_ELEMS): written to
+ * pass against the PRE-rewrite conversion loops, then required bit-identical
+ * after the scale-hoisting perf pass. n=520, groupSize=13 -> 40 groups; 256
+ * and 512 are NOT multiples of 13, so group 19 [247,260) straddles the first
+ * chunk boundary and group 39 [507,520) the second (chunks [0,256),
+ * [256,512), [512,520)). testChunkedFloatToSymRoundTripsAtChunkBoundary is
+ * the SYM precedent (same synthetic-value idiom). */
+
+void testChunkedFloatToBfpGroupedRoundTripsAcrossChunkBoundaries(void) {
+    /* FLOAT32 -> BFP{40,13} -> FLOAT32 at n=520, m=6, e=8: pins
+     * packFloatBufferAsBfp's chunked pass 2 and dequantChunkToFloat's BFP arm
+     * across both chunk boundaries. Quantize-stability: the dequantized
+     * output is exactly mant*2^E per element, and by minimality of E the
+     * group absmax satisfies absmax/2^E in (15.5, 31], so its mantissa
+     * re-rounds into [16, 31] and re-quantizing reproduces every exponent AND
+     * every payload byte exactly.
+     * Spot golds (frexpf snap-up rule: E = smallest with absmax/2^E <= qMax,
+     * qMax = 2^(m-1)-1 = 31; stored = E + bias, bias = 2^(e-1)-1 = 127) for
+     * v_i = ((i*2654435761)%1000 - 500)/25:
+     *   group 0  [0,13):   absmax = |v_0|   = |(0-500)/25|   = 20.00
+     *     -> 20/31 = 0.645 in [0.5,1) -> E=0 -> stored 127
+     *   group 19 [247,260): absmax = |v_251| = |(11-500)/25|  = 19.56
+     *     -> 19.56/31 = 0.631 -> E=0 -> stored 127
+     *   group 39 [507,520): absmax = |v_519| = |(959-500)/25| = 18.36
+     *     -> 18.36/31 = 0.592 -> E=0 -> stored 127
+     * (this formula lands EVERY group on stored 127; the varying-exponent
+     * multi-chunk coverage lives in testStreamPackBfpMultiChunkViaSymSource) */
+    size_t n = 520;
+    size_t numGroups = 40;
+    size_t groupSize = 13;
+    float vals[520];
+    for (size_t i = 0; i < n; i++) {
+        vals[i] = ((float)((i * 2654435761u) % 1000) - 500.f) / 25.f;
+    }
+    size_t dims[] = {n};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    quantization_t floatInQ;
+    initFloat32Quantization(&floatInQ);
+    tensor_t floatIn;
+    setTensorValues(&floatIn, (uint8_t *)vals, &shape, &floatInQ, NULL);
+
+    uint8_t exponentsA[40];
+    memset(exponentsA, 9, sizeof(exponentsA)); /* sentinel != expected 127 */
+    bfpQConfig_t bfpQCA = {.exponents = exponentsA,
+                           .numGroups = numGroups,
+                           .groupSize = groupSize,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = 6,
+                           .exponentBits = 8};
+    quantization_t bfpQA;
+    initBfpQuantization(&bfpQCA, &bfpQA);
+    size_t payloadBytes = calcNumberOfBytesForData(&bfpQA, n); /* 520*6/8 = 390, byte-exact */
+    uint8_t payloadA[calcNumberOfBytesForData(&bfpQA, n)];
+    memset(payloadA, 0x00, payloadBytes);
+    tensor_t bfpA;
+    setTensorValues(&bfpA, payloadA, &shape, &bfpQA, NULL);
+
+    convertTensor(&floatIn, &bfpA);
+
+    TEST_ASSERT_EQUAL_UINT8(127, exponentsA[0]);
+    TEST_ASSERT_EQUAL_UINT8(127, exponentsA[19]);
+    TEST_ASSERT_EQUAL_UINT8(127, exponentsA[39]);
+
+    float mid[520];
+    quantization_t floatMidQ;
+    initFloat32Quantization(&floatMidQ);
+    tensor_t floatMid;
+    setTensorValues(&floatMid, (uint8_t *)mid, &shape, &floatMidQ, NULL);
+    convertTensor(&bfpA, &floatMid);
+
+    /* every group derived E=0 (scale 1) -> half-step tolerance 0.5 */
+    for (size_t i = 0; i < n; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(0.5f + 1e-3f, vals[i], mid[i]);
+    }
+
+    /* re-quantize the dequantized output: quantize-stable means exponents
+     * AND payload bytes reproduce exactly (sentinels/prefill differ from the
+     * first pass, so the memcmp also proves full write coverage) */
+    uint8_t exponentsB[40];
+    memset(exponentsB, 0xEE, sizeof(exponentsB));
+    bfpQConfig_t bfpQCB = {.exponents = exponentsB,
+                           .numGroups = numGroups,
+                           .groupSize = groupSize,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = 6,
+                           .exponentBits = 8};
+    quantization_t bfpQB;
+    initBfpQuantization(&bfpQCB, &bfpQB);
+    uint8_t payloadB[calcNumberOfBytesForData(&bfpQA, n)];
+    memset(payloadB, 0xAA, payloadBytes);
+    tensor_t bfpB;
+    setTensorValues(&bfpB, payloadB, &shape, &bfpQB, NULL);
+
+    convertTensor(&floatMid, &bfpB);
+
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(exponentsA, exponentsB, numGroups);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(payloadA, payloadB, payloadBytes);
+}
+
+void testStreamPackBfpMultiChunkViaSymSource(void) {
+    /* SYM_INT32 -> BFP{40,13} at n=520, m=6, e=8: pins packStreamAsBfp's
+     * pass-1 group closure ACROSS chunk boundaries (groups 19/39 straddle
+     * 256/512) and its chunked pass 2. Mantissas m_i = (i*2654435761)%1000 -
+     * 500 at scale 2^-5 (exact power of two): values m_i/32 in
+     * [-15.625, 15.59].
+     * This fixture lands ADJACENT groups on DIFFERENT exponents (groups
+     * 0/12/24/36 stored 127, all others 126), so a run/group-boundary
+     * off-by-one in any Task-10 hoisted loop changes bytes here -- the
+     * designated mutation catcher.
+     * Spot golds (E = smallest with absmax/2^E <= 31, stored = E + 127):
+     *   group 0:  absmax = |m_0|/32   = 500/32 = 15.625
+     *     -> 15.625/31 = 0.504 in [0.5,1) -> E=0 -> stored 127
+     *   group 1:  absmax = |m_21|/32  = 481/32 = 15.03125
+     *     -> 15.03125/31 = 0.485 = 0.970*2^-1 -> E=-1 -> stored 126
+     *     (adjacent difference right at the group 0|1 boundary)
+     *   group 19: absmax = |m_251|/32 = 489/32 = 15.28125
+     *     -> 15.28125/31 = 0.493 = 0.986*2^-1 -> E=-1 -> stored 126
+     *   group 39: absmax = |m_519|/32 = 459/32 = 14.34375
+     *     -> 14.34375/31 = 0.463 = 0.925*2^-1 -> E=-1 -> stored 126
+     * Cross-check: the reference path SYM_INT32 -> FLOAT32
+     * (convertSymInt32TensorToFloat32Tensor, the identical (float)mant*scale
+     * product) -> BFP runs packFloatBufferAsBfp's PER-GROUP pass 1 -- a
+     * different pass-1 shape -- and must produce identical exponents and
+     * payload. */
+    size_t n = 520;
+    size_t numGroups = 40;
+    size_t groupSize = 13;
+    int32_t mants[520];
+    for (size_t i = 0; i < n; i++) {
+        mants[i] = (int32_t)((i * 2654435761u) % 1000) - 500;
+    }
+    size_t dims[] = {n};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    symInt32QConfig_t srcQC = {.scale = 0.03125f, .roundingMode = HALF_AWAY, .qMaxBits = 12};
+    quantization_t srcQ;
+    initSymInt32Quantization(&srcQC, &srcQ);
+    tensor_t src;
+    setTensorValues(&src, (uint8_t *)mants, &shape, &srcQ, NULL);
+
+    uint8_t exponentsA[40];
+    memset(exponentsA, 9, sizeof(exponentsA)); /* sentinel != expected 127/126 */
+    bfpQConfig_t bfpQCA = {.exponents = exponentsA,
+                           .numGroups = numGroups,
+                           .groupSize = groupSize,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = 6,
+                           .exponentBits = 8};
+    quantization_t bfpQA;
+    initBfpQuantization(&bfpQCA, &bfpQA);
+    size_t payloadBytes = calcNumberOfBytesForData(&bfpQA, n);
+    uint8_t payloadA[calcNumberOfBytesForData(&bfpQA, n)];
+    memset(payloadA, 0x00, payloadBytes);
+    tensor_t bfpA;
+    setTensorValues(&bfpA, payloadA, &shape, &bfpQA, NULL);
+
+    convertTensor(&src, &bfpA);
+
+    TEST_ASSERT_EQUAL_UINT8(127, exponentsA[0]);
+    TEST_ASSERT_EQUAL_UINT8(126, exponentsA[1]);
+    TEST_ASSERT_EQUAL_UINT8(126, exponentsA[19]);
+    TEST_ASSERT_EQUAL_UINT8(126, exponentsA[39]);
+
+    /* reference path: SYM_INT32 -> FLOAT32 -> BFP */
+    float ref[520];
+    quantization_t refQ;
+    initFloat32Quantization(&refQ);
+    tensor_t refFloat;
+    setTensorValues(&refFloat, (uint8_t *)ref, &shape, &refQ, NULL);
+    convertTensor(&src, &refFloat);
+
+    uint8_t exponentsB[40];
+    memset(exponentsB, 0xEE, sizeof(exponentsB));
+    bfpQConfig_t bfpQCB = {.exponents = exponentsB,
+                           .numGroups = numGroups,
+                           .groupSize = groupSize,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = 6,
+                           .exponentBits = 8};
+    quantization_t bfpQB;
+    initBfpQuantization(&bfpQCB, &bfpQB);
+    uint8_t payloadB[calcNumberOfBytesForData(&bfpQA, n)];
+    memset(payloadB, 0xAA, payloadBytes);
+    tensor_t bfpB;
+    setTensorValues(&bfpB, payloadB, &shape, &bfpQB, NULL);
+    convertTensor(&refFloat, &bfpB);
+
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(exponentsA, exponentsB, numGroups);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(payloadA, payloadB, payloadBytes);
+
+    /* dequant leg: BFP -> FLOAT32 must equal (float)code * 2^(stored-127)
+     * recomputed test-locally from the packed payload -- pins
+     * dequantChunkToFloat's BFP arm at n>256 with VARYING group exponents
+     * (a factor-2 scale from the wrong group cannot pass) */
+    float back[520];
+    quantization_t backQ;
+    initFloat32Quantization(&backQ);
+    tensor_t floatBack;
+    setTensorValues(&floatBack, (uint8_t *)back, &shape, &backQ, NULL);
+    convertTensor(&bfpA, &floatBack);
+
+    int32_t codes[520];
+    unpackSignExtend(payloadA, 6, 0, codes, n);
+    for (size_t i = 0; i < n; i++) {
+        float scale = ldexpf(1.f, (int)exponentsA[i / groupSize] - 127);
+        TEST_ASSERT_EQUAL_FLOAT((float)codes[i] * scale, back[i]);
+    }
+}
+
+void testRequantBfpMultiChunkReblock(void) {
+    /* conversionMatrix[BFP][BFP] re-block per-tensor {1,0} -> grouped {40,13}
+     * at n=520: the diagonal's two-pass stream (packDequantStreamAsBfp over
+     * dequantChunkToFloat's BFP arm) crossing chunk boundaries on BOTH the
+     * dequant read and the pack write. Source: m=8 payload, stored 126
+     * (E=-1, scale 0.5), mantissas (i*2654435761)%200 - 100 in [-100, 99]
+     * -> values mant/2 in [-50, 49.5].
+     * Spot golds on the target (qMax = 31, bias = 127):
+     *   group 0:  absmax = |v_0|   = 100/2 = 50.0
+     *     -> 50/31 = 1.613 = 0.807*2^1 -> E=1 -> stored 128
+     *   group 19: absmax = |v_251| = 89/2  = 44.5
+     *     -> 44.5/31 = 1.435 = 0.718*2^1 -> E=1 -> stored 128
+     *   group 39: absmax = |v_518| = 98/2  = 49.0
+     *     -> 49/31 = 1.581 = 0.790*2^1 -> E=1 -> stored 128
+     * Cross-check: BFP -> FLOAT32 -> BFP{40,13} (packFloatBufferAsBfp's
+     * per-group pass 1) must produce identical exponents and payload. */
+    size_t n = 520;
+    size_t numGroups = 40;
+    size_t groupSize = 13;
+    int32_t goldMant[520];
+    for (size_t i = 0; i < n; i++) {
+        goldMant[i] = (int32_t)((i * 2654435761u) % 200) - 100;
+    }
+    size_t dims[] = {n};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    uint8_t srcExponents[1] = {126}; /* E=-1, scale 0.5 */
+    /* SOURCE roundingMode SR: dequant is rounding-free, so the requant must
+     * never read it (testRequantBfpReblocksToTargetGeometry precedent) */
+    bfpQConfig_t srcQC = {.exponents = srcExponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = SR_HALF_AWAY,
+                          .mantissaBits = 8,
+                          .exponentBits = 8};
+    quantization_t srcQ;
+    initBfpQuantization(&srcQC, &srcQ);
+    uint8_t srcData[calcNumberOfBytesForData(&srcQ, n)];
+    byteConversion((uint8_t *)goldMant, 32, srcData, 8, n);
+    tensor_t src;
+    setTensorValues(&src, srcData, &shape, &srcQ, NULL);
+
+    uint8_t exponentsA[40];
+    memset(exponentsA, 9, sizeof(exponentsA)); /* sentinel != expected 128 */
+    bfpQConfig_t dstQCA = {.exponents = exponentsA,
+                           .numGroups = numGroups,
+                           .groupSize = groupSize,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = 6,
+                           .exponentBits = 8};
+    quantization_t dstQA;
+    initBfpQuantization(&dstQCA, &dstQA);
+    size_t payloadBytes = calcNumberOfBytesForData(&dstQA, n);
+    uint8_t payloadA[calcNumberOfBytesForData(&dstQA, n)];
+    memset(payloadA, 0x00, payloadBytes);
+    tensor_t dstA;
+    setTensorValues(&dstA, payloadA, &shape, &dstQA, NULL);
+
+    conversionMatrix[BFP][BFP](&src, &dstA);
+
+    TEST_ASSERT_EQUAL_UINT8(128, exponentsA[0]);
+    TEST_ASSERT_EQUAL_UINT8(128, exponentsA[19]);
+    TEST_ASSERT_EQUAL_UINT8(128, exponentsA[39]);
+    TEST_ASSERT_EQUAL_UINT8(126, srcExponents[0]); /* source untouched */
+
+    /* cross-check via the buffer path: BFP -> FLOAT32 -> BFP */
+    float mid[520];
+    quantization_t midQ;
+    initFloat32Quantization(&midQ);
+    tensor_t floatMid;
+    setTensorValues(&floatMid, (uint8_t *)mid, &shape, &midQ, NULL);
+    convertTensor(&src, &floatMid);
+
+    uint8_t exponentsB[40];
+    memset(exponentsB, 0xEE, sizeof(exponentsB));
+    bfpQConfig_t dstQCB = {.exponents = exponentsB,
+                           .numGroups = numGroups,
+                           .groupSize = groupSize,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = 6,
+                           .exponentBits = 8};
+    quantization_t dstQB;
+    initBfpQuantization(&dstQCB, &dstQB);
+    uint8_t payloadB[calcNumberOfBytesForData(&dstQA, n)];
+    memset(payloadB, 0xAA, payloadBytes);
+    tensor_t dstB;
+    setTensorValues(&dstB, payloadB, &shape, &dstQB, NULL);
+    convertTensor(&floatMid, &dstB);
+
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(exponentsA, exponentsB, numGroups);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(payloadA, payloadB, payloadBytes);
+}
+
+void testRequantBfpTensorRejectsAliasedBuffers(void) {
+    /* requantBfpTensor is documented NOT in-place capable (TensorConversion.h):
+     * pass 2 re-reads the source under its ORIGINAL exponents, which an
+     * aliased pass-2 write would already have clobbered mid-stream --
+     * silently wrong bytes, no crash. The guard turns that latent corruption
+     * into a fail-fast. View is hand-built sharing ->data (stack-fixture
+     * idiom, NOT initTensor, which would allocate fresh data).
+     * Mutation guard: without the src==dst check the aliased call runs to
+     * completion and the child exits 0 (no death) -> RED. */
+    size_t n = 8;
+    size_t dims[] = {8};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t goldMant[8] = {12, 2, -4, 0, 25, -14, 6, 28};
+    uint8_t srcExponents[1] = {127};
+    bfpQConfig_t srcQC = {.exponents = srcExponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 6,
+                          .exponentBits = 8};
+    quantization_t srcQ;
+    initBfpQuantization(&srcQC, &srcQ);
+    uint8_t bfpData[calcNumberOfBytesForData(&srcQ, n)];
+    byteConversion((uint8_t *)goldMant, 32, bfpData, 6, n);
+    tensor_t t;
+    setTensorValues(&t, bfpData, &shape, &srcQ, NULL);
+
+    /* aliased view: same data pointer, own qConfig (grouped target geometry) */
+    uint8_t viewExponents[2] = {9, 9};
+    bfpQConfig_t viewQC = {.exponents = viewExponents,
+                           .numGroups = 2,
+                           .groupSize = 4,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = 6,
+                           .exponentBits = 8};
+    quantization_t viewQ;
+    initBfpQuantization(&viewQC, &viewQ);
+    tensor_t tAliasedView;
+    setTensorValues(&tAliasedView, bfpData, &shape, &viewQ, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(requantBfpTensor(&t, &tAliasedView));
+}
+
 void testQuantizeFloatBufferToBfpCodesPerTensor(void) {
     /* same fixture as testRequantBfpWidthChange: {100,-50,25,0} at m=4,e=8
      * -> stored exponent 131 (E=+4, scale 16), codes {6,-3,2,0}
@@ -5717,6 +6069,10 @@ int main(void) {
     RUN_TEST(testSameTypeBfpConvertRejectsExponentWidthMismatch);
     RUN_TEST(testRequantBfpReblocksToTargetGeometry);
     RUN_TEST(testRequantBfpWidthChange);
+    RUN_TEST(testChunkedFloatToBfpGroupedRoundTripsAcrossChunkBoundaries);
+    RUN_TEST(testStreamPackBfpMultiChunkViaSymSource);
+    RUN_TEST(testRequantBfpMultiChunkReblock);
+    RUN_TEST(testRequantBfpTensorRejectsAliasedBuffers);
 
     RUN_TEST(testQuantizeFloatBufferToBfpCodesPerTensor);
     RUN_TEST(testQuantizeFloatBufferToBfpCodesGroupedIndependentExponents);

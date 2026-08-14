@@ -7,6 +7,7 @@ lives under log["config"], while _run_scalars only read log["memory"]. The
 per-tensor / per-channel / g64 / g32 at the same bit width, i.e. it made finer
 granularity look free — the exact question the sweep exists to answer.
 """
+import subprocess
 import sys
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from examples.har_classifier.compare_memory import (  # noqa: E402
     CATEGORIES,
     aggregate,
     baseline_incompatibilities,
+    load_runs,
     merge_baseline,
 )
 from examples._shared.log_schema import RunLog  # noqa: E402
@@ -149,14 +151,44 @@ def test_absent_optional_config_keys_do_not_trip_the_gate():
     sweep_log["config"]["lr_schedule"] = "none"
     baseline_log = _budget_log(epochs=50, acc=0.8953, params_b=40856)
     baseline_log["config"].pop("lr_schedule", None)  # older log: key simply absent
-    assert baseline_incompatibilities({"sym4": {1: sweep_log}},
-                                      {"float": {1: baseline_log}}) == []
+    problems = baseline_incompatibilities({"sym4": {1: sweep_log}}, {"float": {1: baseline_log}})
+    # Scoped to the budget check: this fixture shares no config, so the drift check
+    # separately (and correctly) reports that it had nothing to compare.
+    assert [p for p in problems if "budget" in p] == []
 
 
 def test_compatible_baseline_passes():
+    """Clean bill of health requires a shared config: the drift check must have
+    had something to compare, otherwise the empty problem list is unearned."""
+    sweep = {
+        "sym4": {1: _budget_log(epochs=50, acc=0.8957)},
+        "float": {1: _budget_log(epochs=50, acc=0.8953, params_b=40856)},
+    }
+    baseline = {
+        "sym4": {1: _budget_log(epochs=50, acc=0.8957)},  # canary: reproduces exactly
+        "float": {1: _budget_log(epochs=50, acc=0.8953, params_b=40856)},
+    }
+    assert baseline_incompatibilities(sweep, baseline) == []
+
+
+def test_no_overlapping_config_is_reported_not_silently_passed():
+    """Without a config in both sets the drift check cannot run at all. Returning
+    an empty list would present a check that never executed as one that passed —
+    the same failure mode as the metadata bug this module was fixed for."""
     sweep = {"sym4": {1: _budget_log(epochs=50, acc=0.8957)}}
     baseline = {"float": {1: _budget_log(epochs=50, acc=0.8953, params_b=40856)}}
-    assert baseline_incompatibilities(sweep, baseline) == []
+    problems = baseline_incompatibilities(sweep, baseline)
+    assert len(problems) == 1
+    assert "drift check" in problems[0] and "could not run" in problems[0], problems[0]
+
+
+def test_overlap_on_a_different_seed_still_counts_as_unverified():
+    """A shared config name is not enough — the drift check compares per SEED, so
+    a baseline whose seeds miss the sweep's entirely verifies nothing."""
+    sweep = {"sym4": {1: _budget_log(epochs=50, acc=0.8957)}}
+    baseline = {"sym4": {7: _budget_log(epochs=50, acc=0.8957)}}
+    problems = baseline_incompatibilities(sweep, baseline)
+    assert any("could not run" in p for p in problems), problems
 
 
 def test_comparisons_populated_once_baseline_is_merged():
@@ -214,9 +246,62 @@ def test_budget_mismatch_always_states_a_reason():
     base["config"]["momentum"] = 0.9  # matches a's momentum, b's epochs, neither tuple
 
     problems = baseline_incompatibilities({"symA": {1: a}, "symB": {1: b}}, {"float": {1: base}})
-    assert len(problems) == 1
-    assert not problems[0].rstrip().endswith("—"), problems[0]
-    assert "epochs" in problems[0] and "momentum" in problems[0], problems[0]
+    budget = [p for p in problems if "budget" in p]
+    assert len(budget) == 1
+    assert not budget[0].rstrip().endswith("—"), budget[0]
+    assert "epochs" in budget[0] and "momentum" in budget[0], budget[0]
+
+
+def test_missing_log_dir_says_so(tmp_path):
+    """A typo'd path reported as 'no runs found' sends the reader hunting for
+    missing data instead of a missing directory."""
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        load_runs(tmp_path / "nope")
+
+
+def test_path_that_is_not_a_directory_says_so(tmp_path):
+    f = tmp_path / "afile.json"
+    f.write_text("{}")
+    with pytest.raises(NotADirectoryError, match="not a directory"):
+        load_runs(f)
+
+
+def test_existing_but_empty_dir_still_reports_no_runs(tmp_path):
+    """The directory exists and is simply empty — that is a genuinely different
+    diagnosis and must stay an empty result, not an error."""
+    assert load_runs(tmp_path) == {}
+
+
+def _run_cli(*args: str) -> subprocess.CompletedProcess:
+    """Invoke the script as the user does — the try/except wrapping in main() is
+    only reachable this way, and unit-testing load_runs alone let a regression to
+    a raw traceback pass the whole suite."""
+    return subprocess.run(
+        [sys.executable, str(REPO_ROOT / "examples/har_classifier/compare_memory.py"), *args],
+        capture_output=True, text=True, cwd=REPO_ROOT,
+    )
+
+
+def test_cli_reports_missing_dir_without_a_traceback(tmp_path):
+    r = _run_cli("--logs", str(tmp_path / "nope"))
+    assert r.returncode != 0
+    assert "does not exist" in r.stderr
+    assert "Traceback" not in r.stderr
+
+
+def test_cli_reports_non_directory_without_a_traceback(tmp_path):
+    f = tmp_path / "afile.json"
+    f.write_text("{}")
+    r = _run_cli("--logs", str(f))
+    assert r.returncode != 0
+    assert "not a directory" in r.stderr
+    assert "Traceback" not in r.stderr
+
+
+def test_cli_reports_bad_baseline_dir_without_a_traceback(tmp_path):
+    r = _run_cli("--logs", str(tmp_path), "--baseline-logs", str(tmp_path / "nope"))
+    assert r.returncode != 0
+    assert "Traceback" not in r.stderr
 
 
 def test_c_python_total_drift_is_rejected():

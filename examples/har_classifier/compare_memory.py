@@ -146,8 +146,10 @@ def baseline_incompatibilities(
             )
             break  # one report per config is enough
 
+    compared = 0
     for config in sorted(set(sweep) & set(baseline)):
         for seed in sorted(set(sweep[config]) & set(baseline[config])):
+            compared += 1
             a = sweep[config][seed]["final"]["test_acc"]
             b = baseline[config][seed]["final"]["test_acc"]
             if a != b:
@@ -157,6 +159,25 @@ def baseline_incompatibilities(
                     f"must reproduce exactly, so the runs are not on a common scale"
                 )
                 break
+
+    if compared == 0:
+        # Counting (config, seed) pairs, not shared config names: the comparison is
+        # per seed, so a shared name whose seeds do not intersect verifies nothing.
+        # Reporting this is the whole point — an empty problem list means "checked
+        # and compatible", and a drift check that never ran must not borrow that
+        # meaning. It is the same failure mode as the metadata bug this module was
+        # fixed for: work that did not happen reading as work that succeeded.
+        # Spell out --logs: run_matrix.py defaults it to the SWEEP dir, so a copy-pasted
+        # command without it drops the canary where the drift check will never see it.
+        # The canary must reuse a config name the sweep already has — that shared name
+        # is what makes it evidence.
+        problems.append(
+            "drift check could not run: no (config, seed) pair appears in both sets, so "
+            "nothing establishes that the two runs share a numerical scale. Re-run one of "
+            "the sweep's OWN configs into the baseline dir as a canary, e.g. "
+            "`run_matrix.py --configs <a-config-from-the-sweep> --seeds 1 --epochs <same> "
+            "--logs <the --baseline-logs dir>`"
+        )
 
     return problems
 
@@ -214,7 +235,17 @@ def _run_scalars(log: RunLog) -> dict[str, float]:
 
 
 def load_runs(logs_dir: Path) -> dict[str, dict[int, RunLog]]:
-    """Load logs into {config: {seed: RunLog}} from ``{config}_seed{N}.json``."""
+    """Load logs into {config: {seed: RunLog}} from ``{config}_seed{N}.json``.
+
+    Distinguishes "directory is missing" from "directory holds no runs": glob on a
+    non-existent path yields nothing, so both used to surface as "no runs found",
+    sending the reader after missing DATA when the real fault was a typo'd PATH.
+    An existing-but-empty directory still returns {} — that diagnosis is genuine.
+    """
+    if not logs_dir.exists():
+        raise FileNotFoundError(f"log directory {logs_dir} does not exist (check the path)")
+    if not logs_dir.is_dir():
+        raise NotADirectoryError(f"log path {logs_dir} is not a directory")
     runs: dict[str, dict[int, RunLog]] = {}
     for path in sorted(logs_dir.glob("*_seed*.json")):
         stem = path.stem  # e.g. "sym8_seed3"
@@ -445,14 +476,21 @@ def main() -> None:
     args = ap.parse_args()
 
     logs_dir = Path(args.logs)
-    runs = load_runs(logs_dir)
+    # A bad path is user error, not a crash: surface the message, not a traceback.
+    try:
+        runs = load_runs(logs_dir)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise SystemExit(str(exc)) from exc
     if not runs:
         raise SystemExit(f"no *_seed*.json logs found in {logs_dir} — run run_matrix.py first")
 
     baseline_meta = None
     if args.baseline_logs:
         bdir = Path(args.baseline_logs)
-        braw = load_runs(bdir)
+        try:
+            braw = load_runs(bdir)
+        except (FileNotFoundError, NotADirectoryError) as exc:
+            raise SystemExit(str(exc)) from exc
         if args.baseline_config not in braw:
             raise SystemExit(f"{bdir} has no '{args.baseline_config}_seed*.json' runs")
         # Gate on the config being merged PLUS every config the two dirs share — the

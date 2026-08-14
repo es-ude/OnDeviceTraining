@@ -225,6 +225,19 @@ add_elastic_ai_unit_test(
         AdaptiveWindow1d
 )
 
+set(GEN_BFP_CONV1D_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_bfp_conv1d.h)
+add_custom_command(
+        OUTPUT ${GEN_BFP_CONV1D_HEADER}
+        COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_bfp_conv1d.py
+                --out ${GEN_BFP_CONV1D_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_bfp_conv1d.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+        COMMENT "Generating expected_bfp_conv1d.h via NumPy emulation"
+        VERBATIM
+)
+add_custom_target(generate_expected_bfp_conv1d
+        DEPENDS ${GEN_BFP_CONV1D_HEADER})
+
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Conv1dKernel
@@ -233,10 +246,13 @@ add_elastic_ai_unit_test(
         Kernel
         Tensor
         TensorApi
+        Quantization
         QuantizationApi
         StorageApi
+        odt_test_death
 )
-add_dependencies(UnitTestConv1dKernel generate_expected_conv1d_kernel)
+add_dependencies(UnitTestConv1dKernel generate_expected_conv1d_kernel
+        generate_expected_bfp_conv1d)
 target_include_directories(UnitTestConv1dKernel PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 add_elastic_ai_unit_test(

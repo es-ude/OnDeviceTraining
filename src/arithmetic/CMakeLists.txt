@@ -197,6 +197,7 @@ target_link_libraries(Conv1dKernel PRIVATE
         Rounding
         Quantization
         Common
+        m
 )
 
 add_library(ConvTranspose1dKernel ConvTranspose1dKernel.c)

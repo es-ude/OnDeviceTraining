@@ -2,6 +2,9 @@
 
 #include "Conv1dKernel.h"
 
+#include <math.h>
+
+#include "BfpKernelSupport.h"
 #include "Common.h"
 #include "Mul.h"
 #include "Rounding.h"
@@ -323,4 +326,159 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
         exit(1);
     }
     ((symInt32QConfig_t *)output->quantization->qConfig)->scale = sAcc;
+}
+
+/* BFP epic PR2 (Task 4): conv1dKernelSymInt32Grouped's BFP twin (see
+ * Conv1dKernel.h for the full contract). Differences from the SYM grouped
+ * kernel: BOTH operands are group-tracked (not just the weight), the
+ * boundary combine is a rounding-free ldexpf fold into a float accumulator
+ * (never rescaleIntoAccumulatorScale), and the output is raw FLOAT32 (no
+ * output-scale write -- the funnel epilogue owns packing). */
+void conv1dKernelBfp(tensor_t const *input, tensor_t const *weight, tensor_t const *bias,
+                     kernel_t const *kernel, size_t groups, tensor_t *output) {
+    size_t batch = input->shape->dimensions[0];
+    size_t inChannels = input->shape->dimensions[1];
+    size_t inputLength = input->shape->dimensions[2];
+    size_t outChannels = output->shape->dimensions[1];
+    size_t outputLength = output->shape->dimensions[2];
+    size_t kernelSize = weight->shape->dimensions[2];
+
+    if (input->quantization->type != BFP || weight->quantization->type != BFP) {
+        PRINT_ERROR("conv1dKernelBfp: input and weight must be BFP (unpacked scratch form)");
+        exit(1);
+    }
+    if (output->quantization->type != FLOAT32) {
+        PRINT_ERROR("conv1dKernelBfp: output must be raw FLOAT32");
+        exit(1);
+    }
+    if (inChannels % groups != 0 || outChannels % groups != 0) {
+        PRINT_ERROR("conv1dKernelBfp: groups (%zu) must divide in_channels "
+                    "(%zu) and out_channels (%zu)",
+                    groups, inChannels, outChannels);
+        exit(1);
+    }
+
+    size_t inChPerGroup = inChannels / groups;
+    size_t outChPerGroup = outChannels / groups;
+
+    bfpQConfig_t *inQC = input->quantization->qConfig;
+    bfpQConfig_t *wQC = weight->quantization->qConfig;
+
+    /* Group-shape fail-fast (validateSymQConfigShape precedent): bfpGroupOf
+     * divides by groupSize with no relation to numGroups, so a mismatched
+     * config would read exponents[] out of bounds. */
+    validateBfpQConfigShape(inQC, calcNumberOfElementsByShape(input->shape));
+    validateBfpQConfigShape(wQC, calcNumberOfElementsByShape(weight->shape));
+
+    bfpQConfig_t *biasQC = NULL;
+    if (bias != NULL) {
+        if (bias->quantization->type != BFP) {
+            PRINT_ERROR("conv1dKernelBfp: bias must be BFP");
+            exit(1);
+        }
+        if (calcNumberOfElementsByShape(bias->shape) != outChannels) {
+            PRINT_ERROR("conv1dKernelBfp: bias element count != out_channels");
+            exit(1);
+        }
+        biasQC = bias->quantization->qConfig;
+        validateBfpQConfigShape(biasQC, outChannels);
+    }
+
+    bfpValidateBlockHeadroom(inQC, wQC, inChPerGroup * kernelSize, "conv1dKernelBfp");
+
+    windowGeometry1d_t geom = windowGeometry1dCalc(inputLength, kernel);
+    if (geom.outputLength != outputLength) {
+        PRINT_ERROR("conv1dKernelBfp: output_length mismatch "
+                    "(geometry=%zu, output tensor=%zu)",
+                    geom.outputLength, outputLength);
+        exit(1);
+    }
+
+    int32_t const *xArr = (int32_t const *)input->data;
+    int32_t const *wArr = (int32_t const *)weight->data;
+    float *yArr = (float *)output->data;
+
+    int32_t inExpBias = bfpExponentBias(inQC);
+    int32_t wExpBias = bfpExponentBias(wQC);
+
+    /* Per-output-channel bias seed, dequantized to float BEFORE the reduction
+     * (value-seed, headroom-exempt -- it never touches the int32 partial).
+     * VLA over channels (topology-bounded), mirroring the SYM kernels. */
+    float seed[outChannels];
+    if (bias != NULL) {
+        int32_t const *bArr = (int32_t const *)bias->data;
+        for (size_t oc = 0; oc < outChannels; oc++) {
+            seed[oc] = (float)bArr[oc] * bfpGroupScale(biasQC, bfpGroupOf(biasQC, oc));
+        }
+    } else {
+        for (size_t oc = 0; oc < outChannels; oc++) {
+            seed[oc] = 0.0f;
+        }
+    }
+
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t g = 0; g < groups; g++) {
+            size_t inLo = g * inChPerGroup;
+            size_t outLo = g * outChPerGroup;
+
+            for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
+                size_t oc = outLo + ocOffset;
+                size_t wBase = oc * inChPerGroup * kernelSize;
+
+                for (size_t outPos = 0; outPos < outputLength; outPos++) {
+                    windowSlice1d_t slice = windowSlice1dAt(&geom, outPos);
+                    float acc = seed[oc];
+                    int32_t partial = 0;
+                    size_t currentInGroup = 0;
+                    size_t currentWGroup = SIZE_MAX;
+
+                    for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
+                        size_t ic = inLo + icOffset;
+                        for (size_t i = 0; i < slice.validCount; i++) {
+                            size_t inputIdx = slice.firstValidInputIdx + i * geom.dilation;
+                            size_t kernelIdx = slice.firstValidKernelOffset + i;
+                            size_t wIdx = wBase + icOffset * kernelSize + kernelIdx;
+                            size_t inIdx = (b * inChannels + ic) * inputLength + inputIdx;
+                            /* Per-element division on BOTH operands (see the SYM
+                             * grouped kernel's gap rationale): clipped windows skip
+                             * taps, so consecutive visited indices can have gaps on
+                             * the weight AND -- across icOffset transitions -- jump
+                             * by inputLength on the input. */
+                            size_t inGroup = bfpGroupOf(inQC, inIdx);
+                            size_t wGroup = bfpGroupOf(wQC, wIdx);
+
+                            if (currentWGroup == SIZE_MAX) {
+                                currentInGroup = inGroup;
+                                currentWGroup = wGroup;
+                            } else if (inGroup != currentInGroup || wGroup != currentWGroup) {
+                                /* Boundary fold on EITHER operand's group change:
+                                 * the finished same-exponent segment's raw int32
+                                 * partial enters the float accumulator via a pure
+                                 * exponent shift -- rounding-free by contract. */
+                                acc += ldexpf((float)partial,
+                                              (int)inQC->exponents[currentInGroup] - inExpBias +
+                                                  (int)wQC->exponents[currentWGroup] - wExpBias);
+                                partial = 0;
+                                currentInGroup = inGroup;
+                                currentWGroup = wGroup;
+                            }
+
+                            partial += mulInt32s(xArr[inIdx], wArr[wIdx]);
+                        }
+                    }
+                    /* Tail fold: the LAST segment never crosses a further
+                     * boundary, so this is its only fold (and the ONLY fold
+                     * when neither operand changes groups over the walk);
+                     * empty windows never seed a segment at all. */
+                    if (currentWGroup != SIZE_MAX) {
+                        acc += ldexpf((float)partial,
+                                      (int)inQC->exponents[currentInGroup] - inExpBias +
+                                          (int)wQC->exponents[currentWGroup] - wExpBias);
+                    }
+
+                    yArr[(b * outChannels + oc) * outputLength + outPos] = acc;
+                }
+            }
+        }
+    }
 }

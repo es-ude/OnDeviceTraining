@@ -1003,3 +1003,145 @@ def matmul_bfp_ref(a_codes, a_exp, a_qc, b_codes, b_exp, b_qc, bias_codes, bias_
             "matmul_bfp_ref: per-tensor collapse is indistinguishable from the "
             "grouped run -- fixture is vacuous against group-structure bugs")
     return out
+
+
+def conv1d_bfp_ref(x_codes, x_exp, x_qc, w_codes, w_exp, w_qc, bias_codes, bias_exp, bias_qc,
+                   batch, in_channels, out_channels, kernel_size, input_length,
+                   stride=1, dilation=1, padding_type="VALID", padding=0, conv_groups=1,
+                   self_check=True):
+    """BFP epic PR2 Task 4: conv1dKernelBfp's kernel emulation. The fold rule
+    is matmul_bfp_ref's, transplanted onto conv1d_grouped_ref's sliding-window
+    walk: per (b, oc, out_pos) ONE int partial (assert |partial| <= 2**31-1 --
+    the C kernel guarantees this via bfpValidateBlockHeadroom); each visited
+    tap maps BOTH operands' STORAGE indices to group ids (_bfp_group_of --
+    per-element division, gap-robust across the index gaps that clipped
+    windows create); when EITHER id changes, the finished segment folds via
+    np.float32 acc += np.ldexp((float32)partial, Ein + Ew - biasIn - biasW)
+    and the partial resets; tail fold after the walk (guarded on >= 1 visited
+    tap, mirroring the C kernel's empty-window branch). Bias is a value-seed
+    dequantized to float32 BEFORE the reduction. `w_codes` is
+    [out_channels, in_channels/conv_groups, kernel_size] row-major flat,
+    `x_codes` is [batch, in_channels, input_length] row-major flat.
+
+    Self-checks (skipped on the collapse rerun):
+      (i)  >= 2 groups crossed on EACH operand within a single reduction;
+      (ii) >= 1 fold with a NONZERO exactly-float-convertible partial;
+      (iii) result differs from an all-per-tensor (exponents[0]) collapse;
+      (iv) >= 1 output element whose tap window is CLIPPED (0 < valid_count
+           < kernel_size -- pins the gap-robust per-element group lookup);
+      plus the disjoint-boundary pins (Task 3 review lesson, both directions):
+      >= 1 step where ONLY the input's group changes and >= 1 step where ONLY
+      the weight's group changes -- a fixture whose boundaries always
+      coincide cannot tell a one-operand fold condition from the correct
+      either-operand one.
+    Returns the float32 outputs as Python floats, row-major
+    [batch*out_channels*out_len]."""
+    assert in_channels % conv_groups == 0 and out_channels % conv_groups == 0, (
+        "conv1d_bfp_ref: conv_groups must divide in_channels and out_channels")
+    in_ch_per_group = in_channels // conv_groups
+    out_ch_per_group = out_channels // conv_groups
+    geom = window_geometry_1d(input_length, kernel_size, stride, dilation, padding_type, padding)
+    out_len = geom["out_len"]
+    x_bias = 2 ** (x_qc["exponent_bits"] - 1) - 1
+    w_bias = 2 ** (w_qc["exponent_bits"] - 1) - 1
+
+    out = []
+    fold_partials = []
+    max_x_groups_crossed = 0
+    max_w_groups_crossed = 0
+    x_only_boundaries = 0
+    w_only_boundaries = 0
+    clipped_windows = 0
+    for b in range(batch):
+        for oc in range(out_channels):
+            conv_g = oc // out_ch_per_group
+            in_lo = conv_g * in_ch_per_group
+            w_base = oc * in_ch_per_group * kernel_size
+            for out_pos in range(out_len):
+                first_valid_idx, first_valid_k, valid_count = window_slice_1d_full(geom, out_pos)
+                if 0 < valid_count < kernel_size:
+                    clipped_windows += 1
+                acc = np.float32(0.0)
+                if bias_codes is not None:
+                    bg = _bfp_group_of(oc, bias_qc["group_size"])
+                    bias_bias = 2 ** (bias_qc["exponent_bits"] - 1) - 1
+                    scale = np.float32(math.ldexp(1.0, bias_exp[bg] - bias_bias))
+                    acc = np.float32(np.float32(bias_codes[oc]) * scale)
+                partial = 0
+                cur_gx, cur_gw = None, None
+                x_groups_seen, w_groups_seen = set(), set()
+                for ic_offset in range(in_ch_per_group):
+                    ic = in_lo + ic_offset
+                    for i in range(valid_count):
+                        kernel_idx = first_valid_k + i
+                        w_idx = w_base + ic_offset * kernel_size + kernel_idx
+                        input_idx = first_valid_idx + i * dilation
+                        x_idx = (b * in_channels + ic) * input_length + input_idx
+                        gx = _bfp_group_of(x_idx, x_qc["group_size"])
+                        gw = _bfp_group_of(w_idx, w_qc["group_size"])
+                        x_groups_seen.add(gx)
+                        w_groups_seen.add(gw)
+                        if cur_gw is None:
+                            cur_gx, cur_gw = gx, gw
+                        elif gx != cur_gx or gw != cur_gw:
+                            if gx != cur_gx and gw == cur_gw:
+                                x_only_boundaries += 1
+                            if gw != cur_gw and gx == cur_gx:
+                                w_only_boundaries += 1
+                            shift = (x_exp[cur_gx] - x_bias) + (w_exp[cur_gw] - w_bias)
+                            fold_partials.append(partial)
+                            acc = np.float32(acc + np.ldexp(np.float32(partial), np.int32(shift)))
+                            partial = 0
+                            cur_gx, cur_gw = gx, gw
+                        partial += x_codes[x_idx] * w_codes[w_idx]
+                        assert abs(partial) <= _INT32_MAX, (
+                            f"conv1d_bfp_ref: partial {partial} exceeds int32 -- fixture "
+                            "violates the bfpValidateBlockHeadroom bound the C kernel enforces")
+                if cur_gw is not None:
+                    shift = (x_exp[cur_gx] - x_bias) + (w_exp[cur_gw] - w_bias)
+                    fold_partials.append(partial)
+                    acc = np.float32(acc + np.ldexp(np.float32(partial), np.int32(shift)))
+                max_x_groups_crossed = max(max_x_groups_crossed, len(x_groups_seen))
+                max_w_groups_crossed = max(max_w_groups_crossed, len(w_groups_seen))
+                out.append(float(acc))
+
+    if self_check:
+        # (i) group tracking is exercised on BOTH operands.
+        assert max_x_groups_crossed >= 2, (
+            "conv1d_bfp_ref: no reduction crosses >= 2 input groups -- the "
+            "input's group tracking is unexercised")
+        assert max_w_groups_crossed >= 2, (
+            "conv1d_bfp_ref: no reduction crosses >= 2 weight groups -- the "
+            "weight's group tracking is unexercised")
+        # (ii) regression anchor: >= 1 fold whose (float)partial conversion is
+        # exact AND nonzero (a zero partial is vacuously exact).
+        assert any(p != 0 and float(np.float32(p)) == float(p) for p in fold_partials), (
+            "conv1d_bfp_ref: no fold has a nonzero exactly-float-convertible "
+            "partial -- fixture lost its exact-regime anchor")
+        # (iv) clipped-window pin: the gap-robust per-element lookup is only
+        # under test if some window actually skips taps.
+        assert clipped_windows >= 1, (
+            "conv1d_bfp_ref: no output element has a clipped tap window -- "
+            "the gap-robust group lookup is unexercised")
+        # Disjoint-boundary pins (both directions, Task 3 review lesson).
+        assert x_only_boundaries >= 1, (
+            "conv1d_bfp_ref: every input-group boundary coincides with a "
+            "weight-group boundary -- the either-operand fold clause is "
+            "unexercised on the input side")
+        assert w_only_boundaries >= 1, (
+            "conv1d_bfp_ref: every weight-group boundary coincides with an "
+            "input-group boundary -- the either-operand fold clause is "
+            "unexercised on the weight side")
+        # (iii) group structure matters: collapsing both operands to
+        # per-tensor (exponents[0] everywhere) must change the result.
+        collapsed = conv1d_bfp_ref(
+            x_codes, [x_exp[0]], {**x_qc, "group_size": 0},
+            w_codes, [w_exp[0]], {**w_qc, "group_size": 0},
+            bias_codes, bias_exp, bias_qc,
+            batch, in_channels, out_channels, kernel_size, input_length,
+            stride, dilation, padding_type, padding, conv_groups,
+            self_check=False)
+        assert collapsed != out, (
+            "conv1d_bfp_ref: per-tensor collapse is indistinguishable from the "
+            "grouped run -- fixture is vacuous against group-structure bugs")
+    return out

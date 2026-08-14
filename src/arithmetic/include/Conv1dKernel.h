@@ -79,4 +79,31 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                                  tensor_t const *bias, kernel_t const *kernel, size_t groups,
                                  tensor_t *output, const symQConfig_t *weightGroups);
 
+/*! BFP epic PR2 (Task 4): block-floating-point Conv1d forward. Same operand
+ *  contract as matmulBfpTensors (see Matmul.h for the shared BFP GEMM-family
+ *  kernel contract): input/weight/bias arrive in the funnel's UNPACKED-BFP
+ *  scratch form (->data int32 sign-extended mantissa codes, ->quantization a
+ *  live bfpQConfig_t), output is raw FLOAT32, the kernel never rounds.
+ *  Unlike the SYM grouped kernel (which tracks only the weight's groups),
+ *  BOTH operands' storage indices map to group ids per visited tap
+ *  (bfpGroupOf -- per-element division, because padding clips taps and
+ *  leaves GAPS in the visited weight/input index sequences); when EITHER id
+ *  changes, the finished segment's int32 partial folds into the float
+ *  accumulator via ldexpf, plus a tail fold per output element. `bias` is a
+ *  value-seed dequantized to float BEFORE the reduction (headroom-exempt).
+ *  int32 overflow is excluded up front by bfpValidateBlockHeadroom over the
+ *  full reduction length inChannels/groups * kernelSize; every operand's
+ *  group shape is fail-fast-checked via validateBfpQConfigShape.
+ *
+ *  @param input  [batch, in_channels, input_length], BFP scratch
+ *  @param weight [out_channels, in_channels/groups, kernel_size], BFP scratch
+ *  @param bias   [out_channels] or NULL, BFP scratch
+ *  @param kernel kernel_t with size/stride/dilation/paddingType
+ *  @param groups must divide in_channels and out_channels (CONV groups --
+ *                independent of the QUANTIZATION groups in the qConfigs)
+ *  @param output [batch, out_channels, output_length], FLOAT32, pre-allocated
+ */
+void conv1dKernelBfp(tensor_t const *input, tensor_t const *weight, tensor_t const *bias,
+                     kernel_t const *kernel, size_t groups, tensor_t *output);
+
 #endif // ODT_CONV1D_KERNEL_H

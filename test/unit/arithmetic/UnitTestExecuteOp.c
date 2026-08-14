@@ -1773,6 +1773,425 @@ void testExecuteOpUnpacksGroupedAsymWhenAllowed(void) {
     TEST_ASSERT_EQUAL_UINT8(6, g_capturedGroupedQMaxBits);
 }
 
+/* ---- BFP epic PR2 (Task 6): ARITH_BFP prologue/raw arms + bfpStage ------ */
+
+/* Shared capture globals for the ARITH_BFP probe kernels (assert-after-free
+ * discipline: heap targets are freed before Unity's longjmp-prone asserts). */
+static const uint8_t *g_bfpCapExponentsPtr;
+static uint8_t g_bfpCapExponents[2];
+static int32_t g_bfpCapCodes[8];
+static roundingMode_t g_bfpCapRounding;
+static int g_bfpCapQType;
+static size_t g_bfpCapNumGroups;
+static size_t g_bfpCapGroupSize;
+static uint8_t g_bfpCapMantissaBits;
+static int g_bfpCapRawQType;
+
+static void captureBfpOperandKernel(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
+                                    tensor_t *auxOut, const void *ctx) {
+    (void)nOperands;
+    (void)auxOut;
+    (void)ctx;
+    g_bfpCapQType = (int)operands[0]->quantization->type;
+    bfpQConfig_t *qc = operands[0]->quantization->qConfig;
+    g_bfpCapExponentsPtr = qc->exponents;
+    for (size_t g = 0; g < qc->numGroups && g < 2; g++) {
+        g_bfpCapExponents[g] = qc->exponents[g];
+    }
+    g_bfpCapRounding = qc->roundingMode;
+    g_bfpCapNumGroups = qc->numGroups;
+    g_bfpCapGroupSize = qc->groupSize;
+    g_bfpCapMantissaBits = qc->mantissaBits;
+    size_t n = calcNumberOfElementsByTensor(operands[0]);
+    for (size_t i = 0; i < n && i < 8; i++) {
+        g_bfpCapCodes[i] = ((int32_t *)operands[0]->data)[i];
+    }
+    g_bfpCapRawQType = (int)rawOut->quantization->type;
+    /* raw is FLOAT32 under ARITH_BFP (D7); write it fully so the epilogue
+     * never reads uninitialized stack. */
+    size_t outN = calcNumberOfElementsByTensor(rawOut);
+    for (size_t i = 0; i < outN; i++) {
+        ((float *)rawOut->data)[i] = 0.f;
+    }
+}
+
+/* (a) A BFP-STORED operand reaches the kernel in unpacked-BFP scratch form:
+ * ->data is int32 SIGN-EXTENDED mantissas (negative codes pin sign-extend
+ * over zero-extend), ->quantization is BFP whose exponents array is BORROWED
+ * from the source config (pointer equality — zero-copy, prologue never
+ * copies or rewrites the exponents). Grouped {2,4} fixture WITHOUT any
+ * groupedSymOperandPos declaration: BFP blocking is per-operand-legal under
+ * ARITH_BFP and must bypass the grouped-SYM/ASYM carrier gate entirely. */
+void testExecuteOpBfpStoredOperandUnpacksAndBorrows(void) {
+    size_t n = 8;
+    size_t dims[] = {8};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t goldMant[8] = {6, 1, -2, 0, 7, -2, 1, 4}; /* the :5363 requant fixture */
+    uint8_t srcExponents[2] = {127, 129};
+    bfpQConfig_t srcQC = {.exponents = srcExponents,
+                          .numGroups = 2,
+                          .groupSize = 4,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t srcQ;
+    initBfpQuantization(&srcQC, &srcQ);
+    uint8_t srcData[calcNumberOfBytesForData(&srcQ, n)];
+    byteConversion((uint8_t *)goldMant, 32, srcData, 4, n);
+    tensor_t src;
+    setTensorValues(&src, srcData, &shape, &srcQ, NULL);
+
+    tensor_t *out = buildFloat(8, (float[]){0, 0, 0, 0, 0, 0, 0, 0});
+
+    executeOp(
+        &(opSpec_t){
+            .kernel = captureBfpOperandKernel,
+            .inputs = (tensor_t *[]){&src},
+            .nInputs = 1,
+            .arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY},
+            .mode = OUT_WRITE,
+            /* no groupedSymOperandPos, no bfpStage — grouped BFP needs neither */
+        },
+        out);
+
+    freeTensor(out);
+    TEST_ASSERT_EQUAL_INT(BFP, g_bfpCapQType);
+    TEST_ASSERT_EQUAL_PTR(srcExponents, g_bfpCapExponentsPtr); /* borrow, not copy */
+    TEST_ASSERT_EQUAL_UINT8(127, g_bfpCapExponents[0]);
+    TEST_ASSERT_EQUAL_UINT8(129, g_bfpCapExponents[1]);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(goldMant, g_bfpCapCodes, 8);
+    TEST_ASSERT_EQUAL_size_t(2, g_bfpCapNumGroups);
+    TEST_ASSERT_EQUAL_size_t(4, g_bfpCapGroupSize);
+    TEST_ASSERT_EQUAL_UINT8(4, g_bfpCapMantissaBits);
+}
+
+/* (b) A FLOAT32-STORED operand is staged fresh through the bfpStage geometry
+ * template: Task 2's {100,-50,25,0}/m=4 gold — stored exponent 131 (E=+4,
+ * scale 16), codes {6,-3,2,0}. The template contributes GEOMETRY+WIDTHS
+ * only: its exponents pointer is ignored (funnel-owned scratch backing, so
+ * the captured pointer differs and the template's sentinel survives) and its
+ * roundingMode is ignored in favor of the OP's arithmetic.roundingMode
+ * (template says SR, captured mode must be the op's HALF_AWAY — asserted on
+ * the MODE, not the codes, because 100/16, -50/16, 25/16 are all fractional
+ * and would make a codes-only assertion stochastic under the bug). */
+void testExecuteOpFloat32OperandStagedToBfpCodes(void) {
+    tensor_t *in = buildFloat(4, (float[]){100.f, -50.f, 25.f, 0.f});
+    tensor_t *out = buildFloat(4, (float[]){0, 0, 0, 0});
+    uint8_t templateSentinel[1] = {9};
+    bfpQConfig_t stage = {.exponents = templateSentinel,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = SR_HALF_AWAY, /* must be ignored */
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+
+    executeOp(
+        &(opSpec_t){
+            .kernel = captureBfpOperandKernel,
+            .inputs = (tensor_t *[]){in},
+            .nInputs = 1,
+            .arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY},
+            .mode = OUT_WRITE,
+            .bfpStage = {&stage},
+        },
+        out);
+
+    freeTensor(out);
+    freeTensor(in);
+    TEST_ASSERT_EQUAL_INT(BFP, g_bfpCapQType);
+    TEST_ASSERT_EQUAL_UINT8(131, g_bfpCapExponents[0]);
+    int32_t expected[4] = {6, -3, 2, 0};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, g_bfpCapCodes, 4);
+    TEST_ASSERT_EQUAL_INT(HALF_AWAY, (int)g_bfpCapRounding);    /* op's, not template's */
+    TEST_ASSERT_TRUE(g_bfpCapExponentsPtr != templateSentinel); /* funnel-owned */
+    TEST_ASSERT_EQUAL_UINT8(9, templateSentinel[0]);            /* never written */
+    TEST_ASSERT_EQUAL_size_t(1, g_bfpCapNumGroups);
+    TEST_ASSERT_EQUAL_size_t(0, g_bfpCapGroupSize);
+    TEST_ASSERT_EQUAL_UINT8(4, g_bfpCapMantissaBits);
+}
+
+/* (c) death: FLOAT32-stored operand under ARITH_BFP with no stage template. */
+void testExecuteOpBfpMissingStageDies(void) {
+    ASSERT_EXITS_WITH_FAILURE({
+        tensor_t *in = buildFloat(4, (float[]){1.f, 2.f, 3.f, 4.f});
+        tensor_t *out = buildFloat(4, (float[]){0, 0, 0, 0});
+        executeOp(
+            &(opSpec_t){
+                .kernel = captureBfpOperandKernel,
+                .inputs = (tensor_t *[]){in},
+                .nInputs = 1,
+                .arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY},
+                .mode = OUT_WRITE,
+                /* .bfpStage intentionally not set (zero-init = NULL) */
+            },
+            out);
+    });
+}
+
+/* (d) death: SYM_INT32-stored operand under ARITH_BFP (v1 accepts FLOAT32 or
+ * BFP storage only; anything else must convert explicitly first). */
+void testExecuteOpBfpRejectsSymStoredOperand(void) {
+    ASSERT_EXITS_WITH_FAILURE({
+        tensor_t *in = buildSym(4, (int32_t[]){10, -20, 30, -40}, 0.1f);
+        tensor_t *out = buildFloat(4, (float[]){0, 0, 0, 0});
+        executeOp(
+            &(opSpec_t){
+                .kernel = captureBfpOperandKernel,
+                .inputs = (tensor_t *[]){in},
+                .nInputs = 1,
+                .arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY},
+                .mode = OUT_WRITE,
+            },
+            out);
+    });
+}
+
+/* Body extracted to a function: the death-test macro takes ONE argument, so
+ * statement-level braced initializers (comma at brace depth, paren depth 0)
+ * would split the macro argument list. */
+static void bfpStageGeometryMismatchBody(void) {
+    tensor_t *in = buildFloat(4, (float[]){1.f, 2.f, 3.f, 4.f});
+    tensor_t *out = buildFloat(4, (float[]){0, 0, 0, 0});
+    uint8_t sentinels[2] = {9, 9};
+    bfpQConfig_t stage = {.exponents = sentinels,
+                          .numGroups = 2,
+                          .groupSize = 3, /* 2*3 != 4 */
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    executeOp(
+        &(opSpec_t){
+            .kernel = captureBfpOperandKernel,
+            .inputs = (tensor_t *[]){in},
+            .nInputs = 1,
+            .arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY},
+            .mode = OUT_WRITE,
+            .bfpStage = {&stage},
+        },
+        out);
+}
+
+/* (e) death: grouped stage template whose numGroups*groupSize != n. */
+void testExecuteOpBfpStageGeometryMismatchDies(void) {
+    ASSERT_EXITS_WITH_FAILURE(bfpStageGeometryMismatchBody());
+}
+
+/* (f) SR staging determinism (UnitTestTensorConversion.c:4541 idiom): staging
+ * with SR_HALF_AWAY must consume the seeded repo RNG — same seed twice gives
+ * identical codes, and they differ somewhere from a HALF_AWAY run (7 of 8
+ * quotients fractional at the derived scale 2, exponent derivation itself is
+ * rounding-free -> stored 128 every run). Kills a hardcoded-HALF_AWAY
+ * staging mutation. */
+void testExecuteOpBfpStagingSrIsSeededDeterministic(void) {
+    float vals[8] = {14.f, 3.5f, -1.75f, 2.625f, 7.f, -10.5f, 0.875f, 5.25f};
+    tensor_t *in = buildFloat(8, vals);
+    tensor_t *out = buildFloat(8, (float[]){0, 0, 0, 0, 0, 0, 0, 0});
+    uint8_t templateSentinel[1] = {0};
+    bfpQConfig_t stage = {.exponents = templateSentinel,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY, /* ignored either way */
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    opSpec_t srSpec = {
+        .kernel = captureBfpOperandKernel,
+        .inputs = (tensor_t *[]){in},
+        .nInputs = 1,
+        .arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = SR_HALF_AWAY},
+        .mode = OUT_WRITE,
+        .bfpStage = {&stage},
+    };
+
+    rngSetSeed(7);
+    executeOp(&srSpec, out);
+    int32_t sr1[8];
+    memcpy(sr1, g_bfpCapCodes, sizeof(sr1));
+    uint8_t srExponent = g_bfpCapExponents[0];
+
+    rngSetSeed(7);
+    executeOp(&srSpec, out);
+    int32_t sr2[8];
+    memcpy(sr2, g_bfpCapCodes, sizeof(sr2));
+
+    opSpec_t refSpec = srSpec;
+    refSpec.arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    executeOp(&refSpec, out);
+    int32_t ref[8];
+    memcpy(ref, g_bfpCapCodes, sizeof(ref));
+
+    freeTensor(out);
+    freeTensor(in);
+    TEST_ASSERT_EQUAL_UINT8(128, srExponent);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(sr1, sr2, 8);
+    bool anyDiffers = false;
+    for (size_t i = 0; i < 8; i++) {
+        if (sr1[i] != ref[i]) {
+            anyDiffers = true;
+        }
+    }
+    TEST_ASSERT_TRUE(anyDiffers);
+}
+
+static void writeKnownFloatsKernel(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
+                                   tensor_t *auxOut, const void *ctx) {
+    (void)operands;
+    (void)nOperands;
+    (void)auxOut;
+    (void)ctx;
+    g_bfpCapRawQType = (int)rawOut->quantization->type;
+    float vals[4] = {100.f, -50.f, 25.f, 0.f};
+    for (size_t i = 0; i < 4; i++) {
+        ((float *)rawOut->data)[i] = vals[i];
+    }
+}
+
+/* (g) The raw intermediate under ARITH_BFP is FLOAT32 (D7) and the OUT_WRITE
+ * epilogue packs a BFP target through the [FLOAT32][BFP] cell: the probe
+ * writes Task 2's {100,-50,25,0} into rawOut, the m=4 target must come out
+ * as stored exponent 131 + packed codes {6,-3,2,0} (composition test — the
+ * cell itself is PR1-covered). */
+void testExecuteOpBfpRawIsFloat32AndPacksTarget(void) {
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t srcMant[4] = {1, 1, 1, 1}; /* content irrelevant: probe ignores operands */
+    uint8_t srcExponents[1] = {127};
+    bfpQConfig_t srcQC = {.exponents = srcExponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t srcQ;
+    initBfpQuantization(&srcQC, &srcQ);
+    uint8_t srcData[calcNumberOfBytesForData(&srcQ, n)];
+    byteConversion((uint8_t *)srcMant, 32, srcData, 4, n);
+    tensor_t src;
+    setTensorValues(&src, srcData, &shape, &srcQ, NULL);
+
+    uint8_t outExponents[1] = {9}; /* sentinel != expected 131 */
+    bfpQConfig_t outQC = {.exponents = outExponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t outQ;
+    initBfpQuantization(&outQC, &outQ);
+    uint8_t outData[calcNumberOfBytesForData(&outQ, n)];
+    tensor_t dst;
+    setTensorValues(&dst, outData, &shape, &outQ, NULL);
+
+    executeOp(
+        &(opSpec_t){
+            .kernel = writeKnownFloatsKernel,
+            .inputs = (tensor_t *[]){&src},
+            .nInputs = 1,
+            .arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY},
+            .mode = OUT_WRITE,
+        },
+        &dst);
+
+    TEST_ASSERT_EQUAL_INT(FLOAT32, g_bfpCapRawQType);
+    TEST_ASSERT_EQUAL_UINT8(131, outExponents[0]);
+    int32_t mant[4];
+    unpackSignExtend(dst.data, 4, 0, mant, 4);
+    int32_t expected[4] = {6, -3, 2, 0};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, mant, 4);
+}
+
+/* Body extracted for the same one-macro-argument reason as
+ * bfpStageGeometryMismatchBody above. */
+static void symArithmeticBfpStoredOperandBody(void) {
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    int32_t srcMant[4] = {6, -3, 2, 0};
+    uint8_t srcExponents[1] = {131};
+    bfpQConfig_t srcQC = {.exponents = srcExponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t srcQ;
+    initBfpQuantization(&srcQC, &srcQ);
+    uint8_t srcData[calcNumberOfBytesForData(&srcQ, n)];
+    byteConversion((uint8_t *)srcMant, 32, srcData, 4, n);
+    tensor_t src;
+    setTensorValues(&src, srcData, &shape, &srcQ, NULL);
+
+    tensor_t *out = buildSym(4, (int32_t[]){0, 0, 0, 0}, 1.0f);
+    executeOp(
+        &(opSpec_t){
+            .kernel = executeOpIdentityKernel,
+            .inputs = (tensor_t *[]){&src},
+            .nInputs = 1,
+            .arithmetic = (arithmetic_t){.type = ARITH_SYM_INT32, .roundingMode = HALF_AWAY},
+            .mode = OUT_WRITE,
+        },
+        out);
+}
+
+/* (h) Decision 11, deny direction: a BFP-STORED operand under ARITH_SYM_INT32
+ * must fail-fast — the [BFP][SYM_INT32] cell would silently collapse the
+ * operand's group structure to a single scalar grid. */
+void testExecuteOpSymArithmeticRejectsBfpStoredOperand(void) {
+    ASSERT_EXITS_WITH_FAILURE(symArithmeticBfpStoredOperandBody());
+}
+
+/* (h) Decision 11, keep direction: a GROUPED BFP-stored operand under
+ * ARITH_FLOAT32 keeps working — the PR1 fake-quant path (float-bridge
+ * staging via the group-aware BFP->FLOAT32 dequant cell) is what every BFP
+ * layer runs on until the Task 9 derivation flip; regression guard. */
+void testExecuteOpFloatArithmeticStillDequantsGroupedBfp(void) {
+    size_t n = 8;
+    size_t dims[] = {8};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t goldMant[8] = {6, 1, -2, 0, 7, -2, 1, 4};
+    uint8_t srcExponents[2] = {127, 129}; /* group scales 1 and 4 */
+    bfpQConfig_t srcQC = {.exponents = srcExponents,
+                          .numGroups = 2,
+                          .groupSize = 4,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t srcQ;
+    initBfpQuantization(&srcQC, &srcQ);
+    uint8_t srcData[calcNumberOfBytesForData(&srcQ, n)];
+    byteConversion((uint8_t *)goldMant, 32, srcData, 4, n);
+    tensor_t src;
+    setTensorValues(&src, srcData, &shape, &srcQ, NULL);
+
+    tensor_t *out = buildFloat(8, (float[]){0, 0, 0, 0, 0, 0, 0, 0});
+
+    executeOp(
+        &(opSpec_t){
+            .kernel = executeOpIdentityKernel,
+            .inputs = (tensor_t *[]){&src},
+            .nInputs = 1,
+            .arithmetic = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY},
+            .mode = OUT_WRITE,
+            /* no groupedSymOperandPos: BFP never uses the SYM/ASYM carrier gate */
+        },
+        out);
+
+    float got[8];
+    memcpy(got, out->data, sizeof(got));
+    freeTensor(out);
+    float expected[8] = {6.f, 1.f, -2.f, 0.f, 28.f, -8.f, 4.f, 16.f};
+    for (size_t i = 0; i < 8; i++) {
+        TEST_ASSERT_EQUAL_FLOAT(expected[i], got[i]);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testProloguePassesMatchingOperandThroughUntouched);
@@ -1817,5 +2236,14 @@ int main(void) {
     RUN_TEST(testExecuteOpRejectsGroupedAsymOperandAtWrongPosition);
     RUN_TEST(testExecuteOpRejectsGroupedAsymOperandUnderFloat32ByDefault);
     RUN_TEST(testExecuteOpUnpacksGroupedAsymWhenAllowed);
+    RUN_TEST(testExecuteOpSymArithmeticRejectsBfpStoredOperand);
+    RUN_TEST(testExecuteOpFloatArithmeticStillDequantsGroupedBfp);
+    RUN_TEST(testExecuteOpBfpMissingStageDies);
+    RUN_TEST(testExecuteOpBfpRejectsSymStoredOperand);
+    RUN_TEST(testExecuteOpBfpStageGeometryMismatchDies);
+    RUN_TEST(testExecuteOpBfpStoredOperandUnpacksAndBorrows);
+    RUN_TEST(testExecuteOpFloat32OperandStagedToBfpCodes);
+    RUN_TEST(testExecuteOpBfpStagingSrIsSeededDeterministic);
+    RUN_TEST(testExecuteOpBfpRawIsFloat32AndPacksTarget);
     return UNITY_END();
 }

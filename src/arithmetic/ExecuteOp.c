@@ -12,10 +12,6 @@
 #include "Tensor.h"
 #include "TensorConversion.h"
 
-/* Maximum operands any in-tree op passes (Linear/LayerNorm forward: input +
- * weights/gamma + bias/beta = 3). Bump deliberately. */
-#define EXECUTE_OP_MAX_INPUTS 3
-
 void executeOpIdentityKernel(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
                              tensor_t *auxOut, const void *ctx) {
     (void)nOperands;
@@ -228,6 +224,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
      * (the whole FLOAT32 training path) allocate nothing. */
     size_t rowBytes[EXECUTE_OP_MAX_INPUTS] = {0};
     size_t totalScratchBytes = 0;
+    size_t totalStageExponents = 0;
     for (size_t i = 0; i < nInputs; i++) {
         bool matches;
         switch (arithmetic.type) {
@@ -237,8 +234,30 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
         case ARITH_SYM_INT32:
             matches = inputs[i]->quantization->type == SYM_INT32;
             break;
+        case ARITH_BFP:
+            /* Packed BFP storage is never kernel-usable in place — every
+             * operand is unpacked/staged into int32 scratch (Task 3-5 kernels
+             * consume the unpacked-BFP scratch form only). */
+            matches = false;
+            if (inputs[i]->quantization->type == FLOAT32 && spec->bfpStage[i] != NULL) {
+                const bfpQConfig_t *stage = spec->bfpStage[i];
+                size_t n = calcNumberOfElementsByTensor(inputs[i]);
+                bool stagePerTensor = stage->numGroups == 1 && stage->groupSize == 0;
+                bool stageGrouped = stage->numGroups > 1 && stage->groupSize > 0 &&
+                                    stage->numGroups * stage->groupSize == n;
+                if (!stagePerTensor && !stageGrouped) {
+                    PRINT_ERROR("executeOp: bfpStage[%zu] template shape {numGroups=%zu, "
+                                "groupSize=%zu} is invalid for %zu elements — valid shapes "
+                                "are {1,0} (per-tensor) or {>1,>0} with "
+                                "numGroups*groupSize == n",
+                                i, stage->numGroups, stage->groupSize, n);
+                    exit(1);
+                }
+                totalStageExponents += stage->numGroups;
+            }
+            break;
         default:
-            PRINT_ERROR("executeOp: arithmetic dtype %d not supported (FLOAT32/SYM_INT32)",
+            PRINT_ERROR("executeOp: arithmetic dtype %d not supported (FLOAT32/SYM_INT32/BFP)",
                         (int)arithmetic.type);
             exit(1);
         }
@@ -249,9 +268,15 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
         }
     }
     uint8_t scratch[totalScratchBytes > 0 ? totalScratchBytes : 1];
+    /* ARITH_BFP staging: funnel-owned exponent backing for FLOAT32-stored
+     * operands, sliced per staged operand (numGroups entries each). BFP-stored
+     * operands never touch this — their exponents are borrowed in place. */
+    uint8_t stageExponents[totalStageExponents > 0 ? totalStageExponents : 1];
+    size_t stageOffset = 0;
     tensor_t scratchTensors[EXECUTE_OP_MAX_INPUTS];
     quantization_t scratchQ[EXECUTE_OP_MAX_INPUTS];
     symInt32QConfig_t scratchQC[EXECUTE_OP_MAX_INPUTS];
+    bfpQConfig_t scratchBfpQC[EXECUTE_OP_MAX_INPUTS];
     tensor_t *ops[EXECUTE_OP_MAX_INPUTS];
 
     size_t scratchOffset = 0;
@@ -293,12 +318,25 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
             exit(1);
         }
 
-        if (arithmetic.type == ARITH_FLOAT32) {
+        switch (arithmetic.type) {
+        case ARITH_FLOAT32:
             initFloat32Quantization(&scratchQ[i]);
             setTensorValuesForConversion(&scratch[scratchOffset], &scratchQ[i], inputs[i],
                                          &scratchTensors[i]);
             convertTensor(inputs[i], &scratchTensors[i]);
-        } else { /* ARITH_SYM_INT32 — validated above */
+            break;
+        case ARITH_SYM_INT32: {
+            /* Decision 11 (BFP epic PR2): deny BEFORE the convertTensor route
+             * — the [BFP][SYM_INT32] cell would silently collapse the
+             * operand's group structure to a single scalar grid. */
+            if (inputs[i]->quantization->type == BFP) {
+                PRINT_ERROR("executeOp: BFP-stored operand %zu under ARITH_SYM_INT32 would "
+                            "silently collapse its group structure to a scalar grid — use "
+                            "ARITH_FLOAT32 (fake-quant) or ARITH_BFP (native), or convert "
+                            "explicitly via a Quantization layer",
+                            i);
+                exit(1);
+            }
             initSymInt32QConfig(arithmetic.roundingMode, &scratchQC[i]);
             initSymInt32Quantization(&scratchQC[i], &scratchQ[i]);
             setTensorValuesForConversion(&scratch[scratchOffset], &scratchQ[i], inputs[i],
@@ -345,6 +383,56 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
             } else {
                 convertTensor(inputs[i], &scratchTensors[i]);
             }
+            break;
+        }
+        case ARITH_BFP: {
+            qtype_t stored = inputs[i]->quantization->type;
+            size_t n = calcNumberOfElementsByTensor(inputs[i]);
+            if (stored == BFP) {
+                bfpQConfig_t *srcQC = inputs[i]->quantization->qConfig;
+                /* Borrow: the struct copy ALIASES the source's exponents
+                 * pointer (zero-copy); the prologue never writes borrowed
+                 * exponents. Geometry/widths ride along for the kernel's
+                 * shape/headroom checks. */
+                scratchBfpQC[i] = *srcQC;
+                initBfpQuantization(&scratchBfpQC[i], &scratchQ[i]);
+                setTensorValuesForConversion(&scratch[scratchOffset], &scratchQ[i], inputs[i],
+                                             &scratchTensors[i]);
+                unpackSignExtend(inputs[i]->data, srcQC->mantissaBits, 0,
+                                 (int32_t *)scratchTensors[i].data, n);
+            } else if (stored == FLOAT32) {
+                const bfpQConfig_t *stage = spec->bfpStage[i];
+                if (stage == NULL) {
+                    PRINT_ERROR("executeOp: FLOAT32-stored operand %zu under ARITH_BFP needs "
+                                "a bfpStage geometry template (layer bug)",
+                                i);
+                    exit(1);
+                }
+                /* Geometry/widths from the template; exponent backing is the
+                 * funnel's transient slice and the roundingMode is the OP's —
+                 * staging rounds by the operation (#282 discipline), never by
+                 * the template. */
+                scratchBfpQC[i] = (bfpQConfig_t){.exponents = &stageExponents[stageOffset],
+                                                 .numGroups = stage->numGroups,
+                                                 .groupSize = stage->groupSize,
+                                                 .roundingMode = arithmetic.roundingMode,
+                                                 .mantissaBits = stage->mantissaBits,
+                                                 .exponentBits = stage->exponentBits};
+                stageOffset += stage->numGroups;
+                initBfpQuantization(&scratchBfpQC[i], &scratchQ[i]);
+                setTensorValuesForConversion(&scratch[scratchOffset], &scratchQ[i], inputs[i],
+                                             &scratchTensors[i]);
+                quantizeFloatBufferToBfpCodes((const float *)inputs[i]->data, n, &scratchBfpQC[i],
+                                              (int32_t *)scratchTensors[i].data);
+            } else {
+                PRINT_ERROR("executeOp: operand %zu storage dtype %d unsupported under "
+                            "ARITH_BFP (v1 accepts FLOAT32 or BFP; convert explicitly via a "
+                            "Quantization layer)",
+                            i, (int)stored);
+                exit(1);
+            }
+            break;
+        }
         }
         ops[i] = &scratchTensors[i];
         scratchOffset += rowBytes[i];
@@ -381,8 +469,14 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
         initSymInt32QConfig(arithmetic.roundingMode, &rawQC);
         initSymInt32Quantization(&rawQC, &rawQ);
         break;
+    case ARITH_BFP:
+        /* Spec D7: BFP kernels fold same-exponent segments into a float
+         * accumulator (ldexpf) and never round — the raw intermediate stays
+         * FLOAT32; any width-restore/pack is the OUT_WRITE epilogue's job. */
+        initFloat32Quantization(&rawQ);
+        break;
     default:
-        PRINT_ERROR("executeOp: arithmetic dtype %d not supported (FLOAT32/SYM_INT32)",
+        PRINT_ERROR("executeOp: arithmetic dtype %d not supported (FLOAT32/SYM_INT32/BFP)",
                     (int)arithmetic.type);
         exit(1);
     }

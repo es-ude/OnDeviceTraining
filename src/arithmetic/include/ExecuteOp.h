@@ -31,6 +31,11 @@
 typedef void (*opKernelFn_t)(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
                              tensor_t *auxOut, const void *ctx);
 
+/* Maximum operands any in-tree op passes (Linear/LayerNorm forward: input +
+ * weights/gamma + bias/beta = 3). Bump deliberately. Public since BFP epic
+ * PR2: opSpec_t.bfpStage is sized by it. */
+#define EXECUTE_OP_MAX_INPUTS 3
+
 typedef enum {
     OUT_WRITE,               /* overwrite target (wire / forward output); SYM->SYM
                               * routes through the conversionMatrix diagonal
@@ -100,8 +105,23 @@ typedef struct opSpec {
      * proceeds through the EXISTING group-aware convertTensor dequant
      * (convertSymTensorToFloat32Tensor / convertAsymTensorToFloatTensor,
      * group-aware since PR2/PR4 Task 2); this field is purely a gate on that
-     * path, not a different mechanism. */
+     * path, not a different mechanism.
+     *
+     * BFP epic PR2 (Task 6): BFP-stored operands never use this gate —
+     * grouped BFP blocking is per-operand-legal under ARITH_BFP (the
+     * prologue hands every operand to the kernel with its live bfpQConfig_t,
+     * so there is no scalar collapse to guard against). */
     size_t groupedSymOperandPos;
+    /* BFP epic PR2 (Task 6), ARITH_BFP only: per-operand staging geometry
+     * for FLOAT32-stored operands. Entries are geometry TEMPLATES ({1,0}
+     * per-tensor or {numGroups>1, groupSize>0} with numGroups*groupSize ==
+     * the operand's element count, plus mantissa/exponent widths); the
+     * template's exponents pointer and roundingMode are IGNORED — the funnel
+     * owns transient scratch exponent backing and stages with the OP's
+     * arithmetic.roundingMode. NULL entry (zero-init) = the operand must
+     * already be BFP-stored (its exponents are then borrowed zero-copy).
+     * Ignored under other arithmetic types. */
+    const bfpQConfig_t *bfpStage[EXECUTE_OP_MAX_INPUTS];
 } opSpec_t;
 
 void executeOp(const opSpec_t *spec, tensor_t *target);

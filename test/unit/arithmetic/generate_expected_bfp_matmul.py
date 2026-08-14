@@ -10,23 +10,29 @@ tail fold after the loop; bias is a value-seed dequantized to float BEFORE
 the reduction ((float)mantissa * bfpGroupScale). The kernel never rounds --
 see sym_gold.matmul_bfp_ref for the exact np.float32-mirrored emulation.
 
-Fixture geometry (2x6 @ 6x3 -> 2x3): `a` grouped numGroups=3/groupSize=4
-(m=6, e=8) so each reduction row crosses one a-group boundary; `b` grouped
-numGroups=9/groupSize=2 (m=4, e=8) in the GEMM-weight storage order
-[outCols=3, reduceLen=6] behind a bOrder {1,0} transposed logical view (the
-same strided-walk wiring the twin test at UnitTestMatmul.c:643 uses), so each
-column's walk crosses two b-group boundaries; bias per-tensor (m=8, e=8).
+Fixture geometry (2x6 @ 6x3 -> 2x3): `a` grouped numGroups=4/groupSize=3
+(m=6, e=8) so each reduction row crosses one a-group boundary at k=3 --
+DISJOINT from b's boundaries {2, 4} by construction, so a fold that only
+watches b's group id is observably wrong (review finding 1: with the earlier
+groupSize=4 every a-boundary coincided with a b-boundary and the either-
+operand fold clause was untested); `b` grouped numGroups=9/groupSize=2
+(m=4, e=8) in the GEMM-weight storage order [outCols=3, reduceLen=6] behind
+a bOrder {1,0} transposed logical view (the same strided-walk wiring the
+twin test at UnitTestMatmul.c:643 uses), so each column's walk crosses two
+b-group boundaries; bias per-tensor (m=8, e=8).
 Input values are SMALL and grid-exact (every code * scale reproduces the
 input float bit-for-bit -- asserted below), so every fold is exact float32
 arithmetic and the expected outputs are bit-pinned via
 TEST_ASSERT_EQUAL_MEMORY, not a tolerance.
 
 Self-checks (abort generation rather than emit a vacuous fixture):
-  - matmul_bfp_ref's built-in (i)-(iii): >= 2 groups crossed on EACH operand
+  - matmul_bfp_ref's built-in (i)-(iv): >= 2 groups crossed on EACH operand
     somewhere; >= 1 fold with a nonzero exactly-float-convertible partial;
     the grouped result differs from an all-per-tensor (exponents[0]) collapse
     -- (iii) is what makes the boundary-fold mutation (folding only at the
-    tail) observable in the gold test.
+    tail) observable in the gold test; (iv) >= 1 reduction step where a's
+    group changes while b's does NOT -- pins the EITHER-operand fold clause
+    (a b-only fold condition is observably wrong).
   - exact-quantization roundtrip: dequantizing the emitted codes reproduces
     the input floats bit-for-bit (the exact-float-regime claim).
   - both operands' exponent arrays are non-uniform (a uniform array would
@@ -52,12 +58,13 @@ OUT_ROWS = 2
 OUT_COLS = 3
 REDUCE_LEN = 6
 
-# a: [out_rows=2, reduce_len=6] row-major, quantization groups of 4 -> group 1
-# straddles the row boundary (row 0 crosses groups {0,1}, row 1 {1,2}).
+# a: [out_rows=2, reduce_len=6] row-major, quantization groups of 3 -> each
+# row crosses ONE a-group boundary at k=3 (row 0: groups {0,1}, row 1:
+# {2,3}), deliberately disjoint from b's per-column boundaries {2, 4}.
 A_VALUES = [1.0, -2.0, 3.0, -1.5, 10.0, -6.0,
             4.0, 8.0, 0.5, -0.25, 0.75, 1.0]
-A_QC = {"mantissa_bits": 6, "exponent_bits": 8, "group_size": 4}
-A_NUM_GROUPS = 3
+A_QC = {"mantissa_bits": 6, "exponent_bits": 8, "group_size": 3}
+A_NUM_GROUPS = 4
 
 # b: [out_cols=3, reduce_len=6] STORAGE order (row c = output channel c's
 # weights -- the GEMM-weight layout the bOrder {1,0} view exposes with the

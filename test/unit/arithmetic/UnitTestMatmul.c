@@ -1056,7 +1056,9 @@ void testMatmulBfpMatchesGold(void) {
     size_t aOrder[] = {0, 1};
     shape_t aShape;
     setShape(&aShape, aDims, 2, aOrder);
-    uint8_t aExponents[3];
+    /* sizeof(fixture) sizing: a regenerated gold with a different group count
+     * fails loudly at the numGroups check instead of silently short-copying */
+    uint8_t aExponents[sizeof(kBfpAExponents)];
     memcpy(aExponents, kBfpAExponents, sizeof(aExponents));
     bfpQConfig_t aQC = {.exponents = aExponents,
                         .numGroups = (size_t)kBfpANumGroups,
@@ -1073,7 +1075,7 @@ void testMatmulBfpMatchesGold(void) {
     size_t bOrder[] = {1, 0}; /* post-transpose logical view: reduction axis first */
     shape_t bShape;
     setShape(&bShape, bDims, 2, bOrder);
-    uint8_t bExponents[9];
+    uint8_t bExponents[sizeof(kBfpBExponents)];
     memcpy(bExponents, kBfpBExponents, sizeof(bExponents));
     bfpQConfig_t bQC = {.exponents = bExponents,
                         .numGroups = (size_t)kBfpBNumGroups,
@@ -1090,7 +1092,7 @@ void testMatmulBfpMatchesGold(void) {
     size_t biasOrder[] = {0};
     shape_t biasShape;
     setShape(&biasShape, biasDims, 1, biasOrder);
-    uint8_t biasExponents[1];
+    uint8_t biasExponents[sizeof(kBfpBiasExponents)];
     memcpy(biasExponents, kBfpBiasExponents, sizeof(biasExponents));
     bfpQConfig_t biasQC = {.exponents = biasExponents,
                            .numGroups = 1,
@@ -1124,7 +1126,7 @@ void testMatmulBfpNoBiasZeroSeeds(void) {
     size_t aOrder[] = {0, 1};
     shape_t aShape;
     setShape(&aShape, aDims, 2, aOrder);
-    uint8_t aExponents[3];
+    uint8_t aExponents[sizeof(kBfpAExponents)];
     memcpy(aExponents, kBfpAExponents, sizeof(aExponents));
     bfpQConfig_t aQC = {.exponents = aExponents,
                         .numGroups = (size_t)kBfpANumGroups,
@@ -1141,7 +1143,7 @@ void testMatmulBfpNoBiasZeroSeeds(void) {
     size_t bOrder[] = {1, 0}; /* post-transpose logical view: reduction axis first */
     shape_t bShape;
     setShape(&bShape, bDims, 2, bOrder);
-    uint8_t bExponents[9];
+    uint8_t bExponents[sizeof(kBfpBExponents)];
     memcpy(bExponents, kBfpBExponents, sizeof(bExponents));
     bfpQConfig_t bQC = {.exponents = bExponents,
                         .numGroups = (size_t)kBfpBNumGroups,
@@ -1319,6 +1321,60 @@ void testBfpSegmentLimitTableValues(void) {
     TEST_ASSERT_EQUAL_size_t(1, bfpSegmentLimit(16, 16));
 }
 
+/* Group-shape fail-fast (review finding 2): bfpGroupOf divides by groupSize
+ * with no relation to numGroups, so a mismatched config ({numGroups=2,
+ * groupSize=4} on 12 elements: 2*4 == 8 != 12) would silently read
+ * exponents[] out of bounds. The kernel must route every operand through
+ * validateBfpQConfigShape (the SYM grouped entry's validateSymQConfigShape
+ * precedent) before touching data. */
+void testMatmulBfpRejectsMismatchedGroupShape(void) {
+    tensor_t aTensor;
+    int32_t aData[] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+    size_t aDims[] = {2, 6};
+    size_t aOrder[] = {0, 1};
+    shape_t aShape;
+    setShape(&aShape, aDims, 2, aOrder);
+    uint8_t aExponents[] = {127, 127};
+    bfpQConfig_t aQC = {.exponents = aExponents,
+                        .numGroups = 2,
+                        .groupSize = 4, /* 2*4 == 8 != 12 elements */
+                        .roundingMode = HALF_AWAY,
+                        .mantissaBits = 6,
+                        .exponentBits = 8};
+    quantization_t aQ;
+    initBfpQuantization(&aQC, &aQ);
+    setTensorValues(&aTensor, (uint8_t *)aData, &aShape, &aQ, NULL);
+
+    tensor_t bTensor;
+    int32_t bData[] = {1, 1, 1, 1, 1, 1};
+    size_t bDims[] = {6, 1};
+    size_t bOrder[] = {0, 1};
+    shape_t bShape;
+    setShape(&bShape, bDims, 2, bOrder);
+    uint8_t bExponents[] = {127};
+    bfpQConfig_t bQC = {.exponents = bExponents,
+                        .numGroups = 1,
+                        .groupSize = 0,
+                        .roundingMode = HALF_AWAY,
+                        .mantissaBits = 6,
+                        .exponentBits = 8};
+    quantization_t bQ;
+    initBfpQuantization(&bQC, &bQ);
+    setTensorValues(&bTensor, (uint8_t *)bData, &bShape, &bQ, NULL);
+
+    tensor_t outTensor;
+    float outData[2];
+    size_t outDims[] = {2, 1};
+    size_t outOrder[] = {0, 1};
+    shape_t outShape;
+    setShape(&outShape, outDims, 2, outOrder);
+    quantization_t outQ;
+    initFloat32Quantization(&outQ);
+    setTensorValues(&outTensor, (uint8_t *)outData, &outShape, &outQ, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(matmulBfpTensors(&aTensor, &bTensor, NULL, &outTensor));
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -1347,6 +1403,7 @@ int main(void) {
     RUN_TEST(testMatmulBfpPowerOfTwoBitIdenticalToGroupedSym);
     RUN_TEST(testMatmulBfpHeadroomGuardDies);
     RUN_TEST(testBfpSegmentLimitTableValues);
+    RUN_TEST(testMatmulBfpRejectsMismatchedGroupShape);
 
     return UNITY_END();
 }

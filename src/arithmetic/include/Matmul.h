@@ -67,7 +67,10 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
  *  finished segment folds via acc += ldexpf((float)partial, Ea + Eb - biasA
  *  - biasB) and the partial resets; tail-fold after the loop. The kernel
  *  never rounds (rounding lives at staging and the OUT_WRITE epilogue).
- *  int32 overflow is excluded up front by bfpValidateBlockHeadroom
+ *  Every operand's group shape is fail-fast-checked against its element
+ *  count (validateBfpQConfigShape -- the SYM grouped entry's precedent),
+ *  since bfpGroupOf's division knows nothing of numGroups. int32 overflow
+ *  is excluded up front by bfpValidateBlockHeadroom
  *  (BfpKernelSupport.h): a same-exponent segment never accumulates more than
  *  min(runA, runB, K) products, which must stay within
  *  bfpSegmentLimit(ma, mb) == INT32_MAX >> (ma+mb-2) (#227 headroom, no

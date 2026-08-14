@@ -921,14 +921,18 @@ def matmul_bfp_ref(a_codes, a_exp, a_qc, b_codes, b_exp, b_qc, bias_codes, bias_
     the collapse rerun): (i) >= 2 groups crossed on EACH operand somewhere,
     (ii) >= 1 fold with a NONZERO partial whose float conversion is exact
     (regression anchor), (iii) result differs from an all-per-tensor run
-    (group structure matters). Returns the float32 outputs as Python floats,
-    row-major [rows*cols]."""
+    (group structure matters), (iv) >= 1 reduction step where a's group
+    changes while b's does NOT (pins the EITHER-operand fold clause: a
+    fixture whose a-boundaries all coincide with b-boundaries cannot tell a
+    b-only fold condition from the correct either-operand one). Returns the
+    float32 outputs as Python floats, row-major [rows*cols]."""
     a_bias = 2 ** (a_qc["exponent_bits"] - 1) - 1
     b_bias = 2 ** (b_qc["exponent_bits"] - 1) - 1
     out = []
     fold_partials = []
     max_a_groups_crossed = 0
     max_b_groups_crossed = 0
+    a_only_boundaries = 0
     for r in range(rows):
         for c in range(cols):
             acc = np.float32(0.0)
@@ -950,6 +954,8 @@ def matmul_bfp_ref(a_codes, a_exp, a_qc, b_codes, b_exp, b_qc, bias_codes, bias_
                 if k == 0:
                     cur_ga, cur_gb = ga, gb
                 elif ga != cur_ga or gb != cur_gb:
+                    if ga != cur_ga and gb == cur_gb:
+                        a_only_boundaries += 1
                     shift = (a_exp[cur_ga] - a_bias) + (b_exp[cur_gb] - b_bias)
                     fold_partials.append(partial)
                     acc = np.float32(acc + np.ldexp(np.float32(partial), np.int32(shift)))
@@ -980,6 +986,12 @@ def matmul_bfp_ref(a_codes, a_exp, a_qc, b_codes, b_exp, b_qc, bias_codes, bias_
         assert any(p != 0 and float(np.float32(p)) == float(p) for p in fold_partials), (
             "matmul_bfp_ref: no fold has a nonzero exactly-float-convertible "
             "partial -- fixture lost its exact-regime anchor")
+        # (iv) EITHER-operand fold clause: >= 1 step where a's group changes
+        # while b's does not -- a-boundaries must not all hide behind
+        # b-boundaries, or a b-only fold condition is indistinguishable.
+        assert a_only_boundaries >= 1, (
+            "matmul_bfp_ref: every a-group boundary coincides with a b-group "
+            "boundary -- the either-operand fold clause is unexercised")
         # (iii) group structure matters: collapsing both operands to per-tensor
         # (exponents[0] everywhere) must change the result.
         collapsed = matmul_bfp_ref(

@@ -520,6 +520,12 @@ void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
         exit(1);
     }
 
+    /* Group-shape fail-fast (validateSymQConfigShape precedent): bfpGroupOf
+     * divides by groupSize with no relation to numGroups, so a mismatched
+     * config would read exponents[] out of bounds. */
+    validateBfpQConfigShape(aQC, calcNumberOfElementsByTensor(aTensor));
+    validateBfpQConfigShape(bQC, calcNumberOfElementsByTensor(bTensor));
+
     bfpQConfig_t *biasQC = NULL;
     if (bias != NULL) {
         if (bias->quantization->type != BFP) {
@@ -531,6 +537,7 @@ void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
             exit(1);
         }
         biasQC = bias->quantization->qConfig;
+        validateBfpQConfigShape(biasQC, calcNumberOfElementsByTensor(bias));
     }
 
     bfpValidateBlockHeadroom(aQC, bQC, aColumns, "matmulBfpTensors");

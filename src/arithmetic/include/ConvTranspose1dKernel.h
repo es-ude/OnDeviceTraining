@@ -96,4 +96,40 @@ void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const 
                                           size_t groups, size_t outputPadding, tensor_t *output,
                                           const symQConfig_t *weightGroups);
 
+/*! BFP epic PR2 (Task 5, D9): output-centric (gather) ConvT1d forward under
+ *  ARITH_BFP -- every output element is a dot product over its contributors
+ *  (convTranspose1dTapsAt), restoring the int32 block-partial contract the
+ *  scatter formulation cannot offer (consecutive scatter products land in
+ *  DIFFERENT output elements); the SYM scatter cores above are untouched.
+ *
+ *  Same operand contract as matmulBfpTensors / conv1dKernelBfp: input/weight/
+ *  bias arrive in the funnel's UNPACKED-BFP scratch form (->data int32
+ *  sign-extended mantissa codes, ->quantization a live bfpQConfig_t), output
+ *  is raw FLOAT32, the kernel never rounds. The reduction walks taps OUTER /
+ *  icOffset INNER; BOTH operands' storage indices map to group ids per step
+ *  (bfpGroupOf -- per-element, tap hops make both index sequences
+ *  non-contiguous); when EITHER id changes, the finished segment's int32
+ *  partial folds into the float accumulator via ldexpf, plus a tail fold per
+ *  output element. `bias` is seeded per output element (value-seed
+ *  dequantized to float BEFORE the reduction -- no separate bias pass,
+ *  unlike the scatter cores); outputPadding tail positions have no
+ *  contributors and stay at the bias seed. int32 overflow is excluded up
+ *  front by bfpValidateBlockHeadroom over in_channels/groups * kernel_size;
+ *  every operand's group shape is fail-fast-checked via
+ *  validateBfpQConfigShape. Geometry (VALID, and the SAME/EXPLICIT adjoint)
+ *  resolves through the same shared helper as the scatter kernels.
+ *
+ *  @param input          [batch, in_channels, input_length], BFP scratch
+ *  @param weight         [in_channels, out_channels/groups, kernel_size], BFP scratch
+ *  @param bias           [out_channels] or NULL, BFP scratch
+ *  @param kernel         kernel_t (paddingType VALID or SAME/EXPLICIT adjoint)
+ *  @param groups         must divide in_channels and out_channels (CONV groups
+ *                        -- independent of the QUANTIZATION groups)
+ *  @param outputPadding  trailing zeros at output end (VALID only); 0 for SAME
+ *  @param output         [batch, out_channels, output_length], FLOAT32, pre-allocated
+ */
+void convTranspose1dKernelBfpGather(tensor_t const *input, tensor_t const *weight,
+                                    tensor_t const *bias, kernel_t const *kernel, size_t groups,
+                                    size_t outputPadding, tensor_t *output);
+
 #endif // ODT_CONV_TRANSPOSE_1D_KERNEL_H

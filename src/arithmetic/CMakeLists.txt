@@ -208,7 +208,9 @@ target_link_libraries(ConvTranspose1dKernel PRIVATE
         SlidingWindow1d
         Mul
         Rounding
+        Quantization
         Common
+        m
 )
 
 add_library(ExecuteOp ExecuteOp.c)

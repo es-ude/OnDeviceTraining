@@ -2,10 +2,65 @@
 
 #include "ConvTranspose1dKernel.h"
 
+#include <math.h>
+
+#include "BfpKernelSupport.h"
 #include "Common.h"
 #include "Mul.h"
 #include "Rounding.h"
 #include "SlidingWindow1d.h"
+
+/* Shared VALID / adjoint-SAME(/EXPLICIT) geometry resolution for every ConvT
+ * core (the scatter kernels AND the BFP gather): in VALID mode the output
+ * length is pinned to convTranspose1dOutputLength ((inputLength-1)*stride +
+ * dilation*(K-1) + outputPadding + 1) and outputPadding must stay below
+ * max(stride, dilation) (PyTorch convention). SAME and EXPLICIT share the
+ * adjoint path: the input-gradient of a forward Conv1d is a transposed conv
+ * that scatters back through the forward's left padding; padLeft is recovered
+ * from the forward-conv1d geometry on the adjoint OUTPUT length (= forward
+ * input len), whose forward output len must equal the adjoint input len. For
+ * EXPLICIT, windowGeometry1dCalc reports padLeft == kernel->padding; for SAME
+ * the minimal {floor,ceil} split. outputPadding must be 0 there. Returns
+ * padLeft; every violation exits with the calling kernel's name prefixed. */
+static size_t convT1dResolveGeometry(kernel_t const *kernel, size_t inputLength,
+                                     size_t outputLength, size_t outputPadding, const char *what) {
+    size_t padLeft = 0;
+
+    if (kernel->paddingType == VALID) {
+        size_t expectedOutLen = convTranspose1dOutputLength(inputLength, kernel, outputPadding);
+        if (expectedOutLen != outputLength) {
+            PRINT_ERROR("%s: VALID output_length mismatch (expected=%zu, got=%zu)", what,
+                        expectedOutLen, outputLength);
+            exit(1);
+        }
+
+        if (outputPadding != 0 &&
+            outputPadding >=
+                ((kernel->stride > kernel->dilation) ? kernel->stride : kernel->dilation)) {
+            PRINT_ERROR("%s: outputPadding (%zu) must be < max(stride=%zu, dilation=%zu)", what,
+                        outputPadding, kernel->stride, kernel->dilation);
+            exit(1);
+        }
+    } else if (kernel->paddingType == SAME || kernel->paddingType == EXPLICIT) {
+        if (outputPadding != 0) {
+            PRINT_ERROR("%s: outputPadding must be 0 in SAME/EXPLICIT mode (was %zu)", what,
+                        outputPadding);
+            exit(1);
+        }
+        windowGeometry1d_t fwdGeom = windowGeometry1dCalc(outputLength, kernel);
+        if (fwdGeom.outputLength != inputLength) {
+            PRINT_ERROR("%s: SAME/EXPLICIT adjoint input length (%zu) does not match forward "
+                        "conv1d output length on the given output shape (%zu, fwd-out=%zu)",
+                        what, inputLength, outputLength, fwdGeom.outputLength);
+            exit(1);
+        }
+        padLeft = fwdGeom.padLeft;
+    } else {
+        PRINT_ERROR("%s: unsupported paddingType %d", what, (int)kernel->paddingType);
+        exit(1);
+    }
+    return padLeft;
+}
 
 void convTranspose1dKernelFloat32(tensor_t const *input, tensor_t const *weight,
                                   tensor_t const *bias, kernel_t const *kernel, size_t groups,
@@ -24,60 +79,8 @@ void convTranspose1dKernelFloat32(tensor_t const *input, tensor_t const *weight,
         exit(1);
     }
 
-    // Geometry: in VALID mode the adjoint output_length is determined by
-    // (inputLength-1)*stride + dilation*(K-1) + outputPadding + 1.
-    // In SAME mode the adjoint is the inverse of a forward Conv1d that took
-    // an input of length outputLength (caller's propLoss target) and produced
-    // an output of length inputLength. windowGeometry1dCalc takes the forward
-    // input length and returns padLeft/padRight implicitly.
-    size_t padLeft = 0;
-
-    if (kernel->paddingType == VALID) {
-        size_t expectedOutLen = convTranspose1dOutputLength(inputLength, kernel, outputPadding);
-        if (expectedOutLen != outputLength) {
-            PRINT_ERROR("convTranspose1dKernelFloat32: VALID output_length mismatch "
-                        "(expected=%zu, got=%zu)",
-                        expectedOutLen, outputLength);
-            exit(1);
-        }
-
-        if (outputPadding != 0 &&
-            outputPadding >=
-                ((kernel->stride > kernel->dilation) ? kernel->stride : kernel->dilation)) {
-            PRINT_ERROR("convTranspose1dKernelFloat32: outputPadding (%zu) must be "
-                        "< max(stride=%zu, dilation=%zu)",
-                        outputPadding, kernel->stride, kernel->dilation);
-            exit(1);
-        }
-    } else if (kernel->paddingType == SAME || kernel->paddingType == EXPLICIT) {
-        // SAME and EXPLICIT share the adjoint path. The input-gradient of a
-        // forward Conv1d is a transposed conv that scatters back through the
-        // forward's left padding; we recover padLeft from the forward-conv1d
-        // geometry on the adjoint output length (= forward input len), whose
-        // forward output len must equal the adjoint input len. For EXPLICIT,
-        // windowGeometry1dCalc reports padLeft == kernel->padding; for SAME it
-        // reports the minimal {floor,ceil} split. This branch is reached as the
-        // Conv1d backward adjoint (conv1dBackward passes the forward kernel).
-        if (outputPadding != 0) {
-            PRINT_ERROR("convTranspose1dKernelFloat32: outputPadding must be 0 in "
-                        "SAME/EXPLICIT mode (was %zu)",
-                        outputPadding);
-            exit(1);
-        }
-        windowGeometry1d_t fwdGeom = windowGeometry1dCalc(outputLength, kernel);
-        if (fwdGeom.outputLength != inputLength) {
-            PRINT_ERROR("convTranspose1dKernelFloat32: SAME/EXPLICIT adjoint input length "
-                        "(%zu) does not match forward conv1d output length on the "
-                        "given output shape (%zu, fwd-out=%zu)",
-                        inputLength, outputLength, fwdGeom.outputLength);
-            exit(1);
-        }
-        padLeft = fwdGeom.padLeft;
-    } else {
-        PRINT_ERROR("convTranspose1dKernelFloat32: unsupported paddingType %d",
-                    (int)kernel->paddingType);
-        exit(1);
-    }
+    size_t padLeft = convT1dResolveGeometry(kernel, inputLength, outputLength, outputPadding,
+                                            "convTranspose1dKernelFloat32");
 
     size_t inChPerGroup = inChannels / groups;
     size_t outChPerGroup = outChannels / groups;
@@ -154,45 +157,8 @@ void convTranspose1dKernelSymInt32(tensor_t const *input, tensor_t const *weight
         exit(1);
     }
 
-    size_t padLeft = 0;
-
-    if (kernel->paddingType == VALID) {
-        size_t expectedOutLen = convTranspose1dOutputLength(inputLength, kernel, outputPadding);
-        if (expectedOutLen != outputLength) {
-            PRINT_ERROR("convTranspose1dKernelSymInt32: VALID output_length mismatch "
-                        "(expected=%zu, got=%zu)",
-                        expectedOutLen, outputLength);
-            exit(1);
-        }
-        if (outputPadding != 0 &&
-            outputPadding >=
-                ((kernel->stride > kernel->dilation) ? kernel->stride : kernel->dilation)) {
-            PRINT_ERROR("convTranspose1dKernelSymInt32: outputPadding (%zu) must be "
-                        "< max(stride=%zu, dilation=%zu)",
-                        outputPadding, kernel->stride, kernel->dilation);
-            exit(1);
-        }
-    } else if (kernel->paddingType == SAME || kernel->paddingType == EXPLICIT) {
-        if (outputPadding != 0) {
-            PRINT_ERROR("convTranspose1dKernelSymInt32: outputPadding must be 0 in "
-                        "SAME/EXPLICIT mode (was %zu)",
-                        outputPadding);
-            exit(1);
-        }
-        windowGeometry1d_t fwdGeom = windowGeometry1dCalc(outputLength, kernel);
-        if (fwdGeom.outputLength != inputLength) {
-            PRINT_ERROR("convTranspose1dKernelSymInt32: SAME/EXPLICIT adjoint input length "
-                        "(%zu) does not match forward conv1d output length on the "
-                        "given output shape (%zu, fwd-out=%zu)",
-                        inputLength, outputLength, fwdGeom.outputLength);
-            exit(1);
-        }
-        padLeft = fwdGeom.padLeft;
-    } else {
-        PRINT_ERROR("convTranspose1dKernelSymInt32: unsupported paddingType %d",
-                    (int)kernel->paddingType);
-        exit(1);
-    }
+    size_t padLeft = convT1dResolveGeometry(kernel, inputLength, outputLength, outputPadding,
+                                            "convTranspose1dKernelSymInt32");
 
     size_t inChPerGroup = inChannels / groups;
     size_t outChPerGroup = outChannels / groups;
@@ -308,45 +274,8 @@ void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const 
         exit(1);
     }
 
-    size_t padLeft = 0;
-
-    if (kernel->paddingType == VALID) {
-        size_t expectedOutLen = convTranspose1dOutputLength(inputLength, kernel, outputPadding);
-        if (expectedOutLen != outputLength) {
-            PRINT_ERROR("convTranspose1dKernelSymInt32Grouped: VALID output_length mismatch "
-                        "(expected=%zu, got=%zu)",
-                        expectedOutLen, outputLength);
-            exit(1);
-        }
-        if (outputPadding != 0 &&
-            outputPadding >=
-                ((kernel->stride > kernel->dilation) ? kernel->stride : kernel->dilation)) {
-            PRINT_ERROR("convTranspose1dKernelSymInt32Grouped: outputPadding (%zu) must be "
-                        "< max(stride=%zu, dilation=%zu)",
-                        outputPadding, kernel->stride, kernel->dilation);
-            exit(1);
-        }
-    } else if (kernel->paddingType == SAME || kernel->paddingType == EXPLICIT) {
-        if (outputPadding != 0) {
-            PRINT_ERROR("convTranspose1dKernelSymInt32Grouped: outputPadding must be 0 in "
-                        "SAME/EXPLICIT mode (was %zu)",
-                        outputPadding);
-            exit(1);
-        }
-        windowGeometry1d_t fwdGeom = windowGeometry1dCalc(outputLength, kernel);
-        if (fwdGeom.outputLength != inputLength) {
-            PRINT_ERROR("convTranspose1dKernelSymInt32Grouped: SAME/EXPLICIT adjoint input "
-                        "length (%zu) does not match forward conv1d output length on the "
-                        "given output shape (%zu, fwd-out=%zu)",
-                        inputLength, outputLength, fwdGeom.outputLength);
-            exit(1);
-        }
-        padLeft = fwdGeom.padLeft;
-    } else {
-        PRINT_ERROR("convTranspose1dKernelSymInt32Grouped: unsupported paddingType %d",
-                    (int)kernel->paddingType);
-        exit(1);
-    }
+    size_t padLeft = convT1dResolveGeometry(kernel, inputLength, outputLength, outputPadding,
+                                            "convTranspose1dKernelSymInt32Grouped");
 
     size_t inChPerGroup = inChannels / groups;
     size_t outChPerGroup = outChannels / groups;
@@ -452,4 +381,165 @@ void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const 
         exit(1);
     }
     ((symInt32QConfig_t *)output->quantization->qConfig)->scale = sAcc;
+}
+
+/* BFP epic PR2 (Task 5, D9): the ConvT1d forward under ARITH_BFP is GATHER-
+ * formulated (see ConvTranspose1dKernel.h for the full contract) because the
+ * scatter form above has no per-(target, group) run across which one raw
+ * int32 block partial could be carried -- consecutive scatter products land
+ * in DIFFERENT output elements. Enumerating each output element's
+ * contributors via convTranspose1dTapsAt restores the Task 3/4 block-partial
+ * contract; the SYM scatter cores stay untouched. */
+void convTranspose1dKernelBfpGather(tensor_t const *input, tensor_t const *weight,
+                                    tensor_t const *bias, kernel_t const *kernel, size_t groups,
+                                    size_t outputPadding, tensor_t *output) {
+    size_t batch = input->shape->dimensions[0];
+    size_t inChannels = input->shape->dimensions[1];
+    size_t inputLength = input->shape->dimensions[2];
+    size_t outChannels = output->shape->dimensions[1];
+    size_t outputLength = output->shape->dimensions[2];
+    size_t kernelSize = weight->shape->dimensions[2];
+
+    if (input->quantization->type != BFP || weight->quantization->type != BFP) {
+        PRINT_ERROR("convTranspose1dKernelBfpGather: input and weight must be BFP "
+                    "(unpacked scratch form)");
+        exit(1);
+    }
+    if (output->quantization->type != FLOAT32) {
+        PRINT_ERROR("convTranspose1dKernelBfpGather: output must be raw FLOAT32");
+        exit(1);
+    }
+    if (inChannels % groups != 0 || outChannels % groups != 0) {
+        PRINT_ERROR("convTranspose1dKernelBfpGather: groups (%zu) must divide "
+                    "in_channels (%zu) and out_channels (%zu)",
+                    groups, inChannels, outChannels);
+        exit(1);
+    }
+
+    size_t inChPerGroup = inChannels / groups;
+    size_t outChPerGroup = outChannels / groups;
+
+    bfpQConfig_t *inQC = input->quantization->qConfig;
+    bfpQConfig_t *wQC = weight->quantization->qConfig;
+
+    /* Group-shape fail-fast (validateSymQConfigShape precedent): bfpGroupOf
+     * divides by groupSize with no relation to numGroups, so a mismatched
+     * config would read exponents[] out of bounds. */
+    validateBfpQConfigShape(inQC, calcNumberOfElementsByShape(input->shape));
+    validateBfpQConfigShape(wQC, calcNumberOfElementsByShape(weight->shape));
+
+    bfpQConfig_t *biasQC = NULL;
+    if (bias != NULL) {
+        if (bias->quantization->type != BFP) {
+            PRINT_ERROR("convTranspose1dKernelBfpGather: bias must be BFP");
+            exit(1);
+        }
+        if (calcNumberOfElementsByShape(bias->shape) != outChannels) {
+            PRINT_ERROR("convTranspose1dKernelBfpGather: bias element count != out_channels");
+            exit(1);
+        }
+        biasQC = bias->quantization->qConfig;
+        validateBfpQConfigShape(biasQC, outChannels);
+    }
+
+    bfpValidateBlockHeadroom(inQC, wQC, inChPerGroup * kernelSize,
+                             "convTranspose1dKernelBfpGather");
+
+    size_t padLeft = convT1dResolveGeometry(kernel, inputLength, outputLength, outputPadding,
+                                            "convTranspose1dKernelBfpGather");
+
+    int32_t const *xArr = (int32_t const *)input->data;
+    int32_t const *wArr = (int32_t const *)weight->data;
+    float *yArr = (float *)output->data;
+
+    int32_t inExpBias = bfpExponentBias(inQC);
+    int32_t wExpBias = bfpExponentBias(wQC);
+
+    /* Per-output-channel bias seed, dequantized to float BEFORE the reduction
+     * (value-seed, headroom-exempt -- it never touches the int32 partial).
+     * Seeded INLINE per output element, not added in a separate pass like the
+     * scatter cores' bias refold: the gather owns a per-element accumulator,
+     * so a second pass would buy nothing. VLA over channels (topology-
+     * bounded), mirroring conv1dKernelBfp. */
+    float seed[outChannels];
+    if (bias != NULL) {
+        int32_t const *bArr = (int32_t const *)bias->data;
+        for (size_t oc = 0; oc < outChannels; oc++) {
+            seed[oc] = (float)bArr[oc] * bfpGroupScale(biasQC, bfpGroupOf(biasQC, oc));
+        }
+    } else {
+        for (size_t oc = 0; oc < outChannels; oc++) {
+            seed[oc] = 0.0f;
+        }
+    }
+
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t g = 0; g < groups; g++) {
+            size_t inLo = g * inChPerGroup;
+            size_t outLo = g * outChPerGroup;
+
+            for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
+                size_t oc = outLo + ocOffset;
+
+                for (size_t outPos = 0; outPos < outputLength; outPos++) {
+                    /* Stack VLA, topology-bounded (allocation-locality rule);
+                     * outputPadding tail positions get tapCount == 0 and stay
+                     * at the bias seed -- exactly where the scatter never
+                     * writes. */
+                    convTransposeTap_t taps[kernelSize];
+                    size_t tapCount =
+                        convTranspose1dTapsAt(outPos, inputLength, kernelSize, kernel->stride,
+                                              kernel->dilation, padLeft, taps);
+                    float acc = seed[oc];
+                    int32_t partial = 0;
+                    size_t currentInGroup = 0;
+                    size_t currentWGroup = SIZE_MAX;
+
+                    /* Taps OUTER, icOffset INNER (the D9 normative reduction
+                     * order the gold emulation mirrors). Per-element group
+                     * lookup on BOTH operands: tap hops make both index
+                     * sequences non-contiguous, so no run length could be
+                     * precomputed (the SYM grouped kernels' gap rationale). */
+                    for (size_t t = 0; t < tapCount; t++) {
+                        for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
+                            size_t ic = inLo + icOffset;
+                            size_t inIdx = (b * inChannels + ic) * inputLength + taps[t].inPos;
+                            size_t wIdx =
+                                (ic * outChPerGroup + ocOffset) * kernelSize + taps[t].kernelIdx;
+                            size_t inGroup = bfpGroupOf(inQC, inIdx);
+                            size_t wGroup = bfpGroupOf(wQC, wIdx);
+
+                            if (currentWGroup == SIZE_MAX) {
+                                currentInGroup = inGroup;
+                                currentWGroup = wGroup;
+                            } else if (inGroup != currentInGroup || wGroup != currentWGroup) {
+                                /* Boundary fold on EITHER operand's group change:
+                                 * the finished same-exponent segment's raw int32
+                                 * partial enters the float accumulator via a pure
+                                 * exponent shift -- rounding-free by contract. */
+                                acc += ldexpf((float)partial,
+                                              (int)inQC->exponents[currentInGroup] - inExpBias +
+                                                  (int)wQC->exponents[currentWGroup] - wExpBias);
+                                partial = 0;
+                                currentInGroup = inGroup;
+                                currentWGroup = wGroup;
+                            }
+
+                            partial += mulInt32s(xArr[inIdx], wArr[wIdx]);
+                        }
+                    }
+                    /* Tail fold: the LAST segment never crosses a further
+                     * boundary, so this is its only fold; tap-free positions
+                     * never seed a segment at all. */
+                    if (currentWGroup != SIZE_MAX) {
+                        acc += ldexpf((float)partial,
+                                      (int)inQC->exponents[currentInGroup] - inExpBias +
+                                          (int)wQC->exponents[currentWGroup] - wExpBias);
+                    }
+
+                    yArr[(b * outChannels + oc) * outputLength + outPos] = acc;
+                }
+            }
+        }
+    }
 }

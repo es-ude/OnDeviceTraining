@@ -246,6 +246,131 @@ void testTransposeOutputLengthStrideDilationOutputPadding() {
     TEST_ASSERT_EQUAL_size_t(14, convTranspose1dOutputLength(5, &kernel, 1));
 }
 
+/* ---- BFP epic PR2 (Task 5): convTranspose1dTapsAt -------------------------
+ * Contributor enumeration for the gather-formulated ConvT1d (D9): taps are
+ * returned in ASCENDING kernelIdx order (the enumeration loop's k order), so
+ * expectations below pin both the SET of (inPos, kernelIdx) pairs and that
+ * order. */
+
+static void assertTapsEqual(convTransposeTap_t const *taps, size_t count,
+                            size_t const *expectedInPos, size_t const *expectedKernelIdx,
+                            size_t expectedCount) {
+    TEST_ASSERT_EQUAL_size_t(expectedCount, count);
+    for (size_t i = 0; i < count; i++) {
+        TEST_ASSERT_EQUAL_size_t(expectedInPos[i], taps[i].inPos);
+        TEST_ASSERT_EQUAL_size_t(expectedKernelIdx[i], taps[i].kernelIdx);
+    }
+}
+
+void testTransposeTapsKernel3Stride2EveryOutPos() {
+    // K=3, stride=2, dilation=1, padLeft=0, Lin=4 -> Lout = (4-1)*2 + 2 + 1 = 9.
+    // Hand-enumerated contributors of every output position: k with
+    // (outPos - k) % 2 == 0 and (outPos - k)/2 in [0, 4).
+    convTransposeTap_t taps[3];
+
+    size_t in0[] = {0}, k0[] = {0};
+    assertTapsEqual(taps, convTranspose1dTapsAt(0, 4, 3, 2, 1, 0, taps), in0, k0, 1);
+    size_t in1[] = {0}, k1[] = {1};
+    assertTapsEqual(taps, convTranspose1dTapsAt(1, 4, 3, 2, 1, 0, taps), in1, k1, 1);
+    size_t in2[] = {1, 0}, k2[] = {0, 2};
+    assertTapsEqual(taps, convTranspose1dTapsAt(2, 4, 3, 2, 1, 0, taps), in2, k2, 2);
+    size_t in3[] = {1}, k3[] = {1};
+    assertTapsEqual(taps, convTranspose1dTapsAt(3, 4, 3, 2, 1, 0, taps), in3, k3, 1);
+    size_t in4[] = {2, 1}, k4[] = {0, 2};
+    assertTapsEqual(taps, convTranspose1dTapsAt(4, 4, 3, 2, 1, 0, taps), in4, k4, 2);
+    size_t in5[] = {2}, k5[] = {1};
+    assertTapsEqual(taps, convTranspose1dTapsAt(5, 4, 3, 2, 1, 0, taps), in5, k5, 1);
+    size_t in6[] = {3, 2}, k6[] = {0, 2};
+    assertTapsEqual(taps, convTranspose1dTapsAt(6, 4, 3, 2, 1, 0, taps), in6, k6, 2);
+    size_t in7[] = {3}, k7[] = {1};
+    assertTapsEqual(taps, convTranspose1dTapsAt(7, 4, 3, 2, 1, 0, taps), in7, k7, 1);
+    // outPos 8: k=0 would need inPos 4 (OOB) -- only the k=2 tap survives.
+    size_t in8[] = {3}, k8[] = {2};
+    assertTapsEqual(taps, convTranspose1dTapsAt(8, 4, 3, 2, 1, 0, taps), in8, k8, 1);
+}
+
+void testTransposeTapsDilation2() {
+    // K=3, stride=2, dilation=2, padLeft=0, Lin=4 -> Lout = 6 + 4 + 1 = 11.
+    // stride and dilation both even => odd output positions have NO contributors.
+    convTransposeTap_t taps[3];
+
+    size_t in0[] = {0}, k0[] = {0};
+    assertTapsEqual(taps, convTranspose1dTapsAt(0, 4, 3, 2, 2, 0, taps), in0, k0, 1);
+    size_t in4[] = {2, 1, 0}, k4[] = {0, 1, 2};
+    assertTapsEqual(taps, convTranspose1dTapsAt(4, 4, 3, 2, 2, 0, taps), in4, k4, 3);
+    TEST_ASSERT_EQUAL_size_t(0, convTranspose1dTapsAt(5, 4, 3, 2, 2, 0, taps));
+    size_t in8[] = {3, 2}, k8[] = {1, 2};
+    assertTapsEqual(taps, convTranspose1dTapsAt(8, 4, 3, 2, 2, 0, taps), in8, k8, 2);
+    size_t in10[] = {3}, k10[] = {2};
+    assertTapsEqual(taps, convTranspose1dTapsAt(10, 4, 3, 2, 2, 0, taps), in10, k10, 1);
+}
+
+void testTransposeTapsPadLeft1() {
+    // K=3, stride=2, dilation=1, padLeft=1, Lin=4 (adjoint-SAME-shaped): the
+    // effective position is outPos + padLeft, shifting every enumeration by 1.
+    convTransposeTap_t taps[3];
+
+    size_t in0[] = {0}, k0[] = {1};
+    assertTapsEqual(taps, convTranspose1dTapsAt(0, 4, 3, 2, 1, 1, taps), in0, k0, 1);
+    size_t in1[] = {1, 0}, k1[] = {0, 2};
+    assertTapsEqual(taps, convTranspose1dTapsAt(1, 4, 3, 2, 1, 1, taps), in1, k1, 2);
+    size_t in6[] = {3}, k6[] = {1};
+    assertTapsEqual(taps, convTranspose1dTapsAt(6, 4, 3, 2, 1, 1, taps), in6, k6, 1);
+    // outPos 7: p=8, k=0 would need inPos 4 (OOB) -- only the k=2 tap survives.
+    size_t in7[] = {3}, k7[] = {2};
+    assertTapsEqual(taps, convTranspose1dTapsAt(7, 4, 3, 2, 1, 1, taps), in7, k7, 1);
+}
+
+void testTransposeTapsMatchScatterEnumeration() {
+    // Scatter-equivalence property (D9): for every outPos, the taps must be
+    // EXACTLY the (inPos, k) pairs the SYM scatter loop structure
+    // (ConvTranspose1dKernel.c: outBase = inPos*stride - padLeft,
+    // outIdx = outBase + k*dilation, bounds-checked) scatters into outPos.
+    // Geometry chosen so both clip directions occur (outBase goes negative at
+    // inPos=0 and outIdx overshoots outputLength at inPos=4).
+    size_t const inputLength = 5;
+    size_t const kernelSize = 4;
+    size_t const stride = 3;
+    size_t const dilation = 2;
+    size_t const padLeft = 2;
+    size_t const outputLength = 15;
+    size_t totalTaps = 0;
+
+    for (size_t outPos = 0; outPos < outputLength; outPos++) {
+        convTransposeTap_t taps[4];
+        size_t count =
+            convTranspose1dTapsAt(outPos, inputLength, kernelSize, stride, dilation, padLeft, taps);
+        totalTaps += count;
+
+        size_t scatterCount = 0;
+        for (size_t inPos = 0; inPos < inputLength; inPos++) {
+            long long outBase = (long long)(inPos * stride) - (long long)padLeft;
+            for (size_t k = 0; k < kernelSize; k++) {
+                long long outIdx = outBase + (long long)(k * dilation);
+                if (outIdx < 0 || outIdx >= (long long)outputLength) {
+                    continue;
+                }
+                if ((size_t)outIdx != outPos) {
+                    continue;
+                }
+                scatterCount++;
+                int found = 0;
+                for (size_t t = 0; t < count; t++) {
+                    if (taps[t].inPos == inPos && taps[t].kernelIdx == k) {
+                        found = 1;
+                    }
+                }
+                TEST_ASSERT_TRUE_MESSAGE(found, "scatter-touched (inPos, k) missing from taps");
+            }
+        }
+        // Same count + every scatter pair found + distinct kernelIdx per tap
+        // => set equality per outPos.
+        TEST_ASSERT_EQUAL_size_t(scatterCount, count);
+    }
+    // Non-vacuity: this geometry scatters 18 in-bounds products.
+    TEST_ASSERT_EQUAL_size_t(18, totalTaps);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -274,5 +399,9 @@ int main(void) {
     RUN_TEST(testSliceWithDilationAndPadding);
     RUN_TEST(testSliceTrulyEmpty);
     RUN_TEST(testSliceTrulyEmptyOnRightEdge);
+    RUN_TEST(testTransposeTapsKernel3Stride2EveryOutPos);
+    RUN_TEST(testTransposeTapsDilation2);
+    RUN_TEST(testTransposeTapsPadLeft1);
+    RUN_TEST(testTransposeTapsMatchScatterEnumeration);
     return UNITY_END();
 }

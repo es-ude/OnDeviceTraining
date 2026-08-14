@@ -93,6 +93,30 @@ windowSlice1d_t windowSlice1dAt(windowGeometry1d_t const *geometry, size_t outpu
     return s;
 }
 
+size_t convTranspose1dTapsAt(size_t outPos, size_t inputLength, size_t kernelSize, size_t stride,
+                             size_t dilation, size_t padLeft, convTransposeTap_t *taps) {
+    size_t count = 0;
+    size_t p = outPos + padLeft;
+    for (size_t k = 0; k < kernelSize; k++) {
+        size_t kd = k * dilation;
+        if (kd > p) {
+            break; /* k*dilation grows monotonically; later taps reach even further left */
+        }
+        size_t rem = p - kd;
+        if (rem % stride != 0) {
+            continue;
+        }
+        size_t inPos = rem / stride;
+        if (inPos >= inputLength) {
+            continue;
+        }
+        taps[count].inPos = inPos;
+        taps[count].kernelIdx = k;
+        count++;
+    }
+    return count;
+}
+
 size_t convTranspose1dOutputLength(size_t inputLength, kernel_t const *kernel,
                                    size_t outputPadding) {
     return (inputLength - 1) * kernel->stride + kernel->dilation * (kernel->size - 1) +

@@ -1145,3 +1145,224 @@ def conv1d_bfp_ref(x_codes, x_exp, x_qc, w_codes, w_exp, w_qc, bias_codes, bias_
             "conv1d_bfp_ref: per-tensor collapse is indistinguishable from the "
             "grouped run -- fixture is vacuous against group-structure bugs")
     return out
+
+
+# ---- BFP epic PR2 Task 5: gather-formulated ConvT1d BFP reference (D9),
+# convTranspose1dKernelBfpGather's kernel emulation. Output-centric: every
+# output element is ONE dot product over its contributors (convT1d_taps_at),
+# restoring the int32 block-partial contract the scatter formulation cannot
+# offer (a scatter's consecutive products land in DIFFERENT output elements).
+# The SYM scatter core stays untouched -- this ref pins the NEW gather walk. ----
+
+
+def convT1d_taps_at(out_pos, input_length, kernel_size, stride, dilation, pad_left):
+    """Mirror convTranspose1dTapsAt (SlidingWindow1d.c): the contributors of
+    ConvT1d output position out_pos -- kernel taps k with
+    (out_pos + pad_left - k*dilation) % stride == 0 and
+    in_pos = (out_pos + pad_left - k*dilation) // stride in [0, input_length),
+    emitted in ascending k order. Returns a list of (in_pos, k) pairs."""
+    taps = []
+    p = out_pos + pad_left
+    for k in range(kernel_size):
+        kd = k * dilation
+        if kd > p:
+            break  # k*dilation grows monotonically; later taps reach even further left
+        rem = p - kd
+        if rem % stride != 0:
+            continue
+        in_pos = rem // stride
+        if in_pos >= input_length:
+            continue
+        taps.append((in_pos, k))
+    return taps
+
+
+def convT1d_bfp_gather_ref(x_codes, x_exp, x_qc, w_codes, w_exp, w_qc,
+                           bias_codes, bias_exp, bias_qc,
+                           batch, in_channels, out_channels, kernel_size, input_length,
+                           stride=1, dilation=1, output_padding=0, conv_groups=1,
+                           self_check=True):
+    """Mirror the C gather kernel's fold order exactly: per (b, conv-group, oc,
+    out_pos) ONE int partial (assert |partial| <= 2**31-1 -- the C kernel
+    guarantees this via bfpValidateBlockHeadroom over inChPerGroup*kernelSize);
+    the reduction walks taps OUTER, ic_offset INNER (the brief's normative
+    order -- NOT conv1d_bfp_ref's ic-outer order); each visited step maps BOTH
+    operands' storage indices to group ids (_bfp_group_of, per-element -- tap
+    hops make both index sequences non-contiguous); when EITHER id changes the
+    finished segment folds via np.float32 acc += np.ldexp((float32)partial,
+    Ein + Ew - biasIn - biasW) and resets; tail fold after the walk (guarded
+    on >= 1 visited step -- outputPadding tail positions have ZERO taps and
+    stay at the bias seed). Bias is a value-seed dequantized to float32 BEFORE
+    the reduction. VALID-only geometry (pad_left = 0; the C kernel's
+    SAME/EXPLICIT adjoint branch is exercised in C directly via the geometry
+    parity test): out_len = (input_length-1)*stride + dilation*(kernel_size-1)
+    + output_padding + 1.
+
+    `w_codes` is ConvT1d's [in_channels, out_channels/conv_groups, kernel_size]
+    row-major flat storage: the weight index for (ic, oc_offset, k) is
+    (ic*out_ch_per_group + oc_offset)*kernel_size + k -- the SAME flat index
+    every ConvTranspose1dKernel.c core reads. `x_codes` is
+    [batch, in_channels, input_length] row-major flat.
+
+    Self-checks (skipped on the collapse rerun):
+      (i)   >= 2 groups crossed on EACH operand within a single reduction;
+      (ii)  >= 1 fold with a NONZERO exactly-float-convertible partial;
+      (iii) result differs from an all-per-tensor (exponents[0]) collapse;
+      plus the disjoint-boundary pins (both directions): >= 1 step where ONLY
+      the input's group changes and >= 1 step where ONLY the weight's group
+      changes; >= 1 (b, oc, out_pos) with ZERO taps (the outputPadding tail --
+      pins the bias-seed-only path); and the SCATTER CROSS-CHECK: a float32
+      scatter reference (convTranspose1dKernelFloat32's loop structure) on the
+      DEQUANTIZED values must equal the gather output bit-for-bit -- valid
+      because the fixture lives in the exact float regime, where add order
+      cannot matter.
+    Returns the float32 outputs as Python floats, row-major
+    [batch*out_channels*out_len]."""
+    assert in_channels % conv_groups == 0 and out_channels % conv_groups == 0, (
+        "convT1d_bfp_gather_ref: conv_groups must divide in_channels and out_channels")
+    in_ch_per_group = in_channels // conv_groups
+    out_ch_per_group = out_channels // conv_groups
+    out_len = (input_length - 1) * stride + dilation * (kernel_size - 1) + output_padding + 1
+    x_bias = 2 ** (x_qc["exponent_bits"] - 1) - 1
+    w_bias = 2 ** (w_qc["exponent_bits"] - 1) - 1
+
+    out = []
+    fold_partials = []
+    max_x_groups_crossed = 0
+    max_w_groups_crossed = 0
+    x_only_boundaries = 0
+    w_only_boundaries = 0
+    tap_free_positions = 0
+    for b in range(batch):
+        for oc in range(out_channels):
+            conv_g = oc // out_ch_per_group
+            in_lo = conv_g * in_ch_per_group
+            oc_offset = oc % out_ch_per_group
+            for out_pos in range(out_len):
+                taps = convT1d_taps_at(out_pos, input_length, kernel_size, stride, dilation, 0)
+                if not taps:
+                    tap_free_positions += 1
+                acc = np.float32(0.0)
+                if bias_codes is not None:
+                    bg = _bfp_group_of(oc, bias_qc["group_size"])
+                    bias_bias = 2 ** (bias_qc["exponent_bits"] - 1) - 1
+                    scale = np.float32(math.ldexp(1.0, bias_exp[bg] - bias_bias))
+                    acc = np.float32(np.float32(bias_codes[oc]) * scale)
+                partial = 0
+                cur_gx, cur_gw = None, None
+                x_groups_seen, w_groups_seen = set(), set()
+                for in_pos, k in taps:
+                    for ic_offset in range(in_ch_per_group):
+                        ic = in_lo + ic_offset
+                        x_idx = (b * in_channels + ic) * input_length + in_pos
+                        w_idx = (ic * out_ch_per_group + oc_offset) * kernel_size + k
+                        gx = _bfp_group_of(x_idx, x_qc["group_size"])
+                        gw = _bfp_group_of(w_idx, w_qc["group_size"])
+                        x_groups_seen.add(gx)
+                        w_groups_seen.add(gw)
+                        if cur_gw is None:
+                            cur_gx, cur_gw = gx, gw
+                        elif gx != cur_gx or gw != cur_gw:
+                            if gx != cur_gx and gw == cur_gw:
+                                x_only_boundaries += 1
+                            if gw != cur_gw and gx == cur_gx:
+                                w_only_boundaries += 1
+                            shift = (x_exp[cur_gx] - x_bias) + (w_exp[cur_gw] - w_bias)
+                            fold_partials.append(partial)
+                            acc = np.float32(acc + np.ldexp(np.float32(partial), np.int32(shift)))
+                            partial = 0
+                            cur_gx, cur_gw = gx, gw
+                        partial += x_codes[x_idx] * w_codes[w_idx]
+                        assert abs(partial) <= _INT32_MAX, (
+                            f"convT1d_bfp_gather_ref: partial {partial} exceeds int32 -- fixture "
+                            "violates the bfpValidateBlockHeadroom bound the C kernel enforces")
+                if cur_gw is not None:
+                    shift = (x_exp[cur_gx] - x_bias) + (w_exp[cur_gw] - w_bias)
+                    fold_partials.append(partial)
+                    acc = np.float32(acc + np.ldexp(np.float32(partial), np.int32(shift)))
+                max_x_groups_crossed = max(max_x_groups_crossed, len(x_groups_seen))
+                max_w_groups_crossed = max(max_w_groups_crossed, len(w_groups_seen))
+                out.append(float(acc))
+
+    if self_check:
+        # (i) group tracking is exercised on BOTH operands.
+        assert max_x_groups_crossed >= 2, (
+            "convT1d_bfp_gather_ref: no reduction crosses >= 2 input groups -- "
+            "the input's group tracking is unexercised")
+        assert max_w_groups_crossed >= 2, (
+            "convT1d_bfp_gather_ref: no reduction crosses >= 2 weight groups -- "
+            "the weight's group tracking is unexercised")
+        # (ii) regression anchor: >= 1 fold whose (float)partial conversion is
+        # exact AND nonzero (a zero partial is vacuously exact).
+        assert any(p != 0 and float(np.float32(p)) == float(p) for p in fold_partials), (
+            "convT1d_bfp_gather_ref: no fold has a nonzero exactly-float-"
+            "convertible partial -- fixture lost its exact-regime anchor")
+        # Disjoint-boundary pins (both directions, Task 3 review lesson).
+        assert x_only_boundaries >= 1, (
+            "convT1d_bfp_gather_ref: every input-group boundary coincides with "
+            "a weight-group boundary -- the either-operand fold clause is "
+            "unexercised on the input side")
+        assert w_only_boundaries >= 1, (
+            "convT1d_bfp_gather_ref: every weight-group boundary coincides "
+            "with an input-group boundary -- the either-operand fold clause is "
+            "unexercised on the weight side")
+        # outputPadding tail pin: >= 1 output position with ZERO taps, whose
+        # value is the bias seed alone (the gather's empty-tap branch).
+        assert tap_free_positions >= 1, (
+            "convT1d_bfp_gather_ref: no output position is tap-free -- the "
+            "outputPadding/bias-seed-only branch is unexercised")
+        # Scatter cross-check (D9): a float32 scatter on the DEQUANTIZED values
+        # must reproduce the gather bit-for-bit in the exact regime -- pins the
+        # gather's tap set AND index mapping against the shipped scatter form.
+        def _deq(codes, exps, qc, n):
+            bias_ = 2 ** (qc["exponent_bits"] - 1) - 1
+            return [np.float32(np.float32(codes[i]) *
+                               np.float32(math.ldexp(1.0, exps[_bfp_group_of(
+                                   i, qc["group_size"])] - bias_)))
+                    for i in range(n)]
+        deq_x = _deq(x_codes, x_exp, x_qc, batch * in_channels * input_length)
+        deq_w = _deq(w_codes, w_exp, w_qc,
+                     in_channels * out_ch_per_group * kernel_size)
+        scatter = [np.float32(0.0)] * (batch * out_channels * out_len)
+        for b in range(batch):
+            for conv_g in range(conv_groups):
+                for ic_offset in range(in_ch_per_group):
+                    ic = conv_g * in_ch_per_group + ic_offset
+                    for in_pos in range(input_length):
+                        xv = deq_x[(b * in_channels + ic) * input_length + in_pos]
+                        for oc_offset in range(out_ch_per_group):
+                            oc = conv_g * out_ch_per_group + oc_offset
+                            for k in range(kernel_size):
+                                out_idx = in_pos * stride + k * dilation
+                                if out_idx >= out_len:
+                                    continue
+                                wv = deq_w[(ic * out_ch_per_group + oc_offset) *
+                                           kernel_size + k]
+                                flat = (b * out_channels + oc) * out_len + out_idx
+                                scatter[flat] = np.float32(scatter[flat] +
+                                                           np.float32(xv * wv))
+        if bias_codes is not None:
+            deq_b = _deq(bias_codes, bias_exp, bias_qc, out_channels)
+            for b in range(batch):
+                for oc in range(out_channels):
+                    for l in range(out_len):
+                        flat = (b * out_channels + oc) * out_len + l
+                        scatter[flat] = np.float32(scatter[flat] + deq_b[oc])
+        assert [float(v) for v in scatter] == out, (
+            "convT1d_bfp_gather_ref: gather output diverges from the float "
+            "scatter reference on dequantized values -- either the tap "
+            "enumeration mirror or the fixture's exact-regime claim is broken")
+        # (iii) group structure matters: collapsing both operands to
+        # per-tensor (exponents[0] everywhere) must change the result.
+        collapsed = convT1d_bfp_gather_ref(
+            x_codes, [x_exp[0]], {**x_qc, "group_size": 0},
+            w_codes, [w_exp[0]], {**w_qc, "group_size": 0},
+            bias_codes, bias_exp, bias_qc,
+            batch, in_channels, out_channels, kernel_size, input_length,
+            stride, dilation, output_padding, conv_groups,
+            self_check=False)
+        assert collapsed != out, (
+            "convT1d_bfp_gather_ref: per-tensor collapse is indistinguishable "
+            "from the grouped run -- fixture is vacuous against group-structure "
+            "bugs")
+    return out

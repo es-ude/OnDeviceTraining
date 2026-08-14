@@ -196,6 +196,7 @@ add_elastic_ai_unit_test(
         TensorApi
         QuantizationApi
         StorageApi
+        odt_test_death
 )
 
 add_elastic_ai_unit_test(

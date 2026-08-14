@@ -328,6 +328,90 @@ void testReluLayerInitOwningDeepCopiesLqPointers(void) {
 void setUp() {}
 void tearDown() {}
 
+/* BFP epic PR2 Task 8: heap BFP wire, per-tensor {1,0}, 8-bit mantissas. The
+ * guards under test read only ->quantization->type, so the payload content is
+ * irrelevant — what matters is that the buffer is BFP-SIZED (n bytes, not
+ * n floats): an unguarded float* read/write would run past it. */
+static tensor_t *buildBfpTensor1D(size_t n) {
+    size_t *dims = reserveMemory(sizeof(size_t));
+    dims[0] = n;
+    size_t *order = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    return initTensor(shape, quantizationInitBfp(8, 8, HALF_AWAY), NULL);
+}
+
+static tensor_t *buildFloatTensor1D(size_t n) {
+    size_t *dims = reserveMemory(sizeof(size_t));
+    dims[0] = n;
+    size_t *order = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    return initTensor(shape, quantizationInitFloat(), NULL);
+}
+
+/* BFP epic PR2 Task 8: ReLU sits OUTSIDE the executeOp funnel — reluForwardFloat
+ * hands input/output straight to gteFloatValue, which raw-casts ->data to
+ * float*. A BFP wire stores PACKED mantissa codes plus a per-group exponent, so
+ * that cast reads packed bytes as floats (and the write leaves the output's
+ * exponents stale) — silent corruption with no diagnostic, on BOTH the input and
+ * the output side. Guard the STORAGE dtype of both wires. */
+void testReluForwardRejectsBfpWire() {
+    layerFunctions_t reluFns = layerFunctions[RELU];
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *reluLayer = reluLayerInit(&lq);
+
+    tensor_t *bfpIn = buildBfpTensor1D(6);
+    tensor_t *floatOut = buildFloatTensor1D(6);
+    ASSERT_EXITS_WITH_FAILURE(reluFns.forward(reluLayer, bfpIn, floatOut));
+
+    tensor_t *floatIn = buildFloatTensor1D(6);
+    tensor_t *bfpOut = buildBfpTensor1D(6);
+    ASSERT_EXITS_WITH_FAILURE(reluFns.forward(reluLayer, floatIn, bfpOut));
+
+    freeTensor(bfpOut);
+    freeTensor(floatIn);
+    freeTensor(floatOut);
+    freeTensor(bfpIn);
+    freeReluLayer(reluLayer);
+    freeQuantization(floatQ);
+}
+
+/* Backward twin of the forward guard above (reluBackwardFloat raw-casts all
+ * three wires). The pre-existing #315 arm guard already exits on a BFP wire —
+ * this pins the BFP-specific GUIDED message instead of the cryptic "requires
+ * FLOAT32 wires — got 6, 6, 6", and pins that the check runs before any
+ * dereference. Documented in the task report as non-discriminating on exit code
+ * alone (DeathTest.h matches the code, not the message). */
+void testReluBackwardRejectsBfpWire() {
+    layerFunctions_t reluFns = layerFunctions[RELU];
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *reluLayer = reluLayerInit(&lq);
+
+    tensor_t *bfpFwdIn = buildBfpTensor1D(6);
+    tensor_t *floatLoss = buildFloatTensor1D(6);
+    tensor_t *floatPropLoss = buildFloatTensor1D(6);
+    ASSERT_EXITS_WITH_FAILURE(reluFns.backward(reluLayer, bfpFwdIn, floatLoss, floatPropLoss));
+
+    tensor_t *floatFwdIn = buildFloatTensor1D(6);
+    tensor_t *bfpPropLoss = buildBfpTensor1D(6);
+    ASSERT_EXITS_WITH_FAILURE(reluFns.backward(reluLayer, floatFwdIn, floatLoss, bfpPropLoss));
+
+    freeTensor(bfpPropLoss);
+    freeTensor(floatFwdIn);
+    freeTensor(floatPropLoss);
+    freeTensor(floatLoss);
+    freeTensor(bfpFwdIn);
+    freeReluLayer(reluLayer);
+    freeQuantization(floatQ);
+}
+
 /* #315: reluBackward dispatches on the layer's DECLARED propLossMath and
  * raw-casts the wire data pointers without checking the wires' ACTUAL dtype. A
  * FLOAT32 arm fed SYM_INT32 wires reads int mantissa codes as floats — silent
@@ -378,6 +462,8 @@ int main(void) {
     RUN_TEST(testReluBackwardFloat);
     RUN_TEST(testReluBackwardSymInt32);
     RUN_TEST(testReluBackwardExitsOnDtypeMismatch);
+    RUN_TEST(testReluForwardRejectsBfpWire);
+    RUN_TEST(testReluBackwardRejectsBfpWire);
 
     RUN_TEST(testReluLayerInitAndFreeRoundTrip);
 

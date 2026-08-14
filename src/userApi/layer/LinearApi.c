@@ -226,13 +226,16 @@ void freeLinearLayer(layer_t *linearLayer) {
     }
 
     if (cfg->ownsQuantizations) {
+        /* freeQuantization, not freeReservedMemory(qConfig) + freeReservedMemory(q):
+         * deepCopyQuantization gives SYM/ASYM/BFP copies their own inner heap
+         * blocks (scales / scales+zeroPoints / exponents), and only
+         * freeQuantization frees those (BFP epic PR2 Task 8). The same swap is
+         * applied at every Owning teardown across src/userApi/layer/. */
         if (cfg->outputQ != NULL) {
-            freeReservedMemory(cfg->outputQ->qConfig);
-            freeReservedMemory(cfg->outputQ);
+            freeQuantization(cfg->outputQ);
         }
         if (cfg->propLossQ != NULL && cfg->propLossQ != cfg->outputQ) {
-            freeReservedMemory(cfg->propLossQ->qConfig);
-            freeReservedMemory(cfg->propLossQ);
+            freeQuantization(cfg->propLossQ);
         }
     }
 

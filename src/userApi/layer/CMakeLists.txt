@@ -46,6 +46,7 @@ target_link_libraries(ReluApi PRIVATE
         Quantization
         Common
         StorageApi
+        TensorApi
 )
 
 add_library(SoftmaxApi SoftmaxApi.c)
@@ -60,6 +61,7 @@ target_link_libraries(SoftmaxApi PRIVATE
         Softmax
         StorageApi
         Tensor
+        TensorApi
 )
 
 add_library(FlattenApi FlattenApi.c)
@@ -121,6 +123,7 @@ target_link_libraries(AdaptivePool1dApi PRIVATE
         QuantizationApi
         Rounding
         StorageApi
+        TensorApi
 )
 
 add_library(DropoutApi DropoutApi.c)
@@ -133,6 +136,7 @@ target_link_libraries(DropoutApi PRIVATE
         Common
         Rounding
         StorageApi
+        TensorApi
 )
 
 add_library(LayerNormApi LayerNormApi.c)
@@ -178,4 +182,5 @@ target_link_libraries(QuantLayerApi PRIVATE
         Rounding
         StorageApi
         Tensor
+        TensorApi
 )

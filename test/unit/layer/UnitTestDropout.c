@@ -51,6 +51,19 @@ static layer_t makeDropoutLayer(dropoutConfig_t *dcfg, layerConfig_t *lcfg) {
     return layer;
 }
 
+/* BFP epic PR2 Task 8: heap BFP wire, per-tensor {1,0}, 8-bit mantissas — the
+ * guards under test read only ->quantization->type, but the buffer is
+ * BFP-SIZED (n bytes), so an unguarded float* access would run past it. */
+static tensor_t *buildBfpTensor(size_t n) {
+    size_t *dims = reserveMemory(sizeof(size_t));
+    dims[0] = n;
+    size_t *order = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    return initTensor(shape, quantizationInitBfp(8, 8, HALF_AWAY), NULL);
+}
+
 void testForwardEvalIdentityFloat(void) {
     size_t n = 4;
     float in[] = {1.f, -2.f, 3.f, -4.f};
@@ -553,6 +566,72 @@ void testDropoutBackwardExitsOnDtypeMismatch(void) {
     freeTensor(loss);
 }
 
+/* BFP epic PR2 Task 8: Dropout sits OUTSIDE the executeOp funnel —
+ * dropoutForwardFloat raw-casts input/output ->data to float*, so a BFP wire's
+ * packed mantissa bytes are read (and written) as floats: silent corruption on
+ * either side, plus stale output exponents. Guard the STORAGE dtype of both
+ * wires, BEFORE bernoulliFillMask consumes RNG draws. */
+void testDropoutForwardRejectsBfpWire(void) {
+    size_t n = 4;
+    tensor_t *mask = buildBoolMask(n);
+    quantization_t *fq = quantizationInitFloat();
+    quantization_t *bq = quantizationInitFloat();
+    dropoutConfig_t dcfg;
+    initDropoutConfig(&dcfg, 0.5f, mask, fq, bq);
+    dcfg.training = true;
+    layerConfig_t lcfg;
+    layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
+
+    tensor_t *bfpIn = buildBfpTensor(n);
+    tensor_t *floatOut = buildFloatTensor(n, NULL);
+    ASSERT_EXITS_WITH_FAILURE(dropoutForward(&layer, bfpIn, floatOut));
+
+    tensor_t *floatIn = buildFloatTensor(n, NULL);
+    tensor_t *bfpOut = buildBfpTensor(n);
+    ASSERT_EXITS_WITH_FAILURE(dropoutForward(&layer, floatIn, bfpOut));
+
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeTensor(bfpOut);
+    freeTensor(floatIn);
+    freeTensor(floatOut);
+    freeTensor(bfpIn);
+    freeTensor(mask);
+}
+
+/* Backward twin: dropoutBackwardFloat raw-casts loss/propLoss (forwardInput is
+ * deliberately unused, so it is NOT guarded). The pre-existing #315 arm guard
+ * already exits on a BFP wire — this pins the BFP-specific GUIDED message; see
+ * the task report on why exit-code-only death tests cannot discriminate it. */
+void testDropoutBackwardRejectsBfpWire(void) {
+    size_t n = 4;
+    tensor_t *mask = buildBoolMask(n);
+    fillMaskKeepEven(mask);
+    quantization_t *fq = quantizationInitFloat();
+    quantization_t *bq = quantizationInitFloat();
+    dropoutConfig_t dcfg;
+    initDropoutConfig(&dcfg, 0.5f, mask, fq, bq);
+    dcfg.training = true;
+    layerConfig_t lcfg;
+    layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
+
+    tensor_t *bfpLoss = buildBfpTensor(n);
+    tensor_t *floatPropLoss = buildFloatTensor(n, NULL);
+    ASSERT_EXITS_WITH_FAILURE(dropoutBackward(&layer, NULL, bfpLoss, floatPropLoss));
+
+    tensor_t *floatLoss = buildFloatTensor(n, NULL);
+    tensor_t *bfpPropLoss = buildBfpTensor(n);
+    ASSERT_EXITS_WITH_FAILURE(dropoutBackward(&layer, NULL, floatLoss, bfpPropLoss));
+
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeTensor(bfpPropLoss);
+    freeTensor(floatLoss);
+    freeTensor(floatPropLoss);
+    freeTensor(bfpLoss);
+    freeTensor(mask);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testForwardEvalIdentityFloat);
@@ -562,6 +641,8 @@ int main(void) {
     RUN_TEST(testBackwardFloatUsesMaskAndScale);
     RUN_TEST(testBackwardSymInt32UsesMaskAndScaleFold);
     RUN_TEST(testDropoutBackwardExitsOnDtypeMismatch);
+    RUN_TEST(testDropoutForwardRejectsBfpWire);
+    RUN_TEST(testDropoutBackwardRejectsBfpWire);
     RUN_TEST(testVtableForwardIdentityFloat);
     RUN_TEST(testCalcOutputShapeIsIdentity);
     RUN_TEST(testFactoryBuildsAndForwards);

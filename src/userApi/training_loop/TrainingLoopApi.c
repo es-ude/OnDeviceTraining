@@ -10,6 +10,7 @@
 #include "Optimizer.h"
 #include "StorageApi.h"
 #include "TensorApi.h"
+#include "TensorConversion.h"
 #include "TrainingEpochDefault.h"
 #include "TrainingLoopApi.h"
 
@@ -68,9 +69,36 @@ static size_t argmaxByTensor(const tensor_t *t, size_t n) {
         }
         return maxIdx;
     }
+    case BFP: {
+        /* BFP epic PR2 Task 8: mantissa order is NOT value order here — every
+         * GROUP carries its own exponent, so a small value in a fine-grained
+         * group can outrank a large one on the raw mantissa. Comparison must
+         * happen after dequant (exact: m * 2^E, so float comparison semantics
+         * are preserved). Streamed in chunks so no scratch scales with n;
+         * dequantChunkToFloat requires count <= ODT_CONVERSION_CHUNK_ELEMS and
+         * a byte-aligned elemOffset, both satisfied by a walk that starts at 0
+         * and strides by the (multiple-of-8) chunk size. Both call sites argmax
+         * a single sample's class vector from element 0 — this must not be
+         * handed an arbitrary per-sample slice offset. */
+        float chunk[ODT_CONVERSION_CHUNK_ELEMS];
+        size_t maxIdx = 0;
+        float maxVal = 0.f;
+        for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+            size_t count =
+                n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+            dequantChunkToFloat(t, off, count, chunk);
+            for (size_t i = 0; i < count; i++) {
+                if (off + i == 0 || chunk[i] > maxVal) {
+                    maxVal = chunk[i];
+                    maxIdx = off + i;
+                }
+            }
+        }
+        return maxIdx;
+    }
     default:
         PRINT_ERROR("evaluate: output-wire dtype %d not supported for argmax "
-                    "(FLOAT32/SYM_INT32)",
+                    "(FLOAT32/SYM_INT32/BFP)",
                     (int)t->quantization->type);
         exit(1);
     }

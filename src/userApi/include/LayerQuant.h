@@ -51,8 +51,13 @@ void layerQuantInitUniform(layerQuant_t *lq, quantization_t *q);
 /*! Deep-copy a `quantization_t` and its `qConfig`. Returns NULL if `src` is NULL.
  *
  *  Caller owns the returned allocation. Free via:
- *      freeReservedMemory(result->qConfig);
- *      freeReservedMemory(result);
+ *      freeQuantization(result);
+ *
+ *  NOT the qConfig/wrapper pair-free this used to prescribe: SYM, ASYM and BFP
+ *  qConfigs each own further heap blocks (scales / scales+zeroPoints /
+ *  exponents) that this function deep-copies into the result, and only
+ *  freeQuantization frees them (BFP epic PR2 Task 8 — the pair-free leaked one
+ *  block per Owning layer).
  *
  *  The `qConfig` size is dispatched by `src->type`; BOOL/INT32/FLOAT32 have
  *  no qConfig (result->qConfig == NULL). Unknown types fire PRINT_ERROR +

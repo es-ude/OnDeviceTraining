@@ -9,6 +9,7 @@
 #include "Softmax.h"
 #include "SoftmaxApi.h"
 #include "StorageApi.h"
+#include "TensorApi.h"
 
 /* ============================================================================
  * New factory API — layerQuant_t profile (PR 2).
@@ -77,12 +78,10 @@ void freeSoftmaxLayer(layer_t *softmaxLayer) {
 
     if (cfg->ownsQuantizations) {
         if (cfg->outputQ != NULL) {
-            freeReservedMemory(cfg->outputQ->qConfig);
-            freeReservedMemory(cfg->outputQ);
+            freeQuantization(cfg->outputQ);
         }
         if (cfg->propLossQ != NULL && cfg->propLossQ != cfg->outputQ) {
-            freeReservedMemory(cfg->propLossQ->qConfig);
-            freeReservedMemory(cfg->propLossQ);
+            freeQuantization(cfg->propLossQ);
         }
     }
     freeReservedMemory(cfg);

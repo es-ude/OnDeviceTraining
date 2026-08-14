@@ -6,6 +6,7 @@
 #include "Layer.h"
 #include "StorageApi.h"
 #include "Tensor.h"
+#include "TensorApi.h"
 
 layer_t *dropoutLayerInit(float p, tensor_t *mask, quantization_t *forwardQ,
                           quantization_t *backwardQ) {
@@ -29,12 +30,10 @@ void freeDropoutLayer(layer_t *dropoutLayer) {
     dropoutConfig_t *cfg = dropoutLayer->config->dropout;
     if (cfg->ownsQuantizations) {
         if (cfg->outputQ != NULL) {
-            freeReservedMemory(cfg->outputQ->qConfig);
-            freeReservedMemory(cfg->outputQ);
+            freeQuantization(cfg->outputQ);
         }
         if (cfg->propLossQ != NULL && cfg->propLossQ != cfg->outputQ) {
-            freeReservedMemory(cfg->propLossQ->qConfig);
-            freeReservedMemory(cfg->propLossQ);
+            freeQuantization(cfg->propLossQ);
         }
     }
     freeReservedMemory(cfg);

@@ -18,6 +18,23 @@ void reluInitConfig(reluConfig_t *reluConfig, quantization_t *forwardQ, quantiza
     reluConfig->propLossQ = backwardQ;
 }
 
+/* BFP epic PR2 Task 8: ReLU runs OUTSIDE the executeOp funnel — every arm below
+ * raw-casts ->data (float* or int32_t*) and, for SYM_INT32, hand-copies the
+ * scale. A BFP wire stores PACKED mantissa codes under a per-GROUP exponent, so
+ * such a view reads packed bytes as wide scalars and leaves the destination's
+ * exponents stale: silent corruption, never a crash. Keyed on the wire's STORAGE
+ * dtype, not the declared arithmetic — pre-flip a BFP wire arrives here under
+ * ARITH_FLOAT32, and post-flip it would arrive under ARITH_BFP; both are wrong
+ * for this layer until it grows real BFP semantics. */
+static void requireNoBfpWire(const tensor_t *t, const char *what) {
+    if (t->quantization->type == BFP) {
+        PRINT_ERROR("%s: BFP Relu semantics arrive with epic PR4 -- keep BFP off this wire or use "
+                    "FLOAT32 wires",
+                    what);
+        exit(1);
+    }
+}
+
 void reluForwardFloat(tensor_t *input, tensor_t *output) {
     gteFloatValue(input, 0, 0, output);
 }
@@ -31,6 +48,8 @@ void reluForwardSymInt32(tensor_t *input, tensor_t *output) {
 
 void reluForward(layer_t *reluLayer, tensor_t *input, tensor_t *output) {
     reluConfig_t *reluConfig = reluLayer->config->relu;
+    requireNoBfpWire(input, "ReLU forward (input)");
+    requireNoBfpWire(output, "ReLU forward (output)");
 
     switch (reluConfig->forwardMath.type) {
     case ARITH_FLOAT32:
@@ -83,6 +102,11 @@ void reluBackwardSymInt32(tensor_t *forwardInput, tensor_t *loss, tensor_t *prop
 
 void reluBackward(layer_t *reluLayer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
     reluConfig_t *reluConfig = reluLayer->config->relu;
+    /* Ahead of the per-arm #315 guards below, which also reject a BFP wire but
+     * only as "not the dtype this arm wants" — this says WHY and what to do. */
+    requireNoBfpWire(forwardInput, "ReLU backward (forwardInput)");
+    requireNoBfpWire(loss, "ReLU backward (loss)");
+    requireNoBfpWire(propLoss, "ReLU backward (propLoss)");
 
     switch (reluConfig->propLossMath.type) {
     case ARITH_FLOAT32:

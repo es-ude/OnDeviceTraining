@@ -36,6 +36,22 @@ void initDropoutConfig(dropoutConfig_t *cfg, float p, tensor_t *mask, quantizati
     cfg->ownsQuantizations = false;
 }
 
+/* BFP epic PR2 Task 8: Dropout runs OUTSIDE the executeOp funnel — every arm
+ * below raw-casts ->data and, for SYM_INT32, folds 1/(1-p) into the wire's
+ * scale. A BFP wire stores PACKED mantissa codes under a per-GROUP exponent, so
+ * such a view reads packed bytes as wide scalars and leaves the destination's
+ * exponents stale (there is no single scale to fold the keep-probability into
+ * either): silent corruption, never a crash. Keyed on the wire's STORAGE dtype,
+ * not the declared arithmetic. */
+static void requireNoBfpWire(const tensor_t *t, const char *what) {
+    if (t->quantization->type == BFP) {
+        PRINT_ERROR("%s: BFP Dropout semantics arrive with epic PR4 -- keep BFP off this wire or "
+                    "use FLOAT32 wires",
+                    what);
+        exit(1);
+    }
+}
+
 static void dropoutForwardFloat(dropoutConfig_t *cfg, tensor_t *input, tensor_t *output) {
     size_t numberOfElements = calcNumberOfElementsByTensor(input);
     float *in = (float *)input->data;
@@ -79,6 +95,9 @@ static void dropoutForwardSymInt32(dropoutConfig_t *cfg, tensor_t *input, tensor
 
 void dropoutForward(layer_t *dropoutLayer, tensor_t *input, tensor_t *output) {
     dropoutConfig_t *cfg = dropoutLayer->config->dropout;
+    /* Before bernoulliFillMask: a rejected call must not consume RNG draws. */
+    requireNoBfpWire(input, "Dropout forward (input)");
+    requireNoBfpWire(output, "Dropout forward (output)");
     if (cfg->training) {
         size_t maskElements = calcNumberOfElementsByTensor(cfg->mask);
         size_t inputElements = calcNumberOfElementsByTensor(input);
@@ -132,6 +151,10 @@ void dropoutBackward(layer_t *dropoutLayer, tensor_t *forwardInput, tensor_t *lo
                      tensor_t *propLoss) {
     (void)forwardInput; // not needed: the stored mask + p fully determine the gradient.
     dropoutConfig_t *cfg = dropoutLayer->config->dropout;
+    /* forwardInput is deliberately NOT guarded — it is never dereferenced here
+     * (callers legitimately pass NULL). */
+    requireNoBfpWire(loss, "Dropout backward (loss)");
+    requireNoBfpWire(propLoss, "Dropout backward (propLoss)");
     size_t maskElements = calcNumberOfElementsByTensor(cfg->mask);
     size_t lossElements = calcNumberOfElementsByTensor(loss);
     if (maskElements != lossElements) {

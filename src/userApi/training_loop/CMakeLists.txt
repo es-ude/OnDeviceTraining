@@ -8,6 +8,7 @@ target_link_libraries(TrainingLoopApi PRIVATE
         TrainingEpochDefault
         TensorApi
         Tensor
+        TensorConversion
         Rounding
         Layer
         LossFunction

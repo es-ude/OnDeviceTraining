@@ -3,6 +3,7 @@
 #include <stdbool.h>
 
 #include "DTypes.h"
+#include "DeathTest.h"
 #include "Flatten.h"
 #include "FlattenApi.h"
 #include "Layer.h"
@@ -322,6 +323,64 @@ void testFlattenBackwardSymInt32_PropagatesScale(void) {
 void setUp(void) {}
 void tearDown(void) {}
 
+/* BFP epic PR2 Task 8: 1-D wire of `n` elements in the given quantization. */
+static tensor_t *buildWire1D(size_t n, quantization_t *q) {
+    size_t *dims = reserveMemory(sizeof(size_t));
+    dims[0] = n;
+    size_t *order = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    return initTensor(shape, q, NULL);
+}
+
+/* BFP epic PR2 Task 8: Flatten is a pure byte reshuffle OUTSIDE the funnel — it
+ * memcpy's `calcNumberOfBytesForData(INPUT->quantization, n)` bytes and then
+ * carries only the SYM_INT32 scale. Two distinct BFP failures: (a) BFP -> BFP
+ * copies the mantissa payload but NOT the per-group exponents, leaving the
+ * output on its zero-state grid (every value silently rescaled); (b) a FLOAT32
+ * input into a BFP output sizes the memcpy off the FLOAT32 side and overruns
+ * the (8x smaller) BFP buffer. Guard the STORAGE dtype of both wires. */
+void testFlattenForwardRejectsBfpWire(void) {
+    layer_t *flatten = flattenLayerInit();
+
+    tensor_t *bfpIn = buildWire1D(8, quantizationInitBfp(8, 8, HALF_AWAY));
+    tensor_t *floatOut = buildWire1D(8, quantizationInitFloat());
+    ASSERT_EXITS_WITH_FAILURE(flattenForward(flatten, bfpIn, floatOut));
+
+    tensor_t *floatIn = buildWire1D(8, quantizationInitFloat());
+    tensor_t *bfpOut = buildWire1D(8, quantizationInitBfp(8, 8, HALF_AWAY));
+    ASSERT_EXITS_WITH_FAILURE(flattenForward(flatten, floatIn, bfpOut));
+
+    freeTensor(bfpOut);
+    freeTensor(floatIn);
+    freeTensor(floatOut);
+    freeTensor(bfpIn);
+    freeFlattenLayer(flatten);
+}
+
+/* Backward twin — flattenBackward is the same byte memcpy on the loss/propLoss
+ * wires (forwardInput is unused and therefore NOT guarded), so it drops the
+ * exponents / overruns the buffer exactly the same way. Unlike Relu/Dropout,
+ * Flatten has NO pre-existing dtype guard, so both directions genuinely RED. */
+void testFlattenBackwardRejectsBfpWire(void) {
+    layer_t *flatten = flattenLayerInit();
+
+    tensor_t *bfpLoss = buildWire1D(8, quantizationInitBfp(8, 8, HALF_AWAY));
+    tensor_t *floatPropLoss = buildWire1D(8, quantizationInitFloat());
+    ASSERT_EXITS_WITH_FAILURE(flattenBackward(flatten, NULL, bfpLoss, floatPropLoss));
+
+    tensor_t *floatLoss = buildWire1D(8, quantizationInitFloat());
+    tensor_t *bfpPropLoss = buildWire1D(8, quantizationInitBfp(8, 8, HALF_AWAY));
+    ASSERT_EXITS_WITH_FAILURE(flattenBackward(flatten, NULL, floatLoss, bfpPropLoss));
+
+    freeTensor(bfpPropLoss);
+    freeTensor(floatLoss);
+    freeTensor(floatPropLoss);
+    freeTensor(bfpLoss);
+    freeFlattenLayer(flatten);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testFlattenLayerInit_ReturnsFlattenTypedLayer);
@@ -330,5 +389,7 @@ int main(void) {
     RUN_TEST(testFlattenForwardSymInt32_PropagatesScaleAndValues);
     RUN_TEST(testFlattenBackwardFloat_CopiesGradsUnchanged);
     RUN_TEST(testFlattenBackwardSymInt32_PropagatesScale);
+    RUN_TEST(testFlattenForwardRejectsBfpWire);
+    RUN_TEST(testFlattenBackwardRejectsBfpWire);
     return UNITY_END();
 }

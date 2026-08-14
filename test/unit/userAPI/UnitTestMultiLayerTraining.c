@@ -1,7 +1,9 @@
 #define SOURCE_FILE "UNIT_TEST_MULTI_LAYER_TRAINING"
 
 #include <math.h>
+#include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "ArithmeticType.h"
@@ -9,6 +11,7 @@
 #include "CalculateGradsSequential.h"
 #include "DataLoaderApi.h"
 #include "Dataset.h"
+#include "DeathTest.h"
 #include "InferenceApi.h"
 #include "LayerQuant.h"
 #include "Linear.h"
@@ -16,12 +19,14 @@
 #include "LossFunction.h"
 #include "OptimizerApi.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "ReluApi.h"
 #include "SgdApi.h"
 #include "SoftmaxApi.h"
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
+#include "TraceApi.h"
 #include "TrainingBatchDefault.h"
 #include "TrainingLoopApi.h"
 #include "unity.h"
@@ -433,6 +438,9 @@ void testMultiLayerTraining_MultipleSteps_GradsAccumulate() {
  *  the conversionMatrix diagonal, honoring writeBackRounding through the
  *  target's storage slot (Task 8 Arm 2) -- textbook fake-quant training. */
 void testBfpFakeQuantTrainingLossDecreasesAndGridMoves(void) {
+    /* BFP epic PR2 Task 8 carry-over: the SR_HALF_AWAY configs below draw from
+     * the module-global RNG -- seed it so the run is reproducible. */
+    rngSetSeed(20250811u);
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
@@ -611,11 +619,379 @@ void testBfpFakeQuantTrainingLossDecreasesAndGridMoves(void) {
     TEST_ASSERT_TRUE_MESSAGE(gradsStillFloat, "grad storage must stay FLOAT32 (default, #261)");
 }
 
+/* ===========================================================================
+ * BFP epic PR2 Task 8 capstone: BFP *WIRES* (not just params).
+ * ======================================================================== */
+
+#define BFP_WIRE_MAX_GROUPS 16
+
+typedef struct bfpWireCapture {
+    bool seen;
+    int type;
+    size_t numElements;
+    size_t numGroups;
+    size_t groupSize;
+    uint8_t mantissaBits;
+    uint8_t exponentBits;
+    uint8_t exponents[BFP_WIRE_MAX_GROUPS];
+} bfpWireCapture_t;
+
+/* The hidden wire lives ONLY inside calculateGradsImpl -- initLayerOutputs
+ * allocates it and deInitLayerOutputs frees it before the call returns, and
+ * trainingStats->output carries the FINAL (FLOAT32) wire. The layer-0 "fwd"
+ * probe is therefore the only place the BFP wire is observable, and it fires
+ * right after the OUT_WRITE epilogue derived the exponents. Captures the FIRST
+ * forward only (the zero-state comparison must see step 1's grid). */
+static void captureLayer0ForwardWire(void *ctx, size_t layerIdx, layerType_t layerType,
+                                     const char *phase, tensor_t *tensor) {
+    (void)layerType;
+    bfpWireCapture_t *cap = ctx;
+    if (cap->seen || layerIdx != 0 || strcmp(phase, "fwd") != 0) {
+        return;
+    }
+    cap->seen = true;
+    cap->type = (int)tensor->quantization->type;
+    cap->numElements = calcNumberOfElementsByTensor(tensor);
+    if (tensor->quantization->type != BFP) {
+        return;
+    }
+    bfpQConfig_t *qc = tensor->quantization->qConfig;
+    cap->numGroups = qc->numGroups;
+    cap->groupSize = qc->groupSize;
+    cap->mantissaBits = qc->mantissaBits;
+    cap->exponentBits = qc->exponentBits;
+    size_t copyGroups = qc->numGroups < BFP_WIRE_MAX_GROUPS ? qc->numGroups : BFP_WIRE_MAX_GROUPS;
+    memcpy(cap->exponents, qc->exponents, copyGroups);
+}
+
+typedef struct bfpWireFixture {
+    quantization_t *floatQ;
+    quantization_t *bfpWireQ;
+    quantization_t *momentumQ;
+    parameter_t *w0;
+    parameter_t *b0;
+    parameter_t *w1;
+    parameter_t *b1;
+    layer_t *linear0;
+    layer_t *linear1;
+    layer_t *model[2];
+    optimizer_t *sgd;
+    tensor_t *input;
+    tensor_t *label;
+} bfpWireFixture_t;
+
+/* Deterministic FLOAT32 parameter, values base, base+step, base+2*step, ... */
+static parameter_t *buildRampParam2D(size_t d0, size_t d1, float base, float step) {
+    size_t *dims = reserveMemory(2 * sizeof(size_t));
+    dims[0] = d0;
+    dims[1] = d1;
+    size_t *order = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 2, order);
+    tensor_t *param = initTensor(shape, quantizationInitFloat(), NULL);
+    size_t n = d0 * d1;
+    float values[n];
+    for (size_t i = 0; i < n; i++) {
+        values[i] = base + step * (float)i;
+    }
+    tensorFillFromFloatBuffer(param, values, n);
+    return parameterInit(param, gradInitFloat(param, NULL));
+}
+
+static tensor_t *buildFloatTensor2D(size_t d0, size_t d1, const float *values) {
+    size_t *dims = reserveMemory(2 * sizeof(size_t));
+    dims[0] = d0;
+    dims[1] = d1;
+    size_t *order = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 2, order);
+    tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(t, (float *)values, d0 * d1);
+    return t;
+}
+
+/*! Linear(3->hidden) -> Linear(hidden->2) + MSE, with layer 0's FORWARD WIRE
+ *  declared grouped BFP. NO Relu in the model: Relu/Dropout/Flatten are guarded
+ *  against BFP storage until epic PR4, so a BFP wire may only ever land between
+ *  two funnel layers.
+ *
+ *  Pre-flip (arithmeticFromQuantization still maps BFP -> ARITH_FLOAT32) this is
+ *  textbook fake-quant: layer 0's GEMM runs in float, the funnel's OUT_WRITE
+ *  epilogue packs the activations into the BFP wire and DERIVES its exponents,
+ *  and layer 1's IN_READ dequantizes them back. propLossQ, both weight/bias
+ *  params and all grads stay FLOAT32.
+ *
+ *  `templateNumGroups` is the numGroups the caller declares in the template --
+ *  deliberately decoupled from the truth: the allocator DERIVES
+ *  numGroups = wireElements / wireGroupSize (plan Decision 5). */
+static void buildBfpWireFixture(bfpWireFixture_t *f, size_t hidden, size_t templateNumGroups,
+                                size_t wireGroupSize) {
+    f->floatQ = quantizationInitFloat();
+    f->bfpWireQ = quantizationInitBfpGrouped(6, 8, SR_HALF_AWAY, templateNumGroups, wireGroupSize);
+
+    f->w0 = buildRampParam2D(hidden, 3, 0.1f, 0.05f);
+    f->b0 = buildRampParam2D(1, hidden, 0.0f, 0.0f);
+    f->w1 = buildRampParam2D(2, hidden, 0.1f, 0.05f);
+    f->b1 = buildRampParam2D(1, 2, 0.0f, 0.0f);
+
+    f->linear0 = buildBorrowedLinearLayer(f->w0, f->b0, f->floatQ);
+    /* Only the forward wire goes BFP; propLossQ and the grad math stay FLOAT32.
+     * forwardMath is DERIVED from the wire template (pre-flip: ARITH_FLOAT32),
+     * so this test tracks the derivation rather than hardcoding it. */
+    f->linear0->config->linear->outputQ = f->bfpWireQ;
+    f->linear0->config->linear->forwardMath = arithmeticFromQuantization(f->bfpWireQ);
+    f->linear1 = buildBorrowedLinearLayer(f->w1, f->b1, f->floatQ);
+    f->model[0] = f->linear0;
+    f->model[1] = f->linear1;
+
+    f->momentumQ = quantizationInitFloat();
+    f->sgd = sgdMCreateOptim(0.002f, 0.f, 0.f, f->model, 2, f->momentumQ,
+                             (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+
+    f->input = buildFloatTensor2D(1, 3, (float[]){1.0f, 2.0f, 3.0f});
+    f->label = buildFloatTensor2D(1, 2, (float[]){0.2f, -0.3f});
+}
+
+/* Reverse-init order; freeOptim cascades into w0/b0/w1/b1 (SgdApi), so the
+ * layers are torn down shell-only. */
+static void freeBfpWireFixture(bfpWireFixture_t *f) {
+    freeTensor(f->label);
+    freeTensor(f->input);
+    freeOptim(f->sgd);
+    freeLinearLayerShellOnly(f->linear1);
+    freeLinearLayerShellOnly(f->linear0);
+    freeQuantization(f->momentumQ);
+    freeQuantization(f->bfpWireQ);
+    freeQuantization(f->floatQ);
+}
+
+/*! THE Task 8 capstone. Hidden wire is [1, 6] -> 6 elements; the template
+ *  declares numGroups=2, which is WRONG for this wire -- the allocator derives
+ *  6/2 = 3 groups (Decision 5). Trains 20 fake-quant SGD steps. */
+void testBfpWireFakeQuantTrainingLossDecreasesAndWirePacks(void) {
+    rngSetSeed(4242u);
+    bfpWireFixture_t f;
+    buildBfpWireFixture(&f, /*hidden=*/6, /*templateNumGroups=*/2, /*wireGroupSize=*/2);
+
+    bfpWireCapture_t cap = {0};
+    optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
+    float firstLoss = NAN;
+    float lastLoss = NAN;
+    for (size_t step = 0; step < 20; step++) {
+        trainingStats_t *stats = tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
+                                             f.input, f.label, captureLayer0ForwardWire, &cap);
+        if (step == 0) {
+            firstLoss = stats->loss;
+        }
+        lastLoss = stats->loss;
+        freeTrainingStats(stats);
+        sgdFns.step(f.sgd);
+        sgdFns.zero(f.sgd);
+    }
+
+    /* CAPTURE (cap is already a value copy) then FREE, assert last. */
+    bool anyExponentMoved = false;
+    uint8_t zeroState = (uint8_t)((1 << (8 - 1)) - 1); /* exponentBits=8 -> bias 127 */
+    for (size_t g = 0; g < cap.numGroups && g < BFP_WIRE_MAX_GROUPS; g++) {
+        if (cap.exponents[g] != zeroState) {
+            anyExponentMoved = true;
+        }
+    }
+
+    freeBfpWireFixture(&f);
+
+    TEST_ASSERT_TRUE_MESSAGE(cap.seen, "layer-0 forward probe must have fired");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, cap.type, "the hidden wire tensor must be BFP-stored");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(6, cap.numElements, "hidden wire is [1, 6]");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(3, cap.numGroups,
+                                   "wire numGroups must be DERIVED (6 elements / groupSize 2 = 3), "
+                                   "not taken from the template's numGroups=2");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2, cap.groupSize, "groupSize comes from the template");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(6, cap.mantissaBits, "mantissa width comes from the template");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(8, cap.exponentBits, "exponent width comes from the template");
+    TEST_ASSERT_TRUE_MESSAGE(anyExponentMoved,
+                             "the forward OUT_WRITE must derive the wire's grid: at least one "
+                             "group exponent must leave the zero state");
+    TEST_ASSERT_TRUE_MESSAGE(isfinite(firstLoss) && isfinite(lastLoss),
+                             "BFP-wire fake-quant training losses must be finite");
+    TEST_ASSERT_TRUE_MESSAGE(lastLoss < firstLoss,
+                             "BFP-wire fake-quant training must converge (loss must decrease)");
+}
+
+/*! Decision 5, pinned hard: a template numGroups that cannot possibly describe
+ *  the wire (7 groups of 2 = 14 elements, wire has 6) is IGNORED -- geometry is
+ *  derived from the wire's own element count. Without the derivation the
+ *  allocator would build a 7-group config over a 6-element buffer. */
+void testBfpWireGeometryIgnoresTemplateNumGroups(void) {
+    rngSetSeed(4242u);
+    bfpWireFixture_t f;
+    buildBfpWireFixture(&f, /*hidden=*/6, /*templateNumGroups=*/7, /*wireGroupSize=*/2);
+
+    bfpWireCapture_t cap = {0};
+    trainingStats_t *stats = tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
+                                         f.input, f.label, captureLayer0ForwardWire, &cap);
+    freeTrainingStats(stats);
+    freeBfpWireFixture(&f);
+
+    TEST_ASSERT_TRUE(cap.seen);
+    TEST_ASSERT_EQUAL_INT(BFP, cap.type);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(3, cap.numGroups,
+                                   "derived 6/2 = 3 must win over the template's numGroups=7");
+    TEST_ASSERT_EQUAL_UINT(2, cap.groupSize);
+}
+
+/*! A groupSize that does not divide the wire has no valid derived geometry --
+ *  fail fast with a guided message instead of silently truncating. Wire is
+ *  [1, 9] with groupSize 2: an un-guarded floor division would yield a {4, 2}
+ *  config covering only 8 of the 9 elements, and the packer would index
+ *  exponents[4] past the array. */
+void testInitLayerOutputsBfpGroupSizeMismatchDies(void) {
+    bfpWireFixture_t f;
+    buildBfpWireFixture(&f, /*hidden=*/9, /*templateNumGroups=*/2, /*wireGroupSize=*/2);
+
+    ASSERT_EXITS_WITH_FAILURE(freeTrainingStats(calculateGradsSequential(
+        f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label)));
+
+    freeBfpWireFixture(&f);
+}
+
+/* Twin of captureLayer0ForwardWire for the BACKWARD wire: the "agrad" probe at
+ * layer 0 hands over the dx tensor `initGradTensor` built from layer 1's
+ * propLossQ, after layer 1's backward wrote into it. Same short-lived-tensor
+ * argument as the forward sink -- deInitGradTensor frees it before the call
+ * returns. */
+static void captureLayer0BackwardWire(void *ctx, size_t layerIdx, layerType_t layerType,
+                                      const char *phase, tensor_t *tensor) {
+    (void)layerType;
+    bfpWireCapture_t *cap = ctx;
+    if (cap->seen || layerIdx != 0 || strcmp(phase, "agrad") != 0) {
+        return;
+    }
+    cap->seen = true;
+    cap->type = (int)tensor->quantization->type;
+    cap->numElements = calcNumberOfElementsByTensor(tensor);
+    if (tensor->quantization->type != BFP) {
+        return;
+    }
+    bfpQConfig_t *qc = tensor->quantization->qConfig;
+    cap->numGroups = qc->numGroups;
+    cap->groupSize = qc->groupSize;
+    cap->mantissaBits = qc->mantissaBits;
+    cap->exponentBits = qc->exponentBits;
+    size_t copyGroups = qc->numGroups < BFP_WIRE_MAX_GROUPS ? qc->numGroups : BFP_WIRE_MAX_GROUPS;
+    memcpy(cap->exponents, qc->exponents, copyGroups);
+}
+
+/* Move the BFP template off the forward wire and onto layer 1's dx wire: the
+ * forward then runs entirely FLOAT32 (so the loss, which has no BFP arm, is
+ * reachable) and the BFP allocation happens in initGradTensor instead --
+ * initGradTensor(gradCurr, layerOutputs[1], backwardWireQ(linear1)). */
+static void moveBfpTemplateToDxWire(bfpWireFixture_t *f) {
+    f->linear0->config->linear->outputQ = f->floatQ;
+    f->linear0->config->linear->forwardMath = arithmeticFromQuantization(f->floatQ);
+    f->linear1->config->linear->propLossQ = f->bfpWireQ;
+    f->linear1->config->linear->propLossMath = arithmeticFromQuantization(f->bfpWireQ);
+}
+
+/*! initGradTensor's BFP arm, live: the dx wire between the two Linears is
+ *  [1, 6] -> 6 elements, groupSize 2 -> derived numGroups 3 (the template's
+ *  numGroups=2 is ignored, same Decision 5 rule as the forward allocators).
+ *  Pre-flip this is the dx-side fake-quant bridge: layer 1's backward OUT_WRITEs
+ *  its dx into the BFP wire, layer 0's weight-grad GEMM IN_READs it back. */
+void testBfpDxWireAllocatesThroughInitGradTensor(void) {
+    rngSetSeed(4242u);
+    bfpWireFixture_t f;
+    buildBfpWireFixture(&f, /*hidden=*/6, /*templateNumGroups=*/2, /*wireGroupSize=*/2);
+    moveBfpTemplateToDxWire(&f);
+
+    bfpWireCapture_t cap = {0};
+    trainingStats_t *stats = tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
+                                         f.input, f.label, captureLayer0BackwardWire, &cap);
+    float loss = stats->loss;
+    freeTrainingStats(stats);
+    freeBfpWireFixture(&f);
+
+    TEST_ASSERT_TRUE_MESSAGE(cap.seen, "layer-0 agrad probe must have fired");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, cap.type, "the dx wire tensor must be BFP-stored");
+    TEST_ASSERT_EQUAL_UINT(6, cap.numElements);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(3, cap.numGroups,
+                                   "dx-wire numGroups must be DERIVED (6 / 2), not the template's");
+    TEST_ASSERT_EQUAL_UINT(2, cap.groupSize);
+    TEST_ASSERT_TRUE_MESSAGE(isfinite(loss), "the dx-wire BFP round trip must stay finite");
+}
+
+/*! initGradTensor's divisibility fail-fast (the dx-wire twin of
+ *  testInitLayerOutputsBfpGroupSizeMismatchDies). Same discriminating fixture
+ *  shape: a 9-element dx wire with groupSize 2, so that floor division yields
+ *  the CONSTRUCTIBLE shape {4, 2} -- initBfpQConfigGrouped's own guard does not
+ *  fire, and without this check the packer would index exponents[4] past a
+ *  4-entry array. (A groupSize that floors to {1, n} would be caught by
+ *  initBfpQConfigGrouped anyway and would make this test vacuous.) */
+void testInitGradTensorBfpGroupSizeMismatchDies(void) {
+    rngSetSeed(4242u);
+    bfpWireFixture_t f;
+    buildBfpWireFixture(&f, /*hidden=*/9, /*templateNumGroups=*/2, /*wireGroupSize=*/2);
+    moveBfpTemplateToDxWire(&f);
+
+    ASSERT_EXITS_WITH_FAILURE(freeTrainingStats(calculateGradsSequential(
+        f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label)));
+
+    freeBfpWireFixture(&f);
+}
+
+/*! Owning factories deep-copy outputQ/propLossQ, and for BFP that copy owns a
+ *  fresh exponents block -- so the teardown must be freeQuantization: the old
+ *  freeReservedMemory(qConfig) + freeReservedMemory(q) pair leaked exactly that
+ *  block, once per Owning layer. Two independent assertions: reserveMemory's
+ *  live-byte counter returns to its pre-factory mark (the leak itself -- a real
+ *  check under ODT_MEM_PROFILE, which the unit_test_debug and unit_test_asan
+ *  presets both enable; vacuously 0 == 0 without it, the UnitTestPpcaReplay
+ *  precedent), and the caller's template survives untouched (the copy is
+ *  independent -- freeing the layer must not reach into it). */
+void testOwningFactoryBfpOutputQFreesExponents(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *bfpQ = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 2);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    lq.outputQ = bfpQ;
+
+    size_t liveBytesBefore = memProfileMark();
+    layer_t *layer = linearLayerInitOwning(
+        &(linearInit_t){.inFeatures = 3, .outFeatures = 4, .bias = BIAS_TRUE}, &lq);
+    freeLinearLayer(layer);
+    size_t liveBytesAfter = memProfileMark();
+
+    bfpQConfig_t *qc = bfpQ->qConfig;
+    size_t capturedNumGroups = qc->numGroups;
+    size_t capturedGroupSize = qc->groupSize;
+    uint8_t capturedExponent0 = qc->exponents[0];
+
+    freeQuantization(bfpQ);
+    freeQuantization(floatQ);
+
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(liveBytesBefore, liveBytesAfter,
+                                     "an Owning layer with a BFP outputQ must free every block it "
+                                     "allocated -- including the deep-copied exponents");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2, capturedNumGroups,
+                                   "the caller's BFP template must survive the layer's teardown");
+    TEST_ASSERT_EQUAL_UINT(2, capturedGroupSize);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(127, capturedExponent0,
+                                    "template exponents must be untouched (zero state, bias 127)");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMultiLayerBackward_WithCrossEntropy_DoesNotCrash);
     RUN_TEST(testMultiLayerBackward_WithManualInit_DoesNotCrash);
     RUN_TEST(testMultiLayerTraining_MultipleSteps_GradsAccumulate);
     RUN_TEST(testBfpFakeQuantTrainingLossDecreasesAndGridMoves);
+    RUN_TEST(testBfpWireFakeQuantTrainingLossDecreasesAndWirePacks);
+    RUN_TEST(testBfpWireGeometryIgnoresTemplateNumGroups);
+    RUN_TEST(testInitLayerOutputsBfpGroupSizeMismatchDies);
+    RUN_TEST(testBfpDxWireAllocatesThroughInitGradTensor);
+    RUN_TEST(testInitGradTensorBfpGroupSizeMismatchDies);
+    RUN_TEST(testOwningFactoryBfpOutputQFreesExponents);
     return UNITY_END();
 }

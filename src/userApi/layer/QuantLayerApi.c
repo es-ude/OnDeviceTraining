@@ -9,6 +9,7 @@
 #include "QuantLayerApi.h"
 #include "QuantizationLayer.h"
 #include "StorageApi.h"
+#include "TensorApi.h"
 
 static void validateLayerQuantForQuantLayer(layerQuant_t *lq) {
     if (lq == NULL) {
@@ -75,12 +76,10 @@ void freeQuantLayer(layer_t *quantLayer) {
      * if it is a distinct allocation from outputQ. */
     if (cfg->ownsQuantizations) {
         if (cfg->outputQ != NULL) {
-            freeReservedMemory(cfg->outputQ->qConfig);
-            freeReservedMemory(cfg->outputQ);
+            freeQuantization(cfg->outputQ);
         }
         if (cfg->propLossQ != NULL && cfg->propLossQ != cfg->outputQ) {
-            freeReservedMemory(cfg->propLossQ->qConfig);
-            freeReservedMemory(cfg->propLossQ);
+            freeQuantization(cfg->propLossQ);
         }
     }
 

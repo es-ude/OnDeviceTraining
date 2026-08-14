@@ -248,6 +248,38 @@ static void initLayerOutputs(tensor_t **layerOutputs, layer_t **model, size_t si
             initSymInt32QConfigWithQMaxBits(currentQC->roundingMode, qC, currentQC->qMaxBits);
             initSymInt32Quantization(qC, q);
             break;
+        case BFP: {
+            /* BFP epic PR2 (plan Decision 5): the template supplies widths,
+             * rounding and groupSize; numGroups is DERIVED from THIS wire's
+             * element count. A layerQuant_t profile is shape-agnostic — the
+             * same template is routinely shared across layers whose wires
+             * differ in size — so a template numGroups can only ever be a
+             * guess, and honoring it would size exponents[] against a buffer
+             * it does not describe (the packer's group index is unbounded by
+             * numGroups: a heap overflow, not a wrong number). Exponents start
+             * at the zero state; the forward's OUT_WRITE epilogue derives the
+             * real grid. */
+            bfpQConfig_t *currentBfpQC = currentQ->qConfig;
+            bfpQConfig_t *bfpQC = reserveMemory(sizeof(bfpQConfig_t));
+            if (currentBfpQC->groupSize == 0) {
+                initBfpQConfig(currentBfpQC->mantissaBits, currentBfpQC->exponentBits,
+                               currentBfpQC->roundingMode, bfpQC);
+            } else {
+                if (numberOfValues % currentBfpQC->groupSize != 0) {
+                    PRINT_ERROR("initLayerOutputs: BFP wire groupSize %zu does not divide the "
+                                "wire's %zu elements -- pick a divisor or a per-tensor {1,0} "
+                                "template",
+                                currentBfpQC->groupSize, numberOfValues);
+                    exit(1);
+                }
+                initBfpQConfigGrouped(currentBfpQC->mantissaBits, currentBfpQC->exponentBits,
+                                      currentBfpQC->roundingMode,
+                                      numberOfValues / currentBfpQC->groupSize,
+                                      currentBfpQC->groupSize, bfpQC);
+            }
+            initBfpQuantization(bfpQC, q);
+            break;
+        }
         default:
             PRINT_ERROR("Unknown QType!");
             exit(1);
@@ -307,6 +339,31 @@ static void initGradTensor(tensor_t *grad, tensor_t *layerOutput, quantization_t
         symInt32QConfig_t *qC = reserveMemory(sizeof(symInt32QConfig_t));
         initSymInt32QConfigWithQMaxBits(currentQC->roundingMode, qC, currentQC->qMaxBits);
         initSymInt32Quantization(qC, q);
+        break;
+    }
+    case BFP: {
+        /* Same derive-from-element-count rule as initLayerOutputs (Decision 5).
+         * `currentQ` is the layer's propLossQ template — except on the loss-grad
+         * seed path, where wireQ is NULL and the template is the model OUTPUT's
+         * own (already wire-sized) config; the rule is identical either way,
+         * since it only ever reads groupSize/widths and re-derives numGroups. */
+        bfpQConfig_t *currentBfpQC = currentQ->qConfig;
+        bfpQConfig_t *bfpQC = reserveMemory(sizeof(bfpQConfig_t));
+        if (currentBfpQC->groupSize == 0) {
+            initBfpQConfig(currentBfpQC->mantissaBits, currentBfpQC->exponentBits,
+                           currentBfpQC->roundingMode, bfpQC);
+        } else {
+            if (numberOfValues % currentBfpQC->groupSize != 0) {
+                PRINT_ERROR("initGradTensor: BFP dx-wire groupSize %zu does not divide the wire's "
+                            "%zu elements -- pick a divisor or a per-tensor {1,0} template",
+                            currentBfpQC->groupSize, numberOfValues);
+                exit(1);
+            }
+            initBfpQConfigGrouped(
+                currentBfpQC->mantissaBits, currentBfpQC->exponentBits, currentBfpQC->roundingMode,
+                numberOfValues / currentBfpQC->groupSize, currentBfpQC->groupSize, bfpQC);
+        }
+        initBfpQuantization(bfpQC, q);
         break;
     }
     default:

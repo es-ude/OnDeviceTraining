@@ -11,6 +11,7 @@
 #include "LayerQuant.h"
 #include "QuantizationApi.h"
 #include "StorageApi.h"
+#include "TensorApi.h"
 
 static void validateInit(adaptiveAvgPool1dInit_t *init) {
     if (init == NULL) {
@@ -86,12 +87,10 @@ void freeAdaptiveAvgPool1dLayer(layer_t *layer) {
 
     if (cfg->ownsQuantizations) {
         if (cfg->outputQ != NULL) {
-            freeReservedMemory(cfg->outputQ->qConfig);
-            freeReservedMemory(cfg->outputQ);
+            freeQuantization(cfg->outputQ);
         }
         if (cfg->propLossQ != NULL && cfg->propLossQ != cfg->outputQ) {
-            freeReservedMemory(cfg->propLossQ->qConfig);
-            freeReservedMemory(cfg->propLossQ);
+            freeQuantization(cfg->propLossQ);
         }
     }
 

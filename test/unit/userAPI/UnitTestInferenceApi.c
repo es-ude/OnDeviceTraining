@@ -3,6 +3,7 @@
 
 #include "ArithmeticType.h"
 #include "BorrowedLayer.h"
+#include "DeathTest.h"
 #include "InferenceApi.h"
 #include "Layer.h"
 #include "LayerNormApi.h"
@@ -405,6 +406,154 @@ void testInferenceOutputWireHonorsDeclaredQMaxBits(void) {
                                     "outputQ qMaxBits, not the re-defaulted int12 operand width");
 }
 
+/* BFP epic PR2 Task 8 --------------------------------------------------------
+ * The inference path has its OWN pair of wire allocators (initBufferOutput /
+ * initBufferInput), separate from the training path's initLayerOutputs. Both
+ * need the BFP arm, and both derive the group geometry from the wire's own
+ * element count (plan Decision 5) rather than trusting the template. */
+
+static tensor_t *buildFloatTensor2DInf(size_t d0, size_t d1, const float *values) {
+    size_t *dims = reserveMemory(2 * sizeof(size_t));
+    dims[0] = d0;
+    dims[1] = d1;
+    size_t *order = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 2, order);
+    tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(t, (float *)values, d0 * d1);
+    return t;
+}
+
+/*! initBufferOutput BFP arm: a Linear whose declared outputQ is a grouped BFP
+ *  template produces a BFP inference wire, with numGroups DERIVED from the
+ *  output's 4 elements / groupSize 2 = 2 -- the template's numGroups=5 is
+ *  ignored. The exponents come out of the forward's OUT_WRITE epilogue, so at
+ *  least one must have left the zero state (bias 127). */
+void testInferenceBufferOutputCarriesBfpWire(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    quantization_t *bfpWireQ = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 5, 2);
+    lq.outputQ = bfpWireQ;
+
+    tensor_t *input = buildFloatTensor2DInf(1, 2, (float[]){1.f, 2.f});
+    layer_t *linear =
+        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 4, .bias = BIAS_TRUE}, &lq);
+    layerLoadWeights(linear, (float[]){1.f, 0.f, 0.f, 1.f, 1.f, 1.f, 2.f, 0.f},
+                     (float[]){0.f, 0.f, 0.f, 0.f});
+    layer_t *model[] = {linear};
+
+    tensor_t *output = inference(model, 1, input);
+
+    /* CAPTURE. */
+    int capturedType = (int)output->quantization->type;
+    size_t capturedNumGroups = 0;
+    size_t capturedGroupSize = 0;
+    uint8_t capturedMantissaBits = 0;
+    bool anyExponentMoved = false;
+    if (output->quantization->type == BFP) {
+        bfpQConfig_t *qc = output->quantization->qConfig;
+        capturedNumGroups = qc->numGroups;
+        capturedGroupSize = qc->groupSize;
+        capturedMantissaBits = qc->mantissaBits;
+        for (size_t g = 0; g < qc->numGroups; g++) {
+            if (qc->exponents[g] != 127) {
+                anyExponentMoved = true;
+            }
+        }
+    }
+
+    /* FREE. */
+    freeTensor(output);
+    freeLinearLayer(linear);
+    freeTensor(input);
+    freeQuantization(bfpWireQ);
+    freeQuantization(q);
+
+    /* ASSERT. */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, capturedType, "inference wire must carry the declared BFP");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2, capturedNumGroups,
+                                   "numGroups must be DERIVED (4 elements / groupSize 2), not the "
+                                   "template's numGroups=5");
+    TEST_ASSERT_EQUAL_UINT(2, capturedGroupSize);
+    TEST_ASSERT_EQUAL_UINT8(8, capturedMantissaBits);
+    TEST_ASSERT_TRUE_MESSAGE(anyExponentMoved,
+                             "the forward OUT_WRITE must derive the wire's exponents");
+}
+
+/*! initBufferInput BFP arm: a BFP-STORED input tensor must survive the entry
+ *  buffer with its geometry AND its exponent VALUES intact -- otherwise the
+ *  first layer reads the mantissas against a zero-state grid, i.e. every value
+ *  silently rescaled by a power of two. Identity Linear, so the FLOAT32 output
+ *  is exactly the dequantized input. */
+void testInferenceBufferInputCarriesBfpExponents(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+
+    /* BFP input: two groups of one, values 1.5 and 24.0 -- far enough apart
+     * that a dropped exponent could not go unnoticed. */
+    size_t *dims = reserveMemory(2 * sizeof(size_t));
+    dims[0] = 1;
+    dims[1] = 2;
+    size_t *order = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 2, order);
+    tensor_t *input = initTensor(shape, quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 1), NULL);
+    tensorFillFromFloatBuffer(input, (float[]){1.5f, 24.f}, 2);
+
+    layer_t *linear =
+        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2, .bias = BIAS_TRUE}, &lq);
+    layerLoadWeights(linear, (float[]){1.f, 0.f, 0.f, 1.f}, (float[]){0.f, 0.f});
+    layer_t *model[] = {linear};
+
+    tensor_t *output = inference(model, 1, input);
+
+    /* CAPTURE. */
+    float capturedOutput[2] = {((float *)output->data)[0], ((float *)output->data)[1]};
+
+    /* FREE. */
+    freeTensor(output);
+    freeLinearLayer(linear);
+    freeTensor(input);
+    freeQuantization(q);
+
+    /* ASSERT: 1.5 and 24.0 are both exactly representable at 8 mantissa bits. */
+    TEST_ASSERT_EQUAL_FLOAT_MESSAGE(1.5f, capturedOutput[0],
+                                    "BFP input buffer must carry group 0's exponent");
+    TEST_ASSERT_EQUAL_FLOAT_MESSAGE(24.f, capturedOutput[1],
+                                    "BFP input buffer must carry group 1's exponent");
+}
+
+/*! initBufferOutput's divisibility fail-fast (the inference-path twin of
+ *  testInitLayerOutputsBfpGroupSizeMismatchDies). Discriminating fixture: a
+ *  5-element output wire with groupSize 2, so floor division yields the
+ *  CONSTRUCTIBLE shape {2, 2} -- initBfpQConfigGrouped's own guard does not
+ *  fire, and without this check the packer would index exponents[2] past a
+ *  2-entry array. (A groupSize that floors to {1, n} would be rejected by
+ *  initBfpQConfigGrouped anyway and would make this test vacuous.) */
+void testInitBufferOutputBfpGroupSizeMismatchDies(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    quantization_t *bfpWireQ = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 2);
+    lq.outputQ = bfpWireQ;
+
+    tensor_t *input = buildFloatTensor2DInf(1, 2, (float[]){1.f, 2.f});
+    layer_t *linear =
+        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 5, .bias = BIAS_TRUE}, &lq);
+    layer_t *model[] = {linear};
+
+    ASSERT_EXITS_WITH_FAILURE(freeTensor(inference(model, 1, input)));
+
+    freeLinearLayer(linear);
+    freeTensor(input);
+    freeQuantization(bfpWireQ);
+    freeQuantization(q);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -417,5 +566,9 @@ int main(void) {
 
     RUN_TEST(testInferenceWithLossLinearReluFloat);
     RUN_TEST(testInferenceWithLossOutputShapeMatchesProducedOutputNotLabel);
+
+    RUN_TEST(testInferenceBufferOutputCarriesBfpWire);
+    RUN_TEST(testInferenceBufferInputCarriesBfpExponents);
+    RUN_TEST(testInitBufferOutputBfpGroupSizeMismatchDies);
     return UNITY_END();
 }

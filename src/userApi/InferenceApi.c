@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "AdaptiveAvgPool1d.h"
 #include "AvgPool1d.h"
@@ -64,6 +65,31 @@ static void initBufferOutput(tensor_t *buffer, layer_t *currentLayer, shape_t *i
         initSymInt32Quantization(symInt32QC, q);
         break;
     }
+    case BFP: {
+        /* BFP epic PR2 (plan Decision 5), the inference-path twin of
+         * initLayerOutputs: widths/rounding/groupSize come from the layer's
+         * declared template, numGroups is DERIVED from this buffer's own
+         * element count. Exponents start at the zero state — the forward's
+         * OUT_WRITE epilogue derives the grid. */
+        bfpQConfig_t *currentBfpQC = currentQ->qConfig;
+        bfpQConfig_t *bfpQC = reserveMemory(sizeof(bfpQConfig_t));
+        if (currentBfpQC->groupSize == 0) {
+            initBfpQConfig(currentBfpQC->mantissaBits, currentBfpQC->exponentBits,
+                           currentBfpQC->roundingMode, bfpQC);
+        } else {
+            if (numValues % currentBfpQC->groupSize != 0) {
+                PRINT_ERROR("initBufferOutput: BFP wire groupSize %zu does not divide the wire's "
+                            "%zu elements -- pick a divisor or a per-tensor {1,0} template",
+                            currentBfpQC->groupSize, numValues);
+                exit(1);
+            }
+            initBfpQConfigGrouped(currentBfpQC->mantissaBits, currentBfpQC->exponentBits,
+                                  currentBfpQC->roundingMode, numValues / currentBfpQC->groupSize,
+                                  currentBfpQC->groupSize, bfpQC);
+        }
+        initBfpQuantization(bfpQC, q);
+        break;
+    }
     default:
         PRINT_ERROR("Unknown QType!");
         exit(1);
@@ -105,6 +131,33 @@ static void initBufferInput(tensor_t *input, tensor_t *buffer) {
         symInt32QC->qMaxBits = currentQC->qMaxBits;
         q->qConfig = symInt32QC;
         break;
+    case BFP: {
+        /* BFP epic PR2: the entry buffer mirrors the INPUT's own config, so
+         * validate the attach-time identity numGroups*groupSize == elements
+         * first — a hand-built input tensor can bypass initTensor's gate, and a
+         * malformed config would otherwise be re-derived into a DIFFERENT
+         * geometry, which the copyTensor below rejects with a confusing
+         * config-mismatch message. Geometry then comes from the same
+         * derive-from-element-count rule as the other three allocators, so all
+         * four agree by construction. The exponent VALUES are copied because
+         * they ARE the input's grid (mirrors the SYM_INT32 scale copy above);
+         * the trailing copyTensor would carry them too, but the buffer must be
+         * a valid BFP tensor on its own the moment it exists. */
+        bfpQConfig_t *currentBfpQC = currentQ->qConfig;
+        validateBfpQConfigShape(currentBfpQC, numValues);
+        bfpQConfig_t *bfpQC = reserveMemory(sizeof(bfpQConfig_t));
+        if (currentBfpQC->groupSize == 0) {
+            initBfpQConfig(currentBfpQC->mantissaBits, currentBfpQC->exponentBits,
+                           currentBfpQC->roundingMode, bfpQC);
+        } else {
+            initBfpQConfigGrouped(currentBfpQC->mantissaBits, currentBfpQC->exponentBits,
+                                  currentBfpQC->roundingMode, numValues / currentBfpQC->groupSize,
+                                  currentBfpQC->groupSize, bfpQC);
+        }
+        memcpy(bfpQC->exponents, currentBfpQC->exponents, bfpQC->numGroups * sizeof(uint8_t));
+        initBfpQuantization(bfpQC, q);
+        break;
+    }
     default:
         PRINT_ERROR("Unknown QType!");
         exit(1);

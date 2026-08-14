@@ -1,6 +1,7 @@
 #define SOURCE_FILE "UNIT_TEST_TRAINING_LOOP_API"
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include "ArithmeticType.h"
 #include "BorrowedLayer.h"
@@ -1941,6 +1942,95 @@ void testTrainingRunReshuffleFlagOn_SingleEpochNeverReshuffles(void) {
     TEST_ASSERT_EQUAL_size_t_ARRAY(snapshot, capturedIndices, 4);
 }
 
+/* BFP epic PR2 Task 8 --------------------------------------------------------
+ * argmax over a BFP output wire. Mantissa order is NOT value order for BFP:
+ * every GROUP carries its own exponent, so a small value in a fine-grained group
+ * can hold a LARGER mantissa than a big value in a coarse group. The metrics
+ * argmax must therefore DEQUANTIZE and compare floats -- unlike SYM_INT32, where
+ * one positive scale makes mantissa order value order.
+ *
+ * Fixture (m=8 -> qMax=127, e=8 -> bias=127, groups {2, 1}):
+ *   class 0: mantissa 122, stored exponent 121 (E=-6) -> 122 * 2^-6 = 1.90625
+ *   class 1: mantissa  67, stored exponent 122 (E=-5) ->  67 * 2^-5 = 2.09375
+ * Value argmax = 1 (the label's class); mantissa argmax = 0. */
+static tensor_t *buildBfpTwoClassOutput(void) {
+    size_t *dims = reserveMemory(2 * sizeof(size_t));
+    dims[0] = 1;
+    dims[1] = 2;
+    size_t *order = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 2, order);
+    quantization_t *bfpQ = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 1);
+    bfpQConfig_t *qc = bfpQ->qConfig;
+    qc->exponents[0] = 121;
+    qc->exponents[1] = 122;
+    tensor_t *t = initTensor(shape, bfpQ, NULL);
+    /* 8-bit mantissas: one signed byte per element, written directly so the
+     * fixture does not depend on the exponent-derivation path. */
+    ((int8_t *)t->data)[0] = 122;
+    ((int8_t *)t->data)[1] = 67;
+    return t;
+}
+
+/* Stand-in for inferenceWithLoss: hands the metrics path a BFP output wire
+ * without running a model. The real inference path cannot produce one yet --
+ * mseLossForward dispatches on the OUTPUT's dtype and has no BFP arm (loss
+ * functions are outside this task's scope) -- but argmaxByTensor consumes
+ * whatever wire the inference function returns, so this stub exercises exactly
+ * the contract under test. */
+static inferenceStats_t *bfpOutputWireInference(layer_t **model, size_t numberOfLayers,
+                                                tensor_t *input, tensor_t *label,
+                                                lossFuncType_t funcType,
+                                                reduction_t forwardReduction) {
+    (void)model;
+    (void)numberOfLayers;
+    (void)input;
+    (void)label;
+    (void)funcType;
+    (void)forwardReduction;
+    inferenceStats_t *stats = reserveMemory(sizeof(inferenceStats_t));
+    stats->output = buildBfpTwoClassOutput();
+    stats->loss = 0.0f;
+    return stats;
+}
+
+static tensor_t *bfpMetricsItem;
+static tensor_t *bfpMetricsLabel;
+
+static sample_t *getBfpMetricsSample(size_t id) {
+    (void)id;
+    sample_t *s = reserveMemory(sizeof(sample_t));
+    s->item = bfpMetricsItem;
+    s->label = bfpMetricsLabel;
+    return s;
+}
+
+static size_t getBfpMetricsDatasetSize(void) {
+    return 1;
+}
+
+void testEvaluationEpochWithMetrics_BfpOutputWireDequantCompares() {
+    bfpMetricsItem = buildFloatTensor2D(1, 2, (float[]){1.f, 1.f}, 2);
+    bfpMetricsLabel = buildFloatTensor2D(1, 2, (float[]){0.f, 1.f}, 2);
+
+    dataLoader_t *dl = dataLoaderInit(getBfpMetricsSample, getBfpMetricsDatasetSize, 1, NULL, NULL,
+                                      false, 0, true);
+
+    epochStats_t stats =
+        evaluationEpochWithMetrics(NULL, 0, MSE, dl, bfpOutputWireInference, REDUCTION_MEAN);
+
+    float capturedAccuracy = stats.accuracy;
+
+    freeDataLoader(dl);
+    freeTensor(bfpMetricsLabel);
+    freeTensor(bfpMetricsItem);
+
+    TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.001f, 1.0f, capturedAccuracy,
+                                     "BFP argmax must compare DEQUANTIZED values: class 1 "
+                                     "(2.09375) wins on value, class 0 wins on raw mantissa");
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -1960,6 +2050,7 @@ int main(void) {
     RUN_TEST(testTrainingRun_ReturnsResult);
     RUN_TEST(testEvaluationEpochWithMetrics_AllCorrect);
     RUN_TEST(testEvaluationEpochWithMetrics_SymOutputWire);
+    RUN_TEST(testEvaluationEpochWithMetrics_BfpOutputWireDequantCompares);
     RUN_TEST(testEvaluationEpochWithMetrics_PartiallyCorrect);
     RUN_TEST(testEvaluationEpochWithMetrics_HandlesZeroPredictionClass);
     RUN_TEST(testEvaluationEpochWithReport_ReturnsConfusionMatrix);

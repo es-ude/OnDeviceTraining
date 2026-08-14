@@ -85,6 +85,7 @@ add_elastic_ai_unit_test(
         QuantizationApi
         LossFunction
         DataLoader
+        odt_test_death
         odt_test_layer_builders
 )
 
@@ -314,7 +315,9 @@ target_link_libraries(UnitTestMultiLayerTraining PRIVATE
         InferenceApi
         DataLoader
         DataLoaderApi
+        RNG
         StorageApi
+        odt_test_death
         odt_test_layer_builders
 )
 __register_target_as_unit_test(UnitTestMultiLayerTraining)

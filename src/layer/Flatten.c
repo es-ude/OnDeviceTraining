@@ -6,8 +6,26 @@
 #include "Common.h"
 #include "Flatten.h"
 
+/* BFP epic PR2 Task 8: Flatten is a raw byte memcpy sized off the SOURCE wire's
+ * quantization, plus a hand-copy of the SYM_INT32 scale. Two distinct BFP
+ * failures: BFP -> BFP moves the mantissa payload but NOT the per-group
+ * exponents, leaving the destination on its zero-state grid (every value
+ * silently rescaled by a power of two); FLOAT32 -> BFP sizes the copy off the
+ * 32-bit side and overruns the (much smaller) packed buffer. Keyed on the wire's
+ * STORAGE dtype — Flatten has no arithmetic slot at all. */
+static void requireNoBfpWire(const tensor_t *t, const char *what) {
+    if (t->quantization->type == BFP) {
+        PRINT_ERROR("%s: BFP Flatten semantics arrive with epic PR4 -- keep BFP off this wire or "
+                    "use FLOAT32 wires",
+                    what);
+        exit(1);
+    }
+}
+
 void flattenForward(layer_t *flattenLayer, tensor_t *input, tensor_t *output) {
     (void)flattenLayer;
+    requireNoBfpWire(input, "Flatten forward (input)");
+    requireNoBfpWire(output, "Flatten forward (output)");
 
     size_t numberOfElements = calcNumberOfElementsByTensor(input);
     size_t numberOfBytes = calcNumberOfBytesForData(input->quantization, numberOfElements);
@@ -23,7 +41,9 @@ void flattenForward(layer_t *flattenLayer, tensor_t *input, tensor_t *output) {
 void flattenBackward(layer_t *flattenLayer, tensor_t *forwardInput, tensor_t *loss,
                      tensor_t *propLoss) {
     (void)flattenLayer;
-    (void)forwardInput;
+    (void)forwardInput; /* never dereferenced -> not guarded */
+    requireNoBfpWire(loss, "Flatten backward (loss)");
+    requireNoBfpWire(propLoss, "Flatten backward (propLoss)");
 
     size_t numberOfElements = calcNumberOfElementsByTensor(loss);
     size_t numberOfBytes = calcNumberOfBytesForData(loss->quantization, numberOfElements);

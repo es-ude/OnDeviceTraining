@@ -418,14 +418,33 @@ static void groupNormForwardKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut
     groupNormForwardSymInt32((groupNormConfig_t *)ctx, ops[1], ops[2], ops[0], rawOut);
 }
 
+/* Explicit kernel dispatch, NOT a ternary — the LayerNorm twin (BFP epic PR2
+ * Task 9): a ternary hands every non-SYM arithmetic to the FLOAT kernel, and
+ * since the derivation flip a BFP profile arrives here as ARITH_BFP, whose
+ * funnel-unpacked int32 mantissa scratch groupNormForwardFloat would read
+ * through a float* cast — silent wrong arithmetic, not a crash. Fail fast until
+ * epic PR5 writes real BFP norm semantics. */
+static opKernelFn_t groupNormSelectForwardKernel(const groupNormConfig_t *cfg) {
+    switch (cfg->forwardMath.type) {
+    case ARITH_FLOAT32:
+        return groupNormForwardKernelFloat;
+    case ARITH_SYM_INT32:
+        return groupNormForwardKernelSym;
+    default:
+        PRINT_ERROR("GroupNorm forward: declared forwardMath %d not implemented "
+                    "(FLOAT32/SYM_INT32 only) -- native BFP norms arrive with epic PR5",
+                    (int)cfg->forwardMath.type);
+        exit(1);
+    }
+}
+
 void groupNormForward(layer_t *layer, tensor_t *input, tensor_t *output) {
     groupNormConfig_t *cfg = layer->config->groupNorm;
     groupNormValidateInputShape(cfg, input);
 
     executeOp(
         &(opSpec_t){
-            .kernel = cfg->forwardMath.type == ARITH_SYM_INT32 ? groupNormForwardKernelSym
-                                                               : groupNormForwardKernelFloat,
+            .kernel = groupNormSelectForwardKernel(cfg),
             .ctx = cfg,
             .inputs = (tensor_t *[]){input, getParamFromParameter(cfg->gamma),
                                      getParamFromParameter(cfg->beta)},
@@ -769,8 +788,9 @@ void groupNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
         groupNormBackwardSymInt32(cfg, forwardInput, loss, propLoss);
         break;
     default:
-        PRINT_ERROR("GroupNorm backward: quantization type not implemented (FLOAT32/SYM_INT32 "
-                    "only) -- native BFP norms arrive with epic PR5");
+        PRINT_ERROR("GroupNorm backward: declared propLossMath %d not implemented "
+                    "(FLOAT32/SYM_INT32 only) -- native BFP norms arrive with epic PR5",
+                    (int)cfg->propLossMath.type);
         exit(1);
     }
 }

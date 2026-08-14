@@ -2459,6 +2459,78 @@ void testSymBackwardNullPropLossComputesGradsOnly(void) {
                              "round only skipped dx");
 }
 
+/* ---- BFP epic PR2 Task 9 (review fix): forward dispatch must reject ARITH_BFP.
+ *
+ * layerNormForward selects its kernel from forwardMath, and that selection used
+ * to be a ternary: anything that was not ARITH_SYM_INT32 got the FLOAT kernel.
+ * Since the Task 9 derivation flip a BFP config DERIVES ARITH_BFP, and that
+ * combination is silent corruption rather than a crash -- the funnel's prologue
+ * unpacks the BFP operands into int32 mantissa scratch and layerNormForwardFloat
+ * reads that scratch through a float* cast (same 4 bytes per element, so no
+ * out-of-bounds access: just wrong numbers, no message).
+ *
+ * The public factory rejects such a profile twice over (LayerNormApi gates
+ * gamma/beta storage to FLOAT32/SYM_INT32 and then requires storage and
+ * forwardMath to agree), but the hand-wired route -- exactly what this test file
+ * uses everywhere -- reaches it. All three operands must be BFP-STORED for the
+ * hole to open: a FLOAT32 operand under ARITH_BFP already dies in the prologue
+ * on its missing bfpStage template, which would make this test vacuous. */
+static tensor_t *buildBfpTensorND(size_t numDims, const size_t *dimsIn, const float *vals) {
+    size_t *dims = reserveMemory(numDims * sizeof(size_t));
+    for (size_t i = 0; i < numDims; i++) {
+        dims[i] = dimsIn[i];
+    }
+    size_t *order = reserveMemory(numDims * sizeof(size_t));
+    setOrderOfDimsForNewTensor(numDims, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, numDims, order);
+    tensor_t *t = initTensor(shape, quantizationInitBfp(8, 8, HALF_AWAY), NULL);
+    if (vals != NULL) {
+        tensorFillFromFloatBuffer(t, (float *)vals, calcNumberOfElementsByShape(shape));
+    }
+    return t;
+}
+
+static parameter_t *buildBfpParamFloatGrad(size_t numDims, const size_t *dimsIn,
+                                           const float *vals) {
+    tensor_t *p = buildBfpTensorND(numDims, dimsIn, vals);
+    return parameterInit(p, gradInitFloat(p, NULL));
+}
+
+void testLayerNormForwardRejectsArithBfp(void) {
+    size_t dims[] = {2, 4};
+    tensor_t *in = buildBfpTensorND(2, dims, (float[]){1.f, 2.f, 3.f, 4.f, 10.f, 20.f, 30.f, 40.f});
+    tensor_t *out = buildBfpTensorND(2, dims, NULL);
+
+    size_t ns[] = {4};
+    parameter_t *gamma = buildBfpParamFloatGrad(1, ns, (float[]){1.f, 1.f, 1.f, 1.f});
+    parameter_t *beta = buildBfpParamFloatGrad(1, ns, (float[]){0.f, 0.f, 0.f, 0.f});
+    size_t *normShape = reserveMemory(sizeof(size_t));
+    normShape[0] = 4;
+
+    quantization_t *fq = quantizationInitBfp(8, 8, HALF_AWAY);
+    quantization_t *bq = quantizationInitFloat();
+    layerNormConfig_t cfg;
+    initLayerNormConfig(&cfg, gamma, beta, normShape, 1, 1e-5f, fq, bq);
+    layerConfig_t lcfg;
+    layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
+
+    /* What initLayerNormConfig ALREADY derived from the BFP forwardQ since the
+     * Task 9 flip -- asserted, not hand-set, so this test also pins that the
+     * guard is reachable through the ordinary config path. */
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, cfg.forwardMath.type);
+
+    ASSERT_EXITS_WITH_FAILURE(layerNormForward(&layer, in, out));
+
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeReservedMemory(normShape);
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(out);
+    freeTensor(in);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConfigStructIsPopulated);
@@ -2512,5 +2584,6 @@ int main(void) {
     RUN_TEST(testLayerNormBackwardFrozenFactoryLayerRunsWithoutGradBuffers);
     RUN_TEST(testBackwardFloatNullPropLossComputesGradsOnly);
     RUN_TEST(testSymBackwardNullPropLossComputesGradsOnly);
+    RUN_TEST(testLayerNormForwardRejectsArithBfp);
     return UNITY_END();
 }

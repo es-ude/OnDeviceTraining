@@ -1320,6 +1320,59 @@ void testSymBackwardNullPropLossComputesGradsOnly(void) {
                              "round only skipped dx");
 }
 
+/* ---- BFP epic PR2 Task 9 (review fix): forward dispatch must reject ARITH_BFP.
+ *  The LayerNorm twin -- same defect, same fix, same fixture shape; see
+ *  testLayerNormForwardRejectsArithBfp in UnitTestLayerNorm.c for the full
+ *  rationale. All operands must be BFP-STORED or the funnel's missing-bfpStage
+ *  prologue check fires first and the test goes vacuous. */
+static tensor_t *buildBfpTensorND(size_t numDims, const size_t *dimsIn, const float *vals) {
+    size_t *dims = reserveMemory(numDims * sizeof(size_t));
+    for (size_t i = 0; i < numDims; i++) {
+        dims[i] = dimsIn[i];
+    }
+    size_t *order = reserveMemory(numDims * sizeof(size_t));
+    setOrderOfDimsForNewTensor(numDims, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, numDims, order);
+    tensor_t *t = initTensor(shape, quantizationInitBfp(8, 8, HALF_AWAY), NULL);
+    if (vals != NULL) {
+        tensorFillFromFloatBuffer(t, (float *)vals, calcNumberOfElementsByShape(shape));
+    }
+    return t;
+}
+
+static parameter_t *buildBfpParamFloatGrad(size_t numChannels, const float *vals) {
+    tensor_t *p = buildBfpTensorND(1, (size_t[]){numChannels}, vals);
+    return parameterInit(p, gradInitFloat(p, NULL));
+}
+
+void testGroupNormForwardRejectsArithBfp(void) {
+    size_t dims[] = {1, 4, 2};
+    tensor_t *in = buildBfpTensorND(3, dims, (float[]){1.f, 2.f, 3.f, 4.f, 10.f, 20.f, 30.f, 40.f});
+    tensor_t *out = buildBfpTensorND(3, dims, NULL);
+
+    parameter_t *gamma = buildBfpParamFloatGrad(4, (float[]){1.f, 1.f, 1.f, 1.f});
+    parameter_t *beta = buildBfpParamFloatGrad(4, (float[]){0.f, 0.f, 0.f, 0.f});
+
+    quantization_t *fq = quantizationInitBfp(8, 8, HALF_AWAY);
+    quantization_t *bq = quantizationInitFloat();
+    groupNormConfig_t cfg;
+    initGroupNormConfig(&cfg, gamma, beta, 2, 4, 1e-5f, fq, bq);
+    layerConfig_t lcfg;
+    layer_t layer = makeGroupNormLayer(&cfg, &lcfg);
+
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, cfg.forwardMath.type);
+
+    ASSERT_EXITS_WITH_FAILURE(groupNormForward(&layer, in, out));
+
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(out);
+    freeTensor(in);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConfigStructIsPopulated);
@@ -1362,5 +1415,6 @@ int main(void) {
     RUN_TEST(testGroupNormBackwardFrozenFactoryLayerRunsWithoutGradBuffers);
     RUN_TEST(testBackwardFloatNullPropLossComputesGradsOnly);
     RUN_TEST(testSymBackwardNullPropLossComputesGradsOnly);
+    RUN_TEST(testGroupNormForwardRejectsArithBfp);
     return UNITY_END();
 }

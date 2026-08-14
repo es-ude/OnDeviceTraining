@@ -399,14 +399,34 @@ static void layerNormForwardKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut
     layerNormForwardSymInt32((layerNormConfig_t *)ctx, ops[1], ops[2], ops[0], rawOut);
 }
 
+/* Explicit kernel dispatch, NOT a ternary (BFP epic PR2 Task 9): a ternary
+ * hands every non-SYM arithmetic to the FLOAT kernel, and since the derivation
+ * flip a BFP profile arrives here as ARITH_BFP -- whose operands the funnel
+ * prologue unpacks into int32 mantissa scratch that layerNormForwardFloat would
+ * read through a float* cast. Same 4 bytes per element, so that is silent wrong
+ * arithmetic rather than a crash. Fail fast until epic PR5 writes real BFP norm
+ * semantics. */
+static opKernelFn_t layerNormSelectForwardKernel(const layerNormConfig_t *cfg) {
+    switch (cfg->forwardMath.type) {
+    case ARITH_FLOAT32:
+        return layerNormForwardKernelFloat;
+    case ARITH_SYM_INT32:
+        return layerNormForwardKernelSym;
+    default:
+        PRINT_ERROR("LayerNorm forward: declared forwardMath %d not implemented "
+                    "(FLOAT32/SYM_INT32 only) -- native BFP norms arrive with epic PR5",
+                    (int)cfg->forwardMath.type);
+        exit(1);
+    }
+}
+
 void layerNormForward(layer_t *layer, tensor_t *input, tensor_t *output) {
     layerNormConfig_t *cfg = layer->config->layerNorm;
     layerNormValidateInputShape(cfg, input);
 
     executeOp(
         &(opSpec_t){
-            .kernel = cfg->forwardMath.type == ARITH_SYM_INT32 ? layerNormForwardKernelSym
-                                                               : layerNormForwardKernelFloat,
+            .kernel = layerNormSelectForwardKernel(cfg),
             .ctx = cfg,
             .inputs = (tensor_t *[]){input, getParamFromParameter(cfg->gamma),
                                      getParamFromParameter(cfg->beta)},
@@ -714,8 +734,9 @@ void layerNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
         layerNormBackwardSymInt32(cfg, forwardInput, loss, propLoss);
         break;
     default:
-        PRINT_ERROR("LayerNorm backward: quantization type not implemented (FLOAT32/SYM_INT32 "
-                    "only) -- native BFP norms arrive with epic PR5");
+        PRINT_ERROR("LayerNorm backward: declared propLossMath %d not implemented "
+                    "(FLOAT32/SYM_INT32 only) -- native BFP norms arrive with epic PR5",
+                    (int)cfg->propLossMath.type);
         exit(1);
     }
 }

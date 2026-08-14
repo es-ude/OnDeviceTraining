@@ -156,7 +156,13 @@ lq0.propLossQ      = f->floatQ;
 `testBfpNativeForwardTrainingLossDecreasesAndGridMoves`,
 `test/unit/userAPI/UnitTestMultiLayerTraining.c` — `propLossQ` must move
 together with `propLossMath`, since a derived-BFP `propLossQ` alone would not
-by itself make the backward op die at allocation.) Fake-quant over BFP
+by itself make the backward op die at allocation. Presented here as
+unconditional for clarity: the shared fixture actually guards the
+`weightGradMath` line behind a `pinWeightGradMath` flag — `true` for this
+capstone, `false` for `testBfpUniformModelDiesOnBackwardUntilPr3`, which
+deliberately leaves `weightGradMath` derived so it dies at the funnel; the
+`biasGradMath`/`propLossMath`/`propLossQ` lines are unconditional in both.)
+Fake-quant over BFP
 storage is still available post-flip, but it is no longer free: pin the math
 slot(s) to `ARITH_FLOAT32` explicitly and the funnel dequantizes the BFP
 operand like any other storage-only dtype, exactly as PR1's derivation did
@@ -227,18 +233,24 @@ Every `ARITH_BFP` kernel (`matmulBfpTensors`, `conv1dKernelBfp`,
   limit, where `runA`/`runB` are each operand's `groupSize` (or the full
   reduction length for a per-tensor operand) — the bound holds for strided
   walks too, since distinct storage indices inside one group number at most
-  `groupSize` regardless of walk order. This supersedes the spec's looser
-  closed form `g ≤ 2^(33−2m)`: for equal-width operands (`ma = mb = m`), the
-  shipped formula reduces algebraically to exactly `2^(33−2m) − 1` — one
-  product tighter at every boundary, because `INT32_MAX = 2^31−1`, not
-  `2^31`. Concretely: **m=8 → 131071** (spec's loose form: 131072), **m=12 →
-  511** (spec: 512), **m=16 → 1** (spec: 2) — pinned by
-  `testBfpSegmentLimitTableValues`, `UnitTestMatmul.c`. In practice operand
-  widths often differ (e.g. Task 3's gold fixture mixes `ma=6`/`mb=4`), which
-  is exactly why the guard's normative form is `INT32_MAX >> (ma+mb−2)`, not
-  the equal-width closed form. Bias operands are exempt from this guard: they
-  are value-seeds dequantized to float BEFORE the reduction, never product
-  operands.
+  `groupSize` regardless of walk order. The spec's SYMBOLIC closed form
+  `g ≤ 2^(33−2m)` (equal-width case, `ma = mb = m`) reads one product looser
+  than what shipped if evaluated literally (`2^(33−2m)` is `131072` at m=8,
+  `512` at m=12) — but the spec's own worked examples already state the
+  TIGHT values that match the shipped formula exactly: "m=8 → 131 071;
+  m=12 → 511" (spec §4). The shipped `INT32_MAX >> (ma+mb−2)` IS that tight
+  form, expressed exactly rather than symbolically: for equal widths it
+  reduces algebraically to `2^(33−2m) − 1` — one below the naive power of
+  two, because `INT32_MAX = 2^31−1`, not `2^31` — which is why the spec's
+  worked examples already land on the shipped values rather than the
+  symbolic form's literal evaluation. Pinned by
+  `testBfpSegmentLimitTableValues`, `UnitTestMatmul.c`, which also covers
+  **m=16 → 1** (shipped-only; the spec's own worked examples stop at m=12).
+  In practice operand widths often differ (e.g. Task 3's gold fixture mixes
+  `ma=6`/`mb=4`), which is exactly why the guard's normative form is
+  `INT32_MAX >> (ma+mb−2)`, not the equal-width closed form. Bias operands
+  are exempt from this guard: they are value-seeds dequantized to float
+  BEFORE the reduction, never product operands.
 - **Forward needs no re-blocking.** Storage groups are contiguous along
   exactly the axis every forward reduction walks (the row/column a GEMM
   reduces over, or a conv's input-channel × kernel-tap axis), so the forward
@@ -327,15 +339,19 @@ order only, pinned equal by
 `testConvTranspose1dKernelBfpGatherAdjointSameParityWithScatter` and the D9
 scatter-vs-gather cross-check built into the gold generator).
 
-**Bias seeded inline, not as a separate pass.** The SYM scatter kernels seed
-`output` with the bias in a dedicated pre-pass before the scatter loop. The
-gather kernel instead dequant-seeds each output element's float accumulator
-with its bias value (per §5.4 Decision 2) as the FIRST thing the
-per-output-element loop body does, before its own reduction — there is no
-separate seeding pass, because the gather formulation already visits every
-output element exactly once. `outputPadding` tail positions (no taps at all)
-simply stay at the bias seed, which the gold fixture's tap-free output
-position pins.
+**Bias folded in after the reduction, not seeded before it — the reverse of
+the scatter kernels.** The `Float32`/`SymInt32` scatter kernels zero-init
+`output`, run the pure `+=` scatter accumulation over every (input, tap)
+pair, and only THEN refold the bias in a separate post-pass over every output
+element (the SYM kernel's own comment at the site: "Bias seed pass (refold),
+separate from the pure-+= scatter"). The gather kernel inverts that order: it
+dequant-seeds each output element's float accumulator with its bias value
+(per §5.4 Decision 2) as the FIRST thing the per-output-element loop body
+does, BEFORE its own reduction — there is no separate pass at all, because
+the gather formulation already visits every output element exactly once and
+folds the bias straight into the accumulator the reduction adds into.
+`outputPadding` tail positions (no taps at all) simply stay at the bias seed,
+which the gold fixture's tap-free output position pins.
 
 ## 7. Float32 `int32→float` partial conversion can round above 2^24
 

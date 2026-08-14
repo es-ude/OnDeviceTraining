@@ -1,6 +1,7 @@
 #include <stdlib.h>
 
 #include "ArithmeticType.h"
+#include "DeathTest.h"
 #include "LayerQuant.h"
 #include "QuantizationApi.h"
 #include "Softmax.h"
@@ -458,8 +459,66 @@ void testSoftmaxLayerInitOwningDeepCopiesLqPointers(void) {
 void setUp() {}
 void tearDown() {}
 
+/* BFP epic PR2 Task 8 (fourth outside-funnel site): softmaxBackward dispatches
+ * on the layer's DECLARED propLossMath and the ARITH_FLOAT32 arm raw-casts all
+ * three wires to float* with no dtype check at all -- unlike Relu/Dropout, which
+ * carried #315-style arm guards already. Softmax FORWARD is safe (it runs inside
+ * executeOp, whose prologue/epilogue convert), and the SYM_INT32 backward arm
+ * converts via convertTensor; backward-FLOAT32 is the sole hole.
+ *
+ * This became REACHABLE with Task 8: before it, a BFP propLossQ died in
+ * initGradTensor's default arm, so no BFP wire could ever arrive here. Now the
+ * dx wire allocates, and pre-flip arithmeticFromQuantization(BFP) ==
+ * ARITH_FLOAT32 routes it straight into the raw casts -- a ~4x heap over-read on
+ * the input/loss side and an over-WRITE into the (4x smaller at 8 mantissa bits)
+ * packed propLoss buffer. Keyed on each wire's STORAGE dtype, checked before the
+ * dispatch. */
+static tensor_t *buildSoftmaxWire1D(size_t n, quantization_t *q) {
+    size_t *dims = reserveMemory(sizeof(size_t));
+    dims[0] = n;
+    size_t *order = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    return initTensor(shape, q, NULL);
+}
+
+void testSoftmaxBackwardRejectsBfpWire(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+    layerFunctions_t softmaxFns = layerFunctions[SOFTMAX];
+
+    /* propLoss BFP: the DESTINATION of the raw float* writes -- 6 packed bytes
+     * receiving 24 bytes of float. */
+    tensor_t *input = buildSoftmaxWire1D(6, quantizationInitFloat());
+    tensor_t *loss = buildSoftmaxWire1D(6, quantizationInitFloat());
+    tensor_t *bfpPropLoss = buildSoftmaxWire1D(6, quantizationInitBfp(8, 8, HALF_AWAY));
+    ASSERT_EXITS_WITH_FAILURE(softmaxFns.backward(softmaxLayer, input, loss, bfpPropLoss));
+
+    /* input BFP: the softmax activations the dot product reads. */
+    tensor_t *bfpInput = buildSoftmaxWire1D(6, quantizationInitBfp(8, 8, HALF_AWAY));
+    tensor_t *propLoss = buildSoftmaxWire1D(6, quantizationInitFloat());
+    ASSERT_EXITS_WITH_FAILURE(softmaxFns.backward(softmaxLayer, bfpInput, loss, propLoss));
+
+    /* loss BFP: the incoming gradient. */
+    tensor_t *bfpLoss = buildSoftmaxWire1D(6, quantizationInitBfp(8, 8, HALF_AWAY));
+    ASSERT_EXITS_WITH_FAILURE(softmaxFns.backward(softmaxLayer, input, bfpLoss, propLoss));
+
+    freeTensor(bfpLoss);
+    freeTensor(propLoss);
+    freeTensor(bfpInput);
+    freeTensor(bfpPropLoss);
+    freeTensor(loss);
+    freeTensor(input);
+    freeSoftmaxLayer(softmaxLayer);
+    freeQuantization(floatQ);
+}
+
 int main() {
     UNITY_BEGIN();
+    RUN_TEST(testSoftmaxBackwardRejectsBfpWire);
     RUN_TEST(unitTestSoftmaxForwardFloat);
     RUN_TEST(unitTestSoftmaxForwardSymInt32);
 

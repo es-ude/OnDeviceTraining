@@ -44,6 +44,12 @@ static tensor_t *makeFloatTensor(size_t const *dims, size_t numDims, float const
     return t;
 }
 
+/* BFP epic PR2 Task 8: 1-D/N-D BFP wire (per-tensor {1,0}, 8-bit mantissas). The
+ * buffer is BFP-SIZED, so an unguarded float* access runs past it. */
+static tensor_t *makeBfpTensor(size_t const *dims, size_t numDims) {
+    return initTensor(makeShape(dims, numDims), quantizationInitBfp(8, 8, HALF_AWAY), NULL);
+}
+
 static tensor_t *makeInt32Tensor(size_t const *dims, size_t numDims) {
     return initTensor(makeShape(dims, numDims), quantizationInitInt32(), NULL);
 }
@@ -592,8 +598,35 @@ void testMaxPool1dEdgeCases(void) {
 void setUp(void) {}
 void tearDown(void) {}
 
+/* BFP epic PR2 Task 8: maxPool1dBackward's ARITH_FLOAT32 arm runs outside
+ * executeOp and raw-casts lossGrad/propLoss to float*. Task 8 made BFP dx wires
+ * allocatable, and pre-flip arithmeticFromQuantization(BFP) == ARITH_FLOAT32
+ * selects exactly that arm -- guard the storage dtype. */
+void testMaxPool1dBackwardRejectsBfpWire(void) {
+    size_t inputDims[] = {1, 1, 4};
+    size_t outputDims[] = {1, 1, 3};
+    float outputData[1 * 1 * 3] = {0};
+    int32_t argmaxData[1 * 1 * 3] = {0};
+    maxPool1dRunResult_t r = maxPool1dBuild(input_maxPool1d_basic, inputDims, 2, VALID, 1, 1,
+                                            outputData, argmaxData, outputDims);
+    maxPool1dForward(r.layer, r.input, r.output);
+    tensor_t *lossGrad = makeFloatTensor(outputDims, 3, NULL);
+    tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
+    tensor_t *bfpLossGrad = makeBfpTensor(outputDims, 3);
+    tensor_t *bfpPropLoss = makeBfpTensor(inputDims, 3);
+
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(r.layer, r.input, bfpLossGrad, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(r.layer, r.input, lossGrad, bfpPropLoss));
+
+    freeTensor(bfpPropLoss);
+    freeTensor(bfpLossGrad);
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testMaxPool1dBackwardRejectsBfpWire);
     RUN_TEST(testMaxPool1dForwardBasic);
     RUN_TEST(testMaxPool1dCalcOutputShapeValidAndSame);
     RUN_TEST(testMaxPool1dBackwardBasic);

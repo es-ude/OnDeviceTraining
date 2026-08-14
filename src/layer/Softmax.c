@@ -76,6 +76,27 @@ void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output) {
         output);
 }
 
+/* BFP epic PR2 Task 8: softmaxBackward is the fourth outside-funnel site (after
+ * Relu/Dropout/Flatten). Its ARITH_FLOAT32 arm raw-casts all three wires to
+ * float* with no dtype check at all, and it is selected by the layer's DECLARED
+ * propLossMath -- so pre-flip, when arithmeticFromQuantization(BFP) is still
+ * ARITH_FLOAT32, a BFP dx wire lands straight in the raw casts: a 4x heap
+ * over-read on input/loss and an over-write into the packed propLoss buffer.
+ * That became reachable only with this task's initGradTensor BFP arm (before it,
+ * a BFP propLossQ died in the allocator's default arm).
+ *
+ * Forward needs no guard: it runs inside executeOp, whose prologue/epilogue
+ * convert both ways. PR6, not PR4 — softmax BFP semantics belong to research
+ * package II. */
+static void requireNoBfpWire(const tensor_t *t, const char *what) {
+    if (t->quantization->type == BFP) {
+        PRINT_ERROR("%s: BFP Softmax semantics arrive with epic PR6 -- keep BFP off this wire or "
+                    "use FLOAT32 wires",
+                    what);
+        exit(1);
+    }
+}
+
 static void softmaxBackwardFloat(tensor_t *input, tensor_t *loss, tensor_t *propLoss) {
     size_t n = calcNumberOfElementsByTensor(input);
 
@@ -134,6 +155,13 @@ static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *p
 }
 
 void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, tensor_t *propLoss) {
+    /* Before the dispatch (the Relu placement): all three wires are dereferenced
+     * by whichever arm runs, and the check is on STORAGE dtype, not the declared
+     * arithmetic that selects the arm. */
+    requireNoBfpWire(input, "Softmax backward (input)");
+    requireNoBfpWire(loss, "Softmax backward (loss)");
+    requireNoBfpWire(propLoss, "Softmax backward (propLoss)");
+
     switch (softmaxLayer->config->softmax->propLossMath.type) {
     case ARITH_FLOAT32:
         softmaxBackwardFloat(input, loss, propLoss);

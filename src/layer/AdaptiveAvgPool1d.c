@@ -182,6 +182,25 @@ void adaptiveAvgPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output)
         output);
 }
 
+/* BFP epic PR2 Task 8: same outside-funnel hole as Softmax backward. The
+ * ARITH_FLOAT32 arm below runs OUTSIDE executeOp and raw-casts lossGrad/propLoss
+ * to float*, selected by the layer's DECLARED propLossMath -- so pre-flip, when
+ * arithmeticFromQuantization(BFP) is still ARITH_FLOAT32, a BFP dx wire lands
+ * straight in those casts (4x heap over-read on lossGrad, over-write into the
+ * packed propLoss buffer). Reachable only since this task's initGradTensor BFP
+ * arm; before it a BFP propLossQ died in the allocator's default arm. Forward
+ * needs no guard (it runs inside executeOp). No epic PR is assigned to BFP
+ * pooling yet -- the message states the gap rather than promising a milestone.
+ * forwardInput is NOT guarded: this layer never dereferences it. */
+static void requireNoBfpWire(const tensor_t *t, const char *what) {
+    if (t->quantization->type == BFP) {
+        PRINT_ERROR("%s: BFP pooling semantics are not implemented -- keep BFP off this wire "
+                    "or use FLOAT32 wires",
+                    what);
+        exit(1);
+    }
+}
+
 void adaptiveAvgPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
                                     tensor_t *propLoss) {
     adaptiveAvgPool1dConfig_t *cfg = layer->config->adaptiveAvgPool1d;
@@ -276,6 +295,8 @@ static void adaptiveAvgPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, te
 
 void adaptiveAvgPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
                                tensor_t *propLoss) {
+    requireNoBfpWire(lossGrad, "AdaptiveAvgPool1d backward (lossGrad)");
+    requireNoBfpWire(propLoss, "AdaptiveAvgPool1d backward (propLoss)");
     adaptiveAvgPool1dConfig_t *cfg = layer->config->adaptiveAvgPool1d;
     switch (cfg->propLossMath.type) {
     case ARITH_FLOAT32:

@@ -56,6 +56,18 @@ static adaptivePoolRun_t build(float const *inputData, size_t const *inputDims, 
     return r;
 }
 
+/* BFP epic PR2 Task 8: BFP wire (per-tensor {1,0}, 8-bit mantissas). The buffer
+ * is BFP-SIZED, so an unguarded float* access runs past it. */
+static tensor_t *makeBfpTensor(size_t const *dims, size_t numDims) {
+    size_t *ownedDims = reserveMemory(numDims * sizeof(size_t));
+    memcpy(ownedDims, dims, numDims * sizeof(size_t));
+    size_t *order = reserveMemory(numDims * sizeof(size_t));
+    setOrderOfDimsForNewTensor(numDims, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, ownedDims, numDims, order);
+    return initTensor(shape, quantizationInitBfp(8, 8, HALF_AWAY), NULL);
+}
+
 void testForwardBasic(void) {
     size_t inDims[] = {1, 1, 4};
     size_t outDims[] = {1, 1, 2};
@@ -446,8 +458,33 @@ void testBackwardSymRejectsWideLossGrad(void) {
     ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss));
 }
 
+/* BFP epic PR2 Task 8: adaptiveAvgPool1dBackward's ARITH_FLOAT32 arm runs
+ * outside executeOp and raw-casts lossGrad/propLoss to float*. Task 8 made BFP
+ * dx wires allocatable and pre-flip they select exactly that arm -- guard the
+ * storage dtype. */
+void testAdaptiveAvgPool1dBackwardRejectsBfpWire(void) {
+    size_t inDims[] = {1, 1, 4};
+    size_t outDims[] = {1, 1, 2};
+    float outData[1 * 1 * 2] = {0};
+    adaptivePoolRun_t r = build(input_adaptiveAvgPool1d_basic, inDims, 2, outData, outDims);
+
+    tensor_t *lossGrad = makeFloatTensor(outDims, 3, NULL);
+    tensor_t *propLoss = makeFloatTensor(inDims, 3, NULL);
+    tensor_t *bfpLossGrad = makeBfpTensor(outDims, 3);
+    tensor_t *bfpPropLoss = makeBfpTensor(inDims, 3);
+
+    ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dBackward(r.layer, r.input, bfpLossGrad, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, bfpPropLoss));
+
+    freeTensor(bfpPropLoss);
+    freeTensor(bfpLossGrad);
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testAdaptiveAvgPool1dBackwardRejectsBfpWire);
     RUN_TEST(testForwardBasic);
     RUN_TEST(testForwardMultiChannelOverlap);
     RUN_TEST(testForwardMultiBatch);

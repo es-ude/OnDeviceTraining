@@ -101,6 +101,19 @@ void linearForwardSymInt32Grouped(tensor_t *w, tensor_t *b, tensor_t *input, ten
     transposeTensor(w, 0, 1);
 }
 
+/* BFP epic PR2 (Task 7): all operands are the executeOp prologue's
+ * unpacked-BFP scratch (int32 mantissa codes under a live bfpQConfig_t —
+ * borrowed exponents for BFP-stored sources, funnel-staged for FLOAT32
+ * ones). Same transpose dance as linearForwardSymInt32Grouped: BFP groups
+ * bind to STORAGE order, which transposeTensor exposes zero-copy as the
+ * physically-innermost axis for the reduction. matmulBfpTensors reads all
+ * quant info from the operands themselves — no weightGroups ctx. */
+void linearForwardBfp(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output) {
+    transposeTensor(w, 0, 1);
+    matmulBfpTensors(input, w, b, output);
+    transposeTensor(w, 0, 1);
+}
+
 /* executeOp forward kernel adapters — operands are {input, weights} or
  * {input, weights, bias} (bias omitted, not NULL-padded, when the layer has
  * no bias); ctx unused (matmul infers geometry from the tensors themselves),
@@ -126,12 +139,65 @@ static void linearForwardKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, t
         linearForwardSymInt32(ops[1], bias, ops[0], rawOut);
     }
 }
+static void linearForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
+                                   const void *ctx) {
+    (void)auxOut;
+    (void)ctx;
+    tensor_t *bias = (n > 2) ? ops[2] : NULL;
+    linearForwardBfp(ops[1], bias, ops[0], rawOut);
+}
 
 void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output) {
     linearConfig_t *linearConfig = linearLayer->config->linear;
 
     tensor_t *weights = getParamFromParameter(linearConfig->weights);
     tensor_t *bias = linearConfig->bias != NULL ? getParamFromParameter(linearConfig->bias) : NULL;
+
+    /* BFP epic PR2 (Task 7), ARITH_BFP arm — identical layer-side rules in
+     * Conv1d.c/Conv1dTransposed.c (arm parity):
+     *  1. BFP-stored weights REQUIRED (fail-fast below): the weight is the
+     *     operand whose widths every FLOAT32 operand stages at, so a
+     *     FLOAT32 weight has no width source (and would silently fake-quant).
+     *  2. bfpStage wiring (plan Decision 1/2): FLOAT32-stored input/bias get
+     *     the stack geometry TEMPLATE below — per-tensor {1,0} at the
+     *     WEIGHTS' widths, rounded by the op (the funnel owns exponent
+     *     backing and reads roundingMode from .arithmetic, not the
+     *     template); BFP-stored operands get NULL (borrowed zero-copy).
+     *     Weights are always NULL by rule 1.
+     *  3. groupedSymOperandPos = 0: that gate is a SYM/ASYM-carrier detail —
+     *     BFP blocking is per-operand-legal under ARITH_BFP (ExecuteOp.h),
+     *     so nothing is declared. */
+    if (linearConfig->forwardMath.type == ARITH_BFP) {
+        if (weights->quantization->type != BFP) {
+            PRINT_ERROR("Linear: ARITH_BFP forward requires BFP-stored weights (FLOAT32-init + "
+                        "requantizeTensorInPlace, see docs/conventions/arithmetic-bfp.md); got "
+                        "dtype %d",
+                        (int)weights->quantization->type);
+            exit(1);
+        }
+        const bfpQConfig_t *wQC = weights->quantization->qConfig;
+        /* Stack template: lifetime covers the executeOp call (same frame). */
+        bfpQConfig_t stage = {.exponents = NULL,
+                              .numGroups = 1,
+                              .groupSize = 0,
+                              .roundingMode = linearConfig->forwardMath.roundingMode,
+                              .mantissaBits = wQC->mantissaBits,
+                              .exponentBits = wQC->exponentBits};
+        executeOp(
+            &(opSpec_t){
+                .kernel = linearForwardKernelBfp,
+                .inputs = bias != NULL ? (tensor_t *[]){input, weights, bias}
+                                       : (tensor_t *[]){input, weights},
+                .nInputs = bias != NULL ? 3 : 2,
+                .arithmetic = linearConfig->forwardMath,
+                .mode = OUT_WRITE,
+                .groupedSymOperandPos = 0,
+                .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL, NULL,
+                             (bias != NULL && bias->quantization->type == FLOAT32) ? &stage : NULL},
+            },
+            output);
+        return;
+    }
 
     /* Group-quant PR2 (+PR4: grouped ASYM via the symQConfig-shaped view,
      * see groupedWeightViewOrNull): a stored grouped weight routes the SYM

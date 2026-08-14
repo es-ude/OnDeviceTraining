@@ -12,6 +12,7 @@
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
+#include "expected_bfp_layer_forward.h"
 #include "expected_conv1d_transposed.h"
 #include "expected_convT1d_grouped.h"
 #include "unity.h"
@@ -1715,6 +1716,211 @@ void testConvT1dForwardGroupedAsymBitIdenticalToSymGroupedTwin(void) {
 void setUp() {}
 void tearDown() {}
 
+/* ---- BFP epic PR2 (Task 7): ConvT1d ARITH_BFP forward arm ----------------
+ *
+ * PRE-FLIP: arithmeticFromQuantization still derives ARITH_FLOAT32 for BFP
+ * storage (the flip is Task 9), so every test here hand-sets forwardMath to
+ * {ARITH_BFP, HALF_AWAY} POST-build. Weights reach BFP storage the
+ * documented user way: FLOAT32 init + requantizeTensorInPlace
+ * (docs/conventions/arithmetic-bfp.md). */
+
+/* Native ARITH_BFP forward against the staged-input gold (the Linear
+ * sibling's design, see testLinearForwardBfpNativeMatchesKernelGold in
+ * UnitTestLinear.c): BFP-stored weights are borrowed+unpacked, the FLOAT32
+ * input is staged PER-TENSOR at the WEIGHTS' widths (Decision 1; m=6, lossy
+ * for the fixture's X values), and the FLOAT32 wire is bit-exact -->
+ * EQUAL_MEMORY against generate_expected_bfp_layer_forward.py's
+ * convT1d_bfp_gather_ref output. outputPadding=1: the tail position per
+ * output channel has NO contributors and must be kernel-written to the bias
+ * seed (0.0 -- no bias) -- the sentinel prefill makes a layer adapter that
+ * drops cfg->outputPadding observably wrong. */
+void testConv1dTransposedForwardBfpNativeMatchesKernelGold(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    size_t weightDims[] = {(size_t)kConvTBfpInChannels, (size_t)kConvTBfpOutChannels,
+                           (size_t)kConvTBfpKernelSize};
+    tensor_t *weightsParam = makeFloatTensor(weightDims, 3, kConvTBfpWValues);
+    quantization_t *bfpTemplate = quantizationInitBfpGrouped(
+        (uint8_t)kConvTBfpWMantissaBits, (uint8_t)kConvTBfpWExponentBits, HALF_AWAY,
+        (size_t)kConvTBfpWNumGroups, (size_t)kConvTBfpWGroupSize);
+    requantizeTensorInPlace(weightsParam, bfpTemplate);
+    freeQuantization(bfpTemplate);
+    parameter_t *weights = parameterInit(weightsParam, NULL);
+
+    kernel_t kernel;
+    initKernel(&kernel, (size_t)kConvTBfpKernelSize, VALID, 1, (size_t)kConvTBfpStride);
+    conv1dTransposedConfig_t cfg;
+    layerConfig_t lc;
+    layer_t layer;
+    initConv1dTransposedConfigWithWeightsAndBias(&cfg, &kernel, weights, NULL, 1,
+                                                 (size_t)kConvTBfpOutputPadding, floatQ, floatQ,
+                                                 floatQ, floatQ);
+    cfg.forwardMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    layer.type = CONV1D_TRANSPOSED;
+    lc.conv1dTransposed = &cfg;
+    layer.config = &lc;
+
+    size_t inputDims[] = {(size_t)kConvTBfpBatch, (size_t)kConvTBfpInChannels,
+                          (size_t)kConvTBfpInputLength};
+    tensor_t *input = makeFloatTensor(inputDims, 3, kConvTBfpXValues);
+    size_t outputDims[] = {(size_t)kConvTBfpBatch, (size_t)kConvTBfpOutChannels,
+                           (size_t)kConvTBfpOutLen};
+    tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
+    for (size_t i = 0; i < kConvTBfpExpected_len; i++) {
+        ((float *)output->data)[i] = 777.0f;
+    }
+
+    conv1dTransposedForward(&layer, input, output);
+
+    float captured[24]; /* kConvTBfpBatch * kConvTBfpOutChannels * kConvTBfpOutLen */
+    memcpy(captured, output->data, sizeof(captured));
+
+    freeParameter(weights);
+    freeTensor(output);
+    freeTensor(input);
+    freeQuantization(floatQ);
+
+    TEST_ASSERT_EQUAL_MEMORY(kConvTBfpExpected, captured, sizeof(captured));
+}
+
+/* Layer-level power-of-two twin (Linear sibling:
+ * testLinearForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer; exactness
+ * argument there): SAME mantissas under value-identical power-of-two grids
+ * -> BIT-IDENTICAL FLOAT32 wires through the grouped-SYM SCATTER arm and
+ * the BFP GATHER arm (D9: same real sums, exact float regime, so the
+ * formulation difference cannot show). Weight [2,2,3] mantissas grouped
+ * {3,4}, all scales 0.25f; input [1,2,4] mantissas at scale 0.5f; K=3,
+ * stride 2, outputPadding 1 -> outLen 10; no bias. */
+void testConv1dTransposedForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer(void) {
+    static const int32_t kTwinWMantissas[12] = {4, -3, 2, -1, 5, -2, 1, 2, -4, 3, -1, 2};
+    static const int32_t kTwinXMantissas[8] = {1, -2, 3, -1, 2, -3, 2, 1};
+    size_t weightDims[] = {2, 2, 3};
+    size_t inputDims[] = {1, 2, 4};
+    size_t outputDims[] = {1, 2, 10}; /* (4-1)*2 + 1*(3-1) + 1 + 1 */
+    float symOut[20];
+    float bfpOut[20];
+
+    { /* SYM side: grouped-SYM weights, SYM_INT32 input, no bias. */
+        quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
+        size_t *ownedWeightDims = reserveMemory(3 * sizeof(size_t));
+        memcpy(ownedWeightDims, weightDims, sizeof(weightDims));
+        size_t *weightOrder = reserveMemory(3 * sizeof(size_t));
+        setOrderOfDimsForNewTensor(3, weightOrder);
+        shape_t *weightShape = reserveMemory(sizeof(shape_t));
+        setShape(weightShape, ownedWeightDims, 3, weightOrder);
+        tensor_t *weightsParam =
+            initTensor(weightShape, quantizationInitSymGrouped(8, HALF_AWAY, 3, 4), NULL);
+        byteConversion((uint8_t *)kTwinWMantissas, 32, weightsParam->data, 8, 12);
+        symQConfig_t *weightQC = weightsParam->quantization->qConfig;
+        for (size_t g = 0; g < 3; g++) {
+            weightQC->scales[g] = 0.25f;
+        }
+        parameter_t *weights = parameterInit(weightsParam, NULL);
+
+        tensor_t *input = buildSymInt32TensorExact(3, inputDims, kTwinXMantissas, 0.5f);
+
+        kernel_t kernel;
+        initKernel(&kernel, 3, VALID, 1, 2);
+        conv1dTransposedConfig_t cfg;
+        layerConfig_t lc;
+        layer_t layer;
+        initConv1dTransposedConfigWithWeightsAndBias(&cfg, &kernel, weights, NULL, 1, 1, symQ, symQ,
+                                                     symQ, symQ);
+        layer.type = CONV1D_TRANSPOSED;
+        lc.conv1dTransposed = &cfg;
+        layer.config = &lc;
+
+        tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
+        conv1dTransposedForward(&layer, input, output);
+        memcpy(symOut, output->data, sizeof(symOut));
+
+        freeParameter(weights);
+        freeTensor(output);
+        freeTensor(input);
+        freeQuantization(symQ);
+    }
+
+    { /* BFP side: the SAME values as FLOAT32, weights requantized to grouped
+       * BFP {3,4} m=8, forwardMath hand-set (pre-flip). */
+        float wVals[12];
+        for (size_t i = 0; i < 12; i++) {
+            wVals[i] = (float)kTwinWMantissas[i] * 0.25f;
+        }
+        float xVals[8];
+        for (size_t i = 0; i < 8; i++) {
+            xVals[i] = (float)kTwinXMantissas[i] * 0.5f;
+        }
+
+        quantization_t *floatQ = quantizationInitFloat();
+        tensor_t *weightsParam = makeFloatTensor(weightDims, 3, wVals);
+        quantization_t *bfpTemplate = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 3, 4);
+        requantizeTensorInPlace(weightsParam, bfpTemplate);
+        freeQuantization(bfpTemplate);
+        parameter_t *weights = parameterInit(weightsParam, NULL);
+
+        kernel_t kernel;
+        initKernel(&kernel, 3, VALID, 1, 2);
+        conv1dTransposedConfig_t cfg;
+        layerConfig_t lc;
+        layer_t layer;
+        initConv1dTransposedConfigWithWeightsAndBias(&cfg, &kernel, weights, NULL, 1, 1, floatQ,
+                                                     floatQ, floatQ, floatQ);
+        cfg.forwardMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+        layer.type = CONV1D_TRANSPOSED;
+        lc.conv1dTransposed = &cfg;
+        layer.config = &lc;
+
+        tensor_t *input = makeFloatTensor(inputDims, 3, xVals);
+        tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
+        conv1dTransposedForward(&layer, input, output);
+        memcpy(bfpOut, output->data, sizeof(bfpOut));
+
+        freeParameter(weights);
+        freeTensor(output);
+        freeTensor(input);
+        freeQuantization(floatQ);
+    }
+
+    TEST_ASSERT_EQUAL_MEMORY(symOut, bfpOut, sizeof(symOut));
+}
+
+/* Rule 1 fail-fast: ARITH_BFP forward with weights left FLOAT32 dies with
+ * the guided requantizeTensorInPlace message (exit(1)) in the LAYER, before
+ * the funnel (harness note in UnitTestLinear.c's sibling). */
+void testConv1dTransposedForwardBfpRejectsFloat32Weights(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    size_t weightDims[] = {(size_t)kConvTBfpInChannels, (size_t)kConvTBfpOutChannels,
+                           (size_t)kConvTBfpKernelSize};
+    tensor_t *weightsParam = makeFloatTensor(weightDims, 3, kConvTBfpWValues);
+    parameter_t *weights = parameterInit(weightsParam, NULL);
+
+    kernel_t kernel;
+    initKernel(&kernel, (size_t)kConvTBfpKernelSize, VALID, 1, (size_t)kConvTBfpStride);
+    conv1dTransposedConfig_t cfg;
+    layerConfig_t lc;
+    layer_t layer;
+    initConv1dTransposedConfigWithWeightsAndBias(&cfg, &kernel, weights, NULL, 1,
+                                                 (size_t)kConvTBfpOutputPadding, floatQ, floatQ,
+                                                 floatQ, floatQ);
+    cfg.forwardMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    layer.type = CONV1D_TRANSPOSED;
+    lc.conv1dTransposed = &cfg;
+    layer.config = &lc;
+
+    size_t inputDims[] = {(size_t)kConvTBfpBatch, (size_t)kConvTBfpInChannels,
+                          (size_t)kConvTBfpInputLength};
+    tensor_t *input = makeFloatTensor(inputDims, 3, kConvTBfpXValues);
+    size_t outputDims[] = {(size_t)kConvTBfpBatch, (size_t)kConvTBfpOutChannels,
+                           (size_t)kConvTBfpOutLen};
+    tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedForward(&layer, input, output));
+
+    freeParameter(weights);
+    freeTensor(output);
+    freeTensor(input);
+    freeQuantization(floatQ);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testConv1dTransposedForwardSingleChannelSingleBatch);
@@ -1760,5 +1966,8 @@ int main() {
     RUN_TEST(testConvT1dBackwardGroupedDxEqualScalesBitIdenticalToScalar);
     RUN_TEST(testConvT1dBackwardGroupedDxFloatPathAgreesWithinTolerance);
     RUN_TEST(testConvT1dForwardGroupedAsymBitIdenticalToSymGroupedTwin);
+    RUN_TEST(testConv1dTransposedForwardBfpNativeMatchesKernelGold);
+    RUN_TEST(testConv1dTransposedForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer);
+    RUN_TEST(testConv1dTransposedForwardBfpRejectsFloat32Weights);
     return UNITY_END();
 }

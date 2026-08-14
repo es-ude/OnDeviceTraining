@@ -21,6 +21,7 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
+#include "expected_bfp_layer_forward.h"
 #include "expected_linear_grouped_asym.h"
 #include "unity.h"
 
@@ -2583,6 +2584,248 @@ void testLinearBackwardGroupedAsymDxMatchesGold(void) {
     }
 }
 
+/* ---- BFP epic PR2 (Task 7): Linear ARITH_BFP forward arm -----------------
+ *
+ * PRE-FLIP: arithmeticFromQuantization still derives ARITH_FLOAT32 for BFP
+ * storage (the flip is Task 9), so every test here hand-sets forwardMath to
+ * {ARITH_BFP, HALF_AWAY} POST-build -- that is the test's only way into the
+ * arm. Weights reach BFP storage the documented user way: FLOAT32 init +
+ * requantizeTensorInPlace (docs/conventions/arithmetic-bfp.md). */
+
+static tensor_t *makeFloatTensor(size_t const *dims, size_t numDims, float const *data) {
+    size_t *ownedDims = reserveMemory(numDims * sizeof(size_t));
+    memcpy(ownedDims, dims, numDims * sizeof(size_t));
+    size_t *order = reserveMemory(numDims * sizeof(size_t));
+    setOrderOfDimsForNewTensor(numDims, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, ownedDims, numDims, order);
+    tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
+    if (data != NULL) {
+        tensorFillFromFloatBuffer(t, data, calcNumberOfElementsByTensor(t));
+    }
+    return t;
+}
+
+/*! Native-fixture layer: FLOAT32 weights [3,6] from the generated fixture,
+ *  requantized IN PLACE to the fixture's grouped BFP config; FLOAT32 `q`
+ *  covers the wires; forwardMath hand-set post-build (pre-flip, see above). */
+static layer_t *buildBfpLinearLayer(bool withBias, quantization_t *floatQ) {
+    size_t weightDims[] = {(size_t)kLinBfpOutFeatures, (size_t)kLinBfpInFeatures};
+    tensor_t *weightsParam = makeFloatTensor(weightDims, 2, kLinBfpWValues);
+    quantization_t *bfpTemplate =
+        quantizationInitBfpGrouped((uint8_t)kLinBfpWMantissaBits, (uint8_t)kLinBfpWExponentBits,
+                                   HALF_AWAY, (size_t)kLinBfpWNumGroups, (size_t)kLinBfpWGroupSize);
+    requantizeTensorInPlace(weightsParam, bfpTemplate);
+    freeQuantization(bfpTemplate);
+    parameter_t *weights = parameterInit(weightsParam, NULL);
+
+    parameter_t *bias = NULL;
+    if (withBias) {
+        size_t biasDims[] = {(size_t)kLinBfpOutFeatures};
+        bias = parameterInit(makeFloatTensor(biasDims, 1, kLinBfpBiasValues), NULL);
+    }
+
+    layer_t *layer = buildBorrowedLinearLayer(weights, bias, floatQ);
+    layer->config->linear->forwardMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    return layer;
+}
+
+/* Native ARITH_BFP forward against the staged-input gold: the funnel borrows
+ * the BFP-stored weights (unpack only) and stages the FLOAT32 input
+ * PER-TENSOR at the WEIGHTS' widths (Decision 1; m=6 here, deliberately != 8
+ * and LOSSY for the fixture's X values so a hardcoded staging width diverges
+ * observably). generate_expected_bfp_layer_forward.py mirrors exactly that
+ * staging. The FLOAT32 wire is bit-exact (ARITH_BFP raw is FLOAT32, D7; the
+ * OUT_WRITE FLOAT32->FLOAT32 epilogue is a memmove), so the compare is
+ * EQUAL_MEMORY, not a tolerance. Output prefilled with a sentinel: every
+ * element must be kernel-written. */
+void testLinearForwardBfpNativeMatchesKernelGold(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layer_t *linearLayer = buildBfpLinearLayer(false, floatQ);
+
+    size_t inputDims[] = {(size_t)kLinBfpBatch, (size_t)kLinBfpInFeatures};
+    tensor_t *input = makeFloatTensor(inputDims, 2, kLinBfpXValues);
+    size_t outputDims[] = {(size_t)kLinBfpBatch, (size_t)kLinBfpOutFeatures};
+    tensor_t *output = makeFloatTensor(outputDims, 2, NULL);
+    for (size_t i = 0; i < kLinBfpExpectedNoBias_len; i++) {
+        ((float *)output->data)[i] = 777.0f;
+    }
+
+    linearForward(linearLayer, input, output);
+
+    float captured[6]; /* kLinBfpBatch * kLinBfpOutFeatures */
+    memcpy(captured, output->data, sizeof(captured));
+
+    freeLinearLayer(linearLayer);
+    freeTensor(output);
+    freeTensor(input);
+    freeQuantization(floatQ);
+
+    TEST_ASSERT_EQUAL_MEMORY(kLinBfpExpectedNoBias, captured, sizeof(captured));
+}
+
+/* Decision 2: a FLOAT32-stored bias under ARITH_BFP is staged through the
+ * SAME per-tensor-at-weights'-widths template as the input (uniform staging
+ * rule) -- the layer must not reject it and the result must match the gold
+ * whose bias was quantized per-tensor at m=6. */
+void testLinearForwardBfpStagesFloat32Bias(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layer_t *linearLayer = buildBfpLinearLayer(true, floatQ);
+
+    size_t inputDims[] = {(size_t)kLinBfpBatch, (size_t)kLinBfpInFeatures};
+    tensor_t *input = makeFloatTensor(inputDims, 2, kLinBfpXValues);
+    size_t outputDims[] = {(size_t)kLinBfpBatch, (size_t)kLinBfpOutFeatures};
+    tensor_t *output = makeFloatTensor(outputDims, 2, NULL);
+    for (size_t i = 0; i < kLinBfpExpectedWithBias_len; i++) {
+        ((float *)output->data)[i] = 777.0f;
+    }
+
+    linearForward(linearLayer, input, output);
+
+    float captured[6]; /* kLinBfpBatch * kLinBfpOutFeatures */
+    memcpy(captured, output->data, sizeof(captured));
+
+    freeLinearLayer(linearLayer);
+    freeTensor(output);
+    freeTensor(input);
+    freeQuantization(floatQ);
+
+    TEST_ASSERT_EQUAL_MEMORY(kLinBfpExpectedWithBias, captured, sizeof(captured));
+}
+
+/* Layer-level power-of-two twin (precedent: the equal-scales-equal-zp twin
+ * above; kernel-level sibling UnitTestMatmul.c's
+ * testMatmulBfpPowerOfTwoBitIdenticalToGroupedSym): the SAME mantissas under
+ * value-identical power-of-two grids must produce BIT-IDENTICAL FLOAT32
+ * wires through BOTH forward arms. SYM side: grouped SYM weights (qBits 8,
+ * scales all 0.25f) + SYM_INT32 input (scale 0.5f) under ARITH_SYM_INT32 --
+ * per output element ONE tail combine, rescaleIntoAccumulatorScale(partial,
+ * 0.125f, 0.125f) is an exact round trip, and the FLOAT32 wire dequant is
+ * one exact (float)mantissa * 0.125f. BFP side: the same values as FLOAT32
+ * params/input; requantize derives per-group absmax <= 1.25 -> stored
+ * exponent 2^-6, weight codes w_m*16 (exact); per-tensor staging at m=8
+ * derives absmax 1.5 -> 2^-6, input codes a_m*32 (exact); the single tail
+ * fold is ldexpf(512*partial, -12) = partial*0.125f bit-for-bit (partials
+ * < 2^24). NO bias: the SYM bias seed would rescale through the
+ * non-power-of-two 0.1f grid and break exactness. */
+void testLinearForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer(void) {
+    float symOut[6];
+    float bfpOut[6];
+
+    { /* SYM side: grouped-SYM weights, SYM_INT32 input, no bias. */
+        quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
+        size_t *weightDims = reserveMemory(2 * sizeof(size_t));
+        weightDims[0] = 3;
+        weightDims[1] = 6;
+        size_t *weightOrder = reserveMemory(2 * sizeof(size_t));
+        setOrderOfDimsForNewTensor(2, weightOrder);
+        shape_t *weightShape = reserveMemory(sizeof(shape_t));
+        setShape(weightShape, weightDims, 2, weightOrder);
+        tensor_t *weightsParam =
+            initTensor(weightShape, quantizationInitSymGrouped(8, HALF_AWAY, 3, 6), NULL);
+        byteConversion((uint8_t *)kGroupedWMantissas, 32, weightsParam->data, 8, 18);
+        symQConfig_t *weightQC = weightsParam->quantization->qConfig;
+        for (size_t g = 0; g < 3; g++) {
+            weightQC->scales[g] = 0.25f;
+        }
+        parameter_t *weights = parameterInit(weightsParam, NULL);
+
+        size_t *inputDims = reserveMemory(2 * sizeof(size_t));
+        inputDims[0] = 2;
+        inputDims[1] = 6;
+        size_t *inputOrder = reserveMemory(2 * sizeof(size_t));
+        setOrderOfDimsForNewTensor(2, inputOrder);
+        shape_t *inputShape = reserveMemory(sizeof(shape_t));
+        setShape(inputShape, inputDims, 2, inputOrder);
+        tensor_t *input = initTensor(inputShape, quantizationInitSymInt32(HALF_AWAY), NULL);
+        for (size_t i = 0; i < 12; i++) {
+            ((int32_t *)input->data)[i] = kGroupedAMantissas[i];
+        }
+        ((symInt32QConfig_t *)input->quantization->qConfig)->scale = 0.5f;
+
+        layer_t *linearLayer = buildBorrowedLinearLayer(weights, NULL, symQ);
+
+        size_t outputDims[] = {2, 3};
+        tensor_t *output = makeFloatTensor(outputDims, 2, NULL);
+
+        linearForward(linearLayer, input, output);
+        memcpy(symOut, output->data, sizeof(symOut));
+
+        freeLinearLayer(linearLayer);
+        freeTensor(output);
+        freeTensor(input);
+        freeQuantization(symQ);
+    }
+
+    { /* BFP side: the SAME values as FLOAT32, weights requantized to grouped
+       * BFP {3,6} m=8, forwardMath hand-set (pre-flip). */
+        float wVals[18];
+        for (size_t i = 0; i < 18; i++) {
+            wVals[i] = (float)kGroupedWMantissas[i] * 0.25f;
+        }
+        float xVals[12];
+        for (size_t i = 0; i < 12; i++) {
+            xVals[i] = (float)kGroupedAMantissas[i] * 0.5f;
+        }
+
+        quantization_t *floatQ = quantizationInitFloat();
+        size_t weightDims[] = {3, 6};
+        tensor_t *weightsParam = makeFloatTensor(weightDims, 2, wVals);
+        quantization_t *bfpTemplate = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 3, 6);
+        requantizeTensorInPlace(weightsParam, bfpTemplate);
+        freeQuantization(bfpTemplate);
+        parameter_t *weights = parameterInit(weightsParam, NULL);
+
+        layer_t *linearLayer = buildBorrowedLinearLayer(weights, NULL, floatQ);
+        linearLayer->config->linear->forwardMath =
+            (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+
+        size_t inputDims[] = {2, 6};
+        tensor_t *input = makeFloatTensor(inputDims, 2, xVals);
+        size_t outputDims[] = {2, 3};
+        tensor_t *output = makeFloatTensor(outputDims, 2, NULL);
+
+        linearForward(linearLayer, input, output);
+        memcpy(bfpOut, output->data, sizeof(bfpOut));
+
+        freeLinearLayer(linearLayer);
+        freeTensor(output);
+        freeTensor(input);
+        freeQuantization(floatQ);
+    }
+
+    TEST_ASSERT_EQUAL_MEMORY(symOut, bfpOut, sizeof(symOut));
+}
+
+/* Rule 1 fail-fast: ARITH_BFP forward with weights left FLOAT32 dies with
+ * the guided requantizeTensorInPlace message (exit(1)) in the LAYER, before
+ * the funnel. Harness note: DeathTest.h asserts the exit CODE only; the
+ * dropped-check mutation is still caught because an unguarded arm derefs the
+ * FLOAT32 weights' NULL qConfig (child dies by SIGNAL -> WIFEXITED false ->
+ * this assert fails) -- verified in the Task 7 mutation pass. */
+void testLinearForwardBfpRejectsFloat32Weights(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    size_t weightDims[] = {(size_t)kLinBfpOutFeatures, (size_t)kLinBfpInFeatures};
+    tensor_t *weightsParam = makeFloatTensor(weightDims, 2, kLinBfpWValues);
+    parameter_t *weights = parameterInit(weightsParam, NULL);
+    layer_t *linearLayer = buildBorrowedLinearLayer(weights, NULL, floatQ);
+    linearLayer->config->linear->forwardMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+
+    size_t inputDims[] = {(size_t)kLinBfpBatch, (size_t)kLinBfpInFeatures};
+    tensor_t *input = makeFloatTensor(inputDims, 2, kLinBfpXValues);
+    size_t outputDims[] = {(size_t)kLinBfpBatch, (size_t)kLinBfpOutFeatures};
+    tensor_t *output = makeFloatTensor(outputDims, 2, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(linearForward(linearLayer, input, output));
+
+    freeLinearLayer(linearLayer);
+    freeTensor(output);
+    freeTensor(input);
+    freeQuantization(floatQ);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLinearForwardFloat);
@@ -2632,5 +2875,9 @@ int main(void) {
     RUN_TEST(testLinearForwardGroupedAsymFloatPathAgreesWithinTolerance);
     RUN_TEST(testLinearForwardGroupedAsymEqualScalesEqualZpBitIdenticalToPerTensor);
     RUN_TEST(testLinearBackwardGroupedAsymDxMatchesGold);
+    RUN_TEST(testLinearForwardBfpNativeMatchesKernelGold);
+    RUN_TEST(testLinearForwardBfpStagesFloat32Bias);
+    RUN_TEST(testLinearForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer);
+    RUN_TEST(testLinearForwardBfpRejectsFloat32Weights);
     return UNITY_END();
 }

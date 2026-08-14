@@ -65,6 +65,22 @@ add_custom_command(
 add_custom_target(generate_expected_linear_grouped_asym
         DEPENDS ${GEN_LINEAR_GROUPED_ASYM_HEADER})
 
+# BFP epic PR2 (Task 7): ONE fixture header for the three GEMM-family layer
+# forward tests (Linear/Conv1d/ConvT1d share the binary dir; each test target
+# below adds its own dependency on this one generate target).
+set(GEN_BFP_LAYER_FORWARD_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_bfp_layer_forward.h)
+add_custom_command(
+        OUTPUT ${GEN_BFP_LAYER_FORWARD_HEADER}
+        COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_bfp_layer_forward.py
+                --out ${GEN_BFP_LAYER_FORWARD_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_bfp_layer_forward.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+        COMMENT "Generating expected_bfp_layer_forward.h via PyTorch"
+        VERBATIM
+)
+add_custom_target(generate_expected_bfp_layer_forward
+        DEPENDS ${GEN_BFP_LAYER_FORWARD_HEADER})
+
 set(GEN_MAX_POOL_1D_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_max_pool_1d.h)
 add_custom_command(
         OUTPUT ${GEN_MAX_POOL_1D_HEADER}
@@ -110,6 +126,7 @@ add_elastic_ai_unit_test(
 )
 add_dependencies(UnitTestConv1d generate_expected_conv1d)
 add_dependencies(UnitTestConv1d generate_expected_conv1d_grouped)
+add_dependencies(UnitTestConv1d generate_expected_bfp_layer_forward)
 target_include_directories(UnitTestConv1d PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 add_elastic_ai_unit_test(
@@ -136,6 +153,7 @@ add_elastic_ai_unit_test(
         odt_test_layer_builders
 )
 add_dependencies(UnitTestLinear generate_expected_linear_grouped_asym)
+add_dependencies(UnitTestLinear generate_expected_bfp_layer_forward)
 target_include_directories(UnitTestLinear PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 add_elastic_ai_unit_test(
@@ -197,6 +215,7 @@ add_elastic_ai_unit_test(
 )
 add_dependencies(UnitTestConv1dTransposed generate_expected_conv1d_transposed)
 add_dependencies(UnitTestConv1dTransposed generate_expected_convT1d_grouped)
+add_dependencies(UnitTestConv1dTransposed generate_expected_bfp_layer_forward)
 target_include_directories(UnitTestConv1dTransposed PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 add_elastic_ai_unit_test(

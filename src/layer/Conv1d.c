@@ -95,6 +95,19 @@ static void forwardKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_
         conv1dKernelSymInt32(ops[0], ops[1], bias, cfg->kernel, cfg->groups, rawOut);
     }
 }
+/* BFP epic PR2 (Task 7): operands arrive in the funnel's unpacked-BFP
+ * scratch form; the BFP kernel reads all quant info from the operands
+ * themselves, so only the kernel_t/groups geometry is taken from ctx —
+ * ctx->weightGroups stays NULL (BFP weights never take the SYM carrier
+ * path, groupedWeightViewOrNull returns NULL for the BFP dtype). */
+static void forwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
+                             const void *ctx) {
+    (void)auxOut;
+    const conv1dForwardCtx_t *fctx = ctx;
+    const conv1dConfig_t *cfg = fctx->cfg;
+    tensor_t *bias = (n > 2) ? ops[2] : NULL;
+    conv1dKernelBfp(ops[0], ops[1], bias, cfg->kernel, cfg->groups, rawOut);
+}
 
 /* Group-quant PR4 (Task 3): grouped-weight detection across BOTH grouped
  * carrier dtypes — duplicated verbatim from Linear.c (the canonical copy;
@@ -175,6 +188,47 @@ void conv1dForward(layer_t *layer, tensor_t *input, tensor_t *output) {
             },
             output);
         break;
+    case ARITH_BFP: {
+        /* BFP epic PR2 (Task 7) — identical layer-side rules in Linear.c
+         * (canonical rule comment there, arm parity): 1. BFP-stored weights
+         * required (the width source for every staged FLOAT32 operand);
+         * 2. FLOAT32-stored input/bias get the per-tensor stack template at
+         * the WEIGHTS' widths, BFP-stored operands NULL (borrowed);
+         * 3. groupedSymOperandPos = 0 (SYM/ASYM-carrier detail — BFP
+         * blocking is per-operand-legal). */
+        if (weightTensor->quantization->type != BFP) {
+            PRINT_ERROR("Conv1d: ARITH_BFP forward requires BFP-stored weights (FLOAT32-init + "
+                        "requantizeTensorInPlace, see docs/conventions/arithmetic-bfp.md); got "
+                        "dtype %d",
+                        (int)weightTensor->quantization->type);
+            exit(1);
+        }
+        const bfpQConfig_t *wQC = weightTensor->quantization->qConfig;
+        /* Stack template: lifetime covers the executeOp call (same frame). */
+        bfpQConfig_t stage = {.exponents = NULL,
+                              .numGroups = 1,
+                              .groupSize = 0,
+                              .roundingMode = cfg->forwardMath.roundingMode,
+                              .mantissaBits = wQC->mantissaBits,
+                              .exponentBits = wQC->exponentBits};
+        executeOp(
+            &(opSpec_t){
+                .kernel = forwardKernelBfp,
+                .ctx = &fctx,
+                .inputs = biasTensor != NULL ? (tensor_t *[]){input, weightTensor, biasTensor}
+                                             : (tensor_t *[]){input, weightTensor},
+                .nInputs = biasTensor != NULL ? 3 : 2,
+                .arithmetic = cfg->forwardMath,
+                .mode = OUT_WRITE,
+                .groupedSymOperandPos = 0,
+                .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL, NULL,
+                             (biasTensor != NULL && biasTensor->quantization->type == FLOAT32)
+                                 ? &stage
+                                 : NULL},
+            },
+            output);
+        break;
+    }
     default:
         PRINT_ERROR("Conv1d forward: quantization type not implemented");
         exit(1);

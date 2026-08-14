@@ -139,7 +139,7 @@ re-derives a fresh grid every store (absmax for SYM, affine min/max for ASYM). B
 direct-call only, not `conversionMatrix` cells (there is no dtype-pair to key a matrix
 cell on — the second operand is a raw float increment, not a tensor).
 
-## BFP — block-floating-point storage (BFP epic PR1, spec `docs/superpowers/specs/2026-07-29-block-floating-point-design.md`)
+## BFP — block-floating-point storage (BFP epic PR1+PR2, spec `docs/superpowers/specs/2026-07-29-block-floating-point-design.md`)
 
 `BFP` is qtype #7 (`qtype_t = {INT32, FLOAT32, SYM_INT32, SYM, ASYM, BOOL,
 BFP}`, appended last — mid-enum insertion would corrupt old checkpoints): a
@@ -161,13 +161,20 @@ saturation-not-abort exponent rule, and clone semantics are in
 **`BFP` IS a storage dtype — "compute format, not storage" (above) does NOT
 apply to it.** Unlike `SYM_INT32`, `BFP` costs `mantissaBits/8` bytes/element
 plus the per-group exponent overhead and is meant to be persisted. Compute is
-a separate, independent axis: as of this PR (dtype core only), BFP has no
-native compute kernel — `arithmeticFromQuantization` derives `ARITH_FLOAT32`
-for a `BFP`-typed quantization (the universal float bridge), so training a
-BFP-stored model today is fake-quant (unpack → float compute → repack).
-Native `ARITH_BFP` kernels (int32 block-partial MACs, float32 cross-block
-accumulation) land in epic PR2; the derivation flips to `ARITH_BFP` then — a
-documented breaking change.
+a separate, independent axis, and unlike `SYM`/`ASYM` it is not float-bridge
+only: since epic PR2, `arithmeticFromQuantization` derives native `ARITH_BFP`
+for a `BFP`-typed quantization — the documented breaking change over PR1's
+`ARITH_FLOAT32` float bridge. `ARITH_BFP` runs the GEMM-family (Linear/
+Conv1d/Conv1dTransposed) **forward** natively: both operands stay blocked,
+`int32` mantissa products accumulate per same-exponent segment, and each
+segment folds into a `float32` accumulator via an exact `ldexpf` power-of-two
+shift at every group-boundary change (kernel contract, headroom guard and
+deviations: `docs/conventions/arithmetic-bfp.md` §5). BFP **backward** is
+still fake-quant-only until epic PR3: pin the backward math slots
+(`weightGradMath`/`biasGradMath`/`propLossMath`) to `ARITH_FLOAT32` explicitly
+— `layerQuantInitUniform` over one BFP template derives `ARITH_BFP` in all
+four slots, and a model that leaves a backward slot derived dies at the
+funnel on its first backward op.
 
 **`int_repr`/`dequantize` convention holds.** `BFP → INT32` emits the packed
 mantissa **codes** with the exponent dropped (`int_repr`, matching every other
@@ -183,7 +190,12 @@ producer-restored BFP wires through explicitly, never a same-type memmove.
 scalar compute image to land a BFP source on, so it fails fast with
 dequant-first guidance (dequantize `BFP → FLOAT32`, then `FLOAT32 →
 SYM`(grouped)); `BFP → SYM`(per-tensor) works directly (fresh absmax pack).
-`BOOL` stays fail-fast in every direction, as elsewhere. Same-dtype BFP pairs
+Conversions with a grouped-**ASYM** target stay denied the same way,
+regardless of source dtype — including BFP sources: `convertBfpTensorToAsymTensor`
+dies inside the shared per-tensor choke point (`requirePerTensorAsym`), the
+same gate every other `* → ASYM` cell routes its grid derivation through;
+route through `FLOAT32` instead. `BOOL` stays fail-fast in every direction,
+as elsewhere. Same-dtype BFP pairs
 with differing geometry/width are the one `QuantizationLayer` same-dtype
 exception besides `SYM_INT32`: a same-type convert requires **identical**
 geometry and widths (`numGroups`, `groupSize`, `mantissaBits`,

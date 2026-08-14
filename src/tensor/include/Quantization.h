@@ -141,7 +141,9 @@ typedef struct bfpQConfig {
     size_t numGroups;   /* 1 = per-tensor */
     size_t groupSize;   /* 0 = whole-tensor sentinel; >0 grouped, numGroups*groupSize == N */
     roundingMode_t roundingMode;
-    uint8_t mantissaBits; /* [2, 16]; storage width -- compute contract lands in epic PR2 */
+    uint8_t mantissaBits; /* [2, 16]; storage width -- also the ARITH_BFP compute contract's
+                           * operand width (kernel headroom, staging), see
+                           * docs/conventions/arithmetic-bfp.md */
     uint8_t exponentBits; /* [2, 8]; bias = 2^(exponentBits-1) - 1 */
 } bfpQConfig_t;
 

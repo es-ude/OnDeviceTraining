@@ -541,11 +541,14 @@ void testValidatorAcceptsChainWithoutQuantLayers(void) {
  * (conversionMatrix[BFP][BFP]). Config-acceptance level: the layer's forward
  * runs once over stack tensors, NOT because heap BFP tensors would leak --
  * freeQuantization's BFP arm (TensorApi.c) frees exponents[] cleanly through
- * freeTensor/freeQuantization, same as SYM. The real reason is that the WIRE
- * ALLOCATORS (initLayerOutputs/initGradTensor, CalculateGradsSequential.c;
- * InferenceApi.c) have no BFP arm yet -- they default to "Unknown QType!"
- * until epic PR2 -- so no model training/inference loop can allocate a live
- * BFP output/grad tensor today; stack fixtures sidestep that gap entirely.
+ * freeTensor/freeQuantization, same as SYM. Stack tensors are also not a
+ * remaining allocation gap: since epic PR2 (Task 8) the wire allocators
+ * (initLayerOutputs/initGradTensor, CalculateGradsSequential.c;
+ * InferenceApi.c) carry BFP arms and can allocate a live BFP output/grad
+ * tensor. This test deliberately stays at the Quantization-layer's own
+ * forward-dispatch level (like its FLOAT32 counterpart below) instead of
+ * driving a full training/inference loop -- the diagonal cell under test
+ * (conversionMatrix[BFP][BFP]) is exercised identically either way.
  * Fixture = testRequantBfpWidthChange's hand-derived gold: m=8 values
  * {100,-50,25,0} -> m=4 stored exponent 131 (E=+4, scale 16), mantissas
  * {6,-3,2,0} -- FRESH exponent proves the forward reached the diagonal. */

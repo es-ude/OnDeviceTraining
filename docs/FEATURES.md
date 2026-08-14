@@ -7,15 +7,21 @@ tracking work. Legend: ✓ = supported · ~ = supported via a fallback (see note
 ✗ = not supported / gated · n/a = not applicable (e.g. layer has no parameters).
 
 Central axis: **arithmetic (compute) and storage are independent knobs.** A layer
-declares compute per op as a by-value `arithmetic_t {ARITH_FLOAT32 | ARITH_SYM_INT32,
-roundingMode}` (`forwardMath`, GEMM family also `weightGradMath`/`biasGradMath`, dx op
-`propLossMath`); storage is the produced-wire `quantization_t*` (`outputQ`/`propLossQ`)
-and the grad-storage knobs. `SYM_INT32` is a **compute** format, never durable grad
-storage (#261); `SYM`/`ASYM` are packed **storage** formats. `BFP` (block-floating-point,
-epic PR1) is a packed **storage** format too — storage dtype, full conversion matrix,
-ODTS v5, fake-quant training via the `ARITH_FLOAT32` bridge; native `ARITH_BFP` kernels
-are epic PR2+. Active training paths are FLOAT32 and SYM_INT32; SYM/ASYM/BOOL/BFP(fake-quant)
-are partial.
+declares compute per op as a by-value `arithmetic_t {ARITH_FLOAT32 | ARITH_SYM_INT32 |
+ARITH_BFP, roundingMode}` (`forwardMath`, GEMM family also `weightGradMath`/`biasGradMath`,
+dx op `propLossMath`); storage is the produced-wire `quantization_t*`
+(`outputQ`/`propLossQ`) and the grad-storage knobs. `SYM_INT32` is a **compute** format,
+never durable grad storage (#261); `SYM`/`ASYM` are packed **storage** formats. `BFP`
+(block-floating-point, epic PR1+PR2) is a packed **storage** format that — unlike
+`SYM`/`ASYM` — also has a native **compute** arithmetic: since epic PR2,
+`arithmeticFromQuantization` derives `ARITH_BFP` for BFP storage (the documented breaking
+change over PR1's `ARITH_FLOAT32` float bridge), and `ARITH_BFP` runs the GEMM-family
+**forward** (Linear/Conv1d/Conv1dTransposed) natively with both operands blocked. BFP
+backward and BFP grad/optimizer-state storage stay carrier-gated fail-fasts until epic
+PR3; fake-quant BFP training (pin the math slot(s) to `ARITH_FLOAT32` explicitly) remains
+available end to end. Active training paths are FLOAT32 and SYM_INT32 end to end, plus BFP
+forward-native/backward-fake-quant; SYM/ASYM/BOOL storage and BFP native backward are
+partial/unsupported.
 
 ## Layers (`layerType_t`, 13 total)
 
@@ -377,26 +383,47 @@ checkpointing, limitations, literature).
   Grads, bias, gamma/beta, wires,
   and momentum stay per-tensor (funnel-enforced); `symInt32QConfig_t` (compute/wires)
   stays scalar by design.
-- **BFP** (`qtype_t BFP`, block-floating-point epic PR1, spec
+- **BFP** (`qtype_t BFP`, block-floating-point epic PR1+PR2, spec
   `docs/superpowers/specs/2026-07-29-block-floating-point-design.md`) — packed
   two's-complement mantissas + per-group `u8` biased exponents (`bfpQConfig_t`), the
-  same always-array group shape as `symQConfig_t`. The dtype-core epic PR1 ships:
+  same always-array group shape as `symQConfig_t`. The dtype-core (epic PR1) ships:
   the **complete 7×7 matrix** (all 10 `BFP` cross cells + the `[BFP][BFP]`
   per-block width-restore diagonal; the one directional gap is `BFP → SYM`(grouped),
   which fails fast with dequant-first guidance rather than silently picking a
-  scalar target), the full owner chain (`getQLike`/copy/`freeQuantization`/
+  scalar target — conversions with a grouped-**ASYM** target are denied the same
+  way, and for EVERY source dtype including BFP: `convertBfpTensorToAsymTensor`
+  dies inside the shared per-tensor choke point (`requirePerTensorAsym`); route
+  through FLOAT32 instead), the full owner chain (`getQLike`/copy/`freeQuantization`/
   `deepCopyQuantization`, mirroring SYM — per-tensor clone resets to zero-state,
   grouped clone deep-copies the exponent grid), `requantizeTensorInPlace` (BFP
-  shape-gated), and ODTS v5. Compute is `ARITH_FLOAT32` only —
-  `arithmeticFromQuantization` bridges every BFP-typed op to float
-  (`ARITH_BFP` does not exist yet); fake-quant BFP training is exercised
-  end-to-end by the multi-layer training capstone test. BFP grad and
-  optimizer-state templates (`gradInit`, per-parameter `m`/`v` cloning) are
-  explicit **carrier gates** that fail fast today — native `ARITH_BFP`
-  compute and BFP grad/state storage are epic PR2/PR3. Deviations from the
-  cited literature (two's-complement mantissas, D6 exponent saturation vs. the
-  #227 abort discipline, the absmax-snap-up exponent rule vs. MX/MSFP) are in
-  `docs/conventions/arithmetic-bfp.md`.
+  shape-gated), and ODTS v5. Epic PR2 adds native **compute**:
+  `arithmeticFromQuantization` now derives `ARITH_BFP` for BFP storage (the
+  documented breaking change — the PR1 `ARITH_FLOAT32` float bridge is retired as
+  the default; fake-quant is still available, pin the math slot(s) to
+  `ARITH_FLOAT32` explicitly). `ARITH_BFP` runs the GEMM-family **forward**
+  natively — Linear/Conv1d matmul, Conv1dTransposed via a gather-formulated
+  kernel (`convTranspose1dKernelBfpGather`, spec D9, since the scatter form has
+  no per-(output, group) run to carry a block partial across) — with both
+  operands blocked, `int32` same-exponent-segment partials folded via `ldexpf`,
+  and a headroom guard (`bfpSegmentLimit(ma,mb) = INT32_MAX >> (ma+mb-2)`,
+  fail-fast at kernel entry). The four wire allocators
+  (`initLayerOutputs`/`initGradTensor`, `InferenceApi.c`) carry BFP arms: wire
+  `numGroups` is DERIVED from the template's `groupSize` and the wire's runtime
+  element count (never the template's own `numGroups`), with a divisibility
+  fail-fast. Remaining **carrier gates**: BFP backward (weightGrad/biasGrad/dx)
+  and BFP grad/optimizer-state templates (`gradInit`, per-parameter `m`/`v`
+  cloning) fail fast until epic PR3 — a uniform-BFP model
+  (`layerQuantInitUniform` over one BFP template) trains its forward natively
+  and then dies at the funnel on the first backward op unless the backward math
+  slots are pinned `ARITH_FLOAT32` by hand. BFP **final/loss-facing** wires are
+  a separate, PR4-gated gap: no loss function has a BFP arm, so a BFP output
+  wire is not evaluable through `inference*WithLoss` — keep the loss-facing
+  wire `FLOAT32` (plan Decision 9). Deviations from the cited literature
+  (two's-complement mantissas, D6 exponent saturation vs. the #227 abort
+  discipline, the absmax-snap-up exponent rule vs. MX/MSFP, plus the PR2 kernel
+  deviations — gather-formulated ConvT1d, the `(float)partial` int32→float
+  conversion's >2^24 rounding point, ±inf fold overflow at extreme combined
+  exponents) are in `docs/conventions/arithmetic-bfp.md`.
 - **Weight init** — PyTorch-compatible: `INIT_DEFAULT` reproduces
   `kaiming_uniform_(a=√5)`, plus kaiming/xavier schemes (`weightInit_t`). FLOAT32-only.
 - **userApi** — `inference` (single/batched/with-loss), `StateDictApi` (weight **load**
@@ -424,12 +451,31 @@ checkpointing, limitations, literature).
 - `TRACK_INSTRUCTIONS` counters exist on the legacy `Square`/`Matmul` libs but are
   unsafe to enable: a name mismatch fails compilation for `Square`, both libs lack a
   reset helper, and `Matmul`'s SYM_INT32 path double-increments (#351).
-- BFP (block-floating-point epic PR1) has no native compute kernel yet —
-  `ARITH_BFP` arrives epic PR2 (GEMM-family forward) → PR3 (backward + grad/
-  optimizer-state storage); BFP grad and optimizer-state templates fail fast
-  today (`gradInit`, per-parameter state cloning). BFP **wires** (a layer's
-  `outputQ`/`propLossQ`) are a separate gap: the wire allocators
-  (`initLayerOutputs`/`initGradTensor`, `InferenceApi.c`) have no BFP arm
-  either and fail fast with "Unknown QType!" until epic PR2, even though
-  ODTS v5 can already round-trip a model config carrying a BFP wire — you
-  can serialize a model you cannot yet run.
+- BFP (block-floating-point epic PR1+PR2) native compute is **forward-only**:
+  `ARITH_BFP` runs Linear/Conv1d/Conv1dTransposed forward natively (both
+  operands blocked, headroom-guarded int32 block partials). BFP **wires**
+  (a layer's `outputQ`/`propLossQ`) are SHIPPED: the four wire allocators
+  (`initLayerOutputs`/`initGradTensor`, `InferenceApi.c`) carry BFP arms —
+  wire `numGroups` derives from the template's `groupSize` and the wire's
+  runtime element count, with a divisibility fail-fast rather than a silent
+  floor. What remains gated, by epic:
+  - **PR3** — BFP backward (weightGrad/biasGrad/dx) and BFP grad/
+    optimizer-state templates (`gradInit`, per-parameter `m`/`v` cloning)
+    fail fast; a uniform-BFP model trains its forward natively and then dies
+    at the funnel on the first backward op unless the backward math slots
+    are pinned `ARITH_FLOAT32` by hand.
+  - **PR4** — Relu/Dropout/Flatten reject a BFP wire outside the funnel
+    (`requireNoBfpWire` guards; these layers read `->data` directly and
+    would otherwise misread packed bytes/drop the exponent array). No loss
+    function (MSE/CrossEntropy) has a BFP arm, so a BFP **final/loss-facing**
+    output wire is not evaluable through `inference*WithLoss` today — keep
+    the loss-facing wire `FLOAT32` (plan Decision 9). Pooling
+    (MaxPool1d/AvgPool1d/AdaptiveAvgPool1d) has no native BFP semantics
+    either: forward already fails cleanly via the existing
+    quantization-type guard, backward carries an explicit BFP-wire guard.
+  - **PR5** — LayerNorm/GroupNorm have no `ARITH_BFP` arm, forward or
+    backward (both guarded, fail fast rather than silently misreading the
+    unpacked scratch as float).
+  - **PR6** — Softmax forward already works with a BFP wire (its arithmetic
+    is hardcoded `ARITH_FLOAT32`, so the funnel dequantizes any storage
+    dtype); backward has no native `ARITH_BFP` arm (guarded, fail fast).

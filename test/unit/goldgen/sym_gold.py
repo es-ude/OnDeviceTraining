@@ -867,14 +867,16 @@ _INT32_MAX = 2 ** 31 - 1
 
 def bfp_derive_stored_exponent(abs_max, q_max, bias, max_stored):
     """Mirror C deriveBfpStoredExponent (TensorConversion.c): frexp snap-up,
-    clamp [0, max_stored]. The quotient is computed in float32 first (the C
-    divides absMax / qMax in float32 before frexpf); frexp of that exact
-    float32 value in double preserves frac/exponent bit-for-bit."""
+    clamp [0, min(max_stored, bias + 127)] -- the high cap keeps the scale a
+    FINITE float32 power of two (2^127); only exponentBits=8 can reach it.
+    The quotient is computed in float32 first (the C divides absMax / qMax in
+    float32 before frexpf); frexp of that exact float32 value in double
+    preserves frac/exponent bit-for-bit."""
     if abs_max == 0.0:
         return bias
     frac, e = math.frexp(float(np.float32(abs_max) / np.float32(q_max)))
     E = e - 1 if frac == 0.5 else e
-    return max(0, min(max_stored, E + bias))
+    return max(0, min(min(max_stored, bias + 127), E + bias))
 
 
 def bfp_quantize_grouped(values, mantissa_bits, exponent_bits, group_size):

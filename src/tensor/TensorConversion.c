@@ -993,9 +993,13 @@ static void packFloatBufferAsSym(const float *values, size_t n, symQConfig_t *ou
  * when ratio is itself a power of two (frac == 0.5), where it is e - 1. The
  * stored-range clamp IS the D6 saturation: stored > max -> the emit pass
  * clamps mantissas to +-qMax (high regime); stored < 0 -> quotients round to
- * 0 (flush-toward-zero regime). Public since epic PR2 (TensorConversion.h):
- * the funnel's staging quantizer and PR3's op-local re-blocking derive
- * exponents through this single authority. */
+ * 0 (flush-toward-zero regime). The high clamp additionally never exceeds
+ * bias + 127 (only reachable at exponentBits=8, where the natural top 255
+ * means E=128): 2^127 is the largest FINITE float32 power of two --
+ * ldexpf(1, 128) is +inf, which would quantize every code to 0 and dequantize
+ * the whole group to NaN (0 * inf) instead of saturating. Public since epic
+ * PR2 (TensorConversion.h): the funnel's staging quantizer and PR3's op-local
+ * re-blocking derive exponents through this single authority. */
 void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint8_t maxStored,
                              uint8_t *storedOut) {
     if (absMax == 0.f) {
@@ -1009,8 +1013,12 @@ void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint8_t max
     if (stored < 0) {
         stored = 0; /* D6: flush-toward-zero regime */
     }
-    if (stored > (int)maxStored) {
-        stored = (int)maxStored; /* D6: mantissa-saturation regime */
+    int cap = (int)maxStored;
+    if (cap > (int)bias + 127) {
+        cap = (int)bias + 127; /* largest stored exponent with a finite scale */
+    }
+    if (stored > cap) {
+        stored = cap; /* D6: mantissa-saturation regime */
     }
     *storedOut = (uint8_t)stored;
 }

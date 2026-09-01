@@ -5921,6 +5921,49 @@ void testDeriveBfpStoredExponentPublicBoundaries(void) {
     TEST_ASSERT_EQUAL_UINT8(128, stored);
 }
 
+/* PR2 self-review finding 4: at exponentBits=8 the natural top of the stored
+ * range (255, bias 127 -> E=128) has NO finite float32 scale -- ldexpf(1, 128)
+ * is +inf, so a group landing there quantized every code to 0 and dequantized
+ * the WHOLE group to NaN (0 * inf), in-range values included, instead of the
+ * D6 mantissa saturation. The derivation authority must therefore never emit
+ * stored > bias + 127 (scale 2^127, the largest finite float32 power of two);
+ * for e <= 7 the cap lies above maxStored and changes nothing. */
+void testDeriveBfpStoredExponentCapsAtLargestFiniteScale(void) {
+    uint8_t stored;
+    /* qMax 1 (m=2): absMax 2e38 > 2^127 naturally derives E=128 (stored 255)
+     * -- must cap at 254 so the D6 saturation regime engages with a finite
+     * scale. */
+    deriveBfpStoredExponent(2e38f, 1.f, 127, 255, &stored);
+    TEST_ASSERT_EQUAL_UINT8(254, stored);
+    /* just below the corner: 1.6e38 < 2^127 derives stored 254 naturally --
+     * the cap coincides with the neighbor, no discontinuity */
+    deriveBfpStoredExponent(1.6e38f, 1.f, 127, 255, &stored);
+    TEST_ASSERT_EQUAL_UINT8(254, stored);
+}
+
+void testQuantizeFloatBufferToBfpCodesE8HighCornerSaturatesFinite(void) {
+    /* End-to-end pin of the finding-4 window {m=2, e=8}: group absMax 2e38.
+     * stored caps at 254 (scale 2^127 finite), the huge value saturates to
+     * +qMax, the in-range 1.0 flushes to 0 at this group resolution -- and
+     * nothing is NaN or inf anywhere. */
+    float values[2] = {2e38f, 1.0f};
+    uint8_t exponents[1] = {0}; /* sentinel */
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 2,
+                       .exponentBits = 8};
+    int32_t codes[2];
+    quantizeFloatBufferToBfpCodes(values, 2, &qc, codes);
+    TEST_ASSERT_EQUAL_UINT8(254, exponents[0]);
+    TEST_ASSERT_EQUAL_INT32(1, codes[0]); /* 2e38 / 2^127 -> 1.18 -> qMax */
+    TEST_ASSERT_EQUAL_INT32(0, codes[1]); /* below the group resolution */
+    float scale = bfpGroupScale(&qc, 0);
+    TEST_ASSERT_TRUE_MESSAGE(isfinite(scale), "top-of-range scale must be finite");
+    TEST_ASSERT_EQUAL_FLOAT(ldexpf(1.f, 127), (float)codes[0] * scale);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -6079,6 +6122,8 @@ int main(void) {
     RUN_TEST(testQuantizeFloatBufferToBfpCodesSaturatesHighAndFlushesLow);
     RUN_TEST(testQuantizeFloatBufferToBfpCodesAllZeroKeepsZeroState);
     RUN_TEST(testDeriveBfpStoredExponentPublicBoundaries);
+    RUN_TEST(testDeriveBfpStoredExponentCapsAtLargestFiniteScale);
+    RUN_TEST(testQuantizeFloatBufferToBfpCodesE8HighCornerSaturatesFinite);
 
     return UNITY_END();
 }

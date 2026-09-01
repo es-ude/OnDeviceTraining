@@ -58,6 +58,12 @@ mantissas saturate to `±qMax`; low side clamps the stored exponent to `0`, so
 small-magnitude quotients round toward zero (flush-to-zero). Both regimes are
 implemented as a plain clamp on the `stored` value inside
 `deriveBfpStoredExponent`, immediately before the biased byte is written.
+The high clamp additionally never exceeds `bias + 127` — only reachable at
+`exponentBits=8`, whose natural top (stored 255, E=128) has **no finite
+float32 scale**: `ldexpf(1, 128)` is `+inf`, which would quantize every code
+to 0 and dequantize the whole block to NaN (`0 * inf`) instead of
+saturating. The saturation regime therefore engages at scale `2^127`, the
+largest finite float32 power of two.
 
 **Rationale for the deviation:** `exponentBits` (range `[2,8]`) is one of the
 epic's first-class HAR sweep axes (spec §1) — the sweep exists specifically to

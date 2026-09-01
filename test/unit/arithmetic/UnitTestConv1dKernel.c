@@ -354,6 +354,165 @@ void testConv1dKernelBfpNoBiasZeroSeeds(void) {
                              kBfpConvNoBiasExpected_len * sizeof(float));
 }
 
+/* PR2 self-review finding 1: the dilation factor lives in the BFP arm's own
+ * tap walk (inputIdx = firstValidInputIdx + i * geom.dilation) -- every other
+ * BFP fixture runs dilation=1, where a dropped factor is an arithmetic
+ * identity. This fixture's taps step by 2; a hardcode-1 mutant reads
+ * p, p+1, p+2 instead of p, p+2, p+4 and misses the gold. */
+void testConv1dKernelBfpDilation2MatchesGold(void) {
+    tensor_t inTensor;
+    size_t inDims[] = {(size_t)kBfpConvBatch, (size_t)kBfpConvInChannels,
+                       (size_t)kBfpConvInputLength};
+    size_t inOrder[] = {0, 1, 2};
+    shape_t inShape;
+    setShape(&inShape, inDims, 3, inOrder);
+    uint8_t inExponents[sizeof(kBfpConvInExponents)];
+    memcpy(inExponents, kBfpConvInExponents, sizeof(inExponents));
+    bfpQConfig_t inQC = {.exponents = inExponents,
+                         .numGroups = (size_t)kBfpConvInNumGroups,
+                         .groupSize = (size_t)kBfpConvInGroupSize,
+                         .roundingMode = HALF_AWAY,
+                         .mantissaBits = (uint8_t)kBfpConvInMantissaBits,
+                         .exponentBits = (uint8_t)kBfpConvInExponentBits};
+    quantization_t inQ;
+    initBfpQuantization(&inQC, &inQ);
+    setTensorValues(&inTensor, (uint8_t *)kBfpConvInCodes, &inShape, &inQ, NULL);
+
+    tensor_t wTensor;
+    size_t wDims[] = {(size_t)kBfpConvOutChannels, (size_t)kBfpConvInChannels,
+                      (size_t)kBfpConvKernelSize};
+    size_t wOrder[] = {0, 1, 2};
+    shape_t wShape;
+    setShape(&wShape, wDims, 3, wOrder);
+    uint8_t wExponents[sizeof(kBfpConvWExponents)];
+    memcpy(wExponents, kBfpConvWExponents, sizeof(wExponents));
+    bfpQConfig_t wQC = {.exponents = wExponents,
+                        .numGroups = (size_t)kBfpConvWNumGroups,
+                        .groupSize = (size_t)kBfpConvWGroupSize,
+                        .roundingMode = HALF_AWAY,
+                        .mantissaBits = (uint8_t)kBfpConvWMantissaBits,
+                        .exponentBits = (uint8_t)kBfpConvWExponentBits};
+    quantization_t wQ;
+    initBfpQuantization(&wQC, &wQ);
+    setTensorValues(&wTensor, (uint8_t *)kBfpConvWCodes, &wShape, &wQ, NULL);
+
+    tensor_t biasTensor;
+    size_t biasDims[] = {(size_t)kBfpConvOutChannels};
+    size_t biasOrder[] = {0};
+    shape_t biasShape;
+    setShape(&biasShape, biasDims, 1, biasOrder);
+    uint8_t biasExponents[sizeof(kBfpConvBiasExponents)];
+    memcpy(biasExponents, kBfpConvBiasExponents, sizeof(biasExponents));
+    bfpQConfig_t biasQC = {.exponents = biasExponents,
+                           .numGroups = 1,
+                           .groupSize = 0,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = (uint8_t)kBfpConvBiasMantissaBits,
+                           .exponentBits = (uint8_t)kBfpConvBiasExponentBits};
+    quantization_t biasQ;
+    initBfpQuantization(&biasQC, &biasQ);
+    setTensorValues(&biasTensor, (uint8_t *)kBfpConvBiasCodes, &biasShape, &biasQ, NULL);
+
+    tensor_t outTensor;
+    float outData[8]; /* batch * outChannels * kBfpConvDilOutLen */
+    size_t outDims[] = {(size_t)kBfpConvBatch, (size_t)kBfpConvOutChannels,
+                        (size_t)kBfpConvDilOutLen};
+    size_t outOrder[] = {0, 1, 2};
+    shape_t outShape;
+    setShape(&outShape, outDims, 3, outOrder);
+    quantization_t outQ;
+    initFloat32Quantization(&outQ);
+    setTensorValues(&outTensor, (uint8_t *)outData, &outShape, &outQ, NULL);
+
+    kernel_t kernel;
+    initKernelExplicit(&kernel, (size_t)kBfpConvKernelSize, (size_t)kBfpConvPadding,
+                       (size_t)kBfpConvDilDilation, (size_t)kBfpConvStride);
+
+    conv1dKernelBfp(&inTensor, &wTensor, &biasTensor, &kernel, 1, &outTensor);
+
+    TEST_ASSERT_EQUAL_MEMORY(kBfpConvDilExpected, outTensor.data,
+                             kBfpConvDilExpected_len * sizeof(float));
+}
+
+/* PR2 self-review finding 3, the conv sibling of UnitTestMatmul.c's
+ * testMatmulBfpGroupedBiasBindsPerGroupExponent: same bias VALUES stored
+ * grouped {numGroups=2, groupSize=1} with non-uniform exponents (goldgen
+ * asserts a group-0 collapse differs), expected output bit-identical to the
+ * per-tensor gold. */
+void testConv1dKernelBfpGroupedBiasBindsPerGroupExponent(void) {
+    tensor_t inTensor;
+    size_t inDims[] = {(size_t)kBfpConvBatch, (size_t)kBfpConvInChannels,
+                       (size_t)kBfpConvInputLength};
+    size_t inOrder[] = {0, 1, 2};
+    shape_t inShape;
+    setShape(&inShape, inDims, 3, inOrder);
+    uint8_t inExponents[sizeof(kBfpConvInExponents)];
+    memcpy(inExponents, kBfpConvInExponents, sizeof(inExponents));
+    bfpQConfig_t inQC = {.exponents = inExponents,
+                         .numGroups = (size_t)kBfpConvInNumGroups,
+                         .groupSize = (size_t)kBfpConvInGroupSize,
+                         .roundingMode = HALF_AWAY,
+                         .mantissaBits = (uint8_t)kBfpConvInMantissaBits,
+                         .exponentBits = (uint8_t)kBfpConvInExponentBits};
+    quantization_t inQ;
+    initBfpQuantization(&inQC, &inQ);
+    setTensorValues(&inTensor, (uint8_t *)kBfpConvInCodes, &inShape, &inQ, NULL);
+
+    tensor_t wTensor;
+    size_t wDims[] = {(size_t)kBfpConvOutChannels, (size_t)kBfpConvInChannels,
+                      (size_t)kBfpConvKernelSize};
+    size_t wOrder[] = {0, 1, 2};
+    shape_t wShape;
+    setShape(&wShape, wDims, 3, wOrder);
+    uint8_t wExponents[sizeof(kBfpConvWExponents)];
+    memcpy(wExponents, kBfpConvWExponents, sizeof(wExponents));
+    bfpQConfig_t wQC = {.exponents = wExponents,
+                        .numGroups = (size_t)kBfpConvWNumGroups,
+                        .groupSize = (size_t)kBfpConvWGroupSize,
+                        .roundingMode = HALF_AWAY,
+                        .mantissaBits = (uint8_t)kBfpConvWMantissaBits,
+                        .exponentBits = (uint8_t)kBfpConvWExponentBits};
+    quantization_t wQ;
+    initBfpQuantization(&wQC, &wQ);
+    setTensorValues(&wTensor, (uint8_t *)kBfpConvWCodes, &wShape, &wQ, NULL);
+
+    tensor_t biasTensor;
+    size_t biasDims[] = {(size_t)kBfpConvOutChannels};
+    size_t biasOrder[] = {0};
+    shape_t biasShape;
+    setShape(&biasShape, biasDims, 1, biasOrder);
+    uint8_t biasExponents[sizeof(kBfpConvBiasGroupedExponents)];
+    memcpy(biasExponents, kBfpConvBiasGroupedExponents, sizeof(biasExponents));
+    bfpQConfig_t biasQC = {.exponents = biasExponents,
+                           .numGroups = (size_t)kBfpConvBiasGroupedNumGroups,
+                           .groupSize = 1,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = (uint8_t)kBfpConvBiasMantissaBits,
+                           .exponentBits = (uint8_t)kBfpConvBiasExponentBits};
+    quantization_t biasQ;
+    initBfpQuantization(&biasQC, &biasQ);
+    setTensorValues(&biasTensor, (uint8_t *)kBfpConvBiasGroupedCodes, &biasShape, &biasQ, NULL);
+
+    tensor_t outTensor;
+    float outData[10];
+    size_t outDims[] = {(size_t)kBfpConvBatch, (size_t)kBfpConvOutChannels, (size_t)kBfpConvOutLen};
+    size_t outOrder[] = {0, 1, 2};
+    shape_t outShape;
+    setShape(&outShape, outDims, 3, outOrder);
+    quantization_t outQ;
+    initFloat32Quantization(&outQ);
+    setTensorValues(&outTensor, (uint8_t *)outData, &outShape, &outQ, NULL);
+
+    kernel_t kernel;
+    initKernelExplicit(&kernel, (size_t)kBfpConvKernelSize, (size_t)kBfpConvPadding, 1,
+                       (size_t)kBfpConvStride);
+
+    conv1dKernelBfp(&inTensor, &wTensor, &biasTensor, &kernel, 1, &outTensor);
+
+    TEST_ASSERT_EQUAL_MEMORY(kBfpConvExpected, outTensor.data,
+                             kBfpConvExpected_len * sizeof(float));
+}
+
 /* BFP power-of-two twin (spec §8c), the BFP sibling of the layer-level
  * testConv1dForwardGroupedEqualScalesBitIdenticalToScalar (UnitTestConv1d.c)
  * asserted at KERNEL level, mirroring UnitTestMatmul.c's
@@ -581,6 +740,8 @@ int main(void) {
     RUN_TEST(testConv1dKernelExplicitPaddingStride2);
     RUN_TEST(testConv1dKernelBfpMatchesGold);
     RUN_TEST(testConv1dKernelBfpNoBiasZeroSeeds);
+    RUN_TEST(testConv1dKernelBfpDilation2MatchesGold);
+    RUN_TEST(testConv1dKernelBfpGroupedBiasBindsPerGroupExponent);
     RUN_TEST(testConv1dKernelBfpPowerOfTwoBitIdenticalToGroupedSym);
     RUN_TEST(testConv1dKernelBfpHeadroomGuardDies);
     RUN_TEST(testConv1dKernelBfpRejectsMismatchedGroupShape);

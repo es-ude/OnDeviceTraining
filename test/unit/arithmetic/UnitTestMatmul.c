@@ -1120,6 +1120,81 @@ void testMatmulBfpMatchesGold(void) {
                              kBfpMatmulExpected_len * sizeof(float));
 }
 
+/* PR2 self-review finding 3: the bias seed must dequantize through ITS OWN
+ * group's exponent (bfpGroupScale(biasQC, bfpGroupOf(biasQC, col))). Same
+ * bias VALUES as the gold, stored grouped {numGroups=3, groupSize=1} with
+ * NON-UNIFORM exponents (goldgen asserts both, plus that a group-0 collapse
+ * differs) -- so the expected output is bit-identical to the per-tensor gold,
+ * and a kernel reading every seed through group 0 is off by a power of two
+ * on the other columns. */
+void testMatmulBfpGroupedBiasBindsPerGroupExponent(void) {
+    tensor_t aTensor;
+    size_t aDims[] = {(size_t)kBfpOutRows, (size_t)kBfpReduceLen};
+    size_t aOrder[] = {0, 1};
+    shape_t aShape;
+    setShape(&aShape, aDims, 2, aOrder);
+    uint8_t aExponents[sizeof(kBfpAExponents)];
+    memcpy(aExponents, kBfpAExponents, sizeof(aExponents));
+    bfpQConfig_t aQC = {.exponents = aExponents,
+                        .numGroups = (size_t)kBfpANumGroups,
+                        .groupSize = (size_t)kBfpAGroupSize,
+                        .roundingMode = HALF_AWAY,
+                        .mantissaBits = (uint8_t)kBfpAMantissaBits,
+                        .exponentBits = (uint8_t)kBfpAExponentBits};
+    quantization_t aQ;
+    initBfpQuantization(&aQC, &aQ);
+    setTensorValues(&aTensor, (uint8_t *)kBfpACodes, &aShape, &aQ, NULL);
+
+    tensor_t bTensor;
+    size_t bDims[] = {(size_t)kBfpOutCols, (size_t)kBfpReduceLen};
+    size_t bOrder[] = {1, 0}; /* post-transpose logical view: reduction axis first */
+    shape_t bShape;
+    setShape(&bShape, bDims, 2, bOrder);
+    uint8_t bExponents[sizeof(kBfpBExponents)];
+    memcpy(bExponents, kBfpBExponents, sizeof(bExponents));
+    bfpQConfig_t bQC = {.exponents = bExponents,
+                        .numGroups = (size_t)kBfpBNumGroups,
+                        .groupSize = (size_t)kBfpBGroupSize,
+                        .roundingMode = HALF_AWAY,
+                        .mantissaBits = (uint8_t)kBfpBMantissaBits,
+                        .exponentBits = (uint8_t)kBfpBExponentBits};
+    quantization_t bQ;
+    initBfpQuantization(&bQC, &bQ);
+    setTensorValues(&bTensor, (uint8_t *)kBfpBCodes, &bShape, &bQ, NULL);
+
+    tensor_t biasTensor;
+    size_t biasDims[] = {(size_t)kBfpOutCols};
+    size_t biasOrder[] = {0};
+    shape_t biasShape;
+    setShape(&biasShape, biasDims, 1, biasOrder);
+    uint8_t biasExponents[sizeof(kBfpBiasGroupedExponents)];
+    memcpy(biasExponents, kBfpBiasGroupedExponents, sizeof(biasExponents));
+    bfpQConfig_t biasQC = {.exponents = biasExponents,
+                           .numGroups = (size_t)kBfpBiasGroupedNumGroups,
+                           .groupSize = 1,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = (uint8_t)kBfpBiasMantissaBits,
+                           .exponentBits = (uint8_t)kBfpBiasExponentBits};
+    quantization_t biasQ;
+    initBfpQuantization(&biasQC, &biasQ);
+    setTensorValues(&biasTensor, (uint8_t *)kBfpBiasGroupedCodes, &biasShape, &biasQ, NULL);
+
+    tensor_t outTensor;
+    float outData[6];
+    size_t outDims[] = {(size_t)kBfpOutRows, (size_t)kBfpOutCols};
+    size_t outOrder[] = {0, 1};
+    shape_t outShape;
+    setShape(&outShape, outDims, 2, outOrder);
+    quantization_t outQ;
+    initFloat32Quantization(&outQ);
+    setTensorValues(&outTensor, (uint8_t *)outData, &outShape, &outQ, NULL);
+
+    matmulBfpTensors(&aTensor, &bTensor, &biasTensor, &outTensor);
+
+    TEST_ASSERT_EQUAL_MEMORY(kBfpMatmulExpected, outTensor.data,
+                             kBfpMatmulExpected_len * sizeof(float));
+}
+
 void testMatmulBfpNoBiasZeroSeeds(void) {
     tensor_t aTensor;
     size_t aDims[] = {(size_t)kBfpOutRows, (size_t)kBfpReduceLen};
@@ -1399,6 +1474,7 @@ int main(void) {
     RUN_TEST(testMatmulGroupedDxEqualScalesBitIdenticalToScalar);
     RUN_TEST(testMatmulGroupedWeightRejectsPerTensorSentinel);
     RUN_TEST(testMatmulBfpMatchesGold);
+    RUN_TEST(testMatmulBfpGroupedBiasBindsPerGroupExponent);
     RUN_TEST(testMatmulBfpNoBiasZeroSeeds);
     RUN_TEST(testMatmulBfpPowerOfTwoBitIdenticalToGroupedSym);
     RUN_TEST(testMatmulBfpHeadroomGuardDies);

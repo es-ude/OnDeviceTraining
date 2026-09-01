@@ -411,6 +411,128 @@ void testConvTranspose1dKernelBfpGatherNoBiasZeroSeeds(void) {
                              kBfpConvTNoBiasExpected_len * sizeof(float));
 }
 
+/* PR2 self-review finding 1: the gather forwards kernel->dilation into
+ * convTranspose1dTapsAt only inside the BFP arm; every other BFP fixture runs
+ * dilation=1, where a hardcoded 1 is an arithmetic identity. This fixture's
+ * contributor enumeration (out_len 14 = (5-1)*2 + 2*2 + 1 + 1) genuinely
+ * depends on the dilation. */
+void testConvTranspose1dKernelBfpGatherDilation2MatchesGold(void) {
+    tensor_t inTensor;
+    size_t inDims[3], inOrder[3];
+    shape_t inShape;
+    uint8_t inExponents[sizeof(kBfpConvTInExponents)];
+    memcpy(inExponents, kBfpConvTInExponents, sizeof(inExponents));
+    bfpQConfig_t inQC;
+    quantization_t inQ;
+    setupBfpConvTInput(&inTensor, &inShape, inDims, inOrder, &inQC, &inQ, inExponents);
+
+    tensor_t wTensor;
+    size_t wDims[3], wOrder[3];
+    shape_t wShape;
+    uint8_t wExponents[sizeof(kBfpConvTWExponents)];
+    memcpy(wExponents, kBfpConvTWExponents, sizeof(wExponents));
+    bfpQConfig_t wQC;
+    quantization_t wQ;
+    setupBfpConvTWeight(&wTensor, &wShape, wDims, wOrder, &wQC, &wQ, wExponents);
+
+    tensor_t biasTensor;
+    size_t biasDims[] = {(size_t)kBfpConvTOutChannels};
+    size_t biasOrder[] = {0};
+    shape_t biasShape;
+    setShape(&biasShape, biasDims, 1, biasOrder);
+    uint8_t biasExponents[sizeof(kBfpConvTBiasExponents)];
+    memcpy(biasExponents, kBfpConvTBiasExponents, sizeof(biasExponents));
+    bfpQConfig_t biasQC = {.exponents = biasExponents,
+                           .numGroups = 1,
+                           .groupSize = 0,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = (uint8_t)kBfpConvTBiasMantissaBits,
+                           .exponentBits = (uint8_t)kBfpConvTBiasExponentBits};
+    quantization_t biasQ;
+    initBfpQuantization(&biasQC, &biasQ);
+    setTensorValues(&biasTensor, (uint8_t *)kBfpConvTBiasCodes, &biasShape, &biasQ, NULL);
+
+    tensor_t outTensor;
+    float outData[28]; /* batch * outChannels * kBfpConvTDilOutLen */
+    size_t outDims[] = {(size_t)kBfpConvTBatch, (size_t)kBfpConvTOutChannels,
+                        (size_t)kBfpConvTDilOutLen};
+    size_t outOrder[] = {0, 1, 2};
+    shape_t outShape;
+    setShape(&outShape, outDims, 3, outOrder);
+    quantization_t outQ;
+    initFloat32Quantization(&outQ);
+    setTensorValues(&outTensor, (uint8_t *)outData, &outShape, &outQ, NULL);
+
+    kernel_t kernel;
+    initKernel(&kernel, (size_t)kBfpConvTKernelSize, VALID, (size_t)kBfpConvTDilDilation,
+               (size_t)kBfpConvTStride);
+
+    convTranspose1dKernelBfpGather(&inTensor, &wTensor, &biasTensor, &kernel, 1,
+                                   (size_t)kBfpConvTOutputPadding, &outTensor);
+
+    TEST_ASSERT_EQUAL_MEMORY(kBfpConvTDilExpected, outTensor.data,
+                             kBfpConvTDilExpected_len * sizeof(float));
+}
+
+/* PR2 self-review finding 3, the ConvT sibling of UnitTestMatmul.c's
+ * testMatmulBfpGroupedBiasBindsPerGroupExponent: same bias VALUES stored
+ * grouped {numGroups=2, groupSize=1} with non-uniform exponents (goldgen
+ * asserts a group-0 collapse differs), expected output bit-identical to the
+ * per-tensor gold -- including the tap-free outputPadding tail, which is
+ * PURE bias seed and therefore the most direct group-binding probe. */
+void testConvTranspose1dKernelBfpGroupedBiasBindsPerGroupExponent(void) {
+    tensor_t inTensor;
+    size_t inDims[3], inOrder[3];
+    shape_t inShape;
+    uint8_t inExponents[sizeof(kBfpConvTInExponents)];
+    memcpy(inExponents, kBfpConvTInExponents, sizeof(inExponents));
+    bfpQConfig_t inQC;
+    quantization_t inQ;
+    setupBfpConvTInput(&inTensor, &inShape, inDims, inOrder, &inQC, &inQ, inExponents);
+
+    tensor_t wTensor;
+    size_t wDims[3], wOrder[3];
+    shape_t wShape;
+    uint8_t wExponents[sizeof(kBfpConvTWExponents)];
+    memcpy(wExponents, kBfpConvTWExponents, sizeof(wExponents));
+    bfpQConfig_t wQC;
+    quantization_t wQ;
+    setupBfpConvTWeight(&wTensor, &wShape, wDims, wOrder, &wQC, &wQ, wExponents);
+
+    tensor_t biasTensor;
+    size_t biasDims[] = {(size_t)kBfpConvTOutChannels};
+    size_t biasOrder[] = {0};
+    shape_t biasShape;
+    setShape(&biasShape, biasDims, 1, biasOrder);
+    uint8_t biasExponents[sizeof(kBfpConvTBiasGroupedExponents)];
+    memcpy(biasExponents, kBfpConvTBiasGroupedExponents, sizeof(biasExponents));
+    bfpQConfig_t biasQC = {.exponents = biasExponents,
+                           .numGroups = (size_t)kBfpConvTBiasGroupedNumGroups,
+                           .groupSize = 1,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = (uint8_t)kBfpConvTBiasMantissaBits,
+                           .exponentBits = (uint8_t)kBfpConvTBiasExponentBits};
+    quantization_t biasQ;
+    initBfpQuantization(&biasQC, &biasQ);
+    setTensorValues(&biasTensor, (uint8_t *)kBfpConvTBiasGroupedCodes, &biasShape, &biasQ, NULL);
+
+    tensor_t outTensor;
+    float outData[24];
+    size_t outDims[3], outOrder[3];
+    shape_t outShape;
+    quantization_t outQ;
+    setupBfpConvTOutput(&outTensor, &outShape, outDims, outOrder, &outQ, outData);
+
+    kernel_t kernel;
+    initKernel(&kernel, (size_t)kBfpConvTKernelSize, VALID, 1, (size_t)kBfpConvTStride);
+
+    convTranspose1dKernelBfpGather(&inTensor, &wTensor, &biasTensor, &kernel, 1,
+                                   (size_t)kBfpConvTOutputPadding, &outTensor);
+
+    TEST_ASSERT_EQUAL_MEMORY(kBfpConvTExpected, outTensor.data,
+                             kBfpConvTExpected_len * sizeof(float));
+}
+
 /* BFP power-of-two twin (spec §8c), mirroring UnitTestConv1dKernel.c's
  * testConv1dKernelBfpPowerOfTwoBitIdenticalToGroupedSym at the ConvT gather:
  * identical mantissas (the gold fixture's codes); BFP input per-tensor stored
@@ -784,6 +906,8 @@ int main(void) {
     RUN_TEST(testConvTranspose1dKernelAdjointSameGrouped);
     RUN_TEST(testConvTranspose1dKernelBfpGatherMatchesGold);
     RUN_TEST(testConvTranspose1dKernelBfpGatherNoBiasZeroSeeds);
+    RUN_TEST(testConvTranspose1dKernelBfpGatherDilation2MatchesGold);
+    RUN_TEST(testConvTranspose1dKernelBfpGroupedBiasBindsPerGroupExponent);
     RUN_TEST(testConvTranspose1dKernelBfpGatherPowerOfTwoBitIdenticalToGroupedSym);
     RUN_TEST(testConvTranspose1dKernelBfpGatherAdjointSameParityWithScatter);
     RUN_TEST(testConvTranspose1dKernelBfpGatherValidLengthMismatchDies);

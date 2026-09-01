@@ -352,6 +352,27 @@ static void propLossKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
     }
 }
 
+/* Backward kernel dispatch: FLOAT32/SYM_INT32 only until epic PR3 ships the
+ * native ARITH_BFP backward — anything else must die HERE, not in the funnel:
+ * for BFP-STORED operands the funnel's backward gate (FLOAT32-stored + NULL
+ * bfpStage) never fires, and a fall-through ternary would hand the FLOAT
+ * kernel unpacked int32 mantissa scratch through a float* cast — silent wrong
+ * arithmetic rather than a crash (same hazard the LayerNorm backward dispatch
+ * documents; Conv1d/ConvT1d guard their slots the same way). */
+static opKernelFn_t linearBackwardKernelForArithmetic(arithmetic_t math, opKernelFn_t floatKernel,
+                                                      opKernelFn_t symKernel,
+                                                      const char *slotName) {
+    switch (math.type) {
+    case ARITH_FLOAT32:
+        return floatKernel;
+    case ARITH_SYM_INT32:
+        return symKernel;
+    default:
+        PRINT_ERROR("Linear backward (%s): quantization type not implemented", slotName);
+        exit(1);
+    }
+}
+
 void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss,
                     tensor_t *propLoss) {
     linearConfig_t *cfg = linearLayer->config->linear;
@@ -360,8 +381,8 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
         executeOpValidateAccMode(cfg->weightGradAccMode, "Linear weightGradAccMode");
         executeOp(
             &(opSpec_t){
-                .kernel = cfg->weightGradMath.type == ARITH_SYM_INT32 ? weightGradKernelSym
-                                                                      : weightGradKernelFloat,
+                .kernel = linearBackwardKernelForArithmetic(
+                    cfg->weightGradMath, weightGradKernelFloat, weightGradKernelSym, "weightGrad"),
                 .inputs = (tensor_t *[]){loss, forwardInput},
                 .nInputs = 2,
                 .arithmetic = cfg->weightGradMath,
@@ -373,8 +394,8 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
             executeOpValidateAccMode(cfg->biasGradAccMode, "Linear biasGradAccMode");
             executeOp(
                 &(opSpec_t){
-                    .kernel = cfg->biasGradMath.type == ARITH_SYM_INT32 ? biasGradKernelSym
-                                                                        : biasGradKernelFloat,
+                    .kernel = linearBackwardKernelForArithmetic(
+                        cfg->biasGradMath, biasGradKernelFloat, biasGradKernelSym, "biasGrad"),
                     .inputs = (tensor_t *[]){loss},
                     .nInputs = 1,
                     .arithmetic = cfg->biasGradMath,
@@ -401,8 +422,8 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
 
         executeOp(
             &(opSpec_t){
-                .kernel = cfg->propLossMath.type == ARITH_SYM_INT32 ? propLossKernelSym
-                                                                    : propLossKernelFloat,
+                .kernel = linearBackwardKernelForArithmetic(cfg->propLossMath, propLossKernelFloat,
+                                                            propLossKernelSym, "propLoss"),
                 .ctx = weightGroups,
                 .inputs = (tensor_t *[]){loss, weights},
                 .nInputs = 2,

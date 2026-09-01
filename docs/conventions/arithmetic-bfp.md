@@ -137,11 +137,15 @@ seam; plan Decision 8): a `layerQuant_t` profile built with
 `layerQuantInitUniform(bfpConfig)` now derives `ARITH_BFP` in **all four**
 math slots (`forwardMath`/`weightGradMath`/`biasGradMath`/`propLossMath`), not
 just `forwardMath`. PR2 ships the forward only — a uniform-BFP model that
-leaves a backward slot derived dies at the funnel's first backward
-`executeOp` call (missing `bfpStage`, see §5.3) until epic PR3 lands native
-BFP backward (`testBfpUniformModelDiesOnBackwardUntilPr3`,
-`test/unit/userAPI/UnitTestMultiLayerTraining.c`, kept as a permanent
-regression pin — delete it when PR3 lands). Pin the backward slots explicitly
+leaves a backward slot derived dies at the layer's backward kernel dispatch:
+every GEMM-family layer guards its three backward slots with a fail-fast
+`switch` (the layer gate is load-bearing — for BFP-STORED operands the
+funnel's missing-`bfpStage` gate of §5.3 never fires, it backstops only
+FLOAT32-stored operands), until epic PR3 lands native BFP backward
+(`testBfpUniformModelDiesOnBackwardUntilPr3`,
+`test/unit/userAPI/UnitTestMultiLayerTraining.c`, plus the per-slot trio in
+`test/unit/layer/UnitTestLinear.c`, kept as permanent regression pins —
+delete them when PR3 lands). Pin the backward slots explicitly
 to keep training natively on the forward while staying correct on the
 backward:
 
@@ -302,7 +306,10 @@ a BFP arm keyed off the layer's `layerQuant_t` template (a
   (the `{1,0}` sentinel) allocates a per-tensor wire; a nonzero `groupSize`
   allocates a grouped wire whose `numGroups = numberOfValues / groupSize` is
   **derived at allocation time from the wire's actual runtime element
-  count**, never taken from the template.
+  count**, never taken from the template. A `groupSize` equal to the wire's
+  element count derives `numGroups == 1` and **normalizes to the per-tensor
+  `{1,0}` config** — one group spanning the tensor IS per-tensor blocking,
+  and the `{1,N}` spelling would violate the config grammar.
 - The template's own `numGroups` is deliberately IGNORED: a `layerQuant_t`
   profile is shape-agnostic and routinely shared across layers/wires whose
   sizes differ, so a template `numGroups` can only be a guess — and honoring

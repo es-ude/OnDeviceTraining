@@ -73,7 +73,8 @@ static void initBufferOutput(tensor_t *buffer, layer_t *currentLayer, shape_t *i
          * OUT_WRITE epilogue derives the grid. */
         bfpQConfig_t *currentBfpQC = currentQ->qConfig;
         bfpQConfig_t *bfpQC = reserveMemory(sizeof(bfpQConfig_t));
-        if (currentBfpQC->groupSize == 0) {
+        /* groupSize == wire elements -> per-tensor {1,0}, see initLayerOutputs. */
+        if (currentBfpQC->groupSize == 0 || currentBfpQC->groupSize == numValues) {
             initBfpQConfig(currentBfpQC->mantissaBits, currentBfpQC->exponentBits,
                            currentBfpQC->roundingMode, bfpQC);
         } else {

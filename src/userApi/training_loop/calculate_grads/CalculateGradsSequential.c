@@ -261,7 +261,11 @@ static void initLayerOutputs(tensor_t **layerOutputs, layer_t **model, size_t si
              * real grid. */
             bfpQConfig_t *currentBfpQC = currentQ->qConfig;
             bfpQConfig_t *bfpQC = reserveMemory(sizeof(bfpQConfig_t));
-            if (currentBfpQC->groupSize == 0) {
+            /* groupSize == wire elements derives numGroups == 1: one group
+             * spanning the tensor IS per-tensor blocking, whose canonical
+             * spelling is {1,0} — the derived {1,N} would violate the config
+             * grammar even though the divisibility guard passed. */
+            if (currentBfpQC->groupSize == 0 || currentBfpQC->groupSize == numberOfValues) {
                 initBfpQConfig(currentBfpQC->mantissaBits, currentBfpQC->exponentBits,
                                currentBfpQC->roundingMode, bfpQC);
             } else {
@@ -349,7 +353,8 @@ static void initGradTensor(tensor_t *grad, tensor_t *layerOutput, quantization_t
          * since it only ever reads groupSize/widths and re-derives numGroups. */
         bfpQConfig_t *currentBfpQC = currentQ->qConfig;
         bfpQConfig_t *bfpQC = reserveMemory(sizeof(bfpQConfig_t));
-        if (currentBfpQC->groupSize == 0) {
+        /* groupSize == wire elements -> per-tensor {1,0}, see initLayerOutputs. */
+        if (currentBfpQC->groupSize == 0 || currentBfpQC->groupSize == numberOfValues) {
             initBfpQConfig(currentBfpQC->mantissaBits, currentBfpQC->exponentBits,
                            currentBfpQC->roundingMode, bfpQC);
         } else {

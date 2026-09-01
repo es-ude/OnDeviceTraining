@@ -482,6 +482,59 @@ void testInferenceBufferOutputCarriesBfpWire(void) {
                              "the forward OUT_WRITE must derive the wire's exponents");
 }
 
+/*! initBufferOutput twin of the training-side normalization: a template
+ *  groupSize EQUAL to the wire's element count (4 output elements, groupSize 4)
+ *  derives numGroups == 1 -- per-tensor blocking, canonical {1,0}. Must
+ *  allocate (the divisibility guard passed), not die on the {1,N} grammar. */
+void testInferenceBufferOutputBfpGroupSizeEqualToWireNormalizesToPerTensor(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    quantization_t *bfpWireQ = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 5, 4);
+    lq.outputQ = bfpWireQ;
+
+    tensor_t *input = buildFloatTensor2DInf(1, 2, (float[]){1.f, 2.f});
+    layer_t *linear =
+        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 4, .bias = BIAS_TRUE}, &lq);
+    layerLoadWeights(linear, (float[]){1.f, 0.f, 0.f, 1.f, 1.f, 1.f, 2.f, 0.f},
+                     (float[]){0.f, 0.f, 0.f, 0.f});
+    layer_t *model[] = {linear};
+
+    tensor_t *output = inference(model, 1, input);
+
+    /* CAPTURE. */
+    int capturedType = (int)output->quantization->type;
+    size_t capturedNumGroups = 0;
+    size_t capturedGroupSize = 99;
+    bool anyExponentMoved = false;
+    if (output->quantization->type == BFP) {
+        bfpQConfig_t *qc = output->quantization->qConfig;
+        capturedNumGroups = qc->numGroups;
+        capturedGroupSize = qc->groupSize;
+        for (size_t g = 0; g < qc->numGroups; g++) {
+            if (qc->exponents[g] != 127) {
+                anyExponentMoved = true;
+            }
+        }
+    }
+
+    /* FREE. */
+    freeTensor(output);
+    freeLinearLayer(linear);
+    freeTensor(input);
+    freeQuantization(bfpWireQ);
+    freeQuantization(q);
+
+    /* ASSERT. */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, capturedType, "inference wire must carry the declared BFP");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1, capturedNumGroups,
+                                   "groupSize == wire elements must derive ONE group");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(
+        0, capturedGroupSize, "one whole-tensor group is per-tensor blocking -- canonical {1,0}");
+    TEST_ASSERT_TRUE_MESSAGE(anyExponentMoved,
+                             "the forward OUT_WRITE must derive the wire's exponents");
+}
+
 /*! initBufferInput BFP arm: a BFP-STORED input tensor must survive the entry
  *  buffer with its geometry AND its exponent VALUES intact -- otherwise the
  *  first layer reads the mantissas against a zero-state grid, i.e. every value
@@ -570,5 +623,6 @@ int main(void) {
     RUN_TEST(testInferenceBufferOutputCarriesBfpWire);
     RUN_TEST(testInferenceBufferInputCarriesBfpExponents);
     RUN_TEST(testInitBufferOutputBfpGroupSizeMismatchDies);
+    RUN_TEST(testInferenceBufferOutputBfpGroupSizeEqualToWireNormalizesToPerTensor);
     return UNITY_END();
 }

@@ -2827,6 +2827,109 @@ void testLinearForwardBfpRejectsFloat32Weights(void) {
     freeQuantization(floatQ);
 }
 
+/* linearBackward must fail fast on an ARITH_BFP math slot (native backward =
+ * epic PR3) instead of routing unpacked int32 mantissa scratch through the
+ * FLOAT kernels. The operands are BFP-STORED on purpose: the funnel's backward
+ * gate only covers FLOAT32-stored operands (NULL bfpStage), so for all-BFP
+ * operands the layer dispatch is the ONLY gate on this path — without it the
+ * float kernel reinterprets mantissa codes as float and training silently
+ * corrupts (the exact ternary hazard the LayerNorm dispatch comment names). */
+void testLinearBackwardBfpWeightGradMathDies(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    size_t weightDims[] = {2, 3};
+    tensor_t *weightsParam =
+        makeFloatTensor(weightDims, 2, (float[]){0.5f, -1.f, 2.f, 1.f, 0.25f, -0.75f});
+    parameter_t *weights = parameterInit(weightsParam, gradInitFloat(weightsParam, NULL));
+    layer_t *linearLayer = buildBorrowedLinearLayer(weights, NULL, floatQ);
+    linearLayer->config->linear->weightGradMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+
+    quantization_t *bfpTemplate = quantizationInitBfp(8, 8, HALF_AWAY);
+    size_t fwdDims[] = {1, 3};
+    tensor_t *forwardInput = makeFloatTensor(fwdDims, 2, (float[]){1.f, 2.f, 3.f});
+    requantizeTensorInPlace(forwardInput, bfpTemplate);
+    size_t lossDims[] = {1, 2};
+    tensor_t *loss = makeFloatTensor(lossDims, 2, (float[]){-4.f, 3.f});
+    requantizeTensorInPlace(loss, bfpTemplate);
+    freeQuantization(bfpTemplate);
+
+    ASSERT_EXITS_WITH_FAILURE(linearBackward(linearLayer, forwardInput, loss, NULL));
+
+    freeLinearLayer(linearLayer);
+    freeTensor(loss);
+    freeTensor(forwardInput);
+    freeQuantization(floatQ);
+}
+
+/* biasGrad twin: weightGrad pinned FLOAT32 runs first (fake-quant dequant of
+ * the BFP loss), then the derived-ARITH_BFP biasGrad slot must die at the
+ * dispatch — its only operand {loss} is BFP-stored, so no funnel gate fires. */
+void testLinearBackwardBfpBiasGradMathDies(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    size_t weightDims[] = {2, 3};
+    tensor_t *weightsParam =
+        makeFloatTensor(weightDims, 2, (float[]){0.5f, -1.f, 2.f, 1.f, 0.25f, -0.75f});
+    parameter_t *weights = parameterInit(weightsParam, gradInitFloat(weightsParam, NULL));
+    size_t biasDims[] = {2};
+    tensor_t *biasParam = makeFloatTensor(biasDims, 1, (float[]){-1.f, 3.f});
+    parameter_t *bias = parameterInit(biasParam, gradInitFloat(biasParam, NULL));
+    layer_t *linearLayer = buildBorrowedLinearLayer(weights, bias, floatQ);
+    linearLayer->config->linear->weightGradMath =
+        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
+    linearLayer->config->linear->biasGradMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+
+    size_t fwdDims[] = {1, 3};
+    tensor_t *forwardInput = makeFloatTensor(fwdDims, 2, (float[]){1.f, 2.f, 3.f});
+    quantization_t *bfpTemplate = quantizationInitBfp(8, 8, HALF_AWAY);
+    size_t lossDims[] = {1, 2};
+    tensor_t *loss = makeFloatTensor(lossDims, 2, (float[]){-4.f, 3.f});
+    requantizeTensorInPlace(loss, bfpTemplate);
+    freeQuantization(bfpTemplate);
+
+    ASSERT_EXITS_WITH_FAILURE(linearBackward(linearLayer, forwardInput, loss, NULL));
+
+    freeLinearLayer(linearLayer);
+    freeTensor(loss);
+    freeTensor(forwardInput);
+    freeQuantization(floatQ);
+}
+
+/* propLoss twin, the frozen-layer variant from the review scenario: frozen
+ * skips both grad ops, so backward reaches the propLoss dispatch directly with
+ * {loss, weights} BOTH BFP-stored — borrow path, no funnel gate, garbage dx
+ * propagated to every upstream layer unless the dispatch dies. */
+void testLinearBackwardBfpPropLossMathDies(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *bfpTemplate = quantizationInitBfp(8, 8, HALF_AWAY);
+    size_t weightDims[] = {2, 3};
+    tensor_t *weightsParam =
+        makeFloatTensor(weightDims, 2, (float[]){0.5f, -1.f, 2.f, 1.f, 0.25f, -0.75f});
+    requantizeTensorInPlace(weightsParam, bfpTemplate);
+    parameter_t *weights = parameterInit(weightsParam, NULL);
+    layer_t *linearLayer = buildBorrowedLinearLayer(weights, NULL, floatQ);
+    linearLayer->config->linear->frozen = true;
+    linearLayer->config->linear->propLossMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+
+    size_t fwdDims[] = {1, 3};
+    tensor_t *forwardInput = makeFloatTensor(fwdDims, 2, (float[]){1.f, 2.f, 3.f});
+    size_t lossDims[] = {1, 2};
+    tensor_t *loss = makeFloatTensor(lossDims, 2, (float[]){-4.f, 3.f});
+    requantizeTensorInPlace(loss, bfpTemplate);
+    freeQuantization(bfpTemplate);
+    size_t propLossDims[] = {1, 3};
+    tensor_t *propLoss = makeFloatTensor(propLossDims, 2, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(linearBackward(linearLayer, forwardInput, loss, propLoss));
+
+    freeLinearLayer(linearLayer);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(forwardInput);
+    freeQuantization(floatQ);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLinearForwardFloat);
@@ -2880,5 +2983,8 @@ int main(void) {
     RUN_TEST(testLinearForwardBfpStagesFloat32Bias);
     RUN_TEST(testLinearForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer);
     RUN_TEST(testLinearForwardBfpRejectsFloat32Weights);
+    RUN_TEST(testLinearBackwardBfpWeightGradMathDies);
+    RUN_TEST(testLinearBackwardBfpBiasGradMathDies);
+    RUN_TEST(testLinearBackwardBfpPropLossMathDies);
     return UNITY_END();
 }

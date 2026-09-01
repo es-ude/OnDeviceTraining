@@ -29,9 +29,11 @@ arithmetic_t arithmeticFromQuantization(const quantization_t *q) {
          *  - PR2 ships the FORWARD only (Linear/Conv1d/ConvT1d). A model that
          *    derives all four layer slots from one BFP config -- what
          *    layerQuantInitUniform does -- trains its forward natively and
-         *    then dies at the funnel on the first backward op, guided by
-         *    executeOp's prologue/accumulate messages, until epic PR3 lands
-         *    the BFP backward arms. See docs/conventions/arithmetic-bfp.md. */
+         *    then dies at the layer's backward kernel dispatch (every
+         *    GEMM-family layer guards its three backward slots; the funnel's
+         *    missing-bfpStage gate backstops FLOAT32-stored operands) until
+         *    epic PR3 lands the BFP backward arms. See
+         *    docs/conventions/arithmetic-bfp.md. */
         a.type = ARITH_BFP;
         a.roundingMode = ((bfpQConfig_t *)q->qConfig)->roundingMode;
         break;

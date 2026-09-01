@@ -938,6 +938,57 @@ void testBfpDxWireAllocatesThroughInitGradTensor(void) {
     TEST_ASSERT_TRUE_MESSAGE(isfinite(loss), "the dx-wire BFP round trip must stay finite");
 }
 
+/*! Boundary of the Decision-5 derivation: a template groupSize EQUAL to the
+ *  wire's element count derives numGroups == 1 -- and one group spanning the
+ *  whole tensor IS per-tensor blocking, whose only grammatical spelling is
+ *  {1,0} (initBfpQConfigGrouped rejects {1,N}). The allocator must normalize
+ *  to the per-tensor config instead of dying: the divisibility guard has
+ *  passed, so its "pick a divisor" guidance was already followed. */
+void testBfpWireGroupSizeEqualToWireElementsNormalizesToPerTensor(void) {
+    rngSetSeed(4242u);
+    bfpWireFixture_t f;
+    buildBfpWireFixture(&f, /*hidden=*/6, /*templateNumGroups=*/2, /*wireGroupSize=*/6);
+
+    bfpWireCapture_t cap = {0};
+    trainingStats_t *stats = tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
+                                         f.input, f.label, captureLayer0ForwardWire, &cap);
+    float loss = stats->loss;
+    freeTrainingStats(stats);
+    freeBfpWireFixture(&f);
+
+    TEST_ASSERT_TRUE_MESSAGE(cap.seen, "layer-0 forward probe must have fired");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, cap.type, "the hidden wire tensor must be BFP-stored");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1, cap.numGroups,
+                                   "groupSize == wire elements must derive ONE group");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(
+        0, cap.groupSize, "one whole-tensor group is per-tensor blocking -- canonical {1,0}");
+    TEST_ASSERT_TRUE_MESSAGE(isfinite(loss), "the normalized wire must stay trainable");
+}
+
+/*! initGradTensor twin of the normalization above: the dx wire has 6 elements,
+ *  template groupSize 6 -> per-tensor {1,0}, not a {1,6} grammar death. */
+void testBfpDxWireGroupSizeEqualToWireElementsNormalizesToPerTensor(void) {
+    rngSetSeed(4242u);
+    bfpWireFixture_t f;
+    buildBfpWireFixture(&f, /*hidden=*/6, /*templateNumGroups=*/2, /*wireGroupSize=*/6);
+    moveBfpTemplateToDxWire(&f);
+
+    bfpWireCapture_t cap = {0};
+    trainingStats_t *stats = tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
+                                         f.input, f.label, captureLayer0BackwardWire, &cap);
+    float loss = stats->loss;
+    freeTrainingStats(stats);
+    freeBfpWireFixture(&f);
+
+    TEST_ASSERT_TRUE_MESSAGE(cap.seen, "layer-0 agrad probe must have fired");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, cap.type, "the dx wire tensor must be BFP-stored");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1, cap.numGroups,
+                                   "groupSize == wire elements must derive ONE group");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(
+        0, cap.groupSize, "one whole-tensor group is per-tensor blocking -- canonical {1,0}");
+    TEST_ASSERT_TRUE_MESSAGE(isfinite(loss), "the normalized dx wire must stay trainable");
+}
+
 /*! initGradTensor's divisibility fail-fast (the dx-wire twin of
  *  testInitLayerOutputsBfpGroupSizeMismatchDies). Same discriminating fixture
  *  shape: a 9-element dx wire with groupSize 2, so that floor division yields
@@ -1203,10 +1254,12 @@ void testBfpNativeForwardTrainingLossDecreasesAndGridMoves(void) {
 
 /*! Decision 8, pinned as a permanent regression: PR2 ships the FORWARD only.
  *  A model that lets a BACKWARD math slot derive ARITH_BFP (here weightGradMath
- *  -- what layerQuantInitUniform hands out for a BFP template) must die at the
- *  funnel gate, not silently compute garbage: the weight-grad executeOp gets
- *  FLOAT32-stored operands under ARITH_BFP with no bfpStage template and
- *  fail-fasts. Delete this test when epic PR3 lands the BFP backward arms. */
+ *  -- what layerQuantInitUniform hands out for a BFP template) must die, not
+ *  silently compute garbage. The death fires at the layer's backward kernel
+ *  dispatch (Linear guards all three slots, like Conv1d/ConvT1d); the funnel's
+ *  missing-bfpStage gate backstops only FLOAT32-stored operands -- the
+ *  BFP-stored-operand variants are pinned per slot in UnitTestLinear.c.
+ *  Delete this test when epic PR3 lands the BFP backward arms. */
 void testBfpUniformModelDiesOnBackwardUntilPr3(void) {
     rngSetSeed(1717u);
     bfpNativeFixture_t f;
@@ -1228,6 +1281,8 @@ int main(void) {
     RUN_TEST(testBfpWireGeometryIgnoresTemplateNumGroups);
     RUN_TEST(testInitLayerOutputsBfpGroupSizeMismatchDies);
     RUN_TEST(testBfpDxWireAllocatesThroughInitGradTensor);
+    RUN_TEST(testBfpWireGroupSizeEqualToWireElementsNormalizesToPerTensor);
+    RUN_TEST(testBfpDxWireGroupSizeEqualToWireElementsNormalizesToPerTensor);
     RUN_TEST(testInitGradTensorBfpGroupSizeMismatchDies);
     RUN_TEST(testOwningFactoryBfpOutputQFreesExponents);
     RUN_TEST(testBfpNativeForwardTrainingLossDecreasesAndGridMoves);

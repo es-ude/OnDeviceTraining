@@ -1441,6 +1441,38 @@ void testLinearLayerInitOwningBoolWeightGradStorageKnobAborts(void) {
     freeQuantization(q);
 }
 
+/* BFP epic PR3 Task 6: BFP twin of the SYM_INT32 knob test above -- a
+ * per-tensor BFP weightGradStorage template must land BFP weight grad
+ * storage end-to-end, through the same gradInit/getQLike path (Step 1's
+ * grouped-only gate). Written FIRST in Task 6 alongside the load-bearing e2e
+ * (UnitTestMultiLayerTraining.c): RED at gradInit's then-unconditional BFP
+ * reject before Step 1 lands, GREEN after. */
+void testLinearLayerInitOwningBfpWeightGradStorageKnob(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    quantization_t *gradKnob = quantizationInitBfp(8, 8, HALF_AWAY);
+    lq.weightGradStorage = gradKnob;
+
+    layer_t *layer = linearLayerInitOwning(
+        &(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE}, &lq);
+
+    linearConfig_t *cfg = layer->config->linear;
+    tensor_t *wGrad = getGradFromParameter(cfg->weights);
+    int gradType = wGrad->quantization->type;
+    /* Guard the qConfig dereference (same pattern as the SYM_INT32 twin). */
+    size_t gradNumGroups =
+        (gradType == BFP) ? ((bfpQConfig_t *)wGrad->quantization->qConfig)->numGroups : 0;
+
+    freeLinearLayer(layer);
+    freeQuantization(gradKnob);
+    freeQuantization(q);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, gradType,
+                                  "weightGradStorage knob must land BFP weight grad storage");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(1, gradNumGroups, "grads are per-tensor-only (#300 axis)");
+}
+
 /* Helper: build a 2-D FLOAT32 tensor on the heap with the given values. */
 static tensor_t *buildFloatTensor2d(size_t rows, size_t cols, const float *data) {
     size_t *d = reserveMemory(2 * sizeof(size_t));
@@ -3070,6 +3102,7 @@ int main(void) {
     RUN_TEST(testLinearLayerInitOwningFreesAllAllocationsWithoutLeak);
     RUN_TEST(testLinearLayerInitOwningWeightGradStorageKnobOverridesPropLossQDefault);
     RUN_TEST(testLinearLayerInitOwningBoolWeightGradStorageKnobAborts);
+    RUN_TEST(testLinearLayerInitOwningBfpWeightGradStorageKnob);
     RUN_TEST(testLinearLayerInitDefaultWeightsWithinPyTorchBound);
     RUN_TEST(testLinearLayerInitXavierUniformOverrideUsesGlorotBound);
     RUN_TEST(testLinearBackwardWithoutBiasDoesNotCrash);

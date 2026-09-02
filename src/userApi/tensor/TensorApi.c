@@ -172,14 +172,17 @@ tensor_t *gradInit(tensor_t *param, quantization_t *gradQ, sparsity_t *sparsity)
             exit(1);
         }
     }
-    /* BFP epic PR1 carrier gate: BFP grad/state storage is out of scope for
-     * this epic PR (native ARITH_BFP compute + grad/state storage land in
-     * BFP epic PR3) -- reject any BFP grad template outright, mirroring the
-     * SYM grouped gate above. */
+    /* BFP epic PR3 Task 6: the carrier gate above lifted -- BFP grad storage
+     * is now per-tensor-only, mirroring the SYM/ASYM grouped gates above
+     * exactly (templates are cloned per-param; a grouped template only fits
+     * one element count; grouped BFP grads have no spec mandate, #300 axis). */
     if (gradQ->type == BFP) {
-        PRINT_ERROR("gradInit: BFP grad templates are unsupported -- "
-                    "BFP grad/state storage arrives with BFP epic PR3");
-        exit(1);
+        bfpQConfig_t *bfpQC = gradQ->qConfig;
+        if (bfpQC->numGroups > 1) {
+            PRINT_ERROR("gradInit: grouped BFP grad templates are unsupported -- "
+                        "per-tensor only (#300 axis)");
+            exit(1);
+        }
     }
     return initTensor(getShapeLike(param->shape), getQLike(gradQ), sparsity);
 }

@@ -32,7 +32,7 @@ void scaleOptimizerGradients(optimizer_t *optimizer, float factor);
  *   - SYM_INT32: scale^2 * sum(mantissa^2) per tensor (int32 mantissa reads
  *     widened to double before squaring -- NO int64, mirroring the SYM-kernel
  *     accumulator rule in spirit).
- *   - packed SYM/ASYM: unsupported in v1 -- fails fast (PRINT_ERROR + exit(1)).
+ *   - packed SYM/ASYM/BFP: unsupported in v1 -- fails fast (PRINT_ERROR + exit(1)).
  *     The O(1) scale-fold this function reuses from scaleOptimizerGradients
  *     only helps APPLYING an already-computed clip coefficient; computing the
  *     norm itself needs unpacked element values, which packed storage doesn't
@@ -76,13 +76,16 @@ bool modelHasFrozenLayer(layer_t **model, size_t sizeModel);
 
 /* #261, PR3: validates that every parameter's grad storage tracked by `optim`
  * is one of the accepted dtypes -- FLOAT32 (default), SYM_INT32 (explicit
- * low-level knob), or packed SYM/ASYM (explicit grad-storage knob,
- * memory-constrained targets). INT32/BOOL grad storage remains unimplemented:
- * fails fast (PRINT_ERROR naming `factoryName` + exit(1)) rather than
- * silently misreading bytes in an unsupported layout. Frozen layers (#380)
- * are skipped before collection, so they never reach `optim->parameter[]`;
- * a NULL grad in a COLLECTED slot is therefore a mis-built model, not a
- * frozen layer, and fails fast here rather than crashing mid-training.
+ * low-level knob), packed SYM/ASYM, or per-tensor BFP (explicit
+ * grad-storage knob, memory-constrained targets; BFP epic PR3 Task 6 --
+ * grouped BFP grads are unreachable here, gradInit's own carrier gate
+ * rejects them first, #300 axis). INT32/BOOL grad storage remains
+ * unimplemented: fails fast (PRINT_ERROR naming `factoryName` + exit(1))
+ * rather than silently misreading bytes in an unsupported layout. Frozen
+ * layers (#380) are skipped before collection, so they never reach
+ * `optim->parameter[]`; a NULL grad in a COLLECTED slot is therefore a
+ * mis-built model, not a frozen layer, and fails fast here rather than
+ * crashing mid-training.
  *
  * Extracted from SgdApi.c (#328 groundwork) so non-SGD factories reuse the
  * same guard; `factoryName` names the caller in the error message. */

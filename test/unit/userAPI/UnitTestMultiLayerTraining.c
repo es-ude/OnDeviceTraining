@@ -1091,8 +1091,14 @@ typedef struct bfpNativeFixture {
  *  Layer 1 is entirely FLOAT32 (Decision 9: the loss-facing wire stays FLOAT32
  *  -- no loss function has a BFP arm before epic PR4); it consumes the BFP
  *  hidden wire through the funnel's IN_READ dequantization. No Relu: BFP
- *  storage is guarded out of Relu/Dropout/Flatten until epic PR4. */
-static void buildBfpNativeFixture(bfpNativeFixture_t *f, bool pinWeightGradMath) {
+ *  storage is guarded out of Relu/Dropout/Flatten until epic PR4.
+ *
+ *  `weightGradStorage` (Task 6, #300 axis): NULL keeps the pre-Task-6 default
+ *  (grads stay FLOAT32, #261); a non-NULL per-tensor BFP template opts layer
+ *  0's weight grad into BFP storage end-to-end -- the load-bearing e2e knob
+ *  both existing callers below leave unexercised. */
+static void buildBfpNativeFixture(bfpNativeFixture_t *f, bool pinWeightGradMath,
+                                  quantization_t *weightGradStorage) {
     f->floatQ = quantizationInitFloat();
     /* groupSize 2 over the [1, 4] hidden wire -> derived numGroups 2. */
     f->bfpWireQ = quantizationInitBfpGrouped(6, 8, SR_HALF_AWAY, 2, 2);
@@ -1112,6 +1118,7 @@ static void buildBfpNativeFixture(bfpNativeFixture_t *f, bool pinWeightGradMath)
     }
     lq0.weightStorage = f->floatQ; /* #270: FLOAT32 init, then requantize below */
     lq0.biasStorage = f->floatQ;
+    lq0.weightGradStorage = weightGradStorage;
     f->linear0 = linearLayerInit(
         &(linearInit_t){.inFeatures = 3, .outFeatures = 4, .bias = BIAS_TRUE}, &lq0);
 
@@ -1169,7 +1176,7 @@ static void freeBfpNativeFixture(bfpNativeFixture_t *f) {
 void testBfpNativeForwardTrainingLossDecreasesAndGridMoves(void) {
     rngSetSeed(1717u);
     bfpNativeFixture_t f;
-    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false);
+    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false, /*weightGradStorage=*/NULL);
 
     tensor_t *w0Param = getParamFromParameter(f.linear0->config->linear->weights);
     tensor_t *w0Grad = getGradFromParameter(f.linear0->config->linear->weights);
@@ -1265,7 +1272,7 @@ void testBfpNativeForwardTrainingLossDecreasesAndGridMoves(void) {
 void testBfpPinnedFloat32BackwardTrainingLossDecreases(void) {
     rngSetSeed(1717u);
     bfpNativeFixture_t f;
-    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/true);
+    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/true, /*weightGradStorage=*/NULL);
 
     optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
     float firstLoss = NAN;
@@ -1303,6 +1310,86 @@ void testBfpPinnedFloat32BackwardTrainingLossDecreases(void) {
                              "(loss must decrease)");
 }
 
+/* ===========================================================================
+ * BFP epic PR3 Task 6 capstone: per-tensor BFP GRAD storage, load-bearing e2e.
+ * ======================================================================== */
+
+/*! Task 6's own load-bearing e2e: same native-BFP-forward fixture as above,
+ *  but layer 0's weight grad ALSO opts into per-tensor BFP storage via the
+ *  weightGradStorage knob (gradInit's grouped-only gate, Step 1). Exercises,
+ *  in one 5-step run: the accumulateOut BFP-target arm (Task 5) writing every
+ *  backward pass's weight grad, the optimizer's read of that grad through
+ *  conversionMatrix[BFP][FLOAT32] (unmodified, PR3 groundwork), and the
+ *  zeroGrad BFP arm (Step 3) resetting codes+exponents to the zero state
+ *  after every step -- without that arm, a stale non-bias exponent would
+ *  leak into the next accumulate's FixedGrid carry decision.
+ *
+ *  RED before Steps 1-4 land: gradInit's then-unconditional BFP reject
+ *  (TensorApi.c) kills the whole binary the instant this fixture builds
+ *  layer 0's weight grad tensor -- written first in this task per the
+ *  brief's Step 5 ordering note, this is that RED. */
+void testBfpGradStorageTrainingAccumulatesAndSteps(void) {
+    rngSetSeed(1717u);
+    quantization_t *gradKnob = quantizationInitBfp(8, 8, HALF_AWAY);
+    bfpNativeFixture_t f;
+    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false, gradKnob);
+    freeQuantization(gradKnob); /* gradInit clones via getQLike -- template unused after */
+
+    tensor_t *w0Grad = getGradFromParameter(f.linear0->config->linear->weights);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, w0Grad->quantization->type,
+                                  "guard: weightGradStorage knob must land BFP grad storage");
+
+    optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
+    float firstLoss = NAN;
+    float lastLoss = NAN;
+    uint8_t gradExponentAfterBackward = (uint8_t)bfpExponentBias(w0Grad->quantization->qConfig);
+    for (size_t step = 0; step < 5; step++) {
+        trainingStats_t *stats = calculateGradsSequential(f.model, 2, defaultLossConfig(MSE),
+                                                          REDUCTION_MEAN, f.input, f.label);
+        if (step == 0) {
+            firstLoss = stats->loss;
+        }
+        lastLoss = stats->loss;
+        freeTrainingStats(stats);
+        if (step == 4) {
+            /* Capture BEFORE the optimizer step/zero on the last iteration --
+             * zeroGrad resets exponents back to bias every step, so this is
+             * the only point where the accumulate arm's moved grid is
+             * observable. */
+            bfpQConfig_t *gradQC = w0Grad->quantization->qConfig;
+            gradExponentAfterBackward = gradQC->exponents[0];
+        }
+        sgdFns.step(f.sgd);
+        sgdFns.zero(f.sgd);
+    }
+
+    /* CAPTURE post-loop (post-zero) state, then FREE, then assert. */
+    bfpQConfig_t *gradQCAfter = w0Grad->quantization->qConfig;
+    int gradTypeAfter = (int)w0Grad->quantization->type;
+    size_t gradNumGroupsAfter = gradQCAfter->numGroups;
+    uint8_t gradExponentAfterZero = gradQCAfter->exponents[0];
+    uint8_t zeroStateBias = (uint8_t)bfpExponentBias(gradQCAfter);
+
+    freeBfpNativeFixture(&f);
+
+    TEST_ASSERT_TRUE_MESSAGE(isfinite(firstLoss) && isfinite(lastLoss),
+                             "BFP grad-storage training losses must be finite");
+    TEST_ASSERT_TRUE_MESSAGE(lastLoss < firstLoss,
+                             "BFP grad-storage training must converge (loss must decrease)");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, gradTypeAfter,
+                                  "weight grad must stay BFP-stored after training (Step 1/2)");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(1, gradNumGroupsAfter,
+                                     "grads are per-tensor-only (#300 axis, Step 1)");
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(
+        zeroStateBias, gradExponentAfterBackward,
+        "the accumulateOut BFP-target arm (Task 5) must have moved the grad's exponent "
+        "off the zero state during backward, read through conversionMatrix[BFP][FLOAT32] "
+        "by the optimizer step");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(
+        zeroStateBias, gradExponentAfterZero,
+        "the zeroGrad BFP arm (Step 3) must reset every exponent back to bias after the step");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMultiLayerBackward_WithCrossEntropy_DoesNotCrash);
@@ -1319,5 +1406,6 @@ int main(void) {
     RUN_TEST(testOwningFactoryBfpOutputQFreesExponents);
     RUN_TEST(testBfpNativeForwardTrainingLossDecreasesAndGridMoves);
     RUN_TEST(testBfpPinnedFloat32BackwardTrainingLossDecreases);
+    RUN_TEST(testBfpGradStorageTrainingAccumulatesAndSteps);
     return UNITY_END();
 }

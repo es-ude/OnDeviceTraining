@@ -142,7 +142,8 @@ float optimizerClipGradNorm(optimizer_t *optimizer, float maxNorm) {
         }
         case SYM:
         case ASYM:
-            PRINT_ERROR("optimizerClipGradNorm: packed SYM/ASYM grad storage not supported "
+        case BFP:
+            PRINT_ERROR("optimizerClipGradNorm: packed SYM/ASYM/BFP grad storage not supported "
                         "(v1) -- computing a norm needs unpacked element values; the O(1) "
                         "scale-fold only helps APPLYING an already-computed clip coefficient, "
                         "not computing the norm itself (follow-up, not implemented). accepted: "
@@ -150,7 +151,7 @@ float optimizerClipGradNorm(optimizer_t *optimizer, float maxNorm) {
             exit(1);
         default:
             PRINT_ERROR("optimizerClipGradNorm: unsupported gradient qtype (accepted: FLOAT32, "
-                        "SYM_INT32; packed SYM/ASYM rejected above, INT32/BOOL grad storage "
+                        "SYM_INT32; packed SYM/ASYM/BFP rejected above, INT32/BOOL grad storage "
                         "remains unsupported, #261)");
             exit(1);
         }
@@ -261,13 +262,15 @@ bool modelHasFrozenLayer(layer_t **model, size_t sizeModel) {
 
 void validateOptimizerGradStorage(optimizer_t *optim, const char *factoryName) {
     /* #261, PR3: grads may be stored FLOAT32 (default), SYM_INT32 (explicit
-     * low-level knob), or packed SYM/ASYM (explicit grad-storage knob,
-     * memory-constrained targets). INT32/BOOL grad storage remains
-     * unimplemented - fail fast rather than silently misread bytes in an
-     * unsupported layout. A NULL grad in a collected slot is a mis-built
-     * model (frozen layers are skipped before collection (#380); a collected
-     * slot must always carry an allocated grad) - fail fast here instead of
-     * crashing mid-training (PR #366 review). */
+     * low-level knob), packed SYM/ASYM, or per-tensor BFP (explicit
+     * grad-storage knob, memory-constrained targets; BFP epic PR3 Task 6 --
+     * grouped BFP grads stay rejected at gradInit's own carrier gate, #300
+     * axis, so a grad tensor reaching here is always per-tensor). INT32/BOOL
+     * grad storage remains unimplemented - fail fast rather than silently
+     * misread bytes in an unsupported layout. A NULL grad in a collected slot
+     * is a mis-built model (frozen layers are skipped before collection
+     * (#380); a collected slot must always carry an allocated grad) - fail
+     * fast here instead of crashing mid-training (PR #366 review). */
     for (size_t s = 0; s < optim->sizeStates; s++) {
         tensor_t *grad = optim->parameter[s]->grad;
         if (grad == NULL) {
@@ -278,9 +281,10 @@ void validateOptimizerGradStorage(optimizer_t *optim, const char *factoryName) {
             exit(1);
         }
         qtype_t gradType = grad->quantization->type;
-        if (gradType != FLOAT32 && gradType != SYM_INT32 && gradType != SYM && gradType != ASYM) {
+        if (gradType != FLOAT32 && gradType != SYM_INT32 && gradType != SYM && gradType != ASYM &&
+            gradType != BFP) {
             PRINT_ERROR("%s: gradient storage dtype %d not supported "
-                        "(accepted: FLOAT32, SYM_INT32, SYM, ASYM; INT32/BOOL grad "
+                        "(accepted: FLOAT32, SYM_INT32, SYM, ASYM, BFP; INT32/BOOL grad "
                         "storage remains unsupported, #261)",
                         factoryName, (int)gradType);
             exit(1);

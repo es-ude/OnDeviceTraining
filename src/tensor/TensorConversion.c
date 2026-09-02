@@ -1786,6 +1786,218 @@ void accumulateTensorIntoAsymRescale(tensor_t *target, const tensor_t *increment
     accumulateIntoAsymRescaleEngine(target, &src, n);
 }
 
+/* BFP grad-accumulate engines (epic PR3): the SYM engines' shape plus
+ * per-group grids. The outer walk stays chunk-aligned (the unpack/pack/
+ * dequant helpers' byte-alignment contract) and group boundaries are handled
+ * by the run-walk inside each chunk (dequantChunkToFloat's BFP shape) -- a
+ * literal group-sequential walk would start chunks at group boundaries,
+ * whose bit offsets (g*groupSize*mantissaBits) are not byte-aligned for
+ * arbitrary geometries. No width guard here or in the funnel arm: BFP
+ * mantissaBits is capped to [2,16] at construction (initBfpQConfigGrouped),
+ * so an ODT_SYM_GRAD_QMAXBITS-style re-check would be dead code. */
+static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *inc, size_t n) {
+    bfpQConfig_t *qc = target->quantization->qConfig;
+    const size_t gsz = qc->groupSize == 0 ? n : qc->groupSize;
+    int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
+    float incBuf[ODT_CONVERSION_CHUNK_ELEMS];
+    int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
+
+    /* phase A: all-zero scan of the packed accumulator (reads only) */
+    bool allZero = true;
+    for (size_t off = 0; off < n && allZero; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+        unpackSignExtendChunk(target->data, qc->mantissaBits, off, count, mant);
+        for (size_t i = 0; i < count; i++) {
+            if (mant[i] != 0) {
+                allZero = false;
+                break;
+            }
+        }
+    }
+    if (allZero) {
+        /* Fresh accumulator (post-initTensor zero-fill or post-optimizerZeroGrad
+         * memset): derive the per-group grid from the increment alone through
+         * the exponent authority (absMax 0 -> stored = bias, the zero-state
+         * convention). */
+        const float qMax = powf(2, (float)qc->mantissaBits - 1) - 1;
+        const int32_t bias = bfpExponentBias(qc);
+        const uint8_t maxStored = (uint8_t)((1u << qc->exponentBits) - 1u);
+        if (inc->flat != NULL) {
+            /* contiguous float groups: packFloatBufferAsBfp's pass-1 shape */
+            for (size_t g = 0; g < qc->numGroups; g++) {
+                size_t start = g * gsz;
+                size_t len = start + gsz > n ? n - start : gsz;
+                float absMax = findAbsMaxFloat((uint8_t *)(inc->flat + start), len);
+                deriveBfpStoredExponent(absMax, qMax, bias, maxStored, &qc->exponents[g]);
+            }
+        } else {
+            /* streamed increment: running absmax, groups close exactly at gsz
+             * multiples (packStreamAsBfp's pass-1 idiom) */
+            float absMax = 0.f;
+            size_t g = 0;
+            for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+                size_t count =
+                    n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+                incSrcChunk(inc, off, count, incBuf);
+                for (size_t i = 0; i < count; i++) {
+                    float v = fabsf(incBuf[i]);
+                    if (v > absMax) {
+                        absMax = v;
+                    }
+                    if ((off + i + 1) % gsz == 0) {
+                        deriveBfpStoredExponent(absMax, qMax, bias, maxStored, &qc->exponents[g]);
+                        g++;
+                        absMax = 0.f;
+                    }
+                }
+            }
+        }
+    }
+    /* else: carry the grid verbatim -- no re-derivation, no renorm (the SYM
+     * engine's D1/D2 analog, fit-preserving). */
+
+    /* phase B: chunked read-modify-write, one roundByMode per element in
+     * element order; the run-walk hoists each group's 2^E scale out of the
+     * inner loop. No clamp: packChunkGuarded aborts on overflow (#227
+     * code-domain discipline; D6 saturation is value-domain only). In-place
+     * safe: chunk k is fully read before chunk k is rewritten and the code
+     * width is unchanged. */
+    for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+        unpackSignExtendChunk(target->data, qc->mantissaBits, off, count, mant);
+        incSrcChunk(inc, off, count, incBuf);
+        size_t chunkEnd = off + count;
+        size_t idx = off;
+        while (idx < chunkEnd) {
+            size_t g = idx / gsz;
+            size_t groupEnd = (g + 1) * gsz;
+            size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
+            const float scale = bfpGroupScale(qc, g);
+            for (size_t i = idx; i < runEnd; i++) {
+                codes[i - off] = roundByMode(
+                    ((float)mant[i - off] * scale + incBuf[i - off]) / scale, qc->roundingMode);
+            }
+            idx = runEnd;
+        }
+        packChunkGuarded(codes, count, target->data, qc->mantissaBits, off,
+                         "accumulateFloatIntoBfpTensorFixedGrid");
+    }
+}
+
+void accumulateFloatIntoBfpTensorFixedGrid(tensor_t *target, const float *inc, size_t n) {
+    incSrc_t src = {.flat = inc, .tens = NULL};
+    accumulateIntoBfpFixedGridEngine(target, &src, n);
+}
+
+void accumulateTensorIntoBfpFixedGrid(tensor_t *target, const tensor_t *increment) {
+    size_t n = calcNumberOfElementsByTensor(target);
+    if (calcNumberOfElementsByTensor((tensor_t *)increment) != n) {
+        PRINT_ERROR("accumulateTensorIntoBfpFixedGrid: element-count mismatch");
+        exit(1);
+    }
+    rejectAliasedIncrement(target, increment, "accumulateTensorIntoBfpFixedGrid");
+    incSrc_t src = {.flat = NULL, .tens = increment};
+    accumulateIntoBfpFixedGridEngine(target, &src, n);
+}
+
+static void accumulateIntoBfpRescaleEngine(tensor_t *target, const incSrc_t *inc, size_t n) {
+    bfpQConfig_t *qc = target->quantization->qConfig;
+    const float qMax = powf(2, (float)qc->mantissaBits - 1) - 1;
+    const float qMin = -powf(2, (float)qc->mantissaBits - 1);
+    const int32_t bias = bfpExponentBias(qc);
+    const uint8_t maxStored = (uint8_t)((1u << qc->exponentBits) - 1u);
+    const size_t gsz = qc->groupSize == 0 ? n : qc->groupSize;
+    int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
+    float incBuf[ODT_CONVERSION_CHUNK_ELEMS];
+    int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
+
+    /* Latch the whole OLD grid before pass 1 overwrites qc->exponents below
+     * -- the pass-2 target-dequant always decodes under the grid the codes
+     * were stored under, never the freshly derived one (the SYM engine's
+     * oldScale latch, per group). One byte per group of stack: a
+     * group-sequential walk needing only ONE latched exponent cannot be built
+     * on the chunk helpers (group starts are not byte-aligned for arbitrary
+     * geometries, and dequantChunkToFloat fail-fasts on unaligned offsets);
+     * on the one production path (the funnel ACC epilogue) the stack already
+     * carries executeOp's 4*n rawData VLA, so numGroups bytes adds nothing. */
+    uint8_t oldStored[qc->numGroups];
+    memcpy(oldStored, qc->exponents, qc->numGroups);
+
+    /* pass 1: chunked absmax of (mant*oldScale + inc), closing each group at
+     * its boundary run and deriving its fresh exponent into qc->exponents
+     * (packStreamAsBfp's pass-1 idiom) -- no rounding, no data writes, fresh
+     * grid every call (unlike the FixedGrid twin). */
+    float absMax = 0.f;
+    for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+        unpackSignExtendChunk(target->data, qc->mantissaBits, off, count, mant);
+        incSrcChunk(inc, off, count, incBuf);
+        size_t chunkEnd = off + count;
+        size_t idx = off;
+        while (idx < chunkEnd) {
+            size_t g = idx / gsz;
+            size_t groupEnd = (g + 1) * gsz;
+            size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
+            const float oldScale = ldexpf(1.f, (int32_t)oldStored[g] - bias);
+            for (size_t i = idx; i < runEnd; i++) {
+                float v = fabsf((float)mant[i - off] * oldScale + incBuf[i - off]);
+                if (v > absMax) {
+                    absMax = v;
+                }
+            }
+            if (runEnd == groupEnd) {
+                deriveBfpStoredExponent(absMax, qMax, bias, maxStored, &qc->exponents[g]);
+                absMax = 0.f;
+            }
+            idx = runEnd;
+        }
+    }
+
+    /* pass 2: chunked read-modify-write -- decode at the LATCHED old scale,
+     * requantize at the fresh one; one roundByMode per element in element
+     * order; clamp before the pack guard (value-domain saturation, D6 --
+     * unlike the FixedGrid twin's abort). In-place safe: chunk k is fully
+     * read before chunk k is rewritten and the code width is unchanged. */
+    for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+        unpackSignExtendChunk(target->data, qc->mantissaBits, off, count, mant);
+        incSrcChunk(inc, off, count, incBuf);
+        size_t chunkEnd = off + count;
+        size_t idx = off;
+        while (idx < chunkEnd) {
+            size_t g = idx / gsz;
+            size_t groupEnd = (g + 1) * gsz;
+            size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
+            const float oldScale = ldexpf(1.f, (int32_t)oldStored[g] - bias);
+            const float scale = bfpGroupScale(qc, g);
+            for (size_t i = idx; i < runEnd; i++) {
+                float v = (float)mant[i - off] * oldScale + incBuf[i - off];
+                codes[i - off] = clampInt32(roundByMode(v / scale, qc->roundingMode), (int32_t)qMin,
+                                            (int32_t)qMax);
+            }
+            idx = runEnd;
+        }
+        packChunkGuarded(codes, count, target->data, qc->mantissaBits, off,
+                         "accumulateFloatIntoBfpTensorRescale");
+    }
+}
+
+void accumulateFloatIntoBfpTensorRescale(tensor_t *target, const float *inc, size_t n) {
+    incSrc_t src = {.flat = inc, .tens = NULL};
+    accumulateIntoBfpRescaleEngine(target, &src, n);
+}
+
+void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment) {
+    size_t n = calcNumberOfElementsByTensor(target);
+    if (calcNumberOfElementsByTensor((tensor_t *)increment) != n) {
+        PRINT_ERROR("accumulateTensorIntoBfpRescale: element-count mismatch");
+        exit(1);
+    }
+    rejectAliasedIncrement(target, increment, "accumulateTensorIntoBfpRescale");
+    incSrc_t src = {.flat = NULL, .tens = increment};
+    accumulateIntoBfpRescaleEngine(target, &src, n);
+}
+
 /* SYM_INT32 -> SYM_INT32 grad accumulate: reproduces addSymInt32TensorsInplace's
  * Strategy-A semantics (dequant both -> float add -> fresh-absmax requant with
  * the TARGET's roundingMode) directly over the flat int32 mantissa arrays --

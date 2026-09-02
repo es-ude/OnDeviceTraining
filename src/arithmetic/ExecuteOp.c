@@ -199,9 +199,30 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
         }
         return;
     }
+    case BFP: {
+        /* No ODT_SYM_GRAD_QMAXBITS-style width guard here (unlike the three
+         * sibling arms above): BFP mantissaBits is capped to [2,16] at
+         * construction (initBfpQConfigGrouped), so a re-check would be dead
+         * code. FIXED_SCALE carries the per-group exponents and aborts on
+         * mantissa overflow; DYNAMIC_RESCALE re-derives them per store. */
+        if (intermediate->quantization->type == FLOAT32) {
+            if (mode == OUT_ACC_FIXED_SCALE) {
+                accumulateFloatIntoBfpTensorFixedGrid(target, (const float *)intermediate->data, n);
+            } else {
+                accumulateFloatIntoBfpTensorRescale(target, (const float *)intermediate->data, n);
+            }
+        } else {
+            if (mode == OUT_ACC_FIXED_SCALE) {
+                accumulateTensorIntoBfpFixedGrid(target, intermediate);
+            } else {
+                accumulateTensorIntoBfpRescale(target, intermediate);
+            }
+        }
+        return;
+    }
     default:
         PRINT_ERROR("executeOp: accumulate target dtype %d not supported "
-                    "(accepted: FLOAT32, SYM_INT32, SYM, ASYM; INT32/BOOL "
+                    "(accepted: FLOAT32, SYM_INT32, SYM, ASYM, BFP; INT32/BOOL "
                     "remain unsupported)",
                     (int)target->quantization->type);
         exit(1);

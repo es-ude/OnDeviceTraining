@@ -887,6 +887,206 @@ void testAccFixedScaleOnAsymTargetAborts(void) {
     freeTensor(inc);
 }
 
+/* Stack BFP target for the accumulateOut arm (epic PR3): codes packed
+ * verbatim at mantissaBits, exponents/geometry field-assigned -- the seeding
+ * idiom of the BFP operand tests below and UnitTestTensorConversion.c. */
+static void buildBfpTarget(tensor_t *t, uint8_t *data, shape_t *shape, quantization_t *q,
+                           bfpQConfig_t *qc, const int32_t *codes, size_t n) {
+    initBfpQuantization(qc, q);
+    byteConversion((uint8_t *)codes, 32, data, qc->mantissaBits, n);
+    setTensorValues(t, data, shape, q, NULL);
+}
+
+/* DYNAMIC_RESCALE into a BFP-stored grad target: the epilogue must re-derive
+ * every group's exponent from the decoded-plus-increment absmax (the
+ * RederivesExponents engine fixture, all steps exact): group0 stored
+ * 127 -> 126, group1 125 -> 127 (over a power-of-two boundary), codes
+ * {20,-6,16,-4}. Mutation guard: dispatching the FixedGrid twin instead
+ * carries the old grid -> group1's value 16 at scale 0.25 is code 64,
+ * overflowing 6 bits -> abort, RED by crash. */
+void testAccDynamicIntoBfpTargetRederivesExponents(void) {
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    uint8_t exponents[2] = {127, 125};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 2,
+                       .groupSize = 2,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    uint8_t data[3];
+    tensor_t target;
+    buildBfpTarget(&target, data, &shape, &q, &qc, (int32_t[]){8, -4, 16, 8}, n);
+
+    tensor_t *inc = buildFloat(n, (float[]){2.f, 1.f, 12.f, -6.f});
+    quantization_t floatArith;
+    initFloat32Quantization(&floatArith);
+    executeOp(
+        &(opSpec_t){
+            .kernel = executeOpIdentityKernel,
+            .inputs = (tensor_t *[]){inc},
+            .nInputs = 1,
+            .arithmetic = arithmeticFromQuantization(&floatArith),
+            .mode = OUT_ACC_DYNAMIC_RESCALE,
+        },
+        &target);
+
+    int32_t got[4];
+    symTestUnpackSignExtend(data, 6, got, n);
+    freeTensor(inc);
+    TEST_ASSERT_EQUAL_UINT8(126, exponents[0]);
+    TEST_ASSERT_EQUAL_UINT8(127, exponents[1]);
+    int32_t expected[4] = {20, -6, 16, -4};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, n);
+}
+
+/* FIXED_SCALE into a zero-state BFP target (the packed-SYM
+ * DerivesThenCarriesGrid clone): call 1 derives the per-group grid from the
+ * increment ({127,129}), call 2 must CARRY it verbatim. Both calls are
+ * checked byte-for-byte against the float primitive. Anti-vacuity of the
+ * carried-grid assert: call 2's group1 sums SHRINK to absmax 4, so a
+ * mode-swap mutant (Rescale dispatched instead) re-derives stored 127 and
+ * codes {4,0} where carry keeps 129 and {1,0} -- rederive does NOT coincide
+ * with carry here (a first-draft inc2 where they coincided was vacuous;
+ * house throwaway-harness cross-check). */
+void testAccFixedIntoBfpTargetCarriesGrid(void) {
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    uint8_t exponents[2] = {127, 127};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 2,
+                       .groupSize = 2,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 4,
+                       .exponentBits = 8};
+    quantization_t q;
+    uint8_t data[2];
+    tensor_t target;
+    buildBfpTarget(&target, data, &shape, &q, &qc, (int32_t[]){0, 0, 0, 0}, n);
+
+    uint8_t refExponents[2] = {127, 127};
+    bfpQConfig_t refQC = {.exponents = refExponents,
+                          .numGroups = 2,
+                          .groupSize = 2,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t refQ;
+    uint8_t refData[2];
+    tensor_t ref;
+    buildBfpTarget(&ref, refData, &shape, &refQ, &refQC, (int32_t[]){0, 0, 0, 0}, n);
+
+    quantization_t floatArith;
+    initFloat32Quantization(&floatArith);
+    tensor_t *inc1T = buildFloat(n, (float[]){6.f, 1.f, 28.f, -7.f});
+    executeOp(
+        &(opSpec_t){
+            .kernel = executeOpIdentityKernel,
+            .inputs = (tensor_t *[]){inc1T},
+            .nInputs = 1,
+            .arithmetic = arithmeticFromQuantization(&floatArith),
+            .mode = OUT_ACC_FIXED_SCALE,
+        },
+        &target);
+    float inc1[] = {6.f, 1.f, 28.f, -7.f};
+    accumulateFloatIntoBfpTensorFixedGrid(&ref, inc1, n);
+    uint8_t expAfterCall1[2] = {exponents[0], exponents[1]};
+
+    tensor_t *inc2T = buildFloat(n, (float[]){1.f, -1.f, -24.f, 8.f});
+    executeOp(
+        &(opSpec_t){
+            .kernel = executeOpIdentityKernel,
+            .inputs = (tensor_t *[]){inc2T},
+            .nInputs = 1,
+            .arithmetic = arithmeticFromQuantization(&floatArith),
+            .mode = OUT_ACC_FIXED_SCALE,
+        },
+        &target);
+    float inc2[] = {1.f, -1.f, -24.f, 8.f};
+    accumulateFloatIntoBfpTensorFixedGrid(&ref, inc2, n);
+
+    int32_t got[4];
+    symTestUnpackSignExtend(data, 4, got, n);
+    freeTensor(inc2T);
+    freeTensor(inc1T);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(refExponents, exponents, 2);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(refData, data, 2);
+    TEST_ASSERT_EQUAL_UINT8(expAfterCall1[0], exponents[0]); /* carried, not re-derived */
+    TEST_ASSERT_EQUAL_UINT8(expAfterCall1[1], exponents[1]);
+    TEST_ASSERT_EQUAL_UINT8(127, exponents[0]);
+    TEST_ASSERT_EQUAL_UINT8(129, exponents[1]);
+    int32_t expected[4] = {7, 0, 1, 0};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, n);
+}
+
+/* The BFP arm's tensor-typed branch: an ARITH_SYM_INT32 raw intermediate
+ * (identity kernel propagates mantissas {8,4,48,-24} AND scale 0.25 -- exact
+ * dequant image {2,1,12,-6}) must reach the SAME result as the tensor twin
+ * primitive on identical data -- the RederivesExponents golds. Mutation
+ * guard: a mode-swap in the tensor-typed branch (FixedGrid dispatched under
+ * DYNAMIC) carries the old grid -> group1 value 16 at scale 0.25 is code 64
+ * -> 6-bit overflow abort, RED by crash. */
+void testAccDynamicSymInt32IntermediateIntoBfpTargetMatchesTensorTwin(void) {
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    uint8_t exponents[2] = {127, 125};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 2,
+                       .groupSize = 2,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    uint8_t data[3];
+    tensor_t target;
+    buildBfpTarget(&target, data, &shape, &q, &qc, (int32_t[]){8, -4, 16, 8}, n);
+
+    uint8_t refExponents[2] = {127, 125};
+    bfpQConfig_t refQC = {.exponents = refExponents,
+                          .numGroups = 2,
+                          .groupSize = 2,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 6,
+                          .exponentBits = 8};
+    quantization_t refQ;
+    uint8_t refData[3];
+    tensor_t ref;
+    buildBfpTarget(&ref, refData, &shape, &refQ, &refQC, (int32_t[]){8, -4, 16, 8}, n);
+
+    tensor_t *incSymInt32 = buildSym(n, (int32_t[]){8, 4, 48, -24}, 0.25f);
+    quantization_t symArith;
+    symInt32QConfig_t symArithQC;
+    initSymInt32QConfig(HALF_AWAY, &symArithQC);
+    initSymInt32Quantization(&symArithQC, &symArith);
+    executeOp(
+        &(opSpec_t){
+            .kernel = executeOpIdentityKernel,
+            .inputs = (tensor_t *[]){incSymInt32},
+            .nInputs = 1,
+            .arithmetic = arithmeticFromQuantization(&symArith),
+            .mode = OUT_ACC_DYNAMIC_RESCALE,
+        },
+        &target);
+    accumulateTensorIntoBfpRescale(&ref, incSymInt32);
+
+    int32_t got[4];
+    symTestUnpackSignExtend(data, 6, got, n);
+    freeTensor(incSymInt32);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(refExponents, exponents, 2);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(refData, data, 3);
+    TEST_ASSERT_EQUAL_UINT8(126, exponents[0]); /* the RederivesExponents golds */
+    TEST_ASSERT_EQUAL_UINT8(127, exponents[1]);
+    int32_t expected[4] = {20, -6, 16, -4};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, n);
+}
+
 /* ---- opSpec_t: ctx / auxOut / FIXED_SCALE roundingMode (spec D1+D4) --- */
 
 typedef struct {
@@ -2305,6 +2505,9 @@ int main(void) {
     RUN_TEST(testAccIntoTooWideSymTargetAborts);
     RUN_TEST(testAccIntoTooWidePackedSymTargetAborts);
     RUN_TEST(testAccFixedScaleOnAsymTargetAborts);
+    RUN_TEST(testAccDynamicIntoBfpTargetRederivesExponents);
+    RUN_TEST(testAccFixedIntoBfpTargetCarriesGrid);
+    RUN_TEST(testAccDynamicSymInt32IntermediateIntoBfpTargetMatchesTensorTwin);
     RUN_TEST(testCtxReachesKernel);
     RUN_TEST(testAuxOutIsKernelWrittenVerbatimAndNeverFunnelConverted);
     RUN_TEST(testAccFixedScaleHonorsTargetSrRoundingMode);

@@ -132,6 +132,20 @@ void accumulateTensorIntoAsymRescale(tensor_t *target, const tensor_t *increment
 void accumulateTensorIntoFloat32Inplace(tensor_t *target, const tensor_t *increment);
 void accumulateSymInt32IntoSymInt32Rescale(tensor_t *target, const tensor_t *increment);
 
+/* BFP grad-accumulate twins (BFP epic PR3). FixedGrid = fit-preserving:
+ * carries the target's per-group exponents (a fresh ALL-ZERO-code accumulator
+ * first derives them from the increment, per group) and ABORTS on mantissa
+ * overflow (#227 code-domain discipline, no clamp). Rescale = requant:
+ * re-derives every group's exponent from the decoded-plus-increment absmax
+ * (value-domain, saturates — D6). n must equal the target's element count;
+ * the tensor-typed twins stream any dequantChunkToFloat-supported increment
+ * and reject a self-aliased one (shared data pointer) with exit(1), like
+ * their SYM/ASYM siblings. */
+void accumulateFloatIntoBfpTensorFixedGrid(tensor_t *target, const float *inc, size_t n);
+void accumulateFloatIntoBfpTensorRescale(tensor_t *target, const float *inc, size_t n);
+void accumulateTensorIntoBfpFixedGrid(tensor_t *target, const tensor_t *increment);
+void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment);
+
 extern conversionFunction_t conversionMatrix[7][7];
 
 #endif // TENSOR_CONVERSION_H

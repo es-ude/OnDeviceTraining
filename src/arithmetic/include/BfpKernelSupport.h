@@ -54,4 +54,34 @@ static inline void bfpValidateBlockHeadroom(const bfpQConfig_t *aQC, const bfpQC
     }
 }
 
+/*! Max codes one int32 SUM partial may accumulate (PR3, biasGrad-family
+ * reductions): a pure mantissa sum of g codes is bounded by g * 2^(m-1)
+ * (codes in [-2^(m-1), 2^(m-1)-1]), so an int32 segment partial is sound for
+ * g <= INT32_MAX >> (m-1). The PRODUCT helper's >> (ma+mb-2) bound does not
+ * apply to single-operand sums. */
+static inline size_t bfpSumSegmentLimit(uint8_t mantissaBits) {
+    return (size_t)(INT32_MAX >> (mantissaBits - 1));
+}
+
+/*! Fail-fast sum-headroom twin of bfpValidateBlockHeadroom, for kernels that
+ * SUM one BFP operand's mantissas (no products): a same-exponent segment
+ * never accumulates more than min(groupSize, reductionLen) codes (a group
+ * holds groupSize storage elements total, so no walk -- strided or not --
+ * visits more of one group; per-tensor {1,0} caps at the reduction length),
+ * so that bound must stay within bfpSumSegmentLimit. */
+static inline void bfpValidateSumHeadroom(const bfpQConfig_t *qC, size_t reductionLen,
+                                          const char *what) {
+    size_t maxSeg = qC->groupSize == 0 ? reductionLen : qC->groupSize;
+    if (maxSeg > reductionLen) {
+        maxSeg = reductionLen;
+    }
+    size_t limit = bfpSumSegmentLimit(qC->mantissaBits);
+    if (maxSeg > limit) {
+        PRINT_ERROR("%s: BFP sum partial would overflow int32 -- max same-exponent segment "
+                    "%zu exceeds %zu codes for mantissa width %u",
+                    what, maxSeg, limit, qC->mantissaBits);
+        exit(1);
+    }
+}
+
 #endif // BFP_KERNEL_SUPPORT_H

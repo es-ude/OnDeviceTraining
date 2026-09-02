@@ -1396,6 +1396,15 @@ void testBfpSegmentLimitTableValues(void) {
     TEST_ASSERT_EQUAL_size_t(1, bfpSegmentLimit(16, 16));
 }
 
+/* PR3 sum-headroom sibling of the table above: single-operand SUMS (biasGrad)
+ * are bounded by g * 2^(m-1), not the product bound, so the limit is
+ * INT32_MAX >> (m-1) -- far roomier than bfpSegmentLimit at equal widths. */
+void testBfpSumSegmentLimitTableValues(void) {
+    TEST_ASSERT_EQUAL_size_t((size_t)(INT32_MAX >> 7), bfpSumSegmentLimit(8));
+    TEST_ASSERT_EQUAL_size_t((size_t)(INT32_MAX >> 15), bfpSumSegmentLimit(16));
+    TEST_ASSERT_EQUAL_size_t((size_t)(INT32_MAX >> 1), bfpSumSegmentLimit(2));
+}
+
 /* Group-shape fail-fast (review finding 2): bfpGroupOf divides by groupSize
  * with no relation to numGroups, so a mismatched config ({numGroups=2,
  * groupSize=4} on 12 elements: 2*4 == 8 != 12) would silently read
@@ -1680,6 +1689,7 @@ int main(void) {
     RUN_TEST(testMatmulBfpPowerOfTwoBitIdenticalToGroupedSym);
     RUN_TEST(testMatmulBfpHeadroomGuardDies);
     RUN_TEST(testBfpSegmentLimitTableValues);
+    RUN_TEST(testBfpSumSegmentLimitTableValues);
     RUN_TEST(testMatmulBfpRejectsMismatchedGroupShape);
     RUN_TEST(testMatmulBfpDxStridedWeightWalkMatchesGold);
     RUN_TEST(testMatmulBfpWeightGradTransposedLossViewMatchesGold);

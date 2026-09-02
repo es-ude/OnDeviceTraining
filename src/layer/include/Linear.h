@@ -74,6 +74,18 @@ void linearCalcPropLossSymInt32(tensor_t *weights, tensor_t *loss, tensor_t *pro
 void linearCalcPropLossSymInt32Grouped(tensor_t *weights, tensor_t *loss, tensor_t *propLoss,
                                        const symQConfig_t *weightGroups);
 
+/* BFP epic PR3: backward raw-emit cores on the PR2 fold contract. All BFP
+ * operands are the executeOp prologue's unpacked-BFP scratch (int32 mantissa
+ * codes under a live bfpQConfig_t); outputs are the funnel's FLOAT32 raw
+ * intermediate (accumulation/width-restore is the epilogue's job). Routed to
+ * by the funnel adapters -- not direct public entry points.
+ * weightGrad = loss^T @ x (zero-copy transpose view), propLoss = loss @ W
+ * with W in RAW [outF, inF] storage, biasGrad = per-feature batch sum of the
+ * loss mantissas (int32 partials, ldexpf folds; sum headroom fail-fast). */
+void linearCalcWeightGradsBfp(tensor_t *loss, tensor_t *forwardInput, tensor_t *weightGrads);
+void linearCalcBiasGradsBfp(tensor_t *loss, tensor_t *biasGrad);
+void linearCalcPropLossBfp(tensor_t *loss, tensor_t *weights, tensor_t *propLoss);
+
 void linearCalcOutputShape(layer_t *linearLayer, shape_t *inputShape, shape_t *outputShape);
 
 #endif // ENV5_RUNTIME_LINEAR_H

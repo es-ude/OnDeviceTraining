@@ -1078,10 +1078,10 @@ typedef struct bfpNativeFixture {
  *
  *  Layer 0's whole profile DERIVES from one grouped BFP template via
  *  layerQuantInitUniform -- which since the Task 9 flip yields ARITH_BFP in all
- *  FOUR math slots. PR2 ships the forward only, so the three BACKWARD slots are
- *  pinned back to ARITH_FLOAT32 (plan Decision 8); `pinWeightGradMath == false`
- *  leaves one of them derived, which is what testBfpUniformModelDiesOnBackward-
- *  UntilPr3 pins as the failure mode until epic PR3.
+ *  FOUR math slots. Since epic PR3's native Linear backward,
+ *  `pinWeightGradMath == false` leaves all four slots derived (fully native);
+ *  `true` is the fake-quant-backward variant: all THREE backward slots pinned
+ *  to ARITH_FLOAT32 + a FLOAT32 propLossQ.
  *
  *  Storage slots follow #270: parameters are FLOAT32-init (the factory rejects
  *  anything else) and reach BFP storage through requantizeTensorInPlace --
@@ -1106,10 +1106,10 @@ static void buildBfpNativeFixture(bfpNativeFixture_t *f, bool pinWeightGradMath)
 
     if (pinWeightGradMath) {
         lq0.weightGradMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
+        lq0.biasGradMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
+        lq0.propLossMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
+        lq0.propLossQ = f->floatQ;
     }
-    lq0.biasGradMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
-    lq0.propLossMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
-    lq0.propLossQ = f->floatQ;
     lq0.weightStorage = f->floatQ; /* #270: FLOAT32 init, then requantize below */
     lq0.biasStorage = f->floatQ;
     f->linear0 = linearLayerInit(
@@ -1157,7 +1157,9 @@ static void freeBfpNativeFixture(bfpNativeFixture_t *f) {
     freeQuantization(f->floatQ);
 }
 
-/*! THE Task 9 capstone: 25 training steps whose forward GEMM is native BFP.
+/*! THE capstone (PR2 Task 9, uniform-native since epic PR3): 25 training
+ *  steps with layer 0 fully derived -- forward AND all three backward slots
+ *  run native ARITH_BFP (no pins).
  *  Asserts, in one run, that (a) the derivation flipped -- one BFP template
  *  yields ARITH_BFP in all four slots, (b) the native forward trains: finite,
  *  decreasing loss, (c) the hidden wire is BFP with the DERIVED geometry and a
@@ -1167,7 +1169,7 @@ static void freeBfpNativeFixture(bfpNativeFixture_t *f) {
 void testBfpNativeForwardTrainingLossDecreasesAndGridMoves(void) {
     rngSetSeed(1717u);
     bfpNativeFixture_t f;
-    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/true);
+    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false);
 
     tensor_t *w0Param = getParamFromParameter(f.linear0->config->linear->weights);
     tensor_t *w0Grad = getGradFromParameter(f.linear0->config->linear->weights);
@@ -1225,7 +1227,7 @@ void testBfpNativeForwardTrainingLossDecreasesAndGridMoves(void) {
                                   "the derived arithmetic carries the config's own roundingMode");
     TEST_ASSERT_TRUE_MESSAGE(allFourSlotsDerivedBfp,
                              "layerQuantInitUniform over a BFP template must derive ARITH_BFP in "
-                             "ALL FOUR math slots -- backward is pinned back by hand until PR3");
+                             "ALL FOUR math slots -- and since epic PR3 all four RUN native");
     TEST_ASSERT_EQUAL_INT_MESSAGE(ARITH_BFP, configuredForwardType,
                                   "layer 0's forward must have RUN native ARITH_BFP");
     TEST_ASSERT_TRUE_MESSAGE(cap.seen, "layer-0 forward probe must have fired");
@@ -1252,23 +1254,53 @@ void testBfpNativeForwardTrainingLossDecreasesAndGridMoves(void) {
     TEST_ASSERT_TRUE_MESSAGE(gradsStillFloat, "grad storage must stay FLOAT32 (default, #261)");
 }
 
-/*! Decision 8, pinned as a permanent regression: PR2 ships the FORWARD only.
- *  A model that lets a BACKWARD math slot derive ARITH_BFP (here weightGradMath
- *  -- what layerQuantInitUniform hands out for a BFP template) must die, not
- *  silently compute garbage. The death fires at the layer's backward kernel
- *  dispatch (Linear guards all three slots, like Conv1d/ConvT1d); the funnel's
- *  missing-bfpStage gate backstops only FLOAT32-stored operands -- the
- *  BFP-stored-operand variants are pinned per slot in UnitTestLinear.c.
- *  Delete this test when epic PR3 lands the BFP backward arms. */
-void testBfpUniformModelDiesOnBackwardUntilPr3(void) {
+/*! The fixture's OTHER variant (pinWeightGradMath == true): native ARITH_BFP
+ *  forward + all three backward slots explicitly pinned ARITH_FLOAT32 with a
+ *  FLOAT32 dx wire -- the documented fake-quant-backward recipe
+ *  (docs/conventions/arithmetic-bfp.md §5.1). Post-PR3 this stays a supported
+ *  configuration, not just a stopgap, so it keeps end-to-end coverage: the
+ *  pins must actually land on the config (flag-branch sensitivity -- a
+ *  fully-derived model would also train, so loss alone cannot detect a broken
+ *  flag) and training must converge. */
+void testBfpPinnedFloat32BackwardTrainingLossDecreases(void) {
     rngSetSeed(1717u);
     bfpNativeFixture_t f;
-    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false);
+    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/true);
 
-    ASSERT_EXITS_WITH_FAILURE(freeTrainingStats(calculateGradsSequential(
-        f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label)));
+    optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
+    float firstLoss = NAN;
+    float lastLoss = NAN;
+    for (size_t step = 0; step < 25; step++) {
+        trainingStats_t *stats = calculateGradsSequential(f.model, 2, defaultLossConfig(MSE),
+                                                          REDUCTION_MEAN, f.input, f.label);
+        if (step == 0) {
+            firstLoss = stats->loss;
+        }
+        lastLoss = stats->loss;
+        freeTrainingStats(stats);
+        sgdFns.step(f.sgd);
+        sgdFns.zero(f.sgd);
+    }
+
+    /* CAPTURE, then FREE, then assert. */
+    linearConfig_t *cfg0 = f.linear0->config->linear;
+    int configuredForwardType = (int)cfg0->forwardMath.type;
+    bool backwardSlotsPinnedFloat = cfg0->weightGradMath.type == ARITH_FLOAT32 &&
+                                    cfg0->biasGradMath.type == ARITH_FLOAT32 &&
+                                    cfg0->propLossMath.type == ARITH_FLOAT32;
 
     freeBfpNativeFixture(&f);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(ARITH_BFP, configuredForwardType,
+                                  "layer 0's forward must still run native ARITH_BFP");
+    TEST_ASSERT_TRUE_MESSAGE(backwardSlotsPinnedFloat,
+                             "pinWeightGradMath == true must pin ALL THREE backward slots to "
+                             "ARITH_FLOAT32 (the fake-quant-backward variant)");
+    TEST_ASSERT_TRUE_MESSAGE(isfinite(firstLoss) && isfinite(lastLoss),
+                             "pinned-FLOAT32-backward training losses must be finite");
+    TEST_ASSERT_TRUE_MESSAGE(lastLoss < firstLoss,
+                             "native BFP forward + pinned FLOAT32 backward must converge "
+                             "(loss must decrease)");
 }
 
 int main(void) {
@@ -1286,6 +1318,6 @@ int main(void) {
     RUN_TEST(testInitGradTensorBfpGroupSizeMismatchDies);
     RUN_TEST(testOwningFactoryBfpOutputQFreesExponents);
     RUN_TEST(testBfpNativeForwardTrainingLossDecreasesAndGridMoves);
-    RUN_TEST(testBfpUniformModelDiesOnBackwardUntilPr3);
+    RUN_TEST(testBfpPinnedFloat32BackwardTrainingLossDecreases);
     return UNITY_END();
 }

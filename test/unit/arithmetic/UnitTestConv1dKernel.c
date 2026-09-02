@@ -725,6 +725,90 @@ void testConv1dKernelBfpRejectsMismatchedGroupShape(void) {
     ASSERT_EXITS_WITH_FAILURE(conv1dKernelBfp(&inTensor, &wTensor, NULL, &kernel, 1, &outTensor));
 }
 
+/* conv-groups=2 parity gold (#416, BFP PR3 Task 3): SPLIT channels
+ * (inChPerGroup = outChPerGroup = 2, not depthwise), so the group loop's
+ * in_lo/w_base channel arithmetic is load-bearing -- the PR2 fixtures all
+ * ran groups=1. Same stack-fixture idiom and EXPLICIT-padded stride-2
+ * geometry family as testConv1dKernelBfpMatchesGold, gold from
+ * conv1d_bfp_ref(conv_groups=2) with the full vacuity self-checks under
+ * split channels. */
+void testConv1dKernelBfpConvGroups2MatchesGold(void) {
+    tensor_t inTensor;
+    size_t inDims[] = {(size_t)kBfpConvBatch, (size_t)kBfpConvG2InChannels,
+                       (size_t)kBfpConvG2InputLength};
+    size_t inOrder[] = {0, 1, 2};
+    shape_t inShape;
+    setShape(&inShape, inDims, 3, inOrder);
+    uint8_t inExponents[sizeof(kBfpConvG2InExponents)];
+    memcpy(inExponents, kBfpConvG2InExponents, sizeof(inExponents));
+    bfpQConfig_t inQC = {.exponents = inExponents,
+                         .numGroups = (size_t)kBfpConvG2InNumGroups,
+                         .groupSize = (size_t)kBfpConvG2InGroupSize,
+                         .roundingMode = HALF_AWAY,
+                         .mantissaBits = (uint8_t)kBfpConvG2InMantissaBits,
+                         .exponentBits = (uint8_t)kBfpConvG2InExponentBits};
+    quantization_t inQ;
+    initBfpQuantization(&inQC, &inQ);
+    setTensorValues(&inTensor, (uint8_t *)kBfpConvG2InCodes, &inShape, &inQ, NULL);
+
+    tensor_t wTensor;
+    size_t wDims[] = {(size_t)kBfpConvG2OutChannels,
+                      (size_t)kBfpConvG2InChannels / (size_t)kBfpConvG2ConvGroups,
+                      (size_t)kBfpConvKernelSize};
+    size_t wOrder[] = {0, 1, 2};
+    shape_t wShape;
+    setShape(&wShape, wDims, 3, wOrder);
+    uint8_t wExponents[sizeof(kBfpConvG2WExponents)];
+    memcpy(wExponents, kBfpConvG2WExponents, sizeof(wExponents));
+    bfpQConfig_t wQC = {.exponents = wExponents,
+                        .numGroups = (size_t)kBfpConvG2WNumGroups,
+                        .groupSize = (size_t)kBfpConvG2WGroupSize,
+                        .roundingMode = HALF_AWAY,
+                        .mantissaBits = (uint8_t)kBfpConvG2WMantissaBits,
+                        .exponentBits = (uint8_t)kBfpConvG2WExponentBits};
+    quantization_t wQ;
+    initBfpQuantization(&wQC, &wQ);
+    setTensorValues(&wTensor, (uint8_t *)kBfpConvG2WCodes, &wShape, &wQ, NULL);
+
+    tensor_t biasTensor;
+    size_t biasDims[] = {(size_t)kBfpConvG2OutChannels};
+    size_t biasOrder[] = {0};
+    shape_t biasShape;
+    setShape(&biasShape, biasDims, 1, biasOrder);
+    uint8_t biasExponents[sizeof(kBfpConvG2BiasExponents)];
+    memcpy(biasExponents, kBfpConvG2BiasExponents, sizeof(biasExponents));
+    bfpQConfig_t biasQC = {.exponents = biasExponents,
+                           .numGroups = 1,
+                           .groupSize = 0,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = (uint8_t)kBfpConvG2BiasMantissaBits,
+                           .exponentBits = (uint8_t)kBfpConvG2BiasExponentBits};
+    quantization_t biasQ;
+    initBfpQuantization(&biasQC, &biasQ);
+    setTensorValues(&biasTensor, (uint8_t *)kBfpConvG2BiasCodes, &biasShape, &biasQ, NULL);
+
+    tensor_t outTensor;
+    float outData[20];
+    size_t outDims[] = {(size_t)kBfpConvBatch, (size_t)kBfpConvG2OutChannels,
+                        (size_t)kBfpConvG2OutLen};
+    size_t outOrder[] = {0, 1, 2};
+    shape_t outShape;
+    setShape(&outShape, outDims, 3, outOrder);
+    quantization_t outQ;
+    initFloat32Quantization(&outQ);
+    setTensorValues(&outTensor, (uint8_t *)outData, &outShape, &outQ, NULL);
+
+    kernel_t kernel;
+    initKernelExplicit(&kernel, (size_t)kBfpConvKernelSize, (size_t)kBfpConvPadding, 1,
+                       (size_t)kBfpConvStride); // size, padding, dilation, stride
+
+    conv1dKernelBfp(&inTensor, &wTensor, &biasTensor, &kernel, (size_t)kBfpConvG2ConvGroups,
+                    &outTensor);
+
+    TEST_ASSERT_EQUAL_MEMORY(kBfpConvG2Expected, outTensor.data,
+                             kBfpConvG2Expected_len * sizeof(float));
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -745,5 +829,6 @@ int main(void) {
     RUN_TEST(testConv1dKernelBfpPowerOfTwoBitIdenticalToGroupedSym);
     RUN_TEST(testConv1dKernelBfpHeadroomGuardDies);
     RUN_TEST(testConv1dKernelBfpRejectsMismatchedGroupShape);
+    RUN_TEST(testConv1dKernelBfpConvGroups2MatchesGold);
     return UNITY_END();
 }

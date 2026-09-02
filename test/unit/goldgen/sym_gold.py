@@ -1414,3 +1414,214 @@ def convT1d_bfp_gather_ref(x_codes, x_exp, x_qc, w_codes, w_exp, w_qc,
             "from the grouped run -- fixture is vacuous against group-structure "
             "bugs")
     return out
+
+
+# ---- BFP epic PR3 Task 3: Conv1d backward references. weightGrad is a NEW
+# output-centric core (one gw element per reduction, contributors walked
+# b outer / outPos inner -- the NORMATIVE order the C kernel mirrors);
+# biasGrad is the single-operand segment fold shared by Conv1d and ConvT1d;
+# dx delegates to the D9 gather ref with the adjoint role swap. ----
+
+
+def conv1d_bfp_weight_grad_ref(x_codes, x_exp, x_qc, gy_codes, gy_exp, gy_qc,
+                               batch, in_channels, out_channels, kernel_size, input_length,
+                               stride=1, dilation=1, padding_type="VALID", padding=0,
+                               self_check=True):
+    """Conv1d weight grad on BFP operands, output-centric: per gw element
+    (oc, ic, k) ONE int partial over its contributors -- the (b, out_pos)
+    pairs whose window visits tap k -- walked b OUTER, out_pos INNER (the
+    normative order the C kernel mirrors). Per contributor
+    window_slice_1d_full(geom, out_pos) -> (first_in, first_k, valid);
+    contribute iff first_k <= k < first_k + valid with in_idx_local =
+    first_in + (k - first_k) * dilation; storage indices
+    x_idx = (b*in_channels + ic)*input_length + in_idx_local and
+    gy_idx = (b*out_channels + oc)*output_length + out_pos map to group ids
+    per step (_bfp_group_of, per-element); when EITHER id changes the
+    finished segment folds via np.float32 acc += np.ldexp((float32)partial,
+    Ex + Egy - biasX - biasGy) and resets; tail fold guarded on >= 1 visited
+    contributor (a (oc, k) whose windows never reach tap k -- extreme
+    padding -- emits 0.0). conv-groups==1 only (the backward fixtures'
+    scope; the C kernel additionally handles conv groups, pinned there by
+    the SYM/float structure tests).
+
+    Self-checks (skipped on the collapse rerun, mirroring conv1d_bfp_ref's):
+      (i)   >= 2 groups crossed on EACH operand within a single reduction;
+      (ii)  >= 1 fold with a NONZERO exactly-float-convertible partial;
+      (iii) result differs from an all-per-tensor (exponents[0]) collapse;
+      plus the disjoint-boundary pins (both directions): >= 1 step where
+      ONLY x's group changes and >= 1 step where ONLY gy's group changes.
+    Returns the float32 grads as Python floats, row-major
+    [out_channels*in_channels*kernel_size]."""
+    geom = window_geometry_1d(input_length, kernel_size, stride, dilation, padding_type, padding)
+    output_length = geom["out_len"]
+    x_bias = 2 ** (x_qc["exponent_bits"] - 1) - 1
+    gy_bias = 2 ** (gy_qc["exponent_bits"] - 1) - 1
+
+    out = []
+    fold_partials = []
+    max_x_groups_crossed = 0
+    max_gy_groups_crossed = 0
+    x_only_boundaries = 0
+    gy_only_boundaries = 0
+    for oc in range(out_channels):
+        for ic in range(in_channels):
+            for k in range(kernel_size):
+                acc = np.float32(0.0)
+                partial = 0
+                cur_gx, cur_ggy = None, None
+                x_groups_seen, gy_groups_seen = set(), set()
+                for b in range(batch):
+                    for out_pos in range(output_length):
+                        first_in, first_k, valid = window_slice_1d_full(geom, out_pos)
+                        if not (first_k <= k < first_k + valid):
+                            continue
+                        in_idx_local = first_in + (k - first_k) * dilation
+                        x_idx = (b * in_channels + ic) * input_length + in_idx_local
+                        gy_idx = (b * out_channels + oc) * output_length + out_pos
+                        gx = _bfp_group_of(x_idx, x_qc["group_size"])
+                        ggy = _bfp_group_of(gy_idx, gy_qc["group_size"])
+                        x_groups_seen.add(gx)
+                        gy_groups_seen.add(ggy)
+                        if cur_ggy is None:
+                            cur_gx, cur_ggy = gx, ggy
+                        elif gx != cur_gx or ggy != cur_ggy:
+                            if gx != cur_gx and ggy == cur_ggy:
+                                x_only_boundaries += 1
+                            if ggy != cur_ggy and gx == cur_gx:
+                                gy_only_boundaries += 1
+                            shift = (x_exp[cur_gx] - x_bias) + (gy_exp[cur_ggy] - gy_bias)
+                            fold_partials.append(partial)
+                            acc = np.float32(acc + np.ldexp(np.float32(partial), np.int32(shift)))
+                            partial = 0
+                            cur_gx, cur_ggy = gx, ggy
+                        partial += x_codes[x_idx] * gy_codes[gy_idx]
+                        assert abs(partial) <= _INT32_MAX, (
+                            f"conv1d_bfp_weight_grad_ref: partial {partial} exceeds int32 -- "
+                            "fixture violates the bfpValidateBlockHeadroom bound the C kernel "
+                            "enforces")
+                if cur_ggy is not None:
+                    shift = (x_exp[cur_gx] - x_bias) + (gy_exp[cur_ggy] - gy_bias)
+                    fold_partials.append(partial)
+                    acc = np.float32(acc + np.ldexp(np.float32(partial), np.int32(shift)))
+                max_x_groups_crossed = max(max_x_groups_crossed, len(x_groups_seen))
+                max_gy_groups_crossed = max(max_gy_groups_crossed, len(gy_groups_seen))
+                out.append(float(acc))
+
+    if self_check:
+        assert max_x_groups_crossed >= 2, (
+            "conv1d_bfp_weight_grad_ref: no reduction crosses >= 2 input groups "
+            "-- the input's group tracking is unexercised")
+        assert max_gy_groups_crossed >= 2, (
+            "conv1d_bfp_weight_grad_ref: no reduction crosses >= 2 loss groups "
+            "-- the loss's group tracking is unexercised")
+        assert any(p != 0 and float(np.float32(p)) == float(p) for p in fold_partials), (
+            "conv1d_bfp_weight_grad_ref: no fold has a nonzero exactly-float-"
+            "convertible partial -- fixture lost its exact-regime anchor")
+        assert x_only_boundaries >= 1, (
+            "conv1d_bfp_weight_grad_ref: every input-group boundary coincides "
+            "with a loss-group boundary -- the either-operand fold clause is "
+            "unexercised on the input side")
+        assert gy_only_boundaries >= 1, (
+            "conv1d_bfp_weight_grad_ref: every loss-group boundary coincides "
+            "with an input-group boundary -- the either-operand fold clause is "
+            "unexercised on the loss side")
+        collapsed = conv1d_bfp_weight_grad_ref(
+            x_codes, [x_exp[0]], {**x_qc, "group_size": 0},
+            gy_codes, [gy_exp[0]], {**gy_qc, "group_size": 0},
+            batch, in_channels, out_channels, kernel_size, input_length,
+            stride, dilation, padding_type, padding, self_check=False)
+        assert collapsed != out, (
+            "conv1d_bfp_weight_grad_ref: per-tensor collapse is "
+            "indistinguishable from the grouped run -- fixture is vacuous "
+            "against group-structure bugs")
+    return out
+
+
+def conv_bfp_bias_grad_ref(gy_codes, gy_exp, gy_qc, batch, out_channels, output_length,
+                           self_check=True):
+    """Conv-family bias grad on BFP loss codes -- db[oc] = sum over (b,
+    out_pos) of gy[b][oc][out_pos], walked b OUTER / out_pos INNER over
+    gy_idx = (b*out_channels + oc)*output_length + out_pos. Fold rule and
+    self-checks are matmul_bfp_bias_grad_ref's, on the conv walk (the walk
+    hops by output_length at each b step, so groups can change every step).
+    Shared by Conv1d and ConvT1d (identical [B, C, L] loss layout), hence
+    the generic name."""
+    bias = 2 ** (gy_qc["exponent_bits"] - 1) - 1
+    out = []
+    crossings = 0
+    for oc in range(out_channels):
+        acc = np.float32(0.0)
+        partial = 0
+        cur_g = None
+        for b in range(batch):
+            for out_pos in range(output_length):
+                idx = (b * out_channels + oc) * output_length + out_pos
+                g = _bfp_group_of(idx, gy_qc["group_size"])
+                if cur_g is None:
+                    cur_g = g
+                elif g != cur_g:
+                    assert abs(partial) <= _INT32_MAX
+                    acc = np.float32(acc + np.ldexp(np.float32(partial),
+                                                    np.int32(gy_exp[cur_g] - bias)))
+                    partial = 0
+                    cur_g = g
+                    crossings += 1
+                partial += gy_codes[idx]
+        if cur_g is not None:
+            assert abs(partial) <= _INT32_MAX
+            acc = np.float32(acc + np.ldexp(np.float32(partial),
+                                            np.int32(gy_exp[cur_g] - bias)))
+        out.append(float(acc))
+    if self_check:
+        assert crossings >= 1, (
+            "conv_bfp_bias_grad_ref: bias-grad fixture never crosses a loss "
+            "group -- vacuous")
+        collapse = conv_bfp_bias_grad_ref(
+            gy_codes, [gy_exp[0]] * len(gy_exp), gy_qc, batch, out_channels,
+            output_length, self_check=False)
+        assert collapse != out, (
+            "conv_bfp_bias_grad_ref: per-tensor collapse identical -- exponent "
+            "binding unobservable")
+    return out
+
+
+def conv1d_bfp_dx_ref(loss_codes, loss_exp, loss_qc, w_codes, w_exp, w_qc,
+                      batch, in_channels, out_channels, kernel_size, input_length,
+                      stride=1, dilation=1, conv_groups=1, self_check=True):
+    """Conv1d dx (propLoss) on BFP operands: the adjoint of a VALID forward
+    Conv1d, computed GATHER-formulated (D9) -- conv1dBackward routes it to
+    convTranspose1dKernelBfpGather, so this ref delegates to
+    convT1d_bfp_gather_ref with the roles swapped: the gather's "input" is
+    lossGrad [batch, out_channels, forward_out_len] and its "output" is dx
+    [batch, in_channels, input_length]. Parameters are named from the FORWARD
+    Conv1d's perspective (in_channels/out_channels/input_length = x's
+    channels/L; loss length is derived). bias is None (dx never has one),
+    output_padding 0.
+
+    Weight-index identity (why no re-layout is needed): convT1d_bfp_gather_ref
+    reads w at (ic_ref*outChPerGroup_ref + oc_offset_ref)*K + k with ic_ref
+    over ITS in-channels (= Conv1d's out_channels) and oc_offset_ref over ITS
+    per-group out-channels (= Conv1d's per-group in_channels) -- i.e.
+    (oc_conv*inChPerGroup + ic_offset_conv)*K + k, exactly Conv1d's
+    [out_channels, in_channels/conv_groups, K] flat storage index (the same
+    index ConvTranspose1dKernel.c computes at its wArr read in the adjoint
+    role). `w_codes` is therefore passed in Conv1d's OWN storage order, and
+    the per-element group binding carries over unchanged. conv_groups passes
+    through (#416: the gather's conv-group of its oc IS the conv's group of
+    that in-channel). `self_check` passes through to the gather ref's
+    built-ins; layer-wiring fixtures whose 2-channel gather walk cannot
+    satisfy the disjoint-boundary pins structurally call with False and pin
+    layer-relevant properties in the generator instead. Returns the float32
+    dx as Python floats, row-major [batch*in_channels*input_length]."""
+    eff_k = dilation * (kernel_size - 1) + 1
+    assert input_length >= eff_k, "conv1d_bfp_dx_ref: forward geometry is empty"
+    forward_out_len = (input_length - eff_k) // stride + 1
+    assert (forward_out_len - 1) * stride + eff_k == input_length, (
+        "conv1d_bfp_dx_ref: VALID forward geometry does not invert exactly "
+        "(stride leaves a remainder) -- pick L with (L - effK) % stride == 0")
+    out = convT1d_bfp_gather_ref(
+        loss_codes, loss_exp, loss_qc, w_codes, w_exp, w_qc,
+        None, None, None, batch, out_channels, in_channels, kernel_size,
+        forward_out_len, stride, dilation, 0, conv_groups, self_check=self_check)
+    assert len(out) == batch * in_channels * input_length
+    return out

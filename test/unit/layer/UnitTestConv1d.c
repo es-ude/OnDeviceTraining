@@ -13,6 +13,7 @@
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
+#include "expected_bfp_conv1d.h"
 #include "expected_bfp_layer_forward.h"
 #include "expected_conv1d.h"
 #include "expected_conv1d_grouped.h"
@@ -2369,6 +2370,388 @@ void testConv1dForwardBfpRejectsFloat32Weights(void) {
     freeQuantization(floatQ);
 }
 
+/* ---- BFP epic PR3 (Task 3): Conv1d ARITH_BFP backward arms ---------------
+ *
+ * Fixture source: generate_expected_bfp_layer_forward.py's kConvBfpBwd*
+ * block -- BOTH backward operands are BFP-STORED wires (the funnel's borrow
+ * arm; the weightGrad/biasGrad fold contract is exercised end-to-end, not
+ * through staging), under the DEDICATED backward kernel geometry (VALID,
+ * stride 2, DILATION 2 -- dilation is load-bearing in the weightGrad tap
+ * arithmetic). Expectations are bit-pinned via TEST_ASSERT_EQUAL_MEMORY:
+ * the goldgen fixture lives in the exact float regime. */
+
+/*! BFP-STORED tensor from goldgen codes/exponents. The funnel prologue
+ *  unpackSignExtend's BFP STORAGE, so codes are PACKED here (byteConversion
+ *  32 -> mantissaBits) -- the kernel-level stack idiom's unpacked int32
+ *  image would be misread as packed fields at layer level. */
+static tensor_t *buildBfpStoredTensor(size_t numDims, const size_t *dimsIn, const int32_t *codes,
+                                      const uint8_t *exponents, uint8_t mantissaBits,
+                                      uint8_t exponentBits, size_t numGroups, size_t groupSize) {
+    size_t *dims = reserveMemory(numDims * sizeof(size_t));
+    memcpy(dims, dimsIn, numDims * sizeof(size_t));
+    size_t *order = reserveMemory(numDims * sizeof(size_t));
+    setOrderOfDimsForNewTensor(numDims, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, numDims, order);
+    tensor_t *t = initTensor(
+        shape,
+        quantizationInitBfpGrouped(mantissaBits, exponentBits, HALF_AWAY, numGroups, groupSize),
+        NULL);
+    byteConversion((uint8_t *)codes, 32, t->data, mantissaBits, calcNumberOfElementsByShape(shape));
+    bfpQConfig_t *qc = t->quantization->qConfig;
+    for (size_t g = 0; g < numGroups; g++) {
+        qc->exponents[g] = exponents[g];
+    }
+    return t;
+}
+
+/*! Backward-fixture layer: the forward fixture's weights ([2,2,3] requantized
+ *  to grouped BFP {6,2} m=6 -- the rule-1 width anchor) plus a FLOAT32 bias,
+ *  both WITH grad buffers, under the backward kernel geometry. All math
+ *  slots start FLOAT32 (floatQ); each test pins exactly ONE slot to
+ *  ARITH_BFP. */
+static layer_t *buildBfpConv1dBackwardLayer(quantization_t *floatQ) {
+    size_t weightDims[] = {(size_t)kConvBfpOutChannels, (size_t)kConvBfpInChannels,
+                           (size_t)kConvBfpKernelSize};
+    tensor_t *weightsParam = makeFloatTensor(weightDims, 3, kConvBfpWValues);
+    quantization_t *bfpTemplate = quantizationInitBfpGrouped(
+        (uint8_t)kConvBfpWMantissaBits, (uint8_t)kConvBfpWExponentBits, HALF_AWAY,
+        (size_t)kConvBfpWNumGroups, (size_t)kConvBfpWGroupSize);
+    requantizeTensorInPlace(weightsParam, bfpTemplate);
+    freeQuantization(bfpTemplate);
+    parameter_t *weights = parameterInit(weightsParam, gradInitFloat(weightsParam, NULL));
+
+    size_t biasDims[] = {(size_t)kConvBfpOutChannels};
+    tensor_t *biasParam = makeFloatTensor(biasDims, 1, (float[]){0.5f, -1.0f});
+    parameter_t *bias = parameterInit(biasParam, gradInitFloat(biasParam, NULL));
+
+    kernel_t *kernel = reserveMemory(sizeof(kernel_t));
+    initKernel(kernel, (size_t)kConvBfpKernelSize, VALID, (size_t)kConvBfpBwdDilation,
+               (size_t)kConvBfpBwdStride);
+    return buildBorrowedConv1dLayer(weights, bias, kernel, floatQ);
+}
+
+static tensor_t *buildBfpBwdForwardInput(void) {
+    size_t dims[] = {(size_t)kConvBfpBatch, (size_t)kConvBfpInChannels,
+                     (size_t)kConvBfpBwdInputLength};
+    return buildBfpStoredTensor(3, dims, kConvBfpBwdXCodes, kConvBfpBwdXExponents,
+                                (uint8_t)kConvBfpBwdMantissaBits, (uint8_t)kConvBfpBwdExponentBits,
+                                (size_t)kConvBfpBwdXNumGroups, (size_t)kConvBfpBwdXGroupSize);
+}
+
+static tensor_t *buildBfpBwdLossGrad(void) {
+    size_t dims[] = {(size_t)kConvBfpBatch, (size_t)kConvBfpOutChannels, (size_t)kConvBfpBwdOutLen};
+    return buildBfpStoredTensor(3, dims, kConvBfpBwdGyCodes, kConvBfpBwdGyExponents,
+                                (uint8_t)kConvBfpBwdMantissaBits, (uint8_t)kConvBfpBwdExponentBits,
+                                (size_t)kConvBfpBwdGyNumGroups, (size_t)kConvBfpBwdGyGroupSize);
+}
+
+void testConv1dBackwardBfpWeightGradMatchesGold(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layer_t *conv1d = buildBfpConv1dBackwardLayer(floatQ);
+    conv1d->config->conv1d->weightGradMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+
+    tensor_t *forwardInput = buildBfpBwdForwardInput();
+    tensor_t *lossGrad = buildBfpBwdLossGrad();
+
+    conv1dBackward(conv1d, forwardInput, lossGrad, NULL);
+
+    float captured[12]; /* kConvBfpOutChannels * kConvBfpInChannels * kConvBfpKernelSize */
+    memcpy(captured, conv1d->config->conv1d->weights->grad->data, sizeof(captured));
+
+    freeConv1dLayer(conv1d);
+    freeTensor(lossGrad);
+    freeTensor(forwardInput);
+    freeQuantization(floatQ);
+
+    TEST_ASSERT_EQUAL_MEMORY(kConvBfpWgExpected, captured, sizeof(captured));
+}
+
+void testConv1dBackwardBfpBiasGradMatchesGold(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layer_t *conv1d = buildBfpConv1dBackwardLayer(floatQ);
+    conv1d->config->conv1d->biasGradMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+
+    tensor_t *forwardInput = buildBfpBwdForwardInput();
+    tensor_t *lossGrad = buildBfpBwdLossGrad();
+
+    conv1dBackward(conv1d, forwardInput, lossGrad, NULL);
+
+    float captured[2]; /* kConvBfpOutChannels */
+    memcpy(captured, conv1d->config->conv1d->bias->grad->data, sizeof(captured));
+
+    freeConv1dLayer(conv1d);
+    freeTensor(lossGrad);
+    freeTensor(forwardInput);
+    freeQuantization(floatQ);
+
+    TEST_ASSERT_EQUAL_MEMORY(kConvBfpBgExpected, captured, sizeof(captured));
+}
+
+/* dx wire: the ARITH_BFP propLoss arm routes the adjoint through the D9
+ * GATHER kernel (convTranspose1dKernelBfpGather, bias NULL, outputPadding 0).
+ * Sentinel prefill pins every element as kernel-written -- including the
+ * ADJOINT HOLES (stride 2 x dilation 2 reach only even input positions, so
+ * every odd dx position must come back exactly 0.0, goldgen-asserted). */
+void testConv1dBackwardBfpDxMatchesGold(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layer_t *conv1d = buildBfpConv1dBackwardLayer(floatQ);
+    conv1d->config->conv1d->propLossMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+
+    tensor_t *forwardInput = buildBfpBwdForwardInput();
+    tensor_t *lossGrad = buildBfpBwdLossGrad();
+    size_t propLossDims[] = {(size_t)kConvBfpBatch, (size_t)kConvBfpInChannels,
+                             (size_t)kConvBfpBwdInputLength};
+    tensor_t *propLoss = makeFloatTensor(propLossDims, 3, NULL);
+    for (size_t i = 0; i < kConvBfpDxExpected_len; i++) {
+        ((float *)propLoss->data)[i] = 777.0f;
+    }
+
+    conv1dBackward(conv1d, forwardInput, lossGrad, propLoss);
+
+    float captured[18]; /* kConvBfpBatch * kConvBfpInChannels * kConvBfpBwdInputLength */
+    memcpy(captured, propLoss->data, sizeof(captured));
+
+    freeConv1dLayer(conv1d);
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(forwardInput);
+    freeQuantization(floatQ);
+
+    TEST_ASSERT_EQUAL_MEMORY(kConvBfpDxExpected, captured, sizeof(captured));
+}
+
+/* dx power-of-two twin (layer sibling of the forward
+ * testConv1dForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer; exactness
+ * argument there and in testConv1dBackwardGroupedDxEqualScalesBitIdenticalToScalar,
+ * whose SYM scalar side this clones with hand-pinned power-of-two grids):
+ * weight mantissas at scale 0.25f, loss at 0.5f -- every SYM product and
+ * every BFP fold is exact float32 arithmetic, so the SYM adjoint's
+ * dequantized FLOAT32 wire and the BFP gather's raw FLOAT32 wire must be
+ * BIT-IDENTICAL. BFP side: same VALUES requantized (weights grouped {3,6}
+ * m=8 mirroring the SYM twin's group shape, loss per-tensor m=8) -- the
+ * requantizer derives its own power-of-two exponents, which is exactness-
+ * irrelevant on these grids. */
+void testConv1dBackwardBfpDxPowerOfTwoBitIdenticalToGroupedSym(void) {
+    size_t weightDims[] = {(size_t)kConv1dGroupedOutChannels, (size_t)kConv1dGroupedInChannels,
+                           (size_t)kConv1dGroupedKernelSize};
+    size_t inputDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kConv1dGroupedInChannels,
+                          (size_t)kConv1dGroupedInputLength};
+    size_t lossDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kConv1dGroupedOutChannels,
+                         (size_t)kConv1dDxFwdOutLen};
+    float symOut[12]; /* batch * inChannels * inputLength */
+    float bfpOut[12];
+
+    { /* SYM side: scalar per-tensor weights at the common power-of-two scale. */
+        quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
+        tensor_t *weightParam =
+            buildSymInt32TensorExact(3, weightDims, kConv1dGroupedWMantissas, 0.25f);
+        parameter_t *weights = parameterInit(weightParam, NULL);
+        kernel_t *kernel = reserveMemory(sizeof(kernel_t));
+        initKernel(kernel, (size_t)kConv1dGroupedKernelSize, VALID, 1, 1);
+        layer_t *layer = buildBorrowedConv1dLayer(weights, NULL, kernel, symQ);
+        layer->config->conv1d->frozen = true;
+
+        tensor_t *input = buildSymInt32TensorExact(3, inputDims, kConv1dGroupedXMantissas, 0.5f);
+        tensor_t *lossGrad = buildSymInt32TensorExact(3, lossDims, kConv1dDxLossMantissas, 0.5f);
+        tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
+
+        conv1dBackward(layer, input, lossGrad, propLoss);
+        memcpy(symOut, propLoss->data, sizeof(symOut));
+
+        freeConv1dLayer(layer);
+        freeTensor(propLoss);
+        freeTensor(lossGrad);
+        freeTensor(input);
+        freeQuantization(symQ);
+    }
+
+    { /* BFP side: the SAME values as FLOAT32, requantized. */
+        float wVals[18];
+        for (size_t i = 0; i < 18; i++) {
+            wVals[i] = (float)kConv1dGroupedWMantissas[i] * 0.25f;
+        }
+        float xVals[12];
+        for (size_t i = 0; i < 12; i++) {
+            xVals[i] = (float)kConv1dGroupedXMantissas[i] * 0.5f;
+        }
+        float lossVals[12];
+        for (size_t i = 0; i < 12; i++) {
+            lossVals[i] = (float)kConv1dDxLossMantissas[i] * 0.5f;
+        }
+
+        quantization_t *floatQ = quantizationInitFloat();
+        tensor_t *weightsParam = makeFloatTensor(weightDims, 3, wVals);
+        quantization_t *groupedTemplate = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 3, 6);
+        requantizeTensorInPlace(weightsParam, groupedTemplate);
+        freeQuantization(groupedTemplate);
+        parameter_t *weights = parameterInit(weightsParam, NULL);
+        kernel_t *kernel = reserveMemory(sizeof(kernel_t));
+        initKernel(kernel, (size_t)kConv1dGroupedKernelSize, VALID, 1, 1);
+        layer_t *layer = buildBorrowedConv1dLayer(weights, NULL, kernel, floatQ);
+        layer->config->conv1d->frozen = true;
+        layer->config->conv1d->propLossMath =
+            (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+
+        tensor_t *input = makeFloatTensor(inputDims, 3, xVals);
+        tensor_t *lossGrad = makeFloatTensor(lossDims, 3, lossVals);
+        quantization_t *perTensorTemplate = quantizationInitBfp(8, 8, HALF_AWAY);
+        requantizeTensorInPlace(lossGrad, perTensorTemplate);
+        freeQuantization(perTensorTemplate);
+        tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
+
+        conv1dBackward(layer, input, lossGrad, propLoss);
+        memcpy(bfpOut, propLoss->data, sizeof(bfpOut));
+
+        freeConv1dLayer(layer);
+        freeTensor(propLoss);
+        freeTensor(lossGrad);
+        freeTensor(input);
+        freeQuantization(floatQ);
+    }
+
+    bool nonDegenerate = false;
+    for (size_t i = 0; i < 12; i++) {
+        if (symOut[i] != 0.0f) {
+            nonDegenerate = true;
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(nonDegenerate, "BFP dx twin is vacuously all-zero");
+    TEST_ASSERT_EQUAL_MEMORY(symOut, bfpOut, sizeof(symOut));
+}
+
+/* conv-groups=2 dx parity (#416): the SAME G2 weight operand as the
+ * kernel-level forward parity test (single-sourced in
+ * generate_expected_bfp_conv1d.py -- hence this file's cross-directory
+ * expected_bfp_conv1d.h include), pushed through the LAYER dx path:
+ * conv1dBackward's ARITH_BFP propLoss arm must hand cfg->groups through to
+ * the gather adjoint. Weight rebuilt the user way (FLOAT32 init +
+ * requantizeTensorInPlace at the fixture's {12,2} m=4 template --
+ * bit-identical codes, goldgen roundtrip-asserted); VALID unit-stride dx
+ * geometry (the dx delegation's exact-inversion scope; the EXPLICIT-padded
+ * forward geometry cannot invert); loss BFP-stored per-channel {4,4}.
+ * Layer hand-wired (the borrowed builder is groups=1-only), frozen
+ * (dx-only, no grad buffers). */
+void testConv1dBackwardBfpDxConvGroups2MatchesGold(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    size_t weightDims[] = {(size_t)kBfpConvG2OutChannels,
+                           (size_t)kBfpConvG2InChannels / (size_t)kBfpConvG2ConvGroups,
+                           (size_t)kBfpConvKernelSize};
+    tensor_t *weightsParam = makeFloatTensor(weightDims, 3, kBfpConvG2WValues);
+    quantization_t *bfpTemplate = quantizationInitBfpGrouped(
+        (uint8_t)kBfpConvG2WMantissaBits, (uint8_t)kBfpConvG2WExponentBits, HALF_AWAY,
+        (size_t)kBfpConvG2WNumGroups, (size_t)kBfpConvG2WGroupSize);
+    requantizeTensorInPlace(weightsParam, bfpTemplate);
+    freeQuantization(bfpTemplate);
+    parameter_t *weights = parameterInit(weightsParam, NULL);
+
+    kernel_t *kernel = reserveMemory(sizeof(kernel_t));
+    initKernel(kernel, (size_t)kBfpConvKernelSize, VALID, 1, 1);
+
+    conv1dConfig_t *cfg = reserveMemory(sizeof(conv1dConfig_t));
+    initConv1dConfigWithWeightsAndBias(cfg, kernel, weights, NULL, (size_t)kBfpConvG2ConvGroups,
+                                       floatQ, floatQ, floatQ, floatQ);
+    cfg->frozen = true;
+    cfg->propLossMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    layerConfig_t *layerCfg = reserveMemory(sizeof(layerConfig_t));
+    layerCfg->conv1d = cfg;
+    layer_t *conv1d = reserveMemory(sizeof(layer_t));
+    initLayer(conv1d, CONV1D, layerCfg);
+
+    size_t lossDims[] = {(size_t)kBfpConvBatch, (size_t)kBfpConvG2OutChannels,
+                         (size_t)kBfpConvG2DxOutLen};
+    tensor_t *lossGrad = buildBfpStoredTensor(
+        3, lossDims, kBfpConvG2DxLossCodes, kBfpConvG2DxLossExponents,
+        (uint8_t)kBfpConvG2DxLossMantissaBits, (uint8_t)kBfpConvG2DxLossExponentBits,
+        (size_t)kBfpConvG2DxLossNumGroups, (size_t)kBfpConvG2DxLossGroupSize);
+
+    size_t inputDims[] = {(size_t)kBfpConvBatch, (size_t)kBfpConvG2InChannels,
+                          (size_t)kBfpConvG2DxInputLength};
+    tensor_t *forwardInput = makeFloatTensor(inputDims, 3, NULL); /* frozen: dx ignores x */
+    tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
+    for (size_t i = 0; i < kBfpConvG2DxExpected_len; i++) {
+        ((float *)propLoss->data)[i] = 777.0f;
+    }
+
+    conv1dBackward(conv1d, forwardInput, lossGrad, propLoss);
+
+    float captured[24]; /* kBfpConvBatch * kBfpConvG2InChannels * kBfpConvG2DxInputLength */
+    memcpy(captured, propLoss->data, sizeof(captured));
+
+    freeConv1dLayer(conv1d);
+    freeTensor(propLoss);
+    freeTensor(forwardInput);
+    freeTensor(lossGrad);
+    freeQuantization(floatQ);
+
+    TEST_ASSERT_EQUAL_MEMORY(kBfpConvG2DxExpected, captured, sizeof(captured));
+}
+
+/* conv1dCalcWeightGradsBfp / conv1dCalcBiasGradsBfp are PUBLIC symbols
+ * (mirroring the SYM publics): called directly, they read the weights'
+ * bfpQConfig_t as the staging width anchor WITHOUT passing conv1dBackward's
+ * rule-1 dispatch guard -- a FLOAT32-stored weight would be reinterpreted as
+ * a bfpQConfig_t (garbage widths, silent wrong staging). Both wrappers
+ * therefore re-guard the BFP-weights expectation at the public boundary
+ * (Task 2's linearCalcBiasGradsBfp dtype-guard precedent). Layer built with
+ * FLOAT32 weights and the math slot hand-set so ONLY the wrapper guard can
+ * fire. */
+void testConv1dCalcWeightGradsBfpRejectsFloat32Weights(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    size_t weightDims[] = {(size_t)kConvBfpOutChannels, (size_t)kConvBfpInChannels,
+                           (size_t)kConvBfpKernelSize};
+    tensor_t *weightsParam = makeFloatTensor(weightDims, 3, kConvBfpWValues);
+    parameter_t *weights = parameterInit(weightsParam, gradInitFloat(weightsParam, NULL));
+    size_t biasDims[] = {(size_t)kConvBfpOutChannels};
+    tensor_t *biasParam = makeFloatTensor(biasDims, 1, (float[]){0.5f, -1.0f});
+    parameter_t *bias = parameterInit(biasParam, gradInitFloat(biasParam, NULL));
+    kernel_t *kernel = reserveMemory(sizeof(kernel_t));
+    initKernel(kernel, (size_t)kConvBfpKernelSize, VALID, (size_t)kConvBfpBwdDilation,
+               (size_t)kConvBfpBwdStride);
+    layer_t *conv1d = buildBorrowedConv1dLayer(weights, bias, kernel, floatQ);
+    conv1d->config->conv1d->weightGradMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+
+    tensor_t *forwardInput = buildBfpBwdForwardInput();
+    tensor_t *lossGrad = buildBfpBwdLossGrad();
+
+    ASSERT_EXITS_WITH_FAILURE(
+        conv1dCalcWeightGradsBfp(conv1d->config->conv1d, forwardInput, lossGrad));
+
+    freeConv1dLayer(conv1d);
+    freeTensor(lossGrad);
+    freeTensor(forwardInput);
+    freeQuantization(floatQ);
+}
+
+void testConv1dCalcBiasGradsBfpRejectsFloat32Weights(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    size_t weightDims[] = {(size_t)kConvBfpOutChannels, (size_t)kConvBfpInChannels,
+                           (size_t)kConvBfpKernelSize};
+    tensor_t *weightsParam = makeFloatTensor(weightDims, 3, kConvBfpWValues);
+    parameter_t *weights = parameterInit(weightsParam, gradInitFloat(weightsParam, NULL));
+    size_t biasDims[] = {(size_t)kConvBfpOutChannels};
+    tensor_t *biasParam = makeFloatTensor(biasDims, 1, (float[]){0.5f, -1.0f});
+    parameter_t *bias = parameterInit(biasParam, gradInitFloat(biasParam, NULL));
+    kernel_t *kernel = reserveMemory(sizeof(kernel_t));
+    initKernel(kernel, (size_t)kConvBfpKernelSize, VALID, (size_t)kConvBfpBwdDilation,
+               (size_t)kConvBfpBwdStride);
+    layer_t *conv1d = buildBorrowedConv1dLayer(weights, bias, kernel, floatQ);
+    conv1d->config->conv1d->biasGradMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+
+    tensor_t *lossGrad = buildBfpBwdLossGrad();
+
+    ASSERT_EXITS_WITH_FAILURE(conv1dCalcBiasGradsBfp(conv1d->config->conv1d, lossGrad));
+
+    freeConv1dLayer(conv1d);
+    freeTensor(lossGrad);
+    freeQuantization(floatQ);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testConv1dForwardMultiChannelWithBias);
@@ -2425,5 +2808,12 @@ int main() {
     RUN_TEST(testConv1dForwardBfpNativeMatchesKernelGold);
     RUN_TEST(testConv1dForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer);
     RUN_TEST(testConv1dForwardBfpRejectsFloat32Weights);
+    RUN_TEST(testConv1dBackwardBfpWeightGradMatchesGold);
+    RUN_TEST(testConv1dBackwardBfpBiasGradMatchesGold);
+    RUN_TEST(testConv1dBackwardBfpDxMatchesGold);
+    RUN_TEST(testConv1dBackwardBfpDxPowerOfTwoBitIdenticalToGroupedSym);
+    RUN_TEST(testConv1dBackwardBfpDxConvGroups2MatchesGold);
+    RUN_TEST(testConv1dCalcWeightGradsBfpRejectsFloat32Weights);
+    RUN_TEST(testConv1dCalcBiasGradsBfpRejectsFloat32Weights);
     return UNITY_END();
 }

@@ -191,6 +191,24 @@ void testCreateAcceptsBfpStorage(void) {
     freePpcaReplay(g);
 }
 
+void testCreateRejectsGroupedBfpStorage(void) {
+    /* BFP epic PR3 Task 7 (controller extension, T6 review minor 1): the
+     * whitelist admits BFP but must stay PER-TENSOR-only -- a grouped basisQ
+     * would flow through getQLike into a grouped BFP state tensor,
+     * contradicting the per-tensor-only rule the optimizer-state gates
+     * enforce (#300 axis). Shape-coincidence discipline (the SGD/AdamW
+     * grouped-reject twins' reasoning): the basis is rank*dim = 2*8 = 16
+     * elements and the template's numGroups*groupSize = 2*8 = 16 MATCHES, so
+     * without the gate ppcaReplayCreate would succeed (initTensor's
+     * validateBfpQConfigShape passes) -- the death can only come from the
+     * new gate, never from an incidental shape mismatch. */
+    ppcaReplayConfig_t cfg = floatConfig(8, 2, 16);
+    quantization_t *groupedBfpQ = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 8);
+    cfg.basisQ = groupedBfpQ;
+    ASSERT_EXITS_WITH_FAILURE(ppcaReplayCreate(&cfg));
+    freeQuantization(groupedBfpQ);
+}
+
 void testCreateRejectsSymInt32Arithmetic(void) {
     ppcaReplayConfig_t cfg = floatConfig(8, 2, 16);
     cfg.mergeMath = (arithmetic_t){.type = ARITH_SYM_INT32, .roundingMode = HALF_AWAY};
@@ -998,6 +1016,7 @@ int main(void) {
     RUN_TEST(testCreateRejectsInt32Storage);
     RUN_TEST(testCreateRejectsBoolStorage);
     RUN_TEST(testCreateAcceptsBfpStorage);
+    RUN_TEST(testCreateRejectsGroupedBfpStorage);
     RUN_TEST(testCreateRejectsSymInt32Arithmetic);
     RUN_TEST(testWorkspaceCreateRejectsZeroSessionBound);
     RUN_TEST(testSampleDeterministicAndGlobalStreamUntouched);

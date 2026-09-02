@@ -57,6 +57,18 @@ fixture: pre- AND post-step zps pairwise distinct (a zp[g] -> zp[0] shift
 bug must change the result), post-step scales pairwise distinct, and the
 group-collapse discriminability check as above.
 
+BFP epic PR3 Task 7 adds the per-tensor-BFP momentum twin (bfpMomentum): the
+SAME two-op sequence as the `momentum` fixture, but BOTH the param AND the
+momentum state are per-tensor BFP -- so op1's OUT_WRITE now REQUANTIZES the
+state (fresh absmax exponent + HALF_AWAY codes, packFloatBufferAsBfp) and
+op2 reads the state from those freshly requantized codes, never op1's raw
+float result. Emulated by sym_gold.sgd_bfp_step_ref, whose docstring
+discloses the exact funnel mirror and whose self-checks (canonical inputs,
+param-exponent-moves, both-repacks-change-values) abort generation rather
+than emit a fixture that cannot observe the quantization. weight_decay is
+deliberately NONZERO here (unlike the `momentum` fixture): with wd=0 a
+wd-placement bug in the mirror or the kernel would be invisible.
+
 Self-checks (mutation-discriminating fixture properties, asserted here so a
 broken fixture aborts generation rather than silently passing a vacuous
 test):
@@ -81,9 +93,10 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 
-from sym_gold import (dequant_asym_grouped, dequant_sym_grouped_f32, emit_float_array,
-                      emit_float_scalar, emit_int32_array, emit_int32_scalar,
-                      quantize_asym_grouped, requant_absmax_grouped_f32, sgd_grouped_step_ref)
+from sym_gold import (bfp_dequant_f32, dequant_asym_grouped, dequant_sym_grouped_f32,
+                      emit_float_array, emit_float_scalar, emit_int32_array, emit_int32_scalar,
+                      quantize_asym_grouped, requant_absmax_grouped_f32, sgd_bfp_step_ref,
+                      sgd_grouped_step_ref)
 
 Q_BITS = 8
 GROUP_SIZE = 3
@@ -231,6 +244,61 @@ def fixture_asym_step0():
     }
 
 
+BFP_MANTISSA_BITS = 8
+BFP_EXPONENT_BITS = 8
+
+
+def fixture_bfp_momentum():
+    """Per-tensor-BFP momentum twin of fixture_momentum (BFP epic PR3 Task 7)
+    -- see the module docstring. Input codes/exponents are chosen so that
+    (a) each absmax code sits in (qMax/2, qMax] (canonical: requantizing the
+    exact dequant reproduces codes AND exponents bit-for-bit -- the C test
+    builds both tensors via FLOAT32 init + requantizeTensorInPlace from the
+    emitted float values), and (b) the param absmax crosses a binade during
+    the update (127/128 = 0.992 grows past 1.0 at index 2, where the state
+    push is negative), so a write-back that forgets to re-derive the shared
+    exponent is observable. sgd_bfp_step_ref aborts if either property (or
+    repack-changes-values) fails to hold."""
+    qc = {"mantissa_bits": BFP_MANTISSA_BITS, "exponent_bits": BFP_EXPONENT_BITS,
+          "group_size": 0}
+    param_codes = [100, -50, 127, -30, 60, -90]
+    param_exps = [120]  # stored; bias 127 -> scale 2^-7
+    state_codes = [-64, 96, -120, 45, -80, 30]
+    state_exps = [121]  # scale 2^-6
+    grad = [0.31, -0.47, 0.11, 0.26, -0.33, 0.18]
+    momentum = 0.9
+    lr = 0.05
+    weight_decay = 0.05  # NONZERO -- pins the wd placement (module docstring)
+
+    new_param_codes, new_param_exps, new_state_codes, new_state_exps = sgd_bfp_step_ref(
+        param_codes, param_exps, qc, grad, lr, momentum, state_codes, state_exps, qc,
+        weight_decay=weight_decay)
+
+    param_deq = bfp_dequant_f32(param_codes, param_exps, qc)
+    state_deq = bfp_dequant_f32(state_codes, state_exps, qc)
+    return {
+        "paramValues": param_deq.tolist(), "statePrev": state_deq.tolist(), "grad": grad,
+        "lr": lr, "momentum": momentum, "weightDecay": weight_decay,
+        "newParamCodes": new_param_codes, "newParamExp": new_param_exps[0],
+        "newStateCodes": new_state_codes, "newStateExp": new_state_exps[0],
+    }
+
+
+def emit_bfp_fixture(parts, prefix, fx):
+    parts.append(emit_int32_scalar(f"{prefix}MantissaBits", BFP_MANTISSA_BITS))
+    parts.append(emit_int32_scalar(f"{prefix}ExponentBits", BFP_EXPONENT_BITS))
+    parts.append(emit_float_array(f"{prefix}ParamValues", torch.tensor(fx["paramValues"])))
+    parts.append(emit_float_array(f"{prefix}StatePrev", torch.tensor(fx["statePrev"])))
+    parts.append(emit_float_array(f"{prefix}Grad", torch.tensor(fx["grad"])))
+    parts.append(emit_float_scalar(f"{prefix}Lr", fx["lr"]))
+    parts.append(emit_float_scalar(f"{prefix}Momentum", fx["momentum"]))
+    parts.append(emit_float_scalar(f"{prefix}WeightDecay", fx["weightDecay"]))
+    parts.append(emit_int32_array(f"{prefix}NewParamCodes", torch.tensor(fx["newParamCodes"])))
+    parts.append(emit_int32_scalar(f"{prefix}NewParamExp", fx["newParamExp"]))
+    parts.append(emit_int32_array(f"{prefix}NewStateCodes", torch.tensor(fx["newStateCodes"])))
+    parts.append(emit_int32_scalar(f"{prefix}NewStateExp", fx["newStateExp"]))
+
+
 def emit_asym_fixture(parts, prefix, fx):
     parts.append(emit_int32_array(f"{prefix}ParamCodes", torch.tensor(fx["paramCodes"])))
     parts.append(emit_float_array(f"{prefix}ParamScales", torch.tensor(fx["paramScales"])))
@@ -279,6 +347,8 @@ def main() -> int:
     emit_fixture(parts, "sgdGroupedMomentum", fixture_momentum(), momentum=True)
     parts.append("\n")
     emit_asym_fixture(parts, "sgdGroupedAsymStep0", fixture_asym_step0())
+    parts.append("\n")
+    emit_bfp_fixture(parts, "sgdBfpMom", fixture_bfp_momentum())
 
     parts.append("\n#endif // ODT_EXPECTED_SGD_GROUPED_H\n")
 

@@ -950,16 +950,71 @@ void testAdamWCreateGroupedAsymMomentQuantExits(void) {
     });
 }
 
-/* BFP epic PR1 carrier-gate twin of testAdamWCreateGroupedSymMomentQuantExits
- * (message points at "BFP epic PR3" instead of "#300"): BFP grad/state
- * storage is out of scope for this epic PR -- momentStateInit must fail-fast
- * on ANY BFP momentQuant template, not just a grouped one (unlike the SYM
- * gate above, which only restricts numGroups>1). Per-tensor BFP
- * (numGroups=1, groupSize=0) sidesteps any incidental
- * initTensor/validateBfpQConfigShape mismatch, isolating the death to the
- * new gate under test (mutation-vacuity guard, same reasoning as the SYM
- * twin above). */
-void testAdamWCreateBfpMomentQuantExits(void) {
+/* BFP epic PR3 Task 7: the PR1 unconditional carrier gate lifts --
+ * momentStateInit now admits a PER-TENSOR BFP moment template (SgdApi
+ * momentumStateInit twin; grads and states share the per-tensor-only rule,
+ * #300 axis). BOTH moment buffers (m and v) must be getQLike clones at
+ * zero-state: BFP-typed, per-tensor, exponent at bias (e=8 -> 127),
+ * all-zero packed codes. */
+void testAdamWCreateAdmitsPerTensorBfpMoments(void) {
+    quantization_t *layerQ = quantizationInitFloat();
+    size_t *wDims = reserveMemory(2 * sizeof(size_t));
+    wDims[0] = 2;
+    wDims[1] = 4;
+    size_t *wOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, wOrder);
+    shape_t *wShape = reserveMemory(sizeof(shape_t));
+    setShape(wShape, wDims, 2, wOrder);
+    tensor_t *wParam = initTensor(wShape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(wParam, (float[]){0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f}, 8);
+    tensor_t *wGrad = gradInitFloat(wParam, NULL);
+    parameter_t *weights = parameterInit(wParam, wGrad);
+
+    layer_t *linear = buildBorrowedLinearLayer(weights, NULL, layerQ);
+    layer_t *model[] = {linear};
+
+    quantization_t *momentQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    optimizer_t *optim =
+        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, model, 1, momentQ,
+                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+
+    /* CAPTURE -> free -> assert (file convention). */
+    qtype_t momentTypes[2];
+    size_t momentNumGroups[2];
+    uint8_t momentExps[2];
+    bool codesAllZero = true;
+    for (size_t b = 0; b < 2; b++) {
+        tensor_t *state = optim->states[0]->stateBuffers[b];
+        momentTypes[b] = state->quantization->type;
+        bfpQConfig_t *stateQC = state->quantization->qConfig;
+        momentNumGroups[b] = stateQC->numGroups;
+        momentExps[b] = stateQC->exponents[0];
+        for (size_t i = 0; i < 8; i++) { /* 8 elements x 8-bit mantissas = 8 packed bytes */
+            if (((uint8_t *)state->data)[i] != 0) {
+                codesAllZero = false;
+            }
+        }
+    }
+    freeOptim(optim);
+    freeLinearLayerShellOnly(linear);
+    freeQuantization(momentQ);
+    freeQuantization(layerQ);
+
+    for (size_t b = 0; b < 2; b++) {
+        TEST_ASSERT_EQUAL_INT(BFP, momentTypes[b]);
+        TEST_ASSERT_EQUAL_size_t(1, momentNumGroups[b]);
+        TEST_ASSERT_EQUAL_UINT8(127, momentExps[b]); /* bias = 2^(8-1)-1: zero-state */
+    }
+    TEST_ASSERT_TRUE_MESSAGE(codesAllZero,
+                             "fresh BFP moment buffers must have all-zero packed codes");
+}
+
+/* Grouped-BFP twin of testAdamWCreateGroupedSymMomentQuantExits above: the
+ * lifted gate keeps rejecting GROUPED templates (per-tensor only, #300
+ * axis). Same shape-coincidence discipline as the SYM twin: weight element
+ * count (2*4=8) EQUALS numGroups*groupSize (2*4=8), so the death cannot come
+ * from the unrelated initTensor/validateBfpQConfigShape guard. */
+void testAdamWCreateRejectsGroupedBfpMoments(void) {
     ASSERT_EXITS_WITH(1, {
         quantization_t *layerQ = quantizationInitFloat();
         size_t *wDims = reserveMemory(2 * sizeof(size_t));
@@ -977,7 +1032,7 @@ void testAdamWCreateBfpMomentQuantExits(void) {
         layer_t *linear = buildBorrowedLinearLayer(weights, NULL, layerQ);
         layer_t *model[] = {linear};
 
-        quantization_t *momentQ = quantizationInitBfp(8, 8, HALF_AWAY);
+        quantization_t *momentQ = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 4);
         adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, model, 1, momentQ,
                          (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     });
@@ -1114,13 +1169,99 @@ void testAdamWStepGroupedSymParamRunsAndRequantsPerGroup(void) {
     }
 }
 
+/* BFP epic PR3 Task 7: BEHAVIORAL pin for BFP moment storage through the
+ * full factory path (adamWCreateOptim admits the per-tensor BFP template
+ * since the gate lift above). AdamWApi.h's no-bit-parity disclaimer for
+ * quantized moments rules out a gold here -- the param path chains six
+ * float32 roundings through a sqrt/div (see the grouped-SYM test's GOLD
+ * CHOICE note above) -- so this pins the observable storage contract
+ * instead: after 5 steps on a constant nonzero grad, (a) every param stays
+ * finite, (b) BOTH moment buffers are still BFP-typed per-tensor, and (c)
+ * BOTH stored exponents have moved off the zero-state bias (e=8 -> 127)
+ * with nonzero packed codes -- i.e. every step's OUT_WRITE really
+ * re-derived a fresh absmax exponent and repacked, so the moments live on
+ * the BFP grid rather than in a float buffer a broken momentStateInit could
+ * have handed out. writeBackRounding opts out to HALF_AWAY (#279) for
+ * determinism, though these assertions would hold under seeded SR too. */
+void testAdamWStepBfpMomentsRunAndRequantize(void) {
+    quantization_t *layerQ = quantizationInitFloat();
+    size_t *wDims = reserveMemory(2 * sizeof(size_t));
+    wDims[0] = 2;
+    wDims[1] = 4;
+    size_t *wOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, wOrder);
+    shape_t *wShape = reserveMemory(sizeof(shape_t));
+    setShape(wShape, wDims, 2, wOrder);
+    tensor_t *wParam = initTensor(wShape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(wParam,
+                              (float[]){0.5f, -0.25f, 0.75f, -0.5f, 0.3f, -0.8f, 0.6f, -0.4f}, 8);
+    tensor_t *wGrad = gradInitFloat(wParam, NULL);
+    tensorFillFromFloatBuffer(wGrad,
+                              (float[]){0.2f, -0.1f, 0.3f, -0.2f, 0.1f, -0.3f, 0.25f, -0.15f}, 8);
+    parameter_t *weights = parameterInit(wParam, wGrad);
+
+    layer_t *linear = buildBorrowedLinearLayer(weights, NULL, layerQ);
+    layer_t *model[] = {linear};
+
+    quantization_t *momentQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    optimizer_t *optim =
+        adamWCreateOptim(0.01f, 0.9, 0.999, 1e-8, 0.01, model, 1, momentQ,
+                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    optimizerSetWriteBackRounding(optim, HALF_AWAY);
+
+    for (int s = 0; s < 5; s++) {
+        adamWStep(optim);
+    }
+
+    /* CAPTURE -> free -> assert (file convention; freeOptim's cascade frees
+     * the registered parameters, so params are copied out first). */
+    float params[8];
+    memcpy(params, wParam->data, sizeof params);
+    qtype_t momentTypes[2];
+    size_t momentNumGroups[2];
+    uint8_t momentExps[2];
+    bool codesAllZero[2];
+    for (size_t b = 0; b < 2; b++) {
+        tensor_t *state = optim->states[0]->stateBuffers[b];
+        momentTypes[b] = state->quantization->type;
+        bfpQConfig_t *stateQC = state->quantization->qConfig;
+        momentNumGroups[b] = stateQC->numGroups;
+        momentExps[b] = stateQC->exponents[0];
+        codesAllZero[b] = true;
+        for (size_t i = 0; i < 8; i++) { /* 8 elements x 8-bit mantissas = 8 packed bytes */
+            if (((uint8_t *)state->data)[i] != 0) {
+                codesAllZero[b] = false;
+            }
+        }
+    }
+    freeOptim(optim);
+    freeLinearLayerShellOnly(linear);
+    freeQuantization(momentQ);
+    freeQuantization(layerQ);
+
+    for (size_t i = 0; i < 8; i++) {
+        TEST_ASSERT_TRUE_MESSAGE(isfinite(params[i]),
+                                 "param must stay finite across 5 BFP-moment steps");
+    }
+    for (size_t b = 0; b < 2; b++) {
+        TEST_ASSERT_EQUAL_INT(BFP, momentTypes[b]);
+        TEST_ASSERT_EQUAL_size_t(1, momentNumGroups[b]);
+        TEST_ASSERT_TRUE_MESSAGE(momentExps[b] != 127,
+                                 "moment exponent must move off the zero-state bias -- the "
+                                 "OUT_WRITE repack re-derives it from the running moment");
+        TEST_ASSERT_FALSE_MESSAGE(codesAllZero[b],
+                                  "moment codes must be nonzero after 5 nonzero-grad steps");
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testAdamWOptimizerSkipsFrozenLayerInCountAndCollection);
     RUN_TEST(testAdamWCreateAllFrozenModelExits);
     RUN_TEST(testAdamWCreateGroupedSymMomentQuantExits);
     RUN_TEST(testAdamWCreateGroupedAsymMomentQuantExits);
-    RUN_TEST(testAdamWCreateBfpMomentQuantExits);
+    RUN_TEST(testAdamWCreateAdmitsPerTensorBfpMoments);
+    RUN_TEST(testAdamWCreateRejectsGroupedBfpMoments);
     RUN_TEST(testAdamWInitStoresDoubleHyperparamsAndZeroStepCount);
     RUN_TEST(testAdamWGetSetLrRoundTripThroughImpl);
     RUN_TEST(testAdamWInitRejectsNonFloat32UpdateMath);
@@ -1145,5 +1286,6 @@ int main(void) {
     RUN_TEST(testAdamWMomentWriteBacksHonorOptimizerSrRounding);
     RUN_TEST(testAdamWCreateOptimRejectsInt32GradStorage);
     RUN_TEST(testAdamWStepGroupedSymParamRunsAndRequantsPerGroup);
+    RUN_TEST(testAdamWStepBfpMomentsRunAndRequantize);
     return UNITY_END();
 }

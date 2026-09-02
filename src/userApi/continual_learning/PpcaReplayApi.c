@@ -23,6 +23,20 @@ static void validateStateStorage(const quantization_t *q, const char *field) {
         PRINT_ERROR("ppcaReplayCreate: %s storage must be FLOAT32/SYM/ASYM/BFP", field);
         exit(1);
     }
+    /* BFP epic PR3 Task 7: BFP state storage is per-tensor-only, mirroring
+     * the optimizer-state gates (SgdApi/AdamWApi) -- a grouped template
+     * would flow through getQLike into a grouped BFP state tensor with no
+     * spec mandate (#300 axis). SYM/ASYM templates share this gap but are
+     * deliberately left as-is here (pre-existing behavior, out of scope). */
+    if (q->type == BFP) {
+        const bfpQConfig_t *bfpQC = q->qConfig;
+        if (bfpQC->numGroups > 1) {
+            PRINT_ERROR("ppcaReplayCreate: %s grouped BFP state templates are unsupported -- "
+                        "per-tensor only (#300 axis)",
+                        field);
+            exit(1);
+        }
+    }
 }
 
 static shape_t *buildOwnedShape(const size_t *srcDims, size_t numberOfDims) {

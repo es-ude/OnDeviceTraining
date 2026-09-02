@@ -1820,3 +1820,109 @@ def convT1d_bfp_dx_ref(loss_codes, loss_exp, loss_qc, w_codes, w_exp, w_qc,
         f"convT1d_bfp_dx_ref: adjoint gather length {len(out) // (batch * in_channels)} != "
         f"forward input length {input_length} -- outputPadding >= stride does not invert")
     return out
+
+
+# ---- BFP epic PR3 Task 7: SGD momentum step with BFP param AND BFP momentum
+# state (per-tensor storage; the optimizer machinery itself is unchanged --
+# this mirrors the funnel's dequant/kernel/repack sequence around the two
+# Sgd.c momentum ops). ----
+
+
+def bfp_dequant_f32(codes, exps, qc):
+    """Exact float32 dequant, dequantChunkToFloat's BFP arm: code *
+    2^(stored - bias) -- a float32 multiply by a power of two is exact.
+    Returns a torch.float32 tensor."""
+    bias = 2 ** (qc["exponent_bits"] - 1) - 1
+    gsz = qc["group_size"]
+    vals = []
+    for i, c in enumerate(codes):
+        g = _bfp_group_of(i, gsz)
+        scale = np.float32(math.ldexp(1.0, exps[g] - bias))
+        vals.append(float(np.float32(np.float32(c) * scale)))
+    return torch.tensor(vals, dtype=torch.float32)
+
+
+def sgd_bfp_step_ref(param_codes, param_exps, param_qc, grad, lr, momentum,
+                     state_codes, state_exps, state_qc, weight_decay=0.0):
+    """One sgdStepM momentum step (momentumFactor > 0, Sgd.c:147-185) with a
+    per-tensor BFP param AND a per-tensor BFP momentum state, mirroring the
+    executeOp funnel bit-for-bit:
+
+      op1 sgdMStateKernel {state, grad, param}: the FLOAT32 prologue dequants
+          state and param EXACTLY (code * 2^(E-bias)); float32 kernel
+          g = grad + wd*paramDeq; newState = momentum*stateDeq + g (same
+          left-to-right op order as the C); the OUT_WRITE epilogue re-packs
+          the state tensor per-tensor BFP (packFloatBufferAsBfp: fresh absmax
+          exponent + HALF_AWAY codes -- holds only under the #279
+          writeBackRounding opt-out, optimizerSetWriteBackRounding /
+          .writeBackRounding = HALF_AWAY).
+      op2 sgdMParamKernel {param, state}: paramDeq is RE-derived from the
+          UNTOUCHED param codes (op1 never wrote param); the state operand is
+          dequanted from its FRESHLY REQUANTIZED codes -- NOT op1's raw float
+          result (this ordering is what makes the state repack load-bearing);
+          newParam = paramDeq - lr*stateReq; per-tensor BFP repack of param.
+
+    Self-checks (abort rather than emit a vacuous fixture):
+      (i)   canonical inputs: requantizing the exact dequant of each input
+            reproduces its codes AND exponents bit-for-bit (a non-canonical
+            fixture would leave the exact-float regime and hide
+            exponent-derivation bugs);
+      (ii)  the param exponent MOVES across the step (an implementation that
+            forgets to re-derive the shared exponent on write-back is
+            observable);
+      (iii) BOTH repacks change values (the BFP quantization is load-bearing
+            on each write-back -- the raw float update alone cannot
+            reproduce the gold).
+
+    Codes/exps are lists (exps: stored/biased, per-group; per-tensor = one
+    entry); each qc is the mantissa_bits/exponent_bits/group_size dict the
+    other BFP refs use. Returns (new_param_codes, new_param_exps,
+    new_state_codes, new_state_exps)."""
+    param_deq = bfp_dequant_f32(param_codes, param_exps, param_qc)
+    state_deq = bfp_dequant_f32(state_codes, state_exps, state_qc)
+
+    # (i) canonical-input roundtrip.
+    for name, deq, codes, exps, qc in (
+            ("param", param_deq, param_codes, param_exps, param_qc),
+            ("state", state_deq, state_codes, state_exps, state_qc)):
+        rq_codes, rq_exps = bfp_quantize_grouped(deq, qc["mantissa_bits"],
+                                                 qc["exponent_bits"], qc["group_size"])
+        assert rq_codes == list(codes) and rq_exps == list(exps), (
+            f"sgd_bfp_step_ref: {name} input is not canonical -- requantizing its exact "
+            f"dequant gives codes {rq_codes} exps {rq_exps}, not the fixture's; pick "
+            "grid-exact values whose absmax code sits in (qMax/2, qMax]")
+
+    g = torch.as_tensor(grad, dtype=torch.float32)
+    wd_t = torch.tensor(weight_decay, dtype=torch.float32)
+    momentum_t = torch.tensor(momentum, dtype=torch.float32)
+    lr_t = torch.tensor(lr, dtype=torch.float32)
+
+    # op1 sgdMStateKernel: g = grad + wd*paramDeq; newState = momentum*stateDeq + g.
+    combined = g + wd_t * param_deq
+    new_state_float = momentum_t * state_deq + combined
+    new_state_codes, new_state_exps = bfp_quantize_grouped(
+        new_state_float, state_qc["mantissa_bits"], state_qc["exponent_bits"],
+        state_qc["group_size"])
+
+    # op2 sgdMParamKernel reads the REQUANTIZED state, never op1's raw floats.
+    state_req_deq = bfp_dequant_f32(new_state_codes, new_state_exps, state_qc)
+    new_param_float = param_deq - lr_t * state_req_deq
+    new_param_codes, new_param_exps = bfp_quantize_grouped(
+        new_param_float, param_qc["mantissa_bits"], param_qc["exponent_bits"],
+        param_qc["group_size"])
+
+    # (ii) param exponent moves.
+    assert new_param_exps != list(param_exps), (
+        "sgd_bfp_step_ref: param exponent did not move -- fixture cannot observe a "
+        "write-back that forgets to re-derive the shared exponent; scale the update "
+        "so the param absmax crosses a binade")
+    # (iii) both repacks change values.
+    assert not torch.equal(state_req_deq, new_state_float), (
+        "sgd_bfp_step_ref: state repack is value-neutral -- fixture cannot tell the "
+        "requantized state from op1's raw float result")
+    param_req_deq = bfp_dequant_f32(new_param_codes, new_param_exps, param_qc)
+    assert not torch.equal(param_req_deq, new_param_float), (
+        "sgd_bfp_step_ref: param repack is value-neutral -- the BFP quantization is "
+        "not load-bearing on the param write-back")
+
+    return new_param_codes, new_param_exps, new_state_codes, new_state_exps

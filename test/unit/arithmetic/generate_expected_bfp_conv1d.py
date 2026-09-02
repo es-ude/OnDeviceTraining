@@ -55,8 +55,9 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 
-from sym_gold import (assert_rounding_canary, bfp_quantize_grouped, conv1d_bfp_dx_ref,
-                      conv1d_bfp_ref, emit_float_array, emit_int32_array, emit_int32_scalar)
+from sym_gold import (assert_rounding_canary, bfp_quantize_grouped, check_exact_roundtrip,
+                      conv1d_bfp_dx_ref, conv1d_bfp_ref, emit_float_array, emit_int32_array,
+                      emit_int32_scalar, emit_uint8_array)
 
 BATCH = 1
 IN_CHANNELS = 2
@@ -120,10 +121,11 @@ G2_BIAS_QC = {"mantissa_bits": 8, "exponent_bits": 8, "group_size": 0}
 # EXPLICIT-padded forward geometry above cannot satisfy): dx [1, 4, 6],
 # loss [1, 4, 4], per-channel loss groups {4 x 4} with pairwise-distinct
 # exponents. The gather ref's disjoint-boundary built-ins are structurally
-# unsatisfiable in the dx role (2 gather in-channels per conv group -- see
-# generate_expected_bfp_layer_forward.py's docstring for the argument), so
-# the delegation runs self_check=False with per-operand collapse asserts
-# below instead.
+# unsatisfiable in the dx role: its inner walk strides the weight index by
+# whole channel-rows (+outChPerGroup*K per step), never staying inside one
+# groupSize-2 weight group, so no step is weight-quiet (see
+# generate_expected_bfp_layer_forward.py's docstring) -- the delegation runs
+# self_check=False with per-operand collapse asserts below instead.
 G2_DX_INPUT_LENGTH = 6
 G2_DX_OUT_LEN = 4  # (6 - 3) // 1 + 1
 G2_DX_LOSS_VALUES = [0.5, -1.0, 0.75, 0.25,
@@ -132,29 +134,6 @@ G2_DX_LOSS_VALUES = [0.5, -1.0, 0.75, 0.25,
                      8.0, -6.0, 4.0, -2.0]
 G2_DX_LOSS_QC = {"mantissa_bits": 6, "exponent_bits": 8, "group_size": 4}
 G2_DX_LOSS_NUM_GROUPS = 4
-
-
-def emit_uint8_array(name: str, values) -> str:
-    vals = [int(v) for v in values]
-    assert all(0 <= v <= 255 for v in vals), f"{name}: value outside uint8 range"
-    body = ", ".join(str(v) for v in vals)
-    return (
-        f"static const uint8_t {name}[] = {{ {body} }};\n"
-        f"static const size_t {name}_len = {len(vals)};\n"
-    )
-
-
-def check_exact_roundtrip(name, values, codes, exps, qc):
-    """Exact-float-regime pin: code * 2^(stored - bias) must reproduce the
-    input float bit-for-bit (float32 multiply by a power of two is exact)."""
-    bias = 2 ** (qc["exponent_bits"] - 1) - 1
-    gsz = len(values) if qc["group_size"] == 0 else qc["group_size"]
-    for i, v in enumerate(values):
-        scale = np.float32(np.ldexp(np.float32(1.0), np.int32(exps[i // gsz] - bias)))
-        deq = float(np.float32(np.float32(codes[i]) * scale))
-        assert deq == v, (
-            f"{name}: element {i} dequantizes to {deq}, not {v} -- fixture left "
-            "the exact float regime; pick grid-exact values")
 
 
 def main() -> int:

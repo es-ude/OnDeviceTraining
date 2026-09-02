@@ -57,8 +57,9 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 
-from sym_gold import (assert_rounding_canary, bfp_quantize_grouped, convT1d_bfp_gather_ref,
-                      emit_float_array, emit_int32_array, emit_int32_scalar)
+from sym_gold import (assert_rounding_canary, bfp_quantize_grouped, check_exact_roundtrip,
+                      convT1d_bfp_dx_ref, convT1d_bfp_gather_ref, emit_float_array,
+                      emit_int32_array, emit_int32_scalar, emit_uint8_array)
 
 BATCH = 1
 IN_CHANNELS = 4
@@ -96,28 +97,53 @@ W_NUM_GROUPS = 3
 BIAS_VALUES = [1.5, -0.75]
 BIAS_QC = {"mantissa_bits": 8, "exponent_bits": 8, "group_size": 0}
 
+# ---- conv-groups=2 fixture (#416, BFP PR3 Task 4): split channels with
+# inChPerGroup = 4, NOT 2. The gather walks taps OUTER / ic INNER, so with
+# only 2 in-channels per conv group every step hops the input index by
+# +-Lin-ish (5, 6) and the weight index by +-outChPerGroup*K-ish (6, 5) --
+# both larger than any legal group size that still yields >= 2 groups
+# inside one reduction's span, so NO step could be quiet on either operand
+# and the ref's disjoint-boundary pins would be unsatisfiable for ANY
+# grouping. With 4 in-channels per conv group each group-0 reduction walks
+# exactly the main fixture's operand slabs (same boundaries), so the FULL
+# self-check suite runs under conv groups. Values derive from the main
+# fixture's grid-exact sets: x = X_VALUES ++ X_VALUES*0.5 ([1,8,5], gs 10
+# -> 4 groups), w = W_VALUES ++ W_VALUES*4 ([8,2,3], gs 8 -> 6 groups) --
+# power-of-two scalings keep every group grid-exact and force NON-UNIFORM
+# exponent arrays. The scalings are deliberately ASYMMETRIC (0.5 vs 4): a
+# symmetric x*0.5/w*2 pair would make every conv-group-1 product fold equal
+# its group-0 twin bit-for-bit (the exponent shifts -1 and +1 cancel), so a
+# conv_g/in_lo-blind kernel that reads group 0's channels for every oc
+# would be unobservable; with 0.5/4 the group-1 outputs are exactly 2x
+# group-0's instead. The float w values are ALSO emitted: the layer-level
+# dx test rebuilds the weight the user way (FLOAT32 init +
+# requantizeTensorInPlace), whose bfp_quantize_grouped mirror reproduces
+# exactly these codes (roundtrip-asserted).
+G2_CONV_GROUPS = 2
+G2_IN_CHANNELS = 8
+G2_OUT_CHANNELS = 4  # Cout/groups = 2, unchanged weight dim 1
+G2_X_VALUES = X_VALUES + [v * 0.5 for v in X_VALUES]
+G2_X_QC = {"mantissa_bits": 6, "exponent_bits": 8, "group_size": 10}
+G2_X_NUM_GROUPS = 4
+G2_W_VALUES = W_VALUES + [v * 4.0 for v in W_VALUES]
+G2_W_QC = {"mantissa_bits": 4, "exponent_bits": 8, "group_size": 8}
+G2_W_NUM_GROUPS = 6
+G2_BIAS_VALUES = [1.5, -0.75, 2.5, 0.5]
+G2_BIAS_QC = {"mantissa_bits": 8, "exponent_bits": 8, "group_size": 0}
 
-def emit_uint8_array(name: str, values) -> str:
-    vals = [int(v) for v in values]
-    assert all(0 <= v <= 255 for v in vals), f"{name}: value outside uint8 range"
-    body = ", ".join(str(v) for v in vals)
-    return (
-        f"static const uint8_t {name}[] = {{ {body} }};\n"
-        f"static const size_t {name}_len = {len(vals)};\n"
-    )
-
-
-def check_exact_roundtrip(name, values, codes, exps, qc):
-    """Exact-float-regime pin: code * 2^(stored - bias) must reproduce the
-    input float bit-for-bit (float32 multiply by a power of two is exact)."""
-    bias = 2 ** (qc["exponent_bits"] - 1) - 1
-    gsz = len(values) if qc["group_size"] == 0 else qc["group_size"]
-    for i, v in enumerate(values):
-        scale = np.float32(np.ldexp(np.float32(1.0), np.int32(exps[i // gsz] - bias)))
-        deq = float(np.float32(np.float32(codes[i]) * scale))
-        assert deq == v, (
-            f"{name}: element {i} dequantizes to {deq}, not {v} -- fixture left "
-            "the exact float regime; pick grid-exact values")
+# dx sub-fixture (layer-level testConvT1dBackwardBfpDxConvGroups2MatchesGold):
+# the SAME G2 weight through the conv-gather adjoint under the SAME VALID
+# stride-2 outputPadding-1 geometry (the ConvT dx delegation lands back on
+# Lin for any outputPadding < stride -- no separate geometry needed, unlike
+# Conv1d's EXPLICIT-padded forward). Loss [1, 4, 12] per-channel quant
+# groups {4 x 12} with pairwise-distinct exponents (channel c = base row
+# scaled 2^c). The delegate conv1d_bfp_ref's clipped-window pin cannot hold
+# under the VALID-only dx role (convT1d_bfp_dx_ref's docstring), so the
+# delegation runs self_check=False with per-operand collapse asserts below.
+G2_DX_LOSS_BASE = [0.5, -1.0, 2.0, 1.5, -4.0, 3.0, -0.5, 1.0, 0.25, -0.75, 1.25, -2.0]
+G2_DX_LOSS_VALUES = [v * (2 ** c) for c in range(4) for v in G2_DX_LOSS_BASE]
+G2_DX_LOSS_QC = {"mantissa_bits": 6, "exponent_bits": 8, "group_size": 12}
+G2_DX_LOSS_NUM_GROUPS = 4
 
 
 def main() -> int:
@@ -210,6 +236,82 @@ def main() -> int:
         "grouped-bias expectation must be bit-identical to the per-tensor gold "
         "-- both grids are exact for these values")
 
+    # ---- conv-groups=2 (#416) --------------------------------------------
+    g2x_codes, g2x_exps = bfp_quantize_grouped(G2_X_VALUES, G2_X_QC["mantissa_bits"],
+                                               G2_X_QC["exponent_bits"], G2_X_QC["group_size"])
+    g2w_codes, g2w_exps = bfp_quantize_grouped(G2_W_VALUES, G2_W_QC["mantissa_bits"],
+                                               G2_W_QC["exponent_bits"], G2_W_QC["group_size"])
+    g2b_codes, g2b_exps = bfp_quantize_grouped(G2_BIAS_VALUES, G2_BIAS_QC["mantissa_bits"],
+                                               G2_BIAS_QC["exponent_bits"],
+                                               G2_BIAS_QC["group_size"])
+    assert len(g2x_exps) == G2_X_NUM_GROUPS and len(g2w_exps) == G2_W_NUM_GROUPS
+    check_exact_roundtrip("g2 input", G2_X_VALUES, g2x_codes, g2x_exps, G2_X_QC)
+    check_exact_roundtrip("g2 weight", G2_W_VALUES, g2w_codes, g2w_exps, G2_W_QC)
+    check_exact_roundtrip("g2 bias", G2_BIAS_VALUES, g2b_codes, g2b_exps, G2_BIAS_QC)
+    assert len(set(g2x_exps)) >= 2, "g2 input: exponent array is uniform -- fixture too weak"
+    assert len(set(g2w_exps)) >= 2, "g2 weight: exponent array is uniform -- fixture too weak"
+
+    g2_expected = convT1d_bfp_gather_ref(g2x_codes, g2x_exps, G2_X_QC,
+                                         g2w_codes, g2w_exps, G2_W_QC,
+                                         g2b_codes, g2b_exps, G2_BIAS_QC,
+                                         BATCH, G2_IN_CHANNELS, G2_OUT_CHANNELS, KERNEL_SIZE,
+                                         INPUT_LENGTH, stride=STRIDE,
+                                         output_padding=OUTPUT_PADDING,
+                                         conv_groups=G2_CONV_GROUPS)
+    assert len(g2_expected) == BATCH * G2_OUT_CHANNELS * OUT_LEN
+    # Asymmetric-scaling pin (see the operand block): a conv_g/in_lo-blind
+    # gather reproduces conv-group-1's channels (oc 2/3) from conv-group-0's
+    # operands -- pre-bias that halves them, so the pre-bias channel twins
+    # must differ somewhere (equivalently: be nonzero somewhere).
+    g2_no_bias = convT1d_bfp_gather_ref(g2x_codes, g2x_exps, G2_X_QC,
+                                        g2w_codes, g2w_exps, G2_W_QC,
+                                        None, None, None,
+                                        BATCH, G2_IN_CHANNELS, G2_OUT_CHANNELS, KERNEL_SIZE,
+                                        INPUT_LENGTH, stride=STRIDE,
+                                        output_padding=OUTPUT_PADDING,
+                                        conv_groups=G2_CONV_GROUPS, self_check=False)
+    for oc_offset in range(G2_OUT_CHANNELS // G2_CONV_GROUPS):
+        lo = oc_offset * OUT_LEN
+        hi = (2 + oc_offset) * OUT_LEN
+        assert any(g2_no_bias[hi + i] != g2_no_bias[lo + i] for i in range(OUT_LEN)), (
+            "g2: conv-group-1 channel coincides with its group-0 twin pre-bias "
+            "-- the group-blind mutant would be unobservable")
+
+    # dx sub-fixture (see the operand block's comment for the
+    # self_check=False rationale).
+    g2dx_loss_codes, g2dx_loss_exps = bfp_quantize_grouped(
+        G2_DX_LOSS_VALUES, G2_DX_LOSS_QC["mantissa_bits"], G2_DX_LOSS_QC["exponent_bits"],
+        G2_DX_LOSS_QC["group_size"])
+    assert len(g2dx_loss_exps) == G2_DX_LOSS_NUM_GROUPS
+    check_exact_roundtrip("g2 dx loss", G2_DX_LOSS_VALUES, g2dx_loss_codes, g2dx_loss_exps,
+                          G2_DX_LOSS_QC)
+    assert len(set(g2dx_loss_exps)) == G2_DX_LOSS_NUM_GROUPS, (
+        "g2 dx loss: group exponents not pairwise distinct -- per-channel "
+        "exponent binding unobservable")
+    g2_dx = convT1d_bfp_dx_ref(g2dx_loss_codes, g2dx_loss_exps, G2_DX_LOSS_QC,
+                               g2w_codes, g2w_exps, G2_W_QC,
+                               BATCH, G2_IN_CHANNELS, G2_OUT_CHANNELS, KERNEL_SIZE,
+                               INPUT_LENGTH, stride=STRIDE, output_padding=OUTPUT_PADDING,
+                               conv_groups=G2_CONV_GROUPS, self_check=False)
+    g2_dx_loss_collapsed = convT1d_bfp_dx_ref(
+        g2dx_loss_codes, [g2dx_loss_exps[0]], {**G2_DX_LOSS_QC, "group_size": 0},
+        g2w_codes, g2w_exps, G2_W_QC, BATCH, G2_IN_CHANNELS, G2_OUT_CHANNELS,
+        KERNEL_SIZE, INPUT_LENGTH, stride=STRIDE, output_padding=OUTPUT_PADDING,
+        conv_groups=G2_CONV_GROUPS, self_check=False)
+    g2_dx_w_collapsed = convT1d_bfp_dx_ref(
+        g2dx_loss_codes, g2dx_loss_exps, G2_DX_LOSS_QC,
+        g2w_codes, [g2w_exps[0]], {**G2_W_QC, "group_size": 0},
+        BATCH, G2_IN_CHANNELS, G2_OUT_CHANNELS, KERNEL_SIZE, INPUT_LENGTH,
+        stride=STRIDE, output_padding=OUTPUT_PADDING, conv_groups=G2_CONV_GROUPS,
+        self_check=False)
+    assert g2_dx_loss_collapsed != g2_dx, (
+        "g2 dx: loss-exponent collapse is indistinguishable -- loss group "
+        "structure unobservable through the grouped dx path")
+    assert g2_dx_w_collapsed != g2_dx, (
+        "g2 dx: weight-exponent collapse is indistinguishable -- weight group "
+        "structure unobservable through the grouped dx path")
+    assert any(v != 0.0 for v in g2_dx), "g2 dx: all-zero expected output"
+
     parts = [
         "// AUTOGENERATED by generate_expected_bfp_convT1d.py — DO NOT EDIT\n",
         "#ifndef ODT_EXPECTED_BFP_CONVT1D_H\n",
@@ -250,6 +352,34 @@ def main() -> int:
         emit_float_array("kBfpConvTExpected", torch.tensor(expected, dtype=torch.float32)),
         emit_float_array("kBfpConvTNoBiasExpected",
                          torch.tensor(expected_no_bias, dtype=torch.float32)),
+        emit_int32_scalar("kBfpConvTG2ConvGroups", G2_CONV_GROUPS),
+        emit_int32_scalar("kBfpConvTG2InChannels", G2_IN_CHANNELS),
+        emit_int32_scalar("kBfpConvTG2OutChannels", G2_OUT_CHANNELS),
+        emit_int32_array("kBfpConvTG2InCodes", torch.tensor(g2x_codes)),
+        emit_uint8_array("kBfpConvTG2InExponents", g2x_exps),
+        emit_int32_scalar("kBfpConvTG2InNumGroups", G2_X_NUM_GROUPS),
+        emit_int32_scalar("kBfpConvTG2InGroupSize", G2_X_QC["group_size"]),
+        emit_int32_scalar("kBfpConvTG2InMantissaBits", G2_X_QC["mantissa_bits"]),
+        emit_int32_scalar("kBfpConvTG2InExponentBits", G2_X_QC["exponent_bits"]),
+        emit_float_array("kBfpConvTG2WValues", torch.tensor(G2_W_VALUES, dtype=torch.float32)),
+        emit_int32_array("kBfpConvTG2WCodes", torch.tensor(g2w_codes)),
+        emit_uint8_array("kBfpConvTG2WExponents", g2w_exps),
+        emit_int32_scalar("kBfpConvTG2WNumGroups", G2_W_NUM_GROUPS),
+        emit_int32_scalar("kBfpConvTG2WGroupSize", G2_W_QC["group_size"]),
+        emit_int32_scalar("kBfpConvTG2WMantissaBits", G2_W_QC["mantissa_bits"]),
+        emit_int32_scalar("kBfpConvTG2WExponentBits", G2_W_QC["exponent_bits"]),
+        emit_int32_array("kBfpConvTG2BiasCodes", torch.tensor(g2b_codes)),
+        emit_uint8_array("kBfpConvTG2BiasExponents", g2b_exps),
+        emit_int32_scalar("kBfpConvTG2BiasMantissaBits", G2_BIAS_QC["mantissa_bits"]),
+        emit_int32_scalar("kBfpConvTG2BiasExponentBits", G2_BIAS_QC["exponent_bits"]),
+        emit_float_array("kBfpConvTG2Expected", torch.tensor(g2_expected, dtype=torch.float32)),
+        emit_int32_array("kBfpConvTG2DxLossCodes", torch.tensor(g2dx_loss_codes)),
+        emit_uint8_array("kBfpConvTG2DxLossExponents", g2dx_loss_exps),
+        emit_int32_scalar("kBfpConvTG2DxLossNumGroups", G2_DX_LOSS_NUM_GROUPS),
+        emit_int32_scalar("kBfpConvTG2DxLossGroupSize", G2_DX_LOSS_QC["group_size"]),
+        emit_int32_scalar("kBfpConvTG2DxLossMantissaBits", G2_DX_LOSS_QC["mantissa_bits"]),
+        emit_int32_scalar("kBfpConvTG2DxLossExponentBits", G2_DX_LOSS_QC["exponent_bits"]),
+        emit_float_array("kBfpConvTG2DxExpected", torch.tensor(g2_dx, dtype=torch.float32)),
         "\n#endif // ODT_EXPECTED_BFP_CONVT1D_H\n",
     ]
 

@@ -225,7 +225,14 @@ add_elastic_ai_unit_test(
 add_dependencies(UnitTestConv1dTransposed generate_expected_conv1d_transposed)
 add_dependencies(UnitTestConv1dTransposed generate_expected_convT1d_grouped)
 add_dependencies(UnitTestConv1dTransposed generate_expected_bfp_layer_forward)
-target_include_directories(UnitTestConv1dTransposed PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+# #416 (BFP PR3): the layer-level conv-groups=2 dx test consumes the SAME
+# operand fixture as the kernel-level parity test, single-sourced in the
+# arithmetic generator's header (two generators re-embedding the values
+# would silently drift apart) -- dependency and include dir stay PAIRED or
+# parallel builds race a missing header.
+add_dependencies(UnitTestConv1dTransposed generate_expected_bfp_convT1d)
+target_include_directories(UnitTestConv1dTransposed PRIVATE ${CMAKE_CURRENT_BINARY_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}/../arithmetic)
 
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST

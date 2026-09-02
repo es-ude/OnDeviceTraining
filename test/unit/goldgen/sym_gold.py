@@ -912,14 +912,16 @@ def _bfp_group_of(idx, group_size):
 
 
 def matmul_bfp_ref(a_codes, a_exp, a_qc, b_codes, b_exp, b_qc, bias_codes, bias_exp, bias_qc,
-                   rows, cols, K, b_transposed, self_check=True):
+                   rows, cols, K, b_transposed, a_transposed=False, self_check=True):
     """Mirror the C fold order exactly: int partial (assert |partial| <=
     2**31-1 -- the C kernel guarantees this via bfpValidateBlockHeadroom),
     np.float32 acc, np.ldexp folds, bias seeds acc first. Each *_qc is a dict
     with keys mantissa_bits / exponent_bits / group_size; codes are storage-
     order flat, exponents are stored (biased) per-group bytes. b's storage is
     [cols, K] when b_transposed (the GEMM-weight bOrder {1,0} view: b_idx =
-    c*K + k), else [K, cols] (b_idx = k*cols + c). Self-checks (skipped on
+    c*K + k), else [K, cols] (b_idx = k*cols + c). a's storage is [K, rows]
+    when a_transposed (the loss^T view Linear weightGrad uses: a_idx =
+    k*rows + r), else [rows, K] (a_idx = r*K + k). Self-checks (skipped on
     the collapse rerun): (i) >= 2 groups crossed on EACH operand somewhere,
     (ii) >= 1 fold with a NONZERO partial whose float conversion is exact
     (regression anchor), (iii) result differs from an all-per-tensor run
@@ -947,7 +949,11 @@ def matmul_bfp_ref(a_codes, a_exp, a_qc, b_codes, b_exp, b_qc, bias_codes, bias_
             cur_ga, cur_gb = 0, 0
             a_groups_seen, b_groups_seen = set(), set()
             for k in range(K):
-                a_idx = r * K + k
+                # a_transposed: logical a[r][k] reads storage [K, rows] row-
+                # major -- the loss^T view Linear weightGrad uses. Storage is
+                # loss [batch, outF] and the logical matrix is [outF, batch],
+                # so rows == outF, K == batch: a_idx = k*outF + r == k*rows + r.
+                a_idx = (k * rows + r) if a_transposed else (r * K + k)
                 b_idx = c * K + k if b_transposed else k * cols + c
                 ga = _bfp_group_of(a_idx, a_qc["group_size"])
                 gb = _bfp_group_of(b_idx, b_qc["group_size"])
@@ -1000,10 +1006,50 @@ def matmul_bfp_ref(a_codes, a_exp, a_qc, b_codes, b_exp, b_qc, bias_codes, bias_
             a_codes, [a_exp[0]], {**a_qc, "group_size": 0},
             b_codes, [b_exp[0]], {**b_qc, "group_size": 0},
             bias_codes, bias_exp, bias_qc, rows, cols, K, b_transposed,
-            self_check=False)
+            a_transposed=a_transposed, self_check=False)
         assert collapsed != out, (
             "matmul_bfp_ref: per-tensor collapse is indistinguishable from the "
             "grouped run -- fixture is vacuous against group-structure bugs")
+    return out
+
+
+def matmul_bfp_bias_grad_ref(codes, exps, qc, rows, cols, self_check=True):
+    """BFP epic PR3: bias-grad reference -- db[f] = sum_n loss[n][f] on BFP loss
+    codes (int mantissas, per-element group lookup). Fold rule: int partial per
+    same-group VISITED segment (the walk strides by `cols`, so groups can change
+    every step), fold acc += ldexp(float32(partial), E) on group change + tail.
+    Sum headroom: |partial| <= segment_len * (2^(m-1)) asserted <= 2^31-1."""
+    bias = 2 ** (qc["exponent_bits"] - 1) - 1
+    gsz = qc["group_size"] if qc["group_size"] else rows * cols
+    out = []
+    crossings = 0
+    for f in range(cols):
+        acc = np.float32(0.0)
+        partial = 0
+        cur_g = None
+        for n in range(rows):
+            idx = n * cols + f
+            g = idx // gsz
+            if cur_g is None:
+                cur_g = g
+            elif g != cur_g:
+                assert abs(partial) <= _INT32_MAX
+                acc = np.float32(acc + np.ldexp(np.float32(partial),
+                                                np.int32(exps[cur_g] - bias)))
+                partial = 0
+                cur_g = g
+                crossings += 1
+            partial += codes[idx]
+        if cur_g is not None:
+            assert abs(partial) <= _INT32_MAX
+            acc = np.float32(acc + np.ldexp(np.float32(partial),
+                                            np.int32(exps[cur_g] - bias)))
+        out.append(float(acc))
+    if self_check:
+        assert crossings >= 1, "bias-grad fixture never crosses a loss group -- vacuous"
+        collapse = matmul_bfp_bias_grad_ref(
+            codes, [exps[0]] * len(exps), qc, rows, cols, self_check=False)
+        assert collapse != out, "per-tensor collapse identical -- exponent binding unobservable"
     return out
 
 

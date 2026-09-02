@@ -40,6 +40,22 @@ Self-checks (abort generation rather than emit a vacuous fixture):
   - the with-bias and no-bias expected outputs differ elementwise (a kernel
     that ignores the bias seed cannot pass both gold tests).
 
+PR3 backward fixtures (BFP epic PR3, Task 1): one consistent Linear-backward
+operand triple -- loss [batch=3, outF=4], W [outF=4, inF=4], x [batch=3,
+inF=4] -- feeds three expectations: dx = loss @ W (RAW weight storage, the
+reduction strides W by inF), dW = loss^T @ x (matmul_bfp_ref's a_transposed
+view), and db[f] = sum_n loss[n][f] (matmul_bfp_bias_grad_ref). Geometry is
+chosen so matmul_bfp_ref's self-check (iv) holds in BOTH orientations: with a
+strided b walk, an a-only group boundary (a's group changes while b's does
+NOT) requires the b operand's groupSize to EXCEED the b stride (inF), so W
+uses groupSize 8 > 4 and x uses groupSize 6 > 4. Smaller group sizes make
+every a-boundary coincide with a b-boundary, which is exactly the review-
+finding-1 vacuity documented for the forward fixture above: the either-
+operand fold clause (and the drop-a-clause mutant) would be unobservable.
+batch is 3 because the weightGrad reduction (K = batch) needs one step where
+x stays inside a group (Lx > inF) and another where it crosses -- impossible
+with only one reduction step at batch=2.
+
 Run via `uv run` (CMake wires this automatically, see CMakeLists.txt).
 """
 import argparse
@@ -52,7 +68,8 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 
 from sym_gold import (assert_rounding_canary, bfp_quantize_grouped, emit_float_array,
-                      emit_int32_array, emit_int32_scalar, matmul_bfp_ref)
+                      emit_int32_array, emit_int32_scalar, matmul_bfp_bias_grad_ref,
+                      matmul_bfp_ref)
 
 OUT_ROWS = 2
 OUT_COLS = 3
@@ -169,6 +186,51 @@ def main() -> int:
         "grouped-bias expectation must be bit-identical to the per-tensor gold "
         "-- both grids are exact for these values")
 
+    # ---- PR3 backward fixtures: loss [3,4] (batch=3, outF=4), W [4,4]
+    # ([outF, inF] row-major), x [3,4]. Group sizes per the module docstring:
+    # loss gsz 3 (4 groups, misaligned with the outF=4 rows so both the
+    # contiguous dx walk and the strided weightGrad walk cross groups),
+    # W gsz 8 > inF and x gsz 6 > inF (a-only boundaries exist in both
+    # orientations). Every group's values sit exactly on its derived grid.
+    LOSS_VALUES = [1.0, -2.0, 5.0, -1.5,
+                   10.0, -6.0, 2.5, -0.25,
+                   0.75, 16.0, -3.0, 21.0]
+    LOSS_QC = {"mantissa_bits": 6, "exponent_bits": 8, "group_size": 3}
+    WB_VALUES = [3.0, -1.0, 0.5, 2.5, 1.0, -2.0, 0.5, -0.5,
+                 1.5, 1.0, -0.75, -1.25, 0.75, -0.25, 1.0, -1.5]
+    WB_QC = {"mantissa_bits": 4, "exponent_bits": 8, "group_size": 8}
+    XB_VALUES = [1.0, -2.0, 0.5, 4.0, -0.25, 0.75,
+                 1.0, -3.0, 0.625, 2.25, -0.125, 1.75]
+    XB_QC = {"mantissa_bits": 6, "exponent_bits": 8, "group_size": 6}
+    BWD_BATCH = 3
+    BWD_OUT_F = 4
+    BWD_IN_F = 4
+    loss_codes, loss_exps = bfp_quantize_grouped(LOSS_VALUES, LOSS_QC["mantissa_bits"],
+                                                 LOSS_QC["exponent_bits"],
+                                                 LOSS_QC["group_size"])
+    wb_codes, wb_exps = bfp_quantize_grouped(WB_VALUES, WB_QC["mantissa_bits"],
+                                             WB_QC["exponent_bits"], WB_QC["group_size"])
+    xb_codes, xb_exps = bfp_quantize_grouped(XB_VALUES, XB_QC["mantissa_bits"],
+                                             XB_QC["exponent_bits"], XB_QC["group_size"])
+    for nm, vals, cds, exs, qc in (("loss", LOSS_VALUES, loss_codes, loss_exps, LOSS_QC),
+                                   ("wb", WB_VALUES, wb_codes, wb_exps, WB_QC),
+                                   ("xb", XB_VALUES, xb_codes, xb_exps, XB_QC)):
+        check_exact_roundtrip(nm, vals, cds, exs, qc)
+        assert len(set(exs)) >= 2, f"{nm}: uniform exponents -- fixture too weak"
+    # dx = loss @ W  ([3,4]@[4,4] -> [3,4]); b NOT transposed: b_idx = k*cols + c
+    # walks W [outF, inF] storage strided by inF -- the canonical strided-dx walk.
+    expected_dx = matmul_bfp_ref(loss_codes, loss_exps, LOSS_QC,
+                                 wb_codes, wb_exps, WB_QC, None, None, None,
+                                 BWD_BATCH, BWD_IN_F, BWD_OUT_F, b_transposed=False)
+    # dW = loss^T @ x ([4,3]@[3,4] -> [4,4]); a is the loss^T VIEW (a_transposed).
+    expected_wg = matmul_bfp_ref(loss_codes, loss_exps, LOSS_QC,
+                                 xb_codes, xb_exps, XB_QC, None, None, None,
+                                 BWD_OUT_F, BWD_IN_F, BWD_BATCH,
+                                 b_transposed=False, a_transposed=True)
+    # db[f] = sum_n loss[n][f]
+    expected_bg = matmul_bfp_bias_grad_ref(loss_codes, loss_exps, LOSS_QC,
+                                           BWD_BATCH, BWD_OUT_F)
+
     parts = [
         "// AUTOGENERATED by generate_expected_bfp_matmul.py — DO NOT EDIT\n",
         "#ifndef ODT_EXPECTED_BFP_MATMUL_H\n",
@@ -200,6 +262,30 @@ def main() -> int:
         emit_float_array("kBfpMatmulExpected", torch.tensor(expected, dtype=torch.float32)),
         emit_float_array("kBfpMatmulNoBiasExpected",
                          torch.tensor(expected_no_bias, dtype=torch.float32)),
+        emit_int32_scalar("kBfpBwdBatch", BWD_BATCH),
+        emit_int32_scalar("kBfpBwdOutF", BWD_OUT_F),
+        emit_int32_scalar("kBfpBwdInF", BWD_IN_F),
+        emit_int32_array("kBfpLossCodes", torch.tensor(loss_codes)),
+        emit_uint8_array("kBfpLossExponents", loss_exps),
+        emit_int32_scalar("kBfpLossNumGroups", len(loss_exps)),
+        emit_int32_scalar("kBfpLossGroupSize", LOSS_QC["group_size"]),
+        emit_int32_scalar("kBfpLossMantissaBits", LOSS_QC["mantissa_bits"]),
+        emit_int32_scalar("kBfpLossExponentBits", LOSS_QC["exponent_bits"]),
+        emit_int32_array("kBfpWbCodes", torch.tensor(wb_codes)),
+        emit_uint8_array("kBfpWbExponents", wb_exps),
+        emit_int32_scalar("kBfpWbNumGroups", len(wb_exps)),
+        emit_int32_scalar("kBfpWbGroupSize", WB_QC["group_size"]),
+        emit_int32_scalar("kBfpWbMantissaBits", WB_QC["mantissa_bits"]),
+        emit_int32_scalar("kBfpWbExponentBits", WB_QC["exponent_bits"]),
+        emit_int32_array("kBfpXbCodes", torch.tensor(xb_codes)),
+        emit_uint8_array("kBfpXbExponents", xb_exps),
+        emit_int32_scalar("kBfpXbNumGroups", len(xb_exps)),
+        emit_int32_scalar("kBfpXbGroupSize", XB_QC["group_size"]),
+        emit_int32_scalar("kBfpXbMantissaBits", XB_QC["mantissa_bits"]),
+        emit_int32_scalar("kBfpXbExponentBits", XB_QC["exponent_bits"]),
+        emit_float_array("kBfpDxExpected", torch.tensor(expected_dx, dtype=torch.float32)),
+        emit_float_array("kBfpWgExpected", torch.tensor(expected_wg, dtype=torch.float32)),
+        emit_float_array("kBfpBgExpected", torch.tensor(expected_bg, dtype=torch.float32)),
         "\n#endif // ODT_EXPECTED_BFP_MATMUL_H\n",
     ]
 

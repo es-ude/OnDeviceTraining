@@ -1450,6 +1450,207 @@ void testMatmulBfpRejectsMismatchedGroupShape(void) {
     ASSERT_EXITS_WITH_FAILURE(matmulBfpTensors(&aTensor, &bTensor, NULL, &outTensor));
 }
 
+/* PR3 kernel-reuse pin: Linear dx = loss @ W with W in RAW [outF, inF] storage
+ * -- the reduction walks W strided by inF, hopping weight groups mid-reduction.
+ * matmulBfpTensors' per-element lookup + either-boundary fold must handle the
+ * strided walk exactly (D8 amendment: no re-quantize, folds just more often). */
+void testMatmulBfpDxStridedWeightWalkMatchesGold(void) {
+    tensor_t lossT;
+    size_t lossDims[] = {(size_t)kBfpBwdBatch, (size_t)kBfpBwdOutF};
+    size_t lossOrder[] = {0, 1};
+    shape_t lossShape;
+    setShape(&lossShape, lossDims, 2, lossOrder);
+    uint8_t lossExps[sizeof(kBfpLossExponents)];
+    memcpy(lossExps, kBfpLossExponents, sizeof(lossExps));
+    bfpQConfig_t lossQC = {.exponents = lossExps,
+                           .numGroups = (size_t)kBfpLossNumGroups,
+                           .groupSize = (size_t)kBfpLossGroupSize,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = (uint8_t)kBfpLossMantissaBits,
+                           .exponentBits = (uint8_t)kBfpLossExponentBits};
+    quantization_t lossQ;
+    initBfpQuantization(&lossQC, &lossQ);
+    setTensorValues(&lossT, (uint8_t *)kBfpLossCodes, &lossShape, &lossQ, NULL);
+
+    tensor_t wT;
+    size_t wDims[] = {(size_t)kBfpBwdOutF, (size_t)kBfpBwdInF};
+    size_t wOrder[] = {0, 1}; /* RAW storage order: reduction axis strided */
+    shape_t wShape;
+    setShape(&wShape, wDims, 2, wOrder);
+    uint8_t wExps[sizeof(kBfpWbExponents)];
+    memcpy(wExps, kBfpWbExponents, sizeof(wExps));
+    bfpQConfig_t wQC = {.exponents = wExps,
+                        .numGroups = (size_t)kBfpWbNumGroups,
+                        .groupSize = (size_t)kBfpWbGroupSize,
+                        .roundingMode = HALF_AWAY,
+                        .mantissaBits = (uint8_t)kBfpWbMantissaBits,
+                        .exponentBits = (uint8_t)kBfpWbExponentBits};
+    quantization_t wQ;
+    initBfpQuantization(&wQC, &wQ);
+    setTensorValues(&wT, (uint8_t *)kBfpWbCodes, &wShape, &wQ, NULL);
+
+    tensor_t outT;
+    float outData[12];
+    size_t outDims[] = {(size_t)kBfpBwdBatch, (size_t)kBfpBwdInF};
+    size_t outOrder[] = {0, 1};
+    shape_t outShape;
+    setShape(&outShape, outDims, 2, outOrder);
+    quantization_t outQ;
+    initFloat32Quantization(&outQ);
+    setTensorValues(&outT, (uint8_t *)outData, &outShape, &outQ, NULL);
+
+    matmulBfpTensors(&lossT, &wT, NULL, &outT);
+
+    TEST_ASSERT_EQUAL_MEMORY(kBfpDxExpected, outT.data, kBfpDxExpected_len * sizeof(float));
+}
+
+/* PR3 kernel-reuse pin: Linear weightGrad = loss^T @ x with loss behind the
+ * zero-copy transposeTensor view [outF, batch] -- the a-walk reads loss
+ * storage strided by outF and crosses loss groups mid-reduction while x's
+ * groups (groupSize 6 > inF) sometimes stay put, so the a-side of the
+ * either-boundary fold clause carries this test alone. */
+void testMatmulBfpWeightGradTransposedLossViewMatchesGold(void) {
+    tensor_t lossT;
+    size_t lossDims[] = {(size_t)kBfpBwdBatch, (size_t)kBfpBwdOutF};
+    size_t lossOrder[] = {0, 1};
+    shape_t lossShape;
+    setShape(&lossShape, lossDims, 2, lossOrder);
+    uint8_t lossExps[sizeof(kBfpLossExponents)];
+    memcpy(lossExps, kBfpLossExponents, sizeof(lossExps));
+    bfpQConfig_t lossQC = {.exponents = lossExps,
+                           .numGroups = (size_t)kBfpLossNumGroups,
+                           .groupSize = (size_t)kBfpLossGroupSize,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = (uint8_t)kBfpLossMantissaBits,
+                           .exponentBits = (uint8_t)kBfpLossExponentBits};
+    quantization_t lossQ;
+    initBfpQuantization(&lossQC, &lossQ);
+    setTensorValues(&lossT, (uint8_t *)kBfpLossCodes, &lossShape, &lossQ, NULL);
+    transposeTensor(&lossT, 0, 1); /* zero-copy loss^T view [outF, batch] */
+
+    tensor_t xT;
+    size_t xDims[] = {(size_t)kBfpBwdBatch, (size_t)kBfpBwdInF};
+    size_t xOrder[] = {0, 1};
+    shape_t xShape;
+    setShape(&xShape, xDims, 2, xOrder);
+    uint8_t xExps[sizeof(kBfpXbExponents)];
+    memcpy(xExps, kBfpXbExponents, sizeof(xExps));
+    bfpQConfig_t xQC = {.exponents = xExps,
+                        .numGroups = (size_t)kBfpXbNumGroups,
+                        .groupSize = (size_t)kBfpXbGroupSize,
+                        .roundingMode = HALF_AWAY,
+                        .mantissaBits = (uint8_t)kBfpXbMantissaBits,
+                        .exponentBits = (uint8_t)kBfpXbExponentBits};
+    quantization_t xQ;
+    initBfpQuantization(&xQC, &xQ);
+    setTensorValues(&xT, (uint8_t *)kBfpXbCodes, &xShape, &xQ, NULL);
+
+    tensor_t outT;
+    float outData[16];
+    size_t outDims[] = {(size_t)kBfpBwdOutF, (size_t)kBfpBwdInF};
+    size_t outOrder[] = {0, 1};
+    shape_t outShape;
+    setShape(&outShape, outDims, 2, outOrder);
+    quantization_t outQ;
+    initFloat32Quantization(&outQ);
+    setTensorValues(&outT, (uint8_t *)outData, &outShape, &outQ, NULL);
+
+    matmulBfpTensors(&lossT, &xT, NULL, &outT);
+    transposeTensor(&lossT, 0, 1); /* restore the storage view */
+
+    TEST_ASSERT_EQUAL_MEMORY(kBfpWgExpected, outT.data, kBfpWgExpected_len * sizeof(float));
+}
+
+/* PR3 dx power-of-two twin (spec §8c in the backward, D8 amendment): the dx
+ * sibling of testMatmulBfpPowerOfTwoBitIdenticalToGroupedSym above (see its
+ * comment for the exactness argument), in the RAW-weight-storage orientation
+ * of testMatmulGroupedDxEqualScalesBitIdenticalToScalar (same mantissas,
+ * loss per-tensor stored 126 <-> SYM aScale 0.5f, W grouped all-125 <->
+ * weightGroups scales 0.25f): the BFP float output must be BIT-IDENTICAL to
+ * the grouped-SYM path's dequantized output. */
+void testMatmulBfpDxPowerOfTwoBitIdenticalToGroupedSym(void) {
+    size_t aDims[] = {(size_t)kDxPerChannelOutRows, (size_t)kDxPerChannelReduceLen};
+    size_t aOrder[] = {0, 1};
+    shape_t aShape;
+    setShape(&aShape, aDims, 2, aOrder);
+    size_t bDims[] = {(size_t)kDxPerChannelReduceLen, (size_t)kDxPerChannelOutCols};
+    size_t bOrder[] = {0, 1}; /* RAW storage view: reduction axis strided by outCols */
+    shape_t bShape;
+    setShape(&bShape, bDims, 2, bOrder);
+    size_t outDims[] = {(size_t)kDxPerChannelOutRows, (size_t)kDxPerChannelOutCols};
+    size_t outOrder[] = {0, 1};
+    shape_t outShape;
+    setShape(&outShape, outDims, 2, outOrder);
+
+    tensor_t aBfpTensor;
+    uint8_t aExponents[] = {126}; /* 2^(126-127) == 0.5f */
+    bfpQConfig_t aBfpQC = {.exponents = aExponents,
+                           .numGroups = 1,
+                           .groupSize = 0,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = 8,
+                           .exponentBits = 8};
+    quantization_t aBfpQ;
+    initBfpQuantization(&aBfpQC, &aBfpQ);
+    setTensorValues(&aBfpTensor, (uint8_t *)kDxPerChannelLossMantissas, &aShape, &aBfpQ, NULL);
+
+    tensor_t bBfpTensor;
+    uint8_t bExponents[] = {125, 125, 125}; /* 2^(125-127) == 0.25f */
+    bfpQConfig_t bBfpQC = {.exponents = bExponents,
+                           .numGroups = 3,
+                           .groupSize = 6,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = 8,
+                           .exponentBits = 8};
+    quantization_t bBfpQ;
+    initBfpQuantization(&bBfpQC, &bBfpQ);
+    setTensorValues(&bBfpTensor, (uint8_t *)kDxPerChannelWMantissas, &bShape, &bBfpQ, NULL);
+
+    tensor_t outBfpTensor;
+    float outBfpData[12];
+    quantization_t outBfpQ;
+    initFloat32Quantization(&outBfpQ);
+    setTensorValues(&outBfpTensor, (uint8_t *)outBfpData, &outShape, &outBfpQ, NULL);
+
+    matmulBfpTensors(&aBfpTensor, &bBfpTensor, NULL, &outBfpTensor);
+
+    tensor_t aSymTensor;
+    symInt32QConfig_t aSymQC;
+    initSymInt32QConfig(HALF_AWAY, &aSymQC);
+    aSymQC.scale = 0.5f;
+    quantization_t aSymQ;
+    initSymInt32Quantization(&aSymQC, &aSymQ);
+    setTensorValues(&aSymTensor, (uint8_t *)kDxPerChannelLossMantissas, &aShape, &aSymQ, NULL);
+
+    tensor_t bSymTensor;
+    symInt32QConfig_t bSymQC;
+    initSymInt32QConfig(HALF_AWAY, &bSymQC);
+    bSymQC.scale = 1.0f;
+    quantization_t bSymQ;
+    initSymInt32Quantization(&bSymQC, &bSymQ);
+    setTensorValues(&bSymTensor, (uint8_t *)kDxPerChannelWMantissas, &bShape, &bSymQ, NULL);
+
+    float scales[3] = {0.25f, 0.25f, 0.25f};
+    symQConfig_t weightGroups = {
+        .scales = scales, .numGroups = 3, .groupSize = 6, .qBits = 8, .roundingMode = HALF_AWAY};
+
+    tensor_t outSymTensor;
+    int32_t outSymData[12];
+    symInt32QConfig_t outSymQC;
+    initSymInt32QConfig(HALF_AWAY, &outSymQC);
+    quantization_t outSymQ;
+    initSymInt32Quantization(&outSymQC, &outSymQ);
+    setTensorValues(&outSymTensor, (uint8_t *)outSymData, &outShape, &outSymQ, NULL);
+
+    matmulSymInt32TensorsGroupedWeight(&aSymTensor, &bSymTensor, NULL, &outSymTensor,
+                                       &weightGroups);
+
+    for (size_t i = 0; i < 12; i++) {
+        float symDequant = (float)outSymData[i] * outSymQC.scale;
+        TEST_ASSERT_EQUAL_MEMORY(&symDequant, &outBfpData[i], sizeof(float));
+    }
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -1480,6 +1681,9 @@ int main(void) {
     RUN_TEST(testMatmulBfpHeadroomGuardDies);
     RUN_TEST(testBfpSegmentLimitTableValues);
     RUN_TEST(testMatmulBfpRejectsMismatchedGroupShape);
+    RUN_TEST(testMatmulBfpDxStridedWeightWalkMatchesGold);
+    RUN_TEST(testMatmulBfpWeightGradTransposedLossViewMatchesGold);
+    RUN_TEST(testMatmulBfpDxPowerOfTwoBitIdenticalToGroupedSym);
 
     return UNITY_END();
 }

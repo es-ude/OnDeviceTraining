@@ -13,6 +13,16 @@ target_link_libraries(DataStorage PRIVATE
         Tensor
 )
 
+add_library(Im2Col
+        Im2Col.c
+)
+target_include_directories(Im2Col PUBLIC include)
+target_link_libraries(Im2Col PRIVATE
+        Common
+        Tensor
+        SlidingWindow1d
+)
+
 add_library(Quantization
         Quantization.c
 )

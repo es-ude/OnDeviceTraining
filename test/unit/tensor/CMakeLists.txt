@@ -59,3 +59,14 @@ target_link_libraries(UnitTestTensorBool PRIVATE
         StorageApi
 )
 __register_target_as_unit_test(UnitTestTensorBool)
+
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
+        Im2Col
+        MORE_LIBS
+        Tensor
+        SlidingWindow1d
+        TensorApi
+        StorageApi
+        QuantizationApi
+)

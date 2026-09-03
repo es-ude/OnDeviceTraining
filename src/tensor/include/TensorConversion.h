@@ -77,8 +77,11 @@ void requantSymInt32TensorToScale(tensor_t *inputTensor, tensor_t *outputTensor)
  * OUT_WRITE epilogue). */
 void requantBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor);
 /* The single BFP exponent authority (frexpf snap-up, D6 clamp both ends).
-   Public since epic PR2: funnel staging and (PR3) op-local re-blocking derive
-   through it. */
+   The funnel's staging quantizer and (since PR2) wire OUT_WRITE epilogues
+   derive exponents through this authority; epic PR3 added the grad-accumulate
+   engines and the scale arm, and extended OUT_WRITE's reach to the backward's
+   dx wire (op-local re-blocking never happens -- the D8 amendment,
+   docs/conventions/arithmetic-bfp.md §9). */
 void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint8_t maxStored,
                              uint8_t *storedOut);
 /* Quantize a float buffer into UNPACKED int32 BFP mantissa codes (no payload

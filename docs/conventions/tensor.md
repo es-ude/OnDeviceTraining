@@ -139,7 +139,7 @@ re-derives a fresh grid every store (absmax for SYM, affine min/max for ASYM). B
 direct-call only, not `conversionMatrix` cells (there is no dtype-pair to key a matrix
 cell on — the second operand is a raw float increment, not a tensor).
 
-## BFP — block-floating-point storage (BFP epic PR1+PR2, spec `docs/superpowers/specs/2026-07-29-block-floating-point-design.md`)
+## BFP — block-floating-point storage (BFP epic PR1–PR3, spec `docs/superpowers/specs/2026-07-29-block-floating-point-design.md`)
 
 `BFP` is qtype #7 (`qtype_t = {INT32, FLOAT32, SYM_INT32, SYM, ASYM, BOOL,
 BFP}`, appended last — mid-enum insertion would corrupt old checkpoints): a
@@ -165,16 +165,20 @@ a separate, independent axis, and unlike `SYM`/`ASYM` it is not float-bridge
 only: since epic PR2, `arithmeticFromQuantization` derives native `ARITH_BFP`
 for a `BFP`-typed quantization — the documented breaking change over PR1's
 `ARITH_FLOAT32` float bridge. `ARITH_BFP` runs the GEMM-family (Linear/
-Conv1d/Conv1dTransposed) **forward** natively: both operands stay blocked,
-`int32` mantissa products accumulate per same-exponent segment, and each
-segment folds into a `float32` accumulator via an exact `ldexpf` power-of-two
-shift at every group-boundary change (kernel contract, headroom guard and
-deviations: `docs/conventions/arithmetic-bfp.md` §5). BFP **backward** is
-still fake-quant-only until epic PR3: pin the backward math slots
-(`weightGradMath`/`biasGradMath`/`propLossMath`) to `ARITH_FLOAT32` explicitly
-— `layerQuantInitUniform` over one BFP template derives `ARITH_BFP` in all
-four slots, and a model that leaves a backward slot derived dies at the
-funnel on its first backward op.
+Conv1d/Conv1dTransposed) **forward AND backward** natively (epic PR3 lifted
+the backward carrier gate): both operands stay blocked, `int32` mantissa
+products/sums accumulate per same-exponent segment, and each segment folds
+into a `float32` accumulator via an exact `ldexpf` power-of-two shift at every
+group-boundary change (kernel contract, headroom guard and deviations:
+`docs/conventions/arithmetic-bfp.md` §5, backward contract §5.6). A model
+built with `layerQuantInitUniform` over one BFP template — which derives
+`ARITH_BFP` in all four math slots — now trains its entire loop natively with
+no pins required. Pinning the backward math slots
+(`weightGradMath`/`biasGradMath`/`propLossMath`) to `ARITH_FLOAT32` remains
+available as an explicit, still-supported fake-quant-backward mode. BFP grad
+and optimizer-state storage is a per-tensor-only knob (`gradInit`,
+`SgdApi`/`AdamWApi` state cloning — a grouped BFP template is rejected, a
+future `#300` axis).
 
 **`int_repr`/`dequantize` convention holds.** `BFP → INT32` emits the packed
 mantissa **codes** with the exponent dropped (`int_repr`, matching every other

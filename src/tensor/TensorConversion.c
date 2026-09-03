@@ -998,8 +998,11 @@ static void packFloatBufferAsSym(const float *values, size_t n, symQConfig_t *ou
  * means E=128): 2^127 is the largest FINITE float32 power of two --
  * ldexpf(1, 128) is +inf, which would quantize every code to 0 and dequantize
  * the whole group to NaN (0 * inf) instead of saturating. Public since epic
- * PR2 (TensorConversion.h): the funnel's staging quantizer and PR3's op-local
- * re-blocking derive exponents through this single authority. */
+ * PR2 (TensorConversion.h): the funnel's staging quantizer and (since PR2)
+ * wire OUT_WRITE epilogues derive exponents through this single authority;
+ * epic PR3 added the grad-accumulate engines and the scale arm, and extended
+ * OUT_WRITE's reach to the backward's dx wire -- op-local re-blocking never
+ * happens (the D8 amendment, docs/conventions/arithmetic-bfp.md §9). */
 void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint8_t maxStored,
                              uint8_t *storedOut) {
     if (absMax == 0.f) {

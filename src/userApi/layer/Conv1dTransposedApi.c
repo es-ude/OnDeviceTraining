@@ -152,9 +152,11 @@ static layer_t *buildConv1dTransposedLayerSkeleton(conv1dTransposedInit_t *init,
 
     cfg->kernel = buildConv1dTransposedKernel(init);
     size_t fanIn = (init->outChannels / groups) * init->kernelSize;
-    /* Grad storage knob (#261): Conv1dTransposed backward is FLOAT32-only, so a
-     * NULL knob keeps the hard-pinned FLOAT32 default; a non-NULL
-     * weightGradStorage/biasGradStorage overrides it explicitly. */
+    /* Grad storage knob (#261): NULL falls back to a hard-pinned FLOAT32
+     * default (parameter grads are persistent state — SYM_INT32 is a compute
+     * format, not storage); a non-NULL weightGradStorage/biasGradStorage
+     * overrides it explicitly to opt into SYM/ASYM/BFP (BFP per-tensor only,
+     * gradInit's carrier gate, #300 axis). */
     quantization_t *floatGradQ = quantizationInitFloat();
     quantization_t *weightGradQ =
         lq->weightGradStorage != NULL ? lq->weightGradStorage : floatGradQ;

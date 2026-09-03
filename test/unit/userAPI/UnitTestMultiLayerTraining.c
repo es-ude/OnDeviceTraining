@@ -1408,9 +1408,12 @@ void testBfpPinnedFloat32BackwardTrainingLossDecreases(void) {
  *  in one 5-step run: the accumulateOut BFP-target arm (Task 5) writing every
  *  backward pass's weight grad, the optimizer's read of that grad through
  *  conversionMatrix[BFP][FLOAT32] (unmodified, PR3 groundwork), and the
- *  zeroGrad BFP arm (Step 3) resetting codes+exponents to the zero state
- *  after every step -- without that arm, a stale non-bias exponent would
- *  leak into the next accumulate's FixedGrid carry decision.
+ *  zeroGrad BFP arm (Step 3) resetting codes+exponents to the canonical
+ *  zero state after every step. The exponent half of that reset is
+ *  SYM/ASYM-parity hygiene, not accumulate-correctness: FixedGrid's
+ *  fresh-vs-carry decision is a codes-only scan and the memset already
+ *  zeroes every code -- the final exponent assertion below pins the
+ *  hygiene contract itself.
  *
  *  RED before Steps 1-4 land: gradInit's then-unconditional BFP reject
  *  (TensorApi.c) kills the whole binary the instant this fixture builds

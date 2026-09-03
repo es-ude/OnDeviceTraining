@@ -2374,6 +2374,35 @@ void testConv1dTransposedCalcBiasGradsBfpRejectsFloat32Weights(void) {
     freeQuantization(floatQ);
 }
 
+/* ConvT twin of Conv1d's InputChannelMismatch death test: inChPerGroup is
+ * derived from the INPUT's channel dim but indexes the WEIGHT-sized grad
+ * buffer ([Cin, Cout/groups, K] here, so the guard checks input channels
+ * against weight dim[0]). Zero codes, valid per-tensor geometry, fixture
+ * input length -- only the channel guard can fire. */
+void testConvT1dCalcWeightGradsBfpRejectsInputChannelMismatch(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layer_t *convT = buildBfpConvTBackwardLayer(floatQ, 1);
+    convT->config->conv1dTransposed->weightGradMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+
+    size_t dims[] = {(size_t)kConvTBfpBatch, (size_t)kConvTBfpInChannels + 1,
+                     (size_t)kConvTBfpBwdInputLength};
+    int32_t zeroCodes[12] = {0}; /* kConvTBfpBatch * (kConvTBfpInChannels+1) * BwdInputLength */
+    uint8_t exponents[1] = {127};
+    tensor_t *forwardInput =
+        buildBfpStoredTensor(3, dims, zeroCodes, exponents, (uint8_t)kConvTBfpBwdMantissaBits,
+                             (uint8_t)kConvTBfpBwdExponentBits, 1, 0);
+    tensor_t *lossGrad = buildBfpConvTBwdLossGrad();
+
+    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedCalcWeightGradsBfp(convT->config->conv1dTransposed,
+                                                                 forwardInput, lossGrad));
+
+    freeConv1dTransposedLayer(convT);
+    freeTensor(lossGrad);
+    freeTensor(forwardInput);
+    freeQuantization(floatQ);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testConv1dTransposedForwardSingleChannelSingleBatch);
@@ -2430,5 +2459,6 @@ int main() {
     RUN_TEST(testConvT1dBackwardBfpDxConvGroups2MatchesGold);
     RUN_TEST(testConv1dTransposedCalcWeightGradsBfpRejectsFloat32Weights);
     RUN_TEST(testConv1dTransposedCalcBiasGradsBfpRejectsFloat32Weights);
+    RUN_TEST(testConvT1dCalcWeightGradsBfpRejectsInputChannelMismatch);
     return UNITY_END();
 }

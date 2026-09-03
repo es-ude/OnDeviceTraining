@@ -6013,6 +6013,52 @@ void testAccumulateFloatIntoBfpRescaleRederivesExponents(void) {
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, n);
 }
 
+void testAccumulateFloatIntoBfpRescaleClampsAtExponentCapCorner(void) {
+    /* The requantize pass's value-domain clamp (D6) is load-bearing ONLY in
+     * the deriveBfpStoredExponent cap regime -- everywhere else the freshly
+     * derived grid guarantees round(v/scale) <= qMax and the clamp is inert.
+     * The E8HighCornerSaturatesFinite fixture, driven through the accumulate
+     * engine: per-tensor m=2/e=8 (qMax 1), target code {1,0} @ stored 127
+     * (scale 1), inc {3.4e38f, 1.0f}. Pass 1: absmax 3.4e38 (the decoded 1
+     * is absorbed) naturally derives E=128 (stored 255) -> capped at 254,
+     * scale 2^127 (finite). Pass 2: 3.4e38 / 2^127 = 1.998 -> HALF_AWAY 2 >
+     * qMax -> the clamp saturates to 1; the in-range 0+1.0 flushes to 0 at
+     * this group resolution. Mutation guard: removing the clamp hands the
+     * raw 2 to packChunkGuarded, which aborts on the 2-bit range [-2,1] ->
+     * RED by crash. (2e38 would be vacuous: ratio 1.18 rounds to 1 and the
+     * clamp never bites.) */
+    size_t n = 2;
+    size_t dims[] = {2};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t seedCodes[2] = {1, 0};
+    uint8_t exponents[1] = {127};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 2,
+                       .exponentBits = 8};
+    quantization_t q;
+    initBfpQuantization(&qc, &q);
+    uint8_t data[calcNumberOfBytesForData(&q, n)];
+    byteConversion((uint8_t *)seedCodes, 32, data, 2, n);
+    tensor_t target;
+    setTensorValues(&target, data, &shape, &q, NULL);
+
+    float inc[2] = {3.4e38f, 1.0f};
+    accumulateFloatIntoBfpTensorRescale(&target, inc, n);
+
+    TEST_ASSERT_EQUAL_UINT8(254, exponents[0]);
+    float scale = bfpGroupScale(&qc, 0);
+    TEST_ASSERT_TRUE_MESSAGE(isfinite(scale), "capped top-of-range scale must be finite");
+    int32_t got[2];
+    unpackSignExtend(data, 2, 0, got, n);
+    int32_t expected[2] = {1, 0};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, n);
+}
+
 void testAccumulateFloatIntoBfpFixedGridFreshTargetDerivesGrid(void) {
     /* Zero-state {2,2} m=4/e=8 target (all-zero codes, exponents at bias):
      * the first accumulate derives the per-group grid from the increment
@@ -6374,6 +6420,38 @@ void testAccumulateTensorIntoBfpRescaleRejectsSelfAliasedIncrement(void) {
     ASSERT_EXITS_WITH_FAILURE(accumulateTensorIntoBfpRescale(&t, &t));
 }
 
+void testAccumulateTensorIntoBfpFixedGridRejectsSelfAliasedIncrement(void) {
+    /* FixedGrid twin of the Rescale alias death test above (PR #324: the
+     * funnel epilogue always passes a distinct intermediate; aliasing is a
+     * caller contract violation rejected uniformly across the twins). Seed
+     * codes {8,-4,12,8}: every doubled code fits the 6-bit range [-32,31],
+     * so the guard-absent state runs the carry path to completion and exits
+     * 0 -> the mutant is observable as a no-death RED. (The Rescale
+     * fixture's 16 would double to 32 and vacuously abort in
+     * packChunkGuarded, masking a disabled guard.) */
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    uint8_t exponents[2] = {127, 125};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 2,
+                       .groupSize = 2,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    initBfpQuantization(&qc, &q);
+    uint8_t data[calcNumberOfBytesForData(&q, n)];
+    int32_t seedCodes[4] = {8, -4, 12, 8};
+    byteConversion((uint8_t *)seedCodes, 32, data, 6, n);
+    tensor_t t;
+    setTensorValues(&t, data, &shape, &q, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(accumulateTensorIntoBfpFixedGrid(&t, &t));
+}
+
 /* ---- scaleBfpTensorInPlace (epic PR3, scaleOptimizerGradients BFP arm) ---- */
 
 void testScaleBfpTensorInPlaceExactHalving(void) {
@@ -6567,6 +6645,88 @@ void testScaleBfpTensorInPlacePerTensorMultiChunkCarriesAbsMax(void) {
     TEST_ASSERT_EQUAL_INT32_ARRAY(seedCodes, got, n);
 }
 
+/* ---- BFP engine geometry guards (final-review batch) --------------------
+ * Field-assigned configs bypass initBfpQConfigGrouped's construction-time
+ * shape check, and the accumulate/scale engines index exponents[g] under the
+ * exact-division invariant (numGroups * groupSize == n): a violating
+ * geometry is an OOB exponent write (numGroups*gsz < n) or a silent
+ * mis-blocking (> n) -- validateBfpQConfigShape at the three engine entries
+ * rejects both, covering all five public entry points exactly once. One
+ * death test per entry family, on the shared fixture below. Fixture
+ * direction: numGroups*gsz (12) > n (8), chosen because the guard-absent
+ * state then runs to completion and exits 0 (a deterministic no-death RED);
+ * the < n direction's OOB stack read feeds garbage exponents whose inf/NaN
+ * fallout can vacuously abort in packChunkGuarded. */
+static void buildBadGeometryBfpTarget(tensor_t *t, uint8_t *data, shape_t *shape, quantization_t *q,
+                                      bfpQConfig_t *qc, size_t n) {
+    initBfpQuantization(qc, q);
+    int32_t seedCodes[8] = {1, -1, 1, -1, 1, -1, 1, -1};
+    byteConversion((uint8_t *)seedCodes, 32, data, 6, n);
+    setTensorValues(t, data, shape, q, NULL);
+}
+
+void testAccumulateFloatIntoBfpFixedGridRejectsBadGroupGeometry(void) {
+    size_t n = 8;
+    size_t dims[] = {8};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    uint8_t exponents[3] = {127, 127, 127};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 3,
+                       .groupSize = 4, /* 3*4 == 12 != 8 -> invalid for n=8 */
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    uint8_t data[6]; /* calcNumberOfBytesForData(m=6, n=8) */
+    tensor_t target;
+    buildBadGeometryBfpTarget(&target, data, &shape, &q, &qc, n);
+
+    float inc[8] = {0};
+    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorFixedGrid(&target, inc, n));
+}
+
+void testAccumulateFloatIntoBfpRescaleRejectsBadGroupGeometry(void) {
+    size_t n = 8;
+    size_t dims[] = {8};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    uint8_t exponents[3] = {127, 127, 127};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 3,
+                       .groupSize = 4,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    uint8_t data[6];
+    tensor_t target;
+    buildBadGeometryBfpTarget(&target, data, &shape, &q, &qc, n);
+
+    float inc[8] = {0};
+    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorRescale(&target, inc, n));
+}
+
+void testScaleBfpTensorInPlaceRejectsBadGroupGeometry(void) {
+    size_t n = 8;
+    size_t dims[] = {8};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    uint8_t exponents[3] = {127, 127, 127};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 3,
+                       .groupSize = 4,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    uint8_t data[6];
+    tensor_t t;
+    buildBadGeometryBfpTarget(&t, data, &shape, &q, &qc, n);
+
+    ASSERT_EXITS_WITH_FAILURE(scaleBfpTensorInPlace(&t, 0.5f));
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -6729,6 +6889,7 @@ int main(void) {
     RUN_TEST(testQuantizeFloatBufferToBfpCodesE8HighCornerSaturatesFinite);
 
     RUN_TEST(testAccumulateFloatIntoBfpRescaleRederivesExponents);
+    RUN_TEST(testAccumulateFloatIntoBfpRescaleClampsAtExponentCapCorner);
     RUN_TEST(testAccumulateFloatIntoBfpFixedGridFreshTargetDerivesGrid);
     RUN_TEST(testAccumulateFloatIntoBfpFixedGridCarriedGridAborts);
     RUN_TEST(testAccumulateTensorIntoBfpRescaleMatchesFloatWrapper);
@@ -6736,10 +6897,14 @@ int main(void) {
     RUN_TEST(testAccumulateFloatIntoBfpRescaleZeroTargetMultiChunkEqualsPack);
     RUN_TEST(testAccumulateTensorIntoBfpFixedGridFreshMultiChunkEqualsPack);
     RUN_TEST(testAccumulateTensorIntoBfpRescaleRejectsSelfAliasedIncrement);
+    RUN_TEST(testAccumulateTensorIntoBfpFixedGridRejectsSelfAliasedIncrement);
     RUN_TEST(testScaleBfpTensorInPlaceExactHalving);
     RUN_TEST(testScaleBfpTensorInPlaceGeneralFactorRederives);
     RUN_TEST(testScaleBfpTensorInPlaceZeroGroupKeepsZeroState);
     RUN_TEST(testScaleBfpTensorInPlacePerTensorMultiChunkCarriesAbsMax);
+    RUN_TEST(testAccumulateFloatIntoBfpFixedGridRejectsBadGroupGeometry);
+    RUN_TEST(testAccumulateFloatIntoBfpRescaleRejectsBadGroupGeometry);
+    RUN_TEST(testScaleBfpTensorInPlaceRejectsBadGroupGeometry);
 
     return UNITY_END();
 }

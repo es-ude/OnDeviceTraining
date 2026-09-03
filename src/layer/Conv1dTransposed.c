@@ -557,6 +557,15 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
                     outChannels, weightOutChannels);
         exit(1);
     }
+    /* inChPerGroup below is derived from the INPUT's channel dim but indexes
+     * the WEIGHT-sized grad intermediate ([Cin, Cout/groups, K]) -- a
+     * mismatch would be an OOB write, not just a wrong result. */
+    if (inChannels != cfg->weights->param->shape->dimensions[0]) {
+        PRINT_ERROR("Conv1dTransposed backward (weightGrad): forwardInput inChannels (%zu) does "
+                    "not match weight Cin (%zu)",
+                    inChannels, cfg->weights->param->shape->dimensions[0]);
+        exit(1);
+    }
 
     bfpQConfig_t *xQC = forwardInput->quantization->qConfig;
     bfpQConfig_t *gyQC = lossGrad->quantization->qConfig;
@@ -903,8 +912,8 @@ void conv1dTransposedBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *
     bfpQConfig_t stage = {0}; /* lifetime: this frame, covers the propLoss executeOp call */
     if (anyBfpBackward) {
         if (weightTensor->quantization->type != BFP) {
-            PRINT_ERROR("ConvT1d backward: ARITH_BFP math slots require BFP-stored weights (the "
-                        "width anchor for FLOAT32-operand staging; FLOAT32-init + "
+            PRINT_ERROR("Conv1dTransposed backward: ARITH_BFP math slots require BFP-stored "
+                        "weights (the width anchor for FLOAT32-operand staging; FLOAT32-init + "
                         "requantizeTensorInPlace, see docs/conventions/arithmetic-bfp.md); got "
                         "dtype %d",
                         (int)weightTensor->quantization->type);

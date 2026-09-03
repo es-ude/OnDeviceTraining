@@ -1087,6 +1087,90 @@ void testAccDynamicSymInt32IntermediateIntoBfpTargetMatchesTensorTwin(void) {
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, n);
 }
 
+/* The 4th cell of the BFP accumulateOut dispatch matrix (TENSOR intermediate
+ * x OUT_ACC_FIXED_SCALE), the one the three tests above leave unpinned: an
+ * ARITH_SYM_INT32 raw intermediate under FIXED_SCALE must reach the
+ * FixedGrid tensor twin. Two calls on a zero-state target (the CarriesGrid
+ * shape, mantissas * 0.25 = its float literals exactly): call 1 derives
+ * {127,129} from the increment alone, call 2 must CARRY that grid -- its
+ * group1 sums SHRINK to absmax 4, so a mode-swap mutant (Rescale dispatched
+ * in this cell) re-derives stored 127 and codes {4,0} where carry keeps 129
+ * and {1,0} (CarriesGrid's anti-vacuity inc2; call 1 alone cannot see the
+ * swap because fresh-derive and rescale coincide on an all-zero target).
+ * Byte-for-byte against the tensor twin primitive on identical data. */
+void testAccFixedSymInt32IntermediateIntoBfpTargetCarriesGrid(void) {
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    uint8_t exponents[2] = {127, 127};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 2,
+                       .groupSize = 2,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 4,
+                       .exponentBits = 8};
+    quantization_t q;
+    uint8_t data[2];
+    tensor_t target;
+    buildBfpTarget(&target, data, &shape, &q, &qc, (int32_t[]){0, 0, 0, 0}, n);
+
+    uint8_t refExponents[2] = {127, 127};
+    bfpQConfig_t refQC = {.exponents = refExponents,
+                          .numGroups = 2,
+                          .groupSize = 2,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t refQ;
+    uint8_t refData[2];
+    tensor_t ref;
+    buildBfpTarget(&ref, refData, &shape, &refQ, &refQC, (int32_t[]){0, 0, 0, 0}, n);
+
+    quantization_t symArith;
+    symInt32QConfig_t symArithQC;
+    initSymInt32QConfig(HALF_AWAY, &symArithQC);
+    initSymInt32Quantization(&symArithQC, &symArith);
+
+    tensor_t *inc1 = buildSym(n, (int32_t[]){24, 4, 112, -28}, 0.25f);
+    executeOp(
+        &(opSpec_t){
+            .kernel = executeOpIdentityKernel,
+            .inputs = (tensor_t *[]){inc1},
+            .nInputs = 1,
+            .arithmetic = arithmeticFromQuantization(&symArith),
+            .mode = OUT_ACC_FIXED_SCALE,
+        },
+        &target);
+    accumulateTensorIntoBfpFixedGrid(&ref, inc1);
+    uint8_t expAfterCall1[2] = {exponents[0], exponents[1]};
+
+    tensor_t *inc2 = buildSym(n, (int32_t[]){4, -4, -96, 32}, 0.25f);
+    executeOp(
+        &(opSpec_t){
+            .kernel = executeOpIdentityKernel,
+            .inputs = (tensor_t *[]){inc2},
+            .nInputs = 1,
+            .arithmetic = arithmeticFromQuantization(&symArith),
+            .mode = OUT_ACC_FIXED_SCALE,
+        },
+        &target);
+    accumulateTensorIntoBfpFixedGrid(&ref, inc2);
+
+    int32_t got[4];
+    symTestUnpackSignExtend(data, 4, got, n);
+    freeTensor(inc2);
+    freeTensor(inc1);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(refExponents, exponents, 2);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(refData, data, 2);
+    TEST_ASSERT_EQUAL_UINT8(expAfterCall1[0], exponents[0]); /* carried, not re-derived */
+    TEST_ASSERT_EQUAL_UINT8(expAfterCall1[1], exponents[1]);
+    TEST_ASSERT_EQUAL_UINT8(127, exponents[0]);
+    TEST_ASSERT_EQUAL_UINT8(129, exponents[1]);
+    int32_t expected[4] = {7, 0, 1, 0};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, n);
+}
+
 /* ---- opSpec_t: ctx / auxOut / FIXED_SCALE roundingMode (spec D1+D4) --- */
 
 typedef struct {
@@ -2508,6 +2592,7 @@ int main(void) {
     RUN_TEST(testAccDynamicIntoBfpTargetRederivesExponents);
     RUN_TEST(testAccFixedIntoBfpTargetCarriesGrid);
     RUN_TEST(testAccDynamicSymInt32IntermediateIntoBfpTargetMatchesTensorTwin);
+    RUN_TEST(testAccFixedSymInt32IntermediateIntoBfpTargetCarriesGrid);
     RUN_TEST(testCtxReachesKernel);
     RUN_TEST(testAuxOutIsKernelWrittenVerbatimAndNeverFunnelConverted);
     RUN_TEST(testAccFixedScaleHonorsTargetSrRoundingMode);

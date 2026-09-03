@@ -317,7 +317,12 @@ Every `ARITH_BFP` kernel (`matmulBfpTensors`, `conv1dKernelBfp`,
   three `executeOp` backward calls (`weightGrad`/`biasGrad`/`propLoss`) — one
   template, reused across all three, rounded by each op's own
   `arithmetic.roundingMode` (never the template's), exactly mirroring the
-  forward. This is the **rule-1 mirror**: `ARITH_BFP` forward requires
+  forward. (Construction detail: Linear literally builds the ONE template in
+  `linearBackward` and reuses it across its three calls, while the
+  Conv1d/Conv1dTransposed grad wrappers each construct it per-wrapper — the
+  field values are identical, and since staging rounds by the op's
+  `arithmetic.roundingMode`, the template's own `roundingMode` field is
+  inert.) This is the **rule-1 mirror**: `ARITH_BFP` forward requires
   BFP-stored weights because the weight is the only width source a
   FLOAT32-stored operand can stage at (§5.2); the SAME requirement applies to
   backward, independently — ANY of the three backward math slots deriving
@@ -458,12 +463,15 @@ silent wrong arithmetic, not a crash.
 - **`optimizerZeroGrad`'s `BFP` arm resets exponents to bias, not just codes
   to zero.** Byte-zeroing the packed mantissa storage alone already decodes
   every code to `0.0f` regardless of exponent — the reset is *value*-inert —
-  but it is load-bearing for the NEXT accumulate: the `FixedGrid` engine's
-  "fresh vs. already-gridded" carry decision (below) reads a codes-only
-  all-zero scan to decide whether to derive a fresh grid or carry the
-  existing one; a stale non-bias exponent left behind would make the next
-  accumulate misread an all-zero-but-stale-exponent grad as "already
-  gridded" and carry forward a grid that no longer matches any live data.
+  and the NEXT accumulate does not key on it either: the `FixedGrid`
+  engine's "fresh vs. already-gridded" carry decision (below) is a
+  codes-only all-zero scan, so a byte-zeroed grad is classified fresh
+  whatever its exponents say. The exponent reset is SYM/ASYM-parity hygiene
+  (the `scales[0] = 1.f` / `zeroPoints[0] = 0` analogs): it restores the
+  canonical zero state (stored = bias) for serialization/inspection and for
+  any future consumer that DOES read a grad's exponents; pinned by the Task
+  6 e2e's exponent assertion
+  (`testBfpGradStorageTrainingAccumulatesAndSteps`).
 - **`accumulateOut`'s BFP-target arm (epic PR3 Task 5,
   `src/tensor/TensorConversion.c`)** backs the `executeOp` epilogue's
   grad-accumulation modes for a BFP-typed grad target:

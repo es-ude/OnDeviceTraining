@@ -1800,6 +1800,13 @@ void accumulateTensorIntoAsymRescale(tensor_t *target, const tensor_t *increment
  * so an ODT_SYM_GRAD_QMAXBITS-style re-check would be dead code. */
 static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *inc, size_t n) {
     bfpQConfig_t *qc = target->quantization->qConfig;
+    /* Both engines and the scale twin index exponents[g] under the
+     * exact-division invariant (numGroups * groupSize == n); a field-assigned
+     * config violating it would OOB-write the exponent array (< n) or
+     * silently mis-block (> n). Engine entry covers both wrappers once --
+     * the float* wrappers' n is caller-supplied, so it is validated here
+     * too, not just the tensor-derived one. */
+    validateBfpQConfigShape(qc, n);
     const size_t gsz = qc->groupSize == 0 ? n : qc->groupSize;
     int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
     float incBuf[ODT_CONVERSION_CHUNK_ELEMS];
@@ -1905,6 +1912,10 @@ void accumulateTensorIntoBfpFixedGrid(tensor_t *target, const tensor_t *incremen
 
 static void accumulateIntoBfpRescaleEngine(tensor_t *target, const incSrc_t *inc, size_t n) {
     bfpQConfig_t *qc = target->quantization->qConfig;
+    /* Exact-division invariant -- see the FixedGrid twin's guard comment.
+     * Must run before the oldStored[numGroups] latch below sizes off the
+     * unvalidated group count. */
+    validateBfpQConfigShape(qc, n);
     const float qMax = powf(2, (float)qc->mantissaBits - 1) - 1;
     const float qMin = -powf(2, (float)qc->mantissaBits - 1);
     const int32_t bias = bfpExponentBias(qc);
@@ -2016,6 +2027,9 @@ void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment)
 void scaleBfpTensorInPlace(tensor_t *t, float factor) {
     size_t n = calcNumberOfElementsByTensor(t);
     bfpQConfig_t *qc = t->quantization->qConfig;
+    /* Exact-division invariant -- see accumulateIntoBfpFixedGridEngine's
+     * guard comment (this twin shares the engines' exponents[g] walk). */
+    validateBfpQConfigShape(qc, n);
     const float qMax = powf(2, (float)qc->mantissaBits - 1) - 1;
     const float qMin = -powf(2, (float)qc->mantissaBits - 1);
     const int32_t bias = bfpExponentBias(qc);

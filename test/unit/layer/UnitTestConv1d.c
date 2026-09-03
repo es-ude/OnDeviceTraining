@@ -2752,6 +2752,37 @@ void testConv1dCalcBiasGradsBfpRejectsFloat32Weights(void) {
     freeQuantization(floatQ);
 }
 
+/* The BFP weightGrad kernel derives inChPerGroup from the INPUT's channel
+ * dim but indexes the WEIGHT-sized grad buffer with it -- a forwardInput
+ * whose channel count disagrees with weight Cin-per-group * groups would
+ * OOB-write the grad intermediate, reachable through the public wrapper.
+ * Zero codes, valid per-tensor geometry: the guard reads shapes only; the
+ * input length matches the bwd fixture so the upstream geometry guard
+ * stays satisfied and ONLY the channel guard can fire. */
+void testConv1dCalcWeightGradsBfpRejectsInputChannelMismatch(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layer_t *conv1d = buildBfpConv1dBackwardLayer(floatQ);
+    conv1d->config->conv1d->weightGradMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+
+    size_t dims[] = {(size_t)kConvBfpBatch, (size_t)kConvBfpInChannels + 1,
+                     (size_t)kConvBfpBwdInputLength};
+    int32_t zeroCodes[27] = {0}; /* kConvBfpBatch * (kConvBfpInChannels+1) * BwdInputLength */
+    uint8_t exponents[1] = {127};
+    tensor_t *forwardInput =
+        buildBfpStoredTensor(3, dims, zeroCodes, exponents, (uint8_t)kConvBfpBwdMantissaBits,
+                             (uint8_t)kConvBfpBwdExponentBits, 1, 0);
+    tensor_t *lossGrad = buildBfpBwdLossGrad();
+
+    ASSERT_EXITS_WITH_FAILURE(
+        conv1dCalcWeightGradsBfp(conv1d->config->conv1d, forwardInput, lossGrad));
+
+    freeConv1dLayer(conv1d);
+    freeTensor(lossGrad);
+    freeTensor(forwardInput);
+    freeQuantization(floatQ);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testConv1dForwardMultiChannelWithBias);
@@ -2815,5 +2846,6 @@ int main() {
     RUN_TEST(testConv1dBackwardBfpDxConvGroups2MatchesGold);
     RUN_TEST(testConv1dCalcWeightGradsBfpRejectsFloat32Weights);
     RUN_TEST(testConv1dCalcBiasGradsBfpRejectsFloat32Weights);
+    RUN_TEST(testConv1dCalcWeightGradsBfpRejectsInputChannelMismatch);
     return UNITY_END();
 }

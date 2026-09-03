@@ -520,6 +520,17 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
         exit(1);
     }
 
+    /* inChPerGroup below is derived from the INPUT's channel dim but indexes
+     * the WEIGHT-sized grad intermediate -- a mismatch would be an OOB
+     * write, not just a wrong result. */
+    size_t weightInChannels = cfg->weights->param->shape->dimensions[1] * cfg->groups;
+    if (inChannels != weightInChannels) {
+        PRINT_ERROR("Conv1d backward (weightGrad): forwardInput inChannels (%zu) does not match "
+                    "weight Cin-per-group * groups (%zu)",
+                    inChannels, weightInChannels);
+        exit(1);
+    }
+
     size_t groups = cfg->groups;
     size_t inChPerGroup = inChannels / groups;
     size_t outChPerGroup = outChannels / groups;

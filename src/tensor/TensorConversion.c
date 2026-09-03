@@ -1880,7 +1880,7 @@ static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *i
             idx = runEnd;
         }
         packChunkGuarded(codes, count, target->data, qc->mantissaBits, off,
-                         "accumulateFloatIntoBfpTensorFixedGrid");
+                         "accumulateIntoBfpFixedGridEngine");
     }
 }
 
@@ -1978,7 +1978,7 @@ static void accumulateIntoBfpRescaleEngine(tensor_t *target, const incSrc_t *inc
             idx = runEnd;
         }
         packChunkGuarded(codes, count, target->data, qc->mantissaBits, off,
-                         "accumulateFloatIntoBfpTensorRescale");
+                         "accumulateIntoBfpRescaleEngine");
     }
 }
 

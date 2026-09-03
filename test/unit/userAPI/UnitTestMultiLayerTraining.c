@@ -899,16 +899,32 @@ static void captureLayer0BackwardWire(void *ctx, size_t layerIdx, layerType_t la
 /* Move the BFP template off the forward wire and onto layer 1's dx wire: the
  * forward then runs entirely FLOAT32 (so the loss, which has no BFP arm, is
  * reachable) and the BFP allocation happens in initGradTensor instead --
- * initGradTensor(gradCurr, layerOutputs[1], backwardWireQ(linear1)). */
-static void moveBfpTemplateToDxWire(bfpWireFixture_t *f) {
+ * initGradTensor(gradCurr, layerOutputs[1], backwardWireQ(linear1)).
+ *
+ * pinPropLossMath == true: the fake-quant bridge (both existing callers) --
+ * propLossMath stays the FLOAT32 arithmeticFromQuantization(floatQ) already
+ * set by buildBorrowedLinearLayer, re-pinned here only to match the wire's
+ * SR_HALF_AWAY rounding.
+ * pinPropLossMath == false (Task 9): deriving ARITH_BFP for propLossMath
+ * selects Linear's native backward arm, which invokes the SAME width-anchor
+ * rule as the forward (linearForward's rule 1): ANY ARITH_BFP math slot on a
+ * layer requires that layer's OWN weights to be BFP-stored, not just the dx
+ * wire's storage config. FLOAT32-init + requantizeTensorInPlace (#270), same
+ * recipe buildBfpNativeFixture uses for layer 0's weights above -- one group
+ * per output row ([2, 6] -> numGroups=2, groupSize=6). */
+static void moveBfpTemplateToDxWire(bfpWireFixture_t *f, bool pinPropLossMath) {
     f->linear0->config->linear->outputQ = f->floatQ;
     f->linear0->config->linear->forwardMath = arithmeticFromQuantization(f->floatQ);
     f->linear1->config->linear->propLossQ = f->bfpWireQ;
-    /* Same explicit-fake-quant pin as the forward wire (Task 9 flip): a derived
-     * ARITH_BFP dx wire would select the native backward arm, which epic PR3
-     * has yet to write. */
-    f->linear1->config->linear->propLossMath =
-        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = SR_HALF_AWAY};
+    if (pinPropLossMath) {
+        f->linear1->config->linear->propLossMath =
+            (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = SR_HALF_AWAY};
+    } else {
+        f->linear1->config->linear->propLossMath = arithmeticFromQuantization(f->bfpWireQ);
+        quantization_t *w1BfpQ = quantizationInitBfpGrouped(8, 8, SR_HALF_AWAY, 2, 6);
+        requantizeTensorInPlace(getParamFromParameter(f->linear1->config->linear->weights), w1BfpQ);
+        freeQuantization(w1BfpQ);
+    }
 }
 
 /*! initGradTensor's BFP arm, live: the dx wire between the two Linears is
@@ -921,7 +937,7 @@ void testBfpDxWireAllocatesThroughInitGradTensor(void) {
     rngSetSeed(4242u);
     bfpWireFixture_t f;
     buildBfpWireFixture(&f, /*hidden=*/6, /*templateNumGroups=*/2, /*wireGroupSize=*/2);
-    moveBfpTemplateToDxWire(&f);
+    moveBfpTemplateToDxWire(&f, /*pinPropLossMath=*/true);
 
     bfpWireCapture_t cap = {0};
     trainingStats_t *stats = tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
@@ -972,7 +988,7 @@ void testBfpDxWireGroupSizeEqualToWireElementsNormalizesToPerTensor(void) {
     rngSetSeed(4242u);
     bfpWireFixture_t f;
     buildBfpWireFixture(&f, /*hidden=*/6, /*templateNumGroups=*/2, /*wireGroupSize=*/6);
-    moveBfpTemplateToDxWire(&f);
+    moveBfpTemplateToDxWire(&f, /*pinPropLossMath=*/true);
 
     bfpWireCapture_t cap = {0};
     trainingStats_t *stats = tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
@@ -1001,12 +1017,83 @@ void testInitGradTensorBfpGroupSizeMismatchDies(void) {
     rngSetSeed(4242u);
     bfpWireFixture_t f;
     buildBfpWireFixture(&f, /*hidden=*/9, /*templateNumGroups=*/2, /*wireGroupSize=*/2);
-    moveBfpTemplateToDxWire(&f);
+    moveBfpTemplateToDxWire(&f, /*pinPropLossMath=*/true);
 
     ASSERT_EXITS_WITH_FAILURE(freeTrainingStats(calculateGradsSequential(
         f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label)));
 
     freeBfpWireFixture(&f);
+}
+
+/*! Task 9 capstone: the last uncovered wire combination -- native ARITH_BFP
+ *  backward WRITING into a BFP-stored dx wire through OUT_WRITE, not just
+ *  reading one back (testBfpDxWireAllocatesThroughInitGradTensor's pinned-
+ *  FLOAT32 bridge covers the read side). moveBfpTemplateToDxWire(&f,
+ *  pinPropLossMath=false) derives layer 1's propLossMath as ARITH_BFP and
+ *  requantizes its weights to BFP (the width-anchor rule 1 requires, see the
+ *  helper's doc comment); layer 1's backward then dispatches the native
+ *  propLossKernelBfp arm and its OUT_WRITE derives the dx wire's grid
+ *  directly, no float bridge.
+ *
+ *  RED-by-construction: commenting out Linear.c's
+ *  `case ARITH_BFP: return bfpKernel;` in linearBackwardKernelForArithmetic
+ *  falls through to the dispatch default and kills the whole binary the
+ *  instant this test's first backward pass reaches layer 1's propLoss call
+ *  (PRINT_ERROR "Linear backward (propLoss): quantization type not
+ *  implemented") -- verified, then restored, before this test was accepted
+ *  green. */
+void testBfpDxWireNativeBackwardTrains(void) {
+    rngSetSeed(4242u);
+    bfpWireFixture_t f;
+    buildBfpWireFixture(&f, /*hidden=*/6, /*templateNumGroups=*/2, /*wireGroupSize=*/2);
+    moveBfpTemplateToDxWire(&f, /*pinPropLossMath=*/false);
+
+    bfpWireCapture_t cap = {0};
+    optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
+    float firstLoss = NAN;
+    float lastLoss = NAN;
+    for (size_t step = 0; step < 5; step++) {
+        trainingStats_t *stats = tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
+                                             f.input, f.label, captureLayer0BackwardWire, &cap);
+        if (step == 0) {
+            firstLoss = stats->loss;
+        }
+        lastLoss = stats->loss;
+        freeTrainingStats(stats);
+        sgdFns.step(f.sgd);
+        sgdFns.zero(f.sgd);
+    }
+
+    /* CAPTURE, then FREE, then assert (Unity longjmps out of the first failure).
+     * Guarded on cap.seen: an unfired probe leaves exponentBits at its zero-init
+     * 0, and 1 << (0 - 1) is a negative shift (UB) -- the cap.seen assert below
+     * already fails that case, so this loop is skipped rather than risking it. */
+    bool wireExponentMoved = false;
+    if (cap.seen) {
+        uint8_t zeroState = (uint8_t)((1 << (cap.exponentBits - 1)) - 1);
+        for (size_t g = 0; g < cap.numGroups && g < BFP_WIRE_MAX_GROUPS; g++) {
+            if (cap.exponents[g] != zeroState) {
+                wireExponentMoved = true;
+            }
+        }
+    }
+
+    freeBfpWireFixture(&f);
+
+    TEST_ASSERT_TRUE_MESSAGE(cap.seen, "layer-0 agrad probe must have fired");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, cap.type,
+                                  "the dx wire must be BFP-stored (native OUT_WRITE)");
+    TEST_ASSERT_EQUAL_UINT(6, cap.numElements);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(3, cap.numGroups,
+                                   "dx-wire numGroups must be DERIVED (6 / 2), not the template's");
+    TEST_ASSERT_EQUAL_UINT(2, cap.groupSize);
+    TEST_ASSERT_TRUE_MESSAGE(wireExponentMoved,
+                             "the native propLoss OUT_WRITE must derive the wire's grid: at "
+                             "least one group exponent must leave the zero state");
+    TEST_ASSERT_TRUE_MESSAGE(isfinite(firstLoss) && isfinite(lastLoss),
+                             "native BFP dx-wire training losses must be finite");
+    TEST_ASSERT_TRUE_MESSAGE(lastLoss < firstLoss,
+                             "native BFP dx-wire training must converge (loss must decrease)");
 }
 
 /*! Owning factories deep-copy outputQ/propLossQ, and for BFP that copy owns a
@@ -1483,6 +1570,7 @@ int main(void) {
     RUN_TEST(testBfpWireGroupSizeEqualToWireElementsNormalizesToPerTensor);
     RUN_TEST(testBfpDxWireGroupSizeEqualToWireElementsNormalizesToPerTensor);
     RUN_TEST(testInitGradTensorBfpGroupSizeMismatchDies);
+    RUN_TEST(testBfpDxWireNativeBackwardTrains);
     RUN_TEST(testOwningFactoryBfpOutputQFreesExponents);
     RUN_TEST(testBfpNativeForwardTrainingLossDecreasesAndGridMoves);
     RUN_TEST(testBfpPinnedFloat32BackwardTrainingLossDecreases);

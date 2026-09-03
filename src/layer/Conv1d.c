@@ -538,7 +538,7 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
     validateBfpQConfigShape(gyQC, calcNumberOfElementsByShape(lossGrad->shape));
     /* Reduction length per gw element: at most one contributor per
      * (b, outPos) pair. */
-    bfpValidateBlockHeadroom(xQC, gyQC, batch * outputLength, "conv1dKernelBfp weightGrad");
+    bfpValidateBlockHeadroom(xQC, gyQC, batch * outputLength, "conv1dCalcWeightGradsBfp");
 
     int32_t const *xArr = (int32_t const *)forwardInput->data;
     int32_t const *gyArr = (int32_t const *)lossGrad->data;

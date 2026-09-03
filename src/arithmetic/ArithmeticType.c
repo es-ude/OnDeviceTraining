@@ -26,14 +26,12 @@ arithmetic_t arithmeticFromQuantization(const quantization_t *q) {
          *    free: pin the math slots to ARITH_FLOAT32 explicitly instead of
          *    deriving them (the funnel then dequantizes BFP operands as it
          *    does for any other storage-only dtype).
-         *  - PR2 ships the FORWARD only (Linear/Conv1d/ConvT1d). A model that
-         *    derives all four layer slots from one BFP config -- what
-         *    layerQuantInitUniform does -- trains its forward natively and
-         *    then dies at the layer's backward kernel dispatch (every
-         *    GEMM-family layer guards its three backward slots; the funnel's
-         *    missing-bfpStage gate backstops FLOAT32-stored operands) until
-         *    epic PR3 lands the BFP backward arms. See
-         *    docs/conventions/arithmetic-bfp.md. */
+         *  - Epic PR3: the GEMM family (Linear/Conv1d/ConvT1d) now runs
+         *    natively end-to-end -- a model that derives all four layer slots
+         *    from one BFP config -- what layerQuantInitUniform does -- trains
+         *    its forward AND backward natively. Pools/norms/softmax still
+         *    guard their BFP math slots (no native arms yet; epic PR4-PR6).
+         *    See docs/conventions/arithmetic-bfp.md. */
         a.type = ARITH_BFP;
         a.roundingMode = ((bfpQConfig_t *)q->qConfig)->roundingMode;
         break;

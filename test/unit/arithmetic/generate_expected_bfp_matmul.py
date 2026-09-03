@@ -67,9 +67,9 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 
-from sym_gold import (assert_rounding_canary, bfp_quantize_grouped, emit_float_array,
-                      emit_int32_array, emit_int32_scalar, matmul_bfp_bias_grad_ref,
-                      matmul_bfp_ref)
+from sym_gold import (assert_rounding_canary, bfp_quantize_grouped, check_exact_roundtrip,
+                      emit_float_array, emit_int32_array, emit_int32_scalar, emit_uint8_array,
+                      matmul_bfp_bias_grad_ref, matmul_bfp_ref)
 
 OUT_ROWS = 2
 OUT_COLS = 3
@@ -94,29 +94,6 @@ B_NUM_GROUPS = 9
 
 BIAS_VALUES = [2.0, -1.5, 0.5]
 BIAS_QC = {"mantissa_bits": 8, "exponent_bits": 8, "group_size": 0}
-
-
-def emit_uint8_array(name: str, values) -> str:
-    vals = [int(v) for v in values]
-    assert all(0 <= v <= 255 for v in vals), f"{name}: value outside uint8 range"
-    body = ", ".join(str(v) for v in vals)
-    return (
-        f"static const uint8_t {name}[] = {{ {body} }};\n"
-        f"static const size_t {name}_len = {len(vals)};\n"
-    )
-
-
-def check_exact_roundtrip(name, values, codes, exps, qc):
-    """Exact-float-regime pin: code * 2^(stored - bias) must reproduce the
-    input float bit-for-bit (float32 multiply by a power of two is exact)."""
-    bias = 2 ** (qc["exponent_bits"] - 1) - 1
-    gsz = len(values) if qc["group_size"] == 0 else qc["group_size"]
-    for i, v in enumerate(values):
-        scale = np.float32(np.ldexp(np.float32(1.0), np.int32(exps[i // gsz] - bias)))
-        deq = float(np.float32(np.float32(codes[i]) * scale))
-        assert deq == v, (
-            f"{name}: element {i} dequantizes to {deq}, not {v} -- fixture left "
-            "the exact float regime; pick grid-exact values")
 
 
 def main() -> int:

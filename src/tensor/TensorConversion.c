@@ -1998,6 +1998,90 @@ void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment)
     accumulateIntoBfpRescaleEngine(target, &src, n);
 }
 
+/* accumulateIntoBfpRescaleEngine's skeleton minus the increment source
+ * (factor multiply only): same chunk-aligned outer walk with run-walk group
+ * handling (group starts are not byte-aligned for arbitrary geometries, so a
+ * literal group-sequential walk cannot be built on the chunk helpers), same
+ * whole-grid latch before pass 1 overwrites qc->exponents, same one
+ * roundByMode per element in element order in pass 2 only. Unlike the
+ * accumulate engines (whose roundingMode reaches the target config via the
+ * funnel's op arithmetic), the mode here is the config's own STORAGE
+ * roundingMode by construction -- scaling is storage requantization, not an
+ * op (#282 target-owned convention). (float)mant * oldScale is exact
+ * (integer times a power of two), so the single float rounding per element
+ * in pass A/B is the trailing multiply by factor. */
+void scaleBfpTensorInPlace(tensor_t *t, float factor) {
+    size_t n = calcNumberOfElementsByTensor(t);
+    bfpQConfig_t *qc = t->quantization->qConfig;
+    const float qMax = powf(2, (float)qc->mantissaBits - 1) - 1;
+    const float qMin = -powf(2, (float)qc->mantissaBits - 1);
+    const int32_t bias = bfpExponentBias(qc);
+    const uint8_t maxStored = (uint8_t)((1u << qc->exponentBits) - 1u);
+    const size_t gsz = qc->groupSize == 0 ? n : qc->groupSize;
+    int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
+    int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
+
+    uint8_t oldStored[qc->numGroups];
+    memcpy(oldStored, qc->exponents, qc->numGroups);
+
+    /* pass 1: chunked absmax of (mant * oldScale * factor), closing each
+     * group at its boundary run and deriving its fresh exponent into
+     * qc->exponents -- no rounding, no data writes. An all-zero group's
+     * absmax is 0 -> deriveBfpStoredExponent re-derives the zero state
+     * (stored = bias), never a shifted stale exponent. */
+    float absMax = 0.f;
+    for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+        unpackSignExtendChunk(t->data, qc->mantissaBits, off, count, mant);
+        size_t chunkEnd = off + count;
+        size_t idx = off;
+        while (idx < chunkEnd) {
+            size_t g = idx / gsz;
+            size_t groupEnd = (g + 1) * gsz;
+            size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
+            const float oldScale = ldexpf(1.f, (int32_t)oldStored[g] - bias);
+            for (size_t i = idx; i < runEnd; i++) {
+                float v = fabsf((float)mant[i - off] * oldScale * factor);
+                if (v > absMax) {
+                    absMax = v;
+                }
+            }
+            if (runEnd == groupEnd) {
+                deriveBfpStoredExponent(absMax, qMax, bias, maxStored, &qc->exponents[g]);
+                absMax = 0.f;
+            }
+            idx = runEnd;
+        }
+    }
+
+    /* pass 2: chunked read-modify-write -- decode at the LATCHED old scale,
+     * multiply, requantize at the fresh one; clamp before the pack guard
+     * (value-domain saturation, D6 -- a huge factor saturates, the correct
+     * storage-requantization semantic, never the FixedGrid abort). In-place
+     * safe: chunk k is fully read before chunk k is rewritten and the code
+     * width is unchanged. */
+    for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+        unpackSignExtendChunk(t->data, qc->mantissaBits, off, count, mant);
+        size_t chunkEnd = off + count;
+        size_t idx = off;
+        while (idx < chunkEnd) {
+            size_t g = idx / gsz;
+            size_t groupEnd = (g + 1) * gsz;
+            size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
+            const float oldScale = ldexpf(1.f, (int32_t)oldStored[g] - bias);
+            const float scale = bfpGroupScale(qc, g);
+            for (size_t i = idx; i < runEnd; i++) {
+                float v = (float)mant[i - off] * oldScale * factor;
+                codes[i - off] = clampInt32(roundByMode(v / scale, qc->roundingMode), (int32_t)qMin,
+                                            (int32_t)qMax);
+            }
+            idx = runEnd;
+        }
+        packChunkGuarded(codes, count, t->data, qc->mantissaBits, off, "scaleBfpTensorInPlace");
+    }
+}
+
 /* SYM_INT32 -> SYM_INT32 grad accumulate: reproduces addSymInt32TensorsInplace's
  * Strategy-A semantics (dequant both -> float add -> fresh-absmax requant with
  * the TARGET's roundingMode) directly over the flat int32 mantissa arrays --

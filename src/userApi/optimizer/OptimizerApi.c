@@ -15,6 +15,7 @@
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
+#include "TensorConversion.h"
 
 void scaleOptimizerGradients(optimizer_t *optimizer, float factor) {
     /* Validation: warn (currently via PRINT_ERROR — see #151 for unified
@@ -90,9 +91,22 @@ void scaleOptimizerGradients(optimizer_t *optimizer, float factor) {
             gradQ->scales[0] *= factor;
             break;
         }
+        case BFP: {
+            /* No O(1) fold here: BFP dequant is mantissa * 2^(E-bias) per
+             * group, and an arbitrary factor is not a power of two -- an
+             * honest O(n) value-domain repack (scaleBfpTensorInPlace: fresh
+             * exponents from the scaled absmax, requant with the grad
+             * config's own storage roundingMode). No grouped gate, unlike
+             * the SYM/ASYM fold arms above: the primitive handles grouped
+             * tensors correctly, so a hand-assembled grouped grad is scaled
+             * right rather than corrupted (in-tree grads are per-tensor
+             * anyway, gradInit's carrier gate, #300 axis). */
+            scaleBfpTensorInPlace(param->grad, factor);
+            break;
+        }
         default:
             PRINT_ERROR("scaleOptimizerGradients: unsupported gradient qtype "
-                        "(accepted: FLOAT32, SYM_INT32, SYM, ASYM; INT32/BOOL "
+                        "(accepted: FLOAT32, SYM_INT32, SYM, ASYM, BFP; INT32/BOOL "
                         "grad storage remains unsupported, #261)");
             exit(1);
         }

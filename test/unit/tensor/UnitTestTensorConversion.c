@@ -6374,6 +6374,199 @@ void testAccumulateTensorIntoBfpRescaleRejectsSelfAliasedIncrement(void) {
     ASSERT_EXITS_WITH_FAILURE(accumulateTensorIntoBfpRescale(&t, &t));
 }
 
+/* ---- scaleBfpTensorInPlace (epic PR3, scaleOptimizerGradients BFP arm) ---- */
+
+void testScaleBfpTensorInPlaceExactHalving(void) {
+    /* Grouped {2,2} m=6/e=8 (qMax 31, bias 127) seeded on CANONICAL
+     * absmax-derived grids -- the exponents are exactly what
+     * deriveBfpStoredExponent yields for the dequantized values, so a
+     * power-of-two factor must reproduce the fold identity:
+     *   group0: codes {16,-8} @ stored 127 (scale 1) -> values {16,-8};
+     *     absMax 16 -> 16/31 in (2^-1, 1) -> E=0 (canonical seed). x0.5 ->
+     *     values {8,-4}, absMax 8 -> 8/31 in (2^-2, 2^-1) -> E=-1 -> stored
+     *     126, scale 0.5, codes 8/0.5={16,-8}.
+     *   group1: codes {16,8} @ stored 125 (scale 0.25) -> values {4,2};
+     *     absMax 4 -> E=-2 (canonical). x0.5 -> values {2,1}, absMax 2 ->
+     *     E=-3 -> stored 124, scale 0.125, codes {16,8}.
+     * Every step exact in float32 (integers and powers of two only), so the
+     * roundByMode draw is deterministic regardless of mode: exponents drop by
+     * exactly 1 and the packed payload is byte-for-byte unchanged.
+     * Mutation guard (the latch): decoding pass 2 at the FRESH exponent
+     * instead of the latched OLD one halves the codes ({8,-4,8,4}) -> RED. */
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t seedCodes[4] = {16, -8, 16, 8};
+    uint8_t exponents[2] = {127, 125};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 2,
+                       .groupSize = 2,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    initBfpQuantization(&qc, &q);
+    uint8_t data[calcNumberOfBytesForData(&q, n)];
+    byteConversion((uint8_t *)seedCodes, 32, data, 6, n);
+    uint8_t bytesBefore[sizeof(data)];
+    memcpy(bytesBefore, data, sizeof(data));
+    tensor_t t;
+    setTensorValues(&t, data, &shape, &q, NULL);
+
+    scaleBfpTensorInPlace(&t, 0.5f);
+
+    TEST_ASSERT_EQUAL_UINT8(126, exponents[0]);
+    TEST_ASSERT_EQUAL_UINT8(124, exponents[1]);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(bytesBefore, data, sizeof(data));
+    int32_t got[4];
+    unpackSignExtend(data, 6, 0, got, n);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(seedCodes, got, n);
+}
+
+void testScaleBfpTensorInPlaceGeneralFactorRederives(void) {
+    /* Grouped {2,2} m=6/e=8, factor 1.f/3.f -- hand-derived in the exact
+     * float regime. float(1/3) = 11184811 * 2^-25 (odd mantissa, round-up of
+     * 4/3's 24-bit significand). The fixture values make every float product
+     * land sub-half-ulp from a clean value, so the IEEE multiply rounds it
+     * EXACTLY there:
+     *   24*f = (2^28+8)*2^-25 = 8 + 2^-22   -> rounds to 8.0f  (ulp(8)=2^-20)
+     *   12*f = (2^27+4)*2^-25 = 4 + 2^-23   -> rounds to 4.0f
+     *    3*f = (2^25+1)*2^-25 = 1 + 2^-25   -> rounds to 1.0f
+     *  1.5*f = (2^24+.5)*2^-25 = .5 + 2^-26 -> rounds to 0.5f
+     *   group0: codes {24,-12} @ stored 127 (scale 1, canonical: 24/31 in
+     *     (2^-1, 1) -> E=0) -> values {24,-12} -> scaled {8,-4}; absMax 8 ->
+     *     E=-1 -> stored 126, scale 0.5 -> codes {16,-8}.
+     *   group1: codes {24,12} @ stored 124 (scale 0.125, canonical: 3/31 in
+     *     (2^-4, 2^-3) -> E=-3) -> values {3,1.5} -> scaled {1,0.5}; absMax 1
+     *     -> 1/31 in (2^-5, 2^-4) -> E=-4 -> stored 123, scale 0.0625 ->
+     *     codes {16,8}.
+     * All requant quotients are exact integers -> deterministic roundByMode.
+     * Mutation guard: dropping the factor from pass 1 keeps the old exponents
+     * ({127,124}) -> RED; the latch mutant shrinks the codes -> RED. */
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t seedCodes[4] = {24, -12, 24, 12};
+    uint8_t exponents[2] = {127, 124};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 2,
+                       .groupSize = 2,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    initBfpQuantization(&qc, &q);
+    uint8_t data[calcNumberOfBytesForData(&q, n)];
+    byteConversion((uint8_t *)seedCodes, 32, data, 6, n);
+    tensor_t t;
+    setTensorValues(&t, data, &shape, &q, NULL);
+
+    scaleBfpTensorInPlace(&t, 1.f / 3.f);
+
+    TEST_ASSERT_EQUAL_UINT8(126, exponents[0]);
+    TEST_ASSERT_EQUAL_UINT8(123, exponents[1]);
+    int32_t got[4];
+    unpackSignExtend(data, 6, 0, got, n);
+    int32_t expected[4] = {16, -8, 16, 8};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, n);
+}
+
+void testScaleBfpTensorInPlaceZeroGroupKeepsZeroState(void) {
+    /* An all-zero group must be a clean numeric no-op: its scaled absmax is 0,
+     * so deriveBfpStoredExponent's zero-state arm re-derives stored = bias and
+     * the codes stay 0 -- exactly the state a post-zeroGrad optimizer grad is
+     * in when scaleOptimizerGradients touches it. Grouped {2,2} m=6/e=8:
+     *   group0: codes {0,0} @ stored 127 (the zero state) -> stays {0,0} @ 127;
+     *   group1: codes {16,8} @ stored 125 (values {4,2}, canonical) -> x0.5 ->
+     *     values {2,1} -> E=-3 -> stored 124, codes {16,8} (halving fold).
+     * Mutation guard: the naive power-of-two fold (exponents[g] -= 1, skip the
+     * re-derivation) passes the ExactHalving test BY DESIGN (that identity is
+     * what it implements) but corrupts the zero state here: group0's exponent
+     * would leave bias (127 -> 126) with all-zero codes -> RED. */
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t seedCodes[4] = {0, 0, 16, 8};
+    uint8_t exponents[2] = {127, 125};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 2,
+                       .groupSize = 2,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    initBfpQuantization(&qc, &q);
+    uint8_t data[calcNumberOfBytesForData(&q, n)];
+    byteConversion((uint8_t *)seedCodes, 32, data, 6, n);
+    tensor_t t;
+    setTensorValues(&t, data, &shape, &q, NULL);
+
+    scaleBfpTensorInPlace(&t, 0.5f);
+
+    TEST_ASSERT_EQUAL_UINT8(127, exponents[0]);
+    TEST_ASSERT_EQUAL_UINT8(124, exponents[1]);
+    int32_t got[4];
+    unpackSignExtend(data, 6, 0, got, n);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(seedCodes, got, n);
+}
+
+void testScaleBfpTensorInPlacePerTensorMultiChunkCarriesAbsMax(void) {
+    /* Per-tensor (groupSize 0 -> gsz = n) with n = 300 > ODT_CONVERSION_CHUNK_ELEMS
+     * (one full 256-chunk + a 44-tail): the PRODUCTION shape of an optimizer
+     * grad (per-tensor by gradInit's gate; a 128x64 Linear grad spans 32
+     * chunks). The single exponent derives from an absmax carried ACROSS the
+     * chunk boundary -- the group closes only in the final chunk, so the
+     * dominant element sits in the NON-final chunk on purpose (index 0).
+     * m=6/e=8 (qMax 31, bias 127), canonical seed on stored 129 (scale 4):
+     *   code[0] = 25 -> value 100 (absMax; 100/31 in (2^1, 2^2] -> E=2);
+     *   code[1..299] = 1 -> value 4.
+     * x0.5 -> values {50, 2, ...}: absMax 50 -> 50/31 in (2^0, 2^1] -> E=1
+     * -> stored 128, scale 2 -> codes 50/2 = 25 and 2/2 = 1, all exact
+     * integers (deterministic roundByMode) -- the halving fold: exponent
+     * drops by 1, all 300 codes bit-unchanged. Also the only test driving
+     * packChunkGuarded at off=256 for this function.
+     * Mutation guard (cross-chunk carry): resetting absMax at each chunk
+     * start derives the exponent from the TAIL alone (absmax 2 -> E=-3 ->
+     * stored 124, scale 0.125) and element 0 saturates at qMax
+     * (50/0.125 = 400 -> clamp 31 != 25) -> RED. */
+    size_t n = 300;
+    size_t dims[] = {300};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t seedCodes[300];
+    seedCodes[0] = 25;
+    for (size_t i = 1; i < 300; i++) {
+        seedCodes[i] = 1;
+    }
+    uint8_t exponents[1] = {129};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    initBfpQuantization(&qc, &q);
+    uint8_t data[calcNumberOfBytesForData(&q, n)];
+    byteConversion((uint8_t *)seedCodes, 32, data, 6, n);
+    tensor_t t;
+    setTensorValues(&t, data, &shape, &q, NULL);
+
+    scaleBfpTensorInPlace(&t, 0.5f);
+
+    TEST_ASSERT_EQUAL_UINT8(128, exponents[0]);
+    int32_t got[300];
+    unpackSignExtend(data, 6, 0, got, n);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(seedCodes, got, n);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -6543,6 +6736,10 @@ int main(void) {
     RUN_TEST(testAccumulateFloatIntoBfpRescaleZeroTargetMultiChunkEqualsPack);
     RUN_TEST(testAccumulateTensorIntoBfpFixedGridFreshMultiChunkEqualsPack);
     RUN_TEST(testAccumulateTensorIntoBfpRescaleRejectsSelfAliasedIncrement);
+    RUN_TEST(testScaleBfpTensorInPlaceExactHalving);
+    RUN_TEST(testScaleBfpTensorInPlaceGeneralFactorRederives);
+    RUN_TEST(testScaleBfpTensorInPlaceZeroGroupKeepsZeroState);
+    RUN_TEST(testScaleBfpTensorInPlacePerTensorMultiChunkCarriesAbsMax);
 
     return UNITY_END();
 }

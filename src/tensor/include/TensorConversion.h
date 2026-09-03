@@ -146,6 +146,21 @@ void accumulateFloatIntoBfpTensorRescale(tensor_t *target, const float *inc, siz
 void accumulateTensorIntoBfpFixedGrid(tensor_t *target, const tensor_t *increment);
 void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment);
 
+/* In-place value-domain scale of a BFP tensor by an arbitrary float factor
+ * (scaleOptimizerGradients's BFP arm: REDUCTION_MEAN mean-scale, clip
+ * coefficients). BFP has no O(1) scale fold -- a general factor moves every
+ * group's absmax off its 2^E grid -- so this is an honest O(n) two-pass
+ * repack: pass 1 re-derives every group's exponent from the scaled absmax
+ * (old exponents latched first); pass 2 requantizes with the config's OWN
+ * storage roundingMode (storage requantization, not an op -- #282
+ * target-owned convention), one roundByMode per element in element order,
+ * clamped (value-domain saturation, D6). A power-of-two factor is exact:
+ * exponents shift, codes bit-unchanged -- except where the derived exponent
+ * saturates at 0 or the cap (D6), where codes shift instead. An all-zero
+ * group re-derives the zero state (stored = bias). Grouped-capable;
+ * direct-call only, not a conversionMatrix cell. */
+void scaleBfpTensorInPlace(tensor_t *t, float factor);
+
 extern conversionFunction_t conversionMatrix[7][7];
 
 #endif // TENSOR_CONVERSION_H

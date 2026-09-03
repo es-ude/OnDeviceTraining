@@ -28,6 +28,7 @@
 #include "TensorApi.h"
 #include "TraceApi.h"
 #include "TrainingBatchDefault.h"
+#include "TrainingEpochDefault.h"
 #include "TrainingLoopApi.h"
 #include "unity.h"
 
@@ -1390,6 +1391,85 @@ void testBfpGradStorageTrainingAccumulatesAndSteps(void) {
         "the zeroGrad BFP arm (Step 3) must reset every exponent back to bias after the step");
 }
 
+/* ===========================================================================
+ * BFP epic PR3 Task 8 capstone: REDUCTION_MEAN through the DEFAULT epoch path.
+ * ======================================================================== */
+
+/* Two-sample dataset for the REDUCTION_MEAN e2e below -- file-scope because
+ * the dataLoader callbacks carry no context pointer (the epochDataset pattern
+ * in UnitTestTrainingLoopApi.c). Built/freed inside the one test that uses it. */
+static tensor_t *bfpMeanEpochItems[2];
+static tensor_t *bfpMeanEpochLabels[2];
+
+static sample_t *getBfpMeanEpochSample(size_t id) {
+    sample_t *s = reserveMemory(sizeof(sample_t));
+    s->item = bfpMeanEpochItems[id];
+    s->label = bfpMeanEpochLabels[id];
+    return s;
+}
+
+static size_t getBfpMeanEpochDatasetSize() {
+    return 2;
+}
+
+/*! Task 8's load-bearing e2e: the Task 6 fixture (native BFP forward + BFP
+ *  weight-grad storage) driven through the DEFAULT TrainingLoopApi epoch path
+ *  (trainingEpochDefault) with defaultLossConfig's backwardReduction ==
+ *  REDUCTION_MEAN -- so every batch runs TrainingEpochDefault.c's mean-scale
+ *  branch: computeMeanScale -> scaleOptimizerGradients over a MIXED optimizer
+ *  (layer 0's weight grad BFP, every other grad FLOAT32) -> step -> zero.
+ *  Before Task 8's BFP arm, scaleOptimizerGradients's default arm exit(1)s on
+ *  the BFP grad the moment the first batch completes -- that process death is
+ *  this test's RED, and the finite decreasing loss is the proof the last gap
+ *  in the default epoch loop is closed. */
+void testBfpGradStorageTrainsUnderReductionMean(void) {
+    rngSetSeed(1717u);
+    quantization_t *gradKnob = quantizationInitBfp(8, 8, HALF_AWAY);
+    bfpNativeFixture_t f;
+    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false, gradKnob);
+    freeQuantization(gradKnob);
+
+    bfpMeanEpochItems[0] = buildFloatTensor2D(1, 3, (float[]){1.0f, 2.0f, 3.0f});
+    bfpMeanEpochLabels[0] = buildFloatTensor2D(1, 2, (float[]){0.2f, -0.3f});
+    bfpMeanEpochItems[1] = buildFloatTensor2D(1, 3, (float[]){0.5f, -1.0f, 2.0f});
+    bfpMeanEpochLabels[1] = buildFloatTensor2D(1, 2, (float[]){-0.1f, 0.4f});
+    dataLoader_t *dl = dataLoaderInit(getBfpMeanEpochSample, getBfpMeanEpochDatasetSize, 1, NULL,
+                                      NULL, false, 0, true);
+
+    tensor_t *w0Grad = getGradFromParameter(f.linear0->config->linear->weights);
+    float firstEpochLoss = NAN;
+    float lastEpochLoss = NAN;
+    for (size_t epoch = 0; epoch < 8; epoch++) {
+        float epochLoss = trainingEpochDefault(f.model, 2, defaultLossConfig(MSE), dl, f.sgd,
+                                               calculateGradsSequential, REDUCTION_MEAN);
+        if (epoch == 0) {
+            firstEpochLoss = epochLoss;
+        }
+        lastEpochLoss = epochLoss;
+    }
+
+    /* CAPTURE, then FREE (reverse init order), then assert. */
+    int gradTypeAfter = (int)w0Grad->quantization->type;
+    size_t gradNumGroupsAfter = ((bfpQConfig_t *)w0Grad->quantization->qConfig)->numGroups;
+
+    freeDataLoader(dl);
+    freeTensor(bfpMeanEpochLabels[1]);
+    freeTensor(bfpMeanEpochItems[1]);
+    freeTensor(bfpMeanEpochLabels[0]);
+    freeTensor(bfpMeanEpochItems[0]);
+    freeBfpNativeFixture(&f);
+
+    TEST_ASSERT_TRUE_MESSAGE(isfinite(firstEpochLoss) && isfinite(lastEpochLoss),
+                             "REDUCTION_MEAN epoch losses must stay finite with BFP grad storage");
+    TEST_ASSERT_TRUE_MESSAGE(lastEpochLoss < firstEpochLoss,
+                             "the default epoch path (mean-scale -> step -> zero per batch) must "
+                             "converge with BFP-stored weight grads");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, gradTypeAfter,
+                                  "weight grad must stay BFP-stored after epoch training");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(1, gradNumGroupsAfter,
+                                     "grads are per-tensor-only (#300 axis)");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMultiLayerBackward_WithCrossEntropy_DoesNotCrash);
@@ -1407,5 +1487,6 @@ int main(void) {
     RUN_TEST(testBfpNativeForwardTrainingLossDecreasesAndGridMoves);
     RUN_TEST(testBfpPinnedFloat32BackwardTrainingLossDecreases);
     RUN_TEST(testBfpGradStorageTrainingAccumulatesAndSteps);
+    RUN_TEST(testBfpGradStorageTrainsUnderReductionMean);
     return UNITY_END();
 }

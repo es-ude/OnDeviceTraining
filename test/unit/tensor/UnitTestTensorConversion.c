@@ -6727,6 +6727,60 @@ void testScaleBfpTensorInPlaceRejectsInfiniteFactor(void) {
     ASSERT_EXITS_WITH_FAILURE(scaleBfpTensorInPlace(&t, INFINITY));
 }
 
+/* ---- scale-path overflow at the exponent cap (follow-up batch, PR #422) --
+ * The reachable overflow: the factor is a perfectly ordinary FINITE 2.0f,
+ * but a grid already sitting AT the cap has no headroom left, so the pass-2
+ * product leaves float32 entirely. Hand-derived, per-tensor m=8/e=8:
+ *   qMax = 2^7 - 1 = 127, qMin = -2^7 = -128, bias = 127,
+ *   cap = min(maxStored 255, bias + 127) = 254 -> oldScale = 2^127
+ *         = 1.7014e38, the largest finite float32 power of two.
+ *   mant  100: 100 * 2^127 = 1.70e40 > FLT_MAX 3.4028e38   -> +inf
+ *   mant -100:                                             -> -inf
+ *   mant    1: 1 * 2^127 finite, then * 2.0f = 2^128       -> +inf
+ *   mant    0: 0 * anything * anything = 0 exactly (the one finite element)
+ * pass 1: absMax = inf -> the exponent authority saturates at the cap, so
+ *   the fresh stored exponent is 254 again (scale 2^127).
+ * pass 2: q = v / 2^127 is +-inf for the three overflowed elements. The
+ *   float-domain clamp to [qMin, qMax] maps +inf -> 127 and -inf -> -128
+ *   BEFORE roundByMode is called -- (int32_t)round(+-inf) is undefined
+ *   (C17 6.3.1.4) -- and the zero element stays 0.
+ * Expected: exponent 254, codes {127, -128, 127, 0}. Saturation, not a crash
+ * and not garbage: D6's value-domain discipline one step past the
+ * finite-absmax case testQuantizeFloatBufferToBfpCodesE8HighCornerSaturates-
+ * Finite already pins.
+ * Mutation note: dropping the float pre-clamp is observable only where the
+ * arithmetic is UNDEFINED, so the kill is platform-dependent by nature --
+ * arm64's saturating fcvtzs happens to land on the same two codes, x86-64's
+ * cvttsd2si yields INT32_MIN for BOTH signs (+inf -> -128 != 127 -> RED).
+ * The preset-independent kill is unit_test_ubsan's float-cast-overflow,
+ * which traps the pre-clamp-free conversion on every platform. */
+void testScaleBfpTensorInPlaceCapRegimeSaturatesOnOverflow(void) {
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    int32_t seedCodes[4] = {100, -100, 1, 0};
+    uint8_t exponents[1] = {254};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 8,
+                       .exponentBits = 8};
+    quantization_t q;
+    uint8_t data[4]; /* calcNumberOfBytesForData(m=8, n=4) */
+    tensor_t t;
+    buildPerTensorBfpFixture(&t, data, &shape, &q, &qc, seedCodes, n);
+
+    scaleBfpTensorInPlace(&t, 2.0f);
+
+    TEST_ASSERT_EQUAL_UINT8(254, exponents[0]);
+    int32_t got[4];
+    unpackSignExtend(data, 8, 0, got, n);
+    int32_t expected[4] = {127, -128, 127, 0};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, n);
+}
+
 /* ---- BFP engine geometry guards (final-review batch) --------------------
  * Field-assigned configs bypass initBfpQConfigGrouped's construction-time
  * shape check, and the accumulate/scale engines index exponents[g] under the
@@ -6987,6 +7041,7 @@ int main(void) {
     RUN_TEST(testScaleBfpTensorInPlacePerTensorMultiChunkCarriesAbsMax);
     RUN_TEST(testScaleBfpTensorInPlaceRejectsNaNFactor);
     RUN_TEST(testScaleBfpTensorInPlaceRejectsInfiniteFactor);
+    RUN_TEST(testScaleBfpTensorInPlaceCapRegimeSaturatesOnOverflow);
     RUN_TEST(testAccumulateFloatIntoBfpFixedGridRejectsBadGroupGeometry);
     RUN_TEST(testAccumulateFloatIntoBfpRescaleRejectsBadGroupGeometry);
     RUN_TEST(testScaleBfpTensorInPlaceRejectsBadGroupGeometry);

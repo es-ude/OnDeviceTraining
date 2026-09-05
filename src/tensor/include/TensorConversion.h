@@ -165,7 +165,10 @@ void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment)
  * clamped (value-domain saturation, D6). A power-of-two factor is exact:
  * exponents shift, codes bit-unchanged -- except where the derived exponent
  * saturates at 0 or the cap (D6), where codes shift instead. An all-zero
- * group re-derives the zero state (stored = bias). Grouped-capable;
+ * group re-derives the zero state (stored = bias). A group already sitting
+ * at the exponent cap has no headroom left, so even a finite factor can
+ * overflow its scaled values to +-inf: those saturate to the code range
+ * (the clamp runs in the float domain, before the round). Grouped-capable;
  * direct-call only, not a conversionMatrix cell.
  * `factor` MUST be finite: a non-finite factor fail-fasts (PRINT_ERROR +
  * exit(1)) because a BFP grid has no NaN/inf code -- unlike the FLOAT32/

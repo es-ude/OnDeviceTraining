@@ -77,6 +77,11 @@ void requantSymInt32TensorToScale(tensor_t *inputTensor, tensor_t *outputTensor)
  * OUT_WRITE epilogue). */
 void requantBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor);
 /* The single BFP exponent authority (frexpf snap-up, D6 clamp both ends).
+   A NON-FINITE absMax (inf or NaN -- an overflowed product in a caller's
+   pass 1) has no derivable exponent and saturates at the cap, D6's high
+   regime taken to its limit: the block's mantissas then clamp to the code
+   range under the largest FINITE scale, instead of frexpf's unspecified
+   result leaking an arbitrary exponent into the emit pass.
    The funnel's staging quantizer and (since PR2) wire OUT_WRITE epilogues
    derive exponents through this authority; epic PR3 added the grad-accumulate
    engines and the scale arm, and extended OUT_WRITE's reach to the backward's

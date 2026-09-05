@@ -5941,6 +5941,30 @@ void testDeriveBfpStoredExponentCapsAtLargestFiniteScale(void) {
     TEST_ASSERT_EQUAL_UINT8(254, stored);
 }
 
+/* Follow-up batch (PR #422): a NON-FINITE absMax has no derivable exponent --
+ * frexpf(inf) leaves both its return value and *exp unspecified (C17
+ * 7.12.6.4), so the stored byte was whatever the libm happened to write, and
+ * one step later the emit pass fed roundByMode a non-finite quotient. D6's
+ * high regime already owns "this magnitude does not fit the exponent range":
+ * an unrepresentably large absmax saturates at the cap -- the largest finite
+ * grid -- so the block's mantissas clamp to the code range instead. Reachable
+ * with an entirely finite factor: mantissa * oldScale * factor overflows
+ * float32 near the exponent cap (pass 1 of the scale path and of the rescale
+ * accumulate engine both feed their absmax straight in here). */
+void testDeriveBfpStoredExponentNonFiniteAbsMaxSaturatesAtCap(void) {
+    uint8_t stored;
+    /* e=8: maxStored 255, but the finite-scale cap binds -> bias + 127 = 254 */
+    deriveBfpStoredExponent(INFINITY, 127.f, 127, 255, &stored);
+    TEST_ASSERT_EQUAL_UINT8(254, stored);
+    /* e=4 (bias 7, maxStored 15): maxStored binds, far below bias + 127 */
+    deriveBfpStoredExponent(INFINITY, 127.f, 7, 15, &stored);
+    TEST_ASSERT_EQUAL_UINT8(15, stored);
+    /* NaN takes the same arm -- there is no exponent to derive at all, and
+     * the cap is the only answer that keeps the emit pass defined. */
+    deriveBfpStoredExponent(NAN, 127.f, 127, 255, &stored);
+    TEST_ASSERT_EQUAL_UINT8(254, stored);
+}
+
 void testQuantizeFloatBufferToBfpCodesE8HighCornerSaturatesFinite(void) {
     /* End-to-end pin of the finding-4 window {m=2, e=8}: group absMax 2e38.
      * stored caps at 254 (scale 2^127 finite), the huge value saturates to
@@ -6944,6 +6968,7 @@ int main(void) {
     RUN_TEST(testQuantizeFloatBufferToBfpCodesAllZeroKeepsZeroState);
     RUN_TEST(testDeriveBfpStoredExponentPublicBoundaries);
     RUN_TEST(testDeriveBfpStoredExponentCapsAtLargestFiniteScale);
+    RUN_TEST(testDeriveBfpStoredExponentNonFiniteAbsMaxSaturatesAtCap);
     RUN_TEST(testQuantizeFloatBufferToBfpCodesE8HighCornerSaturatesFinite);
 
     RUN_TEST(testAccumulateFloatIntoBfpRescaleRederivesExponents);

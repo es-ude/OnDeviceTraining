@@ -1009,16 +1009,27 @@ void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint8_t max
         *storedOut = (uint8_t)bias; /* zero-state parity: E = 0 */
         return;
     }
+    int cap = (int)maxStored;
+    if (cap > (int)bias + 127) {
+        cap = (int)bias + 127; /* largest stored exponent with a finite scale */
+    }
+    if (!isfinite(absMax)) {
+        /* D6's mantissa-saturation regime taken to its limit. frexpf(inf|NaN)
+         * has an unspecified result AND an unspecified *exp (C17 7.12.6.4), so
+         * deriving would emit an arbitrary exponent and leave the emit pass
+         * rounding a non-finite quotient (undefined). A magnitude too large
+         * for ANY grid saturates at the largest finite one -- mantissas then
+         * clamp to the code range, exactly as a merely-too-large FINITE absmax
+         * already does below. */
+        *storedOut = (uint8_t)cap;
+        return;
+    }
     int e;
     float frac = frexpf(absMax / qMax, &e);
     int E = (frac == 0.5f) ? e - 1 : e; /* smallest E with absMax/2^E <= qMax */
     int stored = E + (int)bias;
     if (stored < 0) {
         stored = 0; /* D6: flush-toward-zero regime */
-    }
-    int cap = (int)maxStored;
-    if (cap > (int)bias + 127) {
-        cap = (int)bias + 127; /* largest stored exponent with a finite scale */
     }
     if (stored > cap) {
         stored = cap; /* D6: mantissa-saturation regime */

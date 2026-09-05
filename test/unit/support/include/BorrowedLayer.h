@@ -60,18 +60,26 @@ static inline void freeLinearLayerShellOnly(layer_t *layer) {
     freeReservedMemory(layer);
 }
 
-/*! Conv1d analogue (groups=1); goes straight through
+/*! Conv1d analogue at an explicit `groups`; goes straight through
  *  initConv1dConfigWithWeightsAndBias. The borrowed kernel_t must outlive the
- *  layer. */
-static inline layer_t *buildBorrowedConv1dLayer(parameter_t *weights, parameter_t *bias,
-                                                kernel_t *kernel, quantization_t *q) {
+ *  layer. Weight shape must be [Cout, Cin/groups, K] — the factory's own
+ *  channel-consistency guards still apply. */
+static inline layer_t *buildBorrowedConv1dLayerGrouped(parameter_t *weights, parameter_t *bias,
+                                                       kernel_t *kernel, size_t groups,
+                                                       quantization_t *q) {
     conv1dConfig_t *cfg = reserveMemory(sizeof(conv1dConfig_t));
-    initConv1dConfigWithWeightsAndBias(cfg, kernel, weights, bias, 1u, q, q, q, q);
+    initConv1dConfigWithWeightsAndBias(cfg, kernel, weights, bias, groups, q, q, q, q);
     layerConfig_t *layerCfg = reserveMemory(sizeof(layerConfig_t));
     layerCfg->conv1d = cfg;
     layer_t *layer = reserveMemory(sizeof(layer_t));
     initLayer(layer, CONV1D, layerCfg);
     return layer;
+}
+
+/*! groups==1 shorthand (the overwhelmingly common fixture shape). */
+static inline layer_t *buildBorrowedConv1dLayer(parameter_t *weights, parameter_t *bias,
+                                                kernel_t *kernel, quantization_t *q) {
+    return buildBorrowedConv1dLayerGrouped(weights, bias, kernel, 1u, q);
 }
 
 #endif /* ODT_TEST_BORROWED_LAYER_H */

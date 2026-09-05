@@ -171,6 +171,128 @@ CONVT_BWD_GY_VALUES = [0.5, -1.0, 2.0, 1.5, -4.0, 3.0, -0.5, 1.0, 8.0, -6.0,
 CONVT_BWD_GY_QC = {"mantissa_bits": 6, "exponent_bits": 8, "group_size": 4}
 CONVT_BWD_GY_NUM_GROUPS = 5
 
+# ---- Conv1d GROUPED + PADDED weightGrad fixture (#420 C1) ----------------
+#      Closes the two coverage holes the PR3 fixtures left in
+#      Conv1d.c:weightGradKernelBfp: conv groups > 1 (the g / inLo / outLo
+#      nest and the (oc*inChPerGroup + icOffset) write index) and EXPLICIT
+#      padding (the tap-membership `continue` and the unvisited-contributor
+#      0.f tail guard, both dead under a VALID fixture).
+#
+#      Geometry reasoning (searched, not guessed -- the three constraints do
+#      not hold for arbitrary shapes):
+#        * conv_groups 2 with in/out channels 4/4 -> inChPerGroup ==
+#          outChPerGroup == 2, so BOTH `ic != icOffset` and `oc != ocOffset`
+#          on group 1. A write index built from ocOffset instead of oc, or an
+#          inLo/outLo fixed at 0, therefore collides group 1's cells onto
+#          group 0's IN BOUNDS (observable as a wrong value, not as a heap
+#          overflow the test could not report).
+#        * K=5, L=5, dilation 2, stride 1, EXPLICIT padding 3 -> effK 9,
+#          padded 11, outLen 3, and the per-window valid tap sets are
+#          {2,3} / {1,2,3} / {1,2}: taps 1..3 are PARTIALLY clipped (the
+#          `continue` fires on a tap that contributes elsewhere) while taps 0
+#          and 4 are never reachable at all (16 of the 40 cells come back
+#          exactly 0.0 through the guarded tail fold). A geometry with only
+#          fully-covered taps leaves the `continue` dead; one with only
+#          unreachable taps leaves the partial-clip case dead -- this one has
+#          both.
+#        * Operand blocking is deliberately NOT aligned with the reduction
+#          runs: x is {5 groups x 4} over 20 elements (L=5 per channel, so a
+#          group straddles the channel boundary) and gy is {3 groups x 4}
+#          over 12 (outLen=3 per channel), which is what makes folds land
+#          mid-window and keeps the disjoint-boundary pins (x-only AND
+#          gy-only fold events) satisfiable.
+#      Values are per-group grid-exact (roundtrip-asserted below) with
+#      pairwise-varied exponents, so a mis-bound exponent is observable.
+CONV_GRP_BATCH = 1
+CONV_GRP_GROUPS = 2
+CONV_GRP_IN_CHANNELS = 4
+CONV_GRP_OUT_CHANNELS = 4
+CONV_GRP_KERNEL_SIZE = 5
+CONV_GRP_INPUT_LENGTH = 5
+CONV_GRP_STRIDE = 1
+CONV_GRP_DILATION = 2
+CONV_GRP_PADDING = 3
+CONV_GRP_OUT_LEN = 3  # (5 + 2*3 - (2*4+1)) // 1 + 1
+CONV_GRP_X_VALUES = [5.0, -2.0, 0.75, 4.25,
+                     -12.0, 3.0, 5.5, -9.5,
+                     9.0, -31.0, 14.0, 2.0,
+                     -2.125, 2.75, -0.625, 1.625,
+                     56.0, -24.0, 14.0, -42.0]
+CONV_GRP_X_QC = {"mantissa_bits": 6, "exponent_bits": 8, "group_size": 4}
+CONV_GRP_X_NUM_GROUPS = 5
+CONV_GRP_GY_VALUES = [9.0, -3.5, 12.5, -1.5,
+                      -7.25, 2.75, 1.0, -4.0,
+                      8.0, -22.0, 30.0, 15.0]
+CONV_GRP_GY_QC = {"mantissa_bits": 6, "exponent_bits": 8, "group_size": 4}
+CONV_GRP_GY_NUM_GROUPS = 3
+# Weight [Cout, Cin/groups, K] = [4, 2, 5]: only its WIDTHS matter to the
+# weightGrad (the rule-1 staging anchor; the grad reads x and gy only), but
+# it must be BFP-stored for the layer gate to pass.
+CONV_GRP_W_NUM_GROUPS = 8
+CONV_GRP_W_GROUP_SIZE = 5
+CONV_GRP_W_VALUES = [3.5, -1.5, 1.0, -0.5, -2.0,
+                     1.25, 0.75, -0.25, 1.5, 2.5,
+                     -0.5, 0.25, 1.5, 1.0, -0.75,
+                     -1.25, 2.0, -1.0, 0.5, 3.0,
+                     -2.25, 1.75, 0.125, -1.125, 2.75,
+                     0.625, -0.375, 1.875, -2.5, 0.875,
+                     1.125, -0.625, 2.25, -1.75, 0.375,
+                     -3.5, 1.5, -0.125, 0.25, -2.75]
+
+# ---- ConvT1d GROUPED + outputPadding weightGrad fixture (#420 C1) --------
+#      The ConvT twin of the block above, with ONE deliberate deviation from
+#      the brief's "EXPLICIT padding >= 1": Conv1dTransposed REJECTS any
+#      paddingType other than VALID at layer init ("only VALID paddingType
+#      supported in Phase 1", Conv1dTransposed.c) -- an EXPLICIT-padded ConvT
+#      fixture cannot be built at all. `outputPadding` is the reachable
+#      analogue and is used instead: it lengthens gy (shifting EVERY gy group
+#      binding relative to the affine contributor map) and leaves tail
+#      positions no weight cell reads. For the same structural reason the C
+#      kernel's `outIdx >= outputLength` clip and its unvisited-contributor
+#      branch are unreachable here (max outIdx == outLen - outputPadding - 1,
+#      so every (b, inPos) pair contributes) -- the tap-skip / 0.0-cell
+#      self-checks are Conv1d-only, and this fixture pins the group
+#      arithmetic instead.
+#
+#      Geometry: conv_groups 2, channels 4/4 (inChPerGroup ==
+#      outChPerGroup == 2, so ic != icOffset and oc != ocOffset on group 1),
+#      K=3, Lin=3, stride 2, dilation 1, outputPadding 1 -> Lout 8. Blocking
+#      again unaligned with the runs: x {6 x 2} over 12, gy {8 x 4} over 32.
+CONVT_GRP_BATCH = 1
+CONVT_GRP_GROUPS = 2
+CONVT_GRP_IN_CHANNELS = 4
+CONVT_GRP_OUT_CHANNELS = 4
+CONVT_GRP_KERNEL_SIZE = 3
+CONVT_GRP_INPUT_LENGTH = 3
+CONVT_GRP_STRIDE = 2
+CONVT_GRP_OUTPUT_PADDING = 1
+CONVT_GRP_OUT_LEN = 8  # (3-1)*2 + 1*(3-1) + 1 + 1
+CONVT_GRP_X_VALUES = [5.0, -2.25, -12.0, 8.5, 31.0, -6.0,
+                      -2.25, 3.375, 44.0, -60.0, -1.0, 1.5625]
+CONVT_GRP_X_QC = {"mantissa_bits": 6, "exponent_bits": 8, "group_size": 2}
+CONVT_GRP_X_NUM_GROUPS = 6
+CONVT_GRP_GY_VALUES = [9.0, -3.5, 12.5, -1.5,
+                       -7.25, 2.75, 1.0, -4.0,
+                       8.0, -22.0, 30.0, 15.0,
+                       -2.5, 0.625, 2.125, -1.125,
+                       52.0, -26.0, 12.0, -38.0,
+                       -1.9375, 0.875, 0.125, 1.4375,
+                       84.0, -108.0, 40.0, -20.0,
+                       -0.75, 0.5, -0.09375, 0.875]
+CONVT_GRP_GY_QC = {"mantissa_bits": 6, "exponent_bits": 8, "group_size": 4}
+CONVT_GRP_GY_NUM_GROUPS = 8
+# Weight [Cin, Cout/groups, K] = [4, 2, 3] -- widths-only role, as above.
+CONVT_GRP_W_NUM_GROUPS = 8
+CONVT_GRP_W_GROUP_SIZE = 3
+CONVT_GRP_W_VALUES = [3.5, -1.5, 1.0,
+                      -0.5, -2.0, 1.25,
+                      0.75, -0.25, 1.5,
+                      2.5, -0.5, 0.25,
+                      1.5, 1.0, -0.75,
+                      -1.25, 2.0, -1.0,
+                      0.5, 3.0, -2.25,
+                      1.75, 0.125, -1.125]
+
 # dilation-2 weightGrad sub-fixture: the affine out_idx = in_pos*stride +
 # k*dilation is the ONLY place dilation enters the new ConvT weightGrad
 # kernel, and the main fixture's dilation 1 makes a dropped factor an
@@ -340,6 +462,42 @@ def main() -> int:
                 "broke the tap-free-hole assumption")
     assert any(v != 0.0 for v in conv_dx), "conv1d bwd dx: all-zero expected output"
 
+    # ---- Conv1d GROUPED + PADDED weightGrad (#420 C1) ---------------------
+    gx_codes, gx_exps = bfp_quantize_grouped(
+        CONV_GRP_X_VALUES, CONV_GRP_X_QC["mantissa_bits"], CONV_GRP_X_QC["exponent_bits"],
+        CONV_GRP_X_QC["group_size"])
+    ggy_codes, ggy_exps = bfp_quantize_grouped(
+        CONV_GRP_GY_VALUES, CONV_GRP_GY_QC["mantissa_bits"], CONV_GRP_GY_QC["exponent_bits"],
+        CONV_GRP_GY_QC["group_size"])
+    assert len(gx_exps) == CONV_GRP_X_NUM_GROUPS
+    assert len(ggy_exps) == CONV_GRP_GY_NUM_GROUPS
+    check_exact_roundtrip("conv1d grouped x", CONV_GRP_X_VALUES, gx_codes, gx_exps,
+                          CONV_GRP_X_QC)
+    check_exact_roundtrip("conv1d grouped gy", CONV_GRP_GY_VALUES, ggy_codes, ggy_exps,
+                          CONV_GRP_GY_QC)
+    assert len(set(gx_exps)) == CONV_GRP_X_NUM_GROUPS, (
+        "conv1d grouped x: group exponents not pairwise distinct -- a mis-bound exponent "
+        "would be unobservable at some fold site")
+    assert len(set(ggy_exps)) == CONV_GRP_GY_NUM_GROUPS, (
+        "conv1d grouped gy: group exponents not pairwise distinct -- a mis-bound exponent "
+        "would be unobservable at some fold site")
+
+    # self_check=True: the FULL kernel-grade suite runs here, including the
+    # #420 C1 additions (group-base rotation observable, tap-membership skip
+    # exercised on a contributing tap, >= 1 cell on the unvisited 0.0 branch).
+    conv_grp_wg = conv1d_bfp_weight_grad_ref(
+        gx_codes, gx_exps, CONV_GRP_X_QC, ggy_codes, ggy_exps, CONV_GRP_GY_QC,
+        CONV_GRP_BATCH, CONV_GRP_IN_CHANNELS, CONV_GRP_OUT_CHANNELS, CONV_GRP_KERNEL_SIZE,
+        CONV_GRP_INPUT_LENGTH, stride=CONV_GRP_STRIDE, dilation=CONV_GRP_DILATION,
+        padding_type="EXPLICIT", padding=CONV_GRP_PADDING, conv_groups=CONV_GRP_GROUPS)
+    assert len(conv_grp_wg) == (CONV_GRP_OUT_CHANNELS
+                                * (CONV_GRP_IN_CHANNELS // CONV_GRP_GROUPS)
+                                * CONV_GRP_KERNEL_SIZE)
+    assert any(v != 0.0 for v in conv_grp_wg), "conv1d grouped wg: all-zero expected grads"
+    assert any(v == 0.0 for v in conv_grp_wg), (
+        "conv1d grouped wg: no cell on the unvisited-contributor 0.0 branch -- the padded "
+        "fixture lost its dead-tap coverage")
+
     # ---- ConvT1d ----------------------------------------------------------
     tw_codes, tw_exps, tw_qc = quantize_weights(CONVT_W_VALUES, CONVT_W_NUM_GROUPS,
                                                 CONVT_W_GROUP_SIZE)
@@ -461,6 +619,50 @@ def main() -> int:
         "weight group structure unobservable through the dx path")
     assert any(v != 0.0 for v in convt_dx), "convT1d bwd dx: all-zero expected output"
 
+    # ---- ConvT1d GROUPED + outputPadding weightGrad (#420 C1) -------------
+    tgx_codes, tgx_exps = bfp_quantize_grouped(
+        CONVT_GRP_X_VALUES, CONVT_GRP_X_QC["mantissa_bits"], CONVT_GRP_X_QC["exponent_bits"],
+        CONVT_GRP_X_QC["group_size"])
+    tggy_codes, tggy_exps = bfp_quantize_grouped(
+        CONVT_GRP_GY_VALUES, CONVT_GRP_GY_QC["mantissa_bits"], CONVT_GRP_GY_QC["exponent_bits"],
+        CONVT_GRP_GY_QC["group_size"])
+    assert len(tgx_exps) == CONVT_GRP_X_NUM_GROUPS
+    assert len(tggy_exps) == CONVT_GRP_GY_NUM_GROUPS
+    check_exact_roundtrip("convT1d grouped x", CONVT_GRP_X_VALUES, tgx_codes, tgx_exps,
+                          CONVT_GRP_X_QC)
+    check_exact_roundtrip("convT1d grouped gy", CONVT_GRP_GY_VALUES, tggy_codes, tggy_exps,
+                          CONVT_GRP_GY_QC)
+    assert len(set(tgx_exps)) == CONVT_GRP_X_NUM_GROUPS, (
+        "convT1d grouped x: group exponents not pairwise distinct -- a mis-bound exponent "
+        "would be unobservable at some fold site")
+    assert len(set(tggy_exps)) == CONVT_GRP_GY_NUM_GROUPS, (
+        "convT1d grouped gy: group exponents not pairwise distinct -- a mis-bound exponent "
+        "would be unobservable at some fold site")
+
+    convt_grp_wg = convT1d_bfp_weight_grad_ref(
+        tgx_codes, tgx_exps, CONVT_GRP_X_QC, tggy_codes, tggy_exps, CONVT_GRP_GY_QC,
+        CONVT_GRP_BATCH, CONVT_GRP_IN_CHANNELS, CONVT_GRP_OUT_CHANNELS, CONVT_GRP_KERNEL_SIZE,
+        CONVT_GRP_INPUT_LENGTH, stride=CONVT_GRP_STRIDE, dilation=1,
+        output_padding=CONVT_GRP_OUTPUT_PADDING, conv_groups=CONVT_GRP_GROUPS)
+    assert len(convt_grp_wg) == (CONVT_GRP_IN_CHANNELS
+                                 * (CONVT_GRP_OUT_CHANNELS // CONVT_GRP_GROUPS)
+                                 * CONVT_GRP_KERNEL_SIZE)
+    assert all(v != 0.0 for v in convt_grp_wg), (
+        "convT1d grouped wg: a cell is 0.0 -- every (b, inPos) pair contributes under this "
+        "VALID-only geometry, so a zero cell means the fixture lost its contributor map")
+    # outputPadding must be load-bearing: dropping it shortens gy's rows and
+    # rebinds every gy group, so the expectation must change.
+    convt_grp_wg_nopad = convT1d_bfp_weight_grad_ref(
+        tgx_codes, tgx_exps, CONVT_GRP_X_QC, tggy_codes[:CONVT_GRP_OUT_CHANNELS
+                                                        * (CONVT_GRP_OUT_LEN - 1)],
+        tggy_exps, CONVT_GRP_GY_QC,
+        CONVT_GRP_BATCH, CONVT_GRP_IN_CHANNELS, CONVT_GRP_OUT_CHANNELS, CONVT_GRP_KERNEL_SIZE,
+        CONVT_GRP_INPUT_LENGTH, stride=CONVT_GRP_STRIDE, dilation=1, output_padding=0,
+        conv_groups=CONVT_GRP_GROUPS, self_check=False)
+    assert convt_grp_wg_nopad != convt_grp_wg, (
+        "convT1d grouped wg: dropping outputPadding leaves the expectation unchanged -- the "
+        "gy geometry pass-through is unobservable")
+
     parts = [
         "// AUTOGENERATED by generate_expected_bfp_layer_forward.py — DO NOT EDIT\n",
         "#ifndef ODT_EXPECTED_BFP_LAYER_FORWARD_H\n",
@@ -514,6 +716,32 @@ def main() -> int:
         emit_float_array("kConvBfpWgExpected", torch.tensor(conv_wg, dtype=torch.float32)),
         emit_float_array("kConvBfpBgExpected", torch.tensor(conv_bg, dtype=torch.float32)),
         emit_float_array("kConvBfpDxExpected", torch.tensor(conv_dx, dtype=torch.float32)),
+        emit_int32_scalar("kConvBfpGrpBatch", CONV_GRP_BATCH),
+        emit_int32_scalar("kConvBfpGrpGroups", CONV_GRP_GROUPS),
+        emit_int32_scalar("kConvBfpGrpInChannels", CONV_GRP_IN_CHANNELS),
+        emit_int32_scalar("kConvBfpGrpOutChannels", CONV_GRP_OUT_CHANNELS),
+        emit_int32_scalar("kConvBfpGrpKernelSize", CONV_GRP_KERNEL_SIZE),
+        emit_int32_scalar("kConvBfpGrpInputLength", CONV_GRP_INPUT_LENGTH),
+        emit_int32_scalar("kConvBfpGrpStride", CONV_GRP_STRIDE),
+        emit_int32_scalar("kConvBfpGrpDilation", CONV_GRP_DILATION),
+        emit_int32_scalar("kConvBfpGrpPadding", CONV_GRP_PADDING),
+        emit_int32_scalar("kConvBfpGrpOutLen", CONV_GRP_OUT_LEN),
+        emit_int32_scalar("kConvBfpGrpMantissaBits", CONV_GRP_X_QC["mantissa_bits"]),
+        emit_int32_scalar("kConvBfpGrpExponentBits", CONV_GRP_X_QC["exponent_bits"]),
+        emit_int32_array("kConvBfpGrpXCodes", torch.tensor(gx_codes)),
+        emit_uint8_array("kConvBfpGrpXExponents", gx_exps),
+        emit_int32_scalar("kConvBfpGrpXNumGroups", CONV_GRP_X_NUM_GROUPS),
+        emit_int32_scalar("kConvBfpGrpXGroupSize", CONV_GRP_X_QC["group_size"]),
+        emit_int32_array("kConvBfpGrpGyCodes", torch.tensor(ggy_codes)),
+        emit_uint8_array("kConvBfpGrpGyExponents", ggy_exps),
+        emit_int32_scalar("kConvBfpGrpGyNumGroups", CONV_GRP_GY_NUM_GROUPS),
+        emit_int32_scalar("kConvBfpGrpGyGroupSize", CONV_GRP_GY_QC["group_size"]),
+        emit_int32_scalar("kConvBfpGrpWNumGroups", CONV_GRP_W_NUM_GROUPS),
+        emit_int32_scalar("kConvBfpGrpWGroupSize", CONV_GRP_W_GROUP_SIZE),
+        emit_float_array("kConvBfpGrpWValues",
+                         torch.tensor(CONV_GRP_W_VALUES, dtype=torch.float32)),
+        emit_float_array("kConvBfpGrpWgExpected",
+                         torch.tensor(conv_grp_wg, dtype=torch.float32)),
         emit_int32_scalar("kConvTBfpBatch", CONVT_BATCH),
         emit_int32_scalar("kConvTBfpInChannels", CONVT_IN_CHANNELS),
         emit_int32_scalar("kConvTBfpOutChannels", CONVT_OUT_CHANNELS),
@@ -552,6 +780,31 @@ def main() -> int:
                          torch.tensor(convt_wg_dil, dtype=torch.float32)),
         emit_float_array("kConvTBfpBgExpected", torch.tensor(convt_bg, dtype=torch.float32)),
         emit_float_array("kConvTBfpDxExpected", torch.tensor(convt_dx, dtype=torch.float32)),
+        emit_int32_scalar("kConvTBfpGrpBatch", CONVT_GRP_BATCH),
+        emit_int32_scalar("kConvTBfpGrpGroups", CONVT_GRP_GROUPS),
+        emit_int32_scalar("kConvTBfpGrpInChannels", CONVT_GRP_IN_CHANNELS),
+        emit_int32_scalar("kConvTBfpGrpOutChannels", CONVT_GRP_OUT_CHANNELS),
+        emit_int32_scalar("kConvTBfpGrpKernelSize", CONVT_GRP_KERNEL_SIZE),
+        emit_int32_scalar("kConvTBfpGrpInputLength", CONVT_GRP_INPUT_LENGTH),
+        emit_int32_scalar("kConvTBfpGrpStride", CONVT_GRP_STRIDE),
+        emit_int32_scalar("kConvTBfpGrpOutputPadding", CONVT_GRP_OUTPUT_PADDING),
+        emit_int32_scalar("kConvTBfpGrpOutLen", CONVT_GRP_OUT_LEN),
+        emit_int32_scalar("kConvTBfpGrpMantissaBits", CONVT_GRP_X_QC["mantissa_bits"]),
+        emit_int32_scalar("kConvTBfpGrpExponentBits", CONVT_GRP_X_QC["exponent_bits"]),
+        emit_int32_array("kConvTBfpGrpXCodes", torch.tensor(tgx_codes)),
+        emit_uint8_array("kConvTBfpGrpXExponents", tgx_exps),
+        emit_int32_scalar("kConvTBfpGrpXNumGroups", CONVT_GRP_X_NUM_GROUPS),
+        emit_int32_scalar("kConvTBfpGrpXGroupSize", CONVT_GRP_X_QC["group_size"]),
+        emit_int32_array("kConvTBfpGrpGyCodes", torch.tensor(tggy_codes)),
+        emit_uint8_array("kConvTBfpGrpGyExponents", tggy_exps),
+        emit_int32_scalar("kConvTBfpGrpGyNumGroups", CONVT_GRP_GY_NUM_GROUPS),
+        emit_int32_scalar("kConvTBfpGrpGyGroupSize", CONVT_GRP_GY_QC["group_size"]),
+        emit_int32_scalar("kConvTBfpGrpWNumGroups", CONVT_GRP_W_NUM_GROUPS),
+        emit_int32_scalar("kConvTBfpGrpWGroupSize", CONVT_GRP_W_GROUP_SIZE),
+        emit_float_array("kConvTBfpGrpWValues",
+                         torch.tensor(CONVT_GRP_W_VALUES, dtype=torch.float32)),
+        emit_float_array("kConvTBfpGrpWgExpected",
+                         torch.tensor(convt_grp_wg, dtype=torch.float32)),
         "\n#endif // ODT_EXPECTED_BFP_LAYER_FORWARD_H\n",
     ]
 

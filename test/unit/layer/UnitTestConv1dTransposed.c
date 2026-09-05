@@ -2071,6 +2071,86 @@ void testConvT1dBackwardBfpWeightGradDilation2MatchesGold(void) {
     TEST_ASSERT_EQUAL_MEMORY(kConvTBfpWgDilExpected, captured, sizeof(captured));
 }
 
+/* ---- #420 C1: GROUPED (+ outputPadding) BFP weightGrad ------------------
+ *
+ * The PR3 ConvT fixtures above are conv_groups==1, leaving
+ * Conv1dTransposed.c:weightGradKernelBfp's g/inLo/outLo nest and its
+ * (ic*outChPerGroup + ocOffset) write index un-golded. This fixture runs
+ * conv groups 2 over 4/4 channels (so ic != icOffset AND oc != ocOffset on
+ * group 1) with outputPadding 1.
+ *
+ * DEVIATION from the issue text's "EXPLICIT padding >= 1": Conv1dTransposed
+ * rejects every paddingType but VALID at layer init ("only VALID
+ * paddingType supported in Phase 1"), so no EXPLICIT-padded ConvT fixture
+ * can be constructed. outputPadding is the reachable analogue and is used
+ * instead -- it lengthens gy, rebinding every gy group against the affine
+ * contributor map (goldgen-asserted load-bearing), and leaves tail
+ * positions only biasGrad reads. By the same Phase-1 contract the kernel's
+ * `outIdx >= outputLength` clip and its unvisited-contributor branch are
+ * structurally unreachable here (max outIdx == outLen - outputPadding - 1),
+ * which is why the tap-skip / exact-0.0-cell coverage of this pair lives
+ * only in UnitTestConv1d.c's grouped+padded twin. Generator:
+ * generate_expected_bfp_layer_forward.py's kConvTBfpGrp* block. */
+static layer_t *buildBfpConvTGroupedBackwardLayer(quantization_t *floatQ) {
+    size_t weightDims[] = {(size_t)kConvTBfpGrpInChannels,
+                           (size_t)(kConvTBfpGrpOutChannels / kConvTBfpGrpGroups),
+                           (size_t)kConvTBfpGrpKernelSize};
+    tensor_t *weightsParam = makeFloatTensor(weightDims, 3, kConvTBfpGrpWValues);
+    quantization_t *bfpTemplate = quantizationInitBfpGrouped(
+        (uint8_t)kConvTBfpGrpMantissaBits, (uint8_t)kConvTBfpGrpExponentBits, HALF_AWAY,
+        (size_t)kConvTBfpGrpWNumGroups, (size_t)kConvTBfpGrpWGroupSize);
+    requantizeTensorInPlace(weightsParam, bfpTemplate);
+    freeQuantization(bfpTemplate);
+    parameter_t *weights = parameterInit(weightsParam, gradInitFloat(weightsParam, NULL));
+
+    kernel_t *kernel = reserveMemory(sizeof(kernel_t));
+    initKernel(kernel, (size_t)kConvTBfpGrpKernelSize, VALID, 1, (size_t)kConvTBfpGrpStride);
+
+    conv1dTransposedConfig_t *cfg = reserveMemory(sizeof(conv1dTransposedConfig_t));
+    initConv1dTransposedConfigWithWeightsAndBias(
+        cfg, kernel, weights, NULL, (size_t)kConvTBfpGrpGroups, (size_t)kConvTBfpGrpOutputPadding,
+        floatQ, floatQ, floatQ, floatQ);
+    layerConfig_t *layerCfg = reserveMemory(sizeof(layerConfig_t));
+    layerCfg->conv1dTransposed = cfg;
+    layer_t *layer = reserveMemory(sizeof(layer_t));
+    initLayer(layer, CONV1D_TRANSPOSED, layerCfg);
+    return layer;
+}
+
+void testConvT1dBackwardBfpWeightGradGroupedMatchesGold(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layer_t *convT = buildBfpConvTGroupedBackwardLayer(floatQ);
+    convT->config->conv1dTransposed->weightGradMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+
+    size_t xDims[] = {(size_t)kConvTBfpGrpBatch, (size_t)kConvTBfpGrpInChannels,
+                      (size_t)kConvTBfpGrpInputLength};
+    tensor_t *forwardInput =
+        buildBfpStoredTensor(3, xDims, kConvTBfpGrpXCodes, kConvTBfpGrpXExponents,
+                             (uint8_t)kConvTBfpGrpMantissaBits, (uint8_t)kConvTBfpGrpExponentBits,
+                             (size_t)kConvTBfpGrpXNumGroups, (size_t)kConvTBfpGrpXGroupSize);
+    size_t gyDims[] = {(size_t)kConvTBfpGrpBatch, (size_t)kConvTBfpGrpOutChannels,
+                       (size_t)kConvTBfpGrpOutLen};
+    tensor_t *lossGrad =
+        buildBfpStoredTensor(3, gyDims, kConvTBfpGrpGyCodes, kConvTBfpGrpGyExponents,
+                             (uint8_t)kConvTBfpGrpMantissaBits, (uint8_t)kConvTBfpGrpExponentBits,
+                             (size_t)kConvTBfpGrpGyNumGroups, (size_t)kConvTBfpGrpGyGroupSize);
+
+    conv1dTransposedBackward(convT, forwardInput, lossGrad, NULL);
+
+    /* kConvTBfpGrpInChannels * (kConvTBfpGrpOutChannels / kConvTBfpGrpGroups)
+     * * kConvTBfpGrpKernelSize */
+    float captured[24];
+    memcpy(captured, convT->config->conv1dTransposed->weights->grad->data, sizeof(captured));
+
+    freeConv1dTransposedLayer(convT);
+    freeTensor(lossGrad);
+    freeTensor(forwardInput);
+    freeQuantization(floatQ);
+
+    TEST_ASSERT_EQUAL_MEMORY(kConvTBfpGrpWgExpected, captured, sizeof(captured));
+}
+
 void testConvT1dBackwardBfpBiasGradMatchesGold(void) {
     quantization_t *floatQ = quantizationInitFloat();
     layer_t *convT = buildBfpConvTBackwardLayer(floatQ, 1);
@@ -2453,6 +2533,7 @@ int main() {
     RUN_TEST(testConv1dTransposedForwardBfpRejectsFloat32Weights);
     RUN_TEST(testConvT1dBackwardBfpWeightGradMatchesGold);
     RUN_TEST(testConvT1dBackwardBfpWeightGradDilation2MatchesGold);
+    RUN_TEST(testConvT1dBackwardBfpWeightGradGroupedMatchesGold);
     RUN_TEST(testConvT1dBackwardBfpBiasGradMatchesGold);
     RUN_TEST(testConvT1dBackwardBfpDxMatchesGold);
     RUN_TEST(testConvT1dBackwardBfpDxPowerOfTwoBitIdenticalToGroupedSym);

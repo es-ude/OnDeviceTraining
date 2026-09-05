@@ -2524,6 +2524,73 @@ void testConv1dBackwardBfpDxMatchesGold(void) {
     TEST_ASSERT_EQUAL_MEMORY(kConvBfpDxExpected, captured, sizeof(captured));
 }
 
+/* ---- #420 C1: GROUPED + EXPLICIT-PADDED BFP weightGrad ------------------
+ *
+ * The PR3 fixtures above are conv_groups==1 and VALID, which leaves three
+ * branches of Conv1d.c:weightGradKernelBfp un-golded: the g/inLo/outLo group
+ * nest with its (oc*inChPerGroup + icOffset) write index, the
+ * tap-membership `continue`, and the unvisited-contributor tail guard that
+ * emits an exact 0.0f. This fixture exercises all three at once -- conv
+ * groups 2 over 4/4 channels, EXPLICIT padding 3 with dilation 2 over K=5,
+ * so the per-window valid tap sets are {2,3}/{1,2,3}/{1,2}: taps 1..3 are
+ * partially clipped and taps 0 and 4 never contribute (their 16 cells are
+ * goldgen-asserted 0.0). Generator: generate_expected_bfp_layer_forward.py's
+ * kConvBfpGrp* block, whose ref self-checks abort rather than emit a fixture
+ * that cannot see a group-base rotation or that leaves either padding branch
+ * dead. */
+static layer_t *buildBfpConv1dGroupedBackwardLayer(quantization_t *floatQ) {
+    size_t weightDims[] = {(size_t)kConvBfpGrpOutChannels,
+                           (size_t)(kConvBfpGrpInChannels / kConvBfpGrpGroups),
+                           (size_t)kConvBfpGrpKernelSize};
+    tensor_t *weightsParam = makeFloatTensor(weightDims, 3, kConvBfpGrpWValues);
+    quantization_t *bfpTemplate = quantizationInitBfpGrouped(
+        (uint8_t)kConvBfpGrpMantissaBits, (uint8_t)kConvBfpGrpExponentBits, HALF_AWAY,
+        (size_t)kConvBfpGrpWNumGroups, (size_t)kConvBfpGrpWGroupSize);
+    requantizeTensorInPlace(weightsParam, bfpTemplate);
+    freeQuantization(bfpTemplate);
+    parameter_t *weights = parameterInit(weightsParam, gradInitFloat(weightsParam, NULL));
+
+    kernel_t *kernel = reserveMemory(sizeof(kernel_t));
+    initKernelExplicit(kernel, (size_t)kConvBfpGrpKernelSize, (size_t)kConvBfpGrpPadding,
+                       (size_t)kConvBfpGrpDilation, (size_t)kConvBfpGrpStride);
+    return buildBorrowedConv1dLayerGrouped(weights, NULL, kernel, (size_t)kConvBfpGrpGroups,
+                                           floatQ);
+}
+
+void testConv1dBackwardBfpWeightGradGroupedPaddedMatchesGold(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layer_t *conv1d = buildBfpConv1dGroupedBackwardLayer(floatQ);
+    conv1d->config->conv1d->weightGradMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+
+    size_t xDims[] = {(size_t)kConvBfpGrpBatch, (size_t)kConvBfpGrpInChannels,
+                      (size_t)kConvBfpGrpInputLength};
+    tensor_t *forwardInput =
+        buildBfpStoredTensor(3, xDims, kConvBfpGrpXCodes, kConvBfpGrpXExponents,
+                             (uint8_t)kConvBfpGrpMantissaBits, (uint8_t)kConvBfpGrpExponentBits,
+                             (size_t)kConvBfpGrpXNumGroups, (size_t)kConvBfpGrpXGroupSize);
+    size_t gyDims[] = {(size_t)kConvBfpGrpBatch, (size_t)kConvBfpGrpOutChannels,
+                       (size_t)kConvBfpGrpOutLen};
+    tensor_t *lossGrad =
+        buildBfpStoredTensor(3, gyDims, kConvBfpGrpGyCodes, kConvBfpGrpGyExponents,
+                             (uint8_t)kConvBfpGrpMantissaBits, (uint8_t)kConvBfpGrpExponentBits,
+                             (size_t)kConvBfpGrpGyNumGroups, (size_t)kConvBfpGrpGyGroupSize);
+
+    conv1dBackward(conv1d, forwardInput, lossGrad, NULL);
+
+    /* kConvBfpGrpOutChannels * (kConvBfpGrpInChannels / kConvBfpGrpGroups)
+     * * kConvBfpGrpKernelSize */
+    float captured[40];
+    memcpy(captured, conv1d->config->conv1d->weights->grad->data, sizeof(captured));
+
+    freeConv1dLayer(conv1d);
+    freeTensor(lossGrad);
+    freeTensor(forwardInput);
+    freeQuantization(floatQ);
+
+    TEST_ASSERT_EQUAL_MEMORY(kConvBfpGrpWgExpected, captured, sizeof(captured));
+}
+
 /* dx power-of-two twin (layer sibling of the forward
  * testConv1dForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer; exactness
  * argument there and in testConv1dBackwardGroupedDxEqualScalesBitIdenticalToScalar,
@@ -2842,6 +2909,7 @@ int main() {
     RUN_TEST(testConv1dBackwardBfpWeightGradMatchesGold);
     RUN_TEST(testConv1dBackwardBfpBiasGradMatchesGold);
     RUN_TEST(testConv1dBackwardBfpDxMatchesGold);
+    RUN_TEST(testConv1dBackwardBfpWeightGradGroupedPaddedMatchesGold);
     RUN_TEST(testConv1dBackwardBfpDxPowerOfTwoBitIdenticalToGroupedSym);
     RUN_TEST(testConv1dBackwardBfpDxConvGroups2MatchesGold);
     RUN_TEST(testConv1dCalcWeightGradsBfpRejectsFloat32Weights);

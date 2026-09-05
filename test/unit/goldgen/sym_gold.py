@@ -1449,11 +1449,11 @@ def convT1d_bfp_gather_ref(x_codes, x_exp, x_qc, w_codes, w_exp, w_qc,
 def conv1d_bfp_weight_grad_ref(x_codes, x_exp, x_qc, gy_codes, gy_exp, gy_qc,
                                batch, in_channels, out_channels, kernel_size, input_length,
                                stride=1, dilation=1, padding_type="VALID", padding=0,
-                               self_check=True):
+                               conv_groups=1, group_offset_shift=0, self_check=True):
     """Conv1d weight grad on BFP operands, output-centric: per gw element
-    (oc, ic, k) ONE int partial over its contributors -- the (b, out_pos)
-    pairs whose window visits tap k -- walked b OUTER, out_pos INNER (the
-    normative order the C kernel mirrors). Per contributor
+    (oc, ic_offset, k) ONE int partial over its contributors -- the
+    (b, out_pos) pairs whose window visits tap k -- walked b OUTER, out_pos
+    INNER (the normative order the C kernel mirrors). Per contributor
     window_slice_1d_full(geom, out_pos) -> (first_in, first_k, valid);
     contribute iff first_k <= k < first_k + valid with in_idx_local =
     first_in + (k - first_k) * dilation; storage indices
@@ -1463,72 +1463,124 @@ def conv1d_bfp_weight_grad_ref(x_codes, x_exp, x_qc, gy_codes, gy_exp, gy_qc,
     finished segment folds via np.float32 acc += np.ldexp((float32)partial,
     Ex + Egy - biasX - biasGy) and resets; tail fold guarded on >= 1 visited
     contributor (a (oc, k) whose windows never reach tap k -- extreme
-    padding -- emits 0.0). conv-groups==1 only (the backward fixtures'
-    scope; the C kernel additionally handles conv groups, pinned there by
-    the SYM/float structure tests).
+    padding -- emits 0.0).
 
-    Self-checks (skipped on the collapse rerun, mirroring conv1d_bfp_ref's):
+    CONV GROUPS (#420 C1): the outer nest mirrors the C kernel
+    operation-for-operation -- `for g` derives `in_lo = g*in_ch_per_group`
+    and `out_lo = g*out_ch_per_group`, `oc = out_lo + oc_offset`,
+    `ic = in_lo + ic_offset`, and the result cell is the WEIGHT storage
+    index `(oc*in_ch_per_group + ic_offset)*kernel_size + k` (weight shape
+    [Cout, Cin/groups, K]). Each cell is assigned exactly once (asserted) --
+    the C twin has no memset for the same reason. `group_offset_shift` is a
+    SELF-CHECK knob, not a modelling parameter: a nonzero value rotates the
+    input-channel base by that many groups (`in_lo` only), reproducing the
+    "group arithmetic is inert / off by one group" mutant so the generator
+    can prove the fixture observes it. Leave it 0 for gold emission.
+
+    Self-checks (skipped on the collapse/shift reruns, mirroring
+    conv1d_bfp_ref's):
       (i)   >= 2 groups crossed on EACH operand within a single reduction;
       (ii)  >= 1 fold with a NONZERO exactly-float-convertible partial;
       (iii) result differs from an all-per-tensor (exponents[0]) collapse;
       plus the disjoint-boundary pins (both directions): >= 1 step where
       ONLY x's group changes and >= 1 step where ONLY gy's group changes.
+    Grouped/padded fixtures (#420 C1) additionally pin, whenever the
+    geometry offers them, that the group arithmetic and both padding
+    branches are load-bearing:
+      (iv)  conv_groups > 1: shifting `in_lo` by one group changes >= 1 cell
+            (a kernel whose `in_lo`/`out_lo` derivation is inert would be
+            indistinguishable);
+      (v)   padded geometries: >= 1 (out_pos, k) pair takes the
+            tap-membership skip on a tap that DOES contribute elsewhere
+            (the partially-clipped window the `continue` exists for);
+      (vi)  padded geometries: >= 1 cell has NO contributor at all and
+            therefore lands on exactly 0.0 through the unvisited-contributor
+            branch (the guarded tail fold).
+    (v)/(vi) are asserted only when `padding` is nonzero -- a VALID fixture
+    cannot clip a window at all, which is why the pre-#420 fixtures leave
+    both branches dead.
+
     Returns the float32 grads as Python floats, row-major
-    [out_channels*in_channels*kernel_size]."""
+    [out_channels*(in_channels//conv_groups)*kernel_size]."""
+    assert in_channels % conv_groups == 0 and out_channels % conv_groups == 0, (
+        "conv1d_bfp_weight_grad_ref: conv_groups must divide both channel counts")
+    in_ch_per_group = in_channels // conv_groups
+    out_ch_per_group = out_channels // conv_groups
     geom = window_geometry_1d(input_length, kernel_size, stride, dilation, padding_type, padding)
     output_length = geom["out_len"]
     x_bias = 2 ** (x_qc["exponent_bits"] - 1) - 1
     gy_bias = 2 ** (gy_qc["exponent_bits"] - 1) - 1
 
-    out = []
+    out = [None] * (out_channels * in_ch_per_group * kernel_size)
     fold_partials = []
     max_x_groups_crossed = 0
     max_gy_groups_crossed = 0
     x_only_boundaries = 0
     gy_only_boundaries = 0
-    for oc in range(out_channels):
-        for ic in range(in_channels):
-            for k in range(kernel_size):
-                acc = np.float32(0.0)
-                partial = 0
-                cur_gx, cur_ggy = None, None
-                x_groups_seen, gy_groups_seen = set(), set()
-                for b in range(batch):
-                    for out_pos in range(output_length):
-                        first_in, first_k, valid = window_slice_1d_full(geom, out_pos)
-                        if not (first_k <= k < first_k + valid):
-                            continue
-                        in_idx_local = first_in + (k - first_k) * dilation
-                        x_idx = (b * in_channels + ic) * input_length + in_idx_local
-                        gy_idx = (b * out_channels + oc) * output_length + out_pos
-                        gx = _bfp_group_of(x_idx, x_qc["group_size"])
-                        ggy = _bfp_group_of(gy_idx, gy_qc["group_size"])
-                        x_groups_seen.add(gx)
-                        gy_groups_seen.add(ggy)
-                        if cur_ggy is None:
-                            cur_gx, cur_ggy = gx, ggy
-                        elif gx != cur_gx or ggy != cur_ggy:
-                            if gx != cur_gx and ggy == cur_ggy:
-                                x_only_boundaries += 1
-                            if ggy != cur_ggy and gx == cur_gx:
-                                gy_only_boundaries += 1
-                            shift = (x_exp[cur_gx] - x_bias) + (gy_exp[cur_ggy] - gy_bias)
-                            fold_partials.append(partial)
-                            acc = np.float32(acc + np.ldexp(np.float32(partial), np.int32(shift)))
-                            partial = 0
-                            cur_gx, cur_ggy = gx, ggy
-                        partial += x_codes[x_idx] * gy_codes[gy_idx]
-                        assert abs(partial) <= _INT32_MAX, (
-                            f"conv1d_bfp_weight_grad_ref: partial {partial} exceeds int32 -- "
-                            "fixture violates the bfpValidateBlockHeadroom bound the C kernel "
-                            "enforces")
-                if cur_ggy is not None:
-                    shift = (x_exp[cur_gx] - x_bias) + (gy_exp[cur_ggy] - gy_bias)
-                    fold_partials.append(partial)
-                    acc = np.float32(acc + np.ldexp(np.float32(partial), np.int32(shift)))
-                max_x_groups_crossed = max(max_x_groups_crossed, len(x_groups_seen))
-                max_gy_groups_crossed = max(max_gy_groups_crossed, len(gy_groups_seen))
-                out.append(float(acc))
+    clipped_skips = 0      # (v): skip on a tap that contributes somewhere else
+    unvisited_cells = 0    # (vi): cell with no contributor at all
+    for g in range(conv_groups):
+        in_lo = ((g + group_offset_shift) % conv_groups) * in_ch_per_group
+        out_lo = g * out_ch_per_group
+        for oc_offset in range(out_ch_per_group):
+            oc = out_lo + oc_offset
+            for ic_offset in range(in_ch_per_group):
+                ic = in_lo + ic_offset
+                for k in range(kernel_size):
+                    acc = np.float32(0.0)
+                    partial = 0
+                    cur_gx, cur_ggy = None, None
+                    x_groups_seen, gy_groups_seen = set(), set()
+                    skipped_here = 0
+                    for b in range(batch):
+                        for out_pos in range(output_length):
+                            first_in, first_k, valid = window_slice_1d_full(geom, out_pos)
+                            if not (first_k <= k < first_k + valid):
+                                skipped_here += 1
+                                continue
+                            in_idx_local = first_in + (k - first_k) * dilation
+                            x_idx = (b * in_channels + ic) * input_length + in_idx_local
+                            gy_idx = (b * out_channels + oc) * output_length + out_pos
+                            gx = _bfp_group_of(x_idx, x_qc["group_size"])
+                            ggy = _bfp_group_of(gy_idx, gy_qc["group_size"])
+                            x_groups_seen.add(gx)
+                            gy_groups_seen.add(ggy)
+                            if cur_ggy is None:
+                                cur_gx, cur_ggy = gx, ggy
+                            elif gx != cur_gx or ggy != cur_ggy:
+                                if gx != cur_gx and ggy == cur_ggy:
+                                    x_only_boundaries += 1
+                                if ggy != cur_ggy and gx == cur_gx:
+                                    gy_only_boundaries += 1
+                                shift = (x_exp[cur_gx] - x_bias) + (gy_exp[cur_ggy] - gy_bias)
+                                fold_partials.append(partial)
+                                acc = np.float32(
+                                    acc + np.ldexp(np.float32(partial), np.int32(shift)))
+                                partial = 0
+                                cur_gx, cur_ggy = gx, ggy
+                            partial += x_codes[x_idx] * gy_codes[gy_idx]
+                            assert abs(partial) <= _INT32_MAX, (
+                                f"conv1d_bfp_weight_grad_ref: partial {partial} exceeds int32 -- "
+                                "fixture violates the bfpValidateBlockHeadroom bound the C kernel "
+                                "enforces")
+                    if cur_ggy is not None:
+                        shift = (x_exp[cur_gx] - x_bias) + (gy_exp[cur_ggy] - gy_bias)
+                        fold_partials.append(partial)
+                        acc = np.float32(acc + np.ldexp(np.float32(partial), np.int32(shift)))
+                        if skipped_here:
+                            clipped_skips += skipped_here
+                    else:
+                        unvisited_cells += 1
+                    max_x_groups_crossed = max(max_x_groups_crossed, len(x_groups_seen))
+                    max_gy_groups_crossed = max(max_gy_groups_crossed, len(gy_groups_seen))
+                    cell = (oc * in_ch_per_group + ic_offset) * kernel_size + k
+                    assert out[cell] is None, (
+                        "conv1d_bfp_weight_grad_ref: weight-grad cell written twice -- the "
+                        "output-centric walk must visit each cell exactly once")
+                    out[cell] = float(acc)
+    assert all(v is not None for v in out), (
+        "conv1d_bfp_weight_grad_ref: weight-grad cell never written -- the group nest does "
+        "not cover the weight tensor")
 
     if self_check:
         assert max_x_groups_crossed >= 2, (
@@ -1552,11 +1604,28 @@ def conv1d_bfp_weight_grad_ref(x_codes, x_exp, x_qc, gy_codes, gy_exp, gy_qc,
             x_codes, [x_exp[0]], {**x_qc, "group_size": 0},
             gy_codes, [gy_exp[0]], {**gy_qc, "group_size": 0},
             batch, in_channels, out_channels, kernel_size, input_length,
-            stride, dilation, padding_type, padding, self_check=False)
+            stride, dilation, padding_type, padding, conv_groups, self_check=False)
         assert collapsed != out, (
             "conv1d_bfp_weight_grad_ref: per-tensor collapse is "
             "indistinguishable from the grouped run -- fixture is vacuous "
             "against group-structure bugs")
+        if conv_groups > 1:
+            shifted = conv1d_bfp_weight_grad_ref(
+                x_codes, x_exp, x_qc, gy_codes, gy_exp, gy_qc,
+                batch, in_channels, out_channels, kernel_size, input_length,
+                stride, dilation, padding_type, padding, conv_groups,
+                group_offset_shift=1, self_check=False)
+            assert shifted != out, (
+                "conv1d_bfp_weight_grad_ref: rotating the input-channel group base by one "
+                "group leaves every cell unchanged -- the kernel's in_lo/out_lo derivation "
+                "is unobservable; pick channel data that differs across groups")
+        if padding:
+            assert clipped_skips >= 1, (
+                "conv1d_bfp_weight_grad_ref: no contributing tap is ever clipped away at "
+                "some out_pos -- the tap-membership skip is dead code under this geometry")
+            assert unvisited_cells >= 1, (
+                "conv1d_bfp_weight_grad_ref: every weight cell has a contributor -- the "
+                "unvisited-contributor 0.0 branch is dead code under this geometry")
     return out
 
 
@@ -1660,10 +1729,11 @@ def conv1d_bfp_dx_ref(loss_codes, loss_exp, loss_qc, w_codes, w_exp, w_qc,
 
 def convT1d_bfp_weight_grad_ref(x_codes, x_exp, x_qc, gy_codes, gy_exp, gy_qc,
                                 batch, in_channels, out_channels, kernel_size, input_length,
-                                stride=1, dilation=1, output_padding=0, self_check=True):
+                                stride=1, dilation=1, output_padding=0, conv_groups=1,
+                                group_offset_shift=0, self_check=True):
     """ConvT1d weight grad on BFP operands, output-centric: per gw element
-    (ic, oc, k) -- ConvT weight [Cin, Cout/groups, K] storage order -- ONE
-    int partial over its contributors, walked b OUTER, in_pos INNER (the
+    (ic, oc_offset, k) -- ConvT weight [Cin, Cout/groups, K] storage order --
+    ONE int partial over its contributors, walked b OUTER, in_pos INNER (the
     normative order the C kernel mirrors). Per contributor
     out_idx = in_pos * stride + k * dilation; contribute iff
     out_idx < output_length with output_length = (input_length-1)*stride +
@@ -1676,72 +1746,113 @@ def convT1d_bfp_weight_grad_ref(x_codes, x_exp, x_qc, gy_codes, gy_exp, gy_qc,
     per step (_bfp_group_of, per-element); when EITHER id changes the
     finished segment folds via np.float32 acc += np.ldexp((float32)partial,
     Ex + Egy - biasX - biasGy) and resets; tail fold guarded on >= 1 visited
-    contributor. conv-groups==1 only (the backward fixtures' scope; the C
-    kernel additionally handles conv groups, pinned there by the SYM/float
-    structure tests).
+    contributor.
 
-    Self-checks (skipped on the collapse rerun, conv1d_bfp_weight_grad_ref's
-    suite):
+    CONV GROUPS (#420 C1): the outer nest mirrors the C kernel
+    operation-for-operation -- `for g` derives `in_lo = g*in_ch_per_group`
+    and `out_lo = g*out_ch_per_group`, with ic_offset OUTER and oc_offset
+    INNER (the reverse of Conv1d's nest, matching Conv1dTransposed.c), and
+    the result cell is the WEIGHT storage index
+    `(ic*out_ch_per_group + oc_offset)*kernel_size + k`. Each cell is
+    assigned exactly once (asserted) -- the C twin has no memset for the
+    same reason. `group_offset_shift` is a SELF-CHECK knob, not a modelling
+    parameter: a nonzero value rotates the OUTPUT-channel base by that many
+    groups (`out_lo` only -- the ConvT write index is keyed off the global
+    `ic`, so rotating `in_lo` would only permute cells rather than mispair
+    operands), reproducing the "group arithmetic is inert / off by one
+    group" mutant. Leave it 0 for gold emission.
+
+    UNLIKE Conv1d, this kernel has NO reachable tap-membership skip and no
+    reachable unvisited-contributor branch: Conv1dTransposed rejects any
+    paddingType other than VALID at layer init (Phase-1 contract,
+    Conv1dTransposed.c), so the contributor map is the unconditional affine
+    out_idx = in_pos*stride + k*dilation whose maximum is
+    output_length - output_padding - 1. `output_padding` is therefore the
+    ConvT analogue of Conv1d's padding for fixture purposes: it lengthens gy
+    (shifting every gy group binding) and leaves tail positions that only
+    biasGrad reads.
+
+    Self-checks (skipped on the collapse/shift reruns,
+    conv1d_bfp_weight_grad_ref's suite):
       (i)   >= 2 groups crossed on EACH operand within a single reduction;
       (ii)  >= 1 fold with a NONZERO exactly-float-convertible partial;
       (iii) result differs from an all-per-tensor (exponents[0]) collapse;
       plus the disjoint-boundary pins (both directions): >= 1 step where
-      ONLY x's group changes and >= 1 step where ONLY gy's group changes.
+      ONLY x's group changes and >= 1 step where ONLY gy's group changes;
+      plus, for conv_groups > 1, (iv) rotating the output-channel group base
+      by one group changes >= 1 cell.
     Returns the float32 grads as Python floats, row-major
-    [in_channels*out_channels*kernel_size]."""
+    [in_channels*(out_channels//conv_groups)*kernel_size]."""
+    assert in_channels % conv_groups == 0 and out_channels % conv_groups == 0, (
+        "convT1d_bfp_weight_grad_ref: conv_groups must divide both channel counts")
+    in_ch_per_group = in_channels // conv_groups
+    out_ch_per_group = out_channels // conv_groups
     output_length = (input_length - 1) * stride + dilation * (kernel_size - 1) \
         + output_padding + 1
     x_bias = 2 ** (x_qc["exponent_bits"] - 1) - 1
     gy_bias = 2 ** (gy_qc["exponent_bits"] - 1) - 1
 
-    out = []
+    out = [None] * (in_channels * out_ch_per_group * kernel_size)
     fold_partials = []
     max_x_groups_crossed = 0
     max_gy_groups_crossed = 0
     x_only_boundaries = 0
     gy_only_boundaries = 0
-    for ic in range(in_channels):
-        for oc in range(out_channels):
-            for k in range(kernel_size):
-                acc = np.float32(0.0)
-                partial = 0
-                cur_gx, cur_ggy = None, None
-                x_groups_seen, gy_groups_seen = set(), set()
-                for b in range(batch):
-                    for in_pos in range(input_length):
-                        out_idx = in_pos * stride + k * dilation
-                        if out_idx >= output_length:
-                            continue
-                        x_idx = (b * in_channels + ic) * input_length + in_pos
-                        gy_idx = (b * out_channels + oc) * output_length + out_idx
-                        gx = _bfp_group_of(x_idx, x_qc["group_size"])
-                        ggy = _bfp_group_of(gy_idx, gy_qc["group_size"])
-                        x_groups_seen.add(gx)
-                        gy_groups_seen.add(ggy)
-                        if cur_ggy is None:
-                            cur_gx, cur_ggy = gx, ggy
-                        elif gx != cur_gx or ggy != cur_ggy:
-                            if gx != cur_gx and ggy == cur_ggy:
-                                x_only_boundaries += 1
-                            if ggy != cur_ggy and gx == cur_gx:
-                                gy_only_boundaries += 1
-                            shift = (x_exp[cur_gx] - x_bias) + (gy_exp[cur_ggy] - gy_bias)
-                            fold_partials.append(partial)
-                            acc = np.float32(acc + np.ldexp(np.float32(partial), np.int32(shift)))
-                            partial = 0
-                            cur_gx, cur_ggy = gx, ggy
-                        partial += x_codes[x_idx] * gy_codes[gy_idx]
-                        assert abs(partial) <= _INT32_MAX, (
-                            f"convT1d_bfp_weight_grad_ref: partial {partial} exceeds int32 -- "
-                            "fixture violates the bfpValidateBlockHeadroom bound the C kernel "
-                            "enforces")
-                if cur_ggy is not None:
-                    shift = (x_exp[cur_gx] - x_bias) + (gy_exp[cur_ggy] - gy_bias)
-                    fold_partials.append(partial)
-                    acc = np.float32(acc + np.ldexp(np.float32(partial), np.int32(shift)))
-                max_x_groups_crossed = max(max_x_groups_crossed, len(x_groups_seen))
-                max_gy_groups_crossed = max(max_gy_groups_crossed, len(gy_groups_seen))
-                out.append(float(acc))
+    for g in range(conv_groups):
+        in_lo = g * in_ch_per_group
+        out_lo = ((g + group_offset_shift) % conv_groups) * out_ch_per_group
+        for ic_offset in range(in_ch_per_group):
+            ic = in_lo + ic_offset
+            for oc_offset in range(out_ch_per_group):
+                oc = out_lo + oc_offset
+                for k in range(kernel_size):
+                    acc = np.float32(0.0)
+                    partial = 0
+                    cur_gx, cur_ggy = None, None
+                    x_groups_seen, gy_groups_seen = set(), set()
+                    for b in range(batch):
+                        for in_pos in range(input_length):
+                            out_idx = in_pos * stride + k * dilation
+                            if out_idx >= output_length:
+                                continue
+                            x_idx = (b * in_channels + ic) * input_length + in_pos
+                            gy_idx = (b * out_channels + oc) * output_length + out_idx
+                            gx = _bfp_group_of(x_idx, x_qc["group_size"])
+                            ggy = _bfp_group_of(gy_idx, gy_qc["group_size"])
+                            x_groups_seen.add(gx)
+                            gy_groups_seen.add(ggy)
+                            if cur_ggy is None:
+                                cur_gx, cur_ggy = gx, ggy
+                            elif gx != cur_gx or ggy != cur_ggy:
+                                if gx != cur_gx and ggy == cur_ggy:
+                                    x_only_boundaries += 1
+                                if ggy != cur_ggy and gx == cur_gx:
+                                    gy_only_boundaries += 1
+                                shift = (x_exp[cur_gx] - x_bias) + (gy_exp[cur_ggy] - gy_bias)
+                                fold_partials.append(partial)
+                                acc = np.float32(
+                                    acc + np.ldexp(np.float32(partial), np.int32(shift)))
+                                partial = 0
+                                cur_gx, cur_ggy = gx, ggy
+                            partial += x_codes[x_idx] * gy_codes[gy_idx]
+                            assert abs(partial) <= _INT32_MAX, (
+                                f"convT1d_bfp_weight_grad_ref: partial {partial} exceeds int32 "
+                                "-- fixture violates the bfpValidateBlockHeadroom bound the C "
+                                "kernel enforces")
+                    if cur_ggy is not None:
+                        shift = (x_exp[cur_gx] - x_bias) + (gy_exp[cur_ggy] - gy_bias)
+                        fold_partials.append(partial)
+                        acc = np.float32(acc + np.ldexp(np.float32(partial), np.int32(shift)))
+                    max_x_groups_crossed = max(max_x_groups_crossed, len(x_groups_seen))
+                    max_gy_groups_crossed = max(max_gy_groups_crossed, len(gy_groups_seen))
+                    cell = (ic * out_ch_per_group + oc_offset) * kernel_size + k
+                    assert out[cell] is None, (
+                        "convT1d_bfp_weight_grad_ref: weight-grad cell written twice -- the "
+                        "output-centric walk must visit each cell exactly once")
+                    out[cell] = float(acc)
+    assert all(v is not None for v in out), (
+        "convT1d_bfp_weight_grad_ref: weight-grad cell never written -- the group nest does "
+        "not cover the weight tensor")
 
     if self_check:
         assert max_x_groups_crossed >= 2, (
@@ -1765,11 +1876,21 @@ def convT1d_bfp_weight_grad_ref(x_codes, x_exp, x_qc, gy_codes, gy_exp, gy_qc,
             x_codes, [x_exp[0]], {**x_qc, "group_size": 0},
             gy_codes, [gy_exp[0]], {**gy_qc, "group_size": 0},
             batch, in_channels, out_channels, kernel_size, input_length,
-            stride, dilation, output_padding, self_check=False)
+            stride, dilation, output_padding, conv_groups, self_check=False)
         assert collapsed != out, (
             "convT1d_bfp_weight_grad_ref: per-tensor collapse is "
             "indistinguishable from the grouped run -- fixture is vacuous "
             "against group-structure bugs")
+        if conv_groups > 1:
+            shifted = convT1d_bfp_weight_grad_ref(
+                x_codes, x_exp, x_qc, gy_codes, gy_exp, gy_qc,
+                batch, in_channels, out_channels, kernel_size, input_length,
+                stride, dilation, output_padding, conv_groups,
+                group_offset_shift=1, self_check=False)
+            assert shifted != out, (
+                "convT1d_bfp_weight_grad_ref: rotating the output-channel group base by one "
+                "group leaves every cell unchanged -- the kernel's in_lo/out_lo derivation "
+                "is unobservable; pick channel data that differs across groups")
     return out
 
 

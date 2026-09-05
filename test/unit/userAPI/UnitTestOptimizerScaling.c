@@ -683,6 +683,134 @@ void testScaleOptimizerGradients_Asym_DequantEquivalence(void) {
     }
 }
 
+/* BFP builder mirrors buildSymOneLayerOptim (per-tensor BFP grad templates
+ * through gradInit's knob path -- the same clone-via-getQLike route the
+ * weightGradStorage knob takes; grouped templates are gated out there, #300
+ * axis). Grad values are seeded via tensorFillFromFloatBuffer
+ * (convertFloatTensorToBfpTensor: canonical absmax-derived exponent + packed
+ * codes) -- deterministic, and the dequant-equivalence test below only needs
+ * the fold identity, not specific codes. */
+static optimizer_t *buildBfpOneLayerOptim(layer_t **modelOut, parameter_t **wOut,
+                                          parameter_t **bOut, const float *wInitialGradFloat,
+                                          const float *bInitialGradFloat, uint8_t mantissaBits,
+                                          uint8_t exponentBits, float lr, float momentum) {
+    tensor_t *wParam;
+    {
+        size_t *dims = reserveMemory(2 * sizeof(size_t));
+        dims[0] = 2;
+        dims[1] = 3;
+        size_t *order = reserveMemory(2 * sizeof(size_t));
+        setOrderOfDimsForNewTensor(2, order);
+        shape_t *shape = reserveMemory(sizeof(shape_t));
+        setShape(shape, dims, 2, order);
+        wParam = initTensor(shape, quantizationInitFloat(), NULL);
+        tensorFillFromFloatBuffer(wParam, (float[]){0.f, 0.f, 0.f, 0.f, 0.f, 0.f}, 6);
+    }
+    quantization_t *gradQ = quantizationInitBfp(mantissaBits, exponentBits, HALF_AWAY);
+    tensor_t *wGrad = gradInit(wParam, gradQ, NULL);
+    tensorFillFromFloatBuffer(wGrad, (float *)wInitialGradFloat, 6);
+    parameter_t *w = parameterInit(wParam, wGrad);
+
+    tensor_t *bParam;
+    {
+        size_t *dims = reserveMemory(2 * sizeof(size_t));
+        dims[0] = 1;
+        dims[1] = 2;
+        size_t *order = reserveMemory(2 * sizeof(size_t));
+        setOrderOfDimsForNewTensor(2, order);
+        shape_t *shape = reserveMemory(sizeof(shape_t));
+        setShape(shape, dims, 2, order);
+        bParam = initTensor(shape, quantizationInitFloat(), NULL);
+        tensorFillFromFloatBuffer(bParam, (float[]){0.f, 0.f}, 2);
+    }
+    tensor_t *bGrad = gradInit(bParam, gradQ, NULL);
+    tensorFillFromFloatBuffer(bGrad, (float *)bInitialGradFloat, 2);
+    parameter_t *b = parameterInit(bParam, bGrad);
+    freeQuantization(gradQ); /* both gradInits cloned it via getQLike */
+
+    quantization_t *layerQ = quantizationInitFloat();
+    layer_t *linear = buildBorrowedLinearLayer(w, b, layerQ);
+    modelOut[0] = linear;
+    *wOut = w;
+    *bOut = b;
+
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *optim =
+        sgdMCreateOptim(lr, momentum, 0.f, modelOut, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    freeQuantization(momentumQ);
+    return optim;
+}
+
+void testScaleOptimizerGradients_Bfp_DequantEquivalence(void) {
+    /* Unlike the SYM/ASYM arms (O(1) scale fold, bytes untouched), the BFP
+     * arm REPACKS: scaleBfpTensorInPlace re-derives the exponent and
+     * requantizes the codes. The observable contract is the same dequant
+     * identity: dequant(scale(g)) == dequant(g) * factor. factor 0.5f keeps
+     * it in the exact regime (power-of-two fold: exponent shifts, codes
+     * unchanged, no rounding anywhere), so the 1e-5f tolerance carries no
+     * rounding slack. */
+    layer_t *model[1];
+    parameter_t *w;
+    parameter_t *b;
+    float wGradInit[6] = {1.f, -2.f, 3.f, -4.f, 5.f, -6.f};
+    float bGradInit[2] = {0.5f, -0.5f};
+    float factor = 0.5f;
+
+    optimizer_t *sgd = buildBfpOneLayerOptim(model, &w, &b, wGradInit, bGradInit, 6, 8, 0.01f, 0.f);
+
+    float wDequantBefore[6];
+    float bDequantBefore[2];
+    dequantGradToFloat(w->grad, wDequantBefore, 6);
+    dequantGradToFloat(b->grad, bDequantBefore, 2);
+
+    scaleOptimizerGradients(sgd, factor);
+
+    float wDequantAfter[6];
+    float bDequantAfter[2];
+    dequantGradToFloat(w->grad, wDequantAfter, 6);
+    dequantGradToFloat(b->grad, bDequantAfter, 2);
+    int wGradTypeAfter = (int)w->grad->quantization->type;
+    size_t wGradNumGroupsAfter = ((bfpQConfig_t *)w->grad->quantization->qConfig)->numGroups;
+
+    freeOptim(sgd);
+    freeLinearLayerShellOnly(model[0]);
+
+    for (size_t i = 0; i < 6; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(1e-5f, wDequantBefore[i] * factor, wDequantAfter[i]);
+    }
+    for (size_t i = 0; i < 2; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(1e-5f, bDequantBefore[i] * factor, bDequantAfter[i]);
+    }
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, wGradTypeAfter, "grad must stay BFP-stored");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(1, wGradNumGroupsAfter, "grads are per-tensor (#300 axis)");
+}
+
+/* Follow-up batch (PR #422): the BFP arm is the ONE arm that hard-fails on a
+ * non-finite factor. FLOAT32/SYM_INT32/SYM/ASYM all REPRESENT NaN/inf (a
+ * float grad element, or a per-tensor scale) and propagate it, so the failure
+ * stays loud downstream -- testScaleOptimizerGradients_FactorNaN_DoesNotAbort
+ * above pins exactly that for FLOAT32. A BFP grid has no non-finite code, so
+ * the BFP arm routes into scaleBfpTensorInPlace's fail-fast instead of
+ * silently dropping the factor (pass 1 ignores NaN) or invoking undefined
+ * behavior in pass 2's (int32_t)round(NaN). This test proves the ARM routes
+ * there; the primitive's own guard is pinned in UnitTestTensorConversion.c. */
+void testScaleOptimizerGradients_Bfp_NonFiniteFactorAborts(void) {
+    layer_t *model[1];
+    parameter_t *w;
+    parameter_t *b;
+    float wGradInit[6] = {1.f, -2.f, 3.f, -4.f, 5.f, -6.f};
+    float bGradInit[2] = {0.5f, -0.5f};
+    float nanFactor = 0.0f / 0.0f;
+
+    optimizer_t *sgd = buildBfpOneLayerOptim(model, &w, &b, wGradInit, bGradInit, 6, 8, 0.01f, 0.f);
+
+    ASSERT_EXITS_WITH_FAILURE(scaleOptimizerGradients(sgd, nanFactor));
+
+    freeOptim(sgd);
+    freeLinearLayerShellOnly(model[0]);
+}
+
 /* Group-quant PR3 Task 4: defensive belt-and-suspenders fail-fast on the
  * SYM grad arm. gradInit's own carrier gate already rejects a grouped SYM
  * template before a grad tensor is ever built through the sanctioned API
@@ -740,6 +868,8 @@ int main(void) {
     RUN_TEST(testScaleOptimizerGradients_Sym_DequantEquivalence);
     RUN_TEST(testScaleOptimizerGradients_Asym_ScalesScaleOnly);
     RUN_TEST(testScaleOptimizerGradients_Asym_DequantEquivalence);
+    RUN_TEST(testScaleOptimizerGradients_Bfp_DequantEquivalence);
+    RUN_TEST(testScaleOptimizerGradients_Bfp_NonFiniteFactorAborts);
     RUN_TEST(testScaleOptimizerGradientsRejectsGroupedSymGrad);
     return UNITY_END();
 }

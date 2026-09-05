@@ -498,6 +498,74 @@ void testSgdZeroGradOnSymInt32GradZeroesMantissasAndResetsScale(void) {
     TEST_ASSERT_TRUE(accumWorks);
 }
 
+void testSgdZeroGradBfpResetsExponentsToZeroState(void) {
+    /* BFP twin of testSgdZeroGradOnSymInt32GradZeroesMantissasAndResetsScale
+     * above (BFP epic PR3 Task 6): byte-zero alone is not VALUE-zero for BFP
+     * -- a stale exponent left over from the previous step's accumulate
+     * would be misread by the next FixedGrid accumulate as an already-
+     * gridded tensor (phase A tests codes-only). The zeroGrad BFP arm must
+     * reset every packed mantissa byte to 0 AND every exponent to bias
+     * (127 for e=8). */
+    quantization_t *fwd = quantizationInitFloat();
+    quantization_t *bwd = quantizationInitBfp(8, 8, HALF_AWAY);
+    layerQuant_t lq = {.forwardMath = arithmeticFromQuantization(fwd),
+                       .weightGradMath = arithmeticFromQuantization(bwd),
+                       .biasGradMath = arithmeticFromQuantization(bwd),
+                       .propLossMath = arithmeticFromQuantization(bwd),
+                       .outputQ = fwd,
+                       .propLossQ = bwd,
+                       .weightStorage = fwd,
+                       .biasStorage = fwd,
+                       .weightGradStorage = bwd,
+                       .biasGradStorage = bwd};
+    layer_t *layer =
+        linearLayerInit(&(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE}, &lq);
+
+    tensor_t *wGrad = layer->config->linear->weights->grad;
+    TEST_ASSERT_EQUAL_INT(BFP, wGrad->quantization->type); /* guard */
+
+    /* Pre-load non-zero mantissa bytes and a non-bias exponent to prove the
+     * reset (mantissaBits=8 -> exactly 1 byte/element, N=6). */
+    size_t nW = calcNumberOfElementsByTensor(wGrad);
+    for (size_t i = 0; i < nW; i++) {
+        wGrad->data[i] = (uint8_t)(0x40 + i);
+    }
+    ((bfpQConfig_t *)wGrad->quantization->qConfig)->exponents[0] = 200;
+
+    layer_t *model[] = {layer};
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *optim =
+        sgdMCreateOptim(0.1f, 0.9f, 0.0f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+
+    optimizerZeroGrad(optim);
+
+    /* CAPTURE post-zero state. */
+    int allZero = 1;
+    for (size_t i = 0; i < nW; i++) {
+        if (wGrad->data[i] != 0) {
+            allZero = 0;
+        }
+    }
+    uint8_t exponentAfterZero = ((bfpQConfig_t *)wGrad->quantization->qConfig)->exponents[0];
+
+    /* Prove subsequent accumulation works: load a fresh mantissa byte. */
+    wGrad->data[0] = 5;
+    int accumWorks = (wGrad->data[0] == 5);
+
+    freeOptim(optim); /* frees the layer's parameters */
+    freeReservedMemory(layer->config->linear);
+    freeReservedMemory(layer->config);
+    freeReservedMemory(layer);
+    freeQuantization(momentumQ);
+    freeQuantization(bwd);
+    freeQuantization(fwd);
+
+    TEST_ASSERT_TRUE_MESSAGE(allZero, "optimizerZeroGrad must zero BFP grad mantissa bytes");
+    TEST_ASSERT_EQUAL_UINT8(127, exponentAfterZero);
+    TEST_ASSERT_TRUE(accumWorks);
+}
+
 /* TDD RED for #277 Task 2: momentum state must carry its OWN quantization
  * config, decoupled from the parameter's dtype. Before this change,
  * sgdMCreateOptim built each state via getTensorLike(param->param), so a
@@ -927,6 +995,61 @@ void testSgdMCreateOptimAdmitsPackedSymGradStorage(void) {
     freeQuantization(fQ);
 
     TEST_ASSERT_EQUAL_INT(SYM, capturedWGradType);
+    TEST_ASSERT_EQUAL_size_t(2, capturedSizeStates);
+}
+
+void testSgdMCreateOptimAdmitsBfpGradStorage(void) {
+    /* BFP epic PR3 Task 6: twin of testSgdMCreateOptimAdmitsPackedSymGradStorage
+     * above -- validateOptimizerGradStorage's accept-list gains per-tensor
+     * BFP (#300 axis: grads stay per-tensor-only, gradInit's own carrier gate
+     * rejects a grouped template before construction ever reaches here). No
+     * gradInitBfp scalar-signature shortcut exists (unlike gradInitSym/
+     * gradInitAsym), so the grad tensor is built via gradInit directly. */
+    size_t *wDims = reserveMemory(2 * sizeof(size_t));
+    wDims[0] = 2;
+    wDims[1] = 3;
+    size_t *wOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, wOrder);
+    shape_t *wShape = reserveMemory(sizeof(shape_t));
+    setShape(wShape, wDims, 2, wOrder);
+    tensor_t *wParam = initTensor(wShape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(wParam, (float[]){0.f, 0.f, 0.f, 0.f, 0.f, 0.f}, 6);
+    quantization_t *bfpGradQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    tensor_t *wGrad = gradInit(wParam, bfpGradQ, NULL);
+    freeQuantization(bfpGradQ); /* gradInit clones via getQLike -- template unused after */
+    parameter_t *weights = parameterInit(wParam, wGrad);
+
+    size_t *bDims = reserveMemory(1 * sizeof(size_t));
+    bDims[0] = 2;
+    size_t *bOrder = reserveMemory(1 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, bOrder);
+    shape_t *bShape = reserveMemory(sizeof(shape_t));
+    setShape(bShape, bDims, 1, bOrder);
+    tensor_t *bParam = initTensor(bShape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(bParam, (float[]){0.f, 0.f}, 2);
+    tensor_t *bGrad = gradInitFloat(bParam, NULL);
+    parameter_t *bias = parameterInit(bParam, bGrad);
+
+    quantization_t *fQ = quantizationInitFloat();
+    layer_t *layer = buildBorrowedLinearLayer(weights, bias, fQ);
+    layer_t *model[1] = {layer};
+
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *optim =
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+
+    /* CAPTURE before frees. */
+    qtype_t capturedWGradType = weights->grad->quantization->type;
+    size_t capturedSizeStates = optim->sizeStates;
+
+    /* freeOptim cascades to the registered parameters (weights, bias). */
+    freeOptim(optim);
+    freeLinearLayerShellOnly(layer);
+    freeQuantization(momentumQ);
+    freeQuantization(fQ);
+
+    TEST_ASSERT_EQUAL_INT(BFP, capturedWGradType);
     TEST_ASSERT_EQUAL_size_t(2, capturedSizeStates);
 }
 
@@ -1874,6 +1997,33 @@ void testOptimizerClipGradNormRejectsPackedSymGradStorage(void) {
     freeParameter(param);
 }
 
+void testOptimizerClipGradNormRejectsBfpGradStorage(void) {
+    /* BFP epic PR3 Task 6: BFP twin of
+     * testOptimizerClipGradNormRejectsPackedSymGradStorage above -- folded
+     * into the SAME packed reject (same reasoning: computing a norm needs
+     * unpacked element values, and BFP's block-shared exponent makes the
+     * O(1) scale-fold approach doubly inapplicable). */
+    size_t *pDims = reserveMemory(1 * sizeof(size_t));
+    pDims[0] = 4;
+    size_t *pOrder = reserveMemory(1 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, pOrder);
+    shape_t *pShape = reserveMemory(sizeof(shape_t));
+    setShape(pShape, pDims, 1, pOrder);
+    tensor_t *p = initTensor(pShape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(p, (float[]){0.f, 0.f, 0.f, 0.f}, 4);
+    quantization_t *bfpGradQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    tensor_t *g = gradInit(p, bfpGradQ, NULL);
+    freeQuantization(bfpGradQ); /* gradInit clones via getQLike -- template unused after */
+    parameter_t *param = parameterInit(p, g);
+
+    parameter_t *params[1] = {param};
+    optimizer_t optim = {.parameter = params, .sizeStates = 1, .writeBackRounding = HALF_AWAY};
+
+    ASSERT_EXITS_WITH_FAILURE(optimizerClipGradNorm(&optim, 1.0f));
+
+    freeParameter(param);
+}
+
 /* Final-review Fix 3(c): momentumStateInit (SgdApi.c) builds the momentum
  * buffer via getQLike(momentumQuant) with no carrier gate of its own --
  * unlike gradInit (TensorApi.c), which already fail-fasts a grouped SYM
@@ -1919,16 +2069,66 @@ void testSgdCreateGroupedSymMomentumQuantExits(void) {
     });
 }
 
-/* BFP epic PR1 carrier-gate twin of testSgdCreateGroupedSymMomentumQuantExits
- * (message points at "BFP epic PR3" instead of "#300"): BFP grad/state
- * storage is out of scope for this epic PR -- momentumStateInit must
- * fail-fast on ANY BFP momentumQuant template, not just a grouped one
- * (unlike the SYM gate above, which only restricts numGroups>1). Per-tensor
- * BFP (numGroups=1, groupSize=0) sidesteps any incidental
- * initTensor/validateBfpQConfigShape mismatch, isolating the death to the
- * new gate under test (mutation-vacuity guard, same reasoning as the SYM
- * twin above). */
-void testSgdCreateBfpMomentumQuantExits(void) {
+/* BFP epic PR3 Task 7: the PR1 unconditional carrier gate lifts --
+ * momentumStateInit now admits a PER-TENSOR BFP momentum template, mirroring
+ * gradInit's Task 6 lift (grads and states share the per-tensor-only rule,
+ * #300 axis). The state buffer must be a getQLike clone at zero-state:
+ * BFP-typed, per-tensor {numGroups=1, groupSize=0}, exponent at bias
+ * (e=8 -> 127), all-zero packed codes (reserveMemory zero-fill). */
+void testSgdCreateAdmitsPerTensorBfpMomentum(void) {
+    quantization_t *layerQ = quantizationInitFloat();
+    size_t *wDims = reserveMemory(2 * sizeof(size_t));
+    wDims[0] = 2;
+    wDims[1] = 4;
+    size_t *wOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, wOrder);
+    shape_t *wShape = reserveMemory(sizeof(shape_t));
+    setShape(wShape, wDims, 2, wOrder);
+    tensor_t *wParam = initTensor(wShape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(wParam, (float[]){0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f}, 8);
+    tensor_t *wGrad = gradInitFloat(wParam, NULL);
+    parameter_t *weights = parameterInit(wParam, wGrad);
+
+    layer_t *linear = buildBorrowedLinearLayer(weights, NULL, layerQ);
+    layer_t *model[] = {linear};
+
+    quantization_t *momentumQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    optimizer_t *optim =
+        sgdMCreateOptim(0.1f, 0.9f, 0.0f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+
+    /* CAPTURE -> free -> assert (file convention). */
+    tensor_t *state = optim->states[0]->stateBuffers[0];
+    qtype_t stateType = state->quantization->type;
+    bfpQConfig_t *stateQC = state->quantization->qConfig;
+    size_t stateNumGroups = stateQC->numGroups;
+    uint8_t stateExp = stateQC->exponents[0];
+    bool codesAllZero = true;
+    for (size_t i = 0; i < 8; i++) { /* 8 elements x 8-bit mantissas = 8 packed bytes */
+        if (((uint8_t *)state->data)[i] != 0) {
+            codesAllZero = false;
+        }
+    }
+    freeOptim(optim);
+    freeLinearLayerShellOnly(linear);
+    freeQuantization(momentumQ);
+    freeQuantization(layerQ);
+
+    TEST_ASSERT_EQUAL_INT(BFP, stateType);
+    TEST_ASSERT_EQUAL_size_t(1, stateNumGroups);
+    TEST_ASSERT_EQUAL_UINT8(127, stateExp); /* bias = 2^(8-1)-1: zero-state */
+    TEST_ASSERT_TRUE_MESSAGE(codesAllZero,
+                             "fresh BFP momentum state must have all-zero packed codes");
+}
+
+/* Grouped-BFP twin of testSgdCreateGroupedSymMomentumQuantExits above: the
+ * lifted gate keeps rejecting GROUPED templates (a grouped state template
+ * only fits one param's element count -- per-tensor only, #300 axis). Same
+ * shape-coincidence discipline as the SYM twin: the weight's element count
+ * (2*4=8) EQUALS the template's numGroups*groupSize (2*4=8), so the death
+ * cannot come from the unrelated initTensor/validateBfpQConfigShape guard
+ * tripping on a mismatch instead of the gate under test. */
+void testSgdCreateRejectsGroupedBfpMomentum(void) {
     ASSERT_EXITS_WITH(1, {
         quantization_t *layerQ = quantizationInitFloat();
         size_t *wDims = reserveMemory(2 * sizeof(size_t));
@@ -1946,7 +2146,7 @@ void testSgdCreateBfpMomentumQuantExits(void) {
         layer_t *linear = buildBorrowedLinearLayer(weights, NULL, layerQ);
         layer_t *model[] = {linear};
 
-        quantization_t *momentumQ = quantizationInitBfp(8, 8, HALF_AWAY);
+        quantization_t *momentumQ = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 4);
         sgdMCreateOptim(0.1f, 0.9f, 0.0f, model, 1, momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     });
@@ -2083,6 +2283,71 @@ void testSgdStepGroupedSymParamMomentumMatchesGold(void) {
     TEST_ASSERT_EQUAL_FLOAT(sgdGroupedMomentumNewScales[1], scale1);
 }
 
+/* BFP epic PR3 Task 7: momentum step with a per-tensor BFP param AND a
+ * per-tensor BFP momentum state -- the BFP sibling of the grouped-SYM
+ * momentum gold above, same dtype-agnostic funnel wiring: the FLOAT32
+ * prologue dequants BOTH BFP operands exactly (code * 2^(E-bias),
+ * dequantChunkToFloat's BFP arm), the kernels run the identical float32
+ * math, and each OUT_WRITE epilogue re-packs its target per-tensor with a
+ * FRESH absmax exponent (packFloatBufferAsBfp). Load-bearing sequence pin:
+ * op2 (sgdMParamKernel) reads the state from its freshly REQUANTIZED codes,
+ * not op1's raw float result -- the gold (sym_gold.sgd_bfp_step_ref via
+ * generate_expected_sgd_grouped.py) mirrors exactly that, and its
+ * self-checks guarantee the fixture can observe a violation (param exponent
+ * moves; both repacks change values). Both tensors reach BFP storage the
+ * documented user way (FLOAT32 init + requantizeTensorInPlace,
+ * docs/conventions/arithmetic-bfp.md); the fixture's canonical-input
+ * self-check guarantees that requantize reproduces the generator's exact
+ * input codes AND exponents bit-for-bit. writeBackRounding = HALF_AWAY
+ * opt-out (#279) as in every gold here -- the generator does not emulate
+ * the seeded SR factory default. */
+void testSgdStepBfpParamBfpMomentumMatchesGold(void) {
+    quantization_t *bfpTemplate = quantizationInitBfp((uint8_t)sgdBfpMomMantissaBits,
+                                                      (uint8_t)sgdBfpMomExponentBits, HALF_AWAY);
+
+    tensor_t *p = buildFloatTensor1D(sgdBfpMomParamValues, 6);
+    requantizeTensorInPlace(p, bfpTemplate);
+    tensor_t *g = gradInitFloat(p, NULL);
+    tensorFillFromFloatBuffer(g, sgdBfpMomGrad, 6);
+    parameter_t *param = parameterInit(p, g);
+
+    tensor_t *state = buildFloatTensor1D(sgdBfpMomStatePrev, 6);
+    requantizeTensorInPlace(state, bfpTemplate);
+    freeQuantization(bfpTemplate);
+
+    sgd_t sgd;
+    sgdInit(&sgd, sgdBfpMomLr, sgdBfpMomMomentum, sgdBfpMomWeightDecay,
+            (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    parameter_t *params[1] = {param};
+    optimImpl_t impl = {.sgd = &sgd};
+    tensor_t *stateBuffers[1] = {state};
+    states_t paramStates = {.stateBuffers = stateBuffers, .statesPerParameter = 1};
+    states_t *states[1] = {&paramStates};
+    optimizer_t optim = {.parameter = params,
+                         .states = states,
+                         .sizeStates = 1,
+                         .impl = &impl,
+                         .writeBackRounding = HALF_AWAY};
+
+    sgdStepM(&optim);
+
+    /* CAPTURE -> free -> assert. */
+    int32_t paramCodes[6], stateCodes[6];
+    unpackSignExtend(p->data, (size_t)sgdBfpMomMantissaBits, 0, paramCodes, 6);
+    unpackSignExtend(state->data, (size_t)sgdBfpMomMantissaBits, 0, stateCodes, 6);
+    int32_t paramExp = (int32_t)((bfpQConfig_t *)p->quantization->qConfig)->exponents[0];
+    int32_t stateExp = (int32_t)((bfpQConfig_t *)state->quantization->qConfig)->exponents[0];
+    freeTensor(state);
+    freeParameter(param);
+
+    for (size_t i = 0; i < 6; i++) {
+        TEST_ASSERT_EQUAL_INT32(sgdBfpMomNewParamCodes[i], paramCodes[i]);
+        TEST_ASSERT_EQUAL_INT32(sgdBfpMomNewStateCodes[i], stateCodes[i]);
+    }
+    TEST_ASSERT_EQUAL_INT32(sgdBfpMomNewParamExp, paramExp);
+    TEST_ASSERT_EQUAL_INT32(sgdBfpMomNewStateExp, stateExp);
+}
+
 /* ---- Group-quant PR4 (Task 3): SGD updates a grouped-ASYM param ----------
  *
  * Same funnel wiring as the grouped-SYM tests above (the pos declarations in
@@ -2212,6 +2477,7 @@ int main() {
     RUN_TEST(testSgdStepSymInt32DoesNotRoundTripGrad);
     RUN_TEST(testSgdStepMMomentumZeroIgnoresStatesAndUpdatesParam);
     RUN_TEST(testSgdMCreateOptimAdmitsPackedSymGradStorage);
+    RUN_TEST(testSgdMCreateOptimAdmitsBfpGradStorage);
     RUN_TEST(testSgdMCreateOptimRejectsBoolGradStorage);
     RUN_TEST(testSgdMCreateOptimRejectsNullGradSlot);
     RUN_TEST(testSgdMCreateOptimRejectsNonFloat32UpdateMath);
@@ -2219,6 +2485,7 @@ int main() {
     RUN_TEST(testSgdStepMFloatReadsPackedSymGradGeneric);
     RUN_TEST(testSgdZeroGradAsymSubByteZeroesAllPackedBytes);
     RUN_TEST(testSgdZeroGradSymSubByteZeroesAllPackedBytesAndResetsScale);
+    RUN_TEST(testSgdZeroGradBfpResetsExponentsToZeroState);
     RUN_TEST(testSgdStepMMixedDtypeMovesBothParamsCorrectly);
     RUN_TEST(testSgdStepHalfAwayNeverEscapesSymDeadZone);
     RUN_TEST(testSgdStepDetWriteBackOverridesSrParamQConfig);
@@ -2234,10 +2501,13 @@ int main() {
     RUN_TEST(testOptimizerClipGradNormExactlyAtNormStillClipsByEpsilon);
     RUN_TEST(testOptimizerClipGradNormSymInt32FoldsCoefIntoScaleMantissasUntouched);
     RUN_TEST(testOptimizerClipGradNormRejectsPackedSymGradStorage);
+    RUN_TEST(testOptimizerClipGradNormRejectsBfpGradStorage);
     RUN_TEST(testSgdCreateGroupedSymMomentumQuantExits);
-    RUN_TEST(testSgdCreateBfpMomentumQuantExits);
+    RUN_TEST(testSgdCreateAdmitsPerTensorBfpMomentum);
+    RUN_TEST(testSgdCreateRejectsGroupedBfpMomentum);
     RUN_TEST(testSgdStepGroupedSymParamMatchesGold);
     RUN_TEST(testSgdStepGroupedSymParamMomentumMatchesGold);
+    RUN_TEST(testSgdStepBfpParamBfpMomentumMatchesGold);
     RUN_TEST(testSgdStepGroupedAsymParamMatchesGold);
     RUN_TEST(testSgdCreateGroupedAsymMomentumQuantExits);
     return UNITY_END();

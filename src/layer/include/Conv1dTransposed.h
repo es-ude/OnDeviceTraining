@@ -49,6 +49,14 @@ void conv1dTransposedCalcWeightGradsSymInt32(conv1dTransposedConfig_t *cfg, tens
                                              tensor_t *lossGrad);
 void conv1dTransposedCalcBiasGradsSymInt32(conv1dTransposedConfig_t *cfg, tensor_t *lossGrad);
 
+/*! BFP epic PR3 (Task 4): ARITH_BFP grad twins (executeOp-funneled, raw
+ *  FLOAT32 intermediates, rounding-free ldexpf folds). Both REQUIRE
+ *  BFP-stored weights (fail-fast) -- the width anchor FLOAT32-stored
+ *  operands stage at; BFP-stored operands are borrowed zero-copy. */
+void conv1dTransposedCalcWeightGradsBfp(conv1dTransposedConfig_t *cfg, tensor_t *forwardInput,
+                                        tensor_t *lossGrad);
+void conv1dTransposedCalcBiasGradsBfp(conv1dTransposedConfig_t *cfg, tensor_t *lossGrad);
+
 void conv1dTransposedCalcOutputShape(layer_t *layer, shape_t *inputShape, shape_t *outputShape);
 
 #endif // ODT_CONV1D_TRANSPOSED_H

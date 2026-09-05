@@ -168,9 +168,11 @@ layer_t *conv1dLayerInit(conv1dInit_t *init, layerQuant_t *lq) {
 
     cfg->kernel = buildConv1dKernel(init);
     size_t fanIn = (init->inChannels / groups) * init->kernelSize;
-    /* Grad storage knob (#261): Conv1d backward is FLOAT32-only, so a NULL knob
-     * keeps the hard-pinned FLOAT32 default; a non-NULL weightGradStorage /
-     * biasGradStorage overrides it explicitly. */
+    /* Grad storage knob (#261): NULL falls back to a hard-pinned FLOAT32
+     * default (parameter grads are persistent state — SYM_INT32 is a compute
+     * format, not storage); a non-NULL weightGradStorage/biasGradStorage
+     * overrides it explicitly to opt into SYM/ASYM/BFP (BFP per-tensor only,
+     * gradInit's carrier gate, #300 axis). */
     quantization_t *floatGradQ = quantizationInitFloat();
     quantization_t *weightGradQ =
         lq->weightGradStorage != NULL ? lq->weightGradStorage : floatGradQ;
@@ -221,9 +223,11 @@ layer_t *conv1dLayerInitOwning(conv1dInit_t *init, layerQuant_t *lq) {
      * so the parameter tensors own their quantization_t — caller can drop
      * lq->weightStorage / lq->biasStorage immediately. */
     size_t fanIn = (init->inChannels / groups) * init->kernelSize;
-    /* Grad storage knob (#261): Conv1d backward is FLOAT32-only, so a NULL knob
-     * keeps the hard-pinned FLOAT32 default; a non-NULL weightGradStorage /
-     * biasGradStorage overrides it explicitly. */
+    /* Grad storage knob (#261): NULL falls back to a hard-pinned FLOAT32
+     * default (parameter grads are persistent state — SYM_INT32 is a compute
+     * format, not storage); a non-NULL weightGradStorage/biasGradStorage
+     * overrides it explicitly to opt into SYM/ASYM/BFP (BFP per-tensor only,
+     * gradInit's carrier gate, #300 axis). */
     quantization_t *floatGradQ = quantizationInitFloat();
     quantization_t *weightGradQ =
         lq->weightGradStorage != NULL ? lq->weightGradStorage : floatGradQ;

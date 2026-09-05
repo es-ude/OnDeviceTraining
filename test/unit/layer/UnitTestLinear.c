@@ -1441,6 +1441,38 @@ void testLinearLayerInitOwningBoolWeightGradStorageKnobAborts(void) {
     freeQuantization(q);
 }
 
+/* BFP epic PR3 Task 6: BFP twin of the SYM_INT32 knob test above -- a
+ * per-tensor BFP weightGradStorage template must land BFP weight grad
+ * storage end-to-end, through the same gradInit/getQLike path (Step 1's
+ * grouped-only gate). Written FIRST in Task 6 alongside the load-bearing e2e
+ * (UnitTestMultiLayerTraining.c): RED at gradInit's then-unconditional BFP
+ * reject before Step 1 lands, GREEN after. */
+void testLinearLayerInitOwningBfpWeightGradStorageKnob(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    quantization_t *gradKnob = quantizationInitBfp(8, 8, HALF_AWAY);
+    lq.weightGradStorage = gradKnob;
+
+    layer_t *layer = linearLayerInitOwning(
+        &(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE}, &lq);
+
+    linearConfig_t *cfg = layer->config->linear;
+    tensor_t *wGrad = getGradFromParameter(cfg->weights);
+    int gradType = wGrad->quantization->type;
+    /* Guard the qConfig dereference (same pattern as the SYM_INT32 twin). */
+    size_t gradNumGroups =
+        (gradType == BFP) ? ((bfpQConfig_t *)wGrad->quantization->qConfig)->numGroups : 0;
+
+    freeLinearLayer(layer);
+    freeQuantization(gradKnob);
+    freeQuantization(q);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, gradType,
+                                  "weightGradStorage knob must land BFP weight grad storage");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(1, gradNumGroups, "grads are per-tensor-only (#300 axis)");
+}
+
 /* Helper: build a 2-D FLOAT32 tensor on the heap with the given values. */
 static tensor_t *buildFloatTensor2d(size_t rows, size_t cols, const float *data) {
     size_t *d = reserveMemory(2 * sizeof(size_t));
@@ -2827,24 +2859,27 @@ void testLinearForwardBfpRejectsFloat32Weights(void) {
     freeQuantization(floatQ);
 }
 
-/* linearBackward must fail fast on an ARITH_BFP math slot (native backward =
- * epic PR3) instead of routing unpacked int32 mantissa scratch through the
- * FLOAT kernels. The operands are BFP-STORED on purpose: the funnel's backward
- * gate only covers FLOAT32-stored operands (NULL bfpStage), so for all-BFP
- * operands the layer dispatch is the ONLY gate on this path — without it the
- * float kernel reinterprets mantissa codes as float and training silently
- * corrupts (the exact ternary hazard the LayerNorm dispatch comment names). */
-void testLinearBackwardBfpWeightGradMathDies(void) {
+/* Native ARITH_BFP weightGrad on all-BFP-stored operands (the funnel's borrow
+ * arm end-to-end): weights BFP-stored per the backward rule-1 mirror (the
+ * width anchor), loss + forwardInput requantized per-tensor m=8/e=8 from
+ * exactly-representable values, grad target FLOAT32 (#261). Batch 1, so
+ * dW[o][i] = loss[o] * x[i] with every value exact at m=8 -- the kernel's
+ * single-segment fold is exact float, asserted against the literal products.
+ * Also pins the kernel's transpose-restore: the funnel scratch ALIASES the
+ * caller's shape_t (setTensorValuesForConversion), so a dropped restore would
+ * leave the caller's loss transposed after linearBackward. */
+void testLinearBackwardBfpWeightGradNativeMatchesFloatReference(void) {
     quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *bfpTemplate = quantizationInitBfp(8, 8, HALF_AWAY);
     size_t weightDims[] = {2, 3};
     tensor_t *weightsParam =
         makeFloatTensor(weightDims, 2, (float[]){0.5f, -1.f, 2.f, 1.f, 0.25f, -0.75f});
+    requantizeTensorInPlace(weightsParam, bfpTemplate);
     parameter_t *weights = parameterInit(weightsParam, gradInitFloat(weightsParam, NULL));
     layer_t *linearLayer = buildBorrowedLinearLayer(weights, NULL, floatQ);
     linearLayer->config->linear->weightGradMath =
         (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
 
-    quantization_t *bfpTemplate = quantizationInitBfp(8, 8, HALF_AWAY);
     size_t fwdDims[] = {1, 3};
     tensor_t *forwardInput = makeFloatTensor(fwdDims, 2, (float[]){1.f, 2.f, 3.f});
     requantizeTensorInPlace(forwardInput, bfpTemplate);
@@ -2853,22 +2888,46 @@ void testLinearBackwardBfpWeightGradMathDies(void) {
     requantizeTensorInPlace(loss, bfpTemplate);
     freeQuantization(bfpTemplate);
 
-    ASSERT_EXITS_WITH_FAILURE(linearBackward(linearLayer, forwardInput, loss, NULL));
+    linearBackward(linearLayer, forwardInput, loss, NULL);
+
+    float captured[6];
+    memcpy(captured, weights->grad->data, sizeof(captured));
+    size_t lossOrder0 = loss->shape->orderOfDimensions[0];
+    size_t lossOrder1 = loss->shape->orderOfDimensions[1];
 
     freeLinearLayer(linearLayer);
     freeTensor(loss);
     freeTensor(forwardInput);
     freeQuantization(floatQ);
+
+    /* dW = loss^T @ x, batch 1: row o is loss[o] * {1, 2, 3}. */
+    TEST_ASSERT_EQUAL_FLOAT(-4.f * 1.f, captured[0]);
+    TEST_ASSERT_EQUAL_FLOAT(-4.f * 2.f, captured[1]);
+    TEST_ASSERT_EQUAL_FLOAT(-4.f * 3.f, captured[2]);
+    TEST_ASSERT_EQUAL_FLOAT(3.f * 1.f, captured[3]);
+    TEST_ASSERT_EQUAL_FLOAT(3.f * 2.f, captured[4]);
+    TEST_ASSERT_EQUAL_FLOAT(3.f * 3.f, captured[5]);
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(
+        0, lossOrder0,
+        "the weightGrad kernel must restore the caller's loss view (transpose "
+        "dance on funnel scratch that aliases the caller's shape_t)");
+    TEST_ASSERT_EQUAL_size_t(1, lossOrder1);
 }
 
-/* biasGrad twin: weightGrad pinned FLOAT32 runs first (fake-quant dequant of
- * the BFP loss), then the derived-ARITH_BFP biasGrad slot must die at the
- * dispatch — its only operand {loss} is BFP-stored, so no funnel gate fires. */
-void testLinearBackwardBfpBiasGradMathDies(void) {
+/* Native ARITH_BFP biasGrad in the mixed-slot scenario from the PR2 trio:
+ * weightGrad pinned ARITH_FLOAT32 runs first (fake-quant dequant of the BFP
+ * loss), then the ARITH_BFP biasGrad consumes the BFP-stored loss through the
+ * borrow arm. Batch 2 so the per-feature sum is real (trio-shape deviation:
+ * forwardInput grows to [2,3] to keep the FLOAT32 weightGrad op's loss^T @ x
+ * shape-consistent with the [2,2] loss); bGrad[f] = sum_n loss[n][f], every
+ * value exact at m=8. Weights are BFP-stored per the backward rule-1 mirror. */
+void testLinearBackwardBfpBiasGradNativeSumsLoss(void) {
     quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *bfpTemplate = quantizationInitBfp(8, 8, HALF_AWAY);
     size_t weightDims[] = {2, 3};
     tensor_t *weightsParam =
         makeFloatTensor(weightDims, 2, (float[]){0.5f, -1.f, 2.f, 1.f, 0.25f, -0.75f});
+    requantizeTensorInPlace(weightsParam, bfpTemplate);
     parameter_t *weights = parameterInit(weightsParam, gradInitFloat(weightsParam, NULL));
     size_t biasDims[] = {2};
     tensor_t *biasParam = makeFloatTensor(biasDims, 1, (float[]){-1.f, 3.f});
@@ -2879,27 +2938,101 @@ void testLinearBackwardBfpBiasGradMathDies(void) {
     linearLayer->config->linear->biasGradMath =
         (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
 
-    size_t fwdDims[] = {1, 3};
-    tensor_t *forwardInput = makeFloatTensor(fwdDims, 2, (float[]){1.f, 2.f, 3.f});
-    quantization_t *bfpTemplate = quantizationInitBfp(8, 8, HALF_AWAY);
-    size_t lossDims[] = {1, 2};
-    tensor_t *loss = makeFloatTensor(lossDims, 2, (float[]){-4.f, 3.f});
+    size_t fwdDims[] = {2, 3};
+    tensor_t *forwardInput = makeFloatTensor(fwdDims, 2, (float[]){1.f, 2.f, 3.f, -1.f, 0.5f, 2.f});
+    size_t lossDims[] = {2, 2};
+    tensor_t *loss = makeFloatTensor(lossDims, 2, (float[]){-4.f, 3.f, 2.f, -1.f});
     requantizeTensorInPlace(loss, bfpTemplate);
     freeQuantization(bfpTemplate);
 
-    ASSERT_EXITS_WITH_FAILURE(linearBackward(linearLayer, forwardInput, loss, NULL));
+    linearBackward(linearLayer, forwardInput, loss, NULL);
+
+    float captured[2];
+    memcpy(captured, bias->grad->data, sizeof(captured));
 
     freeLinearLayer(linearLayer);
     freeTensor(loss);
     freeTensor(forwardInput);
     freeQuantization(floatQ);
+
+    /* bGrad[f] = batch sum over loss column f: {-4 + 2, 3 + (-1)}. */
+    TEST_ASSERT_EQUAL_FLOAT(-4.f + 2.f, captured[0]);
+    TEST_ASSERT_EQUAL_FLOAT(3.f + -1.f, captured[1]);
 }
 
-/* propLoss twin, the frozen-layer variant from the review scenario: frozen
- * skips both grad ops, so backward reaches the propLoss dispatch directly with
- * {loss, weights} BOTH BFP-stored — borrow path, no funnel gate, garbage dx
- * propagated to every upstream layer unless the dispatch dies. */
-void testLinearBackwardBfpPropLossMathDies(void) {
+/* Grouped-loss twin of the test above -- the ONLY fixture that reaches the
+ * biasGrad core's group-crossing fold branch (the per-tensor twin never
+ * leaves group 0). Same loss values, but stored grouped {numGroups=2,
+ * groupSize=2}: group 0 = rows {-4, 3} (absmax 4), group 1 = rows {2, -1}
+ * (absmax 2) -> DISTINCT derived exponents, and each feature's stride-2 walk
+ * crosses group 0 -> 1 between n=0 and n=1, so the fold binds
+ * exponents[currentGroup] per segment and resets the partial. All values
+ * m=8-exact under their own group exponent, so the expected sums are the
+ * plain float sums: db[0] = -4 + 2 = -2, db[1] = 3 + (-1) = 2. */
+void testLinearBackwardBfpBiasGradGroupedLossFoldsPerGroup(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *bfpTemplate = quantizationInitBfp(8, 8, HALF_AWAY);
+    size_t weightDims[] = {2, 3};
+    tensor_t *weightsParam =
+        makeFloatTensor(weightDims, 2, (float[]){0.5f, -1.f, 2.f, 1.f, 0.25f, -0.75f});
+    requantizeTensorInPlace(weightsParam, bfpTemplate);
+    freeQuantization(bfpTemplate);
+    parameter_t *weights = parameterInit(weightsParam, gradInitFloat(weightsParam, NULL));
+    size_t biasDims[] = {2};
+    tensor_t *biasParam = makeFloatTensor(biasDims, 1, (float[]){-1.f, 3.f});
+    parameter_t *bias = parameterInit(biasParam, gradInitFloat(biasParam, NULL));
+    layer_t *linearLayer = buildBorrowedLinearLayer(weights, bias, floatQ);
+    linearLayer->config->linear->weightGradMath =
+        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
+    linearLayer->config->linear->biasGradMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+
+    size_t fwdDims[] = {2, 3};
+    tensor_t *forwardInput = makeFloatTensor(fwdDims, 2, (float[]){1.f, 2.f, 3.f, -1.f, 0.5f, 2.f});
+    quantization_t *groupedBfpTemplate = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 2);
+    size_t lossDims[] = {2, 2};
+    tensor_t *loss = makeFloatTensor(lossDims, 2, (float[]){-4.f, 3.f, 2.f, -1.f});
+    requantizeTensorInPlace(loss, groupedBfpTemplate);
+    freeQuantization(groupedBfpTemplate);
+
+    linearBackward(linearLayer, forwardInput, loss, NULL);
+
+    float captured[2];
+    memcpy(captured, bias->grad->data, sizeof(captured));
+
+    freeLinearLayer(linearLayer);
+    freeTensor(loss);
+    freeTensor(forwardInput);
+    freeQuantization(floatQ);
+
+    /* db[f] = fold(group 0 partial) + fold(group 1 partial), per feature. */
+    TEST_ASSERT_EQUAL_FLOAT(-4.f + 2.f, captured[0]);
+    TEST_ASSERT_EQUAL_FLOAT(3.f + -1.f, captured[1]);
+}
+
+/* linearCalcBiasGradsBfp is a PUBLIC symbol: without a dtype guard a
+ * FLOAT32-stored loss would be reinterpreted as int32 mantissa codes (silent
+ * wrong arithmetic). Mirrors matmulBfpTensors' operand fail-fast
+ * ("unpacked scratch form"). */
+void testLinearCalcBiasGradsBfpRejectsFloat32Loss(void) {
+    size_t lossDims[] = {1, 2};
+    tensor_t *loss = makeFloatTensor(lossDims, 2, (float[]){-4.f, 3.f});
+    size_t biasDims[] = {2};
+    tensor_t *biasGrad = makeFloatTensor(biasDims, 1, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(linearCalcBiasGradsBfp(loss, biasGrad));
+
+    freeTensor(biasGrad);
+    freeTensor(loss);
+}
+
+/* Native ARITH_BFP propLoss in the frozen-layer scenario from the PR2 trio:
+ * frozen skips both grad ops, so backward reaches the propLoss op directly
+ * with {loss, weights} BOTH BFP-stored (borrow arm). dx = loss @ W with W in
+ * RAW [outF, inF] storage (Task 1's strided-walk kernel pin) into a FLOAT32
+ * dx wire; every value exact at m=8, asserted against the literal float
+ * expressions. */
+void testLinearBackwardBfpPropLossNativeMatchesFloatReference(void) {
     quantization_t *floatQ = quantizationInitFloat();
     quantization_t *bfpTemplate = quantizationInitBfp(8, 8, HALF_AWAY);
     size_t weightDims[] = {2, 3};
@@ -2921,13 +3054,21 @@ void testLinearBackwardBfpPropLossMathDies(void) {
     size_t propLossDims[] = {1, 3};
     tensor_t *propLoss = makeFloatTensor(propLossDims, 2, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(linearBackward(linearLayer, forwardInput, loss, propLoss));
+    linearBackward(linearLayer, forwardInput, loss, propLoss);
+
+    float captured[3];
+    memcpy(captured, propLoss->data, sizeof(captured));
 
     freeLinearLayer(linearLayer);
     freeTensor(propLoss);
     freeTensor(loss);
     freeTensor(forwardInput);
     freeQuantization(floatQ);
+
+    /* dx[i] = sum_o loss[o] * W[o][i], W rows {0.5, -1, 2} / {1, 0.25, -0.75}. */
+    TEST_ASSERT_EQUAL_FLOAT(-4.f * 0.5f + 3.f * 1.f, captured[0]);
+    TEST_ASSERT_EQUAL_FLOAT(-4.f * -1.f + 3.f * 0.25f, captured[1]);
+    TEST_ASSERT_EQUAL_FLOAT(-4.f * 2.f + 3.f * -0.75f, captured[2]);
 }
 
 int main(void) {
@@ -2961,6 +3102,7 @@ int main(void) {
     RUN_TEST(testLinearLayerInitOwningFreesAllAllocationsWithoutLeak);
     RUN_TEST(testLinearLayerInitOwningWeightGradStorageKnobOverridesPropLossQDefault);
     RUN_TEST(testLinearLayerInitOwningBoolWeightGradStorageKnobAborts);
+    RUN_TEST(testLinearLayerInitOwningBfpWeightGradStorageKnob);
     RUN_TEST(testLinearLayerInitDefaultWeightsWithinPyTorchBound);
     RUN_TEST(testLinearLayerInitXavierUniformOverrideUsesGlorotBound);
     RUN_TEST(testLinearBackwardWithoutBiasDoesNotCrash);
@@ -2983,8 +3125,10 @@ int main(void) {
     RUN_TEST(testLinearForwardBfpStagesFloat32Bias);
     RUN_TEST(testLinearForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer);
     RUN_TEST(testLinearForwardBfpRejectsFloat32Weights);
-    RUN_TEST(testLinearBackwardBfpWeightGradMathDies);
-    RUN_TEST(testLinearBackwardBfpBiasGradMathDies);
-    RUN_TEST(testLinearBackwardBfpPropLossMathDies);
+    RUN_TEST(testLinearBackwardBfpWeightGradNativeMatchesFloatReference);
+    RUN_TEST(testLinearBackwardBfpBiasGradNativeSumsLoss);
+    RUN_TEST(testLinearBackwardBfpBiasGradGroupedLossFoldsPerGroup);
+    RUN_TEST(testLinearCalcBiasGradsBfpRejectsFloat32Loss);
+    RUN_TEST(testLinearBackwardBfpPropLossNativeMatchesFloatReference);
     return UNITY_END();
 }

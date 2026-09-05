@@ -60,6 +60,29 @@ def emit_int32_scalar(name: str, v: int) -> str:
     return f"static const int32_t {name} = {int(v)};\n"
 
 
+def emit_uint8_array(name: str, values) -> str:
+    vals = [int(v) for v in values]
+    assert all(0 <= v <= 255 for v in vals), f"{name}: value outside uint8 range"
+    body = ", ".join(str(v) for v in vals)
+    return (
+        f"static const uint8_t {name}[] = {{ {body} }};\n"
+        f"static const size_t {name}_len = {len(vals)};\n"
+    )
+
+
+def check_exact_roundtrip(name, values, codes, exps, qc):
+    """Exact-float-regime pin: code * 2^(stored - bias) must reproduce the
+    input float bit-for-bit (float32 multiply by a power of two is exact)."""
+    bias = 2 ** (qc["exponent_bits"] - 1) - 1
+    gsz = len(values) if qc["group_size"] == 0 else qc["group_size"]
+    for i, v in enumerate(values):
+        scale = np.float32(np.ldexp(np.float32(1.0), np.int32(exps[i // gsz] - bias)))
+        deq = float(np.float32(np.float32(codes[i]) * scale))
+        assert deq == v, (
+            f"{name}: element {i} dequantizes to {deq}, not {v} -- fixture left "
+            "the exact float regime; pick grid-exact values")
+
+
 def quantize_sym(x: torch.Tensor):
     """convertFloatTensorToSymInt32Tensor: absmax -> scale (1.0 if absmax==0),
     round-clamp with the C rounding (half-away-from-zero)."""
@@ -912,14 +935,16 @@ def _bfp_group_of(idx, group_size):
 
 
 def matmul_bfp_ref(a_codes, a_exp, a_qc, b_codes, b_exp, b_qc, bias_codes, bias_exp, bias_qc,
-                   rows, cols, K, b_transposed, self_check=True):
+                   rows, cols, K, b_transposed, a_transposed=False, self_check=True):
     """Mirror the C fold order exactly: int partial (assert |partial| <=
     2**31-1 -- the C kernel guarantees this via bfpValidateBlockHeadroom),
     np.float32 acc, np.ldexp folds, bias seeds acc first. Each *_qc is a dict
     with keys mantissa_bits / exponent_bits / group_size; codes are storage-
     order flat, exponents are stored (biased) per-group bytes. b's storage is
     [cols, K] when b_transposed (the GEMM-weight bOrder {1,0} view: b_idx =
-    c*K + k), else [K, cols] (b_idx = k*cols + c). Self-checks (skipped on
+    c*K + k), else [K, cols] (b_idx = k*cols + c). a's storage is [K, rows]
+    when a_transposed (the loss^T view Linear weightGrad uses: a_idx =
+    k*rows + r), else [rows, K] (a_idx = r*K + k). Self-checks (skipped on
     the collapse rerun): (i) >= 2 groups crossed on EACH operand somewhere,
     (ii) >= 1 fold with a NONZERO partial whose float conversion is exact
     (regression anchor), (iii) result differs from an all-per-tensor run
@@ -947,7 +972,11 @@ def matmul_bfp_ref(a_codes, a_exp, a_qc, b_codes, b_exp, b_qc, bias_codes, bias_
             cur_ga, cur_gb = 0, 0
             a_groups_seen, b_groups_seen = set(), set()
             for k in range(K):
-                a_idx = r * K + k
+                # a_transposed: logical a[r][k] reads storage [K, rows] row-
+                # major -- the loss^T view Linear weightGrad uses. Storage is
+                # loss [batch, outF] and the logical matrix is [outF, batch],
+                # so rows == outF, K == batch: a_idx = k*outF + r == k*rows + r.
+                a_idx = (k * rows + r) if a_transposed else (r * K + k)
                 b_idx = c * K + k if b_transposed else k * cols + c
                 ga = _bfp_group_of(a_idx, a_qc["group_size"])
                 gb = _bfp_group_of(b_idx, b_qc["group_size"])
@@ -1000,10 +1029,50 @@ def matmul_bfp_ref(a_codes, a_exp, a_qc, b_codes, b_exp, b_qc, bias_codes, bias_
             a_codes, [a_exp[0]], {**a_qc, "group_size": 0},
             b_codes, [b_exp[0]], {**b_qc, "group_size": 0},
             bias_codes, bias_exp, bias_qc, rows, cols, K, b_transposed,
-            self_check=False)
+            a_transposed=a_transposed, self_check=False)
         assert collapsed != out, (
             "matmul_bfp_ref: per-tensor collapse is indistinguishable from the "
             "grouped run -- fixture is vacuous against group-structure bugs")
+    return out
+
+
+def matmul_bfp_bias_grad_ref(codes, exps, qc, rows, cols, self_check=True):
+    """BFP epic PR3: bias-grad reference -- db[f] = sum_n loss[n][f] on BFP loss
+    codes (int mantissas, per-element group lookup). Fold rule: int partial per
+    same-group VISITED segment (the walk strides by `cols`, so groups can change
+    every step), fold acc += ldexp(float32(partial), E) on group change + tail.
+    Sum headroom: |partial| <= segment_len * (2^(m-1)) asserted <= 2^31-1."""
+    bias = 2 ** (qc["exponent_bits"] - 1) - 1
+    gsz = qc["group_size"] if qc["group_size"] else rows * cols
+    out = []
+    crossings = 0
+    for f in range(cols):
+        acc = np.float32(0.0)
+        partial = 0
+        cur_g = None
+        for n in range(rows):
+            idx = n * cols + f
+            g = idx // gsz
+            if cur_g is None:
+                cur_g = g
+            elif g != cur_g:
+                assert abs(partial) <= _INT32_MAX
+                acc = np.float32(acc + np.ldexp(np.float32(partial),
+                                                np.int32(exps[cur_g] - bias)))
+                partial = 0
+                cur_g = g
+                crossings += 1
+            partial += codes[idx]
+        if cur_g is not None:
+            assert abs(partial) <= _INT32_MAX
+            acc = np.float32(acc + np.ldexp(np.float32(partial),
+                                            np.int32(exps[cur_g] - bias)))
+        out.append(float(acc))
+    if self_check:
+        assert crossings >= 1, "bias-grad fixture never crosses a loss group -- vacuous"
+        collapse = matmul_bfp_bias_grad_ref(
+            codes, [exps[0]] * len(exps), qc, rows, cols, self_check=False)
+        assert collapse != out, "per-tensor collapse identical -- exponent binding unobservable"
     return out
 
 
@@ -1368,3 +1437,492 @@ def convT1d_bfp_gather_ref(x_codes, x_exp, x_qc, w_codes, w_exp, w_qc,
             "from the grouped run -- fixture is vacuous against group-structure "
             "bugs")
     return out
+
+
+# ---- BFP epic PR3 Task 3: Conv1d backward references. weightGrad is a NEW
+# output-centric core (one gw element per reduction, contributors walked
+# b outer / outPos inner -- the NORMATIVE order the C kernel mirrors);
+# biasGrad is the single-operand segment fold shared by Conv1d and ConvT1d;
+# dx delegates to the D9 gather ref with the adjoint role swap. ----
+
+
+def conv1d_bfp_weight_grad_ref(x_codes, x_exp, x_qc, gy_codes, gy_exp, gy_qc,
+                               batch, in_channels, out_channels, kernel_size, input_length,
+                               stride=1, dilation=1, padding_type="VALID", padding=0,
+                               self_check=True):
+    """Conv1d weight grad on BFP operands, output-centric: per gw element
+    (oc, ic, k) ONE int partial over its contributors -- the (b, out_pos)
+    pairs whose window visits tap k -- walked b OUTER, out_pos INNER (the
+    normative order the C kernel mirrors). Per contributor
+    window_slice_1d_full(geom, out_pos) -> (first_in, first_k, valid);
+    contribute iff first_k <= k < first_k + valid with in_idx_local =
+    first_in + (k - first_k) * dilation; storage indices
+    x_idx = (b*in_channels + ic)*input_length + in_idx_local and
+    gy_idx = (b*out_channels + oc)*output_length + out_pos map to group ids
+    per step (_bfp_group_of, per-element); when EITHER id changes the
+    finished segment folds via np.float32 acc += np.ldexp((float32)partial,
+    Ex + Egy - biasX - biasGy) and resets; tail fold guarded on >= 1 visited
+    contributor (a (oc, k) whose windows never reach tap k -- extreme
+    padding -- emits 0.0). conv-groups==1 only (the backward fixtures'
+    scope; the C kernel additionally handles conv groups, pinned there by
+    the SYM/float structure tests).
+
+    Self-checks (skipped on the collapse rerun, mirroring conv1d_bfp_ref's):
+      (i)   >= 2 groups crossed on EACH operand within a single reduction;
+      (ii)  >= 1 fold with a NONZERO exactly-float-convertible partial;
+      (iii) result differs from an all-per-tensor (exponents[0]) collapse;
+      plus the disjoint-boundary pins (both directions): >= 1 step where
+      ONLY x's group changes and >= 1 step where ONLY gy's group changes.
+    Returns the float32 grads as Python floats, row-major
+    [out_channels*in_channels*kernel_size]."""
+    geom = window_geometry_1d(input_length, kernel_size, stride, dilation, padding_type, padding)
+    output_length = geom["out_len"]
+    x_bias = 2 ** (x_qc["exponent_bits"] - 1) - 1
+    gy_bias = 2 ** (gy_qc["exponent_bits"] - 1) - 1
+
+    out = []
+    fold_partials = []
+    max_x_groups_crossed = 0
+    max_gy_groups_crossed = 0
+    x_only_boundaries = 0
+    gy_only_boundaries = 0
+    for oc in range(out_channels):
+        for ic in range(in_channels):
+            for k in range(kernel_size):
+                acc = np.float32(0.0)
+                partial = 0
+                cur_gx, cur_ggy = None, None
+                x_groups_seen, gy_groups_seen = set(), set()
+                for b in range(batch):
+                    for out_pos in range(output_length):
+                        first_in, first_k, valid = window_slice_1d_full(geom, out_pos)
+                        if not (first_k <= k < first_k + valid):
+                            continue
+                        in_idx_local = first_in + (k - first_k) * dilation
+                        x_idx = (b * in_channels + ic) * input_length + in_idx_local
+                        gy_idx = (b * out_channels + oc) * output_length + out_pos
+                        gx = _bfp_group_of(x_idx, x_qc["group_size"])
+                        ggy = _bfp_group_of(gy_idx, gy_qc["group_size"])
+                        x_groups_seen.add(gx)
+                        gy_groups_seen.add(ggy)
+                        if cur_ggy is None:
+                            cur_gx, cur_ggy = gx, ggy
+                        elif gx != cur_gx or ggy != cur_ggy:
+                            if gx != cur_gx and ggy == cur_ggy:
+                                x_only_boundaries += 1
+                            if ggy != cur_ggy and gx == cur_gx:
+                                gy_only_boundaries += 1
+                            shift = (x_exp[cur_gx] - x_bias) + (gy_exp[cur_ggy] - gy_bias)
+                            fold_partials.append(partial)
+                            acc = np.float32(acc + np.ldexp(np.float32(partial), np.int32(shift)))
+                            partial = 0
+                            cur_gx, cur_ggy = gx, ggy
+                        partial += x_codes[x_idx] * gy_codes[gy_idx]
+                        assert abs(partial) <= _INT32_MAX, (
+                            f"conv1d_bfp_weight_grad_ref: partial {partial} exceeds int32 -- "
+                            "fixture violates the bfpValidateBlockHeadroom bound the C kernel "
+                            "enforces")
+                if cur_ggy is not None:
+                    shift = (x_exp[cur_gx] - x_bias) + (gy_exp[cur_ggy] - gy_bias)
+                    fold_partials.append(partial)
+                    acc = np.float32(acc + np.ldexp(np.float32(partial), np.int32(shift)))
+                max_x_groups_crossed = max(max_x_groups_crossed, len(x_groups_seen))
+                max_gy_groups_crossed = max(max_gy_groups_crossed, len(gy_groups_seen))
+                out.append(float(acc))
+
+    if self_check:
+        assert max_x_groups_crossed >= 2, (
+            "conv1d_bfp_weight_grad_ref: no reduction crosses >= 2 input groups "
+            "-- the input's group tracking is unexercised")
+        assert max_gy_groups_crossed >= 2, (
+            "conv1d_bfp_weight_grad_ref: no reduction crosses >= 2 loss groups "
+            "-- the loss's group tracking is unexercised")
+        assert any(p != 0 and float(np.float32(p)) == float(p) for p in fold_partials), (
+            "conv1d_bfp_weight_grad_ref: no fold has a nonzero exactly-float-"
+            "convertible partial -- fixture lost its exact-regime anchor")
+        assert x_only_boundaries >= 1, (
+            "conv1d_bfp_weight_grad_ref: every input-group boundary coincides "
+            "with a loss-group boundary -- the either-operand fold clause is "
+            "unexercised on the input side")
+        assert gy_only_boundaries >= 1, (
+            "conv1d_bfp_weight_grad_ref: every loss-group boundary coincides "
+            "with an input-group boundary -- the either-operand fold clause is "
+            "unexercised on the loss side")
+        collapsed = conv1d_bfp_weight_grad_ref(
+            x_codes, [x_exp[0]], {**x_qc, "group_size": 0},
+            gy_codes, [gy_exp[0]], {**gy_qc, "group_size": 0},
+            batch, in_channels, out_channels, kernel_size, input_length,
+            stride, dilation, padding_type, padding, self_check=False)
+        assert collapsed != out, (
+            "conv1d_bfp_weight_grad_ref: per-tensor collapse is "
+            "indistinguishable from the grouped run -- fixture is vacuous "
+            "against group-structure bugs")
+    return out
+
+
+def conv_bfp_bias_grad_ref(gy_codes, gy_exp, gy_qc, batch, out_channels, output_length,
+                           self_check=True):
+    """Conv-family bias grad on BFP loss codes -- db[oc] = sum over (b,
+    out_pos) of gy[b][oc][out_pos], walked b OUTER / out_pos INNER over
+    gy_idx = (b*out_channels + oc)*output_length + out_pos. Fold rule and
+    self-checks are matmul_bfp_bias_grad_ref's, on the conv walk (the walk
+    hops by output_length at each b step, so groups can change every step).
+    Shared by Conv1d and ConvT1d (identical [B, C, L] loss layout), hence
+    the generic name."""
+    bias = 2 ** (gy_qc["exponent_bits"] - 1) - 1
+    out = []
+    crossings = 0
+    for oc in range(out_channels):
+        acc = np.float32(0.0)
+        partial = 0
+        cur_g = None
+        for b in range(batch):
+            for out_pos in range(output_length):
+                idx = (b * out_channels + oc) * output_length + out_pos
+                g = _bfp_group_of(idx, gy_qc["group_size"])
+                if cur_g is None:
+                    cur_g = g
+                elif g != cur_g:
+                    assert abs(partial) <= _INT32_MAX
+                    acc = np.float32(acc + np.ldexp(np.float32(partial),
+                                                    np.int32(gy_exp[cur_g] - bias)))
+                    partial = 0
+                    cur_g = g
+                    crossings += 1
+                partial += gy_codes[idx]
+        if cur_g is not None:
+            assert abs(partial) <= _INT32_MAX
+            acc = np.float32(acc + np.ldexp(np.float32(partial),
+                                            np.int32(gy_exp[cur_g] - bias)))
+        out.append(float(acc))
+    if self_check:
+        assert crossings >= 1, (
+            "conv_bfp_bias_grad_ref: bias-grad fixture never crosses a loss "
+            "group -- vacuous")
+        collapse = conv_bfp_bias_grad_ref(
+            gy_codes, [gy_exp[0]] * len(gy_exp), gy_qc, batch, out_channels,
+            output_length, self_check=False)
+        assert collapse != out, (
+            "conv_bfp_bias_grad_ref: per-tensor collapse identical -- exponent "
+            "binding unobservable")
+    return out
+
+
+def conv1d_bfp_dx_ref(loss_codes, loss_exp, loss_qc, w_codes, w_exp, w_qc,
+                      batch, in_channels, out_channels, kernel_size, input_length,
+                      stride=1, dilation=1, conv_groups=1, self_check=True):
+    """Conv1d dx (propLoss) on BFP operands: the adjoint of a VALID forward
+    Conv1d, computed GATHER-formulated (D9) -- conv1dBackward routes it to
+    convTranspose1dKernelBfpGather, so this ref delegates to
+    convT1d_bfp_gather_ref with the roles swapped: the gather's "input" is
+    lossGrad [batch, out_channels, forward_out_len] and its "output" is dx
+    [batch, in_channels, input_length]. Parameters are named from the FORWARD
+    Conv1d's perspective (in_channels/out_channels/input_length = x's
+    channels/L; loss length is derived). bias is None (dx never has one),
+    output_padding 0.
+
+    Weight-index identity (why no re-layout is needed): convT1d_bfp_gather_ref
+    reads w at (ic_ref*outChPerGroup_ref + oc_offset_ref)*K + k with ic_ref
+    over ITS in-channels (= Conv1d's out_channels) and oc_offset_ref over ITS
+    per-group out-channels (= Conv1d's per-group in_channels) -- i.e.
+    (oc_conv*inChPerGroup + ic_offset_conv)*K + k, exactly Conv1d's
+    [out_channels, in_channels/conv_groups, K] flat storage index (the same
+    index ConvTranspose1dKernel.c computes at its wArr read in the adjoint
+    role). `w_codes` is therefore passed in Conv1d's OWN storage order, and
+    the per-element group binding carries over unchanged. conv_groups passes
+    through (#416: the gather's conv-group of its oc IS the conv's group of
+    that in-channel). `self_check` passes through to the gather ref's
+    built-ins; layer-wiring fixtures whose 2-channel gather walk cannot
+    satisfy the disjoint-boundary pins structurally call with False and pin
+    layer-relevant properties in the generator instead. Returns the float32
+    dx as Python floats, row-major [batch*in_channels*input_length]."""
+    eff_k = dilation * (kernel_size - 1) + 1
+    assert input_length >= eff_k, "conv1d_bfp_dx_ref: forward geometry is empty"
+    forward_out_len = (input_length - eff_k) // stride + 1
+    assert (forward_out_len - 1) * stride + eff_k == input_length, (
+        "conv1d_bfp_dx_ref: VALID forward geometry does not invert exactly "
+        "(stride leaves a remainder) -- pick L with (L - effK) % stride == 0")
+    out = convT1d_bfp_gather_ref(
+        loss_codes, loss_exp, loss_qc, w_codes, w_exp, w_qc,
+        None, None, None, batch, out_channels, in_channels, kernel_size,
+        forward_out_len, stride, dilation, 0, conv_groups, self_check=self_check)
+    assert len(out) == batch * in_channels * input_length
+    return out
+
+
+# ---- BFP epic PR3 Task 4: ConvT1d backward references. weightGrad is the
+# ConvT twin of conv1d_bfp_weight_grad_ref -- output-centric with the ConvT
+# AFFINE contributor map (out_idx = in_pos*stride + k*dilation; no window
+# geometry); biasGrad reuses conv_bfp_bias_grad_ref (identical [B, C, L]
+# loss walk, see its docstring); dx delegates to conv1d_bfp_ref with the
+# adjoint role swap (the SYM convT1d_dx_grouped_ref pattern). ----
+
+
+def convT1d_bfp_weight_grad_ref(x_codes, x_exp, x_qc, gy_codes, gy_exp, gy_qc,
+                                batch, in_channels, out_channels, kernel_size, input_length,
+                                stride=1, dilation=1, output_padding=0, self_check=True):
+    """ConvT1d weight grad on BFP operands, output-centric: per gw element
+    (ic, oc, k) -- ConvT weight [Cin, Cout/groups, K] storage order -- ONE
+    int partial over its contributors, walked b OUTER, in_pos INNER (the
+    normative order the C kernel mirrors). Per contributor
+    out_idx = in_pos * stride + k * dilation; contribute iff
+    out_idx < output_length with output_length = (input_length-1)*stride +
+    dilation*(kernel_size-1) + output_padding + 1 (the clip is DEFENSIVE
+    under this forward-shaped geometry: max out_idx = output_length -
+    output_padding - 1, so every (b, in_pos) pair contributes -- outputPadding
+    tail positions of gy are simply never read). Storage indices
+    x_idx = (b*in_channels + ic)*input_length + in_pos and
+    gy_idx = (b*out_channels + oc)*output_length + out_idx map to group ids
+    per step (_bfp_group_of, per-element); when EITHER id changes the
+    finished segment folds via np.float32 acc += np.ldexp((float32)partial,
+    Ex + Egy - biasX - biasGy) and resets; tail fold guarded on >= 1 visited
+    contributor. conv-groups==1 only (the backward fixtures' scope; the C
+    kernel additionally handles conv groups, pinned there by the SYM/float
+    structure tests).
+
+    Self-checks (skipped on the collapse rerun, conv1d_bfp_weight_grad_ref's
+    suite):
+      (i)   >= 2 groups crossed on EACH operand within a single reduction;
+      (ii)  >= 1 fold with a NONZERO exactly-float-convertible partial;
+      (iii) result differs from an all-per-tensor (exponents[0]) collapse;
+      plus the disjoint-boundary pins (both directions): >= 1 step where
+      ONLY x's group changes and >= 1 step where ONLY gy's group changes.
+    Returns the float32 grads as Python floats, row-major
+    [in_channels*out_channels*kernel_size]."""
+    output_length = (input_length - 1) * stride + dilation * (kernel_size - 1) \
+        + output_padding + 1
+    x_bias = 2 ** (x_qc["exponent_bits"] - 1) - 1
+    gy_bias = 2 ** (gy_qc["exponent_bits"] - 1) - 1
+
+    out = []
+    fold_partials = []
+    max_x_groups_crossed = 0
+    max_gy_groups_crossed = 0
+    x_only_boundaries = 0
+    gy_only_boundaries = 0
+    for ic in range(in_channels):
+        for oc in range(out_channels):
+            for k in range(kernel_size):
+                acc = np.float32(0.0)
+                partial = 0
+                cur_gx, cur_ggy = None, None
+                x_groups_seen, gy_groups_seen = set(), set()
+                for b in range(batch):
+                    for in_pos in range(input_length):
+                        out_idx = in_pos * stride + k * dilation
+                        if out_idx >= output_length:
+                            continue
+                        x_idx = (b * in_channels + ic) * input_length + in_pos
+                        gy_idx = (b * out_channels + oc) * output_length + out_idx
+                        gx = _bfp_group_of(x_idx, x_qc["group_size"])
+                        ggy = _bfp_group_of(gy_idx, gy_qc["group_size"])
+                        x_groups_seen.add(gx)
+                        gy_groups_seen.add(ggy)
+                        if cur_ggy is None:
+                            cur_gx, cur_ggy = gx, ggy
+                        elif gx != cur_gx or ggy != cur_ggy:
+                            if gx != cur_gx and ggy == cur_ggy:
+                                x_only_boundaries += 1
+                            if ggy != cur_ggy and gx == cur_gx:
+                                gy_only_boundaries += 1
+                            shift = (x_exp[cur_gx] - x_bias) + (gy_exp[cur_ggy] - gy_bias)
+                            fold_partials.append(partial)
+                            acc = np.float32(acc + np.ldexp(np.float32(partial), np.int32(shift)))
+                            partial = 0
+                            cur_gx, cur_ggy = gx, ggy
+                        partial += x_codes[x_idx] * gy_codes[gy_idx]
+                        assert abs(partial) <= _INT32_MAX, (
+                            f"convT1d_bfp_weight_grad_ref: partial {partial} exceeds int32 -- "
+                            "fixture violates the bfpValidateBlockHeadroom bound the C kernel "
+                            "enforces")
+                if cur_ggy is not None:
+                    shift = (x_exp[cur_gx] - x_bias) + (gy_exp[cur_ggy] - gy_bias)
+                    fold_partials.append(partial)
+                    acc = np.float32(acc + np.ldexp(np.float32(partial), np.int32(shift)))
+                max_x_groups_crossed = max(max_x_groups_crossed, len(x_groups_seen))
+                max_gy_groups_crossed = max(max_gy_groups_crossed, len(gy_groups_seen))
+                out.append(float(acc))
+
+    if self_check:
+        assert max_x_groups_crossed >= 2, (
+            "convT1d_bfp_weight_grad_ref: no reduction crosses >= 2 input groups "
+            "-- the input's group tracking is unexercised")
+        assert max_gy_groups_crossed >= 2, (
+            "convT1d_bfp_weight_grad_ref: no reduction crosses >= 2 loss groups "
+            "-- the loss's group tracking is unexercised")
+        assert any(p != 0 and float(np.float32(p)) == float(p) for p in fold_partials), (
+            "convT1d_bfp_weight_grad_ref: no fold has a nonzero exactly-float-"
+            "convertible partial -- fixture lost its exact-regime anchor")
+        assert x_only_boundaries >= 1, (
+            "convT1d_bfp_weight_grad_ref: every input-group boundary coincides "
+            "with a loss-group boundary -- the either-operand fold clause is "
+            "unexercised on the input side")
+        assert gy_only_boundaries >= 1, (
+            "convT1d_bfp_weight_grad_ref: every loss-group boundary coincides "
+            "with an input-group boundary -- the either-operand fold clause is "
+            "unexercised on the loss side")
+        collapsed = convT1d_bfp_weight_grad_ref(
+            x_codes, [x_exp[0]], {**x_qc, "group_size": 0},
+            gy_codes, [gy_exp[0]], {**gy_qc, "group_size": 0},
+            batch, in_channels, out_channels, kernel_size, input_length,
+            stride, dilation, output_padding, self_check=False)
+        assert collapsed != out, (
+            "convT1d_bfp_weight_grad_ref: per-tensor collapse is "
+            "indistinguishable from the grouped run -- fixture is vacuous "
+            "against group-structure bugs")
+    return out
+
+
+def convT1d_bfp_dx_ref(loss_codes, loss_exp, loss_qc, w_codes, w_exp, w_qc,
+                       batch, in_channels, out_channels, kernel_size, input_length,
+                       stride=1, dilation=1, output_padding=0, conv_groups=1,
+                       self_check=True):
+    """ConvT1d dx (propLoss) on BFP operands: the adjoint of a VALID forward
+    ConvT1d is a GATHER (correlation) of lossGrad with the SAME weight --
+    conv1dTransposedBackward routes it to conv1dKernelBfp, so this ref
+    delegates to conv1d_bfp_ref with the roles swapped (the SYM
+    convT1d_dx_grouped_ref pattern): the gather's "input" is lossGrad
+    [batch, out_channels, out_len] and its "output" is dx
+    [batch, in_channels, input_length]. Parameters are named from the FORWARD
+    ConvT1d's perspective (in_channels/out_channels/input_length = x's
+    channels/Lin). VALID-only, no bias (dx never has one); outputPadding only
+    pads trailing zeros of the forward output, whose tail positions the
+    adjoint gather's VALID windows never reach.
+
+    Weight-index identity (why no re-layout is needed): conv1d_bfp_ref reads
+    w at (oc_ref*inChPerGroup_ref + ic_offset_ref)*K + k with oc_ref over ITS
+    out-channels (= ConvT1d's in_channels) and ic_offset_ref over ITS
+    per-group in-channels (= ConvT1d's per-group out_channels) -- i.e.
+    (ic_convT*outChPerGroup + oc_offset_convT)*K + k, exactly ConvT1d's
+    [in_channels, out_channels/conv_groups, K] flat storage index (the same
+    index Conv1dKernel.c computes at its wArr read in the adjoint role), so
+    `w_codes` is passed in ConvT1d's OWN storage order and the per-element
+    group binding carries over unchanged. conv_groups passes through (#416:
+    the gather's conv-group of its oc IS the ConvT group of that in-channel).
+
+    `self_check` passes through to the delegate's built-ins. Every dx
+    delegation here must run with False -- NOT because of the
+    disjoint-boundary pins (the delegate walks ic outer / taps inner with
+    unit weight-index steps, so quiet steps exist on both operands), but
+    because conv1d_bfp_ref's clipped-window pin (iv) requires a window with
+    0 < valid_count < kernel_size and the ConvT dx adjoint is VALID-only
+    (Phase-1 contract), where no window is ever clipped. Generators pin
+    layer-relevant replacements instead (per-operand collapse-differs,
+    >= 1 nonzero). Returns the float32 dx as Python floats, row-major
+    [batch*in_channels*input_length]."""
+    out_len = (input_length - 1) * stride + dilation * (kernel_size - 1) \
+        + output_padding + 1
+    out = conv1d_bfp_ref(
+        loss_codes, loss_exp, loss_qc, w_codes, w_exp, w_qc,
+        None, None, None, batch, out_channels, in_channels, kernel_size,
+        out_len, stride, dilation, "VALID", 0, conv_groups, self_check=self_check)
+    assert len(out) == batch * in_channels * input_length, (
+        f"convT1d_bfp_dx_ref: adjoint gather length {len(out) // (batch * in_channels)} != "
+        f"forward input length {input_length} -- outputPadding >= stride does not invert")
+    return out
+
+
+# ---- BFP epic PR3 Task 7: SGD momentum step with BFP param AND BFP momentum
+# state (per-tensor storage; the optimizer machinery itself is unchanged --
+# this mirrors the funnel's dequant/kernel/repack sequence around the two
+# Sgd.c momentum ops). ----
+
+
+def bfp_dequant_f32(codes, exps, qc):
+    """Exact float32 dequant, dequantChunkToFloat's BFP arm: code *
+    2^(stored - bias) -- a float32 multiply by a power of two is exact.
+    Returns a torch.float32 tensor."""
+    bias = 2 ** (qc["exponent_bits"] - 1) - 1
+    gsz = qc["group_size"]
+    vals = []
+    for i, c in enumerate(codes):
+        g = _bfp_group_of(i, gsz)
+        scale = np.float32(math.ldexp(1.0, exps[g] - bias))
+        vals.append(float(np.float32(np.float32(c) * scale)))
+    return torch.tensor(vals, dtype=torch.float32)
+
+
+def sgd_bfp_step_ref(param_codes, param_exps, param_qc, grad, lr, momentum,
+                     state_codes, state_exps, state_qc, weight_decay=0.0):
+    """One sgdStepM momentum step (momentumFactor > 0, Sgd.c:147-185) with a
+    per-tensor BFP param AND a per-tensor BFP momentum state, mirroring the
+    executeOp funnel bit-for-bit:
+
+      op1 sgdMStateKernel {state, grad, param}: the FLOAT32 prologue dequants
+          state and param EXACTLY (code * 2^(E-bias)); float32 kernel
+          g = grad + wd*paramDeq; newState = momentum*stateDeq + g (same
+          left-to-right op order as the C); the OUT_WRITE epilogue re-packs
+          the state tensor per-tensor BFP (packFloatBufferAsBfp: fresh absmax
+          exponent + HALF_AWAY codes -- holds only under the #279
+          writeBackRounding opt-out, optimizerSetWriteBackRounding /
+          .writeBackRounding = HALF_AWAY).
+      op2 sgdMParamKernel {param, state}: paramDeq is RE-derived from the
+          UNTOUCHED param codes (op1 never wrote param); the state operand is
+          dequanted from its FRESHLY REQUANTIZED codes -- NOT op1's raw float
+          result (this ordering is what makes the state repack load-bearing);
+          newParam = paramDeq - lr*stateReq; per-tensor BFP repack of param.
+
+    Self-checks (abort rather than emit a vacuous fixture):
+      (i)   canonical inputs: requantizing the exact dequant of each input
+            reproduces its codes AND exponents bit-for-bit (a non-canonical
+            fixture would leave the exact-float regime and hide
+            exponent-derivation bugs);
+      (ii)  the param exponent MOVES across the step (an implementation that
+            forgets to re-derive the shared exponent on write-back is
+            observable);
+      (iii) BOTH repacks change values (the BFP quantization is load-bearing
+            on each write-back -- the raw float update alone cannot
+            reproduce the gold).
+
+    Codes/exps are lists (exps: stored/biased, per-group; per-tensor = one
+    entry); each qc is the mantissa_bits/exponent_bits/group_size dict the
+    other BFP refs use. Returns (new_param_codes, new_param_exps,
+    new_state_codes, new_state_exps)."""
+    param_deq = bfp_dequant_f32(param_codes, param_exps, param_qc)
+    state_deq = bfp_dequant_f32(state_codes, state_exps, state_qc)
+
+    # (i) canonical-input roundtrip.
+    for name, deq, codes, exps, qc in (
+            ("param", param_deq, param_codes, param_exps, param_qc),
+            ("state", state_deq, state_codes, state_exps, state_qc)):
+        rq_codes, rq_exps = bfp_quantize_grouped(deq, qc["mantissa_bits"],
+                                                 qc["exponent_bits"], qc["group_size"])
+        assert rq_codes == list(codes) and rq_exps == list(exps), (
+            f"sgd_bfp_step_ref: {name} input is not canonical -- requantizing its exact "
+            f"dequant gives codes {rq_codes} exps {rq_exps}, not the fixture's; pick "
+            "grid-exact values whose absmax code sits in (qMax/2, qMax]")
+
+    g = torch.as_tensor(grad, dtype=torch.float32)
+    wd_t = torch.tensor(weight_decay, dtype=torch.float32)
+    momentum_t = torch.tensor(momentum, dtype=torch.float32)
+    lr_t = torch.tensor(lr, dtype=torch.float32)
+
+    # op1 sgdMStateKernel: g = grad + wd*paramDeq; newState = momentum*stateDeq + g.
+    combined = g + wd_t * param_deq
+    new_state_float = momentum_t * state_deq + combined
+    new_state_codes, new_state_exps = bfp_quantize_grouped(
+        new_state_float, state_qc["mantissa_bits"], state_qc["exponent_bits"],
+        state_qc["group_size"])
+
+    # op2 sgdMParamKernel reads the REQUANTIZED state, never op1's raw floats.
+    state_req_deq = bfp_dequant_f32(new_state_codes, new_state_exps, state_qc)
+    new_param_float = param_deq - lr_t * state_req_deq
+    new_param_codes, new_param_exps = bfp_quantize_grouped(
+        new_param_float, param_qc["mantissa_bits"], param_qc["exponent_bits"],
+        param_qc["group_size"])
+
+    # (ii) param exponent moves.
+    assert new_param_exps != list(param_exps), (
+        "sgd_bfp_step_ref: param exponent did not move -- fixture cannot observe a "
+        "write-back that forgets to re-derive the shared exponent; scale the update "
+        "so the param absmax crosses a binade")
+    # (iii) both repacks change values.
+    assert not torch.equal(state_req_deq, new_state_float), (
+        "sgd_bfp_step_ref: state repack is value-neutral -- fixture cannot tell the "
+        "requantized state from op1's raw float result")
+    param_req_deq = bfp_dequant_f32(new_param_codes, new_param_exps, param_qc)
+    assert not torch.equal(param_req_deq, new_param_float), (
+        "sgd_bfp_step_ref: param repack is value-neutral -- the BFP quantization is "
+        "not load-bearing on the param write-back")
+
+    return new_param_codes, new_param_exps, new_state_codes, new_state_exps

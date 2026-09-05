@@ -14,14 +14,28 @@ static void validateStateStorage(const quantization_t *q, const char *field) {
         PRINT_ERROR("ppcaReplayCreate: %s storage config is NULL", field);
         exit(1);
     }
-    if (q->type != FLOAT32 && q->type != SYM && q->type != ASYM) {
+    if (q->type != FLOAT32 && q->type != SYM && q->type != ASYM && q->type != BFP) {
         /* SYM_INT32 is compute-format-not-storage (#261); INT32 would be a
          * silent value-cast through the conversion matrix; BOOL has no cell.
-         * BFP: arrives with BFP epic PR3 (state-template carrier gates land
-         * alongside gradInit/optimizer-state, mirroring those). All four are
-         * rejected HERE, never left to the matrix. */
-        PRINT_ERROR("ppcaReplayCreate: %s storage must be FLOAT32/SYM/ASYM", field);
+         * BFP epic PR3 Task 6: BFP joins the whitelist -- the gate lift
+         * gradInit/optimizer-state already went through. Every still-
+         * unsupported dtype is rejected HERE, never left to the matrix. */
+        PRINT_ERROR("ppcaReplayCreate: %s storage must be FLOAT32/SYM/ASYM/BFP", field);
         exit(1);
+    }
+    /* BFP epic PR3 Task 7: BFP state storage is per-tensor-only, mirroring
+     * the optimizer-state gates (SgdApi/AdamWApi) -- a grouped template
+     * would flow through getQLike into a grouped BFP state tensor with no
+     * spec mandate (#300 axis). SYM/ASYM templates share this gap but are
+     * deliberately left as-is here (pre-existing behavior, out of scope). */
+    if (q->type == BFP) {
+        const bfpQConfig_t *bfpQC = q->qConfig;
+        if (bfpQC->numGroups > 1) {
+            PRINT_ERROR("ppcaReplayCreate: %s grouped BFP state templates are unsupported -- "
+                        "per-tensor only (#300 axis)",
+                        field);
+            exit(1);
+        }
     }
 }
 

@@ -47,6 +47,25 @@ void optimizerZeroGrad(optimizer_t *optimizer) {
             asymQ->zeroPoints[0] = 0;
             break;
         }
+        case BFP: {
+            /* BFP epic PR3 Task 6: grads are per-tensor (gradInit's carrier
+             * gate), but exponents is still a [numGroups]-array -- loop
+             * generically. Byte-zero above already zero-values every packed
+             * mantissa (code 0 decodes to exactly 0.0f regardless of
+             * exponent), and the next accumulate does not key on exponents
+             * either: FixedGrid's fresh-vs-carry decision (Task 5) is a
+             * codes-only scan, so a byte-zeroed grad is classified fresh
+             * whatever its exponents say. This reset is pure hygiene like
+             * SYM_INT32's scale reset above -- the canonical zero state
+             * (stored = bias) for serialization/inspection and any future
+             * exponent-reading consumer; pinned by the Task 6 e2e's
+             * exponent assertion (UnitTestMultiLayerTraining.c). */
+            bfpQConfig_t *bfpQ = param->grad->quantization->qConfig;
+            for (size_t g = 0; g < bfpQ->numGroups; g++) {
+                bfpQ->exponents[g] = (uint8_t)bfpExponentBias(bfpQ);
+            }
+            break;
+        }
         default:
             break;
         }

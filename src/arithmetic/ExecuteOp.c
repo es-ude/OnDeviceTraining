@@ -199,9 +199,30 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
         }
         return;
     }
+    case BFP: {
+        /* No ODT_SYM_GRAD_QMAXBITS-style width guard here (unlike the three
+         * sibling arms above): BFP mantissaBits is capped to [2,16] at
+         * construction (initBfpQConfigGrouped), so a re-check would be dead
+         * code. FIXED_SCALE carries the per-group exponents and aborts on
+         * mantissa overflow; DYNAMIC_RESCALE re-derives them per store. */
+        if (intermediate->quantization->type == FLOAT32) {
+            if (mode == OUT_ACC_FIXED_SCALE) {
+                accumulateFloatIntoBfpTensorFixedGrid(target, (const float *)intermediate->data, n);
+            } else {
+                accumulateFloatIntoBfpTensorRescale(target, (const float *)intermediate->data, n);
+            }
+        } else {
+            if (mode == OUT_ACC_FIXED_SCALE) {
+                accumulateTensorIntoBfpFixedGrid(target, intermediate);
+            } else {
+                accumulateTensorIntoBfpRescale(target, intermediate);
+            }
+        }
+        return;
+    }
     default:
         PRINT_ERROR("executeOp: accumulate target dtype %d not supported "
-                    "(accepted: FLOAT32, SYM_INT32, SYM, ASYM; INT32/BOOL "
+                    "(accepted: FLOAT32, SYM_INT32, SYM, ASYM, BFP; INT32/BOOL "
                     "remain unsupported)",
                     (int)target->quantization->type);
         exit(1);
@@ -403,17 +424,13 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
             } else if (stored == FLOAT32) {
                 const bfpQConfig_t *stage = spec->bfpStage[i];
                 if (stage == NULL) {
-                    /* Two causes, both worth naming: a forward arm that forgot
-                     * its bfpStage wiring (layer bug), and -- since the epic
-                     * PR2 derivation flip -- a BACKWARD math slot left derived
-                     * as ARITH_BFP, which is the common one: no backward op
-                     * stages operands yet. */
+                    /* Since epic PR3, every ARITH_BFP math slot -- forward or
+                     * backward -- stages its FLOAT32-stored operands; a NULL
+                     * template here always means the layer arm forgot to wire
+                     * one. */
                     PRINT_ERROR("executeOp: FLOAT32-stored operand %zu under ARITH_BFP needs "
-                                "a bfpStage geometry template -- either the layer's forward arm "
-                                "forgot to wire one (layer bug), or a backward math slot was left "
-                                "ARITH_BFP: native BFP backward arrives with epic PR3, until then "
-                                "pin the backward slots to ARITH_FLOAT32 (see "
-                                "docs/conventions/arithmetic-bfp.md)",
+                                "a bfpStage geometry template -- the layer arm forgot to wire "
+                                "one (layer bug; see docs/conventions/arithmetic-bfp.md)",
                                 i);
                     exit(1);
                 }

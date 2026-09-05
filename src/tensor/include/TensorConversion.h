@@ -77,8 +77,16 @@ void requantSymInt32TensorToScale(tensor_t *inputTensor, tensor_t *outputTensor)
  * OUT_WRITE epilogue). */
 void requantBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor);
 /* The single BFP exponent authority (frexpf snap-up, D6 clamp both ends).
-   Public since epic PR2: funnel staging and (PR3) op-local re-blocking derive
-   through it. */
+   A NON-FINITE absMax (inf or NaN -- an overflowed product in a caller's
+   pass 1) has no derivable exponent and saturates at the cap, D6's high
+   regime taken to its limit: the block's mantissas then clamp to the code
+   range under the largest FINITE scale, instead of frexpf's unspecified
+   result leaking an arbitrary exponent into the emit pass.
+   The funnel's staging quantizer and (since PR2) wire OUT_WRITE epilogues
+   derive exponents through this authority; epic PR3 added the grad-accumulate
+   engines and the scale arm, and extended OUT_WRITE's reach to the backward's
+   dx wire (op-local re-blocking never happens -- the D8 amendment,
+   docs/conventions/arithmetic-bfp.md §9). */
 void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint8_t maxStored,
                              uint8_t *storedOut);
 /* Quantize a float buffer into UNPACKED int32 BFP mantissa codes (no payload
@@ -131,6 +139,43 @@ void accumulateTensorIntoSymRescale(tensor_t *target, const tensor_t *increment)
 void accumulateTensorIntoAsymRescale(tensor_t *target, const tensor_t *increment);
 void accumulateTensorIntoFloat32Inplace(tensor_t *target, const tensor_t *increment);
 void accumulateSymInt32IntoSymInt32Rescale(tensor_t *target, const tensor_t *increment);
+
+/* BFP grad-accumulate twins (BFP epic PR3). FixedGrid = fit-preserving:
+ * carries the target's per-group exponents (a fresh ALL-ZERO-code accumulator
+ * first derives them from the increment, per group) and ABORTS on mantissa
+ * overflow (#227 code-domain discipline, no clamp). Rescale = requant:
+ * re-derives every group's exponent from the decoded-plus-increment absmax
+ * (value-domain, saturates — D6). n must equal the target's element count;
+ * the tensor-typed twins stream any dequantChunkToFloat-supported increment
+ * and reject a self-aliased one (shared data pointer) with exit(1), like
+ * their SYM/ASYM siblings. */
+void accumulateFloatIntoBfpTensorFixedGrid(tensor_t *target, const float *inc, size_t n);
+void accumulateFloatIntoBfpTensorRescale(tensor_t *target, const float *inc, size_t n);
+void accumulateTensorIntoBfpFixedGrid(tensor_t *target, const tensor_t *increment);
+void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment);
+
+/* In-place value-domain scale of a BFP tensor by an arbitrary float factor
+ * (scaleOptimizerGradients's BFP arm: REDUCTION_MEAN mean-scale, clip
+ * coefficients). BFP has no O(1) scale fold -- a general factor moves every
+ * group's absmax off its 2^E grid -- so this is an honest O(n) two-pass
+ * repack: pass 1 re-derives every group's exponent from the scaled absmax
+ * (old exponents latched first); pass 2 requantizes with the config's OWN
+ * storage roundingMode (storage requantization, not an op -- #282
+ * target-owned convention), one roundByMode per element in element order,
+ * clamped (value-domain saturation, D6). A power-of-two factor is exact:
+ * exponents shift, codes bit-unchanged -- except where the derived exponent
+ * saturates at 0 or the cap (D6), where codes shift instead. An all-zero
+ * group re-derives the zero state (stored = bias). A group already sitting
+ * at the exponent cap has no headroom left, so even a finite factor can
+ * overflow its scaled values to +-inf: those saturate to the code range
+ * (the clamp runs in the float domain, before the round). An EMPTY tensor
+ * (n == 0) is left in the canonical zero state (every group's stored
+ * exponent = bias), never with its previous grid. Grouped-capable;
+ * direct-call only, not a conversionMatrix cell.
+ * `factor` MUST be finite: a non-finite factor fail-fasts (PRINT_ERROR +
+ * exit(1)) because a BFP grid has no NaN/inf code -- unlike the FLOAT32/
+ * SYM/ASYM scale arms, there is nothing here to propagate it into. */
+void scaleBfpTensorInPlace(tensor_t *t, float factor);
 
 extern conversionFunction_t conversionMatrix[7][7];
 

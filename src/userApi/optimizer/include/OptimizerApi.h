@@ -16,7 +16,12 @@
  * Caller is responsible for not calling with factor == 1.0 (no-op);
  * factor must be positive and finite — non-positive or non-finite values
  * are logged via PRINT_ERROR (the closest existing tool; #151 will replace
- * this with a proper PRINT_WARN). */
+ * this with a proper PRINT_WARN). For FLOAT32/SYM_INT32/SYM/ASYM grads that
+ * warning is where it ends: those carriers REPRESENT NaN/inf (a float grad
+ * element, a per-tensor scale) and propagate it, so the failure stays loud
+ * downstream. A BFP-stored grad instead fails fast (exit(1)) inside
+ * scaleBfpTensorInPlace: a (mantissa, shared exponent) grid has no
+ * non-finite code, so there is nothing to propagate it into. */
 void scaleOptimizerGradients(optimizer_t *optimizer, float factor);
 
 /* #382: global-norm gradient clipping, `torch.nn.utils.clip_grad_norm_`
@@ -32,7 +37,7 @@ void scaleOptimizerGradients(optimizer_t *optimizer, float factor);
  *   - SYM_INT32: scale^2 * sum(mantissa^2) per tensor (int32 mantissa reads
  *     widened to double before squaring -- NO int64, mirroring the SYM-kernel
  *     accumulator rule in spirit).
- *   - packed SYM/ASYM: unsupported in v1 -- fails fast (PRINT_ERROR + exit(1)).
+ *   - packed SYM/ASYM/BFP: unsupported in v1 -- fails fast (PRINT_ERROR + exit(1)).
  *     The O(1) scale-fold this function reuses from scaleOptimizerGradients
  *     only helps APPLYING an already-computed clip coefficient; computing the
  *     norm itself needs unpacked element values, which packed storage doesn't
@@ -76,13 +81,16 @@ bool modelHasFrozenLayer(layer_t **model, size_t sizeModel);
 
 /* #261, PR3: validates that every parameter's grad storage tracked by `optim`
  * is one of the accepted dtypes -- FLOAT32 (default), SYM_INT32 (explicit
- * low-level knob), or packed SYM/ASYM (explicit grad-storage knob,
- * memory-constrained targets). INT32/BOOL grad storage remains unimplemented:
- * fails fast (PRINT_ERROR naming `factoryName` + exit(1)) rather than
- * silently misreading bytes in an unsupported layout. Frozen layers (#380)
- * are skipped before collection, so they never reach `optim->parameter[]`;
- * a NULL grad in a COLLECTED slot is therefore a mis-built model, not a
- * frozen layer, and fails fast here rather than crashing mid-training.
+ * low-level knob), packed SYM/ASYM, or per-tensor BFP (explicit
+ * grad-storage knob, memory-constrained targets; BFP epic PR3 Task 6 --
+ * grouped BFP grads are unreachable here, gradInit's own carrier gate
+ * rejects them first, #300 axis). INT32/BOOL grad storage remains
+ * unimplemented: fails fast (PRINT_ERROR naming `factoryName` + exit(1))
+ * rather than silently misreading bytes in an unsupported layout. Frozen
+ * layers (#380) are skipped before collection, so they never reach
+ * `optim->parameter[]`; a NULL grad in a COLLECTED slot is therefore a
+ * mis-built model, not a frozen layer, and fails fast here rather than
+ * crashing mid-training.
  *
  * Extracted from SgdApi.c (#328 groundwork) so non-SGD factories reuse the
  * same guard; `factoryName` names the caller in the error message. */

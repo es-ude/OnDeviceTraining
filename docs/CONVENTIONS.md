@@ -45,9 +45,12 @@ something that will drift again.
 - [`conventions/arithmetic-bfp.md`](conventions/arithmetic-bfp.md) — block-floating-point
   PR1 deviations register (two's-complement mantissas vs. sign-magnitude, D6
   exponent saturation vs. the #227 abort discipline, the absmax-snap-up
-  exponent rule vs. MX/MSFP, BFP clone semantics) plus the PR2 native
-  `ARITH_BFP` compute contract (headroom, staging/wire rules, the
-  gather-formulated ConvT1d and float-rounding deviations it introduced).
+  exponent rule vs. MX/MSFP, BFP clone semantics) plus the native `ARITH_BFP`
+  compute contract: PR2 forward (headroom, staging/wire rules, the
+  gather-formulated ConvT1d and float-rounding deviations it introduced) and
+  PR3 backward (weightGrad/biasGrad/dx kernels, the shared sum-headroom
+  bound, the per-tensor-only grad/optimizer-state knob, and the D8 amendment
+  — exact fold segmentation instead of op-local re-blocking).
 - [`conventions/loss.md`](conventions/loss.md) — loss forward/backward/reduction
   microbatch contracts; where the macro-batch divisor lives.
 - [`conventions/allocation.md`](conventions/allocation.md) — allocation locality

@@ -46,6 +46,14 @@ void conv1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad, 
 void conv1dCalcWeightGradsSymInt32(conv1dConfig_t *cfg, tensor_t *forwardInput, tensor_t *lossGrad);
 void conv1dCalcBiasGradsSymInt32(conv1dConfig_t *cfg, tensor_t *lossGrad);
 
+/* BFP epic PR3 (Task 3): native ARITH_BFP grad twins of the SYM publics
+ * above (executeOp wrappers; accumulate into cfg->weights->grad /
+ * cfg->bias->grad under the layer's acc modes). REQUIRE BFP-stored weights
+ * -- the width anchor FLOAT32-stored operands stage at (fail-fast
+ * otherwise); BFP-stored operands are borrowed zero-copy. */
+void conv1dCalcWeightGradsBfp(conv1dConfig_t *cfg, tensor_t *forwardInput, tensor_t *lossGrad);
+void conv1dCalcBiasGradsBfp(conv1dConfig_t *cfg, tensor_t *lossGrad);
+
 void conv1dCalcOutputShape(layer_t *layer, shape_t *inputShape, shape_t *outputShape);
 
 #endif // ODT_CONV1D_H

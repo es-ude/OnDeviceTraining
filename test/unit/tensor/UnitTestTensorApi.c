@@ -1145,13 +1145,39 @@ void testRequantizeTensorInPlaceRejectsMismatchedGroupShapeBfp(void) {
     });
 }
 
-void testGradInitRejectsBfpTemplate(void) {
-    /* BFP twin of testGradInitRejectsGroupedSymTemplate: BFP grad/state
-     * storage is out of scope for this epic PR (lands with BFP epic PR3) --
-     * gradInit must reject ANY BFP template, not just a grouped one. */
+void testGradInitAcceptsPerTensorBfpTemplate(void) {
+    /* BFP epic PR3 Task 6: the gate lifted -- gradInit now ADMITS a
+     * per-tensor BFP template (SYM/ASYM precedent: grads are per-tensor-only,
+     * #300 axis). The resulting grad tensor's exponents land at the
+     * zero-state bias via getQLike's existing BFP reset arm (Task 1/5) --
+     * exponentBits=8 -> bias 127. */
+    quantization_t *bfpQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    tensor_t *p = makeFloatTensor1d(4); /* file-local Rule-1 factory */
+    tensor_t *grad = gradInit(p, bfpQ, NULL);
+    freeQuantization(bfpQ); /* getQLike clones -- template unused after */
+
+    /* CAPTURE -> free -> assert. */
+    int gradType = grad->quantization->type;
+    bfpQConfig_t *gradQC = grad->quantization->qConfig;
+    size_t gradNumGroups = gradQC->numGroups;
+    uint8_t gradExponent0 = gradQC->exponents[0];
+    freeTensor(p);
+    freeTensor(grad);
+
+    TEST_ASSERT_EQUAL_INT(BFP, gradType);
+    TEST_ASSERT_EQUAL_size_t(1, gradNumGroups);
+    TEST_ASSERT_EQUAL_UINT8(127, gradExponent0);
+}
+
+void testGradInitRejectsGroupedBfpTemplate(void) {
+    /* BFP twin of testGradInitRejectsGroupedSymTemplate: grouped BFP grad
+     * templates stay rejected -- only the per-tensor case was lifted.
+     * numGroups*groupSize == 10 (matches the source's element count) so the
+     * death is isolated to the new gate under test, not an incidental
+     * validateBfpQConfigShape mismatch (mirrors the SYM twin's reasoning). */
     ASSERT_EXITS_WITH(1, {
-        quantization_t *bfpQ = quantizationInitBfp(8, 8, HALF_AWAY);
-        tensor_t *p = makeFloatTensor1d(4); /* file-local Rule-1 factory */
+        quantization_t *bfpQ = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 5);
+        tensor_t *p = makeFloatTensor1d(10); /* file-local Rule-1 factory */
         gradInit(p, bfpQ, NULL);
     });
 }
@@ -1204,6 +1230,7 @@ int main(void) {
     RUN_TEST(testFreeQuantizationBfpFreesExponents);
     RUN_TEST(testRequantizeTensorInPlaceFloatToBfp);
     RUN_TEST(testRequantizeTensorInPlaceRejectsMismatchedGroupShapeBfp);
-    RUN_TEST(testGradInitRejectsBfpTemplate);
+    RUN_TEST(testGradInitAcceptsPerTensorBfpTemplate);
+    RUN_TEST(testGradInitRejectsGroupedBfpTemplate);
     return UNITY_END();
 }

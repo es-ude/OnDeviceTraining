@@ -5,6 +5,7 @@ target_link_libraries(OptimizerApi PRIVATE
         Optimizer
         Tensor
         TensorApi
+        TensorConversion
         Rounding
         Layer
         Conv1d

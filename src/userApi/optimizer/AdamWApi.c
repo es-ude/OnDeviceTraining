@@ -40,13 +40,18 @@ static tensor_t *momentStateInit(tensor_t *param, quantization_t *momentQuant) {
             exit(1);
         }
     }
-    /* BFP epic PR1 carrier gate (mirrors gradInit, TensorApi.c, and SgdApi's
-     * momentumStateInit twin): BFP grad/state storage is out of scope for
-     * this epic PR -- reject any BFP moment template outright. */
+    /* BFP epic PR3 Task 7: the PR1 unconditional carrier gate above lifted
+     * (SgdApi's momentumStateInit twin) -- BFP moment storage is now
+     * per-tensor-only, mirroring the SYM/ASYM grouped gates above and
+     * gradInit's Task 6 lift (a grouped template only fits one param's
+     * element count; grouped BFP states have no spec mandate, #300 axis). */
     if (momentQuant->type == BFP) {
-        PRINT_ERROR("momentStateInit: BFP moment templates are unsupported -- "
-                    "BFP grad/state storage arrives with BFP epic PR3");
-        exit(1);
+        bfpQConfig_t *bfpQC = momentQuant->qConfig;
+        if (bfpQC->numGroups > 1) {
+            PRINT_ERROR("momentStateInit: grouped BFP moment templates are unsupported -- "
+                        "per-tensor only (#300 axis)");
+            exit(1);
+        }
     }
     return initTensor(getShapeLike(param->shape), getQLike(momentQuant), NULL);
 }

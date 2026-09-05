@@ -69,6 +69,16 @@ than emit a fixture that cannot observe the quantization. weight_decay is
 deliberately NONZERO here (unlike the `momentum` fixture): with wd=0 a
 wd-placement bug in the mirror or the kernel would be invisible.
 
+#420 C3 adds a SECOND BFP momentum fixture (bfpMomV2) alongside the first.
+In the original fixture the param and the state both land on stored exponent
+121 after the step, so the C test's two exponent asserts are interchangeable:
+a param/state exponent CROSS-WIRING is invisible there and the
+state-exponent assert only ever kills transitively (through the codes). V2 is
+chosen so the two final exponents are FAR apart (120 vs 123) while the param
+exponent still moves off its input value, which makes each exponent assert
+independently load-bearing. The generator asserts that separation (and that
+V2's exponent pair is not V1's) rather than trusting it.
+
 Self-checks (mutation-discriminating fixture properties, asserted here so a
 broken fixture aborts generation rather than silently passing a vacuous
 test):
@@ -284,6 +294,61 @@ def fixture_bfp_momentum():
     }
 
 
+def fixture_bfp_momentum_v2():
+    """#420 C3: the state-binade-cross BFP momentum fixture. Same two-op
+    sequence and same self-checks as fixture_bfp_momentum, but the operand
+    values are picked so the PARAM and the STATE land on DIFFERENT stored
+    exponents after the step (120 vs 123) instead of coinciding on 121.
+
+    Why that matters: with coincident final exponents the C test's
+    `paramExp`/`stateExp` asserts are interchangeable, so a cross-wiring that
+    binds the state's assert to the param's grid (or vice versa) passes, and
+    the state-exponent assert can only ever fail transitively via the codes.
+    With the exponents three binades apart each assert kills on its own.
+
+    Geometry of the choice: the param's dequantized absmax (125/2^8 =
+    0.48828125 at stored 119) is pushed just past 0.5 by the -lr*state term,
+    so the param grid moves 119 -> 120 (fixture_bfp_momentum's
+    param-exponent-moves self-check still holds), while the state's absmax
+    (127/2^5 = 3.96875 at stored 122) is amplified by momentum*state + g into
+    the next binade, 122 -> 123. Both operands stay canonical (absmax code in
+    (qMax/2, qMax]) so requantizeTensorInPlace on the emitted floats
+    reproduces these exact codes and exponents in C."""
+    qc = {"mantissa_bits": BFP_MANTISSA_BITS, "exponent_bits": BFP_EXPONENT_BITS,
+          "group_size": 0}
+    param_codes = [108, -4, 42, -74, -125, 59]
+    param_exps = [119]  # stored; bias 127 -> scale 2^-8
+    state_codes = [-99, 12, 127, 73, -120, 97]
+    state_exps = [122]  # scale 2^-5
+    grad = [0.12, 0.2, 0.46, -0.08, -0.12, -0.48]
+    momentum = 0.9
+    lr = 0.05
+    weight_decay = 0.05
+
+    new_param_codes, new_param_exps, new_state_codes, new_state_exps = sgd_bfp_step_ref(
+        param_codes, param_exps, qc, grad, lr, momentum, state_codes, state_exps, qc,
+        weight_decay=weight_decay)
+
+    # The discrimination this fixture exists for -- abort rather than emit a
+    # second fixture that is no stronger than the first.
+    assert new_param_exps[0] != new_state_exps[0], (
+        f"fixture_bfp_momentum_v2: final param exponent {new_param_exps[0]} equals the final "
+        f"state exponent -- a param/state exponent cross-wiring stays unobservable; pick "
+        "values whose state absmax crosses a binade the param's does not")
+    assert new_state_exps[0] != state_exps[0], (
+        "fixture_bfp_momentum_v2: the state exponent did not move -- the state write-back's "
+        "own exponent derivation stays unpinned")
+
+    param_deq = bfp_dequant_f32(param_codes, param_exps, qc)
+    state_deq = bfp_dequant_f32(state_codes, state_exps, qc)
+    return {
+        "paramValues": param_deq.tolist(), "statePrev": state_deq.tolist(), "grad": grad,
+        "lr": lr, "momentum": momentum, "weightDecay": weight_decay,
+        "newParamCodes": new_param_codes, "newParamExp": new_param_exps[0],
+        "newStateCodes": new_state_codes, "newStateExp": new_state_exps[0],
+    }
+
+
 def emit_bfp_fixture(parts, prefix, fx):
     parts.append(emit_int32_scalar(f"{prefix}MantissaBits", BFP_MANTISSA_BITS))
     parts.append(emit_int32_scalar(f"{prefix}ExponentBits", BFP_EXPONENT_BITS))
@@ -348,7 +413,15 @@ def main() -> int:
     parts.append("\n")
     emit_asym_fixture(parts, "sgdGroupedAsymStep0", fixture_asym_step0())
     parts.append("\n")
-    emit_bfp_fixture(parts, "sgdBfpMom", fixture_bfp_momentum())
+    bfp_v1 = fixture_bfp_momentum()
+    bfp_v2 = fixture_bfp_momentum_v2()
+    assert (bfp_v1["newParamExp"], bfp_v1["newStateExp"]) != (bfp_v2["newParamExp"],
+                                                              bfp_v2["newStateExp"]), (
+        "bfpMomV2 lands on the SAME (param, state) exponent pair as bfpMom -- the second "
+        "fixture adds no discrimination over the first")
+    emit_bfp_fixture(parts, "sgdBfpMom", bfp_v1)
+    parts.append("\n")
+    emit_bfp_fixture(parts, "sgdBfpMomV2", bfp_v2)
 
     parts.append("\n#endif // ODT_EXPECTED_SGD_GROUPED_H\n")
 

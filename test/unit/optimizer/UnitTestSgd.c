@@ -2301,22 +2301,27 @@ void testSgdStepGroupedSymParamMomentumMatchesGold(void) {
  * input codes AND exponents bit-for-bit. writeBackRounding = HALF_AWAY
  * opt-out (#279) as in every gold here -- the generator does not emulate
  * the seeded SR factory default. */
-void testSgdStepBfpParamBfpMomentumMatchesGold(void) {
-    quantization_t *bfpTemplate = quantizationInitBfp((uint8_t)sgdBfpMomMantissaBits,
-                                                      (uint8_t)sgdBfpMomExponentBits, HALF_AWAY);
+static void runBfpMomentumGoldCase(int32_t mantissaBits, int32_t exponentBits,
+                                   const float *paramValues, const float *statePrev,
+                                   const float *gradValues, float lr, float momentum,
+                                   float weightDecay, const int32_t *expectedParamCodes,
+                                   int32_t expectedParamExp, const int32_t *expectedStateCodes,
+                                   int32_t expectedStateExp) {
+    quantization_t *bfpTemplate =
+        quantizationInitBfp((uint8_t)mantissaBits, (uint8_t)exponentBits, HALF_AWAY);
 
-    tensor_t *p = buildFloatTensor1D(sgdBfpMomParamValues, 6);
+    tensor_t *p = buildFloatTensor1D(paramValues, 6);
     requantizeTensorInPlace(p, bfpTemplate);
     tensor_t *g = gradInitFloat(p, NULL);
-    tensorFillFromFloatBuffer(g, sgdBfpMomGrad, 6);
+    tensorFillFromFloatBuffer(g, gradValues, 6);
     parameter_t *param = parameterInit(p, g);
 
-    tensor_t *state = buildFloatTensor1D(sgdBfpMomStatePrev, 6);
+    tensor_t *state = buildFloatTensor1D(statePrev, 6);
     requantizeTensorInPlace(state, bfpTemplate);
     freeQuantization(bfpTemplate);
 
     sgd_t sgd;
-    sgdInit(&sgd, sgdBfpMomLr, sgdBfpMomMomentum, sgdBfpMomWeightDecay,
+    sgdInit(&sgd, lr, momentum, weightDecay,
             (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     parameter_t *params[1] = {param};
     optimImpl_t impl = {.sgd = &sgd};
@@ -2333,19 +2338,45 @@ void testSgdStepBfpParamBfpMomentumMatchesGold(void) {
 
     /* CAPTURE -> free -> assert. */
     int32_t paramCodes[6], stateCodes[6];
-    unpackSignExtend(p->data, (size_t)sgdBfpMomMantissaBits, 0, paramCodes, 6);
-    unpackSignExtend(state->data, (size_t)sgdBfpMomMantissaBits, 0, stateCodes, 6);
+    unpackSignExtend(p->data, (size_t)mantissaBits, 0, paramCodes, 6);
+    unpackSignExtend(state->data, (size_t)mantissaBits, 0, stateCodes, 6);
     int32_t paramExp = (int32_t)((bfpQConfig_t *)p->quantization->qConfig)->exponents[0];
     int32_t stateExp = (int32_t)((bfpQConfig_t *)state->quantization->qConfig)->exponents[0];
     freeTensor(state);
     freeParameter(param);
 
     for (size_t i = 0; i < 6; i++) {
-        TEST_ASSERT_EQUAL_INT32(sgdBfpMomNewParamCodes[i], paramCodes[i]);
-        TEST_ASSERT_EQUAL_INT32(sgdBfpMomNewStateCodes[i], stateCodes[i]);
+        TEST_ASSERT_EQUAL_INT32(expectedParamCodes[i], paramCodes[i]);
+        TEST_ASSERT_EQUAL_INT32(expectedStateCodes[i], stateCodes[i]);
     }
-    TEST_ASSERT_EQUAL_INT32(sgdBfpMomNewParamExp, paramExp);
-    TEST_ASSERT_EQUAL_INT32(sgdBfpMomNewStateExp, stateExp);
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(expectedParamExp, paramExp,
+                                    "param write-back must derive the PARAM's own exponent");
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(expectedStateExp, stateExp,
+                                    "state write-back must derive the STATE's own exponent");
+}
+
+void testSgdStepBfpParamBfpMomentumMatchesGold(void) {
+    runBfpMomentumGoldCase(sgdBfpMomMantissaBits, sgdBfpMomExponentBits, sgdBfpMomParamValues,
+                           sgdBfpMomStatePrev, sgdBfpMomGrad, sgdBfpMomLr, sgdBfpMomMomentum,
+                           sgdBfpMomWeightDecay, sgdBfpMomNewParamCodes, sgdBfpMomNewParamExp,
+                           sgdBfpMomNewStateCodes, sgdBfpMomNewStateExp);
+}
+
+/* #420 C3: the state-binade-cross twin of the fixture above. In V1 the param
+ * and the state both land on stored exponent 121, so the two exponent
+ * asserts are interchangeable -- a param/state exponent CROSS-WIRING passes,
+ * and the state-exponent assert can only fail transitively through the
+ * codes. V2's operands are picked (generator-asserted, not assumed) so the
+ * two final exponents are three binades apart -- param 119 -> 120, state
+ * 122 -> 123 -- which makes each exponent assert kill on its own. Everything
+ * else, including the load-bearing "op2 reads the REQUANTIZED state" pin, is
+ * V1's. */
+void testSgdStepBfpParamBfpMomentumStateBinadeCrossMatchesGold(void) {
+    runBfpMomentumGoldCase(sgdBfpMomV2MantissaBits, sgdBfpMomV2ExponentBits, sgdBfpMomV2ParamValues,
+                           sgdBfpMomV2StatePrev, sgdBfpMomV2Grad, sgdBfpMomV2Lr,
+                           sgdBfpMomV2Momentum, sgdBfpMomV2WeightDecay, sgdBfpMomV2NewParamCodes,
+                           sgdBfpMomV2NewParamExp, sgdBfpMomV2NewStateCodes,
+                           sgdBfpMomV2NewStateExp);
 }
 
 /* ---- Group-quant PR4 (Task 3): SGD updates a grouped-ASYM param ----------
@@ -2508,6 +2539,7 @@ int main() {
     RUN_TEST(testSgdStepGroupedSymParamMatchesGold);
     RUN_TEST(testSgdStepGroupedSymParamMomentumMatchesGold);
     RUN_TEST(testSgdStepBfpParamBfpMomentumMatchesGold);
+    RUN_TEST(testSgdStepBfpParamBfpMomentumStateBinadeCrossMatchesGold);
     RUN_TEST(testSgdStepGroupedAsymParamMatchesGold);
     RUN_TEST(testSgdCreateGroupedAsymMomentumQuantExits);
     return UNITY_END();

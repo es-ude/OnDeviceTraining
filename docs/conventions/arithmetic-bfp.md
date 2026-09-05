@@ -73,7 +73,13 @@ The high clamp additionally never exceeds `bias + 127` — only reachable at
 float32 scale**: `ldexpf(1, 128)` is `+inf`, which would quantize every code
 to 0 and dequantize the whole block to NaN (`0 * inf`) instead of
 saturating. The saturation regime therefore engages at scale `2^127`, the
-largest finite float32 power of two.
+largest finite float32 power of two. A **non-finite `absMax`** (a caller's
+pass 1 overflowed — see §5.6's scale bullet) takes the same high regime
+directly: `deriveBfpStoredExponent` returns the cap without consulting
+`frexpf`, whose result and `*exp` are both unspecified for inf/NaN (C17
+7.12.6.4). A magnitude too large for any grid saturates at the largest finite
+one; the alternative was an arbitrary exponent leaking into the caller's emit
+pass.
 
 **Rationale for the deviation:** `exponentBits` (range `[2,8]`) is one of the
 epic's first-class HAR sweep axes (spec §1) — the sweep exists specifically to
@@ -524,6 +530,19 @@ silent wrong arithmetic, not a crash.
   work end to end with a BFP-stored grad
   (`testBfpGradStorageTrainsUnderReductionMean`,
   `test/unit/userAPI/UnitTestMultiLayerTraining.c`).
+  Three defined-behavior rules close this path's edges (PR3 follow-up batch):
+  the `factor` must be **finite** — a non-finite one fail-fasts in the
+  primitive, the ONE `scaleOptimizerGradients` arm that does, because BFP has
+  no non-finite code to propagate into while FLOAT32/SYM_INT32/SYM/ASYM all
+  warn and propagate; a group already AT the exponent cap has no headroom
+  left, so even a finite factor can overflow its scaled values to `±inf`,
+  which **saturate to the code range** (that clamp runs in the float domain,
+  BEFORE `roundByMode` — `(int32_t)round(±inf)` is undefined, C17 6.3.1.4);
+  and an **empty** tensor (`n == 0`) is left in the canonical zero state
+  (stored = bias) instead of keeping a grid that describes data it does not
+  have. The same float-domain-clamp question in the accumulate engines
+  involves the increment as well and is deferred to the engine-unification
+  follow-up.
 - **Native BFP `dx` wires are legal.** A layer's `dx` (`propLoss`) output can
   itself be a BFP-stored wire, written by the native backward kernel's own
   `OUT_WRITE` epilogue (deriving that wire's grid directly, no float bridge)

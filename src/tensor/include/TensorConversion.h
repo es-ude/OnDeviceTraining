@@ -168,7 +168,9 @@ void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment)
  * group re-derives the zero state (stored = bias). A group already sitting
  * at the exponent cap has no headroom left, so even a finite factor can
  * overflow its scaled values to +-inf: those saturate to the code range
- * (the clamp runs in the float domain, before the round). Grouped-capable;
+ * (the clamp runs in the float domain, before the round). An EMPTY tensor
+ * (n == 0) is left in the canonical zero state (every group's stored
+ * exponent = bias), never with its previous grid. Grouped-capable;
  * direct-call only, not a conversionMatrix cell.
  * `factor` MUST be finite: a non-finite factor fail-fasts (PRINT_ERROR +
  * exit(1)) because a BFP grid has no NaN/inf code -- unlike the FLOAT32/

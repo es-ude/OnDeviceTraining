@@ -2056,6 +2056,22 @@ void scaleBfpTensorInPlace(tensor_t *t, float factor) {
     /* Exact-division invariant -- see accumulateIntoBfpFixedGridEngine's
      * guard comment (this twin shares the engines' exponents[g] walk). */
     validateBfpQConfigShape(qc, n);
+    if (n == 0) {
+        /* Both passes below are element loops, so an empty tensor would keep
+         * whatever exponent it carried -- a scale describing data it does not
+         * have, indistinguishable downstream from a derived one. Leave the
+         * CANONICAL zero state instead (stored = bias, scale 1.0), the same
+         * "no data" convention the exponent authority's absMax == 0 arm,
+         * optimizerZeroGrad's BFP arm and getQLike's per-tensor clone all
+         * use. Past the shape guard, n == 0 implies the per-tensor {1,0}
+         * geometry (a grouped config needs numGroups > 1 AND groupSize > 0,
+         * whose product is never 0); the loop stays shape-agnostic anyway. */
+        const int32_t zeroStateExponent = bfpExponentBias(qc);
+        for (size_t g = 0; g < qc->numGroups; g++) {
+            qc->exponents[g] = (uint8_t)zeroStateExponent;
+        }
+        return;
+    }
     const float qMax = powf(2, (float)qc->mantissaBits - 1) - 1;
     const float qMin = -powf(2, (float)qc->mantissaBits - 1);
     const int32_t bias = bfpExponentBias(qc);

@@ -6781,6 +6781,43 @@ void testScaleBfpTensorInPlaceCapRegimeSaturatesOnOverflow(void) {
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, n);
 }
 
+/* Follow-up batch (PR #422): n == 0 must leave the CANONICAL zero state, not
+ * a stale grid. Both passes are element loops, so an empty tensor skipped
+ * them entirely and kept whatever exponent it happened to carry -- a scale
+ * describing data the tensor does not have, indistinguishable to the next
+ * accumulate/serialize/inspect from a derived one. Every other "no data"
+ * state in this file agrees on stored = bias (scale 1.0): the exponent
+ * authority's absMax == 0 arm, optimizerZeroGrad's BFP arm, getQLike's
+ * per-tensor clone. (After validateBfpQConfigShape, n == 0 implies the
+ * per-tensor {1,0} geometry -- a grouped config needs numGroups > 1 AND
+ * groupSize > 0, whose product is never 0 -- but the reset loops over
+ * numGroups anyway, so it stays correct if that ever changes.) */
+void testScaleBfpTensorInPlaceEmptyTensorResetsToZeroState(void) {
+    size_t n = 0;
+    size_t dims[] = {0};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    uint8_t exponents[1] = {200}; /* sentinel: a stale grid, != bias 127 */
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    initBfpQuantization(&qc, &q);
+    /* A 0-element payload needs no bytes; hand the tensor a valid pointer
+     * rather than a zero-length array (#160). */
+    uint8_t data[1] = {0};
+    tensor_t t;
+    setTensorValues(&t, data, &shape, &q, NULL);
+
+    scaleBfpTensorInPlace(&t, 2.0f);
+
+    TEST_ASSERT_EQUAL_UINT8(127, exponents[0]);
+    TEST_ASSERT_EQUAL_UINT8(0, data[0]); /* nothing written past the payload */
+}
+
 /* ---- BFP engine geometry guards (final-review batch) --------------------
  * Field-assigned configs bypass initBfpQConfigGrouped's construction-time
  * shape check, and the accumulate/scale engines index exponents[g] under the
@@ -7042,6 +7079,7 @@ int main(void) {
     RUN_TEST(testScaleBfpTensorInPlaceRejectsNaNFactor);
     RUN_TEST(testScaleBfpTensorInPlaceRejectsInfiniteFactor);
     RUN_TEST(testScaleBfpTensorInPlaceCapRegimeSaturatesOnOverflow);
+    RUN_TEST(testScaleBfpTensorInPlaceEmptyTensorResetsToZeroState);
     RUN_TEST(testAccumulateFloatIntoBfpFixedGridRejectsBadGroupGeometry);
     RUN_TEST(testAccumulateFloatIntoBfpRescaleRejectsBadGroupGeometry);
     RUN_TEST(testScaleBfpTensorInPlaceRejectsBadGroupGeometry);

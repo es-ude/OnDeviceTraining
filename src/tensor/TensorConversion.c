@@ -2119,7 +2119,8 @@ void scaleBfpTensorInPlace(tensor_t *t, float factor) {
      * storage-requantization semantic, never the FixedGrid abort). In-place
      * safe: chunk k is fully read before chunk k is rewritten and the code
      * width is unchanged. The saturation clamp runs in the FLOAT domain
-     * FIRST: a group already sitting at the exponent cap has no headroom, so
+     * FIRST (Rounding.h's clamp, this file's existing clamp-then-roundByMode
+     * shape): a group already sitting at the exponent cap has no headroom, so
      * mant * oldScale * factor overflows to +-inf for an entirely finite
      * factor, and (int32_t)round(+-inf) is undefined (C17 6.3.1.4).
      * Behaviour-identical to clamping after the round for every DEFINED case
@@ -2144,12 +2145,7 @@ void scaleBfpTensorInPlace(tensor_t *t, float factor) {
             const float scale = bfpGroupScale(qc, g);
             for (size_t i = idx; i < runEnd; i++) {
                 float v = (float)mant[i - off] * oldScale * factor;
-                float q = v / scale;
-                if (q > qMax) {
-                    q = qMax;
-                } else if (q < qMin) {
-                    q = qMin;
-                }
+                float q = clamp(v / scale, qMin, qMax);
                 codes[i - off] =
                     clampInt32(roundByMode(q, qc->roundingMode), (int32_t)qMin, (int32_t)qMax);
             }

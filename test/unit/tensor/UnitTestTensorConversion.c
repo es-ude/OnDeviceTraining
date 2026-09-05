@@ -6678,9 +6678,11 @@ void testScaleBfpTensorInPlacePerTensorMultiChunkCarriesAbsMax(void) {
  * (int32_t)round(NaN|inf), which is undefined behavior (C17 6.3.1.4).
  * scaleBfpTensorInPlace fail-fasts at entry instead: a silent skip would
  * mask the caller's bug, saturating would invent data. */
+/* Callers run initBfpQuantization themselves, before declaring `data`, so the
+ * payload can be sized by calcNumberOfBytesForData like every other fixture
+ * in this file. */
 static void buildPerTensorBfpFixture(tensor_t *t, uint8_t *data, shape_t *shape, quantization_t *q,
                                      bfpQConfig_t *qc, const int32_t *seedCodes, size_t n) {
-    initBfpQuantization(qc, q);
     byteConversion((uint8_t *)seedCodes, 32, data, qc->mantissaBits, n);
     setTensorValues(t, data, shape, q, NULL);
 }
@@ -6699,7 +6701,8 @@ void testScaleBfpTensorInPlaceRejectsNaNFactor(void) {
                        .mantissaBits = 6,
                        .exponentBits = 8};
     quantization_t q;
-    uint8_t data[3]; /* calcNumberOfBytesForData(m=6, n=4) */
+    initBfpQuantization(&qc, &q);
+    uint8_t data[calcNumberOfBytesForData(&q, n)];
     tensor_t t;
     buildPerTensorBfpFixture(&t, data, &shape, &q, &qc, seedCodes, n);
 
@@ -6720,7 +6723,8 @@ void testScaleBfpTensorInPlaceRejectsInfiniteFactor(void) {
                        .mantissaBits = 6,
                        .exponentBits = 8};
     quantization_t q;
-    uint8_t data[3];
+    initBfpQuantization(&qc, &q);
+    uint8_t data[calcNumberOfBytesForData(&q, n)];
     tensor_t t;
     buildPerTensorBfpFixture(&t, data, &shape, &q, &qc, seedCodes, n);
 
@@ -6768,7 +6772,8 @@ void testScaleBfpTensorInPlaceCapRegimeSaturatesOnOverflow(void) {
                        .mantissaBits = 8,
                        .exponentBits = 8};
     quantization_t q;
-    uint8_t data[4]; /* calcNumberOfBytesForData(m=8, n=4) */
+    initBfpQuantization(&qc, &q);
+    uint8_t data[calcNumberOfBytesForData(&q, n)];
     tensor_t t;
     buildPerTensorBfpFixture(&t, data, &shape, &q, &qc, seedCodes, n);
 

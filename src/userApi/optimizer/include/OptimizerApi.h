@@ -16,7 +16,12 @@
  * Caller is responsible for not calling with factor == 1.0 (no-op);
  * factor must be positive and finite — non-positive or non-finite values
  * are logged via PRINT_ERROR (the closest existing tool; #151 will replace
- * this with a proper PRINT_WARN). */
+ * this with a proper PRINT_WARN). For FLOAT32/SYM_INT32/SYM/ASYM grads that
+ * warning is where it ends: those carriers REPRESENT NaN/inf (a float grad
+ * element, a per-tensor scale) and propagate it, so the failure stays loud
+ * downstream. A BFP-stored grad instead fails fast (exit(1)) inside
+ * scaleBfpTensorInPlace: a (mantissa, shared exponent) grid has no
+ * non-finite code, so there is nothing to propagate it into. */
 void scaleOptimizerGradients(optimizer_t *optimizer, float factor);
 
 /* #382: global-norm gradient clipping, `torch.nn.utils.clip_grad_norm_`

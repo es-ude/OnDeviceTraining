@@ -100,7 +100,16 @@ void scaleOptimizerGradients(optimizer_t *optimizer, float factor) {
              * the SYM/ASYM fold arms above: the primitive handles grouped
              * tensors correctly, so a hand-assembled grouped grad is scaled
              * right rather than corrupted (in-tree grads are per-tensor
-             * anyway, gradInit's carrier gate, #300 axis). */
+             * anyway, gradInit's carrier gate, #300 axis).
+             * Non-finite-factor asymmetry: every OTHER arm warns (the check
+             * at the top of this function) and then PROPAGATES the non-finite
+             * factor -- a float grad element or a per-tensor scale represents
+             * NaN/inf fine, so the failure stays loud downstream. BFP warns
+             * the same way and then HARD-FAILS inside the primitive, because
+             * a (mantissa, shared exponent) grid has no non-finite code:
+             * silently skipping would mask the caller's bug and saturating
+             * would invent data. Precedent for the exit: optimizerClipGradNorm
+             * below. */
             scaleBfpTensorInPlace(param->grad, factor);
             break;
         }

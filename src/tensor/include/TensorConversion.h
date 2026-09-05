@@ -161,7 +161,10 @@ void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment)
  * exponents shift, codes bit-unchanged -- except where the derived exponent
  * saturates at 0 or the cap (D6), where codes shift instead. An all-zero
  * group re-derives the zero state (stored = bias). Grouped-capable;
- * direct-call only, not a conversionMatrix cell. */
+ * direct-call only, not a conversionMatrix cell.
+ * `factor` MUST be finite: a non-finite factor fail-fasts (PRINT_ERROR +
+ * exit(1)) because a BFP grid has no NaN/inf code -- unlike the FLOAT32/
+ * SYM/ASYM scale arms, there is nothing here to propagate it into. */
 void scaleBfpTensorInPlace(tensor_t *t, float factor);
 
 extern conversionFunction_t conversionMatrix[7][7];

@@ -6645,6 +6645,64 @@ void testScaleBfpTensorInPlacePerTensorMultiChunkCarriesAbsMax(void) {
     TEST_ASSERT_EQUAL_INT32_ARRAY(seedCodes, got, n);
 }
 
+/* ---- scale-path non-finite factor (follow-up batch, PR #422) ------------
+ * A BFP grid is (int32 mantissa, shared power-of-two exponent): it has no
+ * code for NaN or inf, so a non-finite factor has no honest outcome here.
+ * Left unguarded the two passes disagree about it -- pass 1's `v > absMax`
+ * comparison is FALSE for NaN, so the fresh exponent silently ignores it,
+ * and pass 2 then evaluates roundByMode(non-finite), i.e.
+ * (int32_t)round(NaN|inf), which is undefined behavior (C17 6.3.1.4).
+ * scaleBfpTensorInPlace fail-fasts at entry instead: a silent skip would
+ * mask the caller's bug, saturating would invent data. */
+static void buildPerTensorBfpFixture(tensor_t *t, uint8_t *data, shape_t *shape, quantization_t *q,
+                                     bfpQConfig_t *qc, const int32_t *seedCodes, size_t n) {
+    initBfpQuantization(qc, q);
+    byteConversion((uint8_t *)seedCodes, 32, data, qc->mantissaBits, n);
+    setTensorValues(t, data, shape, q, NULL);
+}
+
+void testScaleBfpTensorInPlaceRejectsNaNFactor(void) {
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    int32_t seedCodes[4] = {16, -8, 4, 2};
+    uint8_t exponents[1] = {127};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    uint8_t data[3]; /* calcNumberOfBytesForData(m=6, n=4) */
+    tensor_t t;
+    buildPerTensorBfpFixture(&t, data, &shape, &q, &qc, seedCodes, n);
+
+    ASSERT_EXITS_WITH_FAILURE(scaleBfpTensorInPlace(&t, NAN));
+}
+
+void testScaleBfpTensorInPlaceRejectsInfiniteFactor(void) {
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    int32_t seedCodes[4] = {16, -8, 4, 2};
+    uint8_t exponents[1] = {127};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    uint8_t data[3];
+    tensor_t t;
+    buildPerTensorBfpFixture(&t, data, &shape, &q, &qc, seedCodes, n);
+
+    ASSERT_EXITS_WITH_FAILURE(scaleBfpTensorInPlace(&t, INFINITY));
+}
+
 /* ---- BFP engine geometry guards (final-review batch) --------------------
  * Field-assigned configs bypass initBfpQConfigGrouped's construction-time
  * shape check, and the accumulate/scale engines index exponents[g] under the
@@ -6902,6 +6960,8 @@ int main(void) {
     RUN_TEST(testScaleBfpTensorInPlaceGeneralFactorRederives);
     RUN_TEST(testScaleBfpTensorInPlaceZeroGroupKeepsZeroState);
     RUN_TEST(testScaleBfpTensorInPlacePerTensorMultiChunkCarriesAbsMax);
+    RUN_TEST(testScaleBfpTensorInPlaceRejectsNaNFactor);
+    RUN_TEST(testScaleBfpTensorInPlaceRejectsInfiniteFactor);
     RUN_TEST(testAccumulateFloatIntoBfpFixedGridRejectsBadGroupGeometry);
     RUN_TEST(testAccumulateFloatIntoBfpRescaleRejectsBadGroupGeometry);
     RUN_TEST(testScaleBfpTensorInPlaceRejectsBadGroupGeometry);

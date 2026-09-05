@@ -786,6 +786,31 @@ void testScaleOptimizerGradients_Bfp_DequantEquivalence(void) {
     TEST_ASSERT_EQUAL_size_t_MESSAGE(1, wGradNumGroupsAfter, "grads are per-tensor (#300 axis)");
 }
 
+/* Follow-up batch (PR #422): the BFP arm is the ONE arm that hard-fails on a
+ * non-finite factor. FLOAT32/SYM_INT32/SYM/ASYM all REPRESENT NaN/inf (a
+ * float grad element, or a per-tensor scale) and propagate it, so the failure
+ * stays loud downstream -- testScaleOptimizerGradients_FactorNaN_DoesNotAbort
+ * above pins exactly that for FLOAT32. A BFP grid has no non-finite code, so
+ * the BFP arm routes into scaleBfpTensorInPlace's fail-fast instead of
+ * silently dropping the factor (pass 1 ignores NaN) or invoking undefined
+ * behavior in pass 2's (int32_t)round(NaN). This test proves the ARM routes
+ * there; the primitive's own guard is pinned in UnitTestTensorConversion.c. */
+void testScaleOptimizerGradients_Bfp_NonFiniteFactorAborts(void) {
+    layer_t *model[1];
+    parameter_t *w;
+    parameter_t *b;
+    float wGradInit[6] = {1.f, -2.f, 3.f, -4.f, 5.f, -6.f};
+    float bGradInit[2] = {0.5f, -0.5f};
+    float nanFactor = 0.0f / 0.0f;
+
+    optimizer_t *sgd = buildBfpOneLayerOptim(model, &w, &b, wGradInit, bGradInit, 6, 8, 0.01f, 0.f);
+
+    ASSERT_EXITS_WITH_FAILURE(scaleOptimizerGradients(sgd, nanFactor));
+
+    freeOptim(sgd);
+    freeLinearLayerShellOnly(model[0]);
+}
+
 /* Group-quant PR3 Task 4: defensive belt-and-suspenders fail-fast on the
  * SYM grad arm. gradInit's own carrier gate already rejects a grouped SYM
  * template before a grad tensor is ever built through the sanctioned API
@@ -844,6 +869,7 @@ int main(void) {
     RUN_TEST(testScaleOptimizerGradients_Asym_ScalesScaleOnly);
     RUN_TEST(testScaleOptimizerGradients_Asym_DequantEquivalence);
     RUN_TEST(testScaleOptimizerGradients_Bfp_DequantEquivalence);
+    RUN_TEST(testScaleOptimizerGradients_Bfp_NonFiniteFactorAborts);
     RUN_TEST(testScaleOptimizerGradientsRejectsGroupedSymGrad);
     return UNITY_END();
 }

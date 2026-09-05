@@ -2025,6 +2025,21 @@ void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment)
  * (integer times a power of two), so the single float rounding per element
  * in pass A/B is the trailing multiply by factor. */
 void scaleBfpTensorInPlace(tensor_t *t, float factor) {
+    /* A BFP grid is (int32 mantissa, shared power-of-two exponent) -- it has
+     * no NaN/inf code, so there is no propagation path a non-finite factor
+     * could take. Unguarded the two passes below would DISAGREE about it:
+     * pass 1's `v > absMax` is false for NaN, so the fresh exponent silently
+     * ignores it, while pass 2 hands roundByMode a non-finite quotient and
+     * (int32_t)round(NaN|inf) is undefined behavior (C17 6.3.1.4). Fail fast
+     * instead of dropping the factor (masks the caller's bug) or saturating
+     * (invents data). */
+    if (!isfinite(factor)) {
+        PRINT_ERROR("scaleBfpTensorInPlace: non-finite factor %f -- BFP cannot represent "
+                    "non-finite values (no NaN/inf propagation path); refusing to silently "
+                    "drop or corrupt the tensor",
+                    (double)factor);
+        exit(1);
+    }
     size_t n = calcNumberOfElementsByTensor(t);
     bfpQConfig_t *qc = t->quantization->qConfig;
     /* Exact-division invariant -- see accumulateIntoBfpFixedGridEngine's

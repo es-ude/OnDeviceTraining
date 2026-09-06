@@ -1075,7 +1075,15 @@ static void packFloatBufferAsBfp(const float *values, size_t n, bfpQConfig_t *ou
      * to min(chunkEnd, groupEnd) -- so the ldexpf+bias scale derivation
      * leaves the inner loop (packFloatBufferAsSym's grouped phase-2 shape;
      * native hot path since epic PR2). gsz = n for per-tensor keeps g = 0.
-     * One roundByMode per element in element order -- bit-identical. */
+     * One roundByMode per element in element order -- bit-identical.
+     * #421 U2: that clamp runs in the FLOAT domain first. In the D6 cap
+     * regime (a narrow exponentBits pins the scale far below what the data
+     * needs) values / scale leaves int32 range for entirely FINITE inputs,
+     * and (int32_t)round(...) is undefined there (C17 6.3.1.4). Identical to
+     * clamping after the round wherever the round is defined -- in range the
+     * float clamp is the identity, outside it roundByMode is monotone -- and
+     * the clampInt32 behind it stays load-bearing for SR_HALF_AWAY, whose
+     * pre-round dither can still push a clamped qMin one step past it. */
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
@@ -1088,9 +1096,9 @@ static void packFloatBufferAsBfp(const float *values, size_t n, bfpQConfig_t *ou
             size_t runLen = runEnd - idx;
             const float scale = bfpGroupScale(outQC, g);
             for (size_t i = 0; i < runLen; i++) {
+                float q = clamp(values[idx + i] / scale, qMin, qMax);
                 codes[idx - off + i] =
-                    clampInt32(roundByMode(values[idx + i] / scale, outQC->roundingMode),
-                               (int32_t)qMin, (int32_t)qMax);
+                    clampInt32(roundByMode(q, outQC->roundingMode), (int32_t)qMin, (int32_t)qMax);
             }
             idx = runEnd;
         }
@@ -1131,8 +1139,10 @@ void quantizeFloatBufferToBfpCodes(const float *values, size_t n, bfpQConfig_t *
         deriveBfpStoredExponent(absMax, qMax, bias, maxStored, &outQC->exponents[g]);
         float scale = bfpGroupScale(outQC, g);
         for (size_t i = start; i < end; i++) {
-            codesOut[i] = clampInt32(roundByMode(values[i] / scale, outQC->roundingMode), qMin,
-                                     (int32_t)qMax);
+            /* #421 U2: float-domain clamp before the round -- see the packed
+             * sibling's pass-2 comment for the cap-regime rationale. */
+            float q = clamp(values[i] / scale, (float)qMin, qMax);
+            codesOut[i] = clampInt32(roundByMode(q, outQC->roundingMode), qMin, (int32_t)qMax);
         }
     }
 }
@@ -1210,9 +1220,11 @@ static void packStreamAsBfp(const tensor_t *src, bfpSrcChunkReader_t readChunk, 
             size_t runLen = runEnd - idx;
             const float scale = bfpGroupScale(outQC, g);
             for (size_t i = 0; i < runLen; i++) {
+                /* #421 U2: float-domain clamp before the round -- see
+                 * packFloatBufferAsBfp's pass-2 comment. */
+                float q = clamp(buf[idx - off + i] / scale, qMin, qMax);
                 codes[idx - off + i] =
-                    clampInt32(roundByMode(buf[idx - off + i] / scale, outQC->roundingMode),
-                               (int32_t)qMin, (int32_t)qMax);
+                    clampInt32(roundByMode(q, outQC->roundingMode), (int32_t)qMin, (int32_t)qMax);
             }
             idx = runEnd;
         }
@@ -1904,10 +1916,23 @@ static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *i
 
     /* phase B: chunked read-modify-write, one roundByMode per element in
      * element order; the run-walk hoists each group's 2^E scale out of the
-     * inner loop. No clamp: packChunkGuarded aborts on overflow (#227
+     * inner loop. NO saturation: packChunkGuarded aborts on overflow (#227
      * code-domain discipline; D6 saturation is value-domain only). In-place
      * safe: chunk k is fully read before chunk k is rewritten and the code
-     * width is unchanged. */
+     * width is unchanged.
+     * #421 U2: this site's pre-clamp therefore deliberately does NOT use
+     * [qMin, qMax] like the value-domain emit passes -- pulling an
+     * overflowing accumulator back onto the grid would turn the #227 abort
+     * into silent saturation. It clamps to a band TWO codes wider on each
+     * side, which is enough to make the conversion defined (a group at the
+     * exponent cap can drive the quotient past int32 range, or to +-inf, for
+     * entirely finite increments, and (int32_t)round(...) is undefined there
+     * -- C17 6.3.1.4) while leaving every overflowing value out of range for
+     * packChunkGuarded, which still aborts. Two codes, not one: SR_HALF_AWAY
+     * dithers by [-0.5, 0.5) before rounding, so a qMax+1 clamp could round
+     * back down onto qMax and vanish. */
+    const float qMax = powf(2, (float)qc->mantissaBits - 1) - 1;
+    const float qMin = -powf(2, (float)qc->mantissaBits - 1);
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackSignExtendChunk(target->data, qc->mantissaBits, off, count, mant);
@@ -1920,8 +1945,9 @@ static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *i
             size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
             const float scale = bfpGroupScale(qc, g);
             for (size_t i = idx; i < runEnd; i++) {
-                codes[i - off] = roundByMode(
-                    ((float)mant[i - off] * scale + incBuf[i - off]) / scale, qc->roundingMode);
+                float q = clamp(((float)mant[i - off] * scale + incBuf[i - off]) / scale,
+                                qMin - 2.f, qMax + 2.f);
+                codes[i - off] = roundByMode(q, qc->roundingMode);
             }
             idx = runEnd;
         }
@@ -1966,7 +1992,33 @@ void accumulateTensorIntoBfpFixedGrid(tensor_t *target, const tensor_t *incremen
     accumulateIntoBfpFixedGridEngine(target, &src, n);
 }
 
-static void accumulateIntoBfpRescaleEngine(tensor_t *target, const incSrc_t *inc, size_t n) {
+/* The ONE BFP value-domain rescale walker (#421 U1): both the grad-accumulate
+ * DYNAMIC_RESCALE arm and the optimizer's in-place scale arm are the same
+ * two-pass repack over v = mant * oldScale * factor + inc, differing only in
+ * which of the two knobs is inert --
+ *
+ *   accumulate: inc = the increment source, factor = 1.f
+ *   scale:      inc = NULL (a zero increment), factor = the scale factor
+ *
+ * so they are one function with two callers instead of two near-identical
+ * walkers. Both degenerate cases are EXACT, not approximate: (float)mant *
+ * oldScale is an integer times a power of two, so multiplying it by 1.f is
+ * the identity, and x + 0.f is x for every finite x and for +-inf alike (the
+ * -0.0f -> +0.0f flip an added zero can cause is invisible downstream --
+ * fabsf in pass 1, and a quotient of +-0 rounds to the code 0 either way).
+ * The same holds if the compiler contracts the multiply-add into an fma: the
+ * mant * oldScale product is exact, so fma and mul-then-add round identically
+ * here. `inc == NULL` therefore reproduces the old scale path bit for bit,
+ * and `factor == 1.f` the old accumulate path.
+ *
+ * The SYM/ASYM engines keep their own walkers: their grids are scalars, so
+ * they have neither the per-group latch nor the run-walk this shape exists
+ * for. The BFP FixedGrid engine also stays separate -- its emit differs in
+ * KIND, not in formula (a #227 code-domain abort on overflow instead of D6
+ * value-domain saturation), and it carries the target's grid instead of
+ * re-deriving one. */
+static void bfpRescaleWalk(tensor_t *target, const incSrc_t *inc, float factor, size_t n,
+                           const char *what) {
     bfpQConfig_t *qc = target->quantization->qConfig;
     /* Exact-division invariant -- see the FixedGrid twin's guard comment.
      * Must run before the oldStored[numGroups] latch below sizes off the
@@ -1980,6 +2032,11 @@ static void accumulateIntoBfpRescaleEngine(tensor_t *target, const incSrc_t *inc
     int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
     float incBuf[ODT_CONVERSION_CHUNK_ELEMS];
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
+    if (inc == NULL) {
+        /* Scale path: incBuf is never refilled, so one zero fill here makes
+         * the unified formula's `+ inc` term inert for the whole walk. */
+        memset(incBuf, 0, sizeof(incBuf));
+    }
 
     /* Latch the whole OLD grid before pass 1 overwrites qc->exponents below
      * -- the pass-2 target-dequant always decodes under the grid the codes
@@ -1993,15 +2050,17 @@ static void accumulateIntoBfpRescaleEngine(tensor_t *target, const incSrc_t *inc
     uint8_t oldStored[qc->numGroups];
     memcpy(oldStored, qc->exponents, qc->numGroups);
 
-    /* pass 1: chunked absmax of (mant*oldScale + inc), closing each group at
-     * its boundary run and deriving its fresh exponent into qc->exponents
-     * (packStreamAsBfp's pass-1 idiom) -- no rounding, no data writes, fresh
-     * grid every call (unlike the FixedGrid twin). */
+    /* pass 1: chunked absmax of (mant*oldScale*factor + inc), closing each
+     * group at its boundary run and deriving its fresh exponent into
+     * qc->exponents (packStreamAsBfp's pass-1 idiom) -- no rounding, no data
+     * writes, fresh grid every call (unlike the FixedGrid twin). */
     float absMax = 0.f;
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackSignExtendChunk(target->data, qc->mantissaBits, off, count, mant);
-        incSrcChunk(inc, off, count, incBuf);
+        if (inc != NULL) {
+            incSrcChunk(inc, off, count, incBuf);
+        }
         size_t chunkEnd = off + count;
         size_t idx = off;
         while (idx < chunkEnd) {
@@ -2010,7 +2069,7 @@ static void accumulateIntoBfpRescaleEngine(tensor_t *target, const incSrc_t *inc
             size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
             const float oldScale = ldexpf(1.f, (int32_t)oldStored[g] - bias);
             for (size_t i = idx; i < runEnd; i++) {
-                float v = fabsf((float)mant[i - off] * oldScale + incBuf[i - off]);
+                float v = fabsf((float)mant[i - off] * oldScale * factor + incBuf[i - off]);
                 if (v > absMax) {
                     absMax = v;
                 }
@@ -2027,11 +2086,24 @@ static void accumulateIntoBfpRescaleEngine(tensor_t *target, const incSrc_t *inc
      * requantize at the fresh one; one roundByMode per element in element
      * order; clamp before the pack guard (value-domain saturation, D6 --
      * unlike the FixedGrid twin's abort). In-place safe: chunk k is fully
-     * read before chunk k is rewritten and the code width is unchanged. */
+     * read before chunk k is rewritten and the code width is unchanged.
+     * The saturation clamp runs in the FLOAT domain FIRST (Rounding.h's
+     * clamp): a group already sitting at the exponent cap has no headroom, so
+     * even entirely finite inputs push v / scale past int32 range or all the
+     * way to +-inf, and (int32_t)round(...) is undefined there (C17 6.3.1.4).
+     * Behaviour-identical to clamping after the round for every DEFINED case
+     * -- in range the float clamp is the identity, and outside it roundByMode
+     * is monotone, so both orders land on the same boundary code. The
+     * clampInt32 stays behind it and is load-bearing, not decoration:
+     * SR_HALF_AWAY dithers by [-0.5, 0.5) BEFORE rounding, so a value already
+     * clamped to qMin can still round one step past it (round(-128.5) = -129,
+     * half away from zero). */
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackSignExtendChunk(target->data, qc->mantissaBits, off, count, mant);
-        incSrcChunk(inc, off, count, incBuf);
+        if (inc != NULL) {
+            incSrcChunk(inc, off, count, incBuf);
+        }
         size_t chunkEnd = off + count;
         size_t idx = off;
         while (idx < chunkEnd) {
@@ -2041,21 +2113,21 @@ static void accumulateIntoBfpRescaleEngine(tensor_t *target, const incSrc_t *inc
             const float oldScale = ldexpf(1.f, (int32_t)oldStored[g] - bias);
             const float scale = bfpGroupScale(qc, g);
             for (size_t i = idx; i < runEnd; i++) {
-                float v = (float)mant[i - off] * oldScale + incBuf[i - off];
-                codes[i - off] = clampInt32(roundByMode(v / scale, qc->roundingMode), (int32_t)qMin,
-                                            (int32_t)qMax);
+                float v = (float)mant[i - off] * oldScale * factor + incBuf[i - off];
+                float q = clamp(v / scale, qMin, qMax);
+                codes[i - off] =
+                    clampInt32(roundByMode(q, qc->roundingMode), (int32_t)qMin, (int32_t)qMax);
             }
             idx = runEnd;
         }
-        packChunkGuarded(codes, count, target->data, qc->mantissaBits, off,
-                         "accumulateIntoBfpRescaleEngine");
+        packChunkGuarded(codes, count, target->data, qc->mantissaBits, off, what);
     }
 }
 
 void accumulateFloatIntoBfpTensorRescale(tensor_t *target, const float *inc, size_t n) {
     requireBfpFloatIncrementCoversTarget(target, n, "accumulateFloatIntoBfpTensorRescale");
     incSrc_t src = {.flat = inc, .tens = NULL};
-    accumulateIntoBfpRescaleEngine(target, &src, n);
+    bfpRescaleWalk(target, &src, 1.f, n, "accumulateFloatIntoBfpTensorRescale");
 }
 
 void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment) {
@@ -2066,28 +2138,26 @@ void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment)
     }
     rejectAliasedIncrement(target, increment, "accumulateTensorIntoBfpRescale");
     incSrc_t src = {.flat = NULL, .tens = increment};
-    accumulateIntoBfpRescaleEngine(target, &src, n);
+    bfpRescaleWalk(target, &src, 1.f, n, "accumulateTensorIntoBfpRescale");
 }
 
-/* accumulateIntoBfpRescaleEngine's skeleton minus the increment source
- * (factor multiply only): same chunk-aligned outer walk with run-walk group
- * handling (group starts are not byte-aligned for arbitrary geometries, so a
- * literal group-sequential walk cannot be built on the chunk helpers), same
- * whole-grid latch before pass 1 overwrites qc->exponents, same one
- * roundByMode per element in element order in pass 2 only. Unlike the
- * accumulate engines (whose roundingMode reaches the target config via the
- * funnel's op arithmetic), the mode here is the config's own STORAGE
+/* The optimizer's in-place scale arm: the SAME value-domain rescale walk the
+ * DYNAMIC_RESCALE accumulate arm runs, with a NULL increment source instead
+ * of one and a real factor instead of 1.f (#421 U1 -- bfpRescaleWalk's doc
+ * block above carries the shared contract and the exactness argument for
+ * both degenerate knobs). Only the two entry guards are the scale path's own:
+ * `factor` must be finite, and the ROUNDING is the config's own STORAGE
  * roundingMode by construction -- scaling is storage requantization, not an
- * op (#282 target-owned convention). (float)mant * oldScale is exact
- * (integer times a power of two), so the single float rounding per element
- * in pass A/B is the trailing multiply by factor. */
+ * op (#282 target-owned convention), unlike the accumulate arms whose mode
+ * reaches the target config via the funnel's op arithmetic. */
 void scaleBfpTensorInPlace(tensor_t *t, float factor) {
     /* A BFP grid is (int32 mantissa, shared power-of-two exponent) -- it has
      * no NaN/inf code, so there is no propagation path a non-finite factor
-     * could take. Unguarded the two passes below would DISAGREE about it:
+     * could take. Unguarded the walker's two passes would DISAGREE about it:
      * pass 1's `v > absMax` is false for NaN, so the fresh exponent silently
-     * ignores it, while pass 2 hands roundByMode a non-finite quotient and
-     * (int32_t)round(NaN|inf) is undefined behavior (C17 6.3.1.4). Fail fast
+     * ignores it, while pass 2's float clamp passes NaN through (a
+     * comparison-based clamp cannot map it) into roundByMode, and
+     * (int32_t)round(NaN) is undefined behavior (C17 6.3.1.4). Fail fast
      * instead of dropping the factor (masks the caller's bug) or saturating
      * (invents data). */
     if (!isfinite(factor)) {
@@ -2100,10 +2170,11 @@ void scaleBfpTensorInPlace(tensor_t *t, float factor) {
     size_t n = calcNumberOfElementsByTensor(t);
     bfpQConfig_t *qc = t->quantization->qConfig;
     /* Exact-division invariant -- see accumulateIntoBfpFixedGridEngine's
-     * guard comment (this twin shares the engines' exponents[g] walk). */
+     * guard comment (the walker re-checks it; this one keeps the empty-tensor
+     * reset below from running on an unvalidated group count). */
     validateBfpQConfigShape(qc, n);
     if (n == 0) {
-        /* Both passes below are element loops, so an empty tensor would keep
+        /* The walker's passes are element loops, so an empty tensor would keep
          * whatever exponent it carried -- a scale describing data it does not
          * have, indistinguishable downstream from a derived one. Leave the
          * CANONICAL zero state instead (stored = bias, scale 1.0), the same
@@ -2118,87 +2189,7 @@ void scaleBfpTensorInPlace(tensor_t *t, float factor) {
         }
         return;
     }
-    const float qMax = powf(2, (float)qc->mantissaBits - 1) - 1;
-    const float qMin = -powf(2, (float)qc->mantissaBits - 1);
-    const int32_t bias = bfpExponentBias(qc);
-    const uint8_t maxStored = (uint8_t)((1u << qc->exponentBits) - 1u);
-    const size_t gsz = qc->groupSize == 0 ? n : qc->groupSize;
-    int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
-    int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
-
-    uint8_t oldStored[qc->numGroups];
-    memcpy(oldStored, qc->exponents, qc->numGroups);
-
-    /* pass 1: chunked absmax of (mant * oldScale * factor), closing each
-     * group at its boundary run and deriving its fresh exponent into
-     * qc->exponents -- no rounding, no data writes. An all-zero group's
-     * absmax is 0 -> deriveBfpStoredExponent re-derives the zero state
-     * (stored = bias), never a shifted stale exponent. */
-    float absMax = 0.f;
-    for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
-        size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
-        unpackSignExtendChunk(t->data, qc->mantissaBits, off, count, mant);
-        size_t chunkEnd = off + count;
-        size_t idx = off;
-        while (idx < chunkEnd) {
-            size_t g = idx / gsz;
-            size_t groupEnd = (g + 1) * gsz;
-            size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
-            const float oldScale = ldexpf(1.f, (int32_t)oldStored[g] - bias);
-            for (size_t i = idx; i < runEnd; i++) {
-                float v = fabsf((float)mant[i - off] * oldScale * factor);
-                if (v > absMax) {
-                    absMax = v;
-                }
-            }
-            if (runEnd == groupEnd) {
-                deriveBfpStoredExponent(absMax, qMax, bias, maxStored, &qc->exponents[g]);
-                absMax = 0.f;
-            }
-            idx = runEnd;
-        }
-    }
-
-    /* pass 2: chunked read-modify-write -- decode at the LATCHED old scale,
-     * multiply, requantize at the fresh one; clamp before the pack guard
-     * (value-domain saturation, D6 -- a huge factor saturates, the correct
-     * storage-requantization semantic, never the FixedGrid abort). In-place
-     * safe: chunk k is fully read before chunk k is rewritten and the code
-     * width is unchanged. The saturation clamp runs in the FLOAT domain
-     * FIRST (Rounding.h's clamp, this file's existing clamp-then-roundByMode
-     * shape): a group already sitting at the exponent cap has no headroom, so
-     * mant * oldScale * factor overflows to +-inf for an entirely finite
-     * factor, and (int32_t)round(+-inf) is undefined (C17 6.3.1.4).
-     * Behaviour-identical to clamping after the round for every DEFINED case
-     * -- in range the float clamp is the identity, and outside it roundByMode
-     * is monotone, so both orders land on the same boundary code. The
-     * clampInt32 stays behind it and is load-bearing, not decoration:
-     * SR_HALF_AWAY dithers by [-0.5, 0.5) BEFORE rounding, so a value already
-     * clamped to qMin can still round one step past it (round(-128.5) =
-     * -129, half away from zero). NaN never reaches the clamp: the entry
-     * guard rejects a non-finite factor, and finite * finite * 2^k is at
-     * worst +-inf (mant == 0 gives exactly 0). */
-    for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
-        size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
-        unpackSignExtendChunk(t->data, qc->mantissaBits, off, count, mant);
-        size_t chunkEnd = off + count;
-        size_t idx = off;
-        while (idx < chunkEnd) {
-            size_t g = idx / gsz;
-            size_t groupEnd = (g + 1) * gsz;
-            size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
-            const float oldScale = ldexpf(1.f, (int32_t)oldStored[g] - bias);
-            const float scale = bfpGroupScale(qc, g);
-            for (size_t i = idx; i < runEnd; i++) {
-                float v = (float)mant[i - off] * oldScale * factor;
-                float q = clamp(v / scale, qMin, qMax);
-                codes[i - off] =
-                    clampInt32(roundByMode(q, qc->roundingMode), (int32_t)qMin, (int32_t)qMax);
-            }
-            idx = runEnd;
-        }
-        packChunkGuarded(codes, count, t->data, qc->mantissaBits, off, "scaleBfpTensorInPlace");
-    }
+    bfpRescaleWalk(t, NULL, factor, n, "scaleBfpTensorInPlace");
 }
 
 /* SYM_INT32 -> SYM_INT32 grad accumulate: reproduces addSymInt32TensorsInplace's

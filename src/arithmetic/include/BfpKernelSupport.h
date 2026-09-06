@@ -84,4 +84,46 @@ static inline void bfpValidateSumHeadroom(const bfpQConfig_t *qC, size_t reducti
     }
 }
 
+/*! BFP epic PR4 (R-P2/R-P5): one wire's length gate. validateBfpQConfigShape
+ * alone is NOT sufficient for the outside-funnel copiers: the per-tensor
+ * sentinel {numGroups=1, groupSize=0} is legal for ANY element count, so two
+ * per-tensor wires of DIFFERENT lengths pass every grid check while a verbatim
+ * payload copy sized off one of them runs off the other's buffer. The element
+ * count is therefore checked explicitly, next to the grid. */
+static inline void bfpRequireElementCount(const bfpQConfig_t *qC, size_t elems, size_t expected,
+                                          const char *what) {
+    if (elems != expected) {
+        PRINT_ERROR("%s: BFP wires must hold the same number of elements for a verbatim "
+                    "code/exponent carry -- got %zu vs %zu (a per-tensor {1, 0} grid matches "
+                    "any length, so the grid check alone cannot catch this)",
+                    what, elems, expected);
+        exit(1);
+    }
+    validateBfpQConfigShape(qC, elems);
+}
+
+/*! BFP epic PR4 (R-P2/R-P5): verbatim-transparency gate for the layers that
+ * run OUTSIDE the executeOp funnel and COPY codes and exponents between two
+ * BFP wires (Relu, Flatten, Dropout) instead of re-deriving them. Copying is
+ * sound only when both wires hold the same number of elements AND share the
+ * block grid AND the code/exponent widths; anything else is a re-block, which
+ * belongs to the Quantization layer (the sanctioned re-block point,
+ * docs/conventions/arithmetic-bfp.md §9 / spec D8). */
+static inline void bfpRequireSameGeometry(const bfpQConfig_t *aQC, size_t aElems,
+                                          const bfpQConfig_t *bQC, size_t bElems,
+                                          const char *what) {
+    bfpRequireElementCount(bQC, bElems, aElems, what);
+    validateBfpQConfigShape(aQC, aElems);
+    if (aQC->numGroups != bQC->numGroups || aQC->groupSize != bQC->groupSize ||
+        aQC->mantissaBits != bQC->mantissaBits || aQC->exponentBits != bQC->exponentBits) {
+        PRINT_ERROR("%s: BFP wires must share {numGroups, groupSize, mantissaBits, "
+                    "exponentBits} for a verbatim code/exponent carry -- got {%zu, %zu, %u, %u} "
+                    "vs {%zu, %zu, %u, %u}; insert a Quantization layer to re-block",
+                    what, aQC->numGroups, aQC->groupSize, (unsigned)aQC->mantissaBits,
+                    (unsigned)aQC->exponentBits, bQC->numGroups, bQC->groupSize,
+                    (unsigned)bQC->mantissaBits, (unsigned)bQC->exponentBits);
+        exit(1);
+    }
+}
+
 #endif // BFP_KERNEL_SUPPORT_H

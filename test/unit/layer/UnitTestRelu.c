@@ -1,4 +1,7 @@
+#include <string.h>
+
 #include "ArithmeticType.h"
+#include "BfpKernelSupport.h"
 #include "DTypes.h"
 #include "DeathTest.h"
 #include "LayerQuant.h"
@@ -342,6 +345,34 @@ static tensor_t *buildBfpTensor1D(size_t n) {
     return initTensor(shape, quantizationInitBfp(8, 8, HALF_AWAY), NULL);
 }
 
+/* BFP epic PR4: build a BFP wire with EXACT codes and per-group exponents.
+ * Writing the packed payload directly (byteConversion) instead of quantizing
+ * keeps the fixture independent of the quantizer and lets the test pin the
+ * verbatim exponent carry with two DIFFERENT group exponents. */
+static tensor_t *buildBfpWireWithCodes(size_t const *dims, size_t numDims, uint8_t mantissaBits,
+                                       uint8_t exponentBits, size_t numGroups, size_t groupSize,
+                                       int32_t *codes, uint8_t const *exponents) {
+    size_t *ownedDims = reserveMemory(numDims * sizeof(size_t));
+    memcpy(ownedDims, dims, numDims * sizeof(size_t));
+    size_t *order = reserveMemory(numDims * sizeof(size_t));
+    setOrderOfDimsForNewTensor(numDims, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, ownedDims, numDims, order);
+    quantization_t *q = numGroups > 1 ? quantizationInitBfpGrouped(mantissaBits, exponentBits,
+                                                                   HALF_AWAY, numGroups, groupSize)
+                                      : quantizationInitBfp(mantissaBits, exponentBits, HALF_AWAY);
+    tensor_t *t = initTensor(shape, q, NULL);
+    size_t n = calcNumberOfElementsByTensor(t);
+    if (codes != NULL) {
+        byteConversion((uint8_t *)codes, 32, t->data, mantissaBits, n);
+    }
+    bfpQConfig_t *qc = q->qConfig;
+    if (exponents != NULL) {
+        memcpy(qc->exponents, exponents, numGroups);
+    }
+    return t;
+}
+
 static tensor_t *buildFloatTensor1D(size_t n) {
     size_t *dims = reserveMemory(sizeof(size_t));
     dims[0] = n;
@@ -350,6 +381,42 @@ static tensor_t *buildFloatTensor1D(size_t n) {
     shape_t *shape = reserveMemory(sizeof(shape_t));
     setShape(shape, dims, 1, order);
     return initTensor(shape, quantizationInitFloat(), NULL);
+}
+
+/* BFP epic PR4 (R-P2, spec §5 Relu row + deviation 6): ReLU on packed BFP is a
+ * pure code clamp — negatives to code 0 — with the group exponents copied
+ * VERBATIM. Two groups with DIFFERENT exponents (130 / 126) so a dropped or
+ * zero-state exponent copy is observable; the output codes are pre-filled with
+ * a -9 sentinel so a kernel that skips positives is observable too. */
+void testReluForwardBfpClampsCodesAndCarriesExponents(void) {
+    size_t dims[] = {1, 8};
+    int32_t inCodes[8] = {12, -7, 0, 31, -32, 5, -1, 20};
+    uint8_t inExps[2] = {130, 126};
+    int32_t outCodes[8] = {-9, -9, -9, -9, -9, -9, -9, -9};
+    uint8_t outExps[2] = {127, 127};
+    tensor_t *input = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, inCodes, inExps);
+    tensor_t *output = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, outCodes, outExps);
+
+    reluForwardBfp(input, output);
+
+    int32_t got[8];
+    unpackSignExtend(output->data, 6, 0, got, 8);
+    int32_t expected[8] = {12, 0, 0, 31, 0, 5, 0, 20};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, 8);
+
+    bfpQConfig_t *outQC = output->quantization->qConfig;
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(130, outQC->exponents[0],
+                                    "group 0 exponent must be carried verbatim");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(126, outQC->exponents[1],
+                                    "group 1 exponent must be carried verbatim");
+
+    int32_t inAfter[8];
+    unpackSignExtend(input->data, 6, 0, inAfter, 8);
+    int32_t inUnchanged[8] = {12, -7, 0, 31, -32, 5, -1, 20};
+    TEST_ASSERT_EQUAL_INT32_ARRAY_MESSAGE(inUnchanged, inAfter, 8,
+                                          "the input wire must not be modified");
+    freeTensor(output);
+    freeTensor(input);
 }
 
 /* BFP epic PR2 Task 8: ReLU sits OUTSIDE the executeOp funnel — reluForwardFloat
@@ -462,6 +529,7 @@ int main(void) {
     RUN_TEST(testReluBackwardFloat);
     RUN_TEST(testReluBackwardSymInt32);
     RUN_TEST(testReluBackwardExitsOnDtypeMismatch);
+    RUN_TEST(testReluForwardBfpClampsCodesAndCarriesExponents);
     RUN_TEST(testReluForwardRejectsBfpWire);
     RUN_TEST(testReluBackwardRejectsBfpWire);
 

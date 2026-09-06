@@ -4,19 +4,15 @@
 #include <string.h>
 
 #include "ArithmeticType.h"
+#include "BfpKernelSupport.h"
 #include "Common.h"
 #include "Comparison.h"
 #include "DTypes.h"
 #include "Layer.h"
+#include "Quantization.h"
 #include "Relu.h"
 #include "Tensor.h"
-
-void reluInitConfig(reluConfig_t *reluConfig, quantization_t *forwardQ, quantization_t *backwardQ) {
-    reluConfig->forwardMath = arithmeticFromQuantizationOrDefault(forwardQ);
-    reluConfig->propLossMath = arithmeticFromQuantizationOrDefault(backwardQ);
-    reluConfig->outputQ = forwardQ;
-    reluConfig->propLossQ = backwardQ;
-}
+#include "TensorConversion.h"
 
 /* BFP epic PR2 Task 8: ReLU runs OUTSIDE the executeOp funnel — every arm below
  * raw-casts ->data (float* or int32_t*) and, for SYM_INT32, hand-copies the
@@ -44,6 +40,16 @@ void reluForwardSymInt32(tensor_t *input, tensor_t *output) {
     symInt32QConfig_t *outputSymInt32QC = output->quantization->qConfig;
     gteSymInt32Zero(input, 0, output);
     outputSymInt32QC->scale = inputSymInt32QC->scale;
+}
+
+void reluForwardBfp(tensor_t *input, tensor_t *output) {
+    /* Deliberately redundant with gteBfpZero's own gate: this one names the
+     * LAYER in the error, which is what a model author can act on. Both are
+     * pure predicates with no side effects, so the duplicate costs nothing. */
+    bfpRequireSameGeometry(input->quantization->qConfig, calcNumberOfElementsByTensor(input),
+                           output->quantization->qConfig, calcNumberOfElementsByTensor(output),
+                           "ReLU forward BFP");
+    gteBfpZero(input, output);
 }
 
 void reluForward(layer_t *reluLayer, tensor_t *input, tensor_t *output) {

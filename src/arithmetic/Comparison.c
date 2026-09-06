@@ -2,10 +2,14 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
+#include "BfpKernelSupport.h"
 #include "Common.h"
 #include "Comparison.h"
 #include "DTypes.h"
+#include "Quantization.h"
+#include "TensorConversion.h"
 
 void gteInt32Value(tensor_t *a, int32_t b, int32_t altNumber, tensor_t *result) {
     size_t numberOfValues = calcNumberOfElementsByTensor(a);
@@ -129,4 +133,43 @@ void gteSymInt32Tensor(tensor_t *a, tensor_t *b, int32_t altNumber, tensor_t *re
         }
     }
     writeFloatArrayToByteArray(aNumberOfValues, aValues, result->data);
+}
+
+/* BFP epic PR4 (R-P2): ReLU on PACKED BFP storage. Clamp negative mantissa
+ * codes to 0 in the CODE domain and copy the group exponents VERBATIM: zeroing
+ * a code only shrinks its block's absmax, so every group's 2^E grid stays
+ * valid -- no longer absmax-tight, which is the documented utilization drop
+ * (spec §10 deviation 6) and the exact analog of gteSymInt32Zero's scale copy.
+ * Routing this through executeOp instead would re-derive the target's
+ * exponents at OUT_WRITE: a SECOND quantization of unchanged values, which
+ * spec §9 / D8 forbid. The clamp only shrinks magnitude, so the pack can never
+ * overflow the code width and needs no guard. This function dereferences BOTH
+ * packed buffers, so it gates both itself (the PR4 idiom) rather than trusting
+ * its caller: element counts AND grid AND widths. */
+void gteBfpZero(tensor_t *a, tensor_t *result) {
+    size_t numberOfValues = calcNumberOfElementsByTensor(a);
+    const bfpQConfig_t *inQC = a->quantization->qConfig;
+    bfpQConfig_t *outQC = result->quantization->qConfig;
+    bfpRequireSameGeometry(inQC, numberOfValues, outQC, calcNumberOfElementsByTensor(result),
+                           "gteBfpZero (packed-BFP ReLU)");
+
+    int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
+    for (size_t off = 0; off < numberOfValues; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        size_t count = numberOfValues - off < ODT_CONVERSION_CHUNK_ELEMS
+                           ? numberOfValues - off
+                           : ODT_CONVERSION_CHUNK_ELEMS;
+        /* off is a multiple of 256, so off*mantissaBits is a whole number of
+         * bytes for every legal width -- the packed-chunk alignment contract. */
+        unpackSignExtend((const uint8_t *)a->data + off * inQC->mantissaBits / 8,
+                         inQC->mantissaBits, 0, codes, count);
+        for (size_t i = 0; i < count; i++) {
+            if (codes[i] < 0) {
+                codes[i] = 0;
+            }
+        }
+        byteConversion((uint8_t *)codes, 32,
+                       (uint8_t *)result->data + off * outQC->mantissaBits / 8, outQC->mantissaBits,
+                       count);
+    }
+    memcpy(outQC->exponents, inQC->exponents, inQC->numGroups);
 }

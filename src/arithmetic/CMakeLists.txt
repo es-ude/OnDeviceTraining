@@ -43,6 +43,8 @@ target_include_directories(Comparison PUBLIC include)
 target_link_libraries(Comparison PRIVATE
         Tensor
         DTypes
+        TensorConversion
+        Quantization
         Common
 )
 

@@ -174,6 +174,8 @@ target_include_directories(Relu PUBLIC include)
 target_link_libraries(Relu PRIVATE
         DTypes
         Tensor
+        TensorConversion
+        Quantization
         Arithmetic
         ArithmeticType
         Comparison

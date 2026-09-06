@@ -109,15 +109,29 @@ static void dropoutForwardSymInt32(dropoutConfig_t *cfg, tensor_t *input, tensor
  * identical packed byte counts, so the payload moves verbatim and the group
  * exponents are memcpy'd — the R-P2 transparency argument, unchanged values.
  * The byte count is sized off SRC and written into DST, so the gate runs here
- * too rather than being left to the caller (PR4 idiom). */
+ * too rather than being left to the caller (PR4 idiom).
+ *
+ * Unlike the bridge below, aliasing is ACCEPTED, not rejected: this is a
+ * one-pass verbatim copy, so copying a wire onto itself is the identity —
+ * exactly what eval mode promises — and requireBfpPairForArm admits src == dst
+ * (one wire passed as both input and output satisfies every count/grid/width
+ * check). It must not reach the memcpys, though: their parameters are
+ * restrict-qualified, so memcpy(p, p, n) is formally undefined even where every
+ * real libc is benign. Each copy is skipped on ITS OWN alias rather than
+ * returning on the payload's, so a pair that aliases in one block but not the
+ * other still carries the block it does not alias. */
 static void dropoutCopyBfpVerbatim(tensor_t *src, tensor_t *dst) {
     size_t numberOfElements = calcNumberOfElementsByTensor(src);
     const bfpQConfig_t *srcQC = src->quantization->qConfig;
     bfpQConfig_t *dstQC = dst->quantization->qConfig;
     bfpRequireSameGeometry(srcQC, numberOfElements, dstQC, calcNumberOfElementsByTensor(dst),
                            "Dropout BFP verbatim carry");
-    memcpy(dst->data, src->data, calcNumberOfBytesForData(src->quantization, numberOfElements));
-    memcpy(dstQC->exponents, srcQC->exponents, srcQC->numGroups);
+    if (src->data != dst->data) {
+        memcpy(dst->data, src->data, calcNumberOfBytesForData(src->quantization, numberOfElements));
+    }
+    if (srcQC->exponents != dstQC->exponents) {
+        memcpy(dstQC->exponents, srcQC->exponents, srcQC->numGroups);
+    }
 }
 
 /* BFP epic PR4 (R-P3, spec D4 + deviations register 5): Dropout is non-native
@@ -151,7 +165,13 @@ static void dropoutMaskScaleBfp(dropoutConfig_t *cfg, tensor_t *src, tensor_t *d
      * reuses one quantization_t for both wires produces), pass 1 has already
      * destroyed the grid pass 2 depends on and every decoded value is wrong.
      * Same precedent as the accumulate engines' rejectAliasedIncrement: a
-     * two-pass walk fails fast on aliasing instead of silently miscomputing. */
+     * two-pass walk fails fast on aliasing instead of silently miscomputing.
+     *
+     * The exponents term is unreachable through today's API: every
+     * quantizationInitBfp / …Grouped allocates its own exponents block, so two
+     * DISTINCT qConfigs cannot share one and the only constructible alias is
+     * the shared quantization_t caught by srcQC == dstQC. It stays as defence
+     * for a future borrowed / non-owning qConfig, not as dead code. */
     if (src->data == dst->data || srcQC == dstQC || srcQC->exponents == dstQC->exponents) {
         PRINT_ERROR("Dropout BFP bridge: source and destination wires must not alias in EITHER "
                     "their packed payload or their exponent array -- pass 2 re-reads the source "

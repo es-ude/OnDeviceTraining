@@ -267,19 +267,27 @@ void testForwardTrainingSymInt32ScaleFold(void) {
  * group's exponent. Gold from generate_expected_bfp_dropout.py; the mask is
  * the deterministic stubKeepEven, so no RNG enters the assertion. */
 void testDropoutForwardTrainingBfpBridgeRepacksWithFreshExponents(void) {
-    size_t dims[] = {1, 8};
+    size_t dims[] = {1, kBfpDropoutInCodes_len};
     int32_t inCodes[8];
-    for (size_t i = 0; i < 8; i++) {
+    for (size_t i = 0; i < kBfpDropoutInCodes_len; i++) {
         inCodes[i] = kBfpDropoutInCodes[i];
     }
     int32_t sentinel[8] = {-9, -9, -9, -9, -9, -9, -9, -9};
     uint8_t zeroState[2] = {127, 127};
-    tensor_t *input = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, inCodes, kBfpDropoutInExps);
-    tensor_t *output = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, sentinel, zeroState);
-    tensor_t *mask = buildBoolMask(8);
+    tensor_t *input = buildBfpWireWithCodes(
+        dims, 2, (uint8_t)kBfpDropoutMantissaBits, (uint8_t)kBfpDropoutExponentBits,
+        (size_t)kBfpDropoutNumGroups, (size_t)kBfpDropoutGroupSize, inCodes, kBfpDropoutInExps);
+    tensor_t *output = buildBfpWireWithCodes(
+        dims, 2, (uint8_t)kBfpDropoutMantissaBits, (uint8_t)kBfpDropoutExponentBits,
+        (size_t)kBfpDropoutNumGroups, (size_t)kBfpDropoutGroupSize, sentinel, zeroState);
+    tensor_t *mask = buildBoolMask(kBfpDropoutInCodes_len);
 
-    quantization_t *fq = quantizationInitBfpGrouped(6, 8, HALF_AWAY, 2, 4);
-    quantization_t *bq = quantizationInitBfpGrouped(6, 8, HALF_AWAY, 2, 4);
+    quantization_t *fq = quantizationInitBfpGrouped(
+        (uint8_t)kBfpDropoutMantissaBits, (uint8_t)kBfpDropoutExponentBits, HALF_AWAY,
+        (size_t)kBfpDropoutNumGroups, (size_t)kBfpDropoutGroupSize);
+    quantization_t *bq = quantizationInitBfpGrouped(
+        (uint8_t)kBfpDropoutMantissaBits, (uint8_t)kBfpDropoutExponentBits, HALF_AWAY,
+        (size_t)kBfpDropoutNumGroups, (size_t)kBfpDropoutGroupSize);
     dropoutConfig_t dcfg;
     initDropoutConfig(&dcfg, 0.5f, mask, fq, bq);
     dcfg.training = true;
@@ -292,8 +300,9 @@ void testDropoutForwardTrainingBfpBridgeRepacksWithFreshExponents(void) {
     bernoulliSetFillMaskFn(saved);
 
     int32_t got[8];
-    unpackSignExtend(output->data, 6, 0, got, 8);
-    TEST_ASSERT_EQUAL_INT32_ARRAY_MESSAGE(kBfpDropoutOutCodes, got, 8,
+    unpackSignExtend(output->data, (uint8_t)kBfpDropoutMantissaBits, 0, got,
+                     kBfpDropoutOutCodes_len);
+    TEST_ASSERT_EQUAL_INT32_ARRAY_MESSAGE(kBfpDropoutOutCodes, got, kBfpDropoutOutCodes_len,
                                           "masked+scaled codes must match the goldgen");
     bfpQConfig_t *outQC = output->quantization->qConfig;
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(kBfpDropoutOutExps[0], outQC->exponents[0],
@@ -311,19 +320,27 @@ void testDropoutForwardTrainingBfpBridgeRepacksWithFreshExponents(void) {
 /* Eval mode is the exponent-verbatim copy of R-P2's Relu forward: no mask, no
  * factor, so nothing is re-derived. */
 void testDropoutForwardEvalIdentityBfp(void) {
-    size_t dims[] = {1, 8};
+    size_t dims[] = {1, kBfpDropoutInCodes_len};
     int32_t inCodes[8];
-    for (size_t i = 0; i < 8; i++) {
+    for (size_t i = 0; i < kBfpDropoutInCodes_len; i++) {
         inCodes[i] = kBfpDropoutInCodes[i];
     }
     int32_t sentinel[8] = {-9, -9, -9, -9, -9, -9, -9, -9};
     uint8_t zeroState[2] = {127, 127};
-    tensor_t *input = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, inCodes, kBfpDropoutInExps);
-    tensor_t *output = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, sentinel, zeroState);
-    tensor_t *mask = buildBoolMask(8);
+    tensor_t *input = buildBfpWireWithCodes(
+        dims, 2, (uint8_t)kBfpDropoutMantissaBits, (uint8_t)kBfpDropoutExponentBits,
+        (size_t)kBfpDropoutNumGroups, (size_t)kBfpDropoutGroupSize, inCodes, kBfpDropoutInExps);
+    tensor_t *output = buildBfpWireWithCodes(
+        dims, 2, (uint8_t)kBfpDropoutMantissaBits, (uint8_t)kBfpDropoutExponentBits,
+        (size_t)kBfpDropoutNumGroups, (size_t)kBfpDropoutGroupSize, sentinel, zeroState);
+    tensor_t *mask = buildBoolMask(kBfpDropoutInCodes_len);
 
-    quantization_t *fq = quantizationInitBfpGrouped(6, 8, HALF_AWAY, 2, 4);
-    quantization_t *bq = quantizationInitBfpGrouped(6, 8, HALF_AWAY, 2, 4);
+    quantization_t *fq = quantizationInitBfpGrouped(
+        (uint8_t)kBfpDropoutMantissaBits, (uint8_t)kBfpDropoutExponentBits, HALF_AWAY,
+        (size_t)kBfpDropoutNumGroups, (size_t)kBfpDropoutGroupSize);
+    quantization_t *bq = quantizationInitBfpGrouped(
+        (uint8_t)kBfpDropoutMantissaBits, (uint8_t)kBfpDropoutExponentBits, HALF_AWAY,
+        (size_t)kBfpDropoutNumGroups, (size_t)kBfpDropoutGroupSize);
     dropoutConfig_t dcfg;
     initDropoutConfig(&dcfg, 0.5f, mask, fq, bq);
     dcfg.training = false;
@@ -333,8 +350,9 @@ void testDropoutForwardEvalIdentityBfp(void) {
     dropoutForward(&layer, input, output);
 
     int32_t got[8];
-    unpackSignExtend(output->data, 6, 0, got, 8);
-    TEST_ASSERT_EQUAL_INT32_ARRAY_MESSAGE(kBfpDropoutInCodes, got, 8,
+    unpackSignExtend(output->data, (uint8_t)kBfpDropoutMantissaBits, 0, got,
+                     kBfpDropoutInCodes_len);
+    TEST_ASSERT_EQUAL_INT32_ARRAY_MESSAGE(kBfpDropoutInCodes, got, kBfpDropoutInCodes_len,
                                           "eval mode must copy the codes verbatim");
     bfpQConfig_t *outQC = output->quantization->qConfig;
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(kBfpDropoutInExps[0], outQC->exponents[0],
@@ -347,6 +365,52 @@ void testDropoutForwardEvalIdentityBfp(void) {
     freeTensor(mask);
     freeTensor(output);
     freeTensor(input);
+}
+
+/* BFP epic PR4 (wave-1 review M4): eval-mode Dropout IN PLACE — the same wire
+ * passed as input and output. It is constructible through the public entry
+ * (requireBfpPairForArm compares a wire's geometry with its own and admits it),
+ * so the verbatim carry must handle it: identity, no diagnostic, and above all
+ * no memcpy(p, p, n), whose restrict-qualified parameters make the self-copy
+ * formally undefined. This pins the CONTRACT (admitted + identity), not the UB:
+ * a future implementer who copies the bridge's alias REJECT into the verbatim
+ * path would turn a legal call into an exit(1), and this test is what stops
+ * that. */
+void testDropoutForwardEvalInPlaceBfpIsIdentity(void) {
+    size_t dims[] = {1, kBfpDropoutInCodes_len};
+    int32_t inCodes[8];
+    for (size_t i = 0; i < kBfpDropoutInCodes_len; i++) {
+        inCodes[i] = kBfpDropoutInCodes[i];
+    }
+    tensor_t *wire = buildBfpWireWithCodes(
+        dims, 2, (uint8_t)kBfpDropoutMantissaBits, (uint8_t)kBfpDropoutExponentBits,
+        (size_t)kBfpDropoutNumGroups, (size_t)kBfpDropoutGroupSize, inCodes, kBfpDropoutInExps);
+    tensor_t *mask = buildBoolMask(kBfpDropoutInCodes_len);
+
+    quantization_t *fq = quantizationInitBfpGrouped(
+        (uint8_t)kBfpDropoutMantissaBits, (uint8_t)kBfpDropoutExponentBits, HALF_AWAY,
+        (size_t)kBfpDropoutNumGroups, (size_t)kBfpDropoutGroupSize);
+    dropoutConfig_t dcfg;
+    initDropoutConfig(&dcfg, 0.5f, mask, fq, fq);
+    dcfg.training = false;
+    layerConfig_t lcfg;
+    layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
+
+    dropoutForward(&layer, wire, wire);
+
+    int32_t got[8];
+    unpackSignExtend(wire->data, (uint8_t)kBfpDropoutMantissaBits, 0, got, kBfpDropoutInCodes_len);
+    TEST_ASSERT_EQUAL_INT32_ARRAY_MESSAGE(kBfpDropoutInCodes, got, kBfpDropoutInCodes_len,
+                                          "in-place eval must leave the codes untouched");
+    bfpQConfig_t *qc = wire->quantization->qConfig;
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(kBfpDropoutInExps[0], qc->exponents[0],
+                                    "in-place eval must leave the exponents untouched");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(kBfpDropoutInExps[1], qc->exponents[1],
+                                    "in-place eval must leave the exponents untouched");
+
+    freeQuantization(fq);
+    freeTensor(mask);
+    freeTensor(wire);
 }
 
 static void fillMaskKeepEven(tensor_t *mask) {
@@ -679,20 +743,28 @@ void testDropoutBackwardExitsOnDtypeMismatch(void) {
  * it reuses the forward's gold unchanged: same mask (pre-filled here, since the
  * backward never draws), same factor, same fresh per-group derive. */
 void testDropoutBackwardBfpArmDispatchesThroughDropoutBackward(void) {
-    size_t dims[] = {1, 8};
+    size_t dims[] = {1, kBfpDropoutInCodes_len};
     int32_t lossCodes[8];
-    for (size_t i = 0; i < 8; i++) {
+    for (size_t i = 0; i < kBfpDropoutInCodes_len; i++) {
         lossCodes[i] = kBfpDropoutInCodes[i];
     }
     int32_t sentinel[8] = {-9, -9, -9, -9, -9, -9, -9, -9};
     uint8_t zeroState[2] = {127, 127};
-    tensor_t *loss = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, lossCodes, kBfpDropoutInExps);
-    tensor_t *propLoss = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, sentinel, zeroState);
-    tensor_t *mask = buildBoolMask(8);
+    tensor_t *loss = buildBfpWireWithCodes(
+        dims, 2, (uint8_t)kBfpDropoutMantissaBits, (uint8_t)kBfpDropoutExponentBits,
+        (size_t)kBfpDropoutNumGroups, (size_t)kBfpDropoutGroupSize, lossCodes, kBfpDropoutInExps);
+    tensor_t *propLoss = buildBfpWireWithCodes(
+        dims, 2, (uint8_t)kBfpDropoutMantissaBits, (uint8_t)kBfpDropoutExponentBits,
+        (size_t)kBfpDropoutNumGroups, (size_t)kBfpDropoutGroupSize, sentinel, zeroState);
+    tensor_t *mask = buildBoolMask(kBfpDropoutInCodes_len);
     fillMaskKeepEven(mask); /* the pattern the forward would have produced */
 
-    quantization_t *fq = quantizationInitBfpGrouped(6, 8, HALF_AWAY, 2, 4);
-    quantization_t *bq = quantizationInitBfpGrouped(6, 8, HALF_AWAY, 2, 4);
+    quantization_t *fq = quantizationInitBfpGrouped(
+        (uint8_t)kBfpDropoutMantissaBits, (uint8_t)kBfpDropoutExponentBits, HALF_AWAY,
+        (size_t)kBfpDropoutNumGroups, (size_t)kBfpDropoutGroupSize);
+    quantization_t *bq = quantizationInitBfpGrouped(
+        (uint8_t)kBfpDropoutMantissaBits, (uint8_t)kBfpDropoutExponentBits, HALF_AWAY,
+        (size_t)kBfpDropoutNumGroups, (size_t)kBfpDropoutGroupSize);
     dropoutConfig_t dcfg;
     initDropoutConfig(&dcfg, 0.5f, mask, fq, bq);
     dcfg.training = true;
@@ -702,8 +774,9 @@ void testDropoutBackwardBfpArmDispatchesThroughDropoutBackward(void) {
     dropoutBackward(&layer, NULL, loss, propLoss);
 
     int32_t got[8];
-    unpackSignExtend(propLoss->data, 6, 0, got, 8);
-    TEST_ASSERT_EQUAL_INT32_ARRAY_MESSAGE(kBfpDropoutOutCodes, got, 8,
+    unpackSignExtend(propLoss->data, (uint8_t)kBfpDropoutMantissaBits, 0, got,
+                     kBfpDropoutOutCodes_len);
+    TEST_ASSERT_EQUAL_INT32_ARRAY_MESSAGE(kBfpDropoutOutCodes, got, kBfpDropoutOutCodes_len,
                                           "masked+scaled grad codes must match the goldgen");
     bfpQConfig_t *propQC = propLoss->quantization->qConfig;
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(kBfpDropoutOutExps[0], propQC->exponents[0],
@@ -723,7 +796,6 @@ void testDropoutBackwardBfpArmDispatchesThroughDropoutBackward(void) {
 void testDropoutBfpGuardsNarrowedNotRemoved(void) {
     size_t dims[] = {1, 8};
     tensor_t *bfpA = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, NULL, NULL);
-    tensor_t *bfpB = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, NULL, NULL);
     tensor_t *otherGrid = buildBfpWireWithCodes(dims, 2, 6, 8, 4, 2, NULL, NULL);
     tensor_t *floatWire = buildFloatTensor(8, NULL);
     tensor_t *mask = buildBoolMask(8);
@@ -745,14 +817,12 @@ void testDropoutBfpGuardsNarrowedNotRemoved(void) {
     ASSERT_EXITS_WITH_FAILURE(dropoutForward(&bfpLayer, floatWire, bfpA));
     ASSERT_EXITS_WITH_FAILURE(dropoutForward(&bfpLayer, bfpA, otherGrid));
     ASSERT_EXITS_WITH_FAILURE(dropoutBackward(&bfpLayer, NULL, bfpA, otherGrid));
-    (void)bfpB;
 
     freeQuantization(bq);
     freeQuantization(fq);
     freeTensor(mask);
     freeTensor(floatWire);
     freeTensor(otherGrid);
-    freeTensor(bfpB);
     freeTensor(bfpA);
 }
 
@@ -832,6 +902,7 @@ int main(void) {
     RUN_TEST(testDropoutBackwardExitsOnDtypeMismatch);
     RUN_TEST(testDropoutForwardTrainingBfpBridgeRepacksWithFreshExponents);
     RUN_TEST(testDropoutForwardEvalIdentityBfp);
+    RUN_TEST(testDropoutForwardEvalInPlaceBfpIsIdentity);
     RUN_TEST(testDropoutBackwardBfpArmDispatchesThroughDropoutBackward);
     RUN_TEST(testDropoutBfpGuardsNarrowedNotRemoved);
     RUN_TEST(testDropoutBfpRejectsUnequalCountsAndAliasedExponents);

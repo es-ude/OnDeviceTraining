@@ -456,8 +456,11 @@ checkpointing, limitations, literature).
   `ARITH_BFP` forward AND backward — they have no weight operand, so the
   staging width anchor is the layer's OWN produced-wire config (`outputQ` for
   the forward, `propLossQ` for the backward), checked eagerly at op entry;
-  Relu and Flatten are packed-domain transparent (codes and per-group exponents
-  copied verbatim, outside the funnel by design); Dropout bridges through float
+  Relu and Flatten are packed-domain transparent (per-group exponents carried
+  verbatim, outside the funnel by design — Flatten's codes move byte-for-byte
+  too, but Relu's forward clamps negative codes and its backward masks them:
+  what is transparent for Relu is the GRID, not the code values); Dropout
+  bridges through float
   (`1/(1−p)` is not a power of two and cannot fold into exponents) and derives
   fresh exponents from the masked-and-scaled absmax; and MSE/CrossEntropy gained
   BFP **fake-quant** arms, so a BFP output wire IS now evaluable through
@@ -522,8 +525,10 @@ checkpointing, limitations, literature).
   (`docs/conventions/arithmetic-bfp.md` §5.7):
   pooling (MaxPool1d/AvgPool1d/AdaptiveAvgPool1d) runs native `ARITH_BFP`
   forward AND backward, anchored on the layer's own `outputQ`/`propLossQ`
-  (no weight operand to stage at); Relu and Flatten copy codes and per-group
-  exponents verbatim in the packed domain, deliberately outside the funnel;
+  (no weight operand to stage at); Relu and Flatten carry the per-group
+  exponents verbatim in the packed domain, deliberately outside the funnel
+  (Flatten's codes are verbatim too; Relu's forward clamps and its backward
+  masks them);
   Dropout bridges through float and re-derives exponents; and MSE/
   CrossEntropy gained BFP fake-quant arms, so a BFP **final/loss-facing**
   output wire IS evaluable through `inference*WithLoss` (plan Decision 9 is

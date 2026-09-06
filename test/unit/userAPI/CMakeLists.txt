@@ -311,6 +311,7 @@ target_link_libraries(UnitTestMultiLayerTraining PRIVATE
         ArithmeticType
         ReluApi
         SoftmaxApi
+        Softmax
         OptimizerApi
         SgdApi
         QuantizationApi

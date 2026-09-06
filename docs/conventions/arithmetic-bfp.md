@@ -144,7 +144,7 @@ exactly as they do for grouped `SYM`. This clone rule is what `gradInit` and
 optimizer per-parameter state cloning (`m`/`v` buffers) both go through when
 handed a BFP template.
 
-## 5. Compute contract (epic PR2 forward + epic PR3 backward) — shipped
+## 5. Compute contract (epic PR2 forward + epic PR3 backward + epic PR4 weight-less layers) — shipped
 
 ### 5.1 The flip is done — backward is now native, pinning is an optional fake-quant mode
 
@@ -560,8 +560,12 @@ silent wrong arithmetic, not a crash.
 
 - Grouped BFP grad/optimizer-state templates (per-tensor-only decision above
   — a scope decision, not a kernel limitation; a future `#300` axis).
-- Only norms (LayerNorm/GroupNorm, PR5) and Softmax's backward (PR6) still
-  lack an `ARITH_BFP` arm (`docs/FEATURES.md`'s carrier-gate list). Pools,
+- Only norms (LayerNorm/GroupNorm, PR5) and Softmax (PR6) still lack an
+  `ARITH_BFP` arm. Softmax lacks one on BOTH sides: its FORWARD has no BFP arm
+  either — the arithmetic is hardcoded `ARITH_FLOAT32`, so a BFP wire merely
+  CROSSES it as a funnel fake-quant bridge — and its backward rejects a BFP
+  wire outright before dispatching. (`docs/FEATURES.md`'s carrier-gate list
+  states it the same way.) Pools,
   Relu, Flatten and Dropout SHIPPED with PR4 — see §5.7. Losses got their
   fake-quant `ARITH_BFP` arm in the same PR (`case BFP:` joining
   `case SYM_INT32:` on the dtype-generic helpers), which closes
@@ -605,15 +609,23 @@ BFP raw is float). Forward window sums carry `bfpValidateSumHeadroom`; the
 backwards do NOT, because contributions accumulate directly in the FLOAT32 raw
 with no int32 partials.
 
-**Packed-domain transparency (R-P2, R-P5).** Relu and Flatten copy codes and
+**Packed-domain transparency (R-P2, R-P5).** Relu and Flatten carry the
 per-group exponents VERBATIM and stay outside the funnel: routing them through
 `executeOp` would re-derive exponents at OUT_WRITE, a second quantization of
-UNCHANGED values, which §9/D8 forbid. Relu clamps negative codes to 0 (the
-block's grid stays valid, just no longer absmax-tight — the accepted
-utilization drop, deviations register 6) and masks the backward by the SIGN of
-the forward input's codes. Both require the copied-verbatim wire pair to share
-`{numGroups, groupSize, mantissaBits, exponentBits}`; a differing grid is a
-re-block and belongs to the Quantization layer.
+UNCHANGED values, which §9/D8 forbid. The CODES are verbatim for Flatten only —
+a reshape moves the payload byte-for-byte. Relu's are not: its forward clamps
+negative codes to 0 (the block's grid stays valid, just no longer absmax-tight
+— the accepted utilization drop, deviations register 6) and its backward masks
+the loss codes by the SIGN of the forward input's codes. What is transparent in
+both cases is the GRID, never necessarily the code values.
+
+Both require the wire pair to share the same **element count** AND
+`{numGroups, groupSize, mantissaBits, exponentBits}`. The element count is a
+SEPARATE check (`bfpRequireElementCount`, not `bfpRequireSameGeometry`) for a
+specific reason: a per-tensor `{1, 0}` grid is valid for ANY length, so two
+wires of different sizes can pass the grid check, after which a `memcpy` sized
+off one side overruns the other. A differing grid is a re-block and belongs to
+the Quantization layer.
 
 **Dropout bridge (R-P3).** Non-native BY DECISION (D4): `1/(1−p)` is not a
 power of two and cannot fold into exponents. One float bridge, two passes over
@@ -638,13 +650,29 @@ and Flatten because a funnel round-trip would re-quantize unchanged values
 (above), and for Dropout because its own two-pass bridge is the conversion.
 Pools and losses take the opposite route — pools run INSIDE `executeOp` on the
 unpacked-BFP scratch under the anchor rule above, and the losses go through
-`convertTensor`, i.e. both stay on documented arms. Consequence for reviewers:
-OUTSIDE the conversion authority itself (`src/tensor/TensorConversion.c`,
-which walks packed BFP bytes by definition — the pack/unpack helpers, the
-accumulate engines, `scaleBfpTensorInPlace`) and outside those three layers, a
-raw `->data` walk over BFP bytes is a bug. Test fixtures read packed bytes
-too, and they legitimately go through `byteConversion`/`unpackSignExtend`
-rather than indexing raw.
+`convertTensor`, i.e. both stay on documented arms. Softmax's BACKWARD is the
+FOURTH outside-funnel site (`Softmax.c`'s own wording) — it raw-casts all three
+wires to `float*`/`int32*` — but it does not handle BFP at all: it rejects a
+BFP wire on any of the three and waits for PR6, so it walks no packed payload.
+
+Consequence for reviewers — the COMPLETE inventory of code that may walk packed
+BFP bytes, so that the rule applied literally does not flag correct code:
+
+1. the conversion authority `src/tensor/TensorConversion.c` (the BFP cells, the
+   accumulate engines, `scaleBfpTensorInPlace`) **plus the bit-level codec it
+   is built on**, `byteConversion`/`byteConversionAppend` in
+   `src/tensor/Tensor.c`;
+2. the funnel's own operand staging in `src/arithmetic/ExecuteOp.c`, which
+   unpacks BFP payloads into the int32 scratch every `ARITH_BFP` kernel
+   consumes;
+3. `gteBfpZero` in `src/arithmetic/Comparison.c` — **Relu's FORWARD packed walk
+   lives there**, not in `Relu.c`, which only calls it;
+4. the three outside-funnel layers themselves: `Relu.c`'s backward sign mask,
+   `Dropout.c`'s two-pass bridge, and `Flatten.c`'s whole-payload `memcpy`.
+
+Anywhere else, a raw `->data` walk over BFP bytes is a bug. Test fixtures are
+the one non-`src/` exception, and they go through
+`byteConversion`/`unpackSignExtend` rather than indexing raw.
 
 Because the funnel's prologue is not there to reject a mismatched wire, each
 of the three layers carries its own gate, and they are NOT the same shape.
@@ -654,7 +682,8 @@ Relu and Dropout have an `arithmetic_t` slot, so they guard PER ARM:
 arithmetic slot at all (`layerForwardMath` returns the `NO_ARITHMETIC`
 constant) and therefore no arms to guard: its gate is a pair check —
 a BFP wire on one side demands a BFP wire on the other, and the two must then
-share `{numGroups, groupSize, mantissaBits, exponentBits}`.
+share the same element count and `{numGroups, groupSize, mantissaBits,
+exponentBits}`.
 
 ---
 

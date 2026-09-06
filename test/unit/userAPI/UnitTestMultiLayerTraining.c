@@ -1861,9 +1861,10 @@ static void capturePr4FlattenCarry(void *ctx, size_t layerIdx, layerType_t layer
 /* BFP epic PR4 capstone (R-P7e): the whole non-GEMM topology on ONE uniform
  * BFP wire config — conv1d -> relu -> maxpool -> flatten -> linear -> softmax,
  * CrossEntropy loss. Every arm PR4 added is on the critical path:
- *   - conv1d/linear run native ARITH_BFP (PR2/PR3) forward AND backward, so
- *     their weights are FLOAT32-init + requantizeTensorInPlace (#270
- *     requireFloat32 gate);
+ *   - conv1d and linear declare native ARITH_BFP (PR2/PR3) in all four math
+ *     slots, so their weights are FLOAT32-init + requantizeTensorInPlace
+ *     (#270 requireFloat32 gate). Which of those slots actually EXECUTES
+ *     differs per layer -- see the #423-item-4 block near the assertions;
  *   - relu is packed-domain transparent (Tasks 1/2);
  *   - maxpool compares dequantized values and scatters to argmax (Tasks 8/9);
  *   - flatten carries the exponent array (Task 3);
@@ -1873,9 +1874,10 @@ static void capturePr4FlattenCarry(void *ctx, size_t layerIdx, layerType_t layer
  *     the softmax layer entirely (CalculateGradsSequential.c: backwardIndex
  *     -= 1 for CROSS_ENTROPY), so softmaxBackward's PR6 guard is never
  *     reached. Its propLossMath is nevertheless PINNED to ARITH_FLOAT32 to
- *     document that intent -- behaviourally inert, because BOTH spellings
- *     die if that backward is ever reached (pinned FLOAT32 -> the
- *     requireNoBfpWire guard; derived ARITH_BFP -> the switch default);
+ *     document that intent -- behaviourally inert, because softmaxBackward
+ *     runs requireNoBfpWire on all three wires BEFORE its propLossMath
+ *     switch, so a BFP wire dies there under EITHER spelling and the switch
+ *     default is never the thing that catches it;
  *   - the loss reaches its BFP fake-quant arm (Task 10) because the model
  *     output wire is BFP.
  * Wire element counts are 12 / 12 / 6 / 6 / 2 / 2 — all divisible by the
@@ -1963,8 +1965,22 @@ void testBfpUniformPoolActivationModelTrains(void) {
      * the first failure, so nothing may be read after the teardown). */
     bool codesMoved = memcmp(before, convWTensor->data, convWBytes) != 0;
     conv1dConfig_t *convCfg = conv->config->conv1d;
-    /* #423 item 4: the conv really ran NATIVE ARITH_BFP end-to-end -- forward
-     * and all three backward slots -- over BFP-stored weights. */
+    /* #423 item 4 -- read this before ticking the item, because ASSERTED and
+     * EXECUTED are not the same set here.
+     * ASSERTED: all four of the conv's math slots are ARITH_BFP by CONFIG, and
+     * its weights are still BFP-stored after training.
+     * EXECUTED in this loop: forwardMath (the native BFP conv GEMM) and
+     * weightGradMath (conv1dCalcWeightGradsBfp, over a BFP lossGrad that came
+     * down through Flatten's, MaxPool's and Relu's BFP backwards) -- both
+     * confirmed by distinct-exit-code probes.
+     * NOT executed: biasGradMath, skipped by Conv1d's `if (cfg->bias)` because
+     * this fixture's conv is bias-less; and propLossMath, skipped by
+     * `if (propLoss != NULL)` because conv is the DEEPEST trainable layer and
+     * #380 PR2 truncation hands it propLoss == NULL. The dx skip is
+     * structural, not a fixture choice: no topology reaches a conv's dx arm
+     * unless a trainable layer sits below it. That arm is covered by
+     * UnitTestConv1d's PR3 gold tests (testConv1dBackwardBfpDx*) and, in this
+     * same binary, by Linear's structurally identical dx arm at index 4. */
     bool convAllSlotsBfp =
         convCfg->forwardMath.type == ARITH_BFP && convCfg->weightGradMath.type == ARITH_BFP &&
         convCfg->biasGradMath.type == ARITH_BFP && convCfg->propLossMath.type == ARITH_BFP;
@@ -2001,8 +2017,9 @@ void testBfpUniformPoolActivationModelTrains(void) {
     freeQuantization(bfpWireQ);
 
     TEST_ASSERT_TRUE_MESSAGE(convAllSlotsBfp,
-                             "the capstone's conv must run NATIVE ARITH_BFP in all four math "
-                             "slots (#423 item 4: BFP conv backward end-to-end)");
+                             "the capstone's conv must DECLARE native ARITH_BFP in all four math "
+                             "slots (#423 item 4; forward + weightGrad execute here, biasGrad is "
+                             "bias-less and dx is #380-truncated -- see the block above)");
     TEST_ASSERT_EQUAL_INT_MESSAGE(ARITH_BFP, linearForwardType,
                                   "the capstone's linear must run native ARITH_BFP too");
     TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, convWeightStorage,
@@ -2019,6 +2036,19 @@ void testBfpUniformPoolActivationModelTrains(void) {
     TEST_ASSERT_TRUE_MESSAGE(carryGroupCountsMatch,
                              "a reshape preserves the element count, so both wires of each pair "
                              "must derive the same numGroups");
+    /* Two seed-dependent assertions follow, both pinned by rngSetSeed(4242u)
+     * above (the C2 test makes the same disclosure for its own proxy):
+     * (a) "moved off the zero state" is a PROXY -- the zero state IS
+     *     exponent == bias == 127, so a grid whose absmax happened to derive
+     *     exactly 127 would false-fail. At mantissaBits 8 (qMax 127) that
+     *     needs a per-group absmax in [64, 127]; this fixture's values are of
+     *     order 0.5, three binades away, so it is robust but not immune.
+     * (b) lastLoss < firstLoss is the genuinely seed-sensitive one: the wires
+     *     round SR_HALF_AWAY (stochastic), so the trajectory depends on the
+     *     draw. A seed change -- or an RNG-consumption change anywhere
+     *     upstream -- must re-confirm both. The four STRUCTURAL assertions
+     *     (arith slots, weight dtype, both exponent carries) do not depend on
+     *     the seed. */
     TEST_ASSERT_TRUE_MESSAGE(fwdSourceGridMoved,
                              "non-vacuity: MaxPool's output grid must have left the zero state");
     TEST_ASSERT_TRUE_MESSAGE(agradSourceGridMoved,

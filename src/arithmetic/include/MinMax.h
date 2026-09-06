@@ -7,6 +7,7 @@
 float absFloat32(float a);
 float maxFloat32s(float a, float b);
 
+/*! numberOfElements == 0 returns 0.f -- the absmax of nothing (#420 G4). */
 float findAbsMaxFloat(uint8_t *bytes, size_t numberOfElements);
 float findMaxFloat(uint8_t *bytes, size_t numberOfElements);
 float findMinFloat(uint8_t *bytes, size_t numberOfElements);

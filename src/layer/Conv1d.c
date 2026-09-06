@@ -417,13 +417,13 @@ static void weightGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tens
     size_t weightOutChannels = cfg->weights->param->shape->dimensions[0];
 
     if (batch != lossGrad->shape->dimensions[0]) {
-        PRINT_ERROR("Conv1d backward (weightGrad): lossGrad batch (%zu) does not match "
+        PRINT_ERROR("Conv1d backward (SYM weightGrad): lossGrad batch (%zu) does not match "
                     "forwardInput batch (%zu)",
                     lossGrad->shape->dimensions[0], batch);
         exit(1);
     }
     if (outChannels != weightOutChannels) {
-        PRINT_ERROR("Conv1d backward (weightGrad): lossGrad outChannels (%zu) does not match "
+        PRINT_ERROR("Conv1d backward (SYM weightGrad): lossGrad outChannels (%zu) does not match "
                     "weight Cout (%zu)",
                     outChannels, weightOutChannels);
         exit(1);
@@ -531,13 +531,13 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
     size_t weightOutChannels = cfg->weights->param->shape->dimensions[0];
 
     if (batch != lossGrad->shape->dimensions[0]) {
-        PRINT_ERROR("Conv1d backward (weightGrad): lossGrad batch (%zu) does not match "
+        PRINT_ERROR("Conv1d backward (BFP weightGrad): lossGrad batch (%zu) does not match "
                     "forwardInput batch (%zu)",
                     lossGrad->shape->dimensions[0], batch);
         exit(1);
     }
     if (outChannels != weightOutChannels) {
-        PRINT_ERROR("Conv1d backward (weightGrad): lossGrad outChannels (%zu) does not match "
+        PRINT_ERROR("Conv1d backward (BFP weightGrad): lossGrad outChannels (%zu) does not match "
                     "weight Cout (%zu)",
                     outChannels, weightOutChannels);
         exit(1);
@@ -548,9 +548,10 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
      * write, not just a wrong result. */
     size_t weightInChannels = cfg->weights->param->shape->dimensions[1] * cfg->groups;
     if (inChannels != weightInChannels) {
-        PRINT_ERROR("Conv1d backward (weightGrad): forwardInput inChannels (%zu) does not match "
-                    "weight Cin-per-group * groups (%zu)",
-                    inChannels, weightInChannels);
+        PRINT_ERROR(
+            "Conv1d backward (BFP weightGrad): forwardInput inChannels (%zu) does not match "
+            "weight Cin-per-group * groups (%zu)",
+            inChannels, weightInChannels);
         exit(1);
     }
 

@@ -433,7 +433,7 @@ static void weightGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tens
     size_t expectedOutLen =
         convTranspose1dOutputLength(inputLength, cfg->kernel, cfg->outputPadding);
     if (expectedOutLen != outputLength) {
-        PRINT_ERROR("Conv1dTransposed backward (weightGrad): lossGrad outputLength (%zu) does "
+        PRINT_ERROR("Conv1dTransposed backward (SYM weightGrad): lossGrad outputLength (%zu) does "
                     "not match the transpose geometry from forwardInput (expected %zu)",
                     outputLength, expectedOutLen);
         exit(1);
@@ -446,13 +446,13 @@ static void weightGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tens
     // Conv1dTransposed weight shape [Cin, Cout/groups, K] -> Cout = dim[1] * groups.
     size_t weightOutChannels = cfg->weights->param->shape->dimensions[1] * groups;
     if (batch != lossGrad->shape->dimensions[0]) {
-        PRINT_ERROR("Conv1dTransposed backward (weightGrad): lossGrad batch (%zu) does not "
+        PRINT_ERROR("Conv1dTransposed backward (SYM weightGrad): lossGrad batch (%zu) does not "
                     "match forwardInput batch (%zu)",
                     lossGrad->shape->dimensions[0], batch);
         exit(1);
     }
     if (outChannels != weightOutChannels) {
-        PRINT_ERROR("Conv1dTransposed backward (weightGrad): lossGrad outChannels (%zu) does "
+        PRINT_ERROR("Conv1dTransposed backward (SYM weightGrad): lossGrad outChannels (%zu) does "
                     "not match weight Cout (%zu)",
                     outChannels, weightOutChannels);
         exit(1);
@@ -554,7 +554,7 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
     size_t expectedOutLen =
         convTranspose1dOutputLength(inputLength, cfg->kernel, cfg->outputPadding);
     if (expectedOutLen != outputLength) {
-        PRINT_ERROR("Conv1dTransposed backward (weightGrad): lossGrad outputLength (%zu) does "
+        PRINT_ERROR("Conv1dTransposed backward (BFP weightGrad): lossGrad outputLength (%zu) does "
                     "not match the transpose geometry from forwardInput (expected %zu)",
                     outputLength, expectedOutLen);
         exit(1);
@@ -567,13 +567,13 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
     // Conv1dTransposed weight shape [Cin, Cout/groups, K] -> Cout = dim[1] * groups.
     size_t weightOutChannels = cfg->weights->param->shape->dimensions[1] * groups;
     if (batch != lossGrad->shape->dimensions[0]) {
-        PRINT_ERROR("Conv1dTransposed backward (weightGrad): lossGrad batch (%zu) does not "
+        PRINT_ERROR("Conv1dTransposed backward (BFP weightGrad): lossGrad batch (%zu) does not "
                     "match forwardInput batch (%zu)",
                     lossGrad->shape->dimensions[0], batch);
         exit(1);
     }
     if (outChannels != weightOutChannels) {
-        PRINT_ERROR("Conv1dTransposed backward (weightGrad): lossGrad outChannels (%zu) does "
+        PRINT_ERROR("Conv1dTransposed backward (BFP weightGrad): lossGrad outChannels (%zu) does "
                     "not match weight Cout (%zu)",
                     outChannels, weightOutChannels);
         exit(1);
@@ -582,9 +582,10 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
      * the WEIGHT-sized grad intermediate ([Cin, Cout/groups, K]) -- a
      * mismatch would be an OOB write, not just a wrong result. */
     if (inChannels != cfg->weights->param->shape->dimensions[0]) {
-        PRINT_ERROR("Conv1dTransposed backward (weightGrad): forwardInput inChannels (%zu) does "
-                    "not match weight Cin (%zu)",
-                    inChannels, cfg->weights->param->shape->dimensions[0]);
+        PRINT_ERROR(
+            "Conv1dTransposed backward (BFP weightGrad): forwardInput inChannels (%zu) does "
+            "not match weight Cin (%zu)",
+            inChannels, cfg->weights->param->shape->dimensions[0]);
         exit(1);
     }
 

@@ -652,6 +652,10 @@ def main() -> int:
         "VALID-only geometry, so a zero cell means the fixture lost its contributor map")
     # outputPadding must be load-bearing: dropping it shortens gy's rows and
     # rebinds every gy group, so the expectation must change.
+    # This is a probe, NOT a second gold path: it reinterprets the SAME gy codes
+    # under a shorter row length (truncated codes, full exponent list -- the tail
+    # exponents simply go unused), which is enough to prove the outputPadding
+    # pass-through is observable. It does not model a real outputPadding=0 operand.
     convt_grp_wg_nopad = convT1d_bfp_weight_grad_ref(
         tgx_codes, tgx_exps, CONVT_GRP_X_QC, tggy_codes[:CONVT_GRP_OUT_CHANNELS
                                                         * (CONVT_GRP_OUT_LEN - 1)],

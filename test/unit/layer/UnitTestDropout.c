@@ -671,6 +671,53 @@ void testDropoutBackwardExitsOnDtypeMismatch(void) {
     freeTensor(loss);
 }
 
+/* BFP epic PR4: the POSITIVE pin on dropoutBackward's ARITH_BFP arm. Both
+ * backward death tests below expect exit(1), so a DELETED `case ARITH_BFP:`
+ * (which falls through to `default: PRINT_ERROR(...); exit(1)`) satisfies them
+ * just as well as a present one — only an assertion on the produced codes can
+ * tell the two apart. The backward is dropoutMaskScaleBfp on the loss wire, so
+ * it reuses the forward's gold unchanged: same mask (pre-filled here, since the
+ * backward never draws), same factor, same fresh per-group derive. */
+void testDropoutBackwardBfpArmDispatchesThroughDropoutBackward(void) {
+    size_t dims[] = {1, 8};
+    int32_t lossCodes[8];
+    for (size_t i = 0; i < 8; i++) {
+        lossCodes[i] = kBfpDropoutInCodes[i];
+    }
+    int32_t sentinel[8] = {-9, -9, -9, -9, -9, -9, -9, -9};
+    uint8_t zeroState[2] = {127, 127};
+    tensor_t *loss = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, lossCodes, kBfpDropoutInExps);
+    tensor_t *propLoss = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, sentinel, zeroState);
+    tensor_t *mask = buildBoolMask(8);
+    fillMaskKeepEven(mask); /* the pattern the forward would have produced */
+
+    quantization_t *fq = quantizationInitBfpGrouped(6, 8, HALF_AWAY, 2, 4);
+    quantization_t *bq = quantizationInitBfpGrouped(6, 8, HALF_AWAY, 2, 4);
+    dropoutConfig_t dcfg;
+    initDropoutConfig(&dcfg, 0.5f, mask, fq, bq);
+    dcfg.training = true;
+    layerConfig_t lcfg;
+    layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
+
+    dropoutBackward(&layer, NULL, loss, propLoss);
+
+    int32_t got[8];
+    unpackSignExtend(propLoss->data, 6, 0, got, 8);
+    TEST_ASSERT_EQUAL_INT32_ARRAY_MESSAGE(kBfpDropoutOutCodes, got, 8,
+                                          "masked+scaled grad codes must match the goldgen");
+    bfpQConfig_t *propQC = propLoss->quantization->qConfig;
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(kBfpDropoutOutExps[0], propQC->exponents[0],
+                                    "group 0 exponent must be RE-DERIVED, not copied");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(kBfpDropoutOutExps[1], propQC->exponents[1],
+                                    "group 1 exponent must be RE-DERIVED, not copied");
+
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeTensor(mask);
+    freeTensor(propLoss);
+    freeTensor(loss);
+}
+
 /* BFP epic PR4 (R-P7d): FLOAT32/SYM arms still reject a BFP wire (#315 parity);
  * the ARITH_BFP arm rejects a non-BFP wire and a differing block grid. */
 void testDropoutBfpGuardsNarrowedNotRemoved(void) {
@@ -785,6 +832,7 @@ int main(void) {
     RUN_TEST(testDropoutBackwardExitsOnDtypeMismatch);
     RUN_TEST(testDropoutForwardTrainingBfpBridgeRepacksWithFreshExponents);
     RUN_TEST(testDropoutForwardEvalIdentityBfp);
+    RUN_TEST(testDropoutBackwardBfpArmDispatchesThroughDropoutBackward);
     RUN_TEST(testDropoutBfpGuardsNarrowedNotRemoved);
     RUN_TEST(testDropoutBfpRejectsUnequalCountsAndAliasedExponents);
     RUN_TEST(testVtableForwardIdentityFloat);

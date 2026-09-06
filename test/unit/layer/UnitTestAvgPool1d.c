@@ -1,13 +1,18 @@
+#define SOURCE_FILE "UNIT_TEST_AVG_POOL_1D"
+
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "AvgPool1d.h"
+#include "BfpKernelSupport.h"
 #include "DeathTest.h"
 #include "Layer.h"
+#include "Quantization.h"
 #include "QuantizationApi.h"
 #include "StorageApi.h"
 #include "TensorApi.h"
+#include "TensorConversion.h"
 #include "expected_avg_pool_1d.h"
 #include "unity.h"
 
@@ -483,6 +488,323 @@ void testAvgPool1dBackwardSymRejectsTermsOverBound(void) {
     ASSERT_EXITS_WITH_FAILURE(avgPool1dBackward(r.layer, r.input, lossGrad, propLoss));
 }
 
+/* ---- BFP epic PR4 (R-P1/R-P4): native ARITH_BFP arms ---- */
+
+/* BFP epic PR4: build a BFP wire with EXACT codes and per-group exponents.
+ * Writing the packed payload directly (byteConversion) instead of quantizing
+ * keeps the fixture independent of the quantizer and lets the test pin the
+ * borrowed exponents the kernel folds with. */
+static tensor_t *buildBfpWireWithCodes(size_t const *dims, size_t numDims, uint8_t mantissaBits,
+                                       uint8_t exponentBits, size_t numGroups, size_t groupSize,
+                                       int32_t *codes, uint8_t const *exponents) {
+    size_t *ownedDims = reserveMemory(numDims * sizeof(size_t));
+    memcpy(ownedDims, dims, numDims * sizeof(size_t));
+    size_t *order = reserveMemory(numDims * sizeof(size_t));
+    setOrderOfDimsForNewTensor(numDims, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, ownedDims, numDims, order);
+    quantization_t *q = numGroups > 1 ? quantizationInitBfpGrouped(mantissaBits, exponentBits,
+                                                                   HALF_AWAY, numGroups, groupSize)
+                                      : quantizationInitBfp(mantissaBits, exponentBits, HALF_AWAY);
+    tensor_t *t = initTensor(shape, q, NULL);
+    size_t n = calcNumberOfElementsByTensor(t);
+    if (codes != NULL) {
+        byteConversion((uint8_t *)codes, 32, t->data, mantissaBits, n);
+    }
+    bfpQConfig_t *qc = q->qConfig;
+    if (exponents != NULL) {
+        memcpy(qc->exponents, exponents, numGroups);
+    }
+    return t;
+}
+
+/* BFP epic PR4 (R-P1): pools have no weight operand, so the width anchor for
+ * staging is the layer's OWN produced-wire config — outputQ for the forward,
+ * propLossQ for the backward. initAvgPool1dConfig derives both math slots
+ * from it, so passing a BFP wireQ selects the native arms. */
+static layer_t *avgPool1dBuildBfpLayer(avgPool1dConfig_t *cfgStore, kernel_t *kernelStore,
+                                       layerConfig_t *lcStore, layer_t *layerStore, size_t kSize,
+                                       paddingType_t padding, size_t dilation, size_t stride,
+                                       quantization_t *wireQ) {
+    initKernel(kernelStore, kSize, padding, dilation, stride);
+    initAvgPool1dConfig(cfgStore, kernelStore, wireQ, wireQ);
+    layerStore->type = AVGPOOL1D;
+    lcStore->avgPool1d = cfgStore;
+    layerStore->config = lcStore;
+    return layerStore;
+}
+
+/* Borrowed BFP-stored grouped input (D8: never re-blocked): the kernel folds
+ * same-group segments with ldexpf into the FLOAT32 raw (D7) and divides by K
+ * there. A FLOAT32 output wire makes the OUT_WRITE epilogue a memmove, so the
+ * comparison is BIT-exact against the np.float32 reference. */
+void testAvgPool1dForwardBfpBorrowedGroupedInput(void) {
+    size_t inputDims[] = {1, 2, 8};
+    size_t outputDims[] = {1, 2, 4};
+    int32_t inCodes[16];
+    for (size_t i = 0; i < kBfpAvgPoolInCodes_len; i++) {
+        inCodes[i] = kBfpAvgPoolInCodes[i];
+    }
+    tensor_t *input = buildBfpWireWithCodes(
+        inputDims, 3, (uint8_t)kBfpAvgPoolMantissaBits, (uint8_t)kBfpAvgPoolExponentBits,
+        (size_t)kBfpAvgPoolInNumGroups, (size_t)kBfpAvgPoolInGroupSize, inCodes, kBfpAvgPoolInExps);
+    tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
+    quantization_t *wireQ = quantizationInitBfpGrouped(
+        (uint8_t)kBfpAvgPoolMantissaBits, (uint8_t)kBfpAvgPoolExponentBits, HALF_AWAY,
+        (size_t)kBfpAvgPoolInNumGroups, (size_t)kBfpAvgPoolInGroupSize);
+    kernel_t k;
+    avgPool1dConfig_t cfg;
+    layerConfig_t lc;
+    layer_t layer;
+    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, VALID,
+                           (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, wireQ);
+
+    avgPool1dForward(&layer, input, output);
+
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(kBfpAvgPoolExpectedForward, output->data,
+                                     kBfpAvgPoolExpectedForward_len * sizeof(float),
+                                     "ARITH_BFP raw is FLOAT32 (D7) and the FLOAT32 OUT_WRITE "
+                                     "is a memmove -- the output must be bit-exact");
+    freeQuantization(wireQ);
+    freeTensor(output);
+    freeTensor(input);
+}
+
+/* R-P1 staging: a FLOAT32-stored operand is quantized into BFP scratch
+ * per-tensor at the PRODUCED WIRE's widths (m=6 here). The gold's generator
+ * asserts that staging at m=8 instead would change these numbers. */
+void testAvgPool1dForwardBfpStagesFloat32InputAtWireWidths(void) {
+    size_t inputDims[] = {1, 2, 8};
+    size_t outputDims[] = {1, 2, 4};
+    tensor_t *input = makeFloatTensor(inputDims, 3, kBfpAvgPoolStageInput);
+    tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
+    quantization_t *wireQ = quantizationInitBfpGrouped(
+        (uint8_t)kBfpAvgPoolMantissaBits, (uint8_t)kBfpAvgPoolExponentBits, HALF_AWAY,
+        (size_t)kBfpAvgPoolInNumGroups, (size_t)kBfpAvgPoolInGroupSize);
+    kernel_t k;
+    avgPool1dConfig_t cfg;
+    layerConfig_t lc;
+    layer_t layer;
+    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, VALID,
+                           (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, wireQ);
+
+    avgPool1dForward(&layer, input, output);
+
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(kBfpAvgPoolExpectedStaged, output->data,
+                                     kBfpAvgPoolExpectedStaged_len * sizeof(float),
+                                     "the FLOAT32 operand must stage PER-TENSOR at the "
+                                     "produced-wire widths (R-P1)");
+    freeQuantization(wireQ);
+    freeTensor(output);
+    freeTensor(input);
+}
+
+/* OUT_WRITE onto a BFP wire: the epilogue derives the target's per-group
+ * exponents (packFloatBufferAsBfp) with the OP's rounding (#282). */
+void testAvgPool1dForwardBfpPacksOutputWire(void) {
+    size_t inputDims[] = {1, 2, 8};
+    size_t outputDims[] = {1, 2, 4};
+    int32_t inCodes[16];
+    for (size_t i = 0; i < kBfpAvgPoolInCodes_len; i++) {
+        inCodes[i] = kBfpAvgPoolInCodes[i];
+    }
+    int32_t sentinel[8] = {-9, -9, -9, -9, -9, -9, -9, -9};
+    uint8_t zeroState[2] = {127, 127};
+    tensor_t *input = buildBfpWireWithCodes(
+        inputDims, 3, (uint8_t)kBfpAvgPoolMantissaBits, (uint8_t)kBfpAvgPoolExponentBits,
+        (size_t)kBfpAvgPoolInNumGroups, (size_t)kBfpAvgPoolInGroupSize, inCodes, kBfpAvgPoolInExps);
+    tensor_t *output = buildBfpWireWithCodes(
+        outputDims, 3, (uint8_t)kBfpAvgPoolMantissaBits, (uint8_t)kBfpAvgPoolExponentBits,
+        (size_t)kBfpAvgPoolOutNumGroups, (size_t)kBfpAvgPoolOutGroupSize, sentinel, zeroState);
+    quantization_t *wireQ = quantizationInitBfpGrouped(
+        (uint8_t)kBfpAvgPoolMantissaBits, (uint8_t)kBfpAvgPoolExponentBits, HALF_AWAY,
+        (size_t)kBfpAvgPoolInNumGroups, (size_t)kBfpAvgPoolInGroupSize);
+    kernel_t k;
+    avgPool1dConfig_t cfg;
+    layerConfig_t lc;
+    layer_t layer;
+    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, VALID,
+                           (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, wireQ);
+
+    avgPool1dForward(&layer, input, output);
+
+    int32_t got[8];
+    unpackSignExtend(output->data, (uint8_t)kBfpAvgPoolMantissaBits, 0, got,
+                     kBfpAvgPoolPackedCodes_len);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(kBfpAvgPoolPackedCodes, got, kBfpAvgPoolPackedCodes_len);
+    bfpQConfig_t *outQC = output->quantization->qConfig;
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(kBfpAvgPoolPackedExps[0], outQC->exponents[0],
+                                    "OUT_WRITE must derive the output wire's group exponents");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(kBfpAvgPoolPackedExps[1], outQC->exponents[1],
+                                    "OUT_WRITE must derive the output wire's group exponents");
+    freeQuantization(wireQ);
+    freeTensor(output);
+    freeTensor(input);
+}
+
+/* BFP epic PR4 (R-P7d): the rule-1 mirror. A pinned ARITH_BFP forward with a
+ * NULL or non-BFP outputQ has no width anchor and must die EAGERLY — the
+ * userApi factories copy layerQuant_t slots by value and never call
+ * initAvgPool1dConfig, so both spellings are reachable. */
+void testAvgPool1dForwardBfpRequiresBfpOutputQ(void) {
+    size_t inputDims[] = {1, 2, 8};
+    size_t outputDims[] = {1, 2, 4};
+    tensor_t *input = makeFloatTensor(inputDims, 3, kBfpAvgPoolStageInput);
+    tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
+    quantization_t *floatQ = quantizationInitFloat();
+
+    kernel_t k;
+    initKernel(&k, (size_t)kBfpAvgPoolKernelSize, VALID, (size_t)kBfpAvgPoolDilation,
+               (size_t)kBfpAvgPoolStride);
+    avgPool1dConfig_t nullCfg = {0};
+    nullCfg.kernel = &k;
+    nullCfg.forwardMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    nullCfg.outputQ = NULL;
+    layerConfig_t nullLc = {.avgPool1d = &nullCfg};
+    layer_t nullLayer = {.type = AVGPOOL1D, .config = &nullLc};
+    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&nullLayer, input, output));
+
+    avgPool1dConfig_t floatCfg = nullCfg;
+    floatCfg.outputQ = floatQ;
+    layerConfig_t floatLc = {.avgPool1d = &floatCfg};
+    layer_t floatLayer = {.type = AVGPOOL1D, .config = &floatLc};
+    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&floatLayer, input, output));
+
+    freeQuantization(floatQ);
+    freeTensor(output);
+    freeTensor(input);
+}
+
+/* BFP epic PR4 (F5): the shape gate on the NEW kernel. The write index is
+ * (b * channels + c) * outputLength + outPos with batch/channels read off the
+ * INPUT, so an output that matches on LENGTH but not on batch or channels is
+ * written past its end — a checker that looks only at dimensions[2] passes it.
+ * Three cases: matching length + wrong channels, matching length + wrong
+ * batch, and wrong rank. The first case is the one the length-only check
+ * misses; it is listed first so a regression is unmistakable. */
+void testAvgPool1dForwardBfpRejectsMismatchedOutputShape(void) {
+    size_t inputDims[] = {1, 2, 8};
+    size_t wrongChannels[] = {1, 1, 4}; /* right length, wrong channels */
+    size_t wrongBatch[] = {2, 2, 4};    /* right length + channels, wrong batch */
+    size_t wrongRank[] = {2, 4};        /* right element count, rank 2 */
+    int32_t inCodes[16];
+    for (size_t i = 0; i < kBfpAvgPoolInCodes_len; i++) {
+        inCodes[i] = kBfpAvgPoolInCodes[i];
+    }
+    tensor_t *input = buildBfpWireWithCodes(
+        inputDims, 3, (uint8_t)kBfpAvgPoolMantissaBits, (uint8_t)kBfpAvgPoolExponentBits,
+        (size_t)kBfpAvgPoolInNumGroups, (size_t)kBfpAvgPoolInGroupSize, inCodes, kBfpAvgPoolInExps);
+    tensor_t *badChannels = makeFloatTensor(wrongChannels, 3, NULL);
+    tensor_t *badBatch = makeFloatTensor(wrongBatch, 3, NULL);
+    tensor_t *badRank = makeFloatTensor(wrongRank, 2, NULL);
+    quantization_t *wireQ = quantizationInitBfpGrouped(
+        (uint8_t)kBfpAvgPoolMantissaBits, (uint8_t)kBfpAvgPoolExponentBits, HALF_AWAY,
+        (size_t)kBfpAvgPoolInNumGroups, (size_t)kBfpAvgPoolInGroupSize);
+    kernel_t k;
+    avgPool1dConfig_t cfg;
+    layerConfig_t lc;
+    layer_t layer;
+    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, VALID,
+                           (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, wireQ);
+
+    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&layer, input, badChannels));
+    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&layer, input, badBatch));
+    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&layer, input, badRank));
+
+    freeQuantization(wireQ);
+    freeTensor(badRank);
+    freeTensor(badBatch);
+    freeTensor(badChannels);
+    freeTensor(input);
+}
+
+/* The SUM headroom guard (bfpValidateSumHeadroom -- the sum limit
+ * INT32_MAX >> (m-1), NOT the product limit). It cannot be tripped through a
+ * legal AvgPool fixture: mantissaBits is capped at 16 at construction, so the
+ * limit is at least 65535 codes per same-exponent segment, and the segment is
+ * bounded by the kernel size -- a 65536-tap pool is not constructible on any
+ * realistic input length. That is exactly the spec's statement that "with
+ * typical block sizes the contract only binds at very wide mantissas". So the
+ * test pins BOTH halves honestly: the kernel's call site does NOT fire for a
+ * normal fixture, and the guard itself dies when its own bound is exceeded
+ * (called directly -- it is a public static inline in BfpKernelSupport.h). */
+void testAvgPool1dForwardBfpSumHeadroomGuardIsWired(void) {
+    size_t inputDims[] = {1, 1, 8};
+    size_t outputDims[] = {1, 1, 1};
+    int32_t codes[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    uint8_t exps[1] = {127};
+    tensor_t *input = buildBfpWireWithCodes(inputDims, 3, 16, 8, 1, 0, codes, exps);
+    tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
+    quantization_t *wireQ = quantizationInitBfp(16, 8, HALF_AWAY);
+    kernel_t k;
+    avgPool1dConfig_t cfg;
+    layerConfig_t lc;
+    layer_t layer;
+    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, 8, VALID, 1, 1, wireQ);
+
+    /* bfpSumSegmentLimit(16) = INT32_MAX >> 15 = 65535; 8 terms is far inside
+     * it, so the guarded call must SUCCEED (36 / 8 = 4.5 at scale 1.0). */
+    avgPool1dForward(&layer, input, output);
+    TEST_ASSERT_EQUAL_FLOAT(4.5f, ((float *)output->data)[0]);
+
+    /* The guard's own bound, exercised directly. */
+    uint8_t wideExps[1] = {127};
+    bfpQConfig_t wideQC = {.exponents = wideExps,
+                           .numGroups = 1,
+                           .groupSize = 0,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = 16,
+                           .exponentBits = 8};
+    ASSERT_EXITS_WITH_FAILURE(bfpValidateSumHeadroom(&wideQC, 70000, "test"));
+
+    freeQuantization(wireQ);
+    freeTensor(output);
+    freeTensor(input);
+}
+
+/* R-P7: the "BFP wire under a PINNED ARITH_FLOAT32" fake-quant path, the
+ * direct mirror of testAvgPool1dForwardWithSymInt32Input. Pinning the math
+ * slot (instead of deriving it) sends the BFP-stored operand through the
+ * funnel's ARITH_FLOAT32 prologue, which dequants it via
+ * conversionMatrix[BFP][FLOAT32]. Because the fixture is grid-exact
+ * (mantissa * 2^E is a lossless float32 multiply) the bridge is EXACT, so this
+ * asserts EQUALITY with the native run's gold — not a tolerance. */
+void testAvgPool1dForwardBfpWireUnderPinnedFloat32(void) {
+    size_t inputDims[] = {1, 2, 8};
+    size_t outputDims[] = {1, 2, 4};
+    int32_t inCodes[16];
+    for (size_t i = 0; i < kBfpAvgPoolInCodes_len; i++) {
+        inCodes[i] = kBfpAvgPoolInCodes[i];
+    }
+    tensor_t *input = buildBfpWireWithCodes(
+        inputDims, 3, (uint8_t)kBfpAvgPoolMantissaBits, (uint8_t)kBfpAvgPoolExponentBits,
+        (size_t)kBfpAvgPoolInNumGroups, (size_t)kBfpAvgPoolInGroupSize, inCodes, kBfpAvgPoolInExps);
+    tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
+    quantization_t *wireQ = quantizationInitBfpGrouped(
+        (uint8_t)kBfpAvgPoolMantissaBits, (uint8_t)kBfpAvgPoolExponentBits, HALF_AWAY,
+        (size_t)kBfpAvgPoolInNumGroups, (size_t)kBfpAvgPoolInGroupSize);
+    kernel_t k;
+    avgPool1dConfig_t cfg;
+    layerConfig_t lc;
+    layer_t layer;
+    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, VALID,
+                           (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, wireQ);
+    cfg.forwardMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
+
+    avgPool1dForward(&layer, input, output);
+
+    /* The native kernel folds int32 partials then divides; the fake-quant arm
+     * sums exact floats then divides. Both reduce the SAME exact values in the
+     * SAME order, so on this grid-exact fixture the results are identical. */
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(kBfpAvgPoolExpectedForward, output->data,
+                                     kBfpAvgPoolExpectedForward_len * sizeof(float),
+                                     "the fake-quant bridge must reproduce the native result "
+                                     "on a grid-exact fixture");
+    freeQuantization(wireQ);
+    freeTensor(output);
+    freeTensor(input);
+}
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -528,5 +850,12 @@ int main(void) {
     RUN_TEST(testAvgPool1dSymSamePadding);
     RUN_TEST(testAvgPool1dForwardSymRejectsWideOperand);
     RUN_TEST(testAvgPool1dBackwardSymRejectsTermsOverBound);
+    RUN_TEST(testAvgPool1dForwardBfpBorrowedGroupedInput);
+    RUN_TEST(testAvgPool1dForwardBfpStagesFloat32InputAtWireWidths);
+    RUN_TEST(testAvgPool1dForwardBfpPacksOutputWire);
+    RUN_TEST(testAvgPool1dForwardBfpRequiresBfpOutputQ);
+    RUN_TEST(testAvgPool1dForwardBfpRejectsMismatchedOutputShape);
+    RUN_TEST(testAvgPool1dForwardBfpSumHeadroomGuardIsWired);
+    RUN_TEST(testAvgPool1dForwardBfpWireUnderPinnedFloat32);
     return UNITY_END();
 }

@@ -2099,3 +2099,84 @@ def bfp_mask_scale_repack_ref(codes, exps, qc, keep_mask, factor, self_check=Tru
             "bfp_mask_scale_repack_ref: verbatim-exponent codes equal the fresh-derive "
             "codes -- the re-derivation is unobservable in this fixture")
     return new_codes, new_exps
+
+
+# ---- BFP epic PR4 (R-P4): pooling kernels. ----
+
+
+def bfp_window_sum_ref(codes, exps, qc, indices):
+    """Shared BFP pooling window-sum core (AvgPool1d / AdaptiveAvgPool1d
+    forward kernels): ONE int32 partial per same-group visited segment of the
+    STORAGE indices `indices`, folded into a float32 accumulator with np.ldexp
+    on every group change and at the tail -- the C kernels' bfpGroupOf/ldexpf
+    walk, element for element. Per-ELEMENT group lookup, never a run
+    precompute: dilated/strided windows skip storage indices, so a run-based
+    shortcut would bind the wrong exponent (the PR3 precedent). Asserts the
+    int32 bound bfpValidateSumHeadroom guarantees in C.
+    Returns (np.float32 accumulator, number of group crossings)."""
+    bias = 2 ** (qc["exponent_bits"] - 1) - 1
+    acc = np.float32(0.0)
+    partial = 0
+    cur_g = None
+    crossings = 0
+    for j, idx in enumerate(indices):
+        g = _bfp_group_of(idx, qc["group_size"])
+        if j == 0:
+            cur_g = g
+        elif g != cur_g:
+            assert abs(partial) <= _INT32_MAX, (
+                "bfp_window_sum_ref: partial exceeds int32 -- fixture violates the "
+                "bfpValidateSumHeadroom bound the C kernel enforces")
+            acc = np.float32(acc + np.ldexp(np.float32(partial), np.int32(exps[cur_g] - bias)))
+            partial = 0
+            cur_g = g
+            crossings += 1
+        partial += codes[idx]
+    if cur_g is not None:
+        assert abs(partial) <= _INT32_MAX
+        acc = np.float32(acc + np.ldexp(np.float32(partial), np.int32(exps[cur_g] - bias)))
+    return acc, crossings
+
+
+def avgpool1d_bfp_forward_ref(codes, exps, qc, batch, channels, geom, self_check=True):
+    """AvgPool1d ARITH_BFP forward reference: bfp_window_sum_ref per window,
+    then a float32 divide by K. count_include_pad=True, so the divisor is
+    ALWAYS kernel_size (padded positions simply are not visited) -- and the
+    SYM arm's exact s/K scale fold has NO BFP analog, because a BFP scale is
+    2^E and K is not a power of two in general. `geom` is a window_geometry_1d
+    dict. Returns row-major [batch*channels*out_len] float32 as Python floats.
+
+    Self-checks (abort rather than emit a vacuous fixture):
+      (i)   >= 1 window crosses a group boundary (the fold clause runs);
+      (ii)  the geometry is strided or dilated (per-element bfpGroupOf is
+            load-bearing -- a consecutive walk cannot tell it from a run
+            precompute);
+      (iii) collapsing the input to per-tensor changes the result (the group
+            structure is observable);
+      (iv)  >= 1 nonzero output."""
+    out = []
+    crossings_total = 0
+    k = np.float32(geom["kernel_size"])
+    for b in range(batch):
+        for c in range(channels):
+            base = (b * channels + c) * geom["input_length"]
+            for o in range(geom["out_len"]):
+                first, count = window_slice_1d(geom, o)
+                idxs = [base + first + i * geom["dilation"] for i in range(count)]
+                acc, crossings = bfp_window_sum_ref(codes, exps, qc, idxs)
+                crossings_total += crossings
+                out.append(float(np.float32(acc / k)))
+    if self_check:
+        assert crossings_total >= 1, (
+            "avgpool1d_bfp_forward_ref: no window crosses a group boundary -- the "
+            "ldexpf fold clause is unexercised")
+        assert geom["dilation"] > 1 or geom["stride"] > 1, (
+            "avgpool1d_bfp_forward_ref: consecutive windows cannot distinguish a "
+            "per-element bfpGroupOf from a run precompute -- use stride or dilation")
+        collapsed = avgpool1d_bfp_forward_ref(codes, [exps[0]], {**qc, "group_size": 0},
+                                              batch, channels, geom, self_check=False)
+        assert collapsed != out, (
+            "avgpool1d_bfp_forward_ref: per-tensor collapse is indistinguishable -- "
+            "fixture is vacuous against group-structure bugs")
+        assert any(v != 0.0 for v in out), "avgpool1d_bfp_forward_ref: all-zero output"
+    return out

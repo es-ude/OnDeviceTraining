@@ -25,9 +25,12 @@ import torch.nn.functional as F
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 from sym_gold import (
     assert_rounding_canary,
+    avgpool1d_bfp_forward_ref,
+    bfp_quantize_grouped,
     emit_float_scalar,
     emit_int32_array,
     emit_int32_scalar,
+    emit_uint8_array,
     f32_scale_i12,
     requant_absmax_i12_f32,
     stable_dequant_i12,
@@ -331,6 +334,102 @@ def emit_sym_fixture(parts, fx):
     parts.append(emit_float_scalar(f"scaleTol_{pre}", SCALE_REL_TOL_SYM))
 
 
+# ---- BFP epic PR4 (R-P4): AvgPool1d ARITH_BFP forward ------------------
+# Geometry: input [1, 2, 8], kernel 3, VALID, stride 1, DILATION 2 ->
+# effective kernel 5, out_len 4. Dilation is load-bearing: every window
+# visits non-consecutive storage indices, so a run precompute instead of the
+# per-element bfpGroupOf lookup binds the wrong exponent. The input grid is
+# {4 groups x 4} over the 16 storage elements, so channel 0 spans groups
+# 0/1 and channel 1 spans groups 2/3 -- every window crosses a boundary.
+# K = 3 is NOT a power of two, which is exactly why the /K divide lives in
+# the FLOAT32 raw (the SYM s/K scale fold has no BFP analog).
+BFP_AVG_BATCH = 1
+BFP_AVG_CHANNELS = 2
+BFP_AVG_INPUT_LENGTH = 8
+BFP_AVG_KERNEL_SIZE = 3
+BFP_AVG_STRIDE = 1
+BFP_AVG_DILATION = 2
+BFP_AVG_MANTISSA_BITS = 6
+BFP_AVG_EXPONENT_BITS = 8
+BFP_AVG_IN_NUM_GROUPS = 4
+BFP_AVG_IN_GROUP_SIZE = 4
+BFP_AVG_IN_CODES = [12, -7, 0, 31, -32, 5, -1, 20,
+                    3, -14, 22, -1, 8, 0, -30, 6]
+BFP_AVG_IN_EXPS = [130, 127, 133, 125]
+# Output wire for the packed-write fixture: 8 elements -> {2 groups x 4}.
+BFP_AVG_OUT_NUM_GROUPS = 2
+BFP_AVG_OUT_GROUP_SIZE = 4
+# Staged-FLOAT32 fixture: values deliberately LOSSY at m=6 so a kernel that
+# stages at a hardcoded m=8 produces observably different outputs.
+BFP_AVG_STAGE_INPUT = [1.3, -2.6, 3.3, -1.55, 10.0, -6.1, 4.2, 7.9,
+                       0.55, -0.35, 0.85, 1.15, 4.1, 2.3, -1.05, 0.65]
+
+
+def emit_bfp_fixtures(parts):
+    geom = window_geometry_1d(BFP_AVG_INPUT_LENGTH, BFP_AVG_KERNEL_SIZE, BFP_AVG_STRIDE,
+                              BFP_AVG_DILATION, "VALID")
+    assert geom["out_len"] == 4, geom
+    in_qc = {"mantissa_bits": BFP_AVG_MANTISSA_BITS,
+             "exponent_bits": BFP_AVG_EXPONENT_BITS,
+             "group_size": BFP_AVG_IN_GROUP_SIZE}
+
+    # The C tests build their wires from these, so a fixture-shape change
+    # propagates instead of drifting away from hardcoded literals.
+    parts.append(emit_int32_scalar("kBfpAvgPoolMantissaBits", BFP_AVG_MANTISSA_BITS))
+    parts.append(emit_int32_scalar("kBfpAvgPoolExponentBits", BFP_AVG_EXPONENT_BITS))
+    parts.append(emit_int32_scalar("kBfpAvgPoolInNumGroups", BFP_AVG_IN_NUM_GROUPS))
+    parts.append(emit_int32_scalar("kBfpAvgPoolInGroupSize", BFP_AVG_IN_GROUP_SIZE))
+    parts.append(emit_int32_scalar("kBfpAvgPoolOutNumGroups", BFP_AVG_OUT_NUM_GROUPS))
+    parts.append(emit_int32_scalar("kBfpAvgPoolOutGroupSize", BFP_AVG_OUT_GROUP_SIZE))
+    parts.append(emit_int32_scalar("kBfpAvgPoolKernelSize", BFP_AVG_KERNEL_SIZE))
+    parts.append(emit_int32_scalar("kBfpAvgPoolStride", BFP_AVG_STRIDE))
+    parts.append(emit_int32_scalar("kBfpAvgPoolDilation", BFP_AVG_DILATION))
+
+    # (1) BFP-STORED grouped input, borrowed zero-copy (D8): full self-checks.
+    fwd = avgpool1d_bfp_forward_ref(BFP_AVG_IN_CODES, BFP_AVG_IN_EXPS, in_qc,
+                                    BFP_AVG_BATCH, BFP_AVG_CHANNELS, geom)
+    parts.append(emit_int32_array("kBfpAvgPoolInCodes", torch.tensor(BFP_AVG_IN_CODES)))
+    parts.append(emit_uint8_array("kBfpAvgPoolInExps", BFP_AVG_IN_EXPS))
+    parts.append(emit_float_array("kBfpAvgPoolExpectedForward",
+                                  torch.tensor(fwd, dtype=torch.float32)))
+
+    # (2) FLOAT32-stored input staged PER-TENSOR at the produced wire's widths
+    # (R-P1: pools have no weight operand, so outputQ is the anchor). The
+    # stage template is always {1, 0} -- the anchor's GROUPING is irrelevant,
+    # only its mantissa/exponent widths are read.
+    st_codes, st_exps = bfp_quantize_grouped(BFP_AVG_STAGE_INPUT, BFP_AVG_MANTISSA_BITS,
+                                             BFP_AVG_EXPONENT_BITS, 0)
+    st_qc = {"mantissa_bits": BFP_AVG_MANTISSA_BITS,
+             "exponent_bits": BFP_AVG_EXPONENT_BITS, "group_size": 0}
+    staged = avgpool1d_bfp_forward_ref(st_codes, st_exps, st_qc, BFP_AVG_BATCH,
+                                       BFP_AVG_CHANNELS, geom, self_check=False)
+    wide_codes, wide_exps = bfp_quantize_grouped(BFP_AVG_STAGE_INPUT, 8,
+                                                 BFP_AVG_EXPONENT_BITS, 0)
+    wide = avgpool1d_bfp_forward_ref(wide_codes, wide_exps,
+                                     {**st_qc, "mantissa_bits": 8}, BFP_AVG_BATCH,
+                                     BFP_AVG_CHANNELS, geom, self_check=False)
+    assert wide != staged, (
+        "staging at m=8 gives the same output as m=6 -- the rule-1 width-anchor "
+        "mutation would be unobservable; pick lossier input values")
+    assert any(v != 0.0 for v in staged), "staged AvgPool BFP fixture is all-zero"
+    parts.append(emit_float_array("kBfpAvgPoolStageInput",
+                                  torch.tensor(BFP_AVG_STAGE_INPUT, dtype=torch.float32)))
+    parts.append(emit_float_array("kBfpAvgPoolExpectedStaged",
+                                  torch.tensor(staged, dtype=torch.float32)))
+
+    # (3) OUT_WRITE onto a BFP output wire: the epilogue packs the FLOAT32 raw
+    # through packFloatBufferAsBfp (fresh per-group exponents, op rounding =
+    # HALF_AWAY), which bfp_quantize_grouped mirrors bit-for-bit.
+    pk_codes, pk_exps = bfp_quantize_grouped(torch.tensor(fwd, dtype=torch.float32),
+                                             BFP_AVG_MANTISSA_BITS, BFP_AVG_EXPONENT_BITS,
+                                             BFP_AVG_OUT_GROUP_SIZE)
+    assert len(set(pk_exps)) > 1, (
+        "packed AvgPool BFP output has one exponent for both groups -- a per-tensor "
+        "epilogue would be indistinguishable")
+    parts.append(emit_int32_array("kBfpAvgPoolPackedCodes", torch.tensor(pk_codes)))
+    parts.append(emit_uint8_array("kBfpAvgPoolPackedExps", pk_exps))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, type=Path)
@@ -357,6 +456,8 @@ def main() -> int:
     for fx in [fixture_sym_basic(), fixture_sym_stride_dilation(),
                fixture_sym_same_padding()]:
         emit_sym_fixture(parts, fx)
+
+    emit_bfp_fixtures(parts)
 
     parts.append("\n#endif // ODT_EXPECTED_AVG_POOL_1D_H\n")
 

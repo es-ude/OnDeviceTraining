@@ -50,12 +50,14 @@ target_include_directories(AvgPool1d PUBLIC include)
 target_link_libraries(AvgPool1d PRIVATE
         DTypes
         Tensor
+        Quantization
         Arithmetic
         ArithmeticType
         ExecuteOp
         Common
         Kernel
         SlidingWindow1d
+        m
 )
 
 add_library(AdaptiveAvgPool1d AdaptiveAvgPool1d.c)

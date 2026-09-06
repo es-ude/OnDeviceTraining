@@ -7488,6 +7488,137 @@ void testAccumulateFloatIntoBfpFixedGridRejectsNaNIncrement(void) {
     ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorFixedGrid(&target, inc, n));
 }
 
+/* ---- #421 U4 (ruling R7): n == 0 is the canonical zero state -------------
+ * The scale arm was given this semantic in the PR #422 follow-up batch (R4);
+ * the two accumulate engines diverged from it and from each other. All four
+ * public accumulate entries now agree with the scale arm: an empty target is
+ * left in the CANONICAL zero state (every group's stored exponent = bias,
+ * scale 1.0) rather than carrying a grid that describes data it does not
+ * have, indistinguishable to the next accumulate/serialize/inspect from a
+ * derived one. Same "no data" convention as the exponent authority's
+ * absMax == 0 arm, optimizerZeroGrad's BFP arm and getQLike's per-tensor
+ * clone.
+ *
+ * Where the divergence was: the RESCALE walk's passes are element loops, so
+ * n == 0 skipped them entirely and left the stale exponent (both wrappers).
+ * The FIXED-grid engine split by increment kind -- the flat wrapper was
+ * accidentally already correct (an empty group's findAbsMaxFloat is 0, which
+ * the exponent authority maps to the zero state) while the TENSOR wrapper's
+ * streamed derive loop never ran and left the stale exponent. Three of these
+ * four were watched RED; the flat FixedGrid one pins behaviour that was
+ * already right.
+ *
+ * #420 G3 makes the float wrappers demand n == the target's element count,
+ * so this state needs a genuinely 0-element target; per #160 the payload
+ * pointer is a real 1-byte buffer rather than a zero-length array. */
+static void buildEmptyBfpTarget(tensor_t *t, uint8_t *data, shape_t *shape, quantization_t *q,
+                                bfpQConfig_t *qc) {
+    initBfpQuantization(qc, q);
+    setTensorValues(t, data, shape, q, NULL);
+}
+
+void testAccumulateFloatIntoBfpRescaleEmptyTensorResetsToZeroState(void) {
+    size_t dims[] = {0};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    uint8_t exponents[1] = {200}; /* sentinel: a stale grid, != bias 127 */
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    uint8_t data[1] = {0};
+    tensor_t target;
+    buildEmptyBfpTarget(&target, data, &shape, &q, &qc);
+
+    float inc[1] = {0.f};
+    accumulateFloatIntoBfpTensorRescale(&target, inc, 0);
+
+    TEST_ASSERT_EQUAL_UINT8(127, exponents[0]);
+    TEST_ASSERT_EQUAL_UINT8(0, data[0]); /* nothing written past the payload */
+}
+
+void testAccumulateTensorIntoBfpRescaleEmptyTensorResetsToZeroState(void) {
+    size_t dims[] = {0};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    uint8_t exponents[1] = {200};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    uint8_t data[1] = {0};
+    tensor_t target;
+    buildEmptyBfpTarget(&target, data, &shape, &q, &qc);
+
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    float incData[1] = {0.f};
+    tensor_t increment;
+    setTensorValues(&increment, (uint8_t *)incData, &shape, &floatQ, NULL);
+
+    accumulateTensorIntoBfpRescale(&target, &increment);
+
+    TEST_ASSERT_EQUAL_UINT8(127, exponents[0]);
+    TEST_ASSERT_EQUAL_UINT8(0, data[0]);
+}
+
+void testAccumulateFloatIntoBfpFixedGridEmptyTensorResetsToZeroState(void) {
+    size_t dims[] = {0};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    uint8_t exponents[1] = {200};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    uint8_t data[1] = {0};
+    tensor_t target;
+    buildEmptyBfpTarget(&target, data, &shape, &q, &qc);
+
+    float inc[1] = {0.f};
+    accumulateFloatIntoBfpTensorFixedGrid(&target, inc, 0);
+
+    TEST_ASSERT_EQUAL_UINT8(127, exponents[0]);
+    TEST_ASSERT_EQUAL_UINT8(0, data[0]);
+}
+
+void testAccumulateTensorIntoBfpFixedGridEmptyTensorResetsToZeroState(void) {
+    size_t dims[] = {0};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    uint8_t exponents[1] = {200};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    uint8_t data[1] = {0};
+    tensor_t target;
+    buildEmptyBfpTarget(&target, data, &shape, &q, &qc);
+
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    float incData[1] = {0.f};
+    tensor_t increment;
+    setTensorValues(&increment, (uint8_t *)incData, &shape, &floatQ, NULL);
+
+    accumulateTensorIntoBfpFixedGrid(&target, &increment);
+
+    TEST_ASSERT_EQUAL_UINT8(127, exponents[0]);
+    TEST_ASSERT_EQUAL_UINT8(0, data[0]);
+}
+
 void testQuantizeFloatBufferToBfpCodesRejectsBadGroupGeometry(void) {
     float values[8] = {6.f, 1.f, -2.f, 0.f, 28.f, -7.f, 3.f, 14.f};
     uint8_t exponents[3] = {127, 127, 127};
@@ -7692,6 +7823,10 @@ int main(void) {
     RUN_TEST(testAccumulateFloatIntoBfpRescaleRejectsShortElementCount);
     RUN_TEST(testFloatToBfpRejectsBadTargetGroupGeometry);
     RUN_TEST(testQuantizeFloatBufferToBfpCodesRejectsBadGroupGeometry);
+    RUN_TEST(testAccumulateFloatIntoBfpRescaleEmptyTensorResetsToZeroState);
+    RUN_TEST(testAccumulateTensorIntoBfpRescaleEmptyTensorResetsToZeroState);
+    RUN_TEST(testAccumulateFloatIntoBfpFixedGridEmptyTensorResetsToZeroState);
+    RUN_TEST(testAccumulateTensorIntoBfpFixedGridEmptyTensorResetsToZeroState);
     RUN_TEST(testAccumulateFloatIntoBfpRescaleRejectsNaNIncrement);
     RUN_TEST(testAccumulateFloatIntoBfpRescaleRejectsInfiniteIncrement);
     RUN_TEST(testAccumulateFloatIntoBfpFixedGridRejectsNaNIncrement);

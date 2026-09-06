@@ -1623,6 +1623,22 @@ static void incSrcChunk(const incSrc_t *src, size_t off, size_t count, float *ou
     dequantChunkToFloat(src->tens, off, count, out);
 }
 
+/* #421 U4 (ruling R7): the framework's "no data seen yet" BFP state, shared
+ * by every empty-target path. An n == 0 tensor that kept its previous
+ * exponents would carry a scale describing data it does not have,
+ * indistinguishable downstream from a derived one; the canonical zero state
+ * (stored = bias, scale 1.0) is what the exponent authority's absMax == 0
+ * arm, optimizerZeroGrad's BFP arm and getQLike's per-tensor clone all use.
+ * Past validateBfpQConfigShape, n == 0 implies the per-tensor {1,0} geometry
+ * (a grouped config needs numGroups > 1 AND groupSize > 0, whose product is
+ * never 0), but the loop stays shape-agnostic anyway. */
+static void resetBfpGridToZeroState(bfpQConfig_t *qc) {
+    const uint8_t zeroStateExponent = (uint8_t)bfpExponentBias(qc);
+    for (size_t g = 0; g < qc->numGroups; g++) {
+        qc->exponents[g] = zeroStateExponent;
+    }
+}
+
 /* #421 U3 (ruling R6): a non-finite value in a BFP accumulate's INCREMENT is
  * a fail-fast, the increment-side twin of the scale path's non-finite-factor
  * guard. A BFP grid is (int32 mantissa, shared power-of-two exponent) and has
@@ -1901,6 +1917,14 @@ static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *i
      * the float* wrappers' n is caller-supplied, so it is validated here
      * too, not just the tensor-derived one. */
     validateBfpQConfigShape(qc, n);
+    if (n == 0) {
+        /* R7: the scale arm's semantic, now shared. The flat wrapper reached
+         * it by accident (an empty group's absmax is 0, which the exponent
+         * authority maps to the zero state); the streamed one skipped its
+         * derive loop entirely and kept the stale grid. */
+        resetBfpGridToZeroState(qc);
+        return;
+    }
     const size_t gsz = qc->groupSize == 0 ? n : qc->groupSize;
     int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
     float incBuf[ODT_CONVERSION_CHUNK_ELEMS];
@@ -2070,6 +2094,13 @@ static void bfpRescaleWalk(tensor_t *target, const incSrc_t *inc, float factor, 
     /* Exact-division invariant -- see the FixedGrid twin's guard comment. Must
      * run before the walk below, whose group indexing assumes it. */
     validateBfpQConfigShape(qc, n);
+    if (n == 0) {
+        /* R7: both passes below are element loops, so an empty target would
+         * keep whatever grid it carried. Shared with the FixedGrid twin and
+         * with the scale arm, which reaches this through its own entry. */
+        resetBfpGridToZeroState(qc);
+        return;
+    }
     const float qMax = powf(2, (float)qc->mantissaBits - 1) - 1;
     const float qMin = -powf(2, (float)qc->mantissaBits - 1);
     const int32_t bias = bfpExponentBias(qc);
@@ -2248,28 +2279,10 @@ void scaleBfpTensorInPlace(tensor_t *t, float factor) {
                     (double)factor);
         exit(1);
     }
+    /* Everything past the factor guard -- the geometry check, the n == 0
+     * canonical zero state (R4, unified as R7 across all three arms) and the
+     * walk itself -- lives in the shared walker. */
     size_t n = calcNumberOfElementsByTensor(t);
-    bfpQConfig_t *qc = t->quantization->qConfig;
-    /* Exact-division invariant -- see accumulateIntoBfpFixedGridEngine's
-     * guard comment (the walker re-checks it; this one keeps the empty-tensor
-     * reset below from running on an unvalidated group count). */
-    validateBfpQConfigShape(qc, n);
-    if (n == 0) {
-        /* The walker's passes are element loops, so an empty tensor would keep
-         * whatever exponent it carried -- a scale describing data it does not
-         * have, indistinguishable downstream from a derived one. Leave the
-         * CANONICAL zero state instead (stored = bias, scale 1.0), the same
-         * "no data" convention the exponent authority's absMax == 0 arm,
-         * optimizerZeroGrad's BFP arm and getQLike's per-tensor clone all
-         * use. Past the shape guard, n == 0 implies the per-tensor {1,0}
-         * geometry (a grouped config needs numGroups > 1 AND groupSize > 0,
-         * whose product is never 0); the loop stays shape-agnostic anyway. */
-        const int32_t zeroStateExponent = bfpExponentBias(qc);
-        for (size_t g = 0; g < qc->numGroups; g++) {
-            qc->exponents[g] = (uint8_t)zeroStateExponent;
-        }
-        return;
-    }
     bfpRescaleWalk(t, NULL, factor, n, "scaleBfpTensorInPlace");
 }
 

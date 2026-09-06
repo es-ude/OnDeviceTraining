@@ -14,19 +14,28 @@
 #include "Tensor.h"
 #include "TensorConversion.h"
 
-/* BFP epic PR2 Task 8: ReLU runs OUTSIDE the executeOp funnel — every arm below
- * raw-casts ->data (float* or int32_t*) and, for SYM_INT32, hand-copies the
- * scale. A BFP wire stores PACKED mantissa codes under a per-GROUP exponent, so
- * such a view reads packed bytes as wide scalars and leaves the destination's
- * exponents stale: silent corruption, never a crash. Keyed on the wire's STORAGE
- * dtype, not the declared arithmetic — a BFP wire reaches this layer under
- * ARITH_FLOAT32 (fake-quant, pinned) just as under ARITH_BFP (derived); both
- * are wrong for this layer until it grows real BFP semantics. */
+/* BFP epic PR4 (R-P2): ReLU still runs OUTSIDE the executeOp funnel — each arm
+ * raw-views ->data in ITS OWN storage format, so the guard stays keyed on the
+ * wire's STORAGE dtype and is only NARROWED per arm: the FLOAT32/SYM_INT32
+ * arms keep rejecting a packed BFP wire (their float* / int32_t* views would read
+ * packed bytes as wide scalars and leave the destination's exponents stale),
+ * while the ARITH_BFP arm requires both wires BFP-stored. */
 static void requireNoBfpWire(const tensor_t *t, const char *what) {
     if (t->quantization->type == BFP) {
-        PRINT_ERROR("%s: BFP Relu semantics arrive with epic PR4 -- keep BFP off this wire or use "
-                    "FLOAT32 wires",
+        PRINT_ERROR("%s: this arm raw-views the wire in its own storage format and cannot read "
+                    "packed BFP mantissas -- derive ARITH_BFP from a BFP wire config, or keep "
+                    "BFP off this wire",
                     what);
+        exit(1);
+    }
+}
+
+static void requireBfpWire(const tensor_t *t, const char *what) {
+    if (t->quantization->type != BFP) {
+        PRINT_ERROR("%s: the ARITH_BFP arm requires BFP-stored wires (packed codes + per-group "
+                    "exponents, carried verbatim) -- got dtype %d; see "
+                    "docs/conventions/arithmetic-bfp.md §5.7",
+                    what, (int)t->quantization->type);
         exit(1);
     }
 }
@@ -54,15 +63,22 @@ void reluForwardBfp(tensor_t *input, tensor_t *output) {
 
 void reluForward(layer_t *reluLayer, tensor_t *input, tensor_t *output) {
     reluConfig_t *reluConfig = reluLayer->config->relu;
-    requireNoBfpWire(input, "ReLU forward (input)");
-    requireNoBfpWire(output, "ReLU forward (output)");
 
     switch (reluConfig->forwardMath.type) {
     case ARITH_FLOAT32:
+        requireNoBfpWire(input, "ReLU forward (input)");
+        requireNoBfpWire(output, "ReLU forward (output)");
         reluForwardFloat(input, output);
         break;
     case ARITH_SYM_INT32:
+        requireNoBfpWire(input, "ReLU forward (input)");
+        requireNoBfpWire(output, "ReLU forward (output)");
         reluForwardSymInt32(input, output);
+        break;
+    case ARITH_BFP:
+        requireBfpWire(input, "ReLU forward (input)");
+        requireBfpWire(output, "ReLU forward (output)");
+        reluForwardBfp(input, output);
         break;
     default:
         PRINT_ERROR("Unknown QType!");

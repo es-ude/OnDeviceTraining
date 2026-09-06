@@ -419,33 +419,107 @@ void testReluForwardBfpClampsCodesAndCarriesExponents(void) {
     freeTensor(input);
 }
 
-/* BFP epic PR2 Task 8: ReLU sits OUTSIDE the executeOp funnel — reluForwardFloat
- * hands input/output straight to gteFloatValue, which raw-casts ->data to
- * float*. A BFP wire stores PACKED mantissa codes plus a per-group exponent, so
- * that cast reads packed bytes as floats (and the write leaves the output's
- * exponents stale) — silent corruption with no diagnostic, on BOTH the input and
- * the output side. Guard the STORAGE dtype of both wires. */
-void testReluForwardRejectsBfpWire() {
-    layerFunctions_t reluFns = layerFunctions[RELU];
-    quantization_t *floatQ = quantizationInitFloat();
-    layerQuant_t lq;
-    layerQuantInitUniform(&lq, floatQ);
-    layer_t *reluLayer = reluLayerInit(&lq);
+/* BFP epic PR4: the POSITIVE half of the narrowed guard — reluForward must
+ * DISPATCH an ARITH_BFP config to reluForwardBfp instead of rejecting the wire.
+ * The three death tests below are all satisfied by the old, broader
+ * requireNoBfpWire (it exits on every BFP wire), so none of them can tell a
+ * present ARITH_BFP arm from a deleted one; this one can. */
+void testReluForwardBfpArmDispatchesThroughReluForward(void) {
+    reluConfig_t cfg = {0};
+    cfg.forwardMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    layerConfig_t lc = {.relu = &cfg};
+    layer_t layer = {.type = RELU, .config = &lc};
+    size_t dims[] = {1, 8};
+    int32_t inCodes[8] = {12, -7, 0, 31, -32, 5, -1, 20};
+    uint8_t inExps[2] = {130, 126};
+    int32_t outCodes[8] = {-9, -9, -9, -9, -9, -9, -9, -9};
+    uint8_t outExps[2] = {127, 127};
+    tensor_t *input = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, inCodes, inExps);
+    tensor_t *output = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, outCodes, outExps);
 
-    tensor_t *bfpIn = buildBfpTensor1D(6);
-    tensor_t *floatOut = buildFloatTensor1D(6);
-    ASSERT_EXITS_WITH_FAILURE(reluFns.forward(reluLayer, bfpIn, floatOut));
+    reluForward(&layer, input, output);
 
-    tensor_t *floatIn = buildFloatTensor1D(6);
-    tensor_t *bfpOut = buildBfpTensor1D(6);
-    ASSERT_EXITS_WITH_FAILURE(reluFns.forward(reluLayer, floatIn, bfpOut));
+    int32_t got[8];
+    unpackSignExtend(output->data, 6, 0, got, 8);
+    int32_t expected[8] = {12, 0, 0, 31, 0, 5, 0, 20};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, 8);
+    bfpQConfig_t *outQC = output->quantization->qConfig;
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(130, outQC->exponents[0],
+                                    "group 0 exponent must be carried verbatim");
+    freeTensor(output);
+    freeTensor(input);
+}
 
-    freeTensor(bfpOut);
-    freeTensor(floatIn);
-    freeTensor(floatOut);
-    freeTensor(bfpIn);
-    freeReluLayer(reluLayer);
-    freeQuantization(floatQ);
+/* R-P7 asks for a "BFP wire under a pinned ARITH_FLOAT32" fake-quant test
+ * mirroring testAvgPool1dForwardWithSymInt32Input. For the POOLS that test
+ * exists (Task 5's testAvgPool1dForwardBfpWireUnderPinnedFloat32) because
+ * their forwards run INSIDE executeOp, whose ARITH_FLOAT32 prologue dequants
+ * any storage dtype. ReLU has no such bridge BY CONSTRUCTION: it never enters
+ * the funnel and its FLOAT32 arm raw-casts ->data, so a BFP wire under a
+ * pinned ARITH_FLOAT32 is not fake-quant, it is heap corruption. The honest
+ * mirror is therefore this death test — the same fixture, the opposite
+ * expectation. */
+
+/* BFP epic PR4 (R-P7d): the narrowed guards. A BFP wire under the FLOAT32 arm
+ * must still die (#315 parity — the raw float* view would read packed bytes),
+ * and the ARITH_BFP arm must reject a non-BFP wire and a geometry mismatch. */
+void testReluForwardFloat32ArmRejectsBfpWire(void) {
+    reluConfig_t cfg = {0};
+    cfg.forwardMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
+    layerConfig_t lc = {.relu = &cfg};
+    layer_t layer = {.type = RELU, .config = &lc};
+    size_t dims[] = {1, 8};
+    tensor_t *bfpWire = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, NULL, NULL);
+    tensor_t *floatWire = buildFloatTensor1D(8);
+
+    ASSERT_EXITS_WITH_FAILURE(reluForward(&layer, bfpWire, floatWire));
+    ASSERT_EXITS_WITH_FAILURE(reluForward(&layer, floatWire, bfpWire));
+
+    freeTensor(floatWire);
+    freeTensor(bfpWire);
+}
+
+void testReluForwardBfpArmRejectsNonBfpWireAndGeometryMismatch(void) {
+    reluConfig_t cfg = {0};
+    cfg.forwardMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    layerConfig_t lc = {.relu = &cfg};
+    layer_t layer = {.type = RELU, .config = &lc};
+    size_t dims[] = {1, 8};
+    tensor_t *bfpWire = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, NULL, NULL);
+    tensor_t *floatWire = buildFloatTensor1D(8);
+    tensor_t *otherGrid = buildBfpWireWithCodes(dims, 2, 6, 8, 4, 2, NULL, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(reluForward(&layer, floatWire, bfpWire));
+    ASSERT_EXITS_WITH_FAILURE(reluForward(&layer, bfpWire, floatWire));
+    ASSERT_EXITS_WITH_FAILURE(reluForward(&layer, bfpWire, otherGrid));
+
+    freeTensor(otherGrid);
+    freeTensor(floatWire);
+    freeTensor(bfpWire);
+}
+
+/* BFP epic PR4: the length half of the gate, and the ONLY case the grid check
+ * cannot see. Both wires carry the per-tensor sentinel {numGroups=1,
+ * groupSize=0}, which validateBfpQConfigShape accepts for ANY element count
+ * and which compares field-for-field EQUAL between the two — so before the
+ * count check this pair sailed through and gteBfpZero unpacked 8 elements out
+ * of a 4-element buffer and packed 8 into it. Both directions are asserted:
+ * a short destination over-writes, a short source over-reads. */
+void testReluForwardBfpArmRejectsUnequalElementCounts(void) {
+    reluConfig_t cfg = {0};
+    cfg.forwardMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    layerConfig_t lc = {.relu = &cfg};
+    layer_t layer = {.type = RELU, .config = &lc};
+    size_t longDims[] = {1, 8};
+    size_t shortDims[] = {1, 4};
+    tensor_t *longWire = buildBfpWireWithCodes(longDims, 2, 6, 8, 1, 0, NULL, NULL);
+    tensor_t *shortWire = buildBfpWireWithCodes(shortDims, 2, 6, 8, 1, 0, NULL, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(reluForward(&layer, longWire, shortWire));
+    ASSERT_EXITS_WITH_FAILURE(reluForward(&layer, shortWire, longWire));
+
+    freeTensor(shortWire);
+    freeTensor(longWire);
 }
 
 /* Backward twin of the forward guard above (reluBackwardFloat raw-casts all
@@ -530,7 +604,10 @@ int main(void) {
     RUN_TEST(testReluBackwardSymInt32);
     RUN_TEST(testReluBackwardExitsOnDtypeMismatch);
     RUN_TEST(testReluForwardBfpClampsCodesAndCarriesExponents);
-    RUN_TEST(testReluForwardRejectsBfpWire);
+    RUN_TEST(testReluForwardBfpArmDispatchesThroughReluForward);
+    RUN_TEST(testReluForwardFloat32ArmRejectsBfpWire);
+    RUN_TEST(testReluForwardBfpArmRejectsNonBfpWireAndGeometryMismatch);
+    RUN_TEST(testReluForwardBfpArmRejectsUnequalElementCounts);
     RUN_TEST(testReluBackwardRejectsBfpWire);
 
     RUN_TEST(testReluLayerInitAndFreeRoundTrip);

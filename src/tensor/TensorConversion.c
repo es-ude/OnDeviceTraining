@@ -1994,9 +1994,13 @@ static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *i
      * exponent cap can drive the quotient past int32 range, or to +-inf, for
      * entirely finite increments, and (int32_t)round(...) is undefined there
      * -- C17 6.3.1.4) while leaving every overflowing value out of range for
-     * packChunkGuarded, which still aborts. Two codes, not one: SR_HALF_AWAY
-     * dithers by [-0.5, 0.5) before rounding, so a qMax+1 clamp could round
-     * back down onto qMax and vanish. */
+     * packChunkGuarded, which still aborts. Two codes rather than one is
+     * conservative headroom, not a requirement: SR_HALF_AWAY dithers by
+     * [-0.5, 0.5) before rounding, but C's round() is half-AWAY, so a value
+     * clamped to qMax+1 dithers into [qMax+0.5, qMax+1.5) and rounds to
+     * qMax+1 at worst -- it can never land back on qMax, and a +-1 band would
+     * already preserve the abort. The extra code buys margin against any
+     * future rounding mode with a wider dither. */
     const float qMax = powf(2, (float)qc->mantissaBits - 1) - 1;
     const float qMin = -powf(2, (float)qc->mantissaBits - 1);
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
@@ -2064,10 +2068,11 @@ void accumulateTensorIntoBfpFixedGrid(tensor_t *target, const tensor_t *incremen
     accumulateIntoBfpFixedGridEngine(target, &src, n, "accumulateTensorIntoBfpFixedGrid");
 }
 
-/* Fresh-exponent ring capacity for the rescale walker (#421 U6): the live
- * set at any pass-2 chunk spans at most one chunk of groups, so one slot
- * per chunk element plus a margin slot keeps them distinct even at
- * groupSize 1. */
+/* Fresh-exponent ring capacity for the rescale walker (#421 U6): the live set
+ * at any pass-2 chunk spans at most one chunk of groups -- at most
+ * ODT_CONVERSION_CHUNK_ELEMS of them, at groupSize 1 -- so that many slots
+ * are already exactly enough to keep them distinct. The extra slot is slack,
+ * not a requirement. */
 #define ODT_RESCALE_FRESH_WINDOW (ODT_CONVERSION_CHUNK_ELEMS + 1)
 
 /* The ONE BFP value-domain rescale walker (#421 U1): both the grad-accumulate
@@ -2129,7 +2134,12 @@ static void bfpRescaleWalk(tensor_t *target, const incSrc_t *inc, float factor, 
      * the group straddling its end. That is a fixed
      * ODT_CONVERSION_CHUNK_ELEMS + 1 byte window (257 B), replacing the
      * O(numGroups) latch VLA the whole-tensor two-pass needed (n bytes at
-     * groupSize 1); this is what closes the unbounded-stack item.
+     * groupSize 1); this is what closes the unbounded-stack item. The frame
+     * is deterministic rather than smaller: sharing one walker costs the
+     * SCALE arm an incBuf it never had, so at numGroups == 1 that arm's frame
+     * grows by ~1280 B (1 KB incBuf + 257 B window - the 1-byte VLA), from
+     * ~2 KB to ~3.3 KB. Accepted deliberately (a scratch split stays
+     * mechanical if MCU stack budgets ever complain).
      *
      * The direction is inverted relative to that latch, which is what makes
      * the window small: qc->exponents keeps holding the OLD grid, and pass 2
@@ -2142,8 +2152,9 @@ static void bfpRescaleWalk(tensor_t *target, const incSrc_t *inc, float factor, 
      * Ring indexing is g % ODT_RESCALE_FRESH_WINDOW. The live set at pass-2
      * chunk [off, chunkEnd) is exactly the groups [off / gsz,
      * (chunkEnd - 1) / gsz], whose span is at most
-     * (ODT_CONVERSION_CHUNK_ELEMS - 1) / gsz, so 257 slots keep them
-     * distinct even at gsz == 1. */
+     * (ODT_CONVERSION_CHUNK_ELEMS - 1) / gsz -- at most
+     * ODT_CONVERSION_CHUNK_ELEMS distinct groups, which the ring already
+     * covers exactly at gsz == 1, with one slot of slack. */
     uint8_t fresh[ODT_RESCALE_FRESH_WINDOW];
     size_t scanned = 0; /* pass-1 frontier: elements [0, scanned) are absorbed */
     float absMax = 0.f;
@@ -2215,7 +2226,17 @@ static void bfpRescaleWalk(tensor_t *target, const incSrc_t *inc, float factor, 
          * boundary code. The clampInt32 stays behind it and is load-bearing,
          * not decoration: SR_HALF_AWAY dithers by [-0.5, 0.5) BEFORE rounding,
          * so a value already clamped to qMin can still round one step past it
-         * (round(-128.5) = -129, half away from zero). */
+         * (round(-128.5) = -129, half away from zero).
+         * NaN never reaches this clamp -- which matters because a
+         * comparison-based clamp cannot map it. Every input is finite by
+         * construction: the factor is checked at scaleBfpTensorInPlace's
+         * entry (R1) and the increment element-wise in pass 1 (R6), and
+         * mantissa * oldScale * factor + inc over finite operands is at worst
+         * +-inf, never NaN, given a FINITE oldScale -- guaranteed for
+         * in-contract configs, since deriveBfpStoredExponent caps derived
+         * exponents at bias + 127 and #420 G5 rejects deserialized records
+         * above that cap. A mantissa of 0 then decodes to exactly 0, not
+         * 0 * inf. */
         unpackSignExtendChunk(target->data, qc->mantissaBits, off, count, mant);
         if (inc != NULL) {
             incSrcChunk(inc, off, count, incBuf);

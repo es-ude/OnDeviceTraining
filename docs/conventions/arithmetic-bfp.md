@@ -497,9 +497,13 @@ silent wrong arithmetic, not a crash.
     deliberately WIDER than the legal code band — two codes on each side,
     enough that `(int32_t)round(...)` is always defined but never enough to
     pull an overflowing value back onto the grid, so the abort still fires.
-    Two codes rather than one because `SR_HALF_AWAY` dithers by `[-0.5, 0.5)`
-    before rounding and could otherwise round `qMax+1` back down onto
-    `qMax`.
+    Two codes rather than one is conservative headroom, not a requirement:
+    `SR_HALF_AWAY` dithers by `[-0.5, 0.5)` before rounding, but C's `round()`
+    is half-AWAY, so a value clamped to `qMax+1` dithers into
+    `[qMax+0.5, qMax+1.5)` and rounds to `qMax+1` at worst — it can never land
+    back on `qMax`, and a `±1` band would already preserve the abort. The
+    extra code buys margin against any future rounding mode with a wider
+    dither.
   - `OUT_ACC_DYNAMIC_RESCALE` (`bfpRescaleWalk`): re-derives a FRESH
     per-group grid on every call from `|mant·oldScale·factor + inc|`'s absmax
     (value-domain, so D6 CLAMPS rather than aborts at the exponent range's
@@ -513,9 +517,15 @@ silent wrong arithmetic, not a crash.
     were actually stored under, never the freshly derived one) and pass 2
     publishes each group's fresh exponent only after consuming that group's
     LAST element. The only out-of-config scratch is therefore a fixed
-    `ODT_CONVERSION_CHUNK_ELEMS + 1` byte window of fresh exponents — the PR3
+    `ODT_CONVERSION_CHUNK_ELEMS + 1` byte window of fresh exponents (the live
+    set spans at most `ODT_CONVERSION_CHUNK_ELEMS` groups, so that many slots
+    are already exactly enough; the extra one is slack) — the PR3
     whole-tensor two-pass instead latched the ENTIRE old grid into an
-    `O(numGroups)` stack VLA.
+    `O(numGroups)` stack VLA. The frame is deterministic rather than smaller:
+    sharing one walker costs the SCALE arm an increment buffer it never had,
+    so at `numGroups == 1` that arm grows by ~1280 B (~2 KB → ~3.3 KB), a
+    deliberate trade — a scratch split stays mechanical if MCU stack budgets
+    ever complain.
   - Both engines are **two-pass** (one pass to decide/derive the grid, a
     second chunk-aligned read-modify-write pass to write it) rather than a
     single group-sequential walk, because a group's bit offset

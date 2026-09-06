@@ -7203,6 +7203,20 @@ void testFloatToBfpRejectsBadTargetGroupGeometry(void) {
     ASSERT_EXITS_WITH_FAILURE(convertTensor(&src, &dst));
 }
 
+void testQuantizeFloatBufferToBfpCodesRejectsBadGroupGeometry(void) {
+    float values[8] = {6.f, 1.f, -2.f, 0.f, 28.f, -7.f, 3.f, 14.f};
+    uint8_t exponents[3] = {127, 127, 127};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 3,
+                       .groupSize = 4, /* 3*4 == 12 != 8 -> invalid for n=8 */
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 4,
+                       .exponentBits = 8};
+    int32_t codes[8];
+
+    ASSERT_EXITS_WITH_FAILURE(quantizeFloatBufferToBfpCodes(values, 8, &qc, codes));
+}
+
 /* ---- #421 U2: clamp before the round at EVERY BFP emit site --------------
  * `scaleBfpTensorInPlace` got the float-domain pre-clamp in the PR #422
  * follow-up batch (R3); the four sibling emit passes kept rounding a
@@ -7618,20 +7632,6 @@ void testAccumulateTensorIntoBfpFixedGridEmptyTensorResetsToZeroState(void) {
 
     TEST_ASSERT_EQUAL_UINT8(127, exponents[0]);
     TEST_ASSERT_EQUAL_UINT8(0, data[0]);
-}
-
-void testQuantizeFloatBufferToBfpCodesRejectsBadGroupGeometry(void) {
-    float values[8] = {6.f, 1.f, -2.f, 0.f, 28.f, -7.f, 3.f, 14.f};
-    uint8_t exponents[3] = {127, 127, 127};
-    bfpQConfig_t qc = {.exponents = exponents,
-                       .numGroups = 3,
-                       .groupSize = 4, /* 3*4 == 12 != 8 -> invalid for n=8 */
-                       .roundingMode = HALF_AWAY,
-                       .mantissaBits = 4,
-                       .exponentBits = 8};
-    int32_t codes[8];
-
-    ASSERT_EXITS_WITH_FAILURE(quantizeFloatBufferToBfpCodes(values, 8, &qc, codes));
 }
 
 void setUp() {}

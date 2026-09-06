@@ -85,7 +85,10 @@ Notes on the qualified cells:
   increment on an all-zero-codes accumulator (and **aborts** on mantissa overflow, #227
   code-domain discipline); `OUT_ACC_DYNAMIC_RESCALE` re-derives a fresh per-group grid
   every call from the absmax of the post-increment sum (`|mant·oldScale + inc|`,
-  value-domain, so it **clamps** per D6 instead of aborting). `optimizerZeroGrad`'s `BFP` arm resets exponents to bias (not just codes
+  value-domain, so it **clamps** per D6 instead of aborting). Both modes reject a
+  **non-finite increment** (BFP has no NaN/inf code, unlike the FLOAT32 grad path that
+  keeps propagating one) and leave an **empty** target in the canonical zero state
+  (#421). `optimizerZeroGrad`'s `BFP` arm resets exponents to bias (not just codes
   to zero) — hygiene restoring the canonical zero state (the SYM/ASYM `scales[0]=1.f`
   analog); the next `FixedGrid` accumulate keys on a codes-only all-zero scan, which
   the memset alone already satisfies. E2e pinned by

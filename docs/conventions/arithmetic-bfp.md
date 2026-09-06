@@ -8,9 +8,9 @@ arms, and the `ARITH_BFP` arms in `src/layer/Linear.c`/`Conv1d.c`/
 `Conv1dTransposed.c`). Since epic PR3 this also covers those same layers'
 native `ARITH_BFP` **backward** arms (`weightGrad`/`biasGrad`/`dx`), the BFP
 grad-accumulate and scale engines in `src/tensor/TensorConversion.c`
-(`accumulateIntoBfpFixedGridEngine`/`accumulateIntoBfpRescaleEngine`/
-`scaleBfpTensorInPlace`), and the per-tensor-only BFP grad/optimizer-state
-storage knob (`src/userApi/tensor/TensorApi.c`'s `gradInit`,
+(`accumulateIntoBfpFixedGridEngine` and the unified `bfpRescaleWalk` behind
+`scaleBfpTensorInPlace` and the rescale accumulate arms), and the
+per-tensor-only BFP grad/optimizer-state storage knob (`src/userApi/tensor/TensorApi.c`'s `gradInit`,
 `src/userApi/optimizer/{SgdApi,AdamWApi,OptimizerApi}.c`,
 `src/userApi/continual_learning/PpcaReplayApi.c`). Path-scoped for Claude via
 `.claude/rules/arithmetic-bfp.md`. Spec:
@@ -468,7 +468,10 @@ silent wrong arithmetic, not a crash.
   SYM/ASYM grad-storage gates it was modeled on exactly.
 - **`optimizerZeroGrad`'s `BFP` arm resets exponents to bias, not just codes
   to zero.** Byte-zeroing the packed mantissa storage alone already decodes
-  every code to `0.0f` regardless of exponent — the reset is *value*-inert —
+  every code to `0.0f` under any FINITE exponent (`0 · inf` would be NaN,
+  which is why `deriveBfpStoredExponent` caps derived exponents at
+  `bias + 127` and, since #420 G5, the deserializer rejects records above
+  that cap) — the reset is *value*-inert —
   and the NEXT accumulate does not key on it either: the `FixedGrid`
   engine's "fresh vs. already-gridded" carry decision (below) is a
   codes-only all-zero scan, so a byte-zeroed grad is classified fresh
@@ -490,22 +493,52 @@ silent wrong arithmetic, not a crash.
     like the SYM `FixedGrid` twin. The read-modify-write pass then
     `packChunkGuarded`-**aborts** on mantissa overflow (#227 code-domain
     discipline — this is a CODE-domain pack, so D6's value-domain saturation
-    does not apply here).
-  - `OUT_ACC_DYNAMIC_RESCALE` (`accumulateIntoBfpRescaleEngine`): re-derives
-    a FRESH per-group grid on every call from `|mant·oldScale + inc|`'s
-    absmax (value-domain, so D6 CLAMPS rather than aborts at the exponent
-    range's edges) — the old grid is latched into a `numGroups`-byte stack
-    array BEFORE pass 1 overwrites `qc->exponents`, so pass 2's dequant of
-    the pre-existing mantissas always decodes under the grid they were
-    actually stored under, never the freshly derived one.
-  - Both engines are **whole-tensor two-pass** (one pass to decide/derive the
-    grid, a second chunk-aligned read-modify-write pass to write it) rather
-    than a single group-sequential walk, because a group's bit offset
+    does not apply here). Its float-domain pre-clamp (#421) is therefore
+    deliberately WIDER than the legal code band — two codes on each side,
+    enough that `(int32_t)round(...)` is always defined but never enough to
+    pull an overflowing value back onto the grid, so the abort still fires.
+    Two codes rather than one because `SR_HALF_AWAY` dithers by `[-0.5, 0.5)`
+    before rounding and could otherwise round `qMax+1` back down onto
+    `qMax`.
+  - `OUT_ACC_DYNAMIC_RESCALE` (`bfpRescaleWalk`): re-derives a FRESH
+    per-group grid on every call from `|mant·oldScale·factor + inc|`'s absmax
+    (value-domain, so D6 CLAMPS rather than aborts at the exponent range's
+    edges). Since the #421 unification this is the SAME function
+    `scaleBfpTensorInPlace` runs — the accumulate arms pass `factor = 1.f`,
+    the scale arm passes a NULL increment source; both degenerate knobs are
+    exact, so neither path's output moved. Its two passes are INTERLEAVED,
+    pass 1 running exactly one group boundary ahead of pass 2:
+    `qc->exponents` keeps holding the OLD grid for the whole walk (so pass 2's
+    dequant of the pre-existing mantissas always decodes under the grid they
+    were actually stored under, never the freshly derived one) and pass 2
+    publishes each group's fresh exponent only after consuming that group's
+    LAST element. The only out-of-config scratch is therefore a fixed
+    `ODT_CONVERSION_CHUNK_ELEMS + 1` byte window of fresh exponents — the PR3
+    whole-tensor two-pass instead latched the ENTIRE old grid into an
+    `O(numGroups)` stack VLA.
+  - Both engines are **two-pass** (one pass to decide/derive the grid, a
+    second chunk-aligned read-modify-write pass to write it) rather than a
+    single group-sequential walk, because a group's bit offset
     (`g·groupSize·mantissaBits`) is not byte-aligned for arbitrary
     geometries — the walk has to stay chunk-aligned
     (`ODT_CONVERSION_CHUNK_ELEMS`) and let a run-walk inside each chunk
     handle group boundaries, the same shape `packStreamAsBfp`/
-    `dequantChunkToFloat` already use.
+    `dequantChunkToFloat` already use. `FixedGrid` runs its two passes over
+    the whole tensor; `bfpRescaleWalk` interleaves them (above).
+  - Both engines **fail fast on a non-finite value in the INCREMENT** (#421,
+    ruling R6 — the increment-side twin of the scale arm's
+    non-finite-`factor` guard): a BFP grid has no NaN/inf code, so mapping it
+    to 0 would drop the caller's data and saturating it would invent data.
+    Deliberate contract asymmetry — the FLOAT32 grad-storage path keeps
+    propagating a NaN gradient loudly, because FLOAT32 can represent it.
+    Non-finite INTERMEDIATES arising from finite inputs (a grid at the
+    exponent cap overflowing its scaled values) are NOT rejected: those
+    saturate through the emit clamp as ordinary D6 value-domain behaviour.
+  - Both engines leave an **empty target** (`n == 0`) in the canonical zero
+    state (every group's stored exponent = bias) — the semantic the scale arm
+    already had (#421, ruling R7; before it the rescale arm kept the stale
+    grid and the fixed-grid arm's two increment kinds disagreed with each
+    other).
 - **`scaleBfpTensorInPlace` + `scaleOptimizerGradients`'s `BFP` arm (epic PR3
   Task 8)** close the last gap in the default training-loop epoch:
   `TrainingEpochDefault.c`'s mean-scale branch (`computeMeanScale` →
@@ -513,9 +546,9 @@ silent wrong arithmetic, not a crash.
   dying. There is no O(1) scale fold the way SYM_INT32/SYM/ASYM get one (BFP
   dequant is `mantissa · 2^(E−bias)` per GROUP, and an arbitrary mean-scale
   factor is not a power of two in general), so the `BFP` arm calls
-  `scaleBfpTensorInPlace` for an honest O(n) value-domain repack: the same
-  latched-old-grid two-pass shape as the `DYNAMIC_RESCALE` accumulate engine,
-  fresh exponents derived from the SCALED absmax, one `roundByMode` per
+  `scaleBfpTensorInPlace` for an honest O(n) value-domain repack: since #421
+  literally the `DYNAMIC_RESCALE` engine itself (`bfpRescaleWalk` with a NULL
+  increment source), fresh exponents derived from the SCALED absmax, one `roundByMode` per
   element by the grad's own STORAGE `roundingMode` (scaling is a storage
   requantization, not an op — #282's target-owned convention, unlike the
   accumulate engines whose rounding comes from the op's own
@@ -540,9 +573,16 @@ silent wrong arithmetic, not a crash.
   BEFORE `roundByMode` — `(int32_t)round(±inf)` is undefined, C17 6.3.1.4);
   and an **empty** tensor (`n == 0`) is left in the canonical zero state
   (stored = bias) instead of keeping a grid that describes data it does not
-  have. The same float-domain-clamp question in the accumulate engines
-  involves the increment as well and is deferred to the engine-unification
-  follow-up.
+  have. #421 closed the engine-unification follow-up this bullet used to
+  defer: the float-domain pre-clamp now runs at EVERY BFP emit site
+  (`packFloatBufferAsBfp`, `quantizeFloatBufferToBfpCodes`,
+  `packStreamAsBfp`, the unified rescale walker, and — in its
+  abort-preserving wide form — the `FixedGrid` engine), because the regime
+  needs no `inf` at all: at a narrow `exponentBits` the derived exponent
+  saturates, so `v / scale` leaves `int32` range for entirely FINITE inputs.
+  The saturation BOUNDS are each site's own, unchanged: the negative floor is
+  `−2^(m−1)` as shipped, not spec D6's `±qMax` — an open decision in #420,
+  and after the unification a one-site change.
 - **Native BFP `dx` wires are legal.** A layer's `dx` (`propLoss`) output can
   itself be a BFP-stored wire, written by the native backward kernel's own
   `OUT_WRITE` epilogue (deriving that wire's grid directly, no float bridge)

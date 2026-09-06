@@ -93,10 +93,17 @@ void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint8_t max
    packing). Two passes per group: absmax -> deriveBfpStoredExponent into
    outQC->exponents[g], then round/clamp codes. outQC supplies
    geometry/widths/roundingMode; its exponents array must have numGroups
-   entries and is overwritten. codesOut is caller-owned, n entries. Writing
-   into the CALLER's codesOut is exempt from the no-O(n)-internal-scratch
-   converter contract by design -- this function allocates nothing.
-   Value-domain: saturates (D6), never aborts. */
+   entries and is overwritten. Its group shape must satisfy the
+   exact-division invariant (numGroups * groupSize == n, or the per-tensor
+   {1,0} sentinel) -- validated at entry (#421 U9), because a short
+   numGroups * groupSize would otherwise leave the codesOut TAIL
+   uninitialized. codesOut is caller-owned, n entries. Writing into the
+   CALLER's codesOut is exempt from the no-O(n)-internal-scratch converter
+   contract by design -- this function allocates nothing.
+   Value-domain: saturates (D6), never aborts -- and the saturating clamp
+   runs in the FLOAT domain before the round, since at a narrow exponentBits
+   the D6-capped scale can push values / scale out of int32 range for
+   entirely finite inputs (#421 U2). */
 void quantizeFloatBufferToBfpCodes(const float *values, size_t n, bfpQConfig_t *outQC,
                                    int32_t *codesOut);
 char *quantTypeToString(qtype_t t);
@@ -145,13 +152,23 @@ void accumulateSymInt32IntoSymInt32Rescale(tensor_t *target, const tensor_t *inc
  * first derives them from the increment, per group) and ABORTS on mantissa
  * overflow (#227 code-domain discipline, no clamp). Rescale = requant:
  * re-derives every group's exponent from the decoded-plus-increment absmax
- * (value-domain, saturates — D6). n must equal the target's element count and
- * is ENFORCED in the two float* wrappers (#420 G3 — a grouped target dies in
- * the engines' shape check, but the per-tensor {1,0} sentinel would otherwise
- * accept a short n and silently partial-update);
+ * (value-domain, saturates — D6; since #421 this is the same walker
+ * scaleBfpTensorInPlace runs, with factor = 1.f). n must equal the target's
+ * element count and is ENFORCED in the two float* wrappers (#420 G3 — a
+ * grouped target dies in the engines' shape check, but the per-tensor {1,0}
+ * sentinel would otherwise accept a short n and silently partial-update);
  * the tensor-typed twins stream any dequantChunkToFloat-supported increment
  * and reject a self-aliased one (shared data pointer) with exit(1), like
- * their SYM/ASYM siblings. */
+ * their SYM/ASYM siblings.
+ * Both modes REJECT a non-finite value in the increment (PRINT_ERROR +
+ * exit(1), #421 ruling R6): a BFP grid has no NaN/inf code, so dropping the
+ * value or saturating it would either lose or invent data -- unlike the
+ * FLOAT32 grad path, which keeps propagating NaN because it can represent
+ * it. Non-finite INTERMEDIATES from finite inputs (a grid at the exponent
+ * cap) are not rejected; they saturate (D6).
+ * Both modes leave an EMPTY target (n == 0) in the canonical zero state
+ * (every group's stored exponent = bias), never with its previous grid
+ * (#421 ruling R7). */
 void accumulateFloatIntoBfpTensorFixedGrid(tensor_t *target, const float *inc, size_t n);
 void accumulateFloatIntoBfpTensorRescale(tensor_t *target, const float *inc, size_t n);
 void accumulateTensorIntoBfpFixedGrid(tensor_t *target, const tensor_t *increment);
@@ -161,9 +178,10 @@ void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment)
  * (scaleOptimizerGradients's BFP arm: REDUCTION_MEAN mean-scale, clip
  * coefficients). BFP has no O(1) scale fold -- a general factor moves every
  * group's absmax off its 2^E grid -- so this is an honest O(n) two-pass
- * repack: pass 1 re-derives every group's exponent from the scaled absmax
- * (old exponents latched first); pass 2 requantizes with the config's OWN
- * storage roundingMode (storage requantization, not an op -- #282
+ * repack -- since #421 literally the DYNAMIC_RESCALE accumulate walker with
+ * a NULL increment source: pass 1 re-derives every group's exponent from the
+ * scaled absmax while the config still holds the old grid; pass 2
+ * requantizes with the config's OWN storage roundingMode (storage requantization, not an op -- #282
  * target-owned convention), one roundByMode per element in element order,
  * clamped (value-domain saturation, D6). A power-of-two factor is exact:
  * exponents shift, codes bit-unchanged -- except where the derived exponent

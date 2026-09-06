@@ -145,7 +145,10 @@ void accumulateSymInt32IntoSymInt32Rescale(tensor_t *target, const tensor_t *inc
  * first derives them from the increment, per group) and ABORTS on mantissa
  * overflow (#227 code-domain discipline, no clamp). Rescale = requant:
  * re-derives every group's exponent from the decoded-plus-increment absmax
- * (value-domain, saturates — D6). n must equal the target's element count;
+ * (value-domain, saturates — D6). n must equal the target's element count and
+ * is ENFORCED in the two float* wrappers (#420 G3 — a grouped target dies in
+ * the engines' shape check, but the per-tensor {1,0} sentinel would otherwise
+ * accept a short n and silently partial-update);
  * the tensor-typed twins stream any dequantChunkToFloat-supported increment
  * and reject a self-aliased one (shared data pointer) with exit(1), like
  * their SYM/ASYM siblings. */

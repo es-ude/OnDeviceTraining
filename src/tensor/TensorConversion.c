@@ -1914,7 +1914,27 @@ static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *i
     }
 }
 
+/* #420 G3: the FLOAT-pointer wrappers' documented `n == target element count`
+ * contract, enforced. It cannot live in the engines: the tensor-typed twins
+ * DERIVE n from the target (calcNumberOfElementsByTensor below), so the
+ * engines only ever see a caller-supplied n through these two entry points.
+ * A GROUPED target already dies in the engine's validateBfpQConfigShape, but
+ * the per-tensor sentinel {1, 0} accepts any n -- gsz collapses to n, so a
+ * short n silently partial-updates the accumulator and leaves the tail stale
+ * under a grid derived from the prefix alone. */
+static void requireBfpFloatIncrementCoversTarget(const tensor_t *target, size_t n,
+                                                 const char *what) {
+    size_t expected = calcNumberOfElementsByTensor((tensor_t *)target);
+    if (n != expected) {
+        PRINT_ERROR("%s: n (%zu) must equal the target's element count (%zu) -- a partial "
+                    "increment would leave the tail stale under a prefix-derived grid",
+                    what, n, expected);
+        exit(1);
+    }
+}
+
 void accumulateFloatIntoBfpTensorFixedGrid(tensor_t *target, const float *inc, size_t n) {
+    requireBfpFloatIncrementCoversTarget(target, n, "accumulateFloatIntoBfpTensorFixedGrid");
     incSrc_t src = {.flat = inc, .tens = NULL};
     accumulateIntoBfpFixedGridEngine(target, &src, n);
 }
@@ -2017,6 +2037,7 @@ static void accumulateIntoBfpRescaleEngine(tensor_t *target, const incSrc_t *inc
 }
 
 void accumulateFloatIntoBfpTensorRescale(tensor_t *target, const float *inc, size_t n) {
+    requireBfpFloatIncrementCoversTarget(target, n, "accumulateFloatIntoBfpTensorRescale");
     incSrc_t src = {.flat = inc, .tens = NULL};
     accumulateIntoBfpRescaleEngine(target, &src, n);
 }

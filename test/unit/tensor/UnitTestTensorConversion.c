@@ -6948,6 +6948,64 @@ void testRequantBfpTensorRejectsBadTargetGroupGeometry(void) {
     ASSERT_EXITS_WITH_FAILURE(requantBfpTensor(&src, &dst));
 }
 
+/* #420 G3: the two FLOAT-pointer accumulate wrappers document that `n` must
+ * equal the target's element count but never enforced it. A grouped target
+ * now dies in the engines' validateBfpQConfigShape, but the per-tensor
+ * sentinel {1, 0} accepts ANY n -- gsz collapses to n, so a short n
+ * silently partial-updates the accumulator and leaves the tail stale under a
+ * grid derived from the prefix only. The tensor-typed twins are unaffected:
+ * they derive n from the target themselves. Per-tensor target with 8
+ * elements, called with n = 4. */
+static void buildPerTensorBfpTarget(tensor_t *t, uint8_t *data, shape_t *shape, quantization_t *q,
+                                    bfpQConfig_t *qc, size_t n) {
+    initBfpQuantization(qc, q);
+    int32_t seedCodes[8] = {1, -1, 1, -1, 1, -1, 1, -1};
+    byteConversion((uint8_t *)seedCodes, 32, data, 6, n);
+    setTensorValues(t, data, shape, q, NULL);
+}
+
+void testAccumulateFloatIntoBfpFixedGridRejectsShortElementCount(void) {
+    size_t n = 8;
+    size_t dims[] = {8};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    uint8_t exponents[1] = {127};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0, /* per-tensor sentinel accepts ANY n */
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    uint8_t data[6]; /* calcNumberOfBytesForData(m=6, n=8) */
+    tensor_t target;
+    buildPerTensorBfpTarget(&target, data, &shape, &q, &qc, n);
+
+    float inc[4] = {0};
+    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorFixedGrid(&target, inc, 4));
+}
+
+void testAccumulateFloatIntoBfpRescaleRejectsShortElementCount(void) {
+    size_t n = 8;
+    size_t dims[] = {8};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    uint8_t exponents[1] = {127};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    uint8_t data[6];
+    tensor_t target;
+    buildPerTensorBfpTarget(&target, data, &shape, &q, &qc, n);
+
+    float inc[4] = {0};
+    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorRescale(&target, inc, 4));
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -7132,6 +7190,8 @@ int main(void) {
     RUN_TEST(testAccumulateFloatIntoBfpRescaleRejectsBadGroupGeometry);
     RUN_TEST(testScaleBfpTensorInPlaceRejectsBadGroupGeometry);
     RUN_TEST(testRequantBfpTensorRejectsBadTargetGroupGeometry);
+    RUN_TEST(testAccumulateFloatIntoBfpFixedGridRejectsShortElementCount);
+    RUN_TEST(testAccumulateFloatIntoBfpRescaleRejectsShortElementCount);
 
     return UNITY_END();
 }

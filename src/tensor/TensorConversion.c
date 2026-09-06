@@ -1992,6 +1992,12 @@ void accumulateTensorIntoBfpFixedGrid(tensor_t *target, const tensor_t *incremen
     accumulateIntoBfpFixedGridEngine(target, &src, n);
 }
 
+/* Fresh-exponent ring capacity for the rescale walker (#421 U6): the live
+ * set at any pass-2 chunk spans at most one chunk of groups, so one slot
+ * per chunk element plus a margin slot keeps them distinct even at
+ * groupSize 1. */
+#define ODT_RESCALE_FRESH_WINDOW (ODT_CONVERSION_CHUNK_ELEMS + 1)
+
 /* The ONE BFP value-domain rescale walker (#421 U1): both the grad-accumulate
  * DYNAMIC_RESCALE arm and the optimizer's in-place scale arm are the same
  * two-pass repack over v = mant * oldScale * factor + inc, differing only in
@@ -2020,9 +2026,8 @@ void accumulateTensorIntoBfpFixedGrid(tensor_t *target, const tensor_t *incremen
 static void bfpRescaleWalk(tensor_t *target, const incSrc_t *inc, float factor, size_t n,
                            const char *what) {
     bfpQConfig_t *qc = target->quantization->qConfig;
-    /* Exact-division invariant -- see the FixedGrid twin's guard comment.
-     * Must run before the oldStored[numGroups] latch below sizes off the
-     * unvalidated group count. */
+    /* Exact-division invariant -- see the FixedGrid twin's guard comment. Must
+     * run before the walk below, whose group indexing assumes it. */
     validateBfpQConfigShape(qc, n);
     const float qMax = powf(2, (float)qc->mantissaBits - 1) - 1;
     const float qMin = -powf(2, (float)qc->mantissaBits - 1);
@@ -2038,85 +2043,118 @@ static void bfpRescaleWalk(tensor_t *target, const incSrc_t *inc, float factor, 
         memset(incBuf, 0, sizeof(incBuf));
     }
 
-    /* Latch the whole OLD grid before pass 1 overwrites qc->exponents below
-     * -- the pass-2 target-dequant always decodes under the grid the codes
-     * were stored under, never the freshly derived one (the SYM engine's
-     * oldScale latch, per group). One byte per group of stack: a
-     * group-sequential walk needing only ONE latched exponent cannot be built
-     * on the chunk helpers (group starts are not byte-aligned for arbitrary
-     * geometries, and dequantChunkToFloat fail-fasts on unaligned offsets);
-     * on the one production path (the funnel ACC epilogue) the stack already
-     * carries executeOp's 4*n rawData VLA, so numGroups bytes adds nothing. */
-    uint8_t oldStored[qc->numGroups];
-    memcpy(oldStored, qc->exponents, qc->numGroups);
-
-    /* pass 1: chunked absmax of (mant*oldScale*factor + inc), closing each
-     * group at its boundary run and deriving its fresh exponent into
-     * qc->exponents (packStreamAsBfp's pass-1 idiom) -- no rounding, no data
-     * writes, fresh grid every call (unlike the FixedGrid twin). */
+    /* #421 U6: the two passes are INTERLEAVED, with pass 1 running exactly
+     * one group-boundary ahead of pass 2, so the only exponents that must be
+     * held outside qc->exponents are the FRESH ones of the groups the
+     * current pass-2 chunk still touches -- at most one chunk's worth plus
+     * the group straddling its end. That is a fixed
+     * ODT_CONVERSION_CHUNK_ELEMS + 1 byte window (257 B), replacing the
+     * O(numGroups) latch VLA the whole-tensor two-pass needed (n bytes at
+     * groupSize 1); this is what closes the unbounded-stack item.
+     *
+     * The direction is inverted relative to that latch, which is what makes
+     * the window small: qc->exponents keeps holding the OLD grid, and pass 2
+     * publishes each group's fresh exponent into it only after consuming the
+     * group's LAST element. Both passes can therefore read the old exponent
+     * straight out of qc->exponents -- pass 1 only ever looks at groups pass
+     * 2 has not finished, and pass 2 finishes a group exactly when it
+     * publishes it.
+     *
+     * Ring indexing is g % ODT_RESCALE_FRESH_WINDOW. The live set at pass-2
+     * chunk [off, chunkEnd) is exactly the groups [off / gsz,
+     * (chunkEnd - 1) / gsz], whose span is at most
+     * (ODT_CONVERSION_CHUNK_ELEMS - 1) / gsz, so 257 slots keep them
+     * distinct even at gsz == 1. */
+    uint8_t fresh[ODT_RESCALE_FRESH_WINDOW];
+    size_t scanned = 0; /* pass-1 frontier: elements [0, scanned) are absorbed */
     float absMax = 0.f;
-    for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
-        size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
-        unpackSignExtendChunk(target->data, qc->mantissaBits, off, count, mant);
-        if (inc != NULL) {
-            incSrcChunk(inc, off, count, incBuf);
-        }
-        size_t chunkEnd = off + count;
-        size_t idx = off;
-        while (idx < chunkEnd) {
-            size_t g = idx / gsz;
-            size_t groupEnd = (g + 1) * gsz;
-            size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
-            const float oldScale = ldexpf(1.f, (int32_t)oldStored[g] - bias);
-            for (size_t i = idx; i < runEnd; i++) {
-                float v = fabsf((float)mant[i - off] * oldScale * factor + incBuf[i - off]);
-                if (v > absMax) {
-                    absMax = v;
-                }
-            }
-            if (runEnd == groupEnd) {
-                deriveBfpStoredExponent(absMax, qMax, bias, maxStored, &qc->exponents[g]);
-                absMax = 0.f;
-            }
-            idx = runEnd;
-        }
-    }
 
-    /* pass 2: chunked read-modify-write -- decode at the LATCHED old scale,
-     * requantize at the fresh one; one roundByMode per element in element
-     * order; clamp before the pack guard (value-domain saturation, D6 --
-     * unlike the FixedGrid twin's abort). In-place safe: chunk k is fully
-     * read before chunk k is rewritten and the code width is unchanged.
-     * The saturation clamp runs in the FLOAT domain FIRST (Rounding.h's
-     * clamp): a group already sitting at the exponent cap has no headroom, so
-     * even entirely finite inputs push v / scale past int32 range or all the
-     * way to +-inf, and (int32_t)round(...) is undefined there (C17 6.3.1.4).
-     * Behaviour-identical to clamping after the round for every DEFINED case
-     * -- in range the float clamp is the identity, and outside it roundByMode
-     * is monotone, so both orders land on the same boundary code. The
-     * clampInt32 stays behind it and is load-bearing, not decoration:
-     * SR_HALF_AWAY dithers by [-0.5, 0.5) BEFORE rounding, so a value already
-     * clamped to qMin can still round one step past it (round(-128.5) = -129,
-     * half away from zero). */
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+        size_t chunkEnd = off + count;
+
+        /* pass 1, advanced just far enough: absmax of
+         * (mant*oldScale*factor + inc) per group, deriving each group's fresh
+         * exponent into the window when the group closes. It stops at the END
+         * of the last group this chunk touches -- never a whole chunk beyond,
+         * which is what keeps the window one chunk wide. Reads restart at the
+         * 8-aligned offset below the frontier (the unpack/dequant helpers'
+         * alignment contract); the <= 7 re-read elements are re-READ, never
+         * re-absorbed, so each element still contributes to its group's
+         * absmax exactly once. */
+        size_t needed = ((chunkEnd - 1) / gsz + 1) * gsz;
+        if (needed > n) {
+            needed = n;
+        }
+        while (scanned < needed) {
+            size_t start = scanned & ~(size_t)7;
+            size_t take = needed - start < ODT_CONVERSION_CHUNK_ELEMS ? needed - start
+                                                                      : ODT_CONVERSION_CHUNK_ELEMS;
+            unpackSignExtendChunk(target->data, qc->mantissaBits, start, take, mant);
+            if (inc != NULL) {
+                incSrcChunk(inc, start, take, incBuf);
+            }
+            size_t segEnd = start + take;
+            size_t idx = scanned;
+            while (idx < segEnd) {
+                size_t g = idx / gsz;
+                size_t groupEnd = (g + 1) * gsz;
+                size_t runEnd = groupEnd < segEnd ? groupEnd : segEnd;
+                const float oldScale = ldexpf(1.f, (int32_t)qc->exponents[g] - bias);
+                for (size_t i = idx; i < runEnd; i++) {
+                    float v = fabsf((float)mant[i - start] * oldScale * factor + incBuf[i - start]);
+                    if (v > absMax) {
+                        absMax = v;
+                    }
+                }
+                if (runEnd == groupEnd) {
+                    deriveBfpStoredExponent(absMax, qMax, bias, maxStored,
+                                            &fresh[g % ODT_RESCALE_FRESH_WINDOW]);
+                    absMax = 0.f;
+                }
+                idx = runEnd;
+            }
+            scanned = segEnd;
+        }
+
+        /* pass 2: chunked read-modify-write -- decode at the still-unpublished
+         * OLD scale, requantize at the windowed fresh one, then publish the
+         * fresh exponent as each group closes; one roundByMode per element in
+         * element order; clamp before the pack guard (value-domain
+         * saturation, D6 -- unlike the FixedGrid twin's abort). In-place safe:
+         * chunk k is fully read before chunk k is rewritten and the code width
+         * is unchanged.
+         * The saturation clamp runs in the FLOAT domain FIRST (Rounding.h's
+         * clamp): a group already sitting at the exponent cap has no headroom,
+         * so even entirely finite inputs push v / scale past int32 range or
+         * all the way to +-inf, and (int32_t)round(...) is undefined there
+         * (C17 6.3.1.4). Behaviour-identical to clamping after the round for
+         * every DEFINED case -- in range the float clamp is the identity, and
+         * outside it roundByMode is monotone, so both orders land on the same
+         * boundary code. The clampInt32 stays behind it and is load-bearing,
+         * not decoration: SR_HALF_AWAY dithers by [-0.5, 0.5) BEFORE rounding,
+         * so a value already clamped to qMin can still round one step past it
+         * (round(-128.5) = -129, half away from zero). */
         unpackSignExtendChunk(target->data, qc->mantissaBits, off, count, mant);
         if (inc != NULL) {
             incSrcChunk(inc, off, count, incBuf);
         }
-        size_t chunkEnd = off + count;
         size_t idx = off;
         while (idx < chunkEnd) {
             size_t g = idx / gsz;
             size_t groupEnd = (g + 1) * gsz;
             size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
-            const float oldScale = ldexpf(1.f, (int32_t)oldStored[g] - bias);
-            const float scale = bfpGroupScale(qc, g);
+            const float oldScale = ldexpf(1.f, (int32_t)qc->exponents[g] - bias);
+            const uint8_t freshStored = fresh[g % ODT_RESCALE_FRESH_WINDOW];
+            const float scale = ldexpf(1.f, (int32_t)freshStored - bias);
             for (size_t i = idx; i < runEnd; i++) {
                 float v = (float)mant[i - off] * oldScale * factor + incBuf[i - off];
                 float q = clamp(v / scale, qMin, qMax);
                 codes[i - off] =
                     clampInt32(roundByMode(q, qc->roundingMode), (int32_t)qMin, (int32_t)qMax);
+            }
+            if (runEnd == groupEnd) {
+                qc->exponents[g] = freshStored;
             }
             idx = runEnd;
         }

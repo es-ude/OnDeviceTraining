@@ -25,6 +25,7 @@ from sym_gold import (
     emit_int32_scalar,
     emit_uint8_array,
     f32_scale_i12,
+    maxpool1d_bfp_backward_ref,
     maxpool1d_bfp_forward_ref,
     requant_absmax_i12_f32,
     stable_dequant_i12,
@@ -385,6 +386,23 @@ def emit_bfp_fixtures(parts):
     parts.append(emit_float_array("kBfpMaxPoolExpectedForward",
                                   torch.tensor(values, dtype=torch.float32)))
     parts.append(emit_int32_array("kBfpMaxPoolExpectedArgmax", torch.tensor(argmax)))
+
+    # BACKWARD: gy [1, 2, 4] = 8 elements, grid {2 groups x 4}. The argmax
+    # array is the FORWARD gold's, so the two fixtures cannot drift.
+    gy_codes = [9, -21, 4, 30, -12, 7, 25, -3]
+    gy_exps = [129, 124]
+    gy_group_size = 4
+    gy_qc = {"mantissa_bits": BFP_MAX_MANTISSA_BITS, "exponent_bits": BFP_MAX_EXPONENT_BITS,
+             "group_size": gy_group_size}
+    bwd = maxpool1d_bfp_backward_ref(gy_codes, gy_exps, gy_qc, argmax, BFP_MAX_BATCH,
+                                     BFP_MAX_CHANNELS, BFP_MAX_INPUT_LENGTH,
+                                     geom["out_len"])
+    parts.append(emit_int32_scalar("kBfpMaxPoolGyNumGroups", len(gy_exps)))
+    parts.append(emit_int32_scalar("kBfpMaxPoolGyGroupSize", gy_group_size))
+    parts.append(emit_int32_array("kBfpMaxPoolGyCodes", torch.tensor(gy_codes)))
+    parts.append(emit_uint8_array("kBfpMaxPoolGyExps", gy_exps))
+    parts.append(emit_float_array("kBfpMaxPoolExpectedBackward",
+                                  torch.tensor(bwd, dtype=torch.float32)))
 
 
 def main() -> int:

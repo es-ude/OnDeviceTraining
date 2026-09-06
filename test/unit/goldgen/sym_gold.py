@@ -2372,3 +2372,45 @@ def maxpool1d_bfp_forward_ref(codes, exps, qc, batch, channels, geom, self_check
         assert any(v != 0.0 for v in values), "maxpool1d_bfp_forward_ref: all-zero output"
     return values, argmax
 
+
+def maxpool1d_bfp_backward_ref(gy_codes, gy_exps, gy_qc, argmax, batch, channels,
+                               input_length, output_length, self_check=True):
+    """MaxPool1d ARITH_BFP dx reference (R-P4 backward): route each output
+    cell's EXACT dequant to the input position the forward recorded in argmax,
+    accumulating `+=` in float32 (an input cell can be the argmax of several
+    overlapping windows). No divide (unlike AvgPool) and no int32 partials, so
+    no sum-headroom guard. The -1 sentinel means "empty window, no gradient
+    flows" and is skipped. `argmax` is the forward gold's array, so the two
+    fixtures cannot drift apart."""
+    bias = 2 ** (gy_qc["exponent_bits"] - 1) - 1
+    gx = [np.float32(0.0)] * (batch * channels * input_length)
+    hits = [0] * (batch * channels * input_length)
+    for b in range(batch):
+        for c in range(channels):
+            base = (b * channels + c) * input_length
+            for o in range(output_length):
+                out_idx = (b * channels + c) * output_length + o
+                in_idx = argmax[out_idx]
+                if in_idx < 0:
+                    continue
+                g = _bfp_group_of(out_idx, gy_qc["group_size"])
+                contribution = np.float32(np.ldexp(np.float32(gy_codes[out_idx]),
+                                                   np.int32(gy_exps[g] - bias)))
+                gx[base + in_idx] = np.float32(gx[base + in_idx] + contribution)
+                hits[base + in_idx] += 1
+    out = [float(v) for v in gx]
+    if self_check:
+        assert any(h >= 2 for h in hits), (
+            "maxpool1d_bfp_backward_ref: no input cell is the argmax of >= 2 windows -- "
+            "the memset + accumulating scatter is unexercised; use overlapping windows")
+        assert any(v == 0.0 for v in out), (
+            "maxpool1d_bfp_backward_ref: every input cell receives gradient -- the "
+            "SELECT semantics (only argmax positions get gradient) are unobservable")
+        assert any(v != 0.0 for v in out), "maxpool1d_bfp_backward_ref: all-zero dx"
+        collapsed = maxpool1d_bfp_backward_ref(gy_codes, [gy_exps[0]],
+                                               {**gy_qc, "group_size": 0}, argmax, batch,
+                                               channels, input_length, output_length,
+                                               self_check=False)
+        assert collapsed != out, (
+            "maxpool1d_bfp_backward_ref: per-tensor collapse is indistinguishable")
+    return out

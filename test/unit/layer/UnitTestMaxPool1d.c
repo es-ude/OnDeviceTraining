@@ -48,12 +48,6 @@ static tensor_t *makeFloatTensor(size_t const *dims, size_t numDims, float const
     return t;
 }
 
-/* BFP epic PR2 Task 8: 1-D/N-D BFP wire (per-tensor {1,0}, 8-bit mantissas). The
- * buffer is BFP-SIZED, so an unguarded float* access runs past it. */
-static tensor_t *makeBfpTensor(size_t const *dims, size_t numDims) {
-    return initTensor(makeShape(dims, numDims), quantizationInitBfp(8, 8, HALF_AWAY), NULL);
-}
-
 static tensor_t *makeInt32Tensor(size_t const *dims, size_t numDims) {
     return initTensor(makeShape(dims, numDims), quantizationInitInt32(), NULL);
 }
@@ -683,6 +677,59 @@ void testMaxPool1dForwardBfpComparesDequantizedValues(void) {
     freeTensor(input);
 }
 
+/* BFP epic PR4 (R-P4 backward): funnel-routed dx mirroring the ARITH_SYM_INT32
+ * arm — gradient flows only to the argmax positions the forward recorded, and
+ * an input cell that wins several overlapping windows accumulates. Running the
+ * forward first is what fills cfg->argmaxIndices (consumed via ctx). */
+void testMaxPool1dBackwardBfpScattersToArgmaxPositions(void) {
+    size_t inputDims[] = {1, 2, 8};
+    size_t outputDims[] = {1, 2, 4};
+    int32_t inCodes[16];
+    for (size_t i = 0; i < kBfpMaxPoolInCodes_len; i++) {
+        inCodes[i] = kBfpMaxPoolInCodes[i];
+    }
+    int32_t gyCodes[8];
+    for (size_t i = 0; i < kBfpMaxPoolGyCodes_len; i++) {
+        gyCodes[i] = kBfpMaxPoolGyCodes[i];
+    }
+    tensor_t *input = buildBfpWireWithCodes(
+        inputDims, 3, (uint8_t)kBfpMaxPoolMantissaBits, (uint8_t)kBfpMaxPoolExponentBits,
+        (size_t)kBfpMaxPoolInNumGroups, (size_t)kBfpMaxPoolInGroupSize, inCodes, kBfpMaxPoolInExps);
+    tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
+    tensor_t *argmax = makeInt32Tensor(outputDims, 3);
+    tensor_t *lossGrad = buildBfpWireWithCodes(
+        outputDims, 3, (uint8_t)kBfpMaxPoolMantissaBits, (uint8_t)kBfpMaxPoolExponentBits,
+        (size_t)kBfpMaxPoolGyNumGroups, (size_t)kBfpMaxPoolGyGroupSize, gyCodes, kBfpMaxPoolGyExps);
+    tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
+    quantization_t *wireQ = quantizationInitBfpGrouped(
+        (uint8_t)kBfpMaxPoolMantissaBits, (uint8_t)kBfpMaxPoolExponentBits, HALF_AWAY,
+        (size_t)kBfpMaxPoolInNumGroups, (size_t)kBfpMaxPoolInGroupSize);
+    kernel_t k;
+    maxPool1dConfig_t cfg;
+    layerConfig_t lc;
+    layer_t layer;
+    maxPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, argmax, (size_t)kBfpMaxPoolKernelSize, VALID,
+                           (size_t)kBfpMaxPoolDilation, (size_t)kBfpMaxPoolStride, wireQ);
+
+    maxPool1dForward(&layer, input, output);
+    /* Backward TWICE on purpose: dx is OUT_WRITE, so a repeated backward must
+     * reproduce the same numbers — and that is also what makes the kernel's
+     * memset of the funnel's uninitialized Phase-2 scratch observable (that
+     * stack VLA can read as zero on a first call). */
+    maxPool1dBackward(&layer, NULL, lossGrad, propLoss);
+    maxPool1dBackward(&layer, NULL, lossGrad, propLoss);
+
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(kBfpMaxPoolExpectedBackward, propLoss->data,
+                                     kBfpMaxPoolExpectedBackward_len * sizeof(float),
+                                     "gradient flows only to the recorded argmax positions");
+    freeQuantization(wireQ);
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(argmax);
+    freeTensor(output);
+    freeTensor(input);
+}
+
 /* BFP epic PR4 (R-P7d): the rule-1 mirror. A pinned ARITH_BFP forward with a
  * NULL or non-BFP outputQ has no width anchor and must die EAGERLY — the
  * userApi factories copy layerQuant_t slots by value and never call
@@ -769,6 +816,114 @@ void testMaxPool1dForwardBfpRejectsMismatchedOutputShapes(void) {
     freeTensor(input);
 }
 
+/* BFP epic PR4 (F7): the argmax array is kernel-written and never
+ * funnel-converted, so NOTHING upstream validates its CONTENT — only -1 (the
+ * empty-window sentinel) is a legal out-of-range value, and any other index
+ * >= inputLength scatters a float straight past the end of the raw gradient
+ * buffer. The fixture writes the poison index by hand, which is precisely how
+ * a stale argmax from a differently-shaped forward would arrive. The second
+ * half is the F5 twin: an argmax tensor matching only on outputLength is read
+ * past its end for every b, c beyond its own. */
+void testMaxPool1dBackwardBfpRejectsOutOfRangeArgmax(void) {
+    size_t lossDims[] = {1, 2, 4};
+    size_t propDims[] = {1, 2, 8};
+    size_t argmaxDims[] = {1, 2, 4};
+    /* Right length, wrong channels — and deliberately WIDER (3 channels, not
+     * 1): a wider argmax is fully in bounds for the kernel's reads and its
+     * calloc-zeroed indices are all legal, so nothing else can reject it. The
+     * three-dim shape gate is the ONLY thing standing between this call and a
+     * silently-wrong dx. A narrower argmax would be caught by the F7 content
+     * check reading heap garbage, which is luck, not coverage. */
+    size_t wideArgmaxDims[] = {1, 3, 4};
+    int32_t gyCodes[8];
+    for (size_t i = 0; i < kBfpMaxPoolGyCodes_len; i++) {
+        gyCodes[i] = kBfpMaxPoolGyCodes[i];
+    }
+    tensor_t *lossGrad = buildBfpWireWithCodes(
+        lossDims, 3, (uint8_t)kBfpMaxPoolMantissaBits, (uint8_t)kBfpMaxPoolExponentBits,
+        (size_t)kBfpMaxPoolGyNumGroups, (size_t)kBfpMaxPoolGyGroupSize, gyCodes, kBfpMaxPoolGyExps);
+    tensor_t *propLoss = makeFloatTensor(propDims, 3, NULL);
+    tensor_t *argmax = makeInt32Tensor(argmaxDims, 3);
+    tensor_t *wideArgmax = makeInt32Tensor(wideArgmaxDims, 3);
+    int32_t *argmaxArr = (int32_t *)argmax->data;
+    for (size_t i = 0; i < kBfpMaxPoolExpectedArgmax_len; i++) {
+        argmaxArr[i] = kBfpMaxPoolExpectedArgmax[i];
+    }
+    argmaxArr[3] = 8; /* inputLength is 8, so 8 is one past the last cell */
+
+    quantization_t *wireQ = quantizationInitBfpGrouped(
+        (uint8_t)kBfpMaxPoolMantissaBits, (uint8_t)kBfpMaxPoolExponentBits, HALF_AWAY,
+        (size_t)kBfpMaxPoolGyNumGroups, (size_t)kBfpMaxPoolGyGroupSize);
+    kernel_t k;
+    maxPool1dConfig_t cfg;
+    layerConfig_t lc;
+    layer_t layer;
+    maxPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, argmax, (size_t)kBfpMaxPoolKernelSize, VALID,
+                           (size_t)kBfpMaxPoolDilation, (size_t)kBfpMaxPoolStride, wireQ);
+
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&layer, NULL, lossGrad, propLoss));
+
+    /* -1 in the SAME slot must NOT die: the sentinel stays legal. */
+    argmaxArr[3] = -1;
+    maxPool1dBackward(&layer, NULL, lossGrad, propLoss);
+
+    cfg.argmaxIndices = wideArgmax;
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&layer, NULL, lossGrad, propLoss));
+
+    freeQuantization(wireQ);
+    freeTensor(wideArgmax);
+    freeTensor(argmax);
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+}
+
+/* BFP epic PR4 (R-P7d): the guard is NARROWED, not removed — a BFP wire under
+ * the raw-casting FLOAT32/SYM arms must still die, and the ARITH_BFP backward
+ * needs a BFP-typed propLossQ anchor (R-P1). */
+void testMaxPool1dBackwardBfpGuardsNarrowedNotRemoved(void) {
+    size_t inputDims[] = {1, 2, 8};
+    size_t outputDims[] = {1, 2, 4};
+    tensor_t *bfpLossGrad = buildBfpWireWithCodes(
+        outputDims, 3, (uint8_t)kBfpMaxPoolMantissaBits, (uint8_t)kBfpMaxPoolExponentBits,
+        (size_t)kBfpMaxPoolGyNumGroups, (size_t)kBfpMaxPoolGyGroupSize, NULL, NULL);
+    tensor_t *floatLossGrad = makeFloatTensor(outputDims, 3, NULL);
+    tensor_t *floatPropLoss = makeFloatTensor(inputDims, 3, NULL);
+    tensor_t *bfpPropLoss = buildBfpWireWithCodes(
+        inputDims, 3, (uint8_t)kBfpMaxPoolMantissaBits, (uint8_t)kBfpMaxPoolExponentBits,
+        (size_t)kBfpMaxPoolInNumGroups, (size_t)kBfpMaxPoolInGroupSize, NULL, NULL);
+    tensor_t *argmax = makeInt32Tensor(outputDims, 3);
+
+    quantization_t *floatQ = quantizationInitFloat();
+    kernel_t kf;
+    maxPool1dConfig_t floatCfg;
+    layerConfig_t floatLc;
+    layer_t floatLayer;
+    maxPool1dBuildBfpLayer(&floatCfg, &kf, &floatLc, &floatLayer, argmax,
+                           (size_t)kBfpMaxPoolKernelSize, VALID, (size_t)kBfpMaxPoolDilation,
+                           (size_t)kBfpMaxPoolStride, floatQ);
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&floatLayer, NULL, bfpLossGrad, floatPropLoss));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&floatLayer, NULL, floatLossGrad, bfpPropLoss));
+
+    kernel_t kb;
+    initKernel(&kb, (size_t)kBfpMaxPoolKernelSize, VALID, (size_t)kBfpMaxPoolDilation,
+               (size_t)kBfpMaxPoolStride);
+    maxPool1dConfig_t bfpCfg = {0};
+    bfpCfg.kernel = &kb;
+    bfpCfg.argmaxIndices = argmax;
+    bfpCfg.propLossMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    bfpCfg.propLossQ = NULL;
+    layerConfig_t bfpLc = {.maxPool1d = &bfpCfg};
+    layer_t bfpLayer = {.type = MAXPOOL1D, .config = &bfpLc};
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&bfpLayer, NULL, bfpLossGrad, floatPropLoss));
+
+    freeQuantization(floatQ);
+    freeTensor(argmax);
+    freeTensor(bfpPropLoss);
+    freeTensor(floatPropLoss);
+    freeTensor(floatLossGrad);
+    freeTensor(bfpLossGrad);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMaxPool1dForwardBasic);
@@ -789,5 +944,8 @@ int main(void) {
     RUN_TEST(testMaxPool1dForwardBfpComparesDequantizedValues);
     RUN_TEST(testMaxPool1dForwardBfpRequiresBfpOutputQ);
     RUN_TEST(testMaxPool1dForwardBfpRejectsMismatchedOutputShapes);
+    RUN_TEST(testMaxPool1dBackwardBfpScattersToArgmaxPositions);
+    RUN_TEST(testMaxPool1dBackwardBfpRejectsOutOfRangeArgmax);
+    RUN_TEST(testMaxPool1dBackwardBfpGuardsNarrowedNotRemoved);
     return UNITY_END();
 }

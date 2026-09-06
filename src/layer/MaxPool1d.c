@@ -350,20 +350,18 @@ void maxPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output) {
         output);
 }
 
-/* BFP epic PR2 Task 8: same outside-funnel hole as Softmax backward. The
- * ARITH_FLOAT32 arm below runs OUTSIDE executeOp and raw-casts lossGrad/propLoss
- * to float*, selected by the layer's DECLARED propLossMath -- so a BFP dx wire
- * whose math slot is pinned to (or, before the Task 9 flip, derived as)
- * ARITH_FLOAT32 lands straight in those casts (4x heap over-read on lossGrad, over-write into the
- * packed propLoss buffer). Reachable only since this task's initGradTensor BFP
- * arm; before it a BFP propLossQ died in the allocator's default arm. Forward
- * needs no guard (it runs inside executeOp). BFP pooling is epic PR4 (spec
- * section 7), named in the message so the failure points at the roadmap.
- * forwardInput is NOT guarded: this layer never dereferences it. */
+/* BFP epic PR4 (R-P4): the ARITH_BFP arm below IS the native pooling path, so
+ * this guard is NARROWED to the two arms that raw-view ->data in their own
+ * storage format — a packed BFP wire read as float* / int32_t* is a 4x heap
+ * over-read on lossGrad and an over-write into the packed propLoss buffer.
+ * Keyed on the wire's STORAGE dtype, not the declared arithmetic (#315
+ * parity). forwardInput is NOT guarded: this layer never dereferences it
+ * (the argmax indices recorded by the forward carry all the routing). */
 static void requireNoBfpWire(const tensor_t *t, const char *what) {
     if (t->quantization->type == BFP) {
-        PRINT_ERROR("%s: BFP pooling semantics arrive with epic PR4 -- keep BFP off this wire "
-                    "or use FLOAT32 wires",
+        PRINT_ERROR("%s: this arm raw-views the wire in its own storage format and cannot read "
+                    "packed BFP mantissas -- derive ARITH_BFP from a BFP wire config, or keep "
+                    "BFP off this wire",
                     what);
         exit(1);
     }
@@ -488,16 +486,98 @@ static void maxPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *
         ((symInt32QConfig_t *)lossGrad->quantization->qConfig)->scale;
 }
 
+/* BFP epic PR4 (R-P4 backward): funnel-routed dx, the exact shape of the
+ * ARITH_SYM_INT32 arm above. Each output cell's EXACT dequant
+ * (mantissa * 2^(E-bias)) is routed to the input position the forward recorded
+ * in argmax and accumulated in the FLOAT32 raw (D7) — no divide (unlike
+ * AvgPool: max is a SELECT, its transpose is a scatter of the untouched
+ * gradient) and no int32 partials, hence no sum-headroom guard. ops =
+ * {lossGrad}; the argmax tensor arrives via ctx (kernel-written by the
+ * forward, never funnel-converted), auxOut is unused. rawOut is the funnel's
+ * uninitialized Phase-2 scratch, so it is memset before the `+=` (one input
+ * cell can be the argmax of several overlapping windows). */
+static void maxPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
+                                       const void *ctx) {
+    (void)n;
+    (void)auxOut;
+    const maxPool1dConfig_t *cfg = ctx;
+    tensor_t *lossGrad = ops[0];
+
+    if (lossGrad->shape->numberOfDimensions != 3 || rawOut->shape->numberOfDimensions != 3) {
+        PRINT_ERROR("MaxPool1d backward BFP: lossGrad and rawOut must both be rank-3, got ranks "
+                    "%zu and %zu",
+                    lossGrad->shape->numberOfDimensions, rawOut->shape->numberOfDimensions);
+        exit(1);
+    }
+    size_t batch = lossGrad->shape->dimensions[0];
+    size_t channels = lossGrad->shape->dimensions[1];
+    size_t outputLength = lossGrad->shape->dimensions[2];
+    size_t inputLength = rawOut->shape->dimensions[2];
+
+    /* All three dims on BOTH (F5): the memset sizes batch * channels *
+     * inputLength floats, and argmaxArr is read at the SAME flat index as
+     * lossGrad — an argmax tensor that matches only on outputLength is read
+     * past its end for every b, c beyond its own. */
+    poolBfpRequireDims3(rawOut, batch, channels, inputLength, "MaxPool1d backward BFP (rawOut)");
+    poolBfpRequireDims3(cfg->argmaxIndices, batch, channels, outputLength,
+                        "MaxPool1d backward BFP (argmaxIndices)");
+
+    const bfpQConfig_t *qC = lossGrad->quantization->qConfig;
+    validateBfpQConfigShape(qC, calcNumberOfElementsByTensor(lossGrad));
+    const int32_t expBias = bfpExponentBias(qC);
+
+    int32_t const *gyArr = (int32_t const *)lossGrad->data;
+    int32_t const *argmaxArr = (int32_t const *)cfg->argmaxIndices->data;
+    float *gxArr = (float *)rawOut->data;
+
+    memset(gxArr, 0, batch * channels * inputLength * sizeof(float));
+
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t c = 0; c < channels; c++) {
+            for (size_t outPos = 0; outPos < outputLength; outPos++) {
+                size_t outIdx = (b * channels + c) * outputLength + outPos;
+                int32_t inputIdx = argmaxArr[outIdx];
+                if (inputIdx < 0) {
+                    continue; // sentinel: empty window, no gradient flows
+                }
+                /* F7: -1 is the ONLY legal out-of-range value. Any other index
+                 * outside [0, inputLength) is a scatter past the end of the
+                 * raw grad buffer — a silent heap write, not a wrong number.
+                 * The argmax tensor is kernel-written and never funnel-
+                 * converted, so nothing upstream has validated its CONTENT;
+                 * a stale argmax left over from a differently-shaped forward
+                 * is exactly how a too-large index arrives. Bounds-check on
+                 * read rather than trusting the producer. */
+                if ((size_t)inputIdx >= inputLength) {
+                    PRINT_ERROR("MaxPool1d backward BFP: argmax index %d at output position %zu "
+                                "is outside [0, %zu) -- the recorded argmax does not belong to "
+                                "this input shape (stale forward?)",
+                                inputIdx, outIdx, inputLength);
+                    exit(1);
+                }
+                size_t g = bfpGroupOf(qC, outIdx);
+                gxArr[(b * channels + c) * inputLength + (size_t)inputIdx] +=
+                    ldexpf((float)gyArr[outIdx], (int)qC->exponents[g] - expBias);
+            }
+        }
+    }
+}
+
 void maxPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
                        tensor_t *propLoss) {
-    requireNoBfpWire(lossGrad, "MaxPool1d backward (lossGrad)");
-    requireNoBfpWire(propLoss, "MaxPool1d backward (propLoss)");
     maxPool1dConfig_t *cfg = layer->config->maxPool1d;
     switch (cfg->propLossMath.type) {
     case ARITH_FLOAT32:
+        /* Runs OUTSIDE executeOp and raw-casts both wires to float*; a packed
+         * BFP wire would be read as wide scalars (4x heap over-read on
+         * lossGrad, over-write into the packed propLoss buffer). #315 parity. */
+        requireNoBfpWire(lossGrad, "MaxPool1d backward (lossGrad)");
+        requireNoBfpWire(propLoss, "MaxPool1d backward (propLoss)");
         maxPool1dBackwardFloat(layer, forwardInput, lossGrad, propLoss);
         break;
     case ARITH_SYM_INT32:
+        requireNoBfpWire(lossGrad, "MaxPool1d backward (lossGrad)");
+        requireNoBfpWire(propLoss, "MaxPool1d backward (propLoss)");
         (void)forwardInput; // not needed: argmax already encodes the update position
         executeOp(
             &(opSpec_t){
@@ -510,6 +590,28 @@ void maxPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGra
             },
             propLoss);
         break;
+    case ARITH_BFP: {
+        const bfpQConfig_t *anchor = poolBfpWireAnchor(cfg->propLossQ, "MaxPool1d backward");
+        bfpQConfig_t stage = {.exponents = NULL,
+                              .numGroups = 1,
+                              .groupSize = 0,
+                              .roundingMode = cfg->propLossMath.roundingMode,
+                              .mantissaBits = anchor->mantissaBits,
+                              .exponentBits = anchor->exponentBits};
+        (void)forwardInput; // not needed: argmax already encodes the update position
+        executeOp(
+            &(opSpec_t){
+                .kernel = maxPool1dBackwardKernelBfp,
+                .ctx = cfg,
+                .inputs = (tensor_t *[]){lossGrad},
+                .nInputs = 1,
+                .arithmetic = cfg->propLossMath,
+                .mode = OUT_WRITE,
+                .bfpStage = {lossGrad->quantization->type == FLOAT32 ? &stage : NULL, NULL, NULL},
+            },
+            propLoss);
+        break;
+    }
     default:
         PRINT_ERROR("MaxPool1d backward: quantization type not implemented");
         exit(1);

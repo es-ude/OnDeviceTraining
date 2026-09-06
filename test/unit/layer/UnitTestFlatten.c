@@ -1,6 +1,7 @@
 #define SOURCE_FILE "UNIT_TEST_FLATTEN"
 
 #include <stdbool.h>
+#include <string.h>
 
 #include "DTypes.h"
 #include "DeathTest.h"
@@ -334,51 +335,117 @@ static tensor_t *buildWire1D(size_t n, quantization_t *q) {
     return initTensor(shape, q, NULL);
 }
 
-/* BFP epic PR2 Task 8: Flatten is a pure byte reshuffle OUTSIDE the funnel — it
- * memcpy's `calcNumberOfBytesForData(INPUT->quantization, n)` bytes and then
- * carries only the SYM_INT32 scale. Two distinct BFP failures: (a) BFP -> BFP
- * copies the mantissa payload but NOT the per-group exponents, leaving the
- * output on its zero-state grid (every value silently rescaled); (b) a FLOAT32
- * input into a BFP output sizes the memcpy off the FLOAT32 side and overruns
- * the (8x smaller) BFP buffer. Guard the STORAGE dtype of both wires. */
-void testFlattenForwardRejectsBfpWire(void) {
-    layer_t *flatten = flattenLayerInit();
-
-    tensor_t *bfpIn = buildWire1D(8, quantizationInitBfp(8, 8, HALF_AWAY));
-    tensor_t *floatOut = buildWire1D(8, quantizationInitFloat());
-    ASSERT_EXITS_WITH_FAILURE(flattenForward(flatten, bfpIn, floatOut));
-
-    tensor_t *floatIn = buildWire1D(8, quantizationInitFloat());
-    tensor_t *bfpOut = buildWire1D(8, quantizationInitBfp(8, 8, HALF_AWAY));
-    ASSERT_EXITS_WITH_FAILURE(flattenForward(flatten, floatIn, bfpOut));
-
-    freeTensor(bfpOut);
-    freeTensor(floatIn);
-    freeTensor(floatOut);
-    freeTensor(bfpIn);
-    freeFlattenLayer(flatten);
+/* BFP epic PR4 (R-P5): BFP wire with EXACT codes and per-group exponents, so
+ * the verbatim carry is observable at two DIFFERENT exponents. */
+static tensor_t *buildBfpWireWithCodes(size_t const *dims, size_t numDims, uint8_t mantissaBits,
+                                       uint8_t exponentBits, size_t numGroups, size_t groupSize,
+                                       int32_t *codes, uint8_t const *exponents) {
+    size_t *ownedDims = reserveMemory(numDims * sizeof(size_t));
+    memcpy(ownedDims, dims, numDims * sizeof(size_t));
+    size_t *order = reserveMemory(numDims * sizeof(size_t));
+    setOrderOfDimsForNewTensor(numDims, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, ownedDims, numDims, order);
+    quantization_t *q = numGroups > 1 ? quantizationInitBfpGrouped(mantissaBits, exponentBits,
+                                                                   HALF_AWAY, numGroups, groupSize)
+                                      : quantizationInitBfp(mantissaBits, exponentBits, HALF_AWAY);
+    tensor_t *t = initTensor(shape, q, NULL);
+    size_t n = calcNumberOfElementsByTensor(t);
+    if (codes != NULL) {
+        byteConversion((uint8_t *)codes, 32, t->data, mantissaBits, n);
+    }
+    bfpQConfig_t *qc = q->qConfig;
+    if (exponents != NULL) {
+        memcpy(qc->exponents, exponents, numGroups);
+    }
+    return t;
 }
 
-/* Backward twin — flattenBackward is the same byte memcpy on the loss/propLoss
- * wires (forwardInput is unused and therefore NOT guarded), so it drops the
- * exponents / overruns the buffer exactly the same way. Unlike Relu/Dropout,
- * Flatten has NO pre-existing dtype guard, so both directions genuinely RED. */
-void testFlattenBackwardRejectsBfpWire(void) {
-    layer_t *flatten = flattenLayerInit();
+/* BFP epic PR4 (R-P5, spec §5 Flatten row): a reshape moves the packed payload
+ * byte-for-byte AND the per-group exponent VALUES. Input [1, 2, 4] -> output
+ * [1, 8]: same element count, same storage order, so the {2 groups x 4} grid
+ * is unchanged. Two different exponents pin the carry. */
+void testFlattenForwardCarriesBfpExponents(void) {
+    size_t inDims[] = {1, 2, 4};
+    size_t outDims[] = {1, 8};
+    int32_t inCodes[8] = {12, -7, 0, 31, -32, 5, -1, 20};
+    uint8_t inExps[2] = {130, 126};
+    int32_t outCodes[8] = {-9, -9, -9, -9, -9, -9, -9, -9};
+    uint8_t outExps[2] = {127, 127};
+    tensor_t *input = buildBfpWireWithCodes(inDims, 3, 6, 8, 2, 4, inCodes, inExps);
+    tensor_t *output = buildBfpWireWithCodes(outDims, 2, 6, 8, 2, 4, outCodes, outExps);
 
-    tensor_t *bfpLoss = buildWire1D(8, quantizationInitBfp(8, 8, HALF_AWAY));
-    tensor_t *floatPropLoss = buildWire1D(8, quantizationInitFloat());
-    ASSERT_EXITS_WITH_FAILURE(flattenBackward(flatten, NULL, bfpLoss, floatPropLoss));
+    flattenForward(NULL, input, output);
 
-    tensor_t *floatLoss = buildWire1D(8, quantizationInitFloat());
-    tensor_t *bfpPropLoss = buildWire1D(8, quantizationInitBfp(8, 8, HALF_AWAY));
-    ASSERT_EXITS_WITH_FAILURE(flattenBackward(flatten, NULL, floatLoss, bfpPropLoss));
+    int32_t got[8];
+    unpackSignExtend(output->data, 6, 0, got, 8);
+    int32_t expected[8] = {12, -7, 0, 31, -32, 5, -1, 20};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, 8);
+    bfpQConfig_t *outQC = output->quantization->qConfig;
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(130, outQC->exponents[0], "group 0 exponent must be carried");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(126, outQC->exponents[1], "group 1 exponent must be carried");
+    freeTensor(output);
+    freeTensor(input);
+}
 
-    freeTensor(bfpPropLoss);
-    freeTensor(floatLoss);
-    freeTensor(floatPropLoss);
-    freeTensor(bfpLoss);
-    freeFlattenLayer(flatten);
+void testFlattenBackwardCarriesBfpExponents(void) {
+    size_t inDims[] = {1, 2, 4};
+    size_t outDims[] = {1, 8};
+    int32_t lossCodes[8] = {3, -14, 22, -1, 8, 0, -30, 6};
+    uint8_t lossExps[2] = {121, 133};
+    int32_t propCodes[8] = {-9, -9, -9, -9, -9, -9, -9, -9};
+    uint8_t propExps[2] = {127, 127};
+    tensor_t *loss = buildBfpWireWithCodes(outDims, 2, 6, 8, 2, 4, lossCodes, lossExps);
+    tensor_t *propLoss = buildBfpWireWithCodes(inDims, 3, 6, 8, 2, 4, propCodes, propExps);
+
+    flattenBackward(NULL, NULL, loss, propLoss);
+
+    int32_t got[8];
+    unpackSignExtend(propLoss->data, 6, 0, got, 8);
+    int32_t expected[8] = {3, -14, 22, -1, 8, 0, -30, 6};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, 8);
+    bfpQConfig_t *propQC = propLoss->quantization->qConfig;
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(121, propQC->exponents[0], "group 0 exponent must be carried");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(133, propQC->exponents[1], "group 1 exponent must be carried");
+    freeTensor(propLoss);
+    freeTensor(loss);
+}
+
+/* BFP epic PR4 (R-P7d): the narrowed guard — a mixed FLOAT32/BFP pair and a
+ * differing block grid must still die; only the identical-grid carry passes. */
+void testFlattenRejectsMixedAndMismatchedBfpWires(void) {
+    size_t inDims[] = {1, 2, 4};
+    size_t outDims[] = {1, 8};
+    tensor_t *bfpIn = buildBfpWireWithCodes(inDims, 3, 6, 8, 2, 4, NULL, NULL);
+    tensor_t *bfpOut = buildBfpWireWithCodes(outDims, 2, 6, 8, 2, 4, NULL, NULL);
+    tensor_t *otherGrid = buildBfpWireWithCodes(outDims, 2, 6, 8, 4, 2, NULL, NULL);
+    tensor_t *floatOut = buildWire1D(8, quantizationInitFloat());
+
+    ASSERT_EXITS_WITH_FAILURE(flattenForward(NULL, bfpIn, floatOut));
+    ASSERT_EXITS_WITH_FAILURE(flattenForward(NULL, bfpIn, otherGrid));
+    ASSERT_EXITS_WITH_FAILURE(flattenBackward(NULL, NULL, bfpOut, otherGrid));
+
+    freeTensor(floatOut);
+    freeTensor(otherGrid);
+    freeTensor(bfpOut);
+    freeTensor(bfpIn);
+}
+
+/* BFP epic PR4: unequal element counts. A reshape may change the DIMS freely,
+ * so the two per-tensor {1, 0} wires below compare grid-equal and differ only
+ * in their element product — the one mismatch the grid check structurally
+ * cannot see, and the one that makes the byte memcpy overrun. */
+void testFlattenRejectsUnequalBfpElementCounts(void) {
+    size_t inDims[] = {1, 2, 4};
+    size_t shortOutDims[] = {1, 4};
+    tensor_t *bfpIn = buildBfpWireWithCodes(inDims, 3, 6, 8, 1, 0, NULL, NULL);
+    tensor_t *shortOut = buildBfpWireWithCodes(shortOutDims, 2, 6, 8, 1, 0, NULL, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(flattenForward(NULL, bfpIn, shortOut));
+    ASSERT_EXITS_WITH_FAILURE(flattenBackward(NULL, NULL, bfpIn, shortOut));
+
+    freeTensor(shortOut);
+    freeTensor(bfpIn);
 }
 
 int main(void) {
@@ -389,7 +456,9 @@ int main(void) {
     RUN_TEST(testFlattenForwardSymInt32_PropagatesScaleAndValues);
     RUN_TEST(testFlattenBackwardFloat_CopiesGradsUnchanged);
     RUN_TEST(testFlattenBackwardSymInt32_PropagatesScale);
-    RUN_TEST(testFlattenForwardRejectsBfpWire);
-    RUN_TEST(testFlattenBackwardRejectsBfpWire);
+    RUN_TEST(testFlattenForwardCarriesBfpExponents);
+    RUN_TEST(testFlattenBackwardCarriesBfpExponents);
+    RUN_TEST(testFlattenRejectsMixedAndMismatchedBfpWires);
+    RUN_TEST(testFlattenRejectsUnequalBfpElementCounts);
     return UNITY_END();
 }

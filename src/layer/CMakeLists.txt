@@ -200,6 +200,7 @@ target_include_directories(Flatten PUBLIC include)
 target_link_libraries(Flatten PRIVATE
         DTypes
         Tensor
+        Quantization
         Arithmetic
         Layer
         Common

@@ -12,7 +12,7 @@ ARITH_BFP, roundingMode}` (`forwardMath`, GEMM family also `weightGradMath`/`bia
 dx op `propLossMath`); storage is the produced-wire `quantization_t*`
 (`outputQ`/`propLossQ`) and the grad-storage knobs. `SYM_INT32` is a **compute** format,
 never durable grad storage (#261); `SYM`/`ASYM` are packed **storage** formats. `BFP`
-(block-floating-point, epic PR1–PR3) is a packed **storage** format that — unlike
+(block-floating-point, epic PR1–PR4) is a packed **storage** format that — unlike
 `SYM`/`ASYM` — also has a native **compute** arithmetic: since epic PR2,
 `arithmeticFromQuantization` derives `ARITH_BFP` for BFP storage (the documented breaking
 change over PR1's `ARITH_FLOAT32` float bridge), and `ARITH_BFP` runs the GEMM-family
@@ -22,9 +22,12 @@ epic PR3, `ARITH_BFP` also runs the GEMM family's **backward** natively
 knob (`gradInit`/`momentumStateInit`/`momentStateInit`/PPCA state, all reject a grouped
 BFP template, #300 axis); fake-quant BFP training (pin the math slot(s) to
 `ARITH_FLOAT32` explicitly) remains available end to end as an alternative, not a
-workaround. Active training paths are FLOAT32 and SYM_INT32 end to end, plus BFP native
-forward+backward; SYM/ASYM/BOOL storage and grouped BFP grad/state storage are
-partial/unsupported.
+workaround. Since epic PR4 the weight-less layers join in: pools run `ARITH_BFP`
+natively, Relu/Flatten are packed-domain transparent, Dropout bridges through float,
+and MSE/CrossEntropy have BFP fake-quant arms — so a whole conv/pool/activation model
+can run on ONE uniform BFP wire config. Active training paths are FLOAT32 and SYM_INT32
+end to end, plus BFP native forward+backward; SYM/ASYM/BOOL storage and grouped BFP
+grad/state storage are partial/unsupported.
 
 ## Layers (`layerType_t`, 13 total)
 
@@ -406,7 +409,7 @@ checkpointing, limitations, literature).
   Grads, bias, gamma/beta, wires,
   and momentum stay per-tensor (funnel-enforced); `symInt32QConfig_t` (compute/wires)
   stays scalar by design.
-- **BFP** (`qtype_t BFP`, block-floating-point epic PR1–PR3, spec
+- **BFP** (`qtype_t BFP`, block-floating-point epic PR1–PR4, spec
   `docs/superpowers/specs/2026-07-29-block-floating-point-design.md`) — packed
   two's-complement mantissas + per-group `u8` biased exponents (`bfpQConfig_t`), the
   same always-array group shape as `symQConfig_t`. The dtype-core (epic PR1) ships:
@@ -448,10 +451,21 @@ checkpointing, limitations, literature).
   grouped-generic), not a kernel limitation. `scaleOptimizerGradients`'s `BFP`
   arm and `scaleBfpTensorInPlace` make `REDUCTION_MEAN` and the default
   `TrainingEpochDefault` epoch path work with a BFP-stored grad end to end. Full
-  backward contract: `docs/conventions/arithmetic-bfp.md` §5.6. Remaining
-  **carrier gates**, by epic: **PR4** — Relu/Dropout/Flatten reject a BFP wire;
-  no loss function has a BFP arm, so a BFP output wire is not evaluable through
-  `inference*WithLoss` (keep the loss-facing wire `FLOAT32`, plan Decision 9).
+  backward contract: `docs/conventions/arithmetic-bfp.md` §5.6. **Epic PR4 adds
+  the weight-less layers**: MaxPool1d/AvgPool1d/AdaptiveAvgPool1d run native
+  `ARITH_BFP` forward AND backward — they have no weight operand, so the
+  staging width anchor is the layer's OWN produced-wire config (`outputQ` for
+  the forward, `propLossQ` for the backward), checked eagerly at op entry;
+  Relu and Flatten are packed-domain transparent (codes and per-group exponents
+  copied verbatim, outside the funnel by design); Dropout bridges through float
+  (`1/(1−p)` is not a power of two and cannot fold into exponents) and derives
+  fresh exponents from the masked-and-scaled absmax; and MSE/CrossEntropy gained
+  BFP **fake-quant** arms, so a BFP output wire IS now evaluable through
+  `inference*WithLoss`. A uniform-BFP conv1d → relu → maxpool → flatten →
+  linear → softmax + CrossEntropy model trains end to end
+  (`testBfpUniformPoolActivationModelTrains`). Contract:
+  `docs/conventions/arithmetic-bfp.md` §5.7. Remaining **carrier gates**, by
+  epic:
   **PR5** — LayerNorm/GroupNorm have no `ARITH_BFP` arm, forward or backward (and
   neither layer's param storage supports BFP at all, so the PR3 grad-storage knob
   above is a GEMM-family-only feature). **PR6** — Softmax backward has no native
@@ -492,7 +506,7 @@ checkpointing, limitations, literature).
 - `TRACK_INSTRUCTIONS` counters exist on the legacy `Square`/`Matmul` libs but are
   unsafe to enable: a name mismatch fails compilation for `Square`, both libs lack a
   reset helper, and `Matmul`'s SYM_INT32 path double-increments (#351).
-- BFP (block-floating-point epic PR1–PR3) native compute now covers
+- BFP (block-floating-point epic PR1–PR4) native compute now covers
   Linear/Conv1d/Conv1dTransposed **forward AND backward**: `ARITH_BFP` runs
   both, with both operands blocked and headroom-guarded `int32` block
   partials, and a uniform-BFP model trains its entire loop natively with no
@@ -504,16 +518,15 @@ checkpointing, limitations, literature).
   allocators (`initLayerOutputs`/`initGradTensor`, `InferenceApi.c`) carry
   BFP arms — wire `numGroups` derives from the template's `groupSize` and the
   wire's runtime element count, with a divisibility fail-fast rather than a
-  silent floor. What remains gated, by epic:
-  - **PR4** — Relu/Dropout/Flatten reject a BFP wire outside the funnel
-    (`requireNoBfpWire` guards; these layers read `->data` directly and
-    would otherwise misread packed bytes/drop the exponent array). No loss
-    function (MSE/CrossEntropy) has a BFP arm, so a BFP **final/loss-facing**
-    output wire is not evaluable through `inference*WithLoss` today — keep
-    the loss-facing wire `FLOAT32` (plan Decision 9). Pooling
-    (MaxPool1d/AvgPool1d/AdaptiveAvgPool1d) has no native BFP semantics
-    either: forward already fails cleanly via the existing
-    quantization-type guard, backward carries an explicit BFP-wire guard.
+  silent floor. **Epic PR4 shipped the weight-less layers** (spec §5.7):
+  pooling (MaxPool1d/AvgPool1d/AdaptiveAvgPool1d) runs native `ARITH_BFP`
+  forward AND backward, anchored on the layer's own `outputQ`/`propLossQ`
+  (no weight operand to stage at); Relu and Flatten copy codes and per-group
+  exponents verbatim in the packed domain, deliberately outside the funnel;
+  Dropout bridges through float and re-derives exponents; and MSE/
+  CrossEntropy gained BFP fake-quant arms, so a BFP **final/loss-facing**
+  output wire IS evaluable through `inference*WithLoss` (plan Decision 9 is
+  superseded). What remains gated, by epic:
   - **PR5** — LayerNorm/GroupNorm have no `ARITH_BFP` arm, forward or
     backward (both guarded, fail fast rather than silently misreading the
     unpacked scratch as float).

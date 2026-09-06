@@ -1,4 +1,4 @@
-# Block-Floating-Point (BFP) arithmetic — PR1–PR3 conventions + deviations register
+# Block-Floating-Point (BFP) arithmetic — PR1–PR4 conventions + deviations register
 
 Conventions for the `BFP` qtype's dtype-core scope (`src/tensor/Quantization*`,
 `src/tensor/TensorConversion.c`'s BFP cells) and, since epic PR2, the native
@@ -551,16 +551,19 @@ silent wrong arithmetic, not a crash.
   `testBfpDxWireNativeBackwardTrains`
   (`test/unit/userAPI/UnitTestMultiLayerTraining.c`).
 
-**Still gated (deferred past PR3, not a PR3 gap):**
+**Still gated (deferred past PR4, not a PR3/PR4 gap):**
 
 - Grouped BFP grad/optimizer-state templates (per-tensor-only decision above
   — a scope decision, not a kernel limitation; a future `#300` axis).
-- Pools/norms/Softmax `ARITH_BFP` arms stay gated across PR4–PR6
-  (`docs/FEATURES.md`'s carrier-gate list). Loss functions get a fake-quant
-  `ARITH_BFP` arm at PR4 (the fix that closes `docs/FEATURES.md`'s "no loss
-  function has a BFP arm" gap); NATIVE BFP losses (integer CE/MSE) are
-  explicitly OUT of this epic's committed scope — spec §9 files them as an
-  optional stretch goal once PR6 lands, not a PR6 deliverable.
+- Only norms (LayerNorm/GroupNorm, PR5) and Softmax's backward (PR6) still
+  lack an `ARITH_BFP` arm (`docs/FEATURES.md`'s carrier-gate list). Pools,
+  Relu, Flatten and Dropout SHIPPED with PR4 — see §5.7. Losses got their
+  fake-quant `ARITH_BFP` arm in the same PR (`case BFP:` joining
+  `case SYM_INT32:` on the dtype-generic helpers), which closes
+  `docs/FEATURES.md`'s "no loss function has a BFP arm" gap; NATIVE BFP
+  losses (integer CE/MSE) are explicitly OUT of this epic's committed scope
+  — spec §9 files them as an optional stretch goal once PR6 lands, not a PR6
+  deliverable.
 - The optimizer's `updateMath` stays `ARITH_FLOAT32`-only (#310) — BFP
   backward produces grads and lets them be STORED BFP, but the parameter
   update step itself is unchanged.
@@ -572,6 +575,71 @@ silent wrong arithmetic, not a crash.
   of double-quantizing grads for longer same-exponent fold segments) is a
   documented, deferred follow-up (§9) — file the issue only once a real MCU
   measurement motivates it.
+
+### 5.7 Weight-less layers (epic PR4)
+
+**Staging anchor (R-P1).** GEMM rules 1/2 are weight-anchored: a FLOAT32
+operand stages at the *weights'* widths. Pools have no weight operand, so the
+anchor is the layer's OWN produced-wire config — `outputQ` for the forward op,
+`propLossQ` for the backward op. The check is EAGER at op entry (`ARITH_BFP`
+math slot ⇒ the corresponding produced-wire config must be BFP-typed), because
+without it there is no width source at all. The stage template is always
+per-tensor `{1,0}`; only the anchor's `mantissaBits`/`exponentBits` are read.
+A BFP-STORED operand is borrowed zero-copy as everywhere (D8) and never
+re-blocked.
+
+**Pool numerics (R-P4).** MaxPool compares DEQUANTIZED values
+(`ldexpf(mantissa, E − bias)`, exact) — raw mantissas are not comparable
+across groups; argmax/auxOut semantics and the −1 empty-window sentinel are
+unchanged. AvgPool sums int32 partials within same-group segments, folds on
+every group crossing plus the tail, and divides by K in the FLOAT32 raw: the
+SYM `s/K` scale fold has NO BFP analog, because a BFP scale is `2^E` and K is
+not a power of two in general. AdaptiveAvgPool does the same with each
+window's own count (the SYM arm's rounded integer division has no role — the
+BFP raw is float). Forward window sums carry `bfpValidateSumHeadroom`; the
+backwards do NOT, because contributions accumulate directly in the FLOAT32 raw
+with no int32 partials.
+
+**Packed-domain transparency (R-P2, R-P5).** Relu and Flatten copy codes and
+per-group exponents VERBATIM and stay outside the funnel: routing them through
+`executeOp` would re-derive exponents at OUT_WRITE, a second quantization of
+UNCHANGED values, which §9/D8 forbid. Relu clamps negative codes to 0 (the
+block's grid stays valid, just no longer absmax-tight — the accepted
+utilization drop, deviations register 6) and masks the backward by the SIGN of
+the forward input's codes. Both require the copied-verbatim wire pair to share
+`{numGroups, groupSize, mantissaBits, exponentBits}`; a differing grid is a
+re-block and belongs to the Quantization layer.
+
+**Dropout bridge (R-P3).** Non-native BY DECISION (D4): `1/(1−p)` is not a
+power of two and cannot fold into exponents. One float bridge, two passes over
+the packed payload (`scaleBfpTensorInPlace`'s skeleton with the BOOL mask fused
+in): fresh per-group exponents from the masked-and-scaled absmax, then
+requantize with the DESTINATION config's own storage rounding (#282). This
+fresh derive is not double quantization — the multiply changed the values.
+Eval mode is a verbatim copy. `p = 0.5` is exact and needs no special case.
+
+**Losses (R-P6).** Fake-quant only: `case BFP:` joins the existing
+dtype-generic helpers, whose `convertTensor` calls already own
+`conversionMatrix[BFP][FLOAT32]` (read) and `conversionMatrix[FLOAT32][BFP]`
+(write, fresh exponents). Native BFP CE/MSE remain the optional stretch that
+PR6 files as a follow-up.
+
+**Outside-funnel carve-out (PR4 scope).** The funnel is still the ONE place
+storage conversion happens (`docs/CONVENTIONS.md`), and PR4 does not widen
+that rule — it records which layers were already outside it and why. Relu,
+Flatten and Dropout are scale-transparent or bridge-local, so they read and
+write the PACKED payload and the exponent array DIRECTLY, by design: for Relu
+and Flatten because a funnel round-trip would re-quantize unchanged values
+(above), and for Dropout because its own two-pass bridge is the conversion.
+Pools and losses take the opposite route — pools run INSIDE `executeOp` on the
+unpacked-BFP scratch under the anchor rule above, and the losses go through
+`convertTensor`, i.e. both stay on documented arms. Consequence for reviewers:
+a raw `->data` walk over BFP bytes is legitimate ONLY in those three layers
+(plus test fixtures, which use `byteConversion`/`unpackSignExtend`); anywhere
+else it is a bug. All three of the outside-funnel layers therefore carry an
+explicit dtype guard per arm (`requireNoBfpWire` on the FLOAT32/SYM arms,
+`requireBfpWire` on the ARITH_BFP arm) — without the funnel's prologue there
+is nothing else to catch a mismatched wire.
 
 ---
 

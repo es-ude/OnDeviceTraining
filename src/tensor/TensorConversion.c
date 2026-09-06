@@ -1130,6 +1130,15 @@ void quantizeFloatBufferToBfpCodes(const float *values, size_t n, bfpQConfig_t *
  * because dequantChunkToFloat denies grouped SYM and grouped ASYM by design. */
 static void packStreamAsBfp(const tensor_t *src, bfpSrcChunkReader_t readChunk, size_t n,
                             bfpQConfig_t *outQC, uint8_t *dst, const char *what) {
+    /* #420 G2: the accumulate/scale engines' guard extended to the fourth
+     * exponents[g] indexer. Pass 1 derives exponents by index arithmetic and
+     * pass 2 reads bfpGroupScale(outQC, g), both under the exact-division
+     * invariant (numGroups * groupSize == n): a field-assigned config
+     * violating it OOB-writes the exponent array (< n) or silently
+     * mis-blocks (> n). Unlike the engines, the geometry here belongs to the
+     * TARGET while n comes from the SOURCE, so a shape-agnostic template can
+     * produce the mismatch with neither tensor malformed on its own. */
+    validateBfpQConfigShape(outQC, n);
     const float qMax = powf(2, (float)outQC->mantissaBits - 1) - 1;
     const float qMin = -powf(2, (float)outQC->mantissaBits - 1);
     const int32_t bias = bfpExponentBias(outQC);

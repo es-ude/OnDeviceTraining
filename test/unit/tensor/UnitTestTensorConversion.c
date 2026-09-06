@@ -6905,6 +6905,49 @@ void testScaleBfpTensorInPlaceRejectsBadGroupGeometry(void) {
     ASSERT_EXITS_WITH_FAILURE(scaleBfpTensorInPlace(&t, 0.5f));
 }
 
+/* #420 G2: packStreamAsBfp is the fourth exponents[g] indexer and had no
+ * entry validation -- it derives per-group exponents by index arithmetic in
+ * pass 1 and reads bfpGroupScale(outQC, g) in pass 2, both under the same
+ * exact-division invariant the engines validate. requantBfpTensor is its
+ * public route (conversionMatrix[BFP][BFP]); the TARGET carries the
+ * field-assigned violating geometry while n comes from the source, which is
+ * exactly the mismatch a shape-agnostic layerQuant template can produce.
+ * Same numGroups*gsz (12) > n (8) direction as the engine death tests above,
+ * for the same deterministic-no-death-RED reason documented there. */
+void testRequantBfpTensorRejectsBadTargetGroupGeometry(void) {
+    size_t n = 8;
+    size_t dims[] = {8};
+    size_t order[] = {0};
+    shape_t srcShape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    shape_t dstShape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    uint8_t srcExponents[1] = {127};
+    bfpQConfig_t srcQc = {.exponents = srcExponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 6,
+                          .exponentBits = 8};
+    quantization_t srcQ;
+    uint8_t srcData[6];
+    tensor_t src;
+    buildBadGeometryBfpTarget(&src, srcData, &srcShape, &srcQ, &srcQc, n);
+
+    uint8_t dstExponents[3] = {127, 127, 127};
+    bfpQConfig_t dstQc = {.exponents = dstExponents,
+                          .numGroups = 3,
+                          .groupSize = 4, /* 3*4 == 12 != 8 -> invalid for n=8 */
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 6,
+                          .exponentBits = 8};
+    quantization_t dstQ;
+    uint8_t dstData[6];
+    tensor_t dst;
+    buildBadGeometryBfpTarget(&dst, dstData, &dstShape, &dstQ, &dstQc, n);
+
+    ASSERT_EXITS_WITH_FAILURE(requantBfpTensor(&src, &dst));
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -7088,6 +7131,7 @@ int main(void) {
     RUN_TEST(testAccumulateFloatIntoBfpFixedGridRejectsBadGroupGeometry);
     RUN_TEST(testAccumulateFloatIntoBfpRescaleRejectsBadGroupGeometry);
     RUN_TEST(testScaleBfpTensorInPlaceRejectsBadGroupGeometry);
+    RUN_TEST(testRequantBfpTensorRejectsBadTargetGroupGeometry);
 
     return UNITY_END();
 }

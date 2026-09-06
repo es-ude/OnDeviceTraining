@@ -490,6 +490,30 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
         }
         bfpQC->mantissaBits = fileMantissaBits;
         bfpQC->exponentBits = fileExponentBits;
+        /* #420 G5, third member of the untrusted-wire-input family above (and
+         * placed here because the exponent bytes are read BEFORE exponentBits,
+         * so this is the earliest point their bias is known): a stored
+         * exponent above bias + 127 has NO finite float32 scale --
+         * ldexpf(1.f, stored - bias) is +inf, so the first dequant turns every
+         * zero code into 0 * inf == NaN, which walks past every runtime guard
+         * instead of saturating the way an out-of-range VALUE does.
+         * deriveBfpStoredExponent caps its own output at exactly bias + 127
+         * (D6, docs/conventions/arithmetic-bfp.md §2), so a file byte above it
+         * is one this build's own quantizer could never have written --
+         * corrupt or from-the-future, exactly like the width caps. Checked
+         * against the record's OWN bias, so a narrow-exponentBits record
+         * carrying a wide byte is caught too, not just the exponentBits == 8 /
+         * stored == 255 case the canonical range can reach. */
+        int32_t maxFiniteStored = bfpExponentBias(bfpQC) + 127;
+        for (size_t g = 0; g < fileNumGroups; g++) {
+            if ((int32_t)bfpQC->exponents[g] > maxFiniteStored) {
+                PRINT_ERROR("deserializeQConfig: BFP file exponent[%zu] (%u) exceeds the largest "
+                            "finite scale at exponentBits %u (bias + 127 == %d)",
+                            g, (unsigned)bfpQC->exponents[g], (unsigned)fileExponentBits,
+                            maxFiniteStored);
+                exit(1);
+            }
+        }
         bfpQC->roundingMode = (roundingMode_t)serialReadU8(f);
         /* numberOfElements == 0 marks ONLY the layer outputQ/propLossQ
          * wire-config call sites -- mirrors the SYM arm's validate gate. */

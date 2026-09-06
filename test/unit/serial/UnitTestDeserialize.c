@@ -1065,6 +1065,61 @@ static void testBfpDeserializeRejectsExponentBitsOutOfRange(void) {
     freeQuantization(floatQ);
 }
 
+/*! #420 G5, third sibling of the two width-cap tests above (same bare
+ *  wire-config isolation): a stored exponent byte above bias + 127 has NO
+ *  finite float32 scale -- ldexpf(1.f, stored - bias) is +inf, so the first
+ *  dequant turns every zero code into 0 * inf == NaN, which walks past every
+ *  runtime guard instead of saturating like an out-of-range VALUE would.
+ *  deriveBfpStoredExponent caps its own output at exactly bias + 127 (D6,
+ *  docs/conventions/arithmetic-bfp.md §2), so a file byte above it is one
+ *  this build's quantizer could never have written. 255 at exponentBits 8
+ *  (bias 127) is the canonical corrupt value -- the natural top of the
+ *  8-bit range and one past the largest finite scale, 2^127. */
+static void testBfpDeserializeRejectsNonFiniteScaleExponent(void) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    fwrite("ODTS", 1, 4, f);
+    writeU32LE(f, 5); /* version */
+    writeU32LE(f, 1); /* layerCount */
+    uint8_t tag = (uint8_t)RELU;
+    fwrite(&tag, 1, 1, f);
+    uint8_t arithByte = 0; /* ARITH_FLOAT32, HALF_AWAY -- forwardMath */
+    fwrite(&arithByte, 1, 1, f);
+    fwrite(&arithByte, 1, 1, f);
+    fwrite(&arithByte, 1, 1, f); /* propLossMath */
+    fwrite(&arithByte, 1, 1, f);
+    uint8_t bfpType = (uint8_t)BFP;
+    fwrite(&bfpType, 1, 1, f);           /* outputQ dtype */
+    writeU32LE(f, 1);                    /* fileNumGroups = 1, matches the skeleton */
+    writeU32LE(f, 0);                    /* groupSize = 0, matches the sentinel */
+    uint8_t exponentByteNonFinite = 255; /* > bias + 127 == 254 -> scale 2^128 == +inf */
+    fwrite(&exponentByteNonFinite, 1, 1, f);
+    uint8_t mantissaBits = 4;
+    fwrite(&mantissaBits, 1, 1, f);
+    uint8_t exponentBits = 8;
+    fwrite(&exponentBits, 1, 1, f);
+    uint8_t roundingMode = 0; /* HALF_AWAY */
+    fwrite(&roundingMode, 1, 1, f);
+    uint8_t propLossFloatTag = (uint8_t)FLOAT32; /* matches the skeleton's default propLossQ */
+    fwrite(&propLossFloatTag, 1, 1, f);
+    fclose(f);
+
+    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *bfpOutputQ = quantizationInitBfp(4, 8, HALF_AWAY);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    lq.outputQ = bfpOutputQ;
+    layer_t *layer = reluLayerInit(&lq);
+    layer_t *model[] = {layer};
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    fclose(f);
+
+    freeReluLayer(layer);
+    freeQuantization(bfpOutputQ);
+    freeQuantization(floatQ);
+}
+
 /*! #380 PR3: a FROZEN-serialized parameter (hasGrad=0, no grad tensor in the
  *  file) deserialized into a TRAINABLE skeleton (parameter->grad != NULL)
  *  must load the param and leave the skeleton's grad untouched — it was
@@ -1974,6 +2029,7 @@ int main(void) {
     RUN_TEST(testBfpDeserializeRejectsSentinelViolation);
     RUN_TEST(testBfpDeserializeRejectsMantissaBitsOutOfRange);
     RUN_TEST(testBfpDeserializeRejectsExponentBitsOutOfRange);
+    RUN_TEST(testBfpDeserializeRejectsNonFiniteScaleExponent);
     RUN_TEST(testDeserializeWeightsOnlyIntoTrainableSkeleton);
     RUN_TEST(testSkipSerializedTensorRejectsRankAboveCap);
     RUN_TEST(testSkipSerializedTensorRejectsTruncatedPayload);

@@ -7006,6 +7006,61 @@ void testAccumulateFloatIntoBfpRescaleRejectsShortElementCount(void) {
     ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorRescale(&target, inc, 4));
 }
 
+/* #421 U9: the last two exponents[g] indexers without entry validation.
+ * packFloatBufferAsBfp's pass 2 derives g = idx / groupSize with NO bound
+ * against numGroups, so a target whose numGroups * groupSize < n reads
+ * exponents[] OUT OF BOUNDS -- and the route is PUBLIC:
+ * conversionMatrix[FLOAT32][BFP] takes the target's geometry from a
+ * shape-agnostic layerQuant template while n comes from the SOURCE, exactly
+ * the mismatch #420 G2 closed for the streaming twin. The unpacked sibling
+ * quantizeFloatBufferToBfpCodes has the same invariant with a milder failure
+ * (its per-group loops leave the codesOut tail UNINITIALIZED instead of
+ * reading OOB) and is non-static, so its guard is pinned by a direct call.
+ * Both use G2's numGroups*gsz (12) > n (8) direction, for the same
+ * deterministic-no-death-RED reason documented at the engine death tests:
+ * the guard-absent code runs to completion and exits 0. */
+void testFloatToBfpRejectsBadTargetGroupGeometry(void) {
+    size_t n = 8;
+    size_t dims[] = {8};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    float vals[8] = {6.f, 1.f, -2.f, 0.f, 28.f, -7.f, 3.f, 14.f};
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    tensor_t src;
+    setTensorValues(&src, (uint8_t *)vals, &shape, &floatQ, NULL);
+
+    uint8_t exponents[3] = {127, 127, 127};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 3,
+                       .groupSize = 4, /* 3*4 == 12 != 8 -> invalid for n=8 */
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    initBfpQuantization(&qc, &q);
+    uint8_t data[calcNumberOfBytesForData(&q, n)];
+    tensor_t dst;
+    setTensorValues(&dst, data, &shape, &q, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&src, &dst));
+}
+
+void testQuantizeFloatBufferToBfpCodesRejectsBadGroupGeometry(void) {
+    float values[8] = {6.f, 1.f, -2.f, 0.f, 28.f, -7.f, 3.f, 14.f};
+    uint8_t exponents[3] = {127, 127, 127};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 3,
+                       .groupSize = 4, /* 3*4 == 12 != 8 -> invalid for n=8 */
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 4,
+                       .exponentBits = 8};
+    int32_t codes[8];
+
+    ASSERT_EXITS_WITH_FAILURE(quantizeFloatBufferToBfpCodes(values, 8, &qc, codes));
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -7192,6 +7247,8 @@ int main(void) {
     RUN_TEST(testRequantBfpTensorRejectsBadTargetGroupGeometry);
     RUN_TEST(testAccumulateFloatIntoBfpFixedGridRejectsShortElementCount);
     RUN_TEST(testAccumulateFloatIntoBfpRescaleRejectsShortElementCount);
+    RUN_TEST(testFloatToBfpRejectsBadTargetGroupGeometry);
+    RUN_TEST(testQuantizeFloatBufferToBfpCodesRejectsBadGroupGeometry);
 
     return UNITY_END();
 }

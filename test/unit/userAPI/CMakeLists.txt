@@ -297,6 +297,7 @@ __register_target_as_unit_test(UnitTestAdaptiveAvgPool1dIntegration)
 add_executable(UnitTestMultiLayerTraining UnitTestMultiLayerTraining.c)
 target_link_libraries(UnitTestMultiLayerTraining PRIVATE
         unity
+        Pool1dApi
         TrainingLoopApi
         TrainingEpochDefault
         TrainingBatchDefault

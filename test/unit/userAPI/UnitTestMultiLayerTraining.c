@@ -20,10 +20,12 @@
 #include "LinearApi.h"
 #include "LossFunction.h"
 #include "OptimizerApi.h"
+#include "Pool1dApi.h"
 #include "QuantizationApi.h"
 #include "RNG.h"
 #include "ReluApi.h"
 #include "SgdApi.h"
+#include "Softmax.h"
 #include "SoftmaxApi.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -1770,6 +1772,266 @@ void testBfpConvGradStorageTrainsUnderDefaultEpoch(void) {
     TEST_ASSERT_EQUAL_size_t_MESSAGE(1, wGradNumGroups, "grads are per-tensor-only (#300 axis)");
 }
 
+/* ===========================================================================
+ * BFP epic PR4 capstone: the whole non-GEMM topology on ONE uniform BFP wire.
+ * ======================================================================== */
+
+/* buildRampParam2D's rank-3 twin — the conv weight is [Cout, Cin, K]. */
+static parameter_t *buildRampParam3D(size_t d0, size_t d1, size_t d2, float base, float step) {
+    size_t *dims = reserveMemory(3 * sizeof(size_t));
+    dims[0] = d0;
+    dims[1] = d1;
+    dims[2] = d2;
+    size_t *order = reserveMemory(3 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(3, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 3, order);
+    tensor_t *param = initTensor(shape, quantizationInitFloat(), NULL);
+    size_t n = d0 * d1 * d2;
+    float values[n];
+    for (size_t i = 0; i < n; i++) {
+        values[i] = base + step * (float)i;
+    }
+    tensorFillFromFloatBuffer(param, values, n);
+    return parameterInit(param, gradInitFloat(param, NULL));
+}
+
+/* Flatten's exponent carry (Task 3) is NOT observable through the capstone's
+ * loss assertions: dropping it leaves the flatten wire at the zero state
+ * (scale 1.0) with UNCHANGED codes, and training still converges — the
+ * distortion is consistent across steps and the fused (p - y) gradient stays
+ * bounded. Verified empirically (mutant applied, capstone still PASSed).
+ * So the carry gets its own deterministic observable, taken from the live
+ * training run through the TraceApi probes:
+ *   fwd@2   = MaxPool's output wire  -> fwd@3   = Flatten's output wire
+ *   agrad@3 = grad ENTERING Flatten  -> agrad@2 = grad entering MaxPool
+ *             (i.e. exactly what Flatten's backward produced)
+ * Both pairs must carry IDENTICAL per-group exponents; the non-vacuity
+ * assertions pin that the source grids actually left the zero state, so an
+ * all-127 == all-127 comparison cannot pass by accident. */
+#define BFP_PR4_MAX_GROUPS 8
+
+typedef struct pr4CarryCapture {
+    bool seenFwdPool;
+    bool seenFwdFlat;
+    bool seenAgradFlat;
+    bool seenAgradPool;
+    size_t nFwdPool;
+    size_t nFwdFlat;
+    size_t nAgradFlat;
+    size_t nAgradPool;
+    uint8_t fwdPool[BFP_PR4_MAX_GROUPS];
+    uint8_t fwdFlat[BFP_PR4_MAX_GROUPS];
+    uint8_t agradFlat[BFP_PR4_MAX_GROUPS];
+    uint8_t agradPool[BFP_PR4_MAX_GROUPS];
+} pr4CarryCapture_t;
+
+/* First occurrence only — the carry must hold on step 1, before ten SGD steps
+ * can wash the two grids into coincidence. */
+static void pr4SnapExponents(bool *seen, size_t *nOut, uint8_t *dst, const tensor_t *t) {
+    if (*seen || t->quantization->type != BFP) {
+        return;
+    }
+    const bfpQConfig_t *qc = t->quantization->qConfig;
+    size_t n = qc->numGroups < BFP_PR4_MAX_GROUPS ? qc->numGroups : BFP_PR4_MAX_GROUPS;
+    *seen = true;
+    *nOut = n;
+    memcpy(dst, qc->exponents, n);
+}
+
+static void capturePr4FlattenCarry(void *ctx, size_t layerIdx, layerType_t layerType,
+                                   const char *phase, tensor_t *tensor) {
+    (void)layerType;
+    pr4CarryCapture_t *cap = ctx;
+    if (strcmp(phase, "fwd") == 0) {
+        if (layerIdx == 2) {
+            pr4SnapExponents(&cap->seenFwdPool, &cap->nFwdPool, cap->fwdPool, tensor);
+        } else if (layerIdx == 3) {
+            pr4SnapExponents(&cap->seenFwdFlat, &cap->nFwdFlat, cap->fwdFlat, tensor);
+        }
+    } else if (strcmp(phase, "agrad") == 0) {
+        if (layerIdx == 3) {
+            pr4SnapExponents(&cap->seenAgradFlat, &cap->nAgradFlat, cap->agradFlat, tensor);
+        } else if (layerIdx == 2) {
+            pr4SnapExponents(&cap->seenAgradPool, &cap->nAgradPool, cap->agradPool, tensor);
+        }
+    }
+}
+
+/* BFP epic PR4 capstone (R-P7e): the whole non-GEMM topology on ONE uniform
+ * BFP wire config — conv1d -> relu -> maxpool -> flatten -> linear -> softmax,
+ * CrossEntropy loss. Every arm PR4 added is on the critical path:
+ *   - conv1d/linear run native ARITH_BFP (PR2/PR3) forward AND backward, so
+ *     their weights are FLOAT32-init + requantizeTensorInPlace (#270
+ *     requireFloat32 gate);
+ *   - relu is packed-domain transparent (Tasks 1/2);
+ *   - maxpool compares dequantized values and scatters to argmax (Tasks 8/9);
+ *   - flatten carries the exponent array (Task 3);
+ *   - softmax stays PR6: its forward is funnel-routed with a HARDCODED
+ *     ARITH_FLOAT32 (Softmax.c), so a BFP wire crosses it as a fake-quant
+ *     bridge, and CrossEntropy's FUSED backward makes the training loop skip
+ *     the softmax layer entirely (CalculateGradsSequential.c: backwardIndex
+ *     -= 1 for CROSS_ENTROPY), so softmaxBackward's PR6 guard is never
+ *     reached. Its propLossMath is nevertheless PINNED to ARITH_FLOAT32 to
+ *     document that intent -- behaviourally inert, because BOTH spellings
+ *     die if that backward is ever reached (pinned FLOAT32 -> the
+ *     requireNoBfpWire guard; derived ARITH_BFP -> the switch default);
+ *   - the loss reaches its BFP fake-quant arm (Task 10) because the model
+ *     output wire is BFP.
+ * Wire element counts are 12 / 12 / 6 / 6 / 2 / 2 — all divisible by the
+ * template groupSize 2, which the allocators require (Decision 5); the last
+ * two normalize to per-tensor {1, 0} (groupSize == wire elements). The PARAMS
+ * use a per-tensor {1, 0} BFP config: the conv weight's reduction run is
+ * ic*k = 3, and the §2 param rule demands groupSize divide it. */
+void testBfpUniformPoolActivationModelTrains(void) {
+    rngSetSeed(4242u);
+    quantization_t *bfpWireQ = quantizationInitBfpGrouped(8, 8, SR_HALF_AWAY, 2, 2);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, bfpWireQ);
+
+    /* conv1d [1, 1, 8] -> [1, 2, 6] (K=3, VALID, stride 1), no bias. The
+     * kernel_t is heap-allocated because freeConv1dLayerShellOnly (above)
+     * frees it; buildBorrowedConv1dLayer only borrows the pointer. */
+    parameter_t *convW = buildRampParam3D(2, 1, 3, 0.20f, 0.05f);
+    quantization_t *convWQ = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    requantizeTensorInPlace(getParamFromParameter(convW), convWQ);
+    freeQuantization(convWQ); /* requantizeTensorInPlace clones the template */
+    kernel_t *convKernel = reserveMemory(sizeof(kernel_t));
+    initKernel(convKernel, 3, VALID, /*dilation=*/1, /*stride=*/1);
+    layer_t *conv = buildBorrowedConv1dLayer(convW, NULL, convKernel, bfpWireQ);
+
+    layer_t *relu = reluLayerInit(&lq);
+
+    /* maxpool K=2 stride 2 over [1, 2, 6] -> [1, 2, 3]. */
+    layer_t *pool = maxPool1dLayerInit(
+        &(maxPool1dInit_t){.kernelSize = 2, .stride = 2, .inputChannels = 2, .inputLength = 6},
+        &lq);
+
+    layer_t *flatten = flattenLayerInit(); /* [1, 2, 3] -> [1, 6] */
+
+    /* linear 6 -> 2. */
+    parameter_t *linW = buildRampParam2D(2, 6, 0.10f, 0.03f);
+    parameter_t *linB = buildRampParam2D(1, 2, 0.05f, 0.05f);
+    quantization_t *linWQ = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    quantization_t *linBQ = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    requantizeTensorInPlace(getParamFromParameter(linW), linWQ);
+    requantizeTensorInPlace(getParamFromParameter(linB), linBQ);
+    freeQuantization(linBQ);
+    freeQuantization(linWQ);
+    layer_t *linear = buildBorrowedLinearLayer(linW, linB, bfpWireQ);
+
+    layer_t *softmax = softmaxLayerInit(&lq);
+    softmax->config->softmax->propLossMath =
+        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
+
+    layer_t *model[6] = {conv, relu, pool, flatten, linear, softmax};
+
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.05f, 0.9f, 0.f, model, 6, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+
+    float inputValues[8] = {0.9f, -0.4f, 1.3f, 0.2f, -1.1f, 0.7f, 0.3f, -0.6f};
+    tensor_t *input = buildFloatTensor3D(1, 1, 8, inputValues);
+    tensor_t *label = buildFloatTensor2D(1, 2, (float[]){1.0f, 0.0f});
+
+    /* Snapshot the conv weight's packed payload: the SGD write-back must land
+     * in BFP storage, so the codes have to change. */
+    tensor_t *convWTensor = getParamFromParameter(convW);
+    size_t convWBytes = calcNumberOfBytesForData(convWTensor->quantization, 6);
+    uint8_t before[16];
+    memcpy(before, convWTensor->data, convWBytes);
+
+    optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
+    pr4CarryCapture_t carry = {0};
+    float firstLoss = NAN;
+    float lastLoss = NAN;
+    for (size_t step = 0; step < 10; step++) {
+        trainingStats_t *stats =
+            tracedGrads(model, 6, defaultLossConfig(CROSS_ENTROPY), REDUCTION_MEAN, input, label,
+                        capturePr4FlattenCarry, &carry);
+        if (step == 0) {
+            firstLoss = stats->loss;
+        }
+        lastLoss = stats->loss;
+        freeTrainingStats(stats);
+        sgdFns.step(sgd);
+        sgdFns.zero(sgd);
+    }
+
+    /* CAPTURE -> FREE (reverse init order) -> assert (Unity longjmps out of
+     * the first failure, so nothing may be read after the teardown). */
+    bool codesMoved = memcmp(before, convWTensor->data, convWBytes) != 0;
+    conv1dConfig_t *convCfg = conv->config->conv1d;
+    /* #423 item 4: the conv really ran NATIVE ARITH_BFP end-to-end -- forward
+     * and all three backward slots -- over BFP-stored weights. */
+    bool convAllSlotsBfp =
+        convCfg->forwardMath.type == ARITH_BFP && convCfg->weightGradMath.type == ARITH_BFP &&
+        convCfg->biasGradMath.type == ARITH_BFP && convCfg->propLossMath.type == ARITH_BFP;
+    int convWeightStorage = (int)convWTensor->quantization->type;
+    int linearForwardType = (int)linear->config->linear->forwardMath.type;
+    bool allProbesFired =
+        carry.seenFwdPool && carry.seenFwdFlat && carry.seenAgradFlat && carry.seenAgradPool;
+    bool carryGroupCountsMatch =
+        carry.nFwdPool == carry.nFwdFlat && carry.nAgradFlat == carry.nAgradPool;
+    const uint8_t zeroState = 127; /* exponentBits 8 -> bias 127 */
+    bool fwdSourceGridMoved = false;
+    bool agradSourceGridMoved = false;
+    for (size_t g = 0; g < carry.nFwdPool; g++) {
+        if (carry.fwdPool[g] != zeroState) {
+            fwdSourceGridMoved = true;
+        }
+    }
+    for (size_t g = 0; g < carry.nAgradFlat; g++) {
+        if (carry.agradFlat[g] != zeroState) {
+            agradSourceGridMoved = true;
+        }
+    }
+
+    freeTensor(label);
+    freeTensor(input);
+    freeOptim(sgd);
+    freeSoftmaxLayer(softmax);
+    freeLinearLayerShellOnly(linear);
+    freeFlattenLayer(flatten);
+    freeMaxPool1dLayer(pool);
+    freeReluLayer(relu);
+    freeConv1dLayerShellOnly(conv);
+    freeQuantization(momentumQ);
+    freeQuantization(bfpWireQ);
+
+    TEST_ASSERT_TRUE_MESSAGE(convAllSlotsBfp,
+                             "the capstone's conv must run NATIVE ARITH_BFP in all four math "
+                             "slots (#423 item 4: BFP conv backward end-to-end)");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(ARITH_BFP, linearForwardType,
+                                  "the capstone's linear must run native ARITH_BFP too");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, convWeightStorage,
+                                  "conv weights must stay BFP-stored after training");
+    TEST_ASSERT_TRUE_MESSAGE(isfinite(firstLoss) && isfinite(lastLoss),
+                             "uniform-BFP training must stay finite through every PR4 arm");
+    TEST_ASSERT_TRUE_MESSAGE(lastLoss < firstLoss,
+                             "uniform-BFP conv->relu->pool->flatten->linear->softmax+CE must "
+                             "converge (the vision-gate acceptance)");
+    TEST_ASSERT_TRUE_MESSAGE(codesMoved,
+                             "the SGD write-back must land in the conv weight's BFP storage");
+    TEST_ASSERT_TRUE_MESSAGE(allProbesFired,
+                             "all four BFP wire probes around Flatten must have fired");
+    TEST_ASSERT_TRUE_MESSAGE(carryGroupCountsMatch,
+                             "a reshape preserves the element count, so both wires of each pair "
+                             "must derive the same numGroups");
+    TEST_ASSERT_TRUE_MESSAGE(fwdSourceGridMoved,
+                             "non-vacuity: MaxPool's output grid must have left the zero state");
+    TEST_ASSERT_TRUE_MESSAGE(agradSourceGridMoved,
+                             "non-vacuity: the grad entering Flatten must have left the zero "
+                             "state");
+    TEST_ASSERT_EQUAL_UINT8_ARRAY_MESSAGE(carry.fwdPool, carry.fwdFlat, carry.nFwdPool,
+                                          "Flatten forward must carry the per-group exponents "
+                                          "verbatim (Task 3)");
+    TEST_ASSERT_EQUAL_UINT8_ARRAY_MESSAGE(carry.agradFlat, carry.agradPool, carry.nAgradFlat,
+                                          "Flatten backward must carry the per-group exponents "
+                                          "verbatim (Task 3)");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMultiLayerBackward_WithCrossEntropy_DoesNotCrash);
@@ -1790,5 +2052,6 @@ int main(void) {
     RUN_TEST(testBfpGradStorageTrainingAccumulatesAndSteps);
     RUN_TEST(testBfpGradStorageTrainsUnderReductionMean);
     RUN_TEST(testBfpConvGradStorageTrainsUnderDefaultEpoch);
+    RUN_TEST(testBfpUniformPoolActivationModelTrains);
     return UNITY_END();
 }

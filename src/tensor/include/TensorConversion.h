@@ -63,10 +63,14 @@ void requantSymInt32TensorToScale(tensor_t *inputTensor, tensor_t *outputTensor)
  * derives one FRESH stored exponent per TARGET group (absmax -> smallest E
  * with absmax/2^E <= qMax, D6 clamps at the stored-range ends); pass 2
  * re-streams and packs mantissas at the target's mantissaBits with the
- * TARGET config's roundingMode. Source exponents are never copied. This one
- * cell covers the OUT_WRITE width-restore, mantissa/exponent-width changes,
- * and re-blocking (any source geometry -> any target geometry). n == 0
- * writes zero-state exponents (= bias) and no payload.
+ * TARGET config's roundingMode. A source element that DECODES to a
+ * non-finite value fails fast (#421 ruling R9) -- only a hand-built
+ * non-finite-scale grid can produce one, since derived exponents cap at
+ * bias + 127 and #420 G5 rejects deserialized records above that cap.
+ * Source exponents are never copied. This one cell covers the OUT_WRITE
+ * width-restore, mantissa/exponent-width changes, and re-blocking (any
+ * source geometry -> any target geometry). n == 0 writes zero-state
+ * exponents (= bias) and no payload.
  *
  * NOT in-place capable (unlike requantSymInt32Tensor): pass 2 re-reads the
  * source under its original exponents. Flat storage order; orderOfDimensions
@@ -100,10 +104,16 @@ void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint8_t max
    uninitialized. codesOut is caller-owned, n entries. Writing into the
    CALLER's codesOut is exempt from the no-O(n)-internal-scratch converter
    contract by design -- this function allocates nothing.
-   Value-domain: saturates (D6), never aborts -- and the saturating clamp
-   runs in the FLOAT domain before the round, since at a narrow exponentBits
-   the D6-capped scale can push values / scale out of int32 range for
-   entirely finite inputs (#421 U2). */
+   Value-domain: saturates (D6), never aborts on a FINITE value -- and the
+   saturating clamp runs in the FLOAT domain before the round, since at a
+   narrow exponentBits the D6-capped scale can push values / scale out of
+   int32 range for entirely finite inputs (#421 U2). A NON-FINITE input value
+   is the one hard failure (#421 ruling R9, the value-side twin of the
+   accumulate engines' increment guard): BFP has no NaN/inf code, so dropping
+   the value or saturating it would lose or invent data. Reachable in
+   practice -- a diverged step's NaN loss arrives here through the funnel's
+   FLOAT32-operand staging -- and previously platform-divergent, not merely
+   undefined. */
 void quantizeFloatBufferToBfpCodes(const float *values, size_t n, bfpQConfig_t *outQC,
                                    int32_t *codesOut);
 char *quantTypeToString(qtype_t t);

@@ -37,18 +37,6 @@ static tensor_t *makeFloatTensor(size_t const *dims, size_t numDims, float const
     return t;
 }
 
-/* BFP epic PR2 Task 8: BFP wire (per-tensor {1,0}, 8-bit mantissas). The buffer
- * is BFP-SIZED, so an unguarded float* access runs past it. */
-static tensor_t *makeBfpTensor(size_t const *dims, size_t numDims) {
-    size_t *ownedDims = reserveMemory(numDims * sizeof(size_t));
-    memcpy(ownedDims, dims, numDims * sizeof(size_t));
-    size_t *order = reserveMemory(numDims * sizeof(size_t));
-    setOrderOfDimsForNewTensor(numDims, order);
-    shape_t *shape = reserveMemory(sizeof(shape_t));
-    setShape(shape, ownedDims, numDims, order);
-    return initTensor(shape, quantizationInitBfp(8, 8, HALF_AWAY), NULL);
-}
-
 static avgPool1dRunResult_t avgPool1dBuild(float const *inputData, size_t const *inputDims,
                                            size_t kSize, paddingType_t padding, size_t dilation,
                                            size_t stride, float *outputBuf,
@@ -642,6 +630,49 @@ void testAvgPool1dForwardBfpPacksOutputWire(void) {
     freeTensor(input);
 }
 
+/* BFP epic PR4 (R-P4 backward): the dx arm is FUNNEL-ROUTED, mirroring the
+ * existing ARITH_SYM_INT32 arm — the prologue unpacks the BFP-stored lossGrad
+ * and the OUT_WRITE epilogue writes propLoss. A FLOAT32 propLoss wire makes
+ * that epilogue a memmove, so the comparison is bit-exact. */
+void testAvgPool1dBackwardBfpScattersIntoFloat32Raw(void) {
+    size_t inputDims[] = {1, 2, 8};
+    size_t outputDims[] = {1, 2, 4};
+    int32_t gyCodes[8];
+    for (size_t i = 0; i < kBfpAvgPoolGyCodes_len; i++) {
+        gyCodes[i] = kBfpAvgPoolGyCodes[i];
+    }
+    tensor_t *lossGrad =
+        buildBfpWireWithCodes(outputDims, 3, (uint8_t)kBfpAvgPoolMantissaBits,
+                              (uint8_t)kBfpAvgPoolExponentBits, (size_t)kBfpAvgPoolOutNumGroups,
+                              (size_t)kBfpAvgPoolOutGroupSize, gyCodes, kBfpAvgPoolGyExps);
+    tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
+    quantization_t *wireQ = quantizationInitBfpGrouped(
+        (uint8_t)kBfpAvgPoolMantissaBits, (uint8_t)kBfpAvgPoolExponentBits, HALF_AWAY,
+        (size_t)kBfpAvgPoolOutNumGroups, (size_t)kBfpAvgPoolOutGroupSize);
+    kernel_t k;
+    avgPool1dConfig_t cfg;
+    layerConfig_t lc;
+    layer_t layer;
+    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, VALID,
+                           (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, wireQ);
+
+    /* Called TWICE on purpose. dx is OUT_WRITE, so a repeated backward must
+     * reproduce the same numbers — and that is also what makes the kernel's
+     * memset of the funnel's uninitialized Phase-2 scratch observable: on a
+     * first call that stack VLA happens to be zero, so dropping the memset
+     * would pass a single-call test while the second call accumulates on top
+     * of the first one's result. */
+    avgPool1dBackward(&layer, NULL, lossGrad, propLoss);
+    avgPool1dBackward(&layer, NULL, lossGrad, propLoss);
+
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(kBfpAvgPoolExpectedBackward, propLoss->data,
+                                     kBfpAvgPoolExpectedBackward_len * sizeof(float),
+                                     "the dx scatter accumulates directly in the FLOAT32 raw");
+    freeQuantization(wireQ);
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+}
+
 /* BFP epic PR4 (R-P7d): the rule-1 mirror. A pinned ARITH_BFP forward with a
  * NULL or non-BFP outputQ has no width anchor and must die EAGERLY — the
  * userApi factories copy layerQuant_t slots by value and never call
@@ -808,34 +839,51 @@ void testAvgPool1dForwardBfpWireUnderPinnedFloat32(void) {
 void setUp(void) {}
 void tearDown(void) {}
 
-/* BFP epic PR2 Task 8: avgPool1dBackward's ARITH_FLOAT32 arm runs outside
- * executeOp and raw-casts lossGrad/propLoss to float*. Task 8 made BFP dx wires
- * allocatable, and an ARITH_FLOAT32 propLossMath -- pinned, or derived as such
- * before the Task 9 flip -- selects exactly that arm; guard the storage dtype. */
-void testAvgPool1dBackwardRejectsBfpWire(void) {
-    size_t inputDims[] = {1, 1, 4};
-    size_t outputDims[] = {1, 1, 3};
-    float outputData[1 * 1 * 3] = {0};
-    avgPool1dRunResult_t r =
-        avgPool1dBuild(input_avgPool1d_basic, inputDims, 2, VALID, 1, 1, outputData, outputDims);
+/* BFP epic PR4 (R-P7d): the guard is NARROWED, not removed — a BFP wire under
+ * the raw-casting FLOAT32/SYM arms must still die, and the ARITH_BFP backward
+ * needs a BFP-typed propLossQ anchor (R-P1). */
+void testAvgPool1dBackwardBfpGuardsNarrowedNotRemoved(void) {
+    size_t inputDims[] = {1, 2, 8};
+    size_t outputDims[] = {1, 2, 4};
+    tensor_t *bfpLossGrad = buildBfpWireWithCodes(
+        outputDims, 3, (uint8_t)kBfpAvgPoolMantissaBits, (uint8_t)kBfpAvgPoolExponentBits,
+        (size_t)kBfpAvgPoolOutNumGroups, (size_t)kBfpAvgPoolOutGroupSize, NULL, NULL);
+    tensor_t *floatLossGrad = makeFloatTensor(outputDims, 3, NULL);
+    tensor_t *floatPropLoss = makeFloatTensor(inputDims, 3, NULL);
+    tensor_t *bfpPropLoss = buildBfpWireWithCodes(
+        inputDims, 3, (uint8_t)kBfpAvgPoolMantissaBits, (uint8_t)kBfpAvgPoolExponentBits,
+        (size_t)kBfpAvgPoolInNumGroups, (size_t)kBfpAvgPoolInGroupSize, NULL, NULL);
 
-    tensor_t *lossGrad = makeFloatTensor(outputDims, 3, NULL);
-    tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
-    tensor_t *bfpLossGrad = makeBfpTensor(outputDims, 3);
-    tensor_t *bfpPropLoss = makeBfpTensor(inputDims, 3);
+    quantization_t *floatQ = quantizationInitFloat();
+    kernel_t kf;
+    avgPool1dConfig_t floatCfg;
+    layerConfig_t floatLc;
+    layer_t floatLayer;
+    avgPool1dBuildBfpLayer(&floatCfg, &kf, &floatLc, &floatLayer, (size_t)kBfpAvgPoolKernelSize,
+                           VALID, (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, floatQ);
+    ASSERT_EXITS_WITH_FAILURE(avgPool1dBackward(&floatLayer, NULL, bfpLossGrad, floatPropLoss));
+    ASSERT_EXITS_WITH_FAILURE(avgPool1dBackward(&floatLayer, NULL, floatLossGrad, bfpPropLoss));
 
-    ASSERT_EXITS_WITH_FAILURE(avgPool1dBackward(r.layer, r.input, bfpLossGrad, propLoss));
-    ASSERT_EXITS_WITH_FAILURE(avgPool1dBackward(r.layer, r.input, lossGrad, bfpPropLoss));
+    kernel_t kb;
+    initKernel(&kb, (size_t)kBfpAvgPoolKernelSize, VALID, (size_t)kBfpAvgPoolDilation,
+               (size_t)kBfpAvgPoolStride);
+    avgPool1dConfig_t bfpCfg = {0};
+    bfpCfg.kernel = &kb;
+    bfpCfg.propLossMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    bfpCfg.propLossQ = NULL;
+    layerConfig_t bfpLc = {.avgPool1d = &bfpCfg};
+    layer_t bfpLayer = {.type = AVGPOOL1D, .config = &bfpLc};
+    ASSERT_EXITS_WITH_FAILURE(avgPool1dBackward(&bfpLayer, NULL, bfpLossGrad, floatPropLoss));
 
+    freeQuantization(floatQ);
     freeTensor(bfpPropLoss);
+    freeTensor(floatPropLoss);
+    freeTensor(floatLossGrad);
     freeTensor(bfpLossGrad);
-    freeTensor(propLoss);
-    freeTensor(lossGrad);
 }
 
 int main(void) {
     UNITY_BEGIN();
-    RUN_TEST(testAvgPool1dBackwardRejectsBfpWire);
     RUN_TEST(testAvgPool1dForwardBasic);
     RUN_TEST(testAvgPool1dBackwardBasic);
     RUN_TEST(testAvgPool1dMultiChannel);
@@ -857,5 +905,7 @@ int main(void) {
     RUN_TEST(testAvgPool1dForwardBfpRejectsMismatchedOutputShape);
     RUN_TEST(testAvgPool1dForwardBfpSumHeadroomGuardIsWired);
     RUN_TEST(testAvgPool1dForwardBfpWireUnderPinnedFloat32);
+    RUN_TEST(testAvgPool1dBackwardBfpScattersIntoFloat32Raw);
+    RUN_TEST(testAvgPool1dBackwardBfpGuardsNarrowedNotRemoved);
     return UNITY_END();
 }

@@ -2180,3 +2180,50 @@ def avgpool1d_bfp_forward_ref(codes, exps, qc, batch, channels, geom, self_check
             "fixture is vacuous against group-structure bugs")
         assert any(v != 0.0 for v in out), "avgpool1d_bfp_forward_ref: all-zero output"
     return out
+
+
+def avgpool1d_bfp_backward_ref(gy_codes, gy_exps, gy_qc, batch, channels, geom,
+                               self_check=True):
+    """AvgPool1d ARITH_BFP dx reference (R-P4 backward): each output cell's
+    contribution is its EXACT dequant (code * 2^(E-bias), a lossless float32
+    multiply by a power of two) divided by K in float32, then scattered `+=`
+    into every valid window member. Contributions accumulate DIRECTLY in the
+    FLOAT32 raw -- there are no int32 partial sums across scattered writes, so
+    the backward carries NO sum-headroom guard (unlike the forward). The C
+    kernel memsets the funnel's uninitialized Phase-2 scratch first; this
+    reference starts from zeros for the same reason. Loop order (b, c, outPos,
+    then window members) mirrors the C exactly, because float32 addition is
+    not associative. Returns [batch*channels*input_length] floats."""
+    bias = 2 ** (gy_qc["exponent_bits"] - 1) - 1
+    length = geom["input_length"]
+    k = np.float32(geom["kernel_size"])
+    gx = [np.float32(0.0)] * (batch * channels * length)
+    hits = [0] * (batch * channels * length)
+    for b in range(batch):
+        for c in range(channels):
+            base = (b * channels + c) * length
+            for o in range(geom["out_len"]):
+                first, count = window_slice_1d(geom, o)
+                out_idx = (b * channels + c) * geom["out_len"] + o
+                g = _bfp_group_of(out_idx, gy_qc["group_size"])
+                contribution = np.float32(
+                    np.float32(np.ldexp(np.float32(gy_codes[out_idx]),
+                                        np.int32(gy_exps[g] - bias))) / k)
+                for i in range(count):
+                    idx = base + first + i * geom["dilation"]
+                    gx[idx] = np.float32(gx[idx] + contribution)
+                    hits[idx] += 1
+    collisions = sum(1 for h in hits if h >= 2)
+    out = [float(v) for v in gx]
+    if self_check:
+        assert collisions >= 1, (
+            "avgpool1d_bfp_backward_ref: no input cell receives >= 2 contributions -- "
+            "the memset + accumulating scatter is unexercised")
+        assert any(v != 0.0 for v in out), "avgpool1d_bfp_backward_ref: all-zero dx"
+        collapsed = avgpool1d_bfp_backward_ref(gy_codes, [gy_exps[0]],
+                                               {**gy_qc, "group_size": 0}, batch, channels,
+                                               geom, self_check=False)
+        assert collapsed != out, (
+            "avgpool1d_bfp_backward_ref: per-tensor collapse is indistinguishable -- "
+            "fixture is vacuous against group-structure bugs")
+    return out

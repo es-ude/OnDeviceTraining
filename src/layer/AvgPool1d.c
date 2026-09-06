@@ -327,20 +327,17 @@ void avgPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output) {
         output);
 }
 
-/* BFP epic PR2 Task 8: same outside-funnel hole as Softmax backward. The
- * ARITH_FLOAT32 arm below runs OUTSIDE executeOp and raw-casts lossGrad/propLoss
- * to float*, selected by the layer's DECLARED propLossMath -- so a BFP dx wire
- * whose math slot is pinned to (or, before the Task 9 flip, derived as)
- * ARITH_FLOAT32 lands straight in those casts (4x heap over-read on lossGrad, over-write into the
- * packed propLoss buffer). Reachable only since this task's initGradTensor BFP
- * arm; before it a BFP propLossQ died in the allocator's default arm. Forward
- * needs no guard (it runs inside executeOp). BFP pooling is epic PR4 (spec
- * section 7), named in the message so the failure points at the roadmap.
- * forwardInput is NOT guarded: this layer never dereferences it. */
+/* BFP epic PR4 (R-P4): the ARITH_BFP arm below IS the native pooling path, so
+ * this guard is NARROWED to the two arms that raw-view ->data in their own
+ * storage format — a packed BFP wire read as float* / int32_t* is a 4x heap
+ * over-read on lossGrad and an over-write into the packed propLoss buffer.
+ * Keyed on the wire's STORAGE dtype, not the declared arithmetic (#315
+ * parity). forwardInput is NOT guarded: this layer never dereferences it. */
 static void requireNoBfpWire(const tensor_t *t, const char *what) {
     if (t->quantization->type == BFP) {
-        PRINT_ERROR("%s: BFP pooling semantics arrive with epic PR4 -- keep BFP off this wire "
-                    "or use FLOAT32 wires",
+        PRINT_ERROR("%s: this arm raw-views the wire in its own storage format and cannot read "
+                    "packed BFP mantissas -- derive ARITH_BFP from a BFP wire config, or keep "
+                    "BFP off this wire",
                     what);
         exit(1);
     }
@@ -440,16 +437,88 @@ static void avgPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *
         ((symInt32QConfig_t *)lossGrad->quantization->qConfig)->scale / (float)cfg->kernel->size;
 }
 
+/* BFP epic PR4 (R-P4 backward): funnel-routed dx, the exact shape of the
+ * ARITH_SYM_INT32 arm above. Each output cell's contribution is its EXACT
+ * dequant (mantissa * 2^(E-bias) -- a lossless float32 multiply by a power of
+ * two) divided by K, accumulated DIRECTLY in the FLOAT32 raw intermediate
+ * (D7). There are no int32 partial sums across the scattered writes, so this
+ * kernel needs NO sum-headroom guard (unlike the forward's window sum). rawOut
+ * is the funnel's uninitialized Phase-2 scratch, so it is memset before the
+ * accumulating `+=` (overlapping windows hit the same input cell). */
+static void avgPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
+                                       const void *ctx) {
+    (void)n;
+    (void)auxOut;
+    const avgPool1dConfig_t *cfg = ctx;
+    tensor_t *lossGrad = ops[0];
+
+    if (lossGrad->shape->numberOfDimensions != 3 || rawOut->shape->numberOfDimensions != 3) {
+        PRINT_ERROR("AvgPool1d backward BFP: lossGrad and rawOut must both be rank-3 [batch, "
+                    "channels, length], got ranks %zu and %zu",
+                    lossGrad->shape->numberOfDimensions, rawOut->shape->numberOfDimensions);
+        exit(1);
+    }
+    size_t batch = lossGrad->shape->dimensions[0];
+    size_t channels = lossGrad->shape->dimensions[1];
+    size_t outputLength = lossGrad->shape->dimensions[2];
+    size_t inputLength = rawOut->shape->dimensions[2];
+
+    windowGeometry1d_t geom = windowGeometry1dCalc(inputLength, cfg->kernel);
+    if (geom.outputLength != outputLength) {
+        PRINT_ERROR("AvgPool1d backward: lossGrad outputLength (%zu) does not match "
+                    "geometry-derived (%zu)",
+                    outputLength, geom.outputLength);
+        exit(1);
+    }
+    /* All three dims (F5): the scatter index is (b * channels + c) *
+     * inputLength + inputIdx with batch/channels off the LOSSGRAD, and the
+     * memset below sizes batch * channels * inputLength floats — a rawOut that
+     * agrees only on inputLength is both memset and scattered past its end. */
+    poolBfpRequireDims3(rawOut, batch, channels, inputLength, "AvgPool1d backward BFP (rawOut)");
+
+    const bfpQConfig_t *qC = lossGrad->quantization->qConfig;
+    validateBfpQConfigShape(qC, calcNumberOfElementsByTensor(lossGrad));
+    const int32_t expBias = bfpExponentBias(qC);
+
+    int32_t const *gyArr = (int32_t const *)lossGrad->data;
+    float *gxArr = (float *)rawOut->data;
+    const float divisor = (float)cfg->kernel->size;
+
+    memset(gxArr, 0, batch * channels * inputLength * sizeof(float));
+
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t c = 0; c < channels; c++) {
+            for (size_t outPos = 0; outPos < outputLength; outPos++) {
+                windowSlice1d_t slice = windowSlice1dAt(&geom, outPos);
+                size_t outIdx = (b * channels + c) * outputLength + outPos;
+                size_t g = bfpGroupOf(qC, outIdx);
+                float contribution =
+                    ldexpf((float)gyArr[outIdx], (int)qC->exponents[g] - expBias) / divisor;
+
+                for (size_t i = 0; i < slice.validCount; i++) {
+                    size_t inputIdx = slice.firstValidInputIdx + i * geom.dilation;
+                    gxArr[(b * channels + c) * inputLength + inputIdx] += contribution;
+                }
+            }
+        }
+    }
+}
+
 void avgPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
                        tensor_t *propLoss) {
-    requireNoBfpWire(lossGrad, "AvgPool1d backward (lossGrad)");
-    requireNoBfpWire(propLoss, "AvgPool1d backward (propLoss)");
     avgPool1dConfig_t *cfg = layer->config->avgPool1d;
     switch (cfg->propLossMath.type) {
     case ARITH_FLOAT32:
+        /* Runs OUTSIDE executeOp and raw-casts both wires to float*; a packed
+         * BFP wire would be read as wide scalars (4x heap over-read on
+         * lossGrad, over-write into the packed propLoss buffer). #315 parity. */
+        requireNoBfpWire(lossGrad, "AvgPool1d backward (lossGrad)");
+        requireNoBfpWire(propLoss, "AvgPool1d backward (propLoss)");
         avgPool1dBackwardFloat(layer, forwardInput, lossGrad, propLoss);
         break;
     case ARITH_SYM_INT32:
+        requireNoBfpWire(lossGrad, "AvgPool1d backward (lossGrad)");
+        requireNoBfpWire(propLoss, "AvgPool1d backward (propLoss)");
         (void)forwardInput; // not needed: window geometry comes from kernel + shapes
         executeOp(
             &(opSpec_t){
@@ -462,6 +531,28 @@ void avgPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGra
             },
             propLoss);
         break;
+    case ARITH_BFP: {
+        const bfpQConfig_t *anchor = poolBfpWireAnchor(cfg->propLossQ, "AvgPool1d backward");
+        bfpQConfig_t stage = {.exponents = NULL,
+                              .numGroups = 1,
+                              .groupSize = 0,
+                              .roundingMode = cfg->propLossMath.roundingMode,
+                              .mantissaBits = anchor->mantissaBits,
+                              .exponentBits = anchor->exponentBits};
+        (void)forwardInput; // not needed: window geometry comes from kernel + shapes
+        executeOp(
+            &(opSpec_t){
+                .kernel = avgPool1dBackwardKernelBfp,
+                .ctx = cfg,
+                .inputs = (tensor_t *[]){lossGrad},
+                .nInputs = 1,
+                .arithmetic = cfg->propLossMath,
+                .mode = OUT_WRITE,
+                .bfpStage = {lossGrad->quantization->type == FLOAT32 ? &stage : NULL, NULL, NULL},
+            },
+            propLoss);
+        break;
+    }
     default:
         PRINT_ERROR("AvgPool1d backward: quantization type not implemented");
         exit(1);

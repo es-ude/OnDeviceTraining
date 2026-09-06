@@ -25,6 +25,7 @@ import torch.nn.functional as F
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 from sym_gold import (
     assert_rounding_canary,
+    avgpool1d_bfp_backward_ref,
     avgpool1d_bfp_forward_ref,
     bfp_quantize_grouped,
     emit_float_scalar,
@@ -428,6 +429,21 @@ def emit_bfp_fixtures(parts):
         "epilogue would be indistinguishable")
     parts.append(emit_int32_array("kBfpAvgPoolPackedCodes", torch.tensor(pk_codes)))
     parts.append(emit_uint8_array("kBfpAvgPoolPackedExps", pk_exps))
+
+    # (4) BACKWARD: gy [1, 2, 4] = 8 elements, grid {2 groups x 4}. Same
+    # dilated geometry, so windows overlap (index 2 is covered by outputs 0
+    # and 2) and the memset + accumulating scatter is load-bearing.
+    gy_codes = [9, -21, 4, 30, -12, 7, 25, -3]
+    gy_exps = [129, 124]
+    gy_qc = {"mantissa_bits": BFP_AVG_MANTISSA_BITS,
+             "exponent_bits": BFP_AVG_EXPONENT_BITS,
+             "group_size": BFP_AVG_OUT_GROUP_SIZE}
+    bwd = avgpool1d_bfp_backward_ref(gy_codes, gy_exps, gy_qc, BFP_AVG_BATCH,
+                                     BFP_AVG_CHANNELS, geom)
+    parts.append(emit_int32_array("kBfpAvgPoolGyCodes", torch.tensor(gy_codes)))
+    parts.append(emit_uint8_array("kBfpAvgPoolGyExps", gy_exps))
+    parts.append(emit_float_array("kBfpAvgPoolExpectedBackward",
+                                  torch.tensor(bwd, dtype=torch.float32)))
 
 
 def main() -> int:

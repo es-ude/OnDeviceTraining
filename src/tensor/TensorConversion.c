@@ -1041,6 +1041,16 @@ void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint8_t max
  * value-domain quantization, but chunked and emitting a PACKED payload. */
 static void packFloatBufferAsBfp(const float *values, size_t n, bfpQConfig_t *outQC, uint8_t *dst,
                                  const char *what) {
+    /* #421 U9: the fifth exponents[g] indexer, same exact-division invariant
+     * (numGroups * groupSize == n) the engines and the streaming twin already
+     * validate. Pass 2 derives g = idx / gsz with no bound against numGroups,
+     * so a violating geometry reads exponents[] OUT OF BOUNDS (< n) or
+     * silently mis-blocks (> n) -- and the route is PUBLIC:
+     * conversionMatrix[FLOAT32][BFP] takes the geometry from the TARGET while
+     * n comes from the SOURCE, so a shape-agnostic template produces the
+     * mismatch with neither tensor malformed on its own (#420 G2's rationale,
+     * verbatim). */
+    validateBfpQConfigShape(outQC, n);
     const float qMax = powf(2, (float)outQC->mantissaBits - 1) - 1;
     const float qMin = -powf(2, (float)outQC->mantissaBits - 1);
     const int32_t bias = bfpExponentBias(outQC);
@@ -1096,6 +1106,13 @@ static void packFloatBufferAsBfp(const float *values, size_t n, bfpQConfig_t *ou
  * by design; allocates nothing. Contract details in TensorConversion.h. */
 void quantizeFloatBufferToBfpCodes(const float *values, size_t n, bfpQConfig_t *outQC,
                                    int32_t *codesOut) {
+    /* #421 U9: the packed sibling's guard, for the same invariant. This form
+     * never reads out of bounds (its per-group loops clip `end` to n), but a
+     * numGroups * groupSize < n geometry leaves the codesOut TAIL
+     * UNINITIALIZED -- the funnel would then hand a kernel uninitialized
+     * mantissa scratch. Its one production caller is funnel-internal staging
+     * (ExecuteOp.c), whose template is per-tensor {1,0} today. */
+    validateBfpQConfigShape(outQC, n);
     float qMax = (float)((1 << (outQC->mantissaBits - 1)) - 1);
     int32_t qMin = -(1 << (outQC->mantissaBits - 1));
     int32_t bias = bfpExponentBias(outQC);

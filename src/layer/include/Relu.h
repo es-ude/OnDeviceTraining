@@ -21,6 +21,7 @@ void reluForwardBfp(tensor_t *input, tensor_t *output);
 void reluForward(layer_t *reluLayer, tensor_t *input, tensor_t *output);
 
 void reluBackwardFloat(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss);
+void reluBackwardBfp(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss);
 void reluBackward(layer_t *reluLayer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss);
 
 void reluCalcOutputShape(layer_t *reluLayer, shape_t *inputShape, shape_t *outputShape);

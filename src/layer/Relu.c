@@ -122,13 +122,60 @@ void reluBackwardSymInt32(tensor_t *forwardInput, tensor_t *loss, tensor_t *prop
     propLossQC->scale = lossQC->scale;
 }
 
+/* BFP epic PR4 (R-P2 backward): mask by the SIGN of forwardInput's packed
+ * codes (exponents are unsigned scale factors, so code <= 0 iff value <= 0 —
+ * exact parity with the FLOAT32/SYM arms' `input[i] <= 0`), copy the loss code
+ * where kept, write code 0 where dropped, and carry loss's group exponents
+ * verbatim onto propLoss. Same transparency argument as the forward: zeroing
+ * codes only shrinks a block's absmax, so no re-derivation (= no second
+ * quantization, D8) is needed. forwardInput's GEOMETRY is NOT gated — only its
+ * dtype and element count matter, since it is read sign-only.
+ *
+ * ALL THREE wires are length-gated: this loop unpacks from forwardInput AND
+ * loss and packs into propLoss, all sized off ONE count, so any wire shorter
+ * than the anchor is an over-read or an over-write. A per-tensor {1, 0} grid
+ * matches any length, so validateBfpQConfigShape alone would not catch it. */
+void reluBackwardBfp(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
+    size_t numberOfElements = calcNumberOfElementsByTensor(forwardInput);
+    const bfpQConfig_t *inQC = forwardInput->quantization->qConfig;
+    const bfpQConfig_t *lossQC = loss->quantization->qConfig;
+    bfpQConfig_t *propLossQC = propLoss->quantization->qConfig;
+    /* forwardInput is the ANCHOR, so its count comparison is trivially true —
+     * the call is here for the GRID half (does inQC tile numberOfElements?),
+     * kept in the same idiom rather than a bare validateBfpQConfigShape so
+     * every wire in this function is admitted through one door. */
+    bfpRequireElementCount(inQC, numberOfElements, numberOfElements,
+                           "ReLU backward BFP (forwardInput grid)");
+    bfpRequireElementCount(lossQC, calcNumberOfElementsByTensor(loss), numberOfElements,
+                           "ReLU backward BFP (loss vs forwardInput)");
+    bfpRequireSameGeometry(lossQC, numberOfElements, propLossQC,
+                           calcNumberOfElementsByTensor(propLoss),
+                           "ReLU backward BFP (loss -> propLoss)");
+
+    int32_t inCodes[ODT_CONVERSION_CHUNK_ELEMS];
+    int32_t lossCodes[ODT_CONVERSION_CHUNK_ELEMS];
+    for (size_t off = 0; off < numberOfElements; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        size_t count = numberOfElements - off < ODT_CONVERSION_CHUNK_ELEMS
+                           ? numberOfElements - off
+                           : ODT_CONVERSION_CHUNK_ELEMS;
+        unpackSignExtend((const uint8_t *)forwardInput->data + off * inQC->mantissaBits / 8,
+                         inQC->mantissaBits, 0, inCodes, count);
+        unpackSignExtend((const uint8_t *)loss->data + off * lossQC->mantissaBits / 8,
+                         lossQC->mantissaBits, 0, lossCodes, count);
+        for (size_t i = 0; i < count; i++) {
+            if (inCodes[i] <= 0) {
+                lossCodes[i] = 0;
+            }
+        }
+        byteConversion((uint8_t *)lossCodes, 32,
+                       (uint8_t *)propLoss->data + off * propLossQC->mantissaBits / 8,
+                       propLossQC->mantissaBits, count);
+    }
+    memcpy(propLossQC->exponents, lossQC->exponents, lossQC->numGroups);
+}
+
 void reluBackward(layer_t *reluLayer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
     reluConfig_t *reluConfig = reluLayer->config->relu;
-    /* Ahead of the per-arm #315 guards below, which also reject a BFP wire but
-     * only as "not the dtype this arm wants" — this says WHY and what to do. */
-    requireNoBfpWire(forwardInput, "ReLU backward (forwardInput)");
-    requireNoBfpWire(loss, "ReLU backward (loss)");
-    requireNoBfpWire(propLoss, "ReLU backward (propLoss)");
 
     switch (reluConfig->propLossMath.type) {
     case ARITH_FLOAT32:
@@ -161,6 +208,21 @@ void reluBackward(layer_t *reluLayer, tensor_t *forwardInput, tensor_t *loss, te
             exit(1);
         }
         reluBackwardSymInt32(forwardInput, loss, propLoss);
+        break;
+    case ARITH_BFP:
+        /* R-P2: all three wires are read/written in the PACKED code domain, so
+         * all three must be BFP-stored; the loss/propLoss GRID identity is
+         * enforced inside reluBackwardBfp (forwardInput is read sign-only and
+         * may carry any BFP grid). */
+        if (forwardInput->quantization->type != BFP || loss->quantization->type != BFP ||
+            propLoss->quantization->type != BFP) {
+            PRINT_ERROR("ReLU backward: ARITH_BFP arm requires BFP wires — got forwardInput %d, "
+                        "loss %d, propLoss %d",
+                        (int)forwardInput->quantization->type, (int)loss->quantization->type,
+                        (int)propLoss->quantization->type);
+            exit(1);
+        }
+        reluBackwardBfp(forwardInput, loss, propLoss);
         break;
     default:
         PRINT_ERROR("Unknown QType!");

@@ -450,6 +450,78 @@ void testReluForwardBfpArmDispatchesThroughReluForward(void) {
     freeTensor(input);
 }
 
+/* BFP epic PR4 (R-P2 backward): the mask is the SIGN of forwardInput's packed
+ * codes — exponents are unsigned scale factors, so the sign bit alone decides
+ * kept/dropped and no dequant is needed. Kept positions copy the loss code
+ * verbatim, dropped positions write code 0, and loss's group exponents are
+ * carried verbatim onto propLoss. forwardInput deliberately carries a
+ * DIFFERENT grid (per-tensor, m=8) from the loss/propLoss pair: its geometry
+ * is not gated because it is read sign-only. */
+void testReluBackwardBfpMasksBySignAndCarriesExponents(void) {
+    size_t dims[] = {1, 8};
+    int32_t fwdCodes[8] = {5, -3, 0, 40, -1, 17, 9, -80};
+    uint8_t fwdExps[1] = {129};
+    int32_t lossCodes[8] = {11, -6, 30, -12, 4, -20, 7, 25};
+    uint8_t lossExps[2] = {131, 124};
+    int32_t propCodes[8] = {-9, -9, -9, -9, -9, -9, -9, -9};
+    uint8_t propExps[2] = {127, 127};
+    tensor_t *forwardInput = buildBfpWireWithCodes(dims, 2, 8, 8, 1, 0, fwdCodes, fwdExps);
+    tensor_t *loss = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, lossCodes, lossExps);
+    tensor_t *propLoss = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, propCodes, propExps);
+
+    reluBackwardBfp(forwardInput, loss, propLoss);
+
+    int32_t got[8];
+    unpackSignExtend(propLoss->data, 6, 0, got, 8);
+    /* mask: fwd code <= 0 drops (indices 1, 2, 4, 7) — <= 0 matches the
+     * FLOAT32/SYM arms exactly, and code <= 0 iff value <= 0 (scale > 0). */
+    int32_t expected[8] = {11, 0, 0, -12, 0, -20, 7, 0};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, 8);
+
+    bfpQConfig_t *propQC = propLoss->quantization->qConfig;
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(131, propQC->exponents[0],
+                                    "loss group 0 exponent must be carried verbatim");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(124, propQC->exponents[1],
+                                    "loss group 1 exponent must be carried verbatim");
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(forwardInput);
+}
+
+/* BFP epic PR4: the POSITIVE half of the backward narrowing — reluBackward must
+ * DISPATCH an ARITH_BFP config to reluBackwardBfp. Same argument as the
+ * forward twin: every death test here is already satisfied by the old blanket
+ * requireNoBfpWire, so only this one can tell a present arm from a deleted one. */
+void testReluBackwardBfpArmDispatchesThroughReluBackward(void) {
+    reluConfig_t cfg = {0};
+    cfg.propLossMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    layerConfig_t lc = {.relu = &cfg};
+    layer_t layer = {.type = RELU, .config = &lc};
+    size_t dims[] = {1, 8};
+    int32_t fwdCodes[8] = {5, -3, 0, 40, -1, 17, 9, -80};
+    uint8_t fwdExps[1] = {129};
+    int32_t lossCodes[8] = {11, -6, 30, -12, 4, -20, 7, 25};
+    uint8_t lossExps[2] = {131, 124};
+    int32_t propCodes[8] = {-9, -9, -9, -9, -9, -9, -9, -9};
+    uint8_t propExps[2] = {127, 127};
+    tensor_t *forwardInput = buildBfpWireWithCodes(dims, 2, 8, 8, 1, 0, fwdCodes, fwdExps);
+    tensor_t *loss = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, lossCodes, lossExps);
+    tensor_t *propLoss = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, propCodes, propExps);
+
+    reluBackward(&layer, forwardInput, loss, propLoss);
+
+    int32_t got[8];
+    unpackSignExtend(propLoss->data, 6, 0, got, 8);
+    int32_t expected[8] = {11, 0, 0, -12, 0, -20, 7, 0};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, 8);
+    bfpQConfig_t *propQC = propLoss->quantization->qConfig;
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(131, propQC->exponents[0],
+                                    "loss group 0 exponent must be carried verbatim");
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(forwardInput);
+}
+
 /* R-P7 asks for a "BFP wire under a pinned ARITH_FLOAT32" fake-quant test
  * mirroring testAvgPool1dForwardWithSymInt32Input. For the POOLS that test
  * exists (Task 5's testAvgPool1dForwardBfpWireUnderPinnedFloat32) because
@@ -522,35 +594,52 @@ void testReluForwardBfpArmRejectsUnequalElementCounts(void) {
     freeTensor(longWire);
 }
 
-/* Backward twin of the forward guard above (reluBackwardFloat raw-casts all
- * three wires). The pre-existing #315 arm guard already exits on a BFP wire —
- * this pins the BFP-specific GUIDED message instead of the cryptic "requires
- * FLOAT32 wires — got 6, 6, 6", and pins that the check runs before any
- * dereference. Documented in the task report as non-discriminating on exit code
- * alone (DeathTest.h matches the code, not the message). */
-void testReluBackwardRejectsBfpWire() {
-    layerFunctions_t reluFns = layerFunctions[RELU];
-    quantization_t *floatQ = quantizationInitFloat();
-    layerQuant_t lq;
-    layerQuantInitUniform(&lq, floatQ);
-    layer_t *reluLayer = reluLayerInit(&lq);
+/* BFP epic PR4 (R-P7d): FLOAT32 arm still rejects a BFP wire (#315 parity, now
+ * via the per-arm dtype guard); the ARITH_BFP arm rejects a non-BFP wire. */
+void testReluBackwardBfpArmRejectsNonBfpWire(void) {
+    reluConfig_t cfg = {0};
+    cfg.propLossMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    layerConfig_t lc = {.relu = &cfg};
+    layer_t layer = {.type = RELU, .config = &lc};
+    size_t dims[] = {1, 8};
+    tensor_t *bfpWire = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, NULL, NULL);
+    tensor_t *otherBfp = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, NULL, NULL);
+    tensor_t *floatWire = buildFloatTensor1D(8);
 
-    tensor_t *bfpFwdIn = buildBfpTensor1D(6);
-    tensor_t *floatLoss = buildFloatTensor1D(6);
-    tensor_t *floatPropLoss = buildFloatTensor1D(6);
-    ASSERT_EXITS_WITH_FAILURE(reluFns.backward(reluLayer, bfpFwdIn, floatLoss, floatPropLoss));
+    ASSERT_EXITS_WITH_FAILURE(reluBackward(&layer, floatWire, bfpWire, otherBfp));
+    ASSERT_EXITS_WITH_FAILURE(reluBackward(&layer, bfpWire, floatWire, otherBfp));
+    ASSERT_EXITS_WITH_FAILURE(reluBackward(&layer, bfpWire, otherBfp, floatWire));
 
-    tensor_t *floatFwdIn = buildFloatTensor1D(6);
-    tensor_t *bfpPropLoss = buildBfpTensor1D(6);
-    ASSERT_EXITS_WITH_FAILURE(reluFns.backward(reluLayer, floatFwdIn, floatLoss, bfpPropLoss));
+    freeTensor(floatWire);
+    freeTensor(otherBfp);
+    freeTensor(bfpWire);
+}
 
-    freeTensor(bfpPropLoss);
-    freeTensor(floatFwdIn);
-    freeTensor(floatPropLoss);
-    freeTensor(floatLoss);
-    freeTensor(bfpFwdIn);
-    freeReluLayer(reluLayer);
-    freeQuantization(floatQ);
+/* BFP epic PR4: the length gate on ALL THREE wires. Every tensor carries the
+ * per-tensor sentinel {1, 0} and identical widths, so the grid comparison is
+ * field-for-field equal and only the explicit count check separates them. One
+ * assertion per wire, so a gate that covers just the loss/propLoss pair (and
+ * lets a short forwardInput through) still fails this test. */
+void testReluBackwardBfpArmRejectsUnequalElementCounts(void) {
+    reluConfig_t cfg = {0};
+    cfg.propLossMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    layerConfig_t lc = {.relu = &cfg};
+    layer_t layer = {.type = RELU, .config = &lc};
+    size_t longDims[] = {1, 8};
+    size_t shortDims[] = {1, 4};
+    tensor_t *longA = buildBfpWireWithCodes(longDims, 2, 6, 8, 1, 0, NULL, NULL);
+    tensor_t *longB = buildBfpWireWithCodes(longDims, 2, 6, 8, 1, 0, NULL, NULL);
+    tensor_t *longC = buildBfpWireWithCodes(longDims, 2, 6, 8, 1, 0, NULL, NULL);
+    tensor_t *shortWire = buildBfpWireWithCodes(shortDims, 2, 6, 8, 1, 0, NULL, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(reluBackward(&layer, shortWire, longB, longC));
+    ASSERT_EXITS_WITH_FAILURE(reluBackward(&layer, longA, shortWire, longC));
+    ASSERT_EXITS_WITH_FAILURE(reluBackward(&layer, longA, longB, shortWire));
+
+    freeTensor(shortWire);
+    freeTensor(longC);
+    freeTensor(longB);
+    freeTensor(longA);
 }
 
 /* #315: reluBackward dispatches on the layer's DECLARED propLossMath and
@@ -591,6 +680,15 @@ void testReluBackwardExitsOnDtypeMismatch() {
 
     ASSERT_EXITS_WITH_FAILURE(reluFns.backward(reluLayer, &forwardInput, &loss, &propLoss));
 
+    /* BFP epic PR4: the same FLOAT32-declared arm fed a BFP-STORED wire. The
+     * blanket pre-dispatch reject is gone, so this now exercises the per-arm
+     * #315 guard on a packed wire. */
+    tensor_t *bfpWire = buildBfpTensor1D(6);
+    tensor_t *floatWire = buildFloatTensor1D(6);
+    ASSERT_EXITS_WITH_FAILURE(reluFns.backward(reluLayer, bfpWire, floatWire, floatWire));
+
+    freeTensor(floatWire);
+    freeTensor(bfpWire);
     freeReluLayer(reluLayer);
     freeQuantization(floatQ);
 }
@@ -608,7 +706,10 @@ int main(void) {
     RUN_TEST(testReluForwardFloat32ArmRejectsBfpWire);
     RUN_TEST(testReluForwardBfpArmRejectsNonBfpWireAndGeometryMismatch);
     RUN_TEST(testReluForwardBfpArmRejectsUnequalElementCounts);
-    RUN_TEST(testReluBackwardRejectsBfpWire);
+    RUN_TEST(testReluBackwardBfpMasksBySignAndCarriesExponents);
+    RUN_TEST(testReluBackwardBfpArmDispatchesThroughReluBackward);
+    RUN_TEST(testReluBackwardBfpArmRejectsNonBfpWire);
+    RUN_TEST(testReluBackwardBfpArmRejectsUnequalElementCounts);
 
     RUN_TEST(testReluLayerInitAndFreeRoundTrip);
 

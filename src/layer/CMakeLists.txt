@@ -74,11 +74,14 @@ target_include_directories(Dropout PUBLIC include)
 target_link_libraries(Dropout PRIVATE
         DTypes
         Tensor
+        TensorConversion
+        Quantization
         Layer
         ArithmeticType
         Common
         Bernoulli
         Rounding
+        m
 )
 
 add_library(LayerNorm LayerNorm.c)

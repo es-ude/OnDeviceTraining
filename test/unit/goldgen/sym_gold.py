@@ -2047,3 +2047,55 @@ def sgd_bfp_step_ref(param_codes, param_exps, param_qc, grad, lr, momentum,
         "not load-bearing on the param write-back")
 
     return new_param_codes, new_param_exps, new_state_codes, new_state_exps
+
+
+# ---- BFP epic PR4 (R-P3): Dropout's float bridge on packed BFP storage. ----
+
+
+def bfp_mask_scale_repack_ref(codes, exps, qc, keep_mask, factor, self_check=True):
+    """Mirror the C two-pass walk (Dropout.c dropoutMaskScaleBfp, which is
+    scaleBfpTensorInPlace's skeleton with the BOOL mask fused in): dequantize
+    exactly (code * 2^(E-bias)), apply the keep mask and the 1/(1-p) factor in
+    float32 (C order: (float)mant * srcScale * factor), then re-derive EVERY
+    group's exponent from the NEW absmax and requantize HALF_AWAY.
+
+    Re-deriving here is NOT double quantization: the multiply changed the
+    values, so the fresh exponents quantize NEW numbers (spec D8 forbids
+    re-blocking UNCHANGED values).
+
+    Self-checks (abort rather than emit a vacuous fixture):
+      (i)   the mask both keeps and drops (it is load-bearing);
+      (ii)  >= 1 group's exponent MOVES, so a Relu-style verbatim exponent
+            copy is observable;
+      (iii) the codes differ from the verbatim-exponent mutant (same values
+            requantized onto the OLD grid) -- the fresh derive is observable
+            element-wise, not only in the exponent bytes.
+    Returns (codes, stored exponents) for the destination wire."""
+    deq = bfp_dequant_f32(codes, exps, qc)
+    f = np.float32(factor)
+    vals = torch.tensor(
+        [float(np.float32(np.float32(deq[i].item()) * f)) if keep_mask[i] else 0.0
+         for i in range(len(codes))], dtype=torch.float32)
+    new_codes, new_exps = bfp_quantize_grouped(
+        vals, qc["mantissa_bits"], qc["exponent_bits"], qc["group_size"])
+    if self_check:
+        assert any(keep_mask) and not all(keep_mask), (
+            "bfp_mask_scale_repack_ref: mask keeps everything or nothing -- vacuous")
+        assert new_exps != list(exps), (
+            "bfp_mask_scale_repack_ref: no group exponent moved -- a verbatim exponent "
+            "copy would be indistinguishable; pick values whose masked absmax crosses "
+            "a binade")
+        gsz = len(codes) if qc["group_size"] == 0 else qc["group_size"]
+        bias = 2 ** (qc["exponent_bits"] - 1) - 1
+        q_max = 2 ** (qc["mantissa_bits"] - 1) - 1
+        q_min = -(2 ** (qc["mantissa_bits"] - 1))
+        mutant = []
+        for i in range(len(codes)):
+            scale = torch.tensor(math.ldexp(1.0, exps[i // gsz] - bias), dtype=torch.float32)
+            v = torch.tensor([float(vals[i])], dtype=torch.float32)
+            mutant.append(int(torch.clamp(round_half_away(v / scale),
+                                          float(q_min), float(q_max))[0]))
+        assert mutant != new_codes, (
+            "bfp_mask_scale_repack_ref: verbatim-exponent codes equal the fresh-derive "
+            "codes -- the re-derivation is unobservable in this fixture")
+    return new_codes, new_exps

@@ -81,6 +81,22 @@ add_custom_command(
 add_custom_target(generate_expected_bfp_layer_forward
         DEPENDS ${GEN_BFP_LAYER_FORWARD_HEADER})
 
+# BFP epic PR4 (R-P3): Dropout's float-bridge gold (mask + 1/(1-p) + fresh
+# per-group exponents). MSE-style hand-written expectations cannot cover this
+# -- the exponent re-derivation must come from the bit-exact NumPy twin.
+set(GEN_BFP_DROPOUT_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_bfp_dropout.h)
+add_custom_command(
+        OUTPUT ${GEN_BFP_DROPOUT_HEADER}
+        COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_bfp_dropout.py
+                --out ${GEN_BFP_DROPOUT_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_bfp_dropout.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+        COMMENT "Generating expected_bfp_dropout.h via PyTorch"
+        VERBATIM
+)
+add_custom_target(generate_expected_bfp_dropout
+        DEPENDS ${GEN_BFP_DROPOUT_HEADER})
+
 set(GEN_MAX_POOL_1D_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_max_pool_1d.h)
 add_custom_command(
         OUTPUT ${GEN_MAX_POOL_1D_HEADER}
@@ -302,6 +318,8 @@ add_elastic_ai_unit_test(
         DropoutApi
         odt_test_death
 )
+add_dependencies(UnitTestDropout generate_expected_bfp_dropout)
+target_include_directories(UnitTestDropout PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 set(GEN_LAYERNORM_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_layernorm.h)
 add_custom_command(

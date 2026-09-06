@@ -1857,7 +1857,8 @@ void accumulateTensorIntoAsymRescale(tensor_t *target, const tensor_t *increment
  * arbitrary geometries. No width guard here or in the funnel arm: BFP
  * mantissaBits is capped to [2,16] at construction (initBfpQConfigGrouped),
  * so an ODT_SYM_GRAD_QMAXBITS-style re-check would be dead code. */
-static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *inc, size_t n) {
+static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *inc, size_t n,
+                                             const char *what) {
     bfpQConfig_t *qc = target->quantization->qConfig;
     /* Both engines and the scale twin index exponents[g] under the
      * exact-division invariant (numGroups * groupSize == n); a field-assigned
@@ -1951,8 +1952,7 @@ static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *i
             }
             idx = runEnd;
         }
-        packChunkGuarded(codes, count, target->data, qc->mantissaBits, off,
-                         "accumulateIntoBfpFixedGridEngine");
+        packChunkGuarded(codes, count, target->data, qc->mantissaBits, off, what);
     }
 }
 
@@ -1978,7 +1978,7 @@ static void requireBfpFloatIncrementCoversTarget(const tensor_t *target, size_t 
 void accumulateFloatIntoBfpTensorFixedGrid(tensor_t *target, const float *inc, size_t n) {
     requireBfpFloatIncrementCoversTarget(target, n, "accumulateFloatIntoBfpTensorFixedGrid");
     incSrc_t src = {.flat = inc, .tens = NULL};
-    accumulateIntoBfpFixedGridEngine(target, &src, n);
+    accumulateIntoBfpFixedGridEngine(target, &src, n, "accumulateFloatIntoBfpTensorFixedGrid");
 }
 
 void accumulateTensorIntoBfpFixedGrid(tensor_t *target, const tensor_t *increment) {
@@ -1989,7 +1989,7 @@ void accumulateTensorIntoBfpFixedGrid(tensor_t *target, const tensor_t *incremen
     }
     rejectAliasedIncrement(target, increment, "accumulateTensorIntoBfpFixedGrid");
     incSrc_t src = {.flat = NULL, .tens = increment};
-    accumulateIntoBfpFixedGridEngine(target, &src, n);
+    accumulateIntoBfpFixedGridEngine(target, &src, n, "accumulateTensorIntoBfpFixedGrid");
 }
 
 /* Fresh-exponent ring capacity for the rescale walker (#421 U6): the live

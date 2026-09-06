@@ -303,6 +303,16 @@ static void weightGradKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, te
         exit(1);
     }
 
+    /* #420 G1: the weight-grad write below indexes the [Cin, Cout/groups, K]
+     * grad intermediate by the INPUT's channel index -- a mismatch would be an
+     * OOB write, not just a wrong result (the BFP twin's guard, ported). */
+    if (inChannels != cfg->weights->param->shape->dimensions[0]) {
+        PRINT_ERROR("Conv1dTransposed backward (weightGrad): forwardInput inChannels (%zu) does "
+                    "not match weight Cin (%zu)",
+                    inChannels, cfg->weights->param->shape->dimensions[0]);
+        exit(1);
+    }
+
     long long outputLengthSigned = (long long)outputLength;
     long long dilation = (long long)cfg->kernel->dilation;
     size_t stride = cfg->kernel->stride;
@@ -445,6 +455,17 @@ static void weightGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tens
         PRINT_ERROR("Conv1dTransposed backward (weightGrad): lossGrad outChannels (%zu) does "
                     "not match weight Cout (%zu)",
                     outChannels, weightOutChannels);
+        exit(1);
+    }
+
+    /* #420 G1: the weight-grad write below indexes the [Cin, Cout/groups, K]
+     * grad intermediate by the INPUT's channel index -- a mismatch would be an
+     * OOB write, not just a wrong result (the BFP twin's guard, ported). */
+    if (inChannels != cfg->weights->param->shape->dimensions[0]) {
+        PRINT_ERROR(
+            "Conv1dTransposed backward (SYM weightGrad): forwardInput inChannels (%zu) does "
+            "not match weight Cin (%zu)",
+            inChannels, cfg->weights->param->shape->dimensions[0]);
         exit(1);
     }
 

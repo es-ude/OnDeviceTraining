@@ -984,6 +984,48 @@ void testConv1dTransposedWeightGradSymRejectsOutChannelMismatch() {
     ASSERT_EXITS_WITH_FAILURE(conv1dTransposedCalcWeightGradsSymInt32(&cfg, input, lossGrad));
 }
 
+/* #420 G1: ConvT twin of Conv1d's float/SYM input-channel guards. The ConvT
+ * weightGrad kernels index the [Cin, Cout/groups, K] grad buffer by the
+ * INPUT's channel index (`ic`), so a forwardInput with more channels than
+ * weight dim[0] OOB-writes it. Batch, outChannels and the transpose
+ * outputLength all stay consistent, so ONLY the new channel guard can fire. */
+void testConv1dTransposedWeightGradFloatRejectsInputChannelMismatch() {
+    size_t weightDims[] = {2, 1, 2}; // [Cin=2, Cout/groups=1, K=2], groups 1 -> Cout = 1
+    size_t inputDims[] = {1, 3, 3};  // inChannels 3 != weight Cin 2
+    size_t outputDims[] = {1, 1, 4};
+    float weightData[4] = {0};
+    float inputData[9] = {0};
+    float outBuf[4] = {0};
+    convT1dRunResult_t r;
+    convT1dBuild(&r, weightData, weightDims, NULL, NULL, 0, inputData, inputDims, 2, 1, 1, 1, 0,
+                 outBuf, outputDims);
+
+    size_t lossDims[] = {1, 1, 4}; // (3-1)*1 + 1*(2-1) + 0 + 1 == 4
+    float lossData[4] = {0};
+    tensor_t *lossGrad = makeFloatTensor(lossDims, 3, lossData);
+
+    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedBackward(&r.layer, r.input, lossGrad, NULL));
+}
+
+void testConv1dTransposedWeightGradSymRejectsInputChannelMismatch() {
+    size_t weightDims[] = {4, 4, 2}; // [Cin=4, Cout/groups=4, K=2], groups 2 -> Cout = 8
+    size_t inputDims[] = {1, 6, 4};  // inChannels 6 != weight Cin 4
+    size_t lossDims[] = {1, 8, 5};   // (4-1)*1 + 1*(2-1) + 0 + 1 == 5
+
+    parameter_t *weights = buildSymParam(3, weightDims, NULL);
+    tensor_t *input = buildSymTensor(3, inputDims, NULL);
+    tensor_t *lossGrad = buildSymTensor(3, lossDims, NULL);
+
+    kernel_t kernel;
+    initKernel(&kernel, 2, VALID, 1, 1);
+    conv1dTransposedConfig_t cfg;
+    quantization_t *sq = quantizationInitSymInt32(HALF_AWAY);
+    initConv1dTransposedConfigWithWeightsAndBias(&cfg, &kernel, weights, NULL, 2, 0, sq, sq, sq,
+                                                 sq);
+
+    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedCalcWeightGradsSymInt32(&cfg, input, lossGrad));
+}
+
 void testConv1dTransposedBiasGradFloatRejectsOutChannelMismatch() {
     /* weight Cout == lossGrad outChannels so weightGrad passes; bias Cout differs
      * so the biasGrad guard must fire. convT1dBuild runs no forward, so the
@@ -2512,6 +2554,8 @@ int main() {
     RUN_TEST(testConv1dTransposedWeightGradFloatRejectsOutChannelMismatch);
     RUN_TEST(testConv1dTransposedWeightGradSymRejectsBatchMismatch);
     RUN_TEST(testConv1dTransposedWeightGradSymRejectsOutChannelMismatch);
+    RUN_TEST(testConv1dTransposedWeightGradFloatRejectsInputChannelMismatch);
+    RUN_TEST(testConv1dTransposedWeightGradSymRejectsInputChannelMismatch);
     RUN_TEST(testConv1dTransposedBiasGradFloatRejectsOutChannelMismatch);
     RUN_TEST(testConv1dTransposedBiasGradSymRejectsOutChannelMismatch);
     RUN_TEST(testConv1dTransposedFactoryFrozenElidesGrads);

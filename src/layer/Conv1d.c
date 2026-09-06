@@ -281,6 +281,17 @@ static void weightGradKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, te
         exit(1);
     }
 
+    /* #420 G1: inChPerGroup below is derived from the INPUT's channel dim but
+     * indexes the WEIGHT-sized grad intermediate -- a mismatch would be an OOB
+     * write, not just a wrong result (the BFP twin's guard, ported). */
+    size_t weightInChannels = cfg->weights->param->shape->dimensions[1] * cfg->groups;
+    if (inChannels != weightInChannels) {
+        PRINT_ERROR("Conv1d backward (weightGrad): forwardInput inChannels (%zu) does not match "
+                    "weight Cin-per-group * groups (%zu)",
+                    inChannels, weightInChannels);
+        exit(1);
+    }
+
     size_t groups = cfg->groups;
     size_t inChPerGroup = inChannels / groups;
     size_t outChPerGroup = outChannels / groups;
@@ -415,6 +426,18 @@ static void weightGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tens
         PRINT_ERROR("Conv1d backward (weightGrad): lossGrad outChannels (%zu) does not match "
                     "weight Cout (%zu)",
                     outChannels, weightOutChannels);
+        exit(1);
+    }
+
+    /* #420 G1: inChPerGroup below is derived from the INPUT's channel dim but
+     * indexes the WEIGHT-sized grad intermediate -- a mismatch would be an OOB
+     * write, not just a wrong result (the BFP twin's guard, ported). */
+    size_t weightInChannels = cfg->weights->param->shape->dimensions[1] * cfg->groups;
+    if (inChannels != weightInChannels) {
+        PRINT_ERROR(
+            "Conv1d backward (SYM weightGrad): forwardInput inChannels (%zu) does not match "
+            "weight Cin-per-group * groups (%zu)",
+            inChannels, weightInChannels);
         exit(1);
     }
 

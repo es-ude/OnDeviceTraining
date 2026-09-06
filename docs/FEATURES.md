@@ -518,7 +518,8 @@ checkpointing, limitations, literature).
   allocators (`initLayerOutputs`/`initGradTensor`, `InferenceApi.c`) carry
   BFP arms — wire `numGroups` derives from the template's `groupSize` and the
   wire's runtime element count, with a divisibility fail-fast rather than a
-  silent floor. **Epic PR4 shipped the weight-less layers** (spec §5.7):
+  silent floor. **Epic PR4 shipped the weight-less layers**
+  (`docs/conventions/arithmetic-bfp.md` §5.7):
   pooling (MaxPool1d/AvgPool1d/AdaptiveAvgPool1d) runs native `ARITH_BFP`
   forward AND backward, anchored on the layer's own `outputQ`/`propLossQ`
   (no weight operand to stage at); Relu and Flatten copy codes and per-group

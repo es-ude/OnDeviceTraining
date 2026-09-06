@@ -12,7 +12,12 @@ grad-accumulate and scale engines in `src/tensor/TensorConversion.c`
 `scaleBfpTensorInPlace`), and the per-tensor-only BFP grad/optimizer-state
 storage knob (`src/userApi/tensor/TensorApi.c`'s `gradInit`,
 `src/userApi/optimizer/{SgdApi,AdamWApi,OptimizerApi}.c`,
-`src/userApi/continual_learning/PpcaReplayApi.c`). Path-scoped for Claude via
+`src/userApi/continual_learning/PpcaReplayApi.c`). Since epic PR4 it also
+covers the weight-less layers — the native `ARITH_BFP` arms in
+`src/layer/{MaxPool1d,AvgPool1d,AdaptiveAvgPool1d}.c`, the packed-domain
+(outside-funnel) BFP paths in `src/layer/{Relu,Flatten,Dropout}.c`, and the
+BFP fake-quant arms in `src/loss_functions/{MSE,CrossEntropy}.c` — all
+documented in §5.7. Path-scoped for Claude via
 `.claude/rules/arithmetic-bfp.md`. Spec:
 `docs/superpowers/specs/2026-07-29-block-floating-point-design.md` (decisions
 D1–D12, deviations register §10; D8 amended 2026-09-02 at PR3 kickoff — §9
@@ -23,11 +28,11 @@ spec's D1–D12). §§1–4 track where the shipped PR1 dtype-core deliberately
 deviates from the cited literature and from ODT's own `#227` discipline — the
 Deutel-note format used by `docs/conventions/arithmetic-sym.md`'s attribution
 notes, applied to the BFP anchors (HBFP, MSFP, MX, FAST) instead. §5
-documents the compute contract itself (PR2 forward + PR3 backward, both
-shipped, not a forward pointer); §§6–8 extend the deviations register with
-three deviations the PR2 kernels introduced; §9 amends spec decision D8 with
-the PR3 backward's own deviation (exact fold segmentation instead of op-local
-re-blocking).
+documents the compute contract itself (PR2 forward + PR3 backward + PR4's
+weight-less layers in §5.7, all shipped, not a forward pointer); §§6–8 extend
+the deviations register with three deviations the PR2 kernels introduced; §9
+amends spec decision D8 with the PR3 backward's own deviation (exact fold
+segmentation instead of op-local re-blocking).
 
 ## 1. Two's-complement mantissas, not sign-magnitude
 
@@ -634,12 +639,22 @@ and Flatten because a funnel round-trip would re-quantize unchanged values
 Pools and losses take the opposite route — pools run INSIDE `executeOp` on the
 unpacked-BFP scratch under the anchor rule above, and the losses go through
 `convertTensor`, i.e. both stay on documented arms. Consequence for reviewers:
-a raw `->data` walk over BFP bytes is legitimate ONLY in those three layers
-(plus test fixtures, which use `byteConversion`/`unpackSignExtend`); anywhere
-else it is a bug. All three of the outside-funnel layers therefore carry an
-explicit dtype guard per arm (`requireNoBfpWire` on the FLOAT32/SYM arms,
-`requireBfpWire` on the ARITH_BFP arm) — without the funnel's prologue there
-is nothing else to catch a mismatched wire.
+OUTSIDE the conversion authority itself (`src/tensor/TensorConversion.c`,
+which walks packed BFP bytes by definition — the pack/unpack helpers, the
+accumulate engines, `scaleBfpTensorInPlace`) and outside those three layers, a
+raw `->data` walk over BFP bytes is a bug. Test fixtures read packed bytes
+too, and they legitimately go through `byteConversion`/`unpackSignExtend`
+rather than indexing raw.
+
+Because the funnel's prologue is not there to reject a mismatched wire, each
+of the three layers carries its own gate, and they are NOT the same shape.
+Relu and Dropout have an `arithmetic_t` slot, so they guard PER ARM:
+`requireNoBfpWire` on the FLOAT32/SYM arms (which raw-cast to `float*` /
+`int32*`) and `requireBfpWire` on the `ARITH_BFP` arm. Flatten has NO
+arithmetic slot at all (`layerForwardMath` returns the `NO_ARITHMETIC`
+constant) and therefore no arms to guard: its gate is a pair check —
+a BFP wire on one side demands a BFP wire on the other, and the two must then
+share `{numGroups, groupSize, mantissaBits, exponentBits}`.
 
 ---
 

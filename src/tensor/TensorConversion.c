@@ -1611,6 +1611,27 @@ static void incSrcChunk(const incSrc_t *src, size_t off, size_t count, float *ou
     dequantChunkToFloat(src->tens, off, count, out);
 }
 
+/* Both FixedGrid engines' "fresh vs. already-gridded" decision: a codes-only
+ * all-zero scan over the WHOLE packed payload (post-initTensor zero-fill or
+ * post-optimizerZeroGrad memset -> fresh, derive the grid from the increment;
+ * anything else -> carry the existing grid verbatim). Codes-only by design:
+ * a zeroed payload decodes to 0.0f under ANY scale/exponent, so the scan must
+ * not consult the grid it is about to decide. Reads only, and bails at the
+ * first nonzero code. */
+static bool packedPayloadIsAllZero(const uint8_t *data, size_t bits, size_t n) {
+    int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
+    for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+        unpackSignExtendChunk(data, bits, off, count, mant);
+        for (size_t i = 0; i < count; i++) {
+            if (mant[i] != 0) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 static void accumulateIntoSymFixedGridEngine(tensor_t *target, const incSrc_t *inc, size_t n) {
     symQConfig_t *qc = target->quantization->qConfig;
     int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
@@ -1618,18 +1639,7 @@ static void accumulateIntoSymFixedGridEngine(tensor_t *target, const incSrc_t *i
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
 
     /* phase A: all-zero scan of the packed accumulator (reads only) */
-    bool allZero = true;
-    for (size_t off = 0; off < n && allZero; off += ODT_CONVERSION_CHUNK_ELEMS) {
-        size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
-        unpackSignExtendChunk(target->data, qc->qBits, off, count, mant);
-        for (size_t i = 0; i < count; i++) {
-            if (mant[i] != 0) {
-                allZero = false;
-                break;
-            }
-        }
-    }
-    if (allZero) {
+    if (packedPayloadIsAllZero(target->data, qc->qBits, n)) {
         /* Fresh accumulator (post-initTensor zero-fill or post-optimizerZeroGrad
          * memset): derive the grid from the increment (absmax/qMax; absmax
          * 0 -> scale 1.f, packFloatBufferAsSym convention). */
@@ -1850,18 +1860,7 @@ static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *i
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
 
     /* phase A: all-zero scan of the packed accumulator (reads only) */
-    bool allZero = true;
-    for (size_t off = 0; off < n && allZero; off += ODT_CONVERSION_CHUNK_ELEMS) {
-        size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
-        unpackSignExtendChunk(target->data, qc->mantissaBits, off, count, mant);
-        for (size_t i = 0; i < count; i++) {
-            if (mant[i] != 0) {
-                allZero = false;
-                break;
-            }
-        }
-    }
-    if (allZero) {
+    if (packedPayloadIsAllZero(target->data, qc->mantissaBits, n)) {
         /* Fresh accumulator (post-initTensor zero-fill or post-optimizerZeroGrad
          * memset): derive the per-group grid from the increment alone through
          * the exponent authority (absMax 0 -> stored = bias, the zero-state

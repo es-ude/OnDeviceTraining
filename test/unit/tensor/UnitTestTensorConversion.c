@@ -7217,6 +7217,114 @@ void testQuantizeFloatBufferToBfpCodesRejectsBadGroupGeometry(void) {
     ASSERT_EXITS_WITH_FAILURE(quantizeFloatBufferToBfpCodes(values, 8, &qc, codes));
 }
 
+/* ---- #421 U10 (ruling R9): a non-finite INPUT VALUE is a fail-fast --------
+ * R6's value-side twin, at the three value-domain pack entries. Same
+ * rationale verbatim: BFP has no NaN/inf code, so mapping the value to 0
+ * drops the caller's data and saturating it to +-qMax invents data. The
+ * FLOAT32 wire keeps propagating NaN loudly, because FLOAT32 can represent
+ * it -- the documented asymmetry.
+ *
+ * This is not theoretical. An ordinary training divergence produces a NaN
+ * loss, which reaches quantizeFloatBufferToBfpCodes through the funnel's
+ * FLOAT32-operand staging (ExecuteOp.c), and the behaviour there was
+ * PLATFORM-DIVERGENT silent corruption rather than merely undefined: pass 1's
+ * `v > absMax` comparison is false for NaN so the grid ignores it, the
+ * comparison-based float clamp cannot map it either, and (int32_t)round(NaN)
+ * yields 0 on arm64 (code 0) but INT32_MIN on x86-64 (clamped to qMin) -- a
+ * bit-parity hazard, not just UB on paper. That arm64 zero is also why all
+ * three guard-absent states exit 0, which is how these were watched RED.
+ *
+ * Boundary, deliberately: only INPUT values fail fast. Computed
+ * INTERMEDIATES keep saturating through the emit clamp (R6), and
+ * deriveBfpStoredExponent's non-finite-absMax cap branch stays live for the
+ * engine callers that legitimately feed it a sum overflowed from finite
+ * operands. */
+void testFloatToBfpRejectsNonFiniteInputValue(void) {
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    float vals[4] = {1.f, NAN, 0.f, 1.f};
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    tensor_t src;
+    setTensorValues(&src, (uint8_t *)vals, &shape, &floatQ, NULL);
+
+    uint8_t exponents[1] = {127};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    initBfpQuantization(&qc, &q);
+    uint8_t data[calcNumberOfBytesForData(&q, n)];
+    tensor_t dst;
+    setTensorValues(&dst, data, &shape, &q, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&src, &dst));
+}
+
+void testQuantizeFloatBufferToBfpCodesRejectsNonFiniteInputValue(void) {
+    float values[4] = {1.f, NAN, 0.f, 1.f};
+    uint8_t exponents[1] = {127};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    int32_t codes[4];
+
+    ASSERT_EXITS_WITH_FAILURE(quantizeFloatBufferToBfpCodes(values, 4, &qc, codes));
+}
+
+/* The streaming entry sees its input through readChunk, so the non-finite
+ * value has to come out of the SOURCE grid: exponentBits=8 at stored 255 is
+ * E = +128, whose scale ldexpf(1, 128) is +inf, so every nonzero code decodes
+ * to +-inf. That grid can only be HAND-BUILT -- deriveBfpStoredExponent never
+ * derives it (it caps at bias + 127) and since #420 G5 the deserializer
+ * refuses to ingest it -- which is exactly the residual this guard closes. */
+void testRequantBfpTensorRejectsNonFiniteSourceValue(void) {
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t srcShape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    shape_t dstShape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t srcCodes[4] = {1, 1, 1, 1};
+    uint8_t srcExponents[1] = {255}; /* E = +128 -> scale = +inf */
+    bfpQConfig_t srcQc = {.exponents = srcExponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 6,
+                          .exponentBits = 8};
+    quantization_t srcQ;
+    initBfpQuantization(&srcQc, &srcQ);
+    uint8_t srcData[calcNumberOfBytesForData(&srcQ, n)];
+    byteConversion((uint8_t *)srcCodes, 32, srcData, 6, n);
+    tensor_t src;
+    setTensorValues(&src, srcData, &srcShape, &srcQ, NULL);
+
+    uint8_t dstExponents[1] = {127};
+    bfpQConfig_t dstQc = {.exponents = dstExponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 6,
+                          .exponentBits = 8};
+    quantization_t dstQ;
+    initBfpQuantization(&dstQc, &dstQ);
+    uint8_t dstData[calcNumberOfBytesForData(&dstQ, n)];
+    tensor_t dst;
+    setTensorValues(&dst, dstData, &dstShape, &dstQ, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(requantBfpTensor(&src, &dst));
+}
+
 /* ---- #421 U2: clamp before the round at EVERY BFP emit site --------------
  * `scaleBfpTensorInPlace` got the float-domain pre-clamp in the PR #422
  * follow-up batch (R3); the four sibling emit passes kept rounding a
@@ -7824,6 +7932,9 @@ int main(void) {
     RUN_TEST(testAccumulateFloatIntoBfpRescaleRejectsShortElementCount);
     RUN_TEST(testFloatToBfpRejectsBadTargetGroupGeometry);
     RUN_TEST(testQuantizeFloatBufferToBfpCodesRejectsBadGroupGeometry);
+    RUN_TEST(testFloatToBfpRejectsNonFiniteInputValue);
+    RUN_TEST(testQuantizeFloatBufferToBfpCodesRejectsNonFiniteInputValue);
+    RUN_TEST(testRequantBfpTensorRejectsNonFiniteSourceValue);
     RUN_TEST(testAccumulateFloatIntoBfpRescaleEmptyTensorResetsToZeroState);
     RUN_TEST(testAccumulateTensorIntoBfpRescaleEmptyTensorResetsToZeroState);
     RUN_TEST(testAccumulateFloatIntoBfpFixedGridEmptyTensorResetsToZeroState);

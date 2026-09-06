@@ -79,7 +79,14 @@ directly: `deriveBfpStoredExponent` returns the cap without consulting
 `frexpf`, whose result and `*exp` are both unspecified for inf/NaN (C17
 7.12.6.4). A magnitude too large for any grid saturates at the largest finite
 one; the alternative was an arbitrary exponent leaking into the caller's emit
-pass.
+pass. Since `#421` that arm is reached only by the ACCUMULATE/SCALE engines,
+whose absmax can legitimately overflow to `±inf` from finite operands — the
+three value-domain pack entries (`packFloatBufferAsBfp`,
+`quantizeFloatBufferToBfpCodes`, `packStreamAsBfp`) now fail fast on a
+non-finite INPUT VALUE before their absmax is ever formed (§5.6's R9
+bullet), because a non-finite input is the caller handing over something BFP
+cannot represent, not an overflow this format's own saturation regime is
+meant to model.
 
 **Rationale for the deviation:** `exponentBits` (range `[2,8]`) is one of the
 epic's first-class HAR sweep axes (spec §1) — the sweep exists specifically to
@@ -593,6 +600,25 @@ silent wrong arithmetic, not a crash.
   The saturation BOUNDS are each site's own, unchanged: the negative floor is
   `−2^(m−1)` as shipped, not spec D6's `±qMax` — an open decision in #420,
   and after the unification a one-site change.
+- **A non-finite INPUT VALUE fails fast at the three value-domain pack
+  entries** (`packFloatBufferAsBfp`, `quantizeFloatBufferToBfpCodes`,
+  `packStreamAsBfp`) — `#421`, ruling R9, the value-side twin of the
+  accumulate engines' R6 increment guard, with the same rationale: BFP has no
+  NaN/inf code, so mapping the value to `0` drops the caller's data and
+  saturating it to `±qMax` invents data, while the FLOAT32 wire keeps
+  propagating a NaN loudly because FLOAT32 can represent it. This is not a
+  theoretical corner: a diverged training step's NaN loss reaches
+  `quantizeFloatBufferToBfpCodes` through the funnel's FLOAT32-operand
+  staging, and the previous behaviour was PLATFORM-DIVERGENT rather than
+  merely undefined — pass 1's `v > absMax` comparison is false for NaN so the
+  grid ignored it, the comparison-based float clamp could not map it either,
+  and `(int32_t)round(NaN)` yields `0` on arm64 but `INT32_MIN` (clamped to
+  `qMin`) on x86-64, i.e. a bit-parity hazard. The check lives in the pass
+  that already reads every element, so it costs no extra walk, and it names
+  the public entry through the same `what` label the abort messages use.
+  **Only INPUTS**: computed intermediates inside the engines keep saturating
+  through the emit clamp, and `deriveBfpStoredExponent`'s non-finite-absMax
+  cap branch (§2) stays live for them.
 - **Native BFP `dx` wires are legal.** A layer's `dx` (`propLoss`) output can
   itself be a BFP-stored wire, written by the native backward kernel's own
   `OUT_WRITE` epilogue (deriving that wire's grid directly, no float bridge)

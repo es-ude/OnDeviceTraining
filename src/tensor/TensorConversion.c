@@ -61,6 +61,7 @@ static void emitAsymChunk(const float *vals, size_t count, const asymQConfig_t *
  * scales[0]/zeroPoints[0] only and calls this per-tensor choke point first
  * (mirrors the SYM scalar-cell gates). */
 static void requirePerTensorAsym(const asymQConfig_t *qc, const char *what);
+static void requireFiniteBfpSource(float value, size_t index, const char *what, const char *role);
 
 void zeroTensorData(tensor_t *tensor) {
     size_t numberOfElements = calcNumberOfElementsByTensor(tensor);
@@ -1062,6 +1063,9 @@ static void packFloatBufferAsBfp(const float *values, size_t n, bfpQConfig_t *ou
         size_t start = g * gsz;
         size_t end = start + gsz > n ? n : start + gsz;
         for (size_t i = start; i < end; i++) {
+            /* #421 U10: the value-side twin of R6, in the pass that already
+             * reads every element, so no extra walk. */
+            requireFiniteBfpSource(values[i], i, what, "input");
             float v = fabsf(values[i]);
             if (v > absMax) {
                 absMax = v;
@@ -1131,6 +1135,9 @@ void quantizeFloatBufferToBfpCodes(const float *values, size_t n, bfpQConfig_t *
         size_t end = (start + gsz > n) ? n : start + gsz;
         float absMax = 0.f;
         for (size_t i = start; i < end; i++) {
+            /* #421 U10, see the packed sibling. This entry takes no `what`
+             * label -- it IS the public entry, so it names itself. */
+            requireFiniteBfpSource(values[i], i, "quantizeFloatBufferToBfpCodes", "input");
             float a = fabsf(values[i]);
             if (a > absMax) {
                 absMax = a;
@@ -1190,6 +1197,12 @@ static void packStreamAsBfp(const tensor_t *src, bfpSrcChunkReader_t readChunk, 
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         readChunk(src, off, count, buf);
         for (size_t i = 0; i < count; i++) {
+            /* #421 U10, see packFloatBufferAsBfp. The "input" here is what
+             * readChunk decodes out of the source, so a non-finite one needs
+             * a source grid whose scale is itself non-finite -- hand-built
+             * only, since deriveBfpStoredExponent caps derived exponents at
+             * bias + 127 and #420 G5 rejects deserialized records above it. */
+            requireFiniteBfpSource(buf[i], off + i, what, "input");
             float v = fabsf(buf[i]);
             if (v > absMax) {
                 absMax = v;
@@ -1660,16 +1673,20 @@ static void resetBfpGridToZeroState(bfpQConfig_t *qc) {
  * aborts after earlier chunks are already written, exactly as
  * packChunkGuarded's own mid-walk exit(1) does (the process is not
  * recoverable either way). */
+static void requireFiniteBfpSource(float value, size_t index, const char *what, const char *role) {
+    if (!isfinite(value)) {
+        PRINT_ERROR("%s: non-finite %s value %f at element %zu -- BFP cannot represent "
+                    "non-finite values (no NaN/inf code to propagate into); refusing to drop "
+                    "it or saturate it into invented data",
+                    what, role, (double)value, index);
+        exit(1);
+    }
+}
+
 static void rejectNonFiniteIncrement(const float *values, size_t count, size_t baseIndex,
                                      const char *what) {
     for (size_t i = 0; i < count; i++) {
-        if (!isfinite(values[i])) {
-            PRINT_ERROR("%s: non-finite increment value %f at element %zu -- BFP cannot "
-                        "represent non-finite values (no NaN/inf code to propagate into); "
-                        "refusing to drop it or saturate it into invented data",
-                        what, (double)values[i], baseIndex + i);
-            exit(1);
-        }
+        requireFiniteBfpSource(values[i], baseIndex + i, what, "increment");
     }
 }
 

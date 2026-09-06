@@ -7047,6 +7047,197 @@ void testFloatToBfpRejectsBadTargetGroupGeometry(void) {
     ASSERT_EXITS_WITH_FAILURE(convertTensor(&src, &dst));
 }
 
+/* ---- #421 U2: clamp before the round at EVERY BFP emit site --------------
+ * `scaleBfpTensorInPlace` got the float-domain pre-clamp in the PR #422
+ * follow-up batch (R3); the four sibling emit passes kept rounding a
+ * possibly-out-of-int32 quotient. The reachable regime needs NO inf and no
+ * NaN: at a narrow `exponentBits` the derived exponent SATURATES (D6), so
+ * the block's scale is capped far below what its data needs and `v / scale`
+ * leaves int32 range while every input is an ordinary finite float.
+ * Shared fixture across all five: m=8 (qMax 127, qMin -128), e=2 (bias 1,
+ * stored range [0,3], so E <= 2 and the scale caps at 4) and a magnitude of
+ * 1e30 -- quotient 2.5e29, ~10^20 times past INT32_MAX, with 0 and a
+ * small in-range value alongside to pin that the clamp is inert everywhere
+ * else.
+ *
+ * Mutation note (the R3 precedent, verbatim): dropping a pre-clamp is
+ * observable only where the arithmetic is UNDEFINED, so the kill is
+ * platform-dependent by nature -- arm64's saturating fcvtzs lands on
+ * INT32_MAX/INT32_MIN, which clampInt32 then maps onto the SAME two codes.
+ * The preset-independent kill is unit_test_ubsan's float-cast-overflow
+ * (-fno-sanitize-recover), which traps the pre-clamp-free conversion on
+ * every platform. */
+void testFloatToBfpCapRegimeSaturatesFiniteQuotient(void) {
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    float vals[4] = {1e30f, -1e30f, 0.f, 1.f};
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    tensor_t src;
+    setTensorValues(&src, (uint8_t *)vals, &shape, &floatQ, NULL);
+
+    uint8_t exponents[1] = {0};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 8,
+                       .exponentBits = 2};
+    quantization_t q;
+    initBfpQuantization(&qc, &q);
+    uint8_t data[calcNumberOfBytesForData(&q, n)];
+    tensor_t dst;
+    setTensorValues(&dst, data, &shape, &q, NULL);
+
+    convertTensor(&src, &dst);
+
+    TEST_ASSERT_EQUAL_UINT8(3, exponents[0]); /* D6 high clamp: E = 2, scale 4 */
+    int32_t got[4];
+    unpackSignExtend(data, 8, 0, got, n);
+    int32_t expected[4] = {127, -128, 0, 0}; /* 1/4 = 0.25 flushes to 0 */
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, n);
+}
+
+void testQuantizeFloatBufferToBfpCodesCapRegimeSaturatesFiniteQuotient(void) {
+    float values[4] = {1e30f, -1e30f, 0.f, 1.f};
+    uint8_t exponents[1] = {0};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 8,
+                       .exponentBits = 2};
+    int32_t codes[4];
+
+    quantizeFloatBufferToBfpCodes(values, 4, &qc, codes);
+
+    TEST_ASSERT_EQUAL_UINT8(3, exponents[0]);
+    int32_t expected[4] = {127, -128, 0, 0};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, codes, 4);
+}
+
+/* The streaming twin, through its public route requantBfpTensor
+ * (conversionMatrix[BFP][BFP]). The 1e30-scale magnitude comes out of the
+ * SOURCE grid instead of a float buffer: m=8/e=8 at stored 227 is scale
+ * 2^100 = 1.27e30, so source code 1 decodes to a perfectly finite 1.27e30
+ * that the target's capped scale of 4 cannot express. */
+void testRequantBfpTensorCapRegimeSaturatesFiniteQuotient(void) {
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t srcShape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    shape_t dstShape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t srcCodes[4] = {1, -1, 0, 0};
+    uint8_t srcExponents[1] = {227}; /* E = +100, scale 2^100 */
+    bfpQConfig_t srcQc = {.exponents = srcExponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 8,
+                          .exponentBits = 8};
+    quantization_t srcQ;
+    initBfpQuantization(&srcQc, &srcQ);
+    uint8_t srcData[calcNumberOfBytesForData(&srcQ, n)];
+    byteConversion((uint8_t *)srcCodes, 32, srcData, 8, n);
+    tensor_t src;
+    setTensorValues(&src, srcData, &srcShape, &srcQ, NULL);
+
+    uint8_t dstExponents[1] = {0};
+    bfpQConfig_t dstQc = {.exponents = dstExponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 8,
+                          .exponentBits = 2};
+    quantization_t dstQ;
+    initBfpQuantization(&dstQc, &dstQ);
+    uint8_t dstData[calcNumberOfBytesForData(&dstQ, n)];
+    tensor_t dst;
+    setTensorValues(&dst, dstData, &dstShape, &dstQ, NULL);
+
+    requantBfpTensor(&src, &dst);
+
+    TEST_ASSERT_EQUAL_UINT8(3, dstExponents[0]);
+    int32_t got[4];
+    unpackSignExtend(dstData, 8, 0, got, n);
+    int32_t expected[4] = {127, -128, 0, 0};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, n);
+}
+
+/* The DYNAMIC_RESCALE walker: the huge finite magnitude arrives as the
+ * INCREMENT, and the freshly derived grid saturates at the same capped
+ * scale, so pass 2's quotient leaves int32 exactly as above. */
+void testAccumulateFloatIntoBfpRescaleCapRegimeSaturatesFiniteQuotient(void) {
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t seedCodes[4] = {0, 0, 0, 0};
+    uint8_t exponents[1] = {1}; /* bias at e=2: scale 1 */
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 8,
+                       .exponentBits = 2};
+    quantization_t q;
+    initBfpQuantization(&qc, &q);
+    uint8_t data[calcNumberOfBytesForData(&q, n)];
+    byteConversion((uint8_t *)seedCodes, 32, data, 8, n);
+    tensor_t target;
+    setTensorValues(&target, data, &shape, &q, NULL);
+
+    float inc[4] = {1e30f, -1e30f, 0.f, 1.f};
+    accumulateFloatIntoBfpTensorRescale(&target, inc, n);
+
+    TEST_ASSERT_EQUAL_UINT8(3, exponents[0]);
+    int32_t got[4];
+    unpackSignExtend(data, 8, 0, got, n);
+    int32_t expected[4] = {127, -128, 0, 0};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, n);
+}
+
+/* The FIXED-grid engine is the one emit site that must NOT saturate: an
+ * increment that does not fit the CARRIED grid is a #227 code-domain abort
+ * (docs/conventions/arithmetic-bfp.md 5.6), not D6 value-domain saturation.
+ * Its pre-clamp therefore uses a band two codes wider than the legal one, so
+ * an overflowing quotient still reaches packChunkGuarded out of range and
+ * still aborts -- only the (int32_t)round(...) undefined conversion is
+ * removed. Without a pre-clamp the abort depends on what the UNDEFINED
+ * conversion happens to produce (an in-range garbage code would silently
+ * corrupt the accumulator instead of dying), which is what this pins.
+ * Carried grid: the seed codes are nonzero, so the all-zero scan classifies
+ * the target as already-gridded and keeps scale 1. */
+void testAccumulateFloatIntoBfpFixedGridCapRegimeAbortsInsteadOfUB(void) {
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    int32_t seedCodes[4] = {1, -1, 1, -1};
+    uint8_t exponents[1] = {1}; /* bias at e=2: scale 1 */
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 8,
+                       .exponentBits = 2};
+    quantization_t q;
+    initBfpQuantization(&qc, &q);
+    uint8_t data[calcNumberOfBytesForData(&q, n)];
+    byteConversion((uint8_t *)seedCodes, 32, data, 8, n);
+    tensor_t target;
+    setTensorValues(&target, data, &shape, &q, NULL);
+
+    float inc[4] = {1e30f, 0.f, 0.f, 0.f};
+    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorFixedGrid(&target, inc, n));
+}
+
 void testQuantizeFloatBufferToBfpCodesRejectsBadGroupGeometry(void) {
     float values[8] = {6.f, 1.f, -2.f, 0.f, 28.f, -7.f, 3.f, 14.f};
     uint8_t exponents[3] = {127, 127, 127};
@@ -7249,6 +7440,11 @@ int main(void) {
     RUN_TEST(testAccumulateFloatIntoBfpRescaleRejectsShortElementCount);
     RUN_TEST(testFloatToBfpRejectsBadTargetGroupGeometry);
     RUN_TEST(testQuantizeFloatBufferToBfpCodesRejectsBadGroupGeometry);
+    RUN_TEST(testFloatToBfpCapRegimeSaturatesFiniteQuotient);
+    RUN_TEST(testQuantizeFloatBufferToBfpCodesCapRegimeSaturatesFiniteQuotient);
+    RUN_TEST(testRequantBfpTensorCapRegimeSaturatesFiniteQuotient);
+    RUN_TEST(testAccumulateFloatIntoBfpRescaleCapRegimeSaturatesFiniteQuotient);
+    RUN_TEST(testAccumulateFloatIntoBfpFixedGridCapRegimeAbortsInsteadOfUB);
 
     return UNITY_END();
 }

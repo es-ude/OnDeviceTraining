@@ -2309,3 +2309,66 @@ def adaptiveavgpool1d_bfp_backward_ref(gy_codes, gy_exps, gy_qc, batch, channels
         assert collapsed != out, (
             "adaptiveavgpool1d_bfp_backward_ref: per-tensor collapse is indistinguishable")
     return out
+
+
+def maxpool1d_bfp_forward_ref(codes, exps, qc, batch, channels, geom, self_check=True):
+    """MaxPool1d ARITH_BFP forward reference (R-P4): candidates are compared as
+    DEQUANTIZED float32 values -- ldexp(mantissa, E - bias), which is exact --
+    because raw mantissas are NOT comparable across groups: a smaller code in a
+    larger-exponent block can be the true maximum. The winner's dequant value
+    goes to the FLOAT32 raw (D7); the argmax auxOut keeps its own INT32 storage
+    (the funnel NEVER converts auxOut) and the -1 empty-window sentinel.
+    Tie-break matches the FLOAT32 arm exactly: strict >, seeded at -inf, first
+    occurrence wins. No headroom guard: there is no summation.
+    Returns (values, argmax_input_indices)."""
+    bias = 2 ** (qc["exponent_bits"] - 1) - 1
+    values, argmax = [], []
+    value_vs_mantissa_disagreements = 0
+    max_groups_crossed = 0
+    for b in range(batch):
+        for c in range(channels):
+            base = (b * channels + c) * geom["input_length"]
+            for o in range(geom["out_len"]):
+                first, count = window_slice_1d(geom, o)
+                best_val = np.float32(-np.inf)
+                best_idx = -1
+                best_mant, best_mant_idx = None, -1
+                groups = set()
+                for i in range(count):
+                    in_idx = first + i * geom["dilation"]
+                    storage = base + in_idx
+                    g = _bfp_group_of(storage, qc["group_size"])
+                    groups.add(g)
+                    v = np.float32(np.ldexp(np.float32(codes[storage]),
+                                            np.int32(exps[g] - bias)))
+                    if v > best_val:
+                        best_val = v
+                        best_idx = in_idx
+                    if best_mant is None or codes[storage] > best_mant:
+                        best_mant = codes[storage]
+                        best_mant_idx = in_idx
+                max_groups_crossed = max(max_groups_crossed, len(groups))
+                if best_idx != best_mant_idx:
+                    value_vs_mantissa_disagreements += 1
+                if count > 0:
+                    values.append(float(best_val))
+                    argmax.append(int(best_idx))
+                else:
+                    values.append(0.0)
+                    argmax.append(-1)
+    if self_check:
+        assert value_vs_mantissa_disagreements >= 1, (
+            "maxpool1d_bfp_forward_ref: the dequant-value winner never differs from the "
+            "raw-mantissa winner -- a kernel that compares MANTISSAS (the SYM arm's free "
+            "ride) would be indistinguishable; give one group a much larger exponent and "
+            "put a small code there against a big code in a small-exponent group")
+        assert max_groups_crossed >= 2, (
+            "maxpool1d_bfp_forward_ref: no window spans >= 2 groups -- exponent-aware "
+            "comparison is unexercised")
+        coll_v, coll_a = maxpool1d_bfp_forward_ref(codes, [exps[0]], {**qc, "group_size": 0},
+                                                   batch, channels, geom, self_check=False)
+        assert (coll_v, coll_a) != (values, argmax), (
+            "maxpool1d_bfp_forward_ref: per-tensor collapse is indistinguishable")
+        assert any(v != 0.0 for v in values), "maxpool1d_bfp_forward_ref: all-zero output"
+    return values, argmax
+

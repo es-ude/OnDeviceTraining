@@ -1,3 +1,5 @@
+#define SOURCE_FILE "UNIT_TEST_MAX_POOL_1D"
+
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -5,9 +7,11 @@
 #include "DeathTest.h"
 #include "Layer.h"
 #include "MaxPool1d.h"
+#include "Quantization.h"
 #include "QuantizationApi.h"
 #include "StorageApi.h"
 #include "TensorApi.h"
+#include "TensorConversion.h"
 #include "expected_max_pool_1d.h"
 #include "unity.h"
 
@@ -598,35 +602,175 @@ void testMaxPool1dEdgeCases(void) {
 void setUp(void) {}
 void tearDown(void) {}
 
-/* BFP epic PR2 Task 8: maxPool1dBackward's ARITH_FLOAT32 arm runs outside
- * executeOp and raw-casts lossGrad/propLoss to float*. Task 8 made BFP dx wires
- * allocatable, and an ARITH_FLOAT32 propLossMath -- pinned, or derived as such
- * before the Task 9 flip -- selects exactly that arm; guard the storage dtype. */
-void testMaxPool1dBackwardRejectsBfpWire(void) {
-    size_t inputDims[] = {1, 1, 4};
-    size_t outputDims[] = {1, 1, 3};
-    float outputData[1 * 1 * 3] = {0};
-    int32_t argmaxData[1 * 1 * 3] = {0};
-    maxPool1dRunResult_t r = maxPool1dBuild(input_maxPool1d_basic, inputDims, 2, VALID, 1, 1,
-                                            outputData, argmaxData, outputDims);
-    maxPool1dForward(r.layer, r.input, r.output);
-    tensor_t *lossGrad = makeFloatTensor(outputDims, 3, NULL);
-    tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
-    tensor_t *bfpLossGrad = makeBfpTensor(outputDims, 3);
-    tensor_t *bfpPropLoss = makeBfpTensor(inputDims, 3);
+/* ---- BFP epic PR4 (R-P1/R-P4): native ARITH_BFP arms ---- */
 
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(r.layer, r.input, bfpLossGrad, propLoss));
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(r.layer, r.input, lossGrad, bfpPropLoss));
+/* BFP epic PR4: build a BFP wire with EXACT codes and per-group exponents.
+ * Writing the packed payload directly (byteConversion) instead of quantizing
+ * keeps the fixture independent of the quantizer and lets the test pin the
+ * borrowed exponents the kernel compares with. */
+static tensor_t *buildBfpWireWithCodes(size_t const *dims, size_t numDims, uint8_t mantissaBits,
+                                       uint8_t exponentBits, size_t numGroups, size_t groupSize,
+                                       int32_t *codes, uint8_t const *exponents) {
+    quantization_t *q = numGroups > 1 ? quantizationInitBfpGrouped(mantissaBits, exponentBits,
+                                                                   HALF_AWAY, numGroups, groupSize)
+                                      : quantizationInitBfp(mantissaBits, exponentBits, HALF_AWAY);
+    tensor_t *t = initTensor(makeShape(dims, numDims), q, NULL);
+    size_t n = calcNumberOfElementsByTensor(t);
+    if (codes != NULL) {
+        byteConversion((uint8_t *)codes, 32, t->data, mantissaBits, n);
+    }
+    bfpQConfig_t *qc = q->qConfig;
+    if (exponents != NULL) {
+        memcpy(qc->exponents, exponents, numGroups);
+    }
+    return t;
+}
 
-    freeTensor(bfpPropLoss);
-    freeTensor(bfpLossGrad);
-    freeTensor(propLoss);
-    freeTensor(lossGrad);
+/* BFP epic PR4 (R-P1): pools have no weight operand, so the width anchor for
+ * staging is the layer's OWN produced-wire config — outputQ for the forward,
+ * propLossQ for the backward. initMaxPool1dConfig derives both math slots from
+ * it, so passing a BFP wireQ selects the native arms. */
+static layer_t *maxPool1dBuildBfpLayer(maxPool1dConfig_t *cfgStore, kernel_t *kernelStore,
+                                       layerConfig_t *lcStore, layer_t *layerStore,
+                                       tensor_t *argmax, size_t kSize, paddingType_t padding,
+                                       size_t dilation, size_t stride, quantization_t *wireQ) {
+    initKernel(kernelStore, kSize, padding, dilation, stride);
+    initMaxPool1dConfig(cfgStore, kernelStore, argmax, wireQ, wireQ);
+    layerStore->type = MAXPOOL1D;
+    lcStore->maxPool1d = cfgStore;
+    layerStore->config = lcStore;
+    return layerStore;
+}
+
+/* BFP epic PR4 (R-P4): argmax over BFP values is NOT argmax over mantissas —
+ * a smaller code in a larger-exponent block can be the true maximum. The
+ * fixture is built so exactly that happens; a mantissa-comparing kernel gets
+ * both the value AND the index wrong. */
+void testMaxPool1dForwardBfpComparesDequantizedValues(void) {
+    size_t inputDims[] = {1, 2, 8};
+    size_t outputDims[] = {1, 2, 4};
+    int32_t inCodes[16];
+    for (size_t i = 0; i < kBfpMaxPoolInCodes_len; i++) {
+        inCodes[i] = kBfpMaxPoolInCodes[i];
+    }
+    tensor_t *input = buildBfpWireWithCodes(
+        inputDims, 3, (uint8_t)kBfpMaxPoolMantissaBits, (uint8_t)kBfpMaxPoolExponentBits,
+        (size_t)kBfpMaxPoolInNumGroups, (size_t)kBfpMaxPoolInGroupSize, inCodes, kBfpMaxPoolInExps);
+    tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
+    tensor_t *argmax = makeInt32Tensor(outputDims, 3);
+    quantization_t *wireQ = quantizationInitBfpGrouped(
+        (uint8_t)kBfpMaxPoolMantissaBits, (uint8_t)kBfpMaxPoolExponentBits, HALF_AWAY,
+        (size_t)kBfpMaxPoolInNumGroups, (size_t)kBfpMaxPoolInGroupSize);
+    kernel_t k;
+    maxPool1dConfig_t cfg;
+    layerConfig_t lc;
+    layer_t layer;
+    maxPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, argmax, (size_t)kBfpMaxPoolKernelSize, VALID,
+                           (size_t)kBfpMaxPoolDilation, (size_t)kBfpMaxPoolStride, wireQ);
+
+    maxPool1dForward(&layer, input, output);
+
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(kBfpMaxPoolExpectedForward, output->data,
+                                     kBfpMaxPoolExpectedForward_len * sizeof(float),
+                                     "the winner's EXACT dequant goes to the FLOAT32 raw (D7)");
+    TEST_ASSERT_EQUAL_INT32_ARRAY_MESSAGE(kBfpMaxPoolExpectedArgmax, (int32_t *)argmax->data,
+                                          kBfpMaxPoolExpectedArgmax_len,
+                                          "argmax must follow the DEQUANTIZED comparison, and "
+                                          "the funnel must leave auxOut in its INT32 storage");
+    freeQuantization(wireQ);
+    freeTensor(argmax);
+    freeTensor(output);
+    freeTensor(input);
+}
+
+/* BFP epic PR4 (R-P7d): the rule-1 mirror. A pinned ARITH_BFP forward with a
+ * NULL or non-BFP outputQ has no width anchor and must die EAGERLY — the
+ * userApi factories copy layerQuant_t slots by value and never call
+ * initMaxPool1dConfig, so both spellings are reachable (which is also why the
+ * config is built by field assignment here: initMaxPool1dConfig would reject
+ * the NULL argmax and derive the math slots for us). */
+void testMaxPool1dForwardBfpRequiresBfpOutputQ(void) {
+    size_t inputDims[] = {1, 2, 8};
+    size_t outputDims[] = {1, 2, 4};
+    tensor_t *input = makeFloatTensor(inputDims, 3, NULL);
+    tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
+    tensor_t *argmax = makeInt32Tensor(outputDims, 3);
+    quantization_t *floatQ = quantizationInitFloat();
+
+    kernel_t k;
+    initKernel(&k, (size_t)kBfpMaxPoolKernelSize, VALID, (size_t)kBfpMaxPoolDilation,
+               (size_t)kBfpMaxPoolStride);
+    maxPool1dConfig_t nullCfg = {0};
+    nullCfg.kernel = &k;
+    nullCfg.argmaxIndices = argmax;
+    nullCfg.forwardMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    nullCfg.outputQ = NULL;
+    layerConfig_t nullLc = {.maxPool1d = &nullCfg};
+    layer_t nullLayer = {.type = MAXPOOL1D, .config = &nullLc};
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(&nullLayer, input, output));
+
+    maxPool1dConfig_t floatCfg = nullCfg;
+    floatCfg.outputQ = floatQ;
+    layerConfig_t floatLc = {.maxPool1d = &floatCfg};
+    layer_t floatLayer = {.type = MAXPOOL1D, .config = &floatLc};
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(&floatLayer, input, output));
+
+    freeQuantization(floatQ);
+    freeTensor(argmax);
+    freeTensor(output);
+    freeTensor(input);
+}
+
+/* BFP epic PR4 (F5): the forward writes rawOut AND auxOut at the same flat
+ * index (b * channels + c) * outputLength + outPos, with batch/channels taken
+ * from the INPUT — so both need all three dims validated, and auxOut most of
+ * all: it is never funnel-converted, so nothing else looks at its shape before
+ * the kernel writes it raw. Assertion 1 is the case a length-only check
+ * misses; assertion 2 is the same hole on the argmax side. */
+void testMaxPool1dForwardBfpRejectsMismatchedOutputShapes(void) {
+    size_t inputDims[] = {1, 2, 8};
+    size_t goodDims[] = {1, 2, 4};
+    size_t wrongChannels[] = {1, 1, 4}; /* right length, wrong channels */
+    size_t wrongRank[] = {2, 4};
+    int32_t inCodes[16];
+    for (size_t i = 0; i < kBfpMaxPoolInCodes_len; i++) {
+        inCodes[i] = kBfpMaxPoolInCodes[i];
+    }
+    tensor_t *input = buildBfpWireWithCodes(
+        inputDims, 3, (uint8_t)kBfpMaxPoolMantissaBits, (uint8_t)kBfpMaxPoolExponentBits,
+        (size_t)kBfpMaxPoolInNumGroups, (size_t)kBfpMaxPoolInGroupSize, inCodes, kBfpMaxPoolInExps);
+    tensor_t *goodOut = makeFloatTensor(goodDims, 3, NULL);
+    tensor_t *badOut = makeFloatTensor(wrongChannels, 3, NULL);
+    tensor_t *badRankOut = makeFloatTensor(wrongRank, 2, NULL);
+    tensor_t *goodArgmax = makeInt32Tensor(goodDims, 3);
+    tensor_t *badArgmax = makeInt32Tensor(wrongChannels, 3);
+    quantization_t *wireQ = quantizationInitBfpGrouped(
+        (uint8_t)kBfpMaxPoolMantissaBits, (uint8_t)kBfpMaxPoolExponentBits, HALF_AWAY,
+        (size_t)kBfpMaxPoolInNumGroups, (size_t)kBfpMaxPoolInGroupSize);
+    kernel_t k;
+    maxPool1dConfig_t cfg;
+    layerConfig_t lc;
+    layer_t layer;
+    maxPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, goodArgmax, (size_t)kBfpMaxPoolKernelSize, VALID,
+                           (size_t)kBfpMaxPoolDilation, (size_t)kBfpMaxPoolStride, wireQ);
+
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(&layer, input, badOut));
+    cfg.argmaxIndices = badArgmax;
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(&layer, input, goodOut));
+    cfg.argmaxIndices = goodArgmax;
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(&layer, input, badRankOut));
+
+    freeQuantization(wireQ);
+    freeTensor(badArgmax);
+    freeTensor(goodArgmax);
+    freeTensor(badRankOut);
+    freeTensor(badOut);
+    freeTensor(goodOut);
+    freeTensor(input);
 }
 
 int main(void) {
     UNITY_BEGIN();
-    RUN_TEST(testMaxPool1dBackwardRejectsBfpWire);
     RUN_TEST(testMaxPool1dForwardBasic);
     RUN_TEST(testMaxPool1dCalcOutputShapeValidAndSame);
     RUN_TEST(testMaxPool1dBackwardBasic);
@@ -642,5 +786,8 @@ int main(void) {
     RUN_TEST(testMaxPool1dSymTieSamePadding);
     RUN_TEST(testMaxPool1dBackwardSymRejectsWideLossGrad);
     RUN_TEST(testMaxPool1dBackwardSymRejectsTermsOverBound);
+    RUN_TEST(testMaxPool1dForwardBfpComparesDequantizedValues);
+    RUN_TEST(testMaxPool1dForwardBfpRequiresBfpOutputQ);
+    RUN_TEST(testMaxPool1dForwardBfpRejectsMismatchedOutputShapes);
     return UNITY_END();
 }

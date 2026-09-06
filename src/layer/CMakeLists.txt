@@ -37,12 +37,14 @@ target_include_directories(MaxPool1d PUBLIC include)
 target_link_libraries(MaxPool1d PRIVATE
         DTypes
         Tensor
+        Quantization
         Arithmetic
         ArithmeticType
         ExecuteOp
         Common
         Kernel
         SlidingWindow1d
+        m
 )
 
 add_library(AvgPool1d AvgPool1d.c)

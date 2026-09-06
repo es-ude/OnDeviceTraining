@@ -6,6 +6,7 @@
 #include "MaxPool1d.h"
 
 #include "ArithmeticType.h"
+#include "BfpKernelSupport.h"
 #include "Common.h"
 #include "ExecuteOp.h"
 #include "Layer.h"
@@ -170,8 +171,160 @@ static void maxPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *r
         ((symInt32QConfig_t *)input->quantization->qConfig)->scale;
 }
 
+/* BFP epic PR4 (R-P1): GEMM's rule 1 is WEIGHT-anchored, but a pool has no
+ * weight operand, so the width anchor for staging a FLOAT32-stored operand is
+ * the layer's OWN produced-wire config — outputQ for the forward op,
+ * propLossQ for the backward op. Validated EAGERLY at op entry: without a
+ * BFP-typed produced-wire config there is no width source at all, so the arm
+ * must not run even when the operand happens to be BFP-stored. The pointer may
+ * be NULL — the userApi factories copy layerQuant_t slots BY VALUE and never
+ * call initMaxPool1dConfig, so a pinned ARITH_BFP math slot can arrive with a
+ * NULL or non-BFP wire config. NULL-check before ->type. (Per-file static,
+ * like requireNoBfpWire and poolValidateSymValueSum — the pool layers
+ * duplicate these rather than sharing a header.) */
+static const bfpQConfig_t *poolBfpWireAnchor(const quantization_t *wireQ, const char *what) {
+    if (wireQ == NULL || wireQ->type != BFP) {
+        PRINT_ERROR("%s: ARITH_BFP requires this layer's produced-wire config to be BFP-typed "
+                    "(the width anchor for staging FLOAT32 operands -- pools have no weight "
+                    "operand; see docs/conventions/arithmetic-bfp.md §5.7); got %s",
+                    what, wireQ == NULL ? "NULL" : "a non-BFP config");
+        exit(1);
+    }
+    return wireQ->qConfig;
+}
+
+/* BFP epic PR4 (F5): the new BFP kernels index their outputs as DENSE
+ * [batch][channels][length] arrays whose batch and channels come from the
+ * OPERAND's dims, so an output that disagrees on dim 0 or dim 1 is written
+ * past its end even when its length is right — checking dimensions[2] alone is
+ * not enough. Rank is checked first: dimensions[0..2] on a rank-2 shape is
+ * itself an over-read. NOTE the deliberate scope: the FLOAT32/SYM arms of this
+ * layer have the SAME gap and are NOT touched here. */
+static void poolBfpRequireDims3(const tensor_t *t, size_t d0, size_t d1, size_t d2,
+                                const char *what) {
+    if (t->shape->numberOfDimensions != 3) {
+        PRINT_ERROR("%s: expected a rank-3 [batch, channels, length] tensor, got rank %zu", what,
+                    t->shape->numberOfDimensions);
+        exit(1);
+    }
+    if (t->shape->dimensions[0] != d0 || t->shape->dimensions[1] != d1 ||
+        t->shape->dimensions[2] != d2) {
+        PRINT_ERROR("%s: expected shape [%zu, %zu, %zu], got [%zu, %zu, %zu]", what, d0, d1, d2,
+                    t->shape->dimensions[0], t->shape->dimensions[1], t->shape->dimensions[2]);
+        exit(1);
+    }
+}
+
+/* BFP epic PR4 (R-P4), ARITH_BFP arm: unlike the SYM arm's free ride (scale > 0
+ * preserves order, so mantissa select IS value select), raw BFP mantissas are
+ * NOT comparable across groups — a smaller code under a larger group exponent
+ * can be the true maximum. Every candidate is therefore DEQUANTIZED with
+ * ldexpf((float)mant, E_g - bias), which is exact (a float32 multiply by a
+ * power of two), and the comparison runs on values. The winner's dequant goes
+ * straight into the FLOAT32 raw (D7) — no scale copy, because the raw has no
+ * scale. Tie-break matches the FLOAT32 arm: strict >, seeded at -INFINITY,
+ * first occurrence wins. argmax semantics (auxOut, INT32, never
+ * funnel-converted; -1 empty-window sentinel) are unchanged. No headroom
+ * guard: nothing is summed. */
+static void maxPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
+                                      const void *ctx) {
+    (void)n;
+    const maxPool1dConfig_t *cfg = ctx;
+    tensor_t *input = ops[0];
+
+    if (input->shape->numberOfDimensions != 3) {
+        PRINT_ERROR("MaxPool1d forward BFP: input must be rank-3 [batch, channels, length], got "
+                    "rank %zu",
+                    input->shape->numberOfDimensions);
+        exit(1);
+    }
+    size_t batch = input->shape->dimensions[0];
+    size_t channels = input->shape->dimensions[1];
+    size_t inputLength = input->shape->dimensions[2];
+
+    windowGeometry1d_t geom = windowGeometry1dCalc(inputLength, cfg->kernel);
+    size_t outputLength = geom.outputLength;
+
+    /* Full shape on BOTH outputs (F5): rawOut and auxOut are indexed with the
+     * SAME (b * channels + c) * outputLength + outPos, batch/channels taken
+     * from the input, so both need all three dims validated — auxOut most of
+     * all, because it is never funnel-converted and is written raw. */
+    poolBfpRequireDims3(rawOut, batch, channels, outputLength, "MaxPool1d forward BFP (rawOut)");
+    poolBfpRequireDims3(auxOut, batch, channels, outputLength,
+                        "MaxPool1d forward BFP (argmaxIndices)");
+
+    const bfpQConfig_t *qC = input->quantization->qConfig;
+    validateBfpQConfigShape(qC, calcNumberOfElementsByTensor(input));
+    const int32_t expBias = bfpExponentBias(qC);
+
+    int32_t const *xArr = (int32_t const *)input->data;
+    float *yArr = (float *)rawOut->data;
+    int32_t *argmaxArr = (int32_t *)auxOut->data;
+
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t c = 0; c < channels; c++) {
+            for (size_t outPos = 0; outPos < outputLength; outPos++) {
+                windowSlice1d_t slice = windowSlice1dAt(&geom, outPos);
+
+                float bestVal = -INFINITY;
+                int32_t bestInputIdx = -1;
+                for (size_t i = 0; i < slice.validCount; i++) {
+                    size_t inputIdx = slice.firstValidInputIdx + i * geom.dilation;
+                    size_t storageIdx = (b * channels + c) * inputLength + inputIdx;
+                    size_t g = bfpGroupOf(qC, storageIdx);
+                    float v = ldexpf((float)xArr[storageIdx], (int)qC->exponents[g] - expBias);
+                    if (v > bestVal) {
+                        bestVal = v;
+                        bestInputIdx = (int32_t)inputIdx;
+                    }
+                }
+
+                size_t outIdx = (b * channels + c) * outputLength + outPos;
+                if (slice.validCount > 0) {
+                    yArr[outIdx] = bestVal;
+                    argmaxArr[outIdx] = bestInputIdx;
+                } else {
+                    // spec §6.3: empty window is theoretically possible but in
+                    // practice unreachable; log + sentinel-encode rather than exit
+                    yArr[outIdx] = 0.0f;
+                    argmaxArr[outIdx] = -1;
+                    PRINT_ERROR("MaxPool1d: empty window at outPos=%zu — likely user misconfig",
+                                outPos);
+                }
+            }
+        }
+    }
+}
+
 void maxPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output) {
     maxPool1dConfig_t *cfg = layer->config->maxPool1d;
+    if (cfg->forwardMath.type == ARITH_BFP) {
+        const bfpQConfig_t *anchor = poolBfpWireAnchor(cfg->outputQ, "MaxPool1d forward");
+        /* Stack template: lifetime covers the executeOp call (same frame).
+         * Always per-tensor {1,0} — the anchor supplies WIDTHS only; the
+         * funnel owns exponent backing and rounds by the OP (#282). A
+         * BFP-stored operand gets NULL: borrowed zero-copy, never re-blocked. */
+        bfpQConfig_t stage = {.exponents = NULL,
+                              .numGroups = 1,
+                              .groupSize = 0,
+                              .roundingMode = cfg->forwardMath.roundingMode,
+                              .mantissaBits = anchor->mantissaBits,
+                              .exponentBits = anchor->exponentBits};
+        executeOp(
+            &(opSpec_t){
+                .kernel = maxPool1dForwardKernelBfp,
+                .ctx = cfg,
+                .inputs = (tensor_t *[]){input},
+                .nInputs = 1,
+                .arithmetic = cfg->forwardMath,
+                .mode = OUT_WRITE,
+                .auxOut = cfg->argmaxIndices,
+                .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL, NULL, NULL},
+            },
+            output);
+        return;
+    }
+
     opKernelFn_t kernel;
     switch (cfg->forwardMath.type) {
     case ARITH_FLOAT32:

@@ -23,7 +23,9 @@ from sym_gold import (
     assert_rounding_canary,
     emit_float_scalar,
     emit_int32_scalar,
+    emit_uint8_array,
     f32_scale_i12,
+    maxpool1d_bfp_forward_ref,
     requant_absmax_i12_f32,
     stable_dequant_i12,
     window_geometry_1d,
@@ -337,6 +339,54 @@ def emit_sym_fixture(parts, fx):
     parts.append(emit_float_scalar(f"scaleTol_{pre}", SCALE_REL_TOL_SYM))
 
 
+# ---- BFP epic PR4 (R-P4): MaxPool1d ARITH_BFP forward --------------------
+# Input [1, 2, 8], grid {4 groups x 4}. Group 0 carries a MUCH larger stored
+# exponent (133 -> scale 2^6) than group 1 (125 -> scale 2^-2), so window 0
+# of channel 0 ({0, 2, 4} under dilation 2) has its true maximum at a SMALL
+# code in group 0 while the largest raw mantissa sits in group 1: a kernel
+# that compares mantissas (the SYM arm's free ride) picks the wrong element
+# AND the wrong argmax. Asserted by the ref's self-check.
+BFP_MAX_BATCH = 1
+BFP_MAX_CHANNELS = 2
+BFP_MAX_INPUT_LENGTH = 8
+BFP_MAX_KERNEL_SIZE = 3
+BFP_MAX_STRIDE = 1
+BFP_MAX_DILATION = 2
+BFP_MAX_MANTISSA_BITS = 6
+BFP_MAX_EXPONENT_BITS = 8
+BFP_MAX_IN_NUM_GROUPS = 4
+BFP_MAX_IN_GROUP_SIZE = 4
+BFP_MAX_IN_CODES = [12, -7, 3, 31, 30, 5, -1, 20,
+                    8, 0, -30, 6, 22, -1, 14, -14]
+BFP_MAX_IN_EXPS = [133, 125, 127, 130]
+
+
+def emit_bfp_fixtures(parts):
+    geom = window_geometry_1d(BFP_MAX_INPUT_LENGTH, BFP_MAX_KERNEL_SIZE, BFP_MAX_STRIDE,
+                              BFP_MAX_DILATION, "VALID")
+    assert geom["out_len"] == 4, geom
+    qc = {"mantissa_bits": BFP_MAX_MANTISSA_BITS, "exponent_bits": BFP_MAX_EXPONENT_BITS,
+          "group_size": BFP_MAX_IN_GROUP_SIZE}
+    values, argmax = maxpool1d_bfp_forward_ref(BFP_MAX_IN_CODES, BFP_MAX_IN_EXPS, qc,
+                                               BFP_MAX_BATCH, BFP_MAX_CHANNELS, geom)
+
+    # The C tests build their wires from these, so a fixture-shape change
+    # propagates instead of drifting away from hardcoded literals.
+    parts.append(emit_int32_scalar("kBfpMaxPoolMantissaBits", BFP_MAX_MANTISSA_BITS))
+    parts.append(emit_int32_scalar("kBfpMaxPoolExponentBits", BFP_MAX_EXPONENT_BITS))
+    parts.append(emit_int32_scalar("kBfpMaxPoolInNumGroups", BFP_MAX_IN_NUM_GROUPS))
+    parts.append(emit_int32_scalar("kBfpMaxPoolInGroupSize", BFP_MAX_IN_GROUP_SIZE))
+    parts.append(emit_int32_scalar("kBfpMaxPoolKernelSize", BFP_MAX_KERNEL_SIZE))
+    parts.append(emit_int32_scalar("kBfpMaxPoolStride", BFP_MAX_STRIDE))
+    parts.append(emit_int32_scalar("kBfpMaxPoolDilation", BFP_MAX_DILATION))
+
+    parts.append(emit_int32_array("kBfpMaxPoolInCodes", torch.tensor(BFP_MAX_IN_CODES)))
+    parts.append(emit_uint8_array("kBfpMaxPoolInExps", BFP_MAX_IN_EXPS))
+    parts.append(emit_float_array("kBfpMaxPoolExpectedForward",
+                                  torch.tensor(values, dtype=torch.float32)))
+    parts.append(emit_int32_array("kBfpMaxPoolExpectedArgmax", torch.tensor(argmax)))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, type=Path)
@@ -364,6 +414,8 @@ def main() -> int:
     for fx in [fixture_sym_basic(), fixture_sym_stride_dilation(),
                fixture_sym_tie_same_padding()]:
         emit_sym_fixture(parts, fx)
+
+    emit_bfp_fixtures(parts)
 
     parts.append("\n#endif // ODT_EXPECTED_MAX_POOL_1D_H\n")
 

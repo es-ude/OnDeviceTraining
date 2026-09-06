@@ -9,9 +9,11 @@
 #include "ArithmeticType.h"
 #include "BorrowedLayer.h"
 #include "CalculateGradsSequential.h"
+#include "Conv1dApi.h"
 #include "DataLoaderApi.h"
 #include "Dataset.h"
 #include "DeathTest.h"
+#include "FlattenApi.h"
 #include "InferenceApi.h"
 #include "LayerQuant.h"
 #include "Linear.h"
@@ -1560,6 +1562,209 @@ void testBfpGradStorageTrainsUnderReductionMean(void) {
                                      "grads are per-tensor-only (#300 axis)");
 }
 
+/* ===========================================================================
+ * #420 C2: CONV-FAMILY BFP grad-storage capstone.
+ *
+ * The two capstones above pin BFP weight-grad storage on a LINEAR layer only,
+ * so the conv weightGrad/biasGrad accumulate route -- the Conv1d kernels'
+ * FLOAT32 raw intermediate flowing into accumulateOut's BFP-target arm -- ships
+ * with no e2e coverage at all. This capstone closes that: Conv1d -> Flatten ->
+ * Linear with per-tensor BFP weightGradStorage AND biasGradStorage on the conv
+ * layer (the Linear capstones exercise the weight knob only), trained through
+ * the default epoch path.
+ *
+ * Everything else stays FLOAT32 on purpose: BFP STORAGE is guarded out of
+ * Flatten until epic PR4, so a BFP forward wire could not reach the Linear head
+ * at all -- and it is irrelevant here, since the claim under test is about grad
+ * STORAGE, not about ARITH_BFP math. Bias is BIAS_TRUE so the biasGrad route is
+ * live.
+ * ======================================================================== */
+
+#define BFP_CONV_IN_CHANNELS 1
+#define BFP_CONV_OUT_CHANNELS 2
+#define BFP_CONV_KERNEL_SIZE 2
+#define BFP_CONV_SEQ_LEN 4
+#define BFP_CONV_OUT_LEN 3 /* VALID, stride 1: 4 - 2 + 1 */
+#define BFP_CONV_FLAT_FEATURES (BFP_CONV_OUT_CHANNELS * BFP_CONV_OUT_LEN)
+#define BFP_CONV_NUM_CLASSES 2
+#define BFP_CONV_MODEL_SIZE 3
+
+static tensor_t *buildFloatTensor3D(size_t d0, size_t d1, size_t d2, const float *values) {
+    size_t *dims = reserveMemory(3 * sizeof(size_t));
+    dims[0] = d0;
+    dims[1] = d1;
+    dims[2] = d2;
+    size_t *order = reserveMemory(3 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(3, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 3, order);
+    tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(t, (float *)values, d0 * d1 * d2);
+    return t;
+}
+
+/* File-scope for the same reason the REDUCTION_MEAN fixture above is: the
+ * dataLoader callbacks carry no context pointer. */
+static tensor_t *bfpConvEpochItems[2];
+static tensor_t *bfpConvEpochLabels[2];
+
+static sample_t *getBfpConvEpochSample(size_t id) {
+    sample_t *s = reserveMemory(sizeof(sample_t));
+    s->item = bfpConvEpochItems[id];
+    s->label = bfpConvEpochLabels[id];
+    return s;
+}
+
+static size_t getBfpConvEpochDatasetSize() {
+    return 2;
+}
+
+/* Conv1d comes from a BORROWING factory but its parameters are registered with
+ * the optimizer, which frees them in freeOptim's cascade -- so the layer is
+ * torn down shell-only (the GroupNorm/BiaslessConv integration-test pattern).
+ * The kernel_t is factory-allocated and optimizer-invisible, so it is freed
+ * here explicitly. */
+static void freeConv1dLayerShellOnly(layer_t *layer) {
+    freeReservedMemory(layer->config->conv1d->kernel);
+    freeReservedMemory(layer->config->conv1d);
+    freeReservedMemory(layer->config);
+    freeReservedMemory(layer);
+}
+
+void testBfpConvGradStorageTrainsUnderDefaultEpoch(void) {
+    rngSetSeed(1717u);
+    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *gradKnob = quantizationInitBfp(8, 8, HALF_AWAY);
+
+    layerQuant_t lqConv;
+    layerQuantInitUniform(&lqConv, floatQ);
+    lqConv.weightGradStorage = gradKnob;
+    lqConv.biasGradStorage = gradKnob;
+    layer_t *conv = conv1dLayerInit(&(conv1dInit_t){.inChannels = BFP_CONV_IN_CHANNELS,
+                                                    .outChannels = BFP_CONV_OUT_CHANNELS,
+                                                    .kernelSize = BFP_CONV_KERNEL_SIZE,
+                                                    .bias = BIAS_TRUE},
+                                    &lqConv);
+    freeQuantization(gradKnob); /* gradInit deep-clones via getQLike */
+
+    layerQuant_t lqPlain;
+    layerQuantInitUniform(&lqPlain, floatQ);
+    layer_t *flat = flattenLayerInit();
+    layer_t *head = linearLayerInit(&(linearInit_t){.inFeatures = BFP_CONV_FLAT_FEATURES,
+                                                    .outFeatures = BFP_CONV_NUM_CLASSES,
+                                                    .bias = BIAS_TRUE},
+                                    &lqPlain);
+    layer_t *model[BFP_CONV_MODEL_SIZE] = {conv, flat, head};
+
+    tensor_t *wGrad = getGradFromParameter(conv->config->conv1d->weights);
+    tensor_t *bGrad = getGradFromParameter(conv->config->conv1d->bias);
+    /* (a) the knob landed BFP grad storage on BOTH conv parameters. */
+    int wGradType = (int)wGrad->quantization->type;
+    int bGradType = (int)bGrad->quantization->type;
+
+    bfpConvEpochItems[0] = buildFloatTensor3D(1, BFP_CONV_IN_CHANNELS, BFP_CONV_SEQ_LEN,
+                                              (float[]){1.0f, 2.0f, 3.0f, 1.5f});
+    bfpConvEpochLabels[0] = buildFloatTensor2D(1, BFP_CONV_NUM_CLASSES, (float[]){0.2f, -0.3f});
+    bfpConvEpochItems[1] = buildFloatTensor3D(1, BFP_CONV_IN_CHANNELS, BFP_CONV_SEQ_LEN,
+                                              (float[]){0.5f, -1.0f, 2.0f, -0.25f});
+    bfpConvEpochLabels[1] = buildFloatTensor2D(1, BFP_CONV_NUM_CLASSES, (float[]){-0.1f, 0.4f});
+    dataLoader_t *dl = dataLoaderInit(getBfpConvEpochSample, getBfpConvEpochDatasetSize, 1, NULL,
+                                      NULL, false, 0, true);
+
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.02f, 0.f, 0.f, model, BFP_CONV_MODEL_SIZE, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+
+    /* (a, strong form) ONE backward before the epoch loop, so the grads can be
+     * inspected between backward and the optimizer's zero: the accumulate arm
+     * must have moved BOTH grids off the zero state. zeroGrad resets exponents
+     * to bias every step, so this is the only point where that is observable. */
+    trainingStats_t *seedStats =
+        calculateGradsSequential(model, BFP_CONV_MODEL_SIZE, defaultLossConfig(MSE), REDUCTION_MEAN,
+                                 bfpConvEpochItems[0], bfpConvEpochLabels[0]);
+    freeTrainingStats(seedStats);
+    /* Sentinels keep the CAPTURE phase crash-free if the grad-storage knob
+     * ever regresses to the FLOAT32 default -- a FLOAT32 grad carries a NULL
+     * qConfig, and a mutation-time null deref here would replace the clean
+     * dtype assertion below with a segfault nobody can attribute to a case. */
+    uint8_t zeroStateBias = 0;
+    uint8_t wGradExponent = 0;
+    uint8_t bGradExponent = 0;
+    if (wGradType == BFP && bGradType == BFP) {
+        zeroStateBias = (uint8_t)bfpExponentBias(wGrad->quantization->qConfig);
+        wGradExponent = ((bfpQConfig_t *)wGrad->quantization->qConfig)->exponents[0];
+        bGradExponent = ((bfpQConfig_t *)bGrad->quantization->qConfig)->exponents[0];
+    }
+    optimizerFunctions[SGD_M].zero(sgd);
+
+    /* (b) params must move: capture the conv weights before training. */
+    float weightsBefore[BFP_CONV_OUT_CHANNELS * BFP_CONV_IN_CHANNELS * BFP_CONV_KERNEL_SIZE];
+    tensor_t *wParam = getParamFromParameter(conv->config->conv1d->weights);
+    memcpy(weightsBefore, wParam->data, sizeof(weightsBefore));
+
+    /* (c) loss decreases across 10 epochs of the DEFAULT epoch path
+     * (mean-scale -> scaleOptimizerGradients -> step -> zero per batch). */
+    float firstEpochLoss = NAN;
+    float lastEpochLoss = NAN;
+    for (size_t epoch = 0; epoch < 10; epoch++) {
+        float epochLoss = trainingEpochDefault(model, BFP_CONV_MODEL_SIZE, defaultLossConfig(MSE),
+                                               dl, sgd, calculateGradsSequential, REDUCTION_MEAN);
+        if (epoch == 0) {
+            firstEpochLoss = epochLoss;
+        }
+        lastEpochLoss = epochLoss;
+    }
+
+    float weightsAfter[BFP_CONV_OUT_CHANNELS * BFP_CONV_IN_CHANNELS * BFP_CONV_KERNEL_SIZE];
+    memcpy(weightsAfter, wParam->data, sizeof(weightsAfter));
+    int wGradTypeAfter = (int)wGrad->quantization->type;
+    int bGradTypeAfter = (int)bGrad->quantization->type;
+    size_t wGradNumGroups =
+        wGradTypeAfter == BFP ? ((bfpQConfig_t *)wGrad->quantization->qConfig)->numGroups : 0;
+
+    /* CAPTURE -> FREE (reverse init order) -> assert. */
+    freeOptim(sgd);
+    freeLinearLayerShellOnly(head);
+    freeFlattenLayer(flat);
+    freeConv1dLayerShellOnly(conv);
+    freeQuantization(momentumQ);
+    freeDataLoader(dl);
+    freeTensor(bfpConvEpochLabels[1]);
+    freeTensor(bfpConvEpochItems[1]);
+    freeTensor(bfpConvEpochLabels[0]);
+    freeTensor(bfpConvEpochItems[0]);
+    freeQuantization(floatQ);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        BFP, wGradType, "weightGradStorage must land BFP storage on the conv weight grad");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, bGradType,
+                                  "biasGradStorage must land BFP storage on the conv bias grad");
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(zeroStateBias, wGradExponent,
+                                  "the conv weightGrad accumulate route must move the BFP grad's "
+                                  "exponent off the zero state during backward");
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(zeroStateBias, bGradExponent,
+                                  "the conv biasGrad accumulate route must move the BFP grad's "
+                                  "exponent off the zero state during backward");
+    bool moved = false;
+    for (size_t i = 0; i < sizeof(weightsBefore) / sizeof(weightsBefore[0]); i++) {
+        if (weightsBefore[i] != weightsAfter[i]) {
+            moved = true;
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(moved, "a training step must move the conv weights read back through "
+                                    "the BFP grad");
+    TEST_ASSERT_TRUE_MESSAGE(isfinite(firstEpochLoss) && isfinite(lastEpochLoss),
+                             "conv BFP grad-storage epoch losses must stay finite");
+    TEST_ASSERT_TRUE_MESSAGE(lastEpochLoss < firstEpochLoss,
+                             "the default epoch path must converge with BFP-stored conv grads");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, wGradTypeAfter,
+                                  "conv weight grad must stay BFP-stored after training");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, bGradTypeAfter,
+                                  "conv bias grad must stay BFP-stored after training");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(1, wGradNumGroups, "grads are per-tensor-only (#300 axis)");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMultiLayerBackward_WithCrossEntropy_DoesNotCrash);
@@ -1579,5 +1784,6 @@ int main(void) {
     RUN_TEST(testBfpPinnedFloat32BackwardTrainingLossDecreases);
     RUN_TEST(testBfpGradStorageTrainingAccumulatesAndSteps);
     RUN_TEST(testBfpGradStorageTrainsUnderReductionMean);
+    RUN_TEST(testBfpConvGradStorageTrainsUnderDefaultEpoch);
     return UNITY_END();
 }

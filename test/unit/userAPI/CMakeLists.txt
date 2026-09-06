@@ -304,6 +304,8 @@ target_link_libraries(UnitTestMultiLayerTraining PRIVATE
         CommonLayerLibs
         TensorApi
         LinearApi
+        Conv1dApi
+        FlattenApi
         LayerQuant
         ArithmeticType
         ReluApi

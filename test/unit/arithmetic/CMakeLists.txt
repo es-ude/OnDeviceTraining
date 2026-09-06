@@ -145,6 +145,15 @@ add_elastic_ai_unit_test(
 
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
+        MinMax
+        MORE_LIBS
+        Tensor
+        DTypes
+        m
+)
+
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
         Matmul
         MORE_LIBS
         Arithmetic

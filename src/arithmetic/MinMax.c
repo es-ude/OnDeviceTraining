@@ -15,6 +15,14 @@ float maxFloat32s(float a, float b) {
 
 float findAbsMaxFloat(uint8_t *bytes, size_t numberOfElements) {
     float *values = (float *)bytes;
+    /* #420 G4: the absmax of nothing is 0.f -- a DEFINED result, not a trap.
+     * Seeding the running max from values[0] first would read out of bounds
+     * on an empty buffer (#160 family), and 0.f is exactly what the
+     * downstream consumer already means by "no data": deriveBfpStoredExponent's
+     * absMax == 0 branch returns the zero-state exponent (bias, scale 1.0). */
+    if (numberOfElements == 0) {
+        return 0.f;
+    }
     float max = fabsf(values[0]);
 
     for (size_t i = 1; i < numberOfElements; i++) {

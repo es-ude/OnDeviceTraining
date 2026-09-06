@@ -7393,6 +7393,101 @@ void testAccumulateFloatIntoBfpFixedGridCapRegimeAbortsInsteadOfUB(void) {
     ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorFixedGrid(&target, inc, n));
 }
 
+/* ---- #421 U3 (ruling R6): a non-finite INCREMENT is a fail-fast ---------
+ * Same rationale as the scale path's non-finite FACTOR guard (R1): a BFP
+ * grid is (int32 mantissa, shared power-of-two exponent) and has no NaN/inf
+ * code, so there is nothing to propagate into. Mapping the value to 0 would
+ * silently drop the caller's data and saturating it to +-qMax would invent
+ * data that was never there, so both engines refuse. The asymmetry is
+ * deliberate and documented: a FLOAT32-stored grad keeps propagating NaN
+ * loudly, because FLOAT32 CAN represent it.
+ *
+ * Unguarded, both engines walk into undefined behaviour rather than
+ * anything defined: pass 1's `v > absMax` comparison is false for NaN, so
+ * the fresh exponent silently ignores it, and pass 2's comparison-based
+ * float clamp cannot map NaN either, so roundByMode gets it and
+ * (int32_t)round(NaN) is undefined (C17 6.3.1.4). On arm64 that conversion
+ * happens to yield 0, so the guard-absent state exits 0 -- a deterministic
+ * no-death RED, which is how these three were watched.
+ *
+ * NOT covered by a fourth case: a FixedGrid target with an INFINITE
+ * increment would be vacuous. Its emit clamps into an abort-preserving band
+ * and packChunkGuarded then aborts on the overflowing code, so the test
+ * would pass with or without the guard. */
+static void buildNonFiniteIncrementTarget(tensor_t *t, uint8_t *data, shape_t *shape,
+                                          quantization_t *q, bfpQConfig_t *qc,
+                                          const int32_t *seedCodes, size_t n) {
+    initBfpQuantization(qc, q);
+    byteConversion((uint8_t *)seedCodes, 32, data, qc->mantissaBits, n);
+    setTensorValues(t, data, shape, q, NULL);
+}
+
+void testAccumulateFloatIntoBfpRescaleRejectsNaNIncrement(void) {
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    int32_t seedCodes[4] = {16, -8, 4, 2};
+    uint8_t exponents[1] = {127};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    uint8_t data[3]; /* calcNumberOfBytesForData(m=6, n=4) */
+    tensor_t target;
+    buildNonFiniteIncrementTarget(&target, data, &shape, &q, &qc, seedCodes, n);
+
+    float inc[4] = {1.f, NAN, 0.f, 0.f};
+    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorRescale(&target, inc, n));
+}
+
+void testAccumulateFloatIntoBfpRescaleRejectsInfiniteIncrement(void) {
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    int32_t seedCodes[4] = {16, -8, 4, 2};
+    uint8_t exponents[1] = {127};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    uint8_t data[3];
+    tensor_t target;
+    buildNonFiniteIncrementTarget(&target, data, &shape, &q, &qc, seedCodes, n);
+
+    float inc[4] = {1.f, INFINITY, 0.f, 0.f};
+    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorRescale(&target, inc, n));
+}
+
+void testAccumulateFloatIntoBfpFixedGridRejectsNaNIncrement(void) {
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    int32_t seedCodes[4] = {16, -8, 4, 2}; /* nonzero: the grid is CARRIED */
+    uint8_t exponents[1] = {127};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    uint8_t data[3];
+    tensor_t target;
+    buildNonFiniteIncrementTarget(&target, data, &shape, &q, &qc, seedCodes, n);
+
+    float inc[4] = {1.f, NAN, 0.f, 0.f};
+    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorFixedGrid(&target, inc, n));
+}
+
 void testQuantizeFloatBufferToBfpCodesRejectsBadGroupGeometry(void) {
     float values[8] = {6.f, 1.f, -2.f, 0.f, 28.f, -7.f, 3.f, 14.f};
     uint8_t exponents[3] = {127, 127, 127};
@@ -7597,6 +7692,9 @@ int main(void) {
     RUN_TEST(testAccumulateFloatIntoBfpRescaleRejectsShortElementCount);
     RUN_TEST(testFloatToBfpRejectsBadTargetGroupGeometry);
     RUN_TEST(testQuantizeFloatBufferToBfpCodesRejectsBadGroupGeometry);
+    RUN_TEST(testAccumulateFloatIntoBfpRescaleRejectsNaNIncrement);
+    RUN_TEST(testAccumulateFloatIntoBfpRescaleRejectsInfiniteIncrement);
+    RUN_TEST(testAccumulateFloatIntoBfpFixedGridRejectsNaNIncrement);
     RUN_TEST(testFloatToBfpCapRegimeSaturatesFiniteQuotient);
     RUN_TEST(testQuantizeFloatBufferToBfpCodesCapRegimeSaturatesFiniteQuotient);
     RUN_TEST(testRequantBfpTensorCapRegimeSaturatesFiniteQuotient);

@@ -1623,6 +1623,40 @@ static void incSrcChunk(const incSrc_t *src, size_t off, size_t count, float *ou
     dequantChunkToFloat(src->tens, off, count, out);
 }
 
+/* #421 U3 (ruling R6): a non-finite value in a BFP accumulate's INCREMENT is
+ * a fail-fast, the increment-side twin of the scale path's non-finite-factor
+ * guard. A BFP grid is (int32 mantissa, shared power-of-two exponent) and has
+ * no NaN/inf code, so there is nothing to propagate into: mapping the value
+ * to 0 would silently drop the caller's data, saturating it to +-qMax would
+ * invent data. Unguarded it is not even defined -- pass 1's `v > absMax` is
+ * false for NaN, so the fresh exponent ignores it, and the emit pass's
+ * comparison-based float clamp cannot map NaN either, so roundByMode gets it
+ * and (int32_t)round(NaN) is undefined (C17 6.3.1.4).
+ * Deliberate contract asymmetry, mirroring the factor guard's: the FLOAT32
+ * grad-storage path keeps propagating a NaN gradient loudly, because FLOAT32
+ * CAN represent it -- only the BFP arms refuse.
+ * Non-finite INTERMEDIATES are a different question and are NOT rejected: a
+ * finite increment on a grid already at the exponent cap can still overflow
+ * mant*oldScale*factor + inc to +-inf, and that saturates through the emit
+ * clamp as D6 value-domain behaviour. Only the INPUT is checked.
+ * Checked in the pass that first reads each increment element, so a
+ * violation in the first chunk is caught before any write; a later one
+ * aborts after earlier chunks are already written, exactly as
+ * packChunkGuarded's own mid-walk exit(1) does (the process is not
+ * recoverable either way). */
+static void rejectNonFiniteIncrement(const float *values, size_t count, size_t baseIndex,
+                                     const char *what) {
+    for (size_t i = 0; i < count; i++) {
+        if (!isfinite(values[i])) {
+            PRINT_ERROR("%s: non-finite increment value %f at element %zu -- BFP cannot "
+                        "represent non-finite values (no NaN/inf code to propagate into); "
+                        "refusing to drop it or saturate it into invented data",
+                        what, (double)values[i], baseIndex + i);
+            exit(1);
+        }
+    }
+}
+
 /* Both FixedGrid engines' "fresh vs. already-gridded" decision: a codes-only
  * all-zero scan over the WHOLE packed payload (post-initTensor zero-fill or
  * post-optimizerZeroGrad memset -> fresh, derive the grid from the increment;
@@ -1938,6 +1972,13 @@ static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *i
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackSignExtendChunk(target->data, qc->mantissaBits, off, count, mant);
         incSrcChunk(inc, off, count, incBuf);
+        /* Phase B is the only pass that reads EVERY increment element in both
+         * branches (phase A reads it only for a fresh, all-zero target), so
+         * the R6 check lives here. In the fresh branch phase A has already
+         * absorbed the value into an absmax first: NaN is ignored by the
+         * comparison and inf takes the exponent authority's non-finite arm
+         * (the cap), both defined, and the abort follows immediately here. */
+        rejectNonFiniteIncrement(incBuf, count, off, what);
         size_t chunkEnd = off + count;
         size_t idx = off;
         while (idx < chunkEnd) {
@@ -2093,6 +2134,8 @@ static void bfpRescaleWalk(tensor_t *target, const incSrc_t *inc, float factor, 
             unpackSignExtendChunk(target->data, qc->mantissaBits, start, take, mant);
             if (inc != NULL) {
                 incSrcChunk(inc, start, take, incBuf);
+                rejectNonFiniteIncrement(incBuf + (scanned - start), start + take - scanned,
+                                         scanned, what);
             }
             size_t segEnd = start + take;
             size_t idx = scanned;

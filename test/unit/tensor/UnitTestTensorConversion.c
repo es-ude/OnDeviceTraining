@@ -6355,6 +6355,161 @@ void testAccumulateFloatIntoBfpRescaleZeroTargetMultiChunkEqualsPack(void) {
     TEST_ASSERT_EQUAL_UINT8(127, exponents[2]);
 }
 
+/* #421 U6: the discriminating shape for the rescale walker's OLD-grid latch.
+ * The existing cross-chunk pin above starts from an ALL-ZERO target, so its
+ * decode contributes nothing and the latch is inert there. This one seeds
+ * NONZERO codes under three DISTINCT old exponents, with the groups
+ * (gsz=160) straddling the 256-element chunk boundary, so every element's
+ * value depends on the grid its codes were stored under -- and the fresh
+ * grid the walk derives differs from it.
+ *
+ * Reference is independent, not a recorded copy of this walker's output:
+ * decode the target with its OLD per-group scales in plain float, add the
+ * increment, and quantize THAT buffer to the same BFP geometry through
+ * convertTensor (packFloatBufferAsBfp). Rescale-accumulate is defined to be
+ * exactly that -- fresh per-group absmax over decoded-plus-increment, one
+ * clamped round per element -- so byte- and exponent-equality is the
+ * contract. Kills every way the interleaved walk can go wrong: deriving a
+ * group's fresh exponent before its last element has been seen, publishing a
+ * fresh exponent where the walk still needs the old one, and reading the
+ * wrong group's latched exponent. */
+static void fillLatchProbeIncrement(float *values, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        values[i] = ((float)(i % 17) - 8.f) * 0.25f;
+    }
+    values[200] = 90.f; /* group 1's absmax spike, inside the FIRST chunk */
+}
+
+static void fillLatchProbeCodes(int32_t *codes, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        codes[i] = (int32_t)(i % 31) - 15; /* fits m=6's [-32, 31] */
+    }
+}
+
+void testAccumulateFloatIntoBfpRescaleSeededMultiChunkEqualsDecodedPack(void) {
+    size_t n = 480;
+    size_t dims[] = {480};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    const uint8_t oldExponents[3] = {121, 133, 130}; /* scales 2^-6, 2^6, 2^3 */
+
+    int32_t seedCodes[480];
+    fillLatchProbeCodes(seedCodes, n);
+    float inc[480];
+    fillLatchProbeIncrement(inc, n);
+
+    /* Independent reference: decode under the OLD grid, add, requantize. */
+    float decoded[480];
+    for (size_t i = 0; i < n; i++) {
+        decoded[i] = (float)seedCodes[i] * ldexpf(1.f, (int)oldExponents[i / 160] - 127) + inc[i];
+    }
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    tensor_t decodedT;
+    setTensorValues(&decodedT, (uint8_t *)decoded, &shape, &floatQ, NULL);
+
+    uint8_t refExponents[3] = {0, 0, 0};
+    bfpQConfig_t refQC = {.exponents = refExponents,
+                          .numGroups = 3,
+                          .groupSize = 160,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 6,
+                          .exponentBits = 8};
+    quantization_t refQ;
+    initBfpQuantization(&refQC, &refQ);
+    uint8_t refData[calcNumberOfBytesForData(&refQ, n)];
+    tensor_t ref;
+    setTensorValues(&ref, refData, &shape, &refQ, NULL);
+    convertTensor(&decodedT, &ref);
+
+    uint8_t exponents[3] = {oldExponents[0], oldExponents[1], oldExponents[2]};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 3,
+                       .groupSize = 160,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    initBfpQuantization(&qc, &q);
+    uint8_t data[calcNumberOfBytesForData(&q, n)];
+    byteConversion((uint8_t *)seedCodes, 32, data, 6, n);
+    tensor_t target;
+    setTensorValues(&target, data, &shape, &q, NULL);
+
+    accumulateFloatIntoBfpTensorRescale(&target, inc, n);
+
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(refExponents, exponents, 3);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(refData, data, sizeof(refData));
+    /* Non-degeneracy anchors: the three groups land on DISTINCT fresh
+     * exponents, and every one of them moved off the old grid -- otherwise a
+     * latch bug could pass by coincidence. */
+    TEST_ASSERT_EQUAL_UINT8(124, exponents[0]); /* old 121 */
+    TEST_ASSERT_EQUAL_UINT8(132, exponents[1]); /* old 133 */
+    TEST_ASSERT_EQUAL_UINT8(129, exponents[2]); /* old 130 */
+}
+
+void testScaleBfpTensorInPlaceSeededMultiChunkEqualsDecodedPack(void) {
+    /* The scale arm of the same walker, same discriminating shape: nonzero
+     * codes, three distinct old exponents, groups astride the chunk
+     * boundary. Reference: decode under the OLD grid, multiply in float,
+     * requantize -- which is what an in-place scale is defined to be. The
+     * factor is deliberately NOT a power of two, so the codes really move. */
+    size_t n = 480;
+    size_t dims[] = {480};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    const uint8_t oldExponents[3] = {121, 133, 130};
+    const float factor = 0.3f;
+
+    int32_t seedCodes[480];
+    fillLatchProbeCodes(seedCodes, n);
+
+    float scaled[480];
+    for (size_t i = 0; i < n; i++) {
+        scaled[i] = (float)seedCodes[i] * ldexpf(1.f, (int)oldExponents[i / 160] - 127) * factor;
+    }
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    tensor_t scaledT;
+    setTensorValues(&scaledT, (uint8_t *)scaled, &shape, &floatQ, NULL);
+
+    uint8_t refExponents[3] = {0, 0, 0};
+    bfpQConfig_t refQC = {.exponents = refExponents,
+                          .numGroups = 3,
+                          .groupSize = 160,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 6,
+                          .exponentBits = 8};
+    quantization_t refQ;
+    initBfpQuantization(&refQC, &refQ);
+    uint8_t refData[calcNumberOfBytesForData(&refQ, n)];
+    tensor_t ref;
+    setTensorValues(&ref, refData, &shape, &refQ, NULL);
+    convertTensor(&scaledT, &ref);
+
+    uint8_t exponents[3] = {oldExponents[0], oldExponents[1], oldExponents[2]};
+    bfpQConfig_t qc = {.exponents = exponents,
+                       .numGroups = 3,
+                       .groupSize = 160,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 6,
+                       .exponentBits = 8};
+    quantization_t q;
+    initBfpQuantization(&qc, &q);
+    uint8_t data[calcNumberOfBytesForData(&q, n)];
+    byteConversion((uint8_t *)seedCodes, 32, data, 6, n);
+    tensor_t t;
+    setTensorValues(&t, data, &shape, &q, NULL);
+
+    scaleBfpTensorInPlace(&t, factor);
+
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(refExponents, exponents, 3);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(refData, data, sizeof(refData));
+    TEST_ASSERT_EQUAL_UINT8(119, exponents[0]); /* old 121 */
+    TEST_ASSERT_EQUAL_UINT8(131, exponents[1]); /* old 133 */
+    TEST_ASSERT_EQUAL_UINT8(128, exponents[2]); /* old 130 */
+}
+
 void testAccumulateTensorIntoBfpFixedGridFreshMultiChunkEqualsPack(void) {
     /* FixedGrid twin of the EqualsPack test above, through the TENSOR wrapper
      * so the STREAMED fresh-derive branch (running absmax, group close at gsz
@@ -7421,6 +7576,8 @@ int main(void) {
     RUN_TEST(testAccumulateTensorIntoBfpRescaleMatchesFloatWrapper);
     RUN_TEST(testAccumulateTensorIntoBfpFixedGridMatchesFloatWrapper);
     RUN_TEST(testAccumulateFloatIntoBfpRescaleZeroTargetMultiChunkEqualsPack);
+    RUN_TEST(testAccumulateFloatIntoBfpRescaleSeededMultiChunkEqualsDecodedPack);
+    RUN_TEST(testScaleBfpTensorInPlaceSeededMultiChunkEqualsDecodedPack);
     RUN_TEST(testAccumulateTensorIntoBfpFixedGridFreshMultiChunkEqualsPack);
     RUN_TEST(testAccumulateTensorIntoBfpRescaleRejectsSelfAliasedIncrement);
     RUN_TEST(testAccumulateTensorIntoBfpFixedGridRejectsSelfAliasedIncrement);

@@ -28,7 +28,15 @@ float mseLossForwardFloat(tensor_t *output, tensor_t *label, reduction_t reducti
     return sum;
 }
 
-float mseLossForwardSymInt32(tensor_t *output, tensor_t *label, reduction_t reduction) {
+/* Fake-quant arm — dtype-generic by construction (CrossEntropy.c's naming and
+ * precedent): every operand goes through convertTensor, so the same body
+ * serves SYM_INT32 and, since BFP epic PR4 (R-P6), BFP. The read side hits
+ * conversionMatrix[BFP][FLOAT32] (chunked exact dequant, mantissa * 2^E);
+ * the backward's write side hits conversionMatrix[FLOAT32][BFP], which
+ * derives FRESH per-group exponents — the BFP analog of the SYM arm's fresh
+ * absmax scale. NATIVE BFP losses stay an optional stretch (spec §5 MSE/CE
+ * row, §9): PR6 files the follow-up issue. */
+static float mseLossForwardFakeQuant(tensor_t *output, tensor_t *label, reduction_t reduction) {
     size_t size = calcNumberOfElementsByTensor(output);
 
     tensor_t outputFloat;
@@ -66,11 +74,11 @@ float mseLossForward(tensor_t *output, tensor_t *label, reduction_t reduction) {
     case FLOAT32:
         return mseLossForwardFloat(output, label, reduction);
     case SYM_INT32:
-        return mseLossForwardSymInt32(output, label, reduction);
+    case BFP:
+        return mseLossForwardFakeQuant(output, label, reduction);
     default:
-        PRINT_ERROR("mseLossForward: model-output dtype %d not supported (FLOAT32/SYM_INT32) -- "
-                    "BFP loss arms arrive with epic PR4; keep the loss-facing wire FLOAT32 (see "
-                    "docs/conventions/arithmetic-bfp.md)",
+        PRINT_ERROR("mseLossForward: model-output dtype %d not supported "
+                    "(FLOAT32/SYM_INT32/BFP)",
                     (int)output->quantization->type);
         exit(1);
     }
@@ -87,7 +95,10 @@ void mseLossBackwardFloat(tensor_t *modelOutput, tensor_t *label, tensor_t *resu
     }
 }
 
-void mseLossBackwardSymInt32(tensor_t *modelOutput, tensor_t *label, tensor_t *result) {
+/* Backward twin of mseLossForwardFakeQuant above — same dtype-generic
+ * contract, plus the final convertTensor that requantizes the raw grad into
+ * the result's own quantized grid. */
+static void mseLossBackwardFakeQuant(tensor_t *modelOutput, tensor_t *label, tensor_t *result) {
     size_t numberOfElements = calcNumberOfElementsByTensor(modelOutput);
 
     tensor_t modelOutputFloat;
@@ -130,12 +141,12 @@ void mseLossBackward(tensor_t *modelOutput, tensor_t *label, tensor_t *result) {
         mseLossBackwardFloat(modelOutput, label, result);
         break;
     case SYM_INT32:
-        mseLossBackwardSymInt32(modelOutput, label, result);
+    case BFP:
+        mseLossBackwardFakeQuant(modelOutput, label, result);
         break;
     default:
-        PRINT_ERROR("mseLossBackward: model-output dtype %d not supported (FLOAT32/SYM_INT32) -- "
-                    "BFP loss arms arrive with epic PR4; keep the loss-facing wire FLOAT32 (see "
-                    "docs/conventions/arithmetic-bfp.md)",
+        PRINT_ERROR("mseLossBackward: model-output dtype %d not supported "
+                    "(FLOAT32/SYM_INT32/BFP)",
                     (int)modelOutputQType);
         exit(1);
     }

@@ -8,9 +8,11 @@ float crossEntropyForwardFloat(tensor_t *softmaxOutput, tensor_t *distribution,
                                reduction_t reduction);
 
 /* Dtype dispatcher registered as lossFunctions[CROSS_ENTROPY].forward.
- * FLOAT32 -> crossEntropyForwardFloat; any other dtype fails fast — the raw
- * float impl casts the data buffer to float*, so e.g. SYM_INT32 mantissas
- * would be silently reinterpreted as float bit patterns. */
+ * FLOAT32 -> crossEntropyForwardFloat (raw float* view); SYM_INT32 and BFP ->
+ * the dtype-generic fake-quant arm, which dequantizes both operands through
+ * convertTensor before running the float core. Every other dtype fails fast:
+ * the raw float impl casts the data buffer to float*, so e.g. ASYM codes would
+ * be silently reinterpreted as float bit patterns. */
 float crossEntropyForward(tensor_t *softmaxOutput, tensor_t *distribution, reduction_t reduction);
 
 void crossEntropySoftmaxBackward(tensor_t *softmaxOutput, tensor_t *distribution, tensor_t *loss);

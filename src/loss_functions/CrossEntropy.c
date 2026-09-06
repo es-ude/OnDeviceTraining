@@ -41,7 +41,11 @@ float crossEntropyForwardFloat(tensor_t *softmaxOutput, tensor_t *distribution,
  * FLOAT32 label passes through as a copy) and run the float core on the
  * scratch views. The scratch tensors share softmaxOutput's shape/sparsity
  * pointers, so the core's microbatch MEAN branch sees the real
- * dimensions[0]. */
+ * dimensions[0].
+ * Since BFP epic PR4 (R-P6) the same body also serves BFP: convertTensor hits
+ * conversionMatrix[BFP][FLOAT32] on the read side and, in the backward,
+ * conversionMatrix[FLOAT32][BFP] (fresh per-group exponents) on the write
+ * side. */
 static float crossEntropyForwardFakeQuant(tensor_t *softmaxOutput, tensor_t *distribution,
                                           reduction_t reduction) {
     size_t inputSize = calcNumberOfElementsByTensor(softmaxOutput);
@@ -70,11 +74,11 @@ float crossEntropyForward(tensor_t *softmaxOutput, tensor_t *distribution, reduc
     case FLOAT32:
         return crossEntropyForwardFloat(softmaxOutput, distribution, reduction);
     case SYM_INT32:
+    case BFP:
         return crossEntropyForwardFakeQuant(softmaxOutput, distribution, reduction);
     default:
-        PRINT_ERROR("crossEntropyForward: model-output dtype %d not supported (FLOAT32/SYM_INT32) "
-                    "-- BFP loss arms arrive with epic PR4; keep the loss-facing wire FLOAT32 (see "
-                    "docs/conventions/arithmetic-bfp.md)",
+        PRINT_ERROR("crossEntropyForward: model-output dtype %d not supported "
+                    "(FLOAT32/SYM_INT32/BFP)",
                     (int)softmaxOutput->quantization->type);
         exit(1);
     }
@@ -120,7 +124,7 @@ static void crossEntropySoftmaxBackwardFakeQuant(tensor_t *softmaxOutput, tensor
 
     /* Write-only scratch: the loop below overwrites every element, so the
      * pre-call contents of `loss` are never dequantized (MSE.c precedent —
-     * mseLossBackwardSymInt32 skips the same wasted convert). */
+     * mseLossBackwardFakeQuant skips the same wasted convert). */
     tensor_t lossFloat;
     quantization_t lossFloatQ;
     initFloat32Quantization(&lossFloatQ);
@@ -146,12 +150,12 @@ void crossEntropySoftmaxBackward(tensor_t *softmaxOutput, tensor_t *distribution
         break;
     case SYM_INT32:
     case ASYM:
+    case BFP:
         crossEntropySoftmaxBackwardFakeQuant(softmaxOutput, distribution, loss);
         break;
     default:
         PRINT_ERROR("crossEntropySoftmaxBackward: model-output dtype %d not supported "
-                    "(FLOAT32/SYM_INT32/ASYM) -- BFP loss arms arrive with epic PR4; keep the "
-                    "loss-facing wire FLOAT32 (see docs/conventions/arithmetic-bfp.md)",
+                    "(FLOAT32/SYM_INT32/ASYM/BFP)",
                     (int)softmaxOutput->quantization->type);
         exit(1);
     }

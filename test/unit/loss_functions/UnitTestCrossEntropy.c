@@ -1,8 +1,11 @@
+#define SOURCE_FILE "UnitTestCrossEntropy"
+
 #include "CrossEntropy.h"
 #include "LayerQuant.h"
 #include "QuantizationApi.h"
 #include "Softmax.h"
 #include "SoftmaxApi.h"
+#include "StorageApi.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
 #include "expected_cross_entropy_sym.h"
@@ -384,6 +387,92 @@ void testCrossEntropySoftmaxBackwardSymWritesRequantizedGrad(void) {
     }
 }
 
+/* ---- BFP fake-quant arms (BFP epic PR4, R-P6) ---- */
+
+/* BFP epic PR4 (R-P6): a BFP wire with EXACT codes and a per-tensor exponent.
+ * The fixture is CANONICAL — requantizing its exact dequant reproduces these
+ * codes and this exponent — so the fake-quant arm's dequant is lossless and
+ * the test can assert EQUALITY against the FLOAT32 arm (R-P7b). */
+static tensor_t *buildBfpTensor1DWithCodes(size_t n, uint8_t mantissaBits, uint8_t exponentBits,
+                                           int32_t *codes, uint8_t storedExponent) {
+    size_t *dims = reserveMemory(2 * sizeof(size_t));
+    dims[0] = 1;
+    dims[1] = n;
+    size_t *order = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 2, order);
+    quantization_t *q = quantizationInitBfp(mantissaBits, exponentBits, HALF_AWAY);
+    tensor_t *t = initTensor(shape, q, NULL);
+    if (codes != NULL) {
+        byteConversion((uint8_t *)codes, 32, t->data, mantissaBits, n);
+    }
+    ((bfpQConfig_t *)q->qConfig)->exponents[0] = storedExponent;
+    return t;
+}
+
+/* [1, n] FLOAT32 twin of the builder above. */
+static tensor_t *buildFloatTensor1D(size_t n, const float *values) {
+    size_t *dims = reserveMemory(2 * sizeof(size_t));
+    dims[0] = 1;
+    dims[1] = n;
+    size_t *order = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 2, order);
+    tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(t, (float *)values, n);
+    return t;
+}
+
+/* R-P6: BFP joins the SYM_INT32 fake-quant arm. p = [0.5, 0.25, 0.125, 0.125]
+ * is grid-exact at m=6: absmax 0.5, 0.5/31 = 0.0161290 = 0.516129 * 2^-5, so
+ * the stored exponent is 127 - 5 = 122 (scale 2^-5 = 0.03125) and the codes
+ * are [16, 8, 4, 4]. The dequant is therefore lossless and the BFP loss must
+ * equal the FLOAT32 loss bit-for-bit (no logf gold needed). */
+void testCrossEntropyForwardBfpEqualsFloat32OnExactGrid(void) {
+    int32_t codes[4] = {16, 8, 4, 4};
+    tensor_t *bfpP = buildBfpTensor1DWithCodes(4, 6, 8, codes, 122);
+    float exactP[4] = {0.5f, 0.25f, 0.125f, 0.125f};
+    float y[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    tensor_t *floatP = buildFloatTensor1D(4, exactP);
+    tensor_t *label = buildFloatTensor1D(4, y);
+
+    float bfpLoss = crossEntropyForward(bfpP, label, REDUCTION_SUM);
+    float floatLoss = crossEntropyForward(floatP, label, REDUCTION_SUM);
+
+    TEST_ASSERT_EQUAL_FLOAT_MESSAGE(floatLoss, bfpLoss,
+                                    "an exact-grid BFP softmax output must give the FLOAT32 CE");
+    freeTensor(label);
+    freeTensor(floatP);
+    freeTensor(bfpP);
+}
+
+/* Fused (p - y) = [-0.5, 0.25, 0.125, 0.125]; absmax 0.5 -> the SAME grid as
+ * the input (stored 122, scale 0.03125), so the produced codes are
+ * [-16, 8, 4, 4]. */
+void testCrossEntropySoftmaxBackwardBfpRequantizesIntoFreshGrid(void) {
+    int32_t codes[4] = {16, 8, 4, 4};
+    int32_t sentinel[4] = {-9, -9, -9, -9};
+    tensor_t *bfpP = buildBfpTensor1DWithCodes(4, 6, 8, codes, 122);
+    float y[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    tensor_t *label = buildFloatTensor1D(4, y);
+    tensor_t *loss = buildBfpTensor1DWithCodes(4, 6, 8, sentinel, 127);
+
+    crossEntropySoftmaxBackward(bfpP, label, loss);
+
+    int32_t got[4];
+    unpackSignExtend(loss->data, 6, 0, got, 4);
+    int32_t expected[4] = {-16, 8, 4, 4};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, 4);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(122,
+                                    ((bfpQConfig_t *)loss->quantization->qConfig)->exponents[0],
+                                    "the produced grad must get a FRESH exponent (absmax 0.5)");
+    freeTensor(loss);
+    freeTensor(label);
+    freeTensor(bfpP);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -398,5 +487,7 @@ int main() {
     RUN_TEST(testCrossEntropyForwardSymInt32MatchesGold);
     RUN_TEST(testCrossEntropyForwardSymMicrobatchMeanDivides);
     RUN_TEST(testCrossEntropySoftmaxBackwardSymWritesRequantizedGrad);
+    RUN_TEST(testCrossEntropyForwardBfpEqualsFloat32OnExactGrid);
+    RUN_TEST(testCrossEntropySoftmaxBackwardBfpRequantizesIntoFreshGrid);
     return UNITY_END();
 }

@@ -34,6 +34,8 @@ add_elastic_ai_unit_test(
         MORE_LIBS
         CommonLayerLibs
         TensorApi
+        TensorConversion
+        Quantization
         StorageApi
         QuantizationApi
 )

@@ -2227,3 +2227,85 @@ def avgpool1d_bfp_backward_ref(gy_codes, gy_exps, gy_qc, batch, channels, geom,
             "avgpool1d_bfp_backward_ref: per-tensor collapse is indistinguishable -- "
             "fixture is vacuous against group-structure bugs")
     return out
+
+
+def adaptive_window_1d(input_length, output_length, out_pos):
+    """adaptiveWindow1dAt's twin (AdaptiveWindow1d.c): start = floor(o*L/O),
+    end = ceil((o+1)*L/O), count = end - start (>= 1 for o < O)."""
+    start = (out_pos * input_length) // output_length
+    end = ((out_pos + 1) * input_length + output_length - 1) // output_length
+    return start, end - start
+
+
+def adaptiveavgpool1d_bfp_forward_ref(codes, exps, qc, batch, channels, input_length,
+                                      output_length, self_check=True):
+    """AdaptiveAvgPool1d ARITH_BFP forward reference: bfp_window_sum_ref over
+    each adaptive window, then a float32 divide by THAT window's own count.
+    The SYM arm's rounded integer division (roundedDivHalfAwayInt32) has no
+    role here -- the BFP raw intermediate is FLOAT32 (D7), so the exact float
+    divide is both simpler and more accurate. Self-checks: >= 2 DIFFERENT
+    window counts (the per-window divide is load-bearing), >= 1 group
+    crossing, per-tensor collapse differs, >= 1 nonzero output."""
+    out = []
+    counts = set()
+    crossings_total = 0
+    for b in range(batch):
+        for c in range(channels):
+            base = (b * channels + c) * input_length
+            for o in range(output_length):
+                start, count = adaptive_window_1d(input_length, output_length, o)
+                counts.add(count)
+                idxs = [base + start + i for i in range(count)]
+                acc, crossings = bfp_window_sum_ref(codes, exps, qc, idxs)
+                crossings_total += crossings
+                out.append(float(np.float32(acc / np.float32(count))))
+    if self_check:
+        assert len(counts) >= 2, (
+            "adaptiveavgpool1d_bfp_forward_ref: every window has the same count -- the "
+            "per-window divide is indistinguishable from a constant K; pick L % O != 0")
+        assert crossings_total >= 1, (
+            "adaptiveavgpool1d_bfp_forward_ref: no window crosses a group boundary")
+        collapsed = adaptiveavgpool1d_bfp_forward_ref(codes, [exps[0]],
+                                                      {**qc, "group_size": 0}, batch,
+                                                      channels, input_length, output_length,
+                                                      self_check=False)
+        assert collapsed != out, (
+            "adaptiveavgpool1d_bfp_forward_ref: per-tensor collapse is indistinguishable")
+        assert any(v != 0.0 for v in out), "adaptiveavgpool1d_bfp_forward_ref: all-zero output"
+    return out
+
+
+def adaptiveavgpool1d_bfp_backward_ref(gy_codes, gy_exps, gy_qc, batch, channels,
+                                       input_length, output_length, self_check=True):
+    """AdaptiveAvgPool1d ARITH_BFP dx reference: contribution = exact dequant
+    of the output cell divided by ITS window's count (float32), scattered `+=`
+    into every window member. Same no-int32-partials / no-headroom-guard
+    argument as avgpool1d_bfp_backward_ref."""
+    bias = 2 ** (gy_qc["exponent_bits"] - 1) - 1
+    gx = [np.float32(0.0)] * (batch * channels * input_length)
+    hits = [0] * (batch * channels * input_length)
+    for b in range(batch):
+        for c in range(channels):
+            base = (b * channels + c) * input_length
+            for o in range(output_length):
+                start, count = adaptive_window_1d(input_length, output_length, o)
+                out_idx = (b * channels + c) * output_length + o
+                g = _bfp_group_of(out_idx, gy_qc["group_size"])
+                contribution = np.float32(
+                    np.float32(np.ldexp(np.float32(gy_codes[out_idx]),
+                                        np.int32(gy_exps[g] - bias))) / np.float32(count))
+                for i in range(count):
+                    gx[base + start + i] = np.float32(gx[base + start + i] + contribution)
+                    hits[base + start + i] += 1
+    out = [float(v) for v in gx]
+    if self_check:
+        assert any(h >= 2 for h in hits), (
+            "adaptiveavgpool1d_bfp_backward_ref: no input cell receives >= 2 contributions")
+        assert any(v != 0.0 for v in out), "adaptiveavgpool1d_bfp_backward_ref: all-zero dx"
+        collapsed = adaptiveavgpool1d_bfp_backward_ref(gy_codes, [gy_exps[0]],
+                                                       {**gy_qc, "group_size": 0}, batch,
+                                                       channels, input_length, output_length,
+                                                       self_check=False)
+        assert collapsed != out, (
+            "adaptiveavgpool1d_bfp_backward_ref: per-tensor collapse is indistinguishable")
+    return out

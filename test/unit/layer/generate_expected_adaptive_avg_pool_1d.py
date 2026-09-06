@@ -18,10 +18,13 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 from sym_gold import (
+    adaptiveavgpool1d_bfp_backward_ref,
+    adaptiveavgpool1d_bfp_forward_ref,
     assert_rounding_canary,
     emit_float_scalar,
     emit_int32_array,
     emit_int32_scalar,
+    emit_uint8_array,
     f32_scale_i12,
     requant_absmax_i12_f32,
     stable_dequant_i12,
@@ -288,6 +291,63 @@ def emit_sym_fixture(parts, fx):
     parts.append(emit_float_scalar(f"scaleTol_{pre}", SCALE_REL_TOL_SYM))
 
 
+# ---- BFP epic PR4 (R-P4): AdaptiveAvgPool1d ARITH_BFP fwd + dx -----------
+# L = 8, O = 3 -> window counts 3 / 4 / 3 (UNEVEN, so the per-window divide
+# cannot be mistaken for a constant K) and windows {0,1,2} {2,3,4,5}
+# {5,6,7} overlap at 2 and 5 (so the dx memset + accumulating scatter is
+# load-bearing). Input grid {4 groups x 4} over 16 elements -> window
+# {2,3,4,5} crosses a group boundary; channel 1 lives in groups 2/3, so a
+# kernel that looks the group up by the WITHIN-CHANNEL index binds the wrong
+# exponents.
+BFP_AD_BATCH = 1
+BFP_AD_CHANNELS = 2
+BFP_AD_INPUT_LENGTH = 8
+BFP_AD_OUTPUT_SIZE = 3
+BFP_AD_MANTISSA_BITS = 6
+BFP_AD_EXPONENT_BITS = 8
+BFP_AD_IN_NUM_GROUPS = 4
+BFP_AD_IN_GROUP_SIZE = 4
+BFP_AD_IN_CODES = [12, -7, 0, 31, -32, 5, -1, 20,
+                   3, -14, 22, -1, 8, 0, -30, 6]
+BFP_AD_IN_EXPS = [130, 127, 133, 125]
+BFP_AD_GY_NUM_GROUPS = 2
+BFP_AD_GY_GROUP_SIZE = 3
+BFP_AD_GY_CODES = [9, -21, 4, 30, -12, 7]
+BFP_AD_GY_EXPS = [129, 124]
+
+
+def emit_bfp_fixtures(parts):
+    # The C tests build their wires from these, so a fixture-shape change
+    # propagates instead of drifting away from hardcoded literals.
+    parts.append(emit_int32_scalar("kBfpAdaptiveMantissaBits", BFP_AD_MANTISSA_BITS))
+    parts.append(emit_int32_scalar("kBfpAdaptiveExponentBits", BFP_AD_EXPONENT_BITS))
+    parts.append(emit_int32_scalar("kBfpAdaptiveInNumGroups", BFP_AD_IN_NUM_GROUPS))
+    parts.append(emit_int32_scalar("kBfpAdaptiveInGroupSize", BFP_AD_IN_GROUP_SIZE))
+    parts.append(emit_int32_scalar("kBfpAdaptiveGyNumGroups", BFP_AD_GY_NUM_GROUPS))
+    parts.append(emit_int32_scalar("kBfpAdaptiveGyGroupSize", BFP_AD_GY_GROUP_SIZE))
+    parts.append(emit_int32_scalar("kBfpAdaptiveOutputSize", BFP_AD_OUTPUT_SIZE))
+
+    in_qc = {"mantissa_bits": BFP_AD_MANTISSA_BITS, "exponent_bits": BFP_AD_EXPONENT_BITS,
+             "group_size": BFP_AD_IN_GROUP_SIZE}
+    fwd = adaptiveavgpool1d_bfp_forward_ref(BFP_AD_IN_CODES, BFP_AD_IN_EXPS, in_qc,
+                                            BFP_AD_BATCH, BFP_AD_CHANNELS,
+                                            BFP_AD_INPUT_LENGTH, BFP_AD_OUTPUT_SIZE)
+    parts.append(emit_int32_array("kBfpAdaptiveInCodes", torch.tensor(BFP_AD_IN_CODES)))
+    parts.append(emit_uint8_array("kBfpAdaptiveInExps", BFP_AD_IN_EXPS))
+    parts.append(emit_float_array("kBfpAdaptiveExpectedForward",
+                                  torch.tensor(fwd, dtype=torch.float32)))
+
+    gy_qc = {"mantissa_bits": BFP_AD_MANTISSA_BITS, "exponent_bits": BFP_AD_EXPONENT_BITS,
+             "group_size": BFP_AD_GY_GROUP_SIZE}
+    bwd = adaptiveavgpool1d_bfp_backward_ref(BFP_AD_GY_CODES, BFP_AD_GY_EXPS, gy_qc,
+                                             BFP_AD_BATCH, BFP_AD_CHANNELS,
+                                             BFP_AD_INPUT_LENGTH, BFP_AD_OUTPUT_SIZE)
+    parts.append(emit_int32_array("kBfpAdaptiveGyCodes", torch.tensor(BFP_AD_GY_CODES)))
+    parts.append(emit_uint8_array("kBfpAdaptiveGyExps", BFP_AD_GY_EXPS))
+    parts.append(emit_float_array("kBfpAdaptiveExpectedBackward",
+                                  torch.tensor(bwd, dtype=torch.float32)))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, type=Path)
@@ -319,6 +379,8 @@ def main() -> int:
         "no SYM fixture distinguishes half-away from half-even division"
     for fx in sym_fixtures:
         emit_sym_fixture(parts, fx)
+
+    emit_bfp_fixtures(parts)
 
     parts.append("\n#endif // ODT_EXPECTED_ADAPTIVE_AVG_POOL_1D_H\n")
 

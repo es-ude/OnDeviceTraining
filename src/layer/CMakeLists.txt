@@ -65,10 +65,12 @@ target_include_directories(AdaptiveAvgPool1d PUBLIC include)
 target_link_libraries(AdaptiveAvgPool1d PRIVATE
         DTypes
         Tensor
+        Quantization
         ArithmeticType
         ExecuteOp
         Common
         AdaptiveWindow1d
+        m
 )
 
 add_library(Dropout Dropout.c)

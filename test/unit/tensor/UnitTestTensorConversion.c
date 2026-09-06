@@ -6983,9 +6983,10 @@ void testScaleBfpTensorInPlaceEmptyTensorResetsToZeroState(void) {
  * shape check, and the accumulate/scale engines index exponents[g] under the
  * exact-division invariant (numGroups * groupSize == n): a violating
  * geometry is an OOB exponent write (numGroups*gsz < n) or a silent
- * mis-blocking (> n) -- validateBfpQConfigShape at the three engine entries
- * rejects both, covering all five public entry points exactly once. One
- * death test per entry family, on the shared fixture below. Fixture
+ * mis-blocking (> n) -- validateBfpQConfigShape at the two engine entries
+ * (#421 folded the scale walk into the rescale one) rejects both, covering
+ * all five public entry points exactly once. One death test per entry
+ * family, on the shared fixture below. Fixture
  * direction: numGroups*gsz (12) > n (8), chosen because the guard-absent
  * state then runs to completion and exits 0 (a deterministic no-death RED);
  * the < n direction's OOB stack read feeds garbage exponents whose inf/NaN

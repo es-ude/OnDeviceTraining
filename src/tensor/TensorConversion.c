@@ -1679,7 +1679,14 @@ static void rejectNonFiniteIncrement(const float *values, size_t count, size_t b
  * anything else -> carry the existing grid verbatim). Codes-only by design:
  * a zeroed payload decodes to 0.0f under ANY scale/exponent, so the scan must
  * not consult the grid it is about to decide. Reads only, and bails at the
- * first nonzero code. */
+ * first nonzero code.
+ * #421 U8: "mantissa 0 decodes to exactly 0.0f" presumes a FINITE scale --
+ * 0 * inf is NaN, not 0. That holds for every in-contract config: derived
+ * exponents never exceed deriveBfpStoredExponent's bias + 127 cap (the
+ * largest finite float32 power of two), and since #420 G5 the deserializer
+ * rejects stored exponents above it too, so a non-finite-scale grid can no
+ * longer be ingested from an untrusted record -- only hand-built by a caller
+ * assigning qConfig fields directly. */
 static bool packedPayloadIsAllZero(const uint8_t *data, size_t bits, size_t n) {
     int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {

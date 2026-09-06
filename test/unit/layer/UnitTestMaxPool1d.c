@@ -924,6 +924,56 @@ void testMaxPool1dBackwardBfpGuardsNarrowedNotRemoved(void) {
     freeTensor(bfpLossGrad);
 }
 
+/* BFP epic PR4 (F5), the OPERAND side of the rank gate. executeOp never
+ * inspects operand rank (it sizes the raw from the TARGET only), so a rank-2
+ * BFP operand reaches the kernel, which would read dimensions[0..2] off a
+ * two-element dims array — an over-read of the shape itself. Both kernels
+ * therefore open with their own rank check BEFORE poolBfpRequireDims3, and
+ * these two deaths are the only ones that can reach it: every other rank-2
+ * case in this file passes a rank-2 OUTPUT (or argmax), which dies in
+ * poolBfpRequireDims3 first.
+ *
+ * MUTATION STATUS, stated honestly: DELETING either rank guard does NOT redden
+ * this test — the over-read dims[0..2] then reach poolBfpRequireDims3, which
+ * exit(1)s all the same, and the death harness compares exit codes only.
+ * Defense in depth, not coverage. What IS proven: giving each rank guard a
+ * distinct exit code makes exactly the matching assertion below fail, so both
+ * deaths really do originate in the rank guards. */
+void testMaxPool1dBfpRejectsRank2Operands(void) {
+    size_t rank2Input[] = {2, 8};
+    size_t rank2LossGrad[] = {2, 4};
+    size_t inputDims[] = {1, 2, 8};
+    size_t outputDims[] = {1, 2, 4};
+    tensor_t *badInput = buildBfpWireWithCodes(
+        rank2Input, 2, (uint8_t)kBfpMaxPoolMantissaBits, (uint8_t)kBfpMaxPoolExponentBits,
+        (size_t)kBfpMaxPoolInNumGroups, (size_t)kBfpMaxPoolInGroupSize, NULL, NULL);
+    tensor_t *badLossGrad = buildBfpWireWithCodes(
+        rank2LossGrad, 2, (uint8_t)kBfpMaxPoolMantissaBits, (uint8_t)kBfpMaxPoolExponentBits,
+        (size_t)kBfpMaxPoolGyNumGroups, (size_t)kBfpMaxPoolGyGroupSize, NULL, NULL);
+    tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
+    tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
+    tensor_t *argmax = makeInt32Tensor(outputDims, 3);
+    quantization_t *wireQ = quantizationInitBfpGrouped(
+        (uint8_t)kBfpMaxPoolMantissaBits, (uint8_t)kBfpMaxPoolExponentBits, HALF_AWAY,
+        (size_t)kBfpMaxPoolInNumGroups, (size_t)kBfpMaxPoolInGroupSize);
+    kernel_t k;
+    maxPool1dConfig_t cfg;
+    layerConfig_t lc;
+    layer_t layer;
+    maxPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, argmax, (size_t)kBfpMaxPoolKernelSize, VALID,
+                           (size_t)kBfpMaxPoolDilation, (size_t)kBfpMaxPoolStride, wireQ);
+
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(&layer, badInput, output));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&layer, NULL, badLossGrad, propLoss));
+
+    freeQuantization(wireQ);
+    freeTensor(argmax);
+    freeTensor(propLoss);
+    freeTensor(output);
+    freeTensor(badLossGrad);
+    freeTensor(badInput);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMaxPool1dForwardBasic);
@@ -947,5 +997,6 @@ int main(void) {
     RUN_TEST(testMaxPool1dBackwardBfpScattersToArgmaxPositions);
     RUN_TEST(testMaxPool1dBackwardBfpRejectsOutOfRangeArgmax);
     RUN_TEST(testMaxPool1dBackwardBfpGuardsNarrowedNotRemoved);
+    RUN_TEST(testMaxPool1dBfpRejectsRank2Operands);
     return UNITY_END();
 }

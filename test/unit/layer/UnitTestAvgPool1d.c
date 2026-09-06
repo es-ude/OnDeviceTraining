@@ -657,11 +657,13 @@ void testAvgPool1dBackwardBfpScattersIntoFloat32Raw(void) {
                            (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, wireQ);
 
     /* Called TWICE on purpose. dx is OUT_WRITE, so a repeated backward must
-     * reproduce the same numbers — and that is also what makes the kernel's
-     * memset of the funnel's uninitialized Phase-2 scratch observable: on a
-     * first call that stack VLA happens to be zero, so dropping the memset
-     * would pass a single-call test while the second call accumulates on top
-     * of the first one's result. */
+     * reproduce the same numbers — that contract is what this test pins. The
+     * second call is also the best available observability for the kernel's
+     * memset of the funnel's uninitialized Phase-2 scratch: that stack VLA can
+     * read as zero (it holds whatever the prologue's callee frames left at
+     * this stack depth), so a single call may not notice a missing memset.
+     * Not a deterministic kill either way — the durable fix is funnel-level
+     * zeroing of the Phase-2 raw (PR4 follow-up FU-1). */
     avgPool1dBackward(&layer, NULL, lossGrad, propLoss);
     avgPool1dBackward(&layer, NULL, lossGrad, propLoss);
 
@@ -882,6 +884,57 @@ void testAvgPool1dBackwardBfpGuardsNarrowedNotRemoved(void) {
     freeTensor(bfpLossGrad);
 }
 
+/* BFP epic PR4 (F5), the OPERAND side of the rank gate. executeOp never
+ * inspects operand rank (it sizes the raw from the TARGET only), so a rank-2
+ * BFP operand reaches the kernel, which would read dimensions[0..2] off a
+ * two-element dims array — an over-read of the shape itself. Both kernels
+ * therefore open with their own rank check BEFORE poolBfpRequireDims3, and
+ * these two deaths are the only ones that can reach it: every other rank-2
+ * case in this file passes a rank-2 OUTPUT, which dies in poolBfpRequireDims3
+ * first. Operands carry no codes — the guard fires before any data read.
+ *
+ * MUTATION STATUS, stated honestly: DELETING either rank guard does NOT redden
+ * this test. The statements right after it feed the over-read dims[0..2] into
+ * poolBfpRequireDims3 (and, in the backward, the geometry check), which
+ * exit(1) all the same — and the death harness compares exit codes only, with
+ * no message capture, so it cannot tell the two deaths apart. That is defense
+ * in depth, not coverage. What IS proven: giving each rank guard a distinct
+ * exit code makes exactly the matching assertion below fail, so both deaths
+ * really do originate in the rank guards and no rank-2 operand reaches the
+ * indexing loops. */
+void testAvgPool1dBfpRejectsRank2Operands(void) {
+    size_t rank2Input[] = {2, 8};
+    size_t rank2LossGrad[] = {2, 4};
+    size_t inputDims[] = {1, 2, 8};
+    size_t outputDims[] = {1, 2, 4};
+    tensor_t *badInput = buildBfpWireWithCodes(
+        rank2Input, 2, (uint8_t)kBfpAvgPoolMantissaBits, (uint8_t)kBfpAvgPoolExponentBits,
+        (size_t)kBfpAvgPoolInNumGroups, (size_t)kBfpAvgPoolInGroupSize, NULL, NULL);
+    tensor_t *badLossGrad = buildBfpWireWithCodes(
+        rank2LossGrad, 2, (uint8_t)kBfpAvgPoolMantissaBits, (uint8_t)kBfpAvgPoolExponentBits,
+        (size_t)kBfpAvgPoolOutNumGroups, (size_t)kBfpAvgPoolOutGroupSize, NULL, NULL);
+    tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
+    tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
+    quantization_t *wireQ = quantizationInitBfpGrouped(
+        (uint8_t)kBfpAvgPoolMantissaBits, (uint8_t)kBfpAvgPoolExponentBits, HALF_AWAY,
+        (size_t)kBfpAvgPoolInNumGroups, (size_t)kBfpAvgPoolInGroupSize);
+    kernel_t k;
+    avgPool1dConfig_t cfg;
+    layerConfig_t lc;
+    layer_t layer;
+    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, VALID,
+                           (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, wireQ);
+
+    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&layer, badInput, output));
+    ASSERT_EXITS_WITH_FAILURE(avgPool1dBackward(&layer, NULL, badLossGrad, propLoss));
+
+    freeQuantization(wireQ);
+    freeTensor(propLoss);
+    freeTensor(output);
+    freeTensor(badLossGrad);
+    freeTensor(badInput);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testAvgPool1dForwardBasic);
@@ -907,5 +960,6 @@ int main(void) {
     RUN_TEST(testAvgPool1dForwardBfpWireUnderPinnedFloat32);
     RUN_TEST(testAvgPool1dBackwardBfpScattersIntoFloat32Raw);
     RUN_TEST(testAvgPool1dBackwardBfpGuardsNarrowedNotRemoved);
+    RUN_TEST(testAvgPool1dBfpRejectsRank2Operands);
     return UNITY_END();
 }

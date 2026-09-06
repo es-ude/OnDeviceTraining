@@ -550,9 +550,14 @@ void testAdaptiveAvgPool1dBackwardBfpScattersIntoFloat32Raw(void) {
     adaptiveBuildBfpLayer(&cfg, &lc, &layer, (size_t)kBfpAdaptiveOutputSize, wireQ);
 
     /* Called TWICE on purpose: dx is OUT_WRITE, so a repeated backward must
-     * reproduce the same numbers — and that is what makes the kernel's memset
-     * of the funnel's uninitialized Phase-2 scratch observable (that stack VLA
-     * happens to be zero on a first call). */
+     * reproduce the same numbers — that contract is what this test pins. The
+     * second call is also the best available observability for the kernel's
+     * memset of the funnel's uninitialized Phase-2 scratch: that stack VLA can
+     * read as zero (it holds whatever the prologue's callee frames left at
+     * this stack depth), so a single call may not notice a missing memset. For
+     * THIS layer the doubled call did not kill the dropped-memset mutant in
+     * one build — the observability is stack-layout dependent. The durable fix
+     * is funnel-level zeroing of the Phase-2 raw (PR4 follow-up FU-1). */
     adaptiveAvgPool1dBackward(&layer, NULL, lossGrad, propLoss);
     adaptiveAvgPool1dBackward(&layer, NULL, lossGrad, propLoss);
 
@@ -657,6 +662,19 @@ void testAdaptiveAvgPool1dBackwardBfpGuardsNarrowedNotRemoved(void) {
         adaptiveAvgPool1dBackward(&bfpLayer, NULL, bfpLossGrad, floatPropLoss));
     ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dForward(&bfpLayer, floatInput, floatOutput));
 
+    /* The NON-NULL, non-BFP spelling of the same hole (the AvgPool/MaxPool
+     * twins pin it too): a FLOAT32 produced-wire config is just as anchor-less
+     * as a NULL one — it carries no mantissa/exponent widths — so a guard that
+     * only NULL-checks would walk into staging with a bogus anchor. */
+    adaptiveAvgPool1dConfig_t floatWireCfg = bfpCfg;
+    floatWireCfg.outputQ = floatQ;
+    floatWireCfg.propLossQ = floatQ;
+    layerConfig_t floatWireLc = {.adaptiveAvgPool1d = &floatWireCfg};
+    layer_t floatWireLayer = {.type = ADAPTIVE_AVGPOOL1D, .config = &floatWireLc};
+    ASSERT_EXITS_WITH_FAILURE(
+        adaptiveAvgPool1dBackward(&floatWireLayer, NULL, bfpLossGrad, floatPropLoss));
+    ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dForward(&floatWireLayer, floatInput, floatOutput));
+
     freeQuantization(floatQ);
     freeTensor(floatInput);
     freeTensor(bfpPropLoss);
@@ -664,6 +682,52 @@ void testAdaptiveAvgPool1dBackwardBfpGuardsNarrowedNotRemoved(void) {
     freeTensor(floatPropLoss);
     freeTensor(floatLossGrad);
     freeTensor(bfpLossGrad);
+}
+
+/* BFP epic PR4 (F5), the OPERAND side of the rank gate. executeOp never
+ * inspects operand rank (it sizes the raw from the TARGET only), so a rank-2
+ * BFP operand reaches the kernel, which would read dimensions[0..2] off a
+ * two-element dims array — an over-read of the shape itself. Both kernels
+ * therefore open with their own rank check BEFORE poolBfpRequireDims3, and
+ * these two deaths are the only ones that can reach it: the rank-2 case in
+ * testAdaptiveAvgPool1dBfpRejectsMismatchedShapes passes a rank-2 OUTPUT,
+ * which dies in poolBfpRequireDims3 first.
+ *
+ * MUTATION STATUS, stated honestly: DELETING either rank guard does NOT redden
+ * this test — the over-read dims[0..2] then reach poolBfpRequireDims3, which
+ * exit(1)s all the same, and the death harness compares exit codes only.
+ * Defense in depth, not coverage. What IS proven: giving each rank guard a
+ * distinct exit code makes exactly the matching assertion below fail, so both
+ * deaths really do originate in the rank guards. */
+void testAdaptiveAvgPool1dBfpRejectsRank2Operands(void) {
+    size_t rank2Input[] = {2, 8};
+    size_t rank2LossGrad[] = {2, 3};
+    size_t inputDims[] = {1, 2, 8};
+    size_t outputDims[] = {1, 2, 3};
+    tensor_t *badInput = buildBfpWireWithCodes(
+        rank2Input, 2, (uint8_t)kBfpAdaptiveMantissaBits, (uint8_t)kBfpAdaptiveExponentBits,
+        (size_t)kBfpAdaptiveInNumGroups, (size_t)kBfpAdaptiveInGroupSize, NULL, NULL);
+    tensor_t *badLossGrad = buildBfpWireWithCodes(
+        rank2LossGrad, 2, (uint8_t)kBfpAdaptiveMantissaBits, (uint8_t)kBfpAdaptiveExponentBits,
+        (size_t)kBfpAdaptiveGyNumGroups, (size_t)kBfpAdaptiveGyGroupSize, NULL, NULL);
+    tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
+    tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
+    quantization_t *wireQ = quantizationInitBfpGrouped(
+        (uint8_t)kBfpAdaptiveMantissaBits, (uint8_t)kBfpAdaptiveExponentBits, HALF_AWAY,
+        (size_t)kBfpAdaptiveInNumGroups, (size_t)kBfpAdaptiveInGroupSize);
+    adaptiveAvgPool1dConfig_t cfg;
+    layerConfig_t lc;
+    layer_t layer;
+    adaptiveBuildBfpLayer(&cfg, &lc, &layer, (size_t)kBfpAdaptiveOutputSize, wireQ);
+
+    ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dForward(&layer, badInput, output));
+    ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dBackward(&layer, NULL, badLossGrad, propLoss));
+
+    freeQuantization(wireQ);
+    freeTensor(propLoss);
+    freeTensor(output);
+    freeTensor(badLossGrad);
+    freeTensor(badInput);
 }
 
 int main(void) {
@@ -689,5 +753,6 @@ int main(void) {
     RUN_TEST(testAdaptiveAvgPool1dBackwardBfpScattersIntoFloat32Raw);
     RUN_TEST(testAdaptiveAvgPool1dBfpRejectsMismatchedShapes);
     RUN_TEST(testAdaptiveAvgPool1dBackwardBfpGuardsNarrowedNotRemoved);
+    RUN_TEST(testAdaptiveAvgPool1dBfpRejectsRank2Operands);
     return UNITY_END();
 }

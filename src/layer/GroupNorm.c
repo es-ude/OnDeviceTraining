@@ -882,6 +882,208 @@ static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardI
     }
 }
 
+/* dbeta_c = sum over (b, t) of dy[b,c,t]: a pure mantissa VALUE-sum. Within
+ * one (b,c) row the T elements are storage-contiguous -- real same-exponent
+ * segments, so the R-P4 int32 segment-fold does actual work here (unlike
+ * LayerNorm's strided dbeta). Raw is [C] FLOAT32 and memset here (#427:
+ * funnel Phase-2 raw is uninitialized scratch). */
+static void groupNormCalcBetaGradsBfp(const groupNormConfig_t *cfg, tensor_t *loss,
+                                      tensor_t *rawOut) {
+    size_t K;
+    size_t N;
+    size_t cpg;
+    size_t B;
+    size_t T;
+    groupNormGroupGeom(loss, cfg, &K, &N, &cpg, &B, &T);
+    groupNormBfpRequireCount(rawOut, cfg->numChannels, "GroupNorm dbeta BFP raw");
+    float *out = (float *)rawOut->data;
+    memset(out, 0, cfg->numChannels * sizeof(float));
+    if (K == 0 || N == 0) {
+        return;
+    }
+    const bfpQConfig_t *dyQC = loss->quantization->qConfig;
+    validateBfpQConfigShape(dyQC, calcNumberOfElementsByTensor(loss));
+    bfpValidateSumHeadroom(dyQC, B * T, "GroupNorm dbeta BFP");
+    const int32_t dyBias = bfpExponentBias(dyQC);
+    int32_t const *dyArr = (int32_t const *)loss->data;
+    for (size_t c = 0; c < cfg->numChannels; c++) {
+        float acc = 0.0f;
+        int32_t partial = 0;
+        size_t currentGroup = 0;
+        bool haveSeg = false;
+        for (size_t b = 0; b < B; b++) {
+            for (size_t t = 0; t < T; t++) {
+                size_t off = (b * cfg->numChannels + c) * T + t;
+                size_t grp = bfpGroupOf(dyQC, off);
+                if (!haveSeg) {
+                    currentGroup = grp;
+                    haveSeg = true;
+                } else if (grp != currentGroup) {
+                    acc = addFloat32s(
+                        acc, ldexpf((float)partial, (int)dyQC->exponents[currentGroup] - dyBias));
+                    partial = 0;
+                    currentGroup = grp;
+                }
+                partial = addInt32s(partial, dyArr[off]);
+            }
+        }
+        if (haveSeg) {
+            acc = addFloat32s(acc,
+                              ldexpf((float)partial, (int)dyQC->exponents[currentGroup] - dyBias));
+        }
+        out[c] = acc;
+    }
+}
+
+/* dgamma_c = sum over (b, t) of dy[b,c,t] * n[b,c,t]. n is float, so the
+ * accumulation is per-element float32 (no int32 partial for a mixed
+ * mantissa-x-float product). Stats recomputed here (R-N4 per-op cost). */
+static void groupNormCalcGammaGradsBfp(const groupNormConfig_t *cfg, tensor_t *forwardInput,
+                                       tensor_t *loss, tensor_t *rawOut) {
+    size_t K;
+    size_t N;
+    size_t cpg;
+    size_t B;
+    size_t T;
+    groupNormGroupGeom(forwardInput, cfg, &K, &N, &cpg, &B, &T);
+    groupNormBfpRequireCount(rawOut, cfg->numChannels, "GroupNorm dgamma BFP raw");
+    float *out = (float *)rawOut->data;
+    memset(out, 0, cfg->numChannels * sizeof(float));
+    if (K == 0 || N == 0) {
+        return;
+    }
+    const bfpQConfig_t *xQC = forwardInput->quantization->qConfig;
+    const bfpQConfig_t *dyQC = loss->quantization->qConfig;
+    validateBfpQConfigShape(xQC, calcNumberOfElementsByTensor(forwardInput));
+    validateBfpQConfigShape(dyQC, calcNumberOfElementsByTensor(loss));
+    groupNormBfpRequireCount(loss, calcNumberOfElementsByTensor(forwardInput),
+                             "GroupNorm dgamma BFP loss");
+
+    float mean[K];
+    float invSigma[K];
+    groupNormAllGroupStats(forwardInput, cfg, B, cpg, T, K, cfg->eps, mean, invSigma);
+
+    const int32_t xBias = bfpExponentBias(xQC);
+    const int32_t dyBias = bfpExponentBias(dyQC);
+    int32_t const *xArr = (int32_t const *)forwardInput->data;
+    int32_t const *dyArr = (int32_t const *)loss->data;
+    for (size_t b = 0; b < B; b++) {
+        for (size_t grp = 0; grp < cfg->numGroups; grp++) {
+            size_t k = b * cfg->numGroups + grp;
+            size_t base = (b * cfg->numChannels + grp * cpg) * T;
+            for (size_t j = 0; j < N; j++) {
+                size_t off = base + j;
+                size_t c = grp * cpg + j / T;
+                float x =
+                    ldexpf((float)xArr[off], (int)xQC->exponents[bfpGroupOf(xQC, off)] - xBias);
+                float nval = mulFloat32s(subFloat32s(x, mean[k]), invSigma[k]);
+                float dy =
+                    ldexpf((float)dyArr[off], (int)dyQC->exponents[bfpGroupOf(dyQC, off)] - dyBias);
+                out[c] = addFloat32s(out[c], mulFloat32s(dy, nval));
+            }
+        }
+    }
+}
+
+/* dx = invSigma * (dn - meanDn - n*meanDnN) with dn = dy * gamma_c, all in
+ * the FLOAT32 raw from exact dequants; OUT_WRITE packs the propLoss wire.
+ * Every element is written -- no memset. */
+static void groupNormCalcPropLossBfp(const groupNormConfig_t *cfg, tensor_t *forwardInput,
+                                     tensor_t *loss, tensor_t *gamma, tensor_t *rawOut) {
+    size_t K;
+    size_t N;
+    size_t cpg;
+    size_t B;
+    size_t T;
+    groupNormGroupGeom(forwardInput, cfg, &K, &N, &cpg, &B, &T);
+    if (K == 0 || N == 0) {
+        return;
+    }
+    const bfpQConfig_t *xQC = forwardInput->quantization->qConfig;
+    const bfpQConfig_t *dyQC = loss->quantization->qConfig;
+    const bfpQConfig_t *gQC = gamma->quantization->qConfig;
+    validateBfpQConfigShape(xQC, calcNumberOfElementsByTensor(forwardInput));
+    validateBfpQConfigShape(dyQC, calcNumberOfElementsByTensor(loss));
+    groupNormBfpRequireCount(gamma, cfg->numChannels, "GroupNorm dx BFP gamma");
+    validateBfpQConfigShape(gQC, cfg->numChannels); /* count gate alone cannot catch a malformed
+                                                     * grid; bfpGroupOf(gQC, c) would index
+                                                     * exponents[] OOB (Task 3 review finding) */
+    groupNormBfpRequireCount(rawOut, calcNumberOfElementsByTensor(forwardInput),
+                             "GroupNorm dx BFP raw");
+
+    float mean[K];
+    float invSigma[K];
+    groupNormAllGroupStats(forwardInput, cfg, B, cpg, T, K, cfg->eps, mean, invSigma);
+
+    const int32_t xBias = bfpExponentBias(xQC);
+    const int32_t dyBias = bfpExponentBias(dyQC);
+    const int32_t gBias = bfpExponentBias(gQC);
+    int32_t const *xArr = (int32_t const *)forwardInput->data;
+    int32_t const *dyArr = (int32_t const *)loss->data;
+    int32_t const *gArr = (int32_t const *)gamma->data;
+    float *dxArr = (float *)rawOut->data;
+    for (size_t b = 0; b < B; b++) {
+        for (size_t grp = 0; grp < cfg->numGroups; grp++) {
+            size_t k = b * cfg->numGroups + grp;
+            size_t base = (b * cfg->numChannels + grp * cpg) * T;
+            float sumDn = 0.0f;
+            float sumDnN = 0.0f;
+            for (size_t j = 0; j < N; j++) {
+                size_t off = base + j;
+                size_t c = grp * cpg + j / T;
+                float x =
+                    ldexpf((float)xArr[off], (int)xQC->exponents[bfpGroupOf(xQC, off)] - xBias);
+                float nval = mulFloat32s(subFloat32s(x, mean[k]), invSigma[k]);
+                float dy =
+                    ldexpf((float)dyArr[off], (int)dyQC->exponents[bfpGroupOf(dyQC, off)] - dyBias);
+                float gv = ldexpf((float)gArr[c], (int)gQC->exponents[bfpGroupOf(gQC, c)] - gBias);
+                float dn = mulFloat32s(dy, gv);
+                sumDn = addFloat32s(sumDn, dn);
+                sumDnN = addFloat32s(sumDnN, mulFloat32s(dn, nval));
+            }
+            float meanDn = divFloat32s(sumDn, (float)N);
+            float meanDnN = divFloat32s(sumDnN, (float)N);
+            for (size_t j = 0; j < N; j++) {
+                size_t off = base + j;
+                size_t c = grp * cpg + j / T;
+                float x =
+                    ldexpf((float)xArr[off], (int)xQC->exponents[bfpGroupOf(xQC, off)] - xBias);
+                float nval = mulFloat32s(subFloat32s(x, mean[k]), invSigma[k]);
+                float dy =
+                    ldexpf((float)dyArr[off], (int)dyQC->exponents[bfpGroupOf(dyQC, off)] - dyBias);
+                float gv = ldexpf((float)gArr[c], (int)gQC->exponents[bfpGroupOf(gQC, c)] - gBias);
+                float dn = mulFloat32s(dy, gv);
+                dxArr[off] = mulFloat32s(
+                    invSigma[k], subFloat32s(subFloat32s(dn, meanDn), mulFloat32s(nval, meanDnN)));
+            }
+        }
+    }
+}
+
+/* executeOp backward kernel adapters for the ARITH_BFP arm -- dgamma
+ * {forwardInput, loss}, dbeta {loss}, dx {forwardInput, loss, gamma}. */
+static void groupNormDgammaKernelBfp(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
+                                     tensor_t *auxOut, const void *ctx) {
+    (void)nOperands;
+    (void)auxOut;
+    const groupNormConfig_t *cfg = ctx;
+    groupNormCalcGammaGradsBfp(cfg, operands[0], operands[1], rawOut);
+}
+static void groupNormDbetaKernelBfp(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
+                                    tensor_t *auxOut, const void *ctx) {
+    (void)nOperands;
+    (void)auxOut;
+    const groupNormConfig_t *cfg = ctx;
+    groupNormCalcBetaGradsBfp(cfg, operands[0], rawOut);
+}
+static void groupNormDxKernelBfp(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
+                                 tensor_t *auxOut, const void *ctx) {
+    (void)nOperands;
+    (void)auxOut;
+    const groupNormConfig_t *cfg = ctx;
+    groupNormCalcPropLossBfp(cfg, operands[0], operands[1], operands[2], rawOut);
+}
+
 void groupNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
     groupNormConfig_t *cfg = layer->config->groupNorm;
     groupNormValidateInputShape(cfg, forwardInput);
@@ -936,9 +1138,54 @@ void groupNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
     case ARITH_SYM_INT32:
         groupNormBackwardSymInt32(cfg, forwardInput, loss, propLoss);
         break;
+    case ARITH_BFP: {
+        /* R-N1: propLossQ anchors ALL THREE backward ops' staging, even when
+         * the propLoss TENSOR is NULL (the grad ops still stage at it). */
+        const bfpQConfig_t *anchor = groupNormBfpWireAnchor(cfg->propLossQ, "GroupNorm backward");
+        bfpQConfig_t stage = {.exponents = NULL,
+                              .numGroups = 1,
+                              .groupSize = 0,
+                              .roundingMode = cfg->propLossMath.roundingMode,
+                              .mantissaBits = anchor->mantissaBits,
+                              .exponentBits = anchor->exponentBits};
+        tensor_t *gammaT = getParamFromParameter(cfg->gamma);
+        const bfpQConfig_t *fiStage = forwardInput->quantization->type == FLOAT32 ? &stage : NULL;
+        const bfpQConfig_t *dyStage = loss->quantization->type == FLOAT32 ? &stage : NULL;
+        const bfpQConfig_t *gStage = gammaT->quantization->type == FLOAT32 ? &stage : NULL;
+        if (!cfg->frozen) {
+            executeOpValidateAccMode(cfg->weightGradAccMode, "GroupNorm weightGradAccMode");
+            executeOp(&(opSpec_t){.kernel = groupNormDgammaKernelBfp,
+                                  .ctx = cfg,
+                                  .inputs = (tensor_t *[]){forwardInput, loss},
+                                  .nInputs = 2,
+                                  .arithmetic = cfg->propLossMath,
+                                  .mode = cfg->weightGradAccMode,
+                                  .bfpStage = {fiStage, dyStage, NULL}},
+                      cfg->gamma->grad);
+            executeOpValidateAccMode(cfg->biasGradAccMode, "GroupNorm biasGradAccMode");
+            executeOp(&(opSpec_t){.kernel = groupNormDbetaKernelBfp,
+                                  .ctx = cfg,
+                                  .inputs = (tensor_t *[]){loss},
+                                  .nInputs = 1,
+                                  .arithmetic = cfg->propLossMath,
+                                  .mode = cfg->biasGradAccMode,
+                                  .bfpStage = {dyStage, NULL, NULL}},
+                      cfg->beta->grad);
+        }
+        if (propLoss != NULL) {
+            executeOp(&(opSpec_t){.kernel = groupNormDxKernelBfp,
+                                  .ctx = cfg,
+                                  .inputs = (tensor_t *[]){forwardInput, loss, gammaT},
+                                  .nInputs = 3,
+                                  .arithmetic = cfg->propLossMath,
+                                  .mode = OUT_WRITE,
+                                  .bfpStage = {fiStage, dyStage, gStage}},
+                      propLoss);
+        }
+        break;
+    }
     default:
-        PRINT_ERROR("GroupNorm backward: declared propLossMath %d not implemented "
-                    "(FLOAT32/SYM_INT32 only) -- native BFP norms arrive with epic PR5",
+        PRINT_ERROR("GroupNorm backward: declared propLossMath %d not implemented",
                     (int)cfg->propLossMath.type);
         exit(1);
     }

@@ -1678,6 +1678,410 @@ void testGroupNormForwardBfpMissingOutputQAnchorDies(void) {
     freeTensor(in);
 }
 
+/* ---- BFP epic PR5 Task 5 (R-N1/R-N4): native ARITH_BFP backward ---- */
+
+/* GN-C: GN-A's x/gamma/beta plus a grid-exact dy for the backward cross-check.
+ * dy shares x's wire geometry (m=8/e=8, grouped {8, 2} -- one BFP block per
+ * (b, c) channel row) with its own codes/exponents. Every channel's dbeta
+ * folds TWO segments (the b=0 and b=1 rows) with DIFFERENT stored exponents,
+ * so a wrong-exponent fold mutant shifts the result; every norm block's dy
+ * values are non-uniform, so block-reduction mutants stay observable (the
+ * uniform-lossGrad vacuity lesson). All dequants code * 2^(E-127) are small
+ * multiples of 0.5: the per-channel dy sums and the block sums are EXACT in
+ * float32, which is what makes the test-side FLOAT32-twin cross-check below
+ * bit-exact (the same exactness argument as GN-A's). */
+static const int32_t kGnBfpCDyCodes[16] = {1, -2, 3, 1, -3, 5, 2, -1, -4, 2, 3, -1, 1, 4, -2, 3};
+static const uint8_t kGnBfpCDyExponents[8] = {128, 127, 126, 127, 127, 128, 127, 126};
+/* The exact dequants, for the FLOAT32-twin expectation run. */
+static const float kGnBfpCDyValues[16] = {2.f,  -4.f, 3.f, 1.f,  -1.5f, 2.5f, 2.f,  -1.f,
+                                          -4.f, 2.f,  6.f, -2.f, 1.f,   4.f,  -1.f, 1.5f};
+/* Native propLoss wires are seeded with exponents NO derivation can produce
+ * here (100 => scale 2^-27; dx is O(1)); the expectation twin seeds at 127.
+ * DIFFERENT seeds on the two compared wires keep the exponent assertion
+ * non-vacuous: if OUT_WRITE never derived exponents, 100 != 127 fails (Task 4
+ * review lesson). */
+static const uint8_t kGnBfpCPlSeedExponents[8] = {100, 100, 100, 100, 100, 100, 100, 100};
+
+static tensor_t *buildGnBfpCDy(const size_t *dims) {
+    return buildBfpWireWithCodesGn(dims, 3, 8, 8, 8, 2, kGnBfpCDyCodes, kGnBfpCDyExponents);
+}
+
+static tensor_t *buildGnBfpCPropLossWire(const size_t *dims) {
+    return buildBfpWireWithCodesGn(dims, 3, 8, 8, 8, 2, kGnBfpAOutZeroCodes,
+                                   kGnBfpCPlSeedExponents);
+}
+
+/* The test-side backward twin (proof-ladder deviation, epic PR5 brief):
+ * GroupNorm has no gold generator, and the forward's config-pin idiom cannot
+ * provide a backward oracle -- the FLOAT32 backward arm hard-rejects
+ * BFP-stored wires (its raw-cast guards) instead of funneling them, so
+ * flipping only the arithmetic pin cannot run the SAME tensors through both
+ * arms. The expectation is therefore computed HERE: the FLOAT32 backward over
+ * exact-dequant FLOAT32 twins of GN-A's x/gamma/beta and GN-C's dy. On this
+ * grid-exact fixture the native BFP kernels and the FLOAT32 kernel perform
+ * the same float32 op sequence over the same bits (stats bit-identity is
+ * pinned by the forward pin twin; the dbeta segment fold differs only in
+ * summation order, which cannot matter because every partial sum is an exact
+ * small dyadic), so dgamma/dbeta must be memory-equal and the dx raw
+ * bit-equal BEFORE the OUT_WRITE pack -- and that pack is the same
+ * conversionMatrix FLOAT32->BFP diagonal convertTensor applies to the
+ * expectation (both under HALF_AWAY). expDxFloat is a caller-owned [2,4,2]
+ * FLOAT32 tensor the twin's dx lands in. */
+static void gnBfpCExpectedBackward(float *expDgamma, float *expDbeta, tensor_t *expDxFloat) {
+    size_t dims[3] = {2, 4, 2};
+    tensor_t *x = buildFloatTensorND(3, dims, kGnBfpAXValues);
+    tensor_t *dy = buildFloatTensorND(3, dims, kGnBfpCDyValues);
+    parameter_t *gamma = buildFloatParam(4, kGnBfpAGammaValues);
+    parameter_t *beta = buildFloatParam(4, kGnBfpABetaValues);
+    quantization_t *fq = quantizationInitFloat();
+    quantization_t *bq = quantizationInitFloat();
+    groupNormConfig_t cfg;
+    initGroupNormConfig(&cfg, gamma, beta, 2, 4, 1e-5f, fq, bq);
+    layerConfig_t lcfg;
+    layer_t layer = makeGroupNormLayer(&cfg, &lcfg);
+    groupNormBackward(&layer, x, dy, expDxFloat);
+    memcpy(expDgamma, gamma->grad->data, 4 * sizeof(float));
+    memcpy(expDbeta, beta->grad->data, 4 * sizeof(float));
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(dy);
+    freeTensor(x);
+}
+
+/* BFP backward twin-sanity (the testSymBackwardTwinSanityTwoGroups idiom):
+ * quantize the float gold fixture's x/dy/gamma/beta per-tensor at m=8, run
+ * the native ARITH_BFP backward, and require the dequantized dx and the
+ * FLOAT32-default grads to track the FLOAT32 gold within a LOOSE 5e-2 --
+ * sanity over the real quantizer on real data; the bit-exact oracle is the
+ * cross-check below. */
+void testGroupNormBackwardBfpTwinSanityTwoGroups(void) {
+    size_t dims[] = {1, 8, 3};
+    tensor_t *fwdIn = buildBfpTensorND(3, dims, input_groupNorm_twoGroups);
+    tensor_t *loss = buildBfpTensorND(3, dims, lossGrad_groupNorm_twoGroups);
+    tensor_t *propLoss = buildBfpTensorND(3, dims, NULL);
+    parameter_t *gamma = buildBfpParamFloatGrad(8, gamma_groupNorm_twoGroups);
+    parameter_t *beta = buildBfpParamFloatGrad(8, beta_groupNorm_twoGroups);
+
+    groupNormConfig_t cfg;
+    initGroupNormConfig(&cfg, gamma, beta, 2, 8, 1e-5f, propLoss->quantization,
+                        propLoss->quantization);
+    /* Derived through the ordinary config path -- pins that the flip holds. */
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, cfg.propLossMath.type);
+    layerConfig_t lcfg;
+    layer_t layer = makeGroupNormLayer(&cfg, &lcfg);
+
+    layerFunctions[GROUPNORM].backward(&layer, fwdIn, loss, propLoss);
+
+    /* Per-tensor wire ({1, 0}), so one shared exponent dequantizes everything. */
+    int32_t codes[24];
+    bfpQConfig_t *plQC = propLoss->quantization->qConfig;
+    unpackSignExtend(propLoss->data, plQC->mantissaBits, 0, codes, 24);
+    float wireScale = ldexpf(1.0f, (int)plQC->exponents[0] - bfpExponentBias(plQC));
+    float dxDeq[24];
+    bool nonDegenerate = false;
+    for (size_t i = 0; i < 24; i++) {
+        dxDeq[i] = (float)codes[i] * wireScale;
+        if (codes[i] != 0) {
+            nonDegenerate = true;
+        }
+    }
+    float dg[8];
+    float db[8];
+    memcpy(dg, gamma->grad->data, sizeof(dg));
+    memcpy(db, beta->grad->data, sizeof(db));
+
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(fwdIn);
+
+    TEST_ASSERT_TRUE_MESSAGE(nonDegenerate, "the produced dx wire must be non-degenerate");
+    for (size_t i = 0; i < 24; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(5e-2f, expectedPropLoss_groupNorm_twoGroups[i], dxDeq[i]);
+    }
+    for (size_t i = 0; i < 8; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(5e-2f, expectedDgamma_groupNorm_twoGroups[i], dg[i]);
+        TEST_ASSERT_FLOAT_WITHIN(5e-2f, expectedDbeta_groupNorm_twoGroups[i], db[i]);
+    }
+}
+
+/* The primary backward oracle: native ARITH_BFP backward on GN-A + GN-C vs
+ * the test-side FLOAT32 twin (gnBfpCExpectedBackward). dgamma/dbeta land in
+ * FLOAT32 grads via the ACC epilogue (zero-init grad + float raw = plain
+ * float32 addition) and are asserted memory-equal; dx goes through the
+ * OUT_WRITE pack at the propLoss geometry and is asserted payload+exponent
+ * equal against convertTensor over the twin's float dx. */
+void testGroupNormBackwardBfpFakeQuantPinCrossCheck(void) {
+    size_t dims[3] = {2, 4, 2};
+    tensor_t *in = buildGnBfpAInput(dims);
+    tensor_t *loss = buildGnBfpCDy(dims);
+    tensor_t *propLoss = buildGnBfpCPropLossWire(dims);
+    parameter_t *gamma = buildGnBfpAGamma();
+    parameter_t *beta = buildGnBfpABeta();
+
+    groupNormConfig_t cfg;
+    initGroupNormConfig(&cfg, gamma, beta, 2, 4, 1e-5f, in->quantization, in->quantization);
+    /* Derived through the ordinary config path -- pins that the flip holds. */
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, cfg.propLossMath.type);
+    cfg.propLossMath.roundingMode = HALF_AWAY;
+    cfg.propLossQ = propLoss->quantization;
+    layerConfig_t lcfg;
+    layer_t layer = makeGroupNormLayer(&cfg, &lcfg);
+
+    groupNormBackward(&layer, in, loss, propLoss);
+
+    float expDgamma[4];
+    float expDbeta[4];
+    tensor_t *expDxFloat = buildFloatTensorND(3, dims, NULL);
+    gnBfpCExpectedBackward(expDgamma, expDbeta, expDxFloat);
+    tensor_t *expDxWire = buildGnBfpAOutputWire(dims);
+    convertTensor(expDxFloat, expDxWire);
+
+    size_t payloadBytes = calcNumberOfBytesForData(propLoss->quantization, 16);
+    bfpQConfig_t *plQC = propLoss->quantization->qConfig;
+    bfpQConfig_t *expQC = expDxWire->quantization->qConfig;
+    bool payloadIdentical = memcmp(propLoss->data, expDxWire->data, payloadBytes) == 0;
+    bool exponentsIdentical = memcmp(plQC->exponents, expQC->exponents, plQC->numGroups) == 0;
+    bool exponentsRederived = memcmp(plQC->exponents, kGnBfpCPlSeedExponents, plQC->numGroups) != 0;
+    bool nonDegenerate = false;
+    for (size_t i = 0; i < payloadBytes; i++) {
+        if (((uint8_t *)propLoss->data)[i] != 0) {
+            nonDegenerate = true;
+        }
+    }
+    float gotDgamma[4];
+    float gotDbeta[4];
+    memcpy(gotDgamma, gamma->grad->data, sizeof(gotDgamma));
+    memcpy(gotDbeta, beta->grad->data, sizeof(gotDbeta));
+
+    freeTensor(expDxWire);
+    freeTensor(expDxFloat);
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(in);
+
+    TEST_ASSERT_TRUE_MESSAGE(nonDegenerate,
+                             "the native dx wire must be non-degenerate for the cross-check to "
+                             "mean anything");
+    TEST_ASSERT_TRUE_MESSAGE(exponentsRederived,
+                             "the OUT_WRITE epilogue must rewrite the seeded propLoss exponents");
+    TEST_ASSERT_TRUE_MESSAGE(payloadIdentical,
+                             "native ARITH_BFP dx must match the FLOAT32-twin expectation packed "
+                             "through convertTensor on a grid-exact fixture");
+    TEST_ASSERT_TRUE_MESSAGE(exponentsIdentical,
+                             "native ARITH_BFP dx exponents must match the FLOAT32-twin "
+                             "expectation's derived exponents");
+    TEST_ASSERT_EQUAL_MEMORY(expDgamma, gotDgamma, 4 * sizeof(float));
+    TEST_ASSERT_EQUAL_MEMORY(expDbeta, gotDbeta, 4 * sizeof(float));
+}
+
+/* ACC semantics across microbatch calls: a second identical backward must ADD
+ * the same float increment again. inc + inc is exact in float32 (an exponent
+ * bump, no rounding), so the doubled expectation is asserted byte-exact. Also
+ * the sensitized probe for a dropped dgamma/dbeta raw memset: the second
+ * call's Phase-2 raw region has just been scribbled by the first call's op
+ * sequence. */
+void testGroupNormBackwardBfpGradsAccumulateAcrossCalls(void) {
+    size_t dims[3] = {2, 4, 2};
+    tensor_t *in = buildGnBfpAInput(dims);
+    tensor_t *loss = buildGnBfpCDy(dims);
+    tensor_t *propLoss = buildGnBfpCPropLossWire(dims);
+    parameter_t *gamma = buildGnBfpAGamma();
+    parameter_t *beta = buildGnBfpABeta();
+
+    groupNormConfig_t cfg;
+    initGroupNormConfig(&cfg, gamma, beta, 2, 4, 1e-5f, in->quantization, in->quantization);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, cfg.propLossMath.type);
+    cfg.propLossMath.roundingMode = HALF_AWAY;
+    cfg.propLossQ = propLoss->quantization;
+    layerConfig_t lcfg;
+    layer_t layer = makeGroupNormLayer(&cfg, &lcfg);
+
+    groupNormBackward(&layer, in, loss, propLoss);
+    groupNormBackward(&layer, in, loss, propLoss);
+
+    float gotDgamma[4];
+    float gotDbeta[4];
+    memcpy(gotDgamma, gamma->grad->data, sizeof(gotDgamma));
+    memcpy(gotDbeta, beta->grad->data, sizeof(gotDbeta));
+
+    float expDgamma[4];
+    float expDbeta[4];
+    tensor_t *expDxFloat = buildFloatTensorND(3, dims, NULL);
+    gnBfpCExpectedBackward(expDgamma, expDbeta, expDxFloat);
+
+    freeTensor(expDxFloat);
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(in);
+
+    float expDgamma2[4];
+    float expDbeta2[4];
+    for (size_t i = 0; i < 4; i++) {
+        expDgamma2[i] = expDgamma[i] + expDgamma[i];
+        expDbeta2[i] = expDbeta[i] + expDbeta[i];
+    }
+    TEST_ASSERT_EQUAL_MEMORY(expDgamma2, gotDgamma, 4 * sizeof(float));
+    TEST_ASSERT_EQUAL_MEMORY(expDbeta2, gotDbeta, 4 * sizeof(float));
+}
+
+/* propLoss == NULL (#380 PR2): grads-only call -- the dx op is skipped, the
+ * two grad ops still run and land the exact twin expectation. propLossQ stays
+ * the init-derived BFP config: with all-BFP operands the anchor is only
+ * type-checked (nothing stages), but R-N1 still requires it. */
+void testGroupNormBackwardBfpNullPropLossComputesGradsOnly(void) {
+    size_t dims[3] = {2, 4, 2};
+    tensor_t *in = buildGnBfpAInput(dims);
+    tensor_t *loss = buildGnBfpCDy(dims);
+    parameter_t *gamma = buildGnBfpAGamma();
+    parameter_t *beta = buildGnBfpABeta();
+
+    groupNormConfig_t cfg;
+    initGroupNormConfig(&cfg, gamma, beta, 2, 4, 1e-5f, in->quantization, in->quantization);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, cfg.propLossMath.type);
+    cfg.propLossMath.roundingMode = HALF_AWAY;
+    layerConfig_t lcfg;
+    layer_t layer = makeGroupNormLayer(&cfg, &lcfg);
+
+    groupNormBackward(&layer, in, loss, NULL);
+
+    float gotDgamma[4];
+    float gotDbeta[4];
+    memcpy(gotDgamma, gamma->grad->data, sizeof(gotDgamma));
+    memcpy(gotDbeta, beta->grad->data, sizeof(gotDbeta));
+
+    float expDgamma[4];
+    float expDbeta[4];
+    tensor_t *expDxFloat = buildFloatTensorND(3, dims, NULL);
+    gnBfpCExpectedBackward(expDgamma, expDbeta, expDxFloat);
+
+    freeTensor(expDxFloat);
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(loss);
+    freeTensor(in);
+
+    TEST_ASSERT_EQUAL_MEMORY(expDgamma, gotDgamma, 4 * sizeof(float));
+    TEST_ASSERT_EQUAL_MEMORY(expDbeta, gotDbeta, 4 * sizeof(float));
+}
+
+/* frozen (#380): the two grad ops are skipped entirely -- gamma/beta carry NO
+ * grad tensors here (parameterInit(p, NULL), the factory-elision shape), so
+ * any grad-op dispatch would dereference NULL. The dx op still runs and must
+ * hit the same cross-check expectation. */
+void testGroupNormBackwardBfpFrozenSkipsGrads(void) {
+    size_t dims[3] = {2, 4, 2};
+    tensor_t *in = buildGnBfpAInput(dims);
+    tensor_t *loss = buildGnBfpCDy(dims);
+    tensor_t *propLoss = buildGnBfpCPropLossWire(dims);
+    size_t gdims[1] = {4};
+    tensor_t *gammaT =
+        buildBfpWireWithCodesGn(gdims, 1, 8, 8, 1, 0, kGnBfpAGammaCodes, kGnBfpAGammaExponents);
+    parameter_t *gamma = parameterInit(gammaT, NULL);
+    tensor_t *betaT =
+        buildBfpWireWithCodesGn(gdims, 1, 8, 8, 1, 0, kGnBfpABetaCodes, kGnBfpABetaExponents);
+    parameter_t *beta = parameterInit(betaT, NULL);
+
+    groupNormConfig_t cfg;
+    initGroupNormConfig(&cfg, gamma, beta, 2, 4, 1e-5f, in->quantization, in->quantization);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, cfg.propLossMath.type);
+    cfg.propLossMath.roundingMode = HALF_AWAY;
+    cfg.propLossQ = propLoss->quantization;
+    cfg.frozen = true;
+    layerConfig_t lcfg;
+    layer_t layer = makeGroupNormLayer(&cfg, &lcfg);
+
+    groupNormBackward(&layer, in, loss, propLoss);
+
+    float expDgamma[4];
+    float expDbeta[4];
+    tensor_t *expDxFloat = buildFloatTensorND(3, dims, NULL);
+    gnBfpCExpectedBackward(expDgamma, expDbeta, expDxFloat);
+    tensor_t *expDxWire = buildGnBfpAOutputWire(dims);
+    convertTensor(expDxFloat, expDxWire);
+
+    size_t payloadBytes = calcNumberOfBytesForData(propLoss->quantization, 16);
+    bfpQConfig_t *plQC = propLoss->quantization->qConfig;
+    bfpQConfig_t *expQC = expDxWire->quantization->qConfig;
+    bool payloadIdentical = memcmp(propLoss->data, expDxWire->data, payloadBytes) == 0;
+    bool exponentsIdentical = memcmp(plQC->exponents, expQC->exponents, plQC->numGroups) == 0;
+
+    freeTensor(expDxWire);
+    freeTensor(expDxFloat);
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(in);
+
+    TEST_ASSERT_TRUE_MESSAGE(payloadIdentical,
+                             "frozen backward's dx must still match the cross-check expectation");
+    TEST_ASSERT_TRUE_MESSAGE(exponentsIdentical,
+                             "frozen backward's dx exponents must still match the cross-check "
+                             "expectation");
+}
+
+/* R-N1's backward half: propLossQ anchors ALL THREE backward ops' staging, so
+ * a NULL anchor under ARITH_BFP dies at arm entry -- and it must die even
+ * when the propLoss TENSOR is NULL (the grad ops still stage at it). */
+void testGroupNormBackwardBfpMissingPropLossQAnchorDies(void) {
+    size_t dims[3] = {2, 4, 2};
+    tensor_t *in = buildGnBfpAInput(dims);
+    tensor_t *loss = buildGnBfpCDy(dims);
+    tensor_t *propLoss = buildGnBfpCPropLossWire(dims);
+    parameter_t *gamma = buildGnBfpAGamma();
+    parameter_t *beta = buildGnBfpABeta();
+
+    groupNormConfig_t cfg;
+    initGroupNormConfig(&cfg, gamma, beta, 2, 4, 1e-5f, in->quantization, in->quantization);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, cfg.propLossMath.type);
+    layerConfig_t lcfg;
+    layer_t layer = makeGroupNormLayer(&cfg, &lcfg);
+
+    cfg.propLossQ = NULL;
+    ASSERT_EXITS_WITH_FAILURE(groupNormBackward(&layer, in, loss, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(groupNormBackward(&layer, in, loss, NULL));
+
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(in);
+}
+
+/* R-P7d "narrowed, not removed": pinning propLossMath to ARITH_FLOAT32 over
+ * BFP-stored wires still dies in the float arm's raw-cast guards -- the BFP
+ * arm did not open a silent fall-through for mismatched storage. */
+void testGroupNormBackwardFloat32PinnedStillRejectsBfpWires(void) {
+    size_t dims[3] = {2, 4, 2};
+    tensor_t *in = buildGnBfpAInput(dims);
+    tensor_t *loss = buildGnBfpCDy(dims);
+    tensor_t *propLoss = buildGnBfpCPropLossWire(dims);
+    parameter_t *gamma = buildGnBfpAGamma();
+    parameter_t *beta = buildGnBfpABeta();
+
+    groupNormConfig_t cfg;
+    initGroupNormConfig(&cfg, gamma, beta, 2, 4, 1e-5f, in->quantization, in->quantization);
+    cfg.propLossMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
+    layerConfig_t lcfg;
+    layer_t layer = makeGroupNormLayer(&cfg, &lcfg);
+
+    ASSERT_EXITS_WITH_FAILURE(groupNormBackward(&layer, in, loss, propLoss));
+
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(in);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConfigStructIsPopulated);
@@ -1724,5 +2128,12 @@ int main(void) {
     RUN_TEST(testGroupNormForwardBfpStagedFloat32OperandsTwin);
     RUN_TEST(testGroupNormForwardBfpTwinSanityTwoGroups);
     RUN_TEST(testGroupNormForwardBfpMissingOutputQAnchorDies);
+    RUN_TEST(testGroupNormBackwardBfpTwinSanityTwoGroups);
+    RUN_TEST(testGroupNormBackwardBfpFakeQuantPinCrossCheck);
+    RUN_TEST(testGroupNormBackwardBfpGradsAccumulateAcrossCalls);
+    RUN_TEST(testGroupNormBackwardBfpNullPropLossComputesGradsOnly);
+    RUN_TEST(testGroupNormBackwardBfpFrozenSkipsGrads);
+    RUN_TEST(testGroupNormBackwardBfpMissingPropLossQAnchorDies);
+    RUN_TEST(testGroupNormBackwardFloat32PinnedStillRejectsBfpWires);
     return UNITY_END();
 }

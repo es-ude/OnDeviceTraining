@@ -166,7 +166,8 @@
         "Linear", "QuantizationLayer", "Relu", "Softmax", "Flatten",
         "Optimizer", "Sgd", "AdamW", "LrScheduler",
         "CrossEntropy", "LossFunction", "MSE",
-        "Serialize", "Deserialize"
+        "Serialize", "Deserialize",
+        "OdtHook"
       ]
     }
   ],

@@ -29,8 +29,9 @@ arithmetic_t arithmeticFromQuantization(const quantization_t *q) {
          *  - Epic PR3: the GEMM family (Linear/Conv1d/ConvT1d) now runs
          *    natively end-to-end -- a model that derives all four layer slots
          *    from one BFP config -- what layerQuantInitUniform does -- trains
-         *    its forward AND backward natively. Pools/norms/softmax still
-         *    guard their BFP math slots (no native arms yet; epic PR4-PR6).
+         *    its forward AND backward natively. Pools shipped with epic PR4
+         *    and the norms (LayerNorm/GroupNorm) with epic PR5; only Softmax
+         *    still guards its BFP math slots (no native arm yet; epic PR6).
          *    See docs/conventions/arithmetic-bfp.md. */
         a.type = ARITH_BFP;
         a.roundingMode = ((bfpQConfig_t *)q->qConfig)->roundingMode;

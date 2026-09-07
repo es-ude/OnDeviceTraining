@@ -1,4 +1,4 @@
-# Block-Floating-Point (BFP) arithmetic — PR1–PR4 conventions + deviations register
+# Block-Floating-Point (BFP) arithmetic — PR1–PR5 conventions + deviations register
 
 Conventions for the `BFP` qtype's dtype-core scope (`src/tensor/Quantization*`,
 `src/tensor/TensorConversion.c`'s BFP cells) and, since epic PR2, the native
@@ -17,7 +17,13 @@ covers the weight-less layers — the native `ARITH_BFP` arms in
 `src/layer/{MaxPool1d,AvgPool1d,AdaptiveAvgPool1d}.c`, the packed-domain
 (outside-funnel) BFP paths in `src/layer/{Relu,Flatten,Dropout}.c`, and the
 BFP fake-quant arms in `src/loss_functions/{MSE,CrossEntropy}.c` — all
-documented in §5.7. Path-scoped for Claude via
+documented in §5.7. Since epic PR5 it also covers the norm layers — the
+native `ARITH_BFP` arms (forward + `dgamma`/`dbeta`/`dx`) in
+`src/layer/{LayerNorm,GroupNorm}.c`, the BFP stats reducers
+`meanOverTrailingAxesBfp`/`varianceBiasedOverTrailingAxesBfp` in
+`src/arithmetic/Reduce.c`, and the factory coherence rules in
+`src/userApi/layer/{LayerNormApi,GroupNormApi}.c` — all documented in §5.8.
+Path-scoped for Claude via
 `.claude/rules/arithmetic-bfp.md`. Spec:
 `docs/superpowers/specs/2026-07-29-block-floating-point-design.md` (decisions
 D1–D12, deviations register §10; D8 amended 2026-09-02 at PR3 kickoff — §9
@@ -29,10 +35,13 @@ deviates from the cited literature and from ODT's own `#227` discipline — the
 Deutel-note format used by `docs/conventions/arithmetic-sym.md`'s attribution
 notes, applied to the BFP anchors (HBFP, MSFP, MX, FAST) instead. §5
 documents the compute contract itself (PR2 forward + PR3 backward + PR4's
-weight-less layers in §5.7, all shipped, not a forward pointer); §§6–8 extend
+weight-less layers in §5.7 + PR5's norm layers in §5.8, all shipped, not a
+forward pointer); §§6–8 extend
 the deviations register with three deviations the PR2 kernels introduced; §9
 amends spec decision D8 with the PR3 backward's own deviation (exact fold
-segmentation instead of op-local re-blocking).
+segmentation instead of op-local re-blocking); §10 records the PR5 norms'
+own register entries (the 3× stats recompute, and the float32 stats bridges
+that bound what "native" means for a norm).
 
 ## 1. Two's-complement mantissas, not sign-magnitude
 
@@ -151,7 +160,7 @@ exactly as they do for grouped `SYM`. This clone rule is what `gradInit` and
 optimizer per-parameter state cloning (`m`/`v` buffers) both go through when
 handed a BFP template.
 
-## 5. Compute contract (epic PR2 forward + epic PR3 backward + epic PR4 weight-less layers) — shipped
+## 5. Compute contract (epic PR2 forward + epic PR3 backward + epic PR4 weight-less layers + epic PR5 norms) — shipped
 
 ### 5.1 The flip is done — backward is now native, pinning is an optional fake-quant mode
 
@@ -572,9 +581,11 @@ silent wrong arithmetic, not a crash.
   literally the `DYNAMIC_RESCALE` engine itself (`bfpRescaleWalk` with a NULL
   increment source), fresh exponents derived from the SCALED absmax, one `roundByMode` per
   element by the grad's own STORAGE `roundingMode` (scaling is a storage
-  requantization, not an op — #282's target-owned convention, unlike the
-  accumulate engines whose rounding comes from the op's own
-  `arithmetic.roundingMode`). A power-of-two `factor` is exact end to end
+  requantization, not an op — #282's target-owned convention, the SAME
+  ownership the ACC epilogues keep: `accumulateOut` deliberately rounds by
+  the TARGET's storage mode, spec D4, while the OP's
+  `arithmetic.roundingMode` governs staging and the OUT_WRITE epilogue
+  only). A power-of-two `factor` is exact end to end
   (multiplying by an exact power of two only shifts the exponent, never
   rounds the mantissa); any other factor is exact up to ordinary float32
   rounding — the one lossy case is a group whose SCALED absmax pushes its
@@ -636,12 +647,13 @@ silent wrong arithmetic, not a crash.
 
 - Grouped BFP grad/optimizer-state templates (per-tensor-only decision above
   — a scope decision, not a kernel limitation; a future `#300` axis).
-- Only norms (LayerNorm/GroupNorm, PR5) and Softmax (PR6) still lack an
-  `ARITH_BFP` arm. Softmax lacks one on BOTH sides: its FORWARD has no BFP arm
+- Only Softmax (PR6) still lacks an `ARITH_BFP` arm. Softmax lacks one on
+  BOTH sides: its FORWARD has no BFP arm
   either — the arithmetic is hardcoded `ARITH_FLOAT32`, so a BFP wire merely
   CROSSES it as a funnel fake-quant bridge — and its backward rejects a BFP
   wire outright before dispatching. (`docs/FEATURES.md`'s carrier-gate list
-  states it the same way.) Pools,
+  states it the same way.) The norms (LayerNorm/GroupNorm) SHIPPED with PR5
+  — see §5.8. Pools,
   Relu, Flatten and Dropout SHIPPED with PR4 — see §5.7. Losses got their
   fake-quant `ARITH_BFP` arm in the same PR (`case BFP:` joining
   `case SYM_INT32:` on the dtype-generic helpers), which closes
@@ -760,6 +772,355 @@ constant) and therefore no arms to guard: its gate is a pair check —
 a BFP wire on one side demands a BFP wire on the other, and the two must then
 share the same element count and `{numGroups, groupSize, mantissaBits,
 exponentBits}`.
+
+### 5.8 Norm layers (epic PR5) — LayerNorm/GroupNorm contract + error analysis
+
+Native `ARITH_BFP` ships on BOTH sides of both norms: the forward and all
+three backward ops (`dgamma`/`dbeta`/`dx`) run as `executeOp` funnel ops for
+LayerNorm and GroupNorm. Everything is funnel-routed — **the §5.7 packed-walk
+reviewer inventory does NOT grow**: the four norm ops consume the funnel's
+unpacked-BFP scratch (borrowed or staged, §5.3) and produce through the
+OUT_WRITE/ACC epilogues, and the BFP stats reducers read that same unpacked
+scratch. A raw `->data` walk over PACKED BFP bytes in `LayerNorm.c` or
+`GroupNorm.c` remains a bug, exactly as §5.7's closing rule says. The
+end-to-end capstone — a uniform-BFP
+conv → groupNorm → relu → adaptiveAvgPool → flatten → layerNorm → linear →
+softmax model training natively with no pins, both norms' dx EXECUTING —
+is `testBfpUniformNormModelTrainsAndGridsMove`
+(`test/unit/userAPI/UnitTestMultiLayerTraining.c`).
+
+**R-N1 — wire-anchored staging.** Norms have no reduction-weight operand, so
+GEMM rule 1 ("stage at the weights' widths", §§5.2/5.4) has nothing to anchor
+on; the anchor is the layer's OWN produced-wire config — the R-P1 pool rule
+at the norm layer. `outputQ` anchors the forward op; `propLossQ` anchors ALL
+THREE backward ops, **including at `propLoss == NULL`** (a grads-only call
+still stages `forwardInput`/`loss`/gamma at the `propLossQ` widths — the
+anchor is a width source, not a write target). The check is EAGER at op
+entry (`layerNormBfpWireAnchor`/`groupNormBfpWireAnchor`): an `ARITH_BFP`
+math slot whose produced-wire config is NULL or non-BFP fails fast with a
+guided message, because without it there is no width source at all. The
+stage template is per-tensor `{1,0}` at the anchor's
+`mantissaBits`/`exponentBits`, rounded by the op's own
+`arithmetic.roundingMode` (§5.3's borrow/staged asymmetry: staging is a live
+op choice) — ONE template per direction, shared by every FLOAT32-stored
+operand of that direction's ops. Gamma and beta are funnel OPERANDS
+(forward `{input, gamma, beta}`; dgamma `{forwardInput, loss}`, dbeta
+`{loss}`, dx `{forwardInput, loss, gamma}`), so all three operands are
+staged-or-borrowed under exactly the same rule; a BFP-stored operand is
+borrowed zero-copy as everywhere (D8) and never re-blocked.
+
+**R-N2 — stats: one Reduce authority, two mechanisms.** Both layers compute
+mean and biased variance through the Reduce module's BFP arms
+(`meanOverTrailingAxesBfp`/`varianceBiasedOverTrailingAxesBfp`,
+`src/arithmetic/Reduce.c`) via the SAME shared per-layer helper
+(`layerNormAllGroupStats`/`groupNormAllGroupStats`) in forward AND backward,
+so a layer's passes can never desync on the stats definition (variance
+BIASED, ÷N; eps INSIDE the sqrt). GroupNorm hands Reduce a `[B,G,cpg,T]`
+alias VIEW whose flat index equals the storage index (the layer's
+rank-3/identity-order gate makes the split of C a pure relabeling), so
+`bfpGroupOf` still resolves the exponent group each code was actually packed
+into.
+
+- The MEAN is the R-P4 sum contract: one `int32` partial per same-exponent
+  segment, folded into the float accumulator by an exact `ldexpf`
+  power-of-two shift on every group crossing plus the tail, then one float
+  divide by N. `bfpValidateSumHeadroom` fail-fasts at entry (the pure-sum
+  bound `INT32_MAX >> (m−1)`, §5.6's biasGrad twin).
+- The VARIANCE is per-element dequant-center-square in float32: dequantize
+  exactly (`mantissa · 2^E`), subtract the block mean, square, accumulate —
+  no `int32` partials, no headroom guard. A mantissa-domain variance does
+  not EXIST for BFP: centering subtracts an arbitrary float mean, so the
+  centered values sit on no shared `2^E` grid and no same-exponent integer
+  partial can represent `(x−μ)²`. This is the SYM_INT32 variance's own shape
+  (dequant-center-square) carried onto the BFP grid, not a BFP shortcut
+  forgone.
+
+The Reduce module polices its own operands per contract: the BFP arms
+require BFP in the unpacked scratch form, and — new with PR5 — **the FLOAT32
+reducers fail fast on any non-FLOAT32 operand**
+(`reduceValidateFloat32Operand`). That guard closes the silent-`float*`
+hazard the widened norm dtype dispatch created: an unpacked BFP (or SYM)
+int32 scratch operand reaching a `float*` read is the same 4 bytes per
+element, so the failure mode is silent wrong arithmetic, not a crash. The
+layer-side twin of the same ruling: both layers' stats dispatch and forward
+kernel selects are explicit `switch`es with fail-fast defaults, never
+ternaries (the PR2 Task 9 ruling; a ternary hands every unknown arithmetic
+to the float kernel).
+
+**R-N3 — normalize + affine in float32, pack once at OUT_WRITE.** After the
+stats, the kernels dequantize each operand element EXACTLY
+(`ldexpf((float)code, E − bias)` — a power-of-two multiply, no rounding),
+normalize (`(x − μ)·invσ`) and apply the affine (`γ·n + β`) in the FLOAT32
+raw, and let the OUT_WRITE epilogue derive the wire's fresh per-group
+exponents and pack ONCE. There is no BFP analog of the SYM path's
+`rescaleIntoAccumulatorScale` beta-seed / integer-affine bookkeeping, for
+the same reason AvgPool's `s/K` fold has no BFP analog (R-P4): a BFP scale
+is `2^E`, and neither the data-dependent `1/σ` stretch nor the β-into-`s_y`
+rescale is a power of two in general — an "integer affine" would smuggle
+the same float multiplies back in as rounded rescale factors, ADDING
+roundings instead of saving any. The raw is FLOAT32 (D7); the only
+BFP-specific rounding on the whole forward path is the final pack — the
+error analysis below leans on exactly this.
+
+**R-N4 — backward = three funnel ops (GEMM parity).** The `ARITH_BFP`
+backward issues up to three `executeOp` calls, mirroring the GEMM family's
+op split: `dgamma` (mode = `weightGradAccMode`, ACC), `dbeta` (mode =
+`biasGradAccMode`, ACC), `dx` (mode = `OUT_WRITE` into the `propLoss`
+wire). `frozen` skips both grad ops (the grad tensors do not exist, #380);
+`propLoss == NULL` skips the dx op only. The ACC epilogues round by the
+TARGET grad tensor's own storage config (`accumulateOut` deliberately keeps
+the target's mode — spec D4; a FLOAT32 grad target is a plain float add,
+exact), while staging and dx's OUT_WRITE round by
+`propLossMath.roundingMode` (#282).
+
+- **Stats are recomputed per op** — dgamma and dx each run the shared stats
+  helper again; dbeta needs no stats at all (`dβ_j = Σ dy`). §10 owns this
+  as the 3×-recompute register entry: the deliberate cost of keeping every
+  funnel op self-contained (no cross-op stats cache to invalidate, no way
+  for a cached μ/σ to desync from the forward definition).
+- **dbeta is the R-P4 segment-fold** over the loss mantissas
+  (`bfpValidateSumHeadroom` over the cross-block walk). LayerNorm's strided
+  j-outer/g-inner walk typically closes a segment on every element — the
+  contract degrades to per-element folds gracefully, never wrongly — while
+  GroupNorm's contiguous per-(b,c)-row walk gets real multi-element
+  segments.
+- **dgamma is per-element float32**: `dγ_j = Σ dy·n` multiplies a
+  mantissa-backed `dy` into the float `n` — a mixed product has no
+  same-exponent `int32` partial — so each term is dequantized exactly and
+  accumulated in float.
+- **dgamma/dbeta memset their FLOAT32 raw** before writing: the funnel's
+  Phase-2 raw is uninitialized scratch (#427). The two memsets are NOT
+  equally load-bearing, documented honestly: dgamma ACCUMULATES into the
+  raw (`out[j] += …` across blocks), so its memset guards every call;
+  dbeta OVERWRITES every element (`out[j] = acc`), so its memset is
+  load-bearing ONLY on the empty-geometry early-out (`G == 0`/`N == 0`,
+  resp. `K == 0`), where the ACC epilogue would otherwise fold
+  uninitialized raw into the grad — on every non-empty path removing it is
+  an equivalent mutant (the Task 5 finding, recorded here instead of
+  faked test coverage).
+- **dx validates ALL operand grids, including gamma's**
+  (`validateBfpQConfigShape` per operand): the element-count gate alone
+  cannot catch a malformed `{numGroups, groupSize}`, and `bfpGroupOf`
+  would then index `exponents[]` out of bounds.
+
+**R-N5 — grad storage: the norms join the per-tensor BFP knob.** Because
+dgamma/dbeta land through the funnel's ACC epilogues, the PR3 grad-storage
+machinery covers the norms with NO new code: a per-tensor `{1,0}` BFP
+`weightGradStorage`/`biasGradStorage` template flows through `gradInit`'s
+UNCHANGED carrier gate (grouped templates still rejected — "per-tensor
+only, #300 axis"), and the `accumulateOut` BFP arm (§5.6) does the landing
+(FLOAT32 raw increments requantized into the BFP grad under the target's
+own storage rounding). `docs/FEATURES.md`'s former "BFP grad storage is a
+GEMM-family-only feature" caveat is retired; the full round trip
+(ACC → optimizer step → `optimizerZeroGrad`) is pinned by
+`testBfpNormGradStorageAccumulatesAndSteps`
+(`test/unit/userAPI/UnitTestMultiLayerTraining.c`). The knob rides the
+`ARITH_BFP` backward — see R-N6's gap (a) for what happens when it is
+combined with the FLOAT32 backward instead.
+
+**R-N6 — factory coherence rules (the 8-rule set) + param geometry.** Both
+norm factories (`layerNormLayerInit*`/`groupNormLayerInit*`,
+`src/userApi/layer/{LayerNormApi,GroupNormApi}.c`) validate the
+`layerQuant_t` profile with the same eight rules: **R1** gamma/beta storage
+∈ {FLOAT32, SYM_INT32, BFP}; **R2** SYM_INT32 `forwardMath` ⇒ SYM_INT32
+params; **R3** `ARITH_BFP` `forwardMath` ⇒ FLOAT32-or-BFP params AND a
+BFP-typed `outputQ` (the R-N1 anchor, checked at construction so a
+mis-wired profile dies with a factory message instead of at the first
+forward); **R4** `ARITH_FLOAT32` `forwardMath` ⇒ FLOAT32 params; **R5**
+SYM_INT32 `propLossMath` ⇒ SYM_INT32 `forwardMath` (the reverse stays
+constructible — the SYM inference-only profile); **R6** `ARITH_BFP`
+`propLossMath` ⇒ FLOAT32-or-BFP params AND a BFP-typed `propLossQ` (R3's
+backward twin — a FLOAT32 forward with a BFP backward is mechanically legal
+and stays allowed); **R7** `ARITH_FLOAT32` `propLossMath` rejects BFP
+ANYWHERE among gamma/beta storage and the two wire configs; **R8** grad
+storage is delegated to `gradInit`'s carrier gate (no duplicate check).
+
+BFP param allocation is **constant-fill, Decision-5-derived**. The norms are
+the one factory family that allocates non-FLOAT32 params directly (no
+`requireFloat32` gate — #270 covers RANDOM init, and gamma = 1 / beta = 0
+are constants that are exact grid points on any BFP grid). Geometry follows
+the wire-allocator Decision 5 rule applied to params
+(`layerNormParamQLike`/`groupNormParamQLike`): the storage template's
+`groupSize` is honored, `numGroups` is derived from THIS parameter's
+element count (never taken from the shape-agnostic template),
+`groupSize == N` normalizes to the per-tensor `{1,0}` config (a `{1,N}`
+spelling violates the config grammar), and a non-divisor `groupSize` aborts
+with a guided message.
+
+**Rule 4/7's honest asymmetry — fake-quant-over-BFP-params is
+factory-unconstructible for norms.** The GEMM family supports the
+fake-quant profile (FLOAT32 math over BFP-stored params/wires) because its
+ENTIRE backward is funnel-routed: the prologue dequantizes any storage
+dtype. The norms' FLOAT32 backward
+(`layerNormBackwardFloat`/`groupNormBackwardFloat`) is NOT funnel-routed —
+it raw-casts every operand, the grads and the dx wire to `float*` — so a
+FLOAT32-math norm over BFP params would forward fine and die at the first
+backward: a trap, not a feature, hence rules 4 and 7 reject it at
+construction. Escape hatches, in honesty order: keep the norm's params and
+wires FLOAT32 (the profile the guided messages steer toward); insert a
+Quantization layer around the norm so the explicit converter owns the dtype
+change; or, for a forward-only experiment, pin `cfg->forwardMath` directly
+on a hand-wired config (the config path has no factory rules — the
+test-side forward pin twins do exactly this).
+
+Two gaps the rule set deliberately does NOT close — owned here rather than
+papered over:
+
+- **(a) R7 covers params + wires, NOT grad storage.** A FLOAT32-everything
+  profile (FLOAT32 math, params, wires) with a per-tensor-BFP
+  `weightGradStorage`/`biasGradStorage` passes every factory rule — R8
+  delegates to `gradInit`, whose carrier gate accepts a per-tensor BFP
+  template — builds fine, and dies at the FIRST backward at the runtime
+  #261 guard ("packed grad storage requires the funnel route"). This is
+  the PRE-EXISTING #261 packed-grad hole of the norms' FLOAT32 backward,
+  with BFP now joining SYM/ASYM in it; closing it means funnel-routing the
+  float backward's grads (the #261 follow-up), not another factory rule.
+- **(b) The R5-vs-R7 asymmetry + the zero-init trap.** R5 leaves the SYM
+  inference-only profile constructible (SYM_INT32 forward + FLOAT32
+  backward: the runtime backward guard rejects training it, inference
+  works). Its BFP twin (`ARITH_BFP` forward + FLOAT32 backward) is
+  DELIBERATELY unconstructible — R7 rejects it, because the BFP profile
+  requires BFP wires (R3) and the FLOAT32 backward raw-casts them. And
+  since `ARITH_FLOAT32 == 0`, a hand-built `layerQuant_t` that sets the
+  BFP wires but FORGETS to set `propLossMath` arrives with a
+  zero-initialized slot that reads as `ARITH_FLOAT32` and trips R7 — a
+  zero-init trap whose guided message points at declaring `ARITH_BFP`,
+  which is almost always what such a caller meant.
+  `layerQuantInitUniform` sidesteps the trap entirely (it derives all four
+  slots from the one config); it exists only for field-wise hand
+  construction.
+
+**R-N7 — two math slots, not four.**
+`layerNormConfig_t`/`groupNormConfig_t` carry `forwardMath` and
+`propLossMath` only; `propLossMath` governs ALL THREE backward ops (their
+`executeOp` calls all pass `.arithmetic = cfg->propLossMath`). This is a
+deliberate asymmetry against the GEMM family's four slots
+(`weightGradMath`/`biasGradMath` there): the norms' three backward ops are
+three views of ONE derivation (same stats, same dequants, same arithmetic),
+no experiment has asked for a mixed-arithmetic norm backward, and growing
+the config struct would ripple through every field-assign fixture in the
+tree (the struct-growth lesson) for a knob with no user. Rounding still
+splits per seam as everywhere: staging and dx's OUT_WRITE by
+`propLossMath.roundingMode`, the two ACC landings by the grad target's own
+storage mode (R-N4).
+
+**Proof ladder: no §8c bit-identity twin — and what replaces it.** The
+spec's proof-ladder rung (c) (spec §8: a BFP config expressible as grouped
+SYM with `2^E` scales runs bit-identical to the grouped-SYM path) exists
+for the GEMM family and CANNOT exist for the norms: the SYM norm kernels
+derive DYNAMIC, data-dependent output scales (forward
+`s_norm = absmax/qMax` via the global-stretch scheme; backward dx's scale
+likewise, refreshed every call), so even a power-of-two-input config
+diverges structurally — the SYM path's produced grid is an arbitrary float
+scale, the BFP path's is a power of two, and the two paths are not the same
+sum in a different order but different QUANTIZERS. What replaces the rung:
+
+- **config-pin forward twins on grid-exact fixtures**
+  (`testLayerNormForwardBfpFakeQuantPinTwin`,
+  `testGroupNormForwardBfpFakeQuantPinTwin`): the same layer runs native
+  vs. `ARITH_FLOAT32`-pinned fake-quant on fixtures whose values are exact
+  grid points, and the packed outputs must agree;
+- **a test-side backward cross-check**
+  (`testGroupNormBackwardBfpFakeQuantPinCrossCheck`): native dgamma/dbeta
+  asserted memory-equal against a test-side FLOAT32 twin; native dx
+  asserted payload- AND exponent-equal against `convertTensor` over the
+  twin's float dx;
+- **bit-exact NumPy gold for LayerNorm**
+  (`test/unit/layer/generate_expected_bfp_layernorm.py` → the
+  `testLayerNorm{Forward,Backward}BfpGold*` fixtures): every scalar step
+  emulated in `np.float32` in the C statement order, forward (native +
+  staged) and backward, asserted code- and exponent-exact;
+- **twin-sanity for GroupNorm**
+  (`testGroupNormForwardBfpTwinSanityTwoGroups`,
+  `testGroupNormBackwardBfpTwinSanityTwoGroups`): dequantized outputs
+  against the existing FLOAT32 gold within a small multiple of the pack
+  band. A dedicated bit-exact GroupNorm gold generator (mirroring
+  LayerNorm's) is the filed follow-up if twin-sanity ever proves too
+  coarse — the same precedent as the missing SYM GroupNorm gold.
+
+**Error analysis (spec §10 item 4 — the `0.5·C·s_acc`-style deliverable,
+mirroring `docs/conventions/arithmetic-sym.md` §"Grouped backward").**
+
+1. *Mechanism.* Every norm op computes its stats, normalization and affine
+   in float32 FROM EXACT DEQUANTS: `mantissa · 2^E` is a power-of-two
+   multiply (`ldexpf`), exact in float32, and the mean's/dbeta's `int32`
+   segment partials and folds are exact under the sum-headroom guard. The
+   ONLY BFP-specific rounding on any norm path is the OUT_WRITE pack of
+   the produced wire (forward y, backward dx) — one `roundByMode` per
+   element — plus, when a grad tensor is STORED BFP, the ACC landing's own
+   requant (§5.6's engines, a storage property, not a kernel one).
+   Everything else is ordinary float32 arithmetic noise.
+2. *Per-element pack bound.* The pack rounds each element to its group's
+   grid: |err| ≤ `0.5·s_out` per element under HALF_AWAY, where
+   `s_out = 2^{E_g}` is the scale of the element's group in the DERIVED
+   wire grid (`E_g` the unbiased exponent `deriveBfpStoredExponent` snaps
+   to from the raw's per-group absmax). `SR_HALF_AWAY` dithers within the
+   same band — unbiased in expectation, per-draw error < `1·s_out`.
+   Because `s_out ≈ absmax_g/qMax`, the bound is RELATIVE ≈ `2^{−(m−1)}`
+   of the group's largest magnitude — the mantissa-width sweep axis,
+   directly.
+3. *Aggregate float32 noise.* An N-term float32 sum carries worst-case
+   relative error ≤ `(N−1)·2^{−24}`, RMS ≈ `√N·2^{−24}` under the
+   independent-rounding assumption. The BFP MEAN does strictly better than
+   the FLOAT32 path's own mean: its segment folds are EXACT (`ldexpf`
+   power-of-two shifts of exact `int32` partials), so its float roundings
+   number `C ≈ ⌈N/groupSize⌉` fold-adds (plus one divide) instead of the
+   FLOAT32 reduction's N adds. The variance and the backward reductions
+   accumulate per element in float32 (part 5's table) — the SAME rounding
+   counts as the FLOAT32 kernels' own loops; BFP adds nothing there.
+4. *Dominant term.* At every practical `(m, N)` the pack term dominates
+   the stats term. On the same relative footing: the pack is
+   ≈ `2^{−(m−1)}` of the group absmax (≥ `2^{−15}` even at the m = 16
+   ceiling), the float32 stats noise is ≈ `√N·2^{−24}` (≈ `2^{−20}` at
+   N = 256; still only `2^{−16}` at an absurd N = 2^16). In absolute form:
+   an m = 8 wire whose output block absmax is O(1) — anywhere down to
+   ~`2^{−6}` — derives `s_out ≥ 2^{−13}`, so the pack band
+   `0.5·s_out ≥ 2^{−14}` sits ~`2^6` ABOVE the ≈`2^{−20}` stats noise. The
+   norms' BFP error is therefore **quantization-bound, not
+   accumulation-bound — the OPPOSITE of the GEMM finding** (§§7–8: there
+   the interesting error lives in the accumulation seams — the >2^24
+   partial conversion, the ±inf fold — while the pack is routine).
+   Practical consequence: sweeping `mantissaBits` moves norm accuracy;
+   sweeping `groupSize`/N barely does.
+5. *Rounding counts per path* (float32 roundings per OUTPUT element; exact
+   dequants and exact `int32` partials/folds contribute none; per-group
+   stats terms are shared by that group's N outputs and listed as group
+   totals):
+
+   | op | float32 roundings per output element |
+   |---|---|
+   | forward | 4 per-element (center, ·invσ, ·γ, +β) + 1 pack; per group: mean `⌈N/groupSize⌉` fold-adds + 1 divide, variance ~3N, rsqrt ~3 |
+   | dgamma | per param element: G (LayerNorm) resp. B·T (GroupNorm) adds plus the per-term products; no pack (FLOAT32 raw; ACC landing per §5.6 if the grad is stored BFP) |
+   | dbeta | per param element: one fold-add per closed segment — between `⌈#terms/groupSize⌉` (GroupNorm's contiguous rows) and #terms (LayerNorm's strided walk); the `int32` partials are exact; no pack |
+   | dx | ~7 per-element (n = 2, dn = 1, two subs, two muls) + 1 pack; per group: 2N sum roundings (Σdn, Σdn·n) plus each sum term's own products, + 2 divides + the stats recompute (as forward) |
+
+6. *Relative-error class (dx).* dx's signal is O(invσ·|dy|) per element;
+   its noise is the deterministic pack band O(`0.5·s_dx`) — `s_dx` derived
+   from the dx raw's own per-group absmax, i.e. relative ≈ `2^{−(m−1)}` of
+   the block's largest dx — plus float32 dust of relative order
+   `√N·2^{−24}`. dx therefore stays in the single-quantization-step class:
+   ONE pack of the true float32 dx, never an accumulation of quantized
+   partials. The shipped tests derive their tolerances from exactly this:
+   the LayerNorm gold needs NO tolerance at all (the generator emulates
+   every float32 rounding statement-for-statement, so gold is code- and
+   exponent-exact), and GroupNorm's twin-sanity window (5e-2 absolute
+   against the FLOAT32 gold) is a small multiple of the fixture grid's
+   worst-case pack step.
+7. *Research deviation.* There is no literature template for NATIVE BFP
+   norm layers — HBFP/MSFP/FAST/MX quantize GEMM operands and leave norms
+   in higher precision; spec §10 item 4 (native LN/GN beyond the
+   literature, each with its own error analysis) is realized HERE. The
+   documented boundary of "native": mantissas enter the ops unpacked and
+   exact, but the stats/normalize/affine arithmetic is float32 (bridges),
+   and the block structure re-enters at exactly one point per op — the
+   produced-wire pack. §10 records this boundary as a register entry.
+8. *Escape hatch.* `propLossMath = ARITH_FLOAT32` is the exact backward —
+   but ONLY on FLOAT32 wires and params: that arm raw-casts every operand
+   (R-N6's rules 4/7), so it is not reachable over BFP storage. On BFP
+   wires the honest alternatives are a Quantization layer around the norm
+   (the explicit converter owns the dtype change) or FLOAT32 storage for
+   the norm's own wires; there is no norm equivalent of the GEMM family's
+   pin-the-slot fake-quant-over-BFP profile — deliberately (R-N6).
 
 ---
 
@@ -892,3 +1253,38 @@ grads for longer same-exponent fold segments, on hardware where many short
 folds turn out to be measurably expensive. It is deliberately NOT
 implemented here and is gated on a real MCU measurement motivating it (spec
 §9), not filed speculatively.
+
+## 10. Norm register entries (PR5): 3× stats recompute; float32 stats bridges bound "native"
+
+Two register entries the PR5 norms add. The fold-related corners — §7's
+`(float)partial` conversion above `2^24` and §8's `ldexpf` ±inf at extreme
+combined exponents — apply to the norms' mean/dbeta segment folds exactly as
+written there and are NOT re-derived here.
+
+**3× stats recompute.** A full norm training step computes μ/invσ three
+times per layer: once in the forward, once in `dgamma`, once in `dx`
+(`dbeta` needs no stats) — and none of them is cached across ops. This
+deviates from the obvious engineering move (compute once in the forward,
+carry to the backward) deliberately: every funnel op is self-contained
+(operands + ctx in, raw out), a stats cache would need a side channel
+through the layer config, and a cached μ/σ can silently desync from the
+recompute the moment any operand changes between calls — exactly the desync
+class the shared Reduce helper (R-N2) exists to kill. The cost is bounded
+(one extra O(n) Reduce pass per grad op) and is the price of the "one stats
+authority" rule. An opt-in stats cache is a perf follow-up of the same
+shape as §9's re-block knob: file it when an MCU measurement motivates it,
+not before.
+
+**Float32 stats bridges bound what "native" means.** Spec §10 item 4
+promised native LN/GN kernels "beyond literature … with a documented
+boundary of what native means (float32 stats/accumulation bridges)". The
+shipped boundary: operands are consumed as exact unpacked mantissas under
+their own grids (never re-quantized, D8/§9), the mean's and dbeta's
+within-segment arithmetic is exact `int32`, and everything else — variance,
+rsqrt, normalize, affine, all backward reductions — is float32 from exact
+dequants, with the block structure re-entering at exactly one point per op
+(the produced-wire pack; §5.8's error analysis, part 1). "Native" for the
+norms therefore means native OPERAND handling plus a natively derived
+produced grid, NOT integer-only arithmetic — the honest reading the §5.8
+error analysis quantifies, and the research deviation (no literature
+template for BFP norms at all) it documents.

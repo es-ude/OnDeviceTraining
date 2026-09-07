@@ -12,7 +12,7 @@ ARITH_BFP, roundingMode}` (`forwardMath`, GEMM family also `weightGradMath`/`bia
 dx op `propLossMath`); storage is the produced-wire `quantization_t*`
 (`outputQ`/`propLossQ`) and the grad-storage knobs. `SYM_INT32` is a **compute** format,
 never durable grad storage (#261); `SYM`/`ASYM` are packed **storage** formats. `BFP`
-(block-floating-point, epic PR1–PR4) is a packed **storage** format that — unlike
+(block-floating-point, epic PR1–PR5) is a packed **storage** format that — unlike
 `SYM`/`ASYM` — also has a native **compute** arithmetic: since epic PR2,
 `arithmeticFromQuantization` derives `ARITH_BFP` for BFP storage (the documented breaking
 change over PR1's `ARITH_FLOAT32` float bridge), and `ARITH_BFP` runs the GEMM-family
@@ -25,27 +25,31 @@ BFP template, #300 axis); fake-quant BFP training (pin the math slot(s) to
 workaround. Since epic PR4 the weight-less layers join in: pools run `ARITH_BFP`
 natively, Relu/Flatten are packed-domain transparent, Dropout bridges through float,
 and MSE/CrossEntropy have BFP fake-quant arms — so a whole conv/pool/activation model
-can run on ONE uniform BFP wire config. Active training paths are FLOAT32 and SYM_INT32
+can run on ONE uniform BFP wire config. Since epic PR5 the norms run natively too:
+LayerNorm/GroupNorm `ARITH_BFP` forward AND backward (float32 stats/normalize/affine
+from exact dequants, one pack at the produced wire —
+`docs/conventions/arithmetic-bfp.md` §5.8), so a uniform-BFP model CONTAINING norms
+trains end to end with no pins. Active training paths are FLOAT32 and SYM_INT32
 end to end, plus BFP native forward+backward; SYM/ASYM/BOOL storage and grouped BFP
 grad/state storage are partial/unsupported.
 
 ## Layers (`layerType_t`, 13 total)
 
-| Layer | Trainable | FLOAT32 arith | SYM_INT32 arith | Quant params | Quant grads | (De)serialize |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|
-| `LINEAR` | ✓ | ✓ | ✓ native (all 4 ops) | ~ requantize path (#270) | ✓ SYM/ASYM | ✓ |
-| `CONV1D` | ✓ | ✓ | ✓ native (all 4 ops) | ~ requantize path (#270) | ✓ SYM/ASYM | ✓ |
-| `CONV1D_TRANSPOSED` | ✓ | ✓ | ✓ native (all 4 ops) | ~ requantize path (#270) | ✓ SYM/ASYM | ✓ |
-| `LAYERNORM` | ✓ | ✓ | ✓ native (fwd+bwd) | ~ SYM_INT32 only | ~ SYM path only | ✓ |
-| `GROUPNORM` | ✓ | ✓ | ✓ native (fwd+bwd) | ~ SYM_INT32 only | ~ SYM path only | ✓ |
-| `RELU` | – | ✓ | ✓ native (fwd+bwd) | n/a | n/a | ✓ |
-| `SOFTMAX` | – | ✓ | ~ dequant-to-float | n/a | n/a | ✓ |
-| `FLATTEN` | – | ✓ | ✓ scale-transparent | n/a | n/a | ✓ |
-| `DROPOUT` | – | ✓ | ✓ scale-transparent | n/a | n/a | ✓ |
-| `MAXPOOL1D` | – | ✓ | ✓ native (fwd+bwd) | n/a | n/a | ✓ |
-| `AVGPOOL1D` | – | ✓ | ✓ native (fwd+bwd) | n/a | n/a | ✓ |
-| `ADAPTIVE_AVGPOOL1D` | – | ✓ | ✓ native (fwd+bwd) | n/a | n/a | ✓ |
-| `QUANTIZATION` | – | converter node | converter node | n/a | n/a | ✓ |
+| Layer | Trainable | FLOAT32 arith | SYM_INT32 arith | BFP arith | Quant params | Quant grads | (De)serialize |
+|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| `LINEAR` | ✓ | ✓ | ✓ native (all 4 ops) | ✓ native (all 4 ops) | ~ requantize path (#270) | ✓ SYM/ASYM/BFP | ✓ |
+| `CONV1D` | ✓ | ✓ | ✓ native (all 4 ops) | ✓ native (all 4 ops) | ~ requantize path (#270) | ✓ SYM/ASYM/BFP | ✓ |
+| `CONV1D_TRANSPOSED` | ✓ | ✓ | ✓ native (all 4 ops) | ✓ native (all 4 ops) | ~ requantize path (#270) | ✓ SYM/ASYM/BFP | ✓ |
+| `LAYERNORM` | ✓ | ✓ | ✓ native (fwd+bwd) | ✓ native (fwd+bwd) | ~ SYM_INT32/BFP | ~ SYM/BFP bwd paths | ✓ |
+| `GROUPNORM` | ✓ | ✓ | ✓ native (fwd+bwd) | ✓ native (fwd+bwd) | ~ SYM_INT32/BFP | ~ SYM/BFP bwd paths | ✓ |
+| `RELU` | – | ✓ | ✓ native (fwd+bwd) | ✓ packed-transparent | n/a | n/a | ✓ |
+| `SOFTMAX` | – | ✓ | ~ dequant-to-float | ~ fwd bridge; ✗ bwd (PR6) | n/a | n/a | ✓ |
+| `FLATTEN` | – | ✓ | ✓ scale-transparent | ✓ packed-transparent | n/a | n/a | ✓ |
+| `DROPOUT` | – | ✓ | ✓ scale-transparent | ~ float bridge (D4) | n/a | n/a | ✓ |
+| `MAXPOOL1D` | – | ✓ | ✓ native (fwd+bwd) | ✓ native (fwd+bwd) | n/a | n/a | ✓ |
+| `AVGPOOL1D` | – | ✓ | ✓ native (fwd+bwd) | ✓ native (fwd+bwd) | n/a | n/a | ✓ |
+| `ADAPTIVE_AVGPOOL1D` | – | ✓ | ✓ native (fwd+bwd) | ✓ native (fwd+bwd) | n/a | n/a | ✓ |
+| `QUANTIZATION` | – | converter node | converter node | converter node | n/a | n/a | ✓ |
 
 Notes on the qualified cells:
 
@@ -59,6 +63,14 @@ Notes on the qualified cells:
   mantissas (scale copy), AvgPool folds the constant divisor into the scale
   (`s_out = s_in/K`), AdaptiveAvgPool uses rounded integer division (half-away) at an
   unchanged scale — mechanics in `docs/conventions/arithmetic-sym.md`.
+- **`BFP arith`** — *native* means an `ARITH_BFP` funnel kernel on the unpacked
+  mantissa scratch (borrowed or staged operands, `docs/conventions/arithmetic-bfp.md`
+  §5; norms §5.8). *packed-transparent* (Relu/Flatten) carries the per-group exponents
+  verbatim outside the funnel by design (§5.7 — Relu's codes are clamped/masked, the
+  GRID is what is transparent). *float bridge* = dequant → float compute →
+  fresh-exponent repack (Dropout, D4). Softmax's forward needs no arm (its arithmetic
+  is hardcoded `ARITH_FLOAT32`, so a BFP wire crosses it as a funnel fake-quant
+  bridge); its backward rejects BFP wires until epic PR6.
 - **`QUANTIZATION`** is a pure storage-to-storage conversion node (`executeConvert`,
   conversionMatrix), not an arithmetic layer — it deliberately changes dtype/scale.
 - **Quant params** — trainable weight/bias storage. The Linear/Conv factories allocate
@@ -67,8 +79,14 @@ Notes on the qualified cells:
   an in-place requantize (`requantizeTensorInPlace()`, see `examples/mixed_width_mlp`) —
   the layers' forward/backward SYM kernels then run on the native storage. **LayerNorm
   and GroupNorm** take the constant-fill route instead: gamma/beta may be allocated
-  SYM_INT32 directly (no requireFloat32 gate), but SYM/ASYM are rejected by factory
-  validation — hence "partial". No layer supports SYM/ASYM native param storage. Tests
+  SYM_INT32 or BFP directly (no requireFloat32 gate — #270 covers RANDOM init, and the
+  constant fills gamma = 1 / beta = 0 are exact grid points on any BFP grid), but
+  SYM/ASYM are rejected by factory validation — hence "partial". BFP gamma/beta
+  geometry is Decision-5-derived (BFP epic PR5): the factory honors the storage
+  template's `groupSize` only, derives `numGroups` from the parameter's own element
+  count, normalizes `groupSize == N` to the per-tensor `{1,0}` config, and fail-fasts
+  on a non-divisor (`docs/conventions/arithmetic-bfp.md` §5.8 R-N6). No layer supports
+  SYM/ASYM native param storage. Tests
   that need fixture-built SYM_INT32-native params use the shared `BorrowedLayer.h`
   builders (`test/unit/support/`).
 - **Quant grads** — the `weightGradStorage`/`biasGradStorage` knobs in `layerQuant_t`
@@ -76,11 +94,16 @@ Notes on the qualified cells:
   ASYM packed grad storage work for the four trainable layers via `gradInit`→`getQLike`
   (BOOL rejected, #269). Accumulate epilogue: SYM target honors both `OUT_ACC_FIXED_SCALE`
   and `OUT_ACC_DYNAMIC_RESCALE`; ASYM honors `DYNAMIC_RESCALE` only. **LayerNorm/GroupNorm
-  caveat**: packed grads are only writable on the SYM_INT32 backward path — their FLOAT32
-  backward raw-casts grads (and the dx wire) and rejects packed storage; neither layer's
-  gamma/beta storage supports BFP (gated FLOAT32/SYM_INT32-only), so BFP grad storage
-  below is a GEMM-family-only feature. **BFP grad storage (epic PR3 Task 6)** — a
-  per-tensor-only (`{1,0}`) knob for Linear/Conv1d/Conv1dTransposed: `gradInit`'s carrier
+  caveat**: packed/BFP grads are only writable on the funnel-routed backward paths
+  (SYM_INT32 and, since epic PR5, `ARITH_BFP` — dgamma/dbeta land through the funnel
+  ACC there) — their FLOAT32 backward raw-casts grads (and the dx wire) and rejects
+  packed AND BFP grad storage at the first backward (the #261 hole; the factory rules
+  deliberately do not close it — `docs/conventions/arithmetic-bfp.md` §5.8 R-N6 gap
+  (a)). **BFP grad storage (epic PR3 Task 6; norms epic PR5)** — a
+  per-tensor-only (`{1,0}`) knob for the five trainable layers:
+  Linear/Conv1d/Conv1dTransposed since epic PR3, LayerNorm/GroupNorm on their
+  `ARITH_BFP` backward since epic PR5 (round trip pinned by
+  `testBfpNormGradStorageAccumulatesAndSteps`). `gradInit`'s carrier
   gate accepts a per-tensor BFP template and rejects a grouped one ("per-tensor only,
   #300 axis" — mirrors the SYM/ASYM grouped-grad gates exactly, a scope decision, not a
   primitive limitation). The `accumulateOut` BFP-target arm backs both accumulate modes:
@@ -483,11 +506,18 @@ checkpointing, limitations, literature).
   `inference*WithLoss`. A uniform-BFP conv1d → relu → maxpool → flatten →
   linear → softmax + CrossEntropy model trains end to end
   (`testBfpUniformPoolActivationModelTrains`). Contract:
-  `docs/conventions/arithmetic-bfp.md` §5.7. Remaining **carrier gates**, by
-  epic:
-  **PR5** — LayerNorm/GroupNorm have no `ARITH_BFP` arm, forward or backward (and
-  neither layer's param storage supports BFP at all, so the PR3 grad-storage knob
-  above is a GEMM-family-only feature). **PR6** — Softmax backward has no native
+  `docs/conventions/arithmetic-bfp.md` §5.7. **Epic PR5 adds the norms**:
+  LayerNorm/GroupNorm run native `ARITH_BFP` forward AND backward — stats via the
+  Reduce BFP arms (int32 segment-fold mean under the sum-headroom guard,
+  dequant-center-square variance in float32), float32 normalize/affine from exact
+  dequants, one OUT_WRITE pack at the produced wire; the backward is three funnel
+  ops anchored on `propLossQ` (dgamma/dbeta ACC + dx OUT_WRITE), so BFP gamma/beta
+  grad storage works too, and BFP constant-fill gamma/beta allocation is
+  factory-supported with Decision-5-derived geometry. A uniform-BFP model
+  containing BOTH norms trains natively end to end
+  (`testBfpUniformNormModelTrainsAndGridsMove`). Contract + error analysis:
+  `docs/conventions/arithmetic-bfp.md` §5.8. Remaining **carrier gate**:
+  **PR6** — Softmax backward has no native
   `ARITH_BFP` arm. Also still out of scope: grouped BFP grad/optimizer-state
   templates (a future `#300` axis), the optimizer's `updateMath` (FLOAT32-only,
   #310, unchanged by this epic), and `optimizerClipGradNorm` (rejects packed
@@ -525,7 +555,7 @@ checkpointing, limitations, literature).
 - `TRACK_INSTRUCTIONS` counters exist on the legacy `Square`/`Matmul` libs but are
   unsafe to enable: a name mismatch fails compilation for `Square`, both libs lack a
   reset helper, and `Matmul`'s SYM_INT32 path double-increments (#351).
-- BFP (block-floating-point epic PR1–PR4) native compute now covers
+- BFP (block-floating-point epic PR1–PR5) native compute now covers
   Linear/Conv1d/Conv1dTransposed **forward AND backward**: `ARITH_BFP` runs
   both, with both operands blocked and headroom-guarded `int32` block
   partials, and a uniform-BFP model trains its entire loop natively with no
@@ -548,10 +578,12 @@ checkpointing, limitations, literature).
   Dropout bridges through float and re-derives exponents; and MSE/
   CrossEntropy gained BFP fake-quant arms, so a BFP **final/loss-facing**
   output wire IS evaluable through `inference*WithLoss` (plan Decision 9 is
-  superseded). What remains gated, by epic:
-  - **PR5** — LayerNorm/GroupNorm have no `ARITH_BFP` arm, forward or
-    backward (both guarded, fail fast rather than silently misreading the
-    unpacked scratch as float).
+  superseded). **Epic PR5 shipped the norms**
+  (`docs/conventions/arithmetic-bfp.md` §5.8): LayerNorm/GroupNorm run
+  native `ARITH_BFP` forward AND backward (stats via the Reduce BFP arms,
+  float32 normalize/affine from exact dequants, three funnel backward ops
+  anchored on `propLossQ`), with BFP constant-fill gamma/beta params and
+  per-tensor BFP gamma/beta grad storage included. What remains gated:
   - **PR6** — Softmax forward already works with a BFP wire (its arithmetic
     is hardcoded `ARITH_FLOAT32`, so the funnel dequantizes any storage
     dtype); backward has no native `ARITH_BFP` arm (guarded, fail fast).

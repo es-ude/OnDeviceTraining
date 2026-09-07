@@ -810,7 +810,7 @@ static void layerNormBackwardSymInt32(layerNormConfig_t *cfg, tensor_t *forwardI
 /* dbeta_j = sum over blocks g of dy[g,j]: a pure mantissa VALUE-sum walked
  * j-outer/g-inner (R-P4 sum contract; the strided walk typically closes a
  * segment every element -- the contract degrades to per-element folds
- * gracefully, never wrongly). Raw out is gamma-shaped FLOAT32 and memset
+ * gracefully, never wrongly). Raw out is beta-shaped FLOAT32 and memset
  * here: the funnel's Phase-2 raw is uninitialized scratch (#427). */
 static void layerNormCalcBetaGradsBfp(const layerNormConfig_t *cfg, tensor_t *loss,
                                       tensor_t *rawOut) {
@@ -909,6 +909,10 @@ static void layerNormCalcPropLossBfp(const layerNormConfig_t *cfg, tensor_t *for
     validateBfpQConfigShape(xQC, calcNumberOfElementsByTensor(forwardInput));
     validateBfpQConfigShape(dyQC, calcNumberOfElementsByTensor(loss));
     layerNormBfpRequireCount(gamma, N, "LayerNorm dx BFP gamma");
+    /* The count gate alone cannot catch a malformed {numGroups, groupSize}
+     * grid; bfpGroupOf(gQC, j) would then index exponents[] out of bounds
+     * (the forward's gamma/beta idiom). */
+    validateBfpQConfigShape(gQC, N);
     layerNormBfpRequireCount(rawOut, G * N, "LayerNorm dx BFP raw");
 
     float mean[G];

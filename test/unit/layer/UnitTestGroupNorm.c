@@ -2028,6 +2028,48 @@ void testGroupNormBackwardBfpFrozenSkipsGrads(void) {
                              "expectation");
 }
 
+/* The dx kernel derives its walk from forwardInput's geometry ((b, grp) base +
+ * j) but indexes loss at those offsets, so a loss wire shorter than the
+ * forward input reads outside the funnel's unpacked scratch. Unfrozen the
+ * dgamma kernel's own loss-count gate runs first and covers it incidentally;
+ * FROZEN skips dgamma, which makes the dx gate the SOLE catcher -- that is the
+ * configuration pinned here. The short wire is per-tensor {1, 0}, so its own
+ * grid validates at its own count and only the cross-count gate can reject
+ * it. */
+void testGroupNormBackwardBfpFrozenShortLossDies(void) {
+    size_t dims[3] = {2, 4, 2};
+    tensor_t *in = buildGnBfpAInput(dims);
+    /* Half the elements of the forward input: one batch row instead of two. */
+    size_t shortDims[3] = {1, 4, 2};
+    tensor_t *shortLoss = buildBfpWireWithCodesGn(
+        shortDims, 3, 8, 8, 1, 0, (int32_t[]){1, -2, 3, 1, -3, 5, 2, -1}, (uint8_t[]){127});
+    tensor_t *propLoss = buildGnBfpCPropLossWire(dims);
+    size_t gdims[1] = {4};
+    tensor_t *gammaT =
+        buildBfpWireWithCodesGn(gdims, 1, 8, 8, 1, 0, kGnBfpAGammaCodes, kGnBfpAGammaExponents);
+    parameter_t *gamma = parameterInit(gammaT, NULL);
+    tensor_t *betaT =
+        buildBfpWireWithCodesGn(gdims, 1, 8, 8, 1, 0, kGnBfpABetaCodes, kGnBfpABetaExponents);
+    parameter_t *beta = parameterInit(betaT, NULL);
+
+    groupNormConfig_t cfg;
+    initGroupNormConfig(&cfg, gamma, beta, 2, 4, 1e-5f, in->quantization, in->quantization);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, cfg.propLossMath.type);
+    cfg.propLossMath.roundingMode = HALF_AWAY;
+    cfg.propLossQ = propLoss->quantization;
+    cfg.frozen = true;
+    layerConfig_t lcfg;
+    layer_t layer = makeGroupNormLayer(&cfg, &lcfg);
+
+    ASSERT_EXITS_WITH_FAILURE(groupNormBackward(&layer, in, shortLoss, propLoss));
+
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(propLoss);
+    freeTensor(shortLoss);
+    freeTensor(in);
+}
+
 /* R-N1's backward half: propLossQ anchors ALL THREE backward ops' staging, so
  * a NULL anchor under ARITH_BFP dies at arm entry -- and it must die even
  * when the propLoss TENSOR is NULL (the grad ops still stage at it). */
@@ -2567,6 +2609,7 @@ int main(void) {
     RUN_TEST(testGroupNormBackwardBfpGradsAccumulateAcrossCalls);
     RUN_TEST(testGroupNormBackwardBfpNullPropLossComputesGradsOnly);
     RUN_TEST(testGroupNormBackwardBfpFrozenSkipsGrads);
+    RUN_TEST(testGroupNormBackwardBfpFrozenShortLossDies);
     RUN_TEST(testGroupNormBackwardBfpMissingPropLossQAnchorDies);
     RUN_TEST(testGroupNormBackwardFloat32PinnedStillRejectsBfpWires);
     RUN_TEST(testFactoryUniformBfpProfileBuildsAndForwards);

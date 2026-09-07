@@ -2931,6 +2931,56 @@ void testLayerNormBackwardBfpGradsAccumulateAcrossCalls(void) {
     TEST_ASSERT_EQUAL_MEMORY(expDbeta, gotDbeta, 4 * sizeof(float));
 }
 
+/* The dx kernel derives its walk (G x N) from forwardInput but indexes loss at
+ * those offsets, so a loss wire shorter than G * N reads outside the funnel's
+ * unpacked scratch (or, when physOffset's modulo wraps, silently folds the
+ * wrong block twice). Unfrozen the dgamma kernel's own loss-count gate runs
+ * first and covers it incidentally; FROZEN skips dgamma, which makes the dx
+ * gate the SOLE catcher -- that is the configuration pinned here. The short
+ * wire is per-tensor {1, 0}, so its own grid validates at its own count and
+ * only the cross-count gate can reject it. */
+void testLayerNormBackwardBfpFrozenShortLossDies(void) {
+    size_t dims[2] = {(size_t)kLnBfpRows, (size_t)kLnBfpCols};
+    tensor_t *in = buildLnBfpAInput(dims);
+    /* Half the elements of the forward input: one norm group instead of two. */
+    size_t shortDims[2] = {1, (size_t)kLnBfpCols};
+    tensor_t *shortLoss = buildBfpWireWithCodesLn(shortDims, 2, 8, 8, 1, 0,
+                                                  (int32_t[]){1, -2, 3, 1}, (uint8_t[]){127});
+    tensor_t *propLoss = buildLnBfpOutputWire(dims);
+    size_t gdims[1] = {4};
+    tensor_t *gammaT = buildBfpWireWithCodesLn(
+        gdims, 1, (uint8_t)kLnBfpAGammaMantissaBits, (uint8_t)kLnBfpAGammaExponentBits,
+        (size_t)kLnBfpAGammaNumGroups, (size_t)kLnBfpAGammaGroupSize, kLnBfpAGammaCodes,
+        kLnBfpAGammaExponents);
+    parameter_t *gamma = parameterInit(gammaT, NULL);
+    tensor_t *betaT = buildBfpWireWithCodesLn(
+        gdims, 1, (uint8_t)kLnBfpABetaMantissaBits, (uint8_t)kLnBfpABetaExponentBits,
+        (size_t)kLnBfpABetaNumGroups, (size_t)kLnBfpABetaGroupSize, kLnBfpABetaCodes,
+        kLnBfpABetaExponents);
+    parameter_t *beta = parameterInit(betaT, NULL);
+    size_t *normShape = reserveMemory(sizeof(size_t));
+    normShape[0] = 4;
+
+    layerNormConfig_t cfg;
+    initLayerNormConfig(&cfg, gamma, beta, normShape, (size_t)kLnBfpNumNormDims, kLnBfpEps,
+                        in->quantization, in->quantization);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, cfg.propLossMath.type);
+    cfg.propLossMath.roundingMode = HALF_AWAY;
+    cfg.propLossQ = propLoss->quantization;
+    cfg.frozen = true;
+    layerConfig_t lcfg;
+    layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
+
+    ASSERT_EXITS_WITH_FAILURE(layerNormBackward(&layer, in, shortLoss, propLoss));
+
+    freeReservedMemory(normShape);
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(propLoss);
+    freeTensor(shortLoss);
+    freeTensor(in);
+}
+
 /* R-N1's backward half: propLossQ anchors ALL THREE backward ops' staging, so
  * a NULL anchor under ARITH_BFP dies at arm entry -- and it must die even
  * when the propLoss TENSOR is NULL (the grad ops still stage at it). */
@@ -3493,6 +3543,7 @@ int main(void) {
     RUN_TEST(testLayerNormBackwardBfpGoldAllBfpOperands);
     RUN_TEST(testLayerNormBackwardBfpNullPropLossComputesGradsOnly);
     RUN_TEST(testLayerNormBackwardBfpFrozenSkipsGrads);
+    RUN_TEST(testLayerNormBackwardBfpFrozenShortLossDies);
     RUN_TEST(testLayerNormBackwardBfpGradsAccumulateAcrossCalls);
     RUN_TEST(testLayerNormBackwardBfpMissingPropLossQAnchorDies);
     RUN_TEST(testLayerNormBackwardFloat32PinnedStillRejectsBfpWires);

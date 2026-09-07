@@ -1008,6 +1008,12 @@ static void groupNormCalcPropLossBfp(const groupNormConfig_t *cfg, tensor_t *for
     validateBfpQConfigShape(gQC, cfg->numChannels); /* count gate alone cannot catch a malformed
                                                      * grid; bfpGroupOf(gQC, c) would index
                                                      * exponents[] OOB (Task 3 review finding) */
+    /* The walk below is forwardInput's ((b, grp) base + j), but loss is indexed
+     * at those offsets: a shorter loss reads outside its scratch. The dgamma
+     * twin's gate covers this incidentally when unfrozen -- frozen skips
+     * dgamma, so this gate is the sole catcher there. */
+    groupNormBfpRequireCount(loss, calcNumberOfElementsByTensor(forwardInput),
+                             "GroupNorm dx BFP loss");
     groupNormBfpRequireCount(rawOut, calcNumberOfElementsByTensor(forwardInput),
                              "GroupNorm dx BFP raw");
 

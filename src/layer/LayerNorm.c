@@ -913,6 +913,11 @@ static void layerNormCalcPropLossBfp(const layerNormConfig_t *cfg, tensor_t *for
      * grid; bfpGroupOf(gQC, j) would then index exponents[] out of bounds
      * (the forward's gamma/beta idiom). */
     validateBfpQConfigShape(gQC, N);
+    /* The walk below is forwardInput's G x N, but loss is indexed at those
+     * offsets: a shorter loss reads outside its scratch. The dgamma twin's
+     * gate covers this incidentally when unfrozen -- frozen skips dgamma, so
+     * this gate is the sole catcher there. */
+    layerNormBfpRequireCount(loss, G * N, "LayerNorm dx BFP loss");
     layerNormBfpRequireCount(rawOut, G * N, "LayerNorm dx BFP raw");
 
     float mean[G];

@@ -16,6 +16,7 @@ add_elastic_ai_unit_test(
         CrossEntropy
         MORE_LIBS
         CommonLayerLibs
+        odt_test_death
         Log
         SoftmaxApi
         QuantizationApi
@@ -34,6 +35,7 @@ add_elastic_ai_unit_test(
         MSE
         MORE_LIBS
         CommonLayerLibs
+        odt_test_death
         TensorApi
         TensorConversion
         Quantization

@@ -28,6 +28,27 @@ float mseLossForwardFloat(tensor_t *output, tensor_t *label, reduction_t reducti
     return sum;
 }
 
+/* PR4 adversarial gate (F1/F2): every scratch in the two fake-quant bodies is
+ * a VLA sized from the MODEL OUTPUT's element count, but each convertTensor
+ * walks its OWN source's count and the label scratch borrows the LABEL's
+ * shape_t — so a label longer than the output is decoded past the end of a
+ * stack array before the difference loop ever runs. The float arms are safe by
+ * accident (they only index the output's count), which is why the check
+ * belongs at the fake-quant entries and not in the dispatcher. Fail fast rather
+ * than clamp to the shorter side: an operand-count mismatch is a caller's shape
+ * bug, and silently scoring the first n labels would hide it. */
+static void requireLabelMatchesOutput(tensor_t *output, tensor_t *label, const char *what) {
+    size_t outputCount = calcNumberOfElementsByTensor(output);
+    size_t labelCount = calcNumberOfElementsByTensor(label);
+    if (outputCount != labelCount) {
+        PRINT_ERROR("%s: label element count (%zu) does not match the model output (%zu) -- the "
+                    "fake-quant scratch buffers are sized from the OUTPUT, so a differing label "
+                    "would be converted past their end",
+                    what, labelCount, outputCount);
+        exit(1);
+    }
+}
+
 /* Fake-quant arm — dtype-generic by construction (CrossEntropy.c's naming and
  * precedent): every operand goes through convertTensor, so the same body
  * serves SYM_INT32 and, since BFP epic PR4 (R-P6), BFP. The read side hits
@@ -37,6 +58,7 @@ float mseLossForwardFloat(tensor_t *output, tensor_t *label, reduction_t reducti
  * absmax scale. NATIVE BFP losses stay an optional stretch (spec §5 MSE/CE
  * row, §9): PR6 files the follow-up issue. */
 static float mseLossForwardFakeQuant(tensor_t *output, tensor_t *label, reduction_t reduction) {
+    requireLabelMatchesOutput(output, label, "mseLossForwardFakeQuant");
     size_t size = calcNumberOfElementsByTensor(output);
 
     tensor_t outputFloat;
@@ -99,6 +121,7 @@ void mseLossBackwardFloat(tensor_t *modelOutput, tensor_t *label, tensor_t *resu
  * contract, plus the final convertTensor that requantizes the raw grad into
  * the result's own quantized grid. */
 static void mseLossBackwardFakeQuant(tensor_t *modelOutput, tensor_t *label, tensor_t *result) {
+    requireLabelMatchesOutput(modelOutput, label, "mseLossBackwardFakeQuant");
     size_t numberOfElements = calcNumberOfElementsByTensor(modelOutput);
 
     tensor_t modelOutputFloat;

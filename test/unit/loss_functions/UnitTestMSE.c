@@ -1,5 +1,6 @@
 #define SOURCE_FILE "UnitTestMSE"
 
+#include "DeathTest.h"
 #include "MSE.h"
 #include "QuantizationApi.h"
 #include "Rounding.h"
@@ -260,6 +261,41 @@ void testMseLossBackwardBfpRequantizesIntoFreshGrid(void) {
     freeTensor(bfpOut);
 }
 
+/* PR4 adversarial gate (F1/F2): every scratch buffer in the fake-quant bodies
+ * is a VLA sized from the MODEL OUTPUT's element count, but each convertTensor
+ * walks its OWN source's count and the label scratch even borrows the LABEL's
+ * shape — so a label longer than the output writes past the end of a stack
+ * array. The mismatch is deliberately ONE element: large enough to overrun,
+ * small enough that the unguarded child returns normally instead of crashing,
+ * which is what makes the missing-guard RED a clean "exit code 0" rather than
+ * a signal. */
+void testMseLossForwardBfpRejectsLabelCountMismatch(void) {
+    int32_t codes[4] = {8, -4, 12, 16};
+    tensor_t *bfpOut = buildBfpTensor1DWithCodes(4, 6, 8, codes, 127);
+    float labelValues[5] = {7.0f, -4.0f, 10.0f, 16.0f, 1.0f};
+    tensor_t *label = buildFloatTensor1D(5, labelValues);
+
+    ASSERT_EXITS_WITH_FAILURE((void)mseLossForward(bfpOut, label, REDUCTION_MEAN));
+
+    freeTensor(label);
+    freeTensor(bfpOut);
+}
+
+void testMseLossBackwardBfpRejectsLabelCountMismatch(void) {
+    int32_t codes[4] = {8, -4, 12, 16};
+    int32_t sentinel[4] = {-9, -9, -9, -9};
+    tensor_t *bfpOut = buildBfpTensor1DWithCodes(4, 6, 8, codes, 127);
+    float labelValues[5] = {7.0f, -4.0f, 10.0f, 16.0f, 1.0f};
+    tensor_t *label = buildFloatTensor1D(5, labelValues);
+    tensor_t *result = buildBfpTensor1DWithCodes(4, 6, 8, sentinel, 127);
+
+    ASSERT_EXITS_WITH_FAILURE(mseLossBackward(bfpOut, label, result));
+
+    freeTensor(result);
+    freeTensor(label);
+    freeTensor(bfpOut);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -274,6 +310,8 @@ int main(void) {
 
     RUN_TEST(testMseLossForwardBfpEqualsFloat32OnExactGrid);
     RUN_TEST(testMseLossBackwardBfpRequantizesIntoFreshGrid);
+    RUN_TEST(testMseLossForwardBfpRejectsLabelCountMismatch);
+    RUN_TEST(testMseLossBackwardBfpRejectsLabelCountMismatch);
 
     return UNITY_END();
 }

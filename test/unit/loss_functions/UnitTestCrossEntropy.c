@@ -1,6 +1,7 @@
 #define SOURCE_FILE "UnitTestCrossEntropy"
 
 #include "CrossEntropy.h"
+#include "DeathTest.h"
 #include "LayerQuant.h"
 #include "QuantizationApi.h"
 #include "Softmax.h"
@@ -473,6 +474,41 @@ void testCrossEntropySoftmaxBackwardBfpRequantizesIntoFreshGrid(void) {
     freeTensor(bfpP);
 }
 
+/* PR4 adversarial gate (F1/F2): every scratch buffer in the fake-quant bodies
+ * is a VLA sized from the MODEL OUTPUT's element count, but each convertTensor
+ * walks its OWN source's count and the distribution scratch even borrows the
+ * DISTRIBUTION's shape — so a label longer than the softmax output writes past
+ * the end of a stack array. The mismatch is deliberately ONE element: large
+ * enough to overrun, small enough that the unguarded child returns normally
+ * instead of crashing, which is what makes the missing-guard RED a clean "exit
+ * code 0" rather than a signal. */
+void testCrossEntropyForwardBfpRejectsDistributionCountMismatch(void) {
+    int32_t codes[4] = {16, 8, 4, 4};
+    tensor_t *bfpP = buildBfpTensor1DWithCodes(4, 6, 8, codes, 122);
+    float y[5] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    tensor_t *label = buildFloatTensor1D(5, y);
+
+    ASSERT_EXITS_WITH_FAILURE((void)crossEntropyForward(bfpP, label, REDUCTION_SUM));
+
+    freeTensor(label);
+    freeTensor(bfpP);
+}
+
+void testCrossEntropySoftmaxBackwardBfpRejectsDistributionCountMismatch(void) {
+    int32_t codes[4] = {16, 8, 4, 4};
+    int32_t sentinel[4] = {-9, -9, -9, -9};
+    tensor_t *bfpP = buildBfpTensor1DWithCodes(4, 6, 8, codes, 122);
+    float y[5] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    tensor_t *label = buildFloatTensor1D(5, y);
+    tensor_t *loss = buildBfpTensor1DWithCodes(4, 6, 8, sentinel, 127);
+
+    ASSERT_EXITS_WITH_FAILURE(crossEntropySoftmaxBackward(bfpP, label, loss));
+
+    freeTensor(loss);
+    freeTensor(label);
+    freeTensor(bfpP);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -489,5 +525,7 @@ int main() {
     RUN_TEST(testCrossEntropySoftmaxBackwardSymWritesRequantizedGrad);
     RUN_TEST(testCrossEntropyForwardBfpEqualsFloat32OnExactGrid);
     RUN_TEST(testCrossEntropySoftmaxBackwardBfpRequantizesIntoFreshGrid);
+    RUN_TEST(testCrossEntropyForwardBfpRejectsDistributionCountMismatch);
+    RUN_TEST(testCrossEntropySoftmaxBackwardBfpRejectsDistributionCountMismatch);
     return UNITY_END();
 }

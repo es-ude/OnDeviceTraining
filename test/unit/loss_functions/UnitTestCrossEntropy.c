@@ -509,6 +509,28 @@ void testCrossEntropySoftmaxBackwardBfpRejectsDistributionCountMismatch(void) {
     freeTensor(bfpP);
 }
 
+/* PR4 adversarial gate (F1/F2 follow-through): the produced LOSS wire is the
+ * third operand with the same hole, and it needs its own case because a CORRECT
+ * distribution is what carries the call past the distribution guard. The loss
+ * scratch is a VLA sized from the model output's count but borrows the LOSS's
+ * shape_t, so the closing convertTensor(&lossFloat, loss) walks the LOSS's count
+ * and reads past the end of that stack array; a shorter loss wire would instead
+ * emit a silently truncated gradient. */
+void testCrossEntropySoftmaxBackwardBfpRejectsLossWireCountMismatch(void) {
+    int32_t codes[4] = {16, 8, 4, 4};
+    int32_t sentinel[5] = {-9, -9, -9, -9, -9};
+    tensor_t *bfpP = buildBfpTensor1DWithCodes(4, 6, 8, codes, 122);
+    float y[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    tensor_t *label = buildFloatTensor1D(4, y);
+    tensor_t *loss = buildBfpTensor1DWithCodes(5, 6, 8, sentinel, 127);
+
+    ASSERT_EXITS_WITH_FAILURE(crossEntropySoftmaxBackward(bfpP, label, loss));
+
+    freeTensor(loss);
+    freeTensor(label);
+    freeTensor(bfpP);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -527,5 +549,6 @@ int main() {
     RUN_TEST(testCrossEntropySoftmaxBackwardBfpRequantizesIntoFreshGrid);
     RUN_TEST(testCrossEntropyForwardBfpRejectsDistributionCountMismatch);
     RUN_TEST(testCrossEntropySoftmaxBackwardBfpRejectsDistributionCountMismatch);
+    RUN_TEST(testCrossEntropySoftmaxBackwardBfpRejectsLossWireCountMismatch);
     return UNITY_END();
 }

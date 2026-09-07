@@ -296,6 +296,28 @@ void testMseLossBackwardBfpRejectsLabelCountMismatch(void) {
     freeTensor(bfpOut);
 }
 
+/* PR4 adversarial gate (F1/F2 follow-through): the RESULT wire is the third
+ * operand with the same hole, and it needs its own case because a CORRECT label
+ * is what carries the call past the label guard. The result scratch is a VLA
+ * sized from the model output's count but borrows the RESULT's shape_t, so the
+ * closing convertTensor(&resultFloat, result) walks the RESULT's count and
+ * reads past the end of that stack array; a shorter result would instead emit a
+ * silently truncated grad. */
+void testMseLossBackwardBfpRejectsResultCountMismatch(void) {
+    int32_t codes[4] = {8, -4, 12, 16};
+    int32_t sentinel[5] = {-9, -9, -9, -9, -9};
+    tensor_t *bfpOut = buildBfpTensor1DWithCodes(4, 6, 8, codes, 127);
+    float labelValues[4] = {7.0f, -4.0f, 10.0f, 16.0f};
+    tensor_t *label = buildFloatTensor1D(4, labelValues);
+    tensor_t *result = buildBfpTensor1DWithCodes(5, 6, 8, sentinel, 127);
+
+    ASSERT_EXITS_WITH_FAILURE(mseLossBackward(bfpOut, label, result));
+
+    freeTensor(result);
+    freeTensor(label);
+    freeTensor(bfpOut);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -312,6 +334,7 @@ int main(void) {
     RUN_TEST(testMseLossBackwardBfpRequantizesIntoFreshGrid);
     RUN_TEST(testMseLossForwardBfpRejectsLabelCountMismatch);
     RUN_TEST(testMseLossBackwardBfpRejectsLabelCountMismatch);
+    RUN_TEST(testMseLossBackwardBfpRejectsResultCountMismatch);
 
     return UNITY_END();
 }

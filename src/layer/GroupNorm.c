@@ -1,6 +1,7 @@
 #define SOURCE_FILE "GROUPNORM"
 
-#include <math.h> /* powf: one-time config-derived range constants only (orchestration) */
+#include <math.h> /* powf: one-time config-derived range constants only (orchestration);
+                   * ldexpf: exact BFP mantissa*2^E dequant (no rounding) */
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,6 +11,7 @@
 #include "Add.h"
 #include "Arithmetic.h"
 #include "ArithmeticType.h"
+#include "BfpKernelSupport.h"
 #include "Common.h"
 #include "Div.h"
 #include "ExecuteOp.h"
@@ -86,7 +88,7 @@ static void groupNormValidateInputShape(groupNormConfig_t *cfg, tensor_t *input)
 
 /* Group geometry from a validated [B,C,T] input: cpg = C/G channels per group,
  * K = B*G blocks, N = cpg*T elements per block. */
-static void groupNormGroupGeom(tensor_t *input, groupNormConfig_t *cfg, size_t *K, size_t *N,
+static void groupNormGroupGeom(tensor_t *input, const groupNormConfig_t *cfg, size_t *K, size_t *N,
                                size_t *cpg, size_t *B, size_t *T) {
     *B = input->shape->dimensions[0];
     *T = input->shape->dimensions[2];
@@ -112,7 +114,7 @@ static void groupNormGroupGeom(tensor_t *input, groupNormConfig_t *cfg, size_t *
  * LayerNorm precedent). Callers MUST guarantee K > 0 && N > 0 (the stats VLAs
  * and Reduce's block loop are undefined at 0); every caller early-outs before
  * calling here. */
-static void groupNormAllGroupStats(tensor_t *t, groupNormConfig_t *cfg, size_t B, size_t cpg,
+static void groupNormAllGroupStats(tensor_t *t, const groupNormConfig_t *cfg, size_t B, size_t cpg,
                                    size_t T, size_t K, float eps, float *mean, float *invSigma) {
     size_t viewDims[4] = {B, cfg->numGroups, cpg, T};
     size_t viewOrder[4] = {0, 1, 2, 3};
@@ -134,12 +136,35 @@ static void groupNormAllGroupStats(tensor_t *t, groupNormConfig_t *cfg, size_t B
     tensor_t varT;
     setTensorValues(&varT, (uint8_t *)var, &statsShape, &statsQ, NULL);
 
-    if (t->quantization->type == SYM_INT32) {
+    switch (t->quantization->type) {
+    case SYM_INT32:
         meanOverTrailingAxesSymInt32(&view, 2, &meanT);
         varianceBiasedOverTrailingAxesSymInt32(&view, 2, &meanT, &varT);
-    } else {
+        break;
+    case BFP:
+        /* The view ALIASES both t's data and t's quantization (setTensorValues
+         * above), so the Reduce BFP arms fold on the operand's own grid. That
+         * is sound here because the view only RELABELS dims: the layer's
+         * rank-3/identity-order gate makes the storage layout row-major, and
+         * the [B,G,cpg,T] split of C keeps that, so a view element's flat
+         * index EQUALS its storage index and bfpGroupOf(qC, off) resolves the
+         * exponent group the code was actually packed into. */
+        meanOverTrailingAxesBfp(&view, 2, &meanT);
+        varianceBiasedOverTrailingAxesBfp(&view, 2, &meanT, &varT);
+        break;
+    case FLOAT32:
         meanOverTrailingAxesFloat32(&view, 2, &meanT);
         varianceBiasedOverTrailingAxesFloat32(&view, 2, &meanT, &varT);
+        break;
+    default:
+        /* PR2 Task 9 ruling (LayerNorm twin): a fall-through would hand int32
+         * mantissa scratch to the float reducer through a float* cast --
+         * silent wrong arithmetic, not a crash. Explicit switch, fail-fast
+         * default. */
+        PRINT_ERROR("GroupNorm stats: operand dtype %d has no stats path "
+                    "(FLOAT32/SYM_INT32/BFP)",
+                    (int)t->quantization->type);
+        exit(1);
     }
     for (size_t k = 0; k < K; k++) {
         invSigma[k] = rsqrtFloat32(var[k], eps); /* eps INSIDE sqrt */
@@ -399,6 +424,103 @@ static void groupNormForwardSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, te
     groupNormAffineSymInt32(cfg, gamma, beta, output, sNorm);
 }
 
+/* R-N1 (the R-P1 weight-less anchor at the norm layer): norms have no
+ * reduction-weight operand, so the staging width anchor for FLOAT32-stored
+ * operands is the layer's OWN produced-wire config -- outputQ for the forward
+ * op, propLossQ for the backward ops. Eager at op entry: without a BFP-typed
+ * wire config there is no width source at all. NULL-checked because userApi
+ * factories copy layerQuant_t slots by value (a pinned ARITH_BFP slot can
+ * arrive with a NULL or non-BFP wire config). */
+static const bfpQConfig_t *groupNormBfpWireAnchor(const quantization_t *wireQ, const char *what) {
+    if (wireQ == NULL || wireQ->type != BFP) {
+        PRINT_ERROR("%s: ARITH_BFP requires a BFP-typed produced-wire config as the staging "
+                    "width anchor (outputQ forward / propLossQ backward) -- see "
+                    "docs/conventions/arithmetic-bfp.md",
+                    what);
+        exit(1);
+    }
+    return wireQ->qConfig;
+}
+
+/* F5-style count gate for the BFP kernels' flat gamma/beta/raw indexing. */
+static void groupNormBfpRequireCount(tensor_t *t, size_t expected, const char *what) {
+    size_t n = calcNumberOfElementsByTensor(t);
+    if (n != expected) {
+        PRINT_ERROR("%s: element count %zu != expected %zu", what, n, expected);
+        exit(1);
+    }
+}
+
+/* ARITH_BFP forward (R-N2/R-N3): BFP stats via the [B,G,cpg,T] alias view,
+ * per-channel float affine, FLOAT32 raw (D7); OUT_WRITE packs the wire. The
+ * SYM path's integer-affine/beta-seed bookkeeping has no BFP analog (a BFP
+ * scale is 2^E; like AvgPool's /K fold, R-P4). Operands arrive in the funnel's
+ * unpacked-BFP scratch form (borrowed or staged). */
+static void groupNormForwardBfp(const groupNormConfig_t *cfg, tensor_t *gamma, tensor_t *beta,
+                                tensor_t *input, tensor_t *rawOut) {
+    size_t K;
+    size_t N;
+    size_t cpg;
+    size_t B;
+    size_t T;
+    groupNormGroupGeom(input, cfg, &K, &N, &cpg, &B, &T);
+    if (K == 0 || N == 0) {
+        return;
+    }
+    const bfpQConfig_t *xQC = input->quantization->qConfig;
+    const bfpQConfig_t *gQC = gamma->quantization->qConfig;
+    const bfpQConfig_t *bQC = beta->quantization->qConfig;
+    validateBfpQConfigShape(xQC, calcNumberOfElementsByTensor(input));
+    groupNormBfpRequireCount(gamma, cfg->numChannels, "GroupNorm forward BFP gamma");
+    groupNormBfpRequireCount(beta, cfg->numChannels, "GroupNorm forward BFP beta");
+    validateBfpQConfigShape(gQC, cfg->numChannels); /* grid check per operand -- the count gate
+                                                     * alone cannot catch a malformed grid
+                                                     * (LayerNorm forward precedent) */
+    validateBfpQConfigShape(bQC, cfg->numChannels);
+
+    float mean[K];
+    float invSigma[K];
+    groupNormAllGroupStats(input, cfg, B, cpg, T, K, cfg->eps, mean, invSigma);
+
+    const int32_t xBias = bfpExponentBias(xQC);
+    const int32_t gBias = bfpExponentBias(gQC);
+    const int32_t bBias = bfpExponentBias(bQC);
+    int32_t const *xArr = (int32_t const *)input->data;
+    int32_t const *gArr = (int32_t const *)gamma->data;
+    int32_t const *bArr = (int32_t const *)beta->data;
+    float *yArr = (float *)rawOut->data;
+    /* Flat contiguous walk (identity order enforced by the layer's shape
+     * gate): block k = (b, grp), base = (b*C + grp*cpg)*T, element
+     * off = base + j, channel c = grp*cpg + j/T. cfg->numGroups is the LAYER's
+     * channel-group count -- unrelated to any bfpQConfig_t's numGroups, which
+     * is the exponent-block count and is only ever reached through
+     * bfpGroupOf(). */
+    for (size_t b = 0; b < B; b++) {
+        for (size_t grp = 0; grp < cfg->numGroups; grp++) {
+            size_t k = b * cfg->numGroups + grp;
+            size_t base = (b * cfg->numChannels + grp * cpg) * T;
+            for (size_t j = 0; j < N; j++) {
+                size_t off = base + j;
+                size_t c = grp * cpg + j / T;
+                float x =
+                    ldexpf((float)xArr[off], (int)xQC->exponents[bfpGroupOf(xQC, off)] - xBias);
+                float nval = mulFloat32s(subFloat32s(x, mean[k]), invSigma[k]);
+                float gv = ldexpf((float)gArr[c], (int)gQC->exponents[bfpGroupOf(gQC, c)] - gBias);
+                float bv = ldexpf((float)bArr[c], (int)bQC->exponents[bfpGroupOf(bQC, c)] - bBias);
+                yArr[off] = addFloat32s(mulFloat32s(gv, nval), bv);
+            }
+        }
+    }
+}
+
+static void groupNormForwardKernelBfp(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
+                                      tensor_t *auxOut, const void *ctx) {
+    (void)nOperands;
+    (void)auxOut;
+    const groupNormConfig_t *cfg = ctx;
+    groupNormForwardBfp(cfg, operands[1], operands[2], operands[0], rawOut);
+}
+
 /* executeOp forward kernel adapters — operands {input, gamma, beta}; ctx =
  * cfg (eps/numGroups/numChannels geometry, not a tensor so it cannot travel
  * through the funnel's operand array). The SYM kernel emits a RAW, unrestored
@@ -422,8 +544,10 @@ static void groupNormForwardKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut
  * Task 9): a ternary hands every non-SYM arithmetic to the FLOAT kernel, and
  * since the derivation flip a BFP profile arrives here as ARITH_BFP, whose
  * funnel-unpacked int32 mantissa scratch groupNormForwardFloat would read
- * through a float* cast — silent wrong arithmetic, not a crash. Fail fast until
- * epic PR5 writes real BFP norm semantics. */
+ * through a float* cast — silent wrong arithmetic, not a crash. ARITH_BFP never
+ * reaches this select since epic PR5 (groupNormForward early-returns through
+ * its own arm), so the default covers only genuinely unimplemented
+ * arithmetic. */
 static opKernelFn_t groupNormSelectForwardKernel(const groupNormConfig_t *cfg) {
     switch (cfg->forwardMath.type) {
     case ARITH_FLOAT32:
@@ -431,8 +555,7 @@ static opKernelFn_t groupNormSelectForwardKernel(const groupNormConfig_t *cfg) {
     case ARITH_SYM_INT32:
         return groupNormForwardKernelSym;
     default:
-        PRINT_ERROR("GroupNorm forward: declared forwardMath %d not implemented "
-                    "(FLOAT32/SYM_INT32 only) -- native BFP norms arrive with epic PR5",
+        PRINT_ERROR("GroupNorm forward: declared forwardMath %d not implemented",
                     (int)cfg->forwardMath.type);
         exit(1);
     }
@@ -441,6 +564,32 @@ static opKernelFn_t groupNormSelectForwardKernel(const groupNormConfig_t *cfg) {
 void groupNormForward(layer_t *layer, tensor_t *input, tensor_t *output) {
     groupNormConfig_t *cfg = layer->config->groupNorm;
     groupNormValidateInputShape(cfg, input);
+
+    if (cfg->forwardMath.type == ARITH_BFP) {
+        const bfpQConfig_t *anchor = groupNormBfpWireAnchor(cfg->outputQ, "GroupNorm forward");
+        bfpQConfig_t stage = {.exponents = NULL,
+                              .numGroups = 1,
+                              .groupSize = 0,
+                              .roundingMode = cfg->forwardMath.roundingMode,
+                              .mantissaBits = anchor->mantissaBits,
+                              .exponentBits = anchor->exponentBits};
+        tensor_t *gammaT = getParamFromParameter(cfg->gamma);
+        tensor_t *betaT = getParamFromParameter(cfg->beta);
+        executeOp(
+            &(opSpec_t){
+                .kernel = groupNormForwardKernelBfp,
+                .ctx = cfg,
+                .inputs = (tensor_t *[]){input, gammaT, betaT},
+                .nInputs = 3,
+                .arithmetic = cfg->forwardMath,
+                .mode = OUT_WRITE,
+                .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL,
+                             gammaT->quantization->type == FLOAT32 ? &stage : NULL,
+                             betaT->quantization->type == FLOAT32 ? &stage : NULL},
+            },
+            output);
+        return;
+    }
 
     executeOp(
         &(opSpec_t){

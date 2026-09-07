@@ -37,7 +37,7 @@ float trainingEpochDefault(layer_t **model, size_t modelSize, lossConfig_t lossC
             scaleOptimizerGradients(optimizer, meanScale);
         }
 
-        optimFns.step(optimizer);
+        optimizerStep(optimizer);
         optimFns.zero(optimizer);
         freeBatch(batch);
     }

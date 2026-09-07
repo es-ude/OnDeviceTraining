@@ -9,8 +9,15 @@
 #include "Conv1dTransposed.h"
 #include "Layer.h"
 #include "Linear.h"
+#include "OdtHook.h"
 #include "Optimizer.h"
 #include "Sgd.h"
+
+void optimizerStep(optimizer_t *optimizer) {
+    odtHookFire(ODT_EVENT_OPTIMIZER_BEGIN);
+    optimizerFunctions[optimizer->type].step(optimizer);
+    odtHookFire(ODT_EVENT_OPTIMIZER_END);
+}
 
 void optimizerZeroGrad(optimizer_t *optimizer) {
     for (size_t i = 0; i < optimizer->sizeStates; i++) {

@@ -235,6 +235,148 @@ void testAllFrozenModelStillFiresBothPairs(void) {
     assertHookAt(5, ODT_EVENT_BACKWARD_END);
 }
 
+/* The spec's acceptance test: one calculateGradsSequential + one optimizer
+ * step yield the six events, in enum order, each carrying the installed ctx. */
+void testSixEventsFireInOrderForOneGradsCallPlusOneStep(void) {
+    resetLog();
+    quantization_t *q = quantizationInitFloat();
+    layer_t *model[2];
+    buildLinearSoftmaxModel(model, q, TRAINABLE_DEFAULT);
+    tensor_t *x = makeRowVec2(1.0f, 1.0f);
+    tensor_t *label = makeRowVec2(1.0f, 0.0f);
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *optim =
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 2, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+
+    odtHookSet(recordingHook, &g_ctxToken);
+    trainingStats_t *stats =
+        calculateGradsSequential(model, 2, ceMeanLoss(), REDUCTION_MEAN, x, label);
+    optimizerStep(optim);
+    odtHookSet(NULL, NULL);
+
+    size_t count = g_logCount;
+    freeTrainingStats(stats);
+    freeTensor(x);
+    freeTensor(label);
+    freeOptim(optim); /* frees the collected Linear params -> shell-only below */
+    freeLinearLayerShellOnly(model[0]);
+    freeSoftmaxLayer(model[1]);
+    freeQuantization(momentumQ);
+    freeQuantization(q);
+
+    TEST_ASSERT_EQUAL_size_t(6, count);
+    for (size_t i = 0; i < 6; i++) {
+        assertHookAt(i, (odtEvent_t)i);
+    }
+}
+
+/* Same step with the hook removed again after a real install: nothing fires
+ * -- pins the disable path end to end, not just odtHookFire in isolation. */
+void testNothingFiresWhenHookUnset(void) {
+    resetLog();
+    quantization_t *q = quantizationInitFloat();
+    layer_t *model[2];
+    buildLinearSoftmaxModel(model, q, TRAINABLE_DEFAULT);
+    tensor_t *x = makeRowVec2(1.0f, 1.0f);
+    tensor_t *label = makeRowVec2(1.0f, 0.0f);
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *optim =
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 2, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+
+    odtHookSet(recordingHook, &g_ctxToken);
+    odtHookSet(NULL, NULL);
+    trainingStats_t *stats =
+        calculateGradsSequential(model, 2, ceMeanLoss(), REDUCTION_MEAN, x, label);
+    optimizerStep(optim);
+
+    size_t count = g_logCount;
+    freeTrainingStats(stats);
+    freeTensor(x);
+    freeTensor(label);
+    freeOptim(optim);
+    freeLinearLayerShellOnly(model[0]);
+    freeSoftmaxLayer(model[1]);
+    freeQuantization(momentumQ);
+    freeQuantization(q);
+
+    TEST_ASSERT_EQUAL_size_t(0, count);
+}
+
+/* trainingRun's step runs inside trainingEpochDefault: one 2-sample batch
+ * must yield two FORWARD/BACKWARD quads and then exactly one OPTIMIZER pair
+ * -- i.e. the epoch loop steps through optimizerStep, not the raw vtable. */
+static tensor_t *g_epochItems[2];
+static tensor_t *g_epochLabels[2];
+static tensorArray_t g_epochItemsArr;
+static tensorArray_t g_epochLabelsArr;
+static dataset_t g_epochDataset;
+
+static sample_t *getEpochSample(size_t id) {
+    sample_t *s = reserveMemory(sizeof(sample_t));
+    s->item = g_epochDataset.items->array[id];
+    s->label = g_epochDataset.labels->array[id];
+    return s;
+}
+
+static size_t getEpochDatasetSize(void) {
+    return g_epochDataset.items->size;
+}
+
+void testTrainingEpochDefaultStepsThroughOptimizerStep(void) {
+    resetLog();
+    g_epochItems[0] = makeRowVec2(5.0f, 1.0f);
+    g_epochItems[1] = makeRowVec2(1.0f, 5.0f);
+    g_epochLabels[0] = makeRowVec2(1.0f, 0.0f);
+    g_epochLabels[1] = makeRowVec2(0.0f, 1.0f);
+    g_epochItemsArr.array = g_epochItems;
+    g_epochItemsArr.size = 2;
+    g_epochLabelsArr.array = g_epochLabels;
+    g_epochLabelsArr.size = 2;
+    g_epochDataset.items = &g_epochItemsArr;
+    g_epochDataset.labels = &g_epochLabelsArr;
+
+    quantization_t *q = quantizationInitFloat();
+    layer_t *model[2];
+    buildLinearSoftmaxModel(model, q, TRAINABLE_DEFAULT);
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *optim =
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 2, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    dataLoader_t *dl = dataLoaderInit(getEpochSample, getEpochDatasetSize, /*batchSize*/ 2, NULL,
+                                      NULL, /*shuffle*/ false, /*seed*/ 0, /*dropLast*/ true);
+
+    odtHookSet(recordingHook, &g_ctxToken);
+    float epochLoss = trainingEpochDefault(model, 2, ceMeanLoss(), dl, optim,
+                                           calculateGradsSequential, REDUCTION_MEAN);
+    odtHookSet(NULL, NULL);
+
+    size_t count = g_logCount;
+    bool lossPositive = epochLoss > 0.0f;
+    freeDataLoader(dl);
+    freeOptim(optim);
+    freeLinearLayerShellOnly(model[0]);
+    freeSoftmaxLayer(model[1]);
+    freeQuantization(momentumQ);
+    freeQuantization(q);
+    for (size_t i = 0; i < 2; i++) {
+        freeTensor(g_epochItems[i]);
+        freeTensor(g_epochLabels[i]);
+    }
+
+    TEST_ASSERT_TRUE(lossPositive);
+    TEST_ASSERT_EQUAL_size_t(10, count);
+    for (size_t s = 0; s < 2; s++) {
+        assertHookAt(4 * s + 0, ODT_EVENT_FORWARD_BEGIN);
+        assertHookAt(4 * s + 1, ODT_EVENT_FORWARD_END);
+        assertHookAt(4 * s + 2, ODT_EVENT_BACKWARD_BEGIN);
+        assertHookAt(4 * s + 3, ODT_EVENT_BACKWARD_END);
+    }
+    assertHookAt(8, ODT_EVENT_OPTIMIZER_BEGIN);
+    assertHookAt(9, ODT_EVENT_OPTIMIZER_END);
+}
+
 void testFireHandsEventAndCtxToInstalledHook(void) {
     resetLog();
     odtHookSet(recordingHook, &g_ctxToken);
@@ -262,5 +404,8 @@ int main(void) {
     RUN_TEST(testCalculateGradsFiresForwardPairThenBackwardPair);
     RUN_TEST(testTracedGradsInterleavesProbesInsidePhases);
     RUN_TEST(testAllFrozenModelStillFiresBothPairs);
+    RUN_TEST(testSixEventsFireInOrderForOneGradsCallPlusOneStep);
+    RUN_TEST(testNothingFiresWhenHookUnset);
+    RUN_TEST(testTrainingEpochDefaultStepsThroughOptimizerStep);
     return UNITY_END();
 }

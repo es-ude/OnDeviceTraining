@@ -9,6 +9,7 @@ target_link_libraries(Optimizer PRIVATE
         Linear
         Tensor
         Common
+        OdtHook
         # The [ADAM_W] vtable row references adamWStep/adamWGetLr/adamWSetLr.
         # Linked HERE (unlike Sgd, historically consumer-listed) so the new
         # row does not force every existing Optimizer consumer to grow its

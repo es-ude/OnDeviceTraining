@@ -65,6 +65,16 @@ void optimizerZeroGrad(optimizer_t *optimizer);
  * instead of silently inheriting a non-learning default is the point. */
 void optimizerSetWriteBackRounding(optimizer_t *optimizer, roundingMode_t writeBackRounding);
 
+/* THE public step entry: runs the vtable step bracketed by the
+ * ODT_EVENT_OPTIMIZER_BEGIN/END phase-hook events (OdtHook.h). Reach for
+ * this -- not optimizerFunctions[type].step() -- from any training loop or
+ * benchmark that an external profiler may observe: the raw vtable call runs
+ * the identical update but fires no events. Grad zeroing stays a separate
+ * call (optimizerFunctions[type].zero / optimizerZeroGrad); it is not part
+ * of the measured phase. trainingEpochDefault (hence trainingRun) steps
+ * through here. */
+void optimizerStep(optimizer_t *optimizer);
+
 size_t calcTotalNumberOfStates(layer_t **model, size_t sizeModel);
 
 #endif // OPTIMIZER_H

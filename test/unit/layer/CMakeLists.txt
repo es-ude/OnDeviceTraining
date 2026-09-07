@@ -357,6 +357,22 @@ add_custom_command(
 add_custom_target(generate_expected_layernorm_sym_bwd
         DEPENDS ${GEN_LAYERNORM_SYM_BWD_HEADER})
 
+# BFP epic PR5 (R-N1/R-N2/R-N3): LayerNorm's native ARITH_BFP gold. Stats
+# segment-folds, wire-anchored staging and the OUT_WRITE exponent re-derivation
+# are all bit-exact targets -- only the np.float32 twin can supply them.
+set(GEN_BFP_LAYERNORM_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_bfp_layernorm.h)
+add_custom_command(
+        OUTPUT ${GEN_BFP_LAYERNORM_HEADER}
+        COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_bfp_layernorm.py
+                --out ${GEN_BFP_LAYERNORM_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_bfp_layernorm.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+        COMMENT "Generating expected_bfp_layernorm.h via PyTorch"
+        VERBATIM
+)
+add_custom_target(generate_expected_bfp_layernorm
+        DEPENDS ${GEN_BFP_LAYERNORM_HEADER})
+
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         LayerNorm
@@ -376,6 +392,7 @@ add_elastic_ai_unit_test(
 add_dependencies(UnitTestLayerNorm generate_expected_layernorm)
 add_dependencies(UnitTestLayerNorm generate_expected_layernorm_sym)
 add_dependencies(UnitTestLayerNorm generate_expected_layernorm_sym_bwd)
+add_dependencies(UnitTestLayerNorm generate_expected_bfp_layernorm)
 target_include_directories(UnitTestLayerNorm PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 set(GEN_GROUPNORM_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_groupnorm.h)

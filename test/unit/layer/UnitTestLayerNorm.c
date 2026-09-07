@@ -16,9 +16,11 @@
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
+#include "TensorConversion.h"
 #include "unity.h"
 
 #include "DeathTest.h"
+#include "expected_bfp_layernorm.h"
 #include "expected_layernorm.h"
 #include "expected_layernorm_sym.h"
 #include "expected_layernorm_sym_bwd.h"
@@ -2459,71 +2461,270 @@ void testSymBackwardNullPropLossComputesGradsOnly(void) {
                              "round only skipped dx");
 }
 
-/* ---- BFP epic PR2 Task 9 (review fix): forward dispatch must reject ARITH_BFP.
+/* ---- BFP epic PR5 (R-N1/R-N2/R-N3): native ARITH_BFP forward ----
  *
- * layerNormForward selects its kernel from forwardMath, and that selection used
- * to be a ternary: anything that was not ARITH_SYM_INT32 got the FLOAT kernel.
- * Since the Task 9 derivation flip a BFP config DERIVES ARITH_BFP, and that
- * combination is silent corruption rather than a crash -- the funnel's prologue
- * unpacks the BFP operands into int32 mantissa scratch and layerNormForwardFloat
- * reads that scratch through a float* cast (same 4 bytes per element, so no
- * out-of-bounds access: just wrong numbers, no message).
- *
- * The public factory rejects such a profile twice over (LayerNormApi gates
- * gamma/beta storage to FLOAT32/SYM_INT32 and then requires storage and
- * forwardMath to agree), but the hand-wired route -- exactly what this test file
- * uses everywhere -- reaches it. All three operands must be BFP-STORED for the
- * hole to open: a FLOAT32 operand under ARITH_BFP already dies in the prologue
- * on its missing bfpStage template, which would make this test vacuous. */
-static tensor_t *buildBfpTensorND(size_t numDims, const size_t *dimsIn, const float *vals) {
-    size_t *dims = reserveMemory(numDims * sizeof(size_t));
-    for (size_t i = 0; i < numDims; i++) {
-        dims[i] = dimsIn[i];
-    }
+ * These replace the PR2 Task 9 guard test (forward rejects ARITH_BFP): the
+ * dispatch no longer fails fast on ARITH_BFP, it takes the native arm. That
+ * test's sibling assertion -- a BFP forwardQ DERIVES ARITH_BFP through the
+ * ordinary config path -- is inherited here: every gold test below asserts it
+ * before running, so the arm cannot be reached by hand-setting alone. */
+
+/* Packed BFP wire from explicit codes + per-group exponents (the sanctioned
+ * fixture route: byteConversion pack + exponent memcpy, arithmetic-bfp.md §5.7
+ * inventory). Writing the payload directly instead of quantizing keeps the
+ * fixture independent of the quantizer and pins the exponents the kernel
+ * borrows. initTensor is right HERE because these are PACKED wires, not the
+ * funnel's unpacked scratch form. */
+static tensor_t *buildBfpWireWithCodesLn(size_t const *dims, size_t numDims, uint8_t mantissaBits,
+                                         uint8_t exponentBits, size_t numGroups, size_t groupSize,
+                                         int32_t const *codes, uint8_t const *exponents) {
+    quantization_t *q = (groupSize == 0)
+                            ? quantizationInitBfp(mantissaBits, exponentBits, HALF_AWAY)
+                            : quantizationInitBfpGrouped(mantissaBits, exponentBits, HALF_AWAY,
+                                                         numGroups, groupSize);
+    size_t *shapeDims = reserveMemory(numDims * sizeof(size_t));
+    memcpy(shapeDims, dims, numDims * sizeof(size_t));
     size_t *order = reserveMemory(numDims * sizeof(size_t));
     setOrderOfDimsForNewTensor(numDims, order);
     shape_t *shape = reserveMemory(sizeof(shape_t));
-    setShape(shape, dims, numDims, order);
-    tensor_t *t = initTensor(shape, quantizationInitBfp(8, 8, HALF_AWAY), NULL);
-    if (vals != NULL) {
-        tensorFillFromFloatBuffer(t, (float *)vals, calcNumberOfElementsByShape(shape));
-    }
+    setShape(shape, shapeDims, numDims, order);
+    tensor_t *t = initTensor(shape, q, NULL);
+    size_t n = calcNumberOfElementsByTensor(t);
+    int32_t packSrc[n]; /* byteConversion takes a mutable source */
+    memcpy(packSrc, codes, n * sizeof(int32_t));
+    byteConversion((uint8_t *)packSrc, 32, t->data, mantissaBits, n);
+    bfpQConfig_t *qc = t->quantization->qConfig;
+    memcpy(qc->exponents, exponents, qc->numGroups);
     return t;
 }
 
-static parameter_t *buildBfpParamFloatGrad(size_t numDims, const size_t *dimsIn,
-                                           const float *vals) {
-    tensor_t *p = buildBfpTensorND(numDims, dimsIn, vals);
+/* buildBfpParamFloatGrad's codes-taking twin: a BFP-stored gamma/beta with a
+ * FLOAT32 grad (the forward never touches grads). */
+static parameter_t *buildBfpParamWithCodes(size_t len, uint8_t mantissaBits, uint8_t exponentBits,
+                                           size_t numGroups, size_t groupSize, int32_t const *codes,
+                                           uint8_t const *exponents) {
+    size_t dims[1] = {len};
+    tensor_t *p = buildBfpWireWithCodesLn(dims, 1, mantissaBits, exponentBits, numGroups, groupSize,
+                                          codes, exponents);
     return parameterInit(p, gradInitFloat(p, NULL));
 }
 
-void testLayerNormForwardRejectsArithBfp(void) {
-    size_t dims[] = {2, 4};
-    tensor_t *in = buildBfpTensorND(2, dims, (float[]){1.f, 2.f, 3.f, 4.f, 10.f, 20.f, 30.f, 40.f});
-    tensor_t *out = buildBfpTensorND(2, dims, NULL);
+/* LN-A's input wire (grouped {4, 2}, four DIFFERENT stored exponents, so every
+ * norm group's segment-fold crosses a block boundary). */
+static tensor_t *buildLnBfpAInput(size_t const *dims) {
+    return buildBfpWireWithCodesLn(dims, 2, (uint8_t)kLnBfpAXMantissaBits,
+                                   (uint8_t)kLnBfpAXExponentBits, (size_t)kLnBfpAXNumGroups,
+                                   (size_t)kLnBfpAXGroupSize, kLnBfpAXCodes, kLnBfpAXExponents);
+}
 
-    size_t ns[] = {4};
-    parameter_t *gamma = buildBfpParamFloatGrad(1, ns, (float[]){1.f, 1.f, 1.f, 1.f});
-    parameter_t *beta = buildBfpParamFloatGrad(1, ns, (float[]){0.f, 0.f, 0.f, 0.f});
+/* A freshly zero-seeded produced wire (all-zero codes, all-bias exponents), so
+ * every emitted code and exponent below comes from the OUT_WRITE epilogue and
+ * not from a leftover fixture state. */
+static tensor_t *buildLnBfpOutputWire(size_t const *dims) {
+    return buildBfpWireWithCodesLn(dims, 2, (uint8_t)kLnBfpAOutMantissaBits,
+                                   (uint8_t)kLnBfpAOutExponentBits, (size_t)kLnBfpAOutNumGroups,
+                                   (size_t)kLnBfpAOutGroupSize, kLnBfpAOutZeroCodes,
+                                   kLnBfpAOutZeroExponents);
+}
+
+static parameter_t *buildLnBfpAGamma(void) {
+    return buildBfpParamWithCodes(4, (uint8_t)kLnBfpAGammaMantissaBits,
+                                  (uint8_t)kLnBfpAGammaExponentBits, (size_t)kLnBfpAGammaNumGroups,
+                                  (size_t)kLnBfpAGammaGroupSize, kLnBfpAGammaCodes,
+                                  kLnBfpAGammaExponents);
+}
+
+static parameter_t *buildLnBfpABeta(void) {
+    return buildBfpParamWithCodes(4, (uint8_t)kLnBfpABetaMantissaBits,
+                                  (uint8_t)kLnBfpABetaExponentBits, (size_t)kLnBfpABetaNumGroups,
+                                  (size_t)kLnBfpABetaGroupSize, kLnBfpABetaCodes,
+                                  kLnBfpABetaExponents);
+}
+
+/* The primary oracle: all three operands BFP-STORED, so the funnel borrows
+ * their grids zero-copy and the kernel folds on the fixture's own exponents.
+ * Pins the mean's segment fold, the grouped gamma indexed by the INNER index
+ * j (not the input's physical offset), the per-tensor beta, and the OUT_WRITE
+ * epilogue's fresh exponent derivation at the NARROWER wire width (m = 6). */
+void testLayerNormForwardBfpGoldAllBfpOperands(void) {
+    size_t dims[2] = {(size_t)kLnBfpRows, (size_t)kLnBfpCols};
+    tensor_t *in = buildLnBfpAInput(dims);
+    tensor_t *out = buildLnBfpOutputWire(dims);
+    parameter_t *gamma = buildLnBfpAGamma();
+    parameter_t *beta = buildLnBfpABeta();
     size_t *normShape = reserveMemory(sizeof(size_t));
     normShape[0] = 4;
 
-    quantization_t *fq = quantizationInitBfp(8, 8, HALF_AWAY);
-    quantization_t *bq = quantizationInitFloat();
     layerNormConfig_t cfg;
-    initLayerNormConfig(&cfg, gamma, beta, normShape, 1, 1e-5f, fq, bq);
+    initLayerNormConfig(&cfg, gamma, beta, normShape, (size_t)kLnBfpNumNormDims, kLnBfpEps,
+                        in->quantization, in->quantization);
+    /* Derived through the ordinary config path -- pins that the flip holds. */
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, cfg.forwardMath.type);
+    cfg.forwardMath.roundingMode = HALF_AWAY;
+    cfg.outputQ = out->quantization;
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    /* What initLayerNormConfig ALREADY derived from the BFP forwardQ since the
-     * Task 9 flip -- asserted, not hand-set, so this test also pins that the
-     * guard is reachable through the ordinary config path. */
-    TEST_ASSERT_EQUAL_INT(ARITH_BFP, cfg.forwardMath.type);
+    layerNormForward(&layer, in, out);
 
+    /* 8 = kLnBfpRows * kLnBfpCols, 4 = kLnBfpAOutNumGroups (literal sizes: a
+     * static-const bound would make these VLAs). */
+    int32_t got[8];
+    uint8_t gotExps[4];
+    bfpQConfig_t *outQC = out->quantization->qConfig;
+    unpackSignExtend(out->data, outQC->mantissaBits, 0, got, 8);
+    memcpy(gotExps, outQC->exponents, outQC->numGroups);
+
+    freeReservedMemory(normShape);
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(out);
+    freeTensor(in);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(kLnBfpAOutCodes, got, 8);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(kLnBfpAOutExponents, gotExps, 4);
+}
+
+/* R-N1 staging: FLOAT32-stored operands are quantized into per-tensor BFP
+ * scratch at the ANCHOR widths -- the layer's own produced-wire config
+ * (outputQ, m = 6 here), not the operand's own width and not a hardcoded 8.
+ * The generator asserts that staging at m = 8 instead changes these codes, so
+ * this test pins BOTH the .bfpStage wiring for all three operands AND the
+ * anchor widths. */
+void testLayerNormForwardBfpGoldStagedFloat32Operands(void) {
+    size_t dims[2] = {(size_t)kLnBfpRows, (size_t)kLnBfpCols};
+    tensor_t *out = buildLnBfpOutputWire(dims);
+    tensor_t *in = buildFloatTensorND(2, dims, kLnBfpBXValues);
+    size_t ns[1] = {4};
+    parameter_t *gamma = buildFloatParam(1, ns, kLnBfpBGammaValues);
+    parameter_t *beta = buildFloatParam(1, ns, kLnBfpBBetaValues);
+    size_t *normShape = reserveMemory(sizeof(size_t));
+    normShape[0] = 4;
+
+    layerNormConfig_t cfg;
+    /* The produced wire IS the config's forwardQ here, so outputQ (the staging
+     * anchor) comes straight out of the ordinary config path. */
+    initLayerNormConfig(&cfg, gamma, beta, normShape, (size_t)kLnBfpNumNormDims, kLnBfpEps,
+                        out->quantization, out->quantization);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, cfg.forwardMath.type);
+    cfg.forwardMath.roundingMode = HALF_AWAY;
+    layerConfig_t lcfg;
+    layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
+
+    layerNormForward(&layer, in, out);
+
+    /* 8 = kLnBfpRows * kLnBfpCols, 4 = kLnBfpAOutNumGroups (literal sizes: a
+     * static-const bound would make these VLAs). */
+    int32_t got[8];
+    uint8_t gotExps[4];
+    bfpQConfig_t *outQC = out->quantization->qConfig;
+    unpackSignExtend(out->data, outQC->mantissaBits, 0, got, 8);
+    memcpy(gotExps, outQC->exponents, outQC->numGroups);
+
+    freeReservedMemory(normShape);
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(in);
+    freeTensor(out);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(kLnBfpBOutCodes, got, 8);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(kLnBfpBOutExponents, gotExps, 4);
+}
+
+/* Fake-quant pin: the native ARITH_BFP forward and the ARITH_FLOAT32
+ * (dequant-everything) forward must produce the BYTE-IDENTICAL wire on LN-A.
+ * Equality holds because LN-A is grid-exact -- every dequant is a small dyadic
+ * rational and every segment partial sum is exact, which the generator asserts
+ * by comparing the BFP segment-fold mean against the FLOAT32 sequential-sum
+ * mean bit-for-bit -- so both stats paths yield identical float32 mean/var, and
+ * the per-element normalize/affine sequences of the two kernels are textually
+ * parallel. Only the arithmetic slot differs between the two runs. */
+void testLayerNormForwardBfpFakeQuantPinTwin(void) {
+    size_t dims[2] = {(size_t)kLnBfpRows, (size_t)kLnBfpCols};
+    tensor_t *in = buildLnBfpAInput(dims);
+    tensor_t *outNative = buildLnBfpOutputWire(dims);
+    tensor_t *outFake = buildLnBfpOutputWire(dims);
+    parameter_t *gamma = buildLnBfpAGamma();
+    parameter_t *beta = buildLnBfpABeta();
+    size_t *normShape = reserveMemory(sizeof(size_t));
+    normShape[0] = 4;
+
+    layerNormConfig_t cfg;
+    initLayerNormConfig(&cfg, gamma, beta, normShape, (size_t)kLnBfpNumNormDims, kLnBfpEps,
+                        in->quantization, in->quantization);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, cfg.forwardMath.type);
+    cfg.forwardMath.roundingMode = HALF_AWAY;
+    cfg.outputQ = outNative->quantization;
+    layerConfig_t lcfg;
+    layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
+
+    layerNormForward(&layer, in, outNative);
+
+    cfg.forwardMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
+    layerNormForward(&layer, in, outFake);
+
+    size_t payloadBytes = calcNumberOfBytesForData(outNative->quantization, 8);
+    bfpQConfig_t *nativeQC = outNative->quantization->qConfig;
+    bfpQConfig_t *fakeQC = outFake->quantization->qConfig;
+    bool payloadIdentical = memcmp(outNative->data, outFake->data, payloadBytes) == 0;
+    bool exponentsIdentical =
+        memcmp(nativeQC->exponents, fakeQC->exponents, nativeQC->numGroups) == 0;
+    /* Guard against a vacuous pass: an all-zero wire would satisfy both. */
+    bool nativeNonDegenerate = false;
+    for (size_t i = 0; i < payloadBytes; i++) {
+        if (((uint8_t *)outNative->data)[i] != 0) {
+            nativeNonDegenerate = true;
+        }
+    }
+
+    freeReservedMemory(normShape);
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(outFake);
+    freeTensor(outNative);
+    freeTensor(in);
+
+    TEST_ASSERT_TRUE_MESSAGE(nativeNonDegenerate,
+                             "the native wire must be non-degenerate for the twin to mean "
+                             "anything");
+    TEST_ASSERT_TRUE_MESSAGE(payloadIdentical,
+                             "native ARITH_BFP and fake-quant ARITH_FLOAT32 must emit the same "
+                             "packed payload on a grid-exact fixture");
+    TEST_ASSERT_TRUE_MESSAGE(exponentsIdentical,
+                             "native ARITH_BFP and fake-quant ARITH_FLOAT32 must derive the same "
+                             "wire exponents on a grid-exact fixture");
+}
+
+/* R-N1: norms have no reduction-weight operand, so the staging width anchor is
+ * the layer's OWN produced-wire config. A NULL or non-BFP outputQ leaves the
+ * ARITH_BFP arm with no width source at all -- fail fast at op entry, not a
+ * silent fallback width. Reachable because the userApi factories copy
+ * layerQuant_t slots by value, so a pinned ARITH_BFP slot can arrive next to a
+ * NULL/FLOAT32 wire config. */
+void testLayerNormForwardBfpMissingOutputQAnchorDies(void) {
+    size_t dims[2] = {(size_t)kLnBfpRows, (size_t)kLnBfpCols};
+    tensor_t *in = buildLnBfpAInput(dims);
+    tensor_t *out = buildLnBfpOutputWire(dims);
+    parameter_t *gamma = buildLnBfpAGamma();
+    parameter_t *beta = buildLnBfpABeta();
+    size_t *normShape = reserveMemory(sizeof(size_t));
+    normShape[0] = 4;
+
+    layerNormConfig_t cfg;
+    initLayerNormConfig(&cfg, gamma, beta, normShape, (size_t)kLnBfpNumNormDims, kLnBfpEps,
+                        in->quantization, in->quantization);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, cfg.forwardMath.type);
+    layerConfig_t lcfg;
+    layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
+
+    cfg.outputQ = NULL;
     ASSERT_EXITS_WITH_FAILURE(layerNormForward(&layer, in, out));
 
-    freeQuantization(bq);
-    freeQuantization(fq);
+    quantization_t *floatQ = quantizationInitFloat();
+    cfg.outputQ = floatQ;
+    ASSERT_EXITS_WITH_FAILURE(layerNormForward(&layer, in, out));
+
+    freeQuantization(floatQ);
     freeReservedMemory(normShape);
     freeParameter(beta);
     freeParameter(gamma);
@@ -2584,6 +2785,9 @@ int main(void) {
     RUN_TEST(testLayerNormBackwardFrozenFactoryLayerRunsWithoutGradBuffers);
     RUN_TEST(testBackwardFloatNullPropLossComputesGradsOnly);
     RUN_TEST(testSymBackwardNullPropLossComputesGradsOnly);
-    RUN_TEST(testLayerNormForwardRejectsArithBfp);
+    RUN_TEST(testLayerNormForwardBfpGoldAllBfpOperands);
+    RUN_TEST(testLayerNormForwardBfpGoldStagedFloat32Operands);
+    RUN_TEST(testLayerNormForwardBfpFakeQuantPinTwin);
+    RUN_TEST(testLayerNormForwardBfpMissingOutputQAnchorDies);
     return UNITY_END();
 }

@@ -10,6 +10,7 @@
 #include "Add.h"
 #include "Arithmetic.h"
 #include "ArithmeticType.h"
+#include "BfpKernelSupport.h"
 #include "Common.h"
 #include "ExecuteOp.h"
 #include "Layer.h"
@@ -153,12 +154,27 @@ static void layerNormAllGroupStats(tensor_t *t, size_t numNormDims, size_t G, fl
     tensor_t varT;
     setTensorValues(&varT, (uint8_t *)var, &statsShape, &statsQ, NULL);
 
-    if (t->quantization->type == SYM_INT32) {
+    switch (t->quantization->type) {
+    case SYM_INT32:
         meanOverTrailingAxesSymInt32(t, numNormDims, &meanT);
         varianceBiasedOverTrailingAxesSymInt32(t, numNormDims, &meanT, &varT);
-    } else {
+        break;
+    case BFP:
+        meanOverTrailingAxesBfp(t, numNormDims, &meanT);
+        varianceBiasedOverTrailingAxesBfp(t, numNormDims, &meanT, &varT);
+        break;
+    case FLOAT32:
         meanOverTrailingAxesFloat32(t, numNormDims, &meanT);
         varianceBiasedOverTrailingAxesFloat32(t, numNormDims, &meanT, &varT);
+        break;
+    default:
+        /* PR2 Task 9 ruling: a fall-through would hand int32 mantissa scratch
+         * to the float reducer through a float* cast -- silent wrong
+         * arithmetic, not a crash. Explicit switch, fail-fast default. */
+        PRINT_ERROR("LayerNorm stats: operand dtype %d has no stats path "
+                    "(FLOAT32/SYM_INT32/BFP)",
+                    (int)t->quantization->type);
+        exit(1);
     }
     for (size_t g = 0; g < G; g++) {
         invSigma[g] = rsqrtFloat32(var[g], eps); /* eps INSIDE sqrt */
@@ -353,6 +369,83 @@ static void layerNormForwardSymInt32(layerNormConfig_t *cfg, tensor_t *gamma, te
     layerNormAffineSymInt32(cfg->numNormDims, gamma, beta, output, sNorm);
 }
 
+/* R-N1 (the R-P1 weight-less anchor at the norm layer): norms have no
+ * reduction-weight operand, so the staging width anchor for FLOAT32-stored
+ * operands is the layer's OWN produced-wire config -- outputQ for the forward
+ * op, propLossQ for all three backward ops. Eager at op entry: without a
+ * BFP-typed wire config there is no width source at all. NULL-checked because
+ * userApi factories copy layerQuant_t slots by value (a pinned ARITH_BFP slot
+ * can arrive with a NULL or non-BFP wire config). */
+static const bfpQConfig_t *layerNormBfpWireAnchor(const quantization_t *wireQ, const char *what) {
+    if (wireQ == NULL || wireQ->type != BFP) {
+        PRINT_ERROR("%s: ARITH_BFP requires a BFP-typed produced-wire config as the staging "
+                    "width anchor (outputQ forward / propLossQ backward) -- see "
+                    "docs/conventions/arithmetic-bfp.md",
+                    what);
+        exit(1);
+    }
+    return wireQ->qConfig;
+}
+
+/* F5-style count gate for the BFP kernels' flat gamma/beta/raw indexing. */
+static void layerNormBfpRequireCount(tensor_t *t, size_t expected, const char *what) {
+    size_t n = calcNumberOfElementsByTensor(t);
+    if (n != expected) {
+        PRINT_ERROR("%s: element count %zu != expected %zu", what, n, expected);
+        exit(1);
+    }
+}
+
+/* ARITH_BFP forward (R-N2/R-N3): stats in float32 from exact (mantissa, E)
+ * dequants via the Reduce BFP arms; normalize + affine in float -- the SYM
+ * integer-affine/beta-seed bookkeeping has no BFP analog (a BFP scale is 2^E;
+ * like AvgPool's /K fold, R-P4). Raw out is FLOAT32 (D7); the OUT_WRITE
+ * epilogue packs the BFP wire with fresh exponents. Operands arrive in the
+ * funnel's unpacked-BFP scratch form (borrowed or staged). */
+static void layerNormForwardBfp(const layerNormConfig_t *cfg, tensor_t *gamma, tensor_t *beta,
+                                tensor_t *input, tensor_t *rawOut) {
+    size_t G;
+    size_t N;
+    layerNormGroupSizes(input, cfg->numNormDims, &G, &N);
+    if (G == 0 || N == 0) {
+        return;
+    }
+    const bfpQConfig_t *xQC = input->quantization->qConfig;
+    const bfpQConfig_t *gQC = gamma->quantization->qConfig;
+    const bfpQConfig_t *bQC = beta->quantization->qConfig;
+    validateBfpQConfigShape(xQC, calcNumberOfElementsByTensor(input));
+    /* EVERY BFP operand's grid, not just the input's (Matmul.c's a/b/bias
+     * idiom): the count gate cannot catch a malformed {numGroups, groupSize},
+     * and bfpGroupOf(gQC, j) would then index exponents[] out of bounds. */
+    layerNormBfpRequireCount(gamma, N, "LayerNorm forward BFP gamma");
+    validateBfpQConfigShape(gQC, N);
+    layerNormBfpRequireCount(beta, N, "LayerNorm forward BFP beta");
+    validateBfpQConfigShape(bQC, N);
+
+    float mean[G];
+    float invSigma[G];
+    layerNormAllGroupStats(input, cfg->numNormDims, G, cfg->eps, mean, invSigma);
+
+    const int32_t xBias = bfpExponentBias(xQC);
+    const int32_t gBias = bfpExponentBias(gQC);
+    const int32_t bBias = bfpExponentBias(bQC);
+    int32_t const *xArr = (int32_t const *)input->data;
+    int32_t const *gArr = (int32_t const *)gamma->data;
+    int32_t const *bArr = (int32_t const *)beta->data;
+    float *yArr = (float *)rawOut->data;
+    for (size_t g = 0; g < G; g++) {
+        for (size_t j = 0; j < N; j++) {
+            size_t off = layerNormPhysOffset(input, cfg->numNormDims, g, j);
+            float x = ldexpf((float)xArr[off], (int)xQC->exponents[bfpGroupOf(xQC, off)] - xBias);
+            float nval = mulFloat32s(subFloat32s(x, mean[g]), invSigma[g]);
+            float gv = ldexpf((float)gArr[j], (int)gQC->exponents[bfpGroupOf(gQC, j)] - gBias);
+            float bv = ldexpf((float)bArr[j], (int)bQC->exponents[bfpGroupOf(bQC, j)] - bBias);
+            size_t outOff = layerNormPhysOffset(rawOut, cfg->numNormDims, g, j);
+            yArr[outOff] = addFloat32s(mulFloat32s(gv, nval), bv);
+        }
+    }
+}
+
 static void layerNormForwardFloat(layerNormConfig_t *cfg, tensor_t *gamma, tensor_t *beta,
                                   tensor_t *input, tensor_t *output) {
     float *in = (float *)input->data;
@@ -398,14 +491,22 @@ static void layerNormForwardKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut
     (void)auxOut;
     layerNormForwardSymInt32((layerNormConfig_t *)ctx, ops[1], ops[2], ops[0], rawOut);
 }
+static void layerNormForwardKernelBfp(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
+                                      tensor_t *auxOut, const void *ctx) {
+    (void)nOperands;
+    (void)auxOut;
+    const layerNormConfig_t *cfg = ctx;
+    layerNormForwardBfp(cfg, operands[1], operands[2], operands[0], rawOut);
+}
 
 /* Explicit kernel dispatch, NOT a ternary (BFP epic PR2 Task 9): a ternary
  * hands every non-SYM arithmetic to the FLOAT kernel, and since the derivation
  * flip a BFP profile arrives here as ARITH_BFP -- whose operands the funnel
  * prologue unpacks into int32 mantissa scratch that layerNormForwardFloat would
  * read through a float* cast. Same 4 bytes per element, so that is silent wrong
- * arithmetic rather than a crash. Fail fast until epic PR5 writes real BFP norm
- * semantics. */
+ * arithmetic rather than a crash. ARITH_BFP never reaches this select since
+ * epic PR5 (layerNormForward early-returns through its own arm), so the default
+ * covers only genuinely unimplemented arithmetic. */
 static opKernelFn_t layerNormSelectForwardKernel(const layerNormConfig_t *cfg) {
     switch (cfg->forwardMath.type) {
     case ARITH_FLOAT32:
@@ -413,8 +514,7 @@ static opKernelFn_t layerNormSelectForwardKernel(const layerNormConfig_t *cfg) {
     case ARITH_SYM_INT32:
         return layerNormForwardKernelSym;
     default:
-        PRINT_ERROR("LayerNorm forward: declared forwardMath %d not implemented "
-                    "(FLOAT32/SYM_INT32 only) -- native BFP norms arrive with epic PR5",
+        PRINT_ERROR("LayerNorm forward: declared forwardMath %d not implemented",
                     (int)cfg->forwardMath.type);
         exit(1);
     }
@@ -423,6 +523,32 @@ static opKernelFn_t layerNormSelectForwardKernel(const layerNormConfig_t *cfg) {
 void layerNormForward(layer_t *layer, tensor_t *input, tensor_t *output) {
     layerNormConfig_t *cfg = layer->config->layerNorm;
     layerNormValidateInputShape(cfg, input);
+
+    if (cfg->forwardMath.type == ARITH_BFP) {
+        const bfpQConfig_t *anchor = layerNormBfpWireAnchor(cfg->outputQ, "LayerNorm forward");
+        bfpQConfig_t stage = {.exponents = NULL,
+                              .numGroups = 1,
+                              .groupSize = 0,
+                              .roundingMode = cfg->forwardMath.roundingMode,
+                              .mantissaBits = anchor->mantissaBits,
+                              .exponentBits = anchor->exponentBits};
+        tensor_t *gammaT = getParamFromParameter(cfg->gamma);
+        tensor_t *betaT = getParamFromParameter(cfg->beta);
+        executeOp(
+            &(opSpec_t){
+                .kernel = layerNormForwardKernelBfp,
+                .ctx = cfg,
+                .inputs = (tensor_t *[]){input, gammaT, betaT},
+                .nInputs = 3,
+                .arithmetic = cfg->forwardMath,
+                .mode = OUT_WRITE,
+                .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL,
+                             gammaT->quantization->type == FLOAT32 ? &stage : NULL,
+                             betaT->quantization->type == FLOAT32 ? &stage : NULL},
+            },
+            output);
+        return;
+    }
 
     executeOp(
         &(opSpec_t){

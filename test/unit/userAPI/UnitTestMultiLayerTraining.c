@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "AdaptivePool1dApi.h"
 #include "ArithmeticType.h"
 #include "BorrowedLayer.h"
 #include "CalculateGradsSequential.h"
@@ -14,7 +15,11 @@
 #include "Dataset.h"
 #include "DeathTest.h"
 #include "FlattenApi.h"
+#include "GroupNorm.h"
+#include "GroupNormApi.h"
 #include "InferenceApi.h"
+#include "LayerNorm.h"
+#include "LayerNormApi.h"
 #include "LayerQuant.h"
 #include "Linear.h"
 #include "LinearApi.h"
@@ -2062,6 +2067,459 @@ void testBfpUniformPoolActivationModelTrains(void) {
                                           "verbatim (Task 3)");
 }
 
+/* ===========================================================================
+ * BFP epic PR5 Task 7 capstones: the NORM topology end to end.
+ * ======================================================================== */
+
+/* Geometry of the norm capstone below. conv1d(2->4, K=3, SAME, bias-less) ->
+ * groupNorm(G=1, C=4) -> relu -> adaptiveAvgPool1d(1) -> flatten ->
+ * layerNorm({4}) -> linear(4->2) -> softmax, CrossEntropy + REDUCTION_MEAN.
+ * The produced-wire element counts along that chain are
+ *   32 / 32 / 32 / 4 / 4 / 4 / 2 / 2
+ * -- every one divisible by the template groupSize 2, which the wire allocator
+ * REQUIRES (Decision 5; a non-divisor aborts the process, so a green run is the
+ * proof). The two 2-element wires normalize to per-tensor {1, 0} (groupSize ==
+ * wire elements). The GEMM PARAMS use per-tensor {1, 0} BFP: the §2 param rule
+ * demands groupSize divide the reduction run (conv: Cin*K = 6, linear:
+ * inFeatures = 4), and per-tensor satisfies it unconditionally. The NORM params
+ * come straight from the Task 6 factories, which derive {2, 2} from the
+ * 4-element gamma/beta and the template's groupSize. */
+#define BFP_NORM_IN_CHANNELS 2
+#define BFP_NORM_CONV_CHANNELS 4
+#define BFP_NORM_SEQ_LEN 8
+#define BFP_NORM_NUM_CLASSES 2
+#define BFP_NORM_MODEL_SIZE 8
+#define BFP_NORM_LAYERNORM_IDX 5 /* model index of the LayerNorm -- the probe key */
+#define BFP_NORM_CONV_W_COUNT (BFP_NORM_CONV_CHANNELS * BFP_NORM_IN_CHANNELS * 3)
+#define BFP_NORM_LIN_W_COUNT (BFP_NORM_NUM_CLASSES * BFP_NORM_CONV_CHANNELS)
+
+/* The LayerNorm's OUTPUT wire is the observable for "the norms' OUT_WRITE
+ * derived a live BFP grid": it is allocated fresh by the training loop every
+ * step, so the only way to read its exponents is from inside the run. First
+ * occurrence only -- the claim is that the grid is derived at all, and step 1
+ * is the strictest point at which to make it. */
+typedef struct pr5NormCapture {
+    bool seenFwdLayerNorm;
+    size_t nFwdLayerNorm;
+    uint8_t fwdLayerNorm[BFP_PR4_MAX_GROUPS];
+} pr5NormCapture_t;
+
+static void capturePr5LayerNormWire(void *ctx, size_t layerIdx, layerType_t layerType,
+                                    const char *phase, tensor_t *tensor) {
+    (void)layerType;
+    pr5NormCapture_t *cap = ctx;
+    if (layerIdx == BFP_NORM_LAYERNORM_IDX && strcmp(phase, "fwd") == 0) {
+        pr4SnapExponents(&cap->seenFwdLayerNorm, &cap->nFwdLayerNorm, cap->fwdLayerNorm, tensor);
+    }
+}
+
+/* FLOAT32 parameter_t from explicit values (buildRampParam2D/3D's twin -- a
+ * ramp gives every conv output channel the SAME cross-channel weight
+ * difference, which makes the four conv channels near-degenerate on a
+ * two-channel sign-flipped fixture). The §5.2 recipe then requantizes the
+ * param tensor in place. */
+static parameter_t *buildFloatParam3D(size_t d0, size_t d1, size_t d2, const float *values) {
+    tensor_t *param = buildFloatTensor3D(d0, d1, d2, values);
+    return parameterInit(param, gradInitFloat(param, NULL));
+}
+
+static parameter_t *buildFloatParam2D(size_t d0, size_t d1, const float *values) {
+    tensor_t *param = buildFloatTensor2D(d0, d1, values);
+    return parameterInit(param, gradInitFloat(param, NULL));
+}
+
+/* Both norm factories ALWAYS free gamma/beta, and freeOptim already freed every
+ * parameter it registered -- so after freeOptim the layers must come down
+ * shell-only (the UnitTestGroupNormIntegration.c / UnitTestLayerNormIntegration.c
+ * pattern). Both are Borrowing factories (ownsQuantizations == false), so the
+ * shared wire config is freed once by the test, not by the shells. */
+static void freeLayerNormLayerShellOnly(layer_t *layer) {
+    freeReservedMemory(layer->config->layerNorm->normalizedShape);
+    freeReservedMemory(layer->config->layerNorm);
+    freeReservedMemory(layer->config);
+    freeReservedMemory(layer);
+}
+
+static void freeGroupNormLayerShellOnly(layer_t *layer) {
+    freeReservedMemory(layer->config->groupNorm);
+    freeReservedMemory(layer->config);
+    freeReservedMemory(layer);
+}
+
+/*! BFP epic PR5 capstone: the whole NORM topology on ONE uniform BFP wire
+ *  profile (`quantizationInitBfpGrouped(8, 8, SR_HALF_AWAY, 2, 2)` through
+ *  layerQuantInitUniform), trained with SGD+momentum through CrossEntropy.
+ *  Every PR5 arm is on the critical path:
+ *    - GroupNorm (Tasks 4/5) and LayerNorm (Tasks 2/3) run native ARITH_BFP
+ *      forward AND backward, both anchored on the uniform wire config;
+ *    - their gamma/beta are BFP-STORED, allocated by the Task 6 factories
+ *      (constant-fill on the BFP grid: 1.0 is exact at m = 8, 0.0 is the
+ *      zero state) with the {2, 2} geometry derived from the param length;
+ *    - the Reduce BFP arms (Task 1) supply both norms' mean/variance;
+ *    - the optimizer's OUT_WRITE requant writes the trained gammas back INTO
+ *      BFP storage.
+ *  Everything around them is PR2-PR4 machinery re-exercised in a topology
+ *  those PRs never ran: conv1d/linear native BFP GEMMs over BFP params
+ *  (FLOAT32-init + requantizeTensorInPlace, the §5.2 recipe -- the #270
+ *  requireFloat32 gate keeps random-init factories FLOAT32-only), relu's
+ *  packed-domain transparency, AdaptiveAvgPool1d's BFP forward/backward,
+ *  Flatten's exponent carry, and softmax as the PR6 fake-quant bridge whose
+ *  backward CrossEntropy's fused gradient skips entirely.
+ *
+ *  Seed discipline: rngSetSeed(4242u) pins the SR_HALF_AWAY draws, so the
+ *  trajectory -- and with it `lastLoss < firstLoss` -- is deterministic but
+ *  seed-sensitive; the structural assertions (arith slots, wire dtypes) are
+ *  not. 4242u is the FIRST seed tried and it passed, so no adjacent seed was
+ *  needed. */
+void testBfpUniformNormModelTrainsAndGridsMove(void) {
+    rngSetSeed(4242u);
+    quantization_t *bfpWireQ = quantizationInitBfpGrouped(8, 8, SR_HALF_AWAY, 2, 2);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, bfpWireQ);
+
+    /* conv1d [1, 2, 8] -> [1, 4, 8]; SAME padding, stride 1, bias-less. The
+     * kernel_t is heap-allocated because freeConv1dLayerShellOnly frees it. */
+    static const float convWValues[BFP_NORM_CONV_W_COUNT] = {
+        0.35f,  -0.20f, 0.15f,  -0.30f, 0.25f, -0.10f, -0.25f, 0.40f,
+        -0.15f, 0.20f,  -0.35f, 0.30f,  0.10f, 0.30f,  -0.45f, -0.15f,
+        -0.20f, 0.40f,  -0.40f, -0.10f, 0.25f, 0.35f,  0.15f,  -0.30f};
+    parameter_t *convW =
+        buildFloatParam3D(BFP_NORM_CONV_CHANNELS, BFP_NORM_IN_CHANNELS, 3, convWValues);
+    quantization_t *convWQ = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    requantizeTensorInPlace(getParamFromParameter(convW), convWQ);
+    freeQuantization(convWQ); /* requantizeTensorInPlace clones the template */
+    kernel_t *convKernel = reserveMemory(sizeof(kernel_t));
+    initKernel(convKernel, 3, SAME, /*dilation=*/1, /*stride=*/1);
+    layer_t *conv = buildBorrowedConv1dLayer(convW, NULL, convKernel, bfpWireQ);
+
+    layer_t *groupNorm = groupNormLayerInit(
+        &(groupNormInit_t){.numGroups = 1, .numChannels = BFP_NORM_CONV_CHANNELS}, &lq);
+    layer_t *relu = reluLayerInit(&lq);
+    layer_t *pool = adaptiveAvgPool1dLayerInit(&(adaptiveAvgPool1dInit_t){.outputSize = 1}, &lq);
+    layer_t *flatten = flattenLayerInit(); /* [1, 4, 1] -> [1, 4] */
+    size_t normShape[1] = {BFP_NORM_CONV_CHANNELS};
+    layer_t *layerNorm =
+        layerNormLayerInit(&(layerNormInit_t){.normalizedShape = normShape, .numNormDims = 1}, &lq);
+
+    static const float linWValues[BFP_NORM_LIN_W_COUNT] = {0.30f,  -0.20f, 0.15f,  -0.35f,
+                                                           -0.25f, 0.40f,  -0.10f, 0.20f};
+    static const float linBValues[BFP_NORM_NUM_CLASSES] = {0.05f, -0.05f};
+    parameter_t *linW = buildFloatParam2D(BFP_NORM_NUM_CLASSES, BFP_NORM_CONV_CHANNELS, linWValues);
+    parameter_t *linB = buildFloatParam2D(1, BFP_NORM_NUM_CLASSES, linBValues);
+    quantization_t *linWQ = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    quantization_t *linBQ = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    requantizeTensorInPlace(getParamFromParameter(linW), linWQ);
+    requantizeTensorInPlace(getParamFromParameter(linB), linBQ);
+    freeQuantization(linBQ);
+    freeQuantization(linWQ);
+    layer_t *linear = buildBorrowedLinearLayer(linW, linB, bfpWireQ);
+
+    /* Same PR6 disclosure as the PR4 capstone: softmax's forward is funnel-
+     * routed with a HARDCODED ARITH_FLOAT32, so the BFP wire crosses it as a
+     * fake-quant bridge, and CrossEntropy's fused backward makes the training
+     * loop skip the layer entirely. The FLOAT32 propLossMath pin documents that
+     * intent; it is behaviourally inert. */
+    layer_t *softmax = softmaxLayerInit(&lq);
+    softmax->config->softmax->propLossMath =
+        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
+
+    layer_t *model[BFP_NORM_MODEL_SIZE] = {conv,    groupNorm, relu,   pool,
+                                           flatten, layerNorm, linear, softmax};
+
+    /* lr 0.01 deliberately, not the PR4 capstone's 0.05: at 0.05 this fixture
+     * converges so hard that the CE loss hits EXACTLY 0.0 by step 9 -- the
+     * 2-element softmax wire quantizes p = 0.998 to code 64 at the group's own
+     * exponent, i.e. exactly 1.0, so -log(p) == 0 and the last three steps see
+     * a zero gradient. A degenerate endpoint would make `lastLoss < firstLoss`
+     * pass for a reason that has nothing to do with learning. At 0.01 the
+     * 12-step curve is a clean 0.219 -> 0.056 descent with every step
+     * non-degenerate. */
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.01f, 0.9f, 0.f, model, BFP_NORM_MODEL_SIZE, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+
+    /* Two-sample, two-class fixture: channel 0 positive / channel 1 negative is
+     * class 0, signs flipped is class 1 (the UnitTestGroupNormIntegration.c
+     * fixture at rank 3, which GroupNorm REQUIRES: [B, C, T]). Deterministic --
+     * the only RNG consumer in this test is the SR_HALF_AWAY rounding. */
+    float itemA[BFP_NORM_IN_CHANNELS * BFP_NORM_SEQ_LEN];
+    float itemB[BFP_NORM_IN_CHANNELS * BFP_NORM_SEQ_LEN];
+    for (size_t t = 0; t < BFP_NORM_SEQ_LEN; t++) {
+        float ramp = 0.05f * (float)t;
+        itemA[0 * BFP_NORM_SEQ_LEN + t] = 1.5f + ramp;
+        itemA[1 * BFP_NORM_SEQ_LEN + t] = -1.5f - ramp;
+        itemB[0 * BFP_NORM_SEQ_LEN + t] = -1.6f - ramp;
+        itemB[1 * BFP_NORM_SEQ_LEN + t] = 1.6f + ramp;
+    }
+    tensor_t *inputs[2] = {buildFloatTensor3D(1, BFP_NORM_IN_CHANNELS, BFP_NORM_SEQ_LEN, itemA),
+                           buildFloatTensor3D(1, BFP_NORM_IN_CHANNELS, BFP_NORM_SEQ_LEN, itemB)};
+    tensor_t *labels[2] = {buildFloatTensor2D(1, BFP_NORM_NUM_CLASSES, (float[]){1.0f, 0.0f}),
+                           buildFloatTensor2D(1, BFP_NORM_NUM_CLASSES, (float[]){0.0f, 1.0f})};
+
+    /* Snapshot the LayerNorm gamma's packed payload: the SGD write-back must
+     * land IN BFP STORAGE, so the codes have to leave the all-ones seed. */
+    tensor_t *lnGammaTensor = getParamFromParameter(layerNorm->config->layerNorm->gamma);
+    size_t lnGammaBytes =
+        calcNumberOfBytesForData(lnGammaTensor->quantization, BFP_NORM_CONV_CHANNELS);
+    uint8_t gammaCodesBefore[16];
+    memcpy(gammaCodesBefore, lnGammaTensor->data, lnGammaBytes);
+
+    optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
+    pr5NormCapture_t cap = {0};
+    float firstLoss = NAN;
+    float lastLoss = NAN;
+    for (size_t step = 0; step < 12; step++) {
+        float stepLoss = 0.f;
+        for (size_t s = 0; s < 2; s++) {
+            trainingStats_t *stats =
+                tracedGrads(model, BFP_NORM_MODEL_SIZE, defaultLossConfig(CROSS_ENTROPY),
+                            REDUCTION_MEAN, inputs[s], labels[s], capturePr5LayerNormWire, &cap);
+            stepLoss += stats->loss;
+            freeTrainingStats(stats);
+        }
+        if (step == 0) {
+            firstLoss = 0.5f * stepLoss;
+        }
+        lastLoss = 0.5f * stepLoss;
+        sgdFns.step(sgd);
+        sgdFns.zero(sgd);
+    }
+
+    /* CAPTURE -> FREE (reverse init order) -> assert (Unity longjmps out of the
+     * first failure, so nothing may be read after the teardown). */
+    bool gammaCodesMoved = memcmp(gammaCodesBefore, lnGammaTensor->data, lnGammaBytes) != 0;
+    layerNormConfig_t *lnCfg = layerNorm->config->layerNorm;
+    groupNormConfig_t *gnCfg = groupNorm->config->groupNorm;
+    bool normsDeclareBfpMath =
+        lnCfg->forwardMath.type == ARITH_BFP && lnCfg->propLossMath.type == ARITH_BFP &&
+        gnCfg->forwardMath.type == ARITH_BFP && gnCfg->propLossMath.type == ARITH_BFP;
+    bool normPropLossWiresBfp = lnCfg->propLossQ != NULL && lnCfg->propLossQ->type == BFP &&
+                                gnCfg->propLossQ != NULL && gnCfg->propLossQ->type == BFP;
+    bool normParamsBfpStored = lnCfg->gamma->param->quantization->type == BFP &&
+                               lnCfg->beta->param->quantization->type == BFP &&
+                               gnCfg->gamma->param->quantization->type == BFP &&
+                               gnCfg->beta->param->quantization->type == BFP;
+    const uint8_t zeroState = 127; /* exponentBits 8 -> bias 127 */
+    bool lnWireGridMoved = false;
+    for (size_t g = 0; g < cap.nFwdLayerNorm; g++) {
+        if (cap.fwdLayerNorm[g] != zeroState) {
+            lnWireGridMoved = true;
+        }
+    }
+    bool lnProbeFired = cap.seenFwdLayerNorm;
+    size_t lnWireGroups = cap.nFwdLayerNorm;
+
+    freeTensor(labels[1]);
+    freeTensor(labels[0]);
+    freeTensor(inputs[1]);
+    freeTensor(inputs[0]);
+    freeOptim(sgd); /* frees conv weight, both norms' gamma/beta, linear w/b */
+    freeSoftmaxLayer(softmax);
+    freeLinearLayerShellOnly(linear);
+    freeLayerNormLayerShellOnly(layerNorm);
+    freeFlattenLayer(flatten);
+    freeAdaptiveAvgPool1dLayer(pool);
+    freeReluLayer(relu);
+    freeGroupNormLayerShellOnly(groupNorm);
+    freeConv1dLayerShellOnly(conv);
+    freeQuantization(momentumQ);
+    freeQuantization(bfpWireQ);
+
+    TEST_ASSERT_TRUE_MESSAGE(normsDeclareBfpMath,
+                             "layerQuantInitUniform over ONE BFP profile must DERIVE ARITH_BFP "
+                             "forwardMath AND propLossMath on BOTH norms (asserted, not hand-set)");
+    TEST_ASSERT_TRUE_MESSAGE(normPropLossWiresBfp,
+                             "both norms' dx wires must be BFP-typed by config -- the whole "
+                             "backward chain ran on packed grads");
+    TEST_ASSERT_TRUE_MESSAGE(normParamsBfpStored,
+                             "the Task 6 factories must have allocated BFP-stored gamma AND beta "
+                             "for both norms");
+    TEST_ASSERT_TRUE_MESSAGE(isfinite(firstLoss) && isfinite(lastLoss),
+                             "uniform-BFP norm training must stay finite through every PR5 arm");
+    TEST_ASSERT_TRUE_MESSAGE(lastLoss < firstLoss,
+                             "uniform-BFP conv->groupNorm->relu->pool->flatten->layerNorm->linear"
+                             "->softmax+CE must converge (the vision-gate acceptance)");
+    TEST_ASSERT_TRUE_MESSAGE(lnProbeFired, "the LayerNorm forward-wire probe must have fired");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2, lnWireGroups,
+                                   "the LayerNorm output wire is 4 elements / groupSize 2");
+    /* Two seed-dependent claims, both pinned by rngSetSeed(4242u): "moved off
+     * the zero state" is a PROXY (the zero state IS exponent == bias == 127, so
+     * a grid whose absmax happened to derive exactly 127 would false-fail), and
+     * lastLoss < firstLoss depends on the SR_HALF_AWAY draw. A seed change --
+     * or an RNG-consumption change anywhere upstream -- must re-confirm both. */
+    TEST_ASSERT_TRUE_MESSAGE(lnWireGridMoved,
+                             "the LayerNorm forward's OUT_WRITE must DERIVE the output wire's "
+                             "exponent grid: at least one group must leave the zero state");
+    TEST_ASSERT_TRUE_MESSAGE(gammaCodesMoved,
+                             "the SGD write-back must land in the LayerNorm gamma's BFP storage: "
+                             "the packed codes must leave the all-ones seed");
+}
+
+/*! Task 7's second capstone -- the norm twin of
+ *  testBfpGradStorageTrainingAccumulatesAndSteps (which pins the knob on a
+ *  LINEAR weight only). A single factory-built LayerNorm on the same uniform
+ *  BFP profile, with per-tensor BFP {8, 8, SR_HALF_AWAY} storage on BOTH
+ *  gamma's and beta's GRAD (Task 6's rule-8 positive half). One backward pass
+ *  through the training loop's grad calculation exercises, in order:
+ *    - the norms' ARITH_BFP dgamma/dbeta ops writing through accumulateOut's
+ *      BFP-target arm (accumulateFloatIntoBfpTensorRescale) into packed
+ *      storage -- codes AND a derived exponent;
+ *    - the optimizer's read of those grads through conversionMatrix[BFP]
+ *      [FLOAT32] and its OUT_WRITE requant back into gamma's BFP storage;
+ *    - optimizerZeroGrad's BFP arm resetting codes to zero AND exponents to
+ *      bias (the SYM/ASYM-parity hygiene contract).
+ *  The LayerNorm is the deepest -- and only -- trainable layer, so #380 PR2
+ *  truncation hands its backward propLoss == NULL: the dgamma/dbeta ops run,
+ *  the dx op does not. That is the point; dx has its own PR5 coverage. */
+void testBfpNormGradStorageAccumulatesAndSteps(void) {
+    rngSetSeed(4242u);
+    quantization_t *bfpWireQ = quantizationInitBfpGrouped(8, 8, SR_HALF_AWAY, 2, 2);
+    quantization_t *gradKnob = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, bfpWireQ);
+    lq.weightGradStorage = gradKnob;
+    lq.biasGradStorage = gradKnob;
+
+    size_t normShape[1] = {BFP_NORM_CONV_CHANNELS};
+    layer_t *layerNorm =
+        layerNormLayerInit(&(layerNormInit_t){.normalizedShape = normShape, .numNormDims = 1}, &lq);
+    freeQuantization(gradKnob); /* gradInit deep-clones via getQLike */
+
+    layer_t *model[1] = {layerNorm};
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.2f, 0.f, 0.f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+
+    tensor_t *input =
+        buildFloatTensor2D(1, BFP_NORM_CONV_CHANNELS, (float[]){0.9f, -0.4f, 1.3f, 0.2f});
+    tensor_t *label =
+        buildFloatTensor2D(1, BFP_NORM_CONV_CHANNELS, (float[]){0.5f, -0.5f, 1.0f, -1.0f});
+
+    layerNormConfig_t *cfg = layerNorm->config->layerNorm;
+    tensor_t *gammaGrad = getGradFromParameter(cfg->gamma);
+    tensor_t *betaGrad = getGradFromParameter(cfg->beta);
+    /* (a) the knob landed BFP grad storage on BOTH norm parameters. */
+    int gammaGradType = (int)gammaGrad->quantization->type;
+    int betaGradType = (int)betaGrad->quantization->type;
+
+    /* Sentinels keep the CAPTURE phase crash-free if the knob ever regresses to
+     * the FLOAT32 default -- a FLOAT32 grad carries a NULL qConfig, and a
+     * null deref here would replace the clean dtype assertion with a segfault. */
+    uint8_t zeroStateBias = 0;
+    size_t gradBytes = 0;
+    size_t gradNumGroups = 0;
+    if (gammaGradType == BFP && betaGradType == BFP) {
+        zeroStateBias = (uint8_t)bfpExponentBias(gammaGrad->quantization->qConfig);
+        gradNumGroups = ((bfpQConfig_t *)gammaGrad->quantization->qConfig)->numGroups;
+        gradBytes = calcNumberOfBytesForData(gammaGrad->quantization, BFP_NORM_CONV_CHANNELS);
+    }
+
+    tensor_t *gammaParam = getParamFromParameter(cfg->gamma);
+    size_t paramBytes = calcNumberOfBytesForData(gammaParam->quantization, BFP_NORM_CONV_CHANNELS);
+    uint8_t paramBefore[16];
+    memcpy(paramBefore, gammaParam->data, paramBytes);
+
+    /* A fresh BFP grad is the canonical zero state: all-zero codes, exponent ==
+     * bias. Pinned BEFORE the backward so the post-zeroGrad assertions below
+     * are a genuine round trip and not a restatement of the initial state. */
+    bool freshCodesZero = true;
+    for (size_t i = 0; i < gradBytes; i++) {
+        if (((const uint8_t *)gammaGrad->data)[i] != 0u) {
+            freshCodesZero = false;
+        }
+    }
+
+    trainingStats_t *stats =
+        calculateGradsSequential(model, 1, defaultLossConfig(MSE), REDUCTION_MEAN, input, label);
+    float loss = stats->loss;
+    freeTrainingStats(stats);
+
+    /* (b) the ACC arm wrote packed codes AND derived a grid. Read BEFORE the
+     * step/zero -- zeroGrad resets the exponent to bias, so this is the only
+     * point where the accumulate arm's moved grid is observable. */
+    bool gammaGradCodesNonZero = false;
+    bool betaGradCodesNonZero = false;
+    for (size_t i = 0; i < gradBytes; i++) {
+        if (((const uint8_t *)gammaGrad->data)[i] != 0u) {
+            gammaGradCodesNonZero = true;
+        }
+        if (((const uint8_t *)betaGrad->data)[i] != 0u) {
+            betaGradCodesNonZero = true;
+        }
+    }
+    uint8_t gammaGradExponentAfterBackward =
+        gradBytes > 0 ? ((bfpQConfig_t *)gammaGrad->quantization->qConfig)->exponents[0] : 0;
+
+    /* (c) the step must move the BFP-stored gamma, read back through the BFP
+     * grad. gamma's seed is EXACTLY 1.0 (code 64 at stored exponent bias - 6),
+     * so one code is 2^-6 == 0.015625 and the update has to clear half of that
+     * to be observable at all -- which is why lr is 0.2 here and not the 0.01
+     * the model capstone above uses: |dgamma| runs ~0.1-2.4 on this fixture, so
+     * every one of the four codes moves by tens of LSBs, far from the knife
+     * edge. Hand-checked against the kernel math: the four post-step gammas
+     * (0.972 / 0.513 / 0.889 / 1.099) reproduce codes 125, 65 | 57, 71 at the
+     * two groups' re-derived exponents. */
+    optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
+    sgdFns.step(sgd);
+    bool paramMoved = memcmp(paramBefore, gammaParam->data, paramBytes) != 0;
+
+    /* (d) zeroGrad's BFP arm: codes back to zero AND exponents back to bias. */
+    sgdFns.zero(sgd);
+    bool zeroedCodes = true;
+    for (size_t i = 0; i < gradBytes; i++) {
+        if (((const uint8_t *)gammaGrad->data)[i] != 0u ||
+            ((const uint8_t *)betaGrad->data)[i] != 0u) {
+            zeroedCodes = false;
+        }
+    }
+    uint8_t gammaGradExponentAfterZero =
+        gradBytes > 0 ? ((bfpQConfig_t *)gammaGrad->quantization->qConfig)->exponents[0] : 0;
+    int gammaGradTypeAfter = (int)gammaGrad->quantization->type;
+
+    /* CAPTURE -> FREE (reverse init order) -> assert. */
+    freeTensor(label);
+    freeTensor(input);
+    freeOptim(sgd); /* frees gamma/beta + their BFP grads */
+    freeLayerNormLayerShellOnly(layerNorm);
+    freeQuantization(momentumQ);
+    freeQuantization(bfpWireQ);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        BFP, gammaGradType, "weightGradStorage must land BFP storage on the LayerNorm gamma grad");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        BFP, betaGradType, "biasGradStorage must land BFP storage on the LayerNorm beta grad");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(1, gradNumGroups, "grads are per-tensor-only (#300 axis)");
+    TEST_ASSERT_TRUE_MESSAGE(freshCodesZero,
+                             "guard: a fresh BFP grad must start with all-zero codes -- otherwise "
+                             "the post-backward and post-zeroGrad claims below are vacuous");
+    TEST_ASSERT_TRUE_MESSAGE(isfinite(loss), "the BFP norm backward's loss must be finite");
+    TEST_ASSERT_TRUE_MESSAGE(gammaGradCodesNonZero,
+                             "the ARITH_BFP dgamma op must have accumulated non-zero packed codes "
+                             "into the BFP grad (accumulateFloatIntoBfpTensorRescale)");
+    TEST_ASSERT_TRUE_MESSAGE(betaGradCodesNonZero,
+                             "the ARITH_BFP dbeta op must have accumulated non-zero packed codes "
+                             "into the BFP grad");
+    /* Seed-dependent proxy, same disclosure as the PR3/PR4 grad-storage
+     * capstones: the zero state IS exponent == bias, so a grad whose absmax
+     * happened to derive exactly that would false-fail. rngSetSeed(4242u) pins
+     * it; a seed change must re-confirm. */
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(zeroStateBias, gammaGradExponentAfterBackward,
+                                  "the accumulate arm must have moved the gamma grad's exponent "
+                                  "off the zero state during backward");
+    TEST_ASSERT_TRUE_MESSAGE(paramMoved,
+                             "an SGD step must move the BFP-stored gamma, read back through the "
+                             "BFP grad via conversionMatrix[BFP][FLOAT32]");
+    TEST_ASSERT_TRUE_MESSAGE(zeroedCodes,
+                             "optimizerZeroGrad's BFP arm must reset every packed code to zero");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(zeroStateBias, gammaGradExponentAfterZero,
+                                    "optimizerZeroGrad's BFP arm must reset the exponent back to "
+                                    "bias (the SYM/ASYM-parity hygiene contract)");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, gammaGradTypeAfter,
+                                  "the gamma grad must stay BFP-stored across step + zero");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMultiLayerBackward_WithCrossEntropy_DoesNotCrash);
@@ -2083,5 +2541,7 @@ int main(void) {
     RUN_TEST(testBfpGradStorageTrainsUnderReductionMean);
     RUN_TEST(testBfpConvGradStorageTrainsUnderDefaultEpoch);
     RUN_TEST(testBfpUniformPoolActivationModelTrains);
+    RUN_TEST(testBfpUniformNormModelTrainsAndGridsMove);
+    RUN_TEST(testBfpNormGradStorageAccumulatesAndSteps);
     return UNITY_END();
 }

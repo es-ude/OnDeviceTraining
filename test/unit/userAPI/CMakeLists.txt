@@ -298,6 +298,7 @@ add_executable(UnitTestMultiLayerTraining UnitTestMultiLayerTraining.c)
 target_link_libraries(UnitTestMultiLayerTraining PRIVATE
         unity
         Pool1dApi
+        AdaptivePool1dApi
         TrainingLoopApi
         TrainingEpochDefault
         TrainingBatchDefault
@@ -306,6 +307,12 @@ target_link_libraries(UnitTestMultiLayerTraining PRIVATE
         TensorApi
         LinearApi
         Conv1dApi
+        Conv1d
+        LayerNormApi
+        LayerNorm
+        GroupNormApi
+        GroupNorm
+        Reduce
         FlattenApi
         LayerQuant
         ArithmeticType

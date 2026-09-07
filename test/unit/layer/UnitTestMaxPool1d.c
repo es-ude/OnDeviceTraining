@@ -867,6 +867,17 @@ void testMaxPool1dBackwardBfpRejectsOutOfRangeArgmax(void) {
     argmaxArr[3] = -1;
     maxPool1dBackward(&layer, NULL, lossGrad, propLoss);
 
+    /* PR4 adversarial gate (F3): -1 is the ONLY legal out-of-range value, so
+     * every OTHER negative is corruption and must die like a too-large one. A
+     * sentinel test spelled `inputIdx < 0` swallows all of them silently, and
+     * the two assertions above cannot tell the two spellings apart: -1 passes
+     * either way and 8 fails either way. -2 is the discriminating case. It is
+     * not hypothetical -- the scatter casts to size_t, so a -2 that slipped
+     * through would index gxArr at SIZE_MAX-1 rather than skip the window. */
+    argmaxArr[3] = -2;
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&layer, NULL, lossGrad, propLoss));
+    argmaxArr[3] = -1;
+
     cfg.argmaxIndices = wideArgmax;
     ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&layer, NULL, lossGrad, propLoss));
 

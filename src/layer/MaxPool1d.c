@@ -537,7 +537,7 @@ static void maxPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOu
             for (size_t outPos = 0; outPos < outputLength; outPos++) {
                 size_t outIdx = (b * channels + c) * outputLength + outPos;
                 int32_t inputIdx = argmaxArr[outIdx];
-                if (inputIdx < 0) {
+                if (inputIdx == -1) {
                     continue; // sentinel: empty window, no gradient flows
                 }
                 /* F7: -1 is the ONLY legal out-of-range value. Any other index
@@ -547,11 +547,21 @@ static void maxPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOu
                  * converted, so nothing upstream has validated its CONTENT;
                  * a stale argmax left over from a differently-shaped forward
                  * is exactly how a too-large index arrives. Bounds-check on
-                 * read rather than trusting the producer. */
-                if ((size_t)inputIdx >= inputLength) {
+                 * read rather than trusting the producer.
+                 *
+                 * PR4 adversarial gate (F3): the sentinel test is STRICT
+                 * equality, so every other negative falls into this guard
+                 * instead of being silently skipped -- a blanket `< 0`
+                 * sentinel would treat corruption as an empty window and drop
+                 * the gradient without a word. `inputIdx < 0` is spelled out
+                 * even though the size_t cast below already wraps a negative
+                 * past inputLength: the wrap is an accident of the cast, the
+                 * intent is that only -1 is legal. */
+                if (inputIdx < 0 || (size_t)inputIdx >= inputLength) {
                     PRINT_ERROR("MaxPool1d backward BFP: argmax index %d at output position %zu "
-                                "is outside [0, %zu) -- the recorded argmax does not belong to "
-                                "this input shape (stale forward?)",
+                                "is outside [0, %zu) and is not the -1 empty-window sentinel -- "
+                                "the recorded argmax does not belong to this input shape (stale "
+                                "forward?)",
                                 inputIdx, outIdx, inputLength);
                     exit(1);
                 }

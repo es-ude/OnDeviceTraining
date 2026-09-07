@@ -19,6 +19,7 @@
 #include "Linear.h"
 #include "LossFunction.h"
 #include "MaxPool1d.h"
+#include "OdtHook.h"
 #include "QuantizationLayer.h"
 #include "Relu.h"
 #include "Softmax.h"
@@ -58,6 +59,8 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
                                            void *sinkCtx) {
 
     tensor_t *layerOutputs[modelSize + 1];
+    /* Phase hook (OdtHook.h): FORWARD and BACKWARD tile this whole call. */
+    odtHookFire(ODT_EVENT_FORWARD_BEGIN);
     layerOutputs[0] = input;
     setDropoutLayersTraining(model, modelSize, true);
     initLayerOutputs(layerOutputs, model, modelSize);
@@ -81,7 +84,12 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
     lossFunctions_t lossFns = lossFunctions[lossConfig.funcType];
     float loss = lossFns.forward(layerOutputs[modelSize], label, forwardReduction);
     trainingStats->loss = loss;
+    odtHookFire(ODT_EVENT_FORWARD_END);
 
+    /* BACKWARD fires unconditionally -- also around a truncated or skipped
+     * backward (all-frozen model) -- so the per-call event count stays a
+     * constant an external occurrence counter can rely on. */
+    odtHookFire(ODT_EVENT_BACKWARD_BEGIN);
     // Backward pass
     size_t backwardIndex = modelSize - 1;
     if (lossConfig.funcType == CROSS_ENTROPY) {
@@ -125,6 +133,7 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
     deInitLayerOutputs(layerOutputs, modelSize);
 
     setDropoutLayersTraining(model, modelSize, false);
+    odtHookFire(ODT_EVENT_BACKWARD_END);
     return trainingStats;
 }
 

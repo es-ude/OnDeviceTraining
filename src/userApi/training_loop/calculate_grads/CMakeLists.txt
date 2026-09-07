@@ -21,4 +21,5 @@ target_link_libraries(CalculateGradsSequential PRIVATE
         DataLoader
         Common
         StorageApi
+        OdtHook
 )

@@ -531,6 +531,43 @@ void testCrossEntropySoftmaxBackwardBfpRejectsLossWireCountMismatch(void) {
     freeTensor(bfpP);
 }
 
+/* PR4 adversarial delta (D0): the count guard must sit at the PUBLIC entry, not
+ * inside the fake-quant helper — otherwise the FLOAT32 arm keeps the whole hole
+ * (crossEntropySoftmaxBackwardFloat writes lossFloat[i] for i < the model
+ * output's count straight into the caller's buffer, so a SHORTER loss wire is
+ * an out-of-bounds heap WRITE). These two cases use a LONGER operand on
+ * purpose — the float arm ignores the surplus, so the unguarded child returns
+ * normally and the missing-guard RED is a clean "exit code 0" rather than a
+ * signal — while the guard they pin rejects both directions. They are also what
+ * pins the HOIST itself: a guard pushed back down into the fake-quant helper
+ * would leave these two red while every BFP death test stayed green. */
+void testCrossEntropyForwardFloat32RejectsDistributionCountMismatch(void) {
+    float p[4] = {0.5f, 0.25f, 0.125f, 0.125f};
+    float y[5] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    tensor_t *floatP = buildFloatTensor1D(4, p);
+    tensor_t *label = buildFloatTensor1D(5, y);
+
+    ASSERT_EXITS_WITH_FAILURE((void)crossEntropyForward(floatP, label, REDUCTION_SUM));
+
+    freeTensor(label);
+    freeTensor(floatP);
+}
+
+void testCrossEntropySoftmaxBackwardFloat32RejectsLossWireCountMismatch(void) {
+    float p[4] = {0.5f, 0.25f, 0.125f, 0.125f};
+    float y[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    float lossValues[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    tensor_t *floatP = buildFloatTensor1D(4, p);
+    tensor_t *label = buildFloatTensor1D(4, y);
+    tensor_t *loss = buildFloatTensor1D(5, lossValues);
+
+    ASSERT_EXITS_WITH_FAILURE(crossEntropySoftmaxBackward(floatP, label, loss));
+
+    freeTensor(loss);
+    freeTensor(label);
+    freeTensor(floatP);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -550,5 +587,7 @@ int main() {
     RUN_TEST(testCrossEntropyForwardBfpRejectsDistributionCountMismatch);
     RUN_TEST(testCrossEntropySoftmaxBackwardBfpRejectsDistributionCountMismatch);
     RUN_TEST(testCrossEntropySoftmaxBackwardBfpRejectsLossWireCountMismatch);
+    RUN_TEST(testCrossEntropyForwardFloat32RejectsDistributionCountMismatch);
+    RUN_TEST(testCrossEntropySoftmaxBackwardFloat32RejectsLossWireCountMismatch);
     return UNITY_END();
 }

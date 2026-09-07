@@ -318,6 +318,44 @@ void testMseLossBackwardBfpRejectsResultCountMismatch(void) {
     freeTensor(bfpOut);
 }
 
+/* PR4 adversarial delta (D0): the count guard must sit at the PUBLIC entry, not
+ * inside the fake-quant helper — otherwise the FLOAT32 arm keeps the whole hole.
+ * That arm is not the milder half either: mseLossBackwardFloat writes
+ * resultArray[i] for i < the MODEL OUTPUT's count straight into the caller's
+ * buffer, so a SHORTER result is an out-of-bounds heap WRITE. These two cases
+ * use a LONGER operand on purpose — the float arm ignores the surplus, so the
+ * unguarded child returns normally and the missing-guard RED is a clean "exit
+ * code 0" rather than a signal — while the guard they pin rejects both
+ * directions. They are also what pins the HOIST itself: a guard pushed back
+ * down into the fake-quant helper would leave these two red while every BFP
+ * death test stayed green. */
+void testMseLossForwardFloat32RejectsLabelCountMismatch(void) {
+    float outValues[4] = {8.0f, -4.0f, 12.0f, 16.0f};
+    float labelValues[5] = {7.0f, -4.0f, 10.0f, 16.0f, 1.0f};
+    tensor_t *output = buildFloatTensor1D(4, outValues);
+    tensor_t *label = buildFloatTensor1D(5, labelValues);
+
+    ASSERT_EXITS_WITH_FAILURE((void)mseLossForward(output, label, REDUCTION_MEAN));
+
+    freeTensor(label);
+    freeTensor(output);
+}
+
+void testMseLossBackwardFloat32RejectsResultCountMismatch(void) {
+    float outValues[4] = {8.0f, -4.0f, 12.0f, 16.0f};
+    float labelValues[4] = {7.0f, -4.0f, 10.0f, 16.0f};
+    float resultValues[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    tensor_t *modelOutput = buildFloatTensor1D(4, outValues);
+    tensor_t *label = buildFloatTensor1D(4, labelValues);
+    tensor_t *result = buildFloatTensor1D(5, resultValues);
+
+    ASSERT_EXITS_WITH_FAILURE(mseLossBackward(modelOutput, label, result));
+
+    freeTensor(result);
+    freeTensor(label);
+    freeTensor(modelOutput);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -335,6 +373,8 @@ int main(void) {
     RUN_TEST(testMseLossForwardBfpRejectsLabelCountMismatch);
     RUN_TEST(testMseLossBackwardBfpRejectsLabelCountMismatch);
     RUN_TEST(testMseLossBackwardBfpRejectsResultCountMismatch);
+    RUN_TEST(testMseLossForwardFloat32RejectsLabelCountMismatch);
+    RUN_TEST(testMseLossBackwardFloat32RejectsResultCountMismatch);
 
     return UNITY_END();
 }

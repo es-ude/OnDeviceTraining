@@ -36,25 +36,32 @@ float crossEntropyForwardFloat(tensor_t *softmaxOutput, tensor_t *distribution,
     return loss;
 }
 
-/* PR4 adversarial gate (F1/F2): EVERY scratch in the two fake-quant bodies is a
- * VLA sized from the MODEL OUTPUT's element count, while each scratch borrows
- * ITS OWN tensor's shape_t and every convertTensor walks that borrowed count.
- * So both non-output operands are hazards, in opposite directions: a longer
- * DISTRIBUTION is decoded past the end of its scratch on the way in, and a
- * longer LOSS wire is read past the end of its scratch on the way out (a
- * shorter one emits a silently truncated gradient). The float arms are safe by
- * accident (they only index the output's count), which is why the check belongs
- * at the fake-quant entries and not in the dispatcher. Fail fast rather than
- * clamp to the shorter side: an operand-count mismatch is a caller's shape bug,
- * and silently scoring the first n elements would hide it. */
+/* PR4 adversarial gate (F1/F2, hoisted to the dispatchers by delta D0): every
+ * operand of a loss must carry the MODEL OUTPUT's element count, and the check
+ * belongs at the PUBLIC entry because EVERY arm needs it — not just the
+ * fake-quant one that first exposed it. MSE.c carries the twin, same shape.
+ *
+ * Fake-quant arms: each scratch is a VLA sized from the output's count while it
+ * borrows ITS OWN tensor's shape_t, and every convertTensor walks that borrowed
+ * count — so a longer DISTRIBUTION is decoded past the end of its scratch on
+ * the way in, and a longer LOSS wire is read past the end of its scratch on the
+ * way out. FLOAT32 arms: they index every operand at the OUTPUT's count, so the
+ * surplus end of a longer operand is merely ignored while a SHORTER one is read
+ * — and for the backward's loss wire, WRITTEN — out of bounds. Two different
+ * mechanisms, one precondition, therefore one guard above the switch rather
+ * than one per arm.
+ *
+ * Fail fast rather than clamp to the shorter side: an operand-count mismatch is
+ * a caller's shape bug, and silently scoring the first n elements would hide it.
+ * The *Float entry points stay unguarded on purpose — they are the arm bodies,
+ * reachable directly only from tests; the dispatcher is the guarded API. */
 static void requireOperandMatchesOutput(tensor_t *softmaxOutput, tensor_t *operand,
                                         const char *operandName, const char *what) {
     size_t outputCount = calcNumberOfElementsByTensor(softmaxOutput);
     size_t operandCount = calcNumberOfElementsByTensor(operand);
     if (outputCount != operandCount) {
         PRINT_ERROR("%s: %s element count (%zu) does not match the model output (%zu) -- every "
-                    "fake-quant scratch buffer is sized from the OUTPUT, so a differing operand is "
-                    "converted past its end",
+                    "operand of a loss must carry the output's element count",
                     what, operandName, operandCount, outputCount);
         exit(1);
     }
@@ -72,8 +79,6 @@ static void requireOperandMatchesOutput(tensor_t *softmaxOutput, tensor_t *opera
  * side. */
 static float crossEntropyForwardFakeQuant(tensor_t *softmaxOutput, tensor_t *distribution,
                                           reduction_t reduction) {
-    requireOperandMatchesOutput(softmaxOutput, distribution, "distribution",
-                                "crossEntropyForwardFakeQuant");
     size_t inputSize = calcNumberOfElementsByTensor(softmaxOutput);
 
     tensor_t softmaxOutputFloat;
@@ -96,6 +101,7 @@ static float crossEntropyForwardFakeQuant(tensor_t *softmaxOutput, tensor_t *dis
 }
 
 float crossEntropyForward(tensor_t *softmaxOutput, tensor_t *distribution, reduction_t reduction) {
+    requireOperandMatchesOutput(softmaxOutput, distribution, "distribution", "crossEntropyForward");
     switch (softmaxOutput->quantization->type) {
     case FLOAT32:
         return crossEntropyForwardFloat(softmaxOutput, distribution, reduction);
@@ -130,10 +136,6 @@ static void crossEntropySoftmaxBackwardFloat(tensor_t *softmaxOutput, tensor_t *
  * activation scaling, like every quantized wire producer). */
 static void crossEntropySoftmaxBackwardFakeQuant(tensor_t *softmaxOutput, tensor_t *distribution,
                                                  tensor_t *loss) {
-    requireOperandMatchesOutput(softmaxOutput, distribution, "distribution",
-                                "crossEntropySoftmaxBackwardFakeQuant");
-    requireOperandMatchesOutput(softmaxOutput, loss, "loss (grad wire)",
-                                "crossEntropySoftmaxBackwardFakeQuant");
     size_t inputSize = calcNumberOfElementsByTensor(softmaxOutput);
 
     tensor_t softmaxOutputFloat;
@@ -174,6 +176,10 @@ static void crossEntropySoftmaxBackwardFakeQuant(tensor_t *softmaxOutput, tensor
 
 // IMPORTANT: This implementation already takes the softmax backward into account
 void crossEntropySoftmaxBackward(tensor_t *softmaxOutput, tensor_t *distribution, tensor_t *loss) {
+    requireOperandMatchesOutput(softmaxOutput, distribution, "distribution",
+                                "crossEntropySoftmaxBackward");
+    requireOperandMatchesOutput(softmaxOutput, loss, "loss (grad wire)",
+                                "crossEntropySoftmaxBackward");
     switch (softmaxOutput->quantization->type) {
     case FLOAT32:
         crossEntropySoftmaxBackwardFloat(softmaxOutput, distribution, loss);

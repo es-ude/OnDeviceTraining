@@ -28,25 +28,32 @@ float mseLossForwardFloat(tensor_t *output, tensor_t *label, reduction_t reducti
     return sum;
 }
 
-/* PR4 adversarial gate (F1/F2): EVERY scratch in the two fake-quant bodies is a
- * VLA sized from the MODEL OUTPUT's element count, while each scratch borrows
- * ITS OWN tensor's shape_t and every convertTensor walks that borrowed count.
- * So both non-output operands are hazards, in opposite directions: a longer
- * LABEL is decoded past the end of its scratch on the way in, and a longer
- * RESULT is read past the end of its scratch on the way out (a shorter one
- * emits a silently truncated grad). The float arms are safe by accident (they
- * only index the output's count), which is why the check belongs at the
- * fake-quant entries and not in the dispatcher. Fail fast rather than clamp to
- * the shorter side: an operand-count mismatch is a caller's shape bug, and
- * silently scoring the first n elements would hide it. */
+/* PR4 adversarial gate (F1/F2, hoisted to the dispatchers by delta D0): every
+ * operand of a loss must carry the MODEL OUTPUT's element count, and the check
+ * belongs at the PUBLIC entry because EVERY arm needs it — not just the
+ * fake-quant one that first exposed it.
+ *
+ * Fake-quant arms: each scratch is a VLA sized from the output's count while it
+ * borrows ITS OWN tensor's shape_t, and every convertTensor walks that borrowed
+ * count — so a longer LABEL is decoded past the end of its scratch on the way
+ * in, and a longer RESULT is read past the end of its scratch on the way out.
+ * FLOAT32 arms: they index every operand at the OUTPUT's count, so the surplus
+ * end of a longer operand is merely ignored while a SHORTER one is read — and
+ * for the backward's result, WRITTEN — out of bounds. Two different mechanisms,
+ * one precondition, therefore one guard above the switch rather than one per
+ * arm.
+ *
+ * Fail fast rather than clamp to the shorter side: an operand-count mismatch is
+ * a caller's shape bug, and silently scoring the first n elements would hide it.
+ * The *Float entry points stay unguarded on purpose — they are the arm bodies,
+ * reachable directly only from tests; the dispatcher is the guarded API. */
 static void requireOperandMatchesOutput(tensor_t *output, tensor_t *operand,
                                         const char *operandName, const char *what) {
     size_t outputCount = calcNumberOfElementsByTensor(output);
     size_t operandCount = calcNumberOfElementsByTensor(operand);
     if (outputCount != operandCount) {
         PRINT_ERROR("%s: %s element count (%zu) does not match the model output (%zu) -- every "
-                    "fake-quant scratch buffer is sized from the OUTPUT, so a differing operand is "
-                    "converted past its end",
+                    "operand of a loss must carry the output's element count",
                     what, operandName, operandCount, outputCount);
         exit(1);
     }
@@ -61,7 +68,6 @@ static void requireOperandMatchesOutput(tensor_t *output, tensor_t *operand,
  * absmax scale. NATIVE BFP losses stay an optional stretch (spec §5 MSE/CE
  * row, §9): PR6 files the follow-up issue. */
 static float mseLossForwardFakeQuant(tensor_t *output, tensor_t *label, reduction_t reduction) {
-    requireOperandMatchesOutput(output, label, "label", "mseLossForwardFakeQuant");
     size_t size = calcNumberOfElementsByTensor(output);
 
     tensor_t outputFloat;
@@ -95,6 +101,7 @@ static float mseLossForwardFakeQuant(tensor_t *output, tensor_t *label, reductio
 }
 
 float mseLossForward(tensor_t *output, tensor_t *label, reduction_t reduction) {
+    requireOperandMatchesOutput(output, label, "label", "mseLossForward");
     switch (output->quantization->type) {
     case FLOAT32:
         return mseLossForwardFloat(output, label, reduction);
@@ -124,9 +131,6 @@ void mseLossBackwardFloat(tensor_t *modelOutput, tensor_t *label, tensor_t *resu
  * contract, plus the final convertTensor that requantizes the raw grad into
  * the result's own quantized grid. */
 static void mseLossBackwardFakeQuant(tensor_t *modelOutput, tensor_t *label, tensor_t *result) {
-    requireOperandMatchesOutput(modelOutput, label, "label", "mseLossBackwardFakeQuant");
-    requireOperandMatchesOutput(modelOutput, result, "result (grad wire)",
-                                "mseLossBackwardFakeQuant");
     size_t numberOfElements = calcNumberOfElementsByTensor(modelOutput);
 
     tensor_t modelOutputFloat;
@@ -162,6 +166,8 @@ static void mseLossBackwardFakeQuant(tensor_t *modelOutput, tensor_t *label, ten
 }
 
 void mseLossBackward(tensor_t *modelOutput, tensor_t *label, tensor_t *result) {
+    requireOperandMatchesOutput(modelOutput, label, "label", "mseLossBackward");
+    requireOperandMatchesOutput(modelOutput, result, "result (grad wire)", "mseLossBackward");
     qtype_t modelOutputQType = modelOutput->quantization->type;
 
     switch (modelOutputQType) {

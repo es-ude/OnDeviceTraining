@@ -2993,6 +2993,446 @@ void testLayerNormBackwardFloat32PinnedStillRejectsBfpWires(void) {
     freeTensor(in);
 }
 
+/* ---- BFP epic PR5 Task 6: factory gates (coherence rules + param geometry) ---- */
+
+/* Dequant a packed BFP tensor through its OWN grid (code * 2^(E - bias)). The
+ * assertion form for FACTORY-built params, whose codes and exponents come out
+ * of the quantizer rather than a fixture, so nothing may be hardcoded. */
+static void dequantBfpTensorLn(tensor_t *t, float *out) {
+    bfpQConfig_t *qc = t->quantization->qConfig;
+    size_t n = calcNumberOfElementsByTensor(t);
+    int32_t codes[n];
+    unpackSignExtend(t->data, qc->mantissaBits, 0, codes, n);
+    size_t gsz = (qc->groupSize == 0) ? n : qc->groupSize;
+    for (size_t i = 0; i < n; i++) {
+        out[i] = (float)codes[i] * bfpGroupScale(qc, i / gsz);
+    }
+}
+
+/* Reference LayerNorm over already-dequantized floats with gamma=1 / beta=0 --
+ * the factory's own init constants, so this doubles as an end-to-end check
+ * that the constant fills landed on the BFP grid. */
+static void referenceNormOnesZeros(const float *xs, size_t G, size_t N, float eps, float *out) {
+    for (size_t g = 0; g < G; g++) {
+        float mean = 0.f;
+        for (size_t j = 0; j < N; j++) {
+            mean += xs[g * N + j];
+        }
+        mean /= (float)N;
+        float var = 0.f;
+        for (size_t j = 0; j < N; j++) {
+            float d = xs[g * N + j] - mean;
+            var += d * d;
+        }
+        var /= (float)N;
+        float inv = 1.f / sqrtf(var + eps);
+        for (size_t j = 0; j < N; j++) {
+            out[g * N + j] = (xs[g * N + j] - mean) * inv;
+        }
+    }
+}
+
+/* The capstone shape Task 7 depends on: ONE grouped BFP config through
+ * layerQuantInitUniform derives all four math slots ARITH_BFP and aliases every
+ * storage slot, and the factory must accept it end to end. Pins the derived
+ * param geometry ({2, 2} from 4 elements / groupSize 2), the EXACT all-ones
+ * gamma (1.0 = 64 * 2^-6 at m = 8 -- a grid point, so the dequant is exact),
+ * beta's absMax == 0 zero-state (codes 0, every stored exponent = bias), and a
+ * native forward over a BFP wire. */
+void testFactoryUniformBfpProfileBuildsAndForwards(void) {
+    size_t normShape[] = {4};
+    layerNormInit_t init = {.normalizedShape = normShape, .numNormDims = 1, .eps = 0.0f};
+
+    quantization_t *bfpQ = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 2);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, bfpQ);
+
+    layer_t *layer = layerNormLayerInit(&init, &lq);
+    layerNormConfig_t *cfg = layer->config->layerNorm;
+
+    tensor_t *gammaT = cfg->gamma->param;
+    tensor_t *betaT = cfg->beta->param;
+    bool gammaBfp = (gammaT->quantization->type == BFP);
+    bool betaBfp = (betaT->quantization->type == BFP);
+    bfpQConfig_t *gQC = gammaT->quantization->qConfig;
+    bfpQConfig_t *bQC = betaT->quantization->qConfig;
+    size_t gammaGroups = gQC->numGroups;
+    size_t gammaGroupSize = gQC->groupSize;
+
+    float gammaVals[4];
+    float betaVals[4];
+    dequantBfpTensorLn(gammaT, gammaVals);
+    dequantBfpTensorLn(betaT, betaVals);
+    bool betaZeroState = true;
+    for (size_t g = 0; g < bQC->numGroups; g++) {
+        if (bQC->exponents[g] != (uint8_t)bfpExponentBias(bQC)) {
+            betaZeroState = false;
+        }
+    }
+
+    /* Forward over BFP wires: shape {4} == normalizedShape, so G = 1, N = 4. */
+    size_t dims[] = {4};
+    tensor_t *in = buildBfpWireWithCodesLn(dims, 1, 8, 8, 2, 2, (int32_t[]){1, 3, 2, -1},
+                                           (uint8_t[]){127, 128});
+    tensor_t *out = buildBfpWireWithCodesLn(dims, 1, 8, 8, 2, 2, (int32_t[]){0, 0, 0, 0},
+                                            (uint8_t[]){127, 127});
+    layerNormForward(layer, in, out);
+
+    bool outBfp = (out->quantization->type == BFP);
+    float xs[4];
+    float ys[4];
+    dequantBfpTensorLn(in, xs);
+    dequantBfpTensorLn(out, ys);
+    float expected[4];
+    referenceNormOnesZeros(xs, 1, 4, 1e-5f, expected);
+    bool outNonDegenerate = false;
+    for (size_t i = 0; i < 4; i++) {
+        if (ys[i] != 0.f) {
+            outNonDegenerate = true;
+        }
+    }
+
+    freeTensor(out);
+    freeTensor(in);
+    freeLayerNormLayer(layer);
+    freeQuantization(bfpQ);
+
+    TEST_ASSERT_TRUE_MESSAGE(gammaBfp, "uniform BFP profile must give gamma BFP storage");
+    TEST_ASSERT_TRUE_MESSAGE(betaBfp, "uniform BFP profile must give beta BFP storage");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2, gammaGroups, "gamma numGroups is DERIVED from 4 / 2");
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2, gammaGroupSize, "gamma groupSize comes from the template");
+    for (size_t i = 0; i < 4; i++) {
+        /* BIT-exact, not a tolerance: 1.0 is a BFP grid point at m = 8
+         * (code 64, stored exponent bias - 6) and 0.0 is the zero-state. */
+        TEST_ASSERT_TRUE_MESSAGE(gammaVals[i] == 1.f, "gamma must dequant to EXACTLY 1.0");
+        TEST_ASSERT_TRUE_MESSAGE(betaVals[i] == 0.f, "beta must dequant to EXACTLY 0.0");
+    }
+    TEST_ASSERT_TRUE_MESSAGE(betaZeroState, "all-zero beta must hit the absMax == 0 zero-state");
+    TEST_ASSERT_TRUE(outBfp);
+    TEST_ASSERT_TRUE_MESSAGE(outNonDegenerate, "the produced wire must not be all-zero");
+    for (size_t i = 0; i < 4; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(0.02f, expected[i], ys[i]);
+    }
+}
+
+/* R-N6: a grouped BFP storage template's numGroups is a shape-agnostic guess
+ * (one layerQuant_t is shared across a whole model), so only its groupSize is
+ * honored and numGroups is derived from THIS parameter's element count.
+ * Passing the template's numGroups through would die at initTensor's attach
+ * validation instead. */
+void testFactoryBfpGammaGeometryDerivedFromParamLength(void) {
+    /* (a) a {4, 3} template (a 12-element guess) against a 6-element param. */
+    size_t shape6[] = {6};
+    layerNormInit_t init6 = {.normalizedShape = shape6, .numNormDims = 1, .eps = 1e-5f};
+    quantization_t *tmplA = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 4, 3);
+    layerQuant_t lqA;
+    layerQuantInitUniform(&lqA, tmplA);
+    layer_t *layerA = layerNormLayerInit(&init6, &lqA);
+    bfpQConfig_t *gA = layerA->config->layerNorm->gamma->param->quantization->qConfig;
+    size_t groupsA = gA->numGroups;
+    size_t sizeA = gA->groupSize;
+    freeLayerNormLayer(layerA);
+    freeQuantization(tmplA);
+
+    /* (b) groupSize == the param's element count -> the {1, N} shape is
+     * normalized to the per-tensor sentinel {1, 0} (initBfpQConfigGrouped
+     * rejects {1, N} outright). */
+    size_t shape4[] = {4};
+    layerNormInit_t init4 = {.normalizedShape = shape4, .numNormDims = 1, .eps = 1e-5f};
+    quantization_t *tmplB = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 3, 4);
+    layerQuant_t lqB;
+    layerQuantInitUniform(&lqB, tmplB);
+    layer_t *layerB = layerNormLayerInit(&init4, &lqB);
+    bfpQConfig_t *gB = layerB->config->layerNorm->gamma->param->quantization->qConfig;
+    size_t groupsB = gB->numGroups;
+    size_t sizeB = gB->groupSize;
+    freeLayerNormLayer(layerB);
+    freeQuantization(tmplB);
+
+    /* (c) a groupSize that does not divide the param length has no derivable
+     * geometry at all -- guided death in the factory. */
+    quantization_t *tmplC = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 5);
+    layerQuant_t lqC;
+    layerQuantInitUniform(&lqC, tmplC);
+    ASSERT_EXITS_WITH_FAILURE(layerNormLayerInit(&init6, &lqC));
+    freeQuantization(tmplC);
+
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(2, groupsA, "numGroups must be derived (6 / 3), not the guess");
+    TEST_ASSERT_EQUAL_UINT(3, sizeA);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1, groupsB, "groupSize == N must normalize to per-tensor");
+    TEST_ASSERT_EQUAL_UINT(0, sizeB);
+}
+
+/* Rule 3/6's FLOAT32 half: BFP wires with FLOAT32-stored gamma/beta is a legal
+ * profile -- the params stage into BFP scratch at the wire anchor. Forward AND
+ * backward must both run through the factory-built layer. */
+void testFactoryWiresOnlyBfpProfileBuilds(void) {
+    size_t normShape[] = {4};
+    layerNormInit_t init = {.normalizedShape = normShape, .numNormDims = 1, .eps = 1e-5f};
+
+    quantization_t *bfpQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    quantization_t *floatQ = quantizationInitFloat();
+    arithmetic_t bfpMath = {.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    layerQuant_t lq = {.forwardMath = bfpMath,
+                       .weightGradMath = bfpMath,
+                       .biasGradMath = bfpMath,
+                       .propLossMath = bfpMath,
+                       .outputQ = bfpQ,
+                       .propLossQ = bfpQ,
+                       .weightStorage = floatQ,
+                       .biasStorage = floatQ,
+                       .weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE,
+                       .biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE};
+
+    layer_t *layer = layerNormLayerInit(&init, &lq);
+    layerNormConfig_t *cfg = layer->config->layerNorm;
+    bool gammaFloat = (cfg->gamma->param->quantization->type == FLOAT32);
+    bool betaFloat = (cfg->beta->param->quantization->type == FLOAT32);
+
+    size_t dims[2] = {2, 4};
+    tensor_t *in = buildBfpWireWithCodesLn(dims, 2, 8, 8, 1, 0,
+                                           (int32_t[]){1, 3, 2, -1, 5, -3, 4, 2}, (uint8_t[]){127});
+    tensor_t *out = buildBfpWireWithCodesLn(dims, 2, 8, 8, 1, 0,
+                                            (int32_t[]){0, 0, 0, 0, 0, 0, 0, 0}, (uint8_t[]){127});
+    tensor_t *dy = buildBfpWireWithCodesLn(
+        dims, 2, 8, 8, 1, 0, (int32_t[]){1, -2, 3, 1, -3, 5, 2, -1}, (uint8_t[]){127});
+    tensor_t *dx = buildBfpWireWithCodesLn(dims, 2, 8, 8, 1, 0, (int32_t[]){0, 0, 0, 0, 0, 0, 0, 0},
+                                           (uint8_t[]){127});
+
+    layerNormForward(layer, in, out);
+    layerNormBackward(layer, in, dy, dx);
+
+    float xs[8];
+    float ys[8];
+    float dxs[8];
+    dequantBfpTensorLn(in, xs);
+    dequantBfpTensorLn(out, ys);
+    dequantBfpTensorLn(dx, dxs);
+    float expected[8];
+    referenceNormOnesZeros(xs, 2, 4, 1e-5f, expected);
+    bool dxNonDegenerate = false;
+    bool gradsNonZero = false;
+    for (size_t i = 0; i < 8; i++) {
+        if (dxs[i] != 0.f) {
+            dxNonDegenerate = true;
+        }
+    }
+    for (size_t i = 0; i < 4; i++) {
+        if (((float *)cfg->gamma->grad->data)[i] != 0.f ||
+            ((float *)cfg->beta->grad->data)[i] != 0.f) {
+            gradsNonZero = true;
+        }
+    }
+
+    freeTensor(dx);
+    freeTensor(dy);
+    freeTensor(out);
+    freeTensor(in);
+    freeLayerNormLayer(layer);
+    freeQuantization(floatQ);
+    freeQuantization(bfpQ);
+
+    TEST_ASSERT_TRUE(gammaFloat);
+    TEST_ASSERT_TRUE(betaFloat);
+    for (size_t i = 0; i < 8; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(0.02f, expected[i], ys[i]);
+    }
+    TEST_ASSERT_TRUE_MESSAGE(dxNonDegenerate, "the BFP backward must write a non-zero dx wire");
+    TEST_ASSERT_TRUE_MESSAGE(gradsNonZero, "the BFP backward must accumulate non-zero grads");
+}
+
+/* Rule 3: the BFP forward reads gamma/beta as BFP scratch (borrowed or
+ * staged from FLOAT32); SYM_INT32 mantissas have no route into it. */
+void testFactoryRejectsSymGammaUnderBfpForward(void) {
+    size_t normShape[] = {4};
+    layerNormInit_t init = {.normalizedShape = normShape, .numNormDims = 1, .eps = 1e-5f};
+
+    quantization_t *bfpQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
+    arithmetic_t bfpMath = {.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    layerQuant_t lq = {.forwardMath = bfpMath,
+                       .propLossMath = bfpMath,
+                       .outputQ = bfpQ,
+                       .propLossQ = bfpQ,
+                       .weightStorage = symQ,
+                       .biasStorage = bfpQ,
+                       .weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE,
+                       .biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE};
+
+    ASSERT_EXITS_WITH_FAILURE(layerNormLayerInit(&init, &lq));
+
+    freeQuantization(symQ);
+    freeQuantization(bfpQ);
+}
+
+/* Rule 4 (the DELIBERATE asymmetry against the GEMM family): "FLOAT32 math over
+ * BFP params" is a trap for the norms -- their FLOAT32 backward raw-casts gamma
+ * and rejects non-FLOAT32, so the profile would forward fine and die at the
+ * first backward. Unconstructible by design. */
+void testFactoryRejectsFloat32MathOverBfpParams(void) {
+    size_t normShape[] = {4};
+    layerNormInit_t init = {.normalizedShape = normShape, .numNormDims = 1, .eps = 1e-5f};
+
+    quantization_t *bfpQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    quantization_t *floatQ = quantizationInitFloat();
+    arithmetic_t floatMath = {.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
+    layerQuant_t lq = {.forwardMath = floatMath,
+                       .propLossMath = floatMath,
+                       .outputQ = floatQ,
+                       .propLossQ = floatQ,
+                       .weightStorage = bfpQ,
+                       .biasStorage = bfpQ};
+
+    ASSERT_EXITS_WITH_FAILURE(layerNormLayerInit(&init, &lq));
+
+    /* The variant ONLY rule 4 catches: a native ARITH_BFP backward over BFP
+     * wires satisfies rules 6 and 7, so nothing but rule 4 stops the FLOAT32
+     * FORWARD from raw-casting the same BFP gamma. */
+    layerQuant_t lqBfpBackward = {.forwardMath = floatMath,
+                                  .propLossMath = {.type = ARITH_BFP, .roundingMode = HALF_AWAY},
+                                  .outputQ = bfpQ,
+                                  .propLossQ = bfpQ,
+                                  .weightStorage = bfpQ,
+                                  .biasStorage = bfpQ,
+                                  .weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE,
+                                  .biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE};
+
+    ASSERT_EXITS_WITH_FAILURE(layerNormLayerInit(&init, &lqBfpBackward));
+
+    freeQuantization(floatQ);
+    freeQuantization(bfpQ);
+}
+
+/* Rule 7 (the ONLY rule that catches this one): FLOAT32-stored params under a
+ * native BFP forward is fine, but pinning the BACKWARD to ARITH_FLOAT32 over
+ * BFP wires hands the raw-casting float backward a packed dx wire. Rules 3, 4
+ * and 6 all pass here -- deleting rule 7 makes this test fail. */
+void testFactoryRejectsFloat32BackwardOverBfpWires(void) {
+    size_t normShape[] = {4};
+    layerNormInit_t init = {.normalizedShape = normShape, .numNormDims = 1, .eps = 1e-5f};
+
+    quantization_t *bfpQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq = {.forwardMath = {.type = ARITH_BFP, .roundingMode = HALF_AWAY},
+                       .propLossMath = {.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY},
+                       .outputQ = bfpQ,
+                       .propLossQ = bfpQ,
+                       .weightStorage = floatQ,
+                       .biasStorage = floatQ};
+
+    ASSERT_EXITS_WITH_FAILURE(layerNormLayerInit(&init, &lq));
+
+    freeQuantization(floatQ);
+    freeQuantization(bfpQ);
+}
+
+/* Rule 8: the factory adds NO grad gate of its own -- a grouped BFP grad
+ * template dies in gradInit's existing per-tensor-only carrier gate. This test
+ * pins that gate THROUGH the factory path. */
+void testFactoryRejectsGroupedBfpGradTemplate(void) {
+    size_t normShape[] = {4};
+    layerNormInit_t init = {.normalizedShape = normShape, .numNormDims = 1, .eps = 1e-5f};
+
+    quantization_t *bfpQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, bfpQ);
+    quantization_t *groupedGradQ = quantizationInitBfpGrouped(8, 8, SR_HALF_AWAY, 2, 2);
+    lq.weightGradStorage = groupedGradQ;
+
+    ASSERT_EXITS_WITH_FAILURE(layerNormLayerInit(&init, &lq));
+
+    freeQuantization(groupedGradQ);
+    freeQuantization(bfpQ);
+}
+
+/* Rule 8's positive half: a PER-TENSOR BFP grad template flows straight
+ * through, keeping its OWN widths (m = 6 here, not the param's 8) and landing
+ * in the fresh zero state (all-zero codes, every exponent = bias). */
+void testFactoryBfpGradStorageBuildsPerTensor(void) {
+    size_t normShape[] = {4};
+    layerNormInit_t init = {.normalizedShape = normShape, .numNormDims = 1, .eps = 1e-5f};
+
+    quantization_t *bfpQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, bfpQ);
+    quantization_t *gradQ = quantizationInitBfp(6, 8, HALF_AWAY);
+    lq.weightGradStorage = gradQ;
+    lq.biasGradStorage = gradQ;
+
+    layer_t *layer = layerNormLayerInit(&init, &lq);
+    layerNormConfig_t *cfg = layer->config->layerNorm;
+
+    bool gammaGradBfp = (cfg->gamma->grad->quantization->type == BFP);
+    bool betaGradBfp = (cfg->beta->grad->quantization->type == BFP);
+    bfpQConfig_t *ggQC = cfg->gamma->grad->quantization->qConfig;
+    size_t gradGroups = ggQC->numGroups;
+    size_t gradGroupSize = ggQC->groupSize;
+    uint8_t gradMantissaBits = ggQC->mantissaBits;
+    bool gradZeroState = (ggQC->exponents[0] == (uint8_t)bfpExponentBias(ggQC));
+    float gradVals[4];
+    dequantBfpTensorLn(cfg->gamma->grad, gradVals);
+
+    freeLayerNormLayer(layer);
+    freeQuantization(gradQ);
+    freeQuantization(bfpQ);
+
+    TEST_ASSERT_TRUE(gammaGradBfp);
+    TEST_ASSERT_TRUE(betaGradBfp);
+    TEST_ASSERT_EQUAL_UINT(1, gradGroups);
+    TEST_ASSERT_EQUAL_UINT(0, gradGroupSize);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(6, gradMantissaBits,
+                                    "the grad template's OWN width must survive the clone");
+    TEST_ASSERT_TRUE_MESSAGE(gradZeroState, "a fresh BFP grad must carry the bias exponent");
+    for (size_t i = 0; i < 4; i++) {
+        TEST_ASSERT_EQUAL_FLOAT(0.f, gradVals[i]);
+    }
+}
+
+/* The Owning twin over a BFP profile: deepCopyQuantization's BFP arm must
+ * deep-copy the heap exponents array, so dropping the caller's config right
+ * after init leaves the layer intact (and freeing it later is not a
+ * double-free). */
+void testFactoryOwningBfpDeepCopiesQuantizations(void) {
+    size_t normShape[] = {4};
+    layerNormInit_t init = {.normalizedShape = normShape, .numNormDims = 1, .eps = 1e-5f};
+
+    quantization_t *bfpQ = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 2);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, bfpQ);
+
+    layer_t *layer = layerNormLayerInitOwning(&init, &lq);
+    layerNormConfig_t *cfg = layer->config->layerNorm;
+
+    bool outIsCopy = (cfg->outputQ != bfpQ);
+    bool plIsCopy = (cfg->propLossQ != bfpQ);
+    bool outBfp = (cfg->outputQ->type == BFP);
+    bool owns = cfg->ownsQuantizations;
+    bfpQConfig_t *srcQC = bfpQ->qConfig;
+    bfpQConfig_t *outQC = cfg->outputQ->qConfig;
+    bool exponentsDeepCopied = (outQC->exponents != srcQC->exponents);
+    size_t copiedGroups = outQC->numGroups;
+
+    /* Caller drops its config IMMEDIATELY -- the layer holds copies. */
+    freeQuantization(bfpQ);
+
+    /* Params still readable afterwards: their storage quant came through
+     * layerNormParamQLike, not from the caller's allocation. */
+    float gammaVals[4];
+    dequantBfpTensorLn(cfg->gamma->param, gammaVals);
+
+    freeLayerNormLayer(layer);
+
+    TEST_ASSERT_TRUE(outIsCopy);
+    TEST_ASSERT_TRUE(plIsCopy);
+    TEST_ASSERT_TRUE(outBfp);
+    TEST_ASSERT_TRUE(owns);
+    TEST_ASSERT_TRUE_MESSAGE(exponentsDeepCopied, "the BFP exponents array must not be aliased");
+    TEST_ASSERT_EQUAL_UINT(2, copiedGroups);
+    for (size_t i = 0; i < 4; i++) {
+        TEST_ASSERT_EQUAL_FLOAT(1.f, gammaVals[i]);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConfigStructIsPopulated);
@@ -3056,5 +3496,14 @@ int main(void) {
     RUN_TEST(testLayerNormBackwardBfpGradsAccumulateAcrossCalls);
     RUN_TEST(testLayerNormBackwardBfpMissingPropLossQAnchorDies);
     RUN_TEST(testLayerNormBackwardFloat32PinnedStillRejectsBfpWires);
+    RUN_TEST(testFactoryUniformBfpProfileBuildsAndForwards);
+    RUN_TEST(testFactoryBfpGammaGeometryDerivedFromParamLength);
+    RUN_TEST(testFactoryWiresOnlyBfpProfileBuilds);
+    RUN_TEST(testFactoryRejectsSymGammaUnderBfpForward);
+    RUN_TEST(testFactoryRejectsFloat32MathOverBfpParams);
+    RUN_TEST(testFactoryRejectsFloat32BackwardOverBfpWires);
+    RUN_TEST(testFactoryRejectsGroupedBfpGradTemplate);
+    RUN_TEST(testFactoryBfpGradStorageBuildsPerTensor);
+    RUN_TEST(testFactoryOwningBfpDeepCopiesQuantizations);
     return UNITY_END();
 }

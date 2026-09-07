@@ -583,9 +583,10 @@ silent wrong arithmetic, not a crash.
   element by the grad's own STORAGE `roundingMode` (scaling is a storage
   requantization, not an op — #282's target-owned convention, the SAME
   ownership the ACC epilogues keep: `accumulateOut` deliberately rounds by
-  the TARGET's storage mode, spec D4, while the OP's
-  `arithmetic.roundingMode` governs staging and the OUT_WRITE epilogue
-  only). A power-of-two `factor` is exact end to end
+  the TARGET's storage mode (#282; `ExecuteOp.c`'s ACC-epilogue comment —
+  accumulate is a read-modify-write under the accumulator's own storage
+  grid), while the OP's `arithmetic.roundingMode` governs staging and the
+  OUT_WRITE epilogue only). A power-of-two `factor` is exact end to end
   (multiplying by an exact power of two only shifts the exponent, never
   rounds the mantissa); any other factor is exact up to ordinary float32
   rounding — the one lossy case is a group whose SCALED absmax pushes its
@@ -869,7 +870,8 @@ op split: `dgamma` (mode = `weightGradAccMode`, ACC), `dbeta` (mode =
 wire). `frozen` skips both grad ops (the grad tensors do not exist, #380);
 `propLoss == NULL` skips the dx op only. The ACC epilogues round by the
 TARGET grad tensor's own storage config (`accumulateOut` deliberately keeps
-the target's mode — spec D4; a FLOAT32 grad target is a plain float add,
+the target's mode — #282's ownership split, per `ExecuteOp.c`'s
+ACC-epilogue comment; a FLOAT32 grad target is a plain float add,
 exact), while staging and dx's OUT_WRITE round by
 `propLossMath.roundingMode` (#282).
 
@@ -1080,8 +1082,12 @@ mirroring `docs/conventions/arithmetic-sym.md` §"Grouped backward").**
    accumulation-bound — the OPPOSITE of the GEMM finding** (§§7–8: there
    the interesting error lives in the accumulation seams — the >2^24
    partial conversion, the ±inf fold — while the pack is routine).
-   Practical consequence: sweeping `mantissaBits` moves norm accuracy;
-   sweeping `groupSize`/N barely does.
+   Practical consequence: sweeping `mantissaBits` moves norm accuracy
+   directly, and sweeping the wire's `groupSize` moves it too — through
+   the SAME pack term, since `s_out ≈ absmax_g/qMax` is PER-GROUP and a
+   finer blocking tightens each group's absmax (spec D5's rationale, the
+   wire-block-size sweep axis of spec §1); what barely matters is N and
+   the fold geometry, which touch only the subdominant stats term.
 5. *Rounding counts per path* (float32 roundings per OUTPUT element; exact
    dequants and exact `int32` partials/folds contribute none; per-group
    stats terms are shared by that group's N outputs and listed as group

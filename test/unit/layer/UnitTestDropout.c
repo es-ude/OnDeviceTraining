@@ -317,6 +317,68 @@ void testDropoutForwardTrainingBfpBridgeRepacksWithFreshExponents(void) {
     freeTensor(input);
 }
 
+/* PR4 adversarial gate (F0): the D6 exponent-cap regime, where the bridge's
+ * pass-2 quotient leaves int32 range for entirely finite, in-contract inputs.
+ *
+ * Hand-derived, no goldgen. exponentBits = 2 -> bias = 1, maxStored = 3, so the
+ * LARGEST representable scale is 2^(3-1) = 4 and the source already sits on it.
+ * mantissaBits = 16 -> qMax = 32767, and p = 1 - 2^-17 makes 1/(1-p) exactly
+ * 2^17 (both operands are exact binary fractions, so the subtraction and the
+ * reciprocal are exact). Pass 1 then sees absmax = 32767 * 4 * 2^17 =
+ * 32767 * 2^19; 32767 * 2^19 / qMax = 2^19 needs E = 19, i.e. stored 20 -- far
+ * past the cap, so D6 saturates the destination exponent at 3 and its scale
+ * stays 4. Pass 2's quotient for element 0 is therefore 32767 * 2^19 / 4 =
+ * 32767 * 2^17 = 4294836224, which is more than INT32_MAX: rounding it FIRST
+ * hands roundByMode a value no int32 can hold (C17 6.3.1.4 undefined). Clamped
+ * in the float domain first, it saturates to qMax, which is exactly what D6
+ * promises. stubKeepEven keeps 0 and 2 (2 is a zero mantissa), drops 1 and 3.
+ *
+ * On arm64 the value assertions alone do NOT separate the two orders -- an
+ * out-of-range fcvtzs saturates to INT32_MAX and clampInt32 then lands on the
+ * same 32767 -- so the pre-clamp's RED lives in the ubsan preset
+ * (float-cast-overflow). The assertions still pin the D6 contract on every
+ * host, and on x86-64 the unclamped cast returns INT32_MIN, which would flip
+ * the sign and redden them on a plain build too. */
+void testDropoutForwardTrainingBfpSaturatesAtTheExponentCap(void) {
+    size_t dims[] = {1, 4};
+    int32_t inCodes[4] = {32767, 5, 0, 7};
+    uint8_t inExps[1] = {3}; /* the largest stored exponent at exponentBits = 2 */
+    int32_t sentinel[4] = {-9, -9, -9, -9};
+    uint8_t zeroState[1] = {0};
+    tensor_t *input = buildBfpWireWithCodes(dims, 2, 16, 2, 1, 0, inCodes, inExps);
+    tensor_t *output = buildBfpWireWithCodes(dims, 2, 16, 2, 1, 0, sentinel, zeroState);
+    tensor_t *mask = buildBoolMask(4);
+
+    quantization_t *fq = quantizationInitBfp(16, 2, HALF_AWAY);
+    quantization_t *bq = quantizationInitBfp(16, 2, HALF_AWAY);
+    dropoutConfig_t dcfg;
+    initDropoutConfig(&dcfg, 0.99999237060546875f, mask, fq, bq); /* 1 - 2^-17 */
+    dcfg.training = true;
+    layerConfig_t lcfg;
+    layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
+
+    bernoulliFillMaskFn_t saved = bernoulliGetFillMaskFn();
+    bernoulliSetFillMaskFn(stubKeepEven);
+    dropoutForward(&layer, input, output);
+    bernoulliSetFillMaskFn(saved);
+
+    int32_t got[4];
+    unpackSignExtend(output->data, 16, 0, got, 4);
+    int32_t expected[4] = {32767, 0, 0, 0};
+    TEST_ASSERT_EQUAL_INT32_ARRAY_MESSAGE(expected, got, 4,
+                                          "past the exponent cap the mantissa must SATURATE at "
+                                          "qMax (D6), never wrap or round out of int32 range");
+    bfpQConfig_t *outQC = output->quantization->qConfig;
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(3, outQC->exponents[0],
+                                    "the derived exponent must clamp to the cap, not exceed it");
+
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeTensor(mask);
+    freeTensor(output);
+    freeTensor(input);
+}
+
 /* Eval mode is the exponent-verbatim copy of R-P2's Relu forward: no mask, no
  * factor, so nothing is re-derived. */
 void testDropoutForwardEvalIdentityBfp(void) {
@@ -901,6 +963,7 @@ int main(void) {
     RUN_TEST(testBackwardSymInt32UsesMaskAndScaleFold);
     RUN_TEST(testDropoutBackwardExitsOnDtypeMismatch);
     RUN_TEST(testDropoutForwardTrainingBfpBridgeRepacksWithFreshExponents);
+    RUN_TEST(testDropoutForwardTrainingBfpSaturatesAtTheExponentCap);
     RUN_TEST(testDropoutForwardEvalIdentityBfp);
     RUN_TEST(testDropoutForwardEvalInPlaceBfpIsIdentity);
     RUN_TEST(testDropoutBackwardBfpArmDispatchesThroughDropoutBackward);

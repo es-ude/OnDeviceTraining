@@ -221,7 +221,31 @@ static void dropoutMaskScaleBfp(dropoutConfig_t *cfg, tensor_t *src, tensor_t *d
     }
 
     /* pass 2: decode at the source grid, mask+scale, requantize at the fresh
-     * one; clamp before the write (value-domain saturation, D6). */
+     * one; clamp before the write (value-domain saturation, D6).
+     *
+     * PR4 adversarial gate (F0): the saturation clamp runs in the FLOAT domain
+     * FIRST, the same order scaleBfpTensorInPlace's pass 2 uses (this bridge's
+     * skeleton). In the D6 cap regime a destination group has NO headroom left
+     * -- its exponent is pinned at maxStored -- so v / dstScale can exceed
+     * int32 range for entirely finite, in-contract inputs (a narrow
+     * exponentBits plus a factor 1/(1-p) that legally reaches 2^24), and
+     * (int32_t)round(x) is undefined there (C17 6.3.1.4). Behaviour-identical
+     * to clamping after the round for every DEFINED case: in range the float
+     * clamp is the identity, and outside it roundByMode is monotone, so both
+     * orders land on the same boundary code.
+     *
+     * The clampInt32 behind it stays load-bearing, not decoration: SR_HALF_AWAY
+     * dithers by [-0.5, 0.5) BEFORE rounding, so a value already clamped to
+     * qMin can still round one step past it (round(-32768.5) = -32769).
+     *
+     * NaN never reaches the clamp, so its comparison-based form is safe: the
+     * decoded mantissa is a finite int, factor is finite (initDropoutConfig
+     * pins p to [0, 1)), and both scales are finite non-zero powers of two
+     * (deriveBfpStoredExponent caps the stored exponent at bias + 127, the
+     * largest finite float32 scale -- §2 of docs/conventions/arithmetic-bfp.md).
+     * finite * finite * finite is at worst +-inf, an inf divided by a finite
+     * non-zero scale stays +-inf, and the 0 * inf that would make a NaN cannot
+     * arise because neither scale nor factor is ever zero or inf. */
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackSignExtend((const uint8_t *)src->data + off * srcQC->mantissaBits / 8,
@@ -237,8 +261,9 @@ static void dropoutMaskScaleBfp(dropoutConfig_t *cfg, tensor_t *src, tensor_t *d
             for (size_t i = idx; i < runEnd; i++) {
                 float v =
                     tensorBoolGet(cfg->mask, i) ? (float)mant[i - off] * srcScale * factor : 0.f;
-                codes[i - off] = clampInt32(roundByMode(v / dstScale, dstQC->roundingMode),
-                                            (int32_t)qMin, (int32_t)qMax);
+                float q = clamp(v / dstScale, qMin, qMax);
+                codes[i - off] =
+                    clampInt32(roundByMode(q, dstQC->roundingMode), (int32_t)qMin, (int32_t)qMax);
             }
             idx = runEnd;
         }

@@ -4,6 +4,7 @@
 
 #include "Add.h"
 #include "Arithmetic.h" // getDimensionsByIndex, calcElementIndexByIndices
+#include "BfpKernelSupport.h"
 #include "Common.h"
 #include "Div.h"
 #include "MinMax.h"
@@ -98,7 +99,22 @@ static size_t reducePhysOffset(tensor_t *t, size_t k, size_t b, size_t j) {
     return calcElementIndexByIndices(rank, t->shape->dimensions, idx, t->shape->orderOfDimensions);
 }
 
+/* Operand gate for the FLOAT32 reductions. The dtype dispatch in the norm
+ * layers has grown past {FLOAT32, SYM_INT32}: an unpacked BFP (or SYM) int32
+ * scratch operand reaching a `float *` read here is not a crash but SILENT
+ * WRONG ARITHMETIC, so the FLOAT32 arms police their own operand exactly like
+ * the SYM/BFP arms do. `what` names the calling entry point. */
+static void reduceValidateFloat32Operand(tensor_t *t, const char *what) {
+    if (t->quantization->type != FLOAT32) {
+        PRINT_ERROR("%s: input must be FLOAT32 (got dtype %d) -- an unpacked BFP/SYM scratch "
+                    "operand read through float* is silent garbage",
+                    what, (int)t->quantization->type);
+        exit(1);
+    }
+}
+
 void meanOverTrailingAxesFloat32(tensor_t *in, size_t k, tensor_t *meanOut) {
+    reduceValidateFloat32Operand(in, "meanOverTrailingAxesFloat32");
     size_t K;
     size_t N;
     blockGeom(in, k, &K, &N);
@@ -115,6 +131,7 @@ void meanOverTrailingAxesFloat32(tensor_t *in, size_t k, tensor_t *meanOut) {
 
 void varianceBiasedOverTrailingAxesFloat32(tensor_t *in, size_t k, tensor_t *meanIn,
                                            tensor_t *varOut) {
+    reduceValidateFloat32Operand(in, "varianceBiasedOverTrailingAxesFloat32");
     size_t K;
     size_t N;
     blockGeom(in, k, &K, &N);
@@ -132,6 +149,7 @@ void varianceBiasedOverTrailingAxesFloat32(tensor_t *in, size_t k, tensor_t *mea
 }
 
 void sumSquaresOverTrailingAxesFloat32(tensor_t *in, size_t k, tensor_t *ssqOut) {
+    reduceValidateFloat32Operand(in, "sumSquaresOverTrailingAxesFloat32");
     size_t K;
     size_t N;
     blockGeom(in, k, &K, &N);
@@ -292,5 +310,78 @@ void rsqrtSymInt32(tensor_t *in, float eps, tensor_t *out) {
         float r = rsqrtFloat32(mulFloat32s((float)qIn[i], sIn), eps);
         qOut[i] = clampInt32(roundByMode(divFloat32s(r, scale), outQC->roundingMode), (int32_t)qMin,
                              (int32_t)qMax);
+    }
+}
+
+/* Operand gate for the BFP reductions -- a distinct contract from the SYM and
+ * FLOAT32 guards above (precedent: per-contract guards in this file are
+ * deliberately NOT folded). No width bound here: the mean's segment sum is
+ * bounded by bfpValidateSumHeadroom at the entry that sums (below), and the
+ * variance accumulates in float32 with no int32 partials at all. */
+static void reduceValidateBfpOperand(tensor_t *t, const char *what) {
+    if (t->quantization->type != BFP) {
+        PRINT_ERROR("Reduce BFP: %s must be BFP in the unpacked scratch form (got dtype %d)", what,
+                    (int)t->quantization->type);
+        exit(1);
+    }
+    validateBfpQConfigShape(t->quantization->qConfig, calcNumberOfElementsByTensor(t));
+}
+
+void meanOverTrailingAxesBfp(tensor_t *in, size_t k, tensor_t *meanOut) {
+    reduceValidateBfpOperand(in, "input");
+    size_t K;
+    size_t N;
+    blockGeom(in, k, &K, &N);
+    const bfpQConfig_t *qC = in->quantization->qConfig;
+    bfpValidateSumHeadroom(qC, N, "meanOverTrailingAxesBfp");
+    const int32_t expBias = bfpExponentBias(qC);
+    int32_t const *q = (int32_t const *)in->data;
+    float *m = (float *)meanOut->data;
+    for (size_t b = 0; b < K; b++) {
+        float acc = 0.0f;
+        int32_t partial = 0;
+        size_t currentGroup = 0;
+        for (size_t j = 0; j < N; j++) {
+            size_t off = reducePhysOffset(in, k, b, j);
+            size_t g = bfpGroupOf(qC, off);
+            if (j == 0) {
+                currentGroup = g;
+            } else if (g != currentGroup) {
+                acc = addFloat32s(
+                    acc, ldexpf((float)partial, (int)qC->exponents[currentGroup] - expBias));
+                partial = 0;
+                currentGroup = g;
+            }
+            partial = addInt32s(partial, q[off]);
+        }
+        if (N > 0) {
+            acc = addFloat32s(acc,
+                              ldexpf((float)partial, (int)qC->exponents[currentGroup] - expBias));
+        }
+        m[b] = divFloat32s(acc, (float)N);
+    }
+}
+
+void varianceBiasedOverTrailingAxesBfp(tensor_t *in, size_t k, tensor_t *meanIn, tensor_t *varOut) {
+    reduceValidateBfpOperand(in, "input");
+    size_t K;
+    size_t N;
+    blockGeom(in, k, &K, &N);
+    const bfpQConfig_t *qC = in->quantization->qConfig;
+    const int32_t expBias = bfpExponentBias(qC);
+    int32_t const *q = (int32_t const *)in->data;
+    float *m = (float *)meanIn->data;
+    float *v = (float *)varOut->data;
+    for (size_t b = 0; b < K; b++) {
+        float acc = 0.0f;
+        for (size_t j = 0; j < N; j++) {
+            size_t off = reducePhysOffset(in, k, b, j);
+            /* Dequant-center-square in float (exact mantissa*2^E dequant, not
+             * an int product) -- the SYM_INT32 variance's shape on the BFP grid. */
+            float x = ldexpf((float)q[off], (int)qC->exponents[bfpGroupOf(qC, off)] - expBias);
+            float d = subFloat32s(x, m[b]);
+            acc = addFloat32s(acc, squareFloat32(d));
+        }
+        v[b] = divFloat32s(acc, (float)N); /* BIASED -- divide by N, not N-1 */
     }
 }

@@ -31,6 +31,19 @@ void varianceBiasedOverTrailingAxesSymInt32(tensor_t *in, size_t k, tensor_t *me
  * above). Serves PPCA row norms and CCIPCA ||v_i|| (#326). */
 void sumSquaresOverTrailingAxesFloat32(tensor_t *in, size_t k, tensor_t *ssqOut);
 
+/* BFP arms (epic PR5). `in` is the executeOp prologue's UNPACKED-BFP scratch
+ * form: data = sign-extended int32 mantissa codes under a live bfpQConfig_t
+ * (docs/conventions/arithmetic-bfp.md §5.3) -- never packed bytes. meanOut /
+ * varOut are FLOAT32 [K]. The mean is a pure mantissa VALUE-sum: one int32
+ * partial per same-exponent segment, folded via ldexpf on every group
+ * crossing plus the tail (the R-P4/AvgPool sum contract; sum-headroom guard
+ * applies). The variance dequants per element (exact mantissa*2^E), centers
+ * against the float mean and accumulates float32 -- the mean is not on the
+ * grid, so no mantissa-domain variance exists (mirrors the SYM_INT32
+ * variance's dequant-center-square). */
+void meanOverTrailingAxesBfp(tensor_t *in, size_t k, tensor_t *meanOut);
+void varianceBiasedOverTrailingAxesBfp(tensor_t *in, size_t k, tensor_t *meanIn, tensor_t *varOut);
+
 /* 1/sqrt(x + eps): eps INSIDE the sqrt guards x == 0 (matches LayerNorm). */
 float rsqrtFloat32(float x, float eps);
 

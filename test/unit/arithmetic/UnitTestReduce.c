@@ -388,6 +388,191 @@ void testMeanSymInt32RejectsZeroWidthOperand(void) {
     freeTensor(in);
 }
 
+/* ---- BFP reductions (epic PR5 Task 1) ---- */
+
+/* Unpacked-BFP scratch fixture (the executeOp funnel's kernel-side form): data
+ * is a plain sign-extended int32 code array, NOT the packed byte layout
+ * initTensor would size for a BFP tensor -- so these tensors are built BY HAND
+ * (UnitTestMatmul.c's BFP idiom), never via buildFloatTensorND/initTensor.
+ *
+ * Shape [2,6], grouped {numGroups=3, groupSize=4}, mantissaBits=8,
+ * exponentBits=8 (bias 127); stored exponents {126,127,129} -> group scales
+ * {0.5, 1.0, 4.0}. Non-uniform scales kill "ignores the exponents" mutants, and
+ * group 1 SPANS the row boundary (storage 4..7 = row0's tail + row1's head), so
+ * a fold-at-the-wrong-boundary mutant moves BOTH row means. The caller owns the
+ * shape/dims/order/quantization/qConfig storage (it must outlive the tensor). */
+static int32_t kReduceBfpCodes[12] = {10, -20, 30, 40, 50, -60, 7, 9, -5, 11, 13, -17};
+static uint8_t kReduceBfpExponents[3] = {126, 127, 129};
+
+static void buildReduceBfpScratch(tensor_t *t, shape_t *shape, size_t *dims, size_t *order,
+                                  quantization_t *q, bfpQConfig_t *qc) {
+    dims[0] = 2;
+    dims[1] = 6;
+    order[0] = 0;
+    order[1] = 1;
+    setShape(shape, dims, 2, order);
+    qc->exponents = kReduceBfpExponents;
+    qc->numGroups = 3;
+    qc->groupSize = 4;
+    qc->roundingMode = HALF_AWAY;
+    qc->mantissaBits = 8;
+    qc->exponentBits = 8;
+    initBfpQuantization(qc, q);
+    setTensorValues(t, (uint8_t *)kReduceBfpCodes, shape, q, NULL);
+}
+
+void testMeanBfpSegmentFoldAcrossGroupBoundary(void) {
+    tensor_t t;
+    shape_t shape;
+    size_t dims[2];
+    size_t order[2];
+    quantization_t q;
+    bfpQConfig_t qc;
+    buildReduceBfpScratch(&t, &shape, dims, order, &q, &qc);
+
+    size_t outDims[] = {2};
+    tensor_t *meanOut = buildFloatTensorND(1, outDims, NULL);
+
+    meanOverTrailingAxesBfp(&t, 1, meanOut);
+
+    float m0 = ((float *)meanOut->data)[0];
+    float m1 = ((float *)meanOut->data)[1];
+
+    freeTensor(meanOut);
+
+    // row0: g0 partial 10-20+30+40 = 60 -> *0.5 = 30; g1 partial 50-60 = -10
+    // -> *1 = -10; mean = 20/6. row1: g1 partial 7+9 = 16 -> *1 = 16; g2 partial
+    // -5+11+13-17 = 2 -> *4 = 8; mean = 24/6 = 4.
+    TEST_ASSERT_EQUAL_FLOAT(20.0f / 6.0f, m0);
+    TEST_ASSERT_EQUAL_FLOAT(4.0f, m1);
+}
+
+void testVarianceBfpDequantCenterSquare(void) {
+    // Same fixture. row0 dequants to {5,-10,15,20,50,-60}, mean 10/3
+    // -> var = 61050/54 = 1130.5555...; row1 dequants to {7,9,-20,44,52,-68},
+    // mean 4 -> var = 9698/6 = 1616.3333... (float32 accumulation stays well
+    // inside the 0.01 tolerance at these magnitudes).
+    tensor_t t;
+    shape_t shape;
+    size_t dims[2];
+    size_t order[2];
+    quantization_t q;
+    bfpQConfig_t qc;
+    buildReduceBfpScratch(&t, &shape, dims, order, &q, &qc);
+
+    size_t outDims[] = {2};
+    tensor_t *meanOut = buildFloatTensorND(1, outDims, NULL);
+    tensor_t *varOut = buildFloatTensorND(1, outDims, NULL);
+
+    meanOverTrailingAxesBfp(&t, 1, meanOut);
+    varianceBiasedOverTrailingAxesBfp(&t, 1, meanOut, varOut);
+
+    float v0 = ((float *)varOut->data)[0];
+    float v1 = ((float *)varOut->data)[1];
+
+    freeTensor(varOut);
+    freeTensor(meanOut);
+
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 1130.5555f, v0);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 1616.3333f, v1);
+}
+
+void testMeanBfpPerTensorSentinel(void) {
+    // {1,0} per-tensor: one segment per row (group 0 everywhere), exponent 128
+    // -> scale 2.0. Codes {1,2,3, 4,5,6} shape [2,3] -> means {2*6/3, 2*15/3}.
+    static int32_t codes[6] = {1, 2, 3, 4, 5, 6};
+    static uint8_t exps[1] = {128};
+    tensor_t t;
+    shape_t shape;
+    size_t dims[2] = {2, 3};
+    size_t order[2] = {0, 1};
+    setShape(&shape, dims, 2, order);
+    bfpQConfig_t qc = {.exponents = exps,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 8,
+                       .exponentBits = 8};
+    quantization_t q;
+    initBfpQuantization(&qc, &q);
+    setTensorValues(&t, (uint8_t *)codes, &shape, &q, NULL);
+
+    size_t outDims[] = {2};
+    tensor_t *meanOut = buildFloatTensorND(1, outDims, NULL);
+
+    meanOverTrailingAxesBfp(&t, 1, meanOut);
+
+    float m0 = ((float *)meanOut->data)[0];
+    float m1 = ((float *)meanOut->data)[1];
+
+    freeTensor(meanOut);
+
+    TEST_ASSERT_EQUAL_FLOAT(4.0f, m0);
+    TEST_ASSERT_EQUAL_FLOAT(10.0f, m1);
+}
+
+void testMeanBfpRejectsFloat32Operand(void) {
+    // dtype gate: a FLOAT32 buffer read as int32 mantissas is silent garbage.
+    size_t inDims[] = {4};
+    tensor_t *in = buildFloatTensorND(1, inDims, (float[]){1.f, 2.f, 3.f, 4.f});
+    size_t outDims[] = {1};
+    tensor_t *meanOut = buildFloatTensorND(1, outDims, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(meanOverTrailingAxesBfp(in, 1, meanOut));
+
+    freeTensor(meanOut);
+    freeTensor(in);
+}
+
+void testMeanFloat32RejectsBfpOperand(void) {
+    // The reverse gate on the FLOAT32 reducer: an unpacked int32 scratch operand
+    // read through float* was silent WRONG ARITHMETIC before this guard.
+    tensor_t t;
+    shape_t shape;
+    size_t dims[2];
+    size_t order[2];
+    quantization_t q;
+    bfpQConfig_t qc;
+    buildReduceBfpScratch(&t, &shape, dims, order, &q, &qc);
+
+    size_t outDims[] = {2};
+    tensor_t *meanOut = buildFloatTensorND(1, outDims, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(meanOverTrailingAxesFloat32(&t, 1, meanOut));
+
+    freeTensor(meanOut);
+}
+
+void testMeanBfpSumHeadroomDeath(void) {
+    // bfpSumSegmentLimit(16) = INT32_MAX >> 15 = 65535; a per-tensor {1,0}
+    // operand's segment run IS the reduction length, so N = 65536 must die.
+    size_t n = 65536;
+    int32_t *codes = reserveMemory(n * sizeof(int32_t));
+    static uint8_t exps[1] = {127};
+    tensor_t t;
+    shape_t shape;
+    size_t dims[1] = {65536};
+    size_t order[1] = {0};
+    setShape(&shape, dims, 1, order);
+    bfpQConfig_t qc = {.exponents = exps,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 16,
+                       .exponentBits = 8};
+    quantization_t q;
+    initBfpQuantization(&qc, &q);
+    setTensorValues(&t, (uint8_t *)codes, &shape, &q, NULL);
+
+    size_t outDims[] = {1};
+    tensor_t *meanOut = buildFloatTensorND(1, outDims, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(meanOverTrailingAxesBfp(&t, 1, meanOut));
+
+    freeTensor(meanOut);
+    freeReservedMemory(codes);
+}
+
 /* ---- sumSquaresOverTrailingAxesFloat32 + sqrtFloat32 (#326 Task 5) ---- */
 
 void testSumSquaresTrailingAxes(void) {
@@ -474,6 +659,12 @@ int main(void) {
     RUN_TEST(testMeanSymInt32RejectsWideOperand);
     RUN_TEST(testMeanSymInt32RejectsOverlongAxis);
     RUN_TEST(testMeanSymInt32RejectsZeroWidthOperand);
+    RUN_TEST(testMeanBfpSegmentFoldAcrossGroupBoundary);
+    RUN_TEST(testVarianceBfpDequantCenterSquare);
+    RUN_TEST(testMeanBfpPerTensorSentinel);
+    RUN_TEST(testMeanBfpRejectsFloat32Operand);
+    RUN_TEST(testMeanFloat32RejectsBfpOperand);
+    RUN_TEST(testMeanBfpSumHeadroomDeath);
     RUN_TEST(testSumSquaresTrailingAxes);
     RUN_TEST(testSumSquaresWholeTensor);
     RUN_TEST(testSumSquaresPermutationAware);

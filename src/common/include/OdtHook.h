@@ -11,14 +11,16 @@
  *
  *  What each phase spans (the FORWARD and BACKWARD pair TILE one whole
  *  calculateGradsSequential / tracedGrads call, no gap between them):
- *   - FORWARD:   activation-buffer allocation, every layer forward, the output
- *                snapshot copied into trainingStats_t, and the loss FORWARD.
- *   - BACKWARD:  the loss backward, every layer backward, activation teardown.
- *                Fires even when backward truncates at the deepest trainable
- *                layer or is skipped entirely (all-frozen model): every call
- *                yields exactly FORWARD_BEGIN, FORWARD_END, BACKWARD_BEGIN,
- *                BACKWARD_END in that order, so an external occurrence count
- *                per step is a constant, never a function of the model.
+ *   - FORWARD:   the Dropout train-mode flip, activation-buffer allocation,
+ *                every layer forward, the output snapshot copied into
+ *                trainingStats_t, and the loss FORWARD.
+ *   - BACKWARD:  the loss backward, every layer backward, activation teardown
+ *                and the Dropout train-mode reset. Fires even when backward
+ *                truncates at the deepest trainable layer or is skipped
+ *                entirely (all-frozen model): every call yields exactly
+ *                FORWARD_BEGIN, FORWARD_END, BACKWARD_BEGIN, BACKWARD_END in
+ *                that order, so an external occurrence count per step is a
+ *                constant, never a function of the model.
  *   - OPTIMIZER: the parameter update inside optimizerStep() (Optimizer.h),
  *                and only that -- grad zeroing, mean-scaling and clipping are
  *                outside the phase. A direct optimizerFunctions[type].step()
@@ -42,9 +44,11 @@
  *  interleave their events indistinguishably -- serialize training while a
  *  hook is installed, or install none.
  *
- *  Cost when unset: one load and one branch per event. Six event kinds; a
- *  calculateGrads* call fires four, an optimizerStep two, so a macro-batch
- *  of B samples per optimizer update fires 4*B + 2 events. */
+ *  Cost when unset: one out-of-line call into OdtHook.c plus one load and one
+ *  branch per event -- odtHookFire lives in its own translation unit, so it
+ *  cannot be inlined away without LTO. Six event kinds; a calculateGrads* call
+ *  fires four, an optimizerStep two, so a macro-batch of B samples per
+ *  optimizer update fires 4*B + 2 events. */
 
 typedef enum {
     ODT_EVENT_FORWARD_BEGIN,

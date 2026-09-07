@@ -357,13 +357,13 @@ checkpointing, limitations, literature).
   layer-by-layer C-vs-PyTorch parity debugging (`npyDumpSink`, kws_raw harness).
 - **Phase hook for external profilers** (`src/common/include/OdtHook.h`, #419
   precondition) — one process-wide slot (`odtHookSet`, NULL = off, the default)
-  receiving six event kinds (4·B + 2 fires per optimizer update at macro-batch
-  B): `FORWARD`/`BACKWARD` BEGIN/END around
-  the two halves of `calculateGradsSequential`/`tracedGrads` (the pair tiles the
-  call; BACKWARD fires even when truncated or skipped, so the count per call is
-  constant) and `OPTIMIZER` BEGIN/END inside the new public `optimizerStep()`
-  (`Optimizer.h`) — the raw `optimizerFunctions[].step()` vtable call fires
-  nothing. Consumer: odt-energy-rig's `rig_marker` (GPIO markers + DWT cycles).
+  receiving six event kinds (4·B + 2 fires per optimizer update at
+  macro-batch B): `FORWARD`/`BACKWARD` BEGIN/END around the two halves of
+  `calculateGradsSequential`/`tracedGrads` (the pair tiles the call; BACKWARD
+  fires even when truncated or skipped, so the count per call is constant) and
+  `OPTIMIZER` BEGIN/END inside the public `optimizerStep()` (`Optimizer.h`, #429)
+  — the raw `optimizerFunctions[].step()` vtable call fires nothing. Consumer:
+  odt-energy-rig's `rig_marker` library (v0.2.0; GPIO markers + DWT cycles).
   Phases under ~500 µs are latency-only, never energy markers; no per-layer
   events by design (that is the trace facility above).
 - **Fused pointwise primitives** (`src/arithmetic/PointwiseFused.c`, #328) — three

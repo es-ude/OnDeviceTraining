@@ -12,7 +12,7 @@ Each loss function in `src/loss_functions/` exposes:
 
 `lossConfig_t.backwardReduction` is the user's training-strategy choice — it
 drives whether `scaleOptimizerGradients` runs between `trainingBatchDefault`
-and `optimFns.step`. It is a config field.
+and `optimizerStep`. It is a config field.
 
 `forwardReduction` is a per-call parameter on every aggregator
 (`trainingBatchDefault`, `evaluationBatch`, `evaluationEpoch`, `inferenceWithLoss`,

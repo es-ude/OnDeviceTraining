@@ -40,8 +40,8 @@ grad/state storage are partial/unsupported.
 | `LINEAR` | ✓ | ✓ | ✓ native (all 4 ops) | ✓ native (all 4 ops) | ~ requantize path (#270) | ✓ SYM/ASYM/BFP | ✓ |
 | `CONV1D` | ✓ | ✓ | ✓ native (all 4 ops) | ✓ native (all 4 ops) | ~ requantize path (#270) | ✓ SYM/ASYM/BFP | ✓ |
 | `CONV1D_TRANSPOSED` | ✓ | ✓ | ✓ native (all 4 ops) | ✓ native (all 4 ops) | ~ requantize path (#270) | ✓ SYM/ASYM/BFP | ✓ |
-| `LAYERNORM` | ✓ | ✓ | ✓ native (fwd+bwd) | ✓ native (fwd+bwd) | ~ SYM_INT32/BFP | ~ SYM/BFP bwd paths | ✓ |
-| `GROUPNORM` | ✓ | ✓ | ✓ native (fwd+bwd) | ✓ native (fwd+bwd) | ~ SYM_INT32/BFP | ~ SYM/BFP bwd paths | ✓ |
+| `LAYERNORM` | ✓ | ✓ | ✓ native (fwd+bwd) | ✓ native (fwd+bwd) | ~ SYM_INT32/BFP | ~ SYM/ASYM/BFP (funnel bwd only) | ✓ |
+| `GROUPNORM` | ✓ | ✓ | ✓ native (fwd+bwd) | ✓ native (fwd+bwd) | ~ SYM_INT32/BFP | ~ SYM/ASYM/BFP (funnel bwd only) | ✓ |
 | `RELU` | – | ✓ | ✓ native (fwd+bwd) | ✓ packed-transparent | n/a | n/a | ✓ |
 | `SOFTMAX` | – | ✓ | ~ dequant-to-float | ~ fwd bridge; ✗ bwd (PR6) | n/a | n/a | ✓ |
 | `FLATTEN` | – | ✓ | ✓ scale-transparent | ✓ packed-transparent | n/a | n/a | ✓ |

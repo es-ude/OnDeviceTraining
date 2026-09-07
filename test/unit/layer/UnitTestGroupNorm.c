@@ -1533,9 +1533,12 @@ static const float kGnBfpABetaValues[4] = {0.f, 1.f, 2.f, -1.f};
  * an integer code in [-128, 127]; likewise gamma (absmax 3, scale 2^-5) and
  * beta (absmax 2, scale 2^-5). Staging therefore reproduces exactly the same
  * dequantized values the all-BFP-stored run folds on, so the two runs must
- * emit the BYTE-IDENTICAL wire. A missing .bfpStage entry makes the funnel
- * fail fast; a wrong staging width (a hardcoded m instead of the anchor's)
- * rounds 2.5 and shifts the payload. */
+ * emit the BYTE-IDENTICAL wire. What this pins is the .bfpStage ternary wiring
+ * and the staging mechanics -- a missing entry makes the funnel fail fast. It
+ * does NOT pin the staging WIDTH: GN-A's absmax is 7 and every value is a
+ * multiple of 0.5, so m in {5..8} all stage exactly the same codes (only
+ * m <= 4 would round 2.5 and shift the payload). The epic's width pin lives in
+ * LayerNorm's LN-B, where the generator asserts it. */
 void testGroupNormForwardBfpStagedFloat32OperandsTwin(void) {
     size_t dims[3] = {2, 4, 2};
     tensor_t *inBfp = buildGnBfpAInput(dims);
@@ -1882,10 +1885,12 @@ void testGroupNormBackwardBfpFakeQuantPinCrossCheck(void) {
 
 /* ACC semantics across microbatch calls: a second identical backward must ADD
  * the same float increment again. inc + inc is exact in float32 (an exponent
- * bump, no rounding), so the doubled expectation is asserted byte-exact. Also
- * the sensitized probe for a dropped dgamma/dbeta raw memset: the second
- * call's Phase-2 raw region has just been scribbled by the first call's op
- * sequence. */
+ * bump, no rounding), so the doubled expectation is asserted byte-exact. What
+ * it pins empirically is the ACCUMULATION semantics: Task 5's mutation run
+ * showed the twin-sanity assertion, not this test, catching a dropped
+ * dgamma/dbeta raw memset (whether a scribbled Phase-2 raw region survives is
+ * platform luck) -- the memset's own guard is documented in
+ * docs/conventions/arithmetic-bfp.md Section 5.8. */
 void testGroupNormBackwardBfpGradsAccumulateAcrossCalls(void) {
     size_t dims[3] = {2, 4, 2};
     tensor_t *in = buildGnBfpAInput(dims);

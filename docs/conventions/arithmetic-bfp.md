@@ -786,8 +786,10 @@ scratch. A raw `->data` walk over PACKED BFP bytes in `LayerNorm.c` or
 `GroupNorm.c` remains a bug, exactly as §5.7's closing rule says. The
 end-to-end capstone — a uniform-BFP
 conv → groupNorm → relu → adaptiveAvgPool → flatten → layerNorm → linear →
-softmax model training natively with no pins, both norms' dx EXECUTING —
-is `testBfpUniformNormModelTrainsAndGridsMove`
+softmax model training natively with no pins (no pins on either norm; the
+capstone pins only softmax's backward, which is behaviourally inert there —
+CrossEntropy's fused backward makes the loop skip the layer), both norms' dx
+EXECUTING — is `testBfpUniformNormModelTrainsAndGridsMove`
 (`test/unit/userAPI/UnitTestMultiLayerTraining.c`).
 
 **R-N1 — wire-anchored staging.** Norms have no reduction-weight operand, so
@@ -795,8 +797,8 @@ GEMM rule 1 ("stage at the weights' widths", §§5.2/5.4) has nothing to anchor
 on; the anchor is the layer's OWN produced-wire config — the R-P1 pool rule
 at the norm layer. `outputQ` anchors the forward op; `propLossQ` anchors ALL
 THREE backward ops, **including at `propLoss == NULL`** (a grads-only call
-still stages `forwardInput`/`loss`/gamma at the `propLossQ` widths — the
-anchor is a width source, not a write target). The check is EAGER at op
+still stages `forwardInput`/`loss` at the `propLossQ` widths — gamma is a
+dx-only operand — the anchor is a width source, not a write target). The check is EAGER at op
 entry (`layerNormBfpWireAnchor`/`groupNormBfpWireAnchor`): an `ARITH_BFP`
 math slot whose produced-wire config is NULL or non-BFP fails fast with a
 guided message, because without it there is no width source at all. The
@@ -829,10 +831,12 @@ into.
   bound `INT32_MAX >> (m−1)`, §5.6's biasGrad twin).
 - The VARIANCE is per-element dequant-center-square in float32: dequantize
   exactly (`mantissa · 2^E`), subtract the block mean, square, accumulate —
-  no `int32` partials, no headroom guard. A mantissa-domain variance does
-  not EXIST for BFP: centering subtracts an arbitrary float mean, so the
+  no `int32` partials, no headroom guard. A mantissa-domain variance is
+  REJECTED for BFP: centering subtracts an arbitrary float mean, so the
   centered values sit on no shared `2^E` grid and no same-exponent integer
-  partial can represent `(x−μ)²`. This is the SYM_INT32 variance's own shape
+  partial can represent `(x−μ)²`. (The uncentered `Σx² − Nμ²` form does
+  admit an int32 partial and is rejected for the other reason: it is
+  catastrophically cancelling whenever `|μ|` dominates the spread.) This is the SYM_INT32 variance's own shape
   (dequant-center-square) carried onto the BFP grid, not a BFP shortcut
   forgone.
 
@@ -871,8 +875,9 @@ wire). `frozen` skips both grad ops (the grad tensors do not exist, #380);
 `propLoss == NULL` skips the dx op only. The ACC epilogues round by the
 TARGET grad tensor's own storage config (`accumulateOut` deliberately keeps
 the target's mode — #282's ownership split, per `ExecuteOp.c`'s
-ACC-epilogue comment; a FLOAT32 grad target is a plain float add,
-exact), while staging and dx's OUT_WRITE round by
+ACC-epilogue comment; a FLOAT32 grad target is a plain float add, i.e. no
+REQUANTIZATION — the float add itself still rounds, and part 3 counts
+those roundings), while staging and dx's OUT_WRITE round by
 `propLossMath.roundingMode` (#282).
 
 - **Stats are recomputed per op** — dgamma and dx each run the shared stats
@@ -1046,7 +1051,9 @@ mirroring `docs/conventions/arithmetic-sym.md` §"Grouped backward").**
 1. *Mechanism.* Every norm op computes its stats, normalization and affine
    in float32 FROM EXACT DEQUANTS: `mantissa · 2^E` is a power-of-two
    multiply (`ldexpf`), exact in float32, and the mean's/dbeta's `int32`
-   segment partials and folds are exact under the sum-headroom guard. The
+   segment partials and folds are exact under the sum-headroom guard — up
+   to §7's `(float)partial` conversion point above `2^24`, the one place
+   a headroom-legal partial can still round (cross-referenced in §10). The
    ONLY BFP-specific rounding on any norm path is the OUT_WRITE pack of
    the produced wire (forward y, backward dx) — one `roundByMode` per
    element — plus, when a grad tensor is STORED BFP, the ACC landing's own
@@ -1063,11 +1070,12 @@ mirroring `docs/conventions/arithmetic-sym.md` §"Grouped backward").**
    directly.
 3. *Aggregate float32 noise.* An N-term float32 sum carries worst-case
    relative error ≤ `(N−1)·2^{−24}`, RMS ≈ `√N·2^{−24}` under the
-   independent-rounding assumption. The BFP MEAN does strictly better than
+   independent-rounding assumption. The BFP MEAN does no worse than
    the FLOAT32 path's own mean: its segment folds are EXACT (`ldexpf`
    power-of-two shifts of exact `int32` partials), so its float roundings
    number `C ≈ ⌈N/groupSize⌉` fold-adds (plus one divide) instead of the
-   FLOAT32 reduction's N adds. The variance and the backward reductions
+   FLOAT32 reduction's N adds — never MORE, and equal only at
+   `groupSize == 1`, where every element is its own segment. The variance and the backward reductions
    accumulate per element in float32 (part 5's table) — the SAME rounding
    counts as the FLOAT32 kernels' own loops; BFP adds nothing there.
 4. *Dominant term.* At every practical `(m, N)` the pack term dominates

@@ -2230,10 +2230,12 @@ void testBfpUniformNormModelTrainsAndGridsMove(void) {
      * converges so hard that the CE loss hits EXACTLY 0.0 by step 9 -- the
      * 2-element softmax wire quantizes p = 0.998 to code 64 at the group's own
      * exponent, i.e. exactly 1.0, so -log(p) == 0 and the last three steps see
-     * a zero gradient. A degenerate endpoint would make `lastLoss < firstLoss`
-     * pass for a reason that has nothing to do with learning. At 0.01 the
-     * 12-step curve is a clean 0.219 -> 0.056 descent with every step
-     * non-degenerate. */
+     * a zero gradient. A saturated endpoint costs the test its REGRESSION
+     * SENSITIVITY: `lastLoss < firstLoss` still holds after a kernel
+     * regression that only halves the learning signal, because a 2x slower
+     * descent still reaches exactly 0.0 inside 12 steps. At 0.01 the curve is
+     * a monotone 0.219 -> 0.056 with every step non-degenerate, so a partial
+     * regression moves the endpoint and stays observable. */
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
         sgdMCreateOptim(0.01f, 0.9f, 0.f, model, BFP_NORM_MODEL_SIZE, momentumQ,

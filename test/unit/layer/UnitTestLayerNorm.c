@@ -2732,6 +2732,267 @@ void testLayerNormForwardBfpMissingOutputQAnchorDies(void) {
     freeTensor(in);
 }
 
+/* ---- BFP epic PR5 Task 3 (R-N1/R-N4): native ARITH_BFP backward ---- */
+
+/* LN-C's dy wire: same grid numbers as LN-A's input (m = 8, e = 8, {4, 2} --
+ * the generator pins LN_C_DY_QC to those values), its own codes/exponents. */
+static tensor_t *buildLnBfpCDy(size_t const *dims) {
+    return buildBfpWireWithCodesLn(dims, 2, (uint8_t)kLnBfpAXMantissaBits,
+                                   (uint8_t)kLnBfpAXExponentBits, (size_t)kLnBfpAXNumGroups,
+                                   (size_t)kLnBfpAXGroupSize, kLnBfpCDyCodes, kLnBfpCDyExponents);
+}
+
+/* The backward oracle: all operands BFP-stored, gamma/beta with the default
+ * FLOAT32 grads. dgamma/dbeta gold is EXACT (the ACC epilogue's float raw
+ * added into a zeroed FLOAT32 grad is plain float32 addition), so the grads
+ * are asserted byte-identical; dx goes through the OUT_WRITE pack at the
+ * propLossQ geometry (m = 6, {4, 2}) and is asserted code+exponent equal. */
+void testLayerNormBackwardBfpGoldAllBfpOperands(void) {
+    size_t dims[2] = {(size_t)kLnBfpRows, (size_t)kLnBfpCols};
+    tensor_t *in = buildLnBfpAInput(dims);
+    tensor_t *loss = buildLnBfpCDy(dims);
+    tensor_t *propLoss = buildLnBfpOutputWire(dims);
+    parameter_t *gamma = buildLnBfpAGamma();
+    parameter_t *beta = buildLnBfpABeta();
+    size_t *normShape = reserveMemory(sizeof(size_t));
+    normShape[0] = 4;
+
+    layerNormConfig_t cfg;
+    initLayerNormConfig(&cfg, gamma, beta, normShape, (size_t)kLnBfpNumNormDims, kLnBfpEps,
+                        in->quantization, in->quantization);
+    /* Derived through the ordinary config path -- pins that the flip holds. */
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, cfg.propLossMath.type);
+    cfg.propLossMath.roundingMode = HALF_AWAY;
+    cfg.propLossQ = propLoss->quantization;
+    layerConfig_t lcfg;
+    layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
+
+    layerNormBackward(&layer, in, loss, propLoss);
+
+    float gotDgamma[4];
+    float gotDbeta[4];
+    memcpy(gotDgamma, gamma->grad->data, sizeof(gotDgamma));
+    memcpy(gotDbeta, beta->grad->data, sizeof(gotDbeta));
+    /* 8 = kLnBfpRows * kLnBfpCols, 4 = kLnBfpAOutNumGroups (literal sizes: a
+     * static-const bound would make these VLAs). */
+    int32_t gotDx[8];
+    uint8_t gotDxExps[4];
+    bfpQConfig_t *plQC = propLoss->quantization->qConfig;
+    unpackSignExtend(propLoss->data, plQC->mantissaBits, 0, gotDx, 8);
+    memcpy(gotDxExps, plQC->exponents, plQC->numGroups);
+
+    freeReservedMemory(normShape);
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(in);
+
+    TEST_ASSERT_EQUAL_MEMORY(kLnBfpCDgamma, gotDgamma, 4 * sizeof(float));
+    TEST_ASSERT_EQUAL_MEMORY(kLnBfpCDbeta, gotDbeta, 4 * sizeof(float));
+    TEST_ASSERT_EQUAL_INT32_ARRAY(kLnBfpCDxCodes, gotDx, 8);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(kLnBfpCDxExponents, gotDxExps, 4);
+}
+
+/* propLoss == NULL (#380 PR2): grads-only call -- the dx op is skipped, the
+ * two grad ops still run and land the EXACT gold increments. propLossQ stays
+ * the init-derived BFP config: with all-BFP operands the anchor is only
+ * type-checked (nothing stages), but R-N1 still requires it. */
+void testLayerNormBackwardBfpNullPropLossComputesGradsOnly(void) {
+    size_t dims[2] = {(size_t)kLnBfpRows, (size_t)kLnBfpCols};
+    tensor_t *in = buildLnBfpAInput(dims);
+    tensor_t *loss = buildLnBfpCDy(dims);
+    parameter_t *gamma = buildLnBfpAGamma();
+    parameter_t *beta = buildLnBfpABeta();
+    size_t *normShape = reserveMemory(sizeof(size_t));
+    normShape[0] = 4;
+
+    layerNormConfig_t cfg;
+    initLayerNormConfig(&cfg, gamma, beta, normShape, (size_t)kLnBfpNumNormDims, kLnBfpEps,
+                        in->quantization, in->quantization);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, cfg.propLossMath.type);
+    cfg.propLossMath.roundingMode = HALF_AWAY;
+    layerConfig_t lcfg;
+    layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
+
+    layerNormBackward(&layer, in, loss, NULL);
+
+    float gotDgamma[4];
+    float gotDbeta[4];
+    memcpy(gotDgamma, gamma->grad->data, sizeof(gotDgamma));
+    memcpy(gotDbeta, beta->grad->data, sizeof(gotDbeta));
+
+    freeReservedMemory(normShape);
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(loss);
+    freeTensor(in);
+
+    TEST_ASSERT_EQUAL_MEMORY(kLnBfpCDgamma, gotDgamma, 4 * sizeof(float));
+    TEST_ASSERT_EQUAL_MEMORY(kLnBfpCDbeta, gotDbeta, 4 * sizeof(float));
+}
+
+/* frozen (#380): the two grad ops are skipped entirely -- gamma/beta carry
+ * NO grad tensors here (parameterInit(p, NULL), the factory-elision shape),
+ * so any grad-op dispatch would dereference NULL. The dx op still runs and
+ * must hit the same gold wire (mirror of the SYM frozen-twin idiom). */
+void testLayerNormBackwardBfpFrozenSkipsGrads(void) {
+    size_t dims[2] = {(size_t)kLnBfpRows, (size_t)kLnBfpCols};
+    tensor_t *in = buildLnBfpAInput(dims);
+    tensor_t *loss = buildLnBfpCDy(dims);
+    tensor_t *propLoss = buildLnBfpOutputWire(dims);
+    size_t gdims[1] = {4};
+    tensor_t *gammaT = buildBfpWireWithCodesLn(
+        gdims, 1, (uint8_t)kLnBfpAGammaMantissaBits, (uint8_t)kLnBfpAGammaExponentBits,
+        (size_t)kLnBfpAGammaNumGroups, (size_t)kLnBfpAGammaGroupSize, kLnBfpAGammaCodes,
+        kLnBfpAGammaExponents);
+    parameter_t *gamma = parameterInit(gammaT, NULL);
+    tensor_t *betaT = buildBfpWireWithCodesLn(
+        gdims, 1, (uint8_t)kLnBfpABetaMantissaBits, (uint8_t)kLnBfpABetaExponentBits,
+        (size_t)kLnBfpABetaNumGroups, (size_t)kLnBfpABetaGroupSize, kLnBfpABetaCodes,
+        kLnBfpABetaExponents);
+    parameter_t *beta = parameterInit(betaT, NULL);
+    size_t *normShape = reserveMemory(sizeof(size_t));
+    normShape[0] = 4;
+
+    layerNormConfig_t cfg;
+    initLayerNormConfig(&cfg, gamma, beta, normShape, (size_t)kLnBfpNumNormDims, kLnBfpEps,
+                        in->quantization, in->quantization);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, cfg.propLossMath.type);
+    cfg.propLossMath.roundingMode = HALF_AWAY;
+    cfg.propLossQ = propLoss->quantization;
+    cfg.frozen = true;
+    layerConfig_t lcfg;
+    layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
+
+    layerNormBackward(&layer, in, loss, propLoss);
+
+    int32_t gotDx[8];
+    uint8_t gotDxExps[4];
+    bfpQConfig_t *plQC = propLoss->quantization->qConfig;
+    unpackSignExtend(propLoss->data, plQC->mantissaBits, 0, gotDx, 8);
+    memcpy(gotDxExps, plQC->exponents, plQC->numGroups);
+
+    freeReservedMemory(normShape);
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(in);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(kLnBfpCDxCodes, gotDx, 8);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(kLnBfpCDxExponents, gotDxExps, 4);
+}
+
+/* ACC semantics across microbatch calls: a second identical backward must
+ * ADD the same float increment again. inc + inc is exact in float32 (an
+ * exponent bump, no rounding), so the doubled gold is asserted byte-exact. */
+void testLayerNormBackwardBfpGradsAccumulateAcrossCalls(void) {
+    size_t dims[2] = {(size_t)kLnBfpRows, (size_t)kLnBfpCols};
+    tensor_t *in = buildLnBfpAInput(dims);
+    tensor_t *loss = buildLnBfpCDy(dims);
+    tensor_t *propLoss = buildLnBfpOutputWire(dims);
+    parameter_t *gamma = buildLnBfpAGamma();
+    parameter_t *beta = buildLnBfpABeta();
+    size_t *normShape = reserveMemory(sizeof(size_t));
+    normShape[0] = 4;
+
+    layerNormConfig_t cfg;
+    initLayerNormConfig(&cfg, gamma, beta, normShape, (size_t)kLnBfpNumNormDims, kLnBfpEps,
+                        in->quantization, in->quantization);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, cfg.propLossMath.type);
+    cfg.propLossMath.roundingMode = HALF_AWAY;
+    cfg.propLossQ = propLoss->quantization;
+    layerConfig_t lcfg;
+    layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
+
+    layerNormBackward(&layer, in, loss, propLoss);
+    layerNormBackward(&layer, in, loss, propLoss);
+
+    float gotDgamma[4];
+    float gotDbeta[4];
+    memcpy(gotDgamma, gamma->grad->data, sizeof(gotDgamma));
+    memcpy(gotDbeta, beta->grad->data, sizeof(gotDbeta));
+
+    freeReservedMemory(normShape);
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(in);
+
+    float expDgamma[4];
+    float expDbeta[4];
+    for (size_t i = 0; i < 4; i++) {
+        expDgamma[i] = kLnBfpCDgamma[i] + kLnBfpCDgamma[i];
+        expDbeta[i] = kLnBfpCDbeta[i] + kLnBfpCDbeta[i];
+    }
+    TEST_ASSERT_EQUAL_MEMORY(expDgamma, gotDgamma, 4 * sizeof(float));
+    TEST_ASSERT_EQUAL_MEMORY(expDbeta, gotDbeta, 4 * sizeof(float));
+}
+
+/* R-N1's backward half: propLossQ anchors ALL THREE backward ops' staging, so
+ * a NULL anchor under ARITH_BFP dies at arm entry -- and it must die even
+ * when the propLoss TENSOR is NULL (the grad ops still stage at it). */
+void testLayerNormBackwardBfpMissingPropLossQAnchorDies(void) {
+    size_t dims[2] = {(size_t)kLnBfpRows, (size_t)kLnBfpCols};
+    tensor_t *in = buildLnBfpAInput(dims);
+    tensor_t *loss = buildLnBfpCDy(dims);
+    tensor_t *propLoss = buildLnBfpOutputWire(dims);
+    parameter_t *gamma = buildLnBfpAGamma();
+    parameter_t *beta = buildLnBfpABeta();
+    size_t *normShape = reserveMemory(sizeof(size_t));
+    normShape[0] = 4;
+
+    layerNormConfig_t cfg;
+    initLayerNormConfig(&cfg, gamma, beta, normShape, (size_t)kLnBfpNumNormDims, kLnBfpEps,
+                        in->quantization, in->quantization);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, cfg.propLossMath.type);
+    layerConfig_t lcfg;
+    layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
+
+    cfg.propLossQ = NULL;
+    ASSERT_EXITS_WITH_FAILURE(layerNormBackward(&layer, in, loss, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(layerNormBackward(&layer, in, loss, NULL));
+
+    freeReservedMemory(normShape);
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(in);
+}
+
+/* R-P7d "narrowed, not removed": pinning propLossMath to ARITH_FLOAT32 over
+ * BFP-stored wires still dies in the float arm's raw-cast guards -- the BFP
+ * arm did not open a silent fall-through for mismatched storage. */
+void testLayerNormBackwardFloat32PinnedStillRejectsBfpWires(void) {
+    size_t dims[2] = {(size_t)kLnBfpRows, (size_t)kLnBfpCols};
+    tensor_t *in = buildLnBfpAInput(dims);
+    tensor_t *loss = buildLnBfpCDy(dims);
+    tensor_t *propLoss = buildLnBfpOutputWire(dims);
+    parameter_t *gamma = buildLnBfpAGamma();
+    parameter_t *beta = buildLnBfpABeta();
+    size_t *normShape = reserveMemory(sizeof(size_t));
+    normShape[0] = 4;
+
+    layerNormConfig_t cfg;
+    initLayerNormConfig(&cfg, gamma, beta, normShape, (size_t)kLnBfpNumNormDims, kLnBfpEps,
+                        in->quantization, in->quantization);
+    cfg.propLossMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
+    layerConfig_t lcfg;
+    layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
+
+    ASSERT_EXITS_WITH_FAILURE(layerNormBackward(&layer, in, loss, propLoss));
+
+    freeReservedMemory(normShape);
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(in);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConfigStructIsPopulated);
@@ -2789,5 +3050,11 @@ int main(void) {
     RUN_TEST(testLayerNormForwardBfpGoldStagedFloat32Operands);
     RUN_TEST(testLayerNormForwardBfpFakeQuantPinTwin);
     RUN_TEST(testLayerNormForwardBfpMissingOutputQAnchorDies);
+    RUN_TEST(testLayerNormBackwardBfpGoldAllBfpOperands);
+    RUN_TEST(testLayerNormBackwardBfpNullPropLossComputesGradsOnly);
+    RUN_TEST(testLayerNormBackwardBfpFrozenSkipsGrads);
+    RUN_TEST(testLayerNormBackwardBfpGradsAccumulateAcrossCalls);
+    RUN_TEST(testLayerNormBackwardBfpMissingPropLossQAnchorDies);
+    RUN_TEST(testLayerNormBackwardFloat32PinnedStillRejectsBfpWires);
     return UNITY_END();
 }

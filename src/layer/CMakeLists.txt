@@ -100,6 +100,7 @@ target_link_libraries(LayerNorm PRIVATE
         Add
         Sub
         Mul
+        Div
         Reduce
         Arithmetic
         ArithmeticType

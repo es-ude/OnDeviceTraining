@@ -411,8 +411,9 @@ int main(void) {
         /* batch=1 => computeMeanScaleCE(1, ...) == 1.0 (identity): the mean-
          * reduction macro-batch scale trainingEpochDefault would apply here
          * is a no-op, so a bare step/zero per sample is exact (CLAUDE.md
-         * loss/training_loop microbatch contract). */
-        optimFns.step(sgd);
+         * loss/training_loop microbatch contract). The step goes through
+         * optimizerStep so the OPTIMIZER phase events fire (#432). */
+        optimizerStep(sgd);
         optimFns.zero(sgd);
 
         if (i == 0) {

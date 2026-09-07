@@ -55,6 +55,9 @@ something that will drift again.
   microbatch contracts; where the macro-batch divisor lives.
 - [`conventions/allocation.md`](conventions/allocation.md) — allocation locality
   (alloc primitives only in `src/userApi/`; everything else via StorageApi).
+- [`conventions/optimizer-step.md`](conventions/optimizer-step.md) — optimizer step
+  entry (`optimizerStep()` fires the `OPTIMIZER` phase events; the raw vtable
+  step is for unit tests under `test/` only; CI gate on `examples/`).
 - [`conventions/testing.md`](conventions/testing.md) — sanitizer gating; heap-tier
   test memory discipline; build-time gold-value generators.
 - [`conventions/data-shape.md`](conventions/data-shape.md) — datasets deliver the

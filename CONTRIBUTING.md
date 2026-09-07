@@ -167,6 +167,7 @@ PRs to `main`/`develop`:
 | Job | Checks |
 |---|---|
 | `alloc-locality` | No allocation primitives outside `src/userApi/` |
+| `optimizer-step-entry` | `examples/` step the optimizer through `optimizerStep()`, never the raw vtable (#432) |
 | `c-format-check` | `clang-format --dry-run -Werror` over `src`, `test`, `examples` |
 | `c-build-and-test` | `unit_test` preset: configure, build, ctest |
 | `c-asan-build-and-test` | The suite under ASan + UBSan |

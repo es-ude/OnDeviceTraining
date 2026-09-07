@@ -362,7 +362,9 @@ checkpointing, limitations, literature).
   `calculateGradsSequential`/`tracedGrads` (the pair tiles the call; BACKWARD
   fires even when truncated or skipped, so the count per call is constant) and
   `OPTIMIZER` BEGIN/END inside the public `optimizerStep()` (`Optimizer.h`, #429)
-  — the raw `optimizerFunctions[].step()` vtable call fires nothing. Consumer:
+  — the raw `optimizerFunctions[].step()` vtable call fires nothing. Every
+  shipping example steps through the wrapper (CI gate `optimizer-step-entry`
+  on `examples/`, #432), so each one is a valid profiler target. Consumer:
   odt-energy-rig's `rig_marker` library (v0.2.0; GPIO markers + DWT cycles).
   Phases under ~500 µs are latency-only, never energy markers; no per-layer
   events by design (that is the trace facility above).

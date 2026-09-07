@@ -71,6 +71,40 @@ jobs:
             exit 1
           fi
 
+  optimizer-step-entry:
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reject raw optimizerFunctions[].step() calls in examples/
+        # #432: the OPTIMIZER phase-hook events fire only inside optimizerStep()
+        # (Optimizer.h); a raw vtable step runs the same update but is invisible
+        # to an external profiler. Unit tests under test/ stay on the vtable by
+        # design (they test the optimizer, not the training-loop entry), so the
+        # pathspec is examples/ only -- and only C sources, since the PyTorch
+        # twins legitimately call optimizer.step(). The regex matches any
+        # member access to `step` (call, `(*fns.step)(o)`, `stepFn_t f = fns.step;`),
+        # not just the call spelling; an explicit char class stands in for \b,
+        # which macOS ERE ignores. git wildcards cross '/' (no FNM_PATHNAME), so
+        # 'examples/*.c' is every .c under examples/.
+        run: |
+          set +e
+          matches=$(git grep -nE '(\.|->)step([^A-Za-z0-9_]|$)' \
+            -- 'examples/*.c' 'examples/*.h' \
+            | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|\*|/\*)')
+          set -e
+          if [ -n "$matches" ]; then
+            echo "Optimizer-step-entry violation: examples must step the optimizer through optimizerStep() (src/optimizer/include/Optimizer.h)."
+            echo "The raw optimizerFunctions[type].step() call runs the same update but fires no ODT_EVENT_OPTIMIZER_* phase events (#432)."
+            echo
+            echo "Offending lines:"
+            echo "$matches"
+            exit 1
+          fi
+
   c-format-check:
     needs: gate
     if: needs.gate.outputs.proceed == 'true'

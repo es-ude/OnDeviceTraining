@@ -23,6 +23,7 @@
 #include "LinearApi.h"
 #include "LossFunction.h"
 #include "NPYLoaderApi.h"
+#include "Optimizer.h"
 #include "OptimizerApi.h"
 #include "Pool1dApi.h"
 #include "Quantization.h"
@@ -407,8 +408,9 @@ int main(int argc, char **argv) {
         /* tier 3b: scaled grads (MEAN, pre-step). */
         traceModelGrads(model, MODEL_SIZE, "grad_scaled", npyDumpSink, &ctx);
 
-        /* the update, then tier 4b: weights after. */
-        optimFns.step(sgd);
+        /* the update (through optimizerStep so an attached profiler sees the
+         * OPTIMIZER phase, #432), then tier 4b: weights after. */
+        optimizerStep(sgd);
         traceModelWeights(model, MODEL_SIZE, "w_after", npyDumpSink, &ctx);
         optimFns.zero(sgd);
 

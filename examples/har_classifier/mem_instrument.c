@@ -134,8 +134,10 @@ static void memOneStepThunk(void *p) {
                                                       REDUCTION_MEAN, c->input, c->label);
     freeTrainingStats(stats);
     /* No scaleOptimizerGradients: the macro-batch mean scale is a scalar grad
-     * multiply that does not deepen the call stack; the step itself does. */
-    fns.step(c->optim);
+     * multiply that does not deepen the call stack; the step itself does.
+     * optimizerStep, not fns.step: the probe measures trainingRun's path, and
+     * trainingEpochDefault steps through that wrapper (one extra frame; #432). */
+    optimizerStep(c->optim);
     fns.zero(c->optim);
 }
 

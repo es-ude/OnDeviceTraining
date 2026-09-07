@@ -98,6 +98,20 @@ in
 					echo "$matches"
 					exit 1
 				fi
+				# #432: examples must step through optimizerStep(), never the raw vtable
+				set +e
+				matches=$(git grep -nP '(\.|->)step([^A-Za-z0-9_]|$)' \
+					-- 'examples/*.c' 'examples/*.h' \
+					| grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|\*|/\*)')
+				set -e
+				if [ -n "$matches" ]; then
+					echo "Optimizer-step-entry violation: examples must step the optimizer through optimizerStep() (src/optimizer/include/Optimizer.h)."
+					echo "The raw optimizerFunctions[type].step() call runs the same update but fires no ODT_EVENT_OPTIMIZER_* phase events (#432)."
+					echo
+					echo "Offending lines:"
+					echo "$matches"
+					exit 1
+				fi
 				find src test examples \( -name '*.c' -o -name '*.h' \) -print0 \
 					| xargs -0 clang-format --dry-run -Werror
 				CC=gcc cmake --preset unit_test

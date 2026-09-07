@@ -51,6 +51,15 @@ SLACK_B = 8192
 # clang gives 27088 B, ~2.5% below its recorded 27768 B — within the 8 KiB
 # slack, not a regression; recorded here rather than silently reused as the
 # "finetune" comparison baseline.
+#
+# #432 (2026-09-07): mem_instrument's probe now steps through optimizerStep()
+# like trainingEpochDefault does, adding one wrapper frame to the step path.
+# Measured before/after on develop, macOS arm64 host clang, EPOCHS=1 SEED=1:
+# float 28616 -> 28616 B (peak is in the backward pass), sym8 52784 -> 52816 B
+# (+32 B: the packed-SYM peak lies inside the step). Both deltas sit far inside
+# the 8 KiB slack, so the budgets below are untouched; the absolute numbers
+# differ from the devenv-clang provenance above (toolchain), only the deltas
+# are the point of this record.
 BUDGETS_B: dict[str, dict[str, int | None]] = {
     "darwin": {
         "float": 27768 + SLACK_B,

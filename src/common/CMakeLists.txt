@@ -26,3 +26,8 @@ if(ODT_SEED_GUARD)
     target_compile_definitions(Common__hdrs INTERFACE ODT_SEED_GUARD=true)
 endif()
 
+# Phase hook for external profilers (#419 precondition). A compiled library,
+# unlike the header-only Common target above, because the hook slot is state.
+add_library(OdtHook OdtHook.c)
+target_include_directories(OdtHook PUBLIC include)
+target_link_libraries(OdtHook PRIVATE Common)

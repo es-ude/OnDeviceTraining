@@ -246,18 +246,11 @@ void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output) {
     }
 }
 
-/* BFP epic PR2 Task 8: softmaxBackward is the fourth outside-funnel site (after
- * Relu/Dropout/Flatten). Its ARITH_FLOAT32 arm raw-casts all three wires to
- * float* with no dtype check at all, and it is selected by the layer's DECLARED
- * propLossMath -- so a BFP dx wire whose math slot is pinned to (or, before the
- * Task 9 flip, derived as) ARITH_FLOAT32 lands straight in the raw casts: a 4x
- * heap over-read on input/loss and an over-write into the packed propLoss buffer.
- * That became reachable only with this task's initGradTensor BFP arm (before it,
- * a BFP propLossQ died in the allocator's default arm).
- *
- * Forward needs no guard: it runs inside executeOp, whose prologue/epilogue
- * convert both ways. PR6, not PR4 — softmax BFP semantics belong to research
- * package II. */
+/* softmaxBackward's FLOAT32/SYM arms run OUTSIDE the funnel (PR2 Task 8: the
+ * FLOAT32 arm raw-casts all three wires to float*, the SYM arm convertTensors
+ * through them), so each arm guards its own wires against BFP storage. PR6
+ * Task 5 retired the pre-dispatch BLANKET guard: BFP wires are now legal on
+ * the backward -- the ARITH_BFP arm below routes them through the funnel. */
 
 static void softmaxBackwardFloat(tensor_t *input, tensor_t *loss, tensor_t *propLoss) {
     size_t n = calcNumberOfElementsByTensor(input);
@@ -325,25 +318,98 @@ static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *p
     convertTensor(&propLossFloat, propLoss);
 }
 
-void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, tensor_t *propLoss) {
-    /* Before the dispatch (the Relu placement): all three wires are dereferenced
-     * by whichever arm runs, and the check is on STORAGE dtype, not the declared
-     * arithmetic that selects the arm. */
-    bfpRequireNoBfpWire(input, "Softmax backward (input)");
-    bfpRequireNoBfpWire(loss, "Softmax backward (loss)");
-    bfpRequireNoBfpWire(propLoss, "Softmax backward (propLoss)");
+/* BFP epic PR6 Task 5 (P6-6): the native ARITH_BFP softmax backward -- ONE
+ * funnel op, OUT_WRITE of dx anchored at propLossQ. The backward
+ * differentiates the UNPACKED forward values: it recomputes s from the
+ * LOGITS via softmaxValuesBfp with the layer's own knob (the packed forward
+ * wire differs from those values by one pack rounding), paying the norms'
+ * documented R-N4 per-op recompute cost. dLds dequantizes exactly
+ * (code * 2^E); dot and dx are float32 in index order; the raw FLOAT32 out
+ * (D7) is packed by the epilogue. The loss-count gate is load-bearing (the
+ * #436 OOB class): both walks run x's flat n, and a shorter per-tensor
+ * {1, 0} loss passes every grid check while lArr[i] reads outside its
+ * scratch. The permuted-shape class does not arise -- softmax is
+ * shape-agnostic, both walks are flat storage order over count-equal
+ * wires. */
+static void softmaxBackwardKernelBfp(tensor_t **ops, size_t nOps, tensor_t *rawOut,
+                                     tensor_t *auxOut, const void *ctx) {
+    (void)nOps;
+    (void)auxOut;
+    const softmaxConfig_t *cfg = ctx;
+    tensor_t *x = ops[0];
+    tensor_t *dLdsT = ops[1];
+    size_t n = calcNumberOfElementsByTensor(x);
+    if (n == 0) {
+        return;
+    }
+    const bfpQConfig_t *xQC = x->quantization->qConfig;
+    const bfpQConfig_t *lQC = dLdsT->quantization->qConfig;
+    validateBfpQConfigShape(xQC, n);
+    bfpRequireElementCount(lQC, calcNumberOfElementsByTensor(dLdsT), n,
+                           "Softmax backward BFP (loss)");
 
-    switch (softmaxLayer->config->softmax->propLossMath.type) {
+    float s[n];
+    softmaxValuesBfp(x, cfg->bfpExpShiftRounding, s); /* P6-6: R-N4 recompute */
+
+    const int32_t lBias = bfpExponentBias(lQC);
+    int32_t const *lArr = (int32_t const *)dLdsT->data;
+    float *out = (float *)rawOut->data;
+    float dot = 0.0f;
+    for (size_t i = 0; i < n; i++) {
+        float dLds = ldexpf((float)lArr[i], (int)lQC->exponents[bfpGroupOf(lQC, i)] - lBias);
+        dot += s[i] * dLds;
+    }
+    for (size_t i = 0; i < n; i++) {
+        float dLds = ldexpf((float)lArr[i], (int)lQC->exponents[bfpGroupOf(lQC, i)] - lBias);
+        out[i] = s[i] * (dLds - dot);
+    }
+}
+
+void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, tensor_t *propLoss) {
+    softmaxConfig_t *cfg = softmaxLayer->config->softmax;
+    switch (cfg->propLossMath.type) {
     case ARITH_FLOAT32:
+        bfpRequireNoBfpWire(input, "Softmax backward (input)");
+        bfpRequireNoBfpWire(loss, "Softmax backward (loss)");
+        bfpRequireNoBfpWire(propLoss, "Softmax backward (propLoss)");
         softmaxBackwardFloat(input, loss, propLoss);
         break;
     case ARITH_SYM_INT32:
+        /* BFP wires under DECLARED SYM math stay denied. Not because
+         * convertTensor would fail (the BFP->FLOAT32 cell exists and this arm
+         * would silently "work") but as the outside-funnel twin of the funnel's
+         * Decision-11 deny: legal BFP-storage arithmetics are FLOAT32
+         * (fake-quant) and BFP (native) only. */
+        bfpRequireNoBfpWire(input, "Softmax backward (input)");
+        bfpRequireNoBfpWire(loss, "Softmax backward (loss)");
+        bfpRequireNoBfpWire(propLoss, "Softmax backward (propLoss)");
         softmaxBackwardSymInt32(input, loss, propLoss);
         break;
+    case ARITH_BFP: {
+        if (propLoss == NULL) {
+            return; /* P6-6: no param grads, no ops to run */
+        }
+        const bfpQConfig_t *anchor = bfpWireAnchor(cfg->propLossQ, "Softmax backward");
+        bfpQConfig_t stage = {.exponents = NULL,
+                              .numGroups = 1,
+                              .groupSize = 0,
+                              .roundingMode = cfg->propLossMath.roundingMode,
+                              .mantissaBits = anchor->mantissaBits,
+                              .exponentBits = anchor->exponentBits};
+        executeOp(&(opSpec_t){.kernel = softmaxBackwardKernelBfp,
+                              .ctx = cfg,
+                              .inputs = (tensor_t *[]){input, loss},
+                              .nInputs = 2,
+                              .arithmetic = cfg->propLossMath,
+                              .mode = OUT_WRITE,
+                              .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL,
+                                           loss->quantization->type == FLOAT32 ? &stage : NULL}},
+                  propLoss);
+        break;
+    }
     default:
-        PRINT_ERROR("Softmax backward: declared propLossMath %d not implemented "
-                    "(FLOAT32/SYM_INT32 only) -- native BFP softmax arrives with epic PR6",
-                    (int)softmaxLayer->config->softmax->propLossMath.type);
+        PRINT_ERROR("Softmax backward: declared propLossMath %d not implemented",
+                    (int)cfg->propLossMath.type);
         exit(1);
     }
 }

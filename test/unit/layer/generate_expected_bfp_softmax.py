@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Generate expected_bfp_softmax.h for UnitTestSoftmax's native ARITH_BFP
-forward tests (BFP epic PR6 Task 4 -- normative pipeline:
-.superpowers/sdd/2026-09-08-bfp-pr6-softmax/numerics-spec.md, steps 1-5).
+forward AND backward tests (BFP epic PR6 Tasks 4+5 -- normative pipeline:
+.superpowers/sdd/2026-09-08-bfp-pr6-softmax/numerics-spec.md, steps 1-5 and
+the backward paragraph).
 
 Four forward fixtures, all n = 8 (whole-tensor softmax, microbatch B=1):
 
@@ -32,6 +33,22 @@ Four forward fixtures, all n = 8 (whole-tensor softmax, microbatch B=1):
     config (outputQ), m = 6 here, NOT the operand's width and not a
     hardcoded 8 (the width-discrimination self-check pins that). Knob stays
     the factory default TRUNC.
+
+Two backward fixtures (Task 5 -- recompute s via the forward pipeline from
+the LOGITS, exact-dequant dLds, float32 dot in index order, raw = s * (dLds
+- dot), OUT_WRITE pack at propLossQ):
+
+  BWD-N "native": x = SM-A's logits (BFP codes/exponents), dLds a SECOND BFP
+    wire on a DIFFERENT grid (per-tensor {1, 0}, m=8/e=8) with NON-uniform
+    values -- uniform loss grads make the -dot term vacuous (the
+    uniform-lossGrad lesson); propLossQ is the grouped {2, 4} m=8/e=8 grid.
+
+  BWD-S "staged loss": same x, dLds as FLOAT32 values the funnel stages
+    per-tensor at the propLossQ ANCHOR widths (m=8/e=8, HALF_AWAY -- the
+    op's storage-derived rounding). The values are deliberately NOT exactly
+    representable on that grid, so the staging rounding shows in the packed
+    gold (script-asserted: skipping the staging changes the wire, and this
+    gold differs from BWD-N's).
 
 Every integer step runs in exact Python ints (the C kernel's int32 bounds are
 asserted, never widened); every float step is mirrored in np.float32 with the
@@ -81,6 +98,10 @@ def f32(x):
 
 def f32_add(a, b):
     return np.float32(np.float32(a) + np.float32(b))
+
+
+def f32_sub(a, b):
+    return np.float32(np.float32(a) - np.float32(b))
 
 
 def f32_mul(a, b):
@@ -219,6 +240,28 @@ def softmax_float64(vals):
     return (e / e.sum()).tolist()
 
 
+def softmax_backward_bfp(x_codes, x_exps, x_qc, dlds_deq, mode):
+    """softmaxBackwardKernelBfp (Softmax.c, Task 5): recompute s via the
+    forward pipeline from the LOGITS (the backward differentiates the
+    UNpacked forward values -- R-N4), then float32 dot in index order and
+    raw_i = s_i * (dLds_i - dot). Returns (raw floats, dot, s) -- the extra
+    two feed the mutation-killability self-checks."""
+    s = softmax_values_bfp(x_codes, x_exps, x_qc, mode)
+    dot = f32(0.0)
+    for si, d in zip(s, dlds_deq):
+        dot = f32_add(dot, f32_mul(si, d))
+    return [f32_mul(si, f32_sub(d, dot)) for si, d in zip(s, dlds_deq)], dot, s
+
+
+def softmax_backward_autograd(x_deq, dlds_deq):
+    """Independent proximity oracle: torch.autograd through a float64 softmax
+    of the exact logit dequants, upstream grad dLds (float64)."""
+    xt = torch.tensor(x_deq, dtype=torch.float64, requires_grad=True)
+    st = torch.softmax(xt, dim=0)
+    st.backward(torch.tensor(dlds_deq, dtype=torch.float64))
+    return xt.grad.tolist()
+
+
 # ---- geometry + fixtures ----
 
 N = 8
@@ -257,6 +300,24 @@ SM_CN_X_QC = dict(SM_X_QC)
 SM_CS_X_CODES = [8, 2, -128, 0, -128, 0, -16, 4]
 SM_CS_X_EXPS = [122, 146, 154, 122]  # E = -5, 19, 27, -5
 SM_CS_X_QC = {"mantissa_bits": 8, "exponent_bits": 8, "group_size": 2}
+
+# BWD-N (Task 5): x = SM-A's logits; dLds a per-tensor {1, 0} m=8/e=8 wire on
+# its OWN grid (E = -8, absmax-minimal for code 90) with NON-uniform values in
+# ~[-0.31, 0.35] -- uniform loss grads make the -dot term vacuous (the
+# uniform-lossGrad lesson). propLossQ is the same grouped {2, 4} m=8/e=8 grid
+# as the forward outputQ (OUT_QC), so the C test reuses the zero-seed wire.
+BWD_DLDS_CODES = [40, -25, 60, 10, -80, 33, -5, 90]
+BWD_DLDS_EXPS = [119]  # per-tensor: ONE stored exponent, E = -8
+BWD_DLDS_QC = {"mantissa_bits": 8, "exponent_bits": 8, "group_size": 0}
+
+# BWD-S (Task 5): the dLds values arrive FLOAT32 and the funnel stages them
+# per-tensor at the propLossQ anchor widths (m=8/e=8). Deliberately lossy on
+# that grid: elements 0 and 3 sit ~0.49 codes off their staged values (the
+# largest staging error the grid allows, opposite rounding directions), so
+# skipping the staging visibly moves the packed gold; elements 3 and 7 also
+# stage to DIFFERENT codes than BWD-N's dLds, so this gold cannot collide
+# with BWD-N's (both script-asserted below).
+BWD_STAGED_DLDS_VALS = [0.1582, -0.099, 0.233, 0.04105, -0.311, 0.13, -0.021, 0.323]
 
 
 def pack(raw, qc):
@@ -476,6 +537,83 @@ def main() -> None:
                   for i, c in enumerate(b_staged_codes)]
     check_proximity("SM-B", b_codes, b_exps, STAGED_OUT_QC, softmax_float64(staged_deq))
 
+    # ---- Task 5: backward fixtures ----
+
+    # -- BWD-N fixture validation + gold --
+    assert len(BWD_DLDS_CODES) == N and len(BWD_DLDS_EXPS) == 1
+    assert all(-128 <= c <= 127 for c in BWD_DLDS_CODES), "BWD-N dLds codes must fit m=8"
+    assert len(set(BWD_DLDS_CODES)) > 1, (
+        "BWD-N: dLds is uniform -- the -dot term collapses to dot = c * sum(s) = c and "
+        "raw = 0 everywhere (the uniform-lossGrad vacuity)")
+    bwd_dlds_deq = [deq(c, BWD_DLDS_EXPS, BWD_DLDS_QC, i) for i, c in enumerate(BWD_DLDS_CODES)]
+    bwd_raw, bwd_dot, bwd_s = softmax_backward_bfp(SM_X_CODES, SM_X_EXPS, SM_X_QC,
+                                                   bwd_dlds_deq, "trunc")
+    assert float(bwd_dot) != 0.0, (
+        "BWD-N: dot == 0 -- the -dot term is vacuous, mutation (a) would survive")
+    bwd_out = pack(bwd_raw, OUT_QC)
+    bwd_codes, bwd_exps = bwd_out
+
+    # (viii) Mutation-(a) killability: dropping -dot must move the PACKED wire.
+    no_dot_out = pack([f32_mul(si, d) for si, d in zip(bwd_s, bwd_dlds_deq)], OUT_QC)
+    assert no_dot_out != bwd_out, (
+        "BWD-N: raw without the -dot term packs to the same wire -- mutation (a) "
+        "would survive the gold")
+
+    # (ix) Mutation-(b) killability: recomputing s from dLds instead of x
+    # (softmaxValuesBfp(dLdsT, ...)) must move the PACKED wire.
+    bad_raw, _, _ = softmax_backward_bfp(BWD_DLDS_CODES, BWD_DLDS_EXPS, BWD_DLDS_QC,
+                                         bwd_dlds_deq, "trunc")
+    assert pack(bad_raw, OUT_QC) != bwd_out, (
+        "BWD-N: s recomputed from dLds packs to the same wire -- mutation (b) "
+        "would survive the gold")
+
+    # (x) Autograd proximity (float64 torch, shares nothing with the
+    # emulation): 6e-3 -- loose, the expected wire is two quantization layers
+    # deep (i-exp s + propLossQ pack).
+    bwd_ref = softmax_backward_autograd(x_deq, [float(v) for v in bwd_dlds_deq])
+    bwd_out_deq = [float(deq(c, bwd_exps, OUT_QC, i)) for i, c in enumerate(bwd_codes)]
+    for i, (got, want) in enumerate(zip(bwd_out_deq, bwd_ref)):
+        assert abs(got - want) <= 6e-3, (
+            f"BWD-N element {i}: packed dx dequantizes to {got}, torch autograd says "
+            f"{want} (bound 6e-3) -- the emulation and the definition disagree")
+
+    # -- BWD-S fixture validation + gold --
+    bwd_st_vals = [np.float32(v) for v in BWD_STAGED_DLDS_VALS]
+    st_codes, st_exps = bfp_quantize_grouped([float(v) for v in bwd_st_vals],
+                                             OUT_QC["mantissa_bits"], OUT_QC["exponent_bits"], 0)
+    st_qc = {"mantissa_bits": OUT_QC["mantissa_bits"],
+             "exponent_bits": OUT_QC["exponent_bits"], "group_size": 0}
+    st_deq = [deq(c, st_exps, st_qc, i) for i, c in enumerate(st_codes)]
+    assert any(float(d) != float(v) for d, v in zip(st_deq, bwd_st_vals)), (
+        "BWD-S: every dLds value is exactly representable at the staging grid -- the "
+        "fixture cannot pin the staging rounding")
+    st_raw, st_dot, _ = softmax_backward_bfp(SM_X_CODES, SM_X_EXPS, SM_X_QC, st_deq, "trunc")
+    assert float(st_dot) != 0.0, "BWD-S: dot == 0 -- the -dot term is vacuous"
+    st_out = pack(st_raw, OUT_QC)
+    st_out_codes, st_out_exps = st_out
+
+    # (xi) Staging non-vacuity: feeding the kernel the EXACT float values
+    # (i.e. skipping the staging quantization) must move the packed wire.
+    unstaged_raw, _, _ = softmax_backward_bfp(SM_X_CODES, SM_X_EXPS, SM_X_QC,
+                                              bwd_st_vals, "trunc")
+    assert pack(unstaged_raw, OUT_QC) != st_out, (
+        "BWD-S: the unstaged floats pack to the same wire -- the fixture cannot pin "
+        "the staging step; increase the values' distance from the m=8 grid")
+
+    # (xii) Cross-fixture guard: the staged gold must differ from BWD-N's, so
+    # a test wiring mix-up between the two backward tests cannot pass.
+    assert st_out != bwd_out, (
+        "BWD-S: staged gold equals BWD-N's -- pick staged values whose codes differ")
+
+    # (xiii) Autograd proximity with the STAGED upstream grads (staging loss
+    # is the fixture's doing, not the kernel's error budget).
+    st_ref = softmax_backward_autograd(x_deq, [float(v) for v in st_deq])
+    st_out_deq = [float(deq(c, st_out_exps, OUT_QC, i)) for i, c in enumerate(st_out_codes)]
+    for i, (got, want) in enumerate(zip(st_out_deq, st_ref)):
+        assert abs(got - want) <= 6e-3, (
+            f"BWD-S element {i}: packed dx dequantizes to {got}, torch autograd says "
+            f"{want} (bound 6e-3) -- the emulation and the definition disagree")
+
     zero_codes = [0] * N
     zero_exps = [2 ** (OUT_QC["exponent_bits"] - 1) - 1] * OUT_NUM_GROUPS
 
@@ -541,6 +679,24 @@ def main() -> None:
         emit_int32_scalar("kSmBfpBOutGroupSize", STAGED_OUT_QC["group_size"]),
         emit_int32_array("kSmBfpBOutCodes", torch.tensor(b_codes)),
         emit_uint8_array("kSmBfpBOutExponents", b_exps),
+        "\n/* BWD-N (Task 5): x = SM-A's logits; dLds a per-tensor {1, 0} m=8/e=8\n"
+        " * BFP wire on its OWN grid (E=-8) with NON-uniform values (a uniform dLds\n"
+        " * makes the -dot term vacuous). The backward recomputes s from the LOGITS\n"
+        " * (R-N4), dots in index order, and OUT_WRITE-packs dx at the grouped\n"
+        " * {2, 4} m=8 propLossQ. Knob TRUNC (the recompute's shift sites). */\n",
+        emit_int32_array("kSmBfpBwdDLdsCodes", torch.tensor(BWD_DLDS_CODES)),
+        emit_uint8_array("kSmBfpBwdDLdsExponents", BWD_DLDS_EXPS),
+        emit_int32_array("kSmBfpBwdOutCodes", torch.tensor(bwd_codes)),
+        emit_uint8_array("kSmBfpBwdOutExponents", bwd_exps),
+        "\n/* BWD-S (Task 5): same x, dLds as FLOAT32 values the funnel stages\n"
+        " * per-tensor at the propLossQ ANCHOR widths (m=8/e=8, HALF_AWAY -- the\n"
+        " * op's storage-derived rounding). Deliberately lossy on that grid: the\n"
+        " * script asserts skipping the staging moves the packed wire, and that\n"
+        " * this gold differs from BWD-N's. */\n",
+        emit_float_array("kSmBfpBwdStagedDLdsValues",
+                         torch.tensor(bwd_st_vals, dtype=torch.float32)),
+        emit_int32_array("kSmBfpBwdStagedOutCodes", torch.tensor(st_out_codes)),
+        emit_uint8_array("kSmBfpBwdStagedOutExponents", st_out_exps),
         "\n#endif /* ODT_EXPECTED_BFP_SOFTMAX_H */\n",
     ]
     Path(args.out).write_text("".join(parts))

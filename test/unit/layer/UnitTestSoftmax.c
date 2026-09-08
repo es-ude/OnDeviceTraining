@@ -470,21 +470,11 @@ void testSoftmaxLayerInitOwningDeepCopiesLqPointers(void) {
 void setUp() {}
 void tearDown() {}
 
-/* BFP epic PR2 Task 8 (fourth outside-funnel site): softmaxBackward dispatches
- * on the layer's DECLARED propLossMath and the ARITH_FLOAT32 arm raw-casts all
- * three wires to float* with no dtype check at all -- unlike Relu/Dropout, which
- * carried #315-style arm guards already. Softmax FORWARD is safe (it runs inside
- * executeOp, whose prologue/epilogue convert), and the SYM_INT32 backward arm
- * converts via convertTensor; backward-FLOAT32 is the sole hole.
- *
- * This became REACHABLE with Task 8: before it, a BFP propLossQ died in
- * initGradTensor's default arm, so no BFP wire could ever arrive here. Now the
- * dx wire allocates, and an ARITH_FLOAT32 propLossMath -- pinned, or derived
- * as such before the Task 9 flip -- routes it straight into the raw casts: a
- * ~4x heap over-read on
- * the input/loss side and an over-WRITE into the (4x smaller at 8 mantissa bits)
- * packed propLoss buffer. Keyed on each wire's STORAGE dtype, checked before the
- * dispatch. */
+/* 1-D wire builder for the BFP fixtures (n elements, caller-chosen storage).
+ * The PR2-Task-8 blanket "no BFP wires on softmaxBackward" guard this file
+ * once pinned is RETIRED with PR6 Task 5: the backward now carries a native
+ * ARITH_BFP funnel arm; the FLOAT32/SYM arms keep per-arm guards (the
+ * funnel's Decision-11 twin -- see softmaxBackward). */
 static tensor_t *buildSoftmaxWire1D(size_t n, quantization_t *q) {
     size_t *dims = reserveMemory(sizeof(size_t));
     dims[0] = n;
@@ -493,39 +483,6 @@ static tensor_t *buildSoftmaxWire1D(size_t n, quantization_t *q) {
     shape_t *shape = reserveMemory(sizeof(shape_t));
     setShape(shape, dims, 1, order);
     return initTensor(shape, q, NULL);
-}
-
-void testSoftmaxBackwardRejectsBfpWire(void) {
-    quantization_t *floatQ = quantizationInitFloat();
-    layerQuant_t lq;
-    layerQuantInitUniform(&lq, floatQ);
-    layer_t *softmaxLayer = softmaxLayerInit(&lq);
-    layerFunctions_t softmaxFns = layerFunctions[SOFTMAX];
-
-    /* propLoss BFP: the DESTINATION of the raw float* writes -- 6 packed bytes
-     * receiving 24 bytes of float. */
-    tensor_t *input = buildSoftmaxWire1D(6, quantizationInitFloat());
-    tensor_t *loss = buildSoftmaxWire1D(6, quantizationInitFloat());
-    tensor_t *bfpPropLoss = buildSoftmaxWire1D(6, quantizationInitBfp(8, 8, HALF_AWAY));
-    ASSERT_EXITS_WITH_FAILURE(softmaxFns.backward(softmaxLayer, input, loss, bfpPropLoss));
-
-    /* input BFP: the softmax activations the dot product reads. */
-    tensor_t *bfpInput = buildSoftmaxWire1D(6, quantizationInitBfp(8, 8, HALF_AWAY));
-    tensor_t *propLoss = buildSoftmaxWire1D(6, quantizationInitFloat());
-    ASSERT_EXITS_WITH_FAILURE(softmaxFns.backward(softmaxLayer, bfpInput, loss, propLoss));
-
-    /* loss BFP: the incoming gradient. */
-    tensor_t *bfpLoss = buildSoftmaxWire1D(6, quantizationInitBfp(8, 8, HALF_AWAY));
-    ASSERT_EXITS_WITH_FAILURE(softmaxFns.backward(softmaxLayer, input, bfpLoss, propLoss));
-
-    freeTensor(bfpLoss);
-    freeTensor(propLoss);
-    freeTensor(bfpInput);
-    freeTensor(bfpPropLoss);
-    freeTensor(loss);
-    freeTensor(input);
-    freeSoftmaxLayer(softmaxLayer);
-    freeQuantization(floatQ);
 }
 
 /* ---- BFP epic PR6 Task 4: native ARITH_BFP forward (P6-2..P6-5) ----
@@ -780,9 +737,180 @@ void testSoftmaxForwardBfpRequiresBfpOutputQ(void) {
     freeQuantization(floatQ);
 }
 
+/* ---- BFP epic PR6 Task 5: native ARITH_BFP backward (P6-6) ----
+ *
+ * ONE funnel op: OUT_WRITE of dx into the propLoss wire, anchored on
+ * propLossQ. The kernel recomputes s from the LOGITS via the forward
+ * pipeline (same knob), dequantizes dLds exactly, dots in float32 index
+ * order, and emits raw = s * (dLds - dot); the epilogue packs at propLossQ.
+ * Gold: kSmBfpBwd* (generate_expected_bfp_softmax.py mirrors the kernel
+ * statement for statement). */
+
+/* The primary backward oracle: x = SM-A's logits, dLds a per-tensor {1, 0}
+ * m=8/e=8 wire on its OWN grid with NON-uniform values (script-asserted
+ * dot != 0, so the -dot term is load-bearing -- the uniform-lossGrad
+ * lesson), dx packed at the grouped {2, 4} m=8 propLossQ. Knob TRUNC. */
+void unitTestSoftmaxBackwardBfpNative(void) {
+    tensor_t *in = buildSmBfpAInput();
+    tensor_t *loss =
+        buildSmBfpWireWithCodes(8, (uint8_t)kSmBfpXMantissaBits, (uint8_t)kSmBfpXExponentBits, 1, 0,
+                                kSmBfpBwdDLdsCodes, kSmBfpBwdDLdsExponents);
+    tensor_t *propLoss = buildSmBfpOutputWire((uint8_t)kSmBfpOutMantissaBits);
+
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, propLoss->quantization);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+    /* Derived through the ordinary config path -- pins that the flip holds. */
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->propLossMath.type);
+
+    layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, propLoss);
+
+    int32_t got[8];
+    uint8_t gotExps[2];
+    bfpQConfig_t *plQC = propLoss->quantization->qConfig;
+    unpackSignExtend(propLoss->data, plQC->mantissaBits, 0, got, 8);
+    memcpy(gotExps, plQC->exponents, plQC->numGroups);
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(in);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(kSmBfpBwdOutCodes, got, 8);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(kSmBfpBwdOutExponents, gotExps, 2);
+}
+
+/* The loss-side .bfpStage entry: a FLOAT32-stored dLds is staged per-tensor
+ * at the ANCHOR widths (propLossQ, m=8/e=8) with the op's storage-derived
+ * rounding. The generator asserts the staging is LOSSY (skipping it moves
+ * the packed wire) and that this gold differs from the native one, so the
+ * test pins the staging step itself, not just the funnel plumbing. */
+void unitTestSoftmaxBackwardBfpStagedLoss(void) {
+    tensor_t *in = buildSmBfpAInput();
+    tensor_t *loss = buildSoftmaxWire1D(8, quantizationInitFloat());
+    tensorFillFromFloatBuffer(loss, (float *)kSmBfpBwdStagedDLdsValues,
+                              kSmBfpBwdStagedDLdsValues_len);
+    tensor_t *propLoss = buildSmBfpOutputWire((uint8_t)kSmBfpOutMantissaBits);
+
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, propLoss->quantization);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->propLossMath.type);
+
+    layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, propLoss);
+
+    int32_t got[8];
+    uint8_t gotExps[2];
+    bfpQConfig_t *plQC = propLoss->quantization->qConfig;
+    unpackSignExtend(propLoss->data, plQC->mantissaBits, 0, got, 8);
+    memcpy(gotExps, plQC->exponents, plQC->numGroups);
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(in);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(kSmBfpBwdStagedOutCodes, got, 8);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(kSmBfpBwdStagedOutExponents, gotExps, 2);
+}
+
+/* The backward's staging width anchor is the produced-wire config: a pinned
+ * ARITH_BFP propLossMath next to a non-BFP propLossQ leaves the arm with no
+ * width source at all -- fail fast at op entry (bfpWireAnchor), never a
+ * silent fallback width. Reachable because userApi factories copy
+ * layerQuant_t slots by value. propLoss is non-NULL here: the anchor binds
+ * only when an op actually runs (the NULL ordering is pinned below). */
+void testSoftmaxBackwardBfpRequiresBfpPropLossQ(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+    softmaxLayer->config->softmax->propLossMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+
+    tensor_t *in = buildSoftmaxWire1D(8, quantizationInitFloat());
+    tensorFillFromFloatBuffer(in, (float *)kSmBfpBXValues, kSmBfpBXValues_len);
+    tensor_t *loss = buildSoftmaxWire1D(8, quantizationInitFloat());
+    tensorFillFromFloatBuffer(loss, (float *)kSmBfpBwdStagedDLdsValues,
+                              kSmBfpBwdStagedDLdsValues_len);
+    tensor_t *propLoss = buildSoftmaxWire1D(8, quantizationInitFloat());
+
+    ASSERT_EXITS_WITH_FAILURE(layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, propLoss));
+
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(in);
+    freeSoftmaxLayer(softmaxLayer);
+    freeQuantization(floatQ);
+}
+
+/* The kernel's loss-count gate (the #436 OOB class): both kernel walks run
+ * x's flat n, and a SHORTER per-tensor {1, 0} loss passes every grid check
+ * (that sentinel is legal for ANY element count) while lArr[i] reads outside
+ * its funnel scratch. Added RED-first against the gate-less kernel (mutation
+ * (c)): without the gate the walk completes on garbage and the child exits
+ * 0, so this death test fails -- the gate is the sole catcher. */
+void testSoftmaxBackwardBfpRejectsCountMismatchLoss(void) {
+    static const int32_t xCodes[8] = {10, 20, -30, 40, 5, -6, 7, 8};
+    static const int32_t lossCodes[4] = {1, 2, 3, -4};
+    static const uint8_t perTensorExp[1] = {127}; /* E = 0 */
+    tensor_t *in = buildSmBfpWireWithCodes(
+        8, (uint8_t)kSmBfpXMantissaBits, (uint8_t)kSmBfpXExponentBits, 1, 0, xCodes, perTensorExp);
+    tensor_t *loss =
+        buildSmBfpWireWithCodes(4, (uint8_t)kSmBfpXMantissaBits, (uint8_t)kSmBfpXExponentBits, 1, 0,
+                                lossCodes, perTensorExp);
+    tensor_t *propLoss = buildSmBfpOutputWire((uint8_t)kSmBfpOutMantissaBits);
+
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, propLoss->quantization);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+
+    ASSERT_EXITS_WITH_FAILURE(layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, propLoss));
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(in);
+}
+
+/* P6-6: softmax has NO param grads, so propLoss == NULL means no op runs at
+ * all -- the ARITH_BFP arm returns BEFORE the anchor gate binds (documented
+ * deviation from the norms' anchor-binds-even-when-NULL rule). The layer
+ * here carries the SAME broken config as the death test above (pinned
+ * ARITH_BFP propLossMath, FLOAT32 propLossQ): with a non-NULL propLoss it
+ * dies at the anchor, so a plain return here pins the gate ORDERING, not
+ * just the no-op. The input/loss wires must come back untouched. */
+void unitTestSoftmaxBackwardBfpNullPropLossIsNoOp(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+    softmaxLayer->config->softmax->propLossMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+
+    tensor_t *in = buildSmBfpAInput();
+    tensor_t *loss =
+        buildSmBfpWireWithCodes(8, (uint8_t)kSmBfpXMantissaBits, (uint8_t)kSmBfpXExponentBits, 1, 0,
+                                kSmBfpBwdDLdsCodes, kSmBfpBwdDLdsExponents);
+
+    layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, NULL);
+
+    int32_t gotIn[8];
+    int32_t gotLoss[8];
+    unpackSignExtend(in->data, (uint8_t)kSmBfpXMantissaBits, 0, gotIn, 8);
+    unpackSignExtend(loss->data, (uint8_t)kSmBfpXMantissaBits, 0, gotLoss, 8);
+
+    freeTensor(loss);
+    freeTensor(in);
+    freeSoftmaxLayer(softmaxLayer);
+    freeQuantization(floatQ);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(kSmBfpXCodes, gotIn, 8);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(kSmBfpBwdDLdsCodes, gotLoss, 8);
+}
+
 int main() {
     UNITY_BEGIN();
-    RUN_TEST(testSoftmaxBackwardRejectsBfpWire);
     RUN_TEST(unitTestSoftmaxForwardFloat);
     RUN_TEST(unitTestSoftmaxForwardSymInt32);
 
@@ -798,6 +926,13 @@ int main() {
     RUN_TEST(unitTestSoftmaxForwardBfpCoarseSaturation);
     RUN_TEST(unitTestSoftmaxForwardBfpStagedWidths);
     RUN_TEST(testSoftmaxForwardBfpRequiresBfpOutputQ);
+
+    RUN_TEST(unitTestSoftmaxBackwardBfpNative);
+    RUN_TEST(unitTestSoftmaxBackwardBfpStagedLoss);
+    RUN_TEST(testSoftmaxBackwardBfpRequiresBfpPropLossQ);
+    RUN_TEST(testSoftmaxBackwardBfpRejectsCountMismatchLoss);
+    RUN_TEST(unitTestSoftmaxBackwardBfpNullPropLossIsNoOp);
+
     RUN_TEST(testSoftmaxLayerInitAndFreeRoundTrip);
     RUN_TEST(testSoftmaxLayerInitBorrowingStoresLqPointers);
     RUN_TEST(testSoftmaxLayerInitOwningDeepCopiesLqPointers);

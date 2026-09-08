@@ -75,9 +75,9 @@ static void softmaxForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, ten
     softmaxValuesFloat(x, y, count);
 }
 
-/* BFP epic PR6 Task 4 (P6-2..P6-5): the native ARITH_BFP softmax -- numerics
- * spec .superpowers/sdd/2026-09-08-bfp-pr6-softmax/numerics-spec.md steps 1-5
- * (normative; the goldgen mirrors this function statement for statement).
+/* BFP epic PR6 Task 4 (P6-2..P6-5): the native ARITH_BFP softmax -- pipeline
+ * contract docs/conventions/arithmetic-bfp.md §5.9 (R-S2) steps 1-5; the
+ * goldgen mirrors this function statement for statement.
  * Operands arrive in the funnel's unpacked-BFP scratch form (int32 mantissa
  * codes + live bfpQConfig_t). `mode` is the layer's bfpExpShiftRounding knob:
  * it governs ONLY the integer right-shift sites here (the alignment shift and

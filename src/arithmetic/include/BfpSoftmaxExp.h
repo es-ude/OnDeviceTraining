@@ -4,8 +4,8 @@
 
 /* Integer i-exp core for the BFP softmax (I-BERT Algorithm 3, Kim et al.
  * 2021, on a FIXED dyadic work grid 2^-F) plus the 3-mode integer
- * shift-rounding helper the kernels share. Numerics spec:
- * .superpowers/sdd/2026-09-08-bfp-pr6-softmax/numerics-spec.md (-> §5.9).
+ * shift-rounding helper the kernels share. Pipeline contract:
+ * docs/conventions/arithmetic-bfp.md §5.9 (R-S2).
  *
  * Headroom proof (why F = 14 and why no int64 is needed anywhere):
  * q_p ∈ (−QLN2, 0] so |q_p + q_b| ≤ q_b = 22167; the I-POLY square is

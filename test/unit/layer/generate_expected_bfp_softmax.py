@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Generate expected_bfp_softmax.h for UnitTestSoftmax's native ARITH_BFP
-forward AND backward tests (BFP epic PR6 Tasks 4+5 -- normative pipeline:
-.superpowers/sdd/2026-09-08-bfp-pr6-softmax/numerics-spec.md, steps 1-5 and
-the backward paragraph).
+forward AND backward tests (BFP epic PR6 Tasks 4+5 -- pipeline contract:
+docs/conventions/arithmetic-bfp.md §5.9, R-S2 steps 1-5 and the R-S4
+backward paragraph).
 
 Four forward fixtures, all n = 8 (whole-tensor softmax, microbatch B=1):
 

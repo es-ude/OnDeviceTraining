@@ -132,8 +132,8 @@ void unitTestSoftmaxForwardSymInt32() {
     }
 }
 
-/* P6-1 root fix: backward consumes LOGITS -- see docs/superpowers/sdd/
- * 2026-09-08-bfp-pr6-softmax/task-2-brief.md. Fixture X/DLDS/EXPECTED_DX
+/* P6-1 root fix: backward consumes LOGITS -- see docs/conventions/
+ * arithmetic-bfp.md §5.9/§11 (Correction 1, P6-1). Fixture X/DLDS/EXPECTED_DX
  * are goldgen'd (generate_expected_softmax.py, self-checked against
  * torch.autograd on softmax(x) with upstream grad DLDS). */
 void unitTestSoftmaxBackwardFloat() {

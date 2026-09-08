@@ -1,8 +1,10 @@
 #include <stdlib.h>
+#include <string.h>
 
 #include "ArithmeticType.h"
 #include "DeathTest.h"
 #include "LayerQuant.h"
+#include "Quantization.h"
 #include "QuantizationApi.h"
 #include "Softmax.h"
 #include "SoftmaxApi.h"
@@ -10,6 +12,7 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
+#include "expected_bfp_softmax.h"
 #include "expected_softmax.h"
 #include "unity.h"
 
@@ -525,6 +528,173 @@ void testSoftmaxBackwardRejectsBfpWire(void) {
     freeQuantization(floatQ);
 }
 
+/* ---- BFP epic PR6 Task 4: native ARITH_BFP forward (P6-2..P6-5) ----
+ *
+ * Gold: expected_bfp_softmax.h (generate_expected_bfp_softmax.py mirrors the
+ * numerics-spec steps 1-5 bit-exactly; the script asserts the TRUNC and
+ * HALF_AWAY wires differ, so the two knob tests double as the knob
+ * discriminator). Every gold test asserts the ARITH_BFP derivation through
+ * the ordinary config path before running. */
+
+/* Packed BFP wire from explicit codes + per-group exponents (the sanctioned
+ * fixture route, mirrored from UnitTestLayerNorm.c's buildBfpWireWithCodesLn:
+ * byteConversion pack + exponent memcpy, arithmetic-bfp.md §5.7 inventory).
+ * Writing the payload directly keeps the fixture independent of the quantizer
+ * and pins the exponents the kernel borrows. */
+static tensor_t *buildSmBfpWireWithCodes(size_t n, uint8_t mantissaBits, uint8_t exponentBits,
+                                         size_t numGroups, size_t groupSize, int32_t const *codes,
+                                         uint8_t const *exponents) {
+    quantization_t *q = (groupSize == 0)
+                            ? quantizationInitBfp(mantissaBits, exponentBits, HALF_AWAY)
+                            : quantizationInitBfpGrouped(mantissaBits, exponentBits, HALF_AWAY,
+                                                         numGroups, groupSize);
+    size_t *dims = reserveMemory(sizeof(size_t));
+    dims[0] = n;
+    size_t *order = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    tensor_t *t = initTensor(shape, q, NULL);
+    int32_t packSrc[n]; /* byteConversion takes a mutable source */
+    memcpy(packSrc, codes, n * sizeof(int32_t));
+    byteConversion((uint8_t *)packSrc, 32, t->data, mantissaBits, n);
+    bfpQConfig_t *qc = t->quantization->qConfig;
+    memcpy(qc->exponents, exponents, qc->numGroups);
+    return t;
+}
+
+/* SM-A's input wire (grouped {2, 4}, two DIFFERENT stored exponents, so the
+ * block-B alignment shift is 4 bits with nonzero remainders). */
+static tensor_t *buildSmBfpAInput(void) {
+    return buildSmBfpWireWithCodes(8, (uint8_t)kSmBfpXMantissaBits, (uint8_t)kSmBfpXExponentBits,
+                                   (size_t)kSmBfpXNumGroups, (size_t)kSmBfpXGroupSize, kSmBfpXCodes,
+                                   kSmBfpXExponents);
+}
+
+/* A freshly zero-seeded produced wire (all-zero codes, all-bias exponents),
+ * so every emitted code/exponent comes from the OUT_WRITE epilogue. */
+static tensor_t *buildSmBfpOutputWire(uint8_t mantissaBits) {
+    return buildSmBfpWireWithCodes(8, mantissaBits, (uint8_t)kSmBfpOutExponentBits,
+                                   (size_t)kSmBfpOutNumGroups, (size_t)kSmBfpOutGroupSize,
+                                   kSmBfpOutZeroCodes, kSmBfpOutZeroExponents);
+}
+
+/* The primary oracle at the default knob (TRUNC, I-BERT-faithful): BFP-stored
+ * input borrowed zero-copy, integer alignment + i-exp on the block mantissas,
+ * float boundary, OUT_WRITE pack at the grouped {2, 4} m=8 outputQ. */
+void unitTestSoftmaxForwardBfpNativeTrunc(void) {
+    tensor_t *in = buildSmBfpAInput();
+    tensor_t *out = buildSmBfpOutputWire((uint8_t)kSmBfpOutMantissaBits);
+
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, out->quantization);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+    /* Derived through the ordinary config path -- pins that the flip holds. */
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->forwardMath.type);
+
+    layerFunctions[SOFTMAX].forward(softmaxLayer, in, out);
+
+    /* 8 = kSmBfpN, 2 = kSmBfpOutNumGroups (literal sizes: a static-const
+     * bound would make these VLAs). */
+    int32_t got[8];
+    uint8_t gotExps[2];
+    bfpQConfig_t *outQC = out->quantization->qConfig;
+    unpackSignExtend(out->data, outQC->mantissaBits, 0, got, 8);
+    memcpy(gotExps, outQC->exponents, outQC->numGroups);
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(out);
+    freeTensor(in);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(kSmBfpOutCodesTrunc, got, 8);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(kSmBfpOutExponentsTrunc, gotExps, 2);
+}
+
+/* Same fixture through the knob's other deterministic position -- the gold
+ * wires differ (script-asserted), so PASSING BOTH tests proves the knob
+ * actually reaches the kernel's shift sites. */
+void unitTestSoftmaxForwardBfpNativeHalfAway(void) {
+    tensor_t *in = buildSmBfpAInput();
+    tensor_t *out = buildSmBfpOutputWire((uint8_t)kSmBfpOutMantissaBits);
+
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, out->quantization);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->forwardMath.type);
+    softmaxSetBfpExpShiftRounding(softmaxLayer, BFP_SHIFT_HALF_AWAY);
+
+    layerFunctions[SOFTMAX].forward(softmaxLayer, in, out);
+
+    int32_t got[8];
+    uint8_t gotExps[2];
+    bfpQConfig_t *outQC = out->quantization->qConfig;
+    unpackSignExtend(out->data, outQC->mantissaBits, 0, got, 8);
+    memcpy(gotExps, outQC->exponents, outQC->numGroups);
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(out);
+    freeTensor(in);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(kSmBfpOutCodesHalfAway, got, 8);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(kSmBfpOutExponentsHalfAway, gotExps, 2);
+}
+
+/* R-N1 staging: a FLOAT32-stored input is staged per-tensor at the ANCHOR
+ * widths -- the layer's own produced-wire config (outputQ, m = 6 here), not
+ * the operand's width and not a hardcoded 8. The generator asserts an m=8
+ * staging changes these codes, so this test pins BOTH the .bfpStage wiring
+ * AND the anchor widths. */
+void unitTestSoftmaxForwardBfpStagedWidths(void) {
+    tensor_t *in = buildSoftmaxWire1D(8, quantizationInitFloat());
+    tensorFillFromFloatBuffer(in, (float *)kSmBfpBXValues, kSmBfpBXValues_len);
+    tensor_t *out = buildSmBfpOutputWire((uint8_t)kSmBfpBOutMantissaBits);
+
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, out->quantization);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->forwardMath.type);
+
+    layerFunctions[SOFTMAX].forward(softmaxLayer, in, out);
+
+    int32_t got[8];
+    uint8_t gotExps[2];
+    bfpQConfig_t *outQC = out->quantization->qConfig;
+    unpackSignExtend(out->data, outQC->mantissaBits, 0, got, 8);
+    memcpy(gotExps, outQC->exponents, outQC->numGroups);
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(out);
+    freeTensor(in);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(kSmBfpBOutCodes, got, 8);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(kSmBfpBOutExponents, gotExps, 2);
+}
+
+/* The forward's staging width anchor is the produced-wire config: a pinned
+ * ARITH_BFP forwardMath next to a non-BFP outputQ leaves the arm with no
+ * width source at all -- fail fast at op entry (bfpWireAnchor), never a
+ * silent fallback width. Reachable because userApi factories copy
+ * layerQuant_t slots by value. */
+void testSoftmaxForwardBfpRequiresBfpOutputQ(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+    softmaxLayer->config->softmax->forwardMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+
+    tensor_t *in = buildSoftmaxWire1D(8, quantizationInitFloat());
+    tensorFillFromFloatBuffer(in, (float *)kSmBfpBXValues, kSmBfpBXValues_len);
+    tensor_t *out = buildSoftmaxWire1D(8, quantizationInitFloat());
+
+    ASSERT_EXITS_WITH_FAILURE(layerFunctions[SOFTMAX].forward(softmaxLayer, in, out));
+
+    freeTensor(out);
+    freeTensor(in);
+    freeSoftmaxLayer(softmaxLayer);
+    freeQuantization(floatQ);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testSoftmaxBackwardRejectsBfpWire);
@@ -536,6 +706,11 @@ int main() {
 
     RUN_TEST(testSoftmaxForwardLargeLogitsStaysFinite);
     RUN_TEST(testSoftmaxForwardSymLargeLogitsStaysFinite);
+
+    RUN_TEST(unitTestSoftmaxForwardBfpNativeTrunc);
+    RUN_TEST(unitTestSoftmaxForwardBfpNativeHalfAway);
+    RUN_TEST(unitTestSoftmaxForwardBfpStagedWidths);
+    RUN_TEST(testSoftmaxForwardBfpRequiresBfpOutputQ);
     RUN_TEST(testSoftmaxLayerInitAndFreeRoundTrip);
     RUN_TEST(testSoftmaxLayerInitBorrowingStoresLqPointers);
     RUN_TEST(testSoftmaxLayerInitOwningDeepCopiesLqPointers);

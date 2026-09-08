@@ -7,6 +7,7 @@
 
 #include "ArithmeticType.h"
 #include "BfpKernelSupport.h"
+#include "BfpSoftmaxExp.h"
 #include "Common.h"
 #include "ExecuteOp.h"
 #include "Softmax.h"
@@ -74,17 +75,146 @@ static void softmaxForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, ten
     softmaxValuesFloat(x, y, count);
 }
 
+/* BFP epic PR6 Task 4 (P6-2..P6-5): the native ARITH_BFP softmax -- numerics
+ * spec .superpowers/sdd/2026-09-08-bfp-pr6-softmax/numerics-spec.md steps 1-5
+ * (normative; the goldgen mirrors this function statement for statement).
+ * Operands arrive in the funnel's unpacked-BFP scratch form (int32 mantissa
+ * codes + live bfpQConfig_t). `mode` is the layer's bfpExpShiftRounding knob:
+ * it governs ONLY the integer right-shift sites here (the alignment shift and
+ * the >>z inside bfpIExpQ) -- staging and the OUT_WRITE pack keep the normal
+ * roundingMode_t machinery. Raw out is FLOAT32 (D7). Task 5's backward
+ * recompute path calls this helper verbatim. */
+static void softmaxValuesBfp(const tensor_t *input, bfpShiftRounding_t mode, float *sOut) {
+    /* n == 0 handled by caller. */
+    const bfpQConfig_t *qC = input->quantization->qConfig;
+    const int32_t bias = bfpExponentBias(qC);
+    const int32_t *m = (const int32_t *)input->data;
+    /* calcNumberOfElementsByTensor takes a non-const tensor_t* but only
+     * reads; the cast keeps this helper's const-view contract for Task 5's
+     * backward recompute caller. */
+    const size_t n = calcNumberOfElementsByTensor((tensor_t *)input);
+
+    /* (1) Max (P6-4): ldexpf compare, strict > keeps the FIRST max; remember
+     * the winner's mantissa and UNBIASED exponent. */
+    int32_t mMax = m[0];
+    int32_t eMax = (int32_t)qC->exponents[bfpGroupOf(qC, 0)] - bias;
+    float xMax = ldexpf((float)m[0], (int)eMax);
+    for (size_t i = 1; i < n; i++) {
+        const int32_t ei = (int32_t)qC->exponents[bfpGroupOf(qC, i)] - bias;
+        const float xi = ldexpf((float)m[i], (int)ei);
+        if (xi > xMax) {
+            xMax = xi;
+            mMax = m[i];
+            eMax = ei;
+        }
+    }
+
+    /* (2) Align onto the work-grid-or-coarser common grid (THE lossy site --
+     * exactly ONE rounded shift per element). When the storage grid is FINER
+     * than the work grid (sigma < 0), `down` folds the extra descent into
+     * that same shift -- never two chained roundings. Each eMax - ei >= 0 by
+     * the alignment invariant (absmax-minimal exponents are monotone in
+     * block absmax; NOT asserted -- a defensive clamp would hide grid
+     * corruption, see §5.9). */
+    const int32_t sigma = eMax + BFP_SOFTMAX_EXP_FRAC_BITS;
+    const uint32_t down = (sigma < 0) ? (uint32_t)(-sigma) : 0u;
+    const int32_t mMaxW = bfpShiftRightRounded(mMax, down, mode);
+    float sum = 0.f;
+    for (size_t i = 0; i < n; i++) {
+        const int32_t ei = (int32_t)qC->exponents[bfpGroupOf(qC, i)] - bias;
+        const uint32_t shiftTotal = (uint32_t)(eMax - ei) + down;
+        const int32_t aligned = bfpShiftRightRounded(m[i], shiftTotal, mode);
+        int32_t qT = aligned - mMaxW;
+        if (qT > 0) {
+            /* min(qT, 0): load-bearing under SR -- deterministic modes are
+             * monotone (qT <= 0 by construction), but SR jitter can yield +1,
+             * which would reach bfpIExpQ as qW > 0 and make z negative; such
+             * jitter maps to exp(0) instead. */
+            qT = 0;
+        }
+        /* (3) Work-grid promotion (exact). sigma >= 31: any nonzero deficit
+         * at scale >= 2^17 is >> 22.18 -> exact underflow. sigma >= 0:
+         * saturating exact left shift -- the thr guard keeps it inside int32
+         * (|qT| <= ceil(363392/2^sigma) => |qW| < 363392 + 2^sigma); the
+         * unsigned re-shift is the two's-complement image of qT * 2^sigma
+         * without the signed-left-shift UB (the BfpSoftmaxExp.c SR idiom).
+         * sigma < 0: qT is already ON the work grid from step (2). */
+        int32_t qW;
+        if (sigma >= 31) {
+            qW = (qT < 0) ? BFP_SOFTMAX_QFLOOR : 0;
+        } else if (sigma >= 0) {
+            const int32_t thr = -((363392 + (1 << sigma) - 1) >> sigma);
+            qW = (qT <= thr) ? BFP_SOFTMAX_QFLOOR : (int32_t)((uint32_t)qT << (uint32_t)sigma);
+        } else {
+            qW = qT;
+        }
+        /* (4) Integer core (lossy site 3 is the >>z inside); (5) float
+         * boundary (P6-5): S_out = A * 2^-28, float sum in index order. */
+        const int32_t qe = bfpIExpQ(qW, mode);
+        const float e = ldexpf((float)qe * BFP_SOFTMAX_A, -28);
+        sOut[i] = e;
+        sum += e;
+    }
+    for (size_t i = 0; i < n; i++) {
+        sOut[i] /= sum;
+    }
+}
+
+static void softmaxForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
+                                    const void *ctx) {
+    (void)n;
+    (void)auxOut;
+    const softmaxConfig_t *cfg = ctx;
+    tensor_t *input = ops[0];
+    size_t count = calcNumberOfElementsByTensor(input);
+    if (count == 0) {
+        return;
+    }
+    validateBfpQConfigShape(input->quantization->qConfig, count);
+    softmaxValuesBfp(input, cfg->bfpExpShiftRounding, (float *)rawOut->data);
+}
+
 void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output) {
-    (void)softmaxLayer;
-    executeOp(
-        &(opSpec_t){
-            .kernel = softmaxForwardKernel,
-            .inputs = (tensor_t *[]){input},
-            .nInputs = 1,
-            .arithmetic = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY},
-            .mode = OUT_WRITE,
-        },
-        output);
+    softmaxConfig_t *cfg = softmaxLayer->config->softmax;
+    switch (cfg->forwardMath.type) {
+    case ARITH_BFP: {
+        const bfpQConfig_t *anchor = bfpWireAnchor(cfg->outputQ, "Softmax forward");
+        bfpQConfig_t stage = {.exponents = NULL,
+                              .numGroups = 1,
+                              .groupSize = 0,
+                              .roundingMode = cfg->forwardMath.roundingMode,
+                              .mantissaBits = anchor->mantissaBits,
+                              .exponentBits = anchor->exponentBits};
+        executeOp(&(opSpec_t){.kernel = softmaxForwardKernelBfp,
+                              .ctx = cfg,
+                              .inputs = (tensor_t *[]){input},
+                              .nInputs = 1,
+                              .arithmetic = cfg->forwardMath,
+                              .mode = OUT_WRITE,
+                              .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL}},
+                  output);
+        return;
+    }
+    case ARITH_FLOAT32:
+    case ARITH_SYM_INT32:
+        /* P6-7: declared SYM math keeps its documented fake-quant meaning --
+         * compute in float, funnel prologue/epilogue convert. The opSpec
+         * arithmetic stays HARDCODED ARITH_FLOAT32 (NOT cfg->forwardMath):
+         * ARITH_SYM_INT32 would make the prologue unpack into int32 scratch
+         * the float kernel misreads through a float* cast. */
+        executeOp(&(opSpec_t){.kernel = softmaxForwardKernel,
+                              .inputs = (tensor_t *[]){input},
+                              .nInputs = 1,
+                              .arithmetic =
+                                  (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY},
+                              .mode = OUT_WRITE},
+                  output);
+        return;
+    default:
+        PRINT_ERROR("Softmax forward: declared forwardMath %d not implemented",
+                    (int)cfg->forwardMath.type);
+        exit(1);
+    }
 }
 
 /* BFP epic PR2 Task 8: softmaxBackward is the fourth outside-funnel site (after

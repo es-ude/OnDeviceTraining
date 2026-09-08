@@ -214,6 +214,23 @@ add_custom_command(
 add_custom_target(generate_expected_softmax
         DEPENDS ${GEN_SOFTMAX_HEADER})
 
+# BFP epic PR6 Task 4: native ARITH_BFP softmax forward gold. The knob-
+# discriminating integer pipeline (I-BERT i-exp on block mantissas) and the
+# wire-anchored m=6 staging are bit-exact targets -- only the Python twin can
+# supply them.
+set(GEN_BFP_SOFTMAX_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_bfp_softmax.h)
+add_custom_command(
+        OUTPUT ${GEN_BFP_SOFTMAX_HEADER}
+        COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_bfp_softmax.py
+                --out ${GEN_BFP_SOFTMAX_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_bfp_softmax.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+        COMMENT "Generating expected_bfp_softmax.h via PyTorch"
+        VERBATIM
+)
+add_custom_target(generate_expected_bfp_softmax
+        DEPENDS ${GEN_BFP_SOFTMAX_HEADER})
+
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Softmax
@@ -230,6 +247,7 @@ add_elastic_ai_unit_test(
         odt_test_death
 )
 add_dependencies(UnitTestSoftmax generate_expected_softmax)
+add_dependencies(UnitTestSoftmax generate_expected_bfp_softmax)
 target_include_directories(UnitTestSoftmax PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 add_elastic_ai_unit_test(

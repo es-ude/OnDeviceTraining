@@ -1053,12 +1053,15 @@ mirroring `docs/conventions/arithmetic-sym.md` §"Grouped backward").**
    multiply (`ldexpf`), exact in float32, and the mean's/dbeta's `int32`
    segment partials and folds are exact under the sum-headroom guard — up
    to §7's `(float)partial` conversion point above `2^24`, the one place
-   a headroom-legal partial can still round (cross-referenced in §10). The
-   ONLY BFP-specific rounding on any norm path is the OUT_WRITE pack of
-   the produced wire (forward y, backward dx) — one `roundByMode` per
-   element — plus, when a grad tensor is STORED BFP, the ACC landing's own
-   requant (§5.6's engines, a storage property, not a kernel one).
-   Everything else is ordinary float32 arithmetic noise.
+   a headroom-legal partial can still round (cross-referenced in §10). §7's
+   "concrete norm corner" works that case through on a norm: at `m = 16` a
+   constant-code input long enough to push its segment past `2^24` shifts the
+   mean off its exact value and makes the norm emit ≈ `0.525` where the true
+   answer is `0`. The ONLY BFP-specific rounding on any norm path is the
+   OUT_WRITE pack of the produced wire (forward y, backward dx) — one
+   `roundByMode` per element — plus, when a grad tensor is STORED BFP, the
+   ACC landing's own requant (§5.6's engines, a storage property, not a
+   kernel one). Everything else is ordinary float32 arithmetic noise.
 2. *Per-element pack bound.* The pack rounds each element to its group's
    grid: |err| ≤ `0.5·s_out` per element under HALF_AWAY, where
    `s_out = 2^{E_g}` is the scale of the element's group in the DERIVED
@@ -1194,6 +1197,21 @@ same-exponent runs near the headroom ceiling — documented here rather than
 guarded against, because guarding it would mean a second fail-fast stacked on
 top of the headroom guard for a case the sweep may legitimately want to
 explore (mantissa-width sensitivity is exactly what the epic measures).
+
+**The concrete norm corner (PR5).** The norms' mean/dbeta segment folds sum
+single mantissas rather than products, so `bfpSumSegmentLimit` caps a segment
+at `INT32_MAX >> (m−1)` codes — orders of magnitude looser than the product
+form, which is what lets a headroom-legal segment actually reach `2^24` here.
+At `mantissaBits = 16` (`qMax = 32 767`) a per-tensor wire holding the
+CONSTANT code `32765` over `N = 513` elements folds one segment of
+`16 808 445 > 2^24`; `(float)partial` rounds it to `16 808 444`, the mean
+lands at `32764.998…` instead of `32765`, and the normalize step then emits
+≈ `0.525` (at unit scale with `eps = 1e-5`) for an input that is exactly
+constant and whose true normalized output is `0` — §7's documented deviation
+showing up at norm scale, on the one input where the answer is obvious. The
+sweep-practical range is unaffected: at `m ≤ 8` (`qMax = 127`) a per-tensor
+sum stays exact below `N ≈ 132 000`, far above any norm block the epic
+exercises.
 
 ## 8. Exponent fold can overflow to ±inf at extreme combined exponents
 

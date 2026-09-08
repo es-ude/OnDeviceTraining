@@ -1874,16 +1874,14 @@ static void capturePr4FlattenCarry(void *ctx, size_t layerIdx, layerType_t layer
  *   - relu is packed-domain transparent (Tasks 1/2);
  *   - maxpool compares dequantized values and scatters to argmax (Tasks 8/9);
  *   - flatten carries the exponent array (Task 3);
- *   - softmax stays PR6: its forward is funnel-routed with a HARDCODED
- *     ARITH_FLOAT32 (Softmax.c), so a BFP wire crosses it as a fake-quant
- *     bridge, and CrossEntropy's FUSED backward makes the training loop skip
- *     the softmax layer entirely (CalculateGradsSequential.c: backwardIndex
- *     -= 1 for CROSS_ENTROPY), so softmaxBackward's PR6 guard is never
- *     reached. Its propLossMath is nevertheless PINNED to ARITH_FLOAT32 to
- *     document that intent -- behaviourally inert, because softmaxBackward
- *     runs requireNoBfpWire on all three wires BEFORE its propLossMath
- *     switch, so a BFP wire dies there under EITHER spelling and the switch
- *     default is never the thing that catches it;
+ *   - softmax runs its NATIVE forward (P6-8): layerQuantInitUniform derives
+ *     ARITH_BFP forwardMath from the shared BFP wire and Softmax's forward
+ *     dispatches on it (Task 4's i-exp kernel). Its propLossMath derives
+ *     ARITH_BFP too (Task 5's funnel arm), but CrossEntropy's FUSED backward
+ *     still skips the softmax layer entirely (CalculateGradsSequential.c:
+ *     backwardIndex -= 1 for CROSS_ENTROPY), so that native backward is not
+ *     reached HERE -- see unitTestUniformBfpSoftmaxMseTrains (MSE, non-CE)
+ *     for that coverage;
  *   - the loss reaches its BFP fake-quant arm (Task 10) because the model
  *     output wire is BFP.
  * Wire element counts are 12 / 12 / 6 / 6 / 2 / 2 — all divisible by the
@@ -1929,8 +1927,6 @@ void testBfpUniformPoolActivationModelTrains(void) {
     layer_t *linear = buildBorrowedLinearLayer(linW, linB, bfpWireQ);
 
     layer_t *softmax = softmaxLayerInit(&lq);
-    softmax->config->softmax->propLossMath =
-        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
 
     layer_t *model[6] = {conv, relu, pool, flatten, linear, softmax};
 
@@ -1992,6 +1988,13 @@ void testBfpUniformPoolActivationModelTrains(void) {
         convCfg->biasGradMath.type == ARITH_BFP && convCfg->propLossMath.type == ARITH_BFP;
     int convWeightStorage = (int)convWTensor->quantization->type;
     int linearForwardType = (int)linear->config->linear->forwardMath.type;
+    /* P6-8: the pin removal must be observable, not just declared -- both
+     * softmax math slots derive ARITH_BFP through the ordinary layerQuant
+     * path now (forward already executed native before this task; backward
+     * derives it too, though CE's skip means it is not the layer that
+     * exercises it here). */
+    int softmaxForwardType = (int)softmax->config->softmax->forwardMath.type;
+    int softmaxPropLossType = (int)softmax->config->softmax->propLossMath.type;
     bool allProbesFired =
         carry.seenFwdPool && carry.seenFwdFlat && carry.seenAgradFlat && carry.seenAgradPool;
     bool carryGroupCountsMatch =
@@ -2028,6 +2031,13 @@ void testBfpUniformPoolActivationModelTrains(void) {
                              "bias-less and dx is #380-truncated -- see the block above)");
     TEST_ASSERT_EQUAL_INT_MESSAGE(ARITH_BFP, linearForwardType,
                                   "the capstone's linear must run native ARITH_BFP too");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(ARITH_BFP, softmaxForwardType,
+                                  "the capstone's softmax must derive native ARITH_BFP forward "
+                                  "(P6-8 flip)");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(ARITH_BFP, softmaxPropLossType,
+                                  "the capstone's softmax must derive native ARITH_BFP "
+                                  "propLossMath too, even though CE's skip means this layer's "
+                                  "backward never runs here (P6-8 flip)");
     TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, convWeightStorage,
                                   "conv weights must stay BFP-stored after training");
     TEST_ASSERT_TRUE_MESSAGE(isfinite(firstLoss) && isfinite(lastLoss),
@@ -2164,8 +2174,9 @@ static void freeGroupNormLayerShellOnly(layer_t *layer) {
  *  (FLOAT32-init + requantizeTensorInPlace, the §5.2 recipe -- the #270
  *  requireFloat32 gate keeps random-init factories FLOAT32-only), relu's
  *  packed-domain transparency, AdaptiveAvgPool1d's BFP forward/backward,
- *  Flatten's exponent carry, and softmax as the PR6 fake-quant bridge whose
- *  backward CrossEntropy's fused gradient skips entirely.
+ *  Flatten's exponent carry, and softmax's NATIVE forward (P6-8: derived
+ *  ARITH_BFP dispatches into Task 4's i-exp kernel) whose native backward
+ *  (Task 5) CrossEntropy's fused gradient still skips entirely.
  *
  *  Seed discipline: rngSetSeed(4242u) pins the SR_HALF_AWAY draws, so the
  *  trajectory -- and with it `lastLoss < firstLoss` -- is deterministic but
@@ -2215,14 +2226,11 @@ void testBfpUniformNormModelTrainsAndGridsMove(void) {
     freeQuantization(linWQ);
     layer_t *linear = buildBorrowedLinearLayer(linW, linB, bfpWireQ);
 
-    /* Same PR6 disclosure as the PR4 capstone: softmax's forward is funnel-
-     * routed with a HARDCODED ARITH_FLOAT32, so the BFP wire crosses it as a
-     * fake-quant bridge, and CrossEntropy's fused backward makes the training
-     * loop skip the layer entirely. The FLOAT32 propLossMath pin documents that
-     * intent; it is behaviourally inert. */
+    /* Same flip as the PR4 capstone (P6-8): softmax now runs its NATIVE
+     * forward (derived ARITH_BFP), while CrossEntropy's fused backward still
+     * skips the layer entirely -- see unitTestUniformBfpSoftmaxMseTrains for
+     * the native-backward-through-the-loop coverage. */
     layer_t *softmax = softmaxLayerInit(&lq);
-    softmax->config->softmax->propLossMath =
-        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
 
     layer_t *model[BFP_NORM_MODEL_SIZE] = {conv,    groupNorm, relu,   pool,
                                            flatten, layerNorm, linear, softmax};
@@ -2303,6 +2311,10 @@ void testBfpUniformNormModelTrainsAndGridsMove(void) {
                                lnCfg->beta->param->quantization->type == BFP &&
                                gnCfg->gamma->param->quantization->type == BFP &&
                                gnCfg->beta->param->quantization->type == BFP;
+    /* P6-8: the pin removal must be observable, not just declared. */
+    softmaxConfig_t *smCfg = softmax->config->softmax;
+    bool softmaxDeclaresBfpMath =
+        smCfg->forwardMath.type == ARITH_BFP && smCfg->propLossMath.type == ARITH_BFP;
     const uint8_t zeroState = 127; /* exponentBits 8 -> bias 127 */
     bool lnWireGridMoved = false;
     for (size_t g = 0; g < cap.nFwdLayerNorm; g++) {
@@ -2338,6 +2350,9 @@ void testBfpUniformNormModelTrainsAndGridsMove(void) {
     TEST_ASSERT_TRUE_MESSAGE(normParamsBfpStored,
                              "the Task 6 factories must have allocated BFP-stored gamma AND beta "
                              "for both norms");
+    TEST_ASSERT_TRUE_MESSAGE(softmaxDeclaresBfpMath,
+                             "the capstone's softmax must derive native ARITH_BFP in both math "
+                             "slots too (P6-8 flip)");
     TEST_ASSERT_TRUE_MESSAGE(isfinite(firstLoss) && isfinite(lastLoss),
                              "uniform-BFP norm training must stay finite through every PR5 arm");
     TEST_ASSERT_TRUE_MESSAGE(lastLoss < firstLoss,
@@ -2587,6 +2602,109 @@ void unitTestSoftmaxMseBackwardThroughLoop(void) {
     }
 }
 
+/* ===========================================================================
+ * BFP epic PR6 Task 6 (P6-8) capstone: uniform-BFP softmax+MSE e2e.
+ * ======================================================================== */
+
+/*! The non-CE twin of the two capstones above: MSE does not special-case
+ *  softmax the way CalculateGradsSequential.c's CROSS_ENTROPY branch does
+ *  (backwardIndex -= 1), so this IS the model that drives
+ *  softmaxBackwardKernelBfp (Task 5's native funnel arm) through the
+ *  training loop -- linear(4->3) -> softmax, ONE uniform BFP wire profile
+ *  (m=8/e=8) through layerQuantInitUniform, SGD+momentum.
+ *
+ *  This test pins the WIRING (loss decreases, the linear weight's packed
+ *  codes move off their seed), not exact values -- a wrong-gradient mutant
+ *  that still decreases loss is caught by the Task-2/Task-5 gold tests, not
+ *  here. REACHABILITY evidence (verified during development, not committed):
+ *  pinning propLossMath back to ARITH_FLOAT32 does NOT make this test
+ *  silently pass on a fake-quant substitute -- softmaxBackward's FLOAT32 arm
+ *  runs its own bfpRequireNoBfpWire guard (Task 5) against a BFP-typed wire
+ *  and exit(1)s before any compute, because this fixture's propLossQ stays
+ *  BFP regardless of propLossMath (a fake-quant softmax backward needs BOTH
+ *  the math AND the wire declared non-BFP; this uniform fixture never gives
+ *  it that). A second, independent check confirms it is specifically the
+ *  NATIVE kernel that runs on the UNMUTATED config: a temporary exit(3)
+ *  poison of softmaxBackwardKernelBfp made this test die with that exact
+ *  code (see the task-6 report for the transcript -- a permanent poison
+ *  would defeat its own purpose). */
+void unitTestUniformBfpSoftmaxMseTrains(void) {
+    rngSetSeed(4242u);
+    quantization_t *bfpWireQ = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, bfpWireQ);
+
+    /* linear 4 -> 3. */
+    parameter_t *linW = buildRampParam2D(3, 4, 0.10f, 0.03f);
+    parameter_t *linB = buildRampParam2D(1, 3, 0.05f, 0.05f);
+    quantization_t *linWQ = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    quantization_t *linBQ = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    requantizeTensorInPlace(getParamFromParameter(linW), linWQ);
+    requantizeTensorInPlace(getParamFromParameter(linB), linBQ);
+    freeQuantization(linBQ);
+    freeQuantization(linWQ);
+    layer_t *linear = buildBorrowedLinearLayer(linW, linB, bfpWireQ);
+
+    layer_t *softmax = softmaxLayerInit(&lq);
+
+    layer_t *model[2] = {linear, softmax};
+
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.05f, 0.9f, 0.f, model, 2, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+
+    float inputValues[4] = {0.9f, -0.4f, 1.3f, 0.2f};
+    tensor_t *input = buildFloatTensor2D(1, 4, inputValues);
+    tensor_t *label = buildFloatTensor2D(1, 3, (float[]){1.0f, 0.0f, 0.0f});
+
+    /* Snapshot the linear weight's packed payload: the SGD write-back must
+     * land in BFP storage, so the codes have to leave the ramp seed. */
+    tensor_t *linWTensor = getParamFromParameter(linW);
+    size_t linWBytes = calcNumberOfBytesForData(linWTensor->quantization, 12);
+    uint8_t before[16];
+    memcpy(before, linWTensor->data, linWBytes);
+
+    optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
+    float firstLoss = NAN;
+    float lastLoss = NAN;
+    for (size_t step = 0; step < 10; step++) {
+        trainingStats_t *stats = calculateGradsSequential(model, 2, defaultLossConfig(MSE),
+                                                          REDUCTION_MEAN, input, label);
+        if (step == 0) {
+            firstLoss = stats->loss;
+        }
+        lastLoss = stats->loss;
+        freeTrainingStats(stats);
+        sgdFns.step(sgd);
+        sgdFns.zero(sgd);
+    }
+
+    /* CAPTURE -> FREE (reverse init order) -> assert (Unity longjmps out of
+     * the first failure, so nothing may be read after the teardown). No
+     * config-level ARITH_BFP type assertion here on purpose (unlike the two
+     * capstones above): that would only confirm the fixture didn't override
+     * the derived value, not that softmaxBackwardKernelBfp actually RAN --
+     * see the doc comment's mutation-check/reachability-probe note. */
+    bool codesMoved = memcmp(before, linWTensor->data, linWBytes) != 0;
+
+    freeTensor(label);
+    freeTensor(input);
+    freeOptim(sgd);
+    freeSoftmaxLayer(softmax);
+    freeLinearLayerShellOnly(linear);
+    freeQuantization(momentumQ);
+    freeQuantization(bfpWireQ);
+
+    TEST_ASSERT_TRUE_MESSAGE(isfinite(firstLoss) && isfinite(lastLoss),
+                             "uniform-BFP linear->softmax+MSE training must stay finite");
+    TEST_ASSERT_TRUE_MESSAGE(lastLoss < firstLoss,
+                             "uniform-BFP linear->softmax+MSE must converge (the non-CE vision-"
+                             "gate acceptance)");
+    TEST_ASSERT_TRUE_MESSAGE(codesMoved,
+                             "the SGD write-back must land in the linear weight's BFP storage");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMultiLayerBackward_WithCrossEntropy_DoesNotCrash);
@@ -2611,5 +2729,6 @@ int main(void) {
     RUN_TEST(testBfpUniformNormModelTrainsAndGridsMove);
     RUN_TEST(testBfpNormGradStorageAccumulatesAndSteps);
     RUN_TEST(unitTestSoftmaxMseBackwardThroughLoop);
+    RUN_TEST(unitTestUniformBfpSoftmaxMseTrains);
     return UNITY_END();
 }

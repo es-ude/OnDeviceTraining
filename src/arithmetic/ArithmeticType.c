@@ -25,13 +25,20 @@ arithmetic_t arithmeticFromQuantization(const quantization_t *q) {
          *  - Fake-quant over BFP storage is still available, but no longer
          *    free: pin the math slots to ARITH_FLOAT32 explicitly instead of
          *    deriving them (the funnel then dequantizes BFP operands as it
-         *    does for any other storage-only dtype).
+         *    does for any other storage-only dtype). Two layer families do
+         *    NOT offer the pin on the BACKWARD, because their FLOAT32
+         *    backwards run outside the funnel and raw-cast their wires: the
+         *    norms reject it at the factory (PR5, R-N6 rules 4/7) and softmax
+         *    fails fast at the arm's guard (PR6, R-S6 -- its forward pin
+         *    still works).
          *  - Epic PR3: the GEMM family (Linear/Conv1d/ConvT1d) now runs
          *    natively end-to-end -- a model that derives all four layer slots
          *    from one BFP config -- what layerQuantInitUniform does -- trains
-         *    its forward AND backward natively. Pools shipped with epic PR4
-         *    and the norms (LayerNorm/GroupNorm) with epic PR5; only Softmax
-         *    still guards its BFP math slots (no native arm yet; epic PR6).
+         *    its forward AND backward natively. Pools shipped with epic PR4,
+         *    the norms (LayerNorm/GroupNorm) with epic PR5 and Softmax with
+         *    epic PR6 (integer i-exp forward + funnel backward), so EVERY
+         *    layer now derives a usable ARITH_BFP arm; only the loss
+         *    functions stay fake-quant.
          *    See docs/conventions/arithmetic-bfp.md. */
         a.type = ARITH_BFP;
         a.roundingMode = ((bfpQConfig_t *)q->qConfig)->roundingMode;

@@ -1,4 +1,4 @@
-# Block-Floating-Point (BFP) arithmetic — PR1–PR5 conventions + deviations register
+# Block-Floating-Point (BFP) arithmetic — PR1–PR6 conventions + deviations register
 
 Conventions for the `BFP` qtype's dtype-core scope (`src/tensor/Quantization*`,
 `src/tensor/TensorConversion.c`'s BFP cells) and, since epic PR2, the native
@@ -160,7 +160,7 @@ exactly as they do for grouped `SYM`. This clone rule is what `gradInit` and
 optimizer per-parameter state cloning (`m`/`v` buffers) both go through when
 handed a BFP template.
 
-## 5. Compute contract (epic PR2 forward + epic PR3 backward + epic PR4 weight-less layers + epic PR5 norms) — shipped
+## 5. Compute contract (epic PR2 forward + epic PR3 backward + epic PR4 weight-less layers + epic PR5 norms + epic PR6 softmax) — shipped
 
 ### 5.1 The flip is done — backward is now native, pinning is an optional fake-quant mode
 
@@ -221,7 +221,11 @@ dequantizes the BFP operand like any other storage-only dtype, exactly as
 PR1's derivation did automatically before the PR2 flip.
 `testBfpFakeQuantTrainingLossDecreasesAndGridMoves` (the PR1 capstone) still
 passes unchanged: its math slots all derive from a `FLOAT32`
-`quantization_t`, which the flip never touches.
+`quantization_t`, which the flip never touches. Two later families narrow the
+pin on the BACKWARD only, because their FLOAT32 backwards run outside the
+funnel and raw-cast their wires: the norms reject the profile at the factory
+(§5.8 R-N6) and softmax fails fast at the arm's guard (§5.9 R-S6, forward pin
+unaffected).
 
 ### 5.2 BFP-native weights workflow
 
@@ -648,20 +652,15 @@ silent wrong arithmetic, not a crash.
 
 - Grouped BFP grad/optimizer-state templates (per-tensor-only decision above
   — a scope decision, not a kernel limitation; a future `#300` axis).
-- Only Softmax (PR6) still lacks an `ARITH_BFP` arm. Softmax lacks one on
-  BOTH sides: its FORWARD has no BFP arm
-  either — the arithmetic is hardcoded `ARITH_FLOAT32`, so a BFP wire merely
-  CROSSES it as a funnel fake-quant bridge — and its backward rejects a BFP
-  wire outright before dispatching. (`docs/FEATURES.md`'s carrier-gate list
-  states it the same way.) The norms (LayerNorm/GroupNorm) SHIPPED with PR5
-  — see §5.8. Pools,
-  Relu, Flatten and Dropout SHIPPED with PR4 — see §5.7. Losses got their
-  fake-quant `ARITH_BFP` arm in the same PR (`case BFP:` joining
-  `case SYM_INT32:` on the dtype-generic helpers), which closes
-  `docs/FEATURES.md`'s "no loss function has a BFP arm" gap; NATIVE BFP
-  losses (integer CE/MSE) are explicitly OUT of this epic's committed scope
-  — spec §9 files them as an optional stretch goal once PR6 lands, not a PR6
-  deliverable.
+- NATIVE BFP losses (integer CE/MSE). Every LAYER now has an `ARITH_BFP`
+  arm: Softmax SHIPPED with PR6 on BOTH sides — native i-exp forward and a
+  native funnel backward, see §5.9 — the norms (LayerNorm/GroupNorm) with
+  PR5 (§5.8), and pools, Relu, Flatten and Dropout with PR4 (§5.7). The
+  losses have only their PR4 FAKE-QUANT arm (`case BFP:` joining
+  `case SYM_INT32:` on the dtype-generic helpers), which closed
+  `docs/FEATURES.md`'s "no loss function has a BFP arm" gap; integer CE/MSE
+  stay explicitly OUT of this epic's committed scope — spec §9 files them as
+  an optional stretch goal, filed as a follow-up issue when PR6 lands.
 - The optimizer's `updateMath` stays `ARITH_FLOAT32`-only (#310) — BFP
   backward produces grads and lets them be STORED BFP, but the parameter
   update step itself is unchanged.
@@ -740,9 +739,12 @@ and Flatten because a funnel round-trip would re-quantize unchanged values
 Pools and losses take the opposite route — pools run INSIDE `executeOp` on the
 unpacked-BFP scratch under the anchor rule above, and the losses go through
 `convertTensor`, i.e. both stay on documented arms. Softmax's BACKWARD is the
-FOURTH outside-funnel site (`Softmax.c`'s own wording) — it raw-casts all three
-wires to `float*`/`int32*` — but it does not handle BFP at all: it rejects a
-BFP wire on any of the three and waits for PR6, so it walks no packed payload.
+FOURTH outside-funnel site (`Softmax.c`'s own wording) — its FLOAT32 and SYM
+arms raw-cast all three wires to `float*`/`int32*` — but they handle no BFP at
+all: each rejects a BFP wire on any of the three (per-arm
+`bfpRequireNoBfpWire`, §5.9 R-S5), so they walk no packed payload. Since PR6
+the `ARITH_BFP` backward arm runs INSIDE the funnel like the pools, and so
+does the native BFP forward (§5.9).
 
 Consequence for reviewers — the COMPLETE inventory of code that may walk packed
 BFP bytes, so that the rule applied literally does not flag correct code:
@@ -786,10 +788,10 @@ scratch. A raw `->data` walk over PACKED BFP bytes in `LayerNorm.c` or
 `GroupNorm.c` remains a bug, exactly as §5.7's closing rule says. The
 end-to-end capstone — a uniform-BFP
 conv → groupNorm → relu → adaptiveAvgPool → flatten → layerNorm → linear →
-softmax model training natively with no pins (no pins on either norm; the
-capstone pins only softmax's backward, which is behaviourally inert there —
-CrossEntropy's fused backward makes the loop skip the layer), both norms' dx
-EXECUTING — is `testBfpUniformNormModelTrainsAndGridsMove`
+softmax model training natively with NO pins anywhere (since PR6 that includes
+softmax, which runs its native forward there; its native backward is not
+reached, because CrossEntropy's fused gradient makes the loop skip the layer),
+both norms' dx EXECUTING — is `testBfpUniformNormModelTrainsAndGridsMove`
 (`test/unit/userAPI/UnitTestMultiLayerTraining.c`).
 
 **R-N1 — wire-anchored staging.** Norms have no reduction-weight operand, so
@@ -1139,6 +1141,277 @@ mirroring `docs/conventions/arithmetic-sym.md` §"Grouped backward").**
    the norm's own wires; there is no norm equivalent of the GEMM family's
    pin-the-slot fake-quant-over-BFP profile — deliberately (R-N6).
 
+### 5.9 Softmax (epic PR6) — I-BERT adaptation contract + error analysis
+
+Native `ARITH_BFP` ships on BOTH sides. The forward runs an INTEGER pipeline —
+I-BERT's Algorithm 3 (`bfpIExpQ`, `src/arithmetic/BfpSoftmaxExp.c`) on a fixed
+dyadic work grid `2^-14`, fed by a block-alignment step that has no I-BERT
+analog (`softmaxValuesBfp`, `src/layer/Softmax.c`) — and the backward is ONE
+`executeOp` op that recomputes the forward through the same helper. Both are
+funnel-routed, so **the §5.7 packed-walk reviewer inventory does NOT grow**:
+the kernels consume the funnel's unpacked-BFP scratch (borrowed or staged,
+§5.3) and produce through the OUT_WRITE epilogue; a raw `->data` walk over
+PACKED BFP bytes in `Softmax.c` is still a bug. §5.7's "Softmax's BACKWARD is
+the FOURTH outside-funnel site" now describes its FLOAT32/SYM arms only —
+those raw-cast their wires and therefore reject BFP storage outright (R-S5).
+End-to-end evidence: `unitTestUniformBfpSoftmaxMseTrains`
+(`test/unit/userAPI/UnitTestMultiLayerTraining.c`) is the model that actually
+drives the native BACKWARD through the training loop — MSE, not CE, because
+CrossEntropy's fused gradient makes the loop skip the softmax layer — while
+the two CE capstones (`testBfpUniformPoolActivationModelTrains`,
+`testBfpUniformNormModelTrainsAndGridsMove`) now run the native forward with
+no softmax pins at all.
+
+**R-S1 — wire-anchored staging, ONE op per direction.** Softmax has no weight
+operand, so the staging anchor is the layer's OWN produced-wire config, the
+R-P1/R-N1 rule at this layer: `outputQ` anchors the forward op, `propLossQ`
+the backward op, checked EAGERLY at op entry through the now-shared
+`bfpWireAnchor` (`BfpKernelSupport.h`) — an `ARITH_BFP` math slot whose
+produced-wire config is NULL or non-BFP fails fast, because without it there
+is no width source at all. The stage template is per-tensor `{1,0}` at the
+anchor's `mantissaBits`/`exponentBits`, rounded by the op's own
+`arithmetic.roundingMode`; a BFP-stored operand is borrowed zero-copy (D8) and
+never re-blocked. The backward's operands are `{x (logits), loss}`, both under
+that one template. Pinned by `unitTestSoftmaxForwardBfpStagedWidths` /
+`unitTestSoftmaxBackwardBfpStagedLoss` (widths) and the two
+`…RequiresBfp{OutputQ,PropLossQ}` death tests (the eager gate).
+
+**R-S2 — the integer pipeline and its three lossy shift sites.** Per element,
+with `E_i` the element's unbiased block exponent and `EMax` the exponent of
+the block holding the SIGNED max:
+
+1. *Max* — one pass of `ldexpf((float)m_i, E_i)` compares, strict `>` keeps
+   the FIRST max (exact dequants, no rounding).
+2. *Align* onto the work-grid-or-coarser common grid: `sigma = EMax + 14`,
+   `down = max(0, -sigma)`, net shift `s_i = (EMax - E_i) + down`. `s_i >= 0`
+   is a **rounded right shift** (`bfpShiftRightRounded`, exact at `s_i == 0`)
+   — the FIRST lossy site; `s_i < 0` is an EXACT saturating left shift, which
+   is the case a block COARSER than the argmax block lands in. `mMaxW` is the same
+   rounded shift of the max mantissa by `down` — the SECOND lossy site (inert
+   at `down == 0`, i.e. whenever `EMax >= -14`). `down` folds the descent onto
+   a finer-than-work storage grid into that same single shift: never two
+   chained roundings per element.
+3. *Promote* `qT_i = min(aligned_i - mMaxW, 0)` onto the work grid — EXACT by
+   construction (`sigma >= 31` ⇒ any nonzero deficit underflows; `0 <= sigma <
+   31` ⇒ a left shift guarded by `thr = -ceil(363392 / 2^sigma)` so the shift
+   stays inside int32; `sigma < 0` ⇒ `qT` already IS on the work grid).
+4. *i-exp* `bfpIExpQ(qW_i, mode)` — its `>> z` renormalization is the THIRD
+   lossy site.
+5. *Float boundary* `e_i = ldexpf((float)qe_i * 0.3585f, -28)`, float32 sum in
+   index order, divide (R-S3).
+
+The `min(qT, 0)` clamp is load-bearing under SR only: the deterministic modes
+are monotone, but an SR draw can jitter to `+1`, which would enter `bfpIExpQ`
+as `qW > 0` and make `z` negative; the clamp maps such jitter to `exp(0)`.
+Two saturation corners are spec-sanctioned rather than guarded: a NEGATIVE
+mantissa whose exact left shift leaves int32 becomes the `INT32_MIN / 2`
+sentinel (part 4 bounds its true weight), and a ZERO mantissa with `up >= 31`
+returns its exact `0` through an explicit clause, because `0 << 32` is
+shift-count UB (C11 6.5.7p3), not merely a value question.
+
+**No int32 accumulator exists on any softmax path**, so neither
+`bfpValidateBlockHeadroom` nor `bfpValidateSumHeadroom` has a role here —
+unlike every other BFP kernel family. The ONLY int32 headroom argument is the
+polynomial's, and it is what fixes `F = 14`: `q_p ∈ (-QLN2, 0]` gives
+`|q_p + q_b| <= q_b = 22167`, so `qL <= 22167² + QC = 748 954 122 < 2^31`; at
+`F = 15` the square alone is ≈ 1.97e9 and overflows. The constants
+(`QLN2 = 11356`, `QB = 22167`, `QC = 257 578 233`, `QFLOOR = -363 392`) are
+COMPILE-TIME floors of their real values, re-derived by the goldgen and pinned
+in C against a double-precision recomputation (`testShiftConstantsMatchDerivation`).
+
+**The knob (`bfpExpShiftRounding`).** `BFP_SHIFT_TRUNC` (default,
+I-BERT-faithful `>>`), `BFP_SHIFT_HALF_AWAY`, `BFP_SHIFT_SR` — set through
+`softmaxSetBfpExpShiftRounding` (`SoftmaxApi.h`). It governs the three
+INTEGER shift sites above and NOTHING else: it is ORTHOGONAL to every
+`roundingMode_t` in the config, never derives from one, and staging plus the
+OUT_WRITE pack keep the ordinary `roundingMode_t` machinery. It is inert
+unless a math slot is `ARITH_BFP`, and it is **not serialized** — the ODTS
+record carries the two arithmetics and the two wire configs only, the same
+class as Dropout's `training` flag: an experiment knob, not a model property.
+Deserialization fills an ALREADY-CONSTRUCTED layer, so a reloaded model runs
+at whatever its factory set (`BFP_SHIFT_TRUNC`); a sweep that varies the knob
+must re-apply the setter after loading.
+
+**R-S3 — the float32 boundary (what "native" means here).** Exact:
+the dequants for the max compare, the alignment/promotion arithmetic, the
+`dLds` dequant in the backward. Float32: the exp weights `e_i` after
+`(float)qe_i`, the cross-element sum, the normalize divide, and the whole
+backward elementwise/dot arithmetic. The block structure re-enters at exactly
+ONE point per op — the produced wire's OUT_WRITE pack, i.e. §10's
+"native OPERAND handling plus a natively derived produced grid" boundary in
+softmax's shape (§11 records it). The raw is FLOAT32 (D7).
+
+**R-S4 — backward = ONE funnel op that recomputes from the LOGITS.** The
+`ARITH_BFP` arm issues a single `executeOp` (`OUT_WRITE` into `propLoss`,
+anchored at `propLossQ`, arithmetic `propLossMath`): it recomputes `s` from
+the logits via `softmaxValuesBfp` with the layer's OWN knob, dequantizes
+`dLds` exactly, accumulates `dot = Σ s·dLds` in float32 index order and emits
+`s·(dLds - dot)`. The recompute means the backward differentiates the
+UNPACKED forward values — the packed forward wire differs from them by one
+pack rounding — which is the norms' R-N4 cost note verbatim, and it is what
+makes the layer stateless between passes. Two gates: the operand grid
+(`validateBfpQConfigShape`) and the loss ELEMENT COUNT (the #436 OOB class —
+both walks run `x`'s flat `n`, and a shorter per-tensor `{1,0}` loss passes
+every grid check while the loss read runs off its scratch). Softmax has no
+param grads, so **`propLoss == NULL` returns before the anchor gate binds** —
+no op runs at all. This is a DELIBERATE deviation from R-N1's
+anchor-binds-even-when-NULL rule and is sound for the same reason the rule
+exists: the norms still have `dgamma`/`dbeta` needing a width source at
+`propLoss == NULL`, softmax has nothing left to run. The ordering is pinned
+(`unitTestSoftmaxBackwardBfpNullPropLossIsNoOp` carries the same broken config
+the anchor death test dies on). The recompute is NOT a BFP-specific cost: ALL
+THREE arms recompute `s` from the logits, because the training loop hands
+every backward the layer's INPUT — §11's correction 1 records why that had to
+be fixed first.
+
+**R-S5 — the non-BFP arms.** Dispatch is an explicit `switch` with a
+fail-fast default in BOTH directions (the PR2 Task 9 ruling: a ternary hands
+every unknown arithmetic to the float kernel). `ARITH_FLOAT32` is the exact
+float path. `ARITH_SYM_INT32` keeps its documented FAKE-QUANT meaning —
+softmax never had a native SYM kernel — and the forward's `opSpec` therefore
+hardcodes `ARITH_FLOAT32` rather than passing `cfg->forwardMath`: passing it
+would make the funnel prologue unpack into int32 scratch that the float kernel
+then misreads through a `float*` cast. Both backward arms run OUTSIDE the
+funnel and raw-cast their wires, so each carries `bfpRequireNoBfpWire` on all
+three (`testSoftmaxBackward{Float,Sym}ArmRejectsBfpWire`). For the FLOAT32 arm
+that guard is memory safety (a ~4× over-read of a packed payload, an over-write
+into it); for the SYM arm it is POLICY — `conversionMatrix[BFP][FLOAT32]`
+exists, so the arm would silently "work" — the outside-funnel twin of the
+funnel's Decision-11 deny.
+
+**R-S6 — the silent flip, and a FORWARD-ONLY escape hatch.** Because
+`arithmeticFromQuantization` derives `ARITH_BFP` from BFP storage, an existing
+model whose softmax merely CROSSED a BFP wire as a fake-quant bridge now runs
+the native i-exp kernel on both sides, with no config change — the breaking
+change of this PR. Pinning `forwardMath = ARITH_FLOAT32` restores the
+fake-quant forward over BFP wires (the funnel dequantizes any storage dtype).
+The BACKWARD has no such hatch: pinning `propLossMath = ARITH_FLOAT32` over a
+BFP wire FAILS FAST at the arm's own guard, so a fake-quant softmax backward
+is not constructible over BFP storage at all. That asymmetry is deliberate and
+is the norms' §5.8-part-8 asymmetry in a different shape (there the FLOAT32
+backward is unreachable over BFP storage too, only via the factory rules
+instead of a runtime guard). The honest backward opt-outs: CrossEntropy
+coupling (the fused gradient makes the loop skip the layer entirely), a
+Quantization layer around the softmax, or FLOAT32 wires.
+
+**Error analysis (spec §10 item 4's deliverable for softmax, mirroring
+§5.8's parts).**
+
+1. *Mechanism.* Four error sources, and no others: (i) the alignment/`mMaxW`
+   shifts (part 4), (ii) the i-exp polynomial plus its `>> z` (part 2),
+   (iii) float32 dust at the boundary (part 6), (iv) the ONE BFP rounding, the
+   OUT_WRITE pack of the produced wire (part 5) — plus, when the operand is
+   FLOAT32-STORED, its staging quantize, which is the ordinary §5.4 cost and
+   not softmax-specific. Everything else is exact: the max-compare dequants,
+   the `s_i < 0` left shifts, the work-grid promotion, the backward's `dLds`
+   dequant.
+2. *i-exp accuracy.* I-BERT reports `max |i-exp - exp| ≈ 1.9e-3` for its own
+   calibrated setting (paper §3.5). Our FIXED-grid variant at the default
+   TRUNC knob measures **2.0896e-3** worst-case over 2001 points on `[-20, 0]`
+   (goldgen sweep, 2026-09-08); `2.5e-3` is the acceptance bound every
+   value-level test uses (`testIExpAccuracyEnvelope`, the layer goldgen's
+   proximity self-checks). It is an ABSOLUTE error on the unnormalized weight
+   (whose maximum is `exp(0) ≈ 1.000241` in this representation), it is FIXED
+   by `F = 14`, and no knob moves it.
+3. *Headroom / why no int64.* R-S2's `qL <= 748 954 122 < 2^31` bound holds
+   for every reachable input because the `QFLOOR` gate caps `z <= 31` and
+   `q_p ∈ (-QLN2, 0]`. The whole pipeline is int32 with the framework's
+   no-int64 rule intact by construction, not by wider accumulators.
+4. *Alignment error — the term the knob moves.* Write `u = 2^max(EMax, -14)`
+   for one aligned unit. Because block exponents are absmax-snap-up minimal
+   (§3), `a/qMax <= 2^EMax < 2a/qMax` for the argmax block's absmax `a`, so
+   `u ≈ a·2^-(m-1) … a·2^-(m-2)` in the ordinary `EMax >= -14` regime. The
+   error DISTRIBUTION is what matters, and it is not uniform over elements:
+   - the argmax element carries ZERO alignment error under both deterministic
+     modes — identical mantissa, shift and mode as `mMaxW`, so the two round
+     the same way and `qT = 0` exactly; under SR its two INDEPENDENT draws can
+     differ by one unit, which the `min(qT, 0)` clamp maps to `exp(0)`;
+   - every element of a block with `E_i == EMax` is exact when `down == 0`;
+   - elements in blocks COARSER than the argmax block (`E_i > EMax` — the
+     legitimate negative-dominated case) take the exact left shift: also zero
+     alignment error;
+   - the error therefore CONCENTRATES on elements in blocks FINER than the
+     argmax block (`E_i < EMax`), where the shift rounds: error in `(-u, 0]`
+     under TRUNC, `|err| <= u/2` under HALF_AWAY, `< u` unbiased in
+     expectation under SR.
+   Since `u` is an absolute error on the EXPONENT ARGUMENT, it multiplies that
+   element's unnormalized weight by `e^δ ≈ 1 + δ`. TRUNC floors toward `-∞`,
+   so it systematically UNDERESTIMATES every rounded element while leaving the
+   argmax exact: it SHRINKS non-max mass and sharpens the distribution toward
+   the argmax — the measurable knob effect, and the reason SR (unbiased in
+   expectation) is the interesting sweep arm and HALF_AWAY the symmetric
+   control. Note the softmax-specific consequence: `u` scales with the LOGIT
+   MAGNITUDE `a`, so the argument error is a fixed fraction ≈`2^-(m-2)` of the
+   logit block's absmax — a model with large logits needs more mantissa bits
+   on the softmax INPUT wire, where a norm's pack error would stay relative.
+5. *The single pack.* The OUT_WRITE pack rounds each output element to its
+   group's derived grid: `|err| <= 0.5·2^{E_g}` under HALF_AWAY, where
+   `2^{E_g} ≈ absmax_g/qMax` — relative ≈`2^-(m-1)` of the group's largest
+   PROBABILITY, i.e. §5.8 part 2 verbatim, the same mantissa-width sweep axis.
+   `SR_HALF_AWAY` dithers within the band. This is the ONE BFP-specific
+   rounding of the whole path (backward: of `dx`).
+6. *Float32 dust.* `(float)qe_i` rounds above `2^24` (`qe` reaches
+   ≈`7.49e8`) — §7's documented `int32→float` conversion class at a different
+   site, relative `2^-24`, absorbed by the `2.5e-3` bound. The `N`-term sum in
+   index order carries the usual `<= (N-1)·2^-24` relative worst case, the
+   divide one rounding, and the backward's `dot` the same shape. All of it is
+   orders of magnitude below parts 4 and 5 at any practical width.
+7. *Dominant term.* Worked at `m = 8` on both wires with logits of order 1
+   (argmax block absmax `a = 2` ⇒ `EMax = -5`): the alignment band is
+   `u = 2^-5 ≈ 3.1e-2` on the ARGUMENT, i.e. up to ≈3% of a rounded element's
+   weight — ≈`6e-3` absolute on a probability of 0.2; the pack band on an
+   output group whose absmax is `p_max ≈ 0.5` (`2^{E_g} = 2^-7`) is
+   `0.5·2^-7 ≈ 3.9e-3` absolute; the i-exp term is ≤`2.1e-3` absolute. **The
+   BFP softmax is ALIGNMENT-bound** — the INPUT logit wire's `mantissaBits`
+   (and, through the per-group absmax, its `groupSize`) moves accuracy first,
+   the output wire's pack second, and the i-exp floor last; the margins are
+   small at `m = 8` and widen with the logit magnitude, since only the
+   alignment term scales with `a`. That is a third ordering: the GEMMs are
+   accumulation-bound (§§7–8), the norms quantization-bound (§5.8 part 4),
+   softmax alignment-bound. The backward inherits ALL of it — it recomputes
+   the same `s` — and adds only its own pack, so `dx` stays in the
+   single-quantization-step class.
+8. *Degenerate corner.* When `EMax <= -46` (`sigma < -31`), `down` exceeds
+   `bfpShiftRightRounded`'s documented `k <= 31` clamp and every code on that
+   scale collapses to `{-1, 0}`, so every such element maps to `exp(0)` and
+   the layer emits the near-uniform distribution — which for logits below
+   `2^-31` in magnitude IS the true answer to ~`2^-30`; elements in far
+   coarser blocks still take the exact left-shift route and underflow
+   correctly. The `INT32_MIN / 2` saturation sentinel is likewise benign: it
+   is only reachable when the aligned deficit exceeds `2^31` units, i.e. more
+   than `2^17` in the exponent argument against an underflow floor of 22.18,
+   so routing it to an exact `0` weight is correct, not approximate (the
+   kernel comment's `exp(-16)` residual is a conservative restatement of this
+   bound).
+
+**Proof ladder: no §8c bit-identity twin here either — and what replaces
+it.** The spec's rung (c) (a power-of-two BFP config running bit-identical to
+grouped SYM) cannot exist for softmax for a STRONGER reason than the norms':
+not only does the produced grid differ (the pack derives a dynamic `2^E` from
+the raw's absmax, §5.8's argument verbatim), the two paths compute different
+FUNCTIONS — the SYM/FLOAT32 arms evaluate `expf` in float, the BFP arm
+evaluates a quadratic i-exp on an integer grid. What replaces the rung:
+
+- **a bit-exact NumPy/`np.float32` goldgen**
+  (`test/unit/layer/generate_expected_bfp_softmax.py`) mirroring the kernel
+  statement for statement, for the forward at BOTH deterministic knob
+  positions and for the backward — the two knob golds are script-asserted to
+  DIFFER, so passing both proves the knob reaches the shift sites;
+- **a native-vs-fake-quant RED guard** in that generator (the pinned
+  `ARITH_FLOAT32` wire must differ from the native one, so a silent fallback
+  to the float kernel cannot pass the gold);
+- **corner fixtures with their own gold**: the coarse-negative-block regime
+  (`unitTestSoftmaxForwardBfpCoarseNegativeBlock`, both knobs) and the
+  saturation/zero-code clauses (`unitTestSoftmaxForwardBfpCoarseSaturation`,
+  whose zero-shift clause is behavioral only under UBSan);
+- **the integer core's own vectors + envelope**
+  (`test/unit/arithmetic/UnitTestBfpSoftmaxExp.c`: constant re-derivation, per-mode
+  shift vectors, SR bracket/determinism, the `2.5e-3` accuracy envelope);
+- **value-level proximity self-checks** in the goldgen (every element within
+  `2.5e-3` + half a pack step of a float64 softmax; the dequantized wire sums
+  to 1 within the summed pack steps) — the layer-level statement that the
+  integer pipeline computes a softmax at all.
+
 ---
 
 ## 6. D9: gather-formulated ConvT1d, not scatter
@@ -1212,6 +1485,14 @@ showing up at norm scale, on the one input where the answer is obvious. The
 sweep-practical range is unaffected: at `m ≤ 8` (`qMax = 127`) a per-tensor
 sum stays exact below `N ≈ 132 000`, far above any norm block the epic
 exercises.
+
+**The softmax site (PR6).** The same phenomenon at a place that is not a fold:
+the BFP softmax converts each i-exp result with `(float)qe_i`, and `qe` ranges
+up to `748 954 122` — ALWAYS above `2^24`, by construction rather than at a
+sweep extreme. It is harmless there because the value is a probability weight
+consumed immediately in float32: the relative `2^-24` is four orders below the
+i-exp accuracy bound it feeds into (§5.9 parts 2 and 6). No headroom guard
+applies to that path at all — softmax accumulates nothing in `int32`.
 
 ## 8. Exponent fold can overflow to ±inf at extreme combined exponents
 
@@ -1320,3 +1601,74 @@ norms therefore means native OPERAND handling plus a natively derived
 produced grid, NOT integer-only arithmetic — the honest reading the §5.8
 error analysis quantifies, and the research deviation (no literature
 template for BFP norms at all) it documents.
+
+## 11. Softmax register entries (PR6): the I-BERT adaptations, and two corrections
+
+Where §5.9 states the shipped contract, this section records what the softmax
+work DEVIATES from — the source it adapts, and two claims that turned out to
+be wrong. §7's `(float)partial` class and §8's `ldexpf` ±inf do not apply
+here: softmax accumulates nothing in int32 and folds no exponent pair. The
+`(float)qe` conversion above `2^24` is §7's phenomenon at a new site — §7
+records it ("The softmax site"), §5.9 part 6 quantifies it, and neither is
+re-derived here.
+
+**Static input quantization → a fixed COMPILE-TIME grid.** I-BERT (Kim et
+al. 2021, Alg. 3) runs its i-exp on the input tensor's calibrated static scale
+and derives `q_ln2`/`q_b`/`q_c` from it. We pin the work
+grid at `2^-F`, `F = 14`, and floor-quantize the three constants at BUILD
+time. This is stronger than the paper's construction in one respect — the
+constants carry no calibration error, they are exactly
+`floor(ln2·2^14)`, `floor(1.353·2^14)` and `floor(0.344·2^28/0.3585)`,
+re-derived by the goldgen and pinned in C against a double recomputation — and
+it moves a cost elsewhere: the input must be brought ONTO that fixed grid,
+which is the alignment step (§5.9 R-S2 step 2), the pipeline's dominant error
+term (§5.9 part 4) and the piece with no I-BERT analog at all, because a BFP
+tensor has per-group exponents where I-BERT has one tensor scale. `F = 14` is
+not a tuning choice: it is the maximum for which the I-POLY square stays in
+int32 (§5.9 part 3).
+
+**TRUNC is the paper-faithful default; the knob is a research axis.** I-BERT's
+Algorithm 3 renormalizes with an arithmetic right shift, i.e. floor. That is
+`BFP_SHIFT_TRUNC` and it is the factory default. `HALF_AWAY` and `SR` are
+ADDED positions, not corrections of the paper — they exist because the
+alignment shift makes the rounding regime measurable at the layer's output
+(§5.9 part 4: TRUNC sharpens toward the argmax, SR is unbiased in
+expectation). The knob does not participate in serialization (§5.9 R-S2).
+
+**A backward beyond the literature.** I-BERT is inference-only, and the BFP
+literature (HBFP/MSFP/FAST/MX) quantizes GEMM operands while leaving softmax
+in higher precision. A native BFP softmax BACKWARD therefore has no template
+anywhere in the cited work; it is realized here as the R-S4 single funnel op
+that recomputes `s` from the logits, with its own error statement (§5.9
+part 7). The same sentence as the norms' entry applies to what "native" means
+(§10): native operand handling and a natively derived produced grid, with a
+float32 boundary that §5.9 R-S3 names exactly.
+
+**Correction 1 (P6-1): the backward consumed logits as probabilities.** Every
+softmax backward arm applied the Jacobian `s·(dLds − Σ s·dLds)` to the tensor
+the training loop hands it — which is `layerOutputs[i]`, the layer's INPUT
+(the logits), not the softmax OUTPUT the formula needs. The bug predates this
+epic and was invisible because the unit fixtures fed PROBABILITIES, i.e. the
+tests agreed with the bug. The root fix recomputes `s` inside the backward in
+ALL arms (float, SYM, BFP), which is also why the BFP backward's recompute is
+not an extra cost invented for BFP — it is the contract every arm now follows.
+Consequence worth knowing: a wrong `dx` through softmax poisons the UPSTREAM
+layer's weight grad, so the regression pin is an end-to-end one
+(`unitTestSoftmaxMseBackwardThroughLoop`, torch-autograd gold through
+`Linear → Softmax → MSE`).
+
+**Correction 2: the `E_i <= EMax` alignment invariant was FALSE.** The design
+claimed every block exponent is `<= EMax`, so the alignment shift could only
+ever be a right shift, by "absmax monotonicity". That proof is about the
+GLOBAL-absmax block; `EMax` is the exponent of the block containing the SIGNED
+max. A block whose absmax is a large NEGATIVE value is legitimately COARSER
+than the argmax block (`E_i > EMax`), and the first implementation mis-handled
+exactly that case — the shift count went negative, wrapped through `uint32`,
+and the affected elements received `≈exp(-x_max)` mass instead of their true
+share (tens of percent wrong on the corner fixture). The shipped rule is
+two-sided (§5.9 R-S2 step 2): a negative net shift is an EXACT left shift, so
+coarser blocks contribute no alignment error at all, and the saturation
+sentinel covers the one case where that left shift would leave int32. Recorded
+here rather than silently fixed, because the false invariant is the kind a
+reader would re-derive: the fix is not a guard bolted onto a correct rule, it
+is a different rule.

@@ -43,7 +43,7 @@ grad/state storage are partial/unsupported.
 | `LAYERNORM` | ✓ | ✓ | ✓ native (fwd+bwd) | ✓ native (fwd+bwd) | ~ SYM_INT32/BFP | ~ SYM/ASYM/BFP (funnel bwd only) | ✓ |
 | `GROUPNORM` | ✓ | ✓ | ✓ native (fwd+bwd) | ✓ native (fwd+bwd) | ~ SYM_INT32/BFP | ~ SYM/ASYM/BFP (funnel bwd only) | ✓ |
 | `RELU` | – | ✓ | ✓ native (fwd+bwd) | ✓ packed-transparent | n/a | n/a | ✓ |
-| `SOFTMAX` | – | ✓ | ~ dequant-to-float | ~ fwd bridge; ✗ bwd (PR6) | n/a | n/a | ✓ |
+| `SOFTMAX` | – | ✓ | ~ dequant-to-float | ✓ native (fwd+bwd, i-exp + shift knob) | n/a | n/a | ✓ |
 | `FLATTEN` | – | ✓ | ✓ scale-transparent | ✓ packed-transparent | n/a | n/a | ✓ |
 | `DROPOUT` | – | ✓ | ✓ scale-transparent | ~ float bridge (D4) | n/a | n/a | ✓ |
 | `MAXPOOL1D` | – | ✓ | ✓ native (fwd+bwd) | ✓ native (fwd+bwd) | n/a | n/a | ✓ |
@@ -68,9 +68,13 @@ Notes on the qualified cells:
   §5; norms §5.8). *packed-transparent* (Relu/Flatten) carries the per-group exponents
   verbatim outside the funnel by design (§5.7 — Relu's codes are clamped/masked, the
   GRID is what is transparent). *float bridge* = dequant → float compute →
-  fresh-exponent repack (Dropout, D4). Softmax's forward needs no arm (its arithmetic
-  is hardcoded `ARITH_FLOAT32`, so a BFP wire crosses it as a funnel fake-quant
-  bridge); its backward rejects BFP wires until epic PR6.
+  fresh-exponent repack (Dropout, D4). Softmax is native on BOTH sides since epic
+  PR6 (§5.9): an INTEGER forward pipeline (I-BERT i-exp on a fixed `2^-14` work
+  grid, fed by a block-alignment shift) plus one funnel backward op that
+  recomputes the forward from the logits; `softmaxSetBfpExpShiftRounding` picks
+  the rounding of the integer shift sites (TRUNC default, orthogonal to
+  `roundingMode_t`, not serialized). Its FLOAT32/SYM backward arms run outside
+  the funnel and therefore still reject BFP wires.
 - **`QUANTIZATION`** is a pure storage-to-storage conversion node (`executeConvert`,
   conversionMatrix), not an arithmetic layer — it deliberately changes dtype/scale.
 - **Quant params** — trainable weight/bias storage. The Linear/Conv factories allocate
@@ -516,9 +520,16 @@ checkpointing, limitations, literature).
   factory-supported with Decision-5-derived geometry. A uniform-BFP model
   containing BOTH norms trains natively end to end
   (`testBfpUniformNormModelTrainsAndGridsMove`). Contract + error analysis:
-  `docs/conventions/arithmetic-bfp.md` §5.8. Remaining **carrier gate**:
-  **PR6** — Softmax backward has no native
-  `ARITH_BFP` arm. Also still out of scope: grouped BFP grad/optimizer-state
+  `docs/conventions/arithmetic-bfp.md` §5.8. **Epic PR6 adds Softmax**: a native
+  INTEGER forward (I-BERT i-exp, Alg. 3, on a fixed `2^-14` work grid, fed by a
+  block-alignment shift whose rounding is the `softmaxSetBfpExpShiftRounding`
+  knob — TRUNC default) and a native backward as ONE `propLossQ`-anchored funnel
+  op that recomputes the forward from the logits; a uniform-BFP
+  linear → softmax + MSE model trains through the native backward
+  (`unitTestUniformBfpSoftmaxMseTrains`). Contract + error analysis:
+  `docs/conventions/arithmetic-bfp.md` §5.9. Remaining **carrier gate**: native
+  (integer) BFP CE/MSE — the losses have fake-quant arms only, an optional
+  stretch filed as a follow-up. Also still out of scope: grouped BFP grad/optimizer-state
   templates (a future `#300` axis), the optimizer's `updateMath` (FLOAT32-only,
   #310, unchanged by this epic), and `optimizerClipGradNorm` (rejects packed
   SYM/ASYM/BFP grad storage — computing a norm needs unpacked values). Deviations
@@ -583,7 +594,13 @@ checkpointing, limitations, literature).
   native `ARITH_BFP` forward AND backward (stats via the Reduce BFP arms,
   float32 normalize/affine from exact dequants, three funnel backward ops
   anchored on `propLossQ`), with BFP constant-fill gamma/beta params and
-  per-tensor BFP gamma/beta grad storage included. What remains gated:
-  - **PR6** — Softmax forward already works with a BFP wire (its arithmetic
-    is hardcoded `ARITH_FLOAT32`, so the funnel dequantizes any storage
-    dtype); backward has no native `ARITH_BFP` arm (guarded, fail fast).
+  per-tensor BFP gamma/beta grad storage included. **Epic PR6 shipped Softmax**
+  (`docs/conventions/arithmetic-bfp.md` §5.9): a native INTEGER forward
+  (I-BERT i-exp on a fixed `2^-14` grid after a per-block alignment shift, with
+  the `softmaxSetBfpExpShiftRounding` research knob — TRUNC default) and a
+  native backward as ONE `propLossQ`-anchored funnel op recomputing the forward
+  from the logits. Pinning `forwardMath = ARITH_FLOAT32` still buys a fake-quant
+  forward over BFP wires; the backward has no such opt-out (its FLOAT32/SYM arms
+  fail fast on BFP wires). What remains gated:
+  - **native (integer) BFP losses** — CE/MSE have fake-quant BFP arms only; an
+    optional stretch goal, filed as a follow-up issue.

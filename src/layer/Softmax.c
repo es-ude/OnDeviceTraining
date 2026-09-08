@@ -27,11 +27,11 @@ void softmaxInitLayer(layerConfig_t *softmaxConfig, layer_t *softmaxLayer) {
     softmaxLayer->config = softmaxConfig;
 }
 
-/* BFP epic PR6 Task 2: extracted verbatim from the forward kernel's body
- * (behavior-identical refactor) so the backward arms can recompute the
- * softmax OUTPUT from the layer INPUT they are actually handed (P6-1) --
- * Task 4's float kernel and Task 5's SYM arm reuse this too. Max by strict
- * `>` (first-wins on ties), expf, float sum in index order, divide. */
+/* BFP epic PR6 Task 2: the float softmax, shared by the FLOAT32/SYM forward
+ * kernel and by BOTH non-BFP backward arms, which recompute the softmax
+ * OUTPUT from the layer INPUT they are actually handed (P6-1). Max by strict
+ * `>` (first-wins on ties), expf, float sum in index order, divide;
+ * softmaxValuesBfp below is the ARITH_BFP twin of exactly this contract. */
 static void softmaxValuesFloat(const float *x, float *s, size_t n) {
     // 1. find max
     float max = x[0];

@@ -2075,6 +2075,42 @@ void testGroupNormBackwardBfpFrozenShortLossDies(void) {
     freeTensor(in);
 }
 
+/* Count-equal is NOT shape-equal: the dbeta kernel derives B and T from the
+ * LOSS tensor's dims while offsetting with cfg->numChannels, so a [2,2,4] loss
+ * against a [2,4,2] forward input -- 16 elements either way -- passes the
+ * element-count gates AND both wires' grid checks, then walks off = up to 31
+ * over the funnel's 16-element unpacked scratch. dgamma and dx read the same
+ * wire at forward-derived offsets: in bounds, but silently the wrong elements.
+ * UNFROZEN, because dbeta (the out-of-bounds op) only runs unfrozen. */
+void testGroupNormBackwardBfpShapePermutedLossDies(void) {
+    size_t dims[3] = {2, 4, 2};
+    tensor_t *in = buildGnBfpAInput(dims);
+    /* GN-C's dy codes under permuted dims and a per-tensor {1, 0} grid, which
+     * validates at ANY element count -- only a SHAPE gate can reject this. */
+    size_t permutedDims[3] = {2, 2, 4};
+    tensor_t *permutedLoss =
+        buildBfpWireWithCodesGn(permutedDims, 3, 8, 8, 1, 0, kGnBfpCDyCodes, (uint8_t[]){127});
+    tensor_t *propLoss = buildGnBfpCPropLossWire(dims);
+    parameter_t *gamma = buildGnBfpAGamma();
+    parameter_t *beta = buildGnBfpABeta();
+
+    groupNormConfig_t cfg;
+    initGroupNormConfig(&cfg, gamma, beta, 2, 4, 1e-5f, in->quantization, in->quantization);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, cfg.propLossMath.type);
+    cfg.propLossMath.roundingMode = HALF_AWAY;
+    cfg.propLossQ = propLoss->quantization;
+    layerConfig_t lcfg;
+    layer_t layer = makeGroupNormLayer(&cfg, &lcfg);
+
+    ASSERT_EXITS_WITH_FAILURE(groupNormBackward(&layer, in, permutedLoss, propLoss));
+
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(propLoss);
+    freeTensor(permutedLoss);
+    freeTensor(in);
+}
+
 /* R-N1's backward half: propLossQ anchors ALL THREE backward ops' staging, so
  * a NULL anchor under ARITH_BFP dies at arm entry -- and it must die even
  * when the propLoss TENSOR is NULL (the grad ops still stage at it). */
@@ -2615,6 +2651,7 @@ int main(void) {
     RUN_TEST(testGroupNormBackwardBfpNullPropLossComputesGradsOnly);
     RUN_TEST(testGroupNormBackwardBfpFrozenSkipsGrads);
     RUN_TEST(testGroupNormBackwardBfpFrozenShortLossDies);
+    RUN_TEST(testGroupNormBackwardBfpShapePermutedLossDies);
     RUN_TEST(testGroupNormBackwardBfpMissingPropLossQAnchorDies);
     RUN_TEST(testGroupNormBackwardFloat32PinnedStillRejectsBfpWires);
     RUN_TEST(testFactoryUniformBfpProfileBuildsAndForwards);

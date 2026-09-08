@@ -1148,6 +1148,13 @@ void groupNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
         /* R-N1: propLossQ anchors ALL THREE backward ops' staging, even when
          * the propLoss TENSOR is NULL (the grad ops still stage at it). */
         const bfpQConfig_t *anchor = groupNormBfpWireAnchor(cfg->propLossQ, "GroupNorm backward");
+        /* The dbeta kernel derives B/T from the LOSS tensor while offsetting
+         * with cfg->numChannels, so a count-equal but shape-PERMUTED loss
+         * (e.g. [2,2,4] against a [2,4,2] input) passes every count and grid
+         * gate and then reads out of bounds; dgamma/dx read it at
+         * forward-derived offsets, in bounds but silently wrong. The loss gets
+         * the same shape gate the forward applies to its input. */
+        groupNormValidateInputShape(cfg, loss);
         bfpQConfig_t stage = {.exponents = NULL,
                               .numGroups = 1,
                               .groupSize = 0,

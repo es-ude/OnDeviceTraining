@@ -171,28 +171,6 @@ static void maxPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *r
         ((symInt32QConfig_t *)input->quantization->qConfig)->scale;
 }
 
-/* BFP epic PR4 (R-P1): GEMM's rule 1 is WEIGHT-anchored, but a pool has no
- * weight operand, so the width anchor for staging a FLOAT32-stored operand is
- * the layer's OWN produced-wire config — outputQ for the forward op,
- * propLossQ for the backward op. Validated EAGERLY at op entry: without a
- * BFP-typed produced-wire config there is no width source at all, so the arm
- * must not run even when the operand happens to be BFP-stored. The pointer may
- * be NULL — the userApi factories copy layerQuant_t slots BY VALUE and never
- * call initMaxPool1dConfig, so a pinned ARITH_BFP math slot can arrive with a
- * NULL or non-BFP wire config. NULL-check before ->type. (Per-file static,
- * like requireNoBfpWire and poolValidateSymValueSum — the pool layers
- * duplicate these rather than sharing a header.) */
-static const bfpQConfig_t *poolBfpWireAnchor(const quantization_t *wireQ, const char *what) {
-    if (wireQ == NULL || wireQ->type != BFP) {
-        PRINT_ERROR("%s: ARITH_BFP requires this layer's produced-wire config to be BFP-typed "
-                    "(the width anchor for staging FLOAT32 operands -- pools have no weight "
-                    "operand; see docs/conventions/arithmetic-bfp.md §5.7); got %s",
-                    what, wireQ == NULL ? "NULL" : "a non-BFP config");
-        exit(1);
-    }
-    return wireQ->qConfig;
-}
-
 /* BFP epic PR4 (F5): the new BFP kernels index their outputs as DENSE
  * [batch][channels][length] arrays whose batch and channels come from the
  * OPERAND's dims, so an output that disagrees on dim 0 or dim 1 is written
@@ -299,7 +277,7 @@ static void maxPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut
 void maxPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output) {
     maxPool1dConfig_t *cfg = layer->config->maxPool1d;
     if (cfg->forwardMath.type == ARITH_BFP) {
-        const bfpQConfig_t *anchor = poolBfpWireAnchor(cfg->outputQ, "MaxPool1d forward");
+        const bfpQConfig_t *anchor = bfpWireAnchor(cfg->outputQ, "MaxPool1d forward");
         /* Stack template: lifetime covers the executeOp call (same frame).
          * Always per-tensor {1,0} — the anchor supplies WIDTHS only; the
          * funnel owns exponent backing and rounds by the OP (#282). A
@@ -357,15 +335,6 @@ void maxPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output) {
  * Keyed on the wire's STORAGE dtype, not the declared arithmetic (#315
  * parity). forwardInput is NOT guarded: this layer never dereferences it
  * (the argmax indices recorded by the forward carry all the routing). */
-static void requireNoBfpWire(const tensor_t *t, const char *what) {
-    if (t->quantization->type == BFP) {
-        PRINT_ERROR("%s: this arm raw-views the wire in its own storage format and cannot read "
-                    "packed BFP mantissas -- derive ARITH_BFP from a BFP wire config, or keep "
-                    "BFP off this wire",
-                    what);
-        exit(1);
-    }
-}
 
 void maxPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
                             tensor_t *propLoss) {
@@ -581,13 +550,13 @@ void maxPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGra
         /* Runs OUTSIDE executeOp and raw-casts both wires to float*; a packed
          * BFP wire would be read as wide scalars (4x heap over-read on
          * lossGrad, over-write into the packed propLoss buffer). #315 parity. */
-        requireNoBfpWire(lossGrad, "MaxPool1d backward (lossGrad)");
-        requireNoBfpWire(propLoss, "MaxPool1d backward (propLoss)");
+        bfpRequireNoBfpWire(lossGrad, "MaxPool1d backward (lossGrad)");
+        bfpRequireNoBfpWire(propLoss, "MaxPool1d backward (propLoss)");
         maxPool1dBackwardFloat(layer, forwardInput, lossGrad, propLoss);
         break;
     case ARITH_SYM_INT32:
-        requireNoBfpWire(lossGrad, "MaxPool1d backward (lossGrad)");
-        requireNoBfpWire(propLoss, "MaxPool1d backward (propLoss)");
+        bfpRequireNoBfpWire(lossGrad, "MaxPool1d backward (lossGrad)");
+        bfpRequireNoBfpWire(propLoss, "MaxPool1d backward (propLoss)");
         (void)forwardInput; // not needed: argmax already encodes the update position
         executeOp(
             &(opSpec_t){
@@ -601,7 +570,7 @@ void maxPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGra
             propLoss);
         break;
     case ARITH_BFP: {
-        const bfpQConfig_t *anchor = poolBfpWireAnchor(cfg->propLossQ, "MaxPool1d backward");
+        const bfpQConfig_t *anchor = bfpWireAnchor(cfg->propLossQ, "MaxPool1d backward");
         bfpQConfig_t stage = {.exponents = NULL,
                               .numGroups = 1,
                               .groupSize = 0,

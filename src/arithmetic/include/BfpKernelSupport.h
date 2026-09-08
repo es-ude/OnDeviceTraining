@@ -7,6 +7,7 @@
 
 #include "Common.h"
 #include "Quantization.h"
+#include "Tensor.h"
 
 /* BFP epic PR2 (Task 3): shared support for the BFP GEMM kernels (Matmul.c
  * now, the conv kernels in later tasks). Header-only static inline -- no new
@@ -127,6 +128,31 @@ static inline void bfpRequireSameGeometry(const bfpQConfig_t *aQC, size_t aElems
                     what, aQC->numGroups, aQC->groupSize, (unsigned)aQC->mantissaBits,
                     (unsigned)aQC->exponentBits, bQC->numGroups, bQC->groupSize,
                     (unsigned)bQC->mantissaBits, (unsigned)bQC->exponentBits);
+        exit(1);
+    }
+}
+
+/*! PR6 (PR5 deferral 4): the R-P1/R-N1 produced-wire staging anchor, shared.
+ * outputQ anchors forward ops, propLossQ anchors backward ops. Eager at op
+ * entry; NULL-checked because userApi factories copy layerQuant_t slots by
+ * value. */
+static inline const bfpQConfig_t *bfpWireAnchor(const quantization_t *wireQ, const char *what) {
+    if (wireQ == NULL || wireQ->type != BFP) {
+        PRINT_ERROR("%s: ARITH_BFP requires a BFP-typed produced-wire config as the staging "
+                    "width anchor (outputQ forward / propLossQ backward) -- see "
+                    "docs/conventions/arithmetic-bfp.md",
+                    what);
+        exit(1);
+    }
+    return wireQ->qConfig;
+}
+
+/*! PR6 (PR5 deferral 4): fail-fast for paths without BFP semantics, shared. */
+static inline void bfpRequireNoBfpWire(const tensor_t *t, const char *what) {
+    if (t->quantization->type == BFP) {
+        PRINT_ERROR("%s: no BFP semantics on this path -- keep BFP off this wire or use "
+                    "FLOAT32 wires",
+                    what);
         exit(1);
     }
 }

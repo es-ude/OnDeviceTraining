@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "ArithmeticType.h"
+#include "BfpKernelSupport.h"
 #include "Common.h"
 #include "ExecuteOp.h"
 #include "Softmax.h"
@@ -88,14 +89,6 @@ void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output) {
  * Forward needs no guard: it runs inside executeOp, whose prologue/epilogue
  * convert both ways. PR6, not PR4 — softmax BFP semantics belong to research
  * package II. */
-static void requireNoBfpWire(const tensor_t *t, const char *what) {
-    if (t->quantization->type == BFP) {
-        PRINT_ERROR("%s: BFP Softmax semantics arrive with epic PR6 -- keep BFP off this wire or "
-                    "use FLOAT32 wires",
-                    what);
-        exit(1);
-    }
-}
 
 static void softmaxBackwardFloat(tensor_t *input, tensor_t *loss, tensor_t *propLoss) {
     size_t n = calcNumberOfElementsByTensor(input);
@@ -158,9 +151,9 @@ void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, ten
     /* Before the dispatch (the Relu placement): all three wires are dereferenced
      * by whichever arm runs, and the check is on STORAGE dtype, not the declared
      * arithmetic that selects the arm. */
-    requireNoBfpWire(input, "Softmax backward (input)");
-    requireNoBfpWire(loss, "Softmax backward (loss)");
-    requireNoBfpWire(propLoss, "Softmax backward (propLoss)");
+    bfpRequireNoBfpWire(input, "Softmax backward (input)");
+    bfpRequireNoBfpWire(loss, "Softmax backward (loss)");
+    bfpRequireNoBfpWire(propLoss, "Softmax backward (propLoss)");
 
     switch (softmaxLayer->config->softmax->propLossMath.type) {
     case ARITH_FLOAT32:

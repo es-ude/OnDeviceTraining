@@ -45,16 +45,6 @@ void initDropoutConfig(dropoutConfig_t *cfg, float p, tensor_t *mask, quantizati
  * the wire's STORAGE dtype and is only NARROWED per arm: the FLOAT32/SYM_INT32
  * arms keep rejecting a packed BFP wire, while the ARITH_BFP arm requires both
  * wires BFP-stored. */
-static void requireNoBfpWire(const tensor_t *t, const char *what) {
-    if (t->quantization->type == BFP) {
-        PRINT_ERROR("%s: this arm raw-views the wire in its own storage format and cannot read "
-                    "packed BFP mantissas -- derive ARITH_BFP from a BFP wire config, or keep "
-                    "BFP off this wire",
-                    what);
-        exit(1);
-    }
-}
-
 static void requireBfpWire(const tensor_t *t, const char *what) {
     if (t->quantization->type != BFP) {
         PRINT_ERROR("%s: the ARITH_BFP arm requires BFP-stored wires -- got dtype %d; see "
@@ -309,8 +299,8 @@ void dropoutForward(layer_t *dropoutLayer, tensor_t *input, tensor_t *output) {
     switch (cfg->forwardMath.type) {
     case ARITH_FLOAT32:
     case ARITH_SYM_INT32:
-        requireNoBfpWire(input, "Dropout forward (input)");
-        requireNoBfpWire(output, "Dropout forward (output)");
+        bfpRequireNoBfpWire(input, "Dropout forward (input)");
+        bfpRequireNoBfpWire(output, "Dropout forward (output)");
         break;
     case ARITH_BFP:
         requireBfpPairForArm(input, output, "Dropout forward (input)", "Dropout forward (output)",

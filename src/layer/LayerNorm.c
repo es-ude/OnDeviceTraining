@@ -370,24 +370,6 @@ static void layerNormForwardSymInt32(layerNormConfig_t *cfg, tensor_t *gamma, te
     layerNormAffineSymInt32(cfg->numNormDims, gamma, beta, output, sNorm);
 }
 
-/* R-N1 (the R-P1 weight-less anchor at the norm layer): norms have no
- * reduction-weight operand, so the staging width anchor for FLOAT32-stored
- * operands is the layer's OWN produced-wire config -- outputQ for the forward
- * op, propLossQ for all three backward ops. Eager at op entry: without a
- * BFP-typed wire config there is no width source at all. NULL-checked because
- * userApi factories copy layerQuant_t slots by value (a pinned ARITH_BFP slot
- * can arrive with a NULL or non-BFP wire config). */
-static const bfpQConfig_t *layerNormBfpWireAnchor(const quantization_t *wireQ, const char *what) {
-    if (wireQ == NULL || wireQ->type != BFP) {
-        PRINT_ERROR("%s: ARITH_BFP requires a BFP-typed produced-wire config as the staging "
-                    "width anchor (outputQ forward / propLossQ backward) -- see "
-                    "docs/conventions/arithmetic-bfp.md",
-                    what);
-        exit(1);
-    }
-    return wireQ->qConfig;
-}
-
 /* F5-style count gate for the BFP kernels' flat gamma/beta/raw indexing. */
 static void layerNormBfpRequireCount(tensor_t *t, size_t expected, const char *what) {
     size_t n = calcNumberOfElementsByTensor(t);
@@ -526,7 +508,7 @@ void layerNormForward(layer_t *layer, tensor_t *input, tensor_t *output) {
     layerNormValidateInputShape(cfg, input);
 
     if (cfg->forwardMath.type == ARITH_BFP) {
-        const bfpQConfig_t *anchor = layerNormBfpWireAnchor(cfg->outputQ, "LayerNorm forward");
+        const bfpQConfig_t *anchor = bfpWireAnchor(cfg->outputQ, "LayerNorm forward");
         bfpQConfig_t stage = {.exponents = NULL,
                               .numGroups = 1,
                               .groupSize = 0,
@@ -1044,7 +1026,7 @@ void layerNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
     case ARITH_BFP: {
         /* R-N1: propLossQ anchors ALL THREE backward ops' staging, even when
          * the propLoss TENSOR is NULL (the grad ops still stage at it). */
-        const bfpQConfig_t *anchor = layerNormBfpWireAnchor(cfg->propLossQ, "LayerNorm backward");
+        const bfpQConfig_t *anchor = bfpWireAnchor(cfg->propLossQ, "LayerNorm backward");
         bfpQConfig_t stage = {.exponents = NULL,
                               .numGroups = 1,
                               .groupSize = 0,

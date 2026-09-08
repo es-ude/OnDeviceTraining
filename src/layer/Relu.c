@@ -20,16 +20,6 @@
  * arms keep rejecting a packed BFP wire (their float* / int32_t* views would read
  * packed bytes as wide scalars and leave the destination's exponents stale),
  * while the ARITH_BFP arm requires both wires BFP-stored. */
-static void requireNoBfpWire(const tensor_t *t, const char *what) {
-    if (t->quantization->type == BFP) {
-        PRINT_ERROR("%s: this arm raw-views the wire in its own storage format and cannot read "
-                    "packed BFP mantissas -- derive ARITH_BFP from a BFP wire config, or keep "
-                    "BFP off this wire",
-                    what);
-        exit(1);
-    }
-}
-
 static void requireBfpWire(const tensor_t *t, const char *what) {
     if (t->quantization->type != BFP) {
         PRINT_ERROR("%s: the ARITH_BFP arm requires BFP-stored wires (packed codes + per-group "
@@ -66,13 +56,13 @@ void reluForward(layer_t *reluLayer, tensor_t *input, tensor_t *output) {
 
     switch (reluConfig->forwardMath.type) {
     case ARITH_FLOAT32:
-        requireNoBfpWire(input, "ReLU forward (input)");
-        requireNoBfpWire(output, "ReLU forward (output)");
+        bfpRequireNoBfpWire(input, "ReLU forward (input)");
+        bfpRequireNoBfpWire(output, "ReLU forward (output)");
         reluForwardFloat(input, output);
         break;
     case ARITH_SYM_INT32:
-        requireNoBfpWire(input, "ReLU forward (input)");
-        requireNoBfpWire(output, "ReLU forward (output)");
+        bfpRequireNoBfpWire(input, "ReLU forward (input)");
+        bfpRequireNoBfpWire(output, "ReLU forward (output)");
         reluForwardSymInt32(input, output);
         break;
     case ARITH_BFP:

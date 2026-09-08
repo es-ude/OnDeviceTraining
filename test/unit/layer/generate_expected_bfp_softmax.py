@@ -3,7 +3,7 @@
 forward tests (BFP epic PR6 Task 4 -- normative pipeline:
 .superpowers/sdd/2026-09-08-bfp-pr6-softmax/numerics-spec.md, steps 1-5).
 
-Three forward fixtures, all n = 8 (whole-tensor softmax, microbatch B=1):
+Four forward fixtures, all n = 8 (whole-tensor softmax, microbatch B=1):
 
   SM-A "native": the input is BFP-STORED, grouped {numGroups=2, groupSize=4},
     m = 8 / e = 8, with DIFFERENT stored exponents per block (122 -> E=-5
@@ -21,6 +21,11 @@ Three forward fixtures, all n = 8 (whole-tensor softmax, microbatch B=1):
     the amended exact-left-shift alignment. Pins both regimes: large
     negatives (mass exactly 0, packed code 0) and a small positive logit
     the old clamp regime crushed by tens of percent.
+
+  SM-CS "coarse saturation" (fix round 2): grouped {4, 2}; one coarse block
+    per saturation disjunct (magnitude at up=24, up>=31 at up=32), each next
+    to a ZERO code -- the up=32 zero pins the kernel's up>=31 clause (its
+    0 << 32 is formal UB; the zero elements keep their true nonzero mass).
 
   SM-B "staged": the SAME logits as FLOAT32 input values; the funnel stages
     them per-tensor at the ANCHOR widths -- the layer's own produced-wire
@@ -173,6 +178,12 @@ def softmax_values_bfp(codes, exps, qc, mode):
                 # <= exp(-16); the sentinel rides the qT clamp + thr/QFLOOR
                 # handling downstream.
                 aligned = INT32_MIN // 2
+            elif up >= 31:
+                # Fix round 2: the only NON-negative code that can reach
+                # up >= 31 is m_i == 0 (the m_i >= 1 proof bounds up <= 30),
+                # and 0's exact shift is 0 -- the explicit clause exists
+                # because 0 << up with up >= 32 is formal UB in C.
+                aligned = 0
             else:
                 aligned = codes[i] << up  # exact left shift (C: unsigned image)
                 assert INT32_MIN <= aligned <= INT32_MAX, (
@@ -186,7 +197,7 @@ def softmax_values_bfp(codes, exps, qc, mode):
         if sigma >= 31:
             qw = QFLOOR if qt < 0 else 0
         elif sigma >= 0:
-            thr = -((363392 + (1 << sigma) - 1) >> sigma)
+            thr = -(((-QFLOOR) + (1 << sigma) - 1) >> sigma)
             qw = QFLOOR if qt <= thr else qt << sigma  # Python << is exact; C uses
             # the guarded two's-complement image, value-identical inside int32
         else:
@@ -231,6 +242,21 @@ STAGED_OUT_QC = {"mantissa_bits": 6, "exponent_bits": 8, "group_size": 4}
 SM_CN_X_CODES = [64, 16, -10, 4, -100, -80, 1, -50]
 SM_CN_X_EXPS = [122, 127]  # E = -5 (argmax block), E = 0 (coarser)
 SM_CN_X_QC = dict(SM_X_QC)
+
+# SM-CS "coarse saturation" (fix round 2): grouped {4, 2} so ONE fixture can
+# reach every arm of the negative-net-shift branch. Block g0 (E=-5) holds the
+# small positive argmax 0.25; g1 (E=19, up=24) carries code -128 -- the
+# MAGNITUDE-disjunct saturation (|m| > INT32_MAX >> 24 = 127) -- next to a
+# zero code whose 0 << 24 stays a defined shift; g2 (E=27, up=32) carries
+# code -128 -- the up>=31-disjunct saturation -- next to a ZERO code that
+# needs the new up>=31 clause (0 << 32 is formal UB, C11 6.5.7p3; masked
+# shifts return the correct 0 on real targets, so the behavioral oracle here
+# is that the zero elements KEEP their true mass exp(0 - 0.25)/sum -- any
+# garbage alignment would zero or move them -- while the UB itself is pinned
+# by UBSan, see the C test comment); g3 (E=-5) is a normal filler block.
+SM_CS_X_CODES = [8, 2, -128, 0, -128, 0, -16, 4]
+SM_CS_X_EXPS = [122, 146, 154, 122]  # E = -5, 19, 27, -5
+SM_CS_X_QC = {"mantissa_bits": 8, "exponent_bits": 8, "group_size": 2}
 
 
 def pack(raw, qc):
@@ -366,6 +392,57 @@ def main() -> None:
                     "not 0 -- the exp-underflow floor leaked mass")
         check_proximity(f"SM-CN {knob}", cn_codes, cn_exps, OUT_QC, cn_ref)
 
+    # -- SM-CS fixture validation (fix round 2): every arm of the negative-
+    # net-shift branch must be exercised -- both saturation disjuncts AND the
+    # new zero-code up>=31 clause. The branch conditions are re-derived here
+    # from the fixture data alone (same arithmetic as the emulation). --
+    assert (SM_CS_X_QC["mantissa_bits"] == SM_X_QC["mantissa_bits"]
+            and SM_CS_X_QC["exponent_bits"] == SM_X_QC["exponent_bits"]), (
+        "SM-CS must share SM-A's widths -- the C test reuses the kSmBfpX* width scalars")
+    cs_bias = bfp_bias(SM_CS_X_QC)
+    cs_deq = [float(deq(c, SM_CS_X_EXPS, SM_CS_X_QC, i)) for i, c in enumerate(SM_CS_X_CODES)]
+    cs_E = [SM_CS_X_EXPS[_bfp_group_of(i, SM_CS_X_QC["group_size"])] - cs_bias for i in range(N)]
+    cs_argmax = max(range(N), key=lambda i: (cs_deq[i], -i))  # first-wins max
+    cs_e_max = cs_E[cs_argmax]
+    cs_x_max = cs_deq[cs_argmax]
+    assert 0.0 < cs_x_max < 22.0, "SM-CS: the argmax must be small-positive"
+    cs_sigma = cs_e_max + F
+    cs_down = -cs_sigma if cs_sigma < 0 else 0
+    sat_up31 = sat_magnitude = zero_up31 = False
+    for i in range(N):
+        si = (cs_e_max - cs_E[i]) + cs_down
+        if si >= 0:
+            continue
+        up = -si
+        if SM_CS_X_CODES[i] < 0 and up >= 31:
+            sat_up31 = True
+        elif SM_CS_X_CODES[i] < 0 and SM_CS_X_CODES[i] < -(INT32_MAX >> up):
+            sat_magnitude = True
+        elif SM_CS_X_CODES[i] == 0 and up >= 31:
+            zero_up31 = True
+    assert sat_up31, "SM-CS: no element reaches the up>=31 saturation disjunct"
+    assert sat_magnitude, (
+        "SM-CS: no element reaches the magnitude saturation disjunct (|m| > INT32_MAX >> up)")
+    assert zero_up31, "SM-CS: no ZERO code reaches the up>=31 clause (the UB fix's pin)"
+
+    # -- SM-CS gold (knob TRUNC; SM-A remains the knob discriminator) --
+    cs_raw = softmax_values_bfp(SM_CS_X_CODES, SM_CS_X_EXPS, SM_CS_X_QC, "trunc")
+    cs_codes, cs_exps = pack(cs_raw, OUT_QC)
+    cs_ref = softmax_float64(cs_deq)
+    # (vii) Saturated elements pack to code 0 exactly; the ZERO-code elements
+    # keep NONZERO mass matching the float softmax (exp(-x_max)/sum) -- a
+    # STRONGER pin than "zero elements pack to 0" (any corrupted alignment
+    # for the zero code would zero or move a live output code).
+    for i in range(N):
+        if cs_deq[i] - cs_x_max <= QFLOOR * 2.0 ** -F:
+            assert cs_codes[i] == 0, (
+                f"SM-CS: saturated/underflow element {i} packs to {cs_codes[i]}, not 0")
+        if SM_CS_X_CODES[i] == 0:
+            assert cs_codes[i] != 0, (
+                f"SM-CS: zero-code element {i} packs to 0 -- the zero-clause pin is vacuous "
+                "(its true mass exp(-x_max)/sum must survive the pack)")
+    check_proximity("SM-CS", cs_codes, cs_exps, OUT_QC, cs_ref)
+
     # -- SM-B gold: staged FLOAT32 input at the m=6 anchor, knob TRUNC --
     b_vals = [np.float32(v) for v in x_deq]
     for v, orig in zip(b_vals, x_deq):
@@ -442,6 +519,18 @@ def main() -> None:
         emit_uint8_array("kSmBfpCnOutExponentsTrunc", cn_exps_trunc),
         emit_int32_array("kSmBfpCnOutCodesHalfAway", torch.tensor(cn_codes_ha)),
         emit_uint8_array("kSmBfpCnOutExponentsHalfAway", cn_exps_ha),
+        "\n/* SM-CS (fix round 2): grouped {4, 2} -- one coarse block per saturation\n"
+        " * disjunct (up=24 magnitude, up=32 up>=31) plus a ZERO code in each; the\n"
+        " * up=32 zero code needs the kernel's up>=31 clause (0 << 32 is formal UB).\n"
+        " * Saturated elements pack to 0; the zero-code elements KEEP their true\n"
+        " * mass exp(-x_max)/sum (script-asserted nonzero). Widths are SM-A's;\n"
+        " * knob TRUNC; pack at the same m=8 {2, 4} outputQ. */\n",
+        emit_int32_scalar("kSmBfpCsXNumGroups", len(SM_CS_X_EXPS)),
+        emit_int32_scalar("kSmBfpCsXGroupSize", SM_CS_X_QC["group_size"]),
+        emit_int32_array("kSmBfpCsXCodes", torch.tensor(SM_CS_X_CODES)),
+        emit_uint8_array("kSmBfpCsXExponents", SM_CS_X_EXPS),
+        emit_int32_array("kSmBfpCsOutCodesTrunc", torch.tensor(cs_codes)),
+        emit_uint8_array("kSmBfpCsOutExponentsTrunc", cs_exps),
         "\n/* SM-B: the SAME logits as FLOAT32 input values; the funnel stages them\n"
         " * per-tensor at the ANCHOR widths (outputQ: m=6/e=8 -- script-asserted\n"
         " * to differ from an m=8 staging). Knob stays the default TRUNC. */\n",

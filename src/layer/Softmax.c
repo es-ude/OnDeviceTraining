@@ -143,8 +143,14 @@ static void softmaxValuesBfp(const tensor_t *input, bfpShiftRounding_t mode, flo
                  * m_i * 2^(ei - eMax) <= mMax, and -si <= ei - eMax, so
                  * aligned <= mMax -- with m_i >= 1 that also bounds
                  * ei - eMax <= 30, i.e. up stays a valid shift count
-                 * (comment, not assert -- spec step 2). */
-                aligned = (int32_t)((uint32_t)m[i] << up);
+                 * (comment, not assert -- spec step 2). m[i] == 0 is the one
+                 * non-negative code that proof does NOT bound: x_i = 0 puts
+                 * no cap on ei - eMax, so up can reach >= 32 -- a shift-count
+                 * UB (C11 6.5.7p3) even though the value is 0 either way.
+                 * The up >= 31 clause returns 0's exact shift (0) explicitly;
+                 * negatives with up >= 31 already saturated above (fix
+                 * round 2). */
+                aligned = (up >= 31u) ? 0 : (int32_t)((uint32_t)m[i] << up);
             }
         }
         int32_t qT = aligned - mMaxW;
@@ -166,7 +172,7 @@ static void softmaxValuesBfp(const tensor_t *input, bfpShiftRounding_t mode, flo
         if (sigma >= 31) {
             qW = (qT < 0) ? BFP_SOFTMAX_QFLOOR : 0;
         } else if (sigma >= 0) {
-            const int32_t thr = -((363392 + (1 << sigma) - 1) >> sigma);
+            const int32_t thr = -((-BFP_SOFTMAX_QFLOOR + (1 << sigma) - 1) >> sigma);
             qW = (qT <= thr) ? BFP_SOFTMAX_QFLOOR : (int32_t)((uint32_t)qT << (uint32_t)sigma);
         } else {
             qW = qT;

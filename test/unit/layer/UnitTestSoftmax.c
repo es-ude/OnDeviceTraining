@@ -686,6 +686,44 @@ void unitTestSoftmaxForwardBfpCoarseNegativeBlock(void) {
     TEST_ASSERT_EQUAL_UINT8_ARRAY(kSmBfpCnOutExponentsHalfAway, gotHalfAwayExps, 2);
 }
 
+/* Fix round 2: the saturation sub-branches and the zero-code up>=31 clause.
+ * Grouped {4, 2}: g1 (up=24) saturates code -128 via the MAGNITUDE disjunct
+ * (|m| > INT32_MAX >> 24), g2 (up=32) via the up>=31 disjunct; each coarse
+ * block also holds a ZERO code -- g2's reaches the kernel's up>=31 clause,
+ * whose absence is formal UB (0 << 32, C11 6.5.7p3). Masked shifts return
+ * the correct 0 on real targets, so there is NO behavioral RED for the
+ * zero clause on this preset -- the pin is behavioral-under-sanitizer (the
+ * unit_test_asan preset's UBSan aborts on the unfixed kernel) and the gold
+ * vector equality is the oracle: the saturated elements pack to 0 while the
+ * zero-code elements KEEP their true mass exp(-x_max)/sum (nonzero codes,
+ * script-asserted), which any corrupted alignment would move. */
+void unitTestSoftmaxForwardBfpCoarseSaturation(void) {
+    tensor_t *in = buildSmBfpWireWithCodes(
+        8, (uint8_t)kSmBfpXMantissaBits, (uint8_t)kSmBfpXExponentBits, (size_t)kSmBfpCsXNumGroups,
+        (size_t)kSmBfpCsXGroupSize, kSmBfpCsXCodes, kSmBfpCsXExponents);
+    tensor_t *out = buildSmBfpOutputWire((uint8_t)kSmBfpOutMantissaBits);
+
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, out->quantization);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->forwardMath.type);
+
+    layerFunctions[SOFTMAX].forward(softmaxLayer, in, out);
+
+    int32_t got[8];
+    uint8_t gotExps[2];
+    bfpQConfig_t *outQC = out->quantization->qConfig;
+    unpackSignExtend(out->data, outQC->mantissaBits, 0, got, 8);
+    memcpy(gotExps, outQC->exponents, outQC->numGroups);
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(out);
+    freeTensor(in);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(kSmBfpCsOutCodesTrunc, got, 8);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(kSmBfpCsOutExponentsTrunc, gotExps, 2);
+}
+
 /* R-N1 staging: a FLOAT32-stored input is staged per-tensor at the ANCHOR
  * widths -- the layer's own produced-wire config (outputQ, m = 6 here), not
  * the operand's width and not a hardcoded 8. The generator asserts an m=8
@@ -757,6 +795,7 @@ int main() {
     RUN_TEST(unitTestSoftmaxForwardBfpNativeTrunc);
     RUN_TEST(unitTestSoftmaxForwardBfpNativeHalfAway);
     RUN_TEST(unitTestSoftmaxForwardBfpCoarseNegativeBlock);
+    RUN_TEST(unitTestSoftmaxForwardBfpCoarseSaturation);
     RUN_TEST(unitTestSoftmaxForwardBfpStagedWidths);
     RUN_TEST(testSoftmaxForwardBfpRequiresBfpOutputQ);
     RUN_TEST(testSoftmaxLayerInitAndFreeRoundTrip);

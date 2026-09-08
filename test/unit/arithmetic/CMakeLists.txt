@@ -90,6 +90,28 @@ add_elastic_ai_unit_test(
         odt_test_death
 )
 
+set(GEN_BFP_SOFTMAX_CORE_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_bfp_softmax_core.h)
+add_custom_command(
+        OUTPUT ${GEN_BFP_SOFTMAX_CORE_HEADER}
+        COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_bfp_softmax_core.py
+                --out ${GEN_BFP_SOFTMAX_CORE_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_bfp_softmax_core.py
+        COMMENT "Generating expected_bfp_softmax_core.h via integer emulation"
+        VERBATIM
+)
+add_custom_target(generate_expected_bfp_softmax_core
+        DEPENDS ${GEN_BFP_SOFTMAX_CORE_HEADER})
+
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
+        BfpSoftmaxExp
+        MORE_LIBS
+        RNG
+        m
+)
+add_dependencies(UnitTestBfpSoftmaxExp generate_expected_bfp_softmax_core)
+target_include_directories(UnitTestBfpSoftmaxExp PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Comparison

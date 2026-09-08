@@ -38,6 +38,13 @@ target_link_libraries(Axpby PRIVATE
         Common
 )
 
+add_library(BfpSoftmaxExp BfpSoftmaxExp.c)
+target_include_directories(BfpSoftmaxExp PUBLIC include)
+target_link_libraries(BfpSoftmaxExp PRIVATE
+        RNG
+        Common
+)
+
 add_library(Comparison Comparison.c)
 target_include_directories(Comparison PUBLIC include)
 target_link_libraries(Comparison PRIVATE

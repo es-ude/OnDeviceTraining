@@ -639,6 +639,53 @@ void unitTestSoftmaxForwardBfpNativeHalfAway(void) {
     TEST_ASSERT_EQUAL_UINT8_ARRAY(kSmBfpOutExponentsHalfAway, gotExps, 2);
 }
 
+/* Fix round 1 (amended spec step 2): the coarse-negative-block regime. Block
+ * A holds the SIGNED max (2.0 at E=-5); block B {-100, -80, +1.0, -50} is
+ * negative-dominated, so its absmax-minimal grid (E=0) is legitimately
+ * COARSER than the argmax block's -- E_i > EMax, the case the old kernel's
+ * uint32-wrap/clamp-31 path got wrong by tens of percent (the +1.0 element
+ * received ~exp(-x_max) mass instead of ~exp(1-2)/sum ~ 0.2). The amended
+ * kernel takes an EXACT saturating left shift; the -100/-80/-50 elements
+ * pack to code 0 exactly. Runs BOTH knob positions against per-knob gold --
+ * the alignment here is exact, so only bfpIExpQ's >>z differs between them. */
+void unitTestSoftmaxForwardBfpCoarseNegativeBlock(void) {
+    tensor_t *in = buildSmBfpWireWithCodes(
+        8, (uint8_t)kSmBfpXMantissaBits, (uint8_t)kSmBfpXExponentBits, (size_t)kSmBfpXNumGroups,
+        (size_t)kSmBfpXGroupSize, kSmBfpCnXCodes, kSmBfpCnXExponents);
+    tensor_t *outTrunc = buildSmBfpOutputWire((uint8_t)kSmBfpOutMantissaBits);
+    tensor_t *outHalfAway = buildSmBfpOutputWire((uint8_t)kSmBfpOutMantissaBits);
+
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, outTrunc->quantization);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->forwardMath.type);
+
+    layerFunctions[SOFTMAX].forward(softmaxLayer, in, outTrunc);
+    softmaxSetBfpExpShiftRounding(softmaxLayer, BFP_SHIFT_HALF_AWAY);
+    layerFunctions[SOFTMAX].forward(softmaxLayer, in, outHalfAway);
+
+    int32_t gotTrunc[8];
+    uint8_t gotTruncExps[2];
+    bfpQConfig_t *truncQC = outTrunc->quantization->qConfig;
+    unpackSignExtend(outTrunc->data, truncQC->mantissaBits, 0, gotTrunc, 8);
+    memcpy(gotTruncExps, truncQC->exponents, truncQC->numGroups);
+    int32_t gotHalfAway[8];
+    uint8_t gotHalfAwayExps[2];
+    bfpQConfig_t *haQC = outHalfAway->quantization->qConfig;
+    unpackSignExtend(outHalfAway->data, haQC->mantissaBits, 0, gotHalfAway, 8);
+    memcpy(gotHalfAwayExps, haQC->exponents, haQC->numGroups);
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(outHalfAway);
+    freeTensor(outTrunc);
+    freeTensor(in);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(kSmBfpCnOutCodesTrunc, gotTrunc, 8);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(kSmBfpCnOutExponentsTrunc, gotTruncExps, 2);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(kSmBfpCnOutCodesHalfAway, gotHalfAway, 8);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(kSmBfpCnOutExponentsHalfAway, gotHalfAwayExps, 2);
+}
+
 /* R-N1 staging: a FLOAT32-stored input is staged per-tensor at the ANCHOR
  * widths -- the layer's own produced-wire config (outputQ, m = 6 here), not
  * the operand's width and not a hardcoded 8. The generator asserts an m=8
@@ -709,6 +756,7 @@ int main() {
 
     RUN_TEST(unitTestSoftmaxForwardBfpNativeTrunc);
     RUN_TEST(unitTestSoftmaxForwardBfpNativeHalfAway);
+    RUN_TEST(unitTestSoftmaxForwardBfpCoarseNegativeBlock);
     RUN_TEST(unitTestSoftmaxForwardBfpStagedWidths);
     RUN_TEST(testSoftmaxForwardBfpRequiresBfpOutputQ);
     RUN_TEST(testSoftmaxLayerInitAndFreeRoundTrip);

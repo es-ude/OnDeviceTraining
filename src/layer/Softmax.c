@@ -110,20 +110,43 @@ static void softmaxValuesBfp(const tensor_t *input, bfpShiftRounding_t mode, flo
     }
 
     /* (2) Align onto the work-grid-or-coarser common grid (THE lossy site --
-     * exactly ONE rounded shift per element). When the storage grid is FINER
+     * at most ONE rounded shift per element). When the storage grid is FINER
      * than the work grid (sigma < 0), `down` folds the extra descent into
-     * that same shift -- never two chained roundings. Each eMax - ei >= 0 by
-     * the alignment invariant (absmax-minimal exponents are monotone in
-     * block absmax; NOT asserted -- a defensive clamp would hide grid
-     * corruption, see §5.9). */
+     * that same shift -- never two chained roundings. The net shift si MAY be
+     * NEGATIVE (spec amended 2026-09-08, fix round 1): eMax follows the
+     * SIGNED argmax while block exponents follow the block ABSMAX, so a
+     * negative-dominated block is legitimately coarser than the argmax block
+     * (ei > eMax) -- such elements take an EXACT saturating LEFT shift. */
     const int32_t sigma = eMax + BFP_SOFTMAX_EXP_FRAC_BITS;
     const uint32_t down = (sigma < 0) ? (uint32_t)(-sigma) : 0u;
     const int32_t mMaxW = bfpShiftRightRounded(mMax, down, mode);
     float sum = 0.f;
     for (size_t i = 0; i < n; i++) {
         const int32_t ei = (int32_t)qC->exponents[bfpGroupOf(qC, i)] - bias;
-        const uint32_t shiftTotal = (uint32_t)(eMax - ei) + down;
-        const int32_t aligned = bfpShiftRightRounded(m[i], shiftTotal, mode);
+        const int32_t si = (eMax - ei) + (int32_t)down;
+        int32_t aligned;
+        if (si >= 0) {
+            aligned = bfpShiftRightRounded(m[i], (uint32_t)si, mode);
+        } else {
+            const uint32_t up = (uint32_t)(-si);
+            if (m[i] < 0 && (up >= 31u || m[i] < -(INT32_MAX >> up))) {
+                /* Saturate: the element's true value sits below the
+                 * exp-underflow floor up to a residual <= exp(-16); the
+                 * INT32_MIN/2 sentinel rides the qT clamp + thr/QFLOOR
+                 * handling below (headroom: |mMaxW| <= 2^30 keeps the qT
+                 * subtraction inside int32). The m[i] < -(INT32_MAX >> up)
+                 * form avoids negating INT32_MIN. */
+                aligned = INT32_MIN / 2;
+            } else {
+                /* Exact left shift, unsigned image (no signed-shift UB). For
+                 * m[i] > 0 it provably cannot overflow: x_i <= x_max gives
+                 * m_i * 2^(ei - eMax) <= mMax, and -si <= ei - eMax, so
+                 * aligned <= mMax -- with m_i >= 1 that also bounds
+                 * ei - eMax <= 30, i.e. up stays a valid shift count
+                 * (comment, not assert -- spec step 2). */
+                aligned = (int32_t)((uint32_t)m[i] << up);
+            }
+        }
         int32_t qT = aligned - mMaxW;
         if (qT > 0) {
             /* min(qT, 0): load-bearing under SR -- deterministic modes are

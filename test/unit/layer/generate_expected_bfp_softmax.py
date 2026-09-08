@@ -3,7 +3,7 @@
 forward tests (BFP epic PR6 Task 4 -- normative pipeline:
 .superpowers/sdd/2026-09-08-bfp-pr6-softmax/numerics-spec.md, steps 1-5).
 
-Two forward fixtures, both n = 8 (whole-tensor softmax, microbatch B=1):
+Three forward fixtures, all n = 8 (whole-tensor softmax, microbatch B=1):
 
   SM-A "native": the input is BFP-STORED, grouped {numGroups=2, groupSize=4},
     m = 8 / e = 8, with DIFFERENT stored exponents per block (122 -> E=-5
@@ -14,6 +14,13 @@ Two forward fixtures, both n = 8 (whole-tensor softmax, microbatch B=1):
     below asserts the two packed wires differ). The argmax element (code 96,
     block A) sits in the max-exponent block, so the alignment invariant
     E_i <= EMax holds as the spec requires.
+
+  SM-CN "coarse negative block" (fix round 1, amended spec step 2): block A
+    holds the SIGNED max while the negative-dominated block B legitimately
+    carries a COARSER absmax-minimal grid (E_i > EMax) -- its elements take
+    the amended exact-left-shift alignment. Pins both regimes: large
+    negatives (mass exactly 0, packed code 0) and a small positive logit
+    the old clamp regime crushed by tens of percent.
 
   SM-B "staged": the SAME logits as FLOAT32 input values; the funnel stages
     them per-tensor at the ANCHOR widths -- the layer's own produced-wire
@@ -143,24 +150,36 @@ def softmax_values_bfp(codes, exps, qc, mode):
         if xi > x_max:
             x_max, m_max, e_max = xi, codes[i], E[i]
 
-    # Fixture validation (NOT a kernel mirror -- the C does not assert this):
-    # the alignment invariant the spec proves for absmax-minimal grids. A
-    # fixture violating it would make this emulation silently diverge from
-    # the C's uint32-wrap/clamp behavior, so abort loudly instead.
-    for i in range(n):
-        assert e_max - E[i] >= 0, (
-            f"fixture breaks the alignment invariant at element {i}: "
-            f"EMax={e_max} < E_i={E[i]} -- pick the argmax in the max-exponent block")
-
-    # (2) Align onto the work-or-coarser grid: ONE rounded shift per element.
+    # (2) Align onto the work-or-coarser grid: at most ONE rounded shift per
+    # element. The net shift s_i MAY be NEGATIVE (spec amended 2026-09-08,
+    # Task-4 fix round 1): EMax follows the SIGNED argmax while block
+    # exponents follow the block ABSMAX, so a negative-dominated block is
+    # legitimately coarser than the argmax block (E_i > EMax); such elements
+    # take an EXACT saturating left shift instead of a rounded right shift.
     sigma = e_max + F
     down = -sigma if sigma < 0 else 0
     m_max_w = shift_right_rounded(m_max, down, mode)
     s = []
     total = f32(0.0)
     for i in range(n):
-        aligned = shift_right_rounded(codes[i], (e_max - E[i]) + down, mode)
+        si = (e_max - E[i]) + down
+        if si >= 0:
+            aligned = shift_right_rounded(codes[i], si, mode)
+        else:
+            up = -si
+            if codes[i] < 0 and (up >= 31 or codes[i] < -(INT32_MAX >> up)):
+                # Saturating sentinel INT32_MIN/2: the element's true value
+                # sits below the exp-underflow floor up to a residual
+                # <= exp(-16); the sentinel rides the qT clamp + thr/QFLOOR
+                # handling downstream.
+                aligned = INT32_MIN // 2
+            else:
+                aligned = codes[i] << up  # exact left shift (C: unsigned image)
+                assert INT32_MIN <= aligned <= INT32_MAX, (
+                    f"aligned {aligned} leaves int32 -- the m_i > 0 no-overflow "
+                    "proof was violated (grid corruption in the fixture)")
         qt = aligned - m_max_w
+        assert INT32_MIN <= qt <= INT32_MAX, f"qT {qt} leaves int32"
         if qt > 0:  # min(qT, 0): load-bearing under SR, no-op for these modes
             qt = 0
         # (3) Work-grid promotion (exact).
@@ -201,6 +220,17 @@ OUT_QC = {"mantissa_bits": 8, "exponent_bits": 8, "group_size": 4}
 OUT_NUM_GROUPS = 2
 
 STAGED_OUT_QC = {"mantissa_bits": 6, "exponent_bits": 8, "group_size": 4}
+
+# SM-CN "coarse negative block" (fix round 1): block A {2.0, 0.5, -0.3125,
+# 0.125} holds the SIGNED max at E=-5; block B {-100, -80, +1.0, -50} is
+# negative-DOMINATED, so its absmax-minimal exponent E=0 is COARSER than the
+# argmax block's (E_i > EMax) -- the fixture deliberately violates the old
+# (wrong) invariant and exercises BOTH negative-net-shift regimes: large
+# negatives whose true mass is exactly 0, and a small POSITIVE logit whose
+# mass (~exp(1-2)/sum ~ 0.2) the old clamp regime crushed to ~exp(-x_max).
+SM_CN_X_CODES = [64, 16, -10, 4, -100, -80, 1, -50]
+SM_CN_X_EXPS = [122, 127]  # E = -5 (argmax block), E = 0 (coarser)
+SM_CN_X_QC = dict(SM_X_QC)
 
 
 def pack(raw, qc):
@@ -291,6 +321,51 @@ def main() -> None:
     check_proximity("SM-A TRUNC", a_codes_trunc, a_exps_trunc, OUT_QC, fake)
     check_proximity("SM-A HALF_AWAY", a_codes_ha, a_exps_ha, OUT_QC, fake)
 
+    # -- SM-CN fixture validation (fix round 1): the fixture must EXERCISE the
+    # amended negative-net-shift branch, i.e. deliberately contain a block
+    # coarser than the argmax block, with both regimes inside it. --
+    assert SM_CN_X_QC == SM_X_QC and len(SM_CN_X_EXPS) == len(SM_X_EXPS), (
+        "SM-CN must share SM-A's input geometry -- the C test reuses the kSmBfpX* "
+        "geometry scalars")
+    cn_deq = [float(deq(c, SM_CN_X_EXPS, SM_CN_X_QC, i)) for i, c in enumerate(SM_CN_X_CODES)]
+    cn_bias = bfp_bias(SM_CN_X_QC)
+    cn_argmax = max(range(N), key=lambda i: (cn_deq[i], -i))  # first-wins max
+    cn_e_max = SM_CN_X_EXPS[_bfp_group_of(cn_argmax, SM_CN_X_QC["group_size"])] - cn_bias
+    cn_x_max = cn_deq[cn_argmax]
+    coarse_blocks = [g for g, se in enumerate(SM_CN_X_EXPS) if se - cn_bias > cn_e_max]
+    assert coarse_blocks, (
+        "SM-CN: no block is coarser than the argmax block (E_i > EMax) -- the fixture "
+        "no longer exercises the amended negative-net-shift branch")
+    gsz = SM_CN_X_QC["group_size"]
+    for g in coarse_blocks:
+        block_deq = cn_deq[g * gsz:(g + 1) * gsz]
+        # exp-underflow regime: x_i - x_max <= QFLOOR * 2^-F = -22.18 -> mass 0
+        assert any(v - cn_x_max <= QFLOOR * 2.0 ** -F for v in block_deq), (
+            f"SM-CN: coarse block {g} has no large-negative element (mass exactly 0)")
+        assert any(0.0 < v < cn_x_max for v in block_deq), (
+            f"SM-CN: coarse block {g} has no small-positive element -- the "
+            "positive-in-coarse-block regime is unexercised")
+
+    # -- SM-CN gold: both knob positions; pack at SM-A's outputQ geometry --
+    cn_raw_trunc = softmax_values_bfp(SM_CN_X_CODES, SM_CN_X_EXPS, SM_CN_X_QC, "trunc")
+    cn_raw_ha = softmax_values_bfp(SM_CN_X_CODES, SM_CN_X_EXPS, SM_CN_X_QC, "half_away")
+    cn_codes_trunc, cn_exps_trunc = pack(cn_raw_trunc, OUT_QC)
+    cn_codes_ha, cn_exps_ha = pack(cn_raw_ha, OUT_QC)
+
+    # (vi) The underflow elements must land at code 0 (their e_i is EXACTLY 0),
+    # and every element -- the +1.0 one included -- must sit within the i-exp
+    # + pack bound of the float softmax (the old clamp regime missed the +1.0
+    # element by tens of percent, which is what the C RED run captures).
+    cn_ref = softmax_float64(cn_deq)
+    for cn_codes, cn_exps, knob in ((cn_codes_trunc, cn_exps_trunc, "TRUNC"),
+                                    (cn_codes_ha, cn_exps_ha, "HALF_AWAY")):
+        for i in range(N):
+            if cn_deq[i] - cn_x_max <= QFLOOR * 2.0 ** -F:
+                assert cn_codes[i] == 0, (
+                    f"SM-CN {knob}: underflow element {i} packs to code {cn_codes[i]}, "
+                    "not 0 -- the exp-underflow floor leaked mass")
+        check_proximity(f"SM-CN {knob}", cn_codes, cn_exps, OUT_QC, cn_ref)
+
     # -- SM-B gold: staged FLOAT32 input at the m=6 anchor, knob TRUNC --
     b_vals = [np.float32(v) for v in x_deq]
     for v, orig in zip(b_vals, x_deq):
@@ -356,6 +431,17 @@ def main() -> None:
         " * wires share {2, 4} / e=8, so one zero set serves both) */\n",
         emit_int32_array("kSmBfpOutZeroCodes", torch.tensor(zero_codes)),
         emit_uint8_array("kSmBfpOutZeroExponents", zero_exps),
+        "\n/* SM-CN (fix round 1): the coarse-negative-block fixture -- block A holds\n"
+        " * the SIGNED max at E=-5, the negative-dominated block B is legitimately\n"
+        " * COARSER (E=0 > EMax), so its elements take the amended EXACT left-shift\n"
+        " * alignment. Input geometry is SM-A's (script-asserted); pack at the same\n"
+        " * m=8 {2, 4} outputQ. Underflow elements pack to code 0 exactly. */\n",
+        emit_int32_array("kSmBfpCnXCodes", torch.tensor(SM_CN_X_CODES)),
+        emit_uint8_array("kSmBfpCnXExponents", SM_CN_X_EXPS),
+        emit_int32_array("kSmBfpCnOutCodesTrunc", torch.tensor(cn_codes_trunc)),
+        emit_uint8_array("kSmBfpCnOutExponentsTrunc", cn_exps_trunc),
+        emit_int32_array("kSmBfpCnOutCodesHalfAway", torch.tensor(cn_codes_ha)),
+        emit_uint8_array("kSmBfpCnOutExponentsHalfAway", cn_exps_ha),
         "\n/* SM-B: the SAME logits as FLOAT32 input values; the funnel stages them\n"
         " * per-tensor at the ANCHOR widths (outputQ: m=6/e=8 -- script-asserted\n"
         " * to differ from an m=8 staging). Knob stays the default TRUNC. */\n",

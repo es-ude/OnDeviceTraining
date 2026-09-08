@@ -195,6 +195,25 @@ add_elastic_ai_unit_test(
         odt_test_death
 )
 
+# BFP epic PR6 Task 2 (ruling P6-1): softmax backward's Jacobian formula
+# needs the softmax OUTPUT s, but the training loop hands every backward the
+# layer's INPUT (logits) -- the C arms recompute s internally, and this
+# goldgen pins that recompute's formula via torch.autograd (float backward +
+# SYM_INT32 section) plus a loop-contract e2e (Linear->Softmax->MSE weight
+# grad, UnitTestMultiLayerTraining).
+set(GEN_SOFTMAX_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_softmax.h)
+add_custom_command(
+        OUTPUT ${GEN_SOFTMAX_HEADER}
+        COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_softmax.py
+                --out ${GEN_SOFTMAX_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_softmax.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+        COMMENT "Generating expected_softmax.h via PyTorch"
+        VERBATIM
+)
+add_custom_target(generate_expected_softmax
+        DEPENDS ${GEN_SOFTMAX_HEADER})
+
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Softmax
@@ -210,6 +229,8 @@ add_elastic_ai_unit_test(
         StorageApi
         odt_test_death
 )
+add_dependencies(UnitTestSoftmax generate_expected_softmax)
+target_include_directories(UnitTestSoftmax PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST

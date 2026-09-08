@@ -331,6 +331,13 @@ target_link_libraries(UnitTestMultiLayerTraining PRIVATE
         odt_test_death
         odt_test_layer_builders
 )
+# BFP epic PR6 Task 2 (P6-1 loop-contract e2e): the Linear->Softmax->MSE
+# weight-grad fixture is single-sourced in the Softmax goldgen header (layer/
+# generate_expected_softmax.py) so the C consumer here and UnitTestSoftmax
+# never drift apart.
+add_dependencies(UnitTestMultiLayerTraining generate_expected_softmax)
+target_include_directories(UnitTestMultiLayerTraining PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR}/../layer)
 __register_target_as_unit_test(UnitTestMultiLayerTraining)
 
 add_executable(UnitTestMnistSmoke UnitTestMnistSmoke.c)

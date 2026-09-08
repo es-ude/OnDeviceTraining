@@ -25,6 +25,34 @@ void softmaxInitLayer(layerConfig_t *softmaxConfig, layer_t *softmaxLayer) {
     softmaxLayer->config = softmaxConfig;
 }
 
+/* BFP epic PR6 Task 2: extracted verbatim from the forward kernel's body
+ * (behavior-identical refactor) so the backward arms can recompute the
+ * softmax OUTPUT from the layer INPUT they are actually handed (P6-1) --
+ * Task 4's float kernel and Task 5's SYM arm reuse this too. Max by strict
+ * `>` (first-wins on ties), expf, float sum in index order, divide. */
+static void softmaxValuesFloat(const float *x, float *s, size_t n) {
+    // 1. find max
+    float max = x[0];
+    for (size_t i = 1; i < n; i++) {
+        if (x[i] > max) {
+            max = x[i];
+        }
+    }
+
+    // 2. exp and sum
+    float sum = 0.f;
+    for (size_t i = 0; i < n; i++) {
+        float e = expf(x[i] - max);
+        s[i] = e;
+        sum += e;
+    }
+
+    // 3. normalize
+    for (size_t i = 0; i < n; i++) {
+        s[i] /= sum;
+    }
+}
+
 /* Softmax's real compute is always float (numerically stable max-shifted exp);
  * SYM_INT32 forwardMath only ever meant "convert in, compute in float, convert
  * out" (never native SYM arithmetic like Linear/Conv), so the funnel's
@@ -42,26 +70,7 @@ static void softmaxForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, ten
     float *x = (float *)input->data;
     float *y = (float *)rawOut->data;
 
-    // 1. find max
-    float max = x[0];
-    for (size_t i = 1; i < count; i++) {
-        if (x[i] > max) {
-            max = x[i];
-        }
-    }
-
-    // 2. exp and sum
-    float sum = 0.f;
-    for (size_t i = 0; i < count; i++) {
-        float e = expf(x[i] - max);
-        y[i] = e;
-        sum += e;
-    }
-
-    // 3. normalize
-    for (size_t i = 0; i < count; i++) {
-        y[i] /= sum;
-    }
+    softmaxValuesFloat(x, y, count);
 }
 
 void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output) {
@@ -93,9 +102,14 @@ void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output) {
 static void softmaxBackwardFloat(tensor_t *input, tensor_t *loss, tensor_t *propLoss) {
     size_t n = calcNumberOfElementsByTensor(input);
 
-    float *s = (float *)input->data;
+    float *x = (float *)input->data;
     float *dLds = (float *)loss->data;
     float *dLdx = (float *)propLoss->data;
+
+    /* P6-1 root fix: the training loop hands every backward the layer INPUT
+     * (logits), not the softmax OUTPUT the Jacobian needs -- recompute it. */
+    float s[n];
+    softmaxValuesFloat(x, s, n);
 
     float dot = 0.0f;
     for (size_t i = 0; i < n; i++) {
@@ -131,9 +145,13 @@ static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *p
     setTensorValuesForConversion(propLossFloatData, &propLossFloatQ, propLoss, &propLossFloat);
     convertTensor(propLoss, &propLossFloat);
 
-    float *s = (float *)inputFloat.data;
     float *dLds = (float *)lossFloat.data;
     float *dLdx = (float *)propLossFloat.data;
+
+    /* P6-1 root fix: same recompute as the float arm -- the dequantized
+     * inputFloat is the layer INPUT (logits), not the softmax OUTPUT. */
+    float s[inputSize];
+    softmaxValuesFloat((float *)inputFloat.data, s, inputSize);
 
     float dot = 0.0f;
     for (size_t i = 0; i < inputSize; i++) {

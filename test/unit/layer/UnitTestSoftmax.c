@@ -10,6 +10,7 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
+#include "expected_softmax.h"
 #include "unity.h"
 
 void unitTestSoftmaxForwardFloat() {
@@ -128,6 +129,10 @@ void unitTestSoftmaxForwardSymInt32() {
     }
 }
 
+/* P6-1 root fix: backward consumes LOGITS -- see docs/superpowers/sdd/
+ * 2026-09-08-bfp-pr6-softmax/task-2-brief.md. Fixture X/DLDS/EXPECTED_DX
+ * are goldgen'd (generate_expected_softmax.py, self-checked against
+ * torch.autograd on softmax(x) with upstream grad DLDS). */
 void unitTestSoftmaxBackwardFloat() {
     size_t inputSize = 6;
 
@@ -140,9 +145,7 @@ void unitTestSoftmaxBackwardFloat() {
     shape_t *inputShape = reserveMemory(sizeof(shape_t));
     setShape(inputShape, inputDims, 2, inputOrder);
     tensor_t *input = initTensor(inputShape, quantizationInitFloat(), NULL);
-    tensorFillFromFloatBuffer(
-        input,
-        (float[]){2.3008e-03f, 6.2543e-03f, 1.7001e-02f, 4.6213e-02f, 9.2822e-01f, 1.5503e-05f}, 6);
+    tensorFillFromFloatBuffer(input, (float *)softmaxBackwardX, softmaxBackwardX_len);
 
     /* 2. Build heap loss tensor. */
     size_t *lossDims = reserveMemory(2 * sizeof(size_t));
@@ -153,7 +156,7 @@ void unitTestSoftmaxBackwardFloat() {
     shape_t *lossShape = reserveMemory(sizeof(shape_t));
     setShape(lossShape, lossDims, 2, lossOrder);
     tensor_t *loss = initTensor(lossShape, quantizationInitFloat(), NULL);
-    tensorFillFromFloatBuffer(loss, (float[]){0.f, 2.f, -4.f, 6.f, 3.f, 2.f}, 6);
+    tensorFillFromFloatBuffer(loss, (float *)softmaxBackwardDLds, softmaxBackwardDLds_len);
 
     /* 3. Build heap propLoss tensor. */
     size_t *propLossDims = reserveMemory(2 * sizeof(size_t));
@@ -187,13 +190,18 @@ void unitTestSoftmaxBackwardFloat() {
     freeQuantization(floatQ);
 
     /* 7. ASSERT. */
-    float expected[] = {-6.9173e-03f, -6.2947e-03f, -1.1912e-01f,
-                        1.3834e-01f,  -5.9973e-03f, -1.5603e-05f};
     for (size_t i = 0; i < inputSize; i++) {
-        TEST_ASSERT_FLOAT_WITHIN(0.0001f, expected[i], captured[i]);
+        TEST_ASSERT_FLOAT_WITHIN(0.0001f, softmaxBackwardExpectedDx[i], captured[i]);
     }
 }
 
+/* P6-1 SYM_INT32 arm: same X/DLDS as unitTestSoftmaxBackwardFloat, but
+ * quantized through the layer's SymInt32 wires. softmaxBackwardSymExpectedDx
+ * is goldgen'd from X requantized/dequantized at the fixture's int12
+ * per-tensor absmax grid (the SAME grid tensorFillFromFloatBuffer derives
+ * here), then the same float Jacobian formula -- the existing (loose)
+ * tolerance below absorbs the rest of the quantization noise (DLDS and
+ * propLoss also round-trip through SymInt32). */
 void unitTestSoftmaxBackwardSymInt32() {
     size_t inputSize = 6;
 
@@ -206,9 +214,7 @@ void unitTestSoftmaxBackwardSymInt32() {
     shape_t *inputShape = reserveMemory(sizeof(shape_t));
     setShape(inputShape, inputDims, 2, inputOrder);
     tensor_t *input = initTensor(inputShape, quantizationInitSymInt32(HALF_AWAY), NULL);
-    tensorFillFromFloatBuffer(
-        input,
-        (float[]){2.3008e-03f, 6.2543e-03f, 1.7001e-02f, 4.6213e-02f, 9.2822e-01f, 1.5503e-05f}, 6);
+    tensorFillFromFloatBuffer(input, (float *)softmaxBackwardX, softmaxBackwardX_len);
 
     /* 2. Build heap loss tensor (SymInt32). */
     size_t *lossDims = reserveMemory(2 * sizeof(size_t));
@@ -219,7 +225,7 @@ void unitTestSoftmaxBackwardSymInt32() {
     shape_t *lossShape = reserveMemory(sizeof(shape_t));
     setShape(lossShape, lossDims, 2, lossOrder);
     tensor_t *loss = initTensor(lossShape, quantizationInitSymInt32(HALF_AWAY), NULL);
-    tensorFillFromFloatBuffer(loss, (float[]){0.f, 2.f, -4.f, 6.f, 3.f, 2.f}, 6);
+    tensorFillFromFloatBuffer(loss, (float *)softmaxBackwardDLds, softmaxBackwardDLds_len);
 
     /* 3. Build heap propLoss tensor (SymInt32). */
     size_t *propLossDims = reserveMemory(2 * sizeof(size_t));
@@ -265,10 +271,8 @@ void unitTestSoftmaxBackwardSymInt32() {
     freeQuantization(symIntQ);
 
     /* 8. ASSERT. */
-    float expected[] = {-6.9173e-03f, -6.2947e-03f, -1.1912e-01f,
-                        1.3834e-01f,  -5.9973e-03f, -1.5603e-05f};
     for (size_t i = 0; i < inputSize; i++) {
-        TEST_ASSERT_FLOAT_WITHIN(0.01f, expected[i], captured[i]);
+        TEST_ASSERT_FLOAT_WITHIN(0.01f, softmaxBackwardSymExpectedDx[i], captured[i]);
     }
 }
 

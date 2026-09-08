@@ -39,6 +39,7 @@
 #include "TrainingBatchDefault.h"
 #include "TrainingEpochDefault.h"
 #include "TrainingLoopApi.h"
+#include "expected_softmax.h"
 #include "unity.h"
 
 void setUp() {}
@@ -2522,6 +2523,70 @@ void testBfpNormGradStorageAccumulatesAndSteps(void) {
                                   "the gamma grad must stay BFP-stored across step + zero");
 }
 
+/* ===========================================================================
+ * BFP epic PR6 Task 2 (P6-1) capstone: loop-contract e2e.
+ * ======================================================================== */
+
+/*! THE strongest pin that P6-1's root fix is wired correctly end to end: the
+ *  training loop hands softmaxBackward the layer's INPUT (layerOutputs[i]),
+ *  and a wrong dx through softmax poisons the UPSTREAM linear layer's weight
+ *  grad. Model: Linear(3->3, ramp weights) -> Softmax, MSE loss, ONE
+ *  calculateGradsSequential call. softmaxMseE2eExpectedWeightGrad is
+ *  goldgen'd (generate_expected_softmax.py) via torch.autograd through the
+ *  WHOLE chain (F.linear -> softmax -> mse_loss(reduction='sum'), matching
+ *  the repo's raw-per-element MSE backward convention -- docs/conventions/
+ *  loss.md).
+ *
+ *  This test does NOT independently fail against pre-fix code: Steps 3-5 of
+ *  this task already fixed both softmax backward arms, so by the time this
+ *  test exists the fix is already live. Its RED/GREEN evidence is instead a
+ *  mutation check: temporarily revert softmaxBackwardFloat's recompute (use
+ *  the layer input `x` as `s` again, matching the pre-fix bug), rerun, and
+ *  confirm THIS test fails -- proof the loop contract (calculateGradsSequential
+ *  handing softmax the LOGITS, not probabilities) is covered end to end, not
+ *  just at the unit level. See the task-2 report for the transcript. */
+void unitTestSoftmaxMseBackwardThroughLoop(void) {
+    quantization_t *q = quantizationInitFloat();
+
+    parameter_t *w0 = buildRampParam2D(3, 3, 0.1f, 0.05f);
+    parameter_t *b0 = buildRampParam2D(1, 3, 0.0f, 0.0f);
+    layer_t *linear0 = buildBorrowedLinearLayer(w0, b0, q);
+
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *softmax = softmaxLayerInit(&lq);
+
+    layer_t *model[] = {linear0, softmax};
+
+    tensor_t *input = buildFloatTensor2D(1, 3, (float[]){1.0f, -0.5f, 2.0f});
+    tensor_t *label = buildFloatTensor2D(1, 3, (float[]){0.2f, 0.5f, 0.3f});
+
+    trainingStats_t *stats =
+        calculateGradsSequential(model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, input, label);
+
+    /* CAPTURE. */
+    tensor_t *w0GradTensor = getGradFromParameter(w0);
+    float capturedWeightGrad[9];
+    for (size_t i = 0; i < 9; i++) {
+        capturedWeightGrad[i] = ((float *)w0GradTensor->data)[i];
+    }
+
+    /* FREE (reverse init order). */
+    freeTrainingStats(stats);
+    freeTensor(label);
+    freeTensor(input);
+    freeSoftmaxLayer(softmax);
+    freeLinearLayerShellOnly(linear0);
+    freeParameter(b0);
+    freeParameter(w0);
+    freeQuantization(q);
+
+    /* ASSERT. */
+    for (size_t i = 0; i < 9; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(1e-4f, softmaxMseE2eExpectedWeightGrad[i], capturedWeightGrad[i]);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMultiLayerBackward_WithCrossEntropy_DoesNotCrash);
@@ -2545,5 +2610,6 @@ int main(void) {
     RUN_TEST(testBfpUniformPoolActivationModelTrains);
     RUN_TEST(testBfpUniformNormModelTrainsAndGridsMove);
     RUN_TEST(testBfpNormGradStorageAccumulatesAndSteps);
+    RUN_TEST(unitTestSoftmaxMseBackwardThroughLoop);
     return UNITY_END();
 }

@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include "BfpKernelSupport.h"
 #include "DeathTest.h"
 #include "MinMax.h"
 #include "Quantization.h"
@@ -573,6 +574,25 @@ void testMeanBfpSumHeadroomDeath(void) {
     freeReservedMemory(codes);
 }
 
+void testBfpSumHeadroomRejectsZeroMantissaWidth(void) {
+    bfpQConfig_t qC = {.exponents = NULL,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 0,
+                       .exponentBits = 8};
+    /* mantissaBits == 0 shifted INT32_MAX by (0-1): UB before the guard. reductionLen
+     * MUST be 0 here, not some positive N: with groupSize == 0, maxSeg == reductionLen,
+     * and bfpValidateSumHeadroom's OWN pre-existing "maxSeg > limit" check is a
+     * confounder -- on toolchains where the UB shift happens to mask to 31 and
+     * INT32_MAX >> 31 == 0, ANY reductionLen > 0 already trips that pre-existing
+     * check on its own (0 exceeded), exit(1)-ing for the WRONG reason even with no
+     * guard at all. reductionLen == 0 makes maxSeg == 0 too, so "0 > 0" stays false
+     * in both worlds and only the new guard in bfpSumSegmentLimit can produce the
+     * exit(1) this test asserts -- this is load-bearing, not a stylistic choice. */
+    ASSERT_EXITS_WITH_FAILURE(bfpValidateSumHeadroom(&qC, 0, "test"));
+}
+
 /* ---- sumSquaresOverTrailingAxesFloat32 + sqrtFloat32 (#326 Task 5) ---- */
 
 void testSumSquaresTrailingAxes(void) {
@@ -665,6 +685,7 @@ int main(void) {
     RUN_TEST(testMeanBfpRejectsFloat32Operand);
     RUN_TEST(testMeanFloat32RejectsBfpOperand);
     RUN_TEST(testMeanBfpSumHeadroomDeath);
+    RUN_TEST(testBfpSumHeadroomRejectsZeroMantissaWidth);
     RUN_TEST(testSumSquaresTrailingAxes);
     RUN_TEST(testSumSquaresWholeTensor);
     RUN_TEST(testSumSquaresPermutationAware);

@@ -60,6 +60,11 @@ static inline void bfpValidateBlockHeadroom(const bfpQConfig_t *aQC, const bfpQC
  * g <= INT32_MAX >> (m-1). The PRODUCT helper's >> (ma+mb-2) bound does not
  * apply to single-operand sums. */
 static inline size_t bfpSumSegmentLimit(uint8_t mantissaBits) {
+    if (mantissaBits == 0) {
+        PRINT_ERROR("bfpSumSegmentLimit: mantissaBits == 0 is not a BFP width (shift-UB; "
+                    "the SYM twin rejects qMaxBits == 0 the same way)");
+        exit(1);
+    }
     return (size_t)(INT32_MAX >> (mantissaBits - 1));
 }
 

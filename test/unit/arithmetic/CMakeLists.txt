@@ -185,6 +185,7 @@ add_elastic_ai_unit_test(
         Arithmetic
         StorageApi
         MinMax
+        Common
         odt_test_death
 )
 

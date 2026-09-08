@@ -430,6 +430,9 @@ void testSoftmaxLayerInitBorrowingStoresLqPointers(void) {
     TEST_ASSERT_EQUAL_INT(ARITH_FLOAT32, cfg->forwardMath.type);
     TEST_ASSERT_EQUAL_INT(ARITH_FLOAT32, cfg->propLossMath.type);
     TEST_ASSERT_FALSE(cfg->ownsQuantizations);
+    /* P6-2: the shift-rounding knob is an ORTHOGONAL config field (never
+     * derived from any roundingMode_t) and factories default it to TRUNC. */
+    TEST_ASSERT_EQUAL_INT(BFP_SHIFT_TRUNC, cfg->bfpExpShiftRounding);
 
     freeSoftmaxLayer(layer);
     freeQuantization(qFwd);
@@ -454,6 +457,7 @@ void testSoftmaxLayerInitOwningDeepCopiesLqPointers(void) {
     TEST_ASSERT_EQUAL_INT(qFwd->type, cfg->outputQ->type);
     TEST_ASSERT_EQUAL_INT(ARITH_FLOAT32, cfg->forwardMath.type);
     TEST_ASSERT_TRUE(cfg->ownsQuantizations);
+    TEST_ASSERT_EQUAL_INT(BFP_SHIFT_TRUNC, cfg->bfpExpShiftRounding);
 
     freeSoftmaxLayer(layer);
     freeQuantization(qFwd);

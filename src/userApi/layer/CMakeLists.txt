@@ -53,6 +53,7 @@ add_library(SoftmaxApi SoftmaxApi.c)
 target_include_directories(SoftmaxApi PUBLIC include)
 target_link_libraries(SoftmaxApi PRIVATE
         ArithmeticType
+        BfpSoftmaxExp
         Common
         Layer
         LayerQuant

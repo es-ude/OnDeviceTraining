@@ -200,7 +200,9 @@ target_link_libraries(Softmax PRIVATE
         Tensor
         Arithmetic
         ArithmeticType
+        BfpSoftmaxExp
         ExecuteOp
+        Quantization
         Layer
         Common
 )

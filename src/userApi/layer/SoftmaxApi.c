@@ -46,6 +46,7 @@ layer_t *softmaxLayerInit(layerQuant_t *lq) {
     cfg->outputQ = lq->outputQ;
     cfg->propLossQ = lq->propLossQ;
     cfg->ownsQuantizations = false;
+    cfg->bfpExpShiftRounding = BFP_SHIFT_TRUNC;
 
     return layer;
 }
@@ -66,8 +67,13 @@ layer_t *softmaxLayerInitOwning(layerQuant_t *lq) {
     cfg->outputQ = deepCopyQuantization(lq->outputQ);
     cfg->propLossQ = deepCopyQuantization(lq->propLossQ);
     cfg->ownsQuantizations = true;
+    cfg->bfpExpShiftRounding = BFP_SHIFT_TRUNC;
 
     return layer;
+}
+
+void softmaxSetBfpExpShiftRounding(layer_t *softmaxLayer, bfpShiftRounding_t mode) {
+    softmaxLayer->config->softmax->bfpExpShiftRounding = mode;
 }
 
 void freeSoftmaxLayer(layer_t *softmaxLayer) {

@@ -63,8 +63,8 @@ groupShape_t resolveGroupShape(size_t N, size_t outCh, groupModeSweep_t mode, in
  * group shape. */
 qShapeView_t viewQShape(const quantization_t *q);
 
-/* true when `tensor`'s storage matches `expect`; on false, `msg` (msgLen
- * bytes, always NUL-terminated) carries the first mismatch, e.g.
+/* true when `tensor`'s storage matches `expect`; on false, `msg` (msgLen > 0
+ * bytes; always NUL-terminated) carries the first mismatch, e.g.
  * "expected BFP, got SYM" / "expected mantissaBits 8, got 4" /
  * "expected group shape {4,3}, got {1,0}". Expectation dtypes without an
  * arm (INT32, SYM_INT32, BOOL) fail fast (exit 1) -- this is checked FIRST,

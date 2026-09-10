@@ -229,6 +229,19 @@ void testGateFloat32ExpectationIsTypeOnly(void) {
     TEST_ASSERT_NOT_NULL(strstr(msg, "expected FLOAT32"));
 }
 
+/* Type-only means type-only: deliberately wrong bits/shape on a FLOAT32
+ * expectation over a FLOAT32 tensor must still pass. */
+void testGateFloat32ExpectationIgnoresBitsAndShape(void) {
+    char msg[160] = "";
+    bool ok = checkOwned(quantizationInitFloat(),
+                         (paramGateExpect_t){.type = FLOAT32,
+                                             .bits = 99,
+                                             .exponentBits = 99,
+                                             .shape = {.numGroups = 4, .groupSize = 3}},
+                         msg, sizeof(msg));
+    TEST_ASSERT_TRUE(ok);
+}
+
 /* An expectation dtype the gate has no arm for (SYM_INT32 is compute
  * format, never sweep storage) must fail fast, not silently pass. */
 void testGateUnsupportedExpectationFailsFast(void) {
@@ -270,6 +283,7 @@ int main(void) {
     RUN_TEST(testGateSymPerTensorMatchesAndWrongBitsFails);
     RUN_TEST(testGateAsymGroupedMatchesAndWrongShapeFails);
     RUN_TEST(testGateFloat32ExpectationIsTypeOnly);
+    RUN_TEST(testGateFloat32ExpectationIgnoresBitsAndShape);
     RUN_TEST(testGateUnsupportedExpectationFailsFast);
     RUN_TEST(testGateUnsupportedExpectationFailsFastOnTypeMismatch);
     return UNITY_END();

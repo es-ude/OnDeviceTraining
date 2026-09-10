@@ -246,7 +246,7 @@ model:
 
 The startup storage gate behind the `GATES PASS` line is the shared
 `examples/_shared/param_gate.h` checker (SYM / ASYM / BFP arms, #417) — the
-epic-#410 PR7 BFP trainer reuses it.
+epic-#410 PR7 BFP trainer will reuse it.
 
 Resolved shapes on HAR's actual topology (`N` = weight element count, `outCh`
 = output channels, `pc = N/outCh` = the per-channel groupSize):

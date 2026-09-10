@@ -239,6 +239,17 @@ void testGateUnsupportedExpectationFailsFast(void) {
     freeTensor(t);
 }
 
+/* The unsupported-expectation guard must fire regardless of the tensor's
+ * actual type -- including (especially) when actual != expected, which is
+ * the common case for a programmer error the guard exists to catch. */
+void testGateUnsupportedExpectationFailsFastOnTypeMismatch(void) {
+    tensor_t *t = makeTensor4x3(quantizationInitFloat());      /* actual FLOAT32 */
+    paramGateExpect_t expect = {.type = SYM_INT32, .bits = 8}; /* no gate arm */
+    char msg[160] = "";
+    ASSERT_EXITS_WITH_FAILURE(paramGateCheck(t, &expect, msg, sizeof(msg)));
+    freeTensor(t);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testResolveGroupShapeTensorModeIsPerTensor);
@@ -260,5 +271,6 @@ int main(void) {
     RUN_TEST(testGateAsymGroupedMatchesAndWrongShapeFails);
     RUN_TEST(testGateFloat32ExpectationIsTypeOnly);
     RUN_TEST(testGateUnsupportedExpectationFailsFast);
+    RUN_TEST(testGateUnsupportedExpectationFailsFastOnTypeMismatch);
     return UNITY_END();
 }

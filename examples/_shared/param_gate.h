@@ -67,7 +67,10 @@ qShapeView_t viewQShape(const quantization_t *q);
  * bytes, always NUL-terminated) carries the first mismatch, e.g.
  * "expected BFP, got SYM" / "expected mantissaBits 8, got 4" /
  * "expected group shape {4,3}, got {1,0}". Expectation dtypes without an
- * arm (INT32, SYM_INT32, BOOL) fail fast (exit 1). */
+ * arm (INT32, SYM_INT32, BOOL) fail fast (exit 1) -- this is checked FIRST,
+ * before comparing against `tensor`'s actual type, so an unsupported
+ * `expect->type` always exits even when the tensor's actual type differs
+ * from it (the common case for this exact programmer error). */
 bool paramGateCheck(const tensor_t *tensor, const paramGateExpect_t *expect, char *msg,
                     size_t msgLen);
 

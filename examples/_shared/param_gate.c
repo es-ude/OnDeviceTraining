@@ -72,6 +72,24 @@ qShapeView_t viewQShape(const quantization_t *q) {
 
 bool paramGateCheck(const tensor_t *tensor, const paramGateExpect_t *expect, char *msg,
                     size_t msgLen) {
+    /* Validate the EXPECTATION dtype before anything else -- including before
+     * the actual-vs-expected mismatch check below. A caller passing an
+     * unsupported expect->type (INT32/SYM_INT32/BOOL) must fail fast
+     * regardless of the tensor's actual type: that mismatch is the common
+     * case for exactly the programmer error this guard exists to catch, so
+     * gating the check on actualType == expect->type would let most such
+     * mistakes slip through as a benign "expected X, got Y" false result. */
+    switch (expect->type) {
+    case FLOAT32:
+    case SYM:
+    case ASYM:
+    case BFP:
+        break;
+    default:
+        PRINT_ERROR("paramGateCheck: no gate arm for expectation dtype %s",
+                    quantTypeToString(expect->type));
+        exit(1);
+    }
     qtype_t actualType = tensor->quantization->type;
     if (actualType != expect->type) {
         snprintf(msg, msgLen, "expected %s, got %s", quantTypeToString(expect->type),
@@ -106,6 +124,9 @@ bool paramGateCheck(const tensor_t *tensor, const paramGateExpect_t *expect, cha
         return true;
     }
     default:
+        /* Unreachable: expect->type was validated above. Kept explicit (not
+         * folded away) per the repo's explicit-switch/fail-fast-default
+         * convention for dtype dispatch. */
         PRINT_ERROR("paramGateCheck: no gate arm for expectation dtype %s",
                     quantTypeToString(expect->type));
         exit(1);

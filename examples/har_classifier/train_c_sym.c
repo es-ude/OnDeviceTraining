@@ -80,6 +80,7 @@
 #include "TrainingLoopApi.h"
 
 #include "mem_instrument.h"
+#include "param_gate.h"
 
 #define BATCH 64 /* macro-batch: loader groups 64 samples per optimizer step */
 /* Micro-batch = concurrent samples per forward/backward. The training loop
@@ -118,33 +119,9 @@ static float g_lrMin = 0.0f;        /* LR_MIN (cosine floor) */
 static optimizer_t *g_optim = NULL; /* for per-epoch LR logging in epochCallback */
 
 /* Group-quant PR5 axis (#300): GROUP_MODE/GROUP_SIZE/WEIGHT_DTYPE env knobs.
- * Enum names carry a _SWEEP/_MODE_/_DTYPE_ prefix to avoid colliding with
- * qtype_t's own SYM/ASYM enumerators (Quantization.h) -- C enums share one
- * flat namespace. */
-typedef enum groupModeSweep {
-    GROUP_MODE_TENSOR, /* default: per-tensor, today's behavior (byte-identical) */
-    GROUP_MODE_CHANNEL,
-    GROUP_MODE_SIZE
-} groupModeSweep_t;
+ * groupModeSweep_t / groupShape_t / qShapeView_t and the shape helpers live
+ * in examples/_shared/param_gate.h (#417) so the BFP trainer shares them. */
 typedef enum weightDtypeSweep { WEIGHT_DTYPE_SYM, WEIGHT_DTYPE_ASYM } weightDtypeSweep_t;
-
-/* Resolved {numGroups, groupSize} for one weight tensor -- the shape grammar
- * from Quantization.h: per-tensor = {1,0}; grouped = {k>1, g>0, k*g==N};
- * {1,N} is never valid and must never be emitted by resolveGroupShape below. */
-typedef struct groupShape {
-    size_t numGroups;
-    size_t groupSize;
-} groupShape_t;
-
-/* dtype-generic read of a SYM or ASYM tensor's {qBits, numGroups, groupSize}.
- * symQConfig_t and asymQConfig_t share these three field NAMES but differ in
- * layout (asymQConfig_t also carries zeroPoints), so the qtype decides which
- * struct qConfig actually points to. */
-typedef struct qShapeView {
-    uint8_t qBits;
-    size_t numGroups;
-    size_t groupSize;
-} qShapeView_t;
 
 static groupModeSweep_t g_groupMode = GROUP_MODE_TENSOR;    /* GROUP_MODE=tensor|channel|size */
 static int g_groupSize = 0;                                 /* GROUP_SIZE (mode=size only) */
@@ -157,57 +134,6 @@ static float envFloat(const char *name, float dflt) {
 static int envInt(const char *name, int dflt) {
     const char *v = getenv(name);
     return (v != NULL && v[0] != '\0') ? (int)strtol(v, NULL, 10) : dflt;
-}
-
-/* Group-quant PR5 (#300): per-layer group-shape resolution.
- *
- * HAR weight tensors (N = element count, outCh = dim-0 size, pc = N/outCh =
- * elements per output channel; Conv weight = [outCh, inCh/groups, K], Linear
- * = [outFeatures, inFeatures], so outCh is always dim 0):
- *   layer   shape         N      outCh  pc   G64                G32
- *   conv1   [16, 9, 7]    1008   16     63   FALLBACK->pc=63    FALLBACK->pc=63
- *   conv2   [32,16, 5]    2560   32     80   ->40 groups        ->80 groups
- *   conv3   [64,32, 3]    6144   64     96   ->96 groups        ->192 groups
- *   linear  [6, 64]       384    6      64   ->6 groups (==pc)  ->12 groups
- * (conv1's N=1008=2^4*3^2*7: neither 64 nor 32 divide it, so both G64 and G32
- * fall back to per-channel (pc=63=3^2*7) for that layer only.)
- *
- * mode=tensor:  always per-tensor {1,0} (today's behavior).
- * mode=channel: one group per output channel -- groupSize = N/outCh, which
- *               is always an exact divisor of N by construction.
- * mode=size:    groupSize = GROUP_SIZE if it evenly divides N, else FALL
- *               BACK to the per-channel groupSize (N/outCh) for that layer.
- * Either grouped branch collapses to the canonical per-tensor shape {1,0} if
- * the resolved groupSize would leave numGroups <= 1 (a single-output-channel
- * layer, not present in HAR but handled safely) -- {1,N} is never valid. */
-static groupShape_t resolveGroupShape(size_t N, size_t outCh, groupModeSweep_t mode,
-                                      int groupSizeEnv) {
-    if (mode == GROUP_MODE_TENSOR) {
-        return (groupShape_t){.numGroups = 1, .groupSize = 0};
-    }
-    size_t groupSize;
-    if (mode == GROUP_MODE_CHANNEL) {
-        groupSize = N / outCh;
-    } else { /* GROUP_MODE_SIZE */
-        size_t requested = (size_t)groupSizeEnv;
-        groupSize = (requested > 0 && N % requested == 0) ? requested : N / outCh;
-    }
-    size_t numGroups = N / groupSize;
-    if (numGroups <= 1) {
-        return (groupShape_t){.numGroups = 1, .groupSize = 0};
-    }
-    return (groupShape_t){.numGroups = numGroups, .groupSize = groupSize};
-}
-
-static qShapeView_t viewQShape(quantization_t *q) {
-    if (q->type == ASYM) {
-        asymQConfig_t *ac = q->qConfig;
-        return (qShapeView_t){
-            .qBits = ac->qBits, .numGroups = ac->numGroups, .groupSize = ac->groupSize};
-    }
-    symQConfig_t *sc = q->qConfig;
-    return (qShapeView_t){
-        .qBits = sc->qBits, .numGroups = sc->numGroups, .groupSize = sc->groupSize};
 }
 
 /* Builds a fresh weight-quantization template matching the resolved group
@@ -492,7 +418,8 @@ typedef struct paramGateCtx {
  * tensor's own N/outCh; biases: always per-tensor {1,0}) -- an independent
  * recheck of what requantizeParamsToSym built, via the same shared helper.
  * GRAD gate: every trainable grad tensor is FLOAT32 (the NULL grad-knob
- * default). */
+ * default). The per-tensor check itself is examples/_shared/param_gate.c
+ * (#417); this sink only filters, counts and reports. */
 static void paramGateSink(void *ctxVoid, size_t layerIdx, layerType_t layerType, const char *phase,
                           tensor_t *tensor) {
     if (layerType != LINEAR && layerType != CONV1D) {
@@ -500,50 +427,30 @@ static void paramGateSink(void *ctxVoid, size_t layerIdx, layerType_t layerType,
     }
     paramGateCtx_t *ctx = ctxVoid;
 
+    paramGateExpect_t expect;
     if (ctx->isGrad) {
-        if (tensor->quantization->type != FLOAT32) {
-            fprintf(stderr, "GATE FAIL: layer %zu %s expected FLOAT32 grad, got qtype %d\n",
-                    layerIdx, phase, (int)tensor->quantization->type);
-            ctx->fails++;
-            return;
-        }
-        ctx->count++;
-        return;
-    }
-
-    qtype_t expectType = (g_weightDtype == WEIGHT_DTYPE_ASYM) ? ASYM : SYM;
-    if (tensor->quantization->type != expectType) {
-        fprintf(stderr, "GATE FAIL: layer %zu %s expected %s param, got qtype %d\n", layerIdx,
-                phase, expectType == ASYM ? "ASYM" : "SYM", (int)tensor->quantization->type);
-        ctx->fails++;
-        return;
-    }
-
-    qShapeView_t actual = viewQShape(tensor->quantization);
-    if ((int)actual.qBits != ctx->expectBits) {
-        fprintf(stderr, "GATE FAIL: layer %zu %s expected qBits %d, got %u\n", layerIdx, phase,
-                ctx->expectBits, (unsigned)actual.qBits);
-        ctx->fails++;
-        return;
-    }
-
-    bool isBias = strstr(phase, ".bias") != NULL;
-    groupShape_t expectShape;
-    if (isBias) {
-        expectShape = (groupShape_t){.numGroups = 1, .groupSize = 0};
+        expect = (paramGateExpect_t){.type = FLOAT32};
     } else {
-        size_t N = calcNumberOfElementsByTensor(tensor);
-        size_t outCh = tensor->shape->dimensions[0];
-        expectShape = resolveGroupShape(N, outCh, g_groupMode, g_groupSize);
+        bool isBias = strstr(phase, ".bias") != NULL;
+        groupShape_t shape;
+        if (isBias) {
+            shape = (groupShape_t){.numGroups = 1, .groupSize = 0};
+        } else {
+            size_t N = calcNumberOfElementsByTensor(tensor);
+            size_t outCh = tensor->shape->dimensions[0];
+            shape = resolveGroupShape(N, outCh, g_groupMode, g_groupSize);
+        }
+        expect = (paramGateExpect_t){.type = (g_weightDtype == WEIGHT_DTYPE_ASYM) ? ASYM : SYM,
+                                     .bits = (uint8_t)ctx->expectBits,
+                                     .shape = shape};
     }
-    if (actual.numGroups != expectShape.numGroups || actual.groupSize != expectShape.groupSize) {
-        fprintf(stderr, "GATE FAIL: layer %zu %s expected group shape {%zu,%zu}, got {%zu,%zu}\n",
-                layerIdx, phase, expectShape.numGroups, expectShape.groupSize, actual.numGroups,
-                actual.groupSize);
+
+    char msg[160];
+    if (!paramGateCheck(tensor, &expect, msg, sizeof(msg))) {
+        fprintf(stderr, "GATE FAIL: layer %zu %s %s\n", layerIdx, phase, msg);
         ctx->fails++;
         return;
     }
-
     ctx->count++;
 }
 

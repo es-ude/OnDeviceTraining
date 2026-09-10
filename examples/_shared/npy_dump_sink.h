@@ -22,7 +22,10 @@ typedef struct npyDumpCtx {
     size_t sampleIdx; /* NPY_DUMP_NO_SAMPLE for batch-level (param/grad) dumps */
 } npyDumpCtx_t;
 
-/* Matches traceSink_t. FLOAT32 only (hard-errors (exit 1) otherwise). */
+/* Matches traceSink_t. Writes float32 .npy for ANY storage dtype except BOOL:
+ * FLOAT32 verbatim, everything else (SYM / ASYM / SYM_INT32 / INT32 / BFP)
+ * dequantized through convertTensor into a sink-owned FLOAT32 scratch first
+ * (#417). BOOL hard-errors (exit 1) -- no float dequant exists for it. */
 void npyDumpSink(void *ctx, size_t layerIdx, layerType_t layerType, const char *phase,
                  tensor_t *tensor);
 

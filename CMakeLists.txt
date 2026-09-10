@@ -36,6 +36,13 @@ if(ODT_TOP_LEVEL_PROJECT)
         add_link_options("-Wl,-no_warn_duplicate_libraries")
     endif()
 
+    # examples/_shared is a plain static library (npy writer, trace sink, sweep
+    # gates): the sweep's observability layer. Built whenever tests OR examples
+    # are on, so test/unit/examples_shared can exercise it without compiling
+    # every example binary.
+    if(ODT_BUILD_TESTS OR BUILD_EXAMPLES)
+        add_subdirectory(examples/_shared)
+    endif()
     if(ODT_BUILD_TESTS)
         add_unity()
         add_ctest()

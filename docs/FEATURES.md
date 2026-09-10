@@ -382,6 +382,9 @@ checkpointing, limitations, literature).
 - **Observer / trace** — `traceSink_t` callback facility (not a layer) that hands
   fwd/activation-grad/loss-grad/param tensors to a caller-supplied sink; used for
   layer-by-layer C-vs-PyTorch parity debugging (`npyDumpSink`, kws_raw harness).
+  `npyDumpSink` writes float32 `.npy` for every storage dtype except BOOL —
+  non-FLOAT32 tensors (SYM / ASYM / SYM_INT32 / INT32 / BFP) are dequantized
+  through `convertTensor` first (#417, sweep observability for epic #410 PR7).
 - **Phase hook for external profilers** (`src/common/include/OdtHook.h`, #419
   precondition) — one process-wide slot (`odtHookSet`, NULL = off, the default)
   receiving six event kinds (4·B + 2 fires per optimizer update at

@@ -20,6 +20,12 @@
  * (conv1's N=1008=2^4*3^2*7: neither 64 nor 32 divide it, so both G64 and G32
  * fall back to per-channel (pc=63=3^2*7) for that layer only.) */
 groupShape_t resolveGroupShape(size_t N, size_t outCh, groupModeSweep_t mode, int groupSizeEnv) {
+    if (N == 0 || outCh == 0 || N % outCh != 0) {
+        PRINT_ERROR("resolveGroupShape: N=%zu outCh=%zu is not the element count and dim 0 of "
+                    "a non-empty tensor (need N > 0, outCh > 0, N %% outCh == 0)",
+                    N, outCh);
+        exit(1);
+    }
     if (mode == GROUP_MODE_TENSOR) {
         return (groupShape_t){.numGroups = 1, .groupSize = 0};
     }

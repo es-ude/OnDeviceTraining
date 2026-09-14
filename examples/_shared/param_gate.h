@@ -56,7 +56,10 @@ typedef struct paramGateExpect {
  *   mode=size:    groupSize = groupSizeEnv if it evenly divides N, else FALL
  *                 BACK to the per-channel size for that tensor.
  * Either grouped branch collapses to {1,0} when it would leave numGroups
- * <= 1. Worked HAR table lives in the .c. */
+ * <= 1. Worked HAR table lives in the .c.
+ * Precondition (fail-fast, exit 1): N > 0, outCh > 0, N % outCh == 0 -- N is
+ * the element count and outCh the dim-0 size of one non-empty tensor, which
+ * holds by construction for every real weight tensor. */
 groupShape_t resolveGroupShape(size_t N, size_t outCh, groupModeSweep_t mode, int groupSizeEnv);
 
 /* SYM / ASYM / BFP only; any other dtype fails fast (exit 1) -- it carries no

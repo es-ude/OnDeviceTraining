@@ -79,6 +79,24 @@ void testResolveGroupShapeCollapsesSingleGroupToPerTensor(void) {
     TEST_ASSERT_EQUAL_size_t(0, gs.groupSize);
 }
 
+void testResolveGroupShapeRejectsZeroOutCh(void) {
+    ASSERT_EXITS_WITH_FAILURE(resolveGroupShape(64, 0, GROUP_MODE_CHANNEL, 0));
+}
+
+void testResolveGroupShapeRejectsEmptyTensor(void) {
+    ASSERT_EXITS_WITH_FAILURE(resolveGroupShape(0, 1, GROUP_MODE_CHANNEL, 0));
+}
+
+void testResolveGroupShapeRejectsNonDividingOutCh(void) {
+    ASSERT_EXITS_WITH_FAILURE(resolveGroupShape(10, 3, GROUP_MODE_CHANNEL, 0)); /* {3,3} != 10 */
+}
+
+void testResolveGroupShapeGuardIsModeIndependent(void) {
+    /* per-tensor mode divides nothing, but the precondition is the function's,
+     * not the grouped branches' -- an empty tensor is rejected here too. */
+    ASSERT_EXITS_WITH_FAILURE(resolveGroupShape(0, 1, GROUP_MODE_TENSOR, 0));
+}
+
 /* ---- viewQShape: three arms + fail-fast default ---------------------------- */
 
 void testViewQShapeSymGrouped(void) {
@@ -270,6 +288,10 @@ int main(void) {
     RUN_TEST(testResolveGroupShapeSizeModeDivides);
     RUN_TEST(testResolveGroupShapeSizeModeFallsBackToChannel);
     RUN_TEST(testResolveGroupShapeCollapsesSingleGroupToPerTensor);
+    RUN_TEST(testResolveGroupShapeRejectsZeroOutCh);
+    RUN_TEST(testResolveGroupShapeRejectsEmptyTensor);
+    RUN_TEST(testResolveGroupShapeRejectsNonDividingOutCh);
+    RUN_TEST(testResolveGroupShapeGuardIsModeIndependent);
     RUN_TEST(testViewQShapeSymGrouped);
     RUN_TEST(testViewQShapeAsymPerTensor);
     RUN_TEST(testViewQShapeBfpGroupedReportsMantissaAndExponentBits);

@@ -157,3 +157,33 @@ bool paramGateCheck(const tensor_t *tensor, const paramGateExpect_t *expect, cha
         exit(1);
     }
 }
+
+size_t packedPayloadBytes(qtype_t type, uint8_t bits, size_t N) {
+    switch (type) {
+    case FLOAT32:
+        return N * sizeof(float);
+    case SYM:
+    case ASYM:
+    case BFP:
+        return ((size_t)bits * N + 7) / 8;
+    default:
+        PRINT_ERROR("packedPayloadBytes: no sweep accounting for %s", quantTypeToString(type));
+        exit(1);
+    }
+}
+
+size_t packedMetadataBytes(qtype_t type, size_t numGroups) {
+    switch (type) {
+    case FLOAT32:
+        return 0;
+    case BFP:
+        return numGroups * sizeof(uint8_t);
+    case SYM:
+        return numGroups * sizeof(float);
+    case ASYM:
+        return numGroups * (sizeof(float) + sizeof(uint16_t));
+    default:
+        PRINT_ERROR("packedMetadataBytes: no sweep accounting for %s", quantTypeToString(type));
+        exit(1);
+    }
+}

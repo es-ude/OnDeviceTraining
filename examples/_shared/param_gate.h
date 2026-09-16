@@ -97,4 +97,12 @@ qShapeView_t viewQShape(const quantization_t *q);
 bool paramGateCheck(const tensor_t *tensor, const paramGateExpect_t *expect, char *msg,
                     size_t msgLen);
 
+/* Byte accounting for the sweep's memory report (spec §7.1). Payload mirrors
+ * calcNumberOfBytesForData (packed widths round up per TENSOR); metadata is
+ * the per-group side table the qconfig carries: BFP one u8 exponent, SYM one
+ * float scale, ASYM scale + u16 zero-point. FLOAT32 carries neither. Any
+ * other dtype fails fast -- it has no sweep meaning. */
+size_t packedPayloadBytes(qtype_t type, uint8_t bits, size_t N);
+size_t packedMetadataBytes(qtype_t type, size_t numGroups);
+
 #endif

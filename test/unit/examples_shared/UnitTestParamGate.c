@@ -27,6 +27,10 @@ _Static_assert(_Generic((&resolveWireShape),
                    groupShape_t (*)(size_t, wireBlockSweep_t, int): 1,
                    default: 0),
                "resolveWireShape must take (size_t N, wireBlockSweep_t, int)");
+_Static_assert(_Generic((&packedPayloadBytes), size_t (*)(qtype_t, uint8_t, size_t): 1, default: 0),
+               "packedPayloadBytes must take (qtype_t, uint8_t bits, size_t N)");
+_Static_assert(_Generic((&packedMetadataBytes), size_t (*)(qtype_t, size_t): 1, default: 0),
+               "packedMetadataBytes must take (qtype_t, size_t numGroups)");
 
 void setUp() {}
 void tearDown() {}
@@ -333,6 +337,45 @@ void testGateUnsupportedExpectationFailsFastOnTypeMismatch(void) {
     freeTensor(t);
 }
 
+/* ---- packed byte accounting (spec §7.1) ---------------------------------- */
+
+void testPackedPayloadBytesRoundsUpPerTensor(void) {
+    TEST_ASSERT_EQUAL_size_t(5, packedPayloadBytes(BFP, 6, 6)); /* 36 bits -> 5 B */
+    TEST_ASSERT_EQUAL_size_t(1536, packedPayloadBytes(BFP, 6, 2048));
+    TEST_ASSERT_EQUAL_size_t(24, packedPayloadBytes(FLOAT32, 32, 6));
+    TEST_ASSERT_EQUAL_size_t(3, packedPayloadBytes(SYM, 4, 6));
+    TEST_ASSERT_EQUAL_size_t(3, packedPayloadBytes(ASYM, 4, 6));
+}
+
+void testPackedPayloadBytesMatchesFrameworkAccounting(void) {
+    quantization_t *bfpQ = quantizationInitBfp(6, 8, HALF_AWAY);
+    quantization_t *symQ = quantizationInitSym(4, HALF_AWAY);
+    quantization_t *floatQ = quantizationInitFloat();
+    /* [4,3] fixture = 12 elements (makeTensor4x3 owns q, freeTensor frees it). */
+    tensor_t *tb = makeTensor4x3(bfpQ);
+    tensor_t *ts = makeTensor4x3(symQ);
+    tensor_t *tf = makeTensor4x3(floatQ);
+    size_t b = calcBytesPerTensor(tb), s = calcBytesPerTensor(ts), f = calcBytesPerTensor(tf);
+    freeTensor(tb);
+    freeTensor(ts);
+    freeTensor(tf);
+    TEST_ASSERT_EQUAL_size_t(b, packedPayloadBytes(BFP, 6, 12));
+    TEST_ASSERT_EQUAL_size_t(s, packedPayloadBytes(SYM, 4, 12));
+    TEST_ASSERT_EQUAL_size_t(f, packedPayloadBytes(FLOAT32, 32, 12));
+}
+
+void testPackedMetadataBytesPerDtype(void) {
+    TEST_ASSERT_EQUAL_size_t(128, packedMetadataBytes(BFP, 128));  /* 1 B exponent per group */
+    TEST_ASSERT_EQUAL_size_t(512, packedMetadataBytes(SYM, 128));  /* 4 B float scale */
+    TEST_ASSERT_EQUAL_size_t(768, packedMetadataBytes(ASYM, 128)); /* 4 B scale + 2 B zero-point */
+    TEST_ASSERT_EQUAL_size_t(0, packedMetadataBytes(FLOAT32, 1));
+}
+
+void testPackedBytesRejectUnsupportedDtype(void) {
+    ASSERT_EXITS_WITH_FAILURE(packedPayloadBytes(BOOL, 1, 8));
+    ASSERT_EXITS_WITH_FAILURE(packedMetadataBytes(SYM_INT32, 1));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testResolveGroupShapeTensorModeIsPerTensor);
@@ -367,5 +410,9 @@ int main(void) {
     RUN_TEST(testGateFloat32ExpectationIgnoresBitsAndShape);
     RUN_TEST(testGateUnsupportedExpectationFailsFast);
     RUN_TEST(testGateUnsupportedExpectationFailsFastOnTypeMismatch);
+    RUN_TEST(testPackedPayloadBytesRoundsUpPerTensor);
+    RUN_TEST(testPackedPayloadBytesMatchesFrameworkAccounting);
+    RUN_TEST(testPackedMetadataBytesPerDtype);
+    RUN_TEST(testPackedBytesRejectUnsupportedDtype);
     return UNITY_END();
 }

@@ -1,5 +1,6 @@
 #define SOURCE_FILE "param_gate"
 
+#include <ctype.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -192,9 +193,15 @@ size_t packedMetadataBytes(qtype_t type, size_t numGroups) {
     }
 }
 
-/* strtol with full-consumption + range check; false on any junk. */
+/* strtol with full-consumption + range check; false on any junk. Rejects
+ * anything strtol would accept but the name grammar would not: leading
+ * whitespace and a leading '+' are only valid because strtol skips/permits
+ * them, not because the knob's value grammar does. */
 static bool parseIntStrict(const char *s, long lo, long hi, long *out) {
     if (s == NULL || s[0] == '\0') {
+        return false;
+    }
+    if (!isdigit((unsigned char)s[0])) {
         return false;
     }
     char *end = NULL;

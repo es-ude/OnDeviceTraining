@@ -109,8 +109,9 @@ size_t packedMetadataBytes(qtype_t type, size_t numGroups);
  * bfpSweepConfigFromEnv so the trainer's CONFIG line, gates and log all read
  * ONE struct. Returns NULL on success; otherwise a static message naming the
  * offending knob and its legal values (the trainer prints it and exits 1).
- * The six SYM-only knobs are not errors -- a set one is a silent
- * misconfiguration, so each sets its LEGACY_KNOB_* bit for the trainer to WARN. */
+ * The seven legacy (SYM-only + ODTS) knobs are not errors -- a set one is a
+ * silent misconfiguration, so each sets its LEGACY_KNOB_* bit for the trainer
+ * to WARN. */
 typedef enum bfpMathSweep { BFP_MATH_NATIVE, BFP_MATH_FQ } bfpMathSweep_t;
 typedef enum bfpRoundingSweep { BFP_ROUNDING_SR, BFP_ROUNDING_DET } bfpRoundingSweep_t;
 enum {

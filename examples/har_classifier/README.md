@@ -368,7 +368,9 @@ a weight's element count — conv1 at 32/64, like the SYM g32/g64 arms), `BFP_WI
 float|tensor|N` (`float` keeps FLOAT32 wires; N resolves PER WIRE and falls back to
 per-tensor on the 6-element head wires), `BFP_MATH=native|fq`, `BFP_GRADS=0|1`,
 `BFP_STATE=0|1` (needs GRADS=1), `BFP_ROUNDING=sr|det`; plus `LR/MOMENTUM/EPOCHS/SEED/
-SHUFFLE_SEED/LR_SCHEDULE/LR_MIN/LOG_PATH`.
+SHUFFLE_SEED/LR_SCHEDULE/LR_MIN/LOG_PATH`. `MOMENTUM` must be > 0: the STATE gate expects
+the optimizer's eight momentum buffers to exist, `MOMENTUM=0` allocates none, and the
+trainer exits 2.
 
 **Config names encode every knob** (`--resume`-safe):
 `bfp_wb{t|pc|N}_ab{f|t|N}_m{M}_e{E}_x{nat|fq}_g{0|1}_s{0|1}_r{sr|det}_l{const|cos}`.
@@ -411,7 +413,7 @@ design §3.5.1 for the follow-up (a loss-owned wire template).
 **Finding (stage-1 smoke, 1 epoch, seed 1) — recorded, not fully diagnosed.** The
 `bfp_wb32_ab16_m6_e8_xnat_g0_s0_rdet_lconst` arm (deterministic rounding, otherwise
 identical to the anchor) did not learn: `train_loss=1.789` (≈ ln 6) and `test_acc=0.014`
-— well below both the dataset's 14% minimum class frequency and the same seed's
+— well below both the test set's 14% minimum class frequency and the same seed's
 untrained `initial_val_acc≈0.128`, so this is neither a uniform/constant output (that
 would score ≥14%) nor simple stasis near init. The `sr` arm at the same widths learns
 normally (`test_acc≈0.386`). **Hypothesis (UNVERIFIED):** the #279 dead zone at full
@@ -422,12 +424,19 @@ divergence BELOW it, so the hypothesis as stated does not fully explain the numb
 mechanism has not been established, and this is an open question, not a conclusion.
 Diagnostic for a follow-up: `LOG_CODE_MOVEMENT=1 BFP_ROUNDING=det … train_c_har_classifier_bfp`
 (the #279 SYM instrumentation, inherited by the BFP trainer) — inspect `codes_changed_frac`
-in the log.
+in the log. **This det-arm number is suspect until that diagnostic has run.** Concretely:
+`LOG_CODE_MOVEMENT=1 EPOCHS=2 BFP_ROUNDING=det … train_c_har_classifier_bfp` —
+`codes_changed_frac == 0.0` together with accuracy far from `initial_val_acc` points at an
+eval/first-encode tooling bug rather than the kernel; `codes_changed_frac > 0` with
+below-chance accuracy points at biased drift instead. A second, localizing run —
+`BFP_ROUNDING=det BFP_WIRE_BLOCK=float EPOCHS=1 … train_c_har_classifier_bfp` — removes the
+dx-pack seam and narrows the search further.
 
 **Headroom.** Native BFP kernels accumulate int32 block partials; a config is rejected
 before data load when `min(block, K) > INT32_MAX >> (2m−2)` for any HAR reduction
 (63/80/96/64 forward, 128/64/32 weightGrad, 160/192/6 dx). The whole m ≤ 8 grid is safe;
-the bound binds from m=14 with blocks ≥ 32.
+the bound binds from m=14 with blocks ≥ 32, and, for the per-tensor arms (`wbt`, `abf`),
+already from m=13 (conv1's weightGrad reduction L=128 exceeds the m=13 limit of 127).
 
 **Memory.** The `memory` block now carries eleven categories: payload (`params_b`,
 `grads_b`, `optstate_analytic_b`, `activations_b`, `io_b`, `pool_backward_b`,
@@ -453,12 +462,26 @@ uv run examples/har_classifier/run_matrix.py \
   --seeds 1 2 3 4 5 6 7 8 9 10 --epochs 50 --jobs 8 --logs examples/har_classifier/logs_bfp
 uv run examples/har_classifier/compare_memory.py --logs examples/har_classifier/logs_bfp
 ```
-Runtime: measured, not estimated. The stage-1 smoke (1 epoch, seed 1, 16 configs under
-`--jobs 4`) put the anchor (`bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst`) at 273.6 s/epoch
-under that parallel load (223.8 s/epoch run solo) against `sym6g32`'s 86.4 s — native BFP
-runs ≈2.6–3.2× SYM's wall time on this trainer. A 50-epoch run is therefore ≈3 h per
-(config, seed); the full 16-config × 10-seed stage-1 matrix is ≈60 h wall at `--jobs 8`.
-The stack-watermark `bfp` bucket is uncalibrated (report-only) until its own PR.
+Runtime: measured, not estimated — but measured unoptimized. These numbers come from the
+`examples_memprofile` preset, whose `CMakeCache.txt` has `CMAKE_BUILD_TYPE=` (empty: the
+preset sets only `BUILD_EXAMPLES`/`ODT_MEM_PROFILE`, no optimization flag, i.e. -O0),
+not the `-O2` the campaign discipline (spec §1/§13) calls for. The stage-1 smoke (1 epoch,
+seed 1, 16 configs under `--jobs 4`) put the anchor
+(`bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst`) at 273.6 s/epoch under that 4-way load
+against `sym6g32`'s 86.4 s — ≈3.2× under the same 4-way load (273.6 s vs 86.4 s); the
+anchor's solo time was 223.8 s/epoch. A 50-epoch run at these -O0 rates is therefore ≈3 h
+per (config, seed); the full 16-config × 10-seed stage-1 matrix is ≈60 h wall at
+`--jobs 8`. Treat all of the above as an **upper bound**: the spec §13 one-epoch `-O2`
+probe (build with
+`cmake --preset examples_memprofile -DCMAKE_C_FLAGS="-O2 -ffp-contract=fast"` then
+`cmake --build --preset examples_memprofile --target train_c_har_classifier train_c_har_classifier_sym train_c_har_classifier_bfp`
+— `-DCMAKE_C_FLAGS` REPLACES rather than extends the `host` preset's flags, so
+`-ffp-contract=fast` must be repeated or the campaign build silently drops the CI/unit-test
+numerics contract; do NOT use `CMAKE_BUILD_TYPE` instead, since `Release`/`RelWithDebInfo`
+also add `-DNDEBUG`)
+supersedes both these absolute times and the BFP:SYM ratio once run; do not plan the real
+campaign's wall-clock budget off the numbers above. The stack-watermark `bfp` bucket is
+uncalibrated (report-only) until its own PR.
 
 ### Build with memory profiling
 

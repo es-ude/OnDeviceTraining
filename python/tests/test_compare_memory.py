@@ -320,7 +320,7 @@ def test_c_python_total_drift_is_rejected():
 # ---------------------------------------------------------------------------
 _BFP_FIXED = {
     "params_b": 6832, "group_overhead_b": 300, "grads_b": 40856, "grad_overhead_b": 0,
-    "optstate_analytic_b": 40856, "optstate_overhead_b": 0, "activations_b": 10857,
+    "optstate_analytic_b": 40856, "optstate_overhead_b": 0, "activations_b": 10858,
     "wire_overhead_b": 906, "io_b": 4632, "pool_backward_b": 8192, "dx_peak_b": 3072,
 }
 

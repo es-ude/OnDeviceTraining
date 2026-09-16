@@ -458,11 +458,12 @@ void testSweepConfigParsesTheAnchorConfig(void) {
 /* Every invalid value names ITS knob in the message (the trainer prints it). */
 void testSweepConfigRejectsEachInvalidValue(void) {
     static const char *const bad[][2] = {
-        {"BFP_MANTISSA_BITS", "1"}, {"BFP_MANTISSA_BITS", "17"},  {"BFP_MANTISSA_BITS", "x"},
-        {"BFP_EXPONENT_BITS", "1"}, {"BFP_EXPONENT_BITS", "9"},   {"BFP_WEIGHT_BLOCK", "0"},
-        {"BFP_WEIGHT_BLOCK", "-4"}, {"BFP_WEIGHT_BLOCK", "chan"}, {"BFP_WIRE_BLOCK", "0"},
-        {"BFP_WIRE_BLOCK", "fp32"}, {"BFP_MATH", "fake"},         {"BFP_GRADS", "2"},
-        {"BFP_STATE", "yes"},       {"BFP_ROUNDING", "sr_half"},
+        {"BFP_MANTISSA_BITS", "1"},  {"BFP_MANTISSA_BITS", "17"},  {"BFP_MANTISSA_BITS", "x"},
+        {"BFP_EXPONENT_BITS", "1"},  {"BFP_EXPONENT_BITS", "9"},   {"BFP_WEIGHT_BLOCK", "0"},
+        {"BFP_WEIGHT_BLOCK", "-4"},  {"BFP_WEIGHT_BLOCK", "chan"}, {"BFP_WIRE_BLOCK", "0"},
+        {"BFP_WIRE_BLOCK", "fp32"},  {"BFP_MATH", "fake"},         {"BFP_GRADS", "2"},
+        {"BFP_STATE", "yes"},        {"BFP_ROUNDING", "sr_half"},  {"BFP_WEIGHT_BLOCK", " 32"},
+        {"BFP_WEIGHT_BLOCK", "+32"}, {"BFP_MANTISSA_BITS", "+6"},
     };
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         clearSweepEnv();

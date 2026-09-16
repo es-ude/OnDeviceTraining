@@ -111,6 +111,16 @@ whole backward pass, gradients, and optimizer momentum stay FLOAT32. It quantifi
 the on-device memory cost/benefit of weight quantization across widths, against the
 FLOAT32 trainer as the reference.
 
+> **Reshuffle asymmetry (read before comparing arms).** Only the float trainer
+> reshuffles per epoch by default (`RESHUFFLE=1`, see the knobs section above);
+> `train_c_sym.c` and the AdamW trainer still shuffle once. A stored FLOAT32
+> reference therefore no longer reproduces under plain defaults, and
+> `compare_memory.py`'s "keeps up with FLOAT32" gate (`ACC_TOL = 0.01`) would
+> compare a reshuffling float arm against non-reshuffling SYM arms. Regenerate
+> the float reference with `RESHUFFLE=0`, or re-run all arms once the SYM
+> trainers opt in. Making the per-epoch reshuffle the framework-wide default is
+> a deferred follow-up (design Part C item 1), so this asymmetry is temporary.
+
 Key design points (see `docs/CONVENTIONS.md` and the source comments):
 
 - **Weights + biases** are packed `SYM@x` (`ceil(x·N/8)` bytes → @12 = 62.5%,

@@ -1,6 +1,7 @@
 #define SOURCE_FILE "har_classifier_train_c"
 
 #include <errno.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -357,6 +358,22 @@ int main(void) {
     if (g_batchSize < 1 || g_batchSize > UINT16_MAX) {
         fprintf(stderr, "ERROR: BATCH_SIZE=%d must be in [1, %u]\n", g_batchSize,
                 (unsigned)UINT16_MAX);
+        return 1;
+    }
+    /* The scheduler inits take size_t, so a negative STEP_SIZE would cast to
+     * SIZE_MAX and slip past their `stepSize < 1` guard as a permanently-zero
+     * exponent (a silently constant schedule). Reject at the env boundary. */
+    if (g_stepSize < 1) {
+        fprintf(stderr, "ERROR: STEP_SIZE=%d must be >= 1\n", g_stepSize);
+        return 1;
+    }
+    /* stepLrInit/exponentialLrInit only reject a non-finite gamma, so GAMMA <= 0
+     * would flip the LR's sign every epoch (or zero it). BsScheduler already
+     * rejects it; this makes the README's promise true for both schedules. */
+    if ((strcmp(g_lrSchedule, "none") != 0 || strcmp(g_bsSchedule, "none") != 0) &&
+        (!isfinite(g_gamma) || g_gamma <= 0.0f)) {
+        fprintf(stderr, "ERROR: GAMMA=%g must be finite and > 0 when a schedule is set\n",
+                (double)g_gamma);
         return 1;
     }
     const char *logPath = getenv("LOG_PATH");

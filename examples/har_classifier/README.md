@@ -355,6 +355,111 @@ run must load cleanly into a **per-tensor** reader via
 unit-test fixtures. On success the run's JSON log gains
 `"config": {..., "odts_roundtrip": "ok"}`.
 
+### Block floating point (#410)
+
+`train_c_har_classifier_bfp` trains the same 12-layer model with classic block
+floating point: packed `mantissaBits`-wide two's-complement mantissas sharing one
+`exponentBits`-wide exponent per block (1 B of metadata per block, vs 4 B per float
+scale for grouped SYM). Spec: epic design 2026-07-29 + PR7 design 2026-09-14.
+
+**Knobs** (env): `BFP_MANTISSA_BITS` (2..16, default 8), `BFP_EXPONENT_BITS` (2..8, 8),
+`BFP_WEIGHT_BLOCK=tensor|channel|N` (N falls back to per-channel where it does not divide
+a weight's element count — conv1 at 32/64, like the SYM g32/g64 arms), `BFP_WIRE_BLOCK=
+float|tensor|N` (`float` keeps FLOAT32 wires; N resolves PER WIRE and falls back to
+per-tensor on the 6-element head wires), `BFP_MATH=native|fq`, `BFP_GRADS=0|1`,
+`BFP_STATE=0|1` (needs GRADS=1), `BFP_ROUNDING=sr|det`; plus `LR/MOMENTUM/EPOCHS/SEED/
+SHUFFLE_SEED/LR_SCHEDULE/LR_MIN/LOG_PATH`.
+
+**Config names encode every knob** (`--resume`-safe):
+`bfp_wb{t|pc|N}_ab{f|t|N}_m{M}_e{E}_x{nat|fq}_g{0|1}_s{0|1}_r{sr|det}_l{const|cos}`.
+
+**The arm ladder.** `abf` (FLOAT32 wires) is NOT a float arm: the GEMM math still runs
+`ARITH_BFP` and stages each float operand per-tensor at the weight widths. `xfq` pins the
+four GEMM math slots and Softmax's forward to FLOAT32 while Relu/pools keep their BFP arms
+— it is the GEMM fake-quant reference curve, not a whole-model fake-quant twin (the pools'
+FLOAT32 arms reject packed wires). `g1` / `g1s1` store grads / momentum as per-tensor BFP.
+
+**Resolved shapes** (from the logs' `groups_resolved` / `wires_resolved`):
+
+| weights | wb8 | wb32 | pc | t |
+|---|---|---|---|---|
+| conv1 (1008) | {126,8} | {16,63} (fallback) | {16,63} | {1,0} |
+| conv2 (2560) | {320,8} | {80,32} | {32,80} | {1,0} |
+| conv3 (6144) | {768,8} | {192,32} | {64,96} | {1,0} |
+| linear (384) | {48,8} | {12,32} | {6,64} | {1,0} |
+
+| wires | ab16 | ab32 | t |
+|---|---|---|---|
+| 2048-element (conv/relu out, most dx) | {128,16} | {64,32} | {1,0} |
+| 1024-element (pool1/pool2 out, conv2/conv3 dx) | {64,16} | {32,32} | {1,0} |
+| 64-element (pool3/flatten out, flatten/linear dx) | {4,16} | {2,32} | {1,0} |
+| 6-element (linear/softmax out, loss grad) | {1,0} fallback | {1,0} fallback | {1,0} |
+
+**Rounding.** `OUT_WRITE` rounds by the operation's mode, so the knobs are carried by the
+math slots: forward packs and float-operand staging are always HALF_AWAY (deterministic
+inference, evaluation never draws from the RNG); under `sr` the dx packs
+(`propLossMath`), grad/state packs and the optimizer write-back use SR_HALF_AWAY; `det`
+is HALF_AWAY everywhere. **Exception:** the CrossEntropy loss-grad pack (`p − y`, 6
+elements) has no operation carrier (it clones softmax.out's config and packs through
+`executeConvert`) and is HALF_AWAY under both — so `sr` vs `det` compares nine of the ten
+dx seams. **At coarse widths this can matter a lot:** with m=4 (and more so e=4) the five
+small components of `p − y` round deterministically to zero on that first pack — a dead
+zone at the head that SR would escape elsewhere. A `_m4_`/`_e4_` arm that stalls at the
+head is a candidate symptom of this exception, not necessarily of the width; see the PR7
+design §3.5.1 for the follow-up (a loss-owned wire template).
+
+**Finding (stage-1 smoke, 1 epoch, seed 1) — recorded, not fully diagnosed.** The
+`bfp_wb32_ab16_m6_e8_xnat_g0_s0_rdet_lconst` arm (deterministic rounding, otherwise
+identical to the anchor) did not learn: `train_loss=1.789` (≈ ln 6) and `test_acc=0.014`
+— well below both the dataset's 14% minimum class frequency and the same seed's
+untrained `initial_val_acc≈0.128`, so this is neither a uniform/constant output (that
+would score ≥14%) nor simple stasis near init. The `sr` arm at the same widths learns
+normally (`test_acc≈0.386`). **Hypothesis (UNVERIFIED):** the #279 dead zone at full
+strength — at m=6 every `lr·grad` step may be sub-ULP of the per-group weight grid, so
+HALF_AWAY write-back rounds every update away while `sr`'s stochastic write-back escapes
+it in expectation. A pure dead zone predicts stasis near init, not the observed active
+divergence BELOW it, so the hypothesis as stated does not fully explain the number; the
+mechanism has not been established, and this is an open question, not a conclusion.
+Diagnostic for a follow-up: `LOG_CODE_MOVEMENT=1 BFP_ROUNDING=det … train_c_har_classifier_bfp`
+(the #279 SYM instrumentation, inherited by the BFP trainer) — inspect `codes_changed_frac`
+in the log.
+
+**Headroom.** Native BFP kernels accumulate int32 block partials; a config is rejected
+before data load when `min(block, K) > INT32_MAX >> (2m−2)` for any HAR reduction
+(63/80/96/64 forward, 128/64/32 weightGrad, 160/192/6 dx). The whole m ≤ 8 grid is safe;
+the bound binds from m=14 with blocks ≥ 32.
+
+**Memory.** The `memory` block now carries eleven categories: payload (`params_b`,
+`grads_b`, `optstate_analytic_b`, `activations_b`, `io_b`, `pool_backward_b`,
+`dx_peak_b`) and metadata (`group_overhead_b`, `grad_overhead_b`,
+`optstate_overhead_b`, `wire_overhead_b`); `mcu_total_b` is their sum IN THE C
+HARNESS since PR7 (SYM logs' totals grew by their group metadata that was previously
+only reported under `config`). Accuracy-per-byte = accuracy / (payload + ALL metadata).
+For the anchor config (`bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst`), the stage-1 smoke
+reported `activations_b`=10858, `wire_overhead_b`=1162, `group_overhead_b`=304.
+
+**Stage-1 matrix and run:**
+```bash
+cmake --preset examples_memprofile && cmake --build --preset examples_memprofile --target train_c_har_classifier train_c_har_classifier_sym train_c_har_classifier_bfp
+uv run examples/har_classifier/run_matrix.py \
+  --configs float sym6g32 \
+            bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst bfp_wbt_ab16_m6_e8_xnat_g0_s0_rsr_lconst \
+            bfp_wbpc_ab16_m6_e8_xnat_g0_s0_rsr_lconst bfp_wb8_ab16_m6_e8_xnat_g0_s0_rsr_lconst \
+            bfp_wb32_abf_m6_e8_xnat_g0_s0_rsr_lconst bfp_wb32_abt_m6_e8_xnat_g0_s0_rsr_lconst \
+            bfp_wb32_ab32_m6_e8_xnat_g0_s0_rsr_lconst bfp_wb32_ab16_m4_e8_xnat_g0_s0_rsr_lconst \
+            bfp_wb32_ab16_m8_e8_xnat_g0_s0_rsr_lconst bfp_wb32_ab16_m6_e4_xnat_g0_s0_rsr_lconst \
+            bfp_wb32_ab16_m6_e8_xnat_g0_s0_rdet_lconst bfp_wb32_ab16_m6_e8_xfq_g0_s0_rsr_lconst \
+            bfp_wb32_ab16_m6_e8_xnat_g1_s0_rsr_lconst bfp_wb32_ab16_m6_e8_xnat_g1_s1_rsr_lconst \
+  --seeds 1 2 3 4 5 6 7 8 9 10 --epochs 50 --jobs 8 --logs examples/har_classifier/logs_bfp
+uv run examples/har_classifier/compare_memory.py --logs examples/har_classifier/logs_bfp
+```
+Runtime: measured, not estimated. The stage-1 smoke (1 epoch, seed 1, 16 configs under
+`--jobs 4`) put the anchor (`bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst`) at 273.6 s/epoch
+under that parallel load (223.8 s/epoch run solo) against `sym6g32`'s 86.4 s — native BFP
+runs ≈2.6–3.2× SYM's wall time on this trainer. A 50-epoch run is therefore ≈3 h per
+(config, seed); the full 16-config × 10-seed stage-1 matrix is ≈60 h wall at `--jobs 8`.
+The stack-watermark `bfp` bucket is uncalibrated (report-only) until its own PR.
+
 ### Build with memory profiling
 
 Memory instrumentation is compiled in only under the `examples_memprofile` preset

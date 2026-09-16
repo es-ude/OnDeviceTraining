@@ -27,7 +27,8 @@ knee. It is deliberately NOT wired into CI. Smoke a subset first, e.g.::
 Requires a trainer build (pick the matching --build-subdir)::
 
     cmake --preset examples && cmake --build --preset examples --target \
-        train_c_har_classifier train_c_har_classifier_sym train_c_har_classifier_adamw
+        train_c_har_classifier train_c_har_classifier_sym train_c_har_classifier_adamw \
+        train_c_har_classifier_bfp
     # ...then --build-subdir examples  (default: examples_memprofile)
 
 Caveat (parallel): fixed-path trainer artifacts (e.g. outputs/*.npy) are

@@ -32,7 +32,7 @@ class TrainConfig(TypedDict):
     group_overhead_b: NotRequired[int]  # Σ per-tensor numGroups·(4 + asym?2:0), all 8 param tensors (#300)
     odts_roundtrip: NotRequired[str]  # "ok" iff ODTS_ROUNDTRIP=1 demo passed; absent otherwise (#300)
     bs_schedule: NotRequired[str]  # "none" | "step" | "exp": batch DIVIDED by gamma per epoch; absent = constant batch
-    bs_lr_compensation: NotRequired[int]  # 0/1: batch scheduler also writes lr = baseLr * applied / exact (the "BC" arm)
+    bs_lr_compensation: NotRequired[int]  # 0/1: 1 iff a batch schedule is active AND compensation was requested (the effective BC arm)
     gamma: NotRequired[float]  # shared factor of lr_schedule step/exp (LR x gamma) and bs_schedule (batch / gamma)
     step_size: NotRequired[int]  # step schedules only
     max_batch_size: NotRequired[int]  # cap of the batch scheduler; `batch` stays the INITIAL batch

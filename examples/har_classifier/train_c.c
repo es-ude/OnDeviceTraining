@@ -302,7 +302,7 @@ static void epochCallback(epochInfo_t info, epochStats_t evalStats) {
     fprintf(g_log_file,
             "    {\"epoch\": %zu, \"step_losses\": [], \"train_loss\": %.6f, "
             "\"val_loss\": %.6f, \"val_acc\": %.6f, \"wall_s\": %.4f, "
-            "\"lr\": %.8f, \"batch_size\": %zu, \"parameter_updates\": %zu}",
+            "\"lr\": %.9g, \"batch_size\": %zu, \"parameter_updates\": %zu}",
             info.epoch, (double)info.trainLoss, (double)evalStats.loss, (double)evalStats.accuracy,
             wall_s, (double)info.learningRate, info.batchSize, info.parameterUpdates);
     fflush(g_log_file);
@@ -374,6 +374,18 @@ int main(void) {
         (!isfinite(g_gamma) || g_gamma <= 0.0f)) {
         fprintf(stderr, "ERROR: GAMMA=%g must be finite and > 0 when a schedule is set\n",
                 (double)g_gamma);
+        return 1;
+    }
+    /* trainingRun's guard (d) rejects a COMPENSATING batch scheduler next to an
+     * LR scheduler, but only after the log file is open -- which would leave a
+     * truncated JSON at LOG_PATH. Reject the same combination here, before any
+     * output exists; trainingRun's guard stays as the framework backstop. */
+    if (g_bsLrCompensation != 0 && strcmp(g_lrSchedule, "none") != 0 &&
+        strcmp(g_bsSchedule, "none") != 0) {
+        fprintf(stderr,
+                "ERROR: BS_LR_COMPENSATION=1 cannot be combined with LR_SCHEDULE=%s: both would "
+                "write the LR every epoch\n",
+                g_lrSchedule);
         return 1;
     }
     const char *logPath = getenv("LOG_PATH");
@@ -451,8 +463,9 @@ int main(void) {
 
         /* One trainingRun call; the knobs only populate the options struct.
          * BS_LR_COMPENSATION=1 hands the optimizer to the batch scheduler (the
-         * "BC" arm); together with LR_SCHEDULE != none, trainingRun's guard
-         * rejects the run — both would write the LR every epoch. */
+         * "BC" arm); together with LR_SCHEDULE != none that combination is
+         * already rejected up front in main() — trainingRun's guard (d) is the
+         * framework backstop. */
         lrScheduler_t lrSched;
         bsScheduler_t bsSched;
         trainingRunOptions_t options = {.callback = epochCallback};
@@ -488,11 +501,12 @@ int main(void) {
                 "  \"config\": {\"epochs\": %d, \"batch\": %d, \"lr\": %.6f, "
                 "\"momentum\": %.6f, \"seed\": %u, \"shuffle_seed\": %u, "
                 "\"lr_schedule\": \"%s\", \"bs_schedule\": \"%s\", \"bs_lr_compensation\": %d, "
-                "\"gamma\": %.9g, \"step_size\": %d, \"max_batch_size\": %d, "
+                "\"gamma\": %#.9g, \"step_size\": %d, \"max_batch_size\": %d, "
                 "\"reshuffle\": %d, \"toolchain\": \"",
                 g_epochs, g_batchSize, (double)g_lr, (double)g_momentum, g_seed, g_shuffleSeed,
-                g_lrSchedule, g_bsSchedule, g_bsLrCompensation != 0, (double)g_gamma, g_stepSize,
-                g_maxBatchSize, g_reshuffle != 0);
+                g_lrSchedule, g_bsSchedule,
+                (options.bsScheduler != NULL && g_bsLrCompensation != 0), (double)g_gamma,
+                g_stepSize, g_maxBatchSize, g_reshuffle != 0);
         fputsJsonEscaped(g_log_file, __VERSION__);
         fprintf(g_log_file, "\"},\n"
                             "  \"epochs\": [\n");

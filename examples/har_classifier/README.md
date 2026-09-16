@@ -78,7 +78,7 @@ old shuffle-once baseline.
 | `BATCH_SIZE` | 64 | the train loader's initial batch (`config.batch` in the log) |
 | `LR_SCHEDULE` | `none` | `none` \| `step` \| `exp` — torch StepLR / ExponentialLR (`LrScheduler`, #327): LR × `GAMMA` |
 | `BS_SCHEDULE` | `none` | `none` \| `step` \| `exp` — the batch analogue (`BsScheduler`): batch ÷ `GAMMA`, `clamp(round(·), 1, MAX_BATCH_SIZE)` |
-| `BS_LR_COMPENSATION` | 0 | 1 = the batch scheduler also writes `lr = LR · applied / exact` (the "BC" arm); rejected together with `LR_SCHEDULE != none` (two LR writers) |
+| `BS_LR_COMPENSATION` | 0 | 1 = the batch scheduler also writes `lr = LR · applied / exact` (the "BC" arm); combining it with `LR_SCHEDULE != none` is rejected up front, before the log file is opened (two LR writers; `trainingRun`'s guard is the backstop) |
 | `GAMMA` | 1.0 | shared by both schedules so the arms are matched at the same γ; 1.0 = no-op |
 | `STEP_SIZE` | 1 | step schedules only |
 | `MAX_BATCH_SIZE` | train size / 10 = 661 | cap of the batch scheduler |

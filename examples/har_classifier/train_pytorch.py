@@ -183,7 +183,7 @@ def main() -> None:
         "seed": SEED, "shuffle_seed": SHUFFLE_SEED,
         "lr_schedule": SCHEDULER or "none", "lr_min": LR_MIN,
         "optimizer": OPTIMIZER,
-        "reshuffle": RESHUFFLE,
+        "reshuffle": int(RESHUFFLE != 0),
     }
     if OPTIMIZER == "sgd":
         config["momentum"] = MOMENTUM  # AdamW has no momentum; keep its log free of it (#328)

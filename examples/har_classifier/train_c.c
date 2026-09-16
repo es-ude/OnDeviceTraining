@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <time.h>
 
+#include "BsScheduler.h"
 #include "CalculateGradsSequential.h"
 #include "Common.h"
 #include "Conv1dApi.h"
@@ -20,6 +21,7 @@
 #include "LayerQuant.h"
 #include "LinearApi.h"
 #include "LossFunction.h"
+#include "LrScheduler.h"
 #include "NPYLoaderApi.h"
 #include "Pool1dApi.h"
 #include "Quantization.h"
@@ -37,7 +39,6 @@
 #include "mem_instrument.h"
 #include "npy_writer.h"
 
-#define BATCH 64 /* macro-batch: loader groups 64 samples per optimizer step */
 /* Micro-batch = concurrent samples per forward/backward. The training loop
  * streams the macro-batch one sample at a time (loss.md B=1), so peak activation
  * memory is ONE sample's worth — this is what the analytic footprint must use. */
@@ -61,12 +62,21 @@ static dataset_t g_trainDataset;
 static dataset_t g_valDataset;
 static dataset_t g_testDataset;
 
-/* Runtime config (env-overridable); defaults match the historical #defines. */
+/* Runtime config (env-overridable). Defaults are develop's, except RESHUFFLE,
+ * which is now ON by default (mirrored in train_pytorch.py). See README. */
 static int g_epochs = 20;
 static float g_lr = 0.01f;
 static float g_momentum = 0.9f;
 static unsigned g_seed = 42;
 static unsigned g_shuffleSeed = 42;
+static int g_batchSize = 64;              /* BATCH_SIZE: the train loader's INITIAL batch */
+static const char *g_lrSchedule = "none"; /* LR_SCHEDULE: none | step | exp */
+static const char *g_bsSchedule = "none"; /* BS_SCHEDULE: none | step | exp */
+static int g_bsLrCompensation = 0;        /* BS_LR_COMPENSATION: 1 = the "BC" arm */
+static float g_gamma = 1.0f;              /* GAMMA: shared by both schedules; 1.0 = no-op */
+static int g_stepSize = 1;                /* STEP_SIZE: step schedules only */
+static int g_maxBatchSize = 0;            /* MAX_BATCH_SIZE: resolved after the data load */
+static int g_reshuffle = 1;               /* RESHUFFLE: per-epoch reshuffle of the train loader */
 
 static float envFloat(const char *name, float dflt) {
     const char *v = getenv(name);
@@ -75,6 +85,26 @@ static float envFloat(const char *name, float dflt) {
 static int envInt(const char *name, int dflt) {
     const char *v = getenv(name);
     return (v != NULL && v[0] != '\0') ? (int)strtol(v, NULL, 10) : dflt;
+}
+static const char *envStr(const char *name, const char *dflt) {
+    const char *v = getenv(name);
+    return (v != NULL && v[0] != '\0') ? v : dflt;
+}
+
+/* "none" | "step" | "exp" — anything else is a fail-fast config error. */
+static int isKnownSchedule(const char *s) {
+    return strcmp(s, "none") == 0 || strcmp(s, "step") == 0 || strcmp(s, "exp") == 0;
+}
+
+/* __VERSION__ never contains a quote or backslash in practice, but the log is
+ * a JSON contract (examples/_shared/log_schema.py): escape defensively. */
+static void fputsJsonEscaped(FILE *f, const char *s) {
+    for (; *s != '\0'; s++) {
+        if (*s == '"' || *s == '\\') {
+            fputc('\\', f);
+        }
+        fputc(*s, f);
+    }
 }
 
 static void reshapeItemsAddBatchDim(tensorArray_t *items) {
@@ -270,9 +300,10 @@ static void epochCallback(epochInfo_t info, epochStats_t evalStats) {
     }
     fprintf(g_log_file,
             "    {\"epoch\": %zu, \"step_losses\": [], \"train_loss\": %.6f, "
-            "\"val_loss\": %.6f, \"val_acc\": %.6f, \"wall_s\": %.4f}",
+            "\"val_loss\": %.6f, \"val_acc\": %.6f, \"wall_s\": %.4f, "
+            "\"lr\": %.8f, \"batch_size\": %zu, \"parameter_updates\": %zu}",
             info.epoch, (double)info.trainLoss, (double)evalStats.loss, (double)evalStats.accuracy,
-            wall_s);
+            wall_s, (double)info.learningRate, info.batchSize, info.parameterUpdates);
     fflush(g_log_file);
     g_first_epoch = 0;
 
@@ -308,6 +339,26 @@ int main(void) {
     g_momentum = envFloat("MOMENTUM", g_momentum);
     g_seed = (unsigned)envInt("SEED", (int)g_seed);
     g_shuffleSeed = (unsigned)envInt("SHUFFLE_SEED", (int)g_shuffleSeed);
+    g_batchSize = envInt("BATCH_SIZE", g_batchSize);
+    g_lrSchedule = envStr("LR_SCHEDULE", g_lrSchedule);
+    g_bsSchedule = envStr("BS_SCHEDULE", g_bsSchedule);
+    g_bsLrCompensation = envInt("BS_LR_COMPENSATION", g_bsLrCompensation);
+    g_gamma = envFloat("GAMMA", g_gamma);
+    g_stepSize = envInt("STEP_SIZE", g_stepSize);
+    g_reshuffle = envInt("RESHUFFLE", g_reshuffle);
+    if (!isKnownSchedule(g_lrSchedule)) {
+        fprintf(stderr, "ERROR: LR_SCHEDULE=%s (expected none|step|exp)\n", g_lrSchedule);
+        return 1;
+    }
+    if (!isKnownSchedule(g_bsSchedule)) {
+        fprintf(stderr, "ERROR: BS_SCHEDULE=%s (expected none|step|exp)\n", g_bsSchedule);
+        return 1;
+    }
+    if (g_batchSize < 1 || g_batchSize > UINT16_MAX) {
+        fprintf(stderr, "ERROR: BATCH_SIZE=%d must be in [1, %u]\n", g_batchSize,
+                (unsigned)UINT16_MAX);
+        return 1;
+    }
     const char *logPath = getenv("LOG_PATH");
 
 #ifdef ODT_MEM_PROFILE
@@ -317,6 +368,11 @@ int main(void) {
 #endif
 
     initDataSets();
+
+    /* Design assumption 3: default cap = train-set size / 10 (661 for this
+     * split), i.e. >= 10 optimizer updates per epoch even at the cap. Read
+     * here, after the data load, so the default can be derived from it. */
+    g_maxBatchSize = envInt("MAX_BATCH_SIZE", (int)(getTrainSize() / 10));
 
 #ifdef ODT_MEM_PROFILE
     size_t markDataset = memProfileMark(); /* dataset_b */
@@ -357,8 +413,9 @@ int main(void) {
         fprintf(stdout, "BIT_PARITY: loaded state_dict from %s\n", wDir);
     } else {
         dataLoader_t *trainLoader =
-            dataLoaderInit(getTrainSample, getTrainSize, BATCH, NULL, NULL,
+            dataLoaderInit(getTrainSample, getTrainSize, (uint16_t)g_batchSize, NULL, NULL,
                            /*shuffle*/ true, /*shuffleSeed*/ g_shuffleSeed, /*dropLast*/ true);
+        dataLoaderSetReshufflePerEpoch(trainLoader, g_reshuffle != 0);
         dataLoader_t *valLoader = dataLoaderInit(getValSample, getValSize, 1, NULL, NULL,
                                                  /*shuffle*/ false, /*shuffleSeed*/ 0,
                                                  /*dropLast*/ true);
@@ -375,6 +432,30 @@ int main(void) {
         markAfterOpt = memProfileMark(); /* optstate_b = delta */
 #endif
 
+        /* One trainingRun call; the knobs only populate the options struct.
+         * BS_LR_COMPENSATION=1 hands the optimizer to the batch scheduler (the
+         * "BC" arm); together with LR_SCHEDULE != none, trainingRun's guard
+         * rejects the run — both would write the LR every epoch. */
+        lrScheduler_t lrSched;
+        bsScheduler_t bsSched;
+        trainingRunOptions_t options = {.callback = epochCallback};
+        if (strcmp(g_lrSchedule, "step") == 0) {
+            stepLrInit(&lrSched, sgd, (size_t)g_stepSize, g_gamma);
+            options.lrScheduler = &lrSched;
+        } else if (strcmp(g_lrSchedule, "exp") == 0) {
+            exponentialLrInit(&lrSched, sgd, g_gamma);
+            options.lrScheduler = &lrSched;
+        }
+        optimizer_t *bsOptim = (g_bsLrCompensation != 0) ? sgd : NULL;
+        if (strcmp(g_bsSchedule, "step") == 0) {
+            stepBsInit(&bsSched, trainLoader, bsOptim, (size_t)g_stepSize, g_gamma,
+                       (size_t)g_maxBatchSize);
+            options.bsScheduler = &bsSched;
+        } else if (strcmp(g_bsSchedule, "exp") == 0) {
+            exponentialBsInit(&bsSched, trainLoader, bsOptim, g_gamma, (size_t)g_maxBatchSize);
+            options.bsScheduler = &bsSched;
+        }
+
         const char *outLog = (logPath != NULL && logPath[0] != '\0')
                                  ? logPath
                                  : "examples/har_classifier/logs/c.json";
@@ -388,9 +469,16 @@ int main(void) {
                 "  \"impl\": \"c\",\n"
                 "  \"example\": \"har_classifier\",\n"
                 "  \"config\": {\"epochs\": %d, \"batch\": %d, \"lr\": %.6f, "
-                "\"momentum\": %.6f, \"seed\": %u, \"shuffle_seed\": %u},\n"
-                "  \"epochs\": [\n",
-                g_epochs, BATCH, (double)g_lr, (double)g_momentum, g_seed, g_shuffleSeed);
+                "\"momentum\": %.6f, \"seed\": %u, \"shuffle_seed\": %u, "
+                "\"lr_schedule\": \"%s\", \"bs_schedule\": \"%s\", \"bs_lr_compensation\": %d, "
+                "\"gamma\": %.9g, \"step_size\": %d, \"max_batch_size\": %d, "
+                "\"reshuffle\": %d, \"toolchain\": \"",
+                g_epochs, g_batchSize, (double)g_lr, (double)g_momentum, g_seed, g_shuffleSeed,
+                g_lrSchedule, g_bsSchedule, g_bsLrCompensation != 0, (double)g_gamma, g_stepSize,
+                g_maxBatchSize, g_reshuffle != 0);
+        fputsJsonEscaped(g_log_file, __VERSION__);
+        fprintf(g_log_file, "\"},\n"
+                            "  \"epochs\": [\n");
         fflush(g_log_file);
 
         clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
@@ -401,7 +489,7 @@ int main(void) {
                                        .backwardReduction = REDUCTION_MEAN,
                                        .classWeights = NULL},
                         trainLoader, valLoader, sgd, g_epochs, calculateGradsSequential,
-                        inferenceWithLoss, &(trainingRunOptions_t){.callback = epochCallback});
+                        inferenceWithLoss, &options);
         (void)result;
 
         epochStats_t testStats = evaluationEpochWithMetrics(

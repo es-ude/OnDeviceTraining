@@ -4,8 +4,10 @@ The C side writes this format by hand using printf, so the schema here
 is also the contract C must follow. Keep keys ASCII and avoid nested
 constructs that complicate hand-written JSON emission.
 """
-from __future__ import annotations
-
+# Deliberately NO `from __future__ import annotations`: stringized annotations
+# make typing.TypedDict put every NotRequired key into __required_keys__, so the
+# optional-key declarations below become runtime lies (pinned by
+# python/tests/test_log_schema.py).
 import json
 import re
 from pathlib import Path
@@ -19,7 +21,7 @@ class TrainConfig(TypedDict):
     momentum: NotRequired[float]  # absent for optimizers without momentum (#328)
     seed: int
     shuffle_seed: int
-    lr_schedule: NotRequired[str]  # "none" | "cosine" (#327); absent = constant LR
+    lr_schedule: NotRequired[str]  # "none" | "cosine" (#327) | "step" | "exp" (batch-size scheduler port); absent = constant LR
     lr_min: NotRequired[float]
     optimizer: NotRequired[str]  # "sgd" | "adamw" (#328); absent = sgd
     weight_decay: NotRequired[float]
@@ -29,6 +31,13 @@ class TrainConfig(TypedDict):
     groups_resolved: NotRequired[dict[str, list[int]]]  # per-layer [numGroups, groupSize] (#300)
     group_overhead_b: NotRequired[int]  # Σ per-tensor numGroups·(4 + asym?2:0), all 8 param tensors (#300)
     odts_roundtrip: NotRequired[str]  # "ok" iff ODTS_ROUNDTRIP=1 demo passed; absent otherwise (#300)
+    bs_schedule: NotRequired[str]  # "none" | "step" | "exp": batch DIVIDED by gamma per epoch; absent = constant batch
+    bs_lr_compensation: NotRequired[int]  # 0/1: batch scheduler also writes lr = baseLr * applied / exact (the "BC" arm)
+    gamma: NotRequired[float]  # shared factor of lr_schedule step/exp (LR x gamma) and bs_schedule (batch / gamma)
+    step_size: NotRequired[int]  # step schedules only
+    max_batch_size: NotRequired[int]  # cap of the batch scheduler; `batch` stays the INITIAL batch
+    reshuffle: NotRequired[int]  # 0/1: per-epoch reshuffle of the train loader (#381); HAR default 1
+    toolchain: NotRequired[str]  # the C compiler's __VERSION__ (provenance; docs/conventions/toolchain-parity.md)
 
 
 class EpochLog(TypedDict):
@@ -39,6 +48,8 @@ class EpochLog(TypedDict):
     val_acc: float | None
     wall_s: float
     lr: NotRequired[float]  # LR this epoch trained with (#327)
+    batch_size: NotRequired[int]  # train batch this epoch trained with (epochInfo_t)
+    parameter_updates: NotRequired[int]  # optimizer steps this epoch = datasetSize // batch_size
 
 
 class FinalLog(TypedDict):

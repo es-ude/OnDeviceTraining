@@ -64,6 +64,45 @@ The demo's two implementations use independent random init; the loss tolerance
 is empirically calibrated. Bit-parity mode requires exact equality instead.
 See `examples/_shared/DETERMINISM.md` for the full determinism contract.
 
+## Float32 trainer knobs: LR / batch-size schedules and per-epoch reshuffle
+
+`train_c_har_classifier` is fully env-configured; a plain run reproduces the
+develop defaults **except** that the train loader now reshuffles every epoch
+(`RESHUFFLE=1`, mirrored bit-exactly by `train_pytorch.py` — see
+`examples/_shared/DETERMINISM.md`). `RESHUFFLE=0` on both sides restores the
+old shuffle-once baseline.
+
+| env | default | effect |
+|---|---|---|
+| `EPOCHS`, `LR`, `MOMENTUM`, `SEED`, `SHUFFLE_SEED`, `LOG_PATH` | 20, 0.01, 0.9, 42, 42, `logs/c.json` | as before |
+| `BATCH_SIZE` | 64 | the train loader's initial batch (`config.batch` in the log) |
+| `LR_SCHEDULE` | `none` | `none` \| `step` \| `exp` — torch StepLR / ExponentialLR (`LrScheduler`, #327): LR × `GAMMA` |
+| `BS_SCHEDULE` | `none` | `none` \| `step` \| `exp` — the batch analogue (`BsScheduler`): batch ÷ `GAMMA`, `clamp(round(·), 1, MAX_BATCH_SIZE)` |
+| `BS_LR_COMPENSATION` | 0 | 1 = the batch scheduler also writes `lr = LR · applied / exact` (the "BC" arm); rejected together with `LR_SCHEDULE != none` (two LR writers) |
+| `GAMMA` | 1.0 | shared by both schedules so the arms are matched at the same γ; 1.0 = no-op |
+| `STEP_SIZE` | 1 | step schedules only |
+| `MAX_BATCH_SIZE` | train size / 10 = 661 | cap of the batch scheduler |
+| `RESHUFFLE` | 1 | per-epoch reshuffle of the train loader (#381) |
+
+`LR_SCHEDULE` and `BS_SCHEDULE` may both be set without compensation (LR decays
+and the batch grows). Unknown schedule names, `BATCH_SIZE` outside `[1, 65535]`,
+`STEP_SIZE < 1`, `GAMMA <= 0` and a `MAX_BATCH_SIZE` below `BATCH_SIZE` fail fast.
+
+The run log (`examples/_shared/log_schema.py`) records every knob under
+`config` (`lr_schedule`, `bs_schedule`, `bs_lr_compensation`, `gamma`,
+`step_size`, `max_batch_size`, `reshuffle`) plus `toolchain` (the compiler's
+`__VERSION__`, because FMA contraction and libm differ across compilers — see
+`docs/conventions/toolchain-parity.md`), and per epoch the values the epoch
+actually trained with: `lr`, `batch_size`, `parameter_updates`
+(`= train size // batch_size`). Arms at a glance:
+
+```bash
+B=./build/examples/examples/har_classifier/train_c_har_classifier
+LR_SCHEDULE=exp GAMMA=0.97 $B                                   # LS: LR x 0.97 per epoch
+BS_SCHEDULE=exp GAMMA=0.97 BATCH_SIZE=1 $B                      # BS: batch / 0.97 per epoch, LR constant
+BS_SCHEDULE=exp GAMMA=0.97 BATCH_SIZE=1 BS_LR_COMPENSATION=1 $B  # BC: as BS, LR corrected for rounding/cap
+```
+
 ## Packed-SYM weight-quantization memory study
 
 A second trainer, `train_c_har_classifier_sym` (source `train_c_sym.c`), trains
@@ -318,7 +357,8 @@ cmake --build --preset examples_memprofile --target \
 ```
 
 All three binaries are env-configured: `SEED`, `EPOCHS`, `LR`, `MOMENTUM`, `LOG_PATH`
-(+ `SYM_BITS`, `SYM_ROUNDING`, `SYM_WIRES`, `LR_SCHEDULE`, `LR_MIN`, `GROUP_MODE`,
+(+ the float binary's `BATCH_SIZE`/`LR_SCHEDULE`/`BS_SCHEDULE`/`BS_LR_COMPENSATION`/`GAMMA`/
+`STEP_SIZE`/`MAX_BATCH_SIZE`/`RESHUFFLE`, see above; + `SYM_BITS`, `SYM_ROUNDING`, `SYM_WIRES`, `LR_SCHEDULE`, `LR_MIN`, `GROUP_MODE`,
 `GROUP_SIZE`, `WEIGHT_DTYPE`, `ODTS_ROUNDTRIP` for the SYM binary; the AdamW
 binary ignores `MOMENTUM`). Each writes an extended RunLog JSON whose `memory` block
 carries per-category analytic bytes, instrumented heap/stack/RSS peaks, and the **reconciliation

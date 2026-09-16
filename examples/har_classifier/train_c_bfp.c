@@ -753,6 +753,100 @@ static void headroomPreflight(void) {
     fprintf(stdout, "PREFLIGHT PASS: headroom ok for m=%u at every HAR reduction\n", m);
 }
 
+/* ---- First-real-step wire gate (spec §3.6 gate 7) ------------------------ */
+#define WIRE_EVENTS (MODEL_SIZE + 1 + (MODEL_SIZE - 1))
+typedef struct wireGateCtx {
+    bool seen[WIRE_EVENTS]; /* [0,12) fwd@i, [12] lossgrad, [13,24) agrad@i */
+    int fails;
+} wireGateCtx_t;
+static wireGateCtx_t g_wireGate;
+static bool g_wireGateDone = false;
+
+static void checkWire(wireGateCtx_t *g, const char *what, tensor_t *t, size_t elems,
+                      groupShape_t shape) {
+    size_t n = calcNumberOfElementsByTensor(t);
+    if (n != elems) {
+        fprintf(stderr, "WIRE GATE FAIL: %s has %zu elements, expected %zu\n", what, n, elems);
+        g->fails++;
+        return;
+    }
+    paramGateExpect_t expect = (g_cfg.wireMode == WIRE_BLOCK_FLOAT)
+                                   ? (paramGateExpect_t){.type = FLOAT32}
+                                   : (paramGateExpect_t){.type = BFP,
+                                                         .bits = g_cfg.mantissaBits,
+                                                         .exponentBits = g_cfg.exponentBits,
+                                                         .shape = shape};
+    char msg[160];
+    if (!paramGateCheck(t, &expect, msg, sizeof(msg))) {
+        fprintf(stderr, "WIRE GATE FAIL: %s %s\n", what, msg);
+        g->fails++;
+    }
+}
+
+/* Observational only: no allocation, no RNG, no tensor mutation (the traced
+ * step IS the first real optimizer sample -- tracedGrads shares
+ * calculateGradsImpl with calculateGradsSequential). */
+static void wireGateSink(void *ctx, size_t layerIdx, layerType_t layerType, const char *phase,
+                         tensor_t *tensor) {
+    (void)layerType;
+    wireGateCtx_t *g = ctx;
+    char what[48];
+    size_t slot;
+    if (strcmp(phase, "fwd") == 0 && layerIdx < MODEL_SIZE) {
+        slot = layerIdx;
+        snprintf(what, sizeof(what), "fwd %s.out", kLayerNames[layerIdx]);
+        checkWire(g, what, tensor, kOutElems[layerIdx], g_outShape[layerIdx]);
+    } else if (strcmp(phase, "lossgrad") == 0 && layerIdx == MODEL_SIZE) {
+        slot = MODEL_SIZE;
+        checkWire(g, "lossgrad (clones softmax.out)", tensor, kOutElems[11], g_outShape[11]);
+    } else if (strcmp(phase, "agrad") == 0 && layerIdx < MODEL_SIZE - 1) {
+        slot = MODEL_SIZE + 1 + layerIdx;
+        if (layerIdx == MODEL_SIZE - 2) { /* agrad@linear == the loss grad tensor */
+            checkWire(g, "agrad linear (loss grad)", tensor, kOutElems[11], g_outShape[11]);
+        } else {
+            snprintf(what, sizeof(what), "agrad %s (= %s.dx)", kLayerNames[layerIdx],
+                     kLayerNames[layerIdx + 1]);
+            checkWire(g, what, tensor, kDxElems[layerIdx + 1], g_dxShape[layerIdx + 1]);
+        }
+    } else {
+        fprintf(stderr, "WIRE GATE FAIL: unexpected event %s@%zu\n", phase, layerIdx);
+        g->fails++;
+        return;
+    }
+    if (g->seen[slot]) {
+        fprintf(stderr, "WIRE GATE FAIL: duplicate event %s@%zu\n", phase, layerIdx);
+        g->fails++;
+    }
+    g->seen[slot] = true;
+}
+
+static trainingStats_t *firstStepGatedGrads(layer_t **model, size_t modelSize,
+                                            lossConfig_t lossConfig, reduction_t forwardReduction,
+                                            tensor_t *input, tensor_t *label) {
+    if (g_wireGateDone) {
+        return calculateGradsSequential(model, modelSize, lossConfig, forwardReduction, input,
+                                        label);
+    }
+    g_wireGateDone = true;
+    trainingStats_t *stats = tracedGrads(model, modelSize, lossConfig, forwardReduction, input,
+                                         label, wireGateSink, &g_wireGate);
+    int missing = 0;
+    for (size_t s = 0; s < WIRE_EVENTS; s++) {
+        if (!g_wireGate.seen[s]) {
+            fprintf(stderr, "WIRE GATE FAIL: missing event slot %zu\n", s);
+            missing++;
+        }
+    }
+    if (g_wireGate.fails != 0 || missing != 0) {
+        fprintf(stderr, "WIRE GATE FAILED (fails=%d missing=%d of %d events)\n", g_wireGate.fails,
+                missing, (int)WIRE_EVENTS);
+        exit(2);
+    }
+    fprintf(stdout, "WIRE GATE PASS: %d traced wires match wires_resolved\n", (int)WIRE_EVENTS);
+    fflush(stdout);
+    return stats;
+}
+
 int main(void) {
     const char *cfgErr = bfpSweepConfigFromEnv(&g_cfg);
     if (cfgErr != NULL) {
@@ -945,7 +1039,7 @@ int main(void) {
         model, MODEL_SIZE,
         (lossConfig_t){
             .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL},
-        trainLoader, valLoader, sgd, g_epochs, calculateGradsSequential, inferenceWithLoss,
+        trainLoader, valLoader, sgd, g_epochs, firstStepGatedGrads, inferenceWithLoss,
         &(trainingRunOptions_t){.lrScheduler = sched, .callback = epochCallback});
     (void)result;
 

@@ -1,6 +1,7 @@
 #define SOURCE_FILE "TRAINING_EPOCH_DEFAULT"
 
-#include "TrainingEpochDefault.h"
+#include <stdlib.h>
+
 #include "Common.h"
 #include "DataLoaderApi.h"
 #include "LossFunction.h"
@@ -8,12 +9,21 @@
 #include "OptimizerApi.h"
 #include "Tensor.h"
 #include "TrainingBatchDefault.h"
+#include "TrainingEpochDefault.h"
 
 float trainingEpochDefault(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
                            dataLoader_t *dataLoader, optimizer_t *optimizer,
                            calculateGradsFn_t calculateGradsFn, reduction_t forwardReduction) {
     size_t datasetSize = dataLoader->getDatasetSize();
     size_t numberOfBatches = datasetSize / dataLoader->batchSize;
+    if (numberOfBatches == 0) {
+        /* batchSize > datasetSize: no batch can be formed, the loop below would
+         * train nothing and the mean would be 0/0. */
+        PRINT_ERROR("trainingEpochDefault: batchSize %u exceeds the dataset size %zu (zero "
+                    "batches)",
+                    (unsigned)dataLoader->batchSize, datasetSize);
+        exit(1);
+    }
     optimizerFunctions_t optimFns = optimizerFunctions[optimizer->type];
     float totalLoss = 0.0f;
 

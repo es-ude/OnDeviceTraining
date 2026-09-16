@@ -276,11 +276,16 @@ Notes on the qualified cells:
   `parameterUpdates`, `learningRate` — the values the epoch trained with),
   then `lrSchedulerStep`, then `bsSchedulerStep` last. Init guards: NULL
   loader, `gamma` non-finite or `<= 0`, `stepSize < 1`, `maxBatchSize` below
-  the loader's initial batch or above `UINT16_MAX`. `trainingRun` guards: a
-  `bsScheduler` wired to a loader other than the train loader, its compensation
-  wired to another optimizer, or an `lrScheduler` next to a compensating
-  `bsScheduler` (two LR writers) — all `PRINT_ERROR` + `exit(1)`. Exercised by
-  the HAR float32 harness (`BS_SCHEDULE`/`BS_LR_COMPENSATION`/… env knobs,
+  the loader's initial batch, above `UINT16_MAX`, or above the loader's
+  dataset size. `trainingRun` guards: a `bsScheduler` wired to a loader other
+  than the train loader, its compensation wired to another optimizer, or an
+  `lrScheduler` next to a compensating `bsScheduler` (two LR writers) — all
+  `PRINT_ERROR` + `exit(1)`. `bsSchedulerStep` fails fast (`PRINT_ERROR` +
+  `exit(1)`) when `gamma^lastEpoch` leaves the double range (exact target 0 or
+  inf) or the compensated LR is not finite in float; `trainingEpochDefault`
+  fails fast when `batchSize > datasetSize` (zero batches) — the backstop for
+  any caller. Exercised by the HAR float32 harness
+  (`BS_SCHEDULE`/`BS_LR_COMPENSATION`/… env knobs,
   `examples/har_classifier/README.md`).
 - **Frozen layers** (#380 PR1) — `collectTrainableParameters` and
   `calcTotalNumberOfStates` both skip any layer with `layerIsFrozen() == true`:

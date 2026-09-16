@@ -2041,6 +2041,42 @@ void testTrainingRunCompensatingBsSchedulerWritesTheLrEachEpoch(void) {
     TEST_ASSERT_EQUAL_size_t(2, capturedFinalBatch);
 }
 
+void testTrainingEpochDefaultRejectsBatchLargerThanDataset(void) {
+    /* 4 samples, batch 8: datasetSize / batchSize == 0 batches. Before the
+     * guard this trained nothing and returned 0/0 = NaN silently. */
+    tensor_t *wParam = buildFloatTensor2D(2, 2, (float[]){1.f, 0.f, 0.f, 1.f}, 4);
+    tensor_t *wGrad = gradInitFloat(wParam, NULL);
+    parameter_t *w = parameterInit(wParam, wGrad);
+
+    tensor_t *bParam = buildFloatTensor2D(1, 2, (float[]){0.f, 0.f}, 2);
+    tensor_t *bGrad = gradInitFloat(bParam, NULL);
+    parameter_t *b = parameterInit(bParam, bGrad);
+
+    quantization_t testQ;
+    initFloat32Quantization(&testQ);
+    layer_t *linear = buildBorrowedLinearLayer(w, b, &testQ);
+    layer_t *model[] = {linear};
+
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+
+    initEpochDataset();
+    dataLoader_t *trainDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 8, NULL, NULL, false, 0, true);
+
+    ASSERT_EXITS_WITH_FAILURE(trainingEpochDefault(
+        model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, trainDl, sgd,
+        calculateGradsSequential, REDUCTION_SUM));
+
+    freeOptim(sgd);
+    freeQuantization(momentumQ);
+    freeDataLoader(trainDl);
+    freeLinearLayerShellOnly(linear);
+    freeEpochDataset();
+}
+
 /* Guards (b), (c), (d) of the design: all fire before the first batch. */
 void testTrainingRunRejectsBsSchedulerWiredToAnotherLoader(void) {
     tensor_t *wParam = buildFloatTensor2D(2, 2, (float[]){1.f, 0.f, 0.f, 1.f}, 4);
@@ -2069,7 +2105,7 @@ void testTrainingRunRejectsBsSchedulerWiredToAnotherLoader(void) {
 
     /* Wired to the EVAL loader — the eval loader must never be resized. */
     bsScheduler_t bsSched;
-    exponentialBsInit(&bsSched, evalDl, NULL, 0.5f, 8);
+    exponentialBsInit(&bsSched, evalDl, NULL, 0.5f, 4);
     ASSERT_EXITS_WITH_FAILURE(
         trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
                     trainDl, evalDl, sgd, 1, calculateGradsSequential, inferenceWithLoss,
@@ -2116,7 +2152,7 @@ void testTrainingRunRejectsBsCompensationWiredToAnotherOptimizer(void) {
     optimizer_t otherOptim = {
         .type = SGD_M, .impl = &otherImpl, .parameter = NULL, .states = NULL, .sizeStates = 0};
     bsScheduler_t bsSched;
-    exponentialBsInit(&bsSched, trainDl, &otherOptim, 0.5f, 8);
+    exponentialBsInit(&bsSched, trainDl, &otherOptim, 0.5f, 4);
     ASSERT_EXITS_WITH_FAILURE(
         trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
                     trainDl, evalDl, sgd, 1, calculateGradsSequential, inferenceWithLoss,
@@ -2160,7 +2196,7 @@ void testTrainingRunRejectsLrSchedulerNextToCompensatingBsScheduler(void) {
     lrScheduler_t lrSched;
     stepLrInit(&lrSched, sgd, 1, 0.5f);
     bsScheduler_t bsSched;
-    exponentialBsInit(&bsSched, trainDl, sgd, 0.5f, 8);
+    exponentialBsInit(&bsSched, trainDl, sgd, 0.5f, 4);
     ASSERT_EXITS_WITH_FAILURE(
         trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
                     trainDl, evalDl, sgd, 1, calculateGradsSequential, inferenceWithLoss,
@@ -2487,6 +2523,7 @@ int main(void) {
     RUN_TEST(testTrainingRunStepsBsSchedulerOncePerEpochAndCallbackSeesTheEpochsBatch);
     RUN_TEST(testTrainingRunCallbackObservesTheEpochsOwnLrAndBatchWithBothSchedulers);
     RUN_TEST(testTrainingRunCompensatingBsSchedulerWritesTheLrEachEpoch);
+    RUN_TEST(testTrainingEpochDefaultRejectsBatchLargerThanDataset);
     RUN_TEST(testTrainingRunRejectsBsSchedulerWiredToAnotherLoader);
     RUN_TEST(testTrainingRunRejectsBsCompensationWiredToAnotherOptimizer);
     RUN_TEST(testTrainingRunRejectsLrSchedulerNextToCompensatingBsScheduler);

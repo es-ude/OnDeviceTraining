@@ -81,12 +81,13 @@ old shuffle-once baseline.
 | `BS_LR_COMPENSATION` | 0 | 1 = the batch scheduler also writes `lr = LR · applied / exact` (the "BC" arm); combining it with `LR_SCHEDULE != none` is rejected up front, before the log file is opened (two LR writers; `trainingRun`'s guard is the backstop) |
 | `GAMMA` | 1.0 | shared by both schedules so the arms are matched at the same γ; 1.0 = no-op |
 | `STEP_SIZE` | 1 | step schedules only |
-| `MAX_BATCH_SIZE` | train size / 10 = 661 | cap of the batch scheduler |
+| `MAX_BATCH_SIZE` | train size / 10 = 661 | cap of the batch scheduler; must not exceed the train-set size (6617 samples) — a larger cap would let a growing schedule drive the batch past the dataset (zero batches per epoch), so it is rejected up front |
 | `RESHUFFLE` | 1 | per-epoch reshuffle of the train loader (#381) |
 
 `LR_SCHEDULE` and `BS_SCHEDULE` may both be set without compensation (LR decays
 and the batch grows). Unknown schedule names, `BATCH_SIZE` outside `[1, 65535]`,
-`STEP_SIZE < 1`, `GAMMA <= 0` and a `MAX_BATCH_SIZE` below `BATCH_SIZE` fail fast.
+`STEP_SIZE < 1`, `GAMMA <= 0` and a `MAX_BATCH_SIZE` below `BATCH_SIZE` or above
+the train-set size fail fast.
 
 The run log (`examples/_shared/log_schema.py`) records every knob under
 `config` (`lr_schedule`, `bs_schedule`, `bs_lr_compensation`, `gamma`,

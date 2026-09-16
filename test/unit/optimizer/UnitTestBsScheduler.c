@@ -281,6 +281,55 @@ void testInitRejectsNullDataLoader(void) {
     ASSERT_EXITS_WITH_FAILURE(exponentialBsInit(&sched, NULL, NULL, 0.5f, 100));
 }
 
+void testInitRejectsMaxAboveDatasetSize(void) {
+    /* stubDatasetSize() == 1000: a cap the loader can never serve would let
+     * the schedule write batchSize > datasetSize (zero batches per epoch). */
+    dataLoader_t dl = makeLoader(16);
+    bsScheduler_t sched;
+    ASSERT_EXITS_WITH_FAILURE(exponentialBsInit(&sched, &dl, NULL, 0.5f, 1001));
+}
+
+void testStepRejectsTargetUnderflowingToZero(void) {
+    /* gamma = 1e20: pow(gamma, 16) = 1e320 overflows double to +inf, so the
+     * exact target 1/inf = 0. Steps 1..15 are finite (batch clamps to 1);
+     * step 16 must fail fast instead of writing lr = baseLr / 0. */
+    dataLoader_t dl = makeLoader(1);
+    bsScheduler_t sched;
+    exponentialBsInit(&sched, &dl, NULL, 1e20f, 100);
+    for (size_t k = 0; k < 15; k++) {
+        bsSchedulerStep(&sched);
+    }
+    TEST_ASSERT_EQUAL_size_t(1, dl.batchSize);
+    ASSERT_EXITS_WITH_FAILURE(bsSchedulerStep(&sched));
+}
+
+void testStepRejectsTargetOverflowingToInfinity(void) {
+    /* gamma = 1e-20: pow(gamma, 16) = 1e-320 (subnormal) makes the exact
+     * target 1/1e-320 overflow to +inf. Steps 1..15 clamp to the cap; step 16
+     * must fail fast instead of clamping with a compensated LR of 0. */
+    dataLoader_t dl = makeLoader(1);
+    bsScheduler_t sched;
+    exponentialBsInit(&sched, &dl, NULL, 1e-20f, 100);
+    for (size_t k = 0; k < 15; k++) {
+        bsSchedulerStep(&sched);
+    }
+    TEST_ASSERT_EQUAL_size_t(100, dl.batchSize);
+    ASSERT_EXITS_WITH_FAILURE(bsSchedulerStep(&sched));
+}
+
+void testStepRejectsNonFiniteCompensatedLr(void) {
+    /* gamma = 1e20 with compensation: step 1 gives lr = 0.1 * 1 / 1e-20 = 1e19
+     * (finite in float); step 2 gives 1e39 > FLT_MAX -> the float cast is +inf
+     * and must be rejected before it reaches setLr. */
+    dataLoader_t dl = makeLoader(1);
+    optimizer_t optim = makeSgdOptimizer(0.1f);
+    bsScheduler_t sched;
+    exponentialBsInit(&sched, &dl, &optim, 1e20f, 100);
+    bsSchedulerStep(&sched);
+    TEST_ASSERT_TRUE(isfinite(currentLr(&optim)));
+    ASSERT_EXITS_WITH_FAILURE(bsSchedulerStep(&sched));
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testExponentialBsGrowsAndCaps);
@@ -301,5 +350,9 @@ int main() {
     RUN_TEST(testInitRejectsMaxBelowInitialBatch);
     RUN_TEST(testInitRejectsMaxAboveUint16);
     RUN_TEST(testInitRejectsNullDataLoader);
+    RUN_TEST(testInitRejectsMaxAboveDatasetSize);
+    RUN_TEST(testStepRejectsTargetUnderflowingToZero);
+    RUN_TEST(testStepRejectsTargetOverflowingToInfinity);
+    RUN_TEST(testStepRejectsNonFiniteCompensatedLr);
     return UNITY_END();
 }

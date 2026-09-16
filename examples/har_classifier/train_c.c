@@ -402,6 +402,11 @@ int main(void) {
      * split), i.e. >= 10 optimizer updates per epoch even at the cap. Read
      * here, after the data load, so the default can be derived from it. */
     g_maxBatchSize = envInt("MAX_BATCH_SIZE", (int)(getTrainSize() / 10));
+    if (strcmp(g_bsSchedule, "none") != 0 && g_maxBatchSize > (int)getTrainSize()) {
+        fprintf(stderr, "ERROR: MAX_BATCH_SIZE=%d exceeds the train set (%zu samples)\n",
+                g_maxBatchSize, getTrainSize());
+        return 1;
+    }
 
 #ifdef ODT_MEM_PROFILE
     size_t markDataset = memProfileMark(); /* dataset_b */

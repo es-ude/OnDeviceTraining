@@ -47,6 +47,12 @@ static void initCommon(bsScheduler_t *sched, dataLoader_t *dataLoader, optimizer
         PRINT_ERROR("%s: maxBatchSize must fit dataLoader_t.batchSize (uint16_t)", fn);
         exit(1);
     }
+    if (maxBatchSize > dataLoader->getDatasetSize()) {
+        /* A cap the loader can never serve would let the schedule write
+         * batchSize > datasetSize: zero batches per epoch, 0/0 loss. */
+        PRINT_ERROR("%s: maxBatchSize must be <= the loader's dataset size", fn);
+        exit(1);
+    }
     sched->type = type;
     sched->dataLoader = dataLoader;
     sched->optimizer = optimizerOrNull;
@@ -79,6 +85,16 @@ void exponentialBsInit(bsScheduler_t *sched, dataLoader_t *dataLoader, optimizer
 void bsSchedulerStep(bsScheduler_t *sched) {
     sched->lastEpoch++;
     double exact = computeExact(sched);
+    if (!isfinite(exact) || exact <= 0.0) {
+        /* gamma^lastEpoch over- or underflowed in double: the target is 0 or
+         * inf and the batch/LR trajectory is no longer defined. Fail fast
+         * instead of writing a clamped batch with a 0 or inf LR. */
+        PRINT_ERROR("bsSchedulerStep: exact batch target is not finite and positive at lastEpoch "
+                    "%zu (gamma^lastEpoch left the double range); shorten the run or move gamma "
+                    "toward 1",
+                    sched->lastEpoch);
+        exit(1);
+    }
     double rounded = round(exact); /* half away from zero (C round), not banker's */
     size_t applied;
     if (rounded < 1.0) {
@@ -97,6 +113,12 @@ void bsSchedulerStep(bsScheduler_t *sched) {
          * cap this degrades into plain LR decay (baseLr * max / exact) BY
          * DESIGN — do not "fix" it. Written absolutely from baseLr (#327). */
         float lr = (float)((double)sched->baseLr * (double)applied / exact);
+        if (!isfinite(lr)) {
+            PRINT_ERROR("bsSchedulerStep: compensated learning rate is not finite at lastEpoch %zu "
+                        "(baseLr * applied / exact overflowed float)",
+                        sched->lastEpoch);
+            exit(1);
+        }
         optimizerFunctions[sched->optimizer->type].setLr(sched->optimizer, lr);
     }
 }

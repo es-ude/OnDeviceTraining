@@ -25,7 +25,7 @@ class TrainConfig(TypedDict):
     lr_min: NotRequired[float]
     optimizer: NotRequired[str]  # "sgd" | "adamw" (#328); absent = sgd
     weight_decay: NotRequired[float]
-    weight_dtype: NotRequired[str]  # "sym" | "asym" (#300); absent = sym
+    weight_dtype: NotRequired[str]  # "sym" | "asym" | "bfp"
     group_mode: NotRequired[str]  # "tensor" | "channel" | "size" (#300); absent = tensor
     group_size: NotRequired[int]  # GROUP_SIZE when group_mode == "size"; 0 otherwise
     groups_resolved: NotRequired[dict[str, list[int]]]  # per-layer [numGroups, groupSize] (#300)
@@ -38,6 +38,18 @@ class TrainConfig(TypedDict):
     max_batch_size: NotRequired[int]  # cap of the batch scheduler; `batch` stays the INITIAL batch
     reshuffle: NotRequired[int]  # 0/1: per-epoch reshuffle of the train loader (#381); HAR default 1
     toolchain: NotRequired[str]  # the C compiler's __VERSION__ (provenance; docs/conventions/toolchain-parity.md)
+
+    # BFP sweep (epic #410 PR7; spec 2026-09-14 §6). All NotRequired at the type
+    # level; MANDATORY for impl == "c-bfp" (pinned by test_run_matrix_configs.py).
+    mantissa_bits: NotRequired[int]
+    exponent_bits: NotRequired[int]
+    weight_block: NotRequired[str]  # "tensor" | "channel" | "<int>" as given to BFP_WEIGHT_BLOCK
+    wire_block: NotRequired[str]  # "float" | "tensor" | "<int>" as given to BFP_WIRE_BLOCK
+    wires_resolved: NotRequired[dict[str, list[int]]]  # "<layer>.out"/"<layer>.dx" -> [numGroups, groupSize]
+    bfp_math: NotRequired[str]  # "native" | "fq" (fq = GEMM slots + softmax forward pinned FLOAT32)
+    bfp_grads: NotRequired[int]  # 0 | 1 per-tensor BFP grad storage
+    bfp_state: NotRequired[int]  # 0 | 1 per-tensor BFP momentum storage
+    bfp_rounding: NotRequired[str]  # "sr" | "det" (training-side seams only; inference deterministic)
 
 
 class EpochLog(TypedDict):
@@ -64,7 +76,8 @@ class MemoryLog(TypedDict):
     (see examples/har_classifier/mem_instrument.c). ``reconciliation_gap_b`` is
     ``heap_peak_b - mcu_total_b`` and is RECORDED, never massaged.
     """
-    sym_bits: int  # SYM weight width for the sym run; -1 for the float run
+    sym_bits: NotRequired[int]  # SYM width for c-sym-weights; -1 for float runs; ABSENT for c-bfp
+    storage_dtype: NotRequired[str]  # "float" | "sym" | "asym" | "bfp" (every HAR trainer since PR7; absent = legacy log)
     dataset_b: int  # instrumented phase mark: live bytes after initDataSets
     params_grads_b: int  # instrumented phase-mark delta: buildModel (+requantize)
     optstate_b: int  # instrumented phase-mark delta: optimizer creation
@@ -75,7 +88,11 @@ class MemoryLog(TypedDict):
     io_b: int  # analytic: batched input + one-hot label bytes
     pool_backward_b: int  # analytic: persistent MaxPool argmax-index buffers (#321)
     dx_peak_b: int  # analytic: worst concurrent dx ping-pong pair during backprop (#321)
-    mcu_total_b: int  # params+grads+optstate+activations+io+pool_backward+dx_peak
+    group_overhead_b: NotRequired[int]  # Σ per-tensor numGroups·(4 + asym?2:0), all 8 param tensors, now IN the C total
+    grad_overhead_b: NotRequired[int]  # per-tensor packed grad scales/exponents
+    optstate_overhead_b: NotRequired[int]  # per-tensor packed optimizer-state scales/exponents
+    wire_overhead_b: NotRequired[int]  # live forward-wire exponents + peak dx pair
+    mcu_total_b: int  # sum of the eleven categories (legacy logs: seven, metadata added by compare_memory.py)
     heap_peak_b: int  # instrumented: memProfilePeakBytes()
     stack_peak_b: int  # instrumented: measurePeakStackBytes() on one step
     rss_peak_kb: int  # instrumented: memProfileRssPeakKb() (KiB)
@@ -83,7 +100,7 @@ class MemoryLog(TypedDict):
 
 
 class RunLog(TypedDict, total=False):
-    impl: str  # "pytorch" or "c"
+    impl: str  # "pytorch" | "c" | "c-sym-weights" | "c-finetune" | "c-bfp"
     example: str
     config: TrainConfig
     epochs: list[EpochLog]

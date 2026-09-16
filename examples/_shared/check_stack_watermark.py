@@ -65,15 +65,24 @@ BUDGETS_B: dict[str, dict[str, int | None]] = {
         "float": 27768 + SLACK_B,
         "sym": 51968 + SLACK_B,
         "finetune": 4016 + SLACK_B,
+        "bfp": None,  # bfp: UNCALIBRATED BY DESIGN (spec §8: report-only until a calibration PR)
     },
-    "linux": {"float": None, "sym": None, "finetune": None},
+    "linux": {
+        "float": None,
+        "sym": None,
+        "finetune": None,
+        "bfp": None,  # bfp: UNCALIBRATED BY DESIGN (spec §8: report-only until a calibration PR)
+    },
 }
 
 
 def _config_of(log: dict) -> str:
-    if log.get("impl") == "c-finetune":
+    impl = log.get("impl")
+    if impl == "c-finetune":
         return "finetune"
-    memory = log.get("memory", {})
+    if impl == "c-bfp":
+        return "bfp"
+    memory = log.get("memory", {})  # legacy: float/sym keyed on sym_bits
     return "float" if memory.get("sym_bits", -1) < 0 else "sym"
 
 

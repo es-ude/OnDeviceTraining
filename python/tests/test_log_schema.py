@@ -77,3 +77,31 @@ def test_extended_c_log_roundtrips(tmp_path):
     path = tmp_path / "c.json"
     dump_log(path, log)
     assert load_log(path) == log
+
+
+def test_c_bfp_log_without_sym_bits_loads(tmp_path):
+    log = {
+        "impl": "c-bfp", "example": "har_classifier",
+        "config": {
+            "epochs": 1, "batch": 64, "lr": 0.01, "momentum": 0.9, "seed": 1, "shuffle_seed": 1,
+            "weight_dtype": "bfp", "mantissa_bits": 6, "exponent_bits": 8,
+            "weight_block": "32", "wire_block": "16", "bfp_math": "native",
+            "bfp_grads": 0, "bfp_state": 0, "bfp_rounding": "sr",
+            "groups_resolved": {"conv1": [16, 63]}, "wires_resolved": {"conv1.out": [128, 16]},
+            "group_overhead_b": 300,
+        },
+        "epochs": [{"epoch": 0, "step_losses": [1.0], "train_loss": 1.0,
+                    "val_loss": 1.0, "val_acc": 0.2, "wall_s": 1.0}],
+        "final": {"test_loss": 1.0, "test_acc": 0.2, "test_auc": None},
+        "memory": {"storage_dtype": "bfp", "dataset_b": 1, "params_grads_b": 1, "optstate_b": 1,
+                   "params_b": 1, "group_overhead_b": 300, "grads_b": 1, "grad_overhead_b": 0,
+                   "optstate_analytic_b": 1, "optstate_overhead_b": 0, "activations_b": 1,
+                   "wire_overhead_b": 2, "io_b": 1, "pool_backward_b": 1, "dx_peak_b": 1,
+                   "mcu_total_b": 311, "heap_peak_b": 400, "stack_peak_b": 5, "rss_peak_kb": 1,
+                   "reconciliation_gap_b": 89},
+    }
+    path = tmp_path / "bfp.json"
+    dump_log(path, log)
+    loaded = load_log(path)
+    assert loaded == log
+    assert "sym_bits" not in loaded["memory"]

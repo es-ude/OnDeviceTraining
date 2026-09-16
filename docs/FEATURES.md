@@ -231,10 +231,11 @@ Notes on the qualified cells:
 - **LR schedulers** (#327): `lrScheduler_t` (caller-owned, zero-alloc) with
   `STEP_LR`, `EXPONENTIAL_LR`, `COSINE_ANNEALING_LR` — PyTorch closed-form
   parity (double math, float cast at `setLr`), stepped by `trainingRun`
-  (NULL-able param, once per epoch after the callback) or manually via
-  `lrSchedulerStep` at any boundary. Optimizer-agnostic through the
-  `getLr`/`setLr` vtable entries — both `SGD_M` and `ADAM_W` rows implement them,
-  so a scheduler works unchanged across either optimizer.
+  (`trainingRunOptions_t.lrScheduler`, NULL-able, once per epoch after the
+  callback) or manually via `lrSchedulerStep` at any boundary.
+  Optimizer-agnostic through the `getLr`/`setLr` vtable entries — both `SGD_M`
+  and `ADAM_W` rows implement them, so a scheduler works unchanged across
+  either optimizer.
 - **Linear LR warmup** (#383): `LINEAR_WARMUP_LR` composes a linear ramp with an
   optional `main` scheduler (caller-owned, NULLABLE) — `lr = baseLr *
   (startFactor + (1-startFactor)*lastEpoch/warmupEpochs)` while `lastEpoch <
@@ -252,6 +253,35 @@ Notes on the qualified cells:
   semantics, where the pristine LR is locked in by whichever scheduler
   attaches to the optimizer first, regardless of construction order between
   `LinearLR` and `main`.
+- **Batch-size schedulers** (batch-size scheduler port, design 2026-09-16):
+  `bsScheduler_t` (caller-owned, zero-alloc; `src/optimizer/BsScheduler.[ch]`)
+  with `STEP_BS` and `EXPONENTIAL_BS`, the batch analogue of `STEP_LR` /
+  `EXPONENTIAL_LR`: where those multiply the LR by `gamma`, these **divide the
+  batch by `gamma`** — `x_k = baseBs / gamma^floor(k / stepSize)` (step) and
+  `x_k = baseBs / gamma^k` (exponential), `k = lastEpoch` — so `lr / batch`
+  follows the LR scheduler's trajectory at the same `gamma` (`gamma < 1` grows
+  the batch, `gamma > 1` shrinks it). The applied batch `b_k = clamp(round(x_k),
+  1, maxBatchSize)` (C `round`, half away from zero) is written absolutely to
+  `dataLoader->batchSize` from `baseBs` captured at init (double math, cast at
+  the write, like `LrScheduler`). Optional LR compensation: a non-NULL
+  `optimizer` at init captures `baseLr` and every step also writes `lr_k =
+  baseLr * b_k / x_k` through `setLr`, keeping `lr_k / b_k` on the un-rounded,
+  un-capped trajectory; past the cap this degrades into plain LR decay by
+  design. Contract: step only at an epoch boundary (`getBatch` addresses
+  `index * batchSize`; the `datasetSize % batchSize` tail is dropped every
+  epoch, so a growing batch drops a growing tail). Wired through
+  `trainingRunOptions_t` (`lrScheduler`, `bsScheduler`, `callback`, all
+  NULLable; `trainingRun(..., options)` with `NULL` = the old defaults): per
+  epoch the callback receives `epochInfo_t` (`epoch`, `trainLoss`, `batchSize`,
+  `parameterUpdates`, `learningRate` — the values the epoch trained with),
+  then `lrSchedulerStep`, then `bsSchedulerStep` last. Init guards: NULL
+  loader, `gamma` non-finite or `<= 0`, `stepSize < 1`, `maxBatchSize` below
+  the loader's initial batch or above `UINT16_MAX`. `trainingRun` guards: a
+  `bsScheduler` wired to a loader other than the train loader, its compensation
+  wired to another optimizer, or an `lrScheduler` next to a compensating
+  `bsScheduler` (two LR writers) — all `PRINT_ERROR` + `exit(1)`. Exercised by
+  the HAR float32 harness (`BS_SCHEDULE`/`BS_LR_COMPENSATION`/… env knobs,
+  `examples/har_classifier/README.md`).
 - **Frozen layers** (#380 PR1) — `collectTrainableParameters` and
   `calcTotalNumberOfStates` both skip any layer with `layerIsFrozen() == true`:
   zero contribution to the parameter count, the collected slot array, and

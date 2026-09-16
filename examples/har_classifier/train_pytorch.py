@@ -5,6 +5,7 @@ Output: logs/pytorch.json + outputs/pytorch_predictions.npy
 """
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -18,7 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 from examples._shared.log_schema import RunLog, dump_log  # noqa: E402
 from examples._shared.seeds import SEED, SHUFFLE_SEED  # noqa: E402
-from examples._shared.xorshift32 import shuffle_indices  # noqa: E402
+from examples._shared.xorshift32 import reshuffle_indices, shuffle_indices_with_state  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 DATA = HERE / "data"
@@ -43,6 +44,13 @@ WEIGHT_DECAY = 0.01
 SCHEDULER: str | None = None
 LR_MIN = 0.0
 
+# Per-epoch reshuffle mirror of train_c.c's RESHUFFLE knob (default on). The C
+# side reshuffles the train loader at the start of every epoch > 0 by continuing
+# the global xorshift stream (dataLoaderReshuffle: no reseed); the float32 HAR
+# binary draws nothing else from that stream, so XorShift32Sampler below is
+# bit-exact. RESHUFFLE=0 restores shuffle-once on this side, as on the C side.
+RESHUFFLE = int(os.environ.get("RESHUFFLE", "1"))
+
 
 class HarDataset(torch.utils.data.Dataset):
     def __init__(self, x: np.ndarray, y: np.ndarray) -> None:
@@ -57,11 +65,18 @@ class HarDataset(torch.utils.data.Dataset):
 
 
 class XorShift32Sampler(torch.utils.data.Sampler[int]):
-    """Single-shot shuffle, no per-epoch reshuffle, matching framework DataLoader.c."""
-    def __init__(self, n: int, seed: int) -> None:
-        self.indices = shuffle_indices(n, seed)
+    """Mirrors the framework DataLoader: one Fisher-Yates shuffle at init from
+    `seed`, then — with `reshuffle` on — a Fisher-Yates of the CURRENT order at
+    the start of every epoch after the first, continuing the same RNG state."""
+    def __init__(self, n: int, seed: int, reshuffle: bool) -> None:
+        self.indices, self.state = shuffle_indices_with_state(n, seed)
+        self.reshuffle = reshuffle
+        self.epochs_started = 0
 
     def __iter__(self):
+        if self.reshuffle and self.epochs_started > 0:
+            self.state = reshuffle_indices(self.indices, self.state)
+        self.epochs_started += 1
         return iter(self.indices)
 
     def __len__(self) -> int:
@@ -115,7 +130,7 @@ def main() -> None:
     test_y = np.load(DATA / "test_y.npy")
 
     train_ds = HarDataset(train_x, train_y)
-    sampler = XorShift32Sampler(len(train_ds), SHUFFLE_SEED)
+    sampler = XorShift32Sampler(len(train_ds), SHUFFLE_SEED, reshuffle=RESHUFFLE != 0)
     loader = torch.utils.data.DataLoader(train_ds, batch_size=BATCH, sampler=sampler, drop_last=True)
 
     model = HarModel()
@@ -168,6 +183,7 @@ def main() -> None:
         "seed": SEED, "shuffle_seed": SHUFFLE_SEED,
         "lr_schedule": SCHEDULER or "none", "lr_min": LR_MIN,
         "optimizer": OPTIMIZER,
+        "reshuffle": RESHUFFLE,
     }
     if OPTIMIZER == "sgd":
         config["momentum"] = MOMENTUM  # AdamW has no momentum; keep its log free of it (#328)
@@ -194,8 +210,6 @@ def main() -> None:
     # Save per-layer weights for the C-side BIT_PARITY mode.
     # C-side expects: examples/har_classifier/weights/<name>.{weight,bias}.npy
     # Where <name> in {conv1, conv2, conv3, fc} matches the order in v2's buildModel.
-    import os
-
     weights_dir = HERE / "weights"
     os.makedirs(weights_dir, exist_ok=True)
 

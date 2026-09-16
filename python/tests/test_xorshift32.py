@@ -8,7 +8,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from examples._shared.xorshift32 import xorshift32_next, shuffle_indices
+from examples._shared.xorshift32 import UINT32_MAX, reshuffle_indices, shuffle_indices, shuffle_indices_with_state, xorshift32_next
 
 
 def test_xorshift32_next_known_vectors():
@@ -46,8 +46,12 @@ def test_shuffle_indices_deterministic():
     assert a == b
 
 
-def _compile_and_run_c_harness(n: int, seed: int) -> list[int]:
-    """Compile the C harness against src/rng/RNG.c, run it, parse stdout."""
+def _compile_and_run_c_harness(n: int, seed: int, reshuffles: int = 0) -> list[int]:
+    """Compile the C harness against src/rng/RNG.c, run it, parse stdout.
+
+    reshuffles > 0 asks the harness for k additional rngShuffleIndices calls on
+    the CURRENT permutation without reseeding — exactly what dataLoaderReshuffle
+    does once per epoch > 0."""
     harness_src = REPO_ROOT / "examples" / "_shared" / "verify_xorshift32_harness.c"
     rng_src = REPO_ROOT / "src" / "rng" / "RNG.c"
     rng_inc = REPO_ROOT / "src" / "rng" / "include"
@@ -62,9 +66,8 @@ def _compile_and_run_c_harness(n: int, seed: int) -> list[int]:
         ],
         check=True,
     )
-    result = subprocess.run(
-        [binary, str(n), str(seed)], check=True, capture_output=True, text=True,
-    )
+    args = [binary, str(n), str(seed)] + ([str(reshuffles)] if reshuffles else [])
+    result = subprocess.run(args, check=True, capture_output=True, text=True)
     return [int(tok) for tok in result.stdout.split()]
 
 
@@ -84,3 +87,34 @@ def test_python_mirror_matches_c_for_seed_zero():
     expected = _compile_and_run_c_harness(50, 0)
     actual = shuffle_indices(50, 0)
     assert actual == expected
+
+
+def test_shuffle_indices_with_state_matches_shuffle_indices():
+    indices, state = shuffle_indices_with_state(100, 7)
+    assert indices == shuffle_indices(100, 7)
+    assert 0 < state <= UINT32_MAX
+
+
+def test_shuffle_indices_with_state_n_lt_2_keeps_the_aliased_seed():
+    """rngSetSeed runs BEFORE rngShuffleIndices' n < 2 early return, so the state
+    after an init shuffle of a tiny dataset is the (0 -> UINT32_MAX) aliased seed."""
+    assert shuffle_indices_with_state(1, 0) == ([0], UINT32_MAX)
+    assert shuffle_indices_with_state(0, 5) == ([], 5)
+
+
+def test_reshuffle_indices_n_lt_2_is_a_noop():
+    one = [0]
+    assert reshuffle_indices(one, 12345) == 12345
+    assert one == [0]
+
+
+def test_reshuffle_mirror_matches_c_after_k_reshuffles():
+    """The whole point: epoch k's order on the C side (init shuffle, then k
+    reshuffles continuing the global stream) is reproduced bit-exactly by
+    continuing `state`. Python is checked against C, never against itself."""
+    for n, seed, k in ((37, 42, 1), (37, 42, 3), (1000, 0, 2)):
+        expected = _compile_and_run_c_harness(n, seed, reshuffles=k)
+        indices, state = shuffle_indices_with_state(n, seed)
+        for _ in range(k):
+            state = reshuffle_indices(indices, state)
+        assert indices == expected, (n, seed, k)

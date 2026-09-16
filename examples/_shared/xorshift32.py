@@ -1,12 +1,14 @@
 """Python mirror of the framework's XorShift32 RNG (src/rng/RNG.c).
 
-This module exists so PyTorch DataLoaders shuffle samples in the same
-order as the C framework's DataLoader, which uses rngShuffleIndices
-seeded by shuffleSeed in dataLoaderInit (called once at init time, no
-per-epoch reshuffle).
-
-Single-shuffle-at-init means every epoch sees samples in the same
-order. This matches DataLoader.c:41-43.
+This module exists so PyTorch DataLoaders shuffle samples in the same order
+as the C framework's DataLoader: one Fisher-Yates shuffle at init
+(dataLoaderInit: rngSetSeed(shuffleSeed) + rngShuffleIndices) and — for
+examples that opt in via dataLoaderSetReshufflePerEpoch — one more
+Fisher-Yates on the CURRENT permutation at the start of every epoch > 0
+(dataLoaderReshuffle: no reseed, no identity reset, continuing the global
+stream). `shuffle_indices_with_state` + `reshuffle_indices` mirror that pair;
+the mirror is bit-exact only while nothing else draws from the C global RNG
+between the shuffles (true for the float32 HAR binary; see DETERMINISM.md).
 """
 from __future__ import annotations
 
@@ -40,16 +42,37 @@ def _bounded(state: int, bound: int) -> tuple[int, int]:
 
 
 def shuffle_indices(n: int, seed: int) -> list[int]:
-    """Fisher-Yates shuffle mirroring rngShuffleIndices.
+    """Fisher-Yates shuffle mirroring rngSetSeed + rngShuffleIndices.
 
     Returns a permutation of [0, n). For n < 2 returns the identity
     permutation (matches the C early-return).
     """
-    if n < 2:
-        return list(range(n))
+    return shuffle_indices_with_state(n, seed)[0]
+
+
+def shuffle_indices_with_state(n: int, seed: int) -> tuple[list[int], int]:
+    """As shuffle_indices, but also returns the RNG state after the shuffle.
+
+    The seed aliasing (0 -> UINT32_MAX) is rngSetSeed's and happens BEFORE
+    rngShuffleIndices' n < 2 early return, so the returned state is the
+    aliased seed even for a tiny dataset.
+    """
     state = seed if seed != 0 else UINT32_MAX
     indices = list(range(n))
+    state = reshuffle_indices(indices, state)
+    return indices, state
+
+
+def reshuffle_indices(indices: list[int], state: int) -> int:
+    """Fisher-Yates on the CURRENT list in place, continuing `state`; returns the new state.
+
+    Mirrors dataLoaderReshuffle -> rngShuffleIndices: no reseed, no identity
+    reset, n < 2 is a no-op (state unchanged).
+    """
+    n = len(indices)
+    if n < 2:
+        return state
     for i in range(n - 1, 0, -1):
         state, j = _bounded(state, i + 1)
         indices[i], indices[j] = indices[j], indices[i]
-    return indices
+    return state

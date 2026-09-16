@@ -105,4 +105,39 @@ bool paramGateCheck(const tensor_t *tensor, const paramGateExpect_t *expect, cha
 size_t packedPayloadBytes(qtype_t type, uint8_t bits, size_t N);
 size_t packedMetadataBytes(qtype_t type, size_t numGroups);
 
+/* The BFP sweep's knob set (spec §3.1), parsed from the environment by
+ * bfpSweepConfigFromEnv so the trainer's CONFIG line, gates and log all read
+ * ONE struct. Returns NULL on success; otherwise a static message naming the
+ * offending knob and its legal values (the trainer prints it and exits 1).
+ * The six SYM-only knobs are not errors -- a set one is a silent
+ * misconfiguration, so each sets its LEGACY_KNOB_* bit for the trainer to WARN. */
+typedef enum bfpMathSweep { BFP_MATH_NATIVE, BFP_MATH_FQ } bfpMathSweep_t;
+typedef enum bfpRoundingSweep { BFP_ROUNDING_SR, BFP_ROUNDING_DET } bfpRoundingSweep_t;
+enum {
+    LEGACY_KNOB_SYM_BITS = 1u << 0,
+    LEGACY_KNOB_SYM_WIRES = 1u << 1,
+    LEGACY_KNOB_WEIGHT_DTYPE = 1u << 2,
+    LEGACY_KNOB_GROUP_MODE = 1u << 3,
+    LEGACY_KNOB_GROUP_SIZE = 1u << 4,
+    LEGACY_KNOB_SYM_ROUNDING = 1u << 5,
+    LEGACY_KNOB_ODTS_ROUNDTRIP = 1u << 6
+};
+typedef struct bfpSweepConfig {
+    uint8_t mantissaBits;
+    uint8_t exponentBits;
+    groupModeSweep_t weightMode;
+    int weightSize;
+    wireBlockSweep_t wireMode;
+    int wireSize;
+    bfpMathSweep_t math;
+    bool bfpGrads;
+    bool bfpState;
+    bfpRoundingSweep_t rounding;
+    unsigned ignoredLegacyKnobs;
+    char weightBlockStr[16];
+    char wireBlockStr[16];
+} bfpSweepConfig_t;
+
+const char *bfpSweepConfigFromEnv(bfpSweepConfig_t *out);
+
 #endif

@@ -9,6 +9,7 @@
 #include "unity.h"
 
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Compile-time signature contracts (fastest RED: the header does not exist yet). */
@@ -31,6 +32,10 @@ _Static_assert(_Generic((&packedPayloadBytes), size_t (*)(qtype_t, uint8_t, size
                "packedPayloadBytes must take (qtype_t, uint8_t bits, size_t N)");
 _Static_assert(_Generic((&packedMetadataBytes), size_t (*)(qtype_t, size_t): 1, default: 0),
                "packedMetadataBytes must take (qtype_t, size_t numGroups)");
+_Static_assert(_Generic((&bfpSweepConfigFromEnv),
+                   const char *(*)(bfpSweepConfig_t *): 1,
+                   default: 0),
+               "bfpSweepConfigFromEnv must take (bfpSweepConfig_t *) and return const char *");
 
 void setUp() {}
 void tearDown() {}
@@ -376,6 +381,119 @@ void testPackedBytesRejectUnsupportedDtype(void) {
     ASSERT_EXITS_WITH_FAILURE(packedMetadataBytes(SYM_INT32, 1));
 }
 
+/* ---- bfpSweepConfigFromEnv (spec §3.1) ---------------------------------- */
+
+static const char *const kBfpKnobs[] = {
+    "BFP_MANTISSA_BITS", "BFP_EXPONENT_BITS", "BFP_WEIGHT_BLOCK", "BFP_WIRE_BLOCK",
+    "BFP_MATH",          "BFP_GRADS",         "BFP_STATE",        "BFP_ROUNDING"};
+static const char *const kLegacyKnobs[] = {"SYM_BITS",      "SYM_WIRES",  "WEIGHT_DTYPE",
+                                           "GROUP_MODE",    "GROUP_SIZE", "SYM_ROUNDING",
+                                           "ODTS_ROUNDTRIP"};
+
+static void clearSweepEnv(void) {
+    for (size_t i = 0; i < sizeof(kBfpKnobs) / sizeof(kBfpKnobs[0]); i++) {
+        unsetenv(kBfpKnobs[i]);
+    }
+    for (size_t i = 0; i < sizeof(kLegacyKnobs) / sizeof(kLegacyKnobs[0]); i++) {
+        unsetenv(kLegacyKnobs[i]);
+    }
+}
+
+void testSweepConfigDefaults(void) {
+    clearSweepEnv();
+    bfpSweepConfig_t c;
+    TEST_ASSERT_NULL(bfpSweepConfigFromEnv(&c));
+    TEST_ASSERT_EQUAL_UINT8(8, c.mantissaBits);
+    TEST_ASSERT_EQUAL_UINT8(8, c.exponentBits);
+    TEST_ASSERT_EQUAL_INT(GROUP_MODE_TENSOR, c.weightMode);
+    TEST_ASSERT_EQUAL_INT(WIRE_BLOCK_FLOAT, c.wireMode);
+    TEST_ASSERT_EQUAL_INT(BFP_MATH_NATIVE, c.math);
+    TEST_ASSERT_FALSE(c.bfpGrads);
+    TEST_ASSERT_FALSE(c.bfpState);
+    TEST_ASSERT_EQUAL_INT(BFP_ROUNDING_SR, c.rounding);
+    TEST_ASSERT_EQUAL_UINT(0u, c.ignoredLegacyKnobs);
+    TEST_ASSERT_EQUAL_STRING("tensor", c.weightBlockStr);
+    TEST_ASSERT_EQUAL_STRING("float", c.wireBlockStr);
+}
+
+void testSweepConfigParsesTheAnchorConfig(void) {
+    clearSweepEnv();
+    setenv("BFP_WEIGHT_BLOCK", "32", 1);
+    setenv("BFP_WIRE_BLOCK", "16", 1);
+    setenv("BFP_MANTISSA_BITS", "6", 1);
+    setenv("BFP_EXPONENT_BITS", "8", 1);
+    setenv("BFP_MATH", "fq", 1);
+    setenv("BFP_GRADS", "1", 1);
+    setenv("BFP_STATE", "1", 1);
+    setenv("BFP_ROUNDING", "det", 1);
+    bfpSweepConfig_t c;
+    TEST_ASSERT_NULL(bfpSweepConfigFromEnv(&c));
+    TEST_ASSERT_EQUAL_INT(GROUP_MODE_SIZE, c.weightMode);
+    TEST_ASSERT_EQUAL_INT(32, c.weightSize);
+    TEST_ASSERT_EQUAL_INT(WIRE_BLOCK_SIZE, c.wireMode);
+    TEST_ASSERT_EQUAL_INT(16, c.wireSize);
+    TEST_ASSERT_EQUAL_UINT8(6, c.mantissaBits);
+    TEST_ASSERT_EQUAL_INT(BFP_MATH_FQ, c.math);
+    TEST_ASSERT_TRUE(c.bfpGrads);
+    TEST_ASSERT_TRUE(c.bfpState);
+    TEST_ASSERT_EQUAL_INT(BFP_ROUNDING_DET, c.rounding);
+    TEST_ASSERT_EQUAL_STRING("32", c.weightBlockStr);
+    TEST_ASSERT_EQUAL_STRING("16", c.wireBlockStr);
+    setenv("BFP_WEIGHT_BLOCK", "channel", 1);
+    setenv("BFP_WIRE_BLOCK", "tensor", 1);
+    TEST_ASSERT_NULL(bfpSweepConfigFromEnv(&c));
+    TEST_ASSERT_EQUAL_INT(GROUP_MODE_CHANNEL, c.weightMode);
+    TEST_ASSERT_EQUAL_INT(WIRE_BLOCK_TENSOR, c.wireMode);
+    clearSweepEnv();
+}
+
+/* Every invalid value names ITS knob in the message (the trainer prints it). */
+void testSweepConfigRejectsEachInvalidValue(void) {
+    static const char *const bad[][2] = {
+        {"BFP_MANTISSA_BITS", "1"}, {"BFP_MANTISSA_BITS", "17"},  {"BFP_MANTISSA_BITS", "x"},
+        {"BFP_EXPONENT_BITS", "1"}, {"BFP_EXPONENT_BITS", "9"},   {"BFP_WEIGHT_BLOCK", "0"},
+        {"BFP_WEIGHT_BLOCK", "-4"}, {"BFP_WEIGHT_BLOCK", "chan"}, {"BFP_WIRE_BLOCK", "0"},
+        {"BFP_WIRE_BLOCK", "fp32"}, {"BFP_MATH", "fake"},         {"BFP_GRADS", "2"},
+        {"BFP_STATE", "yes"},       {"BFP_ROUNDING", "sr_half"},
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        clearSweepEnv();
+        setenv(bad[i][0], bad[i][1], 1);
+        bfpSweepConfig_t c;
+        const char *err = bfpSweepConfigFromEnv(&c);
+        TEST_ASSERT_NOT_NULL_MESSAGE(err, bad[i][0]);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, bad[i][0]), err);
+    }
+    clearSweepEnv();
+}
+
+void testSweepConfigStateRequiresGrads(void) {
+    clearSweepEnv();
+    setenv("BFP_STATE", "1", 1);
+    bfpSweepConfig_t c;
+    const char *err = bfpSweepConfigFromEnv(&c);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NOT_NULL(strstr(err, "BFP_STATE"));
+    TEST_ASSERT_NOT_NULL(strstr(err, "BFP_GRADS"));
+    clearSweepEnv();
+}
+
+void testSweepConfigFlagsEachLegacyKnobWithoutFailing(void) {
+    static const unsigned bits[] = {LEGACY_KNOB_SYM_BITS,      LEGACY_KNOB_SYM_WIRES,
+                                    LEGACY_KNOB_WEIGHT_DTYPE,  LEGACY_KNOB_GROUP_MODE,
+                                    LEGACY_KNOB_GROUP_SIZE,    LEGACY_KNOB_SYM_ROUNDING,
+                                    LEGACY_KNOB_ODTS_ROUNDTRIP};
+    for (size_t i = 0; i < sizeof(kLegacyKnobs) / sizeof(kLegacyKnobs[0]); i++) {
+        clearSweepEnv();
+        setenv(kLegacyKnobs[i], "1", 1);
+        bfpSweepConfig_t c;
+        TEST_ASSERT_NULL_MESSAGE(bfpSweepConfigFromEnv(&c), kLegacyKnobs[i]);
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(bits[i], c.ignoredLegacyKnobs, kLegacyKnobs[i]);
+        TEST_ASSERT_EQUAL_UINT8(8, c.mantissaBits); /* nothing else changed */
+    }
+    clearSweepEnv();
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testResolveGroupShapeTensorModeIsPerTensor);
@@ -414,5 +532,10 @@ int main(void) {
     RUN_TEST(testPackedPayloadBytesMatchesFrameworkAccounting);
     RUN_TEST(testPackedMetadataBytesPerDtype);
     RUN_TEST(testPackedBytesRejectUnsupportedDtype);
+    RUN_TEST(testSweepConfigDefaults);
+    RUN_TEST(testSweepConfigParsesTheAnchorConfig);
+    RUN_TEST(testSweepConfigRejectsEachInvalidValue);
+    RUN_TEST(testSweepConfigStateRequiresGrads);
+    RUN_TEST(testSweepConfigFlagsEachLegacyKnobWithoutFailing);
     return UNITY_END();
 }

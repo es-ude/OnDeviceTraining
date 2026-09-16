@@ -1,7 +1,10 @@
 #define SOURCE_FILE "param_gate"
 
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "Common.h"
 #include "Quantization.h"
@@ -186,4 +189,144 @@ size_t packedMetadataBytes(qtype_t type, size_t numGroups) {
         PRINT_ERROR("packedMetadataBytes: no sweep accounting for %s", quantTypeToString(type));
         exit(1);
     }
+}
+
+/* strtol with full-consumption + range check; false on any junk. */
+static bool parseIntStrict(const char *s, long lo, long hi, long *out) {
+    if (s == NULL || s[0] == '\0') {
+        return false;
+    }
+    char *end = NULL;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (errno != 0 || *end != '\0' || v < lo || v > hi) {
+        return false;
+    }
+    *out = v;
+    return true;
+}
+
+static const char *envOrEmpty(const char *name) {
+    const char *v = getenv(name);
+    return (v != NULL) ? v : "";
+}
+
+const char *bfpSweepConfigFromEnv(bfpSweepConfig_t *out) {
+    *out = (bfpSweepConfig_t){.mantissaBits = 8,
+                              .exponentBits = 8,
+                              .weightMode = GROUP_MODE_TENSOR,
+                              .weightSize = 0,
+                              .wireMode = WIRE_BLOCK_FLOAT,
+                              .wireSize = 0,
+                              .math = BFP_MATH_NATIVE,
+                              .bfpGrads = false,
+                              .bfpState = false,
+                              .rounding = BFP_ROUNDING_SR,
+                              .ignoredLegacyKnobs = 0u};
+    strncpy(out->weightBlockStr, "tensor", sizeof(out->weightBlockStr));
+    strncpy(out->wireBlockStr, "float", sizeof(out->wireBlockStr));
+
+    const char *s;
+    long v;
+    s = envOrEmpty("BFP_MANTISSA_BITS");
+    if (s[0] != '\0') {
+        if (!parseIntStrict(s, 2, 16, &v)) {
+            return "BFP_MANTISSA_BITS must be an integer in [2, 16]";
+        }
+        out->mantissaBits = (uint8_t)v;
+    }
+    s = envOrEmpty("BFP_EXPONENT_BITS");
+    if (s[0] != '\0') {
+        if (!parseIntStrict(s, 2, 8, &v)) {
+            return "BFP_EXPONENT_BITS must be an integer in [2, 8]";
+        }
+        out->exponentBits = (uint8_t)v;
+    }
+    s = envOrEmpty("BFP_WEIGHT_BLOCK");
+    if (s[0] != '\0') {
+        if (strcmp(s, "tensor") == 0) {
+            out->weightMode = GROUP_MODE_TENSOR;
+        } else if (strcmp(s, "channel") == 0) {
+            out->weightMode = GROUP_MODE_CHANNEL;
+        } else if (parseIntStrict(s, 1, INT_MAX, &v)) {
+            out->weightMode = GROUP_MODE_SIZE;
+            out->weightSize = (int)v;
+        } else {
+            return "BFP_WEIGHT_BLOCK must be tensor, channel, or a positive integer";
+        }
+        strncpy(out->weightBlockStr, s, sizeof(out->weightBlockStr) - 1);
+        out->weightBlockStr[sizeof(out->weightBlockStr) - 1] = '\0';
+    }
+    s = envOrEmpty("BFP_WIRE_BLOCK");
+    if (s[0] != '\0') {
+        if (strcmp(s, "float") == 0) {
+            out->wireMode = WIRE_BLOCK_FLOAT;
+        } else if (strcmp(s, "tensor") == 0) {
+            out->wireMode = WIRE_BLOCK_TENSOR;
+        } else if (parseIntStrict(s, 1, INT_MAX, &v)) {
+            out->wireMode = WIRE_BLOCK_SIZE;
+            out->wireSize = (int)v;
+        } else {
+            return "BFP_WIRE_BLOCK must be float, tensor, or a positive integer";
+        }
+        strncpy(out->wireBlockStr, s, sizeof(out->wireBlockStr) - 1);
+        out->wireBlockStr[sizeof(out->wireBlockStr) - 1] = '\0';
+    }
+    s = envOrEmpty("BFP_MATH");
+    if (s[0] != '\0') {
+        if (strcmp(s, "native") == 0) {
+            out->math = BFP_MATH_NATIVE;
+        } else if (strcmp(s, "fq") == 0) {
+            out->math = BFP_MATH_FQ;
+        } else {
+            return "BFP_MATH must be native or fq";
+        }
+    }
+    s = envOrEmpty("BFP_GRADS");
+    if (s[0] != '\0') {
+        if (!parseIntStrict(s, 0, 1, &v)) {
+            return "BFP_GRADS must be 0 or 1";
+        }
+        out->bfpGrads = (v == 1);
+    }
+    s = envOrEmpty("BFP_STATE");
+    if (s[0] != '\0') {
+        if (!parseIntStrict(s, 0, 1, &v)) {
+            return "BFP_STATE must be 0 or 1";
+        }
+        out->bfpState = (v == 1);
+    }
+    if (out->bfpState && !out->bfpGrads) {
+        return "BFP_STATE=1 requires BFP_GRADS=1 (the storage ladder is weights -> +grads -> "
+               "+state)";
+    }
+    s = envOrEmpty("BFP_ROUNDING");
+    if (s[0] != '\0') {
+        if (strcmp(s, "sr") == 0) {
+            out->rounding = BFP_ROUNDING_SR;
+        } else if (strcmp(s, "det") == 0) {
+            out->rounding = BFP_ROUNDING_DET;
+        } else {
+            return "BFP_ROUNDING must be sr or det";
+        }
+    }
+
+    static const struct {
+        const char *name;
+        unsigned bit;
+    } legacy[] = {
+        {"SYM_BITS", LEGACY_KNOB_SYM_BITS},
+        {"SYM_WIRES", LEGACY_KNOB_SYM_WIRES},
+        {"WEIGHT_DTYPE", LEGACY_KNOB_WEIGHT_DTYPE},
+        {"GROUP_MODE", LEGACY_KNOB_GROUP_MODE},
+        {"GROUP_SIZE", LEGACY_KNOB_GROUP_SIZE},
+        {"SYM_ROUNDING", LEGACY_KNOB_SYM_ROUNDING},
+        {"ODTS_ROUNDTRIP", LEGACY_KNOB_ODTS_ROUNDTRIP},
+    };
+    for (size_t i = 0; i < sizeof(legacy) / sizeof(legacy[0]); i++) {
+        if (envOrEmpty(legacy[i].name)[0] != '\0') {
+            out->ignoredLegacyKnobs |= legacy[i].bit;
+        }
+    }
+    return NULL;
 }

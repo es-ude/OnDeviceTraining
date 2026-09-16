@@ -49,8 +49,13 @@ from examples._shared.log_schema import RunLog, load_log  # noqa: E402
 # sym16 never ran and sym10/sym6 were omitted, so those rows appended in dict order and
 # scrambled the table + color ramp). sym8cos/sym4cos are LR-schedule variants (memory-
 # identical to sym8/sym4) kept here so they order deterministically instead of appending.
+# adamw (optimizer variant of float), sym8w (full-SYM wires), and sym8det/sym6det/sym4det
+# (#279 deterministic-rounding baselines) were the same kind of appended omission --
+# memory-identical to their base config -- and are listed here for the same reason
+# (found by test_run_matrix_configs.py's five-consumer contract, PR7).
 CONFIG_ORDER = [
-    "float", "sym12", "sym10", "sym8", "sym6", "sym4", "sym8cos", "sym4cos",
+    "float", "adamw", "sym12", "sym10", "sym8", "sym8w", "sym6", "sym4",
+    "sym8cos", "sym4cos", "sym8det", "sym6det", "sym4det",
     # #300 granularity axis. The rows above are per-TENSOR; these are the
     # per-channel / fixed-group variants, widest-first and coarsest-to-finest
     # within each width so the metadata surcharge reads monotonically downward.

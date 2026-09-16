@@ -195,8 +195,11 @@ def plot_anomaly_score_hist(
 # ---------------------------------------------------------------------------
 
 # Real run_matrix.py sweep set (#322 — was drifted: sym16 never ran, sym10/sym6 missing).
+# adamw/sym8w/sym8det/sym6det/sym4det — keep in sync with CONFIG_ORDER in
+# compare_memory.py (found by test_run_matrix_configs.py's five-consumer contract, PR7).
 _MEM_CONFIG_ORDER = [
-    "float", "sym12", "sym10", "sym8", "sym6", "sym4", "sym8cos", "sym4cos",
+    "float", "adamw", "sym12", "sym10", "sym8", "sym8w", "sym6", "sym4",
+    "sym8cos", "sym4cos", "sym8det", "sym6det", "sym4det",
     # #300 granularity axis — keep in sync with CONFIG_ORDER in compare_memory.py.
     "sym6pc", "sym6g64", "sym6g32",
     "sym4pc", "sym4g64", "sym4g32",

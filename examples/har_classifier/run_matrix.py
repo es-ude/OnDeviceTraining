@@ -3,12 +3,13 @@
 Runs a config matrix x seeds. Each run invokes the appropriate trainer binary
 with per-run env and collects one extended RunLog JSON under ``logs/``.
 
-THREE BINARIES, not one MODE-switched binary: ``train_c_har_classifier`` (FLOAT32),
-``train_c_har_classifier_sym`` (packed SYM@x weights, x = SYM_BITS), and
-``train_c_har_classifier_adamw`` (AdamW, ignores MOMENTUM). The SYM configs are
-the SAME binary at different packed widths. LR is left to each binary's
-per-config default (float/SYM default LR=0.01, adamw defaults LR=0.001);
-momentum 0.9 (adamw ignores it).
+FOUR BINARIES, not one MODE-switched binary: ``train_c_har_classifier`` (FLOAT32),
+``train_c_har_classifier_sym`` (packed SYM@x weights, x = SYM_BITS),
+``train_c_har_classifier_adamw`` (AdamW, ignores MOMENTUM), and
+``train_c_har_classifier_bfp`` (block floating point, epic #410 PR7). The SYM
+configs are the SAME binary at different packed widths. LR is left to each
+binary's per-config default (float/SYM default LR=0.01, adamw defaults
+LR=0.001); momentum 0.9 (adamw ignores it).
 
 #279 dead-zone A/B: the ``sym<N>`` configs default to seeded SR_HALF_AWAY on the
 packed-SYM param write-back (the dead-zone escape); the ``sym<N>det`` configs
@@ -46,6 +47,49 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
+
+
+def bfp_config_name(env: dict[str, str]) -> str:
+    """The BFP name grammar (spec 2026-09-14 §2): EVERY knob is encoded so --resume
+    can never confuse two numerically different runs:
+      bfp_wb{t|pc|N}_ab{f|t|N}_m{M}_e{E}_x{nat|fq}_g{0|1}_s{0|1}_r{sr|det}_l{const|cos}"""
+    wb = {"tensor": "t", "channel": "pc"}.get(env["BFP_WEIGHT_BLOCK"], env["BFP_WEIGHT_BLOCK"])
+    ab = {"float": "f", "tensor": "t"}.get(env["BFP_WIRE_BLOCK"], env["BFP_WIRE_BLOCK"])
+    x = {"native": "nat", "fq": "fq"}[env["BFP_MATH"]]
+    sched = {"none": "const", "cosine": "cos"}[env["LR_SCHEDULE"]]
+    return (f"bfp_wb{wb}_ab{ab}_m{env['BFP_MANTISSA_BITS']}_e{env['BFP_EXPONENT_BITS']}"
+            f"_x{x}_g{env['BFP_GRADS']}_s{env['BFP_STATE']}_r{env['BFP_ROUNDING']}_l{sched}")
+
+
+def _bfp(**knobs: str) -> tuple[str, dict[str, str]]:
+    env = {"BFP_WEIGHT_BLOCK": "32", "BFP_WIRE_BLOCK": "16", "BFP_MANTISSA_BITS": "6",
+           "BFP_EXPONENT_BITS": "8", "BFP_MATH": "native", "BFP_GRADS": "0", "BFP_STATE": "0",
+           "BFP_ROUNDING": "sr", "LR_SCHEDULE": "none"}
+    env.update(knobs)
+    return ("train_c_har_classifier_bfp", env)
+
+
+# BFP epic PR7 (#410) stage-1 arms: the anchor wb32/ab16/m6/e8 native/sr, then one
+# axis varied per row. abf = FLOAT32 wires (arm A, activations staged per-tensor at
+# the weight widths -- NOT a float arm); xfq = GEMM fake-quant reference (NOT a
+# whole-model twin, see README); g1/s1 = per-tensor BFP grad / momentum storage.
+_BFP_STAGE1 = [
+    _bfp(),
+    _bfp(BFP_WEIGHT_BLOCK="tensor"),
+    _bfp(BFP_WEIGHT_BLOCK="channel"),
+    _bfp(BFP_WEIGHT_BLOCK="8"),
+    _bfp(BFP_WIRE_BLOCK="float"),
+    _bfp(BFP_WIRE_BLOCK="tensor"),
+    _bfp(BFP_WIRE_BLOCK="32"),
+    _bfp(BFP_MANTISSA_BITS="4"),
+    _bfp(BFP_MANTISSA_BITS="8"),
+    _bfp(BFP_EXPONENT_BITS="4"),
+    _bfp(BFP_ROUNDING="det"),
+    _bfp(BFP_MATH="fq"),
+    _bfp(BFP_GRADS="1"),
+    _bfp(BFP_GRADS="1", BFP_STATE="1"),
+]
+
 
 # config name -> (binary, extra per-run env). The FLOAT32 binary ignores SYM_BITS;
 # each SYM config is the same binary at a different packed weight width.
@@ -116,6 +160,7 @@ CONFIGS: dict[str, tuple[str, dict[str, str]]] = {
     "asym6g32": ("train_c_har_classifier_sym",
                  {"SYM_BITS": "6", "WEIGHT_DTYPE": "asym", "GROUP_MODE": "size",
                   "GROUP_SIZE": "32"}),
+    **{bfp_config_name(env): (binary, env) for binary, env in _BFP_STAGE1},
 }
 
 
@@ -293,14 +338,14 @@ def main() -> None:
             except subprocess.CalledProcessError as exc:
                 failures += 1
                 print(
-                    f"[{done:3d}/{total}] {config:8s} seed{seed:<3d} FAILED "
+                    f"[{done:3d}/{total}] {config:42s} seed{seed:<3d} FAILED "
                     f"(exit {exc.returncode})\n{exc.stderr}",
                     file=sys.stderr, flush=True,
                 )
                 continue
             acc_str = f"{acc:.4f}" if acc is not None else "N/A"
             print(
-                f"[{done:3d}/{total}] {config:8s} seed{seed:<3d} "
+                f"[{done:3d}/{total}] {config:42s} seed{seed:<3d} "
                 f"test_acc={acc_str} wall={wall:6.1f}s",
                 flush=True,
             )

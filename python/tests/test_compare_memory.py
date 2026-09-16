@@ -310,3 +310,77 @@ def test_c_python_total_drift_is_rejected():
     bad = _log(params_b=5107, overhead=32, acc=0.89, mcu_total_b=999999)
     with pytest.raises(ValueError, match="mcu_total_b"):
         aggregate({"sym4": {1: bad}})
+
+
+# ---------------------------------------------------------------------------
+# PR7 (BFP sweep): the C harness emits every metadata category under "memory" and
+# an mcu_total_b that already includes them. compare_memory.py must TRUST that
+# total (and verify it) instead of recomputing — the recompute above is the
+# LEGACY path, detected by the absence of memory.group_overhead_b.
+# ---------------------------------------------------------------------------
+_BFP_FIXED = {
+    "params_b": 6832, "group_overhead_b": 300, "grads_b": 40856, "grad_overhead_b": 0,
+    "optstate_analytic_b": 40856, "optstate_overhead_b": 0, "activations_b": 10857,
+    "wire_overhead_b": 906, "io_b": 4632, "pool_backward_b": 8192, "dx_peak_b": 3072,
+}
+
+
+def _bfp_log(*, acc: float, overrides: dict | None = None, c_total: int | None = None) -> RunLog:
+    """A post-PR7 log: memory.storage_dtype present, eleven categories, C total honest."""
+    cats = {**_BFP_FIXED, **(overrides or {})}
+    total = c_total if c_total is not None else sum(cats.values())
+    return {
+        "impl": "c-bfp",
+        "example": "har_classifier",
+        "config": {"epochs": 2, "batch": 64, "lr": 0.01, "seed": 1, "shuffle_seed": 1,
+                   "weight_dtype": "bfp", "group_overhead_b": cats["group_overhead_b"]},
+        "epochs": [
+            {"epoch": 0, "step_losses": [1.0], "train_loss": 1.0,
+             "val_loss": 0.9, "val_acc": 0.5, "wall_s": 1.0},
+            {"epoch": 1, "step_losses": [0.5], "train_loss": 0.5,
+             "val_loss": 0.4, "val_acc": 0.8, "wall_s": 1.0},
+        ],
+        "final": {"test_loss": 0.4, "test_acc": acc, "test_auc": None},
+        "memory": {
+            "storage_dtype": "bfp", "dataset_b": 50877204, "params_grads_b": 1, "optstate_b": 1,
+            **cats, "mcu_total_b": total,
+            "heap_peak_b": 51138367, "stack_peak_b": 40000, "rss_peak_kb": 60608,
+            "reconciliation_gap_b": 51138367 - total,
+        },
+    }
+
+
+def test_eleven_categories_sum_to_the_c_total_for_post_pr7_logs():
+    runs = {"bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst": {1: _bfp_log(acc=0.9)}}
+    stats = aggregate(runs)["per_config"]["bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst"]["stats"]
+    assert len(CATEGORIES) == 11
+    assert stats["mcu_total_b"]["mean"] == sum(_BFP_FIXED.values())
+    assert stats["mcu_total_b"]["mean"] == sum(stats[k]["mean"] for k in CATEGORIES)
+    assert stats["wire_overhead_b"]["mean"] == 906
+    assert stats["reconciliation_gap_b"]["mean"] == 51138367 - sum(_BFP_FIXED.values())
+
+
+def test_post_pr7_c_total_drift_is_loud():
+    runs = {"bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst": {1: _bfp_log(acc=0.9, c_total=12345)}}
+    with pytest.raises(ValueError, match="mcu_total_b drift"):
+        aggregate(runs)
+
+
+def test_legacy_log_still_takes_the_recompute_path():
+    """A pre-PR7 log (no memory.group_overhead_b) keeps its seven-category recompute."""
+    runs = {"sym4g32": {1: _log(params_b=5107, overhead=1216, acc=0.8976)}}
+    stats = aggregate(runs)["per_config"]["sym4g32"]["stats"]
+    assert stats["mcu_total_b"]["mean"] == 5107 + sum(_FIXED.values()) + 1216
+    for k in ("grad_overhead_b", "optstate_overhead_b", "wire_overhead_b"):
+        assert stats[k]["mean"] == 0
+
+
+def test_bfp_configs_are_ordered_and_grouped_with_plotting():
+    from examples.har_classifier.compare_memory import CONFIG_ORDER
+    from examples._shared import plotting
+    bfp = [c for c in CONFIG_ORDER if c.startswith("bfp_")]
+    assert bfp[0] == "bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst"
+    assert len(bfp) == 14
+    assert plotting._MEM_CONFIG_ORDER == CONFIG_ORDER
+    assert plotting._MEM_CATEGORIES == CATEGORIES
+    assert set(plotting._MEM_CAT_COLORS) == set(CATEGORIES)

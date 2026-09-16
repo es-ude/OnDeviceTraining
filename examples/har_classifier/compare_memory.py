@@ -19,6 +19,9 @@ INTEGRITY (this is the whole point of the example, so it is enforced here):
   it is up to a 24% surcharge on the weights at 4 bits (#300).
 * The reconciliation gap (heap_peak_b - mcu_total_b, ~= the host-resident dataset
   the MCU would stream) is reported as-is, never massaged.
+* Since PR7 the C harness includes every metadata category in ``mcu_total_b``;
+  legacy logs are detected by the absence of ``memory.group_overhead_b`` and
+  recomputed as before.
 * "Convergence" (did train loss descend) is reported as k/N across seeds — a
   coarse config that fails to descend is a recorded finding, not a dropped run.
 
@@ -55,11 +58,30 @@ CONFIG_ORDER = [
     "sym4pc", "sym4g64", "sym4g32",
     "asym6", "asym6pc", "asym6g64", "asym6g32",
     "asym4", "asym4pc", "asym4g64", "asym4g32",
+    # BFP epic PR7 (#410): anchor first, then one axis per row -- weight block, wire
+    # block, mantissa, exponent, rounding, GEMM fake-quant twin, +grads, +state.
+    "bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst",
+    "bfp_wbt_ab16_m6_e8_xnat_g0_s0_rsr_lconst",
+    "bfp_wbpc_ab16_m6_e8_xnat_g0_s0_rsr_lconst",
+    "bfp_wb8_ab16_m6_e8_xnat_g0_s0_rsr_lconst",
+    "bfp_wb32_abf_m6_e8_xnat_g0_s0_rsr_lconst",
+    "bfp_wb32_abt_m6_e8_xnat_g0_s0_rsr_lconst",
+    "bfp_wb32_ab32_m6_e8_xnat_g0_s0_rsr_lconst",
+    "bfp_wb32_ab16_m4_e8_xnat_g0_s0_rsr_lconst",
+    "bfp_wb32_ab16_m8_e8_xnat_g0_s0_rsr_lconst",
+    "bfp_wb32_ab16_m6_e4_xnat_g0_s0_rsr_lconst",
+    "bfp_wb32_ab16_m6_e8_xnat_g0_s0_rdet_lconst",
+    "bfp_wb32_ab16_m6_e8_xfq_g0_s0_rsr_lconst",
+    "bfp_wb32_ab16_m6_e8_xnat_g1_s0_rsr_lconst",
+    "bfp_wb32_ab16_m6_e8_xnat_g1_s1_rsr_lconst",
 ]
 
 # Analytic MCU categories, in report order. mcu_total_b is their sum.
-CATEGORIES = ["params_b", "group_overhead_b", "grads_b", "optstate_analytic_b", "activations_b",
+CATEGORIES = ["params_b", "group_overhead_b", "grads_b", "grad_overhead_b",
+              "optstate_analytic_b", "optstate_overhead_b", "activations_b", "wire_overhead_b",
               "io_b", "pool_backward_b", "dx_peak_b"]
+# Categories that exist only since PR7 (BFP sweep); absent in legacy logs => 0.
+PR7_CATEGORIES = ("grad_overhead_b", "optstate_overhead_b", "wire_overhead_b")
 
 # Scalars aggregated per config (mean +/- std over seeds).
 SCALARS = [
@@ -67,8 +89,11 @@ SCALARS = [
     "params_b",
     "group_overhead_b",
     "grads_b",
+    "grad_overhead_b",
     "optstate_analytic_b",
+    "optstate_overhead_b",
     "activations_b",
+    "wire_overhead_b",
     "io_b",
     "pool_backward_b",
     "dx_peak_b",
@@ -199,25 +224,43 @@ def _run_scalars(log: RunLog) -> dict[str, float]:
     out: dict[str, float] = {
         "test_acc": float(final["test_acc"]) if final.get("test_acc") is not None else float("nan"),
         "wall_s": float(sum(e["wall_s"] for e in log.get("epochs", []))),
-        # Group scale/zero-point metadata is resident on-device RAM, but the C
-        # harness derives it from the post-requantize param tensors and emits it
-        # under "config", NOT in the memory report — so it must be picked up
-        # here or the granularity axis vanishes from the summary. Absent in
-        # pre-#300 logs (float/sym8 baselines) => 0.
-        "group_overhead_b": float(log["config"].get("group_overhead_b", 0)),
     }
+    post_pr7 = "group_overhead_b" in mem  # PR7: the C total already includes every category
+    if post_pr7:
+        for key in SCALARS:
+            if key in out:
+                continue
+            out[key] = float(mem[key])
+        c_total = float(mem["mcu_total_b"])
+        analytic = sum(out[k] for k in CATEGORIES)
+        if analytic != c_total:
+            raise ValueError(
+                f"mcu_total_b drift: mem_instrument.c reported {c_total:.0f} but its eleven "
+                f"categories sum to {analytic:.0f}. The C harness and compare_memory.py disagree "
+                f"about the MCU model — reconcile them, do not paper over the gap."
+            )
+        return out
+    # LEGACY (pre-PR7) log: metadata lives under config, the C total omits it.
+    # Group scale/zero-point metadata is resident on-device RAM, but the pre-PR7 C
+    # harness derived it from the post-requantize param tensors and emitted it
+    # under "config", NOT in the memory report — so it must be picked up here or
+    # the granularity axis vanishes from the summary. Absent in pre-#300 logs
+    # (float/sym8 baselines) => 0. The three PR7-only metadata categories did not
+    # exist yet, so they are 0 by definition.
+    out["group_overhead_b"] = float(log["config"].get("group_overhead_b", 0))
+    for key in PR7_CATEGORIES:
+        out[key] = 0.0
     for key in SCALARS:
         if key in out or key == "mcu_total_b":
             continue
         out[key] = float(mem[key])
-
-    # mem_instrument.c sums the SEVEN analytic categories and knows nothing about
-    # the metadata block, so mcu_total_b is recomputed here to keep the headline
-    # total equal to the breakdown row. Cross-check the C value against the
-    # categories first: a mismatch means harness and aggregator have drifted, and
+    # The pre-PR7 mem_instrument.c summed the SEVEN analytic categories and knew
+    # nothing about the metadata block, so mcu_total_b is recomputed here to keep
+    # the headline total equal to the breakdown row. Cross-check the C value against
+    # the categories first: a mismatch means harness and aggregator have drifted, and
     # silently preferring either number would corrupt every headline claim.
     c_total = float(mem["mcu_total_b"])
-    analytic = sum(out[k] for k in CATEGORIES if k != "group_overhead_b")
+    analytic = sum(out[k] for k in CATEGORIES if k not in ("group_overhead_b", *PR7_CATEGORIES))
     if analytic != c_total:
         raise ValueError(
             f"mcu_total_b drift: mem_instrument.c reported {c_total:.0f} but its analytic "
@@ -351,6 +394,9 @@ def print_table(agg: dict, min_seeds: int) -> None:
     present = [c for c in CONFIG_ORDER if c in per_config] + [
         c for c in per_config if c not in CONFIG_ORDER
     ]
+    # The BFP names encode every knob (41 chars); a fixed 8-wide column would
+    # overflow and misalign every row after it.
+    cw = max(8, max(len(c) for c in present))
 
     # Trip on the MINIMUM seed count across configs, not the max: a single well-
     # seeded config must NOT suppress the warning for an under-seeded one (the SYM
@@ -370,7 +416,7 @@ def print_table(agg: dict, min_seeds: int) -> None:
     print("HAR memory / accuracy sweep — per-config mean +/- std over seeds")
     print("=" * 92)
     cols = [
-        ("config", lambda c: c, 8, "s"),
+        ("config", lambda c: c, cw, "s"),
         ("seeds", lambda c: str(per_config[c]["n_seeds"]), 6, "s"),
         ("conv", lambda c: f"{per_config[c]['converged_k']}/{per_config[c]['n_seeds']}", 6, "s"),
         ("test_acc", lambda c: _pm(per_config[c]["stats"]["test_acc"], ".4f"), 17, "s"),
@@ -392,15 +438,21 @@ def print_table(agg: dict, min_seeds: int) -> None:
           "(the loop streams the macro-batch one sample at a time):")
     cat_labels = {
         "params_b": "params", "group_overhead_b": "grp_meta", "grads_b": "grads",
-        "optstate_analytic_b": "optstate", "activations_b": "activations", "io_b": "io",
-        "pool_backward_b": "pool_bwd", "dx_peak_b": "dx_peak",
+        "grad_overhead_b": "grad_meta", "optstate_analytic_b": "optstate",
+        "optstate_overhead_b": "opt_meta", "activations_b": "activations",
+        "wire_overhead_b": "wire_meta", "io_b": "io", "pool_backward_b": "pool_bwd",
+        "dx_peak_b": "dx_peak",
     }
-    chdr = f"{'config':>8}" + "".join(f"{cat_labels[k]:>14}" for k in CATEGORIES) + f"{'mcu_total':>14}"
+    # PR7-only metadata columns appear only when some config has a nonzero value, so
+    # float/SYM tables stay eight columns. mcu_total is still the full eleven-sum.
+    shown = [k for k in CATEGORIES
+             if k not in PR7_CATEGORIES or any(per_config[c]["stats"][k]["mean"] for c in present)]
+    chdr = f"{'config':>{cw}}" + "".join(f"{cat_labels[k]:>14}" for k in shown) + f"{'mcu_total':>14}"
     print(chdr)
     print("-" * len(chdr))
     for c in present:
         st = per_config[c]["stats"]
-        row = f"{c:>8}" + "".join(f"{st[k]['mean']:>14.0f}" for k in CATEGORIES)
+        row = f"{c:>{cw}}" + "".join(f"{st[k]['mean']:>14.0f}" for k in shown)
         row += f"{st['mcu_total_b']['mean']:>14.0f}"
         print(row)
 
@@ -408,7 +460,7 @@ def print_table(agg: dict, min_seeds: int) -> None:
     if comparisons:
         print("\nvs FLOAT32 (paired by seed):")
         chdr = (
-            f"{'config':>8}{'weight_drop%':>14}{'mcu_total_drop%':>16}"
+            f"{'config':>{cw}}{'weight_drop%':>14}{'mcu_total_drop%':>16}"
             f"{'acc_gap':>10}{'keeps_up(<=1pt)':>17}"
         )
         print(chdr)
@@ -422,7 +474,7 @@ def print_table(agg: dict, min_seeds: int) -> None:
             keeps = (f"{cm['acc_keeps_up_k']:>10}/{cm['n_pairs']:<6}"
                      if cm["acc_keeps_up_k"] is not None else f"{'n/a':>10}{'':<7}")
             print(
-                f"{c:>8}{cm['weight_bytes_drop_pct']:>13.1f}%{cm['mcu_total_drop_pct']:>15.1f}%"
+                f"{c:>{cw}}{cm['weight_bytes_drop_pct']:>13.1f}%{cm['mcu_total_drop_pct']:>15.1f}%"
                 f"{acc}{keeps}"
             )
         if any(c in comparisons and comparisons[c].get("acc_suppressed_reason") for c in present):

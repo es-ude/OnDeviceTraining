@@ -202,12 +202,29 @@ _MEM_CONFIG_ORDER = [
     "sym4pc", "sym4g64", "sym4g32",
     "asym6", "asym6pc", "asym6g64", "asym6g32",
     "asym4", "asym4pc", "asym4g64", "asym4g32",
+    # BFP epic PR7 (#410) -- keep in sync with compare_memory.CONFIG_ORDER, pinned by
+    # test_compare_memory.py: anchor first, then one axis per row.
+    "bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst",
+    "bfp_wbt_ab16_m6_e8_xnat_g0_s0_rsr_lconst",
+    "bfp_wbpc_ab16_m6_e8_xnat_g0_s0_rsr_lconst",
+    "bfp_wb8_ab16_m6_e8_xnat_g0_s0_rsr_lconst",
+    "bfp_wb32_abf_m6_e8_xnat_g0_s0_rsr_lconst",
+    "bfp_wb32_abt_m6_e8_xnat_g0_s0_rsr_lconst",
+    "bfp_wb32_ab32_m6_e8_xnat_g0_s0_rsr_lconst",
+    "bfp_wb32_ab16_m4_e8_xnat_g0_s0_rsr_lconst",
+    "bfp_wb32_ab16_m8_e8_xnat_g0_s0_rsr_lconst",
+    "bfp_wb32_ab16_m6_e4_xnat_g0_s0_rsr_lconst",
+    "bfp_wb32_ab16_m6_e8_xnat_g0_s0_rdet_lconst",
+    "bfp_wb32_ab16_m6_e8_xfq_g0_s0_rsr_lconst",
+    "bfp_wb32_ab16_m6_e8_xnat_g1_s0_rsr_lconst",
+    "bfp_wb32_ab16_m6_e8_xnat_g1_s1_rsr_lconst",
 ]
 # MUST stay in sync with CATEGORIES in compare_memory.py: the stacked bar labels each
 # bar with the sum of these, so an omission here silently prints a total that
 # disagrees with mcu_total_b in the summary JSON.
-_MEM_CATEGORIES = ["params_b", "group_overhead_b", "grads_b", "optstate_analytic_b",
-                   "activations_b", "io_b", "pool_backward_b", "dx_peak_b"]
+_MEM_CATEGORIES = ["params_b", "group_overhead_b", "grads_b", "grad_overhead_b",
+                   "optstate_analytic_b", "optstate_overhead_b", "activations_b",
+                   "wire_overhead_b", "io_b", "pool_backward_b", "dx_peak_b"]
 # Okabe-Ito palette, one per analytic category (colorblind-safe, distinguishable).
 _MEM_CAT_COLORS = {
     "params_b": "#0072B2",             # blue   — the category that shrinks
@@ -217,13 +234,22 @@ _MEM_CAT_COLORS = {
     # Validated at its insertion slot: params | THIS | grads.
     "group_overhead_b": "#A6761D",     # brown — group scale/zp metadata (#300)
     "grads_b": "#E69F00",              # orange
+    # PR7 metadata family shares the brown; the segments are told apart by hatch
+    # (below) so the palette stays at eight hues.
+    "grad_overhead_b": "#A6761D",      # brown — packed grad scales/exponents
     "optstate_analytic_b": "#009E73",  # green
+    "optstate_overhead_b": "#A6761D",  # brown — packed optimizer-state metadata
     "activations_b": "#CC79A7",        # pink   — dominates at batch 64
+    "wire_overhead_b": "#A6761D",      # brown — forward-wire exponents + peak dx pair
     "io_b": "#999999",                 # grey
     "pool_backward_b": "#D55E00",      # vermillion — MaxPool argmax backward state (#321)
     "dx_peak_b": "#56B4E9",            # sky blue   — dx ping-pong transient (#321)
 }
-# The weight chart is a TWO-series part-to-whole, not a slice of the 8-category
+# Hatch pattern per PR7 metadata category (drawn in the surface color via
+# edgecolor=bg) so the three brown segments stay distinguishable from each other
+# and from the unhatched group_overhead_b.
+_MEM_CAT_HATCH = {"grad_overhead_b": "//", "optstate_overhead_b": "xx", "wire_overhead_b": ".."}
+# The weight chart is a TWO-series part-to-whole, not a slice of the 11-category
 # stack, so it gets its own validated pair (all checks pass, light AND dark)
 # rather than borrowing two hues tuned for 8-way separation.
 _WEIGHT_SPLIT_COLORS = {"payload": "#0072B2", "metadata": "#D55E00"}
@@ -274,7 +300,8 @@ def plot_peak_ram_stacked_bar(out_path: Path | str, agg: dict, dark: bool = Fals
         ax.bar(x, vals, bottom=bottom, width=0.62,
                # removesuffix, not replace: "pool_backward_b".replace("_b","") also
                # eats the "_b" inside "_backward" and renders as "poolackward".
-               color=_MEM_CAT_COLORS[cat], label=cat.removesuffix("_b"))
+               color=_MEM_CAT_COLORS[cat], label=cat.removesuffix("_b"),
+               hatch=_MEM_CAT_HATCH.get(cat), edgecolor=bg)
         bottom += vals
     for xi, total in zip(x, bottom):
         ax.text(xi, total, f"{total / (1 << 20):.2f}MB", ha="center", va="bottom",
@@ -286,7 +313,7 @@ def plot_peak_ram_stacked_bar(out_path: Path | str, agg: dict, dark: bool = Fals
     ax.set_ylim(0, bottom.max() * 1.12)
     ax.set_title("HAR MCU memory footprint by category (mean over seeds, micro-batch B=1)")
     _mem_apply_theme(fig, ax, bg, fg, grid)
-    leg = ax.legend(fontsize=8, ncol=5, loc="upper center", framealpha=0.3)
+    leg = ax.legend(fontsize=8, ncol=4, loc="upper center", framealpha=0.3)
     for text in leg.get_texts():
         text.set_color(fg)
     fig.tight_layout()

@@ -8,6 +8,7 @@ target_link_libraries(har_mem_instrument PUBLIC
         StorageApi
         MemProfile
         Tensor
+        Quantization
         Optimizer
         CalculateGradsSequential
         TrainingLoopApi
@@ -18,6 +19,7 @@ target_link_libraries(har_mem_instrument PUBLIC
         InferenceApi
         Rounding
         Common
+        examples_shared
 )
 
 add_executable(train_c_har_classifier train_c.c)

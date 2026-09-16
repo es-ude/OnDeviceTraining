@@ -314,8 +314,8 @@ static size_t modelResidentParamBytes(layer_t **model, size_t modelSize) {
  * gradCurr == NULL -- no second dx buffer is EVER allocated (see
  * CalculateGradsSequential.c). There is no ping-pong pair in stage 2 at all;
  * the sole live gradient buffer is the combined CE+Softmax lossGrad seed,
- * shape [NUM_CLASSES]. Reusing memInstrumentHarDxPeakBytes's "2x largest
- * forward wire" formula here would misreport this collapse -- that formula
+ * shape [NUM_CLASSES]. Reusing memInstrumentHarDxPeakBytes's "peak concurrent
+ * dx pair" formula here would misreport this collapse -- that formula
  * prices in a ping-pong that, post-truncation, never happens -- so this is
  * computed directly instead of through the shared (full-model) helper. */
 static size_t dxPeakBytesFrozenHead(size_t microBatch) {
@@ -413,7 +413,7 @@ int main(void) {
     /* Analytic full-model figures, captured BEFORE freeing stage 1. */
     size_t gradsFullB = memInstrumentGradBytes(sgd1);
     size_t optstateFullB = memInstrumentOptStateBytes(sgd1);
-    size_t dxPeakStage1B = memInstrumentHarDxPeakBytes(MICRO_BATCH);
+    size_t dxPeakStage1B = memInstrumentHarDxPeakBytes(MICRO_BATCH, NULL);
     size_t paramsFullB = modelResidentParamBytes(model, MODEL_SIZE);
 
     FILE *fOut = fopen(checkpointPath, "wb");
@@ -556,6 +556,7 @@ int main(void) {
 #ifdef ODT_MEM_PROFILE
     memReport_t report = {0};
     report.sym_bits = -1; /* float binary: no SYM width */
+    report.storage_dtype = "float";
     report.dataset_b = markDataset;
     /* Stage 2's build/optimizer heap deltas (bracketed above, around model2's
      * buildModel/sgdMCreateOptim calls) — stage 1's already-freed footprint is
@@ -566,7 +567,7 @@ int main(void) {
     report.params_b = paramsFrozenB;
     report.grads_b = gradsFrozenB;
     report.optstate_analytic_b = optstateFrozenB;
-    report.activations_b = memInstrumentHarActivationBytes(MICRO_BATCH);
+    report.activations_b = memInstrumentHarActivationBytes(MICRO_BATCH, NULL);
     report.io_b = memInstrumentHarIoBytes(MICRO_BATCH);
     report.pool_backward_b = memInstrumentPoolBackwardBytes(model2, MODEL_SIZE);
     report.dx_peak_b = dxPeakStage2B;

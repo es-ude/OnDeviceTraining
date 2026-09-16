@@ -586,16 +586,17 @@ int main(void) {
 #ifdef ODT_MEM_PROFILE
         memReport_t report = {0};
         report.sym_bits = -1; /* float binary: no SYM width */
+        report.storage_dtype = "float";
         report.dataset_b = markDataset;
         report.params_grads_b = markAfterModel - markBeforeModel;
         report.optstate_b = markAfterOpt - markBeforeOpt;
         report.params_b = memInstrumentParamBytes(sgd);
         report.grads_b = memInstrumentGradBytes(sgd);
         report.optstate_analytic_b = memInstrumentOptStateBytes(sgd);
-        report.activations_b = memInstrumentHarActivationBytes(MICRO_BATCH);
+        report.activations_b = memInstrumentHarActivationBytes(MICRO_BATCH, NULL);
         report.io_b = memInstrumentHarIoBytes(MICRO_BATCH);
         report.pool_backward_b = memInstrumentPoolBackwardBytes(model, MODEL_SIZE);
-        report.dx_peak_b = memInstrumentHarDxPeakBytes(MICRO_BATCH);
+        report.dx_peak_b = memInstrumentHarDxPeakBytes(MICRO_BATCH, NULL);
 
         sample_t *stepSample = getTrainSample(0);
         memStepCtx_t stepCtx = {

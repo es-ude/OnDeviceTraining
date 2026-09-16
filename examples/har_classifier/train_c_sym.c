@@ -959,16 +959,18 @@ int main(void) {
      * follows, so the mutation is inert. */
     memReport_t report = {0};
     report.sym_bits = g_symBits;
+    report.storage_dtype = (g_weightDtype == WEIGHT_DTYPE_ASYM) ? "asym" : "sym";
+    report.group_overhead_b = groupInfo.overheadBytes;
     report.dataset_b = markDataset;
     report.params_grads_b = markAfterModel - markBeforeModel;
     report.optstate_b = markAfterOpt - markBeforeOpt;
     report.params_b = memInstrumentParamBytes(sgd);
     report.grads_b = memInstrumentGradBytes(sgd);
     report.optstate_analytic_b = memInstrumentOptStateBytes(sgd);
-    report.activations_b = memInstrumentHarActivationBytes(MICRO_BATCH);
+    report.activations_b = memInstrumentHarActivationBytes(MICRO_BATCH, NULL);
     report.io_b = memInstrumentHarIoBytes(MICRO_BATCH);
     report.pool_backward_b = memInstrumentPoolBackwardBytes(model, MODEL_SIZE);
-    report.dx_peak_b = memInstrumentHarDxPeakBytes(MICRO_BATCH);
+    report.dx_peak_b = memInstrumentHarDxPeakBytes(MICRO_BATCH, NULL);
 
     sample_t *stepSample = getTrainSample(0);
     memStepCtx_t stepCtx = {

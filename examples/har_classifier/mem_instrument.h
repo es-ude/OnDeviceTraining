@@ -12,12 +12,15 @@
  * #ifdef ODT_MEM_PROFILE so the CI bit-parity build carries zero instrumentation.
  */
 
+#include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 
 #include "CalculateGradsSequential.h"
 #include "MemProfile.h" /* measurePeakStackBytes, memProfileRssPeakKb */
 #include "Optimizer.h"
+#include "Quantization.h"
 #include "StorageApi.h" /* memProfileReset/Mark/CurrentBytes/PeakBytes */
 #include "TrainingLoopApi.h"
 
@@ -26,7 +29,8 @@
  * emitted keys verbatim, so field <-> key names must stay in lockstep with
  * memInstrumentEmitJson. */
 typedef struct memReport {
-    int sym_bits; /* SYM_BITS for the sym binary; -1 for the float binary */
+    int sym_bits;              /* SYM_BITS for the sym binary; -1 for the float binary */
+    const char *storage_dtype; /* "float" | "sym" | "asym" | "bfp" -- every HAR trainer sets it */
 
     /* Instrumented phase marks (memProfileMark deltas over the heap counter). */
     size_t dataset_b;      /* live bytes after initDataSets */
@@ -41,7 +45,15 @@ typedef struct memReport {
     size_t io_b;                /* batched input + one-hot label bytes */
     size_t pool_backward_b;     /* persistent MaxPool argmax-index buffers (backward state, #321) */
     size_t dx_peak_b;           /* worst concurrent dx ping-pong pair during backprop (#321) */
-    size_t mcu_total_b;         /* params+grads+optstate+activations+io+pool_backward+dx_peak */
+    /* Metadata side tables, each its OWN category (integrity rule: never folded
+     * into a payload). group_ = the 8 param tensors' scales/exponents (was
+     * config-only before PR7); grad_/optstate_ = per-tensor packed grads/states
+     * (BFP knobs); wire_ = live forward-wire exponents + the peak dx pair's. */
+    size_t group_overhead_b;
+    size_t grad_overhead_b;
+    size_t optstate_overhead_b;
+    size_t wire_overhead_b;
+    size_t mcu_total_b; /* sum of the eleven analytic categories */
 
     /* Instrumented process-level anchors. */
     size_t heap_peak_b;  /* memProfilePeakBytes() */
@@ -67,16 +79,27 @@ size_t memInstrumentParamBytes(optimizer_t *optim);
 size_t memInstrumentGradBytes(optimizer_t *optim);
 size_t memInstrumentOptStateBytes(optimizer_t *optim);
 
+/* One wire's storage as the trainer resolved it (spec §7.2). NULL profile
+ * arrays = every wire FLOAT32 (the float/SYM/AdamW/finetune trainers). */
+#define HAR_NUM_LAYERS 12
+typedef struct harWireProfile {
+    bool present; /* false = this wire is never allocated (conv1.dx, softmax.dx under CE) */
+    qtype_t type;
+    uint8_t bits;     /* 32 for FLOAT32, mantissaBits for BFP */
+    size_t numGroups; /* 0 for FLOAT32 */
+} harWireProfile_t;
+
 /* HAR-classifier-specific analytic activation / IO sizing for one MICRO-batch.
- * Encodes the fixed 12-layer topology (see mem_instrument.c); identical for the
- * float and the SYM binary because activation WIRES are FLOAT32 in both.
+ * Encodes the fixed 12-layer topology (see mem_instrument.c); the wire dtypes
+ * come from the caller's profile array (NULL = every wire FLOAT32).
  *
  * Pass the MICRO-batch (concurrent samples per forward/backward), NOT the loader
  * macro-batch: trainingBatchDefault streams the macro-batch one sample at a time
  * (loss.md: dimensions[0]=B, today B=1) and accumulates grads at the optimizer,
  * so only one sample's activations are ever live. Passing the macro-batch would
  * over-count activations + IO by that factor. */
-size_t memInstrumentHarActivationBytes(size_t microBatch);
+size_t memInstrumentHarActivationBytes(size_t microBatch,
+                                       const harWireProfile_t out[HAR_NUM_LAYERS]);
 size_t memInstrumentHarIoBytes(size_t microBatch);
 
 /* #321: backward-only on-device state that activations_b/params_b do NOT count.
@@ -84,10 +107,16 @@ size_t memInstrumentHarIoBytes(size_t microBatch);
  *    the backward pass, allocated per-layer at build time). Walks the model for
  *    MAXPOOL1D layers; dtype-aware via calcBytesPerTensor.
  *  - HarDxPeak: the transient dx ping-pong — during backprop gradNext + gradCurr
- *    coexist with every forward wire; the worst concurrent pair is 2x the largest
- *    wire (2x[16,128] FLOAT32 = 16,384 B for HAR). Pass the MICRO-batch. */
+ *    coexist with every forward wire; the worst concurrent PAIR of resolved dx
+ *    wires, payload only (FLOAT32: relu1/pool1 = 2 x [16,128] = 16,384 B for
+ *    HAR). Pass the MICRO-batch.
+ *  - HarWireOverhead: the metadata (group exponents/scales) of the 12 forward
+ *    wires plus that of the same peak dx pair HarDxPeak models; 0 for FLOAT32. */
 size_t memInstrumentPoolBackwardBytes(layer_t **model, size_t modelSize);
-size_t memInstrumentHarDxPeakBytes(size_t microBatch);
+size_t memInstrumentHarDxPeakBytes(size_t microBatch, const harWireProfile_t dx[HAR_NUM_LAYERS]);
+size_t memInstrumentHarWireOverheadBytes(size_t microBatch,
+                                         const harWireProfile_t out[HAR_NUM_LAYERS],
+                                         const harWireProfile_t dx[HAR_NUM_LAYERS]);
 
 /* Everything the stack thunk needs to run one representative training step
  * (zeroGrad -> calculateGradsSequential -> step -> zeroGrad) on one sample. */
@@ -105,11 +134,13 @@ typedef struct memStepCtx {
  * model and momentum state — call it AFTER any output the run must preserve. */
 size_t memInstrumentStackPeakBytes(memStepCtx_t *ctx, size_t stackBytes);
 
-/* Fill mcu_total_b and reconciliation_gap_b from the populated fields. */
+/* Fill mcu_total_b (sum of the eleven categories) and reconciliation_gap_b
+ * from the populated fields. Fails fast if storage_dtype was never set. */
 void memInstrumentFinalize(memReport_t *r);
 
-/* Emit the bare "memory" object body: {"sym_bits": ..., ...}. The caller places
- * it (writes the "memory": key and any surrounding commas). */
+/* Emit the bare "memory" object body: {"storage_dtype": ..., ...}. sym_bits is
+ * written only when storage_dtype is not "bfp". The caller places the object
+ * (writes the "memory": key and any surrounding commas). */
 void memInstrumentEmitJson(FILE *f, const memReport_t *r);
 
 /* Print the reconciliation line to stdout. Integrity: prints the gap as-is. */

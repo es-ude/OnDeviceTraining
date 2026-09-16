@@ -164,7 +164,7 @@
         "Conv1d", "Conv1dTransposed", "MaxPool1d", "AvgPool1d",
         "AdaptiveAvgPool1d", "Dropout", "LayerNorm", "GroupNorm", "Layer",
         "Linear", "QuantizationLayer", "Relu", "Softmax", "Flatten",
-        "Optimizer", "Sgd", "AdamW", "LrScheduler",
+        "Optimizer", "Sgd", "AdamW", "LrScheduler", "BsScheduler",
         "CrossEntropy", "LossFunction", "MSE",
         "Serialize", "Deserialize",
         "OdtHook"

@@ -62,3 +62,19 @@ target_link_libraries(LrScheduler PRIVATE
         Common
         m
 )
+
+add_library(BsScheduler BsScheduler.c)
+target_include_directories(BsScheduler PUBLIC include)
+target_link_libraries(BsScheduler PRIVATE
+        Optimizer
+        DataLoader
+        # #327 PRIVATE-everywhere convention (docs/conventions): Optimizer.h and
+        # DataLoader.h transitively include Layer.h/Tensor.h/Dataset.h/
+        # Quantization.h/Rounding.h; their owners' links are PRIVATE, so this
+        # consumer lists the header-owning targets itself (LrScheduler precedent).
+        Layer
+        Tensor
+        Arithmetic
+        Common
+        m
+)

@@ -48,6 +48,23 @@ add_elastic_ai_unit_test(
 add_dependencies(UnitTestLrScheduler generate_expected_lr_scheduler)
 target_include_directories(UnitTestLrScheduler PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
+        BsScheduler
+        MORE_LIBS
+        Optimizer
+        Sgd
+        DataLoader
+        ArithmeticType
+        # PRIVATE-everywhere convention (#327 precedent): Optimizer.h and
+        # DataLoader.h transitively need Layer.h/Tensor.h/Dataset.h, so the test
+        # binary lists the header-owning targets explicitly too.
+        Layer
+        Tensor
+        Common
+        odt_test_death
+)
+
 set(GEN_ADAMW_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_adamw.h)
 add_custom_command(
         OUTPUT ${GEN_ADAMW_HEADER}

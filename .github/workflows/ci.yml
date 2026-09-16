@@ -526,12 +526,14 @@ jobs:
       - name: Cross-compile core libraries (compile-only, -Werror)
         run: cmake --build --preset arm_cross
 
-  # Stage-1 stack-watermark REPORT (hardening item 6): builds the two
+  # Stage-1 stack-watermark REPORT (hardening item 6): builds the FIVE
   # instrumented har_classifier trainers with ODT_MEM_PROFILE, runs one
   # epoch each, and reports memory.stack_peak_b against the budgets in
   # examples/_shared/check_stack_watermark.py. WARN-ONLY by design: linux
   # budgets are uncalibrated until this job has produced stable peaks;
-  # calibration + --enforce promotion is a dedicated later PR.
+  # calibration + --enforce promotion is a dedicated later PR. The bfp
+  # bucket is uncalibrated on both platforms by design (spec §8) and
+  # prints UNCALIBRATED.
   c-stack-watermark:
     needs: gate
     if: needs.gate.outputs.proceed == 'true'
@@ -565,7 +567,7 @@ jobs:
         run: cmake --preset examples_memprofile
 
       - name: Build instrumented HAR trainers
-        run: cmake --build --preset examples_memprofile --target train_c_har_classifier train_c_har_classifier_sym train_c_har_classifier_adamw train_c_har_classifier_finetune
+        run: cmake --build --preset examples_memprofile --target train_c_har_classifier train_c_har_classifier_sym train_c_har_classifier_adamw train_c_har_classifier_finetune train_c_har_classifier_bfp
 
       - name: Run 1-epoch watermark probes
         run: |
@@ -577,9 +579,11 @@ jobs:
             build/examples_memprofile/examples/har_classifier/train_c_har_classifier_adamw
           STAGE1_EPOCHS=1 STAGE2_EPOCHS=1 SEED=1 LOG_PATH=/tmp/wm_finetune.json \
             build/examples_memprofile/examples/har_classifier/train_c_har_classifier_finetune
+          EPOCHS=1 SEED=1 BFP_WEIGHT_BLOCK=32 BFP_WIRE_BLOCK=16 BFP_MANTISSA_BITS=6 BFP_EXPONENT_BITS=8 LOG_PATH=/tmp/wm_bfp.json \
+            build/examples_memprofile/examples/har_classifier/train_c_har_classifier_bfp
 
       - name: Check stack watermarks (report-only)
-        run: uv run examples/_shared/check_stack_watermark.py --platform linux /tmp/wm_float.json /tmp/wm_sym8.json /tmp/wm_adamw.json /tmp/wm_finetune.json
+        run: uv run examples/_shared/check_stack_watermark.py --platform linux /tmp/wm_float.json /tmp/wm_sym8.json /tmp/wm_adamw.json /tmp/wm_finetune.json /tmp/wm_bfp.json
 
   python-test:
     needs: gate

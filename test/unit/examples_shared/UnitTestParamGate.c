@@ -23,6 +23,10 @@ _Static_assert(
         bool (*)(const tensor_t *, const paramGateExpect_t *, char *, size_t): 1,
         default: 0),
     "paramGateCheck must take (const tensor_t *, const paramGateExpect_t *, char *, size_t)");
+_Static_assert(_Generic((&resolveWireShape),
+                   groupShape_t (*)(size_t, wireBlockSweep_t, int): 1,
+                   default: 0),
+               "resolveWireShape must take (size_t N, wireBlockSweep_t, int)");
 
 void setUp() {}
 void tearDown() {}
@@ -95,6 +99,54 @@ void testResolveGroupShapeGuardIsModeIndependent(void) {
     /* per-tensor mode divides nothing, but the precondition is the function's,
      * not the grouped branches' -- an empty tensor is rejected here too. */
     ASSERT_EXITS_WITH_FAILURE(resolveGroupShape(0, 1, GROUP_MODE_TENSOR, 0));
+}
+
+/* ---- resolveWireShape: the HAR wire table from spec §5, pinned --------- */
+
+void testResolveWireShapeDivisorGroups(void) {
+    groupShape_t gs = resolveWireShape(2048, WIRE_BLOCK_SIZE, 16); /* conv1.out @ ab16 */
+    TEST_ASSERT_EQUAL_size_t(128, gs.numGroups);
+    TEST_ASSERT_EQUAL_size_t(16, gs.groupSize);
+}
+
+void testResolveWireShapeHeadWireFallsBackToPerTensor(void) {
+    groupShape_t gs = resolveWireShape(6, WIRE_BLOCK_SIZE, 16); /* linear.out: 16 !| 6 */
+    TEST_ASSERT_EQUAL_size_t(1, gs.numGroups);
+    TEST_ASSERT_EQUAL_size_t(0, gs.groupSize);
+}
+
+void testResolveWireShapeSizeEqualToWireNormalizesToPerTensor(void) {
+    groupShape_t gs = resolveWireShape(64, WIRE_BLOCK_SIZE, 64); /* flatten.out @ ab64 */
+    TEST_ASSERT_EQUAL_size_t(1, gs.numGroups);
+    TEST_ASSERT_EQUAL_size_t(0, gs.groupSize);
+}
+
+void testResolveWireShapeTensorAndFloatModesArePerTensor(void) {
+    groupShape_t t = resolveWireShape(2048, WIRE_BLOCK_TENSOR, 0);
+    groupShape_t f = resolveWireShape(2048, WIRE_BLOCK_FLOAT, 0);
+    TEST_ASSERT_EQUAL_size_t(1, t.numGroups);
+    TEST_ASSERT_EQUAL_size_t(0, t.groupSize);
+    TEST_ASSERT_EQUAL_size_t(1, f.numGroups);
+    TEST_ASSERT_EQUAL_size_t(0, f.groupSize);
+}
+
+void testResolveWireShapeForwardAndDxResolveIndependently(void) {
+    /* conv2: out = 2048 elements, dx = its INPUT = 1024 elements. */
+    groupShape_t out = resolveWireShape(2048, WIRE_BLOCK_SIZE, 32);
+    groupShape_t dx = resolveWireShape(1024, WIRE_BLOCK_SIZE, 32);
+    TEST_ASSERT_EQUAL_size_t(64, out.numGroups);
+    TEST_ASSERT_EQUAL_size_t(32, dx.numGroups);
+    TEST_ASSERT_EQUAL_size_t(32, out.groupSize);
+    TEST_ASSERT_EQUAL_size_t(32, dx.groupSize);
+}
+
+void testResolveWireShapeRejectsEmptyWire(void) {
+    ASSERT_EXITS_WITH_FAILURE(resolveWireShape(0, WIRE_BLOCK_TENSOR, 0));
+}
+
+void testResolveWireShapeRejectsNonPositiveSize(void) {
+    ASSERT_EXITS_WITH_FAILURE(resolveWireShape(2048, WIRE_BLOCK_SIZE, 0));
+    ASSERT_EXITS_WITH_FAILURE(resolveWireShape(2048, WIRE_BLOCK_SIZE, -8));
 }
 
 /* ---- viewQShape: three arms + fail-fast default ---------------------------- */
@@ -292,6 +344,13 @@ int main(void) {
     RUN_TEST(testResolveGroupShapeRejectsEmptyTensor);
     RUN_TEST(testResolveGroupShapeRejectsNonDividingOutCh);
     RUN_TEST(testResolveGroupShapeGuardIsModeIndependent);
+    RUN_TEST(testResolveWireShapeDivisorGroups);
+    RUN_TEST(testResolveWireShapeHeadWireFallsBackToPerTensor);
+    RUN_TEST(testResolveWireShapeSizeEqualToWireNormalizesToPerTensor);
+    RUN_TEST(testResolveWireShapeTensorAndFloatModesArePerTensor);
+    RUN_TEST(testResolveWireShapeForwardAndDxResolveIndependently);
+    RUN_TEST(testResolveWireShapeRejectsEmptyWire);
+    RUN_TEST(testResolveWireShapeRejectsNonPositiveSize);
     RUN_TEST(testViewQShapeSymGrouped);
     RUN_TEST(testViewQShapeAsymPerTensor);
     RUN_TEST(testViewQShapeBfpGroupedReportsMantissaAndExponentBits);

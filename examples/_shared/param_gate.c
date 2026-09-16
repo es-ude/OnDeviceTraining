@@ -43,6 +43,25 @@ groupShape_t resolveGroupShape(size_t N, size_t outCh, groupModeSweep_t mode, in
     return (groupShape_t){.numGroups = numGroups, .groupSize = groupSize};
 }
 
+groupShape_t resolveWireShape(size_t N, wireBlockSweep_t mode, int size) {
+    if (N == 0) {
+        PRINT_ERROR("resolveWireShape: a wire has no elements (N == 0)");
+        exit(1);
+    }
+    if (mode != WIRE_BLOCK_SIZE) {
+        return (groupShape_t){.numGroups = 1, .groupSize = 0};
+    }
+    if (size <= 0) {
+        PRINT_ERROR("resolveWireShape: BFP_WIRE_BLOCK must be a positive block size, got %d", size);
+        exit(1);
+    }
+    size_t g = (size_t)size;
+    if (N % g != 0 || N / g <= 1) {
+        return (groupShape_t){.numGroups = 1, .groupSize = 0}; /* g == N or fallback */
+    }
+    return (groupShape_t){.numGroups = N / g, .groupSize = g};
+}
+
 /* symQConfig_t / asymQConfig_t / bfpQConfig_t share the field NAMES read
  * here but differ in layout, so the qtype decides which struct qConfig
  * points to. Explicit switch, fail-fast default: an "else is SYM" arm would

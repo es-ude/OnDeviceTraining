@@ -62,6 +62,26 @@ typedef struct paramGateExpect {
  * holds by construction for every real weight tensor. */
 groupShape_t resolveGroupShape(size_t N, size_t outCh, groupModeSweep_t mode, int groupSizeEnv);
 
+/* Wire-block policy of the BFP sweep (spec 2026-09-14 §3.2). One knob for ALL
+ * wires; every forward output wire and every dx wire resolves against its OWN
+ * element count, so a layer's out and dx (its input size) may resolve
+ * differently and two wires with equal N always resolve identically (the
+ * packed-transparent layers' grid checks rely on that).
+ *   FLOAT:  caller keeps a FLOAT32 template; returns {1,0} for uniformity.
+ *   TENSOR: {1,0}.
+ *   SIZE g: {N/g, g} when g divides N and N/g > 1; {1,0} when g == N (one
+ *           group IS per-tensor, {1,N} is not a valid spelling); {1,0}
+ *           FALLBACK when g does not divide N -- the HAR head wires (6
+ *           elements) hit this for every int block; callers record it.
+ * Fail-fast (exit 1): N == 0, or size <= 0 under SIZE. */
+typedef enum wireBlockSweep {
+    WIRE_BLOCK_FLOAT,
+    WIRE_BLOCK_TENSOR,
+    WIRE_BLOCK_SIZE
+} wireBlockSweep_t;
+
+groupShape_t resolveWireShape(size_t N, wireBlockSweep_t mode, int size);
+
 /* SYM / ASYM / BFP only; any other dtype fails fast (exit 1) -- it carries no
  * group shape. */
 qShapeView_t viewQShape(const quantization_t *q);

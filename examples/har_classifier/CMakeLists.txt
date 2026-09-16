@@ -367,3 +367,75 @@ target_link_libraries(train_c_har_classifier_sym PRIVATE
         examples_shared
         har_mem_instrument
 )
+
+add_executable(train_c_har_classifier_bfp train_c_bfp.c)
+
+target_link_libraries(train_c_har_classifier_bfp PRIVATE
+        DataLoaderApi
+        DataLoader
+        NPYLoaderApi
+        NPYLoader
+
+        Layer
+
+        Conv1dApi
+        Conv1d
+
+        LinearApi
+        Linear
+
+        ReluApi
+        Relu
+
+        FlattenApi
+        Flatten
+
+        Pool1dApi
+        MaxPool1d
+        AvgPool1d
+
+        ArithmeticType
+
+        QuantizationApi
+        Quantization
+
+        TensorApi
+        Tensor
+        TensorConversion
+        Rounding
+
+        TrainingLoopApi
+        CalculateGradsSequential
+        TrainingBatchDefault
+        TrainingEpochDefault
+        Optimizer
+        LrScheduler
+
+        LossFunction
+        CrossEntropy
+
+        SoftmaxApi
+        Softmax
+
+        Sgd
+        SgdApi
+
+        InferenceApi
+
+        StateDictApi
+        LayerWeightsApi
+        LayerQuant
+        LayerCommon
+        Distributions
+
+        Serialize
+        Deserialize
+        SerialWire
+
+        Common
+        StorageApi
+        RNG
+
+        examples_shared
+        har_mem_instrument
+)

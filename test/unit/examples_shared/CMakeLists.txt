@@ -37,5 +37,6 @@ target_link_libraries(UnitTestParamGate PRIVATE
         Common
         StorageApi
         odt_test_death
+        ArithmeticType
 )
 __register_target_as_unit_test(UnitTestParamGate)

@@ -1,5 +1,6 @@
 #include "param_gate.h"
 
+#include "BfpKernelSupport.h"
 #include "DeathTest.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
@@ -36,6 +37,13 @@ _Static_assert(_Generic((&bfpSweepConfigFromEnv),
                    const char *(*)(bfpSweepConfig_t *): 1,
                    default: 0),
                "bfpSweepConfigFromEnv must take (bfpSweepConfig_t *) and return const char *");
+
+_Static_assert(_Generic((&bfpBlockHeadroomFits),
+                   bool (*)(uint8_t, uint8_t, size_t, size_t, size_t): 1,
+                   default: 0),
+               "bfpBlockHeadroomFits must take (ma, mb, runA, runB, reductionLen)");
+_Static_assert(_Generic((&bfpSumHeadroomFits), bool (*)(uint8_t, size_t, size_t): 1, default: 0),
+               "bfpSumHeadroomFits must take (m, run, reductionLen)");
 
 void setUp() {}
 void tearDown() {}
@@ -494,6 +502,76 @@ void testSweepConfigFlagsEachLegacyKnobWithoutFailing(void) {
     clearSweepEnv();
 }
 
+/* ---- headroom predicates == the kernel guards (spec §10.4 pin) ------------ */
+
+void testBlockHeadroomFitsMatchesShippedFormula(void) {
+    /* m=12 equal widths: limit = INT32_MAX >> 22 = 511 products. */
+    TEST_ASSERT_TRUE(bfpBlockHeadroomFits(12, 12, 32, 0, 63)); /* seg = min(32, 63) = 32 */
+    TEST_ASSERT_TRUE(bfpBlockHeadroomFits(12, 12, 0, 0, 511)); /* per-tensor, K = 511 */
+    TEST_ASSERT_FALSE(bfpBlockHeadroomFits(12, 12, 0, 0, 512));
+    /* m=14: limit = INT32_MAX >> 26 = 31 -> a 32-block over a 63-run trips. */
+    TEST_ASSERT_FALSE(bfpBlockHeadroomFits(14, 14, 32, 0, 63));
+    TEST_ASSERT_TRUE(bfpBlockHeadroomFits(14, 14, 16, 0, 63));
+    /* m=16: limit 1 -- only a 1-element segment fits. */
+    TEST_ASSERT_TRUE(bfpBlockHeadroomFits(16, 16, 1, 0, 63));
+    TEST_ASSERT_FALSE(bfpBlockHeadroomFits(16, 16, 2, 0, 63));
+    /* The whole stage-1 grid (m <= 8) is safe at every HAR reduction. */
+    TEST_ASSERT_TRUE(bfpBlockHeadroomFits(8, 8, 64, 64, 96));
+    TEST_ASSERT_TRUE(bfpBlockHeadroomFits(12, 12, 600, 0, 511)); /* run > K: clamped to K */
+    TEST_ASSERT_FALSE(bfpBlockHeadroomFits(12, 12, 600, 0, 512));
+    /* runB == 0 substitutes reductionLen for b, so maxSeg = min(a, b) can never
+     * exceed reductionLen there -- the clamp is dead code unless BOTH runs are
+     * nonzero and exceed reductionLen. Only this shape actually exercises it. */
+    TEST_ASSERT_TRUE(bfpBlockHeadroomFits(12, 12, 600, 600, 511)); /* both runs > K: clamped to K */
+}
+
+void testSumHeadroomFitsMatchesShippedFormula(void) {
+    size_t limit8 = bfpSumSegmentLimit(8);
+    TEST_ASSERT_TRUE(bfpSumHeadroomFits(8, 0, 32)); /* AvgPool K=32 */
+    TEST_ASSERT_TRUE(bfpSumHeadroomFits(8, 0, limit8));
+    TEST_ASSERT_FALSE(bfpSumHeadroomFits(8, 0, limit8 + 1));
+    TEST_ASSERT_TRUE(bfpSumHeadroomFits(16, 16, 1u << 20)); /* run caps the segment */
+}
+
+/* Predicate and guard must agree at the boundary from both sides. */
+void testBlockHeadroomPredicateAgreesWithKernelGuard(void) {
+    uint8_t expA[2] = {0, 0}, expB[1] = {0};
+    bfpQConfig_t a = {.exponents = expA,
+                      .numGroups = 2,
+                      .groupSize = 32,
+                      .roundingMode = HALF_AWAY,
+                      .mantissaBits = 14,
+                      .exponentBits = 8};
+    bfpQConfig_t b = {.exponents = expB,
+                      .numGroups = 1,
+                      .groupSize = 0,
+                      .roundingMode = HALF_AWAY,
+                      .mantissaBits = 14,
+                      .exponentBits = 8};
+    TEST_ASSERT_FALSE(bfpBlockHeadroomFits(14, 14, 32, 0, 63));
+    ASSERT_EXITS_WITH_FAILURE(bfpValidateBlockHeadroom(&a, &b, 63, "pin"));
+    a.mantissaBits = 12;
+    b.mantissaBits = 12;
+    TEST_ASSERT_TRUE(bfpBlockHeadroomFits(12, 12, 32, 0, 63));
+    bfpValidateBlockHeadroom(&a, &b, 63, "pin"); /* must NOT exit */
+}
+
+/* Sum twin, same discipline: predicate and guard must agree at the boundary. */
+void testSumHeadroomPredicateAgreesWithKernelGuard(void) {
+    uint8_t exps[1] = {0};
+    size_t limit8 = bfpSumSegmentLimit(8);
+    bfpQConfig_t q = {.exponents = exps,
+                      .numGroups = 1,
+                      .groupSize = 0,
+                      .roundingMode = HALF_AWAY,
+                      .mantissaBits = 8,
+                      .exponentBits = 8};
+    TEST_ASSERT_FALSE(bfpSumHeadroomFits(8, 0, limit8 + 1));
+    ASSERT_EXITS_WITH_FAILURE(bfpValidateSumHeadroom(&q, limit8 + 1, "pin"));
+    TEST_ASSERT_TRUE(bfpSumHeadroomFits(8, 0, limit8));
+    bfpValidateSumHeadroom(&q, limit8, "pin"); /* must NOT exit */
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testResolveGroupShapeTensorModeIsPerTensor);
@@ -537,5 +615,9 @@ int main(void) {
     RUN_TEST(testSweepConfigRejectsEachInvalidValue);
     RUN_TEST(testSweepConfigStateRequiresGrads);
     RUN_TEST(testSweepConfigFlagsEachLegacyKnobWithoutFailing);
+    RUN_TEST(testBlockHeadroomFitsMatchesShippedFormula);
+    RUN_TEST(testSumHeadroomFitsMatchesShippedFormula);
+    RUN_TEST(testBlockHeadroomPredicateAgreesWithKernelGuard);
+    RUN_TEST(testSumHeadroomPredicateAgreesWithKernelGuard);
     return UNITY_END();
 }

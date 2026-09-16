@@ -140,4 +140,12 @@ typedef struct bfpSweepConfig {
 
 const char *bfpSweepConfigFromEnv(bfpSweepConfig_t *out);
 
+/* Non-exiting twins of bfpValidateBlockHeadroom / bfpValidateSumHeadroom
+ * (BfpKernelSupport.h) for the trainer's preflight (spec §3.6 gate 2): same
+ * segment rule, same limits, evaluated before any data is loaded so a doomed
+ * config dies in milliseconds instead of after dataset setup. run == 0 means
+ * a per-tensor operand (the full reduction length), exactly as the guards. */
+bool bfpBlockHeadroomFits(uint8_t ma, uint8_t mb, size_t runA, size_t runB, size_t reductionLen);
+bool bfpSumHeadroomFits(uint8_t m, size_t run, size_t reductionLen);
+
 #endif

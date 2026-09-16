@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "BfpKernelSupport.h"
 #include "Common.h"
 #include "Quantization.h"
 #include "Tensor.h"
@@ -329,4 +330,22 @@ const char *bfpSweepConfigFromEnv(bfpSweepConfig_t *out) {
         }
     }
     return NULL;
+}
+
+bool bfpBlockHeadroomFits(uint8_t ma, uint8_t mb, size_t runA, size_t runB, size_t reductionLen) {
+    size_t a = (runA == 0) ? reductionLen : runA;
+    size_t b = (runB == 0) ? reductionLen : runB;
+    size_t maxSeg = a < b ? a : b;
+    if (maxSeg > reductionLen) {
+        maxSeg = reductionLen;
+    }
+    return maxSeg <= bfpSegmentLimit(ma, mb);
+}
+
+bool bfpSumHeadroomFits(uint8_t m, size_t run, size_t reductionLen) {
+    size_t maxSeg = (run == 0) ? reductionLen : run;
+    if (maxSeg > reductionLen) {
+        maxSeg = reductionLen;
+    }
+    return maxSeg <= bfpSumSegmentLimit(m);
 }

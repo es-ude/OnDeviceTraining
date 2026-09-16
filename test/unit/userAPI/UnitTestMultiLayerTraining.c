@@ -1408,6 +1408,117 @@ void testBfpPinnedFloat32BackwardTrainingLossDecreases(void) {
                              "(loss must decrease)");
 }
 
+/* BFP epic PR7 (sweep arm C, spec §3.4): the fq arm keeps BFP WIRES and pins
+ * the GEMM math to FLOAT32 -- BFP-stored weights, a FLOAT32 backward, and a
+ * BFP dx wire that backward must PACK through the funnel's OUT_WRITE. No
+ * earlier test covers that pairing (the pinned fixture swaps propLossQ to
+ * FLOAT32; the dx-wire tests keep FLOAT32 weights). Subject = layer 1: it is
+ * NOT the deepest trainable layer, so its dx IS computed (layer 0's never is,
+ * #380 PR2), and its 4-element dx divides the template's groupSize 2. The
+ * agrad@0 probe fires on that dx right after layer 1's backward wrote it. */
+typedef struct dxWireCapture {
+    bool seen;
+    int type;
+    size_t numElements;
+    size_t numGroups;
+    size_t groupSize;
+    uint8_t mantissaBits;
+    uint8_t exponentBits;
+    uint8_t exponents[2];
+    bool payloadNonZero;
+} dxWireCapture_t;
+
+static void captureLinear0IncomingDx(void *ctx, size_t layerIdx, layerType_t layerType,
+                                     const char *phase, tensor_t *tensor) {
+    (void)layerType;
+    dxWireCapture_t *cap = ctx;
+    if (cap->seen || layerIdx != 0 || strcmp(phase, "agrad") != 0) {
+        return; /* first step only: agrad@0 == the dx layer 1 produced */
+    }
+    cap->seen = true;
+    cap->type = (int)tensor->quantization->type;
+    cap->numElements = calcNumberOfElementsByTensor(tensor);
+    if (tensor->quantization->type != BFP) {
+        return;
+    }
+    bfpQConfig_t *qc = tensor->quantization->qConfig;
+    cap->numGroups = qc->numGroups;
+    cap->groupSize = qc->groupSize;
+    cap->mantissaBits = qc->mantissaBits;
+    cap->exponentBits = qc->exponentBits;
+    cap->exponents[0] = qc->exponents[0];
+    cap->exponents[1] = (qc->numGroups > 1) ? qc->exponents[1] : qc->exponents[0];
+    size_t bytes = calcBytesPerTensor(tensor);
+    const uint8_t *data = tensor->data;
+    for (size_t b = 0; b < bytes; b++) {
+        if (data[b] != 0) {
+            cap->payloadNonZero = true;
+            break;
+        }
+    }
+}
+
+void testBfpDxWireThroughPinnedFloat32BackwardTrains(void) {
+    rngSetSeed(2727u);
+    bfpNativeFixture_t f;
+    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false, /*weightGradStorage=*/NULL);
+
+    /* Arm-C shape on layer 1: BFP-stored weights + bias (per-tensor {1,0},
+     * the §5.2 two-step recipe), all four math slots pinned ARITH_FLOAT32, a
+     * BFP dx wire. Layer 0 stays fully native and consumes that dx. */
+    linearConfig_t *cfg1 = f.linear1->config->linear;
+    quantization_t *w1Q = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    requantizeTensorInPlace(getParamFromParameter(cfg1->weights), w1Q);
+    freeQuantization(w1Q);
+    quantization_t *b1Q = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    requantizeTensorInPlace(getParamFromParameter(cfg1->bias), b1Q);
+    freeQuantization(b1Q);
+    arithmetic_t pinned = {.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
+    cfg1->forwardMath = pinned;
+    cfg1->weightGradMath = pinned;
+    cfg1->biasGradMath = pinned;
+    cfg1->propLossMath = pinned;
+    cfg1->propLossQ = f.bfpWireQ; /* borrowed (ownsQuantizations == false) */
+
+    optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
+    dxWireCapture_t cap = {0};
+    float firstLoss = NAN;
+    float lastLoss = NAN;
+    for (size_t step = 0; step < 25; step++) {
+        trainingStats_t *stats = tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
+                                             f.input, f.label, captureLinear0IncomingDx, &cap);
+        if (step == 0) {
+            firstLoss = stats->loss;
+        }
+        lastLoss = stats->loss;
+        freeTrainingStats(stats);
+        sgdFns.step(f.sgd);
+        sgdFns.zero(f.sgd);
+    }
+    bool weightsStillBfp = getParamFromParameter(cfg1->weights)->quantization->type == BFP;
+    freeBfpNativeFixture(&f);
+
+    const int exponentBias = (1 << (8 - 1)) - 1; /* e=8: 127 (bfpExponentBias) */
+    TEST_ASSERT_TRUE_MESSAGE(cap.seen,
+                             "agrad@0 must fire: layer 1 produces the dx layer 0 consumes");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, cap.type, "the dx layer 1 wrote must be BFP-stored");
+    TEST_ASSERT_EQUAL_size_t(4, cap.numElements);
+    TEST_ASSERT_EQUAL_size_t(2, cap.numGroups);
+    TEST_ASSERT_EQUAL_size_t(2, cap.groupSize);
+    TEST_ASSERT_EQUAL_UINT8(6, cap.mantissaBits);
+    TEST_ASSERT_EQUAL_UINT8(8, cap.exponentBits);
+    TEST_ASSERT_TRUE_MESSAGE(cap.payloadNonZero && (cap.exponents[0] != exponentBias ||
+                                                    cap.exponents[1] != exponentBias),
+                             "the FLOAT32 backward must have PACKED the dx (grid derived, codes "
+                             "written) -- a zero-state wire means OUT_WRITE never ran");
+    TEST_ASSERT_TRUE_MESSAGE(weightsStillBfp, "layer 1's weights must stay BFP through 25 steps");
+    TEST_ASSERT_TRUE_MESSAGE(isfinite(firstLoss) && isfinite(lastLoss),
+                             "losses must be finite with a BFP dx wire under FLOAT32 backward");
+    TEST_ASSERT_TRUE_MESSAGE(
+        lastLoss < firstLoss,
+        "BFP weights + BFP dx wire + pinned FLOAT32 GEMM backward must converge");
+}
+
 /* ===========================================================================
  * BFP epic PR3 Task 6 capstone: per-tensor BFP GRAD storage, load-bearing e2e.
  * ======================================================================== */
@@ -2722,6 +2833,7 @@ int main(void) {
     RUN_TEST(testOwningFactoryBfpOutputQFreesExponents);
     RUN_TEST(testBfpNativeForwardTrainingLossDecreasesAndGridMoves);
     RUN_TEST(testBfpPinnedFloat32BackwardTrainingLossDecreases);
+    RUN_TEST(testBfpDxWireThroughPinnedFloat32BackwardTrains);
     RUN_TEST(testBfpGradStorageTrainingAccumulatesAndSteps);
     RUN_TEST(testBfpGradStorageTrainsUnderReductionMean);
     RUN_TEST(testBfpConvGradStorageTrainsUnderDefaultEpoch);

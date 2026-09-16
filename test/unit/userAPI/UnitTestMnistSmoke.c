@@ -127,13 +127,12 @@ static size_t cbInvocations;
 static float firstTrainLoss;
 static float lastTrainLoss;
 
-static void captureEpoch(size_t epoch, float trainLoss, epochStats_t evalStats) {
-    (void)epoch;
+static void captureEpoch(epochInfo_t info, epochStats_t evalStats) {
     (void)evalStats;
     if (cbInvocations == 0) {
-        firstTrainLoss = trainLoss;
+        firstTrainLoss = info.trainLoss;
     }
-    lastTrainLoss = trainLoss;
+    lastTrainLoss = info.trainLoss;
     cbInvocations++;
 }
 
@@ -163,8 +162,8 @@ void testMnistSmoke_FullTrainingPipelineReducesLoss() {
     trainingRunResult_t result =
         trainingRun(model, MODEL_SIZE,
                     (lossConfig_t){.funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN},
-                    trainDl, evalDl, sgd, NULL, numberOfEpochs, calculateGradsSequential,
-                    inferenceWithLoss, captureEpoch);
+                    trainDl, evalDl, sgd, numberOfEpochs, calculateGradsSequential,
+                    inferenceWithLoss, &(trainingRunOptions_t){.callback = captureEpoch});
 
     /* CAPTURE all assertion values into stack locals BEFORE any free. */
     size_t capturedCbInvocations = cbInvocations;
@@ -230,10 +229,11 @@ void testMnistSmoke_SnprintfGmtimeRBetweenSetupAndTrainingRun_NoSilentExit() {
              tmStruct.tm_mday);
 
     cbInvocations = 0;
-    trainingRunResult_t result = trainingRun(
-        model, MODEL_SIZE,
-        (lossConfig_t){.funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN}, trainDl,
-        evalDl, sgd, NULL, 1, calculateGradsSequential, inferenceWithLoss, captureEpoch);
+    trainingRunResult_t result =
+        trainingRun(model, MODEL_SIZE,
+                    (lossConfig_t){.funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN},
+                    trainDl, evalDl, sgd, 1, calculateGradsSequential, inferenceWithLoss,
+                    &(trainingRunOptions_t){.callback = captureEpoch});
 
     /* CAPTURE before free. */
     size_t capturedCbInvocations = cbInvocations;

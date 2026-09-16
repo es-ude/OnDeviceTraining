@@ -5,6 +5,7 @@
 
 #include "ArithmeticType.h"
 #include "BorrowedLayer.h"
+#include "BsScheduler.h"
 #include "CalculateGradsSequential.h"
 #include "DataLoaderApi.h"
 #include "Dataset.h"
@@ -28,16 +29,19 @@
 #include "TrainingLoopApi.h"
 #include "unity.h"
 
-/* #327 contract: trainingRun takes the NULL-able scheduler directly after
- * the optimizer (arg 7). Compile-time pin. */
+/* Batch-size scheduler port: trainingRun's optional inputs (LR scheduler,
+ * batch-size scheduler, callback) travel in ONE NULL-able options struct as
+ * the last argument; the callback receives epochInfo_t. Compile-time pins. */
 _Static_assert(_Generic(&trainingRun,
                    trainingRunResult_t (*)(layer_t **, size_t, lossConfig_t, dataLoader_t *,
-                                           dataLoader_t *, optimizer_t *, lrScheduler_t *, size_t,
+                                           dataLoader_t *, optimizer_t *, size_t,
                                            calculateGradsFn_t, inferenceWithLossFn_t,
-                                           epochCallbackFn_t): 1,
+                                           const trainingRunOptions_t *): 1,
                    default: 0),
-               "#327: trainingRun must be (model, modelSize, lossConfig, trainDl, evalDl, "
-               "optimizer, scheduler, numberOfEpochs, calculateGradsFn, inferenceFn, callback)");
+               "trainingRun must be (model, modelSize, lossConfig, trainDl, evalDl, optimizer, "
+               "numberOfEpochs, calculateGradsFn, inferenceFn, options)");
+_Static_assert(_Generic((epochCallbackFn_t)0, void (*)(epochInfo_t, epochStats_t): 1, default: 0),
+               "epochCallbackFn_t must be (epochInfo_t info, epochStats_t evalStats)");
 
 /* Build a fresh 2-D float tensor from a literal float buffer. Encapsulates the
  * post-#106 chain so each test stays readable. */
@@ -649,9 +653,9 @@ void testTrainingRun_ReturnsResult() {
     dataLoader_t *evalDl =
         dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
 
-    trainingRunResult_t result = trainingRun(
-        model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, trainDl,
-        evalDl, sgd, NULL, 2, calculateGradsSequential, inferenceWithLoss, NULL);
+    trainingRunResult_t result =
+        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+                    trainDl, evalDl, sgd, 2, calculateGradsSequential, inferenceWithLoss, NULL);
 
     /* CAPTURE. */
     float capturedFinalTrainLoss = result.finalTrainLoss;
@@ -678,10 +682,10 @@ static size_t cbLastEpoch;
 static float cbLastTrainLoss;
 static epochStats_t cbLastStats;
 
-static void captureCallback(size_t epoch, float trainLoss, epochStats_t evalStats) {
+static void captureCallback(epochInfo_t info, epochStats_t evalStats) {
     cbCallCount++;
-    cbLastEpoch = epoch;
-    cbLastTrainLoss = trainLoss;
+    cbLastEpoch = info.epoch;
+    cbLastTrainLoss = info.trainLoss;
     cbLastStats = evalStats;
 }
 
@@ -718,8 +722,8 @@ void testTrainingRun_CallsCallbackEachEpochWithStats() {
     size_t numberOfEpochs = 3;
     trainingRunResult_t result =
         trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-                    trainDl, evalDl, sgd, NULL, numberOfEpochs, calculateGradsSequential,
-                    inferenceWithLoss, captureCallback);
+                    trainDl, evalDl, sgd, numberOfEpochs, calculateGradsSequential,
+                    inferenceWithLoss, &(trainingRunOptions_t){.callback = captureCallback});
 
     /* CAPTURE. */
     size_t capturedCbCallCount = cbCallCount;
@@ -1540,7 +1544,7 @@ void testTrainingRun_HardcodesForwardReductionMean() {
      * eval loss would be F× larger than train loss, failing the assertion below. */
     lossConfig_t cfg = defaultLossConfig(MSE);
 
-    trainingRunResult_t result = trainingRun(model, 1, cfg, trainDl, evalDl, sgd, NULL, 2,
+    trainingRunResult_t result = trainingRun(model, 1, cfg, trainDl, evalDl, sgd, 2,
                                              calculateGradsSequential, inferenceWithLoss, NULL);
 
     float capturedTrain = result.finalTrainLoss;
@@ -1564,9 +1568,8 @@ static float g_lrCapture[8];
 static size_t g_lrCaptureCount = 0;
 static optimizer_t *g_capturedOptim = NULL;
 
-static void captureLrCallback(size_t epoch, float trainLoss, epochStats_t evalStats) {
-    (void)epoch;
-    (void)trainLoss;
+static void captureLrCallback(epochInfo_t info, epochStats_t evalStats) {
+    (void)info;
     (void)evalStats;
     if (g_lrCaptureCount < 8) {
         g_lrCapture[g_lrCaptureCount++] = optimizerFunctions[SGD_M].getLr(g_capturedOptim);
@@ -1601,9 +1604,10 @@ void testTrainingRunStepsSchedulerOncePerEpoch(void) {
 
     lrScheduler_t sched;
     stepLrInit(&sched, sgd, 1, 0.5f); /* halve every epoch */
-    trainingRunResult_t result = trainingRun(
-        model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, trainDl,
-        evalDl, sgd, &sched, 2, calculateGradsSequential, inferenceWithLoss, NULL);
+    trainingRunResult_t result =
+        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+                    trainDl, evalDl, sgd, 2, calculateGradsSequential, inferenceWithLoss,
+                    &(trainingRunOptions_t){.lrScheduler = &sched});
     (void)result;
     /* base 0.4f halved twice: *0.25 is a power-of-two scale -> exact float */
     TEST_ASSERT_EQUAL_FLOAT(0.4f * 0.25f, optimizerFunctions[SGD_M].getLr(sgd));
@@ -1642,9 +1646,9 @@ void testTrainingRunNullSchedulerKeepsLrConstant(void) {
         dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
 
     float lrBefore = optimizerFunctions[SGD_M].getLr(sgd);
-    trainingRunResult_t result = trainingRun(
-        model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, trainDl,
-        evalDl, sgd, NULL, 2, calculateGradsSequential, inferenceWithLoss, NULL);
+    trainingRunResult_t result =
+        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+                    trainDl, evalDl, sgd, 2, calculateGradsSequential, inferenceWithLoss, NULL);
     (void)result;
     TEST_ASSERT_EQUAL_FLOAT(lrBefore, optimizerFunctions[SGD_M].getLr(sgd));
 
@@ -1690,9 +1694,10 @@ void testTrainingRunRejectsSchedulerWiredToDifferentOptimizer(void) {
         .type = SGD_M, .impl = &otherImpl, .parameter = NULL, .states = NULL, .sizeStates = 0};
     lrScheduler_t sched;
     stepLrInit(&sched, &otherOptim, 1, 0.5f);
-    ASSERT_EXITS_WITH_FAILURE(trainingRun(
-        model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, trainDl,
-        evalDl, sgd, &sched, 1, calculateGradsSequential, inferenceWithLoss, NULL));
+    ASSERT_EXITS_WITH_FAILURE(
+        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+                    trainDl, evalDl, sgd, 1, calculateGradsSequential, inferenceWithLoss,
+                    &(trainingRunOptions_t){.lrScheduler = &sched}));
 
     freeOptim(sgd);
     freeQuantization(momentumQ);
@@ -1736,15 +1741,366 @@ void testTrainingRunCallbackObservesTheEpochsOwnLr(void) {
     g_capturedOptim = sgd;
     lrScheduler_t sched;
     stepLrInit(&sched, sgd, 1, 0.5f);
-    trainingRunResult_t result = trainingRun(
-        model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, trainDl,
-        evalDl, sgd, &sched, 3, calculateGradsSequential, inferenceWithLoss, captureLrCallback);
+    trainingRunResult_t result =
+        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+                    trainDl, evalDl, sgd, 3, calculateGradsSequential, inferenceWithLoss,
+                    &(trainingRunOptions_t){.lrScheduler = &sched, .callback = captureLrCallback});
     (void)result;
     TEST_ASSERT_EQUAL_size_t(3, g_lrCaptureCount);
     /* halving by 0.5 is exponent-only: exact floats */
     TEST_ASSERT_EQUAL_FLOAT(0.4f, g_lrCapture[0]);
     TEST_ASSERT_EQUAL_FLOAT(0.4f * 0.5f, g_lrCapture[1]);
     TEST_ASSERT_EQUAL_FLOAT(0.4f * 0.25f, g_lrCapture[2]);
+
+    freeOptim(sgd);
+    freeQuantization(momentumQ);
+    freeDataLoader(evalDl);
+    freeDataLoader(trainDl);
+    freeLinearLayerShellOnly(linear);
+    freeEpochDataset();
+}
+
+/* Batch-size scheduler port: per-epoch facts the callback must see. */
+static epochInfo_t g_infoCapture[8];
+static size_t g_infoCaptureCount = 0;
+
+static void captureInfoCallback(epochInfo_t info, epochStats_t evalStats) {
+    (void)evalStats;
+    if (g_infoCaptureCount < 8) {
+        g_infoCapture[g_infoCaptureCount++] = info;
+    }
+}
+
+/* 8-sample VIEW over the 4-sample epoch fixture (id % 4): b0=1, gamma=0.5,
+ * max=8 walks the batch 1 -> 2 -> 4 -> 8 across 3 epochs with 8, 4, 2
+ * optimizer updates. No new tensors; freeSample releases only the wrapper. */
+static sample_t *getEpochSample8(size_t id) {
+    return getEpochSample(id % 4);
+}
+
+static size_t getEpochDatasetSize8(void) {
+    return 8;
+}
+
+void testTrainingRunZeroOptionsBehavesLikeNull(void) {
+    tensor_t *wParam = buildFloatTensor2D(2, 2, (float[]){1.f, 0.f, 0.f, 1.f}, 4);
+    tensor_t *wGrad = gradInitFloat(wParam, NULL);
+    parameter_t *w = parameterInit(wParam, wGrad);
+
+    tensor_t *bParam = buildFloatTensor2D(1, 2, (float[]){0.f, 0.f}, 2);
+    tensor_t *bGrad = gradInitFloat(bParam, NULL);
+    parameter_t *b = parameterInit(bParam, bGrad);
+
+    quantization_t testQ;
+    initFloat32Quantization(&testQ);
+    layer_t *linear = buildBorrowedLinearLayer(w, b, &testQ);
+    layer_t *model[] = {linear};
+
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+
+    initEpochDataset();
+    dataLoader_t *trainDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *evalDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+
+    trainingRunOptions_t zero = {0};
+    trainingRunResult_t result =
+        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+                    trainDl, evalDl, sgd, 2, calculateGradsSequential, inferenceWithLoss, &zero);
+
+    /* CAPTURE. */
+    float capturedLr = optimizerFunctions[SGD_M].getLr(sgd);
+    size_t capturedBatch = trainDl->batchSize;
+    float capturedFinalTrainLoss = result.finalTrainLoss;
+
+    /* FREE. */
+    freeOptim(sgd);
+    freeQuantization(momentumQ);
+    freeDataLoader(evalDl);
+    freeDataLoader(trainDl);
+    freeLinearLayerShellOnly(linear);
+    freeEpochDataset();
+
+    /* ASSERT. */
+    TEST_ASSERT_EQUAL_FLOAT(0.01f, capturedLr);
+    TEST_ASSERT_EQUAL_size_t(1, capturedBatch);
+    TEST_ASSERT_TRUE(capturedFinalTrainLoss > 0.0f);
+}
+
+void testTrainingRunStepsBsSchedulerOncePerEpochAndCallbackSeesTheEpochsBatch(void) {
+    tensor_t *wParam = buildFloatTensor2D(2, 2, (float[]){1.f, 0.f, 0.f, 1.f}, 4);
+    tensor_t *wGrad = gradInitFloat(wParam, NULL);
+    parameter_t *w = parameterInit(wParam, wGrad);
+
+    tensor_t *bParam = buildFloatTensor2D(1, 2, (float[]){0.f, 0.f}, 2);
+    tensor_t *bGrad = gradInitFloat(bParam, NULL);
+    parameter_t *b = parameterInit(bParam, bGrad);
+
+    quantization_t testQ;
+    initFloat32Quantization(&testQ);
+    layer_t *linear = buildBorrowedLinearLayer(w, b, &testQ);
+    layer_t *model[] = {linear};
+
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+
+    initEpochDataset();
+    dataLoader_t *trainDl =
+        dataLoaderInit(getEpochSample8, getEpochDatasetSize8, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *evalDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+
+    g_infoCaptureCount = 0;
+    bsScheduler_t bsSched;
+    exponentialBsInit(&bsSched, trainDl, NULL, 0.5f, 8);
+    trainingRunResult_t result = trainingRun(
+        model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, trainDl,
+        evalDl, sgd, 3, calculateGradsSequential, inferenceWithLoss,
+        &(trainingRunOptions_t){.bsScheduler = &bsSched, .callback = captureInfoCallback});
+    (void)result;
+
+    /* CAPTURE. */
+    size_t capturedCount = g_infoCaptureCount;
+    size_t capturedEpoch[3];
+    size_t capturedBatch[3];
+    size_t capturedUpdates[3];
+    for (size_t i = 0; i < 3; i++) {
+        capturedEpoch[i] = g_infoCapture[i].epoch;
+        capturedBatch[i] = g_infoCapture[i].batchSize;
+        capturedUpdates[i] = g_infoCapture[i].parameterUpdates;
+    }
+    size_t capturedFinalBatch = trainDl->batchSize;
+    size_t capturedLastEpoch = bsSched.lastEpoch;
+    float capturedLr = optimizerFunctions[SGD_M].getLr(sgd);
+
+    /* FREE. */
+    freeOptim(sgd);
+    freeQuantization(momentumQ);
+    freeDataLoader(evalDl);
+    freeDataLoader(trainDl);
+    freeLinearLayerShellOnly(linear);
+    freeEpochDataset();
+
+    /* ASSERT. */
+    TEST_ASSERT_EQUAL_size_t(3, capturedCount);
+    const size_t expectedEpoch[3] = {0, 1, 2};
+    const size_t expectedBatch[3] = {1, 2, 4};
+    const size_t expectedUpdates[3] = {8, 4, 2};
+    /* Per-element scalar asserts (judgment call #9): Unity 2.5.2's
+     * *_size_t_ARRAY compares UNITY_INT_WIDTH/8 = 4 bytes per element, so on
+     * LP64 it silently checks only the first ceil(N/2) size_t values. */
+    for (size_t i = 0; i < 3; i++) {
+        TEST_ASSERT_EQUAL_size_t(expectedEpoch[i], capturedEpoch[i]);
+        TEST_ASSERT_EQUAL_size_t(expectedBatch[i], capturedBatch[i]);
+        TEST_ASSERT_EQUAL_size_t(expectedUpdates[i], capturedUpdates[i]);
+    }
+    TEST_ASSERT_EQUAL_size_t(8, capturedFinalBatch); /* stepped after epoch 2: 4 -> 8 */
+    TEST_ASSERT_EQUAL_size_t(3, capturedLastEpoch);  /* exactly once per epoch */
+    TEST_ASSERT_EQUAL_FLOAT(0.01f, capturedLr);      /* optimizer == NULL: LR untouched */
+}
+
+void testTrainingRunCallbackObservesTheEpochsOwnLrAndBatchWithBothSchedulers(void) {
+    /* BS mode (no compensation) next to an LR scheduler is allowed (guard (d)
+     * only rejects a COMPENSATING batch scheduler). The callback must see the
+     * LR and the batch the epoch trained with: both schedulers step after it. */
+    tensor_t *wParam = buildFloatTensor2D(2, 2, (float[]){1.f, 0.f, 0.f, 1.f}, 4);
+    tensor_t *wGrad = gradInitFloat(wParam, NULL);
+    parameter_t *w = parameterInit(wParam, wGrad);
+
+    tensor_t *bParam = buildFloatTensor2D(1, 2, (float[]){0.f, 0.f}, 2);
+    tensor_t *bGrad = gradInitFloat(bParam, NULL);
+    parameter_t *b = parameterInit(bParam, bGrad);
+
+    quantization_t testQ;
+    initFloat32Quantization(&testQ);
+    layer_t *linear = buildBorrowedLinearLayer(w, b, &testQ);
+    layer_t *model[] = {linear};
+
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.4f, 0.f, 0.f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+
+    initEpochDataset();
+    dataLoader_t *trainDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *evalDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+
+    g_infoCaptureCount = 0;
+    lrScheduler_t lrSched;
+    stepLrInit(&lrSched, sgd, 1, 0.5f);
+    bsScheduler_t bsSched;
+    exponentialBsInit(&bsSched, trainDl, NULL, 0.5f, 4);
+    trainingRunResult_t result = trainingRun(
+        model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, trainDl,
+        evalDl, sgd, 3, calculateGradsSequential, inferenceWithLoss,
+        &(trainingRunOptions_t){
+            .lrScheduler = &lrSched, .bsScheduler = &bsSched, .callback = captureInfoCallback});
+    (void)result;
+
+    /* CAPTURE. */
+    size_t capturedCount = g_infoCaptureCount;
+    float capturedLr[3];
+    size_t capturedBatch[3];
+    size_t capturedUpdates[3];
+    for (size_t i = 0; i < 3; i++) {
+        capturedLr[i] = g_infoCapture[i].learningRate;
+        capturedBatch[i] = g_infoCapture[i].batchSize;
+        capturedUpdates[i] = g_infoCapture[i].parameterUpdates;
+    }
+
+    /* FREE. */
+    freeOptim(sgd);
+    freeQuantization(momentumQ);
+    freeDataLoader(evalDl);
+    freeDataLoader(trainDl);
+    freeLinearLayerShellOnly(linear);
+    freeEpochDataset();
+
+    /* ASSERT. halving is exponent-only: exact floats. */
+    TEST_ASSERT_EQUAL_size_t(3, capturedCount);
+    TEST_ASSERT_EQUAL_FLOAT(0.4f, capturedLr[0]);
+    TEST_ASSERT_EQUAL_FLOAT(0.4f * 0.5f, capturedLr[1]);
+    TEST_ASSERT_EQUAL_FLOAT(0.4f * 0.25f, capturedLr[2]);
+    const size_t expectedBatch[3] = {1, 2, 4};
+    const size_t expectedUpdates[3] = {4, 2, 1};
+    for (size_t i = 0; i < 3; i++) { /* scalar asserts, see judgment call #9 */
+        TEST_ASSERT_EQUAL_size_t(expectedBatch[i], capturedBatch[i]);
+        TEST_ASSERT_EQUAL_size_t(expectedUpdates[i], capturedUpdates[i]);
+    }
+}
+
+/* Guards (b), (c), (d) of the design: all fire before the first batch. */
+void testTrainingRunRejectsBsSchedulerWiredToAnotherLoader(void) {
+    tensor_t *wParam = buildFloatTensor2D(2, 2, (float[]){1.f, 0.f, 0.f, 1.f}, 4);
+    tensor_t *wGrad = gradInitFloat(wParam, NULL);
+    parameter_t *w = parameterInit(wParam, wGrad);
+
+    tensor_t *bParam = buildFloatTensor2D(1, 2, (float[]){0.f, 0.f}, 2);
+    tensor_t *bGrad = gradInitFloat(bParam, NULL);
+    parameter_t *b = parameterInit(bParam, bGrad);
+
+    quantization_t testQ;
+    initFloat32Quantization(&testQ);
+    layer_t *linear = buildBorrowedLinearLayer(w, b, &testQ);
+    layer_t *model[] = {linear};
+
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+
+    initEpochDataset();
+    dataLoader_t *trainDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *evalDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+
+    /* Wired to the EVAL loader — the eval loader must never be resized. */
+    bsScheduler_t bsSched;
+    exponentialBsInit(&bsSched, evalDl, NULL, 0.5f, 8);
+    ASSERT_EXITS_WITH_FAILURE(
+        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+                    trainDl, evalDl, sgd, 1, calculateGradsSequential, inferenceWithLoss,
+                    &(trainingRunOptions_t){.bsScheduler = &bsSched}));
+
+    freeOptim(sgd);
+    freeQuantization(momentumQ);
+    freeDataLoader(evalDl);
+    freeDataLoader(trainDl);
+    freeLinearLayerShellOnly(linear);
+    freeEpochDataset();
+}
+
+void testTrainingRunRejectsBsCompensationWiredToAnotherOptimizer(void) {
+    tensor_t *wParam = buildFloatTensor2D(2, 2, (float[]){1.f, 0.f, 0.f, 1.f}, 4);
+    tensor_t *wGrad = gradInitFloat(wParam, NULL);
+    parameter_t *w = parameterInit(wParam, wGrad);
+
+    tensor_t *bParam = buildFloatTensor2D(1, 2, (float[]){0.f, 0.f}, 2);
+    tensor_t *bGrad = gradInitFloat(bParam, NULL);
+    parameter_t *b = parameterInit(bParam, bGrad);
+
+    quantization_t testQ;
+    initFloat32Quantization(&testQ);
+    layer_t *linear = buildBorrowedLinearLayer(w, b, &testQ);
+    layer_t *model[] = {linear};
+
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+
+    initEpochDataset();
+    dataLoader_t *trainDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *evalDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+
+    /* A second, unrelated optimizer the compensation is (wrongly) wired to. */
+    sgd_t otherSgd;
+    sgdInit(&otherSgd, 0.1f, 0.0f, 0.0f,
+            (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    optimImpl_t otherImpl = {.sgd = &otherSgd};
+    optimizer_t otherOptim = {
+        .type = SGD_M, .impl = &otherImpl, .parameter = NULL, .states = NULL, .sizeStates = 0};
+    bsScheduler_t bsSched;
+    exponentialBsInit(&bsSched, trainDl, &otherOptim, 0.5f, 8);
+    ASSERT_EXITS_WITH_FAILURE(
+        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+                    trainDl, evalDl, sgd, 1, calculateGradsSequential, inferenceWithLoss,
+                    &(trainingRunOptions_t){.bsScheduler = &bsSched}));
+
+    freeOptim(sgd);
+    freeQuantization(momentumQ);
+    freeDataLoader(evalDl);
+    freeDataLoader(trainDl);
+    freeLinearLayerShellOnly(linear);
+    freeEpochDataset();
+}
+
+void testTrainingRunRejectsLrSchedulerNextToCompensatingBsScheduler(void) {
+    tensor_t *wParam = buildFloatTensor2D(2, 2, (float[]){1.f, 0.f, 0.f, 1.f}, 4);
+    tensor_t *wGrad = gradInitFloat(wParam, NULL);
+    parameter_t *w = parameterInit(wParam, wGrad);
+
+    tensor_t *bParam = buildFloatTensor2D(1, 2, (float[]){0.f, 0.f}, 2);
+    tensor_t *bGrad = gradInitFloat(bParam, NULL);
+    parameter_t *b = parameterInit(bParam, bGrad);
+
+    quantization_t testQ;
+    initFloat32Quantization(&testQ);
+    layer_t *linear = buildBorrowedLinearLayer(w, b, &testQ);
+    layer_t *model[] = {linear};
+
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+
+    initEpochDataset();
+    dataLoader_t *trainDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *evalDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+
+    /* Both correctly wired to `sgd` — and exactly that is the conflict: two
+     * writers of the same LR every epoch, last writer wins silently. */
+    lrScheduler_t lrSched;
+    stepLrInit(&lrSched, sgd, 1, 0.5f);
+    bsScheduler_t bsSched;
+    exponentialBsInit(&bsSched, trainDl, sgd, 0.5f, 8);
+    ASSERT_EXITS_WITH_FAILURE(
+        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+                    trainDl, evalDl, sgd, 1, calculateGradsSequential, inferenceWithLoss,
+                    &(trainingRunOptions_t){.lrScheduler = &lrSched, .bsScheduler = &bsSched}));
 
     freeOptim(sgd);
     freeQuantization(momentumQ);
@@ -1791,9 +2147,9 @@ void testTrainingRunReshuffleFlagOffKeepsTrainIndices(void) {
         snapshot[i] = trainDl->indices[i];
     }
 
-    trainingRunResult_t result = trainingRun(
-        model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, trainDl,
-        evalDl, sgd, NULL, 2, calculateGradsSequential, inferenceWithLoss, NULL);
+    trainingRunResult_t result =
+        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+                    trainDl, evalDl, sgd, 2, calculateGradsSequential, inferenceWithLoss, NULL);
     (void)result;
 
     /* CAPTURE. */
@@ -1850,9 +2206,9 @@ void testTrainingRunReshuffleFlagOnChangesTrainButNotEvalIndices(void) {
         evalSnapshot[i] = evalDl->indices[i];
     }
 
-    trainingRunResult_t result = trainingRun(
-        model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, trainDl,
-        evalDl, sgd, NULL, 2, calculateGradsSequential, inferenceWithLoss, NULL);
+    trainingRunResult_t result =
+        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+                    trainDl, evalDl, sgd, 2, calculateGradsSequential, inferenceWithLoss, NULL);
     (void)result;
 
     /* CAPTURE. */
@@ -1919,9 +2275,9 @@ void testTrainingRunReshuffleFlagOn_SingleEpochNeverReshuffles(void) {
         snapshot[i] = trainDl->indices[i];
     }
 
-    trainingRunResult_t result = trainingRun(
-        model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, trainDl,
-        evalDl, sgd, NULL, 1, calculateGradsSequential, inferenceWithLoss, NULL);
+    trainingRunResult_t result =
+        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+                    trainDl, evalDl, sgd, 1, calculateGradsSequential, inferenceWithLoss, NULL);
     (void)result;
 
     /* CAPTURE. */
@@ -2063,6 +2419,12 @@ int main(void) {
     RUN_TEST(testTrainingRunNullSchedulerKeepsLrConstant);
     RUN_TEST(testTrainingRunRejectsSchedulerWiredToDifferentOptimizer);
     RUN_TEST(testTrainingRunCallbackObservesTheEpochsOwnLr);
+    RUN_TEST(testTrainingRunZeroOptionsBehavesLikeNull);
+    RUN_TEST(testTrainingRunStepsBsSchedulerOncePerEpochAndCallbackSeesTheEpochsBatch);
+    RUN_TEST(testTrainingRunCallbackObservesTheEpochsOwnLrAndBatchWithBothSchedulers);
+    RUN_TEST(testTrainingRunRejectsBsSchedulerWiredToAnotherLoader);
+    RUN_TEST(testTrainingRunRejectsBsCompensationWiredToAnotherOptimizer);
+    RUN_TEST(testTrainingRunRejectsLrSchedulerNextToCompensatingBsScheduler);
     RUN_TEST(testTrainingRunReshuffleFlagOffKeepsTrainIndices);
     RUN_TEST(testTrainingRunReshuffleFlagOnChangesTrainButNotEvalIndices);
     RUN_TEST(testTrainingRunReshuffleFlagOn_SingleEpochNeverReshuffles);

@@ -7,9 +7,11 @@
 #include "Optimizer.h"
 #include "Tensor.h"
 
-/* #327: forward typedef only — callers passing NULL need no LrScheduler dep.
- * Identical typedef also lives in LrScheduler.h (C11 allows the redefinition). */
+/* #327: forward typedefs only — callers passing NULL need no scheduler
+ * headers. Identical typedefs live in LrScheduler.h / BsScheduler.h (C11
+ * allows the redefinition). */
 typedef struct lrScheduler lrScheduler_t;
+typedef struct bsScheduler bsScheduler_t;
 
 typedef struct trainingStats {
     tensor_t *output;
@@ -77,8 +79,28 @@ typedef inferenceStats_t *(*inferenceWithLossFn_t)(layer_t **model, size_t numbe
                                                    lossFuncType_t funcType,
                                                    reduction_t forwardReduction);
 
-/*! Callback invoked once per training epoch, after evaluation completes. */
-typedef void (*epochCallbackFn_t)(size_t epoch, float trainLoss, epochStats_t evalStats);
+/*! Per-epoch facts handed to the epoch callback. batchSize, parameterUpdates
+ * and learningRate are captured BEFORE the epoch trains — they are the values
+ * the epoch actually trained with, because the schedulers only step after the
+ * callback returns. */
+typedef struct epochInfo {
+    size_t epoch;
+    float trainLoss;
+    size_t batchSize;        /* trainDataLoader->batchSize this epoch trained with */
+    size_t parameterUpdates; /* optimizer steps this epoch = datasetSize / batchSize */
+    float learningRate;      /* getLr(optimizer) this epoch trained with */
+} epochInfo_t;
+
+/*! Invoked once per training epoch, after evaluation, before the schedulers step. */
+typedef void (*epochCallbackFn_t)(epochInfo_t info, epochStats_t evalStats);
+
+/*! Optional inputs of trainingRun(). NULL, or a zero-initialised struct, means
+ * "no schedulers, no callback" — exactly the pre-port default behaviour. */
+typedef struct trainingRunOptions {
+    lrScheduler_t *lrScheduler; /* NULLable; stepped once per epoch after the callback (#327) */
+    bsScheduler_t *bsScheduler; /* NULLable; stepped once per epoch after lrScheduler */
+    epochCallbackFn_t callback; /* NULLable */
+} trainingRunOptions_t;
 
 void freeTrainingStats(trainingStats_t *trainingStats);
 
@@ -99,16 +121,22 @@ classificationReport_t evaluationEpochWithReport(layer_t **model, size_t modelSi
                                                  size_t *cmBuffer, size_t numClasses,
                                                  reduction_t forwardReduction);
 
-/*! Runs numberOfEpochs of train+eval. `scheduler` (NULL-able) is stepped once
- * per epoch AFTER the epoch callback, so a callback that logs the current LR
- * reports the value this epoch actually trained with (PyTorch recipes step
- * after validation as well; evaluation never reads the LR, so placement
- * relative to eval is semantics-neutral). Fails fast if the scheduler is
- * wired to a different optimizer than the one passed here. */
+/*! Runs numberOfEpochs of train+eval. Per epoch, in this order: reshuffle
+ * the train loader (epoch > 0, #381) -> capture epochInfo_t (batch, updates,
+ * LR the epoch trains with) -> trainingEpochDefault -> evaluate -> callback
+ * -> lrSchedulerStep -> bsSchedulerStep (last: it only writes
+ * trainDataLoader->batchSize, which the next epoch reads fresh). A callback
+ * that logs the LR/batch therefore reports the values this epoch actually
+ * trained with. Fails fast (before the first batch) if: the LR scheduler is
+ * wired to another optimizer (#327); the batch scheduler is wired to a loader
+ * other than trainDataLoader (the eval loader is never resized); its LR
+ * compensation is wired to another optimizer; or an LR scheduler and a
+ * compensating batch scheduler would both write the LR every epoch. */
 trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
                                 dataLoader_t *trainDataLoader, dataLoader_t *evalDataLoader,
-                                optimizer_t *optimizer, lrScheduler_t *scheduler,
-                                size_t numberOfEpochs, calculateGradsFn_t calculateGradsFn,
-                                inferenceWithLossFn_t inferenceFn, epochCallbackFn_t callback);
+                                optimizer_t *optimizer, size_t numberOfEpochs,
+                                calculateGradsFn_t calculateGradsFn,
+                                inferenceWithLossFn_t inferenceFn,
+                                const trainingRunOptions_t *options); /* NULL == all defaults */
 
 #endif // TRAINING_LOOP_API_H

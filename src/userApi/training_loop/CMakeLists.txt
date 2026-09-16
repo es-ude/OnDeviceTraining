@@ -14,6 +14,7 @@ target_link_libraries(TrainingLoopApi PRIVATE
         LossFunction
         Optimizer
         LrScheduler
+        BsScheduler
         Common
         DataLoader
         DataLoaderApi

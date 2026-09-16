@@ -136,13 +136,12 @@ static size_t cbInvocations;
 static float firstTrainLoss;
 static float lastTrainLoss;
 
-static void captureEpoch(size_t epoch, float trainLoss, epochStats_t evalStats) {
-    (void)epoch;
+static void captureEpoch(epochInfo_t info, epochStats_t evalStats) {
     (void)evalStats;
     if (cbInvocations == 0) {
-        firstTrainLoss = trainLoss;
+        firstTrainLoss = info.trainLoss;
     }
-    lastTrainLoss = trainLoss;
+    lastTrainLoss = info.trainLoss;
     cbInvocations++;
 }
 
@@ -246,8 +245,8 @@ void testGroupNormClassifierTrainsAndRoundTrips(void) {
     size_t numberOfEpochs = 30;
     trainingRun(model, MODEL_SIZE,
                 (lossConfig_t){.funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN},
-                trainDl, evalDl, optim, NULL, numberOfEpochs, calculateGradsSequential,
-                inferenceWithLoss, captureEpoch);
+                trainDl, evalDl, optim, numberOfEpochs, calculateGradsSequential, inferenceWithLoss,
+                &(trainingRunOptions_t){.callback = captureEpoch});
 
     /* (c) State-dict round trip. Probe two batch-1 inputs (one per class),
      * capture predictions, copy the trained params out, perturb the live params,

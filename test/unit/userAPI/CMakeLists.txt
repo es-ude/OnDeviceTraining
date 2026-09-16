@@ -110,6 +110,7 @@ add_elastic_ai_unit_test(
         DataLoaderApi
         StorageApi
         LrScheduler
+        BsScheduler
         OptimizerApi
         Sgd
         Optimizer

@@ -167,7 +167,7 @@ static FILE *g_log_file = NULL;
 static int g_first_epoch = 1;
 static struct timespec g_epoch_t0;
 
-static void epochCallback(size_t epoch, float trainLoss, epochStats_t evalStats) {
+static void epochCallback(epochInfo_t info, epochStats_t evalStats) {
     struct timespec t1;
     clock_gettime(CLOCK_MONOTONIC, &t1);
     double wall_s =
@@ -179,12 +179,14 @@ static void epochCallback(size_t epoch, float trainLoss, epochStats_t evalStats)
     fprintf(g_log_file,
             "    {\"epoch\": %zu, \"step_losses\": [], \"train_loss\": %.6f, "
             "\"val_loss\": %.6f, \"val_acc\": %.6f, \"wall_s\": %.4f}",
-            epoch, (double)trainLoss, (double)evalStats.loss, (double)evalStats.accuracy, wall_s);
+            info.epoch, (double)info.trainLoss, (double)evalStats.loss, (double)evalStats.accuracy,
+            wall_s);
     fflush(g_log_file);
     g_first_epoch = 0;
 
-    fprintf(stdout, "epoch %zu: train_loss=%.4f val_loss=%.4f val_acc=%.4f wall_s=%.2f\n", epoch,
-            (double)trainLoss, (double)evalStats.loss, (double)evalStats.accuracy, wall_s);
+    fprintf(stdout, "epoch %zu: train_loss=%.4f val_loss=%.4f val_acc=%.4f wall_s=%.2f\n",
+            info.epoch, (double)info.trainLoss, (double)evalStats.loss, (double)evalStats.accuracy,
+            wall_s);
     fflush(stdout);
 
     clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
@@ -269,8 +271,8 @@ int main(void) {
                         (lossConfig_t){.funcType = CROSS_ENTROPY,
                                        .backwardReduction = REDUCTION_MEAN,
                                        .classWeights = NULL},
-                        trainLoader, valLoader, sgd, NULL, EPOCHS, calculateGradsSequential,
-                        inferenceWithLoss, epochCallback);
+                        trainLoader, valLoader, sgd, EPOCHS, calculateGradsSequential,
+                        inferenceWithLoss, &(trainingRunOptions_t){.callback = epochCallback});
         (void)result;
 
         epochStats_t testStats = evaluationEpochWithMetrics(

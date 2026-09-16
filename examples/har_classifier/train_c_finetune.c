@@ -246,7 +246,7 @@ static int g_first_epoch = 1;
 static int g_currentStage = 1;
 static struct timespec g_epoch_t0;
 
-static void epochCallback(size_t epoch, float trainLoss, epochStats_t evalStats) {
+static void epochCallback(epochInfo_t info, epochStats_t evalStats) {
     struct timespec t1;
     clock_gettime(CLOCK_MONOTONIC, &t1);
     double wall_s =
@@ -258,13 +258,13 @@ static void epochCallback(size_t epoch, float trainLoss, epochStats_t evalStats)
     fprintf(g_log_file,
             "    {\"stage\": %d, \"epoch\": %zu, \"step_losses\": [], \"train_loss\": %.6f, "
             "\"val_loss\": %.6f, \"val_acc\": %.6f, \"wall_s\": %.4f}",
-            g_currentStage, epoch, (double)trainLoss, (double)evalStats.loss,
+            g_currentStage, info.epoch, (double)info.trainLoss, (double)evalStats.loss,
             (double)evalStats.accuracy, wall_s);
     fflush(g_log_file);
     g_first_epoch = 0;
 
     fprintf(stdout, "stage%d epoch %zu: train_loss=%.4f val_loss=%.4f val_acc=%.4f wall_s=%.2f\n",
-            g_currentStage, epoch, (double)trainLoss, (double)evalStats.loss,
+            g_currentStage, info.epoch, (double)info.trainLoss, (double)evalStats.loss,
             (double)evalStats.accuracy, wall_s);
     fflush(stdout);
 
@@ -401,8 +401,8 @@ int main(void) {
         model, MODEL_SIZE,
         (lossConfig_t){
             .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL},
-        trainLoader, valLoader, sgd1, NULL, g_stage1Epochs, calculateGradsSequential,
-        inferenceWithLoss, epochCallback);
+        trainLoader, valLoader, sgd1, g_stage1Epochs, calculateGradsSequential, inferenceWithLoss,
+        &(trainingRunOptions_t){.callback = epochCallback});
     (void)stage1Result;
 
     epochStats_t stage1TestStats = evaluationEpochWithMetrics(
@@ -477,8 +477,8 @@ int main(void) {
         model2, MODEL_SIZE,
         (lossConfig_t){
             .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL},
-        trainLoader, valLoader, sgd2, NULL, g_stage2Epochs, calculateGradsSequential,
-        inferenceWithLoss, epochCallback);
+        trainLoader, valLoader, sgd2, g_stage2Epochs, calculateGradsSequential, inferenceWithLoss,
+        &(trainingRunOptions_t){.callback = epochCallback});
     (void)stage2Result;
 
     epochStats_t stage2TestStats = evaluationEpochWithMetrics(

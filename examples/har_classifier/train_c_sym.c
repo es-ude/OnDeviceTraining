@@ -547,16 +547,16 @@ static double codeMovementFraction(void) {
     return firstCall ? -1.0 : (double)changed / (double)total;
 }
 
-static void epochCallback(size_t epoch, float trainLoss, epochStats_t evalStats) {
+static void epochCallback(epochInfo_t info, epochStats_t evalStats) {
     struct timespec t1;
     clock_gettime(CLOCK_MONOTONIC, &t1);
     double wall_s =
         (double)(t1.tv_sec - g_epoch_t0.tv_sec) + (double)(t1.tv_nsec - g_epoch_t0.tv_nsec) * 1e-9;
 
     if (g_firstTrainLoss < 0.0f) {
-        g_firstTrainLoss = trainLoss;
+        g_firstTrainLoss = info.trainLoss;
     }
-    g_lastTrainLoss = trainLoss;
+    g_lastTrainLoss = info.trainLoss;
 
     if (g_log_file != NULL) {
         if (!g_first_epoch) {
@@ -565,8 +565,9 @@ static void epochCallback(size_t epoch, float trainLoss, epochStats_t evalStats)
         fprintf(g_log_file,
                 "    {\"epoch\": %zu, \"step_losses\": [], \"train_loss\": %.6f, "
                 "\"val_loss\": %.6f, \"val_acc\": %.6f, \"wall_s\": %.4f, \"lr\": %.8f",
-                epoch, (double)trainLoss, (double)evalStats.loss, (double)evalStats.accuracy,
-                wall_s, (double)optimizerFunctions[g_optim->type].getLr(g_optim));
+                info.epoch, (double)info.trainLoss, (double)evalStats.loss,
+                (double)evalStats.accuracy, wall_s,
+                (double)optimizerFunctions[g_optim->type].getLr(g_optim));
         if (g_trackMovement) {
             fprintf(g_log_file, ", \"codes_changed_frac\": %.6f", codeMovementFraction());
         }
@@ -575,8 +576,9 @@ static void epochCallback(size_t epoch, float trainLoss, epochStats_t evalStats)
     }
     g_first_epoch = 0;
 
-    fprintf(stdout, "epoch %zu: train_loss=%.4f val_loss=%.4f val_acc=%.4f wall_s=%.2f\n", epoch,
-            (double)trainLoss, (double)evalStats.loss, (double)evalStats.accuracy, wall_s);
+    fprintf(stdout, "epoch %zu: train_loss=%.4f val_loss=%.4f val_acc=%.4f wall_s=%.2f\n",
+            info.epoch, (double)info.trainLoss, (double)evalStats.loss, (double)evalStats.accuracy,
+            wall_s);
     fflush(stdout);
 
     clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
@@ -923,8 +925,8 @@ int main(void) {
         model, MODEL_SIZE,
         (lossConfig_t){
             .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL},
-        trainLoader, valLoader, sgd, sched, g_epochs, calculateGradsSequential, inferenceWithLoss,
-        epochCallback);
+        trainLoader, valLoader, sgd, g_epochs, calculateGradsSequential, inferenceWithLoss,
+        &(trainingRunOptions_t){.lrScheduler = sched, .callback = epochCallback});
     (void)result;
 
     epochStats_t testStats = evaluationEpochWithMetrics(

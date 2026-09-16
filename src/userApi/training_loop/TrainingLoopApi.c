@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 
+#include "BsScheduler.h"
 #include "Common.h"
 #include "DataLoaderApi.h"
 #include "InferenceApi.h"
@@ -282,14 +283,34 @@ classificationReport_t evaluationEpochWithReport(layer_t **model, size_t modelSi
 
 trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
                                 dataLoader_t *trainDataLoader, dataLoader_t *evalDataLoader,
-                                optimizer_t *optimizer, lrScheduler_t *scheduler,
-                                size_t numberOfEpochs, calculateGradsFn_t calculateGradsFn,
-                                inferenceWithLossFn_t inferenceFn, epochCallbackFn_t callback) {
+                                optimizer_t *optimizer, size_t numberOfEpochs,
+                                calculateGradsFn_t calculateGradsFn,
+                                inferenceWithLossFn_t inferenceFn,
+                                const trainingRunOptions_t *options) {
     trainingRunResult_t result = {0};
+    lrScheduler_t *lrScheduler = (options != NULL) ? options->lrScheduler : NULL;
+    bsScheduler_t *bsScheduler = (options != NULL) ? options->bsScheduler : NULL;
+    epochCallbackFn_t callback = (options != NULL) ? options->callback : NULL;
 
-    if (scheduler != NULL && scheduler->optimizer != optimizer) {
+    if (lrScheduler != NULL && lrScheduler->optimizer != optimizer) {
         PRINT_ERROR("trainingRun: scheduler is wired to a different optimizer than the one "
                     "passed to trainingRun (#327)");
+        exit(1);
+    }
+    if (bsScheduler != NULL && bsScheduler->dataLoader != trainDataLoader) {
+        PRINT_ERROR("trainingRun: bsScheduler is wired to a different data loader than the "
+                    "train loader passed to trainingRun (the eval loader is never resized)");
+        exit(1);
+    }
+    if (bsScheduler != NULL && bsScheduler->optimizer != NULL &&
+        bsScheduler->optimizer != optimizer) {
+        PRINT_ERROR("trainingRun: bsScheduler's LR compensation is wired to a different "
+                    "optimizer than the one passed to trainingRun");
+        exit(1);
+    }
+    if (lrScheduler != NULL && bsScheduler != NULL && bsScheduler->optimizer != NULL) {
+        PRINT_ERROR("trainingRun: lrScheduler and a compensating bsScheduler would both write "
+                    "the LR every epoch (last writer wins silently); use one or the other");
         exit(1);
     }
 
@@ -317,18 +338,31 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
             dataLoaderReshuffle(trainDataLoader);
         }
 
+        /* Captured BEFORE training: the values this epoch trains with. The
+         * schedulers step only after the callback, bsScheduler last, so the
+         * batch written now is what the next epoch's capture reads. Same
+         * datasetSize / batchSize as trainingEpochDefault's numberOfBatches. */
+        epochInfo_t info = {0};
+        info.epoch = epoch;
+        info.batchSize = trainDataLoader->batchSize;
+        info.parameterUpdates = trainDataLoader->getDatasetSize() / info.batchSize;
+        info.learningRate = optimizerFunctions[optimizer->type].getLr(optimizer);
+
         float trainLoss = trainingEpochDefault(model, modelSize, lossConfig, trainDataLoader,
                                                optimizer, calculateGradsFn, forwardReduction);
         epochStats_t evalStats =
             evaluateEpochInternal(model, modelSize, lossConfig.funcType, evalDataLoader,
                                   inferenceFn, NULL, numClasses, forwardReduction);
+        info.trainLoss = trainLoss;
 
         if (callback != NULL) {
-            callback(epoch, trainLoss, evalStats);
+            callback(info, evalStats);
         }
-
-        if (scheduler != NULL) {
-            lrSchedulerStep(scheduler);
+        if (lrScheduler != NULL) {
+            lrSchedulerStep(lrScheduler);
+        }
+        if (bsScheduler != NULL) {
+            bsSchedulerStep(bsScheduler);
         }
 
         result.finalTrainLoss = trainLoss;

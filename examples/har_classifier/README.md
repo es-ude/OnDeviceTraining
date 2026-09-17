@@ -368,9 +368,9 @@ a weight's element count — conv1 at 32/64, like the SYM g32/g64 arms), `BFP_WI
 float|tensor|N` (`float` keeps FLOAT32 wires; N resolves PER WIRE and falls back to
 per-tensor on the 6-element head wires), `BFP_MATH=native|fq`, `BFP_GRADS=0|1`,
 `BFP_STATE=0|1` (needs GRADS=1), `BFP_ROUNDING=sr|det`; plus `LR/MOMENTUM/EPOCHS/SEED/
-SHUFFLE_SEED/LR_SCHEDULE/LR_MIN/LOG_PATH`. `MOMENTUM` must be > 0: the STATE gate expects
-the optimizer's eight momentum buffers to exist, `MOMENTUM=0` allocates none, and the
-trainer exits 2.
+SHUFFLE_SEED/LR_SCHEDULE/LR_MIN/LOG_PATH`. `MOMENTUM` must be finite and > 0 — rejected at
+the env gate (exit 1); behind it the STATE gate expects the optimizer's eight momentum
+buffers to exist (`MOMENTUM=0` would allocate none).
 
 **Config names encode every knob** (`--resume`-safe):
 `bfp_wb{t|pc|N}_ab{f|t|N}_m{M}_e{E}_x{nat|fq}_g{0|1}_s{0|1}_r{sr|det}_l{const|cos}`.

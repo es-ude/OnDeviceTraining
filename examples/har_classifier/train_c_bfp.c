@@ -873,6 +873,13 @@ int main(void) {
     }
     g_lr = envFloat("LR", g_lr);
     g_momentum = envFloat("MOMENTUM", g_momentum);
+    /* sgdMCreateOptim only special-cases exactly 0 (no state); a negative or
+     * non-finite factor would allocate state, pass the STATE gate and train
+     * with v = -v + g. Reject it here with the other env-boundary errors. */
+    if (!isfinite(g_momentum) || g_momentum <= 0.0f) {
+        fprintf(stderr, "MOMENTUM=%g not supported (must be finite and > 0)\n", (double)g_momentum);
+        exit(1);
+    }
     g_epochs = envInt("EPOCHS", g_epochs);
     g_seed = (unsigned)envInt("SEED", (int)g_seed);
     g_shuffleSeed = (unsigned)envInt("SHUFFLE_SEED", (int)g_shuffleSeed);

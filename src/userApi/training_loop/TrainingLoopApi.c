@@ -293,7 +293,7 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
     epochCallbackFn_t callback = (options != NULL) ? options->callback : NULL;
 
     if (lrScheduler != NULL && lrScheduler->optimizer != optimizer) {
-        PRINT_ERROR("trainingRun: scheduler is wired to a different optimizer than the one "
+        PRINT_ERROR("trainingRun: lrScheduler is wired to a different optimizer than the one "
                     "passed to trainingRun (#327)");
         exit(1);
     }

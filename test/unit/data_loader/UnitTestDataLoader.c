@@ -6,6 +6,7 @@
 #include "Dataset.h"
 #include "DeathTest.h"
 #include "NPYLoaderApi.h"
+#include "OdtAssert.h"
 #include "QuantizationApi.h"
 #include "RNG.h"
 #include "StorageApi.h"
@@ -306,7 +307,7 @@ void testNpyLoadFlat_LoadsFullMultiDimTensor() {
     /* ASSERT on captured. */
     TEST_ASSERT_EQUAL_size_t(3, capturedRank);
     size_t expectedDims[3] = {3, 2, 4};
-    TEST_ASSERT_EQUAL_size_t_ARRAY(expectedDims, capturedDims, 3);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expectedDims, capturedDims, 3);
     TEST_ASSERT_EQUAL_size_t(24, n);
     float expected[24];
     for (size_t i = 0; i < 24; i++) {
@@ -324,7 +325,7 @@ void testShuffle() {
     rngShuffleIndices(indices, 10);
 
     size_t expected[] = {3, 1, 0, 2, 6, 7, 8, 5, 4, 9};
-    TEST_ASSERT_EQUAL_size_t_ARRAY(expected, indices, 10);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expected, indices, 10);
 }
 
 /* #381 reshuffle fixtures: dataLoaderReshuffle only touches indices/RNG state
@@ -363,7 +364,7 @@ void testReshuffleDisabledKeepsIndices() {
 
     dataLoaderReshuffle(&dl);
 
-    TEST_ASSERT_EQUAL_size_t_ARRAY(snapshot, indices, RESHUFFLE_DATASET_SIZE);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(snapshot, indices, RESHUFFLE_DATASET_SIZE);
 }
 
 void testReshufflePermutesDeterministically() {
@@ -392,7 +393,7 @@ void testReshufflePermutesDeterministically() {
     dataLoaderSetReshufflePerEpoch(&dlB, true);
     dataLoaderReshuffle(&dlB);
 
-    TEST_ASSERT_EQUAL_size_t_ARRAY(indicesA, indicesB, RESHUFFLE_DATASET_SIZE);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(indicesA, indicesB, RESHUFFLE_DATASET_SIZE);
 
     bool differsFromInit = false;
     for (size_t i = 0; i < RESHUFFLE_DATASET_SIZE; i++) {

@@ -20,6 +20,7 @@ add_elastic_ai_unit_test(
         RNG
 
         odt_test_death
+        odt_test_assert
 )
 
 target_compile_definitions(UnitTestDataLoader PRIVATE

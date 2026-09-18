@@ -116,6 +116,7 @@ add_elastic_ai_unit_test(
         Optimizer
         odt_test_death
         odt_test_layer_builders
+        odt_test_assert
 )
 
 add_elastic_ai_unit_test(

@@ -28,6 +28,7 @@
 #include "Linear.h"
 #include "LinearApi.h"
 #include "MaxPool1d.h"
+#include "OdtAssert.h"
 #include "Pool1dApi.h"
 #include "QuantLayerApi.h"
 #include "QuantizationApi.h"
@@ -1205,7 +1206,7 @@ static void testRoundTripLayerNorm(void) {
 
     TEST_ASSERT_EQUAL(2, capturedSerialNumNormDims);
     TEST_ASSERT_EQUAL(capturedSerialNumNormDims, capturedDeserialNumNormDims);
-    TEST_ASSERT_EQUAL_size_t_ARRAY(capturedSerialShape, capturedDeserialShape, 2);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(capturedSerialShape, capturedDeserialShape, 2);
     TEST_ASSERT_EQUAL(4, capturedSerialShape[0]);
     TEST_ASSERT_EQUAL(5, capturedSerialShape[1]);
     TEST_ASSERT_EQUAL_FLOAT(1e-3f, capturedSerialEps);

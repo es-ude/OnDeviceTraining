@@ -1,5 +1,6 @@
 #include "DTypes.h"
 #include "DeathTest.h"
+#include "OdtAssert.h"
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "unity.h"
@@ -440,9 +441,9 @@ void testCopyTensor() {
     size_t expectedOrderOfDims[] = {0, 1};
 
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expectedData, dest.data, numberOfValues);
-    TEST_ASSERT_EQUAL_size_t_ARRAY(expectedDims, dest.shape->dimensions, 2);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expectedDims, dest.shape->dimensions, 2);
     TEST_ASSERT_EQUAL_size_t(expectedNumberOfDims, dest.shape->numberOfDimensions);
-    TEST_ASSERT_EQUAL_size_t_ARRAY(expectedOrderOfDims, dest.shape->orderOfDimensions, 2);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expectedOrderOfDims, dest.shape->orderOfDimensions, 2);
 }
 
 void test_calcBitsPerElement_Sym_qBits3() {

@@ -47,3 +47,16 @@ Enforcement:
   deliberately exercise the optimizer implementation without a hook in the
   loop; they are outside the gate's pathspec and stay as they are.
   `optimizerStep()` itself is covered by `test/unit/common/UnitTestOdtHook.c`.
+
+## Every `optimizerFunctions[]` row implements `getLr` and `setLr`
+
+Since the batch-size scheduler port (#445) `trainingRun` calls
+`optimizerFunctions[type].getLr(optimizer)` once per epoch for **every**
+caller -- to fill `epochInfo_t.learningRate` before the epoch trains -- not
+only when an LR scheduler is wired. `LrScheduler` and a compensating
+`BsScheduler` write through `setLr`. A new optimizer row that leaves either
+accessor NULL therefore crashes on the first epoch of any `trainingRun`,
+scheduler or not. Both current rows (`SGD_M`, `ADAM_W`) implement them
+(`src/optimizer/Optimizer.c`); a new optimizer must too, and its unit test
+should pin both slots (`TEST_ASSERT_NOT_NULL(optimizerFunctions[TYPE].getLr)`
+and `setLr`, or a `trainingRun` smoke test).

@@ -42,7 +42,10 @@ typedef struct optimizer {
 typedef void (*stepFn_t)(optimizer_t *optim);
 typedef void (*zeroFn_t)(optimizer_t *optim);
 /* #327: optimizer-agnostic LR access for the scheduler. LR stays in the impl
- * structs; these accessors are the only sanctioned cross-impl path. */
+ * structs; these accessors are the only sanctioned cross-impl path.
+ * MANDATORY for every row: trainingRun reads getLr once per epoch for every
+ * caller (#445, epochInfo_t.learningRate), so a NULL slot crashes on the
+ * first epoch even without a scheduler -- docs/conventions/optimizer-step.md. */
 typedef float (*getLrFn_t)(optimizer_t *optim);
 typedef void (*setLrFn_t)(optimizer_t *optim, float learningRate);
 

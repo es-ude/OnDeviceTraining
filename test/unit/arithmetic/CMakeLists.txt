@@ -68,6 +68,7 @@ add_elastic_ai_unit_test(
         MORE_LIBS
         Tensor
         Quantization
+        odt_test_assert
 )
 
 add_elastic_ai_unit_test(

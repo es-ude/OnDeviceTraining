@@ -13,3 +13,9 @@ target_include_directories(odt_test_death INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/
 # previously inlined in those test files.
 add_library(odt_test_layer_builders INTERFACE)
 target_include_directories(odt_test_layer_builders INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+# Per-element size_t array assert (OdtAssert.h). Header-only, like
+# odt_test_death: listing `odt_test_assert` in MORE_LIBS is all a test target
+# needs to include it.
+add_library(odt_test_assert INTERFACE)
+target_include_directories(odt_test_assert INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)

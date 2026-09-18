@@ -2,6 +2,7 @@
 #include "Arithmetic.h"
 #include "DTypes.h"
 #include "Mul.h"
+#include "OdtAssert.h"
 #include "Quantization.h"
 #include "Tensor.h"
 #include "unity.h"
@@ -25,7 +26,7 @@ void testOrderDims() {
     size_t actual[numberOfDims];
     orderDims(&tensor, actual);
 
-    TEST_ASSERT_EQUAL_size_t_ARRAY(expected, actual, numberOfDims);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expected, actual, numberOfDims);
 }
 
 /*23 = [2, 1, 3]
@@ -56,7 +57,7 @@ void testCalcIndexByRawIndex() {
     size_t actual[3];
     calcIndicesByRawIndex(numberOfDimensions, dimensions, 23, actual);
 
-    TEST_ASSERT_EQUAL_size_t_ARRAY(expected, actual, numberOfDimensions);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expected, actual, numberOfDimensions);
 }
 
 void testInt32PointWiseArithmetic() {

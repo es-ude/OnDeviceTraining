@@ -15,6 +15,7 @@
 #include "LinearApi.h"
 #include "LossFunction.h"
 #include "LrScheduler.h"
+#include "OdtAssert.h"
 #include "OptimizerApi.h"
 #include "QuantizationApi.h"
 #include "ReluApi.h"
@@ -1892,14 +1893,9 @@ void testTrainingRunStepsBsSchedulerOncePerEpochAndCallbackSeesTheEpochsBatch(vo
     const size_t expectedEpoch[3] = {0, 1, 2};
     const size_t expectedBatch[3] = {1, 2, 4};
     const size_t expectedUpdates[3] = {8, 4, 2};
-    /* Per-element scalar asserts (judgment call #9): Unity 2.5.2's
-     * *_size_t_ARRAY compares UNITY_INT_WIDTH/8 = 4 bytes per element, so on
-     * LP64 it silently checks only the first ceil(N/2) size_t values. */
-    for (size_t i = 0; i < 3; i++) {
-        TEST_ASSERT_EQUAL_size_t(expectedEpoch[i], capturedEpoch[i]);
-        TEST_ASSERT_EQUAL_size_t(expectedBatch[i], capturedBatch[i]);
-        TEST_ASSERT_EQUAL_size_t(expectedUpdates[i], capturedUpdates[i]);
-    }
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expectedEpoch, capturedEpoch, 3);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expectedBatch, capturedBatch, 3);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expectedUpdates, capturedUpdates, 3);
     TEST_ASSERT_EQUAL_size_t(8, capturedFinalBatch); /* stepped after epoch 2: 4 -> 8 */
     TEST_ASSERT_EQUAL_size_t(3, capturedLastEpoch);  /* exactly once per epoch */
     TEST_ASSERT_EQUAL_FLOAT(0.01f, capturedLr);      /* optimizer == NULL: LR untouched */
@@ -1971,10 +1967,8 @@ void testTrainingRunCallbackObservesTheEpochsOwnLrAndBatchWithBothSchedulers(voi
     TEST_ASSERT_EQUAL_FLOAT(0.4f * 0.25f, capturedLr[2]);
     const size_t expectedBatch[3] = {1, 2, 4};
     const size_t expectedUpdates[3] = {4, 2, 1};
-    for (size_t i = 0; i < 3; i++) { /* scalar asserts, see judgment call #9 */
-        TEST_ASSERT_EQUAL_size_t(expectedBatch[i], capturedBatch[i]);
-        TEST_ASSERT_EQUAL_size_t(expectedUpdates[i], capturedUpdates[i]);
-    }
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expectedBatch, capturedBatch, 3);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expectedUpdates, capturedUpdates, 3);
 }
 
 void testTrainingRunCompensatingBsSchedulerWritesTheLrEachEpoch(void) {
@@ -2267,7 +2261,7 @@ void testTrainingRunReshuffleFlagOffKeepsTrainIndices(void) {
     freeEpochDataset();
 
     /* ASSERT. */
-    TEST_ASSERT_EQUAL_size_t_ARRAY(snapshot, capturedIndices, 4);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(snapshot, capturedIndices, 4);
 }
 
 void testTrainingRunReshuffleFlagOnChangesTrainButNotEvalIndices(void) {
@@ -2336,7 +2330,7 @@ void testTrainingRunReshuffleFlagOnChangesTrainButNotEvalIndices(void) {
         }
     }
     TEST_ASSERT_TRUE(trainChanged);
-    TEST_ASSERT_EQUAL_size_t_ARRAY(evalSnapshot, capturedEvalIndices, 4);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(evalSnapshot, capturedEvalIndices, 4);
 }
 
 /* Pins down the "epoch 0 uses the init shuffle" half of the #381 contract
@@ -2395,7 +2389,7 @@ void testTrainingRunReshuffleFlagOn_SingleEpochNeverReshuffles(void) {
     freeEpochDataset();
 
     /* ASSERT. */
-    TEST_ASSERT_EQUAL_size_t_ARRAY(snapshot, capturedIndices, 4);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(snapshot, capturedIndices, 4);
 }
 
 /* BFP epic PR2 Task 8 --------------------------------------------------------

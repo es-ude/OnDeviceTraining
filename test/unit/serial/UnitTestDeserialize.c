@@ -9,6 +9,7 @@
 #include "FlattenApi.h"
 #include "Layer.h"
 #include "LayerQuant.h"
+#include "OdtAssert.h"
 #include "QuantizationApi.h"
 #include "Relu.h"
 #include "ReluApi.h"
@@ -111,8 +112,8 @@ void testSerializeAndDeserializeTensor() {
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(data, capturedDeserialData, numberOfValues);
     TEST_ASSERT_EQUAL(capturedSerialQType, capturedDeserialQType);
     TEST_ASSERT_EQUAL(capturedSerialNumDims, capturedDeserialNumDims);
-    TEST_ASSERT_EQUAL_size_t_ARRAY(capturedSerialDims, capturedDeserialDims, 2);
-    TEST_ASSERT_EQUAL_size_t_ARRAY(capturedSerialOrder, capturedDeserialOrder, 2);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(capturedSerialDims, capturedDeserialDims, 2);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(capturedSerialOrder, capturedDeserialOrder, 2);
 }
 
 /* Hand-crafted malformed files exercising deserializeModel's NEW validation

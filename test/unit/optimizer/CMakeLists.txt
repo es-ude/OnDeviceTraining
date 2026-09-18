@@ -63,6 +63,7 @@ add_elastic_ai_unit_test(
         Tensor
         Common
         odt_test_death
+        odt_test_assert
 )
 
 set(GEN_ADAMW_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_adamw.h)

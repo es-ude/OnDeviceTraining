@@ -9,6 +9,7 @@
 #include "BsScheduler.h"
 #include "DataLoader.h"
 #include "DeathTest.h"
+#include "OdtAssert.h"
 #include "Optimizer.h"
 #include "Sgd.h"
 #include "unity.h"
@@ -72,19 +73,6 @@ static void runBatchSequence(bsScheduler_t *sched, const dataLoader_t *dl, size_
     }
 }
 
-/* Per-element compare instead of TEST_ASSERT_EQUAL_size_t_ARRAY: Unity's
- * UINT array style reads UNITY_INT_WIDTH/8 == 4 bytes per element on an LP64
- * host, so on a size_t[] it only ever inspects the first ceil(N/2) elements —
- * the cap/clamp steps at the END of these sequences would go unchecked. The
- * scalar size_t assert compares full 64-bit UNITY_INT values. */
-static void assertBatchSequence(const size_t *expected, const size_t *got, size_t count) {
-    for (size_t i = 0; i < count; i++) {
-        char msg[48];
-        snprintf(msg, sizeof msg, "batch mismatch at step %zu", i + 1);
-        TEST_ASSERT_EQUAL_size_t_MESSAGE(expected[i], got[i], msg);
-    }
-}
-
 /* ---- closed forms (batch = clamp(round(baseBs / gamma^...), 1, max)) ---- */
 
 void testExponentialBsGrowsAndCaps(void) {
@@ -95,7 +83,7 @@ void testExponentialBsGrowsAndCaps(void) {
     size_t got[4];
     runBatchSequence(&sched, &dl, got, 4);
     const size_t expected[4] = {32, 64, 100, 100};
-    assertBatchSequence(expected, got, 4);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expected, got, 4);
 }
 
 void testStepBsHoldsWithinAStep(void) {
@@ -106,7 +94,7 @@ void testStepBsHoldsWithinAStep(void) {
     size_t got[5];
     runBatchSequence(&sched, &dl, got, 5);
     const size_t expected[5] = {16, 32, 32, 64, 64};
-    assertBatchSequence(expected, got, 5);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expected, got, 5);
 }
 
 void testGrowingTargetRoundsToNearest(void) {
@@ -117,7 +105,7 @@ void testGrowingTargetRoundsToNearest(void) {
     size_t got[5];
     runBatchSequence(&sched, &dl, got, 5);
     const size_t expected[5] = {1, 2, 2, 2, 3};
-    assertBatchSequence(expected, got, 5);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expected, got, 5);
 }
 
 void testTieRoundsHalfAwayFromZero(void) {
@@ -129,7 +117,7 @@ void testTieRoundsHalfAwayFromZero(void) {
     size_t got[3];
     runBatchSequence(&sched, &dl, got, 3);
     const size_t expected[3] = {3, 1, 1};
-    assertBatchSequence(expected, got, 3);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expected, got, 3);
 }
 
 void testGammaAboveOneShrinksAndClampsAtOne(void) {
@@ -141,7 +129,7 @@ void testGammaAboveOneShrinksAndClampsAtOne(void) {
     size_t got[4];
     runBatchSequence(&sched, &dl, got, 4);
     const size_t expected[4] = {2, 1, 1, 1};
-    assertBatchSequence(expected, got, 4);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expected, got, 4);
 }
 
 /* ---- LR compensation ---- */

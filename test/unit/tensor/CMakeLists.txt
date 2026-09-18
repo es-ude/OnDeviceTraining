@@ -16,6 +16,7 @@ add_elastic_ai_unit_test(
         Quantization
         StorageApi
         odt_test_death
+        odt_test_assert
 )
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST

@@ -20,6 +20,7 @@ add_elastic_ai_unit_test(
 
         StorageApi
         odt_test_death
+        odt_test_assert
 )
 
 # Absolute scratch-file path so the test runs from any working directory
@@ -75,6 +76,7 @@ add_elastic_ai_unit_test(
         StorageApi
         odt_test_death
         odt_test_layer_builders
+        odt_test_assert
 )
 
 target_compile_definitions(UnitTestSerialize PRIVATE

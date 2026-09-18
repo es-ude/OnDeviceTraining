@@ -17,6 +17,12 @@ void initDataLoader(dataLoader_t *dataLoader, getSampleFn_t getSample,
         exit(1);
     }
 
+    if (batchSize == 0) {
+        /* Every consumer computes datasetSize / batchSize. */
+        PRINT_ERROR("initDataLoader: batchSize must be >= 1");
+        exit(1);
+    }
+
     dataLoader->getSample = getSample;
     dataLoader->getDatasetSize = getDatasetSize;
 

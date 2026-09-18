@@ -4,6 +4,7 @@
 #include "DataLoader.h"
 #include "DataLoaderApi.h"
 #include "Dataset.h"
+#include "DeathTest.h"
 #include "NPYLoaderApi.h"
 #include "QuantizationApi.h"
 #include "RNG.h"
@@ -448,6 +449,21 @@ void testReshuffleDrawsFromLiveRngStateNotFixedSeed() {
     TEST_ASSERT_TRUE(differsFromUnperturbed);
 }
 
+void testInitDataLoaderRejectsZeroBatchSize(void) {
+    /* Every consumer divides datasetSize / batchSize; 0 must die at init. */
+    dataLoader_t dl;
+    size_t indices[RESHUFFLE_DATASET_SIZE];
+    ASSERT_EXITS_WITH_FAILURE(initDataLoader(&dl, reshuffleDummyGetSample,
+                                             reshuffleDummyGetDatasetSize, reshuffleDummyGetBatch,
+                                             0, NULL, NULL, true, 42, indices, true));
+}
+
+void testDataLoaderInitRejectsZeroBatchSize(void) {
+    /* The API wrapper reaches the same guard. */
+    ASSERT_EXITS_WITH_FAILURE(
+        dataLoaderInit(getProxySample, getProxyDatasetSize, 0, NULL, NULL, false, 0, true));
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testGetSample);
@@ -459,5 +475,7 @@ int main() {
     RUN_TEST(testReshuffleDisabledKeepsIndices);
     RUN_TEST(testReshufflePermutesDeterministically);
     RUN_TEST(testReshuffleDrawsFromLiveRngStateNotFixedSeed);
+    RUN_TEST(testInitDataLoaderRejectsZeroBatchSize);
+    RUN_TEST(testDataLoaderInitRejectsZeroBatchSize);
     return UNITY_END();
 }

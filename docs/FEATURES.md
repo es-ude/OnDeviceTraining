@@ -409,8 +409,8 @@ checkpointing, limitations, literature).
   the eval loader; reshuffling draws from the live RNG stream instead of
   re-seeding, so every epoch gets a distinct permutation while the whole run
   stays reproducible under the one top-level seed. Plus `dropLast` (only
-  `true` supported). No dedicated MNIST loader in `src/` (examples preprocess
-  to `.npy`).
+  `true` supported). `initDataLoader` fails fast on `batchSize == 0`. No
+  dedicated MNIST loader in `src/` (examples preprocess to `.npy`).
 - **RNG** — global XorShift32, seedable and reproducible, **byte-mirrored in Python**
   and CI-verified. Drives weight init, the Dropout Bernoulli mask (swappable fill hook),
   and DataLoader shuffle.

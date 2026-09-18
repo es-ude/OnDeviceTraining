@@ -18,6 +18,8 @@ add_elastic_ai_unit_test(
         NPYLoader
 
         RNG
+
+        odt_test_death
 )
 
 target_compile_definitions(UnitTestDataLoader PRIVATE

@@ -118,7 +118,7 @@ exactly as before; the snapshot is only evaluated, never kept. The run log's
 | field | meaning |
 |---|---|
 | `diverged` | 1 iff the run ended early because an epoch's train or eval loss was non-finite; 0 otherwise |
-| `epochs_completed` | number of epochs whose callback ran (`== len(epochs)`; `< config.epochs` when `diverged`) |
+| `epochs_completed` | number of epochs whose callback ran (`== len(epochs)`; `<= config.epochs` when `diverged` — equal iff the divergence happened in the last epoch) |
 | `best_val_epoch` | epoch index of the lowest finite validation loss, or `null` if none was finite |
 | `best_val_loss` | that validation loss, or `null` |
 | `best_val_acc` | that epoch's validation accuracy, or `null` |
@@ -129,7 +129,8 @@ A diverging run (e.g. `BATCH_SIZE=1 LR=0.01` at the default develop LR, known
 to diverge for a few seeds) no longer aborts (`#446`): it ends gracefully
 after the epoch that produced the non-finite loss, exits 0, and writes
 `diverged: 1` with `epochs_completed` (and the `epochs` array) shorter than
-the requested `EPOCHS`. Stdout gains a matching line after `FINAL
+the requested `EPOCHS` unless the divergence happened in the last epoch.
+Stdout gains a matching line after `FINAL
 test_loss=… test_acc=…`:
 
 ```

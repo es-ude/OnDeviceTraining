@@ -298,7 +298,6 @@ static struct timespec g_epoch_t0;
 static float g_snapshotArena[SNAPSHOT_ARENA_FLOATS]; /* best-val-loss parameters */
 static float g_finalArena[SNAPSHOT_ARENA_FLOATS];    /* final params, parked during snapshot test */
 static optimizer_t *g_snapshotOptim = NULL;          /* whose parameter[] is snapshotted */
-static size_t g_snapshotFloats = 0;                  /* total floats across all parameters */
 static int g_haveSnapshot = 0;
 static float g_bestValLoss = INFINITY;
 static float g_bestValAcc = 0.f;
@@ -317,12 +316,21 @@ static size_t snapshotFloatCount(const optimizer_t *optim) {
     return total;
 }
 
-/* Copy every parameter tensor to (toArena != 0) or from (toArena == 0) `arena`. */
-static void paramsCopy(const optimizer_t *optim, float *arena, int toArena) {
+/* Copy every parameter tensor to (toArena != 0) or from (toArena == 0) `arena`,
+ * which holds `capacity` floats. Mirrors the FLOAT32-storage guard's fail-loud
+ * style: an offset that would run past the arena is a bug (snapshotFloatCount
+ * already gates this once at init, before training starts), not a value to
+ * silently clamp or ignore. */
+static void paramsCopy(const optimizer_t *optim, float *arena, size_t capacity, int toArena) {
     size_t offset = 0;
     for (size_t i = 0; i < optim->sizeStates; i++) {
         tensor_t *p = optim->parameter[i]->param;
         size_t n = calcNumberOfElementsByTensor(p);
+        if (offset + n > capacity) {
+            fprintf(stderr, "paramsCopy: parameter %zu overflows the %zu-float arena\n", i,
+                    capacity);
+            exit(1);
+        }
         if (toArena) {
             memcpy(&arena[offset], p->data, n * sizeof(float));
         } else {
@@ -356,7 +364,7 @@ static void epochCallback(epochInfo_t info, epochStats_t evalStats) {
     fflush(stdout);
 
     if (g_snapshotOptim != NULL && isfinite(evalStats.loss) && evalStats.loss < g_bestValLoss) {
-        paramsCopy(g_snapshotOptim, g_snapshotArena, /*toArena*/ 1);
+        paramsCopy(g_snapshotOptim, g_snapshotArena, SNAPSHOT_ARENA_FLOATS, /*toArena*/ 1);
         g_bestValLoss = evalStats.loss;
         g_bestValAcc = evalStats.accuracy;
         g_bestValEpoch = info.epoch;
@@ -517,9 +525,9 @@ int main(void) {
 #endif
 
         g_snapshotOptim = sgd;
-        g_snapshotFloats = snapshotFloatCount(sgd);
-        if (g_snapshotFloats > SNAPSHOT_ARENA_FLOATS) {
-            fprintf(stderr, "snapshot arena too small: %zu floats\n", g_snapshotFloats);
+        size_t snapshotFloats = snapshotFloatCount(sgd);
+        if (snapshotFloats > SNAPSHOT_ARENA_FLOATS) {
+            fprintf(stderr, "snapshot arena too small: %zu floats\n", snapshotFloats);
             return 1;
         }
 
@@ -593,11 +601,11 @@ int main(void) {
          * the same (final) model and only the *_at_best_val fields are new. */
         epochStats_t bestTest = {0};
         if (g_haveSnapshot) {
-            paramsCopy(g_snapshotOptim, g_finalArena, /*toArena*/ 1);
-            paramsCopy(g_snapshotOptim, g_snapshotArena, /*toArena*/ 0);
+            paramsCopy(g_snapshotOptim, g_finalArena, SNAPSHOT_ARENA_FLOATS, /*toArena*/ 1);
+            paramsCopy(g_snapshotOptim, g_snapshotArena, SNAPSHOT_ARENA_FLOATS, /*toArena*/ 0);
             bestTest = evaluationEpochWithMetrics(model, MODEL_SIZE, CROSS_ENTROPY, testLoader,
                                                   inferenceWithLoss, REDUCTION_MEAN);
-            paramsCopy(g_snapshotOptim, g_finalArena, /*toArena*/ 0);
+            paramsCopy(g_snapshotOptim, g_finalArena, SNAPSHOT_ARENA_FLOATS, /*toArena*/ 0);
         }
 
         /* Leave the JSON object OPEN (no closing brace): the "memory" block, if

@@ -12,7 +12,9 @@ float crossEntropyForwardFloat(tensor_t *softmaxOutput, tensor_t *distribution,
  * the dtype-generic fake-quant arm, which dequantizes both operands through
  * convertTensor before running the float core. Every other dtype fails fast:
  * the raw float impl casts the data buffer to float*, so e.g. ASYM codes would
- * be silently reinterpreted as float bit patterns. */
+ * be silently reinterpreted as float bit patterns.
+ * Returns NaN (and prints one PRINT_ERROR per process) when any softmax
+ * element is non-finite; it no longer aborts (#446). */
 float crossEntropyForward(tensor_t *softmaxOutput, tensor_t *distribution, reduction_t reduction);
 
 void crossEntropySoftmaxBackward(tensor_t *softmaxOutput, tensor_t *distribution, tensor_t *loss);

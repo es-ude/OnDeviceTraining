@@ -270,8 +270,9 @@ Notes on the qualified cells:
   design. Contract: step only at an epoch boundary (`getBatch` addresses
   `index * batchSize`; the `datasetSize % batchSize` tail is dropped every
   epoch, so a growing batch drops a growing tail). Wired through
-  `trainingRunOptions_t` (`lrScheduler`, `bsScheduler`, `callback`, all
-  NULLable; `trainingRun(..., options)` with `NULL` = the old defaults): per
+  `trainingRunOptions_t` (`lrScheduler`, `bsScheduler`, `callback` — all
+  NULLable — and `stopOnNonFiniteLoss`, defaulting to `false`;
+  `trainingRun(..., options)` with `NULL` = the old defaults): per
   epoch the callback receives `epochInfo_t` (`epoch`, `trainLoss`, `batchSize`,
   `parameterUpdates`, `learningRate` — the values the epoch trained with),
   then `lrSchedulerStep`, then `bsSchedulerStep` last. Init guards: NULL
@@ -288,10 +289,13 @@ Notes on the qualified cells:
   (`BS_SCHEDULE`/`BS_LR_COMPENSATION`/… env knobs,
   `examples/har_classifier/README.md`).
 - **Best-val-loss snapshot + graceful divergence** (HAR float32 harness,
-  2026-09-19): `trainingRunOptions_t.stopOnNonFiniteLoss` ends `trainingRun`
-  after the first epoch whose train or eval loss is non-finite instead of
-  aborting (`#446`); the harness sets it, snapshots the optimizer's parameters
-  into a static arena whenever the validation loss strictly improves, and
+  2026-09-19): `crossEntropyForward` returns NaN instead of aborting on a
+  non-finite softmax (`#446`); `trainingRunOptions_t.stopOnNonFiniteLoss` is
+  the separate, opt-in run-level stop built on top of that — it ends
+  `trainingRun` after the first epoch whose train or eval loss is non-finite,
+  rather than running the full `numberOfEpochs`. The harness sets it,
+  snapshots the optimizer's parameters into a static arena whenever the
+  validation loss strictly improves, and
   after training evaluates the test set on that snapshot before restoring the
   final parameters (predictions/plots keep describing the final model). The
   run log's `final` block records `diverged`, `epochs_completed`,
@@ -403,7 +407,9 @@ checkpointing, limitations, literature).
   are fake-quant, #206: dequant, float core, requant). CE backward is the **fused softmax+CE
   gradient** (`softmaxOutput − target`), and the training loop skips the Softmax layer
   in backprop. Backward emits **raw per-element grads**; the mean divisor is deferred to
-  the optimizer via `computeMeanScale` × `scaleOptimizerGradients`.
+  the optimizer via `computeMeanScale` × `scaleOptimizerGradients`. `crossEntropyForward`
+  returns NaN (and prints one PRINT_ERROR per process) when any softmax element is
+  non-finite; it no longer aborts (`#446`).
 - **Training loop** — `trainingRun` → epoch → batch → pluggable `calculateGradsFn`.
   A "batch" is gradient accumulation over B=1 microbatches. Metrics: loss, accuracy,
   macro precision/recall/F1, and a caller-owned confusion matrix

@@ -1,5 +1,6 @@
 """Test examples/_shared/log_schema.py."""
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -104,6 +105,8 @@ def test_diverged_c_log_roundtrips(tmp_path):
     back = load_log(path)
     assert back["final"]["diverged"] == 1 and back["final"]["epochs_completed"] == 2
     assert back["final"]["best_val_epoch"] == 0 and back["final"]["test_acc_at_best_val"] == 0.52
+    assert math.isnan(back["final"]["test_loss"])
+    assert math.isnan(back["epochs"][1]["train_loss"])
 
 
 def test_c_bfp_log_without_sym_bits_loads(tmp_path):

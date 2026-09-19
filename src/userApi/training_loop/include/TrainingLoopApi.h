@@ -71,7 +71,8 @@ typedef struct classificationReport {
 typedef struct trainingRunResult {
     float finalTrainLoss;
     epochStats_t finalEvalStats;
-    size_t epochsCompleted;      /* epochs whose callback ran (== numberOfEpochs unless stopped) */
+    size_t epochsCompleted;      /* epochs that completed training + evaluation (== numberOfEpochs
+                                    unless stopped) */
     bool stoppedOnNonFiniteLoss; /* true iff stopOnNonFiniteLoss ended the run early */
 } trainingRunResult_t;
 

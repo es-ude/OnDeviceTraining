@@ -321,7 +321,7 @@ static size_t snapshotFloatCount(const optimizer_t *optim) {
  * style: an offset that would run past the arena is a bug (snapshotFloatCount
  * already gates this once at init, before training starts), not a value to
  * silently clamp or ignore. */
-static void paramsCopy(const optimizer_t *optim, float *arena, size_t capacity, int toArena) {
+static void paramsCopy(optimizer_t *optim, float *arena, size_t capacity, int toArena) {
     size_t offset = 0;
     for (size_t i = 0; i < optim->sizeStates; i++) {
         tensor_t *p = optim->parameter[i]->param;
@@ -539,6 +539,7 @@ int main(void) {
         lrScheduler_t lrSched;
         bsScheduler_t bsSched;
         trainingRunOptions_t options = {.callback = epochCallback};
+        /* final.diverged in the log is derived from this stop; keep it on */
         options.stopOnNonFiniteLoss = true;
         if (strcmp(g_lrSchedule, "step") == 0) {
             stepLrInit(&lrSched, sgd, (size_t)g_stepSize, g_gamma);

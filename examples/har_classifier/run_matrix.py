@@ -188,13 +188,22 @@ def is_complete(log_path: Path, epochs: int, seed: int) -> bool:
 
 
 def parse_final_acc(stdout: str) -> float | None:
-    """Parse the 'test_acc=<float>' token from the trainer's FINAL output line."""
-    for token in stdout.split():
-        if token.startswith("test_acc="):
-            try:
-                return float(token[len("test_acc="):])
-            except ValueError:
-                return None
+    """Parse the 'test_acc=<float>' token from the trainer's FINAL output line.
+
+    Anchored to the line starting with 'FINAL ' (a space): the harness also
+    prints an optional 'FINAL@best-val ...' line that carries its own
+    test_acc= token (best-val-loss snapshot + graceful divergence, #446),
+    which must never be picked up here.
+    """
+    for line in stdout.splitlines():
+        if not line.startswith("FINAL "):
+            continue
+        for token in line.split():
+            if token.startswith("test_acc="):
+                try:
+                    return float(token[len("test_acc="):])
+                except ValueError:
+                    return None
     return None
 
 

@@ -117,11 +117,11 @@ exactly as before; the snapshot is only evaluated, never kept. The run log's
 
 | field | meaning |
 |---|---|
-| `diverged` | 1 iff the run ended early because an epoch's train or eval loss was non-finite; 0 otherwise |
+| `diverged` | 1 iff the run stopped at the first non-finite train or validation loss (in the last epoch this leaves `epochs_completed == EPOCHS`); 0 otherwise |
 | `epochs_completed` | number of epochs whose callback ran (`== len(epochs)`; `<= config.epochs` when `diverged` — equal iff the divergence happened in the last epoch) |
-| `best_val_epoch` | epoch index of the lowest finite validation loss, or `null` if none was finite |
+| `best_val_epoch` | 0-based, the same index as `epochs[].epoch`; the epoch with the LOWEST validation loss, or `null` if none was finite |
 | `best_val_loss` | that validation loss, or `null` |
-| `best_val_acc` | that epoch's validation accuracy, or `null` |
+| `best_val_acc` | validation accuracy AT that epoch (not the maximum val acc), or `null` |
 | `test_loss_at_best_val` | test-set loss evaluated on the snapshotted (best-val) parameters, or `null` |
 | `test_acc_at_best_val` | test-set accuracy evaluated on the snapshotted parameters, or `null` |
 
@@ -130,8 +130,7 @@ to diverge for a few seeds) no longer aborts (`#446`): it ends gracefully
 after the epoch that produced the non-finite loss, exits 0, and writes
 `diverged: 1` with `epochs_completed` (and the `epochs` array) shorter than
 the requested `EPOCHS` unless the divergence happened in the last epoch.
-Stdout gains a matching line after `FINAL
-test_loss=… test_acc=…`:
+Stdout gains a matching line after `FINAL test_loss=… test_acc=…`:
 
 ```
 FINAL@best-val epoch=<n> val_loss=<f> val_acc=<f> test_loss=<f> test_acc=<f>

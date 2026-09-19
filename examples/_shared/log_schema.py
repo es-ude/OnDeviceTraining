@@ -68,13 +68,16 @@ class FinalLog(TypedDict):
     test_loss: float
     test_acc: float | None
     test_auc: float | None
-    diverged: NotRequired[int]  # 2026-09-19 best-val-loss snapshot + graceful divergence (HAR float32 harness)
-    epochs_completed: NotRequired[int]  # 2026-09-19 best-val-loss snapshot + graceful divergence (HAR float32 harness)
-    best_val_epoch: NotRequired[int | None]  # 2026-09-19 best-val-loss snapshot + graceful divergence (HAR float32 harness)
-    best_val_loss: NotRequired[float | None]  # 2026-09-19 best-val-loss snapshot + graceful divergence (HAR float32 harness)
-    best_val_acc: NotRequired[float | None]  # 2026-09-19 best-val-loss snapshot + graceful divergence (HAR float32 harness)
-    test_loss_at_best_val: NotRequired[float | None]  # 2026-09-19 best-val-loss snapshot + graceful divergence (HAR float32 harness)
-    test_acc_at_best_val: NotRequired[float | None]  # 2026-09-19 best-val-loss snapshot + graceful divergence (HAR float32 harness)
+    # 2026-09-19 best-val-loss snapshot + graceful divergence (HAR float32 harness only;
+    # best_val_epoch is 0-based like epochs[].epoch and selected by lowest val loss; the
+    # five best_*/…_at_best_val keys are null when no epoch had a finite val loss)
+    diverged: NotRequired[int]
+    epochs_completed: NotRequired[int]
+    best_val_epoch: NotRequired[int | None]
+    best_val_loss: NotRequired[float | None]
+    best_val_acc: NotRequired[float | None]
+    test_loss_at_best_val: NotRequired[float | None]
+    test_acc_at_best_val: NotRequired[float | None]
 
 
 class MemoryLog(TypedDict):

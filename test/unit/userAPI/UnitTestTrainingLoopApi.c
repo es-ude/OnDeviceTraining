@@ -2481,6 +2481,102 @@ void testTrainingRun_StopsOnNonFiniteLossWhenRequested(void) {
     TEST_ASSERT_EQUAL_size_t(capturedEpochs, capturedCallbacks);
 }
 
+/* Pin: a divergence on the LAST epoch is still a "completed" epoch, not a
+ * short run. With numberOfEpochs == 1, the only epoch trains, evaluates,
+ * diverges, and the loop breaks -- but epochsCompleted was already set to
+ * epoch + 1 == 1 before the stop check runs, so it reads == numberOfEpochs
+ * exactly like a non-stopped run would. */
+void testTrainingRun_StopOnNonFiniteLoss_LastEpochStillCountsAsCompleted(void) {
+    tensor_t *wParam = buildFloatTensor2D(2, 2, (float[]){1.f, 0.f, 0.f, 1.f}, 4);
+    tensor_t *wGrad = gradInitFloat(wParam, NULL);
+    parameter_t *w = parameterInit(wParam, wGrad);
+    tensor_t *bParam = buildFloatTensor2D(1, 2, (float[]){0.f, 0.f}, 2);
+    tensor_t *bGrad = gradInitFloat(bParam, NULL);
+    parameter_t *b = parameterInit(bParam, bGrad);
+    quantization_t testQ;
+    initFloat32Quantization(&testQ);
+    layer_t *linear = buildBorrowedLinearLayer(w, b, &testQ);
+    layer_t *model[] = {linear};
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(1e30f, 0.f, 0.f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    initEpochDataset();
+    dataLoader_t *trainDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *evalDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+
+    trainingRunResult_t result =
+        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+                    trainDl, evalDl, sgd, 1, calculateGradsSequential, inferenceWithLoss,
+                    &(trainingRunOptions_t){.stopOnNonFiniteLoss = true});
+
+    size_t capturedEpochs = result.epochsCompleted;
+    bool capturedStopped = result.stoppedOnNonFiniteLoss;
+
+    freeOptim(sgd);
+    freeQuantization(momentumQ);
+    freeDataLoader(evalDl);
+    freeDataLoader(trainDl);
+    freeLinearLayerShellOnly(linear);
+    freeEpochDataset();
+
+    TEST_ASSERT_TRUE(capturedStopped);
+    TEST_ASSERT_EQUAL_size_t(1, capturedEpochs);
+}
+
+/* Pin: the loop breaks on the stopping epoch BEFORE lrSchedulerStep runs
+ * (TrainingLoopApi.c's stop check precedes the scheduler-step block). An
+ * attached lrScheduler must therefore have stepped exactly
+ * epochsCompleted - 1 times, mirroring testTrainingRunStepsSchedulerOncePerEpoch's
+ * fixture but counting via lrScheduler_t's own lastEpoch (which counts
+ * lrSchedulerStep() calls) instead of deriving it from the LR value. */
+void testTrainingRun_StopOnNonFiniteLoss_DoesNotStepSchedulersOnTheStoppingEpoch(void) {
+    tensor_t *wParam = buildFloatTensor2D(2, 2, (float[]){1.f, 0.f, 0.f, 1.f}, 4);
+    tensor_t *wGrad = gradInitFloat(wParam, NULL);
+    parameter_t *w = parameterInit(wParam, wGrad);
+    tensor_t *bParam = buildFloatTensor2D(1, 2, (float[]){0.f, 0.f}, 2);
+    tensor_t *bGrad = gradInitFloat(bParam, NULL);
+    parameter_t *b = parameterInit(bParam, bGrad);
+    quantization_t testQ;
+    initFloat32Quantization(&testQ);
+    layer_t *linear = buildBorrowedLinearLayer(w, b, &testQ);
+    layer_t *model[] = {linear};
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(1e30f, 0.f, 0.f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    initEpochDataset();
+    dataLoader_t *trainDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *evalDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+
+    lrScheduler_t sched;
+    stepLrInit(&sched, sgd, 1, 0.5f); /* halve every epoch */
+    trainingRunResult_t result =
+        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+                    trainDl, evalDl, sgd, 6, calculateGradsSequential, inferenceWithLoss,
+                    &(trainingRunOptions_t){.lrScheduler = &sched, .stopOnNonFiniteLoss = true});
+
+    size_t capturedEpochs = result.epochsCompleted;
+    size_t capturedSchedulerSteps = sched.lastEpoch;
+
+    freeOptim(sgd);
+    freeQuantization(momentumQ);
+    freeDataLoader(evalDl);
+    freeDataLoader(trainDl);
+    freeLinearLayerShellOnly(linear);
+    freeEpochDataset();
+
+    TEST_ASSERT_TRUE(result.stoppedOnNonFiniteLoss);
+    /* If the LR 1e30 fixture diverges at epoch 0 (the expected case), this is
+     * 0 -- asserted structurally against epochsCompleted, not a literal, so
+     * the pin holds regardless of exactly which epoch diverges. */
+    TEST_ASSERT_EQUAL_size_t(capturedEpochs - 1, capturedSchedulerSteps);
+}
+
 /* BFP epic PR2 Task 8 --------------------------------------------------------
  * argmax over a BFP output wire. Mantissa order is NOT value order for BFP:
  * every GROUP carries its own exponent, so a small value in a fine-grained group
@@ -2615,5 +2711,7 @@ int main(void) {
     RUN_TEST(testTrainingRunReshuffleFlagOn_SingleEpochNeverReshuffles);
     RUN_TEST(testTrainingRun_DefaultRunsAllEpochsThroughNonFiniteLoss);
     RUN_TEST(testTrainingRun_StopsOnNonFiniteLossWhenRequested);
+    RUN_TEST(testTrainingRun_StopOnNonFiniteLoss_LastEpochStillCountsAsCompleted);
+    RUN_TEST(testTrainingRun_StopOnNonFiniteLoss_DoesNotStepSchedulersOnTheStoppingEpoch);
     return UNITY_END();
 }

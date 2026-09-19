@@ -79,6 +79,33 @@ def test_extended_c_log_roundtrips(tmp_path):
     assert load_log(path) == log
 
 
+def test_snapshot_and_divergence_final_keys_are_declared_optional():
+    optional = FinalLog.__optional_keys__
+    for key in ("diverged", "epochs_completed", "best_val_epoch", "best_val_loss", "best_val_acc",
+                "test_loss_at_best_val", "test_acc_at_best_val"):
+        assert key in optional, key
+    assert "test_loss" in FinalLog.__required_keys__
+
+
+def test_diverged_c_log_roundtrips(tmp_path):
+    log = {
+        "impl": "c", "example": "har_classifier",
+        "config": {"epochs": 3, "batch": 1, "lr": 0.01, "momentum": 0.9, "seed": 0, "shuffle_seed": 0},
+        "epochs": [{"epoch": 0, "step_losses": [], "train_loss": 1.2, "val_loss": 1.1, "val_acc": 0.5,
+                    "wall_s": 1.0},
+                   {"epoch": 1, "step_losses": [], "train_loss": float("nan"), "val_loss": float("nan"),
+                    "val_acc": 0.17, "wall_s": 1.0}],
+        "final": {"test_loss": float("nan"), "test_acc": 0.17, "test_auc": None, "diverged": 1,
+                  "epochs_completed": 2, "best_val_epoch": 0, "best_val_loss": 1.1, "best_val_acc": 0.5,
+                  "test_loss_at_best_val": 1.05, "test_acc_at_best_val": 0.52},
+    }
+    path = tmp_path / "div.json"
+    dump_log(path, log)
+    back = load_log(path)
+    assert back["final"]["diverged"] == 1 and back["final"]["epochs_completed"] == 2
+    assert back["final"]["best_val_epoch"] == 0 and back["final"]["test_acc_at_best_val"] == 0.52
+
+
 def test_c_bfp_log_without_sym_bits_loads(tmp_path):
     log = {
         "impl": "c-bfp", "example": "har_classifier",

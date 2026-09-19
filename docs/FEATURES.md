@@ -287,6 +287,16 @@ Notes on the qualified cells:
   any caller. Exercised by the HAR float32 harness
   (`BS_SCHEDULE`/`BS_LR_COMPENSATION`/… env knobs,
   `examples/har_classifier/README.md`).
+- **Best-val-loss snapshot + graceful divergence** (HAR float32 harness,
+  2026-09-19): `trainingRunOptions_t.stopOnNonFiniteLoss` ends `trainingRun`
+  after the first epoch whose train or eval loss is non-finite instead of
+  aborting (`#446`); the harness sets it, snapshots the optimizer's parameters
+  into a static arena whenever the validation loss strictly improves, and
+  after training evaluates the test set on that snapshot before restoring the
+  final parameters (predictions/plots keep describing the final model). The
+  run log's `final` block records `diverged`, `epochs_completed`,
+  `best_val_epoch`, `best_val_loss`, `best_val_acc`, `test_loss_at_best_val`,
+  `test_acc_at_best_val` (`examples/har_classifier/README.md`).
 - **Frozen layers** (#380 PR1) — `collectTrainableParameters` and
   `calcTotalNumberOfStates` both skip any layer with `layerIsFrozen() == true`:
   zero contribution to the parameter count, the collected slot array, and

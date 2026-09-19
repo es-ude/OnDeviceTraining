@@ -290,6 +290,48 @@ static FILE *g_log_file = NULL;
 static int g_first_epoch = 1;
 static struct timespec g_epoch_t0;
 
+/* Best-val-loss snapshot (2026-09-19): the parameters of the epoch with the
+ * lowest validation loss, kept in a static arena (no allocation in examples,
+ * docs/CONVENTIONS.md). The model has ~10 k float32 parameters; the arena is
+ * sized generously and the count is verified once at init. */
+#define SNAPSHOT_ARENA_FLOATS 32768
+static float g_snapshotArena[SNAPSHOT_ARENA_FLOATS]; /* best-val-loss parameters */
+static float g_finalArena[SNAPSHOT_ARENA_FLOATS];    /* final params, parked during snapshot test */
+static optimizer_t *g_snapshotOptim = NULL;          /* whose parameter[] is snapshotted */
+static size_t g_snapshotFloats = 0;                  /* total floats across all parameters */
+static int g_haveSnapshot = 0;
+static float g_bestValLoss = INFINITY;
+static float g_bestValAcc = 0.f;
+static size_t g_bestValEpoch = 0;
+
+static size_t snapshotFloatCount(const optimizer_t *optim) {
+    size_t total = 0;
+    for (size_t i = 0; i < optim->sizeStates; i++) {
+        tensor_t *p = optim->parameter[i]->param;
+        if (p->quantization->type != FLOAT32) {
+            fprintf(stderr, "snapshot: parameter %zu is not FLOAT32 storage\n", i);
+            exit(1);
+        }
+        total += calcNumberOfElementsByTensor(p);
+    }
+    return total;
+}
+
+/* Copy every parameter tensor to (toArena != 0) or from (toArena == 0) `arena`. */
+static void paramsCopy(const optimizer_t *optim, float *arena, int toArena) {
+    size_t offset = 0;
+    for (size_t i = 0; i < optim->sizeStates; i++) {
+        tensor_t *p = optim->parameter[i]->param;
+        size_t n = calcNumberOfElementsByTensor(p);
+        if (toArena) {
+            memcpy(&arena[offset], p->data, n * sizeof(float));
+        } else {
+            memcpy(p->data, &arena[offset], n * sizeof(float));
+        }
+        offset += n;
+    }
+}
+
 static void epochCallback(epochInfo_t info, epochStats_t evalStats) {
     struct timespec t1;
     clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -312,6 +354,14 @@ static void epochCallback(epochInfo_t info, epochStats_t evalStats) {
             info.epoch, (double)info.trainLoss, (double)evalStats.loss, (double)evalStats.accuracy,
             wall_s);
     fflush(stdout);
+
+    if (g_snapshotOptim != NULL && isfinite(evalStats.loss) && evalStats.loss < g_bestValLoss) {
+        paramsCopy(g_snapshotOptim, g_snapshotArena, /*toArena*/ 1);
+        g_bestValLoss = evalStats.loss;
+        g_bestValAcc = evalStats.accuracy;
+        g_bestValEpoch = info.epoch;
+        g_haveSnapshot = 1;
+    }
 
     clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
 }
@@ -466,6 +516,13 @@ int main(void) {
         markAfterOpt = memProfileMark(); /* optstate_b = delta */
 #endif
 
+        g_snapshotOptim = sgd;
+        g_snapshotFloats = snapshotFloatCount(sgd);
+        if (g_snapshotFloats > SNAPSHOT_ARENA_FLOATS) {
+            fprintf(stderr, "snapshot arena too small: %zu floats\n", g_snapshotFloats);
+            return 1;
+        }
+
         /* One trainingRun call; the knobs only populate the options struct.
          * BS_LR_COMPENSATION=1 hands the optimizer to the batch scheduler (the
          * "BC" arm); together with LR_SCHEDULE != none that combination is
@@ -474,6 +531,7 @@ int main(void) {
         lrScheduler_t lrSched;
         bsScheduler_t bsSched;
         trainingRunOptions_t options = {.callback = epochCallback};
+        options.stopOnNonFiniteLoss = true;
         if (strcmp(g_lrSchedule, "step") == 0) {
             stepLrInit(&lrSched, sgd, (size_t)g_stepSize, g_gamma);
             options.lrScheduler = &lrSched;
@@ -526,21 +584,52 @@ int main(void) {
                                        .classWeights = NULL},
                         trainLoader, valLoader, sgd, g_epochs, calculateGradsSequential,
                         inferenceWithLoss, &options);
-        (void)result;
 
         epochStats_t testStats = evaluationEpochWithMetrics(
             model, MODEL_SIZE, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN);
+
+        /* Additive: evaluate the test set on the snapshot, then put the FINAL
+         * parameters back, so predictions, plots and final.test_* all describe
+         * the same (final) model and only the *_at_best_val fields are new. */
+        epochStats_t bestTest = {0};
+        if (g_haveSnapshot) {
+            paramsCopy(g_snapshotOptim, g_finalArena, /*toArena*/ 1);
+            paramsCopy(g_snapshotOptim, g_snapshotArena, /*toArena*/ 0);
+            bestTest = evaluationEpochWithMetrics(model, MODEL_SIZE, CROSS_ENTROPY, testLoader,
+                                                  inferenceWithLoss, REDUCTION_MEAN);
+            paramsCopy(g_snapshotOptim, g_finalArena, /*toArena*/ 0);
+        }
 
         /* Leave the JSON object OPEN (no closing brace): the "memory" block, if
          * profiling is enabled, is appended after predictions are written. */
         fprintf(g_log_file,
                 "\n  ],\n"
-                "  \"final\": {\"test_loss\": %.6f, \"test_acc\": %.6f, \"test_auc\": null}",
-                (double)testStats.loss, (double)testStats.accuracy);
+                "  \"final\": {\"test_loss\": %.6f, \"test_acc\": %.6f, \"test_auc\": null, "
+                "\"diverged\": %d, \"epochs_completed\": %zu",
+                (double)testStats.loss, (double)testStats.accuracy,
+                result.stoppedOnNonFiniteLoss ? 1 : 0, result.epochsCompleted);
+        if (g_haveSnapshot) {
+            fprintf(g_log_file,
+                    ", \"best_val_epoch\": %zu, \"best_val_loss\": %.6f, \"best_val_acc\": %.6f, "
+                    "\"test_loss_at_best_val\": %.6f, \"test_acc_at_best_val\": %.6f}",
+                    g_bestValEpoch, (double)g_bestValLoss, (double)g_bestValAcc,
+                    (double)bestTest.loss, (double)bestTest.accuracy);
+        } else {
+            fprintf(g_log_file, ", \"best_val_epoch\": null, \"best_val_loss\": null, "
+                                "\"best_val_acc\": null, \"test_loss_at_best_val\": null, "
+                                "\"test_acc_at_best_val\": null}");
+        }
         fflush(g_log_file);
 
         fprintf(stdout, "FINAL test_loss=%.4f test_acc=%.4f\n", (double)testStats.loss,
                 (double)testStats.accuracy);
+        if (g_haveSnapshot) {
+            fprintf(stdout,
+                    "FINAL@best-val epoch=%zu val_loss=%.4f val_acc=%.4f test_loss=%.4f "
+                    "test_acc=%.4f\n",
+                    g_bestValEpoch, (double)g_bestValLoss, (double)g_bestValAcc,
+                    (double)bestTest.loss, (double)bestTest.accuracy);
+        }
     }
 
     /* Predictions on test set (both modes). */

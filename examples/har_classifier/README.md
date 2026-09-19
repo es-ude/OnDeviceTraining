@@ -104,6 +104,42 @@ BS_SCHEDULE=exp GAMMA=0.97 BATCH_SIZE=1 $B                      # BS: batch / 0.
 BS_SCHEDULE=exp GAMMA=0.97 BATCH_SIZE=1 BS_LR_COMPENSATION=1 $B  # BC: as BS, LR corrected for rounding/cap
 ```
 
+### Best-val-loss snapshot and divergence
+
+`train_c_har_classifier` keeps a snapshot of the optimizer's parameters from
+the epoch with the lowest validation loss so far (`stopOnNonFiniteLoss` is
+always on for this harness; a NaN/Inf validation loss is never "best"). After
+training, the snapshot is loaded and evaluated on the test set, then the
+**final** (last-epoch) parameters are restored — `final.test_loss`/`test_acc`,
+`outputs/c_predictions.npy` and the plots all keep describing the final model
+exactly as before; the snapshot is only evaluated, never kept. The run log's
+`final` block gains seven fields:
+
+| field | meaning |
+|---|---|
+| `diverged` | 1 iff the run ended early because an epoch's train or eval loss was non-finite; 0 otherwise |
+| `epochs_completed` | number of epochs whose callback ran (`== len(epochs)`; `< config.epochs` when `diverged`) |
+| `best_val_epoch` | epoch index of the lowest finite validation loss, or `null` if none was finite |
+| `best_val_loss` | that validation loss, or `null` |
+| `best_val_acc` | that epoch's validation accuracy, or `null` |
+| `test_loss_at_best_val` | test-set loss evaluated on the snapshotted (best-val) parameters, or `null` |
+| `test_acc_at_best_val` | test-set accuracy evaluated on the snapshotted parameters, or `null` |
+
+A diverging run (e.g. `BATCH_SIZE=1 LR=0.01` at the default develop LR, known
+to diverge for a few seeds) no longer aborts (`#446`): it ends gracefully
+after the epoch that produced the non-finite loss, exits 0, and writes
+`diverged: 1` with `epochs_completed` (and the `epochs` array) shorter than
+the requested `EPOCHS`. Stdout gains a matching line after `FINAL
+test_loss=… test_acc=…`:
+
+```
+FINAL@best-val epoch=<n> val_loss=<f> val_acc=<f> test_loss=<f> test_acc=<f>
+```
+
+printed only when at least one epoch produced a finite validation loss (i.e.
+a snapshot exists — divergence in epoch 0 leaves no snapshot, and the five
+`best_val_*` / `*_at_best_val` fields are `null`).
+
 ## Packed-SYM weight-quantization memory study
 
 A second trainer, `train_c_har_classifier_sym` (source `train_c_sym.c`), trains

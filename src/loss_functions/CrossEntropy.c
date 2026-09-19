@@ -20,9 +20,19 @@ float crossEntropyForwardFloat(tensor_t *softmaxOutput, tensor_t *distribution,
         float pi = p[i];
 
         if (!isfinite(pi)) {
-            printf("NaN/Inf softmax at %zu\n", i);
-            printf("%f\n", pi);
-            abort();
+            /* #446: a diverged model (NaN/Inf logits) must not take the
+             * process down. Return NaN so the training loop can see the
+             * divergence (trainingRunOptions_t.stopOnNonFiniteLoss) and the
+             * harness can log it. Printed once per process, not per call:
+             * at batch 1 this runs thousands of times per epoch. */
+            static int reported = 0;
+            if (!reported) {
+                PRINT_ERROR("crossEntropyForward: non-finite softmax output at element %zu "
+                            "(%f); returning NaN loss (#446)",
+                            i, (double)pi);
+                reported = 1;
+            }
+            return NAN;
         }
 
         pi = fmaxf(pi, 1e-7f);

@@ -568,6 +568,27 @@ void testCrossEntropySoftmaxBackwardFloat32RejectsLossWireCountMismatch(void) {
     freeTensor(floatP);
 }
 
+void testCrossEntropyForward_NonFiniteSoftmaxReturnsNanInsteadOfAborting(void) {
+    size_t inputSize = 3;
+    float softmaxData[] = {0.5f, NAN, 0.5f};
+    size_t dims[] = {1, inputSize};
+    size_t order[] = {0, 1};
+    shape_t shape;
+    setShape(&shape, dims, 2, order);
+    quantization_t q;
+    initFloat32Quantization(&q);
+    tensor_t softmaxOutput;
+    setTensorValues(&softmaxOutput, (uint8_t *)softmaxData, &shape, &q, NULL);
+
+    float distData[] = {0.f, 1.f, 0.f};
+    tensor_t distribution;
+    setTensorValues(&distribution, (uint8_t *)distData, &shape, &q, NULL);
+
+    float loss = crossEntropyForward(&softmaxOutput, &distribution, REDUCTION_MEAN);
+
+    TEST_ASSERT_TRUE(isnan(loss));
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -589,5 +610,6 @@ int main() {
     RUN_TEST(testCrossEntropySoftmaxBackwardBfpRejectsLossWireCountMismatch);
     RUN_TEST(testCrossEntropyForwardFloat32RejectsDistributionCountMismatch);
     RUN_TEST(testCrossEntropySoftmaxBackwardFloat32RejectsLossWireCountMismatch);
+    RUN_TEST(testCrossEntropyForward_NonFiniteSoftmaxReturnsNanInsteadOfAborting);
     return UNITY_END();
 }

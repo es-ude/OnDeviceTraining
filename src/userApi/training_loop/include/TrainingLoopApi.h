@@ -1,6 +1,8 @@
 #ifndef TRAINING_LOOP_API_H
 #define TRAINING_LOOP_API_H
 
+#include <stdbool.h>
+
 #include "DataLoader.h"
 #include "InferenceApi.h"
 #include "LossFunction.h"
@@ -43,7 +45,9 @@ typedef struct classificationReport {
     size_t numClasses;
 } classificationReport_t;
 
-/*! Final result of trainingRun() after the last epoch completed.
+/*! Final result of trainingRun() after the last epoch completed — either the
+ * last of numberOfEpochs, or, when stopOnNonFiniteLoss ended the run early,
+ * the first epoch whose train or eval loss was non-finite.
  *
  * `finalTrainLoss` and `finalEvalStats.loss` share the same unit (per-sample
  * mean of the configured loss function) but are measured over different
@@ -67,6 +71,8 @@ typedef struct classificationReport {
 typedef struct trainingRunResult {
     float finalTrainLoss;
     epochStats_t finalEvalStats;
+    size_t epochsCompleted;      /* epochs whose callback ran (== numberOfEpochs unless stopped) */
+    bool stoppedOnNonFiniteLoss; /* true iff stopOnNonFiniteLoss ended the run early */
 } trainingRunResult_t;
 
 typedef trainingStats_t *(*calculateGradsFn_t)(layer_t **model, size_t modelSize,
@@ -100,6 +106,8 @@ typedef struct trainingRunOptions {
     lrScheduler_t *lrScheduler; /* NULLable; stepped once per epoch after the callback (#327) */
     bsScheduler_t *bsScheduler; /* NULLable; stepped once per epoch after lrScheduler */
     epochCallbackFn_t callback; /* NULLable */
+    bool stopOnNonFiniteLoss;   /* end the run after the first epoch whose train or eval loss is
+                                    not finite */
 } trainingRunOptions_t;
 
 void freeTrainingStats(trainingStats_t *trainingStats);

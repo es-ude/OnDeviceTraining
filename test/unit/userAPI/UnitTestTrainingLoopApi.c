@@ -1,5 +1,6 @@
 #define SOURCE_FILE "UNIT_TEST_TRAINING_LOOP_API"
 
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -2392,6 +2393,94 @@ void testTrainingRunReshuffleFlagOn_SingleEpochNeverReshuffles(void) {
     ODT_ASSERT_EQUAL_size_t_ARRAY(snapshot, capturedIndices, 4);
 }
 
+/* A learning rate of 1e30 blows the 2x2 linear model up on the first step; the
+ * next epoch's MSE is inf. Default options (no stop flag): all epochs run. */
+void testTrainingRun_DefaultRunsAllEpochsThroughNonFiniteLoss(void) {
+    tensor_t *wParam = buildFloatTensor2D(2, 2, (float[]){1.f, 0.f, 0.f, 1.f}, 4);
+    tensor_t *wGrad = gradInitFloat(wParam, NULL);
+    parameter_t *w = parameterInit(wParam, wGrad);
+    tensor_t *bParam = buildFloatTensor2D(1, 2, (float[]){0.f, 0.f}, 2);
+    tensor_t *bGrad = gradInitFloat(bParam, NULL);
+    parameter_t *b = parameterInit(bParam, bGrad);
+    quantization_t testQ;
+    initFloat32Quantization(&testQ);
+    layer_t *linear = buildBorrowedLinearLayer(w, b, &testQ);
+    layer_t *model[] = {linear};
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(1e30f, 0.f, 0.f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    initEpochDataset();
+    dataLoader_t *trainDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *evalDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+
+    trainingRunResult_t result =
+        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+                    trainDl, evalDl, sgd, 6, calculateGradsSequential, inferenceWithLoss, NULL);
+
+    size_t capturedEpochs = result.epochsCompleted;
+    bool capturedStopped = result.stoppedOnNonFiniteLoss;
+    float capturedLoss = result.finalTrainLoss;
+
+    freeOptim(sgd);
+    freeQuantization(momentumQ);
+    freeDataLoader(evalDl);
+    freeDataLoader(trainDl);
+    freeLinearLayerShellOnly(linear);
+    freeEpochDataset();
+
+    TEST_ASSERT_EQUAL_size_t(6, capturedEpochs);
+    TEST_ASSERT_FALSE(capturedStopped);
+    TEST_ASSERT_FALSE(isfinite(capturedLoss));
+}
+
+void testTrainingRun_StopsOnNonFiniteLossWhenRequested(void) {
+    tensor_t *wParam = buildFloatTensor2D(2, 2, (float[]){1.f, 0.f, 0.f, 1.f}, 4);
+    tensor_t *wGrad = gradInitFloat(wParam, NULL);
+    parameter_t *w = parameterInit(wParam, wGrad);
+    tensor_t *bParam = buildFloatTensor2D(1, 2, (float[]){0.f, 0.f}, 2);
+    tensor_t *bGrad = gradInitFloat(bParam, NULL);
+    parameter_t *b = parameterInit(bParam, bGrad);
+    quantization_t testQ;
+    initFloat32Quantization(&testQ);
+    layer_t *linear = buildBorrowedLinearLayer(w, b, &testQ);
+    layer_t *model[] = {linear};
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(1e30f, 0.f, 0.f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    initEpochDataset();
+    dataLoader_t *trainDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *evalDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+    cbCallCount = 0;
+
+    trainingRunResult_t result = trainingRun(
+        model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, trainDl,
+        evalDl, sgd, 6, calculateGradsSequential, inferenceWithLoss,
+        &(trainingRunOptions_t){.callback = captureCallback, .stopOnNonFiniteLoss = true});
+
+    size_t capturedEpochs = result.epochsCompleted;
+    bool capturedStopped = result.stoppedOnNonFiniteLoss;
+    size_t capturedCallbacks = cbCallCount;
+
+    freeOptim(sgd);
+    freeQuantization(momentumQ);
+    freeDataLoader(evalDl);
+    freeDataLoader(trainDl);
+    freeLinearLayerShellOnly(linear);
+    freeEpochDataset();
+
+    TEST_ASSERT_TRUE(capturedStopped);
+    TEST_ASSERT_TRUE(capturedEpochs < 6);
+    TEST_ASSERT_TRUE(capturedEpochs >= 1);
+    /* The diverged epoch is still reported to the callback before the run ends. */
+    TEST_ASSERT_EQUAL_size_t(capturedEpochs, capturedCallbacks);
+}
+
 /* BFP epic PR2 Task 8 --------------------------------------------------------
  * argmax over a BFP output wire. Mantissa order is NOT value order for BFP:
  * every GROUP carries its own exponent, so a small value in a fine-grained group
@@ -2524,5 +2613,7 @@ int main(void) {
     RUN_TEST(testTrainingRunReshuffleFlagOffKeepsTrainIndices);
     RUN_TEST(testTrainingRunReshuffleFlagOnChangesTrainButNotEvalIndices);
     RUN_TEST(testTrainingRunReshuffleFlagOn_SingleEpochNeverReshuffles);
+    RUN_TEST(testTrainingRun_DefaultRunsAllEpochsThroughNonFiniteLoss);
+    RUN_TEST(testTrainingRun_StopsOnNonFiniteLossWhenRequested);
     return UNITY_END();
 }

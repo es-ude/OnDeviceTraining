@@ -1,5 +1,6 @@
 #define SOURCE_FILE "TRAINING_LOOP_API"
 
+#include <math.h>
 #include <stddef.h>
 #include <stdlib.h>
 
@@ -291,6 +292,7 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
     lrScheduler_t *lrScheduler = (options != NULL) ? options->lrScheduler : NULL;
     bsScheduler_t *bsScheduler = (options != NULL) ? options->bsScheduler : NULL;
     epochCallbackFn_t callback = (options != NULL) ? options->callback : NULL;
+    bool stopOnNonFiniteLoss = (options != NULL) ? options->stopOnNonFiniteLoss : false;
 
     if (lrScheduler != NULL && lrScheduler->optimizer != optimizer) {
         PRINT_ERROR("trainingRun: lrScheduler is wired to a different optimizer than the one "
@@ -358,15 +360,22 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
         if (callback != NULL) {
             callback(info, evalStats);
         }
+        result.epochsCompleted = epoch + 1;
+        result.finalTrainLoss = trainLoss;
+        result.finalEvalStats = evalStats;
+
+        /* Opt-in divergence stop: the epoch that diverged is logged (callback
+         * above) and reported as the final one; nothing steps past it. */
+        if (stopOnNonFiniteLoss && (!isfinite(trainLoss) || !isfinite(evalStats.loss))) {
+            result.stoppedOnNonFiniteLoss = true;
+            break;
+        }
         if (lrScheduler != NULL) {
             lrSchedulerStep(lrScheduler);
         }
         if (bsScheduler != NULL) {
             bsSchedulerStep(bsScheduler);
         }
-
-        result.finalTrainLoss = trainLoss;
-        result.finalEvalStats = evalStats;
     }
 
     return result;

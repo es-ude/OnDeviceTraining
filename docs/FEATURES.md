@@ -73,8 +73,9 @@ Notes on the qualified cells:
   grid, fed by a block-alignment shift) plus one funnel backward op that
   recomputes the forward from the logits; `softmaxSetBfpExpShiftRounding` picks
   the rounding of the integer shift sites (TRUNC default, orthogonal to
-  `roundingMode_t`, not serialized). Its FLOAT32/SYM backward arms run outside
-  the funnel and therefore still reject BFP wires.
+  `roundingMode_t`, not serialized). Both BFP arms take a single row only (`[N]` or
+  `[1, N]`; more rows fail fast, #152, §5.9 R-S7). Its FLOAT32/SYM backward arms run
+  outside the funnel and therefore still reject BFP wires.
 - **`QUANTIZATION`** is a pure storage-to-storage conversion node (`executeConvert`,
   conversionMatrix), not an arithmetic layer — it deliberately changes dtype/scale.
 - **Quant params** — trainable weight/bias storage. The Linear/Conv factories allocate

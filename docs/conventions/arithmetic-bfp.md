@@ -1294,6 +1294,17 @@ instead of a runtime guard). The honest backward opt-outs: CrossEntropy
 coupling (the fused gradient makes the loop skip the layer entirely), a
 Quantization layer around the softmax, or FLOAT32 wires.
 
+**R-S7 — single row only (#152, D3).** The native pipeline runs ONE
+max/alignment grid and ONE partition sum over the whole wire, while the
+FLOAT32/SYM arms normalize per row (row = axis 0 over everything after it; a
+rank-1 input is one row). Per-row BFP softmax is out of scope of the
+FLOAT32-only micro-batch work, so both `ARITH_BFP` arms fail fast at op entry
+when the input has more than one row (`softmaxBfpRequireSingleRow`; the
+backward check sits after the `propLoss == NULL` return, R-S4's ordering).
+`[N]` and `[1, N]` are one row and run unchanged
+(`unitTestSoftmax{Forward,Backward}BfpSingleRowRank2MatchesRank1`,
+`testSoftmax{Forward,Backward}BfpRejectsMultiRow`).
+
 **Error analysis (spec §10 item 4's deliverable for softmax, mirroring
 §5.8's parts).**
 

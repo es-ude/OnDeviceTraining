@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "BatchView.h"
 #include "DeathTest.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
@@ -1182,6 +1183,139 @@ void testGradInitRejectsGroupedBfpTemplate(void) {
     });
 }
 
+/* ---- batchViewOf (#152 PR3a): the loop owns the batch axis ----------------
+ * All fixtures are stack-only (no *Init* call): a view never allocates, so the
+ * sample it wraps does not need to either. */
+
+/* Compile-time contract: batchViewOf(batchView_t *, tensor_t *) -> tensor_t *. */
+_Static_assert(_Generic((&batchViewOf), tensor_t *(*)(batchView_t *, tensor_t *): 1, default: 0),
+               "batchViewOf must take (batchView_t *, tensor_t *) and return tensor_t *");
+
+void testBatchViewOfPrependsUnitBatchAxisAndSharesPointers(void) {
+    float data[6] = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f};
+    size_t dims[2] = {2, 3};
+    size_t order[2] = {0, 1};
+    shape_t shape = {.numberOfDimensions = 2, .dimensions = dims, .orderOfDimensions = order};
+    quantization_t q;
+    initFloat32Quantization(&q);
+    sparsity_t sp = {.type = SPARSITY_TYPE_1, .config = NULL};
+    tensor_t sample = {
+        .data = (uint8_t *)data, .shape = &shape, .quantization = &q, .sparsity = &sp};
+
+    batchView_t view;
+    tensor_t *v = batchViewOf(&view, &sample);
+
+    TEST_ASSERT_EQUAL_PTR(&view.tensor, v);
+    TEST_ASSERT_EQUAL_size_t(3, v->shape->numberOfDimensions);
+    TEST_ASSERT_EQUAL_size_t(1, v->shape->dimensions[0]);
+    TEST_ASSERT_EQUAL_size_t(2, v->shape->dimensions[1]);
+    TEST_ASSERT_EQUAL_size_t(3, v->shape->dimensions[2]);
+    TEST_ASSERT_EQUAL_size_t(0, v->shape->orderOfDimensions[0]);
+    TEST_ASSERT_EQUAL_size_t(1, v->shape->orderOfDimensions[1]);
+    TEST_ASSERT_EQUAL_size_t(2, v->shape->orderOfDimensions[2]);
+    TEST_ASSERT_EQUAL_size_t(6, calcNumberOfElementsByTensor(v));
+    /* zero-copy: every pointer domain except the shape is the sample's own */
+    TEST_ASSERT_EQUAL_PTR(sample.data, v->data);
+    TEST_ASSERT_EQUAL_PTR(&q, v->quantization);
+    TEST_ASSERT_EQUAL_PTR(&sp, v->sparsity);
+    /* the shape is the view's own storage, and the sample's is untouched */
+    TEST_ASSERT_EQUAL_PTR(&view.shape, v->shape);
+    TEST_ASSERT_EQUAL_size_t(2, shape.numberOfDimensions);
+    TEST_ASSERT_EQUAL_size_t(2, dims[0]);
+    TEST_ASSERT_EQUAL_size_t(3, dims[1]);
+}
+
+void testBatchViewOfCarriesPermutedOrderShiftedByOne(void) {
+    /* A zero-copy-transposed sample: order is a non-identity permutation. The
+     * view keeps the batch axis in front (order[0] = 0) and shifts every sample
+     * axis index by one. */
+    float data[24] = {0};
+    size_t dims[3] = {2, 3, 4};
+    size_t order[3] = {2, 0, 1};
+    shape_t shape = {.numberOfDimensions = 3, .dimensions = dims, .orderOfDimensions = order};
+    quantization_t q;
+    initFloat32Quantization(&q);
+    tensor_t sample = {
+        .data = (uint8_t *)data, .shape = &shape, .quantization = &q, .sparsity = NULL};
+
+    batchView_t view;
+    tensor_t *v = batchViewOf(&view, &sample);
+
+    size_t expectedDims[4] = {1, 2, 3, 4};
+    size_t expectedOrder[4] = {0, 3, 1, 2};
+    TEST_ASSERT_EQUAL_size_t(4, v->shape->numberOfDimensions);
+    for (size_t i = 0; i < 4; i++) {
+        TEST_ASSERT_EQUAL_size_t(expectedDims[i], v->shape->dimensions[i]);
+        TEST_ASSERT_EQUAL_size_t(expectedOrder[i], v->shape->orderOfDimensions[i]);
+    }
+    TEST_ASSERT_NULL(v->sparsity);
+}
+
+void testBatchViewOfRefillWithLowerRankLeavesNoStaleAxes(void) {
+    /* One stack view reused across samples (the loop pattern): a rank-1 refill
+     * after a rank-3 fill must describe exactly [1, 5]. */
+    float big[24] = {0};
+    size_t bigDims[3] = {2, 3, 4};
+    size_t bigOrder[3] = {0, 1, 2};
+    shape_t bigShape = {
+        .numberOfDimensions = 3, .dimensions = bigDims, .orderOfDimensions = bigOrder};
+    float small[5] = {0};
+    size_t smallDims[1] = {5};
+    size_t smallOrder[1] = {0};
+    shape_t smallShape = {
+        .numberOfDimensions = 1, .dimensions = smallDims, .orderOfDimensions = smallOrder};
+    quantization_t q;
+    initFloat32Quantization(&q);
+    tensor_t bigSample = {.data = (uint8_t *)big, .shape = &bigShape, .quantization = &q};
+    tensor_t smallSample = {.data = (uint8_t *)small, .shape = &smallShape, .quantization = &q};
+
+    batchView_t view = {0}; /* zero-init: a stale-rank bug reads a defined 0, not garbage */
+    (void)batchViewOf(&view, &bigSample);
+    tensor_t *v = batchViewOf(&view, &smallSample);
+
+    TEST_ASSERT_EQUAL_size_t(2, v->shape->numberOfDimensions);
+    TEST_ASSERT_EQUAL_size_t(1, v->shape->dimensions[0]);
+    TEST_ASSERT_EQUAL_size_t(5, v->shape->dimensions[1]);
+    TEST_ASSERT_EQUAL_size_t(0, v->shape->orderOfDimensions[0]);
+    TEST_ASSERT_EQUAL_size_t(1, v->shape->orderOfDimensions[1]);
+    TEST_ASSERT_EQUAL_size_t(5, calcNumberOfElementsByTensor(v));
+    TEST_ASSERT_EQUAL_PTR(small, v->data);
+}
+
+void testBatchViewOfAcceptsRankSevenFillingEveryViewSlot(void) {
+    /* Boundary: rank 7 + the batch axis == BATCH_VIEW_MAX_RANK (8) is legal. */
+    float data[1] = {0.f};
+    size_t dims[7] = {1, 1, 1, 1, 1, 1, 1};
+    size_t order[7] = {6, 5, 4, 3, 2, 1, 0};
+    shape_t shape = {.numberOfDimensions = 7, .dimensions = dims, .orderOfDimensions = order};
+    quantization_t q;
+    initFloat32Quantization(&q);
+    tensor_t sample = {.data = (uint8_t *)data, .shape = &shape, .quantization = &q};
+
+    batchView_t view;
+    tensor_t *v = batchViewOf(&view, &sample);
+
+    TEST_ASSERT_EQUAL_size_t(BATCH_VIEW_MAX_RANK, v->shape->numberOfDimensions);
+    TEST_ASSERT_EQUAL_size_t(0, v->shape->orderOfDimensions[0]);
+    TEST_ASSERT_EQUAL_size_t(7, v->shape->orderOfDimensions[1]);
+    TEST_ASSERT_EQUAL_size_t(1, v->shape->orderOfDimensions[7]);
+}
+
+void testBatchViewOfRejectsRankEight(void) {
+    /* rank 8 + the batch axis = 9 > BATCH_VIEW_MAX_RANK: fail fast, never write
+     * past the view's fixed arrays. */
+    float data[1] = {0.f};
+    size_t dims[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    size_t order[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+    shape_t shape = {.numberOfDimensions = 8, .dimensions = dims, .orderOfDimensions = order};
+    quantization_t q;
+    initFloat32Quantization(&q);
+    tensor_t sample = {.data = (uint8_t *)data, .shape = &shape, .quantization = &q};
+
+    batchView_t view;
+    ASSERT_EXITS_WITH_FAILURE(batchViewOf(&view, &sample));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testTensorInitWithDistribution_Zeros_InitializesProductOfDimsValues);
@@ -1232,5 +1366,10 @@ int main(void) {
     RUN_TEST(testRequantizeTensorInPlaceRejectsMismatchedGroupShapeBfp);
     RUN_TEST(testGradInitAcceptsPerTensorBfpTemplate);
     RUN_TEST(testGradInitRejectsGroupedBfpTemplate);
+    RUN_TEST(testBatchViewOfPrependsUnitBatchAxisAndSharesPointers);
+    RUN_TEST(testBatchViewOfCarriesPermutedOrderShiftedByOne);
+    RUN_TEST(testBatchViewOfRefillWithLowerRankLeavesNoStaleAxes);
+    RUN_TEST(testBatchViewOfAcceptsRankSevenFillingEveryViewSlot);
+    RUN_TEST(testBatchViewOfRejectsRankEight);
     return UNITY_END();
 }

@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "ArithmeticType.h"
+#include "BatchView.h"
 #include "BorrowedLayer.h"
 #include "BsScheduler.h"
 #include "CalculateGradsSequential.h"
@@ -57,6 +58,21 @@ static tensor_t *buildFloatTensor2D(size_t d0, size_t d1, const float *src, size
     setShape(shape, dims, 2, order);
     tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
     tensorFillFromFloatBuffer(t, src, count);
+    return t;
+}
+
+/* Rank-1 [n] float tensor: the NATURAL shape of a feature-vector sample or a
+ * class-vector label. batch_t consumers add the batch axis themselves (#152
+ * PR3a); a direct tensor-level call wraps it with batchViewOf. */
+static tensor_t *buildFloatTensor1D(size_t n, const float *src) {
+    size_t *dims = reserveMemory(sizeof(size_t));
+    dims[0] = n;
+    size_t *order = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(t, src, n);
     return t;
 }
 
@@ -167,17 +183,22 @@ void testEvaluationBatch_ReturnsAverageLoss() {
     layer_t *linear = buildBorrowedLinearLayer(w, b, &testQ);
     layer_t *model[] = {linear};
 
-    /* Create 2 samples manually */
-    tensor_t *input0 = buildFloatTensor2D(1, 3, (float[]){0.f, 1.f, 2.f}, 3);
-    tensor_t *label0 = buildFloatTensor2D(1, 2, (float[]){10.f, 20.f}, 2);
-    tensor_t *input1 = buildFloatTensor2D(1, 3, (float[]){1.f, 0.f, 0.f}, 3);
-    tensor_t *label1 = buildFloatTensor2D(1, 2, (float[]){5.f, 5.f}, 2);
+    /* Create 2 natural-shape samples manually */
+    tensor_t *input0 = buildFloatTensor1D(3, (float[]){0.f, 1.f, 2.f});
+    tensor_t *label0 = buildFloatTensor1D(2, (float[]){10.f, 20.f});
+    tensor_t *input1 = buildFloatTensor1D(3, (float[]){1.f, 0.f, 0.f});
+    tensor_t *label1 = buildFloatTensor1D(2, (float[]){5.f, 5.f});
 
-    /* Compute expected losses via inferenceWithLoss directly.
-     * evaluationBatch now returns a pure sum (no division); expected = sum of
-     * per-sample MEAN losses. */
-    inferenceStats_t *stats0 = inferenceWithLoss(model, 1, input0, label0, MSE, REDUCTION_MEAN);
-    inferenceStats_t *stats1 = inferenceWithLoss(model, 1, input1, label1, MSE, REDUCTION_MEAN);
+    /* Compute expected losses via inferenceWithLoss directly (tensor-level:
+     * takes [B, ...], so the samples are wrapped). evaluationBatch returns a
+     * pure sum (no division); expected = sum of per-sample MEAN losses. */
+    batchView_t in0View, lb0View, in1View, lb1View;
+    inferenceStats_t *stats0 =
+        inferenceWithLoss(model, 1, batchViewOf(&in0View, input0), batchViewOf(&lb0View, label0),
+                          MSE, REDUCTION_MEAN);
+    inferenceStats_t *stats1 =
+        inferenceWithLoss(model, 1, batchViewOf(&in1View, input1), batchViewOf(&lb1View, label1),
+                          MSE, REDUCTION_MEAN);
     float expectedSumLoss = stats0->loss + stats1->loss;
     freeInferenceStats(stats0);
     freeInferenceStats(stats1);
@@ -245,8 +266,8 @@ static void initEpochDataset() {
         return;
     }
     for (size_t i = 0; i < 4; i++) {
-        epochItems[i] = buildFloatTensor2D(1, 2, epochItemDataLiteral[i], 2);
-        epochLabels[i] = buildFloatTensor2D(1, 2, epochLabelDataLiteral[i], 2);
+        epochItems[i] = buildFloatTensor1D(2, epochItemDataLiteral[i]);
+        epochLabels[i] = buildFloatTensor1D(2, epochLabelDataLiteral[i]);
     }
 
     epochItemsArr.array = epochItems;
@@ -376,21 +397,23 @@ void testTrainingBatchDefault_ReturnsAverageLossAndAccumulatesGrads() {
     layer_t *linear = buildBorrowedLinearLayer(w, b, &testQ);
     layer_t *model[] = {linear};
 
-    /* Compute expected: run calculateGradsSequential manually per sample */
-    tensor_t *in0 = buildFloatTensor2D(1, 3, (float[]){-4.f, 1.f, 9.f}, 3);
-    tensor_t *lb0 = buildFloatTensor2D(1, 2, (float[]){59.f, -23.f}, 2);
-    tensor_t *in1 = buildFloatTensor2D(1, 3, (float[]){5.f, -1.f, 2.f}, 3);
-    tensor_t *lb1 = buildFloatTensor2D(1, 2, (float[]){43.f, 249.f}, 2);
+    /* Compute expected: run calculateGradsSequential manually per sample
+     * (natural-shape samples, wrapped for the tensor-level call). */
+    tensor_t *in0 = buildFloatTensor1D(3, (float[]){-4.f, 1.f, 9.f});
+    tensor_t *lb0 = buildFloatTensor1D(2, (float[]){59.f, -23.f});
+    tensor_t *in1 = buildFloatTensor1D(3, (float[]){5.f, -1.f, 2.f});
+    tensor_t *lb1 = buildFloatTensor1D(2, (float[]){43.f, 249.f});
+    batchView_t in0View, lb0View, in1View, lb1View;
 
     /* Get expected losses from individual calculateGrads calls.
      * Use REDUCTION_MEAN + batchSize=2 to match what trainingBatchDefault threads
      * through when called with forwardReduction=REDUCTION_MEAN. */
     trainingStats_t *ts0 = calculateGradsSequential(
         model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-        REDUCTION_MEAN, in0, lb0);
+        REDUCTION_MEAN, batchViewOf(&in0View, in0), batchViewOf(&lb0View, lb0));
     trainingStats_t *ts1 = calculateGradsSequential(
         model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-        REDUCTION_MEAN, in1, lb1);
+        REDUCTION_MEAN, batchViewOf(&in1View, in1), batchViewOf(&lb1View, lb1));
     float expectedAvg = (ts0->loss + ts1->loss) / 2.0f;
     freeTrainingStats(ts0);
     freeTrainingStats(ts1);
@@ -450,17 +473,18 @@ void testTrainingBatchDefault_SumAggregatesWithoutDivision() {
     layer_t *linear = buildBorrowedLinearLayer(w, b, &testQ);
     layer_t *model[] = {linear};
 
-    tensor_t *in0 = buildFloatTensor2D(1, 3, (float[]){-4.f, 1.f, 9.f}, 3);
-    tensor_t *lb0 = buildFloatTensor2D(1, 2, (float[]){59.f, -23.f}, 2);
-    tensor_t *in1 = buildFloatTensor2D(1, 3, (float[]){5.f, -1.f, 2.f}, 3);
-    tensor_t *lb1 = buildFloatTensor2D(1, 2, (float[]){43.f, 249.f}, 2);
+    tensor_t *in0 = buildFloatTensor1D(3, (float[]){-4.f, 1.f, 9.f});
+    tensor_t *lb0 = buildFloatTensor1D(2, (float[]){59.f, -23.f});
+    tensor_t *in1 = buildFloatTensor1D(3, (float[]){5.f, -1.f, 2.f});
+    tensor_t *lb1 = buildFloatTensor1D(2, (float[]){43.f, 249.f});
+    batchView_t in0View, lb0View, in1View, lb1View;
 
     trainingStats_t *ts0 = calculateGradsSequential(
         model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-        REDUCTION_SUM, in0, lb0);
+        REDUCTION_SUM, batchViewOf(&in0View, in0), batchViewOf(&lb0View, lb0));
     trainingStats_t *ts1 = calculateGradsSequential(
         model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-        REDUCTION_SUM, in1, lb1);
+        REDUCTION_SUM, batchViewOf(&in1View, in1), batchViewOf(&lb1View, lb1));
     float expectedSum = ts0->loss + ts1->loss;
     freeTrainingStats(ts0);
     freeTrainingStats(ts1);
@@ -784,8 +808,8 @@ static void initSymMetricsDataset() {
     if (symMetricsDatasetInit) {
         return;
     }
-    symMetricsItem = buildFloatTensor2D(1, 2, (float[]){-1.f, -0.5f}, 2);
-    symMetricsLabel = buildFloatTensor2D(1, 2, (float[]){0.f, 1.f}, 2);
+    symMetricsItem = buildFloatTensor1D(2, (float[]){-1.f, -0.5f});
+    symMetricsLabel = buildFloatTensor1D(2, (float[]){0.f, 1.f});
     symMetricsDatasetInit = true;
 }
 
@@ -908,8 +932,8 @@ static void initSingleSampleDataset() {
     if (singleSampleDatasetInit) {
         return;
     }
-    singleSampleItem = buildFloatTensor2D(1, 4, (float[]){1.f, 1.f, 1.f, 1.f}, 4);
-    singleSampleLabel = buildFloatTensor2D(1, 4, (float[]){0.f, 0.f, 0.f, 0.f}, 4);
+    singleSampleItem = buildFloatTensor1D(4, (float[]){1.f, 1.f, 1.f, 1.f});
+    singleSampleLabel = buildFloatTensor1D(4, (float[]){0.f, 0.f, 0.f, 0.f});
     singleSampleItemsArr.array = &singleSampleItem;
     singleSampleItemsArr.size = 1;
     singleSampleLabelsArr.array = &singleSampleLabel;
@@ -1029,8 +1053,8 @@ static void initPartialDataset() {
         return;
     }
     for (size_t i = 0; i < 4; i++) {
-        partialItems[i] = buildFloatTensor2D(1, 2, partialItemDataLiteral[i], 2);
-        partialLabels[i] = buildFloatTensor2D(1, 2, partialLabelDataLiteral[i], 2);
+        partialItems[i] = buildFloatTensor1D(2, partialItemDataLiteral[i]);
+        partialLabels[i] = buildFloatTensor1D(2, partialLabelDataLiteral[i]);
     }
 
     partialItemsArr.array = partialItems;
@@ -1137,8 +1161,8 @@ static void initZeroPredDataset() {
         return;
     }
     for (size_t i = 0; i < 3; i++) {
-        zeroPredItems[i] = buildFloatTensor2D(1, 2, zeroPredItemDataLiteral[i], 2);
-        zeroPredLabels[i] = buildFloatTensor2D(1, 2, zeroPredLabelDataLiteral[i], 2);
+        zeroPredItems[i] = buildFloatTensor1D(2, zeroPredItemDataLiteral[i]);
+        zeroPredLabels[i] = buildFloatTensor1D(2, zeroPredLabelDataLiteral[i]);
     }
 
     zeroPredItemsArr.array = zeroPredItems;
@@ -2646,8 +2670,8 @@ static size_t getBfpMetricsDatasetSize(void) {
 }
 
 void testEvaluationEpochWithMetrics_BfpOutputWireDequantCompares() {
-    bfpMetricsItem = buildFloatTensor2D(1, 2, (float[]){1.f, 1.f}, 2);
-    bfpMetricsLabel = buildFloatTensor2D(1, 2, (float[]){0.f, 1.f}, 2);
+    bfpMetricsItem = buildFloatTensor1D(2, (float[]){1.f, 1.f});
+    bfpMetricsLabel = buildFloatTensor1D(2, (float[]){0.f, 1.f});
 
     dataLoader_t *dl = dataLoaderInit(getBfpMetricsSample, getBfpMetricsDatasetSize, 1, NULL, NULL,
                                       false, 0, true);
@@ -2666,11 +2690,254 @@ void testEvaluationEpochWithMetrics_BfpOutputWireDequantCompares() {
                                      "(2.09375) wins on value, class 0 wins on raw mantissa");
 }
 
+/* ---- #152 PR3a: batch_t consumers add the batch axis -----------------------
+ * Datasets deliver samples in their natural shape; trainingBatchDefault,
+ * trainingEpochDefault, evaluationBatch and evaluateBatchInternal hand the
+ * model [1, ...] batchViewOf views. The probes below stand in for
+ * calculateGradsFn / inferenceFn and record what they were handed -- no layer
+ * runs, so a natural-shape tensor reaching the callback is a clean assertion
+ * failure, whatever a real layer would do with that rank. */
+
+typedef struct {
+    size_t calls;
+    size_t inputRank;
+    size_t inputDims[4];
+    size_t inputOrder[4];
+    const uint8_t *inputData;
+    size_t labelRank;
+    size_t labelDims[4];
+    const uint8_t *labelData;
+} shapeProbe_t;
+
+static shapeProbe_t g_probe;
+static tensor_t *g_probeGrad; /* non-NULL: probeGrads adds 1.0f to every element */
+
+static void recordProbe(const tensor_t *input, const tensor_t *label) {
+    g_probe.calls++;
+    g_probe.inputRank = input->shape->numberOfDimensions;
+    for (size_t d = 0; d < g_probe.inputRank && d < 4; d++) {
+        g_probe.inputDims[d] = input->shape->dimensions[d];
+        g_probe.inputOrder[d] = input->shape->orderOfDimensions[d];
+    }
+    g_probe.inputData = input->data;
+    g_probe.labelRank = label->shape->numberOfDimensions;
+    for (size_t d = 0; d < g_probe.labelRank && d < 4; d++) {
+        g_probe.labelDims[d] = label->shape->dimensions[d];
+    }
+    g_probe.labelData = label->data;
+}
+
+static trainingStats_t *probeGrads(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
+                                   reduction_t forwardReduction, tensor_t *input, tensor_t *label) {
+    (void)model;
+    (void)modelSize;
+    (void)lossConfig;
+    (void)forwardReduction;
+    recordProbe(input, label);
+    if (g_probeGrad != NULL) {
+        float *g = (float *)g_probeGrad->data;
+        size_t n = calcNumberOfElementsByTensor(g_probeGrad);
+        for (size_t i = 0; i < n; i++) {
+            g[i] += 1.0f; /* a raw per-element grad of 1, accumulated like backward */
+        }
+    }
+    trainingStats_t *stats = reserveMemory(sizeof(trainingStats_t));
+    stats->output = buildFloatTensor2D(1, 1, (float[]){0.f}, 1);
+    stats->loss = 0.25f;
+    return stats;
+}
+
+/* Echoes the label as a [1, C] output row, so predicted == target. */
+static inferenceStats_t *probeInference(layer_t **model, size_t numberOfLayers, tensor_t *input,
+                                        tensor_t *label, lossFuncType_t funcType,
+                                        reduction_t forwardReduction) {
+    (void)model;
+    (void)numberOfLayers;
+    (void)funcType;
+    (void)forwardReduction;
+    recordProbe(input, label);
+    size_t c = calcNumberOfElementsByTensor(label);
+    inferenceStats_t *stats = reserveMemory(sizeof(inferenceStats_t));
+    stats->output = buildFloatTensor2D(1, c, (const float *)label->data, c);
+    stats->loss = 0.5f;
+    return stats;
+}
+
+/* A natural [C=1, L=3] item and a natural [1, 2] label (like ECG's [1, 140]
+ * target). The leading 1 is deliberate: spec 5.1 "no auto-detection of an
+ * existing batch axis" -- a consumer that skips the wrap when dims[0] == 1
+ * hands the callback rank 2 instead of rank 3 and fails the asserts below. */
+static tensor_t *buildProbeItem(void) {
+    return buildFloatTensor2D(1, 3, (float[]){1.f, 2.f, 3.f}, 3);
+}
+
+static tensor_t *buildProbeLabel(void) {
+    return buildFloatTensor2D(1, 2, (float[]){0.f, 1.f}, 2);
+}
+
+/* Asserts on the captured g_probe (static: survives the frees) plus the two
+ * zero-copy flags the caller captured before freeing its tensors. */
+static void assertProbeSawBatchAxisViews(bool itemDataShared, bool labelDataShared) {
+    TEST_ASSERT_EQUAL_size_t(1, g_probe.calls);
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(3, g_probe.inputRank, "item must arrive as [1, C, L]");
+    TEST_ASSERT_EQUAL_size_t(1, g_probe.inputDims[0]);
+    TEST_ASSERT_EQUAL_size_t(1, g_probe.inputDims[1]);
+    TEST_ASSERT_EQUAL_size_t(3, g_probe.inputDims[2]);
+    TEST_ASSERT_EQUAL_size_t(0, g_probe.inputOrder[0]);
+    TEST_ASSERT_EQUAL_size_t(1, g_probe.inputOrder[1]);
+    TEST_ASSERT_EQUAL_size_t(2, g_probe.inputOrder[2]);
+    TEST_ASSERT_TRUE_MESSAGE(itemDataShared, "the item view must be zero-copy");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(3, g_probe.labelRank, "label must arrive as [1, 1, C]");
+    TEST_ASSERT_EQUAL_size_t(1, g_probe.labelDims[0]);
+    TEST_ASSERT_EQUAL_size_t(1, g_probe.labelDims[1]);
+    TEST_ASSERT_EQUAL_size_t(2, g_probe.labelDims[2]);
+    TEST_ASSERT_TRUE_MESSAGE(labelDataShared, "the label view must be zero-copy");
+}
+
+void testTrainingBatchDefaultHandsCalculateGradsBatchAxisViews(void) {
+    tensor_t *item = buildProbeItem();
+    tensor_t *label = buildProbeLabel();
+    sample_t *s0 = reserveMemory(sizeof(sample_t)); /* freed by trainingBatchDefault */
+    s0->item = item;
+    s0->label = label;
+    sample_t *samples[] = {s0};
+    batch_t batch = {.samples = samples, .size = 1};
+    g_probe = (shapeProbe_t){0};
+    g_probeGrad = NULL;
+
+    float loss = trainingBatchDefault(
+        NULL, 0, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, &batch,
+        probeGrads, REDUCTION_MEAN);
+
+    bool itemDataShared = g_probe.inputData == item->data;
+    bool labelDataShared = g_probe.labelData == label->data;
+    size_t itemRankAfter = item->shape->numberOfDimensions;
+    size_t labelRankAfter = label->shape->numberOfDimensions;
+
+    freeTensor(label);
+    freeTensor(item);
+
+    assertProbeSawBatchAxisViews(itemDataShared, labelDataShared);
+    TEST_ASSERT_EQUAL_FLOAT(0.25f, loss);
+    /* the sample's own shape is untouched: the axis lives only in the view */
+    TEST_ASSERT_EQUAL_size_t(2, itemRankAfter);
+    TEST_ASSERT_EQUAL_size_t(2, labelRankAfter);
+}
+
+void testEvaluationBatchHandsInferenceBatchAxisViews(void) {
+    tensor_t *item = buildProbeItem();
+    tensor_t *label = buildProbeLabel();
+    sample_t *s0 = reserveMemory(sizeof(sample_t)); /* freed by evaluationBatch */
+    s0->item = item;
+    s0->label = label;
+    sample_t *samples[] = {s0};
+    batch_t batch = {.samples = samples, .size = 1};
+    g_probe = (shapeProbe_t){0};
+
+    float sumLoss = evaluationBatch(NULL, 0, MSE, &batch, probeInference, REDUCTION_SUM);
+
+    bool itemDataShared = g_probe.inputData == item->data;
+    bool labelDataShared = g_probe.labelData == label->data;
+
+    freeTensor(label);
+    freeTensor(item);
+
+    assertProbeSawBatchAxisViews(itemDataShared, labelDataShared);
+    TEST_ASSERT_EQUAL_FLOAT(0.5f, sumLoss);
+}
+
+/* Single-sample dataset for the evaluateBatchInternal / trainingEpochDefault
+ * probes: file-scope because the dataLoader callbacks carry no context. */
+static tensor_t *probeDatasetItem;
+static tensor_t *probeDatasetLabel;
+
+static sample_t *getProbeSample(size_t id) {
+    (void)id;
+    sample_t *s = reserveMemory(sizeof(sample_t));
+    s->item = probeDatasetItem;
+    s->label = probeDatasetLabel;
+    return s;
+}
+
+static size_t getProbeDatasetSize(void) {
+    return 1;
+}
+
+void testEvaluationEpochWithMetricsHandsInferenceBatchAxisViews(void) {
+    probeDatasetItem = buildProbeItem();
+    probeDatasetLabel = buildProbeLabel();
+    dataLoader_t *dl =
+        dataLoaderInit(getProbeSample, getProbeDatasetSize, 1, NULL, NULL, false, 0, true);
+    g_probe = (shapeProbe_t){0};
+
+    epochStats_t stats =
+        evaluationEpochWithMetrics(NULL, 0, MSE, dl, probeInference, REDUCTION_MEAN);
+
+    bool itemDataShared = g_probe.inputData == probeDatasetItem->data;
+    bool labelDataShared = g_probe.labelData == probeDatasetLabel->data;
+    float capturedAccuracy = stats.accuracy;
+
+    freeDataLoader(dl);
+    freeTensor(probeDatasetLabel);
+    freeTensor(probeDatasetItem);
+
+    assertProbeSawBatchAxisViews(itemDataShared, labelDataShared);
+    /* The metrics path ran on the views: the echoed [1, C] output row and the
+     * raw label have the same argmax. (probeInference echoes the label, so this
+     * does not pin numClasses; PR3a leaves the numClasses peek untouched.) */
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 1.0f, capturedAccuracy);
+}
+
+void testTrainingEpochDefaultMeanScaleSeesLabelBatchAxis(void) {
+    /* A natural [C=2, L=3] regression label: computeMeanScaleMSE must see the
+     * per-sample F = 6. Read raw, dims[0] = 2 would pass for the batch axis and
+     * give F = 3 -- a 2x too large step. probeGrads writes a raw grad of 1 into
+     * the one weight; SGD lr 1, momentum 0 => w = 0 - 1 * meanScale = -1/6. */
+    probeDatasetItem = buildFloatTensor1D(3, (float[]){1.f, 2.f, 3.f});
+    probeDatasetLabel = buildFloatTensor2D(2, 3, (float[]){0.f, 1.f, 2.f, 3.f, 4.f, 5.f}, 6);
+
+    tensor_t *wParam = buildFloatTensor2D(1, 1, (float[]){0.f}, 1);
+    tensor_t *wGrad = gradInitFloat(wParam, NULL);
+    parameter_t *w = parameterInit(wParam, wGrad);
+    tensor_t *bParam = buildFloatTensor2D(1, 1, (float[]){0.f}, 1);
+    parameter_t *b = parameterInit(bParam, gradInitFloat(bParam, NULL));
+    quantization_t testQ;
+    initFloat32Quantization(&testQ);
+    layer_t *linear = buildBorrowedLinearLayer(w, b, &testQ);
+    layer_t *model[] = {linear};
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(1.0f, 0.f, 0.f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    dataLoader_t *dl =
+        dataLoaderInit(getProbeSample, getProbeDatasetSize, 1, NULL, NULL, false, 0, true);
+    g_probe = (shapeProbe_t){0};
+    g_probeGrad = wGrad;
+
+    trainingEpochDefault(model, 1, defaultLossConfig(MSE), dl, sgd, probeGrads, REDUCTION_MEAN);
+    g_probeGrad = NULL;
+
+    float capturedW = ((float *)wParam->data)[0];
+
+    freeOptim(sgd); /* frees w and b */
+    freeQuantization(momentumQ);
+    freeDataLoader(dl);
+    freeLinearLayerShellOnly(linear);
+    freeTensor(probeDatasetLabel);
+    freeTensor(probeDatasetItem);
+
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, -1.0f / 6.0f, capturedW);
+}
+
 void setUp() {}
 void tearDown() {}
 
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testTrainingBatchDefaultHandsCalculateGradsBatchAxisViews);
+    RUN_TEST(testEvaluationBatchHandsInferenceBatchAxisViews);
+    RUN_TEST(testEvaluationEpochWithMetricsHandsInferenceBatchAxisViews);
+    RUN_TEST(testTrainingEpochDefaultMeanScaleSeesLabelBatchAxis);
     RUN_TEST(testCalculateGradsSequential_MatchesPyTorch);
     RUN_TEST(testEvaluationBatch_ReturnsAverageLoss);
     RUN_TEST(testEvaluationEpoch_ReturnsAverageLossAcrossBatches);

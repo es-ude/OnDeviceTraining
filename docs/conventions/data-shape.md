@@ -14,3 +14,28 @@ the dataset. This:
 
 For flatten-to-2D, use `flattenLayerInit()` from `FlattenApi.h`.
 
+## Who adds the batch axis (#152 PR3a)
+
+Datasets never carry a batch axis; the loop owns it.
+
+- **Tensor-level entry points take batched tensors `[B, ...]`:** `inference`,
+  `inferenceWithLoss`, `calculateGradsSequential`, `tracedGrads`. A caller that
+  hands them ONE dataset sample wraps it first with `batchViewOf`
+  (`src/userApi/tensor/include/BatchView.h`): a caller-owned, stack-allocated
+  `[1, ...sample]` view that shares the sample's data, quantization and
+  sparsity (no copy, no heap, nothing to free).
+- **`batch_t` consumers take natural-shape samples and add axis 0 themselves:**
+  `trainingBatchDefault`, `trainingEpochDefault` (its `labelRef` for
+  `computeMeanScale`), `evaluationBatch`, `evaluateBatchInternal` (behind
+  `evaluationEpochWithMetrics`, `evaluationEpochWithReport` and `trainingRun`)
+  and `inferenceBatched`. The `numClasses` peeks in `trainingRun` and
+  `evaluationEpochWithMetrics` read the raw sample label's element count (the
+  per-sample class count).
+- Nothing auto-detects an existing batch axis: a sample that already carries a
+  leading 1 is wrapped again (`[1, 1, ...]`), and a rank-checking first layer
+  (Conv1d, the pools, Linear) fails fast.
+
+```c
+batchView_t itemView;
+tensor_t *out = inference(model, modelSize, batchViewOf(&itemView, sample->item));
+```

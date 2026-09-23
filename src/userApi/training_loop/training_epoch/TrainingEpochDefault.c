@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 
+#include "BatchView.h"
 #include "Common.h"
 #include "DataLoaderApi.h"
 #include "LossFunction.h"
@@ -41,9 +42,12 @@ float trainingEpochDefault(layer_t **model, size_t modelSize, lossConfig_t lossC
                                           forwardReduction);
 
         if (lossConfig.backwardReduction == REDUCTION_MEAN) {
-            /* Each loss family derives F from labelRef's shape itself. */
-            float meanScale =
-                lossFunctions[lossConfig.funcType].computeMeanScale(batch->size, labelRef);
+            /* Each loss family derives F from labelRef's shape itself, reading
+             * dims[0] as the batch axis -- so it gets the same [1, ...] view the
+             * model output has (a natural [C, L] label must give F = C*L). */
+            batchView_t labelRefView;
+            float meanScale = lossFunctions[lossConfig.funcType].computeMeanScale(
+                batch->size, batchViewOf(&labelRefView, labelRef));
             scaleOptimizerGradients(optimizer, meanScale);
         }
 

@@ -10,12 +10,14 @@
 #include "BorrowedLayer.h"
 #include "CalculateGradsSequential.h"
 #include "Common.h"
+#include "DeathTest.h"
 #include "Layer.h"
 #include "LayerCommon.h"
 #include "LayerQuant.h"
 #include "Linear.h"
 #include "LinearApi.h"
 #include "OptimizerApi.h"
+#include "Pool1dApi.h"
 #include "QuantizationApi.h"
 #include "QuantizationLayer.h"
 #include "ReluApi.h"
@@ -974,6 +976,67 @@ void testAllFrozenModelSkipsBackwardEntirely(void) {
                                      "lossgrad, no agrad)");
 }
 
+/* #152 PR1: the training entry point allocates its wires from the runtime
+ * input (initLayerOutputs), but the MaxPool argmax is the factory's
+ * config-owned [1, C, Lout] buffer -- so a stacked batch-2 input must fail
+ * fast in the forward's argmax shape guard instead of writing row 1's indices
+ * past it. The batch-1 call on the same model is the control. PR 1 interim
+ * contract: #152 PR 3b grows the argmax on demand and turns this into a
+ * growth test. */
+static tensor_t *makeFloatTensor3D(size_t d0, size_t d1, size_t d2, const float *vals) {
+    size_t *dims = reserveMemory(3 * sizeof(size_t));
+    dims[0] = d0;
+    dims[1] = d1;
+    dims[2] = d2;
+    size_t *order = reserveMemory(3 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(3, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 3, order);
+    tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(t, vals, d0 * d1 * d2);
+    return t;
+}
+
+void testCalculateGradsFactoryMaxPoolRejectsBatch2(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *pool = maxPool1dLayerInit(
+        &(maxPool1dInit_t){.kernelSize = 2, .stride = 2, .inputChannels = 2, .inputLength = 4},
+        &lq);
+    layer_t *model[1] = {pool};
+    lossConfig_t lossConfig = defaultLossConfig(MSE);
+    tensor_t *x1 =
+        makeFloatTensor3D(1, 2, 4, (float[]){0.5f, -1.f, 2.f, 0.25f, -0.75f, 1.5f, 0.f, -2.f});
+    tensor_t *label1 = makeFloatTensor3D(1, 2, 2, (float[]){0.f, 0.f, 0.f, 0.f});
+    tensor_t *x2 = makeFloatTensor3D(2, 2, 4,
+                                     (float[]){0.5f, -1.f, 2.f, 0.25f, -0.75f, 1.5f, 0.f, -2.f, 3.f,
+                                               1.f, -0.5f, -0.25f, 0.75f, 0.5f, -1.5f, 1.25f});
+    tensor_t *label2 =
+        makeFloatTensor3D(2, 2, 2, (float[]){0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f});
+
+    trainingStats_t *stats =
+        calculateGradsSequential(model, 1, lossConfig, REDUCTION_MEAN, x1, label1);
+
+    /* CAPTURE. */
+    float capturedLoss = stats->loss;
+    freeTrainingStats(stats);
+
+    ASSERT_EXITS_WITH_FAILURE(freeTrainingStats(
+        calculateGradsSequential(model, 1, lossConfig, REDUCTION_MEAN, x2, label2)));
+
+    /* FREE. */
+    freeTensor(label2);
+    freeTensor(x2);
+    freeTensor(label1);
+    freeTensor(x1);
+    freeMaxPool1dLayer(pool);
+    freeQuantization(q);
+
+    /* ASSERT: pooled {0.5, 2, 1.5, 0} vs zeros -> (0.25 + 4 + 2.25 + 0) / 4. */
+    TEST_ASSERT_EQUAL_FLOAT(1.625f, capturedLoss);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testCalculateGradsSequentialClosedForm);
@@ -987,5 +1050,6 @@ int main(void) {
     RUN_TEST(testBackwardStopsAtDeepestTrainableLayer);
     RUN_TEST(testTruncationPreservesUpperLayerGrads);
     RUN_TEST(testAllFrozenModelSkipsBackwardEntirely);
+    RUN_TEST(testCalculateGradsFactoryMaxPoolRejectsBatch2);
     return UNITY_END();
 }

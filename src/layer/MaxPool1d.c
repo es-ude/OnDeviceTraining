@@ -28,6 +28,35 @@ void initMaxPool1dConfig(maxPool1dConfig_t *cfg, kernel_t *kernel, tensor_t *arg
     cfg->propLossQ = propLossQ;
 }
 
+/* #152: every arm indexes the argmax at (b * channels + c) * outputLength +
+ * outPos with batch and channels taken from the call's operand, and the argmax
+ * is a config-owned buffer sized once by its creator — so its FULL shape must
+ * match the call, not just its length (a [1, C, Lout] buffer under a batch-2
+ * call is written/read one row past its end). Rank first: dimensions[0..2] of
+ * a lower-rank shape is itself an over-read. Forward arms pass the input and
+ * the geometry's outputLength; backward arms pass lossGrad and its
+ * dimensions[2] (lossGrad is [B, C, Lout]; forwardInput may be NULL). The
+ * reference operand's dims are read before the rank check because every
+ * calling arm has already read them. */
+static void maxPoolRequireArgmaxShape(const tensor_t *argmax, const tensor_t *input,
+                                      size_t outputLength, const char *where) {
+    size_t batch = input->shape->dimensions[0];
+    size_t channels = input->shape->dimensions[1];
+    if (argmax->shape->numberOfDimensions != 3) {
+        PRINT_ERROR("%s: argmaxIndices must be rank 3 with shape [%zu, %zu, %zu] (batch, "
+                    "channels, outputLength of this call), got rank %zu",
+                    where, batch, channels, outputLength, argmax->shape->numberOfDimensions);
+        exit(1);
+    }
+    const size_t *got = argmax->shape->dimensions;
+    if (got[0] != batch || got[1] != channels || got[2] != outputLength) {
+        PRINT_ERROR("%s: argmaxIndices shape must be [%zu, %zu, %zu] (batch, channels, "
+                    "outputLength of this call), got [%zu, %zu, %zu]",
+                    where, batch, channels, outputLength, got[0], got[1], got[2]);
+        exit(1);
+    }
+}
+
 /* executeOp forward kernel adapter — ctx = maxPool1dConfig_t* for kernel_t
  * geometry (mirrors AvgPool1d/Conv1d's ctx convention). auxOut = the layer's
  * pre-allocated argmaxIndices tensor (opSpec_t.auxOut, spec D1): the funnel
@@ -54,12 +83,7 @@ static void maxPool1dForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, t
                     rawOut->shape->dimensions[2], outputLength);
         exit(1);
     }
-    if (auxOut->shape->dimensions[2] != outputLength) {
-        PRINT_ERROR("MaxPool1d forward: argmaxIndices length (%zu) does not match "
-                    "geometry-derived (%zu)",
-                    auxOut->shape->dimensions[2], outputLength);
-        exit(1);
-    }
+    maxPoolRequireArgmaxShape(auxOut, input, outputLength, "MaxPool1d forward FLOAT32");
 
     float const *xArr = (float const *)input->data;
     float *yArr = (float *)rawOut->data;

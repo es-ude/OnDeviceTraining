@@ -77,6 +77,8 @@ add_elastic_ai_unit_test(
         LinearApi
         LayerWeightsApi
         ReluApi
+        Pool1dApi
+        Kernel
         LayerNormApi
         LayerNorm
         LayerQuant

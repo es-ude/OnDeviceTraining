@@ -985,6 +985,120 @@ void testMaxPool1dBfpRejectsRank2Operands(void) {
     freeTensor(badInput);
 }
 
+/* ---- #152 PR1: full-shape argmax guard (maxPoolRequireArgmaxShape) ---- */
+
+/* Every arm indexes the argmax as (b * channels + c) * outputLength + outPos
+ * with batch and channels taken from the call's operand, so a [1, C, Lout]
+ * argmax (the factory's size) under a batch-2 call is written/read one full
+ * row past its end. Each test first runs the SAME layer with a matching
+ * argmax (the control: the fixture is valid), then swaps in the batch-1
+ * argmax and expects the guard's exit(1).
+ * The forward batch cases pin PR 1's interim contract: #152 PR 3b grows the
+ * argmax in every forward arm and turns them into growth tests. The backward
+ * cases are the lasting contract. */
+void testMaxPool1dForwardFloatRejectsBatch1ArgmaxAtBatch2(void) {
+    size_t inputDims[] = {2, 3, 5};
+    size_t outputDims[] = {2, 3, 4};
+    size_t batch1ArgmaxDims[] = {1, 3, 4};
+    maxPool1dRunResult_t r =
+        maxPool1dBuild(NULL, inputDims, 2, VALID, 1, 1, NULL, NULL, outputDims);
+    tensor_t *batch1Argmax = makeInt32Tensor(batch1ArgmaxDims, 3);
+
+    maxPool1dForward(r.layer, r.input, r.output);
+
+    r.layer->config->maxPool1d->argmaxIndices = batch1Argmax;
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output));
+
+    freeTensor(batch1Argmax);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+}
+
+/* Review Focus: a factory built with the wrong inputChannels, at B=1. A WIDER
+ * argmax used to pass the length-only check and be silently accepted; the
+ * full-shape guard rejects it like any other mismatch. */
+void testMaxPool1dForwardFloatRejectsArgmaxWithWrongChannels(void) {
+    size_t inputDims[] = {1, 2, 4};
+    size_t outputDims[] = {1, 2, 3};
+    size_t widerArgmaxDims[] = {1, 3, 3};
+    maxPool1dRunResult_t r =
+        maxPool1dBuild(NULL, inputDims, 2, VALID, 1, 1, NULL, NULL, outputDims);
+    tensor_t *widerArgmax = makeInt32Tensor(widerArgmaxDims, 3);
+
+    maxPool1dForward(r.layer, r.input, r.output);
+
+    r.layer->config->maxPool1d->argmaxIndices = widerArgmax;
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output));
+
+    freeTensor(widerArgmax);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+}
+
+/* Review Focus: PR 1's forward contract is EXACT dims, not capacity and not
+ * element count. A larger-batch argmax [3, 1, 3] has room for the call's
+ * rows, and [1, 2, 3] has exactly the call's 6 elements -- both must still die
+ * against the expected [2, 1, 3]. The lasting reason is the backward: it must
+ * see exactly the rows this forward wrote. */
+void testMaxPool1dForwardFloatRequiresExactArgmaxDims(void) {
+    size_t inputDims[] = {2, 1, 4};
+    size_t outputDims[] = {2, 1, 3};
+    size_t largerBatchDims[] = {3, 1, 3};
+    size_t sameCountDims[] = {1, 2, 3};
+    maxPool1dRunResult_t r =
+        maxPool1dBuild(NULL, inputDims, 2, VALID, 1, 1, NULL, NULL, outputDims);
+    tensor_t *largerBatchArgmax = makeInt32Tensor(largerBatchDims, 3);
+    tensor_t *sameCountArgmax = makeInt32Tensor(sameCountDims, 3);
+
+    maxPool1dForward(r.layer, r.input, r.output);
+
+    r.layer->config->maxPool1d->argmaxIndices = largerBatchArgmax;
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output));
+    r.layer->config->maxPool1d->argmaxIndices = sameCountArgmax;
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output));
+
+    freeTensor(sameCountArgmax);
+    freeTensor(largerBatchArgmax);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+}
+
+/* Review Focus: wrong-rank argmax. The rank-4 [1, 2, 3, 1] fixture carries
+ * the right leading dims and element count, so ONLY the rank check can reject
+ * it (the discriminating case). The rank-2 [2, 3] one is the realistic
+ * mistake (argmax built without the batch axis); reading its dimensions[2]
+ * would itself be an over-read, which is why rank is checked first. */
+void testMaxPool1dForwardFloatRejectsArgmaxOfWrongRank(void) {
+    size_t inputDims[] = {1, 2, 4};
+    size_t outputDims[] = {1, 2, 3};
+    size_t rank4Dims[] = {1, 2, 3, 1};
+    size_t rank2Dims[] = {2, 3};
+    maxPool1dRunResult_t r =
+        maxPool1dBuild(NULL, inputDims, 2, VALID, 1, 1, NULL, NULL, outputDims);
+    tensor_t *rank4Argmax = makeInt32Tensor(rank4Dims, 4);
+    tensor_t *rank2Argmax = makeInt32Tensor(rank2Dims, 2);
+
+    maxPool1dForward(r.layer, r.input, r.output);
+
+    r.layer->config->maxPool1d->argmaxIndices = rank4Argmax;
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output));
+    r.layer->config->maxPool1d->argmaxIndices = rank2Argmax;
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output));
+
+    freeTensor(rank2Argmax);
+    freeTensor(rank4Argmax);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMaxPool1dForwardBasic);
@@ -1009,5 +1123,9 @@ int main(void) {
     RUN_TEST(testMaxPool1dBackwardBfpRejectsOutOfRangeArgmax);
     RUN_TEST(testMaxPool1dBackwardBfpGuardsNarrowedNotRemoved);
     RUN_TEST(testMaxPool1dBfpRejectsRank2Operands);
+    RUN_TEST(testMaxPool1dForwardFloatRejectsBatch1ArgmaxAtBatch2);
+    RUN_TEST(testMaxPool1dForwardFloatRejectsArgmaxWithWrongChannels);
+    RUN_TEST(testMaxPool1dForwardFloatRequiresExactArgmaxDims);
+    RUN_TEST(testMaxPool1dForwardFloatRejectsArgmaxOfWrongRank);
     return UNITY_END();
 }

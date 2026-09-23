@@ -6,6 +6,8 @@ add_elastic_ai_unit_test(
         LinearApi
         ReluApi
         SoftmaxApi
+        Pool1dApi
+        Kernel
         LayerQuant
         ArithmeticType
         LayerCommon
@@ -30,4 +32,5 @@ add_elastic_ai_unit_test(
         Distributions
         RNG
         odt_test_layer_builders
+        odt_test_death
 )

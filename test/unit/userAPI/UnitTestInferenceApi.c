@@ -12,6 +12,7 @@
 #include "Linear.h"
 #include "LinearApi.h"
 #include "LossFunction.h"
+#include "Pool1dApi.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
 #include "ReluApi.h"
@@ -607,6 +608,107 @@ void testInitBufferOutputBfpGroupSizeMismatchDies(void) {
     freeQuantization(q);
 }
 
+/* #152 PR1 ------------------------------------------------------------------
+ * maxPool1dLayerInit sizes the argmax [1, C, Lout], and both inference entry
+ * points hand that config-owned buffer to the forward as auxOut. A batch-2
+ * input must therefore fail fast in the argmax shape guard instead of writing
+ * row 1's indices past the buffer. Each test runs the SAME model at batch 1
+ * first (the control): pooling works and the loss reads a matching label, so
+ * the batch-2 death can only come from the guard. PR 1 interim contract:
+ * #152 PR 3b grows the argmax on demand and turns both into growth tests. */
+
+static tensor_t *buildFloatTensor3DInf(size_t d0, size_t d1, size_t d2, const float *values) {
+    size_t *dims = reserveMemory(3 * sizeof(size_t));
+    dims[0] = d0;
+    dims[1] = d1;
+    dims[2] = d2;
+    size_t *order = reserveMemory(3 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(3, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 3, order);
+    tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(t, (float *)values, d0 * d1 * d2);
+    return t;
+}
+
+static layer_t *buildFactoryMaxPoolK2C2L4(layerQuant_t *lq) {
+    return maxPool1dLayerInit(
+        &(maxPool1dInit_t){.kernelSize = 2, .stride = 2, .inputChannels = 2, .inputLength = 4}, lq);
+}
+
+static const float kMaxPoolBatch1[8] = {0.5f, -1.f, 2.f, 0.25f, -0.75f, 1.5f, 0.f, -2.f};
+static const float kMaxPoolBatch2[16] = {0.5f, -1.f, 2.f,   0.25f,  -0.75f, 1.5f, 0.f,   -2.f,
+                                         3.f,  1.f,  -0.5f, -0.25f, 0.75f,  0.5f, -1.5f, 1.25f};
+
+void testInferenceFactoryMaxPoolRejectsBatch2(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *pool = buildFactoryMaxPoolK2C2L4(&lq);
+    layer_t *model[] = {pool};
+    tensor_t *batch1 = buildFloatTensor3DInf(1, 2, 4, kMaxPoolBatch1);
+    tensor_t *batch2 = buildFloatTensor3DInf(2, 2, 4, kMaxPoolBatch2);
+
+    tensor_t *output = inference(model, 1, batch1);
+
+    /* CAPTURE. */
+    size_t capturedDims[3] = {output->shape->dimensions[0], output->shape->dimensions[1],
+                              output->shape->dimensions[2]};
+    float capturedValues[4];
+    for (size_t i = 0; i < 4; i++) {
+        capturedValues[i] = ((float *)output->data)[i];
+    }
+    freeTensor(output);
+
+    ASSERT_EXITS_WITH_FAILURE(freeTensor(inference(model, 1, batch2)));
+
+    /* FREE. */
+    freeTensor(batch2);
+    freeTensor(batch1);
+    freeMaxPool1dLayer(pool);
+    freeQuantization(q);
+
+    /* ASSERT: K=2/S=2 windows {0.5,-1} {2,0.25} | {-0.75,1.5} {0,-2}. */
+    float expectedValues[4] = {0.5f, 2.f, 1.5f, 0.f};
+    TEST_ASSERT_EQUAL_size_t(1, capturedDims[0]);
+    TEST_ASSERT_EQUAL_size_t(2, capturedDims[1]);
+    TEST_ASSERT_EQUAL_size_t(2, capturedDims[2]);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(expectedValues, capturedValues, 4);
+}
+
+void testInferenceWithLossFactoryMaxPoolRejectsBatch2(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *pool = buildFactoryMaxPoolK2C2L4(&lq);
+    layer_t *model[] = {pool};
+    tensor_t *batch1 = buildFloatTensor3DInf(1, 2, 4, kMaxPoolBatch1);
+    tensor_t *batch2 = buildFloatTensor3DInf(2, 2, 4, kMaxPoolBatch2);
+    tensor_t *label1 = buildFloatTensor3DInf(1, 2, 2, (float[]){0.f, 0.f, 0.f, 0.f});
+    tensor_t *label2 =
+        buildFloatTensor3DInf(2, 2, 2, (float[]){0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f});
+
+    inferenceStats_t *stats = inferenceWithLoss(model, 1, batch1, label1, MSE, REDUCTION_MEAN);
+
+    /* CAPTURE. */
+    float capturedLoss = stats->loss;
+    freeInferenceStats(stats);
+
+    ASSERT_EXITS_WITH_FAILURE(
+        freeInferenceStats(inferenceWithLoss(model, 1, batch2, label2, MSE, REDUCTION_MEAN)));
+
+    /* FREE. */
+    freeTensor(label2);
+    freeTensor(label1);
+    freeTensor(batch2);
+    freeTensor(batch1);
+    freeMaxPool1dLayer(pool);
+    freeQuantization(q);
+
+    /* ASSERT: pooled {0.5, 2, 1.5, 0} vs zeros -> (0.25 + 4 + 2.25 + 0) / 4. */
+    TEST_ASSERT_EQUAL_FLOAT(1.625f, capturedLoss);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -624,5 +726,8 @@ int main(void) {
     RUN_TEST(testInferenceBufferInputCarriesBfpExponents);
     RUN_TEST(testInitBufferOutputBfpGroupSizeMismatchDies);
     RUN_TEST(testInferenceBufferOutputBfpGroupSizeEqualToWireNormalizesToPerTensor);
+
+    RUN_TEST(testInferenceFactoryMaxPoolRejectsBatch2);
+    RUN_TEST(testInferenceWithLossFactoryMaxPoolRejectsBatch2);
     return UNITY_END();
 }

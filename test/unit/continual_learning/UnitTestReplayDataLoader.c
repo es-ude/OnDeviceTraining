@@ -510,6 +510,133 @@ void testReshuffleWrappedReplayLoaderReachesBase(void) {
     TEST_ASSERT_TRUE(baseChanged);
 }
 
+/* #152 PR3a: the training loop adds the batch axis to EVERY sample it is
+ * handed, real or replayed -- so a replayed sample must carry exactly the real
+ * samples' natural shape. A pool (or exemplar copy) with a flattened [dim]
+ * shape would be wrapped to [1, dim] and a Conv1d model would reject it.
+ * Items here are natural [C=2, L=3] (dim 6), labels [2]. */
+static tensor_t *g_items2d[2];
+static tensor_t *g_labels2d[2];
+
+static void buildFake2dDataset(void) {
+    for (size_t i = 0; i < 2; i++) {
+        float vals[6];
+        for (size_t j = 0; j < 6; j++) {
+            vals[j] = (float)(i * 10 + j);
+        }
+        g_items2d[i] = buildFloat32TensorND(2, (size_t[]){2, 3}, vals);
+        float onehot[2] = {i == 0 ? 1.0f : 0.0f, i == 0 ? 0.0f : 1.0f};
+        g_labels2d[i] = buildFloat32TensorND(1, (size_t[]){2}, onehot);
+    }
+}
+
+static void freeFake2dDataset(void) {
+    for (size_t i = 0; i < 2; i++) {
+        freeTensor(g_items2d[i]);
+        freeTensor(g_labels2d[i]);
+    }
+}
+
+static sample_t *fake2dGetSample(size_t id) {
+    sample_t *s = reserveMemory(sizeof(sample_t));
+    s->item = g_items2d[id];
+    s->label = g_labels2d[id];
+    return s;
+}
+
+static size_t fake2dGetSize(void) {
+    return 2;
+}
+
+/* Captures rank + dims of every synthetic sample of `batch` (samples 2..3)
+ * into caller arrays so the asserts can run after the frees. */
+static void captureSyntheticShapes(batch_t *batch, size_t itemRank[2], size_t itemDims[2][2],
+                                   size_t labelRank[2], size_t labelDim0[2]) {
+    for (size_t s = 0; s < 2; s++) {
+        shape_t *is = batch->samples[2 + s]->item->shape;
+        shape_t *ls = batch->samples[2 + s]->label->shape;
+        itemRank[s] = is->numberOfDimensions;
+        itemDims[s][0] = is->dimensions[0];
+        itemDims[s][1] = is->numberOfDimensions > 1 ? is->dimensions[1] : 0;
+        labelRank[s] = ls->numberOfDimensions;
+        labelDim0[s] = ls->dimensions[0];
+    }
+}
+
+static void assertSyntheticShapesAreNatural(size_t itemRank[2], size_t itemDims[2][2],
+                                            size_t labelRank[2], size_t labelDim0[2]) {
+    for (size_t s = 0; s < 2; s++) {
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(2, itemRank[s], "replayed item must stay [C, L]");
+        TEST_ASSERT_EQUAL_size_t(2, itemDims[s][0]);
+        TEST_ASSERT_EQUAL_size_t(3, itemDims[s][1]);
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(1, labelRank[s], "replayed label must stay [classes]");
+        TEST_ASSERT_EQUAL_size_t(2, labelDim0[s]);
+    }
+}
+
+void testPpcaReplayedSamplesKeepTheRealSamplesNaturalShape(void) {
+    buildFake2dDataset();
+    dataLoader_t *base =
+        dataLoaderInit(fake2dGetSample, fake2dGetSize, 2, NULL, NULL, false, 0, true);
+    ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
+    ppcaReplaySet_t *set = ppcaReplaySetCreate(2, &cfg);
+    makeSetSampleable(set);
+    rng32_t stream = {.state = 99};
+    replayLoaderConfig_t rcfg = {
+        .set = set, .samplesPerClass = 1, .minCount = 1, .stream = &stream};
+    dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
+
+    batch_t *batch = wrapped->getBatch(wrapped, 0);
+    size_t batchSize = batch->size;
+    size_t itemRank[2], itemDims[2][2], labelRank[2], labelDim0[2];
+    captureSyntheticShapes(batch, itemRank, itemDims, labelRank, labelDim0);
+
+    for (size_t s = 0; s < batch->size; s++) {
+        freeSample(batch->samples[s]);
+    }
+    freeBatch(batch);
+    freeReplayDataLoader(wrapped);
+    freeDataLoader(base);
+    freePpcaReplaySet(set);
+    freeFake2dDataset();
+
+    TEST_ASSERT_EQUAL_size_t(4, batchSize); /* 2 real + 2 classes * r=1 */
+    assertSyntheticShapesAreNatural(itemRank, itemDims, labelRank, labelDim0);
+}
+
+void testExemplarReplayedSamplesKeepTheRealSamplesNaturalShape(void) {
+    buildFake2dDataset();
+    dataLoader_t *base =
+        dataLoaderInit(fake2dGetSample, fake2dGetSize, 2, NULL, NULL, false, 0, true);
+    exemplarBuffer_t *buf = exemplarBufferCreate(2, 1);
+    exemplarBufferAdd(buf, g_items2d[0], 0);
+    exemplarBufferAdd(buf, g_items2d[1], 1);
+    rng32_t stream = {.state = 7};
+    replayLoaderConfig_t rcfg = {.exemplars = buf,
+                                 .samplesPerClass = 1,
+                                 .minCount = 1,
+                                 .stream = &stream,
+                                 .mode = REPLAY_MODE_EXEMPLAR};
+    dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
+
+    batch_t *batch = wrapped->getBatch(wrapped, 0);
+    size_t batchSize = batch->size;
+    size_t itemRank[2], itemDims[2][2], labelRank[2], labelDim0[2];
+    captureSyntheticShapes(batch, itemRank, itemDims, labelRank, labelDim0);
+
+    for (size_t s = 0; s < batch->size; s++) {
+        freeSample(batch->samples[s]);
+    }
+    freeBatch(batch);
+    freeReplayDataLoader(wrapped);
+    freeDataLoader(base);
+    freeExemplarBuffer(buf);
+    freeFake2dDataset();
+
+    TEST_ASSERT_EQUAL_size_t(4, batchSize);
+    assertSyntheticShapesAreNatural(itemRank, itemDims, labelRank, labelDim0);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testWrappedBatchAppendsSyntheticSamples);
@@ -524,5 +651,7 @@ int main(void) {
     RUN_TEST(testExemplarModePicksDeterministic);
     RUN_TEST(testExemplarModeRequiresBufferAndStream);
     RUN_TEST(testReshuffleWrappedReplayLoaderReachesBase);
+    RUN_TEST(testPpcaReplayedSamplesKeepTheRealSamplesNaturalShape);
+    RUN_TEST(testExemplarReplayedSamplesKeepTheRealSamplesNaturalShape);
     return UNITY_END();
 }

@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <time.h>
 
+#include "BatchView.h"
 #include "CalculateGradsSequential.h"
 #include "Common.h"
 #include "Conv1dApi.h"
@@ -57,22 +58,25 @@ static dataset_t g_trainDataset;
 static dataset_t g_valDataset;
 static dataset_t g_testDataset;
 
+/* Documented exception to docs/conventions/data-shape.md: the framework has no
+ * reshape layer, so the dataset reshapes each [1,28,28] image into the
+ * [1,784] (channel, length) sample a Conv1d consumes. Only this geometric
+ * reshape lives here -- the batch axis is added by the loop (batchViewOf). */
 static void reshapeItemsToConv1d(tensorArray_t *items) {
     for (size_t i = 0; i < items->size; ++i) {
         tensor_t *t = items->array[i];
-        size_t *newDims = reserveMemory(3 * sizeof(size_t));
-        size_t *newOrder = reserveMemory(3 * sizeof(size_t));
-        newDims[0] = 1;       /* batch */
-        newDims[1] = 1;       /* channel */
-        newDims[2] = 28 * 28; /* length */
-        for (size_t d = 0; d < 3; ++d) {
+        size_t *newDims = reserveMemory(2 * sizeof(size_t));
+        size_t *newOrder = reserveMemory(2 * sizeof(size_t));
+        newDims[0] = 1;       /* channel */
+        newDims[1] = 28 * 28; /* length */
+        for (size_t d = 0; d < 2; ++d) {
             newOrder[d] = d;
         }
         freeReservedMemory(t->shape->dimensions);
         freeReservedMemory(t->shape->orderOfDimensions);
         t->shape->dimensions = newDims;
         t->shape->orderOfDimensions = newOrder;
-        t->shape->numberOfDimensions = 3;
+        t->shape->numberOfDimensions = 2;
     }
 }
 
@@ -145,7 +149,7 @@ static size_t getTestSize(void) {
 }
 
 static void buildModel(layer_t **model, layerQuant_t *lq) {
-    /* Input reshaped to [1, 1, 784]. */
+    /* Sample [1, 784] (channel, length); the loop's batch view makes it [1, 1, 784]. */
     model[0] = conv1dLayerInit(
         &(conv1dInit_t){
             .inChannels = 1, .outChannels = C1_OUT, .kernelSize = C1_K, .padding = SAME},
@@ -350,7 +354,8 @@ int main(void) {
 
     for (size_t i = 0; i < numTest; ++i) {
         sample_t *s = getTestSample(i);
-        tensor_t *out = inference(model, MODEL_SIZE, s->item);
+        batchView_t itemView;
+        tensor_t *out = inference(model, MODEL_SIZE, batchViewOf(&itemView, s->item));
         float *probs = (float *)out->data;
         size_t argmax = 0;
         float best = probs[0];

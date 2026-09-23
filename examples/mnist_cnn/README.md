@@ -3,7 +3,9 @@
 Trains a small 1D convolutional classifier on MNIST. The framework is 1D-only
 (no `Conv2d`), so each `[1,28,28]` image is reshaped to a single-channel
 length-784 signal — done as loader-side `shape_t` surgery in `train_c.c`
-(`reshapeItemsToConv1d`), since the framework has no view/reshape layer and
+(`reshapeItemsToConv1d`, the documented exception in
+`docs/conventions/data-shape.md`; the loop still adds the batch axis), since
+the framework has no view/reshape layer and
 `flatten` only produces 2D output. Companion to `mnist_mlp/`: same data and
 harness, different topology (convolutional vs dense).
 
@@ -31,7 +33,7 @@ uv run python examples/mnist_cnn/compare.py
 
 ## Model
 
-- Input: `[1, 28, 28]` reshaped to `[1, 784]` (1 channel, length 784)
+- Input: `[1, 28, 28]` reshaped to `[1, 784]` (1 channel, length 784); the training loop's `batchViewOf` view makes it `[1, 1, 784]`
 - `Conv1d(1→8,K3,SAME) → ReLU → MaxPool(2) → Conv1d(8→16,K3,SAME) → ReLU →
   MaxPool(2) → global AvgPool1d → Flatten → Linear(16→10) → Softmax → CE`
 - Lengths: 784 → 392 → 196 → 1; ~600 parameters

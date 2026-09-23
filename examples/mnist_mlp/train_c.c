@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <time.h>
 
+#include "BatchView.h"
 #include "CalculateGradsSequential.h"
 #include "Common.h"
 #include "Conv1dApi.h"
@@ -117,7 +118,7 @@ static size_t getTestSize(void) {
 }
 
 static void buildModel(layer_t **model, layerQuant_t *lq) {
-    /* Flatten [1,28,28] -> [1,784] (the channel-1 acts as batch). */
+    /* Flatten [1,1,28,28] -> [1,784]: the natural [1,28,28] image plus the loop's batch axis. */
     model[0] = flattenLayerInit();
     model[1] = linearLayerInit(&(linearInit_t){.inFeatures = 28 * 28, .outFeatures = 64}, lq);
     model[2] = reluLayerInit(lq);
@@ -300,7 +301,8 @@ int main(void) {
 
     for (size_t i = 0; i < numTest; ++i) {
         sample_t *s = getTestSample(i);
-        tensor_t *out = inference(model, MODEL_SIZE, s->item);
+        batchView_t itemView;
+        tensor_t *out = inference(model, MODEL_SIZE, batchViewOf(&itemView, s->item));
         float *probs = (float *)out->data;
         size_t argmax = 0;
         float best = probs[0];

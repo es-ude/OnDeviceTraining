@@ -1148,6 +1148,32 @@ void testMaxPool1dBackwardFloatRejectsBatch1ArgmaxAtBatch2(void) {
     freeQuantization(r.q);
 }
 
+void testMaxPool1dBackwardSymRejectsBatch1ArgmaxAtBatch2(void) {
+    size_t batch1InputDims[] = {1, 3, 5};
+    size_t batch1OutputDims[] = {1, 3, 4};
+    size_t inputDims[] = {2, 3, 5};
+    size_t outputDims[] = {2, 3, 4};
+    maxPool1dSymRun_t r =
+        maxPool1dBuildSym(NULL, batch1InputDims, 2, VALID, 1, 1, batch1OutputDims);
+    tensor_t *batch1LossGrad = buildSymTensor(batch1OutputDims, 3, NULL);
+    tensor_t *batch1PropLoss = buildSymTensor(batch1InputDims, 3, NULL);
+    tensor_t *lossGrad = buildSymTensor(outputDims, 3, NULL);
+    tensor_t *propLoss = buildSymTensor(inputDims, 3, NULL);
+
+    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dBackward(r.layer, NULL, batch1LossGrad, batch1PropLoss);
+
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(r.layer, NULL, lossGrad, propLoss));
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(batch1PropLoss);
+    freeTensor(batch1LossGrad);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMaxPool1dForwardBasic);
@@ -1178,5 +1204,6 @@ int main(void) {
     RUN_TEST(testMaxPool1dForwardFloatRejectsArgmaxOfWrongRank);
     RUN_TEST(testMaxPool1dForwardSymRejectsBatch1ArgmaxAtBatch2);
     RUN_TEST(testMaxPool1dBackwardFloatRejectsBatch1ArgmaxAtBatch2);
+    RUN_TEST(testMaxPool1dBackwardSymRejectsBatch1ArgmaxAtBatch2);
     return UNITY_END();
 }

@@ -195,8 +195,11 @@ static void maxPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *r
  * OPERAND's dims, so an output that disagrees on dim 0 or dim 1 is written
  * past its end even when its length is right — checking dimensions[2] alone is
  * not enough. Rank is checked first: dimensions[0..2] on a rank-2 shape is
- * itself an over-read. NOTE the deliberate scope: the FLOAT32/SYM arms of this
- * layer have the SAME gap and are NOT touched here. */
+ * itself an over-read.
+ * The FLOAT32/SYM arms validate their argmax through maxPoolRequireArgmaxShape
+ * (#152); their forward rawOut is still checked on length only, and their
+ * backward propLoss (FLOAT32) / rawOut (SYM) shape is not validated against
+ * lossGrad. */
 static void poolBfpRequireDims3(const tensor_t *t, size_t d0, size_t d1, size_t d2,
                                 const char *what) {
     if (t->shape->numberOfDimensions != 3) {
@@ -431,13 +434,8 @@ static void maxPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *
     size_t outputLength = lossGrad->shape->dimensions[2];
     size_t inputLength = rawOut->shape->dimensions[2];
 
-    // Defensive: argmax shape must match lossGrad shape (FLOAT32 arm parity).
-    if (cfg->argmaxIndices->shape->dimensions[2] != outputLength) {
-        PRINT_ERROR("MaxPool1d backward: argmaxIndices length (%zu) does not match "
-                    "lossGrad outputLength (%zu)",
-                    cfg->argmaxIndices->shape->dimensions[2], outputLength);
-        exit(1);
-    }
+    maxPoolRequireArgmaxShape(cfg->argmaxIndices, lossGrad, outputLength,
+                              "MaxPool1d backward SYM_INT32");
 
     /* An input position can be argmax only of windows CONTAINING it, so the
      * worst-case scatter collisions per cell = covering windows =

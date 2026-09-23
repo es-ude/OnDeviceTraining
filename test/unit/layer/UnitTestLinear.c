@@ -3115,7 +3115,13 @@ void testLinearCalcOutputShapeRejectsRank3Input(void) {
  * [3] sample (a missed batchViewOf). Unguarded, it returns a garbage [3]-element
  * output. Rank 3 is not repeated at this level: on the FLOAT32 path the
  * forward's matmul already exits on a >2D operand ("Matmul only supports up to
- * 2D Tensors"), so that test would pass without the guard. */
+ * 2D Tensors"), so that test would pass without the guard.
+ *
+ * Under the ASan preset, an unguarded heap-buffer-overflow write also exits 1
+ * by default (ASan's own exitcode), indistinguishable here from the guard's
+ * exit(1) -- so this test's RED is meaningful only in the non-sanitizer
+ * presets. The two direct linearCalcOutputShape tests above are the
+ * deterministic pins in every preset. */
 void testInferenceOneLinearModelRejectsRank1Sample(void) {
     layer_t *layer = buildFloatLinearWithTrainable(TRAINABLE_DEFAULT); /* 3 -> 2 */
     layer_t *model[] = {layer};

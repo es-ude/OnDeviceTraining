@@ -52,7 +52,13 @@ typedef void (*lossBwdFn_t)(tensor_t *modelOutput, tensor_t *label, tensor_t *re
  * shape itself (B = dimensions[0], F = numElements / B), so the caller
  * does not need to know about microbatch-vs-feature dimensions:
  *   MSE: 1 / (totalSamples × F)
- *   CE:  1 / totalSamples (modelOutput unused) */
+ *   CE:  1 / totalSamples (modelOutput unused)
+ *
+ * Contract on modelOutput: a `[B, ...]` tensor whose dims[0] is the batch
+ * axis. The only caller (trainingEpochDefault) does not pass the model
+ * output itself -- it passes the batchViewOf view of sample 0's label
+ * (#152 PR3a), so for MSE this is dims[0] of the LABEL's [1, ...] view,
+ * not the model's output tensor. */
 typedef float (*computeMeanScaleFn_t)(size_t totalSamples, tensor_t *modelOutput);
 
 typedef struct lossFunctions {

@@ -30,7 +30,21 @@ the leading 1 explicit with `batchViewOf`, for the model input, the label
 and the `labelRef` handed to `computeMeanScale` alike (see
 [data-shape.md](data-shape.md), "Who adds the batch axis").
 
-Softmax partitions its input the same way (#152): each of the `B` rows
+This changed the MSE MEAN gradient scale for labels that do not already
+start with a leading 1 (#152 PR3a). Before this PR, `trainingEpochDefault`
+passed `computeMeanScale` the raw label tensor: a rank-1 label `[F]` had
+`dims[0] == F`, so `computeMeanScaleMSE` read `numFeaturesPerSample = F/F
+== 1` and the MEAN gradient scale was `1/b`. Now `trainingEpochDefault`
+passes the `batchViewOf` view of sample 0's label (`[1, F]`), so `dims[0]
+== 1`, `numFeaturesPerSample == F`, and the scale is `1/(b·F)` — the
+PyTorch value, and consistent with the MSE forward MEAN (which always
+divides by every element, not just the batch). A `[C, L]` label moves the
+same way, from `1/(b·L)` to `1/(b·C·L)`. In-tree users are unaffected
+(ECG's label is `[1, 140]`; migrated fixtures are value-preserving), but an
+external caller whose MSE labels do not start with a leading 1 now gets an
+effective optimizer step F times smaller than before.
+
+Softmax partitions its input by the same `B` rows (#152): each of the `B` rows
 normalizes over its own `numElements / B` elements (a rank-1 input is one
 row), so CE's fused `(p - y)` backward is per row as well.
 

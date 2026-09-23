@@ -26,14 +26,20 @@ Datasets never carry a batch axis; the loop owns it.
   sparsity (no copy, no heap, nothing to free).
 - **`batch_t` consumers take natural-shape samples and add axis 0 themselves:**
   `trainingBatchDefault`, `trainingEpochDefault` (its `labelRef` for
-  `computeMeanScale`), `evaluationBatch`, `evaluateBatchInternal` (behind
+  `computeMeanScale` — this shifts the MSE MEAN gradient scale for labels
+  that don't already start with a leading 1, see
+  [loss.md](loss.md#microbatch-shape)), `evaluationBatch` (and its public
+  entry point `evaluationEpoch`), `evaluateBatchInternal` (behind
   `evaluationEpochWithMetrics`, `evaluationEpochWithReport` and `trainingRun`)
   and `inferenceBatched`. The `numClasses` peeks in `trainingRun` and
   `evaluationEpochWithMetrics` read the raw sample label's element count (the
   per-sample class count).
 - Nothing auto-detects an existing batch axis: a sample that already carries a
-  leading 1 is wrapped again (`[1, 1, ...]`), and a rank-checking first layer
-  (Conv1d, the pools, Linear) fails fast.
+  leading 1 is wrapped again (`[1, 1, ...]`). A first layer that checks input
+  rank (Linear, Conv1d, Conv1dTransposed, the pools, GroupNorm) fails fast on
+  a missed or doubled wrap; a Flatten-, Relu-, LayerNorm- or Dropout-fronted
+  model does not check rank and can absorb the mistake silently — see
+  "Migrating from `[1, ...]` samples" below.
 
 ```c
 batchView_t itemView;
@@ -47,3 +53,28 @@ The framework has no reshape layer, so `examples/mnist_cnn/train_c.c`
 `[1, 784]` (channel, length) sample its first Conv1d consumes. That
 dataset-side reshape is the one exception to "reshapes are the first model
 layer"; it adds no batch axis — the loop does.
+
+### Migrating from `[1, ...]` samples
+
+A dataset or fixture still built on the pre-#152 convention (samples or
+labels that already carry an explicit leading 1) needs auditing along three
+axes, since nothing here auto-detects the old shape:
+
+- **Items.** A first layer that checks input rank (Linear, Conv1d,
+  Conv1dTransposed, the pools, GroupNorm) fails loudly (`exit(1)`) on the
+  now-doubled leading axis — the fastest signal that a dataset still needs
+  updating. A Flatten-first model (e.g. `examples/mnist_cnn`) or a model
+  whose first layers are Relu, LayerNorm or Dropout does not check rank and
+  produces the same output either way (the extra leading 1 multiplies out
+  to the same element count), so these models give no error — check the
+  dataset directly instead of relying on a test failure.
+- **Labels.** `requireOperandMatchesOutput` (`src/loss_functions/MSE.c`,
+  `CrossEntropy.c`) compares element count only, not rank, so an old-style
+  `[1, ...]` label is accepted silently too. Under `REDUCTION_MEAN` this is
+  exactly the MSE mean-scale change described in
+  [loss.md](loss.md#microbatch-shape).
+- **User callbacks.** `calculateGradsFn_t` and `inferenceWithLossFn_t`
+  implementations passed to `trainingBatchDefault` / `evaluationBatch` now
+  receive stack `[1, ...]` views borrowed for the duration of the call,
+  not the long-lived dataset tensors they used to see — see
+  `TrainingLoopApi.h`.

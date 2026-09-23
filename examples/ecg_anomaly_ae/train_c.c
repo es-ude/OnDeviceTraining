@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <time.h>
 
+#include "BatchView.h"
 #include "CalculateGradsSequential.h"
 #include "Common.h"
 #include "Conv1dApi.h"
@@ -70,49 +71,19 @@ static dataset_t g_trainDataset;
 static dataset_t g_valDataset;
 static dataset_t g_testDataset;
 
-static void reshapeItemsAddBatchDim(tensorArray_t *items) {
-    for (size_t i = 0; i < items->size; ++i) {
-        tensor_t *t = items->array[i];
-        size_t oldRank = t->shape->numberOfDimensions;
-        size_t newRank = oldRank + 1;
-
-        size_t *newDims = reserveMemory(newRank * sizeof(size_t));
-        size_t *newOrder = reserveMemory(newRank * sizeof(size_t));
-        newDims[0] = 1;
-        for (size_t d = 0; d < oldRank; ++d) {
-            newDims[d + 1] = t->shape->dimensions[d];
-        }
-        for (size_t d = 0; d < newRank; ++d) {
-            newOrder[d] = d;
-        }
-
-        freeReservedMemory(t->shape->dimensions);
-        freeReservedMemory(t->shape->orderOfDimensions);
-        t->shape->dimensions = newDims;
-        t->shape->orderOfDimensions = newOrder;
-        t->shape->numberOfDimensions = newRank;
-    }
-}
-
 static void initDataSets(void) {
     tensorArray_t *trainItems = npyLoad("examples/ecg_anomaly_ae/data/train_x.npy");
     tensorArray_t *trainLabels = npyLoad("examples/ecg_anomaly_ae/data/train_x.npy");
-    reshapeItemsAddBatchDim(trainItems);
-    reshapeItemsAddBatchDim(trainLabels);
     g_trainDataset.items = trainItems;
     g_trainDataset.labels = trainLabels;
 
     tensorArray_t *valItems = npyLoad("examples/ecg_anomaly_ae/data/val_x.npy");
     tensorArray_t *valLabels = npyLoad("examples/ecg_anomaly_ae/data/val_x.npy");
-    reshapeItemsAddBatchDim(valItems);
-    reshapeItemsAddBatchDim(valLabels);
     g_valDataset.items = valItems;
     g_valDataset.labels = valLabels;
 
     tensorArray_t *testItems = npyLoad("examples/ecg_anomaly_ae/data/test_x.npy");
     tensorArray_t *testLabels = npyLoad("examples/ecg_anomaly_ae/data/test_x.npy");
-    reshapeItemsAddBatchDim(testItems);
-    reshapeItemsAddBatchDim(testLabels);
     g_testDataset.items = testItems;
     g_testDataset.labels = testLabels;
 }
@@ -257,7 +228,8 @@ static int writeAllReconstructions(layer_t **model, size_t modelSize,
 
     for (size_t i = 0; i < n; ++i) {
         sample_t *s = getSample(i);
-        tensor_t *out = inference(model, modelSize, s->item);
+        batchView_t itemView;
+        tensor_t *out = inference(model, modelSize, batchViewOf(&itemView, s->item));
         const float *recon = (const float *)out->data;
         memcpy(buf + i * IN_CHANNELS * LEN_INPUT, recon, IN_CHANNELS * LEN_INPUT * sizeof(float));
         freeTensor(out);

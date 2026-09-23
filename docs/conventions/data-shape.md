@@ -39,3 +39,11 @@ Datasets never carry a batch axis; the loop owns it.
 batchView_t itemView;
 tensor_t *out = inference(model, modelSize, batchViewOf(&itemView, sample->item));
 ```
+
+### Documented exception: mnist_cnn
+
+The framework has no reshape layer, so `examples/mnist_cnn/train_c.c`
+(`reshapeItemsToConv1d`) reshapes each `[1, 28, 28]` image into the
+`[1, 784]` (channel, length) sample its first Conv1d consumes. That
+dataset-side reshape is the one exception to "reshapes are the first model
+layer"; it adds no batch axis — the loop does.

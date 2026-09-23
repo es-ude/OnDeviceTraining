@@ -88,30 +88,6 @@ static int envInt(const char *name, int dflt) {
     return (v != NULL && v[0] != '\0') ? (int)strtol(v, NULL, 10) : dflt;
 }
 
-static void reshapeItemsAddBatchDim(tensorArray_t *items) {
-    for (size_t i = 0; i < items->size; ++i) {
-        tensor_t *t = items->array[i];
-        size_t oldRank = t->shape->numberOfDimensions;
-        size_t newRank = oldRank + 1;
-
-        size_t *newDims = reserveMemory(newRank * sizeof(size_t));
-        size_t *newOrder = reserveMemory(newRank * sizeof(size_t));
-        newDims[0] = 1;
-        for (size_t d = 0; d < oldRank; ++d) {
-            newDims[d + 1] = t->shape->dimensions[d];
-        }
-        for (size_t d = 0; d < newRank; ++d) {
-            newOrder[d] = d;
-        }
-
-        freeReservedMemory(t->shape->dimensions);
-        freeReservedMemory(t->shape->orderOfDimensions);
-        t->shape->dimensions = newDims;
-        t->shape->orderOfDimensions = newOrder;
-        t->shape->numberOfDimensions = newRank;
-    }
-}
-
 static tensorArray_t *buildOneHotLabels(tensorArray_t *intLabels) {
     tensorArray_t *out = reserveMemory(sizeof(tensorArray_t));
     tensor_t **arr = reserveMemory(intLabels->size * sizeof(tensor_t *));
@@ -142,7 +118,7 @@ static tensorArray_t *buildOneHotLabels(tensorArray_t *intLabels) {
 }
 
 /* Load domain{t}_{split}_{x,y}.npy into ds (same helpers/dtype as train_c.c:
- * items get a batch dim, int32 labels become FLOAT32 one-hot). */
+ * items keep their natural [9,128] shape, int32 labels become FLOAT32 one-hot). */
 static void loadDomainDataset(int t, const char *split, dataset_t *ds) {
     char xPath[256], yPath[256];
     snprintf(xPath, sizeof(xPath), "examples/har_classifier/data/domains/domain%d_%s_x.npy", t,
@@ -155,7 +131,6 @@ static void loadDomainDataset(int t, const char *split, dataset_t *ds) {
         fprintf(stderr, "ERROR: cannot load %s / %s\n", xPath, yPath);
         exit(1);
     }
-    reshapeItemsAddBatchDim(items);
     ds->items = items;
     ds->labels = buildOneHotLabels(labelsRaw);
     freeTensorArray(labelsRaw); /* one-hots copied the class; raw ints no longer needed */
@@ -243,7 +218,7 @@ static void releaseStageTensor(tensor_t *t) {
 }
 
 /* Group a domain's train items per class and merge each class's samples
- * into its generator, in chunks of <= maxSessionSamples. Items are [1,9,128]
+ * into its generator, in chunks of <= maxSessionSamples. Items are [9,128]
  * dataset tensors; the flat view [chunk, 1152] borrows their data. */
 static void absorbDomain(ppcaReplaySet_t *set, dataset_t *domainTrain) {
     size_t n = domainTrain->items->size;

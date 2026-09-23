@@ -124,8 +124,8 @@ typedef struct memStepCtx {
     layer_t **model;
     size_t modelSize;
     lossConfig_t lossConfig;
-    tensor_t *input;
-    tensor_t *label;
+    tensor_t *input; /* one dataset sample in its natural shape; the thunk adds */
+    tensor_t *label; /* the batch axis with batchViewOf, as trainingBatchDefault does */
     optimizer_t *optim;
 } memStepCtx_t;
 

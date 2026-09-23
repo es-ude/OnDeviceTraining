@@ -6,6 +6,7 @@ add_library(har_mem_instrument STATIC mem_instrument.c)
 target_include_directories(har_mem_instrument PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(har_mem_instrument PUBLIC
         StorageApi
+        TensorApi
         MemProfile
         Tensor
         Quantization

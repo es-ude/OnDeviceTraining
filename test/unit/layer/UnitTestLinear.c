@@ -5,6 +5,7 @@
 #include "BorrowedLayer.h"
 #include "DTypes.h"
 #include "DeathTest.h"
+#include "InferenceApi.h"
 #include "Layer.h"
 #include "LayerCommon.h"
 #include "LayerQuant.h"
@@ -3071,6 +3072,62 @@ void testLinearBackwardBfpPropLossNativeMatchesFloatReference(void) {
     TEST_ASSERT_EQUAL_FLOAT(-4.f * 2.f + 3.f * -0.75f, captured[2]);
 }
 
+/* #152 PR3a (ruling R1): Linear takes [batch, features] only and fails fast on
+ * any other rank, like the Conv1d and pool rank guards. The guard used to print
+ * and carry on: a rank-1 input wrote outputShape->dimensions[1] past the
+ * one-slot array that inference() sizes by the INPUT rank, and a rank-3 input
+ * left dimensions[2] at its calloc 0, a silent 0-element output. Once the loop
+ * owns the batch axis, a natural-shape sample that missed batchViewOf reaches a
+ * Linear first layer exactly this way. The two direct calls give the output
+ * shape room for every write, so an unguarded call returns normally (child
+ * exit code 0: a clean RED) instead of writing past a caller array. */
+void testLinearCalcOutputShapeRejectsRank1Input(void) {
+    layer_t *layer = buildFloatLinearWithTrainable(TRAINABLE_DEFAULT); /* 3 -> 2 */
+    size_t inDims[1] = {3};
+    size_t inOrder[1] = {0};
+    shape_t inShape = {.numberOfDimensions = 1, .dimensions = inDims, .orderOfDimensions = inOrder};
+    size_t outDims[2] = {0};
+    size_t outOrder[2] = {0};
+    shape_t outShape = {
+        .numberOfDimensions = 1, .dimensions = outDims, .orderOfDimensions = outOrder};
+
+    ASSERT_EXITS_WITH_FAILURE(linearCalcOutputShape(layer, &inShape, &outShape));
+
+    freeLinearLayer(layer);
+}
+
+void testLinearCalcOutputShapeRejectsRank3Input(void) {
+    layer_t *layer = buildFloatLinearWithTrainable(TRAINABLE_DEFAULT); /* 3 -> 2 */
+    size_t inDims[3] = {1, 1, 3};
+    size_t inOrder[3] = {0, 1, 2};
+    shape_t inShape = {.numberOfDimensions = 3, .dimensions = inDims, .orderOfDimensions = inOrder};
+    size_t outDims[3] = {0};
+    size_t outOrder[3] = {0};
+    shape_t outShape = {
+        .numberOfDimensions = 3, .dimensions = outDims, .orderOfDimensions = outOrder};
+
+    ASSERT_EXITS_WITH_FAILURE(linearCalcOutputShape(layer, &inShape, &outShape));
+
+    freeLinearLayer(layer);
+}
+
+/* The user-visible failure: inference() on a one-Linear model handed a natural
+ * [3] sample (a missed batchViewOf). Unguarded, it returns a garbage [3]-element
+ * output. Rank 3 is not repeated at this level: on the FLOAT32 path the
+ * forward's matmul already exits on a >2D operand ("Matmul only supports up to
+ * 2D Tensors"), so that test would pass without the guard. */
+void testInferenceOneLinearModelRejectsRank1Sample(void) {
+    layer_t *layer = buildFloatLinearWithTrainable(TRAINABLE_DEFAULT); /* 3 -> 2 */
+    layer_t *model[] = {layer};
+    size_t sampleDims[] = {3};
+    tensor_t *sample = makeFloatTensor(sampleDims, 1, (float[]){1.f, 2.f, 3.f});
+
+    ASSERT_EXITS_WITH_FAILURE(freeTensor(inference(model, 1, sample)));
+
+    freeTensor(sample);
+    freeLinearLayer(layer);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLinearForwardFloat);
@@ -3130,5 +3187,8 @@ int main(void) {
     RUN_TEST(testLinearBackwardBfpBiasGradGroupedLossFoldsPerGroup);
     RUN_TEST(testLinearCalcBiasGradsBfpRejectsFloat32Loss);
     RUN_TEST(testLinearBackwardBfpPropLossNativeMatchesFloatReference);
+    RUN_TEST(testLinearCalcOutputShapeRejectsRank1Input);
+    RUN_TEST(testLinearCalcOutputShapeRejectsRank3Input);
+    RUN_TEST(testInferenceOneLinearModelRejectsRank1Sample);
     return UNITY_END();
 }

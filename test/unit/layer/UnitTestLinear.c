@@ -3117,11 +3117,12 @@ void testLinearCalcOutputShapeRejectsRank3Input(void) {
  * forward's matmul already exits on a >2D operand ("Matmul only supports up to
  * 2D Tensors"), so that test would pass without the guard.
  *
- * Under the ASan preset, an unguarded heap-buffer-overflow write also exits 1
- * by default (ASan's own exitcode), indistinguishable here from the guard's
- * exit(1) -- so this test's RED is meaningful only in the non-sanitizer
- * presets. The two direct linearCalcOutputShape tests above are the
- * deterministic pins in every preset. */
+ * Without the guard the write past the one-slot dims array is undefined
+ * behaviour: in the plain presets it returns a garbage output (exit 0 -> RED),
+ * and under the ASan preset (abort_on_error=1) it aborts with SIGABRT, which
+ * DeathTest.h reports as "terminated by signal" (also RED). The two direct
+ * linearCalcOutputShape tests above are the deterministic pins in every
+ * preset. */
 void testInferenceOneLinearModelRejectsRank1Sample(void) {
     layer_t *layer = buildFloatLinearWithTrainable(TRAINABLE_DEFAULT); /* 3 -> 2 */
     layer_t *model[] = {layer};

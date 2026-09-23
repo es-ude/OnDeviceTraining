@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "ArithmeticType.h"
+#include "BatchView.h"
 #include "CalculateGradsSequential.h"
 #include "Common.h"
 #include "DataLoader.h"
@@ -144,8 +145,9 @@ typedef struct mixedWidthQuant {
     quantization_t *floatQ;   /* FLOAT32 — Quant1/Softmax outputQ */
 } mixedWidthQuant_t;
 
-/* Flatten [1,28,28] -> [1,784] (the channel-1 acts as batch, mnist_mlp convention) -> Linear0
- * -> Relu -> Linear1 -> Quant1 -> Softmax, CE loss (spec §7 topology). */
+/* Flatten [1,1,28,28] -> [1,784] (the sample is the natural [1,28,28] image; the batch axis
+ * is added by batchViewOf / the loop) -> Linear0 -> Relu -> Linear1 -> Quant1 -> Softmax, CE
+ * loss (spec §7 topology). */
 static void buildModel(layer_t **model, mixedWidthQuant_t *mq) {
     model[FLATTEN_IDX] = flattenLayerInit();
 
@@ -395,15 +397,20 @@ int main(void) {
     for (size_t i = 0; i < TRAIN_SUBSET; i++) {
         sample_t *smp = getTrainSample(i);
         tensor_t *label = g_trainDataset.labels->array[i];
+        /* Tensor-level entry points take [B, ...]: wrap the natural-shape sample. */
+        batchView_t itemView;
+        batchView_t labelView;
+        tensor_t *input = batchViewOf(&itemView, smp->item);
+        tensor_t *labelBatch = batchViewOf(&labelView, label);
 
         trainingStats_t *stats;
         if (i == 0) {
             /* One traced step: also probes Linear0's own forward wire. */
-            stats = tracedGrads(model, MODEL_SIZE, lossCfg, REDUCTION_MEAN, smp->item, label,
+            stats = tracedGrads(model, MODEL_SIZE, lossCfg, REDUCTION_MEAN, input, labelBatch,
                                 linear0WireGateSink, &wireCtx);
         } else {
-            stats = calculateGradsSequential(model, MODEL_SIZE, lossCfg, REDUCTION_MEAN, smp->item,
-                                             label);
+            stats = calculateGradsSequential(model, MODEL_SIZE, lossCfg, REDUCTION_MEAN, input,
+                                             labelBatch);
         }
         freeTrainingStats(stats);
         freeSample(smp);

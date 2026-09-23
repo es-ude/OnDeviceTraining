@@ -43,7 +43,7 @@ Run the full 35-class set with `KWS_CLASSES=35 …` on every command (local-only
 
 ## Model
 
-- Input: `[40, 32]` (40 MFCC channels, 32 frames) → `reshapeItemsAddBatchDim` → `[1, 40, 32]`
+- Input: `[40, 32]` (40 MFCC channels, 32 frames); the training loop's `batchViewOf` view makes it `[1, 40, 32]`
 - `Conv1d(40→32,K3,SAME) → ReLU → MaxPool(2) → Conv1d(32→64,K3,SAME) → ReLU →
   MaxPool(2) → AdaptiveAvgPool1d(1) → Flatten → Linear(64→C) → Softmax → CE`
 - Lengths: 32 → 16 → 8 → 1; ~10.5 K params

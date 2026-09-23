@@ -9,6 +9,7 @@
 #include <time.h>
 
 #include "AdaptivePool1dApi.h"
+#include "BatchView.h"
 #include "CalculateGradsSequential.h"
 #include "Common.h"
 #include "Conv1dApi.h"
@@ -84,30 +85,6 @@ static size_t readNumClasses(void) {
     return (size_t)v;
 }
 
-static void reshapeItemsAddBatchDim(tensorArray_t *items) {
-    for (size_t i = 0; i < items->size; ++i) {
-        tensor_t *t = items->array[i];
-        size_t oldRank = t->shape->numberOfDimensions;
-        size_t newRank = oldRank + 1;
-
-        size_t *newDims = reserveMemory(newRank * sizeof(size_t));
-        size_t *newOrder = reserveMemory(newRank * sizeof(size_t));
-        newDims[0] = 1;
-        for (size_t d = 0; d < oldRank; ++d) {
-            newDims[d + 1] = t->shape->dimensions[d];
-        }
-        for (size_t d = 0; d < newRank; ++d) {
-            newOrder[d] = d;
-        }
-
-        freeReservedMemory(t->shape->dimensions);
-        freeReservedMemory(t->shape->orderOfDimensions);
-        t->shape->dimensions = newDims;
-        t->shape->orderOfDimensions = newOrder;
-        t->shape->numberOfDimensions = newRank;
-    }
-}
-
 static tensorArray_t *buildOneHotLabels(tensorArray_t *intLabels) {
     tensorArray_t *out = reserveMemory(sizeof(tensorArray_t));
     tensor_t **arr = reserveMemory(intLabels->size * sizeof(tensor_t *));
@@ -143,7 +120,6 @@ static void initDataSets(const char *dataDir) {
     tensorArray_t *trainItems = npyLoad(path);
     snprintf(path, sizeof(path), "%s/train_y.npy", dataDir);
     tensorArray_t *trainLabelsRaw = npyLoad(path);
-    reshapeItemsAddBatchDim(trainItems);
     g_trainDataset.items = trainItems;
     g_trainDataset.labels = buildOneHotLabels(trainLabelsRaw);
 
@@ -151,7 +127,6 @@ static void initDataSets(const char *dataDir) {
     tensorArray_t *valItems = npyLoad(path);
     snprintf(path, sizeof(path), "%s/val_y.npy", dataDir);
     tensorArray_t *valLabelsRaw = npyLoad(path);
-    reshapeItemsAddBatchDim(valItems);
     g_valDataset.items = valItems;
     g_valDataset.labels = buildOneHotLabels(valLabelsRaw);
 
@@ -159,7 +134,6 @@ static void initDataSets(const char *dataDir) {
     tensorArray_t *testItems = npyLoad(path);
     snprintf(path, sizeof(path), "%s/test_y.npy", dataDir);
     tensorArray_t *testLabelsRaw = npyLoad(path);
-    reshapeItemsAddBatchDim(testItems);
     g_testDataset.items = testItems;
     g_testDataset.labels = buildOneHotLabels(testLabelsRaw);
 }
@@ -184,7 +158,7 @@ static size_t getTestSize(void) {
 }
 
 static void buildModel(layer_t **model, layerQuant_t *lq) {
-    /* Input reshaped to [1, 1, 16000]. */
+    /* Sample [1, 16000]; the loop's batch view makes it [1, 1, 16000]. */
     /* Front downsample: AvgPool1d(K=16,S=16) -> length 1000 (16 kHz -> 1 kHz). */
     model[0] = avgPool1dLayerInit(&(avgPool1dInit_t){.kernelSize = DS_K, .stride = DS_K}, lq);
 
@@ -362,10 +336,12 @@ int main(int argc, char **argv) {
                 effB, g_batch, effB, g_sampleStart);
     }
 
-    /* mean over effB samples; same vtable entry TrainingEpochDefault.c:35 uses (== 1/effB for
-     * CE). */
+    /* mean over effB samples; same vtable entry and the same [1, ...] label view
+     * trainingEpochDefault uses (== 1/effB for CE). */
     tensor_t *firstLabel = g_testDataset.labels->array[g_sampleStart];
-    float meanScale = lossFunctions[lossCfg.funcType].computeMeanScale(effB, firstLabel);
+    batchView_t firstLabelView;
+    float meanScale = lossFunctions[lossCfg.funcType].computeMeanScale(
+        effB, batchViewOf(&firstLabelView, firstLabel));
 
     ensureDir("examples/kws_raw/dump_c");
     for (size_t step = 0; step < g_steps; step++) {
@@ -390,8 +366,12 @@ int main(int argc, char **argv) {
             tensor_t *label = g_testDataset.labels->array[idx];
             bool dumpActs = (s < g_actSamples);
             ctx.sampleIdx = dumpActs ? s : NPY_DUMP_NO_SAMPLE;
+            /* tracedGrads is tensor-level ([B, ...]); the sample is natural-shape. */
+            batchView_t itemView;
+            batchView_t labelView;
             trainingStats_t *stats =
-                tracedGrads(model, MODEL_SIZE, lossCfg, REDUCTION_MEAN, smp->item, label,
+                tracedGrads(model, MODEL_SIZE, lossCfg, REDUCTION_MEAN,
+                            batchViewOf(&itemView, smp->item), batchViewOf(&labelView, label),
                             dumpActs ? npyDumpSink : NULL, dumpActs ? &ctx : NULL);
             sumLoss += (double)stats->loss;
             freeTrainingStats(stats);

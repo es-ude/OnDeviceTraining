@@ -56,7 +56,7 @@ uv run python examples/_shared/compare_predictions.py \
 
 ## Model
 
-- Input: `[1, 16000]` → `reshapeItemsAddBatchDim` → `[1, 1, 16000]`
+- Input: `[1, 16000]`; the training loop's `batchViewOf` view makes it `[1, 1, 16000]`
 - `AvgPool1d(16) → 3× [Conv1d(K3,SAME) → LayerNorm([C,L]) → ReLU → MaxPool(4)] →
   AdaptiveAvgPool1d(1) → Flatten → Linear(64→C) → Softmax → CE`
   (channels 1→16→32→64; LayerNorm shapes `[16,1000]`, `[32,250]`, `[64,62]`)

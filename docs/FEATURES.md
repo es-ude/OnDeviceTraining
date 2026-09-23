@@ -406,7 +406,11 @@ checkpointing, limitations, literature).
   (fwd FLOAT32 + SYM_INT32; bwd FLOAT32 + SYM_INT32 + ASYM — the quantized arms
   are fake-quant, #206: dequant, float core, requant). CE backward is the **fused softmax+CE
   gradient** (`softmaxOutput − target`), and the training loop skips the Softmax layer
-  in backprop. Backward emits **raw per-element grads**; the mean divisor is deferred to
+  in backprop. Softmax normalizes **per row** (#152: row = axis 0 over all later axes, a
+  rank-1 input is one row; the row count is the storage `dims[0]`, and an input with more
+  than one storage row must be identity-order) — the same `dims[0]` partition as CE's MEAN
+  divisor, so the fused gradient is exact per row. Backward emits
+  **raw per-element grads**; the mean divisor is deferred to
   the optimizer via `computeMeanScale` × `scaleOptimizerGradients`. `crossEntropyForward`
   returns NaN (and prints one PRINT_ERROR per process) when any softmax element is
   non-finite; it no longer aborts (`#446`).

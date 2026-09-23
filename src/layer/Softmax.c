@@ -55,6 +55,37 @@ static void softmaxValuesFloat(const float *x, float *s, size_t n) {
     }
 }
 
+/* #152: row = axis 0 -- every row normalizes over all elements after axis 0
+ * (CrossEntropy.c:42's microbatch rule); a rank-1 tensor is one row. The row
+ * count is the STORAGE dimensions[0], the same field CrossEntropy.c:42 reads
+ * (transposeTensor permutes orderOfDimensions only, never dimensions). rowLen
+ * is the product of the trailing dims, not count / rows, so an empty leading
+ * axis cannot divide by zero. The row walk runs over physical storage, so
+ * more than one storage row requires identity order (GroupNorm.c:67's rule):
+ * a permuted view would silently normalize a partition that is not its
+ * logical rows. One storage row is the whole tensor for any order, as before
+ * #152 -- so a logical [1, N] stored as [N, 1] + transpose fails fast. */
+static void softmaxRowGeometry(const tensor_t *t, const char *where, size_t *rows, size_t *rowLen) {
+    const shape_t *s = t->shape;
+    size_t first = (s->numberOfDimensions >= 2) ? 1 : 0;
+    *rows = (first == 1) ? s->dimensions[0] : 1;
+    size_t len = 1;
+    for (size_t d = first; d < s->numberOfDimensions; d++) {
+        len *= s->dimensions[d];
+    }
+    *rowLen = len;
+    if (*rows > 1) {
+        for (size_t d = 0; d < s->numberOfDimensions; d++) {
+            if (s->orderOfDimensions[d] != d) {
+                PRINT_ERROR("%s: an input with %zu storage rows must be identity-order (dim %zu "
+                            "is order %zu)",
+                            where, *rows, d, s->orderOfDimensions[d]);
+                exit(1);
+            }
+        }
+    }
+}
+
 /* Softmax's real compute is always float (numerically stable max-shifted exp);
  * SYM_INT32 forwardMath only ever meant "convert in, compute in float, convert
  * out" (never native SYM arithmetic like Linear/Conv), so the funnel's
@@ -67,12 +98,19 @@ static void softmaxForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, ten
     (void)auxOut;
     (void)ctx;
     tensor_t *input = ops[0];
-    size_t count = calcNumberOfElementsByTensor(input);
+    size_t rows;
+    size_t rowLen;
+    softmaxRowGeometry(input, "Softmax forward", &rows, &rowLen);
+    if (rowLen == 0) {
+        return; /* empty rows: no max to read */
+    }
 
     float *x = (float *)input->data;
     float *y = (float *)rawOut->data;
 
-    softmaxValuesFloat(x, y, count);
+    for (size_t r = 0; r < rows; r++) {
+        softmaxValuesFloat(x + r * rowLen, y + r * rowLen, rowLen);
+    }
 }
 
 /* BFP epic PR6 Task 4 (P6-2..P6-5): the native ARITH_BFP softmax -- pipeline
@@ -252,26 +290,39 @@ void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output) {
  * Task 5 retired the pre-dispatch BLANKET guard: BFP wires are now legal on
  * the backward -- the ARITH_BFP arm below routes them through the funnel. */
 
+/* The Jacobian-vector product s * (dLds - <s, dLds>) per row: the softmax
+ * Jacobian is block-diagonal over rows (#152), so each row recomputes its own
+ * s from its own logits (P6-1) and takes its own dot. `s` is one row of
+ * scratch, reused across rows. */
+static void softmaxVjpRows(const float *x, const float *dLds, float *dLdx, size_t rows,
+                           size_t rowLen) {
+    if (rowLen == 0) {
+        return; /* empty rows: no max to read, no zero-length VLA */
+    }
+    float s[rowLen];
+    for (size_t r = 0; r < rows; r++) {
+        const size_t off = r * rowLen;
+        softmaxValuesFloat(x + off, s, rowLen);
+
+        float dot = 0.0f;
+        for (size_t i = 0; i < rowLen; i++) {
+            dot += s[i] * dLds[off + i];
+        }
+        for (size_t i = 0; i < rowLen; i++) {
+            dLdx[off + i] = s[i] * (dLds[off + i] - dot);
+        }
+    }
+}
+
+/* P6-1 root fix: the training loop hands every backward the layer INPUT
+ * (logits), not the softmax OUTPUT the Jacobian needs -- softmaxVjpRows
+ * recomputes it. */
 static void softmaxBackwardFloat(tensor_t *input, tensor_t *loss, tensor_t *propLoss) {
-    size_t n = calcNumberOfElementsByTensor(input);
-
-    float *x = (float *)input->data;
-    float *dLds = (float *)loss->data;
-    float *dLdx = (float *)propLoss->data;
-
-    /* P6-1 root fix: the training loop hands every backward the layer INPUT
-     * (logits), not the softmax OUTPUT the Jacobian needs -- recompute it. */
-    float s[n];
-    softmaxValuesFloat(x, s, n);
-
-    float dot = 0.0f;
-    for (size_t i = 0; i < n; i++) {
-        dot += s[i] * dLds[i];
-    }
-
-    for (size_t i = 0; i < n; i++) {
-        dLdx[i] = s[i] * (dLds[i] - dot);
-    }
+    size_t rows;
+    size_t rowLen;
+    softmaxRowGeometry(input, "Softmax backward", &rows, &rowLen);
+    softmaxVjpRows((const float *)input->data, (const float *)loss->data, (float *)propLoss->data,
+                   rows, rowLen);
 }
 
 static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *propLoss) {
@@ -298,22 +349,13 @@ static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *p
     setTensorValuesForConversion(propLossFloatData, &propLossFloatQ, propLoss, &propLossFloat);
     convertTensor(propLoss, &propLossFloat);
 
-    float *dLds = (float *)lossFloat.data;
-    float *dLdx = (float *)propLossFloat.data;
-
     /* P6-1 root fix: same recompute as the float arm -- the dequantized
      * inputFloat is the layer INPUT (logits), not the softmax OUTPUT. */
-    float s[inputSize];
-    softmaxValuesFloat((float *)inputFloat.data, s, inputSize);
-
-    float dot = 0.0f;
-    for (size_t i = 0; i < inputSize; i++) {
-        dot += s[i] * dLds[i];
-    }
-
-    for (size_t i = 0; i < inputSize; i++) {
-        dLdx[i] = s[i] * (dLds[i] - dot);
-    }
+    size_t rows;
+    size_t rowLen;
+    softmaxRowGeometry(input, "Softmax backward", &rows, &rowLen);
+    softmaxVjpRows((const float *)inputFloat.data, (const float *)lossFloat.data,
+                   (float *)propLossFloat.data, rows, rowLen);
 
     convertTensor(&propLossFloat, propLoss);
 }

@@ -27,6 +27,10 @@ callers pick freely.
 `B=1` today, output shape is `[F]` (the leading 1 is implicit). For `B>=1`
 in the future, output shape is `[B, F]` and `numFeaturesPerSample = numElements / B`.
 
+Softmax partitions its input the same way (#152): each of the `B` rows
+normalizes over its own `numElements / B` elements (a rank-1 input is one
+row), so CE's fused `(p - y)` backward is per row as well.
+
 **Uniform-B assumption** (DataLoader contract): all microbatches in one
 macro batch have equal `B`. The MEAN aggregator divides by total samples
 (`Σ batch->size`) rather than by `(numberOfBatches × B)`, so non-uniform B

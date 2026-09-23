@@ -28,7 +28,7 @@ void unitTestSoftmaxForwardFloat() {
     shape_t *inputShape = reserveMemory(sizeof(shape_t));
     setShape(inputShape, inputDims, 2, inputOrder);
     tensor_t *input = initTensor(inputShape, quantizationInitFloat(), NULL);
-    tensorFillFromFloatBuffer(input, (float[]){-1.f, 0.f, 1.f, 2.f, 5.f, -6.f}, 6);
+    tensorFillFromFloatBuffer(input, softmaxForwardX, softmaxForwardX_len);
 
     /* 2. Build heap output tensor (shape 2x3). */
     size_t *outputDims = reserveMemory(2 * sizeof(size_t));
@@ -60,11 +60,10 @@ void unitTestSoftmaxForwardFloat() {
     freeTensor(input);
     freeQuantization(floatQ);
 
-    /* 6. ASSERT. */
-    float expected[] = {2.3008e-03f, 6.2543e-03f, 1.7001e-02f,
-                        4.6213e-02f, 9.2822e-01f, 1.5503e-05f};
+    /* 6. ASSERT: per-row gold (#152, generate_expected_softmax.py section 0)
+     * -- each row of the [2,3] input normalizes over its own 3 logits. */
     for (size_t i = 0; i < inputSize; i++) {
-        TEST_ASSERT_FLOAT_WITHIN(0.0001f, expected[i], captured[i]);
+        TEST_ASSERT_FLOAT_WITHIN(0.0001f, softmaxForwardExpected[i], captured[i]);
     }
 }
 
@@ -80,7 +79,7 @@ void unitTestSoftmaxForwardSymInt32() {
     shape_t *inputShape = reserveMemory(sizeof(shape_t));
     setShape(inputShape, inputDims, 2, inputOrder);
     tensor_t *input = initTensor(inputShape, quantizationInitSymInt32(HALF_AWAY), NULL);
-    tensorFillFromFloatBuffer(input, (float[]){-1.f, 0.f, 1.f, 2.f, 5.f, -6.f}, 6);
+    tensorFillFromFloatBuffer(input, softmaxForwardX, softmaxForwardX_len);
 
     /* 2. Build heap output tensor (SymInt32, shape 2x3). */
     size_t *outputDims = reserveMemory(2 * sizeof(size_t));
@@ -124,18 +123,20 @@ void unitTestSoftmaxForwardSymInt32() {
     freeTensor(input);
     freeQuantization(symIntQ);
 
-    /* 7. ASSERT. */
-    float expected[] = {2.3008e-03f, 6.2543e-03f, 1.7001e-02f,
-                        4.6213e-02f, 9.2822e-01f, 1.5503e-05f};
+    /* 7. ASSERT: the same per-row gold (#152) at 0.01, the SYM backward
+     * twin's tolerance. The int12 in/out quantization error stays below
+     * 1e-3; 0.01 lets four of the six elements (not just two, as at the old
+     * 0.1) catch a whole-tensor partition sum. */
     for (size_t i = 0; i < inputSize; i++) {
-        TEST_ASSERT_FLOAT_WITHIN(0.1f, expected[i], captured[i]);
+        TEST_ASSERT_FLOAT_WITHIN(0.01f, softmaxForwardExpected[i], captured[i]);
     }
 }
 
 /* P6-1 root fix: backward consumes LOGITS -- see docs/conventions/
  * arithmetic-bfp.md §5.9/§11 (Correction 1, P6-1). Fixture X/DLDS/EXPECTED_DX
- * are goldgen'd (generate_expected_softmax.py, self-checked against
- * torch.autograd on softmax(x) with upstream grad DLDS). */
+ * are goldgen'd per row (#152: each row of the [2,3] input is its own softmax;
+ * generate_expected_softmax.py section 1, self-checked against torch.autograd
+ * on the per-row softmax with upstream grad DLDS). */
 void unitTestSoftmaxBackwardFloat() {
     size_t inputSize = 6;
 
@@ -202,7 +203,7 @@ void unitTestSoftmaxBackwardFloat() {
  * quantized through the layer's SymInt32 wires. softmaxBackwardSymExpectedDx
  * is goldgen'd from X requantized/dequantized at the fixture's int12
  * per-tensor absmax grid (the SAME grid tensorFillFromFloatBuffer derives
- * here), then the same float Jacobian formula -- the existing (loose)
+ * here), then the same per-row (#152) float Jacobian formula -- the (loose)
  * tolerance below absorbs the rest of the quantization noise (DLDS and
  * propLoss also round-trip through SymInt32). */
 void unitTestSoftmaxBackwardSymInt32() {
@@ -483,6 +484,335 @@ static tensor_t *buildSoftmaxWire1D(size_t n, quantization_t *q) {
     shape_t *shape = reserveMemory(sizeof(shape_t));
     setShape(shape, dims, 1, order);
     return initTensor(shape, q, NULL);
+}
+
+/* N-d FLOAT32 wire builder for the per-row (#152) fixtures: identity order,
+ * dims copied from the caller, filled from `values` when non-NULL. */
+static tensor_t *buildSoftmaxWireNd(const size_t *dimsIn, size_t rank, const float *values) {
+    size_t *dims = reserveMemory(rank * sizeof(size_t));
+    memcpy(dims, dimsIn, rank * sizeof(size_t));
+    size_t *order = reserveMemory(rank * sizeof(size_t));
+    setOrderOfDimsForNewTensor(rank, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, rank, order);
+    tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
+    if (values != NULL) {
+        tensorFillFromFloatBuffer(t, values, calcNumberOfElementsByTensor(t));
+    }
+    return t;
+}
+
+/* #152 invariant: every row of a multi-row input is its own distribution. A
+ * whole-tensor partition sum makes the rows share one denominator, so no row
+ * sums to 1. The rows are deliberately unlike each other: a wide spread, a
+ * uniform row, a dominant large logit, a small-magnitude row. */
+void testSoftmaxForwardRowsEachSumToOne(void) {
+    const size_t dims[2] = {4, 5};
+    const float x[20] = {3.1f,   -2.4f, 0.7f, 8.9f,  -5.5f, 0.0f, 0.0f,  0.0f,    0.0f, 0.0f,
+                         -30.0f, 25.0f, 1.0f, -1.0f, 12.0f, 0.5f, 0.25f, -0.125f, 2.0f, -4.0f};
+    tensor_t *input = buildSoftmaxWireNd(dims, 2, x);
+    tensor_t *output = buildSoftmaxWireNd(dims, 2, NULL);
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+
+    layerFunctions[SOFTMAX].forward(softmaxLayer, input, output);
+
+    float rowSums[4];
+    for (size_t r = 0; r < 4; r++) {
+        rowSums[r] = 0.0f;
+        for (size_t i = 0; i < 5; i++) {
+            rowSums[r] += ((float *)output->data)[r * 5 + i];
+        }
+    }
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(output);
+    freeTensor(input);
+    freeQuantization(floatQ);
+
+    for (size_t r = 0; r < 4; r++) {
+        TEST_ASSERT_FLOAT_WITHIN(1e-5f, 1.0f, rowSums[r]);
+    }
+}
+
+/* A rank-1 input is ONE row (#152): the whole vector normalizes together,
+ * exactly the pre-#152 behaviour (softmaxForwardRank1Expected is the old
+ * whole-vector gold). Pins that the row geometry never reads a rank-1 dims[0]
+ * as a row count, which would make six one-element rows (every output 1.0). */
+void testSoftmaxForwardRank1IsOneRow(void) {
+    const size_t dims[1] = {6};
+    tensor_t *input = buildSoftmaxWireNd(dims, 1, softmaxForwardX);
+    tensor_t *output = buildSoftmaxWireNd(dims, 1, NULL);
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+
+    layerFunctions[SOFTMAX].forward(softmaxLayer, input, output);
+
+    float captured[6];
+    for (size_t i = 0; i < 6; i++) {
+        captured[i] = ((float *)output->data)[i];
+    }
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(output);
+    freeTensor(input);
+    freeQuantization(floatQ);
+
+    for (size_t i = 0; i < 6; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(1e-4f, softmaxForwardRank1Expected[i], captured[i]);
+    }
+}
+
+/* Rank 3 [2,2,3]: a row is EVERYTHING after axis 0 (6 elements), not the last
+ * axis -- PyTorch's softmax(dim=-1) would normalize each 3-element vector.
+ * The generator asserts the two differ, so this pins the row geometry. */
+void testSoftmaxForwardRank3RowSpansTrailingAxes(void) {
+    const size_t dims[3] = {2, 2, 3};
+    tensor_t *input = buildSoftmaxWireNd(dims, 3, softmaxRank3X);
+    tensor_t *output = buildSoftmaxWireNd(dims, 3, NULL);
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+
+    layerFunctions[SOFTMAX].forward(softmaxLayer, input, output);
+
+    float captured[12];
+    for (size_t i = 0; i < 12; i++) {
+        captured[i] = ((float *)output->data)[i];
+    }
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(output);
+    freeTensor(input);
+    freeQuantization(floatQ);
+
+    for (size_t i = 0; i < 12; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(1e-4f, softmaxRank3ExpectedS[i], captured[i]);
+    }
+}
+
+/* Rows at very different logit scales ([120, 119, 1] next to [-1, 0, 1]):
+ * each row subtracts ITS OWN max. One shared max (120) underflows every exp
+ * of row 1 to 0 in float32, and its 0/0 divide yields NaN, which fails the
+ * WITHIN asserts. */
+void testSoftmaxForwardMixedScaleRowsStayFinite(void) {
+    const size_t dims[2] = {2, 3};
+    tensor_t *input = buildSoftmaxWireNd(dims, 2, softmaxMixedScaleX);
+    tensor_t *output = buildSoftmaxWireNd(dims, 2, NULL);
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+
+    layerFunctions[SOFTMAX].forward(softmaxLayer, input, output);
+
+    float captured[6];
+    for (size_t i = 0; i < 6; i++) {
+        captured[i] = ((float *)output->data)[i];
+    }
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(output);
+    freeTensor(input);
+    freeQuantization(floatQ);
+
+    for (size_t i = 0; i < 6; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(1e-6f, softmaxMixedScaleExpected[i], captured[i]);
+    }
+}
+
+/* A zero-copy transposed view (transposeTensor swaps orderOfDimensions only)
+ * with more than one STORAGE row: physical [2, 3] transposed is logically
+ * [3, 2], but the per-row walk runs over physical storage, so it would
+ * normalize a partition that is not the logical rows. Fail fast instead
+ * (GroupNorm.c:67's identity-order rule). */
+void testSoftmaxForwardRejectsTransposedMultiRow(void) {
+    const size_t dims[2] = {2, 3};
+    tensor_t *input = buildSoftmaxWireNd(dims, 2, softmaxForwardX);
+    tensor_t *output = buildSoftmaxWireNd(dims, 2, NULL);
+    transposeTensor(input, 0, 1);
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+
+    ASSERT_EXITS_WITH_FAILURE(layerFunctions[SOFTMAX].forward(softmaxLayer, input, output));
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(output);
+    freeTensor(input);
+    freeQuantization(floatQ);
+}
+
+/* The row count is the STORAGE dims[0] (the field CrossEntropy.c:42 reads),
+ * not the logical axis 0: physical [1, 6] transposed is logically [6, 1], yet
+ * it has ONE storage row, so the whole six-element vector normalizes together
+ * (the whole-vector gold), exactly as before #152 and as CE's MEAN divisor
+ * counts it. Pins that the identity-order rule binds only when storage
+ * dims[0] > 1. */
+void testSoftmaxForwardTransposedSingleRowIsOneRow(void) {
+    const size_t dims[2] = {1, 6};
+    tensor_t *input = buildSoftmaxWireNd(dims, 2, softmaxForwardX);
+    tensor_t *output = buildSoftmaxWireNd(dims, 2, NULL);
+    transposeTensor(input, 0, 1);
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+
+    layerFunctions[SOFTMAX].forward(softmaxLayer, input, output);
+
+    float captured[6];
+    for (size_t i = 0; i < 6; i++) {
+        captured[i] = ((float *)output->data)[i];
+    }
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(output);
+    freeTensor(input);
+    freeQuantization(floatQ);
+
+    for (size_t i = 0; i < 6; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(1e-4f, softmaxForwardRank1Expected[i], captured[i]);
+    }
+}
+
+/* Empty rows ([2, 0]: two rows of zero elements) are a no-op -- no max read
+ * from an empty row. The RED of this pin is sanitizer-only: under
+ * unit_test_asan the unguarded kernel's x[0] read is a heap-buffer-overflow;
+ * the plain presets read a stray float and carry on. */
+void testSoftmaxForwardEmptyRowsAreNoOp(void) {
+    const size_t dims[2] = {2, 0};
+    tensor_t *input = buildSoftmaxWireNd(dims, 2, NULL);
+    tensor_t *output = buildSoftmaxWireNd(dims, 2, NULL);
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+
+    layerFunctions[SOFTMAX].forward(softmaxLayer, input, output);
+    size_t capturedCount = calcNumberOfElementsByTensor(output);
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(output);
+    freeTensor(input);
+    freeQuantization(floatQ);
+
+    TEST_ASSERT_EQUAL_size_t(0, capturedCount);
+}
+
+/* Backward twin of testSoftmaxForwardRank1IsOneRow: a rank-1 input is ONE row,
+ * so the dx is the whole-vector Jacobian-VJP -- softmaxBackwardRank1ExpectedDx
+ * is byte-identical to the pre-#152 softmaxBackwardExpectedDx gold. */
+void testSoftmaxBackwardRank1IsOneRow(void) {
+    const size_t dims[1] = {6};
+    tensor_t *input = buildSoftmaxWireNd(dims, 1, softmaxBackwardX);
+    tensor_t *loss = buildSoftmaxWireNd(dims, 1, softmaxBackwardDLds);
+    tensor_t *propLoss = buildSoftmaxWireNd(dims, 1, NULL);
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+
+    layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss);
+
+    float captured[6];
+    for (size_t i = 0; i < 6; i++) {
+        captured[i] = ((float *)propLoss->data)[i];
+    }
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(input);
+    freeQuantization(floatQ);
+
+    for (size_t i = 0; i < 6; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(1e-4f, softmaxBackwardRank1ExpectedDx[i], captured[i]);
+    }
+}
+
+/* Backward twin of testSoftmaxForwardRank3RowSpansTrailingAxes: the Jacobian
+ * is block-diagonal over the 2 rows of 6 trailing elements -- each row
+ * recomputes its own s and takes its own dot. */
+void testSoftmaxBackwardRank3RowSpansTrailingAxes(void) {
+    const size_t dims[3] = {2, 2, 3};
+    tensor_t *input = buildSoftmaxWireNd(dims, 3, softmaxRank3X);
+    tensor_t *loss = buildSoftmaxWireNd(dims, 3, softmaxRank3DLds);
+    tensor_t *propLoss = buildSoftmaxWireNd(dims, 3, NULL);
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+
+    layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss);
+
+    float captured[12];
+    for (size_t i = 0; i < 12; i++) {
+        captured[i] = ((float *)propLoss->data)[i];
+    }
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(input);
+    freeQuantization(floatQ);
+
+    for (size_t i = 0; i < 12; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(1e-4f, softmaxRank3ExpectedDx[i], captured[i]);
+    }
+}
+
+/* Backward twin of testSoftmaxForwardRejectsTransposedMultiRow. */
+void testSoftmaxBackwardRejectsTransposedMultiRow(void) {
+    const size_t dims[2] = {2, 3};
+    tensor_t *input = buildSoftmaxWireNd(dims, 2, softmaxBackwardX);
+    tensor_t *loss = buildSoftmaxWireNd(dims, 2, softmaxBackwardDLds);
+    tensor_t *propLoss = buildSoftmaxWireNd(dims, 2, NULL);
+    transposeTensor(input, 0, 1);
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+
+    ASSERT_EXITS_WITH_FAILURE(
+        layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss));
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(input);
+    freeQuantization(floatQ);
+}
+
+/* Backward twin of testSoftmaxForwardEmptyRowsAreNoOp on the FLOAT32 arm: no
+ * max read from an empty row and no zero-length VLA. Sanitizer-only RED
+ * (unit_test_asan: UBSan vla-bound on the unguarded row scratch). */
+void testSoftmaxBackwardEmptyRowsAreNoOp(void) {
+    const size_t dims[2] = {2, 0};
+    tensor_t *input = buildSoftmaxWireNd(dims, 2, NULL);
+    tensor_t *loss = buildSoftmaxWireNd(dims, 2, NULL);
+    tensor_t *propLoss = buildSoftmaxWireNd(dims, 2, NULL);
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+
+    layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss);
+    size_t capturedCount = calcNumberOfElementsByTensor(propLoss);
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(input);
+    freeQuantization(floatQ);
+
+    TEST_ASSERT_EQUAL_size_t(0, capturedCount);
 }
 
 /* ---- BFP epic PR6 Task 4: native ARITH_BFP forward (P6-2..P6-5) ----
@@ -1001,6 +1331,18 @@ int main() {
 
     RUN_TEST(testSoftmaxForwardLargeLogitsStaysFinite);
     RUN_TEST(testSoftmaxForwardSymLargeLogitsStaysFinite);
+
+    RUN_TEST(testSoftmaxForwardRowsEachSumToOne);
+    RUN_TEST(testSoftmaxForwardRank1IsOneRow);
+    RUN_TEST(testSoftmaxForwardRank3RowSpansTrailingAxes);
+    RUN_TEST(testSoftmaxForwardMixedScaleRowsStayFinite);
+    RUN_TEST(testSoftmaxForwardRejectsTransposedMultiRow);
+    RUN_TEST(testSoftmaxForwardTransposedSingleRowIsOneRow);
+    RUN_TEST(testSoftmaxForwardEmptyRowsAreNoOp);
+    RUN_TEST(testSoftmaxBackwardRank1IsOneRow);
+    RUN_TEST(testSoftmaxBackwardRank3RowSpansTrailingAxes);
+    RUN_TEST(testSoftmaxBackwardRejectsTransposedMultiRow);
+    RUN_TEST(testSoftmaxBackwardEmptyRowsAreNoOp);
 
     RUN_TEST(unitTestSoftmaxForwardBfpNativeTrunc);
     RUN_TEST(unitTestSoftmaxForwardBfpNativeHalfAway);

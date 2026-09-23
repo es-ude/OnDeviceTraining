@@ -2713,6 +2713,127 @@ void unitTestSoftmaxMseBackwardThroughLoop(void) {
     }
 }
 
+/*! #152 PR2: CrossEntropy + Softmax at TWO rows through the loop. The fused
+ *  CE backward (p - y, the Softmax layer skipped) inherits whatever the
+ *  Softmax FORWARD produced, so a whole-tensor partition sum -- both rows
+ *  sharing one denominator -- moves the reported loss and every upstream
+ *  grad. softmaxCeTwoRowsE2e* are goldgen'd (generate_expected_softmax.py
+ *  section 6) via torch F.cross_entropy on the [2,3] logits: the loss is the
+ *  REDUCTION_MEAN value (sum / rows, CrossEntropy.c:42), the grads are the raw
+ *  sum-reduction grads (docs/conventions/loss.md: the backward emits raw
+ *  per-element gradients; the optimizer applies the macro scale). */
+void unitTestSoftmaxCeTwoRowsThroughLoop(void) {
+    quantization_t *q = quantizationInitFloat();
+
+    parameter_t *w0 = buildRampParam2D(3, 3, 0.1f, 0.05f);
+    parameter_t *b0 = buildRampParam2D(1, 3, 0.05f, -0.1f);
+    layer_t *linear0 = buildBorrowedLinearLayer(w0, b0, q);
+
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *softmax = softmaxLayerInit(&lq);
+
+    layer_t *model[] = {linear0, softmax};
+
+    tensor_t *input = buildFloatTensor2D(2, 3, softmaxTwoRowsE2eX);
+    tensor_t *label = buildFloatTensor2D(2, 3, softmaxCeTwoRowsE2eLabel);
+
+    trainingStats_t *stats = calculateGradsSequential(model, 2, defaultLossConfig(CROSS_ENTROPY),
+                                                      REDUCTION_MEAN, input, label);
+
+    /* CAPTURE. */
+    float capturedLoss = stats->loss;
+    float capturedWeightGrad[9];
+    float capturedBiasGrad[3];
+    for (size_t i = 0; i < 9; i++) {
+        capturedWeightGrad[i] = ((float *)getGradFromParameter(w0)->data)[i];
+    }
+    for (size_t i = 0; i < 3; i++) {
+        capturedBiasGrad[i] = ((float *)getGradFromParameter(b0)->data)[i];
+    }
+
+    /* FREE (reverse init order). */
+    freeTrainingStats(stats);
+    freeTensor(label);
+    freeTensor(input);
+    freeSoftmaxLayer(softmax);
+    freeLinearLayerShellOnly(linear0);
+    freeParameter(b0);
+    freeParameter(w0);
+    freeQuantization(q);
+
+    /* ASSERT. */
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, softmaxCeTwoRowsE2eExpectedLossMean, capturedLoss);
+    for (size_t i = 0; i < 9; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(1e-4f, softmaxCeTwoRowsE2eExpectedWeightGrad[i],
+                                 capturedWeightGrad[i]);
+    }
+    for (size_t i = 0; i < 3; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(1e-4f, softmaxCeTwoRowsE2eExpectedBiasGrad[i],
+                                 capturedBiasGrad[i]);
+    }
+}
+
+/*! #152 PR2: Linear -> Softmax -> MSE at TWO rows through the loop. MSE does
+ *  not skip the Softmax layer (only CROSS_ENTROPY does, CalculateGradsSequential.c
+ *  backwardIndex -= 1), so this is the one loop path that reaches the per-row
+ *  softmax BACKWARD: each row's dx must use its own s and its own dot before
+ *  the Linear weight/bias grads sum over the rows. softmaxMseTwoRowsE2e* are
+ *  goldgen'd (generate_expected_softmax.py section 7): the loss is the
+ *  REDUCTION_MEAN value (sum / numel, MSE.c), the grads are the raw
+ *  sum-reduction grads (raw 2(o-l) seed, docs/conventions/loss.md). */
+void unitTestSoftmaxMseTwoRowsBackwardThroughLoop(void) {
+    quantization_t *q = quantizationInitFloat();
+
+    parameter_t *w0 = buildRampParam2D(3, 3, 0.1f, 0.05f);
+    parameter_t *b0 = buildRampParam2D(1, 3, 0.05f, -0.1f);
+    layer_t *linear0 = buildBorrowedLinearLayer(w0, b0, q);
+
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *softmax = softmaxLayerInit(&lq);
+
+    layer_t *model[] = {linear0, softmax};
+
+    tensor_t *input = buildFloatTensor2D(2, 3, softmaxTwoRowsE2eX);
+    tensor_t *label = buildFloatTensor2D(2, 3, softmaxMseTwoRowsE2eLabel);
+
+    trainingStats_t *stats =
+        calculateGradsSequential(model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, input, label);
+
+    /* CAPTURE. */
+    float capturedLoss = stats->loss;
+    float capturedWeightGrad[9];
+    float capturedBiasGrad[3];
+    for (size_t i = 0; i < 9; i++) {
+        capturedWeightGrad[i] = ((float *)getGradFromParameter(w0)->data)[i];
+    }
+    for (size_t i = 0; i < 3; i++) {
+        capturedBiasGrad[i] = ((float *)getGradFromParameter(b0)->data)[i];
+    }
+
+    /* FREE (reverse init order). */
+    freeTrainingStats(stats);
+    freeTensor(label);
+    freeTensor(input);
+    freeSoftmaxLayer(softmax);
+    freeLinearLayerShellOnly(linear0);
+    freeParameter(b0);
+    freeParameter(w0);
+    freeQuantization(q);
+
+    /* ASSERT. */
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f, softmaxMseTwoRowsE2eExpectedLossMean, capturedLoss);
+    for (size_t i = 0; i < 9; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(1e-4f, softmaxMseTwoRowsE2eExpectedWeightGrad[i],
+                                 capturedWeightGrad[i]);
+    }
+    for (size_t i = 0; i < 3; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(1e-4f, softmaxMseTwoRowsE2eExpectedBiasGrad[i],
+                                 capturedBiasGrad[i]);
+    }
+}
+
 /* ===========================================================================
  * BFP epic PR6 Task 6 (P6-8) capstone: uniform-BFP softmax+MSE e2e.
  * ======================================================================== */
@@ -2841,6 +2962,8 @@ int main(void) {
     RUN_TEST(testBfpUniformNormModelTrainsAndGridsMove);
     RUN_TEST(testBfpNormGradStorageAccumulatesAndSteps);
     RUN_TEST(unitTestSoftmaxMseBackwardThroughLoop);
+    RUN_TEST(unitTestSoftmaxCeTwoRowsThroughLoop);
+    RUN_TEST(unitTestSoftmaxMseTwoRowsBackwardThroughLoop);
     RUN_TEST(unitTestUniformBfpSoftmaxMseTrains);
     return UNITY_END();
 }

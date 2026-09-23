@@ -1117,6 +1117,37 @@ void testMaxPool1dForwardSymRejectsBatch1ArgmaxAtBatch2(void) {
     freeTensor(r.input);
 }
 
+/* Backward arms: a batch-1 forward records a valid [1, 3, 4] argmax and a
+ * batch-1 backward consumes it (the control); a batch-2 lossGrad against that
+ * stale argmax must die before any argmax read. The guard's reference operand
+ * is lossGrad ([B, C, Lout]); forwardInput is unused and passed as NULL. */
+void testMaxPool1dBackwardFloatRejectsBatch1ArgmaxAtBatch2(void) {
+    size_t batch1InputDims[] = {1, 3, 5};
+    size_t batch1OutputDims[] = {1, 3, 4};
+    size_t inputDims[] = {2, 3, 5};
+    size_t outputDims[] = {2, 3, 4};
+    maxPool1dRunResult_t r =
+        maxPool1dBuild(NULL, batch1InputDims, 2, VALID, 1, 1, NULL, NULL, batch1OutputDims);
+    tensor_t *batch1LossGrad = makeFloatTensor(batch1OutputDims, 3, NULL);
+    tensor_t *batch1PropLoss = makeFloatTensor(batch1InputDims, 3, NULL);
+    tensor_t *lossGrad = makeFloatTensor(outputDims, 3, NULL);
+    tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
+
+    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dBackward(r.layer, NULL, batch1LossGrad, batch1PropLoss);
+
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(r.layer, NULL, lossGrad, propLoss));
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(batch1PropLoss);
+    freeTensor(batch1LossGrad);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMaxPool1dForwardBasic);
@@ -1146,5 +1177,6 @@ int main(void) {
     RUN_TEST(testMaxPool1dForwardFloatRequiresExactArgmaxDims);
     RUN_TEST(testMaxPool1dForwardFloatRejectsArgmaxOfWrongRank);
     RUN_TEST(testMaxPool1dForwardSymRejectsBatch1ArgmaxAtBatch2);
+    RUN_TEST(testMaxPool1dBackwardFloatRejectsBatch1ArgmaxAtBatch2);
     return UNITY_END();
 }

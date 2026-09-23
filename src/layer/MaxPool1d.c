@@ -365,13 +365,8 @@ void maxPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tensor_t *lo
     size_t outputLength = lossGrad->shape->dimensions[2];
     size_t inputLength = propLoss->shape->dimensions[2];
 
-    // Defensive: argmax shape must match lossGrad shape.
-    if (cfg->argmaxIndices->shape->dimensions[2] != outputLength) {
-        PRINT_ERROR("MaxPool1d backward: argmaxIndices length (%zu) does not match "
-                    "lossGrad outputLength (%zu)",
-                    cfg->argmaxIndices->shape->dimensions[2], outputLength);
-        exit(1);
-    }
+    maxPoolRequireArgmaxShape(cfg->argmaxIndices, lossGrad, outputLength,
+                              "MaxPool1d backward FLOAT32");
 
     float const *gyArr = (float const *)lossGrad->data;
     int32_t const *argmaxArr = (int32_t const *)cfg->argmaxIndices->data;

@@ -50,25 +50,23 @@ static const float labelDataLiteral[DATASET_SIZE][NUM_CLASSES] = {
 
 static void initDataset() {
     for (size_t i = 0; i < DATASET_SIZE; i++) {
-        /* Item tensor (1, INPUT_DIM). */
-        size_t *itemDims = reserveMemory(2 * sizeof(size_t));
-        itemDims[0] = 1;
-        itemDims[1] = INPUT_DIM;
-        size_t *itemOrder = reserveMemory(2 * sizeof(size_t));
-        setOrderOfDimsForNewTensor(2, itemOrder);
+        /* Item tensor: natural shape (INPUT_DIM); trainingRun adds the batch axis. */
+        size_t *itemDims = reserveMemory(sizeof(size_t));
+        itemDims[0] = INPUT_DIM;
+        size_t *itemOrder = reserveMemory(sizeof(size_t));
+        setOrderOfDimsForNewTensor(1, itemOrder);
         shape_t *itemShape = reserveMemory(sizeof(shape_t));
-        setShape(itemShape, itemDims, 2, itemOrder);
+        setShape(itemShape, itemDims, 1, itemOrder);
         items[i] = initTensor(itemShape, quantizationInitFloat(), NULL);
         tensorFillFromFloatBuffer(items[i], itemDataLiteral[i], INPUT_DIM);
 
-        /* Label tensor (1, NUM_CLASSES). */
-        size_t *labelDims = reserveMemory(2 * sizeof(size_t));
-        labelDims[0] = 1;
-        labelDims[1] = NUM_CLASSES;
-        size_t *labelOrder = reserveMemory(2 * sizeof(size_t));
-        setOrderOfDimsForNewTensor(2, labelOrder);
+        /* Label tensor: natural shape (NUM_CLASSES). */
+        size_t *labelDims = reserveMemory(sizeof(size_t));
+        labelDims[0] = NUM_CLASSES;
+        size_t *labelOrder = reserveMemory(sizeof(size_t));
+        setOrderOfDimsForNewTensor(1, labelOrder);
         shape_t *labelShape = reserveMemory(sizeof(shape_t));
-        setShape(labelShape, labelDims, 2, labelOrder);
+        setShape(labelShape, labelDims, 1, labelOrder);
         labels[i] = initTensor(labelShape, quantizationInitFloat(), NULL);
         tensorFillFromFloatBuffer(labels[i], labelDataLiteral[i], NUM_CLASSES);
     }

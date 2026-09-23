@@ -23,9 +23,12 @@ callers pick freely.
 
 ### Microbatch shape
 
-`modelOutput->shape->dimensions[0]` is the microbatch dimension `B`. For
-`B=1` today, output shape is `[F]` (the leading 1 is implicit). For `B>=1`
-in the future, output shape is `[B, F]` and `numFeaturesPerSample = numElements / B`.
+`modelOutput->shape->dimensions[0]` is the microbatch dimension `B`, and it
+is always explicit: the output shape is `[B, ...]` and
+`numFeaturesPerSample = numElements / B`. At `B=1` the training loop makes
+the leading 1 explicit with `batchViewOf`, for the model input, the label
+and the `labelRef` handed to `computeMeanScale` alike (see
+[data-shape.md](data-shape.md), "Who adds the batch axis").
 
 Softmax partitions its input the same way (#152): each of the `B` rows
 normalizes over its own `numElements / B` elements (a rank-1 input is one

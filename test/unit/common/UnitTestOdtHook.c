@@ -117,6 +117,21 @@ static tensor_t *makeRowVec2(float a, float b) {
     return t;
 }
 
+/* Natural-shape [2] float32 sample (a dataset sample: trainingEpochDefault adds
+ * the batch axis itself, #152 PR3a). */
+static tensor_t *makeVec2(float a, float b) {
+    size_t *dims = reserveMemory(sizeof(size_t));
+    dims[0] = 2;
+    size_t *order = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
+    float vals[2] = {a, b};
+    tensorFillFromFloatBuffer(t, vals, 2);
+    return t;
+}
+
 /* Linear(2->2) + Softmax with known weights, CE loss. `q` (caller-owned, freed
  * by the caller AFTER the layers) is the uniform layerQuant template. */
 static void buildLinearSoftmaxModel(layer_t *model[2], quantization_t *q, trainable_t trainable) {
@@ -326,10 +341,10 @@ static size_t getEpochDatasetSize(void) {
 
 void testTrainingEpochDefaultStepsThroughOptimizerStep(void) {
     resetLog();
-    g_epochItems[0] = makeRowVec2(5.0f, 1.0f);
-    g_epochItems[1] = makeRowVec2(1.0f, 5.0f);
-    g_epochLabels[0] = makeRowVec2(1.0f, 0.0f);
-    g_epochLabels[1] = makeRowVec2(0.0f, 1.0f);
+    g_epochItems[0] = makeVec2(5.0f, 1.0f);
+    g_epochItems[1] = makeVec2(1.0f, 5.0f);
+    g_epochLabels[0] = makeVec2(1.0f, 0.0f);
+    g_epochLabels[1] = makeVec2(0.0f, 1.0f);
     g_epochItemsArr.array = g_epochItems;
     g_epochItemsArr.size = 2;
     g_epochLabelsArr.array = g_epochLabels;

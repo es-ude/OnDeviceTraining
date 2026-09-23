@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 
+#include "BatchView.h"
 #include "BsScheduler.h"
 #include "Common.h"
 #include "DataLoaderApi.h"
@@ -26,8 +27,11 @@ float evaluationBatch(layer_t **model, size_t modelSize, lossFuncType_t funcType
     float totalLoss = 0.0f;
 
     for (size_t i = 0; i < batch->size; i++) {
-        inferenceStats_t *stats = inferenceFn(model, modelSize, batch->samples[i]->item,
-                                              batch->samples[i]->label, funcType, forwardReduction);
+        batchView_t itemView;
+        batchView_t labelView;
+        inferenceStats_t *stats = inferenceFn(
+            model, modelSize, batchViewOf(&itemView, batch->samples[i]->item),
+            batchViewOf(&labelView, batch->samples[i]->label), funcType, forwardReduction);
         totalLoss += stats->loss;
         freeInferenceStats(stats);
         freeSample(batch->samples[i]);
@@ -135,11 +139,16 @@ static float evaluateBatchInternal(layer_t **model, size_t modelSize, lossFuncTy
     float totalLoss = 0.0f;
 
     for (size_t i = 0; i < batch->size; i++) {
-        inferenceStats_t *stats = inferenceFn(model, modelSize, batch->samples[i]->item,
-                                              batch->samples[i]->label, funcType, forwardReduction);
+        batchView_t itemView;
+        batchView_t labelView;
+        inferenceStats_t *stats = inferenceFn(
+            model, modelSize, batchViewOf(&itemView, batch->samples[i]->item),
+            batchViewOf(&labelView, batch->samples[i]->label), funcType, forwardReduction);
         totalLoss += stats->loss;
 
         size_t predicted = argmaxByTensor(stats->output, numClasses);
+        /* The raw sample label IS the one row's class vector (the view shares
+         * its data), so the target argmax reads it directly. */
         size_t target = argmaxByTensor(batch->samples[i]->label, numClasses);
 
         if (predicted == target) {

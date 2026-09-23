@@ -56,10 +56,11 @@ void tearDown(void) {}
  * class 0 (channel-0 positive, channel-1 negative), 4..7 are class 1 (signs
  * flipped). Per-sample and per-timestep offsets keep the 8 samples distinct
  * without breaking the sign-based separation the model must learn. Each item is
- * a rank-3 [1, IN_CHANNELS, SEQ_LEN] tensor (GroupNorm requires rank-3 [B,C,T]);
- * the DataLoader passes items one at a time and grads accumulate across the
- * batch. File-scope so the getSample callback (fired during trainingRun) reaches
- * them; freeDataset releases them at the end. */
+ * a natural-shape [IN_CHANNELS, SEQ_LEN] tensor and each label a [NUM_CLASSES]
+ * vector; trainingRun adds the batch axis (GroupNorm sees rank-3 [1,C,T]), one
+ * sample at a time, and grads accumulate across the batch. File-scope so the
+ * getSample callback (fired during trainingRun) reaches them; freeDataset
+ * releases them at the end. */
 static tensor_t *items[NUM_SAMPLES];
 static tensor_t *labels[NUM_SAMPLES];
 
@@ -104,13 +105,25 @@ static tensor_t *build2DFloat(size_t d0, size_t d1, const float *data, size_t n)
     return t;
 }
 
+static tensor_t *build1DFloat(size_t n, const float *data) {
+    size_t *dims = reserveMemory(sizeof(size_t));
+    dims[0] = n;
+    size_t *order = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(t, (float *)data, n);
+    return t;
+}
+
 static void initDataset(void) {
     for (size_t s = 0; s < NUM_SAMPLES; s++) {
         float itemBuf[IN_CHANNELS * SEQ_LEN];
         float labelBuf[NUM_CLASSES];
         fillSampleData(s, itemBuf, labelBuf);
-        items[s] = build3DFloat(1, IN_CHANNELS, SEQ_LEN, itemBuf, IN_CHANNELS * SEQ_LEN);
-        labels[s] = build2DFloat(1, NUM_CLASSES, labelBuf, NUM_CLASSES);
+        items[s] = build2DFloat(IN_CHANNELS, SEQ_LEN, itemBuf, IN_CHANNELS * SEQ_LEN);
+        labels[s] = build1DFloat(NUM_CLASSES, labelBuf);
     }
 }
 

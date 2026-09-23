@@ -8,6 +8,7 @@
 
 #include "AdaptivePool1dApi.h"
 #include "ArithmeticType.h"
+#include "BatchView.h"
 #include "BorrowedLayer.h"
 #include "CalculateGradsSequential.h"
 #include "Conv1dApi.h"
@@ -722,6 +723,20 @@ static tensor_t *buildFloatTensor2D(size_t d0, size_t d1, const float *values) {
     setShape(shape, dims, 2, order);
     tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
     tensorFillFromFloatBuffer(t, (float *)values, d0 * d1);
+    return t;
+}
+
+/* Rank-1 [n]: the natural shape of a feature-vector sample / class-vector
+ * label fed through a batch_t consumer (#152 PR3a: the loop adds axis 0). */
+static tensor_t *buildFloatTensor1D(size_t n, const float *values) {
+    size_t *dims = reserveMemory(sizeof(size_t));
+    dims[0] = n;
+    size_t *order = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(t, (float *)values, n);
     return t;
 }
 
@@ -1640,10 +1655,10 @@ void testBfpGradStorageTrainsUnderReductionMean(void) {
     buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false, gradKnob);
     freeQuantization(gradKnob);
 
-    bfpMeanEpochItems[0] = buildFloatTensor2D(1, 3, (float[]){1.0f, 2.0f, 3.0f});
-    bfpMeanEpochLabels[0] = buildFloatTensor2D(1, 2, (float[]){0.2f, -0.3f});
-    bfpMeanEpochItems[1] = buildFloatTensor2D(1, 3, (float[]){0.5f, -1.0f, 2.0f});
-    bfpMeanEpochLabels[1] = buildFloatTensor2D(1, 2, (float[]){-0.1f, 0.4f});
+    bfpMeanEpochItems[0] = buildFloatTensor1D(3, (float[]){1.0f, 2.0f, 3.0f});
+    bfpMeanEpochLabels[0] = buildFloatTensor1D(2, (float[]){0.2f, -0.3f});
+    bfpMeanEpochItems[1] = buildFloatTensor1D(3, (float[]){0.5f, -1.0f, 2.0f});
+    bfpMeanEpochLabels[1] = buildFloatTensor1D(2, (float[]){-0.1f, 0.4f});
     dataLoader_t *dl = dataLoaderInit(getBfpMeanEpochSample, getBfpMeanEpochDatasetSize, 1, NULL,
                                       NULL, false, 0, true);
 
@@ -1781,12 +1796,13 @@ void testBfpConvGradStorageTrainsUnderDefaultEpoch(void) {
     int wGradType = (int)wGrad->quantization->type;
     int bGradType = (int)bGrad->quantization->type;
 
-    bfpConvEpochItems[0] = buildFloatTensor3D(1, BFP_CONV_IN_CHANNELS, BFP_CONV_SEQ_LEN,
+    /* Natural shapes: item [C, L], label [classes]; the epoch loop adds axis 0. */
+    bfpConvEpochItems[0] = buildFloatTensor2D(BFP_CONV_IN_CHANNELS, BFP_CONV_SEQ_LEN,
                                               (float[]){1.0f, 2.0f, 3.0f, 1.5f});
-    bfpConvEpochLabels[0] = buildFloatTensor2D(1, BFP_CONV_NUM_CLASSES, (float[]){0.2f, -0.3f});
-    bfpConvEpochItems[1] = buildFloatTensor3D(1, BFP_CONV_IN_CHANNELS, BFP_CONV_SEQ_LEN,
+    bfpConvEpochLabels[0] = buildFloatTensor1D(BFP_CONV_NUM_CLASSES, (float[]){0.2f, -0.3f});
+    bfpConvEpochItems[1] = buildFloatTensor2D(BFP_CONV_IN_CHANNELS, BFP_CONV_SEQ_LEN,
                                               (float[]){0.5f, -1.0f, 2.0f, -0.25f});
-    bfpConvEpochLabels[1] = buildFloatTensor2D(1, BFP_CONV_NUM_CLASSES, (float[]){-0.1f, 0.4f});
+    bfpConvEpochLabels[1] = buildFloatTensor1D(BFP_CONV_NUM_CLASSES, (float[]){-0.1f, 0.4f});
     dataLoader_t *dl = dataLoaderInit(getBfpConvEpochSample, getBfpConvEpochDatasetSize, 1, NULL,
                                       NULL, false, 0, true);
 
@@ -1799,9 +1815,12 @@ void testBfpConvGradStorageTrainsUnderDefaultEpoch(void) {
      * inspected between backward and the optimizer's zero: the accumulate arm
      * must have moved BOTH grids off the zero state. zeroGrad resets exponents
      * to bias every step, so this is the only point where that is observable. */
+    batchView_t seedItemView;
+    batchView_t seedLabelView;
     trainingStats_t *seedStats =
         calculateGradsSequential(model, BFP_CONV_MODEL_SIZE, defaultLossConfig(MSE), REDUCTION_MEAN,
-                                 bfpConvEpochItems[0], bfpConvEpochLabels[0]);
+                                 batchViewOf(&seedItemView, bfpConvEpochItems[0]),
+                                 batchViewOf(&seedLabelView, bfpConvEpochLabels[0]));
     freeTrainingStats(seedStats);
     /* Sentinels keep the CAPTURE phase crash-free if the grad-storage knob
      * ever regresses to the FLOAT32 default -- a FLOAT32 grad carries a NULL

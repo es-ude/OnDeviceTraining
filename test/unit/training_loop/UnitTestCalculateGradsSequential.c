@@ -976,13 +976,6 @@ void testAllFrozenModelSkipsBackwardEntirely(void) {
                                      "lossgrad, no agrad)");
 }
 
-/* #152 PR1: the training entry point allocates its wires from the runtime
- * input (initLayerOutputs), but the MaxPool argmax is the factory's
- * config-owned [1, C, Lout] buffer -- so a stacked batch-2 input must fail
- * fast in the forward's argmax shape guard instead of writing row 1's indices
- * past it. The batch-1 call on the same model is the control. PR 1 interim
- * contract: #152 PR 3b grows the argmax on demand and turns this into a
- * growth test. */
 static tensor_t *makeFloatTensor3D(size_t d0, size_t d1, size_t d2, const float *vals) {
     size_t *dims = reserveMemory(3 * sizeof(size_t));
     dims[0] = d0;
@@ -997,6 +990,13 @@ static tensor_t *makeFloatTensor3D(size_t d0, size_t d1, size_t d2, const float 
     return t;
 }
 
+/* #152 PR1: the training entry point allocates its wires from the runtime
+ * input (initLayerOutputs), but the MaxPool argmax is the factory's
+ * config-owned [1, C, Lout] buffer -- so a stacked batch-2 input must fail
+ * fast in the forward's argmax shape guard instead of writing row 1's indices
+ * past it. The batch-1 call on the same model is the control. PR 1 interim
+ * contract: #152 PR 3b grows the argmax on demand and turns this into a
+ * growth test. */
 void testCalculateGradsFactoryMaxPoolRejectsBatch2(void) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;

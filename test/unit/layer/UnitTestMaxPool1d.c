@@ -1039,6 +1039,31 @@ void testMaxPool1dForwardFloatRejectsArgmaxWithWrongChannels(void) {
     freeQuantization(r.q);
 }
 
+/* Review Focus: a factory built with an inputLength or kernel geometry that
+ * doesn't match the runtime call, at B=1. A wrong-length argmax has enough
+ * elements (8 >= 6) that only the shape guard -- not an out-of-bounds read --
+ * can reject it, so this pins the outputLength term of
+ * maxPoolRequireArgmaxShape on its own. */
+void testMaxPool1dForwardFloatRejectsArgmaxWithWrongLength(void) {
+    size_t inputDims[] = {1, 2, 4};
+    size_t outputDims[] = {1, 2, 3};
+    size_t wrongLengthArgmaxDims[] = {1, 2, 4};
+    maxPool1dRunResult_t r =
+        maxPool1dBuild(NULL, inputDims, 2, VALID, 1, 1, NULL, NULL, outputDims);
+    tensor_t *wrongLengthArgmax = makeInt32Tensor(wrongLengthArgmaxDims, 3);
+
+    maxPool1dForward(r.layer, r.input, r.output);
+
+    r.layer->config->maxPool1d->argmaxIndices = wrongLengthArgmax;
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output));
+
+    freeTensor(wrongLengthArgmax);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+}
+
 /* Review Focus: PR 1's forward contract is EXACT dims, not capacity and not
  * element count. A larger-batch argmax [3, 1, 3] has room for the call's
  * rows, and [1, 2, 3] has exactly the call's 6 elements -- both must still die
@@ -1278,6 +1303,7 @@ int main(void) {
     RUN_TEST(testMaxPool1dBfpRejectsRank2Operands);
     RUN_TEST(testMaxPool1dForwardFloatRejectsBatch1ArgmaxAtBatch2);
     RUN_TEST(testMaxPool1dForwardFloatRejectsArgmaxWithWrongChannels);
+    RUN_TEST(testMaxPool1dForwardFloatRejectsArgmaxWithWrongLength);
     RUN_TEST(testMaxPool1dForwardFloatRequiresExactArgmaxDims);
     RUN_TEST(testMaxPool1dForwardFloatRejectsArgmaxOfWrongRank);
     RUN_TEST(testMaxPool1dForwardSymRejectsBatch1ArgmaxAtBatch2);

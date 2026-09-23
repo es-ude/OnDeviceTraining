@@ -1321,6 +1321,132 @@ void testSoftmaxBackwardSymArmRejectsBfpWire(void) {
     freeQuantization(floatQ);
 }
 
+/* ---- #152: the BFP arms stay single-row ----
+ *
+ * The native BFP pipeline runs ONE max/alignment grid and ONE partition sum
+ * over the whole wire, so a multi-row BFP call must fail fast (per-row BFP is
+ * out of scope, spec D3) while a single row -- rank 1 [N] or rank 2 [1, N] --
+ * runs bit-identically to the rank-1 gold. */
+
+/* Re-views a rank-1 fixture wire as [d0, d1] over the same storage (d0 * d1
+ * must equal its element count). The dims/order blocks are swapped for
+ * reserveMemory'd rank-2 ones, so freeTensor's cascade stays valid. */
+static void softmaxWireAs2D(tensor_t *t, size_t d0, size_t d1) {
+    freeReservedMemory(t->shape->dimensions);
+    freeReservedMemory(t->shape->orderOfDimensions);
+    size_t *dims = reserveMemory(2 * sizeof(size_t));
+    dims[0] = d0;
+    dims[1] = d1;
+    size_t *order = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, order);
+    setShape(t->shape, dims, 2, order);
+}
+
+void testSoftmaxForwardBfpRejectsMultiRow(void) {
+    tensor_t *in = buildSmBfpAInput();
+    tensor_t *out = buildSmBfpOutputWire((uint8_t)kSmBfpOutMantissaBits);
+    softmaxWireAs2D(in, 2, 4);
+    softmaxWireAs2D(out, 2, 4);
+
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, out->quantization);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->forwardMath.type);
+
+    ASSERT_EXITS_WITH_FAILURE(layerFunctions[SOFTMAX].forward(softmaxLayer, in, out));
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(out);
+    freeTensor(in);
+}
+
+void testSoftmaxBackwardBfpRejectsMultiRow(void) {
+    tensor_t *in = buildSmBfpAInput();
+    tensor_t *loss =
+        buildSmBfpWireWithCodes(8, (uint8_t)kSmBfpXMantissaBits, (uint8_t)kSmBfpXExponentBits, 1, 0,
+                                kSmBfpBwdDLdsCodes, kSmBfpBwdDLdsExponents);
+    tensor_t *propLoss = buildSmBfpOutputWire((uint8_t)kSmBfpOutMantissaBits);
+    softmaxWireAs2D(in, 2, 4);
+    softmaxWireAs2D(loss, 2, 4);
+    softmaxWireAs2D(propLoss, 2, 4);
+
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, propLoss->quantization);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->propLossMath.type);
+
+    ASSERT_EXITS_WITH_FAILURE(layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, propLoss));
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(in);
+}
+
+/* A rank-2 SINGLE row [1, 8] is still one row: the native forward must emit
+ * exactly the rank-1 TRUNC gold. Pins that the guard keys on the row count,
+ * not on the rank (the HAR BFP trainer feeds its softmax [1, 6]). */
+void unitTestSoftmaxForwardBfpSingleRowRank2MatchesRank1(void) {
+    tensor_t *in = buildSmBfpAInput();
+    tensor_t *out = buildSmBfpOutputWire((uint8_t)kSmBfpOutMantissaBits);
+    softmaxWireAs2D(in, 1, 8);
+    softmaxWireAs2D(out, 1, 8);
+
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, out->quantization);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->forwardMath.type);
+
+    layerFunctions[SOFTMAX].forward(softmaxLayer, in, out);
+
+    int32_t got[8];
+    uint8_t gotExps[2];
+    bfpQConfig_t *outQC = out->quantization->qConfig;
+    unpackSignExtend(out->data, outQC->mantissaBits, 0, got, 8);
+    memcpy(gotExps, outQC->exponents, outQC->numGroups);
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(out);
+    freeTensor(in);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(kSmBfpOutCodesTrunc, got, 8);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(kSmBfpOutExponentsTrunc, gotExps, 2);
+}
+
+/* Backward twin: [1, 8] logits/loss/propLoss reproduce the rank-1 native
+ * backward gold (unitTestSoftmaxBackwardBfpNative's fixture). */
+void unitTestSoftmaxBackwardBfpSingleRowRank2MatchesRank1(void) {
+    tensor_t *in = buildSmBfpAInput();
+    tensor_t *loss =
+        buildSmBfpWireWithCodes(8, (uint8_t)kSmBfpXMantissaBits, (uint8_t)kSmBfpXExponentBits, 1, 0,
+                                kSmBfpBwdDLdsCodes, kSmBfpBwdDLdsExponents);
+    tensor_t *propLoss = buildSmBfpOutputWire((uint8_t)kSmBfpOutMantissaBits);
+    softmaxWireAs2D(in, 1, 8);
+    softmaxWireAs2D(loss, 1, 8);
+    softmaxWireAs2D(propLoss, 1, 8);
+
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, propLoss->quantization);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->propLossMath.type);
+
+    layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, propLoss);
+
+    int32_t got[8];
+    uint8_t gotExps[2];
+    bfpQConfig_t *plQC = propLoss->quantization->qConfig;
+    unpackSignExtend(propLoss->data, plQC->mantissaBits, 0, got, 8);
+    memcpy(gotExps, plQC->exponents, plQC->numGroups);
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(in);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(kSmBfpBwdOutCodes, got, 8);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(kSmBfpBwdOutExponents, gotExps, 2);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(unitTestSoftmaxForwardFloat);
@@ -1358,6 +1484,10 @@ int main() {
     RUN_TEST(unitTestSoftmaxBackwardBfpNullPropLossIsNoOp);
     RUN_TEST(testSoftmaxBackwardFloatArmRejectsBfpWire);
     RUN_TEST(testSoftmaxBackwardSymArmRejectsBfpWire);
+    RUN_TEST(testSoftmaxForwardBfpRejectsMultiRow);
+    RUN_TEST(testSoftmaxBackwardBfpRejectsMultiRow);
+    RUN_TEST(unitTestSoftmaxForwardBfpSingleRowRank2MatchesRank1);
+    RUN_TEST(unitTestSoftmaxBackwardBfpSingleRowRank2MatchesRank1);
 
     RUN_TEST(testSoftmaxLayerInitAndFreeRoundTrip);
     RUN_TEST(testSoftmaxLayerInitBorrowingStoresLqPointers);

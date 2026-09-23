@@ -35,7 +35,8 @@ void softmaxInitLayer(layerConfig_t *softmaxConfig, layer_t *softmaxLayer);
  * not the logical axis 0 of a transposeTensor view. An input with more than
  * one storage row must be identity-order (fail fast otherwise), so a logical
  * [1, N] stored as [N, 1] + transpose fails fast; one storage row takes any
- * order. */
+ * order. The ARITH_BFP arms take a single storage row only ([N] or [1, N]);
+ * more rows fail fast. */
 void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output);
 
 /* Same row partition as softmaxForward: the Jacobian is block-diagonal over

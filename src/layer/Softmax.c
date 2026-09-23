@@ -241,10 +241,27 @@ static void softmaxForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, 
     softmaxValuesBfp(input, cfg->bfpExpShiftRounding, (float *)rawOut->data);
 }
 
+/* #152 (spec D3): the native BFP pipeline runs ONE max/alignment grid and
+ * ONE partition sum over the whole wire. Per-row BFP softmax is out of scope,
+ * so a multi-row call fails fast instead of normalizing across rows; a single
+ * row ([N] or [1, N]) runs unchanged. */
+static void softmaxBfpRequireSingleRow(const tensor_t *t, const char *where) {
+    size_t rows;
+    size_t rowLen;
+    softmaxRowGeometry(t, where, &rows, &rowLen);
+    if (rows > 1) {
+        PRINT_ERROR("%s: ARITH_BFP softmax takes a single row, got %zu rows of %zu elements "
+                    "(per-row BFP softmax is out of scope, #152)",
+                    where, rows, rowLen);
+        exit(1);
+    }
+}
+
 void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output) {
     softmaxConfig_t *cfg = softmaxLayer->config->softmax;
     switch (cfg->forwardMath.type) {
     case ARITH_BFP: {
+        softmaxBfpRequireSingleRow(input, "Softmax forward");
         const bfpQConfig_t *anchor = bfpWireAnchor(cfg->outputQ, "Softmax forward");
         bfpQConfig_t stage = {.exponents = NULL,
                               .numGroups = 1,
@@ -370,9 +387,9 @@ static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *p
  * (D7) is packed by the epilogue. The loss-count gate is load-bearing (the
  * #436 OOB class): both walks run x's flat n, and a shorter per-tensor
  * {1, 0} loss passes every grid check while lArr[i] reads outside its
- * scratch. The permuted-shape class does not arise -- softmax is
- * shape-agnostic, both walks are flat storage order over count-equal
- * wires. */
+ * scratch. The permuted-shape class does not arise -- the arm is
+ * single-row (softmaxBfpRequireSingleRow, #152), so both walks are the one
+ * row's flat storage order over count-equal wires. */
 static void softmaxBackwardKernelBfp(tensor_t **ops, size_t nOps, tensor_t *rawOut,
                                      tensor_t *auxOut, const void *ctx) {
     (void)nOps;
@@ -431,6 +448,7 @@ void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, ten
         if (propLoss == NULL) {
             return; /* P6-6: no param grads, no ops to run */
         }
+        softmaxBfpRequireSingleRow(input, "Softmax backward");
         const bfpQConfig_t *anchor = bfpWireAnchor(cfg->propLossQ, "Softmax backward");
         bfpQConfig_t stage = {.exponents = NULL,
                               .numGroups = 1,

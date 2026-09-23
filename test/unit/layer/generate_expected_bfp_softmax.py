@@ -4,7 +4,8 @@ forward AND backward tests (BFP epic PR6 Tasks 4+5 -- pipeline contract:
 docs/conventions/arithmetic-bfp.md §5.9, R-S2 steps 1-5 and the R-S4
 backward paragraph).
 
-Four forward fixtures, all n = 8 (whole-tensor softmax, microbatch B=1):
+Four forward fixtures, all n = 8, each a rank-1 wire = ONE softmax row (the
+ARITH_BFP arms take a single row only; more rows fail fast, #152 R-S7):
 
   SM-A "native": the input is BFP-STORED, grouped {numGroups=2, groupSize=4},
     m = 8 / e = 8, with DIFFERENT stored exponents per block (122 -> E=-5

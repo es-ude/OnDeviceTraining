@@ -153,30 +153,6 @@ static quantization_t *buildWeightQuant(groupShape_t gs, bool isAsym) {
                                                gs.groupSize);
 }
 
-static void reshapeItemsAddBatchDim(tensorArray_t *items) {
-    for (size_t i = 0; i < items->size; ++i) {
-        tensor_t *t = items->array[i];
-        size_t oldRank = t->shape->numberOfDimensions;
-        size_t newRank = oldRank + 1;
-
-        size_t *newDims = reserveMemory(newRank * sizeof(size_t));
-        size_t *newOrder = reserveMemory(newRank * sizeof(size_t));
-        newDims[0] = 1;
-        for (size_t d = 0; d < oldRank; ++d) {
-            newDims[d + 1] = t->shape->dimensions[d];
-        }
-        for (size_t d = 0; d < newRank; ++d) {
-            newOrder[d] = d;
-        }
-
-        freeReservedMemory(t->shape->dimensions);
-        freeReservedMemory(t->shape->orderOfDimensions);
-        t->shape->dimensions = newDims;
-        t->shape->orderOfDimensions = newOrder;
-        t->shape->numberOfDimensions = newRank;
-    }
-}
-
 static tensorArray_t *buildOneHotLabels(tensorArray_t *intLabels) {
     tensorArray_t *out = reserveMemory(sizeof(tensorArray_t));
     tensor_t **arr = reserveMemory(intLabels->size * sizeof(tensor_t *));
@@ -209,19 +185,16 @@ static tensorArray_t *buildOneHotLabels(tensorArray_t *intLabels) {
 static void initDataSets(void) {
     tensorArray_t *trainItems = npyLoad("examples/har_classifier/data/train_x.npy");
     tensorArray_t *trainLabelsRaw = npyLoad("examples/har_classifier/data/train_y.npy");
-    reshapeItemsAddBatchDim(trainItems);
     g_trainDataset.items = trainItems;
     g_trainDataset.labels = buildOneHotLabels(trainLabelsRaw);
 
     tensorArray_t *valItems = npyLoad("examples/har_classifier/data/val_x.npy");
     tensorArray_t *valLabelsRaw = npyLoad("examples/har_classifier/data/val_y.npy");
-    reshapeItemsAddBatchDim(valItems);
     g_valDataset.items = valItems;
     g_valDataset.labels = buildOneHotLabels(valLabelsRaw);
 
     tensorArray_t *testItems = npyLoad("examples/har_classifier/data/test_x.npy");
     tensorArray_t *testLabelsRaw = npyLoad("examples/har_classifier/data/test_y.npy");
-    reshapeItemsAddBatchDim(testItems);
     g_testDataset.items = testItems;
     g_testDataset.labels = buildOneHotLabels(testLabelsRaw);
 }

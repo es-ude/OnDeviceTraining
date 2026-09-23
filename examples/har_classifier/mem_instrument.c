@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "BatchView.h"
 #include "Common.h"
 #include "Layer.h"
 #include "MaxPool1d.h"
@@ -185,8 +186,14 @@ static void memOneStepThunk(void *p) {
     optimizerFunctions_t fns = optimizerFunctions[c->optim->type];
 
     fns.zero(c->optim);
-    trainingStats_t *stats = calculateGradsSequential(c->model, c->modelSize, c->lossConfig,
-                                                      REDUCTION_MEAN, c->input, c->label);
+    /* The two [1, ...] views live in this frame exactly as they live in
+     * trainingBatchDefault's on the real path, so the probe still measures
+     * trainingRun's step (the sample itself is natural-shape, #152 PR3a). */
+    batchView_t itemView;
+    batchView_t labelView;
+    trainingStats_t *stats = calculateGradsSequential(
+        c->model, c->modelSize, c->lossConfig, REDUCTION_MEAN, batchViewOf(&itemView, c->input),
+        batchViewOf(&labelView, c->label));
     freeTrainingStats(stats);
     /* No scaleOptimizerGradients: the macro-batch mean scale is a scalar grad
      * multiply that does not deepen the call stack; the step itself does.

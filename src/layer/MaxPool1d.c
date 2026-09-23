@@ -148,12 +148,7 @@ static void maxPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *r
                     rawOut->shape->dimensions[2], outputLength);
         exit(1);
     }
-    if (auxOut->shape->dimensions[2] != outputLength) {
-        PRINT_ERROR("MaxPool1d forward: argmaxIndices length (%zu) does not match "
-                    "geometry-derived (%zu)",
-                    auxOut->shape->dimensions[2], outputLength);
-        exit(1);
-    }
+    maxPoolRequireArgmaxShape(auxOut, input, outputLength, "MaxPool1d forward SYM_INT32");
 
     int32_t const *xArr = (int32_t const *)input->data;
     int32_t *yArr = (int32_t *)rawOut->data;

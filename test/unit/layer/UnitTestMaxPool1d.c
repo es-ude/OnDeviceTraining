@@ -1099,6 +1099,24 @@ void testMaxPool1dForwardFloatRejectsArgmaxOfWrongRank(void) {
     freeQuantization(r.q);
 }
 
+void testMaxPool1dForwardSymRejectsBatch1ArgmaxAtBatch2(void) {
+    size_t inputDims[] = {2, 3, 5};
+    size_t outputDims[] = {2, 3, 4};
+    size_t batch1ArgmaxDims[] = {1, 3, 4};
+    maxPool1dSymRun_t r = maxPool1dBuildSym(NULL, inputDims, 2, VALID, 1, 1, outputDims);
+    tensor_t *batch1Argmax = makeInt32Tensor(batch1ArgmaxDims, 3);
+
+    maxPool1dForward(r.layer, r.input, r.output);
+
+    r.layer->config->maxPool1d->argmaxIndices = batch1Argmax;
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output));
+
+    freeTensor(batch1Argmax);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMaxPool1dForwardBasic);
@@ -1127,5 +1145,6 @@ int main(void) {
     RUN_TEST(testMaxPool1dForwardFloatRejectsArgmaxWithWrongChannels);
     RUN_TEST(testMaxPool1dForwardFloatRequiresExactArgmaxDims);
     RUN_TEST(testMaxPool1dForwardFloatRejectsArgmaxOfWrongRank);
+    RUN_TEST(testMaxPool1dForwardSymRejectsBatch1ArgmaxAtBatch2);
     return UNITY_END();
 }

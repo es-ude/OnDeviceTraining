@@ -44,7 +44,10 @@ float trainingEpochDefault(layer_t **model, size_t modelSize, lossConfig_t lossC
         if (lossConfig.backwardReduction == REDUCTION_MEAN) {
             /* Each loss family derives F from labelRef's shape itself, reading
              * dims[0] as the batch axis -- so it gets the same [1, ...] view the
-             * model output has (a natural [C, L] label must give F = C*L). */
+             * model output has (a natural [C, L] label must give F = C*L).
+             * CE ignores this tensor entirely (1/totalSamples, no F term); MSE
+             * is the one that reads dims[0] -- see LossFunction.h and
+             * docs/conventions/loss.md, "Microbatch shape" (#152 PR3a). */
             batchView_t labelRefView;
             float meanScale = lossFunctions[lossConfig.funcType].computeMeanScale(
                 batch->size, batchViewOf(&labelRefView, labelRef));

@@ -3,6 +3,8 @@
 
 #include "TrainingLoopApi.h"
 
+/*! Wraps each sample with batchViewOf before calling calculateGradsFn -- see
+ *  docs/conventions/data-shape.md, "Who adds the batch axis". */
 float trainingBatchDefault(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
                            batch_t *batch, calculateGradsFn_t calculateGradsFn,
                            reduction_t forwardReduction);

@@ -15,6 +15,8 @@ void freeInferenceStats(inferenceStats_t *inferenceStats);
 
 tensor_t *inference(layer_t **model, size_t numberOfLayers, tensor_t *input);
 
+/*! Wraps each sample with batchViewOf before calling inference() -- see
+ *  docs/conventions/data-shape.md, "Who adds the batch axis". */
 tensor_t **inferenceBatched(layer_t **model, size_t numberOfLayers, batch_t *batch);
 
 inferenceStats_t *inferenceWithLoss(layer_t **model, size_t numberOfLayers, tensor_t *input,

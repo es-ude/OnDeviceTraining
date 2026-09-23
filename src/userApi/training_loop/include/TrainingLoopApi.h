@@ -76,11 +76,17 @@ typedef struct trainingRunResult {
     bool stoppedOnNonFiniteLoss; /* true iff stopOnNonFiniteLoss ended the run early */
 } trainingRunResult_t;
 
+/*! When invoked by trainingBatchDefault, input/label are the stack
+ *  [1, ...] views batchViewOf built for one sample (#152 PR3a): borrowed;
+ *  valid only for the duration of the call. */
 typedef trainingStats_t *(*calculateGradsFn_t)(layer_t **model, size_t modelSize,
                                                lossConfig_t lossConfig,
                                                reduction_t forwardReduction, tensor_t *input,
                                                tensor_t *label);
 
+/*! When invoked by evaluationBatch/evaluateBatchInternal, input/label are
+ *  the stack [1, ...] views batchViewOf built for one sample (#152 PR3a):
+ *  borrowed; valid only for the duration of the call. */
 typedef inferenceStats_t *(*inferenceWithLossFn_t)(layer_t **model, size_t numberOfLayers,
                                                    tensor_t *input, tensor_t *label,
                                                    lossFuncType_t funcType,

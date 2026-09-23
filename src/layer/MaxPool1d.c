@@ -196,10 +196,10 @@ static void maxPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *r
  * past its end even when its length is right — checking dimensions[2] alone is
  * not enough. Rank is checked first: dimensions[0..2] on a rank-2 shape is
  * itself an over-read.
- * The FLOAT32/SYM arms validate their argmax through maxPoolRequireArgmaxShape
- * (#152); their forward rawOut is still checked on length only, and their
- * backward propLoss (FLOAT32) / rawOut (SYM) shape is not validated against
- * lossGrad. */
+ * In this layer it checks the BFP rawOut only: all six arms validate their
+ * argmax through maxPoolRequireArgmaxShape (#152). The FLOAT32/SYM forward
+ * rawOut is still checked on length only, and their backward propLoss
+ * (FLOAT32) / rawOut (SYM) shape is not validated against lossGrad. */
 static void poolBfpRequireDims3(const tensor_t *t, size_t d0, size_t d1, size_t d2,
                                 const char *what) {
     if (t->shape->numberOfDimensions != 3) {
@@ -250,8 +250,7 @@ static void maxPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut
      * from the input, so both need all three dims validated — auxOut most of
      * all, because it is never funnel-converted and is written raw. */
     poolBfpRequireDims3(rawOut, batch, channels, outputLength, "MaxPool1d forward BFP (rawOut)");
-    poolBfpRequireDims3(auxOut, batch, channels, outputLength,
-                        "MaxPool1d forward BFP (argmaxIndices)");
+    maxPoolRequireArgmaxShape(auxOut, input, outputLength, "MaxPool1d forward BFP");
 
     const bfpQConfig_t *qC = input->quantization->qConfig;
     validateBfpQConfigShape(qC, calcNumberOfElementsByTensor(input));
@@ -500,8 +499,7 @@ static void maxPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOu
      * lossGrad — an argmax tensor that matches only on outputLength is read
      * past its end for every b, c beyond its own. */
     poolBfpRequireDims3(rawOut, batch, channels, inputLength, "MaxPool1d backward BFP (rawOut)");
-    poolBfpRequireDims3(cfg->argmaxIndices, batch, channels, outputLength,
-                        "MaxPool1d backward BFP (argmaxIndices)");
+    maxPoolRequireArgmaxShape(cfg->argmaxIndices, lossGrad, outputLength, "MaxPool1d backward BFP");
 
     const bfpQConfig_t *qC = lossGrad->quantization->qConfig;
     validateBfpQConfigShape(qC, calcNumberOfElementsByTensor(lossGrad));

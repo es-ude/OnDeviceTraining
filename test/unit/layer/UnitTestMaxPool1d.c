@@ -940,9 +940,9 @@ void testMaxPool1dBackwardBfpGuardsNarrowedNotRemoved(void) {
  * BFP operand reaches the kernel, which would read dimensions[0..2] off a
  * two-element dims array — an over-read of the shape itself. Both kernels
  * therefore open with their own rank check BEFORE poolBfpRequireDims3, and
- * these two deaths are the only ones that can reach it: every other rank-2
- * case in this file passes a rank-2 OUTPUT (or argmax), which dies in
- * poolBfpRequireDims3 first.
+ * these two deaths are the only ones that can reach it: every other BFP
+ * rank-2 case in this file passes a rank-2 OUTPUT, which dies in
+ * poolBfpRequireDims3 first (a rank-2 argmax dies in maxPoolRequireArgmaxShape).
  *
  * MUTATION STATUS, stated honestly: DELETING either rank guard does NOT redden
  * this test — the over-read dims[0..2] then reach poolBfpRequireDims3, which
@@ -1174,6 +1174,84 @@ void testMaxPool1dBackwardSymRejectsBatch1ArgmaxAtBatch2(void) {
     freeTensor(r.input);
 }
 
+/* BFP arms: FLOAT32-stored operands under a per-tensor BFP wire config take
+ * the funnel's bfpStage route, so no grouped fixture geometry is needed. */
+void testMaxPool1dForwardBfpRejectsBatch1ArgmaxAtBatch2(void) {
+    size_t inputDims[] = {2, 3, 5};
+    size_t outputDims[] = {2, 3, 4};
+    size_t batch1ArgmaxDims[] = {1, 3, 4};
+    tensor_t *input = makeFloatTensor(inputDims, 3, NULL);
+    tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
+    tensor_t *argmax = makeInt32Tensor(outputDims, 3);
+    tensor_t *batch1Argmax = makeInt32Tensor(batch1ArgmaxDims, 3);
+    quantization_t *wireQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    kernel_t k;
+    maxPool1dConfig_t cfg;
+    layerConfig_t lc;
+    layer_t layer;
+    maxPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, argmax, 2, VALID, 1, 1, wireQ);
+
+    maxPool1dForward(&layer, input, output);
+
+    cfg.argmaxIndices = batch1Argmax;
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(&layer, input, output));
+
+    freeQuantization(wireQ);
+    freeTensor(batch1Argmax);
+    freeTensor(argmax);
+    freeTensor(output);
+    freeTensor(input);
+}
+
+void testMaxPool1dBackwardBfpRejectsBatch1ArgmaxAtBatch2(void) {
+    size_t batch1InputDims[] = {1, 3, 5};
+    size_t batch1OutputDims[] = {1, 3, 4};
+    size_t inputDims[] = {2, 3, 5};
+    size_t outputDims[] = {2, 3, 4};
+    tensor_t *batch1Input = makeFloatTensor(batch1InputDims, 3, NULL);
+    tensor_t *batch1Output = makeFloatTensor(batch1OutputDims, 3, NULL);
+    tensor_t *batch1LossGrad = makeFloatTensor(batch1OutputDims, 3, NULL);
+    tensor_t *batch1PropLoss = makeFloatTensor(batch1InputDims, 3, NULL);
+    tensor_t *input = makeFloatTensor(inputDims, 3, NULL);
+    tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
+    tensor_t *lossGrad = makeFloatTensor(outputDims, 3, NULL);
+    tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
+    tensor_t *argmax = makeInt32Tensor(batch1OutputDims, 3);
+    tensor_t *batch2Argmax = makeInt32Tensor(outputDims, 3);
+    quantization_t *wireQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    kernel_t k;
+    maxPool1dConfig_t cfg;
+    layerConfig_t lc;
+    layer_t layer;
+    maxPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, argmax, 2, VALID, 1, 1, wireQ);
+
+    maxPool1dForward(&layer, batch1Input, batch1Output);
+    maxPool1dBackward(&layer, NULL, batch1LossGrad, batch1PropLoss);
+
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&layer, NULL, lossGrad, propLoss));
+
+    /* The batch-1 argmax is too SMALL for that call, so without the shape
+     * guards the read runs past its end and may STILL die in the F7 content
+     * check on heap garbage (luck, not coverage). A batch-2 forward's argmax
+     * under a batch-1 backward is fully in bounds with legal indices, so only
+     * the full-shape guard can reject it. */
+    cfg.argmaxIndices = batch2Argmax;
+    maxPool1dForward(&layer, input, output);
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&layer, NULL, batch1LossGrad, batch1PropLoss));
+
+    freeQuantization(wireQ);
+    freeTensor(batch2Argmax);
+    freeTensor(argmax);
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(output);
+    freeTensor(input);
+    freeTensor(batch1PropLoss);
+    freeTensor(batch1LossGrad);
+    freeTensor(batch1Output);
+    freeTensor(batch1Input);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMaxPool1dForwardBasic);
@@ -1205,5 +1283,7 @@ int main(void) {
     RUN_TEST(testMaxPool1dForwardSymRejectsBatch1ArgmaxAtBatch2);
     RUN_TEST(testMaxPool1dBackwardFloatRejectsBatch1ArgmaxAtBatch2);
     RUN_TEST(testMaxPool1dBackwardSymRejectsBatch1ArgmaxAtBatch2);
+    RUN_TEST(testMaxPool1dForwardBfpRejectsBatch1ArgmaxAtBatch2);
+    RUN_TEST(testMaxPool1dBackwardBfpRejectsBatch1ArgmaxAtBatch2);
     return UNITY_END();
 }

@@ -607,6 +607,83 @@ void testInitBufferOutputBfpGroupSizeMismatchDies(void) {
     freeQuantization(q);
 }
 
+/* #152 PR3a: inferenceBatched is a batch_t consumer -- its samples arrive in
+ * their natural shape and it adds the batch axis itself, unconditionally. A
+ * Relu-only model is rank-agnostic (its output copies the input shape), so the
+ * output rank shows exactly what inference() was handed. item1 starts with a 1
+ * on purpose (spec 5.1: no auto-detection of an existing batch axis) -- it must
+ * still gain the axis. */
+static tensor_t *buildFloatTensor1DInf(size_t n, const float *values) {
+    size_t *dims = reserveMemory(sizeof(size_t));
+    dims[0] = n;
+    size_t *order = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(t, values, n);
+    return t;
+}
+
+void testInferenceBatchedAddsBatchAxisToNaturalSamples(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *relu = reluLayerInit(&lq);
+    layer_t *model[] = {relu};
+
+    tensor_t *item0 = buildFloatTensor1DInf(3, (float[]){-1.f, 2.f, -3.f});   /* natural [3] */
+    tensor_t *item1 = buildFloatTensor2DInf(1, 3, (float[]){4.f, -5.f, 6.f}); /* natural [1, 3] */
+    sample_t *s0 = reserveMemory(sizeof(sample_t));
+    s0->item = item0;
+    s0->label = item0;
+    sample_t *s1 = reserveMemory(sizeof(sample_t));
+    s1->item = item1;
+    s1->label = item1;
+    sample_t *samples[] = {s0, s1};
+    batch_t batch = {.samples = samples, .size = 2};
+
+    tensor_t **outputs = inferenceBatched(model, 1, &batch);
+
+    size_t rank[2];
+    size_t dims[2][3] = {{0}};
+    float values[2][3];
+    for (size_t i = 0; i < 2; i++) {
+        rank[i] = outputs[i]->shape->numberOfDimensions;
+        for (size_t d = 0; d < rank[i] && d < 3; d++) {
+            dims[i][d] = outputs[i]->shape->dimensions[d];
+        }
+        for (size_t j = 0; j < 3; j++) {
+            values[i][j] = ((float *)outputs[i]->data)[j];
+        }
+    }
+
+    for (size_t i = 0; i < 2; i++) {
+        freeTensor(outputs[i]);
+    }
+    freeReservedMemory(outputs);
+    /* inferenceBatched does not consume the samples (no freeSample inside); the
+     * sample_t shells are plain reserveMemory blocks. */
+    freeReservedMemory(s1);
+    freeReservedMemory(s0);
+    freeTensor(item1);
+    freeTensor(item0);
+    freeReluLayer(relu);
+    freeQuantization(q);
+
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(2, rank[0], "output 0 must be [1, 3]");
+    TEST_ASSERT_EQUAL_size_t(1, dims[0][0]);
+    TEST_ASSERT_EQUAL_size_t(3, dims[0][1]);
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(3, rank[1], "output 1 must be [1, 1, 3] (no auto-detection)");
+    TEST_ASSERT_EQUAL_size_t(1, dims[1][0]);
+    TEST_ASSERT_EQUAL_size_t(1, dims[1][1]);
+    TEST_ASSERT_EQUAL_size_t(3, dims[1][2]);
+    float expected[2][3] = {{0.f, 2.f, 0.f}, {4.f, 0.f, 6.f}};
+    for (size_t i = 0; i < 2; i++) {
+        TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected[i], values[i], 3);
+    }
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -624,5 +701,7 @@ int main(void) {
     RUN_TEST(testInferenceBufferInputCarriesBfpExponents);
     RUN_TEST(testInitBufferOutputBfpGroupSizeMismatchDies);
     RUN_TEST(testInferenceBufferOutputBfpGroupSizeEqualToWireNormalizesToPerTensor);
+
+    RUN_TEST(testInferenceBatchedAddsBatchAxisToNaturalSamples);
     return UNITY_END();
 }

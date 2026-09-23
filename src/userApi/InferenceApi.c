@@ -7,6 +7,7 @@
 
 #include "AdaptiveAvgPool1d.h"
 #include "AvgPool1d.h"
+#include "BatchView.h"
 #include "Common.h"
 #include "Conv1d.h"
 #include "Conv1dTransposed.h"
@@ -204,7 +205,10 @@ tensor_t **inferenceBatched(layer_t **model, size_t numberOfLayers, batch_t *bat
     tensor_t **tensorArr = reserveMemory(batch->size * sizeof(tensor_t));
 
     for (size_t i = 0; i < batch->size; i++) {
-        tensorArr[i] = inference(model, numberOfLayers, batch->samples[i]->item);
+        /* batch_t consumer: the sample is natural-shape, inference() takes [B, ...]. */
+        batchView_t itemView;
+        tensorArr[i] =
+            inference(model, numberOfLayers, batchViewOf(&itemView, batch->samples[i]->item));
     }
 
     return tensorArr;

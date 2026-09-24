@@ -1,13 +1,20 @@
 #define SOURCE_FILE "TRAINING_BATCH_DEFAULT"
 
-#include "TrainingBatchDefault.h"
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
 #include "BatchView.h"
 #include "Common.h"
 #include "DataLoaderApi.h"
+#include "StorageApi.h"
+#include "TrainingBatchDefault.h"
 
-float trainingBatchDefault(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
-                           batch_t *batch, calculateGradsFn_t calculateGradsFn,
-                           reduction_t forwardReduction) {
+/* m == 1: PR3a's per-sample walk, unchanged -- each sample is wrapped by
+ * batchViewOf (no copy, no heap), so default runs stay bit-identical. */
+static float trainingBatchPerSample(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
+                                    batch_t *batch, calculateGradsFn_t calculateGradsFn,
+                                    reduction_t forwardReduction) {
     float totalLoss = 0.0f;
 
     for (size_t i = 0; i < batch->size; i++) {
@@ -22,6 +29,108 @@ float trainingBatchDefault(layer_t **model, size_t modelSize, lossConfig_t lossC
         totalLoss += stats->loss;
         freeTrainingStats(stats);
         freeSample(batch->samples[i]);
+    }
+    return totalLoss;
+}
+
+/* Gather buffer of m rows x perSampleBytes (spec §6.4): overflow-checked
+ * multiply, NULL from reserveMemory fails fast -- never a copy through NULL. */
+static uint8_t *reserveGatherBuffer(size_t m, size_t perSampleBytes, const char *what) {
+    if (perSampleBytes != 0 && m > SIZE_MAX / perSampleBytes) {
+        PRINT_ERROR("trainingBatchDefault: the %s gather buffer (microBatchSize %zu x %zu bytes "
+                    "per sample) overflows size_t",
+                    what, m, perSampleBytes);
+        exit(1);
+    }
+    uint8_t *buffer = reserveMemory(m * perSampleBytes);
+    if (buffer == NULL) {
+        PRINT_ERROR("trainingBatchDefault: reserving the %s gather buffer failed (microBatchSize "
+                    "%zu x %zu bytes per sample)",
+                    what, m, perSampleBytes);
+        exit(1);
+    }
+    return buffer;
+}
+
+/* m > 1 (spec §6.3): b/m chunks of exactly m rows. Each chunk's item and label
+ * bytes are copied row after row into the two gather buffers; the stacked
+ * tensors are stack-local batch views of the chunk's first sample, re-pointed
+ * at the buffers with dims[0] = m (shape [m, ...sampleShape], order
+ * [0, sampleOrder + 1]; quantization and sparsity stay shared with that first
+ * sample). One calculateGradsFn call per chunk; the chunk's sample_t structs
+ * are freed after it (the tensors stay dataset-owned). Returns the loss sum
+ * weighted by rows for MEAN (Σ chunkLoss * m), plain for SUM (spec §6.5). */
+static float trainingBatchStacked(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
+                                  batch_t *batch, calculateGradsFn_t calculateGradsFn,
+                                  reduction_t forwardReduction, size_t m) {
+    /* Sample 0's TENSORS (dataset-owned) stay valid for the whole call; its
+     * sample_t is freed with chunk 0, so the reference is captured up front. */
+    tensor_t *referenceItem = batch->samples[0]->item;
+    tensor_t *referenceLabel = batch->samples[0]->label;
+    size_t itemBytes = calcBytesPerTensor(referenceItem);
+    size_t labelBytes = calcBytesPerTensor(referenceLabel);
+    uint8_t *itemBuffer = reserveGatherBuffer(m, itemBytes, "item");
+    uint8_t *labelBuffer = reserveGatherBuffer(m, labelBytes, "label");
+    const float rowWeight = (forwardReduction == REDUCTION_MEAN) ? (float)m : 1.0f;
+    float totalLoss = 0.0f;
+
+    for (size_t first = 0; first < batch->size; first += m) {
+        for (size_t r = 0; r < m; r++) {
+            const sample_t *sample = batch->samples[first + r];
+            memcpy(itemBuffer + r * itemBytes, sample->item->data, itemBytes);
+            memcpy(labelBuffer + r * labelBytes, sample->label->data, labelBytes);
+        }
+        batchView_t itemView;
+        batchView_t labelView;
+        tensor_t *stackedItem = batchViewOf(&itemView, batch->samples[first]->item);
+        tensor_t *stackedLabel = batchViewOf(&labelView, batch->samples[first]->label);
+        stackedItem->data = itemBuffer;
+        itemView.dimensions[0] = m;
+        stackedLabel->data = labelBuffer;
+        labelView.dimensions[0] = m;
+
+        trainingStats_t *stats = calculateGradsFn(model, modelSize, lossConfig, forwardReduction,
+                                                  stackedItem, stackedLabel);
+        totalLoss += stats->loss * rowWeight;
+        freeTrainingStats(stats);
+        for (size_t r = 0; r < m; r++) {
+            freeSample(batch->samples[first + r]);
+        }
+    }
+
+    freeReservedMemory(labelBuffer);
+    freeReservedMemory(itemBuffer);
+    return totalLoss;
+}
+
+float trainingBatchDefault(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
+                           batch_t *batch, calculateGradsFn_t calculateGradsFn,
+                           reduction_t forwardReduction, size_t microBatchSize) {
+    size_t m = (microBatchSize == 0) ? 1 : microBatchSize;
+    if (batch->size % m != 0) {
+        PRINT_ERROR("trainingBatchDefault: batch size %zu is not divisible by microBatchSize %zu "
+                    "(b %% m == 0 is required; a replay loader must keep its appended sample "
+                    "count divisible by m)",
+                    batch->size, m);
+        exit(1);
+    }
+    if (m > 1 && batch->size == 0) {
+        /* b = 0 passes b % m == 0, but the stacked path sizes its gather
+         * buffers from sample 0 -- there is none. (m == 1 keeps its
+         * pre-existing empty loop.) */
+        PRINT_ERROR("trainingBatchDefault: batch size 0 cannot be stacked into chunks of "
+                    "microBatchSize %zu (no sample 0 to size the gather buffers from)",
+                    m);
+        exit(1);
+    }
+
+    float totalLoss;
+    if (m == 1) {
+        totalLoss = trainingBatchPerSample(model, modelSize, lossConfig, batch, calculateGradsFn,
+                                           forwardReduction);
+    } else {
+        totalLoss = trainingBatchStacked(model, modelSize, lossConfig, batch, calculateGradsFn,
+                                         forwardReduction, m);
     }
 
     if (forwardReduction == REDUCTION_MEAN) {

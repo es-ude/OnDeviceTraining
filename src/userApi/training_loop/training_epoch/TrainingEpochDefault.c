@@ -39,7 +39,7 @@ float trainingEpochDefault(layer_t **model, size_t modelSize, lossConfig_t lossC
         tensor_t *labelRef = batch->samples[0]->label;
 
         totalLoss += trainingBatchDefault(model, modelSize, lossConfig, batch, calculateGradsFn,
-                                          forwardReduction);
+                                          forwardReduction, 1);
 
         if (lossConfig.backwardReduction == REDUCTION_MEAN) {
             /* Each loss family derives F from labelRef's shape itself, reading

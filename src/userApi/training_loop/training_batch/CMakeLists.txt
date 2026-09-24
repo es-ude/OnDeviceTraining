@@ -12,4 +12,5 @@ target_link_libraries(TrainingBatchDefault PRIVATE
         DataLoader
         DataLoaderApi
         Common
+        StorageApi
 )

@@ -440,7 +440,7 @@ void testTrainingBatchDefault_ReturnsAverageLossAndAccumulatesGrads() {
 
     float actualAvg = trainingBatchDefault(
         model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, &batch,
-        calculateGradsSequential, REDUCTION_MEAN);
+        calculateGradsSequential, REDUCTION_MEAN, 1);
 
     /* CAPTURE. */
     float capturedExpected = expectedAvg;
@@ -510,7 +510,7 @@ void testTrainingBatchDefault_SumAggregatesWithoutDivision() {
     /* SUM forwardReduction: aggregator returns Σ stats->loss, NOT divided by batch->size. */
     float actualSum = trainingBatchDefault(
         model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, &batch,
-        calculateGradsSequential, REDUCTION_SUM);
+        calculateGradsSequential, REDUCTION_SUM, 1);
 
     float capturedExpected = expectedSum;
     float capturedActual = actualSum;
@@ -2807,7 +2807,7 @@ void testTrainingBatchDefaultHandsCalculateGradsBatchAxisViews(void) {
 
     float loss = trainingBatchDefault(
         NULL, 0, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, &batch,
-        probeGrads, REDUCTION_MEAN);
+        probeGrads, REDUCTION_MEAN, 1);
 
     bool itemDataShared = g_probe.inputData == item->data;
     bool labelDataShared = g_probe.labelData == label->data;

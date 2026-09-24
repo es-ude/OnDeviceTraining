@@ -531,3 +531,71 @@ add_elastic_ai_unit_test(
         TensorApi
         StorageApi
 )
+
+# #152 PR3b: stacked micro-batch training (spec §6) -- trainingBatchDefault's
+# chunk walk + gather, parity across m, the PyTorch B=4 gold, the FLOAT32 gate
+# and the four divisibility checks. Own binary: model A needs the ConvT, pool
+# and norm factories no other loop test links together.
+set(GEN_MICROBATCH_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_microbatch.h)
+add_custom_command(
+        OUTPUT ${GEN_MICROBATCH_HEADER}
+        COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_microbatch.py
+                --out ${GEN_MICROBATCH_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_microbatch.py
+        COMMENT "Generating expected_microbatch.h via PyTorch"
+        VERBATIM
+)
+add_custom_target(generate_expected_microbatch DEPENDS ${GEN_MICROBATCH_HEADER})
+
+add_executable(UnitTestMicroBatchStacking UnitTestMicroBatchStacking.c)
+target_link_libraries(UnitTestMicroBatchStacking PRIVATE
+        unity
+        TrainingLoopApi
+        TrainingEpochDefault
+        TrainingBatchDefault
+        CalculateGradsSequential
+        CommonLayerLibs
+        LayerConfigAccess
+        LinearApi
+        ReluApi
+        SoftmaxApi
+        BfpSoftmaxExp
+        Conv1dApi
+        Conv1dTransposedApi
+        Pool1dApi
+        AdaptivePool1dApi
+        FlattenApi
+        LayerNormApi
+        GroupNormApi
+        DropoutApi
+        QuantLayerApi
+        LayerQuant
+        LayerCommon
+        LayerWeightsApi
+        ArithmeticType
+        ExecuteOp
+        Kernel
+        Quantization
+        QuantizationApi
+        TensorApi
+        Tensor
+        Rounding
+        StorageApi
+        LossFunction
+        InferenceApi
+        DataLoader
+        DataLoaderApi
+        OptimizerApi
+        Optimizer
+        Sgd
+        SgdApi
+        BsScheduler
+        RNG
+        Bernoulli
+        Reduce
+        Common
+        odt_test_death
+)
+add_dependencies(UnitTestMicroBatchStacking generate_expected_microbatch)
+target_include_directories(UnitTestMicroBatchStacking PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+__register_target_as_unit_test(UnitTestMicroBatchStacking)

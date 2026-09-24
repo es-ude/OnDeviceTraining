@@ -9,20 +9,52 @@
 #include "DataLoader.h"
 #include "Optimizer.h"
 
-/* Exact (un-rounded, un-capped) target batch at lastEpoch, in double. Same
- * expression shape as LrScheduler's closed forms, with gamma DIVIDING. */
-static double computeExact(const bsScheduler_t *sched) {
+/* Exact (un-rounded, un-capped) target batch at `epoch` (a lastEpoch value),
+ * in double. Same expression shape as LrScheduler's closed forms, with gamma
+ * DIVIDING. */
+static double computeExact(const bsScheduler_t *sched, size_t epoch) {
     switch (sched->type) {
     case STEP_BS: {
-        double exponent = (double)(sched->lastEpoch / sched->params.stepBs.stepSize);
+        double exponent = (double)(epoch / sched->params.stepBs.stepSize);
         return (double)sched->baseBs / pow((double)sched->params.stepBs.gamma, exponent);
     }
     case EXPONENTIAL_BS:
         return (double)sched->baseBs /
-               pow((double)sched->params.exponentialBs.gamma, (double)sched->lastEpoch);
+               pow((double)sched->params.exponentialBs.gamma, (double)epoch);
     }
     PRINT_ERROR("bsScheduler: unknown scheduler type %d", (int)sched->type);
     exit(1);
+}
+
+/* THE batch computation, shared by bsSchedulerStep (which writes it) and
+ * bsSchedulerBatchSizeAt (which only reports it) so the two cannot diverge
+ * (#152 D8): closed form -> non-finite guard -> round half away -> clamp to
+ * [1, maxBatchSize]. `fn` names the public entry in the message; *exactOut
+ * receives the un-rounded target (the LR compensation's divisor). */
+static size_t appliedBatchAt(const bsScheduler_t *sched, size_t epoch, const char *fn,
+                             double *exactOut) {
+    double exact = computeExact(sched, epoch);
+    if (!isfinite(exact) || exact <= 0.0) {
+        /* gamma^epoch over- or underflowed in double: the target is 0 or inf
+         * and the batch/LR trajectory is no longer defined. Fail fast instead
+         * of writing a clamped batch with a 0 or inf LR. */
+        PRINT_ERROR("%s: exact batch target is not finite and positive at lastEpoch %zu "
+                    "(gamma^lastEpoch left the double range); shorten the run or move gamma "
+                    "toward 1",
+                    fn, epoch);
+        exit(1);
+    }
+    double rounded = round(exact); /* half away from zero (C round), not banker's */
+    size_t applied;
+    if (rounded < 1.0) {
+        applied = 1;
+    } else if (rounded > (double)sched->maxBatchSize) {
+        applied = sched->maxBatchSize;
+    } else {
+        applied = (size_t)rounded;
+    }
+    *exactOut = exact;
+    return applied;
 }
 
 /* Shared init-time guards. `fn` is the PUBLIC init function's name so every
@@ -82,28 +114,15 @@ void exponentialBsInit(bsScheduler_t *sched, dataLoader_t *dataLoader, optimizer
     sched->params.exponentialBs.gamma = gamma;
 }
 
+size_t bsSchedulerBatchSizeAt(const bsScheduler_t *sched, size_t epoch) {
+    double exact;
+    return appliedBatchAt(sched, epoch, "bsSchedulerBatchSizeAt", &exact);
+}
+
 void bsSchedulerStep(bsScheduler_t *sched) {
     sched->lastEpoch++;
-    double exact = computeExact(sched);
-    if (!isfinite(exact) || exact <= 0.0) {
-        /* gamma^lastEpoch over- or underflowed in double: the target is 0 or
-         * inf and the batch/LR trajectory is no longer defined. Fail fast
-         * instead of writing a clamped batch with a 0 or inf LR. */
-        PRINT_ERROR("bsSchedulerStep: exact batch target is not finite and positive at lastEpoch "
-                    "%zu (gamma^lastEpoch left the double range); shorten the run or move gamma "
-                    "toward 1",
-                    sched->lastEpoch);
-        exit(1);
-    }
-    double rounded = round(exact); /* half away from zero (C round), not banker's */
-    size_t applied;
-    if (rounded < 1.0) {
-        applied = 1;
-    } else if (rounded > (double)sched->maxBatchSize) {
-        applied = sched->maxBatchSize;
-    } else {
-        applied = (size_t)rounded;
-    }
+    double exact;
+    size_t applied = appliedBatchAt(sched, sched->lastEpoch, "bsSchedulerStep", &exact);
     /* maxBatchSize <= UINT16_MAX (init guard) makes the narrowing safe. */
     sched->dataLoader->batchSize = (uint16_t)applied;
 

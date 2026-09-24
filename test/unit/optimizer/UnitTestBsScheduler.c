@@ -30,6 +30,10 @@ _Static_assert(_Generic(&exponentialBsInit,
                "maxBatchSize)");
 _Static_assert(_Generic(&bsSchedulerStep, void (*)(bsScheduler_t *): 1, default: 0),
                "bsSchedulerStep must be (sched)");
+_Static_assert(_Generic(&bsSchedulerBatchSizeAt,
+                   size_t (*)(const bsScheduler_t *, size_t): 1,
+                   default: 0),
+               "bsSchedulerBatchSizeAt must be (const sched, epoch) -> size_t (#152)");
 
 void setUp() {}
 void tearDown() {}
@@ -318,6 +322,92 @@ void testStepRejectsNonFiniteCompensatedLr(void) {
     ASSERT_EXITS_WITH_FAILURE(bsSchedulerStep(&sched));
 }
 
+/* ---- #152 PR3b: bsSchedulerBatchSizeAt (the pre-epoch-0 schedule peek) ---- */
+
+/* Peek-vs-step parity: before every step, the peek at the epoch the step is
+ * about to reach must equal the batch that step then writes. Covers the
+ * growth, the upper cap and (via the second scheduler) the lower clamp. */
+static void assertPeekMatchesEveryStep(bsScheduler_t *sched, const dataLoader_t *dl, size_t steps) {
+    size_t peeked[8];
+    size_t written[8];
+    for (size_t k = 0; k < steps; k++) {
+        peeked[k] = bsSchedulerBatchSizeAt(sched, sched->lastEpoch + 1);
+        bsSchedulerStep(sched);
+        written[k] = dl->batchSize;
+    }
+    ODT_ASSERT_EQUAL_size_t_ARRAY(written, peeked, steps);
+}
+
+void testBatchSizeAtMatchesStepForExponentialSchedule(void) {
+    /* b0=16, gamma=0.5, max=100: 32, 64, 100 (cap), 100, 100, 100 */
+    dataLoader_t grow = makeLoader(16);
+    bsScheduler_t growSched;
+    exponentialBsInit(&growSched, &grow, NULL, 0.5f, 100);
+    TEST_ASSERT_EQUAL_size_t(16, bsSchedulerBatchSizeAt(&growSched, 0));
+    assertPeekMatchesEveryStep(&growSched, &grow, 6);
+
+    /* b0=4, gamma=2: 2, 1, 1 (0.5 rounds to 1), 1 (0.25 -> 0 -> clamped to 1) */
+    dataLoader_t shrink = makeLoader(4);
+    bsScheduler_t shrinkSched;
+    exponentialBsInit(&shrinkSched, &shrink, NULL, 2.0f, 4);
+    assertPeekMatchesEveryStep(&shrinkSched, &shrink, 4);
+}
+
+void testBatchSizeAtMatchesStepForStepSchedule(void) {
+    /* b0=3, gamma=0.5, stepSize=2, max=20: 3, 6, 6, 12, 12, 20 (cap), 20 */
+    dataLoader_t dl = makeLoader(3);
+    bsScheduler_t sched;
+    stepBsInit(&sched, &dl, NULL, 2, 0.5f, 20);
+    TEST_ASSERT_EQUAL_size_t(3, bsSchedulerBatchSizeAt(&sched, 0));
+    assertPeekMatchesEveryStep(&sched, &dl, 7);
+}
+
+void testBatchSizeAtFollowsTheCappedTwoThirdsSchedule(void) {
+    /* The UnitTestMicroBatchStacking scheduler fixtures (#152 PR3b): b0=2,
+     * gamma=2/3 -> 2, 3 (2.9999999), 4 (4.4999998), then 6.75 capped to 4
+     * (max=4) or to 5 (max=5). */
+    dataLoader_t dl = makeLoader(2);
+    bsScheduler_t cap4;
+    exponentialBsInit(&cap4, &dl, NULL, 0.6666667f, 4);
+    bsScheduler_t cap5;
+    exponentialBsInit(&cap5, &dl, NULL, 0.6666667f, 5);
+    size_t got4[4];
+    size_t got5[4];
+    for (size_t e = 0; e < 4; e++) {
+        got4[e] = bsSchedulerBatchSizeAt(&cap4, e);
+        got5[e] = bsSchedulerBatchSizeAt(&cap5, e);
+    }
+    const size_t expected4[4] = {2, 3, 4, 4};
+    const size_t expected5[4] = {2, 3, 4, 5};
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expected4, got4, 4);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expected5, got5, 4);
+}
+
+void testBatchSizeAtIsSideEffectFree(void) {
+    /* A peek far ahead must leave lastEpoch, the loader's batch and the
+     * compensated LR exactly as they were (trainingRun walks the whole
+     * schedule before epoch 0 through it). */
+    dataLoader_t dl = makeLoader(1);
+    optimizer_t optim = makeSgdOptimizer(0.1f);
+    bsScheduler_t sched;
+    exponentialBsInit(&sched, &dl, &optim, 0.8f, 100);
+    size_t peek = bsSchedulerBatchSizeAt(&sched, 5); /* 1/0.8^5 = 3.05 -> 3 */
+    TEST_ASSERT_EQUAL_size_t(3, peek);
+    TEST_ASSERT_EQUAL_size_t(0, sched.lastEpoch);
+    TEST_ASSERT_EQUAL_size_t(1, dl.batchSize);
+    TEST_ASSERT_EQUAL_FLOAT(0.1f, currentLr(&optim));
+}
+
+void testBatchSizeAtRejectsNonFiniteTarget(void) {
+    /* Same overflow as testStepRejectsTargetUnderflowingToZero: gamma^16
+     * leaves double, so the peek shares the step's fail-fast guard. */
+    dataLoader_t dl = makeLoader(1);
+    bsScheduler_t sched;
+    exponentialBsInit(&sched, &dl, NULL, 1e20f, 100);
+    TEST_ASSERT_EQUAL_size_t(1, bsSchedulerBatchSizeAt(&sched, 15));
+    ASSERT_EXITS_WITH_FAILURE(bsSchedulerBatchSizeAt(&sched, 16));
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testExponentialBsGrowsAndCaps);
@@ -342,5 +432,10 @@ int main() {
     RUN_TEST(testStepRejectsTargetUnderflowingToZero);
     RUN_TEST(testStepRejectsTargetOverflowingToInfinity);
     RUN_TEST(testStepRejectsNonFiniteCompensatedLr);
+    RUN_TEST(testBatchSizeAtMatchesStepForExponentialSchedule);
+    RUN_TEST(testBatchSizeAtMatchesStepForStepSchedule);
+    RUN_TEST(testBatchSizeAtFollowsTheCappedTwoThirdsSchedule);
+    RUN_TEST(testBatchSizeAtIsSideEffectFree);
+    RUN_TEST(testBatchSizeAtRejectsNonFiniteTarget);
     return UNITY_END();
 }

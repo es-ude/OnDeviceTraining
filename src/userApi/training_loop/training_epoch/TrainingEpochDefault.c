@@ -14,7 +14,17 @@
 
 float trainingEpochDefault(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
                            dataLoader_t *dataLoader, optimizer_t *optimizer,
-                           calculateGradsFn_t calculateGradsFn, reduction_t forwardReduction) {
+                           calculateGradsFn_t calculateGradsFn, reduction_t forwardReduction,
+                           size_t microBatchSize) {
+    size_t m = (microBatchSize == 0) ? 1 : microBatchSize;
+    if (dataLoader->batchSize % m != 0) {
+        /* Check 3 (#152 spec §6.2): covers direct callers; trainingRun checks
+         * the same (and its whole batch-size schedule) before epoch 0. */
+        PRINT_ERROR("trainingEpochDefault: batchSize %u is not divisible by microBatchSize %zu "
+                    "(b %% m == 0 is required)",
+                    (unsigned)dataLoader->batchSize, m);
+        exit(1);
+    }
     size_t datasetSize = dataLoader->getDatasetSize();
     size_t numberOfBatches = datasetSize / dataLoader->batchSize;
     if (numberOfBatches == 0) {
@@ -39,7 +49,7 @@ float trainingEpochDefault(layer_t **model, size_t modelSize, lossConfig_t lossC
         tensor_t *labelRef = batch->samples[0]->label;
 
         totalLoss += trainingBatchDefault(model, modelSize, lossConfig, batch, calculateGradsFn,
-                                          forwardReduction, 1);
+                                          forwardReduction, m);
 
         if (lossConfig.backwardReduction == REDUCTION_MEAN) {
             /* Each loss family derives F from labelRef's shape itself, reading

@@ -562,7 +562,7 @@ void testTrainingEpochDefault_DoesOptimizerStepPerBatch() {
 
     float epochLoss = trainingEpochDefault(
         model, sizeModel, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, dl,
-        sgd, calculateGradsSequential, REDUCTION_SUM);
+        sgd, calculateGradsSequential, REDUCTION_SUM, 1);
 
     /* CAPTURE assertion values BEFORE any free. */
     bool capturedChanged = false;
@@ -627,7 +627,7 @@ void testTrainingEpochDefault_MinibatchStepsOncePerMinibatch() {
 
     float epochLoss = trainingEpochDefault(
         model, sizeModel, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, dl,
-        sgd, calculateGradsSequential, REDUCTION_SUM);
+        sgd, calculateGradsSequential, REDUCTION_SUM, 1);
 
     /* CAPTURE. */
     bool capturedChanged = false;
@@ -1011,7 +1011,7 @@ void testTrainingEpochDefault_MeanScalesGradByOneOverNF() {
     /* defaultLossConfig: backwardReduction = REDUCTION_MEAN. */
     lossConfig_t cfg = defaultLossConfig(MSE);
 
-    trainingEpochDefault(model, 1, cfg, dl, sgd, calculateGradsSequential, REDUCTION_MEAN);
+    trainingEpochDefault(model, 1, cfg, dl, sgd, calculateGradsSequential, REDUCTION_MEAN, 1);
 
     /* CAPTURE before any free. */
     float capturedW00 = ((float *)wParam->data)[0];
@@ -1377,7 +1377,7 @@ void testTrainingEpochDefault_SumBackwardSkipsOptimizerScaling() {
     cfg.backwardReduction = REDUCTION_SUM;
 
     float epochLoss =
-        trainingEpochDefault(model, 1, cfg, dl, sgd, calculateGradsSequential, REDUCTION_SUM);
+        trainingEpochDefault(model, 1, cfg, dl, sgd, calculateGradsSequential, REDUCTION_SUM, 1);
 
     bool capturedChanged = false;
     {
@@ -1436,7 +1436,7 @@ void testTrainingEpochDefault_MeanForwardSumBackward_MixedCombination() {
 
     /* forwardReduction = MEAN: stats->loss is per-sample mean, comparable. */
     float epochLoss =
-        trainingEpochDefault(model, 1, cfg, dl, sgd, calculateGradsSequential, REDUCTION_MEAN);
+        trainingEpochDefault(model, 1, cfg, dl, sgd, calculateGradsSequential, REDUCTION_MEAN, 1);
 
     bool capturedChanged = false;
     {
@@ -2087,7 +2087,7 @@ void testTrainingEpochDefaultRejectsBatchLargerThanDataset(void) {
 
     ASSERT_EXITS_WITH_FAILURE(trainingEpochDefault(
         model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, trainDl, sgd,
-        calculateGradsSequential, REDUCTION_SUM));
+        calculateGradsSequential, REDUCTION_SUM, 1));
 
     freeOptim(sgd);
     freeQuantization(momentumQ);
@@ -2914,7 +2914,7 @@ void testTrainingEpochDefaultMeanScaleSeesLabelBatchAxis(void) {
     g_probe = (shapeProbe_t){0};
     g_probeGrad = wGrad;
 
-    trainingEpochDefault(model, 1, defaultLossConfig(MSE), dl, sgd, probeGrads, REDUCTION_MEAN);
+    trainingEpochDefault(model, 1, defaultLossConfig(MSE), dl, sgd, probeGrads, REDUCTION_MEAN, 1);
     g_probeGrad = NULL;
 
     float capturedW = ((float *)wParam->data)[0];

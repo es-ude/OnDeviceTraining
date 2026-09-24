@@ -360,7 +360,7 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
         info.learningRate = optimizerFunctions[optimizer->type].getLr(optimizer);
 
         float trainLoss = trainingEpochDefault(model, modelSize, lossConfig, trainDataLoader,
-                                               optimizer, calculateGradsFn, forwardReduction);
+                                               optimizer, calculateGradsFn, forwardReduction, 1);
         epochStats_t evalStats =
             evaluateEpochInternal(model, modelSize, lossConfig.funcType, evalDataLoader,
                                   inferenceFn, NULL, numClasses, forwardReduction);

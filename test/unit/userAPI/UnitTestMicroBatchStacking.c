@@ -54,6 +54,12 @@ _Static_assert(_Generic(&trainingBatchDefault,
                    default: 0),
                "trainingBatchDefault must take a trailing size_t microBatchSize (#152)");
 
+_Static_assert(_Generic(&trainingEpochDefault,
+                   float (*)(layer_t **, size_t, lossConfig_t, dataLoader_t *, optimizer_t *,
+                             calculateGradsFn_t, reduction_t, size_t): 1,
+                   default: 0),
+               "trainingEpochDefault must take a trailing size_t microBatchSize (#152)");
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -1198,6 +1204,236 @@ void testStackedTrainingWithFrozenFirstLayerMatchesPerSample(void) {
     TEST_ASSERT_FLOAT_WITHIN(1e-6f + 1e-5f * fabsf(loss[0]), loss[0], loss[1]);
 }
 
+/* ---- trainingEpochDefault (spec §6.1, §6.2 check 3) ------------------------ */
+
+/* Classifier: Linear(5->4) -> ReLU -> Linear(4->3) -> Softmax, CrossEntropy,
+ * over 8 samples ([5] items, one-hot [3] labels). */
+#define CLS_N 8
+#define CLS_IN 5
+#define CLS_OUT 3
+#define CLS_SIZE 4
+#define CLS_PARAMS (CLS_IN * 4 + 4 + 4 * CLS_OUT + CLS_OUT) /* 39 */
+
+static tensor_t *clsItems[CLS_N];
+static tensor_t *clsLabels[CLS_N];
+
+static void initClassifierData(void) {
+    rngSetSeed(1524u);
+    for (size_t s = 0; s < CLS_N; s++) {
+        float item[CLS_IN];
+        fillRandom(item, CLS_IN);
+        float label[CLS_OUT] = {0.0f, 0.0f, 0.0f};
+        label[s % CLS_OUT] = 1.0f;
+        clsItems[s] = buildFloatTensor((size_t[]){CLS_IN}, 1, item);
+        clsLabels[s] = buildFloatTensor((size_t[]){CLS_OUT}, 1, label);
+    }
+}
+
+static void freeClassifierData(void) {
+    for (size_t s = 0; s < CLS_N; s++) {
+        freeTensor(clsLabels[s]);
+        freeTensor(clsItems[s]);
+    }
+}
+
+static sample_t *getClassifierSample(size_t id) {
+    sample_t *s = reserveMemory(sizeof(sample_t));
+    s->item = clsItems[id];
+    s->label = clsLabels[id];
+    return s;
+}
+
+static size_t getClassifierDatasetSize(void) {
+    return CLS_N;
+}
+
+/* A dataset that must never be read: a check that has to fire BEFORE the
+ * first batch is drawn exits 1; drawing a sample exits 3 instead, so the
+ * death test tells "the early check fired" apart from "a later check caught
+ * it after a batch was drawn". */
+static sample_t *getTripwireSample(size_t id) {
+    (void)id;
+    _exit(3);
+}
+
+/* A replay-style loader: one sample more than its batchSize per batch. The
+ * samples array carries one SPARE valid entry past batch->size, so a missing
+ * check 4 trains the ragged tail silently (exit 0) instead of reading past
+ * the array -- the backstop death test then pins check 4 itself. */
+static batch_t *getBatchWithOneExtraSample(dataLoader_t *dataLoader, size_t index) {
+    size_t n = (size_t)dataLoader->batchSize + 1;
+    batch_t *batch = reserveMemory(sizeof(batch_t));
+    batch->size = n;
+    batch->samples = reserveMemory((n + 1) * sizeof(sample_t *));
+    for (size_t i = 0; i < n + 1; i++) {
+        batch->samples[i] = getClassifierSample((index * dataLoader->batchSize + i) % CLS_N);
+    }
+    return batch;
+}
+
+static void buildClassifier(layer_t **model, layerQuant_t *lq) {
+    rngSetSeed(4242u); /* identical initial weights on every build */
+    model[0] = linearLayerInit(&(linearInit_t){.inFeatures = CLS_IN, .outFeatures = 4}, lq);
+    model[1] = reluLayerInit(lq);
+    model[2] = linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = CLS_OUT}, lq);
+    model[3] = softmaxLayerInit(lq);
+}
+
+/* freeOptim owns the parameters; the Linear layers are torn down shell-only. */
+static void freeClassifierShells(layer_t **model) {
+    freeSoftmaxLayer(model[3]);
+    freeReservedMemory(model[2]->config->linear);
+    freeReservedMemory(model[2]->config);
+    freeReservedMemory(model[2]);
+    freeReluLayer(model[1]);
+    freeReservedMemory(model[0]->config->linear);
+    freeReservedMemory(model[0]->config);
+    freeReservedMemory(model[0]);
+}
+
+static optimizer_t *buildSgd(layer_t **model, quantization_t *momentumQ) {
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.5f, 0.0f, 0.0f, model, CLS_SIZE, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    optimizerSetWriteBackRounding(sgd, HALF_AWAY); /* deterministic write-backs */
+    return sgd;
+}
+
+static size_t snapshotParams(layer_t **model, size_t modelSize, float *out, size_t capacity) {
+    parameter_t *slots[MAX_PARAMS];
+    size_t n = calcTotalNumberOfStates(model, modelSize);
+    collectTrainableParameters(model, modelSize, slots);
+    size_t k = 0;
+    for (size_t p = 0; p < n; p++) {
+        const float *v = (const float *)slots[p]->param->data;
+        size_t count = calcNumberOfElementsByTensor(slots[p]->param);
+        for (size_t i = 0; i < count; i++) {
+            if (k < capacity) {
+                out[k] = v[i];
+            }
+            k++;
+        }
+    }
+    return k;
+}
+
+/* One epoch of the classifier at the given batch and micro-batch size. */
+static float runClassifierEpoch(uint16_t batchSize, size_t microBatchSize,
+                                calculateGradsFn_t calculateGradsFn, float *params) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *model[CLS_SIZE];
+    buildClassifier(model, &lq);
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd = buildSgd(model, momentumQ);
+    dataLoader_t *dl = dataLoaderInit(getClassifierSample, getClassifierDatasetSize, batchSize,
+                                      NULL, NULL, false, 0, true);
+    float loss = trainingEpochDefault(model, CLS_SIZE, defaultLossConfig(CROSS_ENTROPY), dl, sgd,
+                                      calculateGradsFn, REDUCTION_MEAN, microBatchSize);
+    snapshotParams(model, CLS_SIZE, params, CLS_PARAMS);
+    freeDataLoader(dl);
+    freeOptim(sgd);
+    freeQuantization(momentumQ);
+    freeClassifierShells(model);
+    freeQuantization(q);
+    return loss;
+}
+
+static void runEpochOnLoaderOrDie(dataLoader_t *dl, size_t microBatchSize) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *model[CLS_SIZE];
+    buildClassifier(model, &lq);
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd = buildSgd(model, momentumQ);
+    trainingEpochDefault(model, CLS_SIZE, defaultLossConfig(CROSS_ENTROPY), dl, sgd,
+                         calculateGradsSequential, REDUCTION_MEAN, microBatchSize);
+}
+
+void testTrainingEpochDefaultRejectsBatchNotDivisibleByMicroBatch(void) {
+    /* Check 3: loader batch 6, m = 4 -- dies before the first batch is drawn
+     * (exit 1, not the tripwire's 3: that is what tells it from check 4,
+     * which would print the same 6 and 4) and names b and m (ruling R10:
+     * numbers plus the keyword "microBatchSize"). */
+    dataLoader_t *dl =
+        dataLoaderInit(getTripwireSample, getClassifierDatasetSize, 6, NULL, NULL, false, 0, true);
+    char message[512];
+    int code = -2;
+
+    CAPTURE_EXIT_AND_OUTPUT(runEpochOnLoaderOrDie(dl, 4), message, sizeof message, &code);
+
+    freeDataLoader(dl);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, code, "check 3 must exit(1) before any sample is read");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(message, "microBatchSize"), "check 3 must name the knob");
+    TEST_ASSERT_TRUE_MESSAGE(messageHasNumber(message, 6), "check 3 must name b (6)");
+    TEST_ASSERT_TRUE_MESSAGE(messageHasNumber(message, 4), "check 3 must name m (4)");
+}
+
+void testTrainingEpochDefaultBackstopsAnIndivisibleReplayBatch(void) {
+    /* Loader batchSize 4 passes check 3 at m = 2, but its batches carry 5
+     * samples (the replay loader's base + eligible * r shape): check 4 inside
+     * trainingBatchDefault must stop it (spec §6.2 known limitation). The
+     * message's b is the batch's 5 -- a number check 3, which only sees the
+     * loader's 4, can never print. */
+    initClassifierData();
+    dataLoader_t *dl = dataLoaderInit(getClassifierSample, getClassifierDatasetSize, 4, NULL, NULL,
+                                      false, 0, true);
+    dl->getBatch = getBatchWithOneExtraSample;
+    char message[512];
+    int code = -2;
+
+    CAPTURE_EXIT_AND_OUTPUT(runEpochOnLoaderOrDie(dl, 2), message, sizeof message, &code);
+
+    freeDataLoader(dl);
+    freeClassifierData();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, code, "check 4 must stop the ragged replay batch");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(message, "microBatchSize"), "check 4 must name the knob");
+    TEST_ASSERT_TRUE_MESSAGE(messageHasNumber(message, 5),
+                             "check 4 must name the batch's b (5), not the loader's 4");
+    TEST_ASSERT_TRUE_MESSAGE(messageHasNumber(message, 2), "check 4 must name m (2)");
+}
+
+void testTrainingEpochDefaultMicroBatchZeroEqualsOne(void) {
+    initClassifierData();
+    float paramsZero[CLS_PARAMS];
+    float paramsOne[CLS_PARAMS];
+    resetRecording();
+    float lossZero = runClassifierEpoch(4, 0, recordingGrads, paramsZero);
+    size_t callsZero = g_recCalls;
+    size_t rowsZero = g_recItemRows[0];
+    float lossOne = runClassifierEpoch(4, 1, calculateGradsSequential, paramsOne);
+    freeClassifierData();
+
+    TEST_ASSERT_EQUAL_size_t(CLS_N, callsZero);
+    TEST_ASSERT_EQUAL_size_t(1, rowsZero);
+    TEST_ASSERT_EQUAL_MEMORY(&lossOne, &lossZero, sizeof(float));
+    TEST_ASSERT_EQUAL_MEMORY(paramsOne, paramsZero, sizeof(paramsOne));
+}
+
+void testTrainingEpochDefaultStacksAndTracksPerSample(void) {
+    /* Two optimizer steps (8 samples, batch 4): m = 4 must really stack
+     * (one 4-row call per batch) and land where m = 1 lands. */
+    initClassifierData();
+    float paramsOne[CLS_PARAMS];
+    float paramsFour[CLS_PARAMS];
+    float lossOne = runClassifierEpoch(4, 1, calculateGradsSequential, paramsOne);
+    resetRecording();
+    float lossFour = runClassifierEpoch(4, 4, recordingGrads, paramsFour);
+    size_t calls = g_recCalls;
+    size_t rows[2] = {g_recItemRows[0], g_recItemRows[1]};
+    freeClassifierData();
+
+    TEST_ASSERT_EQUAL_size_t(2, calls);
+    TEST_ASSERT_EQUAL_size_t(4, rows[0]);
+    TEST_ASSERT_EQUAL_size_t(4, rows[1]);
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(SIZE_MAX,
+                                     firstMismatch(paramsOne, paramsFour, CLS_PARAMS, 1e-6f, 1e-4f),
+                                     "stacked epoch diverges from m=1");
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f + 1e-5f * fabsf(lossOne), lossOne, lossFour);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testStackedChunkWalkCallsOncePerChunkWithMRows);
@@ -1227,5 +1463,9 @@ int main(void) {
     RUN_TEST(testStackedGateRejectsPerOpSymMathOnFloat32Storage);
     RUN_TEST(testStackedGateRejectsSymGradStorage);
     RUN_TEST(testStackedTrainingWithFrozenFirstLayerMatchesPerSample);
+    RUN_TEST(testTrainingEpochDefaultRejectsBatchNotDivisibleByMicroBatch);
+    RUN_TEST(testTrainingEpochDefaultBackstopsAnIndivisibleReplayBatch);
+    RUN_TEST(testTrainingEpochDefaultMicroBatchZeroEqualsOne);
+    RUN_TEST(testTrainingEpochDefaultStacksAndTracksPerSample);
     return UNITY_END();
 }

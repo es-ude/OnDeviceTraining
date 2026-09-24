@@ -364,7 +364,7 @@ void testTrainingEpochDefaultStepsThroughOptimizerStep(void) {
 
     odtHookSet(recordingHook, &g_ctxToken);
     float epochLoss = trainingEpochDefault(model, 2, ceMeanLoss(), dl, optim,
-                                           calculateGradsSequential, REDUCTION_MEAN);
+                                           calculateGradsSequential, REDUCTION_MEAN, 1);
     odtHookSet(NULL, NULL);
 
     size_t count = g_logCount;

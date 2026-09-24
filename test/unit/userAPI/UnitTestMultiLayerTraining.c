@@ -1667,7 +1667,7 @@ void testBfpGradStorageTrainsUnderReductionMean(void) {
     float lastEpochLoss = NAN;
     for (size_t epoch = 0; epoch < 8; epoch++) {
         float epochLoss = trainingEpochDefault(f.model, 2, defaultLossConfig(MSE), dl, f.sgd,
-                                               calculateGradsSequential, REDUCTION_MEAN);
+                                               calculateGradsSequential, REDUCTION_MEAN, 1);
         if (epoch == 0) {
             firstEpochLoss = epochLoss;
         }
@@ -1846,8 +1846,9 @@ void testBfpConvGradStorageTrainsUnderDefaultEpoch(void) {
     float firstEpochLoss = NAN;
     float lastEpochLoss = NAN;
     for (size_t epoch = 0; epoch < 10; epoch++) {
-        float epochLoss = trainingEpochDefault(model, BFP_CONV_MODEL_SIZE, defaultLossConfig(MSE),
-                                               dl, sgd, calculateGradsSequential, REDUCTION_MEAN);
+        float epochLoss =
+            trainingEpochDefault(model, BFP_CONV_MODEL_SIZE, defaultLossConfig(MSE), dl, sgd,
+                                 calculateGradsSequential, REDUCTION_MEAN, 1);
         if (epoch == 0) {
             firstEpochLoss = epochLoss;
         }

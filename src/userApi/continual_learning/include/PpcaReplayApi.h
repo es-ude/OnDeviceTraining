@@ -47,7 +47,11 @@ typedef struct {
  * shape/dtype/qconfig mirrored via getShapeLike/getQLike, labels must be
  * FLOAT32 one-hot [numClasses]). The wrapper BORROWS base's fields; free
  * it ONLY with freeReplayDataLoader (freeDataLoader on the wrapper would
- * free base's indices). Base stays owned by the caller. */
+ * free base's indices). Base stays owned by the caller.
+ * Known limitation (#152): at microBatchSize m > 1 the replayed batch size
+ * base + eligible * r must stay divisible by m. trainingRun and
+ * trainingEpochDefault check only the loader's batchSize, so an indivisible
+ * replayed batch makes trainingBatchDefault fail fast mid-epoch. */
 dataLoader_t *replayDataLoaderWrap(dataLoader_t *base, const replayLoaderConfig_t *cfg);
 void freeReplayDataLoader(dataLoader_t *wrapped);
 

@@ -129,7 +129,7 @@ static float trainingBatchStacked(layer_t **model, size_t modelSize, lossConfig_
 
     for (size_t first = 0; first < batch->size; first += m) {
         for (size_t r = 0; r < m; r++) {
-            sample_t *sample = batch->samples[first + r];
+            const sample_t *sample = batch->samples[first + r];
             requireStackable(referenceItem, sample->item, "item", first + r, m);
             requireStackable(referenceLabel, sample->label, "label", first + r, m);
         }

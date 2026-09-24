@@ -46,9 +46,10 @@
  *
  *  Cost when unset: one out-of-line call into OdtHook.c plus one load and one
  *  branch per event -- odtHookFire lives in its own translation unit, so it
- *  cannot be inlined away without LTO. Six event kinds; a calculateGrads* call
- *  fires four, an optimizerStep two, so a macro-batch of B samples per
- *  optimizer update fires 4*B + 2 events. */
+ *  cannot be inlined away without LTO. Six event kinds: four per
+ *  calculateGrads* call and two per optimizerStep, so 4*(b/m) + 2 per
+ *  optimizer update for a macro-batch of b samples at microBatchSize m
+ *  (4*b + 2 at the default m = 1). */
 
 typedef enum {
     ODT_EVENT_FORWARD_BEGIN,

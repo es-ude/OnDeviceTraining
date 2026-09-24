@@ -10,7 +10,9 @@ but fires none of the `ODT_EVENT_OPTIMIZER_BEGIN`/`END` phase-hook events
 
 Why:
 - An external profiler (energy rig, cycle counter, latency tracer, #419) counts
-  on 4·B + 2 events per optimizer update at macro-batch B. A raw-vtable stepper
+  on four events per `calculateGrads*` call and two per `optimizerStep`, so
+  4·(b/m) + 2 per optimizer update for a macro-batch of b samples at
+  `microBatchSize` m (4·b + 2 at the default m = 1). A raw-vtable stepper
   reports FORWARD/BACKWARD spans and silently zero OPTIMIZER spans.
 - The stack-watermark probe (`examples/har_classifier/mem_instrument.c`) measures
   the production training path, and `trainingEpochDefault` steps through the

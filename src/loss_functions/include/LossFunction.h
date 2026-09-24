@@ -23,7 +23,9 @@ lossConfig_t defaultLossConfig(lossFuncType_t funcType);
  * Reduction-aware; PyTorch-parity for both MEAN and SUM.
  *
  * \param modelOutput  Tensor of shape [B, F] (B microbatch dim, F feature dim).
- *                     For B=1 today the [B, ...] dim may be implicit.
+ *                     Always explicit: the training loop passes [1, ...] views
+ *                     (microBatchSize 1) or [m, ...] stacks (#152); see
+ *                     docs/conventions/loss.md, "Microbatch shape".
  * \param label        Same shape as modelOutput.
  * \param reduction    REDUCTION_MEAN ⇒ per-microbatch mean over own elements;
  *                     REDUCTION_SUM  ⇒ per-microbatch raw sum.

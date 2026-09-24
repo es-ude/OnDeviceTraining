@@ -19,6 +19,9 @@
  * points at. Capacity is trusted only while argmaxCapacityData ==
  * argmaxIndices->data; any other buffer (zero-initialised config, argmax
  * swapped in by hand) is adopted at its own element count on the next forward.
+ * When replacing argmaxIndices by hand, also set argmaxCapacityData = NULL (or
+ * re-run initMaxPool1dConfig): a replacement whose ->data reuses the freed
+ * buffer's address would otherwise inherit that buffer's stale capacity.
  *
  * CONCURRENCY INVARIANT: one MaxPool layer instance must never run two
  * forwards concurrently, nor a forward concurrently with its backward. This

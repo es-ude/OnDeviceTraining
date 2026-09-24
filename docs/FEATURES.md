@@ -272,7 +272,8 @@ Notes on the qualified cells:
   `index * batchSize`; the `datasetSize % batchSize` tail is dropped every
   epoch, so a growing batch drops a growing tail). Wired through
   `trainingRunOptions_t` (`lrScheduler`, `bsScheduler`, `callback` — all
-  NULLable — and `stopOnNonFiniteLoss`, defaulting to `false`;
+  NULLable — `stopOnNonFiniteLoss`, defaulting to `false`, and
+  `microBatchSize`, 0 meaning 1, see **Training loop** below;
   `trainingRun(..., options)` with `NULL` = the old defaults): per
   epoch the callback receives `epochInfo_t` (`epoch`, `trainLoss`, `batchSize`,
   `parameterUpdates`, `learningRate` — the values the epoch trained with),
@@ -280,9 +281,13 @@ Notes on the qualified cells:
   loader, `gamma` non-finite or `<= 0`, `stepSize < 1`, `maxBatchSize` below
   the loader's initial batch, above `UINT16_MAX`, or above the loader's
   dataset size. `trainingRun` guards: a `bsScheduler` wired to a loader other
-  than the train loader, its compensation wired to another optimizer, or an
-  `lrScheduler` next to a compensating `bsScheduler` (two LR writers) — all
-  `PRINT_ERROR` + `exit(1)`. `bsSchedulerStep` fails fast (`PRINT_ERROR` +
+  than the train loader, its compensation wired to another optimizer, an
+  `lrScheduler` next to a compensating `bsScheduler` (two LR writers), a train
+  loader `batchSize` not divisible by `microBatchSize`, or — with a
+  `bsScheduler` and `microBatchSize > 1` — any batch the schedule will set for
+  epochs `1..numberOfEpochs-1` not divisible by it (the message names the
+  first failing epoch; #152) — all `PRINT_ERROR` + `exit(1)` before epoch 0.
+  `bsSchedulerStep` fails fast (`PRINT_ERROR` +
   `exit(1)`) when `gamma^lastEpoch` leaves the double range (exact target 0 or
   inf) or the compensated LR is not finite in float; `trainingEpochDefault`
   fails fast when `batchSize > datasetSize` (zero batches) — the backstop for
@@ -446,8 +451,10 @@ checkpointing, limitations, literature).
   through `convertTensor` first (#417, sweep observability for epic #410 PR7).
 - **Phase hook for external profilers** (`src/common/include/OdtHook.h`, #419
   precondition) — one process-wide slot (`odtHookSet`, NULL = off, the default)
-  receiving six event kinds (4·B + 2 fires per optimizer update at
-  macro-batch B): `FORWARD`/`BACKWARD` BEGIN/END around the two halves of
+  receiving six event kinds (four per `calculateGrads*` call and two per
+  `optimizerStep`, so 4·(b/m) + 2 per optimizer update for a macro-batch of
+  b samples at `microBatchSize` m; 4·b + 2 at the default m = 1):
+  `FORWARD`/`BACKWARD` BEGIN/END around the two halves of
   `calculateGradsSequential`/`tracedGrads` (the pair tiles the call; BACKWARD
   fires even when truncated or skipped, so the count per call is constant) and
   `OPTIMIZER` BEGIN/END inside the public `optimizerStep()` (`Optimizer.h`, #429)

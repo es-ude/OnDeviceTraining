@@ -33,15 +33,18 @@ void initMaxPool1dConfig(maxPool1dConfig_t *cfg, kernel_t *kernel, tensor_t *arg
 }
 
 /* #152: every arm indexes the argmax at (b * channels + c) * outputLength +
- * outPos with batch and channels taken from the call's operand, and the argmax
- * is a config-owned buffer sized once by its creator — so its FULL shape must
- * match the call, not just its length (a [1, C, Lout] buffer under a batch-2
- * call is written/read one row past its end). Rank first: dimensions[0..2] of
- * a lower-rank shape is itself an over-read. Forward arms pass the input and
- * the geometry's outputLength; backward arms pass lossGrad and its
- * dimensions[2] (lossGrad is [B, C, Lout]; forwardInput may be NULL). The
- * reference operand's dims are read before the rank check because every
- * calling arm has already read them. */
+ * outPos with batch and channels taken from the call's operand, so the
+ * argmax's FULL shape must match the call, not just its length. Since PR3b the
+ * forward first grows the argmax to the call's batch (maxPoolEnsureArgmaxRows,
+ * which also checks both ranks), so in the forward arms this guard catches a
+ * wrong channel count or length. A batch mismatch remains possible only in the
+ * backward arms: an argmax recorded by a forward at another batch (a batch-2
+ * backward after a batch-1 forward would read a row that forward never
+ * wrote). Rank first: dimensions[0..2] of a lower-rank shape is itself an
+ * over-read. Forward arms pass the input and the geometry's outputLength;
+ * backward arms pass lossGrad and its dimensions[2] (lossGrad is [B, C, Lout];
+ * forwardInput may be NULL). The reference operand's dims are read before the
+ * rank check because every calling arm has already read them. */
 static void maxPoolRequireArgmaxShape(const tensor_t *argmax, const tensor_t *input,
                                       size_t outputLength, const char *where) {
     size_t batch = input->shape->dimensions[0];

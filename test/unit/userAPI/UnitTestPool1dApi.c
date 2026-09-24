@@ -239,8 +239,9 @@ static tensor_t *buildPoolTensor(size_t batch, size_t channels, size_t length, c
     return t;
 }
 
-/* K=2, S=2 over L=4 -> Lout=2; every row has its own argmax pattern so a
- * backward that read another row's indices would scatter to wrong cells. */
+/* K=2, S=2 over L=4 -> Lout=2. Rows 1 and 3 -- the two the B = 2 backward
+ * check reads -- differ in their argmax ({0, 3} vs {1, 3}), so a backward that
+ * read the other row's indices would scatter to wrong cells. */
 static const float POOL_ROWS[4 * 4] = {
     1.0f,  5.0f,  2.0f,  0.0f,  /* maxima 5, 2    argmax {1, 2} */
     7.0f,  3.0f,  0.0f,  9.0f,  /* maxima 7, 9    argmax {0, 3} */

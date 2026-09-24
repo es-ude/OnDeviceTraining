@@ -52,6 +52,45 @@ static uint8_t *reserveGatherBuffer(size_t m, size_t perSampleBytes, const char 
     return buffer;
 }
 
+/* Per-chunk validation (spec §6.3): a stacked sample must be FLOAT32, carry no
+ * sparsity and match the reference in rank, dimensions and order. The
+ * reference is the macro batch's sample 0 -- the sample the gather buffers
+ * were sized from -- so it is also every chunk's first-sample reference. */
+static void requireStackable(tensor_t *reference, tensor_t *t, const char *what, size_t sampleIndex,
+                             size_t m) {
+    if (t->quantization->type != FLOAT32) {
+        PRINT_ERROR("trainingBatchDefault: microBatchSize %zu > 1 is FLOAT32-only, but the %s of "
+                    "sample %zu has dtype %d",
+                    m, what, sampleIndex, (int)t->quantization->type);
+        exit(1);
+    }
+    if (t->sparsity != NULL) {
+        PRINT_ERROR("trainingBatchDefault: microBatchSize %zu > 1 cannot stack the %s of sample "
+                    "%zu: it carries sparsity",
+                    m, what, sampleIndex);
+        exit(1);
+    }
+    size_t rank = reference->shape->numberOfDimensions;
+    if (t->shape->numberOfDimensions != rank) {
+        PRINT_ERROR("trainingBatchDefault: the %s of sample %zu has rank %zu, sample 0 has rank "
+                    "%zu -- a stacked chunk needs shape-identical samples",
+                    what, sampleIndex, t->shape->numberOfDimensions, rank);
+        exit(1);
+    }
+    for (size_t d = 0; d < rank; d++) {
+        if (t->shape->dimensions[d] != reference->shape->dimensions[d] ||
+            t->shape->orderOfDimensions[d] != reference->shape->orderOfDimensions[d]) {
+            PRINT_ERROR("trainingBatchDefault: the %s of sample %zu differs from sample 0 in "
+                        "dimension %zu (size %zu vs %zu, order %zu vs %zu) -- a stacked chunk "
+                        "needs shape-identical samples",
+                        what, sampleIndex, d, t->shape->dimensions[d],
+                        reference->shape->dimensions[d], t->shape->orderOfDimensions[d],
+                        reference->shape->orderOfDimensions[d]);
+            exit(1);
+        }
+    }
+}
+
 /* m > 1 (spec §6.3): b/m chunks of exactly m rows. Each chunk's item and label
  * bytes are copied row after row into the two gather buffers; the stacked
  * tensors are stack-local batch views of the chunk's first sample, re-pointed
@@ -75,6 +114,11 @@ static float trainingBatchStacked(layer_t **model, size_t modelSize, lossConfig_
     float totalLoss = 0.0f;
 
     for (size_t first = 0; first < batch->size; first += m) {
+        for (size_t r = 0; r < m; r++) {
+            sample_t *sample = batch->samples[first + r];
+            requireStackable(referenceItem, sample->item, "item", first + r, m);
+            requireStackable(referenceLabel, sample->label, "label", first + r, m);
+        }
         for (size_t r = 0; r < m; r++) {
             const sample_t *sample = batch->samples[first + r];
             memcpy(itemBuffer + r * itemBytes, sample->item->data, itemBytes);

@@ -11,7 +11,9 @@
  *  optimizer step is the caller's (trainingEpochDefault).
  *  - m == 1: every sample is wrapped by batchViewOf, no copy, no heap.
  *  - m > 1: each chunk's items and labels are gathered into two [m, ...]
- *    buffers, reserved once per call and freed before returning.
+ *    buffers, reserved once per call and freed before returning. Every
+ *    sample's item and label must be FLOAT32, sparsity-free and match
+ *    sample 0 in rank, dimensions and order -- fail fast otherwise.
  *  Fails fast unless batch->size % m == 0 (a replay loader must keep its
  *  appended sample count divisible by m), and at m > 1 on an empty batch.
  *  Frees every sample_t it consumes.

@@ -813,6 +813,185 @@ void testStackedDropoutFailsFastOnItsMaskCount(void) {
     freeModelBData();
 }
 
+/* ---- per-chunk sample validation (spec §6.3) ------------------------------ */
+
+/* Model C: Flatten -> Linear(8 -> 4), MSE. Items [2, 4], labels [4]. Every
+ * defective sample below keeps the reference byte count, so a missing check
+ * trains silently (exit 0) instead of crashing: the death tests pin the
+ * validation itself, not an incidental out-of-bounds read. */
+#define C_N 4
+#define C_SIZE 2
+
+static void buildModelC(layer_t **model, layerQuant_t *lq) {
+    model[0] = flattenLayerInit();
+    model[1] = linearLayerInit(&(linearInit_t){.inFeatures = 8, .outFeatures = 4}, lq);
+}
+
+static void freeModelC(layer_t **model) {
+    freeLinearLayer(model[1]);
+    freeFlattenLayer(model[0]);
+}
+
+static void initModelCData(tensor_t **items, tensor_t **labels) {
+    rngSetSeed(1523u);
+    for (size_t s = 0; s < C_N; s++) {
+        float item[8];
+        float label[4];
+        fillRandom(item, 8);
+        fillRandom(label, 4);
+        items[s] = buildFloatTensor((size_t[]){2, 4}, 2, item);
+        labels[s] = buildFloatTensor((size_t[]){4}, 1, label);
+    }
+}
+
+static void freeModelCData(tensor_t **items, tensor_t **labels) {
+    for (size_t s = 0; s < C_N; s++) {
+        freeTensor(labels[s]);
+        freeTensor(items[s]);
+    }
+}
+
+static void trainModelCOrDie(layer_t **model, tensor_t **items, tensor_t **labels) {
+    batch_t *batch = buildBatch(items, labels, C_N);
+    trainingBatchDefault(model, C_SIZE, defaultLossConfig(MSE), batch, calculateGradsSequential,
+                         REDUCTION_MEAN, 2);
+}
+
+/* Runs one death check with sample `bad`'s item (or label) replaced. */
+static void assertStackingRejects(tensor_t *badTensor, size_t bad, bool isLabel) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    rngSetSeed(18u);
+    layer_t *model[C_SIZE];
+    buildModelC(model, &lq);
+    tensor_t *items[C_N];
+    tensor_t *labels[C_N];
+    initModelCData(items, labels);
+    tensor_t *goodTensor = isLabel ? labels[bad] : items[bad];
+    if (isLabel) {
+        labels[bad] = badTensor;
+    } else {
+        items[bad] = badTensor;
+    }
+
+    ASSERT_EXITS_WITH_FAILURE(trainModelCOrDie(model, items, labels));
+
+    if (isLabel) {
+        labels[bad] = goodTensor;
+    } else {
+        items[bad] = goodTensor;
+    }
+    freeModelCData(items, labels);
+    freeModelC(model);
+    freeQuantization(q);
+}
+
+static const float C_BAD_VALUES[8] = {0.1f, -0.2f, 0.3f, -0.4f, 0.5f, -0.6f, 0.7f, -0.8f};
+
+void testStackedRejectsItemWithDifferentDims(void) {
+    tensor_t *bad = buildFloatTensor((size_t[]){4, 2}, 2, C_BAD_VALUES);
+    assertStackingRejects(bad, 1, false);
+    freeTensor(bad);
+}
+
+void testStackedRejectsItemWithDifferentRank(void) {
+    /* [2, 4, 1]: the leading dims match sample 0, only the rank differs. */
+    tensor_t *bad = buildFloatTensor((size_t[]){2, 4, 1}, 3, C_BAD_VALUES);
+    assertStackingRejects(bad, 1, false);
+    freeTensor(bad);
+}
+
+void testStackedRejectsItemWithDifferentOrder(void) {
+    tensor_t *bad = buildFloatTensor((size_t[]){2, 4}, 2, C_BAD_VALUES);
+    transposeTensor(bad, 0, 1); /* same dims and bytes, permuted order */
+    assertStackingRejects(bad, 1, false);
+    freeTensor(bad);
+}
+
+static tensor_t *buildSymInt32Item(void) {
+    size_t *dims = reserveMemory(2 * sizeof(size_t));
+    dims[0] = 2;
+    dims[1] = 4;
+    size_t *order = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 2, order);
+    tensor_t *t = initTensor(shape, quantizationInitSymInt32(HALF_AWAY), NULL);
+    tensorFillFromFloatBuffer(t, C_BAD_VALUES, 8);
+    return t;
+}
+
+void testStackedRejectsNonFloat32Item(void) {
+    tensor_t *bad = buildSymInt32Item();
+    assertStackingRejects(bad, 1, false);
+    freeTensor(bad);
+}
+
+void testStackedRejectsNonFloat32FirstSample(void) {
+    /* Sample 0 is the reference every other sample is compared against --
+     * it must itself be FLOAT32. */
+    tensor_t *bad = buildSymInt32Item();
+    assertStackingRejects(bad, 0, false);
+    freeTensor(bad);
+}
+
+void testStackedRejectsLabelWithSparsity(void) {
+    sparsity_t sparsity = {.type = SPARSITY_TYPE_1, .config = NULL};
+    tensor_t *bad = buildFloatTensor((size_t[]){4}, 1, C_BAD_VALUES);
+    bad->sparsity = &sparsity;
+    assertStackingRejects(bad, 1, true);
+    bad->sparsity = NULL;
+    freeTensor(bad);
+}
+
+void testStackedRejectsLabelWithDifferentRank(void) {
+    /* [2, 2] vs sample 0's [4]: same bytes, the rank differs. (The
+     * per-dimension compare is shared with the item path and pinned there,
+     * Step 5 (h); a rank-1 label cannot differ in dims at equal bytes.) */
+    tensor_t *bad = buildFloatTensor((size_t[]){2, 2}, 2, C_BAD_VALUES);
+    assertStackingRejects(bad, 1, true);
+    freeTensor(bad);
+}
+
+void testStackedRejectsMismatchInALaterChunk(void) {
+    /* Sample 3 = row 1 of chunk 1: validation runs for EVERY chunk. */
+    tensor_t *bad = buildFloatTensor((size_t[]){4, 2}, 2, C_BAD_VALUES);
+    assertStackingRejects(bad, 3, false);
+    freeTensor(bad);
+}
+
+void testStackedRejectsChunkDifferingFromSampleZero(void) {
+    /* Chunk 1 is internally uniform ([4, 2] twice) but differs from sample
+     * 0: the gather buffers are sized once per macro batch from sample 0, so
+     * every sample must match sample 0, not just its chunk's first sample. */
+    tensor_t *badA = buildFloatTensor((size_t[]){4, 2}, 2, C_BAD_VALUES);
+    tensor_t *badB = buildFloatTensor((size_t[]){4, 2}, 2, C_BAD_VALUES);
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    rngSetSeed(19u);
+    layer_t *model[C_SIZE];
+    buildModelC(model, &lq);
+    tensor_t *items[C_N];
+    tensor_t *labels[C_N];
+    initModelCData(items, labels);
+    tensor_t *good2 = items[2];
+    tensor_t *good3 = items[3];
+    items[2] = badA;
+    items[3] = badB;
+
+    ASSERT_EXITS_WITH_FAILURE(trainModelCOrDie(model, items, labels));
+
+    items[2] = good2;
+    items[3] = good3;
+    freeModelCData(items, labels);
+    freeModelC(model);
+    freeQuantization(q);
+    freeTensor(badB);
+    freeTensor(badA);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testStackedChunkWalkCallsOncePerChunkWithMRows);
@@ -826,5 +1005,14 @@ int main(void) {
     RUN_TEST(testStackedGatherSizeOverflowFailsFast);
     RUN_TEST(testStackedGatherReservationFailureFailsFast);
     RUN_TEST(testStackedDropoutFailsFastOnItsMaskCount);
+    RUN_TEST(testStackedRejectsItemWithDifferentDims);
+    RUN_TEST(testStackedRejectsItemWithDifferentRank);
+    RUN_TEST(testStackedRejectsItemWithDifferentOrder);
+    RUN_TEST(testStackedRejectsNonFloat32Item);
+    RUN_TEST(testStackedRejectsNonFloat32FirstSample);
+    RUN_TEST(testStackedRejectsLabelWithSparsity);
+    RUN_TEST(testStackedRejectsLabelWithDifferentRank);
+    RUN_TEST(testStackedRejectsMismatchInALaterChunk);
+    RUN_TEST(testStackedRejectsChunkDifferingFromSampleZero);
     return UNITY_END();
 }

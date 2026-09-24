@@ -128,3 +128,156 @@ arithmetic_t layerForwardMath(layer_t *layer) {
         exit(1);
     }
 }
+
+/* ---- FLOAT32-only gate (#152 PR3b, spec §6.6) ------------------------------
+ * Stacked training (microBatchSize > 1) is FLOAT32-only (D3): every declared
+ * arithmetic, every storage config and every parameter/grad tensor must be
+ * FLOAT32. NULL means "not declared" and never fails the gate: a NULL wire
+ * config is the upstream-dtype passthrough (initLayerOutputs), a NULL bias is
+ * a bias-less layer, a NULL grad is a frozen layer (#380). */
+
+static bool mathIsFloat32(arithmetic_t a) {
+    return a.type == ARITH_FLOAT32;
+}
+
+static bool storageIsFloat32(const quantization_t *q) {
+    return q == NULL || q->type == FLOAT32;
+}
+
+/* The four slots every layer except Flatten/Quantization declares. */
+static const char *wireNonFloat32(arithmetic_t forwardMath, arithmetic_t propLossMath,
+                                  const quantization_t *outputQ, const quantization_t *propLossQ) {
+    if (!mathIsFloat32(forwardMath)) {
+        return "forwardMath";
+    }
+    if (!mathIsFloat32(propLossMath)) {
+        return "propLossMath";
+    }
+    if (!storageIsFloat32(outputQ)) {
+        return "outputQ";
+    }
+    if (!storageIsFloat32(propLossQ)) {
+        return "propLossQ";
+    }
+    return NULL;
+}
+
+static const char *paramNonFloat32(const parameter_t *p, const char *paramField,
+                                   const char *gradField) {
+    if (p == NULL) {
+        return NULL;
+    }
+    if (!storageIsFloat32(p->param->quantization)) {
+        return paramField;
+    }
+    if (p->grad != NULL && !storageIsFloat32(p->grad->quantization)) {
+        return gradField;
+    }
+    return NULL;
+}
+
+/* Linear / Conv1d / Conv1dTransposed: the GEMM family declares per-op grad
+ * arithmetic on top of the wire slots. */
+static const char *gemmNonFloat32(arithmetic_t forwardMath, arithmetic_t weightGradMath,
+                                  arithmetic_t biasGradMath, arithmetic_t propLossMath,
+                                  const quantization_t *outputQ, const quantization_t *propLossQ,
+                                  const parameter_t *weights, const parameter_t *bias) {
+    if (!mathIsFloat32(weightGradMath)) {
+        return "weightGradMath";
+    }
+    if (!mathIsFloat32(biasGradMath)) {
+        return "biasGradMath";
+    }
+    const char *field = wireNonFloat32(forwardMath, propLossMath, outputQ, propLossQ);
+    if (field == NULL) {
+        field = paramNonFloat32(weights, "weights.param", "weights.grad");
+    }
+    if (field == NULL) {
+        field = paramNonFloat32(bias, "bias.param", "bias.grad");
+    }
+    return field;
+}
+
+/* LayerNorm / GroupNorm: no separate grad arithmetic -- propLossMath also
+ * drives the dgamma/dbeta ops (LayerNorm.c backward, the executeOp calls with
+ * .arithmetic = cfg->propLossMath). */
+static const char *normNonFloat32(arithmetic_t forwardMath, arithmetic_t propLossMath,
+                                  const quantization_t *outputQ, const quantization_t *propLossQ,
+                                  const parameter_t *gamma, const parameter_t *beta) {
+    const char *field = wireNonFloat32(forwardMath, propLossMath, outputQ, propLossQ);
+    if (field == NULL) {
+        field = paramNonFloat32(gamma, "gamma.param", "gamma.grad");
+    }
+    if (field == NULL) {
+        field = paramNonFloat32(beta, "beta.param", "beta.grad");
+    }
+    return field;
+}
+
+const char *layerNonFloat32Field(layer_t *layer) {
+    switch (layer->type) {
+    case LINEAR: {
+        const linearConfig_t *c = layer->config->linear;
+        return gemmNonFloat32(c->forwardMath, c->weightGradMath, c->biasGradMath, c->propLossMath,
+                              c->outputQ, c->propLossQ, c->weights, c->bias);
+    }
+    case CONV1D: {
+        const conv1dConfig_t *c = layer->config->conv1d;
+        return gemmNonFloat32(c->forwardMath, c->weightGradMath, c->biasGradMath, c->propLossMath,
+                              c->outputQ, c->propLossQ, c->weights, c->bias);
+    }
+    case CONV1D_TRANSPOSED: {
+        const conv1dTransposedConfig_t *c = layer->config->conv1dTransposed;
+        return gemmNonFloat32(c->forwardMath, c->weightGradMath, c->biasGradMath, c->propLossMath,
+                              c->outputQ, c->propLossQ, c->weights, c->bias);
+    }
+    case LAYERNORM: {
+        const layerNormConfig_t *c = layer->config->layerNorm;
+        return normNonFloat32(c->forwardMath, c->propLossMath, c->outputQ, c->propLossQ, c->gamma,
+                              c->beta);
+    }
+    case GROUPNORM: {
+        const groupNormConfig_t *c = layer->config->groupNorm;
+        return normNonFloat32(c->forwardMath, c->propLossMath, c->outputQ, c->propLossQ, c->gamma,
+                              c->beta);
+    }
+    case RELU: {
+        const reluConfig_t *c = layer->config->relu;
+        return wireNonFloat32(c->forwardMath, c->propLossMath, c->outputQ, c->propLossQ);
+    }
+    case SOFTMAX: {
+        const softmaxConfig_t *c = layer->config->softmax;
+        return wireNonFloat32(c->forwardMath, c->propLossMath, c->outputQ, c->propLossQ);
+    }
+    case MAXPOOL1D: {
+        /* argmaxIndices is INT32 index state, not a value wire -- not gated. */
+        const maxPool1dConfig_t *c = layer->config->maxPool1d;
+        return wireNonFloat32(c->forwardMath, c->propLossMath, c->outputQ, c->propLossQ);
+    }
+    case AVGPOOL1D: {
+        const avgPool1dConfig_t *c = layer->config->avgPool1d;
+        return wireNonFloat32(c->forwardMath, c->propLossMath, c->outputQ, c->propLossQ);
+    }
+    case ADAPTIVE_AVGPOOL1D: {
+        const adaptiveAvgPool1dConfig_t *c = layer->config->adaptiveAvgPool1d;
+        return wireNonFloat32(c->forwardMath, c->propLossMath, c->outputQ, c->propLossQ);
+    }
+    case DROPOUT: {
+        /* The BOOL mask is not a value wire -- not gated (its element count
+         * is Dropout's own guard, which fails fast at m > 1, spec §6.8). */
+        const dropoutConfig_t *c = layer->config->dropout;
+        return wireNonFloat32(c->forwardMath, c->propLossMath, c->outputQ, c->propLossQ);
+    }
+    case FLATTEN:
+        return NULL; /* no per-layer config: pure passthrough */
+    case QUANTIZATION:
+        return "layerType QUANTIZATION (a conversion node)";
+    default:
+        PRINT_ERROR("Unknown Layer Type!");
+        exit(1);
+    }
+}
+
+bool layerIsFloat32Only(layer_t *layer) {
+    return layerNonFloat32Field(layer) == NULL;
+}

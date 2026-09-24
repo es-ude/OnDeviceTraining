@@ -512,6 +512,9 @@ add_elastic_ai_unit_test(
         AdaptivePool1dApi
         DropoutApi
         LayerNormApi
+        GroupNormApi
+        GroupNorm
+        Reduce
         QuantLayerApi
         FlattenApi
         LayerCommon

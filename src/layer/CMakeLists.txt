@@ -44,6 +44,8 @@ target_link_libraries(MaxPool1d PRIVATE
         Common
         Kernel
         SlidingWindow1d
+        # #152 PR3b: the forward grows argmaxIndices on demand (reserveMemory).
+        StorageApi
         m
 )
 

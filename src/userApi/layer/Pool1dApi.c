@@ -95,8 +95,9 @@ static shape_t *buildOwnedShape(const size_t *srcDims, size_t numberOfDims) {
 }
 
 static tensor_t *buildMaxPool1dArgmax(size_t inputChannels, size_t outputLength) {
-    /* Argmax buffer is sized for batch=1 (training_batch iterates microbatch-
-     * by-microbatch in this framework). Shape: [1, inputChannels, outputLength]. */
+    /* Created for batch=1: [1, inputChannels, outputLength]. maxPool1dForward
+     * grows it on demand to the largest batch it is called with (#152 PR3b),
+     * e.g. a stacked micro-batch or a batched inference() call. */
     shape_t *shape = buildOwnedShape((size_t[]){1, inputChannels, outputLength}, 3);
     quantization_t *q = quantizationInitInt32();
     return initTensor(shape, q, NULL);
@@ -122,6 +123,8 @@ static layer_t *buildMaxPool1dLayerSkeleton(maxPool1dInit_t *init) {
 
     cfg->kernel = kernel;
     cfg->argmaxIndices = argmax;
+    cfg->argmaxCapacity = calcNumberOfElementsByTensor(argmax);
+    cfg->argmaxCapacityData = argmax->data;
     return layer;
 }
 

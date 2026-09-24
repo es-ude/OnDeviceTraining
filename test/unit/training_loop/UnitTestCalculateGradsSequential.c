@@ -10,7 +10,6 @@
 #include "BorrowedLayer.h"
 #include "CalculateGradsSequential.h"
 #include "Common.h"
-#include "DeathTest.h"
 #include "Layer.h"
 #include "LayerCommon.h"
 #include "LayerQuant.h"
@@ -990,14 +989,12 @@ static tensor_t *makeFloatTensor3D(size_t d0, size_t d1, size_t d2, const float 
     return t;
 }
 
-/* #152 PR1: the training entry point allocates its wires from the runtime
- * input (initLayerOutputs), but the MaxPool argmax is the factory's
- * config-owned [1, C, Lout] buffer -- so a stacked batch-2 input must fail
- * fast in the forward's argmax shape guard instead of writing row 1's indices
- * past it. The batch-1 call on the same model is the control. PR 1 interim
- * contract: #152 PR 3b grows the argmax on demand and turns this into a
- * growth test. */
-void testCalculateGradsFactoryMaxPoolRejectsBatch2(void) {
+/* #152 PR1/PR3b: the training entry point allocates its wires from the
+ * runtime input (initLayerOutputs), but the MaxPool argmax is the factory's
+ * config-owned [1, C, Lout] buffer. PR 1 made a stacked batch-2 input die in
+ * the forward's argmax shape guard; PR 3b grows the argmax on demand instead
+ * (spec §6.7). The batch-1 call on the same model runs first. */
+void testCalculateGradsFactoryMaxPoolGrowsToBatch2(void) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
@@ -1022,8 +1019,11 @@ void testCalculateGradsFactoryMaxPoolRejectsBatch2(void) {
     float capturedLoss = stats->loss;
     freeTrainingStats(stats);
 
-    ASSERT_EXITS_WITH_FAILURE(freeTrainingStats(
-        calculateGradsSequential(model, 1, lossConfig, REDUCTION_MEAN, x2, label2)));
+    /* #152 PR3b: the stacked batch-2 input grows the argmax (spec §6.7). */
+    trainingStats_t *stats2 =
+        calculateGradsSequential(model, 1, lossConfig, REDUCTION_MEAN, x2, label2);
+    float capturedLoss2 = stats2->loss;
+    freeTrainingStats(stats2);
 
     /* FREE. */
     freeTensor(label2);
@@ -1035,6 +1035,8 @@ void testCalculateGradsFactoryMaxPoolRejectsBatch2(void) {
 
     /* ASSERT: pooled {0.5, 2, 1.5, 0} vs zeros -> (0.25 + 4 + 2.25 + 0) / 4. */
     TEST_ASSERT_EQUAL_FLOAT(1.625f, capturedLoss);
+    /* Batch 2 adds row 1 {3, -0.25, 0.75, 1.25}: (6.5 + 11.1875) / 8. */
+    TEST_ASSERT_EQUAL_FLOAT(2.2109375f, capturedLoss2);
 }
 
 int main(void) {
@@ -1050,6 +1052,6 @@ int main(void) {
     RUN_TEST(testBackwardStopsAtDeepestTrainableLayer);
     RUN_TEST(testTruncationPreservesUpperLayerGrads);
     RUN_TEST(testAllFrozenModelSkipsBackwardEntirely);
-    RUN_TEST(testCalculateGradsFactoryMaxPoolRejectsBatch2);
+    RUN_TEST(testCalculateGradsFactoryMaxPoolGrowsToBatch2);
     return UNITY_END();
 }

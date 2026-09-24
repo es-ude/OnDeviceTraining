@@ -174,6 +174,11 @@ add_elastic_ai_unit_test(
         Kernel
         Tensor
         TensorApi
+        StorageApi
+        InferenceApi
+        LossFunction
+        DataLoader
+        odt_test_death
 )
 
 add_elastic_ai_unit_test(

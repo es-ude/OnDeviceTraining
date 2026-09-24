@@ -1,6 +1,7 @@
 #define SOURCE_FILE "ODT_MAX_POOL_1D"
 
 #include <math.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "MaxPool1d.h"
@@ -12,6 +13,7 @@
 #include "Layer.h"
 #include "Quantization.h"
 #include "SlidingWindow1d.h"
+#include "StorageApi.h"
 #include "Tensor.h"
 
 void initMaxPool1dConfig(maxPool1dConfig_t *cfg, kernel_t *kernel, tensor_t *argmaxIndices,
@@ -22,6 +24,8 @@ void initMaxPool1dConfig(maxPool1dConfig_t *cfg, kernel_t *kernel, tensor_t *arg
     }
     cfg->kernel = kernel;
     cfg->argmaxIndices = argmaxIndices;
+    cfg->argmaxCapacity = calcNumberOfElementsByTensor(argmaxIndices);
+    cfg->argmaxCapacityData = argmaxIndices->data;
     cfg->forwardMath = arithmeticFromQuantizationOrDefault(forwardQ);
     cfg->propLossMath = arithmeticFromQuantizationOrDefault(propLossQ);
     cfg->outputQ = forwardQ;
@@ -295,8 +299,73 @@ static void maxPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut
     }
 }
 
+static bool maxPoolMulFits(size_t a, size_t b, size_t *product) {
+    if (a != 0 && b > SIZE_MAX / a) {
+        return false;
+    }
+    *product = a * b;
+    return true;
+}
+
+/* #152 PR3b (spec §6.7): size the argmax for THIS call's batch before any arm
+ * runs, so every arm (FLOAT32, SYM_INT32, BFP) and inference() see a buffer
+ * holding B rows. Growth reserves the new [B, C, Lout] block BEFORE freeing
+ * the old one (a failed reservation leaves the layer intact) and the element
+ * and byte counts are overflow-checked. Only dims[0] is rewritten: a
+ * wrong-channel or wrong-length argmax still dies in the arm's
+ * maxPoolRequireArgmaxShape (PR1). Concurrency: see maxPool1dConfig_t. */
+static void maxPoolEnsureArgmaxRows(maxPool1dConfig_t *cfg, const tensor_t *input) {
+    tensor_t *argmax = cfg->argmaxIndices;
+    if (argmax == NULL || argmax->shape->numberOfDimensions != 3) {
+        PRINT_ERROR("MaxPool1d forward: argmaxIndices must be a rank-3 [batch, channels, "
+                    "outputLength] INT32 tensor");
+        exit(1);
+    }
+    if (input->shape->numberOfDimensions != 3) {
+        PRINT_ERROR("MaxPool1d forward: input must be rank-3 [batch, channels, length], got rank "
+                    "%zu",
+                    input->shape->numberOfDimensions);
+        exit(1);
+    }
+    size_t batch = input->shape->dimensions[0];
+    size_t channels = input->shape->dimensions[1];
+    size_t outputLength =
+        windowGeometry1dCalc(input->shape->dimensions[2], cfg->kernel).outputLength;
+
+    if (cfg->argmaxCapacityData != argmax->data) {
+        cfg->argmaxCapacityData = argmax->data;
+        cfg->argmaxCapacity = calcNumberOfElementsByTensor(argmax);
+    }
+
+    size_t rowElements = 0;
+    size_t needed = 0;
+    size_t bytes = 0;
+    if (!maxPoolMulFits(channels, outputLength, &rowElements) ||
+        !maxPoolMulFits(batch, rowElements, &needed) ||
+        !maxPoolMulFits(needed, sizeof(int32_t), &bytes)) {
+        PRINT_ERROR("MaxPool1d forward: argmax size [%zu, %zu, %zu] overflows size_t", batch,
+                    channels, outputLength);
+        exit(1);
+    }
+    if (needed > cfg->argmaxCapacity) {
+        uint8_t *grown = reserveMemory(bytes);
+        if (grown == NULL) {
+            PRINT_ERROR("MaxPool1d forward: reserving the [%zu, %zu, %zu] argmax (%zu bytes) "
+                        "failed",
+                        batch, channels, outputLength, bytes);
+            exit(1);
+        }
+        freeReservedMemory(argmax->data);
+        argmax->data = grown;
+        cfg->argmaxCapacityData = grown;
+        cfg->argmaxCapacity = needed;
+    }
+    argmax->shape->dimensions[0] = batch;
+}
+
 void maxPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output) {
     maxPool1dConfig_t *cfg = layer->config->maxPool1d;
+    maxPoolEnsureArgmaxRows(cfg, input);
     if (cfg->forwardMath.type == ARITH_BFP) {
         const bfpQConfig_t *anchor = bfpWireAnchor(cfg->outputQ, "MaxPool1d forward");
         /* Stack template: lifetime covers the executeOp call (same frame).

@@ -32,5 +32,4 @@ add_elastic_ai_unit_test(
         Distributions
         RNG
         odt_test_layer_builders
-        odt_test_death
 )

@@ -949,7 +949,12 @@ void testMaxPool1dBackwardBfpGuardsNarrowedNotRemoved(void) {
  * exit(1)s all the same, and the death harness compares exit codes only.
  * Defense in depth, not coverage. What IS proven: giving each rank guard a
  * distinct exit code makes exactly the matching assertion below fail, so both
- * deaths really do originate in the rank guards. */
+ * deaths really do originate in the rank guards.
+ *
+ * #152 PR3b: the FORWARD death now fires one step earlier, in
+ * maxPoolEnsureArgmaxRows' input-rank guard (argmax growth runs before any
+ * arm), so the BFP forward kernel's own rank check is defense in depth there;
+ * the backward death still originates in the kernel. */
 void testMaxPool1dBfpRejectsRank2Operands(void) {
     size_t rank2Input[] = {2, 8};
     size_t rank2LossGrad[] = {2, 4};
@@ -993,13 +998,16 @@ void testMaxPool1dBfpRejectsRank2Operands(void) {
  * row past its end. Each test first runs the SAME layer with a matching
  * argmax (the control: the fixture is valid), then swaps in the batch-1
  * argmax and expects the guard's exit(1).
- * The forward batch cases pin PR 1's interim contract: #152 PR 3b grows the
- * argmax in every forward arm and turns them into growth tests. The backward
- * cases are the lasting contract. */
-void testMaxPool1dForwardFloatRejectsBatch1ArgmaxAtBatch2(void) {
+ * #152 PR3b: the forward now grows a batch-1 argmax to the call's batch, so
+ * the forward cases pin a wrong LENGTH instead (growth tests live in
+ * UnitTestPool1dApi). The backward cases are unchanged: backward never grows. */
+void testMaxPool1dForwardFloatRejectsArgmaxLengthMismatchAtBatch2(void) {
+    /* #152 PR3b: the forward now GROWS a batch-1 argmax to the call's batch
+     * (spec §6.7), so the pin uses a wrong LENGTH, which growth never repairs:
+     * [1, 3, 5] grows to [2, 3, 5] and still dies against Lout = 4. */
     size_t inputDims[] = {2, 3, 5};
     size_t outputDims[] = {2, 3, 4};
-    size_t batch1ArgmaxDims[] = {1, 3, 4};
+    size_t batch1ArgmaxDims[] = {1, 3, 5};
     maxPool1dRunResult_t r =
         maxPool1dBuild(NULL, inputDims, 2, VALID, 1, 1, NULL, NULL, outputDims);
     tensor_t *batch1Argmax = makeInt32Tensor(batch1ArgmaxDims, 3);
@@ -1064,30 +1072,25 @@ void testMaxPool1dForwardFloatRejectsArgmaxWithWrongLength(void) {
     freeQuantization(r.q);
 }
 
-/* Review Focus: PR 1's forward contract is EXACT dims, not capacity and not
- * element count. A larger-batch argmax [3, 1, 3] has room for the call's
- * rows, and [1, 2, 3] has exactly the call's 6 elements -- both must still die
- * against the expected [2, 1, 3]. The lasting reason is the backward: it must
- * see exactly the rows this forward wrote. */
+/* Review Focus: the non-batch dims are EXACT, not element count: [1, 2, 3]
+ * has exactly the call's 6 elements and must still die against the expected
+ * [2, 1, 3]. (#152 PR3b: a larger-BATCH argmax is legal now -- the forward
+ * re-stamps dims[0] within capacity, pinned by UnitTestPool1dApi's
+ * testMaxPool1dArgmaxGrowsOnceAndTracksBatch -- so that half moved there.) */
 void testMaxPool1dForwardFloatRequiresExactArgmaxDims(void) {
     size_t inputDims[] = {2, 1, 4};
     size_t outputDims[] = {2, 1, 3};
-    size_t largerBatchDims[] = {3, 1, 3};
     size_t sameCountDims[] = {1, 2, 3};
     maxPool1dRunResult_t r =
         maxPool1dBuild(NULL, inputDims, 2, VALID, 1, 1, NULL, NULL, outputDims);
-    tensor_t *largerBatchArgmax = makeInt32Tensor(largerBatchDims, 3);
     tensor_t *sameCountArgmax = makeInt32Tensor(sameCountDims, 3);
 
     maxPool1dForward(r.layer, r.input, r.output);
 
-    r.layer->config->maxPool1d->argmaxIndices = largerBatchArgmax;
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output));
     r.layer->config->maxPool1d->argmaxIndices = sameCountArgmax;
     ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output));
 
     freeTensor(sameCountArgmax);
-    freeTensor(largerBatchArgmax);
     freeTensor(r.argmax);
     freeTensor(r.output);
     freeTensor(r.input);
@@ -1098,7 +1101,11 @@ void testMaxPool1dForwardFloatRequiresExactArgmaxDims(void) {
  * the right leading dims and element count, so ONLY the rank check can reject
  * it (the discriminating case). The rank-2 [2, 3] one is the realistic
  * mistake (argmax built without the batch axis); reading its dimensions[2]
- * would itself be an over-read, which is why rank is checked first. */
+ * would itself be an over-read, which is why rank is checked first.
+ *
+ * #152 PR3b: both deaths now fire one step earlier, in
+ * maxPoolEnsureArgmaxRows' argmax-rank guard (argmax growth runs before any
+ * arm), so maxPoolRequireArgmaxShape's rank branch is defense in depth here. */
 void testMaxPool1dForwardFloatRejectsArgmaxOfWrongRank(void) {
     size_t inputDims[] = {1, 2, 4};
     size_t outputDims[] = {1, 2, 3};
@@ -1124,10 +1131,11 @@ void testMaxPool1dForwardFloatRejectsArgmaxOfWrongRank(void) {
     freeQuantization(r.q);
 }
 
-void testMaxPool1dForwardSymRejectsBatch1ArgmaxAtBatch2(void) {
+void testMaxPool1dForwardSymRejectsArgmaxLengthMismatchAtBatch2(void) {
+    /* #152 PR3b: wrong LENGTH instead of batch 1 -- see the FLOAT32 twin. */
     size_t inputDims[] = {2, 3, 5};
     size_t outputDims[] = {2, 3, 4};
-    size_t batch1ArgmaxDims[] = {1, 3, 4};
+    size_t batch1ArgmaxDims[] = {1, 3, 5};
     maxPool1dSymRun_t r = maxPool1dBuildSym(NULL, inputDims, 2, VALID, 1, 1, outputDims);
     tensor_t *batch1Argmax = makeInt32Tensor(batch1ArgmaxDims, 3);
 
@@ -1201,10 +1209,11 @@ void testMaxPool1dBackwardSymRejectsBatch1ArgmaxAtBatch2(void) {
 
 /* BFP arms: FLOAT32-stored operands under a per-tensor BFP wire config take
  * the funnel's bfpStage route, so no grouped fixture geometry is needed. */
-void testMaxPool1dForwardBfpRejectsBatch1ArgmaxAtBatch2(void) {
+void testMaxPool1dForwardBfpRejectsArgmaxLengthMismatchAtBatch2(void) {
+    /* #152 PR3b: wrong LENGTH instead of batch 1 -- see the FLOAT32 twin. */
     size_t inputDims[] = {2, 3, 5};
     size_t outputDims[] = {2, 3, 4};
-    size_t batch1ArgmaxDims[] = {1, 3, 4};
+    size_t batch1ArgmaxDims[] = {1, 3, 5};
     tensor_t *input = makeFloatTensor(inputDims, 3, NULL);
     tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
     tensor_t *argmax = makeInt32Tensor(outputDims, 3);
@@ -1301,15 +1310,15 @@ int main(void) {
     RUN_TEST(testMaxPool1dBackwardBfpRejectsOutOfRangeArgmax);
     RUN_TEST(testMaxPool1dBackwardBfpGuardsNarrowedNotRemoved);
     RUN_TEST(testMaxPool1dBfpRejectsRank2Operands);
-    RUN_TEST(testMaxPool1dForwardFloatRejectsBatch1ArgmaxAtBatch2);
+    RUN_TEST(testMaxPool1dForwardFloatRejectsArgmaxLengthMismatchAtBatch2);
     RUN_TEST(testMaxPool1dForwardFloatRejectsArgmaxWithWrongChannels);
     RUN_TEST(testMaxPool1dForwardFloatRejectsArgmaxWithWrongLength);
     RUN_TEST(testMaxPool1dForwardFloatRequiresExactArgmaxDims);
     RUN_TEST(testMaxPool1dForwardFloatRejectsArgmaxOfWrongRank);
-    RUN_TEST(testMaxPool1dForwardSymRejectsBatch1ArgmaxAtBatch2);
+    RUN_TEST(testMaxPool1dForwardSymRejectsArgmaxLengthMismatchAtBatch2);
     RUN_TEST(testMaxPool1dBackwardFloatRejectsBatch1ArgmaxAtBatch2);
     RUN_TEST(testMaxPool1dBackwardSymRejectsBatch1ArgmaxAtBatch2);
-    RUN_TEST(testMaxPool1dForwardBfpRejectsBatch1ArgmaxAtBatch2);
+    RUN_TEST(testMaxPool1dForwardBfpRejectsArgmaxLengthMismatchAtBatch2);
     RUN_TEST(testMaxPool1dBackwardBfpRejectsBatch1ArgmaxAtBatch2);
     return UNITY_END();
 }

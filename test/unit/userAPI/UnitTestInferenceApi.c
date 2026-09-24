@@ -608,14 +608,12 @@ void testInitBufferOutputBfpGroupSizeMismatchDies(void) {
     freeQuantization(q);
 }
 
-/* #152 PR1 ------------------------------------------------------------------
+/* #152 PR1/PR3b -------------------------------------------------------------
  * maxPool1dLayerInit sizes the argmax [1, C, Lout], and both inference entry
- * points hand that config-owned buffer to the forward as auxOut. A batch-2
- * input must therefore fail fast in the argmax shape guard instead of writing
- * row 1's indices past the buffer. Each test runs the SAME model at batch 1
- * first (the control): pooling works and the loss reads a matching label, so
- * the batch-2 death can only come from the guard. PR 1 interim contract:
- * #152 PR 3b grows the argmax on demand and turns both into growth tests. */
+ * points hand that config-owned buffer to the forward as auxOut. PR 1 made a
+ * batch-2 input die in the argmax shape guard; PR 3b grows the argmax on
+ * demand instead (spec §6.7). Each test runs the SAME model at batch 1 first,
+ * then at batch 2, so the batch-2 result comes from a grown argmax. */
 
 static tensor_t *buildFloatTensor3DInf(size_t d0, size_t d1, size_t d2, const float *values) {
     size_t *dims = reserveMemory(3 * sizeof(size_t));
@@ -640,7 +638,7 @@ static const float kMaxPoolBatch1[8] = {0.5f, -1.f, 2.f, 0.25f, -0.75f, 1.5f, 0.
 static const float kMaxPoolBatch2[16] = {0.5f, -1.f, 2.f,   0.25f,  -0.75f, 1.5f, 0.f,   -2.f,
                                          3.f,  1.f,  -0.5f, -0.25f, 0.75f,  0.5f, -1.5f, 1.25f};
 
-void testInferenceFactoryMaxPoolRejectsBatch2(void) {
+void testInferenceFactoryMaxPoolGrowsToBatch2(void) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
@@ -660,7 +658,16 @@ void testInferenceFactoryMaxPoolRejectsBatch2(void) {
     }
     freeTensor(output);
 
-    ASSERT_EXITS_WITH_FAILURE(freeTensor(inference(model, 1, batch2)));
+    /* #152 PR3b: the forward grows the factory's [1, C, Lout] argmax to
+     * batch 2 (spec §6.7) instead of dying. */
+    tensor_t *output2 = inference(model, 1, batch2);
+    size_t capturedBatch2Dims[3] = {output2->shape->dimensions[0], output2->shape->dimensions[1],
+                                    output2->shape->dimensions[2]};
+    float capturedBatch2Values[8];
+    for (size_t i = 0; i < 8; i++) {
+        capturedBatch2Values[i] = ((float *)output2->data)[i];
+    }
+    freeTensor(output2);
 
     /* FREE. */
     freeTensor(batch2);
@@ -674,9 +681,15 @@ void testInferenceFactoryMaxPoolRejectsBatch2(void) {
     TEST_ASSERT_EQUAL_size_t(2, capturedDims[1]);
     TEST_ASSERT_EQUAL_size_t(2, capturedDims[2]);
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expectedValues, capturedValues, 4);
+    /* Row 1 windows {3,1} {-0.5,-0.25} | {0.75,0.5} {-1.5,1.25}. */
+    float expectedBatch2Values[8] = {0.5f, 2.f, 1.5f, 0.f, 3.f, -0.25f, 0.75f, 1.25f};
+    TEST_ASSERT_EQUAL_size_t(2, capturedBatch2Dims[0]);
+    TEST_ASSERT_EQUAL_size_t(2, capturedBatch2Dims[1]);
+    TEST_ASSERT_EQUAL_size_t(2, capturedBatch2Dims[2]);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(expectedBatch2Values, capturedBatch2Values, 8);
 }
 
-void testInferenceWithLossFactoryMaxPoolRejectsBatch2(void) {
+void testInferenceWithLossFactoryMaxPoolGrowsToBatch2(void) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
@@ -694,8 +707,10 @@ void testInferenceWithLossFactoryMaxPoolRejectsBatch2(void) {
     float capturedLoss = stats->loss;
     freeInferenceStats(stats);
 
-    ASSERT_EXITS_WITH_FAILURE(
-        freeInferenceStats(inferenceWithLoss(model, 1, batch2, label2, MSE, REDUCTION_MEAN)));
+    /* #152 PR3b: batch 2 grows the argmax and scores both rows. */
+    inferenceStats_t *stats2 = inferenceWithLoss(model, 1, batch2, label2, MSE, REDUCTION_MEAN);
+    float capturedLoss2 = stats2->loss;
+    freeInferenceStats(stats2);
 
     /* FREE. */
     freeTensor(label2);
@@ -707,6 +722,8 @@ void testInferenceWithLossFactoryMaxPoolRejectsBatch2(void) {
 
     /* ASSERT: pooled {0.5, 2, 1.5, 0} vs zeros -> (0.25 + 4 + 2.25 + 0) / 4. */
     TEST_ASSERT_EQUAL_FLOAT(1.625f, capturedLoss);
+    /* Batch 2 adds row 1 {3, -0.25, 0.75, 1.25}: (6.5 + 11.1875) / 8. */
+    TEST_ASSERT_EQUAL_FLOAT(2.2109375f, capturedLoss2);
 }
 
 /* #152 PR3a: inferenceBatched is a batch_t consumer -- its samples arrive in
@@ -804,8 +821,8 @@ int main(void) {
     RUN_TEST(testInitBufferOutputBfpGroupSizeMismatchDies);
     RUN_TEST(testInferenceBufferOutputBfpGroupSizeEqualToWireNormalizesToPerTensor);
 
-    RUN_TEST(testInferenceFactoryMaxPoolRejectsBatch2);
-    RUN_TEST(testInferenceWithLossFactoryMaxPoolRejectsBatch2);
+    RUN_TEST(testInferenceFactoryMaxPoolGrowsToBatch2);
+    RUN_TEST(testInferenceWithLossFactoryMaxPoolGrowsToBatch2);
 
     RUN_TEST(testInferenceBatchedAddsBatchAxisToNaturalSamples);
     return UNITY_END();

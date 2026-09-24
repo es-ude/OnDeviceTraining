@@ -14,8 +14,9 @@ _Static_assert(VALID == 0,
  *
  *  Requires input geometry (inputChannels, inputLength) because the
  *  factory pre-allocates an argmaxIndices INT32 tensor sized for the
- *  layer's output shape. Batch size is hardcoded to 1 (the training
- *  loop iterates microbatch-by-microbatch in this framework).
+ *  layer's output shape at batch 1; maxPool1dForward grows it on demand
+ *  to the largest batch it sees (#152 PR3b: stacked micro-batches,
+ *  batched inference()).
  *
  *  Usage:
  *

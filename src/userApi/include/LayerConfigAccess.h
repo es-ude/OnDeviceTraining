@@ -10,8 +10,8 @@
  * arithmetic-type-split, D3/D4). The layerType_t switch over a layer's
  * declared wire configs and arithmetic lives here and nowhere else -- every
  * consumer that needs a layer's produced-wire storage config, declared forward
- * arithmetic or its FLOAT32-only status goes through these functions instead
- * of re-deriving its own switch. */
+ * arithmetic, its FLOAT32-only status or its backward read-set goes through
+ * these functions instead of re-deriving its own switch. */
 
 /* Produced forward-wire storage config (dtype + qConfig for the layer's
  * output tensor). NULL for Flatten — it has no per-layer quantization;
@@ -42,5 +42,13 @@ bool layerIsFloat32Only(layer_t *layer);
  * string ("forwardMath", "weights.grad", "gamma.param", ...), or NULL when the
  * layer passes -- the "offending field" of the stacked-training error. */
 const char *layerNonFloat32Field(layer_t *layer);
+
+/* Read-set rule (#4, remat spec §3.7): true iff the layer's backward, whenever
+ * the driver runs it, reads its forward input's data or data-dependent
+ * metadata (SYM scale, BFP exponents). Linear/Conv1d/Conv1dTransposed read it
+ * only for the weight grad, so a frozen one does not; the norms read it
+ * frozen or not. false: the backward may be handed an input whose data is
+ * NULL. An unknown type exits. */
+bool layerBackwardReadsInput(const layer_t *layer);
 
 #endif // ODT_LAYER_CONFIG_ACCESS_H

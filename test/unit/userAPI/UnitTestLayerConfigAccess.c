@@ -8,10 +8,12 @@
 #include "AdaptivePool1dApi.h"
 #include "ArithmeticType.h"
 #include "AvgPool1d.h"
+#include "BatchNorm1d.h"
 #include "Conv1d.h"
 #include "Conv1dApi.h"
 #include "Conv1dTransposed.h"
 #include "Conv1dTransposedApi.h"
+#include "DeathTest.h"
 #include "Dropout.h"
 #include "DropoutApi.h"
 #include "FlattenApi.h"
@@ -607,6 +609,72 @@ void testLayerIsFloat32OnlyAcceptsFrozenBiaslessAndPassthroughLayers(void) {
     TEST_ASSERT_TRUE(acceptedPassthrough);
 }
 
+/* #4 PR0 (remat spec §3.7): the read-set truth table. The rule reads only
+ * the type and, for the six param layers, `frozen`; each row is a
+ * stack-built layer, and the eight param-free rows keep config == NULL. */
+static void assertReadsInput(bool expected, layerType_t type, layerConfig_t *config,
+                             const char *row) {
+    layer_t layer = {.type = type, .config = config};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(expected, layerBackwardReadsInput(&layer), row);
+}
+
+void testLayerBackwardReadsInputTruthTable(void) {
+    linearConfig_t linearTrainable = {.frozen = false};
+    linearConfig_t linearFrozen = {.frozen = true};
+    conv1dConfig_t convTrainable = {.frozen = false};
+    conv1dConfig_t convFrozen = {.frozen = true};
+    conv1dTransposedConfig_t convTTrainable = {.frozen = false};
+    conv1dTransposedConfig_t convTFrozen = {.frozen = true};
+    layerNormConfig_t layerNormTrainable = {.frozen = false};
+    layerNormConfig_t layerNormFrozen = {.frozen = true};
+    groupNormConfig_t groupNormTrainable = {.frozen = false};
+    groupNormConfig_t groupNormFrozen = {.frozen = true};
+    batchNorm1dConfig_t batchNormTrainable = {.frozen = false};
+    batchNorm1dConfig_t batchNormFrozen = {.frozen = true};
+
+    /* GEMM family: x feeds only the weight grad, which a frozen layer skips. */
+    assertReadsInput(true, LINEAR, &(layerConfig_t){.linear = &linearTrainable}, "LINEAR");
+    assertReadsInput(false, LINEAR, &(layerConfig_t){.linear = &linearFrozen}, "frozen LINEAR");
+    assertReadsInput(true, CONV1D, &(layerConfig_t){.conv1d = &convTrainable}, "CONV1D");
+    assertReadsInput(false, CONV1D, &(layerConfig_t){.conv1d = &convFrozen}, "frozen CONV1D");
+    assertReadsInput(true, CONV1D_TRANSPOSED, &(layerConfig_t){.conv1dTransposed = &convTTrainable},
+                     "CONV1D_TRANSPOSED");
+    assertReadsInput(false, CONV1D_TRANSPOSED, &(layerConfig_t){.conv1dTransposed = &convTFrozen},
+                     "frozen CONV1D_TRANSPOSED");
+    /* Norms read x in every arm, frozen or not. */
+    assertReadsInput(true, LAYERNORM, &(layerConfig_t){.layerNorm = &layerNormTrainable},
+                     "LAYERNORM");
+    assertReadsInput(true, LAYERNORM, &(layerConfig_t){.layerNorm = &layerNormFrozen},
+                     "frozen LAYERNORM");
+    assertReadsInput(true, GROUPNORM, &(layerConfig_t){.groupNorm = &groupNormTrainable},
+                     "GROUPNORM");
+    assertReadsInput(true, GROUPNORM, &(layerConfig_t){.groupNorm = &groupNormFrozen},
+                     "frozen GROUPNORM");
+    /* BatchNorm1d recomputes x-hat from x in both batch-stat and
+     * running-stat mode, frozen or not -- same rule as LayerNorm/GroupNorm. */
+    assertReadsInput(true, BATCHNORM1D, &(layerConfig_t){.batchNorm1d = &batchNormTrainable},
+                     "BATCHNORM1D");
+    assertReadsInput(true, BATCHNORM1D, &(layerConfig_t){.batchNorm1d = &batchNormFrozen},
+                     "frozen BATCHNORM1D");
+    assertReadsInput(true, RELU, NULL, "RELU");
+    assertReadsInput(true, SOFTMAX, NULL, "SOFTMAX");
+    assertReadsInput(false, MAXPOOL1D, NULL, "MAXPOOL1D");
+    assertReadsInput(false, AVGPOOL1D, NULL, "AVGPOOL1D");
+    assertReadsInput(false, ADAPTIVE_AVGPOOL1D, NULL, "ADAPTIVE_AVGPOOL1D");
+    assertReadsInput(false, FLATTEN, NULL, "FLATTEN");
+    assertReadsInput(false, QUANTIZATION, NULL, "QUANTIZATION");
+    assertReadsInput(false, DROPOUT, NULL, "DROPOUT");
+}
+
+/* A type appended to layerType_t without a read-set row must fail fast: a
+ * silent `false` would let the remat plan free an input the backward reads.
+ * 127 stays out of range as the enum grows (BATCHNORM1D + 1 would not). */
+void testLayerBackwardReadsInputRejectsUnknownType(void) {
+    layer_t unknown = {.type = (layerType_t)127, .config = NULL};
+    ASSERT_EXITS_WITH_OUTPUT(1, "layerBackwardReadsInput: unknown layerType_t 127",
+                             (void)layerBackwardReadsInput(&unknown));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLinearAccessorsMatchConfig);
@@ -628,5 +696,7 @@ int main(void) {
     RUN_TEST(testLayerNonFloat32FieldNamesEveryWireOnlyLayerField);
     RUN_TEST(testLayerIsFloat32OnlyRejectsBfpNotJustSym);
     RUN_TEST(testLayerIsFloat32OnlyAcceptsFrozenBiaslessAndPassthroughLayers);
+    RUN_TEST(testLayerBackwardReadsInputTruthTable);
+    RUN_TEST(testLayerBackwardReadsInputRejectsUnknownType);
     return UNITY_END();
 }

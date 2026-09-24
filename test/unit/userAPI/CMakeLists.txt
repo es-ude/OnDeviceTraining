@@ -580,6 +580,7 @@ add_elastic_ai_unit_test(
         Tensor
         TensorApi
         StorageApi
+        odt_test_death
 )
 
 # #152 PR3b: stacked micro-batch training (spec §6) -- trainingBatchDefault's

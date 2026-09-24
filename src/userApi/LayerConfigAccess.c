@@ -304,3 +304,37 @@ const char *layerNonFloat32Field(layer_t *layer) {
 bool layerIsFloat32Only(layer_t *layer) {
     return layerNonFloat32Field(layer) == NULL;
 }
+
+/* One reason per group below (full per-arm evidence: remat spec §3.7). An
+ * unknown type exits rather than defaulting: a wrong `false` lets the remat
+ * plan free an input the backward still reads. */
+bool layerBackwardReadsInput(const layer_t *layer) {
+    switch (layer->type) {
+    /* x feeds only the weight grad (dW from dy and x); a frozen layer skips it. */
+    case LINEAR:
+    case CONV1D:
+    case CONV1D_TRANSPOSED:
+        return !layerIsFrozen(layer);
+    /* Norms (LayerNorm/GroupNorm/BatchNorm1d) recompute x-hat from x, frozen
+     * or not; ReLU masks dy by the sign of x; Softmax recomputes softmax(x)
+     * for its Jacobian. */
+    case LAYERNORM:
+    case GROUPNORM:
+    case BATCHNORM1D:
+    case RELU:
+    case SOFTMAX:
+        return true;
+    /* Pools route dy by argmax indices or window geometry; Flatten reshapes;
+     * Quantization is straight-through; Dropout uses its stored mask and p. */
+    case MAXPOOL1D:
+    case AVGPOOL1D:
+    case ADAPTIVE_AVGPOOL1D:
+    case FLATTEN:
+    case QUANTIZATION:
+    case DROPOUT:
+        return false;
+    default:
+        PRINT_ERROR("layerBackwardReadsInput: unknown layerType_t %d", (int)layer->type);
+        exit(1);
+    }
+}

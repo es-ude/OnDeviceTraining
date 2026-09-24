@@ -322,8 +322,8 @@ void testNothingFiresWhenHookUnset(void) {
 /* trainingRun's step runs inside trainingEpochDefault: one 2-sample batch
  * must yield two FORWARD/BACKWARD quads and then exactly one OPTIMIZER pair
  * -- i.e. the epoch loop steps through optimizerStep, not the raw vtable. */
-static tensor_t *g_epochItems[2];
-static tensor_t *g_epochLabels[2];
+static tensor_t *g_epochItems[4];
+static tensor_t *g_epochLabels[4];
 static tensorArray_t g_epochItemsArr;
 static tensorArray_t g_epochLabelsArr;
 static dataset_t g_epochDataset;
@@ -392,6 +392,67 @@ void testTrainingEpochDefaultStepsThroughOptimizerStep(void) {
     assertHookAt(9, ODT_EVENT_OPTIMIZER_END);
 }
 
+/* At microBatchSize m the FORWARD/BACKWARD quad fires once per
+ * calculateGrads* call, i.e. once per m-row chunk (#152 PR3b): one 4-sample
+ * batch at m = 2 yields two quads, not four, then one OPTIMIZER pair --
+ * 4 * (4 / 2) + 2 = 10 events (18 at m = 1). */
+void testTrainingEpochDefaultFiresOneQuadPerMicroBatchChunk(void) {
+    resetLog();
+    g_epochItems[0] = makeVec2(5.0f, 1.0f);
+    g_epochItems[1] = makeVec2(1.0f, 5.0f);
+    g_epochItems[2] = makeVec2(4.0f, 2.0f);
+    g_epochItems[3] = makeVec2(2.0f, 4.0f);
+    g_epochLabels[0] = makeVec2(1.0f, 0.0f);
+    g_epochLabels[1] = makeVec2(0.0f, 1.0f);
+    g_epochLabels[2] = makeVec2(1.0f, 0.0f);
+    g_epochLabels[3] = makeVec2(0.0f, 1.0f);
+    g_epochItemsArr.array = g_epochItems;
+    g_epochItemsArr.size = 4;
+    g_epochLabelsArr.array = g_epochLabels;
+    g_epochLabelsArr.size = 4;
+    g_epochDataset.items = &g_epochItemsArr;
+    g_epochDataset.labels = &g_epochLabelsArr;
+
+    quantization_t *q = quantizationInitFloat();
+    layer_t *model[2];
+    buildLinearSoftmaxModel(model, q, TRAINABLE_DEFAULT); /* FLOAT32-only, no Dropout */
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *optim =
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 2, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    dataLoader_t *dl = dataLoaderInit(getEpochSample, getEpochDatasetSize, /*batchSize*/ 4, NULL,
+                                      NULL, /*shuffle*/ false, /*seed*/ 0, /*dropLast*/ true);
+
+    odtHookSet(recordingHook, &g_ctxToken);
+    float epochLoss = trainingEpochDefault(model, 2, ceMeanLoss(), dl, optim,
+                                           calculateGradsSequential, REDUCTION_MEAN, 2);
+    odtHookSet(NULL, NULL);
+
+    size_t count = g_logCount;
+    bool lossPositive = epochLoss > 0.0f;
+    freeDataLoader(dl);
+    freeOptim(optim);
+    freeLinearLayerShellOnly(model[0]);
+    freeSoftmaxLayer(model[1]);
+    freeQuantization(momentumQ);
+    freeQuantization(q);
+    for (size_t i = 0; i < 4; i++) {
+        freeTensor(g_epochItems[i]);
+        freeTensor(g_epochLabels[i]);
+    }
+
+    TEST_ASSERT_TRUE(lossPositive);
+    TEST_ASSERT_EQUAL_size_t(10, count);
+    for (size_t c = 0; c < 2; c++) {
+        assertHookAt(4 * c + 0, ODT_EVENT_FORWARD_BEGIN);
+        assertHookAt(4 * c + 1, ODT_EVENT_FORWARD_END);
+        assertHookAt(4 * c + 2, ODT_EVENT_BACKWARD_BEGIN);
+        assertHookAt(4 * c + 3, ODT_EVENT_BACKWARD_END);
+    }
+    assertHookAt(8, ODT_EVENT_OPTIMIZER_BEGIN);
+    assertHookAt(9, ODT_EVENT_OPTIMIZER_END);
+}
+
 void testFireHandsEventAndCtxToInstalledHook(void) {
     resetLog();
     odtHookSet(recordingHook, &g_ctxToken);
@@ -422,5 +483,6 @@ int main(void) {
     RUN_TEST(testSixEventsFireInOrderForOneGradsCallPlusOneStep);
     RUN_TEST(testNothingFiresWhenHookUnset);
     RUN_TEST(testTrainingEpochDefaultStepsThroughOptimizerStep);
+    RUN_TEST(testTrainingEpochDefaultFiresOneQuadPerMicroBatchChunk);
     return UNITY_END();
 }

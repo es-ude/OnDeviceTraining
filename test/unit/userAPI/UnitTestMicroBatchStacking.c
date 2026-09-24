@@ -389,6 +389,55 @@ void testStackedLossIsRowWeightedForMeanAndPlainForSum(void) {
     TEST_ASSERT_FLOAT_WITHIN(1e-4f * fabsf(sum[0]), sum[0], mean[0] * (float)(B_N * B_OUT));
 }
 
+#ifdef ODT_MEM_PROFILE
+/* The two gather buffers (spec §6.4) are freed before trainingBatchDefault
+ * returns: a stacked macro batch leaves the live-byte count where it found it.
+ * CI runs detect_leaks=0, so only this exact counter catches a dropped free.
+ * The warm-up call grows MaxPool's argmax to 2 rows and settles any other
+ * first-call state; the measured window then builds its batch, trains it
+ * (which frees the 4 sample_t) and frees the batch shell, so every byte the
+ * window does not return is the loop's. */
+void testStackedBatchReturnsItsGatherBuffers(void) {
+    rngSetSeed(1523u);
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *model[A_SIZE];
+    buildModelA(model, &lq);
+    tensor_t *items[4];
+    tensor_t *labels[4];
+    for (size_t s = 0; s < 4; s++) {
+        float item[2 * 8];
+        fillRandom(item, 2 * 8);
+        float label[A_CLASSES] = {0.0f, 0.0f, 0.0f};
+        label[s % A_CLASSES] = 1.0f;
+        items[s] = buildFloatTensor((size_t[]){2, 8}, 2, item);
+        labels[s] = buildFloatTensor((size_t[]){A_CLASSES}, 1, label);
+    }
+    lossConfig_t cfg = defaultLossConfig(CROSS_ENTROPY);
+
+    batch_t *batch = buildBatch(items, labels, 4);
+    trainingBatchDefault(model, A_SIZE, cfg, batch, calculateGradsSequential, REDUCTION_MEAN, 2);
+    freeBatch(batch);
+
+    size_t before = memProfileMark();
+    batch = buildBatch(items, labels, 4);
+    trainingBatchDefault(model, A_SIZE, cfg, batch, calculateGradsSequential, REDUCTION_MEAN, 2);
+    freeBatch(batch);
+    size_t after = memProfileMark();
+
+    for (size_t s = 0; s < 4; s++) {
+        freeTensor(labels[s]);
+        freeTensor(items[s]);
+    }
+    freeModelA(model);
+    freeQuantization(q);
+
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(before, after,
+                                     "a stacked macro batch must return both gather buffers");
+}
+#endif /* ODT_MEM_PROFILE */
+
 /* ---- parity across m (spec §9 PR 3b core) --------------------------------- */
 
 void testStackedMatchesPerSampleOnModelA(void) {
@@ -1649,6 +1698,9 @@ int main(void) {
     RUN_TEST(testStackedChunkWalkCallsOncePerChunkWithMRows);
     RUN_TEST(testMicroBatchZeroBehavesExactlyLikeOne);
     RUN_TEST(testStackedLossIsRowWeightedForMeanAndPlainForSum);
+#ifdef ODT_MEM_PROFILE
+    RUN_TEST(testStackedBatchReturnsItsGatherBuffers);
+#endif
     RUN_TEST(testStackedMatchesPerSampleOnModelA);
     RUN_TEST(testStackedMatchesPerSampleOnMseModelB);
     RUN_TEST(testStackedBatchMatchesPyTorchGold);

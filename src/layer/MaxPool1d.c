@@ -311,9 +311,11 @@ static bool maxPoolMulFits(size_t a, size_t b, size_t *product) {
  * runs, so every arm (FLOAT32, SYM_INT32, BFP) and inference() see a buffer
  * holding B rows. Growth reserves the new [B, C, Lout] block BEFORE freeing
  * the old one (a failed reservation leaves the layer intact) and the element
- * and byte counts are overflow-checked. Only dims[0] is rewritten: a
+ * and byte counts are overflow-checked. Only dims[0] is rewritten (a
  * wrong-channel or wrong-length argmax still dies in the arm's
- * maxPoolRequireArgmaxShape (PR1). Concurrency: see maxPool1dConfig_t. */
+ * maxPoolRequireArgmaxShape, PR1), and only when the batch changes, so a
+ * fixed-batch forward writes nothing into the config beyond the argmax
+ * contents. Concurrency: see maxPool1dConfig_t. */
 static void maxPoolEnsureArgmaxRows(maxPool1dConfig_t *cfg, const tensor_t *input) {
     tensor_t *argmax = cfg->argmaxIndices;
     if (argmax == NULL || argmax->shape->numberOfDimensions != 3) {
@@ -360,7 +362,9 @@ static void maxPoolEnsureArgmaxRows(maxPool1dConfig_t *cfg, const tensor_t *inpu
         cfg->argmaxCapacityData = grown;
         cfg->argmaxCapacity = needed;
     }
-    argmax->shape->dimensions[0] = batch;
+    if (argmax->shape->dimensions[0] != batch) {
+        argmax->shape->dimensions[0] = batch;
+    }
 }
 
 void maxPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output) {

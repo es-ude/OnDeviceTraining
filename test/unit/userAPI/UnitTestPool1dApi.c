@@ -327,6 +327,37 @@ void testMaxPool1dArgmaxGrowsOnceAndTracksBatch(void) {
     TEST_ASSERT_EQUAL_size_t(8, capacityAfterB4Again);
 }
 
+#ifdef ODT_MEM_PROFILE
+/* Growth frees the old argmax block (CI runs detect_leaks=0, so only this
+ * exact counter catches a dropped free): the one growing forward, factory
+ * [1, 1, 2] -> [4, 1, 2], changes the live-byte count by exactly the new
+ * block minus the old one. Every tensor is built before and freed after the
+ * two readings; a FLOAT32-in, FLOAT32-out forward allocates nothing else. */
+void testMaxPool1dArgmaxGrowthReturnsTheOldBlock(void) {
+    quantization_t *q = quantizationInitFloat();
+    layer_t *layer = buildGrowthPool(q);
+    maxPool1dConfig_t *cfg = layer->config->maxPool1d;
+    tensor_t *in4 = buildPoolTensor(4, 1, 4, POOL_ROWS);
+    tensor_t *out4 = buildPoolTensor(4, 1, 2, NULL);
+    size_t capacityBefore = cfg->argmaxCapacity;
+
+    size_t before = memProfileMark();
+    maxPool1dForward(layer, in4, out4);
+    size_t after = memProfileMark();
+    size_t capacityAfter = cfg->argmaxCapacity;
+
+    freeTensor(out4);
+    freeTensor(in4);
+    freeMaxPool1dLayer(layer);
+    freeQuantization(q);
+
+    TEST_ASSERT_EQUAL_size_t(2, capacityBefore);
+    TEST_ASSERT_EQUAL_size_t(8, capacityAfter);
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(before + (8 - 2) * sizeof(int32_t), after,
+                                     "growth must free the old argmax block");
+}
+#endif /* ODT_MEM_PROFILE */
+
 void testInferenceAtBatch4GrowsFactoryMaxPool(void) {
     quantization_t *q = quantizationInitFloat();
     layer_t *layer = buildGrowthPool(q);
@@ -485,6 +516,9 @@ int main(void) {
     RUN_TEST(testAvgPool1dLayerInitBorrowingStrideDefaultsToKernelSize);
     RUN_TEST(testAvgPool1dLayerInitOwningDeepCopiesTwoQuantizations);
     RUN_TEST(testMaxPool1dArgmaxGrowsOnceAndTracksBatch);
+#ifdef ODT_MEM_PROFILE
+    RUN_TEST(testMaxPool1dArgmaxGrowthReturnsTheOldBlock);
+#endif
     RUN_TEST(testInferenceAtBatch4GrowsFactoryMaxPool);
     RUN_TEST(testMaxPool1dArgmaxGrowthRejectsSizeOverflow);
     RUN_TEST(testMaxPool1dArgmaxAdoptsASwappedInBuffer);

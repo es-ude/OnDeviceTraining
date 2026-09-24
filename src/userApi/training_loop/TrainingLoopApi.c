@@ -302,6 +302,9 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
     bsScheduler_t *bsScheduler = (options != NULL) ? options->bsScheduler : NULL;
     epochCallbackFn_t callback = (options != NULL) ? options->callback : NULL;
     bool stopOnNonFiniteLoss = (options != NULL) ? options->stopOnNonFiniteLoss : false;
+    /* 0 means 1 (#152 spec §6.1): zero-initialised options keep per-sample training. */
+    size_t microBatchSize =
+        (options != NULL && options->microBatchSize != 0) ? options->microBatchSize : 1;
 
     if (lrScheduler != NULL && lrScheduler->optimizer != optimizer) {
         PRINT_ERROR("trainingRun: lrScheduler is wired to a different optimizer than the one "
@@ -323,6 +326,33 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
         PRINT_ERROR("trainingRun: lrScheduler and a compensating bsScheduler would both write "
                     "the LR every epoch (last writer wins silently); use one or the other");
         exit(1);
+    }
+
+    /* #152 spec §6.2 checks 1 and 2: every macro batch this run trains must
+     * split into whole chunks of microBatchSize rows (b % m == 0, no ragged
+     * tails). Both fire before anything is read or trained. */
+    if (trainDataLoader->batchSize % microBatchSize != 0) {
+        PRINT_ERROR("trainingRun: trainDataLoader batchSize %u is not divisible by "
+                    "microBatchSize %zu (b %% m == 0 is required)",
+                    (unsigned)trainDataLoader->batchSize, microBatchSize);
+        exit(1);
+    }
+    if (bsScheduler != NULL && microBatchSize > 1) {
+        /* Epoch e of this run trains at the batch the scheduler writes when
+         * its lastEpoch reaches lastEpoch + e (the scheduler may already have
+         * been stepped); the step after the final epoch trains nothing. At
+         * m == 1 every batch divides, so the walk is skipped and a default run
+         * behaves exactly as before (incl. when a non-finite target fails). */
+        for (size_t epoch = 1; epoch < numberOfEpochs; epoch++) {
+            size_t scheduled = bsSchedulerBatchSizeAt(bsScheduler, bsScheduler->lastEpoch + epoch);
+            if (scheduled % microBatchSize != 0) {
+                PRINT_ERROR("trainingRun: the batch-size scheduler sets batch %zu for epoch %zu, "
+                            "which is not divisible by microBatchSize %zu (the whole schedule "
+                            "is checked before epoch 0)",
+                            scheduled, epoch, microBatchSize);
+                exit(1);
+            }
+        }
     }
 
     batch_t *firstBatch = evalDataLoader->getBatch(evalDataLoader, 0);
@@ -359,8 +389,9 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
         info.parameterUpdates = trainDataLoader->getDatasetSize() / info.batchSize;
         info.learningRate = optimizerFunctions[optimizer->type].getLr(optimizer);
 
-        float trainLoss = trainingEpochDefault(model, modelSize, lossConfig, trainDataLoader,
-                                               optimizer, calculateGradsFn, forwardReduction, 1);
+        float trainLoss =
+            trainingEpochDefault(model, modelSize, lossConfig, trainDataLoader, optimizer,
+                                 calculateGradsFn, forwardReduction, microBatchSize);
         epochStats_t evalStats =
             evaluateEpochInternal(model, modelSize, lossConfig.funcType, evalDataLoader,
                                   inferenceFn, NULL, numClasses, forwardReduction);

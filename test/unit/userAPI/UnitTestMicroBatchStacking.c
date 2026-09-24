@@ -60,6 +60,9 @@ _Static_assert(_Generic(&trainingEpochDefault,
                    default: 0),
                "trainingEpochDefault must take a trailing size_t microBatchSize (#152)");
 
+_Static_assert(_Generic(((trainingRunOptions_t){0}).microBatchSize, size_t: 1, default: 0),
+               "trainingRunOptions_t must carry a size_t microBatchSize (#152)");
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -1434,6 +1437,213 @@ void testTrainingEpochDefaultStacksAndTracksPerSample(void) {
     TEST_ASSERT_FLOAT_WITHIN(1e-6f + 1e-5f * fabsf(lossOne), lossOne, lossFour);
 }
 
+/* ---- trainingRun (spec §6.1, §6.2 checks 1 and 2) -------------------------- */
+
+typedef enum {
+    NO_SCHEDULER,
+    FRESH_SCHEDULER,
+    FRESH_SCHEDULER_CAP5,
+    SCHEDULER_STEPPED_TWICE,
+    NONFINITE_SCHEDULER
+} schedulerMode_t;
+
+static float g_epochLoss[8];
+static size_t g_epochCount;
+
+static void captureEpochLoss(epochInfo_t info, epochStats_t evalStats) {
+    (void)evalStats;
+    if (g_epochCount < 8) {
+        g_epochLoss[g_epochCount] = info.trainLoss;
+    }
+    g_epochCount++;
+}
+
+/* The scheduler fixtures: b0 = 2, gamma = 2/3, max = 4 gives 2, 3, 4, 4, ...
+ * (odd at epoch 1 only); FRESH_SCHEDULER_CAP5 (max = 5) gives 2, 3, 4, 5
+ * (odd at epochs 1 AND 3). Both pinned by UnitTestBsScheduler's
+ * testBatchSizeAtFollowsTheCappedTwoThirdsSchedule. NONFINITE_SCHEDULER
+ * (gamma = 1e20, max = 4) clamps to 1 from epoch 1 and its target leaves the
+ * double range at epoch 16 (testBatchSizeAtRejectsNonFiniteTarget there). */
+static trainingRunResult_t runClassifier(getSampleFn_t getSample, uint16_t batchSize,
+                                         size_t numberOfEpochs, schedulerMode_t mode,
+                                         const trainingRunOptions_t *baseOptions,
+                                         calculateGradsFn_t calculateGradsFn, float *params) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *model[CLS_SIZE];
+    buildClassifier(model, &lq);
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd = buildSgd(model, momentumQ);
+    dataLoader_t *trainDl =
+        dataLoaderInit(getSample, getClassifierDatasetSize, batchSize, NULL, NULL, false, 0, true);
+    dataLoader_t *evalDl =
+        dataLoaderInit(getSample, getClassifierDatasetSize, 1, NULL, NULL, false, 0, true);
+    bsScheduler_t bs;
+    trainingRunOptions_t options = {0};
+    if (baseOptions != NULL) {
+        options = *baseOptions;
+    }
+    if (mode != NO_SCHEDULER) {
+        float gamma = (mode == NONFINITE_SCHEDULER) ? 1e20f : 0.6666667f;
+        exponentialBsInit(&bs, trainDl, NULL, gamma, mode == FRESH_SCHEDULER_CAP5 ? 5 : 4);
+        if (mode == SCHEDULER_STEPPED_TWICE) {
+            bsSchedulerStep(&bs); /* loader batch 3 */
+            bsSchedulerStep(&bs); /* loader batch 4 */
+        }
+        options.bsScheduler = &bs;
+    }
+    g_epochCount = 0;
+    trainingRunResult_t result =
+        trainingRun(model, CLS_SIZE, defaultLossConfig(CROSS_ENTROPY), trainDl, evalDl, sgd,
+                    numberOfEpochs, calculateGradsFn, inferenceWithLoss,
+                    (baseOptions == NULL && mode == NO_SCHEDULER) ? NULL : &options);
+    if (params != NULL) {
+        snapshotParams(model, CLS_SIZE, params, CLS_PARAMS);
+    }
+    freeDataLoader(evalDl);
+    freeDataLoader(trainDl);
+    freeOptim(sgd);
+    freeQuantization(momentumQ);
+    freeClassifierShells(model);
+    freeQuantization(q);
+    return result;
+}
+
+static void runClassifierOrDie(uint16_t batchSize, size_t numberOfEpochs, schedulerMode_t mode,
+                               size_t microBatchSize) {
+    trainingRunOptions_t options = {.microBatchSize = microBatchSize};
+    runClassifier(getTripwireSample, batchSize, numberOfEpochs, mode, &options,
+                  calculateGradsSequential, NULL);
+}
+
+void testTrainingRunRejectsLoaderBatchNotDivisibleByMicroBatch(void) {
+    /* Check 1: before epoch 0 -- before even the eval loader's numClasses
+     * peek, so the tripwire dataset is never read (exit 1, not 3: that is what
+     * tells it from checks 3 and 4, which would print the same 3 and 2) --
+     * and the message names b and m (ruling R10: numbers plus the keyword
+     * "microBatchSize"). */
+    char message[512];
+    int code = -2;
+
+    CAPTURE_EXIT_AND_OUTPUT(runClassifierOrDie(3, 2, NO_SCHEDULER, 2), message, sizeof message,
+                            &code);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, code, "check 1 must exit(1) before any sample is read");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(message, "microBatchSize"), "check 1 must name the knob");
+    TEST_ASSERT_TRUE_MESSAGE(messageHasNumber(message, 3), "check 1 must name b (3)");
+    TEST_ASSERT_TRUE_MESSAGE(messageHasNumber(message, 2), "check 1 must name m (2)");
+}
+
+void testTrainingRunRejectsScheduleNotDivisibleByMicroBatch(void) {
+    /* Check 2: the loader batch (2) divides, but the max=5 schedule 2, 3, 4, 5
+     * is odd at epochs 1 AND 3. The walk fires before epoch 0 trains (exit 1,
+     * the tripwire dataset is never read) and names the FIRST failing epoch,
+     * its batch and m (spec §6.2; ruling R10: numbers plus the keyword
+     * "microBatchSize"). Epoch 1 and the absence of epoch 3's batch 5 are the
+     * numbers that tell "first" from "any" failing epoch. 5 is also this
+     * fixture's maxBatchSize, so the message must not print the cap either. */
+    char message[512];
+    int code = -2;
+
+    CAPTURE_EXIT_AND_OUTPUT(runClassifierOrDie(2, 4, FRESH_SCHEDULER_CAP5, 2), message,
+                            sizeof message, &code);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, code, "check 2 must exit(1) before any sample is read");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(message, "microBatchSize"), "check 2 must name the knob");
+    TEST_ASSERT_TRUE_MESSAGE(messageHasNumber(message, 3), "check 2 must name the batch (3)");
+    TEST_ASSERT_TRUE_MESSAGE(messageHasNumber(message, 1),
+                             "check 2 must name the first failing epoch (1)");
+    TEST_ASSERT_FALSE_MESSAGE(messageHasNumber(message, 5),
+                              "check 2 must stop at epoch 1, not report epoch 3's batch 5");
+    TEST_ASSERT_TRUE_MESSAGE(messageHasNumber(message, 2), "check 2 must name m (2)");
+}
+
+void testTrainingRunScheduleWalkSkipsTheUntrainedFinalStep(void) {
+    /* One epoch: the step after it writes 3, but no epoch trains at 3, so
+     * the walk over [1, numberOfEpochs) is empty and the run completes. */
+    initClassifierData();
+    trainingRunOptions_t options = {.microBatchSize = 2};
+    trainingRunResult_t result = runClassifier(getClassifierSample, 2, 1, FRESH_SCHEDULER, &options,
+                                               calculateGradsSequential, NULL);
+    freeClassifierData();
+    TEST_ASSERT_EQUAL_size_t(1, result.epochsCompleted);
+}
+
+void testTrainingRunScheduleWalkStartsAtTheSchedulersLastEpoch(void) {
+    /* Stepped twice before the run (lastEpoch 2, loader batch 4): epochs 1
+     * and 2 of THIS run train at the batches of lastEpoch 3 and 4 (4, 4),
+     * not at those of 1 and 2 (3, 4). */
+    initClassifierData();
+    trainingRunOptions_t options = {.microBatchSize = 2};
+    trainingRunResult_t result = runClassifier(getClassifierSample, 2, 3, SCHEDULER_STEPPED_TWICE,
+                                               &options, calculateGradsSequential, NULL);
+    freeClassifierData();
+    TEST_ASSERT_EQUAL_size_t(3, result.epochsCompleted);
+}
+
+void testTrainingRunNeverWalksTheScheduleAtMicroBatch1(void) {
+    /* Ruling R9: check 2 walks the schedule only at m > 1. Walked over 17
+     * epochs, the NONFINITE_SCHEDULER target would fail fast at epoch 16
+     * (exit 1) before epoch 0; unwalked, the run passes every pre-epoch-0
+     * check and reads its first sample, where the tripwire dataset exits 3.
+     * The default 0 and an explicit 1 must both skip the walk. */
+    ASSERT_EXITS_WITH(3, runClassifierOrDie(2, 17, NONFINITE_SCHEDULER, 0));
+    ASSERT_EXITS_WITH(3, runClassifierOrDie(2, 17, NONFINITE_SCHEDULER, 1));
+}
+
+void testTrainingRunMicroBatchDefaultsAreIdentical(void) {
+    /* NULL options, zero-initialised options (microBatchSize 0) and an
+     * explicit 1 must train bit-identically (spec §6.1: 0 means 1). */
+    initClassifierData();
+    float paramsNull[CLS_PARAMS];
+    float paramsZero[CLS_PARAMS];
+    float paramsOne[CLS_PARAMS];
+    trainingRunResult_t rNull = runClassifier(getClassifierSample, 4, 2, NO_SCHEDULER, NULL,
+                                              calculateGradsSequential, paramsNull);
+    trainingRunOptions_t zero = {0};
+    resetRecording();
+    trainingRunResult_t rZero =
+        runClassifier(getClassifierSample, 4, 2, NO_SCHEDULER, &zero, recordingGrads, paramsZero);
+    size_t callsZero = g_recCalls;
+    trainingRunOptions_t one = {.microBatchSize = 1};
+    trainingRunResult_t rOne = runClassifier(getClassifierSample, 4, 2, NO_SCHEDULER, &one,
+                                             calculateGradsSequential, paramsOne);
+    freeClassifierData();
+
+    TEST_ASSERT_EQUAL_size_t(2 * CLS_N, callsZero);
+    TEST_ASSERT_EQUAL_MEMORY(paramsNull, paramsZero, sizeof(paramsNull));
+    TEST_ASSERT_EQUAL_MEMORY(paramsNull, paramsOne, sizeof(paramsNull));
+    TEST_ASSERT_EQUAL_MEMORY(&rNull.finalTrainLoss, &rZero.finalTrainLoss, sizeof(float));
+    TEST_ASSERT_EQUAL_MEMORY(&rNull.finalTrainLoss, &rOne.finalTrainLoss, sizeof(float));
+}
+
+void testTrainingRunSmokeStackedTracksPerSample(void) {
+    /* A few epochs of the tiny classifier at m = 4: the loss decreases and
+     * ends close to m = 1; every calculateGradsFn call sees 4 rows. */
+    initClassifierData();
+    trainingRunOptions_t perSample = {.callback = captureEpochLoss, .microBatchSize = 1};
+    runClassifier(getClassifierSample, 4, 5, NO_SCHEDULER, &perSample, calculateGradsSequential,
+                  NULL);
+    float lastPerSample = g_epochLoss[4];
+    trainingRunOptions_t stacked = {.callback = captureEpochLoss, .microBatchSize = 4};
+    resetRecording();
+    runClassifier(getClassifierSample, 4, 5, NO_SCHEDULER, &stacked, recordingGrads, NULL);
+    float firstStacked = g_epochLoss[0];
+    float lastStacked = g_epochLoss[4];
+    size_t calls = g_recCalls;
+    size_t minRows = SIZE_MAX;
+    for (size_t c = 0; c < REC_MAX_CALLS && c < calls; c++) {
+        minRows = g_recItemRows[c] < minRows ? g_recItemRows[c] : minRows;
+    }
+    freeClassifierData();
+
+    TEST_ASSERT_EQUAL_size_t(5 * 2, calls);
+    TEST_ASSERT_EQUAL_size_t(4, minRows);
+    TEST_ASSERT_TRUE_MESSAGE(lastStacked < firstStacked, "stacked training must reduce the loss");
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f + 1e-3f * fabsf(lastPerSample), lastPerSample, lastStacked);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testStackedChunkWalkCallsOncePerChunkWithMRows);
@@ -1467,5 +1677,12 @@ int main(void) {
     RUN_TEST(testTrainingEpochDefaultBackstopsAnIndivisibleReplayBatch);
     RUN_TEST(testTrainingEpochDefaultMicroBatchZeroEqualsOne);
     RUN_TEST(testTrainingEpochDefaultStacksAndTracksPerSample);
+    RUN_TEST(testTrainingRunRejectsLoaderBatchNotDivisibleByMicroBatch);
+    RUN_TEST(testTrainingRunRejectsScheduleNotDivisibleByMicroBatch);
+    RUN_TEST(testTrainingRunScheduleWalkSkipsTheUntrainedFinalStep);
+    RUN_TEST(testTrainingRunScheduleWalkStartsAtTheSchedulersLastEpoch);
+    RUN_TEST(testTrainingRunNeverWalksTheScheduleAtMicroBatch1);
+    RUN_TEST(testTrainingRunMicroBatchDefaultsAreIdentical);
+    RUN_TEST(testTrainingRunSmokeStackedTracksPerSample);
     return UNITY_END();
 }

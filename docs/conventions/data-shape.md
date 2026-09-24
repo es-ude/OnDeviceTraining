@@ -31,7 +31,11 @@ Datasets never carry a batch axis; the loop owns it.
   [loss.md](loss.md#microbatch-shape)), `evaluationBatch` (and its public
   entry point `evaluationEpoch`), `evaluateBatchInternal` (behind
   `evaluationEpochWithMetrics`, `evaluationEpochWithReport` and `trainingRun`)
-  and `inferenceBatched`. The `numClasses` peeks in `trainingRun` and
+  and `inferenceBatched`.
+  At `microBatchSize` m > 1, `trainingBatchDefault` instead gathers each
+  chunk of m samples into an `[m, ...]` copy (#152 PR3b, FLOAT32 only; see
+  `trainingRunOptions_t.microBatchSize`); evaluation stays one sample per call.
+  The `numClasses` peeks in `trainingRun` and
   `evaluationEpochWithMetrics` read the raw sample label's element count (the
   per-sample class count).
 - Nothing auto-detects an existing batch axis: a sample that already carries a

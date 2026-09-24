@@ -416,7 +416,10 @@ checkpointing, limitations, literature).
   returns NaN (and prints one PRINT_ERROR per process) when any softmax element is
   non-finite; it no longer aborts (`#446`).
 - **Training loop** — `trainingRun` → epoch → batch → pluggable `calculateGradsFn`.
-  A "batch" is gradient accumulation over B=1 microbatches. Metrics: loss, accuracy,
+  A "batch" is gradient accumulation over microbatches of `microBatchSize` rows
+  (`trainingRunOptions_t`, default 1; m > 1 stacks m samples into one `[m, ...]`
+  forward/backward, FLOAT32 only, `b % m == 0` enforced, Dropout fails fast at
+  m > 1; evaluation stays one sample per call, #152). Metrics: loss, accuracy,
   macro precision/recall/F1, and a caller-owned confusion matrix
   (`epochStats_t` / `classificationReport_t`). Three eval entry points.
   `calculateGradsSequential`'s backward pass truncates at `deepestTrainableIndex`

@@ -48,11 +48,24 @@ Softmax partitions its input by the same `B` rows (#152): each of the `B` rows
 normalizes over its own `numElements / B` elements (a rank-1 input is one
 row), so CE's fused `(p - y)` backward is per row as well.
 
-**Uniform-B assumption** (DataLoader contract): all microbatches in one
-macro batch have equal `B`. The MEAN aggregator divides by total samples
-(`Σ batch->size`) rather than by `(numberOfBatches × B)`, so non-uniform B
-would skew the mean. ODT's DataLoader currently always produces uniform
-batches via `dropLast=true`; non-uniform B is out of contract.
+**Uniform-B contract**: all microbatches in one macro batch have equal `B`.
+At `trainingRunOptions_t.microBatchSize` 1 (the default) `trainingBatchDefault`
+hands `calculateGradsFn` one `[1, ...]` batch view per sample; at m > 1 (#152,
+FLOAT32 only) it gathers each chunk of m samples into one `[m, ...]` call, and
+the loop enforces `b % m == 0` so there are no ragged tails:
+`trainingRun` checks the train loader's batch and, before epoch 0, every
+batch a batch-size scheduler will set (`bsSchedulerBatchSizeAt`);
+`trainingEpochDefault` checks the loader batch; `trainingBatchDefault` checks
+`batch->size` (the backstop for a replay loader, whose batch is
+`base + eligible·r`). Each fails fast naming `b` and `m`. Known limitation:
+Dropout fails fast at m > 1, because its caller-allocated mask holds one
+sample's elements (follow-up issue).
+
+The reported MEAN loss weights every chunk by its rows,
+`Σ (chunkLoss × m) / batch->size`, which equals the per-sample mean for both
+losses because each loss's MEAN already divides by its rows (CE by
+`dimensions[0]`, MSE by all `m·F` elements). `batch->size` always counts
+samples, so the gradient macro-scale below is unchanged by m.
 
 ### Backward macro-scaling
 
@@ -71,8 +84,8 @@ gradient flows through unscaled.
 
 ### Shape assertion (deferred)
 
-Runtime assertion of the `dimensions[0] >= 1` contract is deferred to the
-microbatch-B>1 umbrella (#152) — specifically #153. Today (B=1 only) the
-assertion would be effectively a no-op; the protective value materialises
-when B>1 becomes a real feature target.
+Runtime assertion of the `dimensions[0] >= 1` contract is deferred to #153.
+B > 1 is reachable now, through `microBatchSize` (#152), so the assertion
+would no longer be a no-op; until #153 lands, the loop builds each stacked
+item and label with the same `dimensions[0] = m`.
 

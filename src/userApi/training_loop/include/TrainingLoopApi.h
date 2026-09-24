@@ -76,9 +76,12 @@ typedef struct trainingRunResult {
     bool stoppedOnNonFiniteLoss; /* true iff stopOnNonFiniteLoss ended the run early */
 } trainingRunResult_t;
 
-/*! When invoked by trainingBatchDefault, input/label are the stack
- *  [1, ...] views batchViewOf built for one sample (#152 PR3a): borrowed;
- *  valid only for the duration of the call. */
+/*! When invoked by trainingBatchDefault, input/label are borrowed stack
+ *  views, valid only for the duration of the call: at microBatchSize 1 the
+ *  [1, ...] views batchViewOf built for one sample (they share its data,
+ *  #152 PR3a); at m > 1 [m, ...] views over the loop's gather buffers -- a
+ *  copy of the chunk's m samples, overwritten by the next chunk and freed
+ *  before trainingBatchDefault returns (#152 PR3b). */
 typedef trainingStats_t *(*calculateGradsFn_t)(layer_t **model, size_t modelSize,
                                                lossConfig_t lossConfig,
                                                reduction_t forwardReduction, tensor_t *input,
@@ -108,13 +111,19 @@ typedef struct epochInfo {
 typedef void (*epochCallbackFn_t)(epochInfo_t info, epochStats_t evalStats);
 
 /*! Optional inputs of trainingRun(). NULL, or a zero-initialised struct, means
- * "no schedulers, no callback" — exactly the pre-port default behaviour. */
+ * "no schedulers, no callback, per-sample training" — exactly the pre-port
+ * default behaviour. */
 typedef struct trainingRunOptions {
     lrScheduler_t *lrScheduler; /* NULLable; stepped once per epoch after the callback (#327) */
     bsScheduler_t *bsScheduler; /* NULLable; stepped once per epoch after lrScheduler */
     epochCallbackFn_t callback; /* NULLable */
     bool stopOnNonFiniteLoss;   /* end the run after the first epoch whose train or eval loss is
                                     not finite */
+    size_t microBatchSize;      /* rows per forward/backward call inside each macro batch (#152);
+                                    0 means 1. m > 1 stacks m samples into one [m, ...] call:
+                                    FLOAT32 models only, every macro batch must be divisible by m.
+                                    Training only -- evaluation always runs one sample per call.
+                                    Dropout fails fast at m > 1 (its mask holds one sample). */
 } trainingRunOptions_t;
 
 void freeTrainingStats(trainingStats_t *trainingStats);
@@ -145,8 +154,11 @@ classificationReport_t evaluationEpochWithReport(layer_t **model, size_t modelSi
  * trained with. Fails fast (before the first batch) if: the LR scheduler is
  * wired to another optimizer (#327); the batch scheduler is wired to a loader
  * other than trainDataLoader (the eval loader is never resized); its LR
- * compensation is wired to another optimizer; or an LR scheduler and a
- * compensating batch scheduler would both write the LR every epoch. */
+ * compensation is wired to another optimizer; an LR scheduler and a
+ * compensating batch scheduler would both write the LR every epoch; the train
+ * loader's batchSize is not divisible by options->microBatchSize; or, with a
+ * batch scheduler and microBatchSize > 1, any batch the scheduler will set for
+ * epochs 1..numberOfEpochs-1 is not divisible by it (#152). */
 trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
                                 dataLoader_t *trainDataLoader, dataLoader_t *evalDataLoader,
                                 optimizer_t *optimizer, size_t numberOfEpochs,

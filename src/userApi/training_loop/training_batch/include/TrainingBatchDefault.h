@@ -20,7 +20,8 @@
  *  appended sample count divisible by m), and at m > 1 on an empty batch.
  *  Frees every sample_t it consumes.
  *  Returns the per-sample mean loss for REDUCTION_MEAN (chunk losses weighted
- *  by their m rows, divided by batch->size) and the plain sum for SUM. */
+ *  by their m rows, divided by batch->size) and the plain sum for SUM.
+ *  See docs/conventions/data-shape.md, "Who adds the batch axis". */
 float trainingBatchDefault(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
                            batch_t *batch, calculateGradsFn_t calculateGradsFn,
                            reduction_t forwardReduction, size_t microBatchSize);

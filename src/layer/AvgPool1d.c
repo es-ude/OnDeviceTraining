@@ -322,6 +322,10 @@ void avgPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tensor_t *lo
     size_t outputLength = lossGrad->shape->dimensions[2];
     size_t inputLength = propLoss->shape->dimensions[2];
 
+    // batch/channels come from lossGrad but size the propLoss memset + scatter (F5 parity).
+    poolBfpRequireDims3(propLoss, batch, channels, inputLength,
+                        "AvgPool1d backward FLOAT32 (propLoss)");
+
     windowGeometry1d_t geom = windowGeometry1dCalc(inputLength, cfg->kernel);
     if (geom.outputLength != outputLength) {
         PRINT_ERROR("AvgPool1d backward: lossGrad outputLength (%zu) does not match "
@@ -333,6 +337,9 @@ void avgPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tensor_t *lo
     float const *gyArr = (float const *)lossGrad->data;
     float *gxArr = (float *)propLoss->data;
     float divisor = (float)cfg->kernel->size;
+
+    // OUT_WRITE: propLoss may hold stale bytes (#4 arena reuse); the scatter accumulates.
+    memset(gxArr, 0, batch * channels * inputLength * sizeof(float));
 
     for (size_t b = 0; b < batch; b++) {
         for (size_t c = 0; c < channels; c++) {

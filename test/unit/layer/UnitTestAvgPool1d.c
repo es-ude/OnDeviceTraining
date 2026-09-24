@@ -246,6 +246,79 @@ void testAvgPool1dEdgeCases(void) {
     }
 }
 
+/* #4 PR0 (C13): the FLOAT32 dx arm must OUT_WRITE propLoss -- the remat arena
+ * hands it bytes a previous step left behind. 0xA5A5A5A5 read as a float is
+ * -2.87e-16, which `+=` of an O(1) gradient absorbs exactly, so the first call
+ * exposes stale bytes only in cells no window covers: K=2, dilation=2,
+ * stride=2 over L=8 covers {0,2} {2,4} {4,6} (2 and 4 twice) and leaves 1, 3,
+ * 5, 7 uncovered in every (b, c) row. The second call catches an accumulating
+ * arm on every touched cell. All values are dyadic, so the compare is
+ * bit-exact. */
+void testAvgPool1dBackwardFloatOverwritesStalePropLoss(void) {
+    size_t inputDims[] = {2, 2, 8};
+    size_t outputDims[] = {2, 2, 3}; // effective K=3, stride=2, VALID -> outLen = 3
+    float const gyData[2 * 2 * 3] = {
+        1.0f,  -0.5f, 3.0f,  // b0c0
+        2.0f,  0.5f,  -1.0f, // b0c1
+        -3.0f, 1.0f,  0.25f, // b1c0
+        0.5f,  0.5f,  0.5f,  // b1c1
+    };
+    float const expectedDx[2 * 2 * 8] = {
+        0.5f,  0.0f, 0.25f, 0.0f, 1.25f,  0.0f, 1.5f,   0.0f, // b0c0
+        1.0f,  0.0f, 1.25f, 0.0f, -0.25f, 0.0f, -0.5f,  0.0f, // b0c1
+        -1.5f, 0.0f, -1.0f, 0.0f, 0.625f, 0.0f, 0.125f, 0.0f, // b1c0
+        0.25f, 0.0f, 0.5f,  0.0f, 0.5f,   0.0f, 0.25f,  0.0f, // b1c1
+    };
+
+    avgPool1dRunResult_t r = avgPool1dBuild(NULL, inputDims, 2, VALID, 2, 2, NULL, outputDims);
+    tensor_t *lossGrad = makeFloatTensor(outputDims, 3, gyData);
+    tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
+    size_t propLossElements = calcNumberOfElementsByTensor(propLoss);
+    float firstDx[2 * 2 * 8];
+    float secondDx[2 * 2 * 8];
+
+    memset(propLoss->data, 0xA5, propLossElements * sizeof(float));
+    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    memcpy(firstDx, propLoss->data, sizeof(firstDx));
+    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    memcpy(secondDx, propLoss->data, sizeof(secondDx));
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(2 * 2 * 8, propLossElements, "fixture: propLoss size");
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(expectedDx, firstDx, sizeof(expectedDx),
+                                     "dx must not keep the prefilled 0xA5 bytes");
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(expectedDx, secondDx, sizeof(expectedDx),
+                                     "a repeated backward must reproduce dx (OUT_WRITE)");
+}
+
+/* #4 PR0 (Codex pr0#0): the FLOAT32 dx arm takes batch and channels from
+ * lossGrad but memsets and scatters into propLoss, so a propLoss with fewer
+ * channels is written past its end -- it must fail fast instead. */
+void testAvgPool1dBackwardFloatRejectsPropLossWithFewerChannels(void) {
+    size_t inputDims[] = {2, 2, 8};
+    size_t outputDims[] = {2, 2, 3};
+    size_t smallPropLossDims[] = {2, 1, 8};
+
+    avgPool1dRunResult_t r = avgPool1dBuild(NULL, inputDims, 2, VALID, 2, 2, NULL, outputDims);
+    tensor_t *lossGrad = makeFloatTensor(outputDims, 3, NULL);
+    tensor_t *propLoss = makeFloatTensor(smallPropLossDims, 3, NULL);
+
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "AvgPool1d backward FLOAT32 (propLoss): expected shape [2, 2, 8], got [2, 1, 8]",
+        avgPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+}
+
 // Smoke test for the funnel's new SYM-input capability (spec Testing list):
 // the layer's own forwardMath stays FLOAT32 (no SYM kernel body exists for
 // this op), but a SYM_INT32-typed *producer* tensor feeding it must now be
@@ -944,6 +1017,8 @@ int main(void) {
     RUN_TEST(testAvgPool1dWithStrideAndDilation);
     RUN_TEST(testAvgPool1dWithSamePadding);
     RUN_TEST(testAvgPool1dEdgeCases);
+    RUN_TEST(testAvgPool1dBackwardFloatOverwritesStalePropLoss);
+    RUN_TEST(testAvgPool1dBackwardFloatRejectsPropLossWithFewerChannels);
     RUN_TEST(testAvgPool1dForwardWithSymInt32Input);
     RUN_TEST(testAvgPool1dForwardSymBasic);
     RUN_TEST(testAvgPool1dBackwardSymBasic);

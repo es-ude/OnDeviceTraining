@@ -297,6 +297,90 @@ void testValidateBfpQConfigShapeEnforcesElementIdentity(void) {
     freeReservedMemory(qc.exponents);
 }
 
+/* #4 PR0 (remat spec §2.4): a remat bind derives BFP wire configs into
+ * caller-owned slab storage and must not allocate, so the Into variants fill
+ * a caller-provided exponent array. */
+
+void testInitBfpQConfigGroupedIntoFillsCallerStorage(void) {
+    /* 3 groups + 1 guard byte; 0xA5 is no bias for any exponentBits in [2, 8]. */
+    uint8_t exponents[4] = {0xA5, 0xA5, 0xA5, 0xA5};
+    bfpQConfig_t qc;
+    initBfpQConfigGroupedInto(4, 5, SR_HALF_AWAY, 3, 8, exponents, &qc);
+    TEST_ASSERT_EQUAL_PTR(exponents, qc.exponents);
+    TEST_ASSERT_EQUAL_size_t(3, qc.numGroups);
+    TEST_ASSERT_EQUAL_size_t(8, qc.groupSize);
+    TEST_ASSERT_EQUAL_UINT8(4, qc.mantissaBits);
+    TEST_ASSERT_EQUAL_UINT8(5, qc.exponentBits);
+    TEST_ASSERT_EQUAL_INT(SR_HALF_AWAY, qc.roundingMode);
+    for (size_t g = 0; g < 3; g++) {
+        TEST_ASSERT_EQUAL_UINT8(15, exponents[g]); /* zero state = bias 2^(5-1)-1 */
+    }
+    TEST_ASSERT_EQUAL_HEX8(0xA5, exponents[3]); /* exactly numGroups bytes written */
+}
+
+#ifdef ODT_MEM_PROFILE
+/* The live-byte counter is real only under ODT_MEM_PROFILE (unit_test_debug,
+ * asan, ubsan); the plain unit_test preset compiles this out. */
+void testInitBfpQConfigGroupedIntoAllocatesNothing(void) {
+    uint8_t exponents[3];
+    bfpQConfig_t qc;
+    size_t liveBytesBefore = memProfileMark();
+    initBfpQConfigGroupedInto(8, 8, HALF_AWAY, 3, 8, exponents, &qc);
+    TEST_ASSERT_EQUAL_size_t(liveBytesBefore, memProfileMark());
+}
+#endif
+
+void testInitBfpQConfigGroupedIntoRejectsLikeGrouped(void) {
+    /* Room for every shape below, so a missing guard returns (exit code 0)
+     * instead of overflowing. */
+    uint8_t exponents[8];
+    bfpQConfig_t qc;
+    ASSERT_EXITS_WITH_OUTPUT(1, "GroupedInto: mantissaBits (1) outside [2, 16]",
+                             initBfpQConfigGroupedInto(1, 8, HALF_AWAY, 1, 0, exponents, &qc));
+    ASSERT_EXITS_WITH_OUTPUT(1, "GroupedInto: mantissaBits (17) outside [2, 16]",
+                             initBfpQConfigGroupedInto(17, 8, HALF_AWAY, 1, 0, exponents, &qc));
+    ASSERT_EXITS_WITH_OUTPUT(1, "GroupedInto: exponentBits (1) outside [2, 8]",
+                             initBfpQConfigGroupedInto(8, 1, HALF_AWAY, 1, 0, exponents, &qc));
+    ASSERT_EXITS_WITH_OUTPUT(1, "GroupedInto: exponentBits (9) outside [2, 8]",
+                             initBfpQConfigGroupedInto(8, 9, HALF_AWAY, 1, 0, exponents, &qc));
+    ASSERT_EXITS_WITH_OUTPUT(1, "GroupedInto: invalid group shape numGroups=1 groupSize=8",
+                             initBfpQConfigGroupedInto(8, 8, HALF_AWAY, 1, 8, exponents, &qc));
+    ASSERT_EXITS_WITH_OUTPUT(1, "GroupedInto: invalid group shape numGroups=0 groupSize=0",
+                             initBfpQConfigGroupedInto(8, 8, HALF_AWAY, 0, 0, exponents, &qc));
+    ASSERT_EXITS_WITH_OUTPUT(1, "GroupedInto: invalid group shape numGroups=4 groupSize=0",
+                             initBfpQConfigGroupedInto(8, 8, HALF_AWAY, 4, 0, exponents, &qc));
+}
+
+void testInitBfpQConfigGroupedIntoRejectsNullExponents(void) {
+    bfpQConfig_t qc;
+    ASSERT_EXITS_WITH_OUTPUT(1, "GroupedInto: exponents is NULL",
+                             initBfpQConfigGroupedInto(8, 8, HALF_AWAY, 1, 0, NULL, &qc));
+}
+
+void testInitBfpQConfigIntoFillsPerTensorCallerStorage(void) {
+    uint8_t exponents[2] = {0xA5, 0xA5}; /* 1 group + 1 guard byte */
+    bfpQConfig_t qc;
+    initBfpQConfigInto(8, 8, HALF_AWAY, exponents, &qc);
+    TEST_ASSERT_EQUAL_PTR(exponents, qc.exponents);
+    TEST_ASSERT_EQUAL_size_t(1, qc.numGroups);
+    TEST_ASSERT_EQUAL_size_t(0, qc.groupSize);
+    TEST_ASSERT_EQUAL_UINT8(8, qc.mantissaBits);
+    TEST_ASSERT_EQUAL_UINT8(8, qc.exponentBits);
+    TEST_ASSERT_EQUAL_INT(HALF_AWAY, qc.roundingMode);
+    TEST_ASSERT_EQUAL_UINT8(127, exponents[0]); /* zero state = bias, scale 1.0 */
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, bfpGroupScale(&qc, 0));
+    TEST_ASSERT_EQUAL_HEX8(0xA5, exponents[1]);
+}
+
+/* The wrapper validates before it reserves, under its own name. Without that
+ * call Into's re-validation still exits 1, but its banner names ...GroupedInto,
+ * which does not contain this needle. */
+void testInitBfpQConfigGroupedValidatesUnderItsOwnName(void) {
+    bfpQConfig_t qc;
+    ASSERT_EXITS_WITH_OUTPUT(1, "initBfpQConfigGrouped: mantissaBits (1) outside [2, 16]",
+                             initBfpQConfigGrouped(1, 8, HALF_AWAY, 1, 0, &qc));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testInitSymQConfigProducesPerTensorSentinel);
@@ -315,5 +399,13 @@ int main(void) {
     RUN_TEST(testInitBfpQConfigGroupedRejectsInvalidShape);
     RUN_TEST(testInitBfpQConfigRejectsWidthCaps);
     RUN_TEST(testValidateBfpQConfigShapeEnforcesElementIdentity);
+    RUN_TEST(testInitBfpQConfigGroupedIntoFillsCallerStorage);
+#ifdef ODT_MEM_PROFILE
+    RUN_TEST(testInitBfpQConfigGroupedIntoAllocatesNothing);
+#endif
+    RUN_TEST(testInitBfpQConfigGroupedIntoRejectsLikeGrouped);
+    RUN_TEST(testInitBfpQConfigGroupedIntoRejectsNullExponents);
+    RUN_TEST(testInitBfpQConfigIntoFillsPerTensorCallerStorage);
+    RUN_TEST(testInitBfpQConfigGroupedValidatesUnderItsOwnName);
     return UNITY_END();
 }

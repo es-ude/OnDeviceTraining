@@ -105,7 +105,7 @@ typedef struct symQConfig {
  * element plus one shared `exponentBits`-wide biased exponent per GROUP
  * (value = mantissa * 2^(storedExponent - bias), bias = 2^(exponentBits-1)-1).
  * Group shape mirrors symQConfig_t exactly: `exponents` is heap-allocated
- * (reserveMemory) by whichever call fills the struct (initBfpQConfig /
+ * (reserveMemory) by the allocating inits (initBfpQConfig /
  * initBfpQConfigGrouped always allocate a fresh `numGroups`-element array).
  * A bare qConfig (not wrapped in a quantization_t) is freed directly with
  * freeReservedMemory on `exponents` -- every Task 1 test does exactly this.
@@ -118,7 +118,9 @@ typedef struct symQConfig {
  * instead of calling initBfpQConfig (see docs/conventions/testing.md) --
  * such fixtures are never passed to freeQuantization or freeReservedMemory,
  * and (mirroring the SYM deserialize-destination rule) are never handed to
- * a deserialize call as the destination skeleton.
+ * a deserialize call as the destination skeleton. A config filled by
+ * initBfpQConfigInto / initBfpQConfigGroupedInto borrows its caller's
+ * exponent storage the same way and falls under the same three rules.
  *
  * Shape invariant (identical to symQConfig_t): exactly two shapes are valid --
  * per-tensor {numGroups=1, groupSize=0}, or grouped {numGroups>1, groupSize>0}
@@ -137,7 +139,8 @@ typedef struct symQConfig {
  * #227 discipline as every other packChunkGuarded caller -- D6 saturation
  * covers value-domain quantization only, never raw code packing. */
 typedef struct bfpQConfig {
-    uint8_t *exponents; /* [numGroups], heap (reserveMemory), biased; owned by the qconfig */
+    uint8_t *exponents; /* [numGroups], biased; heap (reserveMemory) and owned by the qconfig,
+                         * or borrowed caller storage via the ...Into inits */
     size_t numGroups;   /* 1 = per-tensor */
     size_t groupSize;   /* 0 = whole-tensor sentinel; >0 grouped, numGroups*groupSize == N */
     roundingMode_t roundingMode;
@@ -231,6 +234,18 @@ void initBfpQConfig(uint8_t mantissaBits, uint8_t exponentBits, roundingMode_t r
  * here even before any tensor exists to validate group*groupSize against. */
 void initBfpQConfigGrouped(uint8_t mantissaBits, uint8_t exponentBits, roundingMode_t roundingMode,
                            size_t numGroups, size_t groupSize, bfpQConfig_t *qC);
+/*! Allocation-free twin of initBfpQConfigGrouped for callers that own the
+ * exponent storage (the remat bind writes into its slab and must not
+ * allocate). Same fail-fasts and the same zero state, written into
+ * exponents[0..numGroups-1]; also fail-fasts on exponents == NULL. The
+ * caller guarantees room for numGroups bytes. The filled config borrows
+ * that storage (ownership rules at bfpQConfig_t). */
+void initBfpQConfigGroupedInto(uint8_t mantissaBits, uint8_t exponentBits,
+                               roundingMode_t roundingMode, size_t numGroups, size_t groupSize,
+                               uint8_t *exponents, bfpQConfig_t *qC);
+/*! Per-tensor ({1,0}) initBfpQConfigGroupedInto; exponents needs 1 byte. */
+void initBfpQConfigInto(uint8_t mantissaBits, uint8_t exponentBits, roundingMode_t roundingMode,
+                        uint8_t *exponents, bfpQConfig_t *qC);
 /*! BFP epic PR1: attach-time shape check for a BFP config against a concrete
  * element count, mirroring validateSymQConfigShape. Fail-fasts unless
  * (numGroups==1 && groupSize==0) or (numGroups>1 && groupSize>0 &&

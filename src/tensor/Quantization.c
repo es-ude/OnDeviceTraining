@@ -136,22 +136,35 @@ void validateAsymQConfigShape(const asymQConfig_t *qC, size_t numberOfElements) 
     }
 }
 
-void initBfpQConfigGrouped(uint8_t mantissaBits, uint8_t exponentBits, roundingMode_t roundingMode,
-                           size_t numGroups, size_t groupSize, bfpQConfig_t *qC) {
+/* Width caps and the {1,0} / {>1,>0} shape grammar, shared by the allocating
+ * and the allocation-free init. `what` names the entry point in the
+ * diagnostic (validateAsymQBits precedent). */
+static void validateBfpInitArgs(uint8_t mantissaBits, uint8_t exponentBits, size_t numGroups,
+                                size_t groupSize, const char *what) {
     if (mantissaBits < 2 || mantissaBits > 16) {
-        PRINT_ERROR("initBfpQConfigGrouped: mantissaBits (%u) outside [2, 16]",
-                    (unsigned)mantissaBits);
+        PRINT_ERROR("%s: mantissaBits (%u) outside [2, 16]", what, (unsigned)mantissaBits);
         exit(1);
     }
     if (exponentBits < 2 || exponentBits > 8) {
-        PRINT_ERROR("initBfpQConfigGrouped: exponentBits (%u) outside [2, 8]",
-                    (unsigned)exponentBits);
+        PRINT_ERROR("%s: exponentBits (%u) outside [2, 8]", what, (unsigned)exponentBits);
         exit(1);
     }
     if (numGroups == 0 || (numGroups == 1) != (groupSize == 0)) {
-        PRINT_ERROR("initBfpQConfigGrouped: invalid group shape numGroups=%zu groupSize=%zu "
+        PRINT_ERROR("%s: invalid group shape numGroups=%zu groupSize=%zu "
                     "(per-tensor is {1,0}; grouped needs numGroups>1 and groupSize>0)",
-                    numGroups, groupSize);
+                    what, numGroups, groupSize);
+        exit(1);
+    }
+}
+
+void initBfpQConfigGroupedInto(uint8_t mantissaBits, uint8_t exponentBits,
+                               roundingMode_t roundingMode, size_t numGroups, size_t groupSize,
+                               uint8_t *exponents, bfpQConfig_t *qC) {
+    validateBfpInitArgs(mantissaBits, exponentBits, numGroups, groupSize,
+                        "initBfpQConfigGroupedInto");
+    if (exponents == NULL) {
+        PRINT_ERROR("initBfpQConfigGroupedInto: exponents is NULL (needs storage for %zu groups)",
+                    numGroups);
         exit(1);
     }
     qC->mantissaBits = mantissaBits;
@@ -159,16 +172,30 @@ void initBfpQConfigGrouped(uint8_t mantissaBits, uint8_t exponentBits, roundingM
     qC->roundingMode = roundingMode;
     qC->numGroups = numGroups;
     qC->groupSize = groupSize;
-    qC->exponents = reserveMemory(numGroups * sizeof(uint8_t));
+    qC->exponents = exponents;
     uint8_t bias = (uint8_t)((1 << (exponentBits - 1)) - 1);
     for (size_t g = 0; g < numGroups; g++) {
         qC->exponents[g] = bias; /* zero-state: E = 0, scale 1.0 (SYM's scales=1.f parity) */
     }
 }
 
+void initBfpQConfigGrouped(uint8_t mantissaBits, uint8_t exponentBits, roundingMode_t roundingMode,
+                           size_t numGroups, size_t groupSize, bfpQConfig_t *qC) {
+    /* Validate before reserving: a rejected shape exits without allocating. */
+    validateBfpInitArgs(mantissaBits, exponentBits, numGroups, groupSize, "initBfpQConfigGrouped");
+    uint8_t *exponents = reserveMemory(numGroups * sizeof(uint8_t));
+    initBfpQConfigGroupedInto(mantissaBits, exponentBits, roundingMode, numGroups, groupSize,
+                              exponents, qC);
+}
+
 void initBfpQConfig(uint8_t mantissaBits, uint8_t exponentBits, roundingMode_t roundingMode,
                     bfpQConfig_t *qC) {
     initBfpQConfigGrouped(mantissaBits, exponentBits, roundingMode, 1, 0, qC);
+}
+
+void initBfpQConfigInto(uint8_t mantissaBits, uint8_t exponentBits, roundingMode_t roundingMode,
+                        uint8_t *exponents, bfpQConfig_t *qC) {
+    initBfpQConfigGroupedInto(mantissaBits, exponentBits, roundingMode, 1, 0, exponents, qC);
 }
 
 void validateBfpQConfigShape(const bfpQConfig_t *qC, size_t numberOfElements) {

@@ -317,6 +317,10 @@ void adaptiveAvgPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tens
     size_t outputLength = lossGrad->shape->dimensions[2];
     size_t inputLength = propLoss->shape->dimensions[2];
 
+    // batch/channels come from lossGrad but size the propLoss memset + scatter (F5 parity).
+    poolBfpRequireDims3(propLoss, batch, channels, inputLength,
+                        "AdaptiveAvgPool1d backward FLOAT32 (propLoss)");
+
     if (outputLength != cfg->outputSize) {
         PRINT_ERROR("AdaptiveAvgPool1d backward: lossGrad outputLength (%zu) does not match "
                     "configured outputSize (%zu)",
@@ -326,8 +330,9 @@ void adaptiveAvgPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tens
 
     float const *gyArr = (float const *)lossGrad->data;
     float *gxArr = (float *)propLoss->data;
-    // propLoss arrives calloc-zeroed (StorageApi reserveMemory); overlapping
-    // windows accumulate correctly via +=.
+
+    // OUT_WRITE: propLoss may hold stale bytes (#4 arena reuse); the scatter accumulates.
+    memset(gxArr, 0, batch * channels * inputLength * sizeof(float));
 
     for (size_t b = 0; b < batch; b++) {
         for (size_t c = 0; c < channels; c++) {

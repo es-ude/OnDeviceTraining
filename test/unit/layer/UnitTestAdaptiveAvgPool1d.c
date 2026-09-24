@@ -236,6 +236,80 @@ void testBackwardUpsample(void) {
     }
 }
 
+/* #4 PR0 (C13): the FLOAT32 dx arm must OUT_WRITE propLoss -- the remat arena
+ * hands it bytes a previous step left behind. Adaptive windows tile the whole
+ * input, and 0xA5A5A5A5 read as a float is -2.87e-16, which `+=` of an O(1)
+ * gradient absorbs exactly, so the first call exposes stale bytes only where
+ * every contribution is exactly zero. L=6 -> 4 gives windows [0,2) [1,3)
+ * [3,5) [4,6) (1 and 4 twice); each (b, c) row zeroes one window whose cell no
+ * other window touches (idx 0, 2, 3, 5 in turn). The second call catches an
+ * accumulating arm on every touched cell. All values are dyadic, so the
+ * compare is bit-exact. */
+void testAdaptiveAvgPool1dBackwardFloatOverwritesStalePropLoss(void) {
+    size_t inDims[] = {2, 2, 6};
+    size_t outDims[] = {2, 2, 4};
+    float const gyData[2 * 2 * 4] = {
+        0.0f,  1.0f,  -2.0f, 0.5f,  // b0c0: idx 0 gets no gradient
+        3.0f,  0.0f,  1.0f,  -1.0f, // b0c1: idx 2 gets no gradient
+        -1.0f, 2.0f,  0.0f,  4.0f,  // b1c0: idx 3 gets no gradient
+        0.25f, -0.5f, 1.5f,  0.0f,  // b1c1: idx 5 gets no gradient
+    };
+    float const expectedDx[2 * 2 * 6] = {
+        0.0f,   0.5f,    0.5f,   -1.0f, -0.75f, 0.25f, // b0c0
+        1.5f,   1.5f,    0.0f,   0.5f,  0.0f,   -0.5f, // b0c1
+        -0.5f,  0.5f,    1.0f,   0.0f,  2.0f,   2.0f,  // b1c0
+        0.125f, -0.125f, -0.25f, 0.75f, 0.75f,  0.0f,  // b1c1
+    };
+
+    adaptivePoolRun_t r = build(NULL, inDims, 4, NULL, outDims);
+    tensor_t *lossGrad = makeFloatTensor(outDims, 3, gyData);
+    tensor_t *propLoss = makeFloatTensor(inDims, 3, NULL);
+    size_t propLossElements = calcNumberOfElementsByTensor(propLoss);
+    float firstDx[2 * 2 * 6];
+    float secondDx[2 * 2 * 6];
+
+    memset(propLoss->data, 0xA5, propLossElements * sizeof(float));
+    adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    memcpy(firstDx, propLoss->data, sizeof(firstDx));
+    adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    memcpy(secondDx, propLoss->data, sizeof(secondDx));
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(2 * 2 * 6, propLossElements, "fixture: propLoss size");
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(expectedDx, firstDx, sizeof(expectedDx),
+                                     "dx must not keep the prefilled 0xA5 bytes");
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(expectedDx, secondDx, sizeof(expectedDx),
+                                     "a repeated backward must reproduce dx (OUT_WRITE)");
+}
+
+/* #4 PR0 (Codex pr0#0): the FLOAT32 dx arm takes batch and channels from
+ * lossGrad but memsets and scatters into propLoss, so a propLoss with a
+ * smaller batch is written past its end -- it must fail fast instead. */
+void testAdaptiveAvgPool1dBackwardFloatRejectsPropLossWithSmallerBatch(void) {
+    size_t inDims[] = {2, 2, 6};
+    size_t outDims[] = {2, 2, 4};
+    size_t smallPropLossDims[] = {1, 2, 6};
+
+    adaptivePoolRun_t r = build(NULL, inDims, 4, NULL, outDims);
+    tensor_t *lossGrad = makeFloatTensor(outDims, 3, NULL);
+    tensor_t *propLoss = makeFloatTensor(smallPropLossDims, 3, NULL);
+
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "AdaptiveAvgPool1d backward FLOAT32 (propLoss): expected shape [2, 2, 6], got [1, 2, 6]",
+        adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+}
+
 void testCalcOutputShapeFixedRegardlessOfInput(void) {
     static adaptiveAvgPool1dConfig_t cfgStore;
     static layer_t layerStore;
@@ -744,6 +818,8 @@ int main(void) {
     RUN_TEST(testBackwardMultiBatch);
     RUN_TEST(testBackwardGlobal);
     RUN_TEST(testBackwardUpsample);
+    RUN_TEST(testAdaptiveAvgPool1dBackwardFloatOverwritesStalePropLoss);
+    RUN_TEST(testAdaptiveAvgPool1dBackwardFloatRejectsPropLossWithSmallerBatch);
     RUN_TEST(testAdaptiveAvgPool1dForwardWithSymInt32Input);
     RUN_TEST(testForwardBackwardSymUneven);
     RUN_TEST(testForwardBackwardSymGlobal);

@@ -90,7 +90,7 @@
     },
     {
       "name": "arm_cross",
-      "displayName": "ARM cross-compile (compile-only, core libs)",
+      "displayName": "ARM cross-compile (compile-only, core libs + training driver)",
       "inherits": "gen_ninja",
       "toolchainFile": "${sourceDir}/cmake/arm-none-eabi.cmake",
       "cacheVariables": {
@@ -167,7 +167,12 @@
         "Optimizer", "Sgd", "AdamW", "LrScheduler", "BsScheduler",
         "CrossEntropy", "LossFunction", "MSE",
         "Serialize", "Deserialize",
-        "OdtHook"
+        "OdtHook",
+        "RNG", "Bernoulli", "BfpSoftmaxExp",
+        "StorageApi", "QuantizationApi", "TensorApi", "LayerConfigAccess",
+        "DataLoader", "DataLoaderApi", "OptimizerApi", "InferenceApi",
+        "TrainingBatchDefault", "TrainingEpochDefault", "TrainingLoopApi",
+        "CalculateGradsSequential"
       ]
     }
   ],

@@ -593,6 +593,94 @@ void testMaxPool1dEdgeCases(void) {
     }
 }
 
+/* #4 PR0 (C13): the FLOAT32 dx arm must OUT_WRITE propLoss -- the remat arena
+ * hands it bytes a previous step left behind. 0xA5A5A5A5 read as a float is
+ * -2.87e-16, which `+=` of an O(1) gradient absorbs exactly, so the first call
+ * exposes stale bytes only in cells that receive no gradient: every (b, c) row
+ * here has non-argmax cells. The second call catches an accumulating arm on
+ * every touched cell. All values are dyadic, so the compare is bit-exact. */
+void testMaxPool1dBackwardFloatOverwritesStalePropLoss(void) {
+    size_t inputDims[] = {2, 2, 5};
+    size_t outputDims[] = {2, 2, 4}; // K=2, stride=1, VALID -> outLen = 4
+    float const inputData[2 * 2 * 5] = {
+        1.0f,  5.0f,  2.0f,  0.0f,  3.0f,  // b0c0: argmax {1, 1, 2, 4}
+        4.0f,  0.0f,  -1.0f, 6.0f,  2.0f,  // b0c1: argmax {0, 1, 3, 3}
+        0.0f,  2.0f,  7.0f,  1.0f,  -3.0f, // b1c0: argmax {1, 2, 2, 3}
+        -2.0f, -1.0f, -4.0f, -5.0f, 8.0f,  // b1c1: argmax {1, 1, 2, 4}
+    };
+    int32_t const expectedArgmax[2 * 2 * 4] = {1, 1, 2, 4, 0, 1, 3, 3, 1, 2, 2, 3, 1, 1, 2, 4};
+    float const gyData[2 * 2 * 4] = {
+        0.5f,  0.25f,  1.0f,   -2.0f,   // b0c0
+        0.75f, -0.5f,  2.0f,   0.125f,  // b0c1
+        1.5f,  -0.25f, 0.5f,   3.0f,    // b1c0
+        -1.0f, 0.25f,  0.625f, -0.375f, // b1c1
+    };
+    float const expectedDx[2 * 2 * 5] = {
+        0.0f,  0.75f,  1.0f,   0.0f,   -2.0f,   // b0c0
+        0.75f, -0.5f,  0.0f,   2.125f, 0.0f,    // b0c1
+        0.0f,  1.5f,   0.25f,  3.0f,   0.0f,    // b1c0
+        0.0f,  -0.75f, 0.625f, 0.0f,   -0.375f, // b1c1
+    };
+
+    maxPool1dRunResult_t r =
+        maxPool1dBuild(inputData, inputDims, 2, VALID, 1, 1, NULL, NULL, outputDims);
+    tensor_t *lossGrad = makeFloatTensor(outputDims, 3, gyData);
+    tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
+    size_t propLossElements = calcNumberOfElementsByTensor(propLoss);
+    int32_t argmax[2 * 2 * 4];
+    float firstDx[2 * 2 * 5];
+    float secondDx[2 * 2 * 5];
+
+    maxPool1dForward(r.layer, r.input, r.output);
+    memcpy(argmax, r.argmax->data, sizeof(argmax));
+    memset(propLoss->data, 0xA5, propLossElements * sizeof(float));
+    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    memcpy(firstDx, propLoss->data, sizeof(firstDx));
+    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    memcpy(secondDx, propLoss->data, sizeof(secondDx));
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(2 * 2 * 5, propLossElements, "fixture: propLoss size");
+    TEST_ASSERT_EQUAL_INT32_ARRAY_MESSAGE(expectedArgmax, argmax, 2 * 2 * 4,
+                                          "fixture: forward argmax");
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(expectedDx, firstDx, sizeof(expectedDx),
+                                     "dx must not keep the prefilled 0xA5 bytes");
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(expectedDx, secondDx, sizeof(expectedDx),
+                                     "a repeated backward must reproduce dx (OUT_WRITE)");
+}
+
+/* #4 PR0 (Codex pr0#0): the FLOAT32 dx arm takes batch and channels from
+ * lossGrad but memsets and scatters into propLoss, so a propLoss with a
+ * smaller batch is written past its end -- it must fail fast instead. */
+void testMaxPool1dBackwardFloatRejectsPropLossWithSmallerBatch(void) {
+    size_t inputDims[] = {2, 2, 5};
+    size_t outputDims[] = {2, 2, 4};
+    size_t smallPropLossDims[] = {1, 2, 5};
+
+    maxPool1dRunResult_t r =
+        maxPool1dBuild(NULL, inputDims, 2, VALID, 1, 1, NULL, NULL, outputDims);
+    tensor_t *lossGrad = makeFloatTensor(outputDims, 3, NULL);
+    tensor_t *propLoss = makeFloatTensor(smallPropLossDims, 3, NULL);
+    maxPool1dForward(r.layer, r.input, r.output);
+
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "MaxPool1d backward FLOAT32 (propLoss): expected shape [2, 2, 5], got [1, 2, 5]",
+        maxPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+}
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -1297,6 +1385,8 @@ int main(void) {
     RUN_TEST(testMaxPool1dWithStrideAndDilation);
     RUN_TEST(testMaxPool1dWithSamePadding);
     RUN_TEST(testMaxPool1dEdgeCases);
+    RUN_TEST(testMaxPool1dBackwardFloatOverwritesStalePropLoss);
+    RUN_TEST(testMaxPool1dBackwardFloatRejectsPropLossWithSmallerBatch);
     RUN_TEST(testMaxPool1dForwardSymBasic);
     RUN_TEST(testMaxPool1dBackwardSymBasic);
     RUN_TEST(testMaxPool1dSymStrideDilationForwardBackward);

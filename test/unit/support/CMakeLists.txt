@@ -19,3 +19,13 @@ target_include_directories(odt_test_layer_builders INTERFACE ${CMAKE_CURRENT_SOU
 # needs to include it.
 add_library(odt_test_assert INTERFACE)
 target_include_directories(odt_test_assert INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+# Self-test of DeathTest.h. Explicit add_executable (not add_elastic_ai_unit_test):
+# odt_test_death does not follow the UnitTest<Lib> naming rule. Common supplies
+# the real PRINT_ERROR banner the output-matching macro must see. TIMEOUT turns
+# a pipe deadlock (parent waiting before it drains) into a RED instead of
+# ctest's 1500 s default.
+add_executable(UnitTestDeathTest UnitTestDeathTest.c)
+target_link_libraries(UnitTestDeathTest PRIVATE unity odt_test_death Common)
+__register_target_as_unit_test(UnitTestDeathTest)
+set_tests_properties(UnitTestDeathTest PROPERTIES TIMEOUT 60)

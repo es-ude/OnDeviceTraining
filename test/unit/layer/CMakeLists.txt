@@ -516,3 +516,17 @@ add_elastic_ai_unit_test(
         StorageApi
         odt_test_death
 )
+
+# #4 PR0: Layer.c's model-walk helpers (layerParameters, deepestTrainableIndex).
+# Stack-built fixtures only -- no factory or *Api library is needed.
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
+        Layer
+        MORE_LIBS
+        CommonLayerLibs
+        # #327: PRIVATE-everywhere convention - the layer config headers include
+        # ArithmeticType.h/ExecuteOp.h/Kernel.h, so list their owning targets.
+        ArithmeticType
+        ExecuteOp
+        Kernel
+)

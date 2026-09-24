@@ -2,6 +2,7 @@
 #define ODT_LAYER_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "Tensor.h"
 
@@ -89,5 +90,17 @@ void initLayer(layer_t *layer, layerType_t layerType, layerConfig_t *config);
  *  `frozen == true`, false for every other layer type (no trainable params,
  *  or not yet wired). */
 bool layerIsFrozen(const layer_t *layer);
+
+/*! The two parameters of a param layer: weight/bias (Linear, Conv1d,
+ *  Conv1dTransposed; bias may be NULL) or gamma/beta (LayerNorm, GroupNorm,
+ *  BatchNorm1d). Frozen layers still return theirs. Param-free layers return
+ *  false and leave both outputs untouched -- including a non-affine
+ *  BatchNorm1d, which is config-bearing but has no gamma/beta. */
+bool layerParameters(const layer_t *layer, parameter_t **weightOut, parameter_t **biasOut);
+
+/*! Index of the deepest (closest-to-input) layer whose parameters train
+ *  (#380 PR2): backward truncates there, since nothing below consumes dx.
+ *  Returns modelSize when no layer trains. */
+size_t deepestTrainableIndex(layer_t **model, size_t modelSize);
 
 #endif

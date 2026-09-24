@@ -47,23 +47,6 @@ static void setLayersTrainingMode(layer_t **model, size_t modelSize, bool traini
     }
 }
 
-/* Defined below (needed here); forward-declared because layerParameters lives
- * further down in this file. */
-static bool layerParameters(layer_t *layer, parameter_t **weightOut, parameter_t **biasOut);
-
-/* Deepest (closest-to-input) layer whose parameters still train (#380 PR2).
- * Below it no dx is consumed, so backward truncates there; modelSize = none. */
-static size_t deepestTrainableIndex(layer_t **model, size_t modelSize) {
-    for (size_t i = 0; i < modelSize; i++) {
-        parameter_t *w = NULL;
-        parameter_t *b = NULL;
-        if (layerParameters(model[i], &w, &b) && !layerIsFrozen(model[i])) {
-            return i;
-        }
-    }
-    return modelSize;
-}
-
 static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
                                            lossConfig_t lossConfig, reduction_t forwardReduction,
                                            tensor_t *input, tensor_t *label, traceSink_t sink,
@@ -160,42 +143,6 @@ trainingStats_t *tracedGrads(layer_t **model, size_t modelSize, lossConfig_t los
                              traceSink_t sink, void *ctx) {
     return calculateGradsImpl(model, modelSize, lossConfig, forwardReduction, input, label, sink,
                               ctx);
-}
-
-/* Return the two parameter_t* of a trainable layer (bias may be NULL).
- * Non-trainable layers return false. */
-static bool layerParameters(layer_t *layer, parameter_t **weightOut, parameter_t **biasOut) {
-    switch (layer->type) {
-    case LINEAR:
-        *weightOut = layer->config->linear->weights;
-        *biasOut = layer->config->linear->bias;
-        return true;
-    case CONV1D:
-        *weightOut = layer->config->conv1d->weights;
-        *biasOut = layer->config->conv1d->bias; /* may be NULL */
-        return true;
-    case CONV1D_TRANSPOSED:
-        *weightOut = layer->config->conv1dTransposed->weights;
-        *biasOut = layer->config->conv1dTransposed->bias;
-        return true;
-    case LAYERNORM:
-        *weightOut = layer->config->layerNorm->gamma;
-        *biasOut = layer->config->layerNorm->beta;
-        return true;
-    case GROUPNORM:
-        *weightOut = layer->config->groupNorm->gamma;
-        *biasOut = layer->config->groupNorm->beta;
-        return true;
-    case BATCHNORM1D:
-        if (!layer->config->batchNorm1d->affine) {
-            return false; /* no gamma/beta: never trainable, never the deepest */
-        }
-        *weightOut = layer->config->batchNorm1d->gamma;
-        *biasOut = layer->config->batchNorm1d->beta;
-        return true;
-    default:
-        return false;
-    }
 }
 
 static void traceModelParams(layer_t **model, size_t modelSize, const char *tag, bool wantGrad,

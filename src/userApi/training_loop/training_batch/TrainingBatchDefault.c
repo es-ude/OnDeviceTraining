@@ -7,6 +7,7 @@
 #include "BatchView.h"
 #include "Common.h"
 #include "DataLoaderApi.h"
+#include "LayerConfigAccess.h"
 #include "StorageApi.h"
 #include "TrainingBatchDefault.h"
 
@@ -50,6 +51,19 @@ static uint8_t *reserveGatherBuffer(size_t m, size_t perSampleBytes, const char 
         exit(1);
     }
     return buffer;
+}
+
+/* FLOAT32 gate (spec §6.6, D3): evaluated over the whole model once per macro
+ * batch when m > 1, before any buffer is reserved or any chunk computed. */
+static void requireFloat32Model(layer_t **model, size_t modelSize, size_t m) {
+    for (size_t i = 0; i < modelSize; i++) {
+        if (!layerIsFloat32Only(model[i])) {
+            PRINT_ERROR("trainingBatchDefault: microBatchSize %zu > 1 is FLOAT32-only, but layer "
+                        "%zu (layerType_t %d) has a non-FLOAT32 %s",
+                        m, i, (int)model[i]->type, layerNonFloat32Field(model[i]));
+            exit(1);
+        }
+    }
 }
 
 /* Per-chunk validation (spec §6.3): a stacked sample must be FLOAT32, carry no
@@ -173,6 +187,7 @@ float trainingBatchDefault(layer_t **model, size_t modelSize, lossConfig_t lossC
         totalLoss = trainingBatchPerSample(model, modelSize, lossConfig, batch, calculateGradsFn,
                                            forwardReduction);
     } else {
+        requireFloat32Model(model, modelSize, m);
         totalLoss = trainingBatchStacked(model, modelSize, lossConfig, batch, calculateGradsFn,
                                          forwardReduction, m);
     }

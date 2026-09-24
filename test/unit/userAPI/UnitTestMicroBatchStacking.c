@@ -20,9 +20,11 @@
 #include "DropoutApi.h"
 #include "FlattenApi.h"
 #include "GroupNormApi.h"
+#include "LayerConfigAccess.h"
 #include "LayerNormApi.h"
 #include "LayerQuant.h"
 #include "LayerWeightsApi.h"
+#include "Linear.h"
 #include "LinearApi.h"
 #include "LossFunction.h"
 #include "Optimizer.h"
@@ -992,6 +994,210 @@ void testStackedRejectsChunkDifferingFromSampleZero(void) {
     freeTensor(badA);
 }
 
+/* ---- FLOAT32 gate (spec §6.6) --------------------------------------------- */
+
+/* Each gated model below trains cleanly at m = 2 WITHOUT the gate (the funnel
+ * converts every non-FLOAT32 operand), so only the gate can make it exit. */
+static void trainStackedMseOrDie(layer_t **model, size_t modelSize) {
+    batch_t *batch = buildBatch(bItems, bLabels, 4);
+    trainingBatchDefault(model, modelSize, defaultLossConfig(MSE), batch, calculateGradsSequential,
+                         REDUCTION_MEAN, 2);
+}
+
+static void assertStackedGateRejects(layer_t **model, size_t modelSize) {
+    initModelBData();
+    ASSERT_EXITS_WITH_FAILURE(trainStackedMseOrDie(model, modelSize));
+    freeModelBData();
+}
+
+void testStackedGateRejectsSymLayer(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
+    arithmetic_t sym = arithmeticFromQuantization(symQ);
+    layerQuant_t lq = {.forwardMath = sym,
+                       .weightGradMath = sym,
+                       .biasGradMath = sym,
+                       .propLossMath = sym,
+                       .outputQ = symQ,
+                       .propLossQ = symQ,
+                       .weightStorage = floatQ,
+                       .biasStorage = floatQ,
+                       .weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE,
+                       .biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE};
+    rngSetSeed(20u);
+    layer_t *model[1] = {
+        linearLayerInit(&(linearInit_t){.inFeatures = B_IN, .outFeatures = B_OUT}, &lq)};
+
+    assertStackedGateRejects(model, 1);
+
+    freeLinearLayer(model[0]);
+    freeQuantization(symQ);
+    freeQuantization(floatQ);
+}
+
+void testStackedGateRejectsBfpLayer(void) {
+    /* A genuine BFP layer: ARITH_BFP in all four math slots (derived from the
+     * BFP wire template) and BFP-stored weights and bias (FLOAT32 init +
+     * requantizeTensorInPlace, #270). With FLOAT32 weights an ARITH_BFP
+     * forward already dies at ANY m ("requires BFP-stored weights"), which
+     * would make this test vacuous; built like this it trains at m = 2
+     * without the gate. */
+    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *bfpQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    layerQuant_t bfpLq;
+    layerQuantInitUniform(&bfpLq, bfpQ);
+    bfpLq.weightStorage = floatQ;
+    bfpLq.biasStorage = floatQ;
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    rngSetSeed(28u);
+    layer_t *model[2] = {
+        linearLayerInit(&(linearInit_t){.inFeatures = B_IN, .outFeatures = 4}, &bfpLq),
+        linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = B_OUT}, &lq)};
+    linearConfig_t *bfpLinear = model[0]->config->linear;
+    requantizeTensorInPlace(getParamFromParameter(bfpLinear->weights), bfpQ);
+    requantizeTensorInPlace(getParamFromParameter(bfpLinear->bias), bfpQ);
+
+    assertStackedGateRejects(model, 2);
+
+    freeLinearLayer(model[1]);
+    freeLinearLayer(model[0]);
+    freeQuantization(bfpQ);
+    freeQuantization(floatQ);
+}
+
+void testStackedGateRejectsBfpWire(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *bfpQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    layerQuant_t bfpOut;
+    layerQuantInitUniform(&bfpOut, floatQ);
+    bfpOut.outputQ = bfpQ; /* FLOAT32 math, BFP-stored forward wire */
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    rngSetSeed(21u);
+    layer_t *model[2] = {
+        linearLayerInit(&(linearInit_t){.inFeatures = B_IN, .outFeatures = 4}, &bfpOut),
+        linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = B_OUT}, &lq)};
+
+    assertStackedGateRejects(model, 2);
+
+    freeLinearLayer(model[1]);
+    freeLinearLayer(model[0]);
+    freeQuantization(bfpQ);
+    freeQuantization(floatQ);
+}
+
+void testStackedGateRejectsQuantizationLayer(void) {
+    /* Also pins the §6.6 message by its numbers plus ONE keyword, "FLOAT32"
+     * (ruling R10): m = 2, the layer index 3 and the layerType_t of
+     * QUANTIZATION (8, append-only enum). The Quantization node follows model
+     * B, so its index 3 collides with none of the message's other numbers
+     * (index 1 would: "microBatchSize 2 > 1"). The offending field is pinned
+     * by identity, not wording: whatever layerNonFloat32Field returns for the
+     * node must appear in the message (§6.6 "names the offending field"). */
+    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layerQuant_t toSym;
+    layerQuantInitUniform(&toSym, symQ);
+    rngSetSeed(22u);
+    layer_t *model[B_SIZE + 1];
+    buildModelB(model, &lq);
+    model[B_SIZE] = quantLayerInit(&toSym);
+    initModelBData();
+    char message[512];
+    int code = -2;
+
+    CAPTURE_EXIT_AND_OUTPUT(trainStackedMseOrDie(model, B_SIZE + 1), message, sizeof message,
+                            &code);
+    /* A string literal (Task 2), so it stays valid after the frees below. */
+    const char *field = layerNonFloat32Field(model[B_SIZE]);
+
+    freeModelBData();
+    freeQuantLayer(model[B_SIZE]);
+    freeModelB(model);
+    freeQuantization(symQ);
+    freeQuantization(floatQ);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, code, "the gate must exit(1)");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(message, "FLOAT32"), "the gate must say FLOAT32");
+    TEST_ASSERT_TRUE_MESSAGE(messageHasNumber(message, 2), "the gate must name m (2)");
+    TEST_ASSERT_TRUE_MESSAGE(messageHasNumber(message, B_SIZE),
+                             "the gate must name the layer index (3)");
+    TEST_ASSERT_TRUE_MESSAGE(messageHasNumber(message, (size_t)QUANTIZATION),
+                             "the gate must name the layerType_t (QUANTIZATION = 8)");
+    TEST_ASSERT_NOT_NULL_MESSAGE(field, "the Quantization node must have a non-FLOAT32 field");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(message, field), "the gate must name the offending field");
+}
+
+void testStackedGateRejectsPerOpSymMathOnFloat32Storage(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    lq.weightGradMath = (arithmetic_t){.type = ARITH_SYM_INT32, .roundingMode = HALF_AWAY};
+    rngSetSeed(23u);
+    layer_t *model[1] = {
+        linearLayerInit(&(linearInit_t){.inFeatures = B_IN, .outFeatures = B_OUT}, &lq)};
+
+    assertStackedGateRejects(model, 1);
+
+    freeLinearLayer(model[0]);
+    freeQuantization(floatQ);
+}
+
+void testStackedGateRejectsSymGradStorage(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    lq.weightGradStorage = symQ; /* FLOAT32 math and wires, SYM_INT32 grads */
+    rngSetSeed(24u);
+    layer_t *model[1] = {
+        linearLayerInit(&(linearInit_t){.inFeatures = B_IN, .outFeatures = B_OUT}, &lq)};
+
+    assertStackedGateRejects(model, 1);
+
+    freeLinearLayer(model[0]);
+    freeQuantization(symQ);
+    freeQuantization(floatQ);
+}
+
+void testStackedTrainingWithFrozenFirstLayerMatchesPerSample(void) {
+    /* A frozen layer has NULL grads (#380): the gate must accept it without
+     * dereferencing them, and the trainable layer's grads must match m = 1. */
+    initModelBData();
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    rngSetSeed(25u);
+    layer_t *model[B_SIZE];
+    model[0] = linearLayerInit(
+        &(linearInit_t){.inFeatures = B_IN, .outFeatures = 4, .trainable = TRAINABLE_FALSE}, &lq);
+    model[1] = reluLayerInit(&lq);
+    model[2] = linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = B_OUT}, &lq);
+    float ref[4 * B_OUT + B_OUT];
+    float got[4 * B_OUT + B_OUT];
+    float loss[2];
+    const size_t ms[2] = {1, 2};
+    for (size_t k = 0; k < 2; k++) {
+        zeroGrads(model, B_SIZE);
+        batch_t *batch = buildBatch(bItems, bLabels, 4);
+        loss[k] = trainingBatchDefault(model, B_SIZE, defaultLossConfig(MSE), batch,
+                                       calculateGradsSequential, REDUCTION_MEAN, ms[k]);
+        freeBatch(batch);
+        snapshotScaledGrads(model, B_SIZE, 1.0f, k == 0 ? ref : got, 4 * B_OUT + B_OUT);
+    }
+    size_t mismatch = firstMismatch(ref, got, 4 * B_OUT + B_OUT, 1e-6f, 1e-4f);
+
+    freeModelB(model);
+    freeQuantization(q);
+    freeModelBData();
+
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(SIZE_MAX, mismatch, "trainable grads diverge from m=1");
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f + 1e-5f * fabsf(loss[0]), loss[0], loss[1]);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testStackedChunkWalkCallsOncePerChunkWithMRows);
@@ -1014,5 +1220,12 @@ int main(void) {
     RUN_TEST(testStackedRejectsLabelWithDifferentRank);
     RUN_TEST(testStackedRejectsMismatchInALaterChunk);
     RUN_TEST(testStackedRejectsChunkDifferingFromSampleZero);
+    RUN_TEST(testStackedGateRejectsSymLayer);
+    RUN_TEST(testStackedGateRejectsBfpLayer);
+    RUN_TEST(testStackedGateRejectsBfpWire);
+    RUN_TEST(testStackedGateRejectsQuantizationLayer);
+    RUN_TEST(testStackedGateRejectsPerOpSymMathOnFloat32Storage);
+    RUN_TEST(testStackedGateRejectsSymGradStorage);
+    RUN_TEST(testStackedTrainingWithFrozenFirstLayerMatchesPerSample);
     return UNITY_END();
 }

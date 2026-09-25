@@ -11,6 +11,7 @@
 #include "LayerConfigAccess.h"
 #include "LossFunction.h"
 #include "Quantization.h"
+#include "RematCheckedSize.h"
 #include "RematPlan.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -19,33 +20,79 @@ static const char *wireKindName(uint8_t kind) {
     return kind == REMAT_WIRE_ACT ? "ACT" : "GRAD";
 }
 
-/* Every size product and sum of the table goes through these. */
-static size_t mulSize(size_t a, size_t b) {
-    return a * b;
+/* Every size product and sum of the table goes through these; f names the wire in an overflow exit
+ * (NULL: the table's own arrays). */
+static void exitSizeOverflow(const rematWireFact_t *f, const char *quantity) {
+    if (f == NULL) {
+        /* Reachable only at the pre-guard "numWires = n + 1" sum in
+         * rematWireTableInit (and its hasBackward extension), before numWires
+         * is checked against REMAT_NONE -- for an absurd n approaching
+         * SIZE_MAX. Every other NULL call runs after that guard, on values it
+         * already bounds. Kept so a NULL wire never reaches the wire-naming
+         * format below. */
+        PRINT_ERROR("remat: size overflow computing %s of the table arrays", quantity);
+    } else {
+        PRINT_ERROR("remat: size overflow computing %s of wire %s %u", quantity,
+                    wireKindName(f->kind), (unsigned)f->index);
+    }
+    exit(1);
 }
 
-static size_t addSize(size_t a, size_t b) {
-    return a + b;
+static size_t mulSize(size_t a, size_t b, const rematWireFact_t *f, const char *quantity) {
+    size_t out;
+    if (!checkedMulSize(a, b, &out)) {
+        exitSizeOverflow(f, quantity);
+    }
+    return out;
 }
 
-static size_t roundUpSize(size_t x, size_t align) {
-    return addSize(x, align - 1u) & ~(align - 1u);
+static size_t addSize(size_t a, size_t b, const rematWireFact_t *f, const char *quantity) {
+    size_t out;
+    if (!checkedAddSize(a, b, &out)) {
+        exitSizeOverflow(f, quantity);
+    }
+    return out;
 }
 
-static size_t elementsOf(const shape_t *shape) {
+static size_t roundUpSize(size_t x, size_t align, const rematWireFact_t *f, const char *quantity) {
+    return addSize(x, align - 1u, f, quantity) & ~(align - 1u);
+}
+
+static size_t elementsOf(const shape_t *shape, const rematWireFact_t *f) {
     size_t count = 1;
     for (size_t d = 0; d < shape->numberOfDimensions; d++) {
-        count = mulSize(count, shape->dimensions[d]);
+        count = mulSize(count, shape->dimensions[d], f, "elements");
     }
     return count;
 }
 
-static size_t wireBytes(const quantization_t *q, size_t elements) {
-    if (q->type == BFP) {
-        const bfpQConfig_t *qc = q->qConfig;
-        return addSize(mulSize(qc->mantissaBits, elements), 7u) / 8u;
+/* calcNumberOfBytesForData (Tensor.c:94-116), checked: every dtype a borrowed
+ * ACT 0 may have; slab wires are FLOAT32, SYM_INT32 or BFP (init enforces it). */
+static size_t wireBytes(const quantization_t *q, size_t elements, const rematWireFact_t *f) {
+    size_t bits;
+    switch (q->type) {
+    case FLOAT32:
+    case INT32:
+    case SYM_INT32:
+        return mulSize(elements, sizeof(int32_t), f, "bytes");
+    case SYM:
+        bits = ((const symQConfig_t *)q->qConfig)->qBits;
+        break;
+    case ASYM:
+        bits = ((const asymQConfig_t *)q->qConfig)->qBits;
+        break;
+    case BOOL:
+        bits = 1u;
+        break;
+    case BFP:
+        bits = ((const bfpQConfig_t *)q->qConfig)->mantissaBits;
+        break;
+    default:
+        PRINT_ERROR("remat: wire %s %u has unknown qtype %d", wireKindName(f->kind),
+                    (unsigned)f->index, (int)q->type);
+        exit(1);
     }
-    return mulSize(elements, sizeof(float));
+    return addSize(mulSize(bits, elements, f, "bytes"), 7u, f, "bytes") / 8u;
 }
 
 rematBfpGroups_t rematBfpWireGrouping(const bfpQConfig_t *tmpl, size_t elements, uint8_t kind,
@@ -95,7 +142,7 @@ static void setWireFacts(rematWireFact_t *f, const quantization_t *tmpl, uint8_t
     f->rank = rank;
     f->elements = elements;
     f->dtype = (uint8_t)tmpl->type;
-    f->bytes = wireBytes(tmpl, elements);
+    f->bytes = wireBytes(tmpl, elements, f);
     f->numGroups = 0;
     bool slabWire = !(f->kind == REMAT_WIRE_ACT && f->index == 0);
     if (slabWire && tmpl->type == BFP) {
@@ -115,7 +162,7 @@ static void deriveFacts(rematWireFact_t *facts, size_t numWires, layer_t **model
                           {.dimensions = dimsB, .orderOfDimensions = orderB}};
     shape_t *prev = input->shape;
     setWireFacts(&facts[0], input->quantization, (uint8_t)prev->numberOfDimensions,
-                 elementsOf(prev));
+                 elementsOf(prev, &facts[0]));
     for (size_t j = 1; j <= n; j++) {
         layer_t *layer = model[j - 1];
         shape_t *out = &scratch[j % 2u];
@@ -123,7 +170,7 @@ static void deriveFacts(rematWireFact_t *facts, size_t numWires, layer_t **model
         layerFunctions[layer->type].calcOutputShape(layer, prev, out);
         const quantization_t *tmpl =
             (layer->type == FLATTEN) ? facts[j - 1].tmpl : layerOutputQ(layer);
-        setWireFacts(&facts[j], tmpl, (uint8_t)out->numberOfDimensions, elementsOf(out));
+        setWireFacts(&facts[j], tmpl, (uint8_t)out->numberOfDimensions, elementsOf(out, &facts[j]));
         prev = out;
     }
     for (size_t id = n + 1u; id < numWires; id++) {
@@ -156,23 +203,25 @@ typedef struct slabLayout {
     size_t cursor;
 } slabLayout_t;
 
-static void *slabPlace(slabLayout_t *layout, size_t align, size_t count, size_t size) {
-    size_t start = roundUpSize(layout->cursor, align);
-    layout->cursor = addSize(start, mulSize(count, size));
+static void *slabPlace(slabLayout_t *layout, size_t align, size_t count, size_t size,
+                       const rematWireFact_t *f) {
+    size_t start = roundUpSize(layout->cursor, align, f, "slabBytes");
+    layout->cursor = addSize(start, mulSize(count, size, f, "slabBytes"), f, "slabBytes");
     return layout->base == NULL ? NULL : layout->base + start;
 }
 
-#define SLAB_PLACE(layout, T, count) ((T *)slabPlace((layout), _Alignof(T), (count), sizeof(T)))
+#define SLAB_PLACE(layout, T, count, f)                                                            \
+    ((T *)slabPlace((layout), _Alignof(T), (count), sizeof(T), (f)))
 
 static rematWireTable_t *layoutTable(slabLayout_t *layout, const rematWireFact_t *facts,
                                      size_t numWires, size_t n, size_t inputRank) {
-    rematWireTable_t *t = SLAB_PLACE(layout, rematWireTable_t, 1u);
-    rematWire_t *wires = SLAB_PLACE(layout, rematWire_t, numWires);
-    uint16_t *gradIdOf = SLAB_PLACE(layout, uint16_t, n + 1u);
-    uint8_t *layerType = SLAB_PLACE(layout, uint8_t, n);
-    uint8_t *frozen = SLAB_PLACE(layout, uint8_t, n);
-    size_t *inputDims = SLAB_PLACE(layout, size_t, inputRank);
-    size_t *inputOrder = SLAB_PLACE(layout, size_t, inputRank);
+    rematWireTable_t *t = SLAB_PLACE(layout, rematWireTable_t, 1u, NULL);
+    rematWire_t *wires = SLAB_PLACE(layout, rematWire_t, numWires, NULL);
+    uint16_t *gradIdOf = SLAB_PLACE(layout, uint16_t, n + 1u, NULL);
+    uint8_t *layerType = SLAB_PLACE(layout, uint8_t, n, NULL);
+    uint8_t *frozen = SLAB_PLACE(layout, uint8_t, n, NULL);
+    size_t *inputDims = SLAB_PLACE(layout, size_t, inputRank, NULL);
+    size_t *inputOrder = SLAB_PLACE(layout, size_t, inputRank, NULL);
     if (t != NULL) {
         t->wires = wires;
         t->gradIdOf = gradIdOf;
@@ -184,16 +233,16 @@ static rematWireTable_t *layoutTable(slabLayout_t *layout, const rematWireFact_t
     }
     for (size_t id = 1; id < numWires; id++) {
         const rematWireFact_t *f = &facts[id];
-        tensor_t *hdr = SLAB_PLACE(layout, tensor_t, 1u);
-        shape_t *shape = SLAB_PLACE(layout, shape_t, 1u);
-        size_t *dims = SLAB_PLACE(layout, size_t, f->rank);
-        size_t *order = SLAB_PLACE(layout, size_t, f->rank);
-        quantization_t *q = SLAB_PLACE(layout, quantization_t, 1u);
+        tensor_t *hdr = SLAB_PLACE(layout, tensor_t, 1u, f);
+        shape_t *shape = SLAB_PLACE(layout, shape_t, 1u, f);
+        size_t *dims = SLAB_PLACE(layout, size_t, f->rank, f);
+        size_t *order = SLAB_PLACE(layout, size_t, f->rank, f);
+        quantization_t *q = SLAB_PLACE(layout, quantization_t, 1u, f);
         void *qConfig = NULL;
         if (f->dtype == SYM_INT32) {
-            qConfig = SLAB_PLACE(layout, symInt32QConfig_t, 1u);
+            qConfig = SLAB_PLACE(layout, symInt32QConfig_t, 1u, f);
         } else if (f->dtype == BFP) {
-            qConfig = SLAB_PLACE(layout, bfpQConfig_t, 1u);
+            qConfig = SLAB_PLACE(layout, bfpQConfig_t, 1u, f);
         }
         if (t != NULL) {
             *hdr = (tensor_t){.data = NULL, .shape = shape, .quantization = q, .sparsity = NULL};
@@ -211,7 +260,7 @@ static rematWireTable_t *layoutTable(slabLayout_t *layout, const rematWireFact_t
         if (f->dtype != BFP) {
             continue;
         }
-        uint8_t *exponents = SLAB_PLACE(layout, uint8_t, f->numGroups);
+        uint8_t *exponents = SLAB_PLACE(layout, uint8_t, f->numGroups, f);
         if (t != NULL) {
             ((bfpQConfig_t *)wires[id].hdr->quantization->qConfig)->exponents = exponents;
         }
@@ -222,24 +271,63 @@ static rematWireTable_t *layoutTable(slabLayout_t *layout, const rematWireFact_t
 bool rematWireTableInit(rematWireTable_t **out, layer_t **model, size_t n, lossConfig_t loss,
                         const tensor_t *inputLike) {
     *out = NULL;
+    if (n == 0) {
+        PRINT_ERROR("rematWireTableInit: modelSize == 0: nothing to schedule");
+        exit(1);
+    }
     size_t deepest;
     ptrdiff_t top;
     rematBackwardRange(model, n, loss.funcType, &deepest, &top);
     bool hasBackward = deepest < n;
-    size_t numWires = n + 1u + (hasBackward ? 1u + gradsBelowSeed(deepest, top) : 0u);
+    size_t numWires = addSize(n, 1u, NULL, "numWires");
+    if (hasBackward) {
+        numWires = addSize(numWires, addSize(1u, gradsBelowSeed(deepest, top), NULL, "numWires"),
+                           NULL, "numWires");
+    }
+    if (numWires >= REMAT_NONE) {
+        PRINT_ERROR("rematWireTableInit: %zu wires reach REMAT_NONE (0xFFFF): wire ids are "
+                    "uint16_t",
+                    numWires);
+        exit(1);
+    }
     size_t inputRank = inputLike->shape->numberOfDimensions;
+    if (inputRank > UINT8_MAX) {
+        PRINT_ERROR("rematWireTableInit: wire ACT 0 has rank %zu, above the uint8_t rank field "
+                    "(255)",
+                    inputRank);
+        exit(1);
+    }
     size_t maxRank = inputRank > 2u ? inputRank : 2u;
 
     /* The table's size depends on the derived facts (ranks, dtypes, exponent
      * counts), so init derives into a transient scratch of numWires facts --
      * sized from numWires alone -- and frees it before returning (plan
      * Assumption 29). Every bind derives into the table's own copy. */
-    rematWireFact_t *facts = reserveMemory(mulSize(numWires, sizeof(rematWireFact_t)));
+    rematWireFact_t *facts =
+        reserveMemory(mulSize(numWires, sizeof(rematWireFact_t), NULL, "derivation scratch"));
     if (facts == NULL) {
         return false;
     }
     numberWires(facts, model, n, deepest, top, hasBackward);
     deriveFacts(facts, numWires, model, n, inputLike, maxRank);
+
+    size_t totalBytes = 0;
+    for (size_t id = 1; id < numWires; id++) {
+        const rematWireFact_t *f = &facts[id];
+        if (f->dtype != FLOAT32 && f->dtype != SYM_INT32 && f->dtype != BFP) {
+            PRINT_ERROR("rematWireTableInit: wire %s %u has dtype %u; remat wires are FLOAT32, "
+                        "SYM_INT32 or BFP",
+                        wireKindName(f->kind), (unsigned)f->index, (unsigned)f->dtype);
+            exit(1);
+        }
+        if (f->bytes == 0) {
+            PRINT_ERROR("rematWireTableInit: wire %s %u has zero bytes (#160)",
+                        wireKindName(f->kind), (unsigned)f->index);
+            exit(1);
+        }
+        /* Makes every later sum over wires (liveBytes, peakLiveBytes) provably in range. */
+        totalBytes = addSize(totalBytes, f->bytes, f, "total wire bytes");
+    }
 
     slabLayout_t sizing = {.base = NULL, .cursor = 0};
     (void)layoutTable(&sizing, facts, numWires, n, inputRank);
@@ -268,8 +356,9 @@ bool rematWireTableInit(rematWireTable_t **out, layer_t **model, size_t n, lossC
         t->frozen[i] = layerIsFrozen(model[i]) ? 1u : 0u;
     }
     t->inputRank = inputRank;
-    memcpy(t->inputDims, inputLike->shape->dimensions, inputRank * sizeof(size_t));
-    memcpy(t->inputOrder, inputLike->shape->orderOfDimensions, inputRank * sizeof(size_t));
+    size_t inputKeyBytes = mulSize(inputRank, sizeof(size_t), NULL, "input key bytes");
+    memcpy(t->inputDims, inputLike->shape->dimensions, inputKeyBytes);
+    memcpy(t->inputOrder, inputLike->shape->orderOfDimensions, inputKeyBytes);
     t->inputType = (uint8_t)inputLike->quantization->type;
     t->maxRank = (uint8_t)maxRank;
     t->slabBytes = sizing.cursor;

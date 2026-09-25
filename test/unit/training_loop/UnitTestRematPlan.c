@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "Common.h"
@@ -498,6 +499,190 @@ void testAccessorsReadTheTableAndHeadersAreLinked(void) {
     freeModel(model, HAR_N);
 }
 
+/* ---- table init's named exits (spec §3.2) ---- */
+
+void testTableInitExitsOnAnEmptyModel(void) {
+    layer_t *model[1] = {makeRelu(&g_floatQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
+    rematWireTable_t *t = NULL;
+    ASSERT_EXITS_WITH_OUTPUT(1, "modelSize == 0: nothing to schedule",
+                             (void)rematWireTableInit(&t, model, 0, defaultLossConfig(MSE), x));
+    freeModel(model, 1);
+}
+
+/* 65534 parameter-free layers under MSE: no GRAD, so n + 1 = 65535 wires, the
+ * first count whose ids would include the REMAT_NONE sentinel. One ReLU is
+ * reused for every slot; the model array itself is test-owned. */
+void testTableInitExitsWhenWireIdsWouldReachRematNone(void) {
+    const size_t n = 65534u;
+    layer_t *relu = makeRelu(&g_floatQ);
+    layer_t **model = reserveMemory(n * sizeof(layer_t *));
+    TEST_ASSERT_NOT_NULL(model);
+    for (size_t i = 0; i < n; i++) {
+        model[i] = relu;
+    }
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
+    rematWireTable_t *t = NULL;
+    ASSERT_EXITS_WITH_OUTPUT(1, "65535 wires reach REMAT_NONE (0xFFFF)",
+                             (void)rematWireTableInit(&t, model, n, defaultLossConfig(MSE), x));
+    freeReservedMemory(model);
+    freeReluLayer(relu);
+}
+
+void testTableInitExitsOnAnInputRankAboveTheRankField(void) {
+    size_t dims[256];
+    size_t order[256];
+    for (size_t d = 0; d < 256; d++) {
+        dims[d] = 1;
+        order[d] = d;
+    }
+    shape_t shape = {.numberOfDimensions = 256, .dimensions = dims, .orderOfDimensions = order};
+    tensor_t x = {.data = NULL, .shape = &shape, .quantization = &g_floatQ, .sparsity = NULL};
+    layer_t *model[1] = {makeRelu(&g_floatQ)};
+    rematWireTable_t *t = NULL;
+    ASSERT_EXITS_WITH_OUTPUT(1, "wire ACT 0 has rank 256, above the uint8_t rank field",
+                             (void)rematWireTableInit(&t, model, 1, defaultLossConfig(MSE), &x));
+    freeModel(model, 1);
+}
+
+void testTableInitExitsOnAnUnsupportedWireDtype(void) {
+    float scale = 1.f;
+    symQConfig_t symQc = {
+        .scales = &scale, .numGroups = 1, .groupSize = 0, .roundingMode = HALF_AWAY, .qBits = 8};
+    quantization_t symQ = {.type = SYM, .qConfig = &symQc};
+    layer_t *model[1] = {makeRelu(&symQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
+    rematWireTable_t *t = NULL;
+    ASSERT_EXITS_WITH_OUTPUT(1, "wire ACT 1 has dtype 3; remat wires are FLOAT32, SYM_INT32 or BFP",
+                             (void)rematWireTableInit(&t, model, 1, defaultLossConfig(MSE), x));
+    freeModel(model, 1);
+}
+
+/* #160: a zero-size block is implementation-defined (a zero-byte request may return NULL). */
+void testTableInitExitsOnAZeroByteWire(void) {
+    layer_t *model[1] = {makeRelu(&g_floatQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 0}, 2, &g_floatQ);
+    rematWireTable_t *t = NULL;
+    ASSERT_EXITS_WITH_OUTPUT(1, "wire ACT 1 has zero bytes (#160)",
+                             (void)rematWireTableInit(&t, model, 1, defaultLossConfig(MSE), x));
+    freeModel(model, 1);
+}
+
+/* §16.1 item 4g: the borrowed ACT 0 may be any dtype, packed ones included;
+ * its bytes are exact for the checker's disjointness test. */
+void testTableInitAcceptsAPackedBorrowedInputAndSizesItExactly(void) {
+    float scale = 1.f;
+    uint16_t zeroPoint = 0;
+    symQConfig_t symQc = {
+        .scales = &scale, .numGroups = 1, .groupSize = 0, .roundingMode = HALF_AWAY, .qBits = 4};
+    asymQConfig_t asymQc = {.scales = &scale,
+                            .zeroPoints = &zeroPoint,
+                            .numGroups = 1,
+                            .groupSize = 0,
+                            .qBits = 6,
+                            .roundingMode = HALF_AWAY};
+    quantization_t inputQ[4] = {{.type = SYM, .qConfig = &symQc},
+                                {.type = ASYM, .qConfig = &asymQc},
+                                {.type = INT32, .qConfig = NULL},
+                                {.type = BOOL, .qConfig = NULL}};
+    const size_t expectedBytes[4] = {4, 6, 32, 1}; /* 8 elements: 4, 6, 32 and 1 bits each */
+    layer_t *model[1] = {makeRelu(&g_floatQ)};
+    for (size_t k = 0; k < 4; k++) {
+        inputLike_t in;
+        rematWireTable_t *t =
+            initTable(model, 1, MSE, makeInput(&in, (size_t[]){1, 8}, 2, &inputQ[k]));
+        TEST_ASSERT_EQUAL_size_t(expectedBytes[k], rematWireBytes(t, 0));
+        rematWireTableFree(t);
+    }
+    freeModel(model, 1);
+}
+
+void testTableInitExitsOnAnUnknownInputQtype(void) {
+    quantization_t unknownQ = {.type = (qtype_t)99, .qConfig = NULL};
+    layer_t *model[1] = {makeRelu(&g_floatQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &unknownQ);
+    rematWireTable_t *t = NULL;
+    ASSERT_EXITS_WITH_OUTPUT(1, "wire ACT 0 has unknown qtype 99",
+                             (void)rematWireTableInit(&t, model, 1, defaultLossConfig(MSE), x));
+    freeModel(model, 1);
+}
+
+/* ---- checked size arithmetic (spec §3.8, D60) ---- */
+
+/* The child prints how many bytes are live when it exits, so the parent can
+ * check "exits before the table block is reserved". Real only under
+ * ODT_MEM_PROFILE; on the plain preset both counters read 0. */
+static size_t g_memBeforeExit;
+
+static void printReservedBeforeExit(void) {
+    printf("reservedBeforeExit=%zu\n", memProfileCurrentBytes() - g_memBeforeExit);
+}
+
+static void initExpectingAnExit(layer_t **model, size_t n, const tensor_t *x) {
+    rematWireTable_t *t = NULL;
+    g_memBeforeExit = memProfileCurrentBytes();
+    (void)atexit(printReservedBeforeExit);
+    (void)rematWireTableInit(&t, model, n, defaultLossConfig(MSE), x);
+}
+
+/* A borrowed [1, SIZE_MAX/4 + 2] FLOAT32 input: 4 * N wraps to 4. */
+void testTableInitExitsOnAByteCountOverflowBeforeReservingTheTable(void) {
+    layer_t *model[1] = {makeRelu(&g_floatQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, SIZE_MAX / 4u + 2u}, 2, &g_floatQ);
+    ASSERT_EXITS_WITH_OUTPUT(1, "size overflow computing bytes of wire ACT 0",
+                             initExpectingAnExit(model, 1, x));
+    /* Only the transient derivation scratch (2 wires) is live at the exit: the
+     * table block is never reserved (plan Assumption 29). */
+#ifdef ODT_MEM_PROFILE
+    size_t expectedReserved = 2u * sizeof(rematWireFact_t);
+#else
+    size_t expectedReserved = 0u; /* the counters are no-ops without ODT_MEM_PROFILE */
+#endif
+    char expected[64];
+    (void)snprintf(expected, sizeof expected, "reservedBeforeExit=%zu", expectedReserved);
+    ASSERT_EXITS_WITH_OUTPUT(1, expected, initExpectingAnExit(model, 1, x));
+    freeModel(model, 1);
+}
+
+/* Four BFP wires of 2^62 elements with groupSize 1: each wire's bytes fit
+ * (2^60), but their exponent tails sum to 2^64. */
+void testTableInitExitsOnASlabSizeOverflow(void) {
+    uint8_t inputExponent[1];
+    bfpQConfig_t inputQc;
+    initBfpQConfigInto(2, 8, HALF_AWAY, inputExponent, &inputQc);
+    quantization_t inputQ = {.type = BFP, .qConfig = &inputQc};
+    uint8_t tmplExponents[2];
+    bfpQConfig_t tmplQc;
+    initBfpQConfigGroupedInto(2, 8, HALF_AWAY, 2, 1, tmplExponents, &tmplQc);
+    quantization_t tmplQ = {.type = BFP, .qConfig = &tmplQc};
+    layer_t *relu = makeRelu(&tmplQ);
+    layer_t *model[4] = {relu, relu, relu, relu};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, (size_t)1 << 62}, 2, &inputQ);
+    ASSERT_EXITS_WITH_OUTPUT(1, "size overflow computing slabBytes of wire ACT 4",
+                             initExpectingAnExit(model, 4, x));
+    freeReluLayer(relu);
+}
+
+/* Three FLOAT32 wires of SIZE_MAX/8 elements: each fits (just under 2^63
+ * bytes), two sum to just under 2^64, the third overflows. The checked total
+ * bounds every later sum over wires (plan Assumption 12). */
+void testTableInitExitsOnATotalWireBytesOverflow(void) {
+    layer_t *relu = makeRelu(&g_floatQ);
+    layer_t *model[3] = {relu, relu, relu};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, SIZE_MAX / 8u}, 2, &g_floatQ);
+    ASSERT_EXITS_WITH_OUTPUT(1, "size overflow computing total wire bytes of wire ACT 3",
+                             initExpectingAnExit(model, 3, x));
+    freeReluLayer(relu);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testBackwardRangeMseRunsFromLastLayerToDeepest);
@@ -517,5 +702,15 @@ int main(void) {
     RUN_TEST(testTableFreeIsNullSafe);
     RUN_TEST(testSlabObjectsAlignedAndExponentsAtTheTail);
     RUN_TEST(testAccessorsReadTheTableAndHeadersAreLinked);
+    RUN_TEST(testTableInitExitsOnAnEmptyModel);
+    RUN_TEST(testTableInitExitsWhenWireIdsWouldReachRematNone);
+    RUN_TEST(testTableInitExitsOnAnInputRankAboveTheRankField);
+    RUN_TEST(testTableInitExitsOnAnUnsupportedWireDtype);
+    RUN_TEST(testTableInitExitsOnAZeroByteWire);
+    RUN_TEST(testTableInitAcceptsAPackedBorrowedInputAndSizesItExactly);
+    RUN_TEST(testTableInitExitsOnAnUnknownInputQtype);
+    RUN_TEST(testTableInitExitsOnAByteCountOverflowBeforeReservingTheTable);
+    RUN_TEST(testTableInitExitsOnASlabSizeOverflow);
+    RUN_TEST(testTableInitExitsOnATotalWireBytesOverflow);
     return UNITY_END();
 }

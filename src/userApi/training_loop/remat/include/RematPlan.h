@@ -21,7 +21,13 @@
  * freeReservedMemory or a deserialize destination (deserializeQConfig
  * reallocates exponents): rematWireTableFree releases the whole table with a
  * single freeReservedMemory. bfpQConfig_t has no owning/borrowed flag, so this
- * rule is the only guard. */
+ * rule is the only guard.
+ *
+ * SIZE ARITHMETIC (D60, Codex N1): every size product and sum RematPlan
+ * computes itself is overflow-checked and exits naming the wire and the
+ * quantity. An overflow inside a layer's calcOutputShape callback (e.g.
+ * convTranspose1dOutputLength, SlidingWindow1d.c:120-124) is the layer's
+ * responsibility, tracked with spec §16.1 item 7. */
 
 #define REMAT_NONE ((uint16_t)0xFFFFu)
 

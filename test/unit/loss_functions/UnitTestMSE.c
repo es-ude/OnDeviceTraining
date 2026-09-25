@@ -466,6 +466,30 @@ void testMseLossForwardAcceptsMatchingRank3Shapes(void) {
     TEST_ASSERT_FLOAT_WITHIN(1e-6f, 5.0f, loss); /* 1 + 0 + 0 + 4 */
 }
 
+/* #153: computeMeanScaleMSE divides the element count by dims[0] as a size_t.
+ * dims[0] = 0 is a SIGFPE on x86 and a silent 0 (then +inf) on AArch64 /
+ * Armv7-M; a rank-1 view has no feature axis. Its only production caller
+ * passes the batchViewOf label view, so both mean a caller bug. */
+void testComputeMeanScaleMseRejectsEmptyBatch(void) {
+    size_t dims[] = {0, 10};
+    size_t order[] = {0, 1};
+    shape_t shape;
+    setShape(&shape, dims, 2, order);
+    quantization_t q;
+    initFloat32Quantization(&q);
+    float dummy[1] = {0.f};
+    tensor_t labelView;
+    setTensorValues(&labelView, (uint8_t *)dummy, &shape, &q, NULL);
+    ASSERT_EXITS_WITH_FAILURE((void)computeMeanScaleMSE(32, &labelView));
+}
+
+void testComputeMeanScaleMseRejectsRank1View(void) {
+    size_t dims[] = {5};
+    tensor_t *labelView = buildFloatTensorShaped(dims, 1, (float[]){1.f, 2.f, 3.f, 4.f, 5.f});
+    ASSERT_EXITS_WITH_FAILURE((void)computeMeanScaleMSE(32, labelView));
+    freeTensor(labelView);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -493,6 +517,9 @@ int main(void) {
     RUN_TEST(testMseLossForwardRejectsLeadingAxisMismatch);
     RUN_TEST(testMseLossForwardRejectsTransposedFeatureLayout);
     RUN_TEST(testMseLossForwardAcceptsMatchingRank3Shapes);
+
+    RUN_TEST(testComputeMeanScaleMseRejectsEmptyBatch);
+    RUN_TEST(testComputeMeanScaleMseRejectsRank1View);
 
     return UNITY_END();
 }

@@ -157,6 +157,7 @@ void mseLossBackward(tensor_t *modelOutput, tensor_t *label, tensor_t *result) {
 }
 
 float computeMeanScaleMSE(size_t totalSamples, tensor_t *modelOutput) {
+    requireBatchedOutput(modelOutput, "label view", "computeMeanScaleMSE");
     size_t microbatch = modelOutput->shape->dimensions[0];
     size_t numFeaturesPerSample = calcNumberOfElementsByTensor(modelOutput) / microbatch;
     return 1.0f / (float)(totalSamples * numFeaturesPerSample);

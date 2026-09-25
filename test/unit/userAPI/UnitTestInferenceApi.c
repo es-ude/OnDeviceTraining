@@ -214,13 +214,11 @@ void testInferenceWithLossLinearReluFloat() {
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expectedOutput, capturedOutput, 2);
 }
 
-/* Hardening regression: reserveInferenceStats sized stats->output from the
- * LABEL's shape, but inferenceWithLoss then copies the PRODUCED model output
- * into it. A classifier's one-hot label is rank-1 [C] while the model output
- * carries an explicit batch dim [1, C] (the HAR/validation constellation) --
- * the label-sized shape copy overflowed past the dimensions array whenever
- * output rank > label rank (ASan-verified, see root-cause report). */
-void testInferenceWithLossOutputShapeMatchesProducedOutputNotLabel(void) {
+/* #153: labels carry the batch axis like every tensor-level input. A rank-1
+ * [C] label against the model's [1, C] output (the case that once overflowed
+ * reserveInferenceStats when it sized from the label) is rejected by the
+ * loss before inferenceWithLoss allocates anything. */
+void testInferenceWithLossRejectsRank1LabelAgainstBatchedOutput(void) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
@@ -254,41 +252,14 @@ void testInferenceWithLossOutputShapeMatchesProducedOutputNotLabel(void) {
     layer_t *model[] = {linear, relu};
     size_t modelSize = 2;
 
-    /* Run inferenceWithLoss. inferenceStats owns its `output` tensor; its
-     * matching free is freeInferenceStats. */
-    inferenceStats_t *inferenceStats =
-        inferenceWithLoss(model, modelSize, input, label, MSE, REDUCTION_MEAN);
-    /* Plain inference() is the known-correct idiom (getTensorLike + convertTensor);
-     * inferenceStats->output must match it element-for-element. */
-    tensor_t *ref = inference(model, modelSize, input);
+    ASSERT_EXITS_WITH_FAILURE(
+        (void)inferenceWithLoss(model, modelSize, input, label, MSE, REDUCTION_MEAN));
 
-    /* CAPTURE (before free -- pre-fix, stats->output's shape is rank 1, so
-     * dimensions[1] would be an out-of-bounds read; guard it). */
-    size_t capturedRank = inferenceStats->output->shape->numberOfDimensions;
-    size_t capturedDim0 = inferenceStats->output->shape->dimensions[0];
-    size_t capturedDim1 =
-        (capturedRank >= 2) ? inferenceStats->output->shape->dimensions[1] : SIZE_MAX;
-    float capturedOutput[3];
-    float capturedRef[3];
-    for (size_t i = 0; i < 3; i++) {
-        capturedOutput[i] = ((float *)inferenceStats->output->data)[i];
-        capturedRef[i] = ((float *)ref->data)[i];
-    }
-
-    /* FREE in reverse-init order. */
-    freeTensor(ref);
-    freeInferenceStats(inferenceStats);
     freeReluLayer(relu);
     freeLinearLayer(linear);
     freeTensor(label);
     freeTensor(input);
     freeQuantization(q);
-
-    /* ASSERT on captured. */
-    TEST_ASSERT_EQUAL_size_t(2, capturedRank);
-    TEST_ASSERT_EQUAL_size_t(1, capturedDim0);
-    TEST_ASSERT_EQUAL_size_t(3, capturedDim1);
-    TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedRef, capturedOutput, 3);
 }
 
 void testInferenceLayerNormSymInt32(void) {
@@ -814,7 +785,7 @@ int main(void) {
     RUN_TEST(testInferenceOutputWireHonorsDeclaredQMaxBits);
 
     RUN_TEST(testInferenceWithLossLinearReluFloat);
-    RUN_TEST(testInferenceWithLossOutputShapeMatchesProducedOutputNotLabel);
+    RUN_TEST(testInferenceWithLossRejectsRank1LabelAgainstBatchedOutput);
 
     RUN_TEST(testInferenceBufferOutputCarriesBfpWire);
     RUN_TEST(testInferenceBufferInputCarriesBfpExponents);

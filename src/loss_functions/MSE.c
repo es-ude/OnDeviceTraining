@@ -5,6 +5,7 @@
 #include <stdlib.h>
 
 #include "Common.h"
+#include "LossFunctionInternal.h"
 #include "MSE.h"
 #include "Sub.h"
 #include "Tensor.h"
@@ -26,37 +27,6 @@ float mseLossForwardFloat(tensor_t *output, tensor_t *label, reduction_t reducti
         return sum / (float)size;
     }
     return sum;
-}
-
-/* PR4 adversarial gate (F1/F2, hoisted to the dispatchers by delta D0): every
- * operand of a loss must carry the MODEL OUTPUT's element count, and the check
- * belongs at the PUBLIC entry because EVERY arm needs it — not just the
- * fake-quant one that first exposed it.
- *
- * Fake-quant arms: each scratch is a VLA sized from the output's count while it
- * borrows ITS OWN tensor's shape_t, and every convertTensor walks that borrowed
- * count — so a longer LABEL is decoded past the end of its scratch on the way
- * in, and a longer RESULT is read past the end of its scratch on the way out.
- * FLOAT32 arms: they index every operand at the OUTPUT's count, so the surplus
- * end of a longer operand is merely ignored while a SHORTER one is read — and
- * for the backward's result, WRITTEN — out of bounds. Two different mechanisms,
- * one precondition, therefore one guard above the switch rather than one per
- * arm.
- *
- * Fail fast rather than clamp to the shorter side: an operand-count mismatch is
- * a caller's shape bug, and silently scoring the first n elements would hide it.
- * The *Float entry points stay unguarded on purpose — they are the arm bodies,
- * reachable directly only from tests; the dispatcher is the guarded API. */
-static void requireOperandMatchesOutput(tensor_t *output, tensor_t *operand,
-                                        const char *operandName, const char *what) {
-    size_t outputCount = calcNumberOfElementsByTensor(output);
-    size_t operandCount = calcNumberOfElementsByTensor(operand);
-    if (outputCount != operandCount) {
-        PRINT_ERROR("%s: %s element count (%zu) does not match the model output (%zu) -- every "
-                    "operand of a loss must carry the output's element count",
-                    what, operandName, operandCount, outputCount);
-        exit(1);
-    }
 }
 
 /* Fake-quant arm — dtype-generic by construction (CrossEntropy.c's naming and

@@ -12,22 +12,24 @@
 #include <string.h>
 
 void testMSEForward_MeanReturnsPerSampleMean() {
-    /* Output (1D, 3 elements). Today B=1, so numFeaturesPerSample = 3. */
-    size_t *outputDims = reserveMemory(1 * sizeof(size_t));
-    outputDims[0] = 3;
-    size_t *outputOrder = reserveMemory(1 * sizeof(size_t));
-    setOrderOfDimsForNewTensor(1, outputOrder);
+    /* Output [1, 3]: B = 1, F = 3. */
+    size_t *outputDims = reserveMemory(2 * sizeof(size_t));
+    outputDims[0] = 1;
+    outputDims[1] = 3;
+    size_t *outputOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, outputOrder);
     shape_t *outputShape = reserveMemory(sizeof(shape_t));
-    setShape(outputShape, outputDims, 1, outputOrder);
+    setShape(outputShape, outputDims, 2, outputOrder);
     tensor_t *output = initTensor(outputShape, quantizationInitFloat(), NULL);
     tensorFillFromFloatBuffer(output, (float[]){1.f, 2.f, 3.f}, 3);
 
-    size_t *labelDims = reserveMemory(1 * sizeof(size_t));
-    labelDims[0] = 3;
-    size_t *labelOrder = reserveMemory(1 * sizeof(size_t));
-    setOrderOfDimsForNewTensor(1, labelOrder);
+    size_t *labelDims = reserveMemory(2 * sizeof(size_t));
+    labelDims[0] = 1;
+    labelDims[1] = 3;
+    size_t *labelOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, labelOrder);
     shape_t *labelShape = reserveMemory(sizeof(shape_t));
-    setShape(labelShape, labelDims, 1, labelOrder);
+    setShape(labelShape, labelDims, 2, labelOrder);
     tensor_t *label = initTensor(labelShape, quantizationInitFloat(), NULL);
     tensorFillFromFloatBuffer(label, (float[]){2.f, 4.f, 6.f}, 3);
 
@@ -41,21 +43,24 @@ void testMSEForward_MeanReturnsPerSampleMean() {
 }
 
 void testMSEForward_SumReturnsRawSum() {
-    size_t *outputDims = reserveMemory(1 * sizeof(size_t));
-    outputDims[0] = 3;
-    size_t *outputOrder = reserveMemory(1 * sizeof(size_t));
-    setOrderOfDimsForNewTensor(1, outputOrder);
+    /* Output [1, 3]: B = 1, F = 3. */
+    size_t *outputDims = reserveMemory(2 * sizeof(size_t));
+    outputDims[0] = 1;
+    outputDims[1] = 3;
+    size_t *outputOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, outputOrder);
     shape_t *outputShape = reserveMemory(sizeof(shape_t));
-    setShape(outputShape, outputDims, 1, outputOrder);
+    setShape(outputShape, outputDims, 2, outputOrder);
     tensor_t *output = initTensor(outputShape, quantizationInitFloat(), NULL);
     tensorFillFromFloatBuffer(output, (float[]){1.f, 2.f, 3.f}, 3);
 
-    size_t *labelDims = reserveMemory(1 * sizeof(size_t));
-    labelDims[0] = 3;
-    size_t *labelOrder = reserveMemory(1 * sizeof(size_t));
-    setOrderOfDimsForNewTensor(1, labelOrder);
+    size_t *labelDims = reserveMemory(2 * sizeof(size_t));
+    labelDims[0] = 1;
+    labelDims[1] = 3;
+    size_t *labelOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, labelOrder);
     shape_t *labelShape = reserveMemory(sizeof(shape_t));
-    setShape(labelShape, labelDims, 1, labelOrder);
+    setShape(labelShape, labelDims, 2, labelOrder);
     tensor_t *label = initTensor(labelShape, quantizationInitFloat(), NULL);
     tensorFillFromFloatBuffer(label, (float[]){2.f, 4.f, 6.f}, 3);
 
@@ -106,9 +111,9 @@ void testMSELossBackward_FloatWritesRawPerElementGrad() {
 
 void testMSELossBackward_SymInt32WritesRawPerElementGrad() {
     size_t numberOfElements = 3;
-    size_t dims[] = {numberOfElements};
-    size_t orderOfDims[] = {0};
-    shape_t shape = {.dimensions = dims, .orderOfDimensions = orderOfDims, .numberOfDimensions = 1};
+    size_t dims[] = {1, numberOfElements};
+    size_t orderOfDims[] = {0, 1};
+    shape_t shape = {.dimensions = dims, .orderOfDimensions = orderOfDims, .numberOfDimensions = 2};
 
     tensor_t modelOutput;
     quantization_t modelOutputQ;
@@ -159,7 +164,7 @@ void testMSELossBackward_SymInt32WritesRawPerElementGrad() {
     mseLossBackward(&modelOutputSymInt32, &labelSymInt32, &resultSymInt32);
     convertTensor(&resultSymInt32, &result);
 
-    /* Raw per-element gradient: same shape as float test, allow wider tolerance for fixed-point. */
+    /* Raw per-element gradient over the [1, 3] wire; wider tolerance for fixed-point. */
     float expected[] = {12.f, 12.f, -10.f};
     float *actual = (float *)result.data;
     for (size_t i = 0; i < numberOfElements; i++) {
@@ -203,6 +208,23 @@ static tensor_t *buildFloatTensor1D(size_t n, const float *values) {
     setShape(shape, dims, 2, order);
     tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
     tensorFillFromFloatBuffer(t, (float *)values, n);
+    return t;
+}
+
+/* Heap FLOAT32 tensor of any rank >= 1 with the given dims, filled from values. */
+static tensor_t *buildFloatTensorShaped(const size_t *dims, size_t rank, float *values) {
+    size_t *d = reserveMemory(rank * sizeof(size_t));
+    size_t n = 1;
+    for (size_t k = 0; k < rank; k++) {
+        d[k] = dims[k];
+        n *= dims[k];
+    }
+    size_t *order = reserveMemory(rank * sizeof(size_t));
+    setOrderOfDimsForNewTensor(rank, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, d, rank, order);
+    tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(t, values, n);
     return t;
 }
 
@@ -356,6 +378,94 @@ void testMseLossBackwardFloat32RejectsResultCountMismatch(void) {
     freeTensor(modelOutput);
 }
 
+/* #153: every loss operand must have the model output's exact shape, and the
+ * output must be [B, ...] with a feature axis and at least one element.
+ * Each fixture below (except the leading-axis one) passes the old
+ * count-only check, so only the shape check can reject it. */
+void testMseLossForwardRejectsRank1Output(void) {
+    size_t dims[] = {3};
+    tensor_t *output = buildFloatTensorShaped(dims, 1, (float[]){1.f, 2.f, 3.f});
+    tensor_t *label = buildFloatTensorShaped(dims, 1, (float[]){2.f, 4.f, 6.f});
+    ASSERT_EXITS_WITH_FAILURE((void)mseLossForward(output, label, REDUCTION_MEAN));
+    freeTensor(label);
+    freeTensor(output);
+}
+
+/* Empty tensors are stack-built: a heap N = 0 allocation is
+ * implementation-defined (#160). */
+static void expectMseForwardDiesOnEmpty(size_t d0, size_t d1) {
+    size_t dims[] = {d0, d1};
+    size_t order[] = {0, 1};
+    shape_t shape;
+    setShape(&shape, dims, 2, order);
+    quantization_t q;
+    initFloat32Quantization(&q);
+    float dummy[1] = {0.f};
+    tensor_t output;
+    tensor_t label;
+    setTensorValues(&output, (uint8_t *)dummy, &shape, &q, NULL);
+    setTensorValues(&label, (uint8_t *)dummy, &shape, &q, NULL);
+    ASSERT_EXITS_WITH_FAILURE((void)mseLossForward(&output, &label, REDUCTION_MEAN));
+}
+
+void testMseLossForwardRejectsEmptyBatch(void) {
+    expectMseForwardDiesOnEmpty(0, 3);
+}
+
+void testMseLossForwardRejectsEmptyFeatureAxis(void) {
+    expectMseForwardDiesOnEmpty(1, 0);
+}
+
+void testMseLossForwardRejectsLabelRankMismatch(void) {
+    size_t outDims[] = {1, 6};
+    size_t labelDims[] = {1, 6, 1};
+    float v[6] = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f};
+    tensor_t *output = buildFloatTensorShaped(outDims, 2, v);
+    tensor_t *label = buildFloatTensorShaped(labelDims, 3, v);
+    ASSERT_EXITS_WITH_FAILURE((void)mseLossForward(output, label, REDUCTION_MEAN));
+    freeTensor(label);
+    freeTensor(output);
+}
+
+/* Only dims[0] differs. Equal counts cannot isolate axis 0, so the label is
+ * LONGER: the FLOAT32 arm reads just the output's 3 elements and returns
+ * normally if the axis-0 compare is missing (clean exit-0 RED, no OOB). */
+void testMseLossForwardRejectsLeadingAxisMismatch(void) {
+    size_t outDims[] = {1, 3};
+    size_t labelDims[] = {2, 3};
+    float v[6] = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f};
+    tensor_t *output = buildFloatTensorShaped(outDims, 2, v);
+    tensor_t *label = buildFloatTensorShaped(labelDims, 2, v);
+    ASSERT_EXITS_WITH_FAILURE((void)mseLossForward(output, label, REDUCTION_MEAN));
+    freeTensor(label);
+    freeTensor(output);
+}
+
+/* Same rank, same dims[0], same count: only a full-shape compare catches it
+ * (a [B, C, L] label against a [B, L, C] output). */
+void testMseLossForwardRejectsTransposedFeatureLayout(void) {
+    size_t outDims[] = {1, 2, 3};
+    size_t labelDims[] = {1, 3, 2};
+    float v[6] = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f};
+    tensor_t *output = buildFloatTensorShaped(outDims, 3, v);
+    tensor_t *label = buildFloatTensorShaped(labelDims, 3, v);
+    ASSERT_EXITS_WITH_FAILURE((void)mseLossForward(output, label, REDUCTION_MEAN));
+    freeTensor(label);
+    freeTensor(output);
+}
+
+/* Over-rejection guard: a rank-3 output with a real leading-1 feature axis
+ * (ECG's [1, 1, 140] shape) must still be scored. */
+void testMseLossForwardAcceptsMatchingRank3Shapes(void) {
+    size_t dims[] = {1, 1, 4};
+    tensor_t *output = buildFloatTensorShaped(dims, 3, (float[]){1.f, 2.f, 3.f, 4.f});
+    tensor_t *label = buildFloatTensorShaped(dims, 3, (float[]){2.f, 2.f, 3.f, 6.f});
+    float loss = mseLossForward(output, label, REDUCTION_SUM);
+    freeTensor(label);
+    freeTensor(output);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 5.0f, loss); /* 1 + 0 + 0 + 4 */
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -375,6 +485,14 @@ int main(void) {
     RUN_TEST(testMseLossBackwardBfpRejectsResultCountMismatch);
     RUN_TEST(testMseLossForwardFloat32RejectsLabelCountMismatch);
     RUN_TEST(testMseLossBackwardFloat32RejectsResultCountMismatch);
+
+    RUN_TEST(testMseLossForwardRejectsRank1Output);
+    RUN_TEST(testMseLossForwardRejectsEmptyBatch);
+    RUN_TEST(testMseLossForwardRejectsEmptyFeatureAxis);
+    RUN_TEST(testMseLossForwardRejectsLabelRankMismatch);
+    RUN_TEST(testMseLossForwardRejectsLeadingAxisMismatch);
+    RUN_TEST(testMseLossForwardRejectsTransposedFeatureLayout);
+    RUN_TEST(testMseLossForwardAcceptsMatchingRank3Shapes);
 
     return UNITY_END();
 }

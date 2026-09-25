@@ -219,6 +219,48 @@ static void freeSeedFixture(seedFixture_t *f) {
 #define SEED_ACT2 2u
 #define SEED_GRAD2 3u
 
+/* examples/mnist_cnn/train_c.c:151-181 (B = 1; the loop feeds [1, 1, 784]). */
+#define MNIST_N 10
+static void buildMnistCnn(layer_t **model) {
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, &g_floatQ);
+    model[0] = conv1dLayerInit(
+        &(conv1dInit_t){.inChannels = 1, .outChannels = 8, .kernelSize = 3, .padding = SAME}, &lq);
+    model[1] = reluLayerInit(&lq);
+    model[2] = maxPool1dLayerInit(
+        &(maxPool1dInit_t){.kernelSize = 2, .stride = 2, .inputChannels = 8, .inputLength = 784},
+        &lq);
+    model[3] = conv1dLayerInit(
+        &(conv1dInit_t){.inChannels = 8, .outChannels = 16, .kernelSize = 3, .padding = SAME}, &lq);
+    model[4] = reluLayerInit(&lq);
+    model[5] = maxPool1dLayerInit(
+        &(maxPool1dInit_t){.kernelSize = 2, .stride = 2, .inputChannels = 16, .inputLength = 392},
+        &lq);
+    model[6] = avgPool1dLayerInit(&(avgPool1dInit_t){.kernelSize = 196, .stride = 196}, &lq);
+    model[7] = flattenLayerInit();
+    model[8] = linearLayerInit(&(linearInit_t){.inFeatures = 16, .outFeatures = 10}, &lq);
+    model[9] = softmaxLayerInit(&lq);
+}
+
+static rematPlan_t *buildPlan(const rematWireTable_t *t, layer_t **model,
+                              const rematPlanSpec_t *spec) {
+    rematPlan_t *p = NULL;
+    TEST_ASSERT_TRUE(rematPlanBuild(&p, t, model, spec));
+    TEST_ASSERT_NOT_NULL(p);
+    return p;
+}
+
+/* Builds table + plan for a fixture model and returns the plan's peak. */
+static size_t peakOf(layer_t **model, size_t n, lossFuncType_t lt, const tensor_t *x,
+                     const rematPlanSpec_t *spec) {
+    rematWireTable_t *t = initTable(model, n, lt, x);
+    rematPlan_t *p = buildPlan(t, model, spec);
+    size_t peak = p->train.peakLiveBytes;
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    return peak;
+}
+
 /* ---- rematBackwardRange (spec §4.3, §12.1) ---- */
 
 void testBackwardRangeMseRunsFromLastLayerToDeepest(void) {
@@ -1617,6 +1659,265 @@ void testWireReleasePoisonsTheOldBytesByDtype(void) {
 }
 #endif
 
+/* ---- the static plan (spec §4) ---- */
+
+/* §4.3: FORWARD 0..n-1, LOSS_FORWARD, LOSS_BACKWARD, BACKWARD top..deepest.
+ * HAR: 12 + 1 + 1 + 11 = 25 steps (§12.2 item 10 pin). */
+void testStoreAllHarStepOrder(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    rematPlan_t *p = buildPlan(t, model, NULL);
+    const rematProgram_t *train = &p->train;
+    TEST_ASSERT_EQUAL_size_t(25, train->numSteps);
+    for (uint16_t l = 0; l < 12; l++) {
+        TEST_ASSERT_EQUAL_UINT8(REMAT_STEP_FORWARD, train->steps[l].kind);
+        TEST_ASSERT_EQUAL_UINT16(l, train->steps[l].layer);
+    }
+    TEST_ASSERT_EQUAL_UINT8(REMAT_STEP_LOSS_FORWARD, train->steps[12].kind);
+    TEST_ASSERT_EQUAL_UINT16(12, train->steps[12].layer);
+    TEST_ASSERT_EQUAL_UINT8(REMAT_STEP_LOSS_BACKWARD, train->steps[13].kind);
+    TEST_ASSERT_EQUAL_UINT16(12, train->steps[13].layer);
+    for (uint16_t k = 0; k < 11; k++) { /* BACKWARD(l) = n + 2 + (top - l), top = 10 */
+        TEST_ASSERT_EQUAL_UINT8(REMAT_STEP_BACKWARD, train->steps[14 + k].kind);
+        TEST_ASSERT_EQUAL_UINT16(10 - k, train->steps[14 + k].layer);
+    }
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+/* §4.4 STORE_ALL: ACT j [FORWARD(j-1), last step]; seed [LOSS_BACKWARD,
+ * BACKWARD(top)]; GRAD l [BACKWARD(l), BACKWARD(l-1)]. One range per slab
+ * wire, in wire-id order, begins strictly ascending. */
+void testStoreAllHarRanges(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    rematPlan_t *p = buildPlan(t, model, NULL);
+    const rematProgram_t *train = &p->train;
+    TEST_ASSERT_EQUAL_size_t(23, train->numRanges);
+    for (uint16_t j = 1; j <= 12; j++) {
+        TEST_ASSERT_EQUAL_UINT16(j, train->ranges[j - 1].wire);
+        TEST_ASSERT_EQUAL_UINT16(j - 1, train->ranges[j - 1].begin);
+        TEST_ASSERT_EQUAL_UINT16(24, train->ranges[j - 1].end);
+    }
+    TEST_ASSERT_EQUAL_UINT16(13, train->ranges[12].wire); /* the seed */
+    TEST_ASSERT_EQUAL_UINT16(13, train->ranges[12].begin);
+    TEST_ASSERT_EQUAL_UINT16(14, train->ranges[12].end);
+    for (uint16_t id = 14; id < 24; id++) {
+        uint16_t l = t->wires[id].index;
+        TEST_ASSERT_EQUAL_UINT16(id, train->ranges[id - 1].wire);
+        TEST_ASSERT_EQUAL_UINT16(14 + (10 - l), train->ranges[id - 1].begin);
+        TEST_ASSERT_EQUAL_UINT16(14 + (10 - (l - 1)), train->ranges[id - 1].end);
+    }
+    for (size_t r = 1; r < train->numRanges; r++) {
+        TEST_ASSERT_TRUE(train->ranges[r - 1].begin < train->ranges[r].begin);
+    }
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+void testEndOrderSortsRangeIdsByEndThenWire(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    rematPlan_t *p = buildPlan(t, model, NULL);
+    const rematProgram_t *train = &p->train;
+    bool seen[23] = {false};
+    for (size_t k = 0; k < train->numRanges; k++) {
+        uint16_t r = train->endOrder[k];
+        TEST_ASSERT_TRUE(r < train->numRanges);
+        TEST_ASSERT_FALSE(seen[r]);
+        seen[r] = true;
+        if (k > 0) {
+            const rematRange_t *prev = &train->ranges[train->endOrder[k - 1]];
+            const rematRange_t *cur = &train->ranges[r];
+            TEST_ASSERT_TRUE(prev->end < cur->end ||
+                             (prev->end == cur->end && prev->wire < cur->wire));
+        }
+    }
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+/* §4.2: walking every step opens each range at its begin and closes it at its
+ * end, exactly once. */
+void testWalkOpensAndClosesEachRangeOnceAtItsEndpoints(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    rematPlan_t *p = buildPlan(t, model, NULL);
+    const rematProgram_t *train = &p->train;
+    uint8_t opened[23] = {0};
+    uint8_t closed[23] = {0};
+    rematWalk_t walk = {0};
+    for (walk.step = 0; walk.step < train->numSteps; walk.step++) {
+        for (size_t r; (r = rematWalkOpening(train, &walk)) != REMAT_NONE;) {
+            TEST_ASSERT_EQUAL_size_t(walk.step, train->ranges[r].begin);
+            opened[r]++;
+        }
+        for (size_t r; (r = rematWalkClosing(train, &walk)) != REMAT_NONE;) {
+            TEST_ASSERT_EQUAL_size_t(walk.step, train->ranges[r].end);
+            closed[r]++;
+        }
+    }
+    for (size_t r = 0; r < train->numRanges; r++) {
+        TEST_ASSERT_EQUAL_UINT8(1, opened[r]);
+        TEST_ASSERT_EQUAL_UINT8(1, closed[r]);
+    }
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+/* §12.2 item 10: scan-model pins, written once, never retyped (plan header). */
+void testStoreAllPeakHarIs74288(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    TEST_ASSERT_EQUAL_size_t(74288, peakOf(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in), NULL));
+    freeModel(model, HAR_N);
+}
+
+void testStoreAllPeakMnistCnnIs175824(void) {
+    layer_t *model[MNIST_N];
+    buildMnistCnn(model);
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 1, 784}, 3, &g_floatQ);
+    TEST_ASSERT_EQUAL_size_t(175824, peakOf(model, MNIST_N, CROSS_ENTROPY, x, NULL));
+    freeModel(model, MNIST_N);
+}
+
+/* #380: three convs frozen leaves only Linear(10) trainable, so deepest ==
+ * top == 10 and the backward phase truncates to a single BACKWARD step; the
+ * seed is the only GRAD wire (its range ends at that one step, not after a
+ * multi-layer descent). */
+void testStoreAllPeakFinetuneStage2Is57928(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, true);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    rematPlan_t *p = buildPlan(t, model, NULL);
+    const rematProgram_t *train = &p->train;
+    TEST_ASSERT_EQUAL_size_t(57928, train->peakLiveBytes);
+    TEST_ASSERT_EQUAL_size_t(15, train->numSteps);
+    TEST_ASSERT_EQUAL_UINT8(REMAT_STEP_BACKWARD, train->steps[14].kind);
+    TEST_ASSERT_EQUAL_UINT16(10, train->steps[14].layer);
+    TEST_ASSERT_EQUAL_UINT16(14, train->ranges[12].end);
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+/* §4.7: one block of steps, ranges and endOrder. HAR TRAIN arrays:
+ * 25 * 4 + 23 * 6 + 23 * 2 = 284 B after the (even-sized) plan struct. */
+void testPlanBlockHoldsStepsRangesAndEndOrder(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    rematPlan_t *p = buildPlan(t, model, NULL);
+    TEST_ASSERT_EQUAL_size_t(sizeof(rematPlan_t) + 284u, p->blockBytes);
+    const uint8_t *begin = (const uint8_t *)p;
+    const uint8_t *end = begin + p->blockBytes;
+    TEST_ASSERT_TRUE((const uint8_t *)p->train.steps >= begin + sizeof(rematPlan_t));
+    TEST_ASSERT_TRUE((const uint8_t *)(p->train.endOrder + p->train.numRanges) <= end);
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+#ifdef ODT_MEM_PROFILE
+void testPlanBuildReservesOneBlockAndFreeReturnsIt(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    size_t before = memProfileCurrentBytes();
+    rematPlan_t *p = buildPlan(t, model, NULL);
+    TEST_ASSERT_EQUAL_size_t(before + p->blockBytes, memProfileCurrentBytes());
+    rematPlanFree(p);
+    TEST_ASSERT_EQUAL_size_t(before, memProfileCurrentBytes());
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+#endif
+
+/* §4.4: NULL, or a zero-initialised spec, means STORE_ALL. */
+void testNullOrZeroedSpecMeansStoreAll(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    rematPlan_t *fromNull = buildPlan(t, model, NULL);
+    rematPlan_t *fromZero = buildPlan(t, model, &(rematPlanSpec_t){0});
+    TEST_ASSERT_EQUAL_INT(REMAT_PLAN_STORE_ALL, fromNull->policy);
+    TEST_ASSERT_EQUAL_INT(REMAT_PLAN_STORE_ALL, fromZero->policy);
+    TEST_ASSERT_EQUAL_MEMORY(fromNull->train.ranges, fromZero->train.ranges,
+                             fromNull->train.numRanges * sizeof(rematRange_t));
+    rematPlanFree(fromNull);
+    rematPlanFree(fromZero);
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+/* RF4: an uninitialised stack spec must not become a garbage plan. */
+void testPlanBuildExitsOnAnUnknownPolicy(void) {
+    layer_t *model[1] = {makeRelu(&g_floatQ)};
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, 1, MSE, makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ));
+    rematPlan_t *p = NULL;
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "rematPlanBuild: unknown policy 7",
+        (void)rematPlanBuild(&p, t, model, &(rematPlanSpec_t){.policy = (rematPlanPolicy_t)7}));
+    rematWireTableFree(t);
+    freeModel(model, 1);
+}
+
+/* D20: n = 1 under CE has LOSS_BACKWARD but no BACKWARD (top = -1 < deepest);
+ * the seed lives [LOSS_BACKWARD, LOSS_BACKWARD]. */
+void testSingleLayerUnderCrossEntropyHasASeedButNoBackwardStep(void) {
+    layer_t *model[1] = {makeLinear(2, 3, false)};
+    inputLike_t in;
+    rematWireTable_t *t =
+        initTable(model, 1, CROSS_ENTROPY, makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ));
+    rematPlan_t *p = buildPlan(t, model, NULL);
+    TEST_ASSERT_EQUAL_size_t(3, p->train.numSteps);
+    TEST_ASSERT_EQUAL_UINT8(REMAT_STEP_LOSS_BACKWARD, p->train.steps[2].kind);
+    TEST_ASSERT_EQUAL_size_t(2, p->train.numRanges);
+    TEST_ASSERT_EQUAL_UINT16(2, p->train.ranges[1].wire);
+    TEST_ASSERT_EQUAL_UINT16(2, p->train.ranges[1].begin);
+    TEST_ASSERT_EQUAL_UINT16(2, p->train.ranges[1].end);
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, 1);
+}
+
+/* All frozen: no LOSS_BACKWARD, no GRAD wire (hasBackward false). */
+void testAllFrozenPlanHasNoBackwardPhase(void) {
+    layer_t *model[2] = {makeLinear(2, 4, true), makeRelu(&g_floatQ)};
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, 2, MSE, makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ));
+    rematPlan_t *p = buildPlan(t, model, NULL);
+    TEST_ASSERT_EQUAL_size_t(3, p->train.numSteps);
+    TEST_ASSERT_EQUAL_UINT8(REMAT_STEP_LOSS_FORWARD, p->train.steps[2].kind);
+    TEST_ASSERT_EQUAL_size_t(2, p->train.numRanges);
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, 2);
+}
+
+void testPlanFreeIsNullSafe(void) {
+    ASSERT_EXITS_WITH(0, rematPlanFree(NULL));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testBackwardRangeMseRunsFromLastLayerToDeepest);
@@ -1698,5 +1999,21 @@ int main(void) {
     RUN_TEST(testWireBindPoisonsFreshBytesByDtype);
     RUN_TEST(testWireReleasePoisonsTheOldBytesByDtype);
 #endif
+    RUN_TEST(testStoreAllHarStepOrder);
+    RUN_TEST(testStoreAllHarRanges);
+    RUN_TEST(testEndOrderSortsRangeIdsByEndThenWire);
+    RUN_TEST(testWalkOpensAndClosesEachRangeOnceAtItsEndpoints);
+    RUN_TEST(testStoreAllPeakHarIs74288);
+    RUN_TEST(testStoreAllPeakMnistCnnIs175824);
+    RUN_TEST(testStoreAllPeakFinetuneStage2Is57928);
+    RUN_TEST(testPlanBlockHoldsStepsRangesAndEndOrder);
+#ifdef ODT_MEM_PROFILE
+    RUN_TEST(testPlanBuildReservesOneBlockAndFreeReturnsIt);
+#endif
+    RUN_TEST(testNullOrZeroedSpecMeansStoreAll);
+    RUN_TEST(testPlanBuildExitsOnAnUnknownPolicy);
+    RUN_TEST(testSingleLayerUnderCrossEntropyHasASeedButNoBackwardStep);
+    RUN_TEST(testAllFrozenPlanHasNoBackwardPhase);
+    RUN_TEST(testPlanFreeIsNullSafe);
     return UNITY_END();
 }

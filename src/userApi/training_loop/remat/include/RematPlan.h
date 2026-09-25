@@ -8,6 +8,7 @@
 #include "Layer.h"
 #include "LossFunction.h"
 #include "Quantization.h"
+#include "RematScheduler.h"
 #include "Tensor.h"
 
 /* Internal to the remat libraries (#4, spec §3-§4): the row inits, the
@@ -145,5 +146,40 @@ tensor_t *rematGradHdr(const rematWireTable_t *t, size_t j); /* j == n: the seed
 uint16_t rematActId(const rematWireTable_t *t, size_t j);
 uint16_t rematGradId(const rematWireTable_t *t, size_t j); /* REMAT_NONE if absent */
 size_t rematWireBytes(const rematWireTable_t *t, uint16_t w);
+
+/* One inclusive range per slab wire in PR1: begin = its producing step, end =
+ * its last reader (policy-dependent). No placement (ARENA offsets are private
+ * to the row). */
+typedef struct rematRange {
+    uint16_t wire, begin, end;
+} rematRange_t;
+
+typedef struct rematProgram {
+    size_t numSteps;
+    rematStep_t *steps;
+    size_t numRanges;
+    rematRange_t *ranges; /* begin-sorted, ties by wire id */
+    uint16_t *endOrder;   /* range ids sorted by end, ties by wire id */
+    size_t peakLiveBytes; /* exact bytes, ACT 0 excluded: the POET x-axis, wires_peak_b */
+} rematProgram_t;
+
+typedef struct rematPlan {
+    rematPlanPolicy_t policy;
+    rematProgram_t train;
+    size_t blockBytes; /* the one plan block, struct included */
+} rematPlan_t;
+
+/* Generates the TRAIN program for the table's built model in ONE reserveMemory
+ * block. The model feeds the read-set rule only; the backward range comes from
+ * the table. Returns false only when reserveMemory fails. */
+bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **model,
+                    const rematPlanSpec_t *spec);
+void rematPlanFree(rematPlan_t *p); /* NULL-safe */
+
+/* O(1) amortised: the next range with begin == w->step (resp. end == w->step,
+ * in endOrder), or REMAT_NONE. Call both every step, openings first. A row
+ * zeroes its rematWalk_t at the start of each call. */
+size_t rematWalkOpening(const rematProgram_t *p, rematWalk_t *w);
+size_t rematWalkClosing(const rematProgram_t *p, rematWalk_t *w);
 
 #endif // ODT_REMAT_PLAN_H

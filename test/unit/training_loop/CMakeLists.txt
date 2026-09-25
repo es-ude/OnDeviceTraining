@@ -33,3 +33,38 @@ add_elastic_ai_unit_test(
         RNG
         odt_test_layer_builders
 )
+
+# Remat PR1a (#4): the RematPlan library (buffer table + static plan). Fixture
+# models are built with the real layer factories.
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
+        RematPlan
+        MORE_LIBS
+        CommonLayerLibs
+        Conv1dApi
+        LinearApi
+        ReluApi
+        SoftmaxApi
+        FlattenApi
+        Pool1dApi
+        LayerNormApi
+        QuantLayerApi
+        Kernel
+        LayerQuant
+        LayerCommon
+        LayerConfigAccess
+        ArithmeticType
+        QuantizationApi
+        Quantization
+        Rounding
+        TensorApi
+        Tensor
+        StorageApi
+        Common
+        LossFunction
+        Distributions
+        RNG
+        Serialize
+        Deserialize
+        odt_test_death
+)

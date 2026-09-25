@@ -172,7 +172,8 @@
         "StorageApi", "QuantizationApi", "TensorApi", "LayerConfigAccess",
         "DataLoader", "DataLoaderApi", "OptimizerApi", "InferenceApi",
         "TrainingBatchDefault", "TrainingEpochDefault", "TrainingLoopApi",
-        "CalculateGradsSequential"
+        "CalculateGradsSequential",
+        "RematPlan"
       ]
     }
   ],

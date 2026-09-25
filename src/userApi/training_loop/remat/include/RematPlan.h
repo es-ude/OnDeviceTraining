@@ -46,6 +46,22 @@ typedef struct rematWire {
     tensor_t *hdr; /* slab header; ACT 0: the caller's tensor between bind and unbind, else NULL */
 } rematWire_t;
 
+/* What a wire takes from a model and an input (spec §3.4 phase 1): the
+ * derivation record of rematWireTableInit and of every rematWireTableBind.
+ * Internal to RematWireTable.c; declared here so tests can size the
+ * derivation scratch, and so rematWireTable_t can hold the bind scratch. */
+typedef struct rematWireFact {
+    const quantization_t *tmpl; /* whose config this wire takes */
+    size_t elements;
+    size_t bytes;
+    size_t numGroups; /* BFP slab wires only, else 0 */
+    uint16_t index;
+    uint16_t inheritFrom;
+    uint8_t kind;
+    uint8_t dtype;
+    uint8_t rank;
+} rematWireFact_t;
+
 typedef struct rematWireTable {
     size_t modelSize;
     lossFuncType_t lossType;
@@ -61,25 +77,10 @@ typedef struct rematWireTable {
     size_t *inputDims;
     size_t *inputOrder;
     uint8_t inputType;
-    uint8_t maxRank;  /* max(inputRank, 2): bounds every wire rank, sizes the bind scratch */
-    size_t slabBytes; /* the whole table block, padding included, no trailing pad */
+    uint8_t maxRank; /* max(inputRank, 2): bounds every wire rank, sizes the bind scratch */
+    rematWireFact_t *bindScratch; /* [numWires], inside this block: every bind's phase-1 facts */
+    size_t slabBytes;             /* the whole table block, padding included, no trailing pad */
 } rematWireTable_t;
-
-/* What a wire takes from a model and an input (spec §3.4 phase 1): the
- * derivation record of rematWireTableInit and of every rematWireTableBind.
- * Internal to RematWireTable.c; declared here so tests can size the
- * derivation scratch. */
-typedef struct rematWireFact {
-    const quantization_t *tmpl; /* whose config this wire takes */
-    size_t elements;
-    size_t bytes;
-    size_t numGroups; /* BFP slab wires only, else 0 */
-    uint16_t index;
-    uint16_t inheritFrom;
-    uint8_t kind;
-    uint8_t dtype;
-    uint8_t rank;
-} rematWireFact_t;
 
 typedef struct rematBfpGroups {
     size_t numGroups;
@@ -109,6 +110,15 @@ bool rematWireTableInit(rematWireTable_t **out, layer_t **model, size_t n, lossC
                         const tensor_t *inputLike);
 /* NULL-safe. One freeReservedMemory; never freeTensor on a slab header. */
 void rematWireTableFree(rematWireTable_t *t);
+
+/* Re-derives every header's CONTENT from the live model and input (spec §3.4):
+ * shapes, config fields from the current templates, fresh dynamic state (SYM
+ * scale 1, BFP exponents at the stored bias). ACT 0 = input, verbatim.
+ * Inherited GRAD headers are derived later, by rematWireBind. Reserves
+ * nothing. */
+void rematWireTableBind(rematWireTable_t *t, layer_t **model, size_t n, lossFuncType_t lt,
+                        tensor_t *input);
+void rematWireTableUnbind(rematWireTable_t *t); /* ACT 0 hdr = NULL */
 
 /* Read-only accessors (rows, the checker, tests). */
 tensor_t *rematWireHdr(const rematWireTable_t *t, uint16_t w);

@@ -9,8 +9,10 @@
 #include "Common.h"
 #include "Conv1dApi.h"
 #include "DeathTest.h"
+#include "Deserialize.h"
 #include "FlattenApi.h"
 #include "Layer.h"
+#include "LayerNormApi.h"
 #include "LayerQuant.h"
 #include "LinearApi.h"
 #include "LossFunction.h"
@@ -19,6 +21,7 @@
 #include "Quantization.h"
 #include "ReluApi.h"
 #include "RematPlan.h"
+#include "Serialize.h"
 #include "SoftmaxApi.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -77,6 +80,9 @@ static void freeModel(layer_t **model, size_t n) {
             break;
         case QUANTIZATION:
             freeQuantLayer(model[i]);
+            break;
+        case LAYERNORM:
+            freeLayerNormLayer(model[i]);
             break;
         default:
             TEST_FAIL_MESSAGE("freeModel: extend the switch for this layer type");
@@ -160,6 +166,23 @@ static void buildHar(layer_t **model, bool freezeConvs) {
 
 static tensor_t *makeHarInput(inputLike_t *in) {
     return makeInput(in, (size_t[]){1, 9, 128}, 3, &g_floatQ);
+}
+
+static layer_t *makeLayerNorm(size_t features, bool frozen) {
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, &g_floatQ);
+    return layerNormLayerInit(
+        &(layerNormInit_t){.normalizedShape = (size_t[]){features},
+                           .numNormDims = 1,
+                           .trainable = frozen ? TRAINABLE_FALSE : TRAINABLE_DEFAULT},
+        &lq);
+}
+
+static void assertDims(const shape_t *shape, const size_t *dims, size_t rank) {
+    TEST_ASSERT_EQUAL_size_t(rank, shape->numberOfDimensions);
+    for (size_t d = 0; d < rank; d++) {
+        TEST_ASSERT_EQUAL_size_t(dims[d], shape->dimensions[d]);
+    }
 }
 
 /* ---- rematBackwardRange (spec §4.3, §12.1) ---- */
@@ -354,6 +377,18 @@ void testSharedGroupedBfpTemplateGroupsPerWire(void) {
     TEST_ASSERT_EQUAL_UINT16(2, t->wires[3].inheritFrom);
     TEST_ASSERT_EQUAL_size_t(4, t->wires[3].expCapacity);
     TEST_ASSERT_EQUAL_size_t(16, t->wires[3].bytes);
+
+    /* Pins the exponent tail's per-wire spacing so a SLAB_PLACE(...,
+     * f->numGroups, ...) regression to a fixed count cannot slip past this
+     * test. In wire order, each BFP wire's exponent array sits exactly its
+     * OWN expCapacity bytes before the next one's, and the last (wire 3, the
+     * seed) abuts the block end. */
+    bfpQConfig_t *qc1 = t->wires[1].hdr->quantization->qConfig;
+    bfpQConfig_t *qc2 = t->wires[2].hdr->quantization->qConfig;
+    bfpQConfig_t *qc3 = t->wires[3].hdr->quantization->qConfig;
+    TEST_ASSERT_EQUAL_PTR(qc1->exponents + t->wires[1].expCapacity, qc2->exponents);
+    TEST_ASSERT_EQUAL_PTR(qc2->exponents + t->wires[2].expCapacity, qc3->exponents);
+    TEST_ASSERT_EQUAL_PTR((uint8_t *)t + t->slabBytes, qc3->exponents + t->wires[3].expCapacity);
 
     rematWireTableFree(t);
     freeModel(model, 2);
@@ -683,6 +718,280 @@ void testTableInitExitsOnATotalWireBytesOverflow(void) {
     freeReluLayer(relu);
 }
 
+/* ---- per-bind re-derivation (spec §3.4, §3.5) ---- */
+
+void testBindWritesHarHeadersAndPointsAct0AtTheInput(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    tensor_t *x = makeHarInput(&in);
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, x);
+    rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, x);
+
+    TEST_ASSERT_EQUAL_PTR(x, rematActHdr(t, 0));
+    assertDims(rematActHdr(t, 1)->shape, (size_t[]){1, 16, 128}, 3);
+    assertDims(rematActHdr(t, 3)->shape, (size_t[]){1, 16, 64}, 3);
+    assertDims(rematActHdr(t, 9)->shape, (size_t[]){1, 64, 1}, 3);
+    assertDims(rematActHdr(t, 10)->shape, (size_t[]){1, 64}, 2);
+    assertDims(rematActHdr(t, 12)->shape, (size_t[]){1, 6}, 2);
+    assertDims(rematGradHdr(t, 3)->shape, (size_t[]){1, 16, 64}, 3);
+    assertDims(rematGradHdr(t, 10)->shape, (size_t[]){1, 64}, 2);
+    for (uint16_t id = 1; id < t->numWires; id++) {
+        TEST_ASSERT_NULL(rematWireHdr(t, id)->data);
+        TEST_ASSERT_EQUAL_INT(FLOAT32, rematWireHdr(t, id)->quantization->type);
+    }
+    /* Inherited headers (the seed, Flatten's dx) wait for rematWireBind. */
+    TEST_ASSERT_EQUAL_size_t(0, rematGradHdr(t, 12)->shape->dimensions[0]);
+    TEST_ASSERT_EQUAL_size_t(0, rematGradHdr(t, 9)->shape->dimensions[0]);
+
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+/* Forward wires copy the upstream order (ReLU, LayerNorm); a dx wire always
+ * gets identity order (CalculateGradsSequential.c:288-293). */
+void testBindCopiesForwardOrderAndGivesGradsIdentityOrder(void) {
+    layer_t *model[2] = {makeLayerNorm(4, false), makeRelu(&g_floatQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
+    in.order[0] = 1;
+    in.order[1] = 0;
+    rematWireTable_t *t = initTable(model, 2, MSE, x);
+    rematWireTableBind(t, model, 2, MSE, x);
+
+    TEST_ASSERT_EQUAL_size_t(1, rematActHdr(t, 1)->shape->orderOfDimensions[0]);
+    TEST_ASSERT_EQUAL_size_t(0, rematActHdr(t, 1)->shape->orderOfDimensions[1]);
+    assertDims(rematGradHdr(t, 1)->shape, (size_t[]){1, 4}, 2);
+    TEST_ASSERT_EQUAL_size_t(0, rematGradHdr(t, 1)->shape->orderOfDimensions[0]);
+    TEST_ASSERT_EQUAL_size_t(1, rematGradHdr(t, 1)->shape->orderOfDimensions[1]);
+
+    rematWireTableFree(t);
+    freeModel(model, 2);
+}
+
+#ifdef ODT_MEM_PROFILE
+/* G4: a bind derives into the slab and reserves nothing. */
+void testBindAllocatesNothing(void) {
+    uint8_t exponent[1];
+    bfpQConfig_t bfpQc;
+    initBfpQConfigInto(8, 8, HALF_AWAY, exponent, &bfpQc);
+    quantization_t bfpQ = {.type = BFP, .qConfig = &bfpQc};
+    layer_t *model[1] = {makeQuant(&bfpQ, &g_floatQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 8}, 2, &g_floatQ);
+    rematWireTable_t *t = initTable(model, 1, MSE, x);
+    size_t before = memProfileCurrentBytes();
+    rematWireTableBind(t, model, 1, MSE, x);
+    TEST_ASSERT_EQUAL_size_t(before, memProfileCurrentBytes());
+    rematWireTableFree(t);
+    freeModel(model, 1);
+}
+#endif
+
+/* §12.2 item 8 (table level): Quant outputQ @8 at build, @16 at the next bind;
+ * the dynamic scale restarts at its init value every bind. */
+void testBindRederivesSymQMaxBitsAndResetsScale(void) {
+    symInt32QConfig_t symQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &symQc, 8);
+    quantization_t symQ = {.type = SYM_INT32, .qConfig = &symQc};
+    layer_t *model[1] = {makeQuant(&symQ, &g_floatQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
+    rematWireTable_t *t = initTable(model, 1, MSE, x);
+    rematWireTableBind(t, model, 1, MSE, x);
+    symInt32QConfig_t *slabQc = rematActHdr(t, 1)->quantization->qConfig;
+    TEST_ASSERT_EQUAL_UINT8(8, slabQc->qMaxBits);
+
+    slabQc->scale = 0.25f; /* a producer's OUT_WRITE epilogue */
+    symQc.qMaxBits = 16;   /* key-preserving template edit between calls */
+    rematWireTableBind(t, model, 1, MSE, x);
+    TEST_ASSERT_EQUAL_UINT8(16, slabQc->qMaxBits);
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, slabQc->scale);
+
+    rematWireTableFree(t);
+    freeModel(model, 1);
+}
+
+/* §12.2 item 8 / §3.5: a deserializeModel into a skeleton whose wire width
+ * differs is a key-preserving config edit (ODTS writes the layer's outputQ in
+ * place, Deserialize.c:773), adopted at the next bind. */
+void testBindAfterDeserializeModel(void) {
+    symInt32QConfig_t savedQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &savedQc, 8);
+    quantization_t savedQ = {.type = SYM_INT32, .qConfig = &savedQc};
+    layer_t *saved[1] = {makeQuant(&savedQ, &g_floatQ)};
+    FILE *file = tmpfile();
+    TEST_ASSERT_NOT_NULL(file);
+    serializeModel(saved, 1, file);
+    rewind(file);
+
+    symInt32QConfig_t skeletonQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &skeletonQc, 16);
+    quantization_t skeletonQ = {.type = SYM_INT32, .qConfig = &skeletonQc};
+    layer_t *skeleton[1] = {makeQuant(&skeletonQ, &g_floatQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
+    rematWireTable_t *t = initTable(skeleton, 1, MSE, x);
+    rematWireTableBind(t, skeleton, 1, MSE, x);
+    symInt32QConfig_t *slabQc = rematActHdr(t, 1)->quantization->qConfig;
+    TEST_ASSERT_EQUAL_UINT8(16, slabQc->qMaxBits);
+
+    deserializeModel(skeleton, 1, file);
+    (void)fclose(file);
+    rematWireTableBind(t, skeleton, 1, MSE, x);
+    TEST_ASSERT_EQUAL_UINT8(8, slabQc->qMaxBits);
+
+    rematWireTableFree(t);
+    freeModel(skeleton, 1);
+    freeModel(saved, 1);
+}
+
+/* The rounding-mode half of §12.2's testBindRederivesRoundingModeAndDrawCount;
+ * the draw-count half needs the driver (PR2). */
+void testBindRederivesRoundingMode(void) {
+    symInt32QConfig_t symQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &symQc, 12);
+    quantization_t symQ = {.type = SYM_INT32, .qConfig = &symQc};
+    layer_t *model[1] = {makeQuant(&symQ, &g_floatQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
+    rematWireTable_t *t = initTable(model, 1, MSE, x);
+    rematWireTableBind(t, model, 1, MSE, x);
+    symQc.roundingMode = SR_HALF_AWAY;
+    rematWireTableBind(t, model, 1, MSE, x);
+    symInt32QConfig_t *slabQc = rematActHdr(t, 1)->quantization->qConfig;
+    TEST_ASSERT_EQUAL_INT(SR_HALF_AWAY, slabQc->roundingMode);
+    rematWireTableFree(t);
+    freeModel(model, 1);
+}
+
+/* §12.2 item 8: Flatten-at-0 re-inherits the live input's BFP grouping at
+ * every bind -- {4,4} -> {2,8} shrinks within the built capacity and succeeds,
+ * with fresh zero-state exponents. */
+void testBindRederivesFlattenBfpGroupingFromTheLiveInput(void) {
+    uint8_t inputExponents[4];
+    bfpQConfig_t inputQc;
+    initBfpQConfigGroupedInto(8, 8, HALF_AWAY, 4, 4, inputExponents, &inputQc);
+    quantization_t inputQ = {.type = BFP, .qConfig = &inputQc};
+    layer_t *model[1] = {flattenLayerInit()};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 4, 4}, 3, &inputQ);
+    rematWireTable_t *t = initTable(model, 1, MSE, x);
+    TEST_ASSERT_EQUAL_size_t(4, t->wires[1].expCapacity);
+    rematWireTableBind(t, model, 1, MSE, x);
+    bfpQConfig_t *slabQc = rematActHdr(t, 1)->quantization->qConfig;
+    TEST_ASSERT_EQUAL_size_t(4, slabQc->numGroups);
+    TEST_ASSERT_EQUAL_size_t(4, slabQc->groupSize);
+
+    slabQc->exponents[0] = 3; /* a producer's exponent write */
+    initBfpQConfigGroupedInto(8, 8, HALF_AWAY, 2, 8, inputExponents, &inputQc);
+    rematWireTableBind(t, model, 1, MSE, x);
+    TEST_ASSERT_EQUAL_size_t(2, slabQc->numGroups);
+    TEST_ASSERT_EQUAL_size_t(8, slabQc->groupSize);
+    TEST_ASSERT_EQUAL_UINT8(127, slabQc->exponents[0]); /* zero state: bias 2^(8-1)-1 */
+    TEST_ASSERT_EQUAL_UINT8(127, slabQc->exponents[1]);
+
+    rematWireTableFree(t);
+    freeModel(model, 1);
+}
+
+/* §12.2 item 8: SYM@12 -> @8 on the input carries qMaxBits 8 onto the Flatten
+ * wire, so a stale width cannot slip past the #227 operand guard. */
+void testBindCarriesSymQMaxBitsOntoTheFlattenWire(void) {
+    symInt32QConfig_t inputQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &inputQc, 12);
+    quantization_t inputQ = {.type = SYM_INT32, .qConfig = &inputQc};
+    layer_t *model[1] = {flattenLayerInit()};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 2, 3}, 3, &inputQ);
+    rematWireTable_t *t = initTable(model, 1, MSE, x);
+    rematWireTableBind(t, model, 1, MSE, x);
+    symInt32QConfig_t *slabQc = rematActHdr(t, 1)->quantization->qConfig;
+    TEST_ASSERT_EQUAL_UINT8(12, slabQc->qMaxBits);
+    inputQc.qMaxBits = 8;
+    rematWireTableBind(t, model, 1, MSE, x);
+    TEST_ASSERT_EQUAL_UINT8(8, slabQc->qMaxBits);
+    rematWireTableFree(t);
+    freeModel(model, 1);
+}
+
+/* RF3: a packed borrowed input re-quantized between calls (8 -> 4 bits) is a
+ * config edit, not a key change; the checker sizes ACT 0 from the live input. */
+void testBindFollowsTheLivePackedInputBytes(void) {
+    float scale = 1.f;
+    symQConfig_t inputQc = {
+        .scales = &scale, .numGroups = 1, .groupSize = 0, .roundingMode = HALF_AWAY, .qBits = 8};
+    quantization_t inputQ = {.type = SYM, .qConfig = &inputQc};
+    layer_t *model[1] = {makeRelu(&g_floatQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 8}, 2, &inputQ);
+    rematWireTable_t *t = initTable(model, 1, MSE, x);
+    TEST_ASSERT_EQUAL_size_t(8, rematWireBytes(t, 0));
+    inputQc.qBits = 4;
+    rematWireTableBind(t, model, 1, MSE, x);
+    TEST_ASSERT_EQUAL_size_t(4, rematWireBytes(t, 0));
+    rematWireTableFree(t);
+    freeModel(model, 1);
+}
+
+/* P9 (table level): ACT 0 is the caller's tensor verbatim -- a table built on
+ * sample A binds sample B, and B's header is not written. */
+void testBindRunsSampleBOnATableBuiltOnSampleA(void) {
+    layer_t *model[1] = {makeRelu(&g_floatQ)};
+    inputLike_t inA;
+    inputLike_t inB;
+    float bytesB[4] = {1.f, 2.f, 3.f, 4.f};
+    tensor_t *a = makeInput(&inA, (size_t[]){1, 4}, 2, &g_floatQ);
+    tensor_t *b = makeInput(&inB, (size_t[]){1, 4}, 2, &g_floatQ);
+    b->data = (uint8_t *)bytesB;
+    inputLike_t snapshot = inB;
+    rematWireTable_t *t = initTable(model, 1, MSE, a);
+    rematWireTableBind(t, model, 1, MSE, a);
+    rematWireTableBind(t, model, 1, MSE, b);
+    TEST_ASSERT_EQUAL_PTR(b, rematActHdr(t, 0));
+    TEST_ASSERT_EQUAL_PTR((uint8_t *)bytesB, b->data);
+    TEST_ASSERT_EQUAL_MEMORY(snapshot.dims, inB.dims, sizeof inB.dims);
+    TEST_ASSERT_EQUAL_MEMORY(snapshot.order, inB.order, sizeof inB.order);
+    TEST_ASSERT_EQUAL_PTR(&g_floatQ, b->quantization);
+    rematWireTableFree(t);
+    freeModel(model, 1);
+}
+
+/* Plan Assumption 29: the bind's per-wire derivation scratch lives inside the
+ * table block. LP64 layout arithmetic (not a scan-model pin): table struct 128
+ * + 24 records x 32 + gradIdOf 26 + layerType/frozen 24, rounded to 8, + the
+ * input key 48 = 1000; the bind scratch 24 x sizeof(rematWireFact_t) 40 = 960;
+ * 18 rank-3 headers x 120 + 5 rank-2 headers x 104 = 2680. Total 4640. Every
+ * host preset is LP64. */
+void testHarSlabHoldsTheBindScratch(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    TEST_ASSERT_EQUAL_size_t(4640, t->slabBytes);
+    const uint8_t *scratch = (const uint8_t *)t->bindScratch;
+    TEST_ASSERT_TRUE(scratch >= (const uint8_t *)(t->inputOrder + t->inputRank));
+    TEST_ASSERT_TRUE(scratch + t->numWires * sizeof(rematWireFact_t) <=
+                     (const uint8_t *)t->wires[1].hdr);
+    ASSERT_ALIGNED(t->bindScratch, rematWireFact_t);
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+void testUnbindClearsTheBorrowedInputOnly(void) {
+    layer_t *model[1] = {makeRelu(&g_floatQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
+    rematWireTable_t *t = initTable(model, 1, MSE, x);
+    rematWireTableBind(t, model, 1, MSE, x);
+    tensor_t *act1 = rematActHdr(t, 1);
+    rematWireTableUnbind(t);
+    TEST_ASSERT_NULL(rematActHdr(t, 0));
+    TEST_ASSERT_EQUAL_PTR(act1, rematActHdr(t, 1));
+    rematWireTableFree(t);
+    freeModel(model, 1);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testBackwardRangeMseRunsFromLastLayerToDeepest);
@@ -712,5 +1021,19 @@ int main(void) {
     RUN_TEST(testTableInitExitsOnAByteCountOverflowBeforeReservingTheTable);
     RUN_TEST(testTableInitExitsOnASlabSizeOverflow);
     RUN_TEST(testTableInitExitsOnATotalWireBytesOverflow);
+    RUN_TEST(testBindWritesHarHeadersAndPointsAct0AtTheInput);
+    RUN_TEST(testBindCopiesForwardOrderAndGivesGradsIdentityOrder);
+#ifdef ODT_MEM_PROFILE
+    RUN_TEST(testBindAllocatesNothing);
+#endif
+    RUN_TEST(testBindRederivesSymQMaxBitsAndResetsScale);
+    RUN_TEST(testBindAfterDeserializeModel);
+    RUN_TEST(testBindRederivesRoundingMode);
+    RUN_TEST(testBindRederivesFlattenBfpGroupingFromTheLiveInput);
+    RUN_TEST(testBindCarriesSymQMaxBitsOntoTheFlattenWire);
+    RUN_TEST(testBindFollowsTheLivePackedInputBytes);
+    RUN_TEST(testBindRunsSampleBOnATableBuiltOnSampleA);
+    RUN_TEST(testHarSlabHoldsTheBindScratch);
+    RUN_TEST(testUnbindClearsTheBorrowedInputOnly);
     return UNITY_END();
 }

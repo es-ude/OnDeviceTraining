@@ -222,6 +222,10 @@ static rematWireTable_t *layoutTable(slabLayout_t *layout, const rematWireFact_t
     uint8_t *frozen = SLAB_PLACE(layout, uint8_t, n, NULL);
     size_t *inputDims = SLAB_PLACE(layout, size_t, inputRank, NULL);
     size_t *inputOrder = SLAB_PLACE(layout, size_t, inputRank, NULL);
+    /* The bind's derivation scratch (plan Assumption 29): after the fixed-size
+     * key, before the headers, so the exponent arrays stay the block's tail. The
+     * cursor rule aligns it for rematWireFact_t like every other object. */
+    rematWireFact_t *bindScratch = SLAB_PLACE(layout, rematWireFact_t, numWires, NULL);
     if (t != NULL) {
         t->wires = wires;
         t->gradIdOf = gradIdOf;
@@ -229,6 +233,7 @@ static rematWireTable_t *layoutTable(slabLayout_t *layout, const rematWireFact_t
         t->frozen = frozen;
         t->inputDims = inputDims;
         t->inputOrder = inputOrder;
+        t->bindScratch = bindScratch;
         wires[0] = recordOf(&facts[0], NULL);
     }
     for (size_t id = 1; id < numWires; id++) {
@@ -369,6 +374,78 @@ bool rematWireTableInit(rematWireTable_t **out, layer_t **model, size_t n, lossC
 
 void rematWireTableFree(rematWireTable_t *t) {
     freeReservedMemory(t);
+}
+
+static void copyGradShape(shape_t *dst, const shape_t *src) {
+    memcpy(dst->dimensions, src->dimensions, src->numberOfDimensions * sizeof(size_t));
+    dst->numberOfDimensions = src->numberOfDimensions;
+    setOrderOfDimsForNewTensor(dst->numberOfDimensions, dst->orderOfDimensions);
+}
+
+static void bindBfpInto(rematWireTable_t *t, uint16_t id, const bfpQConfig_t *tmpl,
+                        size_t elements) {
+    const rematWire_t *w = &t->wires[id];
+    rematBfpGroups_t g = rematBfpWireGrouping(tmpl, elements, w->kind, w->index);
+    quantization_t *q = w->hdr->quantization;
+    bfpQConfig_t *qc = q->qConfig;
+    initBfpQConfigGroupedInto(tmpl->mantissaBits, tmpl->exponentBits, tmpl->roundingMode,
+                              g.numGroups, g.groupSize, qc->exponents, qc);
+    initBfpQuantization(qc, q);
+}
+
+/* Config fields from the template; dynamic state fresh (SYM scale 1, BFP
+ * exponents at the bias). The slab's structural pointers were set at init. */
+static void writeWireConfig(rematWireTable_t *t, uint16_t id, const quantization_t *tmpl,
+                            size_t elements) {
+    quantization_t *q = t->wires[id].hdr->quantization;
+    if (tmpl->type == FLOAT32) {
+        initFloat32Quantization(q);
+    } else if (tmpl->type == SYM_INT32) {
+        const symInt32QConfig_t *src = tmpl->qConfig;
+        symInt32QConfig_t *dst = q->qConfig;
+        initSymInt32QConfigWithQMaxBits(src->roundingMode, dst, src->qMaxBits);
+        initSymInt32Quantization(dst, q);
+    } else { /* BFP: the only other wire dtype */
+        bindBfpInto(t, id, tmpl->qConfig, elements);
+    }
+}
+
+/* Phase 3 (spec §3.4). calcOutputShape is a pure function of the config and
+ * the input shape, so recomputing into the slab reproduces phase 1's shapes
+ * without keeping them in scratch. */
+static void writeHeaders(rematWireTable_t *t, layer_t **model, tensor_t *input,
+                         const rematWireFact_t *facts) {
+    t->wires[0].hdr = input;
+    t->wires[0].bytes = facts[0].bytes; /* a width edit on a packed input is adopted (RF3) */
+    for (size_t j = 1; j <= t->modelSize; j++) {
+        layer_t *layer = model[j - 1];
+        tensor_t *hdr = t->wires[j].hdr;
+        hdr->shape->numberOfDimensions = t->wires[j].rank;
+        layerFunctions[layer->type].calcOutputShape(layer, t->wires[j - 1].hdr->shape, hdr->shape);
+        writeWireConfig(t, (uint16_t)j, facts[j].tmpl, facts[j].elements);
+    }
+    for (size_t id = t->modelSize + 1u; id < t->numWires; id++) {
+        rematWire_t *w = &t->wires[id];
+        if (w->inheritFrom != REMAT_NONE) {
+            continue; /* derived from the LIVE ACT header when its range opens (rematWireBind) */
+        }
+        copyGradShape(w->hdr->shape, t->wires[w->index].hdr->shape);
+        writeWireConfig(t, (uint16_t)id, facts[id].tmpl, facts[id].elements);
+    }
+}
+
+void rematWireTableBind(rematWireTable_t *t, layer_t **model, size_t n, lossFuncType_t lt,
+                        tensor_t *input) {
+    (void)n;
+    (void)lt;
+    rematWireFact_t *facts = t->bindScratch; /* in the table block: no allocation, O(1) stack */
+    numberWires(facts, model, t->modelSize, t->deepest, t->backwardTop, t->hasBackward);
+    deriveFacts(facts, t->numWires, model, t->modelSize, input, t->maxRank);
+    writeHeaders(t, model, input, facts);
+}
+
+void rematWireTableUnbind(rematWireTable_t *t) {
+    t->wires[0].hdr = NULL;
 }
 
 tensor_t *rematWireHdr(const rematWireTable_t *t, uint16_t w) {

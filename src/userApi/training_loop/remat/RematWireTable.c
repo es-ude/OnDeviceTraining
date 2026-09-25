@@ -382,10 +382,18 @@ static void copyGradShape(shape_t *dst, const shape_t *src) {
     setOrderOfDimsForNewTensor(dst->numberOfDimensions, dst->orderOfDimensions);
 }
 
+/* C2: the only road into a slab BFP config. Phase 3 of the table bind and the
+ * inherited-GRAD path of rematWireBind both come here, so neither can write
+ * exponents[0..numGroups) past the slab's reserved expCapacity. */
 static void bindBfpInto(rematWireTable_t *t, uint16_t id, const bfpQConfig_t *tmpl,
                         size_t elements) {
     const rematWire_t *w = &t->wires[id];
     rematBfpGroups_t g = rematBfpWireGrouping(tmpl, elements, w->kind, w->index);
+    if (g.numGroups > w->expCapacity) {
+        PRINT_ERROR("remat: wire %s %u needs %zu BFP exponent groups, above its expCapacity %zu",
+                    wireKindName(w->kind), (unsigned)w->index, g.numGroups, w->expCapacity);
+        exit(1);
+    }
     quantization_t *q = w->hdr->quantization;
     bfpQConfig_t *qc = q->qConfig;
     initBfpQConfigGroupedInto(tmpl->mantissaBits, tmpl->exponentBits, tmpl->roundingMode,
@@ -432,6 +440,11 @@ static void writeHeaders(rematWireTable_t *t, layer_t **model, tensor_t *input,
         copyGradShape(w->hdr->shape, t->wires[w->index].hdr->shape);
         writeWireConfig(t, (uint16_t)id, facts[id].tmpl, facts[id].elements);
     }
+    for (size_t id = 0; id < t->numWires; id++) {
+        t->wires[id].bindGen = 0;
+    }
+    t->liveBytes = 0;
+    t->observedPeakLiveBytes = 0;
 }
 
 static void exitModelKey(const char *fact, size_t built, size_t live) {
@@ -546,6 +559,117 @@ void rematWireTableBind(rematWireTable_t *t, layer_t **model, size_t n, lossFunc
 
 void rematWireTableUnbind(rematWireTable_t *t) {
     t->wires[0].hdr = NULL;
+}
+
+/* Names a record in a size-overflow exit (the checked helpers take a rematWireFact_t). */
+static rematWireFact_t nameOf(const rematWire_t *w) {
+    return (rematWireFact_t){.kind = w->kind, .index = w->index};
+}
+
+/* Checked like every size product (D60), via the same elementsOf phase 1
+ * uses. Unreachable in practice: the source ACT header was derived at this
+ * call's table bind from checked facts. */
+static size_t liveElements(const shape_t *shape, const rematWire_t *w) {
+    rematWireFact_t name = nameOf(w);
+    return elementsOf(shape, &name);
+}
+
+/* Spec §3.4 phase 3 item 3 / §3.10: today's post-forward initGradTensor
+ * timing, so a producer that wrote a config field of its output is seen.
+ * D54 order: every check (dtype, rank, the live payload bytes, and inside
+ * bindBfpInto the grouping and the C2 capacity) runs before the first slab
+ * write, so the config is written before the shape. */
+static void deriveInheritedHeader(rematWireTable_t *t, uint16_t id) {
+    rematWire_t *w = &t->wires[id];
+    const tensor_t *src = t->wires[w->inheritFrom].hdr;
+    if ((uint8_t)src->quantization->type != w->dtype) {
+        PRINT_ERROR("rematWireBind: wire %s %u field 'dtype': its source ACT %u is live as dtype "
+                    "%d, the slab reserved dtype %u",
+                    wireKindName(w->kind), (unsigned)w->index, (unsigned)w->inheritFrom,
+                    (int)src->quantization->type, (unsigned)w->dtype);
+        exit(1);
+    }
+    if (src->shape->numberOfDimensions != w->rank) {
+        PRINT_ERROR("rematWireBind: wire %s %u field 'rank': its source ACT %u is live at rank "
+                    "%zu, the slab reserved rank %u",
+                    wireKindName(w->kind), (unsigned)w->index, (unsigned)w->inheritFrom,
+                    src->shape->numberOfDimensions, (unsigned)w->rank);
+        exit(1);
+    }
+    size_t elements = liveElements(src->shape, w);
+    rematWireFact_t name = nameOf(w);
+    size_t liveBytes = wireBytes(src->quantization, elements, &name);
+    if (liveBytes != w->bytes) {
+        PRINT_ERROR("rematWireBind: wire %s %u field 'bytes': its source ACT %u is live at %zu "
+                    "bytes, the slab reserved %zu",
+                    wireKindName(w->kind), (unsigned)w->index, (unsigned)w->inheritFrom, liveBytes,
+                    w->bytes);
+        exit(1);
+    }
+    writeWireConfig(t, id, src->quantization, elements);
+    copyGradShape(w->hdr->shape, src->shape);
+}
+
+void rematWireBind(rematWireTable_t *t, uint16_t w, uint8_t *bytes) {
+    if (w >= t->numWires) {
+        PRINT_ERROR("rematWireBind: wire id %u out of range (numWires %zu)", (unsigned)w,
+                    t->numWires);
+        exit(1);
+    }
+    if (bytes == NULL) {
+        PRINT_ERROR("rematWireBind: bytes is NULL");
+        exit(1);
+    }
+    rematWire_t *rec = &t->wires[w];
+    if (rec->borrowed) {
+        PRINT_ERROR("rematWireBind: wire ACT 0 is the caller's borrowed input; it is never bound");
+        exit(1);
+    }
+    if (rec->hdr->data != NULL) {
+        PRINT_ERROR("rematWireBind: wire %s %u is already bound", wireKindName(rec->kind),
+                    (unsigned)rec->index);
+        exit(1);
+    }
+    if (rec->inheritFrom != REMAT_NONE) {
+        deriveInheritedHeader(t, w);
+    }
+    rec->hdr->data = bytes;
+    rec->bindGen++;
+    /* Checked (D60), though each wire counts at most once (a bound wire cannot
+     * be bound again), so init's checked total of wire bytes already bounds the
+     * sum: this exit is unreachable and has no dedicated test. */
+    rematWireFact_t name = nameOf(rec);
+    t->liveBytes = addSize(t->liveBytes, rec->bytes, &name, "liveBytes");
+    if (t->liveBytes > t->observedPeakLiveBytes) {
+        t->observedPeakLiveBytes = t->liveBytes;
+    }
+}
+
+void rematWireRelease(rematWireTable_t *t, uint16_t w) {
+    if (w >= t->numWires) {
+        PRINT_ERROR("rematWireRelease: wire id %u out of range (numWires %zu)", (unsigned)w,
+                    t->numWires);
+        exit(1);
+    }
+    rematWire_t *rec = &t->wires[w];
+    if (rec->borrowed) {
+        PRINT_ERROR("rematWireRelease: wire ACT 0 is the caller's borrowed input; it is never "
+                    "released");
+        exit(1);
+    }
+    if (rec->hdr->data == NULL) {
+        PRINT_ERROR("rematWireRelease: wire %s %u is not bound", wireKindName(rec->kind),
+                    (unsigned)rec->index);
+        exit(1);
+    }
+    if (rec->bytes > t->liveBytes) {
+        PRINT_ERROR("rematWireRelease: wire %s %u live bytes would underflow (released more than "
+                    "bound since the last table bind)",
+                    wireKindName(rec->kind), (unsigned)rec->index);
+        exit(1);
+    }
+    rec->hdr->data = NULL;
+    t->liveBytes -= rec->bytes;
 }
 
 tensor_t *rematWireHdr(const rematWireTable_t *t, uint16_t w) {

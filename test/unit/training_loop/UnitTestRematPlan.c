@@ -187,6 +187,38 @@ static void assertDims(const shape_t *shape, const size_t *dims, size_t rank) {
     }
 }
 
+/* [Linear 2->8, Quant FLOAT32->BFP per-tensor] under MSE: ACT 1 (32 B), ACT 2
+ * (BFP, 8 B, 1 exponent slot), the seed GRAD 2 (id 3, inherits ACT 2, 8 B,
+ * its exponent byte the last object of the block) and GRAD 1 (id 4, 32 B). */
+typedef struct seedFixture {
+    uint8_t tmplExponent[1];
+    bfpQConfig_t tmplQc;
+    quantization_t tmplQ;
+    layer_t *model[2];
+    inputLike_t in;
+    tensor_t *x;
+    rematWireTable_t *t;
+} seedFixture_t;
+
+static void buildBfpSeedFixture(seedFixture_t *f) {
+    initBfpQConfigInto(8, 8, HALF_AWAY, f->tmplExponent, &f->tmplQc);
+    f->tmplQ = (quantization_t){.type = BFP, .qConfig = &f->tmplQc};
+    f->model[0] = makeLinear(2, 8, false);
+    f->model[1] = makeQuant(&f->tmplQ, &g_floatQ);
+    f->x = makeInput(&f->in, (size_t[]){1, 2}, 2, &g_floatQ);
+    f->t = initTable(f->model, 2, MSE, f->x);
+    rematWireTableBind(f->t, f->model, 2, MSE, f->x);
+}
+
+static void freeSeedFixture(seedFixture_t *f) {
+    rematWireTableFree(f->t);
+    freeModel(f->model, 2);
+}
+
+#define SEED_ACT1 1u
+#define SEED_ACT2 2u
+#define SEED_GRAD2 3u
+
 /* ---- rematBackwardRange (spec §4.3, §12.1) ---- */
 
 void testBackwardRangeMseRunsFromLastLayerToDeepest(void) {
@@ -960,17 +992,16 @@ void testBindRunsSampleBOnATableBuiltOnSampleA(void) {
 }
 
 /* Plan Assumption 29: the bind's per-wire derivation scratch lives inside the
- * table block. LP64 layout arithmetic (not a scan-model pin): table struct 128
- * + 24 records x 32 + gradIdOf 26 + layerType/frozen 24, rounded to 8, + the
- * input key 48 = 1000; the bind scratch 24 x sizeof(rematWireFact_t) 40 = 960;
- * 18 rank-3 headers x 120 + 5 rank-2 headers x 104 = 2680. Total 4640. Every
- * host preset is LP64. */
+ * table block. LP64 layout arithmetic (not a scan-model pin): table struct 144
+ * + 24 records x 40 + gradIdOf 26 + layerType/frozen 24, rounded to 8, + the
+ * input key 48 = 1208; the bind scratch 960; the headers 2680. Total 4848.
+ * Every host preset is LP64. */
 void testHarSlabHoldsTheBindScratch(void) {
     layer_t *model[HAR_N];
     buildHar(model, false);
     inputLike_t in;
     rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
-    TEST_ASSERT_EQUAL_size_t(4640, t->slabBytes);
+    TEST_ASSERT_EQUAL_size_t(4848, t->slabBytes);
     const uint8_t *scratch = (const uint8_t *)t->bindScratch;
     TEST_ASSERT_TRUE(scratch >= (const uint8_t *)(t->inputOrder + t->inputRank));
     TEST_ASSERT_TRUE(scratch + t->numWires * sizeof(rematWireFact_t) <=
@@ -1200,6 +1231,308 @@ void testBindGroupedBfpEditExitsBeforeSlabWrite(void) {
     freeModel(model, 1);
 }
 
+/* ---- the row SDK (spec §3.10) ---- */
+
+void testWireBindSetsDataCountsBytesAndBumpsBindGen(void) {
+    seedFixture_t f;
+    buildBfpSeedFixture(&f);
+    uint32_t act1[8];
+    uint32_t act2[2];
+    rematWireBind(f.t, SEED_ACT1, (uint8_t *)act1);
+    TEST_ASSERT_EQUAL_PTR((uint8_t *)act1, rematWireHdr(f.t, SEED_ACT1)->data);
+    TEST_ASSERT_EQUAL_UINT32(1, f.t->wires[SEED_ACT1].bindGen);
+    TEST_ASSERT_EQUAL_size_t(32, f.t->liveBytes);
+    rematWireBind(f.t, SEED_ACT2, (uint8_t *)act2);
+    TEST_ASSERT_EQUAL_size_t(40, f.t->liveBytes);
+    TEST_ASSERT_EQUAL_size_t(40, f.t->observedPeakLiveBytes);
+    freeSeedFixture(&f);
+}
+
+void testWireReleaseClearsDataAndKeepsThePeak(void) {
+    seedFixture_t f;
+    buildBfpSeedFixture(&f);
+    uint32_t act1[8];
+    uint32_t act2[2];
+    rematWireBind(f.t, SEED_ACT1, (uint8_t *)act1);
+    rematWireBind(f.t, SEED_ACT2, (uint8_t *)act2);
+    rematWireRelease(f.t, SEED_ACT1);
+    TEST_ASSERT_NULL(rematWireHdr(f.t, SEED_ACT1)->data);
+    TEST_ASSERT_EQUAL_size_t(8, f.t->liveBytes);
+    TEST_ASSERT_EQUAL_size_t(40, f.t->observedPeakLiveBytes);
+    TEST_ASSERT_EQUAL_UINT32(1, f.t->wires[SEED_ACT1].bindGen); /* Release keeps the generation */
+    rematWireBind(f.t, SEED_ACT1, (uint8_t *)act1);
+    TEST_ASSERT_EQUAL_UINT32(2, f.t->wires[SEED_ACT1].bindGen);
+    freeSeedFixture(&f);
+}
+
+/* Phase 3 item 4: every bind starts a call -- generations, live bytes and the
+ * observed peak restart at 0 (the peak is "over the last call", §3.8). */
+void testTableBindResetsBindGenLiveBytesAndThePeak(void) {
+    seedFixture_t f;
+    buildBfpSeedFixture(&f);
+    uint32_t act1[8];
+    uint32_t act2[2];
+    rematWireBind(f.t, SEED_ACT1, (uint8_t *)act1);
+    rematWireBind(f.t, SEED_ACT2, (uint8_t *)act2);
+    rematWireRelease(f.t, SEED_ACT1);
+    rematWireRelease(f.t, SEED_ACT2);
+    rematWireTableBind(f.t, f.model, 2, MSE, f.x);
+    for (uint16_t id = 0; id < f.t->numWires; id++) {
+        TEST_ASSERT_EQUAL_UINT32(0, f.t->wires[id].bindGen);
+    }
+    TEST_ASSERT_EQUAL_size_t(0, f.t->liveBytes);
+    TEST_ASSERT_EQUAL_size_t(0, f.t->observedPeakLiveBytes);
+    freeSeedFixture(&f);
+}
+
+/* The seed takes ACT 2's LIVE config fields when its range opens (today's
+ * post-forward initGradTensor timing, CalculateGradsSequential.c:88), never
+ * its exponents: a fresh zero state. */
+void testWireBindDerivesTheSeedFromTheLiveActHeader(void) {
+    seedFixture_t f;
+    buildBfpSeedFixture(&f);
+    uint32_t act2[2];
+    uint32_t seed[2];
+    rematWireBind(f.t, SEED_ACT2, (uint8_t *)act2);
+    bfpQConfig_t *act2Qc = rematWireHdr(f.t, SEED_ACT2)->quantization->qConfig;
+    act2Qc->exponents[0] = 5; /* the producer's OUT_WRITE */
+    rematWireBind(f.t, SEED_GRAD2, (uint8_t *)seed);
+    tensor_t *seedHdr = rematGradHdr(f.t, 2);
+    assertDims(seedHdr->shape, (size_t[]){1, 8}, 2);
+    TEST_ASSERT_EQUAL_size_t(0, seedHdr->shape->orderOfDimensions[0]);
+    TEST_ASSERT_EQUAL_size_t(1, seedHdr->shape->orderOfDimensions[1]);
+    TEST_ASSERT_EQUAL_INT(BFP, seedHdr->quantization->type);
+    bfpQConfig_t *seedQc = seedHdr->quantization->qConfig;
+    TEST_ASSERT_EQUAL_size_t(1, seedQc->numGroups);
+    TEST_ASSERT_EQUAL_size_t(0, seedQc->groupSize);
+    TEST_ASSERT_EQUAL_UINT8(8, seedQc->mantissaBits);
+    TEST_ASSERT_EQUAL_UINT8(127, seedQc->exponents[0]);
+    TEST_ASSERT_EQUAL_PTR((uint8_t *)seed, seedHdr->data);
+    freeSeedFixture(&f);
+}
+
+void testWireBindInheritedSymTakesConfigNotScale(void) {
+    symInt32QConfig_t symQc;
+    initSymInt32QConfigWithQMaxBits(SR_HALF_AWAY, &symQc, 10);
+    quantization_t symQ = {.type = SYM_INT32, .qConfig = &symQc};
+    layer_t *model[2] = {makeLinear(2, 4, false), makeQuant(&symQ, &g_floatQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ);
+    rematWireTable_t *t = initTable(model, 2, MSE, x);
+    rematWireTableBind(t, model, 2, MSE, x);
+    uint32_t act2[4];
+    uint32_t seed[4];
+    rematWireBind(t, 2, (uint8_t *)act2);
+    symInt32QConfig_t *act2Qc = rematActHdr(t, 2)->quantization->qConfig;
+    act2Qc->scale = 0.25f;
+    rematWireBind(t, rematGradId(t, 2), (uint8_t *)seed);
+    symInt32QConfig_t *seedQc = rematGradHdr(t, 2)->quantization->qConfig;
+    TEST_ASSERT_EQUAL_UINT8(10, seedQc->qMaxBits);
+    TEST_ASSERT_EQUAL_INT(SR_HALF_AWAY, seedQc->roundingMode);
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, seedQc->scale);
+    rematWireTableFree(t);
+    freeModel(model, 2);
+}
+
+/* FLOAT32 and SYM_INT32 both charge 4 B/element (wireBytes), so this dtype
+ * edit is byte-neutral -- the bytes check cannot catch it, only the dtype
+ * check can. Without it, initFloat32Quantization would silently orphan the
+ * slab's reserved SYM_INT32 qConfig. */
+void testWireBindInheritedGradChecksTheLiveDtypeWhenByteNeutral(void) {
+    symInt32QConfig_t symQc;
+    initSymInt32QConfigWithQMaxBits(SR_HALF_AWAY, &symQc, 10);
+    quantization_t symQ = {.type = SYM_INT32, .qConfig = &symQc};
+    layer_t *model[2] = {makeLinear(2, 4, false), makeQuant(&symQ, &g_floatQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ);
+    rematWireTable_t *t = initTable(model, 2, MSE, x);
+    rematWireTableBind(t, model, 2, MSE, x);
+    uint32_t act2[4];
+    uint32_t seed[4];
+    rematWireBind(t, 2, (uint8_t *)act2);
+    rematActHdr(t, 2)->quantization->type = FLOAT32;
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematWireBind: wire GRAD 2 field 'dtype'",
+                             rematWireBind(t, rematGradId(t, 2), (uint8_t *)seed));
+    rematWireTableFree(t);
+    freeModel(model, 2);
+}
+
+/* C2 + D54 (table-level twin of PR2's decorator test): a live ACT header whose
+ * grouping grew past the seed's slab capacity must exit by name before
+ * initBfpQConfigGroupedInto writes 4 exponents into a 1-byte tail at the block
+ * end. */
+static void bindSeedUnderTheAsanCallback(seedFixture_t *f, uint8_t *bytes) {
+    odtInstallAsanDeathExit();
+    rematWireBind(f->t, SEED_GRAD2, bytes);
+}
+
+void testWireBindInheritedGradChecksCapacityBeforeWrite(void) {
+    seedFixture_t f;
+    buildBfpSeedFixture(&f);
+    uint32_t act2[2];
+    uint32_t seed[2];
+    rematWireBind(f.t, SEED_ACT2, (uint8_t *)act2);
+    bfpQConfig_t *act2Qc = rematWireHdr(f.t, SEED_ACT2)->quantization->qConfig;
+    act2Qc->numGroups = 4; /* fields only: no exponent byte is written */
+    act2Qc->groupSize = 2;
+    ASSERT_EXITS_WITH_OUTPUT(1, "wire GRAD 2 needs 4 BFP exponent groups, above its expCapacity 1",
+                             bindSeedUnderTheAsanCallback(&f, (uint8_t *)seed));
+    freeSeedFixture(&f);
+}
+
+void testWireBindInheritedGradChecksTheLiveDtype(void) {
+    seedFixture_t f;
+    buildBfpSeedFixture(&f);
+    uint32_t act2[2];
+    uint32_t seed[2];
+    rematWireBind(f.t, SEED_ACT2, (uint8_t *)act2);
+    rematWireHdr(f.t, SEED_ACT2)->quantization->type = FLOAT32;
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematWireBind: wire GRAD 2 field 'dtype'",
+                             rematWireBind(f.t, SEED_GRAD2, (uint8_t *)seed));
+    rematWireHdr(f.t, SEED_ACT2)->quantization->type = BFP;
+    freeSeedFixture(&f);
+}
+
+/* A live source whose payload size changed (BFP m8 -> m16 doubles 8 -> 16 B)
+ * would overrun the seed's bytes; the check runs before any slab write. */
+void testWireBindInheritedGradChecksTheLiveBytes(void) {
+    seedFixture_t f;
+    buildBfpSeedFixture(&f);
+    uint32_t act2[4];
+    uint32_t seed[4];
+    rematWireBind(f.t, SEED_ACT2, (uint8_t *)act2);
+    bfpQConfig_t *act2Qc = rematWireHdr(f.t, SEED_ACT2)->quantization->qConfig;
+    act2Qc->mantissaBits = 16;
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematWireBind: wire GRAD 2 field 'bytes'",
+                             rematWireBind(f.t, SEED_GRAD2, (uint8_t *)seed));
+    act2Qc->mantissaBits = 8;
+    freeSeedFixture(&f);
+}
+
+void testWireBindInheritedGradChecksTheLiveRank(void) {
+    seedFixture_t f;
+    buildBfpSeedFixture(&f);
+    uint32_t act2[2];
+    uint32_t seed[2];
+    rematWireBind(f.t, SEED_ACT2, (uint8_t *)act2);
+    rematWireHdr(f.t, SEED_ACT2)->shape->numberOfDimensions = 3;
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematWireBind: wire GRAD 2 field 'rank'",
+                             rematWireBind(f.t, SEED_GRAD2, (uint8_t *)seed));
+    rematWireHdr(f.t, SEED_ACT2)->shape->numberOfDimensions = 2;
+    freeSeedFixture(&f);
+}
+
+/* The test above sets numberOfDimensions past the header's allocated
+ * dims[2]/order[2] arrays, so it (coincidentally) also reaches the 'bytes'
+ * exit through an out-of-bounds read of slab memory. This variant swaps in
+ * fully-backed rank-3 arrays ([1,8] -> [1,8,1], a byte-count-preserving
+ * reshape), so only the rank check can catch it. */
+void testWireBindInheritedGradChecksTheLiveRankWhenByteNeutral(void) {
+    seedFixture_t f;
+    buildBfpSeedFixture(&f);
+    uint32_t act2[2];
+    uint32_t seed[2];
+    rematWireBind(f.t, SEED_ACT2, (uint8_t *)act2);
+    shape_t *act2Shape = rematWireHdr(f.t, SEED_ACT2)->shape;
+    size_t *origDims = act2Shape->dimensions;
+    size_t *origOrder = act2Shape->orderOfDimensions;
+    size_t dims3[3] = {1, 8, 1};
+    size_t order3[3] = {0, 1, 2};
+    act2Shape->dimensions = dims3;
+    act2Shape->orderOfDimensions = order3;
+    act2Shape->numberOfDimensions = 3;
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematWireBind: wire GRAD 2 field 'rank'",
+                             rematWireBind(f.t, SEED_GRAD2, (uint8_t *)seed));
+    act2Shape->dimensions = origDims;
+    act2Shape->orderOfDimensions = origOrder;
+    act2Shape->numberOfDimensions = 2;
+    freeSeedFixture(&f);
+}
+
+/* RF1: ACT 0 is the caller's tensor; a row that binds it would overwrite the
+ * caller's ->data. */
+void testWireBindRefusesTheBorrowedInput(void) {
+    seedFixture_t f;
+    buildBfpSeedFixture(&f);
+    uint32_t bytes[2];
+    ASSERT_EXITS_WITH_OUTPUT(1, "wire ACT 0 is the caller's borrowed input; it is never bound",
+                             rematWireBind(f.t, 0, (uint8_t *)bytes));
+    freeSeedFixture(&f);
+}
+
+void testWireReleaseRefusesTheBorrowedInput(void) {
+    seedFixture_t f;
+    buildBfpSeedFixture(&f);
+    ASSERT_EXITS_WITH_OUTPUT(1, "wire ACT 0 is the caller's borrowed input; it is never released",
+                             rematWireRelease(f.t, 0));
+    freeSeedFixture(&f);
+}
+
+/* RF2: unbalanced SDK calls would double-count or wrap liveBytes. */
+void testWireBindRefusesAnAlreadyBoundWire(void) {
+    seedFixture_t f;
+    buildBfpSeedFixture(&f);
+    uint32_t act1[8];
+    rematWireBind(f.t, SEED_ACT1, (uint8_t *)act1);
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematWireBind: wire ACT 1 is already bound",
+                             rematWireBind(f.t, SEED_ACT1, (uint8_t *)act1));
+    freeSeedFixture(&f);
+}
+
+void testWireReleaseRefusesAnUnboundWire(void) {
+    seedFixture_t f;
+    buildBfpSeedFixture(&f);
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematWireRelease: wire ACT 1 is not bound",
+                             rematWireRelease(f.t, SEED_ACT1));
+    freeSeedFixture(&f);
+}
+
+/* I2: REMAT_NONE is handed out by rematGradId and by the walk functions, and
+ * an unchecked bind/release would write or subtract through a garbage
+ * header, corrupting memory silently on an MCU. */
+void testWireBindRefusesAWireIdOutOfRange(void) {
+    seedFixture_t f;
+    buildBfpSeedFixture(&f);
+    uint32_t bytes[2];
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematWireBind: wire id 65535 out of range",
+                             rematWireBind(f.t, REMAT_NONE, (uint8_t *)bytes));
+    freeSeedFixture(&f);
+}
+
+void testWireReleaseRefusesAWireIdOutOfRange(void) {
+    seedFixture_t f;
+    buildBfpSeedFixture(&f);
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematWireRelease: wire id 65535 out of range",
+                             rematWireRelease(f.t, REMAT_NONE));
+    freeSeedFixture(&f);
+}
+
+/* m2: bytes == NULL would still increment liveBytes and bindGen, and under
+ * ODT_REMAT_VERIFY poison a NULL pointer. */
+void testWireBindRefusesNullBytes(void) {
+    seedFixture_t f;
+    buildBfpSeedFixture(&f);
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematWireBind: bytes is NULL",
+                             rematWireBind(f.t, SEED_ACT1, NULL));
+    freeSeedFixture(&f);
+}
+
+/* rematWireTableBind resets liveBytes to 0 but never clears a still-bound
+ * wire's ->data (spec: only Bind/Release write it), so a wire left bound
+ * across a rebind reads as still-bound. Releasing it then would subtract from
+ * a liveBytes that no longer reflects it: checked, so it exits by name
+ * instead of wrapping size_t. */
+void testWireReleaseExitsWhenLiveBytesWouldUnderflow(void) {
+    seedFixture_t f;
+    buildBfpSeedFixture(&f);
+    uint32_t act1[8];
+    rematWireBind(f.t, SEED_ACT1, (uint8_t *)act1);
+    rematWireTableBind(f.t, f.model, 2, MSE, f.x);
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematWireRelease: wire ACT 1 live bytes would underflow",
+                             rematWireRelease(f.t, SEED_ACT1));
+    freeSeedFixture(&f);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testBackwardRangeMseRunsFromLastLayerToDeepest);
@@ -1258,5 +1591,24 @@ int main(void) {
     RUN_TEST(testBindExitsOnAChangedWireByteCount);
     RUN_TEST(testBindFloatToSymTemplateEditExitsBeforeSlabWrite);
     RUN_TEST(testBindGroupedBfpEditExitsBeforeSlabWrite);
+    RUN_TEST(testWireBindSetsDataCountsBytesAndBumpsBindGen);
+    RUN_TEST(testWireReleaseClearsDataAndKeepsThePeak);
+    RUN_TEST(testTableBindResetsBindGenLiveBytesAndThePeak);
+    RUN_TEST(testWireBindDerivesTheSeedFromTheLiveActHeader);
+    RUN_TEST(testWireBindInheritedSymTakesConfigNotScale);
+    RUN_TEST(testWireBindInheritedGradChecksTheLiveDtypeWhenByteNeutral);
+    RUN_TEST(testWireBindInheritedGradChecksCapacityBeforeWrite);
+    RUN_TEST(testWireBindInheritedGradChecksTheLiveDtype);
+    RUN_TEST(testWireBindInheritedGradChecksTheLiveBytes);
+    RUN_TEST(testWireBindInheritedGradChecksTheLiveRank);
+    RUN_TEST(testWireBindInheritedGradChecksTheLiveRankWhenByteNeutral);
+    RUN_TEST(testWireBindRefusesTheBorrowedInput);
+    RUN_TEST(testWireReleaseRefusesTheBorrowedInput);
+    RUN_TEST(testWireBindRefusesAnAlreadyBoundWire);
+    RUN_TEST(testWireReleaseRefusesAnUnboundWire);
+    RUN_TEST(testWireBindRefusesAWireIdOutOfRange);
+    RUN_TEST(testWireReleaseRefusesAWireIdOutOfRange);
+    RUN_TEST(testWireBindRefusesNullBytes);
+    RUN_TEST(testWireReleaseExitsWhenLiveBytesWouldUnderflow);
     return UNITY_END();
 }

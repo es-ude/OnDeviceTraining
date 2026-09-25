@@ -43,6 +43,7 @@ typedef struct rematWire {
                              loss seed, Flatten's dx): that ACT's index; REMAT_NONE otherwise */
     size_t bytes;         /* exact dtype-aware payload bytes, dims[0] = B (key); never padded */
     size_t expCapacity; /* BFP exponent slots reserved in the slab; a bind needs numGroups <= it */
+    uint32_t bindGen;   /* ++ on every rematWireBind; 0 after every rematWireTableBind */
     tensor_t *hdr; /* slab header; ACT 0: the caller's tensor between bind and unbind, else NULL */
 } rematWire_t;
 
@@ -79,6 +80,8 @@ typedef struct rematWireTable {
     uint8_t inputType;
     uint8_t maxRank; /* max(inputRank, 2): bounds every wire rank, sizes the bind scratch */
     rematWireFact_t *bindScratch; /* [numWires], inside this block: every bind's phase-1 facts */
+    size_t liveBytes;             /* rises in rematWireBind, falls in rematWireRelease */
+    size_t observedPeakLiveBytes; /* its high-water mark since the last rematWireTableBind */
     size_t slabBytes;             /* the whole table block, padding included, no trailing pad */
 } rematWireTable_t;
 
@@ -120,7 +123,22 @@ void rematWireTableBind(rematWireTable_t *t, layer_t **model, size_t n, lossFunc
                         tensor_t *input);
 void rematWireTableUnbind(rematWireTable_t *t); /* ACT 0 hdr = NULL */
 
-/* Read-only accessors (rows, the checker, tests). */
+/* The row SDK: the ONLY writers of a header's ->data (spec §2.2). A bind
+ * requires this table's rematWireTableBind to have already run earlier in the
+ * same call; bytes must be non-NULL and aligned for the wire's dtype. Bind
+ * derives an inherited GRAD header (the seed, Flatten's dx) from the LIVE ACT
+ * header -- this call's header content: the source ACT's data does not have
+ * to be bound (under LIVENESS a Flatten dx GRAD binds after its source ACT
+ * died, and PR1d must not require the source to be resident) -- checking
+ * dtype, rank, the live payload bytes and BFP capacity before any write
+ * (D54). Both exit on the borrowed ACT 0, on an unbalanced call, on a NULL
+ * bytes and on a wire id at or above numWires. */
+void rematWireBind(rematWireTable_t *t, uint16_t w, uint8_t *bytes);
+void rematWireRelease(rematWireTable_t *t, uint16_t w);
+
+/* Read-only accessors (rows, the checker, tests). rematWireHdr and
+ * rematWireBytes take ids below numWires too, but -- unlike Bind/Release --
+ * do not check it (read every step, off the exit path). */
 tensor_t *rematWireHdr(const rematWireTable_t *t, uint16_t w);
 tensor_t *rematActHdr(const rematWireTable_t *t, size_t j);  /* j == 0: the bound input or NULL */
 tensor_t *rematGradHdr(const rematWireTable_t *t, size_t j); /* j == n: the seed; NULL if absent */

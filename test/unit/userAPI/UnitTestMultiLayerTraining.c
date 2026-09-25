@@ -2739,9 +2739,10 @@ void unitTestSoftmaxMseBackwardThroughLoop(void) {
  *  sharing one denominator -- moves the reported loss and every upstream
  *  grad. softmaxCeTwoRowsE2e* are goldgen'd (generate_expected_softmax.py
  *  section 6) via torch F.cross_entropy on the [2,3] logits: the loss is the
- *  REDUCTION_MEAN value (sum / rows, CrossEntropy.c:42), the grads are the raw
- *  sum-reduction grads (docs/conventions/loss.md: the backward emits raw
- *  per-element gradients; the optimizer applies the macro scale). */
+ *  REDUCTION_MEAN value (sum / rows, crossEntropyForwardFloat's MEAN rule),
+ *  the grads are the raw sum-reduction grads (docs/conventions/loss.md: the
+ *  backward emits raw per-element gradients; the optimizer applies the
+ *  macro scale). */
 void unitTestSoftmaxCeTwoRowsThroughLoop(void) {
     quantization_t *q = quantizationInitFloat();
 

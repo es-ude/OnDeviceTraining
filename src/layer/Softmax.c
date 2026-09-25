@@ -56,8 +56,8 @@ static void softmaxValuesFloat(const float *x, float *s, size_t n) {
 }
 
 /* #152: row = axis 0 -- every row normalizes over all elements after axis 0
- * (CrossEntropy.c:42's microbatch rule); a rank-1 tensor is one row. The row
- * count is the STORAGE dimensions[0], the same field CrossEntropy.c:42 reads
+ * (crossEntropyForwardFloat's MEAN rule); a rank-1 tensor is one row. The row
+ * count is the STORAGE dimensions[0], the same field that rule reads
  * (transposeTensor permutes orderOfDimensions only, never dimensions). rowLen
  * is the product of the trailing dims, not count / rows, so an empty leading
  * axis cannot divide by zero. The row walk runs over physical storage, so

@@ -340,8 +340,9 @@ void testMseLossBackwardBfpRejectsResultCountMismatch(void) {
     freeTensor(bfpOut);
 }
 
-/* PR4 adversarial delta (D0): the count guard must sit at the PUBLIC entry, not
- * inside the fake-quant helper — otherwise the FLOAT32 arm keeps the whole hole.
+/* PR4 adversarial delta (D0), kept by #153: the operand shape guard must sit
+ * at the PUBLIC entry, not inside the fake-quant helper — otherwise the
+ * FLOAT32 arm keeps the whole hole.
  * That arm is not the milder half either: mseLossBackwardFloat writes
  * resultArray[i] for i < the MODEL OUTPUT's count straight into the caller's
  * buffer, so a SHORTER result is an out-of-bounds heap WRITE. These two cases

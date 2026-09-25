@@ -28,7 +28,8 @@ is always explicit: the output shape is `[B, ...]` and
 `numFeaturesPerSample = numElements / B`. At `B=1` the training loop makes
 the leading 1 explicit with `batchViewOf`, for the model input, the label
 and the `labelRef` handed to `computeMeanScale` alike (see
-[data-shape.md](data-shape.md), "Who adds the batch axis").
+[data-shape.md](data-shape.md), "Who adds the batch axis"). The loss
+dispatchers enforce this (see "Shape assertion").
 
 This changed the MSE MEAN gradient scale for labels that do not already
 start with a leading 1 (#152 PR3a). Before this PR, `trainingEpochDefault`
@@ -82,10 +83,14 @@ The macro-batch divisor lives at the optimizer:
 For SUM (or future per-sample weighted variants — see #150), the backward
 gradient flows through unscaled.
 
-### Shape assertion (deferred)
+### Shape assertion (#153)
 
-Runtime assertion of the `dimensions[0] >= 1` contract is deferred to #153.
-B > 1 is reachable now, through `microBatchSize` (#152), so the assertion
-would no longer be a no-op; until #153 lands, the loop builds each stacked
-item and label with the same `dimensions[0] = m`.
+Every loss dispatcher (`mseLossForward`, `mseLossBackward`,
+`crossEntropyForward`, `crossEntropySoftmaxBackward`) fails fast
+(`PRINT_ERROR` + `exit(1)`) unless the model output has rank >= 2 and at
+least one element, and the label (and the backward's grad wire) has exactly
+the output's rank and dimensions. `computeMeanScaleMSE` applies the same
+rank >= 2 / non-empty check to its label view. Labels carry the batch axis
+`[B, ...]` like every tensor-level input, so a rank-1 label against a
+`[1, C]` output is rejected. The raw `*Float` arm functions stay unchecked.
 

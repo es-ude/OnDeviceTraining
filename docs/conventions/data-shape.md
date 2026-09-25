@@ -41,9 +41,14 @@ Datasets never carry a batch axis; the loop owns it.
 - Nothing auto-detects an existing batch axis: a sample that already carries a
   leading 1 is wrapped again (`[1, 1, ...]`). A first layer that checks input
   rank (Linear, Conv1d, Conv1dTransposed, the pools, GroupNorm) fails fast on
-  a missed or doubled wrap; a Flatten-, Relu-, LayerNorm- or Dropout-fronted
-  model does not check rank and can absorb the mistake silently — see
-  "Migrating from `[1, ...]` samples" below.
+  a missed or doubled wrap; a Relu-, LayerNorm- or Dropout-fronted model
+  carries it to the output, where the loss's shape check (#153) fails fast
+  unless the label carries the same mistake; only a Flatten-fronted model can
+  absorb it silently — see "Migrating from `[1, ...]` samples" below.
+- A label's per-sample shape must equal the model output's per-sample shape
+  (#153). Store a scalar regression target for a `[B, 1]` head as `(N, 1)`,
+  so each sample is `[1]` and its view `[1, 1]`; an `(N,)` array loads as
+  rank-0 samples whose `[1]` view the loss rejects.
 
 ```c
 batchView_t itemView;
@@ -67,16 +72,17 @@ axes, since nothing here auto-detects the old shape:
 - **Items.** A first layer that checks input rank (Linear, Conv1d,
   Conv1dTransposed, the pools, GroupNorm) fails loudly (`exit(1)`) on the
   now-doubled leading axis — the fastest signal that a dataset still needs
-  updating. A Flatten-first model (e.g. `examples/mnist_cnn`) or a model
-  whose first layers are Relu, LayerNorm or Dropout does not check rank and
-  produces the same output either way (the extra leading 1 multiplies out
-  to the same element count), so these models give no error — check the
+  updating. A Flatten-first model (e.g. `examples/mnist_cnn`) collapses the
+  extra leading 1 and gives no error; a Relu-, LayerNorm- or Dropout-first
+  model keeps the extra axis in its output, where the loss's shape check
+  (#153) fails fast unless the labels carry the same extra 1 — check the
   dataset directly instead of relying on a test failure.
-- **Labels.** `requireOperandMatchesOutput` (`src/loss_functions/MSE.c`,
-  `CrossEntropy.c`) compares element count only, not rank, so an old-style
-  `[1, ...]` label is accepted silently too. Under `REDUCTION_MEAN` this is
-  exactly the MSE mean-scale change described in
-  [loss.md](loss.md#microbatch-shape).
+- **Labels.** The loss dispatchers (`src/loss_functions/MSE.c`,
+  `CrossEntropy.c`) require the label to have exactly the model output's rank
+  and dimensions (#153), so an old-style label whose leading 1 was a batch
+  axis fails fast once the loop wraps it to `[1, 1, ...]`: drop that leading
+  1. A leading 1 that is a real axis (ECG's `[1, 140]` against a
+  `[1, 1, 140]` output) stays.
 - **User callbacks.** `calculateGradsFn_t` and `inferenceWithLossFn_t`
   implementations passed to `trainingBatchDefault` / `evaluationBatch` now
   receive stack `[1, ...]` views borrowed for the duration of the call,

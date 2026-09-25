@@ -13,6 +13,8 @@ float crossEntropyForwardFloat(tensor_t *softmaxOutput, tensor_t *distribution,
  * convertTensor before running the float core. Every other dtype fails fast:
  * the raw float impl casts the data buffer to float*, so e.g. ASYM codes would
  * be silently reinterpreted as float bit patterns.
+ * It also fails fast when softmaxOutput has rank < 2 or no elements, or the
+ * distribution's shape differs from it (#153).
  * Returns NaN (and prints one PRINT_ERROR per process) when any softmax
  * element is non-finite; it no longer aborts (#446). */
 float crossEntropyForward(tensor_t *softmaxOutput, tensor_t *distribution, reduction_t reduction);

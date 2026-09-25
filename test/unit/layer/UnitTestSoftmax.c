@@ -649,12 +649,12 @@ void testSoftmaxForwardRejectsTransposedMultiRow(void) {
     freeQuantization(floatQ);
 }
 
-/* The row count is the STORAGE dims[0] (the field CrossEntropy.c:42 reads),
- * not the logical axis 0: physical [1, 6] transposed is logically [6, 1], yet
- * it has ONE storage row, so the whole six-element vector normalizes together
- * (the whole-vector gold), exactly as before #152 and as CE's MEAN divisor
- * counts it. Pins that the identity-order rule binds only when storage
- * dims[0] > 1. */
+/* The row count is the STORAGE dims[0] (the field crossEntropyForwardFloat's
+ * MEAN rule reads), not the logical axis 0: physical [1, 6] transposed is
+ * logically [6, 1], yet it has ONE storage row, so the whole six-element
+ * vector normalizes together (the whole-vector gold), exactly as before
+ * #152 and as CE's MEAN divisor counts it. Pins that the identity-order rule
+ * binds only when storage dims[0] > 1. */
 void testSoftmaxForwardTransposedSingleRowIsOneRow(void) {
     const size_t dims[2] = {1, 6};
     tensor_t *input = buildSoftmaxWireNd(dims, 2, softmaxForwardX);

@@ -212,7 +212,9 @@ void testCrossEntropyForward_Mean1DTensorReturnsSum() {
      * passes through as the raw -log probability sum (PyTorch parity:
      * a 1D logit vector is treated as a single-sample batch with no
      * divisor). Without the numberOfDimensions>=2 guard the impl would
-     * divide by dimensions[0]=3 and yield -log(0.6)/3, breaking parity. */
+     * divide by dimensions[0]=3 and yield -log(0.6)/3, breaking parity.
+     * Arm-only: crossEntropyForward rejects a rank-1 output (#153); this
+     * calls crossEntropyForwardFloat directly. */
     tensor_t softmaxOutput;
     float softmaxData[] = {0.6f, 0.3f, 0.1f};
     size_t dims[] = {3};
@@ -548,16 +550,17 @@ void testCrossEntropySoftmaxBackwardBfpRejectsLossWireCountMismatch(void) {
     freeTensor(bfpP);
 }
 
-/* PR4 adversarial delta (D0): the count guard must sit at the PUBLIC entry, not
- * inside the fake-quant helper — otherwise the FLOAT32 arm keeps the whole hole
- * (crossEntropySoftmaxBackwardFloat writes lossFloat[i] for i < the model
- * output's count straight into the caller's buffer, so a SHORTER loss wire is
- * an out-of-bounds heap WRITE). These two cases use a LONGER operand on
- * purpose — the float arm ignores the surplus, so the unguarded child returns
- * normally and the missing-guard RED is a clean "exit code 0" rather than a
- * signal — while the guard they pin rejects both directions. They are also what
- * pins the HOIST itself: a guard pushed back down into the fake-quant helper
- * would leave these two red while every BFP death test stayed green. */
+/* PR4 adversarial delta (D0), kept by #153: the operand shape guard must sit
+ * at the PUBLIC entry, not inside the fake-quant helper — otherwise the
+ * FLOAT32 arm keeps the whole hole (crossEntropySoftmaxBackwardFloat writes
+ * lossFloat[i] for i < the model output's count straight into the caller's
+ * buffer, so a SHORTER loss wire is an out-of-bounds heap WRITE). These two
+ * cases use a LONGER operand on purpose — the float arm ignores the surplus,
+ * so the unguarded child returns normally and the missing-guard RED is a
+ * clean "exit code 0" rather than a signal — while the guard they pin rejects
+ * both directions. They are also what pins the HOIST itself: a guard pushed
+ * back down into the fake-quant helper would leave these two red while every
+ * BFP death test stayed green. */
 void testCrossEntropyForwardFloat32RejectsDistributionCountMismatch(void) {
     float p[4] = {0.5f, 0.25f, 0.125f, 0.125f};
     float y[5] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f};

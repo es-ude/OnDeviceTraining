@@ -4,8 +4,8 @@
 
 Semantic (#152): the layer normalizes PER ROW. Row = axis 0; every row
 normalizes over ALL elements after axis 0 (count / dims[0] of them); a rank-1
-tensor is one row -- CrossEntropy's microbatch rule (CrossEntropy.c:42). Every
-fixture below is therefore softmax(x.reshape(rows, -1), dim=-1). For rank >= 3
+tensor is one row -- crossEntropyForwardFloat's MEAN rule. Every fixture
+below is therefore softmax(x.reshape(rows, -1), dim=-1). For rank >= 3
 that is NOT PyTorch's last-axis softmax (section 4 asserts the difference).
 
 Root-cause bug (P6-1): the training loop hands every layer backward the
@@ -40,9 +40,10 @@ Sections:
      the fixture pins the per-row max subtraction.
   6. CE e2e [2,3] (UnitTestMultiLayerTraining): Linear(3->3, ramp weights +
      ramp bias) -> Softmax, CrossEntropy. Emits the REDUCTION_MEAN loss
-     (sum / rows, CrossEntropy.c:42) and the raw weight/bias grads (the fused
-     (p - y) backward is the sum-reduction gradient). Asserts a whole-tensor
-     softmax would move the grads, so the fixture discriminates.
+     (sum / rows, crossEntropyForwardFloat's MEAN rule) and the raw
+     weight/bias grads (the fused (p - y) backward is the sum-reduction
+     gradient). Asserts a whole-tensor softmax would move the grads, so the
+     fixture discriminates.
   7. MSE e2e [2,3] (UnitTestMultiLayerTraining): same Linear -> Softmax, MSE.
      Emits the REDUCTION_MEAN loss (sum / numel, MSE.c) and the raw
      weight/bias grads; the only loop path that reaches the softmax

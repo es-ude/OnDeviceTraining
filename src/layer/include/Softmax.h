@@ -30,9 +30,9 @@ void softmaxInitLayer(layerConfig_t *softmaxConfig, layer_t *softmaxLayer);
 
 /* Row semantic (#152): row = axis 0 -- each row normalizes over all elements
  * after axis 0 (count / dims[0] of them) and a rank-1 input is one row, the
- * same partition as CrossEntropy's microbatch rule (CrossEntropy.c:42). The
- * row count is the storage dimensions[0] (the field CrossEntropy.c:42 reads),
- * not the logical axis 0 of a transposeTensor view. An input with more than
+ * same partition as crossEntropyForwardFloat's MEAN rule. The row count is
+ * the storage dimensions[0] (the field that rule reads), not the logical
+ * axis 0 of a transposeTensor view. An input with more than
  * one storage row must be identity-order (fail fast otherwise), so a logical
  * [1, N] stored as [N, 1] + transpose fails fast; one storage row takes any
  * order. The ARITH_BFP arms take a single storage row only ([N] or [1, N]);

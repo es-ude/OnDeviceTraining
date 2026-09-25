@@ -53,7 +53,8 @@ def forward(x, cw, cb, lw, lb):
 
 
 def mean_ce(logits, y):
-    # C side: sum(y * -log(softmax)) / rows (CrossEntropy.c:42 MEAN rule).
+    # C side: sum(y * -log(softmax)) / rows (crossEntropyForwardFloat's
+    # MEAN rule).
     return -(y * torch.log_softmax(logits, dim=1)).sum() / logits.shape[0]
 
 

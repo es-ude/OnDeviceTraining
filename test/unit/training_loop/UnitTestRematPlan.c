@@ -1533,6 +1533,90 @@ void testWireReleaseExitsWhenLiveBytesWouldUnderflow(void) {
     freeSeedFixture(&f);
 }
 
+/* ---- ODT_REMAT_VERIFY poison (spec §3.10, §7.1, §12.2 item 5) ---- */
+
+#ifdef ODT_REMAT_VERIFY
+/* A signalling NaN: exponent all ones, quiet bit clear, payload non-zero. */
+static bool isSignallingNan(uint32_t bits) {
+    return (bits & 0x7F800000u) == 0x7F800000u && (bits & 0x00400000u) == 0u &&
+           (bits & 0x003FFFFFu) != 0u;
+}
+
+/* One wire per wire dtype: ACT 1 FLOAT32 (16 B), ACT 2 SYM_INT32 (16 B),
+ * ACT 3 BFP m8 per-tensor (4 B). */
+typedef struct dtypeFixture {
+    symInt32QConfig_t symQc;
+    quantization_t symQ;
+    uint8_t bfpExponent[1];
+    bfpQConfig_t bfpQc;
+    quantization_t bfpQ;
+    layer_t *model[3];
+    inputLike_t in;
+    tensor_t *x;
+    rematWireTable_t *t;
+} dtypeFixture_t;
+
+static void buildDtypeFixture(dtypeFixture_t *f) {
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &f->symQc, 12);
+    f->symQ = (quantization_t){.type = SYM_INT32, .qConfig = &f->symQc};
+    initBfpQConfigInto(8, 8, HALF_AWAY, f->bfpExponent, &f->bfpQc);
+    f->bfpQ = (quantization_t){.type = BFP, .qConfig = &f->bfpQc};
+    f->model[0] = makeRelu(&g_floatQ);
+    f->model[1] = makeQuant(&f->symQ, &g_floatQ);
+    f->model[2] = makeQuant(&f->bfpQ, &g_floatQ);
+    f->x = makeInput(&f->in, (size_t[]){1, 4}, 2, &g_floatQ);
+    f->t = initTable(f->model, 3, MSE, f->x);
+    rematWireTableBind(f->t, f->model, 3, MSE, f->x);
+}
+
+static void assertPoisoned(const uint32_t *f32, const uint32_t *sym, const uint8_t *bfp) {
+    for (size_t k = 0; k < 4; k++) {
+        TEST_ASSERT_TRUE_MESSAGE(isSignallingNan(f32[k]), "FLOAT32 word is not an sNaN");
+        TEST_ASSERT_EQUAL_HEX32(0x80000000u, sym[k]);
+        TEST_ASSERT_EQUAL_HEX8(0xA5, bfp[k]);
+    }
+}
+
+/* Poison at Bind stops calloc zeros from masking a read of never-written bytes. */
+void testWireBindPoisonsFreshBytesByDtype(void) {
+    dtypeFixture_t f;
+    buildDtypeFixture(&f);
+    uint32_t f32[4] = {0};
+    uint32_t sym[4] = {0};
+    uint8_t bfp[4] = {0};
+    rematWireBind(f.t, 1, (uint8_t *)f32);
+    rematWireBind(f.t, 2, (uint8_t *)sym);
+    rematWireBind(f.t, 3, bfp);
+    assertPoisoned(f32, sym, bfp);
+    rematWireTableFree(f.t);
+    freeModel(f.model, 3);
+}
+
+/* Poison at Release (while the bytes are still owned) makes a read of released
+ * bytes loud. */
+void testWireReleasePoisonsTheOldBytesByDtype(void) {
+    dtypeFixture_t f;
+    buildDtypeFixture(&f);
+    uint32_t f32[4];
+    uint32_t sym[4];
+    uint8_t bfp[4];
+    rematWireBind(f.t, 1, (uint8_t *)f32);
+    rematWireBind(f.t, 2, (uint8_t *)sym);
+    rematWireBind(f.t, 3, bfp);
+    for (size_t k = 0; k < 4; k++) { /* the producers' writes */
+        f32[k] = 0x3F800000u;        /* 1.0f */
+        sym[k] = 7u;
+        bfp[k] = 0x11u;
+    }
+    rematWireRelease(f.t, 1);
+    rematWireRelease(f.t, 2);
+    rematWireRelease(f.t, 3);
+    assertPoisoned(f32, sym, bfp);
+    rematWireTableFree(f.t);
+    freeModel(f.model, 3);
+}
+#endif
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testBackwardRangeMseRunsFromLastLayerToDeepest);
@@ -1610,5 +1694,9 @@ int main(void) {
     RUN_TEST(testWireReleaseRefusesAWireIdOutOfRange);
     RUN_TEST(testWireBindRefusesNullBytes);
     RUN_TEST(testWireReleaseExitsWhenLiveBytesWouldUnderflow);
+#ifdef ODT_REMAT_VERIFY
+    RUN_TEST(testWireBindPoisonsFreshBytesByDtype);
+    RUN_TEST(testWireReleasePoisonsTheOldBytesByDtype);
+#endif
     return UNITY_END();
 }

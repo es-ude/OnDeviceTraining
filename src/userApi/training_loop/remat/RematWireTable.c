@@ -610,6 +610,26 @@ static void deriveInheritedHeader(rematWireTable_t *t, uint16_t id) {
     copyGradShape(w->hdr->shape, src->shape);
 }
 
+#ifdef ODT_REMAT_VERIFY
+/* Test builds (spec §3.10, §7.1). Poison at Bind stops calloc zeros from
+ * masking a read of never-written bytes on the first call (the arena reuses
+ * bytes without zeroing); poison at Release, while the bytes are still owned,
+ * makes a read of released bytes loud. FLOAT32 gets a signalling NaN. */
+#define REMAT_POISON_FLOAT32_BITS 0x7FA00000u
+#define REMAT_POISON_BFP_BYTE 0xA5u
+
+static void poisonWireBytes(const rematWire_t *w, uint8_t *bytes) {
+    if (w->dtype == BFP) {
+        memset(bytes, REMAT_POISON_BFP_BYTE, w->bytes);
+        return;
+    }
+    uint32_t pattern = (w->dtype == FLOAT32) ? REMAT_POISON_FLOAT32_BITS : (uint32_t)INT32_MIN;
+    for (size_t offset = 0; offset < w->bytes; offset += sizeof pattern) {
+        memcpy(bytes + offset, &pattern, sizeof pattern);
+    }
+}
+#endif
+
 void rematWireBind(rematWireTable_t *t, uint16_t w, uint8_t *bytes) {
     if (w >= t->numWires) {
         PRINT_ERROR("rematWireBind: wire id %u out of range (numWires %zu)", (unsigned)w,
@@ -634,6 +654,9 @@ void rematWireBind(rematWireTable_t *t, uint16_t w, uint8_t *bytes) {
         deriveInheritedHeader(t, w);
     }
     rec->hdr->data = bytes;
+#ifdef ODT_REMAT_VERIFY
+    poisonWireBytes(rec, bytes);
+#endif
     rec->bindGen++;
     /* Checked (D60), though each wire counts at most once (a bound wire cannot
      * be bound again), so init's checked total of wire bytes already bounds the
@@ -668,6 +691,9 @@ void rematWireRelease(rematWireTable_t *t, uint16_t w) {
                     wireKindName(rec->kind), (unsigned)rec->index);
         exit(1);
     }
+#ifdef ODT_REMAT_VERIFY
+    poisonWireBytes(rec, rec->hdr->data);
+#endif
     rec->hdr->data = NULL;
     t->liveBytes -= rec->bytes;
 }

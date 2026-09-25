@@ -23,7 +23,10 @@
     {
       "name": "unit_test",
       "displayName": "Unit-Test",
-      "inherits": "host"
+      "inherits": "host",
+      "cacheVariables": {
+        "ODT_REMAT_VERIFY": "ON"
+      }
     },
     {
       "name": "unit_test_error",
@@ -48,7 +51,8 @@
       "cacheVariables": {
         "DEBUG_MODE_DEBUG": "ON",
         "ODT_MEM_PROFILE": "ON",
-        "ODT_TRACK_INSTRUCTIONS": "ON"
+        "ODT_TRACK_INSTRUCTIONS": "ON",
+        "ODT_REMAT_VERIFY": "ON"
       }
     },
     {
@@ -59,7 +63,8 @@
         "CMAKE_C_FLAGS": "-fsanitize=address,undefined -fno-sanitize=function -fno-omit-frame-pointer -fno-sanitize-recover=all -g -O1",
         "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined",
         "ODT_MEM_PROFILE": "ON",
-        "ODT_TRACK_INSTRUCTIONS": "ON"
+        "ODT_TRACK_INSTRUCTIONS": "ON",
+        "ODT_REMAT_VERIFY": "ON"
       }
     },
     {

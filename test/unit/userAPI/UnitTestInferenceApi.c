@@ -217,7 +217,7 @@ void testInferenceWithLossLinearReluFloat() {
 /* #153: labels carry the batch axis like every tensor-level input. A rank-1
  * [C] label against the model's [1, C] output (the case that once overflowed
  * reserveInferenceStats when it sized from the label) is rejected by the
- * loss before inferenceWithLoss allocates anything. */
+ * loss before inferenceWithLoss allocates its stats. */
 void testInferenceWithLossRejectsRank1LabelAgainstBatchedOutput(void) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;

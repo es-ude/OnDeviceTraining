@@ -39,12 +39,13 @@ Datasets never carry a batch axis; the loop owns it.
   `evaluationEpochWithMetrics` read the raw sample label's element count (the
   per-sample class count).
 - Nothing auto-detects an existing batch axis: a sample that already carries a
-  leading 1 is wrapped again (`[1, 1, ...]`). A first layer that checks input
-  rank (Linear, Conv1d, Conv1dTransposed, the pools, GroupNorm) fails fast on
-  a missed or doubled wrap; a Relu-, LayerNorm- or Dropout-fronted model
-  carries it to the output, where the loss's shape check (#153) fails fast
-  unless the label carries the same mistake; only a Flatten-fronted model can
-  absorb it silently — see "Migrating from `[1, ...]` samples" below.
+  leading 1 is wrapped again (`[1, 1, ...]`). A missed or doubled wrap travels
+  through rank-preserving layers (Relu, LayerNorm, Dropout) until the first
+  layer that checks rank (Linear, Conv1d, Conv1dTransposed, the pools,
+  GroupNorm), which fails fast, or a Flatten, which absorbs it silently; if
+  it reaches the output unabsorbed, the loss's shape check (#153) fails fast
+  unless the label carries the same mistake — see "Migrating from
+  `[1, ...]` samples" below.
 - A label's per-sample shape must equal the model output's per-sample shape
   (#153). Store a scalar regression target for a `[B, 1]` head as `(N, 1)`,
   so each sample is `[1]` and its view `[1, 1]`; an `(N,)` array loads as
@@ -74,9 +75,11 @@ axes, since nothing here auto-detects the old shape:
   now-doubled leading axis — the fastest signal that a dataset still needs
   updating. A Flatten-first model (e.g. `examples/mnist_cnn`) collapses the
   extra leading 1 and gives no error; a Relu-, LayerNorm- or Dropout-first
-  model keeps the extra axis in its output, where the loss's shape check
-  (#153) fails fast unless the labels carry the same extra 1 — check the
-  dataset directly instead of relying on a test failure.
+  model carries the extra axis onward, where it keeps traveling through any
+  further rank-preserving layers until a later rank-checking layer fails
+  fast, or — if none follows — the loss's shape check (#153) fails fast at
+  the output, unless the labels carry the same extra 1 — check the dataset
+  directly instead of relying on a test failure.
 - **Labels.** The loss dispatchers (`src/loss_functions/MSE.c`,
   `CrossEntropy.c`) require the label to have exactly the model output's rank
   and dimensions (#153), so an old-style label whose leading 1 was a batch

@@ -249,8 +249,9 @@ inferenceStats_t *inferenceWithLoss(layer_t **model, size_t numberOfLayers, tens
         outputNext = outputCurr;
     }
 
-    /* The loss runs first so a label whose shape differs from the output exits
-     * before anything is allocated (#153). The loss only reads outputNext. */
+    /* The loss runs before the stats are allocated, so a label whose shape
+     * differs from the output exits before reserveInferenceStats (#153). The
+     * loss only reads outputNext. */
     lossFunctions_t lossFns = lossFunctions[funcType];
     float loss = lossFns.forward(&outputNext, label, forwardReduction);
 

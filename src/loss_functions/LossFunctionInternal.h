@@ -11,9 +11,12 @@
  * each convertTensor walks its OWN operand's count, so a longer operand
  * overruns the scratch; FLOAT32 arms index every operand at the output's
  * count, so a shorter one is read -- and for the backward's grad wire,
- * written -- out of bounds. Equal counts are not enough either: a label with
- * the output's count but another rank or layout ([C] vs [1, C], [B, C, L] vs
- * [B, L, C]) would be scored element-by-element against the wrong values.
+ * written -- out of bounds. Equal counts are not enough either. A label with
+ * another layout at the same count ([B, C, L] vs [B, L, C]) would be scored
+ * element-by-element against the wrong values, and a label with another rank
+ * ([C] vs [1, C]) leaves the batch axis to be guessed -- the CE MEAN divisor
+ * and the MSE mean scale read dims[0] -- and hides a missed or doubled batch
+ * wrap.
  *
  * The output must be [B, ...] with a feature axis (rank >= 2; a rank-1
  * tensor would leave the batch axis to be guessed) and at least one element

@@ -434,13 +434,113 @@ static void writeHeaders(rematWireTable_t *t, layer_t **model, tensor_t *input,
     }
 }
 
+static void exitModelKey(const char *fact, size_t built, size_t live) {
+    PRINT_ERROR("rematWireTableBind: key mismatch on '%s': built %zu, live %zu (a key change "
+                "needs a fresh init)",
+                fact, built, live);
+    exit(1);
+}
+
+static void exitModelKeyAt(const char *fact, size_t i, size_t built, size_t live) {
+    PRINT_ERROR("rematWireTableBind: key mismatch on '%s[%zu]': built %zu, live %zu (a key "
+                "change needs a fresh init)",
+                fact, i, built, live);
+    exit(1);
+}
+
+static void exitWireKey(const rematWire_t *w, const char *field, size_t built, size_t live) {
+    PRINT_ERROR("rematWireTableBind: key mismatch on wire %s %u, field '%s': built %zu, live %zu "
+                "(a key change needs a fresh init)",
+                wireKindName(w->kind), (unsigned)w->index, field, built, live);
+    exit(1);
+}
+
+static void exitInputKeyAt(const char *field, size_t k, size_t built, size_t live) {
+    PRINT_ERROR("rematWireTableBind: key mismatch on wire ACT 0, field '%s[%zu]': built %zu, "
+                "live %zu (a key change needs a fresh init)",
+                field, k, built, live);
+    exit(1);
+}
+
+/* Phase 1 step 1 (spec §3.4): the model facts and ACT 0, before any shape is
+ * derived. With ACT 0's rank and every layer type unchanged, each derived rank
+ * is a pure function of them, so the built maxRank bounds the scratch.
+ * backwardTop and hasBackward follow from the compared facts, and so do the
+ * per-wire kind and rank (plan Assumption 9). */
+static void requireModelKey(const rematWireTable_t *t, layer_t **model, size_t n, lossFuncType_t lt,
+                            const tensor_t *input) {
+    if (n != t->modelSize) {
+        exitModelKey("modelSize", t->modelSize, n);
+    }
+    if (lt != t->lossType) {
+        exitModelKey("lossType", (size_t)t->lossType, (size_t)lt);
+    }
+    for (size_t i = 0; i < n; i++) {
+        if ((uint8_t)model[i]->type != t->layerType[i]) {
+            exitModelKeyAt("layerType", i, t->layerType[i], (size_t)model[i]->type);
+        }
+    }
+    size_t deepest;
+    ptrdiff_t top;
+    rematBackwardRange(model, n, lt, &deepest, &top);
+    if (deepest != t->deepest) {
+        exitModelKey("deepest", t->deepest, deepest);
+    }
+    for (size_t i = 0; i < n; i++) {
+        size_t frozen = layerIsFrozen(model[i]) ? 1u : 0u;
+        if (frozen != t->frozen[i]) {
+            exitModelKeyAt("frozen", i, t->frozen[i], frozen);
+        }
+    }
+    const shape_t *shape = input->shape;
+    if (shape->numberOfDimensions != t->inputRank) {
+        exitWireKey(&t->wires[0], "rank", t->inputRank, shape->numberOfDimensions);
+    }
+    for (size_t k = 0; k < t->inputRank; k++) {
+        if (shape->dimensions[k] != t->inputDims[k]) {
+            exitInputKeyAt("dims", k, t->inputDims[k], shape->dimensions[k]);
+        }
+    }
+    for (size_t k = 0; k < t->inputRank; k++) {
+        if (shape->orderOfDimensions[k] != t->inputOrder[k]) {
+            exitInputKeyAt("order", k, t->inputOrder[k], shape->orderOfDimensions[k]);
+        }
+    }
+    if ((uint8_t)input->quantization->type != t->inputType) {
+        exitWireKey(&t->wires[0], "dtype", t->inputType, (size_t)input->quantization->type);
+    }
+}
+
+/* Phase 2 (spec §3.4, D54): the full per-wire key, before phase 3 writes
+ * anything. numGroups <= expCapacity is the only capacity compare. */
+static void requireWireKey(const rematWireTable_t *t, const rematWireFact_t *facts) {
+    for (size_t id = 1; id < t->numWires; id++) {
+        const rematWire_t *w = &t->wires[id];
+        const rematWireFact_t *f = &facts[id];
+        if (f->dtype != w->dtype) {
+            exitWireKey(w, "dtype", w->dtype, f->dtype);
+        }
+        if (f->bytes != w->bytes) {
+            exitWireKey(w, "bytes", w->bytes, f->bytes);
+        }
+        if (f->numGroups > w->expCapacity) {
+            PRINT_ERROR("rematWireTableBind: key mismatch on wire %s %u, field 'numGroups': %zu "
+                        "groups exceed expCapacity %zu (a key change needs a fresh init)",
+                        wireKindName(w->kind), (unsigned)w->index, f->numGroups, w->expCapacity);
+            exit(1);
+        }
+    }
+}
+
 void rematWireTableBind(rematWireTable_t *t, layer_t **model, size_t n, lossFuncType_t lt,
                         tensor_t *input) {
-    (void)n;
-    (void)lt;
-    rematWireFact_t *facts = t->bindScratch; /* in the table block: no allocation, O(1) stack */
+    requireModelKey(t, model, n, lt, input);
+    /* O(maxRank) stack (four size_t[maxRank] shape arrays); the per-wire
+     * facts live in the table block. */
+    rematWireFact_t *facts = t->bindScratch;
     numberWires(facts, model, t->modelSize, t->deepest, t->backwardTop, t->hasBackward);
     deriveFacts(facts, t->numWires, model, t->modelSize, input, t->maxRank);
+    requireWireKey(t, facts);
     writeHeaders(t, model, input, facts);
 }
 

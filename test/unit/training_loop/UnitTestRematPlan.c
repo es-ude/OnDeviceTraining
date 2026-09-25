@@ -6,7 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "AsanDeath.h"
 #include "Common.h"
+#include "Conv1d.h"
 #include "Conv1dApi.h"
 #include "DeathTest.h"
 #include "Deserialize.h"
@@ -992,6 +994,212 @@ void testUnbindClearsTheBorrowedInputOnly(void) {
     freeModel(model, 1);
 }
 
+/* ---- the ASan death callback (spec §12.2 item 6, §16.1 item 4e; C6) ---- */
+
+#ifdef ODT_TEST_ASAN
+static void overrunAHeapBlockUnderTheCallback(void) {
+    odtInstallAsanDeathExit();
+    uint8_t *block = reserveMemory(4);
+    volatile size_t past = 4;
+    block[past] = 1;
+}
+
+/* The live-RED run that decides 4e: an ASan report inside a death-test child
+ * must surface as exit 86, not as the SIGABRT of abort_on_error=1. */
+void testAsanDeathCallbackExitsWithADistinctCode(void) {
+    ASSERT_EXITS_WITH(ODT_ASAN_DEATH_EXIT, overrunAHeapBlockUnderTheCallback());
+}
+#endif
+
+/* ---- the schedule key at bind (spec §3.4-§3.6, §12.2 item 8) ---- */
+
+void testBindExitsOnAChangedModelSize(void) {
+    layer_t *model[2] = {makeRelu(&g_floatQ), makeRelu(&g_floatQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
+    rematWireTable_t *t = initTable(model, 2, MSE, x);
+    ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on 'modelSize': built 2, live 1",
+                             rematWireTableBind(t, model, 1, MSE, x));
+    rematWireTableFree(t);
+    freeModel(model, 2);
+}
+
+void testBindExitsOnAChangedLossType(void) {
+    layer_t *model[2] = {makeLinear(4, 3, false), makeSoftmax()};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
+    rematWireTable_t *t = initTable(model, 2, CROSS_ENTROPY, x);
+    ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on 'lossType': built 1, live 0",
+                             rematWireTableBind(t, model, 2, MSE, x));
+    rematWireTableFree(t);
+    freeModel(model, 2);
+}
+
+void testBindExitsOnALayerTypeSwap(void) {
+    layer_t *relu = makeRelu(&g_floatQ);
+    layer_t *softmax = makeSoftmax();
+    layer_t *model[2] = {makeRelu(&g_floatQ), relu};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
+    rematWireTable_t *t = initTable(model, 2, MSE, x);
+    model[1] = softmax; /* same shape, same dtype: only the type changes */
+    ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on 'layerType[1]': built 1, live 6",
+                             rematWireTableBind(t, model, 2, MSE, x));
+    rematWireTableFree(t);
+    model[1] = relu;
+    freeModel(model, 2);
+    freeSoftmaxLayer(softmax);
+}
+
+/* Freezing the deepest trainable layer moves deepest (0 -> 3 on HAR). */
+void testBindExitsWhenFreezingMovesDeepest(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    tensor_t *x = makeHarInput(&in);
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, x);
+    model[0]->config->conv1d->frozen = true;
+    ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on 'deepest': built 0, live 3",
+                             rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, x));
+    model[0]->config->conv1d->frozen = false;
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+/* Freezing a layer above deepest keeps deepest; the frozen[] key catches it. */
+void testBindExitsWhenFreezingALayerAboveDeepest(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    tensor_t *x = makeHarInput(&in);
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, x);
+    model[3]->config->conv1d->frozen = true;
+    ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on 'frozen[3]': built 0, live 1",
+                             rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, x));
+    model[3]->config->conv1d->frozen = false;
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+void testBindExitsOnAChangedInputRank(void) {
+    layer_t *model[1] = {makeRelu(&g_floatQ)};
+    inputLike_t in;
+    inputLike_t in3;
+    rematWireTable_t *t = initTable(model, 1, MSE, makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ));
+    tensor_t *x3 = makeInput(&in3, (size_t[]){1, 1, 4}, 3, &g_floatQ);
+    ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on wire ACT 0, field 'rank': built 2, live 3",
+                             rematWireTableBind(t, model, 1, MSE, x3));
+    rematWireTableFree(t);
+    freeModel(model, 1);
+}
+
+/* A B change (#152, D17: exact-B key) dies on ACT 0's dims[0], which phase 1
+ * step 1 compares before any wire (plan Assumption 22). */
+void testBindExitsOnAChangedBatch(void) {
+    layer_t *model[1] = {makeRelu(&g_floatQ)};
+    inputLike_t in;
+    inputLike_t in2;
+    rematWireTable_t *t = initTable(model, 1, MSE, makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ));
+    tensor_t *x2 = makeInput(&in2, (size_t[]){2, 4}, 2, &g_floatQ);
+    ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on wire ACT 0, field 'dims[0]': built 1, live 2",
+                             rematWireTableBind(t, model, 1, MSE, x2));
+    rematWireTableFree(t);
+    freeModel(model, 1);
+}
+
+void testBindExitsOnAChangedInputOrder(void) {
+    layer_t *model[1] = {makeRelu(&g_floatQ)};
+    inputLike_t in;
+    inputLike_t inT;
+    rematWireTable_t *t = initTable(model, 1, MSE, makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ));
+    tensor_t *xT = makeInput(&inT, (size_t[]){1, 4}, 2, &g_floatQ);
+    inT.order[0] = 1;
+    inT.order[1] = 0;
+    ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on wire ACT 0, field 'order[0]': built 0, live 1",
+                             rematWireTableBind(t, model, 1, MSE, xT));
+    rematWireTableFree(t);
+    freeModel(model, 1);
+}
+
+void testBindExitsOnAChangedInputDtype(void) {
+    symInt32QConfig_t symQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &symQc, 12);
+    quantization_t symQ = {.type = SYM_INT32, .qConfig = &symQc};
+    layer_t *model[1] = {makeRelu(&g_floatQ)};
+    inputLike_t in;
+    inputLike_t inS;
+    rematWireTable_t *t = initTable(model, 1, MSE, makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ));
+    tensor_t *xS = makeInput(&inS, (size_t[]){1, 4}, 2, &symQ);
+    ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on wire ACT 0, field 'dtype': built 1, live 2",
+                             rematWireTableBind(t, model, 1, MSE, xS));
+    rematWireTableFree(t);
+    freeModel(model, 1);
+}
+
+/* A BFP width edit changes the wire's bytes (8 -> 4 for 8 elements). */
+void testBindExitsOnAChangedWireByteCount(void) {
+    uint8_t exponent[1];
+    bfpQConfig_t tmplQc;
+    initBfpQConfigInto(8, 8, HALF_AWAY, exponent, &tmplQc);
+    quantization_t tmplQ = {.type = BFP, .qConfig = &tmplQc};
+    layer_t *model[1] = {makeQuant(&tmplQ, &g_floatQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 8}, 2, &g_floatQ);
+    rematWireTable_t *t = initTable(model, 1, MSE, x);
+    tmplQc.mantissaBits = 4;
+    ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on wire ACT 1, field 'bytes': built 8, live 4",
+                             rematWireTableBind(t, model, 1, MSE, x));
+    rematWireTableFree(t);
+    freeModel(model, 1);
+}
+
+/* C1 (D54), dtype twin: a byte-neutral FLOAT32 -> SYM_INT32 template edit.
+ * FLOAT32 reserved no qConfig, so a write before the check goes through a NULL
+ * qConfig: a crash (or, under ASan, exit 86), never the named exit. */
+static void bindUnderTheAsanCallback(rematWireTable_t *t, layer_t **model, size_t n,
+                                     lossFuncType_t lt, tensor_t *x) {
+    odtInstallAsanDeathExit();
+    rematWireTableBind(t, model, n, lt, x);
+}
+
+void testBindFloatToSymTemplateEditExitsBeforeSlabWrite(void) {
+    quantization_t tmplQ = {.type = FLOAT32, .qConfig = NULL};
+    symInt32QConfig_t symQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &symQc, 12);
+    layer_t *model[1] = {makeRelu(&tmplQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
+    rematWireTable_t *t = initTable(model, 1, MSE, x);
+    tmplQ.type = SYM_INT32;
+    tmplQ.qConfig = &symQc;
+    ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on wire ACT 1, field 'dtype': built 1, live 2",
+                             bindUnderTheAsanCallback(t, model, 1, MSE, x));
+    rematWireTableFree(t);
+    freeModel(model, 1);
+}
+
+/* C1 (D54), BFP twin: exactly one BFP wire, per-tensor (expCapacity 1), so its
+ * exponent byte is the last object of the table block (plan Assumption 7). A
+ * grouped edit derives 4 groups; a write before the check would put 3 bytes
+ * past the block end, which ASan reports. */
+void testBindGroupedBfpEditExitsBeforeSlabWrite(void) {
+    uint8_t tmplExponents[4];
+    bfpQConfig_t tmplQc;
+    initBfpQConfigInto(8, 8, HALF_AWAY, tmplExponents, &tmplQc);
+    quantization_t tmplQ = {.type = BFP, .qConfig = &tmplQc};
+    layer_t *model[1] = {makeQuant(&tmplQ, &g_floatQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 8}, 2, &g_floatQ);
+    rematWireTable_t *t = initTable(model, 1, MSE, x);
+    TEST_ASSERT_EQUAL_size_t(1, t->wires[1].expCapacity);
+    initBfpQConfigGroupedInto(8, 8, HALF_AWAY, 4, 2, tmplExponents, &tmplQc);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "key mismatch on wire ACT 1, field 'numGroups': 4 groups exceed expCapacity 1",
+        bindUnderTheAsanCallback(t, model, 1, MSE, x));
+    rematWireTableFree(t);
+    freeModel(model, 1);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testBackwardRangeMseRunsFromLastLayerToDeepest);
@@ -1035,5 +1243,20 @@ int main(void) {
     RUN_TEST(testBindRunsSampleBOnATableBuiltOnSampleA);
     RUN_TEST(testHarSlabHoldsTheBindScratch);
     RUN_TEST(testUnbindClearsTheBorrowedInputOnly);
+#ifdef ODT_TEST_ASAN
+    RUN_TEST(testAsanDeathCallbackExitsWithADistinctCode);
+#endif
+    RUN_TEST(testBindExitsOnAChangedModelSize);
+    RUN_TEST(testBindExitsOnAChangedLossType);
+    RUN_TEST(testBindExitsOnALayerTypeSwap);
+    RUN_TEST(testBindExitsWhenFreezingMovesDeepest);
+    RUN_TEST(testBindExitsWhenFreezingALayerAboveDeepest);
+    RUN_TEST(testBindExitsOnAChangedInputRank);
+    RUN_TEST(testBindExitsOnAChangedBatch);
+    RUN_TEST(testBindExitsOnAChangedInputOrder);
+    RUN_TEST(testBindExitsOnAChangedInputDtype);
+    RUN_TEST(testBindExitsOnAChangedWireByteCount);
+    RUN_TEST(testBindFloatToSymTemplateEditExitsBeforeSlabWrite);
+    RUN_TEST(testBindGroupedBfpEditExitsBeforeSlabWrite);
     return UNITY_END();
 }

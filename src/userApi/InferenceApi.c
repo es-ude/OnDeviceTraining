@@ -214,10 +214,11 @@ tensor_t **inferenceBatched(layer_t **model, size_t numberOfLayers, batch_t *bat
     return tensorArr;
 }
 
-/* Sized from the PRODUCED output, not the label: a classifier's label is
- * rank-1 [C] while the model emits [1, C] — sizing from the label made the
- * later shape copy overflow the dimensions array (ASan-verified). Mirrors
- * initTrainingStats (CalculateGradsSequential.c). */
+/* Sized from the PRODUCED output, which is what gets copied into it. The loss
+ * requires the label to have exactly that shape (#153) and runs first, so a
+ * rank-1 [C] label against a [1, C] output -- which once overflowed here when
+ * the size came from the label -- now fails fast before this allocation.
+ * Mirrors initTrainingStats (CalculateGradsSequential.c). */
 static inferenceStats_t *reserveInferenceStats(tensor_t *producedOutput) {
     inferenceStats_t *inferenceStats = reserveMemory(sizeof(inferenceStats_t));
     inferenceStats->output = getTensorLike(producedOutput);
@@ -248,11 +249,13 @@ inferenceStats_t *inferenceWithLoss(layer_t **model, size_t numberOfLayers, tens
         outputNext = outputCurr;
     }
 
-    inferenceStats_t *inferenceStats = reserveInferenceStats(&outputNext);
-    convertTensor(&outputNext, inferenceStats->output);
-
+    /* The loss runs first so a label whose shape differs from the output exits
+     * before anything is allocated (#153). The loss only reads outputNext. */
     lossFunctions_t lossFns = lossFunctions[funcType];
     float loss = lossFns.forward(&outputNext, label, forwardReduction);
+
+    inferenceStats_t *inferenceStats = reserveInferenceStats(&outputNext);
+    convertTensor(&outputNext, inferenceStats->output);
     inferenceStats->loss = loss;
 
     deInitBuffer(&outputNext);

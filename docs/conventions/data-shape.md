@@ -77,9 +77,10 @@ axes, since nothing here auto-detects the old shape:
   extra leading 1 and gives no error; a Relu-, LayerNorm- or Dropout-first
   model carries the extra axis onward, where it keeps traveling through any
   further rank-preserving layers until a later rank-checking layer fails
-  fast, or — if none follows — the loss's shape check (#153) fails fast at
-  the output, unless the labels carry the same extra 1 — check the dataset
-  directly instead of relying on a test failure.
+  fast, a later Flatten absorbs it silently, or — if neither follows — the
+  loss's shape check (#153) fails fast at the output, unless the labels
+  carry the same extra 1 — check the dataset directly instead of relying on
+  a test failure.
 - **Labels.** The loss dispatchers (`src/loss_functions/MSE.c`,
   `CrossEntropy.c`) require the label to have exactly the model output's rank
   and dimensions (#153), so an old-style label whose leading 1 was a batch

@@ -426,6 +426,23 @@ static tensor_t *buildFloatTensor1D(size_t n, const float *values) {
     return t;
 }
 
+/* Heap FLOAT32 tensor of any rank >= 1 with the given dims, filled from values. */
+static tensor_t *buildFloatTensorShaped(const size_t *dims, size_t rank, float *values) {
+    size_t *d = reserveMemory(rank * sizeof(size_t));
+    size_t n = 1;
+    for (size_t k = 0; k < rank; k++) {
+        d[k] = dims[k];
+        n *= dims[k];
+    }
+    size_t *order = reserveMemory(rank * sizeof(size_t));
+    setOrderOfDimsForNewTensor(rank, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, d, rank, order);
+    tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(t, values, n);
+    return t;
+}
+
 /* R-P6: BFP joins the SYM_INT32 fake-quant arm. p = [0.5, 0.25, 0.125, 0.125]
  * is grid-exact at m=6: absmax 0.5, 0.5/31 = 0.0161290 = 0.516129 * 2^-5, so
  * the stored exponent is 127 - 5 = 122 (scale 2^-5 = 0.03125) and the codes
@@ -568,6 +585,44 @@ void testCrossEntropySoftmaxBackwardFloat32RejectsLossWireCountMismatch(void) {
     freeTensor(floatP);
 }
 
+/* #153: the CE dispatchers share MSE's shape check. A rank-1 softmax output
+ * would leave the batch axis to be guessed (crossEntropyForwardFloat treats
+ * it as one row); equal-count operands with another shape are rejected. */
+void testCrossEntropyForwardRejectsRank1Output(void) {
+    size_t dims[] = {3};
+    tensor_t *softmaxOutput = buildFloatTensorShaped(dims, 1, (float[]){0.6f, 0.3f, 0.1f});
+    tensor_t *distribution = buildFloatTensorShaped(dims, 1, (float[]){1.f, 0.f, 0.f});
+    ASSERT_EXITS_WITH_FAILURE(
+        (void)crossEntropyForward(softmaxOutput, distribution, REDUCTION_MEAN));
+    freeTensor(distribution);
+    freeTensor(softmaxOutput);
+}
+
+void testCrossEntropyForwardRejectsLeadingAxisMismatch(void) {
+    size_t outDims[] = {2, 3};
+    size_t distDims[] = {3, 2};
+    tensor_t *softmaxOutput =
+        buildFloatTensorShaped(outDims, 2, (float[]){0.6f, 0.3f, 0.1f, 0.2f, 0.2f, 0.6f});
+    tensor_t *distribution =
+        buildFloatTensorShaped(distDims, 2, (float[]){1.f, 0.f, 0.f, 0.f, 0.f, 1.f});
+    ASSERT_EXITS_WITH_FAILURE(
+        (void)crossEntropyForward(softmaxOutput, distribution, REDUCTION_MEAN));
+    freeTensor(distribution);
+    freeTensor(softmaxOutput);
+}
+
+void testCrossEntropySoftmaxBackwardRejectsDistributionRankMismatch(void) {
+    size_t outDims[] = {1, 3};
+    size_t distDims[] = {1, 3, 1};
+    tensor_t *softmaxOutput = buildFloatTensorShaped(outDims, 2, (float[]){0.6f, 0.3f, 0.1f});
+    tensor_t *distribution = buildFloatTensorShaped(distDims, 3, (float[]){1.f, 0.f, 0.f});
+    tensor_t *lossWire = buildFloatTensorShaped(outDims, 2, (float[]){0.f, 0.f, 0.f});
+    ASSERT_EXITS_WITH_FAILURE(crossEntropySoftmaxBackward(softmaxOutput, distribution, lossWire));
+    freeTensor(lossWire);
+    freeTensor(distribution);
+    freeTensor(softmaxOutput);
+}
+
 void testCrossEntropyForward_NonFiniteSoftmaxReturnsNanInsteadOfAborting(void) {
     size_t inputSize = 3;
     float softmaxData[] = {0.5f, NAN, 0.5f};
@@ -635,6 +690,9 @@ int main() {
     RUN_TEST(testCrossEntropySoftmaxBackwardBfpRejectsLossWireCountMismatch);
     RUN_TEST(testCrossEntropyForwardFloat32RejectsDistributionCountMismatch);
     RUN_TEST(testCrossEntropySoftmaxBackwardFloat32RejectsLossWireCountMismatch);
+    RUN_TEST(testCrossEntropyForwardRejectsRank1Output);
+    RUN_TEST(testCrossEntropyForwardRejectsLeadingAxisMismatch);
+    RUN_TEST(testCrossEntropySoftmaxBackwardRejectsDistributionRankMismatch);
     RUN_TEST(testCrossEntropyForward_NonFiniteSoftmaxReturnsNanInsteadOfAborting);
     RUN_TEST(testCrossEntropyForward_InfiniteSoftmaxReturnsNanInsteadOfAborting);
     return UNITY_END();

@@ -5,6 +5,7 @@
 #include "Common.h"
 #include "CrossEntropy.h"
 #include "Log.h"
+#include "LossFunctionInternal.h"
 #include "TensorConversion.h"
 
 #include <math.h>
@@ -39,42 +40,13 @@ float crossEntropyForwardFloat(tensor_t *softmaxOutput, tensor_t *distribution,
         loss += y[i] * -logf(pi);
     }
 
+    /* Rank < 2 only via a direct arm call (the dispatchers reject it, #153): no
+     * batch axis, so MEAN is the raw sum. */
     if (reduction == REDUCTION_MEAN && softmaxOutput->shape->numberOfDimensions >= 2) {
         size_t microbatch = softmaxOutput->shape->dimensions[0];
         return loss / (float)microbatch;
     }
     return loss;
-}
-
-/* PR4 adversarial gate (F1/F2, hoisted to the dispatchers by delta D0): every
- * operand of a loss must carry the MODEL OUTPUT's element count, and the check
- * belongs at the PUBLIC entry because EVERY arm needs it — not just the
- * fake-quant one that first exposed it. MSE.c carries the twin, same shape.
- *
- * Fake-quant arms: each scratch is a VLA sized from the output's count while it
- * borrows ITS OWN tensor's shape_t, and every convertTensor walks that borrowed
- * count — so a longer DISTRIBUTION is decoded past the end of its scratch on
- * the way in, and a longer LOSS wire is read past the end of its scratch on the
- * way out. FLOAT32 arms: they index every operand at the OUTPUT's count, so the
- * surplus end of a longer operand is merely ignored while a SHORTER one is read
- * — and for the backward's loss wire, WRITTEN — out of bounds. Two different
- * mechanisms, one precondition, therefore one guard above the switch rather
- * than one per arm.
- *
- * Fail fast rather than clamp to the shorter side: an operand-count mismatch is
- * a caller's shape bug, and silently scoring the first n elements would hide it.
- * The *Float entry points stay unguarded on purpose — they are the arm bodies,
- * reachable directly only from tests; the dispatcher is the guarded API. */
-static void requireOperandMatchesOutput(tensor_t *softmaxOutput, tensor_t *operand,
-                                        const char *operandName, const char *what) {
-    size_t outputCount = calcNumberOfElementsByTensor(softmaxOutput);
-    size_t operandCount = calcNumberOfElementsByTensor(operand);
-    if (outputCount != operandCount) {
-        PRINT_ERROR("%s: %s element count (%zu) does not match the model output (%zu) -- every "
-                    "operand of a loss must carry the output's element count",
-                    what, operandName, operandCount, outputCount);
-        exit(1);
-    }
 }
 
 /* Fake-quant forward (#206, M5 — the MSE idiom): dequantize both operands

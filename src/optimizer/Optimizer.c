@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "AdamW.h"
+#include "BatchNorm1d.h"
 #include "Common.h"
 #include "Conv1d.h"
 #include "Conv1dTransposed.h"
@@ -102,6 +103,8 @@ static size_t calcNumberOfStatesByLayer(const layer_t *layer) {
     case LAYERNORM:
     case GROUPNORM:
         return 2;
+    case BATCHNORM1D:
+        return layer->config->batchNorm1d->affine ? 2 : 0;
     case RELU:
     case SOFTMAX:
     case FLATTEN:

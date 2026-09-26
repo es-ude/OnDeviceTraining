@@ -3,6 +3,7 @@
 #include <math.h>
 #include <stdlib.h>
 
+#include "BatchNorm1d.h"
 #include "Common.h"
 #include "Conv1d.h"
 #include "Conv1dTransposed.h"
@@ -256,6 +257,15 @@ void collectTrainableParameters(layer_t **model, size_t sizeModel, parameter_t *
             slots[paramSlot + 1] = gnCfg->beta;
 
             paramSlot += 2;
+            break;
+        }
+        case BATCHNORM1D: {
+            batchNorm1dConfig_t *bnCfg = layerConfig->batchNorm1d;
+            if (bnCfg->affine) {
+                slots[paramSlot] = bnCfg->gamma;
+                slots[paramSlot + 1] = bnCfg->beta;
+                paramSlot += 2;
+            }
             break;
         }
         case RELU:

@@ -281,6 +281,38 @@ target_link_libraries(UnitTestGroupNormIntegration PRIVATE
 )
 __register_target_as_unit_test(UnitTestGroupNormIntegration)
 
+add_executable(UnitTestBatchNorm1dIntegration UnitTestBatchNorm1dIntegration.c)
+target_link_libraries(UnitTestBatchNorm1dIntegration PRIVATE
+        unity
+        TrainingLoopApi
+        TrainingEpochDefault
+        TrainingBatchDefault
+        CalculateGradsSequential
+        CommonLayerLibs
+        BatchNorm1dApi
+        BatchNorm1d
+        Reduce
+        LinearApi
+        LayerConfigAccess
+        LayerWeightsApi
+        OptimizerApi
+        SgdApi
+        Sgd
+        Optimizer
+        StateDictApi
+        LayerQuant
+        LayerCommon
+        TensorApi
+        QuantizationApi
+        LossFunction
+        InferenceApi
+        DataLoader
+        DataLoaderApi
+        StorageApi
+        odt_test_death
+)
+__register_target_as_unit_test(UnitTestBatchNorm1dIntegration)
+
 add_executable(UnitTestAdaptiveAvgPool1dIntegration UnitTestAdaptiveAvgPool1dIntegration.c)
 target_link_libraries(UnitTestAdaptiveAvgPool1dIntegration PRIVATE
         unity

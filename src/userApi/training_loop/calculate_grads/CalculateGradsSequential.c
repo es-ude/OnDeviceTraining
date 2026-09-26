@@ -7,6 +7,7 @@
 
 #include "AdaptiveAvgPool1d.h"
 #include "AvgPool1d.h"
+#include "BatchNorm1d.h"
 #include "CalculateGradsSequential.h"
 #include "Common.h"
 #include "Conv1d.h"
@@ -174,6 +175,13 @@ static bool layerParameters(layer_t *layer, parameter_t **weightOut, parameter_t
     case GROUPNORM:
         *weightOut = layer->config->groupNorm->gamma;
         *biasOut = layer->config->groupNorm->beta;
+        return true;
+    case BATCHNORM1D:
+        if (!layer->config->batchNorm1d->affine) {
+            return false; /* no gamma/beta: never trainable, never the deepest */
+        }
+        *weightOut = layer->config->batchNorm1d->gamma;
+        *biasOut = layer->config->batchNorm1d->beta;
         return true;
     default:
         return false;

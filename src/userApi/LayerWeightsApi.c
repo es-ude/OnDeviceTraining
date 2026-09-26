@@ -1,6 +1,7 @@
 #define SOURCE_FILE "LAYER_WEIGHTS_API"
 
 #include "LayerWeightsApi.h"
+#include "BatchNorm1d.h"
 #include "Common.h"
 #include "Conv1d.h"
 #include "Conv1dTransposed.h"
@@ -114,6 +115,22 @@ void layerLoadWeights(layer_t *layer, float *weightData, float *biasData) {
         tensor_t *betaTensor = cfg->beta->param;
         size_t numBeta = calcNumberOfElementsByTensor(betaTensor);
         tensorFillFromFloatBuffer(betaTensor, biasData, numBeta);
+        break;
+    }
+    case BATCHNORM1D: {
+        batchNorm1dConfig_t *cfg = layer->config->batchNorm1d;
+        if (!cfg->affine) {
+            PRINT_ERROR("layerLoadWeights BATCHNORM1D: layer has no gamma/beta (noAffine)");
+            exit(1);
+        }
+        if (biasData == NULL) {
+            PRINT_ERROR("layerLoadWeights BATCHNORM1D: beta required but biasData is NULL");
+            exit(1);
+        }
+        tensorFillFromFloatBuffer(cfg->gamma->param, weightData,
+                                  calcNumberOfElementsByTensor(cfg->gamma->param));
+        tensorFillFromFloatBuffer(cfg->beta->param, biasData,
+                                  calcNumberOfElementsByTensor(cfg->beta->param));
         break;
     }
     case RELU:

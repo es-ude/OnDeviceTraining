@@ -1,6 +1,7 @@
 #define SOURCE_FILE "STATE_DICT_API"
 
 #include "StateDictApi.h"
+#include "BatchNorm1d.h"
 #include "Common.h"
 #include "LayerWeightsApi.h"
 #include <stdbool.h>
@@ -14,6 +15,8 @@ static bool layerHasParameters(layer_t *layer) {
     case LAYERNORM:
     case GROUPNORM:
         return true;
+    case BATCHNORM1D:
+        return layer->config->batchNorm1d->affine;
     case RELU:
     case SOFTMAX:
     case FLATTEN:

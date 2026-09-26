@@ -61,10 +61,11 @@ float optimizerClipGradNorm(optimizer_t *optimizer, float maxNorm);
 /* Fills the caller-allocated `slots` array (sized via calcTotalNumberOfStates)
  * with every trainable parameter_t* in `model`, in model order. Per-layer-type
  * switch: LINEAR/CONV1D/CONV1D_TRANSPOSED contribute weights (+ bias, if
- * present -- BIAS_FALSE layers carry none); LAYERNORM/GROUPNORM contribute
- * gamma + beta; layers with no trainable parameters are skipped; an unknown
- * layer type fails fast (PRINT_ERROR + exit(1)). Frozen layers (#380) are
- * skipped entirely -- none of their parameters land in `slots`.
+ * present -- BIAS_FALSE layers carry none); LAYERNORM/GROUPNORM/BATCHNORM1D
+ * contribute gamma + beta (BATCHNORM1D only when affine; its running buffers
+ * are never parameters); layers with no trainable parameters are skipped; an
+ * unknown layer type fails fast (PRINT_ERROR + exit(1)). Frozen layers (#380)
+ * are skipped entirely -- none of their parameters land in `slots`.
  *
  * Extracted from SgdApi.c (#328 groundwork) so non-SGD factories (e.g. PR C's
  * adamWCreateOptim) can reuse the same collection logic. */

@@ -85,8 +85,9 @@ extern layerFunctions_t layerFunctions[];
 void initLayer(layer_t *layer, layerType_t layerType, layerConfig_t *config);
 
 /*! Whether `layer` was frozen at create time (#380): true for LINEAR/CONV1D/
- *  CONV1D_TRANSPOSED/LAYERNORM/GROUPNORM configs with `frozen == true`,
- *  false for every other layer type (no trainable params, or not yet wired). */
+ *  CONV1D_TRANSPOSED/LAYERNORM/GROUPNORM/BATCHNORM1D configs with
+ *  `frozen == true`, false for every other layer type (no trainable params,
+ *  or not yet wired). */
 bool layerIsFrozen(const layer_t *layer);
 
 #endif

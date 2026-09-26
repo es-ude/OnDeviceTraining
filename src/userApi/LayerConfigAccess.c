@@ -4,6 +4,7 @@
 
 #include "AdaptiveAvgPool1d.h"
 #include "AvgPool1d.h"
+#include "BatchNorm1d.h"
 #include "Common.h"
 #include "Conv1d.h"
 #include "Conv1dTransposed.h"
@@ -48,6 +49,8 @@ quantization_t *layerOutputQ(layer_t *layer) {
         return layer->config->layerNorm->outputQ;
     case GROUPNORM:
         return layer->config->groupNorm->outputQ;
+    case BATCHNORM1D:
+        return layer->config->batchNorm1d->outputQ;
     case QUANTIZATION:
         return layer->config->quantization->outputQ;
     default:
@@ -84,6 +87,8 @@ quantization_t *backwardWireQ(layer_t *layer) {
         return layer->config->layerNorm->propLossQ;
     case GROUPNORM:
         return layer->config->groupNorm->propLossQ;
+    case BATCHNORM1D:
+        return layer->config->batchNorm1d->propLossQ;
     case QUANTIZATION:
         return layer->config->quantization->propLossQ;
     case FLATTEN:
@@ -120,6 +125,8 @@ arithmetic_t layerForwardMath(layer_t *layer) {
         return layer->config->layerNorm->forwardMath;
     case GROUPNORM:
         return layer->config->groupNorm->forwardMath;
+    case BATCHNORM1D:
+        return layer->config->batchNorm1d->forwardMath;
     case QUANTIZATION:
         // Pure conversion node (D4): no consumed arithmetic.
         return NO_ARITHMETIC;
@@ -240,6 +247,22 @@ const char *layerNonFloat32Field(layer_t *layer) {
         const groupNormConfig_t *c = layer->config->groupNorm;
         return normNonFloat32(c->forwardMath, c->propLossMath, c->outputQ, c->propLossQ, c->gamma,
                               c->beta);
+    }
+    case BATCHNORM1D: {
+        /* gamma/beta are NULL without affine (paramNonFloat32 passes NULL);
+         * the running buffers are value state read as float* -- gated too. */
+        const batchNorm1dConfig_t *c = layer->config->batchNorm1d;
+        const char *field = normNonFloat32(c->forwardMath, c->propLossMath, c->outputQ,
+                                           c->propLossQ, c->gamma, c->beta);
+        if (field == NULL && c->runningMean != NULL &&
+            !storageIsFloat32(c->runningMean->quantization)) {
+            field = "runningMean";
+        }
+        if (field == NULL && c->runningVar != NULL &&
+            !storageIsFloat32(c->runningVar->quantization)) {
+            field = "runningVar";
+        }
+        return field;
     }
     case RELU: {
         const reluConfig_t *c = layer->config->relu;

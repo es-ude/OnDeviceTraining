@@ -51,6 +51,8 @@ bool layerIsFrozen(const layer_t *layer) {
         return layer->config->layerNorm->frozen;
     case GROUPNORM:
         return layer->config->groupNorm->frozen;
+    case BATCHNORM1D:
+        return layer->config->batchNorm1d->frozen;
     default:
         return false;
     }

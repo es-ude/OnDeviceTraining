@@ -39,7 +39,8 @@ trainingStats_t *tracedGrads(layer_t **model, size_t modelSize, lossConfig_t los
  *  skipped; a frozen layer's weight/bias GRAD is also skipped (#380 --
  *  frozen layers carry grad == NULL, and the sink contract promises a
  *  borrowed VALID tensor, never NULL). (Trainable: LINEAR, CONV1D,
- *  CONV1D_TRANSPOSED, LAYERNORM, GROUPNORM.) */
+ *  CONV1D_TRANSPOSED, LAYERNORM, GROUPNORM, BATCHNORM1D when affine; BN
+ *  running buffers are not traced.) */
 void traceModelWeights(layer_t **model, size_t modelSize, const char *tag, traceSink_t sink,
                        void *ctx);
 

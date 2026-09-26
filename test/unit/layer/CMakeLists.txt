@@ -469,6 +469,36 @@ add_elastic_ai_unit_test(
 add_dependencies(UnitTestGroupNorm generate_expected_groupnorm)
 target_include_directories(UnitTestGroupNorm PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
+set(GEN_BATCHNORM1D_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_batchnorm1d.h)
+add_custom_command(
+        OUTPUT ${GEN_BATCHNORM1D_HEADER}
+        COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_batchnorm1d.py
+                --out ${GEN_BATCHNORM1D_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_batchnorm1d.py
+        COMMENT "Generating expected_batchnorm1d.h via PyTorch"
+        VERBATIM
+)
+add_custom_target(generate_expected_batchnorm1d DEPENDS ${GEN_BATCHNORM1D_HEADER})
+
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
+        BatchNorm1d
+        MORE_LIBS
+        ArithmeticType
+        CommonLayerLibs
+        TensorApi
+        QuantizationApi
+        LayerQuant
+        Quantization
+        Rounding
+        Arithmetic
+        StorageApi
+        Reduce
+        odt_test_death
+)
+add_dependencies(UnitTestBatchNorm1d generate_expected_batchnorm1d)
+target_include_directories(UnitTestBatchNorm1d PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         QuantizationLayer

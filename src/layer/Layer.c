@@ -3,6 +3,7 @@
 #include "Layer.h"
 #include "AdaptiveAvgPool1d.h"
 #include "AvgPool1d.h"
+#include "BatchNorm1d.h"
 #include "Conv1d.h"
 #include "Conv1dTransposed.h"
 #include "Dropout.h"
@@ -30,7 +31,9 @@ layerFunctions_t layerFunctions[] = {
                             adaptiveAvgPool1dCalcOutputShape},
     [DROPOUT] = {dropoutForward, dropoutBackward, dropoutCalcOutputShape},
     [LAYERNORM] = {layerNormForward, layerNormBackward, layerNormCalcOutputShape},
-    [GROUPNORM] = {groupNormForward, groupNormBackward, groupNormCalcOutputShape}};
+    [GROUPNORM] = {groupNormForward, groupNormBackward, groupNormCalcOutputShape},
+    [BATCHNORM1D] = {batchNorm1dForward, NULL /* backward: Task 3 (#460) */,
+                     batchNorm1dCalcOutputShape}};
 
 void initLayer(layer_t *layer, layerType_t type, layerConfig_t *config) {
     layer->type = type;

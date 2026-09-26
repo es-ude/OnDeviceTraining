@@ -132,6 +132,25 @@ target_link_libraries(GroupNorm PRIVATE
         Common
 )
 
+add_library(BatchNorm1d BatchNorm1d.c)
+target_include_directories(BatchNorm1d PUBLIC include)
+target_link_libraries(BatchNorm1d PRIVATE
+        DTypes
+        Tensor
+        Quantization
+        Add
+        Sub
+        Mul
+        Div
+        Reduce
+        Arithmetic
+        ArithmeticType
+        ExecuteOp
+        Rounding
+        Layer
+        Common
+)
+
 add_library(Layer Layer.c)
 target_include_directories(Layer PUBLIC include)
 target_link_libraries(Layer PRIVATE
@@ -154,6 +173,7 @@ target_link_libraries(Layer PRIVATE
         Dropout
         LayerNorm
         GroupNorm
+        BatchNorm1d
 )
 
 add_library(Linear Linear.c)
@@ -236,6 +256,7 @@ target_link_libraries(CommonLayerLibs INTERFACE
         Dropout
         LayerNorm
         GroupNorm
+        BatchNorm1d
         Rounding
         Tensor
         Sgd

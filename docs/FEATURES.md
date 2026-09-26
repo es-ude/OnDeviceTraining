@@ -421,7 +421,7 @@ checkpointing, limitations, literature).
   returns NaN (and prints one PRINT_ERROR per process) when any softmax element is
   non-finite; it no longer aborts (`#446`). Both losses fail fast unless the
   model output has rank >= 2 and at least one element and every operand has
-  its exact shape — labels carry the batch axis `[B, ...]` (#153).
+  the output's rank and dimensions — labels carry the batch axis `[B, ...]` (#153).
 - **Training loop** — `trainingRun` → epoch → batch → pluggable `calculateGradsFn`.
   A "batch" is gradient accumulation over microbatches of `microBatchSize` rows
   (`trainingRunOptions_t`, default 1; m > 1 stacks m samples into one `[m, ...]`

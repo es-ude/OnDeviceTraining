@@ -33,9 +33,10 @@ lossConfig_t defaultLossConfig(lossFuncType_t funcType);
  * \return Per-microbatch scalar loss value.
  *
  * Contract, enforced by every dispatcher (#153): modelOutput has rank >= 2
- * and at least one element, and the label has its exact shape. All
- * microbatches in one macro batch must have equal B (uniform microbatch size
- * assumption — see docs/CONVENTIONS.md §"Loss API: microbatch contracts"). */
+ * and at least one element, and the label has modelOutput's rank and dimensions
+ * (orderOfDimensions is not compared). All microbatches in one macro batch
+ * must have equal B (uniform microbatch size assumption — see
+ * docs/CONVENTIONS.md §"Loss API: microbatch contracts"). */
 typedef float (*lossFwdFn_t)(tensor_t *modelOutput, tensor_t *label, reduction_t reduction);
 
 /*! Per-microbatch backward.

@@ -212,6 +212,17 @@ void testGoldTrainForwardCumulativeOverThreeSteps(void) {
                         numBatchesTracked_bn_cumulativeRank3);
 }
 
+/* Spec §4.3: eps INSIDE the sqrt. Batch variance ~1e-6 ~ eps/10, so dropping
+ * eps or adding it outside the sqrt moves y far beyond the 1e-4 tolerance
+ * (the O(1)-variance golds above cannot tell the placements apart). */
+void testGoldTrainForwardTinyVarianceKeepsEpsInsideSqrt(void) {
+    runTrainForwardGold((size_t[]){4, 3}, 2, true, true, BN_MOMENTUM_DEFAULT, 0.0f, 1,
+                        input_bn_tinyVarRank2, gamma_bn_tinyVarRank2, beta_bn_tinyVarRank2,
+                        expectedForward_bn_tinyVarRank2, expectedForward_bn_tinyVarRank2_len,
+                        expectedRunningMean_bn_tinyVarRank2, expectedRunningVar_bn_tinyVarRank2,
+                        numBatchesTracked_bn_tinyVarRank2);
+}
+
 /* track off: batch statistics in training AND in eval (PyTorch parity). */
 void testNoTrackUsesBatchStatisticsInTrainingAndEval(void) {
     for (int training = 0; training <= 1; training++) {
@@ -241,6 +252,19 @@ void testEvalForwardUsesRunningStatsAndWritesNothing(void) {
     TEST_ASSERT_EQUAL_MEMORY(runningMeanInit_bn_evalRank3, cap.rm, 2 * sizeof(float));
     TEST_ASSERT_EQUAL_MEMORY(runningVarInit_bn_evalRank3, cap.rv, 2 * sizeof(float));
     TEST_ASSERT_EQUAL_UINT64(0, cap.nbt);
+}
+
+/* Spec §4.3 on the running-statistics path: running_var in [1e-6, 1.1e-5]. */
+void testEvalForwardTinyRunningVarKeepsEpsInsideSqrt(void) {
+    bnFixture_t f;
+    bnFixtureInit(&f, 2, true, true, gamma_bn_evalTinyVarRank3, beta_bn_evalTinyVarRank3,
+                  runningMeanInit_bn_evalTinyVarRank3, runningVarInit_bn_evalTinyVarRank3,
+                  BN_MOMENTUM_DEFAULT, 0.0f);
+    bnForwardCapture_t cap;
+    bnRunForward(&f, (size_t[]){3, 2, 5}, 3, input_bn_evalTinyVarRank3, &cap);
+    bnFixtureFree(&f);
+    assertFloatsWithin(1e-4f, expectedForward_bn_evalTinyVarRank3, cap.y,
+                       expectedForward_bn_evalTinyVarRank3_len);
 }
 
 /* D3: frozen BN in a training call behaves exactly like eval. */
@@ -510,6 +534,8 @@ int main(void) {
     RUN_TEST(testGoldTrainForwardMomentum03);
     RUN_TEST(testMomentumOneCopiesBatchStatistics);
     RUN_TEST(testGoldTrainForwardCumulativeOverThreeSteps);
+    RUN_TEST(testGoldTrainForwardTinyVarianceKeepsEpsInsideSqrt);
+    RUN_TEST(testEvalForwardTinyRunningVarKeepsEpsInsideSqrt);
     RUN_TEST(testNoTrackUsesBatchStatisticsInTrainingAndEval);
     RUN_TEST(testEvalForwardUsesRunningStatsAndWritesNothing);
     RUN_TEST(testFrozenTrainingForwardUsesRunningStatsAndWritesNothing);

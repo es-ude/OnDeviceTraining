@@ -30,7 +30,7 @@ typedef struct rematStep {
 } rematStep_t;
 _Static_assert(sizeof(rematStep_t) == 4, "fixed-width step record");
 
-typedef enum rematPlanPolicy { REMAT_PLAN_STORE_ALL = 0 } rematPlanPolicy_t;
+typedef enum rematPlanPolicy { REMAT_PLAN_STORE_ALL = 0, REMAT_PLAN_LIVENESS } rematPlanPolicy_t;
 
 /* NULL, or a zero-initialised struct, means STORE_ALL (the trainingRunOptions_t
  * idiom, TrainingLoopApi.h:113-115). */

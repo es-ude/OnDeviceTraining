@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "Layer.h"
+#include "LayerConfigAccess.h"
 #include "RematPlan.h"
 #include "RematPlanPolicy.h"
 #include "RematScheduler.h"
@@ -38,12 +40,30 @@ void rematFillTrainSteps(const rematWireTable_t *t, rematStep_t *steps) {
     }
 }
 
+/* LIVENESS (spec §4.4): ACT j ends at its last reader. With the read-set rule
+ * (§3.7) this frees pool / Flatten / Quantization / Dropout inputs at their
+ * forward, everything below the #380 cut, the CE logits, and a frozen GEMM's
+ * input, while a frozen norm keeps its input. */
+static size_t actLastReader(const rematWireTable_t *t, layer_t **model, size_t j) {
+    size_t n = t->modelSize;
+    size_t last = (j < n) ? j : n; /* FORWARD(j), or LOSS_FORWARD for ACT n */
+    if (j == n && t->hasBackward) {
+        last = n + 1u; /* LOSS_BACKWARD reads the model output */
+    }
+    bool backwardRuns = j >= t->deepest && (ptrdiff_t)j <= t->backwardTop;
+    if (backwardRuns && layerBackwardReadsInput(model[j])) {
+        last = rematBackwardStep(t, j);
+    }
+    return last;
+}
+
 /* STORE_ALL reproduces today's lifetimes: every ACT lives until
  * deInitLayerOutputs (CalculateGradsSequential.c:116), the seed from
  * LOSS_BACKWARD to the first BACKWARD, and each dx wire from the BACKWARD that
  * writes it to the one that reads it (the gradCurr -> gradNext handover,
- * :105-111). */
-void rematFillTrainRanges(const rematWireTable_t *t, size_t numSteps, rematRange_t *ranges) {
+ * :105-111). LIVENESS differs only in where an ACT range ends. */
+void rematFillTrainRanges(rematPlanPolicy_t policy, const rematWireTable_t *t, layer_t **model,
+                          size_t numSteps, rematRange_t *ranges) {
     size_t n = t->modelSize;
     size_t lossBackward = n + 1u;
     for (size_t id = 1; id < t->numWires; id++) {
@@ -52,7 +72,8 @@ void rematFillTrainRanges(const rematWireTable_t *t, size_t numSteps, rematRange
         size_t end;
         if (w->kind == REMAT_WIRE_ACT) {
             begin = w->index - 1u; /* FORWARD(j-1) */
-            end = numSteps - 1u;
+            end = (policy == REMAT_PLAN_STORE_ALL) ? numSteps - 1u
+                                                   : actLastReader(t, model, w->index);
         } else if (w->index == n) { /* the seed */
             begin = lossBackward;
             end = hasBackwardSteps(t) ? rematBackwardStep(t, (size_t)t->backwardTop) : lossBackward;

@@ -10,12 +10,17 @@
 #include "Common.h"
 #include "Conv1d.h"
 #include "Conv1dApi.h"
+#include "Conv1dTransposed.h"
 #include "DeathTest.h"
 #include "Deserialize.h"
 #include "FlattenApi.h"
+#include "GroupNorm.h"
 #include "Layer.h"
+#include "LayerConfigAccess.h"
+#include "LayerNorm.h"
 #include "LayerNormApi.h"
 #include "LayerQuant.h"
+#include "Linear.h"
 #include "LinearApi.h"
 #include "LossFunction.h"
 #include "Pool1dApi.h"
@@ -259,6 +264,98 @@ static size_t peakOf(layer_t **model, size_t n, lossFuncType_t lt, const tensor_
     rematPlanFree(p);
     rematWireTableFree(t);
     return peak;
+}
+
+static const rematPlanSpec_t g_liveness = {.policy = REMAT_PLAN_LIVENESS};
+
+static const rematRange_t *rangeOfWire(const rematProgram_t *p, uint16_t wire) {
+    for (size_t r = 0; r < p->numRanges; r++) {
+        if (p->ranges[r].wire == wire) {
+            return &p->ranges[r];
+        }
+    }
+    return NULL;
+}
+
+static void assertLiveAt(const rematProgram_t *p, uint16_t wire, size_t step, const char *what) {
+    if (wire == 0) {
+        return; /* ACT 0 is borrowed: always present, never ranged */
+    }
+    const rematRange_t *r = rangeOfWire(p, wire);
+    TEST_ASSERT_NOT_NULL_MESSAGE(r, what);
+    TEST_ASSERT_TRUE_MESSAGE(r->begin <= step && step <= r->end, what);
+}
+
+/* The operands of every step, derived here independently of the generator
+ * (§3.1, §4.3), must all be live at that step: inclusive ranges are what keep
+ * a FORWARD's input and output, GRAD l+1 and GRAD l, and ACT l and GRAD l at a
+ * reading BACKWARD(l) out of each other's bytes (§4.2). */
+static void assertEveryStepsOperandsAreCoLive(const rematProgram_t *p, const rematWireTable_t *t,
+                                              layer_t **model) {
+    size_t n = t->modelSize;
+    for (size_t s = 0; s < p->numSteps; s++) {
+        size_t l = p->steps[s].layer;
+        switch (p->steps[s].kind) {
+        case REMAT_STEP_FORWARD:
+            assertLiveAt(p, rematActId(t, l), s, "FORWARD input");
+            assertLiveAt(p, rematActId(t, l + 1), s, "FORWARD output");
+            break;
+        case REMAT_STEP_LOSS_FORWARD:
+            assertLiveAt(p, rematActId(t, n), s, "LOSS_FORWARD reads ACT n");
+            break;
+        case REMAT_STEP_LOSS_BACKWARD:
+            assertLiveAt(p, rematActId(t, n), s, "LOSS_BACKWARD reads ACT n");
+            assertLiveAt(p, rematGradId(t, n), s, "LOSS_BACKWARD writes the seed");
+            break;
+        default: { /* REMAT_STEP_BACKWARD */
+            uint16_t gradIn =
+                ((ptrdiff_t)l == t->backwardTop) ? rematGradId(t, n) : rematGradId(t, l + 1);
+            assertLiveAt(p, gradIn, s, "BACKWARD reads gradIn");
+            if (layerBackwardReadsInput(model[l])) {
+                assertLiveAt(p, rematActId(t, l), s, "BACKWARD reads its input");
+            }
+            if (l > t->deepest) {
+                assertLiveAt(p, rematGradId(t, l), s, "BACKWARD writes its dx");
+            }
+            break;
+        }
+        }
+    }
+}
+
+static void assertCoLiveUnderBothPolicies(layer_t **model, size_t n, lossFuncType_t lt,
+                                          const tensor_t *x) {
+    rematWireTable_t *t = initTable(model, n, lt, x);
+    rematPlan_t *all = buildPlan(t, model, NULL);
+    rematPlan_t *live = buildPlan(t, model, &g_liveness);
+    assertEveryStepsOperandsAreCoLive(&all->train, t, model);
+    assertEveryStepsOperandsAreCoLive(&live->train, t, model);
+    TEST_ASSERT_TRUE(live->train.peakLiveBytes <= all->train.peakLiveBytes);
+    rematPlanFree(live);
+    rematPlanFree(all);
+    rematWireTableFree(t);
+}
+
+static uint32_t nextRandom(uint32_t *state) { /* xorshift32, test-local */
+    uint32_t v = *state;
+    v ^= v << 13;
+    v ^= v >> 17;
+    v ^= v << 5;
+    *state = v;
+    return v;
+}
+
+static layer_t *randomRank2Layer(uint32_t *state) {
+    switch (nextRandom(state) % 4u) {
+    case 0:
+        return makeLinear(4, 4, nextRandom(state) % 2u == 0u);
+    case 1:
+        return makeRelu(&g_floatQ);
+    case 2:
+        return makeSoftmax();
+    default:
+        return makeLayerNorm(4, nextRandom(state) % 2u == 0u);
+    }
 }
 
 /* ---- rematBackwardRange (spec §4.3, §12.1) ---- */
@@ -1918,6 +2015,171 @@ void testPlanFreeIsNullSafe(void) {
     ASSERT_EXITS_WITH(0, rematPlanFree(NULL));
 }
 
+/* ---- LIVENESS (spec §4.4) and the read-set (§3.7, §12.2 item 9) ---- */
+
+void testLivenessHarRangesEndAtTheLastReader(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    rematPlan_t *p = buildPlan(t, model, &g_liveness);
+    TEST_ASSERT_EQUAL_INT(REMAT_PLAN_LIVENESS, p->policy);
+    /* B(l) = 14 + (10 - l). Pool / Flatten inputs and the CE logits die at
+     * their forward; conv (trainable), ReLU and Linear inputs live to their
+     * BACKWARD; ACT 12 to LOSS_BACKWARD. */
+    const uint16_t end[13] = {0, 23, 2, 21, 20, 5, 18, 17, 8, 9, 14, 11, 13};
+    for (uint16_t j = 1; j <= 12; j++) {
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(end[j], p->train.ranges[j - 1].end, "ACT end");
+    }
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+/* §12.2 item 10: scan-model pins (plan header). */
+void testLivenessPeakHarIs49152(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    TEST_ASSERT_EQUAL_size_t(49152,
+                             peakOf(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in), &g_liveness));
+    freeModel(model, HAR_N);
+}
+
+void testLivenessPeakMnistCnnIs112896(void) {
+    layer_t *model[MNIST_N];
+    buildMnistCnn(model);
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 1, 784}, 3, &g_floatQ);
+    TEST_ASSERT_EQUAL_size_t(112896, peakOf(model, MNIST_N, CROSS_ENTROPY, x, &g_liveness));
+    freeModel(model, MNIST_N);
+}
+
+void testLivenessPeakFinetuneStage2Is16384(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, true);
+    inputLike_t in;
+    TEST_ASSERT_EQUAL_size_t(16384,
+                             peakOf(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in), &g_liveness));
+    freeModel(model, HAR_N);
+}
+
+/* §12.2 item 9: a frozen norm's input stays live through its BACKWARD, a frozen
+ * GEMM's input dies at its forward. [Linear T, LayerNorm frozen, Linear frozen,
+ * Linear T] under MSE: n = 4, top = 3, B(l) = 6 + (3 - l). */
+void testFrozenNormStillNeedsItsInputWhileAFrozenGemmDoesNot(void) {
+    layer_t *model[4] = {makeLinear(4, 4, false), makeLayerNorm(4, true), makeLinear(4, 4, true),
+                         makeLinear(4, 2, false)};
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, 4, MSE, makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ));
+    rematPlan_t *p = buildPlan(t, model, &g_liveness);
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(8, p->train.ranges[0].end, "frozen LayerNorm input");
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(2, p->train.ranges[1].end, "frozen Linear input");
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, 4);
+}
+
+/* §4.4: under CE the logits die at FORWARD(n-1) (the positional skip means no
+ * BACKWARD reads them); under MSE after Softmax they live to BACKWARD(n-1). */
+void testCeLogitsDieAtForwardWhileMseSoftmaxInputIsRetained(void) {
+    layer_t *model[2] = {makeLinear(2, 3, false), makeSoftmax()};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ);
+    rematWireTable_t *ce = initTable(model, 2, CROSS_ENTROPY, x);
+    rematPlan_t *ceLive = buildPlan(ce, model, &g_liveness);
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(1, ceLive->train.ranges[0].end, "CE logits");
+    rematWireTable_t *mse = initTable(model, 2, MSE, x);
+    rematPlan_t *mseLive = buildPlan(mse, model, &g_liveness);
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(4, mseLive->train.ranges[0].end, "MSE Softmax input");
+    rematPlanFree(ceLive);
+    rematPlanFree(mseLive);
+    rematWireTableFree(ce);
+    rematWireTableFree(mse);
+    freeModel(model, 2);
+}
+
+/* C3: §3.7's "do not refine the rule by propLoss" argument rests on this
+ * cross-seam property -- the deepest trainable layer (the only grads-only
+ * backward) always reads its input. A characterization of PR0 code: no live
+ * RED is possible; the mutation proves its teeth. */
+void testTrainableParameterLayersReadTheirInputInBackward(void) {
+    linearConfig_t linear[2] = {{.frozen = false}, {.frozen = true}};
+    conv1dConfig_t conv[2] = {{.frozen = false}, {.frozen = true}};
+    conv1dTransposedConfig_t convT[2] = {{.frozen = false}, {.frozen = true}};
+    layerNormConfig_t layerNorm[2] = {{.frozen = false}, {.frozen = true}};
+    groupNormConfig_t groupNorm[2] = {{.frozen = false}, {.frozen = true}};
+    size_t trainableParamLayers = 0;
+    for (int type = LINEAR; type <= GROUPNORM; type++) {
+        for (size_t f = 0; f < 2; f++) {
+            layerConfig_t cfg = {.linear = NULL};
+            switch (type) {
+            case LINEAR:
+                cfg.linear = &linear[f];
+                break;
+            case CONV1D:
+                cfg.conv1d = &conv[f];
+                break;
+            case CONV1D_TRANSPOSED:
+                cfg.conv1dTransposed = &convT[f];
+                break;
+            case LAYERNORM:
+                cfg.layerNorm = &layerNorm[f];
+                break;
+            case GROUPNORM:
+                cfg.groupNorm = &groupNorm[f];
+                break;
+            default:
+                break;
+            }
+            layer_t layer = {.type = (layerType_t)type, .config = &cfg};
+            parameter_t *weight = NULL;
+            parameter_t *bias = NULL;
+            if (layerParameters(&layer, &weight, &bias) && !layerIsFrozen(&layer)) {
+                trainableParamLayers++;
+                TEST_ASSERT_TRUE_MESSAGE(layerBackwardReadsInput(&layer),
+                                         "a trainable parameter layer skips its input");
+            }
+        }
+    }
+    TEST_ASSERT_EQUAL_size_t(5, trainableParamLayers); /* the loop covered all five */
+}
+
+void testEveryStepsOperandsAreCoLiveOnTheZoo(void) {
+    layer_t *har[HAR_N];
+    buildHar(har, false);
+    inputLike_t in;
+    assertCoLiveUnderBothPolicies(har, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    freeModel(har, HAR_N);
+    layer_t *finetune[HAR_N];
+    buildHar(finetune, true);
+    assertCoLiveUnderBothPolicies(finetune, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    freeModel(finetune, HAR_N);
+    layer_t *mnist[MNIST_N];
+    buildMnistCnn(mnist);
+    assertCoLiveUnderBothPolicies(mnist, MNIST_N, CROSS_ENTROPY,
+                                  makeInput(&in, (size_t[]){1, 1, 784}, 3, &g_floatQ));
+    freeModel(mnist, MNIST_N);
+}
+
+/* §12.2 item 9's no-overlap property over random plans: 50 random rank-2
+ * chains of Linear / ReLU / Softmax / LayerNorm with random freezing, under
+ * both losses and both policies. */
+void testEveryStepsOperandsAreCoLiveOnRandomChains(void) {
+    uint32_t state = 0x2545F491u;
+    for (int trial = 0; trial < 50; trial++) {
+        size_t n = 1u + nextRandom(&state) % 6u;
+        layer_t *model[6];
+        for (size_t i = 0; i < n; i++) {
+            model[i] = randomRank2Layer(&state);
+        }
+        lossFuncType_t lt = (nextRandom(&state) % 2u == 0u) ? MSE : CROSS_ENTROPY;
+        inputLike_t in;
+        assertCoLiveUnderBothPolicies(model, n, lt, makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ));
+        freeModel(model, n);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testBackwardRangeMseRunsFromLastLayerToDeepest);
@@ -2015,5 +2277,14 @@ int main(void) {
     RUN_TEST(testSingleLayerUnderCrossEntropyHasASeedButNoBackwardStep);
     RUN_TEST(testAllFrozenPlanHasNoBackwardPhase);
     RUN_TEST(testPlanFreeIsNullSafe);
+    RUN_TEST(testLivenessHarRangesEndAtTheLastReader);
+    RUN_TEST(testLivenessPeakHarIs49152);
+    RUN_TEST(testLivenessPeakMnistCnnIs112896);
+    RUN_TEST(testLivenessPeakFinetuneStage2Is16384);
+    RUN_TEST(testFrozenNormStillNeedsItsInputWhileAFrozenGemmDoesNot);
+    RUN_TEST(testCeLogitsDieAtForwardWhileMseSoftmaxInputIsRetained);
+    RUN_TEST(testTrainableParameterLayersReadTheirInputInBackward);
+    RUN_TEST(testEveryStepsOperandsAreCoLiveOnTheZoo);
+    RUN_TEST(testEveryStepsOperandsAreCoLiveOnRandomChains);
     return UNITY_END();
 }

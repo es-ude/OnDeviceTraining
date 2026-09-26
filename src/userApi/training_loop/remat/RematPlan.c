@@ -110,11 +110,10 @@ bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **mode
                     const rematPlanSpec_t *spec) {
     *out = NULL;
     rematPlanPolicy_t policy = (spec == NULL) ? REMAT_PLAN_STORE_ALL : spec->policy;
-    if (policy != REMAT_PLAN_STORE_ALL) {
+    if (policy != REMAT_PLAN_STORE_ALL && policy != REMAT_PLAN_LIVENESS) {
         PRINT_ERROR("rematPlanBuild: unknown policy %d", (int)policy);
         exit(1);
     }
-    (void)model;
     size_t numSteps = rematTrainStepCount(t);
     size_t numRanges = t->numWires - 1u;
     size_t stepsAt = roundUpTo(sizeof(rematPlan_t), _Alignof(rematStep_t));
@@ -140,7 +139,7 @@ bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **mode
     train->ranges = (rematRange_t *)(block + rangesAt);
     train->endOrder = (uint16_t *)(block + endOrderAt);
     rematFillTrainSteps(t, train->steps);
-    rematFillTrainRanges(t, numSteps, train->ranges);
+    rematFillTrainRanges(policy, t, model, numSteps, train->ranges);
     sortEndOrder(train);
     train->peakLiveBytes = peakLiveBytesOf(train, t);
     *out = p;

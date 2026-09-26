@@ -83,6 +83,23 @@ The macro-batch divisor lives at the optimizer:
 For SUM (or future per-sample weighted variants — see #150), the backward
 gradient flows through unscaled.
 
+### Train/eval mode (Dropout, BatchNorm1d)
+
+`calculateGradsSequential` and `tracedGrads` set the per-layer `training`
+flag of every Dropout and BatchNorm1d layer before the forward and clear
+it after the backward (`setLayersTrainingMode`). Everything else —
+`inference`, `inferenceWithLoss`, evaluation — runs in eval mode. A custom
+`calculateGradsFn_t` that does not route through those two functions runs
+both layers in eval mode (BatchNorm1d then normalizes with its running
+statistics and never updates them).
+
+BatchNorm1d updates its running statistics once per `calculateGradsFn`
+call, i.e. `b/m` times per optimizer step (Ghost-BN over the micro-batch,
+#152 D2). The training forward writes the running buffers: one layer
+instance must never run two forwards concurrently, nor an eval forward
+concurrently with a training forward (same invariant as MaxPool1d's argmax
+buffer; no locks by design).
+
 ### Shape assertion (#153)
 
 Every loss dispatcher (`mseLossForward`, `mseLossBackward`,

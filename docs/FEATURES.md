@@ -33,7 +33,7 @@ trains end to end with no pins. Active training paths are FLOAT32 and SYM_INT32
 end to end, plus BFP native forward+backward; SYM/ASYM/BOOL storage and grouped BFP
 grad/state storage are partial/unsupported.
 
-## Layers (`layerType_t`, 13 total)
+## Layers (`layerType_t`, 14 total)
 
 | Layer | Trainable | FLOAT32 arith | SYM_INT32 arith | BFP arith | Quant params | Quant grads | (De)serialize |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
@@ -42,6 +42,7 @@ grad/state storage are partial/unsupported.
 | `CONV1D_TRANSPOSED` | ✓ | ✓ | ✓ native (all 4 ops) | ✓ native (all 4 ops) | ~ requantize path (#270) | ✓ SYM/ASYM/BFP | ✓ |
 | `LAYERNORM` | ✓ | ✓ | ✓ native (fwd+bwd) | ✓ native (fwd+bwd) | ~ SYM_INT32/BFP | ~ SYM/ASYM/BFP (funnel bwd only) | ✓ |
 | `GROUPNORM` | ✓ | ✓ | ✓ native (fwd+bwd) | ✓ native (fwd+bwd) | ~ SYM_INT32/BFP | ~ SYM/ASYM/BFP (funnel bwd only) | ✓ |
+| `BATCHNORM1D` | ✓ (affine) | ✓ | – FLOAT32 only | – FLOAT32 only | – | – | ✓ |
 | `RELU` | – | ✓ | ✓ native (fwd+bwd) | ✓ packed-transparent | n/a | n/a | ✓ |
 | `SOFTMAX` | – | ✓ | ~ dequant-to-float | ✓ native (fwd+bwd, i-exp + shift knob) | n/a | n/a | ✓ |
 | `FLATTEN` | – | ✓ | ✓ scale-transparent | ✓ packed-transparent | n/a | n/a | ✓ |
@@ -53,6 +54,13 @@ grad/state storage are partial/unsupported.
 
 Notes on the qualified cells:
 
+- **`BATCHNORM1D`** (#460) — `[m, C]` / `[m, C, T]`, PyTorch `nn.BatchNorm1d`
+  surface (affine, track_running_stats, momentum incl. None, eps; eps = 0 not
+  representable). Statistics over the micro-batch `m` (Ghost-BN;
+  `trainingRunOptions_t.microBatchSize`), running stats update once per
+  `calculateGradsFn` call (`b/m` per step). Batch statistics need
+  `n = m·T ≥ 2`; frozen = eval-mode BN; running buffers persist via the v6
+  format and `modelLoadStateDictBuffers`.
 - **`SYM_INT32 arith`** — *native* means an integer kernel selected by the op's
   `arithmetic_t.type` and routed through the `executeOp` funnel (raw int32 mantissas,
   width-restored at the producer). *scale-transparent* (Flatten/Dropout) copies int

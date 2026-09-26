@@ -21,7 +21,8 @@ Raw waveforms are far harder to train than MFCC features: at the `kws_mfcc`
 settings (lr=0.001) the raw model just trains *very* slowly and looks stuck at
 random init within 15–20 epochs, which would make the bit-parity gate degenerate
 (a one-class reference). The fix uses **LayerNorm**, the framework's only
-bit-parity-covered normalizer (BatchNorm is not), at **lr=0.005, 50 epochs**.
+bit-parity-covered normalizer (BatchNorm1d exists since #460 but has no
+bit-parity example), at **lr=0.005, 50 epochs**.
 
 A 10-seed sweep (3 placements × 3 learning rates × 10 seeds × 50 epochs) settled
 *where* the LayerNorm goes:

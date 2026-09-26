@@ -46,6 +46,10 @@ Datasets never carry a batch axis; the loop owns it.
   it reaches the output unabsorbed, the loss's shape check (#153) fails fast
   unless the label carries the same mistake — see "Migrating from
   `[1, ...]` samples" below.
+- BatchNorm1d needs `n = m·T ≥ 2` values per channel in training: a
+  `[m, C]` model needs `microBatchSize ≥ 2`; `[1, C, T ≥ 2]` trains on
+  per-sample statistics (instance-norm-like) while eval uses running
+  statistics — allowed for PyTorch parity (#460).
 - A label's per-sample shape must equal the model output's per-sample shape
   (#153). Store a scalar regression target for a `[B, 1]` head as `(N, 1)`,
   so each sample is `[1]` and its view `[1, 1]`; an `(N,)` array loads as

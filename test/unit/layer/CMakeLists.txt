@@ -485,7 +485,9 @@ add_elastic_ai_unit_test(
         BatchNorm1d
         MORE_LIBS
         ArithmeticType
+        BatchNorm1dApi
         CommonLayerLibs
+        LayerCommon
         TensorApi
         QuantizationApi
         LayerQuant

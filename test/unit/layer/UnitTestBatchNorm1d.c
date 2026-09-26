@@ -16,7 +16,10 @@
 #include "TensorApi.h"
 #include "unity.h"
 
+#include "BatchNorm1dApi.h"
 #include "DeathTest.h"
+#include "LayerCommon.h"
+#include "LayerQuant.h"
 #include "expected_batchnorm1d.h"
 
 void setUp(void) {}
@@ -705,6 +708,139 @@ void testBackwardRejectsLossShapeMismatch(void) {
     bnFixtureFree(&f);
 }
 
+static layerQuant_t floatLq(quantization_t *q) {
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    return lq;
+}
+
+void testFactoryZeroInitGivesPyTorchDefaults(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq = floatLq(q);
+    layer_t *layer = batchNorm1dLayerInit(&(batchNorm1dInit_t){.numChannels = 3}, &lq);
+    batchNorm1dConfig_t *c = layer->config->batchNorm1d;
+    bool typeOk = layer->type == BATCHNORM1D;
+    float eps = c->eps;
+    bnMomentumMode_t mode = c->momentumMode;
+    float momentum = c->momentum;
+    bool affine = c->affine, track = c->trackRunningStats, training = c->training,
+         frozen = c->frozen;
+    float g = ((float *)c->gamma->param->data)[2];
+    float b = ((float *)c->beta->param->data)[2];
+    float rm = ((float *)c->runningMean->data)[2];
+    float rv = ((float *)c->runningVar->data)[2];
+    bool gradsFloat = c->gamma->grad->quantization->type == FLOAT32 &&
+                      c->beta->grad->quantization->type == FLOAT32;
+    bool borrowed = c->outputQ == q && !c->ownsQuantizations;
+    uint64_t nbt = c->numBatchesTracked;
+    freeBatchNorm1dLayer(layer);
+    freeQuantization(q);
+    TEST_ASSERT_TRUE(typeOk);
+    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 1e-5f, eps);
+    TEST_ASSERT_EQUAL_INT(BN_MOMENTUM_VALUE, mode);
+    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 0.1f, momentum);
+    TEST_ASSERT_TRUE(affine && track && !training && !frozen && gradsFloat && borrowed);
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, g);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, b);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, rm);
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, rv);
+    TEST_ASSERT_EQUAL_UINT64(0, nbt);
+}
+
+void testFactoryOptionsNoAffineNoStatsCumulativeFrozen(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq = floatLq(q);
+    layer_t *a = batchNorm1dLayerInitOwning(
+        &(batchNorm1dInit_t){.numChannels = 2, .noAffine = true, .noRunningStats = true}, &lq);
+    layer_t *b = batchNorm1dLayerInitOwning(
+        &(batchNorm1dInit_t){
+            .numChannels = 2, .momentumMode = BN_MOMENTUM_CUMULATIVE, .trainable = TRAINABLE_FALSE},
+        &lq);
+    batchNorm1dConfig_t *ca = a->config->batchNorm1d;
+    batchNorm1dConfig_t *cb = b->config->batchNorm1d;
+    bool aOk = !ca->affine && ca->gamma == NULL && ca->beta == NULL && !ca->trackRunningStats &&
+               ca->runningMean == NULL && ca->runningVar == NULL && !ca->frozen;
+    bool bOk = cb->momentumMode == BN_MOMENTUM_CUMULATIVE && cb->frozen &&
+               cb->gamma->grad == NULL && cb->beta->grad == NULL && cb->ownsQuantizations &&
+               cb->outputQ != q;
+    freeBatchNorm1dLayer(b);
+    freeBatchNorm1dLayer(a);
+    freeQuantization(q);
+    TEST_ASSERT_TRUE(aOk);
+    TEST_ASSERT_TRUE(bOk);
+}
+
+static void initBnOrDie(batchNorm1dInit_t init, qtype_t slotType, int slot) {
+    quantization_t *q = quantizationInitFloat();
+    quantization_t *sym = quantizationInitSymInt32(HALF_AWAY);
+    layerQuant_t lq = floatLq(q);
+    if (slot == 1) {
+        lq.forwardMath = arithmeticFromQuantization(sym);
+    } else if (slot == 2) {
+        lq.outputQ = sym;
+    } else if (slot == 3) {
+        lq.weightStorage = sym;
+    } else if (slot == 4) {
+        lq.weightGradStorage = sym;
+    }
+    (void)slotType;
+    (void)batchNorm1dLayerInit(&init, &lq);
+}
+
+void testFactoryRejectsInvalidInit(void) {
+    ASSERT_EXITS_WITH_FAILURE(initBnOrDie((batchNorm1dInit_t){.numChannels = 0}, FLOAT32, 0));
+    ASSERT_EXITS_WITH_FAILURE(
+        initBnOrDie((batchNorm1dInit_t){.numChannels = 3, .eps = -1e-5f}, FLOAT32, 0));
+    ASSERT_EXITS_WITH_FAILURE(
+        initBnOrDie((batchNorm1dInit_t){.numChannels = 3, .eps = NAN}, FLOAT32, 0));
+    ASSERT_EXITS_WITH_FAILURE(initBnOrDie(
+        (batchNorm1dInit_t){.numChannels = 3, .momentumMode = (bnMomentumMode_t)7}, FLOAT32, 0));
+    ASSERT_EXITS_WITH_FAILURE(initBnOrDie(
+        (batchNorm1dInit_t){.numChannels = 3, .momentumMode = BN_MOMENTUM_VALUE, .momentum = 1.5f},
+        FLOAT32, 0));
+    ASSERT_EXITS_WITH_FAILURE(initBnOrDie(
+        (batchNorm1dInit_t){.numChannels = 3, .momentumMode = BN_MOMENTUM_VALUE, .momentum = NAN},
+        FLOAT32, 0));
+    ASSERT_EXITS_WITH_FAILURE(initBnOrDie(
+        (batchNorm1dInit_t){.numChannels = 3, .noAffine = true, .trainable = TRAINABLE_TRUE},
+        FLOAT32, 0));
+}
+
+void testFactoryRejectsNonFloat32Slots(void) {
+    for (int slot = 1; slot <= 4; slot++) {
+        ASSERT_EXITS_WITH_FAILURE(
+            initBnOrDie((batchNorm1dInit_t){.numChannels = 3}, SYM_INT32, slot));
+    }
+}
+
+void testFactoryRejectsNullPointers(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq = floatLq(q);
+    ASSERT_EXITS_WITH_FAILURE((void)batchNorm1dLayerInit(NULL, &lq));
+    ASSERT_EXITS_WITH_FAILURE(
+        (void)batchNorm1dLayerInit(&(batchNorm1dInit_t){.numChannels = 3}, NULL));
+    freeQuantization(q);
+}
+
+/* Momentum 0 via VALUE is legal (stats frozen in place), unlike zero-init. */
+void testFactoryAcceptsExplicitMomentumZeroAndOne(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq = floatLq(q);
+    layer_t *z = batchNorm1dLayerInit(
+        &(batchNorm1dInit_t){.numChannels = 2, .momentumMode = BN_MOMENTUM_VALUE, .momentum = 0.0f},
+        &lq);
+    layer_t *o = batchNorm1dLayerInit(
+        &(batchNorm1dInit_t){.numChannels = 2, .momentumMode = BN_MOMENTUM_VALUE, .momentum = 1.0f},
+        &lq);
+    float mz = z->config->batchNorm1d->momentum;
+    float mo = o->config->batchNorm1d->momentum;
+    freeBatchNorm1dLayer(o);
+    freeBatchNorm1dLayer(z);
+    freeQuantization(q);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, mz);
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, mo);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testGoldTrainForwardRank2);
@@ -747,5 +883,11 @@ int main(void) {
     RUN_TEST(testGradsOnlyBackwardMatchesFullAndAccumulates);
     RUN_TEST(testBackwardTrainingRejectsSingleRow);
     RUN_TEST(testBackwardRejectsLossShapeMismatch);
+    RUN_TEST(testFactoryZeroInitGivesPyTorchDefaults);
+    RUN_TEST(testFactoryOptionsNoAffineNoStatsCumulativeFrozen);
+    RUN_TEST(testFactoryRejectsInvalidInit);
+    RUN_TEST(testFactoryRejectsNonFloat32Slots);
+    RUN_TEST(testFactoryRejectsNullPointers);
+    RUN_TEST(testFactoryAcceptsExplicitMomentumZeroAndOne);
     return UNITY_END();
 }

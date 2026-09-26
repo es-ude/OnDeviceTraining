@@ -172,6 +172,23 @@ target_link_libraries(GroupNormApi PRIVATE
         StorageApi
 )
 
+add_library(BatchNorm1dApi BatchNorm1dApi.c)
+target_include_directories(BatchNorm1dApi PUBLIC include)
+target_link_libraries(BatchNorm1dApi PRIVATE
+        ArithmeticType
+        Tensor
+        TensorApi
+        QuantizationApi
+        Rounding
+        Layer
+        BatchNorm1d
+        LayerCommon
+        LayerQuant
+        Common
+        StorageApi
+        m
+)
+
 add_library(QuantLayerApi QuantLayerApi.c)
 target_include_directories(QuantLayerApi PUBLIC include)
 target_link_libraries(QuantLayerApi PRIVATE

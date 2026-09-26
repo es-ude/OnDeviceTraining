@@ -38,6 +38,14 @@ void serialWriteF32LE(float value, FILE *f) {
     serialWriteU32LE(bits, f);
 }
 
+void serialWriteU64LE(uint64_t value, FILE *f) {
+    uint8_t bytes[8];
+    for (size_t i = 0; i < 8; i++) {
+        bytes[i] = (uint8_t)(value >> (8 * i));
+    }
+    serialWriteBytes(bytes, 8, f);
+}
+
 void serialWriteSizeAsU32LE(size_t value, FILE *f) {
 #if SIZE_MAX > UINT32_MAX
     if (value > (size_t)UINT32_MAX) {
@@ -82,5 +90,15 @@ float serialReadF32LE(FILE *f) {
     uint32_t bits = serialReadU32LE(f);
     float value;
     memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+uint64_t serialReadU64LE(FILE *f) {
+    uint8_t bytes[8];
+    serialReadBytes(bytes, 8, f);
+    uint64_t value = 0;
+    for (size_t i = 0; i < 8; i++) {
+        value |= (uint64_t)bytes[i] << (8 * i);
+    }
     return value;
 }

@@ -5,6 +5,7 @@
 #include "AdaptiveAvgPool1d.h"
 #include "ArithmeticType.h"
 #include "AvgPool1d.h"
+#include "BatchNorm1d.h"
 #include "Common.h"
 #include "Conv1d.h"
 #include "Conv1dTransposed.h"
@@ -24,7 +25,14 @@
 #include "Softmax.h"
 #include "Tensor.h"
 
-/* Locked format v2 (#370): magic "ODTS" + u32 version + u32 layerCount, then
+/* v6 (#460): new BATCHNORM1D record (tag 13) -- `u32 numChannels, f32 eps,
+ * u8 momentumMode (1 VALUE | 2 CUMULATIVE), f32 momentum, u8 affine, u8
+ * track, [gamma, beta parameters iff affine], [f32 runningMean[C],
+ * f32 runningVar[C], u64 numBatchesTracked iff track], arithmetic
+ * forwardMath, arithmetic propLossMath, quantization outputQ, quantization
+ * propLossQ`. Every other record is unchanged; v5 files fail at the version
+ * check (no back-compat shim, established policy).
+ * Locked format v2 (#370): magic "ODTS" + u32 version + u32 layerCount, then
  * one Record per layer (u8 tag + payload). Every count/dim/kernel field is u32
  * little-endian and every scalar goes through the checked SerialWire
  * primitives, so a model written on a 64-bit host loads bit-identically on
@@ -78,7 +86,7 @@
  * SYM/SYM_INT32/FLOAT32/INT32/BOOL records, layer arms, and the v3
  * grad-presence byte are untouched by this bump. */
 #define SERIALIZE_MAGIC "ODTS"
-#define SERIALIZE_FORMAT_VERSION 5u
+#define SERIALIZE_FORMAT_VERSION 6u
 
 void serializeTensor(tensor_t *tensor, FILE *f) {
     size_t numberOfValues = calcNumberOfElementsByTensor(tensor);
@@ -361,6 +369,35 @@ static void serializeLayer(layer_t *layer, FILE *f) {
         serializeArithmetic(&groupNormConfig->propLossMath, f);
         serializeQuantization(groupNormConfig->outputQ, f);
         serializeQuantization(groupNormConfig->propLossQ, f);
+        break;
+    }
+    case BATCHNORM1D: {
+        batchNorm1dConfig_t *c = layer->config->batchNorm1d;
+        serialWriteSizeAsU32LE(c->numChannels, f);
+        serialWriteF32LE(c->eps, f);
+        serialWriteU8((uint8_t)c->momentumMode, f);
+        serialWriteF32LE(c->momentum, f);
+        serialWriteU8(c->affine ? 1u : 0u, f);
+        serialWriteU8(c->trackRunningStats ? 1u : 0u, f);
+        if (c->affine) {
+            serializeParameter(c->gamma, f);
+            serializeParameter(c->beta, f);
+        }
+        if (c->trackRunningStats) {
+            const float *rm = (const float *)c->runningMean->data;
+            const float *rv = (const float *)c->runningVar->data;
+            for (size_t ch = 0; ch < c->numChannels; ch++) {
+                serialWriteF32LE(rm[ch], f);
+            }
+            for (size_t ch = 0; ch < c->numChannels; ch++) {
+                serialWriteF32LE(rv[ch], f);
+            }
+            serialWriteU64LE(c->numBatchesTracked, f);
+        }
+        serializeArithmetic(&c->forwardMath, f);
+        serializeArithmetic(&c->propLossMath, f);
+        serializeQuantization(c->outputQ, f);
+        serializeQuantization(c->propLossQ, f);
         break;
     }
     default:

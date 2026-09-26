@@ -15,12 +15,15 @@ add_elastic_ai_unit_test(
         FlattenApi
         Relu
         ReluApi
+        BatchNorm1d
+        BatchNorm1dApi
         LayerQuant
         ArithmeticType
 
         StorageApi
         odt_test_death
         odt_test_assert
+        m
 )
 
 # Absolute scratch-file path so the test runs from any working directory
@@ -69,6 +72,8 @@ add_elastic_ai_unit_test(
         LayerNormApi
         GroupNorm
         GroupNormApi
+        BatchNorm1d
+        BatchNorm1dApi
         Reduce
         QuantizationLayer
         QuantLayerApi
@@ -77,6 +82,7 @@ add_elastic_ai_unit_test(
         odt_test_death
         odt_test_layer_builders
         odt_test_assert
+        m
 )
 
 target_compile_definitions(UnitTestSerialize PRIVATE

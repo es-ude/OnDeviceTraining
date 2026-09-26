@@ -7,6 +7,8 @@
 #include "AdaptivePool1dApi.h"
 #include "ArithmeticType.h"
 #include "AvgPool1d.h"
+#include "BatchNorm1d.h"
+#include "BatchNorm1dApi.h"
 #include "BorrowedLayer.h"
 #include "Conv1d.h"
 #include "Conv1dApi.h"
@@ -65,7 +67,9 @@ _Static_assert(ADAPTIVE_AVGPOOL1D == 9,
 _Static_assert(DROPOUT == 10, "layerType_t wire tag: DROPOUT must stay 10 (append-only enum)");
 _Static_assert(LAYERNORM == 11, "layerType_t wire tag: LAYERNORM must stay 11 (append-only enum)");
 _Static_assert(GROUPNORM == 12, "layerType_t wire tag: GROUPNORM must stay 12 (append-only enum)");
-_Static_assert(GROUPNORM + 1 == 13,
+_Static_assert(BATCHNORM1D == 13,
+               "layerType_t wire tag: BATCHNORM1D must stay 13 (append-only enum)");
+_Static_assert(BATCHNORM1D + 1 == 14,
                "new layerType_t member: append at the END and add its wire-tag pin above");
 
 /* WIRE-FORMAT PINS (#serial): the serialized arithmetic record's uint8 tag IS the
@@ -1391,6 +1395,168 @@ static void testRoundTripGroupNorm(void) {
     freeReservedMemory(capturedDeserialBetaGrad);
 }
 
+/*! BATCHNORM1D round trip (#460, wire format v6) over all four
+ *  affine x trackRunningStats combinations, C = 3. The affine+track variant
+ *  also exercises BN_MOMENTUM_CUMULATIVE (every other variant uses VALUE) so
+ *  the momentumMode byte is not uniformly 1 across the whole test. Every
+ *  seeded value is non-constant per channel (same discipline as
+ *  testRoundTripGroupNorm) so a field-order bug in the BATCHNORM1D arm is
+ *  distinguishable from a no-op. trainable stays TRAINABLE_DEFAULT
+ *  throughout so gamma/beta always carry a grad tensor when affine. */
+static void testRoundTripBatchNorm1dVariants(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+
+    for (int affineIdx = 0; affineIdx < 2; affineIdx++) {
+        for (int trackIdx = 0; trackIdx < 2; trackIdx++) {
+            bool affine = affineIdx == 0;
+            bool track = trackIdx == 0;
+            bool cumulative = affine && track;
+
+            batchNorm1dInit_t init = {
+                .numChannels = 3,
+                .eps = 2e-3f,
+                .momentumMode = cumulative ? BN_MOMENTUM_CUMULATIVE : BN_MOMENTUM_VALUE,
+                .momentum = cumulative ? 0.0f : 0.4f,
+                .noAffine = !affine,
+                .noRunningStats = !track,
+            };
+
+            layer_t *serialLayer = batchNorm1dLayerInitOwning(&init, &lq);
+            layer_t *deserialLayer = batchNorm1dLayerInitOwning(&init, &lq);
+            batchNorm1dConfig_t *serialCfg = serialLayer->config->batchNorm1d;
+            batchNorm1dConfig_t *deserialCfg = deserialLayer->config->batchNorm1d;
+
+            if (affine) {
+                float gammaSeed[3];
+                float betaSeed[3];
+                float gammaGradSeed[3];
+                float betaGradSeed[3];
+                for (size_t i = 0; i < 3; i++) {
+                    gammaSeed[i] = 1.5f + (float)i * 0.25f;
+                    betaSeed[i] = -0.5f - (float)i * 0.1f;
+                    gammaGradSeed[i] = 0.3f + (float)i;
+                    betaGradSeed[i] = -0.2f - (float)i;
+                }
+                tensorFillFromFloatBuffer(serialCfg->gamma->param, gammaSeed, 3);
+                tensorFillFromFloatBuffer(serialCfg->beta->param, betaSeed, 3);
+                tensorFillFromFloatBuffer(serialCfg->gamma->grad, gammaGradSeed, 3);
+                tensorFillFromFloatBuffer(serialCfg->beta->grad, betaGradSeed, 3);
+            }
+            if (track) {
+                float runningMeanSeed[3];
+                float runningVarSeed[3];
+                for (size_t i = 0; i < 3; i++) {
+                    runningMeanSeed[i] = 0.1f + (float)i * 0.2f;
+                    runningVarSeed[i] = 0.8f + (float)i * 0.3f;
+                }
+                tensorFillFromFloatBuffer(serialCfg->runningMean, runningMeanSeed, 3);
+                tensorFillFromFloatBuffer(serialCfg->runningVar, runningVarSeed, 3);
+                serialCfg->numBatchesTracked = 0x0000123400005678ull;
+            }
+
+            layer_t *serialModel[] = {serialLayer};
+            layer_t *deserialModel[] = {deserialLayer};
+
+            FILE *f = fopen(FILE_PATH, "wb");
+            serializeModel(serialModel, 1, f);
+            fclose(f);
+
+            f = fopen(FILE_PATH, "rb");
+            deserializeModel(deserialModel, 1, f);
+            fclose(f);
+
+            /* CAPTURE every assertion value before any free. */
+            float capturedSerialEps = serialCfg->eps;
+            float capturedDeserialEps = deserialCfg->eps;
+            bnMomentumMode_t capturedSerialMode = serialCfg->momentumMode;
+            bnMomentumMode_t capturedDeserialMode = deserialCfg->momentumMode;
+            float capturedSerialMomentum = serialCfg->momentum;
+            float capturedDeserialMomentum = deserialCfg->momentum;
+
+            float capturedSerialGamma[3] = {0};
+            float capturedDeserialGamma[3] = {0};
+            float capturedSerialBeta[3] = {0};
+            float capturedDeserialBeta[3] = {0};
+            float capturedSerialGammaGrad[3] = {0};
+            float capturedDeserialGammaGrad[3] = {0};
+            float capturedSerialBetaGrad[3] = {0};
+            float capturedDeserialBetaGrad[3] = {0};
+            if (affine) {
+                for (size_t i = 0; i < 3; i++) {
+                    capturedSerialGamma[i] = ((float *)serialCfg->gamma->param->data)[i];
+                    capturedDeserialGamma[i] = ((float *)deserialCfg->gamma->param->data)[i];
+                    capturedSerialBeta[i] = ((float *)serialCfg->beta->param->data)[i];
+                    capturedDeserialBeta[i] = ((float *)deserialCfg->beta->param->data)[i];
+                    capturedSerialGammaGrad[i] = ((float *)serialCfg->gamma->grad->data)[i];
+                    capturedDeserialGammaGrad[i] = ((float *)deserialCfg->gamma->grad->data)[i];
+                    capturedSerialBetaGrad[i] = ((float *)serialCfg->beta->grad->data)[i];
+                    capturedDeserialBetaGrad[i] = ((float *)deserialCfg->beta->grad->data)[i];
+                }
+            }
+
+            float capturedSerialRunningMean[3] = {0};
+            float capturedDeserialRunningMean[3] = {0};
+            float capturedSerialRunningVar[3] = {0};
+            float capturedDeserialRunningVar[3] = {0};
+            uint64_t capturedSerialCounter = 0;
+            uint64_t capturedDeserialCounter = 0;
+            if (track) {
+                for (size_t i = 0; i < 3; i++) {
+                    capturedSerialRunningMean[i] = ((float *)serialCfg->runningMean->data)[i];
+                    capturedDeserialRunningMean[i] = ((float *)deserialCfg->runningMean->data)[i];
+                    capturedSerialRunningVar[i] = ((float *)serialCfg->runningVar->data)[i];
+                    capturedDeserialRunningVar[i] = ((float *)deserialCfg->runningVar->data)[i];
+                }
+                capturedSerialCounter = serialCfg->numBatchesTracked;
+                capturedDeserialCounter = deserialCfg->numBatchesTracked;
+            }
+
+            arithmetic_t capturedSerialForward = serialCfg->forwardMath;
+            arithmetic_t capturedDeserialForward = deserialCfg->forwardMath;
+            arithmetic_t capturedSerialPropLoss = serialCfg->propLossMath;
+            arithmetic_t capturedDeserialPropLoss = deserialCfg->propLossMath;
+            qtype_t capturedSerialOutputQ = serialCfg->outputQ->type;
+            qtype_t capturedDeserialOutputQ = deserialCfg->outputQ->type;
+            qtype_t capturedSerialPropLossQ = serialCfg->propLossQ->type;
+            qtype_t capturedDeserialPropLossQ = deserialCfg->propLossQ->type;
+
+            freeBatchNorm1dLayer(deserialLayer);
+            freeBatchNorm1dLayer(serialLayer);
+
+            /* ASSERT on captured. */
+            TEST_ASSERT_EQUAL_FLOAT(capturedSerialEps, capturedDeserialEps);
+            TEST_ASSERT_EQUAL(capturedSerialMode, capturedDeserialMode);
+            TEST_ASSERT_EQUAL_FLOAT(capturedSerialMomentum, capturedDeserialMomentum);
+            if (affine) {
+                TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedSerialGamma, capturedDeserialGamma, 3);
+                TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedSerialBeta, capturedDeserialBeta, 3);
+                TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedSerialGammaGrad, capturedDeserialGammaGrad,
+                                              3);
+                TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedSerialBetaGrad, capturedDeserialBetaGrad, 3);
+            }
+            if (track) {
+                TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedSerialRunningMean,
+                                              capturedDeserialRunningMean, 3);
+                TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedSerialRunningVar, capturedDeserialRunningVar,
+                                              3);
+                TEST_ASSERT_EQUAL_UINT64(capturedSerialCounter, capturedDeserialCounter);
+            }
+            TEST_ASSERT_EQUAL(capturedSerialForward.type, capturedDeserialForward.type);
+            TEST_ASSERT_EQUAL(capturedSerialForward.roundingMode,
+                              capturedDeserialForward.roundingMode);
+            TEST_ASSERT_EQUAL(capturedSerialPropLoss.type, capturedDeserialPropLoss.type);
+            TEST_ASSERT_EQUAL(capturedSerialPropLoss.roundingMode,
+                              capturedDeserialPropLoss.roundingMode);
+            TEST_ASSERT_EQUAL(capturedSerialOutputQ, capturedDeserialOutputQ);
+            TEST_ASSERT_EQUAL(capturedSerialPropLossQ, capturedDeserialPropLossQ);
+        }
+    }
+
+    freeQuantization(floatQ);
+}
+
 /*! QUANTIZATION round trip. `outputQ`/`propLossQ` are set to DIFFERENT
  *  storage dtypes (SYM / ASYM) so the record exercises BOTH the SYM
  *  roundingMode fix and ASYM's full qConfig (scale, qBits, roundingMode,
@@ -1779,7 +1945,7 @@ static void testGoldenBytesModelReluV5(void) {
 
     static const uint8_t expected[] = {
         /* magic */ 'O', 'D', 'T', 'S',
-        /* version u32 LE */ 0x05, 0x00, 0x00, 0x00,
+        /* version u32 LE */ 0x06, 0x00, 0x00, 0x00,
         /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
         /* tag RELU */ 0x01,
         /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
@@ -1833,7 +1999,7 @@ static void testGoldenBytesModelReluAsymGroupedPropLossV5(void) {
     freeQuantization(floatQ);
 
     static const uint8_t expected[] = {/* magic */ 'O', 'D', 'T', 'S',
-                                       /* version u32 LE */ 0x05, 0x00, 0x00, 0x00,
+                                       /* version u32 LE */ 0x06, 0x00, 0x00, 0x00,
                                        /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
                                        /* tag RELU */ 0x01,
                                        /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
@@ -1892,7 +2058,7 @@ static void testGoldenBytesModelReluSymOutputV5(void) {
     freeQuantization(floatQ);
 
     static const uint8_t expected[] = {/* magic */ 'O', 'D', 'T', 'S',
-                                       /* version u32 LE */ 0x05, 0x00, 0x00, 0x00,
+                                       /* version u32 LE */ 0x06, 0x00, 0x00, 0x00,
                                        /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
                                        /* tag RELU */ 0x01,
                                        /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
@@ -1943,7 +2109,7 @@ static void testGoldenBytesModelReluSymGroupedOutputV5(void) {
     freeQuantization(floatQ);
 
     static const uint8_t expected[] = {/* magic */ 'O', 'D', 'T', 'S',
-                                       /* version u32 LE */ 0x05, 0x00, 0x00, 0x00,
+                                       /* version u32 LE */ 0x06, 0x00, 0x00, 0x00,
                                        /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
                                        /* tag RELU */ 0x01,
                                        /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
@@ -1989,7 +2155,7 @@ static void testGoldenBytesModelMaxPool1dV5(void) {
                                        'D',
                                        'T',
                                        'S',
-                                       0x05,
+                                       0x06,
                                        0x00,
                                        0x00,
                                        0x00,
@@ -2064,7 +2230,7 @@ static void testGoldenBytesModelLinearFrozenV5(void) {
                                        'D',
                                        'T',
                                        'S',
-                                       /* version u32 LE */ 0x05,
+                                       /* version u32 LE */ 0x06,
                                        0x00,
                                        0x00,
                                        0x00,
@@ -2133,6 +2299,66 @@ static void testGoldenBytesModelLinearFrozenV5(void) {
     size_t fileBytes = fread(got, 1, sizeof(got), f);
     fclose(f);
 
+    TEST_ASSERT_EQUAL_size_t(sizeof(expected), fileBytes);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, got, sizeof(expected));
+}
+
+/*! GOLDEN BYTES (#460, wire format v6): a frozen (no grads), affine,
+ *  tracking BATCHNORM1D record. C = 2, eps 0.5, VALUE momentum 0.25,
+ *  gamma {1, 2}, beta {0.5, -1}, running_mean {0.25, -0.5},
+ *  running_var {1, 4}, num_batches_tracked 0x0102030405060708. */
+static void testGoldenBytesModelBatchNorm1dV6(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *layer =
+        batchNorm1dLayerInitOwning(&(batchNorm1dInit_t){.numChannels = 2,
+                                                        .eps = 0.5f,
+                                                        .momentumMode = BN_MOMENTUM_VALUE,
+                                                        .momentum = 0.25f,
+                                                        .trainable = TRAINABLE_FALSE},
+                                   &lq);
+    batchNorm1dConfig_t *c = layer->config->batchNorm1d;
+    ((float *)c->gamma->param->data)[1] = 2.0f;
+    ((float *)c->beta->param->data)[0] = 0.5f;
+    ((float *)c->beta->param->data)[1] = -1.0f;
+    ((float *)c->runningMean->data)[0] = 0.25f;
+    ((float *)c->runningMean->data)[1] = -0.5f;
+    ((float *)c->runningVar->data)[1] = 4.0f;
+    c->numBatchesTracked = 0x0102030405060708u;
+
+    layer_t *model[] = {layer};
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(model, 1, f);
+    fclose(f);
+    freeBatchNorm1dLayer(layer);
+    freeQuantization(floatQ);
+
+    static const uint8_t expected[] = {
+        'O', 'D', 'T', 'S', /* version */ 0x06, 0x00, 0x00, 0x00,
+        /* layerCount */ 0x01, 0x00, 0x00, 0x00,
+        /* tag BATCHNORM1D */ 0x0D,
+        /* numChannels */ 0x02, 0x00, 0x00, 0x00,
+        /* eps 0.5f */ 0x00, 0x00, 0x00, 0x3F,
+        /* momentumMode VALUE */ 0x01,
+        /* momentum 0.25f */ 0x00, 0x00, 0x80, 0x3E,
+        /* affine */ 0x01, /* track */ 0x01,
+        /* gamma: hasGrad 0, rank 1, dims {2}, order {0}, FLOAT32, {1, 2} */
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+        0x00, 0x80, 0x3F, 0x00, 0x00, 0x00, 0x40,
+        /* beta: {0.5, -1} */
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+        0x00, 0x00, 0x3F, 0x00, 0x00, 0x80, 0xBF,
+        /* running_mean {0.25, -0.5} */ 0x00, 0x00, 0x80, 0x3E, 0x00, 0x00, 0x00, 0xBF,
+        /* running_var {1, 4} */ 0x00, 0x00, 0x80, 0x3F, 0x00, 0x00, 0x80, 0x40,
+        /* num_batches_tracked u64 LE */ 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
+        /* forwardMath, propLossMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00, 0x00, 0x00,
+        /* outputQ, propLossQ: FLOAT32 */ 0x01, 0x01};
+
+    uint8_t got[sizeof(expected) + 8] = {0};
+    f = fopen(FILE_PATH, "rb");
+    size_t fileBytes = fread(got, 1, sizeof(got), f);
+    fclose(f);
     TEST_ASSERT_EQUAL_size_t(sizeof(expected), fileBytes);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, got, sizeof(expected));
 }
@@ -2503,6 +2729,7 @@ int main(void) {
     RUN_TEST(testRoundTripDropout);
     RUN_TEST(testRoundTripLayerNorm);
     RUN_TEST(testRoundTripGroupNorm);
+    RUN_TEST(testRoundTripBatchNorm1dVariants);
     RUN_TEST(testRoundTripQuantizationLayer);
     RUN_TEST(testRoundTripLinearSymPackedWeights);
     RUN_TEST(testSerializeTensorSymSubByteRoundTripsPackedData);
@@ -2514,6 +2741,7 @@ int main(void) {
     RUN_TEST(testGoldenBytesModelReluSymGroupedOutputV5);
     RUN_TEST(testGoldenBytesModelMaxPool1dV5);
     RUN_TEST(testGoldenBytesModelLinearFrozenV5);
+    RUN_TEST(testGoldenBytesModelBatchNorm1dV6);
     RUN_TEST(testGoldenBytesBfpQConfigRecordV5);
     RUN_TEST(testSerializeFailsFastOnUnwritableStream);
 #if SIZE_MAX > UINT32_MAX

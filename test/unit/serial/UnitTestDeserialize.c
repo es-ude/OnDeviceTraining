@@ -3,6 +3,8 @@
 #include <string.h>
 
 #include "ArithmeticType.h"
+#include "BatchNorm1d.h"
+#include "BatchNorm1dApi.h"
 #include "DeathTest.h"
 #include "Deserialize.h"
 #include "Flatten.h"
@@ -125,7 +127,7 @@ void testSerializeAndDeserializeTensor() {
 static void testDeserializeRejectsBadMagic(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("XXXX", 1, 4, f);
-    writeU32LE(f, 5); /* version (dead value: bad magic short-circuits first) */
+    writeU32LE(f, 6); /* version (dead value: bad magic short-circuits first) */
     writeU32LE(f, 1); /* layerCount */
     uint8_t tag = (uint8_t)FLATTEN;
     fwrite(&tag, sizeof(uint8_t), 1, f);
@@ -214,10 +216,34 @@ static void testDeserializeRejectsV4Version(void) {
     freeFlattenLayer(layer);
 }
 
+/*! v5 = the pre-BATCHNORM1D format (#460): no back-compat shim, established
+ *  policy. v5 was a REAL shipped format (group-quant PR4 + BFP epic PR1, see
+ *  Serialize.c/Deserialize.c's v5 history comment); Task 8's v6 bump adds the
+ *  BATCHNORM1D record and offers no migration path from it, exactly like
+ *  every prior version bump above. */
+static void testDeserializeRejectsV5Version(void) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    fwrite("ODTS", 1, 4, f);
+    writeU32LE(f, 5); /* v5: pre-BATCHNORM1D format */
+    writeU32LE(f, 1); /* layerCount */
+    uint8_t tag = (uint8_t)FLATTEN;
+    fwrite(&tag, sizeof(uint8_t), 1, f);
+    fclose(f);
+
+    layer_t *layer = flattenLayerInit();
+    layer_t *model[] = {layer};
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    fclose(f);
+
+    freeFlattenLayer(layer);
+}
+
 static void testDeserializeRejectsLayerCountMismatch(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 5); /* version */
+    writeU32LE(f, 6); /* version */
     writeU32LE(f, 2); /* layerCount; caller below passes sizeModel = 1 */
     uint8_t tag = (uint8_t)FLATTEN;
     fwrite(&tag, sizeof(uint8_t), 1, f);
@@ -236,7 +262,7 @@ static void testDeserializeRejectsLayerCountMismatch(void) {
 static void testDeserializeRejectsTagMismatch(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 5);              /* version */
+    writeU32LE(f, 6);              /* version */
     writeU32LE(f, 1);              /* layerCount */
     uint8_t tag = (uint8_t)LINEAR; /* pre-built mirror layer below is FLATTEN */
     fwrite(&tag, sizeof(uint8_t), 1, f);
@@ -865,7 +891,7 @@ static void testBfpDeserializeReallocatesExponentsOnShapeChange(void) {
 static void testBfpDeserializeRejectsZeroNumGroupsInWireConfig(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 5); /* version */
+    writeU32LE(f, 6); /* version */
     writeU32LE(f, 1); /* layerCount */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
@@ -967,7 +993,7 @@ static void testBfpDeserializeRejectsSentinelViolation(void) {
 static void testBfpDeserializeRejectsMantissaBitsOutOfRange(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 5); /* version */
+    writeU32LE(f, 6); /* version */
     writeU32LE(f, 1); /* layerCount */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
@@ -1024,7 +1050,7 @@ static void testBfpDeserializeRejectsMantissaBitsOutOfRange(void) {
 static void testBfpDeserializeRejectsExponentBitsOutOfRange(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 5); /* version */
+    writeU32LE(f, 6); /* version */
     writeU32LE(f, 1); /* layerCount */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
@@ -1079,7 +1105,7 @@ static void testBfpDeserializeRejectsExponentBitsOutOfRange(void) {
 static void testBfpDeserializeRejectsNonFiniteScaleExponent(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 5); /* version */
+    writeU32LE(f, 6); /* version */
     writeU32LE(f, 1); /* layerCount */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
@@ -1361,7 +1387,7 @@ static void testDeserializeSymRejectsOversizedNumGroupsInWireConfig(void) {
 
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 5); /* version */
+    writeU32LE(f, 6); /* version */
     writeU32LE(f, 1); /* layerCount */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
@@ -1414,7 +1440,7 @@ static void testDeserializeAsymRejectsOversizedNumGroupsInWireConfig(void) {
 
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 5); /* version */
+    writeU32LE(f, 6); /* version */
     writeU32LE(f, 1); /* layerCount */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
@@ -1471,7 +1497,7 @@ static void testDeserializeAsymRejectsOversizedNumGroupsInWireConfig(void) {
 static void testDeserializeSymRejectsZeroNumGroupsInWireConfig(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 5); /* version */
+    writeU32LE(f, 6); /* version */
     writeU32LE(f, 1); /* layerCount */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
@@ -1519,7 +1545,7 @@ static void testDeserializeSymRejectsZeroNumGroupsInWireConfig(void) {
 static void testDeserializeAsymRejectsZeroNumGroupsInWireConfig(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 5); /* version */
+    writeU32LE(f, 6); /* version */
     writeU32LE(f, 1); /* layerCount */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
@@ -1929,7 +1955,7 @@ static void testDeserializeArithmeticRoundTripsBfp(void) {
 static void testDeserializeArithmeticRejectsUnknownTypeTag(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 5); /* version */
+    writeU32LE(f, 6); /* version */
     writeU32LE(f, 1); /* layerCount */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
@@ -1970,7 +1996,7 @@ static void testDeserializeArithmeticRejectsUnknownTypeTag(void) {
 static void testDeserializeArithmeticRejectsUnknownRoundingModeTag(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 5); /* version */
+    writeU32LE(f, 6); /* version */
     writeU32LE(f, 1); /* layerCount */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
@@ -2000,6 +2026,259 @@ static void testDeserializeArithmeticRejectsUnknownRoundingModeTag(void) {
     freeQuantization(floatQ);
 }
 
+/* BATCHNORM1D reader tests (#460, wire format v6). Byte offsets below are
+ * named constants derived from the record layout for a FROZEN (no grad
+ * tensors -- `.trainable = TRAINABLE_FALSE`), C = 2, affine, tracking
+ * BATCHNORM1D record (see Serialize.c's BATCHNORM1D arm and
+ * testGoldenBytesModelBatchNorm1dV6 in UnitTestSerialize.c for the same
+ * layout pinned byte-for-byte):
+ *   header (12) + tag (1) = 13        -> numChannels u32 LE
+ *   13 + 4 = 17                       -> eps f32 LE
+ *   17 + 4 = 21                       -> momentumMode u8
+ *   21 + 1 = 22                       -> momentum f32 LE
+ *   22 + 4 = 26                       -> affine u8
+ *   26 + 1 = 27                       -> track u8
+ *   28                                -> gamma parameter record (hasGrad=0,
+ *                                        rank u32=1, dims[0] u32=2,
+ *                                        order[0] u32=0, qtype u8=FLOAT32,
+ *                                        2 x f32 data = 1+4+4+4+1+8 = 22
+ *                                        bytes for C=2)
+ *   28 + 22 = 50                      -> beta parameter record (22 bytes)
+ *   50 + 22 = 72                      -> runningMean[0] f32 LE
+ *   72 + 8 = 80                       -> runningVar[0] f32 LE
+ * Frozen (no grad) keeps these fixed regardless of the seeded param values,
+ * exactly as the golden byte test's own comment notes. */
+#define BN_OFFSET_EPS 17
+#define BN_OFFSET_MODE 21
+#define BN_OFFSET_MOMENTUM 22
+#define BN_OFFSET_RUNNING_MEAN 72
+#define BN_OFFSET_RUNNING_VAR 80
+
+/*! Writes a otherwise-valid v6 BATCHNORM1D record to FILE_PATH: C = 2,
+ *  frozen, affine, tracking, eps 0.5, VALUE momentum 0.25 -- the fixture the
+ *  reader-rejection tests below patch one field of via fseek + fwrite. */
+static void writeValidBatchNorm1dFile(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *layer =
+        batchNorm1dLayerInitOwning(&(batchNorm1dInit_t){.numChannels = 2,
+                                                        .eps = 0.5f,
+                                                        .momentumMode = BN_MOMENTUM_VALUE,
+                                                        .momentum = 0.25f,
+                                                        .trainable = TRAINABLE_FALSE},
+                                   &lq);
+
+    layer_t *model[] = {layer};
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(model, 1, f);
+    fclose(f);
+
+    freeBatchNorm1dLayer(layer);
+    freeQuantization(floatQ);
+}
+
+/*! Writes a MINIMAL (noAffine, noRunningStats) v6 BATCHNORM1D record: no
+ *  gamma/beta/buffer bytes at all, so numChannels has NO effect on any other
+ *  byte in the record (forwardMath/propLossMath/outputQ/propLossQ follow
+ *  immediately after the header fields regardless of C). This isolates the
+ *  numChannels equality check from #316-style downstream tensor-shape/dtype
+ *  guards that would otherwise catch a mismatch via stream desync instead of
+ *  the check itself -- see testDeserializeBatchNormRejectsChannelMismatch's
+ *  mutation note. */
+static void writeMinimalBatchNorm1dFile(size_t numChannels) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *layer = batchNorm1dLayerInitOwning(
+        &(batchNorm1dInit_t){.numChannels = numChannels, .noAffine = true, .noRunningStats = true},
+        &lq);
+
+    layer_t *model[] = {layer};
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(model, 1, f);
+    fclose(f);
+
+    freeBatchNorm1dLayer(layer);
+    freeQuantization(floatQ);
+}
+
+/*! A fresh BATCHNORM1D skeleton to deserialize into -- frozen (matches the
+ *  fixture's no-grad record shape) so a structural-mismatch test only ever
+ *  exercises the ONE invariant it names. */
+static layer_t *makeSkeletonBatchNorm1d(size_t numChannels, bool noAffine, bool noRunningStats) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *layer =
+        batchNorm1dLayerInitOwning(&(batchNorm1dInit_t){.numChannels = numChannels,
+                                                        .noAffine = noAffine,
+                                                        .noRunningStats = noRunningStats,
+                                                        .trainable = TRAINABLE_FALSE},
+                                   &lq);
+    freeQuantization(floatQ);
+    return layer;
+}
+
+static void patchFileU8(long offset, uint8_t value) {
+    FILE *f = fopen(FILE_PATH, "r+b");
+    TEST_ASSERT_NOT_NULL_MESSAGE(f, "patchFileU8: fopen failed");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, fseek(f, offset, SEEK_SET), "patchFileU8: fseek failed");
+    fwrite(&value, 1, 1, f);
+    fclose(f);
+}
+
+static void patchFileU32Bits(long offset, uint32_t bits) {
+    FILE *f = fopen(FILE_PATH, "r+b");
+    TEST_ASSERT_NOT_NULL_MESSAGE(f, "patchFileU32Bits: fopen failed");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, fseek(f, offset, SEEK_SET), "patchFileU32Bits: fseek failed");
+    writeU32LE(f, bits);
+    fclose(f);
+}
+
+static uint32_t floatBitsOf(float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+/*! noAffine + noRunningStats on both sides (see writeMinimalBatchNorm1dFile):
+ *  numChannels is otherwise inert in this record shape, so this is the ONE
+ *  scenario where removing the numChannels equality check produces a
+ *  genuinely SILENT pass (no downstream tensor-shape/dtype guard happens to
+ *  catch it) rather than an incidental exit(1) from stream desync -- see the
+ *  report's mutation table. */
+static void testDeserializeBatchNormRejectsChannelMismatch(void) {
+    writeMinimalBatchNorm1dFile(2); /* file numChannels = 2 */
+    layer_t *skeleton = makeSkeletonBatchNorm1d(3, true, true);
+    layer_t *model[] = {skeleton};
+
+    FILE *f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    fclose(f);
+
+    freeBatchNorm1dLayer(skeleton);
+}
+
+static void testDeserializeBatchNormRejectsAffineMismatch(void) {
+    writeValidBatchNorm1dFile(); /* file affine = true */
+    layer_t *skeleton = makeSkeletonBatchNorm1d(2, /*noAffine=*/true, /*noRunningStats=*/false);
+    layer_t *model[] = {skeleton};
+
+    FILE *f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    fclose(f);
+
+    freeBatchNorm1dLayer(skeleton);
+}
+
+static void testDeserializeBatchNormRejectsNonFiniteEps(void) {
+    writeValidBatchNorm1dFile();
+    patchFileU32Bits(BN_OFFSET_EPS, 0x7FC00000u); /* quiet NaN */
+    layer_t *skeleton = makeSkeletonBatchNorm1d(2, false, false);
+    layer_t *model[] = {skeleton};
+
+    FILE *f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    fclose(f);
+
+    freeBatchNorm1dLayer(skeleton);
+}
+
+static void testDeserializeBatchNormRejectsMomentumOutOfRange(void) {
+    writeValidBatchNorm1dFile();
+    patchFileU32Bits(BN_OFFSET_MOMENTUM, floatBitsOf(2.0f)); /* outside [0, 1] */
+    layer_t *skeleton = makeSkeletonBatchNorm1d(2, false, false);
+    layer_t *model[] = {skeleton};
+
+    FILE *f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    fclose(f);
+
+    freeBatchNorm1dLayer(skeleton);
+}
+
+static void testDeserializeBatchNormRejectsUnknownMomentumMode(void) {
+    writeValidBatchNorm1dFile();
+    patchFileU8(BN_OFFSET_MODE, 0); /* neither VALUE (1) nor CUMULATIVE (2) */
+    layer_t *skeleton = makeSkeletonBatchNorm1d(2, false, false);
+    layer_t *model[] = {skeleton};
+
+    FILE *f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    fclose(f);
+
+    freeBatchNorm1dLayer(skeleton);
+}
+
+static void testDeserializeBatchNormRejectsNaNRunningMean(void) {
+    writeValidBatchNorm1dFile();
+    patchFileU32Bits(BN_OFFSET_RUNNING_MEAN, 0x7FC00000u); /* quiet NaN */
+    layer_t *skeleton = makeSkeletonBatchNorm1d(2, false, false);
+    layer_t *model[] = {skeleton};
+
+    FILE *f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    fclose(f);
+
+    freeBatchNorm1dLayer(skeleton);
+}
+
+static void testDeserializeBatchNormRejectsNegativeRunningVar(void) {
+    writeValidBatchNorm1dFile();
+    patchFileU32Bits(BN_OFFSET_RUNNING_VAR, floatBitsOf(-1.0f));
+    layer_t *skeleton = makeSkeletonBatchNorm1d(2, false, false);
+    layer_t *model[] = {skeleton};
+
+    FILE *f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    fclose(f);
+
+    freeBatchNorm1dLayer(skeleton);
+}
+
+/*! Review Focus 3: a skeleton built with DEFAULT hyperparameters (eps 0 ->
+ *  1e-5, momentumMode DEFAULT -> VALUE 0.1) must end up with the FILE's own
+ *  eps/momentum after a successful load -- the file's hyperparameters win
+ *  over whatever the skeleton was constructed with, matching every other
+ *  overwrite-from-file field. numChannels/affine/track are identical on
+ *  both sides so the record loads cleanly. */
+static void testDeserializeBatchNormFileHyperparametersWin(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+
+    layer_t *sourceLayer = batchNorm1dLayerInitOwning(
+        &(batchNorm1dInit_t){
+            .numChannels = 2, .eps = 1e-3f, .momentumMode = BN_MOMENTUM_VALUE, .momentum = 0.3f},
+        &lq);
+    layer_t *sourceModel[] = {sourceLayer};
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(sourceModel, 1, f);
+    fclose(f);
+    freeBatchNorm1dLayer(sourceLayer);
+
+    layer_t *skeletonLayer =
+        batchNorm1dLayerInitOwning(&(batchNorm1dInit_t){.numChannels = 2}, &lq);
+    batchNorm1dConfig_t *cfg = skeletonLayer->config->batchNorm1d;
+    layer_t *skeletonModel[] = {skeletonLayer};
+
+    f = fopen(FILE_PATH, "rb");
+    deserializeModel(skeletonModel, 1, f);
+    fclose(f);
+
+    /* CAPTURE every assertion value before any free. */
+    float capturedEps = cfg->eps;
+    float capturedMomentum = cfg->momentum;
+
+    freeBatchNorm1dLayer(skeletonLayer);
+    freeQuantization(floatQ);
+
+    /* ASSERT on captured. */
+    TEST_ASSERT_EQUAL_FLOAT(1e-3f, capturedEps);
+    TEST_ASSERT_EQUAL_FLOAT(0.3f, capturedMomentum);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -2010,6 +2289,7 @@ int main(void) {
     RUN_TEST(testDeserializeRejectsWrongVersion);
     RUN_TEST(testDeserializeRejectsV3Version);
     RUN_TEST(testDeserializeRejectsV4Version);
+    RUN_TEST(testDeserializeRejectsV5Version);
     RUN_TEST(testDeserializeRejectsLayerCountMismatch);
     RUN_TEST(testDeserializeRejectsTagMismatch);
     RUN_TEST(testDeserializeTensorRejectsDtypeMismatch);
@@ -2048,5 +2328,13 @@ int main(void) {
     RUN_TEST(testDeserializeArithmeticRoundTripsBfp);
     RUN_TEST(testDeserializeArithmeticRejectsUnknownTypeTag);
     RUN_TEST(testDeserializeArithmeticRejectsUnknownRoundingModeTag);
+    RUN_TEST(testDeserializeBatchNormRejectsChannelMismatch);
+    RUN_TEST(testDeserializeBatchNormRejectsAffineMismatch);
+    RUN_TEST(testDeserializeBatchNormRejectsNonFiniteEps);
+    RUN_TEST(testDeserializeBatchNormRejectsMomentumOutOfRange);
+    RUN_TEST(testDeserializeBatchNormRejectsUnknownMomentumMode);
+    RUN_TEST(testDeserializeBatchNormRejectsNaNRunningMean);
+    RUN_TEST(testDeserializeBatchNormRejectsNegativeRunningVar);
+    RUN_TEST(testDeserializeBatchNormFileHyperparametersWin);
     return UNITY_END();
 }

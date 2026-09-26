@@ -1,11 +1,13 @@
 #define SOURCE_FILE "DESERIALIZE"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "AdaptiveAvgPool1d.h"
 #include "ArithmeticType.h"
 #include "AvgPool1d.h"
+#include "BatchNorm1d.h"
 #include "Common.h"
 #include "Conv1d.h"
 #include "Conv1dTransposed.h"
@@ -25,7 +27,21 @@
 #include "StorageApi.h"
 #include "Tensor.h"
 
-/* Mirrors Serialize.c's locked format v2 constants (#370): fixed-width
+/* v6 (#460): new BATCHNORM1D record (tag 13), read by a deserializeLayer arm
+ * mirroring Serialize.c's write order exactly -- `u32 numChannels, f32 eps,
+ * u8 momentumMode, f32 momentum, u8 affine, u8 track` are read first and
+ * numChannels/affine/track are checked to EQUAL the skeleton's (the
+ * skeleton owns the gamma/beta/runningMean/runningVar buffers, so a
+ * mismatch would write past them); momentumMode must be 1 (VALUE) or 2
+ * (CUMULATIVE); eps/momentum/every runningMean/runningVar value are
+ * re-validated against the factory's own invariants (finite eps > 0, VALUE
+ * momentum finite in [0, 1], every runningMean finite, every runningVar
+ * finite and >= 0) before being written into the skeleton -- a failing
+ * check exits before any partial overwrite. `frozen`/`training` are
+ * runtime/create-time state, never serialized. No migration path from v5:
+ * a v5 file fails cleanly at the version check below (no back-compat shim,
+ * established policy).
+ * Mirrors Serialize.c's locked format v2 constants (#370): fixed-width
  * little-endian scalars via the checked SerialWire primitives; no v1
  * back-compat shim — v1 files were host-local artifacts.
  * v3: parameter records carry a grad-presence byte (#380). The reader is
@@ -66,7 +82,7 @@
  * (numGroups==1 <=> groupSize==0) and the shared SERIAL_MAX_QCONFIG_GROUPS
  * sanity cap are checked on the FILE's values, exactly as for SYM/ASYM. */
 #define SERIALIZE_MAGIC "ODTS"
-#define SERIALIZE_FORMAT_VERSION 5u
+#define SERIALIZE_FORMAT_VERSION 6u
 
 void deserializeTensor(tensor_t *tensor, FILE *f) {
     /* #316: capture the skeleton's expected payload size BEFORE the shape /
@@ -827,6 +843,69 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         deserializeArithmetic(&groupNormConfig->propLossMath, f);
         deserializeQuantization(groupNormConfig->outputQ, f, 0);
         deserializeQuantization(groupNormConfig->propLossQ, f, 0);
+        break;
+    }
+    case BATCHNORM1D: {
+        batchNorm1dConfig_t *c = layer->config->batchNorm1d;
+        size_t fileC = (size_t)serialReadU32LE(f);
+        float eps = serialReadF32LE(f);
+        uint8_t mode = serialReadU8(f);
+        float momentum = serialReadF32LE(f);
+        uint8_t affine = serialReadU8(f);
+        uint8_t track = serialReadU8(f);
+        if (fileC != c->numChannels || affine > 1u || track > 1u || (affine == 1u) != c->affine ||
+            (track == 1u) != c->trackRunningStats) {
+            PRINT_ERROR("deserializeModel: BATCHNORM1D record (C %zu, affine %u, track %u) does "
+                        "not match the skeleton (C %zu, affine %d, track %d)",
+                        fileC, (unsigned)affine, (unsigned)track, c->numChannels, (int)c->affine,
+                        (int)c->trackRunningStats);
+            exit(1);
+        }
+        if (!isfinite(eps) || eps <= 0.0f) {
+            PRINT_ERROR("deserializeModel: BATCHNORM1D eps must be finite and > 0");
+            exit(1);
+        }
+        if (mode != BN_MOMENTUM_VALUE && mode != BN_MOMENTUM_CUMULATIVE) {
+            PRINT_ERROR("deserializeModel: BATCHNORM1D momentumMode %u unknown", (unsigned)mode);
+            exit(1);
+        }
+        if (mode == BN_MOMENTUM_VALUE &&
+            (!isfinite(momentum) || momentum < 0.0f || momentum > 1.0f)) {
+            PRINT_ERROR("deserializeModel: BATCHNORM1D momentum must be finite and in [0, 1]");
+            exit(1);
+        }
+        c->eps = eps;
+        c->momentumMode = (bnMomentumMode_t)mode;
+        c->momentum = momentum;
+        if (c->affine) {
+            deserializeParameter(c->gamma, f);
+            deserializeParameter(c->beta, f);
+        }
+        if (c->trackRunningStats) {
+            float *rm = (float *)c->runningMean->data;
+            float *rv = (float *)c->runningVar->data;
+            for (size_t ch = 0; ch < c->numChannels; ch++) {
+                rm[ch] = serialReadF32LE(f);
+                if (!isfinite(rm[ch])) {
+                    PRINT_ERROR("deserializeModel: BATCHNORM1D runningMean[%zu] not finite", ch);
+                    exit(1);
+                }
+            }
+            for (size_t ch = 0; ch < c->numChannels; ch++) {
+                rv[ch] = serialReadF32LE(f);
+                if (!isfinite(rv[ch]) || rv[ch] < 0.0f) {
+                    PRINT_ERROR("deserializeModel: BATCHNORM1D runningVar[%zu] must be finite "
+                                "and >= 0",
+                                ch);
+                    exit(1);
+                }
+            }
+            c->numBatchesTracked = serialReadU64LE(f);
+        }
+        deserializeArithmetic(&c->forwardMath, f);
+        deserializeArithmetic(&c->propLossMath, f);
+        deserializeQuantization(c->outputQ, f, 0);
+        deserializeQuantization(c->propLossQ, f, 0);
         break;
     }
     default:

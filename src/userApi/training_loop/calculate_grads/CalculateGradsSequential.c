@@ -29,10 +29,20 @@
 #include "TraceApi.h"
 #include "TrainingLoopApiInternal.h"
 
-static void setDropoutLayersTraining(layer_t **model, size_t modelSize, bool training) {
+/* Dropout and BatchNorm1d run in training mode exactly for one grads call
+ * (forward + backward, #460): inference, inferenceWithLoss and evaluation
+ * never flip it, so they see eval mode. */
+static void setLayersTrainingMode(layer_t **model, size_t modelSize, bool training) {
     for (size_t i = 0; i < modelSize; i++) {
-        if (model[i]->type == DROPOUT) {
+        switch (model[i]->type) {
+        case DROPOUT:
             model[i]->config->dropout->training = training;
+            break;
+        case BATCHNORM1D:
+            model[i]->config->batchNorm1d->training = training;
+            break;
+        default:
+            break;
         }
     }
 }
@@ -63,7 +73,7 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
     /* Phase hook (OdtHook.h): FORWARD and BACKWARD tile this whole call. */
     odtHookFire(ODT_EVENT_FORWARD_BEGIN);
     layerOutputs[0] = input;
-    setDropoutLayersTraining(model, modelSize, true);
+    setLayersTrainingMode(model, modelSize, true);
     initLayerOutputs(layerOutputs, model, modelSize);
 
     // Forward pass
@@ -133,7 +143,7 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
 
     deInitLayerOutputs(layerOutputs, modelSize);
 
-    setDropoutLayersTraining(model, modelSize, false);
+    setLayersTrainingMode(model, modelSize, false);
     odtHookFire(ODT_EVENT_BACKWARD_END);
     return trainingStats;
 }

@@ -81,7 +81,12 @@ typedef struct trainingRunResult {
  *  [1, ...] views batchViewOf built for one sample (they share its data,
  *  #152 PR3a); at m > 1 [m, ...] views over the loop's gather buffers -- a
  *  copy of the chunk's m samples, overwritten by the next chunk and freed
- *  before trainingBatchDefault returns (#152 PR3b). */
+ *  before trainingBatchDefault returns (#152 PR3b).
+ *
+ *  Dropout and BatchNorm1d are in training mode only inside
+ *  calculateGradsSequential / tracedGrads (they flip the per-layer
+ *  `training` flag around the call); a custom function that does not route
+ *  through them runs both in eval mode (#460). */
 typedef trainingStats_t *(*calculateGradsFn_t)(layer_t **model, size_t modelSize,
                                                lossConfig_t lossConfig,
                                                reduction_t forwardReduction, tensor_t *input,

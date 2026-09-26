@@ -68,3 +68,40 @@ add_elastic_ai_unit_test(
         Deserialize
         odt_test_death
 )
+
+# Remat PR1b (#4): the RematScheduler library's ARENA row, driven through its
+# entry points directly (PR1c adds the const vtable and the dispatch). The
+# test reaches the row's private headers (RematPlace.h, RematRows.h) through
+# the source directory; RematPlan is listed for its PUBLIC ODT_REMAT_VERIFY.
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
+        RematScheduler
+        MORE_LIBS
+        RematPlan
+        CommonLayerLibs
+        Conv1dApi
+        LinearApi
+        ReluApi
+        SoftmaxApi
+        FlattenApi
+        Pool1dApi
+        QuantLayerApi
+        Kernel
+        LayerQuant
+        LayerCommon
+        LayerConfigAccess
+        ArithmeticType
+        QuantizationApi
+        Quantization
+        Rounding
+        TensorApi
+        Tensor
+        StorageApi
+        Common
+        LossFunction
+        Distributions
+        RNG
+        odt_test_death
+)
+target_include_directories(UnitTestRematScheduler PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/userApi/training_loop/remat)

@@ -1,13 +1,18 @@
 #ifndef ODT_REMAT_SCHEDULER_H
 #define ODT_REMAT_SCHEDULER_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-/* The remat scheduler's public header (#4, spec §5.1). In PR1a it holds only
- * the step, policy, spec and walk types the static plan needs; the scheduler
- * interface (vtable, rows, rematBegin/Next/Done/End, the report) comes with
- * the RematScheduler library. */
+#include "Layer.h"
+#include "LossFunction.h"
+#include "Tensor.h"
+
+/* The remat scheduler's public header (#4, spec §5.1): the step, policy, spec
+ * and walk types the static plan shares, and the scheduler with its rows.
+ * PR1b holds the ARENA row; PR1c adds the HEAP row, the const vtable and the
+ * rematBegin/Next/Done/End dispatch. */
 
 /* APPEND-ONLY: stored in plan tables and (PR6) caller/ir2c sequences. */
 typedef enum rematStepKind {
@@ -44,5 +49,40 @@ typedef struct rematPlanSpec {
 typedef struct rematWalk {
     size_t step, open, close;
 } rematWalk_t;
+
+typedef enum rematSchedulerType { REMAT_ARENA = 0 } rematSchedulerType_t; /* APPEND-ONLY */
+
+typedef struct rematWireTable rematWireTable_t; /* RematPlan.h (internal) */
+typedef struct rematPlan rematPlan_t;           /* RematPlan.h (internal) */
+typedef struct rematScheduler rematScheduler_t;
+
+/* Caller-owned (stack, static or a struct field); ONE per concurrently
+ * running training stream. */
+struct rematScheduler {
+    rematSchedulerType_t type;
+    rematWireTable_t *wires; /* shared buffer table: one reserveMemory block */
+    rematPlan_t *plan;       /* shared static plan: one reserveMemory block, placement-free */
+};
+
+/* One init per row (the LrScheduler idiom). Returns false iff a reserveMemory
+ * failed; s is then safe for rematSchedulerDeinit and rematSchedulerReport,
+ * whose flags say which fields are valid. A model the table cannot describe,
+ * or whose size arithmetic overflows, exits naming it. */
+bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss,
+                    const tensor_t *inputLike, const rematPlanSpec_t *spec);
+/* NULL-safe and idempotent: the row's blocks, then the plan and the table. */
+void rematSchedulerDeinit(rematScheduler_t *s);
+
+/* Feeds the harness keys (spec §14); a field is valid only under the flag
+ * that declares it. */
+typedef struct rematReport {
+    rematSchedulerType_t type;
+    rematPlanPolicy_t policy;
+    bool planned; /* table + plan built: numSteps, peakLiveBytes, metadataBytes */
+    size_t numSteps;
+    size_t peakLiveBytes; /* plan, exact bytes, ACT 0 excluded: POET x-axis, wires_peak_b */
+    size_t metadataBytes; /* table block + plan block (+ row tables) -> wire_metadata_b */
+} rematReport_t;
+void rematSchedulerReport(const rematScheduler_t *s, rematReport_t *out);
 
 #endif // ODT_REMAT_SCHEDULER_H

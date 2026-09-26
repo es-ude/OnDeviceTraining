@@ -24,3 +24,20 @@ target_link_libraries(RematPlan PRIVATE
         Rounding
         ArithmeticType
 )
+
+# Remat (#4): the swappable scheduler interface and its rows (spec §2.1).
+# PR1b holds the ARENA row. Links: §2.1's list plus Quantization and
+# Rounding, whose headers Tensor.h -> Quantization.h -> Rounding.h include
+# (the PR1a Assumption 27 reasoning).
+add_library(RematScheduler RematScheduler.c RematArena.c)
+target_include_directories(RematScheduler PUBLIC include)
+target_link_libraries(RematScheduler PRIVATE
+        RematPlan
+        StorageApi
+        Layer
+        LossFunction
+        Tensor
+        Quantization
+        Rounding
+        Common
+)

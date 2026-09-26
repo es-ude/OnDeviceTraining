@@ -1,5 +1,6 @@
 #define SOURCE_FILE "UNIT_TEST_BATCHNORM1D_INTEGRATION"
 
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -129,6 +130,53 @@ void testStateDictSkipsNoAffineBatchNorm(void) {
     TEST_ASSERT_EQUAL_FLOAT(2.0f, g0);
 }
 
+void testLoadBuffersInModelOrderSkippingUntrackedBatchNorm(void) {
+    layer_t *a = bnLayer(2, false, false, TRAINABLE_DEFAULT);
+    layer_t *untracked = bnLayer(2, false, true, TRAINABLE_DEFAULT);
+    layer_t *b = bnLayer(2, false, false, TRAINABLE_DEFAULT);
+    layer_t *model[] = {a, untracked, b};
+    const float rmA[2] = {0.5f, -0.5f}, rvA[2] = {2.f, 3.f};
+    const float rmB[2] = {1.5f, 2.5f}, rvB[2] = {0.25f, 0.75f};
+    modelLoadStateDictBuffers(
+        model, 3,
+        (stateDictBuffers_t[]){
+            {.name = "bn1", .runningMean = rmA, .runningVar = rvA, .numBatchesTracked = 7},
+            {.name = "bn2", .runningMean = rmB, .runningVar = rvB, .numBatchesTracked = 9},
+        },
+        2);
+    float gotA = ((float *)a->config->batchNorm1d->runningVar->data)[1];
+    float gotB = ((float *)b->config->batchNorm1d->runningMean->data)[1];
+    uint64_t nA = a->config->batchNorm1d->numBatchesTracked;
+    uint64_t nB = b->config->batchNorm1d->numBatchesTracked;
+    freeBatchNorm1dLayer(b);
+    freeBatchNorm1dLayer(untracked);
+    freeBatchNorm1dLayer(a);
+    TEST_ASSERT_EQUAL_FLOAT(3.f, gotA);
+    TEST_ASSERT_EQUAL_FLOAT(2.5f, gotB);
+    TEST_ASSERT_EQUAL_UINT64(7, nA);
+    TEST_ASSERT_EQUAL_UINT64(9, nB);
+}
+
+static void loadBuffersOrDie(size_t numEntries, const float *rm, const float *rv) {
+    layer_t *model[] = {bnLayer(2, false, false, TRAINABLE_DEFAULT)};
+    stateDictBuffers_t e[2] = {{.runningMean = rm, .runningVar = rv},
+                               {.runningMean = rm, .runningVar = rv}};
+    modelLoadStateDictBuffers(model, 1, e, numEntries);
+}
+
+void testLoadBuffersRejectsBadInput(void) {
+    const float ok[2] = {0.f, 1.f};
+    const float nanMean[2] = {NAN, 0.f};
+    const float negVar[2] = {1.f, -0.5f};
+    const float infVar[2] = {1.f, INFINITY};
+    ASSERT_EXITS_WITH_FAILURE(loadBuffersOrDie(2, ok, ok));      /* count mismatch */
+    ASSERT_EXITS_WITH_FAILURE(loadBuffersOrDie(1, NULL, ok));    /* NULL mean */
+    ASSERT_EXITS_WITH_FAILURE(loadBuffersOrDie(1, ok, NULL));    /* NULL var */
+    ASSERT_EXITS_WITH_FAILURE(loadBuffersOrDie(1, nanMean, ok)); /* NaN mean */
+    ASSERT_EXITS_WITH_FAILURE(loadBuffersOrDie(1, ok, negVar));  /* negative var */
+    ASSERT_EXITS_WITH_FAILURE(loadBuffersOrDie(1, ok, infVar));  /* inf var */
+}
+
 static tensor_t *buildFloatTensor(const size_t *dims, size_t rank, const float *src) {
     size_t *d = reserveMemory(rank * sizeof(size_t));
     for (size_t i = 0; i < rank; i++) {
@@ -221,6 +269,30 @@ void testFrozenBatchNormNeverMovesDuringTraining(void) {
     TEST_ASSERT_EQUAL_FLOAT(0.0f, rm0);
     TEST_ASSERT_EQUAL_FLOAT(1.0f, rv0);
     TEST_ASSERT_EQUAL_UINT64(0, nbt);
+    TEST_ASSERT_TRUE(linGrad != 0.0f);
+}
+
+/* Review Focus 4: loaded buffers + frozen BN, fine-tuned at [1, C]. */
+void testFrozenBatchNormKeepsLoadedBuffersDuringTraining(void) {
+    layer_t *model[2];
+    buildBnLinear(model, TRAINABLE_FALSE);
+    const float rm[2] = {0.2f, -0.3f}, rv[2] = {1.5f, 0.5f};
+    modelLoadStateDictBuffers(model, 2,
+                              (stateDictBuffers_t[]){{.runningMean = rm, .runningVar = rv}}, 1);
+    tensor_t *x = buildFloatTensor((size_t[]){1, 2}, 2, kX);
+    tensor_t *y = buildFloatTensor((size_t[]){1, 2}, 2, kY);
+    freeTrainingStats(
+        calculateGradsSequential(model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, x, y));
+    batchNorm1dConfig_t *c = model[0]->config->batchNorm1d;
+    float got[4];
+    memcpy(got, c->runningMean->data, 2 * sizeof(float));
+    memcpy(got + 2, c->runningVar->data, 2 * sizeof(float));
+    float linGrad = ((float *)model[1]->config->linear->weights->grad->data)[0];
+    freeTensor(y);
+    freeTensor(x);
+    freeBnLinear(model);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(rm, got, 2);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(rv, got + 2, 2);
     TEST_ASSERT_TRUE(linGrad != 0.0f);
 }
 
@@ -385,9 +457,12 @@ int main(void) {
     RUN_TEST(testLayerLoadWeightsFillsGammaBeta);
     RUN_TEST(testLayerLoadWeightsRejectsNoAffine);
     RUN_TEST(testStateDictSkipsNoAffineBatchNorm);
+    RUN_TEST(testLoadBuffersInModelOrderSkippingUntrackedBatchNorm);
+    RUN_TEST(testLoadBuffersRejectsBadInput);
     RUN_TEST(testGradsCallTrainsBatchNormThenLeavesEvalMode);
     RUN_TEST(testInferenceUsesRunningStatsAndWritesNothing);
     RUN_TEST(testFrozenBatchNormNeverMovesDuringTraining);
+    RUN_TEST(testFrozenBatchNormKeepsLoadedBuffersDuringTraining);
     RUN_TEST(testNoAffineBatchNormAloneStillUpdatesRunningStats);
     RUN_TEST(testCustomGradsFnWithoutFlipRunsBatchNormInEvalMode);
     RUN_TEST(testGradsCallKeepsBatchNormInTrainingModeThroughBackward);

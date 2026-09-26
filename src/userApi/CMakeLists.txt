@@ -82,6 +82,7 @@ target_link_libraries(StateDictApi PRIVATE
         StorageApi
         Tensor
         Rounding
+        m
 )
 
 

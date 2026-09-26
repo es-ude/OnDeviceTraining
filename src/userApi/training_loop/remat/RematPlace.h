@@ -34,4 +34,10 @@ size_t arenaPlaced(const rematWireTable_t *t, uint16_t w);
 bool arenaPlaceFirstFitDecreasing(const rematWireTable_t *t, const rematProgram_t *p,
                                   size_t *offsets, size_t *bytes, size_t *peakPlacedBytes);
 
+/* Always runs (firmware too) and trusts no layout, imported ones included
+ * (R6): every offset a multiple of ODT_WIRE_ALIGN, every range inside [0,
+ * bytes), co-live (inclusive) ranges byte-disjoint. Exits naming the wire(s). */
+void arenaVerifyPlacement(const rematWireTable_t *t, const rematProgram_t *p, const size_t *offsets,
+                          size_t bytes);
+
 #endif // ODT_REMAT_PLACE_H

@@ -614,6 +614,117 @@ void testFfdReleasesItsScratch(void) {
 }
 #endif
 
+/* ---- the placement verifier (spec §5.5, R6) ---- */
+
+typedef struct placedPlan {
+    arenaFixture_t f;
+    builtPlan_t b;
+    size_t offsets[23];
+    size_t bytes;
+} placedPlan_t;
+
+static void placeFixture(placedPlan_t *pp, void (*build)(arenaFixture_t *),
+                         const rematPlanSpec_t *spec) {
+    build(&pp->f);
+    pp->b = buildTableAndPlan(pp->f.model, pp->f.n, pp->f.lt, pp->f.x, spec);
+    size_t peak = 0;
+    TEST_ASSERT_TRUE(pp->b.p->train.numRanges <= 23u);
+    TEST_ASSERT_TRUE(
+        arenaPlaceFirstFitDecreasing(pp->b.t, &pp->b.p->train, pp->offsets, &pp->bytes, &peak));
+}
+
+static void freePlacedFixture(placedPlan_t *pp) {
+    freeTableAndPlan(&pp->b);
+    freeModel(pp->f.model, pp->f.n);
+}
+
+static void verifyPlaced(placedPlan_t *pp) {
+    arenaVerifyPlacement(pp->b.t, &pp->b.p->train, pp->offsets, pp->bytes);
+}
+
+static void assertTheFfdPlacementVerifies(void (*build)(arenaFixture_t *),
+                                          const rematPlanSpec_t *spec) {
+    placedPlan_t pp;
+    placeFixture(&pp, build, spec);
+    ASSERT_EXITS_WITH(0, verifyPlaced(&pp));
+    freePlacedFixture(&pp);
+}
+
+/* HAR's FFD layouts reuse bytes between ranges that are never co-live (e.g.
+ * LIVENESS puts ACT 2 and ACT 4 both at 8,192): legal, and accepted. */
+void testVerifierAcceptsTheFfdPlacementOnTheZoo(void) {
+    assertTheFfdPlacementVerifies(buildHarModel, NULL);
+    assertTheFfdPlacementVerifies(buildHarModel, &g_liveness);
+    assertTheFfdPlacementVerifies(buildF1Model, NULL);
+    assertTheFfdPlacementVerifies(buildF1Model, &g_liveness);
+}
+
+/* F1 ranges: 0 = ACT 1 [0,4], 1 = ACT 2 ([1,4] or [1,3]), 2 = the seed GRAD 2 [3,4]. */
+void testVerifierExitsNamingBothWiresOnCoLiveOverlap(void) {
+    placedPlan_t pp;
+    placeFixture(&pp, buildF1Model, NULL);
+    pp.offsets[1] = 0; /* ACT 2 onto ACT 1 */
+    ASSERT_EXITS_WITH_OUTPUT(1, "wires ACT 1 and ACT 2 are co-live but share bytes",
+                             verifyPlaced(&pp));
+    freePlacedFixture(&pp);
+}
+
+/* Inclusive intervals: under LIVENESS ACT 2 ends at step 3, where the seed
+ * begins; they must not share bytes (spec §4.2). */
+void testVerifierTreatsRangesMeetingAtOneStepAsCoLive(void) {
+    placedPlan_t pp;
+    placeFixture(&pp, buildF1Model, &g_liveness);
+    TEST_ASSERT_EQUAL_UINT16(3, pp.b.p->train.ranges[1].end);
+    TEST_ASSERT_EQUAL_UINT16(3, pp.b.p->train.ranges[2].begin);
+    pp.offsets[2] = pp.offsets[1];
+    ASSERT_EXITS_WITH_OUTPUT(1, "wires ACT 2 and GRAD 2 are co-live but share bytes",
+                             verifyPlaced(&pp));
+    freePlacedFixture(&pp);
+}
+
+/* [0,8), [12,20), [24,32) inside 32 bytes: disjoint, only the alignment is wrong. */
+void testVerifierExitsOnAMisalignedOffset(void) {
+    placedPlan_t pp;
+    placeFixture(&pp, buildF1Model, NULL);
+    pp.offsets[1] = 12;
+    pp.offsets[2] = 24;
+    pp.bytes = 32;
+    ASSERT_EXITS_WITH_OUTPUT(1, "wire ACT 2 at offset 12 is not a multiple of ODT_WIRE_ALIGN (8)",
+                             verifyPlaced(&pp));
+    freePlacedFixture(&pp);
+}
+
+void testVerifierExitsOnARangePastTheArenaEnd(void) {
+    placedPlan_t pp;
+    placeFixture(&pp, buildF1Model, NULL);
+    pp.bytes = 16; /* the seed sits at [16, 24) */
+    ASSERT_EXITS_WITH_OUTPUT(1, "(8 placed bytes) ends past the arena's 16 bytes",
+                             verifyPlaced(&pp));
+    freePlacedFixture(&pp);
+}
+
+/* The seed's exact 4 bytes fit [16, 20); its placed 8 do not: the bound is
+ * off + placed, not off + exact. */
+void testVerifierBoundsPlacedNotExactBytes(void) {
+    placedPlan_t pp;
+    placeFixture(&pp, buildF1Model, NULL);
+    pp.bytes = 20;
+    ASSERT_EXITS_WITH_OUTPUT(1, "(8 placed bytes) ends past the arena's 20 bytes",
+                             verifyPlaced(&pp));
+    freePlacedFixture(&pp);
+}
+
+/* RF5: an imported offset of SIZE_MAX - 7 (a multiple of 8) makes
+ * off + placed wrap to 0; the bound must not be computed that way. */
+void testVerifierRejectsAnOffsetNearSizeMax(void) {
+    placedPlan_t pp;
+    placeFixture(&pp, buildF1Model, NULL);
+    pp.offsets[2] = SIZE_MAX - 7u;
+    ASSERT_EXITS_WITH_OUTPUT(1, "(8 placed bytes) ends past the arena's 24 bytes",
+                             verifyPlaced(&pp));
+    freePlacedFixture(&pp);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testArenaInitBuildsTheTableAndThePlan);
@@ -634,5 +745,12 @@ int main(void) {
 #ifdef ODT_MEM_PROFILE
     RUN_TEST(testFfdReleasesItsScratch);
 #endif
+    RUN_TEST(testVerifierAcceptsTheFfdPlacementOnTheZoo);
+    RUN_TEST(testVerifierExitsNamingBothWiresOnCoLiveOverlap);
+    RUN_TEST(testVerifierTreatsRangesMeetingAtOneStepAsCoLive);
+    RUN_TEST(testVerifierExitsOnAMisalignedOffset);
+    RUN_TEST(testVerifierExitsOnARangePastTheArenaEnd);
+    RUN_TEST(testVerifierBoundsPlacedNotExactBytes);
+    RUN_TEST(testVerifierRejectsAnOffsetNearSizeMax);
     return UNITY_END();
 }

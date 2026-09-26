@@ -143,6 +143,47 @@ bool arenaPlaceFirstFitDecreasing(const rematWireTable_t *t, const rematProgram_
     return true;
 }
 
+void arenaVerifyPlacement(const rematWireTable_t *t, const rematProgram_t *p, const size_t *offsets,
+                          size_t bytes) {
+    for (size_t r = 0; r < p->numRanges; r++) {
+        const rematWire_t *w = &t->wires[p->ranges[r].wire];
+        size_t size = arenaPlaced(t, p->ranges[r].wire);
+        if (offsets[r] % ODT_WIRE_ALIGN != 0u) {
+            PRINT_ERROR("remat[arena]: placement verifier: wire %s %u at offset %zu is not a "
+                        "multiple of ODT_WIRE_ALIGN (%u)",
+                        arenaWireKind(w->kind), (unsigned)w->index, offsets[r],
+                        (unsigned)ODT_WIRE_ALIGN);
+            exit(1);
+        }
+        /* offsets[r] + size would wrap on an imported offset near SIZE_MAX. */
+        if (offsets[r] > bytes || size > bytes - offsets[r]) {
+            PRINT_ERROR("remat[arena]: placement verifier: wire %s %u at offset %zu (%zu placed "
+                        "bytes) ends past the arena's %zu bytes",
+                        arenaWireKind(w->kind), (unsigned)w->index, offsets[r], size, bytes);
+            exit(1);
+        }
+    }
+    /* Every range now lies inside [0, bytes), so the sums below cannot wrap. */
+    for (size_t a = 0; a < p->numRanges; a++) {
+        for (size_t b = a + 1u; b < p->numRanges; b++) {
+            if (!arenaCoLive(&p->ranges[a], &p->ranges[b])) {
+                continue;
+            }
+            size_t endA = offsets[a] + arenaPlaced(t, p->ranges[a].wire);
+            size_t endB = offsets[b] + arenaPlaced(t, p->ranges[b].wire);
+            if (offsets[a] < endB && offsets[b] < endA) {
+                const rematWire_t *wa = &t->wires[p->ranges[a].wire];
+                const rematWire_t *wb = &t->wires[p->ranges[b].wire];
+                PRINT_ERROR("remat[arena]: placement verifier: wires %s %u and %s %u are co-live "
+                            "but share bytes (offsets %zu and %zu)",
+                            arenaWireKind(wa->kind), (unsigned)wa->index, arenaWireKind(wb->kind),
+                            (unsigned)wb->index, offsets[a], offsets[b]);
+                exit(1);
+            }
+        }
+    }
+}
+
 bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss,
                     const tensor_t *inputLike, const rematPlanSpec_t *spec) {
     *s = (rematScheduler_t){.type = REMAT_ARENA};

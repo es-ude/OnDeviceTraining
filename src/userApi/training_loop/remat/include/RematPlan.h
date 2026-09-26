@@ -170,8 +170,10 @@ typedef struct rematPlan {
 } rematPlan_t;
 
 /* Generates the TRAIN program for the table's built model in ONE reserveMemory
- * block. The model feeds the read-set rule only; the backward range comes from
- * the table. Returns false only when reserveMemory fails. */
+ * block. `model` must be the model the table was built on: it feeds the
+ * read-set rule only (the backward range comes from the table), and a
+ * layerType/frozen mismatch exits by name. Returns false only when
+ * reserveMemory fails. */
 bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **model,
                     const rematPlanSpec_t *spec);
 void rematPlanFree(rematPlan_t *p); /* NULL-safe */

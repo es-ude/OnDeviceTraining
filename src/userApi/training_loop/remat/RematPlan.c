@@ -225,6 +225,27 @@ void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t
     }
 }
 
+/* The generator and grammar rule 4 both read the read-set off `model`, so a
+ * model other than the table's yields the same wrong ranges in both and the
+ * plan validates. Only the key facts are comparable: the signature has no n. */
+static void requireTheTablesModel(const rematWireTable_t *t, layer_t **model) {
+    for (size_t i = 0; i < t->modelSize; i++) {
+        if ((uint8_t)model[i]->type != t->layerType[i]) {
+            PRINT_ERROR("rematPlanBuild: the model differs from the table's key at "
+                        "'layerType[%zu]': table %u, model %u",
+                        i, (unsigned)t->layerType[i], (unsigned)model[i]->type);
+            exit(1);
+        }
+        uint8_t frozen = layerIsFrozen(model[i]) ? 1u : 0u;
+        if (frozen != t->frozen[i]) {
+            PRINT_ERROR("rematPlanBuild: the model differs from the table's key at "
+                        "'frozen[%zu]': table %u, model %u",
+                        i, (unsigned)t->frozen[i], (unsigned)frozen);
+            exit(1);
+        }
+    }
+}
+
 bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **model,
                     const rematPlanSpec_t *spec) {
     *out = NULL;
@@ -233,6 +254,7 @@ bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **mode
         PRINT_ERROR("rematPlanBuild: unknown policy %d", (int)policy);
         exit(1);
     }
+    requireTheTablesModel(t, model);
     size_t numSteps = rematTrainStepCount(t);
     size_t numRanges = t->numWires - 1u;
     size_t stepsAt = roundUpTo(sizeof(rematPlan_t), _Alignof(rematStep_t));

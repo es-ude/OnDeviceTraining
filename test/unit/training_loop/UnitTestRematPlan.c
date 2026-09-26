@@ -2428,6 +2428,44 @@ void testPlanBuildRunsTheGrammarOnWhatItGenerates(void) {
     freeGrammarFixture(&f);
 }
 
+/* ---- rematPlanBuild takes the table's model (PR1b) ---- */
+
+static void buildLivenessPlanOn(grammarFixture_t *f, layer_t **model) {
+    rematPlan_t *p = NULL;
+    (void)rematPlanBuild(&p, f->t, model, &g_liveness);
+}
+
+/* A frozen Linear reads no input in its backward, so under LIVENESS the
+ * generator AND grammar rule 4 -- both reading the read-set off `model` --
+ * would end ACT 10 at FORWARD(10) and accept the plan, while the table's
+ * trainable BACKWARD(10) still reads ACT 10. */
+void testPlanBuildExitsWhenTheModelFreezesALayerTheTableSawTrainable(void) {
+    grammarFixture_t f;
+    buildHarLivenessFixture(&f);
+    layer_t *other[HAR_N];
+    memcpy(other, f.model, sizeof other);
+    other[10] = makeLinear(64, 6, true);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "the model differs from the table's key at 'frozen[10]': table 0, model 1",
+        buildLivenessPlanOn(&f, other));
+    freeLinearLayer(other[10]);
+    freeGrammarFixture(&f);
+}
+
+/* ReLU -> Softmax keeps the read-set (both read their input), so only an
+ * explicit type compare notices the swap. */
+void testPlanBuildExitsWhenTheModelSwapsALayerType(void) {
+    grammarFixture_t f;
+    buildHarLivenessFixture(&f);
+    layer_t *other[HAR_N];
+    memcpy(other, f.model, sizeof other);
+    other[1] = makeSoftmax();
+    ASSERT_EXITS_WITH_OUTPUT(1, "the model differs from the table's key at 'layerType[1]'",
+                             buildLivenessPlanOn(&f, other));
+    freeSoftmaxLayer(other[1]);
+    freeGrammarFixture(&f);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testBackwardRangeMseRunsFromLastLayerToDeepest);
@@ -2552,5 +2590,7 @@ int main(void) {
     RUN_TEST(testGrammarRejectsALossBackwardWritingTheSeedOutsideItsRange);
     RUN_TEST(testGrammarRejectsABackwardReadingGradInOutsideItsRange);
     RUN_TEST(testPlanBuildRunsTheGrammarOnWhatItGenerates);
+    RUN_TEST(testPlanBuildExitsWhenTheModelFreezesALayerTheTableSawTrainable);
+    RUN_TEST(testPlanBuildExitsWhenTheModelSwapsALayerType);
     return UNITY_END();
 }

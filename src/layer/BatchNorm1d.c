@@ -309,6 +309,101 @@ void batchNorm1dForward(layer_t *layer, tensor_t *input, tensor_t *output) {
               output);
 }
 
+static void bnRequireSameShape(const tensor_t *ref, const tensor_t *t, const char *what) {
+    const shape_t *a = ref->shape;
+    const shape_t *b = t->shape;
+    bool ok = a->numberOfDimensions == b->numberOfDimensions && t->quantization->type == FLOAT32;
+    for (size_t d = 0; ok && d < a->numberOfDimensions; d++) {
+        ok = a->dimensions[d] == b->dimensions[d] && b->orderOfDimensions[d] == d;
+    }
+    if (!ok) {
+        PRINT_ERROR("BatchNorm1d backward: %s must be FLOAT32, identity-order and shaped like the "
+                    "forward input",
+                    what);
+        exit(1);
+    }
+}
+
+void batchNorm1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss,
+                         tensor_t *propLoss) {
+    batchNorm1dConfig_t *cfg = layer->config->batchNorm1d;
+    bnValidateInput(cfg, forwardInput, "backward input");
+    bnRequireSameShape(forwardInput, loss, "loss");
+    if (propLoss != NULL) {
+        bnRequireSameShape(forwardInput, propLoss, "propLoss");
+    }
+    bnValidateAffineParams(cfg);
+    bnValidateRunningBuffers(cfg);
+    if (cfg->propLossMath.type != ARITH_FLOAT32) {
+        PRINT_ERROR("BatchNorm1d backward: propLossMath %d not supported -- FLOAT32 only",
+                    (int)cfg->propLossMath.type);
+        exit(1);
+    }
+    bool wantGrads = cfg->affine && !cfg->frozen;
+    if (wantGrads && (cfg->gamma->grad == NULL || cfg->beta->grad == NULL ||
+                      cfg->gamma->grad->quantization->type != FLOAT32 ||
+                      cfg->beta->grad->quantization->type != FLOAT32)) {
+        PRINT_ERROR("BatchNorm1d backward: a trainable BN needs FLOAT32 gamma/beta grads");
+        exit(1);
+    }
+    size_t total = calcNumberOfElementsByTensor(forwardInput);
+    size_t C = cfg->numChannels;
+    size_t n = total / C;
+    bool batchStats = bnUsesBatchStats(cfg);
+    if (batchStats) {
+        bnRequireBatchStatsSize(forwardInput, n, "backward");
+    } else if (total == 0) {
+        return;
+    }
+
+    float mean[C];
+    float var[C];
+    float invStd[C];
+    bnResolveStats(cfg, forwardInput, batchStats, mean, var, invStd);
+
+    const float *x = (const float *)forwardInput->data;
+    const float *dy = (const float *)loss->data;
+    size_t T = bnInner(forwardInput);
+    float sumDy[C];
+    float sumDyXhat[C];
+    for (size_t c = 0; c < C; c++) {
+        sumDy[c] = 0.0f;
+        sumDyXhat[c] = 0.0f;
+    }
+    for (size_t i = 0; i < total; i++) {
+        size_t ch = (i / T) % C;
+        float xhat = mulFloat32s(subFloat32s(x[i], mean[ch]), invStd[ch]);
+        sumDy[ch] = addFloat32s(sumDy[ch], dy[i]);
+        sumDyXhat[ch] = addFloat32s(sumDyXhat[ch], mulFloat32s(dy[i], xhat));
+    }
+    if (wantGrads) {
+        float *dgamma = (float *)cfg->gamma->grad->data;
+        float *dbeta = (float *)cfg->beta->grad->data;
+        for (size_t c = 0; c < C; c++) {
+            dgamma[c] = addFloat32s(dgamma[c], sumDyXhat[c]); /* SUM over (b, t) */
+            dbeta[c] = addFloat32s(dbeta[c], sumDy[c]);
+        }
+    }
+    if (propLoss == NULL) {
+        return; /* grads-only */
+    }
+    const float *gamma = cfg->affine ? (const float *)cfg->gamma->param->data : NULL;
+    float *dx = (float *)propLoss->data;
+    float invN = batchStats ? divFloat32s(1.0f, (float)n) : 0.0f;
+    for (size_t i = 0; i < total; i++) {
+        size_t ch = (i / T) % C;
+        float scale = gamma != NULL ? mulFloat32s(gamma[ch], invStd[ch]) : invStd[ch];
+        if (batchStats) {
+            float xhat = mulFloat32s(subFloat32s(x[i], mean[ch]), invStd[ch]);
+            float centered = subFloat32s(subFloat32s(dy[i], mulFloat32s(sumDy[ch], invN)),
+                                         mulFloat32s(xhat, mulFloat32s(sumDyXhat[ch], invN)));
+            dx[i] = mulFloat32s(scale, centered);
+        } else {
+            dx[i] = mulFloat32s(scale, dy[i]);
+        }
+    }
+}
+
 void batchNorm1dCalcOutputShape(layer_t *layer, shape_t *inputShape, shape_t *outputShape) {
     (void)layer;
     memcpy(outputShape->dimensions, inputShape->dimensions,

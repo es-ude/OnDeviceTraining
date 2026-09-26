@@ -525,6 +525,186 @@ void testForwardRejectsMismatchedOutputShape(void) {
     bnFixtureFree(&f);
 }
 
+/* ---- backward ---- */
+
+typedef struct {
+    float dx[BN_MAX_N];
+    float dg[BN_MAX_C];
+    float db[BN_MAX_C];
+    float rm[BN_MAX_C];
+    float rv[BN_MAX_C];
+    uint64_t nbt;
+} bnBackwardCapture_t;
+
+/* passes backward calls through the vtable; propLoss NULL -> grads-only. */
+static void bnRunBackward(bnFixture_t *f, const size_t *dims, size_t rank, const float *x,
+                          const float *gy, bool withPropLoss, size_t passes,
+                          bnBackwardCapture_t *cap) {
+    tensor_t *in = buildFloatTensorND(rank, dims, x);
+    tensor_t *loss = buildFloatTensorND(rank, dims, gy);
+    tensor_t *prop = withPropLoss ? buildFloatTensorND(rank, dims, NULL) : NULL;
+    size_t total = calcNumberOfElementsByTensor(in);
+    for (size_t p = 0; p < passes; p++) {
+        layerFunctions[BATCHNORM1D].backward(&f->layer, in, loss, prop);
+    }
+    for (size_t i = 0; prop != NULL && i < total; i++) {
+        cap->dx[i] = ((float *)prop->data)[i];
+    }
+    for (size_t c = 0; c < f->cfg.numChannels; c++) {
+        if (f->gamma != NULL && f->gamma->grad != NULL) {
+            cap->dg[c] = ((float *)f->gamma->grad->data)[c];
+            cap->db[c] = ((float *)f->beta->grad->data)[c];
+        }
+        if (f->runningMean != NULL) {
+            cap->rm[c] = ((float *)f->runningMean->data)[c];
+            cap->rv[c] = ((float *)f->runningVar->data)[c];
+        }
+    }
+    cap->nbt = f->cfg.numBatchesTracked;
+    if (prop != NULL) {
+        freeTensor(prop);
+    }
+    freeTensor(loss);
+    freeTensor(in);
+}
+
+static void runTrainBackwardGold(const size_t *dims, size_t rank, bool affine, const float *x,
+                                 const float *gammaV, const float *betaV, const float *gy,
+                                 const float *expDx, size_t n, const float *expDg,
+                                 const float *expDb) {
+    bnFixture_t f;
+    bnFixtureInit(&f, dims[1], affine, true, gammaV, betaV, NULL, NULL, BN_MOMENTUM_DEFAULT, 0.0f);
+    f.cfg.training = true;
+    bnBackwardCapture_t cap;
+    bnRunBackward(&f, dims, rank, x, gy, true, 1, &cap);
+    size_t C = dims[1];
+    bnFixtureFree(&f);
+    assertFloatsWithin(1e-4f, expDx, cap.dx, n);
+    if (affine) {
+        assertFloatsWithin(1e-4f, expDg, cap.dg, C);
+        assertFloatsWithin(1e-4f, expDb, cap.db, C);
+    }
+    /* backward never touches the running stats (init 0 / 1, counter 0) */
+    for (size_t c = 0; c < C; c++) {
+        TEST_ASSERT_EQUAL_FLOAT(0.0f, cap.rm[c]);
+        TEST_ASSERT_EQUAL_FLOAT(1.0f, cap.rv[c]);
+    }
+    TEST_ASSERT_EQUAL_UINT64(0, cap.nbt);
+}
+
+void testGoldTrainBackwardRank2(void) {
+    runTrainBackwardGold((size_t[]){4, 3}, 2, true, input_bn_trainRank2, gamma_bn_trainRank2,
+                         beta_bn_trainRank2, lossGrad_bn_trainRank2, expectedPropLoss_bn_trainRank2,
+                         expectedPropLoss_bn_trainRank2_len, expectedDgamma_bn_trainRank2,
+                         expectedDbeta_bn_trainRank2);
+}
+
+void testGoldTrainBackwardRank3(void) {
+    runTrainBackwardGold((size_t[]){3, 2, 5}, 3, true, input_bn_trainRank3, gamma_bn_trainRank3,
+                         beta_bn_trainRank3, lossGrad_bn_trainRank3, expectedPropLoss_bn_trainRank3,
+                         expectedPropLoss_bn_trainRank3_len, expectedDgamma_bn_trainRank3,
+                         expectedDbeta_bn_trainRank3);
+}
+
+void testGoldTrainBackwardMinimalBatch(void) {
+    runTrainBackwardGold((size_t[]){2, 3}, 2, true, input_bn_minimalRank2, gamma_bn_minimalRank2,
+                         beta_bn_minimalRank2, lossGrad_bn_minimalRank2,
+                         expectedPropLoss_bn_minimalRank2, expectedPropLoss_bn_minimalRank2_len,
+                         expectedDgamma_bn_minimalRank2, expectedDbeta_bn_minimalRank2);
+}
+
+void testGoldTrainBackwardNoAffine(void) {
+    runTrainBackwardGold((size_t[]){3, 2, 5}, 3, false, input_bn_noAffineRank3, NULL, NULL,
+                         lossGrad_bn_noAffineRank3, expectedPropLoss_bn_noAffineRank3,
+                         expectedPropLoss_bn_noAffineRank3_len, NULL, NULL);
+}
+
+/* Running-statistics backward (PyTorch eval-mode parity): dx = dy*g*invStd,
+ * dgamma = sum dy*xhat_running, dbeta = sum dy. */
+void testGoldEvalBackward(void) {
+    bnFixture_t f;
+    bnFixtureInit(&f, 2, true, true, gamma_bn_evalRank3, beta_bn_evalRank3,
+                  runningMeanInit_bn_evalRank3, runningVarInit_bn_evalRank3, BN_MOMENTUM_DEFAULT,
+                  0.0f);
+    bnBackwardCapture_t cap;
+    bnRunBackward(&f, (size_t[]){3, 2, 5}, 3, input_bn_evalRank3, lossGrad_bn_evalRank3, true, 1,
+                  &cap);
+    bnFixtureFree(&f);
+    assertFloatsWithin(1e-4f, expectedPropLoss_bn_evalRank3, cap.dx,
+                       expectedPropLoss_bn_evalRank3_len);
+    assertFloatsWithin(1e-4f, expectedDgamma_bn_evalRank3, cap.dg, 2);
+    assertFloatsWithin(1e-4f, expectedDbeta_bn_evalRank3, cap.db, 2);
+}
+
+/* D3: frozen BN, training call -> running-stat dx, no grad buffers touched. */
+void testFrozenBackwardUsesRunningStatsAndNoGrads(void) {
+    bnFixture_t f;
+    bnFixtureInit(&f, 2, true, true, gamma_bn_evalRank3, beta_bn_evalRank3,
+                  runningMeanInit_bn_evalRank3, runningVarInit_bn_evalRank3, BN_MOMENTUM_DEFAULT,
+                  0.0f);
+    /* factory-frozen layers have NO grad tensors: free them to prove none is read */
+    freeTensor(f.gamma->grad);
+    f.gamma->grad = NULL;
+    freeTensor(f.beta->grad);
+    f.beta->grad = NULL;
+    f.cfg.training = true;
+    f.cfg.frozen = true;
+    bnBackwardCapture_t cap;
+    bnRunBackward(&f, (size_t[]){3, 2, 5}, 3, input_bn_evalRank3, lossGrad_bn_evalRank3, true, 1,
+                  &cap);
+    bnFixtureFree(&f);
+    assertFloatsWithin(1e-4f, expectedPropLoss_bn_evalRank3, cap.dx,
+                       expectedPropLoss_bn_evalRank3_len);
+}
+
+/* Grads-only (deepest trainable layer, propLoss NULL): same grads; two
+ * passes accumulate 2x (grads +=), dx memory never touched. */
+void testGradsOnlyBackwardMatchesFullAndAccumulates(void) {
+    bnFixture_t f;
+    bnFixtureInit(&f, 3, true, true, gamma_bn_trainRank2, beta_bn_trainRank2, NULL, NULL,
+                  BN_MOMENTUM_DEFAULT, 0.0f);
+    f.cfg.training = true;
+    bnBackwardCapture_t cap;
+    bnRunBackward(&f, (size_t[]){4, 3}, 2, input_bn_trainRank2, lossGrad_bn_trainRank2, false, 2,
+                  &cap);
+    bnFixtureFree(&f);
+    for (size_t c = 0; c < 3; c++) {
+        TEST_ASSERT_FLOAT_WITHIN(2e-4f, 2.0f * expectedDgamma_bn_trainRank2[c], cap.dg[c]);
+        TEST_ASSERT_FLOAT_WITHIN(2e-4f, 2.0f * expectedDbeta_bn_trainRank2[c], cap.db[c]);
+    }
+}
+
+static void backwardOnSingleRow(bnFixture_t *f) {
+    size_t dims[] = {1, 3};
+    tensor_t *in = buildFloatTensorND(2, dims, (float[]){1.f, 2.f, 3.f});
+    tensor_t *loss = buildFloatTensorND(2, dims, (float[]){0.5f, -1.f, 2.f});
+    tensor_t *prop = buildFloatTensorND(2, dims, NULL);
+    layerFunctions[BATCHNORM1D].backward(&f->layer, in, loss, prop);
+}
+
+void testBackwardTrainingRejectsSingleRow(void) {
+    bnFixture_t f;
+    bnFixtureInit(&f, 3, true, true, NULL, NULL, NULL, NULL, BN_MOMENTUM_DEFAULT, 0.0f);
+    f.cfg.training = true;
+    ASSERT_EXITS_WITH_FAILURE(backwardOnSingleRow(&f));
+    bnFixtureFree(&f);
+}
+
+static void backwardWithMismatchedLoss(bnFixture_t *f) {
+    tensor_t *in = buildFloatTensorND(2, (size_t[]){4, 3}, input_bn_trainRank2);
+    tensor_t *loss = buildFloatTensorND(2, (size_t[]){3, 4}, lossGrad_bn_trainRank2);
+    tensor_t *prop = buildFloatTensorND(2, (size_t[]){4, 3}, NULL);
+    layerFunctions[BATCHNORM1D].backward(&f->layer, in, loss, prop);
+}
+
+void testBackwardRejectsLossShapeMismatch(void) {
+    bnFixture_t f;
+    bnFixtureInit(&f, 3, true, true, NULL, NULL, NULL, NULL, BN_MOMENTUM_DEFAULT, 0.0f);
+    f.cfg.training = true;
+    ASSERT_EXITS_WITH_FAILURE(backwardWithMismatchedLoss(&f));
+    bnFixtureFree(&f);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testGoldTrainForwardRank2);
@@ -558,5 +738,14 @@ int main(void) {
     RUN_TEST(testForwardRejectsNonFloat32RunningBuffer);
     RUN_TEST(testForwardRejectsShortRunningBuffer);
     RUN_TEST(testForwardRejectsMismatchedOutputShape);
+    RUN_TEST(testGoldTrainBackwardRank2);
+    RUN_TEST(testGoldTrainBackwardRank3);
+    RUN_TEST(testGoldTrainBackwardMinimalBatch);
+    RUN_TEST(testGoldTrainBackwardNoAffine);
+    RUN_TEST(testGoldEvalBackward);
+    RUN_TEST(testFrozenBackwardUsesRunningStatsAndNoGrads);
+    RUN_TEST(testGradsOnlyBackwardMatchesFullAndAccumulates);
+    RUN_TEST(testBackwardTrainingRejectsSingleRow);
+    RUN_TEST(testBackwardRejectsLossShapeMismatch);
     return UNITY_END();
 }

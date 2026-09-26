@@ -32,8 +32,7 @@ layerFunctions_t layerFunctions[] = {
     [DROPOUT] = {dropoutForward, dropoutBackward, dropoutCalcOutputShape},
     [LAYERNORM] = {layerNormForward, layerNormBackward, layerNormCalcOutputShape},
     [GROUPNORM] = {groupNormForward, groupNormBackward, groupNormCalcOutputShape},
-    [BATCHNORM1D] = {batchNorm1dForward, NULL /* backward: Task 3 (#460) */,
-                     batchNorm1dCalcOutputShape}};
+    [BATCHNORM1D] = {batchNorm1dForward, batchNorm1dBackward, batchNorm1dCalcOutputShape}};
 
 void initLayer(layer_t *layer, layerType_t type, layerConfig_t *config) {
     layer->type = type;

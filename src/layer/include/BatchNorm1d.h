@@ -62,6 +62,11 @@ void initBatchNorm1dConfig(batchNorm1dConfig_t *cfg, parameter_t *gamma, paramet
                            quantization_t *forwardQ, quantization_t *backwardQ);
 
 void batchNorm1dForward(layer_t *layer, tensor_t *input, tensor_t *output);
+/*! propLoss == NULL is a grads-only call (deepest trainable layer, #380): the
+ *  gamma/beta grads are computed and no dx memory is touched. Grads
+ *  accumulate (+=); dx is overwritten. Never touches the running stats. */
+void batchNorm1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss,
+                         tensor_t *propLoss);
 void batchNorm1dCalcOutputShape(layer_t *layer, shape_t *inputShape, shape_t *outputShape);
 
 #endif // ODT_BATCHNORM1D_H

@@ -1475,6 +1475,81 @@ void testReportObservedPeakEqualsThePlannedPeak(void) {
     assertObservedPeakIsThePlannedPeak(buildF1Model, &g_liveness);
 }
 
+/* ---- ASan poisoning of the arena (spec §5.5, §12.2 item 6; asan preset only) ---- */
+
+#ifdef ODT_TEST_ASAN
+static void readTheArenaBeforeAnyRangeOpens(rematScheduler_t *s) {
+    odtInstallAsanDeathExit();
+    volatile uint8_t *arena = s->row.arena.base;
+    (void)arena[0];
+}
+
+/* The whole arena is unaddressable until a range opens. */
+void testArenaIsPoisonedUntilARangeOpens(void) {
+    arenaFixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    ASSERT_EXITS_WITH(ODT_ASAN_DEATH_EXIT, readTheArenaBeforeAnyRangeOpens(&s));
+    freeFixture(&f, &s);
+}
+
+/* next() unpoisons exactly bytes(w). F1's ACT 1 is 5 BFP bytes at an 8-aligned
+ * offset, so bytes 5..7 share a granule with the payload and must stay
+ * poisoned: the granule-8 hypothesis (spec §5.5, §15), pinned. The marker is
+ * flushed before the pad read because the death callback's _exit discards
+ * buffered stdout. */
+static void readThePadOfABoundWire(arenaFixture_t *f, rematScheduler_t *s) {
+    odtInstallAsanDeathExit();
+    bindAndBegin(f, s);
+    rematStep_t st;
+    (void)rematArenaNext(s, &st); /* FORWARD 0 binds ACT 1 */
+    volatile uint8_t *act1 = rematWireHdr(s->wires, 1)->data;
+    (void)act1[4];
+    printf("payload-readable\n");
+    (void)fflush(stdout);
+    (void)act1[5];
+}
+
+void testArenaPadStaysPoisonedWhileBound(void) {
+    arenaFixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(ODT_ASAN_DEATH_EXIT, "payload-readable",
+                             readThePadOfABoundWire(&f, &s));
+    freeFixture(&f, &s);
+}
+
+/* §12.2 item 6. F1 LIVENESS: ACT 2 lives [1, 3]; a pointer saved while it was
+ * bound must trip ASan once done() of step 3 released it. */
+static void readAWireAfterItsRelease(arenaFixture_t *f, rematScheduler_t *s) {
+    odtInstallAsanDeathExit();
+    bindAndBegin(f, s);
+    rematStep_t st;
+    volatile uint8_t *act2 = NULL;
+    while (rematArenaNext(s, &st)) {
+        if (st.kind == REMAT_STEP_FORWARD && st.layer == 1u) {
+            act2 = rematWireHdr(s->wires, 2)->data;
+        }
+        rematArenaDone(s, &st);
+        if (st.kind == REMAT_STEP_LOSS_BACKWARD) {
+            break;
+        }
+    }
+    if (act2 == NULL) {
+        _exit(0); /* never captured: a NULL read's SEGV would also exit 86 */
+    }
+    (void)act2[0];
+}
+
+void testArenaReadAfterReleaseTripsAsan(void) {
+    arenaFixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initArena(&f, &g_liveness);
+    ASSERT_EXITS_WITH(ODT_ASAN_DEATH_EXIT, readAWireAfterItsRelease(&f, &s));
+    freeFixture(&f, &s);
+}
+#endif
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testArenaInitBuildsTheTableAndThePlan);
@@ -1537,5 +1612,10 @@ int main(void) {
     RUN_TEST(testArenaContractF1Liveness);
     RUN_TEST(testArenaLeavesTheRngStreamUntouched);
     RUN_TEST(testReportObservedPeakEqualsThePlannedPeak);
+#ifdef ODT_TEST_ASAN
+    RUN_TEST(testArenaIsPoisonedUntilARangeOpens);
+    RUN_TEST(testArenaPadStaysPoisonedWhileBound);
+    RUN_TEST(testArenaReadAfterReleaseTripsAsan);
+#endif
     return UNITY_END();
 }

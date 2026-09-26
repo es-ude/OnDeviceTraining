@@ -29,6 +29,31 @@ _Static_assert(ODT_WIRE_ALIGN <= _Alignof(max_align_t),
 #define ODT_REMAT_MAX_RANGES 1024u
 #endif
 
+/* Manual poisoning of the resident arena (spec §5.5). The runtime entry points
+ * are declared here rather than taken from <sanitizer/asan_interface.h>, which
+ * the pinned devenv clang does not ship (the AsanDeath.h precedent). 8 is the
+ * ASan shadow granule, so every range starts granule-aligned and an exact
+ * unpoison leaves the pad poisoned. */
+#if defined(__SANITIZE_ADDRESS__)
+#define ODT_REMAT_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define ODT_REMAT_ASAN 1
+#endif
+#endif
+
+#ifdef ODT_REMAT_ASAN
+_Static_assert(ODT_WIRE_ALIGN % 8u == 0u, "an exact unpoison keeps the pad poisoned only when "
+                                          "every range starts on an 8-byte ASan granule");
+void __asan_poison_memory_region(void const volatile *addr, size_t size);
+void __asan_unpoison_memory_region(void const volatile *addr, size_t size);
+#define ODT_ASAN_POISON(addr, size) __asan_poison_memory_region((addr), (size))
+#define ODT_ASAN_UNPOISON(addr, size) __asan_unpoison_memory_region((addr), (size))
+#else
+#define ODT_ASAN_POISON(addr, size) ((void)(addr), (void)(size))
+#define ODT_ASAN_UNPOISON(addr, size) ((void)(addr), (void)(size))
+#endif
+
 /* roundUp(bytes(w), ODT_WIRE_ALIGN), checked (D60): exits naming the wire. */
 size_t arenaPlaced(const rematWireTable_t *t, uint16_t w);
 

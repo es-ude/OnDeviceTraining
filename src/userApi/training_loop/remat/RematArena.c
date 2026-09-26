@@ -243,7 +243,11 @@ bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t
     arenaVerifyPlacement(s->wires, p, s->row.arena.offsets, bytes);
     s->row.arena.bytes = bytes; /* placed: every arena field of the report is valid */
     s->row.arena.base = reserveMemory(bytes);
-    return s->row.arena.base != NULL; /* false: planned, placed, !dataReserved */
+    if (s->row.arena.base == NULL) {
+        return false; /* planned, placed, !dataReserved */
+    }
+    ODT_ASAN_POISON(s->row.arena.base, bytes); /* unaddressable until a range opens */
+    return true;
 }
 
 void rematArenaBegin(rematScheduler_t *s) {
@@ -271,7 +275,8 @@ bool rematArenaNext(rematScheduler_t *s, rematStep_t *st) {
         /* The id comes from the range that was placed, never from rematGradId. */
         uint16_t w = p->ranges[r].wire;
         uint8_t *b = s->row.arena.base + s->row.arena.offsets[r];
-        rematWireBind(s->wires, w, b);
+        ODT_ASAN_UNPOISON(b, rematWireBytes(s->wires, w)); /* exact bytes: the pad stays poisoned */
+        rematWireBind(s->wires, w, b); /* bindGen++, accounting, VERIFY poison-at-bind */
     }
     *st = p->steps[s->walk.step];
     s->handedOut = true;
@@ -306,7 +311,10 @@ void rematArenaDone(rematScheduler_t *s, const rematStep_t *st) {
     const rematProgram_t *p = &s->plan->train;
     arenaRequireSameStep(s, p, st);
     for (size_t r; (r = rematWalkClosing(p, &s->walk)) != REMAT_NONE;) {
-        rematWireRelease(s->wires, p->ranges[r].wire);
+        uint16_t w = p->ranges[r].wire;
+        uint8_t *b = rematWireHdr(s->wires, w)->data;
+        rematWireRelease(s->wires, w);                /* VERIFY poison first, while still owned */
+        ODT_ASAN_POISON(b, arenaPlaced(s->wires, w)); /* then unaddressable */
     }
     s->walk.step++;
     s->handedOut = false;
@@ -323,7 +331,10 @@ void rematArenaEnd(rematScheduler_t *s) {
 }
 
 void rematArenaDeinit(rematScheduler_t *s) {
-    freeReservedMemory(s->row.arena.base); /* NULL after a failed data reservation */
+    if (s->row.arena.base != NULL) { /* NULL after a failed data reservation */
+        ODT_ASAN_UNPOISON(s->row.arena.base, s->row.arena.bytes);
+        freeReservedMemory(s->row.arena.base);
+    }
     freeReservedMemory(s->row.arena.offsets);
     s->row.arena.base = NULL;
     s->row.arena.offsets = NULL;

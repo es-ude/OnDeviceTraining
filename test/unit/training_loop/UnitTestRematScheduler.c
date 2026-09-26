@@ -19,6 +19,7 @@
 #include "QuantLayerApi.h"
 #include "Quantization.h"
 #include "ReluApi.h"
+#include "RematPlace.h"
 #include "RematPlan.h"
 #include "RematScheduler.h"
 #include "SoftmaxApi.h"
@@ -297,6 +298,322 @@ void testDeinitReturnsEveryInitBlock(void) {
 }
 #endif
 
+/* ---- aligned first-fit-decreasing placement (spec §5.5, §12.2 items 7 and 10) ---- */
+
+typedef struct builtPlan {
+    rematWireTable_t *t;
+    rematPlan_t *p;
+} builtPlan_t;
+
+/* Table and plan without the row, so the placement is tested on its own. */
+static builtPlan_t buildTableAndPlan(layer_t **model, size_t n, lossFuncType_t lt,
+                                     const tensor_t *x, const rematPlanSpec_t *spec) {
+    builtPlan_t b = {NULL, NULL};
+    TEST_ASSERT_TRUE(rematWireTableInit(&b.t, model, n, defaultLossConfig(lt), x));
+    TEST_ASSERT_TRUE(rematPlanBuild(&b.p, b.t, model, spec));
+    return b;
+}
+
+static void freeTableAndPlan(builtPlan_t *b) {
+    rematPlanFree(b->p);
+    rematWireTableFree(b->t);
+}
+
+/* The Codex F1 alignment model (spec §5.5): FLOAT32 [1,5] -> Quantization to
+ * BFP m = 8 -> Linear 5 -> 1 under MSE. Wires: ACT 1 (BFP, 5 B), ACT 2
+ * (FLOAT32, 4 B), the seed GRAD 2 (id 3, 4 B). Steps F0 0, F1 1, LF 2, LB 3,
+ * B1 4. Unaligned FFD would place them at {0, 5, 9}. */
+static void buildF1Model(arenaFixture_t *f) {
+    initBfpQConfigInto(8, 8, HALF_AWAY, f->bfpExponent, &f->bfpQc);
+    f->bfpQ = (quantization_t){.type = BFP, .qConfig = &f->bfpQc};
+    f->model[0] = makeQuant(&f->bfpQ, &g_floatQ);
+    f->model[1] = makeLinear(5, 1, false);
+    f->n = 2;
+    f->lt = MSE;
+    f->x = makeInput(&f->in, (size_t[]){1, 5}, 2, &g_floatQ);
+}
+
+void testArenaPlacedRoundsEveryWireUpToTheWireAlignment(void) {
+    arenaFixture_t f;
+    buildF1Model(&f);
+    builtPlan_t b = buildTableAndPlan(f.model, f.n, f.lt, f.x, NULL);
+    TEST_ASSERT_EQUAL_size_t(5, rematWireBytes(b.t, 1));
+    TEST_ASSERT_EQUAL_size_t(4, rematWireBytes(b.t, 2));
+    TEST_ASSERT_EQUAL_size_t(4, rematWireBytes(b.t, 3));
+    TEST_ASSERT_EQUAL_size_t(8, arenaPlaced(b.t, 1));
+    TEST_ASSERT_EQUAL_size_t(8, arenaPlaced(b.t, 2));
+    TEST_ASSERT_EQUAL_size_t(8, arenaPlaced(b.t, 3));
+    freeTableAndPlan(&b);
+    freeModel(f.model, f.n);
+
+    /* HAR: every wire is a multiple of 8 (8192, 4096, 256, 24 B), so the
+     * placement pads nothing -- the basis of the arenaPadBytes == 0 pin. */
+    arenaFixture_t h;
+    buildHarModel(&h);
+    builtPlan_t hb = buildTableAndPlan(h.model, h.n, h.lt, h.x, NULL);
+    for (uint16_t w = 1; w < hb.t->numWires; w++) {
+        TEST_ASSERT_EQUAL_size_t(rematWireBytes(hb.t, w), arenaPlaced(hb.t, w));
+    }
+    freeTableAndPlan(&hb);
+    freeModel(h.model, h.n);
+}
+
+static void assertF1Placement(const rematPlanSpec_t *spec) {
+    arenaFixture_t f;
+    buildF1Model(&f);
+    builtPlan_t b = buildTableAndPlan(f.model, f.n, f.lt, f.x, spec);
+    const rematProgram_t *p = &b.p->train;
+    TEST_ASSERT_EQUAL_size_t(3, p->numRanges);
+    for (size_t r = 0; r < 3u; r++) {
+        TEST_ASSERT_EQUAL_UINT16(r + 1u, p->ranges[r].wire);
+    }
+    size_t offsets[3];
+    size_t bytes = 0;
+    size_t peak = 0;
+    TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(b.t, p, offsets, &bytes, &peak));
+    TEST_ASSERT_EQUAL_size_t(0, offsets[0]);  /* ACT 1 */
+    TEST_ASSERT_EQUAL_size_t(8, offsets[1]);  /* ACT 2; unaligned: 5 */
+    TEST_ASSERT_EQUAL_size_t(16, offsets[2]); /* the seed; unaligned: 9 */
+    TEST_ASSERT_EQUAL_size_t(24, bytes);
+    freeTableAndPlan(&b);
+    freeModel(f.model, f.n);
+}
+
+/* §12.2 item 7: the spec's name for the alignment pin. */
+void testArenaOffsetsAligned(void) {
+    assertF1Placement(NULL);
+    assertF1Placement(&g_liveness);
+}
+
+void testFfdPeakPlacedBytesIsThePeakOfPlacedSums(void) {
+    arenaFixture_t f;
+    buildF1Model(&f);
+    builtPlan_t b = buildTableAndPlan(f.model, f.n, f.lt, f.x, NULL);
+    size_t offsets[3];
+    size_t bytes = 0;
+    size_t peak = 0;
+    TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(b.t, &b.p->train, offsets, &bytes, &peak));
+    TEST_ASSERT_EQUAL_size_t(24, peak); /* all three co-live at step 3: 8 + 8 + 8, exact 13 */
+    freeTableAndPlan(&b);
+    freeModel(f.model, f.n);
+
+    arenaFixture_t h;
+    buildHarModel(&h);
+    builtPlan_t hb = buildTableAndPlan(h.model, h.n, h.lt, h.x, NULL);
+    size_t harOffsets[23];
+    TEST_ASSERT_EQUAL_size_t(23, hb.p->train.numRanges);
+    TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(hb.t, &hb.p->train, harOffsets, &bytes, &peak));
+    TEST_ASSERT_EQUAL_size_t(74288, peak); /* HAR pads nothing: the scan-model STORE_ALL peak */
+    freeTableAndPlan(&hb);
+    freeModel(h.model, h.n);
+}
+
+#define ORACLE_MAX_RANGES 40u
+#define ORACLE_MAX_STEPS 30u
+
+/* A hand-built table and program. The placement reads only wires[].bytes
+ * (kind and index name a wire in an exit), the ranges, endOrder and
+ * numSteps. */
+typedef struct randomPlan {
+    rematWire_t wires[ORACLE_MAX_RANGES + 1u];
+    rematRange_t ranges[ORACLE_MAX_RANGES];
+    uint16_t endOrder[ORACLE_MAX_RANGES];
+    rematWireTable_t table;
+    rematProgram_t program;
+} randomPlan_t;
+
+static void buildRandomPlan(randomPlan_t *rp, uint32_t *state) {
+    size_t numSteps = 1u + nextRandom(state) % ORACLE_MAX_STEPS;
+    size_t numRanges = 1u + nextRandom(state) % ORACLE_MAX_RANGES;
+    for (size_t r = 0; r < numRanges; r++) {
+        uint16_t begin = (uint16_t)(nextRandom(state) % numSteps);
+        uint16_t end = (uint16_t)(begin + nextRandom(state) % (numSteps - begin));
+        size_t k = r;
+        while (k > 0 && rp->ranges[k - 1].begin > begin) {
+            rp->ranges[k] = rp->ranges[k - 1];
+            k--;
+        }
+        rp->ranges[k] = (rematRange_t){.wire = 0, .begin = begin, .end = end};
+    }
+    /* Wire ids are a Fisher-Yates permutation of 1..numRanges, drawn from the
+     * same seeded stream, decoupled from begin order: if wire id tracked
+     * array (begin) position, as it used to, the spec's "begin, then wire
+     * id" tie-break would collapse to "wire id" and never be exercised. */
+    uint16_t perm[ORACLE_MAX_RANGES];
+    for (size_t r = 0; r < numRanges; r++) {
+        perm[r] = (uint16_t)(r + 1u);
+    }
+    for (size_t r = numRanges; r > 1u; r--) {
+        size_t j = nextRandom(state) % r;
+        uint16_t tmp = perm[r - 1u];
+        perm[r - 1u] = perm[j];
+        perm[j] = tmp;
+    }
+    rp->wires[0] = (rematWire_t){.kind = REMAT_WIRE_ACT, .index = 0, .borrowed = 1u};
+    for (size_t r = 0; r < numRanges; r++) {
+        size_t bytes = 1u + nextRandom(state) % 100u; /* mostly unaligned */
+        if (nextRandom(state) % 4u == 0u) {
+            bytes *= 64u;
+        }
+        rp->ranges[r].wire = perm[r];
+        rp->wires[perm[r]] =
+            (rematWire_t){.kind = REMAT_WIRE_ACT, .index = perm[r], .bytes = bytes};
+    }
+    for (size_t i = 0; i < numRanges; i++) {
+        size_t k = i;
+        while (k > 0 && rp->ranges[rp->endOrder[k - 1]].end > rp->ranges[i].end) {
+            rp->endOrder[k] = rp->endOrder[k - 1];
+            k--;
+        }
+        rp->endOrder[k] = (uint16_t)i;
+    }
+    rp->table = (rematWireTable_t){.numWires = numRanges + 1u, .wires = rp->wires};
+    rp->program = (rematProgram_t){.numSteps = numSteps,
+                                   .steps = NULL,
+                                   .numRanges = numRanges,
+                                   .ranges = rp->ranges,
+                                   .endOrder = rp->endOrder};
+}
+
+static size_t oraclePlaced(size_t bytes) {
+    return (bytes + 7u) / 8u * 8u;
+}
+
+static bool oracleCoLive(const rematRange_t *a, const rematRange_t *b) {
+    return a->begin <= b->end && b->begin <= a->end;
+}
+
+static size_t oracleRangePlaced(const randomPlan_t *rp, size_t r) {
+    return oraclePlaced(rp->wires[rp->ranges[r].wire].bytes);
+}
+
+static bool oraclePlacesFirst(const randomPlan_t *rp, size_t a, size_t b) {
+    if (oracleRangePlaced(rp, a) != oracleRangePlaced(rp, b)) {
+        return oracleRangePlaced(rp, a) > oracleRangePlaced(rp, b);
+    }
+    if (rp->ranges[a].begin != rp->ranges[b].begin) {
+        return rp->ranges[a].begin < rp->ranges[b].begin;
+    }
+    return rp->ranges[a].wire < rp->ranges[b].wire;
+}
+
+/* The spec's rule taken literally, O(R^3): every candidate (0, or the end of a
+ * co-live placed range) against every co-live placed range; the lowest
+ * feasible one wins. */
+static size_t oracleFirstFitDecreasing(const randomPlan_t *rp, size_t *offsets,
+                                       size_t *peakPlaced) {
+    size_t numRanges = rp->program.numRanges;
+    bool placed[ORACLE_MAX_RANGES] = {false};
+    size_t bytes = 0;
+    for (size_t k = 0; k < numRanges; k++) {
+        size_t w = numRanges;
+        for (size_t r = 0; r < numRanges; r++) {
+            if (!placed[r] && (w == numRanges || oraclePlacesFirst(rp, r, w))) {
+                w = r;
+            }
+        }
+        size_t size = oracleRangePlaced(rp, w);
+        size_t best = SIZE_MAX;
+        for (size_t c = 0; c <= numRanges; c++) {
+            size_t candidate;
+            if (c == numRanges) {
+                candidate = 0;
+            } else if (placed[c] && oracleCoLive(&rp->ranges[c], &rp->ranges[w])) {
+                candidate = offsets[c] + oracleRangePlaced(rp, c);
+            } else {
+                continue;
+            }
+            bool fits = true;
+            for (size_t q = 0; q < numRanges && fits; q++) {
+                if (placed[q] && oracleCoLive(&rp->ranges[q], &rp->ranges[w])) {
+                    fits = candidate >= offsets[q] + oracleRangePlaced(rp, q) ||
+                           offsets[q] >= candidate + size;
+                }
+            }
+            if (fits && candidate < best) {
+                best = candidate;
+            }
+        }
+        offsets[w] = best;
+        placed[w] = true;
+        if (best + size > bytes) {
+            bytes = best + size;
+        }
+    }
+    *peakPlaced = 0;
+    for (size_t s = 0; s < rp->program.numSteps; s++) {
+        size_t sum = 0;
+        for (size_t r = 0; r < numRanges; r++) {
+            if (rp->ranges[r].begin <= s && s <= rp->ranges[r].end) {
+                sum += oracleRangePlaced(rp, r);
+            }
+        }
+        if (sum > *peakPlaced) {
+            *peakPlaced = sum;
+        }
+    }
+    return bytes;
+}
+
+/* Codex N3: the placement, within the O(R^2 log R) bound, must reproduce the
+ * rule exactly, so no pin depends on how it is implemented. */
+void testFfdMatchesTheNaiveOracleOnRandomPlans(void) {
+    uint32_t state = 0x2545F491u;
+    for (size_t trial = 0; trial < 500u; trial++) {
+        randomPlan_t rp;
+        buildRandomPlan(&rp, &state);
+        size_t expected[ORACLE_MAX_RANGES];
+        size_t actual[ORACLE_MAX_RANGES];
+        size_t expectedPeak = 0;
+        size_t actualBytes = 0;
+        size_t actualPeak = 0;
+        size_t expectedBytes = oracleFirstFitDecreasing(&rp, expected, &expectedPeak);
+        TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(&rp.table, &rp.program, actual, &actualBytes,
+                                                      &actualPeak));
+        for (size_t r = 0; r < rp.program.numRanges; r++) {
+            TEST_ASSERT_EQUAL_size_t_MESSAGE(expected[r], actual[r],
+                                             "offset differs from the oracle");
+        }
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(expectedBytes, actualBytes, "arena bytes differ");
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(expectedPeak, actualPeak, "peakPlacedBytes differs");
+    }
+}
+
+/* A borrowed [1, SIZE_MAX/4] FLOAT32 input: ACT 1 holds 4 * (2^62 - 1) =
+ * SIZE_MAX - 3 bytes, which table init accepts; rounding it up to 8 wraps. */
+static void placeTheOnlyWire(builtPlan_t *b) {
+    (void)arenaPlaced(b->t, 1);
+}
+
+void testArenaPlacedExitsNamingTheWireOnOverflow(void) {
+    layer_t *model[1] = {makeRelu(&g_floatQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, SIZE_MAX / 4u}, 2, &g_floatQ);
+    builtPlan_t b = buildTableAndPlan(model, 1, MSE, x, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(1, "size overflow computing placed bytes at wire ACT 1",
+                             placeTheOnlyWire(&b));
+    freeTableAndPlan(&b);
+    freeModel(model, 1);
+}
+
+#ifdef ODT_MEM_PROFILE
+/* Codex N3: the candidate list is a temporary block, released before the
+ * placement returns (spec §11.1: "freed before init returns"). */
+void testFfdReleasesItsScratch(void) {
+    arenaFixture_t h;
+    buildHarModel(&h);
+    builtPlan_t b = buildTableAndPlan(h.model, h.n, h.lt, h.x, &g_liveness);
+    size_t offsets[23];
+    size_t bytes = 0;
+    size_t peak = 0;
+    size_t before = memProfileCurrentBytes();
+    TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(b.t, &b.p->train, offsets, &bytes, &peak));
+    TEST_ASSERT_EQUAL_size_t(before, memProfileCurrentBytes());
+    freeTableAndPlan(&b);
+    freeModel(h.model, h.n);
+}
+#endif
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testArenaInitBuildsTheTableAndThePlan);
@@ -308,6 +625,14 @@ int main(void) {
     RUN_TEST(testDeinitIsNullSafeAndIdempotent);
 #ifdef ODT_MEM_PROFILE
     RUN_TEST(testDeinitReturnsEveryInitBlock);
+#endif
+    RUN_TEST(testArenaPlacedRoundsEveryWireUpToTheWireAlignment);
+    RUN_TEST(testArenaOffsetsAligned);
+    RUN_TEST(testFfdPeakPlacedBytesIsThePeakOfPlacedSums);
+    RUN_TEST(testFfdMatchesTheNaiveOracleOnRandomPlans);
+    RUN_TEST(testArenaPlacedExitsNamingTheWireOnOverflow);
+#ifdef ODT_MEM_PROFILE
+    RUN_TEST(testFfdReleasesItsScratch);
 #endif
     return UNITY_END();
 }

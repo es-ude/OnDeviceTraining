@@ -358,6 +358,124 @@ static layer_t *randomRank2Layer(uint32_t *state) {
     }
 }
 
+/* A built plan whose program a test tampers with inside the death-test child. */
+typedef struct grammarFixture {
+    layer_t *model[HAR_N];
+    size_t n;
+    inputLike_t in;
+    rematWireTable_t *t;
+    rematPlan_t *p;
+} grammarFixture_t;
+
+static void buildHarLivenessFixture(grammarFixture_t *f) {
+    buildHar(f->model, false);
+    f->n = HAR_N;
+    f->t = initTable(f->model, HAR_N, CROSS_ENTROPY, makeHarInput(&f->in));
+    f->p = buildPlan(f->t, f->model, &g_liveness);
+}
+
+static void buildHarStoreAllFixture(grammarFixture_t *f) {
+    buildHar(f->model, false);
+    f->n = HAR_N;
+    f->t = initTable(f->model, HAR_N, CROSS_ENTROPY, makeHarInput(&f->in));
+    f->p = buildPlan(f->t, f->model, NULL);
+}
+
+static void buildAllFrozenFixture(grammarFixture_t *f) {
+    f->model[0] = makeLinear(2, 4, true);
+    f->model[1] = makeRelu(&g_floatQ);
+    f->n = 2;
+    f->t = initTable(f->model, 2, MSE, makeInput(&f->in, (size_t[]){1, 2}, 2, &g_floatQ));
+    f->p = buildPlan(f->t, f->model, NULL);
+}
+
+static void freeGrammarFixture(grammarFixture_t *f) {
+    rematPlanFree(f->p);
+    rematWireTableFree(f->t);
+    freeModel(f->model, f->n);
+}
+
+static void tamperAndValidate(grammarFixture_t *f, void (*tamper)(rematProgram_t *)) {
+    tamper(&f->p->train);
+    rematPlanValidateGrammar(&f->p->train, f->t, f->model);
+}
+
+#define ASSERT_GRAMMAR_EXIT(buildFixture, tamper, rule)                                            \
+    do {                                                                                           \
+        grammarFixture_t _fixture;                                                                 \
+        buildFixture(&_fixture);                                                                   \
+        ASSERT_EXITS_WITH_OUTPUT(1, rule, tamperAndValidate(&_fixture, tamper));                   \
+        freeGrammarFixture(&_fixture);                                                             \
+    } while (0)
+
+/* HAR TRAIN: F0..F11 = steps 0..11, LOSS_FORWARD 12, LOSS_BACKWARD 13, B10..B0 = 14..24. */
+static void duplicateTheFirstForward(rematProgram_t *p) {
+    p->steps[1] = p->steps[0];
+}
+static void swapLastForwardAndLossForward(rematProgram_t *p) {
+    rematStep_t s = p->steps[11];
+    p->steps[11] = p->steps[12];
+    p->steps[12] = s;
+}
+static void forwardBeyondTheLastLayer(rematProgram_t *p) { /* LOSS_FORWARD -> FORWARD(12) */
+    p->steps[12] = (rematStep_t){.kind = REMAT_STEP_FORWARD, .layer = 12};
+}
+static void swapTheFirstTwoBackwards(rematProgram_t *p) {
+    rematStep_t s = p->steps[14];
+    p->steps[14] = p->steps[15];
+    p->steps[15] = s;
+}
+static void unknownStepKind(rematProgram_t *p) {
+    p->steps[0].kind = 9u;
+}
+static void dropTheLastBackward(rematProgram_t *p) {
+    p->numSteps--;
+}
+static void dropFromLossBackwardOn(rematProgram_t *p) {
+    p->numSteps = 13;
+}
+static void dropTheLossForward(rematProgram_t *p) { /* all-frozen */
+    p->numSteps = 2;
+}
+static void endAct1BeforeItsLastRead(rematProgram_t *p) { /* LIVENESS: ACT 1 ends at B1 = 23 */
+    p->ranges[0].end--;
+}
+static void beginAct2AfterItsWrite(rematProgram_t *p) { /* FORWARD(1) = step 1 writes ACT 2 */
+    p->ranges[1].begin++;
+}
+
+/* ACT 2's only reader is FORWARD(2) at step 2 (MaxPool's backward does not
+ * read its input, LayerConfigAccess.c:302-311). */
+static void endAct2BeforeItsOnlyForwardRead(rematProgram_t *p) {
+    p->ranges[1].end--;
+}
+
+/* HAR STORE_ALL: an absolute end (not a decrement) forces ACT 12's range shut
+ * right after its own write (step 11), so LOSS_FORWARD's read at step 12 is
+ * the first violation regardless of ACT 12's natural (last-step) end. */
+static void endAct12BeforeLossForwardReadsIt(rematProgram_t *p) {
+    p->ranges[11].end = 11;
+}
+
+/* HAR LIVENESS: ACT 12 is read twice (LOSS_FORWARD at 12, LOSS_BACKWARD at
+ * 13); shortening its end by one still covers the first read, isolating the
+ * LOSS_BACKWARD check. */
+static void endAct12BeforeLossBackwardReadsIt(rematProgram_t *p) {
+    p->ranges[11].end--;
+}
+
+/* The seed (GRAD n) begins at LOSS_BACKWARD's write (step 13); moving begin
+ * one step later makes that write itself the violation. */
+static void beginSeedAfterLossBackwardWritesIt(rematProgram_t *p) {
+    p->ranges[12].begin++;
+}
+
+/* GRAD 10 (wire 14) is read once, by BACKWARD(9)'s gradIn at step 15;
+ * shortening its end by one isolates that read. */
+static void endGrad10BeforeBackwardReadsIt(rematProgram_t *p) {
+    p->ranges[13].end--;
+}
+
 /* ---- rematBackwardRange (spec §4.3, §12.1) ---- */
 
 void testBackwardRangeMseRunsFromLastLayerToDeepest(void) {
@@ -2064,6 +2182,23 @@ void testLivenessPeakFinetuneStage2Is16384(void) {
     freeModel(model, HAR_N);
 }
 
+/* D20: n = 1 under CE gives top = -1, so no BACKWARD step exists to read
+ * ACT 1 or the seed; both end at LOSS_BACKWARD (step 2). Same fixture as
+ * testSingleLayerUnderCrossEntropyHasASeedButNoBackwardStep, built under
+ * LIVENESS instead of STORE_ALL. */
+void testLivenessSingleLayerUnderCrossEntropyEndsBothWiresAtLossBackward(void) {
+    layer_t *model[1] = {makeLinear(2, 3, false)};
+    inputLike_t in;
+    rematWireTable_t *t =
+        initTable(model, 1, CROSS_ENTROPY, makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ));
+    rematPlan_t *p = buildPlan(t, model, &g_liveness);
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(2, p->train.ranges[0].end, "ACT 1");
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(2, p->train.ranges[1].end, "the seed");
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, 1);
+}
+
 /* §12.2 item 9: a frozen norm's input stays live through its BACKWARD, a frozen
  * GEMM's input dies at its forward. [Linear T, LayerNorm frozen, Linear frozen,
  * Linear T] under MSE: n = 4, top = 3, B(l) = 6 + (3 - l). */
@@ -2180,6 +2315,119 @@ void testEveryStepsOperandsAreCoLiveOnRandomChains(void) {
     }
 }
 
+/* ---- grammar validation (spec §4.5) ---- */
+
+void testGrammarRejectsADuplicateForward(void) {
+    ASSERT_GRAMMAR_EXIT(buildHarLivenessFixture, duplicateTheFirstForward,
+                        "step #1 (kind 0, layer 0) violates grammar rule 1: one FORWARD per layer");
+}
+
+void testGrammarRejectsAnEarlyLossForward(void) {
+    ASSERT_GRAMMAR_EXIT(buildHarLivenessFixture, swapLastForwardAndLossForward,
+                        "step #11 (kind 1, layer 12) violates grammar rule 1: one LOSS_FORWARD");
+}
+
+/* Rule 1 bounds a FORWARD's layer below n: a FORWARD(n) would "write" ACT n+1,
+ * which is not an ACT wire at all (id n+1 is the seed). */
+void testGrammarRejectsAForwardBeyondTheLastLayer(void) {
+    ASSERT_GRAMMAR_EXIT(
+        buildHarLivenessFixture, forwardBeyondTheLastLayer,
+        "step #12 (kind 0, layer 12) violates grammar rule 1: one FORWARD per layer");
+}
+
+/* A table that says no backward runs, validating HAR's program, which has one:
+ * the LOSS_BACKWARD at step 13 is the first step rule 2 rejects. */
+static void clearHasBackwardAndValidate(grammarFixture_t *f) {
+    f->t->hasBackward = false;
+    rematPlanValidateGrammar(&f->p->train, f->t, f->model);
+}
+
+void testGrammarRejectsALossBackwardWithoutABackwardPhase(void) {
+    grammarFixture_t f;
+    buildHarLivenessFixture(&f);
+    ASSERT_EXITS_WITH_OUTPUT(1, "step #13 (kind 2, layer 12) violates grammar rule 2",
+                             clearHasBackwardAndValidate(&f));
+    freeGrammarFixture(&f);
+}
+
+void testGrammarRejectsOutOfOrderBackwards(void) {
+    ASSERT_GRAMMAR_EXIT(buildHarLivenessFixture, swapTheFirstTwoBackwards,
+                        "step #14 (kind 3, layer 9) violates grammar rule 3");
+}
+
+void testGrammarRejectsAnUnknownStepKind(void) {
+    ASSERT_GRAMMAR_EXIT(buildHarLivenessFixture, unknownStepKind,
+                        "step #0 (kind 9, layer 0) violates grammar: unknown step kind");
+}
+
+void testGrammarRejectsAnIncompleteBackwardSet(void) {
+    ASSERT_GRAMMAR_EXIT(buildHarLivenessFixture, dropTheLastBackward,
+                        "the stream of 24 steps violates grammar rule 3: BACKWARD set incomplete");
+}
+
+void testGrammarRejectsAMissingLossBackward(void) {
+    ASSERT_GRAMMAR_EXIT(buildHarLivenessFixture, dropFromLossBackwardOn,
+                        "the stream of 13 steps violates grammar rule 2: LOSS_BACKWARD missing");
+}
+
+void testGrammarRejectsAMissingLossForward(void) {
+    ASSERT_GRAMMAR_EXIT(buildAllFrozenFixture, dropTheLossForward,
+                        "the stream of 2 steps violates grammar rule 1: no LOSS_FORWARD");
+}
+
+void testGrammarRejectsAReadOutsideItsRange(void) {
+    ASSERT_GRAMMAR_EXIT(buildHarLivenessFixture, endAct1BeforeItsLastRead,
+                        "step #23 (kind 3, layer 1) violates grammar rule 4: it reads wire 1");
+}
+
+void testGrammarRejectsAWriteOutsideItsRange(void) {
+    ASSERT_GRAMMAR_EXIT(buildHarLivenessFixture, beginAct2AfterItsWrite,
+                        "step #1 (kind 0, layer 1) violates grammar rule 4: it writes wire 2");
+}
+
+void testGrammarRejectsAForwardReadingOutsideItsRange(void) {
+    ASSERT_GRAMMAR_EXIT(buildHarLivenessFixture, endAct2BeforeItsOnlyForwardRead,
+                        "step #2 (kind 0, layer 2) violates grammar rule 4: it reads wire 2");
+}
+
+void testGrammarRejectsALossForwardReadingOutsideItsRange(void) {
+    ASSERT_GRAMMAR_EXIT(buildHarStoreAllFixture, endAct12BeforeLossForwardReadsIt,
+                        "step #12 (kind 1, layer 12) violates grammar rule 4: it reads wire 12");
+}
+
+void testGrammarRejectsALossBackwardReadingActNOutsideItsRange(void) {
+    ASSERT_GRAMMAR_EXIT(buildHarLivenessFixture, endAct12BeforeLossBackwardReadsIt,
+                        "step #13 (kind 2, layer 12) violates grammar rule 4: it reads wire 12");
+}
+
+void testGrammarRejectsALossBackwardWritingTheSeedOutsideItsRange(void) {
+    ASSERT_GRAMMAR_EXIT(buildHarLivenessFixture, beginSeedAfterLossBackwardWritesIt,
+                        "step #13 (kind 2, layer 12) violates grammar rule 4: it writes wire 13");
+}
+
+void testGrammarRejectsABackwardReadingGradInOutsideItsRange(void) {
+    ASSERT_GRAMMAR_EXIT(buildHarLivenessFixture, endGrad10BeforeBackwardReadsIt,
+                        "step #15 (kind 3, layer 9) violates grammar rule 4: it reads wire 14");
+}
+
+/* rematPlanBuild runs the grammar on what it generates: a table record that
+ * claims GRAD 8 is GRAD 7 (wire 16) yields a range that opens one step after
+ * BACKWARD(8) writes it. */
+static void mislabelGrad8AndBuild(grammarFixture_t *f) {
+    f->t->wires[16].index = 7;
+    rematPlan_t *p = NULL;
+    (void)rematPlanBuild(&p, f->t, f->model, &g_liveness);
+}
+
+void testPlanBuildRunsTheGrammarOnWhatItGenerates(void) {
+    grammarFixture_t f;
+    buildHarLivenessFixture(&f);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "step #16 (kind 3, layer 8) violates grammar rule 4: it writes wire 16",
+        mislabelGrad8AndBuild(&f));
+    freeGrammarFixture(&f);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testBackwardRangeMseRunsFromLastLayerToDeepest);
@@ -2281,10 +2529,28 @@ int main(void) {
     RUN_TEST(testLivenessPeakHarIs49152);
     RUN_TEST(testLivenessPeakMnistCnnIs112896);
     RUN_TEST(testLivenessPeakFinetuneStage2Is16384);
+    RUN_TEST(testLivenessSingleLayerUnderCrossEntropyEndsBothWiresAtLossBackward);
     RUN_TEST(testFrozenNormStillNeedsItsInputWhileAFrozenGemmDoesNot);
     RUN_TEST(testCeLogitsDieAtForwardWhileMseSoftmaxInputIsRetained);
     RUN_TEST(testTrainableParameterLayersReadTheirInputInBackward);
     RUN_TEST(testEveryStepsOperandsAreCoLiveOnTheZoo);
     RUN_TEST(testEveryStepsOperandsAreCoLiveOnRandomChains);
+    RUN_TEST(testGrammarRejectsADuplicateForward);
+    RUN_TEST(testGrammarRejectsAnEarlyLossForward);
+    RUN_TEST(testGrammarRejectsAForwardBeyondTheLastLayer);
+    RUN_TEST(testGrammarRejectsALossBackwardWithoutABackwardPhase);
+    RUN_TEST(testGrammarRejectsOutOfOrderBackwards);
+    RUN_TEST(testGrammarRejectsAnUnknownStepKind);
+    RUN_TEST(testGrammarRejectsAnIncompleteBackwardSet);
+    RUN_TEST(testGrammarRejectsAMissingLossBackward);
+    RUN_TEST(testGrammarRejectsAMissingLossForward);
+    RUN_TEST(testGrammarRejectsAReadOutsideItsRange);
+    RUN_TEST(testGrammarRejectsAWriteOutsideItsRange);
+    RUN_TEST(testGrammarRejectsAForwardReadingOutsideItsRange);
+    RUN_TEST(testGrammarRejectsALossForwardReadingOutsideItsRange);
+    RUN_TEST(testGrammarRejectsALossBackwardReadingActNOutsideItsRange);
+    RUN_TEST(testGrammarRejectsALossBackwardWritingTheSeedOutsideItsRange);
+    RUN_TEST(testGrammarRejectsABackwardReadingGradInOutsideItsRange);
+    RUN_TEST(testPlanBuildRunsTheGrammarOnWhatItGenerates);
     return UNITY_END();
 }

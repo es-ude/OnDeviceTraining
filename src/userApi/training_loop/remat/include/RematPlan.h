@@ -182,4 +182,10 @@ void rematPlanFree(rematPlan_t *p); /* NULL-safe */
 size_t rematWalkOpening(const rematProgram_t *p, rematWalk_t *w);
 size_t rematWalkClosing(const rematProgram_t *p, rematWalk_t *w);
 
+/* Grammar validation (spec §4.5 rules 1-4). Deliberately independent of
+ * RematCheck, so a mutation in one is caught by the other. rematPlanBuild runs
+ * it on every program it generates; tests run it on tampered programs. Exits
+ * naming the step index and the rule. */
+void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t, layer_t **model);
+
 #endif // ODT_REMAT_PLAN_H

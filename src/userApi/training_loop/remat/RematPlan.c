@@ -7,6 +7,7 @@
 
 #include "Common.h"
 #include "Layer.h"
+#include "LayerConfigAccess.h"
 #include "LossFunction.h"
 #include "RematCheckedSize.h"
 #include "RematPlan.h"
@@ -106,6 +107,124 @@ static size_t roundUpTo(size_t x, size_t align) {
     return planAdd(x, align - 1u, "blockBytes") & ~(align - 1u);
 }
 
+static void grammarExit(size_t s, const rematStep_t *st, const char *rule) {
+    PRINT_ERROR("rematPlanBuild: step #%zu (kind %u, layer %u) violates grammar %s", s,
+                (unsigned)st->kind, (unsigned)st->layer, rule);
+    exit(1);
+}
+
+static void grammarEndExit(size_t numSteps, const char *rule) {
+    PRINT_ERROR("rematPlanBuild: the stream of %zu steps violates grammar %s", numSteps, rule);
+    exit(1);
+}
+
+/* Linear in the ranges on purpose: independent of the walk and of endOrder. */
+static void requireCovered(const rematProgram_t *p, size_t s, uint16_t wire, const char *role) {
+    if (wire == 0) {
+        return; /* ACT 0 is borrowed: always present */
+    }
+    for (size_t r = 0; r < p->numRanges; r++) {
+        const rematRange_t *range = &p->ranges[r];
+        if (range->wire == wire && range->begin <= s && s <= range->end) {
+            return;
+        }
+    }
+    const rematStep_t *st = &p->steps[s];
+    PRINT_ERROR("rematPlanBuild: step #%zu (kind %u, layer %u) violates grammar rule 4: it %s wire "
+                "%u outside any open range",
+                s, (unsigned)st->kind, (unsigned)st->layer, role, (unsigned)wire);
+    exit(1);
+}
+
+/* Rule 4 for one step that rules 1-3 already admitted: rule 1 bounds a FORWARD's
+ * layer below n, LOSS_* steps carry layer n, and rule 3 keeps a BACKWARD's layer
+ * in [deepest, top], so every operand id below is a real wire. */
+static void requireOperandsCovered(const rematProgram_t *p, const rematWireTable_t *t,
+                                   layer_t **model, size_t s) {
+    size_t n = t->modelSize;
+    size_t l = p->steps[s].layer;
+    switch (p->steps[s].kind) {
+    case REMAT_STEP_FORWARD:
+        requireCovered(p, s, rematActId(t, l), "reads");
+        requireCovered(p, s, rematActId(t, l + 1u), "writes");
+        break;
+    case REMAT_STEP_LOSS_FORWARD:
+        requireCovered(p, s, rematActId(t, n), "reads");
+        break;
+    case REMAT_STEP_LOSS_BACKWARD:
+        requireCovered(p, s, rematActId(t, n), "reads");
+        requireCovered(p, s, rematGradId(t, n), "writes");
+        break;
+    default: { /* REMAT_STEP_BACKWARD */
+        uint16_t gradIn =
+            ((ptrdiff_t)l == t->backwardTop) ? rematGradId(t, n) : rematGradId(t, l + 1u);
+        requireCovered(p, s, gradIn, "reads");
+        if (layerBackwardReadsInput(model[l])) {
+            requireCovered(p, s, rematActId(t, l), "reads");
+        }
+        if (l > t->deepest) {
+            requireCovered(p, s, rematGradId(t, l), "writes");
+        }
+        break;
+    }
+    }
+}
+
+void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t, layer_t **model) {
+    size_t n = t->modelSize;
+    size_t nextForward = 0;
+    ptrdiff_t nextBackward = t->backwardTop;
+    bool lossForward = false;
+    bool lossBackward = false;
+    for (size_t s = 0; s < p->numSteps; s++) {
+        const rematStep_t *st = &p->steps[s];
+        switch (st->kind) {
+        case REMAT_STEP_FORWARD:
+            if (lossForward || st->layer != nextForward || st->layer >= n) {
+                grammarExit(s, st, "rule 1: one FORWARD per layer, ascending, before LOSS_FORWARD");
+            }
+            nextForward++;
+            break;
+        case REMAT_STEP_LOSS_FORWARD:
+            if (lossForward || nextForward != n || st->layer != n) {
+                grammarExit(s, st, "rule 1: one LOSS_FORWARD, after FORWARD(n-1)");
+            }
+            lossForward = true;
+            break;
+        case REMAT_STEP_LOSS_BACKWARD:
+            if (!t->hasBackward || !lossForward || lossBackward || st->layer != n) {
+                grammarExit(s, st,
+                            "rule 2: LOSS_BACKWARD iff hasBackward, once, after LOSS_FORWARD");
+            }
+            lossBackward = true;
+            break;
+        case REMAT_STEP_BACKWARD:
+            if (!lossBackward || (ptrdiff_t)st->layer != nextBackward ||
+                nextBackward < (ptrdiff_t)t->deepest) {
+                grammarExit(s, st,
+                            "rule 3: BACKWARD top..deepest, descending, after LOSS_BACKWARD");
+            }
+            nextBackward--;
+            break;
+        default:
+            PRINT_ERROR("rematPlanBuild: step #%zu (kind %u, layer %u) violates grammar: unknown "
+                        "step kind",
+                        s, (unsigned)st->kind, (unsigned)st->layer);
+            exit(1);
+        }
+        requireOperandsCovered(p, t, model, s);
+    }
+    if (!lossForward) {
+        grammarEndExit(p->numSteps, "rule 1: no LOSS_FORWARD");
+    }
+    if (lossBackward != t->hasBackward) {
+        grammarEndExit(p->numSteps, "rule 2: LOSS_BACKWARD missing");
+    }
+    if (t->hasBackward && nextBackward >= (ptrdiff_t)t->deepest) {
+        grammarEndExit(p->numSteps, "rule 3: BACKWARD set incomplete");
+    }
+}
+
 bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **model,
                     const rematPlanSpec_t *spec) {
     *out = NULL;
@@ -141,6 +260,7 @@ bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **mode
     rematFillTrainSteps(t, train->steps);
     rematFillTrainRanges(policy, t, model, numSteps, train->ranges);
     sortEndOrder(train);
+    rematPlanValidateGrammar(train, t, model);
     train->peakLiveBytes = peakLiveBytesOf(train, t);
     *out = p;
     return true;

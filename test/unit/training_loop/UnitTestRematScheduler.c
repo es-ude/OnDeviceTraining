@@ -13,12 +13,14 @@
 #include "DeathTest.h"
 #include "FlattenApi.h"
 #include "Layer.h"
+#include "LayerConfigAccess.h"
 #include "LayerQuant.h"
 #include "LinearApi.h"
 #include "LossFunction.h"
 #include "Pool1dApi.h"
 #include "QuantLayerApi.h"
 #include "Quantization.h"
+#include "RNG.h"
 #include "ReluApi.h"
 #include "RematPlace.h"
 #include "RematPlan.h"
@@ -1274,6 +1276,205 @@ void testArenaBeginExitsWhenTheArenaWasNeverReserved(void) {
     freeFixture(&f, &s);
 }
 
+/* ---- the row contract, ARENA only (spec §12.2 item 1; plan Assumption 15) ---- */
+
+static void assertResident(const rematWireTable_t *t, uint16_t w, const char *what) {
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(REMAT_NONE, w, what);
+    if (w == 0) {
+        return; /* ACT 0 is the caller's borrowed input, checked once per call */
+    }
+    TEST_ASSERT_NOT_NULL_MESSAGE(rematWireHdr(t, w)->data, what);
+}
+
+/* Everything a step reads is resident and everything it writes is bound. A
+ * BACKWARD reads ACT l only where layerBackwardReadsInput says so; elsewhere
+ * ACT l may be NULL (W_dead, the LIVENESS state of a non-reading BACKWARD). */
+static void assertOperandsResident(const rematWireTable_t *t, layer_t **model,
+                                   const rematStep_t *st) {
+    size_t n = t->modelSize;
+    size_t l = st->layer;
+    switch (st->kind) {
+    case REMAT_STEP_FORWARD:
+        assertResident(t, rematActId(t, l), "FORWARD reads its input");
+        assertResident(t, rematActId(t, l + 1u), "FORWARD writes its output");
+        break;
+    case REMAT_STEP_LOSS_FORWARD:
+        assertResident(t, rematActId(t, n), "LOSS_FORWARD reads ACT n");
+        break;
+    case REMAT_STEP_LOSS_BACKWARD:
+        assertResident(t, rematActId(t, n), "LOSS_BACKWARD reads ACT n");
+        assertResident(t, rematGradId(t, n), "LOSS_BACKWARD writes the seed");
+        break;
+    default: { /* REMAT_STEP_BACKWARD */
+        uint16_t gradIn =
+            ((ptrdiff_t)l == t->backwardTop) ? rematGradId(t, n) : rematGradId(t, l + 1u);
+        assertResident(t, gradIn, "BACKWARD reads gradIn");
+        if (layerBackwardReadsInput(model[l])) {
+            assertResident(t, rematActId(t, l), "BACKWARD reads its input");
+        }
+        if (l > t->deepest) {
+            assertResident(t, rematGradId(t, l), "BACKWARD writes its dx");
+        }
+        break;
+    }
+    }
+}
+
+/* O(W^2), tests only. */
+static void assertResidentHeadersDisjoint(const rematWireTable_t *t) {
+    for (uint16_t a = 1; a < t->numWires; a++) {
+        const uint8_t *da = rematWireHdr(t, a)->data;
+        if (da == NULL) {
+            continue;
+        }
+        for (uint16_t b = (uint16_t)(a + 1u); b < t->numWires; b++) {
+            const uint8_t *db = rematWireHdr(t, b)->data;
+            if (db == NULL) {
+                continue;
+            }
+            bool disjoint = da + rematWireBytes(t, a) <= db || db + rematWireBytes(t, b) <= da;
+            TEST_ASSERT_TRUE_MESSAGE(disjoint, "two resident headers share bytes");
+        }
+    }
+}
+
+static void assertEndedRangesReleased(const rematProgram_t *p, const rematWireTable_t *t,
+                                      size_t step) {
+    for (size_t r = 0; r < p->numRanges; r++) {
+        if (p->ranges[r].end == step) {
+            TEST_ASSERT_NULL_MESSAGE(rematWireHdr(t, p->ranges[r].wire)->data,
+                                     "a range that ended at this step is still bound");
+        }
+    }
+}
+
+/* One call with every §12.2 item 1 assert, plus the ARENA-specific one: the
+ * resident arena holds every live byte, so current ODT_MEM_PROFILE bytes stay
+ * at the post-init value at every step (0 == 0 without ODT_MEM_PROFILE). */
+static void walkWithTheContractChecks(arenaFixture_t *f, rematScheduler_t *s) {
+    rematWireTable_t *t = s->wires;
+    const rematProgram_t *p = &s->plan->train;
+    size_t memAfterInit = memProfileCurrentBytes();
+    bindAndBegin(f, s);
+    TEST_ASSERT_EQUAL_PTR(f->x, rematActHdr(t, 0));
+    rematStep_t st;
+    size_t step = 0;
+    while (rematArenaNext(s, &st)) {
+        assertOperandsResident(t, f->model, &st);
+        assertResidentHeadersDisjoint(t);
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(memAfterInit, memProfileCurrentBytes(),
+                                         "a block was reserved inside the call");
+        rematArenaDone(s, &st);
+        assertEndedRangesReleased(p, t, step);
+        step++;
+    }
+    TEST_ASSERT_EQUAL_size_t(p->numSteps, step);
+    endAndUnbind(s);
+    for (uint16_t w = 1; w < t->numWires; w++) {
+        TEST_ASSERT_NULL_MESSAGE(rematWireHdr(t, w)->data, "a wire is still bound after end");
+    }
+    TEST_ASSERT_NULL(rematActHdr(t, 0));
+    TEST_ASSERT_EQUAL_size_t(memAfterInit, memProfileCurrentBytes());
+}
+
+/* Two calls: the second reuses the resident bytes without zeroing (VERIFY
+ * poisons them at every bind on the test presets). */
+static void assertArenaContract(void (*build)(arenaFixture_t *), const rematPlanSpec_t *spec) {
+    arenaFixture_t f;
+    build(&f);
+    rematScheduler_t s = initArena(&f, spec);
+    walkWithTheContractChecks(&f, &s);
+    walkWithTheContractChecks(&f, &s);
+    freeFixture(&f, &s);
+}
+
+void testArenaContractHarStoreAll(void) {
+    assertArenaContract(buildHarModel, NULL);
+}
+
+void testArenaContractHarLiveness(void) {
+    assertArenaContract(buildHarModel, &g_liveness);
+}
+
+/* PR1a carry: under LIVENESS, Flatten's dx (GRAD 9) binds at BACKWARD(9)
+ * after its source ACT 9 died. Pinned here so a planner change that keeps
+ * ACT 9 alive cannot silently drop the harness's coverage of it. */
+void testArenaHarLivenessBindsFlattenDxAfterItsSourceDied(void) {
+    arenaFixture_t f;
+    buildHarModel(&f);
+    TEST_ASSERT_EQUAL_INT(FLATTEN, f.model[9]->type);
+    rematScheduler_t s = initArena(&f, &g_liveness);
+    bindAndBegin(&f, &s);
+    rematStep_t st;
+    bool seen = false;
+    while (rematArenaNext(&s, &st)) {
+        if (st.kind == REMAT_STEP_BACKWARD && st.layer == 9u) {
+            TEST_ASSERT_NULL(rematActHdr(s.wires, 9)->data);
+            TEST_ASSERT_NOT_NULL(rematGradHdr(s.wires, 9)->data);
+            seen = true;
+        }
+        rematArenaDone(&s, &st);
+    }
+    endAndUnbind(&s);
+    TEST_ASSERT_TRUE(seen);
+    freeFixture(&f, &s);
+}
+
+void testArenaContractF1StoreAll(void) {
+    assertArenaContract(buildF1Model, NULL);
+}
+
+void testArenaContractF1Liveness(void) {
+    assertArenaContract(buildF1Model, &g_liveness);
+}
+
+/* PR1-PR5c, while the global stream exists: a row neither draws from nor
+ * reseeds it (R4). The conv factories draw their initial weights, so the pin
+ * starts after the model is built. */
+void testArenaLeavesTheRngStreamUntouched(void) {
+    arenaFixture_t f;
+    buildHarModel(&f);
+    uint32_t seed = rngGetSeed();
+    rematScheduler_t s = initArena(&f, &g_liveness);
+    (void)walkAll(&f, &s);
+    rematSchedulerDeinit(&s);
+    TEST_ASSERT_EQUAL_UINT32(seed, rngGetSeed());
+    freeModel(f.model, f.n);
+}
+
+/* P8's table-level twin: binding at a range's first step and releasing after
+ * its last makes the SDK's observed peak the plan's. Before any call the
+ * observed peak is 0, so a report that copied the plan's peak would show.
+ * Read before end, where a row that never releases would die. */
+static void assertObservedPeakIsThePlannedPeak(void (*build)(arenaFixture_t *),
+                                               const rematPlanSpec_t *spec) {
+    arenaFixture_t f;
+    build(&f);
+    rematScheduler_t s = initArena(&f, spec);
+    rematReport_t before;
+    rematSchedulerReport(&s, &before);
+    TEST_ASSERT_TRUE(before.peakLiveBytes > 0u);
+    TEST_ASSERT_EQUAL_size_t(0, before.observedPeakLiveBytes);
+    bindAndBegin(&f, &s);
+    rematStep_t st;
+    while (rematArenaNext(&s, &st)) {
+        rematArenaDone(&s, &st);
+    }
+    rematReport_t r;
+    rematSchedulerReport(&s, &r);
+    TEST_ASSERT_EQUAL_size_t(s.wires->observedPeakLiveBytes, r.observedPeakLiveBytes);
+    TEST_ASSERT_EQUAL_size_t(r.peakLiveBytes, r.observedPeakLiveBytes);
+    endAndUnbind(&s);
+    freeFixture(&f, &s);
+}
+
+void testReportObservedPeakEqualsThePlannedPeak(void) {
+    assertObservedPeakIsThePlannedPeak(buildHarModel, NULL);
+    assertObservedPeakIsThePlannedPeak(buildHarModel, &g_liveness);
+    assertObservedPeakIsThePlannedPeak(buildF1Model, NULL);
+    assertObservedPeakIsThePlannedPeak(buildF1Model, &g_liveness);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testArenaInitBuildsTheTableAndThePlan);
@@ -1329,5 +1530,12 @@ int main(void) {
     RUN_TEST(testArenaEndExitsOnAnIncompleteWalk);
     RUN_TEST(testArenaEndExitsOnARangeLeftOpen);
     RUN_TEST(testArenaBeginExitsWhenTheArenaWasNeverReserved);
+    RUN_TEST(testArenaContractHarStoreAll);
+    RUN_TEST(testArenaContractHarLiveness);
+    RUN_TEST(testArenaHarLivenessBindsFlattenDxAfterItsSourceDied);
+    RUN_TEST(testArenaContractF1StoreAll);
+    RUN_TEST(testArenaContractF1Liveness);
+    RUN_TEST(testArenaLeavesTheRngStreamUntouched);
+    RUN_TEST(testReportObservedPeakEqualsThePlannedPeak);
     return UNITY_END();
 }

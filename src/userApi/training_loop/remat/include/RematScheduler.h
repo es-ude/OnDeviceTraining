@@ -95,10 +95,11 @@ typedef struct rematReport {
     bool placed;       /* placement computed + verified: the three arena fields */
     bool dataReserved; /* the row's resident data block exists */
     size_t numSteps;
-    size_t peakLiveBytes; /* plan, exact bytes, ACT 0 excluded: POET x-axis, wires_peak_b */
-    size_t arenaBytes;    /* = peakLiveBytes + arenaPadBytes + arenaGapBytes */
-    size_t arenaPadBytes; /* peakPlacedBytes - peakLiveBytes (alignment) -> arena_pad_b */
-    size_t arenaGapBytes; /* arenaBytes - peakPlacedBytes (FFD heuristic) -> arena_gap_b */
+    size_t peakLiveBytes;         /* plan, exact bytes, ACT 0 excluded: POET x-axis, wires_peak_b */
+    size_t observedPeakLiveBytes; /* SDK accounting over the last call, every row (P8) */
+    size_t arenaBytes;            /* = peakLiveBytes + arenaPadBytes + arenaGapBytes */
+    size_t arenaPadBytes;         /* peakPlacedBytes - peakLiveBytes (alignment) -> arena_pad_b */
+    size_t arenaGapBytes;         /* arenaBytes - peakPlacedBytes (FFD heuristic) -> arena_gap_b */
     size_t metadataBytes; /* table block + plan block + the offsets block -> wire_metadata_b */
 } rematReport_t;
 void rematSchedulerReport(const rematScheduler_t *s, rematReport_t *out);

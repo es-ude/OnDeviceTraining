@@ -41,6 +41,7 @@ void rematSchedulerReport(const rematScheduler_t *s, rematReport_t *out) {
     out->planned = true;
     out->numSteps = p->numSteps;
     out->peakLiveBytes = p->peakLiveBytes;
+    out->observedPeakLiveBytes = s->wires->observedPeakLiveBytes;
     out->metadataBytes = reportAdd(s->wires->slabBytes, s->plan->blockBytes);
     /* ARENA is the only row until PR1c, whose HEAP reports placed == planned
      * with the arena fields 0. */

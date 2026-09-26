@@ -195,6 +195,46 @@ void testMeanHonorsTransposedView(void) {
     TEST_ASSERT_FLOAT_WITHIN(1e-6f, 5.0f, m1);
 }
 
+void testVarianceHonorsTransposedRank3View(void) {
+    // BatchNorm1d's statistics view (#460): physical [m=2, C=3, T=2] identity
+    // buffer, transposeTensor(0,1) -> logical [C, m, T]; k = 2 reduces each
+    // channel over its m*T = 4 values. x[b][c][t] = 10*c + 3*b + t.
+    //   channel c values {10c, 10c+1, 10c+3, 10c+4}: mean 10c+2, biased var 2.5
+    // A contiguous-block reader would take phys[4c..4c+3] and mix channels.
+    size_t pdims[] = {2, 3, 2};
+    float x[12];
+    for (size_t b = 0; b < 2; b++) {
+        for (size_t c = 0; c < 3; c++) {
+            for (size_t t = 0; t < 2; t++) {
+                x[(b * 3 + c) * 2 + t] = (float)(10 * c + 3 * b + t);
+            }
+        }
+    }
+    tensor_t *in = buildFloatTensorND(3, pdims, x);
+    transposeTensor(in, 0, 1); /* logical [3, 2, 2], physical unchanged */
+    size_t statDims[] = {3};
+    tensor_t *meanOut = buildFloatTensorND(1, statDims, NULL);
+    tensor_t *varOut = buildFloatTensorND(1, statDims, NULL);
+
+    meanOverTrailingAxesFloat32(in, 2, meanOut);
+    varianceBiasedOverTrailingAxesFloat32(in, 2, meanOut, varOut);
+
+    float m[3];
+    float v[3];
+    for (size_t c = 0; c < 3; c++) {
+        m[c] = ((float *)meanOut->data)[c];
+        v[c] = ((float *)varOut->data)[c];
+    }
+    freeTensor(varOut);
+    freeTensor(meanOut);
+    freeTensor(in);
+
+    for (size_t c = 0; c < 3; c++) {
+        TEST_ASSERT_FLOAT_WITHIN(1e-5f, 10.0f * (float)c + 2.0f, m[c]);
+        TEST_ASSERT_FLOAT_WITHIN(1e-5f, 2.5f, v[c]);
+    }
+}
+
 /* ---- SYM_INT32 reductions (twin-sanity vs the FLOAT32 dequant) ---- */
 
 void testMeanSymInt32MatchesFloatTwin(void) {
@@ -672,6 +712,7 @@ int main(void) {
     RUN_TEST(testRsqrtFloat32EpsInside);
     RUN_TEST(testRsqrtFloat32ZeroVar);
     RUN_TEST(testMeanHonorsTransposedView);
+    RUN_TEST(testVarianceHonorsTransposedRank3View);
     RUN_TEST(testMeanSymInt32MatchesFloatTwin);
     RUN_TEST(testVarianceSymInt32MatchesFloatTwin);
     RUN_TEST(testRsqrtSymInt32MatchesFloatTwin);

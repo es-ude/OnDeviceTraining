@@ -62,6 +62,16 @@ struct rematScheduler {
     rematSchedulerType_t type;
     rematWireTable_t *wires; /* shared buffer table: one reserveMemory block */
     rematPlan_t *plan;       /* shared static plan: one reserveMemory block, placement-free */
+    union {
+        /* ARENA-private (R5). Two blocks (D55 as amended by Codex N3): offsets
+         * first, placed into and verified, then the arena data block. */
+        struct {
+            uint8_t *base;          /* the resident arena data block */
+            size_t bytes;           /* its size; non-zero from the verified placement on */
+            size_t *offsets;        /* [numRanges] */
+            size_t peakPlacedBytes; /* the peak of the placed (8-rounded) sums */
+        } arena;
+    } row;
 };
 
 /* One init per row (the LrScheduler idiom). Returns false iff a reserveMemory
@@ -74,14 +84,20 @@ bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t
 void rematSchedulerDeinit(rematScheduler_t *s);
 
 /* Feeds the harness keys (spec §14); a field is valid only under the flag
- * that declares it. */
+ * that declares it. The three flags imply one another in order (D55 as
+ * amended by Codex N3); a did-not-run point records what its flags allow. */
 typedef struct rematReport {
     rematSchedulerType_t type;
     rematPlanPolicy_t policy;
-    bool planned; /* table + plan built: numSteps, peakLiveBytes, metadataBytes */
+    bool planned;      /* table + plan built: numSteps, peakLiveBytes, metadataBytes */
+    bool placed;       /* placement computed + verified: the three arena fields */
+    bool dataReserved; /* the row's resident data block exists */
     size_t numSteps;
     size_t peakLiveBytes; /* plan, exact bytes, ACT 0 excluded: POET x-axis, wires_peak_b */
-    size_t metadataBytes; /* table block + plan block (+ row tables) -> wire_metadata_b */
+    size_t arenaBytes;    /* = peakLiveBytes + arenaPadBytes + arenaGapBytes */
+    size_t arenaPadBytes; /* peakPlacedBytes - peakLiveBytes (alignment) -> arena_pad_b */
+    size_t arenaGapBytes; /* arenaBytes - peakPlacedBytes (FFD heuristic) -> arena_gap_b */
+    size_t metadataBytes; /* table block + plan block + the offsets block -> wire_metadata_b */
 } rematReport_t;
 void rematSchedulerReport(const rematScheduler_t *s, rematReport_t *out);
 

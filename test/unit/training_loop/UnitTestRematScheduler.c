@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "AsanDeath.h"
 #include "Common.h"
 #include "Conv1dApi.h"
 #include "DeathTest.h"
@@ -21,6 +22,7 @@
 #include "ReluApi.h"
 #include "RematPlace.h"
 #include "RematPlan.h"
+#include "RematRows.h"
 #include "RematScheduler.h"
 #include "SoftmaxApi.h"
 #include "StorageApi.h"
@@ -267,7 +269,10 @@ void testReportMetadataCountsTheResidentBlocks(void) {
     rematScheduler_t s = initArena(&f, NULL);
     rematReport_t r;
     rematSchedulerReport(&s, &r);
-    TEST_ASSERT_EQUAL_size_t(s.wires->slabBytes + s.plan->blockBytes, r.metadataBytes);
+    /* slab + plan block + the offsets block: 4,848 + 348 + 23 * 8 = 5,380 on LP64 */
+    TEST_ASSERT_EQUAL_size_t(s.wires->slabBytes + s.plan->blockBytes +
+                                 s.plan->train.numRanges * sizeof(size_t),
+                             r.metadataBytes);
     freeFixture(&f, &s);
 }
 
@@ -281,6 +286,19 @@ void testDeinitIsNullSafeAndIdempotent(void) {
     TEST_ASSERT_NULL(s.plan);
     rematSchedulerDeinit(&s);
     freeModel(f.model, f.n);
+}
+
+/* PR1c's vtable calls the row deinit directly: on its own it must be
+ * repeatable, not only through rematSchedulerDeinit's zeroing. */
+void testArenaDeinitIsIdempotentOnItsOwn(void) {
+    arenaFixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    rematArenaDeinit(&s);
+    TEST_ASSERT_NULL(s.row.arena.base);
+    TEST_ASSERT_NULL(s.row.arena.offsets);
+    rematArenaDeinit(&s);
+    freeFixture(&f, &s);
 }
 
 #ifdef ODT_MEM_PROFILE
@@ -725,6 +743,181 @@ void testVerifierRejectsAnOffsetNearSizeMax(void) {
     freePlacedFixture(&pp);
 }
 
+/* ---- init completes: offsets block, placement, verifier, arena block (spec §5.5) ---- */
+
+static rematReport_t reportAfterInit(void (*build)(arenaFixture_t *), const rematPlanSpec_t *spec) {
+    arenaFixture_t f;
+    build(&f);
+    rematScheduler_t s = initArena(&f, spec);
+    rematReport_t r;
+    rematSchedulerReport(&s, &r);
+    freeFixture(&f, &s);
+    return r;
+}
+
+void testArenaInitPlacesVerifiesAndReservesTheArena(void) {
+    arenaFixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initArena(&f, &g_liveness);
+    rematReport_t r;
+    rematSchedulerReport(&s, &r);
+    TEST_ASSERT_TRUE(r.planned);
+    TEST_ASSERT_TRUE(r.placed);
+    TEST_ASSERT_TRUE(r.dataReserved);
+    TEST_ASSERT_NOT_NULL(s.row.arena.offsets);
+    TEST_ASSERT_NOT_NULL(s.row.arena.base);
+    TEST_ASSERT_EQUAL_size_t(s.row.arena.bytes, r.arenaBytes);
+    freeFixture(&f, &s);
+}
+
+static void assertArenaDecomposition(void (*build)(arenaFixture_t *), const rematPlanSpec_t *spec) {
+    rematReport_t r = reportAfterInit(build, spec);
+    TEST_ASSERT_TRUE(r.placed);
+    TEST_ASSERT_EQUAL_size_t(r.arenaBytes, r.peakLiveBytes + r.arenaPadBytes + r.arenaGapBytes);
+}
+
+void testReportArenaBytesIsPeakPlusPadPlusGap(void) {
+    assertArenaDecomposition(buildHarModel, NULL);
+    assertArenaDecomposition(buildHarModel, &g_liveness);
+    assertArenaDecomposition(buildF1Model, NULL);
+    assertArenaDecomposition(buildF1Model, &g_liveness);
+}
+
+/* Every HAR wire is a multiple of 8 (8192, 4096, 256, 24 B): nothing to pad. */
+void testReportPadIsZeroOnHar(void) {
+    TEST_ASSERT_EQUAL_size_t(0, reportAfterInit(buildHarModel, NULL).arenaPadBytes);
+    TEST_ASSERT_EQUAL_size_t(0, reportAfterInit(buildHarModel, &g_liveness).arenaPadBytes);
+}
+
+/* F1: 5 + 4 + 4 = 13 live bytes at step 3 take 8 + 8 + 8 = 24 placed bytes. */
+void testReportPadOnTheF1ModelIsEleven(void) {
+    for (size_t policy = 0; policy < 2u; policy++) {
+        rematReport_t r = reportAfterInit(buildF1Model, policy == 0u ? NULL : &g_liveness);
+        TEST_ASSERT_EQUAL_size_t(13, r.peakLiveBytes);
+        TEST_ASSERT_EQUAL_size_t(24, r.arenaBytes);
+        TEST_ASSERT_EQUAL_size_t(11, r.arenaPadBytes);
+        TEST_ASSERT_EQUAL_size_t(0, r.arenaGapBytes);
+    }
+}
+
+/* FFD heuristic; a change needs a stated reason (spec §12.2 item 10). The one
+ * pin recorded from the implementation, cross-checked against an independent
+ * FFD of the spec's rule on the hand-derived HAR ranges (plan Assumption 16):
+ * STORE_ALL leaves a 4,096 B gap above its 74,288 B peak, LIVENESS none. */
+void testReportArenaBytesHarFfdRegressionGuard(void) {
+    TEST_ASSERT_EQUAL_size_t(78384, reportAfterInit(buildHarModel, NULL).arenaBytes);
+    TEST_ASSERT_EQUAL_size_t(49152, reportAfterInit(buildHarModel, &g_liveness).arenaBytes);
+}
+
+/* §12.2 item 7's property: random chains of FLOAT32 and packed BFP wires
+ * (odd byte counts) under both policies, every offset and the arena size a
+ * multiple of ODT_WIRE_ALIGN. It runs in a child so a verifier exit in init
+ * reads as this test's verdict. */
+#define MIXED_MAX_RELUS 6u
+typedef struct mixedChain {
+    uint8_t exponents[3][1];
+    bfpQConfig_t bfpQc[3];
+    quantization_t bfpQ[3];
+    layer_t *model[MIXED_MAX_RELUS + 1u];
+    size_t n;
+    inputLike_t in;
+    tensor_t *x;
+} mixedChain_t;
+
+/* A trainable Linear first, so every ReLU above it also gets a GRAD wire of
+ * its own dtype, then 1..6 ReLUs whose template is FLOAT32 or BFP m = 3/5/7
+ * (per tensor). The feature count 1..9 makes FLOAT32 wires 4 mod 8 when odd. */
+static void buildMixedChain(mixedChain_t *c, uint32_t *state) {
+    static const uint8_t mantissaBits[3] = {3, 5, 7};
+    for (size_t k = 0; k < 3u; k++) {
+        initBfpQConfigInto(mantissaBits[k], 8, HALF_AWAY, c->exponents[k], &c->bfpQc[k]);
+        c->bfpQ[k] = (quantization_t){.type = BFP, .qConfig = &c->bfpQc[k]};
+    }
+    size_t features = 1u + nextRandom(state) % 9u;
+    c->model[0] = makeLinear(features, features, false);
+    c->n = 2u + nextRandom(state) % MIXED_MAX_RELUS;
+    for (size_t i = 1; i < c->n; i++) {
+        uint32_t pick = nextRandom(state) % 4u;
+        c->model[i] = makeRelu(pick == 3u ? &g_floatQ : &c->bfpQ[pick]);
+    }
+    c->x = makeInput(&c->in, (size_t[]){1, features}, 2, &g_floatQ);
+}
+
+static void initMixedChainsAndExitWithTheAlignmentVerdict(void) {
+    uint32_t state = 0x5EED1234u;
+    bool aligned = true;
+    for (size_t trial = 0; trial < 64u; trial++) {
+        mixedChain_t c;
+        buildMixedChain(&c, &state);
+        for (size_t policy = 0; policy < 2u; policy++) {
+            rematScheduler_t s;
+            if (!rematArenaInit(&s, c.model, c.n, defaultLossConfig(MSE), c.x,
+                                policy == 0u ? NULL : &g_liveness)) {
+                _exit(3);
+            }
+            for (size_t r = 0; r < s.plan->train.numRanges; r++) {
+                aligned = aligned && s.row.arena.offsets[r] % ODT_WIRE_ALIGN == 0u;
+            }
+            aligned = aligned && s.row.arena.bytes % ODT_WIRE_ALIGN == 0u;
+            rematSchedulerDeinit(&s);
+        }
+        freeModel(c.model, c.n);
+    }
+    _exit(aligned ? 0 : 2);
+}
+
+void testArenaOffsetsAlignedOnRandomMixedChains(void) {
+    ASSERT_EXITS_WITH(0, initMixedChainsAndExitWithTheAlignmentVerdict());
+}
+
+#ifdef ODT_MEM_PROFILE
+/* Resident means exactly these blocks: table, plan, offsets, arena. */
+void testArenaInitReservesExactlyMetadataPlusArena(void) {
+    arenaFixture_t f;
+    buildHarModel(&f);
+    size_t before = memProfileCurrentBytes();
+    rematScheduler_t s = initArena(&f, &g_liveness);
+    rematReport_t r;
+    rematSchedulerReport(&s, &r);
+    TEST_ASSERT_EQUAL_size_t(r.metadataBytes + r.arenaBytes, memProfileCurrentBytes() - before);
+    freeFixture(&f, &s);
+}
+#endif
+
+#ifndef ODT_TEST_ASAN
+/* D55 / Codex C2 did-not-run pin. ReLU over a borrowed [1, 2^60] FLOAT32 input
+ * (never read at init) under MSE passes table init unchanged (plan Assumption
+ * 18): one 2^62-byte wire, one range, no backward. Reserving 2^62 B fails on
+ * every 64-bit host, and the report must still carry every analytic field.
+ * Host-only (LP64); skipped under ASan, which aborts on oversized requests
+ * unless allocator_may_return_null=1. macOS malloc prints a "can't allocate
+ * region" warning to stderr here; that is expected. */
+void testArenaInitFailureKeepsAnalyticReport(void) {
+    layer_t *model[1] = {makeRelu(&g_floatQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, (size_t)1 << 60}, 2, &g_floatQ);
+    size_t before = memProfileCurrentBytes();
+    rematScheduler_t s;
+    TEST_ASSERT_FALSE(rematArenaInit(&s, model, 1, defaultLossConfig(MSE), x, NULL));
+    rematReport_t r;
+    rematSchedulerReport(&s, &r);
+    TEST_ASSERT_TRUE(r.planned);
+    TEST_ASSERT_TRUE(r.placed);
+    TEST_ASSERT_FALSE(r.dataReserved);
+    TEST_ASSERT_EQUAL_size_t(2, r.numSteps);
+    TEST_ASSERT_EQUAL_size_t((size_t)1 << 62, r.peakLiveBytes);
+    TEST_ASSERT_EQUAL_size_t((size_t)1 << 62, r.arenaBytes);
+    TEST_ASSERT_EQUAL_size_t(0, r.arenaPadBytes);
+    TEST_ASSERT_EQUAL_size_t(0, r.arenaGapBytes);
+    TEST_ASSERT_EQUAL_size_t(s.wires->slabBytes + s.plan->blockBytes + sizeof(size_t),
+                             r.metadataBytes);
+    TEST_ASSERT_TRUE(r.metadataBytes > 0u);
+    rematSchedulerDeinit(&s);
+    TEST_ASSERT_EQUAL_size_t(before, memProfileCurrentBytes());
+    freeModel(model, 1);
+}
+#endif
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testArenaInitBuildsTheTableAndThePlan);
@@ -734,6 +927,7 @@ int main(void) {
     RUN_TEST(testReportOnAZeroedSchedulerIsEmpty);
     RUN_TEST(testReportMetadataCountsTheResidentBlocks);
     RUN_TEST(testDeinitIsNullSafeAndIdempotent);
+    RUN_TEST(testArenaDeinitIsIdempotentOnItsOwn);
 #ifdef ODT_MEM_PROFILE
     RUN_TEST(testDeinitReturnsEveryInitBlock);
 #endif
@@ -752,5 +946,17 @@ int main(void) {
     RUN_TEST(testVerifierExitsOnARangePastTheArenaEnd);
     RUN_TEST(testVerifierBoundsPlacedNotExactBytes);
     RUN_TEST(testVerifierRejectsAnOffsetNearSizeMax);
+    RUN_TEST(testArenaInitPlacesVerifiesAndReservesTheArena);
+    RUN_TEST(testReportArenaBytesIsPeakPlusPadPlusGap);
+    RUN_TEST(testReportPadIsZeroOnHar);
+    RUN_TEST(testReportPadOnTheF1ModelIsEleven);
+    RUN_TEST(testReportArenaBytesHarFfdRegressionGuard);
+    RUN_TEST(testArenaOffsetsAlignedOnRandomMixedChains);
+#ifdef ODT_MEM_PROFILE
+    RUN_TEST(testArenaInitReservesExactlyMetadataPlusArena);
+#endif
+#ifndef ODT_TEST_ASAN
+    RUN_TEST(testArenaInitFailureKeepsAnalyticReport);
+#endif
     return UNITY_END();
 }

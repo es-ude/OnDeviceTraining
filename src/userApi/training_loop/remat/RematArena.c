@@ -11,6 +11,7 @@
 #include "RematCheckedSize.h"
 #include "RematPlace.h"
 #include "RematPlan.h"
+#include "RematRows.h"
 #include "RematScheduler.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -192,5 +193,34 @@ bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t
     }
     /* The identical model reaches both: rematPlanBuild checks it against the
      * table's key. */
-    return rematPlanBuild(&s->plan, s->wires, model, spec);
+    if (!rematPlanBuild(&s->plan, s->wires, model, spec)) {
+        return false;
+    }
+    const rematProgram_t *p = &s->plan->train;
+    /* D55 as amended by Codex N3: the offsets table is its own small block,
+     * placed into and verified before the arena data block exists, so a
+     * failed data reservation still reports every analytic field. numRanges <
+     * REMAT_NONE (the table's wire-id guard): the product cannot overflow.
+     * numRanges >= 1: ACT n always has a range, so neither reservation below
+     * is reserveMemory(0). */
+    s->row.arena.offsets = reserveMemory(p->numRanges * sizeof(size_t));
+    if (s->row.arena.offsets == NULL) {
+        return false; /* planned, !placed */
+    }
+    size_t bytes;
+    if (!arenaPlaceFirstFitDecreasing(s->wires, p, s->row.arena.offsets, &bytes,
+                                      &s->row.arena.peakPlacedBytes)) {
+        return false; /* the placement's scratch: planned, !placed */
+    }
+    arenaVerifyPlacement(s->wires, p, s->row.arena.offsets, bytes);
+    s->row.arena.bytes = bytes; /* placed: every arena field of the report is valid */
+    s->row.arena.base = reserveMemory(bytes);
+    return s->row.arena.base != NULL; /* false: planned, placed, !dataReserved */
+}
+
+void rematArenaDeinit(rematScheduler_t *s) {
+    freeReservedMemory(s->row.arena.base); /* NULL after a failed data reservation */
+    freeReservedMemory(s->row.arena.offsets);
+    s->row.arena.base = NULL;
+    s->row.arena.offsets = NULL;
 }

@@ -7,12 +7,14 @@
 #include "Common.h"
 #include "RematCheckedSize.h"
 #include "RematPlan.h"
+#include "RematRows.h"
 #include "RematScheduler.h"
 
 void rematSchedulerDeinit(rematScheduler_t *s) {
     if (s == NULL) {
         return;
     }
+    rematArenaDeinit(s); /* PR1c: s->fns->deinit(s), behind the fns and inCall guards */
     rematPlanFree(s->plan);
     rematWireTableFree(s->wires);
     *s = (rematScheduler_t){0};
@@ -40,4 +42,19 @@ void rematSchedulerReport(const rematScheduler_t *s, rematReport_t *out) {
     out->numSteps = p->numSteps;
     out->peakLiveBytes = p->peakLiveBytes;
     out->metadataBytes = reportAdd(s->wires->slabBytes, s->plan->blockBytes);
+    /* ARENA is the only row until PR1c, whose HEAP reports placed == planned
+     * with the arena fields 0. */
+    if (s->row.arena.offsets != NULL) {
+        /* Cannot wrap: numRanges < REMAT_NONE, and init reserved this product. */
+        out->metadataBytes = reportAdd(out->metadataBytes, p->numRanges * sizeof(size_t));
+    }
+    if (s->row.arena.bytes != 0u) {
+        out->placed = true;
+        out->arenaBytes = s->row.arena.bytes;
+        /* Neither difference can wrap: placed >= exact bytes per wire, and the
+         * verified co-live ranges fit disjointly inside the arena. */
+        out->arenaPadBytes = s->row.arena.peakPlacedBytes - p->peakLiveBytes;
+        out->arenaGapBytes = s->row.arena.bytes - s->row.arena.peakPlacedBytes;
+    }
+    out->dataReserved = s->row.arena.base != NULL;
 }

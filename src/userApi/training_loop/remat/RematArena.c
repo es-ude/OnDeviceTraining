@@ -39,6 +39,18 @@ size_t arenaPlaced(const rematWireTable_t *t, uint16_t w) {
            ~(size_t)(ODT_WIRE_ALIGN - 1u);
 }
 
+/* D60 before any row reservation: every placed(w) and their sum over all
+ * ranges. An offset is 0 or the end of a chain of distinct co-live ranges, so
+ * this total bounds every offset + placed the placement computes: after this
+ * pass its own checked sums cannot fire (plan Assumption 8). */
+static void arenaRequirePlaceableSizes(const rematWireTable_t *t, const rematProgram_t *p) {
+    size_t total = 0;
+    for (size_t r = 0; r < p->numRanges; r++) {
+        uint16_t w = p->ranges[r].wire;
+        total = arenaAdd(t, w, total, arenaPlaced(t, w), "placed bytes total");
+    }
+}
+
 /* Inclusive intervals (spec §4.2): ranges that meet at one step are co-live. */
 static bool arenaCoLive(const rematRange_t *a, const rematRange_t *b) {
     return a->begin <= b->end && b->begin <= a->end;
@@ -191,18 +203,34 @@ bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t
     if (!rematWireTableInit(&s->wires, model, n, loss, inputLike)) {
         return false;
     }
+    /* Early bound, before the plan block exists (Leo, Codex PR1b-plan triage):
+     * in PR1 every slab wire gets exactly one range, so the plan would hold
+     * numWires - 1 ranges. The post-build check below stays authoritative. */
+    if (s->wires->numWires - 1u > ODT_REMAT_MAX_RANGES) {
+        PRINT_ERROR("remat[arena]: model needs %zu ranges, above ODT_REMAT_MAX_RANGES (%u)",
+                    s->wires->numWires - 1u, (unsigned)ODT_REMAT_MAX_RANGES);
+        exit(1);
+    }
     /* The identical model reaches both: rematPlanBuild checks it against the
      * table's key. */
     if (!rematPlanBuild(&s->plan, s->wires, model, spec)) {
         return false;
     }
     const rematProgram_t *p = &s->plan->train;
+    /* Authoritative: PR6 plans (RETAIN_LIST, SEQUENCE) hold more ranges than
+     * wires. Unreachable in PR1 behind the pre-check above (no dedicated
+     * test). */
+    if (p->numRanges > ODT_REMAT_MAX_RANGES) {
+        PRINT_ERROR("remat[arena]: plan has %zu ranges, above ODT_REMAT_MAX_RANGES (%u)",
+                    p->numRanges, (unsigned)ODT_REMAT_MAX_RANGES);
+        exit(1); /* a model/plan fact, not an OOM: the table-init idiom */
+    }
+    arenaRequirePlaceableSizes(s->wires, p);
     /* D55 as amended by Codex N3: the offsets table is its own small block,
      * placed into and verified before the arena data block exists, so a
-     * failed data reservation still reports every analytic field. numRanges <
-     * REMAT_NONE (the table's wire-id guard): the product cannot overflow.
-     * numRanges >= 1: ACT n always has a range, so neither reservation below
-     * is reserveMemory(0). */
+     * failed data reservation still reports every analytic field. The limit
+     * above bounds the product. numRanges >= 1: ACT n always has a range, so
+     * neither reservation below is reserveMemory(0). */
     s->row.arena.offsets = reserveMemory(p->numRanges * sizeof(size_t));
     if (s->row.arena.offsets == NULL) {
         return false; /* planned, !placed */

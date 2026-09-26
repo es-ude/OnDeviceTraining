@@ -22,6 +22,13 @@ _Static_assert(ODT_WIRE_ALIGN <= _Alignof(max_align_t),
                "reserveMemory block starts are max-aligned: calloc (StorageApi.c:72-74), or the "
                "max_align_t header under ODT_MEM_PROFILE (StorageApi.c:15-18, :32-45)");
 
+/* The per-build init budget (Codex N3): a plan above it exits at init by name
+ * -- a plan fact, not an OOM. Host test builds may raise it; its value belongs
+ * in the plan dump (PR8), like ODT_WIRE_ALIGN. */
+#ifndef ODT_REMAT_MAX_RANGES
+#define ODT_REMAT_MAX_RANGES 1024u
+#endif
+
 /* roundUp(bytes(w), ODT_WIRE_ALIGN), checked (D60): exits naming the wire. */
 size_t arenaPlaced(const rematWireTable_t *t, uint16_t w);
 

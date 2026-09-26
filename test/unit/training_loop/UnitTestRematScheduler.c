@@ -918,6 +918,145 @@ void testArenaInitFailureKeepsAnalyticReport(void) {
 }
 #endif
 
+/* ---- init's named exits before any row reservation (spec §5.5, §3.8, D60) ---- */
+
+/* The child prints how many bytes are live when it exits, so the parent can
+ * check "before any row reservation": only the shared table and plan may
+ * exist. Real only under ODT_MEM_PROFILE; elsewhere both sides read 0. */
+static size_t g_memBeforeExit;
+
+static void printReservedBeforeExit(void) {
+    printf("reservedBeforeExit=%zu\n", memProfileCurrentBytes() - g_memBeforeExit);
+}
+
+static void arenaInitExpectingAnExit(layer_t **model, size_t n, lossFuncType_t lt,
+                                     const tensor_t *x) {
+    rematScheduler_t s;
+    g_memBeforeExit = memProfileCurrentBytes();
+    (void)atexit(printReservedBeforeExit);
+    (void)rematArenaInit(&s, model, n, defaultLossConfig(lt), x, NULL);
+}
+
+static size_t sharedBlockBytes(layer_t **model, size_t n, lossFuncType_t lt, const tensor_t *x) {
+#ifdef ODT_MEM_PROFILE
+    builtPlan_t b = buildTableAndPlan(model, n, lt, x, NULL);
+    size_t bytes = b.t->slabBytes + b.p->blockBytes;
+    freeTableAndPlan(&b);
+    return bytes;
+#else
+    (void)model;
+    (void)n;
+    (void)lt;
+    (void)x;
+    return 0u;
+#endif
+}
+
+static void assertExitsBeforeAnyRowReservation(layer_t **model, size_t n, lossFuncType_t lt,
+                                               const tensor_t *x, const char *message) {
+    ASSERT_EXITS_WITH_OUTPUT(1, message, arenaInitExpectingAnExit(model, n, lt, x));
+    char reserved[64];
+    (void)snprintf(reserved, sizeof reserved, "reservedBeforeExit=%zu\n",
+                   sharedBlockBytes(model, n, lt, x));
+    ASSERT_EXITS_WITH_OUTPUT(1, reserved, arenaInitExpectingAnExit(model, n, lt, x));
+}
+
+/* A chain of one ReLU object over [1,1] FLOAT32 under MSE: nothing trains, so
+ * there is no GRAD wire and exactly n ranges (ACT 1..n). */
+static void fillReluChain(layer_t **model, size_t n, layer_t *relu) {
+    for (size_t i = 0; i < n; i++) {
+        model[i] = relu;
+    }
+}
+
+/* The chain arrays below live on the test stack (8 KiB at the default); a host
+ * build that raises the limit much further must reserve them instead. */
+_Static_assert(ODT_REMAT_MAX_RANGES <= 4096u, "the ReLU-chain arrays live on the test stack");
+
+static size_t tableBlockBytes(layer_t **model, size_t n, lossFuncType_t lt, const tensor_t *x) {
+#ifdef ODT_MEM_PROFILE
+    rematWireTable_t *t = NULL;
+    TEST_ASSERT_TRUE(rematWireTableInit(&t, model, n, defaultLossConfig(lt), x));
+    size_t bytes = t->slabBytes;
+    rematWireTableFree(t);
+    return bytes;
+#else
+    (void)model;
+    (void)n;
+    (void)lt;
+    (void)x;
+    return 0u;
+#endif
+}
+
+/* An oversized chain is refused from the table alone, before the plan block
+ * is reserved: only the table is live at the exit, and the message is the
+ * pre-check's, not the post-build check's ("plan has ... ranges"). */
+void testArenaInitExitsAboveMaxRangesBeforeThePlanIsBuilt(void) {
+    layer_t *relu = makeRelu(&g_floatQ);
+    layer_t *model[ODT_REMAT_MAX_RANGES + 1u];
+    fillReluChain(model, ODT_REMAT_MAX_RANGES + 1u, relu);
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 1}, 2, &g_floatQ);
+    char message[96];
+    (void)snprintf(message, sizeof message,
+                   "model needs %u ranges, above ODT_REMAT_MAX_RANGES (%u)",
+                   (unsigned)(ODT_REMAT_MAX_RANGES + 1u), (unsigned)ODT_REMAT_MAX_RANGES);
+    ASSERT_EXITS_WITH_OUTPUT(1, message,
+                             arenaInitExpectingAnExit(model, ODT_REMAT_MAX_RANGES + 1u, MSE, x));
+    char reserved[64];
+    (void)snprintf(reserved, sizeof reserved, "reservedBeforeExit=%zu\n",
+                   tableBlockBytes(model, ODT_REMAT_MAX_RANGES + 1u, MSE, x));
+    ASSERT_EXITS_WITH_OUTPUT(1, reserved,
+                             arenaInitExpectingAnExit(model, ODT_REMAT_MAX_RANGES + 1u, MSE, x));
+    freeReluLayer(relu);
+}
+
+static void initAndExitWithTheVerdict(layer_t **model, size_t n, const tensor_t *x) {
+    rematScheduler_t s;
+    bool ok = rematArenaInit(&s, model, n, defaultLossConfig(MSE), x, NULL) &&
+              s.plan->train.numRanges == n;
+    rematSchedulerDeinit(&s);
+    _exit(ok ? 0 : 2);
+}
+
+/* RF4: the limit is inclusive -- a plan of exactly ODT_REMAT_MAX_RANGES
+ * ranges initialises. */
+void testArenaInitAcceptsExactlyMaxRanges(void) {
+    layer_t *relu = makeRelu(&g_floatQ);
+    layer_t *model[ODT_REMAT_MAX_RANGES];
+    fillReluChain(model, ODT_REMAT_MAX_RANGES, relu);
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 1}, 2, &g_floatQ);
+    ASSERT_EXITS_WITH(0, initAndExitWithTheVerdict(model, ODT_REMAT_MAX_RANGES, x));
+    freeReluLayer(relu);
+}
+
+/* ACT 1 holds 4 * (2^62 - 1) = SIZE_MAX - 3 bytes; rounding it up to 8 wraps. */
+void testArenaInitExitsOnAPlacedSizeOverflowBeforeAnyRowReservation(void) {
+    layer_t *model[1] = {makeRelu(&g_floatQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, SIZE_MAX / 4u}, 2, &g_floatQ);
+    assertExitsBeforeAnyRowReservation(model, 1, MSE, x,
+                                       "size overflow computing placed bytes at wire ACT 1");
+    freeModel(model, 1);
+}
+
+/* ACT 1 = 2^63 B; the AvgPool (k 2, stride 1, VALID) output has length
+ * 2^61 - 1, so ACT 2 = 2^63 - 4 B; the table's total 2^64 - 4 fits, but the
+ * placed sizes 2^63 + 2^63 do not. */
+void testArenaInitExitsOnAnArenaSumOverflowBeforeAnyRowReservation(void) {
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, &g_floatQ);
+    layer_t *model[2] = {makeRelu(&g_floatQ),
+                         avgPool1dLayerInit(&(avgPool1dInit_t){.kernelSize = 2, .stride = 1}, &lq)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 1, (size_t)1 << 61}, 3, &g_floatQ);
+    assertExitsBeforeAnyRowReservation(model, 2, MSE, x,
+                                       "size overflow computing placed bytes total at wire ACT 2");
+    freeModel(model, 2);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testArenaInitBuildsTheTableAndThePlan);
@@ -958,5 +1097,9 @@ int main(void) {
 #ifndef ODT_TEST_ASAN
     RUN_TEST(testArenaInitFailureKeepsAnalyticReport);
 #endif
+    RUN_TEST(testArenaInitExitsAboveMaxRangesBeforeThePlanIsBuilt);
+    RUN_TEST(testArenaInitAcceptsExactlyMaxRanges);
+    RUN_TEST(testArenaInitExitsOnAPlacedSizeOverflowBeforeAnyRowReservation);
+    RUN_TEST(testArenaInitExitsOnAnArenaSumOverflowBeforeAnyRowReservation);
     return UNITY_END();
 }

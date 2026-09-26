@@ -281,6 +281,20 @@ target_link_libraries(UnitTestGroupNormIntegration PRIVATE
 )
 __register_target_as_unit_test(UnitTestGroupNormIntegration)
 
+# #460 task 7: Ghost-BN cadence through trainingBatchDefault vs a PyTorch
+# chunked reference (spec §7 item 6) -- mirrors generate_expected_microbatch.py's
+# CMake wiring (:571-580).
+set(GEN_BN_CADENCE_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_bn_cadence.h)
+add_custom_command(
+        OUTPUT ${GEN_BN_CADENCE_HEADER}
+        COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_bn_cadence.py
+                --out ${GEN_BN_CADENCE_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_bn_cadence.py
+        COMMENT "Generating expected_bn_cadence.h via PyTorch"
+        VERBATIM
+)
+add_custom_target(generate_expected_bn_cadence DEPENDS ${GEN_BN_CADENCE_HEADER})
+
 add_executable(UnitTestBatchNorm1dIntegration UnitTestBatchNorm1dIntegration.c)
 target_link_libraries(UnitTestBatchNorm1dIntegration PRIVATE
         unity
@@ -311,6 +325,8 @@ target_link_libraries(UnitTestBatchNorm1dIntegration PRIVATE
         StorageApi
         odt_test_death
 )
+add_dependencies(UnitTestBatchNorm1dIntegration generate_expected_bn_cadence)
+target_include_directories(UnitTestBatchNorm1dIntegration PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 __register_target_as_unit_test(UnitTestBatchNorm1dIntegration)
 
 add_executable(UnitTestAdaptiveAvgPool1dIntegration UnitTestAdaptiveAvgPool1dIntegration.c)

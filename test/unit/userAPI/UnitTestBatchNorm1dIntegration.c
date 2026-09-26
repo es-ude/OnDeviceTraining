@@ -6,7 +6,10 @@
 
 #include "BatchNorm1d.h"
 #include "BatchNorm1dApi.h"
+#include "BatchView.h"
 #include "CalculateGradsSequential.h"
+#include "DataLoaderApi.h"
+#include "Dataset.h"
 #include "DeathTest.h"
 #include "InferenceApi.h"
 #include "LayerCommon.h"
@@ -22,7 +25,9 @@
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
+#include "TrainingBatchDefault.h"
 #include "TrainingLoopApi.h"
+#include "expected_bn_cadence.h"
 #include "unity.h"
 
 static quantization_t *g_q;
@@ -279,6 +284,97 @@ void testGradsCallKeepsBatchNormInTrainingModeThroughBackward(void) {
     TEST_ASSERT_EQUAL_FLOAT(dgRef, dgLoop);
 }
 
+/* Ghost-BN cadence through the stacked loop (#460 spec §7 item 6): one
+ * macro batch of b = 8 through BN(3) -> Linear(3->2), chunked by m into
+ * b/m calculateGradsSequential calls via trainingBatchDefault. Compares
+ * running stats + mean-scaled grads (before the optimizer step) against a
+ * PyTorch chunked reference (generate_expected_bn_cadence.py). */
+#define CAD_B 8
+#define CAD_GRADS 14
+
+static batch_t *buildCadBatch(tensor_t **items, tensor_t **labels) {
+    batch_t *batch = reserveMemory(sizeof(batch_t));
+    batch->samples = reserveMemory(CAD_B * sizeof(sample_t *));
+    batch->size = CAD_B;
+    for (size_t i = 0; i < CAD_B; i++) {
+        sample_t *s = reserveMemory(sizeof(sample_t));
+        s->item = items[i];
+        s->label = labels[i];
+        batch->samples[i] = s;
+    }
+    return batch;
+}
+
+static void runCadence(size_t m, float *rm, float *rv, uint64_t *nbt, float *grads) {
+    layer_t *model[2];
+    model[0] = bnLayer(3, false, false, TRAINABLE_DEFAULT);
+    model[1] = linearLayerInit(&(linearInit_t){.inFeatures = 3, .outFeatures = 2}, &g_lq);
+    float g[3], be[3], w[6], b[2];
+    memcpy(g, bnCadGamma, sizeof g);
+    memcpy(be, bnCadBeta, sizeof be);
+    memcpy(w, bnCadLinW, sizeof w);
+    memcpy(b, bnCadLinB, sizeof b);
+    layerLoadWeights(model[0], g, be);
+    layerLoadWeights(model[1], w, b);
+    tensor_t *items[CAD_B];
+    tensor_t *labels[CAD_B];
+    for (size_t s = 0; s < CAD_B; s++) {
+        items[s] = buildFloatTensor((size_t[]){3}, 1, bnCadItems + 3 * s); /* natural [3] */
+        labels[s] = buildFloatTensor((size_t[]){2}, 1, bnCadLabels + 2 * s);
+    }
+    batchView_t view;
+    float scale = lossFunctions[MSE].computeMeanScale(CAD_B, batchViewOf(&view, labels[0]));
+    batch_t *batch = buildCadBatch(items, labels);
+    (void)trainingBatchDefault(model, 2, defaultLossConfig(MSE), batch, calculateGradsSequential,
+                               REDUCTION_MEAN, m);
+    freeBatch(batch);
+    batchNorm1dConfig_t *c = model[0]->config->batchNorm1d;
+    memcpy(rm, c->runningMean->data, 3 * sizeof(float));
+    memcpy(rv, c->runningVar->data, 3 * sizeof(float));
+    *nbt = c->numBatchesTracked;
+    parameter_t *slots[4];
+    TEST_ASSERT_EQUAL_size_t(4, calcTotalNumberOfStates(model, 2));
+    collectTrainableParameters(model, 2, slots);
+    size_t k = 0;
+    for (size_t p = 0; p < 4; p++) {
+        size_t n = calcNumberOfElementsByTensor(slots[p]->grad);
+        for (size_t i = 0; i < n; i++) {
+            grads[k++] = ((float *)slots[p]->grad->data)[i] * scale;
+        }
+    }
+    for (size_t s = 0; s < CAD_B; s++) {
+        freeTensor(labels[s]);
+        freeTensor(items[s]);
+    }
+    freeLinearLayer(model[1]);
+    freeBatchNorm1dLayer(model[0]);
+}
+
+static void assertCadence(size_t m, const float *expRm, const float *expRv, uint64_t expNbt,
+                          const float *expGrads) {
+    float rm[3], rv[3], grads[CAD_GRADS];
+    uint64_t nbt;
+    runCadence(m, rm, rv, &nbt, grads);
+    TEST_ASSERT_EQUAL_UINT64(expNbt, nbt);
+    for (size_t c = 0; c < 3; c++) {
+        TEST_ASSERT_FLOAT_WITHIN(1e-5f, expRm[c], rm[c]);
+        TEST_ASSERT_FLOAT_WITHIN(1e-5f, expRv[c], rv[c]);
+    }
+    for (size_t i = 0; i < CAD_GRADS; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(1e-5f, expGrads[i], grads[i]);
+    }
+}
+
+void testGhostBatchNormCadenceM2(void) {
+    assertCadence(2, bnCadRunningMean_m2, bnCadRunningVar_m2, bnCadNbt_m2, bnCadGrads_m2);
+}
+void testGhostBatchNormCadenceM4(void) {
+    assertCadence(4, bnCadRunningMean_m4, bnCadRunningVar_m4, bnCadNbt_m4, bnCadGrads_m4);
+}
+void testGhostBatchNormCadenceM8(void) {
+    assertCadence(8, bnCadRunningMean_m8, bnCadRunningVar_m8, bnCadNbt_m8, bnCadGrads_m8);
+}
+
 int main(void) {
     g_q = quantizationInitFloat();
     layerQuantInitUniform(&g_lq, g_q);
@@ -295,6 +391,9 @@ int main(void) {
     RUN_TEST(testNoAffineBatchNormAloneStillUpdatesRunningStats);
     RUN_TEST(testCustomGradsFnWithoutFlipRunsBatchNormInEvalMode);
     RUN_TEST(testGradsCallKeepsBatchNormInTrainingModeThroughBackward);
+    RUN_TEST(testGhostBatchNormCadenceM2);
+    RUN_TEST(testGhostBatchNormCadenceM4);
+    RUN_TEST(testGhostBatchNormCadenceM8);
     int rc = UNITY_END();
     freeQuantization(g_q);
     return rc;

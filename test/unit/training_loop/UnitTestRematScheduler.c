@@ -1057,6 +1057,223 @@ void testArenaInitExitsOnAnArenaSumOverflowBeforeAnyRowReservation(void) {
     freeModel(model, 2);
 }
 
+/* ---- the row's per-step entry points (spec §5.5, §5.4) ---- */
+
+/* PR1c's rematBegin: the shared bind, then the row's begin (plan Assumption 3). */
+static void bindAndBegin(arenaFixture_t *f, rematScheduler_t *s) {
+    rematWireTableBind(s->wires, f->model, f->n, f->lt, f->x);
+    rematArenaBegin(s);
+}
+
+/* PR1c's rematEnd: the row's end, then the shared unbind. */
+static void endAndUnbind(rematScheduler_t *s) {
+    rematArenaEnd(s);
+    rematWireTableUnbind(s->wires);
+}
+
+static size_t walkAll(arenaFixture_t *f, rematScheduler_t *s) {
+    bindAndBegin(f, s);
+    rematStep_t st;
+    size_t steps = 0;
+    while (rematArenaNext(s, &st)) {
+        rematArenaDone(s, &st);
+        steps++;
+    }
+    endAndUnbind(s);
+    return steps;
+}
+
+void testArenaNextHandsOutThePlanStepsInOrder(void) {
+    arenaFixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    const rematProgram_t *p = &s.plan->train;
+    bindAndBegin(&f, &s);
+    rematStep_t st;
+    size_t i = 0;
+    while (rematArenaNext(&s, &st)) {
+        TEST_ASSERT_TRUE(i < p->numSteps);
+        TEST_ASSERT_EQUAL_UINT8(p->steps[i].kind, st.kind);
+        TEST_ASSERT_EQUAL_UINT16(p->steps[i].layer, st.layer);
+        rematArenaDone(&s, &st);
+        i++;
+    }
+    TEST_ASSERT_EQUAL_size_t(25, i);
+    endAndUnbind(&s);
+    freeFixture(&f, &s);
+}
+
+void testArenaNextAfterTheStreamCompletedReturnsFalse(void) {
+    arenaFixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initArena(&f, &g_liveness);
+    bindAndBegin(&f, &s);
+    rematStep_t st;
+    while (rematArenaNext(&s, &st)) {
+        rematArenaDone(&s, &st);
+    }
+    size_t live = s.wires->liveBytes;
+    TEST_ASSERT_FALSE(rematArenaNext(&s, &st));
+    TEST_ASSERT_EQUAL_size_t(live, s.wires->liveBytes);
+    endAndUnbind(&s);
+    freeFixture(&f, &s);
+}
+
+/* PR1a carry: the walk restarts at every begin, on the same resident arena. */
+void testArenaSecondCallRestartsTheWalk(void) {
+    arenaFixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initArena(&f, &g_liveness);
+    TEST_ASSERT_EQUAL_size_t(5, walkAll(&f, &s));
+    TEST_ASSERT_EQUAL_size_t(5, walkAll(&f, &s));
+    TEST_ASSERT_EQUAL_UINT32(1, s.wires->wires[1].bindGen); /* the table bind reset it */
+    freeFixture(&f, &s);
+}
+
+static void doneForAStepNextDidNotHandOut(arenaFixture_t *f, rematScheduler_t *s) {
+    bindAndBegin(f, s);
+    rematStep_t st;
+    (void)rematArenaNext(s, &st);
+    rematArenaDone(s, &(rematStep_t){.kind = REMAT_STEP_BACKWARD, .layer = 0});
+}
+
+void testArenaDoneExitsOnAStepNextDidNotHandOut(void) {
+    arenaFixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "rematDone for a step next() did not hand out: step #0 is (kind 0, "
+                             "layer 0), done() got (kind 3, layer 0)",
+                             doneForAStepNextDidNotHandOut(&f, &s));
+    freeFixture(&f, &s);
+}
+
+static void doneBeforeNext(arenaFixture_t *f, rematScheduler_t *s) {
+    bindAndBegin(f, s);
+    rematArenaDone(s, &s->plan->train.steps[0]);
+}
+
+/* RF2: step 0 opens ACT 1; a done() without its next() would leave it
+ * unbound and stall the open cursor for the rest of the call. */
+void testArenaDoneExitsBeforeNextHandedTheStepOut(void) {
+    arenaFixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematDone for step #0 before rematNext handed it out",
+                             doneBeforeNext(&f, &s));
+    freeFixture(&f, &s);
+}
+
+static void doneWithoutNextAtLossForward(arenaFixture_t *f, rematScheduler_t *s) {
+    bindAndBegin(f, s);
+    rematStep_t st;
+    for (size_t k = 0; k < 2u; k++) {
+        (void)rematArenaNext(s, &st);
+        rematArenaDone(s, &st);
+    }
+    rematArenaDone(s, &s->plan->train.steps[2]);
+}
+
+/* F1 step 2 is LOSS_FORWARD, which opens no range (nor does a grads-only
+ * BACKWARD at deepest): the open cursor cannot see the skipped next(), only
+ * the handed-out flag can. */
+void testArenaDoneExitsWhenNextWasSkippedAtAStepThatOpensNothing(void) {
+    arenaFixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    TEST_ASSERT_EQUAL_UINT8(REMAT_STEP_LOSS_FORWARD, s.plan->train.steps[2].kind);
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematDone for step #2 before rematNext handed it out",
+                             doneWithoutNextAtLossForward(&f, &s));
+    freeFixture(&f, &s);
+}
+
+static void nextTwice(arenaFixture_t *f, rematScheduler_t *s) {
+    bindAndBegin(f, s);
+    rematStep_t st;
+    (void)rematArenaNext(s, &st);
+    (void)rematArenaNext(s, &st);
+}
+
+void testArenaNextExitsWhileTheHandedOutStepIsNotDone(void) {
+    arenaFixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematNext while step #0 is still handed out", nextTwice(&f, &s));
+    freeFixture(&f, &s);
+}
+
+static void doneAfterTheStreamCompleted(arenaFixture_t *f, rematScheduler_t *s) {
+    bindAndBegin(f, s);
+    rematStep_t st;
+    rematStep_t last = {0};
+    while (rematArenaNext(s, &st)) {
+        rematArenaDone(s, &st);
+        last = st;
+    }
+    rematArenaDone(s, &last);
+}
+
+/* RF1: one done() too many must not read steps[numSteps]. */
+void testArenaDoneExitsAfterTheStreamCompleted(void) {
+    arenaFixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematDone after the stream completed (5 steps)",
+                             doneAfterTheStreamCompleted(&f, &s));
+    freeFixture(&f, &s);
+}
+
+static void endAfterOneStep(arenaFixture_t *f, rematScheduler_t *s) {
+    bindAndBegin(f, s);
+    rematStep_t st;
+    (void)rematArenaNext(s, &st);
+    rematArenaDone(s, &st);
+    rematArenaEnd(s);
+}
+
+void testArenaEndExitsOnAnIncompleteWalk(void) {
+    arenaFixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initArena(&f, &g_liveness);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "rematEnd before the walk completed: 1 of 5 steps done, 0 of 3 ranges closed",
+        endAfterOneStep(&f, &s));
+    freeFixture(&f, &s);
+}
+
+/* A tampered or imported range ending past the last step would stay bound
+ * across the call boundary; the grammar does not check range ends before
+ * PR6. F1 STORE_ALL: every range ends at step 4, the seed is last in endOrder. */
+static void walkWithTheLastRangeLeftOpen(arenaFixture_t *f, rematScheduler_t *s) {
+    rematProgram_t *p = &s->plan->train;
+    p->ranges[p->endOrder[p->numRanges - 1u]].end = (uint16_t)p->numSteps;
+    (void)walkAll(f, s);
+}
+
+void testArenaEndExitsOnARangeLeftOpen(void) {
+    arenaFixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "rematEnd before the walk completed: 5 of 5 steps done, 2 of 3 ranges closed",
+        walkWithTheLastRangeLeftOpen(&f, &s));
+    freeFixture(&f, &s);
+}
+
+static void beginOnAnUnreservedArena(rematScheduler_t *s) {
+    s->row.arena.base = NULL; /* the state rematArenaInit leaves after a failed data block */
+    rematArenaBegin(s);
+}
+
+void testArenaBeginExitsWhenTheArenaWasNeverReserved(void) {
+    arenaFixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematBegin on a scheduler whose arena was never reserved",
+                             beginOnAnUnreservedArena(&s));
+    freeFixture(&f, &s);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testArenaInitBuildsTheTableAndThePlan);
@@ -1101,5 +1318,16 @@ int main(void) {
     RUN_TEST(testArenaInitAcceptsExactlyMaxRanges);
     RUN_TEST(testArenaInitExitsOnAPlacedSizeOverflowBeforeAnyRowReservation);
     RUN_TEST(testArenaInitExitsOnAnArenaSumOverflowBeforeAnyRowReservation);
+    RUN_TEST(testArenaNextHandsOutThePlanStepsInOrder);
+    RUN_TEST(testArenaNextAfterTheStreamCompletedReturnsFalse);
+    RUN_TEST(testArenaSecondCallRestartsTheWalk);
+    RUN_TEST(testArenaDoneExitsOnAStepNextDidNotHandOut);
+    RUN_TEST(testArenaDoneExitsBeforeNextHandedTheStepOut);
+    RUN_TEST(testArenaDoneExitsWhenNextWasSkippedAtAStepThatOpensNothing);
+    RUN_TEST(testArenaNextExitsWhileTheHandedOutStepIsNotDone);
+    RUN_TEST(testArenaDoneExitsAfterTheStreamCompleted);
+    RUN_TEST(testArenaEndExitsOnAnIncompleteWalk);
+    RUN_TEST(testArenaEndExitsOnARangeLeftOpen);
+    RUN_TEST(testArenaBeginExitsWhenTheArenaWasNeverReserved);
     return UNITY_END();
 }

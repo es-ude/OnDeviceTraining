@@ -246,6 +246,82 @@ bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t
     return s->row.arena.base != NULL; /* false: planned, placed, !dataReserved */
 }
 
+void rematArenaBegin(rematScheduler_t *s) {
+    if (s->row.arena.offsets == NULL || s->row.arena.base == NULL) {
+        PRINT_ERROR("remat[arena]: rematBegin on a scheduler whose arena was never reserved "
+                    "(rematArenaInit returned false)");
+        exit(1);
+    }
+    s->walk = (rematWalk_t){0};
+    s->handedOut = false;
+}
+
+bool rematArenaNext(rematScheduler_t *s, rematStep_t *st) {
+    const rematProgram_t *p = &s->plan->train; /* PR3: the program of the call's mode */
+    if (s->walk.step == p->numSteps) {
+        return false;
+    }
+    if (s->handedOut) {
+        PRINT_ERROR("remat[arena]: rematNext while step #%zu is still handed out (rematDone not "
+                    "called)",
+                    s->walk.step);
+        exit(1);
+    }
+    for (size_t r; (r = rematWalkOpening(p, &s->walk)) != REMAT_NONE;) {
+        /* The id comes from the range that was placed, never from rematGradId. */
+        uint16_t w = p->ranges[r].wire;
+        uint8_t *b = s->row.arena.base + s->row.arena.offsets[r];
+        rematWireBind(s->wires, w, b);
+    }
+    *st = p->steps[s->walk.step];
+    s->handedOut = true;
+    return true;
+}
+
+/* done() answers the step next() just handed out, exactly once. The flag, not
+ * the open cursor, says whether next() ran: LOSS_FORWARD and a grads-only
+ * BACKWARD at deepest open no range. */
+static void arenaRequireSameStep(const rematScheduler_t *s, const rematProgram_t *p,
+                                 const rematStep_t *st) {
+    if (s->walk.step >= p->numSteps) {
+        PRINT_ERROR("remat[arena]: rematDone after the stream completed (%zu steps)", p->numSteps);
+        exit(1);
+    }
+    if (!s->handedOut) {
+        PRINT_ERROR("remat[arena]: rematDone for step #%zu before rematNext handed it out",
+                    s->walk.step);
+        exit(1);
+    }
+    const rematStep_t *handed = &p->steps[s->walk.step];
+    if (st->kind != handed->kind || st->layer != handed->layer) {
+        PRINT_ERROR("remat[arena]: rematDone for a step next() did not hand out: step #%zu is "
+                    "(kind %u, layer %u), done() got (kind %u, layer %u)",
+                    s->walk.step, (unsigned)handed->kind, (unsigned)handed->layer,
+                    (unsigned)st->kind, (unsigned)st->layer);
+        exit(1);
+    }
+}
+
+void rematArenaDone(rematScheduler_t *s, const rematStep_t *st) {
+    const rematProgram_t *p = &s->plan->train;
+    arenaRequireSameStep(s, p, st);
+    for (size_t r; (r = rematWalkClosing(p, &s->walk)) != REMAT_NONE;) {
+        rematWireRelease(s->wires, p->ranges[r].wire);
+    }
+    s->walk.step++;
+    s->handedOut = false;
+}
+
+void rematArenaEnd(rematScheduler_t *s) {
+    const rematProgram_t *p = &s->plan->train;
+    if (s->walk.step != p->numSteps || s->walk.close != p->numRanges) {
+        PRINT_ERROR("remat[arena]: rematEnd before the walk completed: %zu of %zu steps done, "
+                    "%zu of %zu ranges closed",
+                    s->walk.step, p->numSteps, s->walk.close, p->numRanges);
+        exit(1);
+    }
+}
+
 void rematArenaDeinit(rematScheduler_t *s) {
     freeReservedMemory(s->row.arena.base); /* NULL after a failed data reservation */
     freeReservedMemory(s->row.arena.offsets);

@@ -62,6 +62,8 @@ struct rematScheduler {
     rematSchedulerType_t type;
     rematWireTable_t *wires; /* shared buffer table: one reserveMemory block */
     rematPlan_t *plan;       /* shared static plan: one reserveMemory block, placement-free */
+    rematWalk_t walk;        /* the static-plan cursor of the current call */
+    bool handedOut;          /* next() handed out walk.step; done() has not answered yet */
     union {
         /* ARENA-private (R5). Two blocks (D55 as amended by Codex N3): offsets
          * first, placed into and verified, then the arena data block. */

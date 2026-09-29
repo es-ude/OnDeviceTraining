@@ -431,6 +431,41 @@ void testForwardTrainingFrozenUntrackedRejectsSingleRow(void) {
     bnFixtureFree(&f);
 }
 
+/* #467 fix round 1: batchNorm1dRequireEvaluable is public -- pin its no-op
+ * contract for a TRACKED BN directly, without going through trainingRun's
+ * walk. The walk never calls this function at all for a model with no
+ * untracked BN (Review Focus 5's "skip the walk entirely" guarantee), so a
+ * training-loop-level test can never distinguish a missing trackRunningStats
+ * early return here from a correct one -- this is the cheapest direct killer.
+ * ASSERT_EXITS_WITH(0, ...) is DeathTest.h's "did not exit" case: a no-op
+ * return, not a call to exit(). */
+void testRequireEvaluableNoOpsForTrackedBatchNormRank2(void) {
+    bnFixture_t f;
+    bnFixtureInit(&f, 2, true, true /* track */, NULL, NULL, NULL, NULL, BN_MOMENTUM_DEFAULT, 0.0f);
+    size_t dims[2] = {1, 2};
+    size_t order[2] = {0, 1};
+    shape_t s;
+    setShape(&s, dims, 2, order);
+    ASSERT_EXITS_WITH(0, batchNorm1dRequireEvaluable(&f.layer, &s, "t"));
+    bnFixtureFree(&f);
+}
+
+/* Companion: an UNTRACKED BN with n = T = 3 >= 2 also must not die -- pins
+ * the n < 2 threshold itself (not the tracked early return) on a rank-3
+ * shape, distinct from the rejection coverage in
+ * testForwardEvalUntrackedRejectsSingleSample. */
+void testRequireEvaluableNoOpsForUntrackedBatchNormWithEnoughSamples(void) {
+    bnFixture_t f;
+    bnFixtureInit(&f, 2, true, false /* track */, NULL, NULL, NULL, NULL, BN_MOMENTUM_DEFAULT,
+                  0.0f);
+    size_t dims[3] = {1, 2, 3};
+    size_t order[3] = {0, 1, 2};
+    shape_t s;
+    setShape(&s, dims, 3, order);
+    ASSERT_EXITS_WITH(0, batchNorm1dRequireEvaluable(&f.layer, &s, "t"));
+    bnFixtureFree(&f);
+}
+
 void testForwardRejectsRank1(void) {
     size_t order[1] = {0};
     bnFixture_t f;
@@ -978,6 +1013,8 @@ int main(void) {
     RUN_TEST(testForwardEvalAcceptsSingleRowAndEmpty);
     RUN_TEST(testForwardEvalUntrackedRejectsSingleSample);
     RUN_TEST(testForwardTrainingFrozenUntrackedRejectsSingleRow);
+    RUN_TEST(testRequireEvaluableNoOpsForTrackedBatchNormRank2);
+    RUN_TEST(testRequireEvaluableNoOpsForUntrackedBatchNormWithEnoughSamples);
     RUN_TEST(testForwardRejectsRank1);
     RUN_TEST(testForwardRejectsRank4);
     RUN_TEST(testForwardRejectsTransposedInput);

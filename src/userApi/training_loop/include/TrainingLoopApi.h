@@ -130,7 +130,10 @@ typedef struct trainingRunOptions {
                                     Training only -- evaluation always runs one sample per call.
                                     Dropout fails fast at m > 1 (its mask holds one sample). A
                                     rank-2 BatchNorm1d in training mode needs microBatchSize >= 2
-                                    (batch statistics need >= 2 values per channel). */
+                                    (batch statistics need >= 2 values per channel). Since
+                                    evaluation runs one sample per call, an untracked
+                                    (noRunningStats) rank-2 BatchNorm1d cannot be evaluated;
+                                    track running statistics or use [C, T >= 2] samples. */
 } trainingRunOptions_t;
 
 void freeTrainingStats(trainingStats_t *trainingStats);

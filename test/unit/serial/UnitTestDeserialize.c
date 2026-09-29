@@ -2279,6 +2279,40 @@ static void testDeserializeBatchNormFileHyperparametersWin(void) {
     TEST_ASSERT_EQUAL_FLOAT(0.3f, capturedMomentum);
 }
 
+/* Adversarial-review fix #6: the BATCHNORM1D reader decoded forwardMath/
+ * propLossMath (deserializeArithmetic already range-checks the wire tag
+ * against the arithmeticType_t enum) but never required FLOAT32 -- unlike
+ * the factory (BatchNorm1dApi.c's validateLayerQuantForBatchNorm1d), which
+ * rejects a non-FLOAT32 forwardMath/propLossMath at construction time. A
+ * loaded file could carry a non-FLOAT32-tagged BN that only the forward/
+ * backward FLOAT32-only guards would reject, at CALL time, instead of at
+ * LOAD time (the deserialize-time trust boundary every other file-derived
+ * BN field is checked at, per Deserialize.c's BATCHNORM1D arm).
+ *
+ * BN_OFFSET_FORWARD_MATH_TYPE derivation, continuing the layout comment
+ * above (writeValidBatchNorm1dFile: C = 2, frozen, affine, tracking):
+ *   BN_OFFSET_RUNNING_VAR (80) + runningVar[C=2] (2 x f32 = 8) -> 88
+ *                                              numBatchesTracked u64 (8)
+ *   88 + 8                                  -> 96  forwardMath.type u8
+ *   96 + 1                                  -> 97  forwardMath.roundingMode u8
+ *   97 + 1                                  -> 98  propLossMath.type u8
+ * (serializeArithmetic/deserializeArithmetic: type u8 then roundingMode u8,
+ * Serialize.c:143-146 / Deserialize.c:212-227). */
+#define BN_OFFSET_FORWARD_MATH_TYPE 96
+
+static void testDeserializeBatchNormRejectsNonFloat32ForwardMath(void) {
+    writeValidBatchNorm1dFile();
+    patchFileU8(BN_OFFSET_FORWARD_MATH_TYPE, (uint8_t)ARITH_SYM_INT32); /* valid tag, not FLOAT32 */
+    layer_t *skeleton = makeSkeletonBatchNorm1d(2, false, false);
+    layer_t *model[] = {skeleton};
+
+    FILE *f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    fclose(f);
+
+    freeBatchNorm1dLayer(skeleton);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -2336,5 +2370,6 @@ int main(void) {
     RUN_TEST(testDeserializeBatchNormRejectsNaNRunningMean);
     RUN_TEST(testDeserializeBatchNormRejectsNegativeRunningVar);
     RUN_TEST(testDeserializeBatchNormFileHyperparametersWin);
+    RUN_TEST(testDeserializeBatchNormRejectsNonFloat32ForwardMath);
     return UNITY_END();
 }

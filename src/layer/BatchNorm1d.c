@@ -129,8 +129,13 @@ static void bnValidateRunningBuffers(const batchNorm1dConfig_t *cfg) {
 }
 
 /* executeOp sizes its raw target from `output` (ExecuteOp.c:107) while the
- * kernel loops over the input's element count: an output that does not
- * match the input's rank and dims would be written out of bounds. */
+ * kernel loops over the input's element count and writes y[i] at the flat
+ * IDENTITY-order offset i (bnForwardKernelFloat): an output that does not
+ * match the input's rank and dims would be written out of bounds, a
+ * non-identity-order output would receive values at the wrong physical
+ * offsets (silently, when m == C makes dims alone ambiguous -- adversarial-
+ * review fix #3), and a non-FLOAT32 output would misinterpret the FLOAT32
+ * bit pattern the kernel writes. */
 static void bnValidateOutputMatchesInput(const tensor_t *input, const tensor_t *output) {
     const shape_t *in = input->shape;
     const shape_t *out = output->shape;
@@ -142,6 +147,20 @@ static void bnValidateOutputMatchesInput(const tensor_t *input, const tensor_t *
         PRINT_ERROR("BatchNorm1d forward: output must have the input's rank and dims "
                     "(input rank %zu, output rank %zu)",
                     in->numberOfDimensions, out->numberOfDimensions);
+        exit(1);
+    }
+    for (size_t d = 0; d < out->numberOfDimensions; d++) {
+        if (out->orderOfDimensions[d] != d) {
+            PRINT_ERROR("BatchNorm1d forward: output must be identity-order (dim %zu is order "
+                        "%zu) -- the kernel writes in the input's flat identity order",
+                        d, out->orderOfDimensions[d]);
+            exit(1);
+        }
+    }
+    if (output->quantization->type != FLOAT32) {
+        PRINT_ERROR("BatchNorm1d forward: output must be FLOAT32 (got dtype %d) -- BatchNorm1d "
+                    "is FLOAT32-only",
+                    (int)output->quantization->type);
         exit(1);
     }
 }
@@ -156,13 +175,30 @@ static size_t bnInner(const tensor_t *t) {
 
 /* Batch statistics need n >= 2 values per channel: n = 1 has no variance
  * (and n/(n-1) divides by zero), n = 0 would write 0/0 into the running
- * stats. PyTorch rejects n = 1 only; n = 0 is stricter by design (#460). */
-static void bnRequireBatchStatsSize(const tensor_t *t, size_t n, const char *what) {
+ * stats. PyTorch rejects n = 1 only; n = 0 is stricter by design (#460).
+ *
+ * Adversarial-review fix #1: an untracked (noRunningStats) BN always uses
+ * batch statistics, even in eval (D4) -- and evaluation runs one sample per
+ * call (#152 D10), so a rank-2 [1, C] evaluation sample always has n = 1.
+ * The generic "raise microBatchSize" / "a frozen or eval-mode BN falls back
+ * to running statistics" message is actively wrong there: there is no
+ * training loop to raise microBatchSize on, and there are no running
+ * statistics to fall back to. Give that case its own message. */
+static void bnRequireBatchStatsSize(const batchNorm1dConfig_t *cfg, const tensor_t *t, size_t n,
+                                    const char *what) {
     if (n >= 2) {
         return;
     }
+    bool untrackedEval = !cfg->trackRunningStats && !cfg->training;
     const shape_t *s = t->shape;
-    if (s->numberOfDimensions == 2) {
+    if (untrackedEval) {
+        PRINT_ERROR(
+            "BatchNorm1d %s: no running statistics (noRunningStats), so evaluation normalizes "
+            "with batch statistics; evaluation runs one sample per call, so n = T values per "
+            "channel -- got n = %zu -- track running statistics, or feed rank-3 [1, C, T >= 2] "
+            "samples",
+            what, n);
+    } else if (s->numberOfDimensions == 2) {
         if (n == 0) {
             PRINT_ERROR("BatchNorm1d %s: batch statistics need >= 2 values per channel, got an "
                         "empty batch (n = 0) for a [%zu, %zu] batch",
@@ -285,7 +321,7 @@ void batchNorm1dForward(layer_t *layer, tensor_t *input, tensor_t *output) {
     size_t n = total / cfg->numChannels;
     bool batchStats = bnUsesBatchStats(cfg);
     if (batchStats) {
-        bnRequireBatchStatsSize(input, n, "forward");
+        bnRequireBatchStatsSize(cfg, input, n, "forward");
     } else if (total == 0) {
         return; /* running statistics, nothing to normalize, nothing written */
     }
@@ -347,18 +383,24 @@ void batchNorm1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss,
         exit(1);
     }
     bool wantGrads = cfg->affine && !cfg->frozen;
-    if (wantGrads && (cfg->gamma->grad == NULL || cfg->beta->grad == NULL ||
-                      cfg->gamma->grad->quantization->type != FLOAT32 ||
-                      cfg->beta->grad->quantization->type != FLOAT32)) {
-        PRINT_ERROR("BatchNorm1d backward: a trainable BN needs FLOAT32 gamma/beta grads");
-        exit(1);
+    if (wantGrads) {
+        if (cfg->gamma->grad == NULL || cfg->beta->grad == NULL) {
+            PRINT_ERROR("BatchNorm1d backward: a trainable BN needs FLOAT32 gamma/beta grads");
+            exit(1);
+        }
+        /* Adversarial-review fix #2: reuse bnRequireChannelVector (dtype AND
+         * element count) instead of the ad hoc dtype-only check -- a grad
+         * tensor with the wrong element count was silently accepted and the
+         * per-channel write loop below would walk off the end of it. */
+        bnRequireChannelVector(cfg, cfg->gamma->grad, "gamma grad");
+        bnRequireChannelVector(cfg, cfg->beta->grad, "beta grad");
     }
     size_t total = calcNumberOfElementsByTensor(forwardInput);
     size_t C = cfg->numChannels;
     size_t n = total / C;
     bool batchStats = bnUsesBatchStats(cfg);
     if (batchStats) {
-        bnRequireBatchStatsSize(forwardInput, n, "backward");
+        bnRequireBatchStatsSize(cfg, forwardInput, n, "backward");
     } else if (total == 0) {
         return;
     }

@@ -904,6 +904,23 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         }
         deserializeArithmetic(&c->forwardMath, f);
         deserializeArithmetic(&c->propLossMath, f);
+        /* Adversarial-review fix #6: mirror the factory rule
+         * (BatchNorm1dApi.c's validateLayerQuantForBatchNorm1d) at the
+         * deserialize-time trust boundary -- a file-loaded BN otherwise
+         * would not be rejected until its FLOAT32-only forward/backward
+         * guard fires at call time instead of at load time. */
+        if (c->forwardMath.type != ARITH_FLOAT32) {
+            PRINT_ERROR("deserializeModel: BATCHNORM1D forwardMath must be ARITH_FLOAT32 (got %d) "
+                        "-- BatchNorm1d is FLOAT32-only",
+                        (int)c->forwardMath.type);
+            exit(1);
+        }
+        if (c->propLossMath.type != ARITH_FLOAT32) {
+            PRINT_ERROR("deserializeModel: BATCHNORM1D propLossMath must be ARITH_FLOAT32 (got "
+                        "%d) -- BatchNorm1d is FLOAT32-only",
+                        (int)c->propLossMath.type);
+            exit(1);
+        }
         deserializeQuantization(c->outputQ, f, 0);
         deserializeQuantization(c->propLossQ, f, 0);
         break;

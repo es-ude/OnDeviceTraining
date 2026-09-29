@@ -398,6 +398,23 @@ void testForwardEvalAcceptsSingleRowAndEmpty(void) {
     TEST_ASSERT_EQUAL_UINT64(0, nbt);
 }
 
+/* Adversarial-review fix #1: !trackRunningStats always uses batch statistics
+ * (even in eval, D4), so an untracked rank-2 [1, C] evaluation sample still
+ * has n = 1 and must die -- but with a DEDICATED message (not the training
+ * one, which wrongly tells the caller to raise microBatchSize/says a frozen
+ * or eval-mode BN would fall back to running statistics; an untracked BN has
+ * none to fall back to). Distinct from testNoTrackUsesBatchStatisticsInTraining
+ * AndEval, whose eval-mode case uses n = 4 and never dies. */
+void testForwardEvalUntrackedRejectsSingleSample(void) {
+    size_t order[2] = {0, 1};
+    bnFixture_t f;
+    bnFixtureInit(&f, 3, true, false /* track */, NULL, NULL, NULL, NULL, BN_MOMENTUM_DEFAULT,
+                  0.0f);
+    /* f.cfg.training stays false (factory default): eval mode. */
+    ASSERT_EXITS_WITH_FAILURE(bnForwardOnStackInput(&f, (size_t[]){1, 3}, 2, order));
+    bnFixtureFree(&f);
+}
+
 void testForwardRejectsRank1(void) {
     size_t order[1] = {0};
     bnFixture_t f;
@@ -529,6 +546,58 @@ void testForwardRejectsMismatchedOutputShape(void) {
     bnFixtureInit(&f, 3, true, true, NULL, NULL, NULL, NULL, BN_MOMENTUM_DEFAULT, 0.0f);
     f.cfg.training = true; /* batch-stats path, n = 2 passes the size check */
     ASSERT_EXITS_WITH_FAILURE(forwardIntoSmallerOutput(&f));
+    bnFixtureFree(&f);
+}
+
+/* Adversarial-review fix #3: bnValidateOutputMatchesInput only checked rank
+ * and dims, not orderOfDimensions or dtype -- the kernel writes the output in
+ * the input's flat IDENTITY order (bnForwardKernelFloat indexes `y[i]`
+ * linearly), so a same-shape but transposed output would land values at the
+ * wrong physical offsets, and a non-FLOAT32 output would misinterpret the
+ * written bit pattern. m == C == 2 here so dims alone cannot tell {1,0} from
+ * {0,1} apart -- only the order check can. */
+static void forwardWithTransposedOutput(bnFixture_t *f) {
+    size_t dims[] = {2, 2};
+    size_t inOrder[] = {0, 1};
+    size_t outOrder[] = {1, 0};
+    shape_t inShape;
+    setShape(&inShape, dims, 2, inOrder);
+    shape_t outShape;
+    setShape(&outShape, dims, 2, outOrder);
+    quantization_t q;
+    initFloat32Quantization(&q);
+    float buf[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    tensor_t in;
+    setTensorValues(&in, (uint8_t *)buf, &inShape, &q, NULL);
+    float obuf[4] = {0};
+    tensor_t out;
+    setTensorValues(&out, (uint8_t *)obuf, &outShape, &q, NULL);
+    layerFunctions[BATCHNORM1D].forward(&f->layer, &in, &out);
+}
+
+void testForwardRejectsTransposedOutput(void) {
+    bnFixture_t f;
+    bnFixtureInit(&f, 2, true, true, NULL, NULL, NULL, NULL, BN_MOMENTUM_DEFAULT, 0.0f);
+    f.cfg.training = true; /* batch-stats path, n = 2 passes the size check */
+    ASSERT_EXITS_WITH_FAILURE(forwardWithTransposedOutput(&f));
+    bnFixtureFree(&f);
+}
+
+/* relabel only: the guard fires before any data read/write. */
+static void forwardWithNonFloat32Output(bnFixture_t *f) {
+    size_t dims[] = {4, 3};
+    tensor_t *in = buildFloatTensorND(2, dims, input_bn_trainRank2);
+    tensor_t *out = buildFloatTensorND(2, dims, NULL);
+    freeQuantization(out->quantization);
+    out->quantization = quantizationInitSymInt32(HALF_AWAY);
+    layerFunctions[BATCHNORM1D].forward(&f->layer, in, out);
+}
+
+void testForwardRejectsNonFloat32Output(void) {
+    bnFixture_t f;
+    bnFixtureInit(&f, 3, true, true, NULL, NULL, NULL, NULL, BN_MOMENTUM_DEFAULT, 0.0f);
+    f.cfg.training = true;
+    ASSERT_EXITS_WITH_FAILURE(forwardWithNonFloat32Output(&f));
     bnFixtureFree(&f);
 }
 
@@ -712,6 +781,30 @@ void testBackwardRejectsLossShapeMismatch(void) {
     bnFixtureFree(&f);
 }
 
+static void backwardWithShortGammaGrad(bnFixture_t *f) {
+    freeTensor(f->gamma->grad);
+    f->gamma->grad = buildFloatTensorND(1, (size_t[]){f->cfg.numChannels - 1}, NULL);
+    tensor_t *in = buildFloatTensorND(2, (size_t[]){4, 3}, input_bn_trainRank2);
+    tensor_t *loss = buildFloatTensorND(2, (size_t[]){4, 3}, lossGrad_bn_trainRank2);
+    tensor_t *prop = buildFloatTensorND(2, (size_t[]){4, 3}, NULL);
+    layerFunctions[BATCHNORM1D].backward(&f->layer, in, loss, prop);
+}
+
+/* Adversarial-review fix #2: the ad hoc grad check only verified dtype, not
+ * element count -- a gamma grad with the wrong number of elements (here
+ * C - 1) was accepted, and the backward's per-channel write loop would then
+ * walk off the end of the buffer. bnRequireChannelVector (already used for
+ * gamma/beta/running buffers) checks both dtype and capacity; reuse it here
+ * instead of the bespoke predicate. */
+void testBackwardRejectsShortGammaGrad(void) {
+    bnFixture_t f;
+    bnFixtureInit(&f, 3, true, true, gamma_bn_trainRank2, beta_bn_trainRank2, NULL, NULL,
+                  BN_MOMENTUM_DEFAULT, 0.0f);
+    f.cfg.training = true;
+    ASSERT_EXITS_WITH_FAILURE(backwardWithShortGammaGrad(&f));
+    bnFixtureFree(&f);
+}
+
 static layerQuant_t floatLq(quantization_t *q) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
@@ -867,6 +960,7 @@ int main(void) {
     RUN_TEST(testForwardTrainingRejectsEmptyBatch);
     RUN_TEST(testForwardTrainingRejectsZeroLengthTime);
     RUN_TEST(testForwardEvalAcceptsSingleRowAndEmpty);
+    RUN_TEST(testForwardEvalUntrackedRejectsSingleSample);
     RUN_TEST(testForwardRejectsRank1);
     RUN_TEST(testForwardRejectsRank4);
     RUN_TEST(testForwardRejectsTransposedInput);
@@ -878,6 +972,8 @@ int main(void) {
     RUN_TEST(testForwardRejectsNonFloat32RunningBuffer);
     RUN_TEST(testForwardRejectsShortRunningBuffer);
     RUN_TEST(testForwardRejectsMismatchedOutputShape);
+    RUN_TEST(testForwardRejectsTransposedOutput);
+    RUN_TEST(testForwardRejectsNonFloat32Output);
     RUN_TEST(testGoldTrainBackwardRank2);
     RUN_TEST(testGoldTrainBackwardRank3);
     RUN_TEST(testGoldTrainBackwardMinimalBatch);
@@ -887,6 +983,7 @@ int main(void) {
     RUN_TEST(testGradsOnlyBackwardMatchesFullAndAccumulates);
     RUN_TEST(testBackwardTrainingRejectsSingleRow);
     RUN_TEST(testBackwardRejectsLossShapeMismatch);
+    RUN_TEST(testBackwardRejectsShortGammaGrad);
     RUN_TEST(testFactoryZeroInitGivesPyTorchDefaults);
     RUN_TEST(testFactoryOptionsNoAffineNoStatsCumulativeFrozen);
     RUN_TEST(testFactoryRejectsInvalidInit);

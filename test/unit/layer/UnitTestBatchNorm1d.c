@@ -415,6 +415,22 @@ void testForwardEvalUntrackedRejectsSingleSample(void) {
     bnFixtureFree(&f);
 }
 
+/* #467 item 2: a frozen, untracked BN still normalizes with batch statistics
+ * in training (bnUsesBatchStats: !trackRunningStats), so [1, C] dies -- with
+ * its own message, since the generic one claims a frozen/eval BN falls back
+ * to running statistics, which an untracked BN does not have. Exit code only;
+ * pinned by the return-early mutation on the untracked-training branch. */
+void testForwardTrainingFrozenUntrackedRejectsSingleRow(void) {
+    size_t order[2] = {0, 1};
+    bnFixture_t f;
+    bnFixtureInit(&f, 3, true, false /* track */, NULL, NULL, NULL, NULL, BN_MOMENTUM_DEFAULT,
+                  0.0f);
+    f.cfg.training = true;
+    f.cfg.frozen = true;
+    ASSERT_EXITS_WITH_FAILURE(bnForwardOnStackInput(&f, (size_t[]){1, 3}, 2, order));
+    bnFixtureFree(&f);
+}
+
 void testForwardRejectsRank1(void) {
     size_t order[1] = {0};
     bnFixture_t f;
@@ -961,6 +977,7 @@ int main(void) {
     RUN_TEST(testForwardTrainingRejectsZeroLengthTime);
     RUN_TEST(testForwardEvalAcceptsSingleRowAndEmpty);
     RUN_TEST(testForwardEvalUntrackedRejectsSingleSample);
+    RUN_TEST(testForwardTrainingFrozenUntrackedRejectsSingleRow);
     RUN_TEST(testForwardRejectsRank1);
     RUN_TEST(testForwardRejectsRank4);
     RUN_TEST(testForwardRejectsTransposedInput);

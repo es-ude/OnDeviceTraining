@@ -183,7 +183,11 @@ static size_t bnInner(const tensor_t *t) {
  * The generic "raise microBatchSize" / "a frozen or eval-mode BN falls back
  * to running statistics" message is actively wrong there: there is no
  * training loop to raise microBatchSize on, and there are no running
- * statistics to fall back to. Give that case its own message. */
+ * statistics to fall back to. Give that case its own message. The same
+ * untracked BN dying in training (#467) needs its own message too: the
+ * generic branch's "(a frozen or eval-mode BN uses running statistics
+ * instead)" parenthetical is false without running statistics to fall back
+ * on, even though microBatchSize is still the right knob to raise. */
 static void bnRequireBatchStatsSize(const batchNorm1dConfig_t *cfg, const tensor_t *t, size_t n,
                                     const char *what) {
     if (n >= 2) {
@@ -203,6 +207,14 @@ static void bnRequireBatchStatsSize(const batchNorm1dConfig_t *cfg, const tensor
             PRINT_ERROR("BatchNorm1d %s: batch statistics need >= 2 values per channel, got an "
                         "empty batch (n = 0) for a [%zu, %zu] batch",
                         what, s->dimensions[0], s->dimensions[1]);
+        } else if (!cfg->trackRunningStats) {
+            PRINT_ERROR(
+                "BatchNorm1d %s: no running statistics (noRunningStats), so this BN normalizes "
+                "with batch statistics even when frozen; they need >= 2 values per channel, got "
+                "n = %zu for a [%zu, %zu] batch -- set trainingRunOptions_t.microBatchSize >= 2, "
+                "or track running statistics",
+                what, n, s->dimensions[0], s->dimensions[1]);
+            exit(1);
         } else {
             PRINT_ERROR(
                 "BatchNorm1d %s: batch statistics need >= 2 values per channel, got n = %zu "

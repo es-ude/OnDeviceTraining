@@ -200,6 +200,10 @@ static rematScheduler_t initArena(arenaFixture_t *f, const rematPlanSpec_t *spec
     return s;
 }
 
+/* Both inits share one shape, so a test can run on either row. */
+typedef rematScheduler_t (*rowInit_t)(arenaFixture_t *f, const rematPlanSpec_t *spec);
+static rematScheduler_t initHeap(arenaFixture_t *f, const rematPlanSpec_t *spec);
+
 static void freeFixture(arenaFixture_t *f, rematScheduler_t *s) {
     rematSchedulerDeinit(s);
     freeModel(f->model, f->n);
@@ -1219,7 +1223,7 @@ void testArenaBeginExitsWhenTheArenaWasNeverReserved(void) {
     freeFixture(&f, &s);
 }
 
-/* ---- the row contract, ARENA only (spec §12.2 item 1; plan Assumption 15) ---- */
+/* ---- the row contract on every row (spec §12.2 item 1) ---- */
 
 static void assertResident(const rematWireTable_t *t, uint16_t w, const char *what) {
     TEST_ASSERT_NOT_EQUAL_MESSAGE(REMAT_NONE, w, what);
@@ -1275,7 +1279,11 @@ static void assertResidentHeadersDisjoint(const rematWireTable_t *t) {
             if (db == NULL) {
                 continue;
             }
-            bool disjoint = da + rematWireBytes(t, a) <= db || db + rematWireBytes(t, b) <= da;
+            /* Integer intervals: HEAP wires live in separate blocks, whose
+             * pointers C does not order. */
+            uintptr_t ua = (uintptr_t)da;
+            uintptr_t ub = (uintptr_t)db;
+            bool disjoint = ua + rematWireBytes(t, a) <= ub || ub + rematWireBytes(t, b) <= ua;
             TEST_ASSERT_TRUE_MESSAGE(disjoint, "two resident headers share bytes");
         }
     }
@@ -1291,13 +1299,60 @@ static void assertEndedRangesReleased(const rematProgram_t *p, const rematWireTa
     }
 }
 
-/* One call with every §12.2 item 1 assert, plus the ARENA-specific one: the
- * resident arena holds every live byte, so current ODT_MEM_PROFILE bytes stay
- * at the post-init value at every step (0 == 0 without ODT_MEM_PROFILE). */
+/* A row binds a wire at its range's first step and releases it after its last
+ * (P8), no earlier and no later: the memory check compares against the SDK's
+ * liveBytes, which an early bind raises too, so only this pins the bound set.
+ * After next a range ending at the step is still live; after done it is not. */
+static void assertBoundIsExactlyTheLiveSet(const rematProgram_t *p, const rematWireTable_t *t,
+                                           size_t step, bool afterDone) {
+    for (uint16_t w = 1; w < t->numWires; w++) {
+        bool live = false;
+        for (size_t r = 0; r < p->numRanges; r++) {
+            const rematRange_t *rg = &p->ranges[r];
+            if (rg->wire == w && rg->begin <= step &&
+                (afterDone ? rg->end > step : rg->end >= step)) {
+                live = true;
+            }
+        }
+        TEST_ASSERT_EQUAL_MESSAGE(live, rematWireHdr(t, w)->data != NULL,
+                                  "a wire is bound outside its range, or unbound inside it");
+    }
+}
+
+/* Every bound wire's bytes suit every wire dtype (spec §5.5): the ARENA
+ * offsets are multiples of ODT_WIRE_ALIGN and HEAP blocks are max-aligned. */
+static void assertBoundDataAligned(const rematWireTable_t *t) {
+    for (uint16_t w = 1; w < t->numWires; w++) {
+        const uint8_t *data = rematWireHdr(t, w)->data;
+        if (data != NULL) {
+            TEST_ASSERT_EQUAL_size_t_MESSAGE(0, (uintptr_t)data % ODT_WIRE_ALIGN,
+                                             "a bound wire's data is not ODT_WIRE_ALIGN-aligned");
+        }
+    }
+}
+
+/* What a row holds beyond its init blocks at any point of a call. ARENA holds
+ * every live byte in its resident block, so nothing. HEAP holds one block of
+ * exactly bytes(w) per live range, and the counter adds requested bytes, not
+ * the allocator header (StorageApi.c:41), so exactly the SDK's liveBytes.
+ * Without ODT_MEM_PROFILE the counter reads 0 and so does this. */
+static size_t heldInsideTheCall(const rematScheduler_t *s) {
+#ifdef ODT_MEM_PROFILE
+    return s->type == REMAT_HEAP ? s->wires->liveBytes : 0u;
+#else
+    (void)s;
+    return 0u;
+#endif
+}
+
+/* One call with every §12.2 item 1 assert, plus: every bound wire aligned,
+ * exactly the plan's live wires bound, and the row's reserved bytes exactly what it must hold after
+ * every next and every done, peaking at the plan's peak on HEAP (0 on ARENA). */
 static void walkWithTheContractChecks(arenaFixture_t *f, rematScheduler_t *s) {
     rematWireTable_t *t = s->wires;
     const rematProgram_t *p = &s->plan->train;
     size_t memAfterInit = memProfileCurrentBytes();
+    size_t peakHeld = 0;
     bindAndBegin(f, s);
     TEST_ASSERT_EQUAL_PTR(f->x, rematActHdr(t, 0));
     rematStep_t st;
@@ -1305,13 +1360,26 @@ static void walkWithTheContractChecks(arenaFixture_t *f, rematScheduler_t *s) {
     while (rematNext(s, &st)) {
         assertOperandsResident(t, f->model, &st);
         assertResidentHeadersDisjoint(t);
-        TEST_ASSERT_EQUAL_size_t_MESSAGE(memAfterInit, memProfileCurrentBytes(),
-                                         "a block was reserved inside the call");
+        assertBoundDataAligned(t);
+        assertBoundIsExactlyTheLiveSet(p, t, step, false);
+        size_t held = memProfileCurrentBytes() - memAfterInit;
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(
+            heldInsideTheCall(s), held, "the row holds other bytes than its live wires after next");
+        if (held > peakHeld) {
+            peakHeld = held;
+        }
         rematDone(s, &st);
         assertEndedRangesReleased(p, t, step);
+        assertBoundIsExactlyTheLiveSet(p, t, step, true);
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(
+            heldInsideTheCall(s), memProfileCurrentBytes() - memAfterInit,
+            "the row holds other bytes than its live wires after done");
         step++;
     }
     TEST_ASSERT_EQUAL_size_t(p->numSteps, step);
+#ifdef ODT_MEM_PROFILE
+    TEST_ASSERT_EQUAL_size_t(s->type == REMAT_HEAP ? p->peakLiveBytes : 0u, peakHeld);
+#endif
     endAndUnbind(s);
     for (uint16_t w = 1; w < t->numWires; w++) {
         TEST_ASSERT_NULL_MESSAGE(rematWireHdr(t, w)->data, "a wire is still bound after end");
@@ -1320,23 +1388,54 @@ static void walkWithTheContractChecks(arenaFixture_t *f, rematScheduler_t *s) {
     TEST_ASSERT_EQUAL_size_t(memAfterInit, memProfileCurrentBytes());
 }
 
-/* Two calls: the second reuses the resident bytes without zeroing (VERIFY
- * poisons them at every bind on the test presets). */
-static void assertArenaContract(void (*build)(arenaFixture_t *), const rematPlanSpec_t *spec) {
+/* Two calls: ARENA reuses its resident bytes without zeroing, HEAP reserves
+ * fresh blocks (VERIFY poisons both at every bind on the test presets). While
+ * the global stream exists (PR1-PR5c), a row neither draws from nor reseeds
+ * it (R4); the conv factories draw their initial weights, so the pin starts
+ * after the model is built. */
+static void assertRowContract(rowInit_t init, void (*build)(arenaFixture_t *),
+                              const rematPlanSpec_t *spec) {
     arenaFixture_t f;
     build(&f);
-    rematScheduler_t s = initArena(&f, spec);
+    uint32_t seed = rngGetSeed();
+    rematScheduler_t s = init(&f, spec);
     walkWithTheContractChecks(&f, &s);
     walkWithTheContractChecks(&f, &s);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(seed, rngGetSeed(), "a row touched the global RNG stream");
     freeFixture(&f, &s);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(seed, rngGetSeed(), "a row touched the global RNG stream");
 }
 
-void testArenaContractHarStoreAll(void) {
-    assertArenaContract(buildHarModel, NULL);
+void testRowContractArenaHarStoreAll(void) {
+    assertRowContract(initArena, buildHarModel, NULL);
 }
 
-void testArenaContractHarLiveness(void) {
-    assertArenaContract(buildHarModel, &g_liveness);
+void testRowContractArenaHarLiveness(void) {
+    assertRowContract(initArena, buildHarModel, &g_liveness);
+}
+
+void testRowContractArenaF1StoreAll(void) {
+    assertRowContract(initArena, buildF1Model, NULL);
+}
+
+void testRowContractArenaF1Liveness(void) {
+    assertRowContract(initArena, buildF1Model, &g_liveness);
+}
+
+void testRowContractHeapHarStoreAll(void) {
+    assertRowContract(initHeap, buildHarModel, NULL);
+}
+
+void testRowContractHeapHarLiveness(void) {
+    assertRowContract(initHeap, buildHarModel, &g_liveness);
+}
+
+void testRowContractHeapF1StoreAll(void) {
+    assertRowContract(initHeap, buildF1Model, NULL);
+}
+
+void testRowContractHeapF1Liveness(void) {
+    assertRowContract(initHeap, buildF1Model, &g_liveness);
 }
 
 /* PR1a carry: under LIVENESS, Flatten's dx (GRAD 9) binds at BACKWARD(9)
@@ -1363,37 +1462,15 @@ void testArenaHarLivenessBindsFlattenDxAfterItsSourceDied(void) {
     freeFixture(&f, &s);
 }
 
-void testArenaContractF1StoreAll(void) {
-    assertArenaContract(buildF1Model, NULL);
-}
-
-void testArenaContractF1Liveness(void) {
-    assertArenaContract(buildF1Model, &g_liveness);
-}
-
-/* PR1-PR5c, while the global stream exists: a row neither draws from nor
- * reseeds it (R4). The conv factories draw their initial weights, so the pin
- * starts after the model is built. */
-void testArenaLeavesTheRngStreamUntouched(void) {
-    arenaFixture_t f;
-    buildHarModel(&f);
-    uint32_t seed = rngGetSeed();
-    rematScheduler_t s = initArena(&f, &g_liveness);
-    (void)walkAll(&f, &s);
-    rematSchedulerDeinit(&s);
-    TEST_ASSERT_EQUAL_UINT32(seed, rngGetSeed());
-    freeModel(f.model, f.n);
-}
-
 /* P8's table-level twin: binding at a range's first step and releasing after
  * its last makes the SDK's observed peak the plan's. Before any call the
  * observed peak is 0, so a report that copied the plan's peak would show.
  * Read before end, where a row that never releases would die. */
-static void assertObservedPeakIsThePlannedPeak(void (*build)(arenaFixture_t *),
+static void assertObservedPeakIsThePlannedPeak(rowInit_t init, void (*build)(arenaFixture_t *),
                                                const rematPlanSpec_t *spec) {
     arenaFixture_t f;
     build(&f);
-    rematScheduler_t s = initArena(&f, spec);
+    rematScheduler_t s = init(&f, spec);
     rematReport_t before;
     rematSchedulerReport(&s, &before);
     TEST_ASSERT_TRUE(before.peakLiveBytes > 0u);
@@ -1412,10 +1489,13 @@ static void assertObservedPeakIsThePlannedPeak(void (*build)(arenaFixture_t *),
 }
 
 void testReportObservedPeakEqualsThePlannedPeak(void) {
-    assertObservedPeakIsThePlannedPeak(buildHarModel, NULL);
-    assertObservedPeakIsThePlannedPeak(buildHarModel, &g_liveness);
-    assertObservedPeakIsThePlannedPeak(buildF1Model, NULL);
-    assertObservedPeakIsThePlannedPeak(buildF1Model, &g_liveness);
+    const rowInit_t inits[] = {initArena, initHeap};
+    for (size_t k = 0; k < 2u; k++) {
+        assertObservedPeakIsThePlannedPeak(inits[k], buildHarModel, NULL);
+        assertObservedPeakIsThePlannedPeak(inits[k], buildHarModel, &g_liveness);
+        assertObservedPeakIsThePlannedPeak(inits[k], buildF1Model, NULL);
+        assertObservedPeakIsThePlannedPeak(inits[k], buildF1Model, &g_liveness);
+    }
 }
 
 /* ---- ASan poisoning of the arena (spec §5.5, §12.2 item 6; asan preset only) ---- */
@@ -1687,8 +1767,6 @@ void testHeapNextExitsNamingTheStepAndTheWireWhenAReservationFails(void) {
 #endif
 
 /* ---- the const vtable and the dispatch (spec §5.1, §5.3; D24) ---- */
-
-typedef rematScheduler_t (*rowInit_t)(arenaFixture_t *f, const rematPlanSpec_t *spec);
 
 void testEachInitInstallsItsRowsFunctionTable(void) {
     arenaFixture_t f;
@@ -2023,12 +2101,15 @@ int main(void) {
     RUN_TEST(testArenaEndExitsOnAnIncompleteWalk);
     RUN_TEST(testArenaEndExitsOnARangeLeftOpen);
     RUN_TEST(testArenaBeginExitsWhenTheArenaWasNeverReserved);
-    RUN_TEST(testArenaContractHarStoreAll);
-    RUN_TEST(testArenaContractHarLiveness);
+    RUN_TEST(testRowContractArenaHarStoreAll);
+    RUN_TEST(testRowContractArenaHarLiveness);
+    RUN_TEST(testRowContractArenaF1StoreAll);
+    RUN_TEST(testRowContractArenaF1Liveness);
+    RUN_TEST(testRowContractHeapHarStoreAll);
+    RUN_TEST(testRowContractHeapHarLiveness);
+    RUN_TEST(testRowContractHeapF1StoreAll);
+    RUN_TEST(testRowContractHeapF1Liveness);
     RUN_TEST(testArenaHarLivenessBindsFlattenDxAfterItsSourceDied);
-    RUN_TEST(testArenaContractF1StoreAll);
-    RUN_TEST(testArenaContractF1Liveness);
-    RUN_TEST(testArenaLeavesTheRngStreamUntouched);
     RUN_TEST(testReportObservedPeakEqualsThePlannedPeak);
 #ifdef ODT_TEST_ASAN
     RUN_TEST(testArenaIsPoisonedUntilARangeOpens);

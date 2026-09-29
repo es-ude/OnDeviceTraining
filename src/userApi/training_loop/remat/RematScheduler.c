@@ -31,20 +31,9 @@ static size_t reportAdd(size_t a, size_t b) {
     return out;
 }
 
-void rematSchedulerReport(const rematScheduler_t *s, rematReport_t *out) {
-    *out = (rematReport_t){.type = s->type};
-    if (s->wires == NULL || s->plan == NULL) {
-        return; /* init stopped before the plan existed: no field is valid */
-    }
-    const rematProgram_t *p = &s->plan->train;
-    out->policy = s->plan->policy;
-    out->planned = true;
-    out->numSteps = p->numSteps;
-    out->peakLiveBytes = p->peakLiveBytes;
-    out->observedPeakLiveBytes = s->wires->observedPeakLiveBytes;
-    out->metadataBytes = reportAdd(s->wires->slabBytes, s->plan->blockBytes);
-    /* ARENA is the only row until PR1c, whose HEAP reports placed == planned
-     * with the arena fields 0. */
+/* The ARENA half of the report (spec §5.1, D55 as amended by Codex N3): each
+ * flag derived from the block it names. */
+static void reportArena(const rematScheduler_t *s, const rematProgram_t *p, rematReport_t *out) {
     if (s->row.arena.offsets != NULL) {
         /* Cannot wrap: numRanges < REMAT_NONE, and init reserved this product. */
         out->metadataBytes = reportAdd(out->metadataBytes, p->numRanges * sizeof(size_t));
@@ -58,4 +47,29 @@ void rematSchedulerReport(const rematScheduler_t *s, rematReport_t *out) {
         out->arenaGapBytes = s->row.arena.bytes - s->row.arena.peakPlacedBytes;
     }
     out->dataReserved = s->row.arena.base != NULL;
+}
+
+void rematSchedulerReport(const rematScheduler_t *s, rematReport_t *out) {
+    *out = (rematReport_t){.type = s->type};
+    if (s->wires == NULL || s->plan == NULL) {
+        return; /* init stopped before the plan existed: no field is valid */
+    }
+    const rematProgram_t *p = &s->plan->train;
+    out->policy = s->plan->policy;
+    out->planned = true;
+    out->numSteps = p->numSteps;
+    out->peakLiveBytes = p->peakLiveBytes;
+    out->observedPeakLiveBytes = s->wires->observedPeakLiveBytes;
+    out->metadataBytes = reportAdd(s->wires->slabBytes, s->plan->blockBytes);
+    switch (s->type) {
+    case REMAT_ARENA:
+        reportArena(s, p, out);
+        break;
+    case REMAT_HEAP:
+        /* No placement and no resident block: a planned HEAP is ready to run,
+         * its arena fields 0 by definition (plan Assumption 4). */
+        out->placed = true;
+        out->dataReserved = true;
+        break;
+    }
 }

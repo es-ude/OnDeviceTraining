@@ -1550,6 +1550,87 @@ void testArenaReadAfterReleaseTripsAsan(void) {
 }
 #endif
 
+/* ---- the HEAP row: init and report (spec §5.6, §5.1) ---- */
+
+static rematScheduler_t initHeap(arenaFixture_t *f, const rematPlanSpec_t *spec) {
+    rematScheduler_t s;
+    TEST_ASSERT_TRUE(rematHeapInit(&s, f->model, f->n, defaultLossConfig(f->lt), f->x, spec));
+    TEST_ASSERT_NOT_NULL(s.wires);
+    TEST_ASSERT_NOT_NULL(s.plan);
+    return s;
+}
+
+void testHeapInitBuildsTheTableAndThePlan(void) {
+    arenaFixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initHeap(&f, &g_liveness);
+    TEST_ASSERT_EQUAL_INT(REMAT_HEAP, s.type);
+    TEST_ASSERT_EQUAL_size_t(HAR_N, s.wires->modelSize);
+    TEST_ASSERT_EQUAL_INT(REMAT_PLAN_LIVENESS, s.plan->policy);
+    freeFixture(&f, &s);
+}
+
+#ifdef ODT_MEM_PROFILE
+/* HEAP holds no data between calls: init reserves the shared table and plan
+ * blocks only. */
+void testHeapInitReservesOnlyTheTableAndThePlan(void) {
+    arenaFixture_t f;
+    buildHarModel(&f);
+    size_t before = memProfileCurrentBytes();
+    rematScheduler_t s = initHeap(&f, NULL);
+    TEST_ASSERT_EQUAL_size_t(s.wires->slabBytes + s.plan->blockBytes,
+                             memProfileCurrentBytes() - before);
+    freeFixture(&f, &s);
+}
+#endif
+
+/* Spec §5.1: on HEAP placed == planned and the arena fields are 0. HEAP keeps
+ * no resident data block, so a successful init has nothing left to reserve:
+ * dataReserved == planned (plan Assumption 4). REMAT_HEAP != 0 makes the type
+ * echo observable for the first time. */
+static void assertHeapReport(const rematPlanSpec_t *spec, rematPlanPolicy_t policy,
+                             size_t peakLiveBytes) {
+    arenaFixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initHeap(&f, spec);
+    rematReport_t r;
+    rematSchedulerReport(&s, &r);
+    TEST_ASSERT_EQUAL_INT(REMAT_HEAP, r.type);
+    TEST_ASSERT_EQUAL_INT(policy, r.policy);
+    TEST_ASSERT_TRUE(r.planned);
+    TEST_ASSERT_TRUE(r.placed);
+    TEST_ASSERT_TRUE(r.dataReserved);
+    TEST_ASSERT_EQUAL_size_t(25, r.numSteps);
+    TEST_ASSERT_EQUAL_size_t(peakLiveBytes, r.peakLiveBytes);
+    TEST_ASSERT_EQUAL_size_t(0, r.arenaBytes);
+    TEST_ASSERT_EQUAL_size_t(0, r.arenaPadBytes);
+    TEST_ASSERT_EQUAL_size_t(0, r.arenaGapBytes);
+    /* slab + plan block, no row table: 4,848 + 348 = 5,196 on LP64 */
+    TEST_ASSERT_EQUAL_size_t(s.wires->slabBytes + s.plan->blockBytes, r.metadataBytes);
+    freeFixture(&f, &s);
+}
+
+void testHeapReportIsPlacedAndReservedWithoutAnArena(void) {
+    assertHeapReport(NULL, REMAT_PLAN_STORE_ALL, 74288);
+    assertHeapReport(&g_liveness, REMAT_PLAN_LIVENESS, 49152);
+}
+
+static void heapInitExpectingAnExit(layer_t **model, const tensor_t *x) {
+    rematScheduler_t s;
+    (void)rematHeapInit(&s, model, 1, defaultLossConfig(MSE), x, NULL);
+}
+
+/* Spec §3.8: a borrowed [1, SIZE_MAX/4 + 2] FLOAT32 input (4 * N wraps to 4)
+ * exits at rematHeapInit too, naming the wire. */
+void testHeapInitExitsOnAByteCountOverflow(void) {
+    layer_t *model[1] = {makeRelu(&g_floatQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, SIZE_MAX / 4u + 2u}, 2, &g_floatQ);
+    ASSERT_EXITS_WITH_OUTPUT(1, "size overflow computing bytes of wire ACT 0",
+                             heapInitExpectingAnExit(model, x));
+    freeModel(model, 1);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testArenaInitBuildsTheTableAndThePlan);
@@ -1617,5 +1698,11 @@ int main(void) {
     RUN_TEST(testArenaPadStaysPoisonedWhileBound);
     RUN_TEST(testArenaReadAfterReleaseTripsAsan);
 #endif
+    RUN_TEST(testHeapInitBuildsTheTableAndThePlan);
+#ifdef ODT_MEM_PROFILE
+    RUN_TEST(testHeapInitReservesOnlyTheTableAndThePlan);
+#endif
+    RUN_TEST(testHeapReportIsPlacedAndReservedWithoutAnArena);
+    RUN_TEST(testHeapInitExitsOnAByteCountOverflow);
     return UNITY_END();
 }

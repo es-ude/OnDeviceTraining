@@ -50,7 +50,10 @@ typedef struct rematWalk {
     size_t step, open, close;
 } rematWalk_t;
 
-typedef enum rematSchedulerType { REMAT_ARENA = 0 } rematSchedulerType_t; /* APPEND-ONLY */
+typedef enum rematSchedulerType {
+    REMAT_ARENA = 0,
+    REMAT_HEAP
+} rematSchedulerType_t; /* APPEND-ONLY */
 
 typedef struct rematWireTable rematWireTable_t; /* RematPlan.h (internal) */
 typedef struct rematPlan rematPlan_t;           /* RematPlan.h (internal) */
@@ -82,6 +85,10 @@ struct rematScheduler {
  * or whose size arithmetic overflows, exits naming it. */
 bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss,
                     const tensor_t *inputLike, const rematPlanSpec_t *spec);
+/* The peer row (spec §5.6): table and plan only; one exactly-sized block per
+ * range, reserved when the range opens and freed when it closes. */
+bool rematHeapInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss,
+                   const tensor_t *inputLike, const rematPlanSpec_t *spec);
 /* NULL-safe and idempotent: the row's blocks, then the plan and the table. */
 void rematSchedulerDeinit(rematScheduler_t *s);
 
@@ -91,9 +98,13 @@ void rematSchedulerDeinit(rematScheduler_t *s);
 typedef struct rematReport {
     rematSchedulerType_t type;
     rematPlanPolicy_t policy;
-    bool planned;      /* table + plan built: numSteps, peakLiveBytes, metadataBytes */
-    bool placed;       /* placement computed + verified: the three arena fields */
-    bool dataReserved; /* the row's resident data block exists */
+    bool planned; /* table + plan built: numSteps, peakLiveBytes, metadataBytes */
+    /* ARENA: placement computed + verified (the three arena fields). HEAP:
+     * == planned, arena fields 0; it places each range in its own block. */
+    bool placed;
+    /* ARENA: the resident arena block exists. HEAP: == planned; its blocks are
+     * reserved per range at each step, so init leaves nothing pending. */
+    bool dataReserved;
     size_t numSteps;
     size_t peakLiveBytes;         /* plan, exact bytes, ACT 0 excluded: POET x-axis, wires_peak_b */
     size_t observedPeakLiveBytes; /* SDK accounting over the last call, every row (P8) */

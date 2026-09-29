@@ -62,9 +62,11 @@ target_link_libraries(LayerQuant PRIVATE
 add_library(LayerWeightsApi LayerWeightsApi.c)
 target_include_directories(LayerWeightsApi PUBLIC include)
 target_link_libraries(LayerWeightsApi PRIVATE
+        BatchNorm1d
         Common
         Conv1d
         Conv1dTransposed
+        GroupNorm
         Layer
         LayerNorm
         Linear

@@ -128,7 +128,9 @@ typedef struct trainingRunOptions {
                                     0 means 1. m > 1 stacks m samples into one [m, ...] call:
                                     FLOAT32 models only, every macro batch must be divisible by m.
                                     Training only -- evaluation always runs one sample per call.
-                                    Dropout fails fast at m > 1 (its mask holds one sample). */
+                                    Dropout fails fast at m > 1 (its mask holds one sample). A
+                                    rank-2 BatchNorm1d in training mode needs microBatchSize >= 2
+                                    (batch statistics need >= 2 values per channel). */
 } trainingRunOptions_t;
 
 void freeTrainingStats(trainingStats_t *trainingStats);

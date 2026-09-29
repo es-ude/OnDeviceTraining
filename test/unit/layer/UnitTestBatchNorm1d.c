@@ -226,13 +226,17 @@ void testGoldTrainForwardTinyVarianceKeepsEpsInsideSqrt(void) {
                         numBatchesTracked_bn_tinyVarRank2);
 }
 
-/* track off: batch statistics in training AND in eval (PyTorch parity). */
+/* track off: batch statistics in training, in eval, AND when frozen (D3 says
+ * frozen normally means running-stat mode, but with track off there are no
+ * running buffers to fall back to -- !trackRunningStats must keep winning
+ * over frozen, per bnUsesBatchStats's `||`, not a `&&`). PyTorch parity. */
 void testNoTrackUsesBatchStatisticsInTrainingAndEval(void) {
-    for (int training = 0; training <= 1; training++) {
+    for (int mode = 0; mode < 3; mode++) { /* 0: eval, 1: training, 2: frozen + training */
         bnFixture_t f;
         bnFixtureInit(&f, 3, true, false, gamma_bn_noTrackRank2, beta_bn_noTrackRank2, NULL, NULL,
                       BN_MOMENTUM_DEFAULT, 0.0f);
-        f.cfg.training = training != 0;
+        f.cfg.training = mode != 0;
+        f.cfg.frozen = mode == 2;
         bnForwardCapture_t cap;
         bnRunForward(&f, (size_t[]){4, 3}, 2, input_bn_noTrackRank2, &cap);
         bnFixtureFree(&f);

@@ -2151,15 +2151,15 @@ static void testGoldenBytesModelMaxPool1dV5(void) {
     freeMaxPool1dLayer(layer);
     freeQuantization(floatQ);
 
-    static const uint8_t expected[] = {/* magic + version 5 + layerCount 1 */ 'O',
+    static const uint8_t expected[] = {/* magic */ 'O',
                                        'D',
                                        'T',
                                        'S',
-                                       0x06,
+                                       /* version u32 LE */ 0x06,
                                        0x00,
                                        0x00,
                                        0x00,
-                                       0x01,
+                                       /* layerCount u32 LE */ 0x01,
                                        0x00,
                                        0x00,
                                        0x00,

@@ -32,7 +32,12 @@ typedef enum {
  * CONCURRENCY INVARIANT: the training forward writes runningMean/
  * runningVar/numBatchesTracked. One instance must never run two forwards
  * concurrently, nor an eval forward concurrently with a training forward
- * (MaxPool1d.h's argmax invariant; no locks by design, #460 spec §5.4). */
+ * (MaxPool1d.h's argmax invariant; no locks by design, #460 spec §5.4).
+ *
+ * A non-finite input in a batch-statistics forward writes NaN into
+ * runningMean/runningVar (PyTorch parity); serializeModel will write it, but
+ * the v6 reader and modelLoadStateDictBuffers reject non-finite running
+ * statistics at load. */
 typedef struct batchNorm1dConfig {
     parameter_t *gamma;         /* [C]; NULL iff !affine */
     parameter_t *beta;          /* [C]; NULL iff !affine */
@@ -51,8 +56,12 @@ typedef struct batchNorm1dConfig {
     arithmetic_t propLossMath;
     quantization_t *outputQ;
     quantization_t *propLossQ;
-    outputMode_t weightGradAccMode;
-    outputMode_t biasGradAccMode;
+    outputMode_t weightGradAccMode; /* unused by BatchNorm1d (grads accumulate directly in
+                                       FLOAT32); kept for config-shape parity with the norm
+                                       layers */
+    outputMode_t biasGradAccMode;   /* unused by BatchNorm1d (grads accumulate directly in
+                                       FLOAT32); kept for config-shape parity with the norm
+                                       layers */
     bool ownsQuantizations;
 } batchNorm1dConfig_t;
 

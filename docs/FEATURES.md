@@ -134,12 +134,15 @@ Notes on the qualified cells:
   `testBfpGradStorageTrainingAccumulatesAndSteps`,
   `test/unit/userAPI/UnitTestMultiLayerTraining.c`. Full contract:
   `docs/conventions/arithmetic-bfp.md` §5.6.
-- **Trainable / freezing** — the five ✓-parameter layer types (Linear/Conv1d/
-  Conv1dTransposed/LayerNorm/GroupNorm) support create-time **freezing** via the
-  `trainable_t` tri-state (`TRAINABLE_FALSE`) on their init structs (#380 PR1): a
-  frozen layer allocates no grad buffers, is invisible to the optimizer (skipped by
-  count/collection/state allocation, see Optimizer below), and its backward computes
-  only the dx wire — weight/bias grads are never touched. Dx-chain truncation
+- **Trainable / freezing** — the six ✓-parameter layer types (Linear/Conv1d/
+  Conv1dTransposed/LayerNorm/GroupNorm/BatchNorm1d) support create-time **freezing**
+  via the `trainable_t` tri-state (`TRAINABLE_FALSE`) on their init structs (#380 PR1,
+  BatchNorm1d added #460): a frozen layer allocates no grad buffers, is invisible to
+  the optimizer (skipped by count/collection/state allocation, see Optimizer below),
+  and its backward computes only the dx wire — weight/bias grads are never touched. A
+  frozen BatchNorm1d additionally behaves as eval-mode BN: it normalizes with its
+  running statistics when tracked (batch statistics when untracked) and never updates
+  them. Dx-chain truncation
   (#380 PR2) is shipped: backward truncates at the deepest trainable layer — dx
   wires below it, and the deepest trainable layer's own dx, are neither computed
   nor allocated; trace emits backward events only for the executed range.
@@ -327,7 +330,7 @@ Notes on the qualified cells:
 
 ## Serialization (`src/serial/`)
 
-- **Layers** — all 12 `layerType_t` have matching `serialize` + `deserialize` arms,
+- **Layers** — all 14 `layerType_t` have matching `serialize` + `deserialize` arms,
   each round-trip tested under `test/unit/serial/`.
 - **Dtypes** — all 7 `qtype_t` qconfigs serialize/deserialize symmetrically (INT32/
   FLOAT32/BOOL = type byte only; SYM_INT32 carries scale + rounding + bits; SYM, ASYM,
@@ -337,7 +340,7 @@ Notes on the qualified cells:
   `exponentBits` + rounding (v5) — see Model format below). Packed tensor data
   (SYM/ASYM sub-byte, BFP sub-byte mantissas, BOOL 1-bit) is byte-tight via
   `calcNumberOfBytesForData` and round-trips exactly.
-- **Model format** — `"ODTS"` magic + `version` (=5) + `layerCount` + per-layer type
+- **Model format** — `"ODTS"` magic + `version` (=6) + `layerCount` + per-layer type
   tag. Deserialize fail-fasts on magic / version / count / tag mismatch. Since v2
   (#370) every count/dim/kernel field is `u32` little-endian via the checked
   `SerialWire` primitives, so a 64-bit host writes files a
@@ -368,7 +371,17 @@ Notes on the qualified cells:
   reallocate-on-mismatch rules as the SYM v4 arm. The PPCA replay checkpoint's
   (`"ODTR"`) peek-validate-rewind guard (see Continual learning below) was extended in
   lockstep for the ASYM and BFP qconfig records' wider layouts (#316-class
-  width-mismatch parity).
+  width-mismatch parity). Since v6 (#460) the BATCHNORM1D record (tag 13): `u32
+  numChannels, f32 eps, u8 momentumMode (1 VALUE | 2 CUMULATIVE), f32 momentum,
+  u8 affine, u8 track, [gamma, beta parameter records iff affine], [f32
+  runningMean[C], f32 runningVar[C], u64 numBatchesTracked iff track],
+  arithmetic forwardMath, arithmetic propLossMath, quantization outputQ,
+  quantization propLossQ`. The reader requires `numChannels`/`affine`/`track`
+  to equal the skeleton's (fail fast otherwise) and re-validates `eps`
+  (finite, > 0), a VALUE `momentum` (finite, in `[0, 1]`), every `runningMean`
+  value (finite), and every `runningVar` value (finite, >= 0) before
+  overwriting; pre-v6 files fail at the version check (no back-compat shim,
+  established policy).
 - **Contract** — deserialize **fills a pre-constructed model in place** (no allocation
   in the serial path); the caller must build a matching model first. A tensor record
   whose file dtype, rank, or payload size mismatches the pre-built skeleton fail-fasts

@@ -163,10 +163,17 @@ static void bnRequireBatchStatsSize(const tensor_t *t, size_t n, const char *wha
     }
     const shape_t *s = t->shape;
     if (s->numberOfDimensions == 2) {
-        PRINT_ERROR("BatchNorm1d %s: batch statistics need >= 2 values per channel, got n = %zu "
-                    "for a [%zu, %zu] batch -- set trainingRunOptions_t.microBatchSize >= 2 "
-                    "(a frozen or eval-mode BN uses running statistics instead)",
-                    what, n, s->dimensions[0], s->dimensions[1]);
+        if (n == 0) {
+            PRINT_ERROR("BatchNorm1d %s: batch statistics need >= 2 values per channel, got an "
+                        "empty batch (n = 0) for a [%zu, %zu] batch",
+                        what, s->dimensions[0], s->dimensions[1]);
+        } else {
+            PRINT_ERROR(
+                "BatchNorm1d %s: batch statistics need >= 2 values per channel, got n = %zu "
+                "for a [%zu, %zu] batch -- set trainingRunOptions_t.microBatchSize >= 2 "
+                "(a frozen or eval-mode BN uses running statistics instead)",
+                what, n, s->dimensions[0], s->dimensions[1]);
+        }
     } else {
         PRINT_ERROR("BatchNorm1d %s: batch statistics need >= 2 values per channel, got n = %zu "
                     "for a [%zu, %zu, %zu] batch",

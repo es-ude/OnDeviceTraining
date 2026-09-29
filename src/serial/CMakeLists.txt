@@ -18,9 +18,11 @@ target_link_libraries(Serialize PRIVATE
 
         AdaptiveAvgPool1d
         AvgPool1d
+        BatchNorm1d
         Conv1d
         Conv1dTransposed
         Dropout
+        GroupNorm
         Kernel
         LayerNorm
         MaxPool1d
@@ -42,9 +44,11 @@ target_link_libraries(Deserialize PRIVATE
 
         AdaptiveAvgPool1d
         AvgPool1d
+        BatchNorm1d
         Conv1d
         Conv1dTransposed
         Dropout
+        GroupNorm
         Kernel
         LayerNorm
         MaxPool1d

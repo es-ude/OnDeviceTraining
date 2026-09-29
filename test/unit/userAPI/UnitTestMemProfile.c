@@ -7,11 +7,6 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* GT-2 drives measurePeakStackBytes, which runs the workload on a custom pthread
- * stack (pthread_attr_setstack). ASan's thread instrumentation rejects a custom
- * stack, so skip GT-2 under ASan — it runs under plain/debug/ubsan. The stack
- * watermark is host measurement tooling and is never used under ASan in practice. */
-#ifndef __SANITIZE_ADDRESS__
 static volatile unsigned char g_sink;
 
 /* Touches n bytes of a stack VLA end-to-end so the compiler cannot elide it.
@@ -55,7 +50,18 @@ void testStackWatermarkTracksLoadRelativeAndMonotonic(void) {
     TEST_ASSERT_INT_WITHIN(F_STACK_SLACK, 0, (int)d1);
     TEST_ASSERT_INT_WITHIN(F_STACK_SLACK, 0, (int)d2);
 }
-#endif /* !__SANITIZE_ADDRESS__ */
+
+/* A caller may pass any stackBytes; Apple libpthread rejects a region whose size
+ * is not a page multiple (EINVAL) in every build, not only under ASan. */
+void testStackWatermarkHandlesNonPageMultipleRegion(void) {
+    size_t load = 4u * 1024;
+    size_t region = (1u << 20) + 100; /* deliberately not a page multiple */
+
+    size_t used = measurePeakStackBytes(stackConsumer, &load, region);
+
+    TEST_ASSERT_GREATER_OR_EQUAL_size_t(load, used);
+    TEST_ASSERT_LESS_OR_EQUAL_size_t(region, used);
+}
 
 void testRssPeakIsPositiveAndGrows(void) {
     size_t before = memProfileRssPeakKb();
@@ -73,9 +79,8 @@ void testRssPeakIsPositiveAndGrows(void) {
 
 int main(void) {
     UNITY_BEGIN();
-#ifndef __SANITIZE_ADDRESS__
     RUN_TEST(testStackWatermarkTracksLoadRelativeAndMonotonic);
-#endif
+    RUN_TEST(testStackWatermarkHandlesNonPageMultipleRegion);
     RUN_TEST(testRssPeakIsPositiveAndGrows);
     return UNITY_END();
 }

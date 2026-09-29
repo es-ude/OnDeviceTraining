@@ -215,8 +215,8 @@ static void bnRequireBatchStatsSize(const batchNorm1dConfig_t *cfg, const tensor
             PRINT_ERROR(
                 "BatchNorm1d %s: no running statistics (noRunningStats), so this BN normalizes "
                 "with batch statistics even when frozen; they need >= 2 values per channel, got "
-                "n = %zu for a [%zu, %zu] batch -- set trainingRunOptions_t.microBatchSize >= 2, "
-                "or track running statistics",
+                "n = %zu for a [%zu, %zu] batch -- track running statistics, or (without "
+                "evaluation) set trainingRunOptions_t.microBatchSize >= 2",
                 what, n, s->dimensions[0], s->dimensions[1]);
             exit(1);
         } else {

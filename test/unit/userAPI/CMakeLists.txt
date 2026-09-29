@@ -325,6 +325,7 @@ target_link_libraries(UnitTestBatchNorm1dIntegration PRIVATE
         DataLoaderApi
         StorageApi
         odt_test_death
+        odt_test_layer_builders
 )
 add_dependencies(UnitTestBatchNorm1dIntegration generate_expected_bn_cadence)
 target_include_directories(UnitTestBatchNorm1dIntegration PRIVATE ${CMAKE_CURRENT_BINARY_DIR})

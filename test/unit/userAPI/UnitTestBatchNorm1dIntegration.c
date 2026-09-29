@@ -9,6 +9,7 @@
 #include "BatchNorm1d.h"
 #include "BatchNorm1dApi.h"
 #include "BatchView.h"
+#include "BorrowedLayer.h"
 #include "CalculateGradsSequential.h"
 #include "DataLoaderApi.h"
 #include "Dataset.h"
@@ -550,7 +551,7 @@ void testTrainingRunRejectsUntrackedRank3SingleStep(void) {
 
 /* The optimizer built over `model` already freed gamma/beta (collected as
  * trainable parameters) and Linear's weights/bias -- freeBatchNorm1dLayer /
- * freeLinearLayer would double-free them. These free only what freeOptim
+ * freeLinearLayer would double-free them. This frees only what freeOptim
  * does not own: BatchNorm1d's running buffers (never parameters) and the
  * layer/config shells (mirrors BorrowedLayer.h's freeLinearLayerShellOnly,
  * extended to BatchNorm1d, which has no such helper there yet). */
@@ -563,12 +564,6 @@ static void freeBatchNorm1dLayerAfterOptim(layer_t *layer) {
         freeTensor(cfg->runningVar);
     }
     freeReservedMemory(cfg);
-    freeReservedMemory(layer->config);
-    freeReservedMemory(layer);
-}
-
-static void freeLinearLayerAfterOptim(layer_t *layer) {
-    freeReservedMemory(layer->config->linear);
     freeReservedMemory(layer->config);
     freeReservedMemory(layer);
 }
@@ -600,7 +595,7 @@ void testTrainingRunAcceptsTrackedRank2BatchNorm(void) {
     freeQuantization(momentumQ);
     freeDataLoader(evalDl);
     freeDataLoader(trainDl);
-    freeLinearLayerAfterOptim(model[1]);
+    freeLinearLayerShellOnly(model[1]);
     freeBatchNorm1dLayerAfterOptim(model[0]);
     freeTensor(pfLabel);
     freeTensor(pfItem);
@@ -635,7 +630,7 @@ void testTrainingRunAcceptsUntrackedRank3BatchNorm(void) {
     freeQuantization(momentumQ);
     freeDataLoader(evalDl);
     freeDataLoader(trainDl);
-    freeLinearLayerAfterOptim(model[2]);
+    freeLinearLayerShellOnly(model[2]);
     freeFlattenLayer(model[1]);
     freeBatchNorm1dLayerAfterOptim(model[0]);
     freeTensor(pfLabel);

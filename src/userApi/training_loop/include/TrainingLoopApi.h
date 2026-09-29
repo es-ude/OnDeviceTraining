@@ -134,8 +134,7 @@ typedef struct trainingRunOptions {
                                     evaluation runs one sample per call, an untracked
                                     (noRunningStats) rank-2 BatchNorm1d cannot be evaluated;
                                     track running statistics or use [C, T >= 2] samples --
-                                    trainingRun now fails before epoch 0 on this (#467), not
-                                    after a wasted training epoch. */
+                                    trainingRun rejects this before epoch 0 (#467). */
 } trainingRunOptions_t;
 
 void freeTrainingStats(trainingStats_t *trainingStats);

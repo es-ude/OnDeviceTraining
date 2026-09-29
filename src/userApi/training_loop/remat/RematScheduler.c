@@ -10,11 +10,68 @@
 #include "RematRows.h"
 #include "RematScheduler.h"
 
-void rematSchedulerDeinit(rematScheduler_t *s) {
-    if (s == NULL) {
-        return;
+const rematSchedulerFunctions_t rematSchedulerFunctions[] = {
+    [REMAT_ARENA] = {"arena", rematArenaBegin, rematArenaNext, rematArenaDone, rematArenaEnd,
+                     rematArenaDeinit},
+    [REMAT_HEAP] = {"heap", rematHeapBegin, rematHeapNext, rematHeapDone, rematHeapEnd,
+                    rematHeapDeinit},
+};
+/* The enum has no count member (spec §5.1), so appending a row means updating
+ * REMAT_HEAP below to the new last member, or a missing entry goes unseen. */
+_Static_assert(sizeof rematSchedulerFunctions / sizeof rematSchedulerFunctions[0] ==
+                   REMAT_HEAP + 1u,
+               "one vtable entry per rematSchedulerType_t member");
+
+static void requireInCall(const rematScheduler_t *s, const char *call) {
+    if (!s->inCall) {
+        PRINT_ERROR("remat[%s]: %s outside a call (no rematBegin since the last rematEnd)",
+                    s->fns == NULL ? "uninitialised" : s->fns->name, call);
+        exit(1);
     }
-    rematArenaDeinit(s); /* PR1c: s->fns->deinit(s), behind the fns and inCall guards */
+}
+
+void rematBegin(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss,
+                tensor_t *input) {
+    if (s->fns == NULL || s->wires == NULL || s->plan == NULL) {
+        PRINT_ERROR("rematBegin: scheduler not initialised (never initialised, or its init "
+                    "returned false and was ignored)");
+        exit(1);
+    }
+    if (s->inCall) {
+        PRINT_ERROR("rematBegin: scheduler '%s' re-entered", s->fns->name);
+        exit(1);
+    }
+    rematWireTableBind(s->wires, model, n, loss.funcType, input);
+    s->inCall = true;
+    s->fns->begin(s);
+}
+
+bool rematNext(rematScheduler_t *s, rematStep_t *st) {
+    requireInCall(s, "rematNext");
+    return s->fns->next(s, st);
+}
+
+void rematDone(rematScheduler_t *s, const rematStep_t *st) {
+    requireInCall(s, "rematDone");
+    s->fns->done(s, st);
+}
+
+void rematEnd(rematScheduler_t *s) {
+    requireInCall(s, "rematEnd");
+    s->fns->end(s);
+    rematWireTableUnbind(s->wires);
+    s->inCall = false;
+}
+
+void rematSchedulerDeinit(rematScheduler_t *s) {
+    if (s == NULL || s->fns == NULL) {
+        return; /* never initialised, or already deinitialised */
+    }
+    if (s->inCall) {
+        PRINT_ERROR("remat[%s]: rematSchedulerDeinit inside a call", s->fns->name);
+        exit(1);
+    }
+    s->fns->deinit(s);
     rematPlanFree(s->plan);
     rematWireTableFree(s->wires);
     *s = (rematScheduler_t){0};

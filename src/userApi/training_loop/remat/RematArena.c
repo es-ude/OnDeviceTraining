@@ -199,7 +199,7 @@ void arenaVerifyPlacement(const rematWireTable_t *t, const rematProgram_t *p, co
 
 bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss,
                     const tensor_t *inputLike, const rematPlanSpec_t *spec) {
-    *s = (rematScheduler_t){.type = REMAT_ARENA};
+    *s = (rematScheduler_t){.type = REMAT_ARENA, .fns = &rematSchedulerFunctions[REMAT_ARENA]};
     if (!rematWireTableInit(&s->wires, model, n, loss, inputLike)) {
         return false;
     }

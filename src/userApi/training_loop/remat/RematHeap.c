@@ -16,7 +16,7 @@
 
 bool rematHeapInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss,
                    const tensor_t *inputLike, const rematPlanSpec_t *spec) {
-    *s = (rematScheduler_t){.type = REMAT_HEAP};
+    *s = (rematScheduler_t){.type = REMAT_HEAP, .fns = &rematSchedulerFunctions[REMAT_HEAP]};
     return rematWireTableInit(&s->wires, model, n, loss, inputLike) &&
            rematPlanBuild(&s->plan, s->wires, model, spec);
 }
@@ -64,4 +64,8 @@ void rematHeapDone(rematScheduler_t *s, const rematStep_t *st) {
 
 void rematHeapEnd(rematScheduler_t *s) {
     rematRequireWalkComplete(s, "heap");
+}
+
+void rematHeapDeinit(rematScheduler_t *s) {
+    (void)s;
 }

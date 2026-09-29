@@ -69,10 +69,10 @@ add_elastic_ai_unit_test(
         odt_test_death
 )
 
-# Remat PR1b (#4): the RematScheduler library's ARENA row, driven through its
-# entry points directly (PR1c adds the const vtable and the dispatch). The
-# test reaches the row's private headers (RematPlace.h, RematRows.h) through
-# the source directory; RematPlan is listed for its PUBLIC ODT_REMAT_VERIFY.
+# Remat (#4): the RematScheduler library, both rows driven through the const
+# vtable and the rematBegin/Next/Done/End dispatch. The placement tests reach
+# the ARENA-private RematPlace.h through the source directory; RematPlan is
+# listed for its PUBLIC ODT_REMAT_VERIFY.
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         RematScheduler

@@ -10,9 +10,8 @@
 #include "Tensor.h"
 
 /* The remat scheduler's public header (#4, spec §5.1): the step, policy, spec
- * and walk types the static plan shares, and the scheduler with its rows.
- * PR1b holds the ARENA row; PR1c adds the HEAP row, the const vtable and the
- * rematBegin/Next/Done/End dispatch. */
+ * and walk types the static plan shares, and the scheduler with its rows
+ * (ARENA, HEAP), its const vtable and the rematBegin/Next/Done/End dispatch. */
 
 /* APPEND-ONLY: stored in plan tables and (PR6) caller/ir2c sequences. */
 typedef enum rematStepKind {
@@ -59,12 +58,38 @@ typedef struct rematWireTable rematWireTable_t; /* RematPlan.h (internal) */
 typedef struct rematPlan rematPlan_t;           /* RematPlan.h (internal) */
 typedef struct rematScheduler rematScheduler_t;
 
+typedef void (*rematBeginFn_t)(rematScheduler_t *s); /* runs AFTER the shared bind */
+typedef bool (*rematNextFn_t)(rematScheduler_t *s, rematStep_t *step); /* false = stream complete */
+typedef void (*rematDoneFn_t)(rematScheduler_t *s, const rematStep_t *step);
+typedef void (*rematEndFn_t)(rematScheduler_t *s);
+typedef void (*rematDeinitFn_t)(rematScheduler_t *s); /* row-private blocks only */
+
+/* Every slot is mandatory for every row (the Optimizer.h wording). */
+typedef struct rematSchedulerFunctions {
+    const char *name; /* "arena" | "heap": every violation message names the row */
+    rematBeginFn_t begin;
+    rematNextFn_t next;
+    rematDoneFn_t done;
+    rematEndFn_t end;
+    rematDeinitFn_t deinit;
+} rematSchedulerFunctions_t;
+
+/* Indexed by rematSchedulerType_t. const on purpose: flash-resident on the
+ * MCU and no mutable module global -- a deliberate deviation from the
+ * non-const optimizerFunctions[] / layerFunctions[] / lossFunctions[]. */
+extern const rematSchedulerFunctions_t rematSchedulerFunctions[];
+
 /* Caller-owned (stack, static or a struct field); ONE per concurrently
  * running training stream. */
 struct rematScheduler {
     rematSchedulerType_t type;
+    /* &rematSchedulerFunctions[type], set by the row's init. A test may point
+     * its own instance at a decorator table (D24); the driver validates a
+     * wrong table like a correct one. */
+    const rematSchedulerFunctions_t *fns;
     rematWireTable_t *wires; /* shared buffer table: one reserveMemory block */
     rematPlan_t *plan;       /* shared static plan: one reserveMemory block, placement-free */
+    bool inCall;             /* rematBegin..rematEnd; a re-entry guard, NOT a lock */
     rematWalk_t walk;        /* the static-plan cursor of the current call */
     bool handedOut;          /* next() handed out walk.step; done() has not answered yet */
     union {
@@ -89,7 +114,8 @@ bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t
  * range, reserved when the range opens and freed when it closes. */
 bool rematHeapInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss,
                    const tensor_t *inputLike, const rematPlanSpec_t *spec);
-/* NULL-safe and idempotent: the row's blocks, then the plan and the table. */
+/* NULL-safe and idempotent: the row's blocks (fns->deinit), then the plan and
+ * the table. Exits inside a call. */
 void rematSchedulerDeinit(rematScheduler_t *s);
 
 /* Feeds the harness keys (spec §14); a field is valid only under the flag
@@ -114,5 +140,14 @@ typedef struct rematReport {
     size_t metadataBytes; /* table block + plan block + the offsets block -> wire_metadata_b */
 } rematReport_t;
 void rematSchedulerReport(const rematScheduler_t *s, rematReport_t *out);
+
+/* THE entry points (the optimizerStep precedent): only drivers call them; raw
+ * fns-> calls only in unit tests. rematBegin binds the table (key check,
+ * per-bind derivation, ACT 0 = input) before the row's begin; rematEnd
+ * unbinds it after the row's end. */
+void rematBegin(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss, tensor_t *input);
+bool rematNext(rematScheduler_t *s, rematStep_t *step);
+void rematDone(rematScheduler_t *s, const rematStep_t *step);
+void rematEnd(rematScheduler_t *s);
 
 #endif // ODT_REMAT_SCHEDULER_H

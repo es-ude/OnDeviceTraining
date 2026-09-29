@@ -5,10 +5,10 @@
 
 #include "RematScheduler.h"
 
-/* The rows' entry points (spec §2.1). External linkage because PR1c's const
- * vtable in RematScheduler.c names them. Included only by RematScheduler.c,
- * the row's own file, and the row's unit test, which drives the entry points
- * directly until the dispatch exists. */
+/* The rows' entry points (spec §2.1). External linkage because the const
+ * vtable in RematScheduler.c names them. Included only by RematScheduler.c
+ * and the rows' own files; everything else reaches a row through the
+ * dispatch or rematSchedulerFunctions[]. */
 
 /* After the shared rematWireTableBind: requires the reserved arena, restarts
  * the walk. */
@@ -33,6 +33,9 @@ bool rematHeapNext(rematScheduler_t *s, rematStep_t *step);
 void rematHeapDone(rematScheduler_t *s, const rematStep_t *step);
 /* Before the shared rematWireTableUnbind: every step done, every block freed. */
 void rematHeapEnd(rematScheduler_t *s);
+/* HEAP keeps no private state: a block never outlives the call that opened
+ * its range. */
+void rematHeapDeinit(rematScheduler_t *s);
 
 /* For rows that walk the static plan (ARENA, HEAP; PAGED later): every step
  * done and every range closed, else exits naming the row. EVICT ignores the

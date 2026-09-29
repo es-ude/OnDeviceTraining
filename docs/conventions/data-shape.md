@@ -42,10 +42,10 @@ Datasets never carry a batch axis; the loop owns it.
   leading 1 is wrapped again (`[1, 1, ...]`). A missed or doubled wrap travels
   through rank-preserving layers (Relu, LayerNorm, Dropout) until the first
   layer that checks rank (Linear, Conv1d, Conv1dTransposed, the pools,
-  GroupNorm), which fails fast, or a Flatten, which absorbs it silently; if
-  it reaches the output unabsorbed, the loss's shape check (#153) fails fast
-  unless the label carries the same mistake — see "Migrating from
-  `[1, ...]` samples" below.
+  GroupNorm, BatchNorm1d), which fails fast, or a Flatten, which absorbs it
+  silently; if it reaches the output unabsorbed, the loss's shape check
+  (#153) fails fast unless the label carries the same mistake — see
+  "Migrating from `[1, ...]` samples" below.
 - BatchNorm1d needs `n = m·T ≥ 2` values per channel in training: a
   `[m, C]` model needs `microBatchSize ≥ 2`; `[1, C, T ≥ 2]` trains on
   per-sample statistics (instance-norm-like) while eval uses running
@@ -75,16 +75,16 @@ labels that already carry an explicit leading 1) needs auditing along three
 axes, since nothing here auto-detects the old shape:
 
 - **Items.** A first layer that checks input rank (Linear, Conv1d,
-  Conv1dTransposed, the pools, GroupNorm) fails loudly (`exit(1)`) on the
-  now-doubled leading axis — the fastest signal that a dataset still needs
-  updating. A Flatten-first model (e.g. `examples/mnist_cnn`) collapses the
-  extra leading 1 and gives no error; a Relu-, LayerNorm- or Dropout-first
-  model carries the extra axis onward, where it keeps traveling through any
-  further rank-preserving layers until a later rank-checking layer fails
-  fast, a later Flatten absorbs it silently, or — if neither follows — the
-  loss's shape check (#153) fails fast at the output, unless the labels
-  carry the same extra 1 — check the dataset directly instead of relying on
-  a test failure.
+  Conv1dTransposed, the pools, GroupNorm, BatchNorm1d) fails loudly
+  (`exit(1)`) on the now-doubled leading axis — the fastest signal that a
+  dataset still needs updating. A Flatten-first model (e.g.
+  `examples/mnist_cnn`) collapses the extra leading 1 and gives no error;
+  a Relu-, LayerNorm- or Dropout-first model carries the extra axis onward,
+  where it keeps traveling through any further rank-preserving layers until
+  a later rank-checking layer fails fast, a later Flatten absorbs it
+  silently, or — if neither follows — the loss's shape check (#153) fails
+  fast at the output, unless the labels carry the same extra 1 — check the
+  dataset directly instead of relying on a test failure.
 - **Labels.** The loss dispatchers (`src/loss_functions/MSE.c`,
   `CrossEntropy.c`) require the label to have exactly the model output's rank
   and dimensions (#153), so an old-style label whose leading 1 was a batch

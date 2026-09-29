@@ -11,6 +11,7 @@ target_link_libraries(TrainingLoopApi PRIVATE
         TensorConversion
         Rounding
         Layer
+        BatchNorm1d
         LossFunction
         Optimizer
         LrScheduler

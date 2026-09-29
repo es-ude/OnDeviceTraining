@@ -306,6 +306,7 @@ target_link_libraries(UnitTestBatchNorm1dIntegration PRIVATE
         BatchNorm1dApi
         BatchNorm1d
         Reduce
+        FlattenApi
         LinearApi
         LayerConfigAccess
         LayerWeightsApi

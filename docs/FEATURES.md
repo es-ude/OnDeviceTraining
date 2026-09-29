@@ -62,8 +62,8 @@ Notes on the qualified cells:
   `n = m·T ≥ 2`; frozen = eval-mode BN; running buffers persist via the v6
   format and `modelLoadStateDictBuffers`. Evaluation always runs one sample
   per call, so an untracked (`noRunningStats`) rank-2 BatchNorm1d cannot be
-  evaluated (`n = 1`); track running statistics or evaluate rank-3
-  `[1, C, T >= 2]` samples instead.
+  evaluated (`n = 1`; `trainingRun` rejects it before epoch 0); track
+  running statistics or evaluate rank-3 `[1, C, T >= 2]` samples instead.
 - **`SYM_INT32 arith`** — *native* means an integer kernel selected by the op's
   `arithmetic_t.type` and routed through the `executeOp` funnel (raw int32 mantissas,
   width-restored at the producer). *scale-transparent* (Flatten/Dropout) copies int

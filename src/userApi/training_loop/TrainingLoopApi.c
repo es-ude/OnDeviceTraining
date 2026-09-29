@@ -2,13 +2,16 @@
 
 #include <math.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 
+#include "BatchNorm1d.h"
 #include "BatchView.h"
 #include "BsScheduler.h"
 #include "Common.h"
 #include "DataLoaderApi.h"
 #include "InferenceApi.h"
+#include "Layer.h"
 #include "LrScheduler.h"
 #include "Optimizer.h"
 #include "StorageApi.h"
@@ -291,6 +294,52 @@ classificationReport_t evaluationEpochWithReport(layer_t **model, size_t modelSi
     return report;
 }
 
+/* #467: an untracked BatchNorm1d normalizes with batch statistics even in
+ * evaluation, which runs one sample per call -- so a [1, C] input (or
+ * [1, C, 1]) can never be evaluated. Walk the first eval sample's [1, ...]
+ * shape through the model and fail before epoch 0 instead of after a full
+ * training epoch. Models without an untracked BN skip the walk entirely. */
+static void requireUntrackedBatchNormsEvaluable(layer_t **model, size_t modelSize,
+                                                const tensor_t *evalItem) {
+    size_t last = modelSize;
+    for (size_t i = 0; i < modelSize; i++) {
+        if (model[i]->type == BATCHNORM1D && !model[i]->config->batchNorm1d->trackRunningStats) {
+            last = i;
+        }
+    }
+    if (last == modelSize) {
+        return;
+    }
+    size_t rank = evalItem->shape->numberOfDimensions;
+    if (rank >= BATCH_VIEW_MAX_RANK) {
+        return; /* evaluation itself fails fast in batchViewOf */
+    }
+    size_t dimsA[BATCH_VIEW_MAX_RANK];
+    size_t orderA[BATCH_VIEW_MAX_RANK];
+    size_t dimsB[BATCH_VIEW_MAX_RANK];
+    size_t orderB[BATCH_VIEW_MAX_RANK];
+    shape_t a = {.dimensions = dimsA, .orderOfDimensions = orderA, .numberOfDimensions = rank + 1};
+    shape_t b = {.dimensions = dimsB, .orderOfDimensions = orderB, .numberOfDimensions = 0};
+    dimsA[0] = 1;
+    for (size_t d = 0; d < rank; d++) {
+        dimsA[d + 1] = evalItem->shape->dimensions[d];
+    }
+    setOrderOfDimsForNewTensor(rank + 1, orderA);
+    shape_t *in = &a;
+    shape_t *out = &b;
+    for (size_t i = 0; i <= last; i++) {
+        if (model[i]->type == BATCHNORM1D) {
+            char what[64];
+            snprintf(what, sizeof what, "trainingRun pre-flight (model layer %zu)", i);
+            batchNorm1dRequireEvaluable(model[i], in, what);
+        }
+        layerFunctions[model[i]->type].calcOutputShape(model[i], in, out);
+        shape_t *t = in;
+        in = out;
+        out = t;
+    }
+}
+
 trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
                                 dataLoader_t *trainDataLoader, dataLoader_t *evalDataLoader,
                                 optimizer_t *optimizer, size_t numberOfEpochs,
@@ -357,6 +406,7 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
 
     batch_t *firstBatch = evalDataLoader->getBatch(evalDataLoader, 0);
     size_t numClasses = calcNumberOfElementsByTensor(firstBatch->samples[0]->label);
+    requireUntrackedBatchNormsEvaluable(model, modelSize, firstBatch->samples[0]->item);
     for (size_t i = 0; i < firstBatch->size; i++) {
         freeSample(firstBatch->samples[i]);
     }

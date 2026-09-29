@@ -188,6 +188,15 @@ static size_t bnInner(const tensor_t *t) {
  * generic branch's "(a frozen or eval-mode BN uses running statistics
  * instead)" parenthetical is false without running statistics to fall back
  * on, even though microBatchSize is still the right knob to raise. */
+static void bnDieUntrackedEval(const char *what, size_t n) {
+    PRINT_ERROR("BatchNorm1d %s: no running statistics (noRunningStats), so evaluation normalizes "
+                "with batch statistics; evaluation runs one sample per call, so n = T values per "
+                "channel -- got n = %zu -- track running statistics, or feed rank-3 [1, C, T >= 2] "
+                "samples",
+                what, n);
+    exit(1);
+}
+
 static void bnRequireBatchStatsSize(const batchNorm1dConfig_t *cfg, const tensor_t *t, size_t n,
                                     const char *what) {
     if (n >= 2) {
@@ -196,12 +205,7 @@ static void bnRequireBatchStatsSize(const batchNorm1dConfig_t *cfg, const tensor
     bool untrackedEval = !cfg->trackRunningStats && !cfg->training;
     const shape_t *s = t->shape;
     if (untrackedEval) {
-        PRINT_ERROR(
-            "BatchNorm1d %s: no running statistics (noRunningStats), so evaluation normalizes "
-            "with batch statistics; evaluation runs one sample per call, so n = T values per "
-            "channel -- got n = %zu -- track running statistics, or feed rank-3 [1, C, T >= 2] "
-            "samples",
-            what, n);
+        bnDieUntrackedEval(what, n);
     } else if (s->numberOfDimensions == 2) {
         if (n == 0) {
             PRINT_ERROR("BatchNorm1d %s: batch statistics need >= 2 values per channel, got an "
@@ -228,6 +232,25 @@ static void bnRequireBatchStatsSize(const batchNorm1dConfig_t *cfg, const tensor
                     what, n, s->dimensions[0], s->dimensions[1], s->dimensions[2]);
     }
     exit(1);
+}
+
+/* #467: an untracked BN normalizes with batch statistics even in evaluation
+ * (bnUsesBatchStats), and evaluation always runs one sample per call (#152
+ * D10) -- so the eval input's batch axis contributes exactly 1, and n is
+ * whatever the trailing (post-channel) dims multiply out to. No-op for a
+ * tracked BN, which falls back to running statistics in eval. */
+void batchNorm1dRequireEvaluable(const layer_t *layer, const shape_t *evalInputShape,
+                                 const char *what) {
+    if (layer->config->batchNorm1d->trackRunningStats) {
+        return;
+    }
+    size_t n = 1;
+    for (size_t d = 2; d < evalInputShape->numberOfDimensions; d++) {
+        n *= evalInputShape->dimensions[d];
+    }
+    if (n < 2) {
+        bnDieUntrackedEval(what, n);
+    }
 }
 
 /* Per-channel mean / biased variance over (b, t) through Reduce: a stack

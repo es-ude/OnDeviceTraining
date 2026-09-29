@@ -133,7 +133,9 @@ typedef struct trainingRunOptions {
                                     (batch statistics need >= 2 values per channel). Since
                                     evaluation runs one sample per call, an untracked
                                     (noRunningStats) rank-2 BatchNorm1d cannot be evaluated;
-                                    track running statistics or use [C, T >= 2] samples. */
+                                    track running statistics or use [C, T >= 2] samples --
+                                    trainingRun now fails before epoch 0 on this (#467), not
+                                    after a wasted training epoch. */
 } trainingRunOptions_t;
 
 void freeTrainingStats(trainingStats_t *trainingStats);
@@ -168,7 +170,10 @@ classificationReport_t evaluationEpochWithReport(layer_t **model, size_t modelSi
  * compensating batch scheduler would both write the LR every epoch; the train
  * loader's batchSize is not divisible by options->microBatchSize; or, with a
  * batch scheduler and microBatchSize > 1, any batch the scheduler will set for
- * epochs 1..numberOfEpochs-1 is not divisible by it (#152). */
+ * epochs 1..numberOfEpochs-1 is not divisible by it (#152); or the model has
+ * an untracked (noRunningStats) BatchNorm1d whose one-sample evaluation input
+ * (walked from the first eval sample) has fewer than 2 values per channel
+ * (#467). */
 trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
                                 dataLoader_t *trainDataLoader, dataLoader_t *evalDataLoader,
                                 optimizer_t *optimizer, size_t numberOfEpochs,

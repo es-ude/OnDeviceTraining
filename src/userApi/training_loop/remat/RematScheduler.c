@@ -46,14 +46,43 @@ void rematBegin(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t los
     s->fns->begin(s);
 }
 
+/* next() and done() alternate, and done() answers exactly the step next()
+ * handed out. Checked here rather than in the rows: the protocol is the
+ * same for every row, including those whose steps are not the plan's
+ * (EVICT's synthesized REFORWARDs). */
 bool rematNext(rematScheduler_t *s, rematStep_t *st) {
     requireInCall(s, "rematNext");
-    return s->fns->next(s, st);
+    if (s->handedOut) {
+        PRINT_ERROR("remat[%s]: rematNext while (kind %u, layer %u) is still handed out (rematDone "
+                    "not called)",
+                    s->fns->name, (unsigned)s->handed.kind, (unsigned)s->handed.layer);
+        exit(1);
+    }
+    if (!s->fns->next(s, st)) {
+        return false;
+    }
+    s->handed = *st;
+    s->handedOut = true;
+    return true;
 }
 
 void rematDone(rematScheduler_t *s, const rematStep_t *st) {
     requireInCall(s, "rematDone");
+    if (!s->handedOut) {
+        PRINT_ERROR("remat[%s]: rematDone for (kind %u, layer %u) with no step handed out "
+                    "(rematNext not called since the last rematDone, or it returned false)",
+                    s->fns->name, (unsigned)st->kind, (unsigned)st->layer);
+        exit(1);
+    }
+    if (st->kind != s->handed.kind || st->layer != s->handed.layer) {
+        PRINT_ERROR("remat[%s]: rematDone for a step next() did not hand out: next() handed out "
+                    "(kind %u, layer %u), done() got (kind %u, layer %u)",
+                    s->fns->name, (unsigned)s->handed.kind, (unsigned)s->handed.layer,
+                    (unsigned)st->kind, (unsigned)st->layer);
+        exit(1);
+    }
     s->fns->done(s, st);
+    s->handedOut = false;
 }
 
 void rematEnd(rematScheduler_t *s) {

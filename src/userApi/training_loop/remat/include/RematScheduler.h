@@ -91,7 +91,10 @@ struct rematScheduler {
     rematPlan_t *plan;       /* shared static plan: one reserveMemory block, placement-free */
     bool inCall;             /* rematBegin..rematEnd; a re-entry guard, NOT a lock */
     rematWalk_t walk;        /* the static-plan cursor of the current call */
-    bool handedOut;          /* next() handed out walk.step; done() has not answered yet */
+    /* The call protocol, owned by the dispatch for every row: next() handed
+     * out `handed`, and done() has not answered it yet. */
+    bool handedOut;
+    rematStep_t handed;
     union {
         /* ARENA-private (R5). Two blocks (D55 as amended by Codex N3): offsets
          * first, placed into and verified, then the arena data block. */

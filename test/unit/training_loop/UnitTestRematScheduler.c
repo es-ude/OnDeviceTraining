@@ -1135,31 +1135,9 @@ static void doneForAStepNextDidNotHandOut(arenaFixture_t *f, rematScheduler_t *s
     rematDone(s, &(rematStep_t){.kind = REMAT_STEP_BACKWARD, .layer = 0});
 }
 
-void testArenaDoneExitsOnAStepNextDidNotHandOut(void) {
-    arenaFixture_t f;
-    buildF1Model(&f);
-    rematScheduler_t s = initArena(&f, NULL);
-    ASSERT_EXITS_WITH_OUTPUT(1,
-                             "rematDone for a step next() did not hand out: step #0 is (kind 0, "
-                             "layer 0), done() got (kind 3, layer 0)",
-                             doneForAStepNextDidNotHandOut(&f, &s));
-    freeFixture(&f, &s);
-}
-
 static void doneBeforeNext(arenaFixture_t *f, rematScheduler_t *s) {
     bindAndBegin(f, s);
     rematDone(s, &s->plan->train.steps[0]);
-}
-
-/* RF2: step 0 opens ACT 1; a done() without its next() would leave it
- * unbound and stall the open cursor for the rest of the call. */
-void testArenaDoneExitsBeforeNextHandedTheStepOut(void) {
-    arenaFixture_t f;
-    buildF1Model(&f);
-    rematScheduler_t s = initArena(&f, NULL);
-    ASSERT_EXITS_WITH_OUTPUT(1, "rematDone for step #0 before rematNext handed it out",
-                             doneBeforeNext(&f, &s));
-    freeFixture(&f, &s);
 }
 
 static void doneWithoutNextAtLossForward(arenaFixture_t *f, rematScheduler_t *s) {
@@ -1172,32 +1150,11 @@ static void doneWithoutNextAtLossForward(arenaFixture_t *f, rematScheduler_t *s)
     rematDone(s, &s->plan->train.steps[2]);
 }
 
-/* F1 step 2 is LOSS_FORWARD, which opens no range (nor does a grads-only
- * BACKWARD at deepest): the open cursor cannot see the skipped next(), only
- * the handed-out flag can. */
-void testArenaDoneExitsWhenNextWasSkippedAtAStepThatOpensNothing(void) {
-    arenaFixture_t f;
-    buildF1Model(&f);
-    rematScheduler_t s = initArena(&f, NULL);
-    TEST_ASSERT_EQUAL_UINT8(REMAT_STEP_LOSS_FORWARD, s.plan->train.steps[2].kind);
-    ASSERT_EXITS_WITH_OUTPUT(1, "rematDone for step #2 before rematNext handed it out",
-                             doneWithoutNextAtLossForward(&f, &s));
-    freeFixture(&f, &s);
-}
-
 static void nextTwice(arenaFixture_t *f, rematScheduler_t *s) {
     bindAndBegin(f, s);
     rematStep_t st;
     (void)rematNext(s, &st);
     (void)rematNext(s, &st);
-}
-
-void testArenaNextExitsWhileTheHandedOutStepIsNotDone(void) {
-    arenaFixture_t f;
-    buildF1Model(&f);
-    rematScheduler_t s = initArena(&f, NULL);
-    ASSERT_EXITS_WITH_OUTPUT(1, "rematNext while step #0 is still handed out", nextTwice(&f, &s));
-    freeFixture(&f, &s);
 }
 
 static void doneAfterTheStreamCompleted(arenaFixture_t *f, rematScheduler_t *s) {
@@ -1209,16 +1166,6 @@ static void doneAfterTheStreamCompleted(arenaFixture_t *f, rematScheduler_t *s) 
         last = st;
     }
     rematDone(s, &last);
-}
-
-/* RF1: one done() too many must not read steps[numSteps]. */
-void testArenaDoneExitsAfterTheStreamCompleted(void) {
-    arenaFixture_t f;
-    buildF1Model(&f);
-    rematScheduler_t s = initArena(&f, NULL);
-    ASSERT_EXITS_WITH_OUTPUT(1, "rematDone after the stream completed (5 steps)",
-                             doneAfterTheStreamCompleted(&f, &s));
-    freeFixture(&f, &s);
 }
 
 static void endAfterOneStep(arenaFixture_t *f, rematScheduler_t *s) {
@@ -1971,6 +1918,56 @@ void testDeinitExitsInsideACall(void) {
     freeFixture(&f, &s);
 }
 
+/* ---- the call protocol, owned by the dispatch on every row (spec §5.4; C3) ---- */
+
+/* Each misuse on F1 (STORE_ALL) under both rows; the message names the row. */
+static void assertMisuseExitsOnBothRows(void (*misuse)(arenaFixture_t *, rematScheduler_t *),
+                                        const char *rule) {
+    const rowInit_t inits[] = {initArena, initHeap};
+    for (size_t k = 0; k < 2u; k++) {
+        arenaFixture_t f;
+        buildF1Model(&f);
+        rematScheduler_t s = inits[k](&f, NULL);
+        char message[160];
+        (void)snprintf(message, sizeof message, "remat[%s]: %s", s.fns->name, rule);
+        ASSERT_EXITS_WITH_OUTPUT(1, message, misuse(&f, &s));
+        freeFixture(&f, &s);
+    }
+}
+
+void testDoneExitsOnAStepNextDidNotHandOut(void) {
+    assertMisuseExitsOnBothRows(doneForAStepNextDidNotHandOut,
+                                "rematDone for a step next() did not hand out: next() handed out "
+                                "(kind 0, layer 0), done() got (kind 3, layer 0)");
+}
+
+/* RF2: step 0 opens ACT 1; a done() without its next() would leave it
+ * unbound and stall the open cursor for the rest of the call. */
+void testDoneExitsBeforeNextHandedTheStepOut(void) {
+    assertMisuseExitsOnBothRows(doneBeforeNext, "rematDone for (kind 0, layer 0) with no step "
+                                                "handed out");
+}
+
+/* F1 step 2 is LOSS_FORWARD, which opens no range (nor does a grads-only
+ * BACKWARD at deepest): no open cursor can see the skipped next(), only the
+ * handed-out flag. */
+void testDoneExitsWhenNextWasSkippedAtAStepThatOpensNothing(void) {
+    assertMisuseExitsOnBothRows(doneWithoutNextAtLossForward,
+                                "rematDone for (kind 1, layer 2) with no step handed out");
+}
+
+void testNextExitsWhileTheHandedOutStepIsNotDone(void) {
+    assertMisuseExitsOnBothRows(nextTwice, "rematNext while (kind 0, layer 0) is still handed "
+                                           "out");
+}
+
+/* RF1: one done() too many must not reach the row, whose walk would index
+ * steps[numSteps]. */
+void testDoneExitsAfterTheStreamCompleted(void) {
+    assertMisuseExitsOnBothRows(doneAfterTheStreamCompleted,
+                                "rematDone for (kind 3, layer 1) with no step handed out");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testArenaInitBuildsTheTableAndThePlan);
@@ -2018,11 +2015,11 @@ int main(void) {
     RUN_TEST(testArenaNextHandsOutThePlanStepsInOrder);
     RUN_TEST(testArenaNextAfterTheStreamCompletedReturnsFalse);
     RUN_TEST(testArenaSecondCallRestartsTheWalk);
-    RUN_TEST(testArenaDoneExitsOnAStepNextDidNotHandOut);
-    RUN_TEST(testArenaDoneExitsBeforeNextHandedTheStepOut);
-    RUN_TEST(testArenaDoneExitsWhenNextWasSkippedAtAStepThatOpensNothing);
-    RUN_TEST(testArenaNextExitsWhileTheHandedOutStepIsNotDone);
-    RUN_TEST(testArenaDoneExitsAfterTheStreamCompleted);
+    RUN_TEST(testDoneExitsOnAStepNextDidNotHandOut);
+    RUN_TEST(testDoneExitsBeforeNextHandedTheStepOut);
+    RUN_TEST(testDoneExitsWhenNextWasSkippedAtAStepThatOpensNothing);
+    RUN_TEST(testNextExitsWhileTheHandedOutStepIsNotDone);
+    RUN_TEST(testDoneExitsAfterTheStreamCompleted);
     RUN_TEST(testArenaEndExitsOnAnIncompleteWalk);
     RUN_TEST(testArenaEndExitsOnARangeLeftOpen);
     RUN_TEST(testArenaBeginExitsWhenTheArenaWasNeverReserved);

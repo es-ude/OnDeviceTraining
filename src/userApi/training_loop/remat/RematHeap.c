@@ -51,7 +51,7 @@ bool rematHeapNext(rematScheduler_t *s, rematStep_t *st) {
 }
 
 void rematHeapDone(rematScheduler_t *s, const rematStep_t *st) {
-    (void)st;
+    (void)st; /* the dispatch checks that done() answers the step next() handed out */
     const rematProgram_t *p = &s->plan->train;
     for (size_t r; (r = rematWalkClosing(p, &s->walk)) != REMAT_NONE;) {
         uint16_t w = p->ranges[r].wire;

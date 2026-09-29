@@ -20,6 +20,16 @@ void rematSchedulerDeinit(rematScheduler_t *s) {
     *s = (rematScheduler_t){0};
 }
 
+void rematRequireWalkComplete(const rematScheduler_t *s, const char *row) {
+    const rematProgram_t *p = &s->plan->train; /* PR3: the program of the call's mode */
+    if (s->walk.step != p->numSteps || s->walk.close != p->numRanges) {
+        PRINT_ERROR("remat[%s]: rematEnd before the walk completed: %zu of %zu steps done, "
+                    "%zu of %zu ranges closed",
+                    row, s->walk.step, p->numSteps, s->walk.close, p->numRanges);
+        exit(1);
+    }
+}
+
 /* D60 covers every size sum. Resident block sizes cannot reach SIZE_MAX
  * together, so this exit is unreachable and has no dedicated test. */
 static size_t reportAdd(size_t a, size_t b) {

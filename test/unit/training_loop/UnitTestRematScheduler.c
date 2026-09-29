@@ -1631,6 +1631,141 @@ void testHeapInitExitsOnAByteCountOverflow(void) {
     freeModel(model, 1);
 }
 
+/* ---- the HEAP row's entry points, driven directly (spec §5.6; Task 3 moves
+ * them onto the dispatch) ---- */
+
+static void heapBindAndBegin(arenaFixture_t *f, rematScheduler_t *s) {
+    rematWireTableBind(s->wires, f->model, f->n, f->lt, f->x);
+    rematHeapBegin(s);
+}
+
+static void heapEndAndUnbind(rematScheduler_t *s) {
+    rematHeapEnd(s);
+    rematWireTableUnbind(s->wires);
+}
+
+static size_t heapWalkAll(arenaFixture_t *f, rematScheduler_t *s) {
+    heapBindAndBegin(f, s);
+    rematStep_t st;
+    size_t steps = 0;
+    while (rematHeapNext(s, &st)) {
+        rematHeapDone(s, &st);
+        steps++;
+    }
+    heapEndAndUnbind(s);
+    return steps;
+}
+
+void testHeapWalkHandsOutThePlanStepsAndEndsWithNothingBound(void) {
+    arenaFixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initHeap(&f, NULL);
+    const rematProgram_t *p = &s.plan->train;
+    heapBindAndBegin(&f, &s);
+    rematStep_t st;
+    size_t i = 0;
+    while (rematHeapNext(&s, &st)) {
+        TEST_ASSERT_TRUE(i < p->numSteps);
+        TEST_ASSERT_EQUAL_UINT8(p->steps[i].kind, st.kind);
+        TEST_ASSERT_EQUAL_UINT16(p->steps[i].layer, st.layer);
+        rematHeapDone(&s, &st);
+        i++;
+    }
+    TEST_ASSERT_EQUAL_size_t(25, i);
+    heapEndAndUnbind(&s);
+    for (uint16_t w = 1; w < s.wires->numWires; w++) {
+        TEST_ASSERT_NULL(rematWireHdr(s.wires, w)->data);
+    }
+    TEST_ASSERT_NULL(rematActHdr(s.wires, 0));
+    freeFixture(&f, &s);
+}
+
+#ifdef ODT_MEM_PROFILE
+/* The counter adds each block's requested bytes, not the allocator header
+ * (StorageApi.c:41), so a row that reserves exactly bytes(w) per live range
+ * holds exactly the SDK's liveBytes at every point of the call, and its
+ * per-call peak of reserved bytes is the plan's peakLiveBytes. */
+void testHeapHoldsExactlyTheLiveBytesAtEveryStep(void) {
+    arenaFixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initHeap(&f, &g_liveness);
+    size_t memAfterInit = memProfileCurrentBytes();
+    heapBindAndBegin(&f, &s);
+    rematStep_t st;
+    size_t peak = 0;
+    while (rematHeapNext(&s, &st)) {
+        size_t held = memProfileCurrentBytes() - memAfterInit;
+        TEST_ASSERT_EQUAL_size_t(s.wires->liveBytes, held);
+        if (held > peak) {
+            peak = held;
+        }
+        rematHeapDone(&s, &st);
+        TEST_ASSERT_EQUAL_size_t(s.wires->liveBytes, memProfileCurrentBytes() - memAfterInit);
+    }
+    heapEndAndUnbind(&s);
+    TEST_ASSERT_EQUAL_size_t(49152, peak);
+    TEST_ASSERT_EQUAL_size_t(memAfterInit, memProfileCurrentBytes());
+    freeFixture(&f, &s);
+}
+#endif
+
+/* PR1a carry: the walk restarts at every begin. */
+void testHeapSecondCallRestartsTheWalk(void) {
+    arenaFixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initHeap(&f, &g_liveness);
+    TEST_ASSERT_EQUAL_size_t(5, heapWalkAll(&f, &s));
+    TEST_ASSERT_EQUAL_size_t(5, heapWalkAll(&f, &s));
+    TEST_ASSERT_EQUAL_UINT32(1, s.wires->wires[1].bindGen); /* the table bind reset it */
+    freeFixture(&f, &s);
+}
+
+static void heapEndAfterOneStep(arenaFixture_t *f, rematScheduler_t *s) {
+    heapBindAndBegin(f, s);
+    rematStep_t st;
+    (void)rematHeapNext(s, &st);
+    rematHeapDone(s, &st);
+    rematHeapEnd(s);
+}
+
+void testHeapEndExitsOnAnIncompleteWalk(void) {
+    arenaFixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initHeap(&f, &g_liveness);
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "remat[heap]: rematEnd before the walk completed: 1 of 5 steps done, "
+                             "0 of 3 ranges closed",
+                             heapEndAfterOneStep(&f, &s));
+    freeFixture(&f, &s);
+}
+
+#ifndef ODT_TEST_ASAN
+static void heapFirstNextOnAHugeWire(arenaFixture_t *f, rematScheduler_t *s) {
+    heapBindAndBegin(f, s);
+    rematStep_t st;
+    (void)rematHeapNext(s, &st);
+}
+
+/* R8: the row owns resource exits. ReLU over a borrowed [1, 2^60] FLOAT32
+ * input under MSE (the did-not-run fixture): HEAP init reserves only the
+ * table and plan, and FORWARD 0's 2^62-byte ACT 1 cannot be reserved on any
+ * 64-bit host. Skipped under ASan, which aborts on oversized requests; macOS
+ * malloc prints a "can't allocate region" warning to stderr here. */
+void testHeapNextExitsNamingTheStepAndTheWireWhenAReservationFails(void) {
+    arenaFixture_t f;
+    f.model[0] = makeRelu(&g_floatQ);
+    f.n = 1;
+    f.lt = MSE;
+    f.x = makeInput(&f.in, (size_t[]){1, (size_t)1 << 60}, 2, &g_floatQ);
+    rematScheduler_t s = initHeap(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "remat[heap]: reserveMemory(4611686018427387904) failed at step #0 "
+                             "for wire ACT 1",
+                             heapFirstNextOnAHugeWire(&f, &s));
+    freeFixture(&f, &s);
+}
+#endif
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testArenaInitBuildsTheTableAndThePlan);
@@ -1704,5 +1839,14 @@ int main(void) {
 #endif
     RUN_TEST(testHeapReportIsPlacedAndReservedWithoutAnArena);
     RUN_TEST(testHeapInitExitsOnAByteCountOverflow);
+    RUN_TEST(testHeapWalkHandsOutThePlanStepsAndEndsWithNothingBound);
+#ifdef ODT_MEM_PROFILE
+    RUN_TEST(testHeapHoldsExactlyTheLiveBytesAtEveryStep);
+#endif
+    RUN_TEST(testHeapSecondCallRestartsTheWalk);
+    RUN_TEST(testHeapEndExitsOnAnIncompleteWalk);
+#ifndef ODT_TEST_ASAN
+    RUN_TEST(testHeapNextExitsNamingTheStepAndTheWireWhenAReservationFails);
+#endif
     return UNITY_END();
 }

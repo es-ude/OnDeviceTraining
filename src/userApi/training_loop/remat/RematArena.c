@@ -321,13 +321,7 @@ void rematArenaDone(rematScheduler_t *s, const rematStep_t *st) {
 }
 
 void rematArenaEnd(rematScheduler_t *s) {
-    const rematProgram_t *p = &s->plan->train;
-    if (s->walk.step != p->numSteps || s->walk.close != p->numRanges) {
-        PRINT_ERROR("remat[arena]: rematEnd before the walk completed: %zu of %zu steps done, "
-                    "%zu of %zu ranges closed",
-                    s->walk.step, p->numSteps, s->walk.close, p->numRanges);
-        exit(1);
-    }
+    rematRequireWalkComplete(s, "arena");
 }
 
 void rematArenaDeinit(rematScheduler_t *s) {

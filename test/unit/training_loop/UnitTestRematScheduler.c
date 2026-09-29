@@ -2046,6 +2046,63 @@ void testDoneExitsAfterTheStreamCompleted(void) {
                                 "rematDone for (kind 3, layer 1) with no step handed out");
 }
 
+/* ---- HEAP's right-boundary ASan redzones (spec §5.6, §12.2 item 6; asan preset only) ---- */
+
+#ifdef ODT_TEST_ASAN
+/* One block of exactly bytes(w) per range: F1's ACT 1 is 5 BFP bytes, so its
+ * byte 5 lies in the block's redzone. The marker is flushed before the read
+ * because the death callback's _exit discards buffered stdout. */
+static void readOnePastAHeapWire(arenaFixture_t *f, rematScheduler_t *s) {
+    odtInstallAsanDeathExit();
+    bindAndBegin(f, s);
+    rematStep_t st;
+    (void)rematNext(s, &st); /* FORWARD 0 binds ACT 1 */
+    volatile uint8_t *act1 = rematWireHdr(s->wires, 1)->data;
+    (void)act1[4];
+    printf("payload-readable\n");
+    (void)fflush(stdout);
+    (void)act1[5];
+}
+
+void testHeapWireEndsAtItsExactBytes(void) {
+    arenaFixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initHeap(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(ODT_ASAN_DEATH_EXIT, "payload-readable", readOnePastAHeapWire(&f, &s));
+    freeFixture(&f, &s);
+}
+
+/* F1 LIVENESS: ACT 2 lives [1, 3]; its block is freed by done() of step 3, so
+ * a pointer saved while it was bound trips ASan as a use after free. */
+static void readAHeapWireAfterItsRelease(arenaFixture_t *f, rematScheduler_t *s) {
+    odtInstallAsanDeathExit();
+    bindAndBegin(f, s);
+    rematStep_t st;
+    volatile uint8_t *act2 = NULL;
+    while (rematNext(s, &st)) {
+        if (st.kind == REMAT_STEP_FORWARD && st.layer == 1u) {
+            act2 = rematWireHdr(s->wires, 2)->data;
+        }
+        rematDone(s, &st);
+        if (st.kind == REMAT_STEP_LOSS_BACKWARD) {
+            break;
+        }
+    }
+    if (act2 == NULL) {
+        _exit(0); /* never captured: a NULL read's SEGV would also exit 86 */
+    }
+    (void)act2[0];
+}
+
+void testHeapReadAfterReleaseTripsAsan(void) {
+    arenaFixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initHeap(&f, &g_liveness);
+    ASSERT_EXITS_WITH(ODT_ASAN_DEATH_EXIT, readAHeapWireAfterItsRelease(&f, &s));
+    freeFixture(&f, &s);
+}
+#endif
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testArenaInitBuildsTheTableAndThePlan);
@@ -2143,5 +2200,9 @@ int main(void) {
     RUN_TEST(testDoneExitsOutsideACall);
     RUN_TEST(testEndExitsOutsideACall);
     RUN_TEST(testDeinitExitsInsideACall);
+#ifdef ODT_TEST_ASAN
+    RUN_TEST(testHeapWireEndsAtItsExactBytes);
+    RUN_TEST(testHeapReadAfterReleaseTripsAsan);
+#endif
     return UNITY_END();
 }

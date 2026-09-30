@@ -53,5 +53,11 @@ void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, layer_t **model, size_
 /* Checks one step and resolves its operands into *ops; exits on a violation,
  * before the driver runs anything. */
 void rematCheckStep(rematCheck_t *c, const rematStep_t *st, rematOperands_t *ops);
+/* After the last step, before rematEnd: every FORWARD, LOSS_FORWARD, and when
+ * something trains LOSS_BACKWARD and every BACKWARD down to deepest ran;
+ * else exits naming the first missing step. */
+void rematCheckFinish(const rematCheck_t *c);
+/* After rematEnd: no non-borrowed wire is bound and ACT 0 is unbound. */
+void rematCheckReleased(const rematCheck_t *c);
 
 #endif // ODT_REMAT_CHECK_H

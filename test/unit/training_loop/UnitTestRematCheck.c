@@ -364,7 +364,9 @@ static void checkedCall(fixture_t *f, rematScheduler_t *s) {
         TEST_ASSERT_NOT_EQUAL_UINT32(0, producedGen[w]);
         TEST_ASSERT_EQUAL_UINT32(t->wires[w].bindGen, producedGen[w]);
     }
+    rematCheckFinish(&c);
     rematEnd(s);
+    rematCheckReleased(&c);
 }
 
 typedef rematScheduler_t (*rowInit_t)(fixture_t *f, const rematPlanSpec_t *spec);
@@ -530,7 +532,9 @@ static void driveCall(fixture_t *f, rematScheduler_t *s) {
         rematCheckStep(&c, &st, &op);
         rematDone(s, &st);
     }
+    rematCheckFinish(&c);
     rematEnd(s);
+    rematCheckReleased(&c);
 }
 
 /* D24: decorator rows wrap the real ARENA slots and are installed on the
@@ -881,6 +885,255 @@ void testStepExitsWhenALossBackwardsInputAndOutputShareBytes(void) {
                               "in/out' (ACT 2 and GRAD 2)");
 }
 
+static void releaseAct1AndAct2(rematCheck_t *c, rematScheduler_t *s) {
+    (void)c;
+    rematWireRelease(s->wires, rematActId(s->wires, 1));
+    rematWireRelease(s->wires, rematActId(s->wires, 2));
+}
+
+/* Both FORWARD(1) operands unbound: residency names the first, before two NULL intervals "share
+ * bytes" (spec §7.4: rule 4 before rule 5). */
+void testStepExitsOnNonResidencyBeforeSharedBytes(void) {
+    assertF1TamperedRejectsAt(1, releaseAct1AndAct2,
+                              "step #1 FORWARD(layer 1) violates 'operand not resident: in ACT 1'");
+}
+
+/* Only the header the checker sees is aliased: the arena placement stays the verified one. The
+ * child exits after the check, before any release could poison the shared bytes twice. */
+static void aliasAct9OntoGrad9(rematCheck_t *c, rematScheduler_t *s) {
+    (void)c;
+    rematWireHdr(s->wires, rematActId(s->wires, 9))->data =
+        rematWireHdr(s->wires, rematGradId(s->wires, 9))->data;
+}
+
+/* Flatten's BACKWARD(9) (HAR step 15) does not read ACT 9: sharing bytes with its out is legal
+ * (spec §7.5). Exit 0 is the acceptance; the empty needle keeps a rejection's banner in the
+ * failure message. */
+void testStepAcceptsADeadInputSharingBytesWithTheOutput(void) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(0, "", offerStep(&f, &s, 15, NULL, aliasAct9OntoGrad9));
+    freeFixture(&f, &s);
+}
+
+/* ---- the stream-level checks (spec §7.6) ---- */
+
+/* Death-test children only: `k` checked steps, then the stream is declared
+ * finished. */
+static void finishAfter(fixture_t *f, rematScheduler_t *s, size_t k) {
+    uint32_t producedGen[rematCheckNumWires(s)];
+    rematCheck_t c;
+    rematCheckInit(&c, s, f->model, f->n, f->lt, producedGen);
+    rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
+    rematStep_t st;
+    rematOperands_t op;
+    for (size_t i = 0; i < k; i++) {
+        if (!rematNext(s, &st)) {
+            return;
+        }
+        rematCheckStep(&c, &st, &op);
+        rematDone(s, &st);
+    }
+    rematCheckFinish(&c);
+}
+
+static void assertF1FinishRejectsAfter(size_t k, const char *violation) {
+    fixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initHeap(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(1, violation, finishAfter(&f, &s, k));
+    freeFixture(&f, &s);
+}
+
+void testFinishExitsOnAMissingForward(void) {
+    assertF1FinishRejectsAfter(
+        1, "remat[heap]: stream of 1 steps violates 'incomplete stream: missing FORWARD(1)'");
+}
+
+void testFinishExitsOnAMissingLossForward(void) {
+    assertF1FinishRejectsAfter(2, "violates 'incomplete stream: missing LOSS_FORWARD'");
+}
+
+void testFinishExitsOnAMissingLossBackward(void) {
+    assertF1FinishRejectsAfter(3, "violates 'incomplete stream: missing LOSS_BACKWARD'");
+}
+
+void testFinishExitsOnAMissingBackward(void) {
+    assertF1FinishRejectsAfter(4, "violates 'incomplete stream: missing BACKWARD(1)'");
+}
+
+/* A row whose stream ends one step early. The driver checks the stream before
+ * rematEnd, so the checker names the missing step before the row's own
+ * walk-complete check could. */
+static bool truncatingNext(rematScheduler_t *s, rematStep_t *st) {
+    if (s->walk.step + 1u == s->plan->train.numSteps) {
+        return false;
+    }
+    return passNext(s, st);
+}
+
+static const rematSchedulerFunctions_t g_truncatingArena = {.name = "truncating-arena",
+                                                            .begin = passBegin,
+                                                            .next = truncatingNext,
+                                                            .done = passDone,
+                                                            .end = passEnd,
+                                                            .deinit = passDeinit};
+
+void testFinishExitsWhenARowEndsTheStreamEarly(void) {
+    fixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    s.fns = &g_truncatingArena;
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "remat[truncating-arena]: stream of 4 steps violates 'incomplete "
+                             "stream: missing BACKWARD(1)'",
+                             driveCall(&f, &s));
+    freeFixture(&f, &s);
+}
+
+/* A row that consumes the stream's real last step internally -- fetched
+ * from the real next(), answered through the real done() -- and then
+ * returns false. done() advances the row's own walk.step to numSteps, so
+ * rematEnd's rematRequireWalkComplete would NOT fire (unlike truncatingNext
+ * above, which never calls the real next() for that step at all); only
+ * rematCheckFinish, which this step was never offered to, can catch the
+ * missing BACKWARD. */
+static bool eatingNext(rematScheduler_t *s, rematStep_t *st) {
+    if (s->walk.step + 1u == s->plan->train.numSteps) {
+        rematStep_t eaten;
+        (void)passNext(s, &eaten);
+        passDone(s, &eaten);
+        return false;
+    }
+    return passNext(s, st);
+}
+
+static const rematSchedulerFunctions_t g_eatingArena = {.name = "eating-arena",
+                                                        .begin = passBegin,
+                                                        .next = eatingNext,
+                                                        .done = passDone,
+                                                        .end = passEnd,
+                                                        .deinit = passDeinit};
+
+void testFinishExitsWhenARowEatsTheLastStepInternally(void) {
+    fixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    s.fns = &g_eatingArena;
+    ASSERT_EXITS_WITH_OUTPUT(
+        1,
+        "remat[eating-arena]: stream of 4 steps violates 'incomplete stream: missing BACKWARD(1)'",
+        driveCall(&f, &s));
+    freeFixture(&f, &s);
+}
+
+/* [Linear 4 -> 3] under CE, n = 1 (D20): top = -1 < deepest = 0, so the
+ * stream is FORWARD 0, LOSS_FORWARD, LOSS_BACKWARD and no BACKWARD at all;
+ * wires ACT 0, ACT 1, the seed GRAD 1. */
+static void buildCeSingleLinearModel(fixture_t *f) {
+    f->model[0] = makeLinear(4, 3, false);
+    f->n = 1;
+    f->lt = CROSS_ENTROPY;
+    f->x = makeInput(&f->in, (size_t[]){1, 4}, 2);
+}
+
+/* Spec §7.6: with n = 1 under CE, LOSS_BACKWARD and zero BACKWARDs is a
+ * complete stream, as in today's loop. */
+void testFinishAcceptsCeWithOneLayerAndNoBackwardStep(void) {
+    assertEveryStepAccepted(initArena, buildCeSingleLinearModel);
+    assertEveryStepAccepted(initHeap, buildCeSingleLinearModel);
+}
+
+/* No LOSS_BACKWARD and no BACKWARD: complete when nothing trains. */
+void testFinishAcceptsAnAllFrozenStream(void) {
+    assertEveryStepAccepted(initArena, buildAllFrozenModel);
+    assertEveryStepAccepted(initHeap, buildAllFrozenModel);
+}
+
+/* A row whose end leaves ACT 1 bound (R8 lifecycle: "end leaves no
+ * non-borrowed wire resident"). */
+static uint64_t g_strayBytes[1];
+
+static void leakyEnd(rematScheduler_t *s) {
+    passEnd(s);
+    rematWireBind(s->wires, rematActId(s->wires, 1), (uint8_t *)g_strayBytes);
+}
+
+static const rematSchedulerFunctions_t g_leakyArena = {.name = "leaky-arena",
+                                                       .begin = passBegin,
+                                                       .next = passNext,
+                                                       .done = passDone,
+                                                       .end = leakyEnd,
+                                                       .deinit = passDeinit};
+
+void testReleasedExitsWhenARowLeavesAWireResident(void) {
+    fixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    s.fns = &g_leakyArena;
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "remat[leaky-arena]: after rematEnd violates 'wire left resident after end: ACT 1'",
+        driveCall(&f, &s));
+    freeFixture(&f, &s);
+}
+
+/* A driver that checks the release before rematEnd. */
+static void releasedBeforeEnd(fixture_t *f, rematScheduler_t *s) {
+    uint32_t producedGen[rematCheckNumWires(s)];
+    rematCheck_t c;
+    rematCheckInit(&c, s, f->model, f->n, f->lt, producedGen);
+    rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
+    rematStep_t st;
+    rematOperands_t op;
+    while (rematNext(s, &st)) {
+        rematCheckStep(&c, &st, &op);
+        rematDone(s, &st);
+    }
+    rematCheckFinish(&c);
+    rematCheckReleased(&c);
+}
+
+void testReleasedExitsWhileTheInputIsStillBound(void) {
+    fixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initHeap(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "violates 'wire left resident after end: ACT 0' (the input is still "
+                             "bound)",
+                             releasedBeforeEnd(&f, &s));
+    freeFixture(&f, &s);
+}
+
+#ifdef ODT_MEM_PROFILE
+/* Hard rule: the checker reserves nothing; its state is the caller's (spec
+ * §2.3). Measured around every checker call on HEAP, whose rows do reserve. */
+void testCheckReservesNothing(void) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initHeap(&f, &g_liveness);
+    size_t before = memProfileCurrentBytes();
+    uint32_t producedGen[rematCheckNumWires(&s)];
+    rematCheck_t c;
+    rematCheckInit(&c, &s, f.model, f.n, f.lt, producedGen);
+    TEST_ASSERT_EQUAL_size_t(before, memProfileCurrentBytes());
+    rematBegin(&s, f.model, f.n, defaultLossConfig(f.lt), f.x);
+    rematStep_t st;
+    while (rematNext(&s, &st)) {
+        size_t held = memProfileCurrentBytes();
+        rematOperands_t op;
+        rematCheckStep(&c, &st, &op);
+        TEST_ASSERT_EQUAL_size_t(held, memProfileCurrentBytes());
+        rematDone(&s, &st);
+    }
+    rematCheckFinish(&c);
+    rematEnd(&s);
+    rematCheckReleased(&c);
+    TEST_ASSERT_EQUAL_size_t(before, memProfileCurrentBytes());
+    freeFixture(&f, &s);
+}
+#endif
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testNumWiresIsTheTablesWireCount);
@@ -919,5 +1172,20 @@ int main(void) {
     RUN_TEST(testStepExitsWhenABackwardsInputAndOutputShareBytes);
     RUN_TEST(testStepExitsWhenABackwardsGradInAndOutputShareBytes);
     RUN_TEST(testStepExitsWhenALossBackwardsInputAndOutputShareBytes);
+    RUN_TEST(testStepExitsOnNonResidencyBeforeSharedBytes);
+    RUN_TEST(testStepAcceptsADeadInputSharingBytesWithTheOutput);
+    RUN_TEST(testFinishExitsOnAMissingForward);
+    RUN_TEST(testFinishExitsOnAMissingLossForward);
+    RUN_TEST(testFinishExitsOnAMissingLossBackward);
+    RUN_TEST(testFinishExitsOnAMissingBackward);
+    RUN_TEST(testFinishExitsWhenARowEndsTheStreamEarly);
+    RUN_TEST(testFinishExitsWhenARowEatsTheLastStepInternally);
+    RUN_TEST(testFinishAcceptsCeWithOneLayerAndNoBackwardStep);
+    RUN_TEST(testFinishAcceptsAnAllFrozenStream);
+    RUN_TEST(testReleasedExitsWhenARowLeavesAWireResident);
+    RUN_TEST(testReleasedExitsWhileTheInputIsStillBound);
+#ifdef ODT_MEM_PROFILE
+    RUN_TEST(testCheckReservesNothing);
+#endif
     return UNITY_END();
 }

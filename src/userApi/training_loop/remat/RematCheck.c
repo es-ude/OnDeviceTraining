@@ -306,3 +306,49 @@ void rematCheckStep(rematCheck_t *c, const rematStep_t *st, rematOperands_t *ops
     requireDisjoint(c, st, &w);
     commit(c, st, &w);
 }
+
+#define REMAT_FINISH_EXIT(c, violation, ...)                                                       \
+    do {                                                                                           \
+        PRINT_ERROR("remat[%s]: stream of %zu steps violates " violation, (c)->sched->fns->name,   \
+                    (c)->stepIndex, ##__VA_ARGS__);                                                \
+        exit(1);                                                                                   \
+    } while (false)
+
+/* Spec §7.6. Cursors, not bitsets: a stream the step rules admitted is
+ * complete iff every cursor reached its end. Under CE with n = 1, top = -1 is
+ * already below deepest = 0: LOSS_BACKWARD with no BACKWARD is complete. */
+void rematCheckFinish(const rematCheck_t *c) {
+    if (c->nextForward != c->n) {
+        REMAT_FINISH_EXIT(c, "'incomplete stream: missing FORWARD(%zu)'", c->nextForward);
+    }
+    if (!c->lossForwardSeen) {
+        REMAT_FINISH_EXIT(c, "'incomplete stream: missing LOSS_FORWARD'");
+    }
+    if (c->hasBackward && !c->lossBackwardSeen) {
+        REMAT_FINISH_EXIT(c, "'incomplete stream: missing LOSS_BACKWARD'");
+    }
+    if (c->hasBackward && c->nextBackward >= (ptrdiff_t)c->deepest) {
+        REMAT_FINISH_EXIT(c, "'incomplete stream: missing BACKWARD(%ld)'", (long)c->nextBackward);
+    }
+}
+
+/* Spec §7.6, R8 lifecycle: a row's end leaves nothing resident, and the
+ * dispatch's end unbinds the input. A wire still bound here would enter the
+ * next call's table bind still bound. */
+void rematCheckReleased(const rematCheck_t *c) {
+    const rematWireTable_t *t = c->sched->wires;
+    if (rematActHdr(t, 0) != NULL) {
+        PRINT_ERROR("remat[%s]: after rematEnd violates 'wire left resident after end: ACT 0' "
+                    "(the input is still bound)",
+                    c->sched->fns->name);
+        exit(1);
+    }
+    for (uint16_t w = 1; w < t->numWires; w++) {
+        if (rematWireHdr(t, w)->data != NULL) {
+            const rematWire_t *rec = &t->wires[w];
+            PRINT_ERROR("remat[%s]: after rematEnd violates 'wire left resident after end: %s %u'",
+                        c->sched->fns->name, wireKindName(rec), (unsigned)rec->index);
+            exit(1);
+        }
+    }
+}

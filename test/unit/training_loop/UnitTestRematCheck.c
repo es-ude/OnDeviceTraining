@@ -501,6 +501,192 @@ void testStepExitsOnALossStepWhoseLayerIsNotN(void) {
     freeFixture(&f, &s);
 }
 
+/* ---- violations: order and phase (spec §7.4 rule 2, §7.5) ---- */
+
+/* Death-test children only: the §6.1 loop without a test assertion, so a
+ * checker that accepts every step simply returns and the child exits 0. */
+static void driveCall(fixture_t *f, rematScheduler_t *s) {
+    uint32_t producedGen[rematCheckNumWires(s)];
+    rematCheck_t c;
+    rematCheckInit(&c, s, f->model, f->n, f->lt, producedGen);
+    rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
+    rematStep_t st;
+    rematOperands_t op;
+    while (rematNext(s, &st)) {
+        rematCheckStep(&c, &st, &op);
+        rematDone(s, &st);
+    }
+    rematEnd(s);
+}
+
+/* D24: decorator rows wrap the real ARENA slots and are installed on the
+ * test's own instance; their tables are const. */
+static void passBegin(rematScheduler_t *s) {
+    rematSchedulerFunctions[REMAT_ARENA].begin(s);
+}
+static bool passNext(rematScheduler_t *s, rematStep_t *st) {
+    return rematSchedulerFunctions[REMAT_ARENA].next(s, st);
+}
+static void passDone(rematScheduler_t *s, const rematStep_t *st) {
+    rematSchedulerFunctions[REMAT_ARENA].done(s, st);
+}
+static void passEnd(rematScheduler_t *s) {
+    rematSchedulerFunctions[REMAT_ARENA].end(s);
+}
+static void passDeinit(rematScheduler_t *s) {
+    rematSchedulerFunctions[REMAT_ARENA].deinit(s);
+}
+
+/* A row that skips FORWARD(5): it answers the step itself and hands out the
+ * next one, so the dispatch's same-step check sees nothing wrong. */
+static bool skippingNext(rematScheduler_t *s, rematStep_t *st) {
+    if (!passNext(s, st)) {
+        return false;
+    }
+    if (st->kind == REMAT_STEP_FORWARD && st->layer == 5u) {
+        passDone(s, st);
+        return passNext(s, st);
+    }
+    return true;
+}
+
+static const rematSchedulerFunctions_t g_skippingArena = {.name = "skipping-arena",
+                                                          .begin = passBegin,
+                                                          .next = skippingNext,
+                                                          .done = passDone,
+                                                          .end = passEnd,
+                                                          .deinit = passDeinit};
+
+/* [ReLU] under MSE: nothing trains (deepest = n = 1), so the stream is
+ * FORWARD 0, LOSS_FORWARD and ends; wires ACT 0, ACT 1. */
+static void buildAllFrozenModel(fixture_t *f) {
+    f->model[0] = reluLayerInit(&(layerQuant_t){.outputQ = &g_floatQ, .propLossQ = &g_floatQ});
+    f->n = 1;
+    f->lt = MSE;
+    f->x = makeInput(&f->in, (size_t[]){1, 4}, 2);
+}
+
+/* One F1 ARENA scheduler; `forged` is offered at step k. */
+static void assertF1RejectsAt(size_t k, rematStep_t forged, const char *violation) {
+    fixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(1, violation, offerStep(&f, &s, k, &forged, NULL));
+    freeFixture(&f, &s);
+}
+
+void testStepExitsOnAForwardAfterTheLossForward(void) {
+    assertF1RejectsAt(3, (rematStep_t){.kind = REMAT_STEP_FORWARD, .layer = 1u},
+                      "step #3 FORWARD(layer 1) violates 'forward after loss'");
+}
+
+void testStepExitsOnAForwardOutOfOrder(void) {
+    assertF1RejectsAt(0, (rematStep_t){.kind = REMAT_STEP_FORWARD, .layer = 1u},
+                      "violates 'forward order: expected FORWARD(0)'");
+}
+
+/* A row that silently drops a step. */
+void testStepExitsOnARowThatSkipsAStep(void) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    s.fns = &g_skippingArena;
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "remat[skipping-arena]: step #5 FORWARD(layer 6) violates 'forward "
+                             "order: expected FORWARD(5)'",
+                             driveCall(&f, &s));
+    freeFixture(&f, &s);
+}
+
+void testStepExitsOnALossForwardBeforeTheLastForward(void) {
+    assertF1RejectsAt(1, (rematStep_t){.kind = REMAT_STEP_LOSS_FORWARD, .layer = 2u},
+                      "violates 'loss-forward early' (FORWARD(1) has not run)");
+}
+
+void testStepExitsOnADuplicateLossForward(void) {
+    assertF1RejectsAt(3, (rematStep_t){.kind = REMAT_STEP_LOSS_FORWARD, .layer = 2u},
+                      "violates 'duplicate loss-forward'");
+}
+
+void testStepExitsOnALossBackwardBeforeTheLossForward(void) {
+    assertF1RejectsAt(0, (rematStep_t){.kind = REMAT_STEP_LOSS_BACKWARD, .layer = 2u},
+                      "violates 'loss-backward before loss-forward'");
+}
+
+/* The all-frozen stream ends after LOSS_FORWARD; a LOSS_BACKWARD after it
+ * would seed a gradient no layer consumes (GRAD 1 does not exist). */
+void testStepExitsOnALossBackwardWithoutATrainableLayer(void) {
+    fixture_t f;
+    buildAllFrozenModel(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    rematStep_t lossBackward = {.kind = REMAT_STEP_LOSS_BACKWARD, .layer = 1u};
+    ASSERT_EXITS_WITH_OUTPUT(1, "violates 'loss-backward without trainable layer'",
+                             offerStep(&f, &s, 2, &lossBackward, NULL));
+    freeFixture(&f, &s);
+}
+
+void testStepExitsOnADuplicateLossBackward(void) {
+    assertF1RejectsAt(4, (rematStep_t){.kind = REMAT_STEP_LOSS_BACKWARD, .layer = 2u},
+                      "violates 'duplicate loss-backward'");
+}
+
+void testStepExitsOnABackwardBeforeTheLossBackward(void) {
+    assertF1RejectsAt(2, (rematStep_t){.kind = REMAT_STEP_BACKWARD, .layer = 1u},
+                      "violates 'backward before loss-backward'");
+}
+
+/* HAR's BACKWARD(9) sits at step 15; BACKWARD(8) there skips it. */
+void testStepExitsOnABackwardOutOfOrder(void) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    rematStep_t skipsNine = {.kind = REMAT_STEP_BACKWARD, .layer = 8u};
+    ASSERT_EXITS_WITH_OUTPUT(1, "violates 'backward order: expected BACKWARD(9)'",
+                             offerStep(&f, &s, 15, &skipsNine, NULL));
+    freeFixture(&f, &s);
+}
+
+/* After HAR's last BACKWARD (deepest 0) the cursor is -1: it must stay
+ * signed, or it reads as SIZE_MAX, which is not below deepest (spec §7.3). */
+void testStepExitsOnABackwardAfterTheLastOne(void) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    rematStep_t againAtZero = {.kind = REMAT_STEP_BACKWARD, .layer = 0u};
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "violates 'backward order: expected no further BACKWARD' (deepest = 0)",
+        offerStep(&f, &s, 25, &againAtZero, NULL));
+    freeFixture(&f, &s);
+}
+
+/* The driver must re-init the checker for every call: a stale checker sees the second call's first
+ * FORWARD as a forward after the loss. */
+static void twoCallsOnOneChecker(fixture_t *f, rematScheduler_t *s) {
+    uint32_t producedGen[rematCheckNumWires(s)];
+    rematCheck_t c;
+    rematCheckInit(&c, s, f->model, f->n, f->lt, producedGen);
+    for (int call = 0; call < 2; call++) {
+        rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
+        rematStep_t st;
+        rematOperands_t op;
+        while (rematNext(s, &st)) {
+            rematCheckStep(&c, &st, &op);
+            rematDone(s, &st);
+        }
+        rematEnd(s);
+    }
+}
+
+void testASecondCallWithoutReInitExitsAtItsFirstStep(void) {
+    fixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initHeap(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "remat[heap]: step #5 FORWARD(layer 0) violates 'forward after loss'",
+                             twoCallsOnOneChecker(&f, &s));
+    freeFixture(&f, &s);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testNumWiresIsTheTablesWireCount);
@@ -514,5 +700,17 @@ int main(void) {
     RUN_TEST(testStepExitsOnAnUnknownStepKind);
     RUN_TEST(testStepExitsOnALayerOutOfRangeBeforeResolvingIt);
     RUN_TEST(testStepExitsOnALossStepWhoseLayerIsNotN);
+    RUN_TEST(testStepExitsOnAForwardAfterTheLossForward);
+    RUN_TEST(testStepExitsOnAForwardOutOfOrder);
+    RUN_TEST(testStepExitsOnARowThatSkipsAStep);
+    RUN_TEST(testStepExitsOnALossForwardBeforeTheLastForward);
+    RUN_TEST(testStepExitsOnADuplicateLossForward);
+    RUN_TEST(testStepExitsOnALossBackwardBeforeTheLossForward);
+    RUN_TEST(testStepExitsOnALossBackwardWithoutATrainableLayer);
+    RUN_TEST(testStepExitsOnADuplicateLossBackward);
+    RUN_TEST(testStepExitsOnABackwardBeforeTheLossBackward);
+    RUN_TEST(testStepExitsOnABackwardOutOfOrder);
+    RUN_TEST(testStepExitsOnABackwardAfterTheLastOne);
+    RUN_TEST(testASecondCallWithoutReInitExitsAtItsFirstStep);
     return UNITY_END();
 }

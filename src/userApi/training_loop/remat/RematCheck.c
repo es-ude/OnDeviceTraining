@@ -87,6 +87,56 @@ static void requireKindAndLayer(const rematCheck_t *c, const rematStep_t *st) {
     }
 }
 
+/* Rule 2 (spec §7.5): FORWARD strictly ascending and BACKWARD strictly
+ * descending, so "exactly once, in order" is "matches the cursor"; no
+ * per-layer bitset. Every cursor comparison is signed (spec §7.3). */
+static void requireOrder(const rematCheck_t *c, const rematStep_t *st) {
+    switch (st->kind) {
+    case REMAT_STEP_FORWARD:
+        if (c->lossForwardSeen) {
+            REMAT_CHECK_EXIT(c, st, "'forward after loss'");
+        }
+        if (st->layer != c->nextForward) {
+            REMAT_CHECK_EXIT(c, st, "'forward order: expected FORWARD(%zu)'", c->nextForward);
+        }
+        break;
+    case REMAT_STEP_LOSS_FORWARD:
+        if (c->lossForwardSeen) {
+            REMAT_CHECK_EXIT(c, st, "'duplicate loss-forward'");
+        }
+        if (c->nextForward != c->n) {
+            REMAT_CHECK_EXIT(c, st, "'loss-forward early' (FORWARD(%zu) has not run)",
+                             c->nextForward);
+        }
+        break;
+    case REMAT_STEP_LOSS_BACKWARD:
+        if (!c->lossForwardSeen) {
+            REMAT_CHECK_EXIT(c, st, "'loss-backward before loss-forward'");
+        }
+        if (!c->hasBackward) {
+            REMAT_CHECK_EXIT(c, st, "'loss-backward without trainable layer'");
+        }
+        if (c->lossBackwardSeen) {
+            REMAT_CHECK_EXIT(c, st, "'duplicate loss-backward'");
+        }
+        break;
+    default: /* REMAT_STEP_BACKWARD */
+        if (!c->lossBackwardSeen) {
+            REMAT_CHECK_EXIT(c, st, "'backward before loss-backward'");
+        }
+        if (c->nextBackward < (ptrdiff_t)c->deepest) {
+            REMAT_CHECK_EXIT(c, st,
+                             "'backward order: expected no further BACKWARD' (deepest = %zu)",
+                             c->deepest);
+        }
+        if ((ptrdiff_t)st->layer != c->nextBackward) {
+            REMAT_CHECK_EXIT(c, st, "'backward order: expected BACKWARD(%ld)'",
+                             (long)c->nextBackward);
+        }
+        break;
+    }
+}
+
 /* A step's operand wire ids; REMAT_NONE where it has no such operand. */
 typedef struct stepWires {
     uint16_t in, gradIn, out;
@@ -150,6 +200,7 @@ static void commit(rematCheck_t *c, const rematStep_t *st, const stepWires_t *w)
 
 void rematCheckStep(rematCheck_t *c, const rematStep_t *st, rematOperands_t *ops) {
     requireKindAndLayer(c, st);
+    requireOrder(c, st);
     const rematWireTable_t *t = c->sched->wires;
     stepWires_t w = resolve(c, st);
     *ops = (rematOperands_t){

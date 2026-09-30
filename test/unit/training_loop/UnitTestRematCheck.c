@@ -804,6 +804,83 @@ void testCheckAcceptsTheFrozenZooOnBothRows(void) {
     assertEveryStepAccepted(initHeap, buildFrozenZooModel);
 }
 
+/* ---- violations: operands sharing bytes (spec §7.3, §7.4 rule 5) ---- */
+
+static size_t rangeOf(const rematProgram_t *p, uint16_t wire) {
+    for (size_t r = 0; r < p->numRanges; r++) {
+        if (p->ranges[r].wire == wire) {
+            return r;
+        }
+    }
+    TEST_FAIL_MESSAGE("no range for the wire");
+    return 0;
+}
+
+/* Spec §12.2 item 3a: ARENA offsets edited after init bypass the init
+ * verifier, so the run-time rule is the one that fires. `victim` (a GRAD if
+ * victimIsGrad, else an ACT) is placed onto ACT `onto`'s bytes; under
+ * STORE_ALL both are co-live at the step that reads or writes them together. */
+static void assertSharedBytesRejected(void (*build)(fixture_t *), bool victimIsGrad, size_t victim,
+                                      size_t onto, const char *violation) {
+    fixture_t f;
+    build(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    const rematProgram_t *p = &s.plan->train;
+    uint16_t victimId = victimIsGrad ? rematGradId(s.wires, victim) : rematActId(s.wires, victim);
+    s.row.arena.offsets[rangeOf(p, victimId)] =
+        s.row.arena.offsets[rangeOf(p, rematActId(s.wires, onto))];
+    ASSERT_EXITS_WITH_OUTPUT(1, violation, driveCall(&f, &s));
+    freeFixture(&f, &s);
+}
+
+void testStepExitsWhenAForwardsInputAndOutputShareBytes(void) {
+    assertSharedBytesRejected(
+        buildF1Model, false, 2, 1,
+        "step #1 FORWARD(layer 1) violates 'operands share bytes: in/out' (ACT 1 and ACT 2)");
+}
+
+/* Pairwise, not only gradIn/out (spec §7.5): F1's trained Linear reads ACT 1
+ * in the BACKWARD that reads the seed. */
+void testStepExitsWhenABackwardsInputAndGradInShareBytes(void) {
+    assertSharedBytesRejected(
+        buildF1Model, true, 2, 1,
+        "BACKWARD(layer 1) violates 'operands share bytes: in/gradIn' (ACT 1 and GRAD 2)");
+}
+
+/* The pair that is not adjacent in {in, gradIn, out}: HAR's BACKWARD(10)
+ * reads ACT 10 and the seed and writes GRAD 10. */
+void testStepExitsWhenABackwardsInputAndOutputShareBytes(void) {
+    assertSharedBytesRejected(
+        buildHarModel, true, 10, 10,
+        "step #14 BACKWARD(layer 10) violates 'operands share bytes: in/out' (ACT 10 and GRAD 10)");
+}
+
+/* The canonical pair (spec §7.5): HAR's BACKWARD(9) does not read its input
+ * (Flatten), so its only pair is gradIn/out. */
+static void assertGradOntoGradRejected(size_t victim, size_t onto, const char *violation) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    const rematProgram_t *p = &s.plan->train;
+    s.row.arena.offsets[rangeOf(p, rematGradId(s.wires, victim))] =
+        s.row.arena.offsets[rangeOf(p, rematGradId(s.wires, onto))];
+    ASSERT_EXITS_WITH_OUTPUT(1, violation, driveCall(&f, &s));
+    freeFixture(&f, &s);
+}
+
+void testStepExitsWhenABackwardsGradInAndOutputShareBytes(void) {
+    assertGradOntoGradRejected(9, 10,
+                               "step #15 BACKWARD(layer 9) violates 'operands share bytes: "
+                               "gradIn/out' (GRAD 10 and GRAD 9)");
+}
+
+/* LOSS_BACKWARD reads ACT n and writes the seed (spec §7.5). */
+void testStepExitsWhenALossBackwardsInputAndOutputShareBytes(void) {
+    assertSharedBytesRejected(buildF1Model, true, 2, 2,
+                              "step #3 LOSS_BACKWARD(layer 2) violates 'operands share bytes: "
+                              "in/out' (ACT 2 and GRAD 2)");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testNumWiresIsTheTablesWireCount);
@@ -837,5 +914,10 @@ int main(void) {
     RUN_TEST(testStepExitsOnAStaleOperand);
     RUN_TEST(testStepExitsOnAnInputWithoutBytes);
     RUN_TEST(testCheckAcceptsTheFrozenZooOnBothRows);
+    RUN_TEST(testStepExitsWhenAForwardsInputAndOutputShareBytes);
+    RUN_TEST(testStepExitsWhenABackwardsInputAndGradInShareBytes);
+    RUN_TEST(testStepExitsWhenABackwardsInputAndOutputShareBytes);
+    RUN_TEST(testStepExitsWhenABackwardsGradInAndOutputShareBytes);
+    RUN_TEST(testStepExitsWhenALossBackwardsInputAndOutputShareBytes);
     return UNITY_END();
 }

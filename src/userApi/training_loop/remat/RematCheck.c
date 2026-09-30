@@ -231,6 +231,48 @@ static void requireResident(const rematCheck_t *c, const rematStep_t *st, const 
     }
 }
 
+/* Rule 5 (spec §7.3): O(1) over the exact bytes. Integer intervals, because
+ * HEAP operands live in separate blocks, whose pointers C does not order. */
+static void requireApart(const rematCheck_t *c, const rematStep_t *st, uint16_t a,
+                         const char *roleA, uint16_t b, const char *roleB) {
+    const rematWireTable_t *t = c->sched->wires;
+    uintptr_t da = (uintptr_t)rematWireHdr(t, a)->data;
+    uintptr_t db = (uintptr_t)rematWireHdr(t, b)->data;
+    if (da < db + rematWireBytes(t, b) && db < da + rematWireBytes(t, a)) {
+        const rematWire_t *ra = &t->wires[a];
+        const rematWire_t *rb = &t->wires[b];
+        REMAT_CHECK_EXIT(c, st, "'operands share bytes: %s/%s' (%s %u and %s %u)", roleA, roleB,
+                         wireKindName(ra), (unsigned)ra->index, wireKindName(rb),
+                         (unsigned)rb->index);
+    }
+}
+
+/* Pairwise over every operand the step touches, not only gradIn/out: a
+ * LayerNorm-style backward writes dx while it still reads x (spec §7.5). A
+ * dead input (W_dead) is not touched, so it is not compared. */
+static void requireDisjoint(const rematCheck_t *c, const rematStep_t *st, const stepWires_t *w) {
+    uint16_t ids[3];
+    const char *roles[3];
+    size_t k = 0;
+    if (w->readsIn) {
+        ids[k] = w->in;
+        roles[k++] = "in";
+    }
+    if (w->gradIn != REMAT_NONE) {
+        ids[k] = w->gradIn;
+        roles[k++] = "gradIn";
+    }
+    if (w->out != REMAT_NONE) {
+        ids[k] = w->out;
+        roles[k++] = "out";
+    }
+    for (size_t i = 0; i < k; i++) {
+        for (size_t j = i + 1u; j < k; j++) {
+            requireApart(c, st, ids[i], roles[i], ids[j], roles[j]);
+        }
+    }
+}
+
 /* Rule 6 (spec §7.4): an output is produced under the binding it has now. */
 static void commit(rematCheck_t *c, const rematStep_t *st, const stepWires_t *w) {
     switch (st->kind) {
@@ -261,5 +303,6 @@ void rematCheckStep(rematCheck_t *c, const rematStep_t *st, rematOperands_t *ops
     *ops = (rematOperands_t){
         .in = hdrOrNull(t, w.in), .gradIn = hdrOrNull(t, w.gradIn), .out = hdrOrNull(t, w.out)};
     requireResident(c, st, &w);
+    requireDisjoint(c, st, &w);
     commit(c, st, &w);
 }

@@ -178,7 +178,7 @@
         "DataLoader", "DataLoaderApi", "OptimizerApi", "InferenceApi",
         "TrainingBatchDefault", "TrainingEpochDefault", "TrainingLoopApi",
         "CalculateGradsSequential",
-        "RematPlan", "RematScheduler"
+        "RematPlan", "RematScheduler", "RematCheck"
       ]
     }
   ],

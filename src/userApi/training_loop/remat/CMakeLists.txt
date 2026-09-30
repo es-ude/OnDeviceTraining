@@ -41,3 +41,22 @@ target_link_libraries(RematScheduler PRIVATE
         Rounding
         Common
 )
+
+# Remat (#4): the validating interpreter's checker (spec §2.1, §7). Rows never
+# link it, and it links no RNG (D44). Links: §2.1's list plus the owners of
+# the headers its includes pull in (LossFunction.h; Tensor.h -> Quantization.h
+# -> Rounding.h; LayerConfigAccess.h -> ArithmeticType.h).
+add_library(RematCheck RematCheck.c)
+target_include_directories(RematCheck PUBLIC include)
+target_link_libraries(RematCheck PRIVATE
+        RematPlan
+        RematScheduler
+        Layer
+        LayerConfigAccess
+        LossFunction
+        Tensor
+        Quantization
+        Rounding
+        ArithmeticType
+        Common
+)

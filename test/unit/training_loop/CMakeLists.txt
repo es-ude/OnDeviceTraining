@@ -105,3 +105,38 @@ add_elastic_ai_unit_test(
 )
 target_include_directories(UnitTestRematScheduler PRIVATE
         ${PROJECT_SOURCE_DIR}/src/userApi/training_loop/remat)
+
+# Remat (#4): the RematCheck library (spec §7), driven over real schedulers on
+# both rows. RematScheduler and RematPlan are listed because the tests build
+# schedulers and read the table (RematPlan.h).
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
+        RematCheck
+        MORE_LIBS
+        RematScheduler
+        RematPlan
+        CommonLayerLibs
+        Conv1dApi
+        LinearApi
+        ReluApi
+        SoftmaxApi
+        FlattenApi
+        Pool1dApi
+        QuantLayerApi
+        Kernel
+        LayerQuant
+        LayerCommon
+        LayerConfigAccess
+        ArithmeticType
+        QuantizationApi
+        Quantization
+        Rounding
+        TensorApi
+        Tensor
+        StorageApi
+        Common
+        LossFunction
+        Distributions
+        RNG
+        odt_test_death
+)

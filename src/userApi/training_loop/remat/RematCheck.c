@@ -7,6 +7,7 @@
 
 #include "Common.h"
 #include "Layer.h"
+#include "LayerConfigAccess.h"
 #include "LossFunction.h"
 #include "RematCheck.h"
 #include "RematPlan.h"
@@ -140,6 +141,7 @@ static void requireOrder(const rematCheck_t *c, const rematStep_t *st) {
 /* A step's operand wire ids; REMAT_NONE where it has no such operand. */
 typedef struct stepWires {
     uint16_t in, gradIn, out;
+    bool readsIn; /* false only for a BACKWARD whose layer does not read its input */
 } stepWires_t;
 
 /* Rule 3 (spec §7.4): positional, from the checker's own live-model deepest
@@ -148,7 +150,7 @@ typedef struct stepWires {
 static stepWires_t resolve(const rematCheck_t *c, const rematStep_t *st) {
     const rematWireTable_t *t = c->sched->wires;
     size_t l = st->layer;
-    stepWires_t w = {REMAT_NONE, REMAT_NONE, REMAT_NONE};
+    stepWires_t w = {REMAT_NONE, REMAT_NONE, REMAT_NONE, true};
     switch (st->kind) {
     case REMAT_STEP_FORWARD:
         w.in = rematActId(t, l);
@@ -163,6 +165,7 @@ static stepWires_t resolve(const rematCheck_t *c, const rematStep_t *st) {
         break;
     default: /* REMAT_STEP_BACKWARD; rule 1 admitted nothing else */
         w.in = rematActId(t, l);
+        w.readsIn = layerBackwardReadsInput(c->model[l]);
         w.gradIn = rematGradId(t, (ptrdiff_t)l == c->backwardTop ? c->n : l + 1u);
         /* REMAT_NONE at deepest (the grads-only call): the table has no GRAD
          * deepest, and the bind keeps its deepest equal to the live one. */
@@ -174,6 +177,58 @@ static stepWires_t resolve(const rematCheck_t *c, const rematStep_t *st) {
 
 static tensor_t *hdrOrNull(const rematWireTable_t *t, uint16_t w) {
     return w == REMAT_NONE ? NULL : rematWireHdr(t, w);
+}
+
+static const char *wireKindName(const rematWire_t *rec) {
+    return rec->kind == REMAT_WIRE_ACT ? "ACT" : "GRAD";
+}
+
+/* Rule 4 (spec §7.3): resident, and, unless borrowed, produced under the
+ * binding it has now. The bind generation is the only O(1) catch for a row
+ * that re-binds a wire without its producer running again (spec §7.6). */
+static void requireReadable(const rematCheck_t *c, const rematStep_t *st, uint16_t w,
+                            const char *role) {
+    const rematWire_t *rec = &c->sched->wires->wires[w];
+    if (rematWireHdr(c->sched->wires, w)->data == NULL) {
+        REMAT_CHECK_EXIT(c, st, "'operand not resident: %s %s %u'", role, wireKindName(rec),
+                         (unsigned)rec->index);
+    }
+    if (rec->borrowed) {
+        return;
+    }
+    if (c->producedGen[w] == 0u) {
+        REMAT_CHECK_EXIT(c, st, "'operand never produced: %s %u'", wireKindName(rec),
+                         (unsigned)rec->index);
+    }
+    if (c->producedGen[w] != rec->bindGen) {
+        REMAT_CHECK_EXIT(c, st,
+                         "'operand stale: %s %u rebound since produced' (produced at bindGen %u, "
+                         "bound now at bindGen %u)",
+                         wireKindName(rec), (unsigned)rec->index, (unsigned)c->producedGen[w],
+                         (unsigned)rec->bindGen);
+    }
+}
+
+static void requireWritable(const rematCheck_t *c, const rematStep_t *st, uint16_t w) {
+    const rematWire_t *rec = &c->sched->wires->wires[w];
+    if (rematWireHdr(c->sched->wires, w)->data == NULL) {
+        REMAT_CHECK_EXIT(c, st, "'output not resident: %s %u'", wireKindName(rec),
+                         (unsigned)rec->index);
+    }
+}
+
+/* A BACKWARD whose layer does not read its input may get a dead one (W_dead,
+ * spec §3.7): only its header's static metadata is used. */
+static void requireResident(const rematCheck_t *c, const rematStep_t *st, const stepWires_t *w) {
+    if (w->readsIn) {
+        requireReadable(c, st, w->in, "in");
+    }
+    if (w->gradIn != REMAT_NONE) {
+        requireReadable(c, st, w->gradIn, "gradIn");
+    }
+    if (w->out != REMAT_NONE) {
+        requireWritable(c, st, w->out);
+    }
 }
 
 /* Rule 6 (spec §7.4): an output is produced under the binding it has now. */
@@ -205,5 +260,6 @@ void rematCheckStep(rematCheck_t *c, const rematStep_t *st, rematOperands_t *ops
     stepWires_t w = resolve(c, st);
     *ops = (rematOperands_t){
         .in = hdrOrNull(t, w.in), .gradIn = hdrOrNull(t, w.gradIn), .out = hdrOrNull(t, w.out)};
+    requireResident(c, st, &w);
     commit(c, st, &w);
 }

@@ -10,6 +10,7 @@
 #include "DeathTest.h"
 #include "FlattenApi.h"
 #include "Layer.h"
+#include "LayerNormApi.h"
 #include "LayerQuant.h"
 #include "LinearApi.h"
 #include "LossFunction.h"
@@ -47,6 +48,16 @@ static layer_t *makeQuant(quantization_t *outputQ, quantization_t *propLossQ) {
     return quantLayerInit(&(layerQuant_t){.outputQ = outputQ, .propLossQ = propLossQ});
 }
 
+static layer_t *makeLayerNorm(size_t features, bool frozen) {
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, &g_floatQ);
+    return layerNormLayerInit(
+        &(layerNormInit_t){.normalizedShape = (size_t[]){features},
+                           .numNormDims = 1,
+                           .trainable = frozen ? TRAINABLE_FALSE : TRAINABLE_DEFAULT},
+        &lq);
+}
+
 static void freeModel(layer_t **model, size_t n) {
     for (size_t i = 0; i < n; i++) {
         switch (model[i]->type) {
@@ -73,6 +84,9 @@ static void freeModel(layer_t **model, size_t n) {
             break;
         case QUANTIZATION:
             freeQuantLayer(model[i]);
+            break;
+        case LAYERNORM:
+            freeLayerNormLayer(model[i]);
             break;
         default:
             TEST_FAIL_MESSAGE("freeModel: extend the switch for this layer type");
@@ -687,6 +701,109 @@ void testASecondCallWithoutReInitExitsAtItsFirstStep(void) {
     freeFixture(&f, &s);
 }
 
+/* ---- violations: residency and bind generation (spec §7.3, §7.4 rule 4) ---- */
+
+static void releaseAct1(rematCheck_t *c, rematScheduler_t *s) {
+    (void)c;
+    rematWireRelease(s->wires, rematActId(s->wires, 1));
+}
+
+static void releaseTheSeed(rematCheck_t *c, rematScheduler_t *s) {
+    (void)c;
+    rematWireRelease(s->wires, rematGradId(s->wires, 2));
+}
+
+static void forgetThatAct1WasProduced(rematCheck_t *c, rematScheduler_t *s) {
+    c->producedGen[rematActId(s->wires, 1)] = 0u;
+}
+
+/* The swap-target bug class (spec §7.6): a row re-binds the seed without its
+ * producer running again, so its bytes are not the ones LOSS_BACKWARD wrote. */
+static void rebindTheSeed(rematCheck_t *c, rematScheduler_t *s) {
+    (void)c;
+    uint16_t seed = rematGradId(s->wires, 2);
+    uint8_t *bytes = rematWireHdr(s->wires, seed)->data;
+    rematWireRelease(s->wires, seed);
+    rematWireBind(s->wires, seed, bytes);
+}
+
+/* One F1 ARENA scheduler; the step next() hands out at k is offered after
+ * `tamper`. */
+static void assertF1TamperedRejectsAt(size_t k, tamperFn_t tamper, const char *violation) {
+    fixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(1, violation, offerStep(&f, &s, k, NULL, tamper));
+    freeFixture(&f, &s);
+}
+
+void testStepExitsWhenAnInputIsNotResident(void) {
+    assertF1TamperedRejectsAt(1, releaseAct1,
+                              "step #1 FORWARD(layer 1) violates 'operand not resident: in ACT 1'");
+}
+
+/* F1's Linear trains, so its BACKWARD reads ACT 1 (spec §3.7). */
+void testStepExitsWhenAReadingBackwardsInputIsNotResident(void) {
+    assertF1TamperedRejectsAt(4, releaseAct1,
+                              "BACKWARD(layer 1) violates 'operand not resident: in ACT 1'");
+}
+
+void testStepExitsWhenGradInIsNotResident(void) {
+    assertF1TamperedRejectsAt(4, releaseTheSeed, "violates 'operand not resident: gradIn GRAD 2'");
+}
+
+void testStepExitsWhenTheOutputIsNotBound(void) {
+    assertF1TamperedRejectsAt(0, releaseAct1,
+                              "FORWARD(layer 0) violates 'output not resident: ACT 1'");
+}
+
+/* Unreachable through a stream the order rules admit (every read wire's
+ * producer ran before it): the state is forged. */
+void testStepExitsOnAnOperandNeverProduced(void) {
+    assertF1TamperedRejectsAt(1, forgetThatAct1WasProduced,
+                              "violates 'operand never produced: ACT 1'");
+}
+
+void testStepExitsOnAStaleOperand(void) {
+    assertF1TamperedRejectsAt(4, rebindTheSeed,
+                              "BACKWARD(layer 1) violates 'operand stale: GRAD 2 rebound since "
+                              "produced' (produced at bindGen 1, bound now at bindGen 2)");
+}
+
+/* A caller whose input header has no bytes. ACT 0 is borrowed, so it is exempt from the bind
+ * generation, not from residency. */
+void testStepExitsOnAnInputWithoutBytes(void) {
+    fixture_t f;
+    buildF1Model(&f);
+    f.x->data = NULL;
+    rematScheduler_t s = initHeap(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "remat[heap]: step #0 FORWARD(layer 0) violates 'operand not resident: in ACT 0'",
+        driveCall(&f, &s));
+    freeFixture(&f, &s);
+}
+
+/* [Linear T, LayerNorm frozen, Linear frozen, Linear T] under MSE: n = 4,
+ * deepest 0, top 3. Under LIVENESS the frozen Linear's input ACT 2 dies at its
+ * forward (its backward does not read it), while the frozen LayerNorm's ACT 1
+ * lives to BACKWARD(1) (spec §3.7, §12.2 item 9). */
+static void buildFrozenZooModel(fixture_t *f) {
+    f->model[0] = makeLinear(4, 4, false);
+    f->model[1] = makeLayerNorm(4, true);
+    f->model[2] = makeLinear(4, 4, true);
+    f->model[3] = makeLinear(4, 2, false);
+    f->n = 4;
+    f->lt = MSE;
+    f->x = makeInput(&f->in, (size_t[]){1, 4}, 2);
+}
+
+/* The checker's read-set is the planner's: a checker that demanded every BACKWARD input would
+ * reject LIVENESS's dead ACT 2. */
+void testCheckAcceptsTheFrozenZooOnBothRows(void) {
+    assertEveryStepAccepted(initArena, buildFrozenZooModel);
+    assertEveryStepAccepted(initHeap, buildFrozenZooModel);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testNumWiresIsTheTablesWireCount);
@@ -712,5 +829,13 @@ int main(void) {
     RUN_TEST(testStepExitsOnABackwardOutOfOrder);
     RUN_TEST(testStepExitsOnABackwardAfterTheLastOne);
     RUN_TEST(testASecondCallWithoutReInitExitsAtItsFirstStep);
+    RUN_TEST(testStepExitsWhenAnInputIsNotResident);
+    RUN_TEST(testStepExitsWhenAReadingBackwardsInputIsNotResident);
+    RUN_TEST(testStepExitsWhenGradInIsNotResident);
+    RUN_TEST(testStepExitsWhenTheOutputIsNotBound);
+    RUN_TEST(testStepExitsOnAnOperandNeverProduced);
+    RUN_TEST(testStepExitsOnAStaleOperand);
+    RUN_TEST(testStepExitsOnAnInputWithoutBytes);
+    RUN_TEST(testCheckAcceptsTheFrozenZooOnBothRows);
     return UNITY_END();
 }

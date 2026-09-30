@@ -123,6 +123,7 @@ add_elastic_ai_unit_test(
         FlattenApi
         Pool1dApi
         QuantLayerApi
+        LayerNormApi
         Kernel
         LayerQuant
         LayerCommon

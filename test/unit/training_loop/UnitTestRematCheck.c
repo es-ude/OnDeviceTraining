@@ -279,10 +279,240 @@ void testInitSetsTheCursorsFromTheLiveModelAndZeroesProducedGen(void) {
     freeFixture(&built, &s);
 }
 
+/* ---- rematCheckStep: positional resolution and commit (spec §7.4, §7.5) ---- */
+
+/* The positional rule restated from the step (spec §3.1): what the driver must
+ * be handed. BACKWARD(top) reads the seed (the CE skip), and the grads-only
+ * BACKWARD(deepest) writes nothing. */
+static void assertResolved(const rematCheck_t *c, const rematStep_t *st,
+                           const rematOperands_t *op) {
+    const rematWireTable_t *t = c->sched->wires;
+    size_t n = c->n;
+    size_t l = st->layer;
+    switch (st->kind) {
+    case REMAT_STEP_FORWARD:
+        TEST_ASSERT_EQUAL_PTR(rematActHdr(t, l), op->in);
+        TEST_ASSERT_NULL(op->gradIn);
+        TEST_ASSERT_EQUAL_PTR(rematActHdr(t, l + 1u), op->out);
+        break;
+    case REMAT_STEP_LOSS_FORWARD:
+        TEST_ASSERT_EQUAL_PTR(rematActHdr(t, n), op->in);
+        TEST_ASSERT_NULL(op->gradIn);
+        TEST_ASSERT_NULL(op->out);
+        break;
+    case REMAT_STEP_LOSS_BACKWARD:
+        TEST_ASSERT_EQUAL_PTR(rematActHdr(t, n), op->in);
+        TEST_ASSERT_NULL(op->gradIn);
+        TEST_ASSERT_NOT_NULL(op->out);
+        TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, n), op->out);
+        break;
+    default: /* REMAT_STEP_BACKWARD */
+        TEST_ASSERT_EQUAL_PTR(rematActHdr(t, l), op->in);
+        TEST_ASSERT_NOT_NULL(op->gradIn);
+        TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, (ptrdiff_t)l == c->backwardTop ? n : l + 1u),
+                              op->gradIn);
+        if (l == c->deepest) {
+            TEST_ASSERT_NULL(op->out);
+        } else {
+            TEST_ASSERT_NOT_NULL(op->out);
+            TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, l), op->out);
+        }
+        break;
+    }
+}
+
+/* The spec §6.1 driver loop with the layer execution left out. Asserts what
+ * the checker resolved at every step and what it committed by the end: every
+ * cursor at its end, every slab wire produced under its current binding, ACT 0
+ * never. */
+static void checkedCall(fixture_t *f, rematScheduler_t *s) {
+    const rematWireTable_t *t = s->wires;
+    uint32_t producedGen[rematCheckNumWires(s)];
+    rematCheck_t c;
+    rematCheckInit(&c, s, f->model, f->n, f->lt, producedGen);
+    rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
+    rematStep_t st;
+    while (rematNext(s, &st)) {
+        rematOperands_t op;
+        rematCheckStep(&c, &st, &op);
+        assertResolved(&c, &st, &op);
+        rematDone(s, &st);
+    }
+    TEST_ASSERT_EQUAL_size_t(s->plan->train.numSteps, c.stepIndex);
+    TEST_ASSERT_EQUAL_size_t(f->n, c.nextForward);
+    TEST_ASSERT_TRUE(c.lossForwardSeen);
+    TEST_ASSERT_EQUAL(c.hasBackward, c.lossBackwardSeen);
+    ptrdiff_t belowDeepest = (ptrdiff_t)c.deepest - 1;
+    TEST_ASSERT_EQUAL_INT((int)(c.backwardTop < belowDeepest ? c.backwardTop : belowDeepest),
+                          (int)c.nextBackward);
+    TEST_ASSERT_EQUAL_UINT32(0, producedGen[0]);
+    for (uint16_t w = 1; w < t->numWires; w++) {
+        TEST_ASSERT_NOT_EQUAL_UINT32(0, producedGen[w]);
+        TEST_ASSERT_EQUAL_UINT32(t->wires[w].bindGen, producedGen[w]);
+    }
+    rematEnd(s);
+}
+
+typedef rematScheduler_t (*rowInit_t)(fixture_t *f, const rematPlanSpec_t *spec);
+
+/* Two calls per plan: the second binds a persistent scheduler again. */
+static void assertEveryStepAccepted(rowInit_t init, void (*build)(fixture_t *)) {
+    const rematPlanSpec_t *specs[2] = {NULL, &g_liveness};
+    for (size_t k = 0; k < 2u; k++) {
+        fixture_t f;
+        build(&f);
+        rematScheduler_t s = init(&f, specs[k]);
+        checkedCall(&f, &s);
+        checkedCall(&f, &s);
+        freeFixture(&f, &s);
+    }
+}
+
+void testCheckAcceptsEveryStepOnArenaHar(void) {
+    assertEveryStepAccepted(initArena, buildHarModel);
+}
+
+void testCheckAcceptsEveryStepOnArenaF1(void) {
+    assertEveryStepAccepted(initArena, buildF1Model);
+}
+
+void testCheckAcceptsEveryStepOnHeapHar(void) {
+    assertEveryStepAccepted(initHeap, buildHarModel);
+}
+
+void testCheckAcceptsEveryStepOnHeapF1(void) {
+    assertEveryStepAccepted(initHeap, buildF1Model);
+}
+
+/* Literal positions on HAR (steps: FORWARD l = l, LOSS_FORWARD 12,
+ * LOSS_BACKWARD 13, BACKWARD(l) = 24 - l): the CE skip hands BACKWARD(10) the
+ * seed GRAD 12, BACKWARD(9) gets GRAD 10, and BACKWARD(0) is grads-only.
+ * Under LIVENESS, Flatten's input ACT 9 is dead at BACKWARD(9) and is handed
+ * over anyway: its data is NULL (W_dead). */
+void testOperandsAreResolvedPositionallyOnHar(void) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initArena(&f, &g_liveness);
+    const rematWireTable_t *t = s.wires;
+    uint32_t producedGen[rematCheckNumWires(&s)];
+    rematCheck_t c;
+    rematCheckInit(&c, &s, f.model, f.n, f.lt, producedGen);
+    rematBegin(&s, f.model, f.n, defaultLossConfig(f.lt), f.x);
+    rematOperands_t at[25];
+    rematStep_t st;
+    size_t i = 0;
+    while (rematNext(&s, &st)) {
+        TEST_ASSERT_TRUE(i < 25u);
+        rematCheckStep(&c, &st, &at[i]);
+        if (i == 15u) {
+            TEST_ASSERT_NULL(at[i].in->data);
+        }
+        rematDone(&s, &st);
+        i++;
+    }
+    TEST_ASSERT_EQUAL_PTR(f.x, at[0].in);
+    TEST_ASSERT_EQUAL_PTR(rematActHdr(t, 4), at[3].out);
+    TEST_ASSERT_EQUAL_PTR(rematActHdr(t, 12), at[12].in);
+    TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, 12), at[13].out);
+    TEST_ASSERT_EQUAL_PTR(rematActHdr(t, 10), at[14].in);
+    TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, 12), at[14].gradIn);
+    TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, 10), at[14].out);
+    TEST_ASSERT_EQUAL_PTR(rematActHdr(t, 9), at[15].in);
+    TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, 10), at[15].gradIn);
+    TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, 9), at[15].out);
+    TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, 1), at[24].gradIn);
+    TEST_ASSERT_NULL(at[24].out);
+    rematEnd(&s);
+    freeFixture(&f, &s);
+}
+
+/* ---- violations: a desynchronised step (spec §7.4 rule 1) ---- */
+
+typedef void (*tamperFn_t)(rematCheck_t *c, rematScheduler_t *s);
+
+/* Death-test children only. A checked call through step k-1; then next()
+ * hands out step k (binding its ranges, if the stream has one), `tamper`
+ * edits the scheduler or the checker (NULL: none), and the checker is offered
+ * `forged` in place of step k (NULL: the step next() handed out). A checker
+ * that accepts it returns here, and the child exits 0. */
+static void offerStep(fixture_t *f, rematScheduler_t *s, size_t k, const rematStep_t *forged,
+                      tamperFn_t tamper) {
+    uint32_t producedGen[rematCheckNumWires(s)];
+    rematCheck_t c;
+    rematCheckInit(&c, s, f->model, f->n, f->lt, producedGen);
+    rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
+    rematStep_t st;
+    rematOperands_t op;
+    for (size_t i = 0; i < k; i++) {
+        if (!rematNext(s, &st)) {
+            return;
+        }
+        rematCheckStep(&c, &st, &op);
+        rematDone(s, &st);
+    }
+    bool handedOut = rematNext(s, &st);
+    if (tamper != NULL) {
+        tamper(&c, s);
+    }
+    if (forged != NULL) {
+        st = *forged;
+    } else if (!handedOut) {
+        return;
+    }
+    rematCheckStep(&c, &st, &op);
+}
+
+/* The full §7.7 message once: row, step index, kind, layer, rule. */
+void testStepExitsOnAnUnknownStepKind(void) {
+    fixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    rematStep_t forged = {.kind = 7u, .layer = 0u};
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "remat[arena]: step #0 UNKNOWN(layer 0) violates 'unknown step kind' (kind 7)",
+        offerStep(&f, &s, 0, &forged, NULL));
+    freeFixture(&f, &s);
+}
+
+/* Rule 1 runs before resolution, so a bad layer never indexes the model or
+ * the table. FORWARD(n) at LOSS_FORWARD's slot passes the forward cursor
+ * (nextForward == n) and would resolve ACT n+1, the seed's id. */
+void testStepExitsOnALayerOutOfRangeBeforeResolvingIt(void) {
+    fixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    rematStep_t forwardPastTheModel = {.kind = REMAT_STEP_FORWARD, .layer = 2u};
+    ASSERT_EXITS_WITH_OUTPUT(1, "FORWARD(layer 2) violates 'layer out of range' (n = 2)",
+                             offerStep(&f, &s, 2, &forwardPastTheModel, NULL));
+    rematStep_t backwardFarOut = {.kind = REMAT_STEP_BACKWARD, .layer = UINT16_MAX};
+    ASSERT_EXITS_WITH_OUTPUT(1, "BACKWARD(layer 65535) violates 'layer out of range' (n = 2)",
+                             offerStep(&f, &s, 0, &backwardFarOut, NULL));
+    freeFixture(&f, &s);
+}
+
+/* LOSS_* carry layer == n (spec §4.1). */
+void testStepExitsOnALossStepWhoseLayerIsNotN(void) {
+    fixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    rematStep_t lossAtLayer1 = {.kind = REMAT_STEP_LOSS_FORWARD, .layer = 1u};
+    ASSERT_EXITS_WITH_OUTPUT(1, "LOSS_FORWARD(layer 1) violates 'layer out of range' (n = 2)",
+                             offerStep(&f, &s, 2, &lossAtLayer1, NULL));
+    freeFixture(&f, &s);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testNumWiresIsTheTablesWireCount);
     RUN_TEST(testNumWiresExitsOnASchedulerThatIsNotInitialised);
     RUN_TEST(testInitSetsTheCursorsFromTheLiveModelAndZeroesProducedGen);
+    RUN_TEST(testCheckAcceptsEveryStepOnArenaHar);
+    RUN_TEST(testCheckAcceptsEveryStepOnArenaF1);
+    RUN_TEST(testCheckAcceptsEveryStepOnHeapHar);
+    RUN_TEST(testCheckAcceptsEveryStepOnHeapF1);
+    RUN_TEST(testOperandsAreResolvedPositionallyOnHar);
+    RUN_TEST(testStepExitsOnAnUnknownStepKind);
+    RUN_TEST(testStepExitsOnALayerOutOfRangeBeforeResolvingIt);
+    RUN_TEST(testStepExitsOnALossStepWhoseLayerIsNotN);
     return UNITY_END();
 }

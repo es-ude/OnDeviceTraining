@@ -8,11 +8,22 @@
 #include "Layer.h"
 #include "LossFunction.h"
 #include "RematScheduler.h"
+#include "Tensor.h"
 
 /* The validating interpreter's checker (#4, spec §7): the driver hands every
  * step a row's next() returns to rematCheckStep before any layer runs. Always
  * on, firmware included (D28); every violation exits naming the row, the step
  * and the rule (D29). Rows never link it, and it links no RNG (D44). */
+
+/* The operands of one step, resolved positionally from the step and the live
+ * model (spec §7.4 item 3); the driver executes the step on exactly these.
+ * NULL where the step has no such operand: gradIn outside BACKWARD, out for
+ * LOSS_FORWARD and for the grads-only BACKWARD at deepest. */
+typedef struct rematOperands {
+    tensor_t *in;
+    tensor_t *gradIn;
+    tensor_t *out;
+} rematOperands_t;
 
 /* One call's checker state, on the driver's frame (spec §7.3). */
 typedef struct rematCheck {
@@ -39,5 +50,8 @@ size_t rematCheckNumWires(const rematScheduler_t *s);
  * initialiser). */
 void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, layer_t **model, size_t n,
                     lossFuncType_t lt, uint32_t *producedGen);
+/* Checks one step and resolves its operands into *ops; exits on a violation,
+ * before the driver runs anything. */
+void rematCheckStep(rematCheck_t *c, const rematStep_t *st, rematOperands_t *ops);
 
 #endif // ODT_REMAT_CHECK_H

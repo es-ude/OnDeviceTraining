@@ -31,7 +31,8 @@ typedef enum {
  * Evaluation always runs one sample per call (#152 D10), so an untracked
  * (!trackRunningStats) rank-2 BatchNorm1d cannot be evaluated (n = 1 always
  * fails); track running statistics, or evaluate rank-3 [1, C, T >= 2].
- * trainingRun rejects this before epoch 0 (batchNorm1dRequireEvaluable, #467).
+ * trainingRun rejects this before epoch 0, judged on the first eval sample
+ * (batchNorm1dRequireEvaluable, #467).
  *
  * CONCURRENCY INVARIANT: the training forward writes runningMean/
  * runningVar/numBatchesTracked. One instance must never run two forwards

@@ -134,7 +134,8 @@ typedef struct trainingRunOptions {
                                     evaluation runs one sample per call, an untracked
                                     (noRunningStats) rank-2 BatchNorm1d cannot be evaluated;
                                     track running statistics or use [C, T >= 2] samples --
-                                    trainingRun rejects this before epoch 0 (#467). */
+                                    trainingRun rejects this before epoch 0, judged on the first
+                                    eval sample (eval samples must share one shape; #467). */
 } trainingRunOptions_t;
 
 void freeTrainingStats(trainingStats_t *trainingStats);
@@ -171,8 +172,9 @@ classificationReport_t evaluationEpochWithReport(layer_t **model, size_t modelSi
  * batch scheduler and microBatchSize > 1, any batch the scheduler will set for
  * epochs 1..numberOfEpochs-1 is not divisible by it (#152); or the model has
  * an untracked (noRunningStats) BatchNorm1d whose one-sample evaluation input
- * (walked from the first eval sample) has fewer than 2 values per channel
- * (#467). */
+ * (walked from the first eval sample -- eval samples are assumed to share one
+ * shape, as the numClasses derivation already does) has fewer than 2 values
+ * per channel (#467). */
 trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
                                 dataLoader_t *trainDataLoader, dataLoader_t *evalDataLoader,
                                 optimizer_t *optimizer, size_t numberOfEpochs,

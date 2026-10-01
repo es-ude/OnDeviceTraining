@@ -558,6 +558,8 @@ add_elastic_ai_unit_test(
         MORE_LIBS
         ArithmeticType
         CommonLayerLibs
+        BatchNorm1dApi
+        BatchNorm1d
         LinearApi
         ReluApi
         SoftmaxApi

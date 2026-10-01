@@ -9,6 +9,7 @@
 #include "ArithmeticType.h"
 #include "AvgPool1d.h"
 #include "BatchNorm1d.h"
+#include "BatchNorm1dApi.h"
 #include "Conv1d.h"
 #include "Conv1dApi.h"
 #include "Conv1dTransposed.h"
@@ -280,6 +281,12 @@ _Static_assert(_Generic(&layerIsFloat32Only, bool (*)(layer_t *): 1, default: 0)
                "layerIsFloat32Only must be bool (layer_t *layer) (#152)");
 _Static_assert(_Generic(&layerNonFloat32Field, const char *(*)(layer_t *): 1, default: 0),
                "layerNonFloat32Field must be const char *(layer_t *layer) (#152)");
+_Static_assert(_Generic(&layerForwardNonFloat32Field, const char *(*)(layer_t *): 1, default: 0),
+               "layerForwardNonFloat32Field must be const char *(layer_t *layer) (#468)");
+
+/* The accessor the capture helpers query: layerNonFloat32Field (training
+ * gate) by default; the #468 tests switch it to the forward-only variant. */
+static const char *(*g_fieldFn)(layer_t *) = layerNonFloat32Field;
 
 /* The gate's field capture helpers flip ONE slot, record what the gate names,
  * and restore the slot before anything else runs -- capture only, assertions
@@ -290,7 +297,7 @@ static void captureMathFlips(layer_t *layer, arithmetic_t *const *slots, size_t 
     for (size_t i = 0; i < n; i++) {
         arithmeticType_t saved = slots[i]->type;
         slots[i]->type = flipTo;
-        got[i] = layerNonFloat32Field(layer);
+        got[i] = g_fieldFn(layer);
         slots[i]->type = saved;
     }
 }
@@ -300,7 +307,7 @@ static void captureWireFlips(layer_t *layer, quantization_t **const *slots, size
     for (size_t i = 0; i < n; i++) {
         quantization_t *saved = *slots[i];
         *slots[i] = nonFloatQ;
-        got[i] = layerNonFloat32Field(layer);
+        got[i] = g_fieldFn(layer);
         *slots[i] = saved;
     }
 }
@@ -311,11 +318,11 @@ static void captureWireFlips(layer_t *layer, quantization_t **const *slots, size
 static void captureParamFlips(layer_t *layer, parameter_t *p, const char **got) {
     qtype_t saved = p->param->quantization->type;
     p->param->quantization->type = SYM_INT32;
-    got[0] = layerNonFloat32Field(layer);
+    got[0] = g_fieldFn(layer);
     p->param->quantization->type = saved;
     saved = p->grad->quantization->type;
     p->grad->quantization->type = SYM_INT32;
-    got[1] = layerNonFloat32Field(layer);
+    got[1] = g_fieldFn(layer);
     p->grad->quantization->type = saved;
 }
 
@@ -323,6 +330,17 @@ static void assertFieldNames(const char *const *expected, const char *const *got
     for (size_t i = 0; i < n; i++) {
         TEST_ASSERT_NOT_NULL_MESSAGE(got[i], expected[i]);
         TEST_ASSERT_EQUAL_STRING(expected[i], got[i]);
+    }
+}
+
+static void assertFieldNamesOrNull(const char *const *expected, const char *const *got, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if (expected[i] == NULL) {
+            TEST_ASSERT_NULL_MESSAGE(got[i], "backward-only field must not gate the forward");
+        } else {
+            TEST_ASSERT_NOT_NULL_MESSAGE(got[i], expected[i]);
+            TEST_ASSERT_EQUAL_STRING(expected[i], got[i]);
+        }
     }
 }
 
@@ -675,6 +693,99 @@ void testLayerBackwardReadsInputRejectsUnknownType(void) {
                              (void)layerBackwardReadsInput(&unknown));
 }
 
+/* #468 D6: stacked evaluation only runs forwards -- backward arithmetic,
+ * the prop-loss wire and grad storage must not reject a layer. Slot order
+ * matches GEMM_FIELDS / NORM_FIELDS / WIRE_FIELDS. */
+static const char *const GEMM_FORWARD_FIELDS[10] = {
+    "forwardMath", NULL, NULL, NULL, "outputQ", NULL, "weights.param", NULL, "bias.param", NULL};
+static const char *const NORM_FORWARD_FIELDS[8] = {"forwardMath", NULL, "outputQ",    NULL,
+                                                   "gamma.param", NULL, "beta.param", NULL};
+static const char *const WIRE_FORWARD_FIELDS[4] = {"forwardMath", NULL, "outputQ", NULL};
+
+void testLayerForwardNonFloat32FieldIgnoresBackwardOnlyFields(void) {
+    quantization_t *q = quantizationInitFloat();
+    quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *lin = linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &lq);
+    layer_t *ln = layerNormLayerInit(
+        &(layerNormInit_t){.normalizedShape = (size_t[]){2}, .numNormDims = 1}, &lq);
+    layer_t *relu = reluLayerInit(&lq);
+    const char *gotLin[10];
+    const char *gotLn[8];
+    const char *gotRelu[4];
+    const char *gotUniform[3];
+
+    g_fieldFn = layerForwardNonFloat32Field;
+    linearConfig_t *lc = lin->config->linear;
+    captureMathFlips(lin,
+                     (arithmetic_t *const[]){&lc->forwardMath, &lc->weightGradMath,
+                                             &lc->biasGradMath, &lc->propLossMath},
+                     4, ARITH_SYM_INT32, gotLin);
+    captureWireFlips(lin, (quantization_t * *const[]){&lc->outputQ, &lc->propLossQ}, 2, symQ,
+                     gotLin + 4);
+    captureParamFlips(lin, lc->weights, gotLin + 6);
+    captureParamFlips(lin, lc->bias, gotLin + 8);
+    layerNormConfig_t *nc = ln->config->layerNorm;
+    captureMathFlips(ln, (arithmetic_t *const[]){&nc->forwardMath, &nc->propLossMath}, 2,
+                     ARITH_SYM_INT32, gotLn);
+    captureWireFlips(ln, (quantization_t * *const[]){&nc->outputQ, &nc->propLossQ}, 2, symQ,
+                     gotLn + 2);
+    captureParamFlips(ln, nc->gamma, gotLn + 4);
+    captureParamFlips(ln, nc->beta, gotLn + 6);
+    reluConfig_t *rc = relu->config->relu;
+    captureMathFlips(relu, (arithmetic_t *const[]){&rc->forwardMath, &rc->propLossMath}, 2,
+                     ARITH_SYM_INT32, gotRelu);
+    captureWireFlips(relu, (quantization_t * *const[]){&rc->outputQ, &rc->propLossQ}, 2, symQ,
+                     gotRelu + 2);
+    gotUniform[0] = layerForwardNonFloat32Field(lin);
+    gotUniform[1] = layerForwardNonFloat32Field(ln);
+    gotUniform[2] = layerForwardNonFloat32Field(relu);
+    g_fieldFn = layerNonFloat32Field;
+
+    freeReluLayer(relu);
+    freeLayerNormLayer(ln);
+    freeLinearLayer(lin);
+    freeQuantization(symQ);
+    freeQuantization(q);
+
+    assertFieldNamesOrNull(GEMM_FORWARD_FIELDS, gotLin, 10);
+    assertFieldNamesOrNull(NORM_FORWARD_FIELDS, gotLn, 8);
+    assertFieldNamesOrNull(WIRE_FORWARD_FIELDS, gotRelu, 4);
+    for (size_t i = 0; i < 3; i++) {
+        TEST_ASSERT_NULL(gotUniform[i]);
+    }
+}
+
+void testLayerForwardNonFloat32FieldGatesBatchNorm1dRunningBuffers(void) {
+    /* The running buffers are forward state (read as float* in eval), so the
+     * forward-only gate keeps them. */
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *bn = batchNorm1dLayerInit(&(batchNorm1dInit_t){.numChannels = 2}, &lq);
+    batchNorm1dConfig_t *cfg = bn->config->batchNorm1d;
+
+    qtype_t savedMean = cfg->runningMean->quantization->type;
+    cfg->runningMean->quantization->type = SYM_INT32;
+    const char *gotMean = layerForwardNonFloat32Field(bn);
+    cfg->runningMean->quantization->type = savedMean;
+    qtype_t savedVar = cfg->runningVar->quantization->type;
+    cfg->runningVar->quantization->type = SYM_INT32;
+    const char *gotVar = layerForwardNonFloat32Field(bn);
+    cfg->runningVar->quantization->type = savedVar;
+    const char *gotClean = layerForwardNonFloat32Field(bn);
+
+    freeBatchNorm1dLayer(bn);
+    freeQuantization(q);
+
+    TEST_ASSERT_NOT_NULL(gotMean);
+    TEST_ASSERT_EQUAL_STRING("runningMean", gotMean);
+    TEST_ASSERT_NOT_NULL(gotVar);
+    TEST_ASSERT_EQUAL_STRING("runningVar", gotVar);
+    TEST_ASSERT_NULL(gotClean);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLinearAccessorsMatchConfig);
@@ -698,5 +809,7 @@ int main(void) {
     RUN_TEST(testLayerIsFloat32OnlyAcceptsFrozenBiaslessAndPassthroughLayers);
     RUN_TEST(testLayerBackwardReadsInputTruthTable);
     RUN_TEST(testLayerBackwardReadsInputRejectsUnknownType);
+    RUN_TEST(testLayerForwardNonFloat32FieldIgnoresBackwardOnlyFields);
+    RUN_TEST(testLayerForwardNonFloat32FieldGatesBatchNorm1dRunningBuffers);
     return UNITY_END();
 }

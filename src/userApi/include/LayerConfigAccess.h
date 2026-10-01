@@ -51,4 +51,10 @@ const char *layerNonFloat32Field(layer_t *layer);
  * NULL. An unknown type exits. */
 bool layerBackwardReadsInput(const layer_t *layer);
 
+/* Forward-only variant for stacked evaluation (#468 D6): the first
+ * non-FLOAT32 among forwardMath, outputQ and every parameter's (and
+ * BatchNorm1d's running buffers') storage, or NULL. Backward arithmetic, the
+ * prop-loss wire and grad storage are ignored -- evaluation never runs them. */
+const char *layerForwardNonFloat32Field(layer_t *layer);
+
 #endif // ODT_LAYER_CONFIG_ACCESS_H

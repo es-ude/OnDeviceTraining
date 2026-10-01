@@ -8,6 +8,9 @@ add_library(TrainingLoopApi TrainingLoopApi.c)
 target_include_directories(TrainingLoopApi PUBLIC include)
 target_link_libraries(TrainingLoopApi PRIVATE
         TrainingEpochDefault
+        StackGather
+        LayerConfigAccess
+        ArithmeticType
         TensorApi
         Tensor
         TensorConversion

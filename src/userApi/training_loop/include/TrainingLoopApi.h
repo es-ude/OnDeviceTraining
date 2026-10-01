@@ -92,9 +92,13 @@ typedef trainingStats_t *(*calculateGradsFn_t)(layer_t **model, size_t modelSize
                                                reduction_t forwardReduction, tensor_t *input,
                                                tensor_t *label);
 
-/*! When invoked by evaluationBatch/evaluateBatchInternal, input/label are
- *  the stack [1, ...] views batchViewOf built for one sample (#152 PR3a):
- *  borrowed; valid only for the duration of the call. */
+/*! When invoked by the evaluation loop, input/label are borrowed stack views
+ *  of shape [rows, ...sampleShape], valid only for the call: at
+ *  microBatchSize 1 rows == 1 and they share the sample's data (#152 PR3a);
+ *  at m > 1 they point into the loop's gather buffers, overwritten by the
+ *  next chunk. The function returns an output whose leading dimension is
+ *  rows and whose per-row block holds the C class scores (#468 D8), and the
+ *  loss reduced over the rows per forwardReduction. */
 typedef inferenceStats_t *(*inferenceWithLossFn_t)(layer_t **model, size_t numberOfLayers,
                                                    tensor_t *input, tensor_t *label,
                                                    lossFuncType_t funcType,

@@ -683,6 +683,7 @@ target_link_libraries(UnitTestStackedEvaluation PRIVATE
         LayerConfigAccess
         LinearApi
         ReluApi
+        Conv1dApi
         BatchNorm1dApi
         BatchNorm1d
         Reduce

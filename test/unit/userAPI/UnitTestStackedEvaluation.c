@@ -7,14 +7,19 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "ArithmeticType.h"
+#include "Conv1d.h"
+#include "Conv1dApi.h"
 #include "DataLoaderApi.h"
 #include "DeathTest.h"
+#include "FlattenApi.h"
 #include "InferenceApi.h"
 #include "LayerQuant.h"
 #include "Linear.h"
 #include "LinearApi.h"
 #include "LossFunction.h"
 #include "QuantizationApi.h"
+#include "Relu.h"
 #include "ReluApi.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -192,6 +197,420 @@ void testReportRejectsNumClassesNotMatchingTheLabel(void) {
     ASSERT_EXITS_WITH(0, reportWithNumClasses(CLS, 1));
     ASSERT_EXITS_WITH_FAILURE(reportWithNumClasses(CLS + 1, 1));
     ASSERT_EXITS_WITH_FAILURE(reportWithNumClasses(CLS - 1, 1));
+    ASSERT_EXITS_WITH_FAILURE(reportWithNumClasses(0, 1));
+    ASSERT_EXITS_WITH_FAILURE(reportWithNumClasses(0, 2));
+}
+
+/* ---- equivalence: row-independent model, stacked == per-sample ------------ */
+
+static classificationReport_t runReport(size_t m, uint16_t batchSize, size_t *cm) {
+    layer_t *model[MODEL_SIZE];
+    buildModel(model);
+    dataLoader_t *dl =
+        dataLoaderInit(getSample, getDatasetSize, batchSize, NULL, NULL, false, 0, true);
+    classificationReport_t r = evaluationEpochWithReport(
+        model, MODEL_SIZE, MSE, dl, inferenceWithLoss, cm, CLS, REDUCTION_MEAN, m);
+    freeDataLoader(dl);
+    freeModel(model);
+    return r;
+}
+
+static float runPlainLoss(size_t m, reduction_t reduction) {
+    layer_t *model[MODEL_SIZE];
+    buildModel(model);
+    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, 0, true);
+    float loss = evaluationEpoch(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, reduction, m);
+    freeDataLoader(dl);
+    freeModel(model);
+    return loss;
+}
+
+static bool sameStats(epochStats_t a, epochStats_t b) {
+    return memcmp(&a.accuracy, &b.accuracy, sizeof(float)) == 0 &&
+           memcmp(&a.precision, &b.precision, sizeof(float)) == 0 &&
+           memcmp(&a.recall, &b.recall, sizeof(float)) == 0 &&
+           memcmp(&a.f1, &b.f1, sizeof(float)) == 0;
+}
+
+/* m in {2, 3, 7, 8} over N = 7: full chunks, a ragged tail, one exact chunk,
+ * and m > N (one 7-row chunk). Counts are integers, so CM and the derived
+ * rates must match exactly; the loss only by float summation order. */
+void testStackedReportMatchesPerSampleForEveryChunkSize(void) {
+    initData();
+    const size_t ms[4] = {2, 3, 7, 8};
+    size_t cm1[CLS * CLS];
+    size_t cmM[4][CLS * CLS];
+    classificationReport_t r1 = runReport(1, 1, cm1);
+    classificationReport_t rM[4];
+    for (size_t k = 0; k < 4; k++) {
+        rM[k] = runReport(ms[k], 1, cmM[k]);
+    }
+    float sum1 = runPlainLoss(1, REDUCTION_SUM);
+    float sumM = runPlainLoss(3, REDUCTION_SUM);
+    freeFixtureData();
+
+    size_t total = 0;
+    size_t predictedClasses = 0;
+    for (size_t p = 0; p < CLS; p++) {
+        size_t rowSum = 0;
+        for (size_t a = 0; a < CLS; a++) {
+            rowSum += cm1[p * CLS + a];
+        }
+        total += rowSum;
+        predictedClasses += (rowSum > 0);
+    }
+    TEST_ASSERT_EQUAL_size_t(N_EVAL, total);
+    TEST_ASSERT_TRUE_MESSAGE(predictedClasses >= 2, "fixture must predict >= 2 classes");
+    for (size_t k = 0; k < 4; k++) {
+        TEST_ASSERT_EQUAL_MEMORY(cm1, cmM[k], sizeof(cm1));
+        TEST_ASSERT_TRUE(sameStats(r1.stats, rM[k].stats));
+        TEST_ASSERT_FLOAT_WITHIN(1e-5f * fabsf(r1.stats.loss) + 1e-6f, r1.stats.loss,
+                                 rM[k].stats.loss);
+    }
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f * fabsf(sum1) + 1e-6f, sum1, sumM);
+}
+
+/* Review Focus 1: loader batchSize 2 over D = 7 streams N = 6 (dropLast);
+ * m = 4 gathers ACROSS batch_t boundaries -> chunks 4 + 2. */
+void testStackedSpansLoaderBatchesAndRespectsDropLast(void) {
+    initData();
+    size_t cm1[CLS * CLS];
+    size_t cm4[CLS * CLS];
+    classificationReport_t r1 = runReport(1, 2, cm1);
+    classificationReport_t r4 = runReport(4, 2, cm4);
+    freeFixtureData();
+    size_t total = 0;
+    for (size_t i = 0; i < CLS * CLS; i++) {
+        total += cm4[i];
+    }
+    TEST_ASSERT_EQUAL_size_t(6, total);
+    TEST_ASSERT_EQUAL_MEMORY(cm1, cm4, sizeof(cm1));
+    TEST_ASSERT_TRUE(sameStats(r1.stats, r4.stats));
+}
+
+/* ---- D10: no entry point gains a getBatch call --------------------------- */
+
+static size_t g_getBatchCalls;
+static getBatchFn_t g_realGetBatch;
+
+static batch_t *countingGetBatch(dataLoader_t *dl, size_t index) {
+    g_getBatchCalls++;
+    return g_realGetBatch(dl, index);
+}
+
+static size_t countGetBatch(entryPoint_t via, size_t m) {
+    layer_t *model[MODEL_SIZE];
+    buildModel(model);
+    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, 0, true);
+    g_realGetBatch = dl->getBatch;
+    dl->getBatch = countingGetBatch;
+    g_getBatchCalls = 0;
+    size_t cm[CLS * CLS];
+    switch (via) {
+    case VIA_EPOCH:
+        (void)evaluationEpoch(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, m);
+        break;
+    case VIA_METRICS:
+        (void)evaluationEpochWithMetrics(model, MODEL_SIZE, MSE, dl, inferenceWithLoss,
+                                         REDUCTION_MEAN, m);
+        break;
+    case VIA_REPORT:
+        (void)evaluationEpochWithReport(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, cm, CLS,
+                                        REDUCTION_MEAN, m);
+        break;
+    }
+    freeDataLoader(dl);
+    freeModel(model);
+    return g_getBatchCalls;
+}
+
+void testEntryPointsKeepTodaysGetBatchCallCount(void) {
+    initData();
+    size_t calls[2][3];
+    const size_t ms[2] = {1, 3};
+    for (size_t k = 0; k < 2; k++) {
+        calls[k][0] = countGetBatch(VIA_EPOCH, ms[k]);
+        calls[k][1] = countGetBatch(VIA_METRICS, ms[k]);
+        calls[k][2] = countGetBatch(VIA_REPORT, ms[k]);
+    }
+    freeFixtureData();
+    for (size_t k = 0; k < 2; k++) {
+        TEST_ASSERT_EQUAL_size_t(N_EVAL, calls[k][0]);
+        TEST_ASSERT_EQUAL_size_t(N_EVAL + 1, calls[k][1]); /* its existing numClasses peek */
+        TEST_ASSERT_EQUAL_size_t(N_EVAL, calls[k][2]);
+    }
+}
+
+/* ---- Review Focus 4 / D7: MEAN divides by the STREAMED count ------------- */
+
+/* A replay-like loader: batch 0 carries one extra sample beyond batchSize. */
+static batch_t *oneExtraSampleGetBatch(dataLoader_t *dl, size_t index) {
+    batch_t *b = g_realGetBatch(dl, index);
+    if (index == 0) {
+        sample_t **grown = reserveMemory((b->size + 1) * sizeof(sample_t *));
+        memcpy(grown, b->samples, b->size * sizeof(sample_t *));
+        grown[b->size] = getSample(N_EVAL - 1);
+        freeReservedMemory(b->samples);
+        b->samples = grown;
+        b->size += 1;
+    }
+    return b;
+}
+
+static float runGrownLoss(size_t m, reduction_t reduction) {
+    layer_t *model[MODEL_SIZE];
+    buildModel(model);
+    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, 0, true);
+    g_realGetBatch = dl->getBatch;
+    dl->getBatch = oneExtraSampleGetBatch;
+    float loss = evaluationEpoch(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, reduction, m);
+    freeDataLoader(dl);
+    freeModel(model);
+    return loss;
+}
+
+void testStackedMeanDividesByStreamedCount(void) {
+    initData();
+    float mean1 = runGrownLoss(1, REDUCTION_MEAN);
+    float mean3 = runGrownLoss(3, REDUCTION_MEAN);
+    float sum3 = runGrownLoss(3, REDUCTION_SUM);
+    freeFixtureData();
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f * fabsf(mean1) + 1e-6f, mean1, mean3);
+    /* MSE's MEAN is per element (1/(N*F)), so SUM -> MEAN carries the class count. */
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f * fabsf(sum3) + 1e-6f, sum3 / (float)((N_EVAL + 1) * CLS),
+                             mean3);
+}
+
+/* ---- fail-fast: stackability, forward gate, output contract (D8/D12) ----- */
+
+static void metricsWith(inferenceWithLossFn_t fn, size_t m) {
+    layer_t *model[MODEL_SIZE];
+    buildModel(model);
+    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, 0, true);
+    (void)evaluationEpochWithMetrics(model, MODEL_SIZE, MSE, dl, fn, REDUCTION_MEAN, m);
+}
+
+static inferenceStats_t *symOutputInference(layer_t **model, size_t n, tensor_t *in,
+                                            tensor_t *label, lossFuncType_t f, reduction_t r) {
+    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r);
+    s->output->quantization->type = SYM_INT32;
+    return s;
+}
+static inferenceStats_t *extraRowInference(layer_t **model, size_t n, tensor_t *in, tensor_t *label,
+                                           lossFuncType_t f, reduction_t r) {
+    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r);
+    s->output->shape->dimensions[0] += 1;
+    return s;
+}
+/* Same element count, rows moved out of axis 0: [1, rows * C]. */
+static inferenceStats_t *flatRowInference(layer_t **model, size_t n, tensor_t *in, tensor_t *label,
+                                          lossFuncType_t f, reduction_t r) {
+    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r);
+    size_t *d = s->output->shape->dimensions;
+    d[1] *= d[0];
+    d[0] = 1;
+    return s;
+}
+static inferenceStats_t *shortRowInference(layer_t **model, size_t n, tensor_t *in, tensor_t *label,
+                                           lossFuncType_t f, reduction_t r) {
+    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r);
+    s->output->shape->dimensions[1] -= 1;
+    return s;
+}
+static inferenceStats_t *swappedOrderInference(layer_t **model, size_t n, tensor_t *in,
+                                               tensor_t *label, lossFuncType_t f, reduction_t r) {
+    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r);
+    size_t *o = s->output->shape->orderOfDimensions;
+    size_t t = o[0];
+    o[0] = o[1];
+    o[1] = t;
+    return s;
+}
+static inferenceStats_t *nullDataInference(layer_t **model, size_t n, tensor_t *in, tensor_t *label,
+                                           lossFuncType_t f, reduction_t r) {
+    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r);
+    s->output->data = NULL; /* leaks in the forked child only */
+    return s;
+}
+static inferenceStats_t *nullOrderInference(layer_t **model, size_t n, tensor_t *in,
+                                            tensor_t *label, lossFuncType_t f, reduction_t r) {
+    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r);
+    s->output->shape->orderOfDimensions = NULL; /* leaks in the forked child only */
+    return s;
+}
+
+/* A stream that yields no sample at all (custom getBatch returning empty
+ * batches) must fail fast instead of dividing MEAN loss and metrics by 0. */
+static batch_t *emptyGetBatch(dataLoader_t *dl, size_t index) {
+    (void)dl;
+    (void)index;
+    batch_t *b = reserveMemory(sizeof(batch_t));
+    b->size = 0;
+    b->samples = reserveMemory(sizeof(sample_t *));
+    return b;
+}
+
+static void metricsOverEmptyStream(size_t m) {
+    layer_t *model[MODEL_SIZE];
+    buildModel(model);
+    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, 0, true);
+    dl->getBatch = emptyGetBatch;
+    (void)evaluationEpoch(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, m);
+}
+
+void testEmptyStreamFailsFast(void) {
+    initData();
+    ASSERT_EXITS_WITH_FAILURE(metricsOverEmptyStream(1));
+    ASSERT_EXITS_WITH_FAILURE(metricsOverEmptyStream(2));
+    freeFixtureData();
+}
+
+void testStackedRejectsMalformedInferenceOutput(void) {
+    initData();
+    ASSERT_EXITS_WITH(0, metricsWith(inferenceWithLoss, 2)); /* the fixture itself is valid */
+    ASSERT_EXITS_WITH_FAILURE(metricsWith(symOutputInference, 2));
+    ASSERT_EXITS_WITH_FAILURE(metricsWith(extraRowInference, 2));
+    ASSERT_EXITS_WITH_FAILURE(metricsWith(flatRowInference, 2));
+    ASSERT_EXITS_WITH_FAILURE(metricsWith(shortRowInference, 2));
+    ASSERT_EXITS_WITH_FAILURE(metricsWith(swappedOrderInference, 2));
+    ASSERT_EXITS_WITH_FAILURE(metricsWith(nullDataInference, 2));
+    ASSERT_EXITS_WITH_FAILURE(metricsWith(nullOrderInference, 2));
+    freeFixtureData();
+}
+
+static void metricsWithMismatchedSample(bool dtype) {
+    if (dtype) {
+        g_items[4]->quantization->type = SYM_INT32; /* child only */
+    } else {
+        freeTensor(g_items[4]);
+        g_items[4] = buildFloatTensor((size_t[]){IN_F + 1}, 1, NULL);
+    }
+    metricsWith(inferenceWithLoss, 2);
+}
+
+/* D11 on the stacked path: a larger numClasses would not crash there (the
+ * counters are sized by it), it would silently mis-shape the matrix. */
+void testStackedReportRejectsNumClassesNotMatchingTheLabel(void) {
+    ASSERT_EXITS_WITH(0, reportWithNumClasses(CLS, 2));
+    ASSERT_EXITS_WITH_FAILURE(reportWithNumClasses(CLS + 1, 2));
+}
+
+void testStackedRejectsUnstackableSamples(void) {
+    initData();
+    ASSERT_EXITS_WITH_FAILURE(metricsWithMismatchedSample(true));
+    ASSERT_EXITS_WITH_FAILURE(metricsWithMismatchedSample(false));
+    freeFixtureData();
+}
+
+/* Allows WithMetrics' numClasses peek (call 0), exits 2 on any later call:
+ * proves the gate fires before the stream starts. */
+static size_t g_gateCalls;
+static batch_t *getBatchMustNotRunAfterGate(dataLoader_t *dl, size_t index) {
+    if (g_gateCalls++ > 0) {
+        _exit(2);
+    }
+    return g_realGetBatch(dl, index);
+}
+
+static void metricsWithSymForward(size_t m) {
+    layer_t *model[MODEL_SIZE];
+    buildModel(model);
+    model[1]->config->relu->forwardMath.type = ARITH_SYM_INT32; /* child only */
+    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, 0, true);
+    g_realGetBatch = dl->getBatch;
+    dl->getBatch = getBatchMustNotRunAfterGate;
+    (void)evaluationEpochWithMetrics(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, REDUCTION_MEAN,
+                                     m);
+}
+
+void testStackedForwardGateFiresBeforeTheStream(void) {
+    initData();
+    g_gateCalls = 0;
+    ASSERT_EXITS_WITH_FAILURE(metricsWithSymForward(2));
+    freeFixtureData();
+}
+
+/* D6: a FLOAT32 forward with a SYM prop-loss wire (backward only) is fine. */
+static void reportWithSymPropLoss(size_t m, size_t *cm, epochStats_t *out) {
+    quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
+    layer_t *model[MODEL_SIZE];
+    buildModel(model);
+    quantization_t *saved = model[0]->config->linear->propLossQ;
+    model[0]->config->linear->propLossQ = symQ;
+    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, 0, true);
+    *out = evaluationEpochWithReport(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, cm, CLS,
+                                     REDUCTION_MEAN, m)
+               .stats;
+    model[0]->config->linear->propLossQ = saved;
+    freeDataLoader(dl);
+    freeModel(model);
+    freeQuantization(symQ);
+}
+
+void testStackedAcceptsBackwardOnlyNonFloat32Fields(void) {
+    initData();
+    size_t cm1[CLS * CLS];
+    size_t cm2[CLS * CLS];
+    epochStats_t s1;
+    epochStats_t s2;
+    reportWithSymPropLoss(1, cm1, &s1);
+    reportWithSymPropLoss(2, cm2, &s2);
+    freeFixtureData();
+    TEST_ASSERT_EQUAL_MEMORY(cm1, cm2, sizeof(cm1));
+    TEST_ASSERT_TRUE(sameStats(s1, s2));
+}
+static tensor_t *g_convItems[N_EVAL];
+static sample_t *getConvSample(size_t id) {
+    sample_t *s = reserveMemory(sizeof(sample_t));
+    s->item = g_convItems[id];
+    s->label = g_labels[id];
+    return s;
+}
+
+static void convReport(size_t m, size_t *cm, epochStats_t *out) {
+    layer_t *model[4];
+    model[0] =
+        conv1dLayerInit(&(conv1dInit_t){.inChannels = 1, .outChannels = 2, .kernelSize = 3}, &g_lq);
+    model[1] = reluLayerInit(&g_lq);
+    model[2] = flattenLayerInit();
+    model[3] = linearLayerInit(&(linearInit_t){.inFeatures = 8, .outFeatures = CLS}, &g_lq);
+    fillPattern(model[0]->config->conv1d->weights->param, 0.9f);
+    fillPattern(model[0]->config->conv1d->bias->param, 0.2f);
+    fillPattern(model[3]->config->linear->weights->param, 1.1f);
+    fillPattern(model[3]->config->linear->bias->param, 2.3f);
+    dataLoader_t *dl = dataLoaderInit(getConvSample, getDatasetSize, 1, NULL, NULL, false, 0, true);
+    *out =
+        evaluationEpochWithReport(model, 4, MSE, dl, inferenceWithLoss, cm, CLS, REDUCTION_MEAN, m)
+            .stats;
+    freeDataLoader(dl);
+    freeLinearLayer(model[3]);
+    freeFlattenLayer(model[2]);
+    freeReluLayer(model[1]);
+    freeConv1dLayer(model[0]);
+}
+
+void testStackedConvFlattenPipelineMatchesPerSample(void) {
+    initData();
+    for (size_t i = 0; i < N_EVAL; i++) {
+        float x[6];
+        for (size_t j = 0; j < 6; j++) {
+            x[j] = cosf(0.9f * (float)(i * 6 + j));
+        }
+        g_convItems[i] = buildFloatTensor((size_t[]){1, 6}, 2, x);
+    }
+    size_t cm1[CLS * CLS];
+    size_t cm3[CLS * CLS];
+    epochStats_t s1;
+    epochStats_t s3;
+    convReport(1, cm1, &s1);
+    convReport(3, cm3, &s3);
+    for (size_t i = 0; i < N_EVAL; i++) {
+        freeTensor(g_convItems[i]);
+    }
+    freeFixtureData();
+    TEST_ASSERT_EQUAL_MEMORY(cm1, cm3, sizeof(cm1));
+    TEST_ASSERT_TRUE(sameStats(s1, s3));
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f * fabsf(s1.loss) + 1e-6f, s1.loss, s3.loss);
 }
 
 int main(void) {
@@ -200,6 +619,17 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testEmptyEvalLoaderFailsBeforeAnyGetBatch);
     RUN_TEST(testReportRejectsNumClassesNotMatchingTheLabel);
+    RUN_TEST(testStackedReportMatchesPerSampleForEveryChunkSize);
+    RUN_TEST(testStackedSpansLoaderBatchesAndRespectsDropLast);
+    RUN_TEST(testEntryPointsKeepTodaysGetBatchCallCount);
+    RUN_TEST(testStackedMeanDividesByStreamedCount);
+    RUN_TEST(testEmptyStreamFailsFast);
+    RUN_TEST(testStackedRejectsMalformedInferenceOutput);
+    RUN_TEST(testStackedReportRejectsNumClassesNotMatchingTheLabel);
+    RUN_TEST(testStackedRejectsUnstackableSamples);
+    RUN_TEST(testStackedForwardGateFiresBeforeTheStream);
+    RUN_TEST(testStackedAcceptsBackwardOnlyNonFloat32Fields);
+    RUN_TEST(testStackedConvFlattenPipelineMatchesPerSample);
     int result = UNITY_END();
     freeQuantization(g_q);
     return result;

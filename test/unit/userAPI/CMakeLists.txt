@@ -652,3 +652,21 @@ target_link_libraries(UnitTestMicroBatchStacking PRIVATE
 add_dependencies(UnitTestMicroBatchStacking generate_expected_microbatch)
 target_include_directories(UnitTestMicroBatchStacking PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 __register_target_as_unit_test(UnitTestMicroBatchStacking)
+
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST StackGather
+        MORE_LIBS
+        TensorApi
+        Tensor
+        QuantizationApi
+        Quantization
+        StorageApi
+        LayerConfigAccess
+        ArithmeticType
+        CommonLayerLibs
+        LinearApi
+        Linear
+        LayerQuant
+        Common
+        odt_test_death
+)

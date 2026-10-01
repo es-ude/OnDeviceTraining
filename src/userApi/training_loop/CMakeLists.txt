@@ -1,3 +1,4 @@
+add_subdirectory(stack_gather)
 add_subdirectory(calculate_grads)
 add_subdirectory(training_batch)
 add_subdirectory(training_epoch)

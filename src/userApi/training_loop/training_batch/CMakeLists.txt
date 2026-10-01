@@ -13,7 +13,8 @@ target_link_libraries(TrainingBatchDefault PRIVATE
         DataLoaderApi
         Common
         StorageApi
-        # #152 PR3b: the m > 1 FLOAT32 gate (layerIsFloat32Only).
+        StackGather
+        # #152 PR3b: the m > 1 FLOAT32 gate (layerNonFloat32Field).
         LayerConfigAccess
         ArithmeticType
 )

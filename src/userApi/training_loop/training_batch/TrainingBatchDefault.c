@@ -8,6 +8,7 @@
 #include "Common.h"
 #include "DataLoaderApi.h"
 #include "LayerConfigAccess.h"
+#include "StackGather.h"
 #include "StorageApi.h"
 #include "TrainingBatchDefault.h"
 
@@ -34,77 +35,6 @@ static float trainingBatchPerSample(layer_t **model, size_t modelSize, lossConfi
     return totalLoss;
 }
 
-/* Gather buffer of m rows x perSampleBytes (spec §6.4): overflow-checked
- * multiply, NULL from reserveMemory fails fast -- never a copy through NULL. */
-static uint8_t *reserveGatherBuffer(size_t m, size_t perSampleBytes, const char *what) {
-    if (perSampleBytes != 0 && m > SIZE_MAX / perSampleBytes) {
-        PRINT_ERROR("trainingBatchDefault: the %s gather buffer (microBatchSize %zu x %zu bytes "
-                    "per sample) overflows size_t",
-                    what, m, perSampleBytes);
-        exit(1);
-    }
-    uint8_t *buffer = reserveMemory(m * perSampleBytes);
-    if (buffer == NULL) {
-        PRINT_ERROR("trainingBatchDefault: reserving the %s gather buffer failed (microBatchSize "
-                    "%zu x %zu bytes per sample)",
-                    what, m, perSampleBytes);
-        exit(1);
-    }
-    return buffer;
-}
-
-/* FLOAT32 gate (spec §6.6, D3): evaluated over the whole model once per macro
- * batch when m > 1, before any buffer is reserved or any chunk computed. */
-static void requireFloat32Model(layer_t **model, size_t modelSize, size_t m) {
-    for (size_t i = 0; i < modelSize; i++) {
-        if (!layerIsFloat32Only(model[i])) {
-            PRINT_ERROR("trainingBatchDefault: microBatchSize %zu > 1 is FLOAT32-only, but layer "
-                        "%zu (layerType_t %d) has a non-FLOAT32 %s",
-                        m, i, (int)model[i]->type, layerNonFloat32Field(model[i]));
-            exit(1);
-        }
-    }
-}
-
-/* Per-chunk validation (spec §6.3): a stacked sample must be FLOAT32, carry no
- * sparsity and match the reference in rank, dimensions and order. The
- * reference is the macro batch's sample 0 -- the sample the gather buffers
- * were sized from -- so it is also every chunk's first-sample reference. */
-static void requireStackable(tensor_t *reference, tensor_t *t, const char *what, size_t sampleIndex,
-                             size_t m) {
-    if (t->quantization->type != FLOAT32) {
-        PRINT_ERROR("trainingBatchDefault: microBatchSize %zu > 1 is FLOAT32-only, but the %s of "
-                    "sample %zu has dtype %d",
-                    m, what, sampleIndex, (int)t->quantization->type);
-        exit(1);
-    }
-    if (t->sparsity != NULL) {
-        PRINT_ERROR("trainingBatchDefault: microBatchSize %zu > 1 cannot stack the %s of sample "
-                    "%zu: it carries sparsity",
-                    m, what, sampleIndex);
-        exit(1);
-    }
-    size_t rank = reference->shape->numberOfDimensions;
-    if (t->shape->numberOfDimensions != rank) {
-        PRINT_ERROR("trainingBatchDefault: the %s of sample %zu has rank %zu, sample 0 has rank "
-                    "%zu -- a stacked chunk needs shape-identical samples",
-                    what, sampleIndex, t->shape->numberOfDimensions, rank);
-        exit(1);
-    }
-    for (size_t d = 0; d < rank; d++) {
-        if (t->shape->dimensions[d] != reference->shape->dimensions[d] ||
-            t->shape->orderOfDimensions[d] != reference->shape->orderOfDimensions[d]) {
-            PRINT_ERROR("trainingBatchDefault: the %s of sample %zu differs from sample 0 in "
-                        "dimension %zu (size %zu vs %zu, order %zu vs %zu) -- a stacked chunk "
-                        "needs shape-identical samples",
-                        what, sampleIndex, d, t->shape->dimensions[d],
-                        reference->shape->dimensions[d], t->shape->orderOfDimensions[d],
-                        reference->shape->orderOfDimensions[d]);
-            exit(1);
-        }
-    }
-}
-
 /* m > 1 (spec §6.3): b/m chunks of exactly m rows. Each chunk's item and label
  * bytes are copied row after row into the two gather buffers; the stacked
  * tensors are stack-local batch views of the chunk's first sample, re-pointed
@@ -122,16 +52,18 @@ static float trainingBatchStacked(layer_t **model, size_t modelSize, lossConfig_
     tensor_t *referenceLabel = batch->samples[0]->label;
     size_t itemBytes = calcBytesPerTensor(referenceItem);
     size_t labelBytes = calcBytesPerTensor(referenceLabel);
-    uint8_t *itemBuffer = reserveGatherBuffer(m, itemBytes, "item");
-    uint8_t *labelBuffer = reserveGatherBuffer(m, labelBytes, "label");
+    uint8_t *itemBuffer = stackGatherReserveBuffer("trainingBatchDefault", m, itemBytes, "item");
+    uint8_t *labelBuffer = stackGatherReserveBuffer("trainingBatchDefault", m, labelBytes, "label");
     const float rowWeight = (forwardReduction == REDUCTION_MEAN) ? (float)m : 1.0f;
     float totalLoss = 0.0f;
 
     for (size_t first = 0; first < batch->size; first += m) {
         for (size_t r = 0; r < m; r++) {
             const sample_t *sample = batch->samples[first + r];
-            requireStackable(referenceItem, sample->item, "item", first + r, m);
-            requireStackable(referenceLabel, sample->label, "label", first + r, m);
+            stackGatherRequireStackable("trainingBatchDefault", referenceItem, sample->item, "item",
+                                        first + r, m);
+            stackGatherRequireStackable("trainingBatchDefault", referenceLabel, sample->label,
+                                        "label", first + r, m);
         }
         for (size_t r = 0; r < m; r++) {
             const sample_t *sample = batch->samples[first + r];
@@ -187,7 +119,8 @@ float trainingBatchDefault(layer_t **model, size_t modelSize, lossConfig_t lossC
         totalLoss = trainingBatchPerSample(model, modelSize, lossConfig, batch, calculateGradsFn,
                                            forwardReduction);
     } else {
-        requireFloat32Model(model, modelSize, m);
+        stackGatherRequireFloat32Model("trainingBatchDefault", model, modelSize, m,
+                                       layerNonFloat32Field);
         totalLoss = trainingBatchStacked(model, modelSize, lossConfig, batch, calculateGradsFn,
                                          forwardReduction, m);
     }

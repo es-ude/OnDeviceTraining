@@ -322,7 +322,7 @@ void testEvaluationEpoch_ReturnsAverageLossAcrossBatches() {
     dataLoader_t *dl =
         dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
 
-    float totalAvg = evaluationEpoch(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN);
+    float totalAvg = evaluationEpoch(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, 0);
 
     /* CAPTURE. */
     float capturedTotalAvg = totalAvg;
@@ -366,7 +366,7 @@ void testEvaluationEpoch_MinibatchMatchesMicrobatchAverage() {
     dataLoader_t *dl =
         dataLoaderInit(getEpochSample, getEpochDatasetSize, 2, NULL, NULL, false, 0, true);
 
-    float totalAvg = evaluationEpoch(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN);
+    float totalAvg = evaluationEpoch(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, 0);
 
     /* CAPTURE. */
     float capturedTotalAvg = totalAvg;
@@ -858,7 +858,7 @@ void testEvaluationEpochWithMetrics_SymOutputWire() {
                                       false, 0, true);
 
     epochStats_t stats =
-        evaluationEpochWithMetrics(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN);
+        evaluationEpochWithMetrics(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, 0);
 
     float capturedAccuracy = stats.accuracy;
 
@@ -893,7 +893,7 @@ void testEvaluationEpochWithMetrics_AllCorrect() {
 
     /* Identity model: all 4 samples predict correctly (same as testEvaluationEpochAccuracy) */
     epochStats_t stats =
-        evaluationEpochWithMetrics(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN);
+        evaluationEpochWithMetrics(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, 0);
 
     /* CAPTURE. */
     float capturedLoss = stats.loss;
@@ -1109,7 +1109,7 @@ void testEvaluationEpochWithMetrics_PartiallyCorrect() {
         dataLoaderInit(getPartialSample, getPartialDatasetSize, 1, NULL, NULL, false, 0, true);
 
     epochStats_t stats =
-        evaluationEpochWithMetrics(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN);
+        evaluationEpochWithMetrics(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, 0);
 
     /* CAPTURE. */
     float capturedAccuracy = stats.accuracy;
@@ -1217,7 +1217,7 @@ void testEvaluationEpochWithMetrics_HandlesZeroPredictionClass() {
         dataLoaderInit(getZeroPredSample, getZeroPredDatasetSize, 1, NULL, NULL, false, 0, true);
 
     epochStats_t stats =
-        evaluationEpochWithMetrics(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN);
+        evaluationEpochWithMetrics(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, 0);
 
     /* CAPTURE. */
     float capturedAccuracy = stats.accuracy;
@@ -1274,7 +1274,7 @@ void testEvaluationEpochWithReport_ReturnsConfusionMatrix() {
     /* Pre-fill with non-zero to verify WithReport zeroes the caller's buffer before accumulating */
     size_t cm[2 * 2] = {99, 99, 99, 99};
     classificationReport_t report =
-        evaluationEpochWithReport(model, 1, MSE, dl, inferenceWithLoss, cm, 2, REDUCTION_MEAN);
+        evaluationEpochWithReport(model, 1, MSE, dl, inferenceWithLoss, cm, 2, REDUCTION_MEAN, 0);
 
     /* CAPTURE. */
     size_t capturedCM[4];
@@ -1488,7 +1488,7 @@ void testEvaluationEpoch_FlatAggregator_DivisionByTotalSamples() {
         dataLoaderInit(getEpochSample, getEpochDatasetSize, 2, NULL, NULL, false, 0, true);
 
     /* MEAN: divides by totalSamples. */
-    float meanLoss = evaluationEpoch(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN);
+    float meanLoss = evaluationEpoch(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, 0);
 
     float capturedMean = meanLoss;
 
@@ -1521,7 +1521,7 @@ void testEvaluationEpoch_SumPath_ReturnsRawTotal() {
 
     /* SUM forwardReduction: returns raw totalLoss = sum of per-sample
      * SUM losses. Per-sample SUM: 17, 17, 5, 5 (= per-sample MEAN * F=2). */
-    float sumLoss = evaluationEpoch(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_SUM);
+    float sumLoss = evaluationEpoch(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_SUM, 0);
 
     float capturedSum = sumLoss;
 
@@ -2677,7 +2677,7 @@ void testEvaluationEpochWithMetrics_BfpOutputWireDequantCompares() {
                                       false, 0, true);
 
     epochStats_t stats =
-        evaluationEpochWithMetrics(NULL, 0, MSE, dl, bfpOutputWireInference, REDUCTION_MEAN);
+        evaluationEpochWithMetrics(NULL, 0, MSE, dl, bfpOutputWireInference, REDUCTION_MEAN, 0);
 
     float capturedAccuracy = stats.accuracy;
 
@@ -2871,7 +2871,7 @@ void testEvaluationEpochWithMetricsHandsInferenceBatchAxisViews(void) {
     g_probe = (shapeProbe_t){0};
 
     epochStats_t stats =
-        evaluationEpochWithMetrics(NULL, 0, MSE, dl, probeInference, REDUCTION_MEAN);
+        evaluationEpochWithMetrics(NULL, 0, MSE, dl, probeInference, REDUCTION_MEAN, 0);
 
     bool itemDataShared = g_probe.inputData == probeDatasetItem->data;
     bool labelDataShared = g_probe.labelData == probeDatasetLabel->data;

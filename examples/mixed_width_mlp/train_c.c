@@ -389,7 +389,7 @@ int main(void) {
                                               /*dropLast*/ true);
 
     epochStats_t initialStats = evaluationEpochWithMetrics(
-        model, MODEL_SIZE, CROSS_ENTROPY, evalLoader, inferenceWithLoss, REDUCTION_MEAN);
+        model, MODEL_SIZE, CROSS_ENTROPY, evalLoader, inferenceWithLoss, REDUCTION_MEAN, 0);
     fprintf(stdout, "initial_loss=%.6f\n", (double)initialStats.loss);
 
     wireGateCtx_t wireCtx = {.checked = false};
@@ -463,7 +463,7 @@ int main(void) {
     }
 
     epochStats_t finalStats = evaluationEpochWithMetrics(
-        model, MODEL_SIZE, CROSS_ENTROPY, evalLoader, inferenceWithLoss, REDUCTION_MEAN);
+        model, MODEL_SIZE, CROSS_ENTROPY, evalLoader, inferenceWithLoss, REDUCTION_MEAN, 0);
     fprintf(stdout, "final_loss=%.6f\n", (double)finalStats.loss);
 
     /* Sanity gate — no pinned float values (libm differs across platforms). */

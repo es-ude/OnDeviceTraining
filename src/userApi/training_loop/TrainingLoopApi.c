@@ -113,11 +113,47 @@ static size_t argmaxByTensor(const tensor_t *t, size_t n) {
     }
 }
 
-float evaluationEpoch(layer_t **model, size_t modelSize, lossFuncType_t funcType,
-                      dataLoader_t *dataLoader, inferenceWithLossFn_t inferenceFn,
-                      reduction_t forwardReduction) {
+/* #468 D9: computed from sizes, before any getBatch -- a dataset smaller than
+ * batchSize would otherwise make getBatch overrun the loader's index table,
+ * and a MEAN over zero samples is 0/0. */
+static size_t requireEvalBatches(dataLoader_t *dataLoader, const char *caller) {
     size_t datasetSize = dataLoader->getDatasetSize();
     size_t numberOfBatches = datasetSize / dataLoader->batchSize;
+    if (numberOfBatches == 0) {
+        PRINT_ERROR("%s: the evaluation loader yields no batch (dataset size %zu < batchSize %u) "
+                    "-- nothing to evaluate",
+                    caller, datasetSize, (unsigned)dataLoader->batchSize);
+        exit(1);
+    }
+    return numberOfBatches;
+}
+
+/* #468 D11: every metric indexes [0, numClasses); a caller-supplied
+ * numClasses that disagrees with the label would read past each class row. */
+static void requireNumClassesMatchesLabel(size_t numClasses, tensor_t *label, const char *caller) {
+    size_t labelElements = calcNumberOfElementsByTensor(label);
+    if (numClasses != labelElements) {
+        PRINT_ERROR("%s: numClasses %zu does not match the label's %zu elements", caller,
+                    numClasses, labelElements);
+        exit(1);
+    }
+}
+
+/* Interim (#468 Task 4): replaced by the stacked core in Task 5. */
+static size_t resolveEvalMicroBatch(size_t microBatchSize, const char *caller) {
+    size_t m = (microBatchSize == 0) ? 1 : microBatchSize;
+    if (m > 1) {
+        PRINT_ERROR("%s: microBatchSize > 1 is not implemented yet", caller);
+        exit(1);
+    }
+    return m;
+}
+
+float evaluationEpoch(layer_t **model, size_t modelSize, lossFuncType_t funcType,
+                      dataLoader_t *dataLoader, inferenceWithLossFn_t inferenceFn,
+                      reduction_t forwardReduction, size_t microBatchSize) {
+    (void)resolveEvalMicroBatch(microBatchSize, "evaluationEpoch");
+    size_t numberOfBatches = requireEvalBatches(dataLoader, "evaluationEpoch");
     float totalLoss = 0.0f;
     size_t totalSamples = 0;
 
@@ -217,9 +253,10 @@ static epochStats_t evaluateEpochInternal(layer_t **model, size_t modelSize,
                                           lossFuncType_t funcType, dataLoader_t *dataLoader,
                                           inferenceWithLossFn_t inferenceFn,
                                           size_t *confusionMatrix, size_t numClasses,
-                                          reduction_t forwardReduction) {
-    size_t datasetSize = dataLoader->getDatasetSize();
-    size_t numberOfBatches = datasetSize / dataLoader->batchSize;
+                                          reduction_t forwardReduction, size_t m,
+                                          const char *caller) {
+    (void)m; /* consumed by the stacked core (#468 Task 5) */
+    size_t numberOfBatches = requireEvalBatches(dataLoader, caller);
 
     size_t *tp = reserveMemory(numClasses * sizeof(size_t));
     size_t *predCount = reserveMemory(numClasses * sizeof(size_t));
@@ -236,6 +273,9 @@ static epochStats_t evaluateEpochInternal(layer_t **model, size_t modelSize,
 
     for (size_t i = 0; i < numberOfBatches; i++) {
         batch_t *batch = dataLoader->getBatch(dataLoader, i);
+        if (i == 0 && batch->size > 0) {
+            requireNumClassesMatchesLabel(numClasses, batch->samples[0]->label, caller);
+        }
         totalLoss +=
             evaluateBatchInternal(model, modelSize, funcType, batch, inferenceFn, tp, predCount,
                                   actualCount, confusionMatrix, numClasses, forwardReduction);
@@ -263,7 +303,9 @@ static epochStats_t evaluateEpochInternal(layer_t **model, size_t modelSize,
 
 epochStats_t evaluationEpochWithMetrics(layer_t **model, size_t modelSize, lossFuncType_t funcType,
                                         dataLoader_t *dataLoader, inferenceWithLossFn_t inferenceFn,
-                                        reduction_t forwardReduction) {
+                                        reduction_t forwardReduction, size_t microBatchSize) {
+    size_t m = resolveEvalMicroBatch(microBatchSize, "evaluationEpochWithMetrics");
+    (void)requireEvalBatches(dataLoader, "evaluationEpochWithMetrics");
     // Peek at first sample to derive numClasses from label shape
     batch_t *firstBatch = dataLoader->getBatch(dataLoader, 0);
     size_t numClasses = calcNumberOfElementsByTensor(firstBatch->samples[0]->label);
@@ -273,22 +315,25 @@ epochStats_t evaluationEpochWithMetrics(layer_t **model, size_t modelSize, lossF
     freeBatch(firstBatch);
 
     return evaluateEpochInternal(model, modelSize, funcType, dataLoader, inferenceFn, NULL,
-                                 numClasses, forwardReduction);
+                                 numClasses, forwardReduction, m, "evaluationEpochWithMetrics");
 }
 
 classificationReport_t evaluationEpochWithReport(layer_t **model, size_t modelSize,
                                                  lossFuncType_t funcType, dataLoader_t *dataLoader,
                                                  inferenceWithLossFn_t inferenceFn,
                                                  size_t *cmBuffer, size_t numClasses,
-                                                 reduction_t forwardReduction) {
+                                                 reduction_t forwardReduction,
+                                                 size_t microBatchSize) {
+    size_t m = resolveEvalMicroBatch(microBatchSize, "evaluationEpochWithReport");
     // Zero the caller's CM buffer
     for (size_t i = 0; i < numClasses * numClasses; i++) {
         cmBuffer[i] = 0;
     }
 
     classificationReport_t report;
-    report.stats = evaluateEpochInternal(model, modelSize, funcType, dataLoader, inferenceFn,
-                                         cmBuffer, numClasses, forwardReduction);
+    report.stats =
+        evaluateEpochInternal(model, modelSize, funcType, dataLoader, inferenceFn, cmBuffer,
+                              numClasses, forwardReduction, m, "evaluationEpochWithReport");
     report.confusionMatrix = cmBuffer;
     report.numClasses = numClasses;
     return report;
@@ -404,6 +449,7 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
         }
     }
 
+    (void)requireEvalBatches(evalDataLoader, "trainingRun");
     batch_t *firstBatch = evalDataLoader->getBatch(evalDataLoader, 0);
     size_t numClasses = calcNumberOfElementsByTensor(firstBatch->samples[0]->label);
     requireUntrackedBatchNormsEvaluable(model, modelSize, firstBatch->samples[0]->item);
@@ -442,9 +488,9 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
         float trainLoss =
             trainingEpochDefault(model, modelSize, lossConfig, trainDataLoader, optimizer,
                                  calculateGradsFn, forwardReduction, microBatchSize);
-        epochStats_t evalStats =
-            evaluateEpochInternal(model, modelSize, lossConfig.funcType, evalDataLoader,
-                                  inferenceFn, NULL, numClasses, forwardReduction);
+        epochStats_t evalStats = evaluateEpochInternal(
+            model, modelSize, lossConfig.funcType, evalDataLoader, inferenceFn, NULL, numClasses,
+            forwardReduction, 1, "trainingRun");
         info.trainLoss = trainLoss;
 
         if (callback != NULL) {

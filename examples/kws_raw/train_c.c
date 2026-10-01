@@ -379,7 +379,7 @@ int main(void) {
         (void)result;
 
         epochStats_t testStats = evaluationEpochWithMetrics(
-            model, MODEL_SIZE, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN);
+            model, MODEL_SIZE, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN, 0);
 
         fprintf(g_log_file,
                 "\n  ],\n"

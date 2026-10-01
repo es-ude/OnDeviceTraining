@@ -136,6 +136,8 @@ typedef struct trainingRunOptions {
                                     track running statistics or use [C, T >= 2] samples --
                                     trainingRun rejects this before epoch 0, judged on the first
                                     eval sample (eval samples must share one shape; #467). */
+    size_t evalMicroBatchSize;  /* rows per inferenceFn call during evaluation (#468); 0 means 1.
+                                    Independent of microBatchSize. */
 } trainingRunOptions_t;
 
 void freeTrainingStats(trainingStats_t *trainingStats);
@@ -143,19 +145,29 @@ void freeTrainingStats(trainingStats_t *trainingStats);
 float evaluationBatch(layer_t **model, size_t modelSize, lossFuncType_t funcType, batch_t *batch,
                       inferenceWithLossFn_t inferenceFn, reduction_t forwardReduction);
 
+/* microBatchSize: rows per inferenceFn call; 0 means 1. m > 1 stacks consecutive samples of the
+ * loader's stream into [rows, ...] chunks (rows <= m, the last chunk holds the remainder) --
+ * FLOAT32 forwards only (#468). */
 float evaluationEpoch(layer_t **model, size_t modelSize, lossFuncType_t funcType,
                       dataLoader_t *dataLoader, inferenceWithLossFn_t inferenceFn,
-                      reduction_t forwardReduction);
+                      reduction_t forwardReduction, size_t microBatchSize);
 
+/* microBatchSize: rows per inferenceFn call; 0 means 1. m > 1 stacks consecutive samples of the
+ * loader's stream into [rows, ...] chunks (rows <= m, the last chunk holds the remainder) --
+ * FLOAT32 forwards only (#468). */
 epochStats_t evaluationEpochWithMetrics(layer_t **model, size_t modelSize, lossFuncType_t funcType,
                                         dataLoader_t *dataLoader, inferenceWithLossFn_t inferenceFn,
-                                        reduction_t forwardReduction);
+                                        reduction_t forwardReduction, size_t microBatchSize);
 
+/* microBatchSize: rows per inferenceFn call; 0 means 1. m > 1 stacks consecutive samples of the
+ * loader's stream into [rows, ...] chunks (rows <= m, the last chunk holds the remainder) --
+ * FLOAT32 forwards only (#468). */
 classificationReport_t evaluationEpochWithReport(layer_t **model, size_t modelSize,
                                                  lossFuncType_t funcType, dataLoader_t *dataLoader,
                                                  inferenceWithLossFn_t inferenceFn,
                                                  size_t *cmBuffer, size_t numClasses,
-                                                 reduction_t forwardReduction);
+                                                 reduction_t forwardReduction,
+                                                 size_t microBatchSize);
 
 /*! Runs numberOfEpochs of train+eval. Per epoch, in this order: reshuffle
  * the train loader (epoch > 0, #381) -> capture epochInfo_t (batch, updates,

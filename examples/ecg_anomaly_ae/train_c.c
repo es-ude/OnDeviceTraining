@@ -323,8 +323,8 @@ int main(void) {
             &(trainingRunOptions_t){.callback = epochCallback});
         (void)result;
 
-        float testLoss =
-            evaluationEpoch(model, MODEL_SIZE, MSE, testLoader, inferenceWithLoss, REDUCTION_MEAN);
+        float testLoss = evaluationEpoch(model, MODEL_SIZE, MSE, testLoader, inferenceWithLoss,
+                                         REDUCTION_MEAN, 0);
 
         fprintf(g_log_file,
                 "\n  ],\n"

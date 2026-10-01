@@ -281,7 +281,7 @@ static float evalDomain(layer_t **model, dataset_t *evalSet) {
     dataLoader_t *loader = dataLoaderInit(getEvalSample, getEvalSize, 1, NULL, NULL,
                                           /*shuffle*/ false, /*shuffleSeed*/ 0, /*dropLast*/ true);
     epochStats_t stats = evaluationEpochWithMetrics(model, MODEL_SIZE, CROSS_ENTROPY, loader,
-                                                    inferenceWithLoss, REDUCTION_MEAN);
+                                                    inferenceWithLoss, REDUCTION_MEAN, 0);
     freeDataLoader(loader);
     return stats.accuracy;
 }

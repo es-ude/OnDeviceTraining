@@ -380,7 +380,7 @@ int main(void) {
     (void)stage1Result;
 
     epochStats_t stage1TestStats = evaluationEpochWithMetrics(
-        model, MODEL_SIZE, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN);
+        model, MODEL_SIZE, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN, 0);
     fprintf(stdout, "STAGE1 test_loss=%.4f test_acc=%.4f\n", (double)stage1TestStats.loss,
             (double)stage1TestStats.accuracy);
 
@@ -456,7 +456,7 @@ int main(void) {
     (void)stage2Result;
 
     epochStats_t stage2TestStats = evaluationEpochWithMetrics(
-        model2, MODEL_SIZE, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN);
+        model2, MODEL_SIZE, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN, 0);
     fprintf(stdout, "STAGE2 test_loss=%.4f test_acc=%.4f\n", (double)stage2TestStats.loss,
             (double)stage2TestStats.accuracy);
 

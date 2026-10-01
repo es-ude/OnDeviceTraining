@@ -569,7 +569,7 @@ int main(void) {
                         inferenceWithLoss, &options);
 
         epochStats_t testStats = evaluationEpochWithMetrics(
-            model, MODEL_SIZE, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN);
+            model, MODEL_SIZE, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN, 0);
 
         /* Additive: evaluate the test set on the snapshot, then put the FINAL
          * parameters back, so predictions, plots and final.test_* all describe
@@ -579,7 +579,7 @@ int main(void) {
             paramsCopy(g_snapshotOptim, g_finalArena, SNAPSHOT_ARENA_FLOATS, /*toArena*/ 1);
             paramsCopy(g_snapshotOptim, g_snapshotArena, SNAPSHOT_ARENA_FLOATS, /*toArena*/ 0);
             bestTest = evaluationEpochWithMetrics(model, MODEL_SIZE, CROSS_ENTROPY, testLoader,
-                                                  inferenceWithLoss, REDUCTION_MEAN);
+                                                  inferenceWithLoss, REDUCTION_MEAN, 0);
             paramsCopy(g_snapshotOptim, g_finalArena, SNAPSHOT_ARENA_FLOATS, /*toArena*/ 0);
         }
 

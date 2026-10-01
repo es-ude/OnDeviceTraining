@@ -670,3 +670,38 @@ add_elastic_ai_unit_test(
         Common
         odt_test_death
 )
+
+add_executable(UnitTestStackedEvaluation UnitTestStackedEvaluation.c)
+target_link_libraries(UnitTestStackedEvaluation PRIVATE
+        unity
+        TrainingLoopApi
+        TrainingEpochDefault
+        TrainingBatchDefault
+        StackGather
+        CalculateGradsSequential
+        CommonLayerLibs
+        LayerConfigAccess
+        LinearApi
+        ReluApi
+        BatchNorm1dApi
+        BatchNorm1d
+        Reduce
+        FlattenApi
+        LayerQuant
+        LayerCommon
+        LayerWeightsApi
+        ArithmeticType
+        Quantization
+        QuantizationApi
+        TensorApi
+        Tensor
+        StorageApi
+        InferenceApi
+        LossFunction
+        DataLoader
+        DataLoaderApi
+        RNG
+        Common
+        odt_test_death
+)
+__register_target_as_unit_test(UnitTestStackedEvaluation)

@@ -386,7 +386,7 @@ int main(void) {
         (void)result;
 
         epochStats_t testStats = evaluationEpochWithMetrics(
-            model, MODEL_SIZE, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN);
+            model, MODEL_SIZE, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN, 0);
 
         /* Leave the JSON object OPEN (no closing brace): the "memory" block, if
          * profiling is enabled, is appended after predictions are written. */

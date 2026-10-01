@@ -27,6 +27,29 @@ void initAdaptiveAvgPool1dConfig(adaptiveAvgPool1dConfig_t *cfg, size_t outputSi
     cfg->propLossQ = propLossQ;
 }
 
+/* BFP epic PR4 (F5), every arm since #4 PR0: the pool kernels index their
+ * outputs as DENSE [batch][channels][length] arrays whose batch and channels
+ * come from the OPERAND's dims (input forward, lossGrad backward), so an
+ * output that disagrees on dim 0 or dim 1 is written past its end even when
+ * its length is right — checking dimensions[2] alone is not enough. Rank is
+ * checked first: dimensions[0..2] on a rank-2 shape is itself an over-read,
+ * which is also why a backward arm rank-checks its dx output before reading
+ * that output's length to pass in here. */
+static void poolBfpRequireDims3(const tensor_t *t, size_t d0, size_t d1, size_t d2,
+                                const char *what) {
+    if (t->shape->numberOfDimensions != 3) {
+        PRINT_ERROR("%s: expected a rank-3 [batch, channels, length] tensor, got rank %zu", what,
+                    t->shape->numberOfDimensions);
+        exit(1);
+    }
+    if (t->shape->dimensions[0] != d0 || t->shape->dimensions[1] != d1 ||
+        t->shape->dimensions[2] != d2) {
+        PRINT_ERROR("%s: expected shape [%zu, %zu, %zu], got [%zu, %zu, %zu]", what, d0, d1, d2,
+                    t->shape->dimensions[0], t->shape->dimensions[1], t->shape->dimensions[2]);
+        exit(1);
+    }
+}
+
 /* executeOp forward kernel adapter — ctx = adaptiveAvgPool1dConfig_t* (outputSize
  * geometry, mirrors AvgPool1d's ctx convention, AvgPool1d.c); 1 input, no
  * auxOut. The SYM_INT32 arm lives in adaptiveAvgPool1dForwardKernelSymInt32
@@ -43,12 +66,9 @@ static void adaptiveAvgPool1dForwardKernel(tensor_t **ops, size_t n, tensor_t *r
     size_t inputLength = input->shape->dimensions[2];
     size_t outputLength = cfg->outputSize;
 
-    if (rawOut->shape->dimensions[2] != outputLength) {
-        PRINT_ERROR("AdaptiveAvgPool1d forward: output length (%zu) does not match "
-                    "configured outputSize (%zu)",
-                    rawOut->shape->dimensions[2], outputLength);
-        exit(1);
-    }
+    // batch/channels come from the input but size the rawOut writes (F5 parity).
+    poolBfpRequireDims3(rawOut, batch, channels, outputLength,
+                        "AdaptiveAvgPool1d forward FLOAT32 (rawOut)");
 
     float const *xArr = (float const *)input->data;
     float *yArr = (float *)rawOut->data;
@@ -123,12 +143,9 @@ static void adaptiveAvgPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, ten
     size_t inputLength = input->shape->dimensions[2];
     size_t outputLength = cfg->outputSize;
 
-    if (rawOut->shape->dimensions[2] != outputLength) {
-        PRINT_ERROR("AdaptiveAvgPool1d forward: output length (%zu) does not match "
-                    "configured outputSize (%zu)",
-                    rawOut->shape->dimensions[2], outputLength);
-        exit(1);
-    }
+    // batch/channels come from the input but size the rawOut writes (F5 parity).
+    poolBfpRequireDims3(rawOut, batch, channels, outputLength,
+                        "AdaptiveAvgPool1d forward SYM_INT32 (rawOut)");
 
     /* Max adaptive window count = ceil((o+1)L/O) - floor(oL/O) <= L/O + 1,
      * conservatively bounded by ceil(L/O) + 1. */
@@ -156,29 +173,6 @@ static void adaptiveAvgPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, ten
 
     ((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale =
         ((symInt32QConfig_t *)input->quantization->qConfig)->scale;
-}
-
-/* BFP epic PR4 (F5): the new BFP kernels index rawOut as a DENSE
- * [batch][channels][length] array whose batch and channels come from the
- * OPERAND's dims, so a rawOut that disagrees on dim 0 or dim 1 is written past
- * its end even when its length is right — checking dimensions[2] alone is not
- * enough. Rank is checked first: dimensions[0..2] on a rank-2 shape is itself
- * an over-read. The FLOAT32/SYM backward arms have the same dense dx layout
- * (batch/channels from lossGrad), so they check propLoss / rawOut with it too;
- * the FLOAT32/SYM forward rawOut is still checked on length only. */
-static void poolBfpRequireDims3(const tensor_t *t, size_t d0, size_t d1, size_t d2,
-                                const char *what) {
-    if (t->shape->numberOfDimensions != 3) {
-        PRINT_ERROR("%s: expected a rank-3 [batch, channels, length] tensor, got rank %zu", what,
-                    t->shape->numberOfDimensions);
-        exit(1);
-    }
-    if (t->shape->dimensions[0] != d0 || t->shape->dimensions[1] != d1 ||
-        t->shape->dimensions[2] != d2) {
-        PRINT_ERROR("%s: expected shape [%zu, %zu, %zu], got [%zu, %zu, %zu]", what, d0, d1, d2,
-                    t->shape->dimensions[0], t->shape->dimensions[1], t->shape->dimensions[2]);
-        exit(1);
-    }
 }
 
 /* BFP epic PR4 (R-P4): the PR2 fold contract per adaptive window (int32
@@ -313,6 +307,12 @@ void adaptiveAvgPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tens
     adaptiveAvgPool1dConfig_t *cfg = layer->config->adaptiveAvgPool1d;
     (void)forwardInput; // not needed: window geometry is determined by shapes
 
+    if (lossGrad->shape->numberOfDimensions != 3 || propLoss->shape->numberOfDimensions != 3) {
+        PRINT_ERROR("AdaptiveAvgPool1d backward FLOAT32: lossGrad and propLoss must both be "
+                    "rank-3, got ranks %zu and %zu",
+                    lossGrad->shape->numberOfDimensions, propLoss->shape->numberOfDimensions);
+        exit(1);
+    }
     size_t batch = lossGrad->shape->dimensions[0];
     size_t channels = lossGrad->shape->dimensions[1];
     size_t outputLength = lossGrad->shape->dimensions[2];
@@ -363,6 +363,12 @@ static void adaptiveAvgPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, te
     const adaptiveAvgPool1dConfig_t *cfg = ctx;
     tensor_t *lossGrad = ops[0];
 
+    if (lossGrad->shape->numberOfDimensions != 3 || rawOut->shape->numberOfDimensions != 3) {
+        PRINT_ERROR("AdaptiveAvgPool1d backward SYM_INT32: lossGrad and rawOut must both be "
+                    "rank-3, got ranks %zu and %zu",
+                    lossGrad->shape->numberOfDimensions, rawOut->shape->numberOfDimensions);
+        exit(1);
+    }
     size_t batch = lossGrad->shape->dimensions[0];
     size_t channels = lossGrad->shape->dimensions[1];
     size_t outputLength = lossGrad->shape->dimensions[2];

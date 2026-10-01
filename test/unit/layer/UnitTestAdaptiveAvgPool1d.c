@@ -310,6 +310,50 @@ void testAdaptiveAvgPool1dBackwardFloatRejectsPropLossWithSmallerBatch(void) {
     freeQuantization(r.q);
 }
 
+/* #4 PR0: the propLoss rank is checked before its dimensions[2] is read -- on
+ * a rank-2 shape that read is itself a heap over-read (visible under ASan). */
+void testAdaptiveAvgPool1dBackwardFloatRejectsRank2PropLoss(void) {
+    size_t inDims[] = {2, 2, 6};
+    size_t outDims[] = {2, 2, 4};
+    size_t rank2PropLossDims[] = {2, 12};
+
+    adaptivePoolRun_t r = build(NULL, inDims, 4, NULL, outDims);
+    tensor_t *lossGrad = makeFloatTensor(outDims, 3, NULL);
+    tensor_t *propLoss = makeFloatTensor(rank2PropLossDims, 2, NULL);
+
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "AdaptiveAvgPool1d backward FLOAT32: lossGrad and propLoss must both "
+                             "be rank-3, got ranks 3 and 2",
+                             adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+}
+
+/* #4 PR0: the FLOAT32 forward takes batch and channels from the input but
+ * writes them into rawOut, so an output with fewer channels is written past
+ * its end -- it must fail fast instead. */
+void testAdaptiveAvgPool1dForwardFloatRejectsOutputWithFewerChannels(void) {
+    size_t inDims[] = {2, 2, 6};
+    size_t outDims[] = {2, 2, 4};
+    size_t smallOutDims[] = {2, 1, 4};
+
+    adaptivePoolRun_t r = build(NULL, inDims, 4, NULL, outDims);
+    tensor_t *smallOutput = makeFloatTensor(smallOutDims, 3, NULL);
+
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "AdaptiveAvgPool1d forward FLOAT32 (rawOut): expected shape [2, 2, 4], got [2, 1, 4]",
+        adaptiveAvgPool1dForward(r.layer, r.input, smallOutput));
+
+    freeTensor(smallOutput);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+}
+
 void testCalcOutputShapeFixedRegardlessOfInput(void) {
     static adaptiveAvgPool1dConfig_t cfgStore;
     static layer_t layerStore;
@@ -542,6 +586,50 @@ void testAdaptiveAvgPool1dBackwardSymRejectsPropLossWithFewerChannels(void) {
 
     freeTensor(propLoss);
     freeTensor(lossGrad);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+}
+
+/* #4 PR0: the dx output's rank is checked before its dimensions[2] is read --
+ * on a rank-2 shape that read is itself a heap over-read (visible under ASan). */
+void testAdaptiveAvgPool1dBackwardSymRejectsRank2PropLoss(void) {
+    size_t inDims[] = {2, 2, 6};
+    size_t outDims[] = {2, 2, 4};
+    size_t rank2PropLossDims[] = {2, 12};
+
+    adaptivePoolRun_t r = buildSym(NULL, inDims, 4, outDims);
+    tensor_t *lossGrad = buildSymTensor(outDims, 3, NULL);
+    tensor_t *propLoss = buildSymTensor(rank2PropLossDims, 2, NULL);
+
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "AdaptiveAvgPool1d backward SYM_INT32: lossGrad and rawOut must both "
+                             "be rank-3, got ranks 3 and 2",
+                             adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+}
+
+/* #4 PR0: the SYM_INT32 forward takes batch and channels from the input but
+ * writes them into rawOut (the output's shape), so an output with a smaller
+ * batch is written past its end -- it must fail fast instead. */
+void testAdaptiveAvgPool1dForwardSymRejectsOutputWithSmallerBatch(void) {
+    size_t inDims[] = {2, 2, 6};
+    size_t outDims[] = {2, 2, 4};
+    size_t smallOutDims[] = {1, 2, 4};
+
+    adaptivePoolRun_t r = buildSym(NULL, inDims, 4, outDims);
+    tensor_t *smallOutput = buildSymTensor(smallOutDims, 3, NULL);
+
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "AdaptiveAvgPool1d forward SYM_INT32 (rawOut): expected shape [2, 2, 4], got [1, 2, 4]",
+        adaptiveAvgPool1dForward(r.layer, r.input, smallOutput));
+
+    freeTensor(smallOutput);
     freeTensor(r.output);
     freeTensor(r.input);
     freeQuantization(r.q);
@@ -843,7 +931,11 @@ int main(void) {
     RUN_TEST(testBackwardUpsample);
     RUN_TEST(testAdaptiveAvgPool1dBackwardFloatOverwritesStalePropLoss);
     RUN_TEST(testAdaptiveAvgPool1dBackwardFloatRejectsPropLossWithSmallerBatch);
+    RUN_TEST(testAdaptiveAvgPool1dBackwardFloatRejectsRank2PropLoss);
+    RUN_TEST(testAdaptiveAvgPool1dForwardFloatRejectsOutputWithFewerChannels);
     RUN_TEST(testAdaptiveAvgPool1dBackwardSymRejectsPropLossWithFewerChannels);
+    RUN_TEST(testAdaptiveAvgPool1dBackwardSymRejectsRank2PropLoss);
+    RUN_TEST(testAdaptiveAvgPool1dForwardSymRejectsOutputWithSmallerBatch);
     RUN_TEST(testAdaptiveAvgPool1dForwardWithSymInt32Input);
     RUN_TEST(testForwardBackwardSymUneven);
     RUN_TEST(testForwardBackwardSymGlobal);

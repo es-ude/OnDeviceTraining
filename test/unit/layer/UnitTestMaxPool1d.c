@@ -581,6 +581,30 @@ void testMaxPool1dBackwardSymRejectsPropLossWithFewerChannels(void) {
     freeTensor(r.input);
 }
 
+/* #4 PR0: the dx output's rank is checked before its dimensions[2] is read --
+ * on a rank-2 shape that read is itself a heap over-read (visible under ASan). */
+void testMaxPool1dBackwardSymRejectsRank2PropLoss(void) {
+    size_t inputDims[] = {2, 2, 5};
+    size_t outputDims[] = {2, 2, 4};
+    size_t rank2PropLossDims[] = {2, 10};
+
+    maxPool1dSymRun_t r = maxPool1dBuildSym(NULL, inputDims, 2, VALID, 1, 1, outputDims);
+    tensor_t *lossGrad = buildSymTensor(outputDims, 3, NULL);
+    tensor_t *propLoss = buildSymTensor(rank2PropLossDims, 2, NULL);
+    maxPool1dForward(r.layer, r.input, r.output);
+
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "MaxPool1d backward SYM_INT32: lossGrad and rawOut must both be "
+                             "rank-3, got ranks 3 and 2",
+                             maxPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+}
+
 void testMaxPool1dEdgeCases(void) {
     size_t inputDims[] = {1, 1, 4};
     size_t outputDims[] = {1, 1, 4}; // K=1 stride=1 -> outLen = inLen
@@ -696,6 +720,32 @@ void testMaxPool1dBackwardFloatRejectsPropLossWithSmallerBatch(void) {
     ASSERT_EXITS_WITH_OUTPUT(
         1, "MaxPool1d backward FLOAT32 (propLoss): expected shape [2, 2, 5], got [1, 2, 5]",
         maxPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+}
+
+/* #4 PR0: the propLoss rank is checked before its dimensions[2] is read -- on
+ * a rank-2 shape that read is itself a heap over-read (visible under ASan). */
+void testMaxPool1dBackwardFloatRejectsRank2PropLoss(void) {
+    size_t inputDims[] = {2, 2, 5};
+    size_t outputDims[] = {2, 2, 4};
+    size_t rank2PropLossDims[] = {2, 10};
+
+    maxPool1dRunResult_t r =
+        maxPool1dBuild(NULL, inputDims, 2, VALID, 1, 1, NULL, NULL, outputDims);
+    tensor_t *lossGrad = makeFloatTensor(outputDims, 3, NULL);
+    tensor_t *propLoss = makeFloatTensor(rank2PropLossDims, 2, NULL);
+    maxPool1dForward(r.layer, r.input, r.output);
+
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "MaxPool1d backward FLOAT32: lossGrad and propLoss must both be "
+                             "rank-3, got ranks 3 and 2",
+                             maxPool1dBackward(r.layer, r.input, lossGrad, propLoss));
 
     freeTensor(propLoss);
     freeTensor(lossGrad);
@@ -1262,6 +1312,49 @@ void testMaxPool1dForwardSymRejectsArgmaxLengthMismatchAtBatch2(void) {
     freeTensor(r.input);
 }
 
+/* #4 PR0: the FLOAT32 forward takes batch and channels from the input but
+ * writes them into rawOut, so an output with a smaller batch is written past
+ * its end -- it must fail fast instead. */
+void testMaxPool1dForwardFloatRejectsOutputWithSmallerBatch(void) {
+    size_t inputDims[] = {2, 2, 5};
+    size_t outputDims[] = {2, 2, 4};
+    size_t smallOutputDims[] = {1, 2, 4};
+
+    maxPool1dRunResult_t r =
+        maxPool1dBuild(NULL, inputDims, 2, VALID, 1, 1, NULL, NULL, outputDims);
+    tensor_t *smallOutput = makeFloatTensor(smallOutputDims, 3, NULL);
+
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "MaxPool1d forward FLOAT32 (rawOut): expected shape [2, 2, 4], got [1, 2, 4]",
+        maxPool1dForward(r.layer, r.input, smallOutput));
+
+    freeTensor(smallOutput);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+}
+
+/* #4 PR0: the SYM_INT32 twin -- rawOut carries the output's shape, so an
+ * output with fewer channels is written past its end. */
+void testMaxPool1dForwardSymRejectsOutputWithFewerChannels(void) {
+    size_t inputDims[] = {2, 2, 5};
+    size_t outputDims[] = {2, 2, 4};
+    size_t smallOutputDims[] = {2, 1, 4};
+
+    maxPool1dSymRun_t r = maxPool1dBuildSym(NULL, inputDims, 2, VALID, 1, 1, outputDims);
+    tensor_t *smallOutput = buildSymTensor(smallOutputDims, 3, NULL);
+
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "MaxPool1d forward SYM_INT32 (rawOut): expected shape [2, 2, 4], got [2, 1, 4]",
+        maxPool1dForward(r.layer, r.input, smallOutput));
+
+    freeTensor(smallOutput);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+}
+
 /* Backward arms: a batch-1 forward records a valid [1, 3, 4] argmax and a
  * batch-1 backward consumes it (the control); a batch-2 lossGrad against that
  * stale argmax must die before any argmax read. The guard's reference operand
@@ -1411,7 +1504,9 @@ int main(void) {
     RUN_TEST(testMaxPool1dEdgeCases);
     RUN_TEST(testMaxPool1dBackwardFloatOverwritesStalePropLoss);
     RUN_TEST(testMaxPool1dBackwardFloatRejectsPropLossWithSmallerBatch);
+    RUN_TEST(testMaxPool1dBackwardFloatRejectsRank2PropLoss);
     RUN_TEST(testMaxPool1dBackwardSymRejectsPropLossWithFewerChannels);
+    RUN_TEST(testMaxPool1dBackwardSymRejectsRank2PropLoss);
     RUN_TEST(testMaxPool1dForwardSymBasic);
     RUN_TEST(testMaxPool1dBackwardSymBasic);
     RUN_TEST(testMaxPool1dSymStrideDilationForwardBackward);
@@ -1431,6 +1526,8 @@ int main(void) {
     RUN_TEST(testMaxPool1dForwardFloatRequiresExactArgmaxDims);
     RUN_TEST(testMaxPool1dForwardFloatRejectsArgmaxOfWrongRank);
     RUN_TEST(testMaxPool1dForwardSymRejectsArgmaxLengthMismatchAtBatch2);
+    RUN_TEST(testMaxPool1dForwardFloatRejectsOutputWithSmallerBatch);
+    RUN_TEST(testMaxPool1dForwardSymRejectsOutputWithFewerChannels);
     RUN_TEST(testMaxPool1dBackwardFloatRejectsBatch1ArgmaxAtBatch2);
     RUN_TEST(testMaxPool1dBackwardSymRejectsBatch1ArgmaxAtBatch2);
     RUN_TEST(testMaxPool1dForwardBfpRejectsArgmaxLengthMismatchAtBatch2);

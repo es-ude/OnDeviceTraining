@@ -477,6 +477,24 @@ void testEmptyStreamFailsFast(void) {
     freeFixtureData();
 }
 
+static void metricsWithEmptyFirstBatch(void) {
+    layer_t *model[MODEL_SIZE];
+    buildModel(model);
+    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, 0, true);
+    dl->getBatch = emptyGetBatch;
+    (void)evaluationEpochWithMetrics(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, REDUCTION_MEAN,
+                                     1);
+}
+
+/* The numClasses peek reads samples[0] of getBatch(0): a loader that reports
+ * a dataset but hands back an empty first batch must fail fast, not read out
+ * of bounds. */
+void testEmptyFirstBatchFailsFastInMetricsPeek(void) {
+    initData();
+    ASSERT_EXITS_WITH_FAILURE(metricsWithEmptyFirstBatch());
+    freeFixtureData();
+}
+
 void testStackedRejectsMalformedInferenceOutput(void) {
     initData();
     ASSERT_EXITS_WITH(0, metricsWith(inferenceWithLoss, 2)); /* the fixture itself is valid */
@@ -633,6 +651,7 @@ int main(void) {
     layerQuantInitUniform(&g_lq, g_q);
     UNITY_BEGIN();
     RUN_TEST(testEmptyEvalLoaderFailsBeforeAnyGetBatch);
+    RUN_TEST(testEmptyFirstBatchFailsFastInMetricsPeek);
     RUN_TEST(testReportRejectsNumClassesNotMatchingTheLabel);
     RUN_TEST(testStackedReportMatchesPerSampleForEveryChunkSize);
     RUN_TEST(testStackedSpansLoaderBatchesAndRespectsDropLast);

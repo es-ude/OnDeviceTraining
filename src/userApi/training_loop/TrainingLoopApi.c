@@ -213,6 +213,18 @@ static void requireUntrackedBatchNormsEvaluable(layer_t **model, size_t modelSiz
     }
 }
 
+/* numClasses and the evaluation pre-flight are read off the first sample of
+ * getBatch(0); a custom loader may report a dataset yet return an empty batch. */
+static void requireNonEmptyFirstBatch(batch_t *firstBatch, const char *caller) {
+    if (firstBatch->size == 0) {
+        freeBatch(firstBatch);
+        PRINT_ERROR("%s: the evaluation loader's first batch is empty (numClasses and the "
+                    "pre-flight are derived from its first sample)",
+                    caller);
+        exit(1);
+    }
+}
+
 /* D2/D7: judged on the NOMINAL sample count (a loader whose batches differ
  * from batchSize is covered at run time by BatchNorm1d's own forward guard).
  * Callers run requireEvalBatches first, so batchSize and the count are >= 1. */
@@ -576,6 +588,7 @@ epochStats_t evaluationEpochWithMetrics(layer_t **model, size_t modelSize, lossF
     (void)requireEvalBatches(dataLoader, "evaluationEpochWithMetrics");
     // Peek at first sample to derive numClasses from label shape
     batch_t *firstBatch = dataLoader->getBatch(dataLoader, 0);
+    requireNonEmptyFirstBatch(firstBatch, "evaluationEpochWithMetrics");
     size_t numClasses = calcNumberOfElementsByTensor(firstBatch->samples[0]->label);
     for (size_t i = 0; i < firstBatch->size; i++) {
         freeSample(firstBatch->samples[i]);
@@ -685,6 +698,7 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
 
     (void)requireEvalBatches(evalDataLoader, "trainingRun");
     batch_t *firstBatch = evalDataLoader->getBatch(evalDataLoader, 0);
+    requireNonEmptyFirstBatch(firstBatch, "trainingRun");
     size_t numClasses = calcNumberOfElementsByTensor(firstBatch->samples[0]->label);
     if (evalMicroBatchSize > 1) {
         stackGatherRequireFloat32Model("trainingRun", "evalMicroBatchSize", model, modelSize,

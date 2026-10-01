@@ -804,6 +804,35 @@ void testTrainingRunRejectsEmptyEvalLoaderBeforeThePeek(void) {
     ASSERT_EXITS_WITH_FAILURE(runEmptyEvalLoader());
 }
 
+static batch_t *emptyEvalGetBatch(dataLoader_t *dl, size_t index) {
+    (void)dl;
+    (void)index;
+    batch_t *b = reserveMemory(sizeof(batch_t));
+    b->size = 0;
+    b->samples = reserveMemory(sizeof(sample_t *));
+    return b;
+}
+static void runEmptyFirstEvalBatch(void) {
+    layer_t *model[1] = {
+        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &g_lq)};
+    dataLoader_t trainDl = {
+        .getDatasetSize = twoSamples, .batchSize = 2, .getBatch = trainGetBatchMustNotRun};
+    dataLoader_t evalDl = {
+        .getDatasetSize = oneSample, .batchSize = 1, .getBatch = emptyEvalGetBatch};
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    (void)trainingRun(model, 1, defaultLossConfig(MSE), &trainDl, &evalDl, sgd, 1,
+                      calculateGradsSequential, inferenceWithLoss, NULL);
+}
+
+/* exit 1 (not the tripwire's 2): the peek guard fires before epoch 0 reads
+ * the train loader, instead of reading samples[0] of an empty batch. */
+void testTrainingRunRejectsEmptyFirstEvalBatch(void) {
+    ASSERT_EXITS_WITH_FAILURE(runEmptyFirstEvalBatch());
+}
+
 static tensor_t *e2eItems[4];
 static tensor_t *e2eLabels[4];
 static sample_t *e2eGetSample(size_t id) {
@@ -1010,6 +1039,7 @@ int main(void) {
     RUN_TEST(testTrainingRunRejectsNonFloat32ForwardAtEvalMicroBatchBeforeEpoch0);
     RUN_TEST(testTrainingRunEvalGateNamesEvalMicroBatchSize);
     RUN_TEST(testTrainingRunRejectsEmptyEvalLoaderBeforeThePeek);
+    RUN_TEST(testTrainingRunRejectsEmptyFirstEvalBatch);
     RUN_TEST(testUntrackedRank2BatchNormEvaluatesPerChunk);
     RUN_TEST(testEntryPointPreflightsUntrackedBatchNormInline);
     RUN_TEST(testPerSamplePreflightSkipsAnEmptyFirstBatch);

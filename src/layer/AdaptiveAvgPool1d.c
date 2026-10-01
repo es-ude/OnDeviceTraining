@@ -163,8 +163,9 @@ static void adaptiveAvgPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, ten
  * OPERAND's dims, so a rawOut that disagrees on dim 0 or dim 1 is written past
  * its end even when its length is right — checking dimensions[2] alone is not
  * enough. Rank is checked first: dimensions[0..2] on a rank-2 shape is itself
- * an over-read. NOTE the deliberate scope: the FLOAT32/SYM arms of this layer
- * have the SAME gap and are NOT touched here. */
+ * an over-read. The FLOAT32/SYM backward arms have the same dense dx layout
+ * (batch/channels from lossGrad), so they check propLoss / rawOut with it too;
+ * the FLOAT32/SYM forward rawOut is still checked on length only. */
 static void poolBfpRequireDims3(const tensor_t *t, size_t d0, size_t d1, size_t d2,
                                 const char *what) {
     if (t->shape->numberOfDimensions != 3) {
@@ -366,6 +367,10 @@ static void adaptiveAvgPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, te
     size_t channels = lossGrad->shape->dimensions[1];
     size_t outputLength = lossGrad->shape->dimensions[2];
     size_t inputLength = rawOut->shape->dimensions[2];
+
+    // batch/channels come from lossGrad but size the rawOut memset + scatter (F5 parity).
+    poolBfpRequireDims3(rawOut, batch, channels, inputLength,
+                        "AdaptiveAvgPool1d backward SYM_INT32 (rawOut)");
 
     if (outputLength != cfg->outputSize) {
         PRINT_ERROR("AdaptiveAvgPool1d backward: lossGrad outputLength (%zu) does not match "

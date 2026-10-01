@@ -549,6 +549,28 @@ void testAvgPool1dBackwardSymRejectsTermsOverBound(void) {
     ASSERT_EXITS_WITH_FAILURE(avgPool1dBackward(r.layer, r.input, lossGrad, propLoss));
 }
 
+/* #4 PR0: the SYM_INT32 dx kernel takes batch and channels from lossGrad but
+ * memsets and scatters into rawOut (propLoss's shape), so a propLoss with a
+ * smaller batch is written past its end -- it must fail fast instead. */
+void testAvgPool1dBackwardSymRejectsPropLossWithSmallerBatch(void) {
+    size_t inputDims[] = {2, 2, 8};
+    size_t outputDims[] = {2, 2, 3};
+    size_t smallPropLossDims[] = {1, 2, 8};
+
+    avgPool1dSymRun_t r = avgPool1dBuildSym(NULL, inputDims, 2, VALID, 2, 2, outputDims);
+    tensor_t *lossGrad = buildSymTensor(outputDims, 3, NULL);
+    tensor_t *propLoss = buildSymTensor(smallPropLossDims, 3, NULL);
+
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "AvgPool1d backward SYM_INT32 (rawOut): expected shape [2, 2, 8], got [1, 2, 8]",
+        avgPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(r.output);
+    freeTensor(r.input);
+}
+
 /* ---- BFP epic PR4 (R-P1/R-P4): native ARITH_BFP arms ---- */
 
 /* BFP epic PR4: build a BFP wire with EXACT codes and per-group exponents.
@@ -1019,6 +1041,7 @@ int main(void) {
     RUN_TEST(testAvgPool1dEdgeCases);
     RUN_TEST(testAvgPool1dBackwardFloatOverwritesStalePropLoss);
     RUN_TEST(testAvgPool1dBackwardFloatRejectsPropLossWithFewerChannels);
+    RUN_TEST(testAvgPool1dBackwardSymRejectsPropLossWithSmallerBatch);
     RUN_TEST(testAvgPool1dForwardWithSymInt32Input);
     RUN_TEST(testAvgPool1dForwardSymBasic);
     RUN_TEST(testAvgPool1dBackwardSymBasic);

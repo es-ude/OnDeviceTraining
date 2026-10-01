@@ -203,10 +203,11 @@ static void maxPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *r
  * past its end even when its length is right — checking dimensions[2] alone is
  * not enough. Rank is checked first: dimensions[0..2] on a rank-2 shape is
  * itself an over-read.
- * In this layer it checks the BFP rawOut only: all six arms validate their
- * argmax through maxPoolRequireArgmaxShape (#152). The FLOAT32/SYM forward
- * rawOut is still checked on length only, and their backward propLoss
- * (FLOAT32) / rawOut (SYM) shape is not validated against lossGrad. */
+ * In this layer it checks the BFP forward rawOut and every backward arm's dx
+ * output (FLOAT32 propLoss, SYM/BFP rawOut) against lossGrad's batch and
+ * channels; all six arms validate their argmax through
+ * maxPoolRequireArgmaxShape (#152). The FLOAT32/SYM forward rawOut is still
+ * checked on length only. */
 static void poolBfpRequireDims3(const tensor_t *t, size_t d0, size_t d1, size_t d2,
                                 const char *what) {
     if (t->shape->numberOfDimensions != 3) {
@@ -515,6 +516,9 @@ static void maxPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *
     size_t outputLength = lossGrad->shape->dimensions[2];
     size_t inputLength = rawOut->shape->dimensions[2];
 
+    // batch/channels come from lossGrad but size the rawOut memset + scatter (F5 parity).
+    poolBfpRequireDims3(rawOut, batch, channels, inputLength,
+                        "MaxPool1d backward SYM_INT32 (rawOut)");
     maxPoolRequireArgmaxShape(cfg->argmaxIndices, lossGrad, outputLength,
                               "MaxPool1d backward SYM_INT32");
 

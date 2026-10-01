@@ -557,6 +557,30 @@ void testMaxPool1dBackwardSymRejectsTermsOverBound(void) {
     ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(r.layer, r.input, lossGrad, propLoss));
 }
 
+/* #4 PR0: the SYM_INT32 dx kernel takes batch and channels from lossGrad but
+ * memsets and scatters into rawOut (propLoss's shape), so a propLoss with
+ * fewer channels is written past its end -- it must fail fast instead. */
+void testMaxPool1dBackwardSymRejectsPropLossWithFewerChannels(void) {
+    size_t inputDims[] = {2, 2, 5};
+    size_t outputDims[] = {2, 2, 4};
+    size_t smallPropLossDims[] = {2, 1, 5};
+
+    maxPool1dSymRun_t r = maxPool1dBuildSym(NULL, inputDims, 2, VALID, 1, 1, outputDims);
+    tensor_t *lossGrad = buildSymTensor(outputDims, 3, NULL);
+    tensor_t *propLoss = buildSymTensor(smallPropLossDims, 3, NULL);
+    maxPool1dForward(r.layer, r.input, r.output);
+
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "MaxPool1d backward SYM_INT32 (rawOut): expected shape [2, 2, 5], got [2, 1, 5]",
+        maxPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+}
+
 void testMaxPool1dEdgeCases(void) {
     size_t inputDims[] = {1, 1, 4};
     size_t outputDims[] = {1, 1, 4}; // K=1 stride=1 -> outLen = inLen
@@ -1387,6 +1411,7 @@ int main(void) {
     RUN_TEST(testMaxPool1dEdgeCases);
     RUN_TEST(testMaxPool1dBackwardFloatOverwritesStalePropLoss);
     RUN_TEST(testMaxPool1dBackwardFloatRejectsPropLossWithSmallerBatch);
+    RUN_TEST(testMaxPool1dBackwardSymRejectsPropLossWithFewerChannels);
     RUN_TEST(testMaxPool1dForwardSymBasic);
     RUN_TEST(testMaxPool1dBackwardSymBasic);
     RUN_TEST(testMaxPool1dSymStrideDilationForwardBackward);

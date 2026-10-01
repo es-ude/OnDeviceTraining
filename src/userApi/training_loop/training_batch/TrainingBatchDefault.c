@@ -52,18 +52,20 @@ static float trainingBatchStacked(layer_t **model, size_t modelSize, lossConfig_
     tensor_t *referenceLabel = batch->samples[0]->label;
     size_t itemBytes = calcBytesPerTensor(referenceItem);
     size_t labelBytes = calcBytesPerTensor(referenceLabel);
-    uint8_t *itemBuffer = stackGatherReserveBuffer("trainingBatchDefault", m, itemBytes, "item");
-    uint8_t *labelBuffer = stackGatherReserveBuffer("trainingBatchDefault", m, labelBytes, "label");
+    uint8_t *itemBuffer =
+        stackGatherReserveBuffer("trainingBatchDefault", "microBatchSize", m, itemBytes, "item");
+    uint8_t *labelBuffer =
+        stackGatherReserveBuffer("trainingBatchDefault", "microBatchSize", m, labelBytes, "label");
     const float rowWeight = (forwardReduction == REDUCTION_MEAN) ? (float)m : 1.0f;
     float totalLoss = 0.0f;
 
     for (size_t first = 0; first < batch->size; first += m) {
         for (size_t r = 0; r < m; r++) {
             const sample_t *sample = batch->samples[first + r];
-            stackGatherRequireStackable("trainingBatchDefault", referenceItem, sample->item, "item",
-                                        first + r, m);
-            stackGatherRequireStackable("trainingBatchDefault", referenceLabel, sample->label,
-                                        "label", first + r, m);
+            stackGatherRequireStackable("trainingBatchDefault", "microBatchSize", referenceItem,
+                                        sample->item, "item", first + r, m);
+            stackGatherRequireStackable("trainingBatchDefault", "microBatchSize", referenceLabel,
+                                        sample->label, "label", first + r, m);
         }
         for (size_t r = 0; r < m; r++) {
             const sample_t *sample = batch->samples[first + r];
@@ -119,8 +121,8 @@ float trainingBatchDefault(layer_t **model, size_t modelSize, lossConfig_t lossC
         totalLoss = trainingBatchPerSample(model, modelSize, lossConfig, batch, calculateGradsFn,
                                            forwardReduction);
     } else {
-        stackGatherRequireFloat32Model("trainingBatchDefault", model, modelSize, m,
-                                       layerNonFloat32Field);
+        stackGatherRequireFloat32Model("trainingBatchDefault", "microBatchSize", model, modelSize,
+                                       m, layerNonFloat32Field);
         totalLoss = trainingBatchStacked(model, modelSize, lossConfig, batch, calculateGradsFn,
                                          forwardReduction, m);
     }

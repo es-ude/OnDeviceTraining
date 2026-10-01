@@ -16,15 +16,17 @@
 #include "unity.h"
 
 _Static_assert(_Generic(&stackGatherRequireStackable,
-                   void (*)(const char *, tensor_t *, tensor_t *, const char *, size_t, size_t): 1,
+                   void (*)(const char *, const char *, tensor_t *, tensor_t *, const char *,
+                            size_t, size_t): 1,
                    default: 0),
                "stackGatherRequireStackable signature (#468)");
 _Static_assert(_Generic(&stackGatherRequireFloat32Model,
-                   void (*)(const char *, layer_t **, size_t, size_t, nonFloat32FieldFn_t): 1,
+                   void (*)(const char *, const char *, layer_t **, size_t, size_t,
+                            nonFloat32FieldFn_t): 1,
                    default: 0),
                "stackGatherRequireFloat32Model signature (#468)");
 _Static_assert(_Generic(&stackGatherReserveBuffer,
-                   uint8_t *(*)(const char *, size_t, size_t, const char *): 1,
+                   uint8_t *(*)(const char *, const char *, size_t, size_t, const char *): 1,
                    default: 0),
                "stackGatherReserveBuffer signature (#468)");
 
@@ -48,11 +50,11 @@ void testRequireStackableAcceptsIdenticalAndRejectsMismatch(void) {
     tensor_t *same = floatTensor((size_t[]){2, 3}, 2);
     tensor_t *otherDims = floatTensor((size_t[]){3, 2}, 2);
     tensor_t *otherRank = floatTensor((size_t[]){6}, 1);
-    ASSERT_EXITS_WITH(0, stackGatherRequireStackable("t", ref, same, "item", 1, 2));
-    ASSERT_EXITS_WITH_FAILURE(stackGatherRequireStackable("t", ref, otherDims, "item", 1, 2));
-    ASSERT_EXITS_WITH_FAILURE(stackGatherRequireStackable("t", ref, otherRank, "item", 1, 2));
+    ASSERT_EXITS_WITH(0, stackGatherRequireStackable("t", "k", ref, same, "item", 1, 2));
+    ASSERT_EXITS_WITH_FAILURE(stackGatherRequireStackable("t", "k", ref, otherDims, "item", 1, 2));
+    ASSERT_EXITS_WITH_FAILURE(stackGatherRequireStackable("t", "k", ref, otherRank, "item", 1, 2));
     same->quantization->type = SYM_INT32; /* dtype tag only; nothing reads qConfig */
-    ASSERT_EXITS_WITH_FAILURE(stackGatherRequireStackable("t", ref, same, "item", 1, 2));
+    ASSERT_EXITS_WITH_FAILURE(stackGatherRequireStackable("t", "k", ref, same, "item", 1, 2));
     same->quantization->type = FLOAT32;
     freeTensor(otherRank);
     freeTensor(otherDims);
@@ -70,9 +72,9 @@ void testRequireFloat32ModelUsesTheGivenAccessor(void) {
     quantization_t *saved = lin->config->linear->propLossQ;
     lin->config->linear->propLossQ = symQ; /* backward-only field */
     ASSERT_EXITS_WITH_FAILURE(
-        stackGatherRequireFloat32Model("t", model, 1, 2, layerNonFloat32Field));
+        stackGatherRequireFloat32Model("t", "k", model, 1, 2, layerNonFloat32Field));
     ASSERT_EXITS_WITH(
-        0, stackGatherRequireFloat32Model("t", model, 1, 2, layerForwardNonFloat32Field));
+        0, stackGatherRequireFloat32Model("t", "k", model, 1, 2, layerForwardNonFloat32Field));
     lin->config->linear->propLossQ = saved;
     freeLinearLayer(lin);
     freeQuantization(symQ);
@@ -80,7 +82,7 @@ void testRequireFloat32ModelUsesTheGivenAccessor(void) {
 }
 
 void testReserveBufferRejectsOverflow(void) {
-    ASSERT_EXITS_WITH_FAILURE(stackGatherReserveBuffer("t", SIZE_MAX / 2, 4, "item"));
+    ASSERT_EXITS_WITH_FAILURE(stackGatherReserveBuffer("t", "k", SIZE_MAX / 2, 4, "item"));
 }
 
 int main(void) {

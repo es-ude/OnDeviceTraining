@@ -11,7 +11,8 @@
  *  optimizer step is the caller's (trainingEpochDefault).
  *  - m == 1: every sample is wrapped by batchViewOf, no copy, no heap.
  *  - m > 1: each chunk's items and labels are gathered into two [m, ...]
- *    buffers, reserved once per call and freed before returning. FLOAT32
+ *    buffers, reserved once per call and freed before returning (gate and
+ *    gather live in StackGather, shared with evaluation, #468). FLOAT32
  *    only: every layer must pass layerIsFloat32Only (checked once per call,
  *    after the divisibility and empty-batch checks, before any buffer or
  *    chunk) and every sample's item and label must be

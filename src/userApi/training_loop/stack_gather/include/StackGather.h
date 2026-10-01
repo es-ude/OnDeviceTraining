@@ -14,19 +14,20 @@ typedef const char *(*nonFloat32FieldFn_t)(layer_t *layer);
 
 /* Gather buffer of m rows x perSampleBytes: overflow-checked multiply; NULL
  * from reserveMemory fails fast -- never a copy through NULL. `caller` prefixes
- * every error message. */
-uint8_t *stackGatherReserveBuffer(const char *caller, size_t m, size_t perSampleBytes,
-                                  const char *what);
+ * every error message; `knob` names the option that set m ("microBatchSize" or
+ * "evalMicroBatchSize") so the user is pointed at the right field. */
+uint8_t *stackGatherReserveBuffer(const char *caller, const char *knob, size_t m,
+                                  size_t perSampleBytes, const char *what);
 
 /* FLOAT32 gate over the whole model, evaluated once per stacked run before any
  * buffer is reserved. Fails fast naming the first layer whose fieldFn reports a
  * non-FLOAT32 field. */
-void stackGatherRequireFloat32Model(const char *caller, layer_t **model, size_t modelSize, size_t m,
-                                    nonFloat32FieldFn_t fieldFn);
+void stackGatherRequireFloat32Model(const char *caller, const char *knob, layer_t **model,
+                                    size_t modelSize, size_t m, nonFloat32FieldFn_t fieldFn);
 
 /* A stacked sample must be FLOAT32, carry no sparsity and match `reference` in
  * rank, dimensions and order. */
-void stackGatherRequireStackable(const char *caller, tensor_t *reference, tensor_t *t,
-                                 const char *what, size_t sampleIndex, size_t m);
+void stackGatherRequireStackable(const char *caller, const char *knob, tensor_t *reference,
+                                 tensor_t *t, const char *what, size_t sampleIndex, size_t m);
 
 #endif /* STACK_GATHER_H */

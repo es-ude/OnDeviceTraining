@@ -439,6 +439,18 @@ static inferenceStats_t *nullOrderInference(layer_t **model, size_t n, tensor_t 
     return s;
 }
 
+static inferenceStats_t *nullStatsInference(layer_t **model, size_t n, tensor_t *in,
+                                            tensor_t *label, lossFuncType_t f, reduction_t r) {
+    (void)inferenceWithLoss(model, n, in, label, f, r); /* leaks in the forked child only */
+    return NULL;
+}
+static inferenceStats_t *nullShapeInference(layer_t **model, size_t n, tensor_t *in,
+                                            tensor_t *label, lossFuncType_t f, reduction_t r) {
+    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r);
+    s->output->shape = NULL; /* leaks in the forked child only */
+    return s;
+}
+
 /* A stream that yields no sample at all (custom getBatch returning empty
  * batches) must fail fast instead of dividing MEAN loss and metrics by 0. */
 static batch_t *emptyGetBatch(dataLoader_t *dl, size_t index) {
@@ -475,6 +487,8 @@ void testStackedRejectsMalformedInferenceOutput(void) {
     ASSERT_EXITS_WITH_FAILURE(metricsWith(swappedOrderInference, 2));
     ASSERT_EXITS_WITH_FAILURE(metricsWith(nullDataInference, 2));
     ASSERT_EXITS_WITH_FAILURE(metricsWith(nullOrderInference, 2));
+    ASSERT_EXITS_WITH_FAILURE(metricsWith(nullStatsInference, 2));
+    ASSERT_EXITS_WITH_FAILURE(metricsWith(nullShapeInference, 2));
     freeFixtureData();
 }
 
@@ -559,6 +573,7 @@ void testStackedAcceptsBackwardOnlyNonFloat32Fields(void) {
     TEST_ASSERT_EQUAL_MEMORY(cm1, cm2, sizeof(cm1));
     TEST_ASSERT_TRUE(sameStats(s1, s2));
 }
+
 static tensor_t *g_convItems[N_EVAL];
 static sample_t *getConvSample(size_t id) {
     sample_t *s = reserveMemory(sizeof(sample_t));

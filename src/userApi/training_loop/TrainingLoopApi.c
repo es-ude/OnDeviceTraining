@@ -327,12 +327,12 @@ static float evaluateChunk(const char *caller, layer_t **model, size_t modelSize
  * the stream (a replay wrapper's batches exceed batchSize, D7). The reference
  * sample's tensors are dataset-owned and outlive its sample_t (freeSample
  * frees only the wrapper). */
-static float evaluateStacked(const char *caller, layer_t **model, size_t modelSize,
-                             lossFuncType_t funcType, dataLoader_t *dataLoader,
+static float evaluateStacked(const char *caller, const char *knob, layer_t **model,
+                             size_t modelSize, lossFuncType_t funcType, dataLoader_t *dataLoader,
                              size_t numberOfBatches, inferenceWithLossFn_t inferenceFn,
                              reduction_t forwardReduction, size_t m, evalCounts_t *counts,
                              size_t *totalSamples) {
-    stackGatherRequireFloat32Model(caller, model, modelSize, m, layerForwardNonFloat32Field);
+    stackGatherRequireFloat32Model(caller, knob, model, modelSize, m, layerForwardNonFloat32Field);
     tensor_t *referenceItem = NULL;
     tensor_t *referenceLabel = NULL;
     uint8_t *itemBuffer = NULL;
@@ -355,17 +355,20 @@ static float evaluateStacked(const char *caller, layer_t **model, size_t modelSi
                 referenceLabel = sample->label;
                 /* Validates the reference's own dtype/sparsity before its
                  * bytes size the buffers. */
-                stackGatherRequireStackable(caller, referenceItem, referenceItem, "item", 0, m);
-                stackGatherRequireStackable(caller, referenceLabel, referenceLabel, "label", 0, m);
+                stackGatherRequireStackable(caller, knob, referenceItem, referenceItem, "item", 0,
+                                            m);
+                stackGatherRequireStackable(caller, knob, referenceLabel, referenceLabel, "label",
+                                            0, m);
                 itemBytes = calcBytesPerTensor(referenceItem);
                 labelBytes = calcBytesPerTensor(referenceLabel);
                 C = calcNumberOfElementsByTensor(referenceLabel);
-                itemBuffer = stackGatherReserveBuffer(caller, m, itemBytes, "item");
-                labelBuffer = stackGatherReserveBuffer(caller, m, labelBytes, "label");
+                itemBuffer = stackGatherReserveBuffer(caller, knob, m, itemBytes, "item");
+                labelBuffer = stackGatherReserveBuffer(caller, knob, m, labelBytes, "label");
             }
-            stackGatherRequireStackable(caller, referenceItem, sample->item, "item", streamed, m);
-            stackGatherRequireStackable(caller, referenceLabel, sample->label, "label", streamed,
+            stackGatherRequireStackable(caller, knob, referenceItem, sample->item, "item", streamed,
                                         m);
+            stackGatherRequireStackable(caller, knob, referenceLabel, sample->label, "label",
+                                        streamed, m);
             memcpy(itemBuffer + rows * itemBytes, sample->item->data, itemBytes);
             memcpy(labelBuffer + rows * labelBytes, sample->label->data, labelBytes);
             rows++;
@@ -420,9 +423,9 @@ float evaluationEpoch(layer_t **model, size_t modelSize, lossFuncType_t funcType
             freeBatch(batch);
         }
     } else {
-        totalLoss =
-            evaluateStacked("evaluationEpoch", model, modelSize, funcType, dataLoader,
-                            numberOfBatches, inferenceFn, forwardReduction, m, NULL, &totalSamples);
+        totalLoss = evaluateStacked("evaluationEpoch", "microBatchSize", model, modelSize, funcType,
+                                    dataLoader, numberOfBatches, inferenceFn, forwardReduction, m,
+                                    NULL, &totalSamples);
     }
     requireStreamedSamples(totalSamples, "evaluationEpoch");
 
@@ -500,7 +503,7 @@ static float computeMacroF1(const size_t *tp, const size_t *predCount, const siz
     return sum / (float)numClasses;
 }
 
-static epochStats_t evaluateEpochInternal(layer_t **model, size_t modelSize,
+static epochStats_t evaluateEpochInternal(const char *knob, layer_t **model, size_t modelSize,
                                           lossFuncType_t funcType, dataLoader_t *dataLoader,
                                           inferenceWithLossFn_t inferenceFn,
                                           size_t *confusionMatrix, size_t numClasses,
@@ -542,8 +545,9 @@ static epochStats_t evaluateEpochInternal(layer_t **model, size_t modelSize,
             freeBatch(batch);
         }
     } else {
-        totalLoss = evaluateStacked(caller, model, modelSize, funcType, dataLoader, numberOfBatches,
-                                    inferenceFn, forwardReduction, m, &counts, &totalSamples);
+        totalLoss =
+            evaluateStacked(caller, knob, model, modelSize, funcType, dataLoader, numberOfBatches,
+                            inferenceFn, forwardReduction, m, &counts, &totalSamples);
     }
     requireStreamedSamples(totalSamples, caller);
 
@@ -578,8 +582,9 @@ epochStats_t evaluationEpochWithMetrics(layer_t **model, size_t modelSize, lossF
     }
     freeBatch(firstBatch);
 
-    return evaluateEpochInternal(model, modelSize, funcType, dataLoader, inferenceFn, NULL,
-                                 numClasses, forwardReduction, m, "evaluationEpochWithMetrics");
+    return evaluateEpochInternal("microBatchSize", model, modelSize, funcType, dataLoader,
+                                 inferenceFn, NULL, numClasses, forwardReduction, m,
+                                 "evaluationEpochWithMetrics");
 }
 
 classificationReport_t evaluationEpochWithReport(layer_t **model, size_t modelSize,
@@ -602,9 +607,9 @@ classificationReport_t evaluationEpochWithReport(layer_t **model, size_t modelSi
     }
 
     classificationReport_t report;
-    report.stats =
-        evaluateEpochInternal(model, modelSize, funcType, dataLoader, inferenceFn, cmBuffer,
-                              numClasses, forwardReduction, m, "evaluationEpochWithReport");
+    report.stats = evaluateEpochInternal("microBatchSize", model, modelSize, funcType, dataLoader,
+                                         inferenceFn, cmBuffer, numClasses, forwardReduction, m,
+                                         "evaluationEpochWithReport");
     report.confusionMatrix = cmBuffer;
     report.numClasses = numClasses;
     return report;
@@ -682,8 +687,8 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
     batch_t *firstBatch = evalDataLoader->getBatch(evalDataLoader, 0);
     size_t numClasses = calcNumberOfElementsByTensor(firstBatch->samples[0]->label);
     if (evalMicroBatchSize > 1) {
-        stackGatherRequireFloat32Model("trainingRun", model, modelSize, evalMicroBatchSize,
-                                       layerForwardNonFloat32Field);
+        stackGatherRequireFloat32Model("trainingRun", "evalMicroBatchSize", model, modelSize,
+                                       evalMicroBatchSize, layerForwardNonFloat32Field);
     }
     requireEvaluableChunks(model, modelSize, evalDataLoader, firstBatch->samples[0]->item,
                            evalMicroBatchSize, "trainingRun");
@@ -723,8 +728,8 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
             trainingEpochDefault(model, modelSize, lossConfig, trainDataLoader, optimizer,
                                  calculateGradsFn, forwardReduction, microBatchSize);
         epochStats_t evalStats = evaluateEpochInternal(
-            model, modelSize, lossConfig.funcType, evalDataLoader, inferenceFn, NULL, numClasses,
-            forwardReduction, evalMicroBatchSize, "trainingRun");
+            "evalMicroBatchSize", model, modelSize, lossConfig.funcType, evalDataLoader,
+            inferenceFn, NULL, numClasses, forwardReduction, evalMicroBatchSize, "trainingRun");
         info.trainLoss = trainLoss;
 
         if (callback != NULL) {

@@ -136,9 +136,12 @@ typedef struct trainingRunOptions {
                                     rank-2 BatchNorm1d in training mode needs microBatchSize >= 2
                                     (batch statistics need >= 2 values per channel). */
     size_t evalMicroBatchSize;  /* rows per inferenceFn call during evaluation (#468); 0 inherits
-                                    microBatchSize. An untracked BatchNorm1d's eval output depends
-                                    on its chunk mates (deterministic: the eval loader is never
-                                    reshuffled). */
+                                    microBatchSize. m_eval > 1 stacks consecutive eval samples
+                                    into [rows, ...] chunks (rows <= m_eval; the last chunk holds
+                                    the N mod m_eval remainder): FLOAT32 forward only. The gather
+                                    buffers hold m_eval rows even when the eval set is smaller.
+                                    An untracked BatchNorm1d's eval output depends on its chunk
+                                    mates (deterministic: the eval loader is never reshuffled). */
 } trainingRunOptions_t;
 
 void freeTrainingStats(trainingStats_t *trainingStats);

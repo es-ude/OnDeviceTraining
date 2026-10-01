@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "BatchNorm1d.h"
@@ -737,6 +738,44 @@ void testTrainingRunRejectsNonFloat32ForwardAtEvalMicroBatchBeforeEpoch0(void) {
     ASSERT_EXITS_WITH_FAILURE(runSymForwardPreflight());
 }
 
+/* #468: the failure is the EVAL knob's, so it must name evalMicroBatchSize
+ * (microBatchSize is 1 here). The child's stdout is a pipe; PRINT_ERROR writes
+ * to stdout in every preset and exit() flushes it. */
+void testTrainingRunEvalGateNamesEvalMicroBatchSize(void) {
+    int fds[2];
+    TEST_ASSERT_EQUAL_INT(0, pipe(fds));
+    fflush(stdout);
+    pid_t pid = fork();
+    TEST_ASSERT_TRUE(pid >= 0);
+    if (pid == 0) {
+        close(fds[0]);
+        dup2(fds[1], STDOUT_FILENO);
+        close(fds[1]);
+        runSymForwardPreflight();
+        _exit(0);
+    }
+    close(fds[1]);
+    char message[1024];
+    size_t len = 0;
+    ssize_t n;
+    while ((n = read(fds[0], message + len, sizeof message - 1 - len)) > 0) {
+        len += (size_t)n;
+        if (len + 1 >= sizeof message) {
+            break;
+        }
+    }
+    message[len] = '\0';
+    char drain[256];
+    while (read(fds[0], drain, sizeof drain) > 0) {}
+    close(fds[0]);
+    int status = 0;
+    (void)waitpid(pid, &status, 0);
+    bool exitedWithFailure = WIFEXITED(status) && WEXITSTATUS(status) == 1;
+    bool namesEvalKnob = strstr(message, "evalMicroBatchSize") != NULL;
+    TEST_ASSERT_TRUE(exitedWithFailure);
+    TEST_ASSERT_TRUE_MESSAGE(namesEvalKnob, message);
+}
+
 /* D9 in trainingRun: eval dataset smaller than its batchSize fails before the peek. */
 static batch_t *evalGetBatchMustNotRun(dataLoader_t *dl, size_t index) {
     (void)dl;
@@ -969,6 +1008,7 @@ int main(void) {
     RUN_TEST(testTrainingRunRejectsUntrackedRank2WithOneRowTail);
     RUN_TEST(testPreflightJudgesMinOfMAndN);
     RUN_TEST(testTrainingRunRejectsNonFloat32ForwardAtEvalMicroBatchBeforeEpoch0);
+    RUN_TEST(testTrainingRunEvalGateNamesEvalMicroBatchSize);
     RUN_TEST(testTrainingRunRejectsEmptyEvalLoaderBeforeThePeek);
     RUN_TEST(testUntrackedRank2BatchNormEvaluatesPerChunk);
     RUN_TEST(testEntryPointPreflightsUntrackedBatchNormInline);

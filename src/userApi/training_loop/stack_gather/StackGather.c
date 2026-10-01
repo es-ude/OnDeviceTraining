@@ -7,49 +7,49 @@
 #include "StackGather.h"
 #include "StorageApi.h"
 
-uint8_t *stackGatherReserveBuffer(const char *caller, size_t m, size_t perSampleBytes,
-                                  const char *what) {
+uint8_t *stackGatherReserveBuffer(const char *caller, const char *knob, size_t m,
+                                  size_t perSampleBytes, const char *what) {
     if (perSampleBytes != 0 && m > SIZE_MAX / perSampleBytes) {
-        PRINT_ERROR("%s: the %s gather buffer (microBatchSize %zu x %zu bytes "
+        PRINT_ERROR("%s: the %s gather buffer (%s %zu x %zu bytes "
                     "per sample) overflows size_t",
-                    caller, what, m, perSampleBytes);
+                    caller, what, knob, m, perSampleBytes);
         exit(1);
     }
     uint8_t *buffer = reserveMemory(m * perSampleBytes);
     if (buffer == NULL) {
-        PRINT_ERROR("%s: reserving the %s gather buffer failed (microBatchSize "
+        PRINT_ERROR("%s: reserving the %s gather buffer failed (%s "
                     "%zu x %zu bytes per sample)",
-                    caller, what, m, perSampleBytes);
+                    caller, what, knob, m, perSampleBytes);
         exit(1);
     }
     return buffer;
 }
 
-void stackGatherRequireFloat32Model(const char *caller, layer_t **model, size_t modelSize, size_t m,
-                                    nonFloat32FieldFn_t fieldFn) {
+void stackGatherRequireFloat32Model(const char *caller, const char *knob, layer_t **model,
+                                    size_t modelSize, size_t m, nonFloat32FieldFn_t fieldFn) {
     for (size_t i = 0; i < modelSize; i++) {
         const char *field = fieldFn(model[i]);
         if (field != NULL) {
-            PRINT_ERROR("%s: microBatchSize %zu > 1 is FLOAT32-only, but layer "
+            PRINT_ERROR("%s: %s %zu > 1 is FLOAT32-only, but layer "
                         "%zu (layerType_t %d) has a non-FLOAT32 %s",
-                        caller, m, i, (int)model[i]->type, field);
+                        caller, knob, m, i, (int)model[i]->type, field);
             exit(1);
         }
     }
 }
 
-void stackGatherRequireStackable(const char *caller, tensor_t *reference, tensor_t *t,
-                                 const char *what, size_t sampleIndex, size_t m) {
+void stackGatherRequireStackable(const char *caller, const char *knob, tensor_t *reference,
+                                 tensor_t *t, const char *what, size_t sampleIndex, size_t m) {
     if (t->quantization->type != FLOAT32) {
-        PRINT_ERROR("%s: microBatchSize %zu > 1 is FLOAT32-only, but the %s of "
+        PRINT_ERROR("%s: %s %zu > 1 is FLOAT32-only, but the %s of "
                     "sample %zu has dtype %d",
-                    caller, m, what, sampleIndex, (int)t->quantization->type);
+                    caller, knob, m, what, sampleIndex, (int)t->quantization->type);
         exit(1);
     }
     if (t->sparsity != NULL) {
-        PRINT_ERROR("%s: microBatchSize %zu > 1 cannot stack the %s of sample "
+        PRINT_ERROR("%s: %s %zu > 1 cannot stack the %s of sample "
                     "%zu: it carries sparsity",
-                    caller, m, what, sampleIndex);
+                    caller, knob, m, what, sampleIndex);
         exit(1);
     }
     size_t rank = reference->shape->numberOfDimensions;

@@ -166,13 +166,71 @@ static void countPrediction(evalCounts_t *counts, size_t predicted, size_t targe
     }
 }
 
+/* #467/#468: an untracked BatchNorm1d normalizes with batch statistics even
+ * in evaluation -- over its chunk of `rows` samples. Walk [rows, ...item]
+ * through the model and fail before any forward instead of mid-epoch. Models
+ * without an untracked BN skip the walk entirely. */
+static void requireUntrackedBatchNormsEvaluable(layer_t **model, size_t modelSize,
+                                                const tensor_t *evalItem, size_t rows,
+                                                const char *caller) {
+    size_t last = modelSize;
+    for (size_t i = 0; i < modelSize; i++) {
+        if (model[i]->type == BATCHNORM1D && !model[i]->config->batchNorm1d->trackRunningStats) {
+            last = i;
+        }
+    }
+    if (last == modelSize) {
+        return;
+    }
+    size_t rank = evalItem->shape->numberOfDimensions;
+    if (rank >= BATCH_VIEW_MAX_RANK) {
+        return; /* evaluation itself fails fast in batchViewOf */
+    }
+    size_t dimsA[BATCH_VIEW_MAX_RANK];
+    size_t orderA[BATCH_VIEW_MAX_RANK];
+    size_t dimsB[BATCH_VIEW_MAX_RANK];
+    size_t orderB[BATCH_VIEW_MAX_RANK];
+    shape_t a = {.dimensions = dimsA, .orderOfDimensions = orderA, .numberOfDimensions = rank + 1};
+    shape_t b = {.dimensions = dimsB, .orderOfDimensions = orderB, .numberOfDimensions = 0};
+    dimsA[0] = rows;
+    for (size_t d = 0; d < rank; d++) {
+        dimsA[d + 1] = evalItem->shape->dimensions[d];
+    }
+    setOrderOfDimsForNewTensor(rank + 1, orderA);
+    shape_t *in = &a;
+    shape_t *out = &b;
+    for (size_t i = 0; i <= last; i++) {
+        if (model[i]->type == BATCHNORM1D) {
+            char what[128];
+            snprintf(what, sizeof what, "%s pre-flight (model layer %zu, %zu-row evaluation chunk)",
+                     caller, i, rows);
+            batchNorm1dRequireEvaluable(model[i], in, what);
+        }
+        layerFunctions[model[i]->type].calcOutputShape(model[i], in, out);
+        shape_t *t = in;
+        in = out;
+        out = t;
+    }
+}
+
+/* D2/D7: judged on the NOMINAL sample count (a loader whose batches differ
+ * from batchSize is covered at run time by BatchNorm1d's own forward guard).
+ * Callers run requireEvalBatches first, so batchSize and the count are >= 1. */
+static void requireEvaluableChunks(layer_t **model, size_t modelSize, dataLoader_t *dataLoader,
+                                   const tensor_t *firstItem, size_t m, const char *caller) {
+    size_t nominal = (dataLoader->getDatasetSize() / dataLoader->batchSize) * dataLoader->batchSize;
+    size_t full = (m < nominal) ? m : nominal;
+    requireUntrackedBatchNormsEvaluable(model, modelSize, firstItem, full, caller);
+    size_t tail = nominal % m;
+    if (nominal > m && tail != 0) {
+        requireUntrackedBatchNormsEvaluable(model, modelSize, firstItem, tail, caller);
+    }
+}
+
 /* Runs once, on the first streamed sample of every evaluation, whatever m. */
 static void evalFirstSample(layer_t **model, size_t modelSize, dataLoader_t *dataLoader,
                             sample_t *first, size_t m, size_t numClasses, const char *caller) {
-    (void)model;
-    (void)modelSize;
-    (void)dataLoader;
-    (void)m;
+    requireEvaluableChunks(model, modelSize, dataLoader, first->item, m, caller);
     if (numClasses != 0) {
         requireNumClassesMatchesLabel(numClasses, first->label, caller);
     }
@@ -347,11 +405,14 @@ float evaluationEpoch(layer_t **model, size_t modelSize, lossFuncType_t funcType
     size_t totalSamples = 0;
 
     if (m == 1) {
+        /* The first sample of the first NON-EMPTY batch, as on the m > 1 path. */
+        bool firstSeen = false;
         for (size_t i = 0; i < numberOfBatches; i++) {
             batch_t *batch = dataLoader->getBatch(dataLoader, i);
-            if (i == 0 && batch->size > 0) {
+            if (!firstSeen && batch->size > 0) {
                 evalFirstSample(model, modelSize, dataLoader, batch->samples[0], m, 0,
                                 "evaluationEpoch");
+                firstSeen = true;
             }
             totalLoss +=
                 evaluationBatch(model, modelSize, funcType, batch, inferenceFn, forwardReduction);
@@ -466,11 +527,14 @@ static epochStats_t evaluateEpochInternal(layer_t **model, size_t modelSize,
     size_t totalSamples = 0;
 
     if (m == 1) {
+        /* The first sample of the first NON-EMPTY batch, as on the m > 1 path. */
+        bool firstSeen = false;
         for (size_t i = 0; i < numberOfBatches; i++) {
             batch_t *batch = dataLoader->getBatch(dataLoader, i);
-            if (i == 0 && batch->size > 0) {
+            if (!firstSeen && batch->size > 0) {
                 evalFirstSample(model, modelSize, dataLoader, batch->samples[0], m, numClasses,
                                 caller);
+                firstSeen = true;
             }
             totalLoss += evaluateBatchInternal(model, modelSize, funcType, batch, inferenceFn,
                                                &counts, forwardReduction);
@@ -546,52 +610,6 @@ classificationReport_t evaluationEpochWithReport(layer_t **model, size_t modelSi
     return report;
 }
 
-/* #467: an untracked BatchNorm1d normalizes with batch statistics even in
- * evaluation, which runs one sample per call -- so a [1, C] input (or
- * [1, C, 1]) can never be evaluated. Walk the first eval sample's [1, ...]
- * shape through the model and fail before epoch 0 instead of after a full
- * training epoch. Models without an untracked BN skip the walk entirely. */
-static void requireUntrackedBatchNormsEvaluable(layer_t **model, size_t modelSize,
-                                                const tensor_t *evalItem) {
-    size_t last = modelSize;
-    for (size_t i = 0; i < modelSize; i++) {
-        if (model[i]->type == BATCHNORM1D && !model[i]->config->batchNorm1d->trackRunningStats) {
-            last = i;
-        }
-    }
-    if (last == modelSize) {
-        return;
-    }
-    size_t rank = evalItem->shape->numberOfDimensions;
-    if (rank >= BATCH_VIEW_MAX_RANK) {
-        return; /* evaluation itself fails fast in batchViewOf */
-    }
-    size_t dimsA[BATCH_VIEW_MAX_RANK];
-    size_t orderA[BATCH_VIEW_MAX_RANK];
-    size_t dimsB[BATCH_VIEW_MAX_RANK];
-    size_t orderB[BATCH_VIEW_MAX_RANK];
-    shape_t a = {.dimensions = dimsA, .orderOfDimensions = orderA, .numberOfDimensions = rank + 1};
-    shape_t b = {.dimensions = dimsB, .orderOfDimensions = orderB, .numberOfDimensions = 0};
-    dimsA[0] = 1;
-    for (size_t d = 0; d < rank; d++) {
-        dimsA[d + 1] = evalItem->shape->dimensions[d];
-    }
-    setOrderOfDimsForNewTensor(rank + 1, orderA);
-    shape_t *in = &a;
-    shape_t *out = &b;
-    for (size_t i = 0; i <= last; i++) {
-        if (model[i]->type == BATCHNORM1D) {
-            char what[64];
-            snprintf(what, sizeof what, "trainingRun pre-flight (model layer %zu)", i);
-            batchNorm1dRequireEvaluable(model[i], in, what);
-        }
-        layerFunctions[model[i]->type].calcOutputShape(model[i], in, out);
-        shape_t *t = in;
-        in = out;
-        out = t;
-    }
-}
-
 trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
                                 dataLoader_t *trainDataLoader, dataLoader_t *evalDataLoader,
                                 optimizer_t *optimizer, size_t numberOfEpochs,
@@ -606,6 +624,10 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
     /* 0 means 1 (#152 spec §6.1): zero-initialised options keep per-sample training. */
     size_t microBatchSize =
         (options != NULL && options->microBatchSize != 0) ? options->microBatchSize : 1;
+    /* #468 D1: evaluation inherits the training micro-batch unless set. */
+    size_t evalMicroBatchSize = (options != NULL && options->evalMicroBatchSize != 0)
+                                    ? options->evalMicroBatchSize
+                                    : microBatchSize;
 
     if (lrScheduler != NULL && lrScheduler->optimizer != optimizer) {
         PRINT_ERROR("trainingRun: lrScheduler is wired to a different optimizer than the one "
@@ -659,7 +681,12 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
     (void)requireEvalBatches(evalDataLoader, "trainingRun");
     batch_t *firstBatch = evalDataLoader->getBatch(evalDataLoader, 0);
     size_t numClasses = calcNumberOfElementsByTensor(firstBatch->samples[0]->label);
-    requireUntrackedBatchNormsEvaluable(model, modelSize, firstBatch->samples[0]->item);
+    if (evalMicroBatchSize > 1) {
+        stackGatherRequireFloat32Model("trainingRun", model, modelSize, evalMicroBatchSize,
+                                       layerForwardNonFloat32Field);
+    }
+    requireEvaluableChunks(model, modelSize, evalDataLoader, firstBatch->samples[0]->item,
+                           evalMicroBatchSize, "trainingRun");
     for (size_t i = 0; i < firstBatch->size; i++) {
         freeSample(firstBatch->samples[i]);
     }
@@ -697,7 +724,7 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
                                  calculateGradsFn, forwardReduction, microBatchSize);
         epochStats_t evalStats = evaluateEpochInternal(
             model, modelSize, lossConfig.funcType, evalDataLoader, inferenceFn, NULL, numClasses,
-            forwardReduction, 1, "trainingRun");
+            forwardReduction, evalMicroBatchSize, "trainingRun");
         info.trainLoss = trainLoss;
 
         if (callback != NULL) {

@@ -475,11 +475,14 @@ static sample_t *pfGetSample(size_t id) {
     s->label = pfLabel;
     return s;
 }
+static size_t g_pfDatasetSize = 2;
 static size_t pfDatasetSize(void) {
-    return 2;
+    return g_pfDatasetSize;
 }
 
-static void runPreflightOnly(layer_t **model, size_t n) {
+/* exit 1: rejected before epoch 0; exit 2: every pre-flight passed and epoch
+ * 0 read the (tripwire) train loader. */
+static void runPreflightOnly(layer_t **model, size_t n, size_t evalMicroBatchSize) {
     dataLoader_t trainDl = {
         .getDatasetSize = twoSamples, .batchSize = 2, .getBatch = trainGetBatchMustNotRun};
     dataLoader_t *evalDl =
@@ -488,19 +491,20 @@ static void runPreflightOnly(layer_t **model, size_t n) {
     optimizer_t *sgd =
         sgdMCreateOptim(0.01f, 0.f, 0.f, model, n, momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
-    trainingRunOptions_t opts = {.microBatchSize = 2};
+    trainingRunOptions_t opts = {.microBatchSize = 2, .evalMicroBatchSize = evalMicroBatchSize};
     (void)trainingRun(model, n, defaultLossConfig(MSE), &trainDl, evalDl, sgd, 1,
                       calculateGradsSequential, inferenceWithLoss, &opts);
 }
 
 /* Rank-2 untracked BN: eval item [2] -> [1, 2] -> n = 1. */
 void testTrainingRunRejectsUntrackedRank2BatchNormBeforeEpoch0(void) {
+    g_pfDatasetSize = 2;
     pfItem = buildFloatTensor((size_t[]){2}, 1, (float[]){0.1f, 0.2f});
     pfLabel = buildFloatTensor((size_t[]){2}, 1, (float[]){0.f, 1.f});
     layer_t *model[2] = {
         bnLayer(2, false, true, TRAINABLE_DEFAULT),
         linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &g_lq)};
-    ASSERT_EXITS_WITH_FAILURE(runPreflightOnly(model, 2));
+    ASSERT_EXITS_WITH_FAILURE(runPreflightOnly(model, 2, 1));
     freeLinearLayer(model[1]);
     freeBatchNorm1dLayer(model[0]);
     freeTensor(pfLabel);
@@ -510,10 +514,11 @@ void testTrainingRunRejectsUntrackedRank2BatchNormBeforeEpoch0(void) {
 /* Review Focus 1: the sample is rank 2 ([2, 3] -> [1, 2, 3]) but Flatten
  * hands BN [1, 6]: the rank must be walked through the model. */
 void testTrainingRunRejectsUntrackedBatchNormBehindFlatten(void) {
+    g_pfDatasetSize = 2;
     pfItem = buildFloatTensor((size_t[]){2, 3}, 2, (float[]){0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f});
     pfLabel = buildFloatTensor((size_t[]){6}, 1, (float[]){0.f, 1.f, 0.f, 1.f, 0.f, 1.f});
     layer_t *model[2] = {flattenLayerInit(), bnLayer(6, false, true, TRAINABLE_DEFAULT)};
-    ASSERT_EXITS_WITH_FAILURE(runPreflightOnly(model, 2));
+    ASSERT_EXITS_WITH_FAILURE(runPreflightOnly(model, 2, 1));
     freeBatchNorm1dLayer(model[1]);
     freeFlattenLayer(model[0]);
     freeTensor(pfLabel);
@@ -522,11 +527,12 @@ void testTrainingRunRejectsUntrackedBatchNormBehindFlatten(void) {
 
 /* Review Focus 2: tracked BN(2) first, untracked BN(2) second; item [2]. */
 void testTrainingRunRejectsUntrackedSecondBatchNorm(void) {
+    g_pfDatasetSize = 2;
     pfItem = buildFloatTensor((size_t[]){2}, 1, (float[]){0.1f, 0.2f});
     pfLabel = buildFloatTensor((size_t[]){2}, 1, (float[]){0.f, 1.f});
     layer_t *model[2] = {bnLayer(2, false, false, TRAINABLE_DEFAULT),
                          bnLayer(2, false, true, TRAINABLE_DEFAULT)};
-    ASSERT_EXITS_WITH_FAILURE(runPreflightOnly(model, 2));
+    ASSERT_EXITS_WITH_FAILURE(runPreflightOnly(model, 2, 1));
     freeBatchNorm1dLayer(model[1]);
     freeBatchNorm1dLayer(model[0]);
     freeTensor(pfLabel);
@@ -536,12 +542,13 @@ void testTrainingRunRejectsUntrackedSecondBatchNorm(void) {
 /* Review Focus 3: rank-3 untracked BN with T = 1: item [2, 1] -> [1, 2, 1] -> n = 1.
  * model {BN untracked(2), Flatten, Linear(2->2)}; label [2]. */
 void testTrainingRunRejectsUntrackedRank3SingleStep(void) {
+    g_pfDatasetSize = 2;
     pfItem = buildFloatTensor((size_t[]){2, 1}, 2, (float[]){0.1f, 0.2f});
     pfLabel = buildFloatTensor((size_t[]){2}, 1, (float[]){0.f, 1.f});
     layer_t *model[3] = {
         bnLayer(2, false, true, TRAINABLE_DEFAULT), flattenLayerInit(),
         linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &g_lq)};
-    ASSERT_EXITS_WITH_FAILURE(runPreflightOnly(model, 3));
+    ASSERT_EXITS_WITH_FAILURE(runPreflightOnly(model, 3, 1));
     freeLinearLayer(model[2]);
     freeFlattenLayer(model[1]);
     freeBatchNorm1dLayer(model[0]);
@@ -570,6 +577,7 @@ static void freeBatchNorm1dLayerAfterOptim(layer_t *layer) {
 
 /* Tracked rank-2 BN evaluates on running statistics: must not be rejected. */
 void testTrainingRunAcceptsTrackedRank2BatchNorm(void) {
+    g_pfDatasetSize = 2;
     pfItem = buildFloatTensor((size_t[]){2}, 1, (float[]){0.1f, 0.2f});
     pfLabel = buildFloatTensor((size_t[]){2}, 1, (float[]){0.f, 1.f});
     layer_t *model[2] = {
@@ -584,7 +592,7 @@ void testTrainingRunAcceptsTrackedRank2BatchNorm(void) {
     optimizer_t *sgd =
         sgdMCreateOptim(0.01f, 0.f, 0.f, model, 2, momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
-    trainingRunOptions_t opts = {.microBatchSize = 2};
+    trainingRunOptions_t opts = {.microBatchSize = 2, .evalMicroBatchSize = 1};
 
     trainingRunResult_t result = trainingRun(model, 2, defaultLossConfig(MSE), trainDl, evalDl, sgd,
                                              1, calculateGradsSequential, inferenceWithLoss, &opts);
@@ -603,8 +611,11 @@ void testTrainingRunAcceptsTrackedRank2BatchNorm(void) {
     TEST_ASSERT_EQUAL_size_t(1, epochsCompleted);
 }
 
-/* Untracked rank-3 BN with T >= 2 has n = T per eval call: must not be rejected. */
-void testTrainingRunAcceptsUntrackedRank3BatchNorm(void) {
+/* Untracked rank-3 BN with T >= 2: per-sample evaluation (evalMicroBatchSize 1)
+ * has n = T per eval call, stacked evaluation (2) has n = 2 x T. Neither may be
+ * rejected. Returns epochsCompleted. */
+static size_t acceptUntrackedRank3(size_t evalMicroBatchSize) {
+    g_pfDatasetSize = 2;
     pfItem = buildFloatTensor((size_t[]){2, 3}, 2, (float[]){0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f});
     pfLabel = buildFloatTensor((size_t[]){2}, 1, (float[]){0.f, 1.f});
     layer_t *model[3] = {
@@ -619,7 +630,7 @@ void testTrainingRunAcceptsUntrackedRank3BatchNorm(void) {
     optimizer_t *sgd =
         sgdMCreateOptim(0.01f, 0.f, 0.f, model, 3, momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
-    trainingRunOptions_t opts = {.microBatchSize = 2};
+    trainingRunOptions_t opts = {.microBatchSize = 2, .evalMicroBatchSize = evalMicroBatchSize};
 
     trainingRunResult_t result = trainingRun(model, 3, defaultLossConfig(MSE), trainDl, evalDl, sgd,
                                              1, calculateGradsSequential, inferenceWithLoss, &opts);
@@ -635,8 +646,294 @@ void testTrainingRunAcceptsUntrackedRank3BatchNorm(void) {
     freeBatchNorm1dLayerAfterOptim(model[0]);
     freeTensor(pfLabel);
     freeTensor(pfItem);
+    return epochsCompleted;
+}
 
+void testTrainingRunAcceptsUntrackedRank3BatchNorm(void) {
+    TEST_ASSERT_EQUAL_size_t(1, acceptUntrackedRank3(1));
+}
+
+void testTrainingRunAcceptsUntrackedRank3BatchNormStacked(void) {
+    TEST_ASSERT_EQUAL_size_t(1, acceptUntrackedRank3(2));
+}
+
+/* ---- #468: stacked evaluation pre-flight ---- */
+
+/* #468: an untracked rank-2 BN is evaluable once evaluation stacks >= 2 rows.
+ * Inherited (evalMicroBatchSize 0 -> microBatchSize 2) and explicit. */
+void testTrainingRunPassesPreflightForUntrackedRank2WhenEvalStacks(void) {
+    g_pfDatasetSize = 2;
+    pfItem = buildFloatTensor((size_t[]){2}, 1, (float[]){0.1f, 0.2f});
+    pfLabel = buildFloatTensor((size_t[]){2}, 1, (float[]){0.f, 1.f});
+    layer_t *model[2] = {
+        bnLayer(2, false, true, TRAINABLE_DEFAULT),
+        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &g_lq)};
+    ASSERT_EXITS_WITH(2, runPreflightOnly(model, 2, 0));
+    ASSERT_EXITS_WITH(2, runPreflightOnly(model, 2, 2));
+    freeLinearLayer(model[1]);
+    freeBatchNorm1dLayer(model[0]);
+    freeTensor(pfLabel);
+    freeTensor(pfItem);
+}
+
+/* D2: N = 3, m = 2 -> chunks 2 + 1; the 1-row tail has n = 1. */
+void testTrainingRunRejectsUntrackedRank2WithOneRowTail(void) {
+    g_pfDatasetSize = 3;
+    pfItem = buildFloatTensor((size_t[]){2}, 1, (float[]){0.1f, 0.2f});
+    pfLabel = buildFloatTensor((size_t[]){2}, 1, (float[]){0.f, 1.f});
+    layer_t *model[2] = {
+        bnLayer(2, false, true, TRAINABLE_DEFAULT),
+        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &g_lq)};
+    ASSERT_EXITS_WITH_FAILURE(runPreflightOnly(model, 2, 2));
+    ASSERT_EXITS_WITH(2, runPreflightOnly(model, 2, 3)); /* one 3-row chunk */
+    freeLinearLayer(model[1]);
+    freeBatchNorm1dLayer(model[0]);
+    freeTensor(pfLabel);
+    freeTensor(pfItem);
+}
+
+/* Review Focus 2: m > N judges one N-row chunk, not an m-row one. N = 3,
+ * m = 8 -> [3, C]: passes. N = 1, m = 8 -> [1, C]: fails. */
+void testPreflightJudgesMinOfMAndN(void) {
+    pfItem = buildFloatTensor((size_t[]){2}, 1, (float[]){0.1f, 0.2f});
+    pfLabel = buildFloatTensor((size_t[]){2}, 1, (float[]){0.f, 1.f});
+    layer_t *model[2] = {
+        bnLayer(2, false, true, TRAINABLE_DEFAULT),
+        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &g_lq)};
+    g_pfDatasetSize = 3;
+    ASSERT_EXITS_WITH(2, runPreflightOnly(model, 2, 8));
+    g_pfDatasetSize = 1;
+    ASSERT_EXITS_WITH_FAILURE(runPreflightOnly(model, 2, 8));
+    g_pfDatasetSize = 2;
+    freeLinearLayer(model[1]);
+    freeBatchNorm1dLayer(model[0]);
+    freeTensor(pfLabel);
+    freeTensor(pfItem);
+}
+
+/* D1/D6: an explicit evalMicroBatchSize > 1 on a model with a non-FLOAT32
+ * forward fails before epoch 0 (exit 1), even with per-sample training. */
+static void runSymForwardPreflight(void) {
+    g_pfDatasetSize = 2;
+    pfItem = buildFloatTensor((size_t[]){2}, 1, (float[]){0.1f, 0.2f});
+    pfLabel = buildFloatTensor((size_t[]){2}, 1, (float[]){0.f, 1.f});
+    layer_t *model[1] = {
+        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &g_lq)};
+    model[0]->config->linear->forwardMath.type = ARITH_SYM_INT32; /* child only */
+    dataLoader_t trainDl = {
+        .getDatasetSize = twoSamples, .batchSize = 2, .getBatch = trainGetBatchMustNotRun};
+    dataLoader_t *evalDl =
+        dataLoaderInit(pfGetSample, pfDatasetSize, 1, NULL, NULL, false, 0, true);
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    trainingRunOptions_t opts = {.microBatchSize = 1, .evalMicroBatchSize = 2};
+    (void)trainingRun(model, 1, defaultLossConfig(MSE), &trainDl, evalDl, sgd, 1,
+                      calculateGradsSequential, inferenceWithLoss, &opts);
+}
+
+void testTrainingRunRejectsNonFloat32ForwardAtEvalMicroBatchBeforeEpoch0(void) {
+    ASSERT_EXITS_WITH_FAILURE(runSymForwardPreflight());
+}
+
+/* D9 in trainingRun: eval dataset smaller than its batchSize fails before the peek. */
+static batch_t *evalGetBatchMustNotRun(dataLoader_t *dl, size_t index) {
+    (void)dl;
+    (void)index;
+    _exit(3);
+}
+static size_t oneSample(void) {
+    return 1;
+}
+static void runEmptyEvalLoader(void) {
+    layer_t *model[1] = {
+        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &g_lq)};
+    dataLoader_t trainDl = {
+        .getDatasetSize = twoSamples, .batchSize = 2, .getBatch = trainGetBatchMustNotRun};
+    dataLoader_t evalDl = {
+        .getDatasetSize = oneSample, .batchSize = 2, .getBatch = evalGetBatchMustNotRun};
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    (void)trainingRun(model, 1, defaultLossConfig(MSE), &trainDl, &evalDl, sgd, 1,
+                      calculateGradsSequential, inferenceWithLoss, NULL);
+}
+
+void testTrainingRunRejectsEmptyEvalLoaderBeforeThePeek(void) {
+    ASSERT_EXITS_WITH_FAILURE(runEmptyEvalLoader());
+}
+
+static tensor_t *e2eItems[4];
+static tensor_t *e2eLabels[4];
+static sample_t *e2eGetSample(size_t id) {
+    sample_t *s = reserveMemory(sizeof(sample_t));
+    s->item = e2eItems[id];
+    s->label = e2eLabels[id];
+    return s;
+}
+static size_t fourSamples(void) {
+    return 4;
+}
+
+/* Records every output the evaluation hands out, per call. */
+static float e2eOutputs[2][4];
+static size_t e2eCalls;
+static inferenceStats_t *recordingInference(layer_t **model, size_t n, tensor_t *in,
+                                            tensor_t *label, lossFuncType_t f, reduction_t r) {
+    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r);
+    if (e2eCalls < 2) {
+        memcpy(e2eOutputs[e2eCalls], s->output->data, 4 * sizeof(float));
+    }
+    e2eCalls++;
+    return s;
+}
+
+/* Spec 5.5: a chunk's eval output equals a manual inference() over the same
+ * stacked rows -- the untracked BN normalizes over exactly that chunk. */
+void testUntrackedRank2BatchNormEvaluatesPerChunk(void) {
+    const float x[4][2] = {{0.1f, -0.4f}, {0.9f, 0.3f}, {-0.6f, 0.8f}, {0.2f, -0.1f}};
+    for (size_t i = 0; i < 4; i++) {
+        e2eItems[i] = buildFloatTensor((size_t[]){2}, 1, x[i]);
+        e2eLabels[i] =
+            buildFloatTensor((size_t[]){2}, 1, (float[]){(float)(i % 2), (float)((i + 1) % 2)});
+    }
+    layer_t *model[1] = {bnLayer(2, true /* noAffine */, true, TRAINABLE_DEFAULT)};
+    dataLoader_t *evalDl = dataLoaderInit(e2eGetSample, fourSamples, 1, NULL, NULL, false, 0, true);
+    e2eCalls = 0;
+    epochStats_t stats =
+        evaluationEpochWithMetrics(model, 1, MSE, evalDl, recordingInference, REDUCTION_MEAN, 2);
+    size_t calls = e2eCalls;
+    /* Manual reference: chunk 0 = rows {0, 1}, chunk 1 = rows {2, 3}. */
+    float expected[2][4];
+    for (size_t c = 0; c < 2; c++) {
+        tensor_t *stack = buildFloatTensor((size_t[]){2, 2}, 2, NULL);
+        float *d = (float *)stack->data;
+        memcpy(d, x[2 * c], 2 * sizeof(float));
+        memcpy(d + 2, x[2 * c + 1], 2 * sizeof(float));
+        tensor_t *out = inference(model, 1, stack);
+        memcpy(expected[c], out->data, 4 * sizeof(float));
+        freeTensor(out);
+        freeTensor(stack);
+    }
+    freeDataLoader(evalDl);
+    freeBatchNorm1dLayer(model[0]);
+    for (size_t i = 0; i < 4; i++) {
+        freeTensor(e2eLabels[i]);
+        freeTensor(e2eItems[i]);
+    }
+    TEST_ASSERT_EQUAL_size_t(2, calls);
+    TEST_ASSERT_TRUE(isfinite(stats.loss));
+    TEST_ASSERT_EQUAL_MEMORY(expected, e2eOutputs, sizeof(expected));
+}
+
+/* #468 "Done when": an untracked rank-2 BN TRAINS AND EVALUATES through
+ * trainingRun (microBatchSize 2, evaluation inherits it). Distinct rows:
+ * identical rows would give batch variance 0 in both phases. */
+void testTrainingRunTrainsAndEvaluatesUntrackedRank2BatchNorm(void) {
+    const float x[4][2] = {{0.1f, -0.4f}, {0.9f, 0.3f}, {-0.6f, 0.8f}, {0.2f, -0.1f}};
+    for (size_t i = 0; i < 4; i++) {
+        e2eItems[i] = buildFloatTensor((size_t[]){2}, 1, x[i]);
+        e2eLabels[i] =
+            buildFloatTensor((size_t[]){2}, 1, (float[]){(float)(i % 2), (float)((i + 1) % 2)});
+    }
+    layer_t *model[2] = {
+        bnLayer(2, false, true, TRAINABLE_DEFAULT),
+        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &g_lq)};
+    dataLoader_t *trainDl =
+        dataLoaderInit(e2eGetSample, fourSamples, 2, NULL, NULL, false, 0, true);
+    dataLoader_t *evalDl = dataLoaderInit(e2eGetSample, fourSamples, 1, NULL, NULL, false, 0, true);
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 2, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    trainingRunOptions_t opts = {.microBatchSize = 2};
+
+    trainingRunResult_t result = trainingRun(model, 2, defaultLossConfig(MSE), trainDl, evalDl, sgd,
+                                             1, calculateGradsSequential, inferenceWithLoss, &opts);
+    size_t epochsCompleted = result.epochsCompleted;
+    float evalLoss = result.finalEvalStats.loss;
+
+    freeOptim(sgd);
+    freeQuantization(momentumQ);
+    freeDataLoader(evalDl);
+    freeDataLoader(trainDl);
+    freeLinearLayerShellOnly(model[1]);
+    freeBatchNorm1dLayerAfterOptim(model[0]);
+    for (size_t i = 0; i < 4; i++) {
+        freeTensor(e2eLabels[i]);
+        freeTensor(e2eItems[i]);
+    }
     TEST_ASSERT_EQUAL_size_t(1, epochsCompleted);
+    TEST_ASSERT_TRUE(isfinite(evalLoss));
+}
+
+/* The direct entry points pre-flight inline (D10): at m = 1 this model is
+ * rejected BEFORE the first inferenceFn call (the tripwire would exit 2);
+ * at m = 2 it evaluates. */
+static inferenceStats_t *inferenceMustNotRun(layer_t **model, size_t n, tensor_t *in,
+                                             tensor_t *label, lossFuncType_t f, reduction_t r) {
+    (void)model;
+    (void)n;
+    (void)in;
+    (void)label;
+    (void)f;
+    (void)r;
+    _exit(2);
+}
+
+static void untrackedMetrics(inferenceWithLossFn_t fn, size_t m) {
+    pfItem = buildFloatTensor((size_t[]){2}, 1, (float[]){0.1f, 0.2f});
+    pfLabel = buildFloatTensor((size_t[]){2}, 1, (float[]){0.f, 1.f});
+    g_pfDatasetSize = 2;
+    layer_t *model[1] = {bnLayer(2, true, true, TRAINABLE_DEFAULT)};
+    dataLoader_t *evalDl =
+        dataLoaderInit(pfGetSample, pfDatasetSize, 1, NULL, NULL, false, 0, true);
+    (void)evaluationEpochWithMetrics(model, 1, MSE, evalDl, fn, REDUCTION_MEAN, m);
+}
+
+void testEntryPointPreflightsUntrackedBatchNormInline(void) {
+    ASSERT_EXITS_WITH(0, untrackedMetrics(inferenceWithLoss, 2));
+    ASSERT_EXITS_WITH_FAILURE(untrackedMetrics(inferenceMustNotRun, 1));
+}
+
+/* Controller ruling: at m = 1 the inline pre-flight runs on the first sample
+ * of the first NON-EMPTY batch -- an empty batch 0 must not let the untracked
+ * BN reach inferenceFn (the tripwire would exit 2). evaluationEpochWithMetrics
+ * is left out: its numClasses peek reads batch 0's first sample. */
+static getBatchFn_t g_realGetBatch;
+static batch_t *emptyFirstGetBatch(dataLoader_t *dl, size_t index) {
+    if (index == 0) {
+        batch_t *b = reserveMemory(sizeof(batch_t));
+        b->size = 0;
+        b->samples = reserveMemory(sizeof(sample_t *));
+        return b;
+    }
+    return g_realGetBatch(dl, index);
+}
+
+static void untrackedAfterEmptyFirstBatch(bool viaReport) {
+    pfItem = buildFloatTensor((size_t[]){2}, 1, (float[]){0.1f, 0.2f});
+    pfLabel = buildFloatTensor((size_t[]){2}, 1, (float[]){0.f, 1.f});
+    g_pfDatasetSize = 2;
+    layer_t *model[1] = {bnLayer(2, true, true, TRAINABLE_DEFAULT)};
+    dataLoader_t *evalDl =
+        dataLoaderInit(pfGetSample, pfDatasetSize, 1, NULL, NULL, false, 0, true);
+    g_realGetBatch = evalDl->getBatch;
+    evalDl->getBatch = emptyFirstGetBatch;
+    if (viaReport) {
+        size_t cm[4];
+        (void)evaluationEpochWithReport(model, 1, MSE, evalDl, inferenceMustNotRun, cm, 2,
+                                        REDUCTION_MEAN, 1);
+    } else {
+        (void)evaluationEpoch(model, 1, MSE, evalDl, inferenceMustNotRun, REDUCTION_MEAN, 1);
+    }
+}
+
+void testPerSamplePreflightSkipsAnEmptyFirstBatch(void) {
+    ASSERT_EXITS_WITH(1, untrackedAfterEmptyFirstBatch(false));
+    ASSERT_EXITS_WITH(1, untrackedAfterEmptyFirstBatch(true));
 }
 
 int main(void) {
@@ -667,6 +964,16 @@ int main(void) {
     RUN_TEST(testTrainingRunRejectsUntrackedRank3SingleStep);
     RUN_TEST(testTrainingRunAcceptsTrackedRank2BatchNorm);
     RUN_TEST(testTrainingRunAcceptsUntrackedRank3BatchNorm);
+    RUN_TEST(testTrainingRunAcceptsUntrackedRank3BatchNormStacked);
+    RUN_TEST(testTrainingRunPassesPreflightForUntrackedRank2WhenEvalStacks);
+    RUN_TEST(testTrainingRunRejectsUntrackedRank2WithOneRowTail);
+    RUN_TEST(testPreflightJudgesMinOfMAndN);
+    RUN_TEST(testTrainingRunRejectsNonFloat32ForwardAtEvalMicroBatchBeforeEpoch0);
+    RUN_TEST(testTrainingRunRejectsEmptyEvalLoaderBeforeThePeek);
+    RUN_TEST(testUntrackedRank2BatchNormEvaluatesPerChunk);
+    RUN_TEST(testEntryPointPreflightsUntrackedBatchNormInline);
+    RUN_TEST(testPerSamplePreflightSkipsAnEmptyFirstBatch);
+    RUN_TEST(testTrainingRunTrainsAndEvaluatesUntrackedRank2BatchNorm);
     int rc = UNITY_END();
     freeQuantization(g_q);
     return rc;

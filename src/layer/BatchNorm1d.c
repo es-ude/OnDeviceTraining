@@ -178,21 +178,24 @@ static size_t bnInner(const tensor_t *t) {
  * stats. PyTorch rejects n = 1 only; n = 0 is stricter by design (#460).
  *
  * Adversarial-review fix #1: an untracked (noRunningStats) BN always uses
- * batch statistics, even in eval (D4) -- and evaluation runs one sample per
- * call (#152 D10), so a rank-2 [1, C] evaluation sample always has n = 1.
+ * batch statistics, even in eval (D4), over its evaluation chunk (#468): the
+ * untracked-eval n is rows * T of that chunk, so a single-row rank-2
+ * [1, C] chunk has n = 1.
  * The generic "raise microBatchSize" / "a frozen or eval-mode BN falls back
- * to running statistics" message is actively wrong there: there is no
- * training loop to raise microBatchSize on, and there are no running
- * statistics to fall back to. Give that case its own message. The same
+ * to running statistics" message is actively wrong there: there are no
+ * running statistics to fall back to, and the knob to raise is the
+ * evaluation micro-batch size. Give that case its own message. The same
  * untracked BN dying in training (#467) needs its own message too: the
  * generic branch's "(a frozen or eval-mode BN uses running statistics
  * instead)" parenthetical is false without running statistics to fall back
  * on, even though microBatchSize is still the right knob to raise. */
 static void bnDieUntrackedEval(const char *what, size_t n) {
     PRINT_ERROR("BatchNorm1d %s: no running statistics (noRunningStats), so evaluation normalizes "
-                "with batch statistics; evaluation runs one sample per call, so n = T values per "
-                "channel -- got n = %zu -- track running statistics, or feed rank-3 [1, C, T >= 2] "
-                "samples",
+                "with batch statistics over its chunk (n = rows x T values per channel) -- got "
+                "n = %zu -- track running statistics, or raise the evaluation micro-batch size "
+                "(trainingRunOptions_t.evalMicroBatchSize, or the evaluationEpoch* "
+                "microBatchSize) so every chunk, including the last N mod m rows, has >= 2 values "
+                "per channel",
                 what, n);
     exit(1);
 }
@@ -234,17 +237,16 @@ static void bnRequireBatchStatsSize(const batchNorm1dConfig_t *cfg, const tensor
     exit(1);
 }
 
-/* #467: an untracked BN normalizes with batch statistics even in evaluation
- * (bnUsesBatchStats), and evaluation always runs one sample per call (#152
- * D10) -- so the eval input's batch axis contributes exactly 1, and n is
- * whatever the trailing (post-channel) dims multiply out to. No-op for a
- * tracked BN, which falls back to running statistics in eval. */
+/* #467/#468: an untracked BN normalizes with batch statistics even in evaluation
+ * (bnUsesBatchStats), over its evaluation chunk -- [rows, C] or [rows, C, T] -- so
+ * n = rows * prod(dims[2:]). No-op for a tracked BN, which falls back to running
+ * statistics in eval. */
 void batchNorm1dRequireEvaluable(const layer_t *layer, const shape_t *evalInputShape,
                                  const char *what) {
     if (layer->config->batchNorm1d->trackRunningStats) {
         return;
     }
-    size_t n = 1;
+    size_t n = evalInputShape->dimensions[0];
     for (size_t d = 2; d < evalInputShape->numberOfDimensions; d++) {
         n *= evalInputShape->dimensions[d];
     }

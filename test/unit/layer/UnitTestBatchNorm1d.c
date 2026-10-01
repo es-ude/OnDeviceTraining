@@ -466,6 +466,40 @@ void testRequireEvaluableNoOpsForUntrackedBatchNormWithEnoughSamples(void) {
     bnFixtureFree(&f);
 }
 
+/* #468: the pre-flight judges stacked evaluation chunks, so dims[0] (rows)
+ * contributes to n. Untracked rank-2 [2, C] has n = 2 and must pass. */
+void testRequireEvaluableCountsRowsForUntrackedRank2(void) {
+    bnFixture_t f;
+    bnFixtureInit(&f, 2, true, false /* track */, NULL, NULL, NULL, NULL, BN_MOMENTUM_DEFAULT,
+                  0.0f);
+    size_t dims[2] = {2, 2};
+    size_t order[2] = {0, 1};
+    shape_t s;
+    setShape(&s, dims, 2, order);
+    ASSERT_EXITS_WITH(0, batchNorm1dRequireEvaluable(&f.layer, &s, "t"));
+    bnFixtureFree(&f);
+}
+
+/* [2, C, 1]: n = rows * T = 2 passes; [1, C, 1] and [1, C]: n = 1 fails. */
+void testRequireEvaluableRowsTimesStepsThreshold(void) {
+    bnFixture_t f;
+    bnFixtureInit(&f, 2, true, false /* track */, NULL, NULL, NULL, NULL, BN_MOMENTUM_DEFAULT,
+                  0.0f);
+    size_t dims3[3] = {2, 2, 1};
+    size_t order3[3] = {0, 1, 2};
+    shape_t s3;
+    setShape(&s3, dims3, 3, order3);
+    ASSERT_EXITS_WITH(0, batchNorm1dRequireEvaluable(&f.layer, &s3, "t"));
+    dims3[0] = 1;
+    ASSERT_EXITS_WITH_FAILURE(batchNorm1dRequireEvaluable(&f.layer, &s3, "t"));
+    size_t dims2[2] = {1, 2};
+    size_t order2[2] = {0, 1};
+    shape_t s2;
+    setShape(&s2, dims2, 2, order2);
+    ASSERT_EXITS_WITH_FAILURE(batchNorm1dRequireEvaluable(&f.layer, &s2, "t"));
+    bnFixtureFree(&f);
+}
+
 void testForwardRejectsRank1(void) {
     size_t order[1] = {0};
     bnFixture_t f;
@@ -1015,6 +1049,8 @@ int main(void) {
     RUN_TEST(testForwardTrainingFrozenUntrackedRejectsSingleRow);
     RUN_TEST(testRequireEvaluableNoOpsForTrackedBatchNormRank2);
     RUN_TEST(testRequireEvaluableNoOpsForUntrackedBatchNormWithEnoughSamples);
+    RUN_TEST(testRequireEvaluableCountsRowsForUntrackedRank2);
+    RUN_TEST(testRequireEvaluableRowsTimesStepsThreshold);
     RUN_TEST(testForwardRejectsRank1);
     RUN_TEST(testForwardRejectsRank4);
     RUN_TEST(testForwardRejectsTransposedInput);

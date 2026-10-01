@@ -28,11 +28,12 @@ typedef enum {
  *   batch statistics iff !trackRunningStats || (training && !frozen)
  *   running update   iff trackRunningStats && training && !frozen
  * A batch-statistics forward/backward needs n = m*T >= 2 (fails fast).
- * Evaluation always runs one sample per call (#152 D10), so an untracked
- * (!trackRunningStats) rank-2 BatchNorm1d cannot be evaluated (n = 1 always
- * fails); track running statistics, or evaluate rank-3 [1, C, T >= 2].
- * trainingRun rejects this before epoch 0, judged on the first eval sample
- * (batchNorm1dRequireEvaluable, #467).
+ * Evaluation stacks consecutive samples into chunks of up to m rows (#468; m = 1
+ * by default), so an untracked (!trackRunningStats) BatchNorm1d normalizes over
+ * its chunk: its eval output depends on the chunk mates (as in PyTorch) and needs
+ * n = rows * T >= 2 for EVERY chunk, including the ragged last one; trainingRun
+ * and the evaluationEpoch* entry points check this up front
+ * (batchNorm1dRequireEvaluable, #467/#468).
  *
  * CONCURRENCY INVARIANT: the training forward writes runningMean/
  * runningVar/numBatchesTracked. One instance must never run two forwards
@@ -83,10 +84,10 @@ void batchNorm1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss,
                          tensor_t *propLoss);
 void batchNorm1dCalcOutputShape(layer_t *layer, shape_t *inputShape, shape_t *outputShape);
 
-/*! Evaluation pre-flight (#467): exits with the untracked-evaluation message
- *  if `layer` (a BATCHNORM1D) tracks no running statistics and a one-sample
- *  evaluation forward on `evalInputShape` (its [1, C] or [1, C, T] input)
- *  would see n = ∏dims[2:] < 2 values per channel. No-op for a tracked BN.
+/*! Evaluation pre-flight (#467/#468): exits with the untracked-evaluation message
+ *  if `layer` (a BATCHNORM1D) tracks no running statistics and an evaluation
+ *  forward on `evalInputShape` ([rows, C] or [rows, C, T]) would see
+ *  n = rows * prod(dims[2:]) < 2 values per channel. No-op for a tracked BN.
  *  `what` names the caller in the message. */
 void batchNorm1dRequireEvaluable(const layer_t *layer, const shape_t *evalInputShape,
                                  const char *what);

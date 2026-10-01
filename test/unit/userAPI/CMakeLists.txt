@@ -701,6 +701,10 @@ target_link_libraries(UnitTestStackedEvaluation PRIVATE
         LossFunction
         DataLoader
         DataLoaderApi
+        OptimizerApi
+        Optimizer
+        Sgd
+        SgdApi
         RNG
         Common
         odt_test_death

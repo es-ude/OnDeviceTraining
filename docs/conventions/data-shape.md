@@ -34,10 +34,11 @@ Datasets never carry a batch axis; the loop owns it.
   and `inferenceBatched`.
   At `microBatchSize` m > 1, `trainingBatchDefault` instead gathers each
   chunk of m samples into an `[m, ...]` copy (#152 PR3b, FLOAT32 only; see
-  `trainingRunOptions_t.microBatchSize`); evaluation stays one sample per call.
-  The `numClasses` peeks in `trainingRun` and
-  `evaluationEpochWithMetrics` read the raw sample label's element count (the
-  per-sample class count).
+  `trainingRunOptions_t.microBatchSize`). The evaluation consumers hand
+  `[1, ...]` views at m = 1 and, at m > 1, `[rows, ...]` views over gather
+  buffers filled across loader batches (#468). `numClasses` still comes from the
+  raw sample label's element count (the per-sample class count) in `trainingRun`
+  and `evaluationEpochWithMetrics`, and `evaluationEpochWithReport` checks it.
 - Nothing auto-detects an existing batch axis: a sample that already carries a
   leading 1 is wrapped again (`[1, 1, ...]`). A missed or doubled wrap travels
   through rank-preserving layers (Relu, LayerNorm, Dropout) until the first

@@ -131,21 +131,19 @@ typedef struct trainingRunOptions {
     size_t microBatchSize;      /* rows per forward/backward call inside each macro batch (#152);
                                     0 means 1. m > 1 stacks m samples into one [m, ...] call:
                                     FLOAT32 models only, every macro batch must be divisible by m.
-                                    Training only -- evaluation always runs one sample per call.
+                                    Evaluation inherits it unless evalMicroBatchSize is set.
                                     Dropout fails fast at m > 1 (its mask holds one sample). A
                                     rank-2 BatchNorm1d in training mode needs microBatchSize >= 2
-                                    (batch statistics need >= 2 values per channel). Since
-                                    evaluation runs one sample per call, an untracked
-                                    (noRunningStats) rank-2 BatchNorm1d cannot be evaluated;
-                                    track running statistics or use [C, T >= 2] samples --
-                                    trainingRun rejects this before epoch 0, judged on the first
-                                    eval sample (eval samples must share one shape; #467). */
-    size_t evalMicroBatchSize;  /* rows per inferenceFn call during evaluation (#468); 0 means 1.
-                                    Independent of microBatchSize. */
+                                    (batch statistics need >= 2 values per channel). */
+    size_t evalMicroBatchSize;  /* rows per inferenceFn call during evaluation (#468); 0 inherits
+                                    microBatchSize. An untracked BatchNorm1d's eval output depends
+                                    on its chunk mates (deterministic: the eval loader is never
+                                    reshuffled). */
 } trainingRunOptions_t;
 
 void freeTrainingStats(trainingStats_t *trainingStats);
 
+/*! Per-sample primitive over one batch_t: never stacks (the epoch entry points do, #468). */
 float evaluationBatch(layer_t **model, size_t modelSize, lossFuncType_t funcType, batch_t *batch,
                       inferenceWithLossFn_t inferenceFn, reduction_t forwardReduction);
 
@@ -186,11 +184,11 @@ classificationReport_t evaluationEpochWithReport(layer_t **model, size_t modelSi
  * compensating batch scheduler would both write the LR every epoch; the train
  * loader's batchSize is not divisible by options->microBatchSize; or, with a
  * batch scheduler and microBatchSize > 1, any batch the scheduler will set for
- * epochs 1..numberOfEpochs-1 is not divisible by it (#152); or the model has
- * an untracked (noRunningStats) BatchNorm1d whose one-sample evaluation input
- * (walked from the first eval sample -- eval samples are assumed to share one
- * shape, as the numClasses derivation already does) has fewer than 2 values
- * per channel (#467). */
+ * epochs 1..numberOfEpochs-1 is not divisible by it (#152); or
+ * evaluation cannot run: the eval loader yields no batch; a non-FLOAT32
+ * forward with an evaluation micro-batch > 1; or an untracked (noRunningStats)
+ * BatchNorm1d whose evaluation chunk -- full or the N mod m tail -- has fewer
+ * than 2 values per channel (#467/#468). */
 trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
                                 dataLoader_t *trainDataLoader, dataLoader_t *evalDataLoader,
                                 optimizer_t *optimizer, size_t numberOfEpochs,

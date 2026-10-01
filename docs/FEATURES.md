@@ -60,11 +60,15 @@ Notes on the qualified cells:
   `trainingRunOptions_t.microBatchSize`), running stats update once per
   `calculateGradsFn` call (`b/m` per step). Batch statistics need
   `n = m·T ≥ 2`; frozen = eval-mode BN; running buffers persist via the v6
-  format and `modelLoadStateDictBuffers`. Evaluation always runs one sample
-  per call, so an untracked (`noRunningStats`) rank-2 BatchNorm1d cannot be
-  evaluated (`n = 1`; `trainingRun` rejects it before epoch 0, judged on the first eval
-  sample — eval samples must share one shape); track
-  running statistics or evaluate rank-3 `[1, C, T >= 2]` samples instead.
+  format and `modelLoadStateDictBuffers`. An untracked
+  (`noRunningStats`) BatchNorm1d normalizes over its evaluation chunk, so its
+  eval output depends on the chunk mates (chunks are consecutive samples and
+  the eval loader is never reshuffled, so composition is deterministic). Every
+  chunk -- the full one (`min(m, N)` rows) and the `N mod m` tail -- needs `>= 2`
+  values per channel; `trainingRun` (before epoch 0) and the `evaluationEpoch*`
+  entry points reject violations. Workarounds: track running statistics, set
+  `evalMicroBatchSize` (or the entry points' `microBatchSize`) so every chunk
+  has `>= 2` rows, or use rank-3 `[C, T >= 2]` samples.
 - **`SYM_INT32 arith`** — *native* means an integer kernel selected by the op's
   `arithmetic_t.type` and routed through the `executeOp` funnel (raw int32 mantissas,
   width-restored at the producer). *scale-transparent* (Flatten/Dropout) copies int
@@ -451,7 +455,10 @@ checkpointing, limitations, literature).
   A "batch" is gradient accumulation over microbatches of `microBatchSize` rows
   (`trainingRunOptions_t`, default 1; m > 1 stacks m samples into one `[m, ...]`
   forward/backward, FLOAT32 only, `b % m == 0` enforced, Dropout fails fast at
-  m > 1; evaluation stays one sample per call, #152). Metrics: loss, accuracy,
+  m > 1; #152). Evaluation stacks up to `evalMicroBatchSize` rows per call (0
+  inherits `microBatchSize`; ragged last chunk; FLOAT32 forwards; #468); an
+  untracked BatchNorm1d is evaluable once its chunks have >= 2 values per
+  channel. Metrics: loss, accuracy,
   macro precision/recall/F1, and a caller-owned confusion matrix
   (`epochStats_t` / `classificationReport_t`). Three eval entry points.
   `calculateGradsSequential`'s backward pass truncates at `deepestTrainableIndex`

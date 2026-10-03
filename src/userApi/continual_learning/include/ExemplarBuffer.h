@@ -11,7 +11,10 @@
  * dropped — first-K policy, no reservoir). Stored exemplars are COPIES
  * (executeConvert into cloned storage: any item dtype, mirroring the
  * loader-pool contract); the replay loader hands out POINTERS into the
- * buffer, so stored tensors must outlive the wrapped loader. */
+ * buffer, so stored tensors must outlive the wrapped loader. Every item
+ * offered must be in identity dimension order (no transposed views) and have
+ * the first stored exemplar's rank and dimensions, across all classes; a
+ * mismatch exits. */
 typedef struct {
     size_t numClasses, capacity;
     tensor_t **items; /* [numClasses * capacity]; NULL until stored */

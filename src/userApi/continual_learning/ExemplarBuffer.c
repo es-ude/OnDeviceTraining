@@ -56,22 +56,59 @@ exemplarBuffer_t *exemplarBufferCreate(size_t numClasses, size_t capacity) {
     return buf;
 }
 
+static void requireStoredShape(const tensor_t *item, const tensor_t *stored) {
+    size_t itemCount = calcNumberOfElementsByTensor((tensor_t *)item);
+    size_t storedCount = calcNumberOfElementsByTensor((tensor_t *)stored);
+    if (itemCount != storedCount) {
+        PRINT_ERROR("exemplarBufferAdd: item element count %zu != stored %zu", itemCount,
+                    storedCount);
+        exit(1);
+    }
+    const shape_t *is = item->shape;
+    const shape_t *ss = stored->shape;
+    if (is->numberOfDimensions != ss->numberOfDimensions) {
+        PRINT_ERROR("exemplarBufferAdd: item rank %zu != stored rank %zu", is->numberOfDimensions,
+                    ss->numberOfDimensions);
+        exit(1);
+    }
+    /* both orders are identity (requireIdentityOrder), so the dimensions alone decide */
+    for (size_t d = 0; d < ss->numberOfDimensions; d++) {
+        if (is->dimensions[d] != ss->dimensions[d]) {
+            PRINT_ERROR("exemplarBufferAdd: item dimension %zu has size %zu, the stored exemplars "
+                        "have %zu",
+                        d, is->dimensions[d], ss->dimensions[d]);
+            exit(1);
+        }
+    }
+}
+
+/* The copy converts element-wise in storage order into an identity-order
+ * shape (getShapeLike), so a transposed view would silently be stored as its
+ * untransposed base. */
+static void requireIdentityOrder(const tensor_t *item) {
+    const shape_t *is = item->shape;
+    for (size_t d = 0; d < is->numberOfDimensions; d++) {
+        if (is->orderOfDimensions[d] != d) {
+            PRINT_ERROR("exemplarBufferAdd: item is not in identity dimension order (dimension "
+                        "%zu has order %zu); transposed views cannot be stored",
+                        d, is->orderOfDimensions[d]);
+            exit(1);
+        }
+    }
+}
+
 void exemplarBufferAdd(exemplarBuffer_t *buf, const tensor_t *item, size_t classIndex) {
     if (classIndex >= buf->numClasses) {
         PRINT_ERROR("exemplarBufferAdd: classIndex %zu out of range (numClasses %zu)", classIndex,
                     buf->numClasses);
         exit(1);
     }
-    /* every stored exemplar must match the first one's element count (one
-     * model input shape per buffer) */
+    requireIdentityOrder(item);
+    /* one model input shape per buffer: the replay loader lends stored
+     * exemplars zero-copy into batches of real samples */
     for (size_t c = 0; c < buf->numClasses; c++) {
         if (buf->counts[c] > 0) {
-            size_t stored = calcNumberOfElementsByTensor(buf->items[c * buf->capacity]);
-            if (calcNumberOfElementsByTensor((tensor_t *)item) != stored) {
-                PRINT_ERROR("exemplarBufferAdd: item element count %zu != stored %zu",
-                            calcNumberOfElementsByTensor((tensor_t *)item), stored);
-                exit(1);
-            }
+            requireStoredShape(item, buf->items[c * buf->capacity]);
             break;
         }
     }

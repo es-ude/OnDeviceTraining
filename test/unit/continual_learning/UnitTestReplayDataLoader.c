@@ -326,6 +326,43 @@ void testExemplarBufferRejectsBadClassAndShape(void) {
     freeExemplarBuffer(buf);
 }
 
+/* #476: one model input shape per buffer. Every candidate below has the stored
+ * [2, 3] exemplar's element count, so only a full shape comparison catches it,
+ * and it is offered to the OTHER class (the guard compares across classes). */
+static void assertExemplarAddRejectsAgainstStored2x3(tensor_t *candidate) {
+    exemplarBuffer_t *buf = exemplarBufferCreate(2, 2);
+    tensor_t *stored = buildFloat32TensorND(2, (size_t[]){2, 3}, NULL);
+    exemplarBufferAdd(buf, stored, 0);
+    ASSERT_EXITS_WITH_FAILURE(exemplarBufferAdd(buf, candidate, 1));
+    freeTensor(stored);
+    freeExemplarBuffer(buf);
+}
+
+void testExemplarBufferRejectsSameCountDifferentRank(void) {
+    /* trailing singleton: the stored rank-2 prefix matches, only the rank differs */
+    tensor_t *extraAxis = buildFloat32TensorND(3, (size_t[]){2, 3, 1}, NULL);
+    assertExemplarAddRejectsAgainstStored2x3(extraAxis);
+    freeTensor(extraAxis);
+}
+
+void testExemplarBufferRejectsSameRankDifferentDimensions(void) {
+    tensor_t *swapped = buildFloat32TensorND(2, (size_t[]){3, 2}, NULL);
+    assertExemplarAddRejectsAgainstStored2x3(swapped);
+    freeTensor(swapped);
+}
+
+/* The copy is element-wise in storage order into an identity-order shape, so a
+ * transposed view would be stored as its untransposed base: rejected even as
+ * the very first exemplar. */
+void testExemplarBufferRejectsNonIdentityOrderIntoEmptyBuffer(void) {
+    exemplarBuffer_t *buf = exemplarBufferCreate(2, 2);
+    tensor_t *transposed = buildFloat32TensorND(2, (size_t[]){2, 3}, NULL);
+    transposeTensor(transposed, 0, 1);
+    ASSERT_EXITS_WITH_FAILURE(exemplarBufferAdd(buf, transposed, 0));
+    freeTensor(transposed);
+    freeExemplarBuffer(buf);
+}
+
 #if SIZE_MAX > UINT32_MAX
 /* #475: numClasses * capacity wraps to 0. */
 void testExemplarBufferCreateRejectsSlotCountOverflow(void) {
@@ -671,6 +708,9 @@ int main(void) {
     RUN_TEST(testPpcaModeStillRequiresStream);
     RUN_TEST(testExemplarBufferKeepsFirstKAndCopies);
     RUN_TEST(testExemplarBufferRejectsBadClassAndShape);
+    RUN_TEST(testExemplarBufferRejectsSameCountDifferentRank);
+    RUN_TEST(testExemplarBufferRejectsSameRankDifferentDimensions);
+    RUN_TEST(testExemplarBufferRejectsNonIdentityOrderIntoEmptyBuffer);
 #if SIZE_MAX > UINT32_MAX
     RUN_TEST(testExemplarBufferCreateRejectsSlotCountOverflow);
     RUN_TEST(testExemplarBufferCreateRejectsSlotByteOverflow);

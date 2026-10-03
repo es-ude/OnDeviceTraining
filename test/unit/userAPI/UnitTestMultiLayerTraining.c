@@ -880,16 +880,19 @@ void testBfpWireGeometryIgnoresTemplateNumGroups(void) {
 }
 
 /*! A groupSize that does not divide the wire has no valid derived geometry --
- *  fail fast with a guided message instead of silently truncating. Wire is
- *  [1, 9] with groupSize 2: an un-guarded floor division would yield a {4, 2}
- *  config covering only 8 of the 9 elements, and the packer would index
- *  exponents[4] past the array. */
-void testInitLayerOutputsBfpGroupSizeMismatchDies(void) {
+ *  fail fast with a message naming the wire instead of silently truncating.
+ *  Wire ACT 1 is [1, 9] with groupSize 2: an un-guarded floor division would
+ *  yield a {4, 2} config covering only 8 of the 9 elements, and the packer
+ *  would index exponents[4] past the array. The wire table rejects it when
+ *  the call builds its scheduler, before any layer runs. */
+void testBfpActWireGroupSizeMismatchDiesNamingTheWire(void) {
     bfpWireFixture_t f;
     buildBfpWireFixture(&f, /*hidden=*/9, /*templateNumGroups=*/2, /*wireGroupSize=*/2);
 
-    ASSERT_EXITS_WITH_FAILURE(freeTrainingStats(calculateGradsSequential(
-        f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label)));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "BFP groupSize 2 does not divide the 9 elements of wire ACT 1",
+        freeTrainingStats(calculateGradsSequential(f.model, 2, defaultLossConfig(MSE),
+                                                   REDUCTION_MEAN, f.input, f.label)));
 
     freeBfpWireFixture(&f);
 }
@@ -1031,21 +1034,24 @@ void testBfpDxWireGroupSizeEqualToWireElementsNormalizesToPerTensor(void) {
     TEST_ASSERT_TRUE_MESSAGE(isfinite(loss), "the normalized dx wire must stay trainable");
 }
 
-/*! initGradTensor's divisibility fail-fast (the dx-wire twin of
- *  testInitLayerOutputsBfpGroupSizeMismatchDies). Same discriminating fixture
- *  shape: a 9-element dx wire with groupSize 2, so that floor division yields
- *  the CONSTRUCTIBLE shape {4, 2} -- initBfpQConfigGrouped's own guard does not
- *  fire, and without this check the packer would index exponents[4] past a
- *  4-entry array. (A groupSize that floors to {1, n} would be caught by
- *  initBfpQConfigGrouped anyway and would make this test vacuous.) */
-void testInitGradTensorBfpGroupSizeMismatchDies(void) {
+/*! The dx-wire twin of testBfpActWireGroupSizeMismatchDiesNamingTheWire. Same
+ *  discriminating fixture shape: a 9-element dx wire (GRAD 1) with groupSize
+ *  2, so that floor division yields the CONSTRUCTIBLE shape {4, 2} --
+ *  initBfpQConfigGrouped's own guard does not fire, and without this check the
+ *  packer would index exponents[4] past a 4-entry array. (A groupSize that
+ *  floors to {1, n} would be caught by initBfpQConfigGrouped anyway and would
+ *  make this test vacuous.) The GRAD wire is checked with every other wire
+ *  when the call builds its scheduler, so it dies before the first forward. */
+void testBfpGradWireGroupSizeMismatchDiesNamingTheWire(void) {
     rngSetSeed(4242u);
     bfpWireFixture_t f;
     buildBfpWireFixture(&f, /*hidden=*/9, /*templateNumGroups=*/2, /*wireGroupSize=*/2);
     moveBfpTemplateToDxWire(&f, /*pinPropLossMath=*/true);
 
-    ASSERT_EXITS_WITH_FAILURE(freeTrainingStats(calculateGradsSequential(
-        f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label)));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "BFP groupSize 2 does not divide the 9 elements of wire GRAD 1",
+        freeTrainingStats(calculateGradsSequential(f.model, 2, defaultLossConfig(MSE),
+                                                   REDUCTION_MEAN, f.input, f.label)));
 
     freeBfpWireFixture(&f);
 }
@@ -2965,11 +2971,11 @@ int main(void) {
     RUN_TEST(testBfpFakeQuantTrainingLossDecreasesAndGridMoves);
     RUN_TEST(testBfpWireFakeQuantTrainingLossDecreasesAndWirePacks);
     RUN_TEST(testBfpWireGeometryIgnoresTemplateNumGroups);
-    RUN_TEST(testInitLayerOutputsBfpGroupSizeMismatchDies);
+    RUN_TEST(testBfpActWireGroupSizeMismatchDiesNamingTheWire);
     RUN_TEST(testBfpDxWireAllocatesThroughInitGradTensor);
     RUN_TEST(testBfpWireGroupSizeEqualToWireElementsNormalizesToPerTensor);
     RUN_TEST(testBfpDxWireGroupSizeEqualToWireElementsNormalizesToPerTensor);
-    RUN_TEST(testInitGradTensorBfpGroupSizeMismatchDies);
+    RUN_TEST(testBfpGradWireGroupSizeMismatchDiesNamingTheWire);
     RUN_TEST(testBfpDxWireNativeBackwardTrains);
     RUN_TEST(testOwningFactoryBfpOutputQFreesExponents);
     RUN_TEST(testBfpNativeForwardTrainingLossDecreasesAndGridMoves);

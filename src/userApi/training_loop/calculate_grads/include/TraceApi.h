@@ -29,7 +29,8 @@ typedef void (*traceSink_t)(void *ctx, size_t layerIdx, layerType_t layerType, c
  *  above it, never for a layer below it (no dx is consumed there). If no
  *  layer in the model trains, backward is skipped entirely -- NO "lossgrad"
  *  and NO "agrad" events fire (the loss value is still computed and "fwd"
- *  still fires for every layer). */
+ *  still fires for every layer). Preconditions: as for
+ *  calculateGradsSequential (modelSize >= 1, and the uint16_t wire cap). */
 trainingStats_t *tracedGrads(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
                              reduction_t forwardReduction, tensor_t *input, tensor_t *label,
                              traceSink_t sink, void *ctx);

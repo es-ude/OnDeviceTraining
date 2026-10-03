@@ -186,5 +186,6 @@ target_link_libraries(UnitTestCalculateGradsConformance PRIVATE
         LossFunction
         Distributions
         RNG
+        odt_test_death
 )
 __register_target_as_unit_test(UnitTestCalculateGradsConformance)

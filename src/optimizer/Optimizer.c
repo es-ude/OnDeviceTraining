@@ -30,10 +30,10 @@ void optimizerZeroGrad(optimizer_t *optimizer) {
 
         /* Byte-zero the mantissa/code storage above is necessary but, for
          * SYM/ASYM, not sufficient for VALUE-zero: config-reset the grid so
-         * code 0 decodes to exactly 0.0f (spec §5.3). SYM_INT32's scale reset
+         * code 0 decodes to exactly 0.0f. SYM_INT32's scale reset
          * is hygiene (the first-store trigger is the all-zero mantissa state,
          * not the scale); ASYM's zeroPoint reset is load-bearing - without it,
-         * code 0 would decode to zeroPoint*scale, not 0 (PR2 watch-list item). */
+         * code 0 would decode to zeroPoint*scale, not 0. */
         switch (param->grad->quantization->type) {
         case SYM_INT32: {
             symInt32QConfig_t *symIntQ = param->grad->quantization->qConfig;

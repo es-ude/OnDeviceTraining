@@ -36,8 +36,8 @@ typedef struct {
 
 /* Merge/streaming workspace: reserveMemory-backed flat float buffers,
  * created once (ppcaWorkspaceCreate), reused across updates and classes.
- * p_max = rank + maxSessionSamples + 1. Inventory == spec section 5.6;
- * ppcaWorkspaceBytes returns EXACTLY this sum. */
+ * p_max = rank + maxSessionSamples + 1. ppcaWorkspaceBytes returns EXACTLY
+ * the sum of the buffers below. */
 typedef struct {
     size_t dim, rank, maxSessionSamples;
     float *bT;        /* [(p_max) * dim]  augmented matrix, stored transposed */
@@ -59,7 +59,7 @@ typedef struct {
     ppcaWorkspace_t *workspace;
 } ppcaReplaySet_t;
 
-/* Math API (no allocation in steady state; all funnel-routed per spec §5.5). */
+/* Math API (no allocation in steady state; all funnel-routed). */
 void ppcaReplayUpdate(ppcaReplay_t *g, const tensor_t *samples, ppcaWorkspace_t *ws);
 void ppcaReplayUpdateStreaming(ppcaReplay_t *g, const tensor_t *x, ppcaWorkspace_t *ws);
 void ppcaReplaySample(const ppcaReplay_t *g, rng32_t *rng, tensor_t *out);

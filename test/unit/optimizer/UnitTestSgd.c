@@ -845,7 +845,7 @@ void testSgdZeroGradAsymSubByteZeroesAllPackedBytes(void) {
     tensor_t *g = gradInitAsym(p, 3, HALF_AWAY, NULL);
     parameter_t *param = parameterInit(p, g);
     memset(g->data, 0xFF, 4); /* poison all packed grad bytes */
-    /* Poison the config too (PR3, spec §5.3): byte-zero alone is not
+    /* Poison the config too (PR3): byte-zero alone is not
      * VALUE-zero for ASYM (code 0 decodes to -zeroPoint*scale, PR4 code
      * domain) — the config
      * reset asserted below is the fix for the PR2 watch-list item. */
@@ -892,11 +892,11 @@ void testSgdZeroGradAsymSubByteZeroesAllPackedBytes(void) {
 }
 
 void testSgdZeroGradSymSubByteZeroesAllPackedBytesAndResetsScale(void) {
-    /* SYM sibling of the ASYM test above (PR3, spec §5.3). qBits=3, N=10 grad
+    /* SYM sibling of the ASYM test above (PR3). qBits=3, N=10 grad
      * -> packed ceil(30/8)=4 bytes. SYM's all-zero-mantissa state is already
      * the first-store trigger for accumulateFloatIntoSymTensorFixedGrid, so
      * correctness does not depend on the scale reset — this asserts the
-     * hygiene/consistency reset the spec calls for anyway. */
+     * hygiene/consistency reset anyway. */
     size_t *pDims = reserveMemory(2 * sizeof(size_t));
     pDims[0] = 2;
     pDims[1] = 5;
@@ -943,8 +943,7 @@ void testSgdZeroGradSymSubByteZeroesAllPackedBytesAndResetsScale(void) {
 }
 
 void testSgdMCreateOptimAdmitsPackedSymGradStorage(void) {
-    /* CONTRACT FLIP (second of exactly two sanctioned in this PR — spec §5.1;
-     * pr3-autonomous-decisions.md item 5. The other is Task 3's ExecuteOp
+    /* CONTRACT FLIP (second of exactly two sanctioned in this PR. The other is Task 3's ExecuteOp
      * `testAccIntoSubByteTargetAborts` -> `testAccFixedIntoPackedSymDerivesThenCarriesGrid`).
      * This test used to be `testSgdMCreateOptimRejectsSubByteGradStorage`,
      * pinning "packed SYM grad storage aborts optimizer construction". PR3
@@ -1206,8 +1205,8 @@ void testSgdStepMFloatReadsPackedSymGradGeneric(void) {
      * Hand-built optimizer (UnitTestSgd.c:545-556 stack pattern): FLOAT32
      * param, grad = SYM@8 seeded via ONE accumulateFloatIntoSymTensorFixedGrid
      * call. The grad starts fresh (all-zero mantissa from initTensor's
-     * zero-fill), so the call triggers first-store grid derivation (spec
-     * §4.1): scale = absmax(inc)/qMax, qMax = 2^(8-1)-1 = 127. inc = {2.0,
+     * zero-fill), so the call triggers first-store grid derivation:
+     * scale = absmax(inc)/qMax, qMax = 2^(8-1)-1 = 127. inc = {2.0,
      * -1.5, 0.5} -> absmax = 2.0 -> scale = 2.0/127. codes = round(inc/scale):
      *   2.0  / scale =  127.0   (exact) -> code  127
      *  -1.5  / scale =  -95.25          -> code  -95
@@ -2024,7 +2023,7 @@ void testOptimizerClipGradNormRejectsBfpGradStorage(void) {
     freeParameter(param);
 }
 
-/* Final-review Fix 3(c): momentumStateInit (SgdApi.c) builds the momentum
+/* momentumStateInit (SgdApi.c) builds the momentum
  * buffer via getQLike(momentumQuant) with no carrier gate of its own --
  * unlike gradInit (TensorApi.c), which already fail-fasts a grouped SYM
  * template (grouped grads are a future #300 axis). A grouped SYM
@@ -2466,7 +2465,7 @@ void testSgdStepGroupedAsymParamMatchesGold(void) {
  * carrier gate must reject a grouped ASYM template exactly like the grouped
  * SYM one -- getQLike would otherwise deep-clone the grouped grid into a
  * momentum buffer (its ASYM arm copies scales AND zeroPoints), a state the
- * carrier contract never admits (spec §3, #300 axis). Same
+ * carrier contract never admits (#300 axis). Same
  * shape-coincidence discipline as the SYM twin: the weight's element count
  * (2*4=8) EQUALS the template's numGroups*groupSize so the death cannot come
  * from the unrelated attach-time shape guard. */

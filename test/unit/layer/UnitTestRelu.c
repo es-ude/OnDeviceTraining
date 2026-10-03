@@ -383,7 +383,7 @@ static tensor_t *buildFloatTensor1D(size_t n) {
     return initTensor(shape, quantizationInitFloat(), NULL);
 }
 
-/* BFP epic PR4 (R-P2, spec §5 Relu row + deviation 6): ReLU on packed BFP is a
+/* BFP epic PR4 (R-P2, deviations register 6): ReLU on packed BFP is a
  * pure code clamp — negatives to code 0 — with the group exponents copied
  * VERBATIM. Two groups with DIFFERENT exponents (130 / 126) so a dropped or
  * zero-state exponent copy is observable; the output codes are pre-filled with

@@ -22,8 +22,8 @@ outChPerGroup*K=6 per ic step) crosses them DISJOINTLY: e.g. oc=0, outPos=2
 (taps k={0,2}) hits a weight-only crossing at ic2->ic3 within the k=0 tap
 (w 12->18 crosses g1->g2 while the input stays in its 10-wide group) and an
 input-only crossing at ic1->ic2 within the k=2 tap (in 5->10 crosses g0->g1
-while w 8->14 stays in g1) -- both fold-clause directions observable (Task 3/4
-review lesson). outPos=11 (the outputPadding tail) has NO taps -> bias-only.
+while w 8->14 stays in g1) -- both fold-clause directions observable.
+outPos=11 (the outputPadding tail) has NO taps -> bias-only.
 Bias per-tensor (m=8, e=8), both values nonzero so the with-bias/no-bias
 expectations differ even at the tap-free tail. Values are SMALL and grid-exact
 (every code * scale reproduces the input float bit-for-bit -- asserted below),
@@ -190,7 +190,7 @@ def main() -> int:
         "with-bias and no-bias expectations coincide somewhere -- bias seed "
         "would be unobservable there")
 
-    # Dilation fixture (PR2 self-review finding 1): same operands, dilation 2.
+    # Dilation fixture: same operands, dilation 2.
     # The gather forwards kernel->dilation into convTranspose1dTapsAt only in
     # the BFP arm, so the main dilation=1 gold cannot see a hardcoded 1 there
     # -- this fixture's contributor enumeration genuinely depends on it.
@@ -205,7 +205,7 @@ def main() -> int:
     assert len(expected_dil) == BATCH * OUT_CHANNELS * dil_out_len
     assert len(set(expected_dil)) >= 2, "dilation fixture: outputs degenerate"
 
-    # Grouped-bias fixture (PR2 self-review finding 3): the SAME bias values
+    # Grouped-bias fixture: the SAME bias values
     # stored grouped {numGroups=2, groupSize=1} -- each output channel its own
     # exponent. Values exact under their per-value grids too, so the expected
     # output is BIT-IDENTICAL to the per-tensor-bias gold (asserted); a kernel

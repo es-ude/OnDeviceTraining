@@ -9,7 +9,7 @@
 #include "Flatten.h"
 #include "Quantization.h"
 
-/* BFP epic PR4 (R-P5, spec §5 "exponent array carried verbatim"): Flatten is a
+/* BFP epic PR4 (R-P5, exponent array carried verbatim): Flatten is a
  * pure reshape — storage order and element count are unchanged, so the packed
  * mantissa payload moves byte-for-byte (calcNumberOfBytesForData is already
  * BFP-correct) and the per-group exponent VALUES are memcpy'd alongside.

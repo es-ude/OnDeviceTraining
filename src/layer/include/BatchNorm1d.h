@@ -23,7 +23,7 @@ typedef enum {
 
 /* BatchNorm1d over [m, C] or [m, C, T] (identity order, FLOAT32 only), per-
  * channel statistics over the m (and T) values: Ghost-BN over the micro-
- * batch m (#152 D2). PyTorch nn.BatchNorm1d semantics: normalization uses
+ * batch m (#152). PyTorch nn.BatchNorm1d semantics: normalization uses
  * the BIASED batch variance, the running update the UNBIASED one.
  *   batch statistics iff !trackRunningStats || (training && !frozen)
  *   running update   iff trackRunningStats && training && !frozen
@@ -38,7 +38,7 @@ typedef enum {
  * CONCURRENCY INVARIANT: the training forward writes runningMean/
  * runningVar/numBatchesTracked. One instance must never run two forwards
  * concurrently, nor an eval forward concurrently with a training forward
- * (MaxPool1d.h's argmax invariant; no locks by design, #460 spec §5.4).
+ * (MaxPool1d.h's argmax invariant; no locks by design, #460).
  *
  * A non-finite input in a batch-statistics forward writes NaN into
  * runningMean/runningVar (PyTorch parity); serializeModel will write it, but

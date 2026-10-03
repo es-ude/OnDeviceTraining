@@ -135,10 +135,10 @@ arithmetic_t layerForwardMath(layer_t *layer) {
     }
 }
 
-/* ---- FLOAT32-only gate (#152 PR3b, spec §6.6; forward-only variant #468) ---
- * Stacked training (microBatchSize > 1) is FLOAT32-only (#152 D3): every declared
+/* ---- FLOAT32-only gate (#152 PR3b; forward-only variant #468) ------------
+ * Stacked training (microBatchSize > 1) is FLOAT32-only (#152): every declared
  * arithmetic, every storage config and every parameter/grad tensor must be
- * FLOAT32. Stacked evaluation (#468 D6) only runs forwards, so its variant
+ * FLOAT32. Stacked evaluation (#468) only runs forwards, so its variant
  * (forwardOnly) skips the backward-only slots: propLossMath, propLossQ, the
  * grad arithmetics and grad storage. NULL means "not declared" and never fails
  * the gate: a NULL wire config is the upstream-dtype passthrough
@@ -297,7 +297,7 @@ static const char *nonFloat32Field(layer_t *layer, bool forwardOnly) {
     }
     case DROPOUT: {
         /* The BOOL mask is not a value wire -- not gated (its element count
-         * is Dropout's own guard, which fails fast at m > 1, spec §6.8). */
+         * is Dropout's own guard, which fails fast at m > 1). */
         const dropoutConfig_t *c = layer->config->dropout;
         return wireNonFloat32(c->forwardMath, c->propLossMath, c->outputQ, c->propLossQ,
                               forwardOnly);
@@ -324,7 +324,7 @@ bool layerIsFloat32Only(layer_t *layer) {
     return layerNonFloat32Field(layer) == NULL;
 }
 
-/* One reason per group below (full per-arm evidence: remat spec §3.7). An
+/* One reason per group below. An
  * unknown type exits rather than defaulting: a wrong `false` lets the remat
  * plan free an input the backward still reads. */
 bool layerBackwardReadsInput(const layer_t *layer) {

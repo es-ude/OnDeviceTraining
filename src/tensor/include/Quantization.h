@@ -51,7 +51,7 @@ typedef struct symInt32QConfig {
  * initSymQConfig (see docs/conventions/testing.md) -- such fixtures are
  * never passed to freeQuantization or freeReservedMemory.
  *
- * Task-5 review fix (group-quant PR2): that "never passed to
+ * Group-quant PR2: that "never passed to
  * freeQuantization or freeReservedMemory" rule is not just about explicit
  * free calls — it also rules out ANY use as a DESERIALIZE destination
  * (deserializeTensor / deserializeParameter / ppcaReplaySetDeserialize

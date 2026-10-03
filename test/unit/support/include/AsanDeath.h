@@ -2,8 +2,7 @@
 #define ODT_TEST_ASAN_DEATH_H
 
 /*
- * Death-test support for AddressSanitizer reports (remat spec §12.2 item 6,
- * §16.1 item 4e).
+ * Death-test support for AddressSanitizer reports (#4 remat).
  *
  * The unit_test_asan test preset sets abort_on_error=1 (CMakePresets.json:251),
  * so an ASan report ends in SIGABRT, which a death test can only read as

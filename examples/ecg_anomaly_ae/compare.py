@@ -9,7 +9,7 @@ Loads:
   data/train_x.npy                         [N_train_normal, 1, 140]
 
 Reports final-state parity (INFORMATIONAL — does not gate; see note at bottom):
-  - test_mse       ±20 % relative  (ECG-specific override of spec §6's ±10 %;
+  - test_mse       ±20 % relative  (ECG-specific override of the default ±10 %;
                                     K=2 stride-2 ConvTranspose substitution +
                                     independent random init produce a ~20 %
                                     test-set gap on out-of-distribution
@@ -54,22 +54,22 @@ PLOTS = HERE / "plots"
 DATA = HERE / "data"
 
 NORMAL_CLASS = 1
-THRESHOLD_K = 3.0  # mean + K·σ, per spec §4.2
+THRESHOLD_K = 3.0  # anomaly threshold: mean + K·σ
 
 CLASS_NAMES = ["normal", "R-on-T", "PVC", "SP", "UB"]
 
 CHECKS = [
-    # ECG-specific override of spec §6's ±10 % test_mse tolerance: with
+    # ECG-specific override of the default ±10 % test_mse tolerance: with
     # the K=2 stride-2 ConvTranspose substitution and independent random
-    # init (per spec §5.5), the C-side XAVIER_UNIFORM init produces a
+    # init, the C-side XAVIER_UNIFORM init produces a
     # near-zero initial output (epoch-0 loss ~mean(target²) ~1.0) while
     # PyTorch's default Kaiming-uniform produces non-trivial initial
     # output (epoch-0 loss ~1.39). Both converge cleanly (train/val
     # within ~7 % by epoch 199) but to slightly different test-set points
     # because the test set is anomaly-heavy and each AE fails OOD samples
     # differently. Loosening to ±20 % captures the run-to-run variance
-    # without papering over a real correctness issue. Spec §6 row remains
-    # ±10 % for HAR/KWS examples; ECG is the override.
+    # without papering over a real correctness issue. The default stays
+    # ±10 % for the HAR/KWS examples; ECG is the override.
     ParityCheck("test_mse", rel_tol=0.20),
     ParityCheck("auc",      abs_tol=0.03),  # ±3 pp
 ]
@@ -129,7 +129,7 @@ def main() -> int:
     pt_auc = auc_mannwhitney(pt_test_mse, is_anomaly)
     c_auc  = auc_mannwhitney(c_test_mse,  is_anomaly)
 
-    # Spec §4.2 final-MSE parity uses the test_loss recorded in the JSON logs
+    # The final-MSE parity uses the test_loss recorded in the JSON logs
     # (full-pass mean-per-element MSE on the test set). Both implementations
     # compute this identically (PyTorch via F.mse_loss reduction='sum' / total
     # elements; C via evaluationEpoch with REDUCTION_MEAN against MSE).

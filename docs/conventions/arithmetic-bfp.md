@@ -35,9 +35,7 @@ implementation decisions as `Decision N` (outside this document:
 design's deviations list as "deviations register N". §12 states every one
 that is cited anywhere in the repository; the `R-P*`/`R-N*`/`R-S*` entries are
 defined in place in §5.7–§5.9. The design documents themselves are not
-published: a "spec §N" pointer below names a section of that unpublished
-design and is kept only as a historical anchor — what it points at is
-restated in this document.
+published; everything this document relies on from them is stated here.
 
 §§1–4 track where the shipped PR1 dtype-core deliberately
 deviates from the cited literature and from ODT's own `#227` discipline — the
@@ -48,7 +46,7 @@ weight-less layers in §5.7 + PR5's norm layers in §5.8 + PR6's Softmax in
 §5.9, all shipped, not a
 forward pointer); §§6–8 extend
 the deviations register with three deviations the PR2 kernels introduced; §9
-amends spec decision D8 with the PR3 backward's own deviation (exact fold
+amends design decision D8 with the PR3 backward's own deviation (exact fold
 segmentation instead of op-local re-blocking); §10 records the PR5 norms'
 own register entries (the 3× stats recompute, and the float32 stats bridges
 that bound what "native" means for a norm); §11 records PR6 Softmax's (the
@@ -86,7 +84,7 @@ can't represent its data, not silently corrupt it.
 
 BFP's **value-domain** quantize path (deriving a block's stored exponent from
 float magnitudes, `deriveBfpStoredExponent` in `src/tensor/TensorConversion.c`)
-deviates from that discipline by design (spec D6): when the derived exponent
+deviates from that discipline by design (D6): when the derived exponent
 would fall outside `[0, 2^exponentBits - 1]`, it **clamps** instead of
 aborting — high side clamps the stored exponent to its max, so the block's
 mantissas saturate to `±qMax`; low side clamps the stored exponent to `0`, so
@@ -114,7 +112,7 @@ cannot represent, not an overflow this format's own saturation regime is
 meant to model.
 
 **Rationale for the deviation:** `exponentBits` (range `[2,8]`) is one of the
-epic's first-class HAR sweep axes (spec §1) — the sweep exists specifically to
+epic's first-class HAR sweep axes — the sweep exists specifically to
 measure the accuracy/loss cost of narrowing the exponent range. Saturation
 *is* the phenomenon under study at that axis's coarse end, not a bug to guard
 against: aborting on the first block whose absmax needs an out-of-range
@@ -157,7 +155,7 @@ convention, validated by its own gold emulation, not by parity with MX/MSFP.
 
 ## 4. Clone semantics: per-tensor reset, grouped deep-copy
 
-`getQLike`'s BFP arm mirrors the `SYM` precedent exactly (spec §2, refined
+`getQLike`'s BFP arm mirrors the `SYM` precedent exactly (refined
 during PR1 planning from an earlier blanket-zero-state proposal): a
 **per-tensor** clone (`numGroups == 1`) resets to the zero-state (`exponents[0]
 = bias`, i.e. scale `1.0`) — the clone is a fresh, never-yet-quantized target,
@@ -287,7 +285,7 @@ Every `ARITH_BFP` kernel (`matmulBfpTensors`, `conv1dKernelBfp`,
   per-element), then fold into a `float32` accumulator on ANY group-boundary
   crossing (either operand) and once more at the tail:
   `acc += ldexpf((float)partial, Ea + Eb − biasA − biasB)`. The power-of-two
-  multiply is exact (spec D7) — the only rounding this step introduces is
+  multiply is exact (D7) — the only rounding this step introduces is
   ordinary float32 addition across blocks, plus the two exceptions in §§7–8.
 - **Kernels are rounding-free** (Decision 7). Every `roundByMode` call in
   the BFP path lives at exactly two seams: staging (quantizing a FLOAT32
@@ -302,19 +300,19 @@ Every `ARITH_BFP` kernel (`matmulBfpTensors`, `conv1dKernelBfp`,
   limit, where `runA`/`runB` are each operand's `groupSize` (or the full
   reduction length for a per-tensor operand) — the bound holds for strided
   walks too, since distinct storage indices inside one group number at most
-  `groupSize` regardless of walk order. The spec's SYMBOLIC closed form
+  `groupSize` regardless of walk order. The design's SYMBOLIC closed form
   `g ≤ 2^(33−2m)` (equal-width case, `ma = mb = m`) reads one product looser
   than what shipped if evaluated literally (`2^(33−2m)` is `131072` at m=8,
-  `512` at m=12) — but the spec's own worked examples already state the
+  `512` at m=12) — but the design's own worked examples already state the
   TIGHT values that match the shipped formula exactly: "m=8 → 131 071;
-  m=12 → 511" (spec §4). The shipped `INT32_MAX >> (ma+mb−2)` IS that tight
+  m=12 → 511". The shipped `INT32_MAX >> (ma+mb−2)` IS that tight
   form, expressed exactly rather than symbolically: for equal widths it
   reduces algebraically to `2^(33−2m) − 1` — one below the naive power of
-  two, because `INT32_MAX = 2^31−1`, not `2^31` — which is why the spec's
+  two, because `INT32_MAX = 2^31−1`, not `2^31` — which is why the design's
   worked examples already land on the shipped values rather than the
   symbolic form's literal evaluation. Pinned by
   `testBfpSegmentLimitTableValues`, `UnitTestMatmul.c`, which also covers
-  **m=16 → 1** (shipped-only; the spec's own worked examples stop at m=12).
+  **m=16 → 1** (shipped-only; the design's own worked examples stop at m=12).
   In practice operand widths often differ (e.g. Task 3's gold fixture mixes
   `ma=6`/`mb=4`), which is exactly why the guard's normative form is
   `INT32_MAX >> (ma+mb−2)`, not the equal-width closed form. Bias operands
@@ -325,7 +323,7 @@ Every `ARITH_BFP` kernel (`matmulBfpTensors`, `conv1dKernelBfp`,
   walks (the row/column a GEMM reduces over, or a conv's input-channel ×
   kernel-tap axis), so the forward kernels consume the tensors' STORAGE
   blocking directly, unmodified. The backward GEMMs reduce along a DIFFERENT
-  axis (e.g. a transposed reduction), which is exactly the situation spec
+  axis (e.g. a transposed reduction), which is exactly the situation design
   decision D8's original wording ("op-local blocking is a property of the
   op") pointed at — read literally, that wording says to recompute fresh
   block exponents for the backward's own reduction axis before each dot
@@ -631,7 +629,7 @@ silent wrong arithmetic, not a crash.
   needs no `inf` at all: at a narrow `exponentBits` the derived exponent
   saturates, so `v / scale` leaves `int32` range for entirely FINITE inputs.
   The saturation BOUNDS are each site's own, unchanged: the negative floor is
-  `−2^(m−1)` as shipped, not spec D6's `±qMax` — an open decision in #420,
+  `−2^(m−1)` as shipped, not D6's `±qMax` — an open decision in #420,
   and after the unification a one-site change.
 - **A non-finite INPUT VALUE fails fast at the three value-domain pack
   entries** (`packFloatBufferAsBfp`, `quantizeFloatBufferToBfpCodes`,
@@ -671,7 +669,7 @@ silent wrong arithmetic, not a crash.
   losses have only their PR4 FAKE-QUANT arm (`case BFP:` joining
   `case SYM_INT32:` on the dtype-generic helpers), which closed
   `docs/FEATURES.md`'s "no loss function has a BFP arm" gap; integer CE/MSE
-  stay explicitly OUT of this epic's committed scope — spec §9 files them as
+  stay explicitly OUT of this epic's committed scope — the epic design lists them as
   an optional stretch goal, filed as a follow-up issue when PR6 lands.
 - The optimizer's `updateMath` stays `ARITH_FLOAT32`-only (#310) — BFP
   backward produces grads and lets them be STORED BFP, but the parameter
@@ -1025,8 +1023,8 @@ splits per seam as everywhere: staging and dx's OUT_WRITE by
 `propLossMath.roundingMode`, the two ACC landings by the grad target's own
 storage mode (R-N4).
 
-**Proof ladder: no §8c bit-identity twin — and what replaces it.** The
-spec's proof-ladder rung (c) (spec §8: a BFP config expressible as grouped
+**Proof ladder: no bit-identity twin — and what replaces it.** The
+epic's bit-identity proof rung (a BFP config expressible as grouped
 SYM with `2^E` scales runs bit-identical to the grouped-SYM path) exists
 for the GEMM family and CANNOT exist for the norms: the SYM norm kernels
 derive DYNAMIC, data-dependent output scales (forward
@@ -1059,7 +1057,7 @@ sum in a different order but different QUANTIZERS. What replaces the rung:
   LayerNorm's) is the filed follow-up if twin-sanity ever proves too
   coarse — the same precedent as the missing SYM GroupNorm gold.
 
-**Error analysis (spec §10 item 4 — the `0.5·C·s_acc`-style deliverable,
+**Error analysis (the `0.5·C·s_acc`-style deliverable,
 mirroring `docs/conventions/arithmetic-sym.md` §"Grouped backward").**
 
 1. *Mechanism.* Every norm op computes its stats, normalization and affine
@@ -1110,8 +1108,8 @@ mirroring `docs/conventions/arithmetic-sym.md` §"Grouped backward").**
    Practical consequence: sweeping `mantissaBits` moves norm accuracy
    directly, and sweeping the wire's `groupSize` moves it too — through
    the SAME pack term, since `s_out ≈ absmax_g/qMax` is PER-GROUP and a
-   finer blocking tightens each group's absmax (spec D5's rationale, the
-   wire-block-size sweep axis of spec §1); what barely matters is N and
+   finer blocking tightens each group's absmax (D5's rationale, the
+   wire-block-size sweep axis); what barely matters is N and
    the fold geometry, which touch only the subdominant stats term.
 5. *Rounding counts per path* (float32 roundings per OUTPUT element; exact
    dequants and exact `int32` partials/folds contribute none; per-group
@@ -1139,8 +1137,8 @@ mirroring `docs/conventions/arithmetic-sym.md` §"Grouped backward").**
    worst-case pack step.
 7. *Research deviation.* There is no literature template for NATIVE BFP
    norm layers — HBFP/MSFP/FAST/MX quantize GEMM operands and leave norms
-   in higher precision; spec §10 item 4 (native LN/GN beyond the
-   literature, each with its own error analysis) is realized HERE. The
+   in higher precision; the epic's goal of native LN/GN beyond the
+   literature, each with its own error analysis, is realized HERE. The
    documented boundary of "native": mantissas enter the ops unpacked and
    exact, but the stats/normalize/affine arithmetic is float32 (bridges),
    and the block structure re-enters at exactly one point per op — the
@@ -1215,7 +1213,7 @@ the block holding the SIGNED max:
 The `min(qT, 0)` clamp is load-bearing under SR only: the deterministic modes
 are monotone, but an SR draw can jitter to `+1`, which would enter `bfpIExpQ`
 as `qW > 0` and make `z` negative; the clamp maps such jitter to `exp(0)`.
-Two saturation corners are spec-sanctioned rather than guarded: a NEGATIVE
+Two saturation corners are accepted by design rather than guarded: a NEGATIVE
 mantissa whose exact left shift leaves int32 becomes the `INT32_MIN / 2`
 sentinel (part 4 bounds its true weight), and a ZERO mantissa with `up >= 31`
 returns its exact `0` through an explicit clause, because `0 << 32` is
@@ -1306,7 +1304,7 @@ instead of a runtime guard). The honest backward opt-outs: CrossEntropy
 coupling (the fused gradient makes the loop skip the layer entirely), a
 Quantization layer around the softmax, or FLOAT32 wires.
 
-**R-S7 — single row only (#152, D3).** The native pipeline runs ONE
+**R-S7 — single row only (#152).** The native pipeline runs ONE
 max/alignment grid and ONE partition sum over the whole wire, while the
 FLOAT32/SYM arms normalize per row (row = axis 0 over everything after it; a
 rank-1 input is one row). Per-row BFP softmax is out of scope of the
@@ -1317,7 +1315,7 @@ backward check sits after the `propLoss == NULL` return, R-S4's ordering).
 (`unitTestSoftmax{Forward,Backward}BfpSingleRowRank2MatchesRank1`,
 `testSoftmax{Forward,Backward}BfpRejectsMultiRow`).
 
-**Error analysis (spec §10 item 4's deliverable for softmax, mirroring
+**Error analysis (softmax, mirroring
 §5.8's parts).**
 
 1. *Mechanism.* Four error sources, and no others: (i) the alignment/`mMaxW`
@@ -1407,8 +1405,8 @@ backward check sits after the `propLoss == NULL` return, R-S4's ordering).
    kernel comment's `exp(-16)` residual is a conservative restatement of this
    bound).
 
-**Proof ladder: no §8c bit-identity twin here either — and what replaces
-it.** The spec's rung (c) (a power-of-two BFP config running bit-identical to
+**Proof ladder: no bit-identity twin here either — and what replaces
+it.** The bit-identity rung (a power-of-two BFP config running bit-identical to
 grouped SYM) cannot exist for softmax for a STRONGER reason than the norms':
 not only does the produced grid differ (the pack derives a dynamic `2^E` from
 the raw's absmax, §5.8's argument verbatim), the two paths compute different
@@ -1479,8 +1477,8 @@ which the gold fixture's tap-free output position pins.
 `float` before the `ldexpf` power-of-two shift: `(float)partial`. `float32`
 represents integers exactly only up to `2^24`; a `partial` whose magnitude
 exceeds that loses precision in the conversion itself — an extra rounding
-point beyond the spec's stated claim that "the only added rounding point is
-float32 addition across blocks" (spec §4, D7).
+point beyond the design's stated claim that "the only added rounding point is
+float32 addition across blocks" (D7).
 
 This is unreachable at the `(mantissaBits, groupSize)` pairs the epic's sweep
 axes exercise in practice: `bfpSegmentLimit` already caps a segment's product
@@ -1536,7 +1534,7 @@ make the sweep's coarse end unrunnable instead of producing a data point.
 
 ## 9. D8 amendment (PR3): exact fold segmentation, not op-local re-blocking
 
-**Amended 2026-09-02 (Leo, PR3 kickoff).** The spec's original D8 ("op-local
+**Amended 2026-09-02 (Leo, PR3 kickoff).** The original D8 ("op-local
 blocking is a property of the op, storage blocking is a property of the
 tensor") was written before any backward kernel existed. Read literally it
 points at HBFP's own rule: recompute a block's exponents fresh, immediately
@@ -1573,7 +1571,7 @@ benefit (a re-derived block exponent cannot recover precision the first
 quantization already discarded) — exactly the **double-quantization** of the
 gradient signal FAST names gradient precision as the sensitive axis for. It
 would also break the backward's bit-identity twin against the grouped-SYM
-path (the shipped proof-ladder mechanism, spec §8c): a re-block changes which
+path (the shipped proof-ladder mechanism): a re-block changes which
 values participate in which `int32` partial, so the two paths would no
 longer be computing the identical sum in a different order — they would be
 computing genuinely different sums.
@@ -1585,8 +1583,7 @@ weight operand's own widths, identically for forward and backward.
 possible FUTURE perf knob — trading the accuracy cost of double-quantizing
 grads for longer same-exponent fold segments, on hardware where many short
 folds turn out to be measurably expensive. It is deliberately NOT
-implemented here and is gated on a real MCU measurement motivating it (spec
-§9), not filed speculatively.
+implemented here and is gated on a real MCU measurement motivating it, not filed speculatively.
 
 ## 10. Norm register entries (PR5): 3× stats recompute; float32 stats bridges bound "native"
 
@@ -1609,7 +1606,7 @@ authority" rule. An opt-in stats cache is a perf follow-up of the same
 shape as §9's re-block knob: file it when an MCU measurement motivates it,
 not before.
 
-**Float32 stats bridges bound what "native" means.** Spec §10 item 4
+**Float32 stats bridges bound what "native" means.** The epic design
 promised native LN/GN kernels "beyond literature … with a documented
 boundary of what native means (float32 stats/accumulation bridges)". The
 shipped boundary: operands are consumed as exact unpacked mantissas under

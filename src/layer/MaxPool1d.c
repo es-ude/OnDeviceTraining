@@ -92,8 +92,8 @@ static void poolBfpRequireDims3(const tensor_t *t, size_t d0, size_t d1, size_t 
  * geometry (mirrors AvgPool1d/Conv1d's ctx convention). auxOut = the layer's
  * pre-allocated argmaxIndices tensor (opSpec_t.auxOut, PR1b.2 D1): the funnel
  * never converts it (kernel-written verbatim, in ITS OWN storage format,
- * INT32) — this is exactly the dual-output shape auxOut was added for (D1's
- * "MaxPool argmaxIndices lives here"). The SYM_INT32 arm lives in
+ * INT32) — this is exactly the dual-output shape auxOut was added for (PR1b.2
+ * D1: "MaxPool argmaxIndices lives here"). The SYM_INT32 arm lives in
  * maxPool1dForwardKernelSymInt32 below (#205). */
 static void maxPool1dForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                                    const void *ctx) {
@@ -138,7 +138,7 @@ static void maxPool1dForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, t
                     yArr[outIdx] = bestVal;
                     argmaxArr[outIdx] = bestInputIdx;
                 } else {
-                    // spec §6.3: empty window is theoretically possible but in
+                    // An empty window is theoretically possible but in
                     // practice unreachable; log + sentinel-encode rather than exit
                     yArr[outIdx] = 0.0f;
                     argmaxArr[outIdx] = -1;
@@ -200,7 +200,7 @@ static void maxPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *r
                     yArr[outIdx] = bestVal;
                     argmaxArr[outIdx] = bestInputIdx;
                 } else {
-                    // spec §6.3: empty window is theoretically possible but in
+                    // An empty window is theoretically possible but in
                     // practice unreachable; log + sentinel-encode rather than exit
                     yArr[outIdx] = 0;
                     argmaxArr[outIdx] = -1;
@@ -283,7 +283,7 @@ static void maxPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut
                     yArr[outIdx] = bestVal;
                     argmaxArr[outIdx] = bestInputIdx;
                 } else {
-                    // spec §6.3: empty window is theoretically possible but in
+                    // An empty window is theoretically possible but in
                     // practice unreachable; log + sentinel-encode rather than exit
                     yArr[outIdx] = 0.0f;
                     argmaxArr[outIdx] = -1;
@@ -303,7 +303,7 @@ static bool maxPoolMulFits(size_t a, size_t b, size_t *product) {
     return true;
 }
 
-/* #152 PR3b (spec §6.7): size the argmax for THIS call's batch before any arm
+/* #152 PR3b: size the argmax for THIS call's batch before any arm
  * runs, so every arm (FLOAT32, SYM_INT32, BFP) and inference() see a buffer
  * holding B rows. Growth reserves the new [B, C, Lout] block BEFORE freeing
  * the old one (a failed reservation leaves the layer intact) and the element
@@ -618,7 +618,7 @@ static void maxPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOu
                  * is exactly how a too-large index arrives. Bounds-check on
                  * read rather than trusting the producer.
                  *
-                 * PR4 adversarial gate (F3): the sentinel test is STRICT
+                 * PR4 adversarial gate: the sentinel test is STRICT
                  * equality, so every other negative falls into this guard
                  * instead of being silently skipped -- a blanket `< 0`
                  * sentinel would treat corruption as an empty window and drop

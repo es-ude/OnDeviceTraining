@@ -281,8 +281,8 @@ target_link_libraries(UnitTestGroupNormIntegration PRIVATE
 )
 __register_target_as_unit_test(UnitTestGroupNormIntegration)
 
-# #460 task 7: Ghost-BN cadence through trainingBatchDefault vs a PyTorch
-# chunked reference (spec §7 item 6) -- mirrors generate_expected_microbatch.py's
+# #460: Ghost-BN cadence through trainingBatchDefault vs a PyTorch
+# chunked reference -- mirrors generate_expected_microbatch.py's
 # CMake wiring (:571-580).
 set(GEN_BN_CADENCE_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_bn_cadence.h)
 add_custom_command(
@@ -585,7 +585,7 @@ add_elastic_ai_unit_test(
         odt_test_death
 )
 
-# #152 PR3b: stacked micro-batch training (spec §6) -- trainingBatchDefault's
+# #152 PR3b: stacked micro-batch training -- trainingBatchDefault's
 # chunk walk + gather, parity across m, the PyTorch B=4 gold, the FLOAT32 gate
 # and the four divisibility checks. Own binary: model A needs the ConvT, pool
 # and norm factories no other loop test links together.

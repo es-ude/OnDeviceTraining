@@ -6,7 +6,7 @@
 #include "RematPlan.h"
 #include "RematScheduler.h"
 
-/* The TRAIN generators (spec §4.3-§4.4), private to the RematPlan library. */
+/* The TRAIN generators, private to the RematPlan library. */
 
 size_t rematTrainStepCount(const rematWireTable_t *t);
 /* BACKWARD(l) = n + 2 + (top - l), for deepest <= l <= top. */

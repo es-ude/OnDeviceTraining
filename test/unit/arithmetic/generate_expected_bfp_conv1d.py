@@ -19,9 +19,8 @@ the plan's original {numGroups=4, groupSize=3}: with groupSize == kernelSize
 every weight-group boundary sits at an icOffset transition, where the input's
 storage index jumps by inputLength and (for these shapes) ALWAYS changes its
 group too, so no boundary would be weight-only and a fold that only watches
-the input's group id would be untestable (Task 3 review lesson, controller-
-authorized adjustment). With groupSize=2 the weight crosses groups MID-run
-(e.g. oc=0, outPos=1: tap (in 2, w 1)->(in 3, w 2) is weight-only, the
+the input's group id would be untestable. With groupSize=2 the weight crosses
+groups MID-run (e.g. oc=0, outPos=1: tap (in 2, w 1)->(in 3, w 2) is weight-only, the
 following icOffset transition (in 3, w 2)->(in 11, w 3) is input-only).
 outPos=0's window is left-clipped (taps k in {1,2} only), exercising the
 gap-robust per-element lookup; bias per-tensor (m=8, e=8).
@@ -178,7 +177,7 @@ def main() -> int:
         "with-bias and no-bias expectations coincide somewhere -- bias seed "
         "would be unobservable there")
 
-    # Dilation fixture (PR2 self-review finding 1): same operands, dilation 2.
+    # Dilation fixture: same operands, dilation 2.
     # The dilation arithmetic is BFP-arm-local (inputIdx = firstValidInputIdx
     # + i * geom.dilation), so the main dilation=1 gold cannot see a dropped
     # dilation factor -- this fixture's taps step by 2 and a hardcode-1 mutant
@@ -194,7 +193,7 @@ def main() -> int:
     assert len(expected_dil) == BATCH * OUT_CHANNELS * dil_out_len
     assert len(set(expected_dil)) >= 2, "dilation fixture: outputs degenerate"
 
-    # Grouped-bias fixture (PR2 self-review finding 3): the SAME bias values
+    # Grouped-bias fixture: the SAME bias values
     # stored grouped {numGroups=2, groupSize=1} -- each output channel its own
     # exponent. Values exact under their per-value grids too, so the expected
     # output is BIT-IDENTICAL to the per-tensor-bias gold (asserted); a kernel

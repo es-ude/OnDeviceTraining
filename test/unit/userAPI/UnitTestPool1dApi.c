@@ -220,7 +220,7 @@ void testAvgPool1dLayerInitOwningDeepCopiesTwoQuantizations(void) {
 }
 
 /* ============================================================================
- * MaxPool1d argmax grow-on-demand (#152 PR3b, spec §6.7)
+ * MaxPool1d argmax grow-on-demand (#152 PR3b)
  * ========================================================================== */
 
 static tensor_t *buildPoolTensor(size_t batch, size_t channels, size_t length, const float *src) {
@@ -481,7 +481,7 @@ void testMaxPool1dArgmaxGrowthFailsFastWhenReservationFails(void) {
      * SIZE_MAX - 3 does NOT wrap, but no allocator can serve it. reserveMemory
      * returns NULL (its own size-wrap guard under ODT_MEM_PROFILE, calloc
      * failure otherwise) and growth must fail fast instead of installing a
-     * NULL argmax (spec §6.4, §6.7). Stack-built shapes: nothing is read. */
+     * NULL argmax. Stack-built shapes: nothing is read. */
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);

@@ -355,7 +355,7 @@ most interesting): see the `CONFIGS` dict's own header comment in
 `run_matrix.py` for the exact per-arm env. Aggregate with the same
 `compare_memory.py` used by the rest of this sweep.
 
-**The #300 epic-acceptance sweep** (spec §8; run offline, NOT in CI — same
+**The #300 epic-acceptance sweep** (run offline, NOT in CI — same
 regime as the full study above):
 
 ```bash
@@ -372,8 +372,8 @@ recorded findings) with ONE addition for the frontier: the per-arm weight
 footprint is `params_b + group_overhead_b` — the per-group scale/zero-point
 metadata is real on-device memory and the whole point of the finer-granularity
 arms is paying it for accuracy, so the frontier is reported against the SUM,
-never `params_b` alone (spec §8's "including the §4 overhead, honestly
-reported"). Note `compare_memory.py` reports `params_b` only — add each arm's
+never `params_b` alone (the group metadata overhead is included and
+honestly reported). Note `compare_memory.py` reports `params_b` only — add each arm's
 constant `config.group_overhead_b` from any of its logs by hand. `groups_resolved` in each log is the ground truth for what a
 config name actually ran (see the fallback table above).
 
@@ -384,7 +384,7 @@ topology, same `WEIGHT_DTYPE`, but always `GROUP_MODE=tensor` regardless of
 the run's own group mode), deserializes the file into it, re-runs the same
 test eval, and asserts the result is bit-identical to the original — loud
 `stderr` + exit 1 on any mismatch. This is the concrete format-parity
-evidence for the group-quant spec's ODTS §6: a file written by a **grouped**
+evidence for the group-quant ODTS contract: a file written by a **grouped**
 run must load cleanly into a **per-tensor** reader via
 `deserializeQConfig`'s realloc-on-numGroups-mismatch relax, not just in the
 unit-test fixtures. On success the run's JSON log gains
@@ -443,8 +443,8 @@ elements) has no operation carrier (it clones softmax.out's config and packs thr
 dx seams. **At coarse widths this can matter a lot:** with m=4 (and more so e=4) the five
 small components of `p − y` round deterministically to zero on that first pack — a dead
 zone at the head that SR would escape elsewhere. A `_m4_`/`_e4_` arm that stalls at the
-head is a candidate symptom of this exception, not necessarily of the width; see the PR7
-design §3.5.1 for the follow-up (a loss-owned wire template).
+head is a candidate symptom of this exception, not necessarily of the width; the planned
+follow-up is a loss-owned wire template.
 
 **Finding (stage-1 smoke, 1 epoch, seed 1) — recorded, not fully diagnosed.** The
 `bfp_wb32_ab16_m6_e8_xnat_g0_s0_rdet_lconst` arm (deterministic rounding, otherwise
@@ -501,13 +501,13 @@ uv run examples/har_classifier/compare_memory.py --logs examples/har_classifier/
 Runtime: measured, not estimated — but measured unoptimized. These numbers come from the
 `examples_memprofile` preset, whose `CMakeCache.txt` has `CMAKE_BUILD_TYPE=` (empty: the
 preset sets only `BUILD_EXAMPLES`/`ODT_MEM_PROFILE`, no optimization flag, i.e. -O0),
-not the `-O2` the campaign discipline (spec §1/§13) calls for. The stage-1 smoke (1 epoch,
+not the `-O2` the campaign discipline calls for. The stage-1 smoke (1 epoch,
 seed 1, 16 configs under `--jobs 4`) put the anchor
 (`bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst`) at 273.6 s/epoch under that 4-way load
 against `sym6g32`'s 86.4 s — ≈3.2× under the same 4-way load (273.6 s vs 86.4 s); the
 anchor's solo time was 223.8 s/epoch. A 50-epoch run at these -O0 rates is therefore ≈3 h
 per (config, seed); the full 16-config × 10-seed stage-1 matrix is ≈60 h wall at
-`--jobs 8`. Treat all of the above as an **upper bound**: the spec §13 one-epoch `-O2`
+`--jobs 8`. Treat all of the above as an **upper bound**: the one-epoch `-O2`
 probe (build with
 `cmake --preset examples_memprofile -DCMAKE_C_FLAGS="-O2 -ffp-contract=fast"` then
 `cmake --build --preset examples_memprofile --target train_c_har_classifier train_c_har_classifier_sym train_c_har_classifier_bfp`

@@ -206,7 +206,7 @@ void testTraceModelParamsFiresPerTrainableParam() {
     freeSoftmaxLayer(model[1]);
 }
 
-/* #380 final-review Fix 1: traceModelGrads must never hand a NULL tensor to
+/* #380: traceModelGrads must never hand a NULL tensor to
  * the sink. A frozen layer's parameter_t carries grad == NULL (Task 1 elides
  * it), so the pre-fix traceModelParams unconditionally dereferenced it inside
  * sink(); every real sink (npyDumpSink, paramGateSink) dereferences
@@ -992,8 +992,8 @@ static tensor_t *makeFloatTensor3D(size_t d0, size_t d1, size_t d2, const float 
 /* #152 PR1/PR3b: the training entry point allocates its wires from the
  * runtime input (initLayerOutputs), but the MaxPool argmax is the factory's
  * config-owned [1, C, Lout] buffer. PR 1 made a stacked batch-2 input die in
- * the forward's argmax shape guard; PR 3b grows the argmax on demand instead
- * (spec §6.7). The batch-1 call on the same model runs first. */
+ * the forward's argmax shape guard; PR 3b grows the argmax on demand instead.
+ * The batch-1 call on the same model runs first. */
 void testCalculateGradsFactoryMaxPoolGrowsToBatch2(void) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
@@ -1019,7 +1019,7 @@ void testCalculateGradsFactoryMaxPoolGrowsToBatch2(void) {
     float capturedLoss = stats->loss;
     freeTrainingStats(stats);
 
-    /* #152 PR3b: the stacked batch-2 input grows the argmax (spec §6.7). */
+    /* #152 PR3b: the stacked batch-2 input grows the argmax. */
     trainingStats_t *stats2 =
         calculateGradsSequential(model, 1, lossConfig, REDUCTION_MEAN, x2, label2);
     float capturedLoss2 = stats2->loss;

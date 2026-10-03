@@ -55,7 +55,7 @@ size_t memInstrumentOptStateBytes(optimizer_t *optim) {
  *     conv2 16->32 K5 SAME  -> [32,64]    relu -> [32,64]    maxpool/2 -> [32,32]
  *     conv3 32->64 K3 SAME  -> [64,32]    relu -> [64,32]    avgpool/32 -> [64,1]
  *     flatten -> [64]       linear 64->6 -> [6]   softmax -> [6]
- * Wire dtypes come from the caller's harWireProfile_t (spec §7.2); NULL =
+ * Wire dtypes come from the caller's harWireProfile_t; NULL =
  * FLOAT32 everywhere. SYM_WIRES=1 wires are SYM_INT32 = 4 B/elem, so the SYM
  * trainer also passes NULL. */
 static const size_t HAR_LAYER_OUT_ELEMS_PER_SAMPLE[HAR_NUM_LAYERS] = {

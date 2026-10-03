@@ -493,7 +493,7 @@ void testCrossEntropySoftmaxBackwardBfpRequantizesIntoFreshGrid(void) {
     freeTensor(bfpP);
 }
 
-/* PR4 adversarial gate (F1/F2): every scratch buffer in the fake-quant bodies
+/* BFP epic PR4: every scratch buffer in the fake-quant bodies
  * is a VLA sized from the MODEL OUTPUT's element count, but each convertTensor
  * walks its OWN source's count and the distribution scratch even borrows the
  * DISTRIBUTION's shape — so a label longer than the softmax output writes past
@@ -528,7 +528,7 @@ void testCrossEntropySoftmaxBackwardBfpRejectsDistributionCountMismatch(void) {
     freeTensor(bfpP);
 }
 
-/* PR4 adversarial gate (F1/F2 follow-through): the produced LOSS wire is the
+/* BFP epic PR4: the produced LOSS wire is the
  * third operand with the same hole, and it needs its own case because a CORRECT
  * distribution is what carries the call past the distribution guard. The loss
  * scratch is a VLA sized from the model output's count but borrows the LOSS's
@@ -550,7 +550,7 @@ void testCrossEntropySoftmaxBackwardBfpRejectsLossWireCountMismatch(void) {
     freeTensor(bfpP);
 }
 
-/* PR4 adversarial delta (D0), kept by #153: the operand shape guard must sit
+/* BFP epic PR4, kept by #153: the operand shape guard must sit
  * at the PUBLIC entry, not inside the fake-quant helper — otherwise the
  * FLOAT32 arm keeps the whole hole (crossEntropySoftmaxBackwardFloat writes
  * lossFloat[i] for i < the model output's count straight into the caller's

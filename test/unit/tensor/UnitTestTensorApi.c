@@ -855,7 +855,7 @@ void testGradInitRejectsGroupedSymTemplate(void) {
     });
 }
 
-/* Final-review Fix 1 (CRITICAL, heap-OOB): requantizeTensorInPlace builds its
+/* Heap-OOB guard: requantizeTensorInPlace builds its
  * destination view directly (getQLike + getDataLike), bypassing initTensor's
  * validateSymQConfigShape choke point entirely. A grouped SYM target whose
  * numGroups*groupSize does not equal the SOURCE tensor's actual element
@@ -1125,7 +1125,7 @@ void testRequantizeTensorInPlaceFloatToBfp(void) {
     freeTensor(t);
 }
 
-/* Final-review CRITICAL fix (post-Task-6): BFP twin of
+/* Heap-OOB guard, BFP twin of
  * testRequantizeTensorInPlaceRejectsMismatchedGroupShape above. This task's
  * new getQLike/getDataLike BFP arms made requantizeTensorInPlace's hand-built
  * destination view (which bypasses initTensor's validateBfpQConfigShape

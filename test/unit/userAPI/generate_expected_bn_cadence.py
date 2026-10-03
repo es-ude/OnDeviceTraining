@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate expected_bn_cadence.h for UnitTestBatchNorm1dIntegration (#460).
 
-Ghost-BN cadence reference (#152 spec §8): one macro batch of b = 8 through
+Ghost-BN cadence reference (#152): one macro batch of b = 8 through
 BatchNorm1d(3) -> Linear(3 -> 2) with a raw sum-of-squares loss per chunk,
 split into b/m chunks of m rows, m in {2, 4, 8}. Each chunk is one
 train()-mode forward+backward of the SAME module, so the running stats

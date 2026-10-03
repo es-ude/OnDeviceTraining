@@ -14,7 +14,7 @@
  * of momentQuant) -- accumulator dtype decoupled from the parameter's
  * storage dtype (SgdApi momentumStateInit precedent, #277). */
 static tensor_t *momentStateInit(tensor_t *param, quantization_t *momentQuant) {
-    /* Group-quant PR2 final-review Fix 3(c) carrier gate (mirrors gradInit,
+    /* Group-quant PR2 carrier gate (mirrors gradInit,
      * TensorApi.c, and SgdApi's momentumStateInit twin): groups are legal
      * ONLY on GEMM-family weight tensors -- moment states stay per-tensor
      * unconditionally until PR3. Without this, getQLike would silently

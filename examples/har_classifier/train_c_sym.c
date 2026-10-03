@@ -437,8 +437,8 @@ typedef struct groupLogInfo {
  * from what requantizeParamsToSym actually built -- for the log's
  * "groups_resolved" (the 4 weight tensors) and "group_overhead_b" (all 8:
  * weights AND biases, since even a per-tensor {1,0} tensor carries one float
- * scale [+ one uint16 zero-point if ASYM] of metadata; spec-§8-mandatory
- * honest accuracy-per-byte accounting). */
+ * scale [+ one uint16 zero-point if ASYM] of metadata; honest
+ * accuracy-per-byte accounting requires it). */
 static groupLogInfo_t computeGroupLogInfo(layer_t **model, bool isAsym) {
     size_t bytesPerGroup = sizeof(float) + (isAsym ? sizeof(uint16_t) : 0);
     const size_t convIdx[3] = {0, 3, 6};
@@ -574,7 +574,7 @@ static int ensureDir(const char *p) {
  * regardless of this run's own GROUP_MODE -- requantizeParamsToPerTensorSym
  * above), re-evaluates on the SAME test set, and asserts the result is
  * bit-identical to `original` (the final eval this file already ran). This is
- * the format-parity evidence the group-quant spec's §6 calls for: a file
+ * the format-parity evidence the group-quant ODTS contract calls for: a file
  * written by a GROUPED run loads cleanly into a per-tensor reader via
  * deserializeQConfig's realloc-on-numGroups-mismatch relax (Deserialize.c),
  * exercised here on a REAL model rather than only the unit-test fixtures. A

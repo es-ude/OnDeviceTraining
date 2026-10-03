@@ -118,7 +118,7 @@ static void packChunkGuarded(const int32_t *codes, size_t count, uint8_t *dstBas
     const int32_t lo = -((int32_t)1 << (dstBits - 1));
     for (size_t i = 0; i < count; i++) {
         if (codes[i] < lo || codes[i] > hi) {
-            /* abort-on-overflow, process-fatal (#227 discipline; spec §3.2 —
+            /* abort-on-overflow, process-fatal (#227 discipline —
              * earlier chunks of dst may already be written, which is fine
              * because exit(1) is not recoverable) */
             PRINT_ERROR("%s: value %d does not fit %u-bit SYM range [%d, %d] (#227)", what,
@@ -1480,7 +1480,7 @@ void convertBfpTensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTensor) 
 /* BFP -> BFP requant onto the TARGET's geometry/widths: per-group exponents
  * derived FRESH from the source's dequantized VALUES (never copied) -- this
  * one cell is simultaneously the OUT_WRITE width-restore, the mantissa- and
- * exponent-width change, and the re-block point (spec §3/§5). The source is
+ * exponent-width change, and the re-block point. The source is
  * read per-element with its OWN group scales (dequantChunkToFloat's
  * grouped-capable BFP arm), so any source geometry converts to any target
  * geometry. n == 0 falls through to packStreamAsBfp's zero-state arm.
@@ -1620,8 +1620,8 @@ static void rejectAliasedIncrement(const tensor_t *target, const tensor_t *incre
                                    const char *what) {
     /* Self-aliasing is rejected: the rescale engines rewrite the target's
      * grid between phase A and phase B, so an aliased increment would be
-     * decoded against the wrong grid mid-stream (release-review finding,
-     * PR #324). The funnel epilogue always passes a distinct intermediate. */
+     * decoded against the wrong grid mid-stream (PR #324). The funnel epilogue always passes a
+     * distinct intermediate. */
     if (increment->data == target->data) {
         PRINT_ERROR("%s: increment must not alias the target", what);
         exit(1);

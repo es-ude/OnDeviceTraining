@@ -283,7 +283,7 @@ void testMseLossBackwardBfpRequantizesIntoFreshGrid(void) {
     freeTensor(bfpOut);
 }
 
-/* PR4 adversarial gate (F1/F2): every scratch buffer in the fake-quant bodies
+/* BFP epic PR4: every scratch buffer in the fake-quant bodies
  * is a VLA sized from the MODEL OUTPUT's element count, but each convertTensor
  * walks its OWN source's count and the label scratch even borrows the LABEL's
  * shape — so a label longer than the output writes past the end of a stack
@@ -318,7 +318,7 @@ void testMseLossBackwardBfpRejectsLabelCountMismatch(void) {
     freeTensor(bfpOut);
 }
 
-/* PR4 adversarial gate (F1/F2 follow-through): the RESULT wire is the third
+/* BFP epic PR4: the RESULT wire is the third
  * operand with the same hole, and it needs its own case because a CORRECT label
  * is what carries the call past the label guard. The result scratch is a VLA
  * sized from the model output's count but borrows the RESULT's shape_t, so the
@@ -340,7 +340,7 @@ void testMseLossBackwardBfpRejectsResultCountMismatch(void) {
     freeTensor(bfpOut);
 }
 
-/* PR4 adversarial delta (D0), kept by #153: the operand shape guard must sit
+/* BFP epic PR4, kept by #153: the operand shape guard must sit
  * at the PUBLIC entry, not inside the fake-quant helper — otherwise the
  * FLOAT32 arm keeps the whole hole.
  * That arm is not the milder half either: mseLossBackwardFloat writes

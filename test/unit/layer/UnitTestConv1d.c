@@ -1834,18 +1834,18 @@ void testConv1dForwardGroupedEqualScalesBitIdenticalToScalar(void) {
                                   kPerChannelOutMantissas_len);
 }
 
-/* Final-review Fix 3(b): Conv1d had no FLOAT32-math grouped-forward coverage
+/* Conv1d had no FLOAT32-math grouped-forward coverage
  * at all (unlike Linear, which pins both arms via
- * testLinearForwardGroupedFloatPathAgreesWithinTolerance) -- the review found
- * conv1dForward's FLOAT32 arm never declared groupedSymOperandPos, an
+ * testLinearForwardGroupedFloatPathAgreesWithinTolerance) -- and
+ * conv1dForward's FLOAT32 arm once never declared groupedSymOperandPos, an
  * asymmetry that would have made Conv1d's FLOAT32-math grouped forward
- * regress the moment the funnel's FLOAT32-arm deny gate landed (Fix 3a).
+ * regress the moment the funnel's FLOAT32-arm deny gate landed.
  * Same perChannel fixture as testConv1dForwardGroupedPerChannelMatchesGold
  * (buildGroupedConv1dFixtureLayer with a FLOAT32 `q` instead of SYM_INT32 --
  * the weight/bias/input tensors are STILL grouped-SYM/SYM_INT32 storage,
  * exactly like the SYM_INT32-math sibling; only forwardMath differs),
  * exercising Task 2's grouped dequant (convertSymTensorToFloat32Tensor)
- * gated by Fix 3(a)'s FLOAT32-arm check instead of skipping it entirely.
+ * gated by the funnel's FLOAT32-arm check instead of skipping it entirely.
  *
  * Tolerance (same 2-combines-per-output-element structure as
  * testLinearForwardGroupedFloatPathAgreesWithinTolerance's per-channel
@@ -2001,8 +2001,8 @@ void testConv1dBackwardGroupedDxEqualScalesBitIdenticalToScalar(void) {
 /* FLOAT32 dx path on the SAME grouped-SYM weight and SYM_INT32 lossGrad
  * (only propLossMath differs): the executeOp prologue dequantizes both
  * operands (grouped weight through the group-aware SYM->FLOAT32 cell, gated
- * by the FLOAT32 arm's groupedSymOperandPos declaration -- the arm-parity
- * lesson from PR2's final review), then the float scatter computes the
+ * by the FLOAT32 arm's groupedSymOperandPos declaration -- both math arms must
+ * declare the same operand position), then the float scatter computes the
  * reference value with NO per-product rounding.
  *
  * Tolerance derivation (scatter error model, |err| <= 0.5*C*s_acc): the SYM

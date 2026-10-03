@@ -134,7 +134,7 @@ The array must outlive every use of the config (beware `tensorInitFloat`-style
 dangling if the config escapes the scope). Reach for `initSymQConfig` + free
 only when the test exercises the allocation topology itself.
 
-**Never as a deserialize destination (group-quant PR2, Task 5 review fix).**
+**Never as a deserialize destination (group-quant PR2).**
 "Never passed to any free call" also rules out handing a stack fixture to
 `deserializeTensor` / `deserializeParameter` / `ppcaReplaySetDeserialize` as
 the skeleton being deserialized INTO. A file record whose `numGroups` differs

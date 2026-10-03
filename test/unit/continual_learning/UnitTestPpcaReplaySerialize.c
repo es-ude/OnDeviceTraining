@@ -518,7 +518,7 @@ void testRoundTripPackedBfp(void) {
     TEST_ASSERT_EQUAL_FLOAT(12.5f, capturedTotalVar);
 }
 
-/*! BFP epic PR1 review fix (#316 class parity): SAME dtype (BFP) but
+/*! BFP epic PR1 (#316 class parity): SAME dtype (BFP) but
  *  mismatched mantissaBits must still be rejected by the peek arm directly.
  *  dim=3/rank=1 (basis = 3 elements) with mantissaBits 3 (file) vs 5
  *  (skeleton) is a DELIBERATE #316 collision: calcNumberOfBytesForData

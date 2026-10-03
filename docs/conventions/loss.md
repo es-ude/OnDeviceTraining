@@ -95,7 +95,7 @@ statistics and never updates them).
 
 BatchNorm1d updates its running statistics once per `calculateGradsFn`
 call, i.e. `b/m` times per optimizer step (Ghost-BN over the micro-batch,
-#152 D2). The training forward writes the running buffers: one layer
+#152). The training forward writes the running buffers: one layer
 instance must never run two forwards concurrently, nor an eval forward
 concurrently with a training forward (same invariant as MaxPool1d's argmax
 buffer; no locks by design).

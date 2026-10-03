@@ -495,7 +495,7 @@ void convTranspose1dKernelBfpGather(tensor_t const *input, tensor_t const *weigh
                     size_t currentInGroup = 0;
                     size_t currentWGroup = SIZE_MAX;
 
-                    /* Taps OUTER, icOffset INNER (the D9 normative reduction
+                    /* Taps OUTER, icOffset INNER (the BFP D9 normative reduction
                      * order the gold emulation mirrors). Per-element group
                      * lookup on BOTH operands: tap hops make both index
                      * sequences non-contiguous, so no run length could be

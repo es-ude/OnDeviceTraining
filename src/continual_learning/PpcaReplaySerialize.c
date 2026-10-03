@@ -31,8 +31,8 @@
  * untrusted, unbounded numGroups still drives an unbounded read/skip loop
  * on a corrupt/foreign file, so the same sanity cap applies for uniform
  * reader hardening. Keep this literal equal to Deserialize.c's by hand;
- * there is no shared header both modules already depend on to hoist it into
- * (see final-review Fix 7). Renamed from PPCA_MAX_SYM_GROUPS (group-quant
+ * there is no shared header both modules already depend on to hoist it into.
+ * Renamed from PPCA_MAX_SYM_GROUPS (group-quant
  * PR4 Task 4): the v5 ASYM and BFP (epic PR1 Task 7) peek arms below reuse
  * it too. */
 #define PPCA_MAX_QCONFIG_GROUPS 65536u
@@ -118,7 +118,7 @@ static void peekValidateThenDeserializeTensor(tensor_t *skeleton, FILE *f, const
          * the #316 2x-overflow case, independent of group shape. */
         uint32_t numGroups = serialReadU32LE(f);
         symQConfig_t *skelQc = skeleton->quantization->qConfig;
-        /* Task-5-style review fix: bound the untrusted file numGroups before
+        /* Bound the untrusted file numGroups before
          * the skip loop below reads that many floats off the stream (mirrors
          * Deserialize.c's deserializeQConfig guard -- see PPCA_MAX_QCONFIG_GROUPS
          * above). */

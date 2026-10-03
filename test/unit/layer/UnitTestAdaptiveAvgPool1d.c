@@ -287,7 +287,7 @@ void testAdaptiveAvgPool1dBackwardFloatOverwritesStalePropLoss(void) {
                                      "a repeated backward must reproduce dx (OUT_WRITE)");
 }
 
-/* #4 PR0 (Codex pr0#0): the FLOAT32 dx arm takes batch and channels from
+/* #4 PR0: the FLOAT32 dx arm takes batch and channels from
  * lossGrad but memsets and scatters into propLoss, so a propLoss with a
  * smaller batch is written past its end -- it must fail fast instead. */
 void testAdaptiveAvgPool1dBackwardFloatRejectsPropLossWithSmallerBatch(void) {
@@ -754,7 +754,7 @@ void testAdaptiveAvgPool1dBackwardBfpScattersIntoFloat32Raw(void) {
     freeTensor(lossGrad);
 }
 
-/* BFP epic PR4 (F5): both new kernels index their raw output as a DENSE
+/* BFP epic PR4: both new kernels index their raw output as a DENSE
  * [batch][channels][length] array with batch/channels read off the OPERAND, so
  * a raw output that matches on LENGTH but not on batch or channels is written
  * past its end — a checker that looks only at dimensions[2] passes it. Covers
@@ -869,7 +869,7 @@ void testAdaptiveAvgPool1dBackwardBfpGuardsNarrowedNotRemoved(void) {
     freeTensor(bfpLossGrad);
 }
 
-/* BFP epic PR4 (F5), the OPERAND side of the rank gate. executeOp never
+/* BFP epic PR4, the OPERAND side of the rank gate. executeOp never
  * inspects operand rank (it sizes the raw from the TARGET only), so a rank-2
  * BFP operand reaches the kernel, which would read dimensions[0..2] off a
  * two-element dims array — an over-read of the shape itself. Both kernels

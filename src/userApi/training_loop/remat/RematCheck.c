@@ -56,8 +56,8 @@ static const char *kindName(uint8_t kind) {
     }
 }
 
-/* Spec §7.7 (D29): `violation` is a format that starts with the quoted rule,
- * so a death test can match the rule whole. No rollback exists mid-call, so
+/* Every violation exits naming the row, the step and the rule: `violation` is a format that starts
+ * with the quoted rule, so a death test can match the rule whole. No rollback exists mid-call, so
  * exiting is the only honest option. */
 #define REMAT_CHECK_EXIT(c, st, violation, ...)                                                    \
     do {                                                                                           \
@@ -67,7 +67,7 @@ static const char *kindName(uint8_t kind) {
         exit(1);                                                                                   \
     } while (false)
 
-/* Rule 1 (spec §7.4): before any resolution, so an out-of-range layer never
+/* Rule 1: before any resolution, so an out-of-range layer never
  * indexes the model or the table. */
 static void requireKindAndLayer(const rematCheck_t *c, const rematStep_t *st) {
     switch (st->kind) {
@@ -88,9 +88,9 @@ static void requireKindAndLayer(const rematCheck_t *c, const rematStep_t *st) {
     }
 }
 
-/* Rule 2 (spec §7.5): FORWARD strictly ascending and BACKWARD strictly
+/* Rule 2: FORWARD strictly ascending and BACKWARD strictly
  * descending, so "exactly once, in order" is "matches the cursor"; no
- * per-layer bitset. Every cursor comparison is signed (spec §7.3). */
+ * per-layer bitset. Every cursor comparison is signed. */
 static void requireOrder(const rematCheck_t *c, const rematStep_t *st) {
     switch (st->kind) {
     case REMAT_STEP_FORWARD:
@@ -144,7 +144,7 @@ typedef struct stepWires {
     bool readsIn; /* false only for a BACKWARD whose layer does not read its input */
 } stepWires_t;
 
-/* Rule 3 (spec §7.4): positional, from the checker's own live-model deepest
+/* Rule 3: positional, from the checker's own live-model deepest
  * and backwardTop; GRAD ids come from the table's gradIdOf (rematGradId),
  * never from arithmetic on ids. */
 static stepWires_t resolve(const rematCheck_t *c, const rematStep_t *st) {
@@ -183,9 +183,9 @@ static const char *wireKindName(const rematWire_t *rec) {
     return rec->kind == REMAT_WIRE_ACT ? "ACT" : "GRAD";
 }
 
-/* Rule 4 (spec §7.3): resident, and, unless borrowed, produced under the
+/* Rule 4: resident, and, unless borrowed, produced under the
  * binding it has now. The bind generation is the only O(1) catch for a row
- * that re-binds a wire without its producer running again (spec §7.6). */
+ * that re-binds a wire without its producer running again. */
 static void requireReadable(const rematCheck_t *c, const rematStep_t *st, uint16_t w,
                             const char *role) {
     const rematWire_t *rec = &c->sched->wires->wires[w];
@@ -217,8 +217,8 @@ static void requireWritable(const rematCheck_t *c, const rematStep_t *st, uint16
     }
 }
 
-/* A BACKWARD whose layer does not read its input may get a dead one (W_dead,
- * spec §3.7): only its header's static metadata is used. */
+/* A BACKWARD whose layer does not read its input may get a dead one
+ * (W_dead): only its header's static metadata is used. */
 static void requireResident(const rematCheck_t *c, const rematStep_t *st, const stepWires_t *w) {
     if (w->readsIn) {
         requireReadable(c, st, w->in, "in");
@@ -231,7 +231,7 @@ static void requireResident(const rematCheck_t *c, const rematStep_t *st, const 
     }
 }
 
-/* Rule 5 (spec §7.3): O(1) over the exact bytes. Integer intervals, because
+/* Rule 5: O(1) over the exact bytes. Integer intervals, because
  * HEAP operands live in separate blocks, whose pointers C does not order. */
 static void requireApart(const rematCheck_t *c, const rematStep_t *st, uint16_t a,
                          const char *roleA, uint16_t b, const char *roleB) {
@@ -248,7 +248,7 @@ static void requireApart(const rematCheck_t *c, const rematStep_t *st, uint16_t 
 }
 
 /* Pairwise over every operand the step touches, not only gradIn/out: a
- * LayerNorm-style backward writes dx while it still reads x (spec §7.5). A
+ * LayerNorm-style backward writes dx while it still reads x. A
  * dead input (W_dead) is not touched, so it is not compared. */
 static void requireDisjoint(const rematCheck_t *c, const rematStep_t *st, const stepWires_t *w) {
     uint16_t ids[3];
@@ -273,7 +273,7 @@ static void requireDisjoint(const rematCheck_t *c, const rematStep_t *st, const 
     }
 }
 
-/* Rule 6 (spec §7.4): an output is produced under the binding it has now. */
+/* Rule 6: an output is produced under the binding it has now. */
 static void commit(rematCheck_t *c, const rematStep_t *st, const stepWires_t *w) {
     switch (st->kind) {
     case REMAT_STEP_FORWARD:
@@ -314,7 +314,7 @@ void rematCheckStep(rematCheck_t *c, const rematStep_t *st, rematOperands_t *ops
         exit(1);                                                                                   \
     } while (false)
 
-/* Spec §7.6. Cursors, not bitsets: a stream the step rules admitted is
+/* Stream completeness. Cursors, not bitsets: a stream the step rules admitted is
  * complete iff every cursor reached its end. Under CE with n = 1, top = -1 is
  * already below deepest = 0: LOSS_BACKWARD with no BACKWARD is complete. */
 void rematCheckFinish(const rematCheck_t *c) {
@@ -332,7 +332,7 @@ void rematCheckFinish(const rematCheck_t *c) {
     }
 }
 
-/* Spec §7.6, R8 lifecycle: a row's end leaves nothing resident, and the
+/* Release lifecycle: a row's end leaves nothing resident, and the
  * dispatch's end unbinds the input. A wire still bound here would enter the
  * next call's table bind still bound. */
 void rematCheckReleased(const rematCheck_t *c) {

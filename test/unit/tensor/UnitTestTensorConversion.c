@@ -2001,7 +2001,7 @@ void testAccumulateSymFixedGridFirstStoreDerivesGridThenCarries(void) {
      * call -> scale assert RED.
      *
      * Derivation (HALF_AWAY; cross-checked with a throwaway float32 harness
-     * mirroring the exact arithmetic below -- house style, recon-pack §2):
+     * mirroring the exact arithmetic below -- house style):
      * call1: absMax(inc1) = 3.1 -> scale = 3.1/31 ~= 0.1.
      *   codes1[i] = round(inc1[i]/scale): round(31)=31, round(-15.5)=-16
      *   (HALF_AWAY, ties away from zero), round(7.75)=8, round(3.875)=4.
@@ -2045,7 +2045,7 @@ void testAccumulateSymFixedGridFirstStoreDerivesGridThenCarries(void) {
 void testAccumulateSymFixedGridZeroIncrementIsBitExact(void) {
     /* Carried-grid exactness (HALF_AWAY): accumulating an all-zero increment
      * must leave packed bytes AND scale bit-identical (on-grid values survive
-     * re-round exactly; recon-pack §2 proof: mant*scale/scale round-trips to
+     * re-round exactly: mant*scale/scale round-trips to
      * mant exactly for |mant| well under 2^15, which every 6-bit mantissa is).
      * Mutation guard (verified by deliberately breaking the primitive and
      * confirming this test goes RED, per house mutation-testing convention):
@@ -2060,7 +2060,7 @@ void testAccumulateSymFixedGridZeroIncrementIsBitExact(void) {
      *
      * Seed directly: scale=0.1, mant={5,-2,3,-4} (not touching the range
      * boundary) -> dequant={0.5,-0.2,0.3,-0.4}. Carried-grid zero-increment
-     * codes stay exactly {5,-2,3,-4} (recon-pack §2). A rescale mutant would
+     * codes stay exactly {5,-2,3,-4}. A rescale mutant would
      * instead re-derive from absMax(dequant)=0.5: scale'=0.5/31~=0.016129,
      * codes'=round(dequant/scale')={31,-12,19,-25} -- a different scale AND
      * different bytes (verified via a throwaway float32 harness). */
@@ -2242,8 +2242,8 @@ void testAccumulateAsymRescaleMatchesFloatReference(void) {
 }
 
 void testAccumulateAsymValueZeroAfterConfigReset(void) {
-    /* With scale=1, zeroPoint=0 and zero codes (the optimizerZeroGrad reset state,
-     * spec §5.3), decoded values are exactly 0 -> first accumulate equals the
+    /* With scale=1, zeroPoint=0 and zero codes (the optimizerZeroGrad reset state),
+     * decoded values are exactly 0 -> first accumulate equals the
      * increment quantized fresh (0.0f + inc[i] == inc[i] exactly, no
      * rounding at the add). Reference: convertFloatTensorToAsymTensor(inc)
      * calls the identical quantizeFloatToAsym helper on the identical float
@@ -3092,7 +3092,7 @@ void testDequantChunkToFloatRejectsMisalignedOffset(void) {
 }
 
 void testDequantChunkToFloatRejectsOutOfRangeOffset(void) {
-    /* Fix 1 (release-review, PR #324): [elemOffset, elemOffset+count) must not
+    /* PR #324: [elemOffset, elemOffset+count) must not
      * exceed the source tensor's own element count. Before the fix, only
      * count > ODT_CONVERSION_CHUNK_ELEMS and elemOffset % 8 != 0 were guarded --
      * an offset that starts exactly AT the tensor's end (still 8-aligned, still
@@ -3136,7 +3136,7 @@ void testUnpackSignExtendOffsetZeroCoversFullSignedRange(void) {
 }
 
 void testQuantizeFloatToAsymNoOpOnEmptyTensor(void) {
-    /* Fix 2 (release-review, PR #324): n==0 must no-op, never read values[0].
+    /* PR #324: n==0 must no-op, never read values[0].
      * Before the fix, quantizeFloatToAsym's findMinFloat/findMaxFloat both
      * unconditionally dereference values[0] regardless of n -- UB for an
      * empty payload. Since both reads land on the same element, mn==mx
@@ -3182,7 +3182,7 @@ void testQuantizeFloatToAsymNoOpOnEmptyTensor(void) {
 }
 
 void testAccumulateTensorIntoSymRescaleRejectsSelfAliasedIncrement(void) {
-    /* Fix 3 (release-review, PR #324): the rescale engine rewrites the
+    /* PR #324: the rescale engine rewrites the
      * target's qConfig scale between phase A (fresh-grid derivation, reads
      * only) and phase B (chunked decode+requant+pack). If increment aliases
      * target, phase B's incSrcChunk dequantizes the (not-yet-repacked) shared
@@ -5921,7 +5921,7 @@ void testDeriveBfpStoredExponentPublicBoundaries(void) {
     TEST_ASSERT_EQUAL_UINT8(128, stored);
 }
 
-/* PR2 self-review finding 4: at exponentBits=8 the natural top of the stored
+/* BFP epic PR2: at exponentBits=8 the natural top of the stored
  * range (255, bias 127 -> E=128) has NO finite float32 scale -- ldexpf(1, 128)
  * is +inf, so a group landing there quantized every code to 0 and dequantized
  * the WHOLE group to NaN (0 * inf), in-range values included, instead of the
@@ -6978,7 +6978,7 @@ void testScaleBfpTensorInPlaceEmptyTensorResetsToZeroState(void) {
     TEST_ASSERT_EQUAL_UINT8(0, data[0]); /* nothing written past the payload */
 }
 
-/* ---- BFP engine geometry guards (final-review batch) --------------------
+/* ---- BFP engine geometry guards ---------------------------------------
  * Field-assigned configs bypass initBfpQConfigGrouped's construction-time
  * shape check, and the accumulate/scale engines index exponents[g] under the
  * exact-division invariant (numGroups * groupSize == n): a violating

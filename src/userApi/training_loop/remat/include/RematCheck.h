@@ -10,13 +10,13 @@
 #include "RematScheduler.h"
 #include "Tensor.h"
 
-/* The validating interpreter's checker (#4, spec §7): the driver hands every
+/* The validating interpreter's checker (#4): the driver hands every
  * step a row's next() returns to rematCheckStep before any layer runs. Always
- * on, firmware included (D28); every violation exits naming the row, the step
- * and the rule (D29). Rows never link it, and it links no RNG (D44). */
+ * on, firmware included; every violation exits naming the row, the step
+ * and the rule. Rows never link it, and it links no RNG. */
 
 /* The operands of one step, resolved positionally from the step and the live
- * model (spec §7.4 item 3); the driver executes the step on exactly these.
+ * model; the driver executes the step on exactly these.
  * NULL where the step has no such operand: gradIn outside BACKWARD, out for
  * LOSS_FORWARD and for the grads-only BACKWARD at deepest. */
 typedef struct rematOperands {
@@ -25,7 +25,7 @@ typedef struct rematOperands {
     tensor_t *out;
 } rematOperands_t;
 
-/* One call's checker state, on the driver's frame (spec §7.3). */
+/* One call's checker state, on the driver's frame. */
 typedef struct rematCheck {
     rematScheduler_t *sched; /* borrowed: the table, and the row name for messages */
     layer_t **model;

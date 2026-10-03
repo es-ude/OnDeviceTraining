@@ -1572,7 +1572,7 @@ void testSymForwardConstantInputAppliesBeta(void) {
     }
 }
 
-/* var ~ eps fixture (codebase_eps_mutation_vacuity): with var == eps == 1e-5
+/* var ~ eps fixture: with var == eps == 1e-5
  * the reconstructed output variance is var/(var+eps) == 0.5 — the ONLY regime
  * where eps placement and the input scale are visible:
  *   sqrt(var)+eps   -> ratio ~ 0.994 (not 0.5)
@@ -2121,7 +2121,7 @@ void testFactoryFullSymProfileTrainsSymGrads(void) {
     TEST_ASSERT_TRUE(dxScale > 0.0f && dxScale != 1.0f);
 }
 
-/* PR3 §7: the FLOAT32-backward path (layerNormBackwardFloat) bypasses the
+/* PR3: the FLOAT32-backward path (layerNormBackwardFloat) bypasses the
  * executeOp funnel and raw-casts cfg->gamma->grad->data / cfg->beta->grad->data
  * to float*. Hand-wire gamma's grad as a packed SYM@8 tensor (the shape the
  * grad-storage knob can now legitimately produce, PR3) while everything else

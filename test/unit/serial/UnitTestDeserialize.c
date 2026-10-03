@@ -967,7 +967,7 @@ static void testBfpDeserializeRejectsSentinelViolation(void) {
     freeTensor(skeleton);
 }
 
-/*! Final-review fix (BFP epic PR1): the BFP arm's mantissaBits/exponentBits
+/*! BFP epic PR1: the BFP arm's mantissaBits/exponentBits
  *  wire bytes were overwritten into the skeleton's qConfig VERBATIM, with no
  *  range check -- unlike every other BFP wire field (numGroups, the sentinel
  *  invariant), which the arm already validates. A corrupt v5 record
@@ -1202,10 +1202,9 @@ static void testDeserializeWeightsOnlyIntoTrainableSkeleton(void) {
  *  (exit code 1 either way) without ever exercising the rank-cap PRINT_ERROR
  *  itself. Only a well-formed rank-9 record makes the two guards
  *  distinguishable: guarded code exits(1) immediately on the oversized rank;
- *  with the guard removed (verified by temporary mutation, see PR3
- *  final-review report) the record parses to completion and the function
- *  returns normally. Only a frozen skeleton (parameter->grad == NULL) reaches
- *  skipSerializedTensor. */
+ *  with the guard removed (verified by temporary mutation) the record parses
+ *  to completion and the function returns normally. Only a frozen skeleton (parameter->grad ==
+ * NULL) reaches skipSerializedTensor. */
 static void testSkipSerializedTensorRejectsRankAboveCap(void) {
     float paramData[] = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f};
     tensor_t *paramTensor = makeFloatTensor2D(2, 3, paramData, 6);
@@ -1354,7 +1353,7 @@ static void testSkipSerializedGroupedSymGrad(void) {
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(siblingData, capturedSibling, 3);
 }
 
-/*! Task-5 review fix (Finding 1, CRITICAL): fileNumGroups is untrusted wire
+/*! Group-quant PR2 (Task 5): fileNumGroups is untrusted wire
  *  input read directly into an allocation size (fileNumGroups *
  *  sizeof(float)) with no bound before this fix -- on a 32-bit size_t (MCU
  *  target) a value like 0x40000001 makes that multiplication wrap to 4
@@ -1848,7 +1847,7 @@ static void testSkipSerializedGroupedAsymGradRejectsBadDivisibility(void) {
     freeTensor(paramTensor);
 }
 
-/*! Task-5 review fix (Finding 1, point 3): skipSerializedTensor now threads
+/*! Group-quant PR2 (Task 5): skipSerializedTensor now threads
  *  the real element count it just parsed from the record's own dims into
  *  deserializeQConfig instead of a hardcoded 0 -- proven here by a GROUPED
  *  grad record on the SKIP path (frozen skeleton, deserializeParameter)
@@ -2279,7 +2278,7 @@ static void testDeserializeBatchNormFileHyperparametersWin(void) {
     TEST_ASSERT_EQUAL_FLOAT(0.3f, capturedMomentum);
 }
 
-/* Adversarial-review fix #6: the BATCHNORM1D reader decoded forwardMath/
+/* The BATCHNORM1D reader decoded forwardMath/
  * propLossMath (deserializeArithmetic already range-checks the wire tag
  * against the arithmeticType_t enum) but never required FLOAT32 -- unlike
  * the factory (BatchNorm1dApi.c's validateLayerQuantForBatchNorm1d), which

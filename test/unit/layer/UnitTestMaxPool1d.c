@@ -195,7 +195,7 @@ void testMaxPool1dBackwardBasic(void) {
     maxPool1dBackward(r.layer, r.input, lossGrad, propLoss);
 
     // (Mutation: sentinel-skip removal is vacuous in basic fixture; no empty-window
-    //  fixture is in this PR's test set per spec §6.3 / Q3.)
+    //  fixture is in this PR's test set.)
     for (size_t i = 0; i < expectedPropLoss_maxPool1d_basic_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedPropLoss_maxPool1d_basic[i],
                                  ((float *)propLoss->data)[i]);
@@ -301,7 +301,7 @@ void testMaxPool1dWithStrideAndDilation(void) {
                                  ((float *)r.output->data)[i]);
     }
 
-    // auxOut integration (spec Testing list): argmaxIndices now flows through
+    // auxOut integration: argmaxIndices now flows through
     // opSpec_t.auxOut (kernel-written verbatim, never funnel-converted) —
     // assert it is byte-identical to this pre-migration, unregenerated
     // fixture (a non-trivial dilation/stride pattern, unlike the other
@@ -312,7 +312,7 @@ void testMaxPool1dWithStrideAndDilation(void) {
     }
 
     // Use the gold-emitted random lossGrad (NOT ones), so positional mutations
-    // on the backward path are non-vacuous (codebase_uniform_lossgrad_mutation_vacuity).
+    // on the backward path are non-vacuous.
     tensor_t *lossGrad = makeFloatTensor(outputDims, 3, lossGrad_maxPool1d_withStrideAndDilation);
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
@@ -703,7 +703,7 @@ void testMaxPool1dBackwardFloatOverwritesStalePropLoss(void) {
                                      "a repeated backward must reproduce dx (OUT_WRITE)");
 }
 
-/* #4 PR0 (Codex pr0#0): the FLOAT32 dx arm takes batch and channels from
+/* #4 PR0: the FLOAT32 dx arm takes batch and channels from
  * lossGrad but memsets and scatters into propLoss, so a propLoss with a
  * smaller batch is written past its end -- it must fail fast instead. */
 void testMaxPool1dBackwardFloatRejectsPropLossWithSmallerBatch(void) {
@@ -930,7 +930,7 @@ void testMaxPool1dForwardBfpRequiresBfpOutputQ(void) {
     freeTensor(input);
 }
 
-/* BFP epic PR4 (F5): the forward writes rawOut AND auxOut at the same flat
+/* BFP epic PR4: the forward writes rawOut AND auxOut at the same flat
  * index (b * channels + c) * outputLength + outPos, with batch/channels taken
  * from the INPUT — so both need all three dims validated, and auxOut most of
  * all: it is never funnel-converted, so nothing else looks at its shape before
@@ -978,7 +978,7 @@ void testMaxPool1dForwardBfpRejectsMismatchedOutputShapes(void) {
     freeTensor(input);
 }
 
-/* BFP epic PR4 (F7): the argmax array is kernel-written and never
+/* BFP epic PR4: the argmax array is kernel-written and never
  * funnel-converted, so NOTHING upstream validates its CONTENT — only -1 (the
  * empty-window sentinel) is a legal out-of-range value, and any other index
  * >= inputLength scatters a float straight past the end of the raw gradient
@@ -1029,7 +1029,7 @@ void testMaxPool1dBackwardBfpRejectsOutOfRangeArgmax(void) {
     argmaxArr[3] = -1;
     maxPool1dBackward(&layer, NULL, lossGrad, propLoss);
 
-    /* PR4 adversarial gate (F3): -1 is the ONLY legal out-of-range value, so
+    /* PR4 adversarial gate: -1 is the ONLY legal out-of-range value, so
      * every OTHER negative is corruption and must die like a too-large one. A
      * sentinel test spelled `inputIdx < 0` swallows all of them silently, and
      * the two assertions above cannot tell the two spellings apart: -1 passes
@@ -1097,7 +1097,7 @@ void testMaxPool1dBackwardBfpGuardsNarrowedNotRemoved(void) {
     freeTensor(bfpLossGrad);
 }
 
-/* BFP epic PR4 (F5), the OPERAND side of the rank gate. executeOp never
+/* BFP epic PR4, the OPERAND side of the rank gate. executeOp never
  * inspects operand rank (it sizes the raw from the TARGET only), so a rank-2
  * BFP operand reaches the kernel, which would read dimensions[0..2] off a
  * two-element dims array — an over-read of the shape itself. Both kernels
@@ -1165,7 +1165,7 @@ void testMaxPool1dBfpRejectsRank2Operands(void) {
  * UnitTestPool1dApi). The backward cases are unchanged: backward never grows. */
 void testMaxPool1dForwardFloatRejectsArgmaxLengthMismatchAtBatch2(void) {
     /* #152 PR3b: the forward now GROWS a batch-1 argmax to the call's batch
-     * (spec §6.7), so the pin uses a wrong LENGTH, which growth never repairs:
+     * so the pin uses a wrong LENGTH, which growth never repairs:
      * [1, 3, 5] grows to [2, 3, 5] and still dies against Lout = 4. */
     size_t inputDims[] = {2, 3, 5};
     size_t outputDims[] = {2, 3, 4};

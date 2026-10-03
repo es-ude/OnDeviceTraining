@@ -118,7 +118,7 @@ void testResolveGroupShapeGuardIsModeIndependent(void) {
     ASSERT_EXITS_WITH_FAILURE(resolveGroupShape(0, 1, GROUP_MODE_TENSOR, 0));
 }
 
-/* ---- resolveWireShape: the HAR wire table from spec §5, pinned --------- */
+/* ---- resolveWireShape: the HAR wire table, pinned ---------------------- */
 
 void testResolveWireShapeDivisorGroups(void) {
     groupShape_t gs = resolveWireShape(2048, WIRE_BLOCK_SIZE, 16); /* conv1.out @ ab16 */
@@ -350,7 +350,7 @@ void testGateUnsupportedExpectationFailsFastOnTypeMismatch(void) {
     freeTensor(t);
 }
 
-/* ---- packed byte accounting (spec §7.1) ---------------------------------- */
+/* ---- packed byte accounting ---------------------------------------------- */
 
 void testPackedPayloadBytesRoundsUpPerTensor(void) {
     TEST_ASSERT_EQUAL_size_t(5, packedPayloadBytes(BFP, 6, 6)); /* 36 bits -> 5 B */
@@ -389,7 +389,7 @@ void testPackedBytesRejectUnsupportedDtype(void) {
     ASSERT_EXITS_WITH_FAILURE(packedMetadataBytes(SYM_INT32, 1));
 }
 
-/* ---- bfpSweepConfigFromEnv (spec §3.1) ---------------------------------- */
+/* ---- bfpSweepConfigFromEnv ---------------------------------------------- */
 
 static const char *const kBfpKnobs[] = {
     "BFP_MANTISSA_BITS", "BFP_EXPONENT_BITS", "BFP_WEIGHT_BLOCK", "BFP_WIRE_BLOCK",
@@ -503,7 +503,7 @@ void testSweepConfigFlagsEachLegacyKnobWithoutFailing(void) {
     clearSweepEnv();
 }
 
-/* ---- headroom predicates == the kernel guards (spec §10.4 pin) ------------ */
+/* ---- headroom predicates == the kernel guards ---------------------------- */
 
 void testBlockHeadroomFitsMatchesShippedFormula(void) {
     /* m=12 equal widths: limit = INT32_MAX >> 22 = 511 products. */

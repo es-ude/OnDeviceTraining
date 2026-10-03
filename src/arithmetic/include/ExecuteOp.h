@@ -72,7 +72,7 @@ typedef struct opSpec {
      * pointer equality; overlapping sub-views (raw-pointer tensor wiring) are
      * outside the contract. */
     bool writesInPlaceSafe;
-    /* Group-quant PR2 (Task 3; final-review Fix 2/3) + PR4 (Task 3):
+    /* Group-quant PR2 (Task 3) + PR4 (Task 3):
      * per-OPERAND opt-in for a grouped input — SYM OR ASYM (symQConfig_t /
      * asymQConfig_t numGroups > 1; the two grouped carrier dtypes share the
      * shape grammar, group-quant D6) — under EITHER arithmetic type. 0 = no grouped
@@ -84,7 +84,7 @@ typedef struct opSpec {
      * GEMM-family forward AND dx weights (Linear/Conv1d/ConvT1d, both
      * directions) and the optimizer param-update ops (SGD
      * stateless/mState/mParam, AdamW param). Every other op is a non-carrier
-     * (spec §3: grads, bias, gamma/beta, wires, momentum stay per-tensor) —
+     * (grads, bias, gamma/beta, wires, momentum stay per-tensor) —
      * this funnel-wide seam enforces that, on BOTH the ARITH_SYM_INT32 and
      * ARITH_FLOAT32 prologue arms.
      *

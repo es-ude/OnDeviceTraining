@@ -28,7 +28,7 @@ static double computeExact(const bsScheduler_t *sched, size_t epoch) {
 
 /* THE batch computation, shared by bsSchedulerStep (which writes it) and
  * bsSchedulerBatchSizeAt (which only reports it) so the two cannot diverge
- * (#152 D8): closed form -> non-finite guard -> round half away -> clamp to
+ * (#152): closed form -> non-finite guard -> round half away -> clamp to
  * [1, maxBatchSize]. `fn` names the public entry in the message; *exactOut
  * receives the un-rounded target (the LR compensation's divisor). */
 static size_t appliedBatchAt(const bsScheduler_t *sched, size_t epoch, const char *fn,

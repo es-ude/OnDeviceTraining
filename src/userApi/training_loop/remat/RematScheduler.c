@@ -16,7 +16,7 @@ const rematSchedulerFunctions_t rematSchedulerFunctions[] = {
     [REMAT_HEAP] = {"heap", rematHeapBegin, rematHeapNext, rematHeapDone, rematHeapEnd,
                     rematHeapDeinit},
 };
-/* The enum has no count member (spec §5.1), so appending a row means updating
+/* The enum has no count member, so appending a row means updating
  * REMAT_HEAP below to the new last member, or a missing entry goes unseen. */
 _Static_assert(sizeof rematSchedulerFunctions / sizeof rematSchedulerFunctions[0] ==
                    REMAT_HEAP + 1u,
@@ -116,7 +116,7 @@ void rematRequireWalkComplete(const rematScheduler_t *s, const char *row) {
     }
 }
 
-/* D60 covers every size sum. Resident block sizes cannot reach SIZE_MAX
+/* Every size sum is overflow-checked. Resident block sizes cannot reach SIZE_MAX
  * together, so this exit is unreachable and has no dedicated test. */
 static size_t reportAdd(size_t a, size_t b) {
     size_t out;
@@ -127,8 +127,8 @@ static size_t reportAdd(size_t a, size_t b) {
     return out;
 }
 
-/* The ARENA half of the report (spec §5.1, D55 as amended by Codex N3): each
- * flag derived from the block it names. */
+/* The ARENA half of the report: each flag derived from the block it names
+ * (the offsets block, then the arena data block). */
 static void reportArena(const rematScheduler_t *s, const rematProgram_t *p, rematReport_t *out) {
     if (s->row.arena.offsets != NULL) {
         /* Cannot wrap: numRanges < REMAT_NONE, and init reserved this product. */
@@ -163,7 +163,7 @@ void rematSchedulerReport(const rematScheduler_t *s, rematReport_t *out) {
         break;
     case REMAT_HEAP:
         /* No placement and no resident block: a planned HEAP is ready to run,
-         * its arena fields 0 by definition (plan Assumption 4). */
+         * its arena fields 0 by definition. */
         out->placed = true;
         out->dataReserved = true;
         break;

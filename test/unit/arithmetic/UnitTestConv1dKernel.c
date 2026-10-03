@@ -354,7 +354,7 @@ void testConv1dKernelBfpNoBiasZeroSeeds(void) {
                              kBfpConvNoBiasExpected_len * sizeof(float));
 }
 
-/* PR2 self-review finding 1: the dilation factor lives in the BFP arm's own
+/* BFP epic PR2: the dilation factor lives in the BFP arm's own
  * tap walk (inputIdx = firstValidInputIdx + i * geom.dilation) -- every other
  * BFP fixture runs dilation=1, where a dropped factor is an arithmetic
  * identity. This fixture's taps step by 2; a hardcode-1 mutant reads
@@ -434,7 +434,7 @@ void testConv1dKernelBfpDilation2MatchesGold(void) {
                              kBfpConvDilExpected_len * sizeof(float));
 }
 
-/* PR2 self-review finding 3, the conv sibling of UnitTestMatmul.c's
+/* BFP epic PR2, the conv sibling of UnitTestMatmul.c's
  * testMatmulBfpGroupedBiasBindsPerGroupExponent: same bias VALUES stored
  * grouped {numGroups=2, groupSize=1} with non-uniform exponents (goldgen
  * asserts a group-0 collapse differs), expected output bit-identical to the
@@ -513,7 +513,7 @@ void testConv1dKernelBfpGroupedBiasBindsPerGroupExponent(void) {
                              kBfpConvExpected_len * sizeof(float));
 }
 
-/* BFP power-of-two twin (spec §8c), the BFP sibling of the layer-level
+/* BFP power-of-two twin, the BFP sibling of the layer-level
  * testConv1dForwardGroupedEqualScalesBitIdenticalToScalar (UnitTestConv1d.c)
  * asserted at KERNEL level, mirroring UnitTestMatmul.c's
  * testMatmulBfpPowerOfTwoBitIdenticalToGroupedSym: identical mantissas (the

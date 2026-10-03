@@ -6,8 +6,8 @@ test fixture: forward output, expected argmax indices (int32_t),
 propLoss (dL/dx). For most fixtures lossGrad = torch.ones_like(y);
 the `withStrideAndDilation` fixture uses torch.randn_like(y) (and
 emits the lossGrad as a gold array) so that index-permuting mutations
-on the stride/dilation backward path are non-vacuous (per
-codebase_uniform_lossgrad_mutation_vacuity).
+on the stride/dilation backward path are non-vacuous
+(a uniform lossGrad would hide them).
 
 Run via `uv run` (CMake wires this automatically).
 """

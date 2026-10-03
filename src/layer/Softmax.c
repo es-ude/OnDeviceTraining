@@ -151,7 +151,7 @@ static void softmaxValuesBfp(const tensor_t *input, bfpShiftRounding_t mode, flo
      * at most ONE rounded shift per element). When the storage grid is FINER
      * than the work grid (sigma < 0), `down` folds the extra descent into
      * that same shift -- never two chained roundings. The net shift si MAY be
-     * NEGATIVE (spec amended 2026-09-08, fix round 1): eMax follows the
+     * NEGATIVE: eMax follows the
      * SIGNED argmax while block exponents follow the block ABSMAX, so a
      * negative-dominated block is legitimately coarser than the argmax block
      * (ei > eMax) -- such elements take an EXACT saturating LEFT shift. */
@@ -181,7 +181,7 @@ static void softmaxValuesBfp(const tensor_t *input, bfpShiftRounding_t mode, flo
                  * m_i * 2^(ei - eMax) <= mMax, and -si <= ei - eMax, so
                  * aligned <= mMax -- with m_i >= 1 that also bounds
                  * ei - eMax <= 30, i.e. up stays a valid shift count
-                 * (comment, not assert -- spec step 2). m[i] == 0 is the one
+                 * (comment, not assert). m[i] == 0 is the one
                  * non-negative code that proof does NOT bound: x_i = 0 puts
                  * no cap on ei - eMax, so up can reach >= 32 -- a shift-count
                  * UB (C11 6.5.7p3) even though the value is 0 either way.
@@ -241,7 +241,7 @@ static void softmaxForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, 
     softmaxValuesBfp(input, cfg->bfpExpShiftRounding, (float *)rawOut->data);
 }
 
-/* #152 (spec D3): the native BFP pipeline runs ONE max/alignment grid and
+/* #152: the native BFP pipeline runs ONE max/alignment grid and
  * ONE partition sum over the whole wire. Per-row BFP softmax is out of scope,
  * so a multi-row call fails fast instead of normalizing across rows; a single
  * row ([N] or [1, N]) runs unchanged. */

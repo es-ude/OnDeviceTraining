@@ -167,7 +167,7 @@ void conv1dTransposedForward(layer_t *layer, tensor_t *input, tensor_t *output) 
      * Per-tensor SYM/ASYM (numGroups==1) and SYM_INT32 weights are
      * untouched. weightTensor is always inputs[1] (bias present or not) in
      * BOTH math arms -- the FLOAT32 arm must declare the SAME position as
-     * the SYM arm (PR2 final-review Fix 3(b) lesson: a grouped weight
+     * the SYM arm (a grouped weight
      * forwarded under FLOAT32 math dequantizes via the funnel's group-aware
      * convertTensor cell, gated on this field exactly like the SYM arm's
      * unpack). */
@@ -867,7 +867,7 @@ void conv1dTransposedCalcBiasGradsBfp(conv1dTransposedConfig_t *cfg, tensor_t *l
 
 /* dL/dx via the adjoint: conv1d-correlation of lossGrad with weight. The
  * kernel here uses VALID (Phase-1 contract); conv1dKernelFloat32/SymInt32
- * accept the same weight tensor (no flip needed, per spec §5.2).
+ * accept the same weight tensor (no flip needed).
  * PR3 (Task 3): ctx = convT1dForwardCtx_t* (the same wrapper as forward) --
  * the gather kernel's weight index arithmetic
  * ((oc*inChPerGroup + icOffset)*K + k, Conv1dKernel.c) computes exactly the
@@ -993,8 +993,8 @@ void conv1dTransposedBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *
      * through the conversionMatrix diagonal (width-restored at the producer,
      * PR1b.2 D3) instead of the old direct kernel write of raw, unrestored
      * accumulator-range mantissas — the #187 dtype guard is superseded by the
-     * funnel's own prologue/epilogue and is deleted (recon-conv-backward §4:
-     * zero test coverage, confirmed tautology post-#221).
+     * funnel's own prologue/epilogue and is deleted (it had
+     * zero test coverage and was a tautology after #221).
      * propLoss == NULL (#380 PR2): grads-only call -- skip the dx write
      * entirely rather than dereference the absent buffer. */
     if (propLoss != NULL) {
@@ -1003,8 +1003,8 @@ void conv1dTransposedBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *
          * the comment there) -- ctx routes the SYM dx adapter to the grouped
          * GATHER entry, groupedSymOperandPos opts the funnel prologue into
          * unpacking (SYM arm) / group-aware dequant (FLOAT32 arm) of the
-         * weight at inputs[1] (position 2), declared on BOTH math arms (PR2
-         * final-review arm-parity lesson). */
+         * weight at inputs[1] (position 2), declared on BOTH math arms (the same
+         * arm-parity rule as conv1dTransposedForward). */
         symQConfig_t asymWeightView; /* lifetime: this frame (Linear.c view doc) */
         const symQConfig_t *weightGroups = groupedWeightViewOrNull(weightTensor, &asymWeightView);
         bool grouped = weightGroups != NULL;

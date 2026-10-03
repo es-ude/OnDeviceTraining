@@ -411,9 +411,9 @@ targets are little-endian (pinned at compile time in `SerialWire.h`).
   which squares the condition number in float32 — a real numerical risk for
   ill-conditioned sessions. This risk is gated empirically by an
   incremental-vs-pooled-PCA regression test rather than by a runtime check;
-  the design spec's contingency for that test failing is a one-sided Jacobi
+  the planned contingency for that test failing is a one-sided Jacobi
   SVD directly on `Bᵀ` (avoiding the Gram matrix, and the condition-number
-  squaring, entirely) — as of this writing that fallback is a **spec'd, not
+  squaring, entirely) — as of this writing that fallback is a **planned, not
   shipped** primitive: it isn't in `src/arithmetic/` and there is no config
   knob to select it. If you hit conditioning trouble in practice, that's the
   documented next step, not something you can flip on today.

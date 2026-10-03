@@ -99,7 +99,7 @@ void executeConvert(tensor_t *input, tensor_t *target) {
  * former linearCalcBiasGradsSymInt32 behavior: rescale into the target's
  * EXISTING scale via rescaleIntoAccumulatorScale (PR1b.2 D4 — honors the
  * TARGET's roundingMode; Conv1d.c:288 precedent), no clamp, scale never
- * re-derived. The packed SYM/ASYM arms (spec §4.1-4.2) stream the increment
+ * re-derived. The packed SYM/ASYM arms stream the increment
  * chunk-wise via the tensor-typed accumulate*Into* entry points (#296 Stage
  * 2) instead of staging a whole-tensor float view; a FLOAT32 intermediate is
  * passed as a direct pointer (no view/VLA at all). */
@@ -139,7 +139,7 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
             accumulateSymInt32IntoSymInt32Rescale(target, intermediate);
             return;
         }
-        /* #296 residual (spec §5): this arm quantizes the whole increment
+        /* #296 residual: this arm quantizes the whole increment
          * before the add — two sequential rounding blocks. An O(chunk)
          * version would have to re-draw or reorder the SR stream (bit-parity
          * break), so it keeps whole-tensor staging until an RNG-state
@@ -307,7 +307,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
             continue;
         }
 
-        /* Group-quant PR2 (Task 3; final-review Fix 2/3) + PR4 (Task 3): a
+        /* Group-quant PR2 (Task 3) + PR4 (Task 3): a
          * grouped operand (numGroups > 1) -- SYM or ASYM, the two grouped
          * carrier dtypes share the {numGroups, groupSize} shape grammar (group-quant D6)
          * -- has no scalar compute image under EITHER arithmetic type: the

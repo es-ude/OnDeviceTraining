@@ -35,14 +35,14 @@ static float trainingBatchPerSample(layer_t **model, size_t modelSize, lossConfi
     return totalLoss;
 }
 
-/* m > 1 (spec §6.3): b/m chunks of exactly m rows. Each chunk's item and label
+/* m > 1: b/m chunks of exactly m rows. Each chunk's item and label
  * bytes are copied row after row into the two gather buffers; the stacked
  * tensors are stack-local batch views of the chunk's first sample, re-pointed
  * at the buffers with dims[0] = m (shape [m, ...sampleShape], order
  * [0, sampleOrder + 1]; quantization and sparsity stay shared with that first
  * sample). One calculateGradsFn call per chunk; the chunk's sample_t structs
  * are freed after it (the tensors stay dataset-owned). Returns the loss sum
- * weighted by rows for MEAN (Σ chunkLoss * m), plain for SUM (spec §6.5). */
+ * weighted by rows for MEAN (Σ chunkLoss * m), plain for SUM. */
 static float trainingBatchStacked(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
                                   batch_t *batch, calculateGradsFn_t calculateGradsFn,
                                   reduction_t forwardReduction, size_t m) {

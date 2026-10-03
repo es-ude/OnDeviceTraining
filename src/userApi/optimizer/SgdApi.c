@@ -20,7 +20,7 @@
  * quantization (`momentumQuant`, deep-cloned via getQLike) -- decouples the
  * accumulator's dtype from the parameter's storage dtype (#277 Task 2). */
 static tensor_t *momentumStateInit(tensor_t *param, quantization_t *momentumQuant) {
-    /* Group-quant PR2 final-review Fix 3(c) carrier gate (mirrors gradInit,
+    /* Group-quant PR2 carrier gate (mirrors gradInit,
      * TensorApi.c): groups are legal ONLY on GEMM-family weight tensors --
      * momentum states stay per-tensor unconditionally until PR3. Without
      * this, getQLike would silently clone a grouped SYM momentumQuant

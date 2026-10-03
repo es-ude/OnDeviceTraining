@@ -114,7 +114,7 @@ static size_t gradsBelowSeed(size_t deepest, ptrdiff_t top) {
     return top > (ptrdiff_t)deepest ? (size_t)(top - (ptrdiff_t)deepest) : 0u;
 }
 
-/* Production order (plan Assumption 4): with ACT j at id j and GRADs in the
+/* Production order: with ACT j at id j and GRADs in the
  * order BACKWARD writes them, every range begins in wire-id order. */
 static void numberWires(rematWireFact_t *facts, layer_t **model, size_t n, size_t deepest,
                         ptrdiff_t top, bool hasBackward) {
@@ -129,7 +129,7 @@ static void numberWires(rematWireFact_t *facts, layer_t **model, size_t n, size_
     facts[id++] = (rematWireFact_t){
         .kind = REMAT_WIRE_GRAD, .index = (uint16_t)n, .inheritFrom = (uint16_t)n};
     for (ptrdiff_t l = top; l > (ptrdiff_t)deepest; l--) {
-        bool passThrough = model[l]->type == FLATTEN; /* type-derived: plan Assumption 5 */
+        bool passThrough = model[l]->type == FLATTEN; /* type-derived */
         facts[id++] = (rematWireFact_t){.kind = REMAT_WIRE_GRAD,
                                         .index = (uint16_t)l,
                                         .inheritFrom = passThrough ? (uint16_t)l : REMAT_NONE};
@@ -154,7 +154,7 @@ static void setWireFacts(rematWireFact_t *f, const quantization_t *tmpl, uint8_t
  * (for Flatten-at-0 the caller's live input config): config fields only, never
  * a scale or exponents. A GRAD takes backwardWireQ(model[l]) and ACT l's
  * shape, or inherits its ACT's template. Shapes ping-pong between two scratch
- * shapes of maxRank entries (plan Assumption 6). */
+ * shapes of maxRank entries. */
 static void deriveFacts(rematWireFact_t *facts, size_t numWires, layer_t **model, size_t n,
                         const tensor_t *input, size_t maxRank) {
     size_t dimsA[maxRank], orderA[maxRank], dimsB[maxRank], orderB[maxRank];
@@ -195,7 +195,7 @@ static rematWire_t recordOf(const rematWireFact_t *f, tensor_t *hdr) {
                          .hdr = hdr};
 }
 
-/* One cursor rule for the sizing and the placing pass (spec §3.3): with base
+/* One cursor rule for the sizing and the placing pass: with base
  * == NULL only the cursor advances; with the reserved block the offsets become
  * pointers. Both passes run the same code, so they cannot disagree. */
 typedef struct slabLayout {
@@ -222,7 +222,7 @@ static rematWireTable_t *layoutTable(slabLayout_t *layout, const rematWireFact_t
     uint8_t *frozen = SLAB_PLACE(layout, uint8_t, n, NULL);
     size_t *inputDims = SLAB_PLACE(layout, size_t, inputRank, NULL);
     size_t *inputOrder = SLAB_PLACE(layout, size_t, inputRank, NULL);
-    /* The bind's derivation scratch (plan Assumption 29): after the fixed-size
+    /* The bind's derivation scratch: after the fixed-size
      * key, before the headers, so the exponent arrays stay the block's tail. The
      * cursor rule aligns it for rematWireFact_t like every other object. */
     rematWireFact_t *bindScratch = SLAB_PLACE(layout, rematWireFact_t, numWires, NULL);
@@ -257,7 +257,7 @@ static rematWireTable_t *layoutTable(slabLayout_t *layout, const rematWireFact_t
             wires[id] = recordOf(f, hdr);
         }
     }
-    /* Exponent arrays go at the tail (spec §3.3): a 1-byte per-tensor array
+    /* Exponent arrays go at the tail: a 1-byte per-tensor array
      * never sits between two pointer-bearing headers, and the last one abuts
      * the block end, where ASan sees an overrun (Task 5). */
     for (size_t id = 1; id < numWires; id++) {
@@ -306,8 +306,8 @@ bool rematWireTableInit(rematWireTable_t **out, layer_t **model, size_t n, lossC
 
     /* The table's size depends on the derived facts (ranks, dtypes, exponent
      * counts), so init derives into a transient scratch of numWires facts --
-     * sized from numWires alone -- and frees it before returning (plan
-     * Assumption 29). Every bind derives into the table's own copy. */
+     * sized from numWires alone -- and frees it before returning. Every bind
+     * derives into the table's own copy. */
     rematWireFact_t *facts =
         reserveMemory(mulSize(numWires, sizeof(rematWireFact_t), NULL, "derivation scratch"));
     if (facts == NULL) {
@@ -382,7 +382,7 @@ static void copyGradShape(shape_t *dst, const shape_t *src) {
     setOrderOfDimsForNewTensor(dst->numberOfDimensions, dst->orderOfDimensions);
 }
 
-/* C2: the only road into a slab BFP config. Phase 3 of the table bind and the
+/* The only road into a slab BFP config. Phase 3 of the table bind and the
  * inherited-GRAD path of rematWireBind both come here, so neither can write
  * exponents[0..numGroups) past the slab's reserved expCapacity. */
 static void bindBfpInto(rematWireTable_t *t, uint16_t id, const bfpQConfig_t *tmpl,
@@ -418,13 +418,13 @@ static void writeWireConfig(rematWireTable_t *t, uint16_t id, const quantization
     }
 }
 
-/* Phase 3 (spec §3.4). calcOutputShape is a pure function of the config and
- * the input shape, so recomputing into the slab reproduces phase 1's shapes
- * without keeping them in scratch. */
+/* Phase 3 of the table bind: write the headers. calcOutputShape is a pure function of the config
+ * and the input shape, so recomputing into the slab reproduces phase 1's shapes without keeping
+ * them in scratch. */
 static void writeHeaders(rematWireTable_t *t, layer_t **model, tensor_t *input,
                          const rematWireFact_t *facts) {
     t->wires[0].hdr = input;
-    t->wires[0].bytes = facts[0].bytes; /* a width edit on a packed input is adopted (RF3) */
+    t->wires[0].bytes = facts[0].bytes; /* a width edit on a packed input is adopted */
     for (size_t j = 1; j <= t->modelSize; j++) {
         layer_t *layer = model[j - 1];
         tensor_t *hdr = t->wires[j].hdr;
@@ -475,11 +475,11 @@ static void exitInputKeyAt(const char *field, size_t k, size_t built, size_t liv
     exit(1);
 }
 
-/* Phase 1 step 1 (spec §3.4): the model facts and ACT 0, before any shape is
+/* Phase 1 step 1 of the table bind: the model facts and ACT 0, before any shape is
  * derived. With ACT 0's rank and every layer type unchanged, each derived rank
  * is a pure function of them, so the built maxRank bounds the scratch.
  * backwardTop and hasBackward follow from the compared facts, and so do the
- * per-wire kind and rank (plan Assumption 9). */
+ * per-wire kind and rank. */
 static void requireModelKey(const rematWireTable_t *t, layer_t **model, size_t n, lossFuncType_t lt,
                             const tensor_t *input) {
     if (n != t->modelSize) {
@@ -524,8 +524,8 @@ static void requireModelKey(const rematWireTable_t *t, layer_t **model, size_t n
     }
 }
 
-/* Phase 2 (spec §3.4, D54): the full per-wire key, before phase 3 writes
- * anything. numGroups <= expCapacity is the only capacity compare. */
+/* Phase 2 of the table bind: check the full per-wire key, before phase 3
+ * writes anything (check before write). numGroups <= expCapacity is the only capacity compare. */
 static void requireWireKey(const rematWireTable_t *t, const rematWireFact_t *facts) {
     for (size_t id = 1; id < t->numWires; id++) {
         const rematWire_t *w = &t->wires[id];
@@ -566,7 +566,7 @@ static rematWireFact_t nameOf(const rematWire_t *w) {
     return (rematWireFact_t){.kind = w->kind, .index = w->index};
 }
 
-/* Checked like every size product (D60), via the same elementsOf phase 1
+/* Overflow-checked like every size product, via the same elementsOf phase 1
  * uses. Unreachable in practice: the source ACT header was derived at this
  * call's table bind from checked facts. */
 static size_t liveElements(const shape_t *shape, const rematWire_t *w) {
@@ -574,10 +574,10 @@ static size_t liveElements(const shape_t *shape, const rematWire_t *w) {
     return elementsOf(shape, &name);
 }
 
-/* Spec §3.4 phase 3 item 3 / §3.10: today's post-forward initGradTensor
- * timing, so a producer that wrote a config field of its output is seen.
- * D54 order: every check (dtype, rank, the live payload bytes, and inside
- * bindBfpInto the grouping and the C2 capacity) runs before the first slab
+/* Inherited GRAD headers keep today's post-forward initGradTensor timing, so
+ * a producer that wrote a config field of its output is seen. Check before
+ * write: every check (dtype, rank, the live payload bytes, and inside
+ * bindBfpInto the grouping and the expCapacity bound) runs before the first slab
  * write, so the config is written before the shape. */
 static void deriveInheritedHeader(rematWireTable_t *t, uint16_t id) {
     rematWire_t *w = &t->wires[id];
@@ -611,7 +611,7 @@ static void deriveInheritedHeader(rematWireTable_t *t, uint16_t id) {
 }
 
 #ifdef ODT_REMAT_VERIFY
-/* Test builds (spec §3.10, §7.1). Poison at Bind stops calloc zeros from
+/* Test builds (ODT_REMAT_VERIFY). Poison at Bind stops calloc zeros from
  * masking a read of never-written bytes on the first call (the arena reuses
  * bytes without zeroing); poison at Release, while the bytes are still owned,
  * makes a read of released bytes loud. FLOAT32 gets a signalling NaN. */
@@ -658,7 +658,7 @@ void rematWireBind(rematWireTable_t *t, uint16_t w, uint8_t *bytes) {
     poisonWireBytes(rec, bytes);
 #endif
     rec->bindGen++;
-    /* Checked (D60), though each wire counts at most once (a bound wire cannot
+    /* Overflow-checked, though each wire counts at most once (a bound wire cannot
      * be bound again), so init's checked total of wire bytes already bounds the
      * sum: this exit is unreachable and has no dedicated test. */
     rematWireFact_t name = nameOf(rec);

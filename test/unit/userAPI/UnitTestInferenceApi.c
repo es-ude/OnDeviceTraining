@@ -583,7 +583,7 @@ void testInitBufferOutputBfpGroupSizeMismatchDies(void) {
  * maxPool1dLayerInit sizes the argmax [1, C, Lout], and both inference entry
  * points hand that config-owned buffer to the forward as auxOut. PR 1 made a
  * batch-2 input die in the argmax shape guard; PR 3b grows the argmax on
- * demand instead (spec §6.7). Each test runs the SAME model at batch 1 first,
+ * demand instead. Each test runs the SAME model at batch 1 first,
  * then at batch 2, so the batch-2 result comes from a grown argmax. */
 
 static tensor_t *buildFloatTensor3DInf(size_t d0, size_t d1, size_t d2, const float *values) {
@@ -630,7 +630,7 @@ void testInferenceFactoryMaxPoolGrowsToBatch2(void) {
     freeTensor(output);
 
     /* #152 PR3b: the forward grows the factory's [1, C, Lout] argmax to
-     * batch 2 (spec §6.7) instead of dying. */
+     * batch 2 instead of dying. */
     tensor_t *output2 = inference(model, 1, batch2);
     size_t capturedBatch2Dims[3] = {output2->shape->dimensions[0], output2->shape->dimensions[1],
                                     output2->shape->dimensions[2]};
@@ -701,7 +701,7 @@ void testInferenceWithLossFactoryMaxPoolGrowsToBatch2(void) {
  * their natural shape and it adds the batch axis itself, unconditionally. A
  * Relu-only model is rank-agnostic (its output copies the input shape), so the
  * output rank shows exactly what inference() was handed. item1 starts with a 1
- * on purpose (spec 5.1: no auto-detection of an existing batch axis) -- it must
+ * on purpose (data-shape.md: nothing auto-detects an existing batch axis) -- it must
  * still gain the axis. */
 static tensor_t *buildFloatTensor1DInf(size_t n, const float *values) {
     size_t *dims = reserveMemory(sizeof(size_t));

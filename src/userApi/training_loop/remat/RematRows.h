@@ -5,7 +5,7 @@
 
 #include "RematScheduler.h"
 
-/* The rows' entry points (spec §2.1). External linkage because the const
+/* The rows' entry points. External linkage because the const
  * vtable in RematScheduler.c names them. Included only by RematScheduler.c
  * and the rows' own files; everything else reaches a row through the
  * dispatch or rematSchedulerFunctions[]. */

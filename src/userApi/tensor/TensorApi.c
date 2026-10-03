@@ -384,7 +384,7 @@ tensor_t *getTensorLike(tensor_t *tensor) {
 void requantizeTensorInPlace(tensor_t *t, quantization_t *targetQ) {
     size_t numElements = calcNumberOfElementsByTensor(t);
     quantization_t *newQ = getQLike(targetQ);
-    /* Group-quant PR2 final-review Fix 1 (CRITICAL, heap-OOB): this internal
+    /* Group-quant PR2 (heap-OOB guard): this internal
      * view is built by hand (getQLike + getDataLike), bypassing initTensor's
      * validateSymQConfigShape choke point entirely -- unlike every tensor a
      * caller builds through the public API, nothing here checks that a
@@ -402,7 +402,7 @@ void requantizeTensorInPlace(tensor_t *t, quantization_t *targetQ) {
          * must describe exactly `t`'s element count. */
         validateAsymQConfigShape(newQ->qConfig, numElements);
     }
-    /* Final-review CRITICAL fix (post-Task-6): the BFP twin of the SYM guard
+    /* Heap-OOB guard, the BFP twin of the SYM guard
      * above -- Task 6's new getQLike/getDataLike BFP arms made this same
      * unvalidated hand-built view reachable for BFP targets (previously
      * getQLike's default arm killed any BFP target with "Unknown QType"

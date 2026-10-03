@@ -94,8 +94,7 @@ void tearDown(void) {}
 
 /*! LINEAR round trip. `lq` is reused verbatim to construct both the serial
  *  and the deserial mirror layer (both Owning, so each gets its own
- *  parameter tensors + outputQ/propLossQ copies) — the same pattern the
- *  design spec's "designated override" example assumes. `biasGradMath` is
+ *  parameter tensors + outputQ/propLossQ copies). `biasGradMath` is
  *  bumped away from the uniform baseline so the four arithmetic fields are
  *  NOT all identical: a field-order bug in serializeLayer/deserializeLayer
  *  (e.g. weightGradMath and biasGradMath swapped) corrupts the file at that

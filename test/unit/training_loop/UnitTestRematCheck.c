@@ -186,7 +186,7 @@ static void buildHarModel(fixture_t *f) {
     buildHar(f, false);
 }
 
-/* The Codex F1 alignment model: FLOAT32 [1,5] -> Quantization to BFP m = 8 ->
+/* The F1 alignment model: FLOAT32 [1,5] -> Quantization to BFP m = 8 ->
  * Linear 5 -> 1 under MSE. n = 2, deepest 1, top 1. Wires: ACT 0, ACT 1 (BFP,
  * 5 B), ACT 2 (4 B), the seed GRAD 2 (id 3). Steps: FORWARD 0 (#0), FORWARD 1
  * (#1), LOSS_FORWARD (#2), LOSS_BACKWARD (#3), BACKWARD(1) (#4, grads-only). */
@@ -219,13 +219,13 @@ static void freeFixture(fixture_t *f, rematScheduler_t *s) {
     freeModel(f->model, f->n);
 }
 
-/* ---- rematCheckNumWires and rematCheckInit (spec §7.2, §7.3) ---- */
+/* ---- rematCheckNumWires and rematCheckInit ---- */
 
 void testNumWiresIsTheTablesWireCount(void) {
     fixture_t f;
     buildHarModel(&f);
     rematScheduler_t s = initHeap(&f, NULL);
-    TEST_ASSERT_EQUAL_size_t(24, rematCheckNumWires(&s)); /* spec §3.1: 23 slab + ACT 0 */
+    TEST_ASSERT_EQUAL_size_t(24, rematCheckNumWires(&s)); /* 23 slab + ACT 0 */
     freeFixture(&f, &s);
     buildF1Model(&f);
     s = initArena(&f, NULL);
@@ -247,7 +247,7 @@ static void numWiresOfAHeapWhosePlanFailed(fixture_t *f) {
     (void)rematCheckNumWires(&s);
 }
 
-/* Spec §7.2: the guard runs before the VLA it sizes exists, so the VLA is
+/* The guard runs before the VLA it sizes exists, so the VLA is
  * never built from a NULL table. */
 void testNumWiresExitsOnASchedulerThatIsNotInitialised(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "rematCheckNumWires: scheduler not initialised",
@@ -260,7 +260,7 @@ void testNumWiresExitsOnASchedulerThatIsNotInitialised(void) {
 }
 
 /* The cursors come from rematBackwardRange on the model passed in (the LIVE
- * one, spec §6.7), not from the table's built facts: this table was built on
+ * one), not from the table's built facts: this table was built on
  * the trainable HAR (deepest 0), the live model freezes the convs (deepest 10,
  * the #380 cut). producedGen is a VLA, so it starts as garbage. */
 void testInitSetsTheCursorsFromTheLiveModelAndZeroesProducedGen(void) {
@@ -293,9 +293,9 @@ void testInitSetsTheCursorsFromTheLiveModelAndZeroesProducedGen(void) {
     freeFixture(&built, &s);
 }
 
-/* ---- rematCheckStep: positional resolution and commit (spec §7.4, §7.5) ---- */
+/* ---- rematCheckStep: positional resolution and commit ---- */
 
-/* The positional rule restated from the step (spec §3.1): what the driver must
+/* The positional rule restated from the step: what the driver must
  * be handed. BACKWARD(top) reads the seed (the CE skip), and the grads-only
  * BACKWARD(deepest) writes nothing. */
 static void assertResolved(const rematCheck_t *c, const rematStep_t *st,
@@ -335,7 +335,7 @@ static void assertResolved(const rematCheck_t *c, const rematStep_t *st,
     }
 }
 
-/* The spec §6.1 driver loop with the layer execution left out. Asserts what
+/* The driver loop with the layer execution left out. Asserts what
  * the checker resolved at every step and what it committed by the end: every
  * cursor at its end, every slab wire produced under its current binding, ACT 0
  * never. */
@@ -442,7 +442,7 @@ void testOperandsAreResolvedPositionallyOnHar(void) {
     freeFixture(&f, &s);
 }
 
-/* ---- violations: a desynchronised step (spec §7.4 rule 1) ---- */
+/* ---- violations: a desynchronised step ---- */
 
 typedef void (*tamperFn_t)(rematCheck_t *c, rematScheduler_t *s);
 
@@ -478,7 +478,7 @@ static void offerStep(fixture_t *f, rematScheduler_t *s, size_t k, const rematSt
     rematCheckStep(&c, &st, &op);
 }
 
-/* The full §7.7 message once: row, step index, kind, layer, rule. */
+/* The full violation message once: row, step index, kind, layer, rule. */
 void testStepExitsOnAnUnknownStepKind(void) {
     fixture_t f;
     buildF1Model(&f);
@@ -506,7 +506,7 @@ void testStepExitsOnALayerOutOfRangeBeforeResolvingIt(void) {
     freeFixture(&f, &s);
 }
 
-/* LOSS_* carry layer == n (spec §4.1). */
+/* LOSS_* carry layer == n. */
 void testStepExitsOnALossStepWhoseLayerIsNotN(void) {
     fixture_t f;
     buildF1Model(&f);
@@ -517,9 +517,9 @@ void testStepExitsOnALossStepWhoseLayerIsNotN(void) {
     freeFixture(&f, &s);
 }
 
-/* ---- violations: order and phase (spec §7.4 rule 2, §7.5) ---- */
+/* ---- violations: order and phase ---- */
 
-/* Death-test children only: the §6.1 loop without a test assertion, so a
+/* Death-test children only: the driver loop without a test assertion, so a
  * checker that accepts every step simply returns and the child exits 0. */
 static void driveCall(fixture_t *f, rematScheduler_t *s) {
     uint32_t producedGen[rematCheckNumWires(s)];
@@ -537,7 +537,7 @@ static void driveCall(fixture_t *f, rematScheduler_t *s) {
     rematCheckReleased(&c);
 }
 
-/* D24: decorator rows wrap the real ARENA slots and are installed on the
+/* Decorator rows wrap the real ARENA slots and are installed on the
  * test's own instance; their tables are const. */
 static void passBegin(rematScheduler_t *s) {
     rematSchedulerFunctions[REMAT_ARENA].begin(s);
@@ -665,7 +665,7 @@ void testStepExitsOnABackwardOutOfOrder(void) {
 }
 
 /* After HAR's last BACKWARD (deepest 0) the cursor is -1: it must stay
- * signed, or it reads as SIZE_MAX, which is not below deepest (spec §7.3). */
+ * signed, or it reads as SIZE_MAX, which is not below deepest. */
 void testStepExitsOnABackwardAfterTheLastOne(void) {
     fixture_t f;
     buildHarModel(&f);
@@ -705,7 +705,7 @@ void testASecondCallWithoutReInitExitsAtItsFirstStep(void) {
     freeFixture(&f, &s);
 }
 
-/* ---- violations: residency and bind generation (spec §7.3, §7.4 rule 4) ---- */
+/* ---- violations: residency and bind generation ---- */
 
 static void releaseAct1(rematCheck_t *c, rematScheduler_t *s) {
     (void)c;
@@ -721,7 +721,7 @@ static void forgetThatAct1WasProduced(rematCheck_t *c, rematScheduler_t *s) {
     c->producedGen[rematActId(s->wires, 1)] = 0u;
 }
 
-/* The swap-target bug class (spec §7.6): a row re-binds the seed without its
+/* The swap-target bug class: a row re-binds the seed without its
  * producer running again, so its bytes are not the ones LOSS_BACKWARD wrote. */
 static void rebindTheSeed(rematCheck_t *c, rematScheduler_t *s) {
     (void)c;
@@ -746,7 +746,7 @@ void testStepExitsWhenAnInputIsNotResident(void) {
                               "step #1 FORWARD(layer 1) violates 'operand not resident: in ACT 1'");
 }
 
-/* F1's Linear trains, so its BACKWARD reads ACT 1 (spec §3.7). */
+/* F1's Linear trains, so its BACKWARD reads ACT 1. */
 void testStepExitsWhenAReadingBackwardsInputIsNotResident(void) {
     assertF1TamperedRejectsAt(4, releaseAct1,
                               "BACKWARD(layer 1) violates 'operand not resident: in ACT 1'");
@@ -790,7 +790,7 @@ void testStepExitsOnAnInputWithoutBytes(void) {
 /* [Linear T, LayerNorm frozen, Linear frozen, Linear T] under MSE: n = 4,
  * deepest 0, top 3. Under LIVENESS the frozen Linear's input ACT 2 dies at its
  * forward (its backward does not read it), while the frozen LayerNorm's ACT 1
- * lives to BACKWARD(1) (spec §3.7, §12.2 item 9). */
+ * lives to BACKWARD(1). */
 static void buildFrozenZooModel(fixture_t *f) {
     f->model[0] = makeLinear(4, 4, false);
     f->model[1] = makeLayerNorm(4, true);
@@ -808,7 +808,7 @@ void testCheckAcceptsTheFrozenZooOnBothRows(void) {
     assertEveryStepAccepted(initHeap, buildFrozenZooModel);
 }
 
-/* ---- violations: operands sharing bytes (spec §7.3, §7.4 rule 5) ---- */
+/* ---- violations: operands sharing bytes ---- */
 
 static size_t rangeOf(const rematProgram_t *p, uint16_t wire) {
     for (size_t r = 0; r < p->numRanges; r++) {
@@ -820,7 +820,7 @@ static size_t rangeOf(const rematProgram_t *p, uint16_t wire) {
     return 0;
 }
 
-/* Spec §12.2 item 3a: ARENA offsets edited after init bypass the init
+/* ARENA offsets edited after init bypass the init
  * verifier, so the run-time rule is the one that fires. `victim` (a GRAD if
  * victimIsGrad, else an ACT) is placed onto ACT `onto`'s bytes; under
  * STORE_ALL both are co-live at the step that reads or writes them together. */
@@ -843,7 +843,7 @@ void testStepExitsWhenAForwardsInputAndOutputShareBytes(void) {
         "step #1 FORWARD(layer 1) violates 'operands share bytes: in/out' (ACT 1 and ACT 2)");
 }
 
-/* Pairwise, not only gradIn/out (spec §7.5): F1's trained Linear reads ACT 1
+/* Pairwise, not only gradIn/out: F1's trained Linear reads ACT 1
  * in the BACKWARD that reads the seed. */
 void testStepExitsWhenABackwardsInputAndGradInShareBytes(void) {
     assertSharedBytesRejected(
@@ -859,7 +859,7 @@ void testStepExitsWhenABackwardsInputAndOutputShareBytes(void) {
         "step #14 BACKWARD(layer 10) violates 'operands share bytes: in/out' (ACT 10 and GRAD 10)");
 }
 
-/* The canonical pair (spec §7.5): HAR's BACKWARD(9) does not read its input
+/* The canonical pair: HAR's BACKWARD(9) does not read its input
  * (Flatten), so its only pair is gradIn/out. */
 static void assertGradOntoGradRejected(size_t victim, size_t onto, const char *violation) {
     fixture_t f;
@@ -878,7 +878,7 @@ void testStepExitsWhenABackwardsGradInAndOutputShareBytes(void) {
                                "gradIn/out' (GRAD 10 and GRAD 9)");
 }
 
-/* LOSS_BACKWARD reads ACT n and writes the seed (spec §7.5). */
+/* LOSS_BACKWARD reads ACT n and writes the seed. */
 void testStepExitsWhenALossBackwardsInputAndOutputShareBytes(void) {
     assertSharedBytesRejected(buildF1Model, true, 2, 2,
                               "step #3 LOSS_BACKWARD(layer 2) violates 'operands share bytes: "
@@ -892,7 +892,7 @@ static void releaseAct1AndAct2(rematCheck_t *c, rematScheduler_t *s) {
 }
 
 /* Both FORWARD(1) operands unbound: residency names the first, before two NULL intervals "share
- * bytes" (spec §7.4: rule 4 before rule 5). */
+ * bytes" (rule 4 runs before rule 5). */
 void testStepExitsOnNonResidencyBeforeSharedBytes(void) {
     assertF1TamperedRejectsAt(1, releaseAct1AndAct2,
                               "step #1 FORWARD(layer 1) violates 'operand not resident: in ACT 1'");
@@ -906,8 +906,8 @@ static void aliasAct9OntoGrad9(rematCheck_t *c, rematScheduler_t *s) {
         rematWireHdr(s->wires, rematGradId(s->wires, 9))->data;
 }
 
-/* Flatten's BACKWARD(9) (HAR step 15) does not read ACT 9: sharing bytes with its out is legal
- * (spec §7.5). Exit 0 is the acceptance; the empty needle keeps a rejection's banner in the
+/* Flatten's BACKWARD(9) (HAR step 15) does not read ACT 9: sharing bytes with its out is legal.
+ * Exit 0 is the acceptance; the empty needle keeps a rejection's banner in the
  * failure message. */
 void testStepAcceptsADeadInputSharingBytesWithTheOutput(void) {
     fixture_t f;
@@ -917,7 +917,7 @@ void testStepAcceptsADeadInputSharingBytesWithTheOutput(void) {
     freeFixture(&f, &s);
 }
 
-/* ---- the stream-level checks (spec §7.6) ---- */
+/* ---- the stream-level checks ---- */
 
 /* Death-test children only: `k` checked steps, then the stream is declared
  * finished. */
@@ -1028,7 +1028,7 @@ void testFinishExitsWhenARowEatsTheLastStepInternally(void) {
     freeFixture(&f, &s);
 }
 
-/* [Linear 4 -> 3] under CE, n = 1 (D20): top = -1 < deepest = 0, so the
+/* [Linear 4 -> 3] under CE, n = 1: top = -1 < deepest = 0, so the
  * stream is FORWARD 0, LOSS_FORWARD, LOSS_BACKWARD and no BACKWARD at all;
  * wires ACT 0, ACT 1, the seed GRAD 1. */
 static void buildCeSingleLinearModel(fixture_t *f) {
@@ -1038,7 +1038,7 @@ static void buildCeSingleLinearModel(fixture_t *f) {
     f->x = makeInput(&f->in, (size_t[]){1, 4}, 2);
 }
 
-/* Spec §7.6: with n = 1 under CE, LOSS_BACKWARD and zero BACKWARDs is a
+/* With n = 1 under CE, LOSS_BACKWARD and zero BACKWARDs is a
  * complete stream, as in today's loop. */
 void testFinishAcceptsCeWithOneLayerAndNoBackwardStep(void) {
     assertEveryStepAccepted(initArena, buildCeSingleLinearModel);
@@ -1051,7 +1051,7 @@ void testFinishAcceptsAnAllFrozenStream(void) {
     assertEveryStepAccepted(initHeap, buildAllFrozenModel);
 }
 
-/* A row whose end leaves ACT 1 bound (R8 lifecycle: "end leaves no
+/* A row whose end leaves ACT 1 bound (release lifecycle: "end leaves no
  * non-borrowed wire resident"). */
 static uint64_t g_strayBytes[1];
 
@@ -1106,8 +1106,8 @@ void testReleasedExitsWhileTheInputIsStillBound(void) {
 }
 
 #ifdef ODT_MEM_PROFILE
-/* Hard rule: the checker reserves nothing; its state is the caller's (spec
- * §2.3). Measured around every checker call on HEAP, whose rows do reserve. */
+/* Hard rule: the checker reserves nothing; its state is the caller's.
+ * Measured around every checker call on HEAP, whose rows do reserve. */
 void testCheckReservesNothing(void) {
     fixture_t f;
     buildHarModel(&f);

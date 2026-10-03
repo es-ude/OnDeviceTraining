@@ -27,7 +27,7 @@
 #include "TrainingLoopApi.h"
 #include "unity.h"
 
-/* #468 D3: the evaluation entry points take a trailing size_t microBatchSize. */
+/* #468: the evaluation entry points take a trailing size_t microBatchSize. */
 _Static_assert(_Generic(&evaluationEpoch,
                    float (*)(layer_t **, size_t, lossFuncType_t, dataLoader_t *,
                              inferenceWithLossFn_t, reduction_t, size_t): 1,
@@ -44,7 +44,7 @@ _Static_assert(_Generic(&evaluationEpochWithReport,
                                               size_t): 1,
                    default: 0),
                "evaluationEpochWithReport must take a trailing size_t microBatchSize (#468)");
-/* #468 D1 */
+/* #468: evaluation inherits the training micro-batch unless this is set. */
 _Static_assert(_Generic(((trainingRunOptions_t){0}).evalMicroBatchSize, size_t: 1, default: 0),
                "trainingRunOptions_t must carry a size_t evalMicroBatchSize (#468)");
 
@@ -139,7 +139,7 @@ static void freeModel(layer_t **model) {
     freeLinearLayer(model[0]);
 }
 
-/* ---- D9: an eval loader with no batch fails before any getBatch ----------- */
+/* ---- an eval loader with no batch fails before any getBatch --------------- */
 
 static batch_t *getBatchMustNotRun(dataLoader_t *dl, size_t index) {
     (void)dl;
@@ -181,7 +181,7 @@ void testEmptyEvalLoaderFailsBeforeAnyGetBatch(void) {
     ASSERT_EXITS_WITH_FAILURE(evaluateEmptyLoader(VIA_REPORT));
 }
 
-/* ---- D11: the report's numClasses must match the label ------------------- */
+/* ---- the report's numClasses must match the label ------------------------ */
 
 static void reportWithNumClasses(size_t numClasses, size_t m) {
     initData();
@@ -270,7 +270,7 @@ void testStackedReportMatchesPerSampleForEveryChunkSize(void) {
     TEST_ASSERT_FLOAT_WITHIN(1e-5f * fabsf(sum1) + 1e-6f, sum1, sumM);
 }
 
-/* Review Focus 1: loader batchSize 2 over D = 7 streams N = 6 (dropLast);
+/* Loader batchSize 2 over D = 7 streams N = 6 (dropLast);
  * m = 4 gathers ACROSS batch_t boundaries -> chunks 4 + 2. */
 void testStackedSpansLoaderBatchesAndRespectsDropLast(void) {
     initData();
@@ -288,7 +288,7 @@ void testStackedSpansLoaderBatchesAndRespectsDropLast(void) {
     TEST_ASSERT_TRUE(sameStats(r1.stats, r4.stats));
 }
 
-/* ---- D10: no entry point gains a getBatch call --------------------------- */
+/* ---- no entry point gains a getBatch call ------------------------------- */
 
 static size_t g_getBatchCalls;
 static getBatchFn_t g_realGetBatch;
@@ -341,7 +341,7 @@ void testEntryPointsKeepTodaysGetBatchCallCount(void) {
     }
 }
 
-/* ---- Review Focus 4 / D7: MEAN divides by the STREAMED count ------------- */
+/* ---- MEAN divides by the STREAMED count ---------------------------------- */
 
 /* A replay-like loader: batch 0 carries one extra sample beyond batchSize. */
 static batch_t *oneExtraSampleGetBatch(dataLoader_t *dl, size_t index) {
@@ -381,7 +381,7 @@ void testStackedMeanDividesByStreamedCount(void) {
                              mean3);
 }
 
-/* ---- fail-fast: stackability, forward gate, output contract (D8/D12) ----- */
+/* ---- fail-fast: stackability, forward gate, output contract -------------- */
 
 static void metricsWith(inferenceWithLossFn_t fn, size_t m) {
     layer_t *model[MODEL_SIZE];
@@ -520,7 +520,7 @@ static void metricsWithMismatchedSample(bool dtype) {
     metricsWith(inferenceWithLoss, 2);
 }
 
-/* D11 on the stacked path: a larger numClasses would not crash there (the
+/* The numClasses check on the stacked path: a larger numClasses would not crash there (the
  * counters are sized by it), it would silently mis-shape the matrix. */
 void testStackedReportRejectsNumClassesNotMatchingTheLabel(void) {
     ASSERT_EXITS_WITH(0, reportWithNumClasses(CLS, 2));
@@ -562,7 +562,8 @@ void testStackedForwardGateFiresBeforeTheStream(void) {
     freeFixtureData();
 }
 
-/* D6: a FLOAT32 forward with a SYM prop-loss wire (backward only) is fine. */
+/* The stacked-evaluation gate is forward-only: a FLOAT32 forward with a SYM
+ * prop-loss wire (backward only) is fine. */
 static void reportWithSymPropLoss(size_t m, size_t *cm, epochStats_t *out) {
     quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
     layer_t *model[MODEL_SIZE];

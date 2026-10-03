@@ -68,7 +68,7 @@ class XorShift32Sampler(torch.utils.data.Sampler[int]):
 class EcgAutoencoder(nn.Module):
     """ECG5000 reconstruction AE.
 
-    Decoder uses kernel_size=2 (not the spec section 4.2 K=4 with PyTorch
+    Decoder uses kernel_size=2 (not the originally planned K=4 with PyTorch
     padding=1) because our C framework's Conv1dTransposed has no
     integer-padding parameter; the only kernel/stride combination
     that hits length 70 from 35 (and 140 from 70) without input-side

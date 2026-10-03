@@ -174,7 +174,7 @@ void testRsqrtFloat32ZeroVar(void) {
 }
 
 void testMeanHonorsTransposedView(void) {
-    // Permutation-awareness (spec §4). Physical [3,2] buffer, transposeTensor(0,1)
+    // Permutation-awareness. Physical [3,2] buffer, transposeTensor(0,1)
     // -> logical [2,3] with logical (r,c) = phys[c*2 + r]. A contiguous-only
     // implementation would read phys[0..2]/phys[3..5] and get {2.33, 4.67}.
     size_t pdims[] = {3, 2};

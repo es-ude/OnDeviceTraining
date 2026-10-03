@@ -818,7 +818,7 @@ void testSoftmaxBackwardEmptyRowsAreNoOp(void) {
 /* ---- BFP epic PR6 Task 4: native ARITH_BFP forward (P6-2..P6-5) ----
  *
  * Gold: expected_bfp_softmax.h (generate_expected_bfp_softmax.py mirrors the
- * numerics-spec steps 1-5 bit-exactly; the script asserts the TRUNC and
+ * arithmetic-bfp.md §5.9 R-S2 steps 1-5 bit-exactly; the script asserts the TRUNC and
  * HALF_AWAY wires differ, so the two knob tests double as the knob
  * discriminator). Every gold test asserts the ARITH_BFP derivation through
  * the ordinary config path before running. */
@@ -926,7 +926,7 @@ void unitTestSoftmaxForwardBfpNativeHalfAway(void) {
     TEST_ASSERT_EQUAL_UINT8_ARRAY(kSmBfpOutExponentsHalfAway, gotExps, 2);
 }
 
-/* Fix round 1 (amended spec step 2): the coarse-negative-block regime. Block
+/* R-S2 step 2 (arithmetic-bfp.md §5.9): the coarse-negative-block regime. Block
  * A holds the SIGNED max (2.0 at E=-5); block B {-100, -80, +1.0, -50} is
  * negative-dominated, so its absmax-minimal grid (E=0) is legitimately
  * COARSER than the argmax block's -- E_i > EMax, the case the old kernel's
@@ -973,7 +973,7 @@ void unitTestSoftmaxForwardBfpCoarseNegativeBlock(void) {
     TEST_ASSERT_EQUAL_UINT8_ARRAY(kSmBfpCnOutExponentsHalfAway, gotHalfAwayExps, 2);
 }
 
-/* Fix round 2: the saturation sub-branches and the zero-code up>=31 clause.
+/* The saturation sub-branches and the zero-code up>=31 clause.
  * Grouped {4, 2}: g1 (up=24) saturates code -128 via the MAGNITUDE disjunct
  * (|m| > INT32_MAX >> 24), g2 (up=32) via the up>=31 disjunct; each coarse
  * block also holds a ZERO code -- g2's reaches the kernel's up>=31 clause,
@@ -1239,8 +1239,8 @@ void unitTestSoftmaxBackwardBfpNullPropLossIsNoOp(void) {
     TEST_ASSERT_EQUAL_INT32_ARRAY(kSmBfpBwdDLdsCodes, gotLoss, 8);
 }
 
-/* Per-arm guard pins (fix round 1 -- restoring the coverage the deleted
- * blanket-guard test carried): a BFP wire under DECLARED FLOAT32 math must
+/* Per-arm guard pins (restoring the coverage the deleted blanket-guard
+ * test carried): a BFP wire under DECLARED FLOAT32 math must
  * die at the arm's bfpRequireNoBfpWire, on every position -- the FLOAT32
  * arm raw-casts all three wires to float* (a ~4x heap over-read on
  * input/loss, an over-write into the packed propLoss buffer), so a missing
@@ -1325,7 +1325,7 @@ void testSoftmaxBackwardSymArmRejectsBfpWire(void) {
  *
  * The native BFP pipeline runs ONE max/alignment grid and ONE partition sum
  * over the whole wire, so a multi-row BFP call must fail fast (per-row BFP is
- * out of scope, #152 D3) while a single row -- rank 1 [N] or rank 2 [1, N] --
+ * out of scope, #152) while a single row -- rank 1 [N] or rank 2 [1, N] --
  * runs bit-identically to the rank-1 gold. */
 
 /* Re-views a rank-1 fixture wire as [d0, d1] over the same storage (d0 * d1

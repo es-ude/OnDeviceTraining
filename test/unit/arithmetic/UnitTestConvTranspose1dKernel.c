@@ -411,7 +411,7 @@ void testConvTranspose1dKernelBfpGatherNoBiasZeroSeeds(void) {
                              kBfpConvTNoBiasExpected_len * sizeof(float));
 }
 
-/* PR2 self-review finding 1: the gather forwards kernel->dilation into
+/* BFP epic PR2: the gather forwards kernel->dilation into
  * convTranspose1dTapsAt only inside the BFP arm; every other BFP fixture runs
  * dilation=1, where a hardcoded 1 is an arithmetic identity. This fixture's
  * contributor enumeration (out_len 14 = (5-1)*2 + 2*2 + 1 + 1) genuinely
@@ -474,7 +474,7 @@ void testConvTranspose1dKernelBfpGatherDilation2MatchesGold(void) {
                              kBfpConvTDilExpected_len * sizeof(float));
 }
 
-/* PR2 self-review finding 3, the ConvT sibling of UnitTestMatmul.c's
+/* BFP epic PR2, the ConvT sibling of UnitTestMatmul.c's
  * testMatmulBfpGroupedBiasBindsPerGroupExponent: same bias VALUES stored
  * grouped {numGroups=2, groupSize=1} with non-uniform exponents (goldgen
  * asserts a group-0 collapse differs), expected output bit-identical to the
@@ -533,7 +533,7 @@ void testConvTranspose1dKernelBfpGroupedBiasBindsPerGroupExponent(void) {
                              kBfpConvTExpected_len * sizeof(float));
 }
 
-/* BFP power-of-two twin (spec §8c), mirroring UnitTestConv1dKernel.c's
+/* BFP power-of-two twin, mirroring UnitTestConv1dKernel.c's
  * testConv1dKernelBfpPowerOfTwoBitIdenticalToGroupedSym at the ConvT gather:
  * identical mantissas (the gold fixture's codes); BFP input per-tensor stored
  * 126 (2^-1 == 0.5f) <-> SYM inScale 0.5f; BFP weight grouped {numGroups=3,

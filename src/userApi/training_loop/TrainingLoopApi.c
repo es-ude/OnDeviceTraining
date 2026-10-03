@@ -116,7 +116,7 @@ static size_t argmaxByTensor(const tensor_t *t, size_t n) {
     }
 }
 
-/* #468 D9: computed from sizes, before any getBatch -- a dataset smaller than
+/* #468: computed from sizes, before any getBatch -- a dataset smaller than
  * batchSize would otherwise make getBatch overrun the loader's index table,
  * and a MEAN over zero samples is 0/0. */
 static size_t requireEvalBatches(dataLoader_t *dataLoader, const char *caller) {
@@ -131,7 +131,7 @@ static size_t requireEvalBatches(dataLoader_t *dataLoader, const char *caller) {
     return numberOfBatches;
 }
 
-/* #468 D11: every metric indexes [0, numClasses); a caller-supplied
+/* #468: every metric indexes [0, numClasses); a caller-supplied
  * numClasses that disagrees with the label would read past each class row. */
 static void requireNumClassesMatchesLabel(size_t numClasses, tensor_t *label, const char *caller) {
     size_t labelElements = calcNumberOfElementsByTensor(label);
@@ -225,7 +225,8 @@ static void requireNonEmptyFirstBatch(batch_t *firstBatch, const char *caller) {
     }
 }
 
-/* D2/D7: judged on the NOMINAL sample count (a loader whose batches differ
+/* Untracked-BN evaluability over the full chunks AND the ragged tail
+ * chunk, judged on the NOMINAL sample count (a loader whose batches differ
  * from batchSize is covered at run time by BatchNorm1d's own forward guard).
  * Callers run requireEvalBatches first, so batchSize and the count are >= 1. */
 static void requireEvaluableChunks(layer_t **model, size_t modelSize, dataLoader_t *dataLoader,
@@ -248,7 +249,7 @@ static void evalFirstSample(layer_t **model, size_t modelSize, dataLoader_t *dat
     }
 }
 
-/* Extends D9 past the size check: a custom getBatch returning only empty
+/* Extends requireEvalBatches past the size check: a custom getBatch returning only empty
  * batches would make MEAN and the metrics divide by 0. */
 static void requireStreamedSamples(size_t totalSamples, const char *caller) {
     if (totalSamples == 0) {
@@ -303,7 +304,7 @@ static void requireChunkOutput(const char *caller, inferenceStats_t *stats, size
 
 /* One inferenceFn call over `rows` gathered samples: stack views of the
  * reference re-pointed at the gather buffers (dims[0] = rows). Returns the
- * row-weighted loss (x rows for MEAN, plain for SUM -- spec 5.3). */
+ * row-weighted loss (x rows for MEAN, plain for SUM). */
 static float evaluateChunk(const char *caller, layer_t **model, size_t modelSize,
                            lossFuncType_t funcType, inferenceWithLossFn_t inferenceFn,
                            reduction_t forwardReduction, tensor_t *referenceItem,
@@ -333,10 +334,10 @@ static float evaluateChunk(const char *caller, layer_t **model, size_t modelSize
     return loss;
 }
 
-/* m > 1 (spec 5.3): gathers consecutive samples of the loader's stream --
+/* m > 1: gathers consecutive samples of the loader's stream --
  * ACROSS batch_t boundaries, since eval loaders typically use batchSize 1 --
  * into chunks of m rows, then runs the N mod m remainder. Counts come from
- * the stream (a replay wrapper's batches exceed batchSize, D7). The reference
+ * the stream (a replay wrapper's batches exceed batchSize). The reference
  * sample's tensors are dataset-owned and outlive its sample_t (freeSample
  * frees only the wrapper). */
 static float evaluateStacked(const char *caller, const char *knob, layer_t **model,
@@ -606,7 +607,7 @@ classificationReport_t evaluationEpochWithReport(layer_t **model, size_t modelSi
                                                  size_t *cmBuffer, size_t numClasses,
                                                  reduction_t forwardReduction,
                                                  size_t microBatchSize) {
-    /* #468 D11: 0 is evalFirstSample's "no metrics" opt-out, so the
+    /* #468: 0 is evalFirstSample's "no metrics" opt-out, so the
      * first-sample check would let it through to 0-sized counters. */
     if (numClasses == 0) {
         PRINT_ERROR("evaluationEpochWithReport: numClasses is 0 -- it must equal the label's "
@@ -639,10 +640,10 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
     bsScheduler_t *bsScheduler = (options != NULL) ? options->bsScheduler : NULL;
     epochCallbackFn_t callback = (options != NULL) ? options->callback : NULL;
     bool stopOnNonFiniteLoss = (options != NULL) ? options->stopOnNonFiniteLoss : false;
-    /* 0 means 1 (#152 spec §6.1): zero-initialised options keep per-sample training. */
+    /* 0 means 1 (#152): zero-initialised options keep per-sample training. */
     size_t microBatchSize =
         (options != NULL && options->microBatchSize != 0) ? options->microBatchSize : 1;
-    /* #468 D1: evaluation inherits the training micro-batch unless set. */
+    /* #468: evaluation inherits the training micro-batch unless set. */
     size_t evalMicroBatchSize = (options != NULL && options->evalMicroBatchSize != 0)
                                     ? options->evalMicroBatchSize
                                     : microBatchSize;
@@ -669,7 +670,8 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
         exit(1);
     }
 
-    /* #152 spec §6.2 checks 1 and 2: every macro batch this run trains must
+    /* #152 divisibility checks 1 and 2 (3: trainingEpochDefault, 4:
+     * trainingBatchDefault): every macro batch this run trains must
      * split into whole chunks of microBatchSize rows (b % m == 0, no ragged
      * tails). Both fire before anything is read or trained. */
     if (trainDataLoader->batchSize % microBatchSize != 0) {

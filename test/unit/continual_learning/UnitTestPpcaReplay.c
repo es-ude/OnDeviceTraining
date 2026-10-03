@@ -261,7 +261,7 @@ void testSampleDeterministicAndGlobalStreamUntouched(void) {
 }
 
 void testSampleGoldenConstants(void) {
-    /* Host-vs-host determinism (spec §2.6): pinned constants. AFTER the
+    /* Host-vs-host determinism: pinned constants. AFTER the
      * implementation first passes the other tests, run once with the
      * printf below, paste the values, delete the printf. */
     ppcaReplay_t *g = buildKnownGenerator();
@@ -609,7 +609,7 @@ void testUpdateRenormalizesIllConditionedSpectrum(void) {
      * produced by cancellation of O(||G||) entries carries an absolute
      * error floor of ~eps*||G|| — after the rotate-back's 1/sqrt(theta_hat)
      * scaling the kept row's norm deviates by ~eps*||G||/theta_2
-     * (percent-scale here). The renormalization pass (spec §5.2.4) is what
+     * (percent-scale here). The renormalization pass is what
      * pins it back to 1. */
     ppcaReplayConfig_t cfg = floatConfig(6, 2, 16);
     ppcaReplay_t *g = ppcaReplayCreate(&cfg);
@@ -938,7 +938,7 @@ void testPackedStateStreamingGridBounded(void) { /* T7 */
         ppcaReplayUpdateStreaming(gF, x, ws);
         ppcaReplayUpdateStreaming(gP, x, ws);
     }
-    /* Packed streaming is GRID-bounded, not data-bounded (spec §5.3): it
+    /* Packed streaming is GRID-bounded, not data-bounded: it
      * must stay sane (no NaN, top component still informative), while the
      * FLOAT32 twin is the accuracy reference. subspaceProjection reads raw
      * float data, so dequant gP's packed basis into a float twin first. */

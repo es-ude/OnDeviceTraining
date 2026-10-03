@@ -45,7 +45,7 @@
 #include "expected_microbatch.h"
 #include "unity.h"
 
-/* #152 PR3b (spec §6): stacked micro-batch training. trainingBatchDefault
+/* #152 PR3b: stacked micro-batch training. trainingBatchDefault
  * walks the macro batch in b/m chunks of exactly m rows; m > 1 gathers each
  * chunk into two [m, ...] tensors. Compile-time pin of the trailing knob. */
 _Static_assert(_Generic(&trainingBatchDefault,
@@ -68,7 +68,7 @@ void tearDown(void) {}
 
 /* ---- shared fixture helpers ------------------------------------------------ */
 
-/* Natural-shape FLOAT32 tensor: the loop adds axis 0 itself (spec §5.1). */
+/* Natural-shape FLOAT32 tensor: the loop adds axis 0 itself. */
 static tensor_t *buildFloatTensor(const size_t *dims, size_t rank, const float *src) {
     size_t *ownedDims = reserveMemory(rank * sizeof(size_t));
     for (size_t i = 0; i < rank; i++) {
@@ -143,7 +143,7 @@ static size_t snapshotScaledGrads(layer_t **model, size_t modelSize, float scale
 
 /* allclose: |ref - got| <= atol + rtol * |ref|. Returns the first failing
  * index, or SIZE_MAX. The summation order differs across m, so bit equality
- * is not expected (spec §9). */
+ * is not expected. */
 static size_t firstMismatch(const float *ref, const float *got, size_t n, float atol, float rtol) {
     for (size_t i = 0; i < n; i++) {
         if (!(fabsf(ref[i] - got[i]) <= atol + rtol * fabsf(ref[i]))) {
@@ -319,7 +319,7 @@ void testStackedChunkWalkCallsOncePerChunkWithMRows(void) {
 }
 
 void testMicroBatchZeroBehavesExactlyLikeOne(void) {
-    /* 0 means 1 (spec §6.1): same call pattern, bit-identical loss and grads. */
+    /* 0 means 1: same call pattern, bit-identical loss and grads. */
     initModelBData();
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
@@ -357,7 +357,7 @@ void testMicroBatchZeroBehavesExactlyLikeOne(void) {
 
 void testStackedLossIsRowWeightedForMeanAndPlainForSum(void) {
     /* MEAN: Σ(chunkLoss * m) / b equals the per-sample mean; SUM: the plain
-     * sum of chunk sums equals the per-sample sum (spec §6.5). */
+     * sum of chunk sums equals the per-sample sum. */
     initModelBData();
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
@@ -390,7 +390,7 @@ void testStackedLossIsRowWeightedForMeanAndPlainForSum(void) {
 }
 
 #ifdef ODT_MEM_PROFILE
-/* The two gather buffers (spec §6.4) are freed before trainingBatchDefault
+/* The two gather buffers are freed before trainingBatchDefault
  * returns: a stacked macro batch leaves the live-byte count where it found it.
  * CI runs detect_leaks=0, so only this exact counter catches a dropped free.
  * The warm-up call grows MaxPool's argmax to 2 rows and settles any other
@@ -438,7 +438,7 @@ void testStackedBatchReturnsItsGatherBuffers(void) {
 }
 #endif /* ODT_MEM_PROFILE */
 
-/* ---- parity across m (spec §9 PR 3b core) --------------------------------- */
+/* ---- parity across m ----------------------------------------------------- */
 
 void testStackedMatchesPerSampleOnModelA(void) {
     rngSetSeed(1521u);
@@ -638,7 +638,7 @@ void testStackedBatchMatchesPyTorchGold(void) {
 
 /* A death test that also returns what the child printed: DeathTest.h's
  * ASSERT_EXITS_WITH discards the child's stdout, but the fail-fast messages
- * must name b and m (spec §6.2). PRINT_ERROR writes to stdout in every preset
+ * must name b and m. PRINT_ERROR writes to stdout in every preset
  * (DEBUG_MODE_ERROR is always defined, src/common/CMakeLists.txt); here the
  * child's stdout is the write end of a pipe, and exit() flushes it. The
  * parent drains the pipe to EOF (a chatty child can never block on a full
@@ -715,9 +715,9 @@ static void trainModelBBatchOrDie(layer_t **model, size_t batchSize, size_t micr
 }
 
 void testTrainingBatchDefaultRejectsBatchNotDivisibleByMicroBatch(void) {
-    /* Check 4 (spec §6.2): b % m == 0 at entry -- m not dividing b (the
-     * message must name both: numbers plus the keyword "microBatchSize",
-     * ruling R10; a direct call, so checks 1-3 are not on this path), and
+    /* Divisibility check 4: b % m == 0 at entry -- m not dividing b (the
+     * message must name both: numbers plus the keyword "microBatchSize";
+     * a direct call, so checks 1-3 are not on this path), and
      * m > b. */
     initModelBData();
     quantization_t *q = quantizationInitFloat();
@@ -774,7 +774,7 @@ static void trainOneSampleClaimingMRowsOrDie(layer_t **model, sample_t *only, si
 
 void testStackedGatherSizeOverflowFailsFast(void) {
     /* m = SIZE_MAX / 32 + 2 with 32-byte items AND labels: m * 32 wraps to
-     * exactly 32 (spec §6.4 checked multiply). An unchecked multiply would
+     * exactly 32 (the gather size is a checked multiply). An unchecked multiply would
      * reserve 32 bytes and gather samples[1..] past the 1-entry array. The
      * batch claims b = m, so the divisibility check passes. */
     quantization_t *q = quantizationInitFloat();
@@ -809,7 +809,7 @@ void testStackedGatherReservationFailureFailsFast(void) {
     /* m * per-sample bytes = 2 * (SIZE_MAX / 8) * 4 = SIZE_MAX - 7 does NOT
      * wrap, but no allocator can serve it: reserveMemory returns NULL (its own
      * size-wrap guard under ODT_MEM_PROFILE, calloc failure otherwise) and the
-     * gather must fail fast instead of copying through NULL (spec §6.4). The
+     * gather must fail fast instead of copying through NULL. The
      * item is stack-built with that huge shape; its data is never read, and
      * b = m = 2 keeps every sample access in bounds. */
     quantization_t *q = quantizationInitFloat();
@@ -849,7 +849,7 @@ static tensor_t *buildBoolMask(size_t n) {
 }
 
 void testStackedDropoutFailsFastOnItsMaskCount(void) {
-    /* Spec §6.8 known limitation: the caller-allocated mask holds one
+    /* Known limitation: the caller-allocated mask holds one
      * sample's elements, so at m > 1 Dropout's own count guard exits
      * (Dropout.c forward mask guard) -- a pre-existing fail-fast, pinned. */
     initModelBData();
@@ -873,7 +873,7 @@ void testStackedDropoutFailsFastOnItsMaskCount(void) {
     freeModelBData();
 }
 
-/* ---- per-chunk sample validation (spec §6.3) ------------------------------ */
+/* ---- per-chunk sample validation ----------------------------------------- */
 
 /* Model C: Flatten -> Linear(8 -> 4), MSE. Items [2, 4], labels [4]. Every
  * defective sample below keeps the reference byte count, so a missing check
@@ -1052,7 +1052,7 @@ void testStackedRejectsChunkDifferingFromSampleZero(void) {
     freeTensor(badA);
 }
 
-/* ---- FLOAT32 gate (spec §6.6) --------------------------------------------- */
+/* ---- FLOAT32 gate ---------------------------------------------------------- */
 
 /* Each gated model below trains cleanly at m = 2 WITHOUT the gate (the funnel
  * converts every non-FLOAT32 operand), so only the gate can make it exit. */
@@ -1146,13 +1146,13 @@ void testStackedGateRejectsBfpWire(void) {
 }
 
 void testStackedGateRejectsQuantizationLayer(void) {
-    /* Also pins the §6.6 message by its numbers plus ONE keyword, "FLOAT32"
-     * (ruling R10): m = 2, the layer index 3 and the layerType_t of
+    /* Also pins the gate's message by its numbers plus ONE keyword,
+     * "FLOAT32": m = 2, the layer index 3 and the layerType_t of
      * QUANTIZATION (8, append-only enum). The Quantization node follows model
      * B, so its index 3 collides with none of the message's other numbers
      * (index 1 would: "microBatchSize 2 > 1"). The offending field is pinned
      * by identity, not wording: whatever layerNonFloat32Field returns for the
-     * node must appear in the message (§6.6 "names the offending field"). */
+     * node must appear in the message (it names the offending field). */
     quantization_t *floatQ = quantizationInitFloat();
     quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
     layerQuant_t lq;
@@ -1256,7 +1256,7 @@ void testStackedTrainingWithFrozenFirstLayerMatchesPerSample(void) {
     TEST_ASSERT_FLOAT_WITHIN(1e-6f + 1e-5f * fabsf(loss[0]), loss[0], loss[1]);
 }
 
-/* ---- trainingEpochDefault (spec §6.1, §6.2 check 3) ------------------------ */
+/* ---- trainingEpochDefault (0 means 1, divisibility check 3) -------------- */
 
 /* Classifier: Linear(5->4) -> ReLU -> Linear(4->3) -> Softmax, CrossEntropy,
  * over 8 samples ([5] items, one-hot [3] labels). */
@@ -1407,8 +1407,8 @@ static void runEpochOnLoaderOrDie(dataLoader_t *dl, size_t microBatchSize) {
 void testTrainingEpochDefaultRejectsBatchNotDivisibleByMicroBatch(void) {
     /* Check 3: loader batch 6, m = 4 -- dies before the first batch is drawn
      * (exit 1, not the tripwire's 3: that is what tells it from check 4,
-     * which would print the same 6 and 4) and names b and m (ruling R10:
-     * numbers plus the keyword "microBatchSize"). */
+     * which would print the same 6 and 4) and names b and m (numbers plus
+     * the keyword "microBatchSize"). */
     dataLoader_t *dl =
         dataLoaderInit(getTripwireSample, getClassifierDatasetSize, 6, NULL, NULL, false, 0, true);
     char message[512];
@@ -1426,7 +1426,7 @@ void testTrainingEpochDefaultRejectsBatchNotDivisibleByMicroBatch(void) {
 void testTrainingEpochDefaultBackstopsAnIndivisibleReplayBatch(void) {
     /* Loader batchSize 4 passes check 3 at m = 2, but its batches carry 5
      * samples (the replay loader's base + eligible * r shape): check 4 inside
-     * trainingBatchDefault must stop it (spec §6.2 known limitation). The
+     * trainingBatchDefault must stop it (known limitation of check 3). The
      * message's b is the batch's 5 -- a number check 3, which only sees the
      * loader's 4, can never print. */
     initClassifierData();
@@ -1486,7 +1486,7 @@ void testTrainingEpochDefaultStacksAndTracksPerSample(void) {
     TEST_ASSERT_FLOAT_WITHIN(1e-6f + 1e-5f * fabsf(lossOne), lossOne, lossFour);
 }
 
-/* ---- trainingRun (spec §6.1, §6.2 checks 1 and 2) -------------------------- */
+/* ---- trainingRun (0 means 1, divisibility checks 1 and 2) ---------------- */
 
 typedef enum {
     NO_SCHEDULER,
@@ -1570,7 +1570,7 @@ void testTrainingRunRejectsLoaderBatchNotDivisibleByMicroBatch(void) {
     /* Check 1: before epoch 0 -- before even the eval loader's numClasses
      * peek, so the tripwire dataset is never read (exit 1, not 3: that is what
      * tells it from checks 3 and 4, which would print the same 3 and 2) --
-     * and the message names b and m (ruling R10: numbers plus the keyword
+     * and the message names b and m (numbers plus the keyword
      * "microBatchSize"). */
     char message[512];
     int code = -2;
@@ -1588,10 +1588,10 @@ void testTrainingRunRejectsScheduleNotDivisibleByMicroBatch(void) {
     /* Check 2: the loader batch (2) divides, but the max=5 schedule 2, 3, 4, 5
      * is odd at epochs 1 AND 3. The walk fires before epoch 0 trains (exit 1,
      * the tripwire dataset is never read) and names the FIRST failing epoch,
-     * its batch and m (spec §6.2; ruling R10: numbers plus the keyword
-     * "microBatchSize"). Epoch 1 and the absence of epoch 3's batch 5 are the
-     * numbers that tell "first" from "any" failing epoch. 5 is also this
-     * fixture's maxBatchSize, so the message must not print the cap either. */
+     * its batch and m (numbers plus the keyword "microBatchSize"). Epoch 1
+     * and the absence of epoch 3's batch 5 are the numbers that tell "first"
+     * from "any" failing epoch. 5 is also this fixture's maxBatchSize, so the
+     * message must not print the cap either. */
     char message[512];
     int code = -2;
 
@@ -1632,7 +1632,7 @@ void testTrainingRunScheduleWalkStartsAtTheSchedulersLastEpoch(void) {
 }
 
 void testTrainingRunNeverWalksTheScheduleAtMicroBatch1(void) {
-    /* Ruling R9: check 2 walks the schedule only at m > 1. Walked over 17
+    /* Check 2 walks the schedule only at m > 1. Walked over 17
      * epochs, the NONFINITE_SCHEDULER target would fail fast at epoch 16
      * (exit 1) before epoch 0; unwalked, the run passes every pre-epoch-0
      * check and reads its first sample, where the tripwire dataset exits 3.
@@ -1643,7 +1643,7 @@ void testTrainingRunNeverWalksTheScheduleAtMicroBatch1(void) {
 
 void testTrainingRunMicroBatchDefaultsAreIdentical(void) {
     /* NULL options, zero-initialised options (microBatchSize 0) and an
-     * explicit 1 must train bit-identically (spec §6.1: 0 means 1). */
+     * explicit 1 must train bit-identically (0 means 1). */
     initClassifierData();
     float paramsNull[CLS_PARAMS];
     float paramsZero[CLS_PARAMS];

@@ -24,8 +24,8 @@ void initBatchNorm1dConfig(batchNorm1dConfig_t *cfg, parameter_t *gamma, paramet
                            tensor_t *runningMean, tensor_t *runningVar, size_t numChannels,
                            float eps, bnMomentumMode_t momentumMode, float momentum,
                            quantization_t *forwardQ, quantization_t *backwardQ) {
-    /* Codex plan review: affine/track are derived from ONE pointer each, so a
-     * half-pair would dereference NULL later. Both halves or neither. */
+    /* affine/track are derived from ONE pointer each, so a half-pair would
+     * dereference NULL later. Both halves or neither. */
     if ((gamma == NULL) != (beta == NULL)) {
         PRINT_ERROR("initBatchNorm1dConfig: gamma and beta must both be set (affine) or both "
                     "be NULL (got gamma %s, beta %s)",
@@ -95,7 +95,7 @@ static void bnValidateInput(const batchNorm1dConfig_t *cfg, const tensor_t *t, c
 }
 
 /* Every per-channel state tensor the kernels index as float[C]: FLOAT32 and
- * exactly numChannels elements (Codex plan review: dtype AND capacity). */
+ * exactly numChannels elements (dtype AND capacity). */
 static void bnRequireChannelVector(const batchNorm1dConfig_t *cfg, const tensor_t *t,
                                    const char *what) {
     if (t->quantization->type != FLOAT32) {
@@ -133,9 +133,9 @@ static void bnValidateRunningBuffers(const batchNorm1dConfig_t *cfg) {
  * IDENTITY-order offset i (bnForwardKernelFloat): an output that does not
  * match the input's rank and dims would be written out of bounds, a
  * non-identity-order output would receive values at the wrong physical
- * offsets (silently, when m == C makes dims alone ambiguous -- adversarial-
- * review fix #3), and a non-FLOAT32 output would misinterpret the FLOAT32
- * bit pattern the kernel writes. */
+ * offsets (silently, when m == C makes dims alone ambiguous), and a
+ * non-FLOAT32 output would misinterpret the FLOAT32 bit pattern the kernel
+ * writes. */
 static void bnValidateOutputMatchesInput(const tensor_t *input, const tensor_t *output) {
     const shape_t *in = input->shape;
     const shape_t *out = output->shape;
@@ -177,10 +177,10 @@ static size_t bnInner(const tensor_t *t) {
  * (and n/(n-1) divides by zero), n = 0 would write 0/0 into the running
  * stats. PyTorch rejects n = 1 only; n = 0 is stricter by design (#460).
  *
- * Adversarial-review fix #1: an untracked (noRunningStats) BN always uses
- * batch statistics, even in eval (D4), over its evaluation chunk (#468): the
- * untracked-eval n is rows * T of that chunk, so a single-row rank-2
- * [1, C] chunk has n = 1.
+ * An untracked (noRunningStats) BN always uses batch statistics, even in
+ * eval (there are no running statistics to use), over its evaluation chunk
+ * (#468): the untracked-eval n is rows * T of that chunk, so a single-row
+ * rank-2 [1, C] chunk has n = 1.
  * The generic "raise microBatchSize" / "a frozen or eval-mode BN falls back
  * to running statistics" message is actively wrong there: there are no
  * running statistics to fall back to, and the knob to raise is the
@@ -425,8 +425,8 @@ void batchNorm1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss,
             PRINT_ERROR("BatchNorm1d backward: a trainable BN needs FLOAT32 gamma/beta grads");
             exit(1);
         }
-        /* Adversarial-review fix #2: reuse bnRequireChannelVector (dtype AND
-         * element count) instead of the ad hoc dtype-only check -- a grad
+        /* Reuse bnRequireChannelVector (dtype AND element count) instead of
+         * the ad hoc dtype-only check -- a grad
          * tensor with the wrong element count was silently accepted and the
          * per-channel write loop below would walk off the end of it. */
         bnRequireChannelVector(cfg, cfg->gamma->grad, "gamma grad");

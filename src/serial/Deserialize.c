@@ -232,7 +232,7 @@ static void deserializeKernel(kernel_t *kernel, FILE *f) {
     kernel->padding = (size_t)serialReadU32LE(f);
 }
 
-/* Task-5 review fix (Critical): sanity cap on the untrusted wire
+/* Sanity cap on the untrusted wire
  * fileNumGroups (SYM qConfig record) read below, mirroring
  * SKIP_TENSOR_MAX_DIMS's role for the untrusted wire rank further down --
  * generous against any real model (a group count is bounded by the element
@@ -284,7 +284,7 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
          * file's shape instead -- the resulting shape is validated below
          * (validateSymQConfigShape), which is the discipline's PR2 form. */
         size_t fileNumGroups = (size_t)serialReadU32LE(f);
-        /* Task-5 review fix (Critical): fileNumGroups is untrusted wire input
+        /* fileNumGroups is untrusted wire input
          * about to size an allocation -- bound it BEFORE touching
          * symQC->scales at all. Zero is never valid (numGroups==1 is the
          * per-tensor floor; the sentinel check below would catch it too, but
@@ -341,7 +341,7 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
          * q there (group-quant PR2's carrier gate keeps those per-tensor
          * anyway, so skipping this validate there costs nothing). Every
          * other caller reaches this validate, INCLUDING skipSerializedTensor's
-         * grad-skip path (Task-5 review fix: it now threads the real element
+         * grad-skip path (it threads the real element
          * count it just parsed off the wire, not 0) -- a grouped grad record
          * whose numGroups*groupSize does not divide its own element count is
          * corrupt whether or not the resulting scratch qConfig ever attaches
@@ -363,7 +363,7 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
         size_t fileNumGroups = (size_t)serialReadU32LE(f);
         /* Untrusted wire input about to size TWO allocations -- bound it
          * BEFORE touching asymQC's arrays at all (mirrors the SYM arm's
-         * Task-5 review fix). */
+         * bound). */
         if (fileNumGroups == 0 || fileNumGroups > SERIAL_MAX_QCONFIG_GROUPS) {
             PRINT_ERROR("deserializeQConfig: ASYM file numGroups %zu is zero or exceeds the "
                         "%u-group sanity cap",
@@ -477,7 +477,7 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
         }
         bfpQC->groupSize = fileGroupSize;
         serialReadBytes(bfpQC->exponents, fileNumGroups, f);
-        /* Final-review fix: mantissaBits/exponentBits are untrusted wire bytes
+        /* mantissaBits/exponentBits are untrusted wire bytes
          * about to be written verbatim into the skeleton's qConfig -- unlike
          * every field validated above, these two had NO range check, so a
          * corrupt v5 record reaches undefined behavior downstream the moment
@@ -590,7 +590,7 @@ static void skipSerializedTensor(FILE *f) {
      * unconditionally below regardless of whether a reallocation actually
      * happened: this whole qConfig is discarded at function exit, never
      * attached to a real tensor, so nothing else owns whatever it ends up
-     * pointing at. Task-5 review fix: the record's own numberOfElements
+     * pointing at. The record's own numberOfElements
      * (computed above from the dims it just read, not a hardcoded 0) is
      * threaded into deserializeQConfig below, so a grouped record whose
      * numGroups*groupSize does not divide its own element count fails fast
@@ -902,7 +902,7 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         }
         deserializeArithmetic(&c->forwardMath, f);
         deserializeArithmetic(&c->propLossMath, f);
-        /* Adversarial-review fix #6: mirror the factory rule
+        /* Mirror the factory rule
          * (BatchNorm1dApi.c's validateLayerQuantForBatchNorm1d) at the
          * deserialize-time trust boundary -- a file-loaded BN otherwise
          * would not be rejected until its FLOAT32-only forward/backward

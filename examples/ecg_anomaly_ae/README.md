@@ -60,7 +60,7 @@ After the train-from-scratch demo, `examples/ecg_anomaly_ae/` contains:
   → `Conv1dTransposed(4→1, K=2, S=2)` → `[1, 140]`
 - ~1.5 K parameters
 
-The decoder uses kernel size 2 (not the spec §4.2 K=4) for the two stride-2
+The decoder uses kernel size 2 (not the originally planned K=4) for the two stride-2
 layers because our framework's `Conv1dTransposed` only supports
 `paddingType_t = VALID` plus an `outputPadding`; the only kernel/stride
 combination that hits length 70 from 35 (and 140 from 70) without input-side
@@ -73,16 +73,16 @@ padding is K=2, S=2, op=0. The PyTorch model uses the same K=2 layout for parity
 - Batch size: 32 (training); 1 (val/test microbatch)
 - Epochs: 200
 
-The spec §4.2 originally projected 50 epochs, but the K=2 substitution slows
+The original plan projected 50 epochs, but the K=2 substitution slows
 convergence enough that 50 epochs leave the model mid-descent. 200 epochs
-provides a safety margin past the spec's expected `test_mse ≈ 0.05`.
+provides a safety margin past the originally expected `test_mse ≈ 0.05`.
 
 ## Parity tolerance (train-from-scratch demo)
 
 | Metric | Tolerance | Notes |
 |---|---|---|
-| test_mse | ±20 % relative | ECG-specific override of spec §6's ±10 %; the K=2 substitution + independent random init produce a small test-set gap on out-of-distribution anomaly samples while train/val parity holds within ~7 % |
-| anomaly AUC | ±3 pp absolute | Spec §6 default |
+| test_mse | ±20 % relative | ECG-specific override of the examples' default ±10 %; the K=2 substitution + independent random init produce a small test-set gap on out-of-distribution anomaly samples while train/val parity holds within ~7 % |
+| anomaly AUC | ±3 pp absolute | Examples' default |
 
 These tolerances are **informational** — `compare.py` reports them and writes
 plots but does not fail. The two implementations use independent random init, and

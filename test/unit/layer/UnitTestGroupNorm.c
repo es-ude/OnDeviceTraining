@@ -432,7 +432,7 @@ void testBackwardFloatFrozenTwinDxIdenticalGradsZero(void) {
     TEST_ASSERT_TRUE_MESSAGE(dxIdentical, "dx must be byte-identical between twins");
 }
 
-/* FLOAT32-backward guard set (spec §5.4): FLOAT32 forwardInput/loss/gamma
+/* FLOAT32-backward guard set: FLOAT32 forwardInput/loss/gamma
  * dtypes AND FLOAT32 gamma/beta grad storage AND FLOAT32 propLoss (dx) storage —
  * each violation exits(1). whichSym selects the tensor built as SYM_INT32:
  *   0 forwardInput, 1 loss, 2 gamma param, 3 gamma grad, 4 beta grad,
@@ -591,7 +591,7 @@ void testForwardRejectsTransposedInput(void) {
 /* SYM forward twin-sanity: the SYM path (int-domain stats, global absmax
  * stretch, requant, per-channel integer affine) must stay within a LOOSE
  * tolerance of the FLOAT32 gold on the same data — the SYM opportunity is
- * correctness-imperfect by design (spec R3), so this is sanity, not gold.
+ * correctness-imperfect by design, so this is sanity, not gold.
  * Data are the twoGroups PyTorch fixtures (randn, O(1) spread), so int12
  * quantization noise is ~1e-3 per stage; 5e-2 gives >10x headroom while an
  * indexing/scale bug shifts values by O(1). */
@@ -668,7 +668,7 @@ void testSymForwardRejectsOperandWiderThanInt12(void) {
     freeTensor(in);
 }
 
-/* SYM backward twin-sanity (loose, spec R3 — sanity, not gold): dequantized
+/* SYM backward twin-sanity (loose — sanity, not gold): dequantized
  * dx and the FLOAT32-default dgamma/dbeta must track the FLOAT32 gold on the
  * same data. Second call: dgamma/dbeta ACCUMULATE (2x, via the identity-
  * kernel executeOp + OUT_ACC_DYNAMIC_RESCALE route) while dx OVERWRITES (1x,
@@ -733,7 +733,7 @@ void testSymBackwardTwinSanityTwoGroups(void) {
     }
 }
 
-/* #380 final-review Fix 2: SYM twin of the frozen-backward guard (mirrors
+/* #380: SYM twin of the frozen-backward guard (mirrors
  * UnitTestLayerNorm.c's testSymBackwardFrozenTwinDxIdenticalGradsUntouched).
  * Duplicates the testSymBackwardTwinSanityTwoGroups fixture (dgamma/dbeta
  * gold-verified nonzero) into two independent twins that differ only in
@@ -1701,8 +1701,7 @@ static const float kGnBfpCDyValues[16] = {2.f,  -4.f, 3.f, 1.f,  -1.5f, 2.5f, 2.
 /* Native propLoss wires are seeded with exponents NO derivation can produce
  * here (100 => scale 2^-27; dx is O(1)); the expectation twin seeds at 127.
  * DIFFERENT seeds on the two compared wires keep the exponent assertion
- * non-vacuous: if OUT_WRITE never derived exponents, 100 != 127 fails (Task 4
- * review lesson). */
+ * non-vacuous: if OUT_WRITE never derived exponents, 100 != 127 fails. */
 static const uint8_t kGnBfpCPlSeedExponents[8] = {100, 100, 100, 100, 100, 100, 100, 100};
 
 static tensor_t *buildGnBfpCDy(const size_t *dims) {

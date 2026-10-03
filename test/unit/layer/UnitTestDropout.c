@@ -317,7 +317,7 @@ void testDropoutForwardTrainingBfpBridgeRepacksWithFreshExponents(void) {
     freeTensor(input);
 }
 
-/* PR4 adversarial gate (F0): the BFP D6 exponent-cap regime, where the bridge's
+/* PR4 adversarial gate: the BFP D6 exponent-cap regime, where the bridge's
  * pass-2 quotient leaves int32 range for entirely finite, in-contract inputs.
  *
  * Hand-derived, no goldgen. exponentBits = 2 -> bias = 1, maxStored = 3, so the
@@ -429,7 +429,7 @@ void testDropoutForwardEvalIdentityBfp(void) {
     freeTensor(input);
 }
 
-/* BFP epic PR4 (wave-1 review M4): eval-mode Dropout IN PLACE — the same wire
+/* BFP epic PR4: eval-mode Dropout IN PLACE — the same wire
  * passed as input and output. It is constructible through the public entry
  * (requireBfpPairForArm compares a wire's geometry with its own and admits it),
  * so the verbatim carry must handle it: identity, no diagnostic, and above all

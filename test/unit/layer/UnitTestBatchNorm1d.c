@@ -197,7 +197,7 @@ void testGoldTrainForwardMomentum03(void) {
         expectedRunningVar_bn_momentum03Rank2, numBatchesTracked_bn_momentum03Rank2);
 }
 
-/* Review Focus 5: momentum = 1 copies the batch mean / unbiased variance. */
+/* momentum = 1 copies the batch mean / unbiased variance. */
 void testMomentumOneCopiesBatchStatistics(void) {
     runTrainForwardGold(
         (size_t[]){4, 3}, 2, true, true, BN_MOMENTUM_VALUE, 1.0f, 1, input_bn_momentumOneRank2,
@@ -215,7 +215,7 @@ void testGoldTrainForwardCumulativeOverThreeSteps(void) {
                         numBatchesTracked_bn_cumulativeRank3);
 }
 
-/* Spec §4.3: eps INSIDE the sqrt. Batch variance ~1e-6 ~ eps/10, so dropping
+/* eps INSIDE the sqrt (PyTorch parity). Batch variance ~1e-6 ~ eps/10, so dropping
  * eps or adding it outside the sqrt moves y far beyond the 1e-4 tolerance
  * (the O(1)-variance golds above cannot tell the placements apart). */
 void testGoldTrainForwardTinyVarianceKeepsEpsInsideSqrt(void) {
@@ -226,8 +226,8 @@ void testGoldTrainForwardTinyVarianceKeepsEpsInsideSqrt(void) {
                         numBatchesTracked_bn_tinyVarRank2);
 }
 
-/* track off: batch statistics in training, in eval, AND when frozen (D3 says
- * frozen normally means running-stat mode, but with track off there are no
+/* track off: batch statistics in training, in eval, AND when frozen (frozen
+ * normally means running-stat mode, but with track off there are no
  * running buffers to fall back to -- !trackRunningStats must keep winning
  * over frozen, per bnUsesBatchStats's `||`, not a `&&`). PyTorch parity. */
 void testNoTrackUsesBatchStatisticsInTrainingAndEval(void) {
@@ -261,7 +261,7 @@ void testEvalForwardUsesRunningStatsAndWritesNothing(void) {
     TEST_ASSERT_EQUAL_UINT64(0, cap.nbt);
 }
 
-/* Spec §4.3 on the running-statistics path: running_var in [1e-6, 1.1e-5]. */
+/* eps inside the sqrt on the running-statistics path: running_var in [1e-6, 1.1e-5]. */
 void testEvalForwardTinyRunningVarKeepsEpsInsideSqrt(void) {
     bnFixture_t f;
     bnFixtureInit(&f, 2, true, true, gamma_bn_evalTinyVarRank3, beta_bn_evalTinyVarRank3,
@@ -274,7 +274,7 @@ void testEvalForwardTinyRunningVarKeepsEpsInsideSqrt(void) {
                        expectedForward_bn_evalTinyVarRank3_len);
 }
 
-/* D3: frozen BN in a training call behaves exactly like eval. */
+/* A frozen BN in a training call behaves exactly like eval. */
 void testFrozenTrainingForwardUsesRunningStatsAndWritesNothing(void) {
     bnFixture_t f;
     bnFixtureInit(&f, 2, true, true, gamma_bn_evalRank3, beta_bn_evalRank3,
@@ -307,7 +307,7 @@ void testMomentumZeroKeepsRunningStatsButCounts(void) {
     TEST_ASSERT_EQUAL_UINT64(1, cap.nbt);
 }
 
-/* Spec §4.3: the counter saturates, so CUMULATIVE never divides by 0. */
+/* The counter saturates, so CUMULATIVE never divides by 0. */
 void testCounterSaturatesAtMaxAndStaysFinite(void) {
     bnFixture_t f;
     bnFixtureInit(&f, 3, true, true, gamma_bn_trainRank2, beta_bn_trainRank2, NULL, NULL,
@@ -373,7 +373,7 @@ void testForwardTrainingRejectsSingleRowRank2(void) {
     expectTrainingForwardDies((size_t[]){1, 3}, 2); /* n = 1 */
 }
 
-/* Review Focus 2. */
+/* Rank 3 counts T too: [1, C, 1] has n = m*T = 1 per channel. */
 void testForwardTrainingRejectsRank3SingleValuePerChannel(void) {
     expectTrainingForwardDies((size_t[]){1, 3, 1}, 3); /* n = 1 */
 }
@@ -383,7 +383,7 @@ void testForwardTrainingRejectsEmptyBatch(void) {
 }
 
 void testForwardTrainingRejectsZeroLengthTime(void) {
-    expectTrainingForwardDies((size_t[]){2, 3, 0}, 3); /* n = 0 (Codex pre-design finding) */
+    expectTrainingForwardDies((size_t[]){2, 3, 0}, 3); /* n = 0 */
 }
 
 /* The same degenerate shapes are fine in eval (running statistics). */
@@ -398,12 +398,12 @@ void testForwardEvalAcceptsSingleRowAndEmpty(void) {
     TEST_ASSERT_EQUAL_UINT64(0, nbt);
 }
 
-/* Adversarial-review fix #1: !trackRunningStats always uses batch statistics
- * (even in eval, D4), so an untracked rank-2 [1, C] evaluation sample still
- * has n = 1 and must die -- but with a DEDICATED message (not the training
- * one, which wrongly tells the caller to raise microBatchSize/says a frozen
- * or eval-mode BN would fall back to running statistics; an untracked BN has
- * none to fall back to). Distinct from testNoTrackUsesBatchStatisticsInTraining
+/* !trackRunningStats always uses batch statistics (even in eval), so an
+ * untracked rank-2 [1, C] evaluation sample still has n = 1 and must die --
+ * but with a DEDICATED message (not the training one, which wrongly tells
+ * the caller to raise microBatchSize/says a frozen or eval-mode BN would fall
+ * back to running statistics; an untracked BN has none to fall back to).
+ * Distinct from testNoTrackUsesBatchStatisticsInTraining
  * AndEval, whose eval-mode case uses n = 4 and never dies. */
 void testForwardEvalUntrackedRejectsSingleSample(void) {
     size_t order[2] = {0, 1};
@@ -431,10 +431,10 @@ void testForwardTrainingFrozenUntrackedRejectsSingleRow(void) {
     bnFixtureFree(&f);
 }
 
-/* #467 fix round 1: batchNorm1dRequireEvaluable is public -- pin its no-op
+/* #467: batchNorm1dRequireEvaluable is public -- pin its no-op
  * contract for a TRACKED BN directly, without going through trainingRun's
  * walk. The walk never calls this function at all for a model with no
- * untracked BN (Review Focus 5's "skip the walk entirely" guarantee), so a
+ * untracked BN (it skips the walk entirely), so a
  * training-loop-level test can never distinguish a missing trackRunningStats
  * early return here from a correct one -- this is the cheapest direct killer.
  * ASSERT_EXITS_WITH(0, ...) is DeathTest.h's "did not exit" case: a no-op
@@ -558,7 +558,7 @@ void testForwardRejectsNonFloat32Math(void) {
     bnFixtureFree(&f);
 }
 
-/* Codex plan review: half-pairs, running-buffer dtype/capacity, output shape. */
+/* Config validation: half-pairs, running-buffer dtype/capacity, output shape. */
 static void initWithGammaOnly(void) {
     batchNorm1dConfig_t cfg;
     parameter_t *g = buildFloatParam(3, NULL);
@@ -634,7 +634,7 @@ void testForwardRejectsMismatchedOutputShape(void) {
     bnFixtureFree(&f);
 }
 
-/* Adversarial-review fix #3: bnValidateOutputMatchesInput only checked rank
+/* bnValidateOutputMatchesInput once checked only rank
  * and dims, not orderOfDimensions or dtype -- the kernel writes the output in
  * the input's flat IDENTITY order (bnForwardKernelFloat indexes `y[i]`
  * linearly), so a same-shape but transposed output would land values at the
@@ -797,7 +797,7 @@ void testGoldEvalBackward(void) {
     assertFloatsWithin(1e-4f, expectedDbeta_bn_evalRank3, cap.db, 2);
 }
 
-/* D3: frozen BN, training call -> running-stat dx, no grad buffers touched. */
+/* Frozen BN, training call -> running-stat dx, no grad buffers touched. */
 void testFrozenBackwardUsesRunningStatsAndNoGrads(void) {
     bnFixture_t f;
     bnFixtureInit(&f, 2, true, true, gamma_bn_evalRank3, beta_bn_evalRank3,
@@ -875,7 +875,7 @@ static void backwardWithShortGammaGrad(bnFixture_t *f) {
     layerFunctions[BATCHNORM1D].backward(&f->layer, in, loss, prop);
 }
 
-/* Adversarial-review fix #2: the ad hoc grad check only verified dtype, not
+/* The ad hoc grad check once verified only dtype, not
  * element count -- a gamma grad with the wrong number of elements (here
  * C - 1) was accepted, and the backward's per-channel write loop would then
  * walk off the end of the buffer. bnRequireChannelVector (already used for

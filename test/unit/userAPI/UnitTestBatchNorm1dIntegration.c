@@ -277,7 +277,7 @@ void testFrozenBatchNormNeverMovesDuringTraining(void) {
     TEST_ASSERT_TRUE(linGrad != 0.0f);
 }
 
-/* Review Focus 4: loaded buffers + frozen BN, fine-tuned at [1, C]. */
+/* Loaded buffers + frozen BN, fine-tuned at [1, C]. */
 void testFrozenBatchNormKeepsLoadedBuffersDuringTraining(void) {
     layer_t *model[2];
     buildBnLinear(model, TRAINABLE_FALSE);
@@ -311,7 +311,7 @@ void testNoAffineBatchNormAloneStillUpdatesRunningStats(void) {
     TEST_ASSERT_EQUAL_UINT64(1, nbt);
 }
 
-/* Review Focus 1: a custom calculateGradsFn_t that does NOT route through
+/* A custom calculateGradsFn_t that does NOT route through
  * calculateGradsSequential/tracedGrads never flips the mode -> BN runs in
  * eval mode (documented contract, TrainingLoopApi.h). */
 void testCustomGradsFnWithoutFlipRunsBatchNormInEvalMode(void) {
@@ -361,7 +361,7 @@ void testGradsCallKeepsBatchNormInTrainingModeThroughBackward(void) {
     TEST_ASSERT_EQUAL_FLOAT(dgRef, dgLoop);
 }
 
-/* Ghost-BN cadence through the stacked loop (#460 spec §7 item 6): one
+/* Ghost-BN cadence through the stacked loop (#460): one
  * macro batch of b = 8 through BN(3) -> Linear(3->2), chunked by m into
  * b/m calculateGradsSequential calls via trainingBatchDefault. Compares
  * running stats + mean-scaled grads (before the optimizer step) against a
@@ -512,7 +512,7 @@ void testTrainingRunRejectsUntrackedRank2BatchNormBeforeEpoch0(void) {
     freeTensor(pfItem);
 }
 
-/* Review Focus 1: the sample is rank 2 ([2, 3] -> [1, 2, 3]) but Flatten
+/* The sample is rank 2 ([2, 3] -> [1, 2, 3]) but Flatten
  * hands BN [1, 6]: the rank must be walked through the model. */
 void testTrainingRunRejectsUntrackedBatchNormBehindFlatten(void) {
     g_pfDatasetSize = 2;
@@ -526,7 +526,7 @@ void testTrainingRunRejectsUntrackedBatchNormBehindFlatten(void) {
     freeTensor(pfItem);
 }
 
-/* Review Focus 2: tracked BN(2) first, untracked BN(2) second; item [2]. */
+/* Tracked BN(2) first, untracked BN(2) second; item [2]. */
 void testTrainingRunRejectsUntrackedSecondBatchNorm(void) {
     g_pfDatasetSize = 2;
     pfItem = buildFloatTensor((size_t[]){2}, 1, (float[]){0.1f, 0.2f});
@@ -540,7 +540,7 @@ void testTrainingRunRejectsUntrackedSecondBatchNorm(void) {
     freeTensor(pfItem);
 }
 
-/* Review Focus 3: rank-3 untracked BN with T = 1: item [2, 1] -> [1, 2, 1] -> n = 1.
+/* Rank-3 untracked BN with T = 1: item [2, 1] -> [1, 2, 1] -> n = 1.
  * model {BN untracked(2), Flatten, Linear(2->2)}; label [2]. */
 void testTrainingRunRejectsUntrackedRank3SingleStep(void) {
     g_pfDatasetSize = 2;
@@ -677,7 +677,7 @@ void testTrainingRunPassesPreflightForUntrackedRank2WhenEvalStacks(void) {
     freeTensor(pfItem);
 }
 
-/* D2: N = 3, m = 2 -> chunks 2 + 1; the 1-row tail has n = 1. */
+/* The ragged tail chunk is judged too: N = 3, m = 2 -> chunks 2 + 1; the 1-row tail has n = 1. */
 void testTrainingRunRejectsUntrackedRank2WithOneRowTail(void) {
     g_pfDatasetSize = 3;
     pfItem = buildFloatTensor((size_t[]){2}, 1, (float[]){0.1f, 0.2f});
@@ -693,7 +693,7 @@ void testTrainingRunRejectsUntrackedRank2WithOneRowTail(void) {
     freeTensor(pfItem);
 }
 
-/* Review Focus 2: m > N judges one N-row chunk, not an m-row one. N = 3,
+/* m > N judges one N-row chunk, not an m-row one. N = 3,
  * m = 8 -> [3, C]: passes. N = 1, m = 8 -> [1, C]: fails. */
 void testPreflightJudgesMinOfMAndN(void) {
     pfItem = buildFloatTensor((size_t[]){2}, 1, (float[]){0.1f, 0.2f});
@@ -712,7 +712,7 @@ void testPreflightJudgesMinOfMAndN(void) {
     freeTensor(pfItem);
 }
 
-/* D1/D6: an explicit evalMicroBatchSize > 1 on a model with a non-FLOAT32
+/* #468: an explicit evalMicroBatchSize > 1 on a model with a non-FLOAT32
  * forward fails before epoch 0 (exit 1), even with per-sample training. */
 static void runSymForwardPreflight(void) {
     g_pfDatasetSize = 2;
@@ -776,7 +776,7 @@ void testTrainingRunEvalGateNamesEvalMicroBatchSize(void) {
     TEST_ASSERT_TRUE_MESSAGE(namesEvalKnob, message);
 }
 
-/* D9 in trainingRun: eval dataset smaller than its batchSize fails before the peek. */
+/* In trainingRun: an eval dataset smaller than its batchSize fails before the peek. */
 static batch_t *evalGetBatchMustNotRun(dataLoader_t *dl, size_t index) {
     (void)dl;
     (void)index;
@@ -937,7 +937,8 @@ void testTrainingRunTrainsAndEvaluatesUntrackedRank2BatchNorm(void) {
     TEST_ASSERT_TRUE(isfinite(evalLoss));
 }
 
-/* The direct entry points pre-flight inline (D10): at m = 1 this model is
+/* The direct entry points pre-flight inline, on the first sample they
+ * already fetch (no extra getBatch call): at m = 1 this model is
  * rejected BEFORE the first inferenceFn call (the tripwire would exit 2);
  * at m = 2 it evaluates. */
 static inferenceStats_t *inferenceMustNotRun(layer_t **model, size_t n, tensor_t *in,
@@ -966,7 +967,7 @@ void testEntryPointPreflightsUntrackedBatchNormInline(void) {
     ASSERT_EXITS_WITH_FAILURE(untrackedMetrics(inferenceMustNotRun, 1));
 }
 
-/* Controller ruling: at m = 1 the inline pre-flight runs on the first sample
+/* At m = 1 the inline pre-flight runs on the first sample
  * of the first NON-EMPTY batch -- an empty batch 0 must not let the untracked
  * BN reach inferenceFn (the tripwire would exit 2). evaluationEpochWithMetrics
  * is left out: its numClasses peek reads batch 0's first sample. */

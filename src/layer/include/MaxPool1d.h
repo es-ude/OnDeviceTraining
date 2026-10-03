@@ -13,7 +13,7 @@
 /* argmaxIndices: INT32 [B, C, Lout] index state written by every forward and
  * read by the backward. The caller pre-allocates it (the factory sizes it for
  * B = 1); maxPool1dForward grows it on demand to the largest B seen and keeps
- * dims[0] = B, writing it only when B changes (#152 PR3b, spec §6.7), so its
+ * dims[0] = B, writing it only when B changes (#152 PR3b), so its
  * ->data must come from reserveMemory: a growing forward frees and replaces it.
  * argmaxCapacity is the element count of the allocation argmaxCapacityData
  * points at. Capacity is trusted only while argmaxCapacityData ==

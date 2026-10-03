@@ -11,11 +11,11 @@
 #include "RematScheduler.h"
 #include "Tensor.h"
 
-/* Internal to the remat libraries (#4, spec §3-§4): the row inits, the
+/* Internal to the remat libraries (#4): the row inits, the
  * dispatch, RematCheck and tests include it. Placement-free: no byte offset
- * lives here (ARENA keeps its offsets privately, spec §5.5).
+ * lives here (ARENA keeps its offsets privately).
  *
- * BORROWED STORAGE (Codex F1): every slab header's shape arrays,
+ * BORROWED STORAGE: every slab header's shape arrays,
  * quantization_t, qConfig and BFP exponent array is interior storage of the
  * ONE table block. A slab header, or any quantization_t reachable from one,
  * must never reach freeTensor, freeShape, freeQuantization,
@@ -24,11 +24,11 @@
  * single freeReservedMemory. bfpQConfig_t has no owning/borrowed flag, so this
  * rule is the only guard.
  *
- * SIZE ARITHMETIC (D60, Codex N1): every size product and sum RematPlan
+ * SIZE ARITHMETIC: every size product and sum RematPlan
  * computes itself is overflow-checked and exits naming the wire and the
  * quantity. An overflow inside a layer's calcOutputShape callback (e.g.
  * convTranspose1dOutputLength, SlidingWindow1d.c:120-124) is the layer's
- * responsibility, tracked with spec §16.1 item 7. */
+ * responsibility. */
 
 #define REMAT_NONE ((uint16_t)0xFFFFu)
 
@@ -48,7 +48,7 @@ typedef struct rematWire {
     tensor_t *hdr; /* slab header; ACT 0: the caller's tensor between bind and unbind, else NULL */
 } rematWire_t;
 
-/* What a wire takes from a model and an input (spec §3.4 phase 1): the
+/* What a wire takes from a model and an input (phase 1 of the bind): the
  * derivation record of rematWireTableInit and of every rematWireTableBind.
  * Internal to RematWireTable.c; declared here so tests can size the
  * derivation scratch, and so rematWireTable_t can hold the bind scratch. */
@@ -101,7 +101,7 @@ rematBfpGroups_t rematBfpWireGrouping(const bfpQConfig_t *tmpl, size_t elements,
 
 /* deepest = deepestTrainableIndex (n = nothing trains); top = n-1, or n-2
  * under CROSS_ENTROPY: the positional rule of CalculateGradsSequential.c:77-80
- * in SIGNED arithmetic (n == 1 under CE gives -1, D20). One shared function:
+ * in SIGNED arithmetic (n == 1 under CE gives -1). One shared function:
  * the plan uses it on the built model, the checker on the live one. */
 void rematBackwardRange(layer_t **model, size_t n, lossFuncType_t lt, size_t *deepest,
                         ptrdiff_t *top);
@@ -115,7 +115,7 @@ bool rematWireTableInit(rematWireTable_t **out, layer_t **model, size_t n, lossC
 /* NULL-safe. One freeReservedMemory; never freeTensor on a slab header. */
 void rematWireTableFree(rematWireTable_t *t);
 
-/* Re-derives every header's CONTENT from the live model and input (spec §3.4):
+/* Re-derives every header's CONTENT from the live model and input:
  * shapes, config fields from the current templates, fresh dynamic state (SYM
  * scale 1, BFP exponents at the stored bias). ACT 0 = input, verbatim.
  * Inherited GRAD headers are derived later, by rematWireBind. Reserves
@@ -124,15 +124,15 @@ void rematWireTableBind(rematWireTable_t *t, layer_t **model, size_t n, lossFunc
                         tensor_t *input);
 void rematWireTableUnbind(rematWireTable_t *t); /* ACT 0 hdr = NULL */
 
-/* The row SDK: the ONLY writers of a header's ->data (spec §2.2). A bind
+/* The row SDK: the ONLY writers of a header's ->data. A bind
  * requires this table's rematWireTableBind to have already run earlier in the
  * same call; bytes must be non-NULL and aligned for the wire's dtype. Bind
  * derives an inherited GRAD header (the seed, Flatten's dx) from the LIVE ACT
  * header -- this call's header content: the source ACT's data does not have
  * to be bound (under LIVENESS a Flatten dx GRAD binds after its source ACT
  * died, and PR1d must not require the source to be resident) -- checking
- * dtype, rank, the live payload bytes and BFP capacity before any write
- * (D54). Both exit on the borrowed ACT 0, on an unbalanced call, on a NULL
+ * dtype, rank, the live payload bytes and BFP capacity before any write.
+ * Both exit on the borrowed ACT 0, on an unbalanced call, on a NULL
  * bytes and on a wire id at or above numWires. */
 void rematWireBind(rematWireTable_t *t, uint16_t w, uint8_t *bytes);
 void rematWireRelease(rematWireTable_t *t, uint16_t w);
@@ -184,7 +184,7 @@ void rematPlanFree(rematPlan_t *p); /* NULL-safe */
 size_t rematWalkOpening(const rematProgram_t *p, rematWalk_t *w);
 size_t rematWalkClosing(const rematProgram_t *p, rematWalk_t *w);
 
-/* Grammar validation (spec §4.5 rules 1-4). Deliberately independent of
+/* Grammar validation (rules 1-4). Deliberately independent of
  * RematCheck, so a mutation in one is caught by the other. rematPlanBuild runs
  * it on every program it generates; tests run it on tampered programs. Exits
  * naming the step index and the rule. */

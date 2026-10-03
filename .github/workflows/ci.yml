@@ -442,7 +442,7 @@ jobs:
       # seed, 2 domains, 1 epoch each -- proves the PPCA-replay pipeline
       # runs end-to-end, emits schema-valid JSON, and keeps replay memory
       # footprint constant across domains. Deliberately NOT a BWT/accuracy
-      # gate (single seed is stochastic; see spec §9) -- the 10-seed
+      # gate (a single seed is stochastic) -- the 10-seed
       # continual-learning study is a separate, non-CI artifact.
       - name: Continual-learning mini-gate (machinery smoke, no BWT threshold)
         run: |
@@ -560,7 +560,7 @@ jobs:
   # examples/_shared/check_stack_watermark.py. WARN-ONLY by design: linux
   # budgets are uncalibrated until this job has produced stable peaks;
   # calibration + --enforce promotion is a dedicated later PR. The bfp
-  # bucket is uncalibrated on both platforms by design (spec §8) and
+  # bucket is uncalibrated on both platforms by design (report-only) and
   # prints UNCALIBRATED.
   c-stack-watermark:
     needs: gate

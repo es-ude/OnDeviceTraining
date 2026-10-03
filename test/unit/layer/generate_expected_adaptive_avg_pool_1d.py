@@ -4,7 +4,7 @@
 PyTorch torch.nn.functional.adaptive_avg_pool1d ground truth: forward output and
 propLoss (dL/dx). Overlap/upsample fixtures use torch.randn_like(y) lossGrad (and
 emit it as a gold array) so backward-path positional mutations are non-vacuous
-(per codebase_uniform_lossgrad_mutation_vacuity). Divisor is the actual window
+(a uniform lossGrad would hide them). Divisor is the actual window
 size; adaptive pooling has no padding.
 
 Run via `uv run` (CMake wires this automatically).
@@ -48,7 +48,7 @@ def emit_float_array(name: str, tensor: torch.Tensor) -> str:
 
 
 def _hand_adaptive_forward(x, output_size):
-    """floor/ceil reference (spec §2): start=floor(o*L/Lout), end=ceil((o+1)*L/Lout)."""
+    """floor/ceil reference: start=floor(o*L/Lout), end=ceil((o+1)*L/Lout)."""
     B, C, L = x.shape
     out = torch.zeros((B, C, output_size))
     for b in range(B):

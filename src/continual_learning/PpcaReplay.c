@@ -65,7 +65,7 @@ typedef struct {
 
 /* operands {mean, basis, eigvals} (ARITH_FLOAT32 views via the funnel
  * prologue) -> rawOut = mu + sum_i coeff_i * basisRow_i + sigma*eps.
- * ALWAYS draws rank + dim variates (spec §5.4): z beyond kEff is drawn and
+ * ALWAYS draws rank + dim variates: z beyond kEff is drawn and
  * discarded so the stream position never depends on kEff. */
 static void ppcaSampleKernelFloat(tensor_t **op, size_t n, tensor_t *rawOut, tensor_t *aux,
                                   const void *ctxv) {
@@ -290,7 +290,7 @@ static void ppcaMergeKernelFloat(tensor_t **op, size_t nOps, tensor_t *rawOut, t
         tensor_t *bTFull = bindFloatView(&vB, ws->bT, 2, p, d);
         tensor_t *outTop = bindFloatView(&vC, outData, 2, rKeep, d);
         matmulFloat32Tensors(topEig, bTFull, outTop);
-        /* renormalize kept rows (requant-after-normalize, spec §5.2.4) */
+        /* renormalize kept rows (requant-after-normalize) */
         sumSquaresOverTrailingAxesFloat32(outTop, 1,
                                           bindFloatView(&vD, ws->rowScales, 1, rKeep, 0));
         for (size_t i = 0; i < rKeep; i++) {
@@ -356,7 +356,7 @@ void ppcaReplayUpdate(ppcaReplay_t *g, const tensor_t *samples, ppcaWorkspace_t 
 
     /* Step 0 — ingest (any dtype except BOOL) into the bT session region:
      * executeConvert = the funnel's kernel-less form; heap target, zero
-     * stack (spec §5.1 input rule). Sources are never mutated. */
+     * stack. Sources are never mutated. */
     tensor_t *sampleRegion = bindFloatView(&vIngest, ws->bT + k * d, 2, m, d);
     executeConvert((tensor_t *)samples, sampleRegion);
 
@@ -528,7 +528,8 @@ static void ppcaCcipcaStepKernelFloat(tensor_t **op, size_t nOps, tensor_t *rawO
         }
     }
 
-    /* sigma2 via the §5.2 step-5 formula on live components. */
+    /* sigma2 = mean residual variance over the d - live discarded dims:
+     * (totalVar/n - sum of the live eigenvalues) / (d - live). */
     size_t live = (ctx->nOld < k) ? ctx->nOld : k;
     float kept = 0.0f;
     for (size_t i = 0; i < live; i++) {
@@ -575,7 +576,7 @@ void ppcaReplayUpdateStreaming(ppcaReplay_t *g, const tensor_t *x, ppcaWorkspace
             .arithmetic = g->streamMath,
             .mode = OUT_WRITE,
             .auxOut = NULL,
-            .writesInPlaceSafe = false, /* v1 conservative (spec §5.5) */
+            .writesInPlaceSafe = false, /* v1 conservative */
         },
         g->basis);
 

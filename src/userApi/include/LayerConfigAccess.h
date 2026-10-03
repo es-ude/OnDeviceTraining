@@ -29,7 +29,7 @@ quantization_t *backwardWireQ(layer_t *layer);
  * {ARITH_FLOAT32, HALF_AWAY}, matching arithmeticFromQuantizationOrDefault(NULL). */
 arithmetic_t layerForwardMath(layer_t *layer);
 
-/* FLOAT32-only gate for stacked training (#152 PR3b, spec §6.6): true iff
+/* FLOAT32-only gate for stacked training (#152 PR3b): true iff
  * every arithmetic the layer declares (forwardMath, propLossMath and, for the
  * GEMM family, weightGradMath/biasGradMath), both wire storage configs
  * (outputQ, propLossQ) and the param + grad storage of every parameter are
@@ -43,7 +43,7 @@ bool layerIsFloat32Only(layer_t *layer);
  * layer passes -- the "offending field" of the stacked-training error. */
 const char *layerNonFloat32Field(layer_t *layer);
 
-/* Read-set rule (#4, remat spec §3.7): true iff the layer's backward, whenever
+/* Read-set rule (#4, remat): true iff the layer's backward, whenever
  * the driver runs it, reads its forward input's data or data-dependent
  * metadata (SYM scale, BFP exponents). Linear/Conv1d/Conv1dTransposed read it
  * only for the weight grad, so a frozen one does not; the norms read it
@@ -51,7 +51,7 @@ const char *layerNonFloat32Field(layer_t *layer);
  * NULL. An unknown type exits. */
 bool layerBackwardReadsInput(const layer_t *layer);
 
-/* Forward-only variant for stacked evaluation (#468 D6): the first
+/* Forward-only variant for stacked evaluation (#468): the first
  * non-FLOAT32 among forwardMath, outputQ and every parameter's (and
  * BatchNorm1d's running buffers') storage, or NULL. Backward arithmetic, the
  * prop-loss wire and grad storage are ignored -- evaluation never runs them. */

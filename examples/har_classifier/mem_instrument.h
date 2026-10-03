@@ -79,7 +79,7 @@ size_t memInstrumentParamBytes(optimizer_t *optim);
 size_t memInstrumentGradBytes(optimizer_t *optim);
 size_t memInstrumentOptStateBytes(optimizer_t *optim);
 
-/* One wire's storage as the trainer resolved it (spec §7.2). NULL profile
+/* One wire's storage as the trainer resolved it. NULL profile
  * arrays = every wire FLOAT32 (the float/SYM/AdamW/finetune trainers). */
 #define HAR_NUM_LAYERS 12
 typedef struct harWireProfile {

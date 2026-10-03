@@ -32,7 +32,7 @@ void serialWriteI32LE(int32_t value, FILE *f);
 void serialWriteF32LE(float value, FILE *f);
 /*! BatchNorm1d epic, wire format v6 (#460): u64 LE carrier for
  *  batchNorm1dConfig_t.numBatchesTracked -- the running-update counter can
- *  saturate at UINT64_MAX (spec §5), which does not fit a u32. */
+ *  saturate at UINT64_MAX, which does not fit a u32. */
 void serialWriteU64LE(uint64_t value, FILE *f);
 /*! size_t carrier for counts/dims/kernel geometry: fails fast if the value
  *  cannot fit the fixed u32 wire width (only reachable on 64-bit hosts). */

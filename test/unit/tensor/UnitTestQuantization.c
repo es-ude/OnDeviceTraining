@@ -294,7 +294,7 @@ void testValidateBfpQConfigShapeEnforcesElementIdentity(void) {
     freeReservedMemory(qc.exponents);
 }
 
-/* #4 PR0 (remat spec §2.4): a remat bind derives BFP wire configs into
+/* #4 PR0: a remat bind derives BFP wire configs into
  * caller-owned slab storage and must not allocate, so the Into variants fill
  * a caller-provided exponent array. */
 

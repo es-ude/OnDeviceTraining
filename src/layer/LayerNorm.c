@@ -136,7 +136,7 @@ static size_t layerNormPhysOffset(tensor_t *t, size_t numNormDims, size_t g, siz
  * scratch at all, not even G floats) for 3*G floats of stack at peak (the
  * caller's mean[G] + invSigma[G], plus var[G] local to this helper), computed
  * ONCE and SHARED across both passes — not 2*G per pass. The approved tradeoff
- * (spec §6) keeps the statistics math in the arithmetic module, not the layer.
+ * keeps the statistics math in the arithmetic module, not the layer.
  * Callers MUST guarantee G > 0 (the stats
  * VLAs and Reduce's block loop are undefined at G == 0); every caller early-outs
  * on G == 0 || N == 0 before calling here. */
@@ -202,7 +202,7 @@ static void layerNormValidateSymTensor(tensor_t *t, const char *what) {
 }
 
 /* Affine y = gamma*n + beta as a SEPARATE quantized elementwise stage, applied
- * in-place over the freshly written normalized mantissas (spec: it destroys
+ * in-place over the freshly written normalized mantissas (it destroys
  * the abs-max=qMax / var~1 invariants and has its own requantization + output
  * scale). Lives in LayerNorm.c, NOT arithmetic/: it needs broadcast over
  * groups (gamma_j shared by all G groups) and the layout-agnostic logical
@@ -262,7 +262,7 @@ static void layerNormAffineSymInt32(size_t numNormDims, tensor_t *gamma, tensor_
  * pass 2: normalize the stored per-group stats, stretch by K = qMax/absmax,
  *         round-clamp. Stats come ONCE from the Reduce module into G-float stack
  *         scratch (layerNormAllGroupStats) and both passes read them — the
- *         approved tradeoff (spec §6) of 3*G floats of stack at peak (mean[G] +
+ *         approved tradeoff of 3*G floats of stack at peak (mean[G] +
  *         invSigma[G] + the helper-local var[G]), computed once and shared
  *         across both passes, for keeping the stats math in the arithmetic
  *         module (was: per-group recompute-over-store, no scratch at all).
@@ -616,7 +616,7 @@ static void layerNormBackwardFloat(layerNormConfig_t *cfg, tensor_t *forwardInpu
  * ONCE from forwardInput through layerNormAllGroupStats — the SAME shared Reduce
  * helper the forward uses, so backward can never desync from the forward
  * definition — into G-float stack scratch that both passes read (was: per-group
- * recompute-over-store; approved 2*G-float tradeoff, spec §6). dy and gamma are
+ * recompute-over-store; approved 2*G-float tradeoff). dy and gamma are
  * dequantized per element via their own scales (float math; dy/gamma mantissas
  * are never integer-summed — only forwardInput is subject to the int32
  * mantissa-sum bound).

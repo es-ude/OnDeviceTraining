@@ -286,10 +286,10 @@ static void assertLiveAt(const rematProgram_t *p, uint16_t wire, size_t step, co
     TEST_ASSERT_TRUE_MESSAGE(r->begin <= step && step <= r->end, what);
 }
 
-/* The operands of every step, derived here independently of the generator
- * (§3.1, §4.3), must all be live at that step: inclusive ranges are what keep
+/* The operands of every step, derived here independently of the generator,
+ * must all be live at that step: inclusive ranges are what keep
  * a FORWARD's input and output, GRAD l+1 and GRAD l, and ACT l and GRAD l at a
- * reading BACKWARD(l) out of each other's bytes (§4.2). */
+ * reading BACKWARD(l) out of each other's bytes. */
 static void assertEveryStepsOperandsAreCoLive(const rematProgram_t *p, const rematWireTable_t *t,
                                               layer_t **model) {
     size_t n = t->modelSize;
@@ -476,7 +476,7 @@ static void endGrad10BeforeBackwardReadsIt(rematProgram_t *p) {
     p->ranges[13].end--;
 }
 
-/* ---- rematBackwardRange (spec §4.3, §12.1) ---- */
+/* ---- rematBackwardRange ---- */
 
 void testBackwardRangeMseRunsFromLastLayerToDeepest(void) {
     layer_t *model[3] = {makeLinear(2, 4, false), makeRelu(&g_floatQ), makeLinear(4, 2, false)};
@@ -518,7 +518,7 @@ void testBackwardRangeAllFrozenReturnsModelSize(void) {
     freeModel(model, 2);
 }
 
-/* D20: n = 1 under CE keeps today's signed top = -1. */
+/* n = 1 under CE keeps today's signed top = -1. */
 void testBackwardRangeSingleLayerUnderCrossEntropyIsMinusOne(void) {
     layer_t *model[1] = {makeLinear(2, 3, false)};
     size_t deepest = 99;
@@ -529,7 +529,7 @@ void testBackwardRangeSingleLayerUnderCrossEntropyIsMinusOne(void) {
     freeModel(model, 1);
 }
 
-/* ---- C1: the one BFP wire-grouping rule ---- */
+/* ---- the one BFP wire-grouping rule ---- */
 
 /* The helper must reproduce the rule the driver inlines today
  * (CalculateGradsSequential.c:231-246 for ACT wires, :320-333 for dx wires,
@@ -560,7 +560,7 @@ void testBfpWireGroupingExitsNamingTheWireOnAnIndivisibleGroupSize(void) {
                              (void)rematBfpWireGrouping(&tmpl, 16, REMAT_WIRE_GRAD, 5));
 }
 
-/* ---- wire numbering and records (spec §3.1, §3.2) ---- */
+/* ---- wire numbering and records ---- */
 
 void testHarTableNumbersWiresInProductionOrder(void) {
     layer_t *model[HAR_N];
@@ -602,7 +602,7 @@ void testHarTableRecordsBytesRanksAndKey(void) {
     inputLike_t in;
     rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
 
-    /* Scan-model bytes (plan header): ACT 0..12, then the GRADs in id order. */
+    /* Scan-model bytes: ACT 0..12, then the GRADs in id order. */
     const size_t bytes[24] = {4608, 8192, 8192, 4096, 8192, 8192, 4096, 8192,
                               8192, 256,  256,  24,   24,   24,   256,  256,
                               8192, 8192, 4096, 8192, 8192, 4096, 8192, 8192};
@@ -640,7 +640,7 @@ void testHarTableRecordsBytesRanksAndKey(void) {
     freeModel(model, HAR_N);
 }
 
-/* RF5: one grouped template shared by wires of different sizes groups each
+/* One grouped template shared by wires of different sizes groups each
  * wire by its own element count (CalculateGradsSequential.c:215-224). */
 void testSharedGroupedBfpTemplateGroupsPerWire(void) {
     uint8_t tmplExponents[2];
@@ -685,7 +685,7 @@ void testSharedGroupedBfpTemplateGroupsPerWire(void) {
     freeModel(model, 2);
 }
 
-/* ---- one block, released by a single release call (spec §2.3, §3.3; C5) ---- */
+/* ---- one block, released by a single release call ---- */
 
 #ifdef ODT_MEM_PROFILE
 /* The live-byte counter is real only under ODT_MEM_PROFILE (unit_test_debug,
@@ -704,7 +704,7 @@ void testTableInitReservesOneBlockOfSlabBytesAndFreeReturnsIt(void) {
 }
 #endif
 
-/* C5: slab headers borrow their shape, quantization_t, qConfig and
+/* Slab headers borrow their shape, quantization_t, qConfig and
  * BFP exponents from the one table block, so the block's single
  * freeReservedMemory is the only legal release. The free runs in a forked
  * child: releasing an interior slab pointer aborts there (or, under
@@ -735,7 +735,7 @@ void testTableFreeIsNullSafe(void) {
     ASSERT_EXITS_WITH(0, rematWireTableFree(NULL));
 }
 
-/* ---- slab alignment (spec §3.3, §12.2 item 7) ---- */
+/* ---- slab alignment ---- */
 
 #define ASSERT_ALIGNED(ptr, T)                                                                     \
     TEST_ASSERT_EQUAL_UINT_MESSAGE(0u, (unsigned)((uintptr_t)(ptr) % _Alignof(T)),                 \
@@ -792,7 +792,7 @@ void testSlabObjectsAlignedAndExponentsAtTheTail(void) {
     freeModel(model, 3);
 }
 
-/* ---- read-only accessors (spec §3.10) and the linked, content-free headers ---- */
+/* ---- read-only accessors and the linked, content-free headers ---- */
 
 void testAccessorsReadTheTableAndHeadersAreLinked(void) {
     layer_t *model[HAR_N];
@@ -825,7 +825,7 @@ void testAccessorsReadTheTableAndHeadersAreLinked(void) {
     freeModel(model, HAR_N);
 }
 
-/* ---- table init's named exits (spec §3.2) ---- */
+/* ---- table init's named exits ---- */
 
 void testTableInitExitsOnAnEmptyModel(void) {
     layer_t *model[1] = {makeRelu(&g_floatQ)};
@@ -898,7 +898,7 @@ void testTableInitExitsOnAZeroByteWire(void) {
     freeModel(model, 1);
 }
 
-/* §16.1 item 4g: the borrowed ACT 0 may be any dtype, packed ones included;
+/* The borrowed ACT 0 may be any dtype, packed ones included;
  * its bytes are exact for the checker's disjointness test. */
 void testTableInitAcceptsAPackedBorrowedInputAndSizesItExactly(void) {
     float scale = 1.f;
@@ -938,7 +938,7 @@ void testTableInitExitsOnAnUnknownInputQtype(void) {
     freeModel(model, 1);
 }
 
-/* ---- checked size arithmetic (spec §3.8, D60) ---- */
+/* ---- checked size arithmetic ---- */
 
 /* The child prints how many bytes are live when it exits, so the parent can
  * check "exits before the table block is reserved". Real only under
@@ -964,7 +964,7 @@ void testTableInitExitsOnAByteCountOverflowBeforeReservingTheTable(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "size overflow computing bytes of wire ACT 0",
                              initExpectingAnExit(model, 1, x));
     /* Only the transient derivation scratch (2 wires) is live at the exit: the
-     * table block is never reserved (plan Assumption 29). */
+     * table block is never reserved. */
 #ifdef ODT_MEM_PROFILE
     size_t expectedReserved = 2u * sizeof(rematWireFact_t);
 #else
@@ -998,7 +998,7 @@ void testTableInitExitsOnASlabSizeOverflow(void) {
 
 /* Three FLOAT32 wires of SIZE_MAX/8 elements: each fits (just under 2^63
  * bytes), two sum to just under 2^64, the third overflows. The checked total
- * bounds every later sum over wires (plan Assumption 12). */
+ * bounds every later sum over wires. */
 void testTableInitExitsOnATotalWireBytesOverflow(void) {
     layer_t *relu = makeRelu(&g_floatQ);
     layer_t *model[3] = {relu, relu, relu};
@@ -1009,7 +1009,7 @@ void testTableInitExitsOnATotalWireBytesOverflow(void) {
     freeReluLayer(relu);
 }
 
-/* ---- per-bind re-derivation (spec §3.4, §3.5) ---- */
+/* ---- per-bind re-derivation ---- */
 
 void testBindWritesHarHeadersAndPointsAct0AtTheInput(void) {
     layer_t *model[HAR_N];
@@ -1079,7 +1079,7 @@ void testBindAllocatesNothing(void) {
 }
 #endif
 
-/* §12.2 item 8 (table level): Quant outputQ @8 at build, @16 at the next bind;
+/* Table level: Quant outputQ @8 at build, @16 at the next bind;
  * the dynamic scale restarts at its init value every bind. */
 void testBindRederivesSymQMaxBitsAndResetsScale(void) {
     symInt32QConfig_t symQc;
@@ -1103,7 +1103,7 @@ void testBindRederivesSymQMaxBitsAndResetsScale(void) {
     freeModel(model, 1);
 }
 
-/* §12.2 item 8 / §3.5: a deserializeModel into a skeleton whose wire width
+/* A deserializeModel into a skeleton whose wire width
  * differs is a key-preserving config edit (ODTS writes the layer's outputQ in
  * place, Deserialize.c:773), adopted at the next bind. */
 void testBindAfterDeserializeModel(void) {
@@ -1137,8 +1137,8 @@ void testBindAfterDeserializeModel(void) {
     freeModel(saved, 1);
 }
 
-/* The rounding-mode half of §12.2's testBindRederivesRoundingModeAndDrawCount;
- * the draw-count half needs the driver (PR2). */
+/* The rounding-mode half of the bind's rounding-mode and draw-count
+ * re-derivation; the draw-count half needs the driver (PR2). */
 void testBindRederivesRoundingMode(void) {
     symInt32QConfig_t symQc;
     initSymInt32QConfigWithQMaxBits(HALF_AWAY, &symQc, 12);
@@ -1156,7 +1156,7 @@ void testBindRederivesRoundingMode(void) {
     freeModel(model, 1);
 }
 
-/* §12.2 item 8: Flatten-at-0 re-inherits the live input's BFP grouping at
+/* Flatten-at-0 re-inherits the live input's BFP grouping at
  * every bind -- {4,4} -> {2,8} shrinks within the built capacity and succeeds,
  * with fresh zero-state exponents. */
 void testBindRederivesFlattenBfpGroupingFromTheLiveInput(void) {
@@ -1186,7 +1186,7 @@ void testBindRederivesFlattenBfpGroupingFromTheLiveInput(void) {
     freeModel(model, 1);
 }
 
-/* §12.2 item 8: SYM@12 -> @8 on the input carries qMaxBits 8 onto the Flatten
+/* SYM@12 -> @8 on the input carries qMaxBits 8 onto the Flatten
  * wire, so a stale width cannot slip past the #227 operand guard. */
 void testBindCarriesSymQMaxBitsOntoTheFlattenWire(void) {
     symInt32QConfig_t inputQc;
@@ -1206,7 +1206,7 @@ void testBindCarriesSymQMaxBitsOntoTheFlattenWire(void) {
     freeModel(model, 1);
 }
 
-/* RF3: a packed borrowed input re-quantized between calls (8 -> 4 bits) is a
+/* A packed borrowed input re-quantized between calls (8 -> 4 bits) is a
  * config edit, not a key change; the checker sizes ACT 0 from the live input. */
 void testBindFollowsTheLivePackedInputBytes(void) {
     float scale = 1.f;
@@ -1248,7 +1248,7 @@ void testBindRunsSampleBOnATableBuiltOnSampleA(void) {
     freeModel(model, 1);
 }
 
-/* Plan Assumption 29: the bind's per-wire derivation scratch lives inside the
+/* The bind's per-wire derivation scratch lives inside the
  * table block. LP64 layout arithmetic (not a scan-model pin): table struct 144
  * + 24 records x 40 + gradIdOf 26 + layerType/frozen 24, rounded to 8, + the
  * input key 48 = 1208; the bind scratch 960; the headers 2680. Total 4848.
@@ -1282,7 +1282,7 @@ void testUnbindClearsTheBorrowedInputOnly(void) {
     freeModel(model, 1);
 }
 
-/* ---- the ASan death callback (spec §12.2 item 6, §16.1 item 4e; C6) ---- */
+/* ---- the ASan death callback ---- */
 
 #ifdef ODT_TEST_ASAN
 static void overrunAHeapBlockUnderTheCallback(void) {
@@ -1299,7 +1299,7 @@ void testAsanDeathCallbackExitsWithADistinctCode(void) {
 }
 #endif
 
-/* ---- the schedule key at bind (spec §3.4-§3.6, §12.2 item 8) ---- */
+/* ---- the schedule key at bind ---- */
 
 void testBindExitsOnAChangedModelSize(void) {
     layer_t *model[2] = {makeRelu(&g_floatQ), makeRelu(&g_floatQ)};
@@ -1381,8 +1381,8 @@ void testBindExitsOnAChangedInputRank(void) {
     freeModel(model, 1);
 }
 
-/* A B change (#152, D17: exact-B key) dies on ACT 0's dims[0], which phase 1
- * step 1 compares before any wire (plan Assumption 22). */
+/* A B change (#152: the key holds the exact B) dies on ACT 0's dims[0], which phase 1
+ * step 1 compares before any wire. */
 void testBindExitsOnAChangedBatch(void) {
     layer_t *model[1] = {makeRelu(&g_floatQ)};
     inputLike_t in;
@@ -1441,7 +1441,7 @@ void testBindExitsOnAChangedWireByteCount(void) {
     freeModel(model, 1);
 }
 
-/* C1 (D54), dtype twin: a byte-neutral FLOAT32 -> SYM_INT32 template edit.
+/* Check before write, dtype twin: a byte-neutral FLOAT32 -> SYM_INT32 template edit.
  * FLOAT32 reserved no qConfig, so a write before the check goes through a NULL
  * qConfig: a crash (or, under ASan, exit 86), never the named exit. */
 static void bindUnderTheAsanCallback(rematWireTable_t *t, layer_t **model, size_t n,
@@ -1466,8 +1466,8 @@ void testBindFloatToSymTemplateEditExitsBeforeSlabWrite(void) {
     freeModel(model, 1);
 }
 
-/* C1 (D54), BFP twin: exactly one BFP wire, per-tensor (expCapacity 1), so its
- * exponent byte is the last object of the table block (plan Assumption 7). A
+/* Check before write, BFP twin: exactly one BFP wire, per-tensor (expCapacity 1), so its
+ * exponent byte is the last object of the table block. A
  * grouped edit derives 4 groups; a write before the check would put 3 bytes
  * past the block end, which ASan reports. */
 void testBindGroupedBfpEditExitsBeforeSlabWrite(void) {
@@ -1488,7 +1488,7 @@ void testBindGroupedBfpEditExitsBeforeSlabWrite(void) {
     freeModel(model, 1);
 }
 
-/* ---- the row SDK (spec §3.10) ---- */
+/* ---- the row SDK ---- */
 
 void testWireBindSetsDataCountsBytesAndBumpsBindGen(void) {
     seedFixture_t f;
@@ -1522,8 +1522,8 @@ void testWireReleaseClearsDataAndKeepsThePeak(void) {
     freeSeedFixture(&f);
 }
 
-/* Phase 3 item 4: every bind starts a call -- generations, live bytes and the
- * observed peak restart at 0 (the peak is "over the last call", §3.8). */
+/* Every bind starts a call -- generations, live bytes and the
+ * observed peak restart at 0 (the peak is "over the last call"). */
 void testTableBindResetsBindGenLiveBytesAndThePeak(void) {
     seedFixture_t f;
     buildBfpSeedFixture(&f);
@@ -1614,7 +1614,7 @@ void testWireBindInheritedGradChecksTheLiveDtypeWhenByteNeutral(void) {
     freeModel(model, 2);
 }
 
-/* C2 + D54 (table-level twin of PR2's decorator test): a live ACT header whose
+/* Check before write (table-level twin of PR2's decorator test): a live ACT header whose
  * grouping grew past the seed's slab capacity must exit by name before
  * initBfpQConfigGroupedInto writes 4 exponents into a 1-byte tail at the block
  * end. */
@@ -1706,7 +1706,7 @@ void testWireBindInheritedGradChecksTheLiveRankWhenByteNeutral(void) {
     freeSeedFixture(&f);
 }
 
-/* RF1: ACT 0 is the caller's tensor; a row that binds it would overwrite the
+/* ACT 0 is the caller's tensor; a row that binds it would overwrite the
  * caller's ->data. */
 void testWireBindRefusesTheBorrowedInput(void) {
     seedFixture_t f;
@@ -1725,7 +1725,7 @@ void testWireReleaseRefusesTheBorrowedInput(void) {
     freeSeedFixture(&f);
 }
 
-/* RF2: unbalanced SDK calls would double-count or wrap liveBytes. */
+/* Unbalanced SDK calls would double-count or wrap liveBytes. */
 void testWireBindRefusesAnAlreadyBoundWire(void) {
     seedFixture_t f;
     buildBfpSeedFixture(&f);
@@ -1775,7 +1775,7 @@ void testWireBindRefusesNullBytes(void) {
 }
 
 /* rematWireTableBind resets liveBytes to 0 but never clears a still-bound
- * wire's ->data (spec: only Bind/Release write it), so a wire left bound
+ * wire's ->data (only Bind/Release write it), so a wire left bound
  * across a rebind reads as still-bound. Releasing it then would subtract from
  * a liveBytes that no longer reflects it: checked, so it exits by name
  * instead of wrapping size_t. */
@@ -1790,7 +1790,7 @@ void testWireReleaseExitsWhenLiveBytesWouldUnderflow(void) {
     freeSeedFixture(&f);
 }
 
-/* ---- ODT_REMAT_VERIFY poison (spec §3.10, §7.1, §12.2 item 5) ---- */
+/* ---- ODT_REMAT_VERIFY poison ---- */
 
 #ifdef ODT_REMAT_VERIFY
 /* A signalling NaN: exponent all ones, quiet bit clear, payload non-zero. */
@@ -1874,10 +1874,10 @@ void testWireReleasePoisonsTheOldBytesByDtype(void) {
 }
 #endif
 
-/* ---- the static plan (spec §4) ---- */
+/* ---- the static plan ---- */
 
-/* §4.3: FORWARD 0..n-1, LOSS_FORWARD, LOSS_BACKWARD, BACKWARD top..deepest.
- * HAR: 12 + 1 + 1 + 11 = 25 steps (§12.2 item 10 pin). */
+/* FORWARD 0..n-1, LOSS_FORWARD, LOSS_BACKWARD, BACKWARD top..deepest.
+ * HAR: 12 + 1 + 1 + 11 = 25 steps (a scan-model pin). */
 void testStoreAllHarStepOrder(void) {
     layer_t *model[HAR_N];
     buildHar(model, false);
@@ -1903,7 +1903,7 @@ void testStoreAllHarStepOrder(void) {
     freeModel(model, HAR_N);
 }
 
-/* §4.4 STORE_ALL: ACT j [FORWARD(j-1), last step]; seed [LOSS_BACKWARD,
+/* STORE_ALL: ACT j [FORWARD(j-1), last step]; seed [LOSS_BACKWARD,
  * BACKWARD(top)]; GRAD l [BACKWARD(l), BACKWARD(l-1)]. One range per slab
  * wire, in wire-id order, begins strictly ascending. */
 void testStoreAllHarRanges(void) {
@@ -1961,7 +1961,7 @@ void testEndOrderSortsRangeIdsByEndThenWire(void) {
     freeModel(model, HAR_N);
 }
 
-/* §4.2: walking every step opens each range at its begin and closes it at its
+/* Walking every step opens each range at its begin and closes it at its
  * end, exactly once. */
 void testWalkOpensAndClosesEachRangeOnceAtItsEndpoints(void) {
     layer_t *model[HAR_N];
@@ -1992,7 +1992,7 @@ void testWalkOpensAndClosesEachRangeOnceAtItsEndpoints(void) {
     freeModel(model, HAR_N);
 }
 
-/* §12.2 item 10: scan-model pins, written once, never retyped (plan header). */
+/* Scan-model pins, written once, never retyped. */
 void testStoreAllPeakHarIs74288(void) {
     layer_t *model[HAR_N];
     buildHar(model, false);
@@ -2031,7 +2031,7 @@ void testStoreAllPeakFinetuneStage2Is57928(void) {
     freeModel(model, HAR_N);
 }
 
-/* §4.7: one block of steps, ranges and endOrder. HAR TRAIN arrays:
+/* One block of steps, ranges and endOrder. HAR TRAIN arrays:
  * 25 * 4 + 23 * 6 + 23 * 2 = 284 B after the (even-sized) plan struct. */
 void testPlanBlockHoldsStepsRangesAndEndOrder(void) {
     layer_t *model[HAR_N];
@@ -2083,7 +2083,7 @@ void testNullOrZeroedSpecMeansStoreAll(void) {
     freeModel(model, HAR_N);
 }
 
-/* RF4: an uninitialised stack spec must not become a garbage plan. */
+/* An uninitialised stack spec must not become a garbage plan. */
 void testPlanBuildExitsOnAnUnknownPolicy(void) {
     layer_t *model[1] = {makeRelu(&g_floatQ)};
     inputLike_t in;
@@ -2096,7 +2096,7 @@ void testPlanBuildExitsOnAnUnknownPolicy(void) {
     freeModel(model, 1);
 }
 
-/* D20: n = 1 under CE has LOSS_BACKWARD but no BACKWARD (top = -1 < deepest);
+/* n = 1 under CE has LOSS_BACKWARD but no BACKWARD (top = -1 < deepest);
  * the seed lives [LOSS_BACKWARD, LOSS_BACKWARD]. */
 void testSingleLayerUnderCrossEntropyHasASeedButNoBackwardStep(void) {
     layer_t *model[1] = {makeLinear(2, 3, false)};
@@ -2133,7 +2133,7 @@ void testPlanFreeIsNullSafe(void) {
     ASSERT_EXITS_WITH(0, rematPlanFree(NULL));
 }
 
-/* ---- LIVENESS (spec §4.4) and the read-set (§3.7, §12.2 item 9) ---- */
+/* ---- LIVENESS and the read-set ---- */
 
 void testLivenessHarRangesEndAtTheLastReader(void) {
     layer_t *model[HAR_N];
@@ -2154,7 +2154,7 @@ void testLivenessHarRangesEndAtTheLastReader(void) {
     freeModel(model, HAR_N);
 }
 
-/* §12.2 item 10: scan-model pins (plan header). */
+/* Scan-model pins. */
 void testLivenessPeakHarIs49152(void) {
     layer_t *model[HAR_N];
     buildHar(model, false);
@@ -2182,7 +2182,7 @@ void testLivenessPeakFinetuneStage2Is16384(void) {
     freeModel(model, HAR_N);
 }
 
-/* D20: n = 1 under CE gives top = -1, so no BACKWARD step exists to read
+/* n = 1 under CE gives top = -1, so no BACKWARD step exists to read
  * ACT 1 or the seed; both end at LOSS_BACKWARD (step 2). Same fixture as
  * testSingleLayerUnderCrossEntropyHasASeedButNoBackwardStep, built under
  * LIVENESS instead of STORE_ALL. */
@@ -2199,7 +2199,7 @@ void testLivenessSingleLayerUnderCrossEntropyEndsBothWiresAtLossBackward(void) {
     freeModel(model, 1);
 }
 
-/* §12.2 item 9: a frozen norm's input stays live through its BACKWARD, a frozen
+/* A frozen norm's input stays live through its BACKWARD, a frozen
  * GEMM's input dies at its forward. [Linear T, LayerNorm frozen, Linear frozen,
  * Linear T] under MSE: n = 4, top = 3, B(l) = 6 + (3 - l). */
 void testFrozenNormStillNeedsItsInputWhileAFrozenGemmDoesNot(void) {
@@ -2215,7 +2215,7 @@ void testFrozenNormStillNeedsItsInputWhileAFrozenGemmDoesNot(void) {
     freeModel(model, 4);
 }
 
-/* §4.4: under CE the logits die at FORWARD(n-1) (the positional skip means no
+/* Under CE the logits die at FORWARD(n-1) (the positional skip means no
  * BACKWARD reads them); under MSE after Softmax they live to BACKWARD(n-1). */
 void testCeLogitsDieAtForwardWhileMseSoftmaxInputIsRetained(void) {
     layer_t *model[2] = {makeLinear(2, 3, false), makeSoftmax()};
@@ -2234,7 +2234,7 @@ void testCeLogitsDieAtForwardWhileMseSoftmaxInputIsRetained(void) {
     freeModel(model, 2);
 }
 
-/* C3: §3.7's "do not refine the rule by propLoss" argument rests on this
+/* The read-set rule is deliberately not refined by propLoss; that rests on this
  * cross-seam property -- the deepest trainable layer (the only grads-only
  * backward) always reads its input. A characterization of PR0 code: no live
  * RED is possible; the mutation proves its teeth. */
@@ -2297,7 +2297,7 @@ void testEveryStepsOperandsAreCoLiveOnTheZoo(void) {
     freeModel(mnist, MNIST_N);
 }
 
-/* §12.2 item 9's no-overlap property over random plans: 50 random rank-2
+/* The no-overlap property over random plans: 50 random rank-2
  * chains of Linear / ReLU / Softmax / LayerNorm with random freezing, under
  * both losses and both policies. */
 void testEveryStepsOperandsAreCoLiveOnRandomChains(void) {
@@ -2315,7 +2315,7 @@ void testEveryStepsOperandsAreCoLiveOnRandomChains(void) {
     }
 }
 
-/* ---- grammar validation (spec §4.5) ---- */
+/* ---- grammar validation ---- */
 
 void testGrammarRejectsADuplicateForward(void) {
     ASSERT_GRAMMAR_EXIT(buildHarLivenessFixture, duplicateTheFirstForward,

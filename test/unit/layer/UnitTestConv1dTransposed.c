@@ -1474,9 +1474,8 @@ void testConvT1dForwardGroupedEqualScalesBitIdenticalToScalar(void) {
 /* FLOAT32-math arm with the SAME grouped-SYM/SYM_INT32 storage (only
  * forwardMath differs): exercises the funnel's group-aware FLOAT32 dequant
  * (convertSymTensorToFloat32Tensor) gated by the FLOAT32-arm
- * groupedSymOperandPos declaration -- the arm-parity lesson from the PR2
- * final review's Conv1d asymmetry (Fix 3b): omitting the declaration on the
- * FLOAT32 arm makes this test die with the funnel's deny message.
+ * groupedSymOperandPos declaration -- both math arms must declare it:
+ * omitting it on the FLOAT32 arm makes this test die with the funnel's deny message.
  *
  * Tolerance derivation (per-product rescale error model, |err| <=
  * 0.5*C*s_acc): the float path is (near-)exact real arithmetic, while the

@@ -16,12 +16,12 @@
  *   - math: native = ARITH_BFP on the four GEMM slots; fq = those slots and
  *     Softmax's forward pinned ARITH_FLOAT32 (the GEMM fake-quant reference,
  *     NOT a whole-model twin: Relu/pools keep their BFP arms).
- *   - rounding (§3.5): OUT_WRITE rounds by the OPERATION's mode, so the
+ *   - rounding: OUT_WRITE rounds by the OPERATION's mode, so the
  *     carriers are the math slots: forward/weightGrad/biasGrad HALF_AWAY
  *     (deterministic inference + staging), propLossMath SR_HALF_AWAY under
  *     BFP_ROUNDING=sr (dx packs), grad/state templates and the optimizer
  *     write-back likewise. The CE loss-grad pack has no carrier and stays
- *     HALF_AWAY (documented exception §3.5.1).
+ *     HALF_AWAY (documented exception, README "Block floating point").
  *   - grads / momentum: FLOAT32 by default; BFP_GRADS=1 / BFP_STATE=1 opt
  *     into per-tensor BFP storage (grouped BFP grads are rejected upstream).
  *   - optimizer: SGD-M via optimizerStep; updateMath FLOAT32 (#310).
@@ -111,7 +111,7 @@ static optimizer_t *g_optim = NULL; /* for per-epoch LR logging in epochCallback
 
 static bfpSweepConfig_t g_cfg;
 
-/* Wire templates (spec §3.3): trainer-owned, one per forward wire (g_outQ)
+/* Wire templates: trainer-owned, one per forward wire (g_outQ)
  * and one per dx wire (g_dxQ, NULL where the run never allocates one);
  * layers never own them. Under BFP_WIRE_BLOCK=float every slot is g_floatQ. */
 static quantization_t *g_floatQ = NULL;
@@ -184,7 +184,7 @@ static void freeWireTemplates(void) {
     freeQuantization(g_floatQ);
 }
 
-/* One layer's profile (spec §3.3-3.5). layerQuantInitUniform derives the math
+/* One layer's profile. layerQuantInitUniform derives the math
  * type AND copies the template's HALF_AWAY into every slot; the rounding
  * carriers are then set explicitly: forward/staging deterministic, dx packs
  * training-side. GEMM math is pinned by BFP_MATH regardless of wire dtype
@@ -348,7 +348,7 @@ static quantization_t *buildBfpWeightQuant(groupShape_t gs) {
 
 /* Weights -> BFP grouped per BFP_WEIGHT_BLOCK (resolveGroupShape on the
  * tensor's own N/outCh), biases -> per-tensor BFP; HALF_AWAY templates
- * (deterministic initial encode, §3.5). Every template is freed right after
+ * (deterministic initial encode). Every template is freed right after
  * its one requantizeTensorInPlace (which deep-clones it). */
 static void requantizeParamsToBfp(layer_t **model) {
     quantization_t *biasQ = quantizationInitBfp(g_cfg.mantissaBits, g_cfg.exponentBits, HALF_AWAY);
@@ -386,11 +386,11 @@ typedef struct paramGateCtx {
     int fails;
 } paramGateCtx_t;
 
-/* PARAM gate (spec §3.6 gate 3): every trainable weight/bias tensor is BFP at
+/* PARAM gate: every trainable weight/bias tensor is BFP at
  * (m, e), in the group SHAPE BFP_WEIGHT_BLOCK should have produced for that
  * specific tensor (weights: resolveGroupShape on the tensor's own N/outCh;
  * biases: always per-tensor {1,0}) -- an independent recheck of what
- * requantizeParamsToBfp built, via the same shared helper. GRAD gate (gate 4):
+ * requantizeParamsToBfp built, via the same shared helper. GRAD gate:
  * every trainable grad tensor is FLOAT32 (BFP_GRADS=0) or per-tensor BFP at
  * (m, e) (BFP_GRADS=1). The per-tensor check itself is
  * examples/_shared/param_gate.c (#417); this sink only filters, counts and
@@ -479,8 +479,8 @@ typedef struct groupLogInfo {
  * from what requantizeParamsToBfp actually built -- for the log's
  * "groups_resolved" (the 4 weight tensors) and "group_overhead_b" (all 8:
  * weights AND biases, since even a per-tensor {1,0} tensor carries one u8
- * exponent of metadata; spec-§7-mandatory honest accuracy-per-byte
- * accounting). */
+ * exponent of metadata; honest accuracy-per-byte accounting
+ * requires it). */
 static groupLogInfo_t computeGroupLogInfo(layer_t **model) {
     const size_t convIdx[3] = {0, 3, 6};
     groupShape_t convShapes[3];
@@ -552,7 +552,7 @@ static size_t stateMetadataBytes(optimizer_t *o) {
     return bytes;
 }
 
-/* Wire profiles for mem_instrument (spec §7.2), read off the templates the
+/* Wire profiles for mem_instrument, read off the templates the
  * trainer actually built; numGroups is derived from the wire's N exactly as
  * the allocators do. Slot dx[11] stands for the CE loss grad (6 elements),
  * which clones softmax.out's template. */
@@ -665,7 +665,7 @@ static void epochCallback(epochInfo_t info, epochStats_t evalStats) {
     clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
 }
 
-/* Spec §3.6 gate 2: every GEMM product op and every BFP sum op of the fixed
+/* Headroom preflight gate: every GEMM product op and every BFP sum op of the fixed
  * topology, checked with the kernels' own segment rule BEFORE the dataset
  * loads. run 0 = per-tensor operand; a FLOAT32 operand stages per-tensor at
  * the weight widths (arithmetic-bfp.md §5.4 Decision 1) -> run 0 as well. Skipped under fq (no
@@ -727,7 +727,7 @@ static void headroomPreflight(void) {
     fprintf(stdout, "PREFLIGHT PASS: headroom ok for m=%u at every HAR reduction\n", m);
 }
 
-/* ---- First-real-step wire gate (spec §3.6 gate 7) ------------------------ */
+/* ---- First-real-step wire gate ------------------------------------------ */
 #define WIRE_EVENTS (MODEL_SIZE + 1 + (MODEL_SIZE - 1))
 typedef struct wireGateCtx {
     bool seen[WIRE_EVENTS]; /* [0,12) fwd@i, [12] lossgrad, [13,24) agrad@i */

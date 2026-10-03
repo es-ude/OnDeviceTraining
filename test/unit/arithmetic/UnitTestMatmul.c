@@ -1120,7 +1120,7 @@ void testMatmulBfpMatchesGold(void) {
                              kBfpMatmulExpected_len * sizeof(float));
 }
 
-/* PR2 self-review finding 3: the bias seed must dequantize through ITS OWN
+/* BFP epic PR2: the bias seed must dequantize through ITS OWN
  * group's exponent (bfpGroupScale(biasQC, bfpGroupOf(biasQC, col))). Same
  * bias VALUES as the gold, stored grouped {numGroups=3, groupSize=1} with
  * NON-UNIFORM exponents (goldgen asserts both, plus that a group-0 collapse
@@ -1246,7 +1246,7 @@ void testMatmulBfpNoBiasZeroSeeds(void) {
                              kBfpMatmulNoBiasExpected_len * sizeof(float));
 }
 
-/* BFP power-of-two twin (spec §8c), the BFP sibling of
+/* BFP power-of-two twin, the BFP sibling of
  * testMatmulGroupedEqualScalesBitIdenticalToScalar above (see its comment
  * for the exactness argument): identical mantissas; BFP b grouped
  * {numGroups=3, groupSize=6} with every stored exponent 125 (e=8, bias 127
@@ -1405,7 +1405,7 @@ void testBfpSumSegmentLimitTableValues(void) {
     TEST_ASSERT_EQUAL_size_t((size_t)(INT32_MAX >> 1), bfpSumSegmentLimit(2));
 }
 
-/* Group-shape fail-fast (review finding 2): bfpGroupOf divides by groupSize
+/* Group-shape fail-fast: bfpGroupOf divides by groupSize
  * with no relation to numGroups, so a mismatched config ({numGroups=2,
  * groupSize=4} on 12 elements: 2*4 == 8 != 12) would silently read
  * exponents[] out of bounds. The kernel must route every operand through

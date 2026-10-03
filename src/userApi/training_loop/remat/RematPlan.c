@@ -41,7 +41,7 @@ static bool endsBefore(const rematRange_t *ranges, uint16_t a, uint16_t b) {
 }
 
 /* In place, no scratch: O(R^2) worst case, within the O(R^2 log R) of the
- * ARENA placement that follows it at init (plan Assumption 25). */
+ * ARENA placement that follows it at init. */
 static void sortEndOrder(rematProgram_t *p) {
     for (size_t i = 0; i < p->numRanges; i++) {
         p->endOrder[i] = (uint16_t)i;
@@ -57,7 +57,7 @@ static void sortEndOrder(rematProgram_t *p) {
     }
 }
 
-/* D60: checked here are the plan-block size (stepsAt/rangesAt/endOrderAt/
+/* Overflow-checked here are the plan-block size (stepsAt/rangesAt/endOrderAt/
  * blockBytes, via planAdd/planMul) and peakLiveBytes (accumulated with
  * planAdd in peakLiveBytesOf). rematTrainStepCount, rematBackwardStep and
  * numRanges = numWires - 1 are plain size_t arithmetic on modelSize,

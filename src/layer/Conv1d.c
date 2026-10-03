@@ -150,13 +150,11 @@ void conv1dForward(layer_t *layer, tensor_t *input, tensor_t *output) {
      * always together -- mirrors linearForward's identical wiring (Linear.c)
      * exactly. Per-tensor SYM/ASYM (numGroups==1) and SYM_INT32 weights are
      * untouched. weightTensor is always inputs[1] (bias present or not, see
-     * the .inputs literals below) in BOTH math arms -- final-review Fix
-     * 3(b): the FLOAT32 arm must declare the SAME position as the SYM arm (a
-     * grouped weight forwarded under FLOAT32 math dequantizes via the
-     * funnel's group-aware convertTensor cell -- gated on this field exactly
-     * like the SYM arm's unpack, not a different mechanism) -- omitting it
-     * here (as pre-final-review code did) would make Conv1d's FLOAT32-math
-     * grouped forward regress once the funnel's FLOAT32 arm gate lands. */
+     * the .inputs literals below) in BOTH math arms: the FLOAT32 arm must declare the SAME position
+     * as the SYM arm (a grouped weight forwarded under FLOAT32 math dequantizes via the funnel's
+     * group-aware convertTensor cell -- gated on this field exactly like the SYM arm's unpack, not
+     * a different mechanism) -- omitting it here would make Conv1d's FLOAT32-math grouped forward
+     * regress once the funnel's FLOAT32 arm gate lands. */
     symQConfig_t asymWeightView; /* lifetime: this frame (Linear.c view doc) */
     const symQConfig_t *weightGroups = groupedWeightViewOrNull(weightTensor, &asymWeightView);
     bool grouped = weightGroups != NULL;
@@ -239,12 +237,12 @@ void conv1dForward(layer_t *layer, tensor_t *input, tensor_t *output) {
 }
 
 /* executeOp kernel adapters (ctx = conv1dConfig_t*, for kernel_t/groups
- * geometry — recon-conv-backward §8: the fixed opKernelFn_t shape has no
+ * geometry: the fixed opKernelFn_t shape has no
  * per-op-instance geometry slot other than ctx). The FLOAT32/SYM weight-grad
  * kernels `+=` into the same weight cell across many (b, outPos) iterations,
  * so they memset rawOut first (the executeOp Phase-2 scratch is an
  * uninitialized VLA, unlike the reserveMemory-backed intermediate they
- * replace — recon §2); the BFP twin is output-centric and writes each cell
+ * replace); the BFP twin is output-centric and writes each cell
  * exactly once (its own comment). Bias-grad kernels write each
  * output-channel index exactly once (no
  * zero-init hazard). SYM weight-grad sets the raw intermediate's scale
@@ -956,8 +954,8 @@ void conv1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
      * through the conversionMatrix diagonal (width-restored at the producer,
      * PR1b.2 D3) instead of the old direct kernel write of raw, unrestored
      * accumulator-range mantissas — the #187 dtype guard is superseded by the
-     * funnel's own prologue/epilogue and is deleted (recon-conv-backward §4:
-     * zero test coverage, confirmed tautology post-#221).
+     * funnel's own prologue/epilogue and is deleted (it had
+     * zero test coverage and was a tautology after #221).
      * propLoss == NULL (#380 PR2): grads-only call -- skip the dx write
      * entirely rather than dereference the absent buffer. */
     if (propLoss != NULL) {
@@ -966,8 +964,8 @@ void conv1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
          * comment there) -- ctx routes the SYM dx adapter to the grouped
          * SCATTER entry, groupedSymOperandPos opts the funnel prologue into
          * unpacking (SYM arm) / group-aware dequant (FLOAT32 arm) of the
-         * weight at inputs[1] (position 2), declared on BOTH math arms (PR2
-         * final-review arm-parity lesson). */
+         * weight at inputs[1] (position 2), declared on BOTH math arms (the same
+         * arm-parity rule as conv1dForward). */
         symQConfig_t asymWeightView; /* lifetime: this frame (Linear.c view doc) */
         const symQConfig_t *weightGroups = groupedWeightViewOrNull(weightTensor, &asymWeightView);
         bool grouped = weightGroups != NULL;

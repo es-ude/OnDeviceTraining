@@ -40,10 +40,10 @@ void rematFillTrainSteps(const rematWireTable_t *t, rematStep_t *steps) {
     }
 }
 
-/* LIVENESS (spec §4.4): ACT j ends at its last reader. With the read-set rule
- * (§3.7) this frees pool / Flatten / Quantization / Dropout inputs at their
- * forward, everything below the #380 cut, the CE logits, and a frozen GEMM's
- * input, while a frozen norm keeps its input. */
+/* LIVENESS: ACT j ends at its last reader. With the read-set rule (a layer
+ * whose backward does not read its input leaves it dead) this frees pool / Flatten / Quantization /
+ * Dropout inputs at their forward, everything below the #380 cut, the CE logits, and a frozen
+ * GEMM's input, while a frozen norm keeps its input. */
 static size_t actLastReader(const rematWireTable_t *t, layer_t **model, size_t j) {
     size_t n = t->modelSize;
     size_t last = (j < n) ? j : n; /* FORWARD(j), or LOSS_FORWARD for ACT n */

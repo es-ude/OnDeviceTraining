@@ -33,7 +33,7 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* Fixture helpers copied from UnitTestRematPlan.c (plan Assumption 14).
+/* Fixture helpers copied from UnitTestRematPlan.c.
  * Fixture layers borrow their wire templates, so one FLOAT32 template
  * outlives every fixture model. */
 static quantization_t g_floatQ = {.type = FLOAT32, .qConfig = NULL};
@@ -209,7 +209,7 @@ static void freeFixture(arenaFixture_t *f, rematScheduler_t *s) {
     freeModel(f->model, f->n);
 }
 
-/* ---- init builds the shared table and plan; the report (spec §5.1, §12.2 item 10) ---- */
+/* ---- init builds the shared table and plan; the report ---- */
 
 void testArenaInitBuildsTheTableAndThePlan(void) {
     arenaFixture_t f;
@@ -232,7 +232,7 @@ void testReportEchoesTypePolicyAndPlanFacts(void) {
     TEST_ASSERT_EQUAL_INT(REMAT_ARENA, r.type);
     TEST_ASSERT_EQUAL_INT(REMAT_PLAN_LIVENESS, r.policy);
     TEST_ASSERT_TRUE(r.planned);
-    TEST_ASSERT_EQUAL_size_t(25, r.numSteps); /* §4.3: 12 + 1 + 1 + 11 */
+    TEST_ASSERT_EQUAL_size_t(25, r.numSteps); /* 12 + 1 + 1 + 11 */
     freeFixture(&f, &s);
 }
 
@@ -246,7 +246,7 @@ static size_t reportedPeakOnHar(const rematPlanSpec_t *spec) {
     return r.peakLiveBytes;
 }
 
-/* Scan-model pins (spec §1, §12.2 item 10), read from the report. */
+/* Scan-model pins, read from the report. */
 void testReportPeakLiveBytesHarStoreAllIs74288(void) {
     TEST_ASSERT_EQUAL_size_t(74288, reportedPeakOnHar(NULL));
 }
@@ -255,7 +255,7 @@ void testReportPeakLiveBytesHarLivenessIs49152(void) {
     TEST_ASSERT_EQUAL_size_t(49152, reportedPeakOnHar(&g_liveness));
 }
 
-/* RF3: never initialised, failed before the plan existed, or deinitialised --
+/* Never initialised, failed before the plan existed, or deinitialised --
  * the report reads nothing through the NULL table or plan. */
 void testReportOnAZeroedSchedulerIsEmpty(void) {
     rematScheduler_t s = {0};
@@ -321,7 +321,7 @@ void testDeinitReturnsEveryInitBlock(void) {
 }
 #endif
 
-/* ---- aligned first-fit-decreasing placement (spec §5.5, §12.2 items 7 and 10) ---- */
+/* ---- aligned first-fit-decreasing placement ---- */
 
 typedef struct builtPlan {
     rematWireTable_t *t;
@@ -342,7 +342,7 @@ static void freeTableAndPlan(builtPlan_t *b) {
     rematWireTableFree(b->t);
 }
 
-/* The Codex F1 alignment model (spec §5.5): FLOAT32 [1,5] -> Quantization to
+/* The F1 alignment model: FLOAT32 [1,5] -> Quantization to
  * BFP m = 8 -> Linear 5 -> 1 under MSE. Wires: ACT 1 (BFP, 5 B), ACT 2
  * (FLOAT32, 4 B), the seed GRAD 2 (id 3, 4 B). Steps F0 0, F1 1, LF 2, LB 3,
  * B1 4. Unaligned FFD would place them at {0, 5, 9}. */
@@ -402,7 +402,7 @@ static void assertF1Placement(const rematPlanSpec_t *spec) {
     freeModel(f.model, f.n);
 }
 
-/* §12.2 item 7: the spec's name for the alignment pin. */
+/* The alignment pin. */
 void testArenaOffsetsAligned(void) {
     assertF1Placement(NULL);
     assertF1Placement(&g_liveness);
@@ -460,7 +460,7 @@ static void buildRandomPlan(randomPlan_t *rp, uint32_t *state) {
     }
     /* Wire ids are a Fisher-Yates permutation of 1..numRanges, drawn from the
      * same seeded stream, decoupled from begin order: if wire id tracked
-     * array (begin) position, as it used to, the spec's "begin, then wire
+     * array (begin) position, as it used to, the placement's "begin, then wire
      * id" tie-break would collapse to "wire id" and never be exercised. */
     uint16_t perm[ORACLE_MAX_RANGES];
     for (size_t r = 0; r < numRanges; r++) {
@@ -520,7 +520,7 @@ static bool oraclePlacesFirst(const randomPlan_t *rp, size_t a, size_t b) {
     return rp->ranges[a].wire < rp->ranges[b].wire;
 }
 
-/* The spec's rule taken literally, O(R^3): every candidate (0, or the end of a
+/* The first-fit rule taken literally, O(R^3): every candidate (0, or the end of a
  * co-live placed range) against every co-live placed range; the lowest
  * feasible one wins. */
 static size_t oracleFirstFitDecreasing(const randomPlan_t *rp, size_t *offsets,
@@ -578,7 +578,7 @@ static size_t oracleFirstFitDecreasing(const randomPlan_t *rp, size_t *offsets,
     return bytes;
 }
 
-/* Codex N3: the placement, within the O(R^2 log R) bound, must reproduce the
+/* The placement, within the O(R^2 log R) bound, must reproduce the
  * rule exactly, so no pin depends on how it is implemented. */
 void testFfdMatchesTheNaiveOracleOnRandomPlans(void) {
     uint32_t state = 0x2545F491u;
@@ -620,8 +620,8 @@ void testArenaPlacedExitsNamingTheWireOnOverflow(void) {
 }
 
 #ifdef ODT_MEM_PROFILE
-/* Codex N3: the candidate list is a temporary block, released before the
- * placement returns (spec §11.1: "freed before init returns"). */
+/* The candidate list is a temporary block, released before the
+ * placement returns ("freed before init returns"). */
 void testFfdReleasesItsScratch(void) {
     arenaFixture_t h;
     buildHarModel(&h);
@@ -637,7 +637,7 @@ void testFfdReleasesItsScratch(void) {
 }
 #endif
 
-/* ---- the placement verifier (spec §5.5, R6) ---- */
+/* ---- the placement verifier ---- */
 
 typedef struct placedPlan {
     arenaFixture_t f;
@@ -693,7 +693,7 @@ void testVerifierExitsNamingBothWiresOnCoLiveOverlap(void) {
 }
 
 /* Inclusive intervals: under LIVENESS ACT 2 ends at step 3, where the seed
- * begins; they must not share bytes (spec §4.2). */
+ * begins; they must not share bytes. */
 void testVerifierTreatsRangesMeetingAtOneStepAsCoLive(void) {
     placedPlan_t pp;
     placeFixture(&pp, buildF1Model, &g_liveness);
@@ -737,7 +737,7 @@ void testVerifierBoundsPlacedNotExactBytes(void) {
     freePlacedFixture(&pp);
 }
 
-/* RF5: an imported offset of SIZE_MAX - 7 (a multiple of 8) makes
+/* An imported offset of SIZE_MAX - 7 (a multiple of 8) makes
  * off + placed wrap to 0; the bound must not be computed that way. */
 void testVerifierRejectsAnOffsetNearSizeMax(void) {
     placedPlan_t pp;
@@ -748,7 +748,7 @@ void testVerifierRejectsAnOffsetNearSizeMax(void) {
     freePlacedFixture(&pp);
 }
 
-/* ---- init completes: offsets block, placement, verifier, arena block (spec §5.5) ---- */
+/* ---- init completes: offsets block, placement, verifier, arena block ---- */
 
 static rematReport_t reportAfterInit(void (*build)(arenaFixture_t *), const rematPlanSpec_t *spec) {
     arenaFixture_t f;
@@ -805,16 +805,16 @@ void testReportPadOnTheF1ModelIsEleven(void) {
     }
 }
 
-/* FFD heuristic; a change needs a stated reason (spec §12.2 item 10). The one
+/* FFD heuristic; a change needs a stated reason. The one
  * pin recorded from the implementation, cross-checked against an independent
- * FFD of the spec's rule on the hand-derived HAR ranges (plan Assumption 16):
+ * FFD of the first-fit rule on the hand-derived HAR ranges:
  * STORE_ALL leaves a 4,096 B gap above its 74,288 B peak, LIVENESS none. */
 void testReportArenaBytesHarFfdRegressionGuard(void) {
     TEST_ASSERT_EQUAL_size_t(78384, reportAfterInit(buildHarModel, NULL).arenaBytes);
     TEST_ASSERT_EQUAL_size_t(49152, reportAfterInit(buildHarModel, &g_liveness).arenaBytes);
 }
 
-/* §12.2 item 7's property: random chains of FLOAT32 and packed BFP wires
+/* The alignment property: random chains of FLOAT32 and packed BFP wires
  * (odd byte counts) under both policies, every offset and the arena size a
  * multiple of ODT_WIRE_ALIGN. It runs in a child so a verifier exit in init
  * reads as this test's verdict. */
@@ -890,13 +890,12 @@ void testArenaInitReservesExactlyMetadataPlusArena(void) {
 #endif
 
 #ifndef ODT_TEST_ASAN
-/* D55 / Codex C2 did-not-run pin. ReLU over a borrowed [1, 2^60] FLOAT32 input
- * (never read at init) under MSE passes table init unchanged (plan Assumption
- * 18): one 2^62-byte wire, one range, no backward. Reserving 2^62 B fails on
- * every 64-bit host, and the report must still carry every analytic field.
- * Host-only (LP64); skipped under ASan, which aborts on oversized requests
- * unless allocator_may_return_null=1. macOS malloc prints a "can't allocate
- * region" warning to stderr here; that is expected. */
+/* Did-not-run pin. ReLU over a borrowed [1, 2^60] FLOAT32 input
+ * (never read at init) under MSE passes table init unchanged: one 2^62-byte wire, one range, no
+ * backward. Reserving 2^62 B fails on every 64-bit host, and the report must still carry every
+ * analytic field. Host-only (LP64); skipped under ASan, which aborts on oversized requests unless
+ * allocator_may_return_null=1. macOS malloc prints a "can't allocate region" warning to stderr
+ * here; that is expected. */
 void testArenaInitFailureKeepsAnalyticReport(void) {
     layer_t *model[1] = {makeRelu(&g_floatQ)};
     inputLike_t in;
@@ -923,7 +922,7 @@ void testArenaInitFailureKeepsAnalyticReport(void) {
 }
 #endif
 
-/* ---- init's named exits before any row reservation (spec §5.5, §3.8, D60) ---- */
+/* ---- init's named exits before any row reservation ---- */
 
 /* The child prints how many bytes are live when it exits, so the parent can
  * check "before any row reservation": only the shared table and plan may
@@ -1025,7 +1024,7 @@ static void initAndExitWithTheVerdict(layer_t **model, size_t n, const tensor_t 
     _exit(ok ? 0 : 2);
 }
 
-/* RF4: the limit is inclusive -- a plan of exactly ODT_REMAT_MAX_RANGES
+/* The limit is inclusive -- a plan of exactly ODT_REMAT_MAX_RANGES
  * ranges initialises. */
 void testArenaInitAcceptsExactlyMaxRanges(void) {
     layer_t *relu = makeRelu(&g_floatQ);
@@ -1062,7 +1061,7 @@ void testArenaInitExitsOnAnArenaSumOverflowBeforeAnyRowReservation(void) {
     freeModel(model, 2);
 }
 
-/* ---- the row's per-step entry points (spec §5.5, §5.4) ---- */
+/* ---- the row's per-step entry points ---- */
 
 /* One call through the dispatch, on either row. */
 static void bindAndBegin(arenaFixture_t *f, rematScheduler_t *s) {
@@ -1223,7 +1222,7 @@ void testArenaBeginExitsWhenTheArenaWasNeverReserved(void) {
     freeFixture(&f, &s);
 }
 
-/* ---- the row contract on every row (spec §12.2 item 1) ---- */
+/* ---- the row contract on every row ---- */
 
 static void assertResident(const rematWireTable_t *t, uint16_t w, const char *what) {
     TEST_ASSERT_NOT_EQUAL_MESSAGE(REMAT_NONE, w, what);
@@ -1319,7 +1318,7 @@ static void assertBoundIsExactlyTheLiveSet(const rematProgram_t *p, const rematW
     }
 }
 
-/* Every bound wire's bytes suit every wire dtype (spec §5.5): the ARENA
+/* Every bound wire's bytes suit every wire dtype: the ARENA
  * offsets are multiples of ODT_WIRE_ALIGN and HEAP blocks are max-aligned. */
 static void assertBoundDataAligned(const rematWireTable_t *t) {
     for (uint16_t w = 1; w < t->numWires; w++) {
@@ -1345,7 +1344,7 @@ static size_t heldInsideTheCall(const rematScheduler_t *s) {
 #endif
 }
 
-/* One call with every §12.2 item 1 assert, plus: every bound wire aligned,
+/* One call with every row-contract assert, plus: every bound wire aligned,
  * exactly the plan's live wires bound, and the row's reserved bytes exactly what it must hold after
  * every next and every done, peaking at the plan's peak on HEAP (0 on ARENA). */
 static void walkWithTheContractChecks(arenaFixture_t *f, rematScheduler_t *s) {
@@ -1391,7 +1390,7 @@ static void walkWithTheContractChecks(arenaFixture_t *f, rematScheduler_t *s) {
 /* Two calls: ARENA reuses its resident bytes without zeroing, HEAP reserves
  * fresh blocks (VERIFY poisons both at every bind on the test presets). While
  * the global stream exists (PR1-PR5c), a row neither draws from nor reseeds
- * it (R4); the conv factories draw their initial weights, so the pin starts
+ * it; the conv factories draw their initial weights, so the pin starts
  * after the model is built. */
 static void assertRowContract(rowInit_t init, void (*build)(arenaFixture_t *),
                               const rematPlanSpec_t *spec) {
@@ -1498,7 +1497,7 @@ void testReportObservedPeakEqualsThePlannedPeak(void) {
     }
 }
 
-/* ---- ASan poisoning of the arena (spec §5.5, §12.2 item 6; asan preset only) ---- */
+/* ---- ASan poisoning of the arena (asan preset only) ---- */
 
 #ifdef ODT_TEST_ASAN
 static void readTheArenaBeforeAnyRangeOpens(rematScheduler_t *s) {
@@ -1518,7 +1517,7 @@ void testArenaIsPoisonedUntilARangeOpens(void) {
 
 /* next() unpoisons exactly bytes(w). F1's ACT 1 is 5 BFP bytes at an 8-aligned
  * offset, so bytes 5..7 share a granule with the payload and must stay
- * poisoned: the granule-8 hypothesis (spec §5.5, §15), pinned. The marker is
+ * poisoned: the granule-8 hypothesis, pinned. The marker is
  * flushed before the pad read because the death callback's _exit discards
  * buffered stdout. */
 static void readThePadOfABoundWire(arenaFixture_t *f, rematScheduler_t *s) {
@@ -1542,7 +1541,7 @@ void testArenaPadStaysPoisonedWhileBound(void) {
     freeFixture(&f, &s);
 }
 
-/* §12.2 item 6. F1 LIVENESS: ACT 2 lives [1, 3]; a pointer saved while it was
+/* F1 LIVENESS: ACT 2 lives [1, 3]; a pointer saved while it was
  * bound must trip ASan once done() of step 3 released it. */
 static void readAWireAfterItsRelease(arenaFixture_t *f, rematScheduler_t *s) {
     odtInstallAsanDeathExit();
@@ -1573,7 +1572,7 @@ void testArenaReadAfterReleaseTripsAsan(void) {
 }
 #endif
 
-/* ---- the HEAP row: init and report (spec §5.6, §5.1) ---- */
+/* ---- the HEAP row: init and report ---- */
 
 static rematScheduler_t initHeap(arenaFixture_t *f, const rematPlanSpec_t *spec) {
     rematScheduler_t s;
@@ -1607,9 +1606,9 @@ void testHeapInitReservesOnlyTheTableAndThePlan(void) {
 }
 #endif
 
-/* Spec §5.1: on HEAP placed == planned and the arena fields are 0. HEAP keeps
+/* On HEAP placed == planned and the arena fields are 0. HEAP keeps
  * no resident data block, so a successful init has nothing left to reserve:
- * dataReserved == planned (plan Assumption 4). REMAT_HEAP != 0 makes the type
+ * dataReserved == planned. REMAT_HEAP != 0 makes the type
  * echo observable for the first time. */
 static void assertHeapReport(const rematPlanSpec_t *spec, rematPlanPolicy_t policy,
                              size_t peakLiveBytes) {
@@ -1643,7 +1642,7 @@ static void heapInitExpectingAnExit(layer_t **model, const tensor_t *x) {
     (void)rematHeapInit(&s, model, 1, defaultLossConfig(MSE), x, NULL);
 }
 
-/* Spec §3.8: a borrowed [1, SIZE_MAX/4 + 2] FLOAT32 input (4 * N wraps to 4)
+/* A borrowed [1, SIZE_MAX/4 + 2] FLOAT32 input (4 * N wraps to 4)
  * exits at rematHeapInit too, naming the wire. */
 void testHeapInitExitsOnAByteCountOverflow(void) {
     layer_t *model[1] = {makeRelu(&g_floatQ)};
@@ -1654,7 +1653,7 @@ void testHeapInitExitsOnAByteCountOverflow(void) {
     freeModel(model, 1);
 }
 
-/* ---- the HEAP row's entry points (spec §5.6) ---- */
+/* ---- the HEAP row's entry points ---- */
 
 void testHeapWalkHandsOutThePlanStepsAndEndsWithNothingBound(void) {
     arenaFixture_t f;
@@ -1746,7 +1745,7 @@ static void heapFirstNextOnAHugeWire(arenaFixture_t *f, rematScheduler_t *s) {
     (void)rematNext(s, &st);
 }
 
-/* R8: the row owns resource exits. ReLU over a borrowed [1, 2^60] FLOAT32
+/* The row owns resource exits. ReLU over a borrowed [1, 2^60] FLOAT32
  * input under MSE (the did-not-run fixture): HEAP init reserves only the
  * table and plan, and FORWARD 0's 2^62-byte ACT 1 cannot be reserved on any
  * 64-bit host. Skipped under ASan, which aborts on oversized requests; macOS
@@ -1766,7 +1765,7 @@ void testHeapNextExitsNamingTheStepAndTheWireWhenAReservationFails(void) {
 }
 #endif
 
-/* ---- the const vtable and the dispatch (spec §5.1, §5.3; D24) ---- */
+/* ---- the const vtable and the dispatch ---- */
 
 void testEachInitInstallsItsRowsFunctionTable(void) {
     arenaFixture_t f;
@@ -1782,7 +1781,7 @@ void testEachInitInstallsItsRowsFunctionTable(void) {
     freeModel(f.model, f.n);
 }
 
-/* Every slot is mandatory for every row (spec §5.1). */
+/* Every slot is mandatory for every row. */
 void testEveryRowFillsEverySlot(void) {
     for (size_t row = REMAT_ARENA; row <= REMAT_HEAP; row++) {
         const rematSchedulerFunctions_t *fns = &rematSchedulerFunctions[row];
@@ -1824,7 +1823,7 @@ void testTheDispatchWalksEitherRow(void) {
     assertTheDispatchWalks(initHeap);
 }
 
-/* D24: a decorator row on the caller's own instance. The counters are
+/* A decorator row on the caller's own instance. The counters are
  * test-local state; the table itself is const. */
 static size_t g_decoratedCalls[5];
 
@@ -1869,7 +1868,7 @@ void testTheDispatchCallsThroughTheInstancesFunctionTable(void) {
     TEST_ASSERT_EQUAL_size_t(5, g_decoratedCalls[2]);
     TEST_ASSERT_EQUAL_size_t(1, g_decoratedCalls[3]);
     rematSchedulerDeinit(&s);
-    TEST_ASSERT_EQUAL_size_t(1, g_decoratedCalls[4]); /* C4: the row's deinit via fns */
+    TEST_ASSERT_EQUAL_size_t(1, g_decoratedCalls[4]); /* the row's deinit via fns */
     freeModel(f.model, f.n);
 }
 
@@ -1886,7 +1885,7 @@ void testBeginExitsOnASchedulerThatWasNeverInitialised(void) {
     freeModel(f.model, f.n);
 }
 
-/* RF1: the state rematHeapInit leaves when its plan block fails (fns and
+/* The state rematHeapInit leaves when its plan block fails (fns and
  * table set, plan NULL); a caller that ignored the false must not enter a call. */
 static void beginOnAHeapWhosePlanFailed(arenaFixture_t *f, rematScheduler_t *s) {
     rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
@@ -1912,7 +1911,7 @@ static void beginTwice(arenaFixture_t *f, rematScheduler_t *s) {
     rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
 }
 
-/* C2: the table bind resets liveBytes and bindGen but leaves ->data alone, so
+/* The table bind resets liveBytes and bindGen but leaves ->data alone, so
  * a second begin on an unfinished call must not reach it. */
 void testBeginExitsWhenTheCallIsReEntered(void) {
     arenaFixture_t f;
@@ -1969,7 +1968,7 @@ static void endTwice(arenaFixture_t *f, rematScheduler_t *s) {
     rematEnd(s);
 }
 
-/* C2: a second end would unbind and clear inCall twice; it must be named. */
+/* A second end would unbind and clear inCall twice; it must be named. */
 void testEndExitsOutsideACall(void) {
     arenaFixture_t f;
     buildF1Model(&f);
@@ -1986,7 +1985,7 @@ static void deinitInsideACall(arenaFixture_t *f, rematScheduler_t *s) {
 }
 
 /* HEAP holds a block for every open range mid-call; a deinit there would free
- * the table under bound wires and leak those blocks (plan Assumption 9). */
+ * the table under bound wires and leak those blocks. */
 void testDeinitExitsInsideACall(void) {
     arenaFixture_t f;
     buildF1Model(&f);
@@ -1996,7 +1995,7 @@ void testDeinitExitsInsideACall(void) {
     freeFixture(&f, &s);
 }
 
-/* ---- the call protocol, owned by the dispatch on every row (spec §5.4; C3) ---- */
+/* ---- the call protocol, owned by the dispatch on every row ---- */
 
 /* Each misuse on F1 (STORE_ALL) under both rows; the message names the row. */
 static void assertMisuseExitsOnBothRows(void (*misuse)(arenaFixture_t *, rematScheduler_t *),
@@ -2019,7 +2018,7 @@ void testDoneExitsOnAStepNextDidNotHandOut(void) {
                                 "(kind 0, layer 0), done() got (kind 3, layer 0)");
 }
 
-/* RF2: step 0 opens ACT 1; a done() without its next() would leave it
+/* Step 0 opens ACT 1; a done() without its next() would leave it
  * unbound and stall the open cursor for the rest of the call. */
 void testDoneExitsBeforeNextHandedTheStepOut(void) {
     assertMisuseExitsOnBothRows(doneBeforeNext, "rematDone for (kind 0, layer 0) with no step "
@@ -2039,14 +2038,14 @@ void testNextExitsWhileTheHandedOutStepIsNotDone(void) {
                                            "out");
 }
 
-/* RF1: one done() too many must not reach the row, whose walk would index
+/* One done() too many must not reach the row, whose walk would index
  * steps[numSteps]. */
 void testDoneExitsAfterTheStreamCompleted(void) {
     assertMisuseExitsOnBothRows(doneAfterTheStreamCompleted,
                                 "rematDone for (kind 3, layer 1) with no step handed out");
 }
 
-/* ---- HEAP's right-boundary ASan redzones (spec §5.6, §12.2 item 6; asan preset only) ---- */
+/* ---- HEAP's right-boundary ASan redzones (asan preset only) ---- */
 
 #ifdef ODT_TEST_ASAN
 /* One block of exactly bytes(w) per range: F1's ACT 1 is 5 BFP bytes, so its

@@ -57,7 +57,7 @@ static void deserializeKernel(kernel_t *kernel, FILE *f);
  *  (numGroups==1 <=> groupSize==0) is checked on the file's raw values
  *  first and is untouched by this relax.
  *
- *  Task-5 review fix (Critical): the file's numGroups is untrusted wire
+ *  The file's numGroups is untrusted wire
  *  input read directly into an allocation size (fileNumGroups *
  *  sizeof(float)) BEFORE any of the above -- SERIAL_MAX_QCONFIG_GROUPS (see
  *  the .c file) rejects it outright before the realloc runs, and whenever
@@ -75,7 +75,7 @@ static void deserializeKernel(kernel_t *kernel, FILE *f);
  *  live tensor backs q (group-quant PR2's carrier gate keeps those
  *  per-tensor anyway, so skipping the divisibility validate there costs
  *  nothing). Every other caller — including skipSerializedTensor's grad-skip
- *  path (Task-5 review fix: it now threads the real element count it just
+ *  path (it threads the real element count it just
  *  parsed off the wire, not a hardcoded 0) — passes its true count and gets
  *  the full validate.
  */
@@ -98,7 +98,7 @@ static void deserializeSparsity();
  *  path a live tensor's qConfig would take — a stack-backed array there would
  *  make that free() undefined behavior. Freed unconditionally after the call
  *  (see the .c file). Also threads the record's OWN element count (computed
- *  from the dims it just read, Task-5 review fix) into deserializeQConfig
+ *  from the dims it just read) into deserializeQConfig
  *  instead of a hardcoded 0, so a grouped record whose numGroups*groupSize
  *  does not divide its own element count fails fast on this path too, not
  *  just when a live tensor backs the config. Requires a seekable stream

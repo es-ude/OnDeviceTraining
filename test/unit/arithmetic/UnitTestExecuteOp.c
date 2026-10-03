@@ -488,12 +488,10 @@ void testAccFixedSymIntoSymRescalesIntoExistingScale(void) {
  * the OUT_ACC_FIXED_SCALE happy path: a fresh (post-initTensor all-zero)
  * SYM@8 target derives its grid from the first increment, then a second
  * accumulate carries that grid verbatim (fit-preserving, packed-grad D1/D2). One of
- * exactly two sanctioned contract-flip test edits in this PR (spec §4.1/§9;
- * the other is UnitTestSgd's admission flip — the PR2 ASYM-zero test's
- * config-reset extension is additive, not a flip). Parity oracle: a twin
- * target driven directly through
- * accumulateFloatIntoSymTensorFixedGrid must end up bit-identical to the
- * executeOp-driven target. inc2 deliberately SHRINKS the element that hit the
+ * exactly two sanctioned contract-flip test edits in this PR (the other is UnitTestSgd's admission
+ * flip — the PR2 ASYM-zero test's config-reset extension is additive, not a flip). Parity oracle: a
+ * twin target driven directly through accumulateFloatIntoSymTensorFixedGrid must end up
+ * bit-identical to the executeOp-driven target. inc2 deliberately SHRINKS the element that hit the
  * grid boundary on call 1 (index 0, derived to exactly +127) while nudging
  * the others -- carrying the grid keeps scale unchanged, but a mutant that
  * swaps in the DYNAMIC_RESCALE primitive for FIXED_SCALE would re-derive from
@@ -551,7 +549,7 @@ void testAccFixedIntoPackedSymDerivesThenCarriesGrid(void) {
     TEST_ASSERT_EQUAL_FLOAT(scaleAfterCall1, gotScale); /* carried, not re-derived */
 }
 
-/* The float-bridge closure (spec §4.1): a SYM_INT32 intermediate must reach
+/* The float-bridge closure: a SYM_INT32 intermediate must reach
  * the SAME packed-SYM result as a value-identical FLOAT32 intermediate, for
  * BOTH FIXED_SCALE (tested here) since the epilogue dequantizes either
  * representation before calling the primitive. Fixture chosen so the
@@ -714,7 +712,7 @@ void testAccDynamicSymPackedAcceptsSymInt32IntermediateBitIdenticalToFloatBridge
 /* ASYM DYNAMIC_RESCALE happy path (packed-grad D4: the only supported ASYM accumulate
  * mode) must match accumulateFloatIntoAsymTensorRescale exactly (fresh
  * affine grid every store). Fixture matches Task 2's own ASYM-rescale
- * fixture (recon-pack precedent): ASYM@5 codes {12,16,20,24} @
+ * fixture: ASYM@5 codes {12,16,20,24} @
  * scale=0.25/zeroPoint=+4 (code-domain, PR4) dequant to {2,3,4,5}. */
 void testAccDynamicAsymPackedMatchesRescalePrimitive(void) {
     size_t n = 4;
@@ -838,7 +836,7 @@ void testAccIntoTooWideSymTargetAborts(void) {
 }
 
 /* The same ODT_SYM_GRAD_QMAXBITS(16) contract applies to packed SYM targets
- * (spec §4.1: "mirror of the existing SYM_INT32 guard"). qBits=17 packs and
+ * (the mirror of the existing SYM_INT32 guard). qBits=17 packs and
  * unpacks fine on its own (packChunkGuarded allows up to 31) -- only the grad
  * contract rejects it. */
 void testAccIntoTooWidePackedSymTargetAborts(void) {
@@ -1787,7 +1785,7 @@ void testExecuteOpRejectsGroupedSymOperandByDefault(void) {
     });
 }
 
-/* Final-review Fix 2: a grouped SYM input at a position OTHER than the one
+/* A grouped SYM input at a position OTHER than the one
  * declared must still fail-fast — an opt-in for SOME position must not be
  * read as a blanket opt-in for grouped operands anywhere in the operand
  * list. groupedSymOperandPos=2 declares inputs[1] as the only allowed
@@ -1872,7 +1870,7 @@ void testExecuteOpUnpacksGroupedSymWhenAllowed(void) {
     TEST_ASSERT_EQUAL_UINT8(6, g_capturedGroupedQMaxBits);
 }
 
-/* Final-review Fix 3(a): the grouped-operand deny gate must apply under
+/* The grouped-operand deny gate must apply under
  * ARITH_FLOAT32 too, not just ARITH_SYM_INT32 — before this fix, a grouped
  * SYM operand reaching an ARITH_FLOAT32 op would silently succeed (the
  * FLOAT32 prologue's convertTensor call dispatches to the group-aware
@@ -2223,7 +2221,7 @@ static void captureTwoBfpOperandsKernel(tensor_t **operands, size_t nOperands, t
     }
 }
 
-/* Grouped stage template under real staging (review fix): TWO FLOAT32-stored
+/* Grouped stage template under real staging: TWO FLOAT32-stored
  * operands in ONE call — operand 0 under a GROUPED {2,4} template, operand 1
  * under {1,0} — so the stage-exponent VLA sizing (sum of the templates'
  * numGroups) and the per-operand slice advance are both load-bearing.

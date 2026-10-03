@@ -1423,7 +1423,7 @@ void testBfpPinnedFloat32BackwardTrainingLossDecreases(void) {
                              "(loss must decrease)");
 }
 
-/* BFP epic PR7 (sweep arm C, spec §3.4): the fq arm keeps BFP WIRES and pins
+/* BFP epic PR7 (sweep arm C): the fq arm keeps BFP WIRES and pins
  * the GEMM math to FLOAT32 -- BFP-stored weights, a FLOAT32 backward, and a
  * BFP dx wire that backward must PACK through the funnel's OUT_WRITE. No
  * earlier test covers that pairing (the pinned fixture swaps propLossQ to
@@ -1479,7 +1479,7 @@ void testBfpDxWireThroughPinnedFloat32BackwardTrains(void) {
     buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false, /*weightGradStorage=*/NULL);
 
     /* Arm-C shape on layer 1: BFP-stored weights + bias (per-tensor {1,0},
-     * the §5.2 two-step recipe), all four math slots pinned ARITH_FLOAT32, a
+     * the arithmetic-bfp.md §5.2 two-step recipe), all four math slots pinned ARITH_FLOAT32, a
      * BFP dx wire. Layer 0 stays fully native and consumes that dx. */
     linearConfig_t *cfg1 = f.linear1->config->linear;
     quantization_t *w1Q = quantizationInitBfp(8, 8, SR_HALF_AWAY);
@@ -1551,10 +1551,9 @@ void testBfpDxWireThroughPinnedFloat32BackwardTrains(void) {
  *  zeroes every code -- the final exponent assertion below pins the
  *  hygiene contract itself.
  *
- *  RED before Steps 1-4 land: gradInit's then-unconditional BFP reject
- *  (TensorApi.c) kills the whole binary the instant this fixture builds
- *  layer 0's weight grad tensor -- written first in this task per the
- *  brief's Step 5 ordering note, this is that RED. */
+ *  Written test-first: before BFP grad storage existed, gradInit's
+ *  then-unconditional BFP reject (TensorApi.c) killed the whole binary the
+ *  instant this fixture built layer 0's weight grad tensor. */
 void testBfpGradStorageTrainingAccumulatesAndSteps(void) {
     rngSetSeed(1717u);
     quantization_t *gradKnob = quantizationInitBfp(8, 8, HALF_AWAY);
@@ -2019,7 +2018,7 @@ static void capturePr4FlattenCarry(void *ctx, size_t layerIdx, layerType_t layer
  * template groupSize 2, which the allocators require (PR2-Decision 5); the last
  * two normalize to per-tensor {1, 0} (groupSize == wire elements). The PARAMS
  * use a per-tensor {1, 0} BFP config: the conv weight's reduction run is
- * ic*k = 3, and the §2 param rule demands groupSize divide it. */
+ * ic*k = 3, and the param rule demands groupSize divide it. */
 void testBfpUniformPoolActivationModelTrains(void) {
     rngSetSeed(4242u);
     quantization_t *bfpWireQ = quantizationInitBfpGrouped(8, 8, SR_HALF_AWAY, 2, 2);
@@ -2221,7 +2220,7 @@ void testBfpUniformPoolActivationModelTrains(void) {
  * -- every one divisible by the template groupSize 2, which the wire allocator
  * REQUIRES (PR2-Decision 5; a non-divisor aborts the process, so a green run is the
  * proof). The two 2-element wires normalize to per-tensor {1, 0} (groupSize ==
- * wire elements). The GEMM PARAMS use per-tensor {1, 0} BFP: the §2 param rule
+ * wire elements). The GEMM PARAMS use per-tensor {1, 0} BFP: the param rule
  * demands groupSize divide the reduction run (conv: Cin*K = 6, linear:
  * inFeatures = 4), and per-tensor satisfies it unconditionally. The NORM params
  * come straight from the Task 6 factories, which derive {2, 2} from the
@@ -2258,7 +2257,7 @@ static void capturePr5LayerNormWire(void *ctx, size_t layerIdx, layerType_t laye
 /* FLOAT32 parameter_t from explicit values (buildRampParam2D/3D's twin -- a
  * ramp gives every conv output channel the SAME cross-channel weight
  * difference, which makes the four conv channels near-degenerate on a
- * two-channel sign-flipped fixture). The §5.2 recipe then requantizes the
+ * two-channel sign-flipped fixture). The arithmetic-bfp.md §5.2 recipe then requantizes the
  * param tensor in place. */
 static parameter_t *buildFloatParam3D(size_t d0, size_t d1, size_t d2, const float *values) {
     tensor_t *param = buildFloatTensor3D(d0, d1, d2, values);
@@ -2302,7 +2301,7 @@ static void freeGroupNormLayerShellOnly(layer_t *layer) {
  *      BFP storage.
  *  Everything around them is PR2-PR4 machinery re-exercised in a topology
  *  those PRs never ran: conv1d/linear native BFP GEMMs over BFP params
- *  (FLOAT32-init + requantizeTensorInPlace, the §5.2 recipe -- the #270
+ *  (FLOAT32-init + requantizeTensorInPlace, the arithmetic-bfp.md §5.2 recipe -- the #270
  *  requireFloat32 gate keeps random-init factories FLOAT32-only), relu's
  *  packed-domain transparency, AdaptiveAvgPool1d's BFP forward/backward,
  *  Flatten's exponent carry, and softmax's NATIVE forward (P6-8: derived

@@ -9,7 +9,7 @@
 #include "LossFunction.h"
 #include "Tensor.h"
 
-/* The remat scheduler's public header (#4, spec §5.1): the step, policy, spec
+/* The remat scheduler's public header (#4): the step, policy, spec
  * and walk types the static plan shares, and the scheduler with its rows
  * (ARENA, HEAP), its const vtable and the rematBegin/Next/Done/End dispatch. */
 
@@ -25,7 +25,7 @@ typedef enum rematStepKind {
 /* One record, three roles: plan-table entry, the value a row's next() fills
  * in, and (PR6) the offline sequence record. No tensor pointers: the driver
  * resolves operands positionally. No explicit pad byte until a byte-image
- * consumer (#62 ir2c .rodata) needs one (spec §16.1 item 4d); uint16_t
+ * consumer (#62 ir2c .rodata) needs one; uint16_t
  * alignment keeps the implicit pad at one byte on every target. */
 typedef struct rematStep {
     uint8_t kind;   /* rematStepKind_t */
@@ -84,7 +84,7 @@ extern const rematSchedulerFunctions_t rematSchedulerFunctions[];
 struct rematScheduler {
     rematSchedulerType_t type;
     /* &rematSchedulerFunctions[type], set by the row's init. A test may point
-     * its own instance at a decorator table (D24); the driver validates a
+     * its own instance at a decorator table; the driver validates a
      * wrong table like a correct one. */
     const rematSchedulerFunctions_t *fns;
     rematWireTable_t *wires; /* shared buffer table: one reserveMemory block */
@@ -96,7 +96,7 @@ struct rematScheduler {
     bool handedOut;
     rematStep_t handed;
     union {
-        /* ARENA-private (R5). Two blocks (D55 as amended by Codex N3): offsets
+        /* ARENA-private (offsets never leave the row). Two blocks: offsets
          * first, placed into and verified, then the arena data block. */
         struct {
             uint8_t *base;          /* the resident arena data block */
@@ -113,7 +113,7 @@ struct rematScheduler {
  * or whose size arithmetic overflows, exits naming it. */
 bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss,
                     const tensor_t *inputLike, const rematPlanSpec_t *spec);
-/* The peer row (spec §5.6): table and plan only; one exactly-sized block per
+/* The peer row: table and plan only; one exactly-sized block per
  * range, reserved when the range opens and freed when it closes. */
 bool rematHeapInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss,
                    const tensor_t *inputLike, const rematPlanSpec_t *spec);
@@ -121,9 +121,9 @@ bool rematHeapInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t 
  * the table. Exits inside a call. */
 void rematSchedulerDeinit(rematScheduler_t *s);
 
-/* Feeds the harness keys (spec §14); a field is valid only under the flag
- * that declares it. The three flags imply one another in order (D55 as
- * amended by Codex N3); a did-not-run point records what its flags allow. */
+/* Feeds the harness keys; a field is valid only under the flag that
+ * declares it. The three flags imply one another in order; a did-not-run point records what its
+ * flags allow. */
 typedef struct rematReport {
     rematSchedulerType_t type;
     rematPlanPolicy_t policy;

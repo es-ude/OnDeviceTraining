@@ -13,7 +13,7 @@ see sym_gold.matmul_bfp_ref for the exact np.float32-mirrored emulation.
 Fixture geometry (2x6 @ 6x3 -> 2x3): `a` grouped numGroups=4/groupSize=3
 (m=6, e=8) so each reduction row crosses one a-group boundary at k=3 --
 DISJOINT from b's boundaries {2, 4} by construction, so a fold that only
-watches b's group id is observably wrong (review finding 1: with the earlier
+watches b's group id is observably wrong (with an earlier
 groupSize=4 every a-boundary coincided with a b-boundary and the either-
 operand fold clause was untested); `b` grouped numGroups=9/groupSize=2
 (m=4, e=8) in the GEMM-weight storage order [outCols=3, reduceLen=6] behind
@@ -49,8 +49,8 @@ chosen so matmul_bfp_ref's self-check (iv) holds in BOTH orientations: with a
 strided b walk, an a-only group boundary (a's group changes while b's does
 NOT) requires the b operand's groupSize to EXCEED the b stride (inF), so W
 uses groupSize 8 > 4 and x uses groupSize 6 > 4. Smaller group sizes make
-every a-boundary coincide with a b-boundary, which is exactly the review-
-finding-1 vacuity documented for the forward fixture above: the either-
+every a-boundary coincide with a b-boundary, which is exactly the
+vacuity documented for the forward fixture above: the either-
 operand fold clause (and the drop-a-clause mutant) would be unobservable.
 batch is 3 because the weightGrad reduction (K = batch) needs one step where
 x stays inside a group (Lx > inF) and another where it crosses -- impossible
@@ -134,7 +134,7 @@ def main() -> int:
         "with-bias and no-bias expectations coincide somewhere -- bias seed "
         "would be unobservable there")
 
-    # Grouped-bias fixture (PR2 self-review finding 3): the SAME bias values
+    # Grouped-bias fixture: the SAME bias values
     # stored grouped {numGroups=3, groupSize=1} -- each output column its own
     # exponent. The values are exact under their per-value grids too, so the
     # expected output is BIT-IDENTICAL to the per-tensor-bias gold (asserted);

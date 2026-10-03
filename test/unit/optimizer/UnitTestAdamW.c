@@ -882,7 +882,7 @@ void testAdamWCreateAllFrozenModelExits(void) {
     });
 }
 
-/* Final-review Fix 3(c): AdamW twin of the SGD momentum-carrier-gate death
+/* AdamW twin of the SGD momentum-carrier-gate death
  * test (UnitTestSgd.c's testSgdCreateGroupedSymMomentumQuantExits) --
  * momentStateInit (AdamWApi.c) builds BOTH moment buffers via
  * getQLike(momentQuant) with no carrier gate of its own, mirroring SgdApi's

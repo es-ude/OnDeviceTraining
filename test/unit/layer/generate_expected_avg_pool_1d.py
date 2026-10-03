@@ -6,11 +6,10 @@ fixture: forward output, propLoss (dL/dx). For most fixtures
 lossGrad = torch.ones_like(y); withStrideAndDilation uses
 torch.randn_like(y) (and emits the lossGrad as a gold array) so that
 positional mutations on the stride/dilation backward path are
-non-vacuous (per codebase_uniform_lossgrad_mutation_vacuity).
+non-vacuous (a uniform lossGrad would hide them).
 
-Divisor is `count_include_pad=True` (PyTorch default — A1 semantics
-per spec §6.4 / §11). The hand-derived self-check uses kernel_size
-as divisor for ALL output positions, including SAME edges where
+Divisor is `count_include_pad=True` (PyTorch default). The hand-derived
+self-check uses kernel_size as divisor for ALL output positions, including SAME edges where
 validCount < kernel_size — same convention as the C impl.
 
 Run via `uv run` (CMake wires this automatically).

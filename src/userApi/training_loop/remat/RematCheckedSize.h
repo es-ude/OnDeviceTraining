@@ -5,11 +5,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Codex N1 / D60 (spec §3.8): every size product and sum the remat libraries
+/* Every size product and sum the remat libraries
  * compute goes through these, and the caller exits by name on false. Private
  * to src/userApi/training_loop/remat/ (PR1b's RematPlace.h reuses it). The
  * GNU builtins are the primary path (gcc >= 5, clang, arm-none-eabi-gcc);
- * the SIZE_MAX tests are the spec's portable fallback for other compilers. */
+ * the SIZE_MAX tests are the portable fallback for other compilers. */
 #if defined(__has_builtin)
 #if __has_builtin(__builtin_mul_overflow) && __has_builtin(__builtin_add_overflow)
 #define REMAT_HAVE_OVERFLOW_BUILTINS 1

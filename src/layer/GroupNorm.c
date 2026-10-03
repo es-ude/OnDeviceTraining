@@ -55,7 +55,7 @@ void initGroupNormConfig(groupNormConfig_t *cfg, parameter_t *gamma, parameter_t
  * logical row-major, so element (b,c,t) sits at ((b*C)+c)*T + t. A mismatched
  * channel dim would read gamma/beta out of bounds in forward and WRITE the
  * grad tensors out of bounds in backward — silently. Non-identity order /
- * rank-4 is a documented follow-up (spec R4). */
+ * rank-4 is a follow-up, not supported yet. */
 static void groupNormValidateInputShape(groupNormConfig_t *cfg, tensor_t *input) {
     shape_t *s = input->shape;
     if (s->numberOfDimensions != 3) {
@@ -989,7 +989,7 @@ static void groupNormCalcPropLossBfp(const groupNormConfig_t *cfg, tensor_t *for
     groupNormBfpRequireCount(gamma, cfg->numChannels, "GroupNorm dx BFP gamma");
     validateBfpQConfigShape(gQC, cfg->numChannels); /* count gate alone cannot catch a malformed
                                                      * grid; bfpGroupOf(gQC, c) would index
-                                                     * exponents[] OOB (Task 3 review finding) */
+                                                     * exponents[] OOB */
     /* The walk below is forwardInput's ((b, grp) base + j), but loss is indexed
      * at those offsets: a shorter loss reads outside its scratch. The dgamma
      * twin's gate covers this incidentally when unfrozen -- frozen skips

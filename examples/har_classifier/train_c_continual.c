@@ -416,7 +416,7 @@ int main(void) {
     size_t bytesAfterDomain0 = 0;
     size_t bytesFinal = 0;
 
-    /* Protocol (0-indexed, spec section 9). Domain 0: pretrain. */
+    /* Protocol (domains 0-indexed). Domain 0: pretrain. */
     g_curTrain = &trainSets[0];
     dataLoader_t *loader0 =
         dataLoaderInit(getTrainSample, getTrainSize, BATCH, NULL, NULL,

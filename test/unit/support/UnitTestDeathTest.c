@@ -23,7 +23,7 @@ void tearDown(void) {}
  * Distinct from 0 (the body passed) and 1 (the framework's fail-fast code). */
 #define DEATH_TEST_UNITY_FAILED_EXIT 3
 
-/* The framework's fail-fast idiom in the remat violation format (spec §7.7):
+/* The framework's fail-fast idiom in the remat violation format:
  * a PRINT_ERROR banner on stdout, then exit(). */
 static void violate(const char *rule, int code) {
     PRINT_ERROR("remat[ARENA]: step #3 BACKWARD(layer 1) violates '%s'", rule);

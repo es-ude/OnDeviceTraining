@@ -106,7 +106,7 @@ add_elastic_ai_unit_test(
 target_include_directories(UnitTestRematScheduler PRIVATE
         ${PROJECT_SOURCE_DIR}/src/userApi/training_loop/remat)
 
-# Remat (#4): the RematCheck library (spec §7), driven over real schedulers on
+# Remat (#4): the RematCheck library, driven over real schedulers on
 # both rows. RematScheduler and RematPlan are listed because the tests build
 # schedulers and read the table (RematPlan.h).
 add_elastic_ai_unit_test(

@@ -1100,7 +1100,7 @@ def conv1d_bfp_ref(x_codes, x_exp, x_qc, w_codes, w_exp, w_qc, bias_codes, bias_
       (iii) result differs from an all-per-tensor (exponents[0]) collapse;
       (iv) >= 1 output element whose tap window is CLIPPED (0 < valid_count
            < kernel_size -- pins the gap-robust per-element group lookup);
-      plus the disjoint-boundary pins (Task 3 review lesson, both directions):
+      plus the disjoint-boundary pins (both directions):
       >= 1 step where ONLY the input's group changes and >= 1 step where ONLY
       the weight's group changes -- a fixture whose boundaries always
       coincide cannot tell a one-operand fold condition from the correct
@@ -1194,7 +1194,7 @@ def conv1d_bfp_ref(x_codes, x_exp, x_qc, w_codes, w_exp, w_qc, bias_codes, bias_
         assert clipped_windows >= 1, (
             "conv1d_bfp_ref: no output element has a clipped tap window -- "
             "the gap-robust group lookup is unexercised")
-        # Disjoint-boundary pins (both directions, Task 3 review lesson).
+        # Disjoint-boundary pins (both directions).
         assert x_only_boundaries >= 1, (
             "conv1d_bfp_ref: every input-group boundary coincides with a "
             "weight-group boundary -- the either-operand fold clause is "
@@ -1368,7 +1368,7 @@ def convT1d_bfp_gather_ref(x_codes, x_exp, x_qc, w_codes, w_exp, w_qc,
         assert any(p != 0 and float(np.float32(p)) == float(p) for p in fold_partials), (
             "convT1d_bfp_gather_ref: no fold has a nonzero exactly-float-"
             "convertible partial -- fixture lost its exact-regime anchor")
-        # Disjoint-boundary pins (both directions, Task 3 review lesson).
+        # Disjoint-boundary pins (both directions).
         assert x_only_boundaries >= 1, (
             "convT1d_bfp_gather_ref: every input-group boundary coincides with "
             "a weight-group boundary -- the either-operand fold clause is "

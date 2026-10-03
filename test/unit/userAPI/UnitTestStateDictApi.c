@@ -58,7 +58,7 @@ void testModelLoadStateDictLoadsTwoLinearLayersSkippingRelu(void) {
 
 void testModelLoadStateDictCountMismatchIsCoveredByDesign(void) {
     /* Count-mismatch fires PRINT_ERROR + exit; Unity cannot catch.
-     * Documented in spec section 12. This test exists as a marker. */
+     * This test exists as a marker. */
     TEST_IGNORE_MESSAGE("Count mismatch path fires exit() — covered by design contract.");
 }
 

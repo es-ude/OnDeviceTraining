@@ -22,7 +22,8 @@ static const char *arenaWireKind(uint8_t kind) {
     return kind == REMAT_WIRE_ACT ? "ACT" : "GRAD";
 }
 
-/* Every size sum of the placement names the wire it was computing (D60). */
+/* Every size sum of the placement is overflow-checked and names the wire it
+ * was computing. */
 static size_t arenaAdd(const rematWireTable_t *t, uint16_t w, size_t a, size_t b,
                        const char *quantity) {
     size_t out;
@@ -39,10 +40,10 @@ size_t arenaPlaced(const rematWireTable_t *t, uint16_t w) {
            ~(size_t)(ODT_WIRE_ALIGN - 1u);
 }
 
-/* D60 before any row reservation: every placed(w) and their sum over all
+/* Overflow-checked before any row reservation: every placed(w) and their sum over all
  * ranges. An offset is 0 or the end of a chain of distinct co-live ranges, so
  * this total bounds every offset + placed the placement computes: after this
- * pass its own checked sums cannot fire (plan Assumption 8). */
+ * pass its own checked sums cannot fire. */
 static void arenaRequirePlaceableSizes(const rematWireTable_t *t, const rematProgram_t *p) {
     size_t total = 0;
     for (size_t r = 0; r < p->numRanges; r++) {
@@ -51,7 +52,7 @@ static void arenaRequirePlaceableSizes(const rematWireTable_t *t, const rematPro
     }
 }
 
-/* Inclusive intervals (spec §4.2): ranges that meet at one step are co-live. */
+/* Inclusive intervals: ranges that meet at one step are co-live. */
 static bool arenaCoLive(const rematRange_t *a, const rematRange_t *b) {
     return a->begin <= b->end && b->begin <= a->end;
 }
@@ -121,7 +122,7 @@ bool arenaPlaceFirstFitDecreasing(const rematWireTable_t *t, const rematProgram_
          * is always 0 or the end of a co-live placed range, and it moves past a
          * co-live range only when that range overlaps [off, off + size); the
          * first co-live range starting at or above off + size therefore closes
-         * the lowest feasible candidate of the spec's rule (plan Assumption 7).
+         * the lowest feasible candidate of the first-fit rule.
          * O(R) per range, O(R^2) overall. */
         size_t off = 0;
         for (size_t i = 0; i < numPlaced; i++) {
@@ -203,7 +204,7 @@ bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t
     if (!rematWireTableInit(&s->wires, model, n, loss, inputLike)) {
         return false;
     }
-    /* Early bound, before the plan block exists (Leo, Codex PR1b-plan triage):
+    /* Early bound, before the plan block exists:
      * in PR1 every slab wire gets exactly one range, so the plan would hold
      * numWires - 1 ranges. The post-build check below stays authoritative. */
     if (s->wires->numWires - 1u > ODT_REMAT_MAX_RANGES) {
@@ -226,7 +227,7 @@ bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t
         exit(1); /* a model/plan fact, not an OOM: the table-init idiom */
     }
     arenaRequirePlaceableSizes(s->wires, p);
-    /* D55 as amended by Codex N3: the offsets table is its own small block,
+    /* The offsets table is its own small block,
      * placed into and verified before the arena data block exists, so a
      * failed data reservation still reports every analytic field. The limit
      * above bounds the product. numRanges >= 1: ACT n always has a range, so

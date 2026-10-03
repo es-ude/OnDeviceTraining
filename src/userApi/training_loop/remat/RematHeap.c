@@ -36,7 +36,7 @@ bool rematHeapNext(rematScheduler_t *s, rematStep_t *st) {
         size_t bytes = rematWireBytes(s->wires, w);
         uint8_t *b = reserveMemory(bytes); /* exact bytes: an exact right-boundary ASan redzone */
         if (b == NULL) {
-            /* R8: a resource failure mid-call is the row's exit; only init is
+            /* A resource failure mid-call is the row's exit; only init is
              * recoverable. */
             const rematWire_t *rec = &s->wires->wires[w];
             PRINT_ERROR("remat[heap]: reserveMemory(%zu) failed at step #%zu for wire %s %u", bytes,

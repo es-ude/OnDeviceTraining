@@ -65,13 +65,13 @@ BUDGETS_B: dict[str, dict[str, int | None]] = {
         "float": 27768 + SLACK_B,
         "sym": 51968 + SLACK_B,
         "finetune": 4016 + SLACK_B,
-        "bfp": None,  # bfp: UNCALIBRATED BY DESIGN (spec §8: report-only until a calibration PR)
+        "bfp": None,  # bfp: UNCALIBRATED BY DESIGN (report-only until a calibration PR)
     },
     "linux": {
         "float": None,
         "sym": None,
         "finetune": None,
-        "bfp": None,  # bfp: UNCALIBRATED BY DESIGN (spec §8: report-only until a calibration PR)
+        "bfp": None,  # bfp: UNCALIBRATED BY DESIGN (report-only until a calibration PR)
     },
 }
 

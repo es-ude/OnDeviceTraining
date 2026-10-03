@@ -6,8 +6,8 @@
  *
  * Every operand of a loss must have the MODEL OUTPUT's exact shape (#153),
  * and the check sits at each PUBLIC dispatcher, above the dtype switch,
- * because every arm needs it (PR4 adversarial gate F1/F2, hoisted by delta
- * D0). Fake-quant arms size each VLA scratch from the output's count while
+ * because every arm needs it (hoisted there from the fake-quant helpers in
+ * BFP epic PR4). Fake-quant arms size each VLA scratch from the output's count while
  * each convertTensor walks its OWN operand's count, so a longer operand
  * overruns the scratch; FLOAT32 arms index every operand at the output's
  * count, so a shorter one is read -- and for the backward's grad wire,

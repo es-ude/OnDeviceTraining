@@ -35,8 +35,7 @@ float mseLossForwardFloat(tensor_t *output, tensor_t *label, reduction_t reducti
  * conversionMatrix[BFP][FLOAT32] (chunked exact dequant, mantissa * 2^E);
  * the backward's write side hits conversionMatrix[FLOAT32][BFP], which
  * derives FRESH per-group exponents — the BFP analog of the SYM arm's fresh
- * absmax scale. NATIVE BFP losses stay an optional stretch (spec §5 MSE/CE
- * row, §9): PR6 files the follow-up issue. */
+ * absmax scale. NATIVE BFP losses stay an optional stretch (BFP D4). */
 static float mseLossForwardFakeQuant(tensor_t *output, tensor_t *label, reduction_t reduction) {
     size_t size = calcNumberOfElementsByTensor(output);
 

@@ -97,7 +97,7 @@ qShapeView_t viewQShape(const quantization_t *q);
 bool paramGateCheck(const tensor_t *tensor, const paramGateExpect_t *expect, char *msg,
                     size_t msgLen);
 
-/* Byte accounting for the sweep's memory report (spec §7.1). Payload mirrors
+/* Byte accounting for the sweep's memory report. Payload mirrors
  * calcNumberOfBytesForData (packed widths round up per TENSOR); metadata is
  * the per-group side table the qconfig carries: BFP one u8 exponent, SYM one
  * float scale, ASYM scale + u16 zero-point. FLOAT32 carries neither. Any
@@ -105,7 +105,7 @@ bool paramGateCheck(const tensor_t *tensor, const paramGateExpect_t *expect, cha
 size_t packedPayloadBytes(qtype_t type, uint8_t bits, size_t N);
 size_t packedMetadataBytes(qtype_t type, size_t numGroups);
 
-/* The BFP sweep's knob set (spec §3.1), parsed from the environment by
+/* The BFP sweep's knob set, parsed from the environment by
  * bfpSweepConfigFromEnv so the trainer's CONFIG line, gates and log all read
  * ONE struct. Returns NULL on success; otherwise a static message naming the
  * offending knob and its legal values (the trainer prints it and exits 1).
@@ -142,7 +142,7 @@ typedef struct bfpSweepConfig {
 const char *bfpSweepConfigFromEnv(bfpSweepConfig_t *out);
 
 /* Non-exiting twins of bfpValidateBlockHeadroom / bfpValidateSumHeadroom
- * (BfpKernelSupport.h) for the trainer's preflight (spec §3.6 gate 2): same
+ * (BfpKernelSupport.h) for the trainer's headroom preflight gate: same
  * segment rule, same limits, evaluated before any data is loaded so a doomed
  * config dies in milliseconds instead of after dataset setup. run == 0 means
  * a per-tensor operand (the full reduction length), exactly as the guards. */

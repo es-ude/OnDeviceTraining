@@ -74,7 +74,7 @@
  * elements + bias 64 elements, Linear1 weight 64*10=640 elements + bias 10
  * elements, all packed SYM@GRAD_QBITS — calcBytesPerTensor ceils
  * qBits*N/8 per tensor => 50176 + 64 + 640 + 10 = 50890 bytes at qBits=8
- * (vs 203,560 B at FLOAT32/SYM_INT32 pre-PR3 — recon-pack §5). */
+ * (vs 203,560 B at FLOAT32/SYM_INT32 pre-PR3, 4 B/elem). */
 #define EXPECTED_GRAD_BYTES 50890
 
 static dataset_t g_trainDataset;

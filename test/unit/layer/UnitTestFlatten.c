@@ -361,7 +361,7 @@ static tensor_t *buildBfpWireWithCodes(size_t const *dims, size_t numDims, uint8
     return t;
 }
 
-/* BFP epic PR4 (R-P5, spec §5 Flatten row): a reshape moves the packed payload
+/* BFP epic PR4 (R-P5): a reshape moves the packed payload
  * byte-for-byte AND the per-group exponent VALUES. Input [1, 2, 4] -> output
  * [1, 8]: same element count, same storage order, so the {2 groups x 4} grid
  * is unchanged. Two different exponents pin the carry. */

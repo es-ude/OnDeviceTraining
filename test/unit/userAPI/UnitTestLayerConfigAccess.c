@@ -275,7 +275,7 @@ void testFlattenAccessorsAreNullAndDefaultArithmetic(void) {
     freeFlattenLayer(layer);
 }
 
-/* ---- #152 PR3b: FLOAT32-only gate for stacked training (spec §6.6) ---- */
+/* ---- #152 PR3b: FLOAT32-only gate for stacked training ---- */
 
 _Static_assert(_Generic(&layerIsFloat32Only, bool (*)(layer_t *): 1, default: 0),
                "layerIsFloat32Only must be bool (layer_t *layer) (#152)");
@@ -570,7 +570,7 @@ void testLayerNonFloat32FieldNamesEveryWireOnlyLayerField(void) {
 
 void testLayerIsFloat32OnlyRejectsBfpNotJustSym(void) {
     /* The gate is "== FLOAT32", not "!= SYM_INT32": BFP math and a BFP wire
-     * are rejected too (#152 D3). */
+     * are rejected too (#152). */
     quantization_t *q = quantizationInitFloat();
     quantization_t *bfpQ = quantizationInitBfp(8, 8, HALF_AWAY);
     layerQuant_t lq;
@@ -627,7 +627,7 @@ void testLayerIsFloat32OnlyAcceptsFrozenBiaslessAndPassthroughLayers(void) {
     TEST_ASSERT_TRUE(acceptedPassthrough);
 }
 
-/* #4 PR0 (remat spec §3.7): the read-set truth table. The rule reads only
+/* #4 PR0 (remat): the read-set truth table. The rule reads only
  * the type and, for the six param layers, `frozen`; each row is a
  * stack-built layer, and the eight param-free rows keep config == NULL. */
 static void assertReadsInput(bool expected, layerType_t type, layerConfig_t *config,
@@ -693,7 +693,7 @@ void testLayerBackwardReadsInputRejectsUnknownType(void) {
                              (void)layerBackwardReadsInput(&unknown));
 }
 
-/* #468 D6: stacked evaluation only runs forwards -- backward arithmetic,
+/* #468: stacked evaluation only runs forwards -- backward arithmetic,
  * the prop-loss wire and grad storage must not reject a layer. Slot order
  * matches GEMM_FIELDS / NORM_FIELDS / WIRE_FIELDS. */
 static const char *const GEMM_FORWARD_FIELDS[10] = {

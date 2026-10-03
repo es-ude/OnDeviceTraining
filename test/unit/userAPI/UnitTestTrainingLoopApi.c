@@ -2764,8 +2764,8 @@ static inferenceStats_t *probeInference(layer_t **model, size_t numberOfLayers, 
 }
 
 /* A natural [C=1, L=3] item and a natural [1, 2] label (like ECG's [1, 140]
- * target). The leading 1 is deliberate: spec 5.1 "no auto-detection of an
- * existing batch axis" -- a consumer that skips the wrap when dims[0] == 1
+ * target). The leading 1 is deliberate: nothing auto-detects an existing
+ * batch axis (data-shape.md) -- a consumer that skips the wrap when dims[0] == 1
  * hands the callback rank 2 instead of rank 3 and fails the asserts below. */
 static tensor_t *buildProbeItem(void) {
     return buildFloatTensor2D(1, 3, (float[]){1.f, 2.f, 3.f}, 3);

@@ -212,7 +212,7 @@ static void dropoutMaskScaleBfp(dropoutConfig_t *cfg, tensor_t *src, tensor_t *d
     /* pass 2: decode at the source grid, mask+scale, requantize at the fresh
      * one; clamp before the write (value-domain saturation, BFP D6).
      *
-     * PR4 adversarial gate (F0): the saturation clamp runs in the FLOAT domain
+     * PR4 adversarial gate: the saturation clamp runs in the FLOAT domain
      * FIRST, the same order scaleBfpTensorInPlace's pass 2 uses (this bridge's
      * skeleton). In the BFP D6 cap regime a destination group has NO headroom left
      * -- its exponent is pinned at maxStored -- so v / dstScale can exceed
@@ -317,7 +317,7 @@ void dropoutForward(layer_t *dropoutLayer, tensor_t *input, tensor_t *output) {
                         maskElements, inputElements);
             exit(1);
         }
-        bernoulliFillMask(cfg->mask, 1.0f - cfg->p); // §6.0.5: fill once before dtype apply
+        bernoulliFillMask(cfg->mask, 1.0f - cfg->p); // fill once before dtype apply
     }
     /* The first switch has already rejected everything but the three known
      * arms, so this default IS the BFP arm — no unreachable duplicate error. */

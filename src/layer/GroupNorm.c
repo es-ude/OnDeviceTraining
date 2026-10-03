@@ -86,6 +86,24 @@ static void groupNormValidateInputShape(groupNormConfig_t *cfg, tensor_t *input)
     }
 }
 
+/* #465: every kernel addresses output/loss/propLoss at the (validated,
+ * identity-order) input's flat offsets, so `t` must have the input's rank, dims
+ * and identity order -- otherwise an OOB write/read or silent mis-placement. */
+static void groupNormRequireInputShape(const tensor_t *input, const tensor_t *t, const char *what) {
+    const shape_t *in = input->shape;
+    const shape_t *s = t->shape;
+    bool same = s->numberOfDimensions == in->numberOfDimensions;
+    for (size_t d = 0; same && d < in->numberOfDimensions; d++) {
+        same = s->orderOfDimensions[d] == d && s->dimensions[d] == in->dimensions[d];
+    }
+    if (!same) {
+        PRINT_ERROR("GroupNorm: %s must be identity-order with the input's rank and dims "
+                    "(input rank %zu, %s rank %zu)",
+                    what, in->numberOfDimensions, what, s->numberOfDimensions);
+        exit(1);
+    }
+}
+
 /* Group geometry from a validated [B,C,T] input: cpg = C/G channels per group,
  * K = B*G blocks, N = cpg*T elements per block. */
 static void groupNormGroupGeom(tensor_t *input, const groupNormConfig_t *cfg, size_t *K, size_t *N,
@@ -546,6 +564,7 @@ static opKernelFn_t groupNormSelectForwardKernel(const groupNormConfig_t *cfg) {
 void groupNormForward(layer_t *layer, tensor_t *input, tensor_t *output) {
     groupNormConfig_t *cfg = layer->config->groupNorm;
     groupNormValidateInputShape(cfg, input);
+    groupNormRequireInputShape(input, output, "output");
 
     if (cfg->forwardMath.type == ARITH_BFP) {
         const bfpQConfig_t *anchor = bfpWireAnchor(cfg->outputQ, "GroupNorm forward");
@@ -1075,6 +1094,10 @@ static void groupNormDxKernelBfp(tensor_t **operands, size_t nOperands, tensor_t
 void groupNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
     groupNormConfig_t *cfg = layer->config->groupNorm;
     groupNormValidateInputShape(cfg, forwardInput);
+    groupNormRequireInputShape(forwardInput, loss, "loss");
+    if (propLoss != NULL) {
+        groupNormRequireInputShape(forwardInput, propLoss, "propLoss");
+    }
     switch (cfg->propLossMath.type) {
     case ARITH_FLOAT32:
         /* SYM_INT32 forwardMath + FLOAT32 backwardMath is an inference-only

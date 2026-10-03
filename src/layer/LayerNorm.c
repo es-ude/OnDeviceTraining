@@ -93,6 +93,25 @@ static void layerNormValidateInputShape(layerNormConfig_t *cfg, tensor_t *input)
     }
 }
 
+/* #465: the kernels decompose input-derived group/inner indices over `t`'s OWN
+ * logical dims (layerNormPhysOffset), so `t` must have the input's rank and
+ * logical dims -- otherwise an OOB write or a silent overwrite of wrapped
+ * indices. Order may differ: each tensor is addressed through its own
+ * orderOfDimensions. */
+static void layerNormRequireInputShape(tensor_t *input, tensor_t *t, const char *what) {
+    size_t rank = input->shape->numberOfDimensions;
+    bool same = t->shape->numberOfDimensions == rank;
+    for (size_t d = 0; same && d < rank; d++) {
+        same = getDimensionsByIndex(t, d) == getDimensionsByIndex(input, d);
+    }
+    if (!same) {
+        PRINT_ERROR("LayerNorm: %s must have the input's rank and logical dims (input rank "
+                    "%zu, %s rank %zu)",
+                    what, rank, what, t->shape->numberOfDimensions);
+        exit(1);
+    }
+}
+
 /* Physical flat offset of logical element (group g, inner j) in tensor t.
  * The logical multi-index is built by decomposing g over the leading
  * (rank - D) dims and j over the last D dims, then mapped through
@@ -506,6 +525,7 @@ static opKernelFn_t layerNormSelectForwardKernel(const layerNormConfig_t *cfg) {
 void layerNormForward(layer_t *layer, tensor_t *input, tensor_t *output) {
     layerNormConfig_t *cfg = layer->config->layerNorm;
     layerNormValidateInputShape(cfg, input);
+    layerNormRequireInputShape(input, output, "output");
 
     if (cfg->forwardMath.type == ARITH_BFP) {
         const bfpQConfig_t *anchor = bfpWireAnchor(cfg->outputQ, "LayerNorm forward");
@@ -973,6 +993,10 @@ static void layerNormDxKernelBfp(tensor_t **operands, size_t nOperands, tensor_t
 void layerNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
     layerNormConfig_t *cfg = layer->config->layerNorm;
     layerNormValidateInputShape(cfg, forwardInput);
+    layerNormRequireInputShape(forwardInput, loss, "loss");
+    if (propLoss != NULL) {
+        layerNormRequireInputShape(forwardInput, propLoss, "propLoss");
+    }
     switch (cfg->propLossMath.type) {
     case ARITH_FLOAT32:
         /* SYM_INT32 forwardMath + FLOAT32 backwardMath is an inference-only

@@ -517,6 +517,56 @@ static layer_t buildGuardLayer(groupNormConfig_t *cfg, layerConfig_t *lcfg, para
     return makeGroupNormLayer(cfg, lcfg);
 }
 
+/* #465: backward reads loss and writes propLoss at the forwardInput's identity
+ * flat offsets, so both must match its rank, dims AND identity order. A valid
+ * [1,4,4] forwardInput; `loss`/`propLoss` are the tensors under test
+ * (consumed; propLoss may be NULL). */
+static void runBackwardShapeGuard(tensor_t *loss, tensor_t *propLoss) {
+    size_t dims[] = {1, 4, 4}; /* square C=T: a transposed twin keeps the raw dims */
+    tensor_t *fwdIn = buildFloatTensorND(3, dims, NULL);
+
+    parameter_t *gamma;
+    parameter_t *beta;
+    quantization_t *fq;
+    quantization_t *bq;
+    groupNormConfig_t cfg;
+    layerConfig_t lcfg;
+    layer_t layer = buildGuardLayer(&cfg, &lcfg, &gamma, &beta, &fq, &bq);
+
+    ASSERT_EXITS_WITH_FAILURE(groupNormBackward(&layer, fwdIn, loss, propLoss));
+
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeParameter(beta);
+    freeParameter(gamma);
+    if (propLoss != NULL) {
+        freeTensor(propLoss);
+    }
+    freeTensor(loss);
+    freeTensor(fwdIn);
+}
+
+void testBackwardRejectsLossShapeMismatch(void) {
+    runBackwardShapeGuard(buildFloatTensorND(3, (size_t[]){1, 4, 3}, NULL), NULL);
+}
+
+void testBackwardRejectsTransposedLoss(void) {
+    tensor_t *loss = buildFloatTensorND(3, (size_t[]){1, 4, 4}, NULL);
+    transposeTensor(loss, 1, 2); /* same dims, order non-identity */
+    runBackwardShapeGuard(loss, NULL);
+}
+
+void testBackwardRejectsPropLossShapeMismatch(void) {
+    runBackwardShapeGuard(buildFloatTensorND(3, (size_t[]){1, 4, 4}, NULL),
+                          buildFloatTensorND(3, (size_t[]){1, 4, 3}, NULL));
+}
+
+void testBackwardRejectsTransposedPropLoss(void) {
+    tensor_t *propLoss = buildFloatTensorND(3, (size_t[]){1, 4, 4}, NULL);
+    transposeTensor(propLoss, 1, 2);
+    runBackwardShapeGuard(buildFloatTensorND(3, (size_t[]){1, 4, 4}, NULL), propLoss);
+}
+
 void testForwardRejectsWrongRank(void) {
     size_t dims[] = {4, 5}; /* rank-2: violates the rank-3 [B,C,T] contract */
     tensor_t *in = buildFloatTensorND(2, dims, NULL);
@@ -561,6 +611,50 @@ void testForwardRejectsWrongChannelDim(void) {
     freeParameter(gamma);
     freeTensor(out);
     freeTensor(in);
+}
+
+/* #465: the kernels walk the INPUT's geometry and write the output at the
+ * input's identity flat offsets, so an output that differs in rank, dims or
+ * order is an OOB write or a silent mis-placement -- fail fast instead. Input
+ * is a valid [1,4,4]; `out` is the tensor under test (consumed). */
+static void runForwardOutputGuard(tensor_t *out) {
+    size_t dims[] = {1, 4, 4}; /* square C=T: a transposed twin keeps the raw dims */
+    tensor_t *in = buildFloatTensorND(3, dims, NULL);
+
+    parameter_t *gamma;
+    parameter_t *beta;
+    quantization_t *fq;
+    quantization_t *bq;
+    groupNormConfig_t cfg;
+    layerConfig_t lcfg;
+    layer_t layer = buildGuardLayer(&cfg, &lcfg, &gamma, &beta, &fq, &bq);
+
+    ASSERT_EXITS_WITH_FAILURE(groupNormForward(&layer, in, out));
+
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(out);
+    freeTensor(in);
+}
+
+void testForwardRejectsOutputSmallerThanInput(void) {
+    runForwardOutputGuard(buildFloatTensorND(3, (size_t[]){1, 4, 3}, NULL));
+}
+
+void testForwardRejectsOutputSameCountDifferentDims(void) {
+    runForwardOutputGuard(buildFloatTensorND(3, (size_t[]){1, 2, 8}, NULL));
+}
+
+void testForwardRejectsOutputDifferentRank(void) {
+    runForwardOutputGuard(buildFloatTensorND(2, (size_t[]){4, 4}, NULL));
+}
+
+void testForwardRejectsTransposedOutput(void) {
+    tensor_t *out = buildFloatTensorND(3, (size_t[]){1, 4, 4}, NULL);
+    transposeTensor(out, 1, 2); /* same dims, order non-identity: only the order check sees it */
+    runForwardOutputGuard(out);
 }
 
 void testForwardRejectsTransposedInput(void) {
@@ -2611,6 +2705,10 @@ int main(void) {
     RUN_TEST(testForwardRejectsWrongRank);
     RUN_TEST(testForwardRejectsWrongChannelDim);
     RUN_TEST(testForwardRejectsTransposedInput);
+    RUN_TEST(testForwardRejectsOutputSmallerThanInput);
+    RUN_TEST(testForwardRejectsOutputSameCountDifferentDims);
+    RUN_TEST(testForwardRejectsOutputDifferentRank);
+    RUN_TEST(testForwardRejectsTransposedOutput);
     RUN_TEST(testGoldBackwardSingleGroup);
     RUN_TEST(testGoldBackwardTwoGroups);
     RUN_TEST(testGoldBackwardBatch2ThreeGroups);
@@ -2623,6 +2721,10 @@ int main(void) {
     RUN_TEST(testBackwardFloatGuardsSymGammaGrad);
     RUN_TEST(testBackwardFloatGuardsSymBetaGrad);
     RUN_TEST(testBackwardFloatGuardsSymPropLoss);
+    RUN_TEST(testBackwardRejectsLossShapeMismatch);
+    RUN_TEST(testBackwardRejectsTransposedLoss);
+    RUN_TEST(testBackwardRejectsPropLossShapeMismatch);
+    RUN_TEST(testBackwardRejectsTransposedPropLoss);
     RUN_TEST(testSymForwardTwinSanityTwoGroups);
     RUN_TEST(testSymForwardRejectsOperandWiderThanInt12);
     RUN_TEST(testSymBackwardTwinSanityTwoGroups);

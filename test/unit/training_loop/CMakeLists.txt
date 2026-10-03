@@ -40,6 +40,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         RematPlan
         MORE_LIBS
+        RematScheduler
         CommonLayerLibs
         Conv1dApi
         LinearApi
@@ -86,6 +87,7 @@ add_elastic_ai_unit_test(
         FlattenApi
         Pool1dApi
         QuantLayerApi
+        LayerNormApi
         Kernel
         LayerQuant
         LayerCommon

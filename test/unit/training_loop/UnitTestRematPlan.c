@@ -28,6 +28,7 @@
 #include "Quantization.h"
 #include "ReluApi.h"
 #include "RematPlan.h"
+#include "RematTestFixtures.h"
 #include "Serialize.h"
 #include "SoftmaxApi.h"
 #include "StorageApi.h"
@@ -37,152 +38,12 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* Fixture layers borrow their wire templates, so one FLOAT32 template outlives
- * every fixture model. Tests that edit a template use a local one. */
-static quantization_t g_floatQ = {.type = FLOAT32, .qConfig = NULL};
-
-static layer_t *makeLinear(size_t in, size_t out, bool frozen) {
-    layerQuant_t lq;
-    layerQuantInitUniform(&lq, &g_floatQ);
-    return linearLayerInit(
-        &(linearInit_t){.inFeatures = in,
-                        .outFeatures = out,
-                        .trainable = frozen ? TRAINABLE_FALSE : TRAINABLE_DEFAULT},
-        &lq);
-}
-
-static layer_t *makeRelu(quantization_t *q) {
-    return reluLayerInit(&(layerQuant_t){.outputQ = q, .propLossQ = q});
-}
-
-static layer_t *makeSoftmax(void) {
-    layerQuant_t lq;
-    layerQuantInitUniform(&lq, &g_floatQ);
-    return softmaxLayerInit(&lq);
-}
-
-static void freeModel(layer_t **model, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        switch (model[i]->type) {
-        case LINEAR:
-            freeLinearLayer(model[i]);
-            break;
-        case RELU:
-            freeReluLayer(model[i]);
-            break;
-        case SOFTMAX:
-            freeSoftmaxLayer(model[i]);
-            break;
-        case CONV1D:
-            freeConv1dLayer(model[i]);
-            break;
-        case MAXPOOL1D:
-            freeMaxPool1dLayer(model[i]);
-            break;
-        case AVGPOOL1D:
-            freeAvgPool1dLayer(model[i]);
-            break;
-        case FLATTEN:
-            freeFlattenLayer(model[i]);
-            break;
-        case QUANTIZATION:
-            freeQuantLayer(model[i]);
-            break;
-        case LAYERNORM:
-            freeLayerNormLayer(model[i]);
-            break;
-        default:
-            TEST_FAIL_MESSAGE("freeModel: extend the switch for this layer type");
-        }
-    }
-}
-
-static layer_t *makeQuant(quantization_t *outputQ, quantization_t *propLossQ) {
-    return quantLayerInit(&(layerQuant_t){.outputQ = outputQ, .propLossQ = propLossQ});
-}
-
-/* A borrowed input header on the caller's stack. Table init and bind never read
- * its data, so data stays NULL unless a test sets it. */
-#define TEST_MAX_RANK 4
-typedef struct inputLike {
-    size_t dims[TEST_MAX_RANK];
-    size_t order[TEST_MAX_RANK];
-    shape_t shape;
-    tensor_t tensor;
-} inputLike_t;
-
-static tensor_t *makeInput(inputLike_t *in, const size_t *dims, size_t rank, quantization_t *q) {
-    TEST_ASSERT_TRUE(rank <= TEST_MAX_RANK);
-    for (size_t d = 0; d < rank; d++) {
-        in->dims[d] = dims[d];
-        in->order[d] = d;
-    }
-    in->shape = (shape_t){
-        .numberOfDimensions = rank, .dimensions = in->dims, .orderOfDimensions = in->order};
-    in->tensor = (tensor_t){.data = NULL, .shape = &in->shape, .quantization = q, .sparsity = NULL};
-    return &in->tensor;
-}
-
 static rematWireTable_t *initTable(layer_t **model, size_t n, lossFuncType_t lt,
                                    const tensor_t *input) {
     rematWireTable_t *t = NULL;
     TEST_ASSERT_TRUE(rematWireTableInit(&t, model, n, defaultLossConfig(lt), input));
     TEST_ASSERT_NOT_NULL(t);
     return t;
-}
-
-/* examples/har_classifier/train_c.c:178-216 (B = 1); freezeConvs gives the
- * stage-2 backbone of train_c_finetune.c:171-216. */
-#define HAR_N 12
-static void buildHar(layer_t **model, bool freezeConvs) {
-    layerQuant_t lq;
-    layerQuantInitUniform(&lq, &g_floatQ);
-    trainable_t conv = freezeConvs ? TRAINABLE_FALSE : TRAINABLE_DEFAULT;
-    model[0] = conv1dLayerInit(&(conv1dInit_t){.inChannels = 9,
-                                               .outChannels = 16,
-                                               .kernelSize = 7,
-                                               .padding = SAME,
-                                               .trainable = conv},
-                               &lq);
-    model[1] = reluLayerInit(&lq);
-    model[2] = maxPool1dLayerInit(
-        &(maxPool1dInit_t){.kernelSize = 2, .stride = 2, .inputChannels = 16, .inputLength = 128},
-        &lq);
-    model[3] = conv1dLayerInit(&(conv1dInit_t){.inChannels = 16,
-                                               .outChannels = 32,
-                                               .kernelSize = 5,
-                                               .padding = SAME,
-                                               .trainable = conv},
-                               &lq);
-    model[4] = reluLayerInit(&lq);
-    model[5] = maxPool1dLayerInit(
-        &(maxPool1dInit_t){.kernelSize = 2, .stride = 2, .inputChannels = 32, .inputLength = 64},
-        &lq);
-    model[6] = conv1dLayerInit(&(conv1dInit_t){.inChannels = 32,
-                                               .outChannels = 64,
-                                               .kernelSize = 3,
-                                               .padding = SAME,
-                                               .trainable = conv},
-                               &lq);
-    model[7] = reluLayerInit(&lq);
-    model[8] = avgPool1dLayerInit(&(avgPool1dInit_t){.kernelSize = 32, .stride = 32}, &lq);
-    model[9] = flattenLayerInit();
-    model[10] = linearLayerInit(&(linearInit_t){.inFeatures = 64, .outFeatures = 6}, &lq);
-    model[11] = softmaxLayerInit(&lq);
-}
-
-static tensor_t *makeHarInput(inputLike_t *in) {
-    return makeInput(in, (size_t[]){1, 9, 128}, 3, &g_floatQ);
-}
-
-static layer_t *makeLayerNorm(size_t features, bool frozen) {
-    layerQuant_t lq;
-    layerQuantInitUniform(&lq, &g_floatQ);
-    return layerNormLayerInit(
-        &(layerNormInit_t){.normalizedShape = (size_t[]){features},
-                           .numNormDims = 1,
-                           .trainable = frozen ? TRAINABLE_FALSE : TRAINABLE_DEFAULT},
-        &lq);
 }
 
 static void assertDims(const shape_t *shape, const size_t *dims, size_t rank) {
@@ -266,8 +127,6 @@ static size_t peakOf(layer_t **model, size_t n, lossFuncType_t lt, const tensor_
     return peak;
 }
 
-static const rematPlanSpec_t g_liveness = {.policy = REMAT_PLAN_LIVENESS};
-
 static const rematRange_t *rangeOfWire(const rematProgram_t *p, uint16_t wire) {
     for (size_t r = 0; r < p->numRanges; r++) {
         if (p->ranges[r].wire == wire) {
@@ -334,15 +193,6 @@ static void assertCoLiveUnderBothPolicies(layer_t **model, size_t n, lossFuncTyp
     rematPlanFree(live);
     rematPlanFree(all);
     rematWireTableFree(t);
-}
-
-static uint32_t nextRandom(uint32_t *state) { /* xorshift32, test-local */
-    uint32_t v = *state;
-    v ^= v << 13;
-    v ^= v >> 17;
-    v ^= v << 5;
-    *state = v;
-    return v;
 }
 
 static layer_t *randomRank2Layer(uint32_t *state) {

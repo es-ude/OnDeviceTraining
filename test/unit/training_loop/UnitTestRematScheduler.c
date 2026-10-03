@@ -25,6 +25,7 @@
 #include "RematPlace.h"
 #include "RematPlan.h"
 #include "RematScheduler.h"
+#include "RematTestFixtures.h"
 #include "SoftmaxApi.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -33,186 +34,10 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* Fixture helpers copied from UnitTestRematPlan.c.
- * Fixture layers borrow their wire templates, so one FLOAT32 template
- * outlives every fixture model. */
-static quantization_t g_floatQ = {.type = FLOAT32, .qConfig = NULL};
-
-static layer_t *makeLinear(size_t in, size_t out, bool frozen) {
-    layerQuant_t lq;
-    layerQuantInitUniform(&lq, &g_floatQ);
-    return linearLayerInit(
-        &(linearInit_t){.inFeatures = in,
-                        .outFeatures = out,
-                        .trainable = frozen ? TRAINABLE_FALSE : TRAINABLE_DEFAULT},
-        &lq);
-}
-
-static layer_t *makeRelu(quantization_t *q) {
-    return reluLayerInit(&(layerQuant_t){.outputQ = q, .propLossQ = q});
-}
-
-static layer_t *makeSoftmax(void) {
-    layerQuant_t lq;
-    layerQuantInitUniform(&lq, &g_floatQ);
-    return softmaxLayerInit(&lq);
-}
-
-static layer_t *makeQuant(quantization_t *outputQ, quantization_t *propLossQ) {
-    return quantLayerInit(&(layerQuant_t){.outputQ = outputQ, .propLossQ = propLossQ});
-}
-
-static void freeModel(layer_t **model, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        switch (model[i]->type) {
-        case LINEAR:
-            freeLinearLayer(model[i]);
-            break;
-        case RELU:
-            freeReluLayer(model[i]);
-            break;
-        case SOFTMAX:
-            freeSoftmaxLayer(model[i]);
-            break;
-        case CONV1D:
-            freeConv1dLayer(model[i]);
-            break;
-        case MAXPOOL1D:
-            freeMaxPool1dLayer(model[i]);
-            break;
-        case AVGPOOL1D:
-            freeAvgPool1dLayer(model[i]);
-            break;
-        case FLATTEN:
-            freeFlattenLayer(model[i]);
-            break;
-        case QUANTIZATION:
-            freeQuantLayer(model[i]);
-            break;
-        default:
-            TEST_FAIL_MESSAGE("freeModel: extend the switch for this layer type");
-        }
-    }
-}
-
-/* A borrowed input header on the caller's stack. Init and bind never read its
- * data, so data stays NULL. */
-#define TEST_MAX_RANK 4
-typedef struct inputLike {
-    size_t dims[TEST_MAX_RANK];
-    size_t order[TEST_MAX_RANK];
-    shape_t shape;
-    tensor_t tensor;
-} inputLike_t;
-
-static tensor_t *makeInput(inputLike_t *in, const size_t *dims, size_t rank, quantization_t *q) {
-    TEST_ASSERT_TRUE(rank <= TEST_MAX_RANK);
-    for (size_t d = 0; d < rank; d++) {
-        in->dims[d] = dims[d];
-        in->order[d] = d;
-    }
-    in->shape = (shape_t){
-        .numberOfDimensions = rank, .dimensions = in->dims, .orderOfDimensions = in->order};
-    in->tensor = (tensor_t){.data = NULL, .shape = &in->shape, .quantization = q, .sparsity = NULL};
-    return &in->tensor;
-}
-
-/* examples/har_classifier/train_c.c:178-216 (B = 1). */
-#define HAR_N 12
-static void buildHar(layer_t **model, bool freezeConvs) {
-    layerQuant_t lq;
-    layerQuantInitUniform(&lq, &g_floatQ);
-    trainable_t conv = freezeConvs ? TRAINABLE_FALSE : TRAINABLE_DEFAULT;
-    model[0] = conv1dLayerInit(&(conv1dInit_t){.inChannels = 9,
-                                               .outChannels = 16,
-                                               .kernelSize = 7,
-                                               .padding = SAME,
-                                               .trainable = conv},
-                               &lq);
-    model[1] = reluLayerInit(&lq);
-    model[2] = maxPool1dLayerInit(
-        &(maxPool1dInit_t){.kernelSize = 2, .stride = 2, .inputChannels = 16, .inputLength = 128},
-        &lq);
-    model[3] = conv1dLayerInit(&(conv1dInit_t){.inChannels = 16,
-                                               .outChannels = 32,
-                                               .kernelSize = 5,
-                                               .padding = SAME,
-                                               .trainable = conv},
-                               &lq);
-    model[4] = reluLayerInit(&lq);
-    model[5] = maxPool1dLayerInit(
-        &(maxPool1dInit_t){.kernelSize = 2, .stride = 2, .inputChannels = 32, .inputLength = 64},
-        &lq);
-    model[6] = conv1dLayerInit(&(conv1dInit_t){.inChannels = 32,
-                                               .outChannels = 64,
-                                               .kernelSize = 3,
-                                               .padding = SAME,
-                                               .trainable = conv},
-                               &lq);
-    model[7] = reluLayerInit(&lq);
-    model[8] = avgPool1dLayerInit(&(avgPool1dInit_t){.kernelSize = 32, .stride = 32}, &lq);
-    model[9] = flattenLayerInit();
-    model[10] = linearLayerInit(&(linearInit_t){.inFeatures = 64, .outFeatures = 6}, &lq);
-    model[11] = softmaxLayerInit(&lq);
-}
-
-static tensor_t *makeHarInput(inputLike_t *in) {
-    return makeInput(in, (size_t[]){1, 9, 128}, 3, &g_floatQ);
-}
-
-static uint32_t nextRandom(uint32_t *state) { /* xorshift32, test-local */
-    uint32_t v = *state;
-    v ^= v << 13;
-    v ^= v >> 17;
-    v ^= v << 5;
-    *state = v;
-    return v;
-}
-
-static const rematPlanSpec_t g_liveness = {.policy = REMAT_PLAN_LIVENESS};
-
-/* One fixture model and its borrowed input. The BFP template of the F1 model
- * (Task 3) lives here too, because the model's layers borrow it: the fixture
- * must not move while the model is alive. */
-typedef struct arenaFixture {
-    layer_t *model[HAR_N];
-    size_t n;
-    lossFuncType_t lt;
-    inputLike_t in;
-    tensor_t *x;
-    uint8_t bfpExponent[1];
-    bfpQConfig_t bfpQc;
-    quantization_t bfpQ;
-} arenaFixture_t;
-
-static void buildHarModel(arenaFixture_t *f) {
-    buildHar(f->model, false);
-    f->n = HAR_N;
-    f->lt = CROSS_ENTROPY;
-    f->x = makeHarInput(&f->in);
-}
-
-static rematScheduler_t initArena(arenaFixture_t *f, const rematPlanSpec_t *spec) {
-    rematScheduler_t s;
-    TEST_ASSERT_TRUE(rematArenaInit(&s, f->model, f->n, defaultLossConfig(f->lt), f->x, spec));
-    TEST_ASSERT_NOT_NULL(s.wires);
-    TEST_ASSERT_NOT_NULL(s.plan);
-    return s;
-}
-
-/* Both inits share one shape, so a test can run on either row. */
-typedef rematScheduler_t (*rowInit_t)(arenaFixture_t *f, const rematPlanSpec_t *spec);
-static rematScheduler_t initHeap(arenaFixture_t *f, const rematPlanSpec_t *spec);
-
-static void freeFixture(arenaFixture_t *f, rematScheduler_t *s) {
-    rematSchedulerDeinit(s);
-    freeModel(f->model, f->n);
-}
-
 /* ---- init builds the shared table and plan; the report ---- */
 
 void testArenaInitBuildsTheTableAndThePlan(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildHarModel(&f);
     rematScheduler_t s = initArena(&f, NULL);
     TEST_ASSERT_EQUAL_INT(REMAT_ARENA, s.type);
@@ -224,7 +49,7 @@ void testArenaInitBuildsTheTableAndThePlan(void) {
 }
 
 void testReportEchoesTypePolicyAndPlanFacts(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildHarModel(&f);
     rematScheduler_t s = initArena(&f, &g_liveness);
     rematReport_t r;
@@ -237,7 +62,7 @@ void testReportEchoesTypePolicyAndPlanFacts(void) {
 }
 
 static size_t reportedPeakOnHar(const rematPlanSpec_t *spec) {
-    arenaFixture_t f;
+    fixture_t f;
     buildHarModel(&f);
     rematScheduler_t s = initArena(&f, spec);
     rematReport_t r;
@@ -269,7 +94,7 @@ void testReportOnAZeroedSchedulerIsEmpty(void) {
 }
 
 void testReportMetadataCountsTheResidentBlocks(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildHarModel(&f);
     rematScheduler_t s = initArena(&f, NULL);
     rematReport_t r;
@@ -283,7 +108,7 @@ void testReportMetadataCountsTheResidentBlocks(void) {
 
 void testDeinitIsNullSafeAndIdempotent(void) {
     rematSchedulerDeinit(NULL);
-    arenaFixture_t f;
+    fixture_t f;
     buildHarModel(&f);
     rematScheduler_t s = initArena(&f, NULL);
     rematSchedulerDeinit(&s);
@@ -296,7 +121,7 @@ void testDeinitIsNullSafeAndIdempotent(void) {
 /* The row's deinit slot must be repeatable on its own, not only through
  * rematSchedulerDeinit's zeroing. */
 void testArenaDeinitIsIdempotentOnItsOwn(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildHarModel(&f);
     rematScheduler_t s = initArena(&f, NULL);
     rematSchedulerFunctions[REMAT_ARENA].deinit(&s);
@@ -310,7 +135,7 @@ void testArenaDeinitIsIdempotentOnItsOwn(void) {
 /* The live-byte counter is real only under ODT_MEM_PROFILE (unit_test_debug,
  * asan, ubsan); the plain unit_test preset compiles this out. */
 void testDeinitReturnsEveryInitBlock(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildHarModel(&f);
     size_t before = memProfileCurrentBytes();
     rematScheduler_t s = initArena(&f, &g_liveness);
@@ -342,22 +167,8 @@ static void freeTableAndPlan(builtPlan_t *b) {
     rematWireTableFree(b->t);
 }
 
-/* The F1 alignment model: FLOAT32 [1,5] -> Quantization to
- * BFP m = 8 -> Linear 5 -> 1 under MSE. Wires: ACT 1 (BFP, 5 B), ACT 2
- * (FLOAT32, 4 B), the seed GRAD 2 (id 3, 4 B). Steps F0 0, F1 1, LF 2, LB 3,
- * B1 4. Unaligned FFD would place them at {0, 5, 9}. */
-static void buildF1Model(arenaFixture_t *f) {
-    initBfpQConfigInto(8, 8, HALF_AWAY, f->bfpExponent, &f->bfpQc);
-    f->bfpQ = (quantization_t){.type = BFP, .qConfig = &f->bfpQc};
-    f->model[0] = makeQuant(&f->bfpQ, &g_floatQ);
-    f->model[1] = makeLinear(5, 1, false);
-    f->n = 2;
-    f->lt = MSE;
-    f->x = makeInput(&f->in, (size_t[]){1, 5}, 2, &g_floatQ);
-}
-
 void testArenaPlacedRoundsEveryWireUpToTheWireAlignment(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     builtPlan_t b = buildTableAndPlan(f.model, f.n, f.lt, f.x, NULL);
     TEST_ASSERT_EQUAL_size_t(5, rematWireBytes(b.t, 1));
@@ -371,7 +182,7 @@ void testArenaPlacedRoundsEveryWireUpToTheWireAlignment(void) {
 
     /* HAR: every wire is a multiple of 8 (8192, 4096, 256, 24 B), so the
      * placement pads nothing -- the basis of the arenaPadBytes == 0 pin. */
-    arenaFixture_t h;
+    fixture_t h;
     buildHarModel(&h);
     builtPlan_t hb = buildTableAndPlan(h.model, h.n, h.lt, h.x, NULL);
     for (uint16_t w = 1; w < hb.t->numWires; w++) {
@@ -382,7 +193,7 @@ void testArenaPlacedRoundsEveryWireUpToTheWireAlignment(void) {
 }
 
 static void assertF1Placement(const rematPlanSpec_t *spec) {
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     builtPlan_t b = buildTableAndPlan(f.model, f.n, f.lt, f.x, spec);
     const rematProgram_t *p = &b.p->train;
@@ -409,7 +220,7 @@ void testArenaOffsetsAligned(void) {
 }
 
 void testFfdPeakPlacedBytesIsThePeakOfPlacedSums(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     builtPlan_t b = buildTableAndPlan(f.model, f.n, f.lt, f.x, NULL);
     size_t offsets[3];
@@ -420,7 +231,7 @@ void testFfdPeakPlacedBytesIsThePeakOfPlacedSums(void) {
     freeTableAndPlan(&b);
     freeModel(f.model, f.n);
 
-    arenaFixture_t h;
+    fixture_t h;
     buildHarModel(&h);
     builtPlan_t hb = buildTableAndPlan(h.model, h.n, h.lt, h.x, NULL);
     size_t harOffsets[23];
@@ -623,7 +434,7 @@ void testArenaPlacedExitsNamingTheWireOnOverflow(void) {
 /* The candidate list is a temporary block, released before the
  * placement returns ("freed before init returns"). */
 void testFfdReleasesItsScratch(void) {
-    arenaFixture_t h;
+    fixture_t h;
     buildHarModel(&h);
     builtPlan_t b = buildTableAndPlan(h.model, h.n, h.lt, h.x, &g_liveness);
     size_t offsets[23];
@@ -640,13 +451,13 @@ void testFfdReleasesItsScratch(void) {
 /* ---- the placement verifier ---- */
 
 typedef struct placedPlan {
-    arenaFixture_t f;
+    fixture_t f;
     builtPlan_t b;
     size_t offsets[23];
     size_t bytes;
 } placedPlan_t;
 
-static void placeFixture(placedPlan_t *pp, void (*build)(arenaFixture_t *),
+static void placeFixture(placedPlan_t *pp, void (*build)(fixture_t *),
                          const rematPlanSpec_t *spec) {
     build(&pp->f);
     pp->b = buildTableAndPlan(pp->f.model, pp->f.n, pp->f.lt, pp->f.x, spec);
@@ -665,8 +476,7 @@ static void verifyPlaced(placedPlan_t *pp) {
     arenaVerifyPlacement(pp->b.t, &pp->b.p->train, pp->offsets, pp->bytes);
 }
 
-static void assertTheFfdPlacementVerifies(void (*build)(arenaFixture_t *),
-                                          const rematPlanSpec_t *spec) {
+static void assertTheFfdPlacementVerifies(void (*build)(fixture_t *), const rematPlanSpec_t *spec) {
     placedPlan_t pp;
     placeFixture(&pp, build, spec);
     ASSERT_EXITS_WITH(0, verifyPlaced(&pp));
@@ -750,8 +560,8 @@ void testVerifierRejectsAnOffsetNearSizeMax(void) {
 
 /* ---- init completes: offsets block, placement, verifier, arena block ---- */
 
-static rematReport_t reportAfterInit(void (*build)(arenaFixture_t *), const rematPlanSpec_t *spec) {
-    arenaFixture_t f;
+static rematReport_t reportAfterInit(void (*build)(fixture_t *), const rematPlanSpec_t *spec) {
+    fixture_t f;
     build(&f);
     rematScheduler_t s = initArena(&f, spec);
     rematReport_t r;
@@ -761,7 +571,7 @@ static rematReport_t reportAfterInit(void (*build)(arenaFixture_t *), const rema
 }
 
 void testArenaInitPlacesVerifiesAndReservesTheArena(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildHarModel(&f);
     rematScheduler_t s = initArena(&f, &g_liveness);
     rematReport_t r;
@@ -775,7 +585,7 @@ void testArenaInitPlacesVerifiesAndReservesTheArena(void) {
     freeFixture(&f, &s);
 }
 
-static void assertArenaDecomposition(void (*build)(arenaFixture_t *), const rematPlanSpec_t *spec) {
+static void assertArenaDecomposition(void (*build)(fixture_t *), const rematPlanSpec_t *spec) {
     rematReport_t r = reportAfterInit(build, spec);
     TEST_ASSERT_TRUE(r.placed);
     TEST_ASSERT_EQUAL_size_t(r.arenaBytes, r.peakLiveBytes + r.arenaPadBytes + r.arenaGapBytes);
@@ -878,7 +688,7 @@ void testArenaOffsetsAlignedOnRandomMixedChains(void) {
 #ifdef ODT_MEM_PROFILE
 /* Resident means exactly these blocks: table, plan, offsets, arena. */
 void testArenaInitReservesExactlyMetadataPlusArena(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildHarModel(&f);
     size_t before = memProfileCurrentBytes();
     rematScheduler_t s = initArena(&f, &g_liveness);
@@ -1064,7 +874,7 @@ void testArenaInitExitsOnAnArenaSumOverflowBeforeAnyRowReservation(void) {
 /* ---- the row's per-step entry points ---- */
 
 /* One call through the dispatch, on either row. */
-static void bindAndBegin(arenaFixture_t *f, rematScheduler_t *s) {
+static void bindAndBegin(fixture_t *f, rematScheduler_t *s) {
     rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
 }
 
@@ -1072,7 +882,7 @@ static void endAndUnbind(rematScheduler_t *s) {
     rematEnd(s);
 }
 
-static size_t walkAll(arenaFixture_t *f, rematScheduler_t *s) {
+static size_t walkAll(fixture_t *f, rematScheduler_t *s) {
     bindAndBegin(f, s);
     rematStep_t st;
     size_t steps = 0;
@@ -1085,7 +895,7 @@ static size_t walkAll(arenaFixture_t *f, rematScheduler_t *s) {
 }
 
 void testArenaNextHandsOutThePlanStepsInOrder(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildHarModel(&f);
     rematScheduler_t s = initArena(&f, NULL);
     const rematProgram_t *p = &s.plan->train;
@@ -1105,7 +915,7 @@ void testArenaNextHandsOutThePlanStepsInOrder(void) {
 }
 
 void testArenaNextAfterTheStreamCompletedReturnsFalse(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     rematScheduler_t s = initArena(&f, &g_liveness);
     bindAndBegin(&f, &s);
@@ -1122,7 +932,7 @@ void testArenaNextAfterTheStreamCompletedReturnsFalse(void) {
 
 /* PR1a carry: the walk restarts at every begin, on the same resident arena. */
 void testArenaSecondCallRestartsTheWalk(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     rematScheduler_t s = initArena(&f, &g_liveness);
     TEST_ASSERT_EQUAL_size_t(5, walkAll(&f, &s));
@@ -1131,19 +941,19 @@ void testArenaSecondCallRestartsTheWalk(void) {
     freeFixture(&f, &s);
 }
 
-static void doneForAStepNextDidNotHandOut(arenaFixture_t *f, rematScheduler_t *s) {
+static void doneForAStepNextDidNotHandOut(fixture_t *f, rematScheduler_t *s) {
     bindAndBegin(f, s);
     rematStep_t st;
     (void)rematNext(s, &st);
     rematDone(s, &(rematStep_t){.kind = REMAT_STEP_BACKWARD, .layer = 0});
 }
 
-static void doneBeforeNext(arenaFixture_t *f, rematScheduler_t *s) {
+static void doneBeforeNext(fixture_t *f, rematScheduler_t *s) {
     bindAndBegin(f, s);
     rematDone(s, &s->plan->train.steps[0]);
 }
 
-static void doneWithoutNextAtLossForward(arenaFixture_t *f, rematScheduler_t *s) {
+static void doneWithoutNextAtLossForward(fixture_t *f, rematScheduler_t *s) {
     bindAndBegin(f, s);
     rematStep_t st;
     for (size_t k = 0; k < 2u; k++) {
@@ -1153,14 +963,14 @@ static void doneWithoutNextAtLossForward(arenaFixture_t *f, rematScheduler_t *s)
     rematDone(s, &s->plan->train.steps[2]);
 }
 
-static void nextTwice(arenaFixture_t *f, rematScheduler_t *s) {
+static void nextTwice(fixture_t *f, rematScheduler_t *s) {
     bindAndBegin(f, s);
     rematStep_t st;
     (void)rematNext(s, &st);
     (void)rematNext(s, &st);
 }
 
-static void doneAfterTheStreamCompleted(arenaFixture_t *f, rematScheduler_t *s) {
+static void doneAfterTheStreamCompleted(fixture_t *f, rematScheduler_t *s) {
     bindAndBegin(f, s);
     rematStep_t st;
     rematStep_t last = {0};
@@ -1171,7 +981,7 @@ static void doneAfterTheStreamCompleted(arenaFixture_t *f, rematScheduler_t *s) 
     rematDone(s, &last);
 }
 
-static void endAfterOneStep(arenaFixture_t *f, rematScheduler_t *s) {
+static void endAfterOneStep(fixture_t *f, rematScheduler_t *s) {
     bindAndBegin(f, s);
     rematStep_t st;
     (void)rematNext(s, &st);
@@ -1180,7 +990,7 @@ static void endAfterOneStep(arenaFixture_t *f, rematScheduler_t *s) {
 }
 
 void testArenaEndExitsOnAnIncompleteWalk(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     rematScheduler_t s = initArena(&f, &g_liveness);
     ASSERT_EXITS_WITH_OUTPUT(
@@ -1192,14 +1002,14 @@ void testArenaEndExitsOnAnIncompleteWalk(void) {
 /* A tampered or imported range ending past the last step would stay bound
  * across the call boundary; the grammar does not check range ends before
  * PR6. F1 STORE_ALL: every range ends at step 4, the seed is last in endOrder. */
-static void walkWithTheLastRangeLeftOpen(arenaFixture_t *f, rematScheduler_t *s) {
+static void walkWithTheLastRangeLeftOpen(fixture_t *f, rematScheduler_t *s) {
     rematProgram_t *p = &s->plan->train;
     p->ranges[p->endOrder[p->numRanges - 1u]].end = (uint16_t)p->numSteps;
     (void)walkAll(f, s);
 }
 
 void testArenaEndExitsOnARangeLeftOpen(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     rematScheduler_t s = initArena(&f, NULL);
     ASSERT_EXITS_WITH_OUTPUT(
@@ -1208,13 +1018,13 @@ void testArenaEndExitsOnARangeLeftOpen(void) {
     freeFixture(&f, &s);
 }
 
-static void beginOnAnUnreservedArena(arenaFixture_t *f, rematScheduler_t *s) {
+static void beginOnAnUnreservedArena(fixture_t *f, rematScheduler_t *s) {
     s->row.arena.base = NULL; /* the state rematArenaInit leaves after a failed data block */
     bindAndBegin(f, s);
 }
 
 void testArenaBeginExitsWhenTheArenaWasNeverReserved(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     rematScheduler_t s = initArena(&f, NULL);
     ASSERT_EXITS_WITH_OUTPUT(1, "rematBegin on a scheduler whose arena was never reserved",
@@ -1347,7 +1157,7 @@ static size_t heldInsideTheCall(const rematScheduler_t *s) {
 /* One call with every row-contract assert, plus: every bound wire aligned,
  * exactly the plan's live wires bound, and the row's reserved bytes exactly what it must hold after
  * every next and every done, peaking at the plan's peak on HEAP (0 on ARENA). */
-static void walkWithTheContractChecks(arenaFixture_t *f, rematScheduler_t *s) {
+static void walkWithTheContractChecks(fixture_t *f, rematScheduler_t *s) {
     rematWireTable_t *t = s->wires;
     const rematProgram_t *p = &s->plan->train;
     size_t memAfterInit = memProfileCurrentBytes();
@@ -1392,9 +1202,9 @@ static void walkWithTheContractChecks(arenaFixture_t *f, rematScheduler_t *s) {
  * the global stream exists (PR1-PR5c), a row neither draws from nor reseeds
  * it; the conv factories draw their initial weights, so the pin starts
  * after the model is built. */
-static void assertRowContract(rowInit_t init, void (*build)(arenaFixture_t *),
+static void assertRowContract(rowInit_t init, void (*build)(fixture_t *),
                               const rematPlanSpec_t *spec) {
-    arenaFixture_t f;
+    fixture_t f;
     build(&f);
     uint32_t seed = rngGetSeed();
     rematScheduler_t s = init(&f, spec);
@@ -1441,7 +1251,7 @@ void testRowContractHeapF1Liveness(void) {
  * after its source ACT 9 died. Pinned here so a planner change that keeps
  * ACT 9 alive cannot silently drop the harness's coverage of it. */
 void testArenaHarLivenessBindsFlattenDxAfterItsSourceDied(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildHarModel(&f);
     TEST_ASSERT_EQUAL_INT(FLATTEN, f.model[9]->type);
     rematScheduler_t s = initArena(&f, &g_liveness);
@@ -1465,9 +1275,9 @@ void testArenaHarLivenessBindsFlattenDxAfterItsSourceDied(void) {
  * its last makes the SDK's observed peak the plan's. Before any call the
  * observed peak is 0, so a report that copied the plan's peak would show.
  * Read before end, where a row that never releases would die. */
-static void assertObservedPeakIsThePlannedPeak(rowInit_t init, void (*build)(arenaFixture_t *),
+static void assertObservedPeakIsThePlannedPeak(rowInit_t init, void (*build)(fixture_t *),
                                                const rematPlanSpec_t *spec) {
-    arenaFixture_t f;
+    fixture_t f;
     build(&f);
     rematScheduler_t s = init(&f, spec);
     rematReport_t before;
@@ -1508,7 +1318,7 @@ static void readTheArenaBeforeAnyRangeOpens(rematScheduler_t *s) {
 
 /* The whole arena is unaddressable until a range opens. */
 void testArenaIsPoisonedUntilARangeOpens(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     rematScheduler_t s = initArena(&f, NULL);
     ASSERT_EXITS_WITH(ODT_ASAN_DEATH_EXIT, readTheArenaBeforeAnyRangeOpens(&s));
@@ -1520,7 +1330,7 @@ void testArenaIsPoisonedUntilARangeOpens(void) {
  * poisoned: the granule-8 hypothesis, pinned. The marker is
  * flushed before the pad read because the death callback's _exit discards
  * buffered stdout. */
-static void readThePadOfABoundWire(arenaFixture_t *f, rematScheduler_t *s) {
+static void readThePadOfABoundWire(fixture_t *f, rematScheduler_t *s) {
     odtInstallAsanDeathExit();
     bindAndBegin(f, s);
     rematStep_t st;
@@ -1533,7 +1343,7 @@ static void readThePadOfABoundWire(arenaFixture_t *f, rematScheduler_t *s) {
 }
 
 void testArenaPadStaysPoisonedWhileBound(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     rematScheduler_t s = initArena(&f, NULL);
     ASSERT_EXITS_WITH_OUTPUT(ODT_ASAN_DEATH_EXIT, "payload-readable",
@@ -1543,7 +1353,7 @@ void testArenaPadStaysPoisonedWhileBound(void) {
 
 /* F1 LIVENESS: ACT 2 lives [1, 3]; a pointer saved while it was
  * bound must trip ASan once done() of step 3 released it. */
-static void readAWireAfterItsRelease(arenaFixture_t *f, rematScheduler_t *s) {
+static void readAWireAfterItsRelease(fixture_t *f, rematScheduler_t *s) {
     odtInstallAsanDeathExit();
     bindAndBegin(f, s);
     rematStep_t st;
@@ -1564,7 +1374,7 @@ static void readAWireAfterItsRelease(arenaFixture_t *f, rematScheduler_t *s) {
 }
 
 void testArenaReadAfterReleaseTripsAsan(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     rematScheduler_t s = initArena(&f, &g_liveness);
     ASSERT_EXITS_WITH(ODT_ASAN_DEATH_EXIT, readAWireAfterItsRelease(&f, &s));
@@ -1574,16 +1384,8 @@ void testArenaReadAfterReleaseTripsAsan(void) {
 
 /* ---- the HEAP row: init and report ---- */
 
-static rematScheduler_t initHeap(arenaFixture_t *f, const rematPlanSpec_t *spec) {
-    rematScheduler_t s;
-    TEST_ASSERT_TRUE(rematHeapInit(&s, f->model, f->n, defaultLossConfig(f->lt), f->x, spec));
-    TEST_ASSERT_NOT_NULL(s.wires);
-    TEST_ASSERT_NOT_NULL(s.plan);
-    return s;
-}
-
 void testHeapInitBuildsTheTableAndThePlan(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildHarModel(&f);
     rematScheduler_t s = initHeap(&f, &g_liveness);
     TEST_ASSERT_EQUAL_INT(REMAT_HEAP, s.type);
@@ -1596,7 +1398,7 @@ void testHeapInitBuildsTheTableAndThePlan(void) {
 /* HEAP holds no data between calls: init reserves the shared table and plan
  * blocks only. */
 void testHeapInitReservesOnlyTheTableAndThePlan(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildHarModel(&f);
     size_t before = memProfileCurrentBytes();
     rematScheduler_t s = initHeap(&f, NULL);
@@ -1612,7 +1414,7 @@ void testHeapInitReservesOnlyTheTableAndThePlan(void) {
  * echo observable for the first time. */
 static void assertHeapReport(const rematPlanSpec_t *spec, rematPlanPolicy_t policy,
                              size_t peakLiveBytes) {
-    arenaFixture_t f;
+    fixture_t f;
     buildHarModel(&f);
     rematScheduler_t s = initHeap(&f, spec);
     rematReport_t r;
@@ -1656,7 +1458,7 @@ void testHeapInitExitsOnAByteCountOverflow(void) {
 /* ---- the HEAP row's entry points ---- */
 
 void testHeapWalkHandsOutThePlanStepsAndEndsWithNothingBound(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildHarModel(&f);
     rematScheduler_t s = initHeap(&f, NULL);
     const rematProgram_t *p = &s.plan->train;
@@ -1685,7 +1487,7 @@ void testHeapWalkHandsOutThePlanStepsAndEndsWithNothingBound(void) {
  * holds exactly the SDK's liveBytes at every point of the call, and its
  * per-call peak of reserved bytes is the plan's peakLiveBytes. */
 void testHeapHoldsExactlyTheLiveBytesAtEveryStep(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildHarModel(&f);
     rematScheduler_t s = initHeap(&f, &g_liveness);
     size_t memAfterInit = memProfileCurrentBytes();
@@ -1710,7 +1512,7 @@ void testHeapHoldsExactlyTheLiveBytesAtEveryStep(void) {
 
 /* PR1a carry: the walk restarts at every begin. */
 void testHeapSecondCallRestartsTheWalk(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     rematScheduler_t s = initHeap(&f, &g_liveness);
     TEST_ASSERT_EQUAL_size_t(5, walkAll(&f, &s));
@@ -1719,7 +1521,7 @@ void testHeapSecondCallRestartsTheWalk(void) {
     freeFixture(&f, &s);
 }
 
-static void heapEndAfterOneStep(arenaFixture_t *f, rematScheduler_t *s) {
+static void heapEndAfterOneStep(fixture_t *f, rematScheduler_t *s) {
     bindAndBegin(f, s);
     rematStep_t st;
     (void)rematNext(s, &st);
@@ -1728,7 +1530,7 @@ static void heapEndAfterOneStep(arenaFixture_t *f, rematScheduler_t *s) {
 }
 
 void testHeapEndExitsOnAnIncompleteWalk(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     rematScheduler_t s = initHeap(&f, &g_liveness);
     ASSERT_EXITS_WITH_OUTPUT(1,
@@ -1739,7 +1541,7 @@ void testHeapEndExitsOnAnIncompleteWalk(void) {
 }
 
 #ifndef ODT_TEST_ASAN
-static void heapFirstNextOnAHugeWire(arenaFixture_t *f, rematScheduler_t *s) {
+static void heapFirstNextOnAHugeWire(fixture_t *f, rematScheduler_t *s) {
     bindAndBegin(f, s);
     rematStep_t st;
     (void)rematNext(s, &st);
@@ -1751,7 +1553,7 @@ static void heapFirstNextOnAHugeWire(arenaFixture_t *f, rematScheduler_t *s) {
  * 64-bit host. Skipped under ASan, which aborts on oversized requests; macOS
  * malloc prints a "can't allocate region" warning to stderr here. */
 void testHeapNextExitsNamingTheStepAndTheWireWhenAReservationFails(void) {
-    arenaFixture_t f;
+    fixture_t f;
     f.model[0] = makeRelu(&g_floatQ);
     f.n = 1;
     f.lt = MSE;
@@ -1768,7 +1570,7 @@ void testHeapNextExitsNamingTheStepAndTheWireWhenAReservationFails(void) {
 /* ---- the const vtable and the dispatch ---- */
 
 void testEachInitInstallsItsRowsFunctionTable(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     rematScheduler_t a = initArena(&f, NULL);
     rematScheduler_t h = initHeap(&f, NULL);
@@ -1795,7 +1597,7 @@ void testEveryRowFillsEverySlot(void) {
 }
 
 static void assertTheDispatchWalks(rowInit_t init) {
-    arenaFixture_t f;
+    fixture_t f;
     buildHarModel(&f);
     rematScheduler_t s = init(&f, NULL);
     const rematProgram_t *p = &s.plan->train;
@@ -1853,7 +1655,7 @@ static const rematSchedulerFunctions_t g_countingArena = {
 
 void testTheDispatchCallsThroughTheInstancesFunctionTable(void) {
     memset(g_decoratedCalls, 0, sizeof g_decoratedCalls);
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     rematScheduler_t s = initArena(&f, NULL);
     s.fns = &g_countingArena;
@@ -1872,13 +1674,13 @@ void testTheDispatchCallsThroughTheInstancesFunctionTable(void) {
     freeModel(f.model, f.n);
 }
 
-static void beginOnAZeroedScheduler(arenaFixture_t *f) {
+static void beginOnAZeroedScheduler(fixture_t *f) {
     rematScheduler_t s = {0};
     rematBegin(&s, f->model, f->n, defaultLossConfig(f->lt), f->x);
 }
 
 void testBeginExitsOnASchedulerThatWasNeverInitialised(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     ASSERT_EXITS_WITH_OUTPUT(1, "rematBegin: scheduler not initialised",
                              beginOnAZeroedScheduler(&f));
@@ -1887,12 +1689,12 @@ void testBeginExitsOnASchedulerThatWasNeverInitialised(void) {
 
 /* The state rematHeapInit leaves when its plan block fails (fns and
  * table set, plan NULL); a caller that ignored the false must not enter a call. */
-static void beginOnAHeapWhosePlanFailed(arenaFixture_t *f, rematScheduler_t *s) {
+static void beginOnAHeapWhosePlanFailed(fixture_t *f, rematScheduler_t *s) {
     rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
 }
 
 void testBeginExitsOnAHeapWhoseInitReturnedFalse(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     size_t before = memProfileCurrentBytes();
     rematScheduler_t s = initHeap(&f, NULL);
@@ -1906,7 +1708,7 @@ void testBeginExitsOnAHeapWhoseInitReturnedFalse(void) {
     freeModel(f.model, f.n);
 }
 
-static void beginTwice(arenaFixture_t *f, rematScheduler_t *s) {
+static void beginTwice(fixture_t *f, rematScheduler_t *s) {
     rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
     rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
 }
@@ -1914,7 +1716,7 @@ static void beginTwice(arenaFixture_t *f, rematScheduler_t *s) {
 /* The table bind resets liveBytes and bindGen but leaves ->data alone, so
  * a second begin on an unfinished call must not reach it. */
 void testBeginExitsWhenTheCallIsReEntered(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     rematScheduler_t s = initHeap(&f, NULL);
     ASSERT_EXITS_WITH_OUTPUT(1, "rematBegin: scheduler 'heap' re-entered", beginTwice(&f, &s));
@@ -1927,7 +1729,7 @@ static void nextBeforeBegin(rematScheduler_t *s) {
 }
 
 void testNextExitsOutsideACall(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     rematScheduler_t s = initHeap(&f, NULL);
     ASSERT_EXITS_WITH_OUTPUT(1, "remat[heap]: rematNext outside a call", nextBeforeBegin(&s));
@@ -1951,14 +1753,14 @@ static void doneBeforeBegin(rematScheduler_t *s) {
 }
 
 void testDoneExitsOutsideACall(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     rematScheduler_t s = initArena(&f, NULL);
     ASSERT_EXITS_WITH_OUTPUT(1, "remat[arena]: rematDone outside a call", doneBeforeBegin(&s));
     freeFixture(&f, &s);
 }
 
-static void endTwice(arenaFixture_t *f, rematScheduler_t *s) {
+static void endTwice(fixture_t *f, rematScheduler_t *s) {
     rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
     rematStep_t st;
     while (rematNext(s, &st)) {
@@ -1970,14 +1772,14 @@ static void endTwice(arenaFixture_t *f, rematScheduler_t *s) {
 
 /* A second end would unbind and clear inCall twice; it must be named. */
 void testEndExitsOutsideACall(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     rematScheduler_t s = initArena(&f, NULL);
     ASSERT_EXITS_WITH_OUTPUT(1, "remat[arena]: rematEnd outside a call", endTwice(&f, &s));
     freeFixture(&f, &s);
 }
 
-static void deinitInsideACall(arenaFixture_t *f, rematScheduler_t *s) {
+static void deinitInsideACall(fixture_t *f, rematScheduler_t *s) {
     rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
     rematStep_t st;
     (void)rematNext(s, &st);
@@ -1987,7 +1789,7 @@ static void deinitInsideACall(arenaFixture_t *f, rematScheduler_t *s) {
 /* HEAP holds a block for every open range mid-call; a deinit there would free
  * the table under bound wires and leak those blocks. */
 void testDeinitExitsInsideACall(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     rematScheduler_t s = initHeap(&f, NULL);
     ASSERT_EXITS_WITH_OUTPUT(1, "remat[heap]: rematSchedulerDeinit inside a call",
@@ -1998,11 +1800,11 @@ void testDeinitExitsInsideACall(void) {
 /* ---- the call protocol, owned by the dispatch on every row ---- */
 
 /* Each misuse on F1 (STORE_ALL) under both rows; the message names the row. */
-static void assertMisuseExitsOnBothRows(void (*misuse)(arenaFixture_t *, rematScheduler_t *),
+static void assertMisuseExitsOnBothRows(void (*misuse)(fixture_t *, rematScheduler_t *),
                                         const char *rule) {
     const rowInit_t inits[] = {initArena, initHeap};
     for (size_t k = 0; k < 2u; k++) {
-        arenaFixture_t f;
+        fixture_t f;
         buildF1Model(&f);
         rematScheduler_t s = inits[k](&f, NULL);
         char message[160];
@@ -2051,7 +1853,7 @@ void testDoneExitsAfterTheStreamCompleted(void) {
 /* One block of exactly bytes(w) per range: F1's ACT 1 is 5 BFP bytes, so its
  * byte 5 lies in the block's redzone. The marker is flushed before the read
  * because the death callback's _exit discards buffered stdout. */
-static void readOnePastAHeapWire(arenaFixture_t *f, rematScheduler_t *s) {
+static void readOnePastAHeapWire(fixture_t *f, rematScheduler_t *s) {
     odtInstallAsanDeathExit();
     bindAndBegin(f, s);
     rematStep_t st;
@@ -2064,7 +1866,7 @@ static void readOnePastAHeapWire(arenaFixture_t *f, rematScheduler_t *s) {
 }
 
 void testHeapWireEndsAtItsExactBytes(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     rematScheduler_t s = initHeap(&f, NULL);
     ASSERT_EXITS_WITH_OUTPUT(ODT_ASAN_DEATH_EXIT, "payload-readable", readOnePastAHeapWire(&f, &s));
@@ -2073,7 +1875,7 @@ void testHeapWireEndsAtItsExactBytes(void) {
 
 /* F1 LIVENESS: ACT 2 lives [1, 3]; its block is freed by done() of step 3, so
  * a pointer saved while it was bound trips ASan as a use after free. */
-static void readAHeapWireAfterItsRelease(arenaFixture_t *f, rematScheduler_t *s) {
+static void readAHeapWireAfterItsRelease(fixture_t *f, rematScheduler_t *s) {
     odtInstallAsanDeathExit();
     bindAndBegin(f, s);
     rematStep_t st;
@@ -2094,7 +1896,7 @@ static void readAHeapWireAfterItsRelease(arenaFixture_t *f, rematScheduler_t *s)
 }
 
 void testHeapReadAfterReleaseTripsAsan(void) {
-    arenaFixture_t f;
+    fixture_t f;
     buildF1Model(&f);
     rematScheduler_t s = initHeap(&f, &g_liveness);
     ASSERT_EXITS_WITH(ODT_ASAN_DEATH_EXIT, readAHeapWireAfterItsRelease(&f, &s));

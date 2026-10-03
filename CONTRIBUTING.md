@@ -65,7 +65,7 @@ versions, plus these scripts:
 | `run_ai_unit_tests` | Run all Unity unit tests via ctest |
 | `run_asan_tests` | Configure + build + run the suite under ASan/UBSan |
 | `clean_cmake` | Clean the `unit_test` build tree |
-| `ci` | Most of the CI pipeline locally: allocation-locality and optimizer-step-entry gates, `clang-format` check, C tests, ASan/UBSan tests, Python tests |
+| `ci` | Most of the CI pipeline locally: allocation-locality, optimizer-step-entry and private-paths gates, `clang-format` check, C tests, ASan/UBSan tests, Python tests |
 
 Without devenv you need CMake ≥ 3.20, Ninja, a C compiler, and
 [uv](https://docs.astral.sh/uv/) for anything Python. Python work always goes
@@ -171,6 +171,7 @@ PRs to `main`/`develop`:
 | `gate` | Skips a push run when the same commit is already the head of an open PR (that PR's run covers it); every other job depends on it |
 | `alloc-locality` | No allocation primitives outside `src/userApi/` |
 | `optimizer-step-entry` | `examples/` step the optimizer through `optimizerStep()`, never the raw vtable (#432) |
+| `private-paths` | No tracked file references the gitignored maintainer-local directories (superpowers specs/plans, Claude Code rules, SDD scratch); cite the decision registers in `docs/conventions/` instead |
 | `c-format-check` | `clang-format --dry-run -Werror` over `src`, `test`, `examples` |
 | `c-build-and-test` | `unit_test` preset: configure, build, ctest |
 | `c-asan-build-and-test` | The suite under ASan + UBSan |

@@ -112,6 +112,19 @@ in
 					echo "$matches"
 					exit 1
 				fi
+				# tracked files must not cite gitignored maintainer-local paths
+				set +e
+				matches=$(git grep -nE 'docs/superpower[s]/|\.claud[e]/|\.superpower[s]/' \
+					-- ':!.gitignore')
+				set -e
+				if [ -n "$matches" ]; then
+					echo "Private-path violation: tracked files must not reference gitignored maintainer-local directories."
+					echo "Point at docs/conventions/ (decision registers), an issue/PR number, or drop the citation."
+					echo
+					echo "Offending lines:"
+					echo "$matches"
+					exit 1
+				fi
 				find src test examples \( -name '*.c' -o -name '*.h' \) -print0 \
 					| xargs -0 clang-format --dry-run -Werror
 				CC=gcc cmake --preset unit_test

@@ -105,6 +105,34 @@ jobs:
             exit 1
           fi
 
+  private-paths:
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reject references to maintainer-private paths
+        # The superpowers spec/plan directory, Claude Code's rules directory and
+        # the SDD scratch directory are gitignored: a tracked doc or comment that
+        # points into them is a dead link for every reader. Cite the in-repo
+        # decision registers in docs/conventions/ instead. The `[s]`/`[e]` char
+        # classes keep this pattern from matching its own source.
+        run: |
+          set +e
+          matches=$(git grep -nE 'docs/superpower[s]/|\.claud[e]/|\.superpower[s]/' \
+            -- ':!.gitignore')
+          set -e
+          if [ -n "$matches" ]; then
+            echo "Private-path violation: tracked files must not reference gitignored maintainer-local directories."
+            echo "Point at docs/conventions/ (decision registers), an issue/PR number, or drop the citation."
+            echo
+            echo "Offending lines:"
+            echo "$matches"
+            exit 1
+          fi
+
   c-format-check:
     needs: gate
     if: needs.gate.outputs.proceed == 'true'

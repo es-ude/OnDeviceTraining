@@ -154,11 +154,23 @@ target_link_libraries(UnitTestCalculateGradsConformance PRIVATE
         CalculateGradsSequential
         odt_test_legacy_grads
         unity
+        RematScheduler
         CommonLayerLibs
+        Conv1dApi
         LinearApi
         ReluApi
+        SoftmaxApi
+        FlattenApi
+        Pool1dApi
+        QuantLayerApi
+        LayerNormApi
+        GroupNormApi
+        DropoutApi
+        BatchNorm1dApi
+        Kernel
         LayerQuant
         LayerCommon
+        LayerConfigAccess
         ArithmeticType
         QuantizationApi
         Quantization
@@ -167,6 +179,7 @@ target_link_libraries(UnitTestCalculateGradsConformance PRIVATE
         Tensor
         StorageApi
         Common
+        OdtHook
         TrainingLoopApi
         InferenceApi
         DataLoader

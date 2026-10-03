@@ -30,7 +30,7 @@ static tensor_t *momentumStateInit(tensor_t *param, quantization_t *momentumQuan
         symQConfig_t *symQC = momentumQuant->qConfig;
         if (symQC->numGroups > 1) {
             PRINT_ERROR("momentumStateInit: grouped SYM momentum templates are unsupported -- "
-                        "grouped momentum is a future #300 axis (spec §3)");
+                        "grouped momentum is a future #300 axis");
             exit(1);
         }
     }
@@ -42,7 +42,7 @@ static tensor_t *momentumStateInit(tensor_t *param, quantization_t *momentumQuan
         asymQConfig_t *asymQC = momentumQuant->qConfig;
         if (asymQC->numGroups > 1) {
             PRINT_ERROR("momentumStateInit: grouped ASYM momentum templates are unsupported -- "
-                        "grouped momentum is a future #300 axis (spec §3)");
+                        "grouped momentum is a future #300 axis");
             exit(1);
         }
     }

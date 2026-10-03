@@ -828,7 +828,7 @@ void testMaxPool1dForwardBfpComparesDequantizedValues(void) {
 
     TEST_ASSERT_EQUAL_MEMORY_MESSAGE(kBfpMaxPoolExpectedForward, output->data,
                                      kBfpMaxPoolExpectedForward_len * sizeof(float),
-                                     "the winner's EXACT dequant goes to the FLOAT32 raw (D7)");
+                                     "the winner's EXACT dequant goes to the FLOAT32 raw (BFP D7)");
     TEST_ASSERT_EQUAL_INT32_ARRAY_MESSAGE(kBfpMaxPoolExpectedArgmax, (int32_t *)argmax->data,
                                           kBfpMaxPoolExpectedArgmax_len,
                                           "argmax must follow the DEQUANTIZED comparison, and "

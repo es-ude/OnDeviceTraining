@@ -247,8 +247,7 @@ static void requirePerTensorAsym(const asymQConfig_t *qc, const char *what) {
  * supersedes the [1, 30] #246 ceiling). */
 static void requireAsymComputeQBits(const asymQConfig_t *qc, const char *what) {
     if (qc->qBits == 0 || qc->qBits > 16) {
-        PRINT_ERROR("%s: qBits (%u) outside the ASYM range [1, 16] (D6)", what,
-                    (unsigned)qc->qBits);
+        PRINT_ERROR("%s: qBits (%u) outside the ASYM range [1, 16]", what, (unsigned)qc->qBits);
         exit(1);
     }
 }

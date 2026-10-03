@@ -80,7 +80,7 @@ static void requireFloat32Storage(const quantization_t *q, const char *slot, boo
     }
     if (q->type != FLOAT32) {
         PRINT_ERROR("batchNorm1dLayerInit: layerQuant.%s must be FLOAT32 (got dtype %d) -- "
-                    "BatchNorm1d is FLOAT32-only (#152 D3)",
+                    "BatchNorm1d is FLOAT32-only (#152)",
                     slot, (int)q->type);
         exit(1);
     }
@@ -93,7 +93,7 @@ static void validateLayerQuantForBatchNorm1d(const layerQuant_t *lq, bool affine
     }
     if (lq->forwardMath.type != ARITH_FLOAT32 || lq->propLossMath.type != ARITH_FLOAT32) {
         PRINT_ERROR("batchNorm1dLayerInit: forwardMath and propLossMath must be ARITH_FLOAT32 -- "
-                    "BatchNorm1d is FLOAT32-only (#152 D3)");
+                    "BatchNorm1d is FLOAT32-only (#152)");
         exit(1);
     }
     requireFloat32Storage(lq->outputQ, "outputQ", true);

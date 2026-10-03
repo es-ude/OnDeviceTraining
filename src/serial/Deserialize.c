@@ -419,7 +419,7 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
              * unconditionally (independent of numberOfElements) since it
              * does not depend on a live tensor's element count -- same
              * immediacy as the pre-v5 bridge's inline check. */
-            PRINT_ERROR("deserializeQConfig: ASYM file qBits %u outside [1, 16] (D6)",
+            PRINT_ERROR("deserializeQConfig: ASYM file qBits %u outside [1, 16]",
                         (unsigned)fileQBits);
             exit(1);
         }

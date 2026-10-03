@@ -443,7 +443,7 @@ static tensor_t *makeAsymTensor1D(size_t d0) {
     return initTensor(shape, quantizationInitAsym(8, HALF_AWAY), NULL);
 }
 
-/* #370, re-pinned for group-quant PR4 (D6): the zeroPoint slot is still i32
+/* #370, re-pinned for group-quant PR4 (group-quant D6): the zeroPoint slot is still i32
  * LE on the wire but now carries the code-domain uint16 zp; 40000 (> INT16_MAX,
  * < 2^16) is the widest-band class that must round-trip losslessly. The old
  * -72817 value-domain pin has no uint16 representation -- it re-derives as the
@@ -1583,7 +1583,7 @@ static void testDeserializeAsymRejectsZeroNumGroupsInWireConfig(void) {
     freeQuantization(floatQ);
 }
 
-/*! group-quant PR4 (Task 4, D6): a wire qBits outside [1, 16] must fail fast
+/*! group-quant PR4 (group-quant D6): a wire qBits outside [1, 16] must fail fast
  *  regardless of numGroups/numberOfElements -- the code-domain zp requires
  *  qBits <= 16 to fit u16 (see Quantization.h). Exercised through a real
  *  per-tensor ASYM tensor record (deserializeTensor, numberOfElements != 0)

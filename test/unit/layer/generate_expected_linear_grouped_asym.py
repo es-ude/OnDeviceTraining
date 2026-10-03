@@ -112,7 +112,7 @@ def main() -> int:
     affine = dequant_asym_grouped(codes, scales, zps, GROUP_SIZE)
     shifted = dequant_sym_grouped_f32(mantissas, scales, GROUP_SIZE).tolist()
     assert affine == shifted, (
-        "D5 violated: affine dequant != symmetric dequant of shifted mantissas")
+        "group-quant D5 violated: affine dequant != symmetric dequant of shifted mantissas")
 
     # (v) operand contract.
     assert all(abs(m) <= 2047 for m in mantissas), "mantissas exceed int12 operand bound"

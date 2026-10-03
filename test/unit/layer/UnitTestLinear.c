@@ -873,7 +873,7 @@ void testLinearBackwardPackedSymWeightGradFixedScaleFirstStore(void) {
                              "first-store must derive the grid, not keep the untouched scale=1.0");
     TEST_ASSERT_EQUAL_FLOAT_MESSAGE(
         scaleAfterCall1, scaleAfterCall2,
-        "FIXED_SCALE must carry the grid across calls (D1) -- a scale change here "
+        "FIXED_SCALE must carry the grid across calls (packed-grad D1) -- a scale change here "
         "means the weight-grad call site is reading the wrong accMode field");
 }
 

@@ -91,7 +91,7 @@ void initAsymQConfig(uint8_t qBits, roundingMode_t roundingMode, asymQConfig_t *
  * Quantization.h). qBits == 0 would underflow the sub-byte packer. */
 static void validateAsymQBits(uint8_t qBits, const char *what) {
     if (qBits == 0 || qBits > 16) {
-        PRINT_ERROR("%s: qBits (%u) outside the ASYM range [1, 16] (D6)", what, (unsigned)qBits);
+        PRINT_ERROR("%s: qBits (%u) outside the ASYM range [1, 16]", what, (unsigned)qBits);
         exit(1);
     }
 }

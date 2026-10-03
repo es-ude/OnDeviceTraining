@@ -740,7 +740,7 @@ def quantize_asym_nudged(values, q_bits: int):
     Self-checks: zp in [0, 2^b-1]; any 0.0 input decodes to EXACTLY 0.0;
     every in-band value round-trips within 0.5*scale (+1 ulp headroom).
     Returns (codes: list[int], scale: float, zp: int)."""
-    assert 1 <= q_bits <= 16, f"quantize_asym_nudged: qBits {q_bits} outside [1, 16] (D6)"
+    assert 1 <= q_bits <= 16, f"quantize_asym_nudged: qBits {q_bits} outside [1, 16]"
     x = torch.as_tensor(values, dtype=torch.float32).flatten()
     assert x.numel() > 0, "quantize_asym_nudged: empty buffer has no grid (n==0 is a C no-op)"
     q_max = 2 ** q_bits - 1

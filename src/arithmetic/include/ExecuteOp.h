@@ -147,7 +147,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target);
 static inline void executeOpValidateAccMode(outputMode_t mode, const char *context) {
     if (mode != OUT_ACC_DYNAMIC_RESCALE && mode != OUT_ACC_FIXED_SCALE) {
         PRINT_ERROR("%s: not a valid grad accumulate mode (got %d) -- config field never set? "
-                    "(PR3 spec, #261)",
+                    "(#269, #261)",
                     context, (int)mode);
         exit(1);
     }

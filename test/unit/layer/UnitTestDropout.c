@@ -367,7 +367,7 @@ void testDropoutForwardTrainingBfpSaturatesAtTheExponentCap(void) {
     int32_t expected[4] = {32767, 0, 0, 0};
     TEST_ASSERT_EQUAL_INT32_ARRAY_MESSAGE(expected, got, 4,
                                           "past the exponent cap the mantissa must SATURATE at "
-                                          "qMax (D6), never wrap or round out of int32 range");
+                                          "qMax (BFP D6), never wrap or round out of int32 range");
     bfpQConfig_t *outQC = output->quantization->qConfig;
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(3, outQC->exponents[0],
                                     "the derived exponent must clamp to the cap, not exceed it");

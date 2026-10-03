@@ -732,7 +732,7 @@ void testAvgPool1dForwardBfpBorrowedGroupedInput(void) {
 
     TEST_ASSERT_EQUAL_MEMORY_MESSAGE(kBfpAvgPoolExpectedForward, output->data,
                                      kBfpAvgPoolExpectedForward_len * sizeof(float),
-                                     "ARITH_BFP raw is FLOAT32 (D7) and the FLOAT32 OUT_WRITE "
+                                     "ARITH_BFP raw is FLOAT32 (BFP D7) and the FLOAT32 OUT_WRITE "
                                      "is a memmove -- the output must be bit-exact");
     freeQuantization(wireQ);
     freeTensor(output);

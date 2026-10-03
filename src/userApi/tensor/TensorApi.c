@@ -160,7 +160,7 @@ tensor_t *gradInit(tensor_t *param, quantization_t *gradQ, sparsity_t *sparsity)
         symQConfig_t *symQC = gradQ->qConfig;
         if (symQC->numGroups > 1) {
             PRINT_ERROR("gradInit: grouped SYM grad templates are unsupported -- "
-                        "grouped grads are a future #300 axis (spec §3)");
+                        "grouped grads are a future #300 axis");
             exit(1);
         }
     }
@@ -168,7 +168,7 @@ tensor_t *gradInit(tensor_t *param, quantization_t *gradQ, sparsity_t *sparsity)
         asymQConfig_t *asymQC = gradQ->qConfig;
         if (asymQC->numGroups > 1) {
             PRINT_ERROR("gradInit: grouped ASYM grad templates are unsupported -- "
-                        "grouped grads are a future #300 axis (spec §3)");
+                        "grouped grads are a future #300 axis");
             exit(1);
         }
     }

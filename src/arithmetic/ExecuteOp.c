@@ -189,7 +189,7 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
         }
         if (mode == OUT_ACC_FIXED_SCALE) {
             PRINT_ERROR("executeOp: no fit-preserving ASYM pack — ASYM grad targets "
-                        "accumulate under OUT_ACC_DYNAMIC_RESCALE only (PR3 spec, #261)");
+                        "accumulate under OUT_ACC_DYNAMIC_RESCALE only (#269, #261)");
             exit(1);
         }
         if (intermediate->quantization->type == FLOAT32) {
@@ -334,7 +334,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
                 "executeOp: grouped %s operand (numGroups=%zu) at inputs[%zu] reached an op "
                 "without a matching groupedSymOperandPos declaration — grouped tensors are "
                 "legal only where an op declares them (GEMM-family forward/dx weights, "
-                "optimizer param updates); everything else is a non-carrier (spec §3)",
+                "optimizer param updates); everything else is a non-carrier (#300)",
                 symQC != NULL ? "SYM" : "ASYM", operandNumGroups, i);
             exit(1);
         }

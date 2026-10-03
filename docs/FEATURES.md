@@ -2,16 +2,20 @@
 
 Snapshot of what the C framework can do today, per subsystem. This is a
 **living reference** — update it when a layer/optimizer capability lands or a
-gate is lifted. Every row was audited against source; issue numbers point at the
-tracking work. Legend: ✓ = supported · ~ = supported via a fallback (see note) ·
-✗ = not supported / gated · n/a = not applicable (e.g. layer has no parameters).
+gate is lifted. Every row was re-audited against source on 2026-10-03 (develop
+`268f73a0`); issue numbers point at the tracking work. Legend: ✓ = supported ·
+~ = supported via a fallback (see note) · ✗ = not supported / gated · – = not
+available for this layer type (FLOAT32-only layer, or no parameters to train) ·
+n/a = not applicable (e.g. layer has no parameters).
 
 Central axis: **arithmetic (compute) and storage are independent knobs.** A layer
 declares compute per op as a by-value `arithmetic_t {ARITH_FLOAT32 | ARITH_SYM_INT32 |
 ARITH_BFP, roundingMode}` (`forwardMath`, GEMM family also `weightGradMath`/`biasGradMath`,
 dx op `propLossMath`); storage is the produced-wire `quantization_t*`
 (`outputQ`/`propLossQ`) and the grad-storage knobs. `SYM_INT32` is a **compute** format,
-never durable grad storage (#261); `SYM`/`ASYM` are packed **storage** formats. `BFP`
+never durable grad storage (#261 — design policy, not gated in code: `gradInitSymInt32`
+is public and `accumulateOut` keeps a discouraged SYM_INT32-target arm); `SYM`/`ASYM`
+are packed **storage** formats. `BFP`
 (block-floating-point, epic PR1–PR7) is a packed **storage** format that — unlike
 `SYM`/`ASYM` — also has a native **compute** arithmetic: since epic PR2,
 `arithmeticFromQuantization` derives `ARITH_BFP` for BFP storage (the documented breaking
@@ -30,8 +34,9 @@ LayerNorm/GroupNorm `ARITH_BFP` forward AND backward (float32 stats/normalize/af
 from exact dequants, one pack at the produced wire —
 `docs/conventions/arithmetic-bfp.md` §5.8), so a uniform-BFP model CONTAINING norms
 trains end to end with no pins. Active training paths are FLOAT32 and SYM_INT32
-end to end, plus BFP native forward+backward; SYM/ASYM/BOOL storage and grouped BFP
-grad/state storage are partial/unsupported.
+end to end, plus BFP native forward+backward; packed SYM/ASYM serve as param (GEMM
+family, requantize route), grad and optimizer-state storage. BOOL storage (masks
+only) and grouped grad/optimizer-state templates (SYM/ASYM/BFP) are unsupported.
 
 ## Layers (`layerType_t`, 14 total)
 
@@ -40,10 +45,10 @@ grad/state storage are partial/unsupported.
 | `LINEAR` | ✓ | ✓ | ✓ native (all 4 ops) | ✓ native (all 4 ops) | ~ requantize path (#270) | ✓ SYM/ASYM/BFP | ✓ |
 | `CONV1D` | ✓ | ✓ | ✓ native (all 4 ops) | ✓ native (all 4 ops) | ~ requantize path (#270) | ✓ SYM/ASYM/BFP | ✓ |
 | `CONV1D_TRANSPOSED` | ✓ | ✓ | ✓ native (all 4 ops) | ✓ native (all 4 ops) | ~ requantize path (#270) | ✓ SYM/ASYM/BFP | ✓ |
-| `LAYERNORM` | ✓ | ✓ | ✓ native (fwd+bwd) | ✓ native (fwd+bwd) | ~ SYM_INT32/BFP | ~ SYM/ASYM/BFP (funnel bwd only) | ✓ |
-| `GROUPNORM` | ✓ | ✓ | ✓ native (fwd+bwd) | ✓ native (fwd+bwd) | ~ SYM_INT32/BFP | ~ SYM/ASYM/BFP (funnel bwd only) | ✓ |
+| `LAYERNORM` | ✓ | ✓ | ✓ native fwd, ~ float-core bwd | ✓ native (fwd+bwd) | ~ SYM_INT32/BFP | ~ SYM/ASYM/BFP (SYM_INT32/BFP bwd only) | ✓ |
+| `GROUPNORM` | ✓ | ✓ | ✓ native fwd, ~ float-core bwd | ✓ native (fwd+bwd) | ~ SYM_INT32/BFP | ~ SYM/ASYM/BFP (SYM_INT32/BFP bwd only) | ✓ |
 | `BATCHNORM1D` | ✓ (affine) | ✓ | – FLOAT32 only | – FLOAT32 only | – | – | ✓ |
-| `RELU` | – | ✓ | ✓ native (fwd+bwd) | ✓ packed-transparent | n/a | n/a | ✓ |
+| `RELU` | – | ✓ | ✓ scale-transparent | ✓ packed-transparent | n/a | n/a | ✓ |
 | `SOFTMAX` | – | ✓ | ~ dequant-to-float | ✓ native (fwd+bwd, i-exp + shift knob) | n/a | n/a | ✓ |
 | `FLATTEN` | – | ✓ | ✓ scale-transparent | ✓ packed-transparent | n/a | n/a | ✓ |
 | `DROPOUT` | – | ✓ | ✓ scale-transparent | ~ float bridge (D4) | n/a | n/a | ✓ |
@@ -71,10 +76,18 @@ Notes on the qualified cells:
   has `>= 2` rows, or use rank-3 `[C, T >= 2]` samples.
 - **`SYM_INT32 arith`** — *native* means an integer kernel selected by the op's
   `arithmetic_t.type` and routed through the `executeOp` funnel (raw int32 mantissas,
-  width-restored at the producer). *scale-transparent* (Flatten/Dropout) copies int
-  values verbatim and folds any factor into the wire scale, bypassing the funnel.
-  *dequant-to-float* (Softmax backward) converts operands to FLOAT32, computes, and
-  requantizes — no integer arithmetic. Pools (`MAXPOOL1D`/`AVGPOOL1D`/
+  width-restored at the producer). *scale-transparent* (Flatten/Dropout/Relu) bypasses
+  the funnel and carries the wire scale through: Flatten copies int values verbatim,
+  Dropout copies the surviving ones and folds `1/(1−p)` into the scale, Relu
+  clamps/masks negative mantissas at an unchanged scale — what is
+  transparent for Relu is the scale, not the codes. *dequant-to-float* (Softmax forward
+  AND backward) converts operands to FLOAT32, computes, and requantizes — no integer
+  arithmetic (the forward via the funnel's prologue/epilogue with a hardcoded
+  `ARITH_FLOAT32` op, the backward outside the funnel). LayerNorm/GroupNorm *native* is
+  the forward (int32 mantissa-sum stats via Reduce, funnel-routed); their SYM_INT32
+  backward computes in float from dequantized operands and requantizes dx into the
+  int32 `propLoss` itself, outside the funnel — only the dgamma/dbeta increments go
+  through the funnel (ACC). Pools (`MAXPOOL1D`/`AVGPOOL1D`/
   `ADAPTIVE_AVGPOOL1D`) carry integer-exact funnel arms (#205): MaxPool selects
   mantissas (scale copy), AvgPool folds the constant divisor into the scale
   (`s_out = s_in/K`), AdaptiveAvgPool uses rounded integer division (half-away) at an
@@ -96,9 +109,13 @@ Notes on the qualified cells:
   conversionMatrix), not an arithmetic layer — it deliberately changes dtype/scale.
 - **Quant params** — trainable weight/bias storage. The Linear/Conv factories allocate
   FLOAT32 params only (`requireFloat32` init gate, by design — #270): random init is
-  defined on floats, so SYM_INT32-native params are reached by FLOAT32 init followed by
-  an in-place requantize (`requantizeTensorInPlace()`, see `examples/mixed_width_mlp`) —
-  the layers' forward/backward SYM kernels then run on the native storage. **LayerNorm
+  defined on floats, so non-FLOAT32 params on the GEMM family are reached by FLOAT32
+  init followed by an in-place requantize (`requantizeTensorInPlace()`) — hence "~".
+  That route reaches SYM_INT32 (`examples/mixed_width_mlp`), packed SYM/ASYM per-tensor
+  or grouped (`train_c_har_classifier_sym`; the funnel converts them to the op's compute
+  image, grouped weights only at the declared GEMM forward/dx and optimizer-update
+  carrier positions) and BFP (`train_c_har_classifier_bfp`; required, since an
+  `ARITH_BFP` GEMM op fail-fasts on non-BFP weights). **LayerNorm
   and GroupNorm** take the constant-fill route instead: gamma/beta may be allocated
   SYM_INT32 or BFP directly (no requireFloat32 gate — #270 covers RANDOM init, and the
   constant fills gamma = 1 / beta = 0 are exact grid points on any BFP grid), but
@@ -106,18 +123,22 @@ Notes on the qualified cells:
   geometry is Decision-5-derived (BFP epic PR5): the factory honors the storage
   template's `groupSize` only, derives `numGroups` from the parameter's own element
   count, normalizes `groupSize == N` to the per-tensor `{1,0}` config, and fail-fasts
-  on a non-divisor (`docs/conventions/arithmetic-bfp.md` §5.8 R-N6). No layer supports
-  SYM/ASYM native param storage. Tests
+  on a non-divisor (`docs/conventions/arithmetic-bfp.md` §5.8 R-N6). BatchNorm1d
+  params are FLOAT32-only. Tests
   that need fixture-built SYM_INT32-native params use the shared `BorrowedLayer.h`
   builders (`test/unit/support/`).
 - **Quant grads** — the `weightGradStorage`/`biasGradStorage` knobs in `layerQuant_t`
   (plus `weightGradAccMode`/`biasGradAccMode`). Default is FLOAT32 everywhere; SYM and
-  ASYM packed grad storage work for the four trainable layers via `gradInit`→`getQLike`
-  (BOOL rejected, #269). Accumulate epilogue: SYM target honors both `OUT_ACC_FIXED_SCALE`
+  ASYM packed grad storage work for the five non-BatchNorm trainable layers
+  (Linear/Conv1d/Conv1dTransposed/LayerNorm/GroupNorm; BatchNorm1d grads are
+  FLOAT32-only) via `gradInit`→`getQLike` (BOOL rejected, #269). `gradInit` rejects a
+  grouped SYM, ASYM or BFP template (grads are per-tensor, #300 axis), and a SYM/ASYM/
+  SYM_INT32 grad target wider than `ODT_SYM_GRAD_QMAXBITS` (16) fail-fasts at its first
+  accumulate (`executeOp`'s ACC epilogue; no such width gate on the BFP arm). Accumulate
+  epilogue: SYM target honors both `OUT_ACC_FIXED_SCALE`
   and `OUT_ACC_DYNAMIC_RESCALE`; ASYM honors `DYNAMIC_RESCALE` only. **LayerNorm/GroupNorm
-  caveat**: packed/BFP grads are only writable on the funnel-routed backward paths
-  (SYM_INT32 and, since epic PR5, `ARITH_BFP` — dgamma/dbeta land through the funnel
-  ACC there) — their FLOAT32 backward raw-casts grads (and the dx wire) and rejects
+  caveat**: packed/BFP grads are only writable on the SYM_INT32 and (since epic PR5)
+  `ARITH_BFP` backward paths, whose dgamma/dbeta land through the funnel ACC — their FLOAT32 backward raw-casts grads (and the dx wire) and rejects
   packed AND BFP grad storage at the first backward (the #261 hole; the factory rules
   deliberately do not close it — `docs/conventions/arithmetic-bfp.md` §5.8 R-N6 gap
   (a)). **BFP grad storage (epic PR3 Task 6; norms epic PR5)** — a
@@ -154,13 +175,21 @@ Notes on the qualified cells:
   (#380 PR2) is shipped: backward truncates at the deepest trainable layer — dx
   wires below it, and the deepest trainable layer's own dx, are neither computed
   nor allocated; trace emits backward events only for the executed range.
-  The cut is at the deepest **parameter** layer: leading non-param layers
+  The cut is at the deepest **non-frozen parameter** layer (`deepestTrainableIndex`;
+  a `noAffine` BatchNorm1d has no parameters and never counts): leading non-param layers
   (Flatten/Pool/Dropout/Quant — the repo's standard model heads) no longer run
   backward at all, and their previously-fired `agrad` events (e.g. kws_raw's
   `pool0` probe) vanish from traces; fully-trainable param-first models save
   layer-0's previously wasted dx. The canonical pretrain → freeze → fine-tune
-  flow (#380 PR3) ships as `examples/har_classifier/train_c_finetune.c`,
-  enabled by the tolerant grad-presence deserialize (see Serialization).
+  flow (#380 PR3) ships as `examples/har_classifier/train_c_finetune.c`
+  (`train_c_har_classifier_finetune`), enabled by the tolerant grad-presence
+  deserialize (see Serialization).
+- **Micro-batch scope** — the SYM_INT32/BFP columns hold at micro-batch size 1 only:
+  training at `microBatchSize > 1` and evaluation at `evalMicroBatchSize > 1` require
+  an all-FLOAT32 forward model (`stackGatherRequireFloat32Model`, fail-fast; #152,
+  #468). Dropout fails fast when *training* at m > 1 (its caller-allocated mask holds
+  one sample's elements; pinned by `testStackedDropoutFailsFastOnItsMaskCount`);
+  stacked evaluation is unaffected (no mask in eval mode).
 
 ## Optimizer (`optimizerType_t`)
 
@@ -191,9 +220,10 @@ Notes on the qualified cells:
   above — `momentStateInit` rejects a grouped BFP `momentQuant` template ("#300 axis").
   `updateMath` is
   FLOAT32-only, fail-fast at both create time and every `adamWStep` call (the #310
-  pattern). `stepCount` (bias-correction exponent `t`) is **not** checkpointed —
-  `StateDictApi` serializes only weights/biases, so a resumed run restarts bias
-  correction at `t=1` (#350). The `m`-update's `lerp` bit-parity holds only for
+  pattern). `stepCount` (bias-correction exponent `t`) is **not** checkpointed — no
+  optimizer state is persisted anywhere (SGD momentum, AdamW `m`/`v`, `stepCount`;
+  the ODTS model format covers params/grads/buffers only, `StateDictApi` is
+  load-only), so a resumed run restarts bias correction at `t=1` (#350). The `m`-update's `lerp` bit-parity holds only for
   `beta1 > 0.5` (documented, not branched — validation still admits `[0, 1)`).
   Scheduler-compatible via the same `getLr`/`setLr` vtable row as SGD. Exercised by
   the `train_c_har_classifier_adamw` example.
@@ -214,24 +244,29 @@ Notes on the qualified cells:
   the epilogue never leaves it mutated.
 - **Quant grads** — ✓. The update kernels route through `executeOp` like every other
   op in the framework: the funnel dispatches per operand's ACTUAL dtype, so FLOAT32 /
-  SYM_INT32 / SYM / ASYM grads are all consumed with no optimizer-level dtype switch.
-  INT32 and BOOL grad storage are rejected at optimizer-create time.
+  SYM_INT32 / SYM / ASYM / per-tensor BFP grads are all consumed with no
+  optimizer-level dtype switch. INT32 and BOOL grad storage are rejected at
+  optimizer-create time.
 - **Quant params** — dtype dispatch is a funnel property, not a whole-optimizer
   `qtype`: the OUT_WRITE epilogue requants into whatever dtype each parameter tensor
-  actually carries, so FLOAT32/SYM_INT32/SYM/ASYM params all round-trip through the
-  same code path. FLOAT32 and packed SYM are exercised today (har_classifier
-  trainers); SYM_INT32 and ASYM are implied by the generic executeOp/conversionMatrix
-  dispatch but not yet exercised by any example. Support is bounded only by what
-  `conversionMatrix` covers for that dtype (BOOL has no conversion cell in either
-  direction).
+  actually carries, so FLOAT32/SYM_INT32/SYM/ASYM/BFP params all round-trip through the
+  same code path (grouped params included). All are
+  exercised by examples: FLOAT32 (the default trainers), SYM_INT32 (`mixed_width_mlp`), packed
+  SYM and ASYM per-tensor + grouped (`train_c_har_classifier_sym`, `WEIGHT_DTYPE`/
+  `GROUP_MODE`), BFP (`train_c_har_classifier_bfp`). Support is bounded only by what
+  `conversionMatrix` covers for that dtype (BOOL has no cross-dtype conversion cell).
 - **Features**: learning rate, coupled L2 weight decay (SGD) or decoupled weight
   decay (AdamW), PyTorch-convention momentum (SGD: `v = μ·v + g`, `p -= lr·v`; no
   Nesterov, no dampening — NOT classic Polyak heavy ball: the trajectories
   coincide only at constant LR, and under an LR schedule the effective momentum
   term is rescaled by `lr_t/lr_{t-1}`, exactly as in `torch.optim.SGD`),
-  per-parameter momentum state (2 states for Linear/Conv/ConvT/LayerNorm, 0 for the
-  rest, and 0 for every parameter when `momentumFactor == 0`), dtype-aware
-  `scaleOptimizerGradients` (O(1) scale fold for quantized grads), and
+  optimizer state per trainable parameter (SGD_M: 1 momentum buffer, 0 when
+  `momentumFactor == 0`; AdamW: 2, `m`/`v`) over the collected parameter slots
+  (Linear/Conv1d/Conv1dTransposed: 2, or 1 when bias-less; LayerNorm/GroupNorm: 2;
+  BatchNorm1d: 2 if `affine`, else 0; every other layer and every frozen layer: 0),
+  dtype-aware `scaleOptimizerGradients` (O(1) scale fold for SYM_INT32/SYM/ASYM grads;
+  O(n) value-domain repack for BFP via `scaleBfpTensorInPlace` — a non-finite factor
+  warns and propagates on every other dtype but hard-fails on BFP), and
   `optimizerZeroGrad` — shared across both rows. No bias-correction on SGD; AdamW
   has PyTorch-standard bias correction (`bc1`/`bc2`).
 - **Global-norm gradient clipping** (`optimizerClipGradNorm(optim, maxNorm)`, #382,
@@ -240,11 +275,11 @@ Notes on the qualified cells:
   norm) — FLOAT32 sums squares over elements, SYM_INT32 folds to
   `scale² · Σ mantissa²` per tensor (int32 mantissas widen to double before
   squaring, no int64); `clipCoef = maxNorm / (totalNorm + 1e-6)`, applied via
-  `scaleOptimizerGradients` (so quantized grads get the same O(1) scale fold) only
+  `scaleOptimizerGradients` (so a SYM_INT32 grad gets the same O(1) scale fold) only
   when `clipCoef < 1.0` — `maxNorm ≥ totalNorm` is a no-op, grads stay
   byte-untouched. Returns `totalNorm` (pre-clip, torch convention). Call between
   grad accumulation/mean-scaling and the optimizer step. **v1 limitation**: packed
-  SYM/ASYM grad storage fails fast (PRINT_ERROR + exit(1)) — computing a norm needs
+  SYM/ASYM **and BFP** grad storage fails fast (PRINT_ERROR + exit(1)) — computing a norm needs
   unpacked element values, which the O(1) scale-fold trick (that works for
   *applying* an already-known coefficient) does not provide; unpacking-on-read is a
   follow-up, not implemented here.
@@ -291,12 +326,15 @@ Notes on the qualified cells:
   `index * batchSize`; the `datasetSize % batchSize` tail is dropped every
   epoch, so a growing batch drops a growing tail). Wired through
   `trainingRunOptions_t` (`lrScheduler`, `bsScheduler`, `callback` — all
-  NULLable — `stopOnNonFiniteLoss`, defaulting to `false`, and
-  `microBatchSize`, 0 meaning 1, see **Training loop** below;
+  NULLable — `stopOnNonFiniteLoss`, defaulting to `false`,
+  `microBatchSize`, 0 meaning 1, and `evalMicroBatchSize`, 0 inheriting
+  `microBatchSize`, see **Training loop** below;
   `trainingRun(..., options)` with `NULL` = the old defaults): per
   epoch the callback receives `epochInfo_t` (`epoch`, `trainLoss`, `batchSize`,
   `parameterUpdates`, `learningRate` — the values the epoch trained with),
-  then `lrSchedulerStep`, then `bsSchedulerStep` last. Init guards: NULL
+  then `lrSchedulerStep`, then `bsSchedulerStep` last — unless
+  `stopOnNonFiniteLoss` fires, which breaks the loop right after the callback, so
+  neither scheduler steps for the diverged epoch. Init guards: NULL
   loader, `gamma` non-finite or `<= 0`, `stepSize < 1`, `maxBatchSize` below
   the loader's initial batch, above `UINT16_MAX`, or above the loader's
   dataset size. `trainingRun` guards: a `bsScheduler` wired to a loader other
@@ -305,7 +343,11 @@ Notes on the qualified cells:
   loader `batchSize` not divisible by `microBatchSize`, or — with a
   `bsScheduler` and `microBatchSize > 1` — any batch the schedule will set for
   epochs `1..numberOfEpochs-1` not divisible by it (the message names the
-  first failing epoch; #152) — all `PRINT_ERROR` + `exit(1)` before epoch 0.
+  first failing epoch; #152), plus the eval pre-flight: an eval loader that
+  yields no batch (dataset size `<` its `batchSize`) or whose first batch is
+  empty, a non-FLOAT32 forward model with `evalMicroBatchSize > 1`, and an
+  untracked BatchNorm1d whose eval chunks would hold `< 2` values per channel
+  (#468) — all `PRINT_ERROR` + `exit(1)` before epoch 0.
   `bsSchedulerStep` fails fast (`PRINT_ERROR` +
   `exit(1)`) when `gamma^lastEpoch` leaves the double range (exact target 0 or
   inf) or the compensated LR is not finite in float; `trainingEpochDefault`
@@ -318,7 +360,10 @@ Notes on the qualified cells:
   non-finite softmax (`#446`); `trainingRunOptions_t.stopOnNonFiniteLoss` is
   the separate, opt-in run-level stop built on top of that — it ends
   `trainingRun` after the first epoch whose train or eval loss is non-finite,
-  rather than running the full `numberOfEpochs`. The harness sets it,
+  rather than running the full `numberOfEpochs`. `trainingRun` returns
+  `trainingRunResult_t {finalTrainLoss, finalEvalStats, epochsCompleted,
+  stoppedOnNonFiniteLoss}` describing the last completed epoch (the diverged one
+  when stopped). The harness sets `stopOnNonFiniteLoss`,
   snapshots the optimizer's parameters into a static arena whenever the
   validation loss strictly improves, and
   after training evaluates the test set on that snapshot before restoring the
@@ -356,8 +401,10 @@ Notes on the qualified cells:
   every parameter record leads with a `u8` grad-presence byte: frozen layers
   (`parameter->grad == NULL`) write 0 and the record carries the param tensor only.
   Deserialize is TOLERANT of a presence/skeleton mismatch (#380 PR3): file hasGrad=1
-  into a frozen skeleton parses-and-discards the grad record (`skipSerializedTensor`,
-  no allocation, stream stays in sync for the next record) and file hasGrad=0 into a
+  into a frozen skeleton parses-and-discards the grad record (`skipSerializedTensor`:
+  the payload is skipped by `fseek`, but a SYM/ASYM/BFP qconfig is parsed into a
+  small heap-backed scratch config, freed again; stream stays in sync for the next
+  record) and file hasGrad=0 into a
   trainable skeleton leaves its already-zeroed grad untouched — this path requires a
   seekable stream (fseek/ftell). Since v4 (group-quant epic) the SYM qconfig record is
   `u32 numGroups`, `u32 groupSize`, `f32 scales[numGroups]`, `u8 qBits`, `u8 rounding`.
@@ -386,17 +433,24 @@ Notes on the qualified cells:
   arithmetic forwardMath, arithmetic propLossMath, quantization outputQ,
   quantization propLossQ`. The reader requires `numChannels`/`affine`/`track`
   to equal the skeleton's (fail fast otherwise) and re-validates `eps`
-  (finite, > 0), a VALUE `momentum` (finite, in `[0, 1]`), every `runningMean`
-  value (finite), and every `runningVar` value (finite, >= 0) before
-  overwriting; pre-v6 files fail at the version check (no back-compat shim,
+  (finite, > 0) and a VALUE `momentum` (finite, in `[0, 1]`) before overwriting
+  them; every `runningMean` value (finite) and `runningVar` value (finite, >= 0) is
+  validated as it is read, i.e. after it was written into the buffer (the run exits
+  either way); pre-v6 files fail at the version check (no back-compat shim,
   established policy).
-- **Contract** — deserialize **fills a pre-constructed model in place** (no allocation
-  in the serial path); the caller must build a matching model first. A tensor record
-  whose file dtype, rank, or payload size mismatches the pre-built skeleton fail-fasts
-  before any overwrite.
-- **Gaps** — `serializeSparsity` is a TODO stub (shape is fully serialized). No
-  save-to-disk of a full model exists above this layer — `StateDictApi` is
-  weight-**load** only.
+- **Contract** — deserialize **fills a pre-constructed model in place** (no
+  model/tensor allocation in the serial path — only a qconfig's group arrays,
+  `scales[]`/`zeroPoints[]`/`exponents[]`, are freed and re-reserved on a
+  `numGroups` mismatch); the caller must build a matching model first. A tensor
+  record whose file dtype or rank mismatches the skeleton fail-fasts before any
+  overwrite; the payload-size check runs after the record's dims and qconfig were
+  already written into the skeleton, so it protects only the data buffer. Every
+  failure is `PRINT_ERROR` + `exit(1)`.
+- **Gaps** — `serializeSparsity` is a TODO stub (shape is fully serialized). The
+  full-model save is `serializeModel(model, size, FILE*)` (`Serialize.h`, used by
+  `train_c_finetune.c` and `train_c_sym.c`'s ODTS round-trip demo); there is no
+  userApi save wrapper, `StateDictApi` is weight-**load** only, and optimizer state
+  is never serialized.
 
 ## Continual learning (`src/continual_learning/`, `src/userApi/continual_learning/`)
 
@@ -423,11 +477,20 @@ checkpointing, limitations, literature).
   samples per eligible class after the real batch, so the optimizer's
   existing `batch->size` MEAN divisor scales them in automatically. Must be
   freed with `freeReplayDataLoader`, **never** `freeDataLoader` (the
-  wrapper borrows the base loader's fields).
+  wrapper borrows the base loader's fields). `replayLoaderConfig_t.mode`
+  (`replayMode_t`) picks what is appended: `REPLAY_MODE_PPCA_SAMPLE` (default,
+  zero-init), `REPLAY_MODE_CLASS_MEAN` (r copies of the running class centroid —
+  one-vector-per-class baseline) or `REPLAY_MODE_EXEMPLAR` (uniform draws from a
+  caller-owned raw-sample `exemplarBuffer_t`, `ExemplarBuffer.h`:
+  `exemplarBufferCreate`/`exemplarBufferAdd`/`freeExemplarBuffer` — the first-K
+  raw-rehearsal baseline). End-to-end example: `train_c_continual`
+  (`examples/har_classifier`).
 - **Storage vs. arithmetic** — same split as layers: `meanQ`/`basisQ`/
-  `eigvalsQ` (FLOAT32/SYM/ASYM) are independent per-tensor storage configs;
-  compute (`mergeMath`/`streamMath`/`sampleMath`) is v1 `ARITH_FLOAT32`
-  only (`ppcaValidateFloatArith` fail-fasts on `ARITH_SYM_INT32`).
+  `eigvalsQ` (FLOAT32/SYM/ASYM/per-tensor BFP) are independent per-tensor storage
+  configs; compute (`mergeMath`/`streamMath`/`sampleMath`) is v1 `ARITH_FLOAT32`
+  only (`ppcaValidateFloatArith` fail-fasts on every other arithmetic, incl.
+  `ARITH_SYM_INT32` and `ARITH_BFP`); the eigendecomposition is the float Jacobi
+  solver `jacobiEigSymFloat32` (`src/arithmetic/JacobiEig.c`).
   FLOAT32-active/packed-at-rest (SYM/ASYM@8 via `executeConvert`) is the
   recommended pattern.
 - **Serialization** — `ppcaReplaySetSerialize`/`ppcaReplaySetDeserialize`
@@ -437,9 +500,13 @@ checkpointing, limitations, literature).
 
 ## Other subsystems
 
-- **Loss functions** — `MSE` (FLOAT32 + SYM_INT32, fwd+bwd) and `CROSS_ENTROPY`
-  (fwd FLOAT32 + SYM_INT32; bwd FLOAT32 + SYM_INT32 + ASYM — the quantized arms
-  are fake-quant, #206: dequant, float core, requant). CE backward is the **fused softmax+CE
+- **Loss functions** — `MSE` (FLOAT32 + SYM_INT32 + BFP, fwd+bwd) and `CROSS_ENTROPY`
+  (fwd FLOAT32 + SYM_INT32 + BFP; bwd FLOAT32 + SYM_INT32 + ASYM + BFP) — every
+  non-FLOAT32 arm of both losses is fake-quant (#206; BFP since epic PR4): dequant,
+  float core, requant. `lossConfig_t {funcType, backwardReduction, classWeights}`;
+  `reduction_t` is `REDUCTION_SUM | REDUCTION_MEAN`, `defaultLossConfig(funcType)`
+  sets `backwardReduction = REDUCTION_MEAN`, `classWeights = NULL`; the forward
+  reduction is a per-call argument (`trainingRun` hardcodes MEAN). CE backward is the **fused softmax+CE
   gradient** (`softmaxOutput − target`), and the training loop skips the Softmax layer
   in backprop. Softmax normalizes **per row** (#152: row = axis 0 over all later axes, a
   rank-1 input is one row; the row count is the storage `dims[0]`, and an input with more
@@ -454,18 +521,22 @@ checkpointing, limitations, literature).
 - **Training loop** — `trainingRun` → epoch → batch → pluggable `calculateGradsFn`.
   A "batch" is gradient accumulation over microbatches of `microBatchSize` rows
   (`trainingRunOptions_t`, default 1; m > 1 stacks m samples into one `[m, ...]`
-  forward/backward, FLOAT32 only, `b % m == 0` enforced, Dropout fails fast at
-  m > 1; #152). Evaluation stacks up to `evalMicroBatchSize` rows per call (0
+  forward/backward, FLOAT32 only, `b % m == 0` enforced, Dropout fails fast when
+  training at m > 1; #152). Evaluation stacks up to `evalMicroBatchSize` rows per call (0
   inherits `microBatchSize`; ragged last chunk; FLOAT32 forwards; #468); an
   untracked BatchNorm1d is evaluable once its chunks have >= 2 values per
   channel. Metrics: loss, accuracy,
   macro precision/recall/F1, and a caller-owned confusion matrix
-  (`epochStats_t` / `classificationReport_t`). Three eval entry points.
+  (`epochStats_t` / `classificationReport_t`). Three epoch-level eval entry points
+  (`evaluationEpoch` / `evaluationEpochWithMetrics` / `evaluationEpochWithReport`)
+  plus the per-sample, never-stacking `evaluationBatch` primitive.
   `calculateGradsSequential`'s backward pass truncates at `deepestTrainableIndex`
   — the closest-to-input layer whose params still train (#380 PR2); when no
   layer trains, the whole backward pass (loss-grad seed + layer loop) is
   skipped, though the forward loss value is always computed.
-- **Data loading** — `.npy` (`<f4`/`<i4`) and CSV; `DataLoader` with batch + shuffle
+- **Data loading** — `.npy` (`<f4`/`<i4`) datasets (plus a generic CSV row
+  reader/writer helper, `src/csv/include/CSVHelper.h`, not wired as a `DataLoader` source);
+  `DataLoader` with batch + shuffle
   (once at init) + opt-in per-epoch reshuffle (`dataLoaderSetReshufflePerEpoch`,
   default off, #381): `trainingRun` calls `dataLoaderReshuffle` on the TRAIN
   loader only, skipping epoch 0 (already permuted by init) and never touching
@@ -476,7 +547,9 @@ checkpointing, limitations, literature).
   dedicated MNIST loader in `src/` (examples preprocess to `.npy`).
 - **RNG** — global XorShift32, seedable and reproducible, **byte-mirrored in Python**
   and CI-verified. Drives weight init, the Dropout Bernoulli mask (swappable fill hook),
-  and DataLoader shuffle.
+  and DataLoader shuffle. A context-passing variant (`rng32_t` + `rngNextFloatCtx`,
+  same draw math on caller-owned state) serves streams that must not perturb the
+  global one — PPCA/exemplar replay sampling.
 - **Observer / trace** — `traceSink_t` callback facility (not a layer) that hands
   fwd/activation-grad/loss-grad/param tensors to a caller-supplied sink; used for
   layer-by-layer C-vs-PyTorch parity debugging (`npyDumpSink`, kws_raw harness).
@@ -523,12 +596,17 @@ checkpointing, limitations, literature).
   elsewhere) compiles in per-element instruction
   counters (`getLerpInstructionCounter` et al.); no caller/estimator consumes them yet —
   this is the first library wired for the mechanism (#351 tracks enabling it on the
-  legacy `Square`/`Matmul` libs, which predate it and have known blockers).
+  legacy `Square`/`Matmul` libs, which predate it and have known blockers; latent
+  `#ifdef TRACK_INSTRUCTIONS` counters also exist in `Add`/`Sub`/`Mul`/`Div`, likewise
+  not wired to the cache var).
 - **Quantization machinery** — the 4-phase `executeOp` funnel + `executeConvert`, a
-  7×7 `conversionMatrix` (every FLOAT32/INT32/SYM_INT32/SYM/ASYM/BFP pair; BOOL
-  unsupported in every direction), grad-accumulate modes, and `quantizeFloatToAsym` as
-  the single `*→ASYM` helper. `symQConfig_t` is **always-array** (group-quant epic, spec
-  `docs/superpowers/specs/2026-07-28-group-quantization-design.md`): `scales[numGroups]`
+  7×7 `conversionMatrix` (every FLOAT32/INT32/SYM_INT32/SYM/ASYM/BFP pair; no BOOL
+  cross-dtype conversion — only the BOOL→BOOL packed same-type copy that
+  `convertTensor` handles before the matrix), grad-accumulate modes, and
+  `quantizeFloatToAsym` as the single `*→ASYM` helper. `symQConfig_t` is
+  **always-array** (group-quant epic, spec
+  `docs/superpowers/specs/2026-07-28-group-quantization-design.md` — a maintainer-local
+  design spec, not in the repository): `scales[numGroups]`
   with per-tensor = numGroups 1 / groupSize 0 sentinel. Groups (numGroups > 1) are
   SHIPPED for creation (`quantizationInitSymGrouped`/`requantizeTensorInPlace`),
   FLOAT32↔SYM conversion, the `executeOp` grouped-operand gate, the ODTS/ODTR serial
@@ -556,7 +634,8 @@ checkpointing, limitations, literature).
   and momentum stay per-tensor (funnel-enforced); `symInt32QConfig_t` (compute/wires)
   stays scalar by design.
 - **BFP** (`qtype_t BFP`, block-floating-point epic PR1–PR7, spec
-  `docs/superpowers/specs/2026-07-29-block-floating-point-design.md`) — packed
+  `docs/superpowers/specs/2026-07-29-block-floating-point-design.md` — maintainer-local,
+  not in the repository; the in-repo contract is `docs/conventions/arithmetic-bfp.md`) — packed
   two's-complement mantissas + per-group `u8` biased exponents (`bfpQConfig_t`), the
   same always-array group shape as `symQConfig_t`. The dtype-core (epic PR1) ships:
   the **complete 7×7 matrix** (all 10 `BFP` cross cells + the `[BFP][BFP]`
@@ -648,9 +727,28 @@ checkpointing, limitations, literature).
   only), `LayerWeightsApi`, `ModelValidationApi` (near-stub after PR1b.2 retired the
   SYM-producer rule), `LayerQuant` uniform config, and `StorageApi` as the single
   allocation seam (alloc primitives only in `src/userApi/`).
-- **Examples** — 7 end-to-end: `har_classifier` (incl. the pretrain → freeze →
-  fine-tune flow `train_c_finetune`, #380 PR3), `ecg_anomaly_ae`, `mnist_mlp`,
-  `mnist_cnn`, `kws_mfcc`, `kws_raw` (+ trace harness), `mixed_width_mlp`.
+- **Memory profiling** — with `ODT_MEM_PROFILE` (ON in the `unit_test_debug`,
+  `unit_test_asan`, `unit_test_ubsan` (inherited) and `examples_memprofile` presets)
+  `StorageApi` counts live `reserveMemory` bytes (`memProfileReset`/`memProfileCurrentBytes`/
+  `memProfilePeakBytes`/`memProfileMark`; no-ops returning 0 otherwise).
+  `MemProfile.h` adds host-only apparatus: `measurePeakStackBytes` (runs a function
+  on a sentinel-painted pthread stack, returns the high-water mark) and
+  `memProfileRssPeakKb` (process peak RSS). Consumed by the HAR trainers
+  (`examples/har_classifier/mem_instrument.c`) and the report-only CI job
+  `c-stack-watermark`.
+- **Tensor rematerialization (groundwork, #4 PR0+PR1, PR #472)** —
+  `src/userApi/training_loop/remat/`: a static wire plan (`RematPlan`,
+  `REMAT_PLAN_STORE_ALL`/`REMAT_PLAN_LIVENESS`), a step scheduler with `REMAT_ARENA`/
+  `REMAT_HEAP` rows (`RematScheduler.h`) and a checker (`RematCheck.h`); wire bytes
+  are poisoned at bind/release under `ODT_REMAT_VERIFY` (ON in the `unit_test`/
+  `unit_test_debug`/`unit_test_asan` presets and, by inheritance, `unit_test_ubsan`).
+  Unit-tested; no recompute policy yet. Not yet wired into `trainingRun` or its
+  options; no example uses it.
+- **Examples** — 7 end-to-end: `har_classifier` (`train_c_har_classifier` plus the
+  `train_c_har_classifier_{adamw,sym,bfp,finetune}` variants — `_finetune` is the
+  pretrain → freeze → fine-tune flow, #380 PR3 — and the continual-learning
+  `train_c_continual`), `ecg_anomaly_ae`, `mnist_mlp`, `mnist_cnn`,
+  `kws_mfcc`, `kws_raw` (+ trace harness `trace_c_kws_raw`), `mixed_width_mlp`.
   `train_c_har_classifier_bfp` (epic #410 PR7) runs the HAR model end to end on
   BFP storage + `ARITH_BFP` compute with sweepable weight/wire blocks, widths,
   rounding and grad/state storage.
@@ -658,20 +756,26 @@ checkpointing, limitations, literature).
 ## Known gaps / partial features
 
 - Linear/Conv factories allocate FLOAT32 params only — settled as by-design (#270);
-  SYM_INT32-native params via post-init `requantizeTensorInPlace()` (mixed_width_mlp
-  pattern) or LayerNorm/GroupNorm constant-fill.
-- No SYM/ASYM native param storage anywhere; no per-parameter optimizer dtype.
+  SYM_INT32/SYM/ASYM/BFP params on the GEMM family via post-init
+  `requantizeTensorInPlace()` (mixed_width_mlp / HAR `_sym`/`_bfp` pattern).
+  LayerNorm/GroupNorm constant-fill FLOAT32/SYM_INT32/BFP gamma/beta and reject
+  SYM/ASYM; BatchNorm1d is FLOAT32-only.
+- No per-parameter optimizer-state dtype (one `momentumQuant`/`momentQuant` template
+  is cloned for every parameter).
 - Optimizer has no integer update kernel (SYM_INT32 = dequant→float→requant).
-- CrossEntropy `classWeights` field is allocated but unused.
-- Serialization: sparsity stub (wire format is fixed-width LE with checked I/O
-  since v2, #370).
+- `lossConfig_t.classWeights` is declared but unused (`defaultLossConfig` sets it
+  NULL; nothing reads it).
+- Serialization: sparsity stub; optimizer state is not serialized (#350) (wire
+  format is fixed-width LE with checked I/O since v2, #370).
 - `sparsityType_t` is scaffolding only (propagated but no kernel exploits it).
 - Continual-learning (PPCA replay, #326) arithmetic is `ARITH_FLOAT32` only;
-  no integer eigensolver exists yet. State storage is unaffected (FLOAT32/
-  SYM/ASYM all accepted).
+  no integer eigensolver exists yet (`jacobiEigSymFloat32` is float). State
+  storage is unaffected (FLOAT32/SYM/ASYM/per-tensor BFP all accepted).
 - `TRACK_INSTRUCTIONS` counters exist on the legacy `Square`/`Matmul` libs but are
   unsafe to enable: a name mismatch fails compilation for `Square`, both libs lack a
-  reset helper, and `Matmul`'s SYM_INT32 path double-increments (#351).
+  reset helper, and `Matmul`'s SYM_INT32 path double-increments (#351). `Add`/`Sub`/
+  `Mul`/`Div` carry latent counters too; none of these libs gets the define from
+  `ODT_TRACK_INSTRUCTIONS` (only `PointwiseFused` does).
 - BFP (block-floating-point epic PR1–PR7) native compute now covers
   Linear/Conv1d/Conv1dTransposed **forward AND backward**: `ARITH_BFP` runs
   both, with both operands blocked and headroom-guarded `int32` block

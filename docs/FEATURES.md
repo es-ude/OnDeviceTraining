@@ -659,8 +659,8 @@ checkpointing, limitations, literature).
   no per-(output, group) run to carry a block partial across) — with both
   operands blocked, `int32` same-exponent-segment partials folded via `ldexpf`,
   and a headroom guard (`bfpSegmentLimit(ma,mb) = INT32_MAX >> (ma+mb-2)`,
-  fail-fast at kernel entry). The four wire allocators
-  (`initLayerOutputs`/`initGradTensor`, `InferenceApi.c`) carry BFP arms: wire
+  fail-fast at kernel entry). The training wire table (`RematWireTable.c`,
+  `rematBfpWireGrouping`) and the inference allocators (`InferenceApi.c`) carry BFP arms: wire
   `numGroups` is DERIVED from the template's `groupSize` and the wire's runtime
   element count (never the template's own `numGroups`), with a divisibility
   fail-fast. **Epic PR3 adds native backward**: `weightGrad`/`biasGrad`/`dx` all
@@ -769,7 +769,9 @@ checkpointing, limitations, literature).
   NULL; nothing reads it).
 - Serialization: sparsity stub; optimizer state is not serialized (#350) (wire
   format is fixed-width LE with checked I/O since v2, #370).
-- `sparsityType_t` is scaffolding only (propagated but no kernel exploits it).
+- `sparsityType_t` is scaffolding only: no kernel exploits it. Inference
+  passes an input's marker on; the training driver drops it (its wire headers
+  carry none), and `freeSparsity` is a no-op (#478).
 - Continual-learning (PPCA replay, #326) arithmetic is `ARITH_FLOAT32` only;
   no integer eigensolver exists yet (`jacobiEigSymFloat32` is float). State
   storage is unaffected (FLOAT32/SYM/ASYM/per-tensor BFP all accepted).
@@ -786,8 +788,8 @@ checkpointing, limitations, literature).
   optimizer-state storage is a per-tensor-only knob (`gradInit`,
   `SgdApi`/`AdamWApi` momentum/moment cloning, PPCA replay state all reject a
   grouped BFP template — a future `#300` axis, not a primitive limitation).
-  BFP **wires** (a layer's `outputQ`/`propLossQ`) are SHIPPED: the four wire
-  allocators (`initLayerOutputs`/`initGradTensor`, `InferenceApi.c`) carry
+  BFP **wires** (a layer's `outputQ`/`propLossQ`) are SHIPPED: the training wire
+  table (`RematWireTable.c`) and the inference allocators (`InferenceApi.c`) carry
   BFP arms — wire `numGroups` derives from the template's `groupSize` and the
   wire's runtime element count, with a divisibility fail-fast rather than a
   silent floor. **Epic PR4 shipped the weight-less layers**

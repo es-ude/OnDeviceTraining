@@ -650,8 +650,8 @@ typedef struct bfpWireCapture {
     uint8_t exponents[BFP_WIRE_MAX_GROUPS];
 } bfpWireCapture_t;
 
-/* The hidden wire lives ONLY inside calculateGradsImpl -- initLayerOutputs
- * allocates it and deInitLayerOutputs frees it before the call returns, and
+/* The hidden wire lives ONLY inside calculateGradsImpl -- the call's scheduler
+ * binds it and releases it before the call returns, and
  * trainingStats->output carries the FINAL (FLOAT32) wire. The layer-0 "fwd"
  * probe is therefore the only place the BFP wire is observable, and it fires
  * right after the OUT_WRITE epilogue derived the exponents. Captures the FIRST
@@ -898,10 +898,9 @@ void testBfpActWireGroupSizeMismatchDiesNamingTheWire(void) {
 }
 
 /* Twin of captureLayer0ForwardWire for the BACKWARD wire: the "agrad" probe at
- * layer 0 hands over the dx tensor `initGradTensor` built from layer 1's
+ * layer 0 hands over the dx wire the wire table derived from layer 1's
  * propLossQ, after layer 1's backward wrote into it. Same short-lived-tensor
- * argument as the forward sink -- deInitGradTensor frees it before the call
- * returns. */
+ * argument as the forward sink -- it is released before the call returns. */
 static void captureLayer0BackwardWire(void *ctx, size_t layerIdx, layerType_t layerType,
                                       const char *phase, tensor_t *tensor) {
     (void)layerType;
@@ -926,8 +925,8 @@ static void captureLayer0BackwardWire(void *ctx, size_t layerIdx, layerType_t la
 
 /* Move the BFP template off the forward wire and onto layer 1's dx wire: the
  * forward then runs entirely FLOAT32 (so the loss, which has no BFP arm, is
- * reachable) and the BFP allocation happens in initGradTensor instead --
- * initGradTensor(gradCurr, layerOutputs[1], backwardWireQ(linear1)).
+ * reachable) and the BFP wire is GRAD 1 instead, derived from
+ * backwardWireQ(linear1).
  *
  * pinPropLossMath == true: the fake-quant bridge (both existing callers) --
  * propLossMath stays the FLOAT32 arithmeticFromQuantization(floatQ) already
@@ -955,7 +954,7 @@ static void moveBfpTemplateToDxWire(bfpWireFixture_t *f, bool pinPropLossMath) {
     }
 }
 
-/*! initGradTensor's BFP arm, live: the dx wire between the two Linears is
+/*! The BFP dx wire, live: the dx wire between the two Linears is
  *  [1, 6] -> 6 elements, groupSize 2 -> derived numGroups 3 (the template's
  *  numGroups=2 is ignored, same PR2-Decision 5 rule as the forward allocators).
  *  The dx-side fake-quant bridge (propLossMath pinned ARITH_FLOAT32, see
@@ -1010,7 +1009,7 @@ void testBfpWireGroupSizeEqualToWireElementsNormalizesToPerTensor(void) {
     TEST_ASSERT_TRUE_MESSAGE(isfinite(loss), "the normalized wire must stay trainable");
 }
 
-/*! initGradTensor twin of the normalization above: the dx wire has 6 elements,
+/*! dx-wire twin of the normalization above: the dx wire has 6 elements,
  *  template groupSize 6 -> per-tensor {1,0}, not a {1,6} grammar death. */
 void testBfpDxWireGroupSizeEqualToWireElementsNormalizesToPerTensor(void) {
     rngSetSeed(4242u);

@@ -22,7 +22,8 @@ typedef void (*traceSink_t)(void *ctx, size_t layerIdx, layerType_t layerType, c
 
 /*! Same forward+backward as calculateGradsSequential, but fires `sink` after
  *  each layer's forward ("fwd"), after the loss backward ("lossgrad",
- *  layerIdx == modelSize), and after each layer's backward ("agrad").
+ *  layerIdx == modelSize), and before each layer's backward ("agrad", with
+ *  the gradient entering it: the gradient w.r.t. that layer's output).
  *
  *  Backward truncates at the deepest (closest-to-input) trainable layer
  *  (#380 PR2): "lossgrad"/"agrad" fire only for that layer and everything

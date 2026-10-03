@@ -16,8 +16,8 @@
 #include "unity.h"
 
 // Trains [Flatten -> Linear(6,2) -> Softmax] for one step with MSE loss.
-// Main point: initLayerOutputs FLATTEN case must derive output-Q from input tensor.
-// If that case is missing, initLayerOutputs hits `default: exit(1)`.
+// Main point: the wire table's FLATTEN rule must derive output-Q from the input tensor
+// (Flatten has no outputQ of its own).
 void testCalculateGradsSequential_WithFlattenFirst_DoesNotCrash(void) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
@@ -86,7 +86,7 @@ void testCalculateGradsSequential_WithFlattenFirst_DoesNotCrash(void) {
 }
 
 void testCalculateGradsSequential_FlattenRank1_DoesNotOOB(void) {
-    // Regression: initLayerOutputs sized output-shape buffers by INPUT rank, but
+    // Regression: the training wire allocator sized output-shape buffers by INPUT rank, but
     // flattenCalcOutputShape always writes 2 slots. For rank-1 input this is OOB.
     size_t *inputDims = reserveMemory(1 * sizeof(size_t));
     inputDims[0] = 5;

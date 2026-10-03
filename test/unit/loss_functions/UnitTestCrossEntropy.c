@@ -368,7 +368,7 @@ void testCrossEntropySoftmaxBackwardSymWritesRequantizedGrad(void) {
     makeFloatStack(&label, yData, &shape, &labelQ);
 
     /* SYM result wire (the loss-grad seed inherits the model output's dtype,
-     * CalculateGradsSequential initGradTensor(..., NULL)) — its own int12
+     * the remat wire table's inherited seed header) — its own int12
      * HALF_AWAY config; the backward requantizes (p-y) into it. */
     symStackTensor_t grad;
     int32_t gradData[6] = {0};

@@ -142,7 +142,7 @@ arithmetic_t layerForwardMath(layer_t *layer) {
  * (forwardOnly) skips the backward-only slots: propLossMath, propLossQ, the
  * grad arithmetics and grad storage. NULL means "not declared" and never fails
  * the gate: a NULL wire config is the upstream-dtype passthrough
- * (initLayerOutputs), a NULL bias is a bias-less layer, a NULL grad is a
+ * (the remat wire table's Flatten rule), a NULL bias is a bias-less layer, a NULL grad is a
  * frozen layer (#380). */
 
 static bool mathIsFloat32(arithmetic_t a) {

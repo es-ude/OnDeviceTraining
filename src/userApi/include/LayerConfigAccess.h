@@ -20,8 +20,9 @@
 quantization_t *layerOutputQ(layer_t *layer);
 
 /* Producer's declared backward config for the dx wire it emits (#221). NULL
- * for Flatten -> passthrough of the upstream dtype (callers already fall
- * back to the upstream tensor's quantization, e.g. initGradTensor). */
+ * for Flatten -> passthrough of the upstream dtype (callers fall back to the
+ * upstream tensor's quantization, e.g. the remat wire table's inherited GRAD
+ * headers). */
 quantization_t *backwardWireQ(layer_t *layer);
 
 /* Declared forward compute representation. Flatten and Quantization have no

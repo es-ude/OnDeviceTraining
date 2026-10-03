@@ -29,8 +29,8 @@ static void dispatchQuantization(tensor_t *input, tensor_t *output) {
 
 void quantizationForward(layer_t *layer, tensor_t *inputTensor, tensor_t *outputTensor) {
     (void)layer; /* dtype dispatch reads the tensors; config->quantization->outputQ
-                  * already determined outputTensor's dtype at allocation time
-                  * (initLayerOutputs / initBufferOutput). */
+                  * already determined outputTensor's dtype when its header was
+                  * derived (the remat wire table's bind / initBufferOutput). */
     dispatchQuantization(inputTensor, outputTensor);
 }
 

@@ -11,16 +11,18 @@
  *
  *  What each phase spans (the FORWARD and BACKWARD pair TILE one whole
  *  calculateGradsSequential / tracedGrads call, no gap between them):
- *   - FORWARD:   the Dropout train-mode flip, activation-buffer allocation,
- *                every layer forward, the output snapshot copied into
- *                trainingStats_t, and the loss FORWARD.
- *   - BACKWARD:  the loss backward, every layer backward, activation teardown
- *                and the Dropout train-mode reset. Fires even when backward
- *                truncates at the deepest trainable layer or is skipped
- *                entirely (all-frozen model): every call yields exactly
- *                FORWARD_BEGIN, FORWARD_END, BACKWARD_BEGIN, BACKWARD_END in
- *                that order, so an external occurrence count per step is a
- *                constant, never a function of the model.
+ *   - FORWARD:   the Dropout and BatchNorm1d train-mode flip, the scheduler
+ *                build (NULL scheduler) and bind, every layer forward, the
+ *                output snapshot copied into trainingStats_t, and the loss
+ *                FORWARD.
+ *   - BACKWARD:  the loss backward, every layer backward, the scheduler's end
+ *                and teardown, and the Dropout and BatchNorm1d train-mode
+ *                reset. Fires even when backward truncates at the deepest
+ *                trainable layer or is skipped entirely (all-frozen model):
+ *                every call yields exactly FORWARD_BEGIN, FORWARD_END,
+ *                BACKWARD_BEGIN, BACKWARD_END in that order, so an external
+ *                occurrence count per step is a constant, never a function of
+ *                the model.
  *   - OPTIMIZER: the parameter update inside optimizerStep() (Optimizer.h),
  *                and only that -- grad zeroing, mean-scaling and clipping are
  *                outside the phase. A direct optimizerFunctions[type].step()

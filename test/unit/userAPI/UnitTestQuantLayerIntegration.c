@@ -542,7 +542,7 @@ void testValidatorAcceptsChainWithoutQuantLayers(void) {
  * freeQuantization's BFP arm (TensorApi.c) frees exponents[] cleanly through
  * freeTensor/freeQuantization, same as SYM. Stack tensors are also not a
  * remaining allocation gap: since epic PR2 (Task 8) the wire allocators
- * (initLayerOutputs/initGradTensor, CalculateGradsSequential.c;
+ * (RematWireTable.c for training;
  * InferenceApi.c) carry BFP arms and can allocate a live BFP output/grad
  * tensor. This test deliberately stays at the Quantization-layer's own
  * forward-dispatch level (like its FLOAT32 counterpart below) instead of

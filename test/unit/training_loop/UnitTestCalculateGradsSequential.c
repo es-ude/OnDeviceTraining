@@ -340,7 +340,7 @@ void testDxWireHonorsProducerPropLossQ(void) {
      * Linear-Linear chain overflows int32 under UBSan).
      *
      * Pre-fix: the agrad@1 buffer carried HALF_AWAY (derived from Quant0's forward-output
-     * quantization via initGradTensor, ignoring Linear1's propLossQ).
+     * quantization by the training dx-wire allocator, ignoring Linear1's propLossQ).
      * Post-fix: it carries SR_HALF_AWAY (from Linear1's propLossQ). */
     quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
     quantization_t *symQSr = quantizationInitSymInt32(SR_HALF_AWAY);
@@ -455,7 +455,7 @@ void testDxWireHonorsProducerPropLossQMaxBits(void) {
     /* Same 4-layer SYM_INT32 chain as testDxWireHonorsProducerPropLossQ. This time
      * Linear1's propLossQ declares qMaxBits=8 (narrower than the int12 operand
      * default) instead of a divergent roundingMode.
-     * Pre-fix: initGradTensor's SYM arm re-defaults the dx wire to 12 regardless
+     * Pre-fix: the training dx-wire allocator re-defaulted the dx wire to 12 regardless
      * of the declared width. Post-fix: it carries the declared 8. */
     quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
     quantization_t *symQ8 = quantizationInitSymInt32WithBits(HALF_AWAY, 8);
@@ -564,8 +564,8 @@ static void fwdBitsCaptureSink(void *ctx, size_t layerIdx, layerType_t type, con
 
 void testForwardWireHonorsDeclaredOutputQMaxBits(void) {
     /* Single SYM_INT32 Linear layer whose outputQ declares qMaxBits=8 (narrower
-     * than the int12 operand default). Pre-fix: initLayerOutputs' SYM arm
-     * re-defaults the forward wire to 12, discarding the declared width.
+     * than the int12 operand default). Pre-fix: the training forward-wire
+     * allocator re-defaulted the wire to 12, discarding the declared width.
      * Post-fix: the forward wire carries the declared 8. */
     quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
     quantization_t *symQ8 = quantizationInitSymInt32WithBits(HALF_AWAY, 8);
@@ -990,7 +990,7 @@ static tensor_t *makeFloatTensor3D(size_t d0, size_t d1, size_t d2, const float 
 }
 
 /* #152 PR1/PR3b: the training entry point allocates its wires from the
- * runtime input (initLayerOutputs), but the MaxPool argmax is the factory's
+ * runtime input (the remat wire table), but the MaxPool argmax is the factory's
  * config-owned [1, C, Lout] buffer. PR 1 made a stacked batch-2 input die in
  * the forward's argmax shape guard; PR 3b grows the argmax on demand instead.
  * The batch-1 call on the same model runs first. */

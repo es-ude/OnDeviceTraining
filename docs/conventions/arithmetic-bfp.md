@@ -398,10 +398,10 @@ Every `ARITH_BFP` kernel (`matmulBfpTensors`, `conv1dKernelBfp`,
 
 ### 5.5 Wire rule (Decision 5)
 
-The four wire allocators (`initLayerOutputs`/`initGradTensor`,
-`src/userApi/training_loop/calculate_grads/CalculateGradsSequential.c`;
-`initBufferOutput`/`initBufferInput`, `src/userApi/InferenceApi.c`) each carry
-a BFP arm keyed off the layer's `layerQuant_t` template (a
+The training wire table (`rematBfpWireGrouping`, applied to every ACT and GRAD
+wire, `src/userApi/training_loop/remat/RematWireTable.c`) and the two inference
+allocators (`initBufferOutput`/`initBufferInput`, `src/userApi/InferenceApi.c`)
+each carry a BFP arm keyed off the layer's `layerQuant_t` template (a
 `quantizationInitBfp*` config):
 
 - The template's `groupSize` is the ONE knob a wire allocator honors. `0`

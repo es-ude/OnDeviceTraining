@@ -597,7 +597,7 @@ void testLayerIsFloat32OnlyRejectsBfpNotJustSym(void) {
 void testLayerIsFloat32OnlyAcceptsFrozenBiaslessAndPassthroughLayers(void) {
     /* Absent storage is not non-FLOAT32 storage: a frozen layer carries no
      * grad tensors (#380), a bias-less conv no bias parameter, and a NULL
-     * wire config is the upstream-dtype passthrough (initLayerOutputs). */
+     * wire config is the upstream-dtype passthrough (the remat wire table). */
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);

@@ -6,7 +6,7 @@
 layer_t *flattenLayerInit(void) {
     layer_t *flattenLayer = reserveMemory(sizeof(layer_t));
     flattenLayer->type = FLATTEN;
-    // Load-bearing: initLayerOutputs' FLATTEN case never reads config.
+    // Load-bearing: the remat wire table's FLATTEN rule never reads config.
     flattenLayer->config = NULL;
     return flattenLayer;
 }

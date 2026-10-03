@@ -68,13 +68,13 @@ static void initBufferOutput(tensor_t *buffer, layer_t *currentLayer, shape_t *i
     }
     case BFP: {
         /* BFP epic PR2 (PR2-Decision 5), the inference-path twin of
-         * initLayerOutputs: widths/rounding/groupSize come from the layer's
+         * rematBfpWireGrouping: widths/rounding/groupSize come from the layer's
          * declared template, numGroups is DERIVED from this buffer's own
          * element count. Exponents start at the zero state — the forward's
          * OUT_WRITE epilogue derives the grid. */
         bfpQConfig_t *currentBfpQC = currentQ->qConfig;
         bfpQConfig_t *bfpQC = reserveMemory(sizeof(bfpQConfig_t));
-        /* groupSize == wire elements -> per-tensor {1,0}, see initLayerOutputs. */
+        /* groupSize == wire elements -> per-tensor {1,0}, see rematBfpWireGrouping. */
         if (currentBfpQC->groupSize == 0 || currentBfpQC->groupSize == numValues) {
             initBfpQConfig(currentBfpQC->mantissaBits, currentBfpQC->exponentBits,
                            currentBfpQC->roundingMode, bfpQC);

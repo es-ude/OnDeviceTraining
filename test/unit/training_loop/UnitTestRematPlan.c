@@ -381,10 +381,9 @@ void testBackwardRangeSingleLayerUnderCrossEntropyIsMinusOne(void) {
 
 /* ---- the one BFP wire-grouping rule ---- */
 
-/* The helper must reproduce the rule the driver inlines today
- * (CalculateGradsSequential.c:231-246 for ACT wires, :320-333 for dx wires,
- * InferenceApi.c:78-91 for inference buffers) on its canonical cases. PR1
- * leaves those copies alone (no driver change); PR2 replaces them. */
+/* The helper must reproduce the pre-remat driver's rule (the Legacy oracle's
+ * ACT and dx wire allocators) and initBufferOutput's copy (InferenceApi.c)
+ * on its canonical cases. */
 static void assertGrouping(size_t tmplGroups, size_t tmplGroupSize, size_t elements,
                            size_t numGroups, size_t groupSize) {
     uint8_t exponents[8];
@@ -491,7 +490,7 @@ void testHarTableRecordsBytesRanksAndKey(void) {
 }
 
 /* One grouped template shared by wires of different sizes groups each
- * wire by its own element count (CalculateGradsSequential.c:215-224). */
+ * wire by its own element count, as the pre-remat driver did. */
 void testSharedGroupedBfpTemplateGroupsPerWire(void) {
     uint8_t tmplExponents[2];
     bfpQConfig_t tmplQc;
@@ -890,7 +889,7 @@ void testBindWritesHarHeadersAndPointsAct0AtTheInput(void) {
 }
 
 /* Forward wires copy the upstream order (ReLU, LayerNorm); a dx wire always
- * gets identity order (CalculateGradsSequential.c:288-293). */
+ * gets identity order, as the pre-remat driver's dx allocator did. */
 void testBindCopiesForwardOrderAndGivesGradsIdentityOrder(void) {
     layer_t *model[2] = {makeLayerNorm(4, false), makeRelu(&g_floatQ)};
     inputLike_t in;
@@ -1392,9 +1391,9 @@ void testTableBindResetsBindGenLiveBytesAndThePeak(void) {
     freeSeedFixture(&f);
 }
 
-/* The seed takes ACT 2's LIVE config fields when its range opens (today's
- * post-forward initGradTensor timing, CalculateGradsSequential.c:88), never
- * its exponents: a fresh zero state. */
+/* The seed takes ACT 2's LIVE config fields when its range opens (after the
+ * forward, the pre-remat driver's timing), never its exponents: a fresh zero
+ * state. */
 void testWireBindDerivesTheSeedFromTheLiveActHeader(void) {
     seedFixture_t f;
     buildBfpSeedFixture(&f);

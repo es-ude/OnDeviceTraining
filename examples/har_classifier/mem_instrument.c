@@ -94,10 +94,10 @@ static size_t wireMetadata(harWireProfile_t p) {
 size_t memInstrumentHarActivationBytes(size_t microBatch,
                                        const harWireProfile_t out[HAR_NUM_LAYERS]) {
     /* Sum of EVERY layer's forward output-tensor bytes for ONE micro-batch.
-     * calculateGradsSequential allocates all forward activations up front
-     * (initLayerOutputs) and frees them only AFTER the full backward pass
-     * (deInitLayerOutputs), so every forward activation is concurrently live
-     * during backprop.
+     * calculateGradsSequential's default (NULL) scheduler keeps every forward
+     * activation from its producing step to the end of the call (STORE_ALL,
+     * remat D30), so every forward activation is concurrently live during
+     * backprop.
      *
      * #321: this is the forward-wire sum ONLY — NOT the true activation peak.
      * During backprop the dx ping-pong (gradNext + gradCurr) coexists with these

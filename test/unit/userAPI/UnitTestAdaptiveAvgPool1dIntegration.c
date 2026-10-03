@@ -41,8 +41,8 @@ static tensor_t *build3DFloat(size_t d0, size_t d1, size_t d2, float const *data
     return t;
 }
 
-// Exercises CalculateGradsSequential initLayerOutputs ADAPTIVE_AVGPOOL1D case +
-// vtable forward/backward. Missing case -> initLayerOutputs hits default exit(1).
+// Exercises the ADAPTIVE_AVGPOOL1D wire of calculateGradsSequential's wire table +
+// vtable forward/backward (calcOutputShape sizes the wire).
 void testTrainingStep_PoolsCorrectly(void) {
     quantization_t *q = quantizationInitFloat();
     layer_t *pool = buildPool(q, 2);

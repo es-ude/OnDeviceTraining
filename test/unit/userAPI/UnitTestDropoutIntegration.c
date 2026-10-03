@@ -58,7 +58,7 @@ static tensor_t *buildBoolMask(size_t n) {
     return initTensor(shape, quantizationInitBool(), NULL);
 }
 
-// Exercises CalculateGradsSequential initLayerOutputs DROPOUT case + the
+// Exercises the DROPOUT wire of calculateGradsSequential's wire table + the
 // training-flag lifecycle: training-mode forward (output != input), flag
 // restored to false afterward.
 void testTrainingStep_DropoutActiveThenFlagRestored(void) {

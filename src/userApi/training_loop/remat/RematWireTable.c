@@ -574,10 +574,11 @@ static size_t liveElements(const shape_t *shape, const rematWire_t *w) {
     return elementsOf(shape, &name);
 }
 
-/* Inherited GRAD headers keep today's post-forward initGradTensor timing, so
- * a producer that wrote a config field of its output is seen. Check before
- * write: every check (dtype, rank, the live payload bytes, and inside
- * bindBfpInto the grouping and the expCapacity bound) runs before the first slab
+/* Inherited GRAD headers are derived when the range opens, after the forward
+ * that produced their source, so a producer that wrote a config field of its
+ * output is seen. Check before write: every check (dtype, rank, the live
+ * payload bytes, and inside bindBfpInto the grouping and the expCapacity
+ * bound) runs before the first slab
  * write, so the config is written before the shape. */
 static void deriveInheritedHeader(rematWireTable_t *t, uint16_t id) {
     rematWire_t *w = &t->wires[id];

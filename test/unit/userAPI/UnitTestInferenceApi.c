@@ -380,7 +380,7 @@ void testInferenceOutputWireHonorsDeclaredQMaxBits(void) {
 
 /* BFP epic PR2 Task 8 --------------------------------------------------------
  * The inference path has its OWN pair of wire allocators (initBufferOutput /
- * initBufferInput), separate from the training path's initLayerOutputs. Both
+ * initBufferInput), separate from the training path's wire table. Both
  * need the BFP arm, and both derive the group geometry from the wire's own
  * element count (BFP PR2-Decision 5) rather than trusting the template. */
 
@@ -553,7 +553,7 @@ void testInferenceBufferInputCarriesBfpExponents(void) {
 }
 
 /*! initBufferOutput's divisibility fail-fast (the inference-path twin of
- *  testInitLayerOutputsBfpGroupSizeMismatchDies). Discriminating fixture: a
+ *  testBfpActWireGroupSizeMismatchDiesNamingTheWire). Discriminating fixture: a
  *  5-element output wire with groupSize 2, so floor division yields the
  *  CONSTRUCTIBLE shape {2, 2} -- initBfpQConfigGrouped's own guard does not
  *  fire, and without this check the packer would index exponents[2] past a

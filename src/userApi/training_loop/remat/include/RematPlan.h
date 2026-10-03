@@ -91,8 +91,8 @@ typedef struct rematBfpGroups {
     size_t groupSize;
 } rematBfpGroups_t;
 
-/* THE BFP wire-grouping rule (the driver inlines it at CalculateGradsSequential.c:231-246 and
- * :320-333, InferenceApi.c:78-91): a template's widths are shape-agnostic, so a wire derives
+/* THE BFP wire-grouping rule of every training wire (initBufferOutput, InferenceApi.c, keeps
+ * a copy for the inference buffers): a template's widths are shape-agnostic, so a wire derives
  * its own grouping from its element count. groupSize 0, or == elements, is per-tensor {1, 0}
  * (the derived {1, N} would break the config grammar); otherwise groupSize must divide the
  * elements, else it exits naming the wire. */
@@ -100,7 +100,7 @@ rematBfpGroups_t rematBfpWireGrouping(const bfpQConfig_t *tmpl, size_t elements,
                                       size_t index);
 
 /* deepest = deepestTrainableIndex (n = nothing trains); top = n-1, or n-2
- * under CROSS_ENTROPY: the positional rule of CalculateGradsSequential.c:77-80
+ * under CROSS_ENTROPY: the pre-remat driver's positional rule (no Softmax check)
  * in SIGNED arithmetic (n == 1 under CE gives -1). One shared function:
  * the plan uses it on the built model, the checker on the live one. */
 void rematBackwardRange(layer_t **model, size_t n, lossFuncType_t lt, size_t *deepest,

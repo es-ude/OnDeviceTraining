@@ -27,6 +27,11 @@
  * LSan runs). */
 #define FILE_PATH SERIALIZE_TEST_FILE_PATH
 
+/* Current ODTS format version for hand-crafted fixtures. Bump together with
+ * SERIALIZE_FORMAT_VERSION: a stale value makes every fixture below die at
+ * the version check instead of at the guard it targets (a vacuous pass). */
+#define ODTS_VERSION 7u
+
 /* Fixture writer for hand-crafted v2 files: explicit little-endian bytes, so
  * the fixtures stay valid even on a big-endian test host. */
 static void writeU32LE(FILE *f, uint32_t value) {
@@ -127,8 +132,8 @@ void testSerializeAndDeserializeTensor() {
 static void testDeserializeRejectsBadMagic(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("XXXX", 1, 4, f);
-    writeU32LE(f, 6); /* version (dead value: bad magic short-circuits first) */
-    writeU32LE(f, 1); /* layerCount */
+    writeU32LE(f, ODTS_VERSION); /* version (dead value: bad magic short-circuits first) */
+    writeU32LE(f, 1);            /* layerCount */
     uint8_t tag = (uint8_t)FLATTEN;
     fwrite(&tag, sizeof(uint8_t), 1, f);
     fclose(f);
@@ -240,11 +245,33 @@ static void testDeserializeRejectsV5Version(void) {
     freeFlattenLayer(layer);
 }
 
+/*! v6 = the pre-#391 format: its LINEAR record has no hasBias presence byte,
+ *  so a v6 file would misparse under v7. No back-compat shim, established
+ *  policy. */
+static void testDeserializeRejectsV6Version(void) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    fwrite("ODTS", 1, 4, f);
+    writeU32LE(f, 6); /* v6: LINEAR record without hasBias */
+    writeU32LE(f, 1); /* layerCount */
+    uint8_t tag = (uint8_t)FLATTEN;
+    fwrite(&tag, sizeof(uint8_t), 1, f);
+    fclose(f);
+
+    layer_t *layer = flattenLayerInit();
+    layer_t *model[] = {layer};
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    fclose(f);
+
+    freeFlattenLayer(layer);
+}
+
 static void testDeserializeRejectsLayerCountMismatch(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 6); /* version */
-    writeU32LE(f, 2); /* layerCount; caller below passes sizeModel = 1 */
+    writeU32LE(f, ODTS_VERSION); /* version */
+    writeU32LE(f, 2);            /* layerCount; caller below passes sizeModel = 1 */
     uint8_t tag = (uint8_t)FLATTEN;
     fwrite(&tag, sizeof(uint8_t), 1, f);
     fclose(f);
@@ -262,7 +289,7 @@ static void testDeserializeRejectsLayerCountMismatch(void) {
 static void testDeserializeRejectsTagMismatch(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 6);              /* version */
+    writeU32LE(f, ODTS_VERSION);   /* version */
     writeU32LE(f, 1);              /* layerCount */
     uint8_t tag = (uint8_t)LINEAR; /* pre-built mirror layer below is FLATTEN */
     fwrite(&tag, sizeof(uint8_t), 1, f);
@@ -891,8 +918,8 @@ static void testBfpDeserializeReallocatesExponentsOnShapeChange(void) {
 static void testBfpDeserializeRejectsZeroNumGroupsInWireConfig(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 6); /* version */
-    writeU32LE(f, 1); /* layerCount */
+    writeU32LE(f, ODTS_VERSION); /* version */
+    writeU32LE(f, 1);            /* layerCount */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
     uint8_t arithByte = 0; /* ARITH_FLOAT32, HALF_AWAY -- forwardMath */
@@ -993,8 +1020,8 @@ static void testBfpDeserializeRejectsSentinelViolation(void) {
 static void testBfpDeserializeRejectsMantissaBitsOutOfRange(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 6); /* version */
-    writeU32LE(f, 1); /* layerCount */
+    writeU32LE(f, ODTS_VERSION); /* version */
+    writeU32LE(f, 1);            /* layerCount */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
     uint8_t arithByte = 0; /* ARITH_FLOAT32, HALF_AWAY -- forwardMath */
@@ -1050,8 +1077,8 @@ static void testBfpDeserializeRejectsMantissaBitsOutOfRange(void) {
 static void testBfpDeserializeRejectsExponentBitsOutOfRange(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 6); /* version */
-    writeU32LE(f, 1); /* layerCount */
+    writeU32LE(f, ODTS_VERSION); /* version */
+    writeU32LE(f, 1);            /* layerCount */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
     uint8_t arithByte = 0; /* ARITH_FLOAT32, HALF_AWAY -- forwardMath */
@@ -1105,8 +1132,8 @@ static void testBfpDeserializeRejectsExponentBitsOutOfRange(void) {
 static void testBfpDeserializeRejectsNonFiniteScaleExponent(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 6); /* version */
-    writeU32LE(f, 1); /* layerCount */
+    writeU32LE(f, ODTS_VERSION); /* version */
+    writeU32LE(f, 1);            /* layerCount */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
     uint8_t arithByte = 0; /* ARITH_FLOAT32, HALF_AWAY -- forwardMath */
@@ -1386,8 +1413,8 @@ static void testDeserializeSymRejectsOversizedNumGroupsInWireConfig(void) {
 
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 6); /* version */
-    writeU32LE(f, 1); /* layerCount */
+    writeU32LE(f, ODTS_VERSION); /* version */
+    writeU32LE(f, 1);            /* layerCount */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
     uint8_t arithByte = 0; /* ARITH_FLOAT32, HALF_AWAY -- forwardMath */
@@ -1439,8 +1466,8 @@ static void testDeserializeAsymRejectsOversizedNumGroupsInWireConfig(void) {
 
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 6); /* version */
-    writeU32LE(f, 1); /* layerCount */
+    writeU32LE(f, ODTS_VERSION); /* version */
+    writeU32LE(f, 1);            /* layerCount */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
     uint8_t arithByte = 0; /* ARITH_FLOAT32, HALF_AWAY -- forwardMath */
@@ -1496,8 +1523,8 @@ static void testDeserializeAsymRejectsOversizedNumGroupsInWireConfig(void) {
 static void testDeserializeSymRejectsZeroNumGroupsInWireConfig(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 6); /* version */
-    writeU32LE(f, 1); /* layerCount */
+    writeU32LE(f, ODTS_VERSION); /* version */
+    writeU32LE(f, 1);            /* layerCount */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
     uint8_t arithByte = 0;
@@ -1544,8 +1571,8 @@ static void testDeserializeSymRejectsZeroNumGroupsInWireConfig(void) {
 static void testDeserializeAsymRejectsZeroNumGroupsInWireConfig(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 6); /* version */
-    writeU32LE(f, 1); /* layerCount */
+    writeU32LE(f, ODTS_VERSION); /* version */
+    writeU32LE(f, 1);            /* layerCount */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
     uint8_t arithByte = 0;
@@ -1954,8 +1981,8 @@ static void testDeserializeArithmeticRoundTripsBfp(void) {
 static void testDeserializeArithmeticRejectsUnknownTypeTag(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 6); /* version */
-    writeU32LE(f, 1); /* layerCount */
+    writeU32LE(f, ODTS_VERSION); /* version */
+    writeU32LE(f, 1);            /* layerCount */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
     uint8_t badArithType = 3;       /* one past ARITH_BFP (2) -- unknown wire tag */
@@ -1995,8 +2022,8 @@ static void testDeserializeArithmeticRejectsUnknownTypeTag(void) {
 static void testDeserializeArithmeticRejectsUnknownRoundingModeTag(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 6); /* version */
-    writeU32LE(f, 1); /* layerCount */
+    writeU32LE(f, ODTS_VERSION); /* version */
+    writeU32LE(f, 1);            /* layerCount */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
     uint8_t floatType = (uint8_t)ARITH_FLOAT32;
@@ -2323,6 +2350,7 @@ int main(void) {
     RUN_TEST(testDeserializeRejectsV3Version);
     RUN_TEST(testDeserializeRejectsV4Version);
     RUN_TEST(testDeserializeRejectsV5Version);
+    RUN_TEST(testDeserializeRejectsV6Version);
     RUN_TEST(testDeserializeRejectsLayerCountMismatch);
     RUN_TEST(testDeserializeRejectsTagMismatch);
     RUN_TEST(testDeserializeTensorRejectsDtypeMismatch);

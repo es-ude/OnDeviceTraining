@@ -341,7 +341,7 @@ followed by the three tensors (`mean`, `basis`, `eigvals`) via the existing
 tensor-tier `serializeTensor`/`deserializeTensor`. Since v2 (#370) every
 scalar is fixed-width little-endian via the checked `SerialWire` primitives.
 The embedded tensor records follow the CURRENT ODTS tensor-tier layout —
-ODTS v6, whose qconfig records last changed in v5 (numGroups/groupSize-
+ODTS v7, whose qconfig records last changed in v5 (numGroups/groupSize-
 prefixed SYM and ASYM records, ASYM `u16 zeroPoints[]`, the BFP record);
 the ODTR container version (still 2) does NOT track ODTS record changes (an old checkpoint with SYM tensors fails only via downstream
 guards — formal linkage tracked in #401).

@@ -294,6 +294,214 @@ static void testRoundTripLinearFrozen(void) {
     freeReservedMemory(capturedDeserialB);
 }
 
+/*! #391 (ODTS v7): a BIAS_FALSE Linear (cfg->bias == NULL, header-sanctioned)
+ *  round-trips via the LINEAR record's hasBias presence byte. Two stacked
+ *  layers with different feature counts: the no-bias record comes FIRST, so
+ *  the biased layer's weights AND bias parsing correctly right after it is
+ *  the stream-sync proof that hasBias=0 skips exactly the absent record. */
+static void testRoundTripLinearNoBias(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+
+    linearInit_t initNoBias = {.inFeatures = 4, .outFeatures = 3, .bias = BIAS_FALSE};
+    linearInit_t initBias = {.inFeatures = 3, .outFeatures = 2};
+
+    layer_t *serialNoBias = linearLayerInitOwning(&initNoBias, &lq);
+    layer_t *serialBias = linearLayerInitOwning(&initBias, &lq);
+    layer_t *deserialNoBias = linearLayerInitOwning(&initNoBias, &lq);
+    layer_t *deserialBias = linearLayerInitOwning(&initBias, &lq);
+
+    layer_t *serialModel[] = {serialNoBias, serialBias};
+    layer_t *deserialModel[] = {deserialNoBias, deserialBias};
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(serialModel, 2, f);
+    fclose(f);
+
+    f = fopen(FILE_PATH, "rb");
+    deserializeModel(deserialModel, 2, f);
+    fclose(f);
+
+    linearConfig_t *serialNoBiasCfg = serialNoBias->config->linear;
+    linearConfig_t *deserialNoBiasCfg = deserialNoBias->config->linear;
+    linearConfig_t *serialBiasCfg = serialBias->config->linear;
+    linearConfig_t *deserialBiasCfg = deserialBias->config->linear;
+
+    /* CAPTURE every assertion value before any free. */
+    bool capturedDeserialNoBiasIsNull = (deserialNoBiasCfg->bias == NULL);
+    float capturedSerialNoBiasW[12], capturedDeserialNoBiasW[12];
+    for (size_t i = 0; i < 12; i++) {
+        capturedSerialNoBiasW[i] = ((float *)serialNoBiasCfg->weights->param->data)[i];
+        capturedDeserialNoBiasW[i] = ((float *)deserialNoBiasCfg->weights->param->data)[i];
+    }
+    float capturedSerialW[6], capturedDeserialW[6];
+    for (size_t i = 0; i < 6; i++) {
+        capturedSerialW[i] = ((float *)serialBiasCfg->weights->param->data)[i];
+        capturedDeserialW[i] = ((float *)deserialBiasCfg->weights->param->data)[i];
+    }
+    float capturedSerialB[2], capturedDeserialB[2];
+    for (size_t i = 0; i < 2; i++) {
+        capturedSerialB[i] = ((float *)serialBiasCfg->bias->param->data)[i];
+        capturedDeserialB[i] = ((float *)deserialBiasCfg->bias->param->data)[i];
+    }
+
+    /* FREE in reverse-init order. */
+    freeLinearLayer(deserialBias);
+    freeLinearLayer(deserialNoBias);
+    freeLinearLayer(serialBias);
+    freeLinearLayer(serialNoBias);
+    freeQuantization(floatQ);
+
+    /* ASSERT on captured. */
+    TEST_ASSERT_TRUE(capturedDeserialNoBiasIsNull);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedSerialNoBiasW, capturedDeserialNoBiasW, 12);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedSerialW, capturedDeserialW, 6);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedSerialB, capturedDeserialB, 2);
+}
+
+/*! #391: the hasBias byte must MATCH the skeleton. file=1 into a no-bias
+ *  skeleton would deserialize into a NULL parameter; file=0 into a biased
+ *  skeleton would silently keep the skeleton's random-init bias. Both fail
+ *  fast. One helper per layer type, both directions each. */
+static void assertLinearBiasPresenceMismatchRejected(bias_t serialBias, bias_t skeletonBias) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+
+    linearInit_t serialInit = {.inFeatures = 4, .outFeatures = 3, .bias = serialBias};
+    linearInit_t skeletonInit = {.inFeatures = 4, .outFeatures = 3, .bias = skeletonBias};
+    layer_t *serialLayer = linearLayerInitOwning(&serialInit, &lq);
+    layer_t *skeletonLayer = linearLayerInitOwning(&skeletonInit, &lq);
+    layer_t *serialModel[] = {serialLayer};
+    layer_t *skeletonModel[] = {skeletonLayer};
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(serialModel, 1, f);
+    fclose(f);
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(skeletonModel, 1, f));
+    fclose(f);
+
+    freeLinearLayer(skeletonLayer);
+    freeLinearLayer(serialLayer);
+    freeQuantization(floatQ);
+}
+
+static void testDeserializeRejectsLinearBiasPresenceMismatch(void) {
+    assertLinearBiasPresenceMismatchRejected(BIAS_FALSE, BIAS_TRUE);
+    assertLinearBiasPresenceMismatchRejected(BIAS_TRUE, BIAS_FALSE);
+}
+
+static void assertConv1dBiasPresenceMismatchRejected(bias_t serialBias, bias_t skeletonBias) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+
+    conv1dInit_t serialInit = {
+        .inChannels = 2, .outChannels = 3, .kernelSize = 3, .groups = 1, .bias = serialBias};
+    conv1dInit_t skeletonInit = serialInit;
+    skeletonInit.bias = skeletonBias;
+    layer_t *serialLayer = conv1dLayerInitOwning(&serialInit, &lq);
+    layer_t *skeletonLayer = conv1dLayerInitOwning(&skeletonInit, &lq);
+    layer_t *serialModel[] = {serialLayer};
+    layer_t *skeletonModel[] = {skeletonLayer};
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(serialModel, 1, f);
+    fclose(f);
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(skeletonModel, 1, f));
+    fclose(f);
+
+    freeConv1dLayer(skeletonLayer);
+    freeConv1dLayer(serialLayer);
+    freeQuantization(floatQ);
+}
+
+static void testDeserializeRejectsConv1dBiasPresenceMismatch(void) {
+    assertConv1dBiasPresenceMismatchRejected(BIAS_FALSE, BIAS_TRUE);
+    assertConv1dBiasPresenceMismatchRejected(BIAS_TRUE, BIAS_FALSE);
+}
+
+static void assertConv1dTransposedBiasPresenceMismatchRejected(bias_t serialBias,
+                                                               bias_t skeletonBias) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+
+    conv1dTransposedInit_t serialInit = {
+        .inChannels = 2, .outChannels = 3, .kernelSize = 3, .groups = 1, .bias = serialBias};
+    conv1dTransposedInit_t skeletonInit = serialInit;
+    skeletonInit.bias = skeletonBias;
+    layer_t *serialLayer = conv1dTransposedLayerInitOwning(&serialInit, &lq);
+    layer_t *skeletonLayer = conv1dTransposedLayerInitOwning(&skeletonInit, &lq);
+    layer_t *serialModel[] = {serialLayer};
+    layer_t *skeletonModel[] = {skeletonLayer};
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(serialModel, 1, f);
+    fclose(f);
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(skeletonModel, 1, f));
+    fclose(f);
+
+    freeConv1dTransposedLayer(skeletonLayer);
+    freeConv1dTransposedLayer(serialLayer);
+    freeQuantization(floatQ);
+}
+
+static void testDeserializeRejectsConv1dTransposedBiasPresenceMismatch(void) {
+    assertConv1dTransposedBiasPresenceMismatchRejected(BIAS_FALSE, BIAS_TRUE);
+    assertConv1dTransposedBiasPresenceMismatchRejected(BIAS_TRUE, BIAS_FALSE);
+}
+
+/* Byte offset of the LINEAR hasBias byte in a 1-layer model of a frozen
+ * FLOAT32 1x1 Linear: header 12 + tag 1 + weights record (hasGrad 1 + rank 4
+ * + dims 8 + order 8 + qtype 1 + payload 4) = 39. Pinned by
+ * testGoldenBytesModelLinearFrozenV7. */
+#define LINEAR_1X1_FROZEN_HAS_BIAS_OFFSET 39
+
+/*! #391: a hasBias byte other than 0/1 is corruption, not "absent". Without
+ *  the range check, 2 would compare equal to a no-bias skeleton's "absent"
+ *  (2 != 1) and parse on silently. */
+static void testDeserializeRejectsLinearHasBiasByteOutOfRange(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+
+    linearInit_t init = {
+        .inFeatures = 1, .outFeatures = 1, .bias = BIAS_FALSE, .trainable = TRAINABLE_FALSE};
+    layer_t *serialLayer = linearLayerInitOwning(&init, &lq);
+    layer_t *skeletonLayer = linearLayerInitOwning(&init, &lq);
+    layer_t *serialModel[] = {serialLayer};
+    layer_t *skeletonModel[] = {skeletonLayer};
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(serialModel, 1, f);
+    fclose(f);
+
+    f = fopen(FILE_PATH, "r+b");
+    fseek(f, LINEAR_1X1_FROZEN_HAS_BIAS_OFFSET, SEEK_SET);
+    int originalByte = fgetc(f);
+    fseek(f, LINEAR_1X1_FROZEN_HAS_BIAS_OFFSET, SEEK_SET);
+    fputc(0x02, f);
+    fclose(f);
+    /* Offset self-check: the patched byte was the hasBias=0 byte. */
+    TEST_ASSERT_EQUAL_INT(0x00, originalByte);
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(skeletonModel, 1, f));
+    fclose(f);
+
+    freeLinearLayer(skeletonLayer);
+    freeLinearLayer(serialLayer);
+    freeQuantization(floatQ);
+}
+
 /*! RELU round trip. `outputQ`/`propLossQ` are pure quantization_t configs
  *  (Relu owns no tensor keyed on them at construction time), so this is a
  *  safe place to exercise the two NEW quantization-payload fixes directly:
@@ -1912,7 +2120,7 @@ static void testGoldenBytesTensorFloat32V2(void) {
  *  numGroups=1 case; see testGoldenBytesModelReluAsymGroupedPropLossV5 below
  *  for the numGroups>1 golden. RELU carries no parameters, so the
  *  v3-introduced grad-presence byte does not appear in this record (see
- *  testGoldenBytesModelLinearFrozenV5 for that). */
+ *  testGoldenBytesModelLinearFrozenV7 for that). */
 static void testGoldenBytesModelReluV5(void) {
     quantization_t *floatQ = quantizationInitFloat();
     quantization_t *symIntOutputQ = quantizationInitSymInt32WithBits(SR_HALF_AWAY, 12);
@@ -1944,7 +2152,7 @@ static void testGoldenBytesModelReluV5(void) {
 
     static const uint8_t expected[] = {
         /* magic */ 'O', 'D', 'T', 'S',
-        /* version u32 LE */ 0x06, 0x00, 0x00, 0x00,
+        /* version u32 LE */ 0x07, 0x00, 0x00, 0x00,
         /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
         /* tag RELU */ 0x01,
         /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
@@ -1998,7 +2206,7 @@ static void testGoldenBytesModelReluAsymGroupedPropLossV5(void) {
     freeQuantization(floatQ);
 
     static const uint8_t expected[] = {/* magic */ 'O', 'D', 'T', 'S',
-                                       /* version u32 LE */ 0x06, 0x00, 0x00, 0x00,
+                                       /* version u32 LE */ 0x07, 0x00, 0x00, 0x00,
                                        /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
                                        /* tag RELU */ 0x01,
                                        /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
@@ -2056,7 +2264,7 @@ static void testGoldenBytesModelReluSymOutputV5(void) {
     freeQuantization(floatQ);
 
     static const uint8_t expected[] = {/* magic */ 'O', 'D', 'T', 'S',
-                                       /* version u32 LE */ 0x06, 0x00, 0x00, 0x00,
+                                       /* version u32 LE */ 0x07, 0x00, 0x00, 0x00,
                                        /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
                                        /* tag RELU */ 0x01,
                                        /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
@@ -2107,7 +2315,7 @@ static void testGoldenBytesModelReluSymGroupedOutputV5(void) {
     freeQuantization(floatQ);
 
     static const uint8_t expected[] = {/* magic */ 'O', 'D', 'T', 'S',
-                                       /* version u32 LE */ 0x06, 0x00, 0x00, 0x00,
+                                       /* version u32 LE */ 0x07, 0x00, 0x00, 0x00,
                                        /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
                                        /* tag RELU */ 0x01,
                                        /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
@@ -2153,7 +2361,7 @@ static void testGoldenBytesModelMaxPool1dV5(void) {
                                        'D',
                                        'T',
                                        'S',
-                                       /* version u32 LE */ 0x06,
+                                       /* version u32 LE */ 0x07,
                                        0x00,
                                        0x00,
                                        0x00,
@@ -2195,7 +2403,7 @@ static void testGoldenBytesModelMaxPool1dV5(void) {
     TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, got, sizeof(expected));
 }
 
-/*! GOLDEN BYTES (#380, wire format v5): a FROZEN Linear layer's weight AND
+/*! GOLDEN BYTES (#380, wire format v7): a FROZEN Linear layer's weight AND
  *  bias parameter records each lead with a hasGrad=0x00 presence byte
  *  followed directly by the param tensor — no grad tensor on the wire at
  *  all. Pins the exact byte layout the v3-introduced grad-presence byte
@@ -2203,9 +2411,10 @@ static void testGoldenBytesModelMaxPool1dV5(void) {
  *  hasGrad=0x01 byte followed by param THEN grad in testRoundTripLinear).
  *  Both weight and bias here are FLOAT32, so neither the group-quant v4 SYM
  *  bump nor Task 4's v5 ASYM bump touches this record's bytes beyond the
- *  header version. Values are overwritten post-construction (random Kaiming
- *  init is not pin-stable). */
-static void testGoldenBytesModelLinearFrozenV5(void) {
+ *  header version. v7 (#391) inserts the u8 hasBias presence byte between
+ *  the weights and bias records. Values are overwritten post-construction
+ *  (random Kaiming init is not pin-stable). */
+static void testGoldenBytesModelLinearFrozenV7(void) {
     quantization_t *floatQ = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, floatQ);
@@ -2228,7 +2437,7 @@ static void testGoldenBytesModelLinearFrozenV5(void) {
                                        'D',
                                        'T',
                                        'S',
-                                       /* version u32 LE */ 0x06,
+                                       /* version u32 LE */ 0x07,
                                        0x00,
                                        0x00,
                                        0x00,
@@ -2263,6 +2472,7 @@ static void testGoldenBytesModelLinearFrozenV5(void) {
                                        0x00,
                                        0x00,
                                        0x40,
+                                       /* hasBias=1 (v7 bias-presence byte, #391) */ 0x01,
                                        /* bias: hasGrad=0 (v3 grad-presence byte) */ 0x00,
                                        /* bias param shape: rank 1 u32 LE */ 0x01,
                                        0x00,
@@ -2333,7 +2543,7 @@ static void testGoldenBytesModelBatchNorm1dV6(void) {
     freeQuantization(floatQ);
 
     static const uint8_t expected[] = {
-        'O', 'D', 'T', 'S', /* version */ 0x06, 0x00, 0x00, 0x00,
+        'O', 'D', 'T', 'S', /* version */ 0x07, 0x00, 0x00, 0x00,
         /* layerCount */ 0x01, 0x00, 0x00, 0x00,
         /* tag BATCHNORM1D */ 0x0D,
         /* numChannels */ 0x02, 0x00, 0x00, 0x00,
@@ -2737,7 +2947,7 @@ int main(void) {
     RUN_TEST(testGoldenBytesModelReluSymOutputV5);
     RUN_TEST(testGoldenBytesModelReluSymGroupedOutputV5);
     RUN_TEST(testGoldenBytesModelMaxPool1dV5);
-    RUN_TEST(testGoldenBytesModelLinearFrozenV5);
+    RUN_TEST(testGoldenBytesModelLinearFrozenV7);
     RUN_TEST(testGoldenBytesModelBatchNorm1dV6);
     RUN_TEST(testGoldenBytesBfpQConfigRecordV5);
     RUN_TEST(testSerializeFailsFastOnUnwritableStream);
@@ -2748,5 +2958,10 @@ int main(void) {
     RUN_TEST(testDeserializeSkipsGradIntoFrozenSkeleton);
     RUN_TEST(testDeserializeSkipsSymGradIntoFrozenSkeleton);
     RUN_TEST(testRoundTripLinearFrozen);
+    RUN_TEST(testRoundTripLinearNoBias);
+    RUN_TEST(testDeserializeRejectsLinearBiasPresenceMismatch);
+    RUN_TEST(testDeserializeRejectsConv1dBiasPresenceMismatch);
+    RUN_TEST(testDeserializeRejectsConv1dTransposedBiasPresenceMismatch);
+    RUN_TEST(testDeserializeRejectsLinearHasBiasByteOutOfRange);
     return UNITY_END();
 }

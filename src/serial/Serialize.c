@@ -25,7 +25,12 @@
 #include "Softmax.h"
 #include "Tensor.h"
 
-/* v6 (#460): new BATCHNORM1D record (tag 13) -- `u32 numChannels, f32 eps,
+/* v7 (#391): the LINEAR record gains `u8 hasBias` between the weights and
+ * bias parameter records (bias record omitted when 0) -- the same presence
+ * byte CONV1D/CONV1D_TRANSPOSED already carried -- so a BIAS_FALSE Linear
+ * (bias == NULL) no longer NULL-derefs here. Every other record is
+ * unchanged; v6 files fail at the version check (no back-compat shim).
+ * v6 (#460): new BATCHNORM1D record (tag 13) -- `u32 numChannels, f32 eps,
  * u8 momentumMode (1 VALUE | 2 CUMULATIVE), f32 momentum, u8 affine, u8
  * track, [gamma, beta parameters iff affine], [f32 runningMean[C],
  * f32 runningVar[C], u64 numBatchesTracked iff track], arithmetic
@@ -84,7 +89,7 @@
  * SYM/SYM_INT32/FLOAT32/INT32/BOOL records, layer arms, and the v3
  * grad-presence byte are untouched by this bump. */
 #define SERIALIZE_MAGIC "ODTS"
-#define SERIALIZE_FORMAT_VERSION 6u
+#define SERIALIZE_FORMAT_VERSION 7u
 
 void serializeTensor(tensor_t *tensor, FILE *f) {
     size_t numberOfValues = calcNumberOfElementsByTensor(tensor);
@@ -229,12 +234,22 @@ static void serializeQConfig(quantization_t *q, FILE *f) {
 // TODO
 static void serializeSparsity() {}
 
+/* BIAS_FALSE layers carry bias == NULL (header-sanctioned): presence byte
+ * first, bias record only when present. */
+static void serializeOptionalBias(parameter_t *bias, FILE *f) {
+    uint8_t hasBias = bias != NULL ? 1u : 0u;
+    serialWriteU8(hasBias, f);
+    if (hasBias) {
+        serializeParameter(bias, f);
+    }
+}
+
 static void serializeLayer(layer_t *layer, FILE *f) {
     switch (layer->type) {
     case LINEAR: {
         linearConfig_t *linearConfig = layer->config->linear;
         serializeParameter(linearConfig->weights, f);
-        serializeParameter(linearConfig->bias, f);
+        serializeOptionalBias(linearConfig->bias, f);
         serializeArithmetic(&linearConfig->forwardMath, f);
         serializeArithmetic(&linearConfig->weightGradMath, f);
         serializeArithmetic(&linearConfig->biasGradMath, f);
@@ -256,11 +271,7 @@ static void serializeLayer(layer_t *layer, FILE *f) {
         serializeKernel(conv1dConfig->kernel, f);
         serialWriteSizeAsU32LE(conv1dConfig->groups, f);
         serializeParameter(conv1dConfig->weights, f);
-        uint8_t conv1dHasBias = conv1dConfig->bias != NULL ? 1 : 0;
-        serialWriteU8(conv1dHasBias, f);
-        if (conv1dHasBias) {
-            serializeParameter(conv1dConfig->bias, f);
-        }
+        serializeOptionalBias(conv1dConfig->bias, f);
         serializeArithmetic(&conv1dConfig->forwardMath, f);
         serializeArithmetic(&conv1dConfig->weightGradMath, f);
         serializeArithmetic(&conv1dConfig->biasGradMath, f);
@@ -275,11 +286,7 @@ static void serializeLayer(layer_t *layer, FILE *f) {
         serialWriteSizeAsU32LE(conv1dTransposedConfig->groups, f);
         serialWriteSizeAsU32LE(conv1dTransposedConfig->outputPadding, f);
         serializeParameter(conv1dTransposedConfig->weights, f);
-        uint8_t conv1dTransposedHasBias = conv1dTransposedConfig->bias != NULL ? 1 : 0;
-        serialWriteU8(conv1dTransposedHasBias, f);
-        if (conv1dTransposedHasBias) {
-            serializeParameter(conv1dTransposedConfig->bias, f);
-        }
+        serializeOptionalBias(conv1dTransposedConfig->bias, f);
         serializeArithmetic(&conv1dTransposedConfig->forwardMath, f);
         serializeArithmetic(&conv1dTransposedConfig->weightGradMath, f);
         serializeArithmetic(&conv1dTransposedConfig->biasGradMath, f);

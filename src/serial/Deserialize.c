@@ -27,7 +27,14 @@
 #include "StorageApi.h"
 #include "Tensor.h"
 
-/* v6 (#460): new BATCHNORM1D record (tag 13), read by a deserializeLayer arm
+/* v7 (#391): the LINEAR record gains the `u8 hasBias` presence byte the
+ * CONV1D/CONV1D_TRANSPOSED records already carried (bias record skipped when
+ * 0), so a BIAS_FALSE Linear round-trips. All three arms now fail fast when
+ * the byte is not 0/1 or disagrees with the skeleton's bias presence
+ * (deserializeOptionalBias). No migration path from v6: a v6 file fails
+ * cleanly at the version check below (no back-compat shim, established
+ * policy).
+ * v6 (#460): new BATCHNORM1D record (tag 13), read by a deserializeLayer arm
  * mirroring Serialize.c's write order exactly -- `u32 numChannels, f32 eps,
  * u8 momentumMode, f32 momentum, u8 affine, u8 track` are read first and
  * numChannels/affine/track are checked to EQUAL the skeleton's (the
@@ -80,7 +87,7 @@
  * (numGroups==1 <=> groupSize==0) and the shared SERIAL_MAX_QCONFIG_GROUPS
  * sanity cap are checked on the FILE's values, exactly as for SYM/ASYM. */
 #define SERIALIZE_MAGIC "ODTS"
-#define SERIALIZE_FORMAT_VERSION 6u
+#define SERIALIZE_FORMAT_VERSION 7u
 
 void deserializeTensor(tensor_t *tensor, FILE *f) {
     /* #316: capture the skeleton's expected payload size BEFORE the shape /
@@ -696,12 +703,28 @@ static void skipSerializedTensor(FILE *f) {
 // TODO
 static void deserializeSparsity() {}
 
+/* #391: unlike the tolerated grad byte, the hasBias byte must MATCH the
+ * skeleton -- file=1 into a BIAS_FALSE skeleton would deserialize into a NULL
+ * parameter, file=0 into a biased skeleton would silently keep its init bias. */
+static void deserializeOptionalBias(parameter_t *skeletonBias, const char *layerName, FILE *f) {
+    uint8_t hasBias = serialReadU8(f);
+    if (hasBias > 1u || (hasBias == 1u) != (skeletonBias != NULL)) {
+        PRINT_ERROR("deserializeModel: %s record hasBias %u does not match the skeleton "
+                    "(bias %s)",
+                    layerName, (unsigned)hasBias, skeletonBias != NULL ? "present" : "absent");
+        exit(1);
+    }
+    if (hasBias) {
+        deserializeParameter(skeletonBias, f);
+    }
+}
+
 static void deserializeLayer(layer_t *layer, FILE *f) {
     switch (layer->type) {
     case LINEAR: {
         linearConfig_t *linearConfig = layer->config->linear;
         deserializeParameter(linearConfig->weights, f);
-        deserializeParameter(linearConfig->bias, f);
+        deserializeOptionalBias(linearConfig->bias, "LINEAR", f);
         deserializeArithmetic(&linearConfig->forwardMath, f);
         deserializeArithmetic(&linearConfig->weightGradMath, f);
         deserializeArithmetic(&linearConfig->biasGradMath, f);
@@ -723,10 +746,7 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         deserializeKernel(conv1dConfig->kernel, f);
         conv1dConfig->groups = (size_t)serialReadU32LE(f);
         deserializeParameter(conv1dConfig->weights, f);
-        uint8_t conv1dHasBias = serialReadU8(f);
-        if (conv1dHasBias) {
-            deserializeParameter(conv1dConfig->bias, f);
-        }
+        deserializeOptionalBias(conv1dConfig->bias, "CONV1D", f);
         deserializeArithmetic(&conv1dConfig->forwardMath, f);
         deserializeArithmetic(&conv1dConfig->weightGradMath, f);
         deserializeArithmetic(&conv1dConfig->biasGradMath, f);
@@ -741,10 +761,7 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         conv1dTransposedConfig->groups = (size_t)serialReadU32LE(f);
         conv1dTransposedConfig->outputPadding = (size_t)serialReadU32LE(f);
         deserializeParameter(conv1dTransposedConfig->weights, f);
-        uint8_t conv1dTransposedHasBias = serialReadU8(f);
-        if (conv1dTransposedHasBias) {
-            deserializeParameter(conv1dTransposedConfig->bias, f);
-        }
+        deserializeOptionalBias(conv1dTransposedConfig->bias, "CONV1D_TRANSPOSED", f);
         deserializeArithmetic(&conv1dTransposedConfig->forwardMath, f);
         deserializeArithmetic(&conv1dTransposedConfig->weightGradMath, f);
         deserializeArithmetic(&conv1dTransposedConfig->biasGradMath, f);

@@ -141,3 +141,35 @@ add_elastic_ai_unit_test(
         RNG
         odt_test_death
 )
+
+# Remat PR2 (#4): the driver against the Legacy oracle (remat D42) over a
+# fixture zoo. Registered by hand, like UnitTestDeathTest:
+# add_elastic_ai_unit_test names the binary after its LIB_UNDER_TEST, and this
+# binary tests the driver against a second library rather than one library on
+# its own.
+add_executable(UnitTestCalculateGradsConformance UnitTestCalculateGradsConformance.c)
+target_link_libraries(UnitTestCalculateGradsConformance PRIVATE
+        CalculateGradsSequential
+        odt_test_legacy_grads
+        unity
+        CommonLayerLibs
+        LinearApi
+        ReluApi
+        LayerQuant
+        LayerCommon
+        ArithmeticType
+        QuantizationApi
+        Quantization
+        Rounding
+        TensorApi
+        Tensor
+        StorageApi
+        Common
+        TrainingLoopApi
+        InferenceApi
+        DataLoader
+        LossFunction
+        Distributions
+        RNG
+)
+__register_target_as_unit_test(UnitTestCalculateGradsConformance)

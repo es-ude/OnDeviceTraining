@@ -29,3 +29,31 @@ add_executable(UnitTestDeathTest UnitTestDeathTest.c)
 target_link_libraries(UnitTestDeathTest PRIVATE unity odt_test_death Common)
 __register_target_as_unit_test(UnitTestDeathTest)
 set_tests_properties(UnitTestDeathTest PROPERTIES TIMEOUT 60)
+
+# The Legacy oracle (remat D42): the pre-remat driver, compiled with the
+# preset's flags like the driver it is compared against. STATIC, because
+# add_elastic_ai_unit_test's MORE_SOURCES is never used (unit_test.cmake:18-25).
+# Links: the pre-remat driver's own PRIVATE list, plus CalculateGradsSequential
+# for TraceApi.h and the owners of every header the file includes.
+add_library(odt_test_legacy_grads STATIC LegacyCalculateGrads.c)
+target_include_directories(odt_test_legacy_grads PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(odt_test_legacy_grads PRIVATE
+        CalculateGradsSequential
+        TrainingLoopApi
+        TensorApi
+        Tensor
+        Quantization
+        Rounding
+        Layer
+        Dropout
+        BatchNorm1d
+        LayerConfigAccess
+        ArithmeticType
+        LossFunction
+        Optimizer
+        InferenceApi
+        DataLoader
+        Common
+        StorageApi
+        OdtHook
+)

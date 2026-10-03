@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Generate expected_asym_nudged.h for UnitTestTensorConversion (group-quant
-PR4 Task 1, spec D6).
+PR4 Task 1, group-quant D6).
 
 Emulates the NUDGED CODE-DOMAIN ASYM quantizer (deriveAsymGridFromMinMax +
 emitAsymChunk after the PR4 rewrite) BIT-EXACTLY in float32 -- see
 sym_gold.quantize_asym_nudged for the math and its inline self-checks
 (zp in [0, 2^b-1], exact-zero decode, 0.5*scale round-trip bound).
 
-This is a DELIBERATE numerics change (D6): existing ASYM pins re-derive
+This is a DELIBERATE numerics change (group-quant D6): existing ASYM pins re-derive
 through the new math, they are NOT sign-flips of the old codes. Every fixture
 below therefore also runs the OLD value-domain emulation
 (quantize_asym_old_value_domain) and asserts old != new on at least one of
@@ -21,7 +21,7 @@ Fixtures:
                happen to coincide with the old grid (verified, not assumed).
   f2NegBand16  {-10,-1,-5.5,-2.5,-9.25,-3.75} @ qBits=16 -- all-negative
                band; the nudge extends it to [-10, 0] so zp lands exactly on
-               the uint16 ceiling 2^16-1 = 65535 (the D6 boundary pin that
+               the uint16 ceiling 2^16-1 = 65535 (the group-quant D6 boundary pin that
                replaces the old -72817 int32-width pin).
   f3NegFar     {-5000000, -4999999.5} @ qBits=8 -- the old
                ZeroPointBeyondInt32 DEATH data: un-nudged zpReal ~ -2.55e9

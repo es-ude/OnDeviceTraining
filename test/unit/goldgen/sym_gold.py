@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared SYM_INT32 gold-value helpers for unit-test gold generators (spec D7, #192).
+"""Shared SYM_INT32 gold-value helpers for unit-test gold generators (#192 D7).
 
 Extracted verbatim from test/unit/layer/generate_expected_layernorm_sym_bwd.py
 (the LayerNorm generators keep their private copies for now and migrate
@@ -715,7 +715,7 @@ def requant_absmax_grouped_f32(values, q_bits: int, group_size: int):
 
 # ---- Group-quant PR4 Task 1: nudged code-domain ASYM affine (TFLite-standard),
 # deriveAsymGridFromMinMax + emitAsymChunk's per-tensor emulation. DELIBERATE
-# numerics change vs the old value-domain int32-zeroPoint grid (spec D6):
+# numerics change vs the old value-domain int32-zeroPoint grid (group-quant D6):
 # the band is nudged to include 0 (mn=min(mn,0), mx=max(mx,0)), which (a)
 # makes 0.0 exactly representable (code == zp decodes to exactly 0.0) and
 # (b) bounds zpReal into [0, 2^b-1] BY CONSTRUCTION, so the code-domain
@@ -877,7 +877,7 @@ def sgd_grouped_step_ref(param_mantissas, param_scales, group_size: int, q_bits:
 
 
 # ---- BFP epic PR2 Task 3: block-floating-point emulation, matmulBfpTensors'
-# kernel reference (spec docs/superpowers/specs/2026-07-29-block-floating-point-design.md).
+# kernel reference (docs/conventions/arithmetic-bfp.md §5).
 # The fold arithmetic mirrors the C kernel in np.float32 (never float64): one
 # int partial per (a-group, b-group) segment, folded via float32 ldexp into a
 # float32 accumulator whenever EITHER operand's group changes, plus a tail
@@ -1382,7 +1382,7 @@ def convT1d_bfp_gather_ref(x_codes, x_exp, x_qc, w_codes, w_exp, w_qc,
         assert tap_free_positions >= 1, (
             "convT1d_bfp_gather_ref: no output position is tap-free -- the "
             "outputPadding/bias-seed-only branch is unexercised")
-        # Scatter cross-check (D9): a float32 scatter on the DEQUANTIZED values
+        # Scatter cross-check (BFP D9): a float32 scatter on the DEQUANTIZED values
         # must reproduce the gather bit-for-bit in the exact regime -- pins the
         # gather's tap set AND index mapping against the shipped scatter form.
         def _deq(codes, exps, qc, n):
@@ -1443,7 +1443,7 @@ def convT1d_bfp_gather_ref(x_codes, x_exp, x_qc, w_codes, w_exp, w_qc,
 # output-centric core (one gw element per reduction, contributors walked
 # b outer / outPos inner -- the NORMATIVE order the C kernel mirrors);
 # biasGrad is the single-operand segment fold shared by Conv1d and ConvT1d;
-# dx delegates to the D9 gather ref with the adjoint role swap. ----
+# dx delegates to the BFP D9 gather ref with the adjoint role swap. ----
 
 
 def conv1d_bfp_weight_grad_ref(x_codes, x_exp, x_qc, gy_codes, gy_exp, gy_qc,
@@ -1681,7 +1681,7 @@ def conv1d_bfp_dx_ref(loss_codes, loss_exp, loss_qc, w_codes, w_exp, w_qc,
                       batch, in_channels, out_channels, kernel_size, input_length,
                       stride=1, dilation=1, conv_groups=1, self_check=True):
     """Conv1d dx (propLoss) on BFP operands: the adjoint of a VALID forward
-    Conv1d, computed GATHER-formulated (D9) -- conv1dBackward routes it to
+    Conv1d, computed GATHER-formulated (BFP D9) -- conv1dBackward routes it to
     convTranspose1dKernelBfpGather, so this ref delegates to
     convT1d_bfp_gather_ref with the roles swapped: the gather's "input" is
     lossGrad [batch, out_channels, forward_out_len] and its "output" is dx
@@ -2060,7 +2060,7 @@ def bfp_mask_scale_repack_ref(codes, exps, qc, keep_mask, factor, self_check=Tru
     group's exponent from the NEW absmax and requantize HALF_AWAY.
 
     Re-deriving here is NOT double quantization: the multiply changed the
-    values, so the fresh exponents quantize NEW numbers (spec D8 forbids
+    values, so the fresh exponents quantize NEW numbers (BFP D8 forbids
     re-blocking UNCHANGED values).
 
     Self-checks (abort rather than emit a vacuous fixture):
@@ -2242,7 +2242,7 @@ def adaptiveavgpool1d_bfp_forward_ref(codes, exps, qc, batch, channels, input_le
     """AdaptiveAvgPool1d ARITH_BFP forward reference: bfp_window_sum_ref over
     each adaptive window, then a float32 divide by THAT window's own count.
     The SYM arm's rounded integer division (roundedDivHalfAwayInt32) has no
-    role here -- the BFP raw intermediate is FLOAT32 (D7), so the exact float
+    role here -- the BFP raw intermediate is FLOAT32 (BFP D7), so the exact float
     divide is both simpler and more accurate. Self-checks: >= 2 DIFFERENT
     window counts (the per-window divide is load-bearing), >= 1 group
     crossing, per-tensor collapse differs, >= 1 nonzero output."""
@@ -2316,7 +2316,7 @@ def maxpool1d_bfp_forward_ref(codes, exps, qc, batch, channels, geom, self_check
     DEQUANTIZED float32 values -- ldexp(mantissa, E - bias), which is exact --
     because raw mantissas are NOT comparable across groups: a smaller code in a
     larger-exponent block can be the true maximum. The winner's dequant value
-    goes to the FLOAT32 raw (D7); the argmax auxOut keeps its own INT32 storage
+    goes to the FLOAT32 raw (BFP D7); the argmax auxOut keeps its own INT32 storage
     (the funnel NEVER converts auxOut) and the -1 empty-window sentinel.
     Tie-break matches the FLOAT32 arm exactly: strict >, seeded at -inf, first
     occurrence wins. No headroom guard: there is no summation.

@@ -19,7 +19,7 @@ arithmetic_t arithmeticFromQuantization(const quantization_t *q) {
         break;
     case BFP:
         /* Epic PR2: BFP is a COMPUTE representation, not just storage -- the
-         * D5 float-bridge staging rule of PR1 is retired and BFP derives
+         * arithmetic-type-split D5 float-bridge staging rule of PR1 is retired and BFP derives
          * native ARITH_BFP (the documented breaking change of this PR).
          * Consequences worth knowing at this seam:
          *  - Fake-quant over BFP storage is still available, but no longer

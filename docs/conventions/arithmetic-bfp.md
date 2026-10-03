@@ -27,15 +27,19 @@ Since epic PR6 it also covers Softmax — the native `ARITH_BFP` forward and
 backward in `src/layer/Softmax.c`, the I-BERT integer exp
 `src/arithmetic/BfpSoftmaxExp.c`, and the `softmaxSetBfpExpShiftRounding`
 knob (`SoftmaxApi.h`) — documented in §5.9.
-Path-scoped for Claude via
-`.claude/rules/arithmetic-bfp.md`. Spec:
-`docs/superpowers/specs/2026-07-29-block-floating-point-design.md` (decisions
-D1–D12, deviations register §10; D8 amended 2026-09-02 at PR3 kickoff — §9
-below); PR2 implementation plan:
-`docs/superpowers/plans/2026-08-11-bfp-pr2-arith-bfp-gemm-forward.md` (its own
-Decisions 1–11, cited below as "Decision N" to keep them distinct from the
-spec's D1–D12). The rules file, spec and plan are maintainer-local, not in
-the repository. §§1–4 track where the shipped PR1 dtype-core deliberately
+
+Decision IDs: the epic's design decisions are cited as `D<n>` (code
+comments outside this document write `BFP D8` etc.), the epic-PR2
+implementation decisions as `Decision N` (outside this document:
+`PR2-Decision N`), the epic-PR6 kickoff rulings as `P6-N`, and the epic
+design's deviations list as "deviations register N". §12 states every one
+that is cited anywhere in the repository; the `R-P*`/`R-N*`/`R-S*` entries are
+defined in place in §5.7–§5.9. The design documents themselves are not
+published: a "spec §N" pointer below names a section of that unpublished
+design and is kept only as a historical anchor — what it points at is
+restated in this document.
+
+§§1–4 track where the shipped PR1 dtype-core deliberately
 deviates from the cited literature and from ODT's own `#227` discipline — the
 Deutel-note format used by `docs/conventions/arithmetic-sym.md`'s attribution
 notes, applied to the BFP anchors (HBFP, MSFP, MX, FAST) instead. §5
@@ -48,7 +52,7 @@ amends spec decision D8 with the PR3 backward's own deviation (exact fold
 segmentation instead of op-local re-blocking); §10 records the PR5 norms'
 own register entries (the 3× stats recompute, and the float32 stats bridges
 that bound what "native" means for a norm); §11 records PR6 Softmax's (the
-I-BERT adaptations, and two corrections).
+I-BERT adaptations, and two corrections); §12 is the decision register.
 
 ## 1. Two's-complement mantissas, not sign-magnitude
 
@@ -182,8 +186,9 @@ case BFP:
 ```
 
 This is the documented breaking change of epic PR2 (the PR1 "D5 float-bridge
-staging rule" retired, in the codebase's own naming — see the comment at this
-seam; plan Decision 8): a `layerQuant_t` profile built with
+staging rule" — arithmetic-type-split D5, `docs/conventions/arithmetic-sym.md`
+§"Decision register" — retired, in the codebase's own naming; see the comment
+at this seam; Decision 8): a `layerQuant_t` profile built with
 `layerQuantInitUniform(bfpConfig)` derives `ARITH_BFP` in **all four** math
 slots (`forwardMath`/`weightGradMath`/`biasGradMath`/`propLossMath`). Through
 epic PR2 the framework shipped the forward only, so a uniform-BFP model that
@@ -284,7 +289,7 @@ Every `ARITH_BFP` kernel (`matmulBfpTensors`, `conv1dKernelBfp`,
   `acc += ldexpf((float)partial, Ea + Eb − biasA − biasB)`. The power-of-two
   multiply is exact (spec D7) — the only rounding this step introduces is
   ordinary float32 addition across blocks, plus the two exceptions in §§7–8.
-- **Kernels are rounding-free** (plan Decision 7). Every `roundByMode` call in
+- **Kernels are rounding-free** (Decision 7). Every `roundByMode` call in
   the BFP path lives at exactly two seams: staging (quantizing a FLOAT32
   operand into scratch) and the `OUT_WRITE` epilogue (packing the raw FLOAT32
   kernel output back into a BFP target). Nothing inside a kernel's reduction
@@ -1443,9 +1448,7 @@ output elements, so there is no per-(output, exponent-group) run across which
 one `int32` block partial could accumulate (§5.3's fold contract needs a
 stable target across a whole segment).
 
-`convTranspose1dKernelBfpGather` (spec D9; plan
-`docs/superpowers/plans/2026-08-11-bfp-pr2-arith-bfp-gemm-forward.md`,
-maintainer-local) deviates from ODT's own scatter precedent by computing **output-centric**:
+`convTranspose1dKernelBfpGather` (D9; implemented in epic PR2) deviates from ODT's own scatter precedent by computing **output-centric**:
 for every output position, `convTranspose1dTapsAt` enumerates its
 contributing (input position, kernel tap) pairs, and the reduction walks
 those taps like any other GEMM-family reduction — restoring the same
@@ -1690,3 +1693,49 @@ sentinel covers the one case where that left shift would leave int32. Recorded
 here rather than silently fixed, because the false invariant is the kind a
 reader would re-derive: the fix is not a guard bolted onto a correct rule, it
 is a different rule.
+
+## 12. Decision register
+
+The decisions the text and code comments cite by ID. Only IDs cited somewhere
+in the repository are listed.
+
+**Epic design (2026-07-29) — cited as `D<n>` here, `BFP D<n>` elsewhere.**
+
+| ID | Decision | Applied in |
+|---|---|---|
+| D3 | First-class BFP: a new `qtype_t BFP` and a new `ARITH_BFP` (both appended), built on the group-quant group machinery; a constrained-SYM shortcut was rejected (4-byte float scales, no exponent-width axis). | `Quantization.h`, `ArithmeticType.h`, §5 |
+| D4 | Native `ARITH_BFP` everywhere, Softmax and norms included — except by decision: Dropout is non-native (float bridge), Flatten is a passthrough, losses are fake-quant (native CE/MSE an optional stretch). | §5.7–§5.9; `Dropout.c`, `MSE.c`, `CrossEntropy.c` |
+| D5 | Wires are fully blocked; the wire-block size is independent of the weight-block size; per-tensor (`numGroups = 1`) is the degenerate sweep point. | §5.5, wire allocators |
+| D6 | Exponent saturation, not abort: the shared exponent clamps to its representable range; at the top mantissas saturate to ±qMax, at the bottom they flush toward zero. Deliberate deviation from the `#227` abort discipline — saturation is what the `exponentBits` sweep axis measures. | §2; `deriveBfpStoredExponent`, BFP cells of `TensorConversion.c` |
+| D7 | The raw intermediate under `ARITH_BFP` is FLOAT32: kernels MAC mantissa products in `int32` within a block, fold each block partial with an exact `·2^(Ea+Eb)` float multiply, and accumulate in float32 across blocks. No `int64`. | §5.3; every BFP kernel, `ExecuteOp.c`'s BFP arms |
+| D8 | Op-local blocking: compute blocking belongs to the op, storage blocking to the tensor. Amended 2026-09-02 (PR3): an already BFP-stored operand is never re-blocked — op-local blocking realizes as the exact fold-segmentation contract (fold whenever either operand's group changes); fresh blocking happens only on the FLOAT32-staging path. | §5.3, §9; GEMM kernels, pools, Relu/Dropout |
+| D9 | Every ConvT1d op under `ARITH_BFP` is gather-formulated (output-centric: each output is a dot product over its contributors), restoring the int32 block-partial contract; the SYM scatter core stays SYM-only. | §6; `convTranspose1dKernelBfpGather`, `convTranspose1dTapsAt` |
+| D12 | Sequencing: the epic starts after group-quant PR3; group-quant PR4 (ASYM groups) runs in parallel with a single coordinated ODTS version bump (v5); the group-quant HAR sweep is the vehicle the BFP sweep extends. | `Serialize.c` (v5) |
+| deviations register 5 | Dropout handles mantissas through a float bridge (non-native by decision, D4). | §5.7 "Dropout bridge" |
+| deviations register 6 | ReLU is block-transparent: exponents are kept, the mantissa-utilization drop is accepted. | §5.7 "Packed-domain transparency" |
+
+**Epic-PR2 implementation decisions — cited as `Decision N` here, `PR2-Decision N` elsewhere.**
+
+| ID | Decision | Applied in |
+|---|---|---|
+| Decision 1 | A FLOAT32-stored operand under `ARITH_BFP` stages per-tensor (`{1,0}`) at the weight operand's `(mantissaBits, exponentBits)`, rounded by the op's `arithmetic.roundingMode`. Marked revisable. | §5.4; `ExecuteOp.c` `bfpStage`, layer BFP arms |
+| Decision 2 | Bias is staged uniformly like any other operand (FLOAT32 bias → per-tensor BFP scratch; BFP bias → unpacked and borrowed); no funnel special case. | §5.4 |
+| Decision 3 | v1 operand-dtype scope: under `ARITH_BFP` only FLOAT32-stored (staged) and BFP-stored operands are legal; SYM/ASYM/INT32/BOOL-stored operands fail fast ("insert a Quantization layer"). | §5.4 |
+| Decision 5 | Wire geometry: a per-tensor template gives a per-tensor wire; a grouped template gives `{N/groupSize, groupSize}` from the template's `groupSize`, ignoring its `numGroups`; `N % groupSize != 0` fails fast; exponents start zero-state. | §5.5; `initLayerOutputs`, `CalculateGradsSequential.c`, `InferenceApi.c`, norm-factory BFP params |
+| Decision 7 | `ARITH_BFP` kernels are rounding-free: all rounding happens at staging (quantize) and at the OUT_WRITE epilogue (pack). | §5.3 |
+| Decision 8 | The `ARITH_BFP` derivation flip lands last: after it, `layerQuantInitUniform(bfp)` derives `ARITH_BFP` in all four math slots (backward slots had to be pinned to FLOAT32 until epic PR3). | §5.1, `ArithmeticType.c` |
+| Decision 9 | The PR2 native end-to-end model keeps its final (loss-facing) wire FLOAT32, because losses had no BFP arms before PR4. | `UnitTestMultiLayerTraining.c` |
+| Decision 11 | A BFP-stored operand under `ARITH_SYM_INT32` is denied (guided fail-fast in the funnel's SYM prologue): converting it would silently collapse its group structure to one scalar grid. Legal: BFP storage under `ARITH_FLOAT32` (fake-quant) or `ARITH_BFP` (native). | §5.4; `ExecuteOp.c`, `Softmax.c` |
+
+**Epic-PR6 kickoff rulings — cited as `P6-N`.**
+
+| ID | Ruling | Applied in |
+|---|---|---|
+| P6-1 | Softmax backward recomputes the softmax from the logits it actually receives (the layer input, per the training-loop contract) in every arm; the old code treated its input as the softmax output. | §11 Correction 1; `Softmax.c` |
+| P6-2 | Pure-integer alignment onto the max element's block grid, with a shift-rounding knob (`BFP_SHIFT_TRUNC` default, `HALF_AWAY`, `SR`) as a `softmaxConfig_t` field; `layerQuant_t` does not grow. | §5.9 R-S2; `softmaxSetBfpExpShiftRounding` |
+| P6-3 | Fixed dyadic work grid `2^-14`, so the i-exp constants are compile-time integers. | §5.9; `BfpSoftmaxExp.c` |
+| P6-4 | The max search is an exact float compare of dequantized values (first max wins); no rounding introduced. | §5.9 |
+| P6-5 | The cross-element sum and the normalizing divide run in float32 (D7); the only BFP rounding is the OUT_WRITE pack. | §5.9 R-S3 |
+| P6-6 | Backward is one funnel OUT_WRITE op anchored on `propLossQ`, recomputing the softmax in-kernel from the logits; `propLoss == NULL` is an early no-op. | §5.9 R-S4 |
+| P6-7 | SYM_INT32 softmax stays fake-quant (float kernel); only `ARITH_BFP` gets native semantics. | `Softmax.c` dispatch |
+| P6-8 | Silent behavioural flip, documented: a uniform-BFP profile now runs the native forward and backward; pin the math slots to `ARITH_FLOAT32` to opt out. | §5.9 R-S6 |

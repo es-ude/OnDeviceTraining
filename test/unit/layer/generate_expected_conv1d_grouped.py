@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generate expected_conv1d_grouped.h for UnitTestConv1d (group-quant PR2,
-Task 4 -- spec docs/superpowers/specs/2026-07-28-group-quantization-design.md).
+Task 4 -- docs/conventions/tensor.md).
 
 Pins conv1dKernelSymInt32Grouped's GGUF-style running group-partial
 rescale-combine (mirrors Task 3's matmulIntCoreGrouped exactly, just walking

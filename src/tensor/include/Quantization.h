@@ -36,10 +36,9 @@ typedef struct symInt32QConfig {
 #define ODT_SYM_GRAD_QMAXBITS 16
 #endif
 
-/* Group-quant PR1 (spec docs/superpowers/specs/2026-07-28-group-quantization-design.md
- * §2/D3): always-array representation, behavior-identical for PR1 (numGroups
- * is always 1; no grouping functionality yet -- PR2 introduces real groups).
- * groupSize == 0 is the "whole tensor" sentinel: standalone-built configs
+/* Group-quant PR1 (group-quant D3, docs/conventions/tensor.md): always-array representation,
+ * behavior-identical for PR1 (numGroups is always 1; no grouping functionality yet -- PR2
+ * introduces real groups). groupSize == 0 is the "whole tensor" sentinel: standalone-built configs
  * (initSymQConfig, without a tensor in hand) cannot know N, so per-tensor
  * quantization keeps groupSize == 0 ("spans everything"), exactly as
  * N-agnostic as the old scalar scale. Ownership: scales is heap-allocated
@@ -98,9 +97,8 @@ typedef struct symQConfig {
     uint8_t qBits;
 } symQConfig_t;
 
-/* BFP epic PR1 (spec docs/superpowers/specs/2026-07-29-block-floating-point-design.md;
- * group shape mechanics below mirror the group-quant design's
- * docs/superpowers/specs/2026-07-28-group-quantization-design.md):
+/* BFP epic PR1 (docs/conventions/arithmetic-bfp.md; group shape mechanics
+ * below mirror group-quant's, docs/conventions/tensor.md):
  * block-floating-point storage -- one packed `mantissaBits`-wide mantissa per
  * element plus one shared `exponentBits`-wide biased exponent per GROUP
  * (value = mantissa * 2^(storedExponent - bias), bias = 2^(exponentBits-1)-1).
@@ -129,14 +127,14 @@ typedef struct symQConfig {
  * numGroups*groupSize == N identity where a config attaches to a tensor
  * (initTensor, mirroring the SYM arm).
  *
- * Saturation semantics (spec D6, forward reference -- the quantize/pack paths
+ * Saturation semantics (BFP D6, forward reference -- the quantize/pack paths
  * land in epic PR1 Tasks 2-4, not here): VALUE-domain quantization (deriving
  * an exponent from float magnitudes) saturates by design -- an absmax that
  * would need an out-of-range exponent clamps mantissas to +-qMax on the high
  * side, flushes toward zero on the low side; the exponent byte itself is
  * clamped into [0, 2^exponentBits - 1]. CODE-domain packing (raw INT32 codes
  * into BFP mantissas, no exponent derivation) still ABORTS on overflow, same
- * #227 discipline as every other packChunkGuarded caller -- D6 saturation
+ * #227 discipline as every other packChunkGuarded caller -- BFP D6 saturation
  * covers value-domain quantization only, never raw code packing. */
 typedef struct bfpQConfig {
     uint8_t *exponents; /* [numGroups], biased; heap (reserveMemory) and owned by the qconfig,
@@ -150,7 +148,7 @@ typedef struct bfpQConfig {
     uint8_t exponentBits; /* [2, 8]; bias = 2^(exponentBits-1) - 1 */
 } bfpQConfig_t;
 
-/* Group-quant PR4 (Task 1, spec D6): always-array ASYM with a NUDGED
+/* Group-quant PR4 (Task 1, group-quant D6): always-array ASYM with a NUDGED
  * CODE-DOMAIN affine parametrization (TFLite-standard). Ownership and shape
  * grammar are exactly symQConfig_t's (see the block comment above): both
  * arrays are heap blocks owned by the config (reserveMemory, one block per
@@ -176,7 +174,7 @@ typedef struct asymQConfig {
     size_t numGroups;     /* 1 = per-tensor sentinel; >1 = real groups */
     size_t groupSize;     /* 0 = "whole tensor" sentinel (per-tensor);
                             >0 only for real groups, numGroups*groupSize == N */
-    uint8_t qBits;        /* ASYM range [1, 16] (was [1, 30] pre-D6) */
+    uint8_t qBits;        /* ASYM range [1, 16] (was [1, 30] pre-group-quant-D6) */
     roundingMode_t roundingMode;
 } asymQConfig_t;
 
@@ -209,14 +207,14 @@ void initSymQConfigGrouped(uint8_t qBits, roundingMode_t roundingMode, size_t nu
 void validateSymQConfigShape(const symQConfig_t *qC, size_t numberOfElements);
 void initAsymQConfig(uint8_t qBits, roundingMode_t roundingMode, asymQConfig_t *asymQConfig);
 /*! Group-quant PR4: general-shape ASYM config init, the exact ASYM twin of
- * initSymQConfigGrouped (same shape grammar, same fail-fasts) plus the D6
+ * initSymQConfigGrouped (same shape grammar, same fail-fasts) plus the group-quant D6
  * qBits ceiling [1, 16]. Allocates scales[numGroups] (each 1.f) AND
  * zeroPoints[numGroups] (each 0) as two separate owned blocks.
  * initAsymQConfig delegates here with (numGroups=1, groupSize=0). */
 void initAsymQConfigGrouped(uint8_t qBits, roundingMode_t rm, size_t numGroups, size_t groupSize,
                             asymQConfig_t *qC);
 /*! Group-quant PR4: attach-time shape check for an ASYM config against a
- * concrete element count (validateSymQConfigShape twin), PLUS the D6
+ * concrete element count (validateSymQConfigShape twin), PLUS the group-quant D6
  * qBits-in-[1,16] re-check for field-assigned configs. Called by initTensor
  * for ASYM tensors. */
 void validateAsymQConfigShape(const asymQConfig_t *qC, size_t numberOfElements);

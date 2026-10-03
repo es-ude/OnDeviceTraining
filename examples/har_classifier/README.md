@@ -313,10 +313,8 @@ it. Quantizing the gradient path is the open research axis (#218, Jan's
 
 `train_c_sym.c` also carries a `GROUP_MODE`/`GROUP_SIZE`/`WEIGHT_DTYPE` env
 axis on top of everything above, wiring the group-quant epic's grouped
-SYM/ASYM machinery (design spec:
-`docs/superpowers/specs/2026-07-28-group-quantization-design.md`, a maintainer-local
-design spec that is not in this repository) into a real
-model:
+SYM/ASYM machinery (contract: `docs/conventions/tensor.md`, group-quant
+section) into a real model:
 
 - `WEIGHT_DTYPE=sym|asym` (default `sym`) — packed SYM (scale-only) or ASYM
   (scale + uint16 code-domain zero-point) weight/bias storage, both at
@@ -397,8 +395,7 @@ unit-test fixtures. On success the run's JSON log gains
 `train_c_har_classifier_bfp` trains the same 12-layer model with classic block
 floating point: packed `mantissaBits`-wide two's-complement mantissas sharing one
 `exponentBits`-wide exponent per block (1 B of metadata per block, vs 4 B per float
-scale for grouped SYM). Spec: epic design 2026-07-29 + PR7 design 2026-09-14
-(maintainer-local, not in this repository); the public contract is
+scale for grouped SYM). The contract is
 `docs/conventions/arithmetic-bfp.md`.
 
 **Knobs** (env): `BFP_MANTISSA_BITS` (2..16, default 8), `BFP_EXPONENT_BITS` (2..8, 8),

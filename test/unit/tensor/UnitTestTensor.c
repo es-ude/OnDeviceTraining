@@ -621,7 +621,7 @@ void testCopyTensorAsymCarriesConfigAndPackedBytes() {
     size_t srcOrder[] = {0, 1};
     shape_t srcShape = {
         .dimensions = srcDims, .numberOfDimensions = 2, .orderOfDimensions = srcOrder};
-    /* code-domain re-pin (PR4, D6): old value-domain zp -7 becomes +7. */
+    /* code-domain re-pin (group-quant PR4, D6): old value-domain zp -7 becomes +7. */
     float srcScales[1] = {0.5f};
     uint16_t srcZps[1] = {7};
     asymQConfig_t srcQC = {.scales = srcScales,

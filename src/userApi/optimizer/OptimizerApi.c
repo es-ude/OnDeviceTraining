@@ -74,7 +74,7 @@ void scaleOptimizerGradients(optimizer_t *optimizer, float factor) {
             break;
         }
         case ASYM: {
-            /* Packed-ASYM dequant is (code - zeroPoint) * scale (D6 code
+            /* Packed-ASYM dequant is (code - zeroPoint) * scale (group-quant D6 code
              * domain): still linear in scale, so the fold is exact the same
              * way; zeroPoint is an additive offset on the code axis and is
              * untouched. Same defensive grouped gate as the SYM arm above

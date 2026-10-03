@@ -40,7 +40,7 @@ void quantizationBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss
     (void)forwardInput; /* straight-through: dy does not depend on x. Both forward
                          * and backward requant map their own absmax exactly onto
                          * qMax, so neither pass saturates and no STE clipping mask
-                         * is needed (spec D3). */
+                         * is needed (#192 D3). */
     dispatchQuantization(loss, propLoss);
 }
 

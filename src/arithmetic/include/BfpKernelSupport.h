@@ -114,7 +114,7 @@ static inline void bfpRequireElementCount(const bfpQConfig_t *qC, size_t elems, 
  * sound only when both wires hold the same number of elements AND share the
  * block grid AND the code/exponent widths; anything else is a re-block, which
  * belongs to the Quantization layer (the sanctioned re-block point,
- * docs/conventions/arithmetic-bfp.md §9 / spec D8). */
+ * docs/conventions/arithmetic-bfp.md §9 / BFP D8). */
 static inline void bfpRequireSameGeometry(const bfpQConfig_t *aQC, size_t aElems,
                                           const bfpQConfig_t *bQC, size_t bElems,
                                           const char *what) {

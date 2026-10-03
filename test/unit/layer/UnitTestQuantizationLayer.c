@@ -143,7 +143,7 @@ void testQuantLayerConvertsAsymToSymInt32MatchesConvertTensor(void) {
      * different scale than the direct conversionMatrix path. */
     tensor_t *input = buildAsym2D(2, 2, 8);
     asymQConfig_t *inputAsymQC = input->quantization->qConfig;
-    /* code-domain re-pin (PR4, D6): old value-domain zp -10 becomes +10;
+    /* code-domain re-pin (group-quant PR4, D6): old value-domain zp -10 becomes +10;
      * mantissa image code - 10 reproduces the same integers. */
     inputAsymQC->scales[0] = 0.25f;
     inputAsymQC->zeroPoints[0] = 10;

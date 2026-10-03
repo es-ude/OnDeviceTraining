@@ -758,10 +758,10 @@ static void symTestUnpackSignExtend(const uint8_t *packed, size_t qBits, int32_t
     }
 }
 
-/* PR3 Task 4 (D1): weightGradAccMode=OUT_ACC_FIXED_SCALE routed to a packed
+/* PR3 Task 4 (packed-grad D1): weightGradAccMode=OUT_ACC_FIXED_SCALE routed to a packed
  * SYM@8 weight-grad target. The freshly-allocated grad (gradInitSym) starts
  * all-zero mantissas at scale=1.0 -- one backward call is therefore the
- * "first store" path (spec 2026-07-03 PR3 §4.1): the grid is derived from the
+ * "first store" path (packed-grad D1): the grid is derived from the
  * increment instead of carried. Gate-level asserts only (no pinned floats):
  * SYM@8, nonzero mantissas, a scale that moved off the untouched-default 1.0. */
 void testLinearBackwardPackedSymWeightGradFixedScaleFirstStore(void) {
@@ -845,7 +845,7 @@ void testLinearBackwardPackedSymWeightGradFixedScaleFirstStore(void) {
     }
 
     /* Second backward call with the NEGATED loss: FIXED_SCALE must CARRY the
-     * grid established by call 1 (spec D1 -- no re-derivation, no renorm),
+     * grid established by call 1 (packed-grad D1 -- no re-derivation, no renorm),
      * and the exactly-opposite increment drives every mantissa back toward
      * (near-)zero -- safely within the established grid, no overflow risk.
      * If the weight-grad call site were cross-wired to read biasGradAccMode
@@ -877,11 +877,11 @@ void testLinearBackwardPackedSymWeightGradFixedScaleFirstStore(void) {
         "means the weight-grad call site is reading the wrong accMode field");
 }
 
-/* PR3 Task 4 (D1) hazard guard: the same fixture as above, but
+/* PR3 Task 4 (packed-grad D1) hazard guard: the same fixture as above, but
  * weightGradAccMode is (deliberately) left at its zero-init value -- OUT_WRITE
  * happens to be 0, so a hand-wired config that forgets to set the new field
- * would otherwise silently overwrite instead of accumulate (spec 2026-07-03
- * PR3 §3). linearBackward must fail fast instead. */
+ * would otherwise silently overwrite instead of accumulate (packed-grad
+ * D1). linearBackward must fail fast instead. */
 void testLinearBackwardZeroInitAccModeDies(void) {
     size_t *weightDims = reserveMemory(2 * sizeof(size_t));
     weightDims[0] = 2;
@@ -2300,7 +2300,7 @@ void testLinearBackwardGroupedDxFloatPathAgreesWithinTolerance(void) {
 
 /* ---- Group-quant PR4 (Task 3): Linear with a grouped ASYM weight ---------
  *
- * D5 made executable: the grouped ASYM forward/dx IS the grouped SYM
+ * group-quant D5 made executable: the grouped ASYM forward/dx IS the grouped SYM
  * forward/dx on SHIFTED mantissas. The funnel's ASYM grouped-unpack arm
  * (ExecuteOp.c) zero-extends the packed codes and subtracts each element's
  * group zeroPoint (code - zp[g]) -- from there on the compute path is
@@ -2667,10 +2667,10 @@ static layer_t *buildBfpLinearLayer(bool withBias, quantization_t *floatQ) {
 
 /* Native ARITH_BFP forward against the staged-input gold: the funnel borrows
  * the BFP-stored weights (unpack only) and stages the FLOAT32 input
- * PER-TENSOR at the WEIGHTS' widths (Decision 1; m=6 here, deliberately != 8
+ * PER-TENSOR at the WEIGHTS' widths (PR2-Decision 1; m=6 here, deliberately != 8
  * and LOSSY for the fixture's X values so a hardcoded staging width diverges
  * observably). generate_expected_bfp_layer_forward.py mirrors exactly that
- * staging. The FLOAT32 wire is bit-exact (ARITH_BFP raw is FLOAT32, D7; the
+ * staging. The FLOAT32 wire is bit-exact (ARITH_BFP raw is FLOAT32, BFP D7; the
  * OUT_WRITE FLOAT32->FLOAT32 epilogue is a memmove), so the compare is
  * EQUAL_MEMORY, not a tolerance. Output prefilled with a sentinel: every
  * element must be kernel-written. */
@@ -2699,7 +2699,7 @@ void testLinearForwardBfpNativeMatchesKernelGold(void) {
     TEST_ASSERT_EQUAL_MEMORY(kLinBfpExpectedNoBias, captured, sizeof(captured));
 }
 
-/* Decision 2: a FLOAT32-stored bias under ARITH_BFP is staged through the
+/* PR2-Decision 2: a FLOAT32-stored bias under ARITH_BFP is staged through the
  * SAME per-tensor-at-weights'-widths template as the input (uniform staging
  * rule) -- the layer must not reject it and the result must match the gold
  * whose bias was quantized per-tensor at m=6. */

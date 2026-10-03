@@ -48,7 +48,7 @@ void optimizerZeroGrad(optimizer_t *optimizer) {
         case ASYM: {
             /* grads are per-tensor (gradInit carrier gate), so element 0 IS
              * the whole grid; zeroPoints[0]=0 is the load-bearing half (code
-             * 0 must decode to exactly 0.0f -- (0 - 0)*scale under the D6
+             * 0 must decode to exactly 0.0f -- (0 - 0)*scale under the group-quant D6
              * code-domain decode), scales[0]=1.f is hygiene. */
             asymQConfig_t *asymQ = param->grad->quantization->qConfig;
             asymQ->scales[0] = 1.f;

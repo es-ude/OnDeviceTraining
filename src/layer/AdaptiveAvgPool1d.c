@@ -178,7 +178,7 @@ static void adaptiveAvgPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, ten
 /* BFP epic PR4 (R-P4): the PR2 fold contract per adaptive window (int32
  * partial per same-group segment, lossless ldexpf fold on group change and at
  * the tail), then a float32 divide by THAT window's own count in the FLOAT32
- * raw (D7). The SYM arm's roundedDivHalfAwayInt32 has no role here: it exists
+ * raw (BFP D7). The SYM arm's roundedDivHalfAwayInt32 has no role here: it exists
  * only because a SYM raw is int32; the BFP raw is float, so the exact divide
  * is both simpler AND more accurate. Sum headroom uses the SAME conservative
  * bound as the SYM arm, ceil(L/O) + 1. */

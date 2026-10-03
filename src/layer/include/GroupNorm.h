@@ -25,8 +25,8 @@ typedef struct groupNormConfig {
     arithmetic_t propLossMath;
     quantization_t *outputQ;        /* produced forward-wire storage */
     quantization_t *propLossQ;      /* produced dx-wire storage */
-    outputMode_t weightGradAccMode; /* dgamma executeOp accumulate mode (PR3 spec D1) */
-    outputMode_t biasGradAccMode;   /* dbeta executeOp accumulate mode (PR3 spec D1) */
+    outputMode_t weightGradAccMode; /* dgamma executeOp accumulate mode (packed-grad D1) */
+    outputMode_t biasGradAccMode;   /* dbeta executeOp accumulate mode (packed-grad D1) */
     bool ownsQuantizations;         /* true → freeGroupNormLayer tears down outputQ/propLossQ
                                      * (Owning factory); false → caller owns them (Borrowing). */
     bool frozen; /* create-time freeze (#380): no grad buffers; optimizer collection,

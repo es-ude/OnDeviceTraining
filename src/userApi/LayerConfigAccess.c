@@ -18,7 +18,7 @@
 #include "Relu.h"
 #include "Softmax.h"
 
-/* Flatten/Quantization have no consumed arithmetic (D4) — the universal
+/* Flatten/Quantization have no consumed arithmetic (arithmetic-type-split D4) — the universal
  * float bridge, matching arithmeticFromQuantizationOrDefault(NULL). */
 static const arithmetic_t NO_ARITHMETIC = {.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
 
@@ -59,10 +59,9 @@ quantization_t *layerOutputQ(layer_t *layer) {
     }
 }
 
-/* Producer's declared backward config for the dx wire it emits (design spec
- * 2026-07-02 §5, #221). NULL = no declared config (Flatten) -> passthrough of
- * the upstream dtype. The loss-grad seed also passes NULL (lossConfig_t has
- * no quantization field -> model-output dtype, as before). */
+/* Producer's declared backward config for the dx wire it emits (#221). NULL = no declared config
+ * (Flatten) -> passthrough of the upstream dtype. The loss-grad seed also passes NULL (lossConfig_t
+ * has no quantization field -> model-output dtype, as before). */
 quantization_t *backwardWireQ(layer_t *layer) {
     switch (layer->type) {
     case LINEAR:
@@ -128,7 +127,7 @@ arithmetic_t layerForwardMath(layer_t *layer) {
     case BATCHNORM1D:
         return layer->config->batchNorm1d->forwardMath;
     case QUANTIZATION:
-        // Pure conversion node (D4): no consumed arithmetic.
+        // Pure conversion node (arithmetic-type-split D4): no consumed arithmetic.
         return NO_ARITHMETIC;
     default:
         PRINT_ERROR("Unknown Layer Type!");
@@ -137,7 +136,7 @@ arithmetic_t layerForwardMath(layer_t *layer) {
 }
 
 /* ---- FLOAT32-only gate (#152 PR3b, spec §6.6; forward-only variant #468) ---
- * Stacked training (microBatchSize > 1) is FLOAT32-only (D3): every declared
+ * Stacked training (microBatchSize > 1) is FLOAT32-only (#152 D3): every declared
  * arithmetic, every storage config and every parameter/grad tensor must be
  * FLOAT32. Stacked evaluation (#468 D6) only runs forwards, so its variant
  * (forwardOnly) skips the backward-only slots: propLossMath, propLossQ, the

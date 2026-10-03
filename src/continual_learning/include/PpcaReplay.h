@@ -9,8 +9,8 @@
 #include "RNG.h"
 #include "Tensor.h"
 
-/* Per-class PPCA generator (#326; spec docs/superpowers/specs/
- * 2026-07-10-ppca-replay-design.md). State tensors accept FLOAT32/SYM/ASYM
+/* Per-class PPCA generator (#326; overview in docs/CONTINUAL_LEARNING.md).
+ * State tensors accept FLOAT32/SYM/ASYM
  * storage; SYM_INT32 (#261), INT32 (silent value-cast) and BOOL (no
  * conversion cell) are rejected at create. v1 arithmetic: ARITH_FLOAT32
  * only (integer arms are the tracking-issue follow-up; no-int64 rule and

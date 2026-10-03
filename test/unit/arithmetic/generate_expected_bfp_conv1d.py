@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generate expected_bfp_conv1d.h for UnitTestConv1dKernel (BFP epic PR2,
-Task 4 -- spec docs/superpowers/specs/2026-07-29-block-floating-point-design.md).
+Task 4 -- docs/conventions/arithmetic-bfp.md §5).
 
 Pins conv1dKernelBfp's fold order (Conv1dKernel.c): per (b, oc, outPos) ONE
 int32 partial; per visited tap BOTH operands' storage indices -> group ids

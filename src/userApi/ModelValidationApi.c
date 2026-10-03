@@ -7,7 +7,7 @@
 #include "Layer.h"
 #include "ModelValidationApi.h"
 
-/* RETIRED (PR1b.2, spec D3): this validator used to reject a SYM_INT32
+/* RETIRED (PR1b.2 D3): this validator used to reject a SYM_INT32
  * accumulator-range producer (Linear/LayerNorm/Conv1d/Conv1dTransposed) not
  * immediately followed by a QUANTIZATION layer — the forward funnel now
  * restores width at the producer's own wire, so that rule has nothing left

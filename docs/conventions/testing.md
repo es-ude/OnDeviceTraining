@@ -96,10 +96,15 @@ ASAN_OPTIONS="detect_leaks=1:abort_on_error=1:halt_on_error=1" \
   build/unit_test_asan/test/unit/<module>/UnitTest<Name>
 ```
 
-For broader recon (e.g. surveying which tests currently leak), prefer the
-valgrind-based recipe in `docs/superpowers/tools/lsan-recon/` (maintainer-local,
-not in the repository) — it produces
-reproducible, fully-attributed per-test reports.
+For broader recon (e.g. surveying which tests currently leak), prefer
+valgrind: build `unit_test_debug` on Linux (Ubuntu 24.04 with clang-21 for host
+parity and valgrind >= 3.22, which reads clang's DWARF-5 debug info), then run
+every `UnitTest*` binary under
+`valgrind --leak-check=full --show-leak-kinds=all --track-origins=no --num-callers=20 --child-silent-after-fork=yes --error-exitcode=0`
+with one log per test. Each log's LEAK SUMMARY gives definitely / indirectly /
+possibly lost and still-reachable bytes per test; deduplicating the leak records
+by their top three stack frames yields the list of distinct leak sites. This
+produces reproducible, fully-attributed per-test reports.
 
 ## Test memory discipline
 
@@ -223,13 +228,11 @@ Reference exemplars in the tree: `test/unit/userAPI/UnitTestInferenceApi.c`,
 
 ### Verification
 
-A test file is considered idiom-compliant when, run under valgrind in the
-`odt-lsan-recon:2026-04-22` Docker image with
+A test file is considered idiom-compliant when, run under valgrind (the
+Linux recon setup described under the LSan section above) with
 `--leak-check=full --show-leak-kinds=all`, all four LEAK SUMMARY
 categories report 0 bytes in 0 blocks (or valgrind emits "All heap blocks
-were freed -- no leaks are possible"). The reproducible recipe and
-container Dockerfile live in `docs/superpowers/tools/lsan-recon/`
-(maintainer-local, not in the repository).
+were freed -- no leaks are possible").
 
 ## Build-time gold-value generators (CMake + uv + PyTorch)
 

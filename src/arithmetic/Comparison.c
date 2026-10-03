@@ -139,10 +139,10 @@ void gteSymInt32Tensor(tensor_t *a, tensor_t *b, int32_t altNumber, tensor_t *re
  * codes to 0 in the CODE domain and copy the group exponents VERBATIM: zeroing
  * a code only shrinks its block's absmax, so every group's 2^E grid stays
  * valid -- no longer absmax-tight, which is the documented utilization drop
- * (spec §10 deviation 6) and the exact analog of gteSymInt32Zero's scale copy.
- * Routing this through executeOp instead would re-derive the target's
+ * (BFP deviations register 6, docs/conventions/arithmetic-bfp.md §12) and the exact analog of
+ * gteSymInt32Zero's scale copy. Routing this through executeOp instead would re-derive the target's
  * exponents at OUT_WRITE: a SECOND quantization of unchanged values, which
- * spec §9 / D8 forbid. The clamp only shrinks magnitude, so the pack can never
+ * BFP D8 (arithmetic-bfp.md §9) forbids. The clamp only shrinks magnitude, so the pack can never
  * overflow the code width and needs no guard. This function dereferences BOTH
  * packed buffers, so it gates both itself (the PR4 idiom) rather than trusting
  * its caller: element counts AND grid AND widths. */

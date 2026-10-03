@@ -250,7 +250,7 @@ void conv1dForward(layer_t *layer, tensor_t *input, tensor_t *output) {
  * zero-init hazard). SYM weight-grad sets the raw intermediate's scale
  * itself (s_in*s_loss); SYM bias-grad emits the raw per-channel sum at the
  * loss scale and lets the OUT_ACC_FIXED_SCALE epilogue's
- * rescaleIntoAccumulatorScale (target roundingMode, spec D4) do the rescale
+ * rescaleIntoAccumulatorScale (target roundingMode, PR1b.2 D4) do the rescale
  * that used to happen inline here. */
 static void weightGradKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                                   const void *ctx) {
@@ -835,7 +835,7 @@ void conv1dCalcBiasGradsBfp(conv1dConfig_t *cfg, tensor_t *lossGrad) {
 
 /* dx adapters (ctx = conv1dForwardCtx_t*, PR3 Task 3): dL/dx via the
  * adjoint -- convTranspose1d of lossGrad with the Conv1d weight [oc][ic][K]
- * (FLOAT32/SYM take the SCATTER cores; the BFP adapter below gathers, D9).
+ * (FLOAT32/SYM take the SCATTER cores; the BFP adapter below gathers, BFP D9).
  * The scatter kernel's weight index arithmetic
  * ((ic*outChPerGroup + ocOffset)*K + k, ConvTranspose1dKernel.c) computes
  * exactly the Conv1d weight's flat storage index in this adjoint role, so a
@@ -864,7 +864,7 @@ static void propLossKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
     }
 }
 
-/* BFP epic PR3 (Task 3): dx via the D9 GATHER adjoint (output-centric fold
+/* BFP epic PR3 (Task 3): dx via the BFP D9 GATHER adjoint (output-centric fold
  * contract; the SYM scatter cores stay SYM-only) -- same {cfg, weightGroups}
  * ctx wrapper as the other dx adapters, weightGroups always NULL for BFP
  * (groupedWeightViewOrNull returns NULL for the BFP dtype). */
@@ -954,7 +954,7 @@ void conv1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
 
     /* propLoss (dx wire): OUT_WRITE. For a SYM_INT32 target this now requants
      * through the conversionMatrix diagonal (width-restored at the producer,
-     * design D3) instead of the old direct kernel write of raw, unrestored
+     * PR1b.2 D3) instead of the old direct kernel write of raw, unrestored
      * accumulator-range mantissas — the #187 dtype guard is superseded by the
      * funnel's own prologue/epilogue and is deleted (recon-conv-backward §4:
      * zero test coverage, confirmed tautology post-#221).

@@ -70,7 +70,7 @@ static roundingMode_t *storageRoundingSlot(tensor_t *tensor) {
  * serialized into checkpoints and stays authoritative for storage/inference
  * encodes). The ACC epilogues (accumulateOut) deliberately keep the TARGET's
  * mode: accumulate is a read-modify-write under the accumulator's own storage
- * grid, whose rounding is part of the grid discipline like scale (spec D4). */
+ * grid, whose rounding is part of the grid discipline like scale (PR1b.2 D4). */
 static void writeOut(tensor_t *intermediate, tensor_t *target, roundingMode_t opRounding) {
     roundingMode_t *slot = storageRoundingSlot(target);
     if (slot == NULL) {
@@ -97,7 +97,7 @@ void executeConvert(tensor_t *input, tensor_t *target) {
  * (reproduces the former LayerNorm helper layerNormAccumulateGradSymInt32,
  * deleted in PR1b; semantics live here now). Fixed-scale reproduces the
  * former linearCalcBiasGradsSymInt32 behavior: rescale into the target's
- * EXISTING scale via rescaleIntoAccumulatorScale (spec D4 — honors the
+ * EXISTING scale via rescaleIntoAccumulatorScale (PR1b.2 D4 — honors the
  * TARGET's roundingMode; Conv1d.c:288 precedent), no clamp, scale never
  * re-derived. The packed SYM/ASYM arms (spec §4.1-4.2) stream the increment
  * chunk-wise via the tensor-typed accumulate*Into* entry points (#296 Stage
@@ -309,7 +309,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
 
         /* Group-quant PR2 (Task 3; final-review Fix 2/3) + PR4 (Task 3): a
          * grouped operand (numGroups > 1) -- SYM or ASYM, the two grouped
-         * carrier dtypes share the {numGroups, groupSize} shape grammar (D6)
+         * carrier dtypes share the {numGroups, groupSize} shape grammar (group-quant D6)
          * -- has no scalar compute image under EITHER arithmetic type: the
          * SYM->SYM_INT32 and ASYM->SYM_INT32 conversionMatrix cells
          * fail-fast on grouped sources (PR2 Task 2 / PR4 Task 1), and the
@@ -347,7 +347,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
             convertTensor(inputs[i], &scratchTensors[i]);
             break;
         case ARITH_SYM_INT32: {
-            /* Decision 11 (BFP epic PR2): deny BEFORE the convertTensor route
+            /* PR2-Decision 11 (BFP epic PR2): deny BEFORE the convertTensor route
              * — the [BFP][SYM_INT32] cell would silently collapse the
              * operand's group structure to a single scalar grid. */
             if (inputs[i]->quantization->type == BFP) {
@@ -375,11 +375,11 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
                      * sign bit), then shift each element into the
                      * signed-mantissa domain by ITS group's code-domain
                      * zeroPoint: mantissa = code - zp[g], g = i/groupSize
-                     * (exact int32 subtract, both operands <= 2^16-1, D6).
+                     * (exact int32 subtract, both operands <= 2^16-1, group-quant D6).
                      * After the shift the scratch is the SAME mantissa image
                      * the SYM arm produces -- the group-aware kernel then
                      * applies per-group scales from its own ctx identically
-                     * for both dtypes (D5: the grouped ASYM compute path IS
+                     * for both dtypes (group-quant D5: the grouped ASYM compute path IS
                      * the grouped SYM path on shifted mantissas). The zp is
                      * hoisted per run (one i/groupSize division per group,
                      * never per element); numGroups*groupSize == n by the
@@ -496,7 +496,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
         initSymInt32Quantization(&rawQC, &rawQ);
         break;
     case ARITH_BFP:
-        /* Spec D7: BFP kernels fold same-exponent segments into a float
+        /* BFP D7: BFP kernels fold same-exponent segments into a float
          * accumulator (ldexpf) and never round — the raw intermediate stays
          * FLOAT32; any width-restore/pack is the OUT_WRITE epilogue's job. */
         initFloat32Quantization(&rawQ);

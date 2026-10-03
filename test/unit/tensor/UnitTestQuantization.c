@@ -9,7 +9,7 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* Group-quant PR1 (docs/superpowers/plans/2026-07-28-groupquant-pr1-always-array.md):
+/* Group-quant PR1 (group-quant D3, docs/conventions/tensor.md):
  * symQConfig_t's scalar `scale` is replaced by an always-array `scales`
  * representation, behavior-identical for PR1 (numGroups always 1, groupSize
  * always 0 -- the "whole tensor" sentinel). initSymQConfig is the one PR1
@@ -67,10 +67,9 @@ void testInitSymQConfigAllocatesIndependentScalesArrays(void) {
     TEST_ASSERT_NOT_EQUAL(aScales, bScales);
 }
 
-/* Group-quant PR2 (docs/superpowers/specs/2026-07-28-group-quantization-design.md
- * §2/D3, Task 1): the grouped-creation API this PR2 introduces, plus the
- * shape-validation choke point PR1 deferred (see the disclosure above --
- * initTensor is the attach point; PR2 wires validateSymQConfigShape there). */
+/* Group-quant PR2 (group-quant D3, docs/conventions/tensor.md; Task 1): the grouped-creation API
+ * this PR2 introduces, plus the shape-validation choke point PR1 deferred (see the disclosure above
+ * -- initTensor is the attach point; PR2 wires validateSymQConfigShape there). */
 
 void testInitSymQConfigGroupedAllocatesPerGroupScales(void) {
     symQConfig_t qc;
@@ -108,10 +107,10 @@ void testValidateSymQConfigShapeDivisibility(void) {
     TEST_ASSERT_TRUE(true); /* reached ⇒ ok-case did not exit */
 }
 
-/* Group-quant PR4 (Task 1, spec D6): asymQConfig_t goes always-array
+/* Group-quant PR4 (Task 1, group-quant D6): asymQConfig_t goes always-array
  * (scales[numGroups] + CODE-domain uint16 zeroPoints[numGroups]) with the
  * same {1,0}-per-tensor / {>1,>0}-grouped shape grammar as symQConfig_t.
- * ASYM's qBits ceiling drops 30 -> 16 (uint16 zp domain, D6). */
+ * ASYM's qBits ceiling drops 30 -> 16 (uint16 zp domain, group-quant D6). */
 
 void testInitAsymQConfigProducesPerTensorSentinelWithZeroZp(void) {
     /* Mutation guard: hardcoding a different shape pair, or seeding
@@ -196,7 +195,7 @@ void testInitAsymQConfigGroupedRejectsSentinelViolations(void) {
 }
 
 void testInitAsymQConfigGroupedRejectsQBitsOutside1To16(void) {
-    /* D6: the code-domain zeroPoint is uint16, so qBits > 16 has no zp
+    /* group-quant D6: the code-domain zeroPoint is uint16, so qBits > 16 has no zp
      * representation (supersedes the old [1, 30] #246 ceiling); 0 would
      * underflow the sub-byte packer, as before. */
     asymQConfig_t qc;
@@ -229,7 +228,7 @@ void testValidateAsymQConfigShapeDivisibilityAndQBits(void) {
                           .roundingMode = HALF_AWAY,
                           .qBits = 4};
     ASSERT_EXITS_WITH(1, { validateAsymQConfigShape(&oneN, 10); });
-    /* the attach-time validator re-checks the D6 width ceiling for
+    /* the attach-time validator re-checks the group-quant D6 width ceiling for
      * field-assigned configs that never went through the init funnel */
     asymQConfig_t wide = {.scales = s,
                           .zeroPoints = z,
@@ -241,10 +240,8 @@ void testValidateAsymQConfigShapeDivisibilityAndQBits(void) {
     TEST_ASSERT_TRUE(true); /* reached ⇒ ok-case did not exit */
 }
 
-/* BFP epic PR1 (docs/superpowers/specs/2026-07-29-block-floating-point-design.md,
- * Task 1; the group shape itself mirrors the group-quant design's
- * docs/superpowers/specs/2026-07-28-group-quantization-design.md): bfpQConfig_t
- * mirrors symQConfig_t's always-array group shape
+/* BFP epic PR1 (Task 1; the group shape itself mirrors group-quant's, see
+ * docs/conventions/tensor.md): bfpQConfig_t mirrors symQConfig_t's always-array group shape
  * exactly ({1,0} per-tensor sentinel or {>1,>0} grouped), swapping the SYM
  * per-group float scale for a per-group biased exponent byte -- the group
  * grid itself (numGroups/groupSize/validate) is identical machinery. */

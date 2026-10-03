@@ -243,7 +243,7 @@ static void requirePerTensorAsym(const asymQConfig_t *qc, const char *what) {
 }
 
 /* Funnel re-check of the initAsymQConfig ceiling for field-assigned configs:
- * the code-domain zeroPoint is uint16, so 17+ has no zp representation (D6;
+ * the code-domain zeroPoint is uint16, so 17+ has no zp representation (group-quant D6;
  * supersedes the [1, 30] #246 ceiling). */
 static void requireAsymComputeQBits(const asymQConfig_t *qc, const char *what) {
     if (qc->qBits == 0 || qc->qBits > 16) {
@@ -261,7 +261,7 @@ static void deriveAsymGridFromMinMax(float mn, float mx, asymQConfig_t *outQC) {
 
 static void deriveAsymGridForGroup(float mn, float mx, asymQConfig_t *outQC, size_t g) {
     const float qMax = powf(2, (float)outQC->qBits) - 1;
-    /* Zero-inclusion nudge (D6, TFLite-standard): extend the band to contain
+    /* Zero-inclusion nudge (group-quant D6, TFLite-standard): extend the band to contain
      * 0 so (a) 0.0 is exactly representable (code == zp decodes to exactly
      * 0.0f) and (b) zpReal = -mn/scale is bounded into [0, qMax] BY
      * CONSTRUCTION (mn <= 0 gives zpReal >= 0; mx >= 0 gives -mn <= mx - mn
@@ -294,7 +294,7 @@ static void emitAsymChunk(const float *vals, size_t count, const asymQConfig_t *
     const int32_t zp = (int32_t)qc->zeroPoints[0];
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t i = 0; i < count; i++) {
-        /* Code-domain encode (D6): round the VALUE quotient first, add the
+        /* Code-domain encode (group-quant D6): round the VALUE quotient first, add the
          * integer zp after -- NOT the old single-round round(v/scale - zp),
          * whose HALF_AWAY ties land differently under the shift. The clamp
          * is load-bearing at the band edges: a .5 tie at both the zp
@@ -637,7 +637,7 @@ void convertAsymTensorToInt32Tensor(tensor_t *inputTensor, tensor_t *outputTenso
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackZeroExtendChunk(inputTensor->data, inQC->qBits, off, count, codes);
         for (size_t i = 0; i < count; i++) {
-            /* code-domain mantissa image (D6): code - zp (was code + zp
+            /* code-domain mantissa image (group-quant D6): code - zp (was code + zp
              * under the old value-domain signed zeroPoint) */
             out[off + i] = codes[i] - zp;
         }
@@ -659,7 +659,7 @@ void convertAsymTensorToFloatTensor(tensor_t *inputTensor, tensor_t *outputTenso
                 n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
             unpackZeroExtendChunk(inputTensor->data, inQC->qBits, off, count, codes);
             for (size_t i = 0; i < count; i++) {
-                /* code-domain decode (D6): (code - zp)*scale, integer subtract
+                /* code-domain decode (group-quant D6): (code - zp)*scale, integer subtract
                  * exact (both operands <= 2^16-1) */
                 out[off + i] = (float)(codes[i] - zp) * scale;
             }
@@ -703,7 +703,7 @@ void convertAsymTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTe
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackZeroExtendChunk(inputTensor->data, inQC->qBits, off, count, codes);
         for (size_t i = 0; i < count; i++) {
-            /* code-domain mantissa image (D6): code - zp */
+            /* code-domain mantissa image (group-quant D6): code - zp */
             out[off + i] = codes[i] - zp;
         }
     }
@@ -992,7 +992,7 @@ static void packFloatBufferAsSym(const float *values, size_t n, symQConfig_t *ou
  * two land on the boundary with no log2f rounding surprises: frexpf returns
  * ratio = frac * 2^e with frac in [0.5, 1), so ceil(log2(ratio)) is e except
  * when ratio is itself a power of two (frac == 0.5), where it is e - 1. The
- * stored-range clamp IS the D6 saturation: stored > max -> the emit pass
+ * stored-range clamp IS the BFP D6 saturation: stored > max -> the emit pass
  * clamps mantissas to +-qMax (high regime); stored < 0 -> quotients round to
  * 0 (flush-toward-zero regime). The high clamp additionally never exceeds
  * bias + 127 (only reachable at exponentBits=8, where the natural top 255
@@ -1003,7 +1003,7 @@ static void packFloatBufferAsSym(const float *values, size_t n, symQConfig_t *ou
  * wire OUT_WRITE epilogues derive exponents through this single authority;
  * epic PR3 added the grad-accumulate engines and the scale arm, and extended
  * OUT_WRITE's reach to the backward's dx wire -- op-local re-blocking never
- * happens (the D8 amendment, docs/conventions/arithmetic-bfp.md §9). */
+ * happens (the BFP D8 amendment, docs/conventions/arithmetic-bfp.md §9). */
 void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint8_t maxStored,
                              uint8_t *storedOut) {
     if (absMax == 0.f) {
@@ -1015,7 +1015,7 @@ void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint8_t max
         cap = (int)bias + 127; /* largest stored exponent with a finite scale */
     }
     if (!isfinite(absMax)) {
-        /* D6's mantissa-saturation regime taken to its limit. frexpf(inf|NaN)
+        /* BFP D6's mantissa-saturation regime taken to its limit. frexpf(inf|NaN)
          * has an unspecified result AND an unspecified *exp (C17 7.12.6.4), so
          * deriving would emit an arbitrary exponent and leave the emit pass
          * rounding a non-finite quotient (undefined). A magnitude too large
@@ -1030,10 +1030,10 @@ void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint8_t max
     int E = (frac == 0.5f) ? e - 1 : e; /* smallest E with absMax/2^E <= qMax */
     int stored = E + (int)bias;
     if (stored < 0) {
-        stored = 0; /* D6: flush-toward-zero regime */
+        stored = 0; /* BFP D6: flush-toward-zero regime */
     }
     if (stored > cap) {
-        stored = cap; /* D6: mantissa-saturation regime */
+        stored = cap; /* BFP D6: mantissa-saturation regime */
     }
     *storedOut = (uint8_t)stored;
 }
@@ -1074,13 +1074,13 @@ static void packFloatBufferAsBfp(const float *values, size_t n, bfpQConfig_t *ou
         deriveBfpStoredExponent(absMax, qMax, bias, maxStored, &outQC->exponents[g]);
     }
     /* pass 2: chunked quantize + pack; saturation via clamp BEFORE the guard
-     * (value-domain quantization saturates by design -- D6; raw code packing
+     * (value-domain quantization saturates by design -- BFP D6; raw code packing
      * elsewhere keeps the #227 abort). WITHIN a chunk, walk per-RUN -- span
      * to min(chunkEnd, groupEnd) -- so the ldexpf+bias scale derivation
      * leaves the inner loop (packFloatBufferAsSym's grouped phase-2 shape;
      * native hot path since epic PR2). gsz = n for per-tensor keeps g = 0.
      * One roundByMode per element in element order -- bit-identical.
-     * #421 U2: that clamp runs in the FLOAT domain first. In the D6 cap
+     * #421 U2: that clamp runs in the FLOAT domain first. In the BFP D6 cap
      * regime (a narrow exponentBits pins the scale far below what the data
      * needs) values / scale leaves int32 range for entirely FINITE inputs,
      * and (int32_t)round(...) is undefined there (C17 6.3.1.4). Identical to
@@ -1215,7 +1215,7 @@ static void packStreamAsBfp(const tensor_t *src, bfpSrcChunkReader_t readChunk, 
         }
     }
     /* pass 2: chunked quantize + pack; saturation via clamp BEFORE the guard
-     * (value-domain quantization saturates by design -- D6), one roundByMode
+     * (value-domain quantization saturates by design -- BFP D6), one roundByMode
      * per element in element order -- bit-identical under the run-walk.
      * WITHIN a chunk, walk per-RUN so the ldexpf+bias scale derivation
      * leaves the inner loop (packFloatBufferAsBfp's pass-2 shape; native hot
@@ -1324,7 +1324,7 @@ void convertBfpTensorToFloat32Tensor(tensor_t *inputTensor, tensor_t *outputTens
 }
 
 /* INT32 -> BFP is codes-in (#227 code domain): mantissas verbatim, ABORT on
- * overflow via packChunkGuarded (D6 saturation is value-domain only). Every
+ * overflow via packChunkGuarded (BFP D6 saturation is value-domain only). Every
  * group exponent is reset to the zero state (= bias, E=0, scale 1) so a
  * reused destination cannot carry a stale grid -- the BFP image of
  * convertInt32TensorToSymTensor's scales[0] = 1.f reset. */
@@ -1667,7 +1667,7 @@ static void resetBfpGridToZeroState(bfpQConfig_t *qc) {
  * Non-finite INTERMEDIATES are a different question and are NOT rejected: a
  * finite increment on a grid already at the exponent cap can still overflow
  * mant*oldScale*factor + inc to +-inf, and that saturates through the emit
- * clamp as D6 value-domain behaviour. Only the INPUT is checked.
+ * clamp as BFP D6 value-domain behaviour. Only the INPUT is checked.
  * Checked in the pass that first reads each increment element, so a
  * violation in the first chunk is caught before any write; a later one
  * aborts after earlier chunks are already written, exactly as
@@ -1748,7 +1748,7 @@ static void accumulateIntoSymFixedGridEngine(tensor_t *target, const incSrc_t *i
         const float qMax = powf(2, (float)qc->qBits - 1) - 1;
         qc->scales[0] = (absMax == 0.f) ? 1.f : absMax / qMax;
     }
-    /* else: carry the grid verbatim -- no re-derivation, no renorm (D1/D2). */
+    /* else: carry the grid verbatim -- no re-derivation, no renorm (packed-grad D1/D2). */
 
     /* phase B: chunked read-modify-write, one roundByMode per element in
      * element order (SR stream identical to the old whole-tensor pass);
@@ -1762,7 +1762,7 @@ static void accumulateIntoSymFixedGridEngine(tensor_t *target, const incSrc_t *i
         for (size_t i = 0; i < count; i++) {
             codes[i] = roundByMode(((float)mant[i] * scale + incBuf[i]) / scale, qc->roundingMode);
         }
-        /* No clamp: packChunkGuarded aborts on overflow (D2, #227 discipline). */
+        /* No clamp: packChunkGuarded aborts on overflow (packed-grad D2, #227 discipline). */
         packChunkGuarded(codes, count, target->data, qc->qBits, off,
                          "accumulateFloatIntoSymTensorFixedGrid");
     }
@@ -1865,7 +1865,7 @@ static void accumulateIntoAsymRescaleEngine(tensor_t *target, const incSrc_t *in
     int32_t oldZeroPoint = (int32_t)qc->zeroPoints[0];
 
     /* phase A: chunked min/max of the decoded-plus-increment values (no
-     * rounding, no writes) -- fresh affine grid every call (D4: no
+     * rounding, no writes) -- fresh affine grid every call (packed-grad D4: no
      * fit-preserving ASYM pack exists). */
     float mn = 0.f, mx = 0.f;
     bool seeded = false;
@@ -1995,12 +1995,12 @@ static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *i
         }
     }
     /* else: carry the grid verbatim -- no re-derivation, no renorm (the SYM
-     * engine's D1/D2 analog, fit-preserving). */
+     * engine's packed-grad D1/D2 analog, fit-preserving). */
 
     /* phase B: chunked read-modify-write, one roundByMode per element in
      * element order; the run-walk hoists each group's 2^E scale out of the
      * inner loop. NO saturation: packChunkGuarded aborts on overflow (#227
-     * code-domain discipline; D6 saturation is value-domain only). In-place
+     * code-domain discipline; BFP D6 saturation is value-domain only). In-place
      * safe: chunk k is fully read before chunk k is rewritten and the code
      * width is unchanged.
      * #421 U2: this site's pre-clamp therefore deliberately does NOT use
@@ -2114,7 +2114,7 @@ void accumulateTensorIntoBfpFixedGrid(tensor_t *target, const tensor_t *incremen
  * The SYM/ASYM engines keep their own walkers: their grids are scalars, so
  * they have neither the per-group latch nor the run-walk this shape exists
  * for. The BFP FixedGrid engine also stays separate -- its emit differs in
- * KIND, not in formula (a #227 code-domain abort on overflow instead of D6
+ * KIND, not in formula (a #227 code-domain abort on overflow instead of BFP D6
  * value-domain saturation), and it carries the target's grid instead of
  * re-deriving one. */
 static void bfpRescaleWalk(tensor_t *target, const incSrc_t *inc, float factor, size_t n,
@@ -2230,7 +2230,7 @@ static void bfpRescaleWalk(tensor_t *target, const incSrc_t *inc, float factor, 
          * OLD scale, requantize at the windowed fresh one, then publish the
          * fresh exponent as each group closes; one roundByMode per element in
          * element order; clamp before the pack guard (value-domain
-         * saturation, D6 -- unlike the FixedGrid twin's abort). In-place safe:
+         * saturation, BFP D6 -- unlike the FixedGrid twin's abort). In-place safe:
          * chunk k is fully read before chunk k is rewritten and the code width
          * is unchanged.
          * The saturation clamp runs in the FLOAT domain FIRST (Rounding.h's

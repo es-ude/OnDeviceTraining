@@ -1462,7 +1462,7 @@ void testMatmulBfpRejectsMismatchedGroupShape(void) {
 /* PR3 kernel-reuse pin: Linear dx = loss @ W with W in RAW [outF, inF] storage
  * -- the reduction walks W strided by inF, hopping weight groups mid-reduction.
  * matmulBfpTensors' per-element lookup + either-boundary fold must handle the
- * strided walk exactly (D8 amendment: no re-quantize, folds just more often). */
+ * strided walk exactly (BFP D8 amendment: no re-quantize, folds just more often). */
 void testMatmulBfpDxStridedWeightWalkMatchesGold(void) {
     tensor_t lossT;
     size_t lossDims[] = {(size_t)kBfpBwdBatch, (size_t)kBfpBwdOutF};
@@ -1570,13 +1570,12 @@ void testMatmulBfpWeightGradTransposedLossViewMatchesGold(void) {
     TEST_ASSERT_EQUAL_MEMORY(kBfpWgExpected, outT.data, kBfpWgExpected_len * sizeof(float));
 }
 
-/* PR3 dx power-of-two twin (spec §8c in the backward, D8 amendment): the dx
- * sibling of testMatmulBfpPowerOfTwoBitIdenticalToGroupedSym above (see its
- * comment for the exactness argument), in the RAW-weight-storage orientation
- * of testMatmulGroupedDxEqualScalesBitIdenticalToScalar (same mantissas,
- * loss per-tensor stored 126 <-> SYM aScale 0.5f, W grouped all-125 <->
- * weightGroups scales 0.25f): the BFP float output must be BIT-IDENTICAL to
- * the grouped-SYM path's dequantized output. */
+/* PR3 dx power-of-two twin (the power-of-two bit-identity twin in the backward, BFP D8 amendment):
+ * the dx sibling of testMatmulBfpPowerOfTwoBitIdenticalToGroupedSym above (see its comment for the
+ * exactness argument), in the RAW-weight-storage orientation of
+ * testMatmulGroupedDxEqualScalesBitIdenticalToScalar (same mantissas, loss per-tensor stored 126
+ * <-> SYM aScale 0.5f, W grouped all-125 <-> weightGroups scales 0.25f): the BFP float output must
+ * be BIT-IDENTICAL to the grouped-SYM path's dequantized output. */
 void testMatmulBfpDxPowerOfTwoBitIdenticalToGroupedSym(void) {
     size_t aDims[] = {(size_t)kDxPerChannelOutRows, (size_t)kDxPerChannelReduceLen};
     size_t aOrder[] = {0, 1};

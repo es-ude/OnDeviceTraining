@@ -2023,8 +2023,7 @@ static void testGoldenBytesModelReluAsymGroupedPropLossV5(void) {
 }
 
 /*! GOLDEN BYTES (group-quant PR1, wire format v5 -- record layout unchanged
- *  since v4, only the header version byte bumped by Task 4's ASYM re-layout,
- *  spec docs/superpowers/specs/2026-07-28-group-quantization-design.md §6):
+ *  since v4, only the header version byte bumped by Task 4's ASYM re-layout):
  *  the SYM qConfig record itself — `u32 numGroups`, `u32 groupSize`, then
  *  `f32 scales[numGroups]`, THEN the pre-existing `u8 qBits`/`u8 rounding`
  *  tail (unchanged order/width from v3). PR1 is always numGroups=1,
@@ -2363,8 +2362,7 @@ static void testGoldenBytesModelBatchNorm1dV6(void) {
     TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, got, sizeof(expected));
 }
 
-/*! GOLDEN BYTES (BFP epic PR1, Task 7, wire format v5, spec
- *  docs/superpowers/specs/2026-07-29-block-floating-point-design.md §6): the
+/*! GOLDEN BYTES (BFP epic PR1, Task 7, wire format v5): the
  *  BFP qConfig record -- `u32 numGroups`, `u32 groupSize`, `u8
  *  exponents[numGroups]`, then `u8 mantissaBits`, `u8 exponentBits`, `u8
  *  roundingMode` -- followed by the packed mantissa payload

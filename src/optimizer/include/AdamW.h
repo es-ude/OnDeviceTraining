@@ -6,7 +6,7 @@
 
 /*! Decoupled-weight-decay Adam (torch.optim.AdamW parity, #328).
  *
- * Numerics contract (spec 2026-07-10, empirical): beta1/beta2/eps/weightDecay
+ * Numerics contract (empirical): beta1/beta2/eps/weightDecay
  * are stored DOUBLE, and every per-step scalar (1-beta1, 1-beta2, the bias
  * corrections, -(lr/bc1), 1-lr*wd) is composed in double, then cast to float
  * exactly once at the kernel-call boundary -- mirroring PyTorch, which

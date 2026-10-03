@@ -679,8 +679,8 @@ static layer_t *adaptiveBuildBfpLayer(adaptiveAvgPool1dConfig_t *cfgStore, layer
     return layerStore;
 }
 
-/* Borrowed BFP-stored grouped input (D8: never re-blocked): the kernel folds
- * same-group segments with ldexpf into the FLOAT32 raw (D7) and divides by
+/* Borrowed BFP-stored grouped input (BFP D8: never re-blocked): the kernel folds
+ * same-group segments with ldexpf into the FLOAT32 raw (BFP D7) and divides by
  * EACH window's own count there — L=8, O=3 gives counts 3/4/3, so a constant
  * divisor is observably wrong. A FLOAT32 output wire makes the OUT_WRITE
  * epilogue a memmove, so the comparison is bit-exact. */

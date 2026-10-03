@@ -56,7 +56,7 @@ void testLayerQuantInitUniformSymInt32DerivesSymArithmeticWithProfileRoundingMod
 }
 
 void testLayerQuantInitUniformAsymBridgesThroughFloatArithmeticButKeepsAsymStorage(void) {
-    /* Storage-only dtype (spec D5): arithmetic bridges through ARITH_FLOAT32,
+    /* Storage-only dtype (arithmetic-type-split D5): arithmetic bridges through ARITH_FLOAT32,
      * but the storage slots keep the real ASYM quantization untouched. */
     quantization_t *q = quantizationInitAsym(8, HALF_AWAY);
 

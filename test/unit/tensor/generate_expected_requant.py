@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate expected_requant.h for UnitTestTensorConversion (#192 PR-1, spec D1/D7).
+"""Generate expected_requant.h for UnitTestTensorConversion (#192 PR-1, #192 D1/D7).
 
 Emulates the two C SYM_INT32 -> SYM_INT32 requant kernels BIT-EXACTLY:
 the C kernels do all per-element arithmetic in float32 (int->float cast,

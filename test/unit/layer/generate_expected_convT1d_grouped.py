@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generate expected_convT1d_grouped.h for UnitTestConv1dTransposed (group-quant
-PR3, Task 2 -- spec docs/superpowers/specs/2026-07-28-group-quantization-design.md).
+PR3, Task 2 -- docs/conventions/tensor.md).
 
 Pins convTranspose1dKernelSymInt32Grouped's SCATTER core with PER-PRODUCT
 rescale-combine: a scatter's consecutive products land in DIFFERENT output

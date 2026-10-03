@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generate expected_group_matmul.h for UnitTestMatmul (group-quant PR2, Task 3
--- spec docs/superpowers/specs/2026-07-28-group-quantization-design.md).
+-- docs/conventions/tensor.md).
 
 Pins matmulSymInt32TensorsGroupedWeight's GGUF-style running group-partial
 rescale-combine (matmulIntCoreGrouped): int MACs per group (exact), a

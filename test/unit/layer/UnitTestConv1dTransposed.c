@@ -106,7 +106,7 @@ static float symScaleOf(tensor_t *t) {
     return ((symInt32QConfig_t *)t->quantization->qConfig)->scale;
 }
 
-/* Re-gold (spec D5): conv1dTransposedForward now routes SYM through
+/* Re-gold (PR1b.2 D5): conv1dTransposedForward now routes SYM through
  * executeOp's OUT_WRITE epilogue, which requants the raw s_in*s_w
  * accumulator wire through the conversionMatrix diagonal
  * (requantSymInt32Tensor) instead of writing it unrestored (pre-PR1b.2
@@ -117,7 +117,7 @@ static float symScaleOf(tensor_t *t) {
  * generate_expected_conv1d_transposed.py's `emulate_sym_convT` self-check
  * (fwd_err <= fwd_tol against the float64 PyTorch-autograd reference,
  * computed on the RESTORED fwd_deq/fwd_scale). Same re-gold class as Task 2's
- * propLoss/Task 3's LayerNorm/Conv1d's own forward pins (ratified spec D5
+ * propLoss/Task 3's LayerNorm/Conv1d's own forward pins (ratified PR1b.2 D5
  * principle). Applies identically to the 3 other
  * testConv1dTransposedForwardSym* tests below. */
 void testConv1dTransposedForwardSymSingleChannelSingleBatch() {
@@ -699,7 +699,7 @@ void testConv1dTransposedCalcBiasGradsSymMultiChannel() {
     }
 }
 
-/* Re-gold (spec D5): conv1dTransposedBackward's dx wire (propLoss) is a
+/* Re-gold (PR1b.2 D5): conv1dTransposedBackward's dx wire (propLoss) is a
  * *produced* wire, not a passthrough — conv1dKernelSymInt32 (the VALID
  * gather adjoint) emits the raw s_loss*s_w mantissa, and executeOp's
  * OUT_WRITE epilogue then requants it through the conversionMatrix diagonal
@@ -1679,7 +1679,7 @@ void testConvT1dBackwardGroupedDxFloatPathAgreesWithinTolerance(void) {
 
 /* ---- Group-quant PR4 (Task 3): grouped-ASYM ConvT1d forward twin --------
  *
- * D5 smoke at the ConvT1d layer (the UnitTestConv1d.c ASYM-twin design,
+ * group-quant D5 smoke at the ConvT1d layer (the UnitTestConv1d.c ASYM-twin design,
  * transplanted to the scatter core): after the funnel's ASYM grouped-unpack
  * arm shifts the codes (code - zp[g]) the compute path IS the grouped-SYM
  * scatter on the resulting mantissas -- same mantissas + same scales give
@@ -1770,7 +1770,7 @@ void tearDown() {}
 /* Native ARITH_BFP forward against the staged-input gold (the Linear
  * sibling's design, see testLinearForwardBfpNativeMatchesKernelGold in
  * UnitTestLinear.c): BFP-stored weights are borrowed+unpacked, the FLOAT32
- * input is staged PER-TENSOR at the WEIGHTS' widths (Decision 1; m=6, lossy
+ * input is staged PER-TENSOR at the WEIGHTS' widths (PR2-Decision 1; m=6, lossy
  * for the fixture's X values), and the FLOAT32 wire is bit-exact -->
  * EQUAL_MEMORY against generate_expected_bfp_layer_forward.py's
  * convT1d_bfp_gather_ref output. outputPadding=1: the tail position per
@@ -1829,7 +1829,7 @@ void testConv1dTransposedForwardBfpNativeMatchesKernelGold(void) {
  * testLinearForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer; exactness
  * argument there): SAME mantissas under value-identical power-of-two grids
  * -> BIT-IDENTICAL FLOAT32 wires through the grouped-SYM SCATTER arm and
- * the BFP GATHER arm (D9: same real sums, exact float regime, so the
+ * the BFP GATHER arm (BFP D9: same real sums, exact float regime, so the
  * formulation difference cannot show). Weight [2,2,3] mantissas grouped
  * {3,4}, all scales 0.25f; input [1,2,4] mantissas at scale 0.5f; K=3,
  * stride 2, outputPadding 1 -> outLen 10; no bias. */

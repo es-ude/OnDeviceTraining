@@ -42,8 +42,7 @@
  * grad tensor entirely; deserialize is TOLERANT of a presence/skeleton
  * mismatch (#380 PR3) -- grads are skipped into frozen skeletons or left
  * zeroed when absent, never NULL-dereferenced; see Deserialize.c.
- * v4 (group-quant PR1/PR2, spec
- * docs/superpowers/specs/2026-07-28-group-quantization-design.md §6): the SYM
+ * v4 (group-quant PR1/PR2): the SYM
  * qConfig record grows `u32 numGroups`, `u32 groupSize` ahead of the scales
  * array -- `f32 scales[numGroups]` -- then the unchanged `u8 qBits`/`u8
  * rounding` tail. The writer is group-GENERAL and always has been: it writes
@@ -57,15 +56,15 @@
  * (Task 5) are what actually exercise a numGroups>1 record end to end. v4's
  * ASYM record was left on an INTRA-BRANCH BRIDGE (old per-tensor v4 shape,
  * scale/qBits/rounding/i32-zeroPoint, but with the i32 slot repurposed to
- * carry a code-domain uint16 value, #246/D6) -- superseded by v5 below.
- * v5 is a COORDINATED single bump (spec D12) carrying two independent
+ * carry a code-domain uint16 value, #246/group-quant D6) -- superseded by v5
+ * below. v5 is a COORDINATED single bump (BFP D12,
+ * docs/conventions/arithmetic-bfp.md) carrying two independent
  * additions that landed together:
- * (a) group-quant PR4, Task 4 (spec
- * docs/superpowers/specs/2026-07-28-group-quantization-design.md §6): the
+ * (a) group-quant PR4, Task 4: the
  * ASYM qConfig record adopts the SAME numGroups/groupSize-prefixed,
  * group-general layout the v4 SYM record introduced, PLUS a second per-group
  * array: `u16 zeroPoints[numGroups]` (LE) placed after
- * `f32 scales[numGroups]`, D6's code-domain zp made possible by the
+ * `f32 scales[numGroups]`, group-quant D6's code-domain zp made possible by the
  * qBits<=16 ceiling. Full ASYM record: `u32 numGroups`, `u32 groupSize`,
  * `f32 scales[numGroups]`, `u16 zeroPoints[numGroups]`, `u8 qBits`,
  * `u8 rounding` -- replacing the bridge above entirely (no migration path
@@ -74,8 +73,7 @@
  * group-quant branch's own earlier tasks produced -- now fail cleanly at the
  * version check below, consistent with the v1->v4 no-back-compat-shim
  * policy).
- * (b) BFP epic PR1, Task 7 (spec
- * docs/superpowers/specs/2026-07-29-block-floating-point-design.md §6): new
+ * (b) BFP epic PR1, Task 7: new
  * BFP qConfig record -- `u32 numGroups`, `u32 groupSize`, `u8
  * exponents[numGroups]`, then `u8 mantissaBits`, `u8 exponentBits`, `u8
  * roundingMode` -- mirrors the SYM v4 arm field-for-field (group shape ahead

@@ -9,7 +9,7 @@
 #include "Common.h"
 #include "Tensor.h"
 
-/* The one conversion funnel (design spec 2026-07-03 PR1b.2, D1). Every op runs:
+/* The one conversion funnel (PR1b.2 D1, docs/conventions/arithmetic-sym.md). Every op runs:
  *   prologue   — operands whose dtype != arithmetic are converted into
  *                transient stack scratch (sources are never mutated)
  *   kernel     — pure computation: operands (in arithmetic representation)
@@ -23,7 +23,7 @@
  *                converted — the kernel writes it in its own storage format.
  *                Rounding ownership (#282): the OUT_WRITE requant rounds by
  *                the OP's arithmetic.roundingMode; the ACC epilogues round by
- *                the accumulator's own storage qConfig (grid discipline, D4).
+ *                the accumulator's own storage qConfig (grid discipline, PR1b.2 D4).
  * Escape hatch policy: the prologue/epilogue helpers stay static in
  * ExecuteOp.c. Opening one for an op that does not fit the n-inputs/1-output
  * shape requires a documented exception here. */
@@ -48,7 +48,7 @@ typedef enum {
                               * add, no clamp (SYM targets); exact add (FLOAT32) */
 } outputMode_t;
 
-/*! @brief Descriptor for a funnel op invocation (design spec D1).
+/*! @brief Descriptor for a funnel op invocation (PR1b.2 D1).
  * ctx: kernel geometry/config, opaque to the funnel, passed straight through
  *      to the kernel; NULL for config-free kernels.
  * auxOut: kernel-written verbatim, in ITS OWN storage format — never funnel-
@@ -75,7 +75,7 @@ typedef struct opSpec {
     /* Group-quant PR2 (Task 3; final-review Fix 2/3) + PR4 (Task 3):
      * per-OPERAND opt-in for a grouped input — SYM OR ASYM (symQConfig_t /
      * asymQConfig_t numGroups > 1; the two grouped carrier dtypes share the
-     * shape grammar, D6) — under EITHER arithmetic type. 0 = no grouped
+     * shape grammar, group-quant D6) — under EITHER arithmetic type. 0 = no grouped
      * operand allowed anywhere (zero-init safe — every existing opSpec
      * compound literal that never heard of grouped operands still denies
      * them); i+1 = inputs[i] (and ONLY inputs[i]) may be grouped. A grouped
@@ -92,7 +92,7 @@ typedef struct opSpec {
      * into scratch — grouped SYM via unpackSignExtend (sign-extended raw
      * int32), grouped ASYM via a zero-extend + per-element `code - zp[g]`
      * shift (PR4: after the shift both dtypes present the IDENTICAL
-     * signed-mantissa image, D5) — and POISONS the scratch
+     * signed-mantissa image, group-quant D5) — and POISONS the scratch
      * symInt32QConfig_t's scale to 1.0f and qMaxBits to the source's qBits: a
      * grouped operand has no single scalar scale, so any kernel reading
      * scratch->quantization->scale here is a bug — group-aware kernels MUST
@@ -134,7 +134,7 @@ typedef struct opSpec {
 
 void executeOp(const opSpec_t *spec, tensor_t *target);
 
-/* Fail-fast guard for the OUT_WRITE==0 hazard (PR3 spec D1, per-layer
+/* Fail-fast guard for the OUT_WRITE==0 hazard (packed-grad D1, per-layer
  * accumulate-mode knob): weightGradAccMode/biasGradAccMode are by-value
  * layerQuant_t/config fields with no "unset" sentinel of their own, and
  * OUT_WRITE happens to be the zero-init value -- a hand-wired config that

@@ -382,7 +382,7 @@ void testInferenceOutputWireHonorsDeclaredQMaxBits(void) {
  * The inference path has its OWN pair of wire allocators (initBufferOutput /
  * initBufferInput), separate from the training path's initLayerOutputs. Both
  * need the BFP arm, and both derive the group geometry from the wire's own
- * element count (plan Decision 5) rather than trusting the template. */
+ * element count (BFP PR2-Decision 5) rather than trusting the template. */
 
 static tensor_t *buildFloatTensor2DInf(size_t d0, size_t d1, const float *values) {
     size_t *dims = reserveMemory(2 * sizeof(size_t));

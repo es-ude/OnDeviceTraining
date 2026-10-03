@@ -39,7 +39,7 @@ class TrainConfig(TypedDict):
     reshuffle: NotRequired[int]  # 0/1: per-epoch reshuffle of the train loader (#381); HAR default 1
     toolchain: NotRequired[str]  # the C compiler's __VERSION__ (provenance; docs/conventions/toolchain-parity.md)
 
-    # BFP sweep (epic #410 PR7; spec 2026-09-14 §6). All NotRequired at the type
+    # BFP sweep (epic #410 PR7; see examples/har_classifier/README.md). All NotRequired at the type
     # level; MANDATORY for impl == "c-bfp" (pinned by test_run_matrix_configs.py).
     mantissa_bits: NotRequired[int]
     exponent_bits: NotRequired[int]

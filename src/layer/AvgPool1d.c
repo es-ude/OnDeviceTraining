@@ -173,11 +173,11 @@ static void avgPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *r
  * exponents BORROWED zero-copy for a BFP-stored input and funnel-staged for a
  * FLOAT32 one. The window sum rides the PR2 fold contract: one int32 partial
  * per same-group visited segment, a lossless ldexpf fold on every group change
- * and at the tail (D8 — the operand is NEVER re-blocked; segments just fold
+ * and at the tail (BFP D8 — the operand is NEVER re-blocked; segments just fold
  * more often). Group lookup is PER ELEMENT, not a run precompute: dilation and
  * stride skip storage indices. The SYM arm's exact s/K fold has NO BFP analog
  * (a BFP scale is 2^E; K is not a power of two in general), so the divide
- * happens in the FLOAT32 raw intermediate (D7), which costs nothing extra.
+ * happens in the FLOAT32 raw intermediate (BFP D7), which costs nothing extra.
  * count_include_pad=true still falls out free: padded positions are simply not
  * visited and the divisor stays K. Guarded by bfpValidateSumHeadroom — the
  * SUM limit (INT32_MAX >> (m-1)), not the product limit. */
@@ -427,7 +427,7 @@ static void avgPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *
  * ARITH_SYM_INT32 arm above. Each output cell's contribution is its EXACT
  * dequant (mantissa * 2^(E-bias) -- a lossless float32 multiply by a power of
  * two) divided by K, accumulated DIRECTLY in the FLOAT32 raw intermediate
- * (D7). There are no int32 partial sums across the scattered writes, so this
+ * (BFP D7). There are no int32 partial sums across the scattered writes, so this
  * kernel needs NO sum-headroom guard (unlike the forward's window sum). rawOut
  * is the funnel's uninitialized Phase-2 scratch, so it is memset before the
  * accumulating `+=` (overlapping windows hit the same input cell). */

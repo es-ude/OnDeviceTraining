@@ -298,7 +298,7 @@ void testConversionFloatAsymQBits16NegativeBandZeroPointAtCodeCeiling() {
     /* Re-pinned to the nudged code-domain grid (group-quant PR4, D6). This
      * used to be the -72817 int32-zeroPoint width pin (#246); the nudge
      * extends the all-negative band [-10, -1] to [-10, 0], so the code-domain
-     * zp lands EXACTLY on the uint16 ceiling 2^16-1 = 65535 -- the D6
+     * zp lands EXACTLY on the uint16 ceiling 2^16-1 = 65535 -- the group-quant D6
      * boundary this fixture now pins (zpReal = -mn/scale = qMax by
      * construction whenever mx nudges to 0). The old max value -1 no longer
      * maps to code 65535 (that code now represents 0.0); the min still maps
@@ -353,7 +353,7 @@ void testConversionFloatAsymQBits16NegativeBandZeroPointAtCodeCeiling() {
 }
 
 void testInitAsymQConfigRejectsQBitsAbove16(void) {
-    /* D6 ceiling (was [1, 30], #246): the code-domain zeroPoint is uint16,
+    /* group-quant D6 ceiling (was [1, 30], #246): the code-domain zeroPoint is uint16,
      * so qBits=17 has codes/zp up to 2^17-1 with no uint16 representation.
      * Mutation guard: removing the initAsymQConfig guard lets the child exit
      * 0 -> RED. */
@@ -363,7 +363,7 @@ void testInitAsymQConfigRejectsQBitsAbove16(void) {
 
 void testConversionFloatAsymFarNegativeBandDerivesNudgedGrid(void) {
     /* Replaces testConversionFloatAsymZeroPointBeyondInt32Dies (group-quant
-     * PR4, D6): under the zero-inclusion nudge this data's zpReal is BOUNDED
+     * group-quant PR4, D6): under the zero-inclusion nudge this data's zpReal is BOUNDED
      * into [0, 2^b-1] by construction -- the old int32-overflow death regime
      * (un-nudged zpReal ~ -2.55e9) is unreachable, so the death test is
      * obsolete. The property that replaces it: the far-negative band
@@ -1140,7 +1140,7 @@ void testRequantDynamicViaConversionMatrixDiagonal() {
 }
 
 void testConvertTensorSymInt32SameTypeKeepsCopySemantics() {
-    // Pins the spec-D1 invariant the PR-D Quant layer relies on:
+    // Pins the #192 D1 invariant the PR-D Quant layer relies on:
     // convertTensor's same-type branch short-circuits BEFORE the matrix
     // lookup and stays memmove + scale copy — wiring the diagonal must NOT
     // change it. A requant here would yield {10922, -21845, 32767} with a
@@ -2090,7 +2090,7 @@ void testAccumulateSymFixedGridZeroIncrementIsBitExact(void) {
 }
 
 void testAccumulateSymFixedGridOverflowAborts(void) {
-    /* D2: growing past the 6-bit grid must exit(1) (#227 message), never
+    /* packed-grad D2: growing past the 6-bit grid must exit(1) (#227 message), never
      * clamp. Seed mantissa 31 (grid max) directly via byteConversion -- so
      * the CARRIED scale (not a derived one) is under test, since the target
      * is not all-zero -- and add +1 grid step (inc == scale): 31 -> 32,
@@ -2190,7 +2190,7 @@ void testAccumulateSymRescaleRederivesGridEachCall(void) {
 
 void testAccumulateAsymRescaleMatchesFloatReference(void) {
     /* ASYM: decode+add+requant equals numpy-style float reference within one
-     * affine grid step; zeroPoint/scale re-derived per store (D4).
+     * affine grid step; zeroPoint/scale re-derived per store (packed-grad D4).
      * Mutation guard: carrying the OLD scale/zeroPoint (0.25/+4) instead of
      * rederiving would leave qc.scales[0]/qc.zeroPoints[0] unchanged -> the
      * exact asserts below RED.
@@ -4348,7 +4348,7 @@ void testFloatToBfpGroupedIndependentExponents(void) {
 void testFloatToBfpSaturatesNarrowExponentHigh(void) {
     /* e=2 -> bias 1, stored range [0,3], E range [-1, 2], max scale 4, m=4:
      * representable |v| <= 7*4 = 28. absMax 1000 needs E=8 -> clamps to stored 3 (E=2),
-     * mantissas clamp to +-7 (D6 saturation, no abort, no pack-guard trip). */
+     * mantissas clamp to +-7 (BFP D6 saturation, no abort, no pack-guard trip). */
     size_t n = 2;
     size_t dims[] = {2};
     size_t order[] = {0};
@@ -4647,7 +4647,7 @@ void testInt32ToBfpIsCodesInWithZeroStateExponent(void) {
 
 void testInt32ToBfpOverflowAborts(void) {
     /* 200 > 7 = m=4 code max: codes-in must ABORT via packChunkGuarded (#227
-     * code-domain discipline) -- D6 saturation covers value-domain quantization
+     * code-domain discipline) -- BFP D6 saturation covers value-domain quantization
      * only, never raw code stuffing. */
     size_t n = 1;
     size_t dims[] = {1};
@@ -5131,7 +5131,7 @@ void testAsymGroupedSourceToBfpUsesPerGroupGrids(void) {
 void testBfpToAsymUsesCanonicalGrid(void) {
     /* mantissas {-1, 0, 1, 3} @ E=+2 (stored 129, scale 4) = values
      * {-4, 0, 4, 12} -- min/max run over DEQUANTIZED values incl. the
-     * negative -4. Canonical grid (deriveAsymGridFromMinMax, PR4 D6 nudged
+     * negative -4. Canonical grid (deriveAsymGridFromMinMax, group-quant PR4 D6 nudged
      * code-domain form; the band already contains 0, so the nudge is inert)
      * at qBits=4 (qMax 15): scale = (12 - -4)/15 = 16/15, zpReal =
      * -mn/scale = 4/(16/15) = 3.74999976f (genuinely fractional: the float
@@ -5925,13 +5925,13 @@ void testDeriveBfpStoredExponentPublicBoundaries(void) {
  * range (255, bias 127 -> E=128) has NO finite float32 scale -- ldexpf(1, 128)
  * is +inf, so a group landing there quantized every code to 0 and dequantized
  * the WHOLE group to NaN (0 * inf), in-range values included, instead of the
- * D6 mantissa saturation. The derivation authority must therefore never emit
+ * BFP D6 mantissa saturation. The derivation authority must therefore never emit
  * stored > bias + 127 (scale 2^127, the largest finite float32 power of two);
  * for e <= 7 the cap lies above maxStored and changes nothing. */
 void testDeriveBfpStoredExponentCapsAtLargestFiniteScale(void) {
     uint8_t stored;
     /* qMax 1 (m=2): absMax 2e38 > 2^127 naturally derives E=128 (stored 255)
-     * -- must cap at 254 so the D6 saturation regime engages with a finite
+     * -- must cap at 254 so the BFP D6 saturation regime engages with a finite
      * scale. */
     deriveBfpStoredExponent(2e38f, 1.f, 127, 255, &stored);
     TEST_ASSERT_EQUAL_UINT8(254, stored);
@@ -5944,7 +5944,7 @@ void testDeriveBfpStoredExponentCapsAtLargestFiniteScale(void) {
 /* Follow-up batch (PR #422): a NON-FINITE absMax has no derivable exponent --
  * frexpf(inf) leaves both its return value and *exp unspecified (C17
  * 7.12.6.4), so the stored byte was whatever the libm happened to write, and
- * one step later the emit pass fed roundByMode a non-finite quotient. D6's
+ * one step later the emit pass fed roundByMode a non-finite quotient. BFP D6's
  * high regime already owns "this magnitude does not fit the exponent range":
  * an unrepresentably large absmax saturates at the cap -- the largest finite
  * grid -- so the block's mantissas clamp to the code range instead. Reachable
@@ -6038,7 +6038,7 @@ void testAccumulateFloatIntoBfpRescaleRederivesExponents(void) {
 }
 
 void testAccumulateFloatIntoBfpRescaleClampsAtExponentCapCorner(void) {
-    /* The requantize pass's value-domain clamp (D6) is load-bearing ONLY in
+    /* The requantize pass's value-domain clamp (BFP D6) is load-bearing ONLY in
      * the deriveBfpStoredExponent cap regime -- everywhere else the freshly
      * derived grid guarantees round(v/scale) <= qMax and the clamp is inert.
      * The E8HighCornerSaturatesFinite fixture, driven through the accumulate
@@ -6127,7 +6127,7 @@ void testAccumulateFloatIntoBfpFixedGridFreshTargetDerivesGrid(void) {
 void testAccumulateFloatIntoBfpFixedGridCarriedGridAborts(void) {
     /* #227 code-domain discipline: a NON-zero target carries its grid
      * verbatim, and a sum past the mantissa range must exit(1), never clamp
-     * (D6 saturation is value-domain quantization only -- the spec splits the
+     * (BFP D6 saturation is value-domain quantization only -- the spec splits the
      * regimes). Per-tensor m=4, code 7 (grid max) @ stored 127 (scale 1);
      * inc +1 -> 8, outside [-8, 7].
      * Mutation guard: clamping instead of pack-guarding lets the child exit
@@ -6904,7 +6904,7 @@ void testScaleBfpTensorInPlaceRejectsInfiniteFactor(void) {
  *   BEFORE roundByMode is called -- (int32_t)round(+-inf) is undefined
  *   (C17 6.3.1.4) -- and the zero element stays 0.
  * Expected: exponent 254, codes {127, -128, 127, 0}. Saturation, not a crash
- * and not garbage: D6's value-domain discipline one step past the
+ * and not garbage: BFP D6's value-domain discipline one step past the
  * finite-absmax case testQuantizeFloatBufferToBfpCodesE8HighCornerSaturates-
  * Finite already pins.
  * Mutation note: dropping the float pre-clamp is observable only where the
@@ -7329,7 +7329,7 @@ void testRequantBfpTensorRejectsNonFiniteSourceValue(void) {
  * `scaleBfpTensorInPlace` got the float-domain pre-clamp in the PR #422
  * follow-up batch (R3); the four sibling emit passes kept rounding a
  * possibly-out-of-int32 quotient. The reachable regime needs NO inf and no
- * NaN: at a narrow `exponentBits` the derived exponent SATURATES (D6), so
+ * NaN: at a narrow `exponentBits` the derived exponent SATURATES (BFP D6), so
  * the block's scale is capped far below what its data needs and `v / scale`
  * leaves int32 range while every input is an ordinary finite float.
  * Shared fixture across all five: m=8 (qMax 127, qMin -128), e=2 (bias 1,
@@ -7372,7 +7372,7 @@ void testFloatToBfpCapRegimeSaturatesFiniteQuotient(void) {
 
     convertTensor(&src, &dst);
 
-    TEST_ASSERT_EQUAL_UINT8(3, exponents[0]); /* D6 high clamp: E = 2, scale 4 */
+    TEST_ASSERT_EQUAL_UINT8(3, exponents[0]); /* BFP D6 high clamp: E = 2, scale 4 */
     int32_t got[4];
     unpackSignExtend(data, 8, 0, got, n);
     int32_t expected[4] = {127, -128, 0, 0}; /* 1/4 = 0.25 flushes to 0 */
@@ -7482,7 +7482,7 @@ void testAccumulateFloatIntoBfpRescaleCapRegimeSaturatesFiniteQuotient(void) {
 
 /* The FIXED-grid engine is the one emit site that must NOT saturate: an
  * increment that does not fit the CARRIED grid is a #227 code-domain abort
- * (docs/conventions/arithmetic-bfp.md 5.6), not D6 value-domain saturation.
+ * (docs/conventions/arithmetic-bfp.md 5.6), not BFP D6 value-domain saturation.
  * Its pre-clamp therefore uses a band two codes wider than the legal one, so
  * an overflowing quotient still reaches packChunkGuarded out of range and
  * still aborts -- only the (int32_t)round(...) undefined conversion is

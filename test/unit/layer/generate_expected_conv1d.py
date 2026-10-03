@@ -395,7 +395,7 @@ def _requant_absmax_f32(mac_int: torch.Tensor, in_scale: float):
 
 
 def _requant_absmax_i12_f32(mac_int: torch.Tensor, in_scale: float):
-    """PR1b.2 (design D3): propLoss now routes through executeOp's OUT_WRITE
+    """PR1b.2 D3: propLoss now routes through executeOp's OUT_WRITE
     epilogue; for a SYM_INT32 target this hits the conversionMatrix diagonal
     (requantSymInt32Tensor, TensorConversion.c) instead of a raw direct write.
     Mirrors _requant_absmax_f32 above but at propLossQ's declared qMaxBits=12
@@ -496,7 +496,7 @@ def emulate_sym_conv(fx):
     else:
         fwd_raw_q = fwd_mac.to(torch.int32)
         fwd_mtol_raw = 0
-    # PR1b.2 (design D3): conv1dForward now routes through executeOp's
+    # PR1b.2 D3: conv1dForward now routes through executeOp's
     # OUT_WRITE epilogue; a SYM_INT32 target hits the conversionMatrix
     # diagonal (requantSymInt32Tensor) instead of the raw direct kernel write
     # above (pre-PR1b.2 behavior) — the same restoration propLoss already got
@@ -512,7 +512,7 @@ def emulate_sym_conv(fx):
     fwd_mtol, fwd_scale_tol = _restore_tolerances(fwd_raw_q, out_scale, fwd_mtol_raw, fwd_q,
                                                   fwd_scale)
 
-    # dx (propLoss): PR1b.2 (design D3) routes propLoss through executeOp's
+    # dx (propLoss): PR1b.2 D3 routes propLoss through executeOp's
     # OUT_WRITE epilogue; for a SYM_INT32 target this requants through the
     # conversionMatrix diagonal (requantSymInt32Tensor) instead of writing the
     # raw, unrestored accumulator-range scatter directly (pre-PR1b.2 behavior).
@@ -619,14 +619,14 @@ def emit_sym_fixture(parts, fx):
     if g["has_bias"]:
         parts.append(emit_float_array(f"bias_{pre}", g["b_deq"]))
     parts.append(emit_float_array(f"lossGrad_{pre}", g["gy_deq"]))
-    # forward (width-restored, as conv1dForward now writes it — design D3)
+    # forward (width-restored, as conv1dForward now writes it — PR1b.2 D3)
     parts.append(emit_int32_array(f"expectedForward_{pre}", g["fwd_q"]))
     parts.append(emit_float_scalar(f"expectedForwardScale_{pre}", g["fwd_scale"]))
     parts.append(emit_int32_scalar(f"forwardMantissaTol_{pre}", g["fwd_mtol"]))
     parts.append(emit_float_array(f"expectedForwardDequant_{pre}", g["fwd_deq"]))
     parts.append(emit_float_scalar(f"forwardDequantTol_{pre}", g["fwd_dtol"]))
     parts.append(emit_float_scalar(f"forwardScaleTol_{pre}", g["fwd_scale_tol"]))
-    # dx / propLoss (width-restored, as conv1dBackward now writes it — design D3)
+    # dx / propLoss (width-restored, as conv1dBackward now writes it — PR1b.2 D3)
     parts.append(emit_int32_array(f"expectedPropLoss_{pre}", g["dx_q"]))
     parts.append(emit_float_scalar(f"expectedPropLossScale_{pre}", g["dx_scale"]))
     parts.append(emit_int32_scalar(f"propLossMantissaTol_{pre}", g["dx_mtol"]))

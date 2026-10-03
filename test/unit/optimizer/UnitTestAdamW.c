@@ -1050,7 +1050,7 @@ void testAdamWCreateRejectsGroupedBfpMoments(void) {
  * collapse to the trivial m1=w1*grad, v1=s2*grad^2 and are asserted with a
  * tight tolerance.
  *
- * GOLD CHOICE (disclosed, task-4-brief.md): the param path chains six
+ * GOLD CHOICE (disclosed): the param path chains six
  * float32 roundings through a sqrt/div (adamWParamKernel ->
  * addcdivDenomFloat32TensorsInplace, PointwiseFused.c) on top of the
  * per-group dequant/requant. Reproducing that exact float32 rounding

@@ -223,8 +223,8 @@ static void initLayerOutputs(tensor_t **layerOutputs, layer_t **model, size_t si
             initSymInt32Quantization(qC, q);
             break;
         case BFP: {
-            /* BFP epic PR2 (plan Decision 5): the template supplies widths,
-             * rounding and groupSize; numGroups is DERIVED from THIS wire's
+            /* BFP epic PR2 (PR2-Decision 5, docs/conventions/arithmetic-bfp.md §5.5): the template
+             * supplies widths, rounding and groupSize; numGroups is DERIVED from THIS wire's
              * element count. A layerQuant_t profile is shape-agnostic — the
              * same template is routinely shared across layers whose wires
              * differ in size — so a template numGroups can only ever be a
@@ -320,7 +320,7 @@ static void initGradTensor(tensor_t *grad, tensor_t *layerOutput, quantization_t
         break;
     }
     case BFP: {
-        /* Same derive-from-element-count rule as initLayerOutputs (Decision 5).
+        /* Same derive-from-element-count rule as initLayerOutputs (PR2-Decision 5).
          * `currentQ` is the layer's propLossQ template — except on the loss-grad
          * seed path, where wireQ is NULL and the template is the model OUTPUT's
          * own (already wire-sized) config; the rule is identical either way,

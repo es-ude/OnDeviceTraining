@@ -23,7 +23,7 @@
 void serialWriteBytes(const void *bytes, size_t numberOfBytes, FILE *f);
 void serialWriteU8(uint8_t value, FILE *f);
 /*! group-quant PR4 (Task 4): u16 carrier for the ODTS v5 ASYM record's
- *  code-domain zeroPoints[] array (D6 caps qBits <= 16, so a code-domain zp
+ *  code-domain zeroPoints[] array (group-quant D6 caps qBits <= 16, so a code-domain zp
  *  always fits u16) -- same checked, endian-pinned pattern as the other
  *  fixed-width primitives below. */
 void serialWriteU16LE(uint16_t value, FILE *f);

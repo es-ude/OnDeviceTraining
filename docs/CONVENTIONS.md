@@ -2,9 +2,7 @@
 
 Contributor conventions for OnDeviceTraining. Detailed per-subsystem conventions
 live under `docs/conventions/`; this file is the index and the cross-cutting
-vision. (Claude sessions receive each subsystem's conventions
-path-scoped automatically via `.claude/rules/` — maintainer-local, not in the
-repository.)
+vision.
 
 For *what the framework can do today* (layer/optimizer/serialization feature
 matrix), see [`FEATURES.md`](FEATURES.md).
@@ -44,13 +42,13 @@ something that will drift again.
   int32-accumulator contract (no int64); the quantized grad-accumulation open
   problem (#218).
 - [`conventions/arithmetic-bfp.md`](conventions/arithmetic-bfp.md) — block-floating-point
-  PR1 deviations register (two's-complement mantissas vs. sign-magnitude, D6
+  PR1 deviations register (two's-complement mantissas vs. sign-magnitude, BFP D6
   exponent saturation vs. the #227 abort discipline, the absmax-snap-up
   exponent rule vs. MX/MSFP, BFP clone semantics) plus the native `ARITH_BFP`
   compute contract: PR2 forward (headroom, staging/wire rules, the
   gather-formulated ConvT1d and float-rounding deviations it introduced) and
   PR3 backward (weightGrad/biasGrad/dx kernels, the shared sum-headroom
-  bound, the per-tensor-only grad/optimizer-state knob, and the D8 amendment
+  bound, the per-tensor-only grad/optimizer-state knob, and the BFP D8 amendment
   — exact fold segmentation instead of op-local re-blocking), PR4 weight-less
   layers (§5.7: native pool arms, the packed-domain Relu/Flatten/Dropout
   paths, the BFP fake-quant loss arms), PR5 norms (§5.8, register entries

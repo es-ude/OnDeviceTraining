@@ -760,7 +760,7 @@ static tensor_t *buildFloatTensor1D(size_t n, const float *values) {
  *
  *  `templateNumGroups` is the numGroups the caller declares in the template --
  *  deliberately decoupled from the truth: the allocator DERIVES
- *  numGroups = wireElements / wireGroupSize (plan Decision 5). */
+ *  numGroups = wireElements / wireGroupSize (BFP PR2-Decision 5). */
 static void buildBfpWireFixture(bfpWireFixture_t *f, size_t hidden, size_t templateNumGroups,
                                 size_t wireGroupSize) {
     f->floatQ = quantizationInitFloat();
@@ -806,7 +806,7 @@ static void freeBfpWireFixture(bfpWireFixture_t *f) {
 
 /*! THE Task 8 capstone. Hidden wire is [1, 6] -> 6 elements; the template
  *  declares numGroups=2, which is WRONG for this wire -- the allocator derives
- *  6/2 = 3 groups (Decision 5). Trains 20 fake-quant SGD steps. */
+ *  6/2 = 3 groups (PR2-Decision 5). Trains 20 fake-quant SGD steps. */
 void testBfpWireFakeQuantTrainingLossDecreasesAndWirePacks(void) {
     rngSetSeed(4242u);
     bfpWireFixture_t f;
@@ -857,7 +857,7 @@ void testBfpWireFakeQuantTrainingLossDecreasesAndWirePacks(void) {
                              "BFP-wire fake-quant training must converge (loss must decrease)");
 }
 
-/*! Decision 5, pinned hard: a template numGroups that cannot possibly describe
+/*! PR2-Decision 5, pinned hard: a template numGroups that cannot possibly describe
  *  the wire (7 groups of 2 = 14 elements, wire has 6) is IGNORED -- geometry is
  *  derived from the wire's own element count. Without the derivation the
  *  allocator would build a 7-group config over a 6-element buffer. */
@@ -954,7 +954,7 @@ static void moveBfpTemplateToDxWire(bfpWireFixture_t *f, bool pinPropLossMath) {
 
 /*! initGradTensor's BFP arm, live: the dx wire between the two Linears is
  *  [1, 6] -> 6 elements, groupSize 2 -> derived numGroups 3 (the template's
- *  numGroups=2 is ignored, same Decision 5 rule as the forward allocators).
+ *  numGroups=2 is ignored, same PR2-Decision 5 rule as the forward allocators).
  *  The dx-side fake-quant bridge (propLossMath pinned ARITH_FLOAT32, see
  *  moveBfpTemplateToDxWire): layer 1's backward OUT_WRITEs its dx into the BFP
  *  wire, layer 0's weight-grad GEMM IN_READs it back. */
@@ -980,7 +980,7 @@ void testBfpDxWireAllocatesThroughInitGradTensor(void) {
     TEST_ASSERT_TRUE_MESSAGE(isfinite(loss), "the dx-wire BFP round trip must stay finite");
 }
 
-/*! Boundary of the Decision-5 derivation: a template groupSize EQUAL to the
+/*! Boundary of the PR2-Decision-5 derivation: a template groupSize EQUAL to the
  *  wire's element count derives numGroups == 1 -- and one group spanning the
  *  whole tensor IS per-tensor blocking, whose only grammatical spelling is
  *  {1,0} (initBfpQConfigGrouped rejects {1,N}). The allocator must normalize
@@ -1201,7 +1201,7 @@ typedef struct bfpNativeFixture {
  *  mandatory here, since Task 7's rule 1 fail-fasts an ARITH_BFP forward with
  *  non-BFP weights (a FLOAT32 weight has no width source to stage at).
  *
- *  Layer 1 is entirely FLOAT32 (Decision 9: the loss-facing wire stays FLOAT32
+ *  Layer 1 is entirely FLOAT32 (PR2-Decision 9: the loss-facing wire stays FLOAT32
  *  -- no loss function has a BFP arm before epic PR4); it consumes the BFP
  *  hidden wire through the funnel's IN_READ dequantization. No Relu: BFP
  *  storage is guarded out of Relu/Dropout/Flatten until epic PR4.
@@ -2016,7 +2016,7 @@ static void capturePr4FlattenCarry(void *ctx, size_t layerIdx, layerType_t layer
  *   - the loss reaches its BFP fake-quant arm (Task 10) because the model
  *     output wire is BFP.
  * Wire element counts are 12 / 12 / 6 / 6 / 2 / 2 — all divisible by the
- * template groupSize 2, which the allocators require (Decision 5); the last
+ * template groupSize 2, which the allocators require (PR2-Decision 5); the last
  * two normalize to per-tensor {1, 0} (groupSize == wire elements). The PARAMS
  * use a per-tensor {1, 0} BFP config: the conv weight's reduction run is
  * ic*k = 3, and the §2 param rule demands groupSize divide it. */
@@ -2219,7 +2219,7 @@ void testBfpUniformPoolActivationModelTrains(void) {
  * The produced-wire element counts along that chain are
  *   32 / 32 / 32 / 4 / 4 / 4 / 2 / 2
  * -- every one divisible by the template groupSize 2, which the wire allocator
- * REQUIRES (Decision 5; a non-divisor aborts the process, so a green run is the
+ * REQUIRES (PR2-Decision 5; a non-divisor aborts the process, so a green run is the
  * proof). The two 2-element wires normalize to per-tensor {1, 0} (groupSize ==
  * wire elements). The GEMM PARAMS use per-tensor {1, 0} BFP: the §2 param rule
  * demands groupSize divide the reduction run (conv: Cin*K = 6, linear:

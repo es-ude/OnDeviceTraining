@@ -648,7 +648,7 @@ void testConvTranspose1dKernelBfpGatherPowerOfTwoBitIdenticalToGroupedSym(void) 
     }
 }
 
-/* Geometry parity (D9): the gather must resolve the adjoint-SAME geometry
+/* Geometry parity (BFP D9): the gather must resolve the adjoint-SAME geometry
  * exactly like the scatter kernels (shared convT1dResolveGeometry) -- same
  * fixture as testConvTranspose1dKernelSamePaddingSymmetric (K=3, SAME,
  * stride 1, Lin=5, padLeft recovered as 1), run BOTH the FLOAT32 scatter

@@ -90,7 +90,7 @@ static void poolBfpRequireDims3(const tensor_t *t, size_t d0, size_t d1, size_t 
 
 /* executeOp forward kernel adapter — ctx = maxPool1dConfig_t* for kernel_t
  * geometry (mirrors AvgPool1d/Conv1d's ctx convention). auxOut = the layer's
- * pre-allocated argmaxIndices tensor (opSpec_t.auxOut, spec D1): the funnel
+ * pre-allocated argmaxIndices tensor (opSpec_t.auxOut, PR1b.2 D1): the funnel
  * never converts it (kernel-written verbatim, in ITS OWN storage format,
  * INT32) — this is exactly the dual-output shape auxOut was added for (D1's
  * "MaxPool argmaxIndices lives here"). The SYM_INT32 arm lives in
@@ -221,7 +221,7 @@ static void maxPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *r
  * can be the true maximum. Every candidate is therefore DEQUANTIZED with
  * ldexpf((float)mant, E_g - bias), which is exact (a float32 multiply by a
  * power of two), and the comparison runs on values. The winner's dequant goes
- * straight into the FLOAT32 raw (D7) — no scale copy, because the raw has no
+ * straight into the FLOAT32 raw (BFP D7) — no scale copy, because the raw has no
  * scale. Tie-break matches the FLOAT32 arm: strict >, seeded at -INFINITY,
  * first occurrence wins. argmax semantics (auxOut, INT32, never
  * funnel-converted; -1 empty-window sentinel) are unchanged. No headroom
@@ -559,7 +559,7 @@ static void maxPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *
 /* BFP epic PR4 (R-P4 backward): funnel-routed dx, the exact shape of the
  * ARITH_SYM_INT32 arm above. Each output cell's EXACT dequant
  * (mantissa * 2^(E-bias)) is routed to the input position the forward recorded
- * in argmax and accumulated in the FLOAT32 raw (D7) — no divide (unlike
+ * in argmax and accumulated in the FLOAT32 raw (BFP D7) — no divide (unlike
  * AvgPool: max is a SELECT, its transpose is a scatter of the untouched
  * gradient) and no int32 partials, hence no sum-headroom guard. ops =
  * {lossGrad}; the argmax tensor arrives via ctx (kernel-written by the

@@ -33,7 +33,7 @@ static void testSymInt32QuantizationDerivesSymArithmeticWithItsRoundingMode(void
     TEST_ASSERT_EQUAL(SR_HALF_AWAY, a.roundingMode);
 }
 
-/* BFP epic PR2: the D5 float-bridge staging rule is RETIRED -- BFP storage
+/* BFP epic PR2: the arithmetic-type-split D5 float-bridge staging rule is RETIRED -- BFP storage
  * derives NATIVE ARITH_BFP, like SYM_INT32 derives ARITH_SYM_INT32, and its
  * OWN roundingMode seeds the derived arithmetic. Fake-quant over BFP storage
  * stays available, but is now EXPLICIT: pin the math slots to ARITH_FLOAT32
@@ -58,7 +58,7 @@ static void testDerivationBfpIsNativeArithBfpWithConfigRounding(void) {
 
 static void testStorageOnlyDtypesDeriveFloatArithmetic(void) {
     /* ASYM/SYM/BOOL/INT32 are storage formats; compute bridges through float
-     * (spec D5, project ASYM design: conversion between native ops). */
+     * (arithmetic-type-split D5, project ASYM design: conversion between native ops). */
     /* Stack-fixture idiom (PR4): initAsymQConfig would heap-allocate two
      * arrays this test never frees. */
     float aqcScales[1] = {1.f};

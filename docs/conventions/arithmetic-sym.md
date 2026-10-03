@@ -1,8 +1,7 @@
 # Arithmetic & SYM_INT32 kernels
 
 Conventions for the integer-math path: `src/arithmetic/**` and the SYM kernels of
-`src/layer/{Conv1d,Conv1dTransposed,Linear,LayerNorm}*`. Path-scoped for Claude
-via `.claude/rules/arithmetic-sym.md` (maintainer-local, not in the repository).
+`src/layer/{Conv1d,Conv1dTransposed,Linear,LayerNorm}*`.
 
 ## SYM_INT32 seed-rescale + the #189 guard
 
@@ -43,7 +42,7 @@ AND backward: Linear/Conv1d/Conv1dTransposed/LayerNorm forward; the dx wire;
 the Quantization layer itself — `OUT_WRITE` routes SYM→SYM through the
 conversionMatrix diagonal). A chained Quantization layer after a SYM producer
 is therefore **optional**, not required (`validateModelQuantization`'s old
-"next layer must be QUANTIZATION" rule is retired, PR1b.2/spec D3) — but
+"next layer must be QUANTIZATION" rule is retired, PR1b.2 D3) — but
 "optional" does not mean "harmless to add anyway". The precise anti-pattern:
 **a Quant node with an IDENTICAL config directly consuming a funnel-restored
 producer wire** repeats the exact restoration the producer epilogue just
@@ -56,7 +55,7 @@ the producer, prefer declaring it directly in `outputQ` and letting the
 entirely; (b) **same-width re-normalization after a scale-transparent
 segment** (Relu/Dropout/Flatten forward are NOT funnel-routed by design —
 element-wise scale-transparent ops that copy/fold the input's scale rather
-than deriving a fresh one, `2026-07-03-pr1b2-forward-funnel-design.md` D2 —
+than deriving a fresh one, PR1b.2 D2 —
 so they can leave a tensor underfilled, e.g. Relu zeroing the absmax element;
 a Quant node there is the *first* requant of that value, not a second one);
 (c) **dtype changes** (SYM -> FLOAT32 etc.). There is no runtime "was this wire already
@@ -207,7 +206,7 @@ The storage qConfig stays authoritative everywhere else: storage, inference
 and serialization encodes, bare conversions (`executeConvert`/`convertTensor`
 — a conversion node's rounding IS a storage encode), and the `OUT_ACC_*`
 epilogues (accumulate is a read-modify-write under the accumulator's own
-storage grid, whose rounding is part of the grid discipline like scale, D4 —
+storage grid, whose rounding is part of the grid discipline like scale, PR1b.2 D4 —
 grad-ACC callers also derive their declared math from the backward WIRE
 quantization, not the grad-storage config, so operation-owning ACC would
 silently re-route existing grad rounding). The tensor's own qConfig is never
@@ -296,10 +295,8 @@ configs (`quantizationInitSymInt32WithBits` allows up to 31 bits, where even a
 
 ## Grouped backward & update — error analysis and path choice
 
-Group-quantized weights (group-quant epic PR2/PR3, spec
-`docs/superpowers/specs/2026-07-28-group-quantization-design.md`,
-maintainer-local) keep raw
-int32 MACs *within* a group and fold partials into the common accumulator
+Group-quantized weights (group-quant epic PR2/PR3; decision register in
+`docs/conventions/tensor.md`) keep raw int32 MACs *within* a group and fold partials into the common accumulator
 scale `s_acc = s_in · max_g(scales[g])` via `rescaleIntoAccumulatorScale`
 (factors `scales[g]/s_wmax ≤ 1`, so combines never grow mantissas). Every
 combine is one rounding of ≤ 0.5·ulp(s_acc). Per output element with C
@@ -308,7 +305,7 @@ independent-rounding assumption RMS ≈ 0.5·√C·s_acc. This entire analysis
 applies UNCHANGED to grouped **ASYM** weights (PR4): the funnel's per-group
 zp shift (`mantissa = code − zp[g]`) is exact, so an ASYM grouped operand
 presents the identical signed-mantissa image at the identical per-group
-scales — the kernels, s_acc, and every bound below are dtype-blind (D5).
+scales — the kernels, s_acc, and every bound below are dtype-blind (group-quant D5).
 C by path:
 
 | path | structure | C per output element |
@@ -325,7 +322,7 @@ Deutel arXiv:2407.10734 is per-tensor) — per the research-deviation rule.
 When the noise matters (coarse groups, deep chains), `propLossMath =
 ARITH_FLOAT32` is the exact alternative: the funnel prologue dequantizes the
 grouped weight per-group (exact per element) and computes in float. The
-integer path exists per ratified spec decision D2; convergence validation at
+integer path exists per group-quant D2; convergence validation at
 scale is the #300-methodology sweep (PR5, ≥10 seeds, Leo).
 
 **Optimizer updates on grouped params** (SGD/AdamW, PR3): the value-space
@@ -411,6 +408,49 @@ quantization).
 This is a research framework: deliberate scheme differences like this one
 MUST be documented here, so experimental design stays separable from
 accidental inconsistency. LayerNorm uses strategy A for BOTH gamma and beta
-per the 2026-06-05 LayerNorm spec.
+by design (LayerNorm epic, #148).
 
 
+
+## Decision register
+
+Code comments cite the design decisions behind the funnel and the
+arithmetic/storage split by family and ID. The design documents are not
+published; every cited ID is stated here. (Group-quant IDs: see
+`docs/conventions/tensor.md`; BFP IDs: `docs/conventions/arithmetic-bfp.md`
+§12.)
+
+**`#192` — SYM program requant (2026-06-11), cited as `#192 D<n>`.**
+
+| ID | Decision | Applied in |
+|---|---|---|
+| D1 | Requant primitives in `TensorConversion.c`: a dynamic one (dequant → absmax → fresh scale, wired as `conversionMatrix[SYM_INT32][SYM_INT32]`) and a fixed-scale one (requant into a preset target scale). `convertTensor`'s same-type copy semantics stay untouched. | `TensorConversion.c`, `UnitTestTensorConversion.c` |
+| D3 | The Quantization layer is a generic conversion node over the conversion matrix. Dynamic targets only: forward requant maps absmax exactly onto qMax, so it never saturates and backward is a value-identical pass-through (no STE clipping mask). | `QuantizationLayer.c` |
+| D7 | Test/gold strategy: shared Python gold helpers in `test/unit/goldgen/` (`sym_gold.py`) plus a C test-helper library. | `test/unit/goldgen/` |
+
+**Arithmetic-type split (2026-07-02), cited as `arithmetic-type-split D<n>`.**
+
+| ID | Decision | Applied in |
+|---|---|---|
+| D1 | Arithmetic is a value type, `arithmetic_t {type, roundingMode}`, stored by value in layer configs (no ownership, no teardown). | `ArithmeticType.h` |
+| D3 | `outputQ`/`propLossQ` (the produced forward and dx wires) are the only config-level quantization pointers; `ownsQuantizations` covers exactly these two, and the wire allocators honour their declared widths. | layer configs, `LayerConfigAccess.c` |
+| D4 | The Quantization layer is a pure conversion node: no arithmetic fields; it runs the kernel-less `executeConvert`. | `QuantizationLayer.c`, `LayerConfigAccess.c` |
+| D5 | `layerQuant_t` = 4 by-value arithmetic fields + 6 storage pointers; `layerQuantInitUniform` derives `ARITH_*` from FLOAT32/SYM_INT32 profiles and `ARITH_FLOAT32` for storage-only dtypes (ASYM/SYM/BOOL/INT32) — the "float bridge". BFP epic PR2 retired that bridge for BFP, which now derives `ARITH_BFP`. | `LayerQuant.h`, `ArithmeticType.c` |
+
+**PR1b.2 — forward funnel (2026-07-03), cited as `PR1b.2 D<n>`.**
+
+| ID | Decision | Applied in |
+|---|---|---|
+| D1 | The `opSpec_t` descriptor API (kernel, ctx, inputs, arithmetic, mode) with `auxOut` for kernel-written secondary outputs (e.g. MaxPool's argmax). | `ExecuteOp.h`, `MaxPool1d.c` |
+| D2 | Every forward migrates into the funnel except the scale-transparent trio Relu/Dropout/Flatten, whose input-scale copy/fold the OUT_WRITE requant would corrupt; Conv1d/ConvT1d backward paths migrate too. | all layers' forwards |
+| D3 | Double requant is eliminated structurally: producers restore width at their wire, so a Quant node with an identical config directly after a restored wire is an anti-pattern; width changes, underfilled wires and dtype changes remain legitimate single requants. | §"Conv1d / Conv1dTransposed SYM_INT32", §"Validator retirement", `ModelValidationApi.c`, `mixed_width_mlp` |
+| D4 | `OUT_ACC_FIXED_SCALE` rescales by the TARGET's `roundingMode` via `rescaleIntoAccumulatorScale` (accumulate rounding belongs to the accumulator's grid). | `ExecuteOp.c`, `Conv1d.c`, `Conv1dTransposed.c` |
+| D5 | Acceptance is re-gold with derivation: tests pinning raw unrestored wires were re-derived for the restored wire instead of demanding zero expectation changes. | `UnitTestConv1d.c`, `UnitTestConv1dTransposed.c` |
+
+**Packed grad storage (2026-07-03, #269/#276), cited as `packed-grad D<n>`.**
+
+| ID | Decision | Applied in |
+|---|---|---|
+| D1 | Both accumulate modes get honest semantics on packed targets (`OUT_ACC_FIXED_SCALE` = fit-preserving, carries the existing grid; `OUT_ACC_DYNAMIC_RESCALE` = requant onto a fresh grid), configurable per layer via `weightGradAccMode`/`biasGradAccMode`. | `LayerQuant.h`, layer configs, `TensorConversion.c` |
+| D2 | A fit-preserving accumulate that outgrows its qBits grid aborts (`#227`-style); renorm vs. saturate is left to later evidence. | `TensorConversion.c` |
+| D4 | ASYM grad storage is requant-only: `OUT_ACC_DYNAMIC_RESCALE` (fresh affine grid per store); `OUT_ACC_FIXED_SCALE` on an ASYM target aborts — no fit-preserving affine pack exists. | `TensorConversion.c`, `ExecuteOp.c` |

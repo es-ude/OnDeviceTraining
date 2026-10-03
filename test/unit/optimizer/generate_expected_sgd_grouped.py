@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Generate expected_sgd_grouped.h for UnitTestSgd (group-quant PR3 Task 4 --
-spec docs/superpowers/specs/2026-07-28-group-quantization-design.md,
-task-4-brief.md).
+docs/conventions/tensor.md).
 
 Pins sgdStepM's grouped-SYM param update: the update opSpecs declare the
 param's groupedSymOperandPos, so the executeOp funnel's EXISTING FLOAT32

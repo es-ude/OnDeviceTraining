@@ -247,7 +247,7 @@ void testTransposeOutputLengthStrideDilationOutputPadding() {
 }
 
 /* ---- BFP epic PR2 (Task 5): convTranspose1dTapsAt -------------------------
- * Contributor enumeration for the gather-formulated ConvT1d (D9): taps are
+ * Contributor enumeration for the gather-formulated ConvT1d (BFP D9): taps are
  * returned in ASCENDING kernelIdx order (the enumeration loop's k order), so
  * expectations below pin both the SET of (inPos, kernelIdx) pairs and that
  * order. */
@@ -322,7 +322,7 @@ void testTransposeTapsPadLeft1() {
 }
 
 void testTransposeTapsMatchScatterEnumeration() {
-    // Scatter-equivalence property (D9): for every outPos, the taps must be
+    // Scatter-equivalence property (BFP D9): for every outPos, the taps must be
     // EXACTLY the (inPos, k) pairs the SYM scatter loop structure
     // (ConvTranspose1dKernel.c: outBase = inPos*stride - padLeft,
     // outIdx = outBase + k*dilation, bounds-checked) scatters into outPos.

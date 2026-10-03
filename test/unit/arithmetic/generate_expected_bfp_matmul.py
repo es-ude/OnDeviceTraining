@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generate expected_bfp_matmul.h for UnitTestMatmul (BFP epic PR2, Task 3 --
-spec docs/superpowers/specs/2026-07-29-block-floating-point-design.md).
+docs/conventions/arithmetic-bfp.md §5).
 
 Pins matmulBfpTensors' fold order (Matmul.c): per output element ONE int32
 partial; per reduction step both operands' storage indices -> group ids

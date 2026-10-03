@@ -86,7 +86,7 @@ static tensor_t *buildPackedSym(size_t n, const int32_t *mantissas, uint8_t qBit
 
 /* Packed ASYM tensor (PR3 targets); codes are non-negative, no sign-extend
  * needed on the seeding side (byteConversion narrows verbatim). zeroPoint is
- * the CODE-domain uint16 (PR4, D6): dequant = (code - zeroPoint)*scale. */
+ * the CODE-domain uint16 (group-quant PR4, D6): dequant = (code - zeroPoint)*scale. */
 static tensor_t *buildAsymPacked(size_t n, const int32_t *codes, uint8_t qBits, float scale,
                                  uint16_t zeroPoint) {
     size_t *dims = reserveMemory(sizeof(size_t));
@@ -449,7 +449,7 @@ void testAccDynamicFloatIncIntoSymTargetMatchesLayerNormReference(void) {
 /* Fixed-scale SYM+SYM reproduces linearCalcBiasGradsSymInt32's semantics via
  * rescaleIntoAccumulatorScale(interm[i], intermScale, targetScale, HALF_AWAY),
  * NO clamp; the target's roundingMode here is HALF_AWAY (default of buildSym),
- * so this pins the D4 bit-identical-to-old-behavior case (roundHalfAway ==
+ * so this pins the PR1b.2 D4 bit-identical-to-old-behavior case (roundHalfAway ==
  * the pre-migration bare roundf for these inputs). Hand-computed: interm
  * {700, -300} @ 0.01 into target {5, -5} @ 0.02: 700*0.01/0.02 = 350 (exact)
  * -> 355; -300*0.01/0.02 = -150 (exact) -> -155. Target scale must stay
@@ -487,7 +487,7 @@ void testAccFixedSymIntoSymRescalesIntoExistingScale(void) {
  * lifted by this task's new `case SYM:` arm in accumulateOut. Flipped into
  * the OUT_ACC_FIXED_SCALE happy path: a fresh (post-initTensor all-zero)
  * SYM@8 target derives its grid from the first increment, then a second
- * accumulate carries that grid verbatim (fit-preserving, spec D1/D2). One of
+ * accumulate carries that grid verbatim (fit-preserving, packed-grad D1/D2). One of
  * exactly two sanctioned contract-flip test edits in this PR (spec §4.1/§9;
  * the other is UnitTestSgd's admission flip — the PR2 ASYM-zero test's
  * config-reset extension is additive, not a flip). Parity oracle: a twin
@@ -711,7 +711,7 @@ void testAccDynamicSymPackedAcceptsSymInt32IntermediateBitIdenticalToFloatBridge
     TEST_ASSERT_EQUAL_FLOAT(scaleFloat, scaleSymInt32);
 }
 
-/* ASYM DYNAMIC_RESCALE happy path (D4: the only supported ASYM accumulate
+/* ASYM DYNAMIC_RESCALE happy path (packed-grad D4: the only supported ASYM accumulate
  * mode) must match accumulateFloatIntoAsymTensorRescale exactly (fresh
  * affine grid every store). Fixture matches Task 2's own ASYM-rescale
  * fixture (recon-pack precedent): ASYM@5 codes {12,16,20,24} @
@@ -862,7 +862,7 @@ void testAccIntoTooWidePackedSymTargetAborts(void) {
     freeTensor(inc);
 }
 
-/* D4: no fit-preserving ASYM pack exists, so OUT_ACC_FIXED_SCALE on an ASYM
+/* packed-grad D4: no fit-preserving ASYM pack exists, so OUT_ACC_FIXED_SCALE on an ASYM
  * target must abort rather than silently behave like DYNAMIC_RESCALE.
  * Mutation guard: dropping this guard (falling through to the rescale path)
  * lets the child exit 0 -- RED. */
@@ -1171,7 +1171,7 @@ void testAccFixedSymInt32IntermediateIntoBfpTargetCarriesGrid(void) {
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, n);
 }
 
-/* ---- opSpec_t: ctx / auxOut / FIXED_SCALE roundingMode (spec D1+D4) --- */
+/* ---- opSpec_t: ctx / auxOut / FIXED_SCALE roundingMode (PR1b.2 D1+D4) --- */
 
 typedef struct {
     float addend;
@@ -1275,7 +1275,7 @@ void testAuxOutIsKernelWrittenVerbatimAndNeverFunnelConverted(void) {
     TEST_ASSERT_FLOAT_WITHIN(1e-9f, 0.777f, auxScale); /* sentinel scale untouched */
 }
 
-/* OUT_ACC_FIXED_SCALE must consult the TARGET's roundingMode (spec D4) via
+/* OUT_ACC_FIXED_SCALE must consult the TARGET's roundingMode (PR1b.2 D4) via
  * rescaleIntoAccumulatorScale, not a bare roundf (which is HALF_AWAY-only and
  * ignores SR jitter entirely). Values are chosen so the pre-rescale ratio
  * lands exactly on a HALF_AWAY tie (705*0.01/0.02 = 352.5, -705*... = -352.5)
@@ -1292,7 +1292,7 @@ void testAuxOutIsKernelWrittenVerbatimAndNeverFunnelConverted(void) {
  *   SR_HALF_AWAY: round(352.5 + jitter0 - 0.5) = round(352.005...) = 352
  *                 round(-352.5 + jitter1 - 0.5) = round(-352.44...) = -352
  * Target scale must stay EXACTLY 0.02 (never re-derived), matching
- * testAccFixedSymIntoSymRescalesIntoExistingScale's HALF_AWAY pin (D4's
+ * testAccFixedSymIntoSymRescalesIntoExistingScale's HALF_AWAY pin (PR1b.2 D4's
  * "bit-identical for HALF_AWAY" case). */
 void testAccFixedScaleHonorsTargetSrRoundingMode(void) {
     tensor_t *inc = buildSym(2, (int32_t[]){705, -705}, 0.01f);
@@ -1303,7 +1303,7 @@ void testAccFixedScaleHonorsTargetSrRoundingMode(void) {
     initSymInt32QConfig(HALF_AWAY, &arithQC); /* arithmetic's own roundingMode is
                                                * irrelevant to FIXED_SCALE's
                                                * epilogue rescale (target's is
-                                               * what counts, per D4) */
+                                               * what counts, per PR1b.2 D4) */
     initSymInt32Quantization(&arithQC, &arith);
 
     rngSetSeed(99);
@@ -2091,7 +2091,7 @@ static void captureBfpOperandKernel(tensor_t **operands, size_t nOperands, tenso
         g_bfpCapCodes[i] = ((int32_t *)operands[0]->data)[i];
     }
     g_bfpCapRawQType = (int)rawOut->quantization->type;
-    /* raw is FLOAT32 under ARITH_BFP (D7); write it fully so the epilogue
+    /* raw is FLOAT32 under ARITH_BFP (BFP D7); write it fully so the epilogue
      * never reads uninitialized stack. */
     size_t outN = calcNumberOfElementsByTensor(rawOut);
     for (size_t i = 0; i < outN; i++) {
@@ -2423,7 +2423,7 @@ static void writeKnownFloatsKernel(tensor_t **operands, size_t nOperands, tensor
     }
 }
 
-/* (g) The raw intermediate under ARITH_BFP is FLOAT32 (D7) and the OUT_WRITE
+/* (g) The raw intermediate under ARITH_BFP is FLOAT32 (BFP D7) and the OUT_WRITE
  * epilogue packs a BFP target through the [FLOAT32][BFP] cell: the probe
  * writes Task 2's {100,-50,25,0} into rawOut, the m=4 target must come out
  * as stored exponent 131 + packed codes {6,-3,2,0} (composition test — the
@@ -2514,14 +2514,14 @@ static void symArithmeticBfpStoredOperandBody(void) {
         out);
 }
 
-/* (h) Decision 11, deny direction: a BFP-STORED operand under ARITH_SYM_INT32
+/* (h) PR2-Decision 11, deny direction: a BFP-STORED operand under ARITH_SYM_INT32
  * must fail-fast — the [BFP][SYM_INT32] cell would silently collapse the
  * operand's group structure to a single scalar grid. */
 void testExecuteOpSymArithmeticRejectsBfpStoredOperand(void) {
     ASSERT_EXITS_WITH_FAILURE(symArithmeticBfpStoredOperandBody());
 }
 
-/* (h) Decision 11, keep direction: a GROUPED BFP-stored operand under
+/* (h) PR2-Decision 11, keep direction: a GROUPED BFP-stored operand under
  * ARITH_FLOAT32 keeps working — the PR1 fake-quant path (float-bridge
  * staging via the group-aware BFP->FLOAT32 dequant cell) is what every BFP
  * layer runs on until the Task 9 derivation flip; regression guard. */

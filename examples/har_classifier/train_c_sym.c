@@ -3,7 +3,7 @@
 /* SPIKE — SYM-quantized-WEIGHTS HAR conv classifier (de-risking a config the
  * framework has never run: trainable params stored as packed sub-byte SYM).
  *
- * Config (see .superpowers/sdd/sym-spike-report.md):
+ * Config:
  *   - weight storage + bias storage = packed SYM@SYM_BITS (the sub-byte `SYM`
  *     dtype, NOT the SYM_INT32 int32 container). Factories can only init
  *     FLOAT32-native param storage (#270 requireFloat32 gate), so the params
@@ -710,7 +710,7 @@ int main(void) {
      * operand at 12 bits (#227) — wider weights (e.g. 16) would overflow int32
      * over the conv accumulation length, so the kernel rejects them mid-forward.
      * Fail fast here with the reason instead of crashing deep in the matmul.
-     * This ceiling applies to WEIGHT_DTYPE=asym too (ASYM's own D6 ceiling is
+     * This ceiling applies to WEIGHT_DTYPE=asym too (ASYM's own group-quant D6 ceiling is
      * [1,16], looser): the ASYM-stored weight still converts to the same
      * SYM_INT32 forward operand every step (conversionMatrix[ASYM][SYM_INT32]). */
     if (g_symBits < 1 || g_symBits > 12) {

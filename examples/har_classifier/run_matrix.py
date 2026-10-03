@@ -51,7 +51,7 @@ ROOT = HERE.parents[1]
 
 
 def bfp_config_name(env: dict[str, str]) -> str:
-    """The BFP name grammar (spec 2026-09-14 §2): EVERY knob is encoded so --resume
+    """The BFP name grammar (#410 PR7): EVERY knob is encoded so --resume
     can never confuse two numerically different runs:
       bfp_wb{t|pc|N}_ab{f|t|N}_m{M}_e{E}_x{nat|fq}_g{0|1}_s{0|1}_r{sr|det}_l{const|cos}"""
     wb = {"tensor": "t", "channel": "pc"}.get(env["BFP_WEIGHT_BLOCK"], env["BFP_WEIGHT_BLOCK"])
@@ -114,8 +114,7 @@ CONFIGS: dict[str, tuple[str, dict[str, str]]] = {
     "sym4det": ("train_c_har_classifier_sym", {"SYM_BITS": "4", "SYM_ROUNDING": "det"}),
     # Group-granular quantization (#300 axis, group-quant PR5): {per-channel, G64,
     # G32} x {SYM, ASYM} at the two coarse widths where the accuracy-per-byte
-    # frontier is most interesting (sym4/sym6 -- see the design spec's §8
-    # acceptance grid, docs/superpowers/specs/2026-07-28-group-quantization-design.md).
+    # frontier is most interesting (sym4/sym6 -- the #300 acceptance grid).
     # "pc" = per-channel (one scale/zero-point per output channel, GROUP_MODE=channel);
     # "g64"/"g32" = fixed group size via GROUP_MODE=size. Bare "sym{W}"/"asym{W}"
     # (no pc/g64/g32 suffix) are per-TENSOR (today's default GROUP_MODE) -- the

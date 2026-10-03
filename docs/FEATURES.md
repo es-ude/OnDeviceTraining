@@ -51,7 +51,7 @@ only) and grouped grad/optimizer-state templates (SYM/ASYM/BFP) are unsupported.
 | `RELU` | – | ✓ | ✓ scale-transparent | ✓ packed-transparent | n/a | n/a | ✓ |
 | `SOFTMAX` | – | ✓ | ~ dequant-to-float | ✓ native (fwd+bwd, i-exp + shift knob) | n/a | n/a | ✓ |
 | `FLATTEN` | – | ✓ | ✓ scale-transparent | ✓ packed-transparent | n/a | n/a | ✓ |
-| `DROPOUT` | – | ✓ | ✓ scale-transparent | ~ float bridge (D4) | n/a | n/a | ✓ |
+| `DROPOUT` | – | ✓ | ✓ scale-transparent | ~ float bridge (BFP D4) | n/a | n/a | ✓ |
 | `MAXPOOL1D` | – | ✓ | ✓ native (fwd+bwd) | ✓ native (fwd+bwd) | n/a | n/a | ✓ |
 | `AVGPOOL1D` | – | ✓ | ✓ native (fwd+bwd) | ✓ native (fwd+bwd) | n/a | n/a | ✓ |
 | `ADAPTIVE_AVGPOOL1D` | – | ✓ | ✓ native (fwd+bwd) | ✓ native (fwd+bwd) | n/a | n/a | ✓ |
@@ -97,7 +97,7 @@ Notes on the qualified cells:
   §5; norms §5.8). *packed-transparent* (Relu/Flatten) carries the per-group exponents
   verbatim outside the funnel by design (§5.7 — Relu's codes are clamped/masked, the
   GRID is what is transparent). *float bridge* = dequant → float compute →
-  fresh-exponent repack (Dropout, D4). Softmax is native on BOTH sides since epic
+  fresh-exponent repack (Dropout, BFP D4). Softmax is native on BOTH sides since epic
   PR6 (§5.9): an INTEGER forward pipeline (I-BERT i-exp on a fixed `2^-14` work
   grid, fed by a block-alignment shift) plus one funnel backward op that
   recomputes the forward from the logits; `softmaxSetBfpExpShiftRounding` picks
@@ -120,7 +120,7 @@ Notes on the qualified cells:
   SYM_INT32 or BFP directly (no requireFloat32 gate — #270 covers RANDOM init, and the
   constant fills gamma = 1 / beta = 0 are exact grid points on any BFP grid), but
   SYM/ASYM are rejected by factory validation — hence "partial". BFP gamma/beta
-  geometry is Decision-5-derived (BFP epic PR5): the factory honors the storage
+  geometry is PR2-Decision-5-derived (BFP epic PR5): the factory honors the storage
   template's `groupSize` only, derives `numGroups` from the parameter's own element
   count, normalizes `groupSize == N` to the per-tensor `{1,0}` config, and fail-fasts
   on a non-divisor (`docs/conventions/arithmetic-bfp.md` §5.8 R-N6). BatchNorm1d
@@ -153,7 +153,7 @@ Notes on the qualified cells:
   increment on an all-zero-codes accumulator (and **aborts** on mantissa overflow, #227
   code-domain discipline); `OUT_ACC_DYNAMIC_RESCALE` re-derives a fresh per-group grid
   every call from the absmax of the post-increment sum (`|mant·oldScale + inc|`,
-  value-domain, so it **clamps** per D6 instead of aborting). Both modes reject a
+  value-domain, so it **clamps** per BFP D6 instead of aborting). Both modes reject a
   **non-finite increment** (BFP has no NaN/inf code, unlike the FLOAT32 grad path that
   keeps propagating one) and leave an **empty** target in the canonical zero state
   (#421). `optimizerZeroGrad`'s `BFP` arm resets exponents to bias (not just codes
@@ -308,7 +308,7 @@ Notes on the qualified cells:
   semantics, where the pristine LR is locked in by whichever scheduler
   attaches to the optimizer first, regardless of construction order between
   `LinearLR` and `main`.
-- **Batch-size schedulers** (batch-size scheduler port, design 2026-09-16):
+- **Batch-size schedulers** (batch-size scheduler port):
   `bsScheduler_t` (caller-owned, zero-alloc; `src/optimizer/BsScheduler.[ch]`)
   with `STEP_BS` and `EXPONENTIAL_BS`, the batch analogue of `STEP_LR` /
   `EXPONENTIAL_LR`: where those multiply the LR by `gamma`, these **divide the
@@ -604,9 +604,8 @@ checkpointing, limitations, literature).
   cross-dtype conversion — only the BOOL→BOOL packed same-type copy that
   `convertTensor` handles before the matrix), grad-accumulate modes, and
   `quantizeFloatToAsym` as the single `*→ASYM` helper. `symQConfig_t` is
-  **always-array** (group-quant epic, spec
-  `docs/superpowers/specs/2026-07-28-group-quantization-design.md` — a maintainer-local
-  design spec, not in the repository): `scales[numGroups]`
+  **always-array** (group-quant epic; contract and decision register in
+  `docs/conventions/tensor.md`): `scales[numGroups]`
   with per-tensor = numGroups 1 / groupSize 0 sentinel. Groups (numGroups > 1) are
   SHIPPED for creation (`quantizationInitSymGrouped`/`requantizeTensorInPlace`),
   FLOAT32↔SYM conversion, the `executeOp` grouped-operand gate, the ODTS/ODTR serial
@@ -622,7 +621,7 @@ checkpointing, limitations, literature).
   `docs/conventions/tensor.md`), grouped FLOAT32↔ASYM conversion, and grouped ASYM
   weights train end-to-end through the SAME symmetric grouped kernels (the funnel
   shifts codes by the per-group zp into the identical signed-mantissa image — zero
-  kernel changes, spec D5; layers pass a symQConfig-shaped view of the asym scales).
+  kernel changes, group-quant D5; layers pass a symQConfig-shaped view of the asym scales).
   **The HAR sweep wiring is SHIPPED (PR5, epic wiring complete)**: the
   `har_classifier` sym trainer carries the `GROUP_MODE`/`GROUP_SIZE`/`WEIGHT_DTYPE`
   env axis (per-layer divisibility fallback, resolved shapes + `group_overhead_b`
@@ -633,9 +632,8 @@ checkpointing, limitations, literature).
   Grads, bias, gamma/beta, wires,
   and momentum stay per-tensor (funnel-enforced); `symInt32QConfig_t` (compute/wires)
   stays scalar by design.
-- **BFP** (`qtype_t BFP`, block-floating-point epic PR1–PR7, spec
-  `docs/superpowers/specs/2026-07-29-block-floating-point-design.md` — maintainer-local,
-  not in the repository; the in-repo contract is `docs/conventions/arithmetic-bfp.md`) — packed
+- **BFP** (`qtype_t BFP`, block-floating-point epic PR1–PR7; the contract and decision register are
+  `docs/conventions/arithmetic-bfp.md`) — packed
   two's-complement mantissas + per-group `u8` biased exponents (`bfpQConfig_t`), the
   same always-array group shape as `symQConfig_t`. The dtype-core (epic PR1) ships:
   the **complete 7×7 matrix** (all 10 `BFP` cross cells + the `[BFP][BFP]`
@@ -653,7 +651,7 @@ checkpointing, limitations, literature).
   the default; fake-quant is still available, pin the math slot(s) to
   `ARITH_FLOAT32` explicitly). `ARITH_BFP` runs the GEMM-family **forward**
   natively — Linear/Conv1d matmul, Conv1dTransposed via a gather-formulated
-  kernel (`convTranspose1dKernelBfpGather`, spec D9, since the scatter form has
+  kernel (`convTranspose1dKernelBfpGather`, BFP D9, since the scatter form has
   no per-(output, group) run to carry a block partial across) — with both
   operands blocked, `int32` same-exponent-segment partials folded via `ldexpf`,
   and a headroom guard (`bfpSegmentLimit(ma,mb) = INT32_MAX >> (ma+mb-2)`,
@@ -664,7 +662,7 @@ checkpointing, limitations, literature).
   fail-fast. **Epic PR3 adds native backward**: `weightGrad`/`biasGrad`/`dx` all
   run `ARITH_BFP` kernels for Linear/Conv1d/Conv1dTransposed through the EXACT
   same fold contract as the forward — BFP-stored operands are never re-quantized,
-  even though the backward's reduction axis differs from storage order (D8
+  even though the backward's reduction axis differs from storage order (BFP D8
   amendment, `docs/conventions/arithmetic-bfp.md` §9) — so a uniform-BFP model
   (`layerQuantInitUniform` over one BFP template) now trains its ENTIRE loop
   natively, no pins required; pinning the backward math slots to `ARITH_FLOAT32`
@@ -699,7 +697,7 @@ checkpointing, limitations, literature).
   dequants, one OUT_WRITE pack at the produced wire; the backward is three funnel
   ops anchored on `propLossQ` (dgamma/dbeta ACC + dx OUT_WRITE), so BFP gamma/beta
   grad storage works too, and BFP constant-fill gamma/beta allocation is
-  factory-supported with Decision-5-derived geometry. A uniform-BFP model
+  factory-supported with PR2-Decision-5-derived geometry. A uniform-BFP model
   containing BOTH norms trains natively end to end
   (`testBfpUniformNormModelTrainsAndGridsMove`). Contract + error analysis:
   `docs/conventions/arithmetic-bfp.md` §5.8. **Epic PR6 adds Softmax**: a native
@@ -715,11 +713,11 @@ checkpointing, limitations, literature).
   templates (a future `#300` axis), the optimizer's `updateMath` (FLOAT32-only,
   #310, unchanged by this epic), and `optimizerClipGradNorm` (rejects packed
   SYM/ASYM/BFP grad storage — computing a norm needs unpacked values). Deviations
-  from the cited literature (two's-complement mantissas, D6 exponent saturation
+  from the cited literature (two's-complement mantissas, BFP D6 exponent saturation
   vs. the #227 abort discipline, the absmax-snap-up exponent rule vs. MX/MSFP,
   the PR2 kernel deviations — gather-formulated ConvT1d, the `(float)partial`
   int32→float conversion's >2^24 rounding point, ±inf fold overflow at extreme
-  combined exponents — and the PR3 D8 amendment on op-local re-blocking) are in
+  combined exponents — and the PR3 amendment of BFP D8 on op-local re-blocking) are in
   `docs/conventions/arithmetic-bfp.md`.
 - **Weight init** — PyTorch-compatible: `INIT_DEFAULT` reproduces
   `kaiming_uniform_(a=√5)`, plus kaiming/xavier schemes (`weightInit_t`). FLOAT32-only.
@@ -798,7 +796,7 @@ checkpointing, limitations, literature).
   masks them);
   Dropout bridges through float and re-derives exponents; and MSE/
   CrossEntropy gained BFP fake-quant arms, so a BFP **final/loss-facing**
-  output wire IS evaluable through `inference*WithLoss` (plan Decision 9 is
+  output wire IS evaluable through `inference*WithLoss` (BFP PR2-Decision 9 is
   superseded). **Epic PR5 shipped the norms**
   (`docs/conventions/arithmetic-bfp.md` §5.8): LayerNorm/GroupNorm run
   native `ARITH_BFP` forward AND backward (stats via the Reduce BFP arms,

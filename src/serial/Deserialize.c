@@ -47,8 +47,7 @@
  * v3: parameter records carry a grad-presence byte (#380). The reader is
  * TOLERANT of a presence/skeleton mismatch (#380 PR3, superseding PR1's
  * fail-fast): see deserializeParameter / skipSerializedTensor below.
- * v4 (group-quant PR1/PR2, spec
- * docs/superpowers/specs/2026-07-28-group-quantization-design.md §6): the SYM
+ * v4 (group-quant PR1/PR2): the SYM
  * qConfig record grows `u32 numGroups`, `u32 groupSize` ahead of the scales
  * array. A file whose numGroups does not match the skeleton's own (PR1:
  * always 1, from initSymQConfig) REALLOCATES the skeleton's scales[] to the
@@ -61,7 +60,7 @@
  * BRIDGE (old per-tensor shape, i32 zeroPoint slot repurposed to carry a
  * code-domain uint16 value) -- superseded by v5 below.
  * v5 is a coordinated single bump (see Serialize.c's v5 comment for the
- * full record layouts and spec pointers) carrying two additions:
+ * full record layouts) carrying two additions:
  * (a) group-quant PR4, Task 4: the ASYM qConfig record gets the SAME
  * numGroups/groupSize-prefixed, reallocate-on-mismatch treatment the v4 SYM
  * record (and PR2/Task 5's relax) already gave SYM, PLUS a second per-group
@@ -72,8 +71,7 @@
  * so a v4 file (including ones the group-quant branch's own earlier tasks
  * produced) now fails cleanly at the version check below -- consistent with
  * the v1->v4 no-back-compat-shim policy.
- * (b) BFP epic PR1, Task 7 (spec
- * docs/superpowers/specs/2026-07-29-block-floating-point-design.md §6): new
+ * (b) BFP epic PR1, Task 7: new
  * BFP qConfig record, read by a deserializeQConfig arm mirroring the SYM v4
  * arm's discipline exactly -- a file numGroups differing from the
  * skeleton's own REALLOCATES the skeleton's exponents[] to the file's shape
@@ -416,7 +414,7 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
         }
         uint8_t fileQBits = serialReadU8(f);
         if (fileQBits == 0 || fileQBits > 16) {
-            /* D6: uint16 code-domain zp requires qBits <= 16; a wider record
+            /* group-quant D6: uint16 code-domain zp requires qBits <= 16; a wider record
              * is corrupt or written by an incompatible/future build. Checked
              * unconditionally (independent of numberOfElements) since it
              * does not depend on a live tensor's element count -- same
@@ -514,7 +512,7 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
          * zero code into 0 * inf == NaN, which walks past every runtime guard
          * instead of saturating the way an out-of-range VALUE does.
          * deriveBfpStoredExponent caps its own output at exactly bias + 127
-         * (D6, docs/conventions/arithmetic-bfp.md §2), so a file byte above it
+         * (BFP D6, docs/conventions/arithmetic-bfp.md §2), so a file byte above it
          * is one this build's own quantizer could never have written --
          * corrupt or from-the-future, exactly like the width caps. Checked
          * against the record's OWN bias, so a narrow-exponentBits record

@@ -6,8 +6,8 @@
 #include "ArithmeticType.h"
 #include "Layer.h"
 
-/* Uniform per-layer-type accessors (design spec 2026-07-02
- * arithmetic-type-split, D3/D4). The layerType_t switch over a layer's
+/* Uniform per-layer-type accessors (arithmetic-type-split
+ * D3/D4, docs/conventions/arithmetic-sym.md). The layerType_t switch over a layer's
  * declared wire configs and arithmetic lives here and nowhere else -- every
  * consumer that needs a layer's produced-wire storage config, declared forward
  * arithmetic, its FLOAT32-only status or its backward read-set goes through
@@ -25,7 +25,7 @@ quantization_t *layerOutputQ(layer_t *layer);
 quantization_t *backwardWireQ(layer_t *layer);
 
 /* Declared forward compute representation. Flatten and Quantization have no
- * consumed arithmetic (D4 — Quantization is a pure conversion node) ->
+ * consumed arithmetic (arithmetic-type-split D4 — Quantization is a pure conversion node) ->
  * {ARITH_FLOAT32, HALF_AWAY}, matching arithmeticFromQuantizationOrDefault(NULL). */
 arithmetic_t layerForwardMath(layer_t *layer);
 

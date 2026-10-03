@@ -1,7 +1,8 @@
 #define SOURCE_FILE "har_classifier_train_c_bfp"
 
 /* BFP epic #410 PR7 -- block-floating-point HAR conv classifier for the sweep
- * (spec docs/superpowers/specs/2026-09-14-bfp-pr7-sweep-integration-design.md).
+ * (knobs and log schema: examples/har_classifier/README.md; numerics contract:
+ * docs/conventions/arithmetic-bfp.md).
  *
  *   - params: FLOAT32-init (#270) then requantizeTensorInPlace to BFP at
  *     (BFP_MANTISSA_BITS, BFP_EXPONENT_BITS); weights blocked per
@@ -9,7 +10,7 @@
  *     size does not divide N -- conv1 at 32/64), biases per-tensor {1,0}.
  *   - wires: BFP_WIRE_BLOCK=float keeps FLOAT32 wires (arm A: the GEMM math
  *     still runs ARITH_BFP and stages the float operand per-tensor at the
- *     weight widths, spec §3.4); tensor|N builds ONE BFP template PER WIRE,
+ *     weight widths, arithmetic-bfp.md §5.4); tensor|N builds ONE BFP template PER WIRE,
  *     forward and dx resolved independently by resolveWireShape (6-element
  *     head wires always fall back to per-tensor -- recorded in wires_resolved).
  *   - math: native = ARITH_BFP on the four GEMM slots; fq = those slots and
@@ -667,7 +668,7 @@ static void epochCallback(epochInfo_t info, epochStats_t evalStats) {
 /* Spec §3.6 gate 2: every GEMM product op and every BFP sum op of the fixed
  * topology, checked with the kernels' own segment rule BEFORE the dataset
  * loads. run 0 = per-tensor operand; a FLOAT32 operand stages per-tensor at
- * the weight widths (§5.4 Decision 1) -> run 0 as well. Skipped under fq (no
+ * the weight widths (arithmetic-bfp.md §5.4 Decision 1) -> run 0 as well. Skipped under fq (no
  * int32 partials). The kernel guards stay authoritative (defense in depth). */
 static size_t runOf(groupShape_t gs) {
     return gs.groupSize; /* 0 for per-tensor, the guards' convention */

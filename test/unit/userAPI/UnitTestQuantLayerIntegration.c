@@ -269,11 +269,10 @@ static const float W1_VALS[6] = {0.6f, -0.4f, 0.2f, -0.5f, 0.3f, 0.9f};
 static const float B1_VALS[2] = {0.05f, -0.1f};
 static const float LABEL_VALS[4] = {1.f, -1.f, 0.5f, 2.f};
 
-/* Acceptance criterion of #192 (spec D3): one full-SYM training step through
- * Linear(4->3) -> Quant -> LayerNorm([3]) -> Quant -> Linear(3->2) + MSE +
- * SGD-M, vs a FLOAT32 twin (Linear -> LayerNorm -> Linear; a FLOAT->FLOAT
- * Quant layer is a config error by design, so the twin omits them) trained
- * on identical data.
+/* Acceptance criterion of #192 (#192 D3, docs/conventions/arithmetic-sym.md): one full-SYM training
+ * step through Linear(4->3) -> Quant -> LayerNorm([3]) -> Quant -> Linear(3->2) + MSE + SGD-M, vs a
+ * FLOAT32 twin (Linear -> LayerNorm -> Linear; a FLOAT->FLOAT Quant layer is a config error by
+ * design, so the twin omits them) trained on identical data.
  *
  * Tolerance: the single-layer SYM precedent is 5e-3 absolute
  * (UnitTestLayerNormIntegration PR-0/PR-3). Here error compounds: weight/
@@ -501,7 +500,7 @@ void testConv1dTransposedSymChainTrains(void) {
     TEST_ASSERT_TRUE_MESSAGE(decreased, "SYM ConvT chain must train (loss must decrease)");
 }
 
-/* Retired-rule contract update (PR1b.2, spec D3): a SYM-producer chain with
+/* Retired-rule contract update (PR1b.2 D3): a SYM-producer chain with
  * no Quant layers between producers used to be REJECTED by
  * validateModelQuantization; the forward funnel now restores width at each
  * producer's own wire, so this exact chain is a perfectly ordinary, ACCEPTED

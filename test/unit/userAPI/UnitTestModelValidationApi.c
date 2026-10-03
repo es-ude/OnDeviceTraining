@@ -18,7 +18,7 @@ void setUp(void) {}
 void tearDown(void) {}
 
 /* The validator only walks layer->type + array shape now (the SYM-producer
- * rule below buildLayerNormStub was retired, PR1b.2/spec D3), so a
+ * rule below buildLayerNormStub was retired, PR1b.2 D3), so a
  * parameter-free stub suffices — same shape as buildLayerNormStub below (the
  * deleted linearLayerInitLegacy used to store forwardMath without
  * dereferencing weights/bias). */
@@ -99,7 +99,7 @@ void testValidatorRejectsNullElementMidArray(void) {
     TEST_ASSERT_FALSE_MESSAGE(valid, "NULL element in model array should be rejected");
 }
 
-/* Documents the retired rule's replacement contract (PR1b.2, spec D3): a SYM
+/* Documents the retired rule's replacement contract (PR1b.2 D3): a SYM
  * accumulator-range producer (Linear) feeding a non-QUANTIZATION layer
  * (LayerNorm) used to be REJECTED (no chained Quant layer restoring width);
  * the forward funnel now restores width at the producer's own wire, so this

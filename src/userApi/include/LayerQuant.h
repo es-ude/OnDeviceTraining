@@ -6,7 +6,7 @@
 #include "Quantization.h"
 
 /*! Per-layer quantization profile: 4 by-value declared-arithmetic slots +
- *  6 storage-config pointers (spec 2026-07-02 arithmetic-type-split, D5).
+ *  6 storage-config pointers (arithmetic-type-split D5).
  *
  *  Each layer factory reads only the fields it needs (documented in each
  *  layer's header).  Arithmetic fields are by-value: there is no "unset"
@@ -29,8 +29,8 @@ typedef struct layerQuant {
     quantization_t *weightGradStorage; /* grad storage knob; NULL = per-layer default */
     quantization_t *biasGradStorage;   /* grad storage knob; NULL = per-layer default */
 
-    outputMode_t weightGradAccMode; /* accumulate mode for weight/gamma grads (PR3 spec D1) */
-    outputMode_t biasGradAccMode;   /* accumulate mode for bias/beta grads (PR3 spec D1) */
+    outputMode_t weightGradAccMode; /* accumulate mode for weight/gamma grads (packed-grad D1) */
+    outputMode_t biasGradAccMode;   /* accumulate mode for bias/beta grads (packed-grad D1) */
 } layerQuant_t;
 
 /*! Populate `lq` from a single `q`: all four arithmetic slots derive via
@@ -43,7 +43,7 @@ typedef struct layerQuant {
  *  OUT_ACC_FIXED_SCALE would abort. Layers with a specialized
  *  fixed-scale-integer bias-grad scheme (Linear/Conv1d/ConvT1d, per their init
  *  functions) keep FIXED on the hand-wired path; opt back into it here by
- *  setting biasGradAccMode = OUT_ACC_FIXED_SCALE explicitly (PR3 spec D1).
+ *  setting biasGradAccMode = OUT_ACC_FIXED_SCALE explicitly (packed-grad D1).
  *  Convenience for the common all-same-quantization case.
  *  Caller retains ownership of `q`. */
 void layerQuantInitUniform(layerQuant_t *lq, quantization_t *q);

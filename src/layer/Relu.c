@@ -118,7 +118,7 @@ void reluBackwardSymInt32(tensor_t *forwardInput, tensor_t *loss, tensor_t *prop
  * where kept, write code 0 where dropped, and carry loss's group exponents
  * verbatim onto propLoss. Same transparency argument as the forward: zeroing
  * codes only shrinks a block's absmax, so no re-derivation (= no second
- * quantization, D8) is needed. forwardInput's GEOMETRY is NOT gated — only its
+ * quantization, BFP D8) is needed. forwardInput's GEOMETRY is NOT gated — only its
  * dtype and element count matter, since it is read sign-only.
  *
  * ALL THREE wires are length-gated: this loop unpacks from forwardInput AND

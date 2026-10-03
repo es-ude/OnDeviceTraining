@@ -37,7 +37,7 @@ static inline layer_t *buildBorrowedLinearLayer(parameter_t *weights, parameter_
     cfg->propLossMath = arithmeticFromQuantization(q);
     cfg->outputQ = q;
     cfg->propLossQ = q;
-    /* PR3 spec D1: today's per-callsite hardcodes (linearBackward); hand-wired
+    /* packed-grad D1: today's per-callsite hardcodes (linearBackward); hand-wired
      * here since this helper builds the config directly instead of going
      * through linearInitConfig/a layerQuant_t factory. */
     cfg->weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE;

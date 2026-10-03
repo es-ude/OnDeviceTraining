@@ -36,25 +36,25 @@
 #include "TraceApi.h"
 #include "TrainingLoopApi.h"
 
-/* Acceptance example for the arithmetic-type-split (spec §7): mixed SYM_INT32
+/* Acceptance example for the arithmetic-type-split (arithmetic-type-split
+ * decision register, docs/conventions/arithmetic-sym.md): mixed SYM_INT32
  * widths + per-op arithmetic divergence, all on the mnist_mlp topology.
  * Offline, fixed seed, no PyTorch twin (memory-over-accuracy: SYM divergence
  * by design) — this does NOT join the bit-parity job. */
 
 #define NUM_CLASSES 10
 #define HIDDEN 64
-/* Training budget (spec §7): first 256 train samples, batch 1, 1 epoch. */
+/* Training budget: first 256 train samples, batch 1, 1 epoch. */
 #define TRAIN_SUBSET 256
 #define LR 0.01f
 #define MOMENTUM 0.9f
 
 /* Flatten -> Linear0 -> Relu -> Linear1 -> Quant1 -> Softmax = 6 layers.
- * No Quant0 (spec D3): Linear0's forward funnel already restores width to
- * SYM_INT32@12 at the wire (Linear0.outputQ), so a follow-up Quant node with
- * the IDENTICAL @12 config would just repeat that restore for free noise
- * (the double-requant anti-pattern, docs/conventions/arithmetic-sym.md).
- * Quant1 stays: it's a genuine SYM_INT32@12 -> FLOAT32 dtype change, the
- * legitimate single-requant case D3 carves out. */
+ * No Quant0 (PR1b.2 D3, docs/conventions/arithmetic-sym.md): Linear0's forward funnel already
+ * restores width to SYM_INT32@12 at the wire (Linear0.outputQ), so a follow-up Quant node with the
+ * IDENTICAL @12 config would just repeat that restore for free noise (the double-requant
+ * anti-pattern, docs/conventions/arithmetic-sym.md). Quant1 stays: it's a genuine SYM_INT32@12 ->
+ * FLOAT32 dtype change, the legitimate single-requant case PR1b.2 D3 carves out. */
 #define MODEL_SIZE 6
 #define FLATTEN_IDX 0
 #define LINEAR0_IDX 1
@@ -63,14 +63,14 @@
 #define QUANT1_IDX 4
 #define SOFTMAX_IDX 5
 
-/* Pinned widths (spec §7; grad storage flipped to packed SYM by PR3, spec §8:
- * docs/superpowers/specs/2026-07-03-pr3-packed-grad-storage-design.md). */
+/* Pinned widths (grad storage flipped to packed SYM by the packed-grad-storage
+ * PR, #269/#276). */
 #define WEIGHT_QMAXBITS 8
 #define BIAS_QMAXBITS 16
 #define GRAD_QBITS 8     /* packed SYM (was GRAD_QMAXBITS 16 SYM_INT32 pre-PR3) */
 #define WIRE_QMAXBITS 12 /* matches ODT_SYM_OPERAND_QMAXBITS (Quantization.h) */
 
-/* Byte gate expected total (spec §8, derived): Linear0 weight 784*64=50176
+/* Byte gate expected total (derived): Linear0 weight 784*64=50176
  * elements + bias 64 elements, Linear1 weight 64*10=640 elements + bias 10
  * elements, all packed SYM@GRAD_QBITS — calcBytesPerTensor ceils
  * qBits*N/8 per tensor => 50176 + 64 + 640 + 10 = 50890 bytes at qBits=8
@@ -114,8 +114,8 @@ static void initDataSets(void) {
     g_trainDataset.items = trainItems;
     g_trainDataset.labels = buildOneHotLabels(trainLabelsRaw);
 
-    /* Only the first TRAIN_SUBSET samples are ever touched (training budget,
-     * spec §7): quantize just those to SYM_INT32@12 (the operand-contract
+    /* Only the first TRAIN_SUBSET samples are ever touched (training budget):
+     * quantize just those to SYM_INT32@12 (the operand-contract
      * width — Quantization.h's ODT_SYM_OPERAND_QMAXBITS). Linear0's forward
      * (ARITH_SYM_INT32) is the raw/unmigrated kernel (matmulValidateSymOperand,
      * Matmul.c): it fails fast unless its input tensor is natively SYM_INT32,
@@ -147,11 +147,11 @@ typedef struct mixedWidthQuant {
 
 /* Flatten [1,1,28,28] -> [1,784] (the sample is the natural [1,28,28] image; the batch axis
  * is added by batchViewOf / the loop) -> Linear0 -> Relu -> Linear1 -> Quant1 -> Softmax, CE
- * loss (spec §7 topology). */
+ * loss. */
 static void buildModel(layer_t **model, mixedWidthQuant_t *mq) {
     model[FLATTEN_IDX] = flattenLayerInit();
 
-    /* Linear0/Linear1 share the identical pinned profile (spec §7): forward
+    /* Linear0/Linear1 share the identical pinned profile: forward
      * ARITH_SYM_INT32 (native); weightGrad/propLoss ARITH_FLOAT32 — routed
      * through the executeOp funnel (Task 1), which dequantizes SYM operands
      * on the fly and re-quantizes the FLOAT32 intermediate into the packed
@@ -163,8 +163,8 @@ static void buildModel(layer_t **model, mixedWidthQuant_t *mq) {
      * layerQuantInitUniform), so these fields have no implicit default —
      * leaving them at the zero-init OUT_WRITE would trip the PR3 hazard
      * guard (executeOpValidateAccMode) at the first grad accumulate. Setting
-     * both to FIXED_SCALE (the fit-preserving carried-grid scheme, spec
-     * §4.1) rather than the Linear.c hardcode split
+     * both to FIXED_SCALE (the fit-preserving carried-grid scheme,
+     * packed-grad D1) rather than the Linear.c hardcode split
      * (weight=DYNAMIC_RESCALE/bias=FIXED_SCALE) is this acceptance run's
      * deliberate choice: it exercises the new packed-target FIXED_SCALE path
      * on both weight and bias grads at once.
@@ -173,7 +173,7 @@ static void buildModel(layer_t **model, mixedWidthQuant_t *mq) {
      * one. Pre-PR3, executeOp's OUT_ACC_FIXED_SCALE epilogue had no
      * FLOAT32-intermediate-into-SYM-target bridge, so biasGradStorage being
      * SYM_INT32@16 forced biasGradMath to match. PR3 closes that gap for
-     * packed SYM targets (spec §4.1: the SYM epilogue's FIXED_SCALE arm now
+     * packed SYM targets (packed-grad D1: the SYM epilogue's FIXED_SCALE arm now
      * accepts BOTH FLOAT32 and SYM_INT32 intermediates), so biasGradMath
      * could switch to FLOAT32 like weightGradMath/propLossMath — SYM_INT32
      * is retained here as the minimal diff, not because the funnel still
@@ -241,7 +241,7 @@ static void buildModel(layer_t **model, mixedWidthQuant_t *mq) {
     model[SOFTMAX_IDX] = softmaxLayerInit(&lqSoftmax);
 }
 
-/* ---- Hard gates (spec §7 acceptance) --------------------------------------
+/* ---- Hard gates (acceptance) ----------------------------------------------
  * PRINT_ERROR + exit(1) on failure — platform-independent, in-binary. */
 
 typedef struct wireGateCtx {
@@ -249,7 +249,7 @@ typedef struct wireGateCtx {
 } wireGateCtx_t;
 
 /* Fired via tracedGrads for the first training sample: asserts Linear0's own
- * forward wire is already SYM_INT32@12 (spec D3 — the funnel restores width
+ * forward wire is already SYM_INT32@12 (PR1b.2 D3 — the funnel restores width
  * at the producer directly; there is no separate Quant0 wire to probe
  * anymore). */
 static void linear0WireGateSink(void *ctxVoid, size_t layerIdx, layerType_t layerType,
@@ -280,8 +280,8 @@ typedef struct paramGateCtx {
 
 /* Fired via traceModelWeights/traceModelGrads: asserts every LINEAR layer's
  * weight/bias PARAM tensor is SYM_INT32@8 / SYM_INT32@16 respectively, and
- * both its GRAD tensors are packed SYM@GRAD_QBITS (the grad knob, PR3 spec
- * §8 — grads are no longer SYM_INT32, so they need their own dtype/width
+ * both its GRAD tensors are packed SYM@GRAD_QBITS (the grad knob, packed-grad D1
+ * — grads are no longer SYM_INT32, so they need their own dtype/width
  * arm instead of sharing the PARAM branch below). */
 static void paramGateSink(void *ctxVoid, size_t layerIdx, layerType_t layerType, const char *phase,
                           tensor_t *tensor) {
@@ -329,7 +329,7 @@ typedef struct gradBytesGateCtx {
 
 /* Fired via traceModelGrads: sums calcBytesPerTensor across every LINEAR
  * layer's grad tensors and asserts the packed-SYM total against
- * EXPECTED_GRAD_BYTES (spec §8) — the memory-shrink claim measured in-binary
+ * EXPECTED_GRAD_BYTES — the memory-shrink claim measured in-binary
  * rather than left as a comment. */
 static void gradBytesGateSink(void *ctxVoid, size_t layerIdx, layerType_t layerType,
                               const char *phase, tensor_t *tensor) {
@@ -357,7 +357,7 @@ int main(void) {
 
     layer_t *model[MODEL_SIZE];
     rngSetSeed(1); /* fixed seed, sed-able literal: the 10-seed sweep harness
-                    * patches this integer per run (spec §8) */
+                    * patches this integer per run */
     buildModel(model, &mq);
 
     /* Requantize Linear0/Linear1's weight/bias PARAM tensors to the pinned
@@ -424,7 +424,7 @@ int main(void) {
         optimFns.zero(sgd);
 
         if (i == 0) {
-            /* Hard gates (spec §7): after one training step, storage/wire
+            /* Hard gates: after one training step, storage/wire
              * dtypes must already match the pinned config. */
             if (!wireCtx.checked) {
                 PRINT_ERROR("gate: Linear0 forward-wire probe never fired (layer index wrong?)");

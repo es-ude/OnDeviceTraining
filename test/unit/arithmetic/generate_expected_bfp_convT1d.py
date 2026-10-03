@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Generate expected_bfp_convT1d.h for UnitTestConvTranspose1dKernel (BFP epic
-PR2, Task 5 -- spec docs/superpowers/specs/2026-07-29-block-floating-point-design.md,
-decision D9).
+PR2, Task 5 -- BFP D9, docs/conventions/arithmetic-bfp.md).
 
 Pins convTranspose1dKernelBfpGather's fold order (ConvTranspose1dKernel.c):
 per (b, conv-group, oc, outPos) ONE int32 partial over the contributors
@@ -38,7 +37,7 @@ Self-checks (abort generation rather than emit a vacuous fixture):
     an all-per-tensor (exponents[0]) collapse; >= 1 input-only AND >= 1
     weight-only boundary event; >= 1 tap-free output position; and the
     SCATTER CROSS-CHECK (a float32 scatter on dequantized values reproduces
-    the gather bit-for-bit -- the D9 gather-equals-scatter pin).
+    the gather bit-for-bit -- the BFP D9 gather-equals-scatter pin).
   - exact-quantization roundtrip: dequantizing the emitted codes reproduces
     the input floats bit-for-bit (the exact-float-regime claim).
   - both operands' exponent arrays are non-uniform (a uniform array would

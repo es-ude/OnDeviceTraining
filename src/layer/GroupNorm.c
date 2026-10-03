@@ -434,7 +434,7 @@ static void groupNormBfpRequireCount(tensor_t *t, size_t expected, const char *w
 }
 
 /* ARITH_BFP forward (R-N2/R-N3): BFP stats via the [B,G,cpg,T] alias view,
- * per-channel float affine, FLOAT32 raw (D7); OUT_WRITE packs the wire. The
+ * per-channel float affine, FLOAT32 raw (BFP D7); OUT_WRITE packs the wire. The
  * SYM path's integer-affine/beta-seed bookkeeping has no BFP analog (a BFP
  * scale is 2^E; like AvgPool's /K fold, R-P4). Operands arrive in the funnel's
  * unpacked-BFP scratch form (borrowed or staged). */

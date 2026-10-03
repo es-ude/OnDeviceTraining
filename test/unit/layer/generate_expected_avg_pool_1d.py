@@ -386,7 +386,7 @@ def emit_bfp_fixtures(parts):
     parts.append(emit_int32_scalar("kBfpAvgPoolStride", BFP_AVG_STRIDE))
     parts.append(emit_int32_scalar("kBfpAvgPoolDilation", BFP_AVG_DILATION))
 
-    # (1) BFP-STORED grouped input, borrowed zero-copy (D8): full self-checks.
+    # (1) BFP-STORED grouped input, borrowed zero-copy (BFP D8): full self-checks.
     fwd = avgpool1d_bfp_forward_ref(BFP_AVG_IN_CODES, BFP_AVG_IN_EXPS, in_qc,
                                     BFP_AVG_BATCH, BFP_AVG_CHANNELS, geom)
     parts.append(emit_int32_array("kBfpAvgPoolInCodes", torch.tensor(BFP_AVG_IN_CODES)))

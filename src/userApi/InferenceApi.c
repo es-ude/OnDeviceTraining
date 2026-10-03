@@ -67,7 +67,7 @@ static void initBufferOutput(tensor_t *buffer, layer_t *currentLayer, shape_t *i
         break;
     }
     case BFP: {
-        /* BFP epic PR2 (plan Decision 5), the inference-path twin of
+        /* BFP epic PR2 (PR2-Decision 5), the inference-path twin of
          * initLayerOutputs: widths/rounding/groupSize come from the layer's
          * declared template, numGroups is DERIVED from this buffer's own
          * element count. Exponents start at the zero state — the forward's

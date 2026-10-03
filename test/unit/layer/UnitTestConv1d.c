@@ -782,7 +782,7 @@ void testConv1dBackwardExplicitPadding() {
     }
 }
 
-/* Re-gold (spec D5): conv1dForward now routes SYM through executeOp's
+/* Re-gold (PR1b.2 D5): conv1dForward now routes SYM through executeOp's
  * OUT_WRITE epilogue, which requants the raw s_in*s_w accumulator wire
  * through the conversionMatrix diagonal (requantSymInt32Tensor) instead of
  * writing it unrestored (pre-PR1b.2 behavior — the fixture this test asserted
@@ -794,7 +794,7 @@ void testConv1dBackwardExplicitPadding() {
  * `emulate_sym_conv` self-check (fwd_err <= fwd_tol against the float64
  * PyTorch-autograd reference, computed on the RESTORED fwd_deq/fwd_scale).
  * Same re-gold class as Task 2's propLoss/Task 3's LayerNorm forward pins
- * (ratified spec D5 principle, controller 2026-07-03). Applies identically
+ * (ratified PR1b.2 D5 principle, controller 2026-07-03). Applies identically
  * to the 3 other testConv1dForwardSym* tests below. */
 void testConv1dForwardSymSingleChannelSingleBatch() {
     size_t weightDims[] = {1, 1, 2};
@@ -979,7 +979,7 @@ void testConv1dKernelSymScatterStrideDilation() {
     /* Direct low-level kernel call — bypasses conv1dBackward's executeOp
      * funnel entirely, so this characterizes convTranspose1dKernelSymInt32's
      * own raw, unrestored output (the RawKernel fixtures), not the
-     * funnel-restored propLoss wire conv1dBackward now produces (design D3;
+     * funnel-restored propLoss wire conv1dBackward now produces (PR1b.2 D3;
      * see testConv1dBackwardSymStrideDilation for that). */
     convTranspose1dKernelSymInt32(lossGrad, weight, NULL, &kernel, 1, 0, propLoss);
 
@@ -1030,7 +1030,7 @@ void testConv1dCalcBiasGradsSymPointwise() {
     }
 }
 
-/* Re-gold (spec D5): conv1dBackward's dx wire (propLoss) is a *produced*
+/* Re-gold (PR1b.2 D5): conv1dBackward's dx wire (propLoss) is a *produced*
  * wire, not a passthrough — convTranspose1dKernelSymInt32 emits the raw
  * s_loss*s_w scatter-adjoint mantissa (characterized unrestored above by
  * testConv1dKernelSymScatterStrideDilation), and executeOp's OUT_WRITE
@@ -2119,7 +2119,7 @@ void testConv1dForwardGroupedConvGroupsMatchesGold(void) {
 
 /* ---- Group-quant PR4 (Task 3): grouped-ASYM Conv1d twins ----------------
  *
- * D5 smoke at the Conv1d layer: after the funnel's ASYM grouped-unpack arm
+ * group-quant D5 smoke at the Conv1d layer: after the funnel's ASYM grouped-unpack arm
  * shifts the codes (code - zp[g]) the compute path IS the grouped-SYM path
  * on the resulting mantissas -- same mantissas + same scales through the
  * same gather core give BIT-IDENTICAL raw output and s_acc, so no ASYM conv
@@ -2269,7 +2269,7 @@ static layer_t *buildBfpConv1dLayer(quantization_t *floatQ) {
 /* Native ARITH_BFP forward against the staged-input gold (the Linear
  * sibling's design, see testLinearForwardBfpNativeMatchesKernelGold in
  * UnitTestLinear.c): BFP-stored weights are borrowed+unpacked, the FLOAT32
- * input is staged PER-TENSOR at the WEIGHTS' widths (Decision 1; m=6, lossy
+ * input is staged PER-TENSOR at the WEIGHTS' widths (PR2-Decision 1; m=6, lossy
  * for the fixture's X values), and the FLOAT32 wire is bit-exact -->
  * EQUAL_MEMORY against generate_expected_bfp_layer_forward.py's
  * conv1d_bfp_ref output. Output sentinel-prefilled: every element must be
@@ -2538,7 +2538,7 @@ void testConv1dBackwardBfpBiasGradMatchesGold(void) {
     TEST_ASSERT_EQUAL_MEMORY(kConvBfpBgExpected, captured, sizeof(captured));
 }
 
-/* dx wire: the ARITH_BFP propLoss arm routes the adjoint through the D9
+/* dx wire: the ARITH_BFP propLoss arm routes the adjoint through the BFP D9
  * GATHER kernel (convTranspose1dKernelBfpGather, bias NULL, outputPadding 0).
  * Sentinel prefill pins every element as kernel-written -- including the
  * ADJOINT HOLES (stride 2 x dilation 2 reach only even input positions, so

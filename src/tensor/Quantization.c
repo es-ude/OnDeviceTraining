@@ -84,7 +84,7 @@ void initAsymQConfig(uint8_t qBits, roundingMode_t roundingMode, asymQConfig_t *
     initAsymQConfigGrouped(qBits, roundingMode, 1, 0, asymQConfig);
 }
 
-/* D6 width ceiling shared by the init and attach-time funnels: the
+/* group-quant D6 width ceiling shared by the init and attach-time funnels: the
  * code-domain zeroPoint is uint16, so qBits > 16 has codes/zp with no uint16
  * representation (supersedes the old [1, 30] #246 ceiling, whose wide-band
  * int32-zp rationale is void under the zero-inclusion nudge -- see

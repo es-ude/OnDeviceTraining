@@ -44,7 +44,7 @@ void setUp(void) {}
 void tearDown(void) {}
 
 /* Default arithmetic for layers with no consumed arithmetic (Flatten,
- * Quantization — D4) and the shared arithmetic every uniform-FLOAT32-config
+ * Quantization — arithmetic-type-split D4) and the shared arithmetic every uniform-FLOAT32-config
  * layer below derives (all uniform-profile fixtures in this file — every
  * fixture but LINEAR, which uses a divergent SYM_INT32 profile to make the
  * accessors discriminating, see testLinearAccessorsMatchConfig — use a
@@ -258,7 +258,7 @@ void testQuantizationAccessorsMatchConfig(void) {
     quantizationConfig_t *cfg = layer->config->quantization;
     TEST_ASSERT_EQUAL_PTR(cfg->outputQ, layerOutputQ(layer));
     TEST_ASSERT_EQUAL_PTR(cfg->propLossQ, backwardWireQ(layer));
-    /* Quantization is a pure conversion node (D4) — no consumed arithmetic. */
+    /* Quantization: pure conversion node (arithmetic-type-split D4), no consumed arithmetic. */
     assertUniformArithmetic(layerForwardMath(layer));
 
     freeQuantLayer(layer);
@@ -570,7 +570,7 @@ void testLayerNonFloat32FieldNamesEveryWireOnlyLayerField(void) {
 
 void testLayerIsFloat32OnlyRejectsBfpNotJustSym(void) {
     /* The gate is "== FLOAT32", not "!= SYM_INT32": BFP math and a BFP wire
-     * are rejected too (D3). */
+     * are rejected too (#152 D3). */
     quantization_t *q = quantizationInitFloat();
     quantization_t *bfpQ = quantizationInitBfp(8, 8, HALF_AWAY);
     layerQuant_t lq;

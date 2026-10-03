@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate expected_bfp_layer_forward.h for the three GEMM-family LAYER
-forward tests (BFP epic PR2, Task 7 -- spec
-docs/superpowers/specs/2026-07-29-block-floating-point-design.md). One header,
+forward tests (BFP epic PR2, Task 7 -- docs/conventions/arithmetic-bfp.md
+§5). One header,
 three fixtures (Linear / Conv1d / ConvT1d), shared by UnitTestLinear,
 UnitTestConv1d and UnitTestConv1dTransposed (same binary dir; each target adds
 its own dependency on the one generate target -- a separate small generator
@@ -15,13 +15,13 @@ generators own that):
      sym_gold.bfp_quantize_grouped (the bit-exact quantizeFloatBufferToBfpCodes
      twin, HALF_AWAY).
   2. The funnel stages the FLOAT32-stored input (and Linear's FLOAT32 bias)
-     PER-TENSOR at the WEIGHTS' widths (plan Decision 1/2): the gold stages
+     PER-TENSOR at the WEIGHTS' widths (PR2-Decision 1/2): the gold stages
      with group_size=0 at the weight fixture's mantissa/exponent bits. Input
      values are chosen LOSSY at m=6 so a layer that stages at a hardcoded
      m=8 (the Task 7 rule-2 mutation) produces observably different outputs
      -- asserted below per fixture.
   3. The FLOAT32 output wire is bit-exact: ARITH_BFP's raw intermediate is
-     FLOAT32 (D7) and the OUT_WRITE epilogue's FLOAT32->FLOAT32 write is a
+     FLOAT32 (BFP D7) and the OUT_WRITE epilogue's FLOAT32->FLOAT32 write is a
      memmove, so the C tests compare via TEST_ASSERT_EQUAL_MEMORY against
      the np.float32-mirrored *_bfp_ref outputs.
 
@@ -45,7 +45,7 @@ kConvBfpDx*): unlike the forward fixtures' staged-FLOAT32 inputs, BOTH
 backward operands (forwardInput x and lossGrad gy) are BFP-STORED wires, so
 the new weightGrad/biasGrad kernels' fold contract is exercised end-to-end
 (borrow arm) and conv1d_bfp_weight_grad_ref / conv_bfp_bias_grad_ref run
-with their FULL kernel-grade self-checks. The dx gold delegates to the D9
+with their FULL kernel-grade self-checks. The dx gold delegates to the BFP D9
 gather ref through conv1d_bfp_dx_ref with self_check=False -- the gather's
 inner walk moves the WEIGHT storage index by +outChPerGroup*K within a tap
 and jumps negatively at tap transitions, never landing in the same
@@ -71,7 +71,7 @@ from sym_gold import (assert_rounding_canary, bfp_quantize_grouped, check_exact_
                       convT1d_bfp_weight_grad_ref, emit_float_array, emit_int32_array,
                       emit_int32_scalar, emit_uint8_array, matmul_bfp_ref)
 
-# Weights' widths (Decision 1: the funnel stages FLOAT32 operands at these).
+# Weights' widths (PR2-Decision 1: the funnel stages FLOAT32 operands at these).
 # m=6 deliberately != 8 so the hardcode-m=8 mutation is observable.
 W_MANTISSA_BITS = 6
 W_EXPONENT_BITS = 8

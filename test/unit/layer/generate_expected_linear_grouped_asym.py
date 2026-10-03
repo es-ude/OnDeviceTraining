@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Generate expected_linear_grouped_asym.h for UnitTestLinear (group-quant PR4
-Task 3 -- spec docs/superpowers/specs/2026-07-28-group-quantization-design.md).
+Task 3 -- docs/conventions/tensor.md).
 
 Pins Linear's grouped-ASYM weight forward AND dx through the funnel's ASYM
 grouped-unpack arm (ExecuteOp.c): the prologue zero-extends the packed codes
 and shifts each element by ITS group's code-domain zeroPoint (code - zp[g])
 into the SAME signed-mantissa image the SYM arm produces; the kernels then
 read per-group scales via the layer's symQConfig-shaped VIEW of the asym
-config. THAT IS D5 MADE EXECUTABLE: the grouped ASYM forward/dx is EXACTLY
+config. THAT IS group-quant D5 MADE EXECUTABLE: the grouped ASYM forward/dx is EXACTLY
 the grouped SYM forward/dx on shifted mantissas -- so the golds here are the
 EXISTING symmetric references (sym_gold.matmul_grouped_ref /
 matmul_grouped_dx_ref) fed with mantissas = codes - zps[g] and the asym
@@ -27,7 +27,7 @@ Self-checks (abort generation on failure):
         coverage in the zero-extend+shift path).
   (ii)  scales pairwise distinct and scales[0] != max(scales) (s_acc
         discriminability, generate_expected_group_matmul.py precedent).
-  (iii) D5 equivalence, asserted EXACTLY: the per-element affine dequant
+  (iii) group-quant D5 equivalence, asserted EXACTLY: the per-element affine dequant
         (code - zp[g])*scale[g] (dequant_asym_grouped, the C grouped
         ASYM->FLOAT32 cell's float32 mirror) equals the symmetric dequant
         mantissa*scale[g] (dequant_sym_grouped_f32) bit-for-bit -- the
@@ -108,7 +108,7 @@ def main() -> int:
     # The shifted-mantissa image the funnel's ASYM grouped-unpack arm produces.
     mantissas = [c - zps[i // GROUP_SIZE] for i, c in enumerate(codes)]
 
-    # (iii) D5 equivalence, exact.
+    # (iii) group-quant D5 equivalence, exact.
     affine = dequant_asym_grouped(codes, scales, zps, GROUP_SIZE)
     shifted = dequant_sym_grouped_f32(mantissas, scales, GROUP_SIZE).tolist()
     assert affine == shifted, (
@@ -120,7 +120,7 @@ def main() -> int:
         "mantissas must carry both signs")
 
     # Forward gold: the EXISTING symmetric grouped reference on the shifted
-    # mantissas (D5) -- python-int MACs, rescale_f32(HALF_AWAY) combines.
+    # mantissas (group-quant D5) -- python-int MACs, rescale_f32(HALF_AWAY) combines.
     out, s_acc = matmul_grouped_ref(A_MANTISSAS, A_SCALE, mantissas, scales, GROUP_SIZE,
                                     OUT_ROWS, OUT_COLS, REDUCE_LEN, BIAS_MANTISSAS, BIAS_SCALE)
 

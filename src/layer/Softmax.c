@@ -120,7 +120,7 @@ static void softmaxForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, ten
  * codes + live bfpQConfig_t). `mode` is the layer's bfpExpShiftRounding knob:
  * it governs ONLY the integer right-shift sites here (the alignment shift and
  * the >>z inside bfpIExpQ) -- staging and the OUT_WRITE pack keep the normal
- * roundingMode_t machinery. Raw out is FLOAT32 (D7). Task 5's backward
+ * roundingMode_t machinery. Raw out is FLOAT32 (BFP D7). Task 5's backward
  * recompute path calls this helper verbatim. */
 static void softmaxValuesBfp(const tensor_t *input, bfpShiftRounding_t mode, float *sOut) {
     /* n == 0 handled by caller. */
@@ -384,7 +384,7 @@ static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *p
  * wire differs from those values by one pack rounding), paying the norms'
  * documented R-N4 per-op recompute cost. dLds dequantizes exactly
  * (code * 2^E); dot and dx are float32 in index order; the raw FLOAT32 out
- * (D7) is packed by the epilogue. The loss-count gate is load-bearing (the
+ * (BFP D7) is packed by the epilogue. The loss-count gate is load-bearing (the
  * #436 OOB class): both walks run x's flat n, and a shorter per-tensor
  * {1, 0} loss passes every grid check while lArr[i] reads outside its
  * scratch. The permuted-shape class does not arise -- the arm is
@@ -437,7 +437,7 @@ void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, ten
         /* BFP wires under DECLARED SYM math stay denied. Not because
          * convertTensor would fail (the BFP->FLOAT32 cell exists and this arm
          * would silently "work") but as the outside-funnel twin of the funnel's
-         * Decision-11 deny: legal BFP-storage arithmetics are FLOAT32
+         * PR2-Decision-11 deny: legal BFP-storage arithmetics are FLOAT32
          * (fake-quant) and BFP (native) only. */
         bfpRequireNoBfpWire(input, "Softmax backward (input)");
         bfpRequireNoBfpWire(loss, "Softmax backward (loss)");

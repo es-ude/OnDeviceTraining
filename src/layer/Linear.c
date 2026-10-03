@@ -41,7 +41,7 @@ void linearInitConfig(linearConfig_t *linearConfig, parameter_t *weights, parame
 
 /* Group-quant PR4 (Task 3): grouped-weight detection across BOTH grouped
  * carrier dtypes (SYM and ASYM share the {numGroups, groupSize} shape
- * grammar, D6). Returns the symQConfig_t* to pass as the kernels'
+ * grammar, group-quant D6). Returns the symQConfig_t* to pass as the kernels'
  * weightGroups ctx iff the stored weight is grouped (numGroups > 1), else
  * NULL. Grouped SYM: the weight's OWN qConfig. Grouped ASYM: *asymView (the
  * CALLER's stack storage) is filled as a symQConfig-shaped VIEW of the asym
@@ -49,7 +49,7 @@ void linearInitConfig(linearConfig_t *linearConfig, parameter_t *weights, parame
  * scales/numGroups/groupSize (plus the qBits operand-width validate), fields
  * both grammars share, and the funnel prologue has already shifted the codes
  * into the same signed-mantissa image the SYM arm produces (ExecuteOp.c —
- * D5: the grouped ASYM compute path IS the grouped SYM path on shifted
+ * group-quant D5: the grouped ASYM compute path IS the grouped SYM path on shifted
  * mantissas), so the zeroPoints never reach the kernel at all. VIEW
  * LIFETIME: scales is BORROWED from the asym config (never free through the
  * view) and the view lives in the caller's frame — valid for the duration of
@@ -159,7 +159,7 @@ void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output) {
      *  1. BFP-stored weights REQUIRED (fail-fast below): the weight is the
      *     operand whose widths every FLOAT32 operand stages at, so a
      *     FLOAT32 weight has no width source (and would silently fake-quant).
-     *  2. bfpStage wiring (plan Decision 1/2): FLOAT32-stored input/bias get
+     *  2. bfpStage wiring (BFP PR2-Decision 1/2): FLOAT32-stored input/bias get
      *     the stack geometry TEMPLATE below — per-tensor {1,0} at the
      *     WEIGHTS' widths, rounded by the op (the funnel owns exponent
      *     backing and reads roundingMode from .arithmetic, not the
@@ -300,7 +300,7 @@ void linearCalcPropLossSymInt32Grouped(tensor_t *weights, tensor_t *loss, tensor
     matmulSymInt32TensorsGroupedWeight(loss, weights, NULL, propLoss, weightGroups);
 }
 
-/* BFP epic PR3: backward cores on the PR2 fold contract (D8 amendment) --
+/* BFP epic PR3: backward cores on the PR2 fold contract (BFP D8 amendment) --
  * operands arrive as the funnel's unpacked-BFP scratch; matmulBfpTensors is
  * orientation-agnostic (per-element group lookup honors orderOfDimensions),
  * so weightGrad/propLoss are thin transpose-view wrappers. */

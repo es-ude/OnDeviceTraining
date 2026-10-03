@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generate expected_group_quant.h for UnitTestTensorConversion (group-quant PR2,
-Task 2 -- spec docs/superpowers/specs/2026-07-28-group-quantization-design.md).
+Task 2 -- docs/conventions/tensor.md).
 
 Pins the per-GROUP (storage-order, group of element i = i // groupSize) absmax
 symmetric quantization that packFloatBufferAsSym / convertSymTensorToFloat32Tensor

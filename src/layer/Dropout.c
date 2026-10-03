@@ -124,17 +124,16 @@ static void dropoutCopyBfpVerbatim(tensor_t *src, tensor_t *dst) {
     }
 }
 
-/* BFP epic PR4 (R-P3, spec D4 + deviations register 5): Dropout is non-native
- * BY DECISION — 1/(1-p) is not a power of two, so unlike SYM there is no single
- * scale to fold it into and no exponent shift that expresses it. One float
- * bridge, walked in TWO passes over the packed payload: pass 1 derives every
- * group's FRESH exponent from the masked-and-scaled absmax, pass 2 decodes at
- * the source grid, applies mask+factor and requantizes onto the fresh grid.
- * The skeleton is scaleBfpTensorInPlace's (TensorConversion.c) with the mask
+/* BFP epic PR4 (R-P3, BFP D4 + deviations register 5, docs/conventions/arithmetic-bfp.md §12):
+ * Dropout is non-native BY DECISION — 1/(1-p) is not a power of two, so unlike SYM there is no
+ * single scale to fold it into and no exponent shift that expresses it. One float bridge, walked in
+ * TWO passes over the packed payload: pass 1 derives every group's FRESH exponent from the
+ * masked-and-scaled absmax, pass 2 decodes at the source grid, applies mask+factor and requantizes
+ * onto the fresh grid. The skeleton is scaleBfpTensorInPlace's (TensorConversion.c) with the mask
  * fused in — cite, do NOT call: that primitive is in-place on ONE tensor and
  * cannot fuse a mask.
  *
- * Re-deriving here is NOT the double quantization spec §9 / D8 forbid: the
+ * Re-deriving here is NOT the double quantization BFP D8 (arithmetic-bfp.md §9) forbids: the
  * multiply CHANGES the values, so the fresh exponents quantize NEW numbers.
  * Rounding is the DESTINATION config's own storage roundingMode (#282
  * target-owned convention, scaleBfpTensorInPlace precedent) — Dropout runs
@@ -211,11 +210,11 @@ static void dropoutMaskScaleBfp(dropoutConfig_t *cfg, tensor_t *src, tensor_t *d
     }
 
     /* pass 2: decode at the source grid, mask+scale, requantize at the fresh
-     * one; clamp before the write (value-domain saturation, D6).
+     * one; clamp before the write (value-domain saturation, BFP D6).
      *
      * PR4 adversarial gate (F0): the saturation clamp runs in the FLOAT domain
      * FIRST, the same order scaleBfpTensorInPlace's pass 2 uses (this bridge's
-     * skeleton). In the D6 cap regime a destination group has NO headroom left
+     * skeleton). In the BFP D6 cap regime a destination group has NO headroom left
      * -- its exponent is pinned at maxStored -- so v / dstScale can exceed
      * int32 range for entirely finite, in-contract inputs (a narrow
      * exponentBits plus a factor 1/(1-p) that legally reaches 2^24), and

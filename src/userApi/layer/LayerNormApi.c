@@ -50,7 +50,7 @@ static void fillParamTensorWithConstant(tensor_t *paramTensor, float value) {
 /* R-N6 (BFP epic PR5): a grouped BFP storage template's numGroups is a
  * shape-agnostic guess -- one layerQuant_t profile is shared across every layer
  * of a model -- so honor the template's groupSize ONLY and derive numGroups
- * from THIS parameter's element count (the wire-allocator Decision-5 rule
+ * from THIS parameter's element count (the wire-allocator BFP PR2-Decision-5 rule
  * applied to params). getQLike would preserve the guess verbatim and die at
  * initTensor's attach validation (validateBfpQConfigShape) with a message that
  * says nothing about where the geometry came from. */

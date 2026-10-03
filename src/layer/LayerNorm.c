@@ -223,7 +223,7 @@ static void layerNormValidateSymTensor(tensor_t *t, const char *what) {
  *            gamma-product, i.e. |beta| <~ absmax_n * absmax_gamma.)
  * gamma/beta are contiguous default-order rank-D tensors -> flat index j. This
  * writes a RAW, unrestored y_q (accumulator-range, same class as Linear/Conv's
- * matmul output, spec D2/D3) into rawOut's own scale field — the executeOp
+ * matmul output, PR1b.2 D2/D3) into rawOut's own scale field — the executeOp
  * OUT_WRITE epilogue (caller, layerNormForward) restores width at the
  * producer via the SYM->SYM diagonal requant. */
 static void layerNormAffineSymInt32(size_t numNormDims, tensor_t *gamma, tensor_t *beta,
@@ -254,7 +254,7 @@ static void layerNormAffineSymInt32(size_t numNormDims, tensor_t *gamma, tensor_
     outQC->scale = sY;
 }
 
-/* SYM_INT32 forward (spec 2026-06-05, verified scale-folding scheme):
+/* SYM_INT32 forward (LayerNorm epic #148, verified scale-folding scheme):
  * pass 1: per-group float stats + GLOBAL absmax of the normalized values.
  *         Multi-group REQUIRES the per-group 1/sigma_g to hit the DATA — one
  *         per-tensor scale cannot encode G different sigmas; only the global
@@ -382,7 +382,7 @@ static void layerNormBfpRequireCount(tensor_t *t, size_t expected, const char *w
 /* ARITH_BFP forward (R-N2/R-N3): stats in float32 from exact (mantissa, E)
  * dequants via the Reduce BFP arms; normalize + affine in float -- the SYM
  * integer-affine/beta-seed bookkeeping has no BFP analog (a BFP scale is 2^E;
- * like AvgPool's /K fold, R-P4). Raw out is FLOAT32 (D7); the OUT_WRITE
+ * like AvgPool's /K fold, R-P4). Raw out is FLOAT32 (BFP D7); the OUT_WRITE
  * epilogue packs the BFP wire with fresh exponents. Operands arrive in the
  * funnel's unpacked-BFP scratch form (borrowed or staged). */
 static void layerNormForwardBfp(const layerNormConfig_t *cfg, tensor_t *gamma, tensor_t *beta,
@@ -459,7 +459,7 @@ static void layerNormForwardFloat(layerNormConfig_t *cfg, tensor_t *gamma, tenso
 /* executeOp forward kernel adapters — operands {input, gamma, beta}; ctx =
  * cfg (eps/normalizedShape/numNormDims geometry, not a tensor so it cannot
  * travel through the funnel's operand array). The SYM kernel emits a RAW,
- * unrestored producer scale (Finding A/D2/D3): the OUT_WRITE epilogue
+ * unrestored producer scale (Finding A, PR1b.2 D2/D3): the OUT_WRITE epilogue
  * (layerNormForward) restores width via the SYM->SYM diagonal requant, same
  * as Linear/Conv1d's matmul-family forwards. */
 static void layerNormForwardKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut,
@@ -612,7 +612,7 @@ static void layerNormBackwardFloat(layerNormConfig_t *cfg, tensor_t *forwardInpu
     }
 }
 
-/* SYM_INT32 backward (spec 2026-06-05, verified scheme). mu/sigma are computed
+/* SYM_INT32 backward (LayerNorm epic #148, verified scheme). mu/sigma are computed
  * ONCE from forwardInput through layerNormAllGroupStats — the SAME shared Reduce
  * helper the forward uses, so backward can never desync from the forward
  * definition — into G-float stack scratch that both passes read (was: per-group

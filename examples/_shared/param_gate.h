@@ -62,7 +62,7 @@ typedef struct paramGateExpect {
  * holds by construction for every real weight tensor. */
 groupShape_t resolveGroupShape(size_t N, size_t outCh, groupModeSweep_t mode, int groupSizeEnv);
 
-/* Wire-block policy of the BFP sweep (spec 2026-09-14 §3.2). One knob for ALL
+/* Wire-block policy of the BFP sweep (#410 PR7). One knob for ALL
  * wires; every forward output wire and every dx wire resolves against its OWN
  * element count, so a layer's out and dx (its input size) may resolve
  * differently and two wires with equal N always resolve identically (the

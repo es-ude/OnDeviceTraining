@@ -475,7 +475,7 @@ void tearDown() {}
  * The PR2-Task-8 blanket "no BFP wires on softmaxBackward" guard this file
  * once pinned is RETIRED with PR6 Task 5: the backward now carries a native
  * ARITH_BFP funnel arm; the FLOAT32/SYM arms keep per-arm guards (the
- * funnel's Decision-11 twin -- see softmaxBackward). */
+ * funnel's PR2-Decision-11 twin -- see softmaxBackward). */
 static tensor_t *buildSoftmaxWire1D(size_t n, quantization_t *q) {
     size_t *dims = reserveMemory(sizeof(size_t));
     dims[0] = n;
@@ -1284,7 +1284,7 @@ void testSoftmaxBackwardFloatArmRejectsBfpWire(void) {
 /* The SYM arm's guards -- never exercised before this pin. These are NOT
  * memory-safety guards: convertTensor's BFP->FLOAT32 cell exists, so the
  * arm would silently "work". They are the outside-funnel twin of the
- * funnel's Decision-11 deny (legal BFP-storage arithmetics are FLOAT32
+ * funnel's PR2-Decision-11 deny (legal BFP-storage arithmetics are FLOAT32
  * fake-quant and BFP native only), so the pin is on POLICY. propLossMath
  * is overridden the way the anchor death test above does it (userApi
  * factories copy layerQuant_t slots by value). */
@@ -1325,7 +1325,7 @@ void testSoftmaxBackwardSymArmRejectsBfpWire(void) {
  *
  * The native BFP pipeline runs ONE max/alignment grid and ONE partition sum
  * over the whole wire, so a multi-row BFP call must fail fast (per-row BFP is
- * out of scope, spec D3) while a single row -- rank 1 [N] or rank 2 [1, N] --
+ * out of scope, #152 D3) while a single row -- rank 1 [N] or rank 2 [1, N] --
  * runs bit-identically to the rank-1 gold. */
 
 /* Re-views a rank-1 fixture wire as [d0, d1] over the same storage (d0 * d1

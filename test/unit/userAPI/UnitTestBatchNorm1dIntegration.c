@@ -326,7 +326,7 @@ void testCustomGradsFnWithoutFlipRunsBatchNormInEvalMode(void) {
     TEST_ASSERT_EQUAL_UINT64(0, nbt);
 }
 
-/* Closes the known gap (task-6-brief mutation 2): if the loop's `false` flip
+/* Closes a known mutation gap: if the loop's `false` flip
  * moved to before the backward pass instead of after, BN's backward would
  * silently see training=false (running-stats mode) instead of true
  * (batch-stats mode). Catch it without any hand-derived numbers: build a

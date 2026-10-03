@@ -261,7 +261,7 @@ void testForwardTrainingSymInt32ScaleFold(void) {
     TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.2f, outScale);
 }
 
-/* BFP epic PR4 (R-P3, spec D4 + deviation 5): Dropout is NON-NATIVE by
+/* BFP epic PR4 (R-P3, BFP D4 + deviations register 5): Dropout is NON-NATIVE by
  * decision -- 1/(1-p) is not a power of two, so unlike SYM there is no single
  * scale to fold it into. The BFP arm is a float bridge that re-derives every
  * group's exponent. Gold from generate_expected_bfp_dropout.py; the mask is
@@ -317,7 +317,7 @@ void testDropoutForwardTrainingBfpBridgeRepacksWithFreshExponents(void) {
     freeTensor(input);
 }
 
-/* PR4 adversarial gate (F0): the D6 exponent-cap regime, where the bridge's
+/* PR4 adversarial gate (F0): the BFP D6 exponent-cap regime, where the bridge's
  * pass-2 quotient leaves int32 range for entirely finite, in-contract inputs.
  *
  * Hand-derived, no goldgen. exponentBits = 2 -> bias = 1, maxStored = 3, so the
@@ -326,17 +326,17 @@ void testDropoutForwardTrainingBfpBridgeRepacksWithFreshExponents(void) {
  * 2^17 (both operands are exact binary fractions, so the subtraction and the
  * reciprocal are exact). Pass 1 then sees absmax = 32767 * 4 * 2^17 =
  * 32767 * 2^19; 32767 * 2^19 / qMax = 2^19 needs E = 19, i.e. stored 20 -- far
- * past the cap, so D6 saturates the destination exponent at 3 and its scale
+ * past the cap, so BFP D6 saturates the destination exponent at 3 and its scale
  * stays 4. Pass 2's quotient for element 0 is therefore 32767 * 2^19 / 4 =
  * 32767 * 2^17 = 4294836224, which is more than INT32_MAX: rounding it FIRST
  * hands roundByMode a value no int32 can hold (C17 6.3.1.4 undefined). Clamped
- * in the float domain first, it saturates to qMax, which is exactly what D6
+ * in the float domain first, it saturates to qMax, which is exactly what BFP D6
  * promises. stubKeepEven keeps 0 and 2 (2 is a zero mantissa), drops 1 and 3.
  *
  * On arm64 the value assertions alone do NOT separate the two orders -- an
  * out-of-range fcvtzs saturates to INT32_MAX and clampInt32 then lands on the
  * same 32767 -- so the pre-clamp's RED lives in the ubsan preset
- * (float-cast-overflow). The assertions still pin the D6 contract on every
+ * (float-cast-overflow). The assertions still pin the BFP D6 contract on every
  * host, and on x86-64 the unclamped cast returns INT32_MIN, which would flip
  * the sign and redden them on a plain build too. */
 void testDropoutForwardTrainingBfpSaturatesAtTheExponentCap(void) {

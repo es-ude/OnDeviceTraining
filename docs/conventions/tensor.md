@@ -1,8 +1,7 @@
 # Tensor — quantization dtype semantics
 
 Conventions for `src/tensor/**` — dtypes, quantization configs, and the
-conversion matrix. Path-scoped for Claude via `.claude/rules/tensor.md` (maintainer-local, not in
-the repository).
+conversion matrix.
 
 ## SYM_INT32 is a compute format, not storage (#261)
 
@@ -53,7 +52,7 @@ STORAGE order (flat index, not the logical/viewed shape): group id =
 `orderOfDimensions` view permutations — zero-copy transpose is a view, and
 kernels compute flat storage offsets regardless of the permutation.
 
-**Carriers** (spec §3 — YAGNI cuts, reversible later):
+**Carriers** (YAGNI cuts, reversible later):
 
 | Tensor class | Granularity |
 |---|---|
@@ -64,9 +63,19 @@ kernels compute flat storage offsets regardless of the permutation.
 | Wires (`outputQ`/`propLossQ`), momentum | per-tensor only (`symInt32QConfig_t` stays scalar) |
 
 For a row-major GEMM weight `[oc, ...]`, `groupSize == N/oc` IS the
-per-output-channel special case — no separate axis field. Full design:
-`docs/superpowers/specs/2026-07-28-group-quantization-design.md`
-(maintainer-local, not in the repository).
+per-output-channel special case — no separate axis field.
+
+**Decision register (group-quant epic design, 2026-07-28).** Code comments
+cite these as `group-quant D<n>` (or bare `D<n>` / `spec D<n>` inside a
+comment that already names group-quant); the design document itself is not
+published. Only IDs cited in the repository are listed.
+
+| ID | Decision | Applied in |
+|---|---|---|
+| D2 | The dx op keeps an integer path for grouped weights: on-the-fly per-group rescale, no FLOAT32-only pin. | `docs/conventions/arithmetic-sym.md` §"Grouped backward & update" |
+| D3 | Always-array representation: `symQConfig_t`'s scalar `scale` is deleted; per-tensor is the one-group case (`{1, 0}` sentinel). | `Quantization.h`, this section |
+| D5 | ASYM is in scope as a STORAGE granularity (`scales[]` + `zeroPoints[]` per group); integer kernels stay symmetric — the funnel prologue shifts ASYM codes by the per-group zero point into the same signed-mantissa image the SYM path uses. | `ExecuteOp.c` grouped-unpack arm, `Linear.c` asym view |
+| D6 | ASYM zero points are `uint16` code-domain values (covers `qBits ≤ 16`, incl. int12); ASYM `qBits` is capped at [1, 16] and wider configs fail fast. The nudged code-domain grid (below) is the PR4 realization. | §"ASYM width/zeroPoint contract" below; `Quantization.c`, `TensorConversion.c`, `Deserialize.c` |
 
 ## SYM ↔ * conversion bridge (#227)
 
@@ -121,7 +130,7 @@ asym-producing converters MUST call this helper and never re-derive the grid
 inline (#243's drift lesson). Grouped configs derive the grid **per group**
 (`deriveAsymGridForGroup`). The float→SYM pack sibling is `packFloatBufferAsSym`.
 
-**ASYM width/zeroPoint contract (D6, supersedes #246).** `zeroPoints[]` are
+**ASYM width/zeroPoint contract (group-quant D6, supersedes #246).** `zeroPoints[]` are
 **uint16 code-domain** values in `[0, 2^qBits − 1]`; the nudge makes that range
 an invariant, not a hope (the old int32 value-domain zp provably exceeded uint16
 even at `qBits = 16` — the −72817 wide-band pin was the proof, and the reason
@@ -141,7 +150,7 @@ re-derives a fresh grid every store (absmax for SYM, affine min/max for ASYM). B
 direct-call only, not `conversionMatrix` cells (there is no dtype-pair to key a matrix
 cell on — the second operand is a raw float increment, not a tensor).
 
-## BFP — block-floating-point storage (BFP epic PR1–PR3, spec `docs/superpowers/specs/2026-07-29-block-floating-point-design.md`, maintainer-local)
+## BFP — block-floating-point storage (BFP epic PR1–PR3; compute contract and decision register in `docs/conventions/arithmetic-bfp.md`)
 
 `BFP` is qtype #7 (`qtype_t = {INT32, FLOAT32, SYM_INT32, SYM, ASYM, BOOL,
 BFP}`, appended last — mid-enum insertion would corrupt old checkpoints): a

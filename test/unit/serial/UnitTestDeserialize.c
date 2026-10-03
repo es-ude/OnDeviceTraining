@@ -1097,7 +1097,7 @@ static void testBfpDeserializeRejectsExponentBitsOutOfRange(void) {
  *  finite float32 scale -- ldexpf(1.f, stored - bias) is +inf, so the first
  *  dequant turns every zero code into 0 * inf == NaN, which walks past every
  *  runtime guard instead of saturating like an out-of-range VALUE would.
- *  deriveBfpStoredExponent caps its own output at exactly bias + 127 (D6,
+ *  deriveBfpStoredExponent caps its own output at exactly bias + 127 (BFP D6,
  *  docs/conventions/arithmetic-bfp.md §2), so a file byte above it is one
  *  this build's quantizer could never have written. 255 at exponentBits 8
  *  (bias 127) is the canonical corrupt value -- the natural top of the
@@ -1603,7 +1603,7 @@ static void testDeserializeAsymRejectsWireQBitsAboveSixteen(void) {
     writeU32LE(f, 0); /* groupSize */
     writeF32LE(f, 0.5f);
     writeU16LE(f, 3);
-    uint8_t qBits = 17; /* > 16, D6 ceiling */
+    uint8_t qBits = 17; /* > 16, group-quant D6 ceiling */
     fwrite(&qBits, 1, 1, f);
     uint8_t roundingMode = 0; /* HALF_AWAY */
     fwrite(&roundingMode, 1, 1, f);

@@ -703,8 +703,8 @@ static layer_t *avgPool1dBuildBfpLayer(avgPool1dConfig_t *cfgStore, kernel_t *ke
     return layerStore;
 }
 
-/* Borrowed BFP-stored grouped input (D8: never re-blocked): the kernel folds
- * same-group segments with ldexpf into the FLOAT32 raw (D7) and divides by K
+/* Borrowed BFP-stored grouped input (BFP D8: never re-blocked): the kernel folds
+ * same-group segments with ldexpf into the FLOAT32 raw (BFP D7) and divides by K
  * there. A FLOAT32 output wire makes the OUT_WRITE epilogue a memmove, so the
  * comparison is BIT-exact against the np.float32 reference. */
 void testAvgPool1dForwardBfpBorrowedGroupedInput(void) {

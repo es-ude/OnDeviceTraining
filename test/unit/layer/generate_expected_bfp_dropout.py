@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate expected_bfp_dropout.h for UnitTestDropout's BFP float-bridge test
-(BFP epic PR4, R-P3 -- spec docs/superpowers/specs/2026-07-29-block-floating-
-point-design.md, D4 "Dropout non-native BY DECISION" + deviations register 5).
+(BFP epic PR4, R-P3 -- docs/conventions/arithmetic-bfp.md: BFP D4 "Dropout
+non-native BY DECISION" + deviations register 5).
 
 Fixture design (each choice is a mutation the test must kill):
   - two groups of four with DIFFERENT stored exponents (130 / 126), so a

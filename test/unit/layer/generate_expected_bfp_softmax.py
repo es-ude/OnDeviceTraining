@@ -163,7 +163,7 @@ def iexp_q(qw, mode):
 
 def softmax_values_bfp(codes, exps, qc, mode):
     """softmaxValuesBfp (Softmax.c): numerics-spec steps 1-5 on unpacked
-    mantissa codes with a live grid. Returns the RAW float32 outputs (D7) --
+    mantissa codes with a live grid. Returns the RAW float32 outputs (BFP D7) --
     the OUT_WRITE epilogue packs them."""
     n = len(codes)
     bias = bfp_bias(qc)

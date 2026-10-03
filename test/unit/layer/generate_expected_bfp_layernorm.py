@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Generate expected_bfp_layernorm.h for UnitTestLayerNorm's native ARITH_BFP
-tests (BFP epic PR5, R-N1/R-N2/R-N3 -- spec docs/superpowers/specs/
-2026-07-29-block-floating-point-design.md).
+tests (BFP epic PR5, R-N1/R-N2/R-N3 -- docs/conventions/arithmetic-bfp.md §5.8).
 
 Two forward fixtures, both on shape [2, 4] with numNormDims = 1 (G = 2 blocks
 of N = 4):
@@ -237,7 +236,7 @@ def forward_bfp(x_codes, x_exps, x_qc, gamma_codes, gamma_exps, gamma_qc, beta_c
                 beta_qc, g_count, n):
     """layerNormForwardBfp: stats through the Reduce BFP arms, then
     nval = (x - mean) * invSigma and y = gamma*nval + beta in float32. Returns
-    the RAW float32 output (D7) -- the OUT_WRITE epilogue packs it."""
+    the RAW float32 output (BFP D7) -- the OUT_WRITE epilogue packs it."""
     means = block_mean_bfp(x_codes, x_exps, x_qc, g_count, n)
     variances = block_var_bfp(x_codes, x_exps, x_qc, means, g_count, n)
     inv_sigma = [f32_div(f32(1.0), sqrt_f32(f32_add(v, EPS))) for v in variances]
@@ -480,7 +479,7 @@ def dx_bfp(x_codes, x_exps, x_qc, dy_codes, dy_exps, dy_qc, gamma_codes, gamma_e
            g_count, n):
     """layerNormCalcPropLossBfp: per group, chain-sum sumDn/sumDnN in j order,
     then dx = invSigma * (dn - meanDn - nval * meanDnN) per element. Returns
-    the RAW float32 dx (D7) -- the OUT_WRITE epilogue packs the propLoss
+    the RAW float32 dx (BFP D7) -- the OUT_WRITE epilogue packs the propLoss
     wire."""
     means, inv_sigma = stats_bfp(x_codes, x_exps, x_qc, g_count, n)
     dx = [f32(0.0)] * (g_count * n)

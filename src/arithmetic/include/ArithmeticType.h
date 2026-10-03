@@ -4,8 +4,8 @@
 #include "Quantization.h"
 #include "Rounding.h"
 
-/* Declared compute representation of an op (design spec 2026-07-02
- * arithmetic-type-split, D1). BY VALUE in layer configs: no ownership,
+/* Declared compute representation of an op (arithmetic-type-split D1,
+ * docs/conventions/arithmetic-sym.md). BY VALUE in layer configs: no ownership,
  * no teardown. Only compute-capable representations exist here — storage
  * dtypes (SYM/ASYM/BOOL/INT32) are expressed on tensors/storage configs. */
 typedef enum arithmeticType { ARITH_FLOAT32, ARITH_SYM_INT32, ARITH_BFP } arithmeticType_t;
@@ -22,7 +22,7 @@ typedef struct arithmetic {
     roundingMode_t roundingMode;
 } arithmetic_t;
 
-/* Derivation rule (spec D5, as amended by BFP epic PR2): FLOAT32 ->
+/* Derivation rule (arithmetic-type-split D5, as amended by BFP epic PR2): FLOAT32 ->
  * ARITH_FLOAT32; SYM_INT32 -> ARITH_SYM_INT32; BFP -> ARITH_BFP; the
  * remaining storage-only dtypes (SYM/ASYM/BOOL/INT32) -> ARITH_FLOAT32
  * (float is the universal compute bridge). roundingMode is taken from the

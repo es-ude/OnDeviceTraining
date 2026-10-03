@@ -11,7 +11,7 @@ linked document wins.
 
 Read in this order:
 
-1. [`README.md`](README.md) — motivation, design principles, roadmap
+1. [`README.md`](README.md) — motivation, design principles
 2. [`docs/FEATURES.md`](docs/FEATURES.md) — what the framework can do **today**
    (layer/optimizer/serialization matrix)
 3. [`examples/README.md`](examples/README.md) — runnable end-to-end demos with
@@ -28,6 +28,7 @@ Read in this order:
 | `test/unit/` | Unity unit tests, one `UnitTest<LibName>.c` per library |
 | `examples/` | End-to-end training demos (PyTorch reference + C twin + parity harness) |
 | `python/odt/` | Python package skeleton: `providers/`, `ir2c/`, `resource_estimator/` (not started yet) |
+| `python/tests/` | Active pytest suite for the `examples/` tooling (parity helpers, XorShift32 mirror, log schema, `.npy` writer, stack-watermark checker, memory/sweep aggregation) plus a package-import smoke test |
 | `docs/` | Feature matrix, conventions index, per-subsystem conventions |
 | `cmake/` | Build helpers and external dependencies (Unity via FetchContent) |
 | `.github/workflows/` | CI pipeline (see [CI](#branches-prs--ci)) |
@@ -44,10 +45,10 @@ src/arithmetic/       Matmul, Add, Comparison, Distributions, …
 src/tensor/           Tensor, Quantization, TensorConversion, DTypes
 ```
 
-Support modules (`common/`, `csv/`, `data_loader/`, `rng/`, `serial/`) sit
-alongside. Dispatch is via C-style vtables — global function-pointer arrays
-(`layerFunctions[]`, `optimizerFunctions[]`, `lossFunctions[]`,
-`conversionMatrix[][]`) indexed by enum. Within each module, public headers
+Support modules (`common/`, `continual_learning/`, `csv/`, `data_loader/`,
+`rng/`, `serial/`) sit alongside. Dispatch is via C-style vtables — global
+function-pointer arrays (`layerFunctions[]`, `optimizerFunctions[]`,
+`lossFunctions[]`, `conversionMatrix[][]`) indexed by enum. Within each module, public headers
 live in its `include/` subdirectory and implementations at the directory root.
 
 ## Development environment
@@ -64,7 +65,7 @@ versions, plus these scripts:
 | `run_ai_unit_tests` | Run all Unity unit tests via ctest |
 | `run_asan_tests` | Configure + build + run the suite under ASan/UBSan |
 | `clean_cmake` | Clean the `unit_test` build tree |
-| `ci` | Most of the CI pipeline locally: allocation-locality gate, `clang-format` check, C tests, ASan/UBSan tests, Python tests |
+| `ci` | Most of the CI pipeline locally: allocation-locality and optimizer-step-entry gates, `clang-format` check, C tests, ASan/UBSan tests, Python tests |
 
 Without devenv you need CMake ≥ 3.20, Ninja, a C compiler, and
 [uv](https://docs.astral.sh/uv/) for anything Python. Python work always goes
@@ -83,12 +84,13 @@ ctest --preset unit_test_debug          # run all unit tests
 
 | Configure preset | Purpose |
 |---|---|
-| `unit_test` | Plain unit-test build (what CI runs) |
-| `unit_test_error` / `unit_test_info` / `unit_test_debug` | Increasing log verbosity (`DEBUG_MODE_*`); `debug` also enables `ODT_MEM_PROFILE` |
-| `unit_test_asan` | AddressSanitizer + UBSan. On macOS this needs compiler-rt ≥ LLVM 22 — see [`docs/conventions/testing.md`](docs/conventions/testing.md) (the devenv shell handles it) |
-| `unit_test_ubsan` | Signed-overflow / float-cast UBSan build |
+| `unit_test` | Plain unit-test build (what CI runs); sets `ODT_REMAT_VERIFY=ON` |
+| `unit_test_error` / `unit_test_info` / `unit_test_debug` | Increasing log verbosity (`DEBUG_MODE_*`); `debug` also enables `ODT_MEM_PROFILE`, `ODT_TRACK_INSTRUCTIONS` and `ODT_REMAT_VERIFY` |
+| `unit_test_asan` | AddressSanitizer + UBSan, plus `ODT_MEM_PROFILE`, `ODT_TRACK_INSTRUCTIONS`, `ODT_REMAT_VERIFY`. On macOS this needs compiler-rt ≥ LLVM 22 — see [`docs/conventions/testing.md`](docs/conventions/testing.md) (the devenv shell handles it) |
+| `unit_test_ubsan` | Signed-overflow / float-cast UBSan build; inherits `unit_test_debug` (same `ODT_*` options) |
 | `examples` | `BUILD_EXAMPLES=ON`; the default `all` target compiles **every** example binary |
 | `examples_memprofile` | `examples` + `ODT_MEM_PROFILE=ON` |
+| `arm_cross` | Compile-only `arm-none-eabi` cross build (`cmake/arm-none-eabi.cmake`, `-Werror`, no tests); its build preset compiles an explicit list of core library targets |
 
 Each preset builds into its own `build/<preset>/` directory. Test presets
 exist for the six `unit_test*` presets; test binaries in
@@ -166,17 +168,22 @@ PRs to `main`/`develop`:
 
 | Job | Checks |
 |---|---|
+| `gate` | Skips a push run when the same commit is already the head of an open PR (that PR's run covers it); every other job depends on it |
 | `alloc-locality` | No allocation primitives outside `src/userApi/` |
 | `optimizer-step-entry` | `examples/` step the optimizer through `optimizerStep()`, never the raw vtable (#432) |
 | `c-format-check` | `clang-format --dry-run -Werror` over `src`, `test`, `examples` |
 | `c-build-and-test` | `unit_test` preset: configure, build, ctest |
 | `c-asan-build-and-test` | The suite under ASan + UBSan |
 | `c-ubsan-build-and-test` | The suite under overflow-focused UBSan |
-| `c-bit-parity` | Builds **all** example binaries, then parity of the C twins against PyTorch (exact int32 predictions; ECG reconstructions via allclose) |
+| `c-bit-parity` | Builds **all** example binaries, then parity of the C twins against PyTorch (exact int32 predictions; ECG reconstructions via allclose); also runs the `mixed_width_mlp` acceptance binary (in-binary gates, no parity) and the continual-learning mini-gate (`train_c_continual` machinery smoke) |
+| `c-arm-cross-compile` | `arm_cross` preset with Arm GNU 13.3.Rel1 (devenv parity); non-required |
+| `c-arm-cross-compile-min` | `arm_cross` preset with apt arm-gcc 10.x — the pre-C23 portability floor; non-required |
+| `c-stack-watermark` | Builds the five instrumented HAR trainers under `examples_memprofile`, runs one epoch each, reports stack peaks against budgets (report-only) |
 | `python-test` | `uv run pytest` |
 
-The devenv `ci` script mirrors this pipeline locally (all but the UBSan and
-bit-parity jobs) — run it before opening a PR. If your change touches
+The devenv `ci` script mirrors this pipeline locally (all but the `gate`,
+UBSan, bit-parity, both ARM cross-compile and stack-watermark jobs) — run it
+before opening a PR. If your change touches
 numerics or training behavior, also run the `unit_test_ubsan` preset and the
 affected examples' parity checks yourself.
 

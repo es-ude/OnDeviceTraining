@@ -31,13 +31,20 @@ The repository is currently structured as a **CMake-based C project** and includ
 
 - `src/` — core sources
 - `test/unit/` — unit tests
+- `examples/` — end-to-end training demos (PyTorch reference + C twin + parity checks) — see [`examples/README.md`](examples/README.md)
+- `docs/` — feature matrix, continual-learning guide, contributor conventions
+- `python/` — Python package skeleton (`python/odt/`, not started yet) and `python/tests/` (tests for the example tooling)
 - `cmake/` — build helpers
 - `CMakePresets.json` — reproducible CMake configurations
+- `pyproject.toml` / `uv.lock` — Python dependencies, managed with [uv](https://docs.astral.sh/uv/)
 - `devenv.*` — a pinned developer environment (optional, depending on your setup)
+- `.github/workflows/ci.yml` — the CI pipeline
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — repository map, build/test, and contribution workflow
 - MIT license
 
-If you’re new: expect this project to evolve quickly. This README is written to clearly separate
-**current scope** from **planned features**.
+What the framework supports today (layers, optimizers, quantization, serialization, …) is
+tracked in [`docs/FEATURES.md`](docs/FEATURES.md) — that file is the source of truth for current
+capabilities. Expect this project to evolve quickly.
 
 ---
 
@@ -47,38 +54,3 @@ If you’re new: expect this project to evolve quickly. This README is written t
 - **MCU realism:** optimize for peak RAM, temporary buffers, and predictable memory behavior.
 - **Host equivalence:** run the same model code on PC for debugging/profiling and cross-checking.
 - **Incremental complexity:** start minimal, then add optimizers, quantization, and memory knobs without breaking the baseline.
-
----
-
-## Roadmap (planned additions)
-
-This section is a **direction**, not a promise.
-
-### 1) Training core
-- Forward + backward support for a growing set of “MCU-credible” building blocks
-- Loss functions and training loops for supervised learning
-- Optimizers (SGD, momentum, Adam variants) with configurable state footprint
-
-### 2) Memory & compute optimization knobs
-- Gradient checkpointing / recomputation strategies
-- Buffer reuse and static memory planning
-- Operator fusion where it reduces peak RAM or improves throughput
-
-### 3) Quantization & low-precision training
-- Quantized inference baseline with consistent numerics across host/MCU
-- QAT-style flows and integer-friendly training variants
-- Mixed precision strategies with explicit memory accounting
-
-### 4) Tooling & usability
-- Minimal “example zoo”, e.g.:
-  - tiny MLP (XOR / toy classification)
-  - time-series classifier
-  - small conv net
-- Profiling hooks and per-layer accounting (MACs, temporary buffers, parameter footprint)
-- CI for host builds + sanity tests
-
-### 5) Platform targets
-- Reference ports for common MCU families (board + toolchain recipes)
-- Clean hardware abstraction boundary to keep the training core platform-agnostic
-
---

@@ -23,6 +23,10 @@ native `ARITH_BFP` arms (forward + `dgamma`/`dbeta`/`dx`) in
 `meanOverTrailingAxesBfp`/`varianceBiasedOverTrailingAxesBfp` in
 `src/arithmetic/Reduce.c`, and the factory coherence rules in
 `src/userApi/layer/{LayerNormApi,GroupNormApi}.c` — all documented in §5.8.
+Since epic PR6 it also covers Softmax — the native `ARITH_BFP` forward and
+backward in `src/layer/Softmax.c`, the I-BERT integer exp
+`src/arithmetic/BfpSoftmaxExp.c`, and the `softmaxSetBfpExpShiftRounding`
+knob (`SoftmaxApi.h`) — documented in §5.9.
 Path-scoped for Claude via
 `.claude/rules/arithmetic-bfp.md`. Spec:
 `docs/superpowers/specs/2026-07-29-block-floating-point-design.md` (decisions
@@ -30,18 +34,21 @@ D1–D12, deviations register §10; D8 amended 2026-09-02 at PR3 kickoff — §9
 below); PR2 implementation plan:
 `docs/superpowers/plans/2026-08-11-bfp-pr2-arith-bfp-gemm-forward.md` (its own
 Decisions 1–11, cited below as "Decision N" to keep them distinct from the
-spec's D1–D12). §§1–4 track where the shipped PR1 dtype-core deliberately
+spec's D1–D12). The rules file, spec and plan are maintainer-local, not in
+the repository. §§1–4 track where the shipped PR1 dtype-core deliberately
 deviates from the cited literature and from ODT's own `#227` discipline — the
 Deutel-note format used by `docs/conventions/arithmetic-sym.md`'s attribution
 notes, applied to the BFP anchors (HBFP, MSFP, MX, FAST) instead. §5
 documents the compute contract itself (PR2 forward + PR3 backward + PR4's
-weight-less layers in §5.7 + PR5's norm layers in §5.8, all shipped, not a
+weight-less layers in §5.7 + PR5's norm layers in §5.8 + PR6's Softmax in
+§5.9, all shipped, not a
 forward pointer); §§6–8 extend
 the deviations register with three deviations the PR2 kernels introduced; §9
 amends spec decision D8 with the PR3 backward's own deviation (exact fold
 segmentation instead of op-local re-blocking); §10 records the PR5 norms'
 own register entries (the 3× stats recompute, and the float32 stats bridges
-that bound what "native" means for a norm).
+that bound what "native" means for a norm); §11 records PR6 Softmax's (the
+I-BERT adaptations, and two corrections).
 
 ## 1. Two's-complement mantissas, not sign-magnitude
 
@@ -1437,8 +1444,8 @@ one `int32` block partial could accumulate (§5.3's fold contract needs a
 stable target across a whole segment).
 
 `convTranspose1dKernelBfpGather` (spec D9; plan
-`docs/superpowers/plans/2026-08-11-bfp-pr2-arith-bfp-gemm-forward.md`)
-deviates from ODT's own scatter precedent by computing **output-centric**:
+`docs/superpowers/plans/2026-08-11-bfp-pr2-arith-bfp-gemm-forward.md`,
+maintainer-local) deviates from ODT's own scatter precedent by computing **output-centric**:
 for every output position, `convTranspose1dTapsAt` enumerates its
 contributing (input position, kernel tap) pairs, and the reduction walks
 those taps like any other GEMM-family reduction — restoring the same

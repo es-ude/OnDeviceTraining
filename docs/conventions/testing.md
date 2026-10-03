@@ -97,7 +97,8 @@ ASAN_OPTIONS="detect_leaks=1:abort_on_error=1:halt_on_error=1" \
 ```
 
 For broader recon (e.g. surveying which tests currently leak), prefer the
-valgrind-based recipe in `docs/superpowers/tools/lsan-recon/` — it produces
+valgrind-based recipe in `docs/superpowers/tools/lsan-recon/` (maintainer-local,
+not in the repository) — it produces
 reproducible, fully-attributed per-test reports.
 
 ## Test memory discipline
@@ -227,7 +228,8 @@ A test file is considered idiom-compliant when, run under valgrind in the
 `--leak-check=full --show-leak-kinds=all`, all four LEAK SUMMARY
 categories report 0 bytes in 0 blocks (or valgrind emits "All heap blocks
 were freed -- no leaks are possible"). The reproducible recipe and
-container Dockerfile live in `docs/superpowers/tools/lsan-recon/`.
+container Dockerfile live in `docs/superpowers/tools/lsan-recon/`
+(maintainer-local, not in the repository).
 
 ## Build-time gold-value generators (CMake + uv + PyTorch)
 

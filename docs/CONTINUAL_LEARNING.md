@@ -3,14 +3,19 @@
 Memory-bounded protection against catastrophic forgetting under sequential
 domain shift (#326). Per class, a small probabilistic-PCA (PPCA) generator
 models the input distribution; during fine-tuning on a new domain, synthetic
-rehearsal samples drawn from that generator are mixed into every batch — no
-raw exemplar from any earlier domain is ever stored. Persistent memory is
-`O((k+1)·d)` per class, constant in the number of domains absorbed so far.
+rehearsal samples drawn from that generator are mixed into every batch — in
+the default PPCA mode no raw exemplar from any earlier domain is ever stored
+(the opt-in `REPLAY_MODE_EXEMPLAR` baseline does store them, see *How it
+works*). Persistent memory is `O((k+1)·d)` per class, constant in the number
+of domains absorbed so far.
 
-Module layout: `src/continual_learning/` (math + serialization, no
-allocation), `src/userApi/continual_learning/` (create/free, the replay
-data-loader wrapper — all `malloc`/`reserveMemory` lives here). Public
-headers: `PpcaReplay.h`, `PpcaReplaySerialize.h`, `PpcaReplayApi.h`.
+Module layout: `src/continual_learning/` (math + serialization, no model or
+tensor allocation; checkpoint deserialize may reallocate a state tensor's
+qconfig group arrays through the shared ODTS `deserializeTensor`),
+`src/userApi/continual_learning/` (create/free, the replay data-loader
+wrapper, the exemplar-buffer baseline — every allocation this module makes
+itself lives here). Public headers: `PpcaReplay.h`, `PpcaReplaySerialize.h`,
+`PpcaReplayApi.h`, `ExemplarBuffer.h`.
 
 ## When to use
 
@@ -74,12 +79,31 @@ noise around the single point it has seen so far.
 
 ```c
 typedef struct {
-    ppcaReplaySet_t *set;
-    size_t samplesPerClass; /* r */
-    uint32_t minCount;      /* class eligible once generator count >= minCount */
-    rng32_t *stream;        /* caller-owned sampling stream */
+    ppcaReplaySet_t *set;        /* PPCA_SAMPLE/CLASS_MEAN; unused in EXEMPLAR */
+    exemplarBuffer_t *exemplars; /* EXEMPLAR only; caller-owned */
+    size_t samplesPerClass;      /* r */
+    uint32_t minCount;           /* class eligible once generator count >= minCount */
+    rng32_t *stream;             /* caller-owned sampling stream; NULL ok in CLASS_MEAN */
+    replayMode_t mode;           /* zero-init = REPLAY_MODE_PPCA_SAMPLE */
 } replayLoaderConfig_t;
 ```
+
+`mode` selects what fills the `r` replay slots per eligible class:
+
+- **`REPLAY_MODE_PPCA_SAMPLE`** (default) — a fresh `ppcaReplaySample` draw
+  per slot.
+- **`REPLAY_MODE_CLASS_MEAN`** — `r` identical copies of the generator's
+  running class mean (`ppcaReplayMean`); the one-vector-per-class baseline.
+- **`REPLAY_MODE_EXEMPLAR`** — raw-rehearsal baseline: uniform draws (with
+  replacement) from an `exemplarBuffer_t` (`ExemplarBuffer.h`:
+  `exemplarBufferCreate(numClasses, capacity)`, `exemplarBufferAdd`,
+  `freeExemplarBuffer`), which keeps a copy of the first `capacity` samples
+  offered per class and drops the rest. Items are lent to batches zero-copy,
+  so the buffer must outlive the wrapper; a class is eligible once its buffer
+  is non-empty (`minCount` is ignored).
+
+The two baselines exist for the #326 iso-memory comparison against PPCA
+sampling; only EXEMPLAR stores raw samples.
 
 Its `getBatch` calls the base loader first, then appends `r` synthetic
 samples **after** the real ones for every class whose generator has
@@ -200,7 +224,8 @@ for realistic `dim`/`maxSessionSamples` — it is `reserveMemory`-backed
   for path-B streaming accuracy, see *Update paths*), then snapshot to
   SYM/ASYM at 8 bits via `executeConvert` at session or checkpoint
   boundaries for the memory win. `meanQ`/`basisQ`/`eigvalsQ` must each be
-  FLOAT32, SYM, or ASYM — SYM_INT32 (a compute format, not storage, #261),
+  FLOAT32, SYM, ASYM, or BFP (per-tensor only; a grouped BFP template is
+  rejected) — SYM_INT32 (a compute format, not storage, #261),
   INT32 (would silently value-cast through the conversion matrix), and BOOL
   (no conversion cell) are all rejected at `ppcaReplayCreate`.
 - **`mergeMath`/`streamMath`/`sampleMath`** — must all be `{.type =
@@ -294,6 +319,14 @@ generator "epoch" or "domain" counter exists to catch it if you call update
 too early or too late) — get the sequence right in your own training-loop
 composition.
 
+The `train_c_continual` example (`examples/har_classifier/train_c_continual.c`)
+implements exactly this sequence on UCI HAR split into five subject domains
+(`prepare_domains.py`): it pretrains on domain 0, then fine-tunes through
+domains 1–4 with the replay wrapper, absorbing each domain afterwards, and
+writes the per-domain accuracy matrix plus the replay footprint to a JSON log.
+`REPLAY=0` and `REPLAY_MODE=ppca|mean|exemplar` (environment variables)
+switch between no replay, PPCA sampling, and the two baselines.
+
 ## Checkpointing
 
 ```c
@@ -308,31 +341,34 @@ followed by the three tensors (`mean`, `basis`, `eigvals`) via the existing
 tensor-tier `serializeTensor`/`deserializeTensor`. Since v2 (#370) every
 scalar is fixed-width little-endian via the checked `SerialWire` primitives.
 The embedded tensor records follow the CURRENT ODTS tensor-tier layout —
-since group-quant PR1 that means the v4 SYM qconfig record (numGroups/
-groupSize/scales[]); the ODTR container version does NOT track ODTS record
-changes (an old checkpoint with SYM tensors fails only via downstream
+ODTS v6, whose qconfig records last changed in v5 (numGroups/groupSize-
+prefixed SYM and ASYM records, ASYM `u16 zeroPoints[]`, the BFP record);
+the ODTR container version (still 2) does NOT track ODTS record changes (an old checkpoint with SYM tensors fails only via downstream
 guards — formal linkage tracked in #401).
 
 **Deserialize fills a pre-built skeleton in place** — it does not allocate a
 set for you. Build the skeleton with `ppcaReplaySetCreate(numClasses, cfg)`
 using the *exact* `dim`/`rank`/storage config the checkpoint was written
 with, then call `ppcaReplaySetDeserialize(skeleton, f)`. The skeleton's
-`dim`, `rank`, dtype, and (for SYM/ASYM) `qBits` must match the checkpoint's
+`dim`, `rank`, dtype, and the packed width (`qBits` for SYM/ASYM,
+`mantissaBits`/`exponentBits` for BFP) must match the checkpoint's
 recorded values **per tensor** (`mean`, `basis`, `eigvals` independently) —
 any mismatch is a fail-fast `PRINT_ERROR + exit(1)` (the "#316-class"
-guard). A SYM tensor's `numGroups` is the one exception (group-quant PR2):
+guard). A SYM, ASYM or BFP tensor's `numGroups` is the one exception:
 a file `numGroups` that differs from the skeleton's own is tolerated —
 the shared ODTS tensor-tier deserialize reallocates the skeleton's
-`scales[]` to the file's shape (same relax as any other ODTS SYM record);
+per-group arrays (`scales[]`, plus ASYM `zeroPoints[]`, or BFP
+`exponents[]`) to the file's shape (same relax as any other ODTS record);
 the sentinel invariant (`numGroups==1 <=> groupSize==0`) and the
 divisibility identity (`numGroups * groupSize == N`) are still enforced.
 Mechanism: each tensor record's header (shape, dtype, qConfig) is read into
 locals and validated against the skeleton *before* the public
 `deserializeTensor` is allowed to touch it, then the stream is rewound and
-the real read happens — this works around an open bug (#316) where
-`deserializeTensor` itself overwrites the destination's shape/dtype from
-file bytes before sizing its own payload read, so a wrapper can't check
-"before overwrite" by calling it directly.
+the real read happens. `deserializeTensor` itself rejects a rank or dtype
+mismatch before writing and checks the payload size before reading data
+(#316), but a same-rank record's dims (and qConfig) are written into the
+destination before that size check — so a wrapper still can't get a full
+"validate before any overwrite" guarantee by calling it directly.
 
 This requires a **seekable stream** — the peek-validate-rewind mechanism
 does an `fseek` back to each record's start before consuming it, so a
@@ -364,11 +400,12 @@ targets are little-endian (pinned at compile time in `SerialWire.h`).
   `sampleMath` are declared per-op (`arithmetic_t`, the same by-value knob
   every layer uses), but only `ARITH_FLOAT32` is implemented —
   `ppcaValidateFloatArith` fail-fasts (at `ppcaReplayCreate` **and** at
-  every update/sample call) if any is set to `ARITH_SYM_INT32`. An integer
+  every update/sample call) if any is set to anything else (`ARITH_SYM_INT32`,
+  `ARITH_BFP`). An integer
   PPCA arithmetic path (which needs, among other things, an integer
   eigensolver) is literature-first future work, to be filed as a tracking
   issue rather than home-grown. State *storage* is independent of this and
-  already accepts FLOAT32/SYM/ASYM.
+  already accepts FLOAT32/SYM/ASYM/BFP.
 - **float32 Gram-matrix conditioning.** Path A's merge forms a Gram matrix
   `G = Bᵀ·B` (eigendecomposed by `jacobiEigSymFloat32`, `JacobiEig.h`),
   which squares the condition number in float32 — a real numerical risk for
@@ -380,8 +417,14 @@ targets are little-endian (pinned at compile time in `SerialWire.h`).
   shipped** primitive: it isn't in `src/arithmetic/` and there is no config
   knob to select it. If you hit conditioning trouble in practice, that's the
   documented next step, not something you can flip on today.
-- **Host-native checkpoint format.** Width/endianness are inherited from
-  the model-serialization format — no cross-architecture normalization.
+- **Micro-batching (#152).** At `microBatchSize` m > 1 the replayed batch
+  size `base + eligible · r` must stay divisible by m. `trainingRun` and
+  `trainingEpochDefault` check only the loader's `batchSize`, so an
+  indivisible replayed batch makes `trainingBatchDefault` fail fast
+  mid-epoch. `eligible` grows across sessions as more classes cross
+  `minCount` (or, in EXEMPLAR mode, get a non-empty buffer), so pick `r` and
+  the base batch size so that every reachable `base + eligible · r` is a
+  multiple of m.
 
 ## Literature
 

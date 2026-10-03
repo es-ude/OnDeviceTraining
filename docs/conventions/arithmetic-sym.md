@@ -2,7 +2,7 @@
 
 Conventions for the integer-math path: `src/arithmetic/**` and the SYM kernels of
 `src/layer/{Conv1d,Conv1dTransposed,Linear,LayerNorm}*`. Path-scoped for Claude
-via `.claude/rules/arithmetic-sym.md`.
+via `.claude/rules/arithmetic-sym.md` (maintainer-local, not in the repository).
 
 ## SYM_INT32 seed-rescale + the #189 guard
 
@@ -297,7 +297,8 @@ configs (`quantizationInitSymInt32WithBits` allows up to 31 bits, where even a
 ## Grouped backward & update — error analysis and path choice
 
 Group-quantized weights (group-quant epic PR2/PR3, spec
-`docs/superpowers/specs/2026-07-28-group-quantization-design.md`) keep raw
+`docs/superpowers/specs/2026-07-28-group-quantization-design.md`,
+maintainer-local) keep raw
 int32 MACs *within* a group and fold partials into the common accumulator
 scale `s_acc = s_in · max_g(scales[g])` via `rescaleIntoAccumulatorScale`
 (factors `scales[g]/s_wmax ≤ 1`, so combines never grow mantissas). Every

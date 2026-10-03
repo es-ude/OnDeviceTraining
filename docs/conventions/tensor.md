@@ -1,7 +1,8 @@
 # Tensor — quantization dtype semantics
 
 Conventions for `src/tensor/**` — dtypes, quantization configs, and the
-conversion matrix. Path-scoped for Claude via `.claude/rules/tensor.md`.
+conversion matrix. Path-scoped for Claude via `.claude/rules/tensor.md` (maintainer-local, not in
+the repository).
 
 ## SYM_INT32 is a compute format, not storage (#261)
 
@@ -64,7 +65,8 @@ kernels compute flat storage offsets regardless of the permutation.
 
 For a row-major GEMM weight `[oc, ...]`, `groupSize == N/oc` IS the
 per-output-channel special case — no separate axis field. Full design:
-`docs/superpowers/specs/2026-07-28-group-quantization-design.md`.
+`docs/superpowers/specs/2026-07-28-group-quantization-design.md`
+(maintainer-local, not in the repository).
 
 ## SYM ↔ * conversion bridge (#227)
 
@@ -139,7 +141,7 @@ re-derives a fresh grid every store (absmax for SYM, affine min/max for ASYM). B
 direct-call only, not `conversionMatrix` cells (there is no dtype-pair to key a matrix
 cell on — the second operand is a raw float increment, not a tensor).
 
-## BFP — block-floating-point storage (BFP epic PR1–PR3, spec `docs/superpowers/specs/2026-07-29-block-floating-point-design.md`)
+## BFP — block-floating-point storage (BFP epic PR1–PR3, spec `docs/superpowers/specs/2026-07-29-block-floating-point-design.md`, maintainer-local)
 
 `BFP` is qtype #7 (`qtype_t = {INT32, FLOAT32, SYM_INT32, SYM, ASYM, BOOL,
 BFP}`, appended last — mid-enum insertion would corrupt old checkpoints): a
@@ -170,7 +172,9 @@ the backward carrier gate): both operands stay blocked, `int32` mantissa
 products/sums accumulate per same-exponent segment, and each segment folds
 into a `float32` accumulator via an exact `ldexpf` power-of-two shift at every
 group-boundary change (kernel contract, headroom guard and deviations:
-`docs/conventions/arithmetic-bfp.md` §5, backward contract §5.6). A model
+`docs/conventions/arithmetic-bfp.md` §5, backward contract §5.6). Epic
+PR4–PR6 extended native `ARITH_BFP` beyond the GEMM family to the pools,
+LayerNorm/GroupNorm and Softmax (§5.7–§5.9 there). A model
 built with `layerQuantInitUniform` over one BFP template — which derives
 `ARITH_BFP` in all four math slots — now trains its entire loop natively with
 no pins required. Pinning the backward math slots

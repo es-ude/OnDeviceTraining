@@ -3,7 +3,8 @@
 Contributor conventions for OnDeviceTraining. Detailed per-subsystem conventions
 live under `docs/conventions/`; this file is the index and the cross-cutting
 vision. (Claude sessions receive each subsystem's conventions
-path-scoped automatically via `.claude/rules/`.)
+path-scoped automatically via `.claude/rules/` — maintainer-local, not in the
+repository.)
 
 For *what the framework can do today* (layer/optimizer/serialization feature
 matrix), see [`FEATURES.md`](FEATURES.md).
@@ -50,7 +51,11 @@ something that will drift again.
   gather-formulated ConvT1d and float-rounding deviations it introduced) and
   PR3 backward (weightGrad/biasGrad/dx kernels, the shared sum-headroom
   bound, the per-tensor-only grad/optimizer-state knob, and the D8 amendment
-  — exact fold segmentation instead of op-local re-blocking).
+  — exact fold segmentation instead of op-local re-blocking), PR4 weight-less
+  layers (§5.7: native pool arms, the packed-domain Relu/Flatten/Dropout
+  paths, the BFP fake-quant loss arms), PR5 norms (§5.8, register entries
+  §10) and PR6 Softmax (§5.9: the I-BERT adaptation contract, register
+  entries §11).
 - [`conventions/loss.md`](conventions/loss.md) — loss forward/backward/reduction
   microbatch contracts; where the macro-batch divisor lives.
 - [`conventions/allocation.md`](conventions/allocation.md) — allocation locality

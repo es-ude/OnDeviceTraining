@@ -1,5 +1,7 @@
 #define SOURCE_FILE "EXEMPLAR_BUFFER"
 
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 #include "Common.h"
@@ -9,17 +11,43 @@
 #include "StorageApi.h"
 #include "TensorApi.h"
 
+static bool exemplarMulFits(size_t a, size_t b, size_t *product) {
+    if (a != 0 && b > SIZE_MAX / a) {
+        return false;
+    }
+    *product = a * b;
+    return true;
+}
+
+static void *reserveOrExit(size_t bytes, const char *what) {
+    void *p = reserveMemory(bytes);
+    if (p == NULL) {
+        PRINT_ERROR("exemplarBufferCreate: cannot reserve %zu bytes for the %s", bytes, what);
+        exit(1);
+    }
+    return p;
+}
+
 exemplarBuffer_t *exemplarBufferCreate(size_t numClasses, size_t capacity) {
     if (numClasses == 0 || capacity == 0) {
         PRINT_ERROR("exemplarBufferCreate: numClasses and capacity must be >= 1");
         exit(1);
     }
-    exemplarBuffer_t *buf = reserveMemory(sizeof(exemplarBuffer_t));
+    /* the counts array cannot wrap once the slot bytes fit: numClasses <= slots
+     * and sizeof(uint32_t) <= sizeof(tensor_t *) */
+    size_t slots, slotBytes;
+    if (!exemplarMulFits(numClasses, capacity, &slots) ||
+        !exemplarMulFits(slots, sizeof(tensor_t *), &slotBytes)) {
+        PRINT_ERROR("exemplarBufferCreate: numClasses %zu * capacity %zu overflows size_t",
+                    numClasses, capacity);
+        exit(1);
+    }
+    exemplarBuffer_t *buf = reserveOrExit(sizeof(exemplarBuffer_t), "buffer");
     buf->numClasses = numClasses;
     buf->capacity = capacity;
-    buf->items = reserveMemory(numClasses * capacity * sizeof(tensor_t *));
-    buf->counts = reserveMemory(numClasses * sizeof(uint32_t));
-    for (size_t i = 0; i < numClasses * capacity; i++) {
+    buf->items = reserveOrExit(slotBytes, "exemplar slots");
+    buf->counts = reserveOrExit(numClasses * sizeof(uint32_t), "class counts");
+    for (size_t i = 0; i < slots; i++) {
         buf->items[i] = NULL;
     }
     for (size_t c = 0; c < numClasses; c++) {

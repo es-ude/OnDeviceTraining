@@ -1,7 +1,9 @@
 #define SOURCE_FILE "UNIT_TEST_REPLAY_DATA_LOADER"
 
+#include <stdint.h>
 #include <stdlib.h>
 
+#include "AsanDeath.h"
 #include "DataLoaderApi.h"
 #include "DeathTest.h"
 #include "PpcaReplay.h"
@@ -323,6 +325,28 @@ void testExemplarBufferRejectsBadClassAndShape(void) {
     freeTensor(ok);
     freeExemplarBuffer(buf);
 }
+
+#if SIZE_MAX > UINT32_MAX
+/* #475: numClasses * capacity wraps to 0. */
+void testExemplarBufferCreateRejectsSlotCountOverflow(void) {
+    ASSERT_EXITS_WITH_FAILURE(exemplarBufferCreate(2, SIZE_MAX / 2u + 1u));
+}
+
+/* #475: the slot count fits, the byte count (* sizeof(tensor_t *)) wraps to 0. */
+void testExemplarBufferCreateRejectsSlotByteOverflow(void) {
+    ASSERT_EXITS_WITH_FAILURE(exemplarBufferCreate(1, SIZE_MAX / sizeof(tensor_t *) + 1u));
+}
+
+#ifndef ODT_TEST_ASAN
+/* #475: 2^62 slot bytes do not wrap but cannot be reserved on any 64-bit host.
+ * Skipped under ASan, which aborts on oversized requests unless
+ * allocator_may_return_null=1. macOS malloc prints a "can't allocate region"
+ * warning to stderr here; that is expected. */
+void testExemplarBufferCreateFailsFastWhenReservationFails(void) {
+    ASSERT_EXITS_WITH_FAILURE(exemplarBufferCreate(1, (size_t)1 << 59));
+}
+#endif
+#endif
 
 void testExemplarModeReplaysStoredSamplesZeroCopy(void) {
     /* REPLAY_MODE_EXEMPLAR: slots point INTO the buffer (no copy); classes
@@ -647,6 +671,13 @@ int main(void) {
     RUN_TEST(testPpcaModeStillRequiresStream);
     RUN_TEST(testExemplarBufferKeepsFirstKAndCopies);
     RUN_TEST(testExemplarBufferRejectsBadClassAndShape);
+#if SIZE_MAX > UINT32_MAX
+    RUN_TEST(testExemplarBufferCreateRejectsSlotCountOverflow);
+    RUN_TEST(testExemplarBufferCreateRejectsSlotByteOverflow);
+#ifndef ODT_TEST_ASAN
+    RUN_TEST(testExemplarBufferCreateFailsFastWhenReservationFails);
+#endif
+#endif
     RUN_TEST(testExemplarModeReplaysStoredSamplesZeroCopy);
     RUN_TEST(testExemplarModePicksDeterministic);
     RUN_TEST(testExemplarModeRequiresBufferAndStream);

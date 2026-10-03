@@ -314,7 +314,8 @@ it. Quantizing the gradient path is the open research axis (#218, Jan's
 `train_c_sym.c` also carries a `GROUP_MODE`/`GROUP_SIZE`/`WEIGHT_DTYPE` env
 axis on top of everything above, wiring the group-quant epic's grouped
 SYM/ASYM machinery (design spec:
-`docs/superpowers/specs/2026-07-28-group-quantization-design.md`) into a real
+`docs/superpowers/specs/2026-07-28-group-quantization-design.md`, a maintainer-local
+design spec that is not in this repository) into a real
 model:
 
 - `WEIGHT_DTYPE=sym|asym` (default `sym`) — packed SYM (scale-only) or ASYM
@@ -396,7 +397,9 @@ unit-test fixtures. On success the run's JSON log gains
 `train_c_har_classifier_bfp` trains the same 12-layer model with classic block
 floating point: packed `mantissaBits`-wide two's-complement mantissas sharing one
 `exponentBits`-wide exponent per block (1 B of metadata per block, vs 4 B per float
-scale for grouped SYM). Spec: epic design 2026-07-29 + PR7 design 2026-09-14.
+scale for grouped SYM). Spec: epic design 2026-07-29 + PR7 design 2026-09-14
+(maintainer-local, not in this repository); the public contract is
+`docs/conventions/arithmetic-bfp.md`.
 
 **Knobs** (env): `BFP_MANTISSA_BITS` (2..16, default 8), `BFP_EXPONENT_BITS` (2..8, 8),
 `BFP_WEIGHT_BLOCK=tensor|channel|N` (N falls back to per-channel where it does not divide
@@ -519,6 +522,50 @@ supersedes both these absolute times and the BFP:SYM ratio once run; do not plan
 campaign's wall-clock budget off the numbers above. The stack-watermark `bfp` bucket is
 uncalibrated (report-only) until its own PR.
 
+### Continual learning with PPCA replay (#326)
+
+`train_c_continual.c` (target `train_c_continual`) runs a sequential domain-incremental
+protocol on the same FLOAT32 model as `train_c.c`: UCI HAR's 21 training subjects are split
+into five domains, the model pretrains on domain 0, then fine-tunes on domains 1..T-1 in
+order, evaluating on every domain seen so far after each one. With replay on, the train
+loader is wrapped by `replayDataLoaderWrap`, which appends per-class replay samples
+(generated from, or stored out of, the domains absorbed so far) to each real batch. API, memory formula and knob guidance:
+[`docs/CONTINUAL_LEARNING.md`](../../docs/CONTINUAL_LEARNING.md).
+
+```bash
+# Needs data/raw from prepare_data.py; writes data/domains/domain{0..4}_{train,eval}_{x,y}.npy
+# (subjects in contiguous chunks of 5/4/4/4/4, per-domain 80/20 train/eval split).
+uv run examples/har_classifier/prepare_domains.py
+
+cmake --build --preset examples --target train_c_continual
+./build/examples/examples/har_classifier/train_c_continual           # PPCA replay (default)
+REPLAY=0 LOG_PATH=examples/har_classifier/logs/no_replay.json \
+  ./build/examples/examples/har_classifier/train_c_continual         # no-replay baseline
+
+uv run examples/har_classifier/compare_continual.py examples/har_classifier/logs/continual.json
+```
+
+| env | default | effect |
+|---|---|---|
+| `DOMAINS` | 5 | domains to run (≤ 5: `prepare_domains.py` writes five) |
+| `PRETRAIN_EPOCHS`, `EPOCHS_PER_DOMAIN` | 10, 5 | epochs on domain 0 / on each later domain |
+| `LR`, `MOMENTUM`, `SEED` | 0.01, 0.9, 42 | SGD with momentum; one optimizer spans all domains |
+| `REPLAY` | 1 | 0 = plain sequential fine-tuning |
+| `REPLAY_MODE` | `ppca` | `ppca` (sample per-class PPCA generators), `mean` (class means), `exemplar` (raw-sample buffer) |
+| `R_PER_CLASS`, `MIN_COUNT` | 2, 16 | replay samples appended per eligible class per batch; samples a class's generator must have absorbed before it is replayed (ppca/mean) |
+| `RANK`, `MAX_SESSION_SAMPLES` | 8, 512 | PPCA rank; per-session sample cap of the PPCA update |
+| `EXEMPLARS_PER_CLASS` | 9 | exemplar-buffer capacity (9 ≈ iso-memory with rank-8 PPCA) |
+| `LOG_PATH` | `examples/har_classifier/logs/continual.json` | run log |
+
+Run it from the repo root (data and log paths are repo-relative). The log holds the
+lower-triangular `accuracy_matrix` (`R[t][j]` = accuracy on domain j after training through
+domain t) and a `replay` block with the per-class replay footprint; the binary exits 1 if
+the PPCA bytes per class after the final domain differ from those after domain 0.
+`compare_continual.py` computes ACC/BWT from one log, or mean ± std per replay setting from a
+directory of logs; `plot_continual.py` renders the study figures from per-arm log
+directories (layout in its docstring). CI runs a 2-domain, 1-epoch machinery smoke of this
+binary (`c-bit-parity`), not an accuracy or BWT gate.
+
 ### Build with memory profiling
 
 Memory instrumentation is compiled in only under the `examples_memprofile` preset
@@ -528,14 +575,18 @@ byte-identical bare calloc/free.
 ```bash
 cmake --preset examples_memprofile
 cmake --build --preset examples_memprofile --target \
-    train_c_har_classifier train_c_har_classifier_sym train_c_har_classifier_adamw
+    train_c_har_classifier train_c_har_classifier_sym train_c_har_classifier_adamw \
+    train_c_har_classifier_finetune train_c_har_classifier_bfp
 ```
 
-All three binaries are env-configured: `SEED`, `EPOCHS`, `LR`, `MOMENTUM`, `LOG_PATH`
+These five binaries are memory-instrumented (the CI `c-stack-watermark` job builds and
+runs all five); `train_c_continual` links the instrumentation library but records no
+memory block. All five are env-configured: `SEED`, `LR`, `MOMENTUM`, `LOG_PATH`, `EPOCHS`
+(`STAGE1_EPOCHS`/`STAGE2_EPOCHS` for the finetune binary)
 (+ the float binary's `BATCH_SIZE`/`LR_SCHEDULE`/`BS_SCHEDULE`/`BS_LR_COMPENSATION`/`GAMMA`/
 `STEP_SIZE`/`MAX_BATCH_SIZE`/`RESHUFFLE`, see above; + `SYM_BITS`, `SYM_ROUNDING`, `SYM_WIRES`, `LR_SCHEDULE`, `LR_MIN`, `GROUP_MODE`,
-`GROUP_SIZE`, `WEIGHT_DTYPE`, `ODTS_ROUNDTRIP` for the SYM binary; the AdamW
-binary ignores `MOMENTUM`). Each writes an extended RunLog JSON whose `memory` block
+`GROUP_SIZE`, `WEIGHT_DTYPE`, `ODTS_ROUNDTRIP` for the SYM binary; the `BFP_*` knobs
+for the BFP binary, see above; the AdamW binary ignores `MOMENTUM`). Each writes an extended RunLog JSON whose `memory` block
 carries per-category analytic bytes, instrumented heap/stack/RSS peaks, and the **reconciliation
 gap** (`heap_peak − mcu_total`, ≈ the host-resident dataset the MCU would
 stream — recorded, never massaged).

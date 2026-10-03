@@ -69,3 +69,34 @@ The train-from-scratch demo is the slowest in the suite (raw `[1,16000]` is the
 heaviest input even after the AvgPool downsample) — run it offline. Bit-parity
 mode requires exact equality; the train-from-scratch tolerances are informational
 and match `kws_mfcc/`.
+
+## Per-layer training trace (`trace_c_kws_raw`)
+
+A diagnostic for localizing where C and PyTorch *training* diverge (bit-parity
+only covers inference). `trace_c.c` (target `trace_c_kws_raw`) and
+`trace_pytorch.py` both load the exported state_dict — so run
+`train_pytorch.py` first — then run one SGD step (lr 0.005, momentum 0.9,
+mean-reduced CE) on the same fixed slice of the test set and dump every
+intermediate tensor as `.npy`: weights before/after the step, per-sample
+activations, activation grads and loss grad, and the raw (batch-sum) and
+mean-scaled parameter grads. Probe names follow `probe_manifest.h` (one name
+per layer of the 17-layer `model[]`); the C side writes `dump_c/stepNNN/`,
+PyTorch `dump_pt/step000/` (PyTorch's per-sample and raw grads are multiplied
+by B to undo its mean reduction and match C's unscaled per-sample backward).
+
+```bash
+cmake --build --preset examples --target trace_c_kws_raw
+./build/examples/examples/kws_raw/trace_c_kws_raw --sample-start 0 --batch 32
+uv run examples/kws_raw/trace_pytorch.py --sample-start 0 --batch 32
+uv run examples/_shared/trace_compare.py --example kws_raw   # first diverging tensor
+uv run examples/_shared/trace_sweep.py --example kws_raw     # aggregate over 10 batches
+```
+
+Run from the repo root. Both sides accept `--sample-start`, `--batch` (32) and
+`--act-samples` (samples whose activations are dumped, 4); `trace_pytorch.py`
+takes `--classes`, the C binary reads `KWS_CLASSES` and additionally accepts
+`--steps S` (re-feed the same batch S times; PyTorch dumps only step 0).
+`trace_compare.py` prints max-abs/max-rel error per tensor and flags the first
+probe whose error jumps far above the running per-tier floor; `trace_sweep.py`
+reruns both sides over non-overlapping batches to separate systematic
+divergence from accumulation noise. CI builds the binary but does not run it.

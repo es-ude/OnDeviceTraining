@@ -486,20 +486,26 @@ static tensor_t *buildSoftmaxWire1D(size_t n, quantization_t *q) {
     return initTensor(shape, q, NULL);
 }
 
-/* N-d FLOAT32 wire builder for the per-row (#152) fixtures: identity order,
- * dims copied from the caller, filled from `values` when non-NULL. */
-static tensor_t *buildSoftmaxWireNd(const size_t *dimsIn, size_t rank, const float *values) {
+/* N-d wire builder for the per-row (#152) fixtures: identity order, dims
+ * copied from the caller, takes ownership of `q`, filled from `values` when
+ * non-NULL. */
+static tensor_t *buildSoftmaxWireNdQ(const size_t *dimsIn, size_t rank, const float *values,
+                                     quantization_t *q) {
     size_t *dims = reserveMemory(rank * sizeof(size_t));
     memcpy(dims, dimsIn, rank * sizeof(size_t));
     size_t *order = reserveMemory(rank * sizeof(size_t));
     setOrderOfDimsForNewTensor(rank, order);
     shape_t *shape = reserveMemory(sizeof(shape_t));
     setShape(shape, dims, rank, order);
-    tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
+    tensor_t *t = initTensor(shape, q, NULL);
     if (values != NULL) {
         tensorFillFromFloatBuffer(t, values, calcNumberOfElementsByTensor(t));
     }
     return t;
+}
+
+static tensor_t *buildSoftmaxWireNd(const size_t *dimsIn, size_t rank, const float *values) {
+    return buildSoftmaxWireNdQ(dimsIn, rank, values, quantizationInitFloat());
 }
 
 /* #152 invariant: every row of a multi-row input is its own distribution. A
@@ -813,6 +819,135 @@ void testSoftmaxBackwardEmptyRowsAreNoOp(void) {
     freeQuantization(floatQ);
 
     TEST_ASSERT_EQUAL_size_t(0, capturedCount);
+}
+
+/* SYM_INT32 twin of testSoftmaxBackwardEmptyRowsAreNoOp (#457 a): the SYM
+ * arm's three float scratch VLAs are sized from the input count, so an empty
+ * input must return before declaring them. [0, 3] pins that the return keys
+ * on the element count, not on rowLen. Sanitizer-only RED (unit_test_asan:
+ * UBSan vla-bound). */
+void testSoftmaxBackwardSymEmptyRowsAreNoOp(void) {
+    const size_t shapes[2][2] = {{2, 0}, {0, 3}};
+    quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, symQ);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+    TEST_ASSERT_EQUAL_INT(ARITH_SYM_INT32, softmaxLayer->config->softmax->propLossMath.type);
+
+    for (size_t s = 0; s < 2; s++) {
+        tensor_t *input =
+            buildSoftmaxWireNdQ(shapes[s], 2, NULL, quantizationInitSymInt32(HALF_AWAY));
+        tensor_t *loss =
+            buildSoftmaxWireNdQ(shapes[s], 2, NULL, quantizationInitSymInt32(HALF_AWAY));
+        tensor_t *propLoss =
+            buildSoftmaxWireNdQ(shapes[s], 2, NULL, quantizationInitSymInt32(HALF_AWAY));
+
+        layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss);
+        size_t capturedCount = calcNumberOfElementsByTensor(propLoss);
+
+        freeTensor(propLoss);
+        freeTensor(loss);
+        freeTensor(input);
+        TEST_ASSERT_EQUAL_size_t(0, capturedCount);
+    }
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeQuantization(symQ);
+}
+
+/* #457 b: both non-BFP arms walk loss/propLoss at the input's flat offsets, so
+ * each wire must carry the input's dims. Without the gate a
+ * shorter wire is an OOB heap read/write (FLOAT32 arm, raw float* casts) or
+ * a silently wrong/truncated dx (SYM arm), and a longer one overflows the SYM
+ * arm's input-sized stack scratch. A [2, 3] input meets each bad wire. */
+static quantization_t *softmaxWireQ(bool sym) {
+    return sym ? quantizationInitSymInt32(HALF_AWAY) : quantizationInitFloat();
+}
+
+static void assertSoftmaxBackwardRejectsWire(bool sym, const size_t *lossDims,
+                                             const size_t *propLossDims) {
+    const size_t inputDims[2] = {2, 3};
+    quantization_t *layerQ = softmaxWireQ(sym);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, layerQ);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+    tensor_t *input = buildSoftmaxWireNdQ(inputDims, 2, softmaxBackwardX, softmaxWireQ(sym));
+    tensor_t *loss = buildSoftmaxWireNdQ(lossDims, 2, NULL, softmaxWireQ(sym));
+    tensor_t *propLoss = buildSoftmaxWireNdQ(propLossDims, 2, NULL, softmaxWireQ(sym));
+
+    ASSERT_EXITS_WITH_FAILURE(
+        layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss));
+
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(input);
+    freeSoftmaxLayer(softmaxLayer);
+    freeQuantization(layerQ);
+}
+
+void testSoftmaxBackwardFloatRejectsShortLoss(void) {
+    assertSoftmaxBackwardRejectsWire(false, (const size_t[]){2, 2}, (const size_t[]){2, 3});
+}
+
+void testSoftmaxBackwardFloatRejectsShortPropLoss(void) {
+    assertSoftmaxBackwardRejectsWire(false, (const size_t[]){2, 3}, (const size_t[]){2, 2});
+}
+
+void testSoftmaxBackwardSymRejectsShortLoss(void) {
+    assertSoftmaxBackwardRejectsWire(true, (const size_t[]){2, 2}, (const size_t[]){2, 3});
+}
+
+void testSoftmaxBackwardSymRejectsShortPropLoss(void) {
+    assertSoftmaxBackwardRejectsWire(true, (const size_t[]){2, 3}, (const size_t[]){2, 2});
+}
+
+void testSoftmaxBackwardSymRejectsLongLoss(void) {
+    assertSoftmaxBackwardRejectsWire(true, (const size_t[]){2, 4}, (const size_t[]){2, 3});
+}
+
+void testSoftmaxBackwardSymRejectsLongPropLoss(void) {
+    assertSoftmaxBackwardRejectsWire(true, (const size_t[]){2, 3}, (const size_t[]){2, 4});
+}
+
+/* #457: a count-equal reshape passes a count gate, but its rows no longer line
+ * up with the input's -- the wires must carry the input's dims. */
+void testSoftmaxBackwardFloatRejectsReshapedLoss(void) {
+    assertSoftmaxBackwardRejectsWire(false, (const size_t[]){3, 2}, (const size_t[]){2, 3});
+}
+
+void testSoftmaxBackwardSymRejectsReshapedPropLoss(void) {
+    assertSoftmaxBackwardRejectsWire(true, (const size_t[]){2, 3}, (const size_t[]){3, 2});
+}
+
+/* #457: a count-equal but permuted multi-row loss/propLoss would be walked in
+ * storage order at the input's offsets -- a silent mis-placement the count
+ * gate cannot see. The fixture is square so transposeTensor leaves the raw
+ * dims alone and only the order differs. */
+void testSoftmaxBackwardRejectsTransposedMultiRowGrads(void) {
+    const size_t dims[2] = {3, 3};
+    const float x[9] = {0.5f, -1.0f, 2.0f, 0.0f, 1.5f, -0.5f, 3.0f, 0.25f, -2.0f};
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+    tensor_t *input = buildSoftmaxWireNd(dims, 2, x);
+    tensor_t *loss = buildSoftmaxWireNd(dims, 2, x);
+    tensor_t *propLoss = buildSoftmaxWireNd(dims, 2, NULL);
+
+    transposeTensor(loss, 0, 1);
+    ASSERT_EXITS_WITH_FAILURE(
+        layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss));
+    transposeTensor(loss, 0, 1);
+
+    transposeTensor(propLoss, 0, 1);
+    ASSERT_EXITS_WITH_FAILURE(
+        layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss));
+
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(input);
+    freeSoftmaxLayer(softmaxLayer);
+    freeQuantization(floatQ);
 }
 
 /* ---- BFP epic PR6 Task 4: native ARITH_BFP forward (P6-2..P6-5) ----
@@ -1469,6 +1604,16 @@ int main() {
     RUN_TEST(testSoftmaxBackwardRank3RowSpansTrailingAxes);
     RUN_TEST(testSoftmaxBackwardRejectsTransposedMultiRow);
     RUN_TEST(testSoftmaxBackwardEmptyRowsAreNoOp);
+    RUN_TEST(testSoftmaxBackwardSymEmptyRowsAreNoOp);
+    RUN_TEST(testSoftmaxBackwardFloatRejectsShortLoss);
+    RUN_TEST(testSoftmaxBackwardFloatRejectsShortPropLoss);
+    RUN_TEST(testSoftmaxBackwardSymRejectsShortLoss);
+    RUN_TEST(testSoftmaxBackwardSymRejectsShortPropLoss);
+    RUN_TEST(testSoftmaxBackwardSymRejectsLongLoss);
+    RUN_TEST(testSoftmaxBackwardSymRejectsLongPropLoss);
+    RUN_TEST(testSoftmaxBackwardFloatRejectsReshapedLoss);
+    RUN_TEST(testSoftmaxBackwardSymRejectsReshapedPropLoss);
+    RUN_TEST(testSoftmaxBackwardRejectsTransposedMultiRowGrads);
 
     RUN_TEST(unitTestSoftmaxForwardBfpNativeTrunc);
     RUN_TEST(unitTestSoftmaxForwardBfpNativeHalfAway);

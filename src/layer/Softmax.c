@@ -77,7 +77,7 @@ static void softmaxRowGeometry(const tensor_t *t, const char *where, size_t *row
     if (*rows > 1) {
         for (size_t d = 0; d < s->numberOfDimensions; d++) {
             if (s->orderOfDimensions[d] != d) {
-                PRINT_ERROR("%s: an input with %zu storage rows must be identity-order (dim %zu "
+                PRINT_ERROR("%s: a wire with %zu storage rows must be identity-order (dim %zu "
                             "is order %zu)",
                             where, *rows, d, s->orderOfDimensions[d]);
                 exit(1);
@@ -331,19 +331,58 @@ static void softmaxVjpRows(const float *x, const float *dLds, float *dLdx, size_
     }
 }
 
+static void softmaxRequireInputDims(const tensor_t *input, const tensor_t *t, const char *what) {
+    const shape_t *a = input->shape;
+    const shape_t *b = t->shape;
+    bool same = a->numberOfDimensions == b->numberOfDimensions;
+    for (size_t d = 0; same && d < a->numberOfDimensions; d++) {
+        same = a->dimensions[d] == b->dimensions[d];
+    }
+    if (!same) {
+        PRINT_ERROR("Softmax backward: %s must have the input's rank and dims (input rank %zu, "
+                    "%s rank %zu)",
+                    what, a->numberOfDimensions, what, b->numberOfDimensions);
+        exit(1);
+    }
+}
+
+/* #457: both non-BFP arms walk loss/propLoss in flat storage order at the
+ * input's offsets (raw float* casts, or scratch sized from the input count),
+ * so each wire needs the input's dims -- else an OOB read/write, a
+ * stack-scratch overflow, or (count-equal reshape) rows that no longer line
+ * up -- and a multi-row wire must be identity-order, else a silent
+ * mis-placement (the BatchNorm1d wire contract). Runs before any conversion;
+ * returns the input count. */
+static size_t softmaxBackwardRequireWires(tensor_t *input, tensor_t *loss, tensor_t *propLoss,
+                                          size_t *rows, size_t *rowLen) {
+    size_t wireRows;
+    size_t wireRowLen;
+    softmaxRowGeometry(input, "Softmax backward", rows, rowLen);
+    softmaxRowGeometry(loss, "Softmax backward (loss)", &wireRows, &wireRowLen);
+    softmaxRowGeometry(propLoss, "Softmax backward (propLoss)", &wireRows, &wireRowLen);
+    softmaxRequireInputDims(input, loss, "loss");
+    softmaxRequireInputDims(input, propLoss, "propLoss");
+    return calcNumberOfElementsByTensor(input);
+}
+
 /* P6-1 root fix: the training loop hands every backward the layer INPUT
  * (logits), not the softmax OUTPUT the Jacobian needs -- softmaxVjpRows
  * recomputes it. */
 static void softmaxBackwardFloat(tensor_t *input, tensor_t *loss, tensor_t *propLoss) {
     size_t rows;
     size_t rowLen;
-    softmaxRowGeometry(input, "Softmax backward", &rows, &rowLen);
+    softmaxBackwardRequireWires(input, loss, propLoss, &rows, &rowLen);
     softmaxVjpRows((const float *)input->data, (const float *)loss->data, (float *)propLoss->data,
                    rows, rowLen);
 }
 
 static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *propLoss) {
-    size_t inputSize = calcNumberOfElementsByTensor(input);
+    size_t rows;
+    size_t rowLen;
+    size_t inputSize = softmaxBackwardRequireWires(input, loss, propLoss, &rows, &rowLen);
+    if (inputSize == 0) {
+        return; /* #457: no zero-length scratch VLAs */
+    }
 
     tensor_t inputFloat;
     quantization_t inputFloatQ;
@@ -368,9 +407,6 @@ static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *p
 
     /* P6-1 root fix: same recompute as the float arm -- the dequantized
      * inputFloat is the layer INPUT (logits), not the softmax OUTPUT. */
-    size_t rows;
-    size_t rowLen;
-    softmaxRowGeometry(input, "Softmax backward", &rows, &rowLen);
     softmaxVjpRows((const float *)inputFloat.data, (const float *)lossFloat.data,
                    (float *)propLossFloat.data, rows, rowLen);
 

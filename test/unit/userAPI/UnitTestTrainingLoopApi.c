@@ -2952,7 +2952,7 @@ typedef struct remRun {
  * sample, the real driver and inferenceWithLoss), with or without a HEAP
  * scheduler in the options. The scheduler is keyed to the [1, 2] batch view
  * the per-sample path hands the driver. */
-static remRun_t runTwoEpochs(bool withScheduler) {
+static remRun_t runTwoEpochs(bool withScheduler, bool deinitBeforeTheRun) {
     tensor_t *wParam = buildFloatTensor2D(2, 2, (float[]){1.f, 0.f, 0.f, 1.f}, 4);
     tensor_t *wGrad = gradInitFloat(wParam, NULL);
     parameter_t *w = parameterInit(wParam, wGrad);
@@ -2979,6 +2979,9 @@ static remRun_t runTwoEpochs(bool withScheduler) {
     if (withScheduler) {
         batchView_t view;
         TEST_ASSERT_TRUE(rematHeapInit(&s, model, 1, cfg, batchViewOf(&view, epochItems[0]), NULL));
+        if (deinitBeforeTheRun) {
+            rematSchedulerDeinit(&s);
+        }
     }
     run.result =
         trainingRun(model, 1, cfg, trainDl, evalDl, sgd, 2, calculateGradsSequential,
@@ -3003,8 +3006,8 @@ static remRun_t runTwoEpochs(bool withScheduler) {
  * the real inferenceWithLoss (it gets no scheduler before #4 PR3), and the
  * losses equal a run without one: STORE_ALL HEAP is today's values. */
 void testTrainingRunTrainsOnTheOptionsScheduler(void) {
-    remRun_t plain = runTwoEpochs(false);
-    remRun_t onScheduler = runTwoEpochs(true);
+    remRun_t plain = runTwoEpochs(false, false);
+    remRun_t onScheduler = runTwoEpochs(true, false);
     TEST_ASSERT_EQUAL_size_t(2, onScheduler.result.epochsCompleted);
     TEST_ASSERT_TRUE(onScheduler.report.peakLiveBytes > 0);
     TEST_ASSERT_EQUAL_size_t_MESSAGE(onScheduler.report.peakLiveBytes,
@@ -3014,6 +3017,15 @@ void testTrainingRunTrainsOnTheOptionsScheduler(void) {
                              sizeof(float));
     TEST_ASSERT_EQUAL_MEMORY(&plain.result.finalEvalStats.loss,
                              &onScheduler.result.finalEvalStats.loss, sizeof(float));
+}
+
+/* A deinitialised scheduler (zeroed by its deinit) in the options exits at the
+ * first training call, at the driver's guard, before any bind. */
+void testTrainingRunExitsOnADeinitialisedOptionsScheduler(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "rematCheckNumWires: scheduler not initialised (never initialised, "
+                             "or its init failed before the plan was built)",
+                             (void)runTwoEpochs(true, true));
 }
 
 int main(void) {
@@ -3065,5 +3077,6 @@ int main(void) {
     RUN_TEST(testTrainingRun_StopOnNonFiniteLoss_LastEpochStillCountsAsCompleted);
     RUN_TEST(testTrainingRun_StopOnNonFiniteLoss_DoesNotStepSchedulersOnTheStoppingEpoch);
     RUN_TEST(testTrainingRunTrainsOnTheOptionsScheduler);
+    RUN_TEST(testTrainingRunExitsOnADeinitialisedOptionsScheduler);
     return UNITY_END();
 }

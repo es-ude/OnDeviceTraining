@@ -1753,6 +1753,47 @@ void testTrainingBatchDefaultHandsTheCallToEachChunk(void) {
     assertRanOnTheScheduler(&r);
 }
 
+typedef bool (*rematRowInit_t)(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss,
+                               const tensor_t *inputLike, const rematPlanSpec_t *spec);
+
+/* remat P7 through the batch path: a scheduler keyed to a batch view of
+ * keyedRows rows exits at the first bind of a call whose input has another
+ * row count. (The raw [F] sample cannot key one: model B's Linear rejects a
+ * 1-D input at init.) Death-test children only: the exit leaves nothing to
+ * free. */
+static void trainModelBOnAMiskeyedScheduler(rematRowInit_t init, size_t m, size_t keyedRows) {
+    initModelBData();
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *model[B_SIZE];
+    buildModelB(model, &lq);
+    batchView_t view;
+    tensor_t *key = batchViewOf(&view, bItems[0]);
+    view.dimensions[0] = keyedRows;
+    rematScheduler_t s;
+    TEST_ASSERT_TRUE(init(&s, model, B_SIZE, defaultLossConfig(MSE), key, NULL));
+    batch_t *batch = buildBatch(bItems, bLabels, B_N);
+    trainingBatchDefault(model, B_SIZE, defaultLossConfig(MSE), batch, calculateGradsSequential,
+                         REDUCTION_MEAN, m, &(trainingCall_t){.remat = &s});
+}
+
+/* At m = 1 the driver receives the [1, F] batch view. */
+void testTrainingBatchDefaultExitsOnASchedulerKeyedToTwoRowsAtM1(void) {
+    const char *violation =
+        "rematWireTableBind: key mismatch on wire ACT 0, field 'dims[0]': built 2, live 1";
+    ASSERT_EXITS_WITH_OUTPUT(1, violation, trainModelBOnAMiskeyedScheduler(rematArenaInit, 1, 2));
+    ASSERT_EXITS_WITH_OUTPUT(1, violation, trainModelBOnAMiskeyedScheduler(rematHeapInit, 1, 2));
+}
+
+/* At m = 4 it receives the [4, F] gather view, so the m = 1 key is wrong. */
+void testTrainingBatchDefaultExitsOnASchedulerKeyedToOneRowAtM4(void) {
+    const char *violation =
+        "rematWireTableBind: key mismatch on wire ACT 0, field 'dims[0]': built 1, live 4";
+    ASSERT_EXITS_WITH_OUTPUT(1, violation, trainModelBOnAMiskeyedScheduler(rematArenaInit, 4, 1));
+    ASSERT_EXITS_WITH_OUTPUT(1, violation, trainModelBOnAMiskeyedScheduler(rematHeapInit, 4, 1));
+}
+
 void testTrainingEpochDefaultHandsTheCallToItsBatches(void) {
     initClassifierData();
     quantization_t *q = quantizationInitFloat();
@@ -1826,6 +1867,8 @@ int main(void) {
     RUN_TEST(testTrainingRunSmokeStackedTracksPerSample);
     RUN_TEST(testTrainingBatchDefaultHandsTheCallToEachSample);
     RUN_TEST(testTrainingBatchDefaultHandsTheCallToEachChunk);
+    RUN_TEST(testTrainingBatchDefaultExitsOnASchedulerKeyedToTwoRowsAtM1);
+    RUN_TEST(testTrainingBatchDefaultExitsOnASchedulerKeyedToOneRowAtM4);
     RUN_TEST(testTrainingEpochDefaultHandsTheCallToItsBatches);
     return UNITY_END();
 }

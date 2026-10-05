@@ -9,6 +9,7 @@
 #include "CalculateGradsSequential.h"
 #include "DeathTest.h"
 #include "Layer.h"
+#include "Linear.h"
 #include "LossFunction.h"
 #include "Quantization.h"
 #include "RematPlan.h"
@@ -409,6 +410,218 @@ void testWireBindInheritedGradChecksBeforeWrite(void) {
     assertRegroupedSeedExits(initHeap);
 }
 
+/* ---- the schedule key at the driver (remat P7) ---- */
+
+/* The key deaths name no row, so remat P7 ("identical across rows") is the
+ * same text from an ARENA and a HEAP scheduler, both built on the unedited
+ * fixture. `undo` restores what the parent frees. */
+typedef void (*fixtureEdit_t)(fixture_t *f);
+
+static void assertKeyChangeExitsOnBothRows(void (*build)(fixture_t *), fixtureEdit_t edit,
+                                           fixtureEdit_t undo, const char *violation) {
+    fixture_t f;
+    build(&f);
+    makeLabel(2);
+    rematScheduler_t arena = initArena(&f, NULL);
+    rematScheduler_t heap = initHeap(&f, NULL);
+    edit(&f);
+    ASSERT_EXITS_WITH_OUTPUT(1, violation, trainUnderTheAsanCallback(&f, &arena));
+    ASSERT_EXITS_WITH_OUTPUT(1, violation, trainUnderTheAsanCallback(&f, &heap));
+    undo(&f);
+    rematSchedulerDeinit(&arena);
+    freeFixture(&f, &heap);
+}
+
+/* A second input header the edits swap in; the fixture's own stays put. */
+static inputLike_t g_otherIn;
+static tensor_t *g_ownInput;
+
+static void restoreTheInput(fixture_t *f) {
+    f->x = g_ownInput;
+}
+
+static void feedTwoRows(fixture_t *f) {
+    g_ownInput = f->x;
+    f->x = makeResidentInput(&g_otherIn, (size_t[]){2, 4}, 2);
+}
+
+/* ACT 0's facts are compared before any per-wire byte count, so a B change
+ * names dims[0], not bytes. */
+void testABatchChangeExitsIdenticallyOnBothRows(void) {
+    assertKeyChangeExitsOnBothRows(
+        buildMlpModel, feedTwoRows, restoreTheInput,
+        "rematWireTableBind: key mismatch on wire ACT 0, field 'dims[0]': built 1, live 2");
+}
+
+static void feedRank3(fixture_t *f) {
+    g_ownInput = f->x;
+    f->x = makeResidentInput(&g_otherIn, (size_t[]){1, 1, 4}, 3);
+}
+
+void testARankChangeExitsIdenticallyOnBothRows(void) {
+    assertKeyChangeExitsOnBothRows(
+        buildMlpModel, feedRank3, restoreTheInput,
+        "rematWireTableBind: key mismatch on wire ACT 0, field 'rank': built 2, live 3");
+}
+
+static symInt32QConfig_t g_symQc;
+static quantization_t g_symQ;
+
+static void useSymQ(void) {
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &g_symQc, 12);
+    g_symQ = (quantization_t){.type = SYM_INT32, .qConfig = &g_symQc};
+}
+
+static void feedASymInput(fixture_t *f) {
+    useSymQ();
+    f->x->quantization = &g_symQ;
+}
+
+static void restoreTheInputDtype(fixture_t *f) {
+    f->x->quantization = &g_floatQ;
+}
+
+void testAnInputDtypeChangeExitsIdenticallyOnBothRows(void) {
+    assertKeyChangeExitsOnBothRows(
+        buildMlpModel, feedASymInput, restoreTheInputDtype,
+        "rematWireTableBind: key mismatch on wire ACT 0, field 'dtype': built 1, live 2");
+}
+
+/* The MLP with its ReLU on a template of its own, so a test can edit it. */
+static quantization_t g_reluQ;
+
+static void buildMlpWithOwnReluTemplate(fixture_t *f) {
+    buildMlpModel(f);
+    freeModel(&f->model[1], 1);
+    g_reluQ = (quantization_t){.type = FLOAT32, .qConfig = NULL};
+    f->model[1] = makeRelu(&g_reluQ);
+}
+
+/* Byte-neutral, and FLOAT32 reserved no qConfig: a write before the check
+ * would go through the slab header's NULL qConfig (remat D54). */
+static void editTheReluTemplateToSym(fixture_t *f) {
+    (void)f;
+    useSymQ();
+    g_reluQ = g_symQ;
+}
+
+static void restoreTheReluTemplate(fixture_t *f) {
+    (void)f;
+    g_reluQ = (quantization_t){.type = FLOAT32, .qConfig = NULL};
+}
+
+void testAFloatToSymTemplateEditExitsIdenticallyOnBothRows(void) {
+    assertKeyChangeExitsOnBothRows(
+        buildMlpWithOwnReluTemplate, editTheReluTemplateToSym, restoreTheReluTemplate,
+        "rematWireTableBind: key mismatch on wire ACT 2, field 'dtype': built 1, live 2");
+}
+
+static void freezeLayer(fixture_t *f, size_t i, bool frozen) {
+    f->model[i]->config->linear->frozen = frozen;
+}
+
+static void freezeLayer0(fixture_t *f) {
+    freezeLayer(f, 0, true);
+}
+
+static void thawLayer0(fixture_t *f) {
+    freezeLayer(f, 0, false);
+}
+
+/* Layer 1 (ReLU) has no parameters, so freezing layer 0 moves deepest to 2. */
+void testFreezingTheDeepestLayerExitsIdenticallyOnBothRows(void) {
+    assertKeyChangeExitsOnBothRows(
+        buildMlpModel, freezeLayer0, thawLayer0,
+        "rematWireTableBind: key mismatch on 'deepest': built 0, live 2");
+}
+
+static void freezeLayer2(fixture_t *f) {
+    freezeLayer(f, 2, true);
+}
+
+static void thawLayer2(fixture_t *f) {
+    freezeLayer(f, 2, false);
+}
+
+/* Above deepest: deepest stays 0, the frozen[] key catches it. */
+void testFreezingALayerAboveDeepestExitsIdenticallyOnBothRows(void) {
+    assertKeyChangeExitsOnBothRows(
+        buildMlpModel, freezeLayer2, thawLayer2,
+        "rematWireTableBind: key mismatch on 'frozen[2]': built 0, live 1");
+}
+
+static layer_t *g_swappedOut;
+
+/* Same shape, same dtype: only the type changes. */
+static void swapTheReluForASoftmax(fixture_t *f) {
+    g_swappedOut = f->model[1];
+    f->model[1] = makeSoftmax();
+}
+
+static void swapTheReluBack(fixture_t *f) {
+    freeModel(&f->model[1], 1);
+    f->model[1] = g_swappedOut;
+}
+
+void testALayerTypeSwapExitsIdenticallyOnBothRows(void) {
+    assertKeyChangeExitsOnBothRows(
+        buildMlpModel, swapTheReluForASoftmax, swapTheReluBack,
+        "rematWireTableBind: key mismatch on 'layerType[1]': built 1, live 6");
+}
+
+/* A per-tensor BFP Quantization (ACT 1, expCapacity 1) before a trained
+ * Linear 8 -> 2. */
+static void buildBfpQuantModel(fixture_t *f) {
+    memset(f, 0, sizeof *f);
+    initBfpQConfigInto(8, 8, HALF_AWAY, f->bfpExponent, &f->bfpQc);
+    f->bfpQ = (quantization_t){.type = BFP, .qConfig = &f->bfpQc};
+    f->model[0] = makeQuant(&f->bfpQ, &g_floatQ);
+    f->model[1] = makeLinear(8, 2, false);
+    f->n = 2;
+    f->lt = MSE;
+    f->x = makeResidentInput(&f->in, (size_t[]){1, 8}, 2);
+}
+
+static uint8_t g_groupedExponents[4];
+
+/* 4 groups of 2 over ACT 1's 8 elements: past the slab's one exponent byte. */
+static void groupTheBfpTemplate(fixture_t *f) {
+    initBfpQConfigGroupedInto(8, 8, HALF_AWAY, 4, 2, g_groupedExponents, &f->bfpQc);
+}
+
+static void ungroupTheBfpTemplate(fixture_t *f) {
+    initBfpQConfigInto(8, 8, HALF_AWAY, f->bfpExponent, &f->bfpQc);
+}
+
+void testAGroupingPastTheCapacityExitsIdenticallyOnBothRows(void) {
+    assertKeyChangeExitsOnBothRows(buildBfpQuantModel, groupTheBfpTemplate, ungroupTheBfpTemplate,
+                                   "rematWireTableBind: key mismatch on wire ACT 1, field "
+                                   "'numGroups': 4 groups exceed expCapacity 1");
+}
+
+/* rematSchedulerDeinit zeroes the struct, so a zeroed and a deinitialised
+ * scheduler are one defined state. The driver's rematCheckNumWires guard runs
+ * before rematBegin, so its text is the one a caller sees. An automatic
+ * struct no init ever touched is indeterminate: undefined, not pinned. */
+#define NOT_INITIALISED                                                                            \
+    "rematCheckNumWires: scheduler not initialised (never initialised, or its init failed "        \
+    "before the plan was built)"
+
+void testAZeroedOrDeinitialisedSchedulerExitsNamingIt(void) {
+    fixture_t f;
+    buildMlpModel(&f);
+    makeLabel(2);
+    rematScheduler_t zeroed = {0};
+    rematScheduler_t arena = initArena(&f, NULL);
+    rematSchedulerDeinit(&arena);
+    rematScheduler_t heap = initHeap(&f, NULL);
+    rematSchedulerDeinit(&heap);
+    ASSERT_EXITS_WITH_OUTPUT(1, NOT_INITIALISED, trainOn(&f, &zeroed));
+    ASSERT_EXITS_WITH_OUTPUT(1, NOT_INITIALISED, trainOn(&f, &arena));
+    ASSERT_EXITS_WITH_OUTPUT(1, NOT_INITIALISED, trainOn(&f, &heap));
+    freeModel(f.model, f.n);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testASwappedStepExitsOnBothRows);
@@ -425,5 +638,14 @@ int main(void) {
     RUN_TEST(testARowThatEatsTheLastStepExitsOnBothRows);
     RUN_TEST(testARowThatReentersBeginExitsOnBothRows);
     RUN_TEST(testWireBindInheritedGradChecksBeforeWrite);
+    RUN_TEST(testABatchChangeExitsIdenticallyOnBothRows);
+    RUN_TEST(testARankChangeExitsIdenticallyOnBothRows);
+    RUN_TEST(testAnInputDtypeChangeExitsIdenticallyOnBothRows);
+    RUN_TEST(testAFloatToSymTemplateEditExitsIdenticallyOnBothRows);
+    RUN_TEST(testFreezingTheDeepestLayerExitsIdenticallyOnBothRows);
+    RUN_TEST(testFreezingALayerAboveDeepestExitsIdenticallyOnBothRows);
+    RUN_TEST(testALayerTypeSwapExitsIdenticallyOnBothRows);
+    RUN_TEST(testAGroupingPastTheCapacityExitsIdenticallyOnBothRows);
+    RUN_TEST(testAZeroedOrDeinitialisedSchedulerExitsNamingIt);
     return UNITY_END();
 }

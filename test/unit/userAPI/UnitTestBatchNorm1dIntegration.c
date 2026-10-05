@@ -849,8 +849,9 @@ static size_t fourSamples(void) {
 static float e2eOutputs[2][4];
 static size_t e2eCalls;
 static inferenceStats_t *recordingInference(layer_t **model, size_t n, tensor_t *in,
-                                            tensor_t *label, lossFuncType_t f, reduction_t r) {
-    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r);
+                                            tensor_t *label, lossFuncType_t f, reduction_t r,
+                                            const trainingCall_t *call) {
+    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r, call);
     if (e2eCalls < 2) {
         memcpy(e2eOutputs[e2eCalls], s->output->data, 4 * sizeof(float));
     }
@@ -942,13 +943,15 @@ void testTrainingRunTrainsAndEvaluatesUntrackedRank2BatchNorm(void) {
  * rejected BEFORE the first inferenceFn call (the tripwire would exit 2);
  * at m = 2 it evaluates. */
 static inferenceStats_t *inferenceMustNotRun(layer_t **model, size_t n, tensor_t *in,
-                                             tensor_t *label, lossFuncType_t f, reduction_t r) {
+                                             tensor_t *label, lossFuncType_t f, reduction_t r,
+                                             const trainingCall_t *call) {
     (void)model;
     (void)n;
     (void)in;
     (void)label;
     (void)f;
     (void)r;
+    (void)call;
     _exit(2);
 }
 

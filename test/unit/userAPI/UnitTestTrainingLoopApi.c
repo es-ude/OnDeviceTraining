@@ -195,10 +195,10 @@ void testEvaluationBatch_ReturnsAverageLoss() {
     batchView_t in0View, lb0View, in1View, lb1View;
     inferenceStats_t *stats0 =
         inferenceWithLoss(model, 1, batchViewOf(&in0View, input0), batchViewOf(&lb0View, label0),
-                          MSE, REDUCTION_MEAN);
+                          MSE, REDUCTION_MEAN, NULL);
     inferenceStats_t *stats1 =
         inferenceWithLoss(model, 1, batchViewOf(&in1View, input1), batchViewOf(&lb1View, label1),
-                          MSE, REDUCTION_MEAN);
+                          MSE, REDUCTION_MEAN, NULL);
     float expectedSumLoss = stats0->loss + stats1->loss;
     freeInferenceStats(stats0);
     freeInferenceStats(stats1);
@@ -1324,8 +1324,10 @@ void testInferenceWithLoss_PropagatesForwardReductionSum() {
     tensor_t *label = buildFloatTensor2D(1, 2, (float[]){1.f, 0.f}, 2);
 
     /* SUM: (5-1)² + (1-0)² = 17. MEAN: 17 / 2 = 8.5. Different by construction. */
-    inferenceStats_t *sumStats = inferenceWithLoss(model, 1, input, label, MSE, REDUCTION_SUM);
-    inferenceStats_t *meanStats = inferenceWithLoss(model, 1, input, label, MSE, REDUCTION_MEAN);
+    inferenceStats_t *sumStats =
+        inferenceWithLoss(model, 1, input, label, MSE, REDUCTION_SUM, NULL);
+    inferenceStats_t *meanStats =
+        inferenceWithLoss(model, 1, input, label, MSE, REDUCTION_MEAN, NULL);
 
     float capturedSum = sumStats->loss;
     float capturedMean = meanStats->loss;
@@ -2641,7 +2643,9 @@ static tensor_t *buildBfpTwoClassOutput(void) {
 static inferenceStats_t *bfpOutputWireInference(layer_t **model, size_t numberOfLayers,
                                                 tensor_t *input, tensor_t *label,
                                                 lossFuncType_t funcType,
-                                                reduction_t forwardReduction) {
+                                                reduction_t forwardReduction,
+                                                const trainingCall_t *call) {
+    (void)call;
     (void)model;
     (void)numberOfLayers;
     (void)input;
@@ -2752,7 +2756,8 @@ static trainingStats_t *probeGrads(layer_t **model, size_t modelSize, lossConfig
 /* Echoes the label as a [1, C] output row, so predicted == target. */
 static inferenceStats_t *probeInference(layer_t **model, size_t numberOfLayers, tensor_t *input,
                                         tensor_t *label, lossFuncType_t funcType,
-                                        reduction_t forwardReduction) {
+                                        reduction_t forwardReduction, const trainingCall_t *call) {
+    (void)call;
     (void)model;
     (void)numberOfLayers;
     (void)funcType;

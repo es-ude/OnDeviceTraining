@@ -103,11 +103,14 @@ typedef trainingStats_t *(*calculateGradsFn_t)(layer_t **model, size_t modelSize
  *  at m > 1 they point into the loop's gather buffers, overwritten by the
  *  next chunk. The function returns an output whose leading dimension is
  *  rows and whose per-row block holds the C class scores (#468), and the
- *  loss reduced over the rows per forwardReduction. */
+ *  loss reduced over the rows per forwardReduction. The evaluation loop
+ *  passes call == NULL until #4 PR3; a function that routes through
+ *  inferenceWithLoss forwards call. */
 typedef inferenceStats_t *(*inferenceWithLossFn_t)(layer_t **model, size_t numberOfLayers,
                                                    tensor_t *input, tensor_t *label,
                                                    lossFuncType_t funcType,
-                                                   reduction_t forwardReduction);
+                                                   reduction_t forwardReduction,
+                                                   const trainingCall_t *call);
 
 /*! Per-epoch facts handed to the epoch callback. batchSize, parameterUpdates
  * and learningRate are captured BEFORE the epoch trains — they are the values

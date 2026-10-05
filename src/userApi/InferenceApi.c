@@ -232,7 +232,13 @@ void freeInferenceStats(inferenceStats_t *inferenceStats) {
 
 inferenceStats_t *inferenceWithLoss(layer_t **model, size_t numberOfLayers, tensor_t *input,
                                     tensor_t *label, lossFuncType_t funcType,
-                                    reduction_t forwardReduction) {
+                                    reduction_t forwardReduction, const trainingCall_t *call) {
+    if (call != NULL && call->remat != NULL) {
+        /* Ignoring the caller's scheduler would hide that eval did not run on
+         * it; #4 PR3 adds that path. */
+        PRINT_ERROR("inferenceWithLoss: remat scheduler not supported before PR3");
+        exit(1);
+    }
     tensor_t outputNext;
     initBufferInput(input, &outputNext);
 

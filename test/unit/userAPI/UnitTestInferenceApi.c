@@ -1,5 +1,6 @@
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "ArithmeticType.h"
 #include "BorrowedLayer.h"
@@ -16,6 +17,7 @@
 #include "Quantization.h"
 #include "QuantizationApi.h"
 #include "ReluApi.h"
+#include "RematScheduler.h"
 #include "StorageApi.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
@@ -191,7 +193,7 @@ void testInferenceWithLossLinearReluFloat() {
     /* Run inferenceWithLoss. inferenceStats owns its `output` tensor; its
      * matching free is freeInferenceStats. */
     inferenceStats_t *inferenceStats =
-        inferenceWithLoss(model, 2, input, label0, MSE, REDUCTION_MEAN);
+        inferenceWithLoss(model, 2, input, label0, MSE, REDUCTION_MEAN, NULL);
 
     /* CAPTURE. */
     float capturedLoss = inferenceStats->loss;
@@ -253,7 +255,7 @@ void testInferenceWithLossRejectsRank1LabelAgainstBatchedOutput(void) {
     size_t modelSize = 2;
 
     ASSERT_EXITS_WITH_FAILURE(
-        (void)inferenceWithLoss(model, modelSize, input, label, MSE, REDUCTION_MEAN));
+        (void)inferenceWithLoss(model, modelSize, input, label, MSE, REDUCTION_MEAN, NULL));
 
     freeReluLayer(relu);
     freeLinearLayer(linear);
@@ -672,14 +674,16 @@ void testInferenceWithLossFactoryMaxPoolGrowsToBatch2(void) {
     tensor_t *label2 =
         buildFloatTensor3DInf(2, 2, 2, (float[]){0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f});
 
-    inferenceStats_t *stats = inferenceWithLoss(model, 1, batch1, label1, MSE, REDUCTION_MEAN);
+    inferenceStats_t *stats =
+        inferenceWithLoss(model, 1, batch1, label1, MSE, REDUCTION_MEAN, NULL);
 
     /* CAPTURE. */
     float capturedLoss = stats->loss;
     freeInferenceStats(stats);
 
     /* #152 PR3b: batch 2 grows the argmax and scores both rows. */
-    inferenceStats_t *stats2 = inferenceWithLoss(model, 1, batch2, label2, MSE, REDUCTION_MEAN);
+    inferenceStats_t *stats2 =
+        inferenceWithLoss(model, 1, batch2, label2, MSE, REDUCTION_MEAN, NULL);
     float capturedLoss2 = stats2->loss;
     freeInferenceStats(stats2);
 
@@ -777,6 +781,77 @@ void testInferenceBatchedAddsBatchAxisToNaturalSamples(void) {
 void setUp() {}
 void tearDown() {}
 
+/* ---- the call struct on the eval level (#4 PR2, remat D19) --------------- */
+
+typedef struct evalFixture {
+    quantization_t *q;
+    layer_t *model[2];
+    tensor_t *input;
+    tensor_t *label;
+} evalFixture_t;
+
+/* testInferenceWithLossLinearReluFloat's model and sample: loss 2665. */
+static void buildEvalFixture(evalFixture_t *f) {
+    f->q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, f->q);
+    f->model[0] =
+        linearLayerInit(&(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE}, &lq);
+    layerLoadWeights(f->model[0], (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, 6.f}, (float[]){-1.f, 3.f});
+    f->model[1] = reluLayerInit(&lq);
+    f->input = buildFloatTensor2DInf(1, 3, (float[]){0.f, 1.f, 2.f});
+    f->label = buildFloatTensor2DInf(1, 2, (float[]){59.f, -23.f});
+}
+
+static void freeEvalFixture(evalFixture_t *f) {
+    freeTensor(f->label);
+    freeTensor(f->input);
+    freeReluLayer(f->model[1]);
+    freeLinearLayer(f->model[0]);
+    freeQuantization(f->q);
+}
+
+/* Until #4 PR3 runs eval on a caller's scheduler, one passed here would be
+ * ignored without a word, so the call exits first. #4 PR3 turns this test
+ * into its positive path on the same initialised instance. */
+void testInferenceWithLossRejectsASchedulerUntilPR3(void) {
+    evalFixture_t f;
+    buildEvalFixture(&f);
+    rematScheduler_t s;
+    TEST_ASSERT_TRUE(rematHeapInit(&s, f.model, 2, defaultLossConfig(MSE), f.input, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "inferenceWithLoss: remat scheduler not supported before PR3",
+                             (void)inferenceWithLoss(f.model, 2, f.input, f.label, MSE,
+                                                     REDUCTION_MEAN,
+                                                     &(trainingCall_t){.remat = &s}));
+    rematSchedulerDeinit(&s);
+    freeEvalFixture(&f);
+}
+
+/* A call without a scheduler is not an error: today's body, today's values.
+ * The death-test wrapper keeps a wrong exit from ending the binary. */
+void testInferenceWithLossTakesACallWithoutAScheduler(void) {
+    evalFixture_t f;
+    buildEvalFixture(&f);
+    ASSERT_EXITS_WITH_OUTPUT(
+        0, "",
+        freeInferenceStats(inferenceWithLoss(f.model, 2, f.input, f.label, MSE, REDUCTION_MEAN,
+                                             &(trainingCall_t){0})));
+    inferenceStats_t *viaNull =
+        inferenceWithLoss(f.model, 2, f.input, f.label, MSE, REDUCTION_MEAN, NULL);
+    inferenceStats_t *viaCall =
+        inferenceWithLoss(f.model, 2, f.input, f.label, MSE, REDUCTION_MEAN, &(trainingCall_t){0});
+    float loss[2] = {viaNull->loss, viaCall->loss};
+    float out[2][2];
+    memcpy(out[0], viaNull->output->data, sizeof out[0]);
+    memcpy(out[1], viaCall->output->data, sizeof out[1]);
+    freeInferenceStats(viaCall);
+    freeInferenceStats(viaNull);
+    freeEvalFixture(&f);
+    TEST_ASSERT_EQUAL_FLOAT(2665.f, loss[0]);
+    TEST_ASSERT_EQUAL_MEMORY(&loss[0], &loss[1], sizeof loss[0]);
+    TEST_ASSERT_EQUAL_MEMORY(out[0], out[1], sizeof out[0]);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testInferenceLinearReluFloat);
@@ -796,5 +871,7 @@ int main(void) {
     RUN_TEST(testInferenceWithLossFactoryMaxPoolGrowsToBatch2);
 
     RUN_TEST(testInferenceBatchedAddsBatchAxisToNaturalSamples);
+    RUN_TEST(testInferenceWithLossRejectsASchedulerUntilPR3);
+    RUN_TEST(testInferenceWithLossTakesACallWithoutAScheduler);
     return UNITY_END();
 }

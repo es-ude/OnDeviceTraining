@@ -391,35 +391,40 @@ static void metricsWith(inferenceWithLossFn_t fn, size_t m) {
 }
 
 static inferenceStats_t *symOutputInference(layer_t **model, size_t n, tensor_t *in,
-                                            tensor_t *label, lossFuncType_t f, reduction_t r) {
-    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r);
+                                            tensor_t *label, lossFuncType_t f, reduction_t r,
+                                            const trainingCall_t *call) {
+    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r, call);
     s->output->quantization->type = SYM_INT32;
     return s;
 }
 static inferenceStats_t *extraRowInference(layer_t **model, size_t n, tensor_t *in, tensor_t *label,
-                                           lossFuncType_t f, reduction_t r) {
-    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r);
+                                           lossFuncType_t f, reduction_t r,
+                                           const trainingCall_t *call) {
+    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r, call);
     s->output->shape->dimensions[0] += 1;
     return s;
 }
 /* Same element count, rows moved out of axis 0: [1, rows * C]. */
 static inferenceStats_t *flatRowInference(layer_t **model, size_t n, tensor_t *in, tensor_t *label,
-                                          lossFuncType_t f, reduction_t r) {
-    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r);
+                                          lossFuncType_t f, reduction_t r,
+                                          const trainingCall_t *call) {
+    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r, call);
     size_t *d = s->output->shape->dimensions;
     d[1] *= d[0];
     d[0] = 1;
     return s;
 }
 static inferenceStats_t *shortRowInference(layer_t **model, size_t n, tensor_t *in, tensor_t *label,
-                                           lossFuncType_t f, reduction_t r) {
-    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r);
+                                           lossFuncType_t f, reduction_t r,
+                                           const trainingCall_t *call) {
+    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r, call);
     s->output->shape->dimensions[1] -= 1;
     return s;
 }
 static inferenceStats_t *swappedOrderInference(layer_t **model, size_t n, tensor_t *in,
-                                               tensor_t *label, lossFuncType_t f, reduction_t r) {
-    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r);
+                                               tensor_t *label, lossFuncType_t f, reduction_t r,
+                                               const trainingCall_t *call) {
+    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r, call);
     size_t *o = s->output->shape->orderOfDimensions;
     size_t t = o[0];
     o[0] = o[1];
@@ -427,26 +432,30 @@ static inferenceStats_t *swappedOrderInference(layer_t **model, size_t n, tensor
     return s;
 }
 static inferenceStats_t *nullDataInference(layer_t **model, size_t n, tensor_t *in, tensor_t *label,
-                                           lossFuncType_t f, reduction_t r) {
-    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r);
+                                           lossFuncType_t f, reduction_t r,
+                                           const trainingCall_t *call) {
+    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r, call);
     s->output->data = NULL; /* leaks in the forked child only */
     return s;
 }
 static inferenceStats_t *nullOrderInference(layer_t **model, size_t n, tensor_t *in,
-                                            tensor_t *label, lossFuncType_t f, reduction_t r) {
-    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r);
+                                            tensor_t *label, lossFuncType_t f, reduction_t r,
+                                            const trainingCall_t *call) {
+    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r, call);
     s->output->shape->orderOfDimensions = NULL; /* leaks in the forked child only */
     return s;
 }
 
 static inferenceStats_t *nullStatsInference(layer_t **model, size_t n, tensor_t *in,
-                                            tensor_t *label, lossFuncType_t f, reduction_t r) {
-    (void)inferenceWithLoss(model, n, in, label, f, r); /* leaks in the forked child only */
+                                            tensor_t *label, lossFuncType_t f, reduction_t r,
+                                            const trainingCall_t *call) {
+    (void)inferenceWithLoss(model, n, in, label, f, r, call); /* leaks in the forked child only */
     return NULL;
 }
 static inferenceStats_t *nullShapeInference(layer_t **model, size_t n, tensor_t *in,
-                                            tensor_t *label, lossFuncType_t f, reduction_t r) {
-    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r);
+                                            tensor_t *label, lossFuncType_t f, reduction_t r,
+                                            const trainingCall_t *call) {
+    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r, call);
     s->output->shape = NULL; /* leaks in the forked child only */
     return s;
 }

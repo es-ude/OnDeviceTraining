@@ -37,7 +37,7 @@ float evaluationBatch(layer_t **model, size_t modelSize, lossFuncType_t funcType
         batchView_t labelView;
         inferenceStats_t *stats = inferenceFn(
             model, modelSize, batchViewOf(&itemView, batch->samples[i]->item),
-            batchViewOf(&labelView, batch->samples[i]->label), funcType, forwardReduction);
+            batchViewOf(&labelView, batch->samples[i]->label), funcType, forwardReduction, NULL);
         totalLoss += stats->loss;
         freeInferenceStats(stats);
         freeSample(batch->samples[i]);
@@ -320,7 +320,7 @@ static float evaluateChunk(const char *caller, layer_t **model, size_t modelSize
     labelView.dimensions[0] = rows;
 
     inferenceStats_t *stats =
-        inferenceFn(model, modelSize, item, label, funcType, forwardReduction);
+        inferenceFn(model, modelSize, item, label, funcType, forwardReduction, NULL);
     requireChunkOutput(caller, stats, rows, C, chunkFirst);
     if (counts != NULL) {
         const float *out = (const float *)stats->output->data;
@@ -458,7 +458,7 @@ static float evaluateBatchInternal(layer_t **model, size_t modelSize, lossFuncTy
         batchView_t labelView;
         inferenceStats_t *stats = inferenceFn(
             model, modelSize, batchViewOf(&itemView, batch->samples[i]->item),
-            batchViewOf(&labelView, batch->samples[i]->label), funcType, forwardReduction);
+            batchViewOf(&labelView, batch->samples[i]->label), funcType, forwardReduction, NULL);
         totalLoss += stats->loss;
 
         size_t predicted = argmaxByTensor(stats->output, counts->numClasses);

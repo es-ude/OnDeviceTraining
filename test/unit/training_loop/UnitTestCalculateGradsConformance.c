@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "AsanDeath.h"
@@ -492,7 +493,8 @@ typedef enum { RUN_LEGACY, RUN_DRIVER } runner_t;
 /* One call from the same starting state: zeroed grads (they accumulate,
  * OUT_ACC), restored BN running stats, the global stream at ZOO_SEED. The
  * counting hook is installed around the call only. */
-static void captureRun(runner_t runner, zooFixture_t *f, runCapture_t *cap) {
+static void captureRun(runner_t runner, zooFixture_t *f, const trainingCall_t *call,
+                       runCapture_t *cap) {
     forEachGrad(f->model, f->n, NULL);
     bnStateIo(f, runner == RUN_LEGACY, NULL);
     cap->numEvents = 0;
@@ -507,7 +509,7 @@ static void captureRun(runner_t runner, zooFixture_t *f, runCapture_t *cap) {
                                  ? legacyCalculateGrads(f->model, f->n, f->loss, REDUCTION_MEAN,
                                                         f->x, f->y, recordingSink, &cap->trace)
                                  : tracedGrads(f->model, f->n, f->loss, REDUCTION_MEAN, f->x, f->y,
-                                               recordingSink, &cap->trace, NULL);
+                                               recordingSink, &cap->trace, call);
     odtHookSet(NULL, NULL);
     cap->seedAfter = rngGetSeed();
     cap->loss = stats->loss;
@@ -520,42 +522,58 @@ static void captureRun(runner_t runner, zooFixture_t *f, runCapture_t *cap) {
     assertInputUnchanged(&g_input, f->x);
 }
 
-static void assertSameValues(void) {
-    TEST_ASSERT_TRUE(g_legacy.values.used > 0);
-    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(&g_legacy.loss, &g_driver.loss, sizeof g_legacy.loss,
-                                     "P1: loss");
-    TEST_ASSERT_EQUAL_size_t_MESSAGE(g_legacy.values.used, g_driver.values.used,
-                                     "P1: captured byte count");
-    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(g_legacy.values.bytes, g_driver.values.bytes,
-                                     g_legacy.values.used,
-                                     "P1: output snapshot, parameter grads, BN running stats");
+/* A failure message that names the matrix cell; cell == NULL is the NULL
+ * path, whose messages stay bare. */
+static char g_message[128];
+static const char *say(const char *cell, const char *what) {
+    if (cell == NULL) {
+        return what;
+    }
+    (void)snprintf(g_message, sizeof g_message, "%s: %s", cell, what);
+    return g_message;
 }
 
-static void assertConforms(void) {
-    assertSameValues();
+static void assertSameValues(const char *cell) {
+    TEST_ASSERT_TRUE(g_legacy.values.used > 0);
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(&g_legacy.loss, &g_driver.loss, sizeof g_legacy.loss,
+                                     say(cell, "remat P1: loss"));
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(g_legacy.values.used, g_driver.values.used,
+                                     say(cell, "remat P1: captured byte count"));
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(
+        g_legacy.values.bytes, g_driver.values.bytes, g_legacy.values.used,
+        say(cell, "remat P1: output snapshot, parameter grads, BN running stats"));
+}
+
+static void assertConforms(const char *cell) {
+    assertSameValues(cell);
     TEST_ASSERT_EQUAL_HEX32_MESSAGE(g_legacy.seedAfter, g_driver.seedAfter,
-                                    "P2: the global stream after the call");
-    TEST_ASSERT_EQUAL_size_t_MESSAGE(4, g_driver.numEvents, "P3: four hook events");
-    TEST_ASSERT_EQUAL_size_t_MESSAGE(g_legacy.numEvents, g_driver.numEvents, "P3: event count");
+                                    say(cell, "remat P2: the global stream after the call"));
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(4, g_driver.numEvents,
+                                     say(cell, "remat P3: four hook events"));
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(g_legacy.numEvents, g_driver.numEvents,
+                                     say(cell, "remat P3: event count"));
     TEST_ASSERT_EQUAL_MEMORY_MESSAGE(g_legacy.events, g_driver.events,
-                                     g_driver.numEvents * sizeof(odtEvent_t), "P3: event order");
+                                     g_driver.numEvents * sizeof(odtEvent_t),
+                                     say(cell, "remat P3: event order"));
     TEST_ASSERT_EQUAL_size_t_MESSAGE(g_legacy.trace.used, g_driver.trace.used,
-                                     "P4: trace byte count");
+                                     say(cell, "remat P4: trace byte count"));
     TEST_ASSERT_EQUAL_MEMORY_MESSAGE(g_legacy.trace.bytes, g_driver.trace.bytes,
-                                     g_legacy.trace.used, "P4: trace (idx, phase, tensor)");
+                                     g_legacy.trace.used,
+                                     say(cell, "remat P4: trace (idx, phase, tensor)"));
     TEST_ASSERT_EQUAL_size_t_MESSAGE(g_legacy.memBefore, g_legacy.memAfter,
                                      "remat P5: Legacy releases everything but the stats");
-    TEST_ASSERT_EQUAL_size_t_MESSAGE(g_driver.memBefore, g_driver.memAfter,
-                                     "P5: the driver releases everything but the stats");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(
+        g_driver.memBefore, g_driver.memAfter,
+        say(cell, "remat P5: the driver releases everything but the stats"));
 }
 
 static void assertNullPathMatchesLegacy(void (*build)(zooFixture_t *)) {
     zooFixture_t f;
     build(&f);
-    captureRun(RUN_LEGACY, &f, &g_legacy);
-    captureRun(RUN_DRIVER, &f, &g_driver);
+    captureRun(RUN_LEGACY, &f, NULL, &g_legacy);
+    captureRun(RUN_DRIVER, &f, NULL, &g_driver);
     freeZoo(&f);
-    assertConforms();
+    assertConforms(NULL);
 }
 
 static trainingStats_t *runOnce(runner_t runner, zooFixture_t *f) {
@@ -588,7 +606,7 @@ static void assertTwoCallsMatchLegacy(void (*build)(zooFixture_t *)) {
     captureTwoCalls(RUN_LEGACY, &f, &g_legacy);
     captureTwoCalls(RUN_DRIVER, &f, &g_driver);
     freeZoo(&f);
-    assertSameValues();
+    assertSameValues(NULL);
     TEST_ASSERT_EQUAL_HEX32_MESSAGE(g_legacy.seedAfter, g_driver.seedAfter,
                                     "remat P2: the global stream after two calls");
 }
@@ -618,7 +636,7 @@ void testNullPathMatchesLegacyOnTheMlp(void) {
     freeTrainingStats(driver);
     forEachGrad(f.model, f.n, &g_driver.values);
     freeZoo(&f);
-    assertSameValues();
+    assertSameValues(NULL);
 }
 
 void testTracedMlpConforms(void) {
@@ -791,7 +809,7 @@ void testAMarkedInputYieldsAnUnmarkedOutputAndLeaksNothing(void) {
     buildMlp(&f);
     sparsity_t marker = {0};
     f.x->sparsity = &marker;
-    captureRun(RUN_LEGACY, &f, &g_legacy);
+    captureRun(RUN_LEGACY, &f, NULL, &g_legacy);
 
     forEachGrad(f.model, f.n, NULL);
     g_driver.values.used = 0;
@@ -809,7 +827,7 @@ void testAMarkedInputYieldsAnUnmarkedOutputAndLeaksNothing(void) {
     freeZoo(&f);
     TEST_ASSERT_FALSE_MESSAGE(outputMarked, "the output snapshot carries no sparsity marker");
     TEST_ASSERT_EQUAL_size_t_MESSAGE(before, after, "no marker is reserved, so none leaks");
-    assertSameValues();
+    assertSameValues(NULL);
 }
 
 #ifndef ODT_TEST_ASAN
@@ -885,7 +903,7 @@ void testCalculateGradsSequentialRunsOnTheCallersScheduler(void) {
     TEST_ASSERT_TRUE(after.peakLiveBytes > 0);
     TEST_ASSERT_EQUAL_size_t_MESSAGE(after.peakLiveBytes, after.observedPeakLiveBytes,
                                      "the call ran on the caller's scheduler");
-    assertSameValues();
+    assertSameValues(NULL);
 }
 
 void testTracedGradsRunsOnTheCallersScheduler(void) {
@@ -938,7 +956,211 @@ void testAZeroInitialisedCallIsTheNullScheduler(void) {
     captureValues(RUN_LEGACY, &f, NULL, &g_legacy);
     captureValues(RUN_DRIVER, &f, &(trainingCall_t){0}, &g_driver);
     freeZoo(&f);
-    assertSameValues();
+    assertSameValues(NULL);
+}
+
+/* ---- the conformance matrix: {ARENA, HEAP} x {STORE_ALL, LIVENESS} ---- */
+
+typedef struct matrixCell {
+    const char *name;
+    rematSchedulerType_t row;
+    const rematPlanSpec_t *spec;
+} matrixCell_t;
+
+#define MATRIX_CELLS 4
+static const matrixCell_t g_cells[MATRIX_CELLS] = {
+    {"arena/store-all", REMAT_ARENA, NULL},
+    {"arena/liveness", REMAT_ARENA, &g_liveness},
+    {"heap/store-all", REMAT_HEAP, NULL},
+    {"heap/liveness", REMAT_HEAP, &g_liveness},
+};
+
+/* A persistent scheduler of the cell, built from the fixture's own model and
+ * input. */
+static void initCell(rematScheduler_t *s, const matrixCell_t *cell, zooFixture_t *f) {
+    bool built = (cell->row == REMAT_ARENA)
+                     ? rematArenaInit(s, f->model, f->n, f->loss, f->x, cell->spec)
+                     : rematHeapInit(s, f->model, f->n, f->loss, f->x, cell->spec);
+    TEST_ASSERT_TRUE_MESSAGE(built, say(cell->name, "init"));
+}
+
+/* One cell's own observations; the call's remat P1-P5 and P9 land in g_driver. */
+typedef struct cellRun {
+    rematReport_t report;
+    size_t memBeforeInit;
+    size_t memAfterDeinit;
+} cellRun_t;
+
+/* A fresh fixture per cell, so every cell starts from the state Legacy saw.
+ * remat P5's call bracket starts after the init, whose blocks the caller owns, and
+ * the deinit must return them. */
+static cellRun_t captureCell(void (*build)(zooFixture_t *), const matrixCell_t *cell) {
+    zooFixture_t f;
+    build(&f);
+    captureRun(RUN_LEGACY, &f, NULL, &g_legacy);
+    cellRun_t c;
+    c.memBeforeInit = memProfileCurrentBytes();
+    rematScheduler_t s;
+    initCell(&s, cell, &f);
+    captureRun(RUN_DRIVER, &f, &(trainingCall_t){.remat = &s}, &g_driver);
+    c.report = reportOf(&s);
+    rematSchedulerDeinit(&s);
+    c.memAfterDeinit = memProfileCurrentBytes();
+    freeZoo(&f);
+    return c;
+}
+
+/* One test per fixture and row, so a failing row cannot mask the other: the
+ * poison mutation must turn both red. */
+static void assertRowMatchesLegacy(void (*build)(zooFixture_t *), rematSchedulerType_t row) {
+    for (size_t k = 0; k < MATRIX_CELLS; k++) {
+        const matrixCell_t *cell = &g_cells[k];
+        if (cell->row != row) {
+            continue;
+        }
+        cellRun_t c = captureCell(build, cell);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(cell->row, c.report.type, say(cell->name, "the cell's row"));
+        TEST_ASSERT_EQUAL_INT_MESSAGE(cell->spec == NULL ? REMAT_PLAN_STORE_ALL
+                                                         : cell->spec->policy,
+                                      c.report.policy, say(cell->name, "the cell's plan"));
+        assertConforms(cell->name);
+        TEST_ASSERT_TRUE_MESSAGE(c.report.peakLiveBytes > 0,
+                                 say(cell->name, "remat P8: a planned peak"));
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(
+            c.report.peakLiveBytes, c.report.observedPeakLiveBytes,
+            say(cell->name, "remat P8: the call ran on the cell's scheduler"));
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(
+            c.memBeforeInit, c.memAfterDeinit,
+            say(cell->name, "remat P5: the deinit returns what the init reserved"));
+    }
+}
+
+void testMlpMatchesLegacyOnArena(void) {
+    assertRowMatchesLegacy(buildMlp, REMAT_ARENA);
+}
+
+void testMlpMatchesLegacyOnHeap(void) {
+    assertRowMatchesLegacy(buildMlp, REMAT_HEAP);
+}
+
+void testHarCnnMatchesLegacyOnArena(void) {
+    assertRowMatchesLegacy(buildHarCnn, REMAT_ARENA);
+}
+
+void testHarCnnMatchesLegacyOnHeap(void) {
+    assertRowMatchesLegacy(buildHarCnn, REMAT_HEAP);
+}
+
+void testTruncatedHarMatchesLegacyOnArena(void) {
+    assertRowMatchesLegacy(buildTruncatedHar, REMAT_ARENA);
+}
+
+void testTruncatedHarMatchesLegacyOnHeap(void) {
+    assertRowMatchesLegacy(buildTruncatedHar, REMAT_HEAP);
+}
+
+void testSoftmaxMseMatchesLegacyOnArena(void) {
+    assertRowMatchesLegacy(buildSoftmaxMse, REMAT_ARENA);
+}
+
+void testSoftmaxMseMatchesLegacyOnHeap(void) {
+    assertRowMatchesLegacy(buildSoftmaxMse, REMAT_HEAP);
+}
+
+void testFrozenLayerNormMatchesLegacyOnArena(void) {
+    assertRowMatchesLegacy(buildFrozenLayerNorm, REMAT_ARENA);
+}
+
+void testFrozenLayerNormMatchesLegacyOnHeap(void) {
+    assertRowMatchesLegacy(buildFrozenLayerNorm, REMAT_HEAP);
+}
+
+void testFrozenGroupNormMatchesLegacyOnArena(void) {
+    assertRowMatchesLegacy(buildFrozenGroupNorm, REMAT_ARENA);
+}
+
+void testFrozenGroupNormMatchesLegacyOnHeap(void) {
+    assertRowMatchesLegacy(buildFrozenGroupNorm, REMAT_HEAP);
+}
+
+void testAllFrozenMatchesLegacyOnArena(void) {
+    assertRowMatchesLegacy(buildAllFrozen, REMAT_ARENA);
+}
+
+void testAllFrozenMatchesLegacyOnHeap(void) {
+    assertRowMatchesLegacy(buildAllFrozen, REMAT_HEAP);
+}
+
+void testDropoutMatchesLegacyOnArena(void) {
+    assertRowMatchesLegacy(buildDropout, REMAT_ARENA);
+}
+
+void testDropoutMatchesLegacyOnHeap(void) {
+    assertRowMatchesLegacy(buildDropout, REMAT_HEAP);
+}
+
+void testQuantSymMatchesLegacyOnArena(void) {
+    assertRowMatchesLegacy(buildQuantSym, REMAT_ARENA);
+}
+
+void testQuantSymMatchesLegacyOnHeap(void) {
+    assertRowMatchesLegacy(buildQuantSym, REMAT_HEAP);
+}
+
+void testFlattenAt0MatchesLegacyOnArena(void) {
+    assertRowMatchesLegacy(buildFlattenAt0, REMAT_ARENA);
+}
+
+void testFlattenAt0MatchesLegacyOnHeap(void) {
+    assertRowMatchesLegacy(buildFlattenAt0, REMAT_HEAP);
+}
+
+void testF1ZooMatchesLegacyOnArena(void) {
+    assertRowMatchesLegacy(buildF1Zoo, REMAT_ARENA);
+}
+
+void testF1ZooMatchesLegacyOnHeap(void) {
+    assertRowMatchesLegacy(buildF1Zoo, REMAT_HEAP);
+}
+
+void testGroupedBfpMatchesLegacyOnArena(void) {
+    assertRowMatchesLegacy(buildGroupedBfp, REMAT_ARENA);
+}
+
+void testGroupedBfpMatchesLegacyOnHeap(void) {
+    assertRowMatchesLegacy(buildGroupedBfp, REMAT_HEAP);
+}
+
+void testSingleLayerCeMatchesLegacyOnArena(void) {
+    assertRowMatchesLegacy(buildSingleLayerCe, REMAT_ARENA);
+}
+
+void testSingleLayerCeMatchesLegacyOnHeap(void) {
+    assertRowMatchesLegacy(buildSingleLayerCe, REMAT_HEAP);
+}
+
+void testCeLastLinearOnlyMatchesLegacyOnArena(void) {
+    assertRowMatchesLegacy(buildCeLastLinearOnly, REMAT_ARENA);
+}
+
+void testCeLastLinearOnlyMatchesLegacyOnHeap(void) {
+    assertRowMatchesLegacy(buildCeLastLinearOnly, REMAT_HEAP);
+}
+
+void testCeWithoutSoftmaxMatchesLegacyOnArena(void) {
+    assertRowMatchesLegacy(buildCeWithoutSoftmax, REMAT_ARENA);
+}
+
+void testCeWithoutSoftmaxMatchesLegacyOnHeap(void) {
+    assertRowMatchesLegacy(buildCeWithoutSoftmax, REMAT_HEAP);
+}
+
+void testBatchNormMatchesLegacyOnArena(void) {
+    assertRowMatchesLegacy(buildBatchNorm, REMAT_ARENA);
+}
+
+void testBatchNormMatchesLegacyOnHeap(void) {
+    assertRowMatchesLegacy(buildBatchNorm, REMAT_HEAP);
 }
 
 int main(void) {
@@ -973,5 +1195,37 @@ int main(void) {
     RUN_TEST(testTracedGradsRunsOnTheCallersScheduler);
     RUN_TEST(testTheCallersSchedulerSurvivesTheCall);
     RUN_TEST(testAZeroInitialisedCallIsTheNullScheduler);
+    RUN_TEST(testMlpMatchesLegacyOnArena);
+    RUN_TEST(testMlpMatchesLegacyOnHeap);
+    RUN_TEST(testHarCnnMatchesLegacyOnArena);
+    RUN_TEST(testHarCnnMatchesLegacyOnHeap);
+    RUN_TEST(testTruncatedHarMatchesLegacyOnArena);
+    RUN_TEST(testTruncatedHarMatchesLegacyOnHeap);
+    RUN_TEST(testSoftmaxMseMatchesLegacyOnArena);
+    RUN_TEST(testSoftmaxMseMatchesLegacyOnHeap);
+    RUN_TEST(testFrozenLayerNormMatchesLegacyOnArena);
+    RUN_TEST(testFrozenLayerNormMatchesLegacyOnHeap);
+    RUN_TEST(testFrozenGroupNormMatchesLegacyOnArena);
+    RUN_TEST(testFrozenGroupNormMatchesLegacyOnHeap);
+    RUN_TEST(testAllFrozenMatchesLegacyOnArena);
+    RUN_TEST(testAllFrozenMatchesLegacyOnHeap);
+    RUN_TEST(testDropoutMatchesLegacyOnArena);
+    RUN_TEST(testDropoutMatchesLegacyOnHeap);
+    RUN_TEST(testQuantSymMatchesLegacyOnArena);
+    RUN_TEST(testQuantSymMatchesLegacyOnHeap);
+    RUN_TEST(testFlattenAt0MatchesLegacyOnArena);
+    RUN_TEST(testFlattenAt0MatchesLegacyOnHeap);
+    RUN_TEST(testF1ZooMatchesLegacyOnArena);
+    RUN_TEST(testF1ZooMatchesLegacyOnHeap);
+    RUN_TEST(testGroupedBfpMatchesLegacyOnArena);
+    RUN_TEST(testGroupedBfpMatchesLegacyOnHeap);
+    RUN_TEST(testSingleLayerCeMatchesLegacyOnArena);
+    RUN_TEST(testSingleLayerCeMatchesLegacyOnHeap);
+    RUN_TEST(testCeLastLinearOnlyMatchesLegacyOnArena);
+    RUN_TEST(testCeLastLinearOnlyMatchesLegacyOnHeap);
+    RUN_TEST(testCeWithoutSoftmaxMatchesLegacyOnArena);
+    RUN_TEST(testCeWithoutSoftmaxMatchesLegacyOnHeap);
+    RUN_TEST(testBatchNormMatchesLegacyOnArena);
+    RUN_TEST(testBatchNormMatchesLegacyOnHeap);
     return UNITY_END();
 }

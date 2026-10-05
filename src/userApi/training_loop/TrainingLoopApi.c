@@ -647,6 +647,8 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
     size_t evalMicroBatchSize = (options != NULL && options->evalMicroBatchSize != 0)
                                     ? options->evalMicroBatchSize
                                     : microBatchSize;
+    /* Training only until #4 PR3: the evaluation calls pass NULL (remat D19). */
+    const trainingCall_t trainCall = {.remat = (options != NULL) ? options->remat : NULL};
 
     if (lrScheduler != NULL && lrScheduler->optimizer != optimizer) {
         PRINT_ERROR("trainingRun: lrScheduler is wired to a different optimizer than the one "
@@ -742,7 +744,7 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
 
         float trainLoss =
             trainingEpochDefault(model, modelSize, lossConfig, trainDataLoader, optimizer,
-                                 calculateGradsFn, forwardReduction, microBatchSize, NULL);
+                                 calculateGradsFn, forwardReduction, microBatchSize, &trainCall);
         epochStats_t evalStats = evaluateEpochInternal(
             "evalMicroBatchSize", model, modelSize, lossConfig.funcType, evalDataLoader,
             inferenceFn, NULL, numClasses, forwardReduction, evalMicroBatchSize, "trainingRun");

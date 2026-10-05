@@ -21,6 +21,7 @@
 #include "OptimizerApi.h"
 #include "QuantizationApi.h"
 #include "ReluApi.h"
+#include "RematScheduler.h"
 #include "Sgd.h"
 #include "SgdApi.h"
 #include "StorageApi.h"
@@ -2940,6 +2941,81 @@ void testTrainingEpochDefaultMeanScaleSeesLabelBatchAxis(void) {
 void setUp() {}
 void tearDown() {}
 
+/* ---- trainingRunOptions_t.remat (#4 PR2): the run passes it to training --- */
+
+typedef struct remRun {
+    trainingRunResult_t result;
+    rematReport_t report;
+} remRun_t;
+
+/* testTrainingRun_HardcodesForwardReductionMean's run (two epochs, per
+ * sample, the real driver and inferenceWithLoss), with or without a HEAP
+ * scheduler in the options. The scheduler is keyed to the [1, 2] batch view
+ * the per-sample path hands the driver. */
+static remRun_t runTwoEpochs(bool withScheduler) {
+    tensor_t *wParam = buildFloatTensor2D(2, 2, (float[]){1.f, 0.f, 0.f, 1.f}, 4);
+    tensor_t *wGrad = gradInitFloat(wParam, NULL);
+    parameter_t *w = parameterInit(wParam, wGrad);
+    tensor_t *bParam = buildFloatTensor2D(1, 2, (float[]){0.f, 0.f}, 2);
+    tensor_t *bGrad = gradInitFloat(bParam, NULL);
+    parameter_t *b = parameterInit(bParam, bGrad);
+    quantization_t testQ;
+    initFloat32Quantization(&testQ);
+    layer_t *linear = buildBorrowedLinearLayer(w, b, &testQ);
+    layer_t *model[] = {linear};
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    initEpochDataset();
+    dataLoader_t *trainDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *evalDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+    lossConfig_t cfg = defaultLossConfig(MSE);
+
+    remRun_t run = {0};
+    rematScheduler_t s;
+    if (withScheduler) {
+        batchView_t view;
+        TEST_ASSERT_TRUE(rematHeapInit(&s, model, 1, cfg, batchViewOf(&view, epochItems[0]), NULL));
+    }
+    run.result =
+        trainingRun(model, 1, cfg, trainDl, evalDl, sgd, 2, calculateGradsSequential,
+                    inferenceWithLoss, &(trainingRunOptions_t){.remat = withScheduler ? &s : NULL});
+    if (withScheduler) {
+        rematSchedulerReport(&s, &run.report);
+        rematSchedulerDeinit(&s);
+    }
+
+    freeOptim(sgd);
+    freeQuantization(momentumQ);
+    freeDataLoader(evalDl);
+    freeDataLoader(trainDl);
+    freeLinearLayerShellOnly(linear);
+    freeEpochDataset();
+    return run;
+}
+
+/* The last training call ran on the options' scheduler (the peak observable
+ * sees only the last bind; trainingRun builds one call from the options and
+ * hands every training call that same call), evaluation completes through
+ * the real inferenceWithLoss (it gets no scheduler before #4 PR3), and the
+ * losses equal a run without one: STORE_ALL HEAP is today's values. */
+void testTrainingRunTrainsOnTheOptionsScheduler(void) {
+    remRun_t plain = runTwoEpochs(false);
+    remRun_t onScheduler = runTwoEpochs(true);
+    TEST_ASSERT_EQUAL_size_t(2, onScheduler.result.epochsCompleted);
+    TEST_ASSERT_TRUE(onScheduler.report.peakLiveBytes > 0);
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(onScheduler.report.peakLiveBytes,
+                                     onScheduler.report.observedPeakLiveBytes,
+                                     "trainingRun did not train on options->remat");
+    TEST_ASSERT_EQUAL_MEMORY(&plain.result.finalTrainLoss, &onScheduler.result.finalTrainLoss,
+                             sizeof(float));
+    TEST_ASSERT_EQUAL_MEMORY(&plain.result.finalEvalStats.loss,
+                             &onScheduler.result.finalEvalStats.loss, sizeof(float));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testTrainingBatchDefaultHandsCalculateGradsBatchAxisViews);
@@ -2988,5 +3064,6 @@ int main(void) {
     RUN_TEST(testTrainingRun_StopsOnNonFiniteLossWhenRequested);
     RUN_TEST(testTrainingRun_StopOnNonFiniteLoss_LastEpochStillCountsAsCompleted);
     RUN_TEST(testTrainingRun_StopOnNonFiniteLoss_DoesNotStepSchedulersOnTheStoppingEpoch);
+    RUN_TEST(testTrainingRunTrainsOnTheOptionsScheduler);
     return UNITY_END();
 }

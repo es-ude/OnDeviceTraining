@@ -150,6 +150,17 @@ typedef struct trainingRunOptions {
                                     buffers hold m_eval rows even when the eval set is smaller.
                                     An untracked BatchNorm1d's eval output depends on its chunk
                                     mates (deterministic: the eval loader is never reshuffled). */
+    rematScheduler_t *remat;    /* NULLable; NULL keeps a fresh scheduler per training call
+                                    (remat D30). Otherwise caller-initialised (rematHeapInit /
+                                    rematArenaInit) and caller-owned: trainingRun borrows it for
+                                    every training call and never tears it down; the caller
+                                    deinits it after the run. Its key must match the input of
+                                    every training call -- [1, ...sampleShape] at microBatchSize 1,
+                                    [m, ...sampleShape] at m > 1 -- so every training sample must
+                                    have the one sampleShape it was keyed to: the first call
+                                    whose input differs exits naming the mismatch, and a zeroed
+                                    or deinitialised one exits at the first call.
+                                    Training only: evaluation runs without it until #4 PR3. */
 } trainingRunOptions_t;
 
 void freeTrainingStats(trainingStats_t *trainingStats);

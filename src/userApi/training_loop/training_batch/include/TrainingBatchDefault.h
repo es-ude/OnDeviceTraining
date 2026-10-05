@@ -23,9 +23,13 @@
  *  Frees every sample_t it consumes.
  *  Returns the per-sample mean loss for REDUCTION_MEAN (chunk losses weighted
  *  by their m rows, divided by batch->size) and the plain sum for SUM.
- *  See docs/conventions/data-shape.md, "Who adds the batch axis". */
+ *  See docs/conventions/data-shape.md, "Who adds the batch axis".
+ *  call (NULLable) goes to every calculateGradsFn call unchanged; a scheduler
+ *  in call->remat must be keyed to the input those calls receive: [1, ...]
+ *  at m == 1, [m, ...] at m > 1. */
 float trainingBatchDefault(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
                            batch_t *batch, calculateGradsFn_t calculateGradsFn,
-                           reduction_t forwardReduction, size_t microBatchSize);
+                           reduction_t forwardReduction, size_t microBatchSize,
+                           const trainingCall_t *call);
 
 #endif // TRAINING_BATCH_DEFAULT_H

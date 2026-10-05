@@ -34,6 +34,7 @@
 #include "QuantizationApi.h"
 #include "RNG.h"
 #include "ReluApi.h"
+#include "RematScheduler.h"
 #include "SgdApi.h"
 #include "SoftmaxApi.h"
 #include "StorageApi.h"
@@ -50,15 +51,17 @@
  * chunk into two [m, ...] tensors. Compile-time pin of the trailing knob. */
 _Static_assert(_Generic(&trainingBatchDefault,
                    float (*)(layer_t **, size_t, lossConfig_t, batch_t *, calculateGradsFn_t,
-                             reduction_t, size_t): 1,
+                             reduction_t, size_t, const trainingCall_t *): 1,
                    default: 0),
-               "trainingBatchDefault must take a trailing size_t microBatchSize (#152)");
+               "trainingBatchDefault must take size_t microBatchSize (#152), then a trailing "
+               "const trainingCall_t *call (#4)");
 
 _Static_assert(_Generic(&trainingEpochDefault,
                    float (*)(layer_t **, size_t, lossConfig_t, dataLoader_t *, optimizer_t *,
-                             calculateGradsFn_t, reduction_t, size_t): 1,
+                             calculateGradsFn_t, reduction_t, size_t, const trainingCall_t *): 1,
                    default: 0),
-               "trainingEpochDefault must take a trailing size_t microBatchSize (#152)");
+               "trainingEpochDefault must take size_t microBatchSize (#152), then a trailing "
+               "const trainingCall_t *call (#4)");
 
 _Static_assert(_Generic(((trainingRunOptions_t){0}).microBatchSize, size_t: 1, default: 0),
                "trainingRunOptions_t must carry a size_t microBatchSize (#152)");
@@ -287,7 +290,7 @@ void testStackedChunkWalkCallsOncePerChunkWithMRows(void) {
     resetRecording();
     batch_t *batch = buildBatch(bItems, bLabels, B_N);
     trainingBatchDefault(model, B_SIZE, defaultLossConfig(MSE), batch, recordingGrads,
-                         REDUCTION_MEAN, 4);
+                         REDUCTION_MEAN, 4, NULL);
     freeBatch(batch);
     size_t calls = g_recCalls;
     size_t itemRows[2] = {g_recItemRows[0], g_recItemRows[1]};
@@ -338,7 +341,7 @@ void testMicroBatchZeroBehavesExactlyLikeOne(void) {
         resetRecording();
         batch_t *batch = buildBatch(bItems, bLabels, B_N);
         loss[k] = trainingBatchDefault(model, B_SIZE, defaultLossConfig(MSE), batch, recordingGrads,
-                                       REDUCTION_MEAN, ms[k]);
+                                       REDUCTION_MEAN, ms[k], NULL);
         freeBatch(batch);
         calls[k] = g_recCalls;
         rows[k] = g_recItemRows[0];
@@ -372,11 +375,11 @@ void testStackedLossIsRowWeightedForMeanAndPlainForSum(void) {
     for (size_t k = 0; k < 2; k++) {
         batch_t *batch = buildBatch(bItems, bLabels, B_N);
         mean[k] = trainingBatchDefault(model, B_SIZE, defaultLossConfig(MSE), batch,
-                                       calculateGradsSequential, REDUCTION_MEAN, ms[k]);
+                                       calculateGradsSequential, REDUCTION_MEAN, ms[k], NULL);
         freeBatch(batch);
         batch = buildBatch(bItems, bLabels, B_N);
         sum[k] = trainingBatchDefault(model, B_SIZE, defaultLossConfig(MSE), batch,
-                                      calculateGradsSequential, REDUCTION_SUM, ms[k]);
+                                      calculateGradsSequential, REDUCTION_SUM, ms[k], NULL);
         freeBatch(batch);
     }
 
@@ -418,12 +421,14 @@ void testStackedBatchReturnsItsGatherBuffers(void) {
     lossConfig_t cfg = defaultLossConfig(CROSS_ENTROPY);
 
     batch_t *batch = buildBatch(items, labels, 4);
-    trainingBatchDefault(model, A_SIZE, cfg, batch, calculateGradsSequential, REDUCTION_MEAN, 2);
+    trainingBatchDefault(model, A_SIZE, cfg, batch, calculateGradsSequential, REDUCTION_MEAN, 2,
+                         NULL);
     freeBatch(batch);
 
     size_t before = memProfileMark();
     batch = buildBatch(items, labels, 4);
-    trainingBatchDefault(model, A_SIZE, cfg, batch, calculateGradsSequential, REDUCTION_MEAN, 2);
+    trainingBatchDefault(model, A_SIZE, cfg, batch, calculateGradsSequential, REDUCTION_MEAN, 2,
+                         NULL);
     freeBatch(batch);
     size_t after = memProfileMark();
 
@@ -469,7 +474,7 @@ void testStackedMatchesPerSampleOnModelA(void) {
     zeroGrads(model, A_SIZE);
     batch_t *batch = buildBatch(items, labels, B_N);
     float refLoss = trainingBatchDefault(model, A_SIZE, cfg, batch, calculateGradsSequential,
-                                         REDUCTION_MEAN, 1);
+                                         REDUCTION_MEAN, 1, NULL);
     freeBatch(batch);
     size_t refCount = snapshotScaledGrads(model, A_SIZE, scale, ref, A_GRADS);
 
@@ -481,7 +486,7 @@ void testStackedMatchesPerSampleOnModelA(void) {
         zeroGrads(model, A_SIZE);
         batch = buildBatch(items, labels, B_N);
         loss[k] = trainingBatchDefault(model, A_SIZE, cfg, batch, calculateGradsSequential,
-                                       REDUCTION_MEAN, ms[k]);
+                                       REDUCTION_MEAN, ms[k], NULL);
         freeBatch(batch);
         gotCount[k] = snapshotScaledGrads(model, A_SIZE, scale, got, A_GRADS);
         mismatch[k] = firstMismatch(ref, got, A_GRADS, 1e-6f, 1e-4f);
@@ -520,7 +525,7 @@ void testStackedMatchesPerSampleOnMseModelB(void) {
     zeroGrads(model, B_SIZE);
     batch_t *batch = buildBatch(bItems, bLabels, B_N);
     float refLoss = trainingBatchDefault(model, B_SIZE, cfg, batch, calculateGradsSequential,
-                                         REDUCTION_MEAN, 1);
+                                         REDUCTION_MEAN, 1, NULL);
     freeBatch(batch);
     snapshotScaledGrads(model, B_SIZE, scale, ref, B_GRADS);
 
@@ -531,7 +536,7 @@ void testStackedMatchesPerSampleOnMseModelB(void) {
         zeroGrads(model, B_SIZE);
         batch = buildBatch(bItems, bLabels, B_N);
         loss[k] = trainingBatchDefault(model, B_SIZE, cfg, batch, calculateGradsSequential,
-                                       REDUCTION_MEAN, ms[k]);
+                                       REDUCTION_MEAN, ms[k], NULL);
         freeBatch(batch);
         snapshotScaledGrads(model, B_SIZE, scale, got, B_GRADS);
         mismatch[k] = firstMismatch(ref, got, B_GRADS, 1e-6f, 1e-4f);
@@ -610,7 +615,7 @@ void testStackedBatchMatchesPyTorchGold(void) {
         zeroGrads(model, GOLD_SIZE);
         batch_t *batch = buildBatch(items, labels, MB_GOLD_B);
         loss[k] = trainingBatchDefault(model, GOLD_SIZE, defaultLossConfig(CROSS_ENTROPY), batch,
-                                       calculateGradsSequential, REDUCTION_MEAN, ms[k]);
+                                       calculateGradsSequential, REDUCTION_MEAN, ms[k], NULL);
         freeBatch(batch);
         count[k] = snapshotScaledGrads(model, GOLD_SIZE, scale, got, GOLD_GRADS);
         mismatch[k] = firstMismatch(gold, got, GOLD_GRADS, 1e-6f, 1e-4f);
@@ -712,7 +717,7 @@ static bool messageHasNumber(const char *message, size_t value) {
 static void trainModelBBatchOrDie(layer_t **model, size_t batchSize, size_t microBatchSize) {
     batch_t *batch = buildBatch(bItems, bLabels, batchSize);
     trainingBatchDefault(model, B_SIZE, defaultLossConfig(MSE), batch, calculateGradsSequential,
-                         REDUCTION_MEAN, microBatchSize);
+                         REDUCTION_MEAN, microBatchSize, NULL);
 }
 
 void testTrainingBatchDefaultRejectsBatchNotDivisibleByMicroBatch(void) {
@@ -746,7 +751,7 @@ void testTrainingBatchDefaultRejectsBatchNotDivisibleByMicroBatch(void) {
 static void trainEmptyBatchOrDie(layer_t **model, size_t microBatchSize) {
     batch_t empty = {.samples = NULL, .size = 0};
     trainingBatchDefault(model, B_SIZE, defaultLossConfig(MSE), &empty, calculateGradsSequential,
-                         REDUCTION_MEAN, microBatchSize);
+                         REDUCTION_MEAN, microBatchSize, NULL);
 }
 
 void testStackedRejectsEmptyBatch(void) {
@@ -770,7 +775,7 @@ static void trainOneSampleClaimingMRowsOrDie(layer_t **model, sample_t *only, si
     sample_t *samples[1] = {only};
     batch_t batch = {.samples = samples, .size = m};
     trainingBatchDefault(model, B_SIZE, defaultLossConfig(MSE), &batch, calculateGradsSequential,
-                         REDUCTION_MEAN, m);
+                         REDUCTION_MEAN, m, NULL);
 }
 
 void testStackedGatherSizeOverflowFailsFast(void) {
@@ -803,7 +808,7 @@ void testStackedGatherSizeOverflowFailsFast(void) {
 static void trainTwoSamplesOrDie(layer_t **model, tensor_t **items, tensor_t **labels) {
     batch_t *batch = buildBatch(items, labels, 2);
     trainingBatchDefault(model, B_SIZE, defaultLossConfig(MSE), batch, calculateGradsSequential,
-                         REDUCTION_MEAN, 2);
+                         REDUCTION_MEAN, 2, NULL);
 }
 
 void testStackedGatherReservationFailureFailsFast(void) {
@@ -915,7 +920,7 @@ static void freeModelCData(tensor_t **items, tensor_t **labels) {
 static void trainModelCOrDie(layer_t **model, tensor_t **items, tensor_t **labels) {
     batch_t *batch = buildBatch(items, labels, C_N);
     trainingBatchDefault(model, C_SIZE, defaultLossConfig(MSE), batch, calculateGradsSequential,
-                         REDUCTION_MEAN, 2);
+                         REDUCTION_MEAN, 2, NULL);
 }
 
 /* Runs one death check with sample `bad`'s item (or label) replaced. */
@@ -1060,7 +1065,7 @@ void testStackedRejectsChunkDifferingFromSampleZero(void) {
 static void trainStackedMseOrDie(layer_t **model, size_t modelSize) {
     batch_t *batch = buildBatch(bItems, bLabels, 4);
     trainingBatchDefault(model, modelSize, defaultLossConfig(MSE), batch, calculateGradsSequential,
-                         REDUCTION_MEAN, 2);
+                         REDUCTION_MEAN, 2, NULL);
 }
 
 static void assertStackedGateRejects(layer_t **model, size_t modelSize) {
@@ -1243,7 +1248,7 @@ void testStackedTrainingWithFrozenFirstLayerMatchesPerSample(void) {
         zeroGrads(model, B_SIZE);
         batch_t *batch = buildBatch(bItems, bLabels, 4);
         loss[k] = trainingBatchDefault(model, B_SIZE, defaultLossConfig(MSE), batch,
-                                       calculateGradsSequential, REDUCTION_MEAN, ms[k]);
+                                       calculateGradsSequential, REDUCTION_MEAN, ms[k], NULL);
         freeBatch(batch);
         snapshotScaledGrads(model, B_SIZE, 1.0f, k == 0 ? ref : got, 4 * B_OUT + B_OUT);
     }
@@ -1383,7 +1388,7 @@ static float runClassifierEpoch(uint16_t batchSize, size_t microBatchSize,
     dataLoader_t *dl = dataLoaderInit(getClassifierSample, getClassifierDatasetSize, batchSize,
                                       NULL, NULL, false, 0, true);
     float loss = trainingEpochDefault(model, CLS_SIZE, defaultLossConfig(CROSS_ENTROPY), dl, sgd,
-                                      calculateGradsFn, REDUCTION_MEAN, microBatchSize);
+                                      calculateGradsFn, REDUCTION_MEAN, microBatchSize, NULL);
     snapshotParams(model, CLS_SIZE, params, CLS_PARAMS);
     freeDataLoader(dl);
     freeOptim(sgd);
@@ -1402,7 +1407,7 @@ static void runEpochOnLoaderOrDie(dataLoader_t *dl, size_t microBatchSize) {
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd = buildSgd(model, momentumQ);
     trainingEpochDefault(model, CLS_SIZE, defaultLossConfig(CROSS_ENTROPY), dl, sgd,
-                         calculateGradsSequential, REDUCTION_MEAN, microBatchSize);
+                         calculateGradsSequential, REDUCTION_MEAN, microBatchSize, NULL);
 }
 
 void testTrainingEpochDefaultRejectsBatchNotDivisibleByMicroBatch(void) {
@@ -1694,6 +1699,88 @@ void testTrainingRunSmokeStackedTracksPerSample(void) {
     TEST_ASSERT_FLOAT_WITHIN(1e-4f + 1e-3f * fabsf(lastPerSample), lastPerSample, lastStacked);
 }
 
+/* ---- the call reaches the driver through the batch level (#4 PR2) --------- */
+
+/* The bind checks the key against the input the driver receives: the
+ * [1, ...] batch view at m = 1 and the [m, ...] gather view at m > 1
+ * (TrainingBatchDefault.c), never the raw sample. */
+static void initHeapForRows(rematScheduler_t *s, layer_t **model, size_t modelSize,
+                            lossConfig_t loss, tensor_t *sampleItem, size_t rows) {
+    batchView_t view;
+    tensor_t *inputLike = batchViewOf(&view, sampleItem);
+    view.dimensions[0] = rows;
+    TEST_ASSERT_TRUE(rematHeapInit(s, model, modelSize, loss, inputLike, NULL));
+}
+
+/* Each bind resets the observed peak and the call's wires raise it to the
+ * planned one; a scheduler no call reached keeps the 0 of its init. */
+static void assertRanOnTheScheduler(const rematReport_t *r) {
+    TEST_ASSERT_TRUE(r->peakLiveBytes > 0);
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(r->peakLiveBytes, r->observedPeakLiveBytes,
+                                     "the call did not reach the driver");
+}
+
+static void trainModelBOnAScheduler(size_t m, rematReport_t *out) {
+    initModelBData();
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    rngSetSeed(13u);
+    layer_t *model[B_SIZE];
+    buildModelB(model, &lq);
+    rematScheduler_t s;
+    initHeapForRows(&s, model, B_SIZE, defaultLossConfig(MSE), bItems[0], m);
+    batch_t *batch = buildBatch(bItems, bLabels, B_N);
+    trainingBatchDefault(model, B_SIZE, defaultLossConfig(MSE), batch, calculateGradsSequential,
+                         REDUCTION_MEAN, m, &(trainingCall_t){.remat = &s});
+    freeBatch(batch);
+    rematSchedulerReport(&s, out);
+    rematSchedulerDeinit(&s);
+    freeModelB(model);
+    freeQuantization(q);
+    freeModelBData();
+}
+
+void testTrainingBatchDefaultHandsTheCallToEachSample(void) {
+    rematReport_t r;
+    trainModelBOnAScheduler(1, &r);
+    assertRanOnTheScheduler(&r);
+}
+
+void testTrainingBatchDefaultHandsTheCallToEachChunk(void) {
+    rematReport_t r;
+    trainModelBOnAScheduler(4, &r);
+    assertRanOnTheScheduler(&r);
+}
+
+void testTrainingEpochDefaultHandsTheCallToItsBatches(void) {
+    initClassifierData();
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *model[CLS_SIZE];
+    buildClassifier(model, &lq);
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd = buildSgd(model, momentumQ);
+    dataLoader_t *dl = dataLoaderInit(getClassifierSample, getClassifierDatasetSize, 4, NULL, NULL,
+                                      false, 0, true);
+    rematScheduler_t s;
+    initHeapForRows(&s, model, CLS_SIZE, defaultLossConfig(CROSS_ENTROPY), clsItems[0], 1);
+    trainingEpochDefault(model, CLS_SIZE, defaultLossConfig(CROSS_ENTROPY), dl, sgd,
+                         calculateGradsSequential, REDUCTION_MEAN, 1,
+                         &(trainingCall_t){.remat = &s});
+    rematReport_t r;
+    rematSchedulerReport(&s, &r);
+    rematSchedulerDeinit(&s);
+    freeDataLoader(dl);
+    freeOptim(sgd);
+    freeQuantization(momentumQ);
+    freeClassifierShells(model);
+    freeQuantization(q);
+    freeClassifierData();
+    assertRanOnTheScheduler(&r);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testStackedChunkWalkCallsOncePerChunkWithMRows);
@@ -1737,5 +1824,8 @@ int main(void) {
     RUN_TEST(testTrainingRunNeverWalksTheScheduleAtMicroBatch1);
     RUN_TEST(testTrainingRunMicroBatchDefaultsAreIdentical);
     RUN_TEST(testTrainingRunSmokeStackedTracksPerSample);
+    RUN_TEST(testTrainingBatchDefaultHandsTheCallToEachSample);
+    RUN_TEST(testTrainingBatchDefaultHandsTheCallToEachChunk);
+    RUN_TEST(testTrainingEpochDefaultHandsTheCallToItsBatches);
     return UNITY_END();
 }

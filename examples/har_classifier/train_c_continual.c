@@ -264,11 +264,12 @@ static void absorbDomain(ppcaReplaySet_t *set, dataset_t *domainTrain) {
 static void trainEpochs(layer_t **model, optimizer_t *sgd, dataLoader_t *loader, int epochs,
                         int domain, const char *phase) {
     for (int e = 0; e < epochs; e++) {
-        float loss = trainingEpochDefault(model, MODEL_SIZE,
-                                          (lossConfig_t){.funcType = CROSS_ENTROPY,
-                                                         .backwardReduction = REDUCTION_MEAN,
-                                                         .classWeights = NULL},
-                                          loader, sgd, calculateGradsSequential, REDUCTION_MEAN, 1);
+        float loss =
+            trainingEpochDefault(model, MODEL_SIZE,
+                                 (lossConfig_t){.funcType = CROSS_ENTROPY,
+                                                .backwardReduction = REDUCTION_MEAN,
+                                                .classWeights = NULL},
+                                 loader, sgd, calculateGradsSequential, REDUCTION_MEAN, 1, NULL);
         fprintf(stdout, "[domain %d %s] epoch %d/%d train_loss=%.4f\n", domain, phase, e + 1,
                 epochs, (double)loss);
         fflush(stdout);

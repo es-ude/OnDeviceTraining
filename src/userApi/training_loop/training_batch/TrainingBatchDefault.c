@@ -16,7 +16,7 @@
  * batchViewOf (no copy, no heap), so default runs stay bit-identical. */
 static float trainingBatchPerSample(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
                                     batch_t *batch, calculateGradsFn_t calculateGradsFn,
-                                    reduction_t forwardReduction) {
+                                    reduction_t forwardReduction, const trainingCall_t *call) {
     float totalLoss = 0.0f;
 
     for (size_t i = 0; i < batch->size; i++) {
@@ -27,7 +27,7 @@ static float trainingBatchPerSample(layer_t **model, size_t modelSize, lossConfi
         trainingStats_t *stats =
             calculateGradsFn(model, modelSize, lossConfig, forwardReduction,
                              batchViewOf(&itemView, batch->samples[i]->item),
-                             batchViewOf(&labelView, batch->samples[i]->label), NULL);
+                             batchViewOf(&labelView, batch->samples[i]->label), call);
         totalLoss += stats->loss;
         freeTrainingStats(stats);
         freeSample(batch->samples[i]);
@@ -45,7 +45,8 @@ static float trainingBatchPerSample(layer_t **model, size_t modelSize, lossConfi
  * weighted by rows for MEAN (Σ chunkLoss * m), plain for SUM. */
 static float trainingBatchStacked(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
                                   batch_t *batch, calculateGradsFn_t calculateGradsFn,
-                                  reduction_t forwardReduction, size_t m) {
+                                  reduction_t forwardReduction, size_t m,
+                                  const trainingCall_t *call) {
     /* Sample 0's TENSORS (dataset-owned) stay valid for the whole call; its
      * sample_t is freed with chunk 0, so the reference is captured up front. */
     tensor_t *referenceItem = batch->samples[0]->item;
@@ -82,7 +83,7 @@ static float trainingBatchStacked(layer_t **model, size_t modelSize, lossConfig_
         labelView.dimensions[0] = m;
 
         trainingStats_t *stats = calculateGradsFn(model, modelSize, lossConfig, forwardReduction,
-                                                  stackedItem, stackedLabel, NULL);
+                                                  stackedItem, stackedLabel, call);
         totalLoss += stats->loss * rowWeight;
         freeTrainingStats(stats);
         for (size_t r = 0; r < m; r++) {
@@ -97,7 +98,8 @@ static float trainingBatchStacked(layer_t **model, size_t modelSize, lossConfig_
 
 float trainingBatchDefault(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
                            batch_t *batch, calculateGradsFn_t calculateGradsFn,
-                           reduction_t forwardReduction, size_t microBatchSize) {
+                           reduction_t forwardReduction, size_t microBatchSize,
+                           const trainingCall_t *call) {
     size_t m = (microBatchSize == 0) ? 1 : microBatchSize;
     if (batch->size % m != 0) {
         PRINT_ERROR("trainingBatchDefault: batch size %zu is not divisible by microBatchSize %zu "
@@ -119,12 +121,12 @@ float trainingBatchDefault(layer_t **model, size_t modelSize, lossConfig_t lossC
     float totalLoss;
     if (m == 1) {
         totalLoss = trainingBatchPerSample(model, modelSize, lossConfig, batch, calculateGradsFn,
-                                           forwardReduction);
+                                           forwardReduction, call);
     } else {
         stackGatherRequireFloat32Model("trainingBatchDefault", "microBatchSize", model, modelSize,
                                        m, layerNonFloat32Field);
         totalLoss = trainingBatchStacked(model, modelSize, lossConfig, batch, calculateGradsFn,
-                                         forwardReduction, m);
+                                         forwardReduction, m, call);
     }
 
     if (forwardReduction == REDUCTION_MEAN) {

@@ -364,7 +364,7 @@ void testTrainingEpochDefaultStepsThroughOptimizerStep(void) {
 
     odtHookSet(recordingHook, &g_ctxToken);
     float epochLoss = trainingEpochDefault(model, 2, ceMeanLoss(), dl, optim,
-                                           calculateGradsSequential, REDUCTION_MEAN, 1);
+                                           calculateGradsSequential, REDUCTION_MEAN, 1, NULL);
     odtHookSet(NULL, NULL);
 
     size_t count = g_logCount;
@@ -425,7 +425,7 @@ void testTrainingEpochDefaultFiresOneQuadPerMicroBatchChunk(void) {
 
     odtHookSet(recordingHook, &g_ctxToken);
     float epochLoss = trainingEpochDefault(model, 2, ceMeanLoss(), dl, optim,
-                                           calculateGradsSequential, REDUCTION_MEAN, 2);
+                                           calculateGradsSequential, REDUCTION_MEAN, 2, NULL);
     odtHookSet(NULL, NULL);
 
     size_t count = g_logCount;

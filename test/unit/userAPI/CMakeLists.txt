@@ -607,6 +607,7 @@ target_link_libraries(UnitTestMicroBatchStacking PRIVATE
         TrainingEpochDefault
         TrainingBatchDefault
         CalculateGradsSequential
+        RematScheduler
         CommonLayerLibs
         LayerConfigAccess
         LinearApi

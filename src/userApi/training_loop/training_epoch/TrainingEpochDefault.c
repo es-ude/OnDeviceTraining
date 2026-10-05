@@ -15,7 +15,7 @@
 float trainingEpochDefault(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
                            dataLoader_t *dataLoader, optimizer_t *optimizer,
                            calculateGradsFn_t calculateGradsFn, reduction_t forwardReduction,
-                           size_t microBatchSize) {
+                           size_t microBatchSize, const trainingCall_t *call) {
     size_t m = (microBatchSize == 0) ? 1 : microBatchSize;
     if (dataLoader->batchSize % m != 0) {
         /* Divisibility check 3 (#152): covers direct callers; trainingRun checks
@@ -49,7 +49,7 @@ float trainingEpochDefault(layer_t **model, size_t modelSize, lossConfig_t lossC
         tensor_t *labelRef = batch->samples[0]->label;
 
         totalLoss += trainingBatchDefault(model, modelSize, lossConfig, batch, calculateGradsFn,
-                                          forwardReduction, m);
+                                          forwardReduction, m, call);
 
         if (lossConfig.backwardReduction == REDUCTION_MEAN) {
             /* Each loss family derives F from labelRef's shape itself, reading

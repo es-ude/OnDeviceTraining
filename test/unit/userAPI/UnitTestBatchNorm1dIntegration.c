@@ -403,7 +403,7 @@ static void runCadence(size_t m, float *rm, float *rv, uint64_t *nbt, float *gra
     float scale = lossFunctions[MSE].computeMeanScale(CAD_B, batchViewOf(&view, labels[0]));
     batch_t *batch = buildCadBatch(items, labels);
     (void)trainingBatchDefault(model, 2, defaultLossConfig(MSE), batch, calculateGradsSequential,
-                               REDUCTION_MEAN, m);
+                               REDUCTION_MEAN, m, NULL);
     freeBatch(batch);
     batchNorm1dConfig_t *c = model[0]->config->batchNorm1d;
     memcpy(rm, c->runningMean->data, 3 * sizeof(float));

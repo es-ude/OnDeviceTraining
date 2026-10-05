@@ -742,7 +742,7 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
 
         float trainLoss =
             trainingEpochDefault(model, modelSize, lossConfig, trainDataLoader, optimizer,
-                                 calculateGradsFn, forwardReduction, microBatchSize);
+                                 calculateGradsFn, forwardReduction, microBatchSize, NULL);
         epochStats_t evalStats = evaluateEpochInternal(
             "evalMicroBatchSize", model, modelSize, lossConfig.funcType, evalDataLoader,
             inferenceFn, NULL, numClasses, forwardReduction, evalMicroBatchSize, "trainingRun");

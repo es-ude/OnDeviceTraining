@@ -189,3 +189,46 @@ target_link_libraries(UnitTestCalculateGradsConformance PRIVATE
         odt_test_death
 )
 __register_target_as_unit_test(UnitTestCalculateGradsConformance)
+
+# Remat PR2 (#4): the driver-level deaths (tampered plans, decorator rows,
+# schedule-key mismatches), each asserted on both rows. Registered by hand like the conformance binary; a
+# binary of its own because the deaths need small models and decorator rows,
+# not the zoo or Legacy. RematPlan is listed because the tamper tests edit the
+# plan (RematPlan.h).
+add_executable(UnitTestCalculateGradsDeaths UnitTestCalculateGradsDeaths.c)
+target_link_libraries(UnitTestCalculateGradsDeaths PRIVATE
+        CalculateGradsSequential
+        unity
+        RematScheduler
+        RematPlan
+        CommonLayerLibs
+        Conv1dApi
+        LinearApi
+        ReluApi
+        SoftmaxApi
+        FlattenApi
+        Pool1dApi
+        QuantLayerApi
+        LayerNormApi
+        Kernel
+        LayerQuant
+        LayerCommon
+        LayerConfigAccess
+        ArithmeticType
+        QuantizationApi
+        Quantization
+        Rounding
+        TensorApi
+        Tensor
+        StorageApi
+        Common
+        OdtHook
+        TrainingLoopApi
+        InferenceApi
+        DataLoader
+        LossFunction
+        Distributions
+        RNG
+        odt_test_death
+)
+__register_target_as_unit_test(UnitTestCalculateGradsDeaths)

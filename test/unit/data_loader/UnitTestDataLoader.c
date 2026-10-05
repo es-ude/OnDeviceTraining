@@ -14,6 +14,24 @@
 #include "TensorApi.h"
 #include "unity.h"
 
+/* Compile-time contract (#396): the shuffle seed is exactly as wide as the
+ * canonical RNG state (rngSetSeed takes uint32_t). A wider seed type would
+ * silently drop its high bits, so seeds differing only there would alias to
+ * the same permutation. */
+_Static_assert(_Generic(((dataLoader_t *)0)->shuffleSeed, uint32_t: 1, default: 0),
+               "dataLoader_t.shuffleSeed must be uint32_t (RNG state width)");
+_Static_assert(_Generic((&initDataLoader),
+                   void (*)(dataLoader_t *, getSampleFn_t, getDatasetSizeFn_t, getBatchFn_t,
+                            uint16_t, transformFn_t, transformFn_t, bool, uint32_t, size_t *,
+                            bool): 1,
+                   default: 0),
+               "initDataLoader must take a uint32_t shuffleSeed");
+_Static_assert(_Generic((&dataLoaderInit),
+                   dataLoader_t *(*)(getSampleFn_t, getDatasetSizeFn_t, uint16_t, transformFn_t,
+                                     transformFn_t, bool, uint32_t, bool): 1,
+                   default: 0),
+               "dataLoaderInit must take a uint32_t shuffleSeed");
+
 #define PROXY_DATASET_SIZE 4
 #define PROXY_FEATURES 2
 

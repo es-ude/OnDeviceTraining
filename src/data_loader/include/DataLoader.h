@@ -25,7 +25,7 @@ struct dataLoader {
     transformFn_t targetTransform; /*!< Pointer to function to be used after each getBatch */
 
     bool shuffle;
-    uint64_t shuffleSeed;
+    uint32_t shuffleSeed;
     size_t *indices; /*!< List of indices with getDatasetSize many entries. Used for shuffling */
 
     bool reshufflePerEpoch; /*!< Opt-in: re-permute indices on each dataLoaderReshuffle() call
@@ -46,14 +46,14 @@ struct dataLoader {
  * \param transform: Pointer to function to be used once after loading the dataset
  * \param targetTransform: Pointer to function to be used for each batch
  * \param shuffle: Use shuffle, or not
- * \param shuffleSeed: Seed for shuffling for reproducability
+ * \param shuffleSeed: Seed for shuffling (reproducibility); 32-bit = RNG state width
  * \param indices: List of indices for shuffling
  * \param dropLast: If last batch cannot be filled, drop batch
  */
 void initDataLoader(dataLoader_t *dataLoader, getSampleFn_t getSample,
                     getDatasetSizeFn_t getDatasetSize, getBatchFn_t getBatch, uint16_t batchSize,
                     transformFn_t transform, transformFn_t targetTransform, bool shuffle,
-                    uint64_t shuffleSeed, size_t *indices, bool dropLast);
+                    uint32_t shuffleSeed, size_t *indices, bool dropLast);
 
 /*! Enables/disables opt-in per-epoch reshuffling (#381). Default off.
  *

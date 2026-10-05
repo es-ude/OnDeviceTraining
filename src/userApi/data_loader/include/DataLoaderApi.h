@@ -13,13 +13,13 @@
  * \param transform: Pointer to transform function to be used once after loading
  * \param targetTransform: Pointer to transform function to be used for each getBatch()
  * \param shuffle: Shuffle or not
- * \param shuffleSeed: Seed for shuffling
+ * \param shuffleSeed: Seed for shuffling; 32-bit like the RNG state (rngSetSeed)
  * \param dropLast: If last batch can't be filled, drop or not
  * \return Pointer to initialized data loader
  */
 dataLoader_t *dataLoaderInit(getSampleFn_t getSample, getDatasetSizeFn_t getDatasetSize,
                              uint16_t batchSize, transformFn_t transform,
-                             transformFn_t targetTransform, bool shuffle, uint64_t shuffleSeed,
+                             transformFn_t targetTransform, bool shuffle, uint32_t shuffleSeed,
                              bool dropLast);
 
 /*!

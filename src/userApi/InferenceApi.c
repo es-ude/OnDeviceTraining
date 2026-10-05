@@ -140,11 +140,12 @@ static void initBufferInput(tensor_t *input, tensor_t *buffer) {
          * malformed config would otherwise be re-derived into a DIFFERENT
          * geometry, which the copyTensor below rejects with a confusing
          * config-mismatch message. Geometry then comes from the same
-         * derive-from-element-count rule as the other three allocators, so all
-         * four agree by construction. The exponent VALUES are copied because
-         * they ARE the input's grid (mirrors the SYM_INT32 scale copy above);
-         * the trailing copyTensor would carry them too, but the buffer must be
-         * a valid BFP tensor on its own the moment it exists. */
+         * derive-from-element-count rule as initBufferOutput and the training
+         * wires (rematBfpWireGrouping), so all of them agree by construction.
+         * The exponent VALUES are copied because they ARE the input's grid
+         * (mirrors the SYM_INT32 scale copy above); the trailing copyTensor
+         * would carry them too, but the buffer must be a valid BFP tensor on
+         * its own the moment it exists. */
         bfpQConfig_t *currentBfpQC = currentQ->qConfig;
         validateBfpQConfigShape(currentBfpQC, numValues);
         bfpQConfig_t *bfpQC = reserveMemory(sizeof(bfpQConfig_t));

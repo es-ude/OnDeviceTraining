@@ -280,18 +280,17 @@ static size_t modelResidentParamBytes(layer_t **model, size_t modelSize) {
 }
 
 /* #380 PR3: stage 2 freezes conv1/conv2/conv3; the head Linear (model[10])
- * is the ONLY trainable layer, and it is ALSO
- * CalculateGradsSequential's backwardIndex (MODEL_SIZE-1, less 1 for the
+ * is the ONLY trainable layer, and it is ALSO the top of the driver's
+ * backward range (rematBackwardRange: MODEL_SIZE-1, less 1 for the
  * CE+Softmax combined-gradient shortcut). deepestTrainableIndex() therefore
- * equals backwardIndex: the backward loop's first (only) iteration lands
- * directly on the `i == deepest` branch, which calls layer backward with
- * gradCurr == NULL -- no second dx buffer is EVER allocated (see
- * CalculateGradsSequential.c). There is no ping-pong pair in stage 2 at all;
- * the sole live gradient buffer is the combined CE+Softmax lossGrad seed,
- * shape [NUM_CLASSES]. Reusing memInstrumentHarDxPeakBytes's "peak concurrent
- * dx pair" formula here would misreport this collapse -- that formula
- * prices in a ping-pong that, post-truncation, never happens -- so this is
- * computed directly instead of through the shared (full-model) helper. */
+ * equals that top: the one backward step is BACKWARD(deepest), which
+ * produces no dx -- no GRAD wire below the seed is EVER live under the remat
+ * wire table's lifetimes. There is no dx pair in stage 2 at all; the sole
+ * live gradient buffer is the combined CE+Softmax lossGrad seed, shape
+ * [NUM_CLASSES]. Reusing memInstrumentHarDxPeakBytes's "peak concurrent dx
+ * pair" formula here would misreport this collapse -- that formula prices in
+ * a dx pair that, post-truncation, never exists -- so this is computed
+ * directly instead of through the shared (full-model) helper. */
 static size_t dxPeakBytesFrozenHead(size_t microBatch) {
     return (size_t)NUM_CLASSES * microBatch * sizeof(float);
 }

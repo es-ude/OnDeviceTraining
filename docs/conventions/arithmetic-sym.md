@@ -140,11 +140,12 @@ only the quantization configs change; the int32 accumulator (no int64) is kept.
   knob override (e.g. `-DODT_SYM_OPERAND_QMAXBITS=8`) diverges from those gold
   fixtures, which is expected and intentional.
 
-The training loop (`CalculateGradsSequential.c`) allocates each dx-wire buffer
-from the **producing layer's declared backward config** (`backwardWireQ`: reads
-`propLossQ` storage uniformly for every layer type — Linear/Conv/pools/Relu/
-Softmax/Dropout/LayerNorm/Quantization all resolve through the same field;
-Flatten and the loss seed pass through the upstream dtype) — #221.
+The training loop's wire table (`src/userApi/training_loop/remat/RematWireTable.c`)
+configures each dx wire (GRAD) from the **producing layer's declared backward config**
+(`backwardWireQ`: reads `propLossQ` storage uniformly for every layer type —
+Linear/Conv/pools/Relu/Softmax/Dropout/LayerNorm/Quantization all resolve
+through the same field; Flatten and the loss seed pass through the upstream
+dtype) — #221.
 Uniform chains behave exactly as before. The Conv→Quant→…→MSE chain
 wiring + FLOAT32-twin convergence check is PR3.
 

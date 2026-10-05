@@ -91,11 +91,11 @@ typedef struct rematBfpGroups {
     size_t groupSize;
 } rematBfpGroups_t;
 
-/* THE BFP wire-grouping rule of every training wire (initBufferOutput, InferenceApi.c, keeps
- * a copy for the inference buffers): a template's widths are shape-agnostic, so a wire derives
- * its own grouping from its element count. groupSize 0, or == elements, is per-tensor {1, 0}
- * (the derived {1, N} would break the config grammar); otherwise groupSize must divide the
- * elements, else it exits naming the wire. */
+/* THE BFP wire-grouping rule of every training wire (InferenceApi.c's initBufferOutput and
+ * initBufferInput keep a copy for the inference buffers): a template's widths are
+ * shape-agnostic, so a wire derives its own grouping from its element count. groupSize 0,
+ * or groupSize == elements, is per-tensor {1, 0} (the derived {1, N} would break the config
+ * grammar); otherwise groupSize must divide the elements, else it exits naming the wire. */
 rematBfpGroups_t rematBfpWireGrouping(const bfpQConfig_t *tmpl, size_t elements, uint8_t kind,
                                       size_t index);
 

@@ -100,10 +100,10 @@ size_t memInstrumentHarActivationBytes(size_t microBatch,
      * backprop.
      *
      * #321: this is the forward-wire sum ONLY — NOT the true activation peak.
-     * During backprop the dx ping-pong (gradNext + gradCurr) coexists with these
-     * wires; that transient is reported separately as dx_peak_b (see
-     * memInstrumentHarDxPeakBytes), so the true concurrent wire peak is
-     * activations_b + dx_peak_b. The per-op conversion scratch executeOp
+     * During backprop the dx pair of a backward step (the wire entering it and the
+     * one it produces) coexists with these wires; that transient is reported
+     * separately as dx_peak_b (see memInstrumentHarDxPeakBytes), so the true
+     * concurrent wire peak is activations_b + dx_peak_b. The per-op conversion scratch executeOp
      * allocates is on the STACK (VLAs), already captured by stack_peak_b — it does
      * NOT under-count this heap sum.
      *
@@ -141,10 +141,11 @@ size_t memInstrumentPoolBackwardBytes(layer_t **model, size_t modelSize) {
     return total;
 }
 
-/* The dx ping-pong: at backward step i (linear=10 down to relu1=1) gradNext is
- * the dx produced by layer i+1 (the loss grad for i == 10) and gradCurr the dx
- * layer i produces; the two coexist. Peak = the pair with the largest payload
- * (FLOAT32: relu1/pool1 = 2 x 2048 x 4 = 16384 B, the pre-PR7 number). */
+/* The dx pair: at BACKWARD(i) (linear=10 down to relu1=1) slot i+1, the dx
+ * entering layer i (GRAD i+1; at i == 10 the CE seed GRAD 12, which slot 11
+ * stands in for), and slot i, the dx layer i produces (GRAD i), are both live
+ * under the STORE_ALL lifetimes (remat D30). Peak = the pair with the largest
+ * payload (FLOAT32: relu1/pool1 = 2 x 2048 x 4 = 16384 B). */
 static size_t dxPairIndexOfPeak(size_t microBatch, const harWireProfile_t dx[HAR_NUM_LAYERS]) {
     size_t best = 1, bestBytes = 0;
     for (size_t i = 1; i <= 10; i++) {
@@ -160,9 +161,10 @@ static size_t dxPairIndexOfPeak(size_t microBatch, const harWireProfile_t dx[HAR
 }
 
 size_t memInstrumentHarDxPeakBytes(size_t microBatch, const harWireProfile_t dx[HAR_NUM_LAYERS]) {
-    /* #321: the transient dx ping-pong during backprop. CalculateGradsSequential
-     * allocates gradCurr before freeing gradNext, so the two dx wires coexist with
-     * all forward wires; this is the payload of the worst concurrent pair. */
+    /* #321: the transient dx pair during backprop. Under STORE_ALL (remat D30)
+     * the dx entering BACKWARD(i) stays live until that step has produced its
+     * own dx, so the two dx wires coexist with all forward wires; this is the
+     * payload of the worst concurrent pair. */
     size_t i = dxPairIndexOfPeak(microBatch, dx);
     return wirePayload(profileAt(dx, i + 1), HAR_LAYER_DX_ELEMS_PER_SAMPLE[i + 1] * microBatch) +
            wirePayload(profileAt(dx, i), HAR_LAYER_DX_ELEMS_PER_SAMPLE[i] * microBatch);

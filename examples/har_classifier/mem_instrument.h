@@ -106,7 +106,7 @@ size_t memInstrumentHarIoBytes(size_t microBatch);
  *  - PoolBackward: the persistent INT32 MaxPool argmax-index buffers (required for
  *    the backward pass, allocated per-layer at build time). Walks the model for
  *    MAXPOOL1D layers; dtype-aware via calcBytesPerTensor.
- *  - HarDxPeak: the transient dx ping-pong — during backprop gradNext + gradCurr
+ *  - HarDxPeak: the transient dx pair — during BACKWARD(i) GRAD i+1 and GRAD i
  *    coexist with every forward wire; the worst concurrent PAIR of resolved dx
  *    wires, payload only (FLOAT32: relu1/pool1 = 2 x [16,128] = 16,384 B for
  *    HAR). Pass the MICRO-batch.

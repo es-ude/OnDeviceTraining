@@ -9,7 +9,7 @@ below is therefore softmax(x.reshape(rows, -1), dim=-1). For rank >= 3
 that is NOT PyTorch's last-axis softmax (section 4 asserts the difference).
 
 Root-cause bug (P6-1): the training loop hands every layer backward the
-layer's INPUT (layerOutputs[i]); softmax's backward arms treated that as the
+layer's INPUT (its ACT i wire); softmax's backward arms treated that as the
 softmax OUTPUT `s` and applied the Jacobian formula to raw logits. The fix
 recomputes `s` from the logits inside the backward, in ALL arms. This
 script's fixtures are therefore LOGITS.

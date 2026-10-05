@@ -1,32 +1,22 @@
 #define SOURCE_FILE "CALCULATE_GRADS_SEQUENTIAL"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
-#include "AdaptiveAvgPool1d.h"
-#include "AvgPool1d.h"
 #include "BatchNorm1d.h"
 #include "CalculateGradsSequential.h"
 #include "Common.h"
-#include "Conv1d.h"
-#include "Conv1dTransposed.h"
 #include "Dropout.h"
-#include "GroupNorm.h"
 #include "Layer.h"
 #include "LayerConfigAccess.h"
-#include "LayerNorm.h"
-#include "Linear.h"
 #include "LossFunction.h"
-#include "MaxPool1d.h"
 #include "OdtHook.h"
-#include "QuantizationLayer.h"
-#include "Relu.h"
 #include "RematCheck.h"
 #include "RematScheduler.h"
-#include "Softmax.h"
 #include "StorageApi.h"
+#include "Tensor.h"
 #include "TensorApi.h"
 #include "TraceApi.h"
 

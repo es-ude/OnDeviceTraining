@@ -11,15 +11,9 @@ target_link_libraries(CalculateGradsSequential PRIVATE
         TrainingLoopApi
         TensorApi
         Tensor
-        Rounding
         Layer
-        Conv1d
-        Conv1dTransposed
-        MaxPool1d
-        AvgPool1d
-        AdaptiveAvgPool1d
-        LayerNorm
-        QuantizationLayer
+        Dropout
+        BatchNorm1d
         LayerConfigAccess
         Optimizer
         LossFunction

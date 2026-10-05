@@ -61,6 +61,10 @@ something that will drift again.
 - [`conventions/optimizer-step.md`](conventions/optimizer-step.md) — optimizer step
   entry (`optimizerStep()` fires the `OPTIMIZER` phase events; the raw vtable
   step is for unit tests under `test/` only; CI gate on `examples/`).
+- [`conventions/remat-scheduler.md`](conventions/remat-scheduler.md) — remat
+  scheduler rows (#4): the seam rule, the row contract R1–R8, the plan contract,
+  the two checking tiers, adding a row, the `remat-row-contract` CI gate, the
+  test conventions, and the decision register (`remat D<n>`, `R<n>`, `P<n>`).
 - [`conventions/testing.md`](conventions/testing.md) — sanitizer gating; heap-tier
   test memory discipline; build-time gold-value generators.
 - [`conventions/data-shape.md`](conventions/data-shape.md) — datasets deliver the

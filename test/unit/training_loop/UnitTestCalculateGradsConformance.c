@@ -507,7 +507,7 @@ static void captureRun(runner_t runner, zooFixture_t *f, runCapture_t *cap) {
                                  ? legacyCalculateGrads(f->model, f->n, f->loss, REDUCTION_MEAN,
                                                         f->x, f->y, recordingSink, &cap->trace)
                                  : tracedGrads(f->model, f->n, f->loss, REDUCTION_MEAN, f->x, f->y,
-                                               recordingSink, &cap->trace);
+                                               recordingSink, &cap->trace, NULL);
     odtHookSet(NULL, NULL);
     cap->seedAfter = rngGetSeed();
     cap->loss = stats->loss;
@@ -559,10 +559,10 @@ static void assertNullPathMatchesLegacy(void (*build)(zooFixture_t *)) {
 }
 
 static trainingStats_t *runOnce(runner_t runner, zooFixture_t *f) {
-    return (runner == RUN_LEGACY)
-               ? legacyCalculateGrads(f->model, f->n, f->loss, REDUCTION_MEAN, f->x, f->y, NULL,
-                                      NULL)
-               : calculateGradsSequential(f->model, f->n, f->loss, REDUCTION_MEAN, f->x, f->y);
+    return (runner == RUN_LEGACY) ? legacyCalculateGrads(f->model, f->n, f->loss, REDUCTION_MEAN,
+                                                         f->x, f->y, NULL, NULL)
+                                  : calculateGradsSequential(f->model, f->n, f->loss,
+                                                             REDUCTION_MEAN, f->x, f->y, NULL);
 }
 
 /* A caller that does not zero between calls: the grads accumulate over both,
@@ -611,7 +611,7 @@ void testNullPathMatchesLegacyOnTheMlp(void) {
 
     forEachGrad(f.model, f.n, NULL);
     trainingStats_t *driver =
-        calculateGradsSequential(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y);
+        calculateGradsSequential(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y, NULL);
     g_driver.values.used = 0;
     g_driver.loss = driver->loss;
     captureTensor(&g_driver.values, driver->output);
@@ -737,7 +737,7 @@ static agradProbe_t probeAgradOrder(runner_t runner) {
         (runner == RUN_LEGACY)
             ? legacyCalculateGrads(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y, agradOrderSink,
                                    &p)
-            : tracedGrads(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y, agradOrderSink, &p);
+            : tracedGrads(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y, agradOrderSink, &p, NULL);
     freeTrainingStats(stats);
     freeZoo(&f);
     return p;
@@ -764,7 +764,7 @@ void testAnInputWithoutBytesExitsBeforeLayer0Runs(void) {
     ASSERT_EXITS_WITH_OUTPUT(
         1, "remat[heap]: step #0 FORWARD(layer 0) violates 'operand not resident: in ACT 0'",
         freeTrainingStats(
-            calculateGradsSequential(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y)));
+            calculateGradsSequential(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y, NULL)));
     f.x->data = bytes;
     freeZoo(&f);
 }
@@ -777,7 +777,7 @@ void testAnEmptyModelExitsNamingIt(void) {
     tensor_t *inputShapedLabel = makeFloatTensor((size_t[]){1, 4}, 2, 0.5f);
     ASSERT_EXITS_WITH_OUTPUT(1, "rematWireTableInit: modelSize == 0: nothing to schedule",
                              freeTrainingStats(calculateGradsSequential(
-                                 f.model, 0, f.loss, REDUCTION_MEAN, f.x, inputShapedLabel)));
+                                 f.model, 0, f.loss, REDUCTION_MEAN, f.x, inputShapedLabel, NULL)));
     freeTensor(inputShapedLabel);
     freeZoo(&f);
 }
@@ -797,7 +797,7 @@ void testAMarkedInputYieldsAnUnmarkedOutputAndLeaksNothing(void) {
     g_driver.values.used = 0;
     size_t before = memProfileCurrentBytes();
     trainingStats_t *stats =
-        calculateGradsSequential(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y);
+        calculateGradsSequential(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y, NULL);
     bool outputMarked = stats->output->sparsity != NULL;
     g_driver.loss = stats->loss;
     captureTensor(&g_driver.values, stats->output);
@@ -829,12 +829,117 @@ void testAFailedEphemeralBuildExitsNamingIt(void) {
     tensor_t *y = makeFloatTensor((size_t[]){1, 1}, 2, 0.5f);
     ASSERT_EXITS_WITH_OUTPUT(1, "calculateGrads: ephemeral HEAP scheduler: reserveMemory failed",
                              freeTrainingStats(calculateGradsSequential(
-                                 model, 1, defaultLossConfig(MSE), REDUCTION_MEAN, x, y)));
+                                 model, 1, defaultLossConfig(MSE), REDUCTION_MEAN, x, y, NULL)));
     freeTensor(y);
     freeModel(model, 1);
     freeQuantization(bfp);
 }
 #endif
+
+/* ---- a caller's scheduler through the call struct: borrowed, never torn down ---- */
+
+/* remat P1's values of one call from zeroed grads: the loss, the output snapshot and
+ * every parameter grad. */
+static void captureValues(runner_t runner, zooFixture_t *f, const trainingCall_t *call,
+                          runCapture_t *cap) {
+    forEachGrad(f->model, f->n, NULL);
+    cap->values.used = 0;
+    trainingStats_t *stats =
+        (runner == RUN_LEGACY)
+            ? legacyCalculateGrads(f->model, f->n, f->loss, REDUCTION_MEAN, f->x, f->y, NULL, NULL)
+            : calculateGradsSequential(f->model, f->n, f->loss, REDUCTION_MEAN, f->x, f->y, call);
+    cap->loss = stats->loss;
+    captureTensor(&cap->values, stats->output);
+    freeTrainingStats(stats);
+    forEachGrad(f->model, f->n, &cap->values);
+}
+
+/* Built from the fixture's own model and input, so the first bind's key check
+ * passes. */
+static void initFixtureHeap(rematScheduler_t *s, zooFixture_t *f) {
+    TEST_ASSERT_TRUE(rematHeapInit(s, f->model, f->n, f->loss, f->x, NULL));
+}
+
+static rematReport_t reportOf(const rematScheduler_t *s) {
+    rematReport_t r;
+    rematSchedulerReport(s, &r);
+    return r;
+}
+
+/* A bind resets the observed peak and every bound wire raises it; nothing
+ * lowers it before the next bind. So a scheduler that ran the call reports the
+ * planned peak afterwards, and one the driver ignored keeps the 0 of a fresh
+ * init. */
+void testCalculateGradsSequentialRunsOnTheCallersScheduler(void) {
+    zooFixture_t f;
+    buildMlp(&f);
+    captureValues(RUN_LEGACY, &f, NULL, &g_legacy);
+    rematScheduler_t s;
+    initFixtureHeap(&s, &f);
+    size_t observedBefore = reportOf(&s).observedPeakLiveBytes;
+    captureValues(RUN_DRIVER, &f, &(trainingCall_t){.remat = &s}, &g_driver);
+    rematReport_t after = reportOf(&s);
+    rematSchedulerDeinit(&s);
+    freeZoo(&f);
+    TEST_ASSERT_EQUAL_size_t(0, observedBefore);
+    TEST_ASSERT_TRUE(after.peakLiveBytes > 0);
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(after.peakLiveBytes, after.observedPeakLiveBytes,
+                                     "the call ran on the caller's scheduler");
+    assertSameValues();
+}
+
+void testTracedGradsRunsOnTheCallersScheduler(void) {
+    zooFixture_t f;
+    buildMlp(&f);
+    rematScheduler_t s;
+    initFixtureHeap(&s, &f);
+    g_driver.trace.used = 0;
+    freeTrainingStats(tracedGrads(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y, recordingSink,
+                                  &g_driver.trace, &(trainingCall_t){.remat = &s}));
+    rematReport_t after = reportOf(&s);
+    rematSchedulerDeinit(&s);
+    freeZoo(&f);
+    TEST_ASSERT_TRUE(g_driver.trace.used > 0);
+    TEST_ASSERT_TRUE(after.peakLiveBytes > 0);
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(after.peakLiveBytes, after.observedPeakLiveBytes,
+                                     "the traced call ran on the caller's scheduler");
+}
+
+static void twoCallsOnOneScheduler(zooFixture_t *f, rematScheduler_t *s) {
+    const trainingCall_t call = {.remat = s};
+    freeTrainingStats(
+        calculateGradsSequential(f->model, f->n, f->loss, REDUCTION_MEAN, f->x, f->y, &call));
+    freeTrainingStats(
+        calculateGradsSequential(f->model, f->n, f->loss, REDUCTION_MEAN, f->x, f->y, &call));
+}
+
+/* The driver borrows a caller's scheduler and tears down only its own
+ * ephemeral one, so a second call on the same instance runs. */
+void testTheCallersSchedulerSurvivesTheCall(void) {
+    zooFixture_t f;
+    buildMlp(&f);
+    rematScheduler_t s;
+    initFixtureHeap(&s, &f);
+    ASSERT_EXITS_WITH_OUTPUT(0, "", twoCallsOnOneScheduler(&f, &s));
+    rematSchedulerDeinit(&s);
+    freeZoo(&f);
+}
+
+/* A NULL call and a zero-initialised one mean the same: the ephemeral
+ * scheduler. The death-test wrapper turns a NULL dereference into a readable
+ * failure instead of a crashed binary. */
+void testAZeroInitialisedCallIsTheNullScheduler(void) {
+    zooFixture_t f;
+    buildMlp(&f);
+    ASSERT_EXITS_WITH_OUTPUT(
+        0, "",
+        freeTrainingStats(calculateGradsSequential(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y,
+                                                   &(trainingCall_t){0})));
+    captureValues(RUN_LEGACY, &f, NULL, &g_legacy);
+    captureValues(RUN_DRIVER, &f, &(trainingCall_t){0}, &g_driver);
+    freeZoo(&f);
+    assertSameValues();
+}
 
 int main(void) {
     UNITY_BEGIN();
@@ -864,5 +969,9 @@ int main(void) {
 #ifndef ODT_TEST_ASAN
     RUN_TEST(testAFailedEphemeralBuildExitsNamingIt);
 #endif
+    RUN_TEST(testCalculateGradsSequentialRunsOnTheCallersScheduler);
+    RUN_TEST(testTracedGradsRunsOnTheCallersScheduler);
+    RUN_TEST(testTheCallersSchedulerSurvivesTheCall);
+    RUN_TEST(testAZeroInitialisedCallIsTheNullScheduler);
     return UNITY_END();
 }

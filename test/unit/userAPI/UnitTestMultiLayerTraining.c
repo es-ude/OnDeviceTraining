@@ -142,7 +142,7 @@ void testMultiLayerBackward_WithCrossEntropy_DoesNotCrash() {
     trainingStats_t *stats = calculateGradsSequential(
         model, sizeModel,
         (lossConfig_t){.funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_SUM},
-        REDUCTION_SUM, input, label);
+        REDUCTION_SUM, input, label, NULL);
 
     /* CAPTURE. */
     bool capturedNotNull = (stats != NULL);
@@ -263,7 +263,7 @@ void testMultiLayerBackward_WithManualInit_DoesNotCrash() {
     trainingStats_t *stats = calculateGradsSequential(
         model, sizeModel,
         (lossConfig_t){.funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_SUM},
-        REDUCTION_SUM, input, label);
+        REDUCTION_SUM, input, label, NULL);
 
     /* CAPTURE. The original test checks that b1Grad has at least one nonzero
      * value AFTER the backward pass; we capture that boolean before frees so
@@ -406,7 +406,7 @@ void testMultiLayerTraining_MultipleSteps_GradsAccumulate() {
         trainingStats_t *stats = calculateGradsSequential(
             model, sizeModel,
             (lossConfig_t){.funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_SUM},
-            REDUCTION_SUM, input, label);
+            REDUCTION_SUM, input, label, NULL);
         capturedNotNull[step] = (stats != NULL);
         capturedLoss[step] = stats ? stats->loss : -1.0f;
         freeTrainingStats(stats);
@@ -569,7 +569,7 @@ void testBfpFakeQuantTrainingLossDecreasesAndGridMoves(void) {
     float lastLoss = NAN;
     for (size_t step = 0; step < STEPS; step++) {
         trainingStats_t *stats = calculateGradsSequential(model, sizeModel, defaultLossConfig(MSE),
-                                                          REDUCTION_MEAN, input, label);
+                                                          REDUCTION_MEAN, input, label, NULL);
         if (step == 0) {
             firstLoss = stats->loss;
         }
@@ -817,8 +817,9 @@ void testBfpWireFakeQuantTrainingLossDecreasesAndWirePacks(void) {
     float firstLoss = NAN;
     float lastLoss = NAN;
     for (size_t step = 0; step < 20; step++) {
-        trainingStats_t *stats = tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
-                                             f.input, f.label, captureLayer0ForwardWire, &cap);
+        trainingStats_t *stats =
+            tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
+                        captureLayer0ForwardWire, &cap, NULL);
         if (step == 0) {
             firstLoss = stats->loss;
         }
@@ -868,7 +869,7 @@ void testBfpWireGeometryIgnoresTemplateNumGroups(void) {
 
     bfpWireCapture_t cap = {0};
     trainingStats_t *stats = tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
-                                         f.input, f.label, captureLayer0ForwardWire, &cap);
+                                         f.input, f.label, captureLayer0ForwardWire, &cap, NULL);
     freeTrainingStats(stats);
     freeBfpWireFixture(&f);
 
@@ -892,7 +893,7 @@ void testBfpActWireGroupSizeMismatchDiesNamingTheWire(void) {
     ASSERT_EXITS_WITH_OUTPUT(
         1, "BFP groupSize 2 does not divide the 9 elements of wire ACT 1",
         freeTrainingStats(calculateGradsSequential(f.model, 2, defaultLossConfig(MSE),
-                                                   REDUCTION_MEAN, f.input, f.label)));
+                                                   REDUCTION_MEAN, f.input, f.label, NULL)));
 
     freeBfpWireFixture(&f);
 }
@@ -968,7 +969,7 @@ void testBfpDxWireAllocatesThroughInitGradTensor(void) {
 
     bfpWireCapture_t cap = {0};
     trainingStats_t *stats = tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
-                                         f.input, f.label, captureLayer0BackwardWire, &cap);
+                                         f.input, f.label, captureLayer0BackwardWire, &cap, NULL);
     float loss = stats->loss;
     freeTrainingStats(stats);
     freeBfpWireFixture(&f);
@@ -995,7 +996,7 @@ void testBfpWireGroupSizeEqualToWireElementsNormalizesToPerTensor(void) {
 
     bfpWireCapture_t cap = {0};
     trainingStats_t *stats = tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
-                                         f.input, f.label, captureLayer0ForwardWire, &cap);
+                                         f.input, f.label, captureLayer0ForwardWire, &cap, NULL);
     float loss = stats->loss;
     freeTrainingStats(stats);
     freeBfpWireFixture(&f);
@@ -1019,7 +1020,7 @@ void testBfpDxWireGroupSizeEqualToWireElementsNormalizesToPerTensor(void) {
 
     bfpWireCapture_t cap = {0};
     trainingStats_t *stats = tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
-                                         f.input, f.label, captureLayer0BackwardWire, &cap);
+                                         f.input, f.label, captureLayer0BackwardWire, &cap, NULL);
     float loss = stats->loss;
     freeTrainingStats(stats);
     freeBfpWireFixture(&f);
@@ -1050,7 +1051,7 @@ void testBfpGradWireGroupSizeMismatchDiesNamingTheWire(void) {
     ASSERT_EXITS_WITH_OUTPUT(
         1, "BFP groupSize 2 does not divide the 9 elements of wire GRAD 1",
         freeTrainingStats(calculateGradsSequential(f.model, 2, defaultLossConfig(MSE),
-                                                   REDUCTION_MEAN, f.input, f.label)));
+                                                   REDUCTION_MEAN, f.input, f.label, NULL)));
 
     freeBfpWireFixture(&f);
 }
@@ -1083,8 +1084,9 @@ void testBfpDxWireNativeBackwardTrains(void) {
     float firstLoss = NAN;
     float lastLoss = NAN;
     for (size_t step = 0; step < 5; step++) {
-        trainingStats_t *stats = tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
-                                             f.input, f.label, captureLayer0BackwardWire, &cap);
+        trainingStats_t *stats =
+            tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
+                        captureLayer0BackwardWire, &cap, NULL);
         if (step == 0) {
             firstLoss = stats->loss;
         }
@@ -1307,8 +1309,9 @@ void testBfpNativeForwardTrainingLossDecreasesAndGridMoves(void) {
     float firstLoss = NAN;
     float lastLoss = NAN;
     for (size_t step = 0; step < 25; step++) {
-        trainingStats_t *stats = tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
-                                             f.input, f.label, captureLayer0ForwardWire, &cap);
+        trainingStats_t *stats =
+            tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
+                        captureLayer0ForwardWire, &cap, NULL);
         if (step == 0) {
             firstLoss = stats->loss;
         }
@@ -1397,7 +1400,7 @@ void testBfpPinnedFloat32BackwardTrainingLossDecreases(void) {
     float lastLoss = NAN;
     for (size_t step = 0; step < 25; step++) {
         trainingStats_t *stats = calculateGradsSequential(f.model, 2, defaultLossConfig(MSE),
-                                                          REDUCTION_MEAN, f.input, f.label);
+                                                          REDUCTION_MEAN, f.input, f.label, NULL);
         if (step == 0) {
             firstLoss = stats->loss;
         }
@@ -1505,8 +1508,9 @@ void testBfpDxWireThroughPinnedFloat32BackwardTrains(void) {
     float firstLoss = NAN;
     float lastLoss = NAN;
     for (size_t step = 0; step < 25; step++) {
-        trainingStats_t *stats = tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
-                                             f.input, f.label, captureLinear0IncomingDx, &cap);
+        trainingStats_t *stats =
+            tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
+                        captureLinear0IncomingDx, &cap, NULL);
         if (step == 0) {
             firstLoss = stats->loss;
         }
@@ -1576,7 +1580,7 @@ void testBfpGradStorageTrainingAccumulatesAndSteps(void) {
     uint8_t gradExponentAfterBackward = (uint8_t)bfpExponentBias(w0Grad->quantization->qConfig);
     for (size_t step = 0; step < 5; step++) {
         trainingStats_t *stats = calculateGradsSequential(f.model, 2, defaultLossConfig(MSE),
-                                                          REDUCTION_MEAN, f.input, f.label);
+                                                          REDUCTION_MEAN, f.input, f.label, NULL);
         if (step == 0) {
             firstLoss = stats->loss;
         }
@@ -1824,7 +1828,7 @@ void testBfpConvGradStorageTrainsUnderDefaultEpoch(void) {
     trainingStats_t *seedStats =
         calculateGradsSequential(model, BFP_CONV_MODEL_SIZE, defaultLossConfig(MSE), REDUCTION_MEAN,
                                  batchViewOf(&seedItemView, bfpConvEpochItems[0]),
-                                 batchViewOf(&seedLabelView, bfpConvEpochLabels[0]));
+                                 batchViewOf(&seedLabelView, bfpConvEpochLabels[0]), NULL);
     freeTrainingStats(seedStats);
     /* Sentinels keep the CAPTURE phase crash-free if the grad-storage knob
      * ever regresses to the FLOAT32 default -- a FLOAT32 grad carries a NULL
@@ -2088,7 +2092,7 @@ void testBfpUniformPoolActivationModelTrains(void) {
     for (size_t step = 0; step < 10; step++) {
         trainingStats_t *stats =
             tracedGrads(model, 6, defaultLossConfig(CROSS_ENTROPY), REDUCTION_MEAN, input, label,
-                        capturePr4FlattenCarry, &carry);
+                        capturePr4FlattenCarry, &carry, NULL);
         if (step == 0) {
             firstLoss = stats->loss;
         }
@@ -2418,9 +2422,9 @@ void testBfpUniformNormModelTrainsAndGridsMove(void) {
     for (size_t step = 0; step < 12; step++) {
         float stepLoss = 0.f;
         for (size_t s = 0; s < 2; s++) {
-            trainingStats_t *stats =
-                tracedGrads(model, BFP_NORM_MODEL_SIZE, defaultLossConfig(CROSS_ENTROPY),
-                            REDUCTION_MEAN, inputs[s], labels[s], capturePr5LayerNormWire, &cap);
+            trainingStats_t *stats = tracedGrads(
+                model, BFP_NORM_MODEL_SIZE, defaultLossConfig(CROSS_ENTROPY), REDUCTION_MEAN,
+                inputs[s], labels[s], capturePr5LayerNormWire, &cap, NULL);
             stepLoss += stats->loss;
             freeTrainingStats(stats);
         }
@@ -2584,8 +2588,8 @@ void testBfpNormGradStorageAccumulatesAndSteps(void) {
         }
     }
 
-    trainingStats_t *stats =
-        calculateGradsSequential(model, 1, defaultLossConfig(MSE), REDUCTION_MEAN, input, label);
+    trainingStats_t *stats = calculateGradsSequential(model, 1, defaultLossConfig(MSE),
+                                                      REDUCTION_MEAN, input, label, NULL);
     float loss = stats->loss;
     freeTrainingStats(stats);
 
@@ -2711,8 +2715,8 @@ void unitTestSoftmaxMseBackwardThroughLoop(void) {
     tensor_t *input = buildFloatTensor2D(1, 3, (float[]){1.0f, -0.5f, 2.0f});
     tensor_t *label = buildFloatTensor2D(1, 3, (float[]){0.2f, 0.5f, 0.3f});
 
-    trainingStats_t *stats =
-        calculateGradsSequential(model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, input, label);
+    trainingStats_t *stats = calculateGradsSequential(model, 2, defaultLossConfig(MSE),
+                                                      REDUCTION_MEAN, input, label, NULL);
 
     /* CAPTURE. */
     tensor_t *w0GradTensor = getGradFromParameter(w0);
@@ -2764,7 +2768,7 @@ void unitTestSoftmaxCeTwoRowsThroughLoop(void) {
     tensor_t *label = buildFloatTensor2D(2, 3, softmaxCeTwoRowsE2eLabel);
 
     trainingStats_t *stats = calculateGradsSequential(model, 2, defaultLossConfig(CROSS_ENTROPY),
-                                                      REDUCTION_MEAN, input, label);
+                                                      REDUCTION_MEAN, input, label, NULL);
 
     /* CAPTURE. */
     float capturedLoss = stats->loss;
@@ -2823,8 +2827,8 @@ void unitTestSoftmaxMseTwoRowsBackwardThroughLoop(void) {
     tensor_t *input = buildFloatTensor2D(2, 3, softmaxTwoRowsE2eX);
     tensor_t *label = buildFloatTensor2D(2, 3, softmaxMseTwoRowsE2eLabel);
 
-    trainingStats_t *stats =
-        calculateGradsSequential(model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, input, label);
+    trainingStats_t *stats = calculateGradsSequential(model, 2, defaultLossConfig(MSE),
+                                                      REDUCTION_MEAN, input, label, NULL);
 
     /* CAPTURE. */
     float capturedLoss = stats->loss;
@@ -2927,7 +2931,7 @@ void unitTestUniformBfpSoftmaxMseTrains(void) {
     float lastLoss = NAN;
     for (size_t step = 0; step < 10; step++) {
         trainingStats_t *stats = calculateGradsSequential(model, 2, defaultLossConfig(MSE),
-                                                          REDUCTION_MEAN, input, label);
+                                                          REDUCTION_MEAN, input, label, NULL);
         if (step == 0) {
             firstLoss = stats->loss;
         }

@@ -8,6 +8,7 @@
 #include "LossFunction.h"
 #include "Optimizer.h"
 #include "Tensor.h"
+#include "TrainingCall.h"
 
 /* #327: forward typedefs only — callers passing NULL need no scheduler
  * headers. Identical typedefs live in LrScheduler.h / BsScheduler.h (C11
@@ -86,11 +87,15 @@ typedef struct trainingRunResult {
  *  Dropout and BatchNorm1d are in training mode only inside
  *  calculateGradsSequential / tracedGrads (they flip the per-layer
  *  `training` flag around the call); a custom function that does not route
- *  through them runs both in eval mode (#460). */
+ *  through them runs both in eval mode (#460).
+ *
+ *  call is the caller's, NULLable and borrowed for the call: a function that
+ *  routes through calculateGradsSequential / tracedGrads forwards it, so a
+ *  scheduler set in trainingRunOptions_t.remat reaches the driver. */
 typedef trainingStats_t *(*calculateGradsFn_t)(layer_t **model, size_t modelSize,
                                                lossConfig_t lossConfig,
                                                reduction_t forwardReduction, tensor_t *input,
-                                               tensor_t *label);
+                                               tensor_t *label, const trainingCall_t *call);
 
 /*! When invoked by the evaluation loop, input/label are borrowed stack views
  *  of shape [rows, ...sampleShape], valid only for the call: at

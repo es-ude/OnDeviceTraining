@@ -219,7 +219,7 @@ static void runGrads(layer_t **model, size_t n) {
     tensor_t *x = buildFloatTensor((size_t[]){4, 2}, 2, kX);
     tensor_t *y = buildFloatTensor((size_t[]){4, 2}, 2, kY);
     freeTrainingStats(
-        calculateGradsSequential(model, n, defaultLossConfig(MSE), REDUCTION_MEAN, x, y));
+        calculateGradsSequential(model, n, defaultLossConfig(MSE), REDUCTION_MEAN, x, y, NULL));
     freeTensor(y);
     freeTensor(x);
 }
@@ -287,7 +287,7 @@ void testFrozenBatchNormKeepsLoadedBuffersDuringTraining(void) {
     tensor_t *x = buildFloatTensor((size_t[]){1, 2}, 2, kX);
     tensor_t *y = buildFloatTensor((size_t[]){1, 2}, 2, kY);
     freeTrainingStats(
-        calculateGradsSequential(model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, x, y));
+        calculateGradsSequential(model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, x, y, NULL));
     batchNorm1dConfig_t *c = model[0]->config->batchNorm1d;
     float got[4];
     memcpy(got, c->runningMean->data, 2 * sizeof(float));

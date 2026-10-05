@@ -27,7 +27,7 @@ static float trainingBatchPerSample(layer_t **model, size_t modelSize, lossConfi
         trainingStats_t *stats =
             calculateGradsFn(model, modelSize, lossConfig, forwardReduction,
                              batchViewOf(&itemView, batch->samples[i]->item),
-                             batchViewOf(&labelView, batch->samples[i]->label));
+                             batchViewOf(&labelView, batch->samples[i]->label), NULL);
         totalLoss += stats->loss;
         freeTrainingStats(stats);
         freeSample(batch->samples[i]);
@@ -82,7 +82,7 @@ static float trainingBatchStacked(layer_t **model, size_t modelSize, lossConfig_
         labelView.dimensions[0] = m;
 
         trainingStats_t *stats = calculateGradsFn(model, modelSize, lossConfig, forwardReduction,
-                                                  stackedItem, stackedLabel);
+                                                  stackedItem, stackedLabel, NULL);
         totalLoss += stats->loss * rowWeight;
         freeTrainingStats(stats);
         for (size_t r = 0; r < m; r++) {

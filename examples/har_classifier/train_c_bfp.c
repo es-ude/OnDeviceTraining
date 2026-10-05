@@ -799,14 +799,15 @@ static void wireGateSink(void *ctx, size_t layerIdx, layerType_t layerType, cons
  * PR3a), so they go to calculateGradsSequential/tracedGrads unchanged. */
 static trainingStats_t *firstStepGatedGrads(layer_t **model, size_t modelSize,
                                             lossConfig_t lossConfig, reduction_t forwardReduction,
-                                            tensor_t *input, tensor_t *label) {
+                                            tensor_t *input, tensor_t *label,
+                                            const trainingCall_t *call) {
     if (g_wireGateDone) {
         return calculateGradsSequential(model, modelSize, lossConfig, forwardReduction, input,
-                                        label);
+                                        label, call);
     }
     g_wireGateDone = true;
     trainingStats_t *stats = tracedGrads(model, modelSize, lossConfig, forwardReduction, input,
-                                         label, wireGateSink, &g_wireGate);
+                                         label, wireGateSink, &g_wireGate, call);
     int missing = 0;
     for (size_t s = 0; s < WIRE_EVENTS; s++) {
         if (!g_wireGate.seen[s]) {

@@ -407,10 +407,10 @@ int main(void) {
         if (i == 0) {
             /* One traced step: also probes Linear0's own forward wire. */
             stats = tracedGrads(model, MODEL_SIZE, lossCfg, REDUCTION_MEAN, input, labelBatch,
-                                linear0WireGateSink, &wireCtx);
+                                linear0WireGateSink, &wireCtx, NULL);
         } else {
             stats = calculateGradsSequential(model, MODEL_SIZE, lossCfg, REDUCTION_MEAN, input,
-                                             labelBatch);
+                                             labelBatch, NULL);
         }
         freeTrainingStats(stats);
         freeSample(smp);

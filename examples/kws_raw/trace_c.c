@@ -372,7 +372,7 @@ int main(int argc, char **argv) {
             trainingStats_t *stats =
                 tracedGrads(model, MODEL_SIZE, lossCfg, REDUCTION_MEAN,
                             batchViewOf(&itemView, smp->item), batchViewOf(&labelView, label),
-                            dumpActs ? npyDumpSink : NULL, dumpActs ? &ctx : NULL);
+                            dumpActs ? npyDumpSink : NULL, dumpActs ? &ctx : NULL, NULL);
             sumLoss += (double)stats->loss;
             freeTrainingStats(stats);
             freeSample(smp);

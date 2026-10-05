@@ -53,7 +53,7 @@ void testTrainingStep_PoolsCorrectly(void) {
 
     trainingStats_t *stats = calculateGradsSequential(
         model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-        REDUCTION_SUM, input, label);
+        REDUCTION_SUM, input, label, NULL);
 
     bool statsNotNull = (stats != NULL);
     size_t d2 = (stats && stats->output) ? stats->output->shape->dimensions[2] : 0;

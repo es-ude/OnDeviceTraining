@@ -58,7 +58,7 @@ void testCalculateGradsSequential_WithFlattenFirst_DoesNotCrash(void) {
 
     trainingStats_t *stats = calculateGradsSequential(
         model, 3, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-        REDUCTION_SUM, input, label);
+        REDUCTION_SUM, input, label, NULL);
 
     /* CAPTURE before frees. */
     bool capturedStatsNotNull = (stats != NULL);
@@ -112,7 +112,7 @@ void testCalculateGradsSequential_FlattenRank1_DoesNotOOB(void) {
 
     trainingStats_t *stats = calculateGradsSequential(
         model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-        REDUCTION_SUM, input, label);
+        REDUCTION_SUM, input, label, NULL);
 
     /* CAPTURE before frees. */
     bool capturedStatsNotNull = (stats != NULL);
@@ -164,7 +164,7 @@ void testCalculateGradsSequential_FlattenOnly_PreservesValues(void) {
 
     trainingStats_t *stats = calculateGradsSequential(
         model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-        REDUCTION_SUM, input, label);
+        REDUCTION_SUM, input, label, NULL);
 
     /* CAPTURE before frees. */
     bool capturedStatsNotNull = (stats != NULL);

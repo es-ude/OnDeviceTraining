@@ -161,7 +161,7 @@ void testCalculateGradsFiresForwardPairThenBackwardPair(void) {
 
     odtHookSet(recordingHook, &g_ctxToken);
     trainingStats_t *stats =
-        calculateGradsSequential(model, 2, ceMeanLoss(), REDUCTION_MEAN, x, label);
+        calculateGradsSequential(model, 2, ceMeanLoss(), REDUCTION_MEAN, x, label, NULL);
     odtHookSet(NULL, NULL);
 
     size_t count = g_logCount;
@@ -194,7 +194,7 @@ void testTracedGradsInterleavesProbesInsidePhases(void) {
 
     odtHookSet(recordingHook, &g_ctxToken);
     trainingStats_t *stats =
-        tracedGrads(model, 2, ceMeanLoss(), REDUCTION_MEAN, x, label, recordingSink, NULL);
+        tracedGrads(model, 2, ceMeanLoss(), REDUCTION_MEAN, x, label, recordingSink, NULL, NULL);
     odtHookSet(NULL, NULL);
 
     size_t count = g_logCount;
@@ -229,7 +229,7 @@ void testAllFrozenModelStillFiresBothPairs(void) {
 
     odtHookSet(recordingHook, &g_ctxToken);
     trainingStats_t *stats =
-        tracedGrads(model, 2, ceMeanLoss(), REDUCTION_MEAN, x, label, recordingSink, NULL);
+        tracedGrads(model, 2, ceMeanLoss(), REDUCTION_MEAN, x, label, recordingSink, NULL, NULL);
     odtHookSet(NULL, NULL);
 
     size_t count = g_logCount;
@@ -266,7 +266,7 @@ void testSixEventsFireInOrderForOneGradsCallPlusOneStep(void) {
 
     odtHookSet(recordingHook, &g_ctxToken);
     trainingStats_t *stats =
-        calculateGradsSequential(model, 2, ceMeanLoss(), REDUCTION_MEAN, x, label);
+        calculateGradsSequential(model, 2, ceMeanLoss(), REDUCTION_MEAN, x, label, NULL);
     optimizerStep(optim);
     odtHookSet(NULL, NULL);
 
@@ -303,7 +303,7 @@ void testNothingFiresWhenHookUnset(void) {
     odtHookSet(recordingHook, &g_ctxToken);
     odtHookSet(NULL, NULL);
     trainingStats_t *stats =
-        calculateGradsSequential(model, 2, ceMeanLoss(), REDUCTION_MEAN, x, label);
+        calculateGradsSequential(model, 2, ceMeanLoss(), REDUCTION_MEAN, x, label, NULL);
     optimizerStep(optim);
 
     size_t count = g_logCount;

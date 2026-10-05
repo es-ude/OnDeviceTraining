@@ -88,7 +88,7 @@ void testCalculateGradsSequentialClosedForm() {
         model, 2,
         (lossConfig_t){
             .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL},
-        REDUCTION_MEAN, x, label);
+        REDUCTION_MEAN, x, label, NULL);
 
     TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.91300f, stats->loss);
 
@@ -148,7 +148,7 @@ void testTracedGradsFiresInOrder() {
                                          (lossConfig_t){.funcType = CROSS_ENTROPY,
                                                         .backwardReduction = REDUCTION_MEAN,
                                                         .classWeights = NULL},
-                                         REDUCTION_MEAN, x, label, recordingSink, NULL);
+                                         REDUCTION_MEAN, x, label, recordingSink, NULL, NULL);
 
     /* fwd L0, fwd L1, lossgrad@2, agrad L0  (Softmax skipped under CE) */
     TEST_ASSERT_EQUAL_size_t(4, g_eventCount);
@@ -187,7 +187,7 @@ void testTraceModelParamsFiresPerTrainableParam() {
         model, 2,
         (lossConfig_t){
             .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL},
-        REDUCTION_MEAN, x, label);
+        REDUCTION_MEAN, x, label, NULL);
 
     traceModelWeights(model, 2, "w_before", recordingSink, NULL);
     traceModelGrads(model, 2, "grad_raw", recordingSink, NULL);
@@ -403,7 +403,7 @@ void testDxWireHonorsProducerPropLossQ(void) {
     trainingStats_t *stats = tracedGrads(
         model, 4,
         (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM, .classWeights = NULL},
-        REDUCTION_SUM, x, label, agradCaptureSink, &ctx);
+        REDUCTION_SUM, x, label, agradCaptureSink, &ctx, NULL);
 
     /* Capture before teardown (ASSERT LAST convention). */
     bool captured = ctx.capturedAgrad;
@@ -517,7 +517,7 @@ void testDxWireHonorsProducerPropLossQMaxBits(void) {
     trainingStats_t *stats = tracedGrads(
         model, 4,
         (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM, .classWeights = NULL},
-        REDUCTION_SUM, x, label, agradBitsCaptureSink, &ctx);
+        REDUCTION_SUM, x, label, agradBitsCaptureSink, &ctx, NULL);
 
     /* Capture before teardown (ASSERT LAST convention). */
     bool captured = ctx.capturedAgrad;
@@ -607,7 +607,7 @@ void testForwardWireHonorsDeclaredOutputQMaxBits(void) {
     trainingStats_t *stats = tracedGrads(
         model, 1,
         (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM, .classWeights = NULL},
-        REDUCTION_SUM, x, label, fwdBitsCaptureSink, &ctx);
+        REDUCTION_SUM, x, label, fwdBitsCaptureSink, &ctx, NULL);
 
     /* Capture before teardown (ASSERT LAST convention). */
     bool captured = ctx.capturedFwd;
@@ -708,7 +708,7 @@ void testFrozenLayerSurvivesTrainingUntouched(void) {
     for (size_t step = 0; step < 5; step++) {
         optimFns.zero(optim);
         trainingStats_t *stats =
-            calculateGradsSequential(model, 3, lossConfig, REDUCTION_SUM, input, label);
+            calculateGradsSequential(model, 3, lossConfig, REDUCTION_SUM, input, label, NULL);
         if (step == 0) {
             firstLoss = stats->loss;
         }
@@ -786,7 +786,7 @@ void testBackwardStopsAtDeepestTrainableLayer(void) {
     trainingStats_t *stats = tracedGrads(
         model, 3,
         (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM, .classWeights = NULL},
-        REDUCTION_SUM, x, label, recordingSink, NULL);
+        REDUCTION_SUM, x, label, recordingSink, NULL, NULL);
 
     size_t agradAt0 = 0, agradAt1 = 0, agradAt2 = 0, lossgradCount = 0;
     for (size_t i = 0; i < g_eventCount; i++) {
@@ -889,9 +889,9 @@ void testTruncationPreservesUpperLayerGrads(void) {
     lossConfig_t lossConfig = {
         .funcType = MSE, .backwardReduction = REDUCTION_SUM, .classWeights = NULL};
     trainingStats_t *stats1 =
-        calculateGradsSequential(m1, 3, lossConfig, REDUCTION_SUM, x1, label1);
+        calculateGradsSequential(m1, 3, lossConfig, REDUCTION_SUM, x1, label1, NULL);
     trainingStats_t *stats2 =
-        calculateGradsSequential(m2, 3, lossConfig, REDUCTION_SUM, x2, label2);
+        calculateGradsSequential(m2, 3, lossConfig, REDUCTION_SUM, x2, label2, NULL);
 
     float *wg1 = (float *)getGradFromParameter(m1Top->config->linear->weights)->data;
     float *wg2 = (float *)getGradFromParameter(m2Top->config->linear->weights)->data;
@@ -951,7 +951,7 @@ void testAllFrozenModelSkipsBackwardEntirely(void) {
     trainingStats_t *stats = tracedGrads(
         model, 1,
         (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM, .classWeights = NULL},
-        REDUCTION_SUM, x, label, recordingSink, NULL);
+        REDUCTION_SUM, x, label, recordingSink, NULL, NULL);
 
     size_t backwardEvents = 0;
     for (size_t i = 0; i < g_eventCount; i++) {
@@ -1013,7 +1013,7 @@ void testCalculateGradsFactoryMaxPoolGrowsToBatch2(void) {
         makeFloatTensor3D(2, 2, 2, (float[]){0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f});
 
     trainingStats_t *stats =
-        calculateGradsSequential(model, 1, lossConfig, REDUCTION_MEAN, x1, label1);
+        calculateGradsSequential(model, 1, lossConfig, REDUCTION_MEAN, x1, label1, NULL);
 
     /* CAPTURE. */
     float capturedLoss = stats->loss;
@@ -1021,7 +1021,7 @@ void testCalculateGradsFactoryMaxPoolGrowsToBatch2(void) {
 
     /* #152 PR3b: the stacked batch-2 input grows the argmax. */
     trainingStats_t *stats2 =
-        calculateGradsSequential(model, 1, lossConfig, REDUCTION_MEAN, x2, label2);
+        calculateGradsSequential(model, 1, lossConfig, REDUCTION_MEAN, x2, label2, NULL);
     float capturedLoss2 = stats2->loss;
     freeTrainingStats(stats2);
 

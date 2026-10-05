@@ -113,13 +113,13 @@ void testCalculateGradsSequential_MatchesPyTorch() {
     for (size_t i = 0; i < 23; i++) {
         trainingStats_t *ts0 = calculateGradsSequential(
             model, sizeModel, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-            REDUCTION_SUM, input0, label0);
+            REDUCTION_SUM, input0, label0, NULL);
         trainingStats_t *ts1 = calculateGradsSequential(
             model, sizeModel, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-            REDUCTION_SUM, input1, label1);
+            REDUCTION_SUM, input1, label1, NULL);
         trainingStats_t *ts2 = calculateGradsSequential(
             model, sizeModel, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-            REDUCTION_SUM, input2, label2);
+            REDUCTION_SUM, input2, label2, NULL);
 
         /* PyTorch reference is MSE-mean-of-features (`2/F * (o-l)` per element). Post-#135
          * backward writes raw `2*(o-l)`; recover the reference trajectory via explicit
@@ -410,10 +410,10 @@ void testTrainingBatchDefault_ReturnsAverageLossAndAccumulatesGrads() {
      * through when called with forwardReduction=REDUCTION_MEAN. */
     trainingStats_t *ts0 = calculateGradsSequential(
         model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-        REDUCTION_MEAN, batchViewOf(&in0View, in0), batchViewOf(&lb0View, lb0));
+        REDUCTION_MEAN, batchViewOf(&in0View, in0), batchViewOf(&lb0View, lb0), NULL);
     trainingStats_t *ts1 = calculateGradsSequential(
         model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-        REDUCTION_MEAN, batchViewOf(&in1View, in1), batchViewOf(&lb1View, lb1));
+        REDUCTION_MEAN, batchViewOf(&in1View, in1), batchViewOf(&lb1View, lb1), NULL);
     float expectedAvg = (ts0->loss + ts1->loss) / 2.0f;
     freeTrainingStats(ts0);
     freeTrainingStats(ts1);
@@ -481,10 +481,10 @@ void testTrainingBatchDefault_SumAggregatesWithoutDivision() {
 
     trainingStats_t *ts0 = calculateGradsSequential(
         model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-        REDUCTION_SUM, batchViewOf(&in0View, in0), batchViewOf(&lb0View, lb0));
+        REDUCTION_SUM, batchViewOf(&in0View, in0), batchViewOf(&lb0View, lb0), NULL);
     trainingStats_t *ts1 = calculateGradsSequential(
         model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-        REDUCTION_SUM, batchViewOf(&in1View, in1), batchViewOf(&lb1View, lb1));
+        REDUCTION_SUM, batchViewOf(&in1View, in1), batchViewOf(&lb1View, lb1), NULL);
     float expectedSum = ts0->loss + ts1->loss;
     freeTrainingStats(ts0);
     freeTrainingStats(ts1);
@@ -2728,11 +2728,13 @@ static void recordProbe(const tensor_t *input, const tensor_t *label) {
 }
 
 static trainingStats_t *probeGrads(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
-                                   reduction_t forwardReduction, tensor_t *input, tensor_t *label) {
+                                   reduction_t forwardReduction, tensor_t *input, tensor_t *label,
+                                   const trainingCall_t *call) {
     (void)model;
     (void)modelSize;
     (void)lossConfig;
     (void)forwardReduction;
+    (void)call;
     recordProbe(input, label);
     if (g_probeGrad != NULL) {
         float *g = (float *)g_probeGrad->data;

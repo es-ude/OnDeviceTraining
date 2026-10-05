@@ -31,10 +31,11 @@ typedef void (*traceSink_t)(void *ctx, size_t layerIdx, layerType_t layerType, c
  *  layer in the model trains, backward is skipped entirely -- NO "lossgrad"
  *  and NO "agrad" events fire (the loss value is still computed and "fwd"
  *  still fires for every layer). Preconditions: as for
- *  calculateGradsSequential (modelSize >= 1, and the uint16_t wire cap). */
+ *  calculateGradsSequential (modelSize >= 1, and the uint16_t wire cap);
+ *  call as for calculateGradsSequential. */
 trainingStats_t *tracedGrads(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
                              reduction_t forwardReduction, tensor_t *input, tensor_t *label,
-                             traceSink_t sink, void *ctx);
+                             traceSink_t sink, void *ctx, const trainingCall_t *call);
 
 /*! Fire `sink` for each trainable layer's weight and bias PARAM tensors, with
  *  phase "<tag>.weight" / "<tag>.bias". Param-less layers and NULL bias are

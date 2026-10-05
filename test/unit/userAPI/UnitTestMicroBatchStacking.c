@@ -172,7 +172,7 @@ static void resetRecording(void) {
 
 static trainingStats_t *recordingGrads(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
                                        reduction_t forwardReduction, tensor_t *input,
-                                       tensor_t *label) {
+                                       tensor_t *label, const trainingCall_t *call) {
     if (g_recCalls < REC_MAX_CALLS) {
         g_recItemRows[g_recCalls] = input->shape->dimensions[0];
         g_recLabelRows[g_recCalls] = label->shape->dimensions[0];
@@ -183,7 +183,8 @@ static trainingStats_t *recordingGrads(layer_t **model, size_t modelSize, lossCo
         }
     }
     g_recCalls++;
-    return calculateGradsSequential(model, modelSize, lossConfig, forwardReduction, input, label);
+    return calculateGradsSequential(model, modelSize, lossConfig, forwardReduction, input, label,
+                                    call);
 }
 
 /* ---- model B: Linear(5->4) -> ReLU -> Linear(4->3), MSE --------------------- */

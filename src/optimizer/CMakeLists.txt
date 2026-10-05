@@ -10,10 +10,12 @@ target_link_libraries(Optimizer PRIVATE
         Tensor
         Common
         OdtHook
-        # The [ADAM_W] vtable row references adamWStep/adamWGetLr/adamWSetLr.
-        # Linked HERE (unlike Sgd, historically consumer-listed) so the new
-        # row does not force every existing Optimizer consumer to grow its
-        # link list; CMake propagates static-lib PRIVATE deps to final links.
+        # The vtable rows reference sgdStepM/sgdGetLr/sgdSetLr and
+        # adamWStep/adamWGetLr/adamWSetLr. Both libraries are linked HERE so no
+        # Optimizer consumer has to list them after Optimizer itself: CMake
+        # propagates static-lib PRIVATE deps to final links, after the
+        # library, which is the order GNU ld needs.
+        Sgd
         AdamW
 )
 

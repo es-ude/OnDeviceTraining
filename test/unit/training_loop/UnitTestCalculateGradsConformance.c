@@ -21,6 +21,7 @@
 #include "Quantization.h"
 #include "QuantizationApi.h"
 #include "RNG.h"
+#include "RematTestDecorators.h"
 #include "RematTestFixtures.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -576,11 +577,11 @@ static void assertNullPathMatchesLegacy(void (*build)(zooFixture_t *)) {
     assertConforms(NULL);
 }
 
-static trainingStats_t *runOnce(runner_t runner, zooFixture_t *f) {
+static trainingStats_t *runOnce(runner_t runner, zooFixture_t *f, const trainingCall_t *call) {
     return (runner == RUN_LEGACY) ? legacyCalculateGrads(f->model, f->n, f->loss, REDUCTION_MEAN,
                                                          f->x, f->y, NULL, NULL)
                                   : calculateGradsSequential(f->model, f->n, f->loss,
-                                                             REDUCTION_MEAN, f->x, f->y, NULL);
+                                                             REDUCTION_MEAN, f->x, f->y, call);
 }
 
 /* A caller that does not zero between calls: the grads accumulate over both,
@@ -590,8 +591,8 @@ static void captureTwoCalls(runner_t runner, zooFixture_t *f, runCapture_t *cap)
     bnStateIo(f, runner == RUN_LEGACY, NULL);
     cap->values.used = 0;
     rngSetSeed(ZOO_SEED);
-    freeTrainingStats(runOnce(runner, f));
-    trainingStats_t *stats = runOnce(runner, f);
+    freeTrainingStats(runOnce(runner, f, NULL));
+    trainingStats_t *stats = runOnce(runner, f, NULL);
     cap->seedAfter = rngGetSeed();
     cap->loss = stats->loss;
     captureTensor(&cap->values, stats->output);
@@ -1163,6 +1164,167 @@ void testBatchNormMatchesLegacyOnHeap(void) {
     assertRowMatchesLegacy(buildBatchNorm, REMAT_HEAP);
 }
 
+/* ---- one persistent instance across calls (remat P6, P9) ---- */
+
+typedef void (*fixtureEdit_t)(zooFixture_t *f);
+
+/* Two calls from zeroed grads, without zeroing between them, and `edit`
+ * applied to the live fixture between them. */
+static void captureEditedTwoCalls(runner_t runner, zooFixture_t *f, const trainingCall_t *call,
+                                  fixtureEdit_t edit, runCapture_t *cap) {
+    forEachGrad(f->model, f->n, NULL);
+    cap->values.used = 0;
+    rngSetSeed(ZOO_SEED);
+    freeTrainingStats(runOnce(runner, f, call));
+    edit(f);
+    trainingStats_t *stats = runOnce(runner, f, call);
+    cap->seedAfter = rngGetSeed();
+    cap->loss = stats->loss;
+    captureTensor(&cap->values, stats->output);
+    freeTrainingStats(stats);
+    forEachGrad(f->model, f->n, &cap->values);
+}
+
+/* Legacy reads every config live; each cell's scheduler is built on the
+ * unedited fixture before the first call, so its second bind must re-derive
+ * the edited wire (a key-preserving edit, remat P6). */
+static void assertEditedTwoCallsMatchLegacy(void (*build)(zooFixture_t *), fixtureEdit_t edit) {
+    for (size_t k = 0; k < MATRIX_CELLS; k++) {
+        const matrixCell_t *cell = &g_cells[k];
+        zooFixture_t f;
+        build(&f);
+        captureEditedTwoCalls(RUN_LEGACY, &f, NULL, edit, &g_legacy);
+        freeZoo(&f);
+        build(&f);
+        rematScheduler_t s;
+        initCell(&s, cell, &f);
+        captureEditedTwoCalls(RUN_DRIVER, &f, &(trainingCall_t){.remat = &s}, edit, &g_driver);
+        rematSchedulerDeinit(&s);
+        freeZoo(&f);
+        assertSameValues(cell->name);
+        TEST_ASSERT_EQUAL_HEX32_MESSAGE(
+            g_legacy.seedAfter, g_driver.seedAfter,
+            say(cell->name, "remat P2: the global stream after two calls"));
+    }
+}
+
+/* buildQuantSym's ACT template is its first kept template. */
+static symInt32QConfig_t *quantSymActConfig(zooFixture_t *f) {
+    return f->templates[0]->qConfig;
+}
+
+static void raiseTheActWidthTo16(zooFixture_t *f) {
+    quantSymActConfig(f)->qMaxBits = 16;
+}
+
+static void roundTheActStochastically(zooFixture_t *f) {
+    quantSymActConfig(f)->roundingMode = SR_HALF_AWAY;
+}
+
+/* remat P6: qMaxBits 8 -> 16 between two calls on one instance. */
+void testTwoCallsAcrossAWidthEditMatchLegacy(void) {
+    assertEditedTwoCallsMatchLegacy(buildQuantSym, raiseTheActWidthTo16);
+}
+
+/* The draw-count half of testBindRederivesRoundingModeAndDrawCount: after the
+ * switch to stochastic rounding the second call draws from the global stream,
+ * as many times as Legacy's (remat P2). */
+void testTwoCallsAcrossARoundingEditMatchLegacy(void) {
+    assertEditedTwoCallsMatchLegacy(buildQuantSym, roundTheActStochastically);
+}
+
+/* A [1, 4, 4] input quantized to BFP in numGroups groups of groupSize. */
+static tensor_t *makeBfpInput(size_t numGroups, size_t groupSize) {
+    tensor_t *x = makeFloatTensor((size_t[]){1, 4, 4}, 3, 1.0f);
+    quantization_t *q = quantizationInitBfpGrouped(8, 8, HALF_AWAY, numGroups, groupSize);
+    requantizeTensorInPlace(x, q);
+    freeQuantization(q);
+    return x;
+}
+
+/* Flatten at 0 inherits the input's config: ACT 1 is BFP in the input's
+ * grouping, then back to FLOAT32 for the trained Linear. */
+static void buildBfpFlattenAt0(zooFixture_t *f) {
+    beginZoo(f);
+    f->model[0] = flattenLayerInit();
+    f->model[1] = makeQuant(&g_floatQ, &g_floatQ);
+    f->model[2] = makeLinear(16, 2, false);
+    f->n = 3;
+    f->x = makeBfpInput(4, 4);
+    mseLabel(f, 2);
+}
+
+/* The caller re-quantizes its input between calls: {4 x 4} -> {2 x 8} shrinks
+ * within the built exponent capacity (testBindRederivesFlattenBfpGroupingFromTheLiveInput). */
+static void regroupTheInput(zooFixture_t *f) {
+    freeTensor(f->x);
+    f->x = makeBfpInput(2, 8);
+}
+
+void testTwoCallsAcrossAnInputRegroupMatchLegacy(void) {
+    assertEditedTwoCallsMatchLegacy(buildBfpFlattenAt0, regroupTheInput);
+}
+
+/* remat P9, second half: a scheduler built on sample A runs sample B (same shape,
+ * other bytes) exactly as Legacy runs B, and leaves B untouched. */
+void testASchedulerBuiltOnSampleARunsSampleB(void) {
+    for (size_t k = 0; k < MATRIX_CELLS; k++) {
+        const matrixCell_t *cell = &g_cells[k];
+        zooFixture_t f;
+        buildMlp(&f);
+        tensor_t *sampleA = f.x;
+        tensor_t *sampleB = makeFloatTensor((size_t[]){1, 4}, 2, -0.75f);
+        f.x = sampleB;
+        captureRun(RUN_LEGACY, &f, NULL, &g_legacy);
+        f.x = sampleA;
+        rematScheduler_t s;
+        initCell(&s, cell, &f);
+        f.x = sampleB;
+        captureRun(RUN_DRIVER, &f, &(trainingCall_t){.remat = &s}, &g_driver);
+        rematSchedulerDeinit(&s);
+        f.x = sampleA;
+        freeTensor(sampleB);
+        freeZoo(&f);
+        assertConforms(cell->name);
+    }
+}
+
+/* ---- remat P2 has teeth: a row that draws is caught ---- */
+
+/* A row that draws from the global stream in next(): every value still
+ * matches, only remat P2 can see it. */
+static bool drawingNext(rematScheduler_t *s, rematStep_t *st) {
+    (void)rngNextFloat();
+    return decoratedNext(s, st);
+}
+
+static const rematSchedulerFunctions_t g_drawing = {.name = "drawing",
+                                                    .begin = decoratedBegin,
+                                                    .next = drawingNext,
+                                                    .done = decoratedDone,
+                                                    .end = decoratedEnd,
+                                                    .deinit = decoratedDeinit};
+
+void testADrawingRowFailsP2AgainstLegacy(void) {
+    for (size_t k = 0; k < MATRIX_CELLS; k++) {
+        const matrixCell_t *cell = &g_cells[k];
+        zooFixture_t f;
+        buildMlp(&f);
+        captureRun(RUN_LEGACY, &f, NULL, &g_legacy);
+        rematScheduler_t s;
+        initCell(&s, cell, &f);
+        s.fns = &g_drawing;
+        captureRun(RUN_DRIVER, &f, &(trainingCall_t){.remat = &s}, &g_driver);
+        s.fns = &rematSchedulerFunctions[s.type];
+        rematSchedulerDeinit(&s);
+        freeZoo(&f);
+        assertSameValues(cell->name);
+        TEST_ASSERT_NOT_EQUAL_HEX32_MESSAGE(
+            g_legacy.seedAfter, g_driver.seedAfter,
+            say(cell->name, "remat P2: a drawing row moves the stream"));
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testNullPathMatchesLegacyOnTheMlp);
@@ -1227,5 +1389,10 @@ int main(void) {
     RUN_TEST(testCeWithoutSoftmaxMatchesLegacyOnHeap);
     RUN_TEST(testBatchNormMatchesLegacyOnArena);
     RUN_TEST(testBatchNormMatchesLegacyOnHeap);
+    RUN_TEST(testTwoCallsAcrossAWidthEditMatchLegacy);
+    RUN_TEST(testTwoCallsAcrossARoundingEditMatchLegacy);
+    RUN_TEST(testTwoCallsAcrossAnInputRegroupMatchLegacy);
+    RUN_TEST(testASchedulerBuiltOnSampleARunsSampleB);
+    RUN_TEST(testADrawingRowFailsP2AgainstLegacy);
     return UNITY_END();
 }

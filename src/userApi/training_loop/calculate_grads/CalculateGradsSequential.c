@@ -72,7 +72,7 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
     }
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t chk;
-    rematCheckInit(&chk, s, model, modelSize, lossConfig.funcType, producedGen);
+    rematCheckInit(&chk, s, model, modelSize, lossConfig.funcType, REMAT_MODE_TRAIN, producedGen);
 
     rematBegin(s, model, modelSize, lossConfig, input);
     lossFunctions_t lossFns = lossFunctions[lossConfig.funcType];
@@ -115,10 +115,10 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
             }
             tensor_t *x = op.in;
 #ifdef ODT_REMAT_VERIFY
-            /* Strict W_dead: a backward that does not read its
-             * input gets a header without bytes on every plan, so a read the
-             * read-set table denies crashes here instead of passing on the
-             * NULL path and breaking under LIVENESS. */
+            /* Strict W_dead: a backward that does not read its input gets a
+             * header without bytes on every plan, so a read the read-set table
+             * denies crashes here instead of passing on the NULL path and
+             * breaking under LIVENESS. */
             tensor_t dead;
             if (!layerBackwardReadsInput(layer)) {
                 dead = *op.in;

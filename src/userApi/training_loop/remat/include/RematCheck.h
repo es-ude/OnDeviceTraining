@@ -28,6 +28,7 @@ typedef struct rematOperands {
 /* One call's checker state, on the driver's frame. */
 typedef struct rematCheck {
     rematScheduler_t *sched; /* borrowed: the table, and the row name for messages */
+    rematMode_t mode;        /* EVAL admits FORWARD and LOSS_FORWARD only */
     layer_t **model;
     size_t n;
     size_t deepest; /* rematBackwardRange on the LIVE model */
@@ -46,16 +47,16 @@ typedef struct rematCheck {
  * block failed after that -- e.g. ARENA's data block -- is caught by
  * rematBegin instead. */
 size_t rematCheckNumWires(const rematScheduler_t *s);
-/* Before rematBegin. Zeroes producedGen[0..numWires) (a VLA has no
- * initialiser). */
+/* Before rematBegin / rematBeginEval, in the same mode. Zeroes
+ * producedGen[0..numWires) (a VLA has no initialiser). */
 void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, layer_t **model, size_t n,
-                    lossFuncType_t lt, uint32_t *producedGen);
+                    lossFuncType_t lt, rematMode_t mode, uint32_t *producedGen);
 /* Checks one step and resolves its operands into *ops; exits on a violation,
  * before the driver runs anything. */
 void rematCheckStep(rematCheck_t *c, const rematStep_t *st, rematOperands_t *ops);
-/* After the last step, before rematEnd: every FORWARD, LOSS_FORWARD, and when
- * something trains LOSS_BACKWARD and every BACKWARD down to deepest ran;
- * else exits naming the first missing step. */
+/* After the last step, before rematEnd: every FORWARD, LOSS_FORWARD, and in
+ * TRAIN when something trains LOSS_BACKWARD and every BACKWARD down to
+ * deepest ran; else exits naming the first missing step. */
 void rematCheckFinish(const rematCheck_t *c);
 /* After rematEnd: no non-borrowed wire is bound and ACT 0 is unbound. */
 void rematCheckReleased(const rematCheck_t *c);

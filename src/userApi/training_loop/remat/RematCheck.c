@@ -23,12 +23,13 @@ size_t rematCheckNumWires(const rematScheduler_t *s) {
 }
 
 void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, layer_t **model, size_t n,
-                    lossFuncType_t lt, uint32_t *producedGen) {
+                    lossFuncType_t lt, rematMode_t mode, uint32_t *producedGen) {
     size_t numWires = rematCheckNumWires(s);
     size_t deepest;
     ptrdiff_t top;
     rematBackwardRange(model, n, lt, &deepest, &top);
     *c = (rematCheck_t){.sched = s,
+                        .mode = mode,
                         .model = model,
                         .n = n,
                         .deepest = deepest,
@@ -68,8 +69,13 @@ static const char *kindName(uint8_t kind) {
     } while (false)
 
 /* Rule 1: before any resolution, so an out-of-range layer never
- * indexes the model or the table. */
+ * indexes the model or the table. In EVAL the kind is judged before the
+ * layer. */
 static void requireKindAndLayer(const rematCheck_t *c, const rematStep_t *st) {
+    if (c->mode == REMAT_MODE_EVAL &&
+        (st->kind == REMAT_STEP_LOSS_BACKWARD || st->kind == REMAT_STEP_BACKWARD)) {
+        REMAT_CHECK_EXIT(c, st, "'step not allowed in eval'");
+    }
     switch (st->kind) {
     case REMAT_STEP_FORWARD:
     case REMAT_STEP_BACKWARD:
@@ -323,6 +329,9 @@ void rematCheckFinish(const rematCheck_t *c) {
     }
     if (!c->lossForwardSeen) {
         REMAT_FINISH_EXIT(c, "'incomplete stream: missing LOSS_FORWARD'");
+    }
+    if (c->mode == REMAT_MODE_EVAL) {
+        return; /* an eval stream is its forward half */
     }
     if (c->hasBackward && !c->lossBackwardSeen) {
         REMAT_FINISH_EXIT(c, "'incomplete stream: missing LOSS_BACKWARD'");

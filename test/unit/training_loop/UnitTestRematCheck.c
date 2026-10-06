@@ -84,7 +84,7 @@ void testInitSetsTheCursorsFromTheLiveModelAndZeroesProducedGen(void) {
     uint32_t producedGen[numWires];
     memset(producedGen, 0xA5, sizeof producedGen);
     rematCheck_t c;
-    rematCheckInit(&c, &s, live.model, live.n, live.lt, producedGen);
+    rematCheckInit(&c, &s, live.model, live.n, live.lt, REMAT_MODE_TRAIN, producedGen);
     TEST_ASSERT_EQUAL_PTR(&s, c.sched);
     TEST_ASSERT_EQUAL_PTR(live.model, c.model);
     TEST_ASSERT_EQUAL_size_t(HAR_N, c.n);
@@ -154,7 +154,7 @@ static void checkedCall(fixture_t *f, rematScheduler_t *s) {
     const rematWireTable_t *t = s->wires;
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t c;
-    rematCheckInit(&c, s, f->model, f->n, f->lt, producedGen);
+    rematCheckInit(&c, s, f->model, f->n, f->lt, REMAT_MODE_TRAIN, producedGen);
     rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
     rematStep_t st;
     while (rematNext(s, &st)) {
@@ -209,6 +209,113 @@ void testCheckAcceptsEveryStepOnHeapF1(void) {
     assertEveryStepAccepted(initHeap, buildF1Model);
 }
 
+/* An eval call with the checker: FORWARD 0..n-1 and LOSS_FORWARD resolve as
+ * in TRAIN, and the stream is complete without any backward step. */
+static void checkedEvalCall(fixture_t *f, rematScheduler_t *s) {
+    const rematWireTable_t *t = s->wires;
+    uint32_t producedGen[rematCheckNumWires(s)];
+    rematCheck_t c;
+    rematCheckInit(&c, s, f->model, f->n, f->lt, REMAT_MODE_EVAL, producedGen);
+    rematBeginEval(s, f->model, f->n, f->lt, f->x);
+    rematStep_t st;
+    while (rematNext(s, &st)) {
+        rematOperands_t op;
+        rematCheckStep(&c, &st, &op);
+        assertResolved(&c, &st, &op);
+        rematDone(s, &st);
+    }
+    TEST_ASSERT_EQUAL_size_t(f->n + 1u, c.stepIndex);
+    TEST_ASSERT_TRUE(c.lossForwardSeen);
+    TEST_ASSERT_FALSE(c.lossBackwardSeen);
+    for (size_t j = 1; j <= f->n; j++) {
+        TEST_ASSERT_NOT_EQUAL_UINT32(0, producedGen[rematActId(t, j)]);
+    }
+    rematCheckFinish(&c);
+    rematEnd(s);
+    rematCheckReleased(&c);
+}
+
+void testCheckAcceptsAnEvalCallOnEitherRow(void) {
+    rowInit_t inits[2] = {initArena, initHeap};
+    for (size_t k = 0; k < 2u; k++) {
+        fixture_t f;
+        buildHarModel(&f);
+        rematScheduler_t s = inits[k](&f, &g_liveness);
+        checkedEvalCall(&f, &s);
+        checkedCall(&f, &s);
+        checkedEvalCall(&f, &s);
+        freeFixture(&f, &s);
+    }
+}
+
+/* Rule 1 in EVAL: only FORWARD and LOSS_FORWARD. The kind is judged before
+ * the layer, so a BACKWARD with an out-of-range layer names the eval rule. */
+static void evalCheckerGets(fixture_t *f, rematScheduler_t *s, rematStep_t st) {
+    uint32_t producedGen[rematCheckNumWires(s)];
+    rematCheck_t c;
+    rematCheckInit(&c, s, f->model, f->n, f->lt, REMAT_MODE_EVAL, producedGen);
+    rematOperands_t op;
+    rematCheckStep(&c, &st, &op);
+}
+
+void testEvalRejectsALossBackward(void) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initHeap(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "remat[heap]: step #0 LOSS_BACKWARD(layer 12) violates 'step not allowed in eval'",
+        evalCheckerGets(&f, &s, (rematStep_t){.kind = REMAT_STEP_LOSS_BACKWARD, .layer = 12}));
+    freeFixture(&f, &s);
+}
+
+void testEvalRejectsABackwardBeforeItsLayerIsChecked(void) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initHeap(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "remat[heap]: step #0 BACKWARD(layer 99) violates 'step not allowed in eval'",
+        evalCheckerGets(&f, &s, (rematStep_t){.kind = REMAT_STEP_BACKWARD, .layer = 99}));
+    freeFixture(&f, &s);
+}
+
+/* The eval rule names only the two backward kinds: an unknown kind in EVAL
+ * still reaches the unknown-kind exit, as in TRAIN. */
+void testEvalStillNamesAnUnknownStepKind(void) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initHeap(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "remat[heap]: step #0 UNKNOWN(layer 0) violates 'unknown step kind' (kind 9)",
+        evalCheckerGets(&f, &s, (rematStep_t){.kind = 9u, .layer = 0u}));
+    freeFixture(&f, &s);
+}
+
+/* An eval stream that stops after FORWARD(n-1) misses its LOSS_FORWARD. */
+static void evalStreamWithoutLossForward(fixture_t *f, rematScheduler_t *s) {
+    uint32_t producedGen[rematCheckNumWires(s)];
+    rematCheck_t c;
+    rematCheckInit(&c, s, f->model, f->n, f->lt, REMAT_MODE_EVAL, producedGen);
+    rematBeginEval(s, f->model, f->n, f->lt, f->x);
+    rematStep_t st;
+    for (size_t k = 0; k < f->n; k++) {
+        TEST_ASSERT_TRUE(rematNext(s, &st));
+        rematOperands_t op;
+        rematCheckStep(&c, &st, &op);
+        rematDone(s, &st);
+    }
+    rematCheckFinish(&c);
+}
+
+void testEvalFinishExitsOnAMissingLossForward(void) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initHeap(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "remat[heap]: stream of 12 steps violates 'incomplete stream: missing LOSS_FORWARD'",
+        evalStreamWithoutLossForward(&f, &s));
+    freeFixture(&f, &s);
+}
+
 /* Literal positions on HAR (steps: FORWARD l = l, LOSS_FORWARD 12,
  * LOSS_BACKWARD 13, BACKWARD(l) = 24 - l): the CE skip hands BACKWARD(10) the
  * seed GRAD 12, BACKWARD(9) gets GRAD 10, and BACKWARD(0) is grads-only.
@@ -221,7 +328,7 @@ void testOperandsAreResolvedPositionallyOnHar(void) {
     const rematWireTable_t *t = s.wires;
     uint32_t producedGen[rematCheckNumWires(&s)];
     rematCheck_t c;
-    rematCheckInit(&c, &s, f.model, f.n, f.lt, producedGen);
+    rematCheckInit(&c, &s, f.model, f.n, f.lt, REMAT_MODE_TRAIN, producedGen);
     rematBegin(&s, f.model, f.n, defaultLossConfig(f.lt), f.x);
     rematOperands_t at[25];
     rematStep_t st;
@@ -264,7 +371,7 @@ static void offerStep(fixture_t *f, rematScheduler_t *s, size_t k, const rematSt
                       tamperFn_t tamper) {
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t c;
-    rematCheckInit(&c, s, f->model, f->n, f->lt, producedGen);
+    rematCheckInit(&c, s, f->model, f->n, f->lt, REMAT_MODE_TRAIN, producedGen);
     rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
     rematStep_t st;
     rematOperands_t op;
@@ -333,7 +440,7 @@ void testStepExitsOnALossStepWhoseLayerIsNotN(void) {
 static void driveCall(fixture_t *f, rematScheduler_t *s) {
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t c;
-    rematCheckInit(&c, s, f->model, f->n, f->lt, producedGen);
+    rematCheckInit(&c, s, f->model, f->n, f->lt, REMAT_MODE_TRAIN, producedGen);
     rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
     rematStep_t st;
     rematOperands_t op;
@@ -491,7 +598,7 @@ void testStepExitsOnABackwardAfterTheLastOne(void) {
 static void twoCallsOnOneChecker(fixture_t *f, rematScheduler_t *s) {
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t c;
-    rematCheckInit(&c, s, f->model, f->n, f->lt, producedGen);
+    rematCheckInit(&c, s, f->model, f->n, f->lt, REMAT_MODE_TRAIN, producedGen);
     for (int call = 0; call < 2; call++) {
         rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
         rematStep_t st;
@@ -733,7 +840,7 @@ void testStepAcceptsADeadInputSharingBytesWithTheOutput(void) {
 static void finishAfter(fixture_t *f, rematScheduler_t *s, size_t k) {
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t c;
-    rematCheckInit(&c, s, f->model, f->n, f->lt, producedGen);
+    rematCheckInit(&c, s, f->model, f->n, f->lt, REMAT_MODE_TRAIN, producedGen);
     rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
     rematStep_t st;
     rematOperands_t op;
@@ -891,7 +998,7 @@ void testReleasedExitsWhenARowLeavesAWireResident(void) {
 static void releasedBeforeEnd(fixture_t *f, rematScheduler_t *s) {
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t c;
-    rematCheckInit(&c, s, f->model, f->n, f->lt, producedGen);
+    rematCheckInit(&c, s, f->model, f->n, f->lt, REMAT_MODE_TRAIN, producedGen);
     rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
     rematStep_t st;
     rematOperands_t op;
@@ -924,7 +1031,7 @@ void testCheckReservesNothing(void) {
     size_t before = memProfileCurrentBytes();
     uint32_t producedGen[rematCheckNumWires(&s)];
     rematCheck_t c;
-    rematCheckInit(&c, &s, f.model, f.n, f.lt, producedGen);
+    rematCheckInit(&c, &s, f.model, f.n, f.lt, REMAT_MODE_TRAIN, producedGen);
     TEST_ASSERT_EQUAL_size_t(before, memProfileCurrentBytes());
     rematBegin(&s, f.model, f.n, defaultLossConfig(f.lt), f.x);
     rematStep_t st;
@@ -952,6 +1059,11 @@ int main(void) {
     RUN_TEST(testCheckAcceptsEveryStepOnArenaF1);
     RUN_TEST(testCheckAcceptsEveryStepOnHeapHar);
     RUN_TEST(testCheckAcceptsEveryStepOnHeapF1);
+    RUN_TEST(testCheckAcceptsAnEvalCallOnEitherRow);
+    RUN_TEST(testEvalRejectsALossBackward);
+    RUN_TEST(testEvalRejectsABackwardBeforeItsLayerIsChecked);
+    RUN_TEST(testEvalStillNamesAnUnknownStepKind);
+    RUN_TEST(testEvalFinishExitsOnAMissingLossForward);
     RUN_TEST(testOperandsAreResolvedPositionallyOnHar);
     RUN_TEST(testStepExitsOnAnUnknownStepKind);
     RUN_TEST(testStepExitsOnALayerOutOfRangeBeforeResolvingIt);

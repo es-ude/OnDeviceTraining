@@ -811,19 +811,42 @@ static void freeEvalFixture(evalFixture_t *f) {
     freeQuantization(f->q);
 }
 
-/* Until #4 PR3 runs eval on a caller's scheduler, one passed here would be
- * ignored without a word, so the call exits first. #4 PR3 turns this test
- * into its positive path on the same initialised instance. */
-void testInferenceWithLossRejectsASchedulerUntilPR3(void) {
+/* Evaluation on a caller's scheduler (remat D19): output and loss equal the
+ * NULL path's bit for bit, on either row, on two calls of one instance. The
+ * death-test wrapper keeps a wrong exit from ending the binary. */
+void testInferenceWithLossRunsOnACallersScheduler(void) {
     evalFixture_t f;
     buildEvalFixture(&f);
-    rematScheduler_t s;
-    TEST_ASSERT_TRUE(rematHeapInit(&s, f.model, 2, defaultLossConfig(MSE), f.input, NULL));
-    ASSERT_EXITS_WITH_OUTPUT(1, "inferenceWithLoss: remat scheduler not supported before PR3",
-                             (void)inferenceWithLoss(f.model, 2, f.input, f.label, MSE,
-                                                     REDUCTION_MEAN,
-                                                     &(trainingCall_t){.remat = &s}));
-    rematSchedulerDeinit(&s);
+    inferenceStats_t *ref =
+        inferenceWithLoss(f.model, 2, f.input, f.label, MSE, REDUCTION_MEAN, NULL);
+    rematScheduler_t heap;
+    rematScheduler_t arena;
+    TEST_ASSERT_TRUE(rematHeapInit(&heap, f.model, 2, defaultLossConfig(MSE), f.input, NULL));
+    TEST_ASSERT_TRUE(rematArenaInit(&arena, f.model, 2, defaultLossConfig(MSE), f.input, NULL));
+    rematScheduler_t *rows[2] = {&heap, &arena};
+    for (size_t k = 0; k < 2u; k++) {
+        const trainingCall_t call = {.remat = rows[k]};
+        ASSERT_EXITS_WITH_OUTPUT(0, "",
+                                 freeInferenceStats(inferenceWithLoss(f.model, 2, f.input, f.label,
+                                                                      MSE, REDUCTION_MEAN, &call)));
+        for (int rep = 0; rep < 2; rep++) {
+            inferenceStats_t *got =
+                inferenceWithLoss(f.model, 2, f.input, f.label, MSE, REDUCTION_MEAN, &call);
+            TEST_ASSERT_EQUAL_MEMORY(&ref->loss, &got->loss, sizeof(float));
+            TEST_ASSERT_EQUAL_size_t(2, got->output->shape->numberOfDimensions);
+            TEST_ASSERT_EQUAL_size_t(2, got->output->shape->dimensions[1]);
+            TEST_ASSERT_EQUAL_MEMORY(ref->output->data, got->output->data, 2 * sizeof(float));
+            freeInferenceStats(got);
+            /* The call ran on the scheduler: its accounting saw the eval peak,
+             * ACT 1 + ACT 2 = two [1, 2] float wires = 16 B. */
+            rematReport_t report;
+            rematSchedulerReport(rows[k], &report);
+            TEST_ASSERT_EQUAL_size_t(16, report.observedPeakLiveBytes);
+        }
+    }
+    rematSchedulerDeinit(&arena);
+    rematSchedulerDeinit(&heap);
+    freeInferenceStats(ref);
     freeEvalFixture(&f);
 }
 
@@ -871,7 +894,7 @@ int main(void) {
     RUN_TEST(testInferenceWithLossFactoryMaxPoolGrowsToBatch2);
 
     RUN_TEST(testInferenceBatchedAddsBatchAxisToNaturalSamples);
-    RUN_TEST(testInferenceWithLossRejectsASchedulerUntilPR3);
+    RUN_TEST(testInferenceWithLossRunsOnACallersScheduler);
     RUN_TEST(testInferenceWithLossTakesACallWithoutAScheduler);
     return UNITY_END();
 }

@@ -1,6 +1,7 @@
 #define SOURCE_FILE "INFERENCE_Api"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +21,8 @@
 #include "MaxPool1d.h"
 #include "QuantizationLayer.h"
 #include "Relu.h"
+#include "RematCheck.h"
+#include "RematScheduler.h"
 #include "Softmax.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -231,14 +234,52 @@ void freeInferenceStats(inferenceStats_t *inferenceStats) {
     freeReservedMemory(inferenceStats);
 }
 
+/* The eval half of the validating interpreter (CalculateGradsSequential.c):
+ * the scheduler hands out FORWARD and LOSS_FORWARD steps of its EVAL program,
+ * the checker validates each before it runs, and ACT 0 is the caller's input,
+ * borrowed, not copied. No hook fires and no training-mode flag changes. */
+static inferenceStats_t *inferenceOnScheduler(layer_t **model, size_t numberOfLayers,
+                                              tensor_t *input, tensor_t *label,
+                                              lossFuncType_t funcType, reduction_t forwardReduction,
+                                              rematScheduler_t *s) {
+    uint32_t producedGen[rematCheckNumWires(s)];
+    rematCheck_t chk;
+    rematCheckInit(&chk, s, model, numberOfLayers, funcType, REMAT_MODE_EVAL, producedGen);
+    rematBeginEval(s, model, numberOfLayers, funcType, input);
+    inferenceStats_t *inferenceStats = NULL;
+    for (;;) {
+        rematStep_t st;
+        if (!rematNext(s, &st)) {
+            break;
+        }
+        rematOperands_t op;
+        rematCheckStep(&chk, &st, &op);
+        if (st.kind == REMAT_STEP_FORWARD) {
+            layer_t *layer = model[st.layer];
+            layerFunctions[layer->type].forward(layer, op.in, op.out);
+        } else { /* LOSS_FORWARD: the checker admits nothing else in EVAL */
+            /* As on the NULL path: the loss first (a label whose shape differs
+             * from the output exits before the stats exist, #153), and all of it
+             * before rematDone releases ACT n. */
+            float loss = lossFunctions[funcType].forward(op.in, label, forwardReduction);
+            inferenceStats = reserveInferenceStats(op.in);
+            convertTensor(op.in, inferenceStats->output);
+            inferenceStats->loss = loss;
+        }
+        rematDone(s, &st);
+    }
+    rematCheckFinish(&chk);
+    rematEnd(s);
+    rematCheckReleased(&chk);
+    return inferenceStats;
+}
+
 inferenceStats_t *inferenceWithLoss(layer_t **model, size_t numberOfLayers, tensor_t *input,
                                     tensor_t *label, lossFuncType_t funcType,
                                     reduction_t forwardReduction, const trainingCall_t *call) {
     if (call != NULL && call->remat != NULL) {
-        /* Ignoring the caller's scheduler would hide that eval did not run on
-         * it; #4 PR3 adds that path. */
-        PRINT_ERROR("inferenceWithLoss: remat scheduler not supported before PR3");
-        exit(1);
+        return inferenceOnScheduler(model, numberOfLayers, input, label, funcType, forwardReduction,
+                                    call->remat);
     }
     tensor_t outputNext;
     initBufferInput(input, &outputNext);

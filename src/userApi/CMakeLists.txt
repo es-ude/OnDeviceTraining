@@ -37,6 +37,8 @@ target_link_libraries(InferenceApi PRIVATE
         LossFunction
         Common
         DataLoader
+        RematScheduler
+        RematCheck
 )
 
 add_library(StorageApi StorageApi.c)

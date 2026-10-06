@@ -14,8 +14,8 @@ typedef struct trainingCall {
     /* NULLable; NULL = an ephemeral scheduler per grads call (remat D30).
      * Otherwise borrowed: initialised and deinitialised by the caller, keyed
      * to the model and to the input shape the grads level receives. Read by
-     * the grads level; the batch and epoch levels pass it down; the eval
-     * level refuses a non-NULL one until #4 PR3 (remat D19). */
+     * the grads and the eval level; the batch and epoch levels pass it down
+     * (remat D19). */
     rematScheduler_t *remat;
 } trainingCall_t;
 

@@ -1250,6 +1250,48 @@ void testRowContractHeapF1AcrossModesLiveness(void) {
     assertRowContractAcrossModes(initHeap, buildF1Model, &g_liveness);
 }
 
+/* On ARENA the walk also pins "eval adds 0 B": under ODT_MEM_PROFILE the
+ * row holds nothing beyond its init blocks at any step of an eval call. */
+void testRowContractArenaHarAcrossModes(void) {
+    assertRowContractAcrossModes(initArena, buildHarModel, NULL);
+}
+
+void testRowContractArenaF1AcrossModesLiveness(void) {
+    assertRowContractAcrossModes(initArena, buildF1Model, &g_liveness);
+}
+
+/* EVAL places two-ended inside the training arena: an even ACT at offset 0,
+ * an odd ACT top-aligned at bytes - placed. ACT j and ACT j+1 are co-live at
+ * TRAIN's FORWARD(j), so the verified TRAIN layout proves they fit together. */
+static void assertEvalOffsetsAreTwoEnded(void (*build)(fixture_t *)) {
+    fixture_t f;
+    build(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    rematBeginEval(&s, f.model, f.n, f.lt, f.x);
+    rematStep_t st;
+    while (rematNext(&s, &st)) {
+        for (uint16_t j = 1; j <= f.n; j++) {
+            const uint8_t *data = rematActHdr(s.wires, j)->data;
+            if (data == NULL) {
+                continue;
+            }
+            size_t offset = (size_t)(data - s.row.arena.base);
+            size_t expected =
+                (j % 2u == 0u) ? 0u
+                               : s.row.arena.bytes - arenaPlaced(s.wires, rematActId(s.wires, j));
+            TEST_ASSERT_EQUAL_size_t_MESSAGE(expected, offset, "an EVAL ACT is not two-ended");
+        }
+        rematDone(&s, &st);
+    }
+    rematEnd(&s);
+    freeFixture(&f, &s);
+}
+
+void testArenaEvalPlacesEvenActsAtTheBottomAndOddActsAtTheTop(void) {
+    assertEvalOffsetsAreTwoEnded(buildHarModel);
+    assertEvalOffsetsAreTwoEnded(buildF1Model);
+}
+
 void testRowContractArenaHarStoreAll(void) {
     assertRowContract(initArena, buildHarModel, NULL);
 }
@@ -1383,6 +1425,29 @@ void testArenaPadStaysPoisonedWhileBound(void) {
     rematScheduler_t s = initArena(&f, NULL);
     ASSERT_EXITS_WITH_OUTPUT(ODT_ASAN_DEATH_EXIT, "payload-readable",
                              readThePadOfABoundWire(&f, &s));
+    freeFixture(&f, &s);
+}
+
+/* The same in EVAL, where F1's ACT 1 (BFP, 5 B, odd) sits top-aligned: its
+ * 3-byte pad is the arena's last bytes. */
+static void readThePadOfATopPlacedEvalWire(fixture_t *f, rematScheduler_t *s) {
+    odtInstallAsanDeathExit();
+    rematBeginEval(s, f->model, f->n, f->lt, f->x);
+    rematStep_t st;
+    (void)rematNext(s, &st); /* FORWARD 0 binds ACT 1 */
+    volatile uint8_t *act1 = rematWireHdr(s->wires, 1)->data;
+    (void)act1[4];
+    printf("payload-readable\n");
+    (void)fflush(stdout);
+    (void)act1[5];
+}
+
+void testArenaEvalPadStaysPoisonedWhileBound(void) {
+    fixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(ODT_ASAN_DEATH_EXIT, "payload-readable",
+                             readThePadOfATopPlacedEvalWire(&f, &s));
     freeFixture(&f, &s);
 }
 
@@ -2055,11 +2120,15 @@ int main(void) {
     RUN_TEST(testRowContractHeapF1Liveness);
     RUN_TEST(testRowContractHeapHarAcrossModes);
     RUN_TEST(testRowContractHeapF1AcrossModesLiveness);
+    RUN_TEST(testRowContractArenaHarAcrossModes);
+    RUN_TEST(testRowContractArenaF1AcrossModesLiveness);
+    RUN_TEST(testArenaEvalPlacesEvenActsAtTheBottomAndOddActsAtTheTop);
     RUN_TEST(testArenaHarLivenessBindsFlattenDxAfterItsSourceDied);
     RUN_TEST(testReportObservedPeakEqualsThePlannedPeak);
 #ifdef ODT_TEST_ASAN
     RUN_TEST(testArenaIsPoisonedUntilARangeOpens);
     RUN_TEST(testArenaPadStaysPoisonedWhileBound);
+    RUN_TEST(testArenaEvalPadStaysPoisonedWhileBound);
     RUN_TEST(testArenaReadAfterReleaseTripsAsan);
 #endif
     RUN_TEST(testHeapInitBuildsTheTableAndThePlan);

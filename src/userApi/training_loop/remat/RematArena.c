@@ -260,15 +260,28 @@ void rematArenaBegin(rematScheduler_t *s) {
     s->walk = (rematWalk_t){0};
 }
 
+/* TRAIN: the verified placement. EVAL, two-ended inside the same arena: ACT j
+ * even at offset 0, odd top-aligned. ACT j and ACT j+1 are co-live at TRAIN's
+ * FORWARD(j), so the verified layout proves placed(j) + placed(j+1) <= bytes;
+ * bytes is a multiple of ODT_WIRE_ALIGN, so a top offset is aligned; ACT 0 is
+ * borrowed. Eval therefore adds no byte to the arena. */
+static size_t arenaOffset(const rematScheduler_t *s, const rematProgram_t *p, size_t r) {
+    if (s->mode == REMAT_MODE_TRAIN) {
+        return s->row.arena.offsets[r];
+    }
+    uint16_t w = p->ranges[r].wire;
+    return (w % 2u == 0u) ? 0u : s->row.arena.bytes - arenaPlaced(s->wires, w);
+}
+
 bool rematArenaNext(rematScheduler_t *s, rematStep_t *st) {
-    const rematProgram_t *p = &s->plan->train; /* PR3: the program of the call's mode */
+    const rematProgram_t *p = rematPlanProgram(s->plan, s->mode);
     if (s->walk.step == p->numSteps) {
         return false;
     }
     for (size_t r; (r = rematWalkOpening(p, &s->walk)) != REMAT_NONE;) {
         /* The id comes from the range that was placed, never from rematGradId. */
         uint16_t w = p->ranges[r].wire;
-        uint8_t *b = s->row.arena.base + s->row.arena.offsets[r];
+        uint8_t *b = s->row.arena.base + arenaOffset(s, p, r);
         ODT_ASAN_UNPOISON(b, rematWireBytes(s->wires, w)); /* exact bytes: the pad stays poisoned */
         rematWireBind(s->wires, w, b); /* bindGen++, accounting, VERIFY poison-at-bind */
     }
@@ -278,7 +291,7 @@ bool rematArenaNext(rematScheduler_t *s, rematStep_t *st) {
 
 void rematArenaDone(rematScheduler_t *s, const rematStep_t *st) {
     (void)st; /* the dispatch checks that done() answers the step next() handed out */
-    const rematProgram_t *p = &s->plan->train;
+    const rematProgram_t *p = rematPlanProgram(s->plan, s->mode);
     for (size_t r; (r = rematWalkClosing(p, &s->walk)) != REMAT_NONE;) {
         uint16_t w = p->ranges[r].wire;
         uint8_t *b = rematWireHdr(s->wires, w)->data;

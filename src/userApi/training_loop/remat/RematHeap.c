@@ -26,7 +26,7 @@ void rematHeapBegin(rematScheduler_t *s) {
 }
 
 bool rematHeapNext(rematScheduler_t *s, rematStep_t *st) {
-    const rematProgram_t *p = &s->plan->train; /* PR3: the program of the call's mode */
+    const rematProgram_t *p = rematPlanProgram(s->plan, s->mode);
     if (s->walk.step == p->numSteps) {
         return false;
     }
@@ -52,7 +52,7 @@ bool rematHeapNext(rematScheduler_t *s, rematStep_t *st) {
 
 void rematHeapDone(rematScheduler_t *s, const rematStep_t *st) {
     (void)st; /* the dispatch checks that done() answers the step next() handed out */
-    const rematProgram_t *p = &s->plan->train;
+    const rematProgram_t *p = rematPlanProgram(s->plan, s->mode);
     for (size_t r; (r = rematWalkClosing(p, &s->walk)) != REMAT_NONE;) {
         uint16_t w = p->ranges[r].wire;
         uint8_t *b = rematWireHdr(s->wires, w)->data;

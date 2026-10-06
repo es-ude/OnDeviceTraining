@@ -94,6 +94,7 @@ struct rematScheduler {
     rematWireTable_t *wires; /* shared buffer table: one reserveMemory block */
     rematPlan_t *plan;       /* shared static plan: one reserveMemory block, placement-free */
     bool inCall;             /* rematBegin..rematEnd; a re-entry guard, NOT a lock */
+    rematMode_t mode;        /* the program this call walks: set by rematBegin/rematBeginEval */
     rematWalk_t walk;        /* the static-plan cursor of the current call */
     /* The call protocol, owned by the dispatch for every row: next() handed
      * out `handed`, and done() has not answered it yet. */
@@ -153,6 +154,12 @@ void rematSchedulerReport(const rematScheduler_t *s, rematReport_t *out);
  * per-bind derivation, ACT 0 = input) before the row's begin; rematEnd
  * unbinds it after the row's end. */
 void rematBegin(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss, tensor_t *input);
+/* An evaluation call on the same instance: the same guards and key check, then
+ * the plan's EVAL program (FORWARD and LOSS_FORWARD only); no GRAD header is
+ * written. The eval caller has only the loss type, which is all the bind
+ * keys. */
+void rematBeginEval(rematScheduler_t *s, layer_t **model, size_t modelSize, lossFuncType_t lossType,
+                    tensor_t *input);
 bool rematNext(rematScheduler_t *s, rematStep_t *step);
 void rematDone(rematScheduler_t *s, const rematStep_t *step);
 void rematEnd(rematScheduler_t *s);

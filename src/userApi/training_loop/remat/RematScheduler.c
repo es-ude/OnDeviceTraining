@@ -30,20 +30,34 @@ static void requireInCall(const rematScheduler_t *s, const char *call) {
     }
 }
 
-void rematBegin(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss,
-                tensor_t *input) {
+/* Both begins: the guards name the verb the caller used. The mode is set
+ * before the row's begin, which walks that mode's program. */
+static void beginCall(rematScheduler_t *s, const char *verb, layer_t **model, size_t n,
+                      lossFuncType_t lt, rematMode_t mode, tensor_t *input) {
     if (s->fns == NULL || s->wires == NULL || s->plan == NULL) {
-        PRINT_ERROR("rematBegin: scheduler not initialised (never initialised, or its init "
-                    "returned false and was ignored)");
+        PRINT_ERROR("%s: scheduler not initialised (never initialised, or its init "
+                    "returned false and was ignored)",
+                    verb);
         exit(1);
     }
     if (s->inCall) {
-        PRINT_ERROR("rematBegin: scheduler '%s' re-entered", s->fns->name);
+        PRINT_ERROR("%s: scheduler '%s' re-entered", verb, s->fns->name);
         exit(1);
     }
-    rematWireTableBind(s->wires, model, n, loss.funcType, REMAT_MODE_TRAIN, input);
+    rematWireTableBind(s->wires, model, n, lt, mode, input);
+    s->mode = mode;
     s->inCall = true;
     s->fns->begin(s);
+}
+
+void rematBegin(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss,
+                tensor_t *input) {
+    beginCall(s, "rematBegin", model, n, loss.funcType, REMAT_MODE_TRAIN, input);
+}
+
+void rematBeginEval(rematScheduler_t *s, layer_t **model, size_t modelSize, lossFuncType_t lossType,
+                    tensor_t *input) {
+    beginCall(s, "rematBeginEval", model, modelSize, lossType, REMAT_MODE_EVAL, input);
 }
 
 /* next() and done() alternate, and done() answers exactly the step next()
@@ -107,7 +121,7 @@ void rematSchedulerDeinit(rematScheduler_t *s) {
 }
 
 void rematRequireWalkComplete(const rematScheduler_t *s, const char *row) {
-    const rematProgram_t *p = &s->plan->train; /* PR3: the program of the call's mode */
+    const rematProgram_t *p = rematPlanProgram(s->plan, s->mode);
     if (s->walk.step != p->numSteps || s->walk.close != p->numRanges) {
         PRINT_ERROR("remat[%s]: rematEnd before the walk completed: %zu of %zu steps done, "
                     "%zu of %zu ranges closed",

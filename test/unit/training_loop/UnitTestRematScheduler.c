@@ -882,6 +882,15 @@ static void endAndUnbind(rematScheduler_t *s) {
     rematEnd(s);
 }
 
+/* One call in `mode`: rematBegin for TRAIN, rematBeginEval for EVAL. */
+static void bindAndBeginIn(fixture_t *f, rematScheduler_t *s, rematMode_t mode) {
+    if (mode == REMAT_MODE_EVAL) {
+        rematBeginEval(s, f->model, f->n, f->lt, f->x);
+    } else {
+        bindAndBegin(f, s);
+    }
+}
+
 static size_t walkAll(fixture_t *f, rematScheduler_t *s) {
     bindAndBegin(f, s);
     rematStep_t st;
@@ -1157,12 +1166,12 @@ static size_t heldInsideTheCall(const rematScheduler_t *s) {
 /* One call with every row-contract assert, plus: every bound wire aligned,
  * exactly the plan's live wires bound, and the row's reserved bytes exactly what it must hold after
  * every next and every done, peaking at the plan's peak on HEAP (0 on ARENA). */
-static void walkWithTheContractChecks(fixture_t *f, rematScheduler_t *s) {
+static void walkWithTheContractChecks(fixture_t *f, rematScheduler_t *s, rematMode_t mode) {
     rematWireTable_t *t = s->wires;
-    const rematProgram_t *p = &s->plan->train;
+    const rematProgram_t *p = rematPlanProgram(s->plan, mode);
     size_t memAfterInit = memProfileCurrentBytes();
     size_t peakHeld = 0;
-    bindAndBegin(f, s);
+    bindAndBeginIn(f, s, mode);
     TEST_ASSERT_EQUAL_PTR(f->x, rematActHdr(t, 0));
     rematStep_t st;
     size_t step = 0;
@@ -1208,11 +1217,37 @@ static void assertRowContract(rowInit_t init, void (*build)(fixture_t *),
     build(&f);
     uint32_t seed = rngGetSeed();
     rematScheduler_t s = init(&f, spec);
-    walkWithTheContractChecks(&f, &s);
-    walkWithTheContractChecks(&f, &s);
+    walkWithTheContractChecks(&f, &s, REMAT_MODE_TRAIN);
+    walkWithTheContractChecks(&f, &s, REMAT_MODE_TRAIN);
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(seed, rngGetSeed(), "a row touched the global RNG stream");
     freeFixture(&f, &s);
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(seed, rngGetSeed(), "a row touched the global RNG stream");
+}
+
+/* Evaluation on a persistent scheduler between training calls: every call
+ * walks its own mode's program under every contract check (on HEAP one
+ * exactly-sized block per EVAL range, peaking at the EVAL program's peak), and
+ * the training call after two eval calls is unaffected. */
+static void assertRowContractAcrossModes(rowInit_t init, void (*build)(fixture_t *),
+                                         const rematPlanSpec_t *spec) {
+    fixture_t f;
+    build(&f);
+    uint32_t seed = rngGetSeed();
+    rematScheduler_t s = init(&f, spec);
+    walkWithTheContractChecks(&f, &s, REMAT_MODE_TRAIN);
+    walkWithTheContractChecks(&f, &s, REMAT_MODE_EVAL);
+    walkWithTheContractChecks(&f, &s, REMAT_MODE_EVAL);
+    walkWithTheContractChecks(&f, &s, REMAT_MODE_TRAIN);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(seed, rngGetSeed(), "a row touched the global RNG stream");
+    freeFixture(&f, &s);
+}
+
+void testRowContractHeapHarAcrossModes(void) {
+    assertRowContractAcrossModes(initHeap, buildHarModel, NULL);
+}
+
+void testRowContractHeapF1AcrossModesLiveness(void) {
+    assertRowContractAcrossModes(initHeap, buildF1Model, &g_liveness);
 }
 
 void testRowContractArenaHarStoreAll(void) {
@@ -1537,6 +1572,57 @@ void testHeapEndExitsOnAnIncompleteWalk(void) {
                              "remat[heap]: rematEnd before the walk completed: 1 of 5 steps done, "
                              "0 of 3 ranges closed",
                              heapEndAfterOneStep(&f, &s));
+    freeFixture(&f, &s);
+}
+
+static void heapEvalEndAfterOneStep(fixture_t *f, rematScheduler_t *s) {
+    bindAndBeginIn(f, s, REMAT_MODE_EVAL);
+    rematStep_t st;
+    (void)rematNext(s, &st);
+    rematDone(s, &st);
+    rematEnd(s);
+}
+
+/* The end of an eval call checks the EVAL walk: F1's EVAL program has 3 steps
+ * and 2 ranges. */
+void testHeapEndInEvalChecksTheEvalWalk(void) {
+    fixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initHeap(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "remat[heap]: rematEnd before the walk completed: 1 of 3 steps done, "
+                             "0 of 2 ranges closed",
+                             heapEvalEndAfterOneStep(&f, &s));
+    freeFixture(&f, &s);
+}
+
+static void beginEvalOnAZeroedScheduler(fixture_t *f) {
+    rematScheduler_t s = {0};
+    rematBeginEval(&s, f->model, f->n, f->lt, f->x);
+}
+
+/* rematBeginEval shares rematBegin's guards, under its own name. */
+void testBeginEvalExitsOnASchedulerThatIsNotInitialised(void) {
+    fixture_t f;
+    buildF1Model(&f);
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "rematBeginEval: scheduler not initialised (never initialised, or "
+                             "its init returned false and was ignored)",
+                             beginEvalOnAZeroedScheduler(&f));
+    freeModel(f.model, f.n);
+}
+
+static void beginEvalInsideATrainingCall(fixture_t *f, rematScheduler_t *s) {
+    bindAndBegin(f, s);
+    rematBeginEval(s, f->model, f->n, f->lt, f->x);
+}
+
+void testBeginEvalExitsWhenReEntered(void) {
+    fixture_t f;
+    buildF1Model(&f);
+    rematScheduler_t s = initHeap(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematBeginEval: scheduler 'heap' re-entered",
+                             beginEvalInsideATrainingCall(&f, &s));
     freeFixture(&f, &s);
 }
 
@@ -1967,6 +2053,8 @@ int main(void) {
     RUN_TEST(testRowContractHeapHarLiveness);
     RUN_TEST(testRowContractHeapF1StoreAll);
     RUN_TEST(testRowContractHeapF1Liveness);
+    RUN_TEST(testRowContractHeapHarAcrossModes);
+    RUN_TEST(testRowContractHeapF1AcrossModesLiveness);
     RUN_TEST(testArenaHarLivenessBindsFlattenDxAfterItsSourceDied);
     RUN_TEST(testReportObservedPeakEqualsThePlannedPeak);
 #ifdef ODT_TEST_ASAN
@@ -1986,6 +2074,9 @@ int main(void) {
 #endif
     RUN_TEST(testHeapSecondCallRestartsTheWalk);
     RUN_TEST(testHeapEndExitsOnAnIncompleteWalk);
+    RUN_TEST(testHeapEndInEvalChecksTheEvalWalk);
+    RUN_TEST(testBeginEvalExitsOnASchedulerThatIsNotInitialised);
+    RUN_TEST(testBeginEvalExitsWhenReEntered);
 #ifndef ODT_TEST_ASAN
     RUN_TEST(testHeapNextExitsNamingTheStepAndTheWireWhenAReservationFails);
 #endif

@@ -99,7 +99,7 @@ void testReportMetadataCountsTheResidentBlocks(void) {
     rematScheduler_t s = initArena(&f, NULL);
     rematReport_t r;
     rematSchedulerReport(&s, &r);
-    /* slab + plan block + the offsets block: 4,848 + 348 + 23 * 8 = 5,380 on LP64 */
+    /* slab + plan block + the offsets block: 4,848 + 544 + 23 * 8 = 5,576 on LP64 */
     TEST_ASSERT_EQUAL_size_t(s.wires->slabBytes + s.plan->blockBytes +
                                  s.plan->train.numRanges * sizeof(size_t),
                              r.metadataBytes);
@@ -1429,7 +1429,7 @@ static void assertHeapReport(const rematPlanSpec_t *spec, rematPlanPolicy_t poli
     TEST_ASSERT_EQUAL_size_t(0, r.arenaBytes);
     TEST_ASSERT_EQUAL_size_t(0, r.arenaPadBytes);
     TEST_ASSERT_EQUAL_size_t(0, r.arenaGapBytes);
-    /* slab + plan block, no row table: 4,848 + 348 = 5,196 on LP64 */
+    /* slab + plan block, no row table: 4,848 + 544 = 5,392 on LP64 */
     TEST_ASSERT_EQUAL_size_t(s.wires->slabBytes + s.plan->blockBytes, r.metadataBytes);
     freeFixture(&f, &s);
 }

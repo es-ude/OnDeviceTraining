@@ -107,6 +107,34 @@ static size_t roundUpTo(size_t x, size_t align) {
     return planAdd(x, align - 1u, "blockBytes") & ~(align - 1u);
 }
 
+/* One program's arrays inside the plan block, from `at` on: steps, ranges,
+ * endOrder, each at its own alignment; `end` is the first byte after them. */
+typedef struct programLayout {
+    size_t stepsAt, rangesAt, endOrderAt, end;
+} programLayout_t;
+
+static programLayout_t layoutProgram(size_t at, size_t numSteps, size_t numRanges) {
+    programLayout_t l;
+    l.stepsAt = roundUpTo(at, _Alignof(rematStep_t));
+    l.rangesAt = roundUpTo(
+        planAdd(l.stepsAt, planMul(numSteps, sizeof(rematStep_t), "blockBytes"), "blockBytes"),
+        _Alignof(rematRange_t));
+    l.endOrderAt = roundUpTo(
+        planAdd(l.rangesAt, planMul(numRanges, sizeof(rematRange_t), "blockBytes"), "blockBytes"),
+        _Alignof(uint16_t));
+    l.end = planAdd(l.endOrderAt, planMul(numRanges, sizeof(uint16_t), "blockBytes"), "blockBytes");
+    return l;
+}
+
+static void placeProgram(rematProgram_t *p, uint8_t *block, const programLayout_t *l,
+                         size_t numSteps, size_t numRanges) {
+    p->numSteps = numSteps;
+    p->steps = (rematStep_t *)(block + l->stepsAt);
+    p->numRanges = numRanges;
+    p->ranges = (rematRange_t *)(block + l->rangesAt);
+    p->endOrder = (uint16_t *)(block + l->endOrderAt);
+}
+
 static void grammarExit(size_t s, const rematStep_t *st, const char *rule) {
     PRINT_ERROR("rematPlanBuild: step #%zu (kind %u, layer %u) violates grammar %s", s,
                 (unsigned)st->kind, (unsigned)st->layer, rule);
@@ -170,7 +198,8 @@ static void requireOperandsCovered(const rematProgram_t *p, const rematWireTable
     }
 }
 
-void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t, layer_t **model) {
+void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t, layer_t **model,
+                              rematMode_t mode) {
     size_t n = t->modelSize;
     size_t nextForward = 0;
     ptrdiff_t nextBackward = t->backwardTop;
@@ -178,6 +207,10 @@ void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t
     bool lossBackward = false;
     for (size_t s = 0; s < p->numSteps; s++) {
         const rematStep_t *st = &p->steps[s];
+        if (mode == REMAT_MODE_EVAL &&
+            (st->kind == REMAT_STEP_LOSS_BACKWARD || st->kind == REMAT_STEP_BACKWARD)) {
+            grammarExit(s, st, "rule 2: no LOSS_BACKWARD or BACKWARD in an EVAL program");
+        }
         switch (st->kind) {
         case REMAT_STEP_FORWARD:
             if (lossForward || st->layer != nextForward || st->layer >= n) {
@@ -216,6 +249,9 @@ void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t
     }
     if (!lossForward) {
         grammarEndExit(p->numSteps, "rule 1: no LOSS_FORWARD");
+    }
+    if (mode == REMAT_MODE_EVAL) {
+        return;
     }
     if (lossBackward != t->hasBackward) {
         grammarEndExit(p->numSteps, "rule 2: LOSS_BACKWARD missing");
@@ -257,37 +293,38 @@ bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **mode
     requireTheTablesModel(t, model);
     size_t numSteps = rematTrainStepCount(t);
     size_t numRanges = t->numWires - 1u;
-    size_t stepsAt = roundUpTo(sizeof(rematPlan_t), _Alignof(rematStep_t));
-    size_t rangesAt = roundUpTo(
-        planAdd(stepsAt, planMul(numSteps, sizeof(rematStep_t), "blockBytes"), "blockBytes"),
-        _Alignof(rematRange_t));
-    size_t endOrderAt = roundUpTo(
-        planAdd(rangesAt, planMul(numRanges, sizeof(rematRange_t), "blockBytes"), "blockBytes"),
-        _Alignof(uint16_t));
-    size_t blockBytes =
-        planAdd(endOrderAt, planMul(numRanges, sizeof(uint16_t), "blockBytes"), "blockBytes");
-    uint8_t *block = reserveMemory(blockBytes);
+    size_t evalSteps = t->modelSize + 1u;
+    size_t evalRanges = t->modelSize;
+    programLayout_t trainAt = layoutProgram(sizeof(rematPlan_t), numSteps, numRanges);
+    programLayout_t evalAt = layoutProgram(trainAt.end, evalSteps, evalRanges);
+    uint8_t *block = reserveMemory(evalAt.end);
     if (block == NULL) {
         return false;
     }
     rematPlan_t *p = (rematPlan_t *)block;
     p->policy = policy;
-    p->blockBytes = blockBytes;
+    p->blockBytes = evalAt.end;
     rematProgram_t *train = &p->train;
-    train->numSteps = numSteps;
-    train->steps = (rematStep_t *)(block + stepsAt);
-    train->numRanges = numRanges;
-    train->ranges = (rematRange_t *)(block + rangesAt);
-    train->endOrder = (uint16_t *)(block + endOrderAt);
+    placeProgram(train, block, &trainAt, numSteps, numRanges);
     rematFillTrainSteps(t, train->steps);
     rematFillTrainRanges(policy, t, model, numSteps, train->ranges);
     sortEndOrder(train);
-    rematPlanValidateGrammar(train, t, model);
+    rematPlanValidateGrammar(train, t, model, REMAT_MODE_TRAIN);
     train->peakLiveBytes = peakLiveBytesOf(train, t);
+    rematProgram_t *eval = &p->eval;
+    placeProgram(eval, block, &evalAt, evalSteps, evalRanges);
+    rematFillEvalProgram(t, eval->steps, eval->ranges);
+    sortEndOrder(eval);
+    rematPlanValidateGrammar(eval, t, model, REMAT_MODE_EVAL);
+    eval->peakLiveBytes = peakLiveBytesOf(eval, t);
     *out = p;
     return true;
 }
 
 void rematPlanFree(rematPlan_t *p) {
     freeReservedMemory(p);
+}
+
+const rematProgram_t *rematPlanProgram(const rematPlan_t *p, rematMode_t mode) {
+    return (mode == REMAT_MODE_EVAL) ? &p->eval : &p->train;
 }

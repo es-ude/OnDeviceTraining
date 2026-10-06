@@ -166,17 +166,24 @@ typedef struct rematProgram {
 typedef struct rematPlan {
     rematPlanPolicy_t policy;
     rematProgram_t train;
+    /* FORWARD 0..n-1, LOSS_FORWARD; ACT j lives [FORWARD(j-1), FORWARD(j)],
+     * ACT n [FORWARD(n-1), LOSS_FORWARD]; no GRAD range. The same for every
+     * policy: eval never recomputes. */
+    rematProgram_t eval;
     size_t blockBytes; /* the one plan block, struct included */
 } rematPlan_t;
 
-/* Generates the TRAIN program for the table's built model in ONE reserveMemory
- * block. `model` must be the model the table was built on: it feeds the
- * read-set rule only (the backward range comes from the table), and a
- * layerType/frozen mismatch exits by name. Returns false only when
+/* Generates the TRAIN and the EVAL program for the table's built model in ONE
+ * reserveMemory block. `model` must be the model the table was built on: it
+ * feeds the read-set rule only (the backward range comes from the table), and
+ * a layerType/frozen mismatch exits by name. Returns false only when
  * reserveMemory fails. */
 bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **model,
                     const rematPlanSpec_t *spec);
 void rematPlanFree(rematPlan_t *p); /* NULL-safe */
+
+/* The program a call in `mode` walks. */
+const rematProgram_t *rematPlanProgram(const rematPlan_t *p, rematMode_t mode);
 
 /* O(1) amortised: the next range with begin == w->step (resp. end == w->step,
  * in endOrder), or REMAT_NONE. Call both every step, openings first. A row
@@ -187,7 +194,9 @@ size_t rematWalkClosing(const rematProgram_t *p, rematWalk_t *w);
 /* Grammar validation (rules 1-4). Deliberately independent of
  * RematCheck, so a mutation in one is caught by the other. rematPlanBuild runs
  * it on every program it generates; tests run it on tampered programs. Exits
- * naming the step index and the rule. */
-void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t, layer_t **model);
+ * naming the step index and the rule. An EVAL program has no backward step:
+ * rule 2 rejects LOSS_BACKWARD and BACKWARD there, and rule 3 does not apply. */
+void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t, layer_t **model,
+                              rematMode_t mode);
 
 #endif // ODT_REMAT_PLAN_H

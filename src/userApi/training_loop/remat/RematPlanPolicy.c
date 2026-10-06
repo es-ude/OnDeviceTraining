@@ -24,13 +24,19 @@ size_t rematBackwardStep(const rematWireTable_t *t, size_t l) {
     return t->modelSize + 2u + (size_t)(t->backwardTop - (ptrdiff_t)l);
 }
 
+/* FORWARD 0..n-1, LOSS_FORWARD: the whole EVAL program, and the TRAIN
+ * program's first n + 1 steps. */
+static size_t fillForwardSteps(size_t n, rematStep_t *steps) {
+    for (size_t l = 0; l < n; l++) {
+        steps[l] = (rematStep_t){.kind = REMAT_STEP_FORWARD, .layer = (uint16_t)l};
+    }
+    steps[n] = (rematStep_t){.kind = REMAT_STEP_LOSS_FORWARD, .layer = (uint16_t)n};
+    return n + 1u;
+}
+
 void rematFillTrainSteps(const rematWireTable_t *t, rematStep_t *steps) {
     size_t n = t->modelSize;
-    size_t s = 0;
-    for (size_t l = 0; l < n; l++) {
-        steps[s++] = (rematStep_t){.kind = REMAT_STEP_FORWARD, .layer = (uint16_t)l};
-    }
-    steps[s++] = (rematStep_t){.kind = REMAT_STEP_LOSS_FORWARD, .layer = (uint16_t)n};
+    size_t s = fillForwardSteps(n, steps);
     if (!t->hasBackward) {
         return;
     }
@@ -83,5 +89,16 @@ void rematFillTrainRanges(rematPlanPolicy_t policy, const rematWireTable_t *t, l
         }
         ranges[id - 1] =
             (rematRange_t){.wire = (uint16_t)id, .begin = (uint16_t)begin, .end = (uint16_t)end};
+    }
+}
+
+/* Ping-pong lifetimes: ACT j from the FORWARD that writes it (step j - 1) to
+ * the step that reads it (step j: FORWARD(j), or LOSS_FORWARD for ACT n). */
+void rematFillEvalProgram(const rematWireTable_t *t, rematStep_t *steps, rematRange_t *ranges) {
+    size_t n = t->modelSize;
+    (void)fillForwardSteps(n, steps);
+    for (size_t j = 1; j <= n; j++) {
+        ranges[j - 1] = (rematRange_t){
+            .wire = rematActId(t, j), .begin = (uint16_t)(j - 1u), .end = (uint16_t)j};
     }
 }

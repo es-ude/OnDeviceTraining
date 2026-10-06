@@ -247,7 +247,7 @@ static void freeGrammarFixture(grammarFixture_t *f) {
 
 static void tamperAndValidate(grammarFixture_t *f, void (*tamper)(rematProgram_t *)) {
     tamper(&f->p->train);
-    rematPlanValidateGrammar(&f->p->train, f->t, f->model);
+    rematPlanValidateGrammar(&f->p->train, f->t, f->model, REMAT_MODE_TRAIN);
 }
 
 #define ASSERT_GRAMMAR_EXIT(buildFixture, tamper, rule)                                            \
@@ -1880,22 +1880,95 @@ void testStoreAllPeakFinetuneStage2Is57928(void) {
     freeModel(model, HAR_N);
 }
 
-/* One block of steps, ranges and endOrder. HAR TRAIN arrays:
- * 25 * 4 + 23 * 6 + 23 * 2 = 284 B after the (even-sized) plan struct. */
+/* One block of steps, ranges and endOrder for both programs. HAR TRAIN arrays:
+ * 25 * 4 + 23 * 6 + 23 * 2 = 284 B after the (even-sized) plan struct; EVAL
+ * arrays: 13 * 4 + 12 * 6 + 12 * 2 = 148 B. Every array is 2-aligned, so the
+ * two programs pack without padding. */
 void testPlanBlockHoldsStepsRangesAndEndOrder(void) {
     layer_t *model[HAR_N];
     buildHar(model, false);
     inputLike_t in;
     rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
     rematPlan_t *p = buildPlan(t, model, NULL);
-    TEST_ASSERT_EQUAL_size_t(sizeof(rematPlan_t) + 284u, p->blockBytes);
+    TEST_ASSERT_EQUAL_size_t(sizeof(rematPlan_t) + 284u + 148u, p->blockBytes);
     const uint8_t *begin = (const uint8_t *)p;
     const uint8_t *end = begin + p->blockBytes;
+    const rematProgram_t *eval = rematPlanProgram(p, REMAT_MODE_EVAL);
     TEST_ASSERT_TRUE((const uint8_t *)p->train.steps >= begin + sizeof(rematPlan_t));
-    TEST_ASSERT_TRUE((const uint8_t *)(p->train.endOrder + p->train.numRanges) <= end);
+    TEST_ASSERT_TRUE((const uint8_t *)eval->steps >=
+                     (const uint8_t *)(p->train.endOrder + p->train.numRanges));
+    TEST_ASSERT_TRUE((const uint8_t *)(eval->endOrder + eval->numRanges) <= end);
     rematPlanFree(p);
     rematWireTableFree(t);
     freeModel(model, HAR_N);
+}
+
+void testPlanProgramOfTrainIsTheTrainProgram(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    rematPlan_t *p = buildPlan(t, model, NULL);
+    TEST_ASSERT_EQUAL_PTR(&p->train, rematPlanProgram(p, REMAT_MODE_TRAIN));
+    TEST_ASSERT_EQUAL_size_t(25, rematPlanProgram(p, REMAT_MODE_TRAIN)->numSteps);
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+/* EVAL: FORWARD 0..n-1, LOSS_FORWARD; ACT j lives [FORWARD(j-1), FORWARD(j)]
+ * and ACT n [FORWARD(n-1), LOSS_FORWARD], so range j-1 is [j-1, j]; no GRAD
+ * range. The same program under every policy: eval never recomputes. */
+void testEvalHarStepsAndRangesUnderEveryPolicy(void) {
+    const rematPlanSpec_t *specs[2] = {NULL, &g_liveness};
+    for (size_t k = 0; k < 2u; k++) {
+        layer_t *model[HAR_N];
+        buildHar(model, false);
+        inputLike_t in;
+        rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+        rematPlan_t *p = buildPlan(t, model, specs[k]);
+        const rematProgram_t *eval = rematPlanProgram(p, REMAT_MODE_EVAL);
+        TEST_ASSERT_EQUAL_size_t(13, eval->numSteps);
+        for (uint16_t l = 0; l < 12; l++) {
+            TEST_ASSERT_EQUAL_UINT8(REMAT_STEP_FORWARD, eval->steps[l].kind);
+            TEST_ASSERT_EQUAL_UINT16(l, eval->steps[l].layer);
+        }
+        TEST_ASSERT_EQUAL_UINT8(REMAT_STEP_LOSS_FORWARD, eval->steps[12].kind);
+        TEST_ASSERT_EQUAL_UINT16(12, eval->steps[12].layer);
+        TEST_ASSERT_EQUAL_size_t(12, eval->numRanges);
+        for (uint16_t j = 1; j <= 12; j++) {
+            TEST_ASSERT_EQUAL_UINT16(j, eval->ranges[j - 1].wire);
+            TEST_ASSERT_EQUAL_UINT16(j - 1, eval->ranges[j - 1].begin);
+            TEST_ASSERT_EQUAL_UINT16(j, eval->ranges[j - 1].end);
+            TEST_ASSERT_EQUAL_UINT16(j - 1, eval->endOrder[j - 1]);
+        }
+        rematPlanFree(p);
+        rematWireTableFree(t);
+        freeModel(model, HAR_N);
+    }
+}
+
+/* ACT 0 is borrowed and has no range, so FORWARD(0) holds ACT 1 alone and
+ * FORWARD(j) holds ACT j + ACT j+1. HAR: the conv/relu pairs of 16 x 128 and
+ * 32 x 64 floats, 8192 + 8192 B. One layer: ACT 1 alone, [1, 3] floats. */
+void testEvalPeakIsTheLargestAdjacentActPair(void) {
+    layer_t *har[HAR_N];
+    buildHar(har, false);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(har, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    rematPlan_t *p = buildPlan(t, har, NULL);
+    TEST_ASSERT_EQUAL_size_t(16384, rematPlanProgram(p, REMAT_MODE_EVAL)->peakLiveBytes);
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(har, HAR_N);
+    layer_t *one[1] = {makeLinear(2, 3, false)};
+    t = initTable(one, 1, CROSS_ENTROPY, makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ));
+    p = buildPlan(t, one, NULL);
+    TEST_ASSERT_EQUAL_size_t(2, rematPlanProgram(p, REMAT_MODE_EVAL)->numSteps);
+    TEST_ASSERT_EQUAL_size_t(12, rematPlanProgram(p, REMAT_MODE_EVAL)->peakLiveBytes);
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(one, 1);
 }
 
 #ifdef ODT_MEM_PROFILE
@@ -2188,7 +2261,7 @@ void testGrammarRejectsAForwardBeyondTheLastLayer(void) {
  * the LOSS_BACKWARD at step 13 is the first step rule 2 rejects. */
 static void clearHasBackwardAndValidate(grammarFixture_t *f) {
     f->t->hasBackward = false;
-    rematPlanValidateGrammar(&f->p->train, f->t, f->model);
+    rematPlanValidateGrammar(&f->p->train, f->t, f->model, REMAT_MODE_TRAIN);
 }
 
 void testGrammarRejectsALossBackwardWithoutABackwardPhase(void) {
@@ -2257,6 +2330,43 @@ void testGrammarRejectsALossBackwardWritingTheSeedOutsideItsRange(void) {
 void testGrammarRejectsABackwardReadingGradInOutsideItsRange(void) {
     ASSERT_GRAMMAR_EXIT(buildHarLivenessFixture, endGrad10BeforeBackwardReadsIt,
                         "step #15 (kind 3, layer 9) violates grammar rule 4: it reads wire 14");
+}
+
+/* HAR EVAL: F0..F11 = steps 0..11, LOSS_FORWARD 12. A LOSS_BACKWARD there
+ * would pass TRAIN's rule 2 only after a LOSS_FORWARD; in EVAL no backward
+ * step passes at all, and the message names the EVAL rule. */
+static void lossBackwardInEvalAndValidate(grammarFixture_t *f) {
+    rematProgram_t *eval = &f->p->eval;
+    eval->steps[12] = (rematStep_t){.kind = REMAT_STEP_LOSS_BACKWARD, .layer = 12};
+    rematPlanValidateGrammar(eval, f->t, f->model, REMAT_MODE_EVAL);
+}
+
+void testGrammarRejectsABackwardStepInAnEvalProgram(void) {
+    grammarFixture_t f;
+    buildHarStoreAllFixture(&f);
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "step #12 (kind 2, layer 12) violates grammar rule 2: no "
+                             "LOSS_BACKWARD or BACKWARD in an EVAL program",
+                             lossBackwardInEvalAndValidate(&f));
+    freeGrammarFixture(&f);
+}
+
+/* A layer BACKWARD in EVAL would otherwise fall to rule 3 (no LOSS_BACKWARD
+ * precedes it); the message pins that the EVAL rule rejects it first. */
+static void layerBackwardInEvalAndValidate(grammarFixture_t *f) {
+    rematProgram_t *eval = &f->p->eval;
+    eval->steps[12] = (rematStep_t){.kind = REMAT_STEP_BACKWARD, .layer = 11};
+    rematPlanValidateGrammar(eval, f->t, f->model, REMAT_MODE_EVAL);
+}
+
+void testGrammarRejectsALayerBackwardInAnEvalProgram(void) {
+    grammarFixture_t f;
+    buildHarStoreAllFixture(&f);
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "step #12 (kind 3, layer 11) violates grammar rule 2: no "
+                             "LOSS_BACKWARD or BACKWARD in an EVAL program",
+                             layerBackwardInEvalAndValidate(&f));
+    freeGrammarFixture(&f);
 }
 
 /* rematPlanBuild runs the grammar on what it generates: a table record that
@@ -2404,6 +2514,9 @@ int main(void) {
     RUN_TEST(testStoreAllPeakMnistCnnIs175824);
     RUN_TEST(testStoreAllPeakFinetuneStage2Is57928);
     RUN_TEST(testPlanBlockHoldsStepsRangesAndEndOrder);
+    RUN_TEST(testPlanProgramOfTrainIsTheTrainProgram);
+    RUN_TEST(testEvalHarStepsAndRangesUnderEveryPolicy);
+    RUN_TEST(testEvalPeakIsTheLargestAdjacentActPair);
 #ifdef ODT_MEM_PROFILE
     RUN_TEST(testPlanBuildReservesOneBlockAndFreeReturnsIt);
 #endif
@@ -2438,6 +2551,8 @@ int main(void) {
     RUN_TEST(testGrammarRejectsALossBackwardReadingActNOutsideItsRange);
     RUN_TEST(testGrammarRejectsALossBackwardWritingTheSeedOutsideItsRange);
     RUN_TEST(testGrammarRejectsABackwardReadingGradInOutsideItsRange);
+    RUN_TEST(testGrammarRejectsABackwardStepInAnEvalProgram);
+    RUN_TEST(testGrammarRejectsALayerBackwardInAnEvalProgram);
     RUN_TEST(testPlanBuildRunsTheGrammarOnWhatItGenerates);
     RUN_TEST(testPlanBuildExitsWhenTheModelFreezesALayerTheTableSawTrainable);
     RUN_TEST(testPlanBuildExitsWhenTheModelSwapsALayerType);

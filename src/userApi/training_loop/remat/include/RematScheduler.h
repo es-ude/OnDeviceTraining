@@ -42,6 +42,10 @@ typedef struct rematPlanSpec {
     rematPlanPolicy_t policy;
 } rematPlanSpec_t;
 
+/* Which of the plan's programs a call walks. TRAIN = 0: a zero-initialised
+ * value means training. */
+typedef enum rematMode { REMAT_MODE_TRAIN = 0, REMAT_MODE_EVAL } rematMode_t;
+
 /* The static-plan cursor: step index, next range to open (begin order), next
  * range to close (endOrder). Defined here because the scheduler struct embeds
  * it. */

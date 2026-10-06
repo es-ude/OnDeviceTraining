@@ -1386,6 +1386,7 @@ typedef struct evalCapture {
     size_t memBefore;
     size_t memAfter;
     blob_t output;
+    blob_t state;
 } evalCapture_t;
 static evalCapture_t g_evalNull;
 static evalCapture_t g_evalCell;
@@ -1400,6 +1401,9 @@ static void captureEval(zooFixture_t *f, const trainingCall_t *call, evalCapture
     captureTensor(&cap->output, stats->output);
     freeInferenceStats(stats);
     cap->memAfter = memProfileCurrentBytes();
+    cap->state.used = 0;
+    forEachGrad(f->model, f->n, &cap->state);
+    bnStateIo(f, false, &cap->state);
     assertInputUnchanged(&g_input, f->x);
 }
 
@@ -1409,10 +1413,27 @@ static const char *sayEval(const char *fixture, const char *cell, const char *wh
     return g_evalMessage;
 }
 
-/* Every zoo fixture on every cell of one row: output and loss memcmp-equal to
- * the NULL path (remat D9), the input untouched (remat P9, in captureEval),
- * the observed peak the EVAL program's (remat P8), and every byte the call
- * reserved returned with the stats (remat P5). */
+static void assertEvalCaptureMatches(const char *fixture, const char *cell, const char *what) {
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(&g_evalNull.loss, &g_evalCell.loss, sizeof(float),
+                                     sayEval(fixture, cell, what));
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(g_evalNull.output.used, g_evalCell.output.used,
+                                     sayEval(fixture, cell, what));
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(g_evalNull.output.bytes, g_evalCell.output.bytes,
+                                     g_evalNull.output.used, sayEval(fixture, cell, what));
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(g_evalNull.state.used, g_evalCell.state.used,
+                                     sayEval(fixture, cell, "model state after eval"));
+    /* all-frozen without BatchNorm has no state; Unity rejects a 0-byte compare */
+    if (g_evalNull.state.used > 0) {
+        TEST_ASSERT_EQUAL_MEMORY_MESSAGE(g_evalNull.state.bytes, g_evalCell.state.bytes,
+                                         g_evalNull.state.used,
+                                         sayEval(fixture, cell, "model state after eval"));
+    }
+}
+
+/* Every zoo fixture on every cell of one row: output, loss and the model state
+ * after the call memcmp-equal to the NULL path (remat D9), the input untouched
+ * (remat P9, in captureEval), the observed peak the EVAL program's (remat P8),
+ * and every byte the call reserved returned with the stats (remat P5). */
 static void assertEvalMatchesTheNullPath(rematSchedulerType_t row) {
     for (size_t z = 0; z < ZOO_FIXTURES; z++) {
         for (size_t k = 0; k < MATRIX_CELLS; k++) {
@@ -1431,13 +1452,7 @@ static void assertEvalMatchesTheNullPath(rematSchedulerType_t row) {
             rematSchedulerDeinit(&s);
             freeZoo(&f);
             const char *name = g_zoo[z].name;
-            TEST_ASSERT_EQUAL_MEMORY_MESSAGE(&g_evalNull.loss, &g_evalCell.loss, sizeof(float),
-                                             sayEval(name, cell->name, "the loss"));
-            TEST_ASSERT_EQUAL_size_t_MESSAGE(g_evalNull.output.used, g_evalCell.output.used,
-                                             sayEval(name, cell->name, "the output's size"));
-            TEST_ASSERT_EQUAL_MEMORY_MESSAGE(g_evalNull.output.bytes, g_evalCell.output.bytes,
-                                             g_evalNull.output.used,
-                                             sayEval(name, cell->name, "the output"));
+            assertEvalCaptureMatches(name, cell->name, "the output");
             TEST_ASSERT_EQUAL_size_t_MESSAGE(evalPeak, report.observedPeakLiveBytes,
                                              sayEval(name, cell->name, "remat P8 in eval"));
             TEST_ASSERT_EQUAL_size_t_MESSAGE(g_evalCell.memBefore, g_evalCell.memAfter,
@@ -1495,6 +1510,57 @@ void testEvalOverTheZooMatchesTheNullPathOnArena(void) {
 
 void testEvalOverTheZooMatchesTheNullPathOnHeap(void) {
     assertEvalMatchesTheNullPath(REMAT_HEAP);
+}
+
+/* One persistent scheduler across modes: train, evaluate, train again equals
+ * Legacy train, the NULL path's eval, Legacy train (remat P1 on both training
+ * calls; the eval call leaves nothing the next training call sees), and an
+ * eval call on sample B of a scheduler built on sample A equals the NULL path
+ * on B (remat P9). BatchNorm carries running stats from training into eval.
+ * Each eval call leaves the parameter grads and BatchNorm running stats as the
+ * NULL path's eval does; it is compared right there, because the training
+ * captures reset both. */
+static void assertTrainEvalTrainMatches(rematSchedulerType_t row) {
+    const zooEntry_t fixtures[2] = {{"har-cnn", buildHarCnn}, {"batchnorm", buildBatchNorm}};
+    for (size_t z = 0; z < 2u; z++) {
+        for (size_t k = 0; k < MATRIX_CELLS; k++) {
+            const matrixCell_t *cell = &g_cells[k];
+            if (cell->row != row) {
+                continue;
+            }
+            zooFixture_t f;
+            fixtures[z].build(&f);
+            captureRun(RUN_LEGACY, &f, NULL, &g_legacy);
+            captureEval(&f, NULL, &g_evalNull);
+            rematScheduler_t s;
+            initCell(&s, cell, &f);
+            const trainingCall_t call = {.remat = &s};
+            captureRun(RUN_DRIVER, &f, &call, &g_driver);
+            assertSameValues(cell->name);
+            captureEval(&f, &call, &g_evalCell);
+            assertEvalCaptureMatches(fixtures[z].name, cell->name, "eval between trainings");
+            captureRun(RUN_DRIVER, &f, &call, &g_driver);
+            assertSameValues(cell->name);
+            tensor_t *sampleA = f.x;
+            f.x = makeFloatTensor(sampleA->shape->dimensions, sampleA->shape->numberOfDimensions,
+                                  2.5f);
+            captureEval(&f, NULL, &g_evalNull);
+            captureEval(&f, &call, &g_evalCell);
+            assertEvalCaptureMatches(fixtures[z].name, cell->name, "remat P9: eval on sample B");
+            freeTensor(f.x);
+            f.x = sampleA;
+            rematSchedulerDeinit(&s);
+            freeZoo(&f);
+        }
+    }
+}
+
+void testTrainEvalTrainOnOneArenaMatchesLegacy(void) {
+    assertTrainEvalTrainMatches(REMAT_ARENA);
+}
+
+void testTrainEvalTrainOnOneHeapMatchesLegacy(void) {
+    assertTrainEvalTrainMatches(REMAT_HEAP);
 }
 
 int main(void) {
@@ -1569,5 +1635,7 @@ int main(void) {
     RUN_TEST(testAMarkedInputEvaluatesToAnUnmarkedOutputOnEitherRow);
     RUN_TEST(testEvalOverTheZooMatchesTheNullPathOnArena);
     RUN_TEST(testEvalOverTheZooMatchesTheNullPathOnHeap);
+    RUN_TEST(testTrainEvalTrainOnOneArenaMatchesLegacy);
+    RUN_TEST(testTrainEvalTrainOnOneHeapMatchesLegacy);
     return UNITY_END();
 }

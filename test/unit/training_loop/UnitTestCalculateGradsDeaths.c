@@ -8,6 +8,7 @@
 #include "AsanDeath.h"
 #include "CalculateGradsSequential.h"
 #include "DeathTest.h"
+#include "InferenceApi.h"
 #include "Layer.h"
 #include "Linear.h"
 #include "LossFunction.h"
@@ -294,7 +295,7 @@ void testARowThatLeavesAWireResidentAtEndExitsOnBothRows(void) {
  * reports the stream complete: the row's walk is complete, so rematEnd's own
  * check passes, and only the driver's rematCheckFinish sees the gap. */
 static bool eatingNext(rematScheduler_t *s, rematStep_t *st) {
-    if (s->walk.step + 1u == s->plan->train.numSteps) {
+    if (s->walk.step + 1u == rematPlanProgram(s->plan, s->mode)->numSteps) {
         rematStep_t eaten;
         (void)decoratedNext(s, &eaten);
         decoratedDone(s, &eaten);
@@ -622,6 +623,91 @@ void testAZeroedOrDeinitialisedSchedulerExitsNamingIt(void) {
     freeModel(f.model, f.n);
 }
 
+/* ---- evaluation on a caller's scheduler (remat D19) ---- */
+
+/* MLP EVAL: FORWARD 0, 1, 2 (#0-#2), LOSS_FORWARD (#3). */
+static void evalOn(fixture_t *f, rematScheduler_t *s) {
+    freeInferenceStats(inferenceWithLoss(f->model, f->n, f->x, g_label, f->lt, REDUCTION_MEAN,
+                                         &(trainingCall_t){.remat = s}));
+}
+
+static void assertDecoratedEvalExitsOnBothRows(const rematSchedulerFunctions_t *fns,
+                                               const char *violation) {
+    rowInit_t inits[2] = {initArena, initHeap};
+    for (size_t k = 0; k < 2u; k++) {
+        fixture_t f;
+        buildMlpModel(&f);
+        makeLabel(2);
+        rematScheduler_t s = inits[k](&f, NULL);
+        s.fns = fns;
+        ASSERT_EXITS_WITH_OUTPUT(1, violation, evalOn(&f, &s));
+        s.fns = &rematSchedulerFunctions[s.type];
+        freeFixture(&f, &s);
+    }
+}
+
+/* Hands out a BACKWARD where the EVAL program has its LOSS_FORWARD. */
+static bool backwardInEvalNext(rematScheduler_t *s, rematStep_t *st) {
+    bool more = decoratedNext(s, st);
+    if (more && st->kind == REMAT_STEP_LOSS_FORWARD) {
+        *st = (rematStep_t){.kind = REMAT_STEP_BACKWARD, .layer = 2};
+    }
+    return more;
+}
+
+static const rematSchedulerFunctions_t g_backwardInEval = {.name = "backward-in-eval",
+                                                           .begin = decoratedBegin,
+                                                           .next = backwardInEvalNext,
+                                                           .done = decoratedDone,
+                                                           .end = decoratedEnd,
+                                                           .deinit = decoratedDeinit};
+
+void testARowThatHandsOutABackwardInEvalExitsOnBothRows(void) {
+    assertDecoratedEvalExitsOnBothRows(
+        &g_backwardInEval,
+        "remat[backward-in-eval]: step #3 BACKWARD(layer 2) violates 'step not allowed in eval'");
+}
+
+/* g_eating eats the last step of the call's program: in EVAL, the
+ * LOSS_FORWARD. */
+void testARowThatEatsTheLossForwardOfAnEvalCallExitsOnBothRows(void) {
+    assertDecoratedEvalExitsOnBothRows(
+        &g_eating,
+        "remat[eating]: stream of 3 steps violates 'incomplete stream: missing LOSS_FORWARD'");
+}
+
+/* remat P7 in eval: a batch of two against a scheduler keyed to one exits at
+ * the bind with the same text on both rows (the key check is shared). */
+void testAnEvalShapeOtherThanTheKeyExitsIdenticallyOnBothRows(void) {
+    fixture_t f;
+    buildMlpModel(&f);
+    makeLabel(2);
+    rematScheduler_t arena = initArena(&f, NULL);
+    rematScheduler_t heap = initHeap(&f, NULL);
+    feedTwoRows(&f);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "rematWireTableBind: key mismatch on wire ACT 0, field 'dims[0]': built 1, live 2",
+        evalOn(&f, &arena));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "rematWireTableBind: key mismatch on wire ACT 0, field 'dims[0]': built 1, live 2",
+        evalOn(&f, &heap));
+    restoreTheInput(&f);
+    rematSchedulerDeinit(&arena);
+    freeFixture(&f, &heap);
+}
+
+/* A deinitialised scheduler exits at the eval call's first use of it, before
+ * any bind. */
+void testAnEvalCallOnADeinitialisedSchedulerExitsNamingIt(void) {
+    fixture_t f;
+    buildMlpModel(&f);
+    makeLabel(2);
+    rematScheduler_t heap = initHeap(&f, NULL);
+    rematSchedulerDeinit(&heap);
+    ASSERT_EXITS_WITH_OUTPUT(1, NOT_INITIALISED, evalOn(&f, &heap));
+    freeModel(f.model, f.n);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testASwappedStepExitsOnBothRows);
@@ -647,5 +733,9 @@ int main(void) {
     RUN_TEST(testALayerTypeSwapExitsIdenticallyOnBothRows);
     RUN_TEST(testAGroupingPastTheCapacityExitsIdenticallyOnBothRows);
     RUN_TEST(testAZeroedOrDeinitialisedSchedulerExitsNamingIt);
+    RUN_TEST(testARowThatHandsOutABackwardInEvalExitsOnBothRows);
+    RUN_TEST(testARowThatEatsTheLossForwardOfAnEvalCallExitsOnBothRows);
+    RUN_TEST(testAnEvalShapeOtherThanTheKeyExitsIdenticallyOnBothRows);
+    RUN_TEST(testAnEvalCallOnADeinitialisedSchedulerExitsNamingIt);
     return UNITY_END();
 }

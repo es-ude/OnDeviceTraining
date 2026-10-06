@@ -103,9 +103,10 @@ typedef trainingStats_t *(*calculateGradsFn_t)(layer_t **model, size_t modelSize
  *  at m > 1 they point into the loop's gather buffers, overwritten by the
  *  next chunk. The function returns an output whose leading dimension is
  *  rows and whose per-row block holds the C class scores (#468), and the
- *  loss reduced over the rows per forwardReduction. The evaluation loop
- *  passes call == NULL until #4 PR3; a function that routes through
- *  inferenceWithLoss forwards call. */
+ *  loss reduced over the rows per forwardReduction. trainingRun's evaluation
+ *  passes its call (see trainingRunOptions_t.remat), the public evaluation
+ *  functions pass NULL; a function that routes through inferenceWithLoss
+ *  forwards call. */
 typedef inferenceStats_t *(*inferenceWithLossFn_t)(layer_t **model, size_t numberOfLayers,
                                                    tensor_t *input, tensor_t *label,
                                                    lossFuncType_t funcType,
@@ -160,7 +161,15 @@ typedef struct trainingRunOptions {
                                     have the one sampleShape it was keyed to: the first call
                                     whose input differs exits naming the mismatch, and a zeroed
                                     or deinitialised one exits at the first call.
-                                    Training only: evaluation runs without it until #4 PR3. */
+                                    Evaluation runs on it too when every eval chunk has the
+                                    training row count: evalMicroBatchSize equal to
+                                    microBatchSize, and the eval loader's nominal count
+                                    (datasetSize / batchSize * batchSize) a multiple of it.
+                                    Otherwise evaluation runs without it (remat D19). On it,
+                                    every eval sample must have the sampleShape too: the first
+                                    eval call whose input differs exits naming the mismatch.
+                                    A loader whose stream differs from its nominal count
+                                    exits at its first ragged chunk. */
 } trainingRunOptions_t;
 
 void freeTrainingStats(trainingStats_t *trainingStats);

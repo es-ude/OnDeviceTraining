@@ -225,13 +225,19 @@ static void requireNonEmptyFirstBatch(batch_t *firstBatch, const char *caller) {
     }
 }
 
+/* The NOMINAL eval sample count, the samples of the loader's full batches.
+ * The chunk check and trainingRun's scheduler gate must count alike. */
+static size_t evalNominalCount(dataLoader_t *dataLoader) {
+    return (dataLoader->getDatasetSize() / dataLoader->batchSize) * dataLoader->batchSize;
+}
+
 /* Untracked-BN evaluability over the full chunks AND the ragged tail
  * chunk, judged on the NOMINAL sample count (a loader whose batches differ
  * from batchSize is covered at run time by BatchNorm1d's own forward guard).
  * Callers run requireEvalBatches first, so batchSize and the count are >= 1. */
 static void requireEvaluableChunks(layer_t **model, size_t modelSize, dataLoader_t *dataLoader,
                                    const tensor_t *firstItem, size_t m, const char *caller) {
-    size_t nominal = (dataLoader->getDatasetSize() / dataLoader->batchSize) * dataLoader->batchSize;
+    size_t nominal = evalNominalCount(dataLoader);
     size_t full = (m < nominal) ? m : nominal;
     requireUntrackedBatchNormsEvaluable(model, modelSize, firstItem, full, caller);
     size_t tail = nominal % m;
@@ -649,7 +655,8 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
     size_t evalMicroBatchSize = (options != NULL && options->evalMicroBatchSize != 0)
                                     ? options->evalMicroBatchSize
                                     : microBatchSize;
-    /* The run's call: every training call, and every evaluation call (remat D19). */
+    /* Every training call gets the options' scheduler; evaluation gets it
+     * behind the entry check below (remat D19). */
     const trainingCall_t trainCall = {.remat = (options != NULL) ? options->remat : NULL};
 
     if (lrScheduler != NULL && lrScheduler->optimizer != optimizer) {
@@ -712,6 +719,19 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
     }
     requireEvaluableChunks(model, modelSize, evalDataLoader, firstBatch->samples[0]->item,
                            evalMicroBatchSize, "trainingRun");
+    /* Evaluation shares the training scheduler only when every eval chunk has
+     * the training row count m: the same micro-batch, and no N mod m tail
+     * chunk over the nominal sample count (N < m is such a tail). Otherwise
+     * it runs without one, so such a run still completes. The sample shape is
+     * not judged here: an eval sample whose own shape or dtype differs from
+     * the key exits at its call's bind check or, when evaluation stacks
+     * samples, at the gather check, which can fire first; the first ragged
+     * chunk of a loader whose stream differs from its nominal count exits at
+     * the bind check. */
+    size_t evalNominal = evalNominalCount(evalDataLoader);
+    bool evalOnTheScheduler =
+        evalMicroBatchSize == microBatchSize && evalNominal % evalMicroBatchSize == 0;
+    const trainingCall_t evalCall = {.remat = evalOnTheScheduler ? trainCall.remat : NULL};
     for (size_t i = 0; i < firstBatch->size; i++) {
         freeSample(firstBatch->samples[i]);
     }
@@ -750,7 +770,7 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
         epochStats_t evalStats =
             evaluateEpochInternal("evalMicroBatchSize", model, modelSize, lossConfig.funcType,
                                   evalDataLoader, inferenceFn, NULL, numClasses, forwardReduction,
-                                  evalMicroBatchSize, "trainingRun", &trainCall);
+                                  evalMicroBatchSize, "trainingRun", &evalCall);
         info.trainLoss = trainLoss;
 
         if (callback != NULL) {

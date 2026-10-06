@@ -3038,6 +3038,11 @@ static size_t getEvalCountDatasetSize() {
     return g_evalCount;
 }
 
+/* NULL, or the eval loader's getBatch for one run (it may delegate to
+ * g_baseGetBatch, the loader's own). */
+static getBatchFn_t g_evalGetBatchOverride;
+static getBatchFn_t g_baseGetBatch;
+
 /* An inferenceWithLossFn_t conformer that wraps the real one: it records the
  * scheduler of every call it gets and forwards the call unchanged. */
 static size_t g_forwardedCalls;
@@ -3080,6 +3085,11 @@ static remRun_t runMicroBatched(size_t m, size_t mEval, size_t evalCount,
                                            NULL, false, 0, true);
     dataLoader_t *evalDl =
         dataLoaderInit(getEpochSample, getEvalCountDatasetSize, 1, NULL, NULL, false, 0, true);
+    if (g_evalGetBatchOverride != NULL) {
+        g_baseGetBatch = evalDl->getBatch;
+        evalDl->getBatch = g_evalGetBatchOverride;
+        g_evalGetBatchOverride = NULL;
+    }
     lossConfig_t cfg = defaultLossConfig(MSE);
     tensor_t *trainBatchLike = buildFloatTensor2D(m, 2, (float[8]){0}, 2 * m);
 
@@ -3124,6 +3134,77 @@ void testTrainingRunHandsEveryEvalCallTheOptionsScheduler(void) {
     TEST_ASSERT_EQUAL_size_t(4, g_forwardedCalls);
     TEST_ASSERT_EQUAL_size_t(4, g_forwardedOnScheduler);
     TEST_ASSERT_EQUAL_size_t(stacked.evalPeak, stacked.report.observedPeakLiveBytes);
+}
+
+/* With options->remat set, a run whose eval chunks would not all have the
+ * training row count m evaluates without the scheduler: it completes (the
+ * death-test wrapper keeps a wrong exit from ending the binary), its last
+ * bind is a training call's (TRAIN peak), and its losses equal the
+ * scheduler-less run's. */
+static void assertEvaluationFallsBackToNoScheduler(size_t m, size_t mEval, size_t evalCount) {
+    ASSERT_EXITS_WITH_OUTPUT(0, "",
+                             (void)runMicroBatched(m, mEval, evalCount, inferenceWithLoss, true));
+    remRun_t plain = runMicroBatched(m, mEval, evalCount, inferenceWithLoss, false);
+    remRun_t run = runMicroBatched(m, mEval, evalCount, inferenceWithLoss, true);
+    TEST_ASSERT_EQUAL_size_t(2, run.result.epochsCompleted);
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(run.report.peakLiveBytes, run.report.observedPeakLiveBytes,
+                                     "evaluation ran on options->remat");
+    TEST_ASSERT_EQUAL_MEMORY(&plain.result.finalTrainLoss, &run.result.finalTrainLoss,
+                             sizeof(float));
+    TEST_ASSERT_EQUAL_MEMORY(&plain.result.finalEvalStats.loss, &run.result.finalEvalStats.loss,
+                             sizeof(float));
+}
+
+void testTrainingRunEvaluatesWithoutTheSchedulerAtAnotherEvalMicroBatch(void) {
+    assertEvaluationFallsBackToNoScheduler(1, 2, 4);
+}
+
+void testTrainingRunEvaluatesWithoutTheSchedulerOverATailChunk(void) {
+    assertEvaluationFallsBackToNoScheduler(2, 2, 3);
+}
+
+void testTrainingRunEvaluatesWithoutTheSchedulerBelowOneChunk(void) {
+    assertEvaluationFallsBackToNoScheduler(2, 2, 1);
+}
+
+/* The control: every chunk is [2, 2], so evaluation runs on the scheduler. */
+void testTrainingRunEvaluatesOnTheSchedulerWhenEveryChunkHasTheTrainingRowCount(void) {
+    remRun_t plain = runMicroBatched(2, 2, 4, inferenceWithLoss, false);
+    remRun_t run = runMicroBatched(2, 2, 4, inferenceWithLoss, true);
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(run.evalPeak, run.report.observedPeakLiveBytes,
+                                     "evaluation did not run on options->remat");
+    TEST_ASSERT_EQUAL_MEMORY(&plain.result.finalTrainLoss, &run.result.finalTrainLoss,
+                             sizeof(float));
+    TEST_ASSERT_EQUAL_MEMORY(&plain.result.finalEvalStats.loss, &run.result.finalEvalStats.loss,
+                             sizeof(float));
+}
+
+/* The entry check judges the nominal count, as requireEvaluableChunks does: a
+ * loader whose stream is shorter than nominal (here its last batch comes back
+ * empty, so 3 of 4 samples stream at m = 2) passes it, and the ragged last
+ * chunk meets the scheduler's bind check, which names the row count. */
+static batch_t *droppingTheLastSample(dataLoader_t *dataLoader, size_t index) {
+    batch_t *batch = g_baseGetBatch(dataLoader, index);
+    size_t last = dataLoader->getDatasetSize() / dataLoader->batchSize - 1u;
+    if (index == last && batch->size > 0) {
+        batch->size--;
+        freeSample(batch->samples[batch->size]);
+    }
+    return batch;
+}
+
+/* Runs as the death test's statement, so only the forked child ever sets the
+ * override: a failing assertion in the parent cannot leave it set. */
+static void runOnAStreamShorterThanItsNominalCount(void) {
+    g_evalGetBatchOverride = droppingTheLastSample;
+    (void)runMicroBatched(2, 2, 4, inferenceWithLoss, true);
+}
+
+void testTrainingRunExitsAtTheRaggedChunkOfAStreamShorterThanItsNominalCount(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "rematWireTableBind: key mismatch on wire ACT 0, field 'dims[0]': "
+                             "built 2, live 1",
+                             runOnAStreamShorterThanItsNominalCount());
 }
 
 int main(void) {
@@ -3177,5 +3258,10 @@ int main(void) {
     RUN_TEST(testTrainingRunTrainsOnTheOptionsScheduler);
     RUN_TEST(testTrainingRunExitsOnADeinitialisedOptionsScheduler);
     RUN_TEST(testTrainingRunHandsEveryEvalCallTheOptionsScheduler);
+    RUN_TEST(testTrainingRunEvaluatesWithoutTheSchedulerAtAnotherEvalMicroBatch);
+    RUN_TEST(testTrainingRunEvaluatesWithoutTheSchedulerOverATailChunk);
+    RUN_TEST(testTrainingRunEvaluatesWithoutTheSchedulerBelowOneChunk);
+    RUN_TEST(testTrainingRunEvaluatesOnTheSchedulerWhenEveryChunkHasTheTrainingRowCount);
+    RUN_TEST(testTrainingRunExitsAtTheRaggedChunkOfAStreamShorterThanItsNominalCount);
     return UNITY_END();
 }

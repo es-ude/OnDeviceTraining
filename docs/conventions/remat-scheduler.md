@@ -75,6 +75,18 @@ A scheduler binds against the model as it is at each call.
   initialise a fresh scheduler.
 - A scheduler keyed to a different input shape than the one the grads level
   receives exits on its first call, naming ACT 0's field.
+- **Evaluation binds the same key.** `inferenceWithLoss` on a scheduler
+  exits at bind when its input differs from the training input the
+  scheduler was keyed to (batch rows, rank, order, dtype), naming ACT 0's
+  field. `trainingRun` avoids that for its own micro-batch artefacts: it
+  hands evaluation the scheduler only when every eval chunk has the training
+  row count (remat D19), judged once at entry on the eval loader's nominal
+  count. A loader whose stream differs from its nominal count (a replay
+  wrapper, for example) can still end on a ragged chunk, which exits at that
+  chunk's bind. An eval sample whose own shape or dtype differs from the
+  training sample's exits too: at its call's bind, or, when evaluation stacks
+  samples (m > 1), already at the gather check if it is not FLOAT32 or
+  differs from the first eval sample.
 
 ## Two tiers of checking
 
@@ -229,8 +241,22 @@ decisions and those with nothing in force yet are left out.
   ARENA-private. Every memory block comes from `reserveMemory`.
 - **remat D17** The schedule key fixes the batch size exactly: a scheduler
   keyed to batch B exits at bind on any other B. No plan-per-B cache.
-- **remat D19** Evaluation will run on the training arena. Until it does,
-  the eval level (`inferenceWithLoss`) refuses a non-NULL scheduler.
+- **remat D19** Evaluation runs on the caller's scheduler: `inferenceWithLoss`
+  with a non-NULL `call->remat` walks the plan's EVAL program (FORWARD and
+  LOSS_FORWARD only) in that scheduler's memory, with ACT 0 the caller's
+  input, borrowed. Output values, shape, dtype, dynamic quantization state
+  (SYM scale, BFP exponents), the loss and the model state after the call
+  are bit-identical to the NULL path's; the one difference is an input's
+  sparsity marker, which this path drops (the output is unmarked) while the
+  NULL path keeps it. `trainingRun` hands its eval calls `options->remat` only
+  when every eval chunk has the training row count: `evalMicroBatchSize ==
+  microBatchSize`, and the eval loader's nominal count
+  (`datasetSize / batchSize * batchSize`) a multiple of it. Otherwise its
+  eval calls get no scheduler, and the run completes as without one. The
+  sample shape is not judged at entry: an eval sample whose shape or dtype
+  differs from the key exits with a named error, at its call's bind or, when
+  evaluation stacks samples, at the gather check. The public `evaluation*`
+  functions pass none.
 - **remat D20** n = 1 under CrossEntropy keeps the signed `top = -1`: the
   stream has a LOSS_BACKWARD step and no BACKWARD step.
 - **remat D23** A step is a 4-byte `{kind, layer}` value (`rematStep_t`);
@@ -238,6 +264,13 @@ decisions and those with nothing in force yet are left out.
 - **remat D24** Rows dispatch through a `const` vtable and a per-instance
   `fns` pointer that the row's init sets. Tests inject faults with
   decorator rows on their own instance, never by patching the vtable.
+- **remat D25** Evaluation inside the training arena adds no byte to it:
+  ARENA places the EVAL program two-ended (an even ACT at offset 0, an odd
+  ACT top-aligned), which the verified training layout proves fits, and HEAP
+  reserves one block per EVAL range. An eval bind runs the full key check
+  and writes no GRAD header. `inference()`, `inferenceBatched()` and the
+  public `evaluation*` functions keep their signatures and their per-call
+  buffers.
 - **remat D26** ARENA's arena is resident: reserved at init, held until
   deinit.
 - **remat D28** The validator (`RematCheck`) is always compiled in,
@@ -299,9 +332,9 @@ decisions and those with nothing in force yet are left out.
   and every buffer it writes is bound.
 - **remat R8** The validator exits on scheduler bugs, the row on resource
   failure mid-call; only an allocation failure at init is recoverable (the
-  init returns `false`). R8 lifecycle: every
-  vtable slot is mandatory, `end` leaves no non-borrowed wire resident,
-  and `deinit` is safe after a failed init.
+  init returns `false`). R8 lifecycle: every vtable slot is mandatory, `end`
+  leaves no non-borrowed wire resident, and `deinit` is safe after a failed
+  init.
 
 **Conformance properties** (each row and plan against the Legacy oracle).
 - **remat P1** Parameter grads, loss, output snapshot, SYM scales and BFP
@@ -318,7 +351,9 @@ decisions and those with nothing in force yet are left out.
   oracle calls.
 - **remat P7** Key deaths are identical on every row: the key check is
   shared code.
-- **remat P8** `observedPeakLiveBytes == peakLiveBytes` after a call.
+- **remat P8** After a call, `observedPeakLiveBytes` equals the
+  `peakLiveBytes` of the program the call walked (TRAIN, or EVAL for an
+  eval call).
 - **remat P9** The caller's input header and bytes stay unchanged, and a
   scheduler built on sample A runs sample B of the same shape.
 - **remat P10** Clean under ASan and UBSan.

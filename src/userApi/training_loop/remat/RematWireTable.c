@@ -418,10 +418,22 @@ static void writeWireConfig(rematWireTable_t *t, uint16_t id, const quantization
     }
 }
 
+/* The type-derived GRAD headers of phase 3. */
+static void writeGradHeaders(rematWireTable_t *t, const rematWireFact_t *facts) {
+    for (size_t id = t->modelSize + 1u; id < t->numWires; id++) {
+        rematWire_t *w = &t->wires[id];
+        if (w->inheritFrom != REMAT_NONE) {
+            continue; /* derived from the LIVE ACT header when its range opens (rematWireBind) */
+        }
+        copyGradShape(w->hdr->shape, t->wires[w->index].hdr->shape);
+        writeWireConfig(t, (uint16_t)id, facts[id].tmpl, facts[id].elements);
+    }
+}
+
 /* Phase 3 of the table bind: write the headers. calcOutputShape is a pure function of the config
  * and the input shape, so recomputing into the slab reproduces phase 1's shapes without keeping
  * them in scratch. */
-static void writeHeaders(rematWireTable_t *t, layer_t **model, tensor_t *input,
+static void writeHeaders(rematWireTable_t *t, layer_t **model, rematMode_t mode, tensor_t *input,
                          const rematWireFact_t *facts) {
     t->wires[0].hdr = input;
     t->wires[0].bytes = facts[0].bytes; /* a width edit on a packed input is adopted */
@@ -432,13 +444,8 @@ static void writeHeaders(rematWireTable_t *t, layer_t **model, tensor_t *input,
         layerFunctions[layer->type].calcOutputShape(layer, t->wires[j - 1].hdr->shape, hdr->shape);
         writeWireConfig(t, (uint16_t)j, facts[j].tmpl, facts[j].elements);
     }
-    for (size_t id = t->modelSize + 1u; id < t->numWires; id++) {
-        rematWire_t *w = &t->wires[id];
-        if (w->inheritFrom != REMAT_NONE) {
-            continue; /* derived from the LIVE ACT header when its range opens (rematWireBind) */
-        }
-        copyGradShape(w->hdr->shape, t->wires[w->index].hdr->shape);
-        writeWireConfig(t, (uint16_t)id, facts[id].tmpl, facts[id].elements);
+    if (mode == REMAT_MODE_TRAIN) { /* eval binds no GRAD wire */
+        writeGradHeaders(t, facts);
     }
     for (size_t id = 0; id < t->numWires; id++) {
         t->wires[id].bindGen = 0;
@@ -546,7 +553,7 @@ static void requireWireKey(const rematWireTable_t *t, const rematWireFact_t *fac
 }
 
 void rematWireTableBind(rematWireTable_t *t, layer_t **model, size_t n, lossFuncType_t lt,
-                        tensor_t *input) {
+                        rematMode_t mode, tensor_t *input) {
     requireModelKey(t, model, n, lt, input);
     /* O(maxRank) stack (four size_t[maxRank] shape arrays); the per-wire
      * facts live in the table block. */
@@ -554,7 +561,7 @@ void rematWireTableBind(rematWireTable_t *t, layer_t **model, size_t n, lossFunc
     numberWires(facts, model, t->modelSize, t->deepest, t->backwardTop, t->hasBackward);
     deriveFacts(facts, t->numWires, model, t->modelSize, input, t->maxRank);
     requireWireKey(t, facts);
-    writeHeaders(t, model, input, facts);
+    writeHeaders(t, model, mode, input, facts);
 }
 
 void rematWireTableUnbind(rematWireTable_t *t) {
@@ -578,8 +585,8 @@ static size_t liveElements(const shape_t *shape, const rematWire_t *w) {
  * that produced their source, so a producer that wrote a config field of its
  * output is seen. Check before write: every check (dtype, rank, the live
  * payload bytes, and inside bindBfpInto the grouping and the expCapacity
- * bound) runs before the first slab
- * write, so the config is written before the shape. */
+ * bound) runs before the first slab write, so the config is written before
+ * the shape. */
 static void deriveInheritedHeader(rematWireTable_t *t, uint16_t id) {
     rematWire_t *w = &t->wires[id];
     const tensor_t *src = t->wires[w->inheritFrom].hdr;

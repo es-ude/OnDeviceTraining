@@ -73,7 +73,7 @@ static void buildBfpSeedFixture(seedFixture_t *f) {
     f->model[1] = makeQuant(&f->tmplQ, &g_floatQ);
     f->x = makeInput(&f->in, (size_t[]){1, 2}, 2, &g_floatQ);
     f->t = initTable(f->model, 2, MSE, f->x);
-    rematWireTableBind(f->t, f->model, 2, MSE, f->x);
+    rematWireTableBind(f->t, f->model, 2, MSE, REMAT_MODE_TRAIN, f->x);
 }
 
 static void freeSeedFixture(seedFixture_t *f) {
@@ -866,7 +866,7 @@ void testBindWritesHarHeadersAndPointsAct0AtTheInput(void) {
     inputLike_t in;
     tensor_t *x = makeHarInput(&in);
     rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, x);
-    rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, x);
+    rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, REMAT_MODE_TRAIN, x);
 
     TEST_ASSERT_EQUAL_PTR(x, rematActHdr(t, 0));
     assertDims(rematActHdr(t, 1)->shape, (size_t[]){1, 16, 128}, 3);
@@ -888,6 +888,61 @@ void testBindWritesHarHeadersAndPointsAct0AtTheInput(void) {
     freeModel(model, HAR_N);
 }
 
+/* An EVAL bind re-derives the ACT headers but writes no GRAD header: eval
+ * binds no GRAD wire. GRAD 10 (the Linear's dx, type-derived) is tampered
+ * after a TRAIN bind; only the next TRAIN bind re-derives it. */
+void testEvalBindLeavesTheGradHeadersAsTheyAre(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    tensor_t *x = makeHarInput(&in);
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, x);
+    rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, REMAT_MODE_TRAIN, x);
+    rematGradHdr(t, 10)->shape->dimensions[1] = 7u;
+    rematActHdr(t, 10)->shape->dimensions[1] = 7u;
+    rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, REMAT_MODE_EVAL, x);
+    TEST_ASSERT_EQUAL_size_t(7, rematGradHdr(t, 10)->shape->dimensions[1]);
+    assertDims(rematActHdr(t, 10)->shape, (size_t[]){1, 64}, 2);
+    rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, REMAT_MODE_TRAIN, x);
+    assertDims(rematGradHdr(t, 10)->shape, (size_t[]){1, 64}, 2);
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+/* The bind generations and the observed peak restart at every bind, an EVAL
+ * one included: the peak a caller reads after an eval call is that call's. */
+void testEvalBindResetsTheBindGenerationsAndTheObservedPeak(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    tensor_t *x = makeHarInput(&in);
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, x);
+    rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, REMAT_MODE_TRAIN, x);
+    t->wires[1].bindGen = 5u;
+    t->observedPeakLiveBytes = 99u;
+    rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, REMAT_MODE_EVAL, x);
+    TEST_ASSERT_EQUAL_UINT32(0, t->wires[1].bindGen);
+    TEST_ASSERT_EQUAL_size_t(0, t->observedPeakLiveBytes);
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+/* EVAL runs the same key check: a batch of two against a table keyed to one
+ * exits naming ACT 0's field. */
+void testEvalBindRunsTheFullKeyCheck(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    inputLike_t in2;
+    tensor_t *x2 = makeInput(&in2, (size_t[]){2, 9, 128}, 3, &g_floatQ);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "key mismatch on wire ACT 0, field 'dims[0]': built 1, live 2",
+        rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, REMAT_MODE_EVAL, x2));
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
 /* Forward wires copy the upstream order (ReLU, LayerNorm); a dx wire always
  * gets identity order, as the pre-remat driver's dx allocator did. */
 void testBindCopiesForwardOrderAndGivesGradsIdentityOrder(void) {
@@ -897,7 +952,7 @@ void testBindCopiesForwardOrderAndGivesGradsIdentityOrder(void) {
     in.order[0] = 1;
     in.order[1] = 0;
     rematWireTable_t *t = initTable(model, 2, MSE, x);
-    rematWireTableBind(t, model, 2, MSE, x);
+    rematWireTableBind(t, model, 2, MSE, REMAT_MODE_TRAIN, x);
 
     TEST_ASSERT_EQUAL_size_t(1, rematActHdr(t, 1)->shape->orderOfDimensions[0]);
     TEST_ASSERT_EQUAL_size_t(0, rematActHdr(t, 1)->shape->orderOfDimensions[1]);
@@ -921,7 +976,7 @@ void testBindAllocatesNothing(void) {
     tensor_t *x = makeInput(&in, (size_t[]){1, 8}, 2, &g_floatQ);
     rematWireTable_t *t = initTable(model, 1, MSE, x);
     size_t before = memProfileCurrentBytes();
-    rematWireTableBind(t, model, 1, MSE, x);
+    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
     TEST_ASSERT_EQUAL_size_t(before, memProfileCurrentBytes());
     rematWireTableFree(t);
     freeModel(model, 1);
@@ -938,13 +993,13 @@ void testBindRederivesSymQMaxBitsAndResetsScale(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
     rematWireTable_t *t = initTable(model, 1, MSE, x);
-    rematWireTableBind(t, model, 1, MSE, x);
+    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
     symInt32QConfig_t *slabQc = rematActHdr(t, 1)->quantization->qConfig;
     TEST_ASSERT_EQUAL_UINT8(8, slabQc->qMaxBits);
 
     slabQc->scale = 0.25f; /* a producer's OUT_WRITE epilogue */
     symQc.qMaxBits = 16;   /* key-preserving template edit between calls */
-    rematWireTableBind(t, model, 1, MSE, x);
+    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
     TEST_ASSERT_EQUAL_UINT8(16, slabQc->qMaxBits);
     TEST_ASSERT_EQUAL_FLOAT(1.0f, slabQc->scale);
 
@@ -972,13 +1027,13 @@ void testBindAfterDeserializeModel(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
     rematWireTable_t *t = initTable(skeleton, 1, MSE, x);
-    rematWireTableBind(t, skeleton, 1, MSE, x);
+    rematWireTableBind(t, skeleton, 1, MSE, REMAT_MODE_TRAIN, x);
     symInt32QConfig_t *slabQc = rematActHdr(t, 1)->quantization->qConfig;
     TEST_ASSERT_EQUAL_UINT8(16, slabQc->qMaxBits);
 
     deserializeModel(skeleton, 1, file);
     (void)fclose(file);
-    rematWireTableBind(t, skeleton, 1, MSE, x);
+    rematWireTableBind(t, skeleton, 1, MSE, REMAT_MODE_TRAIN, x);
     TEST_ASSERT_EQUAL_UINT8(8, slabQc->qMaxBits);
 
     rematWireTableFree(t);
@@ -996,9 +1051,9 @@ void testBindRederivesRoundingMode(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
     rematWireTable_t *t = initTable(model, 1, MSE, x);
-    rematWireTableBind(t, model, 1, MSE, x);
+    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
     symQc.roundingMode = SR_HALF_AWAY;
-    rematWireTableBind(t, model, 1, MSE, x);
+    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
     symInt32QConfig_t *slabQc = rematActHdr(t, 1)->quantization->qConfig;
     TEST_ASSERT_EQUAL_INT(SR_HALF_AWAY, slabQc->roundingMode);
     rematWireTableFree(t);
@@ -1018,14 +1073,14 @@ void testBindRederivesFlattenBfpGroupingFromTheLiveInput(void) {
     tensor_t *x = makeInput(&in, (size_t[]){1, 4, 4}, 3, &inputQ);
     rematWireTable_t *t = initTable(model, 1, MSE, x);
     TEST_ASSERT_EQUAL_size_t(4, t->wires[1].expCapacity);
-    rematWireTableBind(t, model, 1, MSE, x);
+    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
     bfpQConfig_t *slabQc = rematActHdr(t, 1)->quantization->qConfig;
     TEST_ASSERT_EQUAL_size_t(4, slabQc->numGroups);
     TEST_ASSERT_EQUAL_size_t(4, slabQc->groupSize);
 
     slabQc->exponents[0] = 3; /* a producer's exponent write */
     initBfpQConfigGroupedInto(8, 8, HALF_AWAY, 2, 8, inputExponents, &inputQc);
-    rematWireTableBind(t, model, 1, MSE, x);
+    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
     TEST_ASSERT_EQUAL_size_t(2, slabQc->numGroups);
     TEST_ASSERT_EQUAL_size_t(8, slabQc->groupSize);
     TEST_ASSERT_EQUAL_UINT8(127, slabQc->exponents[0]); /* zero state: bias 2^(8-1)-1 */
@@ -1045,11 +1100,11 @@ void testBindCarriesSymQMaxBitsOntoTheFlattenWire(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 2, 3}, 3, &inputQ);
     rematWireTable_t *t = initTable(model, 1, MSE, x);
-    rematWireTableBind(t, model, 1, MSE, x);
+    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
     symInt32QConfig_t *slabQc = rematActHdr(t, 1)->quantization->qConfig;
     TEST_ASSERT_EQUAL_UINT8(12, slabQc->qMaxBits);
     inputQc.qMaxBits = 8;
-    rematWireTableBind(t, model, 1, MSE, x);
+    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
     TEST_ASSERT_EQUAL_UINT8(8, slabQc->qMaxBits);
     rematWireTableFree(t);
     freeModel(model, 1);
@@ -1068,7 +1123,7 @@ void testBindFollowsTheLivePackedInputBytes(void) {
     rematWireTable_t *t = initTable(model, 1, MSE, x);
     TEST_ASSERT_EQUAL_size_t(8, rematWireBytes(t, 0));
     inputQc.qBits = 4;
-    rematWireTableBind(t, model, 1, MSE, x);
+    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
     TEST_ASSERT_EQUAL_size_t(4, rematWireBytes(t, 0));
     rematWireTableFree(t);
     freeModel(model, 1);
@@ -1086,8 +1141,8 @@ void testBindRunsSampleBOnATableBuiltOnSampleA(void) {
     b->data = (uint8_t *)bytesB;
     inputLike_t snapshot = inB;
     rematWireTable_t *t = initTable(model, 1, MSE, a);
-    rematWireTableBind(t, model, 1, MSE, a);
-    rematWireTableBind(t, model, 1, MSE, b);
+    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, a);
+    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, b);
     TEST_ASSERT_EQUAL_PTR(b, rematActHdr(t, 0));
     TEST_ASSERT_EQUAL_PTR((uint8_t *)bytesB, b->data);
     TEST_ASSERT_EQUAL_MEMORY(snapshot.dims, inB.dims, sizeof inB.dims);
@@ -1122,7 +1177,7 @@ void testUnbindClearsTheBorrowedInputOnly(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
     rematWireTable_t *t = initTable(model, 1, MSE, x);
-    rematWireTableBind(t, model, 1, MSE, x);
+    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
     tensor_t *act1 = rematActHdr(t, 1);
     rematWireTableUnbind(t);
     TEST_ASSERT_NULL(rematActHdr(t, 0));
@@ -1156,7 +1211,7 @@ void testBindExitsOnAChangedModelSize(void) {
     tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
     rematWireTable_t *t = initTable(model, 2, MSE, x);
     ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on 'modelSize': built 2, live 1",
-                             rematWireTableBind(t, model, 1, MSE, x));
+                             rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x));
     rematWireTableFree(t);
     freeModel(model, 2);
 }
@@ -1167,7 +1222,7 @@ void testBindExitsOnAChangedLossType(void) {
     tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
     rematWireTable_t *t = initTable(model, 2, CROSS_ENTROPY, x);
     ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on 'lossType': built 1, live 0",
-                             rematWireTableBind(t, model, 2, MSE, x));
+                             rematWireTableBind(t, model, 2, MSE, REMAT_MODE_TRAIN, x));
     rematWireTableFree(t);
     freeModel(model, 2);
 }
@@ -1181,7 +1236,7 @@ void testBindExitsOnALayerTypeSwap(void) {
     rematWireTable_t *t = initTable(model, 2, MSE, x);
     model[1] = softmax; /* same shape, same dtype: only the type changes */
     ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on 'layerType[1]': built 1, live 6",
-                             rematWireTableBind(t, model, 2, MSE, x));
+                             rematWireTableBind(t, model, 2, MSE, REMAT_MODE_TRAIN, x));
     rematWireTableFree(t);
     model[1] = relu;
     freeModel(model, 2);
@@ -1196,8 +1251,9 @@ void testBindExitsWhenFreezingMovesDeepest(void) {
     tensor_t *x = makeHarInput(&in);
     rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, x);
     model[0]->config->conv1d->frozen = true;
-    ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on 'deepest': built 0, live 3",
-                             rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, x));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "key mismatch on 'deepest': built 0, live 3",
+        rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, REMAT_MODE_TRAIN, x));
     model[0]->config->conv1d->frozen = false;
     rematWireTableFree(t);
     freeModel(model, HAR_N);
@@ -1211,8 +1267,9 @@ void testBindExitsWhenFreezingALayerAboveDeepest(void) {
     tensor_t *x = makeHarInput(&in);
     rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, x);
     model[3]->config->conv1d->frozen = true;
-    ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on 'frozen[3]': built 0, live 1",
-                             rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, x));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "key mismatch on 'frozen[3]': built 0, live 1",
+        rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, REMAT_MODE_TRAIN, x));
     model[3]->config->conv1d->frozen = false;
     rematWireTableFree(t);
     freeModel(model, HAR_N);
@@ -1225,7 +1282,7 @@ void testBindExitsOnAChangedInputRank(void) {
     rematWireTable_t *t = initTable(model, 1, MSE, makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ));
     tensor_t *x3 = makeInput(&in3, (size_t[]){1, 1, 4}, 3, &g_floatQ);
     ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on wire ACT 0, field 'rank': built 2, live 3",
-                             rematWireTableBind(t, model, 1, MSE, x3));
+                             rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x3));
     rematWireTableFree(t);
     freeModel(model, 1);
 }
@@ -1239,7 +1296,7 @@ void testBindExitsOnAChangedBatch(void) {
     rematWireTable_t *t = initTable(model, 1, MSE, makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ));
     tensor_t *x2 = makeInput(&in2, (size_t[]){2, 4}, 2, &g_floatQ);
     ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on wire ACT 0, field 'dims[0]': built 1, live 2",
-                             rematWireTableBind(t, model, 1, MSE, x2));
+                             rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x2));
     rematWireTableFree(t);
     freeModel(model, 1);
 }
@@ -1253,7 +1310,7 @@ void testBindExitsOnAChangedInputOrder(void) {
     inT.order[0] = 1;
     inT.order[1] = 0;
     ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on wire ACT 0, field 'order[0]': built 0, live 1",
-                             rematWireTableBind(t, model, 1, MSE, xT));
+                             rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, xT));
     rematWireTableFree(t);
     freeModel(model, 1);
 }
@@ -1268,7 +1325,7 @@ void testBindExitsOnAChangedInputDtype(void) {
     rematWireTable_t *t = initTable(model, 1, MSE, makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ));
     tensor_t *xS = makeInput(&inS, (size_t[]){1, 4}, 2, &symQ);
     ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on wire ACT 0, field 'dtype': built 1, live 2",
-                             rematWireTableBind(t, model, 1, MSE, xS));
+                             rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, xS));
     rematWireTableFree(t);
     freeModel(model, 1);
 }
@@ -1285,7 +1342,7 @@ void testBindExitsOnAChangedWireByteCount(void) {
     rematWireTable_t *t = initTable(model, 1, MSE, x);
     tmplQc.mantissaBits = 4;
     ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on wire ACT 1, field 'bytes': built 8, live 4",
-                             rematWireTableBind(t, model, 1, MSE, x));
+                             rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x));
     rematWireTableFree(t);
     freeModel(model, 1);
 }
@@ -1296,7 +1353,7 @@ void testBindExitsOnAChangedWireByteCount(void) {
 static void bindUnderTheAsanCallback(rematWireTable_t *t, layer_t **model, size_t n,
                                      lossFuncType_t lt, tensor_t *x) {
     odtInstallAsanDeathExit();
-    rematWireTableBind(t, model, n, lt, x);
+    rematWireTableBind(t, model, n, lt, REMAT_MODE_TRAIN, x);
 }
 
 void testBindFloatToSymTemplateEditExitsBeforeSlabWrite(void) {
@@ -1382,7 +1439,7 @@ void testTableBindResetsBindGenLiveBytesAndThePeak(void) {
     rematWireBind(f.t, SEED_ACT2, (uint8_t *)act2);
     rematWireRelease(f.t, SEED_ACT1);
     rematWireRelease(f.t, SEED_ACT2);
-    rematWireTableBind(f.t, f.model, 2, MSE, f.x);
+    rematWireTableBind(f.t, f.model, 2, MSE, REMAT_MODE_TRAIN, f.x);
     for (uint16_t id = 0; id < f.t->numWires; id++) {
         TEST_ASSERT_EQUAL_UINT32(0, f.t->wires[id].bindGen);
     }
@@ -1425,7 +1482,7 @@ void testWireBindInheritedSymTakesConfigNotScale(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ);
     rematWireTable_t *t = initTable(model, 2, MSE, x);
-    rematWireTableBind(t, model, 2, MSE, x);
+    rematWireTableBind(t, model, 2, MSE, REMAT_MODE_TRAIN, x);
     uint32_t act2[4];
     uint32_t seed[4];
     rematWireBind(t, 2, (uint8_t *)act2);
@@ -1452,7 +1509,7 @@ void testWireBindInheritedGradChecksTheLiveDtypeWhenByteNeutral(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ);
     rematWireTable_t *t = initTable(model, 2, MSE, x);
-    rematWireTableBind(t, model, 2, MSE, x);
+    rematWireTableBind(t, model, 2, MSE, REMAT_MODE_TRAIN, x);
     uint32_t act2[4];
     uint32_t seed[4];
     rematWireBind(t, 2, (uint8_t *)act2);
@@ -1633,7 +1690,7 @@ void testWireReleaseExitsWhenLiveBytesWouldUnderflow(void) {
     buildBfpSeedFixture(&f);
     uint32_t act1[8];
     rematWireBind(f.t, SEED_ACT1, (uint8_t *)act1);
-    rematWireTableBind(f.t, f.model, 2, MSE, f.x);
+    rematWireTableBind(f.t, f.model, 2, MSE, REMAT_MODE_TRAIN, f.x);
     ASSERT_EXITS_WITH_OUTPUT(1, "rematWireRelease: wire ACT 1 live bytes would underflow",
                              rematWireRelease(f.t, SEED_ACT1));
     freeSeedFixture(&f);
@@ -1672,7 +1729,7 @@ static void buildDtypeFixture(dtypeFixture_t *f) {
     f->model[2] = makeQuant(&f->bfpQ, &g_floatQ);
     f->x = makeInput(&f->in, (size_t[]){1, 4}, 2, &g_floatQ);
     f->t = initTable(f->model, 3, MSE, f->x);
-    rematWireTableBind(f->t, f->model, 3, MSE, f->x);
+    rematWireTableBind(f->t, f->model, 3, MSE, REMAT_MODE_TRAIN, f->x);
 }
 
 static void assertPoisoned(const uint32_t *f32, const uint32_t *sym, const uint8_t *bfp) {
@@ -2455,6 +2512,9 @@ int main(void) {
     RUN_TEST(testTableInitExitsOnASlabSizeOverflow);
     RUN_TEST(testTableInitExitsOnATotalWireBytesOverflow);
     RUN_TEST(testBindWritesHarHeadersAndPointsAct0AtTheInput);
+    RUN_TEST(testEvalBindLeavesTheGradHeadersAsTheyAre);
+    RUN_TEST(testEvalBindResetsTheBindGenerationsAndTheObservedPeak);
+    RUN_TEST(testEvalBindRunsTheFullKeyCheck);
     RUN_TEST(testBindCopiesForwardOrderAndGivesGradsIdentityOrder);
 #ifdef ODT_MEM_PROFILE
     RUN_TEST(testBindAllocatesNothing);

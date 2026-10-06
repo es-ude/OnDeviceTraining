@@ -41,7 +41,7 @@ void rematBegin(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t los
         PRINT_ERROR("rematBegin: scheduler '%s' re-entered", s->fns->name);
         exit(1);
     }
-    rematWireTableBind(s->wires, model, n, loss.funcType, input);
+    rematWireTableBind(s->wires, model, n, loss.funcType, REMAT_MODE_TRAIN, input);
     s->inCall = true;
     s->fns->begin(s);
 }

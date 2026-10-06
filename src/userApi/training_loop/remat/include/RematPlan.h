@@ -119,9 +119,10 @@ void rematWireTableFree(rematWireTable_t *t);
  * shapes, config fields from the current templates, fresh dynamic state (SYM
  * scale 1, BFP exponents at the stored bias). ACT 0 = input, verbatim.
  * Inherited GRAD headers are derived later, by rematWireBind. Reserves
- * nothing. */
+ * nothing. An EVAL bind runs the same key check and ACT derivation but writes
+ * no GRAD header: eval binds no GRAD wire. */
 void rematWireTableBind(rematWireTable_t *t, layer_t **model, size_t n, lossFuncType_t lt,
-                        tensor_t *input);
+                        rematMode_t mode, tensor_t *input);
 void rematWireTableUnbind(rematWireTable_t *t); /* ACT 0 hdr = NULL */
 
 /* The row SDK: the ONLY writers of a header's ->data. A bind

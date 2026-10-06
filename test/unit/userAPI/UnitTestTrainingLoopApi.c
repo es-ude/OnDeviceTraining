@@ -21,6 +21,7 @@
 #include "OptimizerApi.h"
 #include "QuantizationApi.h"
 #include "ReluApi.h"
+#include "RematPlan.h"
 #include "RematScheduler.h"
 #include "Sgd.h"
 #include "SgdApi.h"
@@ -2941,11 +2942,12 @@ void testTrainingEpochDefaultMeanScaleSeesLabelBatchAxis(void) {
 void setUp() {}
 void tearDown() {}
 
-/* ---- trainingRunOptions_t.remat (#4 PR2): the run passes it to training --- */
+/* ---- trainingRunOptions_t.remat (#4): training and evaluation on it ------- */
 
 typedef struct remRun {
     trainingRunResult_t result;
     rematReport_t report;
+    size_t evalPeak; /* the EVAL program's peakLiveBytes */
 } remRun_t;
 
 /* testTrainingRun_HardcodesForwardReductionMean's run (two epochs, per
@@ -2988,6 +2990,7 @@ static remRun_t runTwoEpochs(bool withScheduler, bool deinitBeforeTheRun) {
                     inferenceWithLoss, &(trainingRunOptions_t){.remat = withScheduler ? &s : NULL});
     if (withScheduler) {
         rematSchedulerReport(&s, &run.report);
+        run.evalPeak = rematPlanProgram(s.plan, REMAT_MODE_EVAL)->peakLiveBytes;
         rematSchedulerDeinit(&s);
     }
 
@@ -3000,19 +3003,19 @@ static remRun_t runTwoEpochs(bool withScheduler, bool deinitBeforeTheRun) {
     return run;
 }
 
-/* The last training call ran on the options' scheduler (the peak observable
- * sees only the last bind; trainingRun builds one call from the options and
- * hands every training call that same call), evaluation completes through
- * the real inferenceWithLoss (it gets no scheduler before #4 PR3), and the
- * losses equal a run without one: STORE_ALL HEAP is today's values. */
+/* The run's last scheduler call was an eval call on the options' scheduler
+ * (the peak observable sees only the last bind, and the EVAL program's peak,
+ * ACT 1 alone, is below TRAIN's ACT 1 + seed), evaluation completes through
+ * the real inferenceWithLoss, and the losses equal a run without one:
+ * STORE_ALL HEAP is today's values. */
 void testTrainingRunTrainsOnTheOptionsScheduler(void) {
     remRun_t plain = runTwoEpochs(false, false);
     remRun_t onScheduler = runTwoEpochs(true, false);
     TEST_ASSERT_EQUAL_size_t(2, onScheduler.result.epochsCompleted);
-    TEST_ASSERT_TRUE(onScheduler.report.peakLiveBytes > 0);
-    TEST_ASSERT_EQUAL_size_t_MESSAGE(onScheduler.report.peakLiveBytes,
-                                     onScheduler.report.observedPeakLiveBytes,
-                                     "trainingRun did not train on options->remat");
+    TEST_ASSERT_TRUE(onScheduler.evalPeak > 0);
+    TEST_ASSERT_TRUE(onScheduler.evalPeak < onScheduler.report.peakLiveBytes);
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(onScheduler.evalPeak, onScheduler.report.observedPeakLiveBytes,
+                                     "trainingRun did not evaluate on options->remat");
     TEST_ASSERT_EQUAL_MEMORY(&plain.result.finalTrainLoss, &onScheduler.result.finalTrainLoss,
                              sizeof(float));
     TEST_ASSERT_EQUAL_MEMORY(&plain.result.finalEvalStats.loss,
@@ -3026,6 +3029,101 @@ void testTrainingRunExitsOnADeinitialisedOptionsScheduler(void) {
                              "rematCheckNumWires: scheduler not initialised (never initialised, "
                              "or its init failed before the plan was built)",
                              (void)runTwoEpochs(true, true));
+}
+
+/* The eval loader's dataset: the first g_evalCount epoch samples. */
+static size_t g_evalCount = 4;
+
+static size_t getEvalCountDatasetSize() {
+    return g_evalCount;
+}
+
+/* An inferenceWithLossFn_t conformer that wraps the real one: it records the
+ * scheduler of every call it gets and forwards the call unchanged. */
+static size_t g_forwardedCalls;
+static size_t g_forwardedOnScheduler;
+static rematScheduler_t *g_expectedRemat;
+
+static inferenceStats_t *forwardingInference(layer_t **model, size_t numberOfLayers,
+                                             tensor_t *input, tensor_t *label,
+                                             lossFuncType_t funcType, reduction_t forwardReduction,
+                                             const trainingCall_t *call) {
+    g_forwardedCalls++;
+    if (call != NULL && call->remat != NULL && call->remat == g_expectedRemat) {
+        g_forwardedOnScheduler++;
+    }
+    return inferenceWithLoss(model, numberOfLayers, input, label, funcType, forwardReduction, call);
+}
+
+/* runTwoEpochs at training micro-batch m, evaluated at mEval over the first
+ * evalCount samples (eval batchSize 1, so evalCount is the nominal count),
+ * with or without a HEAP scheduler keyed to the [m, 2] training batch. */
+static remRun_t runMicroBatched(size_t m, size_t mEval, size_t evalCount,
+                                inferenceWithLossFn_t inferenceFn, bool withScheduler) {
+    tensor_t *wParam = buildFloatTensor2D(2, 2, (float[]){1.f, 0.f, 0.f, 1.f}, 4);
+    tensor_t *wGrad = gradInitFloat(wParam, NULL);
+    parameter_t *w = parameterInit(wParam, wGrad);
+    tensor_t *bParam = buildFloatTensor2D(1, 2, (float[]){0.f, 0.f}, 2);
+    tensor_t *bGrad = gradInitFloat(bParam, NULL);
+    parameter_t *b = parameterInit(bParam, bGrad);
+    quantization_t testQ;
+    initFloat32Quantization(&testQ);
+    layer_t *linear = buildBorrowedLinearLayer(w, b, &testQ);
+    layer_t *model[] = {linear};
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    initEpochDataset();
+    g_evalCount = evalCount;
+    dataLoader_t *trainDl = dataLoaderInit(getEpochSample, getEpochDatasetSize, (uint16_t)m, NULL,
+                                           NULL, false, 0, true);
+    dataLoader_t *evalDl =
+        dataLoaderInit(getEpochSample, getEvalCountDatasetSize, 1, NULL, NULL, false, 0, true);
+    lossConfig_t cfg = defaultLossConfig(MSE);
+    tensor_t *trainBatchLike = buildFloatTensor2D(m, 2, (float[8]){0}, 2 * m);
+
+    remRun_t run = {0};
+    rematScheduler_t s;
+    if (withScheduler) {
+        TEST_ASSERT_TRUE(rematHeapInit(&s, model, 1, cfg, trainBatchLike, NULL));
+    }
+    g_forwardedCalls = 0;
+    g_forwardedOnScheduler = 0;
+    g_expectedRemat = withScheduler ? &s : NULL;
+    run.result = trainingRun(
+        model, 1, cfg, trainDl, evalDl, sgd, 2, calculateGradsSequential, inferenceFn,
+        &(trainingRunOptions_t){
+            .remat = withScheduler ? &s : NULL, .microBatchSize = m, .evalMicroBatchSize = mEval});
+    g_expectedRemat = NULL; /* s ends with this frame */
+    if (withScheduler) {
+        rematSchedulerReport(&s, &run.report);
+        run.evalPeak = rematPlanProgram(s.plan, REMAT_MODE_EVAL)->peakLiveBytes;
+        rematSchedulerDeinit(&s);
+    }
+
+    freeTensor(trainBatchLike);
+    freeOptim(sgd);
+    freeQuantization(momentumQ);
+    freeDataLoader(evalDl);
+    freeDataLoader(trainDl);
+    freeLinearLayerShellOnly(linear);
+    freeEpochDataset();
+    return run;
+}
+
+/* A conformer that wraps inferenceWithLoss receives the run's call on every
+ * eval call and forwards it: per sample at m = 1 (4 calls per epoch), per
+ * chunk of two at m = 2 (2 per epoch). */
+void testTrainingRunHandsEveryEvalCallTheOptionsScheduler(void) {
+    remRun_t perSample = runMicroBatched(1, 1, 4, forwardingInference, true);
+    TEST_ASSERT_EQUAL_size_t(8, g_forwardedCalls);
+    TEST_ASSERT_EQUAL_size_t(8, g_forwardedOnScheduler);
+    TEST_ASSERT_EQUAL_size_t(perSample.evalPeak, perSample.report.observedPeakLiveBytes);
+    remRun_t stacked = runMicroBatched(2, 2, 4, forwardingInference, true);
+    TEST_ASSERT_EQUAL_size_t(4, g_forwardedCalls);
+    TEST_ASSERT_EQUAL_size_t(4, g_forwardedOnScheduler);
+    TEST_ASSERT_EQUAL_size_t(stacked.evalPeak, stacked.report.observedPeakLiveBytes);
 }
 
 int main(void) {
@@ -3078,5 +3176,6 @@ int main(void) {
     RUN_TEST(testTrainingRun_StopOnNonFiniteLoss_DoesNotStepSchedulersOnTheStoppingEpoch);
     RUN_TEST(testTrainingRunTrainsOnTheOptionsScheduler);
     RUN_TEST(testTrainingRunExitsOnADeinitialisedOptionsScheduler);
+    RUN_TEST(testTrainingRunHandsEveryEvalCallTheOptionsScheduler);
     return UNITY_END();
 }

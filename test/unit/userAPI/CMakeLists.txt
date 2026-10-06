@@ -98,6 +98,7 @@ add_elastic_ai_unit_test(
         TrainingLoopApi
         MORE_LIBS
         RematScheduler
+        RematPlan
         TrainingEpochDefault
         TrainingBatchDefault
         CalculateGradsSequential

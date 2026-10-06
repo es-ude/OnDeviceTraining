@@ -309,7 +309,8 @@ static float evaluateChunk(const char *caller, layer_t **model, size_t modelSize
                            lossFuncType_t funcType, inferenceWithLossFn_t inferenceFn,
                            reduction_t forwardReduction, tensor_t *referenceItem,
                            tensor_t *referenceLabel, uint8_t *itemBuffer, uint8_t *labelBuffer,
-                           size_t rows, size_t C, size_t chunkFirst, evalCounts_t *counts) {
+                           size_t rows, size_t C, size_t chunkFirst, evalCounts_t *counts,
+                           const trainingCall_t *call) {
     batchView_t itemView;
     batchView_t labelView;
     tensor_t *item = batchViewOf(&itemView, referenceItem);
@@ -320,7 +321,7 @@ static float evaluateChunk(const char *caller, layer_t **model, size_t modelSize
     labelView.dimensions[0] = rows;
 
     inferenceStats_t *stats =
-        inferenceFn(model, modelSize, item, label, funcType, forwardReduction, NULL);
+        inferenceFn(model, modelSize, item, label, funcType, forwardReduction, call);
     requireChunkOutput(caller, stats, rows, C, chunkFirst);
     if (counts != NULL) {
         const float *out = (const float *)stats->output->data;
@@ -344,7 +345,7 @@ static float evaluateStacked(const char *caller, const char *knob, layer_t **mod
                              size_t modelSize, lossFuncType_t funcType, dataLoader_t *dataLoader,
                              size_t numberOfBatches, inferenceWithLossFn_t inferenceFn,
                              reduction_t forwardReduction, size_t m, evalCounts_t *counts,
-                             size_t *totalSamples) {
+                             size_t *totalSamples, const trainingCall_t *call) {
     stackGatherRequireFloat32Model(caller, knob, model, modelSize, m, layerForwardNonFloat32Field);
     tensor_t *referenceItem = NULL;
     tensor_t *referenceLabel = NULL;
@@ -391,7 +392,7 @@ static float evaluateStacked(const char *caller, const char *knob, layer_t **mod
                 totalLoss +=
                     evaluateChunk(caller, model, modelSize, funcType, inferenceFn, forwardReduction,
                                   referenceItem, referenceLabel, itemBuffer, labelBuffer, rows, C,
-                                  streamed - rows, counts);
+                                  streamed - rows, counts, call);
                 rows = 0;
             }
         }
@@ -400,7 +401,7 @@ static float evaluateStacked(const char *caller, const char *knob, layer_t **mod
     if (rows > 0) {
         totalLoss += evaluateChunk(caller, model, modelSize, funcType, inferenceFn,
                                    forwardReduction, referenceItem, referenceLabel, itemBuffer,
-                                   labelBuffer, rows, C, streamed - rows, counts);
+                                   labelBuffer, rows, C, streamed - rows, counts, call);
     }
     if (labelBuffer != NULL) {
         freeReservedMemory(labelBuffer);
@@ -438,7 +439,7 @@ float evaluationEpoch(layer_t **model, size_t modelSize, lossFuncType_t funcType
     } else {
         totalLoss = evaluateStacked("evaluationEpoch", "microBatchSize", model, modelSize, funcType,
                                     dataLoader, numberOfBatches, inferenceFn, forwardReduction, m,
-                                    NULL, &totalSamples);
+                                    NULL, &totalSamples, NULL);
     }
     requireStreamedSamples(totalSamples, "evaluationEpoch");
 
@@ -450,7 +451,8 @@ float evaluationEpoch(layer_t **model, size_t modelSize, lossFuncType_t funcType
 
 static float evaluateBatchInternal(layer_t **model, size_t modelSize, lossFuncType_t funcType,
                                    batch_t *batch, inferenceWithLossFn_t inferenceFn,
-                                   evalCounts_t *counts, reduction_t forwardReduction) {
+                                   evalCounts_t *counts, reduction_t forwardReduction,
+                                   const trainingCall_t *call) {
     float totalLoss = 0.0f;
 
     for (size_t i = 0; i < batch->size; i++) {
@@ -458,7 +460,7 @@ static float evaluateBatchInternal(layer_t **model, size_t modelSize, lossFuncTy
         batchView_t labelView;
         inferenceStats_t *stats = inferenceFn(
             model, modelSize, batchViewOf(&itemView, batch->samples[i]->item),
-            batchViewOf(&labelView, batch->samples[i]->label), funcType, forwardReduction, NULL);
+            batchViewOf(&labelView, batch->samples[i]->label), funcType, forwardReduction, call);
         totalLoss += stats->loss;
 
         size_t predicted = argmaxByTensor(stats->output, counts->numClasses);
@@ -521,7 +523,7 @@ static epochStats_t evaluateEpochInternal(const char *knob, layer_t **model, siz
                                           inferenceWithLossFn_t inferenceFn,
                                           size_t *confusionMatrix, size_t numClasses,
                                           reduction_t forwardReduction, size_t m,
-                                          const char *caller) {
+                                          const char *caller, const trainingCall_t *call) {
     size_t numberOfBatches = requireEvalBatches(dataLoader, caller);
 
     size_t *tp = reserveMemory(numClasses * sizeof(size_t));
@@ -553,14 +555,14 @@ static epochStats_t evaluateEpochInternal(const char *knob, layer_t **model, siz
                 firstSeen = true;
             }
             totalLoss += evaluateBatchInternal(model, modelSize, funcType, batch, inferenceFn,
-                                               &counts, forwardReduction);
+                                               &counts, forwardReduction, call);
             totalSamples += batch->size;
             freeBatch(batch);
         }
     } else {
         totalLoss =
             evaluateStacked(caller, knob, model, modelSize, funcType, dataLoader, numberOfBatches,
-                            inferenceFn, forwardReduction, m, &counts, &totalSamples);
+                            inferenceFn, forwardReduction, m, &counts, &totalSamples, call);
     }
     requireStreamedSamples(totalSamples, caller);
 
@@ -598,7 +600,7 @@ epochStats_t evaluationEpochWithMetrics(layer_t **model, size_t modelSize, lossF
 
     return evaluateEpochInternal("microBatchSize", model, modelSize, funcType, dataLoader,
                                  inferenceFn, NULL, numClasses, forwardReduction, m,
-                                 "evaluationEpochWithMetrics");
+                                 "evaluationEpochWithMetrics", NULL);
 }
 
 classificationReport_t evaluationEpochWithReport(layer_t **model, size_t modelSize,
@@ -623,7 +625,7 @@ classificationReport_t evaluationEpochWithReport(layer_t **model, size_t modelSi
     classificationReport_t report;
     report.stats = evaluateEpochInternal("microBatchSize", model, modelSize, funcType, dataLoader,
                                          inferenceFn, cmBuffer, numClasses, forwardReduction, m,
-                                         "evaluationEpochWithReport");
+                                         "evaluationEpochWithReport", NULL);
     report.confusionMatrix = cmBuffer;
     report.numClasses = numClasses;
     return report;
@@ -647,7 +649,7 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
     size_t evalMicroBatchSize = (options != NULL && options->evalMicroBatchSize != 0)
                                     ? options->evalMicroBatchSize
                                     : microBatchSize;
-    /* Training only until #4 PR3: the evaluation calls pass NULL (remat D19). */
+    /* The run's call: every training call, and every evaluation call (remat D19). */
     const trainingCall_t trainCall = {.remat = (options != NULL) ? options->remat : NULL};
 
     if (lrScheduler != NULL && lrScheduler->optimizer != optimizer) {
@@ -745,9 +747,10 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
         float trainLoss =
             trainingEpochDefault(model, modelSize, lossConfig, trainDataLoader, optimizer,
                                  calculateGradsFn, forwardReduction, microBatchSize, &trainCall);
-        epochStats_t evalStats = evaluateEpochInternal(
-            "evalMicroBatchSize", model, modelSize, lossConfig.funcType, evalDataLoader,
-            inferenceFn, NULL, numClasses, forwardReduction, evalMicroBatchSize, "trainingRun");
+        epochStats_t evalStats =
+            evaluateEpochInternal("evalMicroBatchSize", model, modelSize, lossConfig.funcType,
+                                  evalDataLoader, inferenceFn, NULL, numClasses, forwardReduction,
+                                  evalMicroBatchSize, "trainingRun", &trainCall);
         info.trainLoss = trainLoss;
 
         if (callback != NULL) {

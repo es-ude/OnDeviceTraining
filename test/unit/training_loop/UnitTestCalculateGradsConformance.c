@@ -13,6 +13,7 @@
 #include "DeathTest.h"
 #include "DropoutApi.h"
 #include "GroupNormApi.h"
+#include "InferenceApi.h"
 #include "Layer.h"
 #include "LayerQuant.h"
 #include "LegacyCalculateGrads.h"
@@ -21,6 +22,7 @@
 #include "Quantization.h"
 #include "QuantizationApi.h"
 #include "RNG.h"
+#include "RematPlan.h"
 #include "RematTestDecorators.h"
 #include "RematTestFixtures.h"
 #include "StorageApi.h"
@@ -298,7 +300,7 @@ static void buildCeLastLinearOnly(zooFixture_t *f) {
 }
 
 /* CE over a model whose last layer is not a Softmax: the positional rule
- * (remat D20) still skips layer n - 1's backward, exactly as the old driver did. */
+ * still skips layer n - 1's backward, exactly as the old driver did. */
 static void buildCeWithoutSoftmax(zooFixture_t *f) {
     beginZoo(f);
     f->model[0] = makeLinear(4, 3, false);
@@ -803,8 +805,9 @@ void testAnEmptyModelExitsNamingIt(void) {
 
 /* Wire headers carry no sparsity marker (an input's marker is not
  * propagated), so a marked input yields an unmarked output snapshot and
- * nothing is reserved for markers. The values still match Legacy. The memory baseline is taken
- * after the Legacy run, which leaks its markers (freeSparsity is a no-op). */
+ * nothing is reserved for markers. The values still match Legacy. The memory
+ * baseline is taken after the Legacy run, which leaks its markers
+ * (freeSparsity is a no-op). */
 void testAMarkedInputYieldsAnUnmarkedOutputAndLeaksNothing(void) {
     zooFixture_t f;
     buildMlp(&f);
@@ -1325,6 +1328,175 @@ void testADrawingRowFailsP2AgainstLegacy(void) {
     }
 }
 
+/* ---- evaluation on the matrix (remat D19) ---- */
+
+typedef struct zooEntry {
+    const char *name;
+    void (*build)(zooFixture_t *f);
+} zooEntry_t;
+
+/* The returned output is SYM_INT32: its scale is compared. */
+static void buildSymOutput(zooFixture_t *f) {
+    beginZoo(f);
+    quantization_t *act = keepTemplate(f, quantizationInitSymInt32WithBits(HALF_AWAY, 8));
+    f->model[0] = makeLinear(4, 2, false);
+    f->model[1] = makeQuant(act, &g_floatQ);
+    f->n = 2;
+    f->x = makeFloatTensor((size_t[]){1, 4}, 2, 1.0f);
+    mseLabel(f, 2);
+}
+
+/* The returned output is grouped BFP: its exponents are compared. */
+static void buildBfpOutput(zooFixture_t *f) {
+    beginZoo(f);
+    quantization_t *bfp = keepTemplate(f, quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 4));
+    f->model[0] = makeLinear(8, 8, false);
+    f->model[1] = makeQuant(bfp, &g_floatQ);
+    f->n = 2;
+    f->x = makeFloatTensor((size_t[]){1, 8}, 2, 1.0f);
+    mseLabel(f, 8);
+}
+
+#define ZOO_FIXTURES 18
+static const zooEntry_t g_zoo[ZOO_FIXTURES] = {
+    {"mlp", buildMlp},
+    {"har-cnn", buildHarCnn},
+    {"softmax-mse", buildSoftmaxMse},
+    {"frozen-layernorm", buildFrozenLayerNorm},
+    {"frozen-groupnorm", buildFrozenGroupNorm},
+    {"truncated-har", buildTruncatedHar},
+    {"all-frozen", buildAllFrozen},
+    {"dropout", buildDropout},
+    {"quant-sym", buildQuantSym},
+    {"flatten-at-0", buildFlattenAt0},
+    {"f1-bfp", buildF1Zoo},
+    {"grouped-bfp", buildGroupedBfp},
+    {"single-layer-ce", buildSingleLayerCe},
+    {"ce-last-linear-only", buildCeLastLinearOnly},
+    {"batchnorm", buildBatchNorm},
+    {"ce-without-softmax", buildCeWithoutSoftmax},
+    {"sym-output", buildSymOutput},
+    {"bfp-output", buildBfpOutput},
+};
+
+/* One inferenceWithLoss call: the loss, the returned output with its shape
+ * and dynamic state (SYM scale, BFP exponents), and the memory bracket. */
+typedef struct evalCapture {
+    float loss;
+    size_t memBefore;
+    size_t memAfter;
+    blob_t output;
+} evalCapture_t;
+static evalCapture_t g_evalNull;
+static evalCapture_t g_evalCell;
+
+static void captureEval(zooFixture_t *f, const trainingCall_t *call, evalCapture_t *cap) {
+    snapshotInput(&g_input, f->x);
+    cap->output.used = 0;
+    cap->memBefore = memProfileCurrentBytes();
+    inferenceStats_t *stats =
+        inferenceWithLoss(f->model, f->n, f->x, f->y, f->loss.funcType, REDUCTION_MEAN, call);
+    cap->loss = stats->loss;
+    captureTensor(&cap->output, stats->output);
+    freeInferenceStats(stats);
+    cap->memAfter = memProfileCurrentBytes();
+    assertInputUnchanged(&g_input, f->x);
+}
+
+static char g_evalMessage[160];
+static const char *sayEval(const char *fixture, const char *cell, const char *what) {
+    (void)snprintf(g_evalMessage, sizeof g_evalMessage, "%s on %s: %s", fixture, cell, what);
+    return g_evalMessage;
+}
+
+/* Every zoo fixture on every cell of one row: output and loss memcmp-equal to
+ * the NULL path (remat D9), the input untouched (remat P9, in captureEval),
+ * the observed peak the EVAL program's (remat P8), and every byte the call
+ * reserved returned with the stats (remat P5). */
+static void assertEvalMatchesTheNullPath(rematSchedulerType_t row) {
+    for (size_t z = 0; z < ZOO_FIXTURES; z++) {
+        for (size_t k = 0; k < MATRIX_CELLS; k++) {
+            const matrixCell_t *cell = &g_cells[k];
+            if (cell->row != row) {
+                continue;
+            }
+            zooFixture_t f;
+            g_zoo[z].build(&f);
+            captureEval(&f, NULL, &g_evalNull);
+            rematScheduler_t s;
+            initCell(&s, cell, &f);
+            captureEval(&f, &(trainingCall_t){.remat = &s}, &g_evalCell);
+            rematReport_t report = reportOf(&s);
+            size_t evalPeak = rematPlanProgram(s.plan, REMAT_MODE_EVAL)->peakLiveBytes;
+            rematSchedulerDeinit(&s);
+            freeZoo(&f);
+            const char *name = g_zoo[z].name;
+            TEST_ASSERT_EQUAL_MEMORY_MESSAGE(&g_evalNull.loss, &g_evalCell.loss, sizeof(float),
+                                             sayEval(name, cell->name, "the loss"));
+            TEST_ASSERT_EQUAL_size_t_MESSAGE(g_evalNull.output.used, g_evalCell.output.used,
+                                             sayEval(name, cell->name, "the output's size"));
+            TEST_ASSERT_EQUAL_MEMORY_MESSAGE(g_evalNull.output.bytes, g_evalCell.output.bytes,
+                                             g_evalNull.output.used,
+                                             sayEval(name, cell->name, "the output"));
+            TEST_ASSERT_EQUAL_size_t_MESSAGE(evalPeak, report.observedPeakLiveBytes,
+                                             sayEval(name, cell->name, "remat P8 in eval"));
+            TEST_ASSERT_EQUAL_size_t_MESSAGE(g_evalCell.memBefore, g_evalCell.memAfter,
+                                             sayEval(name, cell->name, "remat P5 in eval"));
+        }
+    }
+}
+
+/* Evaluation on a scheduler drops an input's sparsity marker, as training
+ * does: the wire headers carry none, so the output is unmarked and nothing is
+ * reserved for a marker, the values equal the unmarked NULL path's, and the
+ * marked input stays unchanged (remat P9). The NULL path runs unmarked here:
+ * it would hand the output a fresh marker, and freeSparsity is a no-op. */
+void testAMarkedInputEvaluatesToAnUnmarkedOutputOnEitherRow(void) {
+    for (size_t k = 0; k < MATRIX_CELLS; k++) {
+        const matrixCell_t *cell = &g_cells[k];
+        zooFixture_t f;
+        buildMlp(&f);
+        captureEval(&f, NULL, &g_evalNull);
+        rematScheduler_t s;
+        initCell(&s, cell, &f);
+        sparsity_t marker = {0};
+        f.x->sparsity = &marker;
+        snapshotInput(&g_input, f.x);
+        size_t before = memProfileCurrentBytes();
+        inferenceStats_t *stats = inferenceWithLoss(f.model, f.n, f.x, f.y, f.loss.funcType,
+                                                    REDUCTION_MEAN, &(trainingCall_t){.remat = &s});
+        assertInputUnchanged(&g_input, f.x);
+        bool outputMarked = stats->output->sparsity != NULL;
+        g_evalCell.loss = stats->loss;
+        g_evalCell.output.used = 0;
+        captureTensor(&g_evalCell.output, stats->output);
+        freeInferenceStats(stats);
+        size_t after = memProfileCurrentBytes();
+        f.x->sparsity = NULL;
+        rematSchedulerDeinit(&s);
+        freeZoo(&f);
+        TEST_ASSERT_FALSE_MESSAGE(outputMarked,
+                                  sayEval("mlp", cell->name, "the output carries no marker"));
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(before, after,
+                                         sayEval("mlp", cell->name, "no marker is reserved"));
+        TEST_ASSERT_EQUAL_MEMORY_MESSAGE(&g_evalNull.loss, &g_evalCell.loss, sizeof(float),
+                                         sayEval("mlp", cell->name, "the loss"));
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(g_evalNull.output.used, g_evalCell.output.used,
+                                         sayEval("mlp", cell->name, "the output's size"));
+        TEST_ASSERT_EQUAL_MEMORY_MESSAGE(g_evalNull.output.bytes, g_evalCell.output.bytes,
+                                         g_evalNull.output.used,
+                                         sayEval("mlp", cell->name, "the output"));
+    }
+}
+
+void testEvalOverTheZooMatchesTheNullPathOnArena(void) {
+    assertEvalMatchesTheNullPath(REMAT_ARENA);
+}
+
+void testEvalOverTheZooMatchesTheNullPathOnHeap(void) {
+    assertEvalMatchesTheNullPath(REMAT_HEAP);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testNullPathMatchesLegacyOnTheMlp);
@@ -1394,5 +1566,8 @@ int main(void) {
     RUN_TEST(testTwoCallsAcrossAnInputRegroupMatchLegacy);
     RUN_TEST(testASchedulerBuiltOnSampleARunsSampleB);
     RUN_TEST(testADrawingRowFailsP2AgainstLegacy);
+    RUN_TEST(testAMarkedInputEvaluatesToAnUnmarkedOutputOnEitherRow);
+    RUN_TEST(testEvalOverTheZooMatchesTheNullPathOnArena);
+    RUN_TEST(testEvalOverTheZooMatchesTheNullPathOnHeap);
     return UNITY_END();
 }

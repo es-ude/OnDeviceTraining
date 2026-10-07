@@ -48,11 +48,19 @@ static trainingStats_t *initTrainingStats(tensor_t *output) {
     return trainingStats;
 }
 
+/* What a training call without a scheduler runs on (remat D30). The policy
+ * of this use case, not of the scheduler library, whose NULL spec keeps
+ * meaning STORE_ALL. */
+static const rematPlanSpec_t defaultPlanSpec = {.policy = REMAT_PLAN_STORE_ALL};
+
+const rematPlanSpec_t *calculateGradsDefaultPlanSpec(void) {
+    return &defaultPlanSpec;
+}
+
 /* The validating interpreter: a row hands out each step, the checker
  * validates it and resolves its operands before anything runs, and only then
  * does the driver execute it. Without a caller scheduler every call builds an
- * ephemeral HEAP + STORE_ALL one (remat D30): today's values and lifetimes,
- * one block per wire range. */
+ * ephemeral HEAP one on the default plan, one block per wire range. */
 static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
                                            lossConfig_t lossConfig, reduction_t forwardReduction,
                                            tensor_t *input, tensor_t *label, traceSink_t sink,
@@ -64,7 +72,7 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
     rematScheduler_t ephemeral;
     rematScheduler_t *s = (call != NULL) ? call->remat : NULL;
     if (s == NULL) {
-        if (!rematHeapInit(&ephemeral, model, modelSize, lossConfig, input, NULL)) {
+        if (!rematHeapInit(&ephemeral, model, modelSize, lossConfig, input, &defaultPlanSpec)) {
             PRINT_ERROR("calculateGrads: ephemeral HEAP scheduler: reserveMemory failed");
             exit(1);
         }

@@ -963,6 +963,89 @@ void testAZeroInitialisedCallIsTheNullScheduler(void) {
     assertSameValues(NULL);
 }
 
+/* ---- the default plan of a training call without a scheduler ---- */
+
+/* What a NULL scheduler resolves to is the training call's rule, visible to
+ * its callers; the scheduler library's own NULL spec stays STORE_ALL. */
+void testANullSchedulerResolvesToTheNamedDefaultPlan(void) {
+    const rematPlanSpec_t *spec = calculateGradsDefaultPlanSpec();
+    TEST_ASSERT_NOT_NULL(spec);
+    TEST_ASSERT_EQUAL_INT(REMAT_PLAN_STORE_ALL, spec->policy);
+}
+
+#ifdef ODT_MEM_PROFILE
+/* HAR under CE: BACKWARD 10..0 (the Softmax at 11 has none). */
+#define HAR_CNN_AGRADS 11u
+
+/* Live bytes at every "agrad" event of one call, relative to a mark taken
+ * right before the call. The sink asserts nothing: a Unity failure would
+ * longjmp out of the driver mid-call. */
+typedef struct liveSampler {
+    size_t mark;
+    size_t agrads;
+    bool underflow;
+    size_t at[ZOO_MAX_LAYERS];
+} liveSampler_t;
+
+static void liveBytesSink(void *ctx, size_t layerIdx, layerType_t layerType, const char *phase,
+                          tensor_t *tensor) {
+    (void)layerType;
+    (void)tensor;
+    liveSampler_t *s = ctx;
+    if (strcmp(phase, "agrad") != 0 || layerIdx >= ZOO_MAX_LAYERS) {
+        return;
+    }
+    size_t cur = memProfileCurrentBytes();
+    if (cur < s->mark) {
+        s->underflow = true;
+        return;
+    }
+    s->at[layerIdx] = cur - s->mark;
+    s->agrads++;
+}
+
+/* One traced HAR CNN call, on the NULL path or on an explicit HEAP scheduler
+ * built from spec before the mark. The NULL path reserves its table and plan
+ * inside the call, after the mark, so the explicit scheduler's metadata is
+ * added back: both then count the same blocks. */
+static liveSampler_t sampleHarCnn(bool explicitScheduler, const rematPlanSpec_t *spec) {
+    zooFixture_t f;
+    buildHarCnn(&f);
+    rematScheduler_t s = {0};
+    size_t meta = 0;
+    if (explicitScheduler) {
+        TEST_ASSERT_TRUE(rematHeapInit(&s, f.model, f.n, f.loss, f.x, spec));
+        meta = reportOf(&s).metadataBytes;
+    }
+    const trainingCall_t call = {.remat = explicitScheduler ? &s : NULL};
+    liveSampler_t smp = {0};
+    smp.mark = memProfileCurrentBytes();
+    freeTrainingStats(
+        tracedGrads(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y, liveBytesSink, &smp, &call));
+    rematSchedulerDeinit(&s);
+    freeZoo(&f);
+    for (size_t l = 0; l < HAR_CNN_AGRADS; l++) {
+        smp.at[l] += meta;
+    }
+    return smp;
+}
+
+/* The NULL path holds exactly what a scheduler built from the named default
+ * holds, at every backward step: the default is the whole difference. */
+void testANullSchedulerHoldsWhatTheDefaultPlansSchedulerHolds(void) {
+    liveSampler_t nullPath = sampleHarCnn(false, NULL);
+    liveSampler_t viaDefault = sampleHarCnn(true, calculateGradsDefaultPlanSpec());
+    TEST_ASSERT_FALSE_MESSAGE(nullPath.underflow, "NULL path: live bytes below the mark");
+    TEST_ASSERT_FALSE_MESSAGE(viaDefault.underflow, "default plan: live bytes below the mark");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(HAR_CNN_AGRADS, nullPath.agrads, "NULL path: agrads");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(HAR_CNN_AGRADS, viaDefault.agrads, "default plan: agrads");
+    for (size_t l = 0; l < HAR_CNN_AGRADS; l++) {
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(viaDefault.at[l], nullPath.at[l],
+                                         "live bytes at the agrad of this layer index");
+    }
+}
+#endif
+
 /* ---- the conformance matrix: {ARENA, HEAP} x {STORE_ALL, LIVENESS} ---- */
 
 typedef struct matrixCell {
@@ -1595,6 +1678,10 @@ int main(void) {
     RUN_TEST(testTracedGradsRunsOnTheCallersScheduler);
     RUN_TEST(testTheCallersSchedulerSurvivesTheCall);
     RUN_TEST(testAZeroInitialisedCallIsTheNullScheduler);
+    RUN_TEST(testANullSchedulerResolvesToTheNamedDefaultPlan);
+#ifdef ODT_MEM_PROFILE
+    RUN_TEST(testANullSchedulerHoldsWhatTheDefaultPlansSchedulerHolds);
+#endif
     RUN_TEST(testMlpMatchesLegacyOnArena);
     RUN_TEST(testMlpMatchesLegacyOnHeap);
     RUN_TEST(testHarCnnMatchesLegacyOnArena);

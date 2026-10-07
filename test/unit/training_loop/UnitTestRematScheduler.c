@@ -625,6 +625,24 @@ void testReportArenaBytesHarFfdRegressionGuard(void) {
     TEST_ASSERT_EQUAL_size_t(49152, reportAfterInit(buildHarModel, &g_liveness).arenaBytes);
 }
 
+static void buildFinetuneStage2Model(fixture_t *f) {
+    buildHarFixture(f, true);
+}
+
+/* FFD heuristic, like the HAR guard above: recorded from the
+ * implementation, a change needs a stated reason. mnist_cnn: STORE_ALL places
+ * 188,368 B for its 175,824 B peak (a 12,544 B gap), LIVENESS exactly its
+ * 112,896 B peak. Finetune stage 2: STORE_ALL exactly its 57,928 B peak;
+ * LIVENESS places every 8,192 B wire first and needs 20,480 B for a 16,384 B
+ * peak, a layout of 16,384 B exists. */
+void testReportArenaBytesMnistCnnAndFinetuneFfdRegressionGuards(void) {
+    TEST_ASSERT_EQUAL_size_t(188368, reportAfterInit(buildMnistCnnModel, NULL).arenaBytes);
+    TEST_ASSERT_EQUAL_size_t(112896, reportAfterInit(buildMnistCnnModel, &g_liveness).arenaBytes);
+    TEST_ASSERT_EQUAL_size_t(57928, reportAfterInit(buildFinetuneStage2Model, NULL).arenaBytes);
+    TEST_ASSERT_EQUAL_size_t(20480,
+                             reportAfterInit(buildFinetuneStage2Model, &g_liveness).arenaBytes);
+}
+
 /* The report's activation-only peak is the TRAIN program's, on either row
  * (the hand-derived HAR values of UnitTestRematPlan). */
 void testReportActivationsPeakOnHarOnBothRows(void) {
@@ -2176,6 +2194,7 @@ int main(void) {
     RUN_TEST(testReportPadIsZeroOnHar);
     RUN_TEST(testReportPadOnTheF1ModelIsEleven);
     RUN_TEST(testReportArenaBytesHarFfdRegressionGuard);
+    RUN_TEST(testReportArenaBytesMnistCnnAndFinetuneFfdRegressionGuards);
     RUN_TEST(testReportActivationsPeakOnHarOnBothRows);
     RUN_TEST(testArenaOffsetsAlignedOnRandomMixedChains);
 #ifdef ODT_MEM_PROFILE

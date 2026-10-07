@@ -85,29 +85,6 @@ static void freeSeedFixture(seedFixture_t *f) {
 #define SEED_ACT2 2u
 #define SEED_GRAD2 3u
 
-/* examples/mnist_cnn/train_c.c:151-181 (B = 1; the loop feeds [1, 1, 784]). */
-#define MNIST_N 10
-static void buildMnistCnn(layer_t **model) {
-    layerQuant_t lq;
-    layerQuantInitUniform(&lq, &g_floatQ);
-    model[0] = conv1dLayerInit(
-        &(conv1dInit_t){.inChannels = 1, .outChannels = 8, .kernelSize = 3, .padding = SAME}, &lq);
-    model[1] = reluLayerInit(&lq);
-    model[2] = maxPool1dLayerInit(
-        &(maxPool1dInit_t){.kernelSize = 2, .stride = 2, .inputChannels = 8, .inputLength = 784},
-        &lq);
-    model[3] = conv1dLayerInit(
-        &(conv1dInit_t){.inChannels = 8, .outChannels = 16, .kernelSize = 3, .padding = SAME}, &lq);
-    model[4] = reluLayerInit(&lq);
-    model[5] = maxPool1dLayerInit(
-        &(maxPool1dInit_t){.kernelSize = 2, .stride = 2, .inputChannels = 16, .inputLength = 392},
-        &lq);
-    model[6] = avgPool1dLayerInit(&(avgPool1dInit_t){.kernelSize = 196, .stride = 196}, &lq);
-    model[7] = flattenLayerInit();
-    model[8] = linearLayerInit(&(linearInit_t){.inFeatures = 16, .outFeatures = 10}, &lq);
-    model[9] = softmaxLayerInit(&lq);
-}
-
 static rematPlan_t *buildPlan(const rematWireTable_t *t, layer_t **model,
                               const rematPlanSpec_t *spec) {
     rematPlan_t *p = NULL;

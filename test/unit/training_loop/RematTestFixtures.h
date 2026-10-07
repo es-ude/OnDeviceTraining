@@ -3,11 +3,11 @@
 
 /* Fixture builders shared by the remat test binaries (UnitTestRematPlan,
  * UnitTestRematScheduler, UnitTestRematCheck) and the driver's conformance
- * harness, so all four build the same models. Header-only statics, like
- * BorrowedLayer.h: each binary compiles the helpers it calls. A consumer
- * links the layer API targets of every type freeModel frees (LinearApi,
- * ReluApi, SoftmaxApi, Conv1dApi, Pool1dApi, FlattenApi, QuantLayerApi,
- * LayerNormApi) and RematScheduler for initArena/initHeap. */
+ * and death binaries, so all of them build the same models. Header-only
+ * statics, like BorrowedLayer.h: each binary compiles the helpers it calls.
+ * A consumer links the layer API targets of every type freeModel frees
+ * (LinearApi, ReluApi, SoftmaxApi, Conv1dApi, Pool1dApi, FlattenApi,
+ * QuantLayerApi, LayerNormApi) and RematScheduler for initArena/initHeap. */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -136,8 +136,8 @@ static tensor_t *makeResidentInput(inputLike_t *in, const size_t *dims, size_t r
     return x;
 }
 
-/* examples/har_classifier/train_c.c:178-216 (B = 1); freezeConvs gives the
- * stage-2 backbone of train_c_finetune.c:171-216. n = 12, CE, deepest 0, top
+/* examples/har_classifier/train_c.c buildModel (B = 1); freezeConvs gives the
+ * stage-2 backbone of train_c_finetune.c buildModel. n = 12, CE, deepest 0, top
  * 10; 25 steps; ACT 0..12 plus GRAD {12, 10, 9, ..., 1} = 24 wires. */
 #define HAR_N 12
 static void buildHar(layer_t **model, bool freezeConvs) {
@@ -179,6 +179,29 @@ static void buildHar(layer_t **model, bool freezeConvs) {
 
 static tensor_t *makeHarInput(inputLike_t *in) {
     return makeInput(in, (size_t[]){1, 9, 128}, 3, &g_floatQ);
+}
+
+/* examples/mnist_cnn/train_c.c buildModel (B = 1; the loop feeds [1, 1, 784]). */
+#define MNIST_N 10
+static void buildMnistCnn(layer_t **model) {
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, &g_floatQ);
+    model[0] = conv1dLayerInit(
+        &(conv1dInit_t){.inChannels = 1, .outChannels = 8, .kernelSize = 3, .padding = SAME}, &lq);
+    model[1] = reluLayerInit(&lq);
+    model[2] = maxPool1dLayerInit(
+        &(maxPool1dInit_t){.kernelSize = 2, .stride = 2, .inputChannels = 8, .inputLength = 784},
+        &lq);
+    model[3] = conv1dLayerInit(
+        &(conv1dInit_t){.inChannels = 8, .outChannels = 16, .kernelSize = 3, .padding = SAME}, &lq);
+    model[4] = reluLayerInit(&lq);
+    model[5] = maxPool1dLayerInit(
+        &(maxPool1dInit_t){.kernelSize = 2, .stride = 2, .inputChannels = 16, .inputLength = 392},
+        &lq);
+    model[6] = avgPool1dLayerInit(&(avgPool1dInit_t){.kernelSize = 196, .stride = 196}, &lq);
+    model[7] = flattenLayerInit();
+    model[8] = linearLayerInit(&(linearInit_t){.inFeatures = 16, .outFeatures = 10}, &lq);
+    model[9] = softmaxLayerInit(&lq);
 }
 
 static uint32_t nextRandom(uint32_t *state) { /* xorshift32, test-local */
@@ -231,6 +254,13 @@ static void buildF1Model(fixture_t *f) {
     f->n = 2;
     f->lt = MSE;
     f->x = makeResidentInput(&f->in, (size_t[]){1, 5}, 2);
+}
+
+static void buildMnistCnnModel(fixture_t *f) {
+    buildMnistCnn(f->model);
+    f->n = MNIST_N;
+    f->lt = CROSS_ENTROPY;
+    f->x = makeResidentInput(&f->in, (size_t[]){1, 1, 784}, 3);
 }
 
 /* Both inits share one shape, so a test can run on either row. */

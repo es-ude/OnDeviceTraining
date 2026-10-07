@@ -587,11 +587,13 @@ int main(void) {
                 "\"momentum\": %.6f, \"seed\": %u, \"shuffle_seed\": %u, "
                 "\"lr_schedule\": \"%s\", \"bs_schedule\": \"%s\", \"bs_lr_compensation\": %d, "
                 "\"gamma\": %#.9g, \"step_size\": %d, \"max_batch_size\": %d, "
-                "\"reshuffle\": %d, \"toolchain\": \"",
+                "\"reshuffle\": %d",
                 g_epochs, g_batchSize, (double)g_lr, (double)g_momentum, g_seed, g_shuffleSeed,
                 g_lrSchedule, g_bsSchedule,
                 (options.bsScheduler != NULL && g_bsLrCompensation != 0), (double)g_gamma,
                 g_stepSize, g_maxBatchSize, g_reshuffle != 0);
+        rematSelectPrintConfigKeys(g_log_file, &rematSel);
+        fprintf(g_log_file, ", \"toolchain\": \"");
         fputsJsonEscaped(g_log_file, __VERSION__);
         fprintf(g_log_file, "\"},\n"
                             "  \"epochs\": [\n");
@@ -719,6 +721,7 @@ int main(void) {
         report.stack_peak_b = memInstrumentStackPeakBytes(&stepCtx, 1u << 20);
         freeSample(stepSample);
 
+        memInstrumentSetRemat(&report, rematCall.remat);
         report.heap_peak_b = memProfilePeakBytes();
         report.rss_peak_kb = memProfileRssPeakKb();
         memInstrumentFinalize(&report);

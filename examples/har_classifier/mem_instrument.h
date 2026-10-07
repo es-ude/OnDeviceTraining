@@ -63,6 +63,16 @@ typedef struct memReport {
 
     /* heap_peak_b - mcu_total_b. RECORDED, never massaged (integrity rule). */
     long reconciliation_gap_b;
+
+    /* The run's remat scheduler (#4), from its rematReport_t: emitted only
+     * when hasRemat (the trainer built one); otherwise the keys are absent. */
+    bool hasRemat;
+    size_t wires_peak_b;       /* TRAIN wires peak (peakLiveBytes) */
+    size_t activations_peak_b; /* the same, activation wires only */
+    size_t arena_b;
+    size_t arena_pad_b;
+    size_t arena_gap_b;
+    size_t wire_metadata_b;
 } memReport_t;
 
 /* Analytic byte sums over the optimizer's authoritative trainable-parameter
@@ -137,6 +147,10 @@ typedef struct memStepCtx {
  * bytes touched. NOTE: performs a REAL gradient + optimizer step, mutating the
  * model and momentum state — call it AFTER any output the run must preserve. */
 size_t memInstrumentStackPeakBytes(memStepCtx_t *ctx, size_t stackBytes);
+
+/* The run's remat scheduler into the report (hasRemat and its six fields);
+ * NULL, a run without one, leaves the keys absent from the log. */
+void memInstrumentSetRemat(memReport_t *r, const rematScheduler_t *s);
 
 /* Fill mcu_total_b (sum of the eleven categories) and reconciliation_gap_b
  * from the populated fields. Fails fast if storage_dtype was never set. */

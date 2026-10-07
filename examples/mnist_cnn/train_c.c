@@ -349,9 +349,10 @@ int main(void) {
                 "  \"impl\": \"c\",\n"
                 "  \"example\": \"mnist_cnn\",\n"
                 "  \"config\": {\"epochs\": %d, \"batch\": %d, \"lr\": %.6f, "
-                "\"momentum\": %.6f, \"seed\": %d, \"shuffle_seed\": %d},\n"
-                "  \"epochs\": [\n",
+                "\"momentum\": %.6f, \"seed\": %d, \"shuffle_seed\": %d",
                 EPOCHS, BATCH, (double)LR, (double)MOMENTUM, SEED, SHUFFLE_SEED);
+        rematSelectPrintConfigKeys(g_log_file, &rematSel);
+        fprintf(g_log_file, "},\n  \"epochs\": [\n");
         fflush(g_log_file);
 
         clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);

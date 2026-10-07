@@ -21,6 +21,7 @@ target_link_libraries(har_mem_instrument PUBLIC
         Rounding
         Common
         examples_shared
+        RematScheduler
 )
 
 add_executable(train_c_har_classifier train_c.c)

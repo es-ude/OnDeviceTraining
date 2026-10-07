@@ -11,6 +11,7 @@
 #include "MaxPool1d.h"
 #include "MemProfile.h"
 #include "Optimizer.h"
+#include "RematScheduler.h"
 #include "Tensor.h"
 #include "param_gate.h"
 
@@ -241,11 +242,34 @@ void memInstrumentEmitJson(FILE *f, const memReport_t *r) {
         "\"activations_b\": %zu, \"wire_overhead_b\": %zu, \"io_b\": %zu, "
         "\"pool_backward_b\": %zu, \"dx_peak_b\": %zu, \"mcu_total_b\": %zu, "
         "\"heap_peak_b\": %zu, \"stack_peak_b\": %zu, \"rss_peak_kb\": %zu, "
-        "\"reconciliation_gap_b\": %ld}",
+        "\"reconciliation_gap_b\": %ld",
         r->dataset_b, r->params_grads_b, r->optstate_b, r->params_b, r->group_overhead_b,
         r->grads_b, r->grad_overhead_b, r->optstate_analytic_b, r->optstate_overhead_b,
         r->activations_b, r->wire_overhead_b, r->io_b, r->pool_backward_b, r->dx_peak_b,
         r->mcu_total_b, r->heap_peak_b, r->stack_peak_b, r->rss_peak_kb, r->reconciliation_gap_b);
+    if (r->hasRemat) {
+        fprintf(f,
+                ", \"wires_peak_b\": %zu, \"activations_peak_b\": %zu, \"arena_b\": %zu, "
+                "\"arena_pad_b\": %zu, \"arena_gap_b\": %zu, \"wire_metadata_b\": %zu",
+                r->wires_peak_b, r->activations_peak_b, r->arena_b, r->arena_pad_b, r->arena_gap_b,
+                r->wire_metadata_b);
+    }
+    fputc('}', f);
+}
+
+void memInstrumentSetRemat(memReport_t *r, const rematScheduler_t *s) {
+    r->hasRemat = s != NULL;
+    if (s == NULL) {
+        return;
+    }
+    rematReport_t rr;
+    rematSchedulerReport(s, &rr);
+    r->wires_peak_b = rr.peakLiveBytes;
+    r->activations_peak_b = rr.activationsPeakBytes;
+    r->arena_b = rr.arenaBytes;
+    r->arena_pad_b = rr.arenaPadBytes;
+    r->arena_gap_b = rr.arenaGapBytes;
+    r->wire_metadata_b = rr.metadataBytes;
 }
 
 void memInstrumentPrintReconciliation(const memReport_t *r) {

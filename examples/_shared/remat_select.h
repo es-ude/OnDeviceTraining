@@ -39,4 +39,8 @@ bool rematSelectInit(rematScheduler_t *s, const rematSelection_t *sel, const cha
 /* The one-line plan report of DRY_PLAN=1. */
 void rematSelectPrintPlan(FILE *f, const char *example, const rematScheduler_t *s);
 
+/* The run log's config keys of a chosen scheme, each preceded by ", "
+ * ("remat_storage", "remat_plan"); nothing when none was chosen. */
+void rematSelectPrintConfigKeys(FILE *f, const rematSelection_t *sel);
+
 #endif // EXAMPLES_SHARED_REMAT_SELECT_H

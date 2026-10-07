@@ -390,10 +390,16 @@ int main(void) {
             "  \"impl\": \"c-finetune\",\n"
             "  \"example\": \"har_classifier\",\n"
             "  \"config\": {\"stage1_epochs\": %d, \"stage2_epochs\": %d, \"batch\": %d, "
-            "\"lr\": %.6f, \"momentum\": %.6f, \"seed\": %u, \"shuffle_seed\": %u},\n"
-            "  \"epochs\": [\n",
+            "\"lr\": %.6f, \"momentum\": %.6f, \"seed\": %u, \"shuffle_seed\": %u",
             g_stage1Epochs, g_stage2Epochs, BATCH, (double)g_lr, (double)g_momentum, g_seed,
             g_shuffleSeed);
+    rematSelectPrintConfigKeys(g_log_file, &rematSel);
+    if (rematSel.chosen) {
+        /* Stage 1 runs on the training call's default: the scheduler and the
+         * memory section's remat keys are stage 2's. */
+        fprintf(g_log_file, ", \"remat_stage\": 2");
+    }
+    fprintf(g_log_file, "},\n  \"epochs\": [\n");
     fflush(g_log_file);
 
     /* ---- Stage 1: full trainable model ------------------------------------ */
@@ -600,6 +606,7 @@ int main(void) {
     report.stack_peak_b = memInstrumentStackPeakBytes(&stepCtx, 1u << 20);
     freeSample(stepSample);
 
+    memInstrumentSetRemat(&report, rematCall.remat);
     report.heap_peak_b = memProfilePeakBytes();
     report.rss_peak_kb = memProfileRssPeakKb();
     memInstrumentFinalize(&report);

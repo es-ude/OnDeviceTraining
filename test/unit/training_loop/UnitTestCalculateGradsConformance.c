@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "AdaptivePool1dApi.h"
 #include "AsanDeath.h"
 #include "BatchNorm1dApi.h"
 #include "CalculateGradsSequential.h"
@@ -116,6 +117,9 @@ static void freeZoo(zooFixture_t *f) {
             break;
         case CONV1D_TRANSPOSED:
             freeConv1dTransposedLayer(f->model[i]);
+            break;
+        case ADAPTIVE_AVGPOOL1D:
+            freeAdaptiveAvgPool1dLayer(f->model[i]);
             break;
         default:
             freeModel(&f->model[i], 1);
@@ -358,6 +362,23 @@ static void buildConvTransposedTrainable(zooFixture_t *f) {
 
 static void buildFrozenConvTransposed(zooFixture_t *f) {
     buildConvTransposed(f, true);
+}
+
+/* Conv1d -> AdaptiveAvgPool1d (length 5 -> 2) -> Flatten -> Linear under
+ * MSE: the pool's backward reads no input, so under LIVENESS its input dies
+ * at its forward. */
+static void buildAdaptiveAvgPool(zooFixture_t *f) {
+    beginZoo(f);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, &g_floatQ);
+    f->model[0] =
+        conv1dLayerInit(&(conv1dInit_t){.inChannels = 2, .outChannels = 2, .kernelSize = 1}, &lq);
+    f->model[1] = adaptiveAvgPool1dLayerInit(&(adaptiveAvgPool1dInit_t){.outputSize = 2}, &lq);
+    f->model[2] = flattenLayerInit();
+    f->model[3] = makeLinear(4, 2, false);
+    f->n = 4;
+    f->x = makeFloatTensor((size_t[]){1, 2, 5}, 3, 1.0f);
+    mseLabel(f, 2);
 }
 
 /* ---- capturing one call (remat P1-P5, P9) ---- */
@@ -747,6 +768,10 @@ void testConvTransposedConforms(void) {
 
 void testFrozenConvTransposedAboveDeepestConforms(void) {
     assertNullPathMatchesLegacy(buildFrozenConvTransposed);
+}
+
+void testAdaptiveAvgPoolConforms(void) {
+    assertNullPathMatchesLegacy(buildAdaptiveAvgPool);
 }
 
 void testTwoCallsInARowMatchLegacyOnBatchNorm(void) {
@@ -1309,6 +1334,14 @@ void testFrozenConvTransposedMatchesLegacyOnHeap(void) {
     assertRowMatchesLegacy(buildFrozenConvTransposed, REMAT_HEAP);
 }
 
+void testAdaptiveAvgPoolMatchesLegacyOnArena(void) {
+    assertRowMatchesLegacy(buildAdaptiveAvgPool, REMAT_ARENA);
+}
+
+void testAdaptiveAvgPoolMatchesLegacyOnHeap(void) {
+    assertRowMatchesLegacy(buildAdaptiveAvgPool, REMAT_HEAP);
+}
+
 /* ---- one persistent instance across calls (remat P6, P9) ---- */
 
 typedef void (*fixtureEdit_t)(zooFixture_t *f);
@@ -1499,7 +1532,7 @@ static void buildBfpOutput(zooFixture_t *f) {
     mseLabel(f, 8);
 }
 
-#define ZOO_FIXTURES 20
+#define ZOO_FIXTURES 21
 static const zooEntry_t g_zoo[ZOO_FIXTURES] = {
     {"mlp", buildMlp},
     {"har-cnn", buildHarCnn},
@@ -1521,6 +1554,7 @@ static const zooEntry_t g_zoo[ZOO_FIXTURES] = {
     {"bfp-output", buildBfpOutput},
     {"conv-transposed", buildConvTransposedTrainable},
     {"frozen-conv-transposed", buildFrozenConvTransposed},
+    {"adaptive-avgpool", buildAdaptiveAvgPool},
 };
 
 /* One inferenceWithLoss call: the loss, the returned output with its shape
@@ -1728,6 +1762,7 @@ int main(void) {
     RUN_TEST(testCeWithoutATrailingSoftmaxConforms);
     RUN_TEST(testConvTransposedConforms);
     RUN_TEST(testFrozenConvTransposedAboveDeepestConforms);
+    RUN_TEST(testAdaptiveAvgPoolConforms);
     RUN_TEST(testTwoCallsInARowMatchLegacyOnBatchNorm);
     RUN_TEST(testTwoCallsInARowMatchLegacyOnDropout);
     RUN_TEST(testAgradFiresBeforeTheLayersBackward);
@@ -1781,6 +1816,8 @@ int main(void) {
     RUN_TEST(testConvTransposedMatchesLegacyOnHeap);
     RUN_TEST(testFrozenConvTransposedMatchesLegacyOnArena);
     RUN_TEST(testFrozenConvTransposedMatchesLegacyOnHeap);
+    RUN_TEST(testAdaptiveAvgPoolMatchesLegacyOnArena);
+    RUN_TEST(testAdaptiveAvgPoolMatchesLegacyOnHeap);
     RUN_TEST(testTwoCallsAcrossAWidthEditMatchLegacy);
     RUN_TEST(testTwoCallsAcrossARoundingEditMatchLegacy);
     RUN_TEST(testTwoCallsAcrossAnInputRegroupMatchLegacy);

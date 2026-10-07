@@ -128,6 +128,9 @@ typedef struct memStepCtx {
     tensor_t *input; /* one dataset sample in its natural shape; the thunk adds */
     tensor_t *label; /* the batch axis with batchViewOf, as trainingBatchDefault does */
     optimizer_t *optim;
+    /* The trainer's training call, so the probe runs the step on the run's
+     * scheduler; NULL (or a NULL .remat) is the training call's default. */
+    const trainingCall_t *call;
 } memStepCtx_t;
 
 /* Runs one training step on a painted pthread stack and returns the high-water

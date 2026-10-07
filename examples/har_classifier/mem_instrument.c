@@ -198,7 +198,7 @@ static void memOneStepThunk(void *p) {
     batchView_t labelView;
     trainingStats_t *stats = calculateGradsSequential(
         c->model, c->modelSize, c->lossConfig, REDUCTION_MEAN, batchViewOf(&itemView, c->input),
-        batchViewOf(&labelView, c->label), NULL);
+        batchViewOf(&labelView, c->label), c->call);
     freeTrainingStats(stats);
     /* No scaleOptimizerGradients: the macro-batch mean scale is a scalar grad
      * multiply that does not deepen the call stack; the step itself does.

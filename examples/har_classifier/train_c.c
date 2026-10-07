@@ -714,6 +714,7 @@ int main(void) {
             .input = stepSample->item,
             .label = stepSample->label,
             .optim = sgd,
+            .call = &rematCall,
         };
         report.stack_peak_b = memInstrumentStackPeakBytes(&stepCtx, 1u << 20);
         freeSample(stepSample);

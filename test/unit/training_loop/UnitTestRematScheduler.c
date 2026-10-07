@@ -624,6 +624,21 @@ void testReportArenaBytesHarFfdRegressionGuard(void) {
     TEST_ASSERT_EQUAL_size_t(49152, reportAfterInit(buildHarModel, &g_liveness).arenaBytes);
 }
 
+/* The report's activation-only peak is the TRAIN program's, on either row
+ * (the hand-derived HAR values of UnitTestRematPlan). */
+void testReportActivationsPeakOnHarOnBothRows(void) {
+    TEST_ASSERT_EQUAL_size_t(57904, reportAfterInit(buildHarModel, NULL).activationsPeakBytes);
+    TEST_ASSERT_EQUAL_size_t(41216,
+                             reportAfterInit(buildHarModel, &g_liveness).activationsPeakBytes);
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initHeap(&f, &g_liveness);
+    rematReport_t r;
+    rematSchedulerReport(&s, &r);
+    freeFixture(&f, &s);
+    TEST_ASSERT_EQUAL_size_t(41216, r.activationsPeakBytes);
+}
+
 /* The alignment property: random chains of FLOAT32 and packed BFP wires
  * (odd byte counts) under both policies, every offset and the arena size a
  * multiple of ODT_WIRE_ALIGN. It runs in a child so a verifier exit in init
@@ -2088,6 +2103,7 @@ int main(void) {
     RUN_TEST(testReportPadIsZeroOnHar);
     RUN_TEST(testReportPadOnTheF1ModelIsEleven);
     RUN_TEST(testReportArenaBytesHarFfdRegressionGuard);
+    RUN_TEST(testReportActivationsPeakOnHarOnBothRows);
     RUN_TEST(testArenaOffsetsAlignedOnRandomMixedChains);
 #ifdef ODT_MEM_PROFILE
     RUN_TEST(testArenaInitReservesExactlyMetadataPlusArena);

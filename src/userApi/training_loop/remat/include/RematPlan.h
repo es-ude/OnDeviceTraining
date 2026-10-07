@@ -186,6 +186,11 @@ void rematPlanFree(rematPlan_t *p); /* NULL-safe */
 /* The program a call in `mode` walks. */
 const rematProgram_t *rematPlanProgram(const rematPlan_t *p, rematMode_t mode);
 
+/* The activation-only peak of a program: the maximum over its steps of the
+ * live bytes of ACT wires (ACT 0, the caller's input, has no range); the
+ * same scan as peakLiveBytes, not the ACT share at that peak's step. */
+size_t rematProgramActPeakBytes(const rematProgram_t *p, const rematWireTable_t *t);
+
 /* O(1) amortised: the next range with begin == w->step (resp. end == w->step,
  * in endOrder), or REMAT_NONE. Call both every step, openings first. A row
  * zeroes its rematWalk_t at the start of each call. */

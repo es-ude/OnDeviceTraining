@@ -2044,7 +2044,8 @@ void testPlanBuildReservesOneBlockAndFreeReturnsIt(void) {
 }
 #endif
 
-/* §4.4: NULL, or a zero-initialised spec, means STORE_ALL. */
+/* NULL, or a zero-initialised spec, means STORE_ALL: the scheduler library's
+ * default, not the training call's (calculateGradsDefaultPlanSpec). */
 void testNullOrZeroedSpecMeansStoreAll(void) {
     layer_t *model[HAR_N];
     buildHar(model, false);
@@ -2159,6 +2160,55 @@ void testLivenessPeakFinetuneStage2Is16384(void) {
     TEST_ASSERT_EQUAL_size_t(16384,
                              peakOf(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in), &g_liveness));
     freeModel(model, HAR_N);
+}
+
+static size_t actPeakOf(layer_t **model, size_t n, lossFuncType_t lt, const tensor_t *x,
+                        const rematPlanSpec_t *spec) {
+    rematWireTable_t *t = initTable(model, n, lt, x);
+    rematPlan_t *p = buildPlan(t, model, spec);
+    size_t peak = rematProgramActPeakBytes(&p->train, t);
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    return peak;
+}
+
+/* The activation-only peak, by hand from HAR's TRAIN ranges: STORE_ALL keeps
+ * every ACT (6 x 8192 + 2 x 4096 + 2 x 256 + 2 x 24); LIVENESS peaks at step
+ * 8, ACT 1, 3, 4, 6, 7, 8 plus ACT 9 opening before ACT 8 closes. */
+void testActPeakOfHarIs57904StoreAllAnd41216Liveness(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    TEST_ASSERT_EQUAL_size_t(57904,
+                             actPeakOf(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in), NULL));
+    TEST_ASSERT_EQUAL_size_t(
+        41216, actPeakOf(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in), &g_liveness));
+    freeModel(model, HAR_N);
+}
+
+/* Finetune stage 2: under LIVENESS each frozen layer's input dies at its
+ * forward, so the peak is ACT 1 + ACT 2 at step 1. */
+void testActPeakOfFinetuneStage2Is57904StoreAllAnd16384Liveness(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, true);
+    inputLike_t in;
+    TEST_ASSERT_EQUAL_size_t(57904,
+                             actPeakOf(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in), NULL));
+    TEST_ASSERT_EQUAL_size_t(
+        16384, actPeakOf(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in), &g_liveness));
+    freeModel(model, HAR_N);
+}
+
+/* mnist_cnn: STORE_ALL 4 x 25088 + 2 x 12544 + 2 x 64 + 2 x 40; LIVENESS
+ * peaks at step 5 with ACT 1, 3, 4, 5, 6. */
+void testActPeakOfMnistCnnIs125648StoreAllAnd100352Liveness(void) {
+    layer_t *model[MNIST_N];
+    buildMnistCnn(model);
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 1, 784}, 3, &g_floatQ);
+    TEST_ASSERT_EQUAL_size_t(125648, actPeakOf(model, MNIST_N, CROSS_ENTROPY, x, NULL));
+    TEST_ASSERT_EQUAL_size_t(100352, actPeakOf(model, MNIST_N, CROSS_ENTROPY, x, &g_liveness));
+    freeModel(model, MNIST_N);
 }
 
 /* n = 1 under CE gives top = -1, so no BACKWARD step exists to read
@@ -2389,9 +2439,10 @@ void testGrammarRejectsABackwardReadingGradInOutsideItsRange(void) {
                         "step #15 (kind 3, layer 9) violates grammar rule 4: it reads wire 14");
 }
 
-/* HAR EVAL: F0..F11 = steps 0..11, LOSS_FORWARD 12. A LOSS_BACKWARD there
- * would pass TRAIN's rule 2 only after a LOSS_FORWARD; in EVAL no backward
- * step passes at all, and the message names the EVAL rule. */
+/* HAR EVAL: FORWARD 0..11 are steps 0..11, LOSS_FORWARD is step 12. The
+ * tamper puts a LOSS_BACKWARD at step 12, where TRAIN's rule 2 would accept
+ * one only after a LOSS_FORWARD; in EVAL rule 2 rejects any backward step,
+ * and the message names the EVAL rule. */
 static void lossBackwardInEvalAndValidate(grammarFixture_t *f) {
     rematProgram_t *eval = &f->p->eval;
     eval->steps[12] = (rematStep_t){.kind = REMAT_STEP_LOSS_BACKWARD, .layer = 12};
@@ -2589,6 +2640,9 @@ int main(void) {
     RUN_TEST(testLivenessPeakHarIs49152);
     RUN_TEST(testLivenessPeakMnistCnnIs112896);
     RUN_TEST(testLivenessPeakFinetuneStage2Is16384);
+    RUN_TEST(testActPeakOfHarIs57904StoreAllAnd41216Liveness);
+    RUN_TEST(testActPeakOfFinetuneStage2Is57904StoreAllAnd16384Liveness);
+    RUN_TEST(testActPeakOfMnistCnnIs125648StoreAllAnd100352Liveness);
     RUN_TEST(testLivenessSingleLayerUnderCrossEntropyEndsBothWiresAtLossBackward);
     RUN_TEST(testFrozenNormStillNeedsItsInputWhileAFrozenGemmDoesNot);
     RUN_TEST(testCeLogitsDieAtForwardWhileMseSoftmaxInputIsRetained);

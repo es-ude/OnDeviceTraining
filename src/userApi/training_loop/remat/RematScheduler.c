@@ -169,6 +169,7 @@ void rematSchedulerReport(const rematScheduler_t *s, rematReport_t *out) {
     out->planned = true;
     out->numSteps = p->numSteps;
     out->peakLiveBytes = p->peakLiveBytes;
+    out->activationsPeakBytes = rematProgramActPeakBytes(p, s->wires);
     out->observedPeakLiveBytes = s->wires->observedPeakLiveBytes;
     out->metadataBytes = reportAdd(s->wires->slabBytes, s->plan->blockBytes);
     switch (s->type) {

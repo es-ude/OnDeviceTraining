@@ -58,8 +58,9 @@ static void sortEndOrder(rematProgram_t *p) {
 }
 
 /* Overflow-checked here are the plan-block size (stepsAt/rangesAt/endOrderAt/
- * blockBytes, via planAdd/planMul) and peakLiveBytes (accumulated with
- * planAdd in peakLiveBytesOf). rematTrainStepCount, rematBackwardStep and
+ * blockBytes, via planAdd/planMul) and the two peaks, peakLiveBytes and the
+ * activation-only peak (accumulated with planAdd in peakBytesUpTo, each under
+ * its own label). rematTrainStepCount, rematBackwardStep and
  * numRanges = numWires - 1 are plain size_t arithmetic on modelSize,
  * backwardTop, deepest and numWires -- all bounded well under SIZE_MAX by the
  * table's numWires < REMAT_NONE guard, so they cannot overflow. In PR1 the
@@ -85,22 +86,39 @@ static size_t planMul(size_t a, size_t b, const char *quantity) {
     return out;
 }
 
-static size_t peakLiveBytesOf(const rematProgram_t *p, const rematWireTable_t *t) {
+/* The peak over the program's steps of the live bytes of the wires whose id
+ * is at most maxWire: openings count before the peak check, closings after.
+ * quantity names the peak in the overflow exit. */
+static size_t peakBytesUpTo(const rematProgram_t *p, const rematWireTable_t *t, size_t maxWire,
+                            const char *quantity) {
     rematWalk_t walk = {0};
     size_t live = 0;
     size_t peak = 0;
     for (walk.step = 0; walk.step < p->numSteps; walk.step++) {
         for (size_t r; (r = rematWalkOpening(p, &walk)) != REMAT_NONE;) {
-            live = planAdd(live, t->wires[p->ranges[r].wire].bytes, "peakLiveBytes");
+            if (p->ranges[r].wire <= maxWire) {
+                live = planAdd(live, t->wires[p->ranges[r].wire].bytes, quantity);
+            }
         }
         if (live > peak) {
             peak = live;
         }
         for (size_t r; (r = rematWalkClosing(p, &walk)) != REMAT_NONE;) {
-            live -= t->wires[p->ranges[r].wire].bytes;
+            if (p->ranges[r].wire <= maxWire) {
+                live -= t->wires[p->ranges[r].wire].bytes;
+            }
         }
     }
     return peak;
+}
+
+static size_t peakLiveBytesOf(const rematProgram_t *p, const rematWireTable_t *t) {
+    return peakBytesUpTo(p, t, SIZE_MAX, "peakLiveBytes");
+}
+
+/* ACT j is wire j (0..n): the ACT wires are the ids up to modelSize. */
+size_t rematProgramActPeakBytes(const rematProgram_t *p, const rematWireTable_t *t) {
+    return peakBytesUpTo(p, t, t->modelSize, "activationsPeakBytes");
 }
 
 static size_t roundUpTo(size_t x, size_t align) {

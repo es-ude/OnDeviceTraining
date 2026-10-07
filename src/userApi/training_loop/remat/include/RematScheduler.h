@@ -37,7 +37,7 @@ _Static_assert(sizeof(rematStep_t) == 4, "fixed-width step record");
 typedef enum rematPlanPolicy { REMAT_PLAN_STORE_ALL = 0, REMAT_PLAN_LIVENESS } rematPlanPolicy_t;
 
 /* NULL, or a zero-initialised struct, means STORE_ALL (the trainingRunOptions_t
- * idiom, TrainingLoopApi.h:113-115). */
+ * zero-initialisation idiom). */
 typedef struct rematPlanSpec {
     rematPlanPolicy_t policy;
 } rematPlanSpec_t;
@@ -140,7 +140,11 @@ typedef struct rematReport {
      * reserved per range at each step, so init leaves nothing pending. */
     bool dataReserved;
     size_t numSteps;
-    size_t peakLiveBytes;         /* plan, exact bytes, ACT 0 excluded: POET x-axis, wires_peak_b */
+    /* Both of the TRAIN program, exact bytes, ACT 0 excluded: the wires peak
+     * (the POET x-axis, wires_peak_b) and that of its ACT wires alone
+     * (activations_peak_b). */
+    size_t peakLiveBytes;
+    size_t activationsPeakBytes;
     size_t observedPeakLiveBytes; /* SDK accounting over the last call, every row (P8) */
     size_t arenaBytes;            /* = peakLiveBytes + arenaPadBytes + arenaGapBytes */
     size_t arenaPadBytes;         /* peakPlacedBytes - peakLiveBytes (alignment) -> arena_pad_b */

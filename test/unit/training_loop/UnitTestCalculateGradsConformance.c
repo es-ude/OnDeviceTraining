@@ -1034,11 +1034,12 @@ void testAZeroInitialisedCallIsTheNullScheduler(void) {
 /* ---- the default plan of a training call without a scheduler ---- */
 
 /* What a NULL scheduler resolves to is the training call's rule, visible to
- * its callers; the scheduler library's own NULL spec stays STORE_ALL. */
+ * its callers: LIVENESS (remat D15). The scheduler library's own NULL spec
+ * stays STORE_ALL. */
 void testANullSchedulerResolvesToTheNamedDefaultPlan(void) {
     const rematPlanSpec_t *spec = calculateGradsDefaultPlanSpec();
     TEST_ASSERT_NOT_NULL(spec);
-    TEST_ASSERT_EQUAL_INT(REMAT_PLAN_STORE_ALL, spec->policy);
+    TEST_ASSERT_EQUAL_INT(REMAT_PLAN_LIVENESS, spec->policy);
 }
 
 #ifdef ODT_MEM_PROFILE
@@ -1110,6 +1111,21 @@ void testANullSchedulerHoldsWhatTheDefaultPlansSchedulerHolds(void) {
     for (size_t l = 0; l < HAR_CNN_AGRADS; l++) {
         TEST_ASSERT_EQUAL_size_t_MESSAGE(viaDefault.at[l], nullPath.at[l],
                                          "live bytes at the agrad of this layer index");
+    }
+}
+
+/* What the default buys: mid-backward the NULL path holds less than a
+ * STORE_ALL scheduler at every backward step (remat D15). */
+void testANullSchedulerHoldsLessThanStoreAllMidBackward(void) {
+    liveSampler_t nullPath = sampleHarCnn(false, NULL);
+    liveSampler_t storeAll = sampleHarCnn(true, &(rematPlanSpec_t){.policy = REMAT_PLAN_STORE_ALL});
+    TEST_ASSERT_FALSE_MESSAGE(nullPath.underflow, "NULL path: live bytes below the mark");
+    TEST_ASSERT_FALSE_MESSAGE(storeAll.underflow, "STORE_ALL: live bytes below the mark");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(HAR_CNN_AGRADS, nullPath.agrads, "NULL path: agrads");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(HAR_CNN_AGRADS, storeAll.agrads, "STORE_ALL: agrads");
+    for (size_t l = 0; l < HAR_CNN_AGRADS; l++) {
+        TEST_ASSERT_LESS_THAN_size_t_MESSAGE(storeAll.at[l], nullPath.at[l],
+                                             "live bytes at the agrad of this layer index");
     }
 }
 #endif
@@ -1779,6 +1795,7 @@ int main(void) {
     RUN_TEST(testANullSchedulerResolvesToTheNamedDefaultPlan);
 #ifdef ODT_MEM_PROFILE
     RUN_TEST(testANullSchedulerHoldsWhatTheDefaultPlansSchedulerHolds);
+    RUN_TEST(testANullSchedulerHoldsLessThanStoreAllMidBackward);
 #endif
     RUN_TEST(testMlpMatchesLegacyOnArena);
     RUN_TEST(testMlpMatchesLegacyOnHeap);

@@ -41,14 +41,15 @@ typedef struct memReport {
     size_t params_b;            /* sum of weight+bias tensor bytes (dtype-aware) */
     size_t grads_b;             /* sum of grad tensor bytes */
     size_t optstate_analytic_b; /* sum of optimizer momentum-buffer bytes */
-    size_t activations_b;       /* peak concurrent activation bytes, one batch */
+    size_t activations_b;       /* forward-wire sum, one batch (STORE_ALL upper bound) */
     size_t io_b;                /* batched input + one-hot label bytes */
     size_t pool_backward_b;     /* persistent MaxPool argmax-index buffers (backward state, #321) */
     size_t dx_peak_b;           /* worst concurrent dx ping-pong pair during backprop (#321) */
     /* Metadata side tables, each its OWN category (integrity rule: never folded
      * into a payload). group_ = the 8 param tensors' scales/exponents (was
      * config-only before PR7); grad_/optstate_ = per-tensor packed grads/states
-     * (BFP knobs); wire_ = live forward-wire exponents + the peak dx pair's. */
+     * (BFP knobs); wire_ = every forward wire's exponents (the STORE_ALL
+     * model) + the peak dx pair's. */
     size_t group_overhead_b;
     size_t grad_overhead_b;
     size_t optstate_overhead_b;
@@ -107,9 +108,9 @@ size_t memInstrumentHarIoBytes(size_t microBatch);
  *    the backward pass, allocated per-layer at build time). Walks the model for
  *    MAXPOOL1D layers; dtype-aware via calcBytesPerTensor.
  *  - HarDxPeak: the transient dx pair — during BACKWARD(i) GRAD i+1 and GRAD i
- *    coexist with every forward wire; the worst concurrent PAIR of resolved dx
- *    wires, payload only (FLOAT32: relu1/pool1 = 2 x [16,128] = 16,384 B for
- *    HAR). Pass the MICRO-batch.
+ *    coexist; under the STORE_ALL model also with every forward wire; the worst
+ *    concurrent PAIR of resolved dx wires, payload only (FLOAT32: relu1/pool1 =
+ *    2 x [16,128] = 16,384 B for HAR). Pass the MICRO-batch.
  *  - HarWireOverhead: the metadata (group exponents/scales) of the 12 forward
  *    wires plus that of the same peak dx pair HarDxPeak models; 0 for FLOAT32. */
 size_t memInstrumentPoolBackwardBytes(layer_t **model, size_t modelSize);

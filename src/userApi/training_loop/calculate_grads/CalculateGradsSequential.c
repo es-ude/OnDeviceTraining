@@ -48,10 +48,11 @@ static trainingStats_t *initTrainingStats(tensor_t *output) {
     return trainingStats;
 }
 
-/* What a training call without a scheduler runs on (remat D30). The policy
- * of this use case, not of the scheduler library, whose NULL spec keeps
- * meaning STORE_ALL. */
-static const rematPlanSpec_t defaultPlanSpec = {.policy = REMAT_PLAN_STORE_ALL};
+/* What a training call without a scheduler runs on (remat D15, D30):
+ * LIVENESS frees each activation after its last reader, with values
+ * identical to STORE_ALL. The policy of this use case, not of the scheduler
+ * library, whose NULL spec keeps meaning STORE_ALL. */
+static const rematPlanSpec_t defaultPlanSpec = {.policy = REMAT_PLAN_LIVENESS};
 
 const rematPlanSpec_t *calculateGradsDefaultPlanSpec(void) {
     return &defaultPlanSpec;

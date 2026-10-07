@@ -8,7 +8,8 @@ HEAP today) over shared code: the buffer table and the static plan
 (`RematCheck`). A caller initialises one with `rematArenaInit` or
 `rematHeapInit`, passes it as `trainingCall_t.remat` (`TrainingCall.h`), and
 deinitialises it with `rematSchedulerDeinit`. A NULL scheduler means an
-ephemeral HEAP scheduler with the STORE_ALL plan per grads call.
+ephemeral HEAP scheduler per grads call on the training call's default
+plan, LIVENESS (remat D15).
 
 ## The seam rule: rows own bytes, nothing else
 
@@ -239,6 +240,13 @@ decisions and those with nothing in force yet are left out.
 - **remat D11** ARENA and HEAP are peer rows behind one swappable,
   step-by-step scheduler, which picks the steps. Placement offsets are
   ARENA-private. Every memory block comes from `reserveMemory`.
+- **remat D15** The default plan of a training call without a scheduler is
+  LIVENESS: each activation is freed after its last reader, with values
+  identical to STORE_ALL (remat D9). The default is the training call's
+  rule (`calculateGradsDefaultPlanSpec()`, `CalculateGradsSequential.h`),
+  not the scheduler library's, whose NULL plan spec keeps meaning
+  STORE_ALL. Evaluation and `inference()` build no scheduler on their NULL
+  path and are unaffected.
 - **remat D17** The schedule key fixes the batch size exactly: a scheduler
   keyed to batch B exits at bind on any other B. No plan-per-B cache.
 - **remat D19** Evaluation runs on the caller's scheduler: `inferenceWithLoss`
@@ -279,8 +287,10 @@ decisions and those with nothing in force yet are left out.
   step and the rule. Only an allocation failure at init is recoverable: the
   init returns `false`, and nothing ran. An unsupported model or a broken
   size or range limit exits at init too (remat D55, D60).
-- **remat D30** A NULL scheduler means an ephemeral HEAP scheduler with the
-  STORE_ALL plan per grads call, bit-identical to the pre-remat driver.
+- **remat D30** A NULL scheduler means an ephemeral HEAP scheduler per
+  grads call, built from the training call's default plan (remat D15) and
+  torn down inside the call; its values are bit-identical to the pre-remat
+  driver's.
 - **remat D31** Three libraries: `RematPlan` (wire table and static plan),
   `RematScheduler` (dispatch and rows) and `RematCheck` (the validator).
   Rows write `->data` only through bind and release (R1).
@@ -332,7 +342,7 @@ decisions and those with nothing in force yet are left out.
   and every buffer it writes is bound.
 - **remat R8** The validator exits on scheduler bugs, the row on resource
   failure mid-call; only an allocation failure at init is recoverable (the
-  init returns `false`). R8 lifecycle: every vtable slot is mandatory, `end`
+  init returns `false`). Its lifecycle: every vtable slot is mandatory, `end`
   leaves no non-borrowed wire resident, and `deinit` is safe after a failed
   init.
 

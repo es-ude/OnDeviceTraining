@@ -152,7 +152,7 @@ typedef struct trainingRunOptions {
                                     An untracked BatchNorm1d's eval output depends on its chunk
                                     mates (deterministic: the eval loader is never reshuffled). */
     rematScheduler_t *remat;    /* NULLable; NULL keeps a fresh scheduler per training call
-                                    (remat D30). Otherwise caller-initialised (rematHeapInit /
+                                    (remat D15, D30). Otherwise caller-initialised (rematHeapInit /
                                     rematArenaInit) and caller-owned: trainingRun borrows it for
                                     every training call and never tears it down; the caller
                                     deinits it after the run. Its key must match the input of
@@ -166,9 +166,9 @@ typedef struct trainingRunOptions {
                                     microBatchSize, and the eval loader's nominal count
                                     (datasetSize / batchSize * batchSize) a multiple of it.
                                     Otherwise evaluation runs without it (remat D19). On it,
-                                    every eval sample must have the sampleShape too: the first
-                                    eval call whose input differs exits naming the mismatch.
-                                    A loader whose stream differs from its nominal count
+                                    every eval sample must have the sampleShape too (the first
+                                    eval call whose input differs exits naming the mismatch),
+                                    and a loader whose stream differs from its nominal count
                                     exits at its first ragged chunk. */
 } trainingRunOptions_t;
 

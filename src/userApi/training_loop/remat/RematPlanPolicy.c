@@ -63,11 +63,11 @@ static size_t actLastReader(const rematWireTable_t *t, layer_t **model, size_t j
     return last;
 }
 
-/* STORE_ALL reproduces the pre-remat driver's lifetimes, which the NULL
- * scheduler keeps (remat D30): every ACT lives to the end of the call, the
- * seed from LOSS_BACKWARD to the first BACKWARD, and each dx wire from the
- * BACKWARD that writes it to the one that reads it. LIVENESS differs only in
- * where an ACT range ends. */
+/* STORE_ALL reproduces the pre-remat driver's lifetimes: every ACT lives to
+ * the end of the call, the seed from LOSS_BACKWARD to the first BACKWARD, and
+ * each dx wire from the BACKWARD that writes it to the one that reads it.
+ * LIVENESS, the plan of a NULL scheduler (remat D15), differs only in where
+ * an ACT range ends. */
 void rematFillTrainRanges(rematPlanPolicy_t policy, const rematWireTable_t *t, layer_t **model,
                           size_t numSteps, rematRange_t *ranges) {
     size_t n = t->modelSize;

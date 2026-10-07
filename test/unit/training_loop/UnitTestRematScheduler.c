@@ -24,6 +24,7 @@
 #include "ReluApi.h"
 #include "RematPlace.h"
 #include "RematPlan.h"
+#include "RematRows.h"
 #include "RematScheduler.h"
 #include "RematTestFixtures.h"
 #include "SoftmaxApi.h"
@@ -2070,6 +2071,78 @@ void testHeapReadAfterReleaseTripsAsan(void) {
 }
 #endif
 
+/* The init self-check: the bytes the memory counter saw a successful init
+ * reserve must equal what its report accounts for (arenaBytes +
+ * metadataBytes). One unaccounted byte exits naming the row and both
+ * numbers. */
+static void selfCheckWithOneExtraByte(rowInit_t init) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = init(&f, NULL);
+    rematReport_t r;
+    rematSchedulerReport(&s, &r);
+    rematRequireReservedMatchesReport(&s, r.arenaBytes + r.metadataBytes + 1u);
+}
+
+void testInitSelfCheckExitsOnAnUnaccountedByteOnHeap(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "remat[heap]: init reserved 5393 B, but its report accounts for "
+                             "5392 B (arenaBytes 0 + metadataBytes 5392)",
+                             selfCheckWithOneExtraByte(initHeap));
+}
+
+void testInitSelfCheckExitsOnAnUnaccountedByteOnArena(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "remat[arena]: init reserved 83961 B, but its report accounts for "
+                             "83960 B (arenaBytes 78384 + metadataBytes 5576)",
+                             selfCheckWithOneExtraByte(initArena));
+}
+
+#ifdef ODT_MEM_PROFILE
+/* The same check reached through a real init: the wire table asks every layer
+ * for its output shape while it is built, so a shape query that also reserves
+ * 8 bytes once (kept reachable here) is a reservation no report term covers.
+ * The init must then exit with its report's bytes + 8. */
+static calcOutputShapeFn_t g_realOutputShape;
+static void *g_unaccounted;
+
+static void outputShapeReservingEightBytesOnce(layer_t *layer, shape_t *in, shape_t *out) {
+    if (g_unaccounted == NULL) {
+        g_unaccounted = reserveMemory(8);
+    }
+    g_realOutputShape(layer, in, out);
+}
+
+static void initWithAnUnaccountedReservation(rematSchedulerType_t row) {
+    fixture_t f;
+    buildHarModel(&f);
+    layerType_t first = f.model[0]->type;
+    g_realOutputShape = layerFunctions[first].calcOutputShape;
+    layerFunctions[first].calcOutputShape = outputShapeReservingEightBytesOnce;
+    rematScheduler_t s;
+    bool built = (row == REMAT_ARENA)
+                     ? rematArenaInit(&s, f.model, f.n, defaultLossConfig(f.lt), f.x, NULL)
+                     : rematHeapInit(&s, f.model, f.n, defaultLossConfig(f.lt), f.x, NULL);
+    if (!built) {
+        exit(2);
+    }
+}
+
+void testHeapInitExitsOnAnUnaccountedReservation(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "remat[heap]: init reserved 5400 B, but its report accounts for "
+                             "5392 B (arenaBytes 0 + metadataBytes 5392)",
+                             initWithAnUnaccountedReservation(REMAT_HEAP));
+}
+
+void testArenaInitExitsOnAnUnaccountedReservation(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "remat[arena]: init reserved 83968 B, but its report accounts for "
+                             "83960 B (arenaBytes 78384 + metadataBytes 5576)",
+                             initWithAnUnaccountedReservation(REMAT_ARENA));
+}
+#endif
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testArenaInitBuildsTheTableAndThePlan);
@@ -2177,6 +2250,12 @@ int main(void) {
     RUN_TEST(testDoneExitsOutsideACall);
     RUN_TEST(testEndExitsOutsideACall);
     RUN_TEST(testDeinitExitsInsideACall);
+    RUN_TEST(testInitSelfCheckExitsOnAnUnaccountedByteOnHeap);
+    RUN_TEST(testInitSelfCheckExitsOnAnUnaccountedByteOnArena);
+#ifdef ODT_MEM_PROFILE
+    RUN_TEST(testHeapInitExitsOnAnUnaccountedReservation);
+    RUN_TEST(testArenaInitExitsOnAnUnaccountedReservation);
+#endif
 #ifdef ODT_TEST_ASAN
     RUN_TEST(testHeapWireEndsAtItsExactBytes);
     RUN_TEST(testHeapReadAfterReleaseTripsAsan);

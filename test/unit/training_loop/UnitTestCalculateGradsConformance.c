@@ -1706,6 +1706,48 @@ void testEvalOverTheZooMatchesTheNullPathOnHeap(void) {
     assertEvalMatchesTheNullPath(REMAT_HEAP);
 }
 
+#ifdef ODT_MEM_PROFILE
+/* Every successful init reserves exactly what its report accounts for
+ * (arenaBytes + metadataBytes), on every zoo fixture and cell. Measured here
+ * with the memory counter, so the rule stays tested apart from the check
+ * inside each init. In a child, so an exit reads as this test's verdict: 1 =
+ * the check inside an init stopped it, 2 = a failed init (not expected), 3 =
+ * this measurement disagrees with the report. */
+static void initEveryZooCell(void) {
+    for (size_t z = 0; z < ZOO_FIXTURES; z++) {
+        for (size_t k = 0; k < MATRIX_CELLS; k++) {
+            const matrixCell_t *cell = &g_cells[k];
+            zooFixture_t f;
+            g_zoo[z].build(&f);
+            rematScheduler_t s;
+            size_t mark = memProfileCurrentBytes();
+            bool built = (cell->row == REMAT_ARENA)
+                             ? rematArenaInit(&s, f.model, f.n, f.loss, f.x, cell->spec)
+                             : rematHeapInit(&s, f.model, f.n, f.loss, f.x, cell->spec);
+            size_t reserved = memProfileCurrentBytes() - mark;
+            if (!built) {
+                exit(2);
+            }
+            rematReport_t r;
+            rematSchedulerReport(&s, &r);
+            if (reserved != r.arenaBytes + r.metadataBytes) {
+                printf("zoo %s on %s: init reserved %zu B, the report accounts for %zu B "
+                       "(arenaBytes %zu + metadataBytes %zu)\n",
+                       g_zoo[z].name, cell->name, reserved, r.arenaBytes + r.metadataBytes,
+                       r.arenaBytes, r.metadataBytes);
+                exit(3);
+            }
+            rematSchedulerDeinit(&s);
+            freeZoo(&f);
+        }
+    }
+}
+
+void testEveryZooInitReservesWhatItsReportAccountsFor(void) {
+    ASSERT_EXITS_WITH_OUTPUT(0, "", initEveryZooCell());
+}
+#endif
+
 /* One persistent scheduler across modes: train, evaluate, train again equals
  * Legacy train, the NULL path's eval, Legacy train (remat P1 on both training
  * calls; the eval call leaves nothing the next training call sees), and an
@@ -1796,6 +1838,7 @@ int main(void) {
 #ifdef ODT_MEM_PROFILE
     RUN_TEST(testANullSchedulerHoldsWhatTheDefaultPlansSchedulerHolds);
     RUN_TEST(testANullSchedulerHoldsLessThanStoreAllMidBackward);
+    RUN_TEST(testEveryZooInitReservesWhatItsReportAccountsFor);
 #endif
     RUN_TEST(testMlpMatchesLegacyOnArena);
     RUN_TEST(testMlpMatchesLegacyOnHeap);

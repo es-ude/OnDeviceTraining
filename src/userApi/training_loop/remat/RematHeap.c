@@ -16,9 +16,18 @@
 
 bool rematHeapInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss,
                    const tensor_t *inputLike, const rematPlanSpec_t *spec) {
+#ifdef ODT_MEM_PROFILE
+    size_t mark = memProfileCurrentBytes();
+#endif
     *s = (rematScheduler_t){.type = REMAT_HEAP, .fns = &rematSchedulerFunctions[REMAT_HEAP]};
-    return rematWireTableInit(&s->wires, model, n, loss, inputLike) &&
-           rematPlanBuild(&s->plan, s->wires, model, spec);
+    if (!rematWireTableInit(&s->wires, model, n, loss, inputLike) ||
+        !rematPlanBuild(&s->plan, s->wires, model, spec)) {
+        return false;
+    }
+#ifdef ODT_MEM_PROFILE
+    rematRequireReservedMatchesReport(s, memProfileCurrentBytes() - mark);
+#endif
+    return true;
 }
 
 void rematHeapBegin(rematScheduler_t *s) {

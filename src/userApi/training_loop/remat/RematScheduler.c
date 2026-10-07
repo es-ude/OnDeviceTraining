@@ -184,3 +184,15 @@ void rematSchedulerReport(const rematScheduler_t *s, rematReport_t *out) {
         break;
     }
 }
+
+void rematRequireReservedMatchesReport(const rematScheduler_t *s, size_t reservedBytes) {
+    rematReport_t r;
+    rematSchedulerReport(s, &r);
+    size_t claimed = reportAdd(r.arenaBytes, r.metadataBytes);
+    if (reservedBytes != claimed) {
+        PRINT_ERROR("remat[%s]: init reserved %zu B, but its report accounts for %zu B "
+                    "(arenaBytes %zu + metadataBytes %zu)",
+                    s->fns->name, reservedBytes, claimed, r.arenaBytes, r.metadataBytes);
+        exit(1);
+    }
+}

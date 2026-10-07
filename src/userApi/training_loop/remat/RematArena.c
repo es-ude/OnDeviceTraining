@@ -200,6 +200,9 @@ void arenaVerifyPlacement(const rematWireTable_t *t, const rematProgram_t *p, co
 
 bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss,
                     const tensor_t *inputLike, const rematPlanSpec_t *spec) {
+#ifdef ODT_MEM_PROFILE
+    size_t mark = memProfileCurrentBytes();
+#endif
     *s = (rematScheduler_t){.type = REMAT_ARENA, .fns = &rematSchedulerFunctions[REMAT_ARENA]};
     if (!rematWireTableInit(&s->wires, model, n, loss, inputLike)) {
         return false;
@@ -248,6 +251,9 @@ bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t
         return false; /* planned, placed, !dataReserved */
     }
     ODT_ASAN_POISON(s->row.arena.base, bytes); /* unaddressable until a range opens */
+#ifdef ODT_MEM_PROFILE
+    rematRequireReservedMatchesReport(s, memProfileCurrentBytes() - mark);
+#endif
     return true;
 }
 

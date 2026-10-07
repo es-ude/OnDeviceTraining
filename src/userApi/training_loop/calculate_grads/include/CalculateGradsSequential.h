@@ -15,8 +15,13 @@ typedef struct rematPlanSpec rematPlanSpec_t;
  *
  *  call is NULLable. NULL, or a NULL call->remat, builds and tears down an
  *  ephemeral HEAP scheduler on calculateGradsDefaultPlanSpec() inside the
- *  call (remat D15, D30). A non-NULL call->remat is the caller's: initialised for
- *  this model and for this input's shape (rematHeapInit / rematArenaInit),
+ *  call (remat D15, D30). In builds with the memory counter (ODT_MEM_PROFILE)
+ *  that init, like any rematHeapInit, checks that it reserved exactly what its
+ *  report claims, so the rule of RematScheduler.h applies to the call: no
+ *  other thread may reserve or free memory while it sets the scheduler up.
+ *
+ *  A non-NULL call->remat is the caller's: initialised for this model and
+ *  for this input's shape (rematHeapInit / rematArenaInit),
  *  used by the call and left initialised for the next one; the caller deinits
  *  it. A zeroed or deinitialised scheduler, or one whose key does not match,
  *  exits naming it. */

@@ -42,4 +42,9 @@ void rematHeapDeinit(rematScheduler_t *s);
  * walk and checks its own end. */
 void rematRequireWalkComplete(const rematScheduler_t *s, const char *row);
 
+/* The row inits call it under ODT_MEM_PROFILE once they succeed, with the
+ * bytes the memory counter saw them reserve: exits naming the row when that
+ * differs from what the report accounts for (arenaBytes + metadataBytes). */
+void rematRequireReservedMatchesReport(const rematScheduler_t *s, size_t reservedBytes);
+
 #endif // ODT_REMAT_ROWS_H

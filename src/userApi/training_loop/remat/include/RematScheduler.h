@@ -115,7 +115,11 @@ struct rematScheduler {
 /* One init per row (the LrScheduler idiom). Returns false iff a reserveMemory
  * failed; s is then safe for rematSchedulerDeinit and rematSchedulerReport,
  * whose flags say which fields are valid. A model the table cannot describe,
- * or whose size arithmetic overflows, exits naming it. */
+ * or whose size arithmetic overflows, exits naming it. In builds with the
+ * memory counter (ODT_MEM_PROFILE) a successful init checks that it reserved
+ * exactly its report's arenaBytes + metadataBytes and exits naming both
+ * otherwise. The counter is process-wide: no other thread may reserve or free
+ * memory while an init runs. */
 bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss,
                     const tensor_t *inputLike, const rematPlanSpec_t *spec);
 /* The peer row: table and plan only; one exactly-sized block per

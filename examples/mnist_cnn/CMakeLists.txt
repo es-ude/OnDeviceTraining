@@ -59,4 +59,5 @@ target_link_libraries(train_c_mnist_cnn PRIVATE
         RNG
 
         examples_shared
+        RematScheduler
 )

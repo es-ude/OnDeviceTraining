@@ -27,6 +27,7 @@
 #include "QuantizationApi.h"
 #include "RNG.h"
 #include "ReluApi.h"
+#include "RematScheduler.h"
 #include "SgdApi.h"
 #include "SoftmaxApi.h"
 #include "StateDictApi.h"
@@ -36,6 +37,7 @@
 #include "TrainingLoopApi.h"
 
 #include "npy_writer.h"
+#include "remat_select.h"
 
 #define EPOCHS 10
 #define BATCH 64
@@ -264,6 +266,24 @@ int main(void) {
     if (ensureDir("examples/mnist_cnn/outputs") != 0) {
         return 1;
     }
+    rematSelection_t rematSel;
+    if (!rematSelectFromEnv(&rematSel)) {
+        return 1;
+    }
+    /* A BIT_PARITY run makes no training call, so a chosen memory scheme
+     * cannot apply: refuse it instead of ignoring it. */
+    const char *bitParityEnv = getenv("BIT_PARITY");
+    if (rematSel.chosen && bitParityEnv != NULL && bitParityEnv[0] != '\0') {
+        fprintf(stderr, "ERROR: REMAT_STORAGE, REMAT_PLAN and DRY_PLAN do not apply to a "
+                        "BIT_PARITY run (it trains nothing)\n");
+        return 1;
+    }
+    const lossConfig_t lossConfig = {
+        .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL};
+    /* The training call's memory scheme (remat_select.h); zeroed, so the
+     * deinit is a no-op when none was built. */
+    rematScheduler_t remat = {0};
+    trainingCall_t rematCall = {0};
 
     initDataSets();
 
@@ -292,6 +312,22 @@ int main(void) {
         }
         fprintf(stdout, "BIT_PARITY: loaded state_dict from %s\n", wDir);
     } else {
+        if (rematSel.chosen) {
+            sample_t *keySample = getTrainSample(0);
+            batchView_t keyView;
+            bool built = rematSelectInit(&remat, &rematSel, "mnist_cnn", model, MODEL_SIZE,
+                                         lossConfig, batchViewOf(&keyView, keySample->item));
+            freeSample(keySample);
+            if (!built) {
+                return 1;
+            }
+            rematCall.remat = &remat;
+            if (rematSel.dryPlan) {
+                rematSelectPrintPlan(stdout, "mnist_cnn", &remat);
+                rematSchedulerDeinit(&remat);
+                return 0;
+            }
+        }
         dataLoader_t *trainLoader = dataLoaderInit(getTrainSample, getTrainSize, BATCH, NULL, NULL,
                                                    /*shuffle*/ true, /*shuffleSeed*/ SHUFFLE_SEED,
                                                    /*dropLast*/ true);
@@ -320,13 +356,10 @@ int main(void) {
 
         clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
 
-        trainingRunResult_t result =
-            trainingRun(model, MODEL_SIZE,
-                        (lossConfig_t){.funcType = CROSS_ENTROPY,
-                                       .backwardReduction = REDUCTION_MEAN,
-                                       .classWeights = NULL},
-                        trainLoader, valLoader, sgd, EPOCHS, calculateGradsSequential,
-                        inferenceWithLoss, &(trainingRunOptions_t){.callback = epochCallback});
+        trainingRunResult_t result = trainingRun(
+            model, MODEL_SIZE, lossConfig, trainLoader, valLoader, sgd, EPOCHS,
+            calculateGradsSequential, inferenceWithLoss,
+            &(trainingRunOptions_t){.callback = epochCallback, .remat = rematCall.remat});
         (void)result;
 
         epochStats_t testStats = evaluationEpochWithMetrics(
@@ -380,5 +413,6 @@ int main(void) {
     }
     free(predictions);
 
+    rematSchedulerDeinit(&remat);
     return status;
 }

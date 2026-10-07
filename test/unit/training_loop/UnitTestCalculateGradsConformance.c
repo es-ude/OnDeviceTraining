@@ -10,6 +10,7 @@
 #include "BatchNorm1dApi.h"
 #include "CalculateGradsSequential.h"
 #include "Common.h"
+#include "Conv1dTransposedApi.h"
 #include "DeathTest.h"
 #include "DropoutApi.h"
 #include "GroupNormApi.h"
@@ -112,6 +113,9 @@ static void freeZoo(zooFixture_t *f) {
             break;
         case BATCHNORM1D:
             freeBatchNorm1dLayer(f->model[i]);
+            break;
+        case CONV1D_TRANSPOSED:
+            freeConv1dTransposedLayer(f->model[i]);
             break;
         default:
             freeModel(&f->model[i], 1);
@@ -323,6 +327,37 @@ static void buildBatchNorm(zooFixture_t *f) {
     f->loss = defaultLossConfig(MSE);
     f->x = makeFloatTensor((size_t[]){4, 2}, 2, 1.0f);
     f->y = makeFloatTensor((size_t[]){4, 2}, 2, 0.5f);
+}
+
+/* Conv1d -> ConvTranspose1d -> Flatten -> Linear under MSE. ConvTranspose1d
+ * reads its input only for the weight grad. The frozen one sits above the
+ * trainable Conv1d: at the deepest position the frozen-layer cut would drop
+ * its backward, and its "does not read" case would never run. */
+static void buildConvTransposed(zooFixture_t *f, bool frozen) {
+    beginZoo(f);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, &g_floatQ);
+    f->model[0] =
+        conv1dLayerInit(&(conv1dInit_t){.inChannels = 2, .outChannels = 2, .kernelSize = 1}, &lq);
+    f->model[1] = conv1dTransposedLayerInit(
+        &(conv1dTransposedInit_t){.inChannels = 2,
+                                  .outChannels = 2,
+                                  .kernelSize = 2,
+                                  .trainable = frozen ? TRAINABLE_FALSE : TRAINABLE_DEFAULT},
+        &lq);
+    f->model[2] = flattenLayerInit();
+    f->model[3] = makeLinear(8, 2, false);
+    f->n = 4;
+    f->x = makeFloatTensor((size_t[]){1, 2, 3}, 3, 1.0f);
+    mseLabel(f, 2);
+}
+
+static void buildConvTransposedTrainable(zooFixture_t *f) {
+    buildConvTransposed(f, false);
+}
+
+static void buildFrozenConvTransposed(zooFixture_t *f) {
+    buildConvTransposed(f, true);
 }
 
 /* ---- capturing one call (remat P1-P5, P9) ---- */
@@ -704,6 +739,14 @@ void testBatchNormConforms(void) {
 
 void testCeWithoutATrailingSoftmaxConforms(void) {
     assertNullPathMatchesLegacy(buildCeWithoutSoftmax);
+}
+
+void testConvTransposedConforms(void) {
+    assertNullPathMatchesLegacy(buildConvTransposedTrainable);
+}
+
+void testFrozenConvTransposedAboveDeepestConforms(void) {
+    assertNullPathMatchesLegacy(buildFrozenConvTransposed);
 }
 
 void testTwoCallsInARowMatchLegacyOnBatchNorm(void) {
@@ -1250,6 +1293,22 @@ void testBatchNormMatchesLegacyOnHeap(void) {
     assertRowMatchesLegacy(buildBatchNorm, REMAT_HEAP);
 }
 
+void testConvTransposedMatchesLegacyOnArena(void) {
+    assertRowMatchesLegacy(buildConvTransposedTrainable, REMAT_ARENA);
+}
+
+void testConvTransposedMatchesLegacyOnHeap(void) {
+    assertRowMatchesLegacy(buildConvTransposedTrainable, REMAT_HEAP);
+}
+
+void testFrozenConvTransposedMatchesLegacyOnArena(void) {
+    assertRowMatchesLegacy(buildFrozenConvTransposed, REMAT_ARENA);
+}
+
+void testFrozenConvTransposedMatchesLegacyOnHeap(void) {
+    assertRowMatchesLegacy(buildFrozenConvTransposed, REMAT_HEAP);
+}
+
 /* ---- one persistent instance across calls (remat P6, P9) ---- */
 
 typedef void (*fixtureEdit_t)(zooFixture_t *f);
@@ -1440,7 +1499,7 @@ static void buildBfpOutput(zooFixture_t *f) {
     mseLabel(f, 8);
 }
 
-#define ZOO_FIXTURES 18
+#define ZOO_FIXTURES 20
 static const zooEntry_t g_zoo[ZOO_FIXTURES] = {
     {"mlp", buildMlp},
     {"har-cnn", buildHarCnn},
@@ -1460,6 +1519,8 @@ static const zooEntry_t g_zoo[ZOO_FIXTURES] = {
     {"ce-without-softmax", buildCeWithoutSoftmax},
     {"sym-output", buildSymOutput},
     {"bfp-output", buildBfpOutput},
+    {"conv-transposed", buildConvTransposedTrainable},
+    {"frozen-conv-transposed", buildFrozenConvTransposed},
 };
 
 /* One inferenceWithLoss call: the loss, the returned output with its shape
@@ -1665,6 +1726,8 @@ int main(void) {
     RUN_TEST(testCeWithOnlyTheLastLinearTrainableConforms);
     RUN_TEST(testBatchNormConforms);
     RUN_TEST(testCeWithoutATrailingSoftmaxConforms);
+    RUN_TEST(testConvTransposedConforms);
+    RUN_TEST(testFrozenConvTransposedAboveDeepestConforms);
     RUN_TEST(testTwoCallsInARowMatchLegacyOnBatchNorm);
     RUN_TEST(testTwoCallsInARowMatchLegacyOnDropout);
     RUN_TEST(testAgradFiresBeforeTheLayersBackward);
@@ -1714,6 +1777,10 @@ int main(void) {
     RUN_TEST(testCeWithoutSoftmaxMatchesLegacyOnHeap);
     RUN_TEST(testBatchNormMatchesLegacyOnArena);
     RUN_TEST(testBatchNormMatchesLegacyOnHeap);
+    RUN_TEST(testConvTransposedMatchesLegacyOnArena);
+    RUN_TEST(testConvTransposedMatchesLegacyOnHeap);
+    RUN_TEST(testFrozenConvTransposedMatchesLegacyOnArena);
+    RUN_TEST(testFrozenConvTransposedMatchesLegacyOnHeap);
     RUN_TEST(testTwoCallsAcrossAWidthEditMatchLegacy);
     RUN_TEST(testTwoCallsAcrossARoundingEditMatchLegacy);
     RUN_TEST(testTwoCallsAcrossAnInputRegroupMatchLegacy);

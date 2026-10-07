@@ -168,6 +168,7 @@ target_link_libraries(UnitTestCalculateGradsConformance PRIVATE
         GroupNormApi
         DropoutApi
         BatchNorm1dApi
+        Conv1dTransposedApi
         Kernel
         LayerQuant
         LayerCommon

@@ -738,14 +738,28 @@ checkpointing, limitations, literature).
   `memProfileRssPeakKb` (process peak RSS). Consumed by the HAR trainers
   (`examples/har_classifier/mem_instrument.c`) and the report-only CI job
   `c-stack-watermark`.
-- **Tensor rematerialization (groundwork, #4 PR0+PR1, PR #472)** —
+- **Tensor rematerialization (#4, PR0–PR4)** —
   `src/userApi/training_loop/remat/`: a static wire plan (`RematPlan`,
-  `REMAT_PLAN_STORE_ALL`/`REMAT_PLAN_LIVENESS`), a step scheduler with `REMAT_ARENA`/
-  `REMAT_HEAP` rows (`RematScheduler.h`) and a checker (`RematCheck.h`); wire bytes
-  are poisoned at bind/release under `ODT_REMAT_VERIFY` (ON in the `unit_test`/
-  `unit_test_debug`/`unit_test_asan` presets and, by inheritance, `unit_test_ubsan`).
-  Unit-tested; no recompute policy yet. Not yet wired into `trainingRun` or its
-  options; no example uses it.
+  `REMAT_PLAN_STORE_ALL`/`REMAT_PLAN_LIVENESS`), a step scheduler with two storage
+  schemes behind one interface (`RematScheduler.h`): `REMAT_ARENA` (one resident
+  block, first-fit-decreasing placement) and `REMAT_HEAP` (one block per buffer),
+  and a validating checker (`RematCheck.h`). Training calls take a caller's
+  scheduler through `trainingCall_t.remat` / `trainingRunOptions_t.remat`;
+  `trainingRun` evaluates on the same scheduler when the evaluation micro-batch
+  equals the training one and divides the evaluation loader's nominal sample
+  count (the samples of its full batches). Without a scheduler a
+  training call builds an ephemeral HEAP one on its own default plan, LIVENESS
+  (`calculateGradsDefaultPlanSpec()`); evaluation and `inference()` without one
+  keep their own buffers. `rematSchedulerReport` gives the plan's numbers (TRAIN
+  wires peak, activation-only peak, arena size, padding, first-fit gap, metadata);
+  in builds with the memory counter every init checks that it reserved exactly
+  what its report claims. The HAR main trainer, finetune stage 2 and `mnist_cnn`
+  choose the scheme at start-up (`REMAT_STORAGE=arena|heap`,
+  `REMAT_PLAN=store_all|liveness`, `DRY_PLAN=1`) and log the choice; the HAR
+  memory-profiling build also logs the numbers (`mnist_cnn` prints them only in
+  its `DRY_PLAN` line). Wire bytes are poisoned at bind/release under
+  `ODT_REMAT_VERIFY` (ON in the `unit_test`/`unit_test_debug`/`unit_test_asan`
+  presets and, by inheritance, `unit_test_ubsan`). No recompute policy yet.
 - **Examples** — 7 end-to-end: `har_classifier` (`train_c_har_classifier` plus the
   `train_c_har_classifier_{adamw,sym,bfp,finetune}` variants — `_finetune` is the
   pretrain → freeze → fine-tune flow, #380 PR3 — and the continual-learning
@@ -769,9 +783,10 @@ checkpointing, limitations, literature).
   NULL; nothing reads it).
 - Serialization: sparsity stub; optimizer state is not serialized (#350) (wire
   format is fixed-width LE with checked I/O since v2, #370).
-- `sparsityType_t` is scaffolding only: no kernel exploits it. Inference
-  passes an input's marker on; the training driver drops it (its wire headers
-  carry none), and `freeSparsity` is a no-op (#478).
+- `sparsityType_t` is scaffolding only: no kernel exploits it. `inference()` and
+  `inferenceWithLoss` without a scheduler pass an input's marker on; the training
+  driver and `inferenceWithLoss` on a caller's scheduler drop it (their wire
+  headers carry none), and `freeSparsity` is a no-op (#478).
 - Continual-learning (PPCA replay, #326) arithmetic is `ARITH_FLOAT32` only;
   no integer eigensolver exists yet (`jacobiEigSymFloat32` is float). State
   storage is unaffected (FLOAT32/SYM/ASYM/per-tensor BFP all accepted).

@@ -87,6 +87,7 @@ target_link_libraries(train_c_har_classifier PRIVATE
 
         examples_shared
         har_mem_instrument
+        RematScheduler
 )
 
 add_executable(train_c_har_classifier_adamw train_c_adamw.c)

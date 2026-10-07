@@ -30,6 +30,7 @@
 #include "QuantizationApi.h"
 #include "RNG.h"
 #include "ReluApi.h"
+#include "RematScheduler.h"
 #include "SgdApi.h"
 #include "SoftmaxApi.h"
 #include "StateDictApi.h"
@@ -40,6 +41,7 @@
 
 #include "mem_instrument.h"
 #include "npy_writer.h"
+#include "remat_select.h"
 
 /* Micro-batch = concurrent samples per forward/backward. The training loop
  * streams the macro-batch one sample at a time (loss.md B=1), so peak activation
@@ -420,6 +422,25 @@ int main(void) {
                 g_lrSchedule);
         return 1;
     }
+    rematSelection_t rematSel;
+    if (!rematSelectFromEnv(&rematSel)) {
+        return 1;
+    }
+    /* A BIT_PARITY run makes no training call, so a chosen memory scheme
+     * cannot apply: refuse it instead of ignoring it. */
+    const char *bitParityEnv = getenv("BIT_PARITY");
+    if (rematSel.chosen && bitParityEnv != NULL && bitParityEnv[0] != '\0') {
+        fprintf(stderr, "ERROR: REMAT_STORAGE, REMAT_PLAN and DRY_PLAN do not apply to a "
+                        "BIT_PARITY run (it trains nothing)\n");
+        return 1;
+    }
+    const lossConfig_t lossConfig = {
+        .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL};
+    /* The training call's memory scheme (remat_select.h): built on the
+     * training branch only and deinitialised after the stack probe, which
+     * runs on it too. Zeroed, so the deinit is a no-op when none was built. */
+    rematScheduler_t remat = {0};
+    trainingCall_t rematCall = {0};
     const char *logPath = getenv("LOG_PATH");
 
 #ifdef ODT_MEM_PROFILE
@@ -478,6 +499,24 @@ int main(void) {
         }
         fprintf(stdout, "BIT_PARITY: loaded state_dict from %s\n", wDir);
     } else {
+        if (rematSel.chosen) {
+            /* Keyed to one training sample's [1, ...] view: every training
+             * call runs at micro-batch 1, whatever the batch schedule does. */
+            sample_t *keySample = getTrainSample(0);
+            batchView_t keyView;
+            bool built = rematSelectInit(&remat, &rematSel, "har_classifier", model, MODEL_SIZE,
+                                         lossConfig, batchViewOf(&keyView, keySample->item));
+            freeSample(keySample);
+            if (!built) {
+                return 1;
+            }
+            rematCall.remat = &remat;
+            if (rematSel.dryPlan) {
+                rematSelectPrintPlan(stdout, "har_classifier", &remat);
+                rematSchedulerDeinit(&remat);
+                return 0;
+            }
+        }
         dataLoader_t *trainLoader =
             dataLoaderInit(getTrainSample, getTrainSize, (uint16_t)g_batchSize, NULL, NULL,
                            /*shuffle*/ true, /*shuffleSeed*/ g_shuffleSeed, /*dropLast*/ true);
@@ -512,7 +551,7 @@ int main(void) {
          * framework backstop. */
         lrScheduler_t lrSched;
         bsScheduler_t bsSched;
-        trainingRunOptions_t options = {.callback = epochCallback};
+        trainingRunOptions_t options = {.callback = epochCallback, .remat = rematCall.remat};
         /* final.diverged in the log is derived from this stop; keep it on */
         options.stopOnNonFiniteLoss = true;
         if (strcmp(g_lrSchedule, "step") == 0) {
@@ -561,12 +600,8 @@ int main(void) {
         clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
 
         trainingRunResult_t result =
-            trainingRun(model, MODEL_SIZE,
-                        (lossConfig_t){.funcType = CROSS_ENTROPY,
-                                       .backwardReduction = REDUCTION_MEAN,
-                                       .classWeights = NULL},
-                        trainLoader, valLoader, sgd, g_epochs, calculateGradsSequential,
-                        inferenceWithLoss, &options);
+            trainingRun(model, MODEL_SIZE, lossConfig, trainLoader, valLoader, sgd, g_epochs,
+                        calculateGradsSequential, inferenceWithLoss, &options);
 
         epochStats_t testStats = evaluationEpochWithMetrics(
             model, MODEL_SIZE, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN, 0);
@@ -675,9 +710,7 @@ int main(void) {
         memStepCtx_t stepCtx = {
             .model = model,
             .modelSize = MODEL_SIZE,
-            .lossConfig = (lossConfig_t){.funcType = CROSS_ENTROPY,
-                                         .backwardReduction = REDUCTION_MEAN,
-                                         .classWeights = NULL},
+            .lossConfig = lossConfig,
             .input = stepSample->item,
             .label = stepSample->label,
             .optim = sgd,
@@ -697,5 +730,6 @@ int main(void) {
         fclose(g_log_file);
     }
 
+    rematSchedulerDeinit(&remat);
     return status;
 }

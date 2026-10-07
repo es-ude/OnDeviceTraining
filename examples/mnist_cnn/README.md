@@ -41,3 +41,15 @@ uv run python examples/mnist_cnn/compare.py
 
 Bit-parity mode requires exact equality; the train-from-scratch tolerances match
 `mnist_mlp/` and are informational.
+
+## Memory scheme (#4)
+
+`REMAT_STORAGE` (`arena` | `heap`), `REMAT_PLAN` (`store_all` | `liveness`) and
+`DRY_PLAN=1` choose the training call's memory scheme at start-up, as in
+`har_classifier/README.md`. This example has no memory-profiling build; its plan's
+numbers are in the `DRY_PLAN` line, and the run log's `config` records the choice:
+
+```bash
+REMAT_STORAGE=arena DRY_PLAN=1 ./build/examples/examples/mnist_cnn/train_c_mnist_cnn
+# DRY_PLAN example=mnist_cnn storage=arena plan=liveness planned=1 placed=1 data_reserved=1 steps=21 wires_peak_b=112896 activations_peak_b=100352 arena_b=112896 arena_pad_b=0 arena_gap_b=0 wire_metadata_b=4664
+```

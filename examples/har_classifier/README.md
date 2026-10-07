@@ -563,6 +563,47 @@ directory of logs; `plot_continual.py` renders the study figures from per-arm lo
 directories (layout in its docstring). CI runs a 2-domain, 1-epoch machinery smoke of this
 binary (`c-bit-parity`), not an accuracy or BWT gate.
 
+### Choosing the training call's memory scheme (#4)
+
+The main trainer (`train_c_har_classifier`) and the finetune trainer's stage 2
+read three environment variables at start-up (the other HAR binaries ignore them):
+
+| Variable | Values | Meaning |
+|---|---|---|
+| `REMAT_STORAGE` | `arena` \| `heap` | one resident block placed at start-up, or one allocation per buffer |
+| `REMAT_PLAN` | `store_all` \| `liveness` | keep every activation to the end of the call, or free each after its last reader |
+| `DRY_PLAN` | `1` | print the plan's numbers in one line and stop (nothing is trained; no log, checkpoint or prediction file is written) |
+
+With none set, the trainer passes no scheduler and each training call runs its own
+default (one allocation per buffer, `liveness`). A missing variable takes that
+default (an empty value counts as unset); an unknown value stops before the data
+is loaded, naming the allowed values, and so does any of them with `BIT_PARITY=1`,
+which trains nothing. Losses, accuracies and predictions are identical under every
+choice.
+
+```bash
+B=./build/examples/examples/har_classifier/train_c_har_classifier
+REMAT_STORAGE=arena DRY_PLAN=1 $B
+# DRY_PLAN example=har_classifier storage=arena plan=liveness planned=1 placed=1 data_reserved=1 steps=25 wires_peak_b=49152 activations_peak_b=41216 arena_b=49152 arena_pad_b=0 arena_gap_b=0 wire_metadata_b=5576
+REMAT_STORAGE=arena REMAT_PLAN=liveness EPOCHS=1 $B
+```
+
+`wires_peak_b` is the plan's peak of live training buffers (input excluded),
+`activations_peak_b` the same for activations alone, `arena_b` the resident block
+(`arena_pad_b` alignment, `arena_gap_b` the first-fit placer's unused bytes,
+recorded, never assumed), `wire_metadata_b` the scheduler's tables. The run log
+records the choice in `config` (`remat_storage`, `remat_plan`; the finetune trainer
+adds `remat_stage: 2`, because stage 1 always runs on the default), and a
+memory-profiling build adds the six numbers to the `memory` block. For the finetune
+trainer the numbers are stage 2's (frozen backbone): `DRY_PLAN=1` needs no stage-1
+checkpoint. An opted-in one-block run's `heap_peak_b` counts its resident block for
+the whole run, so compare plans by `wires_peak_b` / `arena_b`, not by `heap_peak_b`.
+Every memory-profiling log keeps `activations_b` (and so `mcu_total_b`) as the
+store-all sum, an upper bound kept for comparison with older logs: a run without a
+scheduler runs `liveness`, frees each activation after its last reader and holds less;
+the plan's own figures are `wires_peak_b` and `activations_peak_b`, present only in
+the log of a memory-profiling run that set `REMAT_STORAGE` or `REMAT_PLAN`.
+
 ### Build with memory profiling
 
 Memory instrumentation is compiled in only under the `examples_memprofile` preset

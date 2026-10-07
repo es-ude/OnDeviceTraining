@@ -51,6 +51,13 @@ class TrainConfig(TypedDict):
     bfp_state: NotRequired[int]  # 0 | 1 per-tensor BFP momentum storage
     bfp_rounding: NotRequired[str]  # "sr" | "det" (training-side seams only; inference deterministic)
 
+    # Remat scheduler (#4): the scheme the run chose (REMAT_STORAGE / REMAT_PLAN); a scheduler
+    # that fails to build stops the run, so a complete log with these keys ran on it. Absent =
+    # none chosen (the training call's default plan).
+    remat_storage: NotRequired[str]  # "arena" (one block) | "heap" (one allocation per buffer)
+    remat_plan: NotRequired[str]  # "store_all" | "liveness"
+    remat_stage: NotRequired[int]  # finetune: the stage the scheduler and the remat memory keys belong to (2)
+
 
 class EpochLog(TypedDict):
     epoch: int
@@ -107,6 +114,13 @@ class MemoryLog(TypedDict):
     stack_peak_b: int  # instrumented: measurePeakStackBytes() on one step
     rss_peak_kb: int  # instrumented: memProfileRssPeakKb() (KiB)
     reconciliation_gap_b: int  # heap_peak_b - mcu_total_b (signed)
+    # Remat scheduler (#4), from rematReport_t; present iff config.remat_storage is.
+    wires_peak_b: NotRequired[int]  # TRAIN wires peak, ACT 0 excluded (peakLiveBytes; POET x-axis)
+    activations_peak_b: NotRequired[int]  # the same, activation wires only
+    arena_b: NotRequired[int]  # resident arena block; 0 for the heap scheme
+    arena_pad_b: NotRequired[int]  # alignment padding at the peak
+    arena_gap_b: NotRequired[int]  # first-fit placement gap: recorded, never assumed
+    wire_metadata_b: NotRequired[int]  # wire table + plan block (+ arena offsets)
 
 
 class RunLog(TypedDict, total=False):

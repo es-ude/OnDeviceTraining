@@ -7,7 +7,15 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from examples._shared.log_schema import EpochLog, FinalLog, RunLog, TrainConfig, dump_log, load_log
+from examples._shared.log_schema import (
+    EpochLog,
+    FinalLog,
+    MemoryLog,
+    RunLog,
+    TrainConfig,
+    dump_log,
+    load_log,
+)
 
 
 def test_dump_then_load_roundtrips(tmp_path):
@@ -135,3 +143,14 @@ def test_c_bfp_log_without_sym_bits_loads(tmp_path):
     loaded = load_log(path)
     assert loaded == log
     assert "sym_bits" not in loaded["memory"]
+
+
+def test_remat_keys_are_declared_optional():
+    """A trainer that builds a remat scheduler (REMAT_STORAGE / REMAT_PLAN /
+    DRY_PLAN) logs its choice in config and the plan's bytes in memory; every
+    other log omits them, so they must stay NotRequired."""
+    assert {"remat_storage", "remat_plan", "remat_stage"} <= TrainConfig.__optional_keys__
+    assert {
+        "wires_peak_b", "activations_peak_b", "arena_b", "arena_pad_b", "arena_gap_b",
+        "wire_metadata_b",
+    } <= MemoryLog.__optional_keys__

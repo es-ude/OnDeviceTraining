@@ -360,6 +360,33 @@ def test_eleven_categories_sum_to_the_c_total_for_post_pr7_logs():
     assert stats["reconciliation_gap_b"]["mean"] == 51138367 - sum(_BFP_FIXED.values())
 
 
+_REMAT = {"wires_peak_b": 49152, "activations_peak_b": 41216, "arena_b": 49152,
+          "arena_pad_b": 0, "arena_gap_b": 0, "wire_metadata_b": 5576}
+
+
+def test_remat_keys_are_aggregated_when_every_seed_has_them():
+    runs = {"bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst": {}}
+    for seed in (1, 2):
+        log = _bfp_log(acc=0.9)
+        log["memory"].update(_REMAT)
+        runs["bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst"][seed] = log
+    stats = aggregate(runs)["per_config"]["bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst"]["stats"]
+    for key, value in _REMAT.items():
+        assert stats[key] == {"mean": value, "std": 0.0}
+
+
+def test_a_log_without_remat_keys_omits_them_never_zero():
+    """A legacy log (no scheduler) aggregates as before; the remat keys are absent,
+    not 0, and so is a key only some seeds carry."""
+    runs = {"bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst": {1: _bfp_log(acc=0.9)}}
+    with_one = _bfp_log(acc=0.9)
+    with_one["memory"].update(_REMAT)
+    runs["bfp_wb32_ab16_m6_e8_xnat_g0_s1_rsr_lconst"] = {1: with_one, 2: _bfp_log(acc=0.9)}
+    per_config = aggregate(runs)["per_config"]
+    for config in runs:
+        assert not set(_REMAT) & set(per_config[config]["stats"])
+
+
 def test_post_pr7_c_total_drift_is_loud():
     runs = {"bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst": {1: _bfp_log(acc=0.9, c_total=12345)}}
     with pytest.raises(ValueError, match="mcu_total_b drift"):

@@ -110,6 +110,12 @@ SCALARS = [
     "wall_s",
 ]
 
+# Remat scheduler figures (#4): present only in logs of runs that built a
+# scheduler (REMAT_STORAGE / REMAT_PLAN), so never in SCALARS (read with
+# float(mem[key]) on every log). An absent key is omitted, never 0.
+REMAT_SCALARS = ["wires_peak_b", "activations_peak_b", "arena_b", "arena_pad_b", "arena_gap_b",
+                 "wire_metadata_b"]
+
 ACC_TOL = 0.01  # "keeps up with FLOAT32" = within 1 accuracy point
 
 # Config keys that define the TRAINING BUDGET. A baseline differing in any of them
@@ -236,6 +242,9 @@ def _run_scalars(log: RunLog) -> dict[str, float]:
             if key in out:
                 continue
             out[key] = float(mem[key])
+        for key in REMAT_SCALARS:
+            if mem.get(key) is not None:
+                out[key] = float(mem[key])
         c_total = float(mem["mcu_total_b"])
         analytic = sum(out[k] for k in CATEGORIES)
         if analytic != c_total:
@@ -318,6 +327,14 @@ def aggregate(runs: dict[str, dict[int, RunLog]]) -> dict:
                 "mean": float(np.nanmean(vals)),
                 # sample std (ddof=1) needs >=2 points; else 0.0
                 "std": float(np.nanstd(vals, ddof=1)) if np.count_nonzero(~np.isnan(vals)) > 1 else 0.0,
+            }
+        for key in REMAT_SCALARS:
+            if not all(key in r for r in scal):
+                continue  # only seeds that all built a scheduler are comparable
+            vals = np.array([r[key] for r in scal], dtype=float)
+            stats[key] = {
+                "mean": float(np.mean(vals)),
+                "std": float(np.std(vals, ddof=1)) if len(vals) > 1 else 0.0,
             }
         converged = [(_converged(by_seed[s])) for s in seeds]
         per_config[config] = {

@@ -222,6 +222,7 @@ target_link_libraries(train_c_har_classifier_finetune PRIVATE
 
         examples_shared
         har_mem_instrument
+        RematScheduler
 )
 
 add_executable(train_c_continual train_c_continual.c)

@@ -44,6 +44,7 @@
 #include "QuantizationApi.h"
 #include "RNG.h"
 #include "ReluApi.h"
+#include "RematScheduler.h"
 #include "Serialize.h"
 #include "SgdApi.h"
 #include "SoftmaxApi.h"
@@ -55,6 +56,7 @@
 
 #include "mem_instrument.h"
 #include "npy_writer.h"
+#include "remat_select.h"
 
 #define BATCH 64 /* macro-batch: loader groups 64 samples per optimizer step */
 /* Micro-batch = concurrent samples per forward/backward. The training loop
@@ -295,6 +297,19 @@ static size_t dxPeakBytesFrozenHead(size_t microBatch) {
     return (size_t)NUM_CLASSES * microBatch * sizeof(float);
 }
 
+/* Stage 2's scheduler (remat_select.h), keyed to one training sample's
+ * [1, ...] view: the frozen backbone is part of its key, so stage 1 runs on
+ * the training call's default instead. */
+static bool buildStage2Remat(rematScheduler_t *s, const rematSelection_t *sel, layer_t **model2,
+                             lossConfig_t lossConfig) {
+    sample_t *keySample = getTrainSample(0);
+    batchView_t keyView;
+    bool built = rematSelectInit(s, sel, "har_classifier_finetune", model2, MODEL_SIZE, lossConfig,
+                                 batchViewOf(&keyView, keySample->item));
+    freeSample(keySample);
+    return built;
+}
+
 int main(void) {
     if (ensureDir("examples/har_classifier/logs") != 0) {
         return 1;
@@ -311,6 +326,16 @@ int main(void) {
     g_shuffleSeed = (unsigned)envInt("SHUFFLE_SEED", (int)g_shuffleSeed);
     const char *logPath = getenv("LOG_PATH");
     const char *checkpointPath = "examples/har_classifier/outputs/har_pretrained.odts";
+    rematSelection_t rematSel;
+    if (!rematSelectFromEnv(&rematSel)) {
+        return 1;
+    }
+    const lossConfig_t lossConfig = {
+        .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL};
+    /* Stage 2's memory scheme; zeroed, so the deinit is a no-op when none
+     * was built. */
+    rematScheduler_t remat = {0};
+    trainingCall_t rematCall = {0};
 
 #ifdef ODT_MEM_PROFILE
     /* Reset the heap counter before the first reserveMemory so dataset_b starts
@@ -338,6 +363,19 @@ int main(void) {
     layerQuantInitUniform(&lq, quantizationInitFloat());
 
     rngSetSeed(g_seed);
+
+    if (rematSel.dryPlan) {
+        /* The stage-2 plan depends on topology, frozen flags and the input
+         * shape, not on weights: no stage-1 checkpoint is needed. */
+        layer_t *planModel[MODEL_SIZE];
+        buildModel(planModel, &lq, /*freezeConv*/ true);
+        if (!buildStage2Remat(&remat, &rematSel, planModel, lossConfig)) {
+            return 1;
+        }
+        rematSelectPrintPlan(stdout, "har_classifier_finetune", &remat);
+        rematSchedulerDeinit(&remat);
+        return 0;
+    }
 
     const char *outLog = (logPath != NULL && logPath[0] != '\0')
                              ? logPath
@@ -370,12 +408,10 @@ int main(void) {
 
     clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
     g_currentStage = 1;
-    trainingRunResult_t stage1Result = trainingRun(
-        model, MODEL_SIZE,
-        (lossConfig_t){
-            .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL},
-        trainLoader, valLoader, sgd1, g_stage1Epochs, calculateGradsSequential, inferenceWithLoss,
-        &(trainingRunOptions_t){.callback = epochCallback});
+    trainingRunResult_t stage1Result =
+        trainingRun(model, MODEL_SIZE, lossConfig, trainLoader, valLoader, sgd1, g_stage1Epochs,
+                    calculateGradsSequential, inferenceWithLoss,
+                    &(trainingRunOptions_t){.callback = epochCallback});
     (void)stage1Result;
 
     epochStats_t stage1TestStats = evaluationEpochWithMetrics(
@@ -444,14 +480,19 @@ int main(void) {
         return 1;
     }
 
+    if (rematSel.chosen) {
+        if (!buildStage2Remat(&remat, &rematSel, model2, lossConfig)) {
+            return 1;
+        }
+        rematCall.remat = &remat;
+    }
+
     clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
     g_currentStage = 2;
-    trainingRunResult_t stage2Result = trainingRun(
-        model2, MODEL_SIZE,
-        (lossConfig_t){
-            .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL},
-        trainLoader, valLoader, sgd2, g_stage2Epochs, calculateGradsSequential, inferenceWithLoss,
-        &(trainingRunOptions_t){.callback = epochCallback});
+    trainingRunResult_t stage2Result =
+        trainingRun(model2, MODEL_SIZE, lossConfig, trainLoader, valLoader, sgd2, g_stage2Epochs,
+                    calculateGradsSequential, inferenceWithLoss,
+                    &(trainingRunOptions_t){.callback = epochCallback, .remat = rematCall.remat});
     (void)stage2Result;
 
     epochStats_t stage2TestStats = evaluationEpochWithMetrics(
@@ -550,12 +591,11 @@ int main(void) {
     memStepCtx_t stepCtx = {
         .model = model2,
         .modelSize = MODEL_SIZE,
-        .lossConfig = (lossConfig_t){.funcType = CROSS_ENTROPY,
-                                     .backwardReduction = REDUCTION_MEAN,
-                                     .classWeights = NULL},
+        .lossConfig = lossConfig,
         .input = stepSample->item,
         .label = stepSample->label,
         .optim = sgd2,
+        .call = &rematCall,
     };
     report.stack_peak_b = memInstrumentStackPeakBytes(&stepCtx, 1u << 20);
     freeSample(stepSample);
@@ -571,5 +611,6 @@ int main(void) {
     fprintf(g_log_file, "\n}\n");
     fclose(g_log_file);
 
+    rematSchedulerDeinit(&remat);
     return status;
 }

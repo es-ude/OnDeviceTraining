@@ -100,3 +100,9 @@ uint32_t rngNextU32(rngStream_t *stream) {
     stream->state = y;
     return y;
 }
+
+/* The top 24 bits fit a float's mantissa exactly, so the result never rounds
+ * up to 1. */
+float rngNextUnitFloat(rngStream_t *stream) {
+    return (float)(rngNextU32(stream) >> 8) / 0x1p24f;
+}

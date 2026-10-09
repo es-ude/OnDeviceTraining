@@ -43,6 +43,9 @@ rngStream_t rngOpen(rngKey_t key);
  * rngNextFloatCtx's step. */
 uint32_t rngNextU32(rngStream_t *stream);
 
+/* A float in [0, 1) from the next draw: the mapping of rngNextFloatCtx. */
+float rngNextUnitFloat(rngStream_t *stream);
+
 // NOTE: not thread-safe — all functions below use module-global RNG state.
 // When multi-threading support is added, migrate to context-passing variants.
 

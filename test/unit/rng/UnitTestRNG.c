@@ -1,3 +1,5 @@
+#include <string.h>
+
 #include "RNG.h"
 #include "unity.h"
 
@@ -339,6 +341,39 @@ void testRngKeyedStreamsDoNotMoveTheGlobalStream(void) {
     TEST_ASSERT_EQUAL_UINT32(before, rngGetSeed());
 }
 
+/* ---- keyed core: rngNextUnitFloat ---- */
+
+static uint32_t floatBits(float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof bits);
+    return bits;
+}
+
+/* Today's mapping bit for bit, and in [0, 1). Unity's float compare has a
+ * tolerance, so the identity compares bit patterns. */
+void testRngNextUnitFloatIsBitIdenticalToTheGlobalMapping(void) {
+    const uint32_t states[3] = {1u, 0x929c8a01u, 0xffffffffu};
+    for (size_t k = 0; k < 3; ++k) {
+        rng32_t ctx = {.state = states[k]};
+        rngStream_t stream = rngOpen((rngKey_t){{states[k], 0u}});
+        for (size_t i = 0; i < 1000; ++i) {
+            const float expected = rngNextFloatCtx(&ctx);
+            const float actual = rngNextUnitFloat(&stream);
+            TEST_ASSERT_EQUAL_HEX32(floatBits(expected), floatBits(actual));
+            TEST_ASSERT_TRUE(actual >= 0.0f && actual < 1.0f);
+        }
+    }
+}
+
+/* The derived key of the U32 reference test; the Python mirror repeats it. */
+void testRngNextUnitFloatMatchesReferenceOnADerivedKey(void) {
+    rngStream_t stream = rngOpen((rngKey_t){{0x929c8a01u, 0xee4a7510u}});
+    TEST_ASSERT_EQUAL_HEX32(0x3ef093acu, floatBits(rngNextUnitFloat(&stream)));
+    TEST_ASSERT_EQUAL_HEX32(0x3d9c57f0u, floatBits(rngNextUnitFloat(&stream)));
+    TEST_ASSERT_EQUAL_HEX32(0x3f45b8b9u, floatBits(rngNextUnitFloat(&stream)));
+    TEST_ASSERT_EQUAL_HEX32(0x3f03a349u, floatBits(rngNextUnitFloat(&stream)));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testRngNextFloatInRange);
@@ -366,5 +401,7 @@ int main(void) {
     RUN_TEST(testRngStreamsDrawIndependently);
     RUN_TEST(testRngReopenedStreamReplaysItsValues);
     RUN_TEST(testRngKeyedStreamsDoNotMoveTheGlobalStream);
+    RUN_TEST(testRngNextUnitFloatIsBitIdenticalToTheGlobalMapping);
+    RUN_TEST(testRngNextUnitFloatMatchesReferenceOnADerivedKey);
     return UNITY_END();
 }

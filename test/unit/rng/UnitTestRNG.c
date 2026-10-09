@@ -1,5 +1,6 @@
 #include <string.h>
 
+#include "DeathTest.h"
 #include "RNG.h"
 #include "unity.h"
 
@@ -374,6 +375,78 @@ void testRngNextUnitFloatMatchesReferenceOnADerivedKey(void) {
     TEST_ASSERT_EQUAL_HEX32(0x3f03a349u, floatBits(rngNextUnitFloat(&stream)));
 }
 
+/* ---- keyed core: rngNextBounded ---- */
+
+/* Fisher-Yates with the keyed bounded draw on the stream of {seed, 0} gives
+ * the permutation of rngSetSeed(seed) + rngShuffleIndices: the same rejection
+ * rule, bias included. n <= 1000, seed != 0 (rngSetSeed aliases 0). */
+static void assertShuffleIdentity(size_t n, uint32_t seed) {
+    size_t expected[1000];
+    size_t actual[1000];
+    for (size_t i = 0; i < n; ++i) {
+        expected[i] = i;
+        actual[i] = i;
+    }
+    rngSetSeed(seed);
+    rngShuffleIndices(expected, n);
+    rngStream_t stream = rngOpen((rngKey_t){{seed, 0u}});
+    for (size_t i = n - 1; i > 0; --i) {
+        const size_t j = rngNextBounded(&stream, i + 1);
+        const size_t tmp = actual[i];
+        actual[i] = actual[j];
+        actual[j] = tmp;
+    }
+    for (size_t i = 0; i < n; ++i) {
+        TEST_ASSERT_EQUAL_size_t(expected[i], actual[i]);
+    }
+}
+
+/* 0xfc7d0b53's first draw is 0xfffffed8, exactly the rejection limit for
+ * bound 1000, so this case also checks that the limit itself is rejected. */
+void testRngNextBoundedReproducesTheGlobalShuffle(void) {
+    assertShuffleIdentity(10, 42u);
+    assertShuffleIdentity(100, 99u);
+    assertShuffleIdentity(1000, 1u);
+    assertShuffleIdentity(1000, 0xfc7d0b53u);
+}
+
+/* Bounds 10, 1000, then the smallest and the largest valid bound on one
+ * stream of a derived key; the Python mirror repeats these values. */
+void testRngNextBoundedMatchesReferenceOnADerivedKey(void) {
+    rngStream_t stream = rngOpen((rngKey_t){{0x929c8a01u, 0xee4a7510u}});
+    const size_t bounds[8] = {10, 10, 10, 10, 1000, 1000, 1, UINT32_MAX};
+    const size_t expected[8] = {7, 9, 6, 2, 485, 721, 0, 1286403703};
+    for (size_t k = 0; k < 8; ++k) {
+        TEST_ASSERT_EQUAL_size_t(expected[k], rngNextBounded(&stream, bounds[k]));
+    }
+}
+
+/* Without its exit, bound 0 is a remainder by zero and a bound above
+ * UINT32_MAX makes the rejection limit 0: either traps or never returns. The
+ * child arms the alarm, so a hang becomes a signal the parent reports. */
+static void drawWithBoundZero(void) {
+    rngStream_t stream = rngOpen((rngKey_t){{1u, 2u}});
+    alarm(5);
+    (void)rngNextBounded(&stream, 0);
+}
+
+void testRngNextBoundedExitsOnBoundZero(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "rngNextBounded: bound is 0", drawWithBoundZero());
+}
+
+#if SIZE_MAX > UINT32_MAX
+static void drawWithBoundAboveUint32Max(void) {
+    rngStream_t stream = rngOpen((rngKey_t){{1u, 2u}});
+    alarm(5);
+    (void)rngNextBounded(&stream, (size_t)UINT32_MAX + 1u);
+}
+
+void testRngNextBoundedExitsAboveUint32Max(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "rngNextBounded: bound exceeds UINT32_MAX",
+                             drawWithBoundAboveUint32Max());
+}
+#endif
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testRngNextFloatInRange);
@@ -403,5 +476,11 @@ int main(void) {
     RUN_TEST(testRngKeyedStreamsDoNotMoveTheGlobalStream);
     RUN_TEST(testRngNextUnitFloatIsBitIdenticalToTheGlobalMapping);
     RUN_TEST(testRngNextUnitFloatMatchesReferenceOnADerivedKey);
+    RUN_TEST(testRngNextBoundedReproducesTheGlobalShuffle);
+    RUN_TEST(testRngNextBoundedMatchesReferenceOnADerivedKey);
+    RUN_TEST(testRngNextBoundedExitsOnBoundZero);
+#if SIZE_MAX > UINT32_MAX
+    RUN_TEST(testRngNextBoundedExitsAboveUint32Max);
+#endif
     return UNITY_END();
 }

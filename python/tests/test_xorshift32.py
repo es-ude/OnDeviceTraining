@@ -61,6 +61,7 @@ def _compile_and_run_c_harness(n: int, seed: int, reshuffles: int = 0) -> list[i
         [
             "cc", "-std=c11", "-O0",
             f"-I{rng_inc}",
+            f"-I{REPO_ROOT / 'src' / 'common' / 'include'}",
             str(harness_src), str(rng_src),
             "-o", binary,
         ],

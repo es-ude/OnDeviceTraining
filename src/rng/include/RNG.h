@@ -46,6 +46,11 @@ uint32_t rngNextU32(rngStream_t *stream);
 /* A float in [0, 1) from the next draw: the mapping of rngNextFloatCtx. */
 float rngNextUnitFloat(rngStream_t *stream);
 
+/* A draw in [0, bound) by the rejection rule of rngShuffleIndices, so a keyed
+ * Fisher-Yates reproduces today's permutations. bound must be in
+ * [1, UINT32_MAX]; any other bound stops the program with a named error. */
+size_t rngNextBounded(rngStream_t *stream, size_t bound);
+
 // NOTE: not thread-safe — all functions below use module-global RNG state.
 // When multi-threading support is added, migrate to context-passing variants.
 

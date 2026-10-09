@@ -22,6 +22,11 @@ typedef struct rngKey {
  * change moves every keyed value, so they are fixed by known-answer tests. */
 rngKey_t rngFold(rngKey_t parent, uint32_t tag, uint32_t index);
 
+/* The root of a key tree: one Threefry block under the all-zero key over the
+ * counter (low word, high word) of the seed. Every seed, 0 included, is an
+ * ordinary seed. */
+rngKey_t rngKeyFromSeed(uint64_t seed);
+
 // NOTE: not thread-safe — all functions below use module-global RNG state.
 // When multi-threading support is added, migrate to context-passing variants.
 

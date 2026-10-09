@@ -82,3 +82,7 @@ rngKey_t rngFold(rngKey_t parent, uint32_t tag, uint32_t index) {
     }
     return (rngKey_t){{x0, x1}};
 }
+
+rngKey_t rngKeyFromSeed(uint64_t seed) {
+    return rngFold((rngKey_t){{0u, 0u}}, (uint32_t)seed, (uint32_t)(seed >> 32));
+}

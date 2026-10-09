@@ -200,6 +200,42 @@ void testRngFoldDoesNotMoveTheGlobalStream(void) {
     TEST_ASSERT_EQUAL_UINT32(before, rngGetSeed());
 }
 
+/* ---- keyed core: rngKeyFromSeed ---- */
+
+/* Seed 0 is the all-zero counter under the all-zero key, Random123's first
+ * 20-round row (credited above); 42 and 2^32 (low word 0) come from the
+ * reference implementation. */
+void testRngKeyFromSeedMatchesReference(void) {
+    assertKeyEquals(0x6b200159u, 0x99ba4efeu, rngKeyFromSeed(0u));
+    assertKeyEquals(0xa608025au, 0x0ef6f004u, rngKeyFromSeed(42u));
+    assertKeyEquals(0x375f238fu, 0xcddb151du, rngKeyFromSeed(UINT64_C(1) << 32));
+}
+
+/* The seed's low word is the tag position of the counter, its high word the
+ * index position; distinct words make a swap visible. */
+void testRngKeyFromSeedIsTheFoldOfItsSeedWords(void) {
+    const rngKey_t zero = {{0u, 0u}};
+    TEST_ASSERT_TRUE(keysEqual(rngFold(zero, 0x89abcdefu, 0x01234567u),
+                               rngKeyFromSeed(UINT64_C(0x0123456789abcdef))));
+    TEST_ASSERT_TRUE(
+        keysEqual(rngFold(zero, 0xffffffffu, 0xffffffffu), rngKeyFromSeed(UINT64_MAX)));
+}
+
+/* Unlike rngSetSeed, seed 0 is not an alias of UINT32_MAX. */
+void testRngKeyFromSeedTreatsZeroAsAnOrdinarySeed(void) {
+    TEST_ASSERT_FALSE(keysEqual(rngKeyFromSeed(0u), rngKeyFromSeed(0xFFFFFFFFu)));
+    TEST_ASSERT_FALSE(keysEqual(rngKeyFromSeed(0u), rngKeyFromSeed(1u)));
+}
+
+void testRngKeyFromSeedDoesNotMoveTheGlobalStream(void) {
+    rngSetSeed(77);
+    const uint32_t before = rngGetSeed();
+    for (uint64_t seed = 0; seed < 50u; ++seed) {
+        (void)rngKeyFromSeed(seed);
+    }
+    TEST_ASSERT_EQUAL_UINT32(before, rngGetSeed());
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testRngNextFloatInRange);
@@ -216,5 +252,9 @@ int main(void) {
     RUN_TEST(testRngFoldTwoEdgePathMatchesReference);
     RUN_TEST(testRngFoldKeysDoNotDependOnDerivationOrder);
     RUN_TEST(testRngFoldDoesNotMoveTheGlobalStream);
+    RUN_TEST(testRngKeyFromSeedMatchesReference);
+    RUN_TEST(testRngKeyFromSeedIsTheFoldOfItsSeedWords);
+    RUN_TEST(testRngKeyFromSeedTreatsZeroAsAnOrdinarySeed);
+    RUN_TEST(testRngKeyFromSeedDoesNotMoveTheGlobalStream);
     return UNITY_END();
 }

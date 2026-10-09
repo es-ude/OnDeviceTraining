@@ -86,3 +86,17 @@ rngKey_t rngFold(rngKey_t parent, uint32_t tag, uint32_t index) {
 rngKey_t rngKeyFromSeed(uint64_t seed) {
     return rngFold((rngKey_t){{0u, 0u}}, (uint32_t)seed, (uint32_t)(seed >> 32));
 }
+
+rngStream_t rngOpen(rngKey_t key) {
+    const uint32_t state = key.w[0] ? key.w[0] : (key.w[1] ? key.w[1] : 1u);
+    return (rngStream_t){state};
+}
+
+uint32_t rngNextU32(rngStream_t *stream) {
+    uint32_t y = stream->state;
+    y ^= y << 13;
+    y ^= y >> 17;
+    y ^= y << 5;
+    stream->state = y;
+    return y;
+}

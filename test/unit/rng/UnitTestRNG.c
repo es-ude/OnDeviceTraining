@@ -236,6 +236,109 @@ void testRngKeyFromSeedDoesNotMoveTheGlobalStream(void) {
     TEST_ASSERT_EQUAL_UINT32(before, rngGetSeed());
 }
 
+/* ---- keyed core: rngOpen and rngNextU32 (backend v1, keyed xorshift32) ---- */
+
+/* xorshift32 never leaves state 0, so the reduction is total and non-zero:
+ * w[0], else w[1], else 1. */
+void testRngOpenReducesTheKeyToANonZeroState(void) {
+    const rngStream_t full = rngOpen((rngKey_t){{0x929c8a01u, 0xee4a7510u}});
+    const rngStream_t lowWordZero = rngOpen((rngKey_t){{0u, 0xee4a7510u}});
+    const rngStream_t bothWordsZero = rngOpen((rngKey_t){{0u, 0u}});
+    TEST_ASSERT_EQUAL_HEX32(0x929c8a01u, full.state);
+    TEST_ASSERT_EQUAL_HEX32(0xee4a7510u, lowWordZero.state);
+    TEST_ASSERT_EQUAL_HEX32(1u, bothWordsZero.state);
+}
+
+/* Backend v1 is today's generator on a keyed state: from state 1 the first
+ * draws are the known xorshift32 vectors, and from any state s each draw is
+ * the state that the global step leaves in an rng32_t holding s. */
+void testRngNextU32ReproducesTheGlobalGenerator(void) {
+    rngStream_t one = rngOpen((rngKey_t){{1u, 0xdeadbeefu}});
+    TEST_ASSERT_EQUAL_UINT32(270369u, rngNextU32(&one));
+    TEST_ASSERT_EQUAL_UINT32(67634689u, rngNextU32(&one));
+    TEST_ASSERT_EQUAL_UINT32(2647435461u, rngNextU32(&one));
+    TEST_ASSERT_EQUAL_UINT32(307599695u, rngNextU32(&one));
+    const uint32_t states[4] = {1u, 42u, 0x9e3779b9u, 0xffffffffu};
+    for (size_t k = 0; k < 4; ++k) {
+        rng32_t ctx = {.state = states[k]};
+        rngStream_t stream = rngOpen((rngKey_t){{states[k], 0u}});
+        for (size_t i = 0; i < 100; ++i) {
+            (void)rngNextFloatCtx(&ctx);
+            TEST_ASSERT_EQUAL_HEX32(ctx.state, rngNextU32(&stream));
+        }
+    }
+}
+
+/* A derived key's stream end to end; the Python mirror repeats these values. */
+void testRngNextU32MatchesReferenceOnADerivedKey(void) {
+    const rngKey_t key = rngFold(rngFold(rngKeyFromSeed(42u), 7u, 0u), 3u, 5u);
+    assertKeyEquals(0x929c8a01u, 0xee4a7510u, key);
+    rngStream_t stream = rngOpen(key);
+    TEST_ASSERT_EQUAL_HEX32(0x7849d60fu, rngNextU32(&stream));
+    TEST_ASSERT_EQUAL_HEX32(0x138afe2bu, rngNextU32(&stream));
+    TEST_ASSERT_EQUAL_HEX32(0xc5b8b98cu, rngNextU32(&stream));
+    TEST_ASSERT_EQUAL_HEX32(0x83a349c8u, rngNextU32(&stream));
+}
+
+void testRngOpenedZeroKeysNeverStickAtZero(void) {
+    const rngKey_t keys[2] = {{{0u, 0xee4a7510u}}, {{0u, 0u}}};
+    for (size_t k = 0; k < 2; ++k) {
+        rngStream_t stream = rngOpen(keys[k]);
+        for (size_t i = 0; i < 100; ++i) {
+            TEST_ASSERT_NOT_EQUAL_UINT32(0u, rngNextU32(&stream));
+        }
+    }
+}
+
+/* Drawing from stream A between the draws of stream B leaves B's values
+ * unchanged: a stream's state lives in its caller's struct only. */
+void testRngStreamsDrawIndependently(void) {
+    const rngKey_t keyA = rngFold(rngKeyFromSeed(1u), 7u, 0u);
+    const rngKey_t keyB = rngFold(rngKeyFromSeed(1u), 7u, 1u);
+    uint32_t alone[50];
+    rngStream_t b = rngOpen(keyB);
+    for (size_t i = 0; i < 50; ++i) {
+        alone[i] = rngNextU32(&b);
+    }
+    rngStream_t a = rngOpen(keyA);
+    b = rngOpen(keyB);
+    for (size_t i = 0; i < 50; ++i) {
+        (void)rngNextU32(&a);
+        (void)rngNextU32(&a);
+        TEST_ASSERT_EQUAL_HEX32(alone[i], rngNextU32(&b));
+    }
+}
+
+/* Reopening a key replays its stream and a copied stream continues
+ * identically: a recompute reopens the key of the first computation. */
+void testRngReopenedStreamReplaysItsValues(void) {
+    const rngKey_t key = rngFold(rngKeyFromSeed(3u), 7u, 2u);
+    uint32_t drawn[20];
+    rngStream_t first = rngOpen(key);
+    for (size_t i = 0; i < 20; ++i) {
+        drawn[i] = rngNextU32(&first);
+    }
+    rngStream_t again = rngOpen(key);
+    for (size_t i = 0; i < 10; ++i) {
+        TEST_ASSERT_EQUAL_HEX32(drawn[i], rngNextU32(&again));
+    }
+    rngStream_t copy = again;
+    for (size_t i = 10; i < 20; ++i) {
+        TEST_ASSERT_EQUAL_HEX32(drawn[i], rngNextU32(&copy));
+        TEST_ASSERT_EQUAL_HEX32(drawn[i], rngNextU32(&again));
+    }
+}
+
+void testRngKeyedStreamsDoNotMoveTheGlobalStream(void) {
+    rngSetSeed(77);
+    const uint32_t before = rngGetSeed();
+    rngStream_t stream = rngOpen(rngKeyFromSeed(5u));
+    for (size_t i = 0; i < 50; ++i) {
+        (void)rngNextU32(&stream);
+    }
+    TEST_ASSERT_EQUAL_UINT32(before, rngGetSeed());
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testRngNextFloatInRange);
@@ -256,5 +359,12 @@ int main(void) {
     RUN_TEST(testRngKeyFromSeedIsTheFoldOfItsSeedWords);
     RUN_TEST(testRngKeyFromSeedTreatsZeroAsAnOrdinarySeed);
     RUN_TEST(testRngKeyFromSeedDoesNotMoveTheGlobalStream);
+    RUN_TEST(testRngOpenReducesTheKeyToANonZeroState);
+    RUN_TEST(testRngNextU32ReproducesTheGlobalGenerator);
+    RUN_TEST(testRngNextU32MatchesReferenceOnADerivedKey);
+    RUN_TEST(testRngOpenedZeroKeysNeverStickAtZero);
+    RUN_TEST(testRngStreamsDrawIndependently);
+    RUN_TEST(testRngReopenedStreamReplaysItsValues);
+    RUN_TEST(testRngKeyedStreamsDoNotMoveTheGlobalStream);
     return UNITY_END();
 }

@@ -27,6 +27,22 @@ rngKey_t rngFold(rngKey_t parent, uint32_t tag, uint32_t index);
  * ordinary seed. */
 rngKey_t rngKeyFromSeed(uint64_t seed);
 
+/* The draws under one key. Owned by its caller, usually on the stack of the op
+ * that draws. Backend v1: keyed xorshift32, today's draw math. Start a stream
+ * with rngOpen only: a hand-set state 0 would draw 0 forever. */
+typedef struct rngStream {
+    uint32_t state;
+} rngStream_t;
+
+/* v1 keeps one key word as the state: w[0], else w[1], else 1 (state 0 would
+ * stick). Reopening a key replays its stream, which is how a recompute gets
+ * the values of the first computation. */
+rngStream_t rngOpen(rngKey_t key);
+
+/* The next draw: one xorshift32 step (shifts 13, 17, 5), the math of
+ * rngNextFloatCtx's step. */
+uint32_t rngNextU32(rngStream_t *stream);
+
 // NOTE: not thread-safe — all functions below use module-global RNG state.
 // When multi-threading support is added, migrate to context-passing variants.
 

@@ -115,6 +115,91 @@ void testRngNextFloatCtxDoesNotTouchGlobalStream(void) {
     TEST_ASSERT_EQUAL_UINT32(before, rngGetSeed());
 }
 
+/* ---- keyed core: rngFold ---- */
+
+static void assertKeyEquals(uint32_t w0, uint32_t w1, rngKey_t key) {
+    TEST_ASSERT_EQUAL_HEX32(w0, key.w[0]);
+    TEST_ASSERT_EQUAL_HEX32(w1, key.w[1]);
+}
+
+static int keysEqual(rngKey_t a, rngKey_t b) {
+    return a.w[0] == b.w[0] && a.w[1] == b.w[1];
+}
+
+/* Threefry-2x32 known answers at 20 rounds, read as
+ * rngFold({KEY0, KEY1}, CTR0, CTR1) == {OUT0, OUT1}. Source: tests/kat_vectors of
+ * https://github.com/DEShawResearch/random123 at commit 9545ff64
+ * (Random123, Copyright 2010-2011 D. E. Shaw Research, BSD-3-Clause). */
+void testRngFoldMatchesThreefryKnownAnswers(void) {
+    assertKeyEquals(0x6b200159u, 0x99ba4efeu,
+                    rngFold((rngKey_t){{0x00000000u, 0x00000000u}}, 0x00000000u, 0x00000000u));
+    assertKeyEquals(0x1cb996fcu, 0xbb002be7u,
+                    rngFold((rngKey_t){{0xffffffffu, 0xffffffffu}}, 0xffffffffu, 0xffffffffu));
+    /* The only row whose words all differ: it fixes which input word is the
+     * tag, which the index, and which key word comes first. */
+    assertKeyEquals(0xc4923a9cu, 0x483df7a0u,
+                    rngFold((rngKey_t){{0x13198a2eu, 0x03707344u}}, 0x243f6a88u, 0x85a308d3u));
+}
+
+void testRngFoldIsNotSymmetricInTagAndIndex(void) {
+    const rngKey_t parent = {{0x13198a2eu, 0x03707344u}};
+    TEST_ASSERT_FALSE(keysEqual(rngFold(parent, 7u, 42u), rngFold(parent, 42u, 7u)));
+}
+
+/* Siblings that differ in the tag only or in the index only are different
+ * nodes: 8 tags x 8 indices give 64 pairwise distinct children. */
+void testRngFoldDistinctEdgesGiveDistinctKeys(void) {
+    const rngKey_t parent = {{0x13198a2eu, 0x03707344u}};
+    rngKey_t child[64];
+    for (uint32_t tag = 1u; tag <= 8u; ++tag) {
+        for (uint32_t index = 0u; index < 8u; ++index) {
+            child[(tag - 1u) * 8u + index] = rngFold(parent, tag, index);
+        }
+    }
+    for (size_t a = 0; a < 64; ++a) {
+        for (size_t b = a + 1; b < 64; ++b) {
+            TEST_ASSERT_FALSE(keysEqual(child[a], child[b]));
+        }
+    }
+}
+
+/* A two-edge path is the nested fold; the values come from an independent
+ * implementation of the published algorithm (the Python mirror repeats them). */
+void testRngFoldTwoEdgePathMatchesReference(void) {
+    const rngKey_t first = rngFold((rngKey_t){{0x13198a2eu, 0x03707344u}}, 7u, 0u);
+    assertKeyEquals(0x627945fdu, 0xa1f54519u, first);
+    assertKeyEquals(0x2b6fc7a8u, 0x5d69d71du, rngFold(first, 3u, 5u));
+}
+
+/* A key depends on its path only, never on which keys were derived before
+ * it: three two-edge paths, derived path by path and interleaved. */
+void testRngFoldKeysDoNotDependOnDerivationOrder(void) {
+    const rngKey_t root = {{0x13198a2eu, 0x03707344u}};
+    const rngKey_t a1 = rngFold(rngFold(root, 7u, 1u), 9u, 2u);
+    const rngKey_t b1 = rngFold(rngFold(root, 7u, 1u), 9u, 3u);
+    const rngKey_t c1 = rngFold(rngFold(root, 8u, 0u), 5u, 5u);
+    const rngKey_t mid7 = rngFold(root, 7u, 1u);
+    const rngKey_t mid8 = rngFold(root, 8u, 0u);
+    const rngKey_t c2 = rngFold(mid8, 5u, 5u);
+    const rngKey_t b2 = rngFold(mid7, 9u, 3u);
+    const rngKey_t a2 = rngFold(mid7, 9u, 2u);
+    TEST_ASSERT_TRUE(keysEqual(a1, a2));
+    TEST_ASSERT_TRUE(keysEqual(b1, b2));
+    TEST_ASSERT_TRUE(keysEqual(c1, c2));
+}
+
+/* The keyed core keeps no module state: deriving keys never moves the global
+ * stream that the not yet migrated consumers draw from. */
+void testRngFoldDoesNotMoveTheGlobalStream(void) {
+    rngSetSeed(77);
+    const uint32_t before = rngGetSeed();
+    rngKey_t key = {{1u, 2u}};
+    for (uint32_t i = 0; i < 50u; ++i) {
+        key = rngFold(rngFold(key, 7u, i), 3u, i);
+    }
+    TEST_ASSERT_EQUAL_UINT32(before, rngGetSeed());
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testRngNextFloatInRange);
@@ -125,5 +210,11 @@ int main(void) {
     RUN_TEST(testRngNextFloatCtxReproducible);
     RUN_TEST(testRngNextFloatCtxMatchesGlobalStream);
     RUN_TEST(testRngNextFloatCtxDoesNotTouchGlobalStream);
+    RUN_TEST(testRngFoldMatchesThreefryKnownAnswers);
+    RUN_TEST(testRngFoldIsNotSymmetricInTagAndIndex);
+    RUN_TEST(testRngFoldDistinctEdgesGiveDistinctKeys);
+    RUN_TEST(testRngFoldTwoEdgePathMatchesReference);
+    RUN_TEST(testRngFoldKeysDoNotDependOnDerivationOrder);
+    RUN_TEST(testRngFoldDoesNotMoveTheGlobalStream);
     return UNITY_END();
 }

@@ -56,3 +56,29 @@ float rngNextFloatCtx(rng32_t *rngCtx) {
 float rngNextFloat(void) {
     return rngNextFloatCtx(&rng);
 }
+
+/* Threefry-2x32 rotation constants; round i uses entry i % 8. */
+static const unsigned threefryRotations[8] = {13, 15, 26, 6, 17, 29, 16, 24};
+
+static uint32_t rotateLeft32(uint32_t x, unsigned r) {
+    return (x << r) | (x >> (32u - r));
+}
+
+/* Add, rotate and xor only: no multiplier, which the M0+ lacks for the high
+ * half. 20 rounds is Random123's default; 0x1BD11BDA is Threefry's key-schedule
+ * parity constant. */
+rngKey_t rngFold(rngKey_t parent, uint32_t tag, uint32_t index) {
+    const uint32_t ks[3] = {parent.w[0], parent.w[1], parent.w[0] ^ parent.w[1] ^ 0x1BD11BDAu};
+    uint32_t x0 = tag + ks[0];
+    uint32_t x1 = index + ks[1];
+    for (unsigned step = 0; step < 20u; ++step) {
+        x0 += x1;
+        x1 = rotateLeft32(x1, threefryRotations[step % 8u]) ^ x0;
+        if (step % 4u == 3u) {
+            const unsigned injection = (step + 1u) / 4u;
+            x0 += ks[injection % 3u];
+            x1 += ks[(injection + 1u) % 3u] + injection;
+        }
+    }
+    return (rngKey_t){{x0, x1}};
+}

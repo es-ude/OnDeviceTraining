@@ -553,7 +553,11 @@ checkpointing, limitations, literature).
   and CI-verified. Drives weight init, the Dropout Bernoulli mask (swappable fill hook),
   and DataLoader shuffle. A context-passing variant (`rng32_t` + `rngNextFloatCtx`,
   same draw math on caller-owned state) serves streams that must not perturb the
-  global one — PPCA/exemplar replay sampling.
+  global one — PPCA/exemplar replay sampling. A keyed, order-independent core also
+  exists (`rngKeyFromSeed`, `rngFold` = one Threefry-2x32-20 block per key-tree edge,
+  `rngOpen` with `rngNextU32`/`rngNextUnitFloat`/`rngNextBounded` on a keyed xorshift32
+  state; mirrored in `examples/_shared/keyed_rng.py`); nothing uses it yet, consumers
+  move to it in later steps.
 - **Observer / trace** — `traceSink_t` callback facility (not a layer) that hands
   fwd/activation-grad/loss-grad/param tensors to a caller-supplied sink; used for
   layer-by-layer C-vs-PyTorch parity debugging (`npyDumpSink`, kws_raw harness).

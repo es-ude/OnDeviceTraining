@@ -157,14 +157,14 @@ static void softmaxValuesBfp(const tensor_t *input, bfpShiftRounding_t mode, flo
      * (ei > eMax) -- such elements take an EXACT saturating LEFT shift. */
     const int32_t sigma = eMax + BFP_SOFTMAX_EXP_FRAC_BITS;
     const uint32_t down = (sigma < 0) ? (uint32_t)(-sigma) : 0u;
-    const int32_t mMaxW = bfpShiftRightRounded(mMax, down, mode);
+    const int32_t mMaxW = bfpShiftRightRounded(mMax, down, mode, NULL);
     float sum = 0.f;
     for (size_t i = 0; i < n; i++) {
         const int32_t ei = (int32_t)qC->exponents[bfpGroupOf(qC, i)] - bias;
         const int32_t si = (eMax - ei) + (int32_t)down;
         int32_t aligned;
         if (si >= 0) {
-            aligned = bfpShiftRightRounded(m[i], (uint32_t)si, mode);
+            aligned = bfpShiftRightRounded(m[i], (uint32_t)si, mode, NULL);
         } else {
             const uint32_t up = (uint32_t)(-si);
             if (m[i] < 0 && (up >= 31u || m[i] < -(INT32_MAX >> up))) {
@@ -217,7 +217,7 @@ static void softmaxValuesBfp(const tensor_t *input, bfpShiftRounding_t mode, flo
         }
         /* (4) Integer core (lossy site 3 is the >>z inside); (5) float
          * boundary (P6-5): S_out = A * 2^-28, float sum in index order. */
-        const int32_t qe = bfpIExpQ(qW, mode);
+        const int32_t qe = bfpIExpQ(qW, mode, NULL);
         const float e = ldexpf((float)qe * BFP_SOFTMAX_A, -28);
         sOut[i] = e;
         sum += e;

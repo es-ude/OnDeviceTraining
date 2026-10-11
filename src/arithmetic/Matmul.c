@@ -285,8 +285,8 @@ void matmulSymInt32TensorsWithBias(tensor_t *aTensor, tensor_t *bTensor, tensor_
         int32_t seed[bColumns];
         for (size_t c = 0; c < bColumns; c++) {
             int32_t biasIntC = readBytesAsInt32(&bias->data[c * sizeof(int32_t)]);
-            seed[c] =
-                rescaleIntoAccumulatorScale(biasIntC, biasScale, outputScale, biasQC->roundingMode);
+            seed[c] = rescaleIntoAccumulatorScale(biasIntC, biasScale, outputScale,
+                                                  biasQC->roundingMode, NULL);
         }
         matmulIntCore(aTensor, bTensor, outputTensor, seed);
     }
@@ -366,7 +366,7 @@ static void matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor_t 
                          * mode — never hardcoded). */
                         acc += rescaleIntoAccumulatorScale(
                             partial, aScale * weightGroups->scales[currentGroup], sAcc,
-                            roundingMode);
+                            roundingMode, NULL);
                         partial = 0;
                     }
                     currentGroup = g;
@@ -392,7 +392,7 @@ static void matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor_t 
              * their ONLY combine. */
             if (currentGroup != SIZE_MAX) {
                 acc += rescaleIntoAccumulatorScale(
-                    partial, aScale * weightGroups->scales[currentGroup], sAcc, roundingMode);
+                    partial, aScale * weightGroups->scales[currentGroup], sAcc, roundingMode, NULL);
             }
 
             size_t outputByteIndex = resultCounter * sizeof(int32_t);
@@ -462,8 +462,8 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
         symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
         for (size_t c = 0; c < bColumns; c++) {
             int32_t biasIntC = readBytesAsInt32(&bias->data[c * sizeof(int32_t)]);
-            seedBuf[c] =
-                rescaleIntoAccumulatorScale(biasIntC, biasQC->scale, sAcc, biasQC->roundingMode);
+            seedBuf[c] = rescaleIntoAccumulatorScale(biasIntC, biasQC->scale, sAcc,
+                                                     biasQC->roundingMode, NULL);
         }
         seedPtr = seedBuf;
     }

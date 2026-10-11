@@ -277,7 +277,7 @@ void varianceBiasedOverTrailingAxesSymInt32(tensor_t *in, size_t k, tensor_t *me
     }
 }
 
-void rsqrtSymInt32(tensor_t *in, float eps, tensor_t *out) {
+void rsqrtSymInt32(tensor_t *in, float eps, tensor_t *out, rngStream_t *rs) {
     reduceValidateSymOperand(in, "input");
     reduceValidateSymRequantTarget(out, "output");
     size_t n = calcNumberOfElementsByTensor(in);
@@ -308,8 +308,8 @@ void rsqrtSymInt32(tensor_t *in, float eps, tensor_t *out) {
     outQC->scale = scale;
     for (size_t i = 0; i < n; i++) {
         float r = rsqrtFloat32(mulFloat32s((float)qIn[i], sIn), eps);
-        qOut[i] = clampInt32(roundByMode(divFloat32s(r, scale), outQC->roundingMode), (int32_t)qMin,
-                             (int32_t)qMax);
+        qOut[i] = clampInt32(roundByMode(divFloat32s(r, scale), outQC->roundingMode, rs),
+                             (int32_t)qMin, (int32_t)qMax);
     }
 }
 

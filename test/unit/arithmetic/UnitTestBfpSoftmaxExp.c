@@ -37,13 +37,13 @@ void testShiftTruncVectors() {
             snprintf(msg, sizeof msg, "v=%d k=%u", (int)kShiftV[i], (unsigned)kShiftK[j]);
             TEST_ASSERT_EQUAL_INT32_MESSAGE(
                 kShiftTruncExpected[i][j],
-                bfpShiftRightRounded(kShiftV[i], kShiftK[j], BFP_SHIFT_TRUNC), msg);
+                bfpShiftRightRounded(kShiftV[i], kShiftK[j], BFP_SHIFT_TRUNC, NULL), msg);
         }
         /* k >= 31 clamps to 31 (column SHIFT_NUM_K-1 is k=31) */
         TEST_ASSERT_EQUAL_INT32(kShiftTruncExpected[i][SHIFT_NUM_K - 1],
-                                bfpShiftRightRounded(kShiftV[i], 32u, BFP_SHIFT_TRUNC));
+                                bfpShiftRightRounded(kShiftV[i], 32u, BFP_SHIFT_TRUNC, NULL));
         TEST_ASSERT_EQUAL_INT32(kShiftTruncExpected[i][SHIFT_NUM_K - 1],
-                                bfpShiftRightRounded(kShiftV[i], 100u, BFP_SHIFT_TRUNC));
+                                bfpShiftRightRounded(kShiftV[i], 100u, BFP_SHIFT_TRUNC, NULL));
     }
 }
 
@@ -54,12 +54,12 @@ void testShiftHalfAwayVectors() {
             snprintf(msg, sizeof msg, "v=%d k=%u", (int)kShiftV[i], (unsigned)kShiftK[j]);
             TEST_ASSERT_EQUAL_INT32_MESSAGE(
                 kShiftHalfAwayExpected[i][j],
-                bfpShiftRightRounded(kShiftV[i], kShiftK[j], BFP_SHIFT_HALF_AWAY), msg);
+                bfpShiftRightRounded(kShiftV[i], kShiftK[j], BFP_SHIFT_HALF_AWAY, NULL), msg);
         }
         TEST_ASSERT_EQUAL_INT32(kShiftHalfAwayExpected[i][SHIFT_NUM_K - 1],
-                                bfpShiftRightRounded(kShiftV[i], 32u, BFP_SHIFT_HALF_AWAY));
+                                bfpShiftRightRounded(kShiftV[i], 32u, BFP_SHIFT_HALF_AWAY, NULL));
         TEST_ASSERT_EQUAL_INT32(kShiftHalfAwayExpected[i][SHIFT_NUM_K - 1],
-                                bfpShiftRightRounded(kShiftV[i], 100u, BFP_SHIFT_HALF_AWAY));
+                                bfpShiftRightRounded(kShiftV[i], 100u, BFP_SHIFT_HALF_AWAY, NULL));
     }
 }
 
@@ -74,7 +74,8 @@ void testShiftSrExactWhenRemainderZero() {
         for (size_t j = 0; j < sizeof ks / sizeof ks[0]; j++) {
             const int32_t v = base[b] * (int32_t)(1u << ks[j]);
             for (int rep = 0; rep < 10; rep++) {
-                TEST_ASSERT_EQUAL_INT32(base[b], bfpShiftRightRounded(v, ks[j], BFP_SHIFT_SR));
+                TEST_ASSERT_EQUAL_INT32(base[b],
+                                        bfpShiftRightRounded(v, ks[j], BFP_SHIFT_SR, NULL));
             }
         }
     }
@@ -97,7 +98,7 @@ void testShiftSrBracketsFloor() {
         int sawFloor = 0;
         int sawFloorPlusOne = 0;
         for (int draw = 0; draw < 100; draw++) {
-            const int32_t r = bfpShiftRightRounded(cases[c].v, cases[c].k, BFP_SHIFT_SR);
+            const int32_t r = bfpShiftRightRounded(cases[c].v, cases[c].k, BFP_SHIFT_SR, NULL);
             if (r == cases[c].floorQ) {
                 sawFloor++;
             } else if (r == cases[c].floorQ + 1) {
@@ -116,13 +117,13 @@ void testShiftSrSeededDeterminism() {
     int32_t second[32];
     rngSetSeed(77u);
     for (int i = 0; i < 32; i++) {
-        first[i] =
-            bfpShiftRightRounded(kShiftV[i % SHIFT_NUM_V], kShiftK[1 + (i % 4)], BFP_SHIFT_SR);
+        first[i] = bfpShiftRightRounded(kShiftV[i % SHIFT_NUM_V], kShiftK[1 + (i % 4)],
+                                        BFP_SHIFT_SR, NULL);
     }
     rngSetSeed(77u);
     for (int i = 0; i < 32; i++) {
-        second[i] =
-            bfpShiftRightRounded(kShiftV[i % SHIFT_NUM_V], kShiftK[1 + (i % 4)], BFP_SHIFT_SR);
+        second[i] = bfpShiftRightRounded(kShiftV[i % SHIFT_NUM_V], kShiftK[1 + (i % 4)],
+                                         BFP_SHIFT_SR, NULL);
     }
     TEST_ASSERT_EQUAL_INT32_ARRAY(first, second, 32);
 }
@@ -132,7 +133,7 @@ void testIExpVectorsTrunc() {
     for (int i = 0; i < IEXP_NUM_QW; i++) {
         snprintf(msg, sizeof msg, "qW=%ld", (long)kIExpQw[i]);
         TEST_ASSERT_EQUAL_INT32_MESSAGE(kIExpTruncExpected[i],
-                                        bfpIExpQ(kIExpQw[i], BFP_SHIFT_TRUNC), msg);
+                                        bfpIExpQ(kIExpQw[i], BFP_SHIFT_TRUNC, NULL), msg);
     }
 }
 
@@ -141,7 +142,7 @@ void testIExpVectorsHalfAway() {
     for (int i = 0; i < IEXP_NUM_QW; i++) {
         snprintf(msg, sizeof msg, "qW=%ld", (long)kIExpQw[i]);
         TEST_ASSERT_EQUAL_INT32_MESSAGE(kIExpHalfAwayExpected[i],
-                                        bfpIExpQ(kIExpQw[i], BFP_SHIFT_HALF_AWAY), msg);
+                                        bfpIExpQ(kIExpQw[i], BFP_SHIFT_HALF_AWAY, NULL), msg);
     }
 }
 
@@ -155,7 +156,7 @@ void testIExpUnderflowFloorIsExactZero() {
         for (size_t m = 0; m < sizeof modes / sizeof modes[0]; m++) {
             rngSetSeed(42u);
             for (int rep = 0; rep < 32; rep++) {
-                TEST_ASSERT_EQUAL_INT32(0, bfpIExpQ(inputs[i], modes[m]));
+                TEST_ASSERT_EQUAL_INT32(0, bfpIExpQ(inputs[i], modes[m], NULL));
             }
             TEST_ASSERT_EQUAL_UINT32(42u, rngGetSeed());
         }
@@ -169,7 +170,7 @@ void testIExpUnderflowFloorIsExactZero() {
 void testIExpAccuracyEnvelope() {
     char msg[96];
     for (int i = 0; i < IEXP_ACC_N; i++) {
-        const int32_t q = bfpIExpQ(kIExpAccQw[i], BFP_SHIFT_TRUNC);
+        const int32_t q = bfpIExpQ(kIExpAccQw[i], BFP_SHIFT_TRUNC, NULL);
         snprintf(msg, sizeof msg, "x=%f", kIExpAccX[i]);
         TEST_ASSERT_EQUAL_INT32_MESSAGE(kIExpAccTruncExpected[i], q, msg);
 
@@ -179,6 +180,16 @@ void testIExpAccuracyEnvelope() {
         const double gap = fabs((double)value - exp(kIExpAccX[i]));
         snprintf(msg, sizeof msg, "x=%f gap=%e", kIExpAccX[i], gap);
         TEST_ASSERT_TRUE_MESSAGE(gap < 2.5e-3, msg);
+    }
+}
+
+/* A shift by 0 draws nothing in any mode, so it needs no stream: even in SR mode
+ * with a NULL stream it returns v unchanged. */
+void testShiftByZeroNeedsNoStreamInAnyMode() {
+    static const bfpShiftRounding_t modes[] = {BFP_SHIFT_TRUNC, BFP_SHIFT_HALF_AWAY, BFP_SHIFT_SR};
+    for (size_t m = 0; m < sizeof modes / sizeof modes[0]; m++) {
+        TEST_ASSERT_EQUAL_INT32(12345, bfpShiftRightRounded(12345, 0u, modes[m], NULL));
+        TEST_ASSERT_EQUAL_INT32(-7, bfpShiftRightRounded(-7, 0u, modes[m], NULL));
     }
 }
 
@@ -197,5 +208,6 @@ int main(void) {
     RUN_TEST(testIExpVectorsHalfAway);
     RUN_TEST(testIExpUnderflowFloorIsExactZero);
     RUN_TEST(testIExpAccuracyEnvelope);
+    RUN_TEST(testShiftByZeroNeedsNoStreamInAnyMode);
     return UNITY_END();
 }

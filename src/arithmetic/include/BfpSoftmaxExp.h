@@ -26,6 +26,10 @@ typedef enum bfpShiftRounding {
     BFP_SHIFT_SR,        /* floor + Bernoulli(remainder / 2^k), one rngNextFloat() draw       */
 } bfpShiftRounding_t;
 
+/* Pointer-only use: the identical typedef lives in RNG.h (C11 allows the
+ * repetition), so this header needs no RNG include path. */
+typedef struct rngStream rngStream_t;
+
 /*! @brief Rounded arithmetic right shift v / 2^k in one of three modes.
  *
  * k == 0 returns v unchanged (no RNG draw). k >= 31 is clamped to 31
@@ -34,7 +38,7 @@ typedef enum bfpShiftRounding {
  * with k > 0, and a zero remainder never increments (exact shifts stay
  * exact under SR). HALF_AWAY requires |v| ≤ 2^30 (holds at every call
  * site) so the magnitude add cannot overflow. */
-int32_t bfpShiftRightRounded(int32_t v, uint32_t k, bfpShiftRounding_t mode);
+int32_t bfpShiftRightRounded(int32_t v, uint32_t k, bfpShiftRounding_t mode, rngStream_t *rs);
 
 /*! @brief Integer exponential on the 2^-F work grid.
  *
@@ -42,6 +46,6 @@ int32_t bfpShiftRightRounded(int32_t v, uint32_t k, bfpShiftRounding_t mode);
  * i.e. exp(qW * 2^-F) ≈ q_e * 0.3585 * 2^-28. qW ≤ BFP_SOFTMAX_QFLOOR is
  * an exact 0 (exp underflow; also keeps z ≤ ZMAX and skips the RNG in SR
  * mode). `mode` picks the rounding of the final >> z renormalization. */
-int32_t bfpIExpQ(int32_t qW, bfpShiftRounding_t mode);
+int32_t bfpIExpQ(int32_t qW, bfpShiftRounding_t mode, rngStream_t *rs);
 
 #endif // BFP_SOFTMAX_EXP_H

@@ -39,7 +39,7 @@ void testReferenceRateApproxProbTrue(void) {
     tensor_t *mask = buildBoolTensor(n);
     rngSetSeed(12345u);
 
-    bernoulliFillMask(mask, 0.3f);
+    bernoulliFillMask(mask, 0.3f, NULL);
     size_t set = countSetBits(mask, n);
 
     freeTensor(mask);
@@ -53,7 +53,7 @@ void testReferenceEdgeAllZero(void) {
     tensor_t *mask = buildBoolTensor(n);
     rngSetSeed(1u);
 
-    bernoulliFillMask(mask, 0.0f);
+    bernoulliFillMask(mask, 0.0f, NULL);
     size_t set = countSetBits(mask, n);
 
     freeTensor(mask);
@@ -65,7 +65,7 @@ void testReferenceEdgeAllOne(void) {
     tensor_t *mask = buildBoolTensor(n);
     rngSetSeed(1u);
 
-    bernoulliFillMask(mask, 1.0f);
+    bernoulliFillMask(mask, 1.0f, NULL);
     size_t set = countSetBits(mask, n);
 
     freeTensor(mask);
@@ -78,9 +78,9 @@ void testDeterministicUnderSameSeed(void) {
     tensor_t *b = buildBoolTensor(n);
 
     rngSetSeed(999u);
-    bernoulliFillMask(a, 0.5f);
+    bernoulliFillMask(a, 0.5f, NULL);
     rngSetSeed(999u);
-    bernoulliFillMask(b, 0.5f);
+    bernoulliFillMask(b, 0.5f, NULL);
 
     bool identical = true;
     for (size_t i = 0; i < n; i++) {
@@ -95,8 +95,9 @@ void testDeterministicUnderSameSeed(void) {
     TEST_ASSERT_TRUE(identical);
 }
 
-static void stubFillAllSet(tensor_t *mask, float probTrue) {
+static void stubFillAllSet(tensor_t *mask, float probTrue, rngStream_t *rs) {
     (void)probTrue;
+    (void)rs;
     size_t n = calcNumberOfElementsByTensor(mask);
     for (size_t i = 0; i < n; i++) {
         tensorBoolSet(mask, i, true);
@@ -111,7 +112,7 @@ void testSwapMechanismInstallsAndRestores(void) {
     bernoulliSetFillMaskFn(stubFillAllSet);
 
     bool active = (bernoulliGetFillMaskFn() == stubFillAllSet);
-    bernoulliFillMask(mask, 0.0f); // probTrue 0 but stub ignores it → all set
+    bernoulliFillMask(mask, 0.0f, NULL); // probTrue 0 but stub ignores it → all set
     size_t setAfterStub = countSetBits(mask, n);
 
     bernoulliSetFillMaskFn(saved);
@@ -123,6 +124,33 @@ void testSwapMechanismInstallsAndRestores(void) {
     TEST_ASSERT_TRUE(restored);
 }
 
+static rngStream_t *recordedStream;
+static float recordedProbTrue;
+
+static void recordingFill(tensor_t *mask, float probTrue, rngStream_t *rs) {
+    (void)mask;
+    recordedProbTrue = probTrue;
+    recordedStream = rs;
+}
+
+/* The dispatcher hands its caller's stream to the installed sampler unchanged:
+ * the stream is the only randomness an installed sampler may use. */
+void testFillMaskHandsTheStreamToTheInstalledSampler(void) {
+    tensor_t *mask = buildBoolTensor(8);
+    rngStream_t stream = rngOpen(rngKeyFromSeed(1u));
+    bernoulliFillMaskFn_t saved = bernoulliGetFillMaskFn();
+    bernoulliSetFillMaskFn(recordingFill);
+    recordedStream = NULL;
+    recordedProbTrue = -1.0f;
+
+    bernoulliFillMask(mask, 0.25f, &stream);
+
+    bernoulliSetFillMaskFn(saved);
+    freeTensor(mask);
+    TEST_ASSERT_EQUAL_PTR(&stream, recordedStream);
+    TEST_ASSERT_EQUAL_FLOAT(0.25f, recordedProbTrue);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testReferenceRateApproxProbTrue);
@@ -130,5 +158,6 @@ int main(void) {
     RUN_TEST(testReferenceEdgeAllOne);
     RUN_TEST(testDeterministicUnderSameSeed);
     RUN_TEST(testSwapMechanismInstallsAndRestores);
+    RUN_TEST(testFillMaskHandsTheStreamToTheInstalledSampler);
     return UNITY_END();
 }

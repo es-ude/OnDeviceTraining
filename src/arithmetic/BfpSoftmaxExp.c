@@ -5,7 +5,7 @@
 #include "Common.h"
 #include "RNG.h"
 
-int32_t bfpShiftRightRounded(int32_t v, uint32_t k, bfpShiftRounding_t mode) {
+int32_t bfpShiftRightRounded(int32_t v, uint32_t k, bfpShiftRounding_t mode, rngStream_t *rs) {
     if (k == 0) {
         return v;
     }
@@ -35,7 +35,7 @@ int32_t bfpShiftRightRounded(int32_t v, uint32_t k, bfpShiftRounding_t mode) {
     return 0;
 }
 
-int32_t bfpIExpQ(int32_t qW, bfpShiftRounding_t mode) {
+int32_t bfpIExpQ(int32_t qW, bfpShiftRounding_t mode, rngStream_t *rs) {
     if (qW <= BFP_SOFTMAX_QFLOOR) {
         return 0; /* exp underflow: exact 0, no RNG draw */
     }
@@ -43,5 +43,5 @@ int32_t bfpIExpQ(int32_t qW, bfpShiftRounding_t mode) {
     const int32_t qp = qW + z * BFP_SOFTMAX_QLN2; /* in (-QLN2, 0] */
     const int32_t qL =
         (qp + BFP_SOFTMAX_QB) * (qp + BFP_SOFTMAX_QB) + BFP_SOFTMAX_QC; /* <= 748,954,122 */
-    return bfpShiftRightRounded(qL, (uint32_t)z, mode); /* z <= ZMAX by the QFLOOR gate */
+    return bfpShiftRightRounded(qL, (uint32_t)z, mode, rs); /* z <= ZMAX by the QFLOOR gate */
 }

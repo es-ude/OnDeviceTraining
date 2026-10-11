@@ -117,7 +117,7 @@ void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_
         symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
         for (size_t oc = 0; oc < outChannels; oc++) {
             seed[oc] = rescaleIntoAccumulatorScale(bArr[oc], biasQC->scale, outputScale,
-                                                   biasQC->roundingMode);
+                                                   biasQC->roundingMode, NULL);
         }
     } else {
         for (size_t oc = 0; oc < outChannels; oc++) {
@@ -245,8 +245,8 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
         int32_t const *bArr = (int32_t const *)bias->data;
         symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
         for (size_t oc = 0; oc < outChannels; oc++) {
-            seed[oc] =
-                rescaleIntoAccumulatorScale(bArr[oc], biasQC->scale, sAcc, biasQC->roundingMode);
+            seed[oc] = rescaleIntoAccumulatorScale(bArr[oc], biasQC->scale, sAcc,
+                                                   biasQC->roundingMode, NULL);
         }
     } else {
         for (size_t oc = 0; oc < outChannels; oc++) {
@@ -291,7 +291,7 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                                      * honoring the op's rounding mode). */
                                     acc += rescaleIntoAccumulatorScale(
                                         partial, inScale * weightGroups->scales[currentGroup], sAcc,
-                                        wQC->roundingMode);
+                                        wQC->roundingMode, NULL);
                                     partial = 0;
                                 }
                                 currentGroup = elemGroup;
@@ -311,7 +311,7 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                     if (currentGroup != SIZE_MAX) {
                         acc += rescaleIntoAccumulatorScale(
                             partial, inScale * weightGroups->scales[currentGroup], sAcc,
-                            wQC->roundingMode);
+                            wQC->roundingMode, NULL);
                     }
 
                     yArr[(b * outChannels + oc) * outputLength + outPos] = acc;

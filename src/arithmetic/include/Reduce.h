@@ -4,6 +4,10 @@
 #include "Tensor.h"
 #include <stddef.h>
 
+/* Pointer-only use: the identical typedef lives in RNG.h (C11 allows the
+ * repetition), so this header needs no RNG include path. */
+typedef struct rngStream rngStream_t;
+
 /* Axis reductions over the TRAILING k logical dims of `in`.
  *
  * The reduction collapses the last k logical dims (element count N = product of
@@ -57,6 +61,6 @@ float sqrtFloat32(float x);
  * absmax-derived scale (absMax == 0 -> zero mantissas + scale 1.0), writing
  * out's qConfig->scale. `in` and `out` are SYM_INT32 of the same element count;
  * both are validated (qMaxBits <= 16). */
-void rsqrtSymInt32(tensor_t *in, float eps, tensor_t *out);
+void rsqrtSymInt32(tensor_t *in, float eps, tensor_t *out, rngStream_t *rs);
 
 #endif // ENV5_RUNTIME_REDUCE_H

@@ -130,7 +130,7 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
             int32_t *in = (int32_t *)intermediate->data;
             for (size_t i = 0; i < n; i++) {
                 tg[i] += rescaleIntoAccumulatorScale(in[i], intermScale, targetScale,
-                                                     targetQC->roundingMode);
+                                                     targetQC->roundingMode, NULL);
             }
             return;
         }

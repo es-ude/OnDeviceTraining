@@ -293,7 +293,8 @@ static void groupNormAffineSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, ten
     size_t C = cfg->numChannels;
     int32_t seed[C];
     for (size_t c = 0; c < C; c++) {
-        seed[c] = rescaleIntoAccumulatorScale(betaQ[c], betaQC->scale, sY, outQC->roundingMode);
+        seed[c] =
+            rescaleIntoAccumulatorScale(betaQ[c], betaQC->scale, sY, outQC->roundingMode, NULL);
     }
 
     size_t G = cfg->numGroups;
@@ -433,7 +434,7 @@ static void groupNormForwardSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, te
                     float n = mulFloat32s(
                         subFloat32s(mulFloat32s((float)in[off], inScale), mean[k]), invSigma[k]);
                     out[off] = roundByMode(clamp(mulFloat32s(n, stretch), qMin, qMax),
-                                           outQC->roundingMode);
+                                           outQC->roundingMode, NULL);
                 }
             }
         }
@@ -875,7 +876,7 @@ static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardI
                     float dxv = mulFloat32s(invSigma[k], subFloat32s(subFloat32s(dn, meanDn),
                                                                      mulFloat32s(nval, meanDnN)));
                     dxq[off] = roundByMode(clamp(divFloat32s(dxv, dxScale), qMin, qMax),
-                                           plQC->roundingMode);
+                                           plQC->roundingMode, NULL);
                 }
             }
         }

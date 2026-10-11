@@ -251,8 +251,8 @@ static void dropoutMaskScaleBfp(dropoutConfig_t *cfg, tensor_t *src, tensor_t *d
                 float v =
                     tensorBoolGet(cfg->mask, i) ? (float)mant[i - off] * srcScale * factor : 0.f;
                 float q = clamp(v / dstScale, qMin, qMax);
-                codes[i - off] =
-                    clampInt32(roundByMode(q, dstQC->roundingMode), (int32_t)qMin, (int32_t)qMax);
+                codes[i - off] = clampInt32(roundByMode(q, dstQC->roundingMode, NULL),
+                                            (int32_t)qMin, (int32_t)qMax);
             }
             idx = runEnd;
         }
@@ -317,7 +317,7 @@ void dropoutForward(layer_t *dropoutLayer, tensor_t *input, tensor_t *output) {
                         maskElements, inputElements);
             exit(1);
         }
-        bernoulliFillMask(cfg->mask, 1.0f - cfg->p); // fill once before dtype apply
+        bernoulliFillMask(cfg->mask, 1.0f - cfg->p, NULL); // fill once before dtype apply
     }
     /* The first switch has already rejected everything but the three known
      * arms, so this default IS the BFP arm — no unreachable duplicate error. */

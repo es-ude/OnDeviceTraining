@@ -162,8 +162,9 @@ void testForwardEvalIdentitySymInt32(void) {
 }
 
 /* Stub sampler: keep even indices (bit 1), drop odd (bit 0). Ignores probTrue. */
-static void stubKeepEven(tensor_t *mask, float probTrue) {
+static void stubKeepEven(tensor_t *mask, float probTrue, rngStream_t *rs) {
     (void)probTrue;
+    (void)rs;
     size_t n = calcNumberOfElementsByTensor(mask);
     for (size_t i = 0; i < n; i++) {
         tensorBoolSet(mask, i, (i % 2) == 0);

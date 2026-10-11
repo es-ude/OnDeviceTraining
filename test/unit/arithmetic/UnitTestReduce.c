@@ -314,7 +314,7 @@ void testRsqrtSymInt32MatchesFloatTwin(void) {
     tensor_t *symIn = buildSymInt32TensorND(1, dims, (float[]){1.25f, 4.0f, 0.25f});
     tensor_t *symOut = buildSymInt32TensorND(1, dims, NULL);
 
-    rsqrtSymInt32(symIn, 1e-5f, symOut);
+    rsqrtSymInt32(symIn, 1e-5f, symOut, NULL);
 
     int32_t *qin = (int32_t *)symIn->data;
     float sin = symScaleOf(symIn);
@@ -345,7 +345,7 @@ void testRsqrtSymInt32RejectsWideOutput(void) {
     tensor_t *symIn = buildSymInt32TensorND(1, dims, (float[]){1.25f, 4.0f, 0.25f});
     tensor_t *wideOut = buildSymInt32TensorNDBits(1, dims, NULL, 17);
 
-    ASSERT_EXITS_WITH_FAILURE(rsqrtSymInt32(symIn, 1e-5f, wideOut));
+    ASSERT_EXITS_WITH_FAILURE(rsqrtSymInt32(symIn, 1e-5f, wideOut, NULL));
 
     freeTensor(wideOut);
     freeTensor(symIn);

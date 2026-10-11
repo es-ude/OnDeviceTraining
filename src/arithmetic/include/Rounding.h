@@ -9,7 +9,11 @@
  */
 typedef enum roundingMode { HALF_AWAY, SR_HALF_AWAY } roundingMode_t;
 
-int32_t roundByMode(float input, roundingMode_t roundingMode);
+/* Pointer-only use: the identical typedef lives in RNG.h (C11 allows the
+ * repetition), so this header needs no RNG include path. */
+typedef struct rngStream rngStream_t;
+
+int32_t roundByMode(float input, roundingMode_t roundingMode, rngStream_t *rs);
 
 /*! @brief Rescale a SYM_INT32 parameter mantissa from its own scale into an
  * accumulator's product-scale, returning the int32 seed to add into the
@@ -24,7 +28,7 @@ int32_t roundByMode(float input, roundingMode_t roundingMode);
  * underflowed accumulator scale is caught, not bypassed. Release builds run
  * the raw cast (UBSan #204 covers occurrences there). */
 int32_t rescaleIntoAccumulatorScale(int32_t paramQ, float paramScale, float accumulatorScale,
-                                    roundingMode_t roundingMode);
+                                    roundingMode_t roundingMode, rngStream_t *rs);
 
 int32_t clampInt32(int32_t input, int32_t min, int32_t max);
 

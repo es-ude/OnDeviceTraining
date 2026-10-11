@@ -16,22 +16,22 @@ float randfloat() {
     return rngNextFloat();
 }
 
-int32_t roundSRHalfAway(const float input) {
+int32_t roundSRHalfAway(const float input, rngStream_t *rs) {
     return roundHalfAway(input + randfloat() - 0.5f);
 }
 
-int32_t roundByMode(const float input, const roundingMode_t roundingMode) {
+int32_t roundByMode(const float input, const roundingMode_t roundingMode, rngStream_t *rs) {
     switch (roundingMode) {
     case HALF_AWAY:
         return roundHalfAway(input);
     case SR_HALF_AWAY:
-        return roundSRHalfAway(input);
+        return roundSRHalfAway(input, rs);
     }
     return 0;
 }
 
 int32_t rescaleIntoAccumulatorScale(int32_t paramQ, float paramScale, float accumulatorScale,
-                                    roundingMode_t roundingMode) {
+                                    roundingMode_t roundingMode, rngStream_t *rs) {
     float rescaled = (float)paramQ * paramScale / accumulatorScale;
 #ifdef ODT_SEED_GUARD
     /* !(x <= T), NOT (x > T): also catches NaN (0*inf when accumulatorScale
@@ -43,7 +43,7 @@ int32_t rescaleIntoAccumulatorScale(int32_t paramQ, float paramScale, float accu
         exit(1);
     }
 #endif
-    return roundByMode(rescaled, roundingMode);
+    return roundByMode(rescaled, roundingMode, rs);
 }
 
 int32_t clampInt32(int32_t input, int32_t min, int32_t max) {

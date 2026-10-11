@@ -27,6 +27,14 @@ rngKey_t rngFold(rngKey_t parent, uint32_t tag, uint32_t index);
  * ordinary seed. */
 rngKey_t rngKeyFromSeed(uint64_t seed);
 
+/* The tags of the key tree's edges (rngFold's `tag`). Append-only and never
+ * renumbered: a tag's value is part of the value contract. 0 is never a tag,
+ * and no two tags share a value, so every path decodes one way. */
+#define RNG_TAG_STEP 1u
+#define RNG_TAG_CALL 2u
+#define RNG_TAG_EVAL 6u
+#define RNG_TAG_UPDATE 18u
+
 /* The draws under one key. Owned by its caller, usually on the stack of the op
  * that draws. Backend v1: keyed xorshift32, today's draw math. Start a stream
  * with rngOpen only: a hand-set state 0 would draw 0 forever. */

@@ -97,6 +97,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         TrainingLoopApi
         MORE_LIBS
+        RNG
         RematScheduler
         RematPlan
         TrainingEpochDefault
@@ -229,6 +230,7 @@ add_executable(UnitTestLayerNormIntegration UnitTestLayerNormIntegration.c)
 target_link_libraries(UnitTestLayerNormIntegration PRIVATE
         unity
         TrainingLoopApi
+        RNG
         CalculateGradsSequential
         CommonLayerLibs
         LayerNormApi
@@ -253,6 +255,7 @@ add_executable(UnitTestGroupNormIntegration UnitTestGroupNormIntegration.c)
 target_link_libraries(UnitTestGroupNormIntegration PRIVATE
         unity
         TrainingLoopApi
+        RNG
         TrainingEpochDefault
         TrainingBatchDefault
         CalculateGradsSequential
@@ -302,6 +305,7 @@ add_executable(UnitTestBatchNorm1dIntegration UnitTestBatchNorm1dIntegration.c)
 target_link_libraries(UnitTestBatchNorm1dIntegration PRIVATE
         unity
         TrainingLoopApi
+        RNG
         TrainingEpochDefault
         TrainingBatchDefault
         CalculateGradsSequential
@@ -338,6 +342,7 @@ add_executable(UnitTestAdaptiveAvgPool1dIntegration UnitTestAdaptiveAvgPool1dInt
 target_link_libraries(UnitTestAdaptiveAvgPool1dIntegration PRIVATE
         unity
         TrainingLoopApi
+        RNG
         CalculateGradsSequential
         CommonLayerLibs
         AdaptivePool1dApi
@@ -406,6 +411,7 @@ add_executable(UnitTestMnistSmoke UnitTestMnistSmoke.c)
 target_link_libraries(UnitTestMnistSmoke PRIVATE
         unity
         TrainingLoopApi
+        RNG
         TrainingEpochDefault
         TrainingBatchDefault
         CalculateGradsSequential
@@ -431,6 +437,7 @@ add_executable(UnitTestFlattenIntegration UnitTestFlattenIntegration.c)
 target_link_libraries(UnitTestFlattenIntegration PRIVATE
         unity
         TrainingLoopApi
+        RNG
         CalculateGradsSequential
         CommonLayerLibs
         FlattenApi
@@ -510,6 +517,7 @@ add_executable(UnitTestQuantLayerIntegration UnitTestQuantLayerIntegration.c)
 target_link_libraries(UnitTestQuantLayerIntegration PRIVATE
         unity
         TrainingLoopApi
+        RNG
         CalculateGradsSequential
         CommonLayerLibs
         LayerNormApi

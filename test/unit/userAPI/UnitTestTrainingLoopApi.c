@@ -20,6 +20,7 @@
 #include "OdtAssert.h"
 #include "OptimizerApi.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "ReluApi.h"
 #include "RematPlan.h"
 #include "RematScheduler.h"
@@ -3207,6 +3208,174 @@ void testTrainingRunExitsAtTheRaggedChunkOfAStreamShorterThanItsNominalCount(voi
                              runOnAStreamShorterThanItsNominalCount());
 }
 
+/* ---- training-stream keys: trainingRng_t and its helpers ---- */
+
+/* The expected keys come from the Python mirror, not from the C key chain, with
+ * the tag values spelled as numbers (STEP 1, CALL 2, EVAL 6, UPDATE 18). From
+ * the repository root:
+ *   uv run python -c "from examples._shared.keyed_rng import (fold, key_from_seed
+ *   as kfs); r = kfs(0x0123456789abcdef); s1 = fold(r, 1, 1); e1 = fold(r, 6, 1); print([
+ *   [hex(w) for w in k] for k in (r, fold(r, 1, 0), s1, fold(s1, 2, 3),
+ *   fold(r, 18, 1), fold(r, 6, 0), e1, fold(e1, 2, 5))])"
+ * Each test also compares the helper with the explicit rngFold chain, so a wrong
+ * tag value and a wrong fold fail differently. */
+#define TRAINING_RNG_TEST_SEED 0x0123456789abcdefULL
+
+static void assertTrainingKey(uint32_t w0, uint32_t w1, rngKey_t key) {
+    TEST_ASSERT_EQUAL_HEX32(w0, key.w[0]);
+    TEST_ASSERT_EQUAL_HEX32(w1, key.w[1]);
+}
+
+static void assertSameKey(rngKey_t expected, rngKey_t actual) {
+    TEST_ASSERT_EQUAL_HEX32(expected.w[0], actual.w[0]);
+    TEST_ASSERT_EQUAL_HEX32(expected.w[1], actual.w[1]);
+}
+
+void testTrainingRngInitSetsTheRootAndClearsTheCounters(void) {
+    trainingRng_t rng = {.root = {{0xdeadbeefu, 0xdeadbeefu}}, .step = 7u, .epoch = 9u};
+    trainingRngInit(&rng, TRAINING_RNG_TEST_SEED);
+    assertSameKey(rngKeyFromSeed(TRAINING_RNG_TEST_SEED), rng.root);
+    assertTrainingKey(0xd1445d70u, 0x2266ebdeu, rng.root);
+    TEST_ASSERT_EQUAL_UINT32(0u, rng.step);
+    TEST_ASSERT_EQUAL_UINT32(0u, rng.epoch);
+}
+
+void testTrainingRngStepKeyIsTheStepFoldOfTheRoot(void) {
+    trainingRng_t rng;
+    trainingRngInit(&rng, TRAINING_RNG_TEST_SEED);
+    assertSameKey(rngFold(rng.root, RNG_TAG_STEP, 0u), trainingRngStepKey(&rng));
+    assertTrainingKey(0x488612fbu, 0x4df9f3a1u, trainingRngStepKey(&rng));
+    trainingRngAdvance(&rng);
+    assertSameKey(rngFold(rng.root, RNG_TAG_STEP, 1u), trainingRngStepKey(&rng));
+    assertTrainingKey(0x925a85f6u, 0xcd30b2f7u, trainingRngStepKey(&rng));
+}
+
+void testTrainingRngCallKeyIsTheCallFoldOfItsParent(void) {
+    trainingRng_t rng;
+    trainingRngInit(&rng, TRAINING_RNG_TEST_SEED);
+    trainingRngAdvance(&rng);
+    const rngKey_t stepKey = trainingRngStepKey(&rng);
+    assertSameKey(rngFold(stepKey, RNG_TAG_CALL, 3u), trainingRngCallKey(stepKey, 3u));
+    assertTrainingKey(0xbe960da6u, 0x66f79f1du, trainingRngCallKey(stepKey, 3u));
+    const rngKey_t nextCall = trainingRngCallKey(stepKey, 4u);
+    TEST_ASSERT_FALSE(nextCall.w[0] == 0xbe960da6u && nextCall.w[1] == 0x66f79f1du);
+}
+
+void testTrainingRngUpdateKeyIsTheUpdateFoldOfTheRoot(void) {
+    trainingRng_t rng;
+    trainingRngInit(&rng, TRAINING_RNG_TEST_SEED);
+    trainingRngAdvance(&rng);
+    assertSameKey(rngFold(rng.root, RNG_TAG_UPDATE, 1u), trainingRngUpdateKey(&rng));
+    assertTrainingKey(0x1722c30du, 0x530de81fu, trainingRngUpdateKey(&rng));
+}
+
+void testTrainingRngEvalKeyIsTheEvalFoldOfTheRoot(void) {
+    trainingRng_t rng;
+    trainingRngInit(&rng, TRAINING_RNG_TEST_SEED);
+    trainingRngAdvance(&rng); /* the evaluation key follows the epoch, never the step */
+    assertSameKey(rngFold(rng.root, RNG_TAG_EVAL, 0u), trainingRngEvalKey(&rng));
+    assertTrainingKey(0x238e4cf9u, 0x06660cf1u, trainingRngEvalKey(&rng));
+    trainingRngAdvanceEpoch(&rng);
+    const rngKey_t evalKey = trainingRngEvalKey(&rng);
+    assertTrainingKey(0xd252cbe9u, 0xbfbe2e3du, evalKey);
+    assertTrainingKey(0x0e6cb39du, 0x6d05e020u, trainingRngCallKey(evalKey, 5u));
+}
+
+void testTrainingRngAdvanceCountsUpdatesAndAdvanceEpochCountsEpochs(void) {
+    trainingRng_t rng;
+    trainingRngInit(&rng, TRAINING_RNG_TEST_SEED);
+    const rngKey_t root = rng.root;
+    trainingRngAdvance(&rng);
+    trainingRngAdvance(&rng);
+    trainingRngAdvanceEpoch(&rng);
+    TEST_ASSERT_EQUAL_UINT32(2u, rng.step);
+    TEST_ASSERT_EQUAL_UINT32(1u, rng.epoch);
+    assertSameKey(root, rng.root);
+}
+
+/* The last step, epoch and call index are still usable: only going past one exits. */
+void testTrainingRngReachesTheLastStepEpochAndCallIndexWithoutExiting(void) {
+    trainingRng_t rng;
+    trainingRngInit(&rng, TRAINING_RNG_TEST_SEED);
+    rng.step = UINT32_MAX - 1u;
+    rng.epoch = UINT32_MAX - 1u;
+    trainingRngAdvance(&rng);
+    trainingRngAdvanceEpoch(&rng);
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, rng.step);
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, rng.epoch);
+    const rngKey_t stepKey = trainingRngStepKey(&rng);
+    assertSameKey(rngFold(stepKey, RNG_TAG_CALL, UINT32_MAX),
+                  trainingRngCallKey(stepKey, (size_t)UINT32_MAX));
+}
+
+static void initANullState(void) {
+    trainingRngInit(NULL, 1u);
+}
+
+static void stepKeyOfANullState(void) {
+    (void)trainingRngStepKey(NULL);
+}
+
+static void updateKeyOfANullState(void) {
+    (void)trainingRngUpdateKey(NULL);
+}
+
+static void evalKeyOfANullState(void) {
+    (void)trainingRngEvalKey(NULL);
+}
+
+static void advanceANullState(void) {
+    trainingRngAdvance(NULL);
+}
+
+static void advanceEpochOfANullState(void) {
+    trainingRngAdvanceEpoch(NULL);
+}
+
+void testTrainingRngHelpersExitOnANullState(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngInit: rng is NULL", initANullState());
+    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngStepKey: rng is NULL", stepKeyOfANullState());
+    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngUpdateKey: rng is NULL", updateKeyOfANullState());
+    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngEvalKey: rng is NULL", evalKeyOfANullState());
+    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngAdvance: rng is NULL", advanceANullState());
+    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngAdvanceEpoch: rng is NULL", advanceEpochOfANullState());
+}
+
+static void advancePastTheLastStep(void) {
+    trainingRng_t rng;
+    trainingRngInit(&rng, 1u);
+    rng.step = UINT32_MAX;
+    trainingRngAdvance(&rng);
+}
+
+void testTrainingRngAdvanceExitsWhenTheStepCounterIsExhausted(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngAdvance: step counter exhausted",
+                             advancePastTheLastStep());
+}
+
+static void advancePastTheLastEpoch(void) {
+    trainingRng_t rng;
+    trainingRngInit(&rng, 1u);
+    rng.epoch = UINT32_MAX;
+    trainingRngAdvanceEpoch(&rng);
+}
+
+void testTrainingRngAdvanceEpochExitsWhenTheEpochCounterIsExhausted(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngAdvanceEpoch: epoch counter exhausted",
+                             advancePastTheLastEpoch());
+}
+
+#if SIZE_MAX > UINT32_MAX
+static void callKeyPastUint32Max(void) {
+    (void)trainingRngCallKey(rngKeyFromSeed(1u), (size_t)UINT32_MAX + 1u);
+}
+
+void testTrainingRngCallKeyExitsAboveUint32Max(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngCallKey: call index exceeds UINT32_MAX",
+                             callKeyPastUint32Max());
+}
+#endif
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testTrainingBatchDefaultHandsCalculateGradsBatchAxisViews);
@@ -3263,5 +3432,18 @@ int main(void) {
     RUN_TEST(testTrainingRunEvaluatesWithoutTheSchedulerBelowOneChunk);
     RUN_TEST(testTrainingRunEvaluatesOnTheSchedulerWhenEveryChunkHasTheTrainingRowCount);
     RUN_TEST(testTrainingRunExitsAtTheRaggedChunkOfAStreamShorterThanItsNominalCount);
+    RUN_TEST(testTrainingRngInitSetsTheRootAndClearsTheCounters);
+    RUN_TEST(testTrainingRngStepKeyIsTheStepFoldOfTheRoot);
+    RUN_TEST(testTrainingRngCallKeyIsTheCallFoldOfItsParent);
+    RUN_TEST(testTrainingRngUpdateKeyIsTheUpdateFoldOfTheRoot);
+    RUN_TEST(testTrainingRngEvalKeyIsTheEvalFoldOfTheRoot);
+    RUN_TEST(testTrainingRngAdvanceCountsUpdatesAndAdvanceEpochCountsEpochs);
+    RUN_TEST(testTrainingRngReachesTheLastStepEpochAndCallIndexWithoutExiting);
+    RUN_TEST(testTrainingRngHelpersExitOnANullState);
+    RUN_TEST(testTrainingRngAdvanceExitsWhenTheStepCounterIsExhausted);
+    RUN_TEST(testTrainingRngAdvanceEpochExitsWhenTheEpochCounterIsExhausted);
+#if SIZE_MAX > UINT32_MAX
+    RUN_TEST(testTrainingRngCallKeyExitsAboveUint32Max);
+#endif
     return UNITY_END();
 }

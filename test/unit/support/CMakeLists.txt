@@ -40,6 +40,7 @@ target_include_directories(odt_test_legacy_grads PUBLIC ${CMAKE_CURRENT_SOURCE_D
 target_link_libraries(odt_test_legacy_grads PRIVATE
         CalculateGradsSequential
         TrainingLoopApi
+        RNG
         TensorApi
         Tensor
         Quantization

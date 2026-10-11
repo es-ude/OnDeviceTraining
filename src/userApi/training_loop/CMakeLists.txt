@@ -4,7 +4,7 @@ add_subdirectory(training_batch)
 add_subdirectory(training_epoch)
 add_subdirectory(remat)
 
-add_library(TrainingLoopApi TrainingLoopApi.c)
+add_library(TrainingLoopApi TrainingLoopApi.c TrainingRng.c)
 target_include_directories(TrainingLoopApi PUBLIC include)
 target_link_libraries(TrainingLoopApi PRIVATE
         TrainingEpochDefault
@@ -19,6 +19,7 @@ target_link_libraries(TrainingLoopApi PRIVATE
         BatchNorm1d
         LossFunction
         Optimizer
+        RNG
         LrScheduler
         BsScheduler
         Common

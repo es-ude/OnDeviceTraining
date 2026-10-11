@@ -7,6 +7,7 @@
 #include "InferenceApi.h"
 #include "LossFunction.h"
 #include "Optimizer.h"
+#include "RNG.h"
 #include "Tensor.h"
 #include "TrainingCall.h"
 
@@ -15,6 +16,45 @@
  * allows the redefinition). */
 typedef struct lrScheduler lrScheduler_t;
 typedef struct bsScheduler bsScheduler_t;
+
+/*! The keyed randomness of one training stream: caller-owned, one per stream,
+ * never copied. `root` names the run, `step` counts optimizer updates and
+ * `epoch` completed epochs. Derive every key through the trainingRng* helpers
+ * below: they are the only place the key chain is written out, so every loop
+ * that uses them derives the same keys for the same update and call. */
+typedef struct trainingRng {
+    rngKey_t root;
+    uint32_t step;
+    uint32_t epoch;
+} trainingRng_t;
+
+/* Every helper that takes the state stops the program with a named error on a
+ * NULL state (a caller bug). A missing key is a NULL key pointer instead. */
+
+/*! root = rngKeyFromSeed(seed); step = epoch = 0. */
+void trainingRngInit(trainingRng_t *rng, uint64_t seed);
+
+/*! The key of the model calls of the current update. Derive it before the
+ * update's batch is fetched. */
+rngKey_t trainingRngStepKey(const trainingRng_t *rng);
+
+/*! The key of call `callIndex` under a step key or an evaluation key. An index
+ * above UINT32_MAX stops the program with a named error: it would reuse the
+ * key of an earlier call. */
+rngKey_t trainingRngCallKey(rngKey_t parentKey, size_t callIndex);
+
+/*! The key of the current update's optimizer step and gradient mean-scale. */
+rngKey_t trainingRngUpdateKey(const trainingRng_t *rng);
+
+/*! The key of the current epoch's evaluation. */
+rngKey_t trainingRngEvalKey(const trainingRng_t *rng);
+
+/*! Call after each optimizer update. Past UINT32_MAX updates it stops the
+ * program with a named error: a wrapped counter would reuse keys. */
+void trainingRngAdvance(trainingRng_t *rng);
+
+/*! Call after each completed epoch, under the same rule as trainingRngAdvance. */
+void trainingRngAdvanceEpoch(trainingRng_t *rng);
 
 typedef struct trainingStats {
     tensor_t *output;

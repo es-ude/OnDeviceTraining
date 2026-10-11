@@ -5,11 +5,12 @@ target_include_directories(examples_shared PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # Quantization.h, QuantizationApi.h, Rounding.h, Common.h, BfpKernelSupport.h;
 # remat_select.c: RematScheduler.h, CalculateGradsSequential.h and what it
 # pulls in: TrainingLoopApi.h, InferenceApi.h, DataLoader.h, LossFunction.h,
-# Optimizer.h).
+# Optimizer.h, RNG.h).
 target_link_libraries(examples_shared PRIVATE
         RematScheduler
         CalculateGradsSequential
         TrainingLoopApi
+        RNG
         InferenceApi
         DataLoader
         LossFunction

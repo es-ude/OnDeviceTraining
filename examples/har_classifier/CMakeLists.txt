@@ -13,6 +13,7 @@ target_link_libraries(har_mem_instrument PUBLIC
         Optimizer
         CalculateGradsSequential
         TrainingLoopApi
+        RNG
         Layer
         MaxPool1d
         LossFunction

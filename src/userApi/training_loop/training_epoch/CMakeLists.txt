@@ -2,6 +2,7 @@ add_library(TrainingEpochDefault TrainingEpochDefault.c)
 target_include_directories(TrainingEpochDefault PUBLIC include)
 target_link_libraries(TrainingEpochDefault PRIVATE
         TrainingLoopApi
+        RNG
         TrainingBatchDefault
         TensorApi
         Tensor

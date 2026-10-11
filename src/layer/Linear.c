@@ -11,6 +11,7 @@
 #include "Common.h"
 #include "ExecuteOp.h"
 #include "Layer.h"
+#include "LayerExec.h"
 #include "Linear.h"
 #include "Matmul.h"
 #include "Rounding.h"
@@ -149,8 +150,18 @@ static void linearForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, t
     linearForwardBfp(ops[1], bias, ops[0], rawOut);
 }
 
+/* OP(k) of each funnel op of this layer, for layerExecOpKey. Part of the
+ * value contract: append, never renumber. */
+enum {
+    LINEAR_OP_FORWARD = 0,
+    LINEAR_OP_WEIGHT_GRAD = 1,
+    LINEAR_OP_BIAS_GRAD = 2,
+    LINEAR_OP_PROP_LOSS = 3,
+};
+
 void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output,
                    const layerExec_t *exec) {
+    rngKey_t opKey;
     linearConfig_t *linearConfig = linearLayer->config->linear;
 
     tensor_t *weights = getParamFromParameter(linearConfig->weights);
@@ -193,6 +204,7 @@ void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output,
                                        : (tensor_t *[]){input, weights},
                 .nInputs = bias != NULL ? 3 : 2,
                 .arithmetic = linearConfig->forwardMath,
+                .key = layerExecOpKey(exec, RNG_TAG_FORWARD, LINEAR_OP_FORWARD, &opKey),
                 .mode = OUT_WRITE,
                 .groupedSymOperandPos = 0,
                 .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL, NULL,
@@ -226,6 +238,7 @@ void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output,
                                    : (tensor_t *[]){input, weights},
             .nInputs = bias != NULL ? 3 : 2,
             .arithmetic = linearConfig->forwardMath,
+            .key = layerExecOpKey(exec, RNG_TAG_FORWARD, LINEAR_OP_FORWARD, &opKey),
             .mode = OUT_WRITE,
             .groupedSymOperandPos = grouped ? 2 : 0,
         },
@@ -463,6 +476,7 @@ static opKernelFn_t linearBackwardKernelForArithmetic(arithmetic_t math, opKerne
 
 void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss,
                     tensor_t *propLoss, const layerExec_t *exec) {
+    rngKey_t opKey;
     linearConfig_t *cfg = linearLayer->config->linear;
     tensor_t *weights = getParamFromParameter(cfg->weights);
 
@@ -508,6 +522,7 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
                 .inputs = (tensor_t *[]){loss, forwardInput},
                 .nInputs = 2,
                 .arithmetic = cfg->weightGradMath,
+                .key = layerExecOpKey(exec, RNG_TAG_BACKWARD, LINEAR_OP_WEIGHT_GRAD, &opKey),
                 .mode = cfg->weightGradAccMode,
                 .bfpStage = {loss->quantization->type == FLOAT32 ? &stage : NULL,
                              forwardInput->quantization->type == FLOAT32 ? &stage : NULL, NULL},
@@ -524,6 +539,7 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
                     .inputs = (tensor_t *[]){loss},
                     .nInputs = 1,
                     .arithmetic = cfg->biasGradMath,
+                    .key = layerExecOpKey(exec, RNG_TAG_BACKWARD, LINEAR_OP_BIAS_GRAD, &opKey),
                     .mode = cfg->biasGradAccMode,
                     .bfpStage = {loss->quantization->type == FLOAT32 ? &stage : NULL, NULL, NULL},
                 },
@@ -553,6 +569,7 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
                 .inputs = (tensor_t *[]){loss, weights},
                 .nInputs = 2,
                 .arithmetic = cfg->propLossMath,
+                .key = layerExecOpKey(exec, RNG_TAG_BACKWARD, LINEAR_OP_PROP_LOSS, &opKey),
                 .mode = OUT_WRITE,
                 .groupedSymOperandPos = grouped ? 2 : 0,
                 /* weights operand: always BFP-stored under ARITH_BFP (rule-1

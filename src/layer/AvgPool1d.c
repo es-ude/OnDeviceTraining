@@ -10,6 +10,7 @@
 #include "Common.h"
 #include "ExecuteOp.h"
 #include "Layer.h"
+#include "LayerExec.h"
 #include "Quantization.h"
 #include "SlidingWindow1d.h"
 #include "Tensor.h"
@@ -247,7 +248,15 @@ static void avgPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut
     }
 }
 
+/* OP(k) of each funnel op of this layer, for layerExecOpKey. Part of the
+ * value contract: append, never renumber. */
+enum {
+    AVGPOOL1D_OP_FORWARD = 0,
+    AVGPOOL1D_OP_PROP_LOSS = 1,
+};
+
 void avgPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const layerExec_t *exec) {
+    rngKey_t opKey;
     avgPool1dConfig_t *cfg = layer->config->avgPool1d;
     if (cfg->forwardMath.type == ARITH_BFP) {
         const bfpQConfig_t *anchor = bfpWireAnchor(cfg->outputQ, "AvgPool1d forward");
@@ -268,6 +277,7 @@ void avgPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const l
                 .inputs = (tensor_t *[]){input},
                 .nInputs = 1,
                 .arithmetic = cfg->forwardMath,
+                .key = layerExecOpKey(exec, RNG_TAG_FORWARD, AVGPOOL1D_OP_FORWARD, &opKey),
                 .mode = OUT_WRITE,
                 .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL, NULL, NULL},
             },
@@ -294,6 +304,7 @@ void avgPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const l
             .inputs = (tensor_t *[]){input},
             .nInputs = 1,
             .arithmetic = cfg->forwardMath,
+            .key = layerExecOpKey(exec, RNG_TAG_FORWARD, AVGPOOL1D_OP_FORWARD, &opKey),
             .mode = OUT_WRITE,
         },
         output);
@@ -492,6 +503,7 @@ static void avgPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOu
 
 void avgPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
                        tensor_t *propLoss, const layerExec_t *exec) {
+    rngKey_t opKey;
     avgPool1dConfig_t *cfg = layer->config->avgPool1d;
     switch (cfg->propLossMath.type) {
     case ARITH_FLOAT32:
@@ -513,6 +525,7 @@ void avgPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGra
                 .inputs = (tensor_t *[]){lossGrad},
                 .nInputs = 1,
                 .arithmetic = cfg->propLossMath,
+                .key = layerExecOpKey(exec, RNG_TAG_BACKWARD, AVGPOOL1D_OP_PROP_LOSS, &opKey),
                 .mode = OUT_WRITE,
             },
             propLoss);
@@ -533,6 +546,7 @@ void avgPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGra
                 .inputs = (tensor_t *[]){lossGrad},
                 .nInputs = 1,
                 .arithmetic = cfg->propLossMath,
+                .key = layerExecOpKey(exec, RNG_TAG_BACKWARD, AVGPOOL1D_OP_PROP_LOSS, &opKey),
                 .mode = OUT_WRITE,
                 .bfpStage = {lossGrad->quantization->type == FLOAT32 ? &stage : NULL, NULL, NULL},
             },

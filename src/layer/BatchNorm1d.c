@@ -12,6 +12,7 @@
 #include "Div.h"
 #include "ExecuteOp.h"
 #include "Layer.h"
+#include "LayerExec.h"
 #include "Mul.h"
 #include "Quantization.h"
 #include "Reduce.h"
@@ -343,8 +344,15 @@ static void bnForwardKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, ten
     }
 }
 
+/* OP(k) of each funnel op of this layer, for layerExecOpKey. Part of the
+ * value contract: append, never renumber. */
+enum {
+    BATCHNORM1D_OP_FORWARD = 0,
+};
+
 void batchNorm1dForward(layer_t *layer, tensor_t *input, tensor_t *output,
                         const layerExec_t *exec) {
+    rngKey_t opKey;
     batchNorm1dConfig_t *cfg = layer->config->batchNorm1d;
     bnValidateInput(cfg, input, "forward input");
     bnValidateOutputMatchesInput(input, output);
@@ -381,13 +389,15 @@ void batchNorm1dForward(layer_t *layer, tensor_t *input, tensor_t *output,
         ops[2] = getParamFromParameter(cfg->beta);
         nOps = 3;
     }
-    executeOp(&(opSpec_t){.kernel = bnForwardKernelFloat,
-                          .ctx = &ctx,
-                          .inputs = ops,
-                          .nInputs = nOps,
-                          .arithmetic = cfg->forwardMath,
-                          .mode = OUT_WRITE},
-              output);
+    executeOp(
+        &(opSpec_t){.kernel = bnForwardKernelFloat,
+                    .ctx = &ctx,
+                    .inputs = ops,
+                    .nInputs = nOps,
+                    .arithmetic = cfg->forwardMath,
+                    .key = layerExecOpKey(exec, RNG_TAG_FORWARD, BATCHNORM1D_OP_FORWARD, &opKey),
+                    .mode = OUT_WRITE},
+        output);
 }
 
 static void bnRequireSameShape(const tensor_t *ref, const tensor_t *t, const char *what) {

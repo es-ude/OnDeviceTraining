@@ -8,6 +8,7 @@
 #include "InferenceApi.h"
 #include "Layer.h"
 #include "LayerCommon.h"
+#include "LayerExec.h"
 #include "LayerQuant.h"
 #include "LayerWeightsApi.h"
 #include "Linear.h"
@@ -1633,6 +1634,124 @@ void testLinearBackwardFrozenFactoryLayerRunsWithoutGradBuffers(void) {
     TEST_ASSERT_TRUE(gradStillNull);
 }
 
+/* ---- each funnel op of the layer draws from its own op key ---- */
+
+/* The expected stream states come from the Python mirror, tags as numbers
+ * (FORWARD 4, BACKWARD 5, OP 7, OUT 10; Linear's forward is OP 0, its dx OP 3):
+ *   uv run python -c "from examples._shared.keyed_rng import (fold, key_from_seed as kfs,
+ *   open_stream as o); k = kfs(0x1a7e); f = fold(k, 4, 0); b = fold(k, 5, 0); print([
+ *   hex(o(fold(fold(p, 7, i), 10, 0))) for (p, i) in ((f, 0), (b, 3))])"
+ * Each check also compares with the explicit rngFold chain. */
+#define LINEAR_EXEC_TEST_SEED 0x1a7eu
+#define LINEAR_MAX_CELL_RECORDS 4
+
+typedef struct {
+    bool hasStream;
+    uint32_t state;
+} linearCellRecord_t;
+
+static linearCellRecord_t linearCellRecords[LINEAR_MAX_CELL_RECORDS];
+static size_t linearCellRecordCount;
+static conversionFunction_t linearSavedCell;
+
+/* Records the stream, then runs the real [FLOAT32][SYM_INT32] cell. */
+static void linearRecordingCell(tensor_t *in, tensor_t *out, rngStream_t *rs) {
+    if (linearCellRecordCount < LINEAR_MAX_CELL_RECORDS) {
+        linearCellRecords[linearCellRecordCount].hasStream = rs != NULL;
+        linearCellRecords[linearCellRecordCount].state = (rs != NULL) ? rs->state : 0u;
+    }
+    linearCellRecordCount++;
+    linearSavedCell(in, out, rs);
+}
+
+static void linearInstallRecordingCell(void) {
+    linearSavedCell = conversionMatrix[FLOAT32][SYM_INT32];
+    conversionMatrix[FLOAT32][SYM_INT32] = linearRecordingCell;
+    linearCellRecordCount = 0;
+}
+
+static void linearRestoreCell(void) {
+    conversionMatrix[FLOAT32][SYM_INT32] = linearSavedCell;
+}
+
+static tensor_t *linearMakeSym1x2(void) {
+    size_t *d = reserveMemory(2 * sizeof(size_t));
+    d[0] = 1;
+    d[1] = 2;
+    size_t *o = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, o);
+    shape_t *s = reserveMemory(sizeof(shape_t));
+    setShape(s, d, 2, o);
+    return initTensor(s, quantizationInitSymInt32(HALF_AWAY), NULL);
+}
+
+static void assertLinearOutStream(size_t record, uint32_t phaseTag, uint32_t opIndex,
+                                  uint32_t pythonState) {
+    rngKey_t layerKey = rngKeyFromSeed(LINEAR_EXEC_TEST_SEED);
+    rngKey_t opKey = rngFold(rngFold(layerKey, phaseTag, 0u), RNG_TAG_OP, opIndex);
+    TEST_ASSERT_TRUE(linearCellRecords[record].hasStream);
+    TEST_ASSERT_EQUAL_HEX32(rngOpen(rngFold(opKey, RNG_TAG_OUT, 0u)).state,
+                            linearCellRecords[record].state);
+    TEST_ASSERT_EQUAL_HEX32(pythonState, linearCellRecords[record].state);
+}
+
+/* A FLOAT32 forward into a SYM_INT32 output rounds in the OUT_WRITE epilogue
+ * of the forward op: OP 0 under the FORWARD phase of the layer key. */
+void testLinearForwardOpDrawsFromItsForwardOpKey(void) {
+    layer_t *layer = buildFloatLinearWithTrainable(TRAINABLE_FALSE);
+    tensor_t *input = e2eMakeInput((float[]){0.5f, -1.f, 2.f});
+    tensor_t *output = linearMakeSym1x2();
+    layerExec_t exec = {.key = rngKeyFromSeed(LINEAR_EXEC_TEST_SEED)};
+    linearInstallRecordingCell();
+
+    linearForward(layer, input, output, &exec);
+
+    linearRestoreCell();
+    freeTensor(output);
+    freeTensor(input);
+    freeLinearLayer(layer);
+    TEST_ASSERT_EQUAL_UINT32(1u, (uint32_t)linearCellRecordCount);
+    assertLinearOutStream(0, RNG_TAG_FORWARD, 0u, 0x02960061u);
+}
+
+/* A frozen layer's backward runs only the dx op (OP 3 under BACKWARD); a
+ * SYM_INT32 propLoss rounds in its OUT_WRITE epilogue. */
+void testLinearBackwardDxOpDrawsFromItsBackwardOpKey(void) {
+    layer_t *layer = buildFloatLinearWithTrainable(TRAINABLE_FALSE);
+    tensor_t *forwardInput = e2eMakeInput((float[]){0.5f, -1.f, 2.f});
+    tensor_t *loss = e2eMake1x2((float[]){0.25f, -0.75f});
+    tensor_t *propLoss = e2eMakeSym1x3();
+    layerExec_t exec = {.key = rngKeyFromSeed(LINEAR_EXEC_TEST_SEED)};
+    linearInstallRecordingCell();
+
+    linearBackward(layer, forwardInput, loss, propLoss, &exec);
+
+    linearRestoreCell();
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(forwardInput);
+    freeLinearLayer(layer);
+    TEST_ASSERT_EQUAL_UINT32(1u, (uint32_t)linearCellRecordCount);
+    assertLinearOutStream(0, RNG_TAG_BACKWARD, 3u, 0xeb73a7ebu);
+}
+
+/* Without a context no funnel op gets a key, so the epilogue gets no stream. */
+void testLinearForwardWithoutAContextHandsTheFunnelNoStream(void) {
+    layer_t *layer = buildFloatLinearWithTrainable(TRAINABLE_FALSE);
+    tensor_t *input = e2eMakeInput((float[]){0.5f, -1.f, 2.f});
+    tensor_t *output = linearMakeSym1x2();
+    linearInstallRecordingCell();
+
+    linearForward(layer, input, output, NULL);
+
+    linearRestoreCell();
+    freeTensor(output);
+    freeTensor(input);
+    freeLinearLayer(layer);
+    TEST_ASSERT_EQUAL_UINT32(1u, (uint32_t)linearCellRecordCount);
+    TEST_ASSERT_FALSE(linearCellRecords[0].hasStream);
+}
+
 /* #380 PR2 Task 1: propLoss == NULL is a grads-only call -- weight/bias grads
  * must be computed exactly as with a real propLoss, and no dx memory may be
  * touched. Twin fixture (both TRAINABLE, hand-seeded, bit-identical) mirrors
@@ -3176,6 +3295,9 @@ int main(void) {
     RUN_TEST(testLinearFactoryDefaultAllocatesGrads);
     RUN_TEST(testLinearBackwardFrozenTwinPropLossIdenticalGradsZero);
     RUN_TEST(testLinearBackwardFrozenFactoryLayerRunsWithoutGradBuffers);
+    RUN_TEST(testLinearForwardOpDrawsFromItsForwardOpKey);
+    RUN_TEST(testLinearBackwardDxOpDrawsFromItsBackwardOpKey);
+    RUN_TEST(testLinearForwardWithoutAContextHandsTheFunnelNoStream);
     RUN_TEST(testLinearBackwardNullPropLossComputesGradsOnly);
     RUN_TEST(testLinearForwardGroupedSymWeights);
     RUN_TEST(testLinearForwardGroupedFloatPathAgreesWithinTolerance);

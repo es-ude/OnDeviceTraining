@@ -947,7 +947,7 @@ void testConv1dCalcWeightGradsSymGroupsGrouped() {
     quantization_t *sq = quantizationInitSymInt32(HALF_AWAY);
     initConv1dConfigWithWeightsAndBias(&cfg, &kernel, weights, bias, 2, sq, sq, sq, sq);
 
-    conv1dCalcWeightGradsSymInt32(&cfg, input, lossGrad);
+    conv1dCalcWeightGradsSymInt32(&cfg, input, lossGrad, NULL);
 
     int32_t *m = (int32_t *)weights->grad->data;
     for (size_t i = 0; i < expectedWeightGrad_conv1dSym_groupsGroupedSym_len; i++) {
@@ -1013,7 +1013,7 @@ void testConv1dCalcBiasGradsSymPointwise() {
     quantization_t *sq = quantizationInitSymInt32(HALF_AWAY);
     initConv1dConfigWithWeightsAndBias(&cfg, &kernel, weights, bias, 1, sq, sq, sq, sq);
 
-    conv1dCalcBiasGradsSymInt32(&cfg, lossGrad);
+    conv1dCalcBiasGradsSymInt32(&cfg, lossGrad, NULL);
 
     int32_t *m = (int32_t *)bias->grad->data;
     for (size_t i = 0; i < expectedBiasGrad_conv1dSym_pointwise_len; i++) {
@@ -1315,7 +1315,7 @@ void testConv1dWeightGradSymRejectsBatchMismatch() {
     quantization_t *sq = quantizationInitSymInt32(HALF_AWAY);
     initConv1dConfigWithWeightsAndBias(&cfg, &kernel, weights, NULL, 2, sq, sq, sq, sq);
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dCalcWeightGradsSymInt32(&cfg, input, lossGrad));
+    ASSERT_EXITS_WITH_FAILURE(conv1dCalcWeightGradsSymInt32(&cfg, input, lossGrad, NULL));
 }
 
 void testConv1dWeightGradSymRejectsOutChannelMismatch() {
@@ -1333,7 +1333,7 @@ void testConv1dWeightGradSymRejectsOutChannelMismatch() {
     quantization_t *sq = quantizationInitSymInt32(HALF_AWAY);
     initConv1dConfigWithWeightsAndBias(&cfg, &kernel, weights, NULL, 2, sq, sq, sq, sq);
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dCalcWeightGradsSymInt32(&cfg, input, lossGrad));
+    ASSERT_EXITS_WITH_FAILURE(conv1dCalcWeightGradsSymInt32(&cfg, input, lossGrad, NULL));
 }
 
 /* #420 G1: the input-channels-vs-weight-dims guard PR3 added to the BFP
@@ -1381,7 +1381,7 @@ void testConv1dWeightGradSymRejectsInputChannelMismatch() {
     quantization_t *sq = quantizationInitSymInt32(HALF_AWAY);
     initConv1dConfigWithWeightsAndBias(&cfg, &kernel, weights, NULL, 2, sq, sq, sq, sq);
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dCalcWeightGradsSymInt32(&cfg, input, lossGrad));
+    ASSERT_EXITS_WITH_FAILURE(conv1dCalcWeightGradsSymInt32(&cfg, input, lossGrad, NULL));
 }
 
 void testConv1dBiasGradFloatRejectsOutChannelMismatch() {
@@ -1431,7 +1431,7 @@ void testConv1dBiasGradSymRejectsOutChannelMismatch() {
     quantization_t *sq = quantizationInitSymInt32(HALF_AWAY);
     initConv1dConfigWithWeightsAndBias(&cfg, &kernel, weights, bias, 1, sq, sq, sq, sq);
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dCalcBiasGradsSymInt32(&cfg, lossGrad));
+    ASSERT_EXITS_WITH_FAILURE(conv1dCalcBiasGradsSymInt32(&cfg, lossGrad, NULL));
 }
 
 /* #380 PR1 Task 2: create-time trainable knob (trainable_t). */
@@ -2834,7 +2834,7 @@ void testConv1dCalcWeightGradsBfpRejectsFloat32Weights(void) {
     tensor_t *lossGrad = buildBfpBwdLossGrad();
 
     ASSERT_EXITS_WITH_FAILURE(
-        conv1dCalcWeightGradsBfp(conv1d->config->conv1d, forwardInput, lossGrad));
+        conv1dCalcWeightGradsBfp(conv1d->config->conv1d, forwardInput, lossGrad, NULL));
 
     freeConv1dLayer(conv1d);
     freeTensor(lossGrad);
@@ -2860,7 +2860,7 @@ void testConv1dCalcBiasGradsBfpRejectsFloat32Weights(void) {
 
     tensor_t *lossGrad = buildBfpBwdLossGrad();
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dCalcBiasGradsBfp(conv1d->config->conv1d, lossGrad));
+    ASSERT_EXITS_WITH_FAILURE(conv1dCalcBiasGradsBfp(conv1d->config->conv1d, lossGrad, NULL));
 
     freeConv1dLayer(conv1d);
     freeTensor(lossGrad);
@@ -2890,7 +2890,7 @@ void testConv1dCalcWeightGradsBfpRejectsInputChannelMismatch(void) {
     tensor_t *lossGrad = buildBfpBwdLossGrad();
 
     ASSERT_EXITS_WITH_FAILURE(
-        conv1dCalcWeightGradsBfp(conv1d->config->conv1d, forwardInput, lossGrad));
+        conv1dCalcWeightGradsBfp(conv1d->config->conv1d, forwardInput, lossGrad, NULL));
 
     freeConv1dLayer(conv1d);
     freeTensor(lossGrad);

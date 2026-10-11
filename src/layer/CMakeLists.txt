@@ -1,6 +1,8 @@
 add_library(Conv1d Conv1d.c)
 target_include_directories(Conv1d PUBLIC include)
 target_link_libraries(Conv1d PRIVATE
+        LayerExec
+        RNG
         DTypes
         Tensor
         Arithmetic
@@ -18,6 +20,8 @@ target_link_libraries(Conv1d PRIVATE
 add_library(Conv1dTransposed Conv1dTransposed.c)
 target_include_directories(Conv1dTransposed PUBLIC include)
 target_link_libraries(Conv1dTransposed PRIVATE
+        LayerExec
+        RNG
         DTypes
         Tensor
         Arithmetic
@@ -35,6 +39,8 @@ target_link_libraries(Conv1dTransposed PRIVATE
 add_library(MaxPool1d MaxPool1d.c)
 target_include_directories(MaxPool1d PUBLIC include)
 target_link_libraries(MaxPool1d PRIVATE
+        LayerExec
+        RNG
         DTypes
         Tensor
         Quantization
@@ -52,6 +58,8 @@ target_link_libraries(MaxPool1d PRIVATE
 add_library(AvgPool1d AvgPool1d.c)
 target_include_directories(AvgPool1d PUBLIC include)
 target_link_libraries(AvgPool1d PRIVATE
+        LayerExec
+        RNG
         DTypes
         Tensor
         Quantization
@@ -67,6 +75,8 @@ target_link_libraries(AvgPool1d PRIVATE
 add_library(AdaptiveAvgPool1d AdaptiveAvgPool1d.c)
 target_include_directories(AdaptiveAvgPool1d PUBLIC include)
 target_link_libraries(AdaptiveAvgPool1d PRIVATE
+        LayerExec
+        RNG
         DTypes
         Tensor
         Quantization
@@ -95,6 +105,8 @@ target_link_libraries(Dropout PRIVATE
 add_library(LayerNorm LayerNorm.c)
 target_include_directories(LayerNorm PUBLIC include)
 target_link_libraries(LayerNorm PRIVATE
+        LayerExec
+        RNG
         DTypes
         Tensor
         TensorConversion
@@ -115,6 +127,8 @@ target_link_libraries(LayerNorm PRIVATE
 add_library(GroupNorm GroupNorm.c)
 target_include_directories(GroupNorm PUBLIC include)
 target_link_libraries(GroupNorm PRIVATE
+        LayerExec
+        RNG
         DTypes
         Tensor
         Quantization
@@ -135,6 +149,8 @@ target_link_libraries(GroupNorm PRIVATE
 add_library(BatchNorm1d BatchNorm1d.c)
 target_include_directories(BatchNorm1d PUBLIC include)
 target_link_libraries(BatchNorm1d PRIVATE
+        LayerExec
+        RNG
         DTypes
         Tensor
         Quantization
@@ -185,6 +201,8 @@ target_link_libraries(Layer PRIVATE
 add_library(Linear Linear.c)
 target_include_directories(Linear PUBLIC include)
 target_link_libraries(Linear PRIVATE
+        LayerExec
+        RNG
         DTypes
         Tensor
         Arithmetic
@@ -224,6 +242,8 @@ target_link_libraries(Relu PRIVATE
 add_library(Softmax Softmax.c)
 target_include_directories(Softmax PUBLIC include)
 target_link_libraries(Softmax PRIVATE
+        LayerExec
+        RNG
         DTypes
         Tensor
         Arithmetic

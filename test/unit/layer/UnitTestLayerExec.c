@@ -66,10 +66,42 @@ void testLayerExecPhaseKeyFoldsTheBackwardPhase(void) {
     assertKey(0xfc1567afu, 0xac9a7ff1u, storage);
 }
 
+/* The op key is the phase key folded with (OP, opIndex). Python, tags as
+ * numbers (FORWARD 4, BACKWARD 5, OP 7):
+ *   uv run python -c "from examples._shared.keyed_rng import (fold,
+ *   key_from_seed as kfs); k = kfs(0x1a7e); print([[hex(w) for w in x]
+ *   for x in (fold(fold(k, 4, 0), 7, 0), fold(fold(k, 5, 0), 7, 3))])" */
+void testLayerExecOpKeyFoldsThePhaseThenTheOpIndex(void) {
+    layerExec_t exec = {.key = rngKeyFromSeed(LAYER_EXEC_TEST_SEED)};
+    rngKey_t phase;
+    rngKey_t storage;
+
+    const rngKey_t *op = layerExecOpKey(&exec, RNG_TAG_FORWARD, 0u, &storage);
+    TEST_ASSERT_EQUAL_PTR(&storage, op);
+    assertSameKey(rngFold(*layerExecPhaseKey(&exec, RNG_TAG_FORWARD, &phase), RNG_TAG_OP, 0u),
+                  storage);
+    assertKey(0x260d8a9du, 0x002d0794u, storage);
+
+    op = layerExecOpKey(&exec, RNG_TAG_BACKWARD, 3u, &storage);
+    TEST_ASSERT_EQUAL_PTR(&storage, op);
+    assertSameKey(rngFold(*layerExecPhaseKey(&exec, RNG_TAG_BACKWARD, &phase), RNG_TAG_OP, 3u),
+                  storage);
+    assertKey(0x05fbab60u, 0x814d2f62u, storage);
+}
+
+void testLayerExecOpKeyIsNullWithoutAContext(void) {
+    rngKey_t storage = {{0xdeadbeefu, 0xdeadbeefu}};
+
+    TEST_ASSERT_NULL(layerExecOpKey(NULL, RNG_TAG_BACKWARD, 3u, &storage));
+    assertKey(0xdeadbeefu, 0xdeadbeefu, storage);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLayerExecPhaseKeyIsNullWithoutAContext);
     RUN_TEST(testLayerExecPhaseKeyFoldsTheForwardPhase);
     RUN_TEST(testLayerExecPhaseKeyFoldsTheBackwardPhase);
+    RUN_TEST(testLayerExecOpKeyFoldsThePhaseThenTheOpIndex);
+    RUN_TEST(testLayerExecOpKeyIsNullWithoutAContext);
     return UNITY_END();
 }

@@ -18,4 +18,11 @@ typedef struct layerExec {
  * key pointer it hands on never dangles. */
 const rngKey_t *layerExecPhaseKey(const layerExec_t *exec, uint32_t phaseTag, rngKey_t *storage);
 
+/* The key of the layer's opIndex-th funnel op in phase phaseTag, for
+ * opSpec_t.key: NULL iff exec is NULL; otherwise *storage =
+ * rngFold(rngFold(exec->key, phaseTag, 0), RNG_TAG_OP, opIndex) and the
+ * result is storage. opIndex is the layer's OP(k) constant. */
+const rngKey_t *layerExecOpKey(const layerExec_t *exec, uint32_t phaseTag, uint32_t opIndex,
+                               rngKey_t *storage);
+
 #endif

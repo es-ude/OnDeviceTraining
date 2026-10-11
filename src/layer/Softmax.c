@@ -10,6 +10,7 @@
 #include "BfpSoftmaxExp.h"
 #include "Common.h"
 #include "ExecuteOp.h"
+#include "LayerExec.h"
 #include "Softmax.h"
 #include "TensorConversion.h"
 
@@ -257,8 +258,16 @@ static void softmaxBfpRequireSingleRow(const tensor_t *t, const char *where) {
     }
 }
 
+/* OP(k) of each funnel op of this layer, for layerExecOpKey. Part of the
+ * value contract: append, never renumber. */
+enum {
+    SOFTMAX_OP_FORWARD = 0,
+    SOFTMAX_OP_PROP_LOSS = 1,
+};
+
 void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output,
                     const layerExec_t *exec) {
+    rngKey_t opKey;
     softmaxConfig_t *cfg = softmaxLayer->config->softmax;
     switch (cfg->forwardMath.type) {
     case ARITH_BFP: {
@@ -270,14 +279,16 @@ void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output,
                               .roundingMode = cfg->forwardMath.roundingMode,
                               .mantissaBits = anchor->mantissaBits,
                               .exponentBits = anchor->exponentBits};
-        executeOp(&(opSpec_t){.kernel = softmaxForwardKernelBfp,
-                              .ctx = cfg,
-                              .inputs = (tensor_t *[]){input},
-                              .nInputs = 1,
-                              .arithmetic = cfg->forwardMath,
-                              .mode = OUT_WRITE,
-                              .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL}},
-                  output);
+        executeOp(
+            &(opSpec_t){.kernel = softmaxForwardKernelBfp,
+                        .ctx = cfg,
+                        .inputs = (tensor_t *[]){input},
+                        .nInputs = 1,
+                        .arithmetic = cfg->forwardMath,
+                        .key = layerExecOpKey(exec, RNG_TAG_FORWARD, SOFTMAX_OP_FORWARD, &opKey),
+                        .mode = OUT_WRITE,
+                        .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL}},
+            output);
         return;
     }
     case ARITH_FLOAT32:
@@ -287,13 +298,15 @@ void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output,
          * arithmetic stays HARDCODED ARITH_FLOAT32 (NOT cfg->forwardMath):
          * ARITH_SYM_INT32 would make the prologue unpack into int32 scratch
          * the float kernel misreads through a float* cast. */
-        executeOp(&(opSpec_t){.kernel = softmaxForwardKernel,
-                              .inputs = (tensor_t *[]){input},
-                              .nInputs = 1,
-                              .arithmetic =
-                                  (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY},
-                              .mode = OUT_WRITE},
-                  output);
+        executeOp(
+            &(opSpec_t){.kernel = softmaxForwardKernel,
+                        .key = layerExecOpKey(exec, RNG_TAG_FORWARD, SOFTMAX_OP_FORWARD, &opKey),
+                        .inputs = (tensor_t *[]){input},
+                        .nInputs = 1,
+                        .arithmetic =
+                            (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY},
+                        .mode = OUT_WRITE},
+            output);
         return;
     default:
         PRINT_ERROR("Softmax forward: declared forwardMath %d not implemented",
@@ -463,6 +476,7 @@ static void softmaxBackwardKernelBfp(tensor_t **ops, size_t nOps, tensor_t *rawO
 
 void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, tensor_t *propLoss,
                      const layerExec_t *exec) {
+    rngKey_t opKey;
     softmaxConfig_t *cfg = softmaxLayer->config->softmax;
     switch (cfg->propLossMath.type) {
     case ARITH_FLOAT32:
@@ -494,15 +508,17 @@ void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, ten
                               .roundingMode = cfg->propLossMath.roundingMode,
                               .mantissaBits = anchor->mantissaBits,
                               .exponentBits = anchor->exponentBits};
-        executeOp(&(opSpec_t){.kernel = softmaxBackwardKernelBfp,
-                              .ctx = cfg,
-                              .inputs = (tensor_t *[]){input, loss},
-                              .nInputs = 2,
-                              .arithmetic = cfg->propLossMath,
-                              .mode = OUT_WRITE,
-                              .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL,
-                                           loss->quantization->type == FLOAT32 ? &stage : NULL}},
-                  propLoss);
+        executeOp(
+            &(opSpec_t){.kernel = softmaxBackwardKernelBfp,
+                        .ctx = cfg,
+                        .inputs = (tensor_t *[]){input, loss},
+                        .nInputs = 2,
+                        .arithmetic = cfg->propLossMath,
+                        .key = layerExecOpKey(exec, RNG_TAG_BACKWARD, SOFTMAX_OP_PROP_LOSS, &opKey),
+                        .mode = OUT_WRITE,
+                        .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL,
+                                     loss->quantization->type == FLOAT32 ? &stage : NULL}},
+            propLoss);
         break;
     }
     default:

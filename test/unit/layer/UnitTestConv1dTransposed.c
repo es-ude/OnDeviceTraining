@@ -649,7 +649,7 @@ void testConv1dTransposedCalcWeightGradsSymGroupsGrouped() {
     initConv1dTransposedConfigWithWeightsAndBias(&cfg, &kernel, weights, bias, 2, 0, sq, sq, sq,
                                                  sq);
 
-    conv1dTransposedCalcWeightGradsSymInt32(&cfg, input, lossGrad);
+    conv1dTransposedCalcWeightGradsSymInt32(&cfg, input, lossGrad, NULL);
 
     int32_t *m = (int32_t *)weights->grad->data;
     for (size_t i = 0; i < expectedWeightGrad_convT1dSym_groupsGroupedSym_len; i++) {
@@ -682,7 +682,7 @@ void testConv1dTransposedCalcBiasGradsSymMultiChannel() {
     initConv1dTransposedConfigWithWeightsAndBias(&cfg, &kernel, weights, bias, 1, 0, sq, sq, sq,
                                                  sq);
 
-    conv1dTransposedCalcBiasGradsSymInt32(&cfg, lossGrad);
+    conv1dTransposedCalcBiasGradsSymInt32(&cfg, lossGrad, NULL);
 
     int32_t *m = (int32_t *)bias->grad->data;
     for (size_t i = 0; i < expectedBiasGrad_convT1dSym_multiChannelWithBiasSym_len; i++) {
@@ -964,7 +964,7 @@ void testConv1dTransposedWeightGradSymRejectsBatchMismatch() {
     initConv1dTransposedConfigWithWeightsAndBias(&cfg, &kernel, weights, NULL, 2, 0, sq, sq, sq,
                                                  sq);
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedCalcWeightGradsSymInt32(&cfg, input, lossGrad));
+    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedCalcWeightGradsSymInt32(&cfg, input, lossGrad, NULL));
 }
 
 void testConv1dTransposedWeightGradSymRejectsOutChannelMismatch() {
@@ -983,7 +983,7 @@ void testConv1dTransposedWeightGradSymRejectsOutChannelMismatch() {
     initConv1dTransposedConfigWithWeightsAndBias(&cfg, &kernel, weights, NULL, 2, 0, sq, sq, sq,
                                                  sq);
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedCalcWeightGradsSymInt32(&cfg, input, lossGrad));
+    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedCalcWeightGradsSymInt32(&cfg, input, lossGrad, NULL));
 }
 
 /* #420 G1: ConvT twin of Conv1d's float/SYM input-channel guards. The ConvT
@@ -1025,7 +1025,7 @@ void testConv1dTransposedWeightGradSymRejectsInputChannelMismatch() {
     initConv1dTransposedConfigWithWeightsAndBias(&cfg, &kernel, weights, NULL, 2, 0, sq, sq, sq,
                                                  sq);
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedCalcWeightGradsSymInt32(&cfg, input, lossGrad));
+    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedCalcWeightGradsSymInt32(&cfg, input, lossGrad, NULL));
 }
 
 void testConv1dTransposedBiasGradFloatRejectsOutChannelMismatch() {
@@ -1070,7 +1070,7 @@ void testConv1dTransposedBiasGradSymRejectsOutChannelMismatch() {
     initConv1dTransposedConfigWithWeightsAndBias(&cfg, &kernel, weights, bias, 1, 0, sq, sq, sq,
                                                  sq);
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedCalcBiasGradsSymInt32(&cfg, lossGrad));
+    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedCalcBiasGradsSymInt32(&cfg, lossGrad, NULL));
 }
 
 /* #380 PR1 Task 2: create-time trainable knob (trainable_t). */
@@ -2474,7 +2474,7 @@ void testConv1dTransposedCalcWeightGradsBfpRejectsFloat32Weights(void) {
     tensor_t *lossGrad = buildBfpConvTBwdLossGrad();
 
     ASSERT_EXITS_WITH_FAILURE(conv1dTransposedCalcWeightGradsBfp(convT->config->conv1dTransposed,
-                                                                 forwardInput, lossGrad));
+                                                                 forwardInput, lossGrad, NULL));
 
     freeConv1dTransposedLayer(convT);
     freeTensor(lossGrad);
@@ -2491,7 +2491,7 @@ void testConv1dTransposedCalcBiasGradsBfpRejectsFloat32Weights(void) {
     tensor_t *lossGrad = buildBfpConvTBwdLossGrad();
 
     ASSERT_EXITS_WITH_FAILURE(
-        conv1dTransposedCalcBiasGradsBfp(convT->config->conv1dTransposed, lossGrad));
+        conv1dTransposedCalcBiasGradsBfp(convT->config->conv1dTransposed, lossGrad, NULL));
 
     freeConv1dTransposedLayer(convT);
     freeTensor(lossGrad);
@@ -2519,7 +2519,7 @@ void testConvT1dCalcWeightGradsBfpRejectsInputChannelMismatch(void) {
     tensor_t *lossGrad = buildBfpConvTBwdLossGrad();
 
     ASSERT_EXITS_WITH_FAILURE(conv1dTransposedCalcWeightGradsBfp(convT->config->conv1dTransposed,
-                                                                 forwardInput, lossGrad));
+                                                                 forwardInput, lossGrad, NULL));
 
     freeConv1dTransposedLayer(convT);
     freeTensor(lossGrad);

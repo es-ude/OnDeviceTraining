@@ -16,6 +16,7 @@
 #include "Div.h"
 #include "ExecuteOp.h"
 #include "Layer.h"
+#include "LayerExec.h"
 #include "MinMax.h"
 #include "Mul.h"
 #include "Quantization.h"
@@ -561,7 +562,17 @@ static opKernelFn_t groupNormSelectForwardKernel(const groupNormConfig_t *cfg) {
     }
 }
 
+/* OP(k) of each funnel op of this layer, for layerExecOpKey. Part of the
+ * value contract: append, never renumber. */
+enum {
+    GROUPNORM_OP_FORWARD = 0,
+    GROUPNORM_OP_GAMMA_GRAD = 1,
+    GROUPNORM_OP_BETA_GRAD = 2,
+    GROUPNORM_OP_PROP_LOSS = 3,
+};
+
 void groupNormForward(layer_t *layer, tensor_t *input, tensor_t *output, const layerExec_t *exec) {
+    rngKey_t opKey;
     groupNormConfig_t *cfg = layer->config->groupNorm;
     groupNormValidateInputShape(cfg, input);
     groupNormRequireInputShape(input, output, "output");
@@ -583,6 +594,7 @@ void groupNormForward(layer_t *layer, tensor_t *input, tensor_t *output, const l
                 .inputs = (tensor_t *[]){input, gammaT, betaT},
                 .nInputs = 3,
                 .arithmetic = cfg->forwardMath,
+                .key = layerExecOpKey(exec, RNG_TAG_FORWARD, GROUPNORM_OP_FORWARD, &opKey),
                 .mode = OUT_WRITE,
                 .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL,
                              gammaT->quantization->type == FLOAT32 ? &stage : NULL,
@@ -600,6 +612,7 @@ void groupNormForward(layer_t *layer, tensor_t *input, tensor_t *output, const l
                                      getParamFromParameter(cfg->beta)},
             .nInputs = 3,
             .arithmetic = cfg->forwardMath,
+            .key = layerExecOpKey(exec, RNG_TAG_FORWARD, GROUPNORM_OP_FORWARD, &opKey),
             .mode = OUT_WRITE,
         },
         output);
@@ -701,7 +714,8 @@ static void groupNormBackwardFloat(groupNormConfig_t *cfg, tensor_t *forwardInpu
  *         absmax/qMax, round-clamp; absmax==0 -> zeros, scale 1.0). The
  *         propLoss scale is data-dependent and REFRESHED ON EVERY CALL. */
 static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardInput,
-                                      tensor_t *loss, tensor_t *propLoss) {
+                                      tensor_t *loss, tensor_t *propLoss, const layerExec_t *exec) {
+    rngKey_t opKey;
     groupNormValidateSymTensor(forwardInput, "forwardInput");
     groupNormValidateSymTensor(loss, "loss");
     /* propLoss == NULL (#380 PR2): grads-only call -- skip validating and
@@ -803,6 +817,7 @@ static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardI
                 .nInputs = 1,
                 .arithmetic = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY},
                 .mode = cfg->weightGradAccMode,
+                .key = layerExecOpKey(exec, RNG_TAG_BACKWARD, GROUPNORM_OP_GAMMA_GRAD, &opKey),
             },
             cfg->gamma->grad);
         executeOpValidateAccMode(cfg->biasGradAccMode, "GroupNorm biasGradAccMode");
@@ -813,6 +828,7 @@ static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardI
                 .nInputs = 1,
                 .arithmetic = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY},
                 .mode = cfg->biasGradAccMode,
+                .key = layerExecOpKey(exec, RNG_TAG_BACKWARD, GROUPNORM_OP_BETA_GRAD, &opKey),
             },
             cfg->beta->grad);
     }
@@ -1093,6 +1109,7 @@ static void groupNormDxKernelBfp(tensor_t **operands, size_t nOperands, tensor_t
 
 void groupNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss,
                        const layerExec_t *exec) {
+    rngKey_t opKey;
     groupNormConfig_t *cfg = layer->config->groupNorm;
     groupNormValidateInputShape(cfg, forwardInput);
     groupNormRequireInputShape(forwardInput, loss, "loss");
@@ -1148,7 +1165,7 @@ void groupNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
         groupNormBackwardFloat(cfg, forwardInput, loss, propLoss);
         break;
     case ARITH_SYM_INT32:
-        groupNormBackwardSymInt32(cfg, forwardInput, loss, propLoss);
+        groupNormBackwardSymInt32(cfg, forwardInput, loss, propLoss, exec);
         break;
     case ARITH_BFP: {
         /* R-N1: propLossQ anchors ALL THREE backward ops' staging, even when
@@ -1179,6 +1196,8 @@ void groupNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
                                   .nInputs = 2,
                                   .arithmetic = cfg->propLossMath,
                                   .mode = cfg->weightGradAccMode,
+                                  .key = layerExecOpKey(exec, RNG_TAG_BACKWARD,
+                                                        GROUPNORM_OP_GAMMA_GRAD, &opKey),
                                   .bfpStage = {fiStage, dyStage, NULL}},
                       cfg->gamma->grad);
             executeOpValidateAccMode(cfg->biasGradAccMode, "GroupNorm biasGradAccMode");
@@ -1188,11 +1207,15 @@ void groupNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
                                   .nInputs = 1,
                                   .arithmetic = cfg->propLossMath,
                                   .mode = cfg->biasGradAccMode,
+                                  .key = layerExecOpKey(exec, RNG_TAG_BACKWARD,
+                                                        GROUPNORM_OP_BETA_GRAD, &opKey),
                                   .bfpStage = {dyStage, NULL, NULL}},
                       cfg->beta->grad);
         }
         if (propLoss != NULL) {
             executeOp(&(opSpec_t){.kernel = groupNormDxKernelBfp,
+                                  .key = layerExecOpKey(exec, RNG_TAG_BACKWARD,
+                                                        GROUPNORM_OP_PROP_LOSS, &opKey),
                                   .ctx = cfg,
                                   .inputs = (tensor_t *[]){forwardInput, loss, gammaT},
                                   .nInputs = 3,

@@ -11,6 +11,7 @@
 #include "Common.h"
 #include "ExecuteOp.h"
 #include "Layer.h"
+#include "LayerExec.h"
 #include "Quantization.h"
 #include "SlidingWindow1d.h"
 #include "StorageApi.h"
@@ -363,7 +364,15 @@ static void maxPoolEnsureArgmaxRows(maxPool1dConfig_t *cfg, const tensor_t *inpu
     }
 }
 
+/* OP(k) of each funnel op of this layer, for layerExecOpKey. Part of the
+ * value contract: append, never renumber. */
+enum {
+    MAXPOOL1D_OP_FORWARD = 0,
+    MAXPOOL1D_OP_PROP_LOSS = 1,
+};
+
 void maxPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const layerExec_t *exec) {
+    rngKey_t opKey;
     maxPool1dConfig_t *cfg = layer->config->maxPool1d;
     maxPoolEnsureArgmaxRows(cfg, input);
     if (cfg->forwardMath.type == ARITH_BFP) {
@@ -385,6 +394,7 @@ void maxPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const l
                 .inputs = (tensor_t *[]){input},
                 .nInputs = 1,
                 .arithmetic = cfg->forwardMath,
+                .key = layerExecOpKey(exec, RNG_TAG_FORWARD, MAXPOOL1D_OP_FORWARD, &opKey),
                 .mode = OUT_WRITE,
                 .auxOut = cfg->argmaxIndices,
                 .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL, NULL, NULL},
@@ -412,6 +422,7 @@ void maxPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const l
             .inputs = (tensor_t *[]){input},
             .nInputs = 1,
             .arithmetic = cfg->forwardMath,
+            .key = layerExecOpKey(exec, RNG_TAG_FORWARD, MAXPOOL1D_OP_FORWARD, &opKey),
             .mode = OUT_WRITE,
             .auxOut = cfg->argmaxIndices,
         },
@@ -644,6 +655,7 @@ static void maxPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOu
 
 void maxPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
                        tensor_t *propLoss, const layerExec_t *exec) {
+    rngKey_t opKey;
     maxPool1dConfig_t *cfg = layer->config->maxPool1d;
     switch (cfg->propLossMath.type) {
     case ARITH_FLOAT32:
@@ -665,6 +677,7 @@ void maxPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGra
                 .inputs = (tensor_t *[]){lossGrad},
                 .nInputs = 1,
                 .arithmetic = cfg->propLossMath,
+                .key = layerExecOpKey(exec, RNG_TAG_BACKWARD, MAXPOOL1D_OP_PROP_LOSS, &opKey),
                 .mode = OUT_WRITE,
             },
             propLoss);
@@ -685,6 +698,7 @@ void maxPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGra
                 .inputs = (tensor_t *[]){lossGrad},
                 .nInputs = 1,
                 .arithmetic = cfg->propLossMath,
+                .key = layerExecOpKey(exec, RNG_TAG_BACKWARD, MAXPOOL1D_OP_PROP_LOSS, &opKey),
                 .mode = OUT_WRITE,
                 .bfpStage = {lossGrad->quantization->type == FLOAT32 ? &stage : NULL, NULL, NULL},
             },

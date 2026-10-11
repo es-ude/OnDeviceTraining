@@ -171,6 +171,7 @@ add_elastic_ai_unit_test(
         Add
         Distributions
         RNG
+        LayerExec
         OptimizerApi
         SgdApi
         Sgd

@@ -11,6 +11,7 @@
 #include "ConvTranspose1dKernel.h"
 #include "ExecuteOp.h"
 #include "Layer.h"
+#include "LayerExec.h"
 #include "Mul.h"
 #include "Quantization.h"
 #include "SlidingWindow1d.h"
@@ -153,8 +154,18 @@ static const symQConfig_t *groupedWeightViewOrNull(const tensor_t *weights,
     return NULL;
 }
 
+/* OP(k) of each funnel op of this layer, for layerExecOpKey. Part of the
+ * value contract: append, never renumber. */
+enum {
+    CONV1D_TRANSPOSED_OP_FORWARD = 0,
+    CONV1D_TRANSPOSED_OP_WEIGHT_GRAD = 1,
+    CONV1D_TRANSPOSED_OP_BIAS_GRAD = 2,
+    CONV1D_TRANSPOSED_OP_PROP_LOSS = 3,
+};
+
 void conv1dTransposedForward(layer_t *layer, tensor_t *input, tensor_t *output,
                              const layerExec_t *exec) {
+    rngKey_t opKey;
     conv1dTransposedConfig_t *cfg = layer->config->conv1dTransposed;
     tensor_t *weightTensor = cfg->weights->param;
     tensor_t *biasTensor = cfg->bias ? cfg->bias->param : NULL;
@@ -187,6 +198,7 @@ void conv1dTransposedForward(layer_t *layer, tensor_t *input, tensor_t *output,
                                              : (tensor_t *[]){input, weightTensor},
                 .nInputs = biasTensor != NULL ? 3 : 2,
                 .arithmetic = cfg->forwardMath,
+                .key = layerExecOpKey(exec, RNG_TAG_FORWARD, CONV1D_TRANSPOSED_OP_FORWARD, &opKey),
                 .mode = OUT_WRITE,
                 .groupedSymOperandPos = grouped ? 2 : 0,
             },
@@ -201,6 +213,7 @@ void conv1dTransposedForward(layer_t *layer, tensor_t *input, tensor_t *output,
                                              : (tensor_t *[]){input, weightTensor},
                 .nInputs = biasTensor != NULL ? 3 : 2,
                 .arithmetic = cfg->forwardMath,
+                .key = layerExecOpKey(exec, RNG_TAG_FORWARD, CONV1D_TRANSPOSED_OP_FORWARD, &opKey),
                 .mode = OUT_WRITE,
                 .groupedSymOperandPos = grouped ? 2 : 0,
             },
@@ -237,6 +250,7 @@ void conv1dTransposedForward(layer_t *layer, tensor_t *input, tensor_t *output,
                                              : (tensor_t *[]){input, weightTensor},
                 .nInputs = biasTensor != NULL ? 3 : 2,
                 .arithmetic = cfg->forwardMath,
+                .key = layerExecOpKey(exec, RNG_TAG_FORWARD, CONV1D_TRANSPOSED_OP_FORWARD, &opKey),
                 .mode = OUT_WRITE,
                 .groupedSymOperandPos = 0,
                 .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL, NULL,
@@ -354,7 +368,8 @@ static void weightGradKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, te
 }
 
 static void conv1dTransposedCalcWeightGradsFloat32(conv1dTransposedConfig_t *cfg,
-                                                   tensor_t *forwardInput, tensor_t *lossGrad) {
+                                                   tensor_t *forwardInput, tensor_t *lossGrad,
+                                                   const rngKey_t *key) {
     executeOpValidateAccMode(cfg->weightGradAccMode, "Conv1dTransposed weightGradAccMode");
     executeOp(
         &(opSpec_t){
@@ -363,6 +378,7 @@ static void conv1dTransposedCalcWeightGradsFloat32(conv1dTransposedConfig_t *cfg
             .inputs = (tensor_t *[]){forwardInput, lossGrad},
             .nInputs = 2,
             .arithmetic = cfg->weightGradMath,
+            .key = key,
             .mode = cfg->weightGradAccMode,
         },
         cfg->weights->grad);
@@ -401,8 +417,8 @@ static void biasGradKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tens
     }
 }
 
-static void conv1dTransposedCalcBiasGradsFloat32(conv1dTransposedConfig_t *cfg,
-                                                 tensor_t *lossGrad) {
+static void conv1dTransposedCalcBiasGradsFloat32(conv1dTransposedConfig_t *cfg, tensor_t *lossGrad,
+                                                 const rngKey_t *key) {
     executeOpValidateAccMode(cfg->biasGradAccMode, "Conv1dTransposed biasGradAccMode");
     executeOp(
         &(opSpec_t){
@@ -411,6 +427,7 @@ static void conv1dTransposedCalcBiasGradsFloat32(conv1dTransposedConfig_t *cfg,
             .inputs = (tensor_t *[]){lossGrad},
             .nInputs = 1,
             .arithmetic = cfg->biasGradMath,
+            .key = key,
             .mode = cfg->biasGradAccMode,
         },
         cfg->bias->grad);
@@ -516,7 +533,7 @@ static void weightGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tens
 }
 
 void conv1dTransposedCalcWeightGradsSymInt32(conv1dTransposedConfig_t *cfg, tensor_t *forwardInput,
-                                             tensor_t *lossGrad) {
+                                             tensor_t *lossGrad, const rngKey_t *key) {
     executeOpValidateAccMode(cfg->weightGradAccMode, "Conv1dTransposed weightGradAccMode");
     executeOp(
         &(opSpec_t){
@@ -525,6 +542,7 @@ void conv1dTransposedCalcWeightGradsSymInt32(conv1dTransposedConfig_t *cfg, tens
             .inputs = (tensor_t *[]){forwardInput, lossGrad},
             .nInputs = 2,
             .arithmetic = cfg->weightGradMath,
+            .key = key,
             .mode = cfg->weightGradAccMode,
         },
         cfg->weights->grad);
@@ -683,7 +701,7 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
 }
 
 void conv1dTransposedCalcWeightGradsBfp(conv1dTransposedConfig_t *cfg, tensor_t *forwardInput,
-                                        tensor_t *lossGrad) {
+                                        tensor_t *lossGrad, const rngKey_t *key) {
     executeOpValidateAccMode(cfg->weightGradAccMode, "Conv1dTransposed weightGradAccMode");
     tensor_t *weightTensor = cfg->weights->param;
     /* Public-boundary re-guard of the conv1dTransposedBackward dispatch rule
@@ -713,6 +731,7 @@ void conv1dTransposedCalcWeightGradsBfp(conv1dTransposedConfig_t *cfg, tensor_t 
             .inputs = (tensor_t *[]){forwardInput, lossGrad},
             .nInputs = 2,
             .arithmetic = cfg->weightGradMath,
+            .key = key,
             .mode = cfg->weightGradAccMode,
             .bfpStage = {forwardInput->quantization->type == FLOAT32 ? &stage : NULL,
                          lossGrad->quantization->type == FLOAT32 ? &stage : NULL, NULL},
@@ -758,7 +777,8 @@ static void biasGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
     ((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale = lossScale;
 }
 
-void conv1dTransposedCalcBiasGradsSymInt32(conv1dTransposedConfig_t *cfg, tensor_t *lossGrad) {
+void conv1dTransposedCalcBiasGradsSymInt32(conv1dTransposedConfig_t *cfg, tensor_t *lossGrad,
+                                           const rngKey_t *key) {
     executeOpValidateAccMode(cfg->biasGradAccMode, "Conv1dTransposed biasGradAccMode");
     executeOp(
         &(opSpec_t){
@@ -767,6 +787,7 @@ void conv1dTransposedCalcBiasGradsSymInt32(conv1dTransposedConfig_t *cfg, tensor
             .inputs = (tensor_t *[]){lossGrad},
             .nInputs = 1,
             .arithmetic = cfg->biasGradMath,
+            .key = key,
             .mode = cfg->biasGradAccMode,
         },
         cfg->bias->grad);
@@ -831,7 +852,8 @@ static void biasGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
     }
 }
 
-void conv1dTransposedCalcBiasGradsBfp(conv1dTransposedConfig_t *cfg, tensor_t *lossGrad) {
+void conv1dTransposedCalcBiasGradsBfp(conv1dTransposedConfig_t *cfg, tensor_t *lossGrad,
+                                      const rngKey_t *key) {
     executeOpValidateAccMode(cfg->biasGradAccMode, "Conv1dTransposed biasGradAccMode");
     tensor_t *weightTensor = cfg->weights->param;
     /* Public-boundary re-guard of the conv1dTransposedBackward dispatch rule
@@ -860,6 +882,7 @@ void conv1dTransposedCalcBiasGradsBfp(conv1dTransposedConfig_t *cfg, tensor_t *l
             .inputs = (tensor_t *[]){lossGrad},
             .nInputs = 1,
             .arithmetic = cfg->biasGradMath,
+            .key = key,
             .mode = cfg->biasGradAccMode,
             .bfpStage = {lossGrad->quantization->type == FLOAT32 ? &stage : NULL, NULL, NULL},
         },
@@ -916,6 +939,7 @@ static void propLossKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
 
 void conv1dTransposedBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
                               tensor_t *propLoss, const layerExec_t *exec) {
+    rngKey_t opKey;
     conv1dTransposedConfig_t *cfg = layer->config->conv1dTransposed;
     tensor_t *weightTensor = cfg->weights->param;
 
@@ -954,13 +978,19 @@ void conv1dTransposedBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *
     if (!cfg->frozen) {
         switch (cfg->weightGradMath.type) {
         case ARITH_FLOAT32:
-            conv1dTransposedCalcWeightGradsFloat32(cfg, forwardInput, lossGrad);
+            conv1dTransposedCalcWeightGradsFloat32(
+                cfg, forwardInput, lossGrad,
+                layerExecOpKey(exec, RNG_TAG_BACKWARD, CONV1D_TRANSPOSED_OP_WEIGHT_GRAD, &opKey));
             break;
         case ARITH_SYM_INT32:
-            conv1dTransposedCalcWeightGradsSymInt32(cfg, forwardInput, lossGrad);
+            conv1dTransposedCalcWeightGradsSymInt32(
+                cfg, forwardInput, lossGrad,
+                layerExecOpKey(exec, RNG_TAG_BACKWARD, CONV1D_TRANSPOSED_OP_WEIGHT_GRAD, &opKey));
             break;
         case ARITH_BFP:
-            conv1dTransposedCalcWeightGradsBfp(cfg, forwardInput, lossGrad);
+            conv1dTransposedCalcWeightGradsBfp(
+                cfg, forwardInput, lossGrad,
+                layerExecOpKey(exec, RNG_TAG_BACKWARD, CONV1D_TRANSPOSED_OP_WEIGHT_GRAD, &opKey));
             break;
         default:
             PRINT_ERROR(
@@ -971,17 +1001,23 @@ void conv1dTransposedBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *
         switch (cfg->biasGradMath.type) {
         case ARITH_FLOAT32:
             if (cfg->bias) {
-                conv1dTransposedCalcBiasGradsFloat32(cfg, lossGrad);
+                conv1dTransposedCalcBiasGradsFloat32(
+                    cfg, lossGrad,
+                    layerExecOpKey(exec, RNG_TAG_BACKWARD, CONV1D_TRANSPOSED_OP_BIAS_GRAD, &opKey));
             }
             break;
         case ARITH_SYM_INT32:
             if (cfg->bias) {
-                conv1dTransposedCalcBiasGradsSymInt32(cfg, lossGrad);
+                conv1dTransposedCalcBiasGradsSymInt32(
+                    cfg, lossGrad,
+                    layerExecOpKey(exec, RNG_TAG_BACKWARD, CONV1D_TRANSPOSED_OP_BIAS_GRAD, &opKey));
             }
             break;
         case ARITH_BFP:
             if (cfg->bias) {
-                conv1dTransposedCalcBiasGradsBfp(cfg, lossGrad);
+                conv1dTransposedCalcBiasGradsBfp(
+                    cfg, lossGrad,
+                    layerExecOpKey(exec, RNG_TAG_BACKWARD, CONV1D_TRANSPOSED_OP_BIAS_GRAD, &opKey));
             }
             break;
         default:
@@ -1020,6 +1056,8 @@ void conv1dTransposedBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *
                     .inputs = (tensor_t *[]){lossGrad, weightTensor},
                     .nInputs = 2,
                     .arithmetic = cfg->propLossMath,
+                    .key = layerExecOpKey(exec, RNG_TAG_BACKWARD, CONV1D_TRANSPOSED_OP_PROP_LOSS,
+                                          &opKey),
                     .mode = OUT_WRITE,
                     .groupedSymOperandPos = grouped ? 2 : 0,
                 },
@@ -1033,6 +1071,8 @@ void conv1dTransposedBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *
                     .inputs = (tensor_t *[]){lossGrad, weightTensor},
                     .nInputs = 2,
                     .arithmetic = cfg->propLossMath,
+                    .key = layerExecOpKey(exec, RNG_TAG_BACKWARD, CONV1D_TRANSPOSED_OP_PROP_LOSS,
+                                          &opKey),
                     .mode = OUT_WRITE,
                     .groupedSymOperandPos = grouped ? 2 : 0,
                 },
@@ -1046,6 +1086,8 @@ void conv1dTransposedBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *
                     .inputs = (tensor_t *[]){lossGrad, weightTensor},
                     .nInputs = 2,
                     .arithmetic = cfg->propLossMath,
+                    .key = layerExecOpKey(exec, RNG_TAG_BACKWARD, CONV1D_TRANSPOSED_OP_PROP_LOSS,
+                                          &opKey),
                     .mode = OUT_WRITE,
                     /* SYM/ASYM-carrier gate -- BFP blocking is
                      * per-operand-legal, nothing is declared. */

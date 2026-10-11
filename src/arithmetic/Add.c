@@ -128,7 +128,8 @@ void addFloat32TensorToSymInt32TensorInplace(tensor_t *symInt32Tensor, tensor_t 
     writeInt32ArrayToByteArray(symInt32NumberOfValues, outputValues, symInt32Tensor->data);
 }
 
-void addSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor) {
+void addSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,
+                        rngStream_t *rs) {
     size_t aNumberOfValues = calcNumberOfElementsByTensor(aTensor);
     size_t bNumberOfValues = calcNumberOfElementsByTensor(bTensor);
 
@@ -165,20 +166,20 @@ void addSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTe
         uint8_t aFloatData[aNumberOfValues * sizeof(float)];
         tensor_t aFloat;
         setTensorValuesForConversion(aFloatData, &floatQ, &aFloat, aTensor);
-        convertTensor(aTensor, &aFloat, NULL);
+        convertTensor(aTensor, &aFloat, rs);
 
         uint8_t bFloatData[aNumberOfValues * sizeof(float)];
         tensor_t bFloat;
         setTensorValuesForConversion(bFloatData, &floatQ, bTensor, &bFloat);
-        convertTensor(bTensor, &bFloat, NULL);
+        convertTensor(bTensor, &bFloat, rs);
 
         addFloat32TensorsInplace(&aFloat, &bFloat);
 
-        convertTensor(&aFloat, outputTensor, NULL);
+        convertTensor(&aFloat, outputTensor, rs);
     }
 }
 
-void addSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor) {
+void addSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor, rngStream_t *rs) {
     size_t aNumberOfValues = calcNumberOfElementsByTensor(aTensor);
     size_t bNumberOfValues = calcNumberOfElementsByTensor(bTensor);
 
@@ -193,16 +194,16 @@ void addSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor) {
     uint8_t aFloatData[aNumberOfValues * sizeof(float)];
     tensor_t aFloat;
     setTensorValuesForConversion(aFloatData, &floatQ, aTensor, &aFloat);
-    convertTensor(aTensor, &aFloat, NULL);
+    convertTensor(aTensor, &aFloat, rs);
 
     uint8_t bFloatData[aNumberOfValues * sizeof(float)];
     tensor_t bFloat;
     setTensorValuesForConversion(bFloatData, &floatQ, bTensor, &bFloat);
-    convertTensor(bTensor, &bFloat, NULL);
+    convertTensor(bTensor, &bFloat, rs);
 
     addFloat32TensorsInplace(&aFloat, &bFloat);
 
-    convertTensor(&aFloat, aTensor, NULL);
+    convertTensor(&aFloat, aTensor, rs);
 }
 
 size_t getAddInstructionCounter() {

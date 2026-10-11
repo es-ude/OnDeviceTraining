@@ -1134,7 +1134,7 @@ static void packFloatBufferAsBfp(const float *values, size_t n, bfpQConfig_t *ou
  * (n entries) -- exempt from the no-O(n)-internal-scratch converter contract
  * by design; allocates nothing. Contract details in TensorConversion.h. */
 void quantizeFloatBufferToBfpCodes(const float *values, size_t n, bfpQConfig_t *outQC,
-                                   int32_t *codesOut) {
+                                   int32_t *codesOut, rngStream_t *rs) {
     /* #421 U9: the packed sibling's guard, for the same invariant. This form
      * never reads out of bounds (its per-group loops clip `end` to n), but a
      * numGroups * groupSize < n geometry leaves the codesOut TAIL
@@ -1166,8 +1166,7 @@ void quantizeFloatBufferToBfpCodes(const float *values, size_t n, bfpQConfig_t *
             /* #421 U2: float-domain clamp before the round -- see the packed
              * sibling's pass-2 comment for the cap-regime rationale. */
             float q = clamp(values[i] / scale, (float)qMin, qMax);
-            codesOut[i] =
-                clampInt32(roundByMode(q, outQC->roundingMode, NULL), qMin, (int32_t)qMax);
+            codesOut[i] = clampInt32(roundByMode(q, outQC->roundingMode, rs), qMin, (int32_t)qMax);
         }
     }
 }
@@ -1740,7 +1739,8 @@ static bool packedPayloadIsAllZero(const uint8_t *data, size_t bits, size_t n) {
     return true;
 }
 
-static void accumulateIntoSymFixedGridEngine(tensor_t *target, const incSrc_t *inc, size_t n) {
+static void accumulateIntoSymFixedGridEngine(tensor_t *target, const incSrc_t *inc, size_t n,
+                                             rngStream_t *rs) {
     symQConfig_t *qc = target->quantization->qConfig;
     int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
     float incBuf[ODT_CONVERSION_CHUNK_ELEMS];
@@ -1783,7 +1783,7 @@ static void accumulateIntoSymFixedGridEngine(tensor_t *target, const incSrc_t *i
         incSrcChunk(inc, off, count, incBuf);
         for (size_t i = 0; i < count; i++) {
             codes[i] =
-                roundByMode(((float)mant[i] * scale + incBuf[i]) / scale, qc->roundingMode, NULL);
+                roundByMode(((float)mant[i] * scale + incBuf[i]) / scale, qc->roundingMode, rs);
         }
         /* No clamp: packChunkGuarded aborts on overflow (packed-grad D2, #227 discipline). */
         packChunkGuarded(codes, count, target->data, qc->qBits, off,
@@ -1791,12 +1791,14 @@ static void accumulateIntoSymFixedGridEngine(tensor_t *target, const incSrc_t *i
     }
 }
 
-void accumulateFloatIntoSymTensorFixedGrid(tensor_t *target, const float *inc, size_t n) {
+void accumulateFloatIntoSymTensorFixedGrid(tensor_t *target, const float *inc, size_t n,
+                                           rngStream_t *rs) {
     incSrc_t src = {.flat = inc, .tens = NULL};
-    accumulateIntoSymFixedGridEngine(target, &src, n);
+    accumulateIntoSymFixedGridEngine(target, &src, n, rs);
 }
 
-void accumulateTensorIntoSymFixedGrid(tensor_t *target, const tensor_t *increment) {
+void accumulateTensorIntoSymFixedGrid(tensor_t *target, const tensor_t *increment,
+                                      rngStream_t *rs) {
     size_t n = calcNumberOfElementsByTensor(target);
     if (calcNumberOfElementsByTensor((tensor_t *)increment) != n) {
         PRINT_ERROR("accumulateTensorIntoSymFixedGrid: element-count mismatch");
@@ -1804,10 +1806,11 @@ void accumulateTensorIntoSymFixedGrid(tensor_t *target, const tensor_t *incremen
     }
     rejectAliasedIncrement(target, increment, "accumulateTensorIntoSymFixedGrid");
     incSrc_t src = {.flat = NULL, .tens = increment};
-    accumulateIntoSymFixedGridEngine(target, &src, n);
+    accumulateIntoSymFixedGridEngine(target, &src, n, rs);
 }
 
-static void accumulateIntoSymRescaleEngine(tensor_t *target, const incSrc_t *inc, size_t n) {
+static void accumulateIntoSymRescaleEngine(tensor_t *target, const incSrc_t *inc, size_t n,
+                                           rngStream_t *rs) {
     symQConfig_t *qc = target->quantization->qConfig;
     int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
     float incBuf[ODT_CONVERSION_CHUNK_ELEMS];
@@ -1848,7 +1851,7 @@ static void accumulateIntoSymRescaleEngine(tensor_t *target, const incSrc_t *inc
         incSrcChunk(inc, off, count, incBuf);
         for (size_t i = 0; i < count; i++) {
             float v = (float)mant[i] * oldScale + incBuf[i];
-            codes[i] = clampInt32(roundByMode(v / scale, qc->roundingMode, NULL), (int32_t)qMin,
+            codes[i] = clampInt32(roundByMode(v / scale, qc->roundingMode, rs), (int32_t)qMin,
                                   (int32_t)qMax);
         }
         packChunkGuarded(codes, count, target->data, qc->qBits, off,
@@ -1856,12 +1859,13 @@ static void accumulateIntoSymRescaleEngine(tensor_t *target, const incSrc_t *inc
     }
 }
 
-void accumulateFloatIntoSymTensorRescale(tensor_t *target, const float *inc, size_t n) {
+void accumulateFloatIntoSymTensorRescale(tensor_t *target, const float *inc, size_t n,
+                                         rngStream_t *rs) {
     incSrc_t src = {.flat = inc, .tens = NULL};
-    accumulateIntoSymRescaleEngine(target, &src, n);
+    accumulateIntoSymRescaleEngine(target, &src, n, rs);
 }
 
-void accumulateTensorIntoSymRescale(tensor_t *target, const tensor_t *increment) {
+void accumulateTensorIntoSymRescale(tensor_t *target, const tensor_t *increment, rngStream_t *rs) {
     size_t n = calcNumberOfElementsByTensor(target);
     if (calcNumberOfElementsByTensor((tensor_t *)increment) != n) {
         PRINT_ERROR("accumulateTensorIntoSymRescale: element-count mismatch");
@@ -1869,10 +1873,11 @@ void accumulateTensorIntoSymRescale(tensor_t *target, const tensor_t *increment)
     }
     rejectAliasedIncrement(target, increment, "accumulateTensorIntoSymRescale");
     incSrc_t src = {.flat = NULL, .tens = increment};
-    accumulateIntoSymRescaleEngine(target, &src, n);
+    accumulateIntoSymRescaleEngine(target, &src, n, rs);
 }
 
-static void accumulateIntoAsymRescaleEngine(tensor_t *target, const incSrc_t *inc, size_t n) {
+static void accumulateIntoAsymRescaleEngine(tensor_t *target, const incSrc_t *inc, size_t n,
+                                            rngStream_t *rs) {
     asymQConfig_t *qc = target->quantization->qConfig;
     /* grads are per-tensor unconditionally (gradInit's carrier gate) -- a
      * grouped target here is a caller contract violation, same rationale as
@@ -1912,7 +1917,7 @@ static void accumulateIntoAsymRescaleEngine(tensor_t *target, const incSrc_t *in
             }
         }
     }
-    deriveAsymGridFromMinMax(mn, mx, qc, NULL);
+    deriveAsymGridFromMinMax(mn, mx, qc, rs);
 
     /* phase B: chunked recompute + emit -- one roundByMode per element
      * (inside emitAsymChunk), element order; chunk k is fully read (target
@@ -1925,16 +1930,17 @@ static void accumulateIntoAsymRescaleEngine(tensor_t *target, const incSrc_t *in
         for (size_t i = 0; i < count; i++) {
             vals[i] = (float)(codes[i] - oldZeroPoint) * oldScale + incBuf[i];
         }
-        emitAsymChunk(vals, count, qc, target->data, off, NULL);
+        emitAsymChunk(vals, count, qc, target->data, off, rs);
     }
 }
 
-void accumulateFloatIntoAsymTensorRescale(tensor_t *target, const float *inc, size_t n) {
+void accumulateFloatIntoAsymTensorRescale(tensor_t *target, const float *inc, size_t n,
+                                          rngStream_t *rs) {
     incSrc_t src = {.flat = inc, .tens = NULL};
-    accumulateIntoAsymRescaleEngine(target, &src, n);
+    accumulateIntoAsymRescaleEngine(target, &src, n, rs);
 }
 
-void accumulateTensorIntoAsymRescale(tensor_t *target, const tensor_t *increment) {
+void accumulateTensorIntoAsymRescale(tensor_t *target, const tensor_t *increment, rngStream_t *rs) {
     size_t n = calcNumberOfElementsByTensor(target);
     if (calcNumberOfElementsByTensor((tensor_t *)increment) != n) {
         PRINT_ERROR("accumulateTensorIntoAsymRescale: element-count mismatch");
@@ -1942,7 +1948,7 @@ void accumulateTensorIntoAsymRescale(tensor_t *target, const tensor_t *increment
     }
     rejectAliasedIncrement(target, increment, "accumulateTensorIntoAsymRescale");
     incSrc_t src = {.flat = NULL, .tens = increment};
-    accumulateIntoAsymRescaleEngine(target, &src, n);
+    accumulateIntoAsymRescaleEngine(target, &src, n, rs);
 }
 
 /* BFP grad-accumulate engines (epic PR3): the SYM engines' shape plus
@@ -1955,7 +1961,7 @@ void accumulateTensorIntoAsymRescale(tensor_t *target, const tensor_t *increment
  * mantissaBits is capped to [2,16] at construction (initBfpQConfigGrouped),
  * so an ODT_SYM_GRAD_QMAXBITS-style re-check would be dead code. */
 static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *inc, size_t n,
-                                             const char *what) {
+                                             const char *what, rngStream_t *rs) {
     bfpQConfig_t *qc = target->quantization->qConfig;
     /* Both engines and the scale twin index exponents[g] under the
      * exact-division invariant (numGroups * groupSize == n); a field-assigned
@@ -2064,7 +2070,7 @@ static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *i
             for (size_t i = idx; i < runEnd; i++) {
                 float q = clamp(((float)mant[i - off] * scale + incBuf[i - off]) / scale,
                                 qMin - 2.f, qMax + 2.f);
-                codes[i - off] = roundByMode(q, qc->roundingMode, NULL);
+                codes[i - off] = roundByMode(q, qc->roundingMode, rs);
             }
             idx = runEnd;
         }
@@ -2091,13 +2097,15 @@ static void requireBfpFloatIncrementCoversTarget(const tensor_t *target, size_t 
     }
 }
 
-void accumulateFloatIntoBfpTensorFixedGrid(tensor_t *target, const float *inc, size_t n) {
+void accumulateFloatIntoBfpTensorFixedGrid(tensor_t *target, const float *inc, size_t n,
+                                           rngStream_t *rs) {
     requireBfpFloatIncrementCoversTarget(target, n, "accumulateFloatIntoBfpTensorFixedGrid");
     incSrc_t src = {.flat = inc, .tens = NULL};
-    accumulateIntoBfpFixedGridEngine(target, &src, n, "accumulateFloatIntoBfpTensorFixedGrid");
+    accumulateIntoBfpFixedGridEngine(target, &src, n, "accumulateFloatIntoBfpTensorFixedGrid", rs);
 }
 
-void accumulateTensorIntoBfpFixedGrid(tensor_t *target, const tensor_t *increment) {
+void accumulateTensorIntoBfpFixedGrid(tensor_t *target, const tensor_t *increment,
+                                      rngStream_t *rs) {
     size_t n = calcNumberOfElementsByTensor(target);
     if (calcNumberOfElementsByTensor((tensor_t *)increment) != n) {
         PRINT_ERROR("accumulateTensorIntoBfpFixedGrid: element-count mismatch");
@@ -2105,7 +2113,7 @@ void accumulateTensorIntoBfpFixedGrid(tensor_t *target, const tensor_t *incremen
     }
     rejectAliasedIncrement(target, increment, "accumulateTensorIntoBfpFixedGrid");
     incSrc_t src = {.flat = NULL, .tens = increment};
-    accumulateIntoBfpFixedGridEngine(target, &src, n, "accumulateTensorIntoBfpFixedGrid");
+    accumulateIntoBfpFixedGridEngine(target, &src, n, "accumulateTensorIntoBfpFixedGrid", rs);
 }
 
 /* Fresh-exponent ring capacity for the rescale walker (#421 U6): the live set
@@ -2141,7 +2149,7 @@ void accumulateTensorIntoBfpFixedGrid(tensor_t *target, const tensor_t *incremen
  * value-domain saturation), and it carries the target's grid instead of
  * re-deriving one. */
 static void bfpRescaleWalk(tensor_t *target, const incSrc_t *inc, float factor, size_t n,
-                           const char *what) {
+                           const char *what, rngStream_t *rs) {
     bfpQConfig_t *qc = target->quantization->qConfig;
     /* Exact-division invariant -- see the FixedGrid twin's guard comment. Must
      * run before the walk below, whose group indexing assumes it. */
@@ -2292,8 +2300,8 @@ static void bfpRescaleWalk(tensor_t *target, const incSrc_t *inc, float factor, 
             for (size_t i = idx; i < runEnd; i++) {
                 float v = (float)mant[i - off] * oldScale * factor + incBuf[i - off];
                 float q = clamp(v / scale, qMin, qMax);
-                codes[i - off] = clampInt32(roundByMode(q, qc->roundingMode, NULL), (int32_t)qMin,
-                                            (int32_t)qMax);
+                codes[i - off] =
+                    clampInt32(roundByMode(q, qc->roundingMode, rs), (int32_t)qMin, (int32_t)qMax);
             }
             if (runEnd == groupEnd) {
                 qc->exponents[g] = freshStored;
@@ -2304,13 +2312,14 @@ static void bfpRescaleWalk(tensor_t *target, const incSrc_t *inc, float factor, 
     }
 }
 
-void accumulateFloatIntoBfpTensorRescale(tensor_t *target, const float *inc, size_t n) {
+void accumulateFloatIntoBfpTensorRescale(tensor_t *target, const float *inc, size_t n,
+                                         rngStream_t *rs) {
     requireBfpFloatIncrementCoversTarget(target, n, "accumulateFloatIntoBfpTensorRescale");
     incSrc_t src = {.flat = inc, .tens = NULL};
-    bfpRescaleWalk(target, &src, 1.f, n, "accumulateFloatIntoBfpTensorRescale");
+    bfpRescaleWalk(target, &src, 1.f, n, "accumulateFloatIntoBfpTensorRescale", rs);
 }
 
-void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment) {
+void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment, rngStream_t *rs) {
     size_t n = calcNumberOfElementsByTensor(target);
     if (calcNumberOfElementsByTensor((tensor_t *)increment) != n) {
         PRINT_ERROR("accumulateTensorIntoBfpRescale: element-count mismatch");
@@ -2318,7 +2327,7 @@ void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment)
     }
     rejectAliasedIncrement(target, increment, "accumulateTensorIntoBfpRescale");
     incSrc_t src = {.flat = NULL, .tens = increment};
-    bfpRescaleWalk(target, &src, 1.f, n, "accumulateTensorIntoBfpRescale");
+    bfpRescaleWalk(target, &src, 1.f, n, "accumulateTensorIntoBfpRescale", rs);
 }
 
 /* The optimizer's in-place scale arm: the SAME value-domain rescale walk the
@@ -2330,7 +2339,7 @@ void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment)
  * roundingMode by construction -- scaling is storage requantization, not an
  * op (#282 target-owned convention), unlike the accumulate arms whose mode
  * reaches the target config via the funnel's op arithmetic. */
-void scaleBfpTensorInPlace(tensor_t *t, float factor) {
+void scaleBfpTensorInPlace(tensor_t *t, float factor, rngStream_t *rs) {
     /* A BFP grid is (int32 mantissa, shared power-of-two exponent) -- it has
      * no NaN/inf code, so there is no propagation path a non-finite factor
      * could take. Unguarded the walker's two passes would DISAGREE about it:
@@ -2351,7 +2360,7 @@ void scaleBfpTensorInPlace(tensor_t *t, float factor) {
      * canonical zero state (R4, unified as R7 across all three arms) and the
      * walk itself -- lives in the shared walker. */
     size_t n = calcNumberOfElementsByTensor(t);
-    bfpRescaleWalk(t, NULL, factor, n, "scaleBfpTensorInPlace");
+    bfpRescaleWalk(t, NULL, factor, n, "scaleBfpTensorInPlace", rs);
 }
 
 /* SYM_INT32 -> SYM_INT32 grad accumulate: reproduces addSymInt32TensorsInplace's
@@ -2359,7 +2368,8 @@ void scaleBfpTensorInPlace(tensor_t *t, float factor) {
  * the TARGET's roundingMode) directly over the flat int32 mantissa arrays --
  * SYM_INT32 storage is never packed/sub-byte, so no chunk buffer is needed to
  * keep this O(1) extra memory; Add.c stays untouched (#296 Stage 2). */
-void accumulateSymInt32IntoSymInt32Rescale(tensor_t *target, const tensor_t *increment) {
+void accumulateSymInt32IntoSymInt32Rescale(tensor_t *target, const tensor_t *increment,
+                                           rngStream_t *rs) {
     size_t n = calcNumberOfElementsByTensor(target);
     if (calcNumberOfElementsByTensor((tensor_t *)increment) != n) {
         PRINT_ERROR("accumulateSymInt32IntoSymInt32Rescale: element-count mismatch");
@@ -2386,15 +2396,16 @@ void accumulateSymInt32IntoSymInt32Rescale(tensor_t *target, const tensor_t *inc
     /* pass 2: same-index read-then-write, one round per element in order */
     for (size_t i = 0; i < n; i++) {
         float v = (float)tg[i] * tScale + (float)in[i] * iScale;
-        tg[i] = clampInt32(roundByMode(v / scale, tQC->roundingMode, NULL), (int32_t)qMin,
-                           (int32_t)qMax);
+        tg[i] =
+            clampInt32(roundByMode(v / scale, tQC->roundingMode, rs), (int32_t)qMin, (int32_t)qMax);
     }
 }
 
 /* FLOAT32 grad accumulate: the FLOAT32-increment fast path is unchanged
  * (addFloat32TensorsInplace, VLA-free already); a non-FLOAT32 increment is
  * dequantized chunk-wise so no O(n) scratch is ever allocated. */
-void accumulateTensorIntoFloat32Inplace(tensor_t *target, const tensor_t *increment) {
+void accumulateTensorIntoFloat32Inplace(tensor_t *target, const tensor_t *increment,
+                                        rngStream_t *rs) {
     size_t n = calcNumberOfElementsByTensor(target);
     if (calcNumberOfElementsByTensor((tensor_t *)increment) != n) {
         PRINT_ERROR("accumulateTensorIntoFloat32Inplace: element-count mismatch");

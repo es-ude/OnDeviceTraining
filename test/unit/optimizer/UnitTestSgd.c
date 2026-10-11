@@ -1229,7 +1229,7 @@ void testSgdStepMFloatReadsPackedSymGradGeneric(void) {
     parameter_t *param = parameterInit(p, g);
 
     float inc[] = {2.0f, -1.5f, 0.5f};
-    accumulateFloatIntoSymTensorFixedGrid(g, inc, 3);
+    accumulateFloatIntoSymTensorFixedGrid(g, inc, 3, NULL);
 
     /* Minimal stack optimizer around one parameter (file convention,
      * UnitTestSgd.c:545-556): momentumFactor==0 -> sgdStepM never reads

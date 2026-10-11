@@ -384,7 +384,7 @@ void testAccDynamicSymIntoSymBitEqualsAddSymInplace(void) {
             .mode = OUT_ACC_DYNAMIC_RESCALE,
         },
         grad);
-    addSymInt32TensorsInplace(refGrad, refInc);
+    addSymInt32TensorsInplace(refGrad, refInc, NULL);
 
     int32_t got[3];
     int32_t want[3];
@@ -427,7 +427,7 @@ void testAccDynamicFloatIncIntoSymTargetMatchesLayerNormReference(void) {
     tensor_t *refIncFloat = buildFloat(3, incVals);
     tensor_t *refIncSym = buildSym(3, (int32_t[]){0, 0, 0}, 1.0f); /* int12 shell, HALF_AWAY */
     convertTensor(refIncFloat, refIncSym, NULL);
-    addSymInt32TensorsInplace(refGrad, refIncSym);
+    addSymInt32TensorsInplace(refGrad, refIncSym, NULL);
 
     int32_t got[3];
     int32_t want[3];
@@ -518,7 +518,7 @@ void testAccFixedIntoPackedSymDerivesThenCarriesGrid(void) {
         },
         target);
     float inc1[] = {2.0f, -0.9f, 0.37f};
-    accumulateFloatIntoSymTensorFixedGrid(ref, inc1, n);
+    accumulateFloatIntoSymTensorFixedGrid(ref, inc1, n, NULL);
     float scaleAfterCall1 = ((symQConfig_t *)target->quantization->qConfig)->scales[0];
 
     tensor_t *inc2T = buildFloat(n, (float[]){-1.8f, 0.05f, -0.1f});
@@ -532,7 +532,7 @@ void testAccFixedIntoPackedSymDerivesThenCarriesGrid(void) {
         },
         target);
     float inc2[] = {-1.8f, 0.05f, -0.1f};
-    accumulateFloatIntoSymTensorFixedGrid(ref, inc2, n);
+    accumulateFloatIntoSymTensorFixedGrid(ref, inc2, n, NULL);
 
     int32_t got[3];
     int32_t want[3];
@@ -634,7 +634,7 @@ void testAccDynamicSymPackedRederivesScaleMatchesRescalePrimitive(void) {
         },
         target);
     float incVals[] = {50.0f, -50.0f};
-    accumulateFloatIntoSymTensorRescale(ref, incVals, n);
+    accumulateFloatIntoSymTensorRescale(ref, incVals, n, NULL);
 
     int32_t got[2];
     int32_t want[2];
@@ -733,7 +733,7 @@ void testAccDynamicAsymPackedMatchesRescalePrimitive(void) {
         },
         target);
     float incVals[] = {1.0f, -0.5f, 2.0f, 0.25f};
-    accumulateFloatIntoAsymTensorRescale(ref, incVals, n);
+    accumulateFloatIntoAsymTensorRescale(ref, incVals, n, NULL);
 
     int32_t got[4];
     int32_t want[4];
@@ -992,7 +992,7 @@ void testAccFixedIntoBfpTargetCarriesGrid(void) {
         },
         &target);
     float inc1[] = {6.f, 1.f, 28.f, -7.f};
-    accumulateFloatIntoBfpTensorFixedGrid(&ref, inc1, n);
+    accumulateFloatIntoBfpTensorFixedGrid(&ref, inc1, n, NULL);
     uint8_t expAfterCall1[2] = {exponents[0], exponents[1]};
 
     tensor_t *inc2T = buildFloat(n, (float[]){1.f, -1.f, -24.f, 8.f});
@@ -1006,7 +1006,7 @@ void testAccFixedIntoBfpTargetCarriesGrid(void) {
         },
         &target);
     float inc2[] = {1.f, -1.f, -24.f, 8.f};
-    accumulateFloatIntoBfpTensorFixedGrid(&ref, inc2, n);
+    accumulateFloatIntoBfpTensorFixedGrid(&ref, inc2, n, NULL);
 
     int32_t got[4];
     symTestUnpackSignExtend(data, 4, got, n);
@@ -1072,7 +1072,7 @@ void testAccDynamicSymInt32IntermediateIntoBfpTargetMatchesTensorTwin(void) {
             .mode = OUT_ACC_DYNAMIC_RESCALE,
         },
         &target);
-    accumulateTensorIntoBfpRescale(&ref, incSymInt32);
+    accumulateTensorIntoBfpRescale(&ref, incSymInt32, NULL);
 
     int32_t got[4];
     symTestUnpackSignExtend(data, 6, got, n);
@@ -1140,7 +1140,7 @@ void testAccFixedSymInt32IntermediateIntoBfpTargetCarriesGrid(void) {
             .mode = OUT_ACC_FIXED_SCALE,
         },
         &target);
-    accumulateTensorIntoBfpFixedGrid(&ref, inc1);
+    accumulateTensorIntoBfpFixedGrid(&ref, inc1, NULL);
     uint8_t expAfterCall1[2] = {exponents[0], exponents[1]};
 
     tensor_t *inc2 = buildSym(n, (int32_t[]){4, -4, -96, 32}, 0.25f);
@@ -1153,7 +1153,7 @@ void testAccFixedSymInt32IntermediateIntoBfpTargetCarriesGrid(void) {
             .mode = OUT_ACC_FIXED_SCALE,
         },
         &target);
-    accumulateTensorIntoBfpFixedGrid(&ref, inc2);
+    accumulateTensorIntoBfpFixedGrid(&ref, inc2, NULL);
 
     int32_t got[4];
     symTestUnpackSignExtend(data, 4, got, n);

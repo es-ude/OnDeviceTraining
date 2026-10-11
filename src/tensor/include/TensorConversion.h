@@ -121,7 +121,7 @@ void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint8_t max
    FLOAT32-operand staging -- and previously platform-divergent, not merely
    undefined. */
 void quantizeFloatBufferToBfpCodes(const float *values, size_t n, bfpQConfig_t *outQC,
-                                   int32_t *codesOut);
+                                   int32_t *codesOut, rngStream_t *rs);
 char *quantTypeToString(qtype_t t);
 /*! SYM_INT32 -> SYM with NO rescale: carry the input scale, pack mantissas
  *  verbatim. Exits if any mantissa exceeds the target qBits. The no-rescale
@@ -144,9 +144,12 @@ void unpackSignExtend(const uint8_t *src, size_t srcBits, size_t srcStartBit, in
  * a zero-fill derives it from the increment) and ABORTS on grid overflow (#227
  * discipline, no clamp). Rescale = requant: fresh absmax (SYM) / fresh affine grid
  * (ASYM) on every store. n must equal the target's element count. */
-void accumulateFloatIntoSymTensorFixedGrid(tensor_t *target, const float *inc, size_t n);
-void accumulateFloatIntoSymTensorRescale(tensor_t *target, const float *inc, size_t n);
-void accumulateFloatIntoAsymTensorRescale(tensor_t *target, const float *inc, size_t n);
+void accumulateFloatIntoSymTensorFixedGrid(tensor_t *target, const float *inc, size_t n,
+                                           rngStream_t *rs);
+void accumulateFloatIntoSymTensorRescale(tensor_t *target, const float *inc, size_t n,
+                                         rngStream_t *rs);
+void accumulateFloatIntoAsymTensorRescale(tensor_t *target, const float *inc, size_t n,
+                                          rngStream_t *rs);
 
 /* Tensor-typed accumulate entry points (#296 Stage 2) — stream the increment
  * chunk-wise via dequantChunkToFloat; float* variants keep their signatures.
@@ -157,11 +160,13 @@ void accumulateFloatIntoAsymTensorRescale(tensor_t *target, const float *inc, si
  * accumulateTensorIntoAsymRescale reject a self-aliased increment (increment
  * and target sharing the same data pointer) with exit(1) — the funnel
  * epilogue always passes a distinct intermediate (release-review, PR #324). */
-void accumulateTensorIntoSymFixedGrid(tensor_t *target, const tensor_t *increment);
-void accumulateTensorIntoSymRescale(tensor_t *target, const tensor_t *increment);
-void accumulateTensorIntoAsymRescale(tensor_t *target, const tensor_t *increment);
-void accumulateTensorIntoFloat32Inplace(tensor_t *target, const tensor_t *increment);
-void accumulateSymInt32IntoSymInt32Rescale(tensor_t *target, const tensor_t *increment);
+void accumulateTensorIntoSymFixedGrid(tensor_t *target, const tensor_t *increment, rngStream_t *rs);
+void accumulateTensorIntoSymRescale(tensor_t *target, const tensor_t *increment, rngStream_t *rs);
+void accumulateTensorIntoAsymRescale(tensor_t *target, const tensor_t *increment, rngStream_t *rs);
+void accumulateTensorIntoFloat32Inplace(tensor_t *target, const tensor_t *increment,
+                                        rngStream_t *rs);
+void accumulateSymInt32IntoSymInt32Rescale(tensor_t *target, const tensor_t *increment,
+                                           rngStream_t *rs);
 
 /* BFP grad-accumulate twins (BFP epic PR3). FixedGrid = fit-preserving:
  * carries the target's per-group exponents (a fresh ALL-ZERO-code accumulator
@@ -185,10 +190,12 @@ void accumulateSymInt32IntoSymInt32Rescale(tensor_t *target, const tensor_t *inc
  * Both modes leave an EMPTY target (n == 0) in the canonical zero state
  * (every group's stored exponent = bias), never with its previous grid
  * (#421 ruling R7). */
-void accumulateFloatIntoBfpTensorFixedGrid(tensor_t *target, const float *inc, size_t n);
-void accumulateFloatIntoBfpTensorRescale(tensor_t *target, const float *inc, size_t n);
-void accumulateTensorIntoBfpFixedGrid(tensor_t *target, const tensor_t *increment);
-void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment);
+void accumulateFloatIntoBfpTensorFixedGrid(tensor_t *target, const float *inc, size_t n,
+                                           rngStream_t *rs);
+void accumulateFloatIntoBfpTensorRescale(tensor_t *target, const float *inc, size_t n,
+                                         rngStream_t *rs);
+void accumulateTensorIntoBfpFixedGrid(tensor_t *target, const tensor_t *increment, rngStream_t *rs);
+void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment, rngStream_t *rs);
 
 /* In-place value-domain scale of a BFP tensor by an arbitrary float factor
  * (scaleOptimizerGradients's BFP arm: REDUCTION_MEAN mean-scale, clip
@@ -212,7 +219,7 @@ void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment)
  * `factor` MUST be finite: a non-finite factor fail-fasts (PRINT_ERROR +
  * exit(1)) because a BFP grid has no NaN/inf code -- unlike the FLOAT32/
  * SYM/ASYM scale arms, there is nothing here to propagate it into. */
-void scaleBfpTensorInPlace(tensor_t *t, float factor);
+void scaleBfpTensorInPlace(tensor_t *t, float factor, rngStream_t *rs);
 
 extern conversionFunction_t conversionMatrix[7][7];
 

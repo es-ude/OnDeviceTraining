@@ -108,7 +108,7 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
 
     switch (target->quantization->type) {
     case FLOAT32:
-        accumulateTensorIntoFloat32Inplace(target, intermediate);
+        accumulateTensorIntoFloat32Inplace(target, intermediate, NULL);
         return;
     case SYM_INT32: {
         symInt32QConfig_t *targetQC = target->quantization->qConfig;
@@ -136,7 +136,7 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
         }
         /* OUT_ACC_DYNAMIC_RESCALE */
         if (intermediate->quantization->type == SYM_INT32) {
-            accumulateSymInt32IntoSymInt32Rescale(target, intermediate);
+            accumulateSymInt32IntoSymInt32Rescale(target, intermediate, NULL);
             return;
         }
         /* #296 residual: this arm quantizes the whole increment
@@ -155,7 +155,7 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
         tensor_t incSym;
         setTensorValuesForConversion(incSymData, &incQ, intermediate, &incSym);
         convertTensor(intermediate, &incSym, NULL);
-        addSymInt32TensorsInplace(target, &incSym);
+        addSymInt32TensorsInplace(target, &incSym, NULL);
         return;
     }
     case SYM: {
@@ -167,15 +167,17 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
         }
         if (intermediate->quantization->type == FLOAT32) {
             if (mode == OUT_ACC_FIXED_SCALE) {
-                accumulateFloatIntoSymTensorFixedGrid(target, (const float *)intermediate->data, n);
+                accumulateFloatIntoSymTensorFixedGrid(target, (const float *)intermediate->data, n,
+                                                      NULL);
             } else {
-                accumulateFloatIntoSymTensorRescale(target, (const float *)intermediate->data, n);
+                accumulateFloatIntoSymTensorRescale(target, (const float *)intermediate->data, n,
+                                                    NULL);
             }
         } else {
             if (mode == OUT_ACC_FIXED_SCALE) {
-                accumulateTensorIntoSymFixedGrid(target, intermediate);
+                accumulateTensorIntoSymFixedGrid(target, intermediate, NULL);
             } else {
-                accumulateTensorIntoSymRescale(target, intermediate);
+                accumulateTensorIntoSymRescale(target, intermediate, NULL);
             }
         }
         return;
@@ -193,9 +195,10 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
             exit(1);
         }
         if (intermediate->quantization->type == FLOAT32) {
-            accumulateFloatIntoAsymTensorRescale(target, (const float *)intermediate->data, n);
+            accumulateFloatIntoAsymTensorRescale(target, (const float *)intermediate->data, n,
+                                                 NULL);
         } else {
-            accumulateTensorIntoAsymRescale(target, intermediate);
+            accumulateTensorIntoAsymRescale(target, intermediate, NULL);
         }
         return;
     }
@@ -207,15 +210,17 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
          * mantissa overflow; DYNAMIC_RESCALE re-derives them per store. */
         if (intermediate->quantization->type == FLOAT32) {
             if (mode == OUT_ACC_FIXED_SCALE) {
-                accumulateFloatIntoBfpTensorFixedGrid(target, (const float *)intermediate->data, n);
+                accumulateFloatIntoBfpTensorFixedGrid(target, (const float *)intermediate->data, n,
+                                                      NULL);
             } else {
-                accumulateFloatIntoBfpTensorRescale(target, (const float *)intermediate->data, n);
+                accumulateFloatIntoBfpTensorRescale(target, (const float *)intermediate->data, n,
+                                                    NULL);
             }
         } else {
             if (mode == OUT_ACC_FIXED_SCALE) {
-                accumulateTensorIntoBfpFixedGrid(target, intermediate);
+                accumulateTensorIntoBfpFixedGrid(target, intermediate, NULL);
             } else {
-                accumulateTensorIntoBfpRescale(target, intermediate);
+                accumulateTensorIntoBfpRescale(target, intermediate, NULL);
             }
         }
         return;
@@ -449,7 +454,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
                 setTensorValuesForConversion(&scratch[scratchOffset], &scratchQ[i], inputs[i],
                                              &scratchTensors[i]);
                 quantizeFloatBufferToBfpCodes((const float *)inputs[i]->data, n, &scratchBfpQC[i],
-                                              (int32_t *)scratchTensors[i].data);
+                                              (int32_t *)scratchTensors[i].data, NULL);
             } else {
                 PRINT_ERROR("executeOp: operand %zu storage dtype %d unsupported under "
                             "ARITH_BFP (v1 accepts FLOAT32 or BFP; convert explicitly via a "

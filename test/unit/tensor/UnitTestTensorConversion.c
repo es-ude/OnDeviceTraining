@@ -2022,7 +2022,7 @@ void testAccumulateSymFixedGridFirstStoreDerivesGridThenCarries(void) {
     setTensorValues(&target, data, &shape, &q, NULL);
 
     float inc1[] = {3.1f, -1.55f, 0.775f, 0.3875f};
-    accumulateFloatIntoSymTensorFixedGrid(&target, inc1, 4);
+    accumulateFloatIntoSymTensorFixedGrid(&target, inc1, 4, NULL);
     float scaleAfter1 = qc.scales[0];
     TEST_ASSERT_FLOAT_WITHIN(1e-6f, 3.1f / 31.0f, scaleAfter1);
 
@@ -2032,7 +2032,7 @@ void testAccumulateSymFixedGridFirstStoreDerivesGridThenCarries(void) {
     TEST_ASSERT_EQUAL_INT32_ARRAY(expectedCodes1, codes1, 4);
 
     float inc2[] = {-0.1f, 0.1f, 0.f, 0.f};
-    accumulateFloatIntoSymTensorFixedGrid(&target, inc2, 4);
+    accumulateFloatIntoSymTensorFixedGrid(&target, inc2, 4, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT(scaleAfter1, qc.scales[0]); /* carried, not re-derived */
 
@@ -2083,7 +2083,7 @@ void testAccumulateSymFixedGridZeroIncrementIsBitExact(void) {
     float snapshotScale = qc.scales[0];
 
     float zeroInc[] = {0.f, 0.f, 0.f, 0.f};
-    accumulateFloatIntoSymTensorFixedGrid(&target, zeroInc, 4);
+    accumulateFloatIntoSymTensorFixedGrid(&target, zeroInc, 4, NULL);
 
     TEST_ASSERT_EQUAL_UINT8_ARRAY(snapshotBytes, data, 3);
     TEST_ASSERT_EQUAL_FLOAT(snapshotScale, qc.scales[0]);
@@ -2114,7 +2114,7 @@ void testAccumulateSymFixedGridOverflowAborts(void) {
     setTensorValues(&target, data, &shape, &q, NULL);
 
     float inc[] = {0.1f}; /* +1 grid step: 31 -> 32, overflow */
-    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoSymTensorFixedGrid(&target, inc, n));
+    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoSymTensorFixedGrid(&target, inc, n, NULL));
 }
 
 void testAccumulateSymRescaleRederivesGridEachCall(void) {
@@ -2151,7 +2151,7 @@ void testAccumulateSymRescaleRederivesGridEachCall(void) {
     setTensorValues(&target, data, &shape, &q, NULL);
 
     float inc1[] = {0.f, 0.f, 0.f, 0.f};
-    accumulateFloatIntoSymTensorRescale(&target, inc1, n);
+    accumulateFloatIntoSymTensorRescale(&target, inc1, n, NULL);
     float scale1 = qc.scales[0];
     TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.0f / 31.0f, scale1);
 
@@ -2166,7 +2166,7 @@ void testAccumulateSymRescaleRederivesGridEachCall(void) {
     }
 
     float inc2[] = {50.f, 50.f, 50.f, 50.f};
-    accumulateFloatIntoSymTensorRescale(&target, inc2, n);
+    accumulateFloatIntoSymTensorRescale(&target, inc2, n, NULL);
     float scale2 = qc.scales[0];
 
     /* Rederivation, not carry: scale2 reflects the new (much larger) absmax. */
@@ -2227,7 +2227,7 @@ void testAccumulateAsymRescaleMatchesFloatReference(void) {
     float inc[] = {1.0f, -0.5f, 2.0f, 0.25f};
     float reference[] = {3.0f, 2.5f, 6.0f, 5.25f};
 
-    accumulateFloatIntoAsymTensorRescale(&target, inc, n);
+    accumulateFloatIntoAsymTensorRescale(&target, inc, n, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT(scale_asym_nudged_f6AccumRef, qc.scales[0]);
     TEST_ASSERT_EQUAL_UINT16((uint16_t)zp_asym_nudged_f6AccumRef, qc.zeroPoints[0]);
@@ -2272,7 +2272,7 @@ void testAccumulateAsymValueZeroAfterConfigReset(void) {
     setTensorValues(&target, data, &shape, &q, NULL);
 
     float inc[] = {2.0f, -3.5f, 0.0f};
-    accumulateFloatIntoAsymTensorRescale(&target, inc, n);
+    accumulateFloatIntoAsymTensorRescale(&target, inc, n, NULL);
 
     float refScales[1] = {1.f};
     uint16_t refZps[1] = {0};
@@ -2335,7 +2335,7 @@ void testAccumulateSymFixedGridMatchesReferenceAtChunkBoundary(void) {
     }
     inc[400] = 500.f; /* dominant absmax; lands in the SECOND chunk */
 
-    accumulateFloatIntoSymTensorFixedGrid(&target, inc, n);
+    accumulateFloatIntoSymTensorFixedGrid(&target, inc, n, NULL);
 
     const float qMax = powf(2, (float)qBits - 1) - 1; /* 127 */
     float expectedScale = 500.f / qMax;
@@ -2397,7 +2397,7 @@ void testAccumulateSymRescaleMatchesReferenceAtChunkBoundary(void) {
         reference[i] = (float)seedMant[i] * 0.01f + inc[i];
     }
 
-    accumulateFloatIntoSymTensorRescale(&target, inc, n);
+    accumulateFloatIntoSymTensorRescale(&target, inc, n, NULL);
 
     float absMax = reference[0] < 0.f ? -reference[0] : reference[0];
     for (size_t i = 1; i < n; i++) {
@@ -2469,7 +2469,7 @@ void testAccumulateTensorIntoSymRescaleStreamsIncrementAcrossChunks(void) {
     tensor_t incTensor;
     setTensorValues(&incTensor, (uint8_t *)incData, &shape, &incQ, NULL);
 
-    accumulateTensorIntoSymRescale(&target, &incTensor);
+    accumulateTensorIntoSymRescale(&target, &incTensor, NULL);
 
     const float qMax = powf(2, (float)qBits - 1) - 1; /* 127 */
     float expectedScale = 100.f / qMax; /* target started zero, so absmax == the dominant value */
@@ -3208,7 +3208,7 @@ void testAccumulateTensorIntoSymRescaleRejectsSelfAliasedIncrement(void) {
     tensor_t t;
     setTensorValues(&t, data, &shape, &q, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(accumulateTensorIntoSymRescale(&t, &t));
+    ASSERT_EXITS_WITH_FAILURE(accumulateTensorIntoSymRescale(&t, &t, NULL));
 }
 
 /* Group-quant PR2 (Task 2): group-aware FLOAT32<->SYM conversion cells, the
@@ -4104,7 +4104,7 @@ void testAccumulateFloatIntoAsymRescaleRejectsGroupedTarget(void) {
     setTensorValues(&target, data, &shape, &q, NULL);
 
     float inc[8] = {0};
-    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoAsymTensorRescale(&target, inc, n));
+    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoAsymTensorRescale(&target, inc, n, NULL));
 }
 
 void testAccumulateTensorIntoAsymRescaleRejectsGroupedTarget(void) {
@@ -4136,7 +4136,7 @@ void testAccumulateTensorIntoAsymRescaleRejectsGroupedTarget(void) {
     tensor_t inc;
     setTensorValues(&inc, (uint8_t *)incData, &shape, &incQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(accumulateTensorIntoAsymRescale(&target, &inc));
+    ASSERT_EXITS_WITH_FAILURE(accumulateTensorIntoAsymRescale(&target, &inc, NULL));
 }
 
 void testSameTypeAsymCopyCarriesGroupArrays(void) {
@@ -5832,7 +5832,7 @@ void testQuantizeFloatBufferToBfpCodesPerTensor(void) {
                        .mantissaBits = 4,
                        .exponentBits = 8};
     int32_t codes[4];
-    quantizeFloatBufferToBfpCodes(values, 4, &qc, codes);
+    quantizeFloatBufferToBfpCodes(values, 4, &qc, codes, NULL);
     TEST_ASSERT_EQUAL_UINT8(131, exponents[0]);
     int32_t expected[] = {6, -3, 2, 0};
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, codes, 4);
@@ -5852,7 +5852,7 @@ void testQuantizeFloatBufferToBfpCodesGroupedIndependentExponents(void) {
                        .mantissaBits = 4,
                        .exponentBits = 8};
     int32_t codes[8];
-    quantizeFloatBufferToBfpCodes(values, 8, &qc, codes);
+    quantizeFloatBufferToBfpCodes(values, 8, &qc, codes, NULL);
     TEST_ASSERT_EQUAL_UINT8(127, exponents[0]);
     TEST_ASSERT_EQUAL_UINT8(129, exponents[1]);
     int32_t expected[8] = {6, 1, -2, 0, 7, -2, 1, 4};
@@ -5873,7 +5873,7 @@ void testQuantizeFloatBufferToBfpCodesSaturatesHighAndFlushesLow(void) {
                            .mantissaBits = 4,
                            .exponentBits = 2};
     int32_t highCodes[2];
-    quantizeFloatBufferToBfpCodes(high, 2, &highQc, highCodes);
+    quantizeFloatBufferToBfpCodes(high, 2, &highQc, highCodes, NULL);
     TEST_ASSERT_EQUAL_UINT8(3, highExponents[0]);
     TEST_ASSERT_EQUAL_INT32(7, highCodes[0]);  /* saturated */
     TEST_ASSERT_EQUAL_INT32(-1, highCodes[1]); /* -5/4 -> -1.25 -> -1 */
@@ -5887,7 +5887,7 @@ void testQuantizeFloatBufferToBfpCodesSaturatesHighAndFlushesLow(void) {
                           .mantissaBits = 4,
                           .exponentBits = 2};
     int32_t lowCodes[2];
-    quantizeFloatBufferToBfpCodes(low, 2, &lowQc, lowCodes);
+    quantizeFloatBufferToBfpCodes(low, 2, &lowQc, lowCodes, NULL);
     TEST_ASSERT_EQUAL_UINT8(0, lowExponents[0]);
     TEST_ASSERT_EQUAL_INT32(0, lowCodes[0]);
     TEST_ASSERT_EQUAL_INT32(0, lowCodes[1]);
@@ -5905,7 +5905,7 @@ void testQuantizeFloatBufferToBfpCodesAllZeroKeepsZeroState(void) {
                        .mantissaBits = 4,
                        .exponentBits = 8};
     int32_t codes[4];
-    quantizeFloatBufferToBfpCodes(values, 4, &qc, codes);
+    quantizeFloatBufferToBfpCodes(values, 4, &qc, codes, NULL);
     TEST_ASSERT_EQUAL_UINT8(127, exponents[0]);
     int32_t expected[4] = {0, 0, 0, 0};
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, codes, 4);
@@ -5979,7 +5979,7 @@ void testQuantizeFloatBufferToBfpCodesE8HighCornerSaturatesFinite(void) {
                        .mantissaBits = 2,
                        .exponentBits = 8};
     int32_t codes[2];
-    quantizeFloatBufferToBfpCodes(values, 2, &qc, codes);
+    quantizeFloatBufferToBfpCodes(values, 2, &qc, codes, NULL);
     TEST_ASSERT_EQUAL_UINT8(254, exponents[0]);
     TEST_ASSERT_EQUAL_INT32(1, codes[0]); /* 2e38 / 2^127 -> 1.18 -> qMax */
     TEST_ASSERT_EQUAL_INT32(0, codes[1]); /* below the group resolution */
@@ -6027,7 +6027,7 @@ void testAccumulateFloatIntoBfpRescaleRederivesExponents(void) {
     setTensorValues(&target, data, &shape, &q, NULL);
 
     float inc[4] = {2.f, 1.f, 12.f, -6.f};
-    accumulateFloatIntoBfpTensorRescale(&target, inc, n);
+    accumulateFloatIntoBfpTensorRescale(&target, inc, n, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(126, exponents[0]);
     TEST_ASSERT_EQUAL_UINT8(127, exponents[1]);
@@ -6072,7 +6072,7 @@ void testAccumulateFloatIntoBfpRescaleClampsAtExponentCapCorner(void) {
     setTensorValues(&target, data, &shape, &q, NULL);
 
     float inc[2] = {3.4e38f, 1.0f};
-    accumulateFloatIntoBfpTensorRescale(&target, inc, n);
+    accumulateFloatIntoBfpTensorRescale(&target, inc, n, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(254, exponents[0]);
     float scale = bfpGroupScale(&qc, 0);
@@ -6114,7 +6114,7 @@ void testAccumulateFloatIntoBfpFixedGridFreshTargetDerivesGrid(void) {
     setTensorValues(&target, data, &shape, &q, NULL);
 
     float inc[4] = {6.f, 1.f, 28.f, -7.f};
-    accumulateFloatIntoBfpTensorFixedGrid(&target, inc, n);
+    accumulateFloatIntoBfpTensorFixedGrid(&target, inc, n, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(127, exponents[0]);
     TEST_ASSERT_EQUAL_UINT8(129, exponents[1]);
@@ -6153,7 +6153,7 @@ void testAccumulateFloatIntoBfpFixedGridCarriedGridAborts(void) {
     setTensorValues(&target, data, &shape, &q, NULL);
 
     float inc[1] = {1.f};
-    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorFixedGrid(&target, inc, n));
+    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorFixedGrid(&target, inc, n, NULL));
 }
 
 void testAccumulateTensorIntoBfpRescaleMatchesFloatWrapper(void) {
@@ -6207,9 +6207,9 @@ void testAccumulateTensorIntoBfpRescaleMatchesFloatWrapper(void) {
     tensor_t incTens;
     setTensorValues(&incTens, (uint8_t *)incMant, &shape, &incQ, NULL);
 
-    accumulateTensorIntoBfpRescale(&targetTens, &incTens);
+    accumulateTensorIntoBfpRescale(&targetTens, &incTens, NULL);
     float incFlat[4] = {2.f, 1.f, 12.f, -6.f};
-    accumulateFloatIntoBfpTensorRescale(&targetFloat, incFlat, n);
+    accumulateFloatIntoBfpTensorRescale(&targetFloat, incFlat, n, NULL);
 
     TEST_ASSERT_EQUAL_UINT8_ARRAY(expFloat, expTens, 2);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(dataFloat, dataTens, sizeof(dataFloat));
@@ -6267,9 +6267,9 @@ void testAccumulateTensorIntoBfpFixedGridMatchesFloatWrapper(void) {
     tensor_t incTens;
     setTensorValues(&incTens, (uint8_t *)incMant, &shape, &incQ, NULL);
 
-    accumulateTensorIntoBfpFixedGrid(&targetTens, &incTens);
+    accumulateTensorIntoBfpFixedGrid(&targetTens, &incTens, NULL);
     float incFlat[4] = {6.f, 1.f, 28.f, -7.f};
-    accumulateFloatIntoBfpTensorFixedGrid(&targetFloat, incFlat, n);
+    accumulateFloatIntoBfpTensorFixedGrid(&targetFloat, incFlat, n, NULL);
 
     TEST_ASSERT_EQUAL_UINT8_ARRAY(expFloat, expTens, 2);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(dataFloat, dataTens, sizeof(dataFloat));
@@ -6346,7 +6346,7 @@ void testAccumulateFloatIntoBfpRescaleZeroTargetMultiChunkEqualsPack(void) {
     tensor_t target;
     setTensorValues(&target, data, &shape, &q, NULL);
 
-    accumulateFloatIntoBfpTensorRescale(&target, values, n);
+    accumulateFloatIntoBfpTensorRescale(&target, values, n, NULL);
 
     TEST_ASSERT_EQUAL_UINT8_ARRAY(refExponents, exponents, 3);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(refData, data, sizeof(refData));
@@ -6436,7 +6436,7 @@ void testAccumulateFloatIntoBfpRescaleSeededMultiChunkEqualsDecodedPack(void) {
     tensor_t target;
     setTensorValues(&target, data, &shape, &q, NULL);
 
-    accumulateFloatIntoBfpTensorRescale(&target, inc, n);
+    accumulateFloatIntoBfpTensorRescale(&target, inc, n, NULL);
 
     TEST_ASSERT_EQUAL_UINT8_ARRAY(refExponents, exponents, 3);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(refData, data, sizeof(refData));
@@ -6501,7 +6501,7 @@ void testScaleBfpTensorInPlaceSeededMultiChunkEqualsDecodedPack(void) {
     tensor_t t;
     setTensorValues(&t, data, &shape, &q, NULL);
 
-    scaleBfpTensorInPlace(&t, factor);
+    scaleBfpTensorInPlace(&t, factor, NULL);
 
     TEST_ASSERT_EQUAL_UINT8_ARRAY(refExponents, exponents, 3);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(refData, data, sizeof(refData));
@@ -6562,7 +6562,7 @@ void testAccumulateTensorIntoBfpFixedGridFreshMultiChunkEqualsPack(void) {
     tensor_t target;
     setTensorValues(&target, data, &shape, &q, NULL);
 
-    accumulateTensorIntoBfpFixedGrid(&target, &incT);
+    accumulateTensorIntoBfpFixedGrid(&target, &incT, NULL);
 
     TEST_ASSERT_EQUAL_UINT8_ARRAY(refExponents, exponents, 3);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(refData, data, sizeof(refData));
@@ -6596,7 +6596,7 @@ void testAccumulateTensorIntoBfpRescaleRejectsSelfAliasedIncrement(void) {
     tensor_t t;
     setTensorValues(&t, data, &shape, &q, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(accumulateTensorIntoBfpRescale(&t, &t));
+    ASSERT_EXITS_WITH_FAILURE(accumulateTensorIntoBfpRescale(&t, &t, NULL));
 }
 
 void testAccumulateTensorIntoBfpFixedGridRejectsSelfAliasedIncrement(void) {
@@ -6628,7 +6628,7 @@ void testAccumulateTensorIntoBfpFixedGridRejectsSelfAliasedIncrement(void) {
     tensor_t t;
     setTensorValues(&t, data, &shape, &q, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(accumulateTensorIntoBfpFixedGrid(&t, &t));
+    ASSERT_EXITS_WITH_FAILURE(accumulateTensorIntoBfpFixedGrid(&t, &t, NULL));
 }
 
 /* ---- scaleBfpTensorInPlace (epic PR3, scaleOptimizerGradients BFP arm) ---- */
@@ -6672,7 +6672,7 @@ void testScaleBfpTensorInPlaceExactHalving(void) {
     tensor_t t;
     setTensorValues(&t, data, &shape, &q, NULL);
 
-    scaleBfpTensorInPlace(&t, 0.5f);
+    scaleBfpTensorInPlace(&t, 0.5f, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(126, exponents[0]);
     TEST_ASSERT_EQUAL_UINT8(124, exponents[1]);
@@ -6722,7 +6722,7 @@ void testScaleBfpTensorInPlaceGeneralFactorRederives(void) {
     tensor_t t;
     setTensorValues(&t, data, &shape, &q, NULL);
 
-    scaleBfpTensorInPlace(&t, 1.f / 3.f);
+    scaleBfpTensorInPlace(&t, 1.f / 3.f, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(126, exponents[0]);
     TEST_ASSERT_EQUAL_UINT8(123, exponents[1]);
@@ -6764,7 +6764,7 @@ void testScaleBfpTensorInPlaceZeroGroupKeepsZeroState(void) {
     tensor_t t;
     setTensorValues(&t, data, &shape, &q, NULL);
 
-    scaleBfpTensorInPlace(&t, 0.5f);
+    scaleBfpTensorInPlace(&t, 0.5f, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(127, exponents[0]);
     TEST_ASSERT_EQUAL_UINT8(124, exponents[1]);
@@ -6816,7 +6816,7 @@ void testScaleBfpTensorInPlacePerTensorMultiChunkCarriesAbsMax(void) {
     tensor_t t;
     setTensorValues(&t, data, &shape, &q, NULL);
 
-    scaleBfpTensorInPlace(&t, 0.5f);
+    scaleBfpTensorInPlace(&t, 0.5f, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(128, exponents[0]);
     int32_t got[300];
@@ -6861,7 +6861,7 @@ void testScaleBfpTensorInPlaceRejectsNaNFactor(void) {
     tensor_t t;
     buildPerTensorBfpFixture(&t, data, &shape, &q, &qc, seedCodes, n);
 
-    ASSERT_EXITS_WITH_FAILURE(scaleBfpTensorInPlace(&t, NAN));
+    ASSERT_EXITS_WITH_FAILURE(scaleBfpTensorInPlace(&t, NAN, NULL));
 }
 
 void testScaleBfpTensorInPlaceRejectsInfiniteFactor(void) {
@@ -6883,7 +6883,7 @@ void testScaleBfpTensorInPlaceRejectsInfiniteFactor(void) {
     tensor_t t;
     buildPerTensorBfpFixture(&t, data, &shape, &q, &qc, seedCodes, n);
 
-    ASSERT_EXITS_WITH_FAILURE(scaleBfpTensorInPlace(&t, INFINITY));
+    ASSERT_EXITS_WITH_FAILURE(scaleBfpTensorInPlace(&t, INFINITY, NULL));
 }
 
 /* ---- scale-path overflow at the exponent cap (follow-up batch, PR #422) --
@@ -6932,7 +6932,7 @@ void testScaleBfpTensorInPlaceCapRegimeSaturatesOnOverflow(void) {
     tensor_t t;
     buildPerTensorBfpFixture(&t, data, &shape, &q, &qc, seedCodes, n);
 
-    scaleBfpTensorInPlace(&t, 2.0f);
+    scaleBfpTensorInPlace(&t, 2.0f, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(254, exponents[0]);
     int32_t got[4];
@@ -6972,7 +6972,7 @@ void testScaleBfpTensorInPlaceEmptyTensorResetsToZeroState(void) {
     tensor_t t;
     setTensorValues(&t, data, &shape, &q, NULL);
 
-    scaleBfpTensorInPlace(&t, 2.0f);
+    scaleBfpTensorInPlace(&t, 2.0f, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(127, exponents[0]);
     TEST_ASSERT_EQUAL_UINT8(0, data[0]); /* nothing written past the payload */
@@ -7017,7 +7017,7 @@ void testAccumulateFloatIntoBfpFixedGridRejectsBadGroupGeometry(void) {
     buildBadGeometryBfpTarget(&target, data, &shape, &q, &qc, n);
 
     float inc[8] = {0};
-    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorFixedGrid(&target, inc, n));
+    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorFixedGrid(&target, inc, n, NULL));
 }
 
 void testAccumulateFloatIntoBfpRescaleRejectsBadGroupGeometry(void) {
@@ -7038,7 +7038,7 @@ void testAccumulateFloatIntoBfpRescaleRejectsBadGroupGeometry(void) {
     buildBadGeometryBfpTarget(&target, data, &shape, &q, &qc, n);
 
     float inc[8] = {0};
-    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorRescale(&target, inc, n));
+    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorRescale(&target, inc, n, NULL));
 }
 
 void testScaleBfpTensorInPlaceRejectsBadGroupGeometry(void) {
@@ -7058,7 +7058,7 @@ void testScaleBfpTensorInPlaceRejectsBadGroupGeometry(void) {
     tensor_t t;
     buildBadGeometryBfpTarget(&t, data, &shape, &q, &qc, n);
 
-    ASSERT_EXITS_WITH_FAILURE(scaleBfpTensorInPlace(&t, 0.5f));
+    ASSERT_EXITS_WITH_FAILURE(scaleBfpTensorInPlace(&t, 0.5f, NULL));
 }
 
 /* #420 G2: packStreamAsBfp is the fourth exponents[g] indexer and had no
@@ -7138,7 +7138,7 @@ void testAccumulateFloatIntoBfpFixedGridRejectsShortElementCount(void) {
     buildPerTensorBfpTarget(&target, data, &shape, &q, &qc, n);
 
     float inc[4] = {0};
-    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorFixedGrid(&target, inc, 4));
+    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorFixedGrid(&target, inc, 4, NULL));
 }
 
 void testAccumulateFloatIntoBfpRescaleRejectsShortElementCount(void) {
@@ -7159,7 +7159,7 @@ void testAccumulateFloatIntoBfpRescaleRejectsShortElementCount(void) {
     buildPerTensorBfpTarget(&target, data, &shape, &q, &qc, n);
 
     float inc[4] = {0};
-    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorRescale(&target, inc, 4));
+    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorRescale(&target, inc, 4, NULL));
 }
 
 /* #421 U9: the last two exponents[g] indexers without entry validation.
@@ -7214,7 +7214,7 @@ void testQuantizeFloatBufferToBfpCodesRejectsBadGroupGeometry(void) {
                        .exponentBits = 8};
     int32_t codes[8];
 
-    ASSERT_EXITS_WITH_FAILURE(quantizeFloatBufferToBfpCodes(values, 8, &qc, codes));
+    ASSERT_EXITS_WITH_FAILURE(quantizeFloatBufferToBfpCodes(values, 8, &qc, codes, NULL));
 }
 
 /* ---- #421 U10 (ruling R9): a non-finite INPUT VALUE is a fail-fast --------
@@ -7278,7 +7278,7 @@ void testQuantizeFloatBufferToBfpCodesRejectsNonFiniteInputValue(void) {
                        .exponentBits = 8};
     int32_t codes[4];
 
-    ASSERT_EXITS_WITH_FAILURE(quantizeFloatBufferToBfpCodes(values, 4, &qc, codes));
+    ASSERT_EXITS_WITH_FAILURE(quantizeFloatBufferToBfpCodes(values, 4, &qc, codes, NULL));
 }
 
 /* The streaming entry sees its input through readChunk, so the non-finite
@@ -7390,7 +7390,7 @@ void testQuantizeFloatBufferToBfpCodesCapRegimeSaturatesFiniteQuotient(void) {
                        .exponentBits = 2};
     int32_t codes[4];
 
-    quantizeFloatBufferToBfpCodes(values, 4, &qc, codes);
+    quantizeFloatBufferToBfpCodes(values, 4, &qc, codes, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(3, exponents[0]);
     int32_t expected[4] = {127, -128, 0, 0};
@@ -7471,7 +7471,7 @@ void testAccumulateFloatIntoBfpRescaleCapRegimeSaturatesFiniteQuotient(void) {
     setTensorValues(&target, data, &shape, &q, NULL);
 
     float inc[4] = {1e30f, -1e30f, 0.f, 1.f};
-    accumulateFloatIntoBfpTensorRescale(&target, inc, n);
+    accumulateFloatIntoBfpTensorRescale(&target, inc, n, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(3, exponents[0]);
     int32_t got[4];
@@ -7513,7 +7513,7 @@ void testAccumulateFloatIntoBfpFixedGridCapRegimeAbortsInsteadOfUB(void) {
     setTensorValues(&target, data, &shape, &q, NULL);
 
     float inc[4] = {1e30f, 0.f, 0.f, 0.f};
-    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorFixedGrid(&target, inc, n));
+    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorFixedGrid(&target, inc, n, NULL));
 }
 
 /* ---- #421 U3 (ruling R6): a non-finite INCREMENT is a fail-fast ---------
@@ -7564,7 +7564,7 @@ void testAccumulateFloatIntoBfpRescaleRejectsNaNIncrement(void) {
     buildNonFiniteIncrementTarget(&target, data, &shape, &q, &qc, seedCodes, n);
 
     float inc[4] = {1.f, NAN, 0.f, 0.f};
-    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorRescale(&target, inc, n));
+    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorRescale(&target, inc, n, NULL));
 }
 
 void testAccumulateFloatIntoBfpRescaleRejectsInfiniteIncrement(void) {
@@ -7586,7 +7586,7 @@ void testAccumulateFloatIntoBfpRescaleRejectsInfiniteIncrement(void) {
     buildNonFiniteIncrementTarget(&target, data, &shape, &q, &qc, seedCodes, n);
 
     float inc[4] = {1.f, INFINITY, 0.f, 0.f};
-    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorRescale(&target, inc, n));
+    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorRescale(&target, inc, n, NULL));
 }
 
 void testAccumulateFloatIntoBfpFixedGridRejectsNaNIncrement(void) {
@@ -7608,7 +7608,7 @@ void testAccumulateFloatIntoBfpFixedGridRejectsNaNIncrement(void) {
     buildNonFiniteIncrementTarget(&target, data, &shape, &q, &qc, seedCodes, n);
 
     float inc[4] = {1.f, NAN, 0.f, 0.f};
-    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorFixedGrid(&target, inc, n));
+    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorFixedGrid(&target, inc, n, NULL));
 }
 
 /* ---- #421 U4 (ruling R7): n == 0 is the canonical zero state -------------
@@ -7657,7 +7657,7 @@ void testAccumulateFloatIntoBfpRescaleEmptyTensorResetsToZeroState(void) {
     buildEmptyBfpTarget(&target, data, &shape, &q, &qc);
 
     float inc[1] = {0.f};
-    accumulateFloatIntoBfpTensorRescale(&target, inc, 0);
+    accumulateFloatIntoBfpTensorRescale(&target, inc, 0, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(127, exponents[0]);
     TEST_ASSERT_EQUAL_UINT8(0, data[0]); /* nothing written past the payload */
@@ -7685,7 +7685,7 @@ void testAccumulateTensorIntoBfpRescaleEmptyTensorResetsToZeroState(void) {
     tensor_t increment;
     setTensorValues(&increment, (uint8_t *)incData, &shape, &floatQ, NULL);
 
-    accumulateTensorIntoBfpRescale(&target, &increment);
+    accumulateTensorIntoBfpRescale(&target, &increment, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(127, exponents[0]);
     TEST_ASSERT_EQUAL_UINT8(0, data[0]);
@@ -7708,7 +7708,7 @@ void testAccumulateFloatIntoBfpFixedGridEmptyTensorResetsToZeroState(void) {
     buildEmptyBfpTarget(&target, data, &shape, &q, &qc);
 
     float inc[1] = {0.f};
-    accumulateFloatIntoBfpTensorFixedGrid(&target, inc, 0);
+    accumulateFloatIntoBfpTensorFixedGrid(&target, inc, 0, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(127, exponents[0]);
     TEST_ASSERT_EQUAL_UINT8(0, data[0]);
@@ -7736,7 +7736,7 @@ void testAccumulateTensorIntoBfpFixedGridEmptyTensorResetsToZeroState(void) {
     tensor_t increment;
     setTensorValues(&increment, (uint8_t *)incData, &shape, &floatQ, NULL);
 
-    accumulateTensorIntoBfpFixedGrid(&target, &increment);
+    accumulateTensorIntoBfpFixedGrid(&target, &increment, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(127, exponents[0]);
     TEST_ASSERT_EQUAL_UINT8(0, data[0]);

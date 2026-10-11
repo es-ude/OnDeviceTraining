@@ -111,7 +111,7 @@ void scaleOptimizerGradients(optimizer_t *optimizer, float factor) {
              * silently skipping would mask the caller's bug and saturating
              * would invent data. Precedent for the exit: optimizerClipGradNorm
              * below. */
-            scaleBfpTensorInPlace(param->grad, factor);
+            scaleBfpTensorInPlace(param->grad, factor, NULL);
             break;
         }
         default:

@@ -174,7 +174,7 @@ void testAddSymInt32TensorsInplace() {
 
     setTensorValues(&bTensor, bDataBytes, &shape, &bQ, NULL);
 
-    addSymInt32TensorsInplace(&aTensor, &bTensor);
+    addSymInt32TensorsInplace(&aTensor, &bTensor, NULL);
 
     /* Build a heap Float32 output tensor for the convert-back step using the
      * post-#106 primitives: initTensor owns its own data buffer and
@@ -234,7 +234,7 @@ void testAddSymInt32TensorsInplaceExitsOnCountMismatch() {
     tensor_t bTensor;
     setTensorValues(&bTensor, (uint8_t *)bData, &bShape, &bQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(addSymInt32TensorsInplace(&aTensor, &bTensor));
+    ASSERT_EXITS_WITH_FAILURE(addSymInt32TensorsInplace(&aTensor, &bTensor, NULL));
 }
 
 void testAddInt32TensorWithSymInt32TensorInplace() {

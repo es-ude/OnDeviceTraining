@@ -5,6 +5,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Pointer-only use: the identical typedef lives in RNG.h (C11 allows the
+ * repetition), so this header needs no RNG include path. */
+typedef struct rngStream rngStream_t;
+
 /*!
  * Calculates the sum of two floats.
  *
@@ -119,7 +123,8 @@ void addFloat32TensorToSymInt32TensorInplace(tensor_t *symInt32Tensor, tensor_t 
  * \param bTensor: Second tensor
  * \param outputTensor: Tensor for results
  */
-void addSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor);
+void addSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,
+                        rngStream_t *rs);
 /*!
  * Calculates the sum of two symInt32 tensors inplace.
  *
@@ -128,7 +133,7 @@ void addSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTe
  * \param aTensor: First tensor
  * \param bTensor: Second tensor
  */
-void addSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor);
+void addSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor, rngStream_t *rs);
 
 /*!
  * Gets the current value of the add instruction counter.

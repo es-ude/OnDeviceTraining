@@ -54,7 +54,7 @@ static void poolBfpRequireDims3(const tensor_t *t, size_t d0, size_t d1, size_t 
  * geometry (mirrors Conv1d's ctx convention, Conv1d.c); 1 input, no auxOut.
  * The SYM_INT32 arm lives in avgPool1dForwardKernelSymInt32 below (#205). */
 static void avgPool1dForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                   const void *ctx) {
+                                   const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     const avgPool1dConfig_t *cfg = ctx;
@@ -125,7 +125,7 @@ static void poolValidateSymValueSum(const tensor_t *operand, size_t maxTerms, co
  * satisfied), guarded by poolValidateSymValueSum above. The OUT_WRITE
  * epilogue width-restores the accumulator-range sums at the producer. */
 static void avgPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *rawOut,
-                                           tensor_t *auxOut, const void *ctx) {
+                                           tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     const avgPool1dConfig_t *cfg = ctx;
@@ -182,7 +182,7 @@ static void avgPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *r
  * visited and the divisor stays K. Guarded by bfpValidateSumHeadroom — the
  * SUM limit (INT32_MAX >> (m-1)), not the product limit. */
 static void avgPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                      const void *ctx) {
+                                      const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     const avgPool1dConfig_t *cfg = ctx;
@@ -365,7 +365,7 @@ void avgPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tensor_t *lo
  * the producer). rawOut is the funnel's uninitialized Phase-2 scratch, so
  * the kernel memsets it before the scatter `+=` (overlapping windows). */
 static void avgPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *rawOut,
-                                            tensor_t *auxOut, const void *ctx) {
+                                            tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     const avgPool1dConfig_t *cfg = ctx;
@@ -432,7 +432,7 @@ static void avgPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *
  * is the funnel's uninitialized Phase-2 scratch, so it is memset before the
  * accumulating `+=` (overlapping windows hit the same input cell). */
 static void avgPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                       const void *ctx) {
+                                       const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     const avgPool1dConfig_t *cfg = ctx;

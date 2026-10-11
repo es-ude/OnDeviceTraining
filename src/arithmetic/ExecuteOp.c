@@ -8,12 +8,13 @@
 #include "Common.h"
 #include "ExecuteOp.h"
 #include "Quantization.h"
+#include "RNG.h"
 #include "Rounding.h"
 #include "Tensor.h"
 #include "TensorConversion.h"
 
 void executeOpIdentityKernel(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
-                             tensor_t *auxOut, const void *ctx) {
+                             tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)nOperands;
     (void)auxOut;
     (void)ctx;
@@ -25,6 +26,17 @@ void executeOpIdentityKernel(tensor_t **operands, size_t nOperands, tensor_t *ra
         ((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale =
             ((symInt32QConfig_t *)src->quantization->qConfig)->scale;
     }
+}
+
+/* One phase's stream: NULL without an op key, otherwise the stream of
+ * rngFold(*key, tag, index), opened into the caller's storage. */
+static rngStream_t *openPhaseStream(const rngKey_t *key, uint32_t tag, uint32_t index,
+                                    rngStream_t *storage) {
+    if (key == NULL) {
+        return NULL;
+    }
+    *storage = rngOpen(rngFold(*key, tag, index));
+    return storage;
 }
 
 /* Phase 4, OUT_WRITE: intermediate -> target in the target's dtype. Same-dtype
@@ -71,15 +83,16 @@ static roundingMode_t *storageRoundingSlot(tensor_t *tensor) {
  * encodes). The ACC epilogues (accumulateOut) deliberately keep the TARGET's
  * mode: accumulate is a read-modify-write under the accumulator's own storage
  * grid, whose rounding is part of the grid discipline like scale (PR1b.2 D4). */
-static void writeOut(tensor_t *intermediate, tensor_t *target, roundingMode_t opRounding) {
+static void writeOut(tensor_t *intermediate, tensor_t *target, roundingMode_t opRounding,
+                     rngStream_t *rs) {
     roundingMode_t *slot = storageRoundingSlot(target);
     if (slot == NULL) {
-        writeOutConversion(intermediate, target, NULL);
+        writeOutConversion(intermediate, target, rs);
         return;
     }
     roundingMode_t storageMode = *slot;
     *slot = opRounding;
-    writeOutConversion(intermediate, target, NULL);
+    writeOutConversion(intermediate, target, rs);
     *slot = storageMode;
 }
 
@@ -103,12 +116,15 @@ void executeConvert(tensor_t *input, tensor_t *target, rngStream_t *rs) {
  * chunk-wise via the tensor-typed accumulate*Into* entry points (#296 Stage
  * 2) instead of staging a whole-tensor float view; a FLOAT32 intermediate is
  * passed as a direct pointer (no view/VLA at all). */
-static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t mode) {
+static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t mode,
+                          const rngKey_t *key) {
     size_t n = calcNumberOfElementsByTensor(target);
+    rngStream_t acc0Storage;
+    rngStream_t *acc0 = openPhaseStream(key, RNG_TAG_ACC, 0u, &acc0Storage);
 
     switch (target->quantization->type) {
     case FLOAT32:
-        accumulateTensorIntoFloat32Inplace(target, intermediate, NULL);
+        accumulateTensorIntoFloat32Inplace(target, intermediate, acc0);
         return;
     case SYM_INT32: {
         symInt32QConfig_t *targetQC = target->quantization->qConfig;
@@ -130,13 +146,13 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
             int32_t *in = (int32_t *)intermediate->data;
             for (size_t i = 0; i < n; i++) {
                 tg[i] += rescaleIntoAccumulatorScale(in[i], intermScale, targetScale,
-                                                     targetQC->roundingMode, NULL);
+                                                     targetQC->roundingMode, acc0);
             }
             return;
         }
         /* OUT_ACC_DYNAMIC_RESCALE */
         if (intermediate->quantization->type == SYM_INT32) {
-            accumulateSymInt32IntoSymInt32Rescale(target, intermediate, NULL);
+            accumulateSymInt32IntoSymInt32Rescale(target, intermediate, acc0);
             return;
         }
         /* #296 residual: this arm quantizes the whole increment
@@ -154,8 +170,10 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
         uint8_t incSymData[(n > 0 ? n : 1) * sizeof(int32_t)];
         tensor_t incSym;
         setTensorValuesForConversion(incSymData, &incQ, intermediate, &incSym);
-        convertTensor(intermediate, &incSym, NULL);
-        addSymInt32TensorsInplace(target, &incSym, NULL);
+        convertTensor(intermediate, &incSym, acc0);
+        rngStream_t acc1Storage;
+        addSymInt32TensorsInplace(target, &incSym,
+                                  openPhaseStream(key, RNG_TAG_ACC, 1u, &acc1Storage));
         return;
     }
     case SYM: {
@@ -168,16 +186,16 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
         if (intermediate->quantization->type == FLOAT32) {
             if (mode == OUT_ACC_FIXED_SCALE) {
                 accumulateFloatIntoSymTensorFixedGrid(target, (const float *)intermediate->data, n,
-                                                      NULL);
+                                                      acc0);
             } else {
                 accumulateFloatIntoSymTensorRescale(target, (const float *)intermediate->data, n,
-                                                    NULL);
+                                                    acc0);
             }
         } else {
             if (mode == OUT_ACC_FIXED_SCALE) {
-                accumulateTensorIntoSymFixedGrid(target, intermediate, NULL);
+                accumulateTensorIntoSymFixedGrid(target, intermediate, acc0);
             } else {
-                accumulateTensorIntoSymRescale(target, intermediate, NULL);
+                accumulateTensorIntoSymRescale(target, intermediate, acc0);
             }
         }
         return;
@@ -196,9 +214,9 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
         }
         if (intermediate->quantization->type == FLOAT32) {
             accumulateFloatIntoAsymTensorRescale(target, (const float *)intermediate->data, n,
-                                                 NULL);
+                                                 acc0);
         } else {
-            accumulateTensorIntoAsymRescale(target, intermediate, NULL);
+            accumulateTensorIntoAsymRescale(target, intermediate, acc0);
         }
         return;
     }
@@ -211,16 +229,16 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
         if (intermediate->quantization->type == FLOAT32) {
             if (mode == OUT_ACC_FIXED_SCALE) {
                 accumulateFloatIntoBfpTensorFixedGrid(target, (const float *)intermediate->data, n,
-                                                      NULL);
+                                                      acc0);
             } else {
                 accumulateFloatIntoBfpTensorRescale(target, (const float *)intermediate->data, n,
-                                                    NULL);
+                                                    acc0);
             }
         } else {
             if (mode == OUT_ACC_FIXED_SCALE) {
-                accumulateTensorIntoBfpFixedGrid(target, intermediate, NULL);
+                accumulateTensorIntoBfpFixedGrid(target, intermediate, acc0);
             } else {
-                accumulateTensorIntoBfpRescale(target, intermediate, NULL);
+                accumulateTensorIntoBfpRescale(target, intermediate, acc0);
             }
         }
         return;
@@ -311,6 +329,9 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
             ops[i] = inputs[i];
             continue;
         }
+        rngStream_t stageStreamStorage;
+        rngStream_t *stageStream =
+            openPhaseStream(spec->key, RNG_TAG_STAGE, (uint32_t)i, &stageStreamStorage);
 
         /* Group-quant PR2 (Task 3) + PR4 (Task 3): a
          * grouped operand (numGroups > 1) -- SYM or ASYM, the two grouped
@@ -349,7 +370,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
             initFloat32Quantization(&scratchQ[i]);
             setTensorValuesForConversion(&scratch[scratchOffset], &scratchQ[i], inputs[i],
                                          &scratchTensors[i]);
-            convertTensor(inputs[i], &scratchTensors[i], NULL);
+            convertTensor(inputs[i], &scratchTensors[i], stageStream);
             break;
         case ARITH_SYM_INT32: {
             /* PR2-Decision 11 (BFP epic PR2): deny BEFORE the convertTensor route
@@ -407,7 +428,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
                  * ctx (e.g. Matmul's weightGroups), never this field. */
                 scratchQC[i].scale = 1.0f;
             } else {
-                convertTensor(inputs[i], &scratchTensors[i], NULL);
+                convertTensor(inputs[i], &scratchTensors[i], stageStream);
             }
             break;
         }
@@ -454,7 +475,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
                 setTensorValuesForConversion(&scratch[scratchOffset], &scratchQ[i], inputs[i],
                                              &scratchTensors[i]);
                 quantizeFloatBufferToBfpCodes((const float *)inputs[i]->data, n, &scratchBfpQC[i],
-                                              (int32_t *)scratchTensors[i].data, NULL);
+                                              (int32_t *)scratchTensors[i].data, stageStream);
             } else {
                 PRINT_ERROR("executeOp: operand %zu storage dtype %d unsupported under "
                             "ARITH_BFP (v1 accepts FLOAT32 or BFP; convert explicitly via a "
@@ -516,18 +537,22 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
 
     /* Phase 3 — kernel emits raw; auxOut/ctx pass through untouched by the
      * funnel (auxOut is NEVER funnel-converted). */
-    spec->kernel(ops, nInputs, &raw, spec->auxOut, spec->ctx);
+    rngStream_t kernelStorage;
+    spec->kernel(ops, nInputs, &raw, spec->auxOut, spec->ctx,
+                 openPhaseStream(spec->key, RNG_TAG_KERNEL, 0u, &kernelStorage));
 
     /* Phase 4 — epilogue (target only; auxOut already final). */
     switch (spec->mode) {
     case OUT_WRITE:
         if (!aliasOut) {
-            writeOut(&raw, target, arithmetic.roundingMode);
+            rngStream_t outStorage;
+            writeOut(&raw, target, arithmetic.roundingMode,
+                     openPhaseStream(spec->key, RNG_TAG_OUT, 0u, &outStorage));
         }
         break;
     case OUT_ACC_DYNAMIC_RESCALE:
     case OUT_ACC_FIXED_SCALE:
-        accumulateOut(&raw, target, spec->mode);
+        accumulateOut(&raw, target, spec->mode, spec->key);
         break;
     }
 }

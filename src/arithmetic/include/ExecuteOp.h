@@ -12,6 +12,7 @@
 /* Pointer-only use: the identical typedef lives in RNG.h (C11 allows the
  * repetition), so this header needs no RNG include path. */
 typedef struct rngStream rngStream_t;
+typedef struct rngKey rngKey_t;
 
 /* The one conversion funnel (PR1b.2 D1, docs/conventions/arithmetic-sym.md). Every op runs:
  *   prologue   — operands whose dtype != arithmetic are converted into
@@ -32,8 +33,10 @@ typedef struct rngStream rngStream_t;
  * ExecuteOp.c. Opening one for an op that does not fit the n-inputs/1-output
  * shape requires a documented exception here. */
 
+/* rs: the op's KERNEL(0) stream (NULL without an op key). A kernel that rounds
+ * hands it to its rounding calls; every other kernel ignores it. */
 typedef void (*opKernelFn_t)(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
-                             tensor_t *auxOut, const void *ctx);
+                             tensor_t *auxOut, const void *ctx, rngStream_t *rs);
 
 /* Maximum operands any in-tree op passes (Linear/LayerNorm forward: input +
  * weights/gamma + bias/beta = 3). Bump deliberately. Public since BFP epic
@@ -64,6 +67,11 @@ typedef struct opSpec {
     tensor_t **inputs;
     size_t nInputs;
     arithmetic_t arithmetic;
+    /* The op key. The funnel opens one stream per phase from it: STAGE(i) for
+     * staging operand i, KERNEL(0) for the kernel, OUT(0) for the OUT_WRITE
+     * epilogue, ACC(j) for the j-th rounding pass of an ACC epilogue. NULL (the
+     * zero-init) hands every phase a NULL stream. Read during the call only. */
+    const rngKey_t *key;
     outputMode_t mode;
     tensor_t *auxOut;
     /* #296 Stage 1: opt-in for OUT_WRITE aliasing when the target is also an
@@ -164,7 +172,7 @@ static inline void executeOpValidateAccMode(outputMode_t mode, const char *conte
  * byte-count-based copy reads packed-storage sizes) — never pair with
  * ARITH_BFP. */
 void executeOpIdentityKernel(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
-                             tensor_t *auxOut, const void *ctx);
+                             tensor_t *auxOut, const void *ctx, rngStream_t *rs);
 
 /* Kernel-less funnel form: storage-to-storage conversion (1 input,
  * OUT_WRITE semantics). SYM->SYM routes through the conversionMatrix

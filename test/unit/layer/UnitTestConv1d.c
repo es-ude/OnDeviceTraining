@@ -981,7 +981,7 @@ void testConv1dKernelSymScatterStrideDilation() {
      * own raw, unrestored output (the RawKernel fixtures), not the
      * funnel-restored propLoss wire conv1dBackward now produces (PR1b.2 D3;
      * see testConv1dBackwardSymStrideDilation for that). */
-    convTranspose1dKernelSymInt32(lossGrad, weight, NULL, &kernel, 1, 0, propLoss);
+    convTranspose1dKernelSymInt32(lossGrad, weight, NULL, &kernel, 1, 0, propLoss, NULL);
 
     int32_t *m = (int32_t *)propLoss->data;
     for (size_t i = 0; i < expectedPropLossRawKernel_conv1dSym_strideDilationSym_len; i++) {

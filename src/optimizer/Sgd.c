@@ -49,7 +49,7 @@ typedef struct {
 
 /* operands {param, grad} -> rawOut = param - lr*(grad + wd*param) */
 static void sgdUpdateKernel(tensor_t **op, size_t n, tensor_t *rawOut, tensor_t *aux,
-                            const void *ctxv) {
+                            const void *ctxv, rngStream_t *rs) {
     (void)n;
     (void)aux;
     const sgdUpdateCtx_t *ctx = ctxv;
@@ -65,7 +65,7 @@ static void sgdUpdateKernel(tensor_t **op, size_t n, tensor_t *rawOut, tensor_t 
 
 /* operands {state, grad, param} -> rawOut = mom*state + grad + wd*param */
 static void sgdMStateKernel(tensor_t **op, size_t n, tensor_t *rawOut, tensor_t *aux,
-                            const void *ctxv) {
+                            const void *ctxv, rngStream_t *rs) {
     (void)n;
     (void)aux;
     const sgdMStateCtx_t *ctx = ctxv;
@@ -82,7 +82,7 @@ static void sgdMStateKernel(tensor_t **op, size_t n, tensor_t *rawOut, tensor_t 
 
 /* operands {param, state} -> rawOut = param - lr*state */
 static void sgdMParamKernel(tensor_t **op, size_t n, tensor_t *rawOut, tensor_t *aux,
-                            const void *ctxv) {
+                            const void *ctxv, rngStream_t *rs) {
     (void)n;
     (void)aux;
     const sgdMParamCtx_t *ctx = ctxv;

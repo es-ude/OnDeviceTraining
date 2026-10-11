@@ -606,7 +606,7 @@ void testConv1dKernelBfpPowerOfTwoBitIdenticalToGroupedSym(void) {
     setTensorValues(&outSymTensor, (uint8_t *)outSymData, &outShape, &outSymQ, NULL);
 
     conv1dKernelSymInt32Grouped(&inSymTensor, &wSymTensor, NULL, &kernel, 1, &outSymTensor,
-                                &weightGroups);
+                                &weightGroups, NULL);
 
     for (size_t i = 0; i < 10; i++) {
         float symDequant = (float)outSymData[i] * outSymQC.scale;

@@ -68,7 +68,7 @@ typedef struct {
  * ALWAYS draws rank + dim variates: z beyond kEff is drawn and
  * discarded so the stream position never depends on kEff. */
 static void ppcaSampleKernelFloat(tensor_t **op, size_t n, tensor_t *rawOut, tensor_t *aux,
-                                  const void *ctxv) {
+                                  const void *ctxv, rngStream_t *rs) {
     (void)n;
     (void)aux;
     const ppcaSampleCtx_t *ctx = ctxv;
@@ -189,7 +189,7 @@ typedef struct {
 
 /* operands {muOld, meanBatch} (FLOAT32 scratch) -> rawOut = a*op0 + b*op1. */
 static void ppcaMeanMergeKernelFloat(tensor_t **op, size_t n, tensor_t *rawOut, tensor_t *aux,
-                                     const void *ctxv) {
+                                     const void *ctxv, rngStream_t *rs) {
     (void)n;
     (void)aux;
     const ppcaMeanMergeCtx_t *ctx = ctxv;
@@ -214,7 +214,7 @@ typedef struct {
  * rawOut = new basis [k,d]. writesInPlaceSafe=true is sound: op[0] is fully
  * consumed into bT (step 1) before the first rawOut write (step 8). */
 static void ppcaMergeKernelFloat(tensor_t **op, size_t nOps, tensor_t *rawOut, tensor_t *aux,
-                                 const void *ctxv) {
+                                 const void *ctxv, rngStream_t *rs) {
     (void)nOps;
     (void)aux;
     const ppcaMergeCtx_t *ctx = ctxv;
@@ -443,7 +443,7 @@ typedef struct {
  * count > i+1; bootstrap of component (nOld-1) from the deflated residual.
  * lambda' -> ws->lambdaOut, Welford totalVar/sigma2 -> ws fields. */
 static void ppcaCcipcaStepKernelFloat(tensor_t **op, size_t nOps, tensor_t *rawOut, tensor_t *aux,
-                                      const void *ctxv) {
+                                      const void *ctxv, rngStream_t *rs) {
     (void)nOps;
     (void)aux;
     const ppcaCcipcaCtx_t *ctx = ctxv;

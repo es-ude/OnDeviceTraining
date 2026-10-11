@@ -37,13 +37,14 @@ void linearInitConfig(linearConfig_t *linearConfig, parameter_t *weights, parame
 // IMPORTANT: Assumes all tensors have FLOAT32 quantization
 void linearForwardFloat(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output);
 // IMPORTANT: Assumes all tensors have SYM_INT32 quantization
-void linearForwardSymInt32(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output);
+void linearForwardSymInt32(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output,
+                           rngStream_t *rs);
 /* Group-quant PR2 (Task 3): `w` is the executeOp prologue's unpacked grouped-
  * SYM scratch (SYM_INT32 dtype, poisoned scale); `weightGroups` carries the
  * real per-group scales/qBits/groupSize. Routed to by linearForwardKernelSym
  * when the stored weight is grouped SYM — not a direct public entry point. */
 void linearForwardSymInt32Grouped(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output,
-                                  const symQConfig_t *weightGroups);
+                                  const symQConfig_t *weightGroups, rngStream_t *rs);
 /* BFP epic PR2 (Task 7): the BFP twin of linearForwardSymInt32Grouped's role.
  * All operands are the executeOp prologue's unpacked-BFP scratch (int32
  * mantissa codes under a live bfpQConfig_t; `b` NULL-able) — same transpose
@@ -72,7 +73,7 @@ void linearCalcPropLossSymInt32(tensor_t *weights, tensor_t *loss, tensor_t *pro
  * the unified matmul core binds groups per visited storage element. Routed
  * to by propLossKernelSym when the stored weight is grouped SYM. */
 void linearCalcPropLossSymInt32Grouped(tensor_t *weights, tensor_t *loss, tensor_t *propLoss,
-                                       const symQConfig_t *weightGroups);
+                                       const symQConfig_t *weightGroups, rngStream_t *rs);
 
 /* BFP epic PR3: backward raw-emit cores on the PR2 fold contract. All BFP
  * operands are the executeOp prologue's unpacked-BFP scratch (int32 mantissa

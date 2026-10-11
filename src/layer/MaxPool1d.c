@@ -96,7 +96,7 @@ static void poolBfpRequireDims3(const tensor_t *t, size_t d0, size_t d1, size_t 
  * D1: "MaxPool argmaxIndices lives here"). The SYM_INT32 arm lives in
  * maxPool1dForwardKernelSymInt32 below (#205). */
 static void maxPool1dForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                   const void *ctx) {
+                                   const void *ctx, rngStream_t *rs) {
     (void)n;
     const maxPool1dConfig_t *cfg = ctx;
     tensor_t *input = ops[0];
@@ -158,7 +158,7 @@ static void maxPool1dForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, t
  * so inputs that quantize to the same mantissa tie here even when their float
  * values differ. */
 static void maxPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *rawOut,
-                                           tensor_t *auxOut, const void *ctx) {
+                                           tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)n;
     const maxPool1dConfig_t *cfg = ctx;
     tensor_t *input = ops[0];
@@ -227,7 +227,7 @@ static void maxPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *r
  * funnel-converted; -1 empty-window sentinel) are unchanged. No headroom
  * guard: nothing is summed. */
 static void maxPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                      const void *ctx) {
+                                      const void *ctx, rngStream_t *rs) {
     (void)n;
     const maxPool1dConfig_t *cfg = ctx;
     tensor_t *input = ops[0];
@@ -503,7 +503,7 @@ static void poolValidateSymValueSum(const tensor_t *operand, size_t maxTerms, co
  * (overlapping windows may hit the same input index — Conv1d weight-grad
  * kernel precedent). */
 static void maxPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *rawOut,
-                                            tensor_t *auxOut, const void *ctx) {
+                                            tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     const maxPool1dConfig_t *cfg = ctx;
@@ -567,7 +567,7 @@ static void maxPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *
  * uninitialized Phase-2 scratch, so it is memset before the `+=` (one input
  * cell can be the argmax of several overlapping windows). */
 static void maxPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                       const void *ctx) {
+                                       const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     const maxPool1dConfig_t *cfg = ctx;

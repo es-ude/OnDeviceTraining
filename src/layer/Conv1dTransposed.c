@@ -89,7 +89,7 @@ typedef struct convT1dForwardCtx {
  * {input, weights, bias} (bias omitted, not NULL-padded, when the layer has
  * no bias). */
 static void forwardKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                               const void *ctx) {
+                               const void *ctx, rngStream_t *rs) {
     (void)auxOut;
     const convT1dForwardCtx_t *fctx = ctx;
     const conv1dTransposedConfig_t *cfg = fctx->cfg;
@@ -98,17 +98,17 @@ static void forwardKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tenso
                                  rawOut);
 }
 static void forwardKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                             const void *ctx) {
+                             const void *ctx, rngStream_t *rs) {
     (void)auxOut;
     const convT1dForwardCtx_t *fctx = ctx;
     const conv1dTransposedConfig_t *cfg = fctx->cfg;
     tensor_t *bias = (n > 2) ? ops[2] : NULL;
     if (fctx->weightGroups != NULL) {
         convTranspose1dKernelSymInt32Grouped(ops[0], ops[1], bias, cfg->kernel, cfg->groups,
-                                             cfg->outputPadding, rawOut, fctx->weightGroups);
+                                             cfg->outputPadding, rawOut, fctx->weightGroups, rs);
     } else {
         convTranspose1dKernelSymInt32(ops[0], ops[1], bias, cfg->kernel, cfg->groups,
-                                      cfg->outputPadding, rawOut);
+                                      cfg->outputPadding, rawOut, rs);
     }
 }
 /* BFP epic PR2 (Task 7): operands arrive in the funnel's unpacked-BFP
@@ -118,7 +118,7 @@ static void forwardKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_
  * ctx->weightGroups stays NULL (BFP weights never take the SYM carrier
  * path, groupedWeightViewOrNull returns NULL for the BFP dtype). */
 static void forwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                             const void *ctx) {
+                             const void *ctx, rngStream_t *rs) {
     (void)auxOut;
     const convT1dForwardCtx_t *fctx = ctx;
     const conv1dTransposedConfig_t *cfg = fctx->cfg;
@@ -261,7 +261,7 @@ void conv1dTransposedForward(layer_t *layer, tensor_t *input, tensor_t *output) 
  * OUT_ACC_FIXED_SCALE epilogue's rescaleIntoAccumulatorScale (target
  * roundingMode, PR1b.2 D4) do the rescale that used to happen inline here. */
 static void weightGradKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                  const void *ctx) {
+                                  const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     const conv1dTransposedConfig_t *cfg = ctx;
@@ -368,7 +368,7 @@ static void conv1dTransposedCalcWeightGradsFloat32(conv1dTransposedConfig_t *cfg
 }
 
 static void biasGradKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                const void *ctx) {
+                                const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     const conv1dTransposedConfig_t *cfg = ctx;
@@ -416,7 +416,7 @@ static void conv1dTransposedCalcBiasGradsFloat32(conv1dTransposedConfig_t *cfg,
 }
 
 static void weightGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                const void *ctx) {
+                                const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     const conv1dTransposedConfig_t *cfg = ctx;
@@ -537,7 +537,7 @@ void conv1dTransposedCalcWeightGradsSymInt32(conv1dTransposedConfig_t *cfg, tens
  * contributor map is the ConvT AFFINE outIdx = inPos*stride + k*dilation.
  * Each gw element is written exactly once, so there is NO memset. */
 static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                const void *ctx) {
+                                const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     const conv1dTransposedConfig_t *cfg = ctx;
@@ -720,7 +720,7 @@ void conv1dTransposedCalcWeightGradsBfp(conv1dTransposedConfig_t *cfg, tensor_t 
 }
 
 static void biasGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                              const void *ctx) {
+                              const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     const conv1dTransposedConfig_t *cfg = ctx;
@@ -779,7 +779,7 @@ void conv1dTransposedCalcBiasGradsSymInt32(conv1dTransposedConfig_t *cfg, tensor
  * positions the weightGrad affine never reaches). Sum headroom via
  * bfpValidateSumHeadroom (the product bound does not apply to sums). */
 static void biasGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                              const void *ctx) {
+                              const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     const conv1dTransposedConfig_t *cfg = ctx;
@@ -876,7 +876,7 @@ void conv1dTransposedCalcBiasGradsBfp(conv1dTransposedConfig_t *cfg, tensor_t *l
  * unchanged: route to the grouped GATHER entry with the stored weight's own
  * symQConfig_t. */
 static void propLossKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                const void *ctx) {
+                                const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     const convT1dForwardCtx_t *fctx = ctx;
@@ -885,16 +885,16 @@ static void propLossKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tens
 }
 
 static void propLossKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                              const void *ctx) {
+                              const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     const convT1dForwardCtx_t *fctx = ctx;
     const conv1dTransposedConfig_t *cfg = fctx->cfg;
     if (fctx->weightGroups != NULL) {
         conv1dKernelSymInt32Grouped(ops[0], ops[1], NULL, cfg->kernel, cfg->groups, rawOut,
-                                    fctx->weightGroups);
+                                    fctx->weightGroups, rs);
     } else {
-        conv1dKernelSymInt32(ops[0], ops[1], NULL, cfg->kernel, cfg->groups, rawOut);
+        conv1dKernelSymInt32(ops[0], ops[1], NULL, cfg->kernel, cfg->groups, rawOut, rs);
     }
 }
 
@@ -905,7 +905,7 @@ static void propLossKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
  * ctx wrapper as the other dx adapters, weightGroups always NULL for BFP
  * (groupedWeightViewOrNull returns NULL for the BFP dtype). */
 static void propLossKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                              const void *ctx) {
+                              const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     const convT1dForwardCtx_t *fctx = ctx;

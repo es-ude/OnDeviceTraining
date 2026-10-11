@@ -246,7 +246,7 @@ static void layerNormValidateSymTensor(tensor_t *t, const char *what) {
  * OUT_WRITE epilogue (caller, layerNormForward) restores width at the
  * producer via the SYM->SYM diagonal requant. */
 static void layerNormAffineSymInt32(size_t numNormDims, tensor_t *gamma, tensor_t *beta,
-                                    tensor_t *output, float sNorm) {
+                                    tensor_t *output, float sNorm, rngStream_t *rs) {
     int32_t *out = (int32_t *)output->data;
     int32_t *gammaQ = (int32_t *)gamma->data;
     int32_t *betaQ = (int32_t *)beta->data;
@@ -266,7 +266,7 @@ static void layerNormAffineSymInt32(size_t numNormDims, tensor_t *gamma, tensor_
         for (size_t j = 0; j < N; j++) {
             size_t off = layerNormPhysOffset(output, numNormDims, g, j);
             int32_t seed =
-                rescaleIntoAccumulatorScale(betaQ[j], betaQC->scale, sY, outQC->roundingMode, NULL);
+                rescaleIntoAccumulatorScale(betaQ[j], betaQC->scale, sY, outQC->roundingMode, rs);
             out[off] = out[off] * gammaQ[j] + seed;
         }
     }
@@ -293,7 +293,7 @@ static void layerNormAffineSymInt32(size_t numNormDims, tensor_t *gamma, tensor_
  * Linear's weights/bias adapter pattern — cfg is retained only for
  * eps/numNormDims/qMaxBits-independent geometry. */
 static void layerNormForwardSymInt32(layerNormConfig_t *cfg, tensor_t *gamma, tensor_t *beta,
-                                     tensor_t *input, tensor_t *output) {
+                                     tensor_t *input, tensor_t *output, rngStream_t *rs) {
     layerNormValidateSymTensor(input, "input");
     layerNormValidateSymTensor(output, "output");
     layerNormValidateSymTensor(gamma, "gamma");
@@ -381,12 +381,12 @@ static void layerNormForwardSymInt32(layerNormConfig_t *cfg, tensor_t *gamma, te
                 size_t inOff = layerNormPhysOffset(input, cfg->numNormDims, g, j);
                 float n = ((float)in[inOff] * inScale - mean[g]) * invSigma[g];
                 size_t outOff = layerNormPhysOffset(output, cfg->numNormDims, g, j);
-                out[outOff] = roundByMode(clamp(n * K, qMin, qMax), outQC->roundingMode, NULL);
+                out[outOff] = roundByMode(clamp(n * K, qMin, qMax), outQC->roundingMode, rs);
             }
         }
     }
 
-    layerNormAffineSymInt32(cfg->numNormDims, gamma, beta, output, sNorm);
+    layerNormAffineSymInt32(cfg->numNormDims, gamma, beta, output, sNorm, rs);
 }
 
 /* F5-style count gate for the BFP kernels' flat gamma/beta/raw indexing. */
@@ -482,19 +482,19 @@ static void layerNormForwardFloat(layerNormConfig_t *cfg, tensor_t *gamma, tenso
  * (layerNormForward) restores width via the SYM->SYM diagonal requant, same
  * as Linear/Conv1d's matmul-family forwards. */
 static void layerNormForwardKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut,
-                                        tensor_t *auxOut, const void *ctx) {
+                                        tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     layerNormForwardFloat((layerNormConfig_t *)ctx, ops[1], ops[2], ops[0], rawOut);
 }
 static void layerNormForwardKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                      const void *ctx) {
+                                      const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
-    layerNormForwardSymInt32((layerNormConfig_t *)ctx, ops[1], ops[2], ops[0], rawOut);
+    layerNormForwardSymInt32((layerNormConfig_t *)ctx, ops[1], ops[2], ops[0], rawOut, rs);
 }
 static void layerNormForwardKernelBfp(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
-                                      tensor_t *auxOut, const void *ctx) {
+                                      tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)nOperands;
     (void)auxOut;
     const layerNormConfig_t *cfg = ctx;
@@ -970,21 +970,21 @@ static void layerNormCalcPropLossBfp(const layerNormConfig_t *cfg, tensor_t *for
 /* executeOp backward kernel adapters for the ARITH_BFP arm -- dgamma
  * {forwardInput, loss}, dbeta {loss}, dx {forwardInput, loss, gamma}. */
 static void layerNormDgammaKernelBfp(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
-                                     tensor_t *auxOut, const void *ctx) {
+                                     tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)nOperands;
     (void)auxOut;
     const layerNormConfig_t *cfg = ctx;
     layerNormCalcGammaGradsBfp(cfg, operands[0], operands[1], rawOut);
 }
 static void layerNormDbetaKernelBfp(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
-                                    tensor_t *auxOut, const void *ctx) {
+                                    tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)nOperands;
     (void)auxOut;
     const layerNormConfig_t *cfg = ctx;
     layerNormCalcBetaGradsBfp(cfg, operands[0], rawOut);
 }
 static void layerNormDxKernelBfp(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
-                                 tensor_t *auxOut, const void *ctx) {
+                                 tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)nOperands;
     (void)auxOut;
     const layerNormConfig_t *cfg = ctx;

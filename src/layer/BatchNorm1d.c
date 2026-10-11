@@ -328,7 +328,7 @@ typedef struct {
 /* executeOp kernel: operands {input[, gamma, beta]}; y = gamma*xhat + beta
  * (xhat alone when nOperands == 1, i.e. !affine). */
 static void bnForwardKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                 const void *ctx) {
+                                 const void *ctx, rngStream_t *rs) {
     (void)auxOut;
     const bnAffineCtx_t *c = ctx;
     const float *x = (const float *)ops[0]->data;

@@ -142,7 +142,7 @@ void convTranspose1dKernelFloat32(tensor_t const *input, tensor_t const *weight,
 
 void convTranspose1dKernelSymInt32(tensor_t const *input, tensor_t const *weight,
                                    tensor_t const *bias, kernel_t const *kernel, size_t groups,
-                                   size_t outputPadding, tensor_t *output) {
+                                   size_t outputPadding, tensor_t *output, rngStream_t *rs) {
     size_t batch = input->shape->dimensions[0];
     size_t inChannels = input->shape->dimensions[1];
     size_t inputLength = input->shape->dimensions[2];
@@ -215,7 +215,7 @@ void convTranspose1dKernelSymInt32(tensor_t const *input, tensor_t const *weight
         symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
         for (size_t oc = 0; oc < outChannels; oc++) {
             int32_t seed = rescaleIntoAccumulatorScale(bArr[oc], biasQC->scale, outputScale,
-                                                       biasQC->roundingMode, NULL);
+                                                       biasQC->roundingMode, rs);
             for (size_t b = 0; b < batch; b++) {
                 for (size_t l = 0; l < outputLength; l++) {
                     yArr[(b * outChannels + oc) * outputLength + l] += seed;
@@ -259,7 +259,7 @@ static void convT1dValidateWeightGroups(const symQConfig_t *weightGroups, size_t
 void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                                           tensor_t const *bias, kernel_t const *kernel,
                                           size_t groups, size_t outputPadding, tensor_t *output,
-                                          const symQConfig_t *weightGroups) {
+                                          const symQConfig_t *weightGroups, rngStream_t *rs) {
     size_t batch = input->shape->dimensions[0];
     size_t inChannels = input->shape->dimensions[1];
     size_t inputLength = input->shape->dimensions[2];
@@ -350,7 +350,7 @@ void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const 
                             yArr[(b * outChannels + oc) * outputLength + (size_t)outIdx] +=
                                 rescaleIntoAccumulatorScale(
                                     product, inScale * weightGroups->scales[elemGroup], sAcc,
-                                    wQC->roundingMode, NULL);
+                                    wQC->roundingMode, rs);
                         }
                     }
                 }
@@ -366,7 +366,7 @@ void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const 
         symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
         for (size_t oc = 0; oc < outChannels; oc++) {
             int32_t seed = rescaleIntoAccumulatorScale(bArr[oc], biasQC->scale, sAcc,
-                                                       biasQC->roundingMode, NULL);
+                                                       biasQC->roundingMode, rs);
             for (size_t b = 0; b < batch; b++) {
                 for (size_t l = 0; l < outputLength; l++) {
                     yArr[(b * outChannels + oc) * outputLength + l] += seed;

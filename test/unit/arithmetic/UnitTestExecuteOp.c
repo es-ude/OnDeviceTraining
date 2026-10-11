@@ -193,7 +193,7 @@ void testPrologueConvertsFloatOperandIntoSymArithmetic(void) {
 }
 
 static void probeSum3Kernel(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
-                            tensor_t *auxOut, const void *ctx) {
+                            tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)auxOut;
     (void)ctx;
     size_t n = calcNumberOfElementsByTensor(rawOut);
@@ -1180,7 +1180,7 @@ typedef struct {
  * would crash (NULL deref) or - if silently defaulted - would leave the
  * output un-added; the pinned +10 catches either regression. */
 static void kernelAddsCtx(tensor_t **ops, size_t nOps, tensor_t *rawOut, tensor_t *auxOut,
-                          const void *ctx) {
+                          const void *ctx, rngStream_t *rs) {
     (void)nOps;
     (void)auxOut;
     const testCtx_t *c = (const testCtx_t *)ctx;
@@ -1226,7 +1226,7 @@ void testCtxReachesKernel(void) {
  * requant would recompute its scale from the data's absmax and destroy the
  * sentinel - this test would then fail. */
 static void kernelWritesAuxVerbatim(tensor_t **ops, size_t nOps, tensor_t *rawOut, tensor_t *auxOut,
-                                    const void *ctx) {
+                                    const void *ctx, rngStream_t *rs) {
     (void)nOps;
     (void)ctx;
     size_t n = calcNumberOfElementsByTensor(ops[0]);
@@ -1331,7 +1331,7 @@ void testAccFixedScaleHonorsTargetSrRoundingMode(void) {
 /* probeAddOneKernel is elementwise (reads in[i] before writing out[i]). */
 static const void *g_probeRawOutData;
 static void probeAddOneKernel(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
-                              tensor_t *auxOut, const void *ctx) {
+                              tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)nOperands;
     (void)auxOut;
     (void)ctx;
@@ -1820,7 +1820,7 @@ static float g_capturedGroupedScale;
 static uint8_t g_capturedGroupedQMaxBits;
 
 static void captureGroupedOperandKernel(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
-                                        tensor_t *auxOut, const void *ctx) {
+                                        tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)nOperands;
     (void)auxOut;
     (void)ctx;
@@ -2070,7 +2070,7 @@ static uint8_t g_bfpCapMantissaBits;
 static int g_bfpCapRawQType;
 
 static void captureBfpOperandKernel(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
-                                    tensor_t *auxOut, const void *ctx) {
+                                    tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)nOperands;
     (void)auxOut;
     (void)ctx;
@@ -2200,7 +2200,7 @@ static int32_t g_bfpCap2Codes[2][8];
 static size_t g_bfpCap2NumGroups[2];
 
 static void captureTwoBfpOperandsKernel(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
-                                        tensor_t *auxOut, const void *ctx) {
+                                        tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)auxOut;
     (void)ctx;
     for (size_t k = 0; k < nOperands && k < 2; k++) {
@@ -2409,7 +2409,7 @@ void testExecuteOpBfpStagingSrIsSeededDeterministic(void) {
 }
 
 static void writeKnownFloatsKernel(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
-                                   tensor_t *auxOut, const void *ctx) {
+                                   tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)operands;
     (void)nOperands;
     (void)auxOut;
@@ -2566,6 +2566,201 @@ void testExecuteOpFloatArithmeticStillDequantsGroupedBfp(void) {
     }
 }
 
+/* ---- the funnel's keyed sub-streams ---- */
+
+/* The expected stream states come from the Python mirror, not from the C key
+ * chain, with the tag values spelled as numbers (STAGE 8, KERNEL 9, OUT 10,
+ * ACC 11). From the repository root:
+ *   uv run python -c "from examples._shared.keyed_rng import (fold, key_from_seed,
+ *   open_stream); k = key_from_seed(2024); print([hex(open_stream(fold(k, t, i)))
+ *   for (t, i) in ((8, 1), (9, 0), (10, 0), (11, 0), (11, 1), (8, 0))])"
+ * Each check also compares with the explicit rngFold chain, so a wrong tag
+ * value and a wrong wiring fail differently. */
+#define FUNNEL_TEST_SEED 2024u
+#define FUNNEL_STAGE1_STATE 0x606fec86u
+#define FUNNEL_KERNEL0_STATE 0x780e2145u
+#define FUNNEL_OUT0_STATE 0xcc59e4b1u
+#define FUNNEL_ACC0_STATE 0x3ecc80e6u
+#define FUNNEL_ACC1_STATE 0xac44fd15u
+#define FUNNEL_MAX_RECORDS 4
+
+typedef struct {
+    bool hasStream;
+    uint32_t state;
+} funnelRecord_t;
+
+static funnelRecord_t funnelRecords[FUNNEL_MAX_RECORDS];
+static size_t funnelRecordCount;
+static conversionFunction_t funnelSavedCells[7][7];
+
+static void funnelRecord(const rngStream_t *rs) {
+    if (funnelRecordCount < FUNNEL_MAX_RECORDS) {
+        funnelRecords[funnelRecordCount].hasStream = rs != NULL;
+        funnelRecords[funnelRecordCount].state = (rs != NULL) ? rs->state : 0u;
+    }
+    funnelRecordCount++;
+}
+
+/* Records the stream, then runs the real cell, so the op completes normally. */
+static void funnelRecordingCell(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t *rs) {
+    funnelRecord(rs);
+    funnelSavedCells[inputTensor->quantization->type][outputTensor->quantization->type](
+        inputTensor, outputTensor, rs);
+}
+
+/* FLOAT32 copy of operand 0 into rawOut; records the kernel's stream. */
+static void funnelRecordingKernel(tensor_t **ops, size_t nOps, tensor_t *rawOut, tensor_t *auxOut,
+                                  const void *ctx, rngStream_t *rs) {
+    (void)nOps;
+    (void)auxOut;
+    (void)ctx;
+    size_t n = calcNumberOfElementsByTensor(rawOut);
+    for (size_t i = 0; i < n; i++) {
+        ((float *)rawOut->data)[i] = ((float *)ops[0]->data)[i];
+    }
+    funnelRecord(rs);
+}
+
+static void funnelInstallCell(qtype_t from, qtype_t to) {
+    funnelSavedCells[from][to] = conversionMatrix[from][to];
+    conversionMatrix[from][to] = funnelRecordingCell;
+}
+
+static void funnelRestoreCell(qtype_t from, qtype_t to) {
+    conversionMatrix[from][to] = funnelSavedCells[from][to];
+}
+
+static void assertFunnelStream(size_t record, uint32_t pythonState, uint32_t tag, uint32_t index) {
+    rngKey_t key = rngKeyFromSeed(FUNNEL_TEST_SEED);
+    TEST_ASSERT_TRUE(funnelRecords[record].hasStream);
+    TEST_ASSERT_EQUAL_HEX32(rngOpen(rngFold(key, tag, index)).state, funnelRecords[record].state);
+    TEST_ASSERT_EQUAL_HEX32(pythonState, funnelRecords[record].state);
+}
+
+static tensor_t *buildInt32(size_t n, const int32_t *values) {
+    size_t *dims = reserveMemory(sizeof(size_t));
+    dims[0] = n;
+    size_t *order = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    tensor_t *t = initTensor(shape, quantizationInitInt32(), NULL);
+    for (size_t i = 0; i < n; i++) {
+        ((int32_t *)t->data)[i] = values[i];
+    }
+    return t;
+}
+
+static const arithmetic_t funnelFloatArith = {.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
+
+/* An INT32 operand under FLOAT32 arithmetic is staged through [INT32][FLOAT32]
+ * with STAGE(i) of its operand index (1 here), then the kernel runs with
+ * KERNEL(0); the FLOAT32 target is written in place, so no epilogue runs. */
+void testExecuteOpOpensTheStageAndKernelStreamsFromTheOpKey(void) {
+    tensor_t *a = buildFloat(2, (float[]){1.0f, 2.0f});
+    tensor_t *b = buildInt32(2, (int32_t[]){3, 4});
+    tensor_t *out = buildFloat(2, (float[]){0.f, 0.f});
+    rngKey_t key = rngKeyFromSeed(FUNNEL_TEST_SEED);
+    funnelRecordCount = 0;
+    funnelInstallCell(INT32, FLOAT32);
+
+    executeOp(&(opSpec_t){.kernel = funnelRecordingKernel,
+                          .inputs = (tensor_t *[]){a, b},
+                          .nInputs = 2,
+                          .arithmetic = funnelFloatArith,
+                          .key = &key,
+                          .mode = OUT_WRITE},
+              out);
+
+    funnelRestoreCell(INT32, FLOAT32);
+    freeTensor(out);
+    freeTensor(b);
+    freeTensor(a);
+    TEST_ASSERT_EQUAL_UINT32(2u, (uint32_t)funnelRecordCount);
+    assertFunnelStream(0, FUNNEL_STAGE1_STATE, RNG_TAG_STAGE, 1u);
+    assertFunnelStream(1, FUNNEL_KERNEL0_STATE, RNG_TAG_KERNEL, 0u);
+}
+
+/* A FLOAT32 intermediate written into a SYM_INT32 target goes through
+ * [FLOAT32][SYM_INT32] with OUT(0), after the kernel ran with KERNEL(0). */
+void testExecuteOpOpensTheOutStreamFromTheOpKey(void) {
+    tensor_t *a = buildFloat(2, (float[]){1.0f, -2.0f});
+    tensor_t *out = buildSym(2, (int32_t[]){0, 0}, 1.0f);
+    rngKey_t key = rngKeyFromSeed(FUNNEL_TEST_SEED);
+    funnelRecordCount = 0;
+    funnelInstallCell(FLOAT32, SYM_INT32);
+
+    executeOp(&(opSpec_t){.kernel = funnelRecordingKernel,
+                          .inputs = (tensor_t *[]){a},
+                          .nInputs = 1,
+                          .arithmetic = funnelFloatArith,
+                          .key = &key,
+                          .mode = OUT_WRITE},
+              out);
+
+    funnelRestoreCell(FLOAT32, SYM_INT32);
+    freeTensor(out);
+    freeTensor(a);
+    TEST_ASSERT_EQUAL_UINT32(2u, (uint32_t)funnelRecordCount);
+    assertFunnelStream(0, FUNNEL_KERNEL0_STATE, RNG_TAG_KERNEL, 0u);
+    assertFunnelStream(1, FUNNEL_OUT0_STATE, RNG_TAG_OUT, 0u);
+}
+
+/* The dynamic-rescale ACC of a FLOAT32 intermediate into a SYM_INT32 target
+ * makes two rounding passes, each with its own stream: the increment's
+ * conversion with ACC(0), then addSymInt32TensorsInplace's requantization
+ * with ACC(1). Both go through [FLOAT32][SYM_INT32]. */
+void testExecuteOpOpensOneAccStreamPerRoundingPass(void) {
+    tensor_t *a = buildFloat(2, (float[]){0.5f, -1.0f});
+    tensor_t *acc = buildSym(2, (int32_t[]){4, -2}, 0.25f);
+    rngKey_t key = rngKeyFromSeed(FUNNEL_TEST_SEED);
+    funnelRecordCount = 0;
+    funnelInstallCell(FLOAT32, SYM_INT32);
+
+    executeOp(&(opSpec_t){.kernel = funnelRecordingKernel,
+                          .inputs = (tensor_t *[]){a},
+                          .nInputs = 1,
+                          .arithmetic = funnelFloatArith,
+                          .key = &key,
+                          .mode = OUT_ACC_DYNAMIC_RESCALE},
+              acc);
+
+    funnelRestoreCell(FLOAT32, SYM_INT32);
+    freeTensor(acc);
+    freeTensor(a);
+    TEST_ASSERT_EQUAL_UINT32(3u, (uint32_t)funnelRecordCount);
+    assertFunnelStream(1, FUNNEL_ACC0_STATE, RNG_TAG_ACC, 0u);
+    assertFunnelStream(2, FUNNEL_ACC1_STATE, RNG_TAG_ACC, 1u);
+}
+
+/* Without an op key every phase gets a NULL stream: the staging, the kernel
+ * and the OUT_WRITE epilogue. */
+void testExecuteOpWithoutAKeyHandsEveryPhaseANullStream(void) {
+    tensor_t *a = buildFloat(2, (float[]){1.0f, 2.0f});
+    tensor_t *b = buildInt32(2, (int32_t[]){3, 4});
+    tensor_t *out = buildSym(2, (int32_t[]){0, 0}, 1.0f);
+    funnelRecordCount = 0;
+    funnelInstallCell(INT32, FLOAT32);
+    funnelInstallCell(FLOAT32, SYM_INT32);
+
+    executeOp(&(opSpec_t){.kernel = funnelRecordingKernel,
+                          .inputs = (tensor_t *[]){a, b},
+                          .nInputs = 2,
+                          .arithmetic = funnelFloatArith,
+                          .mode = OUT_WRITE},
+              out);
+
+    funnelRestoreCell(FLOAT32, SYM_INT32);
+    funnelRestoreCell(INT32, FLOAT32);
+    freeTensor(out);
+    freeTensor(b);
+    freeTensor(a);
+    TEST_ASSERT_EQUAL_UINT32(3u, (uint32_t)funnelRecordCount);
+    for (size_t r = 0; r < 3; r++) {
+        TEST_ASSERT_FALSE(funnelRecords[r].hasStream);
+    }
+}
+
 /* ---- executeConvert hands its stream to the matrix cell on every route ---- */
 
 static rngStream_t *routeCellStream;
@@ -2683,5 +2878,9 @@ int main(void) {
     RUN_TEST(testExecuteOpBfpStagingSrIsSeededDeterministic);
     RUN_TEST(testExecuteOpBfpRawIsFloat32AndPacksTarget);
     RUN_TEST(testExecuteConvertHandsTheStreamToTheCellOnEveryRoute);
+    RUN_TEST(testExecuteOpOpensTheStageAndKernelStreamsFromTheOpKey);
+    RUN_TEST(testExecuteOpOpensTheOutStreamFromTheOpKey);
+    RUN_TEST(testExecuteOpOpensOneAccStreamPerRoundingPass);
+    RUN_TEST(testExecuteOpWithoutAKeyHandsEveryPhaseANullStream);
     return UNITY_END();
 }

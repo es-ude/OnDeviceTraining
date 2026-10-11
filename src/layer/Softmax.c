@@ -93,7 +93,7 @@ static void softmaxRowGeometry(const tensor_t *t, const char *where, size_t *row
  * hardcoded ARITH_FLOAT32 here on purpose — forwardMath no longer selects a
  * compute path, it only declares the layer's storage dtype. */
 static void softmaxForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                 const void *ctx) {
+                                 const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     (void)ctx;
@@ -228,7 +228,7 @@ static void softmaxValuesBfp(const tensor_t *input, bfpShiftRounding_t mode, flo
 }
 
 static void softmaxForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                    const void *ctx) {
+                                    const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     const softmaxConfig_t *cfg = ctx;
@@ -427,7 +427,7 @@ static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *p
  * single-row (softmaxBfpRequireSingleRow, #152), so both walks are the one
  * row's flat storage order over count-equal wires. */
 static void softmaxBackwardKernelBfp(tensor_t **ops, size_t nOps, tensor_t *rawOut,
-                                     tensor_t *auxOut, const void *ctx) {
+                                     tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)nOps;
     (void)auxOut;
     const softmaxConfig_t *cfg = ctx;

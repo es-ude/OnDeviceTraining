@@ -83,9 +83,10 @@ void linearForwardFloat(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *out
     transposeTensor(w, 0, 1);
 }
 
-void linearForwardSymInt32(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output) {
+void linearForwardSymInt32(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output,
+                           rngStream_t *rs) {
     transposeTensor(w, 0, 1);
-    matmulSymInt32TensorsWithBias(input, w, output, b);
+    matmulSymInt32TensorsWithBias(input, w, output, b, rs);
     transposeTensor(w, 0, 1);
 }
 
@@ -96,9 +97,9 @@ void linearForwardSymInt32(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *
  * groups bind to STORAGE order, which transposeTensor exposes as the
  * physically-innermost (contiguous) axis for the reduction. */
 void linearForwardSymInt32Grouped(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output,
-                                  const symQConfig_t *weightGroups) {
+                                  const symQConfig_t *weightGroups, rngStream_t *rs) {
     transposeTensor(w, 0, 1);
-    matmulSymInt32TensorsGroupedWeight(input, w, b, output, weightGroups);
+    matmulSymInt32TensorsGroupedWeight(input, w, b, output, weightGroups, rs);
     transposeTensor(w, 0, 1);
 }
 
@@ -123,25 +124,25 @@ void linearForwardBfp(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *outpu
  * groupedSymOperandPos together, see below) — that routes to the grouped
  * matmul entry instead of the scalar one. */
 static void linearForwardKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                     const void *ctx) {
+                                     const void *ctx, rngStream_t *rs) {
     (void)auxOut;
     (void)ctx;
     tensor_t *bias = (n > 2) ? ops[2] : NULL;
     linearForwardFloat(ops[1], bias, ops[0], rawOut);
 }
 static void linearForwardKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                   const void *ctx) {
+                                   const void *ctx, rngStream_t *rs) {
     (void)auxOut;
     tensor_t *bias = (n > 2) ? ops[2] : NULL;
     const symQConfig_t *weightGroups = (const symQConfig_t *)ctx;
     if (weightGroups != NULL) {
-        linearForwardSymInt32Grouped(ops[1], bias, ops[0], rawOut, weightGroups);
+        linearForwardSymInt32Grouped(ops[1], bias, ops[0], rawOut, weightGroups, rs);
     } else {
-        linearForwardSymInt32(ops[1], bias, ops[0], rawOut);
+        linearForwardSymInt32(ops[1], bias, ops[0], rawOut, rs);
     }
 }
 static void linearForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                   const void *ctx) {
+                                   const void *ctx, rngStream_t *rs) {
     (void)auxOut;
     (void)ctx;
     tensor_t *bias = (n > 2) ? ops[2] : NULL;
@@ -296,8 +297,8 @@ void linearCalcPropLossSymInt32(tensor_t *weights, tensor_t *loss, tensor_t *pro
  * actual storage index, so no orientation fix-up is needed (or possible:
  * groups partition flat storage, not the logical view). dx has no bias. */
 void linearCalcPropLossSymInt32Grouped(tensor_t *weights, tensor_t *loss, tensor_t *propLoss,
-                                       const symQConfig_t *weightGroups) {
-    matmulSymInt32TensorsGroupedWeight(loss, weights, NULL, propLoss, weightGroups);
+                                       const symQConfig_t *weightGroups, rngStream_t *rs) {
+    matmulSymInt32TensorsGroupedWeight(loss, weights, NULL, propLoss, weightGroups, rs);
 }
 
 /* BFP epic PR3: backward cores on the PR2 fold contract (BFP D8 amendment) --
@@ -367,67 +368,67 @@ void linearCalcBiasGradsBfp(tensor_t *loss, tensor_t *biasGrad) {
  * linearBackward sets ctx + groupedSymOperandPos together) and routes to the
  * grouped matmul entry. */
 static void weightGradKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                  const void *ctx) {
+                                  const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     (void)ctx;
     linearCalcWeightGradsFloat32(ops[1], ops[0], rawOut);
 }
 static void weightGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                const void *ctx) {
+                                const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     (void)ctx;
     linearCalcWeightGradsSymInt32(ops[0], ops[1], rawOut);
 }
 static void biasGradKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                const void *ctx) {
+                                const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     (void)ctx;
     linearCalcBiasGradsFloat32(ops[0], rawOut);
 }
 static void biasGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                              const void *ctx) {
+                              const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     (void)ctx;
     linearCalcBiasGradsSymInt32(rawOut, ops[0]);
 }
 static void propLossKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                const void *ctx) {
+                                const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     (void)ctx;
     linearCalcPropLossFloat32(ops[0], ops[1], rawOut);
 }
 static void propLossKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                              const void *ctx) {
+                              const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     const symQConfig_t *weightGroups = (const symQConfig_t *)ctx;
     if (weightGroups != NULL) {
-        linearCalcPropLossSymInt32Grouped(ops[1], ops[0], rawOut, weightGroups);
+        linearCalcPropLossSymInt32Grouped(ops[1], ops[0], rawOut, weightGroups, rs);
     } else {
         linearCalcPropLossSymInt32(ops[1], ops[0], rawOut);
     }
 }
 static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                const void *ctx) {
+                                const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     (void)ctx;
     linearCalcWeightGradsBfp(ops[0], ops[1], rawOut);
 }
 static void biasGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                              const void *ctx) {
+                              const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     (void)ctx;
     linearCalcBiasGradsBfp(ops[0], rawOut);
 }
 static void propLossKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                              const void *ctx) {
+                              const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     (void)ctx;

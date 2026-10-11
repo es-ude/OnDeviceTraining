@@ -5,6 +5,10 @@
 
 #include "Tensor.h"
 
+/* Pointer-only use: the identical typedef lives in RNG.h (C11 allows the
+ * repetition), so this header needs no RNG include path. */
+typedef struct rngStream rngStream_t;
+
 typedef void (*matmulFunc_t)(tensor_t *aTensor, tensor_t *bTensor, tensor_t outputTensor);
 
 void matmulInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor);
@@ -17,7 +21,7 @@ void matmulFloat32TensorsWithBias(tensor_t *aTensor, tensor_t *bTensor, tensor_t
                                   tensor_t *bias);
 
 void matmulSymInt32TensorsWithBias(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,
-                                   tensor_t *bias);
+                                   tensor_t *bias, rngStream_t *rs);
 
 /*! Group-quant PR2 (Task 3): GGUF-style grouped-weight matmul. `a` is a plain
  *  (per-tensor) SYM_INT32 operand, validated exactly like the scalar entries
@@ -48,7 +52,8 @@ void matmulSymInt32TensorsWithBias(tensor_t *aTensor, tensor_t *bTensor, tensor_
  *  logical dim 0) hops groups on every reduction step and folds one combine
  *  per visited-group change. */
 void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
-                                        tensor_t *outputTensor, const symQConfig_t *weightGroups);
+                                        tensor_t *outputTensor, const symQConfig_t *weightGroups,
+                                        rngStream_t *rs);
 
 /*! BFP epic PR2 (Task 3): block-floating-point GEMM forward. Operands are in
  *  the executeOp funnel's UNPACKED-BFP scratch form: ->data holds int32

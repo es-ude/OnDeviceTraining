@@ -75,7 +75,7 @@ static void seedRawOutFromFirstOperand(tensor_t **op, tensor_t *rawOut) {
 /* operands {m, g} -> rawOut = lerp(m, g, w1) = m + w1*(g - m), fmaf-fused
  * exactly like ATen's small-weight branch (torch exp_avg.lerp_). */
 static void adamWMomentKernel(tensor_t **op, size_t n, tensor_t *rawOut, tensor_t *aux,
-                              const void *ctxv) {
+                              const void *ctxv, rngStream_t *rs) {
     (void)n;
     (void)aux;
     const adamWMomentCtx_t *ctx = ctxv;
@@ -86,7 +86,7 @@ static void adamWMomentKernel(tensor_t **op, size_t n, tensor_t *rawOut, tensor_
 /* operands {v, g} -> rawOut = beta2*v + s2*g*g (torch's own two passes:
  * exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1-beta2)). */
 static void adamWVarianceKernel(tensor_t **op, size_t n, tensor_t *rawOut, tensor_t *aux,
-                                const void *ctxv) {
+                                const void *ctxv, rngStream_t *rs) {
     (void)n;
     (void)aux;
     const adamWVarianceCtx_t *ctx = ctxv;
@@ -101,7 +101,7 @@ static void adamWVarianceKernel(tensor_t **op, size_t n, tensor_t *rawOut, tenso
  * value=-lr/bc1) -- same six per-element roundings, denom never
  * materialized). */
 static void adamWParamKernel(tensor_t **op, size_t n, tensor_t *rawOut, tensor_t *aux,
-                             const void *ctxv) {
+                             const void *ctxv, rngStream_t *rs) {
     (void)n;
     (void)aux;
     const adamWParamCtx_t *ctx = ctxv;

@@ -6,6 +6,10 @@
 #include "Kernel.h"
 #include "Tensor.h"
 
+/* Pointer-only use: the identical typedef lives in RNG.h (C11 allows the
+ * repetition), so this header needs no RNG include path. */
+typedef struct rngStream rngStream_t;
+
 /*! Transposed 1D convolution forward (FLOAT32). Scatter form: each input
  *  value is multiplied into a window region of the output.
  *
@@ -50,7 +54,7 @@ void convTranspose1dKernelFloat32(tensor_t const *input, tensor_t const *weight,
  */
 void convTranspose1dKernelSymInt32(tensor_t const *input, tensor_t const *weight,
                                    tensor_t const *bias, kernel_t const *kernel, size_t groups,
-                                   size_t outputPadding, tensor_t *output);
+                                   size_t outputPadding, tensor_t *output, rngStream_t *rs);
 
 /*! Group-quant PR3 (Task 2): grouped-weight sibling of
  *  convTranspose1dKernelSymInt32 -- the SCATTER core. The weight's
@@ -94,7 +98,7 @@ void convTranspose1dKernelSymInt32(tensor_t const *input, tensor_t const *weight
 void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                                           tensor_t const *bias, kernel_t const *kernel,
                                           size_t groups, size_t outputPadding, tensor_t *output,
-                                          const symQConfig_t *weightGroups);
+                                          const symQConfig_t *weightGroups, rngStream_t *rs);
 
 /*! BFP epic PR2 (Task 5, D9): output-centric (gather) ConvT1d forward under
  *  ARITH_BFP -- every output element is a dot product over its contributors

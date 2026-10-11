@@ -254,7 +254,7 @@ void matmulSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outpu
 }
 
 void matmulSymInt32TensorsWithBias(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,
-                                   tensor_t *bias) {
+                                   tensor_t *bias, rngStream_t *rs) {
     matmulValidateSymOperand(aTensor, "aTensor");
     matmulValidateSymOperand(bTensor, "bTensor");
     if (bias == NULL) {
@@ -286,7 +286,7 @@ void matmulSymInt32TensorsWithBias(tensor_t *aTensor, tensor_t *bTensor, tensor_
         for (size_t c = 0; c < bColumns; c++) {
             int32_t biasIntC = readBytesAsInt32(&bias->data[c * sizeof(int32_t)]);
             seed[c] = rescaleIntoAccumulatorScale(biasIntC, biasScale, outputScale,
-                                                  biasQC->roundingMode, NULL);
+                                                  biasQC->roundingMode, rs);
         }
         matmulIntCore(aTensor, bTensor, outputTensor, seed);
     }
@@ -313,7 +313,8 @@ void matmulSymInt32TensorsWithBias(tensor_t *aTensor, tensor_t *bTensor, tensor_
  * bit-for-bit. */
 static void matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,
                                  const int32_t *biasSeed, const symQConfig_t *weightGroups,
-                                 float aScale, float sAcc, roundingMode_t roundingMode) {
+                                 float aScale, float sAcc, roundingMode_t roundingMode,
+                                 rngStream_t *rs) {
     if (aTensor->shape->numberOfDimensions > 2 || bTensor->shape->numberOfDimensions != 2) {
         PRINT_ERROR("matmulIntCoreGrouped: grouped weight operand (b) must be 2D; a must be <=2D");
         exit(1);
@@ -366,7 +367,7 @@ static void matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor_t 
                          * mode — never hardcoded). */
                         acc += rescaleIntoAccumulatorScale(
                             partial, aScale * weightGroups->scales[currentGroup], sAcc,
-                            roundingMode, NULL);
+                            roundingMode, rs);
                         partial = 0;
                     }
                     currentGroup = g;
@@ -392,7 +393,7 @@ static void matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor_t 
              * their ONLY combine. */
             if (currentGroup != SIZE_MAX) {
                 acc += rescaleIntoAccumulatorScale(
-                    partial, aScale * weightGroups->scales[currentGroup], sAcc, roundingMode, NULL);
+                    partial, aScale * weightGroups->scales[currentGroup], sAcc, roundingMode, rs);
             }
 
             size_t outputByteIndex = resultCounter * sizeof(int32_t);
@@ -421,7 +422,8 @@ static void matmulValidateWeightGroups(const symQConfig_t *weightGroups) {
 }
 
 void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
-                                        tensor_t *outputTensor, const symQConfig_t *weightGroups) {
+                                        tensor_t *outputTensor, const symQConfig_t *weightGroups,
+                                        rngStream_t *rs) {
     matmulValidateSymOperand(aTensor, "aTensor");
     matmulValidateWeightGroups(weightGroups);
     validateSymQConfigShape(weightGroups, calcNumberOfElementsByTensor(bTensor));
@@ -463,13 +465,13 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
         for (size_t c = 0; c < bColumns; c++) {
             int32_t biasIntC = readBytesAsInt32(&bias->data[c * sizeof(int32_t)]);
             seedBuf[c] = rescaleIntoAccumulatorScale(biasIntC, biasQC->scale, sAcc,
-                                                     biasQC->roundingMode, NULL);
+                                                     biasQC->roundingMode, rs);
         }
         seedPtr = seedBuf;
     }
 
     matmulIntCoreGrouped(aTensor, bTensor, outputTensor, seedPtr, weightGroups, aScale, sAcc,
-                         bQC->roundingMode);
+                         bQC->roundingMode, rs);
 
     symInt32QConfig_t *outputQC = outputTensor->quantization->qConfig;
     outputQC->scale = sAcc;

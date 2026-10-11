@@ -640,7 +640,7 @@ void testConvTranspose1dKernelBfpGatherPowerOfTwoBitIdenticalToGroupedSym(void) 
 
     convTranspose1dKernelSymInt32Grouped(&inSymTensor, &wSymTensor, NULL, &kernel, 1,
                                          (size_t)kBfpConvTOutputPadding, &outSymTensor,
-                                         &weightGroups);
+                                         &weightGroups, NULL);
 
     for (size_t i = 0; i < 24; i++) {
         float symDequant = (float)outSymData[i] * outSymQC.scale;

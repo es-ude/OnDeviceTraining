@@ -267,7 +267,7 @@ static void groupNormValidateSymTensor(tensor_t *t, const char *what) {
  * executeOp OUT_WRITE epilogue (caller, groupNormForward) restores width at
  * the producer via the SYM->SYM diagonal requant. */
 static void groupNormAffineSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, tensor_t *beta,
-                                    tensor_t *output, float sNorm) {
+                                    tensor_t *output, float sNorm, rngStream_t *rs) {
     int32_t *out = (int32_t *)output->data;
     int32_t *gammaQ = (int32_t *)gamma->data;
     int32_t *betaQ = (int32_t *)beta->data;
@@ -293,8 +293,7 @@ static void groupNormAffineSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, ten
     size_t C = cfg->numChannels;
     int32_t seed[C];
     for (size_t c = 0; c < C; c++) {
-        seed[c] =
-            rescaleIntoAccumulatorScale(betaQ[c], betaQC->scale, sY, outQC->roundingMode, NULL);
+        seed[c] = rescaleIntoAccumulatorScale(betaQ[c], betaQC->scale, sY, outQC->roundingMode, rs);
     }
 
     size_t G = cfg->numGroups;
@@ -324,7 +323,7 @@ static void groupNormAffineSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, ten
  * operands (inputs = {input, gamma, beta}), not read via cfg — cfg carries
  * only eps/numGroups/numChannels geometry. */
 static void groupNormForwardSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, tensor_t *beta,
-                                     tensor_t *input, tensor_t *output) {
+                                     tensor_t *input, tensor_t *output, rngStream_t *rs) {
     groupNormValidateSymTensor(input, "input");
     groupNormValidateSymTensor(output, "output");
     groupNormValidateSymTensor(gamma, "gamma");
@@ -434,13 +433,13 @@ static void groupNormForwardSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, te
                     float n = mulFloat32s(
                         subFloat32s(mulFloat32s((float)in[off], inScale), mean[k]), invSigma[k]);
                     out[off] = roundByMode(clamp(mulFloat32s(n, stretch), qMin, qMax),
-                                           outQC->roundingMode, NULL);
+                                           outQC->roundingMode, rs);
                 }
             }
         }
     }
 
-    groupNormAffineSymInt32(cfg, gamma, beta, output, sNorm);
+    groupNormAffineSymInt32(cfg, gamma, beta, output, sNorm, rs);
 }
 
 /* F5-style count gate for the BFP kernels' flat gamma/beta/raw indexing. */
@@ -515,7 +514,7 @@ static void groupNormForwardBfp(const groupNormConfig_t *cfg, tensor_t *gamma, t
 }
 
 static void groupNormForwardKernelBfp(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
-                                      tensor_t *auxOut, const void *ctx) {
+                                      tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)nOperands;
     (void)auxOut;
     const groupNormConfig_t *cfg = ctx;
@@ -529,16 +528,16 @@ static void groupNormForwardKernelBfp(tensor_t **operands, size_t nOperands, ten
  * via the SYM->SYM diagonal requant, same as Linear/Conv1d's matmul-family
  * forwards. */
 static void groupNormForwardKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut,
-                                        tensor_t *auxOut, const void *ctx) {
+                                        tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     groupNormForwardFloat((groupNormConfig_t *)ctx, ops[1], ops[2], ops[0], rawOut);
 }
 static void groupNormForwardKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                      const void *ctx) {
+                                      const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
-    groupNormForwardSymInt32((groupNormConfig_t *)ctx, ops[1], ops[2], ops[0], rawOut);
+    groupNormForwardSymInt32((groupNormConfig_t *)ctx, ops[1], ops[2], ops[0], rawOut, rs);
 }
 
 /* Explicit kernel dispatch, NOT a ternary — the LayerNorm twin (BFP epic PR2
@@ -1071,21 +1070,21 @@ static void groupNormCalcPropLossBfp(const groupNormConfig_t *cfg, tensor_t *for
 /* executeOp backward kernel adapters for the ARITH_BFP arm -- dgamma
  * {forwardInput, loss}, dbeta {loss}, dx {forwardInput, loss, gamma}. */
 static void groupNormDgammaKernelBfp(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
-                                     tensor_t *auxOut, const void *ctx) {
+                                     tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)nOperands;
     (void)auxOut;
     const groupNormConfig_t *cfg = ctx;
     groupNormCalcGammaGradsBfp(cfg, operands[0], operands[1], rawOut);
 }
 static void groupNormDbetaKernelBfp(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
-                                    tensor_t *auxOut, const void *ctx) {
+                                    tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)nOperands;
     (void)auxOut;
     const groupNormConfig_t *cfg = ctx;
     groupNormCalcBetaGradsBfp(cfg, operands[0], rawOut);
 }
 static void groupNormDxKernelBfp(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
-                                 tensor_t *auxOut, const void *ctx) {
+                                 tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)nOperands;
     (void)auxOut;
     const groupNormConfig_t *cfg = ctx;

@@ -33,6 +33,10 @@ rngKey_t rngKeyFromSeed(uint64_t seed);
 #define RNG_TAG_STEP 1u
 #define RNG_TAG_CALL 2u
 #define RNG_TAG_EVAL 6u
+#define RNG_TAG_STAGE 8u
+#define RNG_TAG_KERNEL 9u
+#define RNG_TAG_OUT 10u
+#define RNG_TAG_ACC 11u
 #define RNG_TAG_UPDATE 18u
 
 /* The draws under one key. Owned by its caller, usually on the stack of the op

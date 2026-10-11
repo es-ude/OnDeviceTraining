@@ -6,6 +6,10 @@
 #include "Kernel.h"
 #include "Tensor.h"
 
+/* Pointer-only use: the identical typedef lives in RNG.h (C11 allows the
+ * repetition), so this header needs no RNG include path. */
+typedef struct rngStream rngStream_t;
+
 /*! 1D convolution forward (FLOAT32 only). Correlation, not flipped.
  *
  *  @param input  [batch, in_channels, input_length], FLOAT32
@@ -31,7 +35,7 @@ void conv1dKernelFloat32(tensor_t const *input, tensor_t const *weight, tensor_t
  *  @param output [batch, out_channels, output_length], SYM_INT32, pre-allocated
  */
 void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_t const *bias,
-                          kernel_t const *kernel, size_t groups, tensor_t *output);
+                          kernel_t const *kernel, size_t groups, tensor_t *output, rngStream_t *rs);
 
 /*! Group-quant PR2 (Task 4): grouped-weight Conv1d forward gather core.
  *  Sibling of conv1dKernelSymInt32, adding the running group-partial
@@ -77,7 +81,8 @@ void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_
  */
 void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                                  tensor_t const *bias, kernel_t const *kernel, size_t groups,
-                                 tensor_t *output, const symQConfig_t *weightGroups);
+                                 tensor_t *output, const symQConfig_t *weightGroups,
+                                 rngStream_t *rs);
 
 /*! BFP epic PR2 (Task 4): block-floating-point Conv1d forward. Same operand
  *  contract as matmulBfpTensors (see Matmul.h for the shared BFP GEMM-family

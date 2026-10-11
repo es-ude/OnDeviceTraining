@@ -231,6 +231,7 @@ target_link_libraries(ExecuteOp PRIVATE
         TensorConversion
         Add
         Rounding
+        RNG
         Common
 )
 

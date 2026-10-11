@@ -74,7 +74,8 @@ void conv1dKernelFloat32(tensor_t const *input, tensor_t const *weight, tensor_t
 }
 
 void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_t const *bias,
-                          kernel_t const *kernel, size_t groups, tensor_t *output) {
+                          kernel_t const *kernel, size_t groups, tensor_t *output,
+                          rngStream_t *rs) {
     size_t batch = input->shape->dimensions[0];
     size_t inChannels = input->shape->dimensions[1];
     size_t inputLength = input->shape->dimensions[2];
@@ -117,7 +118,7 @@ void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_
         symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
         for (size_t oc = 0; oc < outChannels; oc++) {
             seed[oc] = rescaleIntoAccumulatorScale(bArr[oc], biasQC->scale, outputScale,
-                                                   biasQC->roundingMode, NULL);
+                                                   biasQC->roundingMode, rs);
         }
     } else {
         for (size_t oc = 0; oc < outChannels; oc++) {
@@ -187,7 +188,8 @@ static void conv1dValidateWeightGroups(const symQConfig_t *weightGroups, size_t 
 
 void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                                  tensor_t const *bias, kernel_t const *kernel, size_t groups,
-                                 tensor_t *output, const symQConfig_t *weightGroups) {
+                                 tensor_t *output, const symQConfig_t *weightGroups,
+                                 rngStream_t *rs) {
     size_t batch = input->shape->dimensions[0];
     size_t inChannels = input->shape->dimensions[1];
     size_t inputLength = input->shape->dimensions[2];
@@ -246,7 +248,7 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
         symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
         for (size_t oc = 0; oc < outChannels; oc++) {
             seed[oc] = rescaleIntoAccumulatorScale(bArr[oc], biasQC->scale, sAcc,
-                                                   biasQC->roundingMode, NULL);
+                                                   biasQC->roundingMode, rs);
         }
     } else {
         for (size_t oc = 0; oc < outChannels; oc++) {
@@ -291,7 +293,7 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                                      * honoring the op's rounding mode). */
                                     acc += rescaleIntoAccumulatorScale(
                                         partial, inScale * weightGroups->scales[currentGroup], sAcc,
-                                        wQC->roundingMode, NULL);
+                                        wQC->roundingMode, rs);
                                     partial = 0;
                                 }
                                 currentGroup = elemGroup;
@@ -311,7 +313,7 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                     if (currentGroup != SIZE_MAX) {
                         acc += rescaleIntoAccumulatorScale(
                             partial, inScale * weightGroups->scales[currentGroup], sAcc,
-                            wQC->roundingMode, NULL);
+                            wQC->roundingMode, rs);
                     }
 
                     yArr[(b * outChannels + oc) * outputLength + outPos] = acc;

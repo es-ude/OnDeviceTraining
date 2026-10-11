@@ -409,7 +409,7 @@ void testMatmulSymInt32TensorsWithBiasRescalesBias() {
     initSymInt32Quantization(&outputQC, &outputQ);
     setTensorValues(&outputTensor, (uint8_t *)outputData, &outputShape, &outputQ, NULL);
 
-    matmulSymInt32TensorsWithBias(&aTensor, &bTensor, &outputTensor, &biasTensor);
+    matmulSymInt32TensorsWithBias(&aTensor, &bTensor, &outputTensor, &biasTensor, NULL);
 
     /* a_real (scale 2) @ b = [[28,64],[64,154]]; + bias_real [4,8] = [[32,72],[68,162]]. */
     float expected[] = {32.f, 72.f, 68.f, 162.f};
@@ -486,7 +486,7 @@ void testMatmulSymInt32TensorsWithBiasRejectsNonSymInt32Bias() {
     initFloat32Quantization(&biasQ);
     setTensorValues(&bias, (uint8_t *)biasData, &biasS, &biasQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(matmulSymInt32TensorsWithBias(&a, &b, &out, &bias));
+    ASSERT_EXITS_WITH_FAILURE(matmulSymInt32TensorsWithBias(&a, &b, &out, &bias, NULL));
 }
 
 /* ---- Group-quant PR2 (Task 3): matmulSymInt32TensorsGroupedWeight -------
@@ -557,7 +557,7 @@ void testMatmulGroupedWeightPerChannelMatchesGold(void) {
     setTensorValues(&outputTensor, (uint8_t *)outputData, &outputShape, &outputQ, NULL);
 
     matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, &biasTensor, &outputTensor,
-                                       &weightGroups);
+                                       &weightGroups, NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(kPerChannelOutMantissas, outputData, 6);
     TEST_ASSERT_FLOAT_WITHIN(1e-9f, kPerChannelOutScale, outputQC.scale);
@@ -622,7 +622,7 @@ void testMatmulGroupedWeightGeneralGroupsMatchesGold(void) {
     setTensorValues(&outputTensor, (uint8_t *)outputData, &outputShape, &outputQ, NULL);
 
     matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, &biasTensor, &outputTensor,
-                                       &weightGroups);
+                                       &weightGroups, NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(kGeneralOutMantissas, outputData, 6);
     TEST_ASSERT_FLOAT_WITHIN(1e-9f, kGeneralOutScale, outputQC.scale);
@@ -688,7 +688,8 @@ void testMatmulGroupedEqualScalesBitIdenticalToScalar(void) {
     initSymInt32Quantization(&outGroupedQC, &outGroupedQ);
     setTensorValues(&outGrouped, (uint8_t *)outGroupedData, &outShape, &outGroupedQ, NULL);
 
-    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensorGrouped, NULL, &outGrouped, &weightGroups);
+    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensorGrouped, NULL, &outGrouped, &weightGroups,
+                                       NULL);
 
     tensor_t bTensorScalar;
     symInt32QConfig_t bScalarQC;
@@ -706,7 +707,7 @@ void testMatmulGroupedEqualScalesBitIdenticalToScalar(void) {
     initSymInt32Quantization(&outScalarQC, &outScalarQ);
     setTensorValues(&outScalar, (uint8_t *)outScalarData, &outShape, &outScalarQ, NULL);
 
-    matmulSymInt32TensorsWithBias(&aTensor, &bTensorScalar, &outScalar, NULL);
+    matmulSymInt32TensorsWithBias(&aTensor, &bTensorScalar, &outScalar, NULL, NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(outScalarData, outGroupedData, 6);
     TEST_ASSERT_EQUAL_FLOAT(outScalarQC.scale, outGroupedQC.scale);
@@ -778,9 +779,9 @@ void testMatmulGroupedHonorsOpRoundingMode(void) {
     setTensorValues(&out2, (uint8_t *)out2Data, &outShape, &out2Q, NULL);
 
     rngSetSeed(1);
-    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &out1, &weightGroups);
+    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &out1, &weightGroups, NULL);
     rngSetSeed(2);
-    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &out2, &weightGroups);
+    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &out2, &weightGroups, NULL);
 
     bool anyDiffer = false;
     for (size_t i = 0; i < 6; i++) {
@@ -850,7 +851,8 @@ void testMatmulGroupedWeightStridedReductionMatchesGold(void) {
     initSymInt32Quantization(&outputQC, &outputQ);
     setTensorValues(&outputTensor, (uint8_t *)outputData, &outputShape, &outputQ, NULL);
 
-    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &outputTensor, &weightGroups);
+    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &outputTensor, &weightGroups,
+                                       NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(kDxPerChannelOutMantissas, outputData, 12);
     TEST_ASSERT_FLOAT_WITHIN(1e-9f, kDxPerChannelOutScale, outputQC.scale);
@@ -902,7 +904,8 @@ void testMatmulGroupedWeightStridedGeneralGroupsMatchesGold(void) {
     initSymInt32Quantization(&outputQC, &outputQ);
     setTensorValues(&outputTensor, (uint8_t *)outputData, &outputShape, &outputQ, NULL);
 
-    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &outputTensor, &weightGroups);
+    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &outputTensor, &weightGroups,
+                                       NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(kDxGeneralOutMantissas, outputData, 12);
     TEST_ASSERT_FLOAT_WITHIN(1e-9f, kDxGeneralOutScale, outputQC.scale);
@@ -962,7 +965,8 @@ void testMatmulGroupedDxEqualScalesBitIdenticalToScalar(void) {
     initSymInt32Quantization(&outGroupedQC, &outGroupedQ);
     setTensorValues(&outGrouped, (uint8_t *)outGroupedData, &outShape, &outGroupedQ, NULL);
 
-    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensorGrouped, NULL, &outGrouped, &weightGroups);
+    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensorGrouped, NULL, &outGrouped, &weightGroups,
+                                       NULL);
 
     tensor_t bTensorScalar;
     symInt32QConfig_t bScalarQC;
@@ -1036,8 +1040,8 @@ void testMatmulGroupedWeightRejectsPerTensorSentinel(void) {
     initSymInt32Quantization(&outputQC, &outputQ);
     setTensorValues(&outputTensor, (uint8_t *)outputData, &outShape, &outputQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(
-        matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &outputTensor, &weightGroups));
+    ASSERT_EXITS_WITH_FAILURE(matmulSymInt32TensorsGroupedWeight(
+        &aTensor, &bTensor, NULL, &outputTensor, &weightGroups, NULL));
 }
 
 /* ---- BFP epic PR2 (Task 3): matmulBfpTensors ----------------------------
@@ -1330,8 +1334,8 @@ void testMatmulBfpPowerOfTwoBitIdenticalToGroupedSym(void) {
     initSymInt32Quantization(&outSymQC, &outSymQ);
     setTensorValues(&outSymTensor, (uint8_t *)outSymData, &outShape, &outSymQ, NULL);
 
-    matmulSymInt32TensorsGroupedWeight(&aSymTensor, &bSymTensor, NULL, &outSymTensor,
-                                       &weightGroups);
+    matmulSymInt32TensorsGroupedWeight(&aSymTensor, &bSymTensor, NULL, &outSymTensor, &weightGroups,
+                                       NULL);
 
     for (size_t i = 0; i < 6; i++) {
         float symDequant = (float)outSymData[i] * outSymQC.scale;
@@ -1650,8 +1654,8 @@ void testMatmulBfpDxPowerOfTwoBitIdenticalToGroupedSym(void) {
     initSymInt32Quantization(&outSymQC, &outSymQ);
     setTensorValues(&outSymTensor, (uint8_t *)outSymData, &outShape, &outSymQ, NULL);
 
-    matmulSymInt32TensorsGroupedWeight(&aSymTensor, &bSymTensor, NULL, &outSymTensor,
-                                       &weightGroups);
+    matmulSymInt32TensorsGroupedWeight(&aSymTensor, &bSymTensor, NULL, &outSymTensor, &weightGroups,
+                                       NULL);
 
     for (size_t i = 0; i < 12; i++) {
         float symDequant = (float)outSymData[i] * outSymQC.scale;

@@ -55,7 +55,7 @@ static void poolBfpRequireDims3(const tensor_t *t, size_t d0, size_t d1, size_t 
  * auxOut. The SYM_INT32 arm lives in adaptiveAvgPool1dForwardKernelSymInt32
  * below (#205). */
 static void adaptiveAvgPool1dForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut,
-                                           tensor_t *auxOut, const void *ctx) {
+                                           tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     const adaptiveAvgPool1dConfig_t *cfg = ctx;
@@ -132,7 +132,8 @@ static inline int32_t roundedDivHalfAwayInt32(int32_t sum, int32_t count) {
  * range (|mean| <= |max|); the OUT_WRITE epilogue still renormalizes to the
  * target's own absmax like every funnel SYM producer. */
 static void adaptiveAvgPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *rawOut,
-                                                   tensor_t *auxOut, const void *ctx) {
+                                                   tensor_t *auxOut, const void *ctx,
+                                                   rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     const adaptiveAvgPool1dConfig_t *cfg = ctx;
@@ -183,7 +184,7 @@ static void adaptiveAvgPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, ten
  * is both simpler AND more accurate. Sum headroom uses the SAME conservative
  * bound as the SYM arm, ceil(L/O) + 1. */
 static void adaptiveAvgPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut,
-                                              tensor_t *auxOut, const void *ctx) {
+                                              tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     const adaptiveAvgPool1dConfig_t *cfg = ctx;
@@ -357,7 +358,8 @@ void adaptiveAvgPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tens
  * uninitialized Phase-2 scratch, so the kernel memsets it before the scatter
  * `+=` (adjacent adaptive windows overlap when L % outputSize != 0). */
 static void adaptiveAvgPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *rawOut,
-                                                    tensor_t *auxOut, const void *ctx) {
+                                                    tensor_t *auxOut, const void *ctx,
+                                                    rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     const adaptiveAvgPool1dConfig_t *cfg = ctx;
@@ -421,7 +423,7 @@ static void adaptiveAvgPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, te
  * uninitialized Phase-2 scratch, so it is memset before the `+=` (adjacent
  * adaptive windows overlap when L % outputSize != 0). */
 static void adaptiveAvgPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut,
-                                               tensor_t *auxOut, const void *ctx) {
+                                               tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
     const adaptiveAvgPool1dConfig_t *cfg = ctx;

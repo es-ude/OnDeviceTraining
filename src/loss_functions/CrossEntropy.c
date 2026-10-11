@@ -82,7 +82,8 @@ static float crossEntropyForwardFakeQuant(tensor_t *softmaxOutput, tensor_t *dis
     return crossEntropyForwardFloat(&softmaxOutputFloat, &distributionFloat, reduction);
 }
 
-float crossEntropyForward(tensor_t *softmaxOutput, tensor_t *distribution, reduction_t reduction) {
+float crossEntropyForward(tensor_t *softmaxOutput, tensor_t *distribution, reduction_t reduction,
+                          const layerExec_t *exec) {
     requireOperandMatchesOutput(softmaxOutput, distribution, "distribution", "crossEntropyForward");
     switch (softmaxOutput->quantization->type) {
     case FLOAT32:
@@ -157,7 +158,8 @@ static void crossEntropySoftmaxBackwardFakeQuant(tensor_t *softmaxOutput, tensor
 }
 
 // IMPORTANT: This implementation already takes the softmax backward into account
-void crossEntropySoftmaxBackward(tensor_t *softmaxOutput, tensor_t *distribution, tensor_t *loss) {
+void crossEntropySoftmaxBackward(tensor_t *softmaxOutput, tensor_t *distribution, tensor_t *loss,
+                                 const layerExec_t *exec) {
     requireOperandMatchesOutput(softmaxOutput, distribution, "distribution",
                                 "crossEntropySoftmaxBackward");
     requireOperandMatchesOutput(softmaxOutput, loss, "loss (grad wire)",

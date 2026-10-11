@@ -522,7 +522,7 @@ static opKernelFn_t layerNormSelectForwardKernel(const layerNormConfig_t *cfg) {
     }
 }
 
-void layerNormForward(layer_t *layer, tensor_t *input, tensor_t *output) {
+void layerNormForward(layer_t *layer, tensor_t *input, tensor_t *output, const layerExec_t *exec) {
     layerNormConfig_t *cfg = layer->config->layerNorm;
     layerNormValidateInputShape(cfg, input);
     layerNormRequireInputShape(input, output, "output");
@@ -991,7 +991,8 @@ static void layerNormDxKernelBfp(tensor_t **operands, size_t nOperands, tensor_t
     layerNormCalcPropLossBfp(cfg, operands[0], operands[1], operands[2], rawOut);
 }
 
-void layerNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
+void layerNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss,
+                       const layerExec_t *exec) {
     layerNormConfig_t *cfg = layer->config->layerNorm;
     layerNormValidateInputShape(cfg, forwardInput);
     layerNormRequireInputShape(forwardInput, loss, "loss");

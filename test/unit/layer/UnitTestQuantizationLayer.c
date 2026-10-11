@@ -84,7 +84,7 @@ void testQuantizationForwardSymToSymMatchesDirectRequant(void) {
 
     tensor_t *actual = buildSym2D(2, 3);
     layer_t qLayer = {.type = QUANTIZATION, .config = NULL}; /* kernel reads only tensors */
-    quantizationForward(&qLayer, input, actual);
+    quantizationForward(&qLayer, input, actual, NULL);
 
     int32_t expectedMantissas[6];
     int32_t actualMantissas[6];
@@ -112,7 +112,7 @@ void testQuantizationForwardSymToFloatMatchesConvertTensor(void) {
 
     tensor_t *actual = buildFloat2D(2, 2);
     layer_t qLayer = {.type = QUANTIZATION, .config = NULL};
-    quantizationForward(&qLayer, input, actual);
+    quantizationForward(&qLayer, input, actual, NULL);
 
     float expectedVals[4];
     float actualVals[4];
@@ -160,7 +160,7 @@ void testQuantLayerConvertsAsymToSymInt32MatchesConvertTensor(void) {
 
     tensor_t *actual = buildSym2D(2, 2);
     layer_t qLayer = {.type = QUANTIZATION, .config = NULL};
-    quantizationForward(&qLayer, input, actual);
+    quantizationForward(&qLayer, input, actual, NULL);
 
     int32_t expectedMantissas[4];
     int32_t actualMantissas[4];
@@ -188,7 +188,7 @@ void testQuantLayerAbortsOnUnpopulatedConversionCell(void) {
     tensor_t *output = buildAsym2D(1, 4, 8);
     layer_t qLayer = {.type = QUANTIZATION, .config = NULL};
 
-    ASSERT_EXITS_WITH_FAILURE(quantizationForward(&qLayer, input, output));
+    ASSERT_EXITS_WITH_FAILURE(quantizationForward(&qLayer, input, output, NULL));
 
     freeTensor(output);
     freeTensor(input);
@@ -206,7 +206,7 @@ void testQuantizationBackwardRequantsDyMantissasLikeDirectRequant(void) {
     tensor_t *forwardInput = buildSym2D(2, 3); /* unused: straight-through backward */
     tensor_t *propLoss = buildSym2D(2, 3);
     layer_t qLayer = {.type = QUANTIZATION, .config = NULL};
-    quantizationBackward(&qLayer, forwardInput, loss, propLoss);
+    quantizationBackward(&qLayer, forwardInput, loss, propLoss, NULL);
 
     int32_t expectedMantissas[6];
     int32_t actualMantissas[6];

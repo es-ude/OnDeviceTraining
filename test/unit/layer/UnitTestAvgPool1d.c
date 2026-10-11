@@ -72,7 +72,7 @@ void testAvgPool1dForwardBasic(void) {
     avgPool1dRunResult_t r =
         avgPool1dBuild(input_avgPool1d_basic, inputDims, 2, VALID, 1, 1, outputData, outputDims);
 
-    avgPool1dForward(r.layer, r.input, r.output);
+    avgPool1dForward(r.layer, r.input, r.output, NULL);
 
     for (size_t i = 0; i < expectedForward_avgPool1d_basic_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedForward_avgPool1d_basic[i],
@@ -88,7 +88,7 @@ void testAvgPool1dBackwardBasic(void) {
     avgPool1dRunResult_t r =
         avgPool1dBuild(input_avgPool1d_basic, inputDims, 2, VALID, 1, 1, outputData, outputDims);
 
-    avgPool1dForward(r.layer, r.input, r.output);
+    avgPool1dForward(r.layer, r.input, r.output, NULL);
 
     float lossGradData[1 * 1 * 3];
     for (size_t i = 0; i < 3; i++) {
@@ -98,7 +98,7 @@ void testAvgPool1dBackwardBasic(void) {
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
 
     for (size_t i = 0; i < expectedPropLoss_avgPool1d_basic_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedPropLoss_avgPool1d_basic[i],
@@ -114,7 +114,7 @@ void testAvgPool1dMultiChannel(void) {
     avgPool1dRunResult_t r = avgPool1dBuild(input_avgPool1d_multiChannel, inputDims, 2, VALID, 1, 1,
                                             outputData, outputDims);
 
-    avgPool1dForward(r.layer, r.input, r.output);
+    avgPool1dForward(r.layer, r.input, r.output, NULL);
     for (size_t i = 0; i < expectedForward_avgPool1d_multiChannel_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedForward_avgPool1d_multiChannel[i],
                                  ((float *)r.output->data)[i]);
@@ -128,7 +128,7 @@ void testAvgPool1dMultiChannel(void) {
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
     for (size_t i = 0; i < expectedPropLoss_avgPool1d_multiChannel_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedPropLoss_avgPool1d_multiChannel[i],
                                  ((float *)propLoss->data)[i]);
@@ -143,7 +143,7 @@ void testAvgPool1dMultiBatch(void) {
     avgPool1dRunResult_t r = avgPool1dBuild(input_avgPool1d_multiBatch, inputDims, 2, VALID, 1, 1,
                                             outputData, outputDims);
 
-    avgPool1dForward(r.layer, r.input, r.output);
+    avgPool1dForward(r.layer, r.input, r.output, NULL);
     for (size_t i = 0; i < expectedForward_avgPool1d_multiBatch_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedForward_avgPool1d_multiBatch[i],
                                  ((float *)r.output->data)[i]);
@@ -157,7 +157,7 @@ void testAvgPool1dMultiBatch(void) {
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
     for (size_t i = 0; i < expectedPropLoss_avgPool1d_multiBatch_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedPropLoss_avgPool1d_multiBatch[i],
                                  ((float *)propLoss->data)[i]);
@@ -172,7 +172,7 @@ void testAvgPool1dWithStrideAndDilation(void) {
     avgPool1dRunResult_t r = avgPool1dBuild(input_avgPool1d_withStrideAndDilation, inputDims, 2,
                                             VALID, 2, 3, outputData, outputDims);
 
-    avgPool1dForward(r.layer, r.input, r.output);
+    avgPool1dForward(r.layer, r.input, r.output, NULL);
     for (size_t i = 0; i < expectedForward_avgPool1d_withStrideAndDilation_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedForward_avgPool1d_withStrideAndDilation[i],
                                  ((float *)r.output->data)[i]);
@@ -182,7 +182,7 @@ void testAvgPool1dWithStrideAndDilation(void) {
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
     for (size_t i = 0; i < expectedPropLoss_avgPool1d_withStrideAndDilation_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedPropLoss_avgPool1d_withStrideAndDilation[i],
                                  ((float *)propLoss->data)[i]);
@@ -197,7 +197,7 @@ void testAvgPool1dWithSamePadding(void) {
     avgPool1dRunResult_t r = avgPool1dBuild(input_avgPool1d_withSamePadding, inputDims, 3, SAME, 1,
                                             1, outputData, outputDims);
 
-    avgPool1dForward(r.layer, r.input, r.output);
+    avgPool1dForward(r.layer, r.input, r.output, NULL);
     for (size_t i = 0; i < expectedForward_avgPool1d_withSamePadding_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedForward_avgPool1d_withSamePadding[i],
                                  ((float *)r.output->data)[i]);
@@ -211,7 +211,7 @@ void testAvgPool1dWithSamePadding(void) {
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
     for (size_t i = 0; i < expectedPropLoss_avgPool1d_withSamePadding_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedPropLoss_avgPool1d_withSamePadding[i],
                                  ((float *)propLoss->data)[i]);
@@ -226,7 +226,7 @@ void testAvgPool1dEdgeCases(void) {
     avgPool1dRunResult_t r = avgPool1dBuild(input_avgPool1d_edgeCases, inputDims, 4, VALID, 1, 1,
                                             outputData, outputDims);
 
-    avgPool1dForward(r.layer, r.input, r.output);
+    avgPool1dForward(r.layer, r.input, r.output, NULL);
     // input [1,2,3,4] mean = 2.5
     for (size_t i = 0; i < expectedForward_avgPool1d_edgeCases_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedForward_avgPool1d_edgeCases[i],
@@ -238,7 +238,7 @@ void testAvgPool1dEdgeCases(void) {
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
     // 1/K = 0.25 contribution to each of 4 input positions.
     for (size_t i = 0; i < expectedPropLoss_avgPool1d_edgeCases_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedPropLoss_avgPool1d_edgeCases[i],
@@ -278,9 +278,9 @@ void testAvgPool1dBackwardFloatOverwritesStalePropLoss(void) {
     float secondDx[2 * 2 * 8];
 
     memset(propLoss->data, 0xA5, propLossElements * sizeof(float));
-    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
     memcpy(firstDx, propLoss->data, sizeof(firstDx));
-    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
     memcpy(secondDx, propLoss->data, sizeof(secondDx));
 
     freeTensor(propLoss);
@@ -310,7 +310,7 @@ void testAvgPool1dBackwardFloatRejectsPropLossWithFewerChannels(void) {
 
     ASSERT_EXITS_WITH_OUTPUT(
         1, "AvgPool1d backward FLOAT32 (propLoss): expected shape [2, 2, 8], got [2, 1, 8]",
-        avgPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+        avgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
 
     freeTensor(propLoss);
     freeTensor(lossGrad);
@@ -333,7 +333,7 @@ void testAvgPool1dBackwardFloatRejectsRank2PropLoss(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
                              "AvgPool1d backward FLOAT32: lossGrad and propLoss must both be "
                              "rank-3, got ranks 3 and 2",
-                             avgPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+                             avgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
 
     freeTensor(propLoss);
     freeTensor(lossGrad);
@@ -355,7 +355,7 @@ void testAvgPool1dForwardFloatRejectsOutputWithSmallerBatch(void) {
 
     ASSERT_EXITS_WITH_OUTPUT(
         1, "AvgPool1d forward FLOAT32 (rawOut): expected shape [2, 2, 3], got [1, 2, 3]",
-        avgPool1dForward(r.layer, r.input, smallOutput));
+        avgPool1dForward(r.layer, r.input, smallOutput, NULL));
 
     freeTensor(smallOutput);
     freeTensor(r.output);
@@ -401,7 +401,7 @@ void testAvgPool1dForwardWithSymInt32Input(void) {
 
     tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
 
-    avgPool1dForward(&layerStore, symInput, output);
+    avgPool1dForward(&layerStore, symInput, output, NULL);
 
     for (size_t i = 0; i < expectedForward_avgPool1d_basic_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(5e-3f, expectedForward_avgPool1d_basic[i],
@@ -496,7 +496,7 @@ void testAvgPool1dForwardSymBasic(void) {
     avgPool1dSymRun_t r =
         avgPool1dBuildSym(input_avgPool1dSym_symBasic, inputDims, 2, VALID, 1, 1, outputDims);
 
-    avgPool1dForward(r.layer, r.input, r.output);
+    avgPool1dForward(r.layer, r.input, r.output, NULL);
 
     ASSERT_SYM_FORWARD_GOLD(r.output, symBasic);
 }
@@ -511,7 +511,7 @@ void testAvgPool1dBackwardSymBasic(void) {
     tensor_t *lossGrad = buildSymTensor(outputDims, 3, lossGrad_avgPool1dSym_symBasic);
     tensor_t *propLoss = buildSymTensor(inputDims, 3, NULL);
 
-    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
 
     ASSERT_SYM_PROPLOSS_GOLD(propLoss, symBasic);
 }
@@ -525,13 +525,13 @@ void testAvgPool1dSymStrideDilationForwardBackward(void) {
     avgPool1dSymRun_t r = avgPool1dBuildSym(input_avgPool1dSym_symStrideDilation, inputDims, 2,
                                             VALID, 2, 3, outputDims);
 
-    avgPool1dForward(r.layer, r.input, r.output);
+    avgPool1dForward(r.layer, r.input, r.output, NULL);
     ASSERT_SYM_FORWARD_GOLD(r.output, symStrideDilation);
 
     tensor_t *lossGrad = buildSymTensor(outputDims, 3, lossGrad_avgPool1dSym_symStrideDilation);
     tensor_t *propLoss = buildSymTensor(inputDims, 3, NULL);
 
-    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
     ASSERT_SYM_PROPLOSS_GOLD(propLoss, symStrideDilation);
 }
 
@@ -544,13 +544,13 @@ void testAvgPool1dSymSamePadding(void) {
     avgPool1dSymRun_t r =
         avgPool1dBuildSym(input_avgPool1dSym_symSamePadding, inputDims, 3, SAME, 1, 1, outputDims);
 
-    avgPool1dForward(r.layer, r.input, r.output);
+    avgPool1dForward(r.layer, r.input, r.output, NULL);
     ASSERT_SYM_FORWARD_GOLD(r.output, symSamePadding);
 
     tensor_t *lossGrad = buildSymTensor(outputDims, 3, lossGrad_avgPool1dSym_symSamePadding);
     tensor_t *propLoss = buildSymTensor(inputDims, 3, NULL);
 
-    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    avgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
     ASSERT_SYM_PROPLOSS_GOLD(propLoss, symSamePadding);
 }
 
@@ -575,7 +575,7 @@ void testAvgPool1dForwardSymRejectsWideOperand(void) {
         avgPool1dBuildSym(input_avgPool1dSym_symBasic, inputDims, 2, VALID, 1, 1, outputDims);
     r.input = buildSymTensorWithBits(inputDims, 3, 31);
 
-    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(r.layer, r.input, r.output));
+    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(r.layer, r.input, r.output, NULL));
 }
 
 /* Value-sum guard, N branch: at qMaxBits=16 the scatter bound is
@@ -590,7 +590,7 @@ void testAvgPool1dBackwardSymRejectsTermsOverBound(void) {
     tensor_t *lossGrad = buildSymTensorWithBits(outputDims, 3, 16);
     tensor_t *propLoss = buildSymTensor(inputDims, 3, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(avgPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(avgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
 }
 
 /* #4 PR0: the SYM_INT32 dx kernel takes batch and channels from lossGrad but
@@ -607,7 +607,7 @@ void testAvgPool1dBackwardSymRejectsPropLossWithSmallerBatch(void) {
 
     ASSERT_EXITS_WITH_OUTPUT(
         1, "AvgPool1d backward SYM_INT32 (rawOut): expected shape [2, 2, 8], got [1, 2, 8]",
-        avgPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+        avgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
 
     freeTensor(propLoss);
     freeTensor(lossGrad);
@@ -629,7 +629,7 @@ void testAvgPool1dBackwardSymRejectsRank2PropLoss(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
                              "AvgPool1d backward SYM_INT32: lossGrad and rawOut must both be "
                              "rank-3, got ranks 3 and 2",
-                             avgPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+                             avgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
 
     freeTensor(propLoss);
     freeTensor(lossGrad);
@@ -650,7 +650,7 @@ void testAvgPool1dForwardSymRejectsOutputWithFewerChannels(void) {
 
     ASSERT_EXITS_WITH_OUTPUT(
         1, "AvgPool1d forward SYM_INT32 (rawOut): expected shape [2, 2, 3], got [2, 1, 3]",
-        avgPool1dForward(r.layer, r.input, smallOutput));
+        avgPool1dForward(r.layer, r.input, smallOutput, NULL));
 
     freeTensor(smallOutput);
     freeTensor(r.output);
@@ -728,7 +728,7 @@ void testAvgPool1dForwardBfpBorrowedGroupedInput(void) {
     avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, VALID,
                            (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, wireQ);
 
-    avgPool1dForward(&layer, input, output);
+    avgPool1dForward(&layer, input, output, NULL);
 
     TEST_ASSERT_EQUAL_MEMORY_MESSAGE(kBfpAvgPoolExpectedForward, output->data,
                                      kBfpAvgPoolExpectedForward_len * sizeof(float),
@@ -757,7 +757,7 @@ void testAvgPool1dForwardBfpStagesFloat32InputAtWireWidths(void) {
     avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, VALID,
                            (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, wireQ);
 
-    avgPool1dForward(&layer, input, output);
+    avgPool1dForward(&layer, input, output, NULL);
 
     TEST_ASSERT_EQUAL_MEMORY_MESSAGE(kBfpAvgPoolExpectedStaged, output->data,
                                      kBfpAvgPoolExpectedStaged_len * sizeof(float),
@@ -795,7 +795,7 @@ void testAvgPool1dForwardBfpPacksOutputWire(void) {
     avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, VALID,
                            (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, wireQ);
 
-    avgPool1dForward(&layer, input, output);
+    avgPool1dForward(&layer, input, output, NULL);
 
     int32_t got[8];
     unpackSignExtend(output->data, (uint8_t)kBfpAvgPoolMantissaBits, 0, got,
@@ -845,8 +845,8 @@ void testAvgPool1dBackwardBfpScattersIntoFloat32Raw(void) {
      * this stack depth), so a single call may not notice a missing memset.
      * Not a deterministic kill either way — the durable fix is funnel-level
      * zeroing of the Phase-2 raw (PR4 follow-up FU-1). */
-    avgPool1dBackward(&layer, NULL, lossGrad, propLoss);
-    avgPool1dBackward(&layer, NULL, lossGrad, propLoss);
+    avgPool1dBackward(&layer, NULL, lossGrad, propLoss, NULL);
+    avgPool1dBackward(&layer, NULL, lossGrad, propLoss, NULL);
 
     TEST_ASSERT_EQUAL_MEMORY_MESSAGE(kBfpAvgPoolExpectedBackward, propLoss->data,
                                      kBfpAvgPoolExpectedBackward_len * sizeof(float),
@@ -876,13 +876,13 @@ void testAvgPool1dForwardBfpRequiresBfpOutputQ(void) {
     nullCfg.outputQ = NULL;
     layerConfig_t nullLc = {.avgPool1d = &nullCfg};
     layer_t nullLayer = {.type = AVGPOOL1D, .config = &nullLc};
-    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&nullLayer, input, output));
+    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&nullLayer, input, output, NULL));
 
     avgPool1dConfig_t floatCfg = nullCfg;
     floatCfg.outputQ = floatQ;
     layerConfig_t floatLc = {.avgPool1d = &floatCfg};
     layer_t floatLayer = {.type = AVGPOOL1D, .config = &floatLc};
-    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&floatLayer, input, output));
+    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&floatLayer, input, output, NULL));
 
     freeQuantization(floatQ);
     freeTensor(output);
@@ -921,9 +921,9 @@ void testAvgPool1dForwardBfpRejectsMismatchedOutputShape(void) {
     avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, VALID,
                            (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, wireQ);
 
-    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&layer, input, badChannels));
-    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&layer, input, badBatch));
-    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&layer, input, badRank));
+    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&layer, input, badChannels, NULL));
+    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&layer, input, badBatch, NULL));
+    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&layer, input, badRank, NULL));
 
     freeQuantization(wireQ);
     freeTensor(badRank);
@@ -958,7 +958,7 @@ void testAvgPool1dForwardBfpSumHeadroomGuardIsWired(void) {
 
     /* bfpSumSegmentLimit(16) = INT32_MAX >> 15 = 65535; 8 terms is far inside
      * it, so the guarded call must SUCCEED (36 / 8 = 4.5 at scale 1.0). */
-    avgPool1dForward(&layer, input, output);
+    avgPool1dForward(&layer, input, output, NULL);
     TEST_ASSERT_EQUAL_FLOAT(4.5f, ((float *)output->data)[0]);
 
     /* The guard's own bound, exercised directly. */
@@ -1005,7 +1005,7 @@ void testAvgPool1dForwardBfpWireUnderPinnedFloat32(void) {
                            (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, wireQ);
     cfg.forwardMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
 
-    avgPool1dForward(&layer, input, output);
+    avgPool1dForward(&layer, input, output, NULL);
 
     /* The native kernel folds int32 partials then divides; the fake-quant arm
      * sums exact floats then divides. Both reduce the SAME exact values in the
@@ -1044,8 +1044,10 @@ void testAvgPool1dBackwardBfpGuardsNarrowedNotRemoved(void) {
     layer_t floatLayer;
     avgPool1dBuildBfpLayer(&floatCfg, &kf, &floatLc, &floatLayer, (size_t)kBfpAvgPoolKernelSize,
                            VALID, (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, floatQ);
-    ASSERT_EXITS_WITH_FAILURE(avgPool1dBackward(&floatLayer, NULL, bfpLossGrad, floatPropLoss));
-    ASSERT_EXITS_WITH_FAILURE(avgPool1dBackward(&floatLayer, NULL, floatLossGrad, bfpPropLoss));
+    ASSERT_EXITS_WITH_FAILURE(
+        avgPool1dBackward(&floatLayer, NULL, bfpLossGrad, floatPropLoss, NULL));
+    ASSERT_EXITS_WITH_FAILURE(
+        avgPool1dBackward(&floatLayer, NULL, floatLossGrad, bfpPropLoss, NULL));
 
     kernel_t kb;
     initKernel(&kb, (size_t)kBfpAvgPoolKernelSize, VALID, (size_t)kBfpAvgPoolDilation,
@@ -1056,7 +1058,7 @@ void testAvgPool1dBackwardBfpGuardsNarrowedNotRemoved(void) {
     bfpCfg.propLossQ = NULL;
     layerConfig_t bfpLc = {.avgPool1d = &bfpCfg};
     layer_t bfpLayer = {.type = AVGPOOL1D, .config = &bfpLc};
-    ASSERT_EXITS_WITH_FAILURE(avgPool1dBackward(&bfpLayer, NULL, bfpLossGrad, floatPropLoss));
+    ASSERT_EXITS_WITH_FAILURE(avgPool1dBackward(&bfpLayer, NULL, bfpLossGrad, floatPropLoss, NULL));
 
     freeQuantization(floatQ);
     freeTensor(bfpPropLoss);
@@ -1106,8 +1108,8 @@ void testAvgPool1dBfpRejectsRank2Operands(void) {
     avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, VALID,
                            (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, wireQ);
 
-    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&layer, badInput, output));
-    ASSERT_EXITS_WITH_FAILURE(avgPool1dBackward(&layer, NULL, badLossGrad, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&layer, badInput, output, NULL));
+    ASSERT_EXITS_WITH_FAILURE(avgPool1dBackward(&layer, NULL, badLossGrad, propLoss, NULL));
 
     freeQuantization(wireQ);
     freeTensor(propLoss);

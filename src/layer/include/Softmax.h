@@ -37,11 +37,13 @@ void softmaxInitLayer(layerConfig_t *softmaxConfig, layer_t *softmaxLayer);
  * [1, N] stored as [N, 1] + transpose fails fast; one storage row takes any
  * order. The ARITH_BFP arms take a single storage row only ([N] or [1, N]);
  * more rows fail fast. */
-void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output);
+void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output,
+                    const layerExec_t *exec);
 
 /* Same row partition as softmaxForward: the Jacobian is block-diagonal over
  * rows, and each row's s is recomputed from its own logits (P6-1). */
-void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, tensor_t *propLoss);
+void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, tensor_t *propLoss,
+                     const layerExec_t *exec);
 
 void softmaxCalcOutputShape(layer_t *softmaxLayer, shape_t *inputShape, shape_t *outputShape);
 

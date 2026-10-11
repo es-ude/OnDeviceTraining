@@ -10,6 +10,7 @@
 #include "Tensor.h"
 
 typedef struct layer layer_t;
+typedef struct layerExec layerExec_t;
 
 /* momentum selection. DEFAULT (zero-init) = 0.1; VALUE = `momentum`
  * literally (0 = running stats never move); CUMULATIVE = PyTorch
@@ -76,12 +77,12 @@ void initBatchNorm1dConfig(batchNorm1dConfig_t *cfg, parameter_t *gamma, paramet
                            float eps, bnMomentumMode_t momentumMode, float momentum,
                            quantization_t *forwardQ, quantization_t *backwardQ);
 
-void batchNorm1dForward(layer_t *layer, tensor_t *input, tensor_t *output);
+void batchNorm1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const layerExec_t *exec);
 /*! propLoss == NULL is a grads-only call (deepest trainable layer, #380): the
  *  gamma/beta grads are computed and no dx memory is touched. Grads
  *  accumulate (+=); dx is overwritten. Never touches the running stats. */
-void batchNorm1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss,
-                         tensor_t *propLoss);
+void batchNorm1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss,
+                         const layerExec_t *exec);
 void batchNorm1dCalcOutputShape(layer_t *layer, shape_t *inputShape, shape_t *outputShape);
 
 /*! Evaluation pre-flight (#467/#468): exits with the untracked-evaluation message

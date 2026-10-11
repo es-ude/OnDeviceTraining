@@ -9,6 +9,7 @@
 #include "Tensor.h"
 
 typedef struct layer layer_t;
+typedef struct layerExec layerExec_t;
 
 /* GroupNorm over rank-3 [B, C, T] inputs (identity order, fail-fast guarded):
  * per-(b,g) statistics over N = C/G * T elements, per-CHANNEL affine — the
@@ -37,8 +38,9 @@ void initGroupNormConfig(groupNormConfig_t *cfg, parameter_t *gamma, parameter_t
                          size_t numGroups, size_t numChannels, float eps, quantization_t *forwardQ,
                          quantization_t *backwardQ);
 
-void groupNormForward(layer_t *layer, tensor_t *input, tensor_t *output);
-void groupNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss);
+void groupNormForward(layer_t *layer, tensor_t *input, tensor_t *output, const layerExec_t *exec);
+void groupNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss,
+                       const layerExec_t *exec);
 void groupNormCalcOutputShape(layer_t *layer, shape_t *inputShape, shape_t *outputShape);
 
 #endif // ODT_GROUPNORM_H

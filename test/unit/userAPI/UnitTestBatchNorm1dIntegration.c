@@ -346,11 +346,11 @@ void testGradsCallKeepsBatchNormInTrainingModeThroughBackward(void) {
     tensor_t *y = buildFloatTensor((size_t[]){4, 2}, 2, kY);
     tensor_t *out = buildFloatTensor((size_t[]){4, 2}, 2, NULL);
     rc->training = true;
-    batchNorm1dForward(ref, x, out);
+    batchNorm1dForward(ref, x, out, NULL);
     tensor_t *dy = buildFloatTensor((size_t[]){4, 2}, 2, NULL);
-    lossFunctions[MSE].backward(out, y, dy);
+    lossFunctions[MSE].backward(out, y, dy, NULL);
     rc->training = true; /* pinned true through backward: what the loop must match */
-    batchNorm1dBackward(ref, x, dy, NULL);
+    batchNorm1dBackward(ref, x, dy, NULL, NULL);
     float dgRef = ((float *)rc->gamma->grad->data)[0];
 
     freeTensor(dy);

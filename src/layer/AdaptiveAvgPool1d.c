@@ -244,7 +244,8 @@ static void adaptiveAvgPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t
     }
 }
 
-void adaptiveAvgPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output) {
+void adaptiveAvgPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output,
+                              const layerExec_t *exec) {
     adaptiveAvgPool1dConfig_t *cfg = layer->config->adaptiveAvgPool1d;
     if (cfg->forwardMath.type == ARITH_BFP) {
         const bfpQConfig_t *anchor = bfpWireAnchor(cfg->outputQ, "AdaptiveAvgPool1d forward");
@@ -478,7 +479,7 @@ static void adaptiveAvgPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_
 }
 
 void adaptiveAvgPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
-                               tensor_t *propLoss) {
+                               tensor_t *propLoss, const layerExec_t *exec) {
     adaptiveAvgPool1dConfig_t *cfg = layer->config->adaptiveAvgPool1d;
     switch (cfg->propLossMath.type) {
     case ARITH_FLOAT32:

@@ -51,7 +51,7 @@ void reluForwardBfp(tensor_t *input, tensor_t *output) {
     gteBfpZero(input, output);
 }
 
-void reluForward(layer_t *reluLayer, tensor_t *input, tensor_t *output) {
+void reluForward(layer_t *reluLayer, tensor_t *input, tensor_t *output, const layerExec_t *exec) {
     reluConfig_t *reluConfig = reluLayer->config->relu;
 
     switch (reluConfig->forwardMath.type) {
@@ -164,7 +164,8 @@ void reluBackwardBfp(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss)
     memcpy(propLossQC->exponents, lossQC->exponents, lossQC->numGroups);
 }
 
-void reluBackward(layer_t *reluLayer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
+void reluBackward(layer_t *reluLayer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss,
+                  const layerExec_t *exec) {
     reluConfig_t *reluConfig = reluLayer->config->relu;
 
     switch (reluConfig->propLossMath.type) {

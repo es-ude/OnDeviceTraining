@@ -46,7 +46,7 @@ void unitTestCrossEntropySoftmaxBackward() {
     layerQuantInitUniform(&lq, floatQ);
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
     layerFunctions_t softmaxFns = layerFunctions[SOFTMAX];
-    softmaxFns.forward(softmaxLayer, &logits, &softmaxOutput);
+    softmaxFns.forward(softmaxLayer, &logits, &softmaxOutput, NULL);
 
     tensor_t distribution;
     float distData[] = {0.9f, 0.1f, 0.0f};
@@ -70,7 +70,7 @@ void unitTestCrossEntropySoftmaxBackward() {
     initFloat32Quantization(&propLossQ);
     setTensorValues(&propLoss, (uint8_t *)propLossData, &propLossShape, &propLossQ, NULL);
 
-    crossEntropySoftmaxBackward(&softmaxOutput, &distribution, &propLoss);
+    crossEntropySoftmaxBackward(&softmaxOutput, &distribution, &propLoss, NULL);
 
     /* CAPTURE. propLoss.data is stack memory (propLossData[]); copy into a
      * dedicated capture array so the assertions read from a buffer that
@@ -118,7 +118,7 @@ void testCrossEntropyBackward_WritesRawPerElementGrad(void) {
 
     /* Raw per-element gradient: (p-y). No batch divisor — scaleOptimizerGradients
      * applies macro-scale at the optimizer step. */
-    crossEntropySoftmaxBackward(&softmaxOutput, &distribution, &lossGrad);
+    crossEntropySoftmaxBackward(&softmaxOutput, &distribution, &lossGrad, NULL);
 
     /* Expected = p - y = [0.7-1, 0.2-0, 0.1-0] = [-0.3, 0.2, 0.1] */
     float expected[3] = {0.7f - 1.f, 0.2f - 0.f, 0.1f - 0.f};
@@ -153,7 +153,7 @@ void testCrossEntropyForward_SumReturnsRawSum() {
     layerQuantInitUniform(&lq, floatQ);
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
     layerFunctions_t softmaxFns = layerFunctions[SOFTMAX];
-    softmaxFns.forward(softmaxLayer, &logits, &softmaxOutput);
+    softmaxFns.forward(softmaxLayer, &logits, &softmaxOutput, NULL);
 
     tensor_t distribution;
     float distData[] = {0.9f, 0.1f, 0.0f};
@@ -258,7 +258,7 @@ void testCrossEntropyForward_DispatcherFloat32MatchesFloatImpl() {
     initFloat32Quantization(&distQ);
     setTensorValues(&distribution, (uint8_t *)distData, &shape, &distQ, NULL);
 
-    float viaDispatcher = crossEntropyForward(&softmaxOutput, &distribution, REDUCTION_MEAN);
+    float viaDispatcher = crossEntropyForward(&softmaxOutput, &distribution, REDUCTION_MEAN, NULL);
     float viaFloatImpl = crossEntropyForwardFloat(&softmaxOutput, &distribution, REDUCTION_MEAN);
 
     TEST_ASSERT_EQUAL_FLOAT(viaFloatImpl, viaDispatcher);
@@ -312,7 +312,7 @@ void testCrossEntropyForwardSymInt32MatchesGold(void) {
     quantization_t labelQ;
     makeFloatStack(&label, yData, &shape, &labelQ);
 
-    float lossSum = crossEntropyForward(&pSym.tensor, &label, REDUCTION_SUM);
+    float lossSum = crossEntropyForward(&pSym.tensor, &label, REDUCTION_SUM, NULL);
 
     TEST_ASSERT_FLOAT_WITHIN(lossTol_ceSym_symBasic, expectedLossSum_ceSym_symBasic, lossSum);
 }
@@ -339,7 +339,7 @@ void testCrossEntropyForwardSymMicrobatchMeanDivides(void) {
     quantization_t labelQ;
     makeFloatStack(&label, yData, &shape, &labelQ);
 
-    float lossMean = crossEntropyForward(&pSym.tensor, &label, REDUCTION_MEAN);
+    float lossMean = crossEntropyForward(&pSym.tensor, &label, REDUCTION_MEAN, NULL);
 
     TEST_ASSERT_FLOAT_WITHIN(lossTol_ceSym_symMicrobatch, expectedLossMean_ceSym_symMicrobatch,
                              lossMean);
@@ -376,7 +376,7 @@ void testCrossEntropySoftmaxBackwardSymWritesRequantizedGrad(void) {
     initSymInt32Quantization(&grad.qc, &grad.q);
     setTensorValues(&grad.tensor, (uint8_t *)gradData, &shape, &grad.q, NULL);
 
-    crossEntropySoftmaxBackward(&pSym.tensor, &label, &grad.tensor);
+    crossEntropySoftmaxBackward(&pSym.tensor, &label, &grad.tensor, NULL);
 
     float scale = grad.qc.scale;
     TEST_ASSERT_FLOAT_WITHIN(expectedGradScale_ceSym_symMicrobatch * scaleTol_ceSym_symMicrobatch,
@@ -458,8 +458,8 @@ void testCrossEntropyForwardBfpEqualsFloat32OnExactGrid(void) {
     tensor_t *floatP = buildFloatTensor1D(4, exactP);
     tensor_t *label = buildFloatTensor1D(4, y);
 
-    float bfpLoss = crossEntropyForward(bfpP, label, REDUCTION_SUM);
-    float floatLoss = crossEntropyForward(floatP, label, REDUCTION_SUM);
+    float bfpLoss = crossEntropyForward(bfpP, label, REDUCTION_SUM, NULL);
+    float floatLoss = crossEntropyForward(floatP, label, REDUCTION_SUM, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT_MESSAGE(floatLoss, bfpLoss,
                                     "an exact-grid BFP softmax output must give the FLOAT32 CE");
@@ -479,7 +479,7 @@ void testCrossEntropySoftmaxBackwardBfpRequantizesIntoFreshGrid(void) {
     tensor_t *label = buildFloatTensor1D(4, y);
     tensor_t *loss = buildBfpTensor1DWithCodes(4, 6, 8, sentinel, 127);
 
-    crossEntropySoftmaxBackward(bfpP, label, loss);
+    crossEntropySoftmaxBackward(bfpP, label, loss, NULL);
 
     int32_t got[4];
     unpackSignExtend(loss->data, 6, 0, got, 4);
@@ -507,7 +507,7 @@ void testCrossEntropyForwardBfpRejectsDistributionCountMismatch(void) {
     float y[5] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f};
     tensor_t *label = buildFloatTensor1D(5, y);
 
-    ASSERT_EXITS_WITH_FAILURE((void)crossEntropyForward(bfpP, label, REDUCTION_SUM));
+    ASSERT_EXITS_WITH_FAILURE((void)crossEntropyForward(bfpP, label, REDUCTION_SUM, NULL));
 
     freeTensor(label);
     freeTensor(bfpP);
@@ -521,7 +521,7 @@ void testCrossEntropySoftmaxBackwardBfpRejectsDistributionCountMismatch(void) {
     tensor_t *label = buildFloatTensor1D(5, y);
     tensor_t *loss = buildBfpTensor1DWithCodes(4, 6, 8, sentinel, 127);
 
-    ASSERT_EXITS_WITH_FAILURE(crossEntropySoftmaxBackward(bfpP, label, loss));
+    ASSERT_EXITS_WITH_FAILURE(crossEntropySoftmaxBackward(bfpP, label, loss, NULL));
 
     freeTensor(loss);
     freeTensor(label);
@@ -543,7 +543,7 @@ void testCrossEntropySoftmaxBackwardBfpRejectsLossWireCountMismatch(void) {
     tensor_t *label = buildFloatTensor1D(4, y);
     tensor_t *loss = buildBfpTensor1DWithCodes(5, 6, 8, sentinel, 127);
 
-    ASSERT_EXITS_WITH_FAILURE(crossEntropySoftmaxBackward(bfpP, label, loss));
+    ASSERT_EXITS_WITH_FAILURE(crossEntropySoftmaxBackward(bfpP, label, loss, NULL));
 
     freeTensor(loss);
     freeTensor(label);
@@ -567,7 +567,7 @@ void testCrossEntropyForwardFloat32RejectsDistributionCountMismatch(void) {
     tensor_t *floatP = buildFloatTensor1D(4, p);
     tensor_t *label = buildFloatTensor1D(5, y);
 
-    ASSERT_EXITS_WITH_FAILURE((void)crossEntropyForward(floatP, label, REDUCTION_SUM));
+    ASSERT_EXITS_WITH_FAILURE((void)crossEntropyForward(floatP, label, REDUCTION_SUM, NULL));
 
     freeTensor(label);
     freeTensor(floatP);
@@ -581,7 +581,7 @@ void testCrossEntropySoftmaxBackwardFloat32RejectsLossWireCountMismatch(void) {
     tensor_t *label = buildFloatTensor1D(4, y);
     tensor_t *loss = buildFloatTensor1D(5, lossValues);
 
-    ASSERT_EXITS_WITH_FAILURE(crossEntropySoftmaxBackward(floatP, label, loss));
+    ASSERT_EXITS_WITH_FAILURE(crossEntropySoftmaxBackward(floatP, label, loss, NULL));
 
     freeTensor(loss);
     freeTensor(label);
@@ -596,7 +596,7 @@ void testCrossEntropyForwardRejectsRank1Output(void) {
     tensor_t *softmaxOutput = buildFloatTensorShaped(dims, 1, (float[]){0.6f, 0.3f, 0.1f});
     tensor_t *distribution = buildFloatTensorShaped(dims, 1, (float[]){1.f, 0.f, 0.f});
     ASSERT_EXITS_WITH_FAILURE(
-        (void)crossEntropyForward(softmaxOutput, distribution, REDUCTION_MEAN));
+        (void)crossEntropyForward(softmaxOutput, distribution, REDUCTION_MEAN, NULL));
     freeTensor(distribution);
     freeTensor(softmaxOutput);
 }
@@ -609,7 +609,7 @@ void testCrossEntropyForwardRejectsLeadingAxisMismatch(void) {
     tensor_t *distribution =
         buildFloatTensorShaped(distDims, 2, (float[]){1.f, 0.f, 0.f, 0.f, 0.f, 1.f});
     ASSERT_EXITS_WITH_FAILURE(
-        (void)crossEntropyForward(softmaxOutput, distribution, REDUCTION_MEAN));
+        (void)crossEntropyForward(softmaxOutput, distribution, REDUCTION_MEAN, NULL));
     freeTensor(distribution);
     freeTensor(softmaxOutput);
 }
@@ -620,7 +620,8 @@ void testCrossEntropySoftmaxBackwardRejectsDistributionRankMismatch(void) {
     tensor_t *softmaxOutput = buildFloatTensorShaped(outDims, 2, (float[]){0.6f, 0.3f, 0.1f});
     tensor_t *distribution = buildFloatTensorShaped(distDims, 3, (float[]){1.f, 0.f, 0.f});
     tensor_t *lossWire = buildFloatTensorShaped(outDims, 2, (float[]){0.f, 0.f, 0.f});
-    ASSERT_EXITS_WITH_FAILURE(crossEntropySoftmaxBackward(softmaxOutput, distribution, lossWire));
+    ASSERT_EXITS_WITH_FAILURE(
+        crossEntropySoftmaxBackward(softmaxOutput, distribution, lossWire, NULL));
     freeTensor(lossWire);
     freeTensor(distribution);
     freeTensor(softmaxOutput);
@@ -642,7 +643,7 @@ void testCrossEntropyForward_NonFiniteSoftmaxReturnsNanInsteadOfAborting(void) {
     tensor_t distribution;
     setTensorValues(&distribution, (uint8_t *)distData, &shape, &q, NULL);
 
-    float loss = crossEntropyForward(&softmaxOutput, &distribution, REDUCTION_MEAN);
+    float loss = crossEntropyForward(&softmaxOutput, &distribution, REDUCTION_MEAN, NULL);
 
     TEST_ASSERT_TRUE(isnan(loss));
 }
@@ -667,7 +668,7 @@ void testCrossEntropyForward_InfiniteSoftmaxReturnsNanInsteadOfAborting(void) {
     tensor_t distribution;
     setTensorValues(&distribution, (uint8_t *)distData, &shape, &q, NULL);
 
-    float loss = crossEntropyForward(&softmaxOutput, &distribution, REDUCTION_MEAN);
+    float loss = crossEntropyForward(&softmaxOutput, &distribution, REDUCTION_MEAN, NULL);
 
     TEST_ASSERT_TRUE(isnan(loss));
 }

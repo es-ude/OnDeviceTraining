@@ -41,7 +41,8 @@ static void requireMatchingBfpWires(tensor_t *a, tensor_t *b, const char *what) 
                            b->quantization->qConfig, calcNumberOfElementsByTensor(b), what);
 }
 
-void flattenForward(layer_t *flattenLayer, tensor_t *input, tensor_t *output) {
+void flattenForward(layer_t *flattenLayer, tensor_t *input, tensor_t *output,
+                    const layerExec_t *exec) {
     (void)flattenLayer;
     requireMatchingBfpWires(input, output, "Flatten forward (input -> output)");
 
@@ -61,7 +62,7 @@ void flattenForward(layer_t *flattenLayer, tensor_t *input, tensor_t *output) {
 }
 
 void flattenBackward(layer_t *flattenLayer, tensor_t *forwardInput, tensor_t *loss,
-                     tensor_t *propLoss) {
+                     tensor_t *propLoss, const layerExec_t *exec) {
     (void)flattenLayer;
     (void)forwardInput; /* never dereferenced -> not guarded */
     requireMatchingBfpWires(loss, propLoss, "Flatten backward (loss -> propLoss)");

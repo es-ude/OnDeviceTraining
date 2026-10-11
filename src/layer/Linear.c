@@ -149,7 +149,8 @@ static void linearForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, t
     linearForwardBfp(ops[1], bias, ops[0], rawOut);
 }
 
-void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output) {
+void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output,
+                   const layerExec_t *exec) {
     linearConfig_t *linearConfig = linearLayer->config->linear;
 
     tensor_t *weights = getParamFromParameter(linearConfig->weights);
@@ -461,7 +462,7 @@ static opKernelFn_t linearBackwardKernelForArithmetic(arithmetic_t math, opKerne
 }
 
 void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss,
-                    tensor_t *propLoss) {
+                    tensor_t *propLoss, const layerExec_t *exec) {
     linearConfig_t *cfg = linearLayer->config->linear;
     tensor_t *weights = getParamFromParameter(cfg->weights);
 

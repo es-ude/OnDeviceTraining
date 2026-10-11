@@ -27,7 +27,8 @@ static void dispatchQuantization(tensor_t *input, tensor_t *output) {
     executeConvert(input, output, NULL);
 }
 
-void quantizationForward(layer_t *layer, tensor_t *inputTensor, tensor_t *outputTensor) {
+void quantizationForward(layer_t *layer, tensor_t *inputTensor, tensor_t *outputTensor,
+                         const layerExec_t *exec) {
     (void)layer; /* dtype dispatch reads the tensors; config->quantization->outputQ
                   * already determined outputTensor's dtype when its header was
                   * derived (the remat wire table's bind / initBufferOutput). */
@@ -35,7 +36,7 @@ void quantizationForward(layer_t *layer, tensor_t *inputTensor, tensor_t *output
 }
 
 void quantizationBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss,
-                          tensor_t *propLoss) {
+                          tensor_t *propLoss, const layerExec_t *exec) {
     (void)layer;
     (void)forwardInput; /* straight-through: dy does not depend on x. Both forward
                          * and backward requant map their own absmax exactly onto

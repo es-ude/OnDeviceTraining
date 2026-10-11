@@ -4,11 +4,13 @@
 #include "LossFunction.h"
 #include "Tensor.h"
 
-float mseLossForward(tensor_t *output, tensor_t *label, reduction_t reduction);
+float mseLossForward(tensor_t *output, tensor_t *label, reduction_t reduction,
+                     const layerExec_t *exec);
 
 void mseLossBackwardFloat(tensor_t *modelOutput, tensor_t *label, tensor_t *result);
 
-void mseLossBackward(tensor_t *modelOutput, tensor_t *label, tensor_t *result);
+void mseLossBackward(tensor_t *modelOutput, tensor_t *label, tensor_t *result,
+                     const layerExec_t *exec);
 
 /* Per-loss MEAN-reduction scale factor (PyTorch parity).
  *

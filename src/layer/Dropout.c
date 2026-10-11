@@ -285,7 +285,8 @@ static void dropoutBackwardBfp(dropoutConfig_t *cfg, tensor_t *loss, tensor_t *p
     dropoutMaskScaleBfp(cfg, loss, propLoss);
 }
 
-void dropoutForward(layer_t *dropoutLayer, tensor_t *input, tensor_t *output) {
+void dropoutForward(layer_t *dropoutLayer, tensor_t *input, tensor_t *output,
+                    const layerExec_t *exec) {
     dropoutConfig_t *cfg = dropoutLayer->config->dropout;
     /* Before bernoulliFillMask: a rejected call must not consume RNG draws, so
      * the ARITH_BFP case validates EVERYTHING here — dtype, element counts,
@@ -361,7 +362,7 @@ static void dropoutBackwardSymInt32(dropoutConfig_t *cfg, tensor_t *loss, tensor
 }
 
 void dropoutBackward(layer_t *dropoutLayer, tensor_t *forwardInput, tensor_t *loss,
-                     tensor_t *propLoss) {
+                     tensor_t *propLoss, const layerExec_t *exec) {
     (void)forwardInput; // not needed: the stored mask + p fully determine the gradient.
     dropoutConfig_t *cfg = dropoutLayer->config->dropout;
     /* forwardInput is deliberately NOT guarded — it is never dereferenced here

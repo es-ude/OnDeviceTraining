@@ -363,7 +363,7 @@ static void maxPoolEnsureArgmaxRows(maxPool1dConfig_t *cfg, const tensor_t *inpu
     }
 }
 
-void maxPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output) {
+void maxPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const layerExec_t *exec) {
     maxPool1dConfig_t *cfg = layer->config->maxPool1d;
     maxPoolEnsureArgmaxRows(cfg, input);
     if (cfg->forwardMath.type == ARITH_BFP) {
@@ -643,7 +643,7 @@ static void maxPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOu
 }
 
 void maxPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
-                       tensor_t *propLoss) {
+                       tensor_t *propLoss, const layerExec_t *exec) {
     maxPool1dConfig_t *cfg = layer->config->maxPool1d;
     switch (cfg->propLossMath.type) {
     case ARITH_FLOAT32:

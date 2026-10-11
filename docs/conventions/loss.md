@@ -4,9 +4,12 @@
 
 Each loss function in `src/loss_functions/` exposes:
 
-- `forward(modelOutput, label, reduction) → float`
-- `backward(modelOutput, label, result) → void`
+- `forward(modelOutput, label, reduction, exec) → float`
+- `backward(modelOutput, label, result, exec) → void`
 - `computeMeanScale(totalSamples, modelOutput) → float`
+
+`exec` is the call's `const layerExec_t *` (the layer key); NULL means the
+caller supplies no randomness.
 
 ### Reduction split
 

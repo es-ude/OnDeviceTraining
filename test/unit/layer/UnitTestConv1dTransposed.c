@@ -141,7 +141,7 @@ void testConv1dTransposedForwardSymSingleChannelSingleBatch() {
     lc.conv1dTransposed = &cfg;
     layer.config = &lc;
 
-    conv1dTransposedForward(&layer, input, output);
+    conv1dTransposedForward(&layer, input, output, NULL);
 
     int32_t *m = (int32_t *)output->data;
     for (size_t i = 0; i < expectedForward_convT1dSym_singleChannelSingleBatch_len; i++) {
@@ -170,7 +170,7 @@ void testConv1dTransposedForwardSingleChannelSingleBatch() {
                  input_convT1d_singleChannelSingleBatch, inputDims, 2, 1, 1, 1, 0, outputData,
                  outputDims);
 
-    conv1dTransposedForward(&r.layer, r.input, r.output);
+    conv1dTransposedForward(&r.layer, r.input, r.output, NULL);
 
     for (size_t i = 0; i < expectedForward_convT1d_singleChannelSingleBatch_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedForward_convT1d_singleChannelSingleBatch[i],
@@ -190,7 +190,7 @@ void testConv1dTransposedForwardMultiChannelWithBias() {
                  bias_convT1d_multiChannelWithBias, biasDims, 1, input_convT1d_multiChannelWithBias,
                  inputDims, 2, 1, 1, 1, 0, outputData, outputDims);
 
-    conv1dTransposedForward(&r.layer, r.input, r.output);
+    conv1dTransposedForward(&r.layer, r.input, r.output, NULL);
 
     for (size_t i = 0; i < expectedForward_convT1d_multiChannelWithBias_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedForward_convT1d_multiChannelWithBias[i],
@@ -241,7 +241,7 @@ void testConv1dTransposedBackwardSingleChannelWithBias() {
                  input_convT1d_singleChannelWithBias, inputDims, 2, 1, 1, 1, 0, outputData,
                  outputDims);
 
-    conv1dTransposedForward(&r.layer, r.input, r.output); // sanity
+    conv1dTransposedForward(&r.layer, r.input, r.output, NULL); // sanity
 
     float lossGradData[4];
     for (size_t i = 0; i < 4; i++) {
@@ -251,7 +251,7 @@ void testConv1dTransposedBackwardSingleChannelWithBias() {
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    conv1dTransposedBackward(&r.layer, r.input, lossGrad, propLoss);
+    conv1dTransposedBackward(&r.layer, r.input, lossGrad, propLoss, NULL);
 
     for (size_t i = 0; i < expectedPropLoss_convT1d_singleChannelWithBias_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedPropLoss_convT1d_singleChannelWithBias[i],
@@ -278,7 +278,7 @@ void testConv1dTransposedBackwardStride2() {
     convT1dBuild(&r, weight_convT1d_stride2, weightDims, NULL, NULL, 0, input_convT1d_stride2,
                  inputDims, 2, 1, 2, 1, 0, outputData, outputDims);
 
-    conv1dTransposedForward(&r.layer, r.input, r.output);
+    conv1dTransposedForward(&r.layer, r.input, r.output, NULL);
 
     float lossGradData[6];
     for (size_t i = 0; i < 6; i++) {
@@ -288,7 +288,7 @@ void testConv1dTransposedBackwardStride2() {
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    conv1dTransposedBackward(&r.layer, r.input, lossGrad, propLoss);
+    conv1dTransposedBackward(&r.layer, r.input, lossGrad, propLoss, NULL);
 
     for (size_t i = 0; i < expectedPropLoss_convT1d_stride2_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedPropLoss_convT1d_stride2[i],
@@ -311,7 +311,7 @@ void testConv1dTransposedForwardMultiBatch() {
     convT1dBuild(&r, weight_convT1d_multiBatch, weightDims, NULL, NULL, 0, input_convT1d_multiBatch,
                  inputDims, 2, 1, 1, 1, 0, outputData, outputDims);
 
-    conv1dTransposedForward(&r.layer, r.input, r.output);
+    conv1dTransposedForward(&r.layer, r.input, r.output, NULL);
 
     for (size_t i = 0; i < expectedForward_convT1d_multiBatch_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedForward_convT1d_multiBatch[i],
@@ -330,7 +330,7 @@ void testConv1dTransposedForwardGroupsDepthwise() {
     convT1dBuild(&r, weight_convT1d_groupsDepthwise, weightDims, NULL, NULL, 0,
                  input_convT1d_groupsDepthwise, inputDims, 2, 1, 1, 4, 0, outputData, outputDims);
 
-    conv1dTransposedForward(&r.layer, r.input, r.output);
+    conv1dTransposedForward(&r.layer, r.input, r.output, NULL);
 
     for (size_t i = 0; i < expectedForward_convT1d_groupsDepthwise_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedForward_convT1d_groupsDepthwise[i],
@@ -348,7 +348,7 @@ void testConv1dTransposedBackwardGroupsDepthwise() {
     convT1dBuild(&r, weight_convT1d_groupsDepthwise, weightDims, NULL, NULL, 0,
                  input_convT1d_groupsDepthwise, inputDims, 2, 1, 1, 4, 0, outputData, outputDims);
 
-    conv1dTransposedForward(&r.layer, r.input, r.output);
+    conv1dTransposedForward(&r.layer, r.input, r.output, NULL);
 
     float lossGradData[1 * 4 * 5];
     for (size_t i = 0; i < 20; i++) {
@@ -358,7 +358,7 @@ void testConv1dTransposedBackwardGroupsDepthwise() {
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    conv1dTransposedBackward(&r.layer, r.input, lossGrad, propLoss);
+    conv1dTransposedBackward(&r.layer, r.input, lossGrad, propLoss, NULL);
 
     for (size_t i = 0; i < expectedPropLoss_convT1d_groupsDepthwise_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedPropLoss_convT1d_groupsDepthwise[i],
@@ -382,7 +382,7 @@ void testConv1dTransposedForwardGroupsGrouped() {
     convT1dBuild(&r, weight_convT1d_groupsGrouped, weightDims, bias_convT1d_groupsGrouped, biasDims,
                  1, input_convT1d_groupsGrouped, inputDims, 2, 1, 1, 2, 0, outputData, outputDims);
 
-    conv1dTransposedForward(&r.layer, r.input, r.output);
+    conv1dTransposedForward(&r.layer, r.input, r.output, NULL);
 
     for (size_t i = 0; i < expectedForward_convT1d_groupsGrouped_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedForward_convT1d_groupsGrouped[i],
@@ -401,7 +401,7 @@ void testConv1dTransposedBackwardGroupsGrouped() {
     convT1dBuild(&r, weight_convT1d_groupsGrouped, weightDims, bias_convT1d_groupsGrouped, biasDims,
                  1, input_convT1d_groupsGrouped, inputDims, 2, 1, 1, 2, 0, outputData, outputDims);
 
-    conv1dTransposedForward(&r.layer, r.input, r.output);
+    conv1dTransposedForward(&r.layer, r.input, r.output, NULL);
 
     float lossGradData[1 * 8 * 5];
     for (size_t i = 0; i < 40; i++) {
@@ -411,7 +411,7 @@ void testConv1dTransposedBackwardGroupsGrouped() {
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    conv1dTransposedBackward(&r.layer, r.input, lossGrad, propLoss);
+    conv1dTransposedBackward(&r.layer, r.input, lossGrad, propLoss, NULL);
 
     for (size_t i = 0; i < expectedPropLoss_convT1d_groupsGrouped_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedPropLoss_convT1d_groupsGrouped[i],
@@ -441,7 +441,7 @@ void testConv1dTransposedForwardStride2WithOutputPadding() {
                  input_convT1d_stride2WithOutputPadding, inputDims, 2, 1, 2, 1, 1, outputData,
                  outputDims);
 
-    conv1dTransposedForward(&r.layer, r.input, r.output);
+    conv1dTransposedForward(&r.layer, r.input, r.output, NULL);
 
     for (size_t i = 0; i < expectedForward_convT1d_stride2WithOutputPadding_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedForward_convT1d_stride2WithOutputPadding[i],
@@ -460,7 +460,7 @@ void testConv1dTransposedForwardDilation2() {
     convT1dBuild(&r, weight_convT1d_dilation2, weightDims, NULL, NULL, 0, input_convT1d_dilation2,
                  inputDims, 2, 2, 1, 1, 0, outputData, outputDims);
 
-    conv1dTransposedForward(&r.layer, r.input, r.output);
+    conv1dTransposedForward(&r.layer, r.input, r.output, NULL);
 
     for (size_t i = 0; i < expectedForward_convT1d_dilation2_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedForward_convT1d_dilation2[i],
@@ -533,7 +533,7 @@ void testConv1dTransposedForwardSymSingleChannelWithBias() {
     lc.conv1dTransposed = &cfg;
     layer.config = &lc;
 
-    conv1dTransposedForward(&layer, input, output);
+    conv1dTransposedForward(&layer, input, output, NULL);
 
     int32_t *m = (int32_t *)output->data;
     for (size_t i = 0; i < expectedForward_convT1dSym_singleChannelWithBias_len; i++) {
@@ -572,7 +572,7 @@ void testConv1dTransposedForwardSymStride2() {
     lc.conv1dTransposed = &cfg;
     layer.config = &lc;
 
-    conv1dTransposedForward(&layer, input, output);
+    conv1dTransposedForward(&layer, input, output, NULL);
 
     int32_t *m = (int32_t *)output->data;
     for (size_t i = 0; i < expectedForward_convT1dSym_stride2Sym_len; i++) {
@@ -613,7 +613,7 @@ void testConv1dTransposedForwardSymStride2OutputPadding() {
     lc.conv1dTransposed = &cfg;
     layer.config = &lc;
 
-    conv1dTransposedForward(&layer, input, output);
+    conv1dTransposedForward(&layer, input, output, NULL);
 
     int32_t *m = (int32_t *)output->data;
     for (size_t i = 0; i < expectedForward_convT1dSym_stride2OutputPaddingSym_len; i++) {
@@ -740,7 +740,7 @@ void testConv1dTransposedBackwardSymStride2OutputPadding() {
     lc.conv1dTransposed = &cfg;
     layer.config = &lc;
 
-    conv1dTransposedBackward(&layer, input, lossGrad, propLoss);
+    conv1dTransposedBackward(&layer, input, lossGrad, propLoss, NULL);
 
     /* propLoss (dx) */
     int32_t *dx = (int32_t *)propLoss->data;
@@ -803,7 +803,7 @@ void testConv1dTransposedBackwardSymGroupsGrouped() {
     lc.conv1dTransposed = &cfg;
     layer.config = &lc;
 
-    conv1dTransposedBackward(&layer, input, lossGrad, propLoss);
+    conv1dTransposedBackward(&layer, input, lossGrad, propLoss, NULL);
 
     /* propLoss (dx) */
     int32_t *dx = (int32_t *)propLoss->data;
@@ -864,7 +864,7 @@ void testConv1dTransposedBackwardSymDilation2() {
     lc.conv1dTransposed = &cfg;
     layer.config = &lc;
 
-    conv1dTransposedBackward(&layer, input, lossGrad, propLoss);
+    conv1dTransposedBackward(&layer, input, lossGrad, propLoss, NULL);
 
     /* propLoss (dx) */
     int32_t *dx = (int32_t *)propLoss->data;
@@ -923,7 +923,8 @@ void testConv1dTransposedWeightGradFloatRejectsBatchMismatch() {
     size_t propDims[] = {2, 1, 3};
     tensor_t *propLoss = makeFloatTensor(propDims, 3, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedBackward(&r.layer, r.input, lossGrad, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(
+        conv1dTransposedBackward(&r.layer, r.input, lossGrad, propLoss, NULL));
 }
 
 void testConv1dTransposedWeightGradFloatRejectsOutChannelMismatch() {
@@ -943,7 +944,8 @@ void testConv1dTransposedWeightGradFloatRejectsOutChannelMismatch() {
     size_t propDims[] = {1, 1, 3};
     tensor_t *propLoss = makeFloatTensor(propDims, 3, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedBackward(&r.layer, r.input, lossGrad, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(
+        conv1dTransposedBackward(&r.layer, r.input, lossGrad, propLoss, NULL));
 }
 
 void testConv1dTransposedWeightGradSymRejectsBatchMismatch() {
@@ -1004,7 +1006,7 @@ void testConv1dTransposedWeightGradFloatRejectsInputChannelMismatch() {
     float lossData[4] = {0};
     tensor_t *lossGrad = makeFloatTensor(lossDims, 3, lossData);
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedBackward(&r.layer, r.input, lossGrad, NULL));
+    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedBackward(&r.layer, r.input, lossGrad, NULL, NULL));
 }
 
 void testConv1dTransposedWeightGradSymRejectsInputChannelMismatch() {
@@ -1048,7 +1050,8 @@ void testConv1dTransposedBiasGradFloatRejectsOutChannelMismatch() {
     size_t propDims[] = {1, 1, 3};
     tensor_t *propLoss = makeFloatTensor(propDims, 3, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedBackward(&r.layer, r.input, lossGrad, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(
+        conv1dTransposedBackward(&r.layer, r.input, lossGrad, propLoss, NULL));
 }
 
 void testConv1dTransposedBiasGradSymRejectsOutChannelMismatch() {
@@ -1132,8 +1135,8 @@ void testConv1dTransposedBackwardFrozenTwinPropLossIdenticalGradsZero(void) {
     tensor_t *propLossTrainable = makeFloatTensor(inputDims, 3, NULL);
     tensor_t *propLossFrozen = makeFloatTensor(inputDims, 3, NULL);
 
-    conv1dTransposedBackward(&rA.layer, rA.input, lossGrad, propLossTrainable);
-    conv1dTransposedBackward(&rB.layer, rB.input, lossGrad, propLossFrozen);
+    conv1dTransposedBackward(&rA.layer, rA.input, lossGrad, propLossTrainable, NULL);
+    conv1dTransposedBackward(&rB.layer, rB.input, lossGrad, propLossFrozen, NULL);
 
     size_t numWeights = calcNumberOfElementsByTensor(rA.weights->param);
     size_t numBias = calcNumberOfElementsByTensor(rA.bias->param);
@@ -1189,7 +1192,7 @@ void testConv1dTransposedBackwardFrozenFactoryLayerRunsWithoutGradBuffers(void) 
                                                    1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f});
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    conv1dTransposedBackward(layer, input, lossGrad, propLoss);
+    conv1dTransposedBackward(layer, input, lossGrad, propLoss, NULL);
 
     bool gradStillNull = layer->config->conv1dTransposed->weights->grad == NULL;
     freeConv1dTransposedLayer(layer);
@@ -1226,8 +1229,8 @@ void testConv1dTransposedBackwardNullPropLossComputesGradsOnly(void) {
     tensor_t *lossGrad = makeFloatTensor(outputDims, 3, (float[]){1.f, 2.f, 3.f, 4.f});
     tensor_t *propLossA = makeFloatTensor(inputDims, 3, NULL);
 
-    conv1dTransposedBackward(&rA.layer, rA.input, lossGrad, propLossA);
-    conv1dTransposedBackward(&rB.layer, rB.input, lossGrad, NULL);
+    conv1dTransposedBackward(&rA.layer, rA.input, lossGrad, propLossA, NULL);
+    conv1dTransposedBackward(&rB.layer, rB.input, lossGrad, NULL, NULL);
 
     size_t numWeights = calcNumberOfElementsByTensor(rA.weights->param);
     size_t numBias = calcNumberOfElementsByTensor(rA.bias->param);
@@ -1382,7 +1385,7 @@ void testConvT1dForwardGroupedPerChannelMatchesGold(void) {
                            (size_t)kConvTGroupedOutLen};
     tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
 
-    conv1dTransposedForward(&f.layer, f.input, output);
+    conv1dTransposedForward(&f.layer, f.input, output, NULL);
 
     float *captured = (float *)output->data;
     for (size_t i = 0; i < kConvTPerChannelOutMantissas_len; i++) {
@@ -1401,7 +1404,7 @@ void testConvT1dForwardGroupedGeneralMatchesGold(void) {
                            (size_t)kConvTGroupedOutLen};
     tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
 
-    conv1dTransposedForward(&f.layer, f.input, output);
+    conv1dTransposedForward(&f.layer, f.input, output, NULL);
 
     float *captured = (float *)output->data;
     for (size_t i = 0; i < kConvTGeneralOutMantissas_len; i++) {
@@ -1435,7 +1438,7 @@ void testConvT1dForwardGroupedEqualScalesBitIdenticalToScalar(void) {
     size_t outputDims[] = {(size_t)kConvTGroupedBatch, (size_t)kConvTGroupedOutChannels,
                            (size_t)kConvTGroupedOutLen};
     tensor_t *groupedOutput = makeFloatTensor(outputDims, 3, NULL);
-    conv1dTransposedForward(&grouped.layer, grouped.input, groupedOutput);
+    conv1dTransposedForward(&grouped.layer, grouped.input, groupedOutput, NULL);
 
     size_t weightDims[] = {(size_t)kConvTGroupedInChannels, (size_t)kConvTGroupedOutChannels,
                            (size_t)kConvTGroupedKernelSize};
@@ -1465,7 +1468,7 @@ void testConvT1dForwardGroupedEqualScalesBitIdenticalToScalar(void) {
     scalarLayer.config = &scalarLc;
 
     tensor_t *scalarOutput = makeFloatTensor(outputDims, 3, NULL);
-    conv1dTransposedForward(&scalarLayer, scalarInput, scalarOutput);
+    conv1dTransposedForward(&scalarLayer, scalarInput, scalarOutput, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT_ARRAY((float *)scalarOutput->data, (float *)groupedOutput->data,
                                   kConvTPerChannelOutMantissas_len);
@@ -1498,7 +1501,7 @@ void testConvT1dForwardGroupedFloatPathAgreesWithinTolerance(void) {
                            (size_t)kConvTGroupedOutLen};
     tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
 
-    conv1dTransposedForward(&f.layer, f.input, output);
+    conv1dTransposedForward(&f.layer, f.input, output, NULL);
 
     float *captured = (float *)output->data;
     const float tolerance =
@@ -1541,7 +1544,7 @@ static tensor_t *runGroupedConvTDxBackward(convTGroupedFixture_t *f, quantizatio
                              (size_t)kConvTGroupedInputLength};
     tensor_t *propLoss = makeFloatTensor(propLossDims, 3, NULL);
 
-    conv1dTransposedBackward(&f->layer, f->input, lossGrad, propLoss);
+    conv1dTransposedBackward(&f->layer, f->input, lossGrad, propLoss, NULL);
     return propLoss;
 }
 
@@ -1633,7 +1636,7 @@ void testConvT1dBackwardGroupedDxEqualScalesBitIdenticalToScalar(void) {
     tensor_t *lossGrad =
         buildSymInt32TensorExact(3, lossDims, kConvTDxLossMantissas, kConvTDxLossScale);
     tensor_t *scalarPropLoss = makeFloatTensor(inputDims, 3, NULL);
-    conv1dTransposedBackward(&scalarLayer, scalarInput, lossGrad, scalarPropLoss);
+    conv1dTransposedBackward(&scalarLayer, scalarInput, lossGrad, scalarPropLoss, NULL);
 
     bool nonDegenerate = false;
     for (size_t i = 0; i < kConvTDxPerChannelOutMantissas_len; i++) {
@@ -1744,12 +1747,12 @@ void testConvT1dForwardGroupedAsymBitIdenticalToSymGroupedTwin(void) {
     size_t outputDims[] = {(size_t)kConvTGroupedBatch, (size_t)kConvTGroupedOutChannels,
                            (size_t)kConvTGroupedOutLen};
     tensor_t *symOutput = makeFloatTensor(outputDims, 3, NULL);
-    conv1dTransposedForward(&symF.layer, symF.input, symOutput);
+    conv1dTransposedForward(&symF.layer, symF.input, symOutput, NULL);
 
     convTGroupedFixture_t asymF;
     buildGroupedAsymConvTTwinFixture(&asymF, testQ);
     tensor_t *asymOutput = makeFloatTensor(outputDims, 3, NULL);
-    conv1dTransposedForward(&asymF.layer, asymF.input, asymOutput);
+    conv1dTransposedForward(&asymF.layer, asymF.input, asymOutput, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT_ARRAY((float *)symOutput->data, (float *)asymOutput->data,
                                   kConvTPerChannelOutMantissas_len);
@@ -1811,7 +1814,7 @@ void testConv1dTransposedForwardBfpNativeMatchesKernelGold(void) {
         ((float *)output->data)[i] = 777.0f;
     }
 
-    conv1dTransposedForward(&layer, input, output);
+    conv1dTransposedForward(&layer, input, output, NULL);
 
     float captured[24]; /* kConvTBfpBatch * kConvTBfpOutChannels * kConvTBfpOutLen */
     memcpy(captured, output->data, sizeof(captured));
@@ -1872,7 +1875,7 @@ void testConv1dTransposedForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer(void)
         layer.config = &lc;
 
         tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
-        conv1dTransposedForward(&layer, input, output);
+        conv1dTransposedForward(&layer, input, output, NULL);
         memcpy(symOut, output->data, sizeof(symOut));
 
         freeParameter(weights);
@@ -1913,7 +1916,7 @@ void testConv1dTransposedForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer(void)
 
         tensor_t *input = makeFloatTensor(inputDims, 3, xVals);
         tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
-        conv1dTransposedForward(&layer, input, output);
+        conv1dTransposedForward(&layer, input, output, NULL);
         memcpy(bfpOut, output->data, sizeof(bfpOut));
 
         freeParameter(weights);
@@ -1955,7 +1958,7 @@ void testConv1dTransposedForwardBfpRejectsFloat32Weights(void) {
                            (size_t)kConvTBfpOutLen};
     tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedForward(&layer, input, output));
+    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedForward(&layer, input, output, NULL));
 
     freeParameter(weights);
     freeTensor(output);
@@ -2072,7 +2075,7 @@ void testConvT1dBackwardBfpWeightGradMatchesGold(void) {
     tensor_t *forwardInput = buildBfpConvTBwdForwardInput();
     tensor_t *lossGrad = buildBfpConvTBwdLossGrad();
 
-    conv1dTransposedBackward(convT, forwardInput, lossGrad, NULL);
+    conv1dTransposedBackward(convT, forwardInput, lossGrad, NULL, NULL);
 
     float captured[12]; /* kConvTBfpInChannels * kConvTBfpOutChannels * kConvTBfpKernelSize */
     memcpy(captured, convT->config->conv1dTransposed->weights->grad->data, sizeof(captured));
@@ -2099,7 +2102,7 @@ void testConvT1dBackwardBfpWeightGradDilation2MatchesGold(void) {
     tensor_t *forwardInput = buildBfpConvTBwdForwardInput();
     tensor_t *lossGrad = buildBfpConvTBwdLossGradDil();
 
-    conv1dTransposedBackward(convT, forwardInput, lossGrad, NULL);
+    conv1dTransposedBackward(convT, forwardInput, lossGrad, NULL, NULL);
 
     float captured[12];
     memcpy(captured, convT->config->conv1dTransposed->weights->grad->data, sizeof(captured));
@@ -2177,7 +2180,7 @@ void testConvT1dBackwardBfpWeightGradGroupedMatchesGold(void) {
                              (uint8_t)kConvTBfpGrpMantissaBits, (uint8_t)kConvTBfpGrpExponentBits,
                              (size_t)kConvTBfpGrpGyNumGroups, (size_t)kConvTBfpGrpGyGroupSize);
 
-    conv1dTransposedBackward(convT, forwardInput, lossGrad, NULL);
+    conv1dTransposedBackward(convT, forwardInput, lossGrad, NULL, NULL);
 
     /* kConvTBfpGrpInChannels * (kConvTBfpGrpOutChannels / kConvTBfpGrpGroups)
      * * kConvTBfpGrpKernelSize */
@@ -2201,7 +2204,7 @@ void testConvT1dBackwardBfpBiasGradMatchesGold(void) {
     tensor_t *forwardInput = buildBfpConvTBwdForwardInput();
     tensor_t *lossGrad = buildBfpConvTBwdLossGrad();
 
-    conv1dTransposedBackward(convT, forwardInput, lossGrad, NULL);
+    conv1dTransposedBackward(convT, forwardInput, lossGrad, NULL, NULL);
 
     float captured[2]; /* kConvTBfpOutChannels */
     memcpy(captured, convT->config->conv1dTransposed->bias->grad->data, sizeof(captured));
@@ -2232,7 +2235,7 @@ void testConvT1dBackwardBfpDxMatchesGold(void) {
         ((float *)propLoss->data)[i] = 777.0f;
     }
 
-    conv1dTransposedBackward(convT, forwardInput, lossGrad, propLoss);
+    conv1dTransposedBackward(convT, forwardInput, lossGrad, propLoss, NULL);
 
     float captured[8]; /* kConvTBfpBatch * kConvTBfpInChannels * kConvTBfpBwdInputLength */
     memcpy(captured, propLoss->data, sizeof(captured));
@@ -2290,7 +2293,7 @@ void testConvT1dBackwardBfpDxPowerOfTwoBitIdenticalToGroupedSym(void) {
         tensor_t *lossGrad = buildSymInt32TensorExact(3, lossDims, kConvTDxLossMantissas, 0.5f);
         tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-        conv1dTransposedBackward(&layer, input, lossGrad, propLoss);
+        conv1dTransposedBackward(&layer, input, lossGrad, propLoss, NULL);
         memcpy(symOut, propLoss->data, sizeof(symOut));
 
         freeParameter(weights);
@@ -2341,7 +2344,7 @@ void testConvT1dBackwardBfpDxPowerOfTwoBitIdenticalToGroupedSym(void) {
         freeQuantization(perTensorTemplate);
         tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-        conv1dTransposedBackward(&layer, input, lossGrad, propLoss);
+        conv1dTransposedBackward(&layer, input, lossGrad, propLoss, NULL);
         memcpy(bfpOut, propLoss->data, sizeof(bfpOut));
 
         freeParameter(weights);
@@ -2414,7 +2417,7 @@ void testConvT1dBackwardBfpDxConvGroups2MatchesGold(void) {
         ((float *)propLoss->data)[i] = 777.0f;
     }
 
-    conv1dTransposedBackward(convT, forwardInput, lossGrad, propLoss);
+    conv1dTransposedBackward(convT, forwardInput, lossGrad, propLoss, NULL);
 
     float captured[40]; /* kBfpConvTBatch * kBfpConvTG2InChannels * kBfpConvTInputLength */
     memcpy(captured, propLoss->data, sizeof(captured));

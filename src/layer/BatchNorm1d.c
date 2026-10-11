@@ -343,7 +343,8 @@ static void bnForwardKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, ten
     }
 }
 
-void batchNorm1dForward(layer_t *layer, tensor_t *input, tensor_t *output) {
+void batchNorm1dForward(layer_t *layer, tensor_t *input, tensor_t *output,
+                        const layerExec_t *exec) {
     batchNorm1dConfig_t *cfg = layer->config->batchNorm1d;
     bnValidateInput(cfg, input, "forward input");
     bnValidateOutputMatchesInput(input, output);
@@ -404,8 +405,8 @@ static void bnRequireSameShape(const tensor_t *ref, const tensor_t *t, const cha
     }
 }
 
-void batchNorm1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss,
-                         tensor_t *propLoss) {
+void batchNorm1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss,
+                         const layerExec_t *exec) {
     batchNorm1dConfig_t *cfg = layer->config->batchNorm1d;
     bnValidateInput(cfg, forwardInput, "backward input");
     bnRequireSameShape(forwardInput, loss, "loss");

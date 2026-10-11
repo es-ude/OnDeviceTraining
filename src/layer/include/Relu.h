@@ -7,6 +7,7 @@
 #include "Tensor.h"
 
 typedef struct layer layer_t;
+typedef struct layerExec layerExec_t;
 
 typedef struct reluConfig {
     arithmetic_t forwardMath;
@@ -18,11 +19,12 @@ typedef struct reluConfig {
 
 void reluForwardFloat(tensor_t *input, tensor_t *output);
 void reluForwardBfp(tensor_t *input, tensor_t *output);
-void reluForward(layer_t *reluLayer, tensor_t *input, tensor_t *output);
+void reluForward(layer_t *reluLayer, tensor_t *input, tensor_t *output, const layerExec_t *exec);
 
 void reluBackwardFloat(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss);
 void reluBackwardBfp(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss);
-void reluBackward(layer_t *reluLayer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss);
+void reluBackward(layer_t *reluLayer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss,
+                  const layerExec_t *exec);
 
 void reluCalcOutputShape(layer_t *reluLayer, shape_t *inputShape, shape_t *outputShape);
 

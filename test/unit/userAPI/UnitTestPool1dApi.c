@@ -265,13 +265,13 @@ void testMaxPool1dArgmaxGrowsOnceAndTracksBatch(void) {
 
     tensor_t *in1 = buildPoolTensor(1, 1, 4, POOL_ROWS);
     tensor_t *out1 = buildPoolTensor(1, 1, 2, NULL);
-    maxPool1dForward(layer, in1, out1);
+    maxPool1dForward(layer, in1, out1, NULL);
     size_t batchAfterB1 = argmax->shape->dimensions[0];
     size_t capacityAfterB1 = cfg->argmaxCapacity;
 
     tensor_t *in4 = buildPoolTensor(4, 1, 4, POOL_ROWS);
     tensor_t *out4 = buildPoolTensor(4, 1, 2, NULL);
-    maxPool1dForward(layer, in4, out4);
+    maxPool1dForward(layer, in4, out4, NULL);
     size_t batchAfterB4 = argmax->shape->dimensions[0];
     size_t capacityAfterB4 = cfg->argmaxCapacity;
     const uint8_t *grownData = argmax->data;
@@ -282,7 +282,7 @@ void testMaxPool1dArgmaxGrowsOnceAndTracksBatch(void) {
     tensor_t *in2 = buildPoolTensor(2, 1, 4, POOL_ROWS + 4);
     memcpy(in2->data + 4 * sizeof(float), POOL_ROWS + 12, 4 * sizeof(float));
     tensor_t *out2 = buildPoolTensor(2, 1, 2, NULL);
-    maxPool1dForward(layer, in2, out2);
+    maxPool1dForward(layer, in2, out2, NULL);
     size_t batchAfterB2 = argmax->shape->dimensions[0];
     bool b2KeptBuffer = argmax->data == grownData;
     int32_t argmaxB2[4];
@@ -292,12 +292,12 @@ void testMaxPool1dArgmaxGrowsOnceAndTracksBatch(void) {
      * lossGrad: a row mix-up moves values, not just positions). */
     tensor_t *lossGrad = buildPoolTensor(2, 1, 2, (float[]){1.0f, 2.0f, 3.0f, 4.0f});
     tensor_t *propLoss = buildPoolTensor(2, 1, 4, NULL);
-    maxPool1dBackward(layer, in2, lossGrad, propLoss);
+    maxPool1dBackward(layer, in2, lossGrad, propLoss, NULL);
     float gotPropLoss[8];
     memcpy(gotPropLoss, propLoss->data, sizeof gotPropLoss);
 
     /* Back to B=4: still within capacity -> same buffer again. */
-    maxPool1dForward(layer, in4, out4);
+    maxPool1dForward(layer, in4, out4, NULL);
     bool b4AgainKeptBuffer = argmax->data == grownData;
     size_t capacityAfterB4Again = cfg->argmaxCapacity;
 
@@ -343,7 +343,7 @@ void testMaxPool1dArgmaxGrowthReturnsTheOldBlock(void) {
     size_t capacityBefore = cfg->argmaxCapacity;
 
     size_t before = memProfileMark();
-    maxPool1dForward(layer, in4, out4);
+    maxPool1dForward(layer, in4, out4, NULL);
     size_t after = memProfileMark();
     size_t capacityAfter = cfg->argmaxCapacity;
 
@@ -408,7 +408,7 @@ void testMaxPool1dArgmaxGrowthRejectsSizeOverflow(void) {
     tensor_t input = {.data = (uint8_t *)inData, .shape = &inShape, .quantization = &floatQ};
     tensor_t output = {.data = (uint8_t *)outData, .shape = &outShape, .quantization = &floatQ};
 
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(layer, &input, &output));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(layer, &input, &output, NULL));
 
     freeMaxPool1dLayer(layer);
     freeQuantization(q);
@@ -439,18 +439,18 @@ void testMaxPool1dArgmaxAdoptsASwappedInBuffer(void) {
     tensor_t *out1 = buildPoolTensor(1, 1, 2, NULL);
     tensor_t *in4 = buildPoolTensor(4, 1, 4, POOL_ROWS);
     tensor_t *out4 = buildPoolTensor(4, 1, 2, NULL);
-    maxPool1dForward(layer, in4, out4); /* the factory argmax grows to capacity 8 */
+    maxPool1dForward(layer, in4, out4, NULL); /* the factory argmax grows to capacity 8 */
 
     tensor_t *swapped = buildInt32PoolTensor(1, 1, 2);
     uintptr_t swappedOriginalAddr = (uintptr_t)swapped->data;
     cfg->argmaxIndices = swapped;
     /* B = 1 fits the swapped buffer: adopted at its 2 elements, no growth. */
-    maxPool1dForward(layer, in1, out1);
+    maxPool1dForward(layer, in1, out1, NULL);
     size_t capacityAtB1 = cfg->argmaxCapacity;
     bool trackedAtB1 = cfg->argmaxCapacityData == swapped->data;
     bool keptAtB1 = (uintptr_t)swapped->data == swappedOriginalAddr;
     /* B = 4 exceeds the adopted 2 elements: the swapped argmax grows. */
-    maxPool1dForward(layer, in4, out4);
+    maxPool1dForward(layer, in4, out4, NULL);
     bool grewAtB4 = (uintptr_t)swapped->data != swappedOriginalAddr;
     size_t capacityAtB4 = cfg->argmaxCapacity;
     bool trackedAtB4 = cfg->argmaxCapacityData == swapped->data;
@@ -501,7 +501,7 @@ void testMaxPool1dArgmaxGrowthFailsFastWhenReservationFails(void) {
     tensor_t input = {.data = (uint8_t *)inData, .shape = &inShape, .quantization = &floatQ};
     tensor_t output = {.data = (uint8_t *)outData, .shape = &outShape, .quantization = &floatQ};
 
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(layer, &input, &output));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(layer, &input, &output, NULL));
 
     freeMaxPool1dLayer(layer);
     freeQuantization(q);

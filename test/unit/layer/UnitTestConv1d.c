@@ -110,7 +110,7 @@ static conv1dRunResult_t conv1dRunForward(conv1dFixtureSetup_t s, float *outputB
     r.input = makeFloatTensor(s.inputDims, 3, s.inputData);
     r.output = makeFloatTensor(s.outputDims, 3, NULL);
     (void)outputBuf;
-    conv1dForward(r.layer, r.input, r.output);
+    conv1dForward(r.layer, r.input, r.output, NULL);
 
     return r;
 }
@@ -167,7 +167,7 @@ void testConv1dForwardMultiChannelWithBias() {
     size_t outputDims[] = {1, 2, 3};
     tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
 
-    conv1dForward(conv1d, input, output);
+    conv1dForward(conv1d, input, output, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expectedForward_conv1d_multiChannelWithBias, output->data,
                                   expectedForward_conv1d_multiChannelWithBias_len);
@@ -191,7 +191,7 @@ void testConv1dForwardSingleChannelSingleBatch() {
     size_t outputDims[] = {1, 1, 3};
     tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
 
-    conv1dForward(conv1d, input, output);
+    conv1dForward(conv1d, input, output, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expectedForward_conv1d_singleChannelSingleBatch, output->data,
                                   expectedForward_conv1d_singleChannelSingleBatch_len);
@@ -219,7 +219,7 @@ void testConv1dBackwardSingleChannelWithBias() {
     // forward (sanity — also fills output)
     size_t outputDims[] = {1, 1, 3};
     tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
-    conv1dForward(conv1d, input, output);
+    conv1dForward(conv1d, input, output, NULL);
 
     // lossGrad = ones (matches what the generator used for autograd)
     float lossGradData[3];
@@ -231,7 +231,7 @@ void testConv1dBackwardSingleChannelWithBias() {
     // propLoss buffer caller-owned, pre-zeroed
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    conv1dBackward(conv1d, input, lossGrad, propLoss);
+    conv1dBackward(conv1d, input, lossGrad, propLoss, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expectedPropLoss_conv1d_singleChannelWithBias, propLoss->data,
                                   expectedPropLoss_conv1d_singleChannelWithBias_len);
@@ -258,7 +258,7 @@ void testConv1dBackwardSamePaddingSymmetric() {
 
     size_t outputDims[] = {1, 1, 5};
     tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
-    conv1dForward(conv1d, input, output);
+    conv1dForward(conv1d, input, output, NULL);
 
     float lossGradData[5];
     for (size_t i = 0; i < 5; i++) {
@@ -268,7 +268,7 @@ void testConv1dBackwardSamePaddingSymmetric() {
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    conv1dBackward(conv1d, input, lossGrad, propLoss);
+    conv1dBackward(conv1d, input, lossGrad, propLoss, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expectedPropLoss_conv1d_samePaddingSymmetric, propLoss->data,
                                   expectedPropLoss_conv1d_samePaddingSymmetric_len);
@@ -364,7 +364,7 @@ void testConv1dBackwardGroupsDepthwise() {
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    conv1dBackward(r.layer, r.input, lossGrad, propLoss);
+    conv1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
 
     for (size_t i = 0; i < expectedPropLoss_conv1d_groupsDepthwise_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedPropLoss_conv1d_groupsDepthwise[i],
@@ -436,7 +436,7 @@ void testConv1dBackwardGroupsGrouped() {
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    conv1dBackward(r.layer, r.input, lossGrad, propLoss);
+    conv1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
 
     for (size_t i = 0; i < expectedPropLoss_conv1d_groupsGrouped_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedPropLoss_conv1d_groupsGrouped[i],
@@ -539,7 +539,7 @@ void testConv1dBackwardSamePaddingAsymmetric() {
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    conv1dBackward(r.layer, r.input, lossGrad, propLoss);
+    conv1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
 
     for (size_t i = 0; i < expectedPropLoss_conv1d_samePaddingAsymmetric_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedPropLoss_conv1d_samePaddingAsymmetric[i],
@@ -611,7 +611,7 @@ void testConv1dBackwardSamePaddingWithGroups() {
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    conv1dBackward(r.layer, r.input, lossGrad, propLoss);
+    conv1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
 
     for (size_t i = 0; i < expectedPropLoss_conv1d_samePaddingWithGroups_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedPropLoss_conv1d_samePaddingWithGroups[i],
@@ -686,7 +686,7 @@ void testConv1dBackwardPointwise() {
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    conv1dBackward(r.layer, r.input, lossGrad, propLoss);
+    conv1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
 
     for (size_t i = 0; i < expectedPropLoss_conv1d_pointwise_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedPropLoss_conv1d_pointwise[i],
@@ -766,7 +766,7 @@ void testConv1dBackwardExplicitPadding() {
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    conv1dBackward(r.layer, r.input, lossGrad, propLoss);
+    conv1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
 
     for (size_t i = 0; i < expectedPropLoss_conv1d_explicitPadding_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedPropLoss_conv1d_explicitPadding[i],
@@ -810,7 +810,7 @@ void testConv1dForwardSymSingleChannelSingleBatch() {
     quantization_t *sq = quantizationInitSymInt32(HALF_AWAY);
     layer_t *conv1d = buildBorrowedConv1dLayer(weights, NULL, &kernel, sq);
 
-    conv1dForward(conv1d, input, output);
+    conv1dForward(conv1d, input, output, NULL);
 
     int32_t *m = (int32_t *)output->data;
     for (size_t i = 0; i < expectedForward_conv1dSym_singleChannelSingleBatch_len; i++) {
@@ -844,7 +844,7 @@ void testConv1dForwardSymSingleChannelWithBias() {
     quantization_t *sq = quantizationInitSymInt32(HALF_AWAY);
     layer_t *conv1d = buildBorrowedConv1dLayer(weights, bias, &kernel, sq);
 
-    conv1dForward(conv1d, input, output);
+    conv1dForward(conv1d, input, output, NULL);
 
     int32_t *m = (int32_t *)output->data;
     for (size_t i = 0; i < expectedForward_conv1dSym_singleChannelWithBias_len; i++) {
@@ -878,7 +878,7 @@ void testConv1dForwardSymPointwise() {
     quantization_t *sq = quantizationInitSymInt32(HALF_AWAY);
     layer_t *conv1d = buildBorrowedConv1dLayer(weights, bias, &kernel, sq);
 
-    conv1dForward(conv1d, input, output);
+    conv1dForward(conv1d, input, output, NULL);
 
     int32_t *m = (int32_t *)output->data;
     for (size_t i = 0; i < expectedForward_conv1dSym_pointwise_len; i++) {
@@ -912,7 +912,7 @@ void testConv1dForwardSymExplicitPadding() {
     quantization_t *sq = quantizationInitSymInt32(HALF_AWAY);
     layer_t *conv1d = buildBorrowedConv1dLayer(weights, bias, &kernel, sq);
 
-    conv1dForward(conv1d, input, output);
+    conv1dForward(conv1d, input, output, NULL);
 
     int32_t *m = (int32_t *)output->data;
     for (size_t i = 0; i < expectedForward_conv1dSym_explicitPadding_len; i++) {
@@ -1071,7 +1071,7 @@ void testConv1dBackwardSymExplicitPadding() {
     lc.conv1d = &cfg;
     layer.config = &lc;
 
-    conv1dBackward(&layer, input, lossGrad, propLoss);
+    conv1dBackward(&layer, input, lossGrad, propLoss, NULL);
 
     /* propLoss (dx) */
     int32_t *dx = (int32_t *)propLoss->data;
@@ -1132,7 +1132,7 @@ void testConv1dBackwardSymGroupsGrouped() {
     lc.conv1d = &cfg;
     layer.config = &lc;
 
-    conv1dBackward(&layer, input, lossGrad, propLoss);
+    conv1dBackward(&layer, input, lossGrad, propLoss, NULL);
 
     /* propLoss (dx) */
     int32_t *dx = (int32_t *)propLoss->data;
@@ -1191,7 +1191,7 @@ void testConv1dBackwardSymStrideDilation() {
     lc.conv1d = &cfg;
     layer.config = &lc;
 
-    conv1dBackward(&layer, input, lossGrad, propLoss);
+    conv1dBackward(&layer, input, lossGrad, propLoss, NULL);
 
     /* propLoss (dx) */
     int32_t *dx = (int32_t *)propLoss->data;
@@ -1263,7 +1263,7 @@ void testConv1dWeightGradFloatRejectsBatchMismatch() {
     size_t propDims[] = {2, 1, 5};
     tensor_t *propLoss = makeFloatTensor(propDims, 3, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dBackward(r.layer, r.input, lossGrad, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(conv1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
 }
 
 void testConv1dWeightGradFloatRejectsOutChannelMismatch() {
@@ -1297,7 +1297,7 @@ void testConv1dWeightGradFloatRejectsOutChannelMismatch() {
     size_t propDims[] = {1, 1, 5};
     tensor_t *propLoss = makeFloatTensor(propDims, 3, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dBackward(r.layer, r.input, lossGrad, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(conv1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
 }
 
 void testConv1dWeightGradSymRejectsBatchMismatch() {
@@ -1363,7 +1363,7 @@ void testConv1dWeightGradFloatRejectsInputChannelMismatch() {
     float lossData[8] = {0};
     tensor_t *lossGrad = makeFloatTensor(lossDims, 3, lossData);
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dBackward(layer, input, lossGrad, NULL));
+    ASSERT_EXITS_WITH_FAILURE(conv1dBackward(layer, input, lossGrad, NULL, NULL));
 }
 
 void testConv1dWeightGradSymRejectsInputChannelMismatch() {
@@ -1413,7 +1413,7 @@ void testConv1dBiasGradFloatRejectsOutChannelMismatch() {
     size_t propDims[] = {1, 1, 5};
     tensor_t *propLoss = makeFloatTensor(propDims, 3, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dBackward(layer, input, lossGrad, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(conv1dBackward(layer, input, lossGrad, propLoss, NULL));
 }
 
 void testConv1dBiasGradSymRejectsOutChannelMismatch() {
@@ -1508,8 +1508,8 @@ void testConv1dBackwardFrozenTwinPropLossIdenticalGradsZero(void) {
     tensor_t *propLossTrainable = makeFloatTensor(inputDims, 3, NULL);
     tensor_t *propLossFrozen = makeFloatTensor(inputDims, 3, NULL);
 
-    conv1dBackward(trainableTwin, input, lossGrad, propLossTrainable);
-    conv1dBackward(frozenTwin, input, lossGrad, propLossFrozen);
+    conv1dBackward(trainableTwin, input, lossGrad, propLossTrainable, NULL);
+    conv1dBackward(frozenTwin, input, lossGrad, propLossFrozen, NULL);
 
     size_t numWeights = calcNumberOfElementsByTensor(weightParamA);
     size_t numBias = calcNumberOfElementsByTensor(biasParamA);
@@ -1564,7 +1564,7 @@ void testConv1dBackwardFrozenFactoryLayerRunsWithoutGradBuffers(void) {
         makeFloatTensor(outputDims, 3, (float[]){1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f});
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    conv1dBackward(layer, input, lossGrad, propLoss);
+    conv1dBackward(layer, input, lossGrad, propLoss, NULL);
 
     bool gradStillNull = layer->config->conv1d->weights->grad == NULL;
     freeConv1dLayer(layer);
@@ -1609,8 +1609,8 @@ void testConv1dBackwardNullPropLossComputesGradsOnly(void) {
     tensor_t *lossGrad = makeFloatTensor((size_t[]){1, 1, 3}, 3, (float[]){1.f, 1.f, 1.f});
     tensor_t *propLossA = makeFloatTensor(inputDims, 3, NULL);
 
-    conv1dBackward(twinA, input, lossGrad, propLossA);
-    conv1dBackward(twinB, input, lossGrad, NULL);
+    conv1dBackward(twinA, input, lossGrad, propLossA, NULL);
+    conv1dBackward(twinB, input, lossGrad, NULL, NULL);
 
     size_t numWeights = calcNumberOfElementsByTensor(weightParamA);
     size_t numBias = calcNumberOfElementsByTensor(biasParamA);
@@ -1750,7 +1750,7 @@ void testConv1dForwardGroupedPerChannelMatchesGold(void) {
                            (size_t)kPerChannelOutLen};
     tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
 
-    conv1dForward(conv1d, input, output);
+    conv1dForward(conv1d, input, output, NULL);
 
     float *captured = (float *)output->data;
     for (size_t i = 0; i < kPerChannelOutMantissas_len; i++) {
@@ -1770,7 +1770,7 @@ void testConv1dForwardGroupedGeneralMatchesGold(void) {
                            (size_t)kGeneralOutLen};
     tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
 
-    conv1dForward(conv1d, input, output);
+    conv1dForward(conv1d, input, output, NULL);
 
     float *captured = (float *)output->data;
     for (size_t i = 0; i < kGeneralOutMantissas_len; i++) {
@@ -1805,7 +1805,7 @@ void testConv1dForwardGroupedEqualScalesBitIdenticalToScalar(void) {
     size_t outputDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kConv1dGroupedOutChannels,
                            (size_t)kPerChannelOutLen};
     tensor_t *groupedOutput = makeFloatTensor(outputDims, 3, NULL);
-    conv1dForward(groupedLayer, groupedInput, groupedOutput);
+    conv1dForward(groupedLayer, groupedInput, groupedOutput, NULL);
 
     size_t weightDims[] = {(size_t)kConv1dGroupedOutChannels, (size_t)kConv1dGroupedInChannels,
                            (size_t)kConv1dGroupedKernelSize};
@@ -1828,7 +1828,7 @@ void testConv1dForwardGroupedEqualScalesBitIdenticalToScalar(void) {
     layer_t *scalarLayer = buildBorrowedConv1dLayer(scalarWeights, scalarBias, scalarKernel, testQ);
 
     tensor_t *scalarOutput = makeFloatTensor(outputDims, 3, NULL);
-    conv1dForward(scalarLayer, scalarInput, scalarOutput);
+    conv1dForward(scalarLayer, scalarInput, scalarOutput, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT_ARRAY((float *)scalarOutput->data, (float *)groupedOutput->data,
                                   kPerChannelOutMantissas_len);
@@ -1864,7 +1864,7 @@ void testConv1dForwardGroupedPerChannelFloatPathAgreesWithinTolerance(void) {
                            (size_t)kPerChannelOutLen};
     tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
 
-    conv1dForward(conv1d, input, output);
+    conv1dForward(conv1d, input, output, NULL);
 
     float *captured = (float *)output->data;
     const float tolerance = 1.0f * kPerChannelOutScale + 1e-6f;
@@ -1905,7 +1905,7 @@ static tensor_t *runGroupedConv1dDxBackward(quantization_t *q, size_t numGroups,
                              (size_t)kConv1dGroupedInputLength};
     tensor_t *propLoss = makeFloatTensor(propLossDims, 3, NULL);
 
-    conv1dBackward(conv1d, input, lossGrad, propLoss);
+    conv1dBackward(conv1d, input, lossGrad, propLoss, NULL);
     return propLoss;
 }
 
@@ -1985,7 +1985,7 @@ void testConv1dBackwardGroupedDxEqualScalesBitIdenticalToScalar(void) {
     tensor_t *lossGrad =
         buildSymInt32TensorExact(3, lossDims, kConv1dDxLossMantissas, kConv1dDxLossScale);
     tensor_t *scalarPropLoss = makeFloatTensor(inputDims, 3, NULL);
-    conv1dBackward(scalarLayer, scalarInput, lossGrad, scalarPropLoss);
+    conv1dBackward(scalarLayer, scalarInput, lossGrad, scalarPropLoss, NULL);
 
     bool nonDegenerate = false;
     for (size_t i = 0; i < kDxPerChannelOutMantissas_len; i++) {
@@ -2044,7 +2044,7 @@ void testConv1dForwardGroupedSamePaddingMatchesGold(void) {
                            (size_t)kSamePadOutLen};
     tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
 
-    conv1dForward(conv1d, input, output);
+    conv1dForward(conv1d, input, output, NULL);
 
     float *captured = (float *)output->data;
     for (size_t i = 0; i < kSamePadOutMantissas_len; i++) {
@@ -2108,7 +2108,7 @@ void testConv1dForwardGroupedConvGroupsMatchesGold(void) {
     size_t outputDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kCgOutChannels, (size_t)kCgOutLen};
     tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
 
-    conv1dForward(conv1d, input, output);
+    conv1dForward(conv1d, input, output, NULL);
 
     float *captured = (float *)output->data;
     for (size_t i = 0; i < kCgOutMantissas_len; i++) {
@@ -2187,12 +2187,12 @@ void testConv1dForwardGroupedAsymBitIdenticalToSymGroupedTwin(void) {
     size_t outputDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kConv1dGroupedOutChannels,
                            (size_t)kPerChannelOutLen};
     tensor_t *symOutput = makeFloatTensor(outputDims, 3, NULL);
-    conv1dForward(symLayer, symInput, symOutput);
+    conv1dForward(symLayer, symInput, symOutput, NULL);
 
     tensor_t *asymInput = NULL;
     layer_t *asymLayer = buildGroupedAsymConv1dTwinLayer(testQ, &asymInput);
     tensor_t *asymOutput = makeFloatTensor(outputDims, 3, NULL);
-    conv1dForward(asymLayer, asymInput, asymOutput);
+    conv1dForward(asymLayer, asymInput, asymOutput, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT_ARRAY((float *)symOutput->data, (float *)asymOutput->data,
                                   kPerChannelOutMantissas_len);
@@ -2219,7 +2219,7 @@ void testConv1dBackwardGroupedAsymDxBitIdenticalToSymGroupedTwin(void) {
     size_t propLossDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kConv1dGroupedInChannels,
                              (size_t)kConv1dGroupedInputLength};
     tensor_t *asymPropLoss = makeFloatTensor(propLossDims, 3, NULL);
-    conv1dBackward(asymLayer, asymInput, lossGrad, asymPropLoss);
+    conv1dBackward(asymLayer, asymInput, lossGrad, asymPropLoss, NULL);
 
     bool nonDegenerate = false;
     for (size_t i = 0; i < kDxPerChannelOutMantissas_len; i++) {
@@ -2288,7 +2288,7 @@ void testConv1dForwardBfpNativeMatchesKernelGold(void) {
         ((float *)output->data)[i] = 777.0f;
     }
 
-    conv1dForward(conv1d, input, output);
+    conv1dForward(conv1d, input, output, NULL);
 
     float captured[8]; /* kConvBfpBatch * kConvBfpOutChannels * kConvBfpOutLen */
     memcpy(captured, output->data, sizeof(captured));
@@ -2341,7 +2341,7 @@ void testConv1dForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer(void) {
         layer_t *conv1d = buildBorrowedConv1dLayer(weights, NULL, kernel, symQ);
 
         tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
-        conv1dForward(conv1d, input, output);
+        conv1dForward(conv1d, input, output, NULL);
         memcpy(symOut, output->data, sizeof(symOut));
 
         freeConv1dLayer(conv1d);
@@ -2376,7 +2376,7 @@ void testConv1dForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer(void) {
 
         tensor_t *input = makeFloatTensor(inputDims, 3, xVals);
         tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
-        conv1dForward(conv1d, input, output);
+        conv1dForward(conv1d, input, output, NULL);
         memcpy(bfpOut, output->data, sizeof(bfpOut));
 
         freeConv1dLayer(conv1d);
@@ -2410,7 +2410,7 @@ void testConv1dForwardBfpRejectsFloat32Weights(void) {
                            (size_t)kConvBfpOutLen};
     tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dForward(conv1d, input, output));
+    ASSERT_EXITS_WITH_FAILURE(conv1dForward(conv1d, input, output, NULL));
 
     freeConv1dLayer(conv1d);
     freeTensor(output);
@@ -2503,7 +2503,7 @@ void testConv1dBackwardBfpWeightGradMatchesGold(void) {
     tensor_t *forwardInput = buildBfpBwdForwardInput();
     tensor_t *lossGrad = buildBfpBwdLossGrad();
 
-    conv1dBackward(conv1d, forwardInput, lossGrad, NULL);
+    conv1dBackward(conv1d, forwardInput, lossGrad, NULL, NULL);
 
     float captured[12]; /* kConvBfpOutChannels * kConvBfpInChannels * kConvBfpKernelSize */
     memcpy(captured, conv1d->config->conv1d->weights->grad->data, sizeof(captured));
@@ -2525,7 +2525,7 @@ void testConv1dBackwardBfpBiasGradMatchesGold(void) {
     tensor_t *forwardInput = buildBfpBwdForwardInput();
     tensor_t *lossGrad = buildBfpBwdLossGrad();
 
-    conv1dBackward(conv1d, forwardInput, lossGrad, NULL);
+    conv1dBackward(conv1d, forwardInput, lossGrad, NULL, NULL);
 
     float captured[2]; /* kConvBfpOutChannels */
     memcpy(captured, conv1d->config->conv1d->bias->grad->data, sizeof(captured));
@@ -2558,7 +2558,7 @@ void testConv1dBackwardBfpDxMatchesGold(void) {
         ((float *)propLoss->data)[i] = 777.0f;
     }
 
-    conv1dBackward(conv1d, forwardInput, lossGrad, propLoss);
+    conv1dBackward(conv1d, forwardInput, lossGrad, propLoss, NULL);
 
     float captured[18]; /* kConvBfpBatch * kConvBfpInChannels * kConvBfpBwdInputLength */
     memcpy(captured, propLoss->data, sizeof(captured));
@@ -2624,7 +2624,7 @@ void testConv1dBackwardBfpWeightGradGroupedPaddedMatchesGold(void) {
                              (uint8_t)kConvBfpGrpMantissaBits, (uint8_t)kConvBfpGrpExponentBits,
                              (size_t)kConvBfpGrpGyNumGroups, (size_t)kConvBfpGrpGyGroupSize);
 
-    conv1dBackward(conv1d, forwardInput, lossGrad, NULL);
+    conv1dBackward(conv1d, forwardInput, lossGrad, NULL, NULL);
 
     /* kConvBfpGrpOutChannels * (kConvBfpGrpInChannels / kConvBfpGrpGroups)
      * * kConvBfpGrpKernelSize */
@@ -2674,7 +2674,7 @@ void testConv1dBackwardBfpDxPowerOfTwoBitIdenticalToGroupedSym(void) {
         tensor_t *lossGrad = buildSymInt32TensorExact(3, lossDims, kConv1dDxLossMantissas, 0.5f);
         tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-        conv1dBackward(layer, input, lossGrad, propLoss);
+        conv1dBackward(layer, input, lossGrad, propLoss, NULL);
         memcpy(symOut, propLoss->data, sizeof(symOut));
 
         freeConv1dLayer(layer);
@@ -2718,7 +2718,7 @@ void testConv1dBackwardBfpDxPowerOfTwoBitIdenticalToGroupedSym(void) {
         freeQuantization(perTensorTemplate);
         tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-        conv1dBackward(layer, input, lossGrad, propLoss);
+        conv1dBackward(layer, input, lossGrad, propLoss, NULL);
         memcpy(bfpOut, propLoss->data, sizeof(bfpOut));
 
         freeConv1dLayer(layer);
@@ -2791,7 +2791,7 @@ void testConv1dBackwardBfpDxConvGroups2MatchesGold(void) {
         ((float *)propLoss->data)[i] = 777.0f;
     }
 
-    conv1dBackward(conv1d, forwardInput, lossGrad, propLoss);
+    conv1dBackward(conv1d, forwardInput, lossGrad, propLoss, NULL);
 
     float captured[24]; /* kBfpConvBatch * kBfpConvG2InChannels * kBfpConvG2DxInputLength */
     memcpy(captured, propLoss->data, sizeof(captured));

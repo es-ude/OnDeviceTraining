@@ -65,14 +65,20 @@ typedef struct layer {
     layerConfig_t *config;
 } layer_t;
 
-typedef void (*forwardFn_t)(layer_t *layer, tensor_t *inputTensor, tensor_t *outputTensor);
+/* Pointer-only use: the identical typedef lives in LayerExec.h (C11 allows the
+ * repetition), so this header needs no RNG include path. */
+typedef struct layerExec layerExec_t;
+
+/* exec: the layer's execution context (LayerExec.h); NULL = no randomness. */
+typedef void (*forwardFn_t)(layer_t *layer, tensor_t *inputTensor, tensor_t *outputTensor,
+                            const layerExec_t *exec);
 /*! propLoss == NULL is a grads-only call, valid ONLY for the six param-layer
  *  backwards (Linear/Conv1d/Conv1dTransposed/LayerNorm/GroupNorm/BatchNorm1d,
  *  #380 PR2, #460): they compute weight/bias (resp. gamma/beta) grads exactly
  *  as with a real propLoss and touch no dx memory. Non-param layers (Relu, Softmax, Pool,
  *  ...) require a non-NULL propLoss. */
 typedef void (*backwardFn_t)(layer_t *layer, tensor_t *forwardInput, tensor_t *loss,
-                             tensor_t *propLoss);
+                             tensor_t *propLoss, const layerExec_t *exec);
 typedef void (*calcOutputShapeFn_t)(layer_t *layer, shape_t *inputShape, shape_t *outputShape);
 
 typedef struct layerFunctions {

@@ -193,7 +193,7 @@ tensor_t *inference(layer_t **model, size_t numberOfLayers, tensor_t *input) {
         tensor_t outputCurr;
         initBufferOutput(&outputCurr, currentLayer, outputNext.shape, outputNext.sparsity,
                          outputNext.quantization);
-        forward(currentLayer, &outputNext, &outputCurr);
+        forward(currentLayer, &outputNext, &outputCurr, NULL);
 
         deInitBuffer(&outputNext);
         outputNext = outputCurr;
@@ -256,12 +256,12 @@ static inferenceStats_t *inferenceOnScheduler(layer_t **model, size_t numberOfLa
         rematCheckStep(&chk, &st, &op);
         if (st.kind == REMAT_STEP_FORWARD) {
             layer_t *layer = model[st.layer];
-            layerFunctions[layer->type].forward(layer, op.in, op.out);
+            layerFunctions[layer->type].forward(layer, op.in, op.out, NULL);
         } else { /* LOSS_FORWARD: the checker admits nothing else in EVAL */
             /* As on the NULL path: the loss first (a label whose shape differs
              * from the output exits before the stats exist, #153), and all of it
              * before rematDone releases ACT n. */
-            float loss = lossFunctions[funcType].forward(op.in, label, forwardReduction);
+            float loss = lossFunctions[funcType].forward(op.in, label, forwardReduction, NULL);
             inferenceStats = reserveInferenceStats(op.in);
             convertTensor(op.in, inferenceStats->output, NULL);
             inferenceStats->loss = loss;
@@ -292,7 +292,7 @@ inferenceStats_t *inferenceWithLoss(layer_t **model, size_t numberOfLayers, tens
         tensor_t outputCurr;
         initBufferOutput(&outputCurr, currentLayer, outputNext.shape, outputNext.sparsity,
                          outputNext.quantization);
-        forward(currentLayer, &outputNext, &outputCurr);
+        forward(currentLayer, &outputNext, &outputCurr, NULL);
         deInitBuffer(&outputNext);
         outputNext = outputCurr;
     }
@@ -301,7 +301,7 @@ inferenceStats_t *inferenceWithLoss(layer_t **model, size_t numberOfLayers, tens
      * differs from the output exits before reserveInferenceStats (#153). The
      * loss only reads outputNext. */
     lossFunctions_t lossFns = lossFunctions[funcType];
-    float loss = lossFns.forward(&outputNext, label, forwardReduction);
+    float loss = lossFns.forward(&outputNext, label, forwardReduction, NULL);
 
     inferenceStats_t *inferenceStats = reserveInferenceStats(&outputNext);
     convertTensor(&outputNext, inferenceStats->output, NULL);

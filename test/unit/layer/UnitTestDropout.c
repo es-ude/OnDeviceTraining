@@ -95,7 +95,7 @@ void testForwardEvalIdentityFloat(void) {
     layerConfig_t lcfg;
     layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
 
-    dropoutForward(&layer, input, output);
+    dropoutForward(&layer, input, output, NULL);
 
     float captured[4];
     for (size_t i = 0; i < n; i++) {
@@ -143,7 +143,7 @@ void testForwardEvalIdentitySymInt32(void) {
     layerConfig_t lcfg;
     layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
 
-    dropoutForward(&layer, symIn, symOut);
+    dropoutForward(&layer, symIn, symOut, NULL);
 
     int32_t capturedInts[4];
     for (size_t i = 0; i < n; i++) {
@@ -188,7 +188,7 @@ void testForwardTrainingFloatScalesAndDrops(void) {
 
     bernoulliFillMaskFn_t saved = bernoulliGetFillMaskFn();
     bernoulliSetFillMaskFn(stubKeepEven);
-    dropoutForward(&layer, input, output);
+    dropoutForward(&layer, input, output, NULL);
     bernoulliSetFillMaskFn(saved);
 
     float captured[4];
@@ -241,7 +241,7 @@ void testForwardTrainingSymInt32ScaleFold(void) {
 
     bernoulliFillMaskFn_t saved = bernoulliGetFillMaskFn();
     bernoulliSetFillMaskFn(stubKeepEven);
-    dropoutForward(&layer, symIn, symOut);
+    dropoutForward(&layer, symIn, symOut, NULL);
     bernoulliSetFillMaskFn(saved);
 
     int32_t capturedInts[4];
@@ -297,7 +297,7 @@ void testDropoutForwardTrainingBfpBridgeRepacksWithFreshExponents(void) {
 
     bernoulliFillMaskFn_t saved = bernoulliGetFillMaskFn();
     bernoulliSetFillMaskFn(stubKeepEven);
-    dropoutForward(&layer, input, output);
+    dropoutForward(&layer, input, output, NULL);
     bernoulliSetFillMaskFn(saved);
 
     int32_t got[8];
@@ -360,7 +360,7 @@ void testDropoutForwardTrainingBfpSaturatesAtTheExponentCap(void) {
 
     bernoulliFillMaskFn_t saved = bernoulliGetFillMaskFn();
     bernoulliSetFillMaskFn(stubKeepEven);
-    dropoutForward(&layer, input, output);
+    dropoutForward(&layer, input, output, NULL);
     bernoulliSetFillMaskFn(saved);
 
     int32_t got[4];
@@ -410,7 +410,7 @@ void testDropoutForwardEvalIdentityBfp(void) {
     layerConfig_t lcfg;
     layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
 
-    dropoutForward(&layer, input, output);
+    dropoutForward(&layer, input, output, NULL);
 
     int32_t got[8];
     unpackSignExtend(output->data, (uint8_t)kBfpDropoutMantissaBits, 0, got,
@@ -459,7 +459,7 @@ void testDropoutForwardEvalInPlaceBfpIsIdentity(void) {
     layerConfig_t lcfg;
     layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
 
-    dropoutForward(&layer, wire, wire);
+    dropoutForward(&layer, wire, wire, NULL);
 
     int32_t got[8];
     unpackSignExtend(wire->data, (uint8_t)kBfpDropoutMantissaBits, 0, got, kBfpDropoutInCodes_len);
@@ -500,7 +500,7 @@ void testBackwardFloatUsesMaskAndScale(void) {
     layerConfig_t lcfg;
     layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
 
-    dropoutBackward(&layer, forwardInput, loss, propLoss);
+    dropoutBackward(&layer, forwardInput, loss, propLoss, NULL);
 
     float captured[4];
     for (size_t i = 0; i < n; i++) {
@@ -554,7 +554,7 @@ void testBackwardSymInt32UsesMaskAndScaleFold(void) {
     layerConfig_t lcfg;
     layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
 
-    dropoutBackward(&layer, NULL, loss, propLoss);
+    dropoutBackward(&layer, NULL, loss, propLoss, NULL);
 
     int32_t capturedInts[4];
     for (size_t i = 0; i < n; i++) {
@@ -588,7 +588,7 @@ void testVtableForwardIdentityFloat(void) {
     layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
 
     layerFunctions_t fns = layerFunctions[DROPOUT];
-    fns.forward(&layer, input, output);
+    fns.forward(&layer, input, output, NULL);
 
     float captured[3];
     for (size_t i = 0; i < n; i++) {
@@ -663,7 +663,7 @@ void testFactoryBuildsAndForwards(void) {
     float pOk = layer->config->dropout->p;
     bool trainingDefaultFalse = (layer->config->dropout->training == false);
 
-    layerFunctions[DROPOUT].forward(layer, input, output); // eval → identity
+    layerFunctions[DROPOUT].forward(layer, input, output, NULL); // eval → identity
     float captured[3];
     for (size_t i = 0; i < n; i++) {
         captured[i] = ((float *)output->data)[i];
@@ -700,7 +700,7 @@ void testForwardTrainingP0KeepsAllNoScale(void) {
     // p=0 → reference sampler fills probTrue=1.0 → all keep; scale=1/(1-0)=1 → identity.
     bernoulliFillMaskFn_t saved = bernoulliGetFillMaskFn();
     bernoulliSetFillMaskFn(bernoulliFillMaskReference);
-    dropoutForward(&layer, input, output);
+    dropoutForward(&layer, input, output, NULL);
     bernoulliSetFillMaskFn(saved);
 
     float captured[4];
@@ -733,7 +733,7 @@ void testForwardTrainingFloatP025Scale(void) {
 
     bernoulliFillMaskFn_t saved = bernoulliGetFillMaskFn();
     bernoulliSetFillMaskFn(stubKeepEven);
-    dropoutForward(&layer, input, output);
+    dropoutForward(&layer, input, output, NULL);
     bernoulliSetFillMaskFn(saved);
 
     float captured[4];
@@ -789,7 +789,7 @@ void testDropoutBackwardExitsOnDtypeMismatch(void) {
     layerConfig_t lcfg;
     layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
 
-    ASSERT_EXITS_WITH_FAILURE(dropoutBackward(&layer, NULL, loss, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(dropoutBackward(&layer, NULL, loss, propLoss, NULL));
 
     freeQuantization(bq);
     freeQuantization(fq);
@@ -834,7 +834,7 @@ void testDropoutBackwardBfpArmDispatchesThroughDropoutBackward(void) {
     layerConfig_t lcfg;
     layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
 
-    dropoutBackward(&layer, NULL, loss, propLoss);
+    dropoutBackward(&layer, NULL, loss, propLoss, NULL);
 
     int32_t got[8];
     unpackSignExtend(propLoss->data, (uint8_t)kBfpDropoutMantissaBits, 0, got,
@@ -868,8 +868,8 @@ void testDropoutBfpGuardsNarrowedNotRemoved(void) {
     layerConfig_t floatLc;
     layer_t floatLayer = makeDropoutLayer(&floatCfg, &floatLc);
 
-    ASSERT_EXITS_WITH_FAILURE(dropoutForward(&floatLayer, bfpA, floatWire));
-    ASSERT_EXITS_WITH_FAILURE(dropoutBackward(&floatLayer, NULL, bfpA, floatWire));
+    ASSERT_EXITS_WITH_FAILURE(dropoutForward(&floatLayer, bfpA, floatWire, NULL));
+    ASSERT_EXITS_WITH_FAILURE(dropoutBackward(&floatLayer, NULL, bfpA, floatWire, NULL));
 
     quantization_t *bq = quantizationInitBfpGrouped(6, 8, HALF_AWAY, 2, 4);
     dropoutConfig_t bfpCfg;
@@ -877,9 +877,9 @@ void testDropoutBfpGuardsNarrowedNotRemoved(void) {
     layerConfig_t bfpLc;
     layer_t bfpLayer = makeDropoutLayer(&bfpCfg, &bfpLc);
 
-    ASSERT_EXITS_WITH_FAILURE(dropoutForward(&bfpLayer, floatWire, bfpA));
-    ASSERT_EXITS_WITH_FAILURE(dropoutForward(&bfpLayer, bfpA, otherGrid));
-    ASSERT_EXITS_WITH_FAILURE(dropoutBackward(&bfpLayer, NULL, bfpA, otherGrid));
+    ASSERT_EXITS_WITH_FAILURE(dropoutForward(&bfpLayer, floatWire, bfpA, NULL));
+    ASSERT_EXITS_WITH_FAILURE(dropoutForward(&bfpLayer, bfpA, otherGrid, NULL));
+    ASSERT_EXITS_WITH_FAILURE(dropoutBackward(&bfpLayer, NULL, bfpA, otherGrid, NULL));
 
     freeQuantization(bq);
     freeQuantization(fq);
@@ -908,8 +908,8 @@ void testDropoutBfpRejectsUnequalCountsAndAliasedExponents(void) {
     layerConfig_t lc;
     layer_t layer = makeDropoutLayer(&cfg, &lc);
 
-    ASSERT_EXITS_WITH_FAILURE(dropoutForward(&layer, longWire, shortWire));
-    ASSERT_EXITS_WITH_FAILURE(dropoutBackward(&layer, NULL, longWire, shortWire));
+    ASSERT_EXITS_WITH_FAILURE(dropoutForward(&layer, longWire, shortWire, NULL));
+    ASSERT_EXITS_WITH_FAILURE(dropoutBackward(&layer, NULL, longWire, shortWire, NULL));
 
     /* Two distinct payload buffers, ONE shared quantization_t (hence one
      * exponents array): counts and grid both match, only the alias is wrong. */
@@ -939,7 +939,7 @@ void testDropoutBfpRejectsUnequalCountsAndAliasedExponents(void) {
 
     TEST_ASSERT_NOT_EQUAL_MESSAGE(aliasSrc->data, aliasDst->data,
                                   "the alias fixture must differ in payload, not in qConfig");
-    ASSERT_EXITS_WITH_FAILURE(dropoutForward(&aliasLayer, aliasSrc, aliasDst));
+    ASSERT_EXITS_WITH_FAILURE(dropoutForward(&aliasLayer, aliasSrc, aliasDst, NULL));
 
     /* UnitTestDropout.c has no shell-only free helper and the plan forbids
      * inventing one: free aliasDst's own blocks by hand and let

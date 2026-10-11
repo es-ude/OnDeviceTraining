@@ -116,7 +116,7 @@ static void bnRunForward(bnFixture_t *f, const size_t *dims, size_t rank, const 
     tensor_t *out = buildFloatTensorND(rank, dims, NULL);
     size_t total = calcNumberOfElementsByTensor(in);
     TEST_ASSERT_TRUE_MESSAGE(total <= BN_MAX_N, "fixture exceeds capture buffer");
-    layerFunctions[BATCHNORM1D].forward(&f->layer, in, out);
+    layerFunctions[BATCHNORM1D].forward(&f->layer, in, out, NULL);
     for (size_t i = 0; i < total; i++) {
         cap->y[i] = ((float *)out->data)[i];
     }
@@ -357,7 +357,7 @@ static void bnForwardOnStackInput(bnFixture_t *f, size_t *dims, size_t rank, siz
     float obuf[BN_MAX_N] = {0};
     tensor_t out;
     setTensorValues(&out, (uint8_t *)obuf, &shape, &q, NULL);
-    layerFunctions[BATCHNORM1D].forward(&f->layer, &in, &out);
+    layerFunctions[BATCHNORM1D].forward(&f->layer, &in, &out, NULL);
 }
 
 static void expectTrainingForwardDies(size_t *dims, size_t rank) {
@@ -539,7 +539,7 @@ static void forwardSymInput(bnFixture_t *f) {
     /* relabel the input's dtype only: the guard fires before any data read */
     freeQuantization(in->quantization);
     in->quantization = quantizationInitSymInt32(HALF_AWAY);
-    layerFunctions[BATCHNORM1D].forward(&f->layer, in, out);
+    layerFunctions[BATCHNORM1D].forward(&f->layer, in, out, NULL);
 }
 
 void testForwardRejectsNonFloat32Input(void) {
@@ -623,7 +623,7 @@ static void forwardIntoSmallerOutput(bnFixture_t *f) {
     float obuf[3] = {0};
     tensor_t out;
     setTensorValues(&out, (uint8_t *)obuf, &outShape, &q, NULL);
-    layerFunctions[BATCHNORM1D].forward(&f->layer, &in, &out);
+    layerFunctions[BATCHNORM1D].forward(&f->layer, &in, &out, NULL);
 }
 
 void testForwardRejectsMismatchedOutputShape(void) {
@@ -657,7 +657,7 @@ static void forwardWithTransposedOutput(bnFixture_t *f) {
     float obuf[4] = {0};
     tensor_t out;
     setTensorValues(&out, (uint8_t *)obuf, &outShape, &q, NULL);
-    layerFunctions[BATCHNORM1D].forward(&f->layer, &in, &out);
+    layerFunctions[BATCHNORM1D].forward(&f->layer, &in, &out, NULL);
 }
 
 void testForwardRejectsTransposedOutput(void) {
@@ -675,7 +675,7 @@ static void forwardWithNonFloat32Output(bnFixture_t *f) {
     tensor_t *out = buildFloatTensorND(2, dims, NULL);
     freeQuantization(out->quantization);
     out->quantization = quantizationInitSymInt32(HALF_AWAY);
-    layerFunctions[BATCHNORM1D].forward(&f->layer, in, out);
+    layerFunctions[BATCHNORM1D].forward(&f->layer, in, out, NULL);
 }
 
 void testForwardRejectsNonFloat32Output(void) {
@@ -706,7 +706,7 @@ static void bnRunBackward(bnFixture_t *f, const size_t *dims, size_t rank, const
     tensor_t *prop = withPropLoss ? buildFloatTensorND(rank, dims, NULL) : NULL;
     size_t total = calcNumberOfElementsByTensor(in);
     for (size_t p = 0; p < passes; p++) {
-        layerFunctions[BATCHNORM1D].backward(&f->layer, in, loss, prop);
+        layerFunctions[BATCHNORM1D].backward(&f->layer, in, loss, prop, NULL);
     }
     for (size_t i = 0; prop != NULL && i < total; i++) {
         cap->dx[i] = ((float *)prop->data)[i];
@@ -840,7 +840,7 @@ static void backwardOnSingleRow(bnFixture_t *f) {
     tensor_t *in = buildFloatTensorND(2, dims, (float[]){1.f, 2.f, 3.f});
     tensor_t *loss = buildFloatTensorND(2, dims, (float[]){0.5f, -1.f, 2.f});
     tensor_t *prop = buildFloatTensorND(2, dims, NULL);
-    layerFunctions[BATCHNORM1D].backward(&f->layer, in, loss, prop);
+    layerFunctions[BATCHNORM1D].backward(&f->layer, in, loss, prop, NULL);
 }
 
 void testBackwardTrainingRejectsSingleRow(void) {
@@ -855,7 +855,7 @@ static void backwardWithMismatchedLoss(bnFixture_t *f) {
     tensor_t *in = buildFloatTensorND(2, (size_t[]){4, 3}, input_bn_trainRank2);
     tensor_t *loss = buildFloatTensorND(2, (size_t[]){3, 4}, lossGrad_bn_trainRank2);
     tensor_t *prop = buildFloatTensorND(2, (size_t[]){4, 3}, NULL);
-    layerFunctions[BATCHNORM1D].backward(&f->layer, in, loss, prop);
+    layerFunctions[BATCHNORM1D].backward(&f->layer, in, loss, prop, NULL);
 }
 
 void testBackwardRejectsLossShapeMismatch(void) {
@@ -872,7 +872,7 @@ static void backwardWithShortGammaGrad(bnFixture_t *f) {
     tensor_t *in = buildFloatTensorND(2, (size_t[]){4, 3}, input_bn_trainRank2);
     tensor_t *loss = buildFloatTensorND(2, (size_t[]){4, 3}, lossGrad_bn_trainRank2);
     tensor_t *prop = buildFloatTensorND(2, (size_t[]){4, 3}, NULL);
-    layerFunctions[BATCHNORM1D].backward(&f->layer, in, loss, prop);
+    layerFunctions[BATCHNORM1D].backward(&f->layer, in, loss, prop, NULL);
 }
 
 /* The ad hoc grad check once verified only dtype, not

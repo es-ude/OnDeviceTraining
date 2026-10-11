@@ -53,7 +53,7 @@ void testLinearForwardFloatRank1BiasRank2Output() {
         linearLayerInit(&(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE}, &lq);
     layerLoadWeights(linearLayer, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, -6.f}, (float[]){-1.f, 3.f});
 
-    linearForward(linearLayer, input, output);
+    linearForward(linearLayer, input, output, NULL);
 
     float captured[2];
     captured[0] = ((float *)output->data)[0];
@@ -115,7 +115,7 @@ void testLinearForwardSymInt32Rank1BiasRank2Output() {
     quantization_t *test = quantizationInitSymInt32(HALF_AWAY);
     layer_t *linearLayer = buildBorrowedLinearLayer(weights, bias, test);
 
-    linearForward(linearLayer, input, output);
+    linearForward(linearLayer, input, output, NULL);
 
     size_t *outFloatDims = reserveMemory(2 * sizeof(size_t));
     outFloatDims[0] = 1;
@@ -182,7 +182,7 @@ void testLinearBackwardFloatRank1Bias() {
     layerLoadWeights(linearLayer, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, -6.f}, (float[]){-1.f, 3.f});
     linearConfig_t *cfg = linearLayer->config->linear;
 
-    linearBackward(linearLayer, forwardInput, loss, propLoss);
+    linearBackward(linearLayer, forwardInput, loss, propLoss, NULL);
 
     size_t numWeightElements = calcNumberOfElementsByShape(cfg->weights->param->shape);
     size_t numBiasElements = calcNumberOfElementsByShape(cfg->bias->param->shape);
@@ -281,7 +281,7 @@ void testLinearBackwardSymInt32Rank1Bias() {
     quantization_t *test = quantizationInitSymInt32(HALF_AWAY);
     layer_t *linearLayer = buildBorrowedLinearLayer(weights, bias, test);
 
-    linearBackward(linearLayer, forwardInput, loss, propLoss);
+    linearBackward(linearLayer, forwardInput, loss, propLoss, NULL);
 
     /* 7. Convert SymInt32 grads back to Float for comparison. */
     size_t *wgDims = reserveMemory(2 * sizeof(size_t));
@@ -421,7 +421,7 @@ void testLinearForwardFloat() {
         linearLayerInit(&(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE}, &lq);
     layerLoadWeights(linearLayer, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, -6.f}, (float[]){-1.f, 3.f});
 
-    linearForward(linearLayer, input, output);
+    linearForward(linearLayer, input, output, NULL);
 
     /* 6. CAPTURE. */
     float captured[2];
@@ -481,7 +481,7 @@ void testLinearBackwardFloat() {
     layerLoadWeights(linearLayer, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, -6.f}, (float[]){-1.f, 3.f});
     linearConfig_t *cfg = linearLayer->config->linear;
 
-    linearBackward(linearLayer, forwardInput, loss, propLoss);
+    linearBackward(linearLayer, forwardInput, loss, propLoss, NULL);
 
     /* 7. CAPTURE. */
     size_t numWeightElements = calcNumberOfElementsByShape(cfg->weights->param->shape);
@@ -572,7 +572,7 @@ void testLinearForwardSymInt32() {
     quantization_t *test = quantizationInitSymInt32(HALF_AWAY);
     layer_t *linearLayer = buildBorrowedLinearLayer(weights, bias, test);
 
-    linearForward(linearLayer, input, output);
+    linearForward(linearLayer, input, output, NULL);
 
     /* 6. Convert SymInt32 output back to Float for comparison. */
     size_t *outFloatDims = reserveMemory(2 * sizeof(size_t));
@@ -671,7 +671,7 @@ void testLinearBackwardSymInt32() {
     quantization_t *test = quantizationInitSymInt32(HALF_AWAY);
     layer_t *linearLayer = buildBorrowedLinearLayer(weights, bias, test);
 
-    linearBackward(linearLayer, forwardInput, loss, propLoss);
+    linearBackward(linearLayer, forwardInput, loss, propLoss, NULL);
 
     /* 7. Convert SymInt32 grads back to Float for comparison. The convert-back
      *    output buffers are heap-allocated to keep us in the heap-tier idiom. */
@@ -828,7 +828,7 @@ void testLinearBackwardPackedSymWeightGradFixedScaleFirstStore(void) {
     linearLayer->config->linear->weightGradAccMode = OUT_ACC_FIXED_SCALE;
     linearLayer->config->linear->biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
 
-    linearBackward(linearLayer, forwardInput, loss, propLoss);
+    linearBackward(linearLayer, forwardInput, loss, propLoss, NULL);
 
     symQConfig_t *gradQC = (symQConfig_t *)weightsGrad->quantization->qConfig;
     bool gradTypeIsSym = (weightsGrad->quantization->type == SYM);
@@ -854,7 +854,7 @@ void testLinearBackwardPackedSymWeightGradFixedScaleFirstStore(void) {
      * clearly different from the carried scaleAfterCall1. */
     tensor_t *loss2 = initTensor(getShapeLike(loss->shape), quantizationInitFloat(), NULL);
     tensorFillFromFloatBuffer(loss2, (float[]){4.f, 3.f}, 2);
-    linearBackward(linearLayer, forwardInput, loss2, propLoss);
+    linearBackward(linearLayer, forwardInput, loss2, propLoss, NULL);
     float scaleAfterCall2 = gradQC->scales[0];
 
     freeTensor(loss2);
@@ -940,7 +940,7 @@ void testLinearBackwardZeroInitAccModeDies(void) {
     linearLayer->config->linear->weightGradAccMode =
         (outputMode_t)0; /* == OUT_WRITE, forgotten knob */
 
-    ASSERT_EXITS_WITH_FAILURE(linearBackward(linearLayer, forwardInput, loss, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(linearBackward(linearLayer, forwardInput, loss, propLoss, NULL));
 
     freeLinearLayer(linearLayer);
     freeTensor(propLoss);
@@ -1000,7 +1000,7 @@ void testLinearBackwardFloatWithMismatchedQuantizations() {
     layerLoadWeights(linearLayer, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, -6.f}, (float[]){-1.f, 3.f});
     linearConfig_t *cfg = linearLayer->config->linear;
 
-    linearBackward(linearLayer, forwardInput, lossAsym, propLoss);
+    linearBackward(linearLayer, forwardInput, lossAsym, propLoss, NULL);
 
     /* 7. CAPTURE. */
     size_t sizeWeights = calcNumberOfElementsByParameter(cfg->weights);
@@ -1116,7 +1116,7 @@ void testLinearLayerInitNonTrainable(void) {
     setShape(outputShape, outputDims, 2, outputOrder);
     tensor_t *output = initTensor(outputShape, quantizationInitFloat(), NULL);
 
-    linearForward(layer, input, output);
+    linearForward(layer, input, output, NULL);
 
     /* 6. CAPTURE. */
     float capturedOutput[2];
@@ -1562,8 +1562,8 @@ void testLinearBackwardFrozenTwinPropLossIdenticalGradsZero(void) {
     tensor_t *propLossTrainable = buildFloatTensor2d(1, 3, (float[]){0.f, 0.f, 0.f});
     tensor_t *propLossFrozen = buildFloatTensor2d(1, 3, (float[]){0.f, 0.f, 0.f});
 
-    linearBackward(trainableTwin, forwardInput, loss, propLossTrainable);
-    linearBackward(frozenTwin, forwardInput, loss, propLossFrozen);
+    linearBackward(trainableTwin, forwardInput, loss, propLossTrainable, NULL);
+    linearBackward(frozenTwin, forwardInput, loss, propLossFrozen, NULL);
 
     size_t numWeights = calcNumberOfElementsByTensor(weightsParamA);
     size_t numBias = calcNumberOfElementsByTensor(biasParamA);
@@ -1621,7 +1621,7 @@ void testLinearBackwardFrozenFactoryLayerRunsWithoutGradBuffers(void) {
     tensor_t *loss = e2eMake1x2((float[]){-4.f, -3.f});
     tensor_t *propLoss = e2eMakeInput(NULL);
 
-    linearBackward(layer, forwardInput, loss, propLoss);
+    linearBackward(layer, forwardInput, loss, propLoss, NULL);
 
     bool gradStillNull = layer->config->linear->weights->grad == NULL;
 
@@ -1664,8 +1664,8 @@ void testLinearBackwardNullPropLossComputesGradsOnly(void) {
     tensor_t *loss = buildFloatTensor2d(1, 2, (float[]){-4.f, -3.f});
     tensor_t *propLossA = buildFloatTensor2d(1, 3, (float[]){0.f, 0.f, 0.f});
 
-    linearBackward(twinA, forwardInput, loss, propLossA);
-    linearBackward(twinB, forwardInput, loss, NULL);
+    linearBackward(twinA, forwardInput, loss, propLossA, NULL);
+    linearBackward(twinB, forwardInput, loss, NULL, NULL);
 
     size_t numWeights = calcNumberOfElementsByTensor(weightsParamA);
     size_t numBias = calcNumberOfElementsByTensor(biasParamA);
@@ -1735,12 +1735,12 @@ void testLinearSymInt32GradAccumulatesOverTwoMicrobatchesAndSteps(void) {
     tensor_t *symIn1 = e2eMakeInput(inputVals);
     tensor_t *symLoss1 = e2eMake1x2(lossVals);
     tensor_t *symProp1 = e2eMakeSym1x3(); /* propLoss [1,3], SYM_INT32 (matches propLossQ) */
-    linearBackward(symLayer, symIn1, symLoss1, symProp1);
+    linearBackward(symLayer, symIn1, symLoss1, symProp1, NULL);
 
     tensor_t *symIn2 = e2eMakeInput(inputVals);
     tensor_t *symLoss2 = e2eMake1x2(lossVals);
     tensor_t *symProp2 = e2eMakeSym1x3();
-    linearBackward(symLayer, symIn2, symLoss2, symProp2);
+    linearBackward(symLayer, symIn2, symLoss2, symProp2, NULL);
 
     /* Capture accumulated SYM_INT32 weight grad as float (dequantized). */
     size_t nW = calcNumberOfElementsByTensor(symWGrad);
@@ -1792,11 +1792,11 @@ void testLinearSymInt32GradAccumulatesOverTwoMicrobatchesAndSteps(void) {
     tensor_t *fIn1 = e2eMakeInput(inputVals);
     tensor_t *fLoss1 = e2eMake1x2(lossVals);
     tensor_t *fProp1 = e2eMakeInput(NULL);
-    linearBackward(fLayer, fIn1, fLoss1, fProp1);
+    linearBackward(fLayer, fIn1, fLoss1, fProp1, NULL);
     tensor_t *fIn2 = e2eMakeInput(inputVals);
     tensor_t *fLoss2 = e2eMake1x2(lossVals);
     tensor_t *fProp2 = e2eMakeInput(NULL);
-    linearBackward(fLayer, fIn2, fLoss2, fProp2);
+    linearBackward(fLayer, fIn2, fLoss2, fProp2, NULL);
 
     float refGradFloat[6];
     for (size_t i = 0; i < nW; i++) {
@@ -1948,7 +1948,7 @@ void testLinearBackwardWithoutBiasDoesNotCrash(void) {
     tensor_t *loss = buildFloatTensor2d(1, 2, (float[]){0.5f, -0.5f});
     tensor_t *propLoss = buildFloatTensor2d(1, 3, (float[]){0.f, 0.f, 0.f});
 
-    layerFunctions[LINEAR].backward(layer, fwdIn, loss, propLoss);
+    layerFunctions[LINEAR].backward(layer, fwdIn, loss, propLoss, NULL);
 
     float wg00 = ((float *)layer->config->linear->weights->grad->data)[0];
     bool biasIsNull = (layer->config->linear->bias == NULL);
@@ -1978,7 +1978,7 @@ void testLinearForwardWithoutBiasDoesNotCrash(void) {
     tensor_t *input = buildFloatTensor2d(1, 3, (float[]){0.f, 1.f, 2.f});
     tensor_t *output = buildFloatTensor2d(1, 2, (float[]){0.f, 0.f});
 
-    layerFunctions[LINEAR].forward(layer, input, output);
+    layerFunctions[LINEAR].forward(layer, input, output, NULL);
 
     bool biasIsNull = (layer->config->linear->bias == NULL);
     float out0 = ((float *)output->data)[0];
@@ -2098,7 +2098,7 @@ void testLinearForwardGroupedSymWeights(void) {
     setShape(outputShape, outputDims, 2, outputOrder);
     tensor_t *output = initTensor(outputShape, quantizationInitSymInt32(HALF_AWAY), NULL);
 
-    linearForward(linearLayer, input, output);
+    linearForward(linearLayer, input, output, NULL);
 
     size_t *outFloatDims = reserveMemory(2 * sizeof(size_t));
     outFloatDims[0] = 2;
@@ -2166,7 +2166,7 @@ void testLinearForwardGroupedFloatPathAgreesWithinTolerance(void) {
     setShape(outputShape, outputDims, 2, outputOrder);
     tensor_t *output = initTensor(outputShape, quantizationInitFloat(), NULL);
 
-    linearForward(linearLayer, input, output);
+    linearForward(linearLayer, input, output, NULL);
 
     float captured[6];
     for (size_t i = 0; i < 6; i++) {
@@ -2235,7 +2235,7 @@ static void runGroupedDxBackward(quantization_t *mathQ, quantization_t *wireQ,
     setShape(propLossShape, propLossDims, 2, propLossOrder);
     tensor_t *propLoss = initTensor(propLossShape, quantizationInitFloat(), NULL);
 
-    linearBackward(linearLayer, input, loss, propLoss);
+    linearBackward(linearLayer, input, loss, propLoss, NULL);
 
     for (size_t i = 0; i < 12; i++) {
         capturedOut[i] = ((float *)propLoss->data)[i];
@@ -2388,7 +2388,7 @@ void testLinearForwardGroupedAsymWeightsMatchesGold(void) {
     setShape(outputShape, outputDims, 2, outputOrder);
     tensor_t *output = initTensor(outputShape, quantizationInitFloat(), NULL);
 
-    linearForward(linearLayer, input, output);
+    linearForward(linearLayer, input, output, NULL);
 
     float captured[6];
     for (size_t i = 0; i < 6; i++) {
@@ -2427,7 +2427,7 @@ void testLinearForwardGroupedAsymFloatPathAgreesWithinTolerance(void) {
     setShape(outputShape, outputDims, 2, outputOrder);
     tensor_t *output = initTensor(outputShape, quantizationInitFloat(), NULL);
 
-    linearForward(linearLayer, input, output);
+    linearForward(linearLayer, input, output, NULL);
 
     float captured[6];
     for (size_t i = 0; i < 6; i++) {
@@ -2546,7 +2546,7 @@ void testLinearForwardGroupedAsymEqualScalesEqualZpBitIdenticalToPerTensor(void)
         setShape(outputShape, outputDims, 2, outputOrder);
         tensor_t *output = initTensor(outputShape, quantizationInitFloat(), NULL);
 
-        linearForward(linearLayer, input, output);
+        linearForward(linearLayer, input, output, NULL);
 
         for (size_t i = 0; i < 6; i++) {
             outPerRun[run][i] = ((float *)output->data)[i];
@@ -2597,7 +2597,7 @@ void testLinearBackwardGroupedAsymDxMatchesGold(void) {
     setShape(propLossShape, propLossDims, 2, propLossOrder);
     tensor_t *propLoss = initTensor(propLossShape, quantizationInitFloat(), NULL);
 
-    linearBackward(linearLayer, input, loss, propLoss);
+    linearBackward(linearLayer, input, loss, propLoss, NULL);
 
     float captured[12];
     for (size_t i = 0; i < 12; i++) {
@@ -2686,7 +2686,7 @@ void testLinearForwardBfpNativeMatchesKernelGold(void) {
         ((float *)output->data)[i] = 777.0f;
     }
 
-    linearForward(linearLayer, input, output);
+    linearForward(linearLayer, input, output, NULL);
 
     float captured[6]; /* kLinBfpBatch * kLinBfpOutFeatures */
     memcpy(captured, output->data, sizeof(captured));
@@ -2715,7 +2715,7 @@ void testLinearForwardBfpStagesFloat32Bias(void) {
         ((float *)output->data)[i] = 777.0f;
     }
 
-    linearForward(linearLayer, input, output);
+    linearForward(linearLayer, input, output, NULL);
 
     float captured[6]; /* kLinBfpBatch * kLinBfpOutFeatures */
     memcpy(captured, output->data, sizeof(captured));
@@ -2783,7 +2783,7 @@ void testLinearForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer(void) {
         size_t outputDims[] = {2, 3};
         tensor_t *output = makeFloatTensor(outputDims, 2, NULL);
 
-        linearForward(linearLayer, input, output);
+        linearForward(linearLayer, input, output, NULL);
         memcpy(symOut, output->data, sizeof(symOut));
 
         freeLinearLayer(linearLayer);
@@ -2820,7 +2820,7 @@ void testLinearForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer(void) {
         size_t outputDims[] = {2, 3};
         tensor_t *output = makeFloatTensor(outputDims, 2, NULL);
 
-        linearForward(linearLayer, input, output);
+        linearForward(linearLayer, input, output, NULL);
         memcpy(bfpOut, output->data, sizeof(bfpOut));
 
         freeLinearLayer(linearLayer);
@@ -2852,7 +2852,7 @@ void testLinearForwardBfpRejectsFloat32Weights(void) {
     size_t outputDims[] = {(size_t)kLinBfpBatch, (size_t)kLinBfpOutFeatures};
     tensor_t *output = makeFloatTensor(outputDims, 2, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(linearForward(linearLayer, input, output));
+    ASSERT_EXITS_WITH_FAILURE(linearForward(linearLayer, input, output, NULL));
 
     freeLinearLayer(linearLayer);
     freeTensor(output);
@@ -2889,7 +2889,7 @@ void testLinearBackwardBfpWeightGradNativeMatchesFloatReference(void) {
     requantizeTensorInPlace(loss, bfpTemplate);
     freeQuantization(bfpTemplate);
 
-    linearBackward(linearLayer, forwardInput, loss, NULL);
+    linearBackward(linearLayer, forwardInput, loss, NULL, NULL);
 
     float captured[6];
     memcpy(captured, weights->grad->data, sizeof(captured));
@@ -2946,7 +2946,7 @@ void testLinearBackwardBfpBiasGradNativeSumsLoss(void) {
     requantizeTensorInPlace(loss, bfpTemplate);
     freeQuantization(bfpTemplate);
 
-    linearBackward(linearLayer, forwardInput, loss, NULL);
+    linearBackward(linearLayer, forwardInput, loss, NULL, NULL);
 
     float captured[2];
     memcpy(captured, bias->grad->data, sizeof(captured));
@@ -2996,7 +2996,7 @@ void testLinearBackwardBfpBiasGradGroupedLossFoldsPerGroup(void) {
     requantizeTensorInPlace(loss, groupedBfpTemplate);
     freeQuantization(groupedBfpTemplate);
 
-    linearBackward(linearLayer, forwardInput, loss, NULL);
+    linearBackward(linearLayer, forwardInput, loss, NULL, NULL);
 
     float captured[2];
     memcpy(captured, bias->grad->data, sizeof(captured));
@@ -3055,7 +3055,7 @@ void testLinearBackwardBfpPropLossNativeMatchesFloatReference(void) {
     size_t propLossDims[] = {1, 3};
     tensor_t *propLoss = makeFloatTensor(propLossDims, 2, NULL);
 
-    linearBackward(linearLayer, forwardInput, loss, propLoss);
+    linearBackward(linearLayer, forwardInput, loss, propLoss, NULL);
 
     float captured[3];
     memcpy(captured, propLoss->data, sizeof(captured));

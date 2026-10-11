@@ -46,7 +46,7 @@ void testReluForwardFloat() {
     layer_t *reluLayer = reluLayerInit(&lq);
 
     /* 4. Exercise. */
-    reluForward(reluLayer, input, output);
+    reluForward(reluLayer, input, output, NULL);
 
     /* 5. CAPTURE assertion values. */
     float captured[6];
@@ -94,7 +94,7 @@ void testReluForwardSymInt32() {
     layerQuantInitUniform(&lq, symIntQ);
     layer_t *reluLayer = reluLayerInit(&lq);
     layerFunctions_t reluFns = layerFunctions[RELU];
-    reluFns.forward(reluLayer, input, output);
+    reluFns.forward(reluLayer, input, output, NULL);
 
     /* 4. Convert SymInt32 output back to Float for comparison; output buffer
      *    is heap-allocated to keep us in the heap-tier idiom. */
@@ -166,7 +166,7 @@ void testReluBackwardFloat() {
     layerQuantInitUniform(&lq, floatQ);
     layer_t *reluLayer = reluLayerInit(&lq);
     layerFunctions_t reluFns = layerFunctions[RELU];
-    reluFns.backward(reluLayer, forwardInput, loss, propLoss);
+    reluFns.backward(reluLayer, forwardInput, loss, propLoss, NULL);
 
     /* 5. CAPTURE. */
     float captured[6];
@@ -224,7 +224,7 @@ void testReluBackwardSymInt32() {
     layerQuantInitUniform(&lq, symIntQ);
     layer_t *reluLayer = reluLayerInit(&lq);
     layerFunctions_t reluFns = layerFunctions[RELU];
-    reluFns.backward(reluLayer, forwardInput, loss, propLoss);
+    reluFns.backward(reluLayer, forwardInput, loss, propLoss, NULL);
 
     /* 5. Convert SymInt32 propLoss back to Float for comparison. */
     size_t *propLossFloatDims = reserveMemory(1 * sizeof(size_t));
@@ -437,7 +437,7 @@ void testReluForwardBfpArmDispatchesThroughReluForward(void) {
     tensor_t *input = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, inCodes, inExps);
     tensor_t *output = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, outCodes, outExps);
 
-    reluForward(&layer, input, output);
+    reluForward(&layer, input, output, NULL);
 
     int32_t got[8];
     unpackSignExtend(output->data, 6, 0, got, 8);
@@ -508,7 +508,7 @@ void testReluBackwardBfpArmDispatchesThroughReluBackward(void) {
     tensor_t *loss = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, lossCodes, lossExps);
     tensor_t *propLoss = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, propCodes, propExps);
 
-    reluBackward(&layer, forwardInput, loss, propLoss);
+    reluBackward(&layer, forwardInput, loss, propLoss, NULL);
 
     int32_t got[8];
     unpackSignExtend(propLoss->data, 6, 0, got, 8);
@@ -544,8 +544,8 @@ void testReluForwardFloat32ArmRejectsBfpWire(void) {
     tensor_t *bfpWire = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, NULL, NULL);
     tensor_t *floatWire = buildFloatTensor1D(8);
 
-    ASSERT_EXITS_WITH_FAILURE(reluForward(&layer, bfpWire, floatWire));
-    ASSERT_EXITS_WITH_FAILURE(reluForward(&layer, floatWire, bfpWire));
+    ASSERT_EXITS_WITH_FAILURE(reluForward(&layer, bfpWire, floatWire, NULL));
+    ASSERT_EXITS_WITH_FAILURE(reluForward(&layer, floatWire, bfpWire, NULL));
 
     freeTensor(floatWire);
     freeTensor(bfpWire);
@@ -561,9 +561,9 @@ void testReluForwardBfpArmRejectsNonBfpWireAndGeometryMismatch(void) {
     tensor_t *floatWire = buildFloatTensor1D(8);
     tensor_t *otherGrid = buildBfpWireWithCodes(dims, 2, 6, 8, 4, 2, NULL, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(reluForward(&layer, floatWire, bfpWire));
-    ASSERT_EXITS_WITH_FAILURE(reluForward(&layer, bfpWire, floatWire));
-    ASSERT_EXITS_WITH_FAILURE(reluForward(&layer, bfpWire, otherGrid));
+    ASSERT_EXITS_WITH_FAILURE(reluForward(&layer, floatWire, bfpWire, NULL));
+    ASSERT_EXITS_WITH_FAILURE(reluForward(&layer, bfpWire, floatWire, NULL));
+    ASSERT_EXITS_WITH_FAILURE(reluForward(&layer, bfpWire, otherGrid, NULL));
 
     freeTensor(otherGrid);
     freeTensor(floatWire);
@@ -587,8 +587,8 @@ void testReluForwardBfpArmRejectsUnequalElementCounts(void) {
     tensor_t *longWire = buildBfpWireWithCodes(longDims, 2, 6, 8, 1, 0, NULL, NULL);
     tensor_t *shortWire = buildBfpWireWithCodes(shortDims, 2, 6, 8, 1, 0, NULL, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(reluForward(&layer, longWire, shortWire));
-    ASSERT_EXITS_WITH_FAILURE(reluForward(&layer, shortWire, longWire));
+    ASSERT_EXITS_WITH_FAILURE(reluForward(&layer, longWire, shortWire, NULL));
+    ASSERT_EXITS_WITH_FAILURE(reluForward(&layer, shortWire, longWire, NULL));
 
     freeTensor(shortWire);
     freeTensor(longWire);
@@ -606,9 +606,9 @@ void testReluBackwardBfpArmRejectsNonBfpWire(void) {
     tensor_t *otherBfp = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, NULL, NULL);
     tensor_t *floatWire = buildFloatTensor1D(8);
 
-    ASSERT_EXITS_WITH_FAILURE(reluBackward(&layer, floatWire, bfpWire, otherBfp));
-    ASSERT_EXITS_WITH_FAILURE(reluBackward(&layer, bfpWire, floatWire, otherBfp));
-    ASSERT_EXITS_WITH_FAILURE(reluBackward(&layer, bfpWire, otherBfp, floatWire));
+    ASSERT_EXITS_WITH_FAILURE(reluBackward(&layer, floatWire, bfpWire, otherBfp, NULL));
+    ASSERT_EXITS_WITH_FAILURE(reluBackward(&layer, bfpWire, floatWire, otherBfp, NULL));
+    ASSERT_EXITS_WITH_FAILURE(reluBackward(&layer, bfpWire, otherBfp, floatWire, NULL));
 
     freeTensor(floatWire);
     freeTensor(otherBfp);
@@ -632,9 +632,9 @@ void testReluBackwardBfpArmRejectsUnequalElementCounts(void) {
     tensor_t *longC = buildBfpWireWithCodes(longDims, 2, 6, 8, 1, 0, NULL, NULL);
     tensor_t *shortWire = buildBfpWireWithCodes(shortDims, 2, 6, 8, 1, 0, NULL, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(reluBackward(&layer, shortWire, longB, longC));
-    ASSERT_EXITS_WITH_FAILURE(reluBackward(&layer, longA, shortWire, longC));
-    ASSERT_EXITS_WITH_FAILURE(reluBackward(&layer, longA, longB, shortWire));
+    ASSERT_EXITS_WITH_FAILURE(reluBackward(&layer, shortWire, longB, longC, NULL));
+    ASSERT_EXITS_WITH_FAILURE(reluBackward(&layer, longA, shortWire, longC, NULL));
+    ASSERT_EXITS_WITH_FAILURE(reluBackward(&layer, longA, longB, shortWire, NULL));
 
     freeTensor(shortWire);
     freeTensor(longC);
@@ -678,14 +678,14 @@ void testReluBackwardExitsOnDtypeMismatch() {
     layer_t *reluLayer = reluLayerInit(&lq);
     layerFunctions_t reluFns = layerFunctions[RELU];
 
-    ASSERT_EXITS_WITH_FAILURE(reluFns.backward(reluLayer, &forwardInput, &loss, &propLoss));
+    ASSERT_EXITS_WITH_FAILURE(reluFns.backward(reluLayer, &forwardInput, &loss, &propLoss, NULL));
 
     /* BFP epic PR4: the same FLOAT32-declared arm fed a BFP-STORED wire. The
      * blanket pre-dispatch reject is gone, so this now exercises the per-arm
      * #315 guard on a packed wire. */
     tensor_t *bfpWire = buildBfpTensor1D(6);
     tensor_t *floatWire = buildFloatTensor1D(6);
-    ASSERT_EXITS_WITH_FAILURE(reluFns.backward(reluLayer, bfpWire, floatWire, floatWire));
+    ASSERT_EXITS_WITH_FAILURE(reluFns.backward(reluLayer, bfpWire, floatWire, floatWire, NULL));
 
     freeTensor(floatWire);
     freeTensor(bfpWire);

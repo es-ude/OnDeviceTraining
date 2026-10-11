@@ -93,7 +93,7 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
         layer_t *layer = (st.layer < modelSize) ? model[st.layer] : NULL;
         switch (st.kind) {
         case REMAT_STEP_FORWARD:
-            layerFunctions[layer->type].forward(layer, op.in, op.out);
+            layerFunctions[layer->type].forward(layer, op.in, op.out, NULL);
             if (sink != NULL) {
                 sink(sinkCtx, st.layer, layer->type, "fwd", op.out);
             }
@@ -101,7 +101,7 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
         case REMAT_STEP_LOSS_FORWARD:
             trainingStats = initTrainingStats(op.in);
             copyTensor(trainingStats->output, op.in);
-            trainingStats->loss = lossFns.forward(op.in, label, forwardReduction);
+            trainingStats->loss = lossFns.forward(op.in, label, forwardReduction, NULL);
             odtHookFire(ODT_EVENT_FORWARD_END);
             /* BACKWARD fires unconditionally -- also around a truncated or
              * skipped backward (all-frozen model) -- so the per-call event
@@ -110,7 +110,7 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
             odtHookFire(ODT_EVENT_BACKWARD_BEGIN);
             break;
         case REMAT_STEP_LOSS_BACKWARD:
-            lossFns.backward(op.in, label, op.out);
+            lossFns.backward(op.in, label, op.out, NULL);
             if (sink != NULL) {
                 sink(sinkCtx, modelSize, model[modelSize - 1]->type, "lossgrad", op.out);
             }
@@ -136,7 +136,7 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
             }
 #endif
             /* op.out is NULL at deepest: grads only, nothing below consumes dx. */
-            layerFunctions[layer->type].backward(layer, x, op.gradIn, op.out);
+            layerFunctions[layer->type].backward(layer, x, op.gradIn, op.out, NULL);
             break;
         }
         default:

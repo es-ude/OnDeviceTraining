@@ -64,7 +64,7 @@ trainingStats_t *legacyCalculateGrads(layer_t **model, size_t modelSize, lossCon
         layer_t *currentLayer = model[i];
         layerType_t currentLayerType = currentLayer->type;
         forwardFn_t forward = layerFunctions[currentLayerType].forward;
-        forward(currentLayer, layerOutputs[i], layerOutputs[i + 1]);
+        forward(currentLayer, layerOutputs[i], layerOutputs[i + 1], NULL);
         if (sink != NULL) {
             sink(sinkCtx, i, currentLayerType, "fwd", layerOutputs[i + 1]);
         }
@@ -76,7 +76,7 @@ trainingStats_t *legacyCalculateGrads(layer_t **model, size_t modelSize, lossCon
     // LOSS
 
     lossFunctions_t lossFns = lossFunctions[lossConfig.funcType];
-    float loss = lossFns.forward(layerOutputs[modelSize], label, forwardReduction);
+    float loss = lossFns.forward(layerOutputs[modelSize], label, forwardReduction, NULL);
     trainingStats->loss = loss;
     odtHookFire(ODT_EVENT_FORWARD_END);
 
@@ -97,7 +97,7 @@ trainingStats_t *legacyCalculateGrads(layer_t **model, size_t modelSize, lossCon
     if (deepest < modelSize) {
         tensor_t gradNext;
         legacyInitGradTensor(&gradNext, layerOutputs[modelSize], NULL);
-        lossFns.backward(layerOutputs[modelSize], label, &gradNext);
+        lossFns.backward(layerOutputs[modelSize], label, &gradNext, NULL);
         if (sink != NULL) {
             sink(sinkCtx, modelSize, model[modelSize - 1]->type, "lossgrad", &gradNext);
         }
@@ -112,11 +112,11 @@ trainingStats_t *legacyCalculateGrads(layer_t **model, size_t modelSize, lossCon
             backwardFn_t backward = layerFunctions[layerType].backward;
             if ((size_t)i == deepest) {
                 /* deepest trainable layer: grads only -- nothing below consumes dx */
-                backward(model[i], layerOutputs[i], &gradNext, NULL);
+                backward(model[i], layerOutputs[i], &gradNext, NULL, NULL);
             } else {
                 tensor_t gradCurr;
                 legacyInitGradTensor(&gradCurr, layerOutputs[i], backwardWireQ(model[i]));
-                backward(model[i], layerOutputs[i], &gradNext, &gradCurr);
+                backward(model[i], layerOutputs[i], &gradNext, &gradCurr, NULL);
                 legacyDeInitGradTensor(&gradNext);
                 gradNext = gradCurr;
             }

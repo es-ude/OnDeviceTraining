@@ -17,9 +17,11 @@ float crossEntropyForwardFloat(tensor_t *softmaxOutput, tensor_t *distribution,
  * distribution's shape differs from it (#153).
  * Returns NaN (and prints one PRINT_ERROR per process) when any softmax
  * element is non-finite; it no longer aborts (#446). */
-float crossEntropyForward(tensor_t *softmaxOutput, tensor_t *distribution, reduction_t reduction);
+float crossEntropyForward(tensor_t *softmaxOutput, tensor_t *distribution, reduction_t reduction,
+                          const layerExec_t *exec);
 
-void crossEntropySoftmaxBackward(tensor_t *softmaxOutput, tensor_t *distribution, tensor_t *loss);
+void crossEntropySoftmaxBackward(tensor_t *softmaxOutput, tensor_t *distribution, tensor_t *loss,
+                                 const layerExec_t *exec);
 
 /* Per-loss MEAN-reduction scale factor (PyTorch parity).
  *

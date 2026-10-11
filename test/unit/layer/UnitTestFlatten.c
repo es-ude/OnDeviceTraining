@@ -97,7 +97,7 @@ void testFlattenForwardFloat_PreservesBytesAndReshapes(void) {
 
     /* 3. Build flatten layer. */
     layer_t *flatten = flattenLayerInit();
-    flattenForward(flatten, input, output);
+    flattenForward(flatten, input, output, NULL);
 
     /* 4. CAPTURE assertion values before frees. */
     float captured[12];
@@ -145,7 +145,7 @@ void testFlattenForwardSymInt32_PropagatesScaleAndValues(void) {
     outputQC->scale = 0.0f;
 
     layer_t *flatten = flattenLayerInit();
-    flattenForward(flatten, input, output);
+    flattenForward(flatten, input, output, NULL);
 
     /* 3. Capture scale-propagation observation before frees. */
     symInt32QConfig_t *inputQC = input->quantization->qConfig;
@@ -221,7 +221,7 @@ void testFlattenBackwardFloat_CopiesGradsUnchanged(void) {
     tensor_t *propLoss = initTensor(propLossShape, quantizationInitFloat(), NULL);
 
     layer_t *flatten = flattenLayerInit();
-    flattenBackward(flatten, forwardInput, loss, propLoss);
+    flattenBackward(flatten, forwardInput, loss, propLoss, NULL);
 
     /* 4. CAPTURE before frees. */
     float captured[6];
@@ -282,7 +282,7 @@ void testFlattenBackwardSymInt32_PropagatesScale(void) {
     propLossQC->scale = 0.0f;
 
     layer_t *flatten = flattenLayerInit();
-    flattenBackward(flatten, forwardInput, loss, propLoss);
+    flattenBackward(flatten, forwardInput, loss, propLoss, NULL);
 
     /* 4. Capture scale-propagation observation before frees. */
     symInt32QConfig_t *lossQC = loss->quantization->qConfig;
@@ -375,7 +375,7 @@ void testFlattenForwardCarriesBfpExponents(void) {
     tensor_t *input = buildBfpWireWithCodes(inDims, 3, 6, 8, 2, 4, inCodes, inExps);
     tensor_t *output = buildBfpWireWithCodes(outDims, 2, 6, 8, 2, 4, outCodes, outExps);
 
-    flattenForward(NULL, input, output);
+    flattenForward(NULL, input, output, NULL);
 
     int32_t got[8];
     unpackSignExtend(output->data, 6, 0, got, 8);
@@ -398,7 +398,7 @@ void testFlattenBackwardCarriesBfpExponents(void) {
     tensor_t *loss = buildBfpWireWithCodes(outDims, 2, 6, 8, 2, 4, lossCodes, lossExps);
     tensor_t *propLoss = buildBfpWireWithCodes(inDims, 3, 6, 8, 2, 4, propCodes, propExps);
 
-    flattenBackward(NULL, NULL, loss, propLoss);
+    flattenBackward(NULL, NULL, loss, propLoss, NULL);
 
     int32_t got[8];
     unpackSignExtend(propLoss->data, 6, 0, got, 8);
@@ -421,9 +421,9 @@ void testFlattenRejectsMixedAndMismatchedBfpWires(void) {
     tensor_t *otherGrid = buildBfpWireWithCodes(outDims, 2, 6, 8, 4, 2, NULL, NULL);
     tensor_t *floatOut = buildWire1D(8, quantizationInitFloat());
 
-    ASSERT_EXITS_WITH_FAILURE(flattenForward(NULL, bfpIn, floatOut));
-    ASSERT_EXITS_WITH_FAILURE(flattenForward(NULL, bfpIn, otherGrid));
-    ASSERT_EXITS_WITH_FAILURE(flattenBackward(NULL, NULL, bfpOut, otherGrid));
+    ASSERT_EXITS_WITH_FAILURE(flattenForward(NULL, bfpIn, floatOut, NULL));
+    ASSERT_EXITS_WITH_FAILURE(flattenForward(NULL, bfpIn, otherGrid, NULL));
+    ASSERT_EXITS_WITH_FAILURE(flattenBackward(NULL, NULL, bfpOut, otherGrid, NULL));
 
     freeTensor(floatOut);
     freeTensor(otherGrid);
@@ -441,8 +441,8 @@ void testFlattenRejectsUnequalBfpElementCounts(void) {
     tensor_t *bfpIn = buildBfpWireWithCodes(inDims, 3, 6, 8, 1, 0, NULL, NULL);
     tensor_t *shortOut = buildBfpWireWithCodes(shortOutDims, 2, 6, 8, 1, 0, NULL, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(flattenForward(NULL, bfpIn, shortOut));
-    ASSERT_EXITS_WITH_FAILURE(flattenBackward(NULL, NULL, bfpIn, shortOut));
+    ASSERT_EXITS_WITH_FAILURE(flattenForward(NULL, bfpIn, shortOut, NULL));
+    ASSERT_EXITS_WITH_FAILURE(flattenBackward(NULL, NULL, bfpIn, shortOut, NULL));
 
     freeTensor(shortOut);
     freeTensor(bfpIn);

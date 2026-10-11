@@ -7,6 +7,7 @@
 #include "Tensor.h"
 
 typedef struct layer layer_t;
+typedef struct layerExec layerExec_t;
 
 typedef struct linearConfig {
     parameter_t *weights;
@@ -52,10 +53,11 @@ void linearForwardSymInt32Grouped(tensor_t *w, tensor_t *b, tensor_t *input, ten
  * direct public entry point. */
 void linearForwardBfp(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output);
 // IMPORTANT: Used for mismatched quantizations
-void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output);
+void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output,
+                   const layerExec_t *exec);
 
 void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss,
-                    tensor_t *propLossTensor);
+                    tensor_t *propLossTensor, const layerExec_t *exec);
 
 /* Raw-emit kernels: each writes into the passed tensor without accumulating;
  * accumulation and width restoration are handled by the executeOp epilogue. */

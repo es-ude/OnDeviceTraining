@@ -33,7 +33,7 @@ void testMSEForward_MeanReturnsPerSampleMean() {
     tensor_t *label = initTensor(labelShape, quantizationInitFloat(), NULL);
     tensorFillFromFloatBuffer(label, (float[]){2.f, 4.f, 6.f}, 3);
 
-    float capturedLoss = mseLossForward(output, label, REDUCTION_MEAN);
+    float capturedLoss = mseLossForward(output, label, REDUCTION_MEAN, NULL);
 
     freeTensor(label);
     freeTensor(output);
@@ -64,7 +64,7 @@ void testMSEForward_SumReturnsRawSum() {
     tensor_t *label = initTensor(labelShape, quantizationInitFloat(), NULL);
     tensorFillFromFloatBuffer(label, (float[]){2.f, 4.f, 6.f}, 3);
 
-    float capturedLoss = mseLossForward(output, label, REDUCTION_SUM);
+    float capturedLoss = mseLossForward(output, label, REDUCTION_SUM, NULL);
 
     freeTensor(label);
     freeTensor(output);
@@ -161,7 +161,7 @@ void testMSELossBackward_SymInt32WritesRawPerElementGrad() {
     memset(resultSymInt32Data, 0, numberOfElements * sizeof(int32_t));
     setTensorValuesForConversion(resultSymInt32Data, &resultSymInt32Q, &result, &resultSymInt32);
 
-    mseLossBackward(&modelOutputSymInt32, &labelSymInt32, &resultSymInt32);
+    mseLossBackward(&modelOutputSymInt32, &labelSymInt32, &resultSymInt32, NULL);
     convertTensor(&resultSymInt32, &result, NULL);
 
     /* Raw per-element gradient over the [1, 3] wire; wider tolerance for fixed-point. */
@@ -242,8 +242,8 @@ void testMseLossForwardBfpEqualsFloat32OnExactGrid(void) {
     tensor_t *floatOut = buildFloatTensor1D(4, exactValues);
     tensor_t *label = buildFloatTensor1D(4, labelValues);
 
-    float bfpLoss = mseLossForward(bfpOut, label, REDUCTION_MEAN);
-    float floatLoss = mseLossForward(floatOut, label, REDUCTION_MEAN);
+    float bfpLoss = mseLossForward(bfpOut, label, REDUCTION_MEAN, NULL);
+    float floatLoss = mseLossForward(floatOut, label, REDUCTION_MEAN, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT_MESSAGE(floatLoss, bfpLoss,
                                     "an exact-grid BFP output must give the FLOAT32 loss");
@@ -268,7 +268,7 @@ void testMseLossBackwardBfpRequantizesIntoFreshGrid(void) {
     tensor_t *label = buildFloatTensor1D(4, labelValues);
     tensor_t *result = buildBfpTensor1DWithCodes(4, 6, 8, sentinel, 127);
 
-    mseLossBackward(bfpOut, label, result);
+    mseLossBackward(bfpOut, label, result, NULL);
 
     int32_t got[4];
     unpackSignExtend(result->data, 6, 0, got, 4);
@@ -297,7 +297,7 @@ void testMseLossForwardBfpRejectsLabelCountMismatch(void) {
     float labelValues[5] = {7.0f, -4.0f, 10.0f, 16.0f, 1.0f};
     tensor_t *label = buildFloatTensor1D(5, labelValues);
 
-    ASSERT_EXITS_WITH_FAILURE((void)mseLossForward(bfpOut, label, REDUCTION_MEAN));
+    ASSERT_EXITS_WITH_FAILURE((void)mseLossForward(bfpOut, label, REDUCTION_MEAN, NULL));
 
     freeTensor(label);
     freeTensor(bfpOut);
@@ -311,7 +311,7 @@ void testMseLossBackwardBfpRejectsLabelCountMismatch(void) {
     tensor_t *label = buildFloatTensor1D(5, labelValues);
     tensor_t *result = buildBfpTensor1DWithCodes(4, 6, 8, sentinel, 127);
 
-    ASSERT_EXITS_WITH_FAILURE(mseLossBackward(bfpOut, label, result));
+    ASSERT_EXITS_WITH_FAILURE(mseLossBackward(bfpOut, label, result, NULL));
 
     freeTensor(result);
     freeTensor(label);
@@ -333,7 +333,7 @@ void testMseLossBackwardBfpRejectsResultCountMismatch(void) {
     tensor_t *label = buildFloatTensor1D(4, labelValues);
     tensor_t *result = buildBfpTensor1DWithCodes(5, 6, 8, sentinel, 127);
 
-    ASSERT_EXITS_WITH_FAILURE(mseLossBackward(bfpOut, label, result));
+    ASSERT_EXITS_WITH_FAILURE(mseLossBackward(bfpOut, label, result, NULL));
 
     freeTensor(result);
     freeTensor(label);
@@ -358,7 +358,7 @@ void testMseLossForwardFloat32RejectsLabelCountMismatch(void) {
     tensor_t *output = buildFloatTensor1D(4, outValues);
     tensor_t *label = buildFloatTensor1D(5, labelValues);
 
-    ASSERT_EXITS_WITH_FAILURE((void)mseLossForward(output, label, REDUCTION_MEAN));
+    ASSERT_EXITS_WITH_FAILURE((void)mseLossForward(output, label, REDUCTION_MEAN, NULL));
 
     freeTensor(label);
     freeTensor(output);
@@ -372,7 +372,7 @@ void testMseLossBackwardFloat32RejectsResultCountMismatch(void) {
     tensor_t *label = buildFloatTensor1D(4, labelValues);
     tensor_t *result = buildFloatTensor1D(5, resultValues);
 
-    ASSERT_EXITS_WITH_FAILURE(mseLossBackward(modelOutput, label, result));
+    ASSERT_EXITS_WITH_FAILURE(mseLossBackward(modelOutput, label, result, NULL));
 
     freeTensor(result);
     freeTensor(label);
@@ -387,7 +387,7 @@ void testMseLossForwardRejectsRank1Output(void) {
     size_t dims[] = {3};
     tensor_t *output = buildFloatTensorShaped(dims, 1, (float[]){1.f, 2.f, 3.f});
     tensor_t *label = buildFloatTensorShaped(dims, 1, (float[]){2.f, 4.f, 6.f});
-    ASSERT_EXITS_WITH_FAILURE((void)mseLossForward(output, label, REDUCTION_MEAN));
+    ASSERT_EXITS_WITH_FAILURE((void)mseLossForward(output, label, REDUCTION_MEAN, NULL));
     freeTensor(label);
     freeTensor(output);
 }
@@ -406,7 +406,7 @@ static void expectMseForwardDiesOnEmpty(size_t d0, size_t d1) {
     tensor_t label;
     setTensorValues(&output, (uint8_t *)dummy, &shape, &q, NULL);
     setTensorValues(&label, (uint8_t *)dummy, &shape, &q, NULL);
-    ASSERT_EXITS_WITH_FAILURE((void)mseLossForward(&output, &label, REDUCTION_MEAN));
+    ASSERT_EXITS_WITH_FAILURE((void)mseLossForward(&output, &label, REDUCTION_MEAN, NULL));
 }
 
 void testMseLossForwardRejectsEmptyBatch(void) {
@@ -423,7 +423,7 @@ void testMseLossForwardRejectsLabelRankMismatch(void) {
     float v[6] = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f};
     tensor_t *output = buildFloatTensorShaped(outDims, 2, v);
     tensor_t *label = buildFloatTensorShaped(labelDims, 3, v);
-    ASSERT_EXITS_WITH_FAILURE((void)mseLossForward(output, label, REDUCTION_MEAN));
+    ASSERT_EXITS_WITH_FAILURE((void)mseLossForward(output, label, REDUCTION_MEAN, NULL));
     freeTensor(label);
     freeTensor(output);
 }
@@ -437,7 +437,7 @@ void testMseLossForwardRejectsLeadingAxisMismatch(void) {
     float v[6] = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f};
     tensor_t *output = buildFloatTensorShaped(outDims, 2, v);
     tensor_t *label = buildFloatTensorShaped(labelDims, 2, v);
-    ASSERT_EXITS_WITH_FAILURE((void)mseLossForward(output, label, REDUCTION_MEAN));
+    ASSERT_EXITS_WITH_FAILURE((void)mseLossForward(output, label, REDUCTION_MEAN, NULL));
     freeTensor(label);
     freeTensor(output);
 }
@@ -450,7 +450,7 @@ void testMseLossForwardRejectsTransposedFeatureLayout(void) {
     float v[6] = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f};
     tensor_t *output = buildFloatTensorShaped(outDims, 3, v);
     tensor_t *label = buildFloatTensorShaped(labelDims, 3, v);
-    ASSERT_EXITS_WITH_FAILURE((void)mseLossForward(output, label, REDUCTION_MEAN));
+    ASSERT_EXITS_WITH_FAILURE((void)mseLossForward(output, label, REDUCTION_MEAN, NULL));
     freeTensor(label);
     freeTensor(output);
 }
@@ -461,7 +461,7 @@ void testMseLossForwardAcceptsMatchingRank3Shapes(void) {
     size_t dims[] = {1, 1, 4};
     tensor_t *output = buildFloatTensorShaped(dims, 3, (float[]){1.f, 2.f, 3.f, 4.f});
     tensor_t *label = buildFloatTensorShaped(dims, 3, (float[]){2.f, 2.f, 3.f, 6.f});
-    float loss = mseLossForward(output, label, REDUCTION_SUM);
+    float loss = mseLossForward(output, label, REDUCTION_SUM, NULL);
     freeTensor(label);
     freeTensor(output);
     TEST_ASSERT_FLOAT_WITHIN(1e-6f, 5.0f, loss); /* 1 + 0 + 0 + 4 */

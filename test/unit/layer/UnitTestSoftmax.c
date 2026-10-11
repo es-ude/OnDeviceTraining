@@ -46,7 +46,7 @@ void unitTestSoftmaxForwardFloat() {
     layerQuantInitUniform(&lq, floatQ);
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
     layerFunctions_t softmaxFns = layerFunctions[SOFTMAX];
-    softmaxFns.forward(softmaxLayer, input, output);
+    softmaxFns.forward(softmaxLayer, input, output, NULL);
 
     /* 4. CAPTURE. */
     float captured[6];
@@ -97,7 +97,7 @@ void unitTestSoftmaxForwardSymInt32() {
     layerQuantInitUniform(&lq, symIntQ);
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
     layerFunctions_t softmaxFns = layerFunctions[SOFTMAX];
-    softmaxFns.forward(softmaxLayer, input, output);
+    softmaxFns.forward(softmaxLayer, input, output, NULL);
 
     /* 4. Convert SymInt32 output back to Float for comparison. */
     size_t *outFloatDims = reserveMemory(2 * sizeof(size_t));
@@ -178,7 +178,7 @@ void unitTestSoftmaxBackwardFloat() {
     layerQuantInitUniform(&lq, floatQ);
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
     layerFunctions_t softmaxFns = layerFunctions[SOFTMAX];
-    softmaxFns.backward(softmaxLayer, input, loss, propLoss);
+    softmaxFns.backward(softmaxLayer, input, loss, propLoss, NULL);
 
     /* 5. CAPTURE. */
     float captured[6];
@@ -247,7 +247,7 @@ void unitTestSoftmaxBackwardSymInt32() {
     layerQuantInitUniform(&lq, symIntQ);
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
     layerFunctions_t softmaxFns = layerFunctions[SOFTMAX];
-    softmaxFns.backward(softmaxLayer, input, loss, propLoss);
+    softmaxFns.backward(softmaxLayer, input, loss, propLoss, NULL);
 
     /* 5. Convert SymInt32 propLoss back to Float for comparison. */
     size_t *propLossFloatDims = reserveMemory(2 * sizeof(size_t));
@@ -311,7 +311,7 @@ void testSoftmaxForwardLargeLogitsStaysFinite(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, floatQ);
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
-    layerFunctions[SOFTMAX].forward(softmaxLayer, input, output);
+    layerFunctions[SOFTMAX].forward(softmaxLayer, input, output, NULL);
 
     float captured[3];
     for (size_t i = 0; i < 3; i++) {
@@ -358,7 +358,7 @@ void testSoftmaxForwardSymLargeLogitsStaysFinite(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, symIntQ);
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
-    layerFunctions[SOFTMAX].forward(softmaxLayer, input, output);
+    layerFunctions[SOFTMAX].forward(softmaxLayer, input, output, NULL);
 
     size_t *outFloatDims = reserveMemory(2 * sizeof(size_t));
     outFloatDims[0] = 1;
@@ -523,7 +523,7 @@ void testSoftmaxForwardRowsEachSumToOne(void) {
     layerQuantInitUniform(&lq, floatQ);
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
 
-    layerFunctions[SOFTMAX].forward(softmaxLayer, input, output);
+    layerFunctions[SOFTMAX].forward(softmaxLayer, input, output, NULL);
 
     float rowSums[4];
     for (size_t r = 0; r < 4; r++) {
@@ -556,7 +556,7 @@ void testSoftmaxForwardRank1IsOneRow(void) {
     layerQuantInitUniform(&lq, floatQ);
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
 
-    layerFunctions[SOFTMAX].forward(softmaxLayer, input, output);
+    layerFunctions[SOFTMAX].forward(softmaxLayer, input, output, NULL);
 
     float captured[6];
     for (size_t i = 0; i < 6; i++) {
@@ -585,7 +585,7 @@ void testSoftmaxForwardRank3RowSpansTrailingAxes(void) {
     layerQuantInitUniform(&lq, floatQ);
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
 
-    layerFunctions[SOFTMAX].forward(softmaxLayer, input, output);
+    layerFunctions[SOFTMAX].forward(softmaxLayer, input, output, NULL);
 
     float captured[12];
     for (size_t i = 0; i < 12; i++) {
@@ -615,7 +615,7 @@ void testSoftmaxForwardMixedScaleRowsStayFinite(void) {
     layerQuantInitUniform(&lq, floatQ);
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
 
-    layerFunctions[SOFTMAX].forward(softmaxLayer, input, output);
+    layerFunctions[SOFTMAX].forward(softmaxLayer, input, output, NULL);
 
     float captured[6];
     for (size_t i = 0; i < 6; i++) {
@@ -647,7 +647,7 @@ void testSoftmaxForwardRejectsTransposedMultiRow(void) {
     layerQuantInitUniform(&lq, floatQ);
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
 
-    ASSERT_EXITS_WITH_FAILURE(layerFunctions[SOFTMAX].forward(softmaxLayer, input, output));
+    ASSERT_EXITS_WITH_FAILURE(layerFunctions[SOFTMAX].forward(softmaxLayer, input, output, NULL));
 
     freeSoftmaxLayer(softmaxLayer);
     freeTensor(output);
@@ -671,7 +671,7 @@ void testSoftmaxForwardTransposedSingleRowIsOneRow(void) {
     layerQuantInitUniform(&lq, floatQ);
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
 
-    layerFunctions[SOFTMAX].forward(softmaxLayer, input, output);
+    layerFunctions[SOFTMAX].forward(softmaxLayer, input, output, NULL);
 
     float captured[6];
     for (size_t i = 0; i < 6; i++) {
@@ -701,7 +701,7 @@ void testSoftmaxForwardEmptyRowsAreNoOp(void) {
     layerQuantInitUniform(&lq, floatQ);
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
 
-    layerFunctions[SOFTMAX].forward(softmaxLayer, input, output);
+    layerFunctions[SOFTMAX].forward(softmaxLayer, input, output, NULL);
     size_t capturedCount = calcNumberOfElementsByTensor(output);
 
     freeSoftmaxLayer(softmaxLayer);
@@ -725,7 +725,7 @@ void testSoftmaxBackwardRank1IsOneRow(void) {
     layerQuantInitUniform(&lq, floatQ);
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
 
-    layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss);
+    layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss, NULL);
 
     float captured[6];
     for (size_t i = 0; i < 6; i++) {
@@ -756,7 +756,7 @@ void testSoftmaxBackwardRank3RowSpansTrailingAxes(void) {
     layerQuantInitUniform(&lq, floatQ);
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
 
-    layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss);
+    layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss, NULL);
 
     float captured[12];
     for (size_t i = 0; i < 12; i++) {
@@ -787,7 +787,7 @@ void testSoftmaxBackwardRejectsTransposedMultiRow(void) {
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
 
     ASSERT_EXITS_WITH_FAILURE(
-        layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss));
+        layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss, NULL));
 
     freeSoftmaxLayer(softmaxLayer);
     freeTensor(propLoss);
@@ -809,7 +809,7 @@ void testSoftmaxBackwardEmptyRowsAreNoOp(void) {
     layerQuantInitUniform(&lq, floatQ);
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
 
-    layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss);
+    layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss, NULL);
     size_t capturedCount = calcNumberOfElementsByTensor(propLoss);
 
     freeSoftmaxLayer(softmaxLayer);
@@ -842,7 +842,7 @@ void testSoftmaxBackwardSymEmptyRowsAreNoOp(void) {
         tensor_t *propLoss =
             buildSoftmaxWireNdQ(shapes[s], 2, NULL, quantizationInitSymInt32(HALF_AWAY));
 
-        layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss);
+        layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss, NULL);
         size_t capturedCount = calcNumberOfElementsByTensor(propLoss);
 
         freeTensor(propLoss);
@@ -876,7 +876,7 @@ static void assertSoftmaxBackwardRejectsWire(bool sym, const size_t *lossDims,
     tensor_t *propLoss = buildSoftmaxWireNdQ(propLossDims, 2, NULL, softmaxWireQ(sym));
 
     ASSERT_EXITS_WITH_FAILURE(
-        layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss));
+        layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss, NULL));
 
     freeTensor(propLoss);
     freeTensor(loss);
@@ -936,12 +936,12 @@ void testSoftmaxBackwardRejectsTransposedMultiRowGrads(void) {
 
     transposeTensor(loss, 0, 1);
     ASSERT_EXITS_WITH_FAILURE(
-        layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss));
+        layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss, NULL));
     transposeTensor(loss, 0, 1);
 
     transposeTensor(propLoss, 0, 1);
     ASSERT_EXITS_WITH_FAILURE(
-        layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss));
+        layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss, NULL));
 
     freeTensor(propLoss);
     freeTensor(loss);
@@ -1014,7 +1014,7 @@ void unitTestSoftmaxForwardBfpNativeTrunc(void) {
     /* Derived through the ordinary config path -- pins that the flip holds. */
     TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->forwardMath.type);
 
-    layerFunctions[SOFTMAX].forward(softmaxLayer, in, out);
+    layerFunctions[SOFTMAX].forward(softmaxLayer, in, out, NULL);
 
     /* 8 = kSmBfpN, 2 = kSmBfpOutNumGroups (literal sizes: a static-const
      * bound would make these VLAs). */
@@ -1045,7 +1045,7 @@ void unitTestSoftmaxForwardBfpNativeHalfAway(void) {
     TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->forwardMath.type);
     softmaxSetBfpExpShiftRounding(softmaxLayer, BFP_SHIFT_HALF_AWAY);
 
-    layerFunctions[SOFTMAX].forward(softmaxLayer, in, out);
+    layerFunctions[SOFTMAX].forward(softmaxLayer, in, out, NULL);
 
     int32_t got[8];
     uint8_t gotExps[2];
@@ -1082,9 +1082,9 @@ void unitTestSoftmaxForwardBfpCoarseNegativeBlock(void) {
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
     TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->forwardMath.type);
 
-    layerFunctions[SOFTMAX].forward(softmaxLayer, in, outTrunc);
+    layerFunctions[SOFTMAX].forward(softmaxLayer, in, outTrunc, NULL);
     softmaxSetBfpExpShiftRounding(softmaxLayer, BFP_SHIFT_HALF_AWAY);
-    layerFunctions[SOFTMAX].forward(softmaxLayer, in, outHalfAway);
+    layerFunctions[SOFTMAX].forward(softmaxLayer, in, outHalfAway, NULL);
 
     int32_t gotTrunc[8];
     uint8_t gotTruncExps[2];
@@ -1130,7 +1130,7 @@ void unitTestSoftmaxForwardBfpCoarseSaturation(void) {
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
     TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->forwardMath.type);
 
-    layerFunctions[SOFTMAX].forward(softmaxLayer, in, out);
+    layerFunctions[SOFTMAX].forward(softmaxLayer, in, out, NULL);
 
     int32_t got[8];
     uint8_t gotExps[2];
@@ -1161,7 +1161,7 @@ void unitTestSoftmaxForwardBfpStagedWidths(void) {
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
     TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->forwardMath.type);
 
-    layerFunctions[SOFTMAX].forward(softmaxLayer, in, out);
+    layerFunctions[SOFTMAX].forward(softmaxLayer, in, out, NULL);
 
     int32_t got[8];
     uint8_t gotExps[2];
@@ -1194,7 +1194,7 @@ void testSoftmaxForwardBfpRequiresBfpOutputQ(void) {
     tensorFillFromFloatBuffer(in, (float *)kSmBfpBXValues, kSmBfpBXValues_len);
     tensor_t *out = buildSoftmaxWire1D(8, quantizationInitFloat());
 
-    ASSERT_EXITS_WITH_FAILURE(layerFunctions[SOFTMAX].forward(softmaxLayer, in, out));
+    ASSERT_EXITS_WITH_FAILURE(layerFunctions[SOFTMAX].forward(softmaxLayer, in, out, NULL));
 
     freeTensor(out);
     freeTensor(in);
@@ -1228,7 +1228,7 @@ void unitTestSoftmaxBackwardBfpNative(void) {
     /* Derived through the ordinary config path -- pins that the flip holds. */
     TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->propLossMath.type);
 
-    layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, propLoss);
+    layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, propLoss, NULL);
 
     int32_t got[8];
     uint8_t gotExps[2];
@@ -1262,7 +1262,7 @@ void unitTestSoftmaxBackwardBfpStagedLoss(void) {
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
     TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->propLossMath.type);
 
-    layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, propLoss);
+    layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, propLoss, NULL);
 
     int32_t got[8];
     uint8_t gotExps[2];
@@ -1300,7 +1300,8 @@ void testSoftmaxBackwardBfpRequiresBfpPropLossQ(void) {
                               kSmBfpBwdStagedDLdsValues_len);
     tensor_t *propLoss = buildSoftmaxWire1D(8, quantizationInitFloat());
 
-    ASSERT_EXITS_WITH_FAILURE(layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(
+        layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, propLoss, NULL));
 
     freeTensor(propLoss);
     freeTensor(loss);
@@ -1330,7 +1331,8 @@ void testSoftmaxBackwardBfpRejectsCountMismatchLoss(void) {
     layerQuantInitUniform(&lq, propLoss->quantization);
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
 
-    ASSERT_EXITS_WITH_FAILURE(layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(
+        layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, propLoss, NULL));
 
     freeSoftmaxLayer(softmaxLayer);
     freeTensor(propLoss);
@@ -1358,7 +1360,7 @@ void unitTestSoftmaxBackwardBfpNullPropLossIsNoOp(void) {
         buildSmBfpWireWithCodes(8, (uint8_t)kSmBfpXMantissaBits, (uint8_t)kSmBfpXExponentBits, 1, 0,
                                 kSmBfpBwdDLdsCodes, kSmBfpBwdDLdsExponents);
 
-    layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, NULL);
+    layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, NULL, NULL);
 
     int32_t gotIn[8];
     int32_t gotLoss[8];
@@ -1393,18 +1395,18 @@ void testSoftmaxBackwardFloatArmRejectsBfpWire(void) {
     tensor_t *loss = buildSoftmaxWire1D(6, quantizationInitFloat());
     tensor_t *bfpPropLoss = buildSoftmaxWire1D(6, quantizationInitBfp(8, 8, HALF_AWAY));
     ASSERT_EXITS_WITH_FAILURE(
-        layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, bfpPropLoss));
+        layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, bfpPropLoss, NULL));
 
     /* input BFP: the logits the recompute reads. */
     tensor_t *bfpInput = buildSoftmaxWire1D(6, quantizationInitBfp(8, 8, HALF_AWAY));
     tensor_t *propLoss = buildSoftmaxWire1D(6, quantizationInitFloat());
     ASSERT_EXITS_WITH_FAILURE(
-        layerFunctions[SOFTMAX].backward(softmaxLayer, bfpInput, loss, propLoss));
+        layerFunctions[SOFTMAX].backward(softmaxLayer, bfpInput, loss, propLoss, NULL));
 
     /* loss BFP: the incoming gradient. */
     tensor_t *bfpLoss = buildSoftmaxWire1D(6, quantizationInitBfp(8, 8, HALF_AWAY));
     ASSERT_EXITS_WITH_FAILURE(
-        layerFunctions[SOFTMAX].backward(softmaxLayer, input, bfpLoss, propLoss));
+        layerFunctions[SOFTMAX].backward(softmaxLayer, input, bfpLoss, propLoss, NULL));
 
     freeTensor(bfpLoss);
     freeTensor(propLoss);
@@ -1435,16 +1437,16 @@ void testSoftmaxBackwardSymArmRejectsBfpWire(void) {
     tensor_t *loss = buildSoftmaxWire1D(6, quantizationInitFloat());
     tensor_t *bfpPropLoss = buildSoftmaxWire1D(6, quantizationInitBfp(8, 8, HALF_AWAY));
     ASSERT_EXITS_WITH_FAILURE(
-        layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, bfpPropLoss));
+        layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, bfpPropLoss, NULL));
 
     tensor_t *bfpInput = buildSoftmaxWire1D(6, quantizationInitBfp(8, 8, HALF_AWAY));
     tensor_t *propLoss = buildSoftmaxWire1D(6, quantizationInitFloat());
     ASSERT_EXITS_WITH_FAILURE(
-        layerFunctions[SOFTMAX].backward(softmaxLayer, bfpInput, loss, propLoss));
+        layerFunctions[SOFTMAX].backward(softmaxLayer, bfpInput, loss, propLoss, NULL));
 
     tensor_t *bfpLoss = buildSoftmaxWire1D(6, quantizationInitBfp(8, 8, HALF_AWAY));
     ASSERT_EXITS_WITH_FAILURE(
-        layerFunctions[SOFTMAX].backward(softmaxLayer, input, bfpLoss, propLoss));
+        layerFunctions[SOFTMAX].backward(softmaxLayer, input, bfpLoss, propLoss, NULL));
 
     freeTensor(bfpLoss);
     freeTensor(propLoss);
@@ -1488,7 +1490,7 @@ void testSoftmaxForwardBfpRejectsMultiRow(void) {
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
     TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->forwardMath.type);
 
-    ASSERT_EXITS_WITH_FAILURE(layerFunctions[SOFTMAX].forward(softmaxLayer, in, out));
+    ASSERT_EXITS_WITH_FAILURE(layerFunctions[SOFTMAX].forward(softmaxLayer, in, out, NULL));
 
     freeSoftmaxLayer(softmaxLayer);
     freeTensor(out);
@@ -1510,7 +1512,8 @@ void testSoftmaxBackwardBfpRejectsMultiRow(void) {
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
     TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->propLossMath.type);
 
-    ASSERT_EXITS_WITH_FAILURE(layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(
+        layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, propLoss, NULL));
 
     freeSoftmaxLayer(softmaxLayer);
     freeTensor(propLoss);
@@ -1532,7 +1535,7 @@ void unitTestSoftmaxForwardBfpSingleRowRank2MatchesRank1(void) {
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
     TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->forwardMath.type);
 
-    layerFunctions[SOFTMAX].forward(softmaxLayer, in, out);
+    layerFunctions[SOFTMAX].forward(softmaxLayer, in, out, NULL);
 
     int32_t got[8];
     uint8_t gotExps[2];
@@ -1565,7 +1568,7 @@ void unitTestSoftmaxBackwardBfpSingleRowRank2MatchesRank1(void) {
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
     TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->propLossMath.type);
 
-    layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, propLoss);
+    layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, propLoss, NULL);
 
     int32_t got[8];
     uint8_t gotExps[2];

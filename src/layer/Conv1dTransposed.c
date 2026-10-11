@@ -153,7 +153,8 @@ static const symQConfig_t *groupedWeightViewOrNull(const tensor_t *weights,
     return NULL;
 }
 
-void conv1dTransposedForward(layer_t *layer, tensor_t *input, tensor_t *output) {
+void conv1dTransposedForward(layer_t *layer, tensor_t *input, tensor_t *output,
+                             const layerExec_t *exec) {
     conv1dTransposedConfig_t *cfg = layer->config->conv1dTransposed;
     tensor_t *weightTensor = cfg->weights->param;
     tensor_t *biasTensor = cfg->bias ? cfg->bias->param : NULL;
@@ -914,7 +915,7 @@ static void propLossKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
 }
 
 void conv1dTransposedBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
-                              tensor_t *propLoss) {
+                              tensor_t *propLoss, const layerExec_t *exec) {
     conv1dTransposedConfig_t *cfg = layer->config->conv1dTransposed;
     tensor_t *weightTensor = cfg->weights->param;
 

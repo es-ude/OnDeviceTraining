@@ -257,7 +257,8 @@ static void softmaxBfpRequireSingleRow(const tensor_t *t, const char *where) {
     }
 }
 
-void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output) {
+void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output,
+                    const layerExec_t *exec) {
     softmaxConfig_t *cfg = softmaxLayer->config->softmax;
     switch (cfg->forwardMath.type) {
     case ARITH_BFP: {
@@ -460,7 +461,8 @@ static void softmaxBackwardKernelBfp(tensor_t **ops, size_t nOps, tensor_t *rawO
     }
 }
 
-void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, tensor_t *propLoss) {
+void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, tensor_t *propLoss,
+                     const layerExec_t *exec) {
     softmaxConfig_t *cfg = softmaxLayer->config->softmax;
     switch (cfg->propLossMath.type) {
     case ARITH_FLOAT32:

@@ -151,6 +151,12 @@ target_link_libraries(BatchNorm1d PRIVATE
         Common
 )
 
+add_library(LayerExec LayerExec.c)
+target_include_directories(LayerExec PUBLIC include)
+target_link_libraries(LayerExec PRIVATE
+        RNG
+)
+
 add_library(Layer Layer.c)
 target_include_directories(Layer PUBLIC include)
 target_link_libraries(Layer PRIVATE

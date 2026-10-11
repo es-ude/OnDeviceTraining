@@ -183,7 +183,7 @@ void testSymForwardDequantInvariantsMultiGroup(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormForward(&layer, in, out);
+    layerNormForward(&layer, in, out, NULL);
 
     float scale = symScaleOf(out);
     int32_t *m = (int32_t *)out->data;
@@ -248,7 +248,7 @@ void testForwardFloatSingleGroup(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormForward(&layer, in, out);
+    layerNormForward(&layer, in, out, NULL);
 
     float captured[4];
     for (size_t i = 0; i < 4; i++) {
@@ -295,7 +295,7 @@ void testForwardFloatMultiGroup(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormForward(&layer, in, out);
+    layerNormForward(&layer, in, out, NULL);
 
     float captured[6];
     for (size_t i = 0; i < 6; i++) {
@@ -342,7 +342,7 @@ void testForwardFloatTransposedInput(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormForward(&layer, in, out);
+    layerNormForward(&layer, in, out, NULL);
 
     /* Read back logically via the same offset map the kernel used:
      * logical row0 -> [-1.22472, 0, 3.67417], row1 -> [0,0,0]. */
@@ -388,7 +388,7 @@ void testVtableForwardFloatSingleGroup(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerFunctions[LAYERNORM].forward(&layer, in, out);
+    layerFunctions[LAYERNORM].forward(&layer, in, out, NULL);
 
     float captured[4];
     for (size_t i = 0; i < 4; i++) {
@@ -431,7 +431,7 @@ void testBackwardFloatSingleGroup(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerFunctions[LAYERNORM].backward(&layer, fwdIn, loss, propLoss);
+    layerFunctions[LAYERNORM].backward(&layer, fwdIn, loss, propLoss, NULL);
 
     float dx[4], dgamma[4], dbeta[4];
     for (size_t i = 0; i < 4; i++) {
@@ -484,7 +484,7 @@ void testBackwardFloatMultiGroupAccumulatesGradients(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormBackward(&layer, fwdIn, loss, propLoss);
+    layerNormBackward(&layer, fwdIn, loss, propLoss, NULL);
 
     float dgamma[2], dbeta[2], dx[4];
     for (size_t i = 0; i < 2; i++) {
@@ -549,7 +549,7 @@ void testBackwardFloatDivergentLayouts(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormBackward(&layer, fwdIn, loss, propLoss);
+    layerNormBackward(&layer, fwdIn, loss, propLoss, NULL);
 
     float dx[6], dgamma[3], dbeta[3];
     for (size_t i = 0; i < 6; i++) {
@@ -618,8 +618,8 @@ void testBackwardFloatFrozenTwinDxIdenticalGradsZero(void) {
     layerConfig_t lcfgFrozen;
     layer_t layerFrozen = makeLayerNormLayer(&cfgFrozen, &lcfgFrozen);
 
-    layerNormBackward(&layerTrainable, fwdIn, loss, propLossTrainable);
-    layerNormBackward(&layerFrozen, fwdIn, loss, propLossFrozen);
+    layerNormBackward(&layerTrainable, fwdIn, loss, propLossTrainable, NULL);
+    layerNormBackward(&layerFrozen, fwdIn, loss, propLossFrozen, NULL);
 
     bool trainableGradNonzero = false;
     bool frozenGradAllZero = true;
@@ -689,7 +689,7 @@ void testFactoryBuildsGammaOnesBetaZerosAndForwards(void) {
     size_t dims[] = {4};
     tensor_t *in = buildFloatTensorND(1, dims, (float[]){1.f, -1.f, 1.f, -1.f});
     tensor_t *out = buildFloatTensorND(1, dims, NULL);
-    layerFunctions[LAYERNORM].forward(layer, in, out);
+    layerFunctions[LAYERNORM].forward(layer, in, out, NULL);
     float y0 = ((float *)out->data)[0];
     float y1 = ((float *)out->data)[1];
 
@@ -848,7 +848,7 @@ static void runGoldForward(size_t numDims, const size_t *dims, const float *xVal
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormForward(&layer, in, out);
+    layerNormForward(&layer, in, out, NULL);
 
     float captured[64];
     for (size_t i = 0; i < count; i++) {
@@ -892,7 +892,7 @@ static void runGoldBackward(size_t numDims, const size_t *dims, const float *xVa
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormBackward(&layer, fwdIn, loss, propLoss);
+    layerNormBackward(&layer, fwdIn, loss, propLoss, NULL);
 
     float dx[64], dg[64], db[64];
     for (size_t i = 0; i < count; i++) {
@@ -968,7 +968,7 @@ static void runSymGoldForward(size_t numDims, const size_t *dims, size_t numNorm
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormForward(&layer, in, out);
+    layerNormForward(&layer, in, out, NULL);
 
     int32_t m[64];
     for (size_t i = 0; i < count; i++) {
@@ -1052,7 +1052,7 @@ static void runSymGoldBackward(
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerFunctions[LAYERNORM].backward(&layer, fwdIn, loss, propLoss);
+    layerFunctions[LAYERNORM].backward(&layer, fwdIn, loss, propLoss, NULL);
 
     int32_t dgm[64], dbm[64], dxm[64];
     for (size_t i = 0; i < normCount; i++) {
@@ -1147,8 +1147,8 @@ void testSymBackwardFrozenTwinDxIdenticalGradsUntouched(void) {
     layerConfig_t lcfgFrozen;
     layer_t layerFrozen = makeLayerNormLayer(&cfgFrozen, &lcfgFrozen);
 
-    layerNormBackward(&layerTrainable, fwdIn, loss, propLossTrainable);
-    layerNormBackward(&layerFrozen, fwdIn, loss, propLossFrozen);
+    layerNormBackward(&layerTrainable, fwdIn, loss, propLossTrainable, NULL);
+    layerNormBackward(&layerFrozen, fwdIn, loss, propLossFrozen, NULL);
 
     int32_t dxTrainable[12], dxFrozen[12];
     for (size_t i = 0; i < 12; i++) {
@@ -1237,7 +1237,7 @@ void testSymBackwardZeroLossGradEmitsZerosNeutralScale(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormBackward(&layer, fwdIn, loss, propLoss);
+    layerNormBackward(&layer, fwdIn, loss, propLoss, NULL);
 
     int32_t dxm[8], dgm[4], dbm[4];
     for (size_t i = 0; i < 8; i++) {
@@ -1418,7 +1418,7 @@ void testSymForwardConstantInputEmitsZeros(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormForward(&layer, in, out);
+    layerNormForward(&layer, in, out, NULL);
 
     int32_t mantissas[6];
     for (size_t i = 0; i < 6; i++) {
@@ -1479,7 +1479,7 @@ void testSymForwardMantissaInvariantsViaOnesGamma(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormForward(&layer, in, out);
+    layerNormForward(&layer, in, out, NULL);
 
     int32_t m[8];
     for (size_t i = 0; i < 8; i++) {
@@ -1545,7 +1545,7 @@ void testSymForwardConstantInputAppliesBeta(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormForward(&layer, in, out);
+    layerNormForward(&layer, in, out, NULL);
 
     float deq[6];
     float scale = symScaleOf(out);
@@ -1602,7 +1602,7 @@ void testSymForwardVarNearEpsReconstructsHalf(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormForward(&layer, in, out);
+    layerNormForward(&layer, in, out, NULL);
 
     float scale = symScaleOf(out);
     float deq[3];
@@ -1665,8 +1665,8 @@ void testSymForwardTransposedMatchesContiguous(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormForward(&layer, inC, outC);
-    layerNormForward(&layer, inT, outT);
+    layerNormForward(&layer, inC, outC, NULL);
+    layerNormForward(&layer, inT, outT, NULL);
 
     int32_t mC[8];
     int32_t mT[8];
@@ -1728,7 +1728,7 @@ void testFactorySymInt32StorageQuantizesGammaBeta(void) {
     size_t dims[] = {4};
     tensor_t *in = buildSymInt32TensorND(1, dims, (float[]){1.f, 2.f, 3.f, 4.f});
     tensor_t *out = buildSymInt32TensorND(1, dims, NULL);
-    layerFunctions[LAYERNORM].forward(layer, in, out);
+    layerFunctions[LAYERNORM].forward(layer, in, out, NULL);
     float outScale = symScaleOf(out);
     float deqMean = 0.f;
     for (size_t i = 0; i < 4; i++) {
@@ -1811,14 +1811,14 @@ void testSymBackwardPropLossScaleRefreshedEveryCall(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormBackward(&layer, fwdIn, loss1, propLoss);
+    layerNormBackward(&layer, fwdIn, loss1, propLoss, NULL);
     int32_t dx1[8];
     for (size_t i = 0; i < 8; i++) {
         dx1[i] = ((int32_t *)propLoss->data)[i];
     }
     float s1 = symScaleOf(propLoss);
 
-    layerNormBackward(&layer, fwdIn, loss2, propLoss);
+    layerNormBackward(&layer, fwdIn, loss2, propLoss, NULL);
     int32_t dx2[8];
     for (size_t i = 0; i < 8; i++) {
         dx2[i] = ((int32_t *)propLoss->data)[i];
@@ -1870,8 +1870,8 @@ void testSymBackwardGradsAccumulateAcrossCalls(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormBackward(&layer, fwdIn, loss1, propLoss);
-    layerNormBackward(&layer, fwdIn, loss2, propLoss);
+    layerNormBackward(&layer, fwdIn, loss1, propLoss, NULL);
+    layerNormBackward(&layer, fwdIn, loss2, propLoss, NULL);
 
     int32_t dgm[4], dbm[4];
     for (size_t i = 0; i < 4; i++) {
@@ -1955,7 +1955,7 @@ void testSymBackwardDivergentLayoutsBitIdentical(void) {
     initLayerNormConfig(&cfgC, gammaC, betaC, normShapeC, 1, 1e-5f, fqC, bqC);
     layerConfig_t lcfgC;
     layer_t layerC = makeLayerNormLayer(&cfgC, &lcfgC);
-    layerNormBackward(&layerC, fwdC, lossC, propC);
+    layerNormBackward(&layerC, fwdC, lossC, propC, NULL);
 
     /* --- divergent run: x and propLoss physical [4,3], logical [3,4] --- */
     float xT[12];
@@ -1980,7 +1980,7 @@ void testSymBackwardDivergentLayoutsBitIdentical(void) {
     initLayerNormConfig(&cfgT, gammaT, betaT, normShapeT, 1, 1e-5f, fqT, bqT);
     layerConfig_t lcfgT;
     layer_t layerT = makeLayerNormLayer(&cfgT, &lcfgT);
-    layerNormBackward(&layerT, fwdT, lossT, propT);
+    layerNormBackward(&layerT, fwdT, lossT, propT, NULL);
 
     int32_t dxC[12], dxT[12], dgC[4], dgT[4], dbC[4], dbT[4];
     int32_t *pcd = (int32_t *)propC->data;
@@ -2099,7 +2099,7 @@ void testFactoryFullSymProfileTrainsSymGrads(void) {
         2, dims, (float[]){0.5f, -1.f, 0.25f, 0.75f, -0.5f, 1.5f, -0.25f, 1.f});
     tensor_t *propLoss = buildSymInt32TensorND(2, dims, NULL);
 
-    layerFunctions[LAYERNORM].backward(layer, fwdIn, loss, propLoss);
+    layerFunctions[LAYERNORM].backward(layer, fwdIn, loss, propLoss, NULL);
 
     int32_t dbSum = 0;
     for (size_t i = 0; i < 4; i++) {
@@ -2155,7 +2155,7 @@ void testBackwardFloatGuardsNonFloat32GammaGrad(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    ASSERT_EXITS_WITH_FAILURE(layerNormBackward(&layer, fwdIn, loss, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(layerNormBackward(&layer, fwdIn, loss, propLoss, NULL));
 
     freeQuantization(bq);
     freeQuantization(fq);
@@ -2195,7 +2195,7 @@ void testBackwardFloatGuardsNonFloat32PropLoss(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    ASSERT_EXITS_WITH_FAILURE(layerNormBackward(&layer, fwdIn, loss, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(layerNormBackward(&layer, fwdIn, loss, propLoss, NULL));
 
     freeQuantization(bq);
     freeQuantization(fq);
@@ -2228,7 +2228,7 @@ static void runBackwardShapeGuard(tensor_t *loss, tensor_t *propLoss) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    ASSERT_EXITS_WITH_FAILURE(layerNormBackward(&layer, fwdIn, loss, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(layerNormBackward(&layer, fwdIn, loss, propLoss, NULL));
 
     freeQuantization(bq);
     freeQuantization(fq);
@@ -2276,7 +2276,7 @@ static void runForwardOutputGuard(tensor_t *out) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    ASSERT_EXITS_WITH_FAILURE(layerNormForward(&layer, in, out));
+    ASSERT_EXITS_WITH_FAILURE(layerNormForward(&layer, in, out, NULL));
 
     freeQuantization(bq);
     freeQuantization(fq);
@@ -2322,8 +2322,8 @@ void testForwardAcceptsTransposedOutputWithMatchingLogicalDims(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormForward(&layer, in, outIdentity);
-    layerNormForward(&layer, in, outTransposed);
+    layerNormForward(&layer, in, outIdentity, NULL);
+    layerNormForward(&layer, in, outTransposed, NULL);
 
     float expected[8];
     float got[8];
@@ -2380,7 +2380,7 @@ void testLayerNormSymRejectsOperandWiderThanInt12(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    ASSERT_EXITS_WITH_FAILURE(layerNormForward(&layer, in, out));
+    ASSERT_EXITS_WITH_FAILURE(layerNormForward(&layer, in, out, NULL));
 
     freeQuantization(bq);
     freeQuantization(fq);
@@ -2448,7 +2448,7 @@ void testLayerNormBackwardFrozenFactoryLayerRunsWithoutGradBuffers(void) {
     tensor_t *loss = buildFloatTensorND(1, dims, (float[]){1.f, 2.f, 3.f, 4.f});
     tensor_t *propLoss = buildFloatTensorND(1, dims, NULL);
 
-    ASSERT_EXITS_WITH(0, layerNormBackward(layer, fwdIn, loss, propLoss));
+    ASSERT_EXITS_WITH(0, layerNormBackward(layer, fwdIn, loss, propLoss, NULL));
 
     freeTensor(propLoss);
     freeTensor(loss);
@@ -2497,8 +2497,8 @@ void testBackwardFloatNullPropLossComputesGradsOnly(void) {
     layerConfig_t lcfgB;
     layer_t twinB = makeLayerNormLayer(&cfgB, &lcfgB);
 
-    layerNormBackward(&twinA, fwdIn, loss, propLossA);
-    layerNormBackward(&twinB, fwdIn, loss, NULL);
+    layerNormBackward(&twinA, fwdIn, loss, propLossA, NULL);
+    layerNormBackward(&twinB, fwdIn, loss, NULL, NULL);
 
     bool gammaGradIdentical = memcmp(gammaA->grad->data, gammaB->grad->data,
                                      calcNumberOfBytesForData(gammaA->grad->quantization, 2)) == 0;
@@ -2567,8 +2567,8 @@ void testSymBackwardNullPropLossComputesGradsOnly(void) {
     layerConfig_t lcfgB;
     layer_t twinB = makeLayerNormLayer(&cfgB, &lcfgB);
 
-    layerNormBackward(&twinA, fwdIn, loss, propLossA);
-    layerNormBackward(&twinB, fwdIn, loss, NULL);
+    layerNormBackward(&twinA, fwdIn, loss, propLossA, NULL);
+    layerNormBackward(&twinB, fwdIn, loss, NULL, NULL);
 
     bool gammaGradIdentical = memcmp(gammaA->grad->data, gammaB->grad->data,
                                      calcNumberOfBytesForData(gammaA->grad->quantization, 4)) == 0;
@@ -2707,7 +2707,7 @@ void testLayerNormForwardBfpGoldAllBfpOperands(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormForward(&layer, in, out);
+    layerNormForward(&layer, in, out, NULL);
 
     /* 8 = kLnBfpRows * kLnBfpCols, 4 = kLnBfpAOutNumGroups (literal sizes: a
      * static-const bound would make these VLAs). */
@@ -2753,7 +2753,7 @@ void testLayerNormForwardBfpGoldStagedFloat32Operands(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormForward(&layer, in, out);
+    layerNormForward(&layer, in, out, NULL);
 
     /* 8 = kLnBfpRows * kLnBfpCols, 4 = kLnBfpAOutNumGroups (literal sizes: a
      * static-const bound would make these VLAs). */
@@ -2800,10 +2800,10 @@ void testLayerNormForwardBfpFakeQuantPinTwin(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormForward(&layer, in, outNative);
+    layerNormForward(&layer, in, outNative, NULL);
 
     cfg.forwardMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
-    layerNormForward(&layer, in, outFake);
+    layerNormForward(&layer, in, outFake, NULL);
 
     size_t payloadBytes = calcNumberOfBytesForData(outNative->quantization, 8);
     bfpQConfig_t *nativeQC = outNative->quantization->qConfig;
@@ -2860,11 +2860,11 @@ void testLayerNormForwardBfpMissingOutputQAnchorDies(void) {
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
     cfg.outputQ = NULL;
-    ASSERT_EXITS_WITH_FAILURE(layerNormForward(&layer, in, out));
+    ASSERT_EXITS_WITH_FAILURE(layerNormForward(&layer, in, out, NULL));
 
     quantization_t *floatQ = quantizationInitFloat();
     cfg.outputQ = floatQ;
-    ASSERT_EXITS_WITH_FAILURE(layerNormForward(&layer, in, out));
+    ASSERT_EXITS_WITH_FAILURE(layerNormForward(&layer, in, out, NULL));
 
     freeQuantization(floatQ);
     freeReservedMemory(normShape);
@@ -2909,7 +2909,7 @@ void testLayerNormBackwardBfpGoldAllBfpOperands(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormBackward(&layer, in, loss, propLoss);
+    layerNormBackward(&layer, in, loss, propLoss, NULL);
 
     float gotDgamma[4];
     float gotDbeta[4];
@@ -2957,7 +2957,7 @@ void testLayerNormBackwardBfpNullPropLossComputesGradsOnly(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormBackward(&layer, in, loss, NULL);
+    layerNormBackward(&layer, in, loss, NULL, NULL);
 
     float gotDgamma[4];
     float gotDbeta[4];
@@ -3007,7 +3007,7 @@ void testLayerNormBackwardBfpFrozenSkipsGrads(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormBackward(&layer, in, loss, propLoss);
+    layerNormBackward(&layer, in, loss, propLoss, NULL);
 
     int32_t gotDx[8];
     uint8_t gotDxExps[4];
@@ -3048,8 +3048,8 @@ void testLayerNormBackwardBfpGradsAccumulateAcrossCalls(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    layerNormBackward(&layer, in, loss, propLoss);
-    layerNormBackward(&layer, in, loss, propLoss);
+    layerNormBackward(&layer, in, loss, propLoss, NULL);
+    layerNormBackward(&layer, in, loss, propLoss, NULL);
 
     float gotDgamma[4];
     float gotDbeta[4];
@@ -3113,7 +3113,7 @@ void testLayerNormBackwardBfpFrozenShortLossDies(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    ASSERT_EXITS_WITH_FAILURE(layerNormBackward(&layer, in, shortLoss, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(layerNormBackward(&layer, in, shortLoss, propLoss, NULL));
 
     freeReservedMemory(normShape);
     freeParameter(beta);
@@ -3144,8 +3144,8 @@ void testLayerNormBackwardBfpMissingPropLossQAnchorDies(void) {
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
     cfg.propLossQ = NULL;
-    ASSERT_EXITS_WITH_FAILURE(layerNormBackward(&layer, in, loss, propLoss));
-    ASSERT_EXITS_WITH_FAILURE(layerNormBackward(&layer, in, loss, NULL));
+    ASSERT_EXITS_WITH_FAILURE(layerNormBackward(&layer, in, loss, propLoss, NULL));
+    ASSERT_EXITS_WITH_FAILURE(layerNormBackward(&layer, in, loss, NULL, NULL));
 
     freeReservedMemory(normShape);
     freeParameter(beta);
@@ -3175,7 +3175,7 @@ void testLayerNormBackwardFloat32PinnedStillRejectsBfpWires(void) {
     layerConfig_t lcfg;
     layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
 
-    ASSERT_EXITS_WITH_FAILURE(layerNormBackward(&layer, in, loss, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(layerNormBackward(&layer, in, loss, propLoss, NULL));
 
     freeReservedMemory(normShape);
     freeParameter(beta);
@@ -3268,7 +3268,7 @@ void testFactoryUniformBfpProfileBuildsAndForwards(void) {
                                            (uint8_t[]){127, 128});
     tensor_t *out = buildBfpWireWithCodesLn(dims, 1, 8, 8, 2, 2, (int32_t[]){0, 0, 0, 0},
                                             (uint8_t[]){127, 127});
-    layerNormForward(layer, in, out);
+    layerNormForward(layer, in, out, NULL);
 
     bool outBfp = (out->quantization->type == BFP);
     float xs[4];
@@ -3391,8 +3391,8 @@ void testFactoryWiresOnlyBfpProfileBuilds(void) {
     tensor_t *dx = buildBfpWireWithCodesLn(dims, 2, 8, 8, 1, 0, (int32_t[]){0, 0, 0, 0, 0, 0, 0, 0},
                                            (uint8_t[]){127});
 
-    layerNormForward(layer, in, out);
-    layerNormBackward(layer, in, dy, dx);
+    layerNormForward(layer, in, out, NULL);
+    layerNormBackward(layer, in, dy, dx, NULL);
 
     float xs[8];
     float ys[8];

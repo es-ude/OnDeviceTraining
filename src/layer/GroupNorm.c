@@ -561,7 +561,7 @@ static opKernelFn_t groupNormSelectForwardKernel(const groupNormConfig_t *cfg) {
     }
 }
 
-void groupNormForward(layer_t *layer, tensor_t *input, tensor_t *output) {
+void groupNormForward(layer_t *layer, tensor_t *input, tensor_t *output, const layerExec_t *exec) {
     groupNormConfig_t *cfg = layer->config->groupNorm;
     groupNormValidateInputShape(cfg, input);
     groupNormRequireInputShape(input, output, "output");
@@ -1091,7 +1091,8 @@ static void groupNormDxKernelBfp(tensor_t **operands, size_t nOperands, tensor_t
     groupNormCalcPropLossBfp(cfg, operands[0], operands[1], operands[2], rawOut);
 }
 
-void groupNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
+void groupNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss,
+                       const layerExec_t *exec) {
     groupNormConfig_t *cfg = layer->config->groupNorm;
     groupNormValidateInputShape(cfg, forwardInput);
     groupNormRequireInputShape(forwardInput, loss, "loss");

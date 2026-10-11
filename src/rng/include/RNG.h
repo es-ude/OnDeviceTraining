@@ -32,6 +32,8 @@ rngKey_t rngKeyFromSeed(uint64_t seed);
  * and no two tags share a value, so every path decodes one way. */
 #define RNG_TAG_STEP 1u
 #define RNG_TAG_CALL 2u
+#define RNG_TAG_FORWARD 4u
+#define RNG_TAG_BACKWARD 5u
 #define RNG_TAG_EVAL 6u
 #define RNG_TAG_STAGE 8u
 #define RNG_TAG_KERNEL 9u

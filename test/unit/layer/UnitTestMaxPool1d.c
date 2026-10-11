@@ -92,7 +92,7 @@ void testMaxPool1dForwardBasic(void) {
     maxPool1dRunResult_t r = maxPool1dBuild(input_maxPool1d_basic, inputDims, 2, VALID, 1, 1,
                                             outputData, argmaxData, outputDims);
 
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
 
     for (size_t i = 0; i < expectedForward_maxPool1d_basic_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedForward_maxPool1d_basic[i],
@@ -181,7 +181,7 @@ void testMaxPool1dBackwardBasic(void) {
                                             outputData, argmaxData, outputDims);
 
     // Forward populates argmax — required precondition for backward.
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
 
     // lossGrad = ones (matches what the generator used for autograd on `basic`).
     float lossGradData[1 * 1 * 3];
@@ -192,7 +192,7 @@ void testMaxPool1dBackwardBasic(void) {
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
 
     // (Mutation: sentinel-skip removal is vacuous in basic fixture; no empty-window
     //  fixture is in this PR's test set.)
@@ -211,7 +211,7 @@ void testMaxPool1dArgmaxIndicesContent(void) {
     maxPool1dRunResult_t r = maxPool1dBuild(input_maxPool1d_basic, inputDims, 2, VALID, 1, 1,
                                             outputData, argmaxData, outputDims);
 
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
 
     // Compare argmax tensor content against generator-emitted gold values.
     int32_t const *actual = (int32_t const *)r.argmax->data;
@@ -229,7 +229,7 @@ void testMaxPool1dMultiChannel(void) {
     maxPool1dRunResult_t r = maxPool1dBuild(input_maxPool1d_multiChannel, inputDims, 2, VALID, 1, 1,
                                             outputData, argmaxData, outputDims);
 
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
     for (size_t i = 0; i < expectedForward_maxPool1d_multiChannel_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedForward_maxPool1d_multiChannel[i],
                                  ((float *)r.output->data)[i]);
@@ -248,7 +248,7 @@ void testMaxPool1dMultiChannel(void) {
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
     for (size_t i = 0; i < expectedPropLoss_maxPool1d_multiChannel_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedPropLoss_maxPool1d_multiChannel[i],
                                  ((float *)propLoss->data)[i]);
@@ -264,7 +264,7 @@ void testMaxPool1dMultiBatch(void) {
     maxPool1dRunResult_t r = maxPool1dBuild(input_maxPool1d_multiBatch, inputDims, 2, VALID, 1, 1,
                                             outputData, argmaxData, outputDims);
 
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
     for (size_t i = 0; i < expectedForward_maxPool1d_multiBatch_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedForward_maxPool1d_multiBatch[i],
                                  ((float *)r.output->data)[i]);
@@ -278,7 +278,7 @@ void testMaxPool1dMultiBatch(void) {
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
     for (size_t i = 0; i < expectedPropLoss_maxPool1d_multiBatch_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedPropLoss_maxPool1d_multiBatch[i],
                                  ((float *)propLoss->data)[i]);
@@ -295,7 +295,7 @@ void testMaxPool1dWithStrideAndDilation(void) {
     maxPool1dRunResult_t r = maxPool1dBuild(input_maxPool1d_withStrideAndDilation, inputDims, 2,
                                             VALID, 2, 3, outputData, argmaxData, outputDims);
 
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
     for (size_t i = 0; i < expectedForward_maxPool1d_withStrideAndDilation_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedForward_maxPool1d_withStrideAndDilation[i],
                                  ((float *)r.output->data)[i]);
@@ -317,7 +317,7 @@ void testMaxPool1dWithStrideAndDilation(void) {
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
     for (size_t i = 0; i < expectedPropLoss_maxPool1d_withStrideAndDilation_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedPropLoss_maxPool1d_withStrideAndDilation[i],
                                  ((float *)propLoss->data)[i]);
@@ -333,7 +333,7 @@ void testMaxPool1dWithSamePadding(void) {
     maxPool1dRunResult_t r = maxPool1dBuild(input_maxPool1d_withSamePadding, inputDims, 3, SAME, 1,
                                             1, outputData, argmaxData, outputDims);
 
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
     for (size_t i = 0; i < expectedForward_maxPool1d_withSamePadding_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedForward_maxPool1d_withSamePadding[i],
                                  ((float *)r.output->data)[i]);
@@ -353,7 +353,7 @@ void testMaxPool1dWithSamePadding(void) {
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
     for (size_t i = 0; i < expectedPropLoss_maxPool1d_withSamePadding_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedPropLoss_maxPool1d_withSamePadding[i],
                                  ((float *)propLoss->data)[i]);
@@ -454,7 +454,7 @@ void testMaxPool1dForwardSymBasic(void) {
     maxPool1dSymRun_t r =
         maxPool1dBuildSym(input_maxPool1dSym_symBasic, inputDims, 2, VALID, 1, 1, outputDims);
 
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
 
     ASSERT_SYM_FORWARD_GOLD(r.output, symBasic);
     ASSERT_SYM_ARGMAX_GOLD(r.argmax, symBasic);
@@ -468,12 +468,12 @@ void testMaxPool1dBackwardSymBasic(void) {
         maxPool1dBuildSym(input_maxPool1dSym_symBasic, inputDims, 2, VALID, 1, 1, outputDims);
 
     // Forward populates argmax — required precondition for backward.
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
 
     tensor_t *lossGrad = buildSymTensor(outputDims, 3, lossGrad_maxPool1dSym_symBasic);
     tensor_t *propLoss = buildSymTensor(inputDims, 3, NULL);
 
-    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
 
     ASSERT_SYM_PROPLOSS_GOLD(propLoss, symBasic);
 }
@@ -487,14 +487,14 @@ void testMaxPool1dSymStrideDilationForwardBackward(void) {
     maxPool1dSymRun_t r = maxPool1dBuildSym(input_maxPool1dSym_symStrideDilation, inputDims, 2,
                                             VALID, 2, 3, outputDims);
 
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
     ASSERT_SYM_FORWARD_GOLD(r.output, symStrideDilation);
     ASSERT_SYM_ARGMAX_GOLD(r.argmax, symStrideDilation);
 
     tensor_t *lossGrad = buildSymTensor(outputDims, 3, lossGrad_maxPool1dSym_symStrideDilation);
     tensor_t *propLoss = buildSymTensor(inputDims, 3, NULL);
 
-    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
     ASSERT_SYM_PROPLOSS_GOLD(propLoss, symStrideDilation);
 }
 
@@ -508,14 +508,14 @@ void testMaxPool1dSymTieSamePadding(void) {
     maxPool1dSymRun_t r = maxPool1dBuildSym(input_maxPool1dSym_symTieSamePadding, inputDims, 3,
                                             SAME, 1, 1, outputDims);
 
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
     ASSERT_SYM_FORWARD_GOLD(r.output, symTieSamePadding);
     ASSERT_SYM_ARGMAX_GOLD(r.argmax, symTieSamePadding);
 
     tensor_t *lossGrad = buildSymTensor(outputDims, 3, lossGrad_maxPool1dSym_symTieSamePadding);
     tensor_t *propLoss = buildSymTensor(inputDims, 3, NULL);
 
-    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
     ASSERT_SYM_PROPLOSS_GOLD(propLoss, symTieSamePadding);
 }
 
@@ -533,12 +533,12 @@ void testMaxPool1dBackwardSymRejectsWideLossGrad(void) {
 
     maxPool1dSymRun_t r =
         maxPool1dBuildSym(input_maxPool1dSym_symBasic, inputDims, 2, VALID, 1, 1, outputDims);
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
 
     tensor_t *lossGrad = buildSymTensorWithBits(outputDims, 3, 31);
     tensor_t *propLoss = buildSymTensor(inputDims, 3, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
 }
 
 /* Value-sum guard, N branch: at qMaxBits=16 the scatter bound is
@@ -549,12 +549,12 @@ void testMaxPool1dBackwardSymRejectsTermsOverBound(void) {
     size_t outputDims[] = {1, 1, 1};
 
     maxPool1dSymRun_t r = maxPool1dBuildSym(NULL, inputDims, 65536, VALID, 1, 1, outputDims);
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
 
     tensor_t *lossGrad = buildSymTensorWithBits(outputDims, 3, 16);
     tensor_t *propLoss = buildSymTensor(inputDims, 3, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
 }
 
 /* #4 PR0: the SYM_INT32 dx kernel takes batch and channels from lossGrad but
@@ -568,11 +568,11 @@ void testMaxPool1dBackwardSymRejectsPropLossWithFewerChannels(void) {
     maxPool1dSymRun_t r = maxPool1dBuildSym(NULL, inputDims, 2, VALID, 1, 1, outputDims);
     tensor_t *lossGrad = buildSymTensor(outputDims, 3, NULL);
     tensor_t *propLoss = buildSymTensor(smallPropLossDims, 3, NULL);
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
 
     ASSERT_EXITS_WITH_OUTPUT(
         1, "MaxPool1d backward SYM_INT32 (rawOut): expected shape [2, 2, 5], got [2, 1, 5]",
-        maxPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+        maxPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
 
     freeTensor(propLoss);
     freeTensor(lossGrad);
@@ -591,12 +591,12 @@ void testMaxPool1dBackwardSymRejectsRank2PropLoss(void) {
     maxPool1dSymRun_t r = maxPool1dBuildSym(NULL, inputDims, 2, VALID, 1, 1, outputDims);
     tensor_t *lossGrad = buildSymTensor(outputDims, 3, NULL);
     tensor_t *propLoss = buildSymTensor(rank2PropLossDims, 2, NULL);
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
 
     ASSERT_EXITS_WITH_OUTPUT(1,
                              "MaxPool1d backward SYM_INT32: lossGrad and rawOut must both be "
                              "rank-3, got ranks 3 and 2",
-                             maxPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+                             maxPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
 
     freeTensor(propLoss);
     freeTensor(lossGrad);
@@ -614,7 +614,7 @@ void testMaxPool1dEdgeCases(void) {
     maxPool1dRunResult_t r = maxPool1dBuild(input_maxPool1d_edgeCases, inputDims, 1, VALID, 1, 1,
                                             outputData, argmaxData, outputDims);
 
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
     for (size_t i = 0; i < expectedForward_maxPool1d_edgeCases_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedForward_maxPool1d_edgeCases[i],
                                  ((float *)r.output->data)[i]);
@@ -634,7 +634,7 @@ void testMaxPool1dEdgeCases(void) {
 
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
     for (size_t i = 0; i < expectedPropLoss_maxPool1d_edgeCases_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedPropLoss_maxPool1d_edgeCases[i],
                                  ((float *)propLoss->data)[i]);
@@ -679,12 +679,12 @@ void testMaxPool1dBackwardFloatOverwritesStalePropLoss(void) {
     float firstDx[2 * 2 * 5];
     float secondDx[2 * 2 * 5];
 
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
     memcpy(argmax, r.argmax->data, sizeof(argmax));
     memset(propLoss->data, 0xA5, propLossElements * sizeof(float));
-    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
     memcpy(firstDx, propLoss->data, sizeof(firstDx));
-    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    maxPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
     memcpy(secondDx, propLoss->data, sizeof(secondDx));
 
     freeTensor(propLoss);
@@ -715,11 +715,11 @@ void testMaxPool1dBackwardFloatRejectsPropLossWithSmallerBatch(void) {
         maxPool1dBuild(NULL, inputDims, 2, VALID, 1, 1, NULL, NULL, outputDims);
     tensor_t *lossGrad = makeFloatTensor(outputDims, 3, NULL);
     tensor_t *propLoss = makeFloatTensor(smallPropLossDims, 3, NULL);
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
 
     ASSERT_EXITS_WITH_OUTPUT(
         1, "MaxPool1d backward FLOAT32 (propLoss): expected shape [2, 2, 5], got [1, 2, 5]",
-        maxPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+        maxPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
 
     freeTensor(propLoss);
     freeTensor(lossGrad);
@@ -740,12 +740,12 @@ void testMaxPool1dBackwardFloatRejectsRank2PropLoss(void) {
         maxPool1dBuild(NULL, inputDims, 2, VALID, 1, 1, NULL, NULL, outputDims);
     tensor_t *lossGrad = makeFloatTensor(outputDims, 3, NULL);
     tensor_t *propLoss = makeFloatTensor(rank2PropLossDims, 2, NULL);
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
 
     ASSERT_EXITS_WITH_OUTPUT(1,
                              "MaxPool1d backward FLOAT32: lossGrad and propLoss must both be "
                              "rank-3, got ranks 3 and 2",
-                             maxPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+                             maxPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
 
     freeTensor(propLoss);
     freeTensor(lossGrad);
@@ -824,7 +824,7 @@ void testMaxPool1dForwardBfpComparesDequantizedValues(void) {
     maxPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, argmax, (size_t)kBfpMaxPoolKernelSize, VALID,
                            (size_t)kBfpMaxPoolDilation, (size_t)kBfpMaxPoolStride, wireQ);
 
-    maxPool1dForward(&layer, input, output);
+    maxPool1dForward(&layer, input, output, NULL);
 
     TEST_ASSERT_EQUAL_MEMORY_MESSAGE(kBfpMaxPoolExpectedForward, output->data,
                                      kBfpMaxPoolExpectedForward_len * sizeof(float),
@@ -873,13 +873,13 @@ void testMaxPool1dBackwardBfpScattersToArgmaxPositions(void) {
     maxPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, argmax, (size_t)kBfpMaxPoolKernelSize, VALID,
                            (size_t)kBfpMaxPoolDilation, (size_t)kBfpMaxPoolStride, wireQ);
 
-    maxPool1dForward(&layer, input, output);
+    maxPool1dForward(&layer, input, output, NULL);
     /* Backward TWICE on purpose: dx is OUT_WRITE, so a repeated backward must
      * reproduce the same numbers — and that is also what makes the kernel's
      * memset of the funnel's uninitialized Phase-2 scratch observable (that
      * stack VLA can read as zero on a first call). */
-    maxPool1dBackward(&layer, NULL, lossGrad, propLoss);
-    maxPool1dBackward(&layer, NULL, lossGrad, propLoss);
+    maxPool1dBackward(&layer, NULL, lossGrad, propLoss, NULL);
+    maxPool1dBackward(&layer, NULL, lossGrad, propLoss, NULL);
 
     TEST_ASSERT_EQUAL_MEMORY_MESSAGE(kBfpMaxPoolExpectedBackward, propLoss->data,
                                      kBfpMaxPoolExpectedBackward_len * sizeof(float),
@@ -916,13 +916,13 @@ void testMaxPool1dForwardBfpRequiresBfpOutputQ(void) {
     nullCfg.outputQ = NULL;
     layerConfig_t nullLc = {.maxPool1d = &nullCfg};
     layer_t nullLayer = {.type = MAXPOOL1D, .config = &nullLc};
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(&nullLayer, input, output));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(&nullLayer, input, output, NULL));
 
     maxPool1dConfig_t floatCfg = nullCfg;
     floatCfg.outputQ = floatQ;
     layerConfig_t floatLc = {.maxPool1d = &floatCfg};
     layer_t floatLayer = {.type = MAXPOOL1D, .config = &floatLc};
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(&floatLayer, input, output));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(&floatLayer, input, output, NULL));
 
     freeQuantization(floatQ);
     freeTensor(argmax);
@@ -963,11 +963,11 @@ void testMaxPool1dForwardBfpRejectsMismatchedOutputShapes(void) {
     maxPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, goodArgmax, (size_t)kBfpMaxPoolKernelSize, VALID,
                            (size_t)kBfpMaxPoolDilation, (size_t)kBfpMaxPoolStride, wireQ);
 
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(&layer, input, badOut));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(&layer, input, badOut, NULL));
     cfg.argmaxIndices = badArgmax;
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(&layer, input, goodOut));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(&layer, input, goodOut, NULL));
     cfg.argmaxIndices = goodArgmax;
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(&layer, input, badRankOut));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(&layer, input, badRankOut, NULL));
 
     freeQuantization(wireQ);
     freeTensor(badArgmax);
@@ -1023,11 +1023,11 @@ void testMaxPool1dBackwardBfpRejectsOutOfRangeArgmax(void) {
     maxPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, argmax, (size_t)kBfpMaxPoolKernelSize, VALID,
                            (size_t)kBfpMaxPoolDilation, (size_t)kBfpMaxPoolStride, wireQ);
 
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&layer, NULL, lossGrad, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&layer, NULL, lossGrad, propLoss, NULL));
 
     /* -1 in the SAME slot must NOT die: the sentinel stays legal. */
     argmaxArr[3] = -1;
-    maxPool1dBackward(&layer, NULL, lossGrad, propLoss);
+    maxPool1dBackward(&layer, NULL, lossGrad, propLoss, NULL);
 
     /* PR4 adversarial gate: -1 is the ONLY legal out-of-range value, so
      * every OTHER negative is corruption and must die like a too-large one. A
@@ -1037,11 +1037,11 @@ void testMaxPool1dBackwardBfpRejectsOutOfRangeArgmax(void) {
      * not hypothetical -- the scatter casts to size_t, so a -2 that slipped
      * through would index gxArr at SIZE_MAX-1 rather than skip the window. */
     argmaxArr[3] = -2;
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&layer, NULL, lossGrad, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&layer, NULL, lossGrad, propLoss, NULL));
     argmaxArr[3] = -1;
 
     cfg.argmaxIndices = wideArgmax;
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&layer, NULL, lossGrad, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&layer, NULL, lossGrad, propLoss, NULL));
 
     freeQuantization(wireQ);
     freeTensor(wideArgmax);
@@ -1074,8 +1074,10 @@ void testMaxPool1dBackwardBfpGuardsNarrowedNotRemoved(void) {
     maxPool1dBuildBfpLayer(&floatCfg, &kf, &floatLc, &floatLayer, argmax,
                            (size_t)kBfpMaxPoolKernelSize, VALID, (size_t)kBfpMaxPoolDilation,
                            (size_t)kBfpMaxPoolStride, floatQ);
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&floatLayer, NULL, bfpLossGrad, floatPropLoss));
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&floatLayer, NULL, floatLossGrad, bfpPropLoss));
+    ASSERT_EXITS_WITH_FAILURE(
+        maxPool1dBackward(&floatLayer, NULL, bfpLossGrad, floatPropLoss, NULL));
+    ASSERT_EXITS_WITH_FAILURE(
+        maxPool1dBackward(&floatLayer, NULL, floatLossGrad, bfpPropLoss, NULL));
 
     kernel_t kb;
     initKernel(&kb, (size_t)kBfpMaxPoolKernelSize, VALID, (size_t)kBfpMaxPoolDilation,
@@ -1087,7 +1089,7 @@ void testMaxPool1dBackwardBfpGuardsNarrowedNotRemoved(void) {
     bfpCfg.propLossQ = NULL;
     layerConfig_t bfpLc = {.maxPool1d = &bfpCfg};
     layer_t bfpLayer = {.type = MAXPOOL1D, .config = &bfpLc};
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&bfpLayer, NULL, bfpLossGrad, floatPropLoss));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&bfpLayer, NULL, bfpLossGrad, floatPropLoss, NULL));
 
     freeQuantization(floatQ);
     freeTensor(argmax);
@@ -1141,8 +1143,8 @@ void testMaxPool1dBfpRejectsRank2Operands(void) {
     maxPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, argmax, (size_t)kBfpMaxPoolKernelSize, VALID,
                            (size_t)kBfpMaxPoolDilation, (size_t)kBfpMaxPoolStride, wireQ);
 
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(&layer, badInput, output));
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&layer, NULL, badLossGrad, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(&layer, badInput, output, NULL));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&layer, NULL, badLossGrad, propLoss, NULL));
 
     freeQuantization(wireQ);
     freeTensor(argmax);
@@ -1174,10 +1176,10 @@ void testMaxPool1dForwardFloatRejectsArgmaxLengthMismatchAtBatch2(void) {
         maxPool1dBuild(NULL, inputDims, 2, VALID, 1, 1, NULL, NULL, outputDims);
     tensor_t *batch1Argmax = makeInt32Tensor(batch1ArgmaxDims, 3);
 
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
 
     r.layer->config->maxPool1d->argmaxIndices = batch1Argmax;
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output, NULL));
 
     freeTensor(batch1Argmax);
     freeTensor(r.argmax);
@@ -1197,10 +1199,10 @@ void testMaxPool1dForwardFloatRejectsArgmaxWithWrongChannels(void) {
         maxPool1dBuild(NULL, inputDims, 2, VALID, 1, 1, NULL, NULL, outputDims);
     tensor_t *widerArgmax = makeInt32Tensor(widerArgmaxDims, 3);
 
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
 
     r.layer->config->maxPool1d->argmaxIndices = widerArgmax;
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output, NULL));
 
     freeTensor(widerArgmax);
     freeTensor(r.argmax);
@@ -1222,10 +1224,10 @@ void testMaxPool1dForwardFloatRejectsArgmaxWithWrongLength(void) {
         maxPool1dBuild(NULL, inputDims, 2, VALID, 1, 1, NULL, NULL, outputDims);
     tensor_t *wrongLengthArgmax = makeInt32Tensor(wrongLengthArgmaxDims, 3);
 
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
 
     r.layer->config->maxPool1d->argmaxIndices = wrongLengthArgmax;
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output, NULL));
 
     freeTensor(wrongLengthArgmax);
     freeTensor(r.argmax);
@@ -1247,10 +1249,10 @@ void testMaxPool1dForwardFloatRequiresExactArgmaxDims(void) {
         maxPool1dBuild(NULL, inputDims, 2, VALID, 1, 1, NULL, NULL, outputDims);
     tensor_t *sameCountArgmax = makeInt32Tensor(sameCountDims, 3);
 
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
 
     r.layer->config->maxPool1d->argmaxIndices = sameCountArgmax;
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output, NULL));
 
     freeTensor(sameCountArgmax);
     freeTensor(r.argmax);
@@ -1278,12 +1280,12 @@ void testMaxPool1dForwardFloatRejectsArgmaxOfWrongRank(void) {
     tensor_t *rank4Argmax = makeInt32Tensor(rank4Dims, 4);
     tensor_t *rank2Argmax = makeInt32Tensor(rank2Dims, 2);
 
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
 
     r.layer->config->maxPool1d->argmaxIndices = rank4Argmax;
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output, NULL));
     r.layer->config->maxPool1d->argmaxIndices = rank2Argmax;
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output, NULL));
 
     freeTensor(rank2Argmax);
     freeTensor(rank4Argmax);
@@ -1301,10 +1303,10 @@ void testMaxPool1dForwardSymRejectsArgmaxLengthMismatchAtBatch2(void) {
     maxPool1dSymRun_t r = maxPool1dBuildSym(NULL, inputDims, 2, VALID, 1, 1, outputDims);
     tensor_t *batch1Argmax = makeInt32Tensor(batch1ArgmaxDims, 3);
 
-    maxPool1dForward(r.layer, r.input, r.output);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
 
     r.layer->config->maxPool1d->argmaxIndices = batch1Argmax;
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(r.layer, r.input, r.output, NULL));
 
     freeTensor(batch1Argmax);
     freeTensor(r.argmax);
@@ -1326,7 +1328,7 @@ void testMaxPool1dForwardFloatRejectsOutputWithSmallerBatch(void) {
 
     ASSERT_EXITS_WITH_OUTPUT(
         1, "MaxPool1d forward FLOAT32 (rawOut): expected shape [2, 2, 4], got [1, 2, 4]",
-        maxPool1dForward(r.layer, r.input, smallOutput));
+        maxPool1dForward(r.layer, r.input, smallOutput, NULL));
 
     freeTensor(smallOutput);
     freeTensor(r.argmax);
@@ -1347,7 +1349,7 @@ void testMaxPool1dForwardSymRejectsOutputWithFewerChannels(void) {
 
     ASSERT_EXITS_WITH_OUTPUT(
         1, "MaxPool1d forward SYM_INT32 (rawOut): expected shape [2, 2, 4], got [2, 1, 4]",
-        maxPool1dForward(r.layer, r.input, smallOutput));
+        maxPool1dForward(r.layer, r.input, smallOutput, NULL));
 
     freeTensor(smallOutput);
     freeTensor(r.argmax);
@@ -1371,10 +1373,10 @@ void testMaxPool1dBackwardFloatRejectsBatch1ArgmaxAtBatch2(void) {
     tensor_t *lossGrad = makeFloatTensor(outputDims, 3, NULL);
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
 
-    maxPool1dForward(r.layer, r.input, r.output);
-    maxPool1dBackward(r.layer, NULL, batch1LossGrad, batch1PropLoss);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
+    maxPool1dBackward(r.layer, NULL, batch1LossGrad, batch1PropLoss, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(r.layer, NULL, lossGrad, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(r.layer, NULL, lossGrad, propLoss, NULL));
 
     freeTensor(propLoss);
     freeTensor(lossGrad);
@@ -1398,10 +1400,10 @@ void testMaxPool1dBackwardSymRejectsBatch1ArgmaxAtBatch2(void) {
     tensor_t *lossGrad = buildSymTensor(outputDims, 3, NULL);
     tensor_t *propLoss = buildSymTensor(inputDims, 3, NULL);
 
-    maxPool1dForward(r.layer, r.input, r.output);
-    maxPool1dBackward(r.layer, NULL, batch1LossGrad, batch1PropLoss);
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
+    maxPool1dBackward(r.layer, NULL, batch1LossGrad, batch1PropLoss, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(r.layer, NULL, lossGrad, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(r.layer, NULL, lossGrad, propLoss, NULL));
 
     freeTensor(propLoss);
     freeTensor(lossGrad);
@@ -1430,10 +1432,10 @@ void testMaxPool1dForwardBfpRejectsArgmaxLengthMismatchAtBatch2(void) {
     layer_t layer;
     maxPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, argmax, 2, VALID, 1, 1, wireQ);
 
-    maxPool1dForward(&layer, input, output);
+    maxPool1dForward(&layer, input, output, NULL);
 
     cfg.argmaxIndices = batch1Argmax;
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(&layer, input, output));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(&layer, input, output, NULL));
 
     freeQuantization(wireQ);
     freeTensor(batch1Argmax);
@@ -1464,10 +1466,10 @@ void testMaxPool1dBackwardBfpRejectsBatch1ArgmaxAtBatch2(void) {
     layer_t layer;
     maxPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, argmax, 2, VALID, 1, 1, wireQ);
 
-    maxPool1dForward(&layer, batch1Input, batch1Output);
-    maxPool1dBackward(&layer, NULL, batch1LossGrad, batch1PropLoss);
+    maxPool1dForward(&layer, batch1Input, batch1Output, NULL);
+    maxPool1dBackward(&layer, NULL, batch1LossGrad, batch1PropLoss, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&layer, NULL, lossGrad, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&layer, NULL, lossGrad, propLoss, NULL));
 
     /* The batch-1 argmax is too SMALL for that call, so without the shape
      * guards the read runs past its end and may STILL die in the F7 content
@@ -1475,8 +1477,9 @@ void testMaxPool1dBackwardBfpRejectsBatch1ArgmaxAtBatch2(void) {
      * under a batch-1 backward is fully in bounds with legal indices, so only
      * the full-shape guard can reject it. */
     cfg.argmaxIndices = batch2Argmax;
-    maxPool1dForward(&layer, input, output);
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dBackward(&layer, NULL, batch1LossGrad, batch1PropLoss));
+    maxPool1dForward(&layer, input, output, NULL);
+    ASSERT_EXITS_WITH_FAILURE(
+        maxPool1dBackward(&layer, NULL, batch1LossGrad, batch1PropLoss, NULL));
 
     freeQuantization(wireQ);
     freeTensor(batch2Argmax);

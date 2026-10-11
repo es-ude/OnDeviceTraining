@@ -40,10 +40,11 @@ void initConv1dTransposedConfigWithWeightsAndBias(
     size_t groups, size_t outputPadding, quantization_t *forwardQ, quantization_t *weightGradQ,
     quantization_t *biasGradQ, quantization_t *propLossQ);
 
-void conv1dTransposedForward(layer_t *layer, tensor_t *input, tensor_t *output);
+void conv1dTransposedForward(layer_t *layer, tensor_t *input, tensor_t *output,
+                             const layerExec_t *exec);
 
 void conv1dTransposedBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
-                              tensor_t *propLoss);
+                              tensor_t *propLoss, const layerExec_t *exec);
 
 void conv1dTransposedCalcWeightGradsSymInt32(conv1dTransposedConfig_t *cfg, tensor_t *forwardInput,
                                              tensor_t *lossGrad);

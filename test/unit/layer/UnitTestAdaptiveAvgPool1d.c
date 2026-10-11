@@ -66,7 +66,7 @@ void testForwardBasic(void) {
     float outData[1 * 1 * 2] = {0};
     adaptivePoolRun_t r = build(input_adaptiveAvgPool1d_basic, inDims, 2, outData, outDims);
 
-    adaptiveAvgPool1dForward(r.layer, r.input, r.output);
+    adaptiveAvgPool1dForward(r.layer, r.input, r.output, NULL);
 
     for (size_t i = 0; i < expectedForward_adaptiveAvgPool1d_basic_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedForward_adaptiveAvgPool1d_basic[i],
@@ -80,7 +80,7 @@ void testForwardMultiChannelOverlap(void) {
     float outData[1 * 3 * 2] = {0};
     adaptivePoolRun_t r = build(input_adaptiveAvgPool1d_multiChannel, inDims, 2, outData, outDims);
 
-    adaptiveAvgPool1dForward(r.layer, r.input, r.output);
+    adaptiveAvgPool1dForward(r.layer, r.input, r.output, NULL);
 
     for (size_t i = 0; i < expectedForward_adaptiveAvgPool1d_multiChannel_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedForward_adaptiveAvgPool1d_multiChannel[i],
@@ -94,7 +94,7 @@ void testForwardMultiBatch(void) {
     float outData[4 * 2 * 4] = {0};
     adaptivePoolRun_t r = build(input_adaptiveAvgPool1d_multiBatch, inDims, 4, outData, outDims);
 
-    adaptiveAvgPool1dForward(r.layer, r.input, r.output);
+    adaptiveAvgPool1dForward(r.layer, r.input, r.output, NULL);
 
     for (size_t i = 0; i < expectedForward_adaptiveAvgPool1d_multiBatch_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedForward_adaptiveAvgPool1d_multiBatch[i],
@@ -108,7 +108,7 @@ void testForwardGlobal(void) {
     float outData[1 * 2 * 1] = {0};
     adaptivePoolRun_t r = build(input_adaptiveAvgPool1d_global, inDims, 1, outData, outDims);
 
-    adaptiveAvgPool1dForward(r.layer, r.input, r.output);
+    adaptiveAvgPool1dForward(r.layer, r.input, r.output, NULL);
 
     for (size_t i = 0; i < expectedForward_adaptiveAvgPool1d_global_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedForward_adaptiveAvgPool1d_global[i],
@@ -122,7 +122,7 @@ void testForwardIdentity(void) {
     float outData[1 * 1 * 4] = {0};
     adaptivePoolRun_t r = build(input_adaptiveAvgPool1d_identity, inDims, 4, outData, outDims);
 
-    adaptiveAvgPool1dForward(r.layer, r.input, r.output);
+    adaptiveAvgPool1dForward(r.layer, r.input, r.output, NULL);
 
     for (size_t i = 0; i < expectedForward_adaptiveAvgPool1d_identity_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedForward_adaptiveAvgPool1d_identity[i],
@@ -136,7 +136,7 @@ void testForwardUpsample(void) {
     float outData[1 * 1 * 5] = {0};
     adaptivePoolRun_t r = build(input_adaptiveAvgPool1d_upsample, inDims, 5, outData, outDims);
 
-    adaptiveAvgPool1dForward(r.layer, r.input, r.output);
+    adaptiveAvgPool1dForward(r.layer, r.input, r.output, NULL);
 
     for (size_t i = 0; i < expectedForward_adaptiveAvgPool1d_upsample_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedForward_adaptiveAvgPool1d_upsample[i],
@@ -149,13 +149,13 @@ void testBackwardBasic(void) {
     size_t outDims[] = {1, 1, 2};
     float outData[1 * 1 * 2] = {0};
     adaptivePoolRun_t r = build(input_adaptiveAvgPool1d_basic, inDims, 2, outData, outDims);
-    adaptiveAvgPool1dForward(r.layer, r.input, r.output);
+    adaptiveAvgPool1dForward(r.layer, r.input, r.output, NULL);
 
     float gyData[1 * 1 * 2] = {1.0f, 1.0f};
     tensor_t *lossGrad = makeFloatTensor(outDims, 3, gyData);
     tensor_t *propLoss = makeFloatTensor(inDims, 3, NULL);
 
-    adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
 
     for (size_t i = 0; i < expectedPropLoss_adaptiveAvgPool1d_basic_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedPropLoss_adaptiveAvgPool1d_basic[i],
@@ -168,12 +168,12 @@ void testBackwardMultiChannelOverlap(void) {
     size_t outDims[] = {1, 3, 2};
     float outData[1 * 3 * 2] = {0};
     adaptivePoolRun_t r = build(input_adaptiveAvgPool1d_multiChannel, inDims, 2, outData, outDims);
-    adaptiveAvgPool1dForward(r.layer, r.input, r.output);
+    adaptiveAvgPool1dForward(r.layer, r.input, r.output, NULL);
 
     tensor_t *lossGrad = makeFloatTensor(outDims, 3, lossGrad_adaptiveAvgPool1d_multiChannel);
     tensor_t *propLoss = makeFloatTensor(inDims, 3, NULL);
 
-    adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
 
     for (size_t i = 0; i < expectedPropLoss_adaptiveAvgPool1d_multiChannel_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedPropLoss_adaptiveAvgPool1d_multiChannel[i],
@@ -186,12 +186,12 @@ void testBackwardMultiBatch(void) {
     size_t outDims[] = {4, 2, 4};
     float outData[4 * 2 * 4] = {0};
     adaptivePoolRun_t r = build(input_adaptiveAvgPool1d_multiBatch, inDims, 4, outData, outDims);
-    adaptiveAvgPool1dForward(r.layer, r.input, r.output);
+    adaptiveAvgPool1dForward(r.layer, r.input, r.output, NULL);
 
     tensor_t *lossGrad = makeFloatTensor(outDims, 3, lossGrad_adaptiveAvgPool1d_multiBatch);
     tensor_t *propLoss = makeFloatTensor(inDims, 3, NULL);
 
-    adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
 
     for (size_t i = 0; i < expectedPropLoss_adaptiveAvgPool1d_multiBatch_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedPropLoss_adaptiveAvgPool1d_multiBatch[i],
@@ -204,13 +204,13 @@ void testBackwardGlobal(void) {
     size_t outDims[] = {1, 2, 1};
     float outData[1 * 2 * 1] = {0};
     adaptivePoolRun_t r = build(input_adaptiveAvgPool1d_global, inDims, 1, outData, outDims);
-    adaptiveAvgPool1dForward(r.layer, r.input, r.output);
+    adaptiveAvgPool1dForward(r.layer, r.input, r.output, NULL);
 
     float gyData[1 * 2 * 1] = {1.0f, 1.0f};
     tensor_t *lossGrad = makeFloatTensor(outDims, 3, gyData);
     tensor_t *propLoss = makeFloatTensor(inDims, 3, NULL);
 
-    adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
 
     for (size_t i = 0; i < expectedPropLoss_adaptiveAvgPool1d_global_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedPropLoss_adaptiveAvgPool1d_global[i],
@@ -223,12 +223,12 @@ void testBackwardUpsample(void) {
     size_t outDims[] = {1, 1, 5};
     float outData[1 * 1 * 5] = {0};
     adaptivePoolRun_t r = build(input_adaptiveAvgPool1d_upsample, inDims, 5, outData, outDims);
-    adaptiveAvgPool1dForward(r.layer, r.input, r.output);
+    adaptiveAvgPool1dForward(r.layer, r.input, r.output, NULL);
 
     tensor_t *lossGrad = makeFloatTensor(outDims, 3, lossGrad_adaptiveAvgPool1d_upsample);
     tensor_t *propLoss = makeFloatTensor(inDims, 3, NULL);
 
-    adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
 
     for (size_t i = 0; i < expectedPropLoss_adaptiveAvgPool1d_upsample_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, expectedPropLoss_adaptiveAvgPool1d_upsample[i],
@@ -269,9 +269,9 @@ void testAdaptiveAvgPool1dBackwardFloatOverwritesStalePropLoss(void) {
     float secondDx[2 * 2 * 6];
 
     memset(propLoss->data, 0xA5, propLossElements * sizeof(float));
-    adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
     memcpy(firstDx, propLoss->data, sizeof(firstDx));
-    adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
     memcpy(secondDx, propLoss->data, sizeof(secondDx));
 
     freeTensor(propLoss);
@@ -301,7 +301,7 @@ void testAdaptiveAvgPool1dBackwardFloatRejectsPropLossWithSmallerBatch(void) {
 
     ASSERT_EXITS_WITH_OUTPUT(
         1, "AdaptiveAvgPool1d backward FLOAT32 (propLoss): expected shape [2, 2, 6], got [1, 2, 6]",
-        adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+        adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
 
     freeTensor(propLoss);
     freeTensor(lossGrad);
@@ -324,7 +324,7 @@ void testAdaptiveAvgPool1dBackwardFloatRejectsRank2PropLoss(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
                              "AdaptiveAvgPool1d backward FLOAT32: lossGrad and propLoss must both "
                              "be rank-3, got ranks 3 and 2",
-                             adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+                             adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
 
     freeTensor(propLoss);
     freeTensor(lossGrad);
@@ -346,7 +346,7 @@ void testAdaptiveAvgPool1dForwardFloatRejectsOutputWithFewerChannels(void) {
 
     ASSERT_EXITS_WITH_OUTPUT(
         1, "AdaptiveAvgPool1d forward FLOAT32 (rawOut): expected shape [2, 2, 4], got [2, 1, 4]",
-        adaptiveAvgPool1dForward(r.layer, r.input, smallOutput));
+        adaptiveAvgPool1dForward(r.layer, r.input, smallOutput, NULL));
 
     freeTensor(smallOutput);
     freeTensor(r.output);
@@ -416,7 +416,7 @@ void testAdaptiveAvgPool1dForwardWithSymInt32Input(void) {
 
     tensor_t *output = makeFloatTensor(outDims, 3, NULL);
 
-    adaptiveAvgPool1dForward(&layerStore, symInput, output);
+    adaptiveAvgPool1dForward(&layerStore, symInput, output, NULL);
 
     for (size_t i = 0; i < expectedForward_adaptiveAvgPool1d_basic_len; i++) {
         TEST_ASSERT_FLOAT_WITHIN(5e-3f, expectedForward_adaptiveAvgPool1d_basic[i],
@@ -503,13 +503,13 @@ void testForwardBackwardSymUneven(void) {
     // (sum 981, count 2), pinning half-away-from-zero integer division.
     adaptivePoolRun_t r = buildSym(input_adaptiveAvgPool1dSym_symUneven, inDims, 3, outDims);
 
-    adaptiveAvgPool1dForward(r.layer, r.input, r.output);
+    adaptiveAvgPool1dForward(r.layer, r.input, r.output, NULL);
     ASSERT_SYM_FORWARD_GOLD(r.output, symUneven);
 
     tensor_t *lossGrad = buildSymTensor(outDims, 3, lossGrad_adaptiveAvgPool1dSym_symUneven);
     tensor_t *propLoss = buildSymTensor(inDims, 3, NULL);
 
-    adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
     ASSERT_SYM_PROPLOSS_GOLD(propLoss, symUneven);
 }
 
@@ -520,13 +520,13 @@ void testForwardBackwardSymGlobal(void) {
     // Global average: count = L, the largest divisor.
     adaptivePoolRun_t r = buildSym(input_adaptiveAvgPool1dSym_symGlobal, inDims, 1, outDims);
 
-    adaptiveAvgPool1dForward(r.layer, r.input, r.output);
+    adaptiveAvgPool1dForward(r.layer, r.input, r.output, NULL);
     ASSERT_SYM_FORWARD_GOLD(r.output, symGlobal);
 
     tensor_t *lossGrad = buildSymTensor(outDims, 3, lossGrad_adaptiveAvgPool1dSym_symGlobal);
     tensor_t *propLoss = buildSymTensor(inDims, 3, NULL);
 
-    adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss);
+    adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
     ASSERT_SYM_PROPLOSS_GOLD(propLoss, symGlobal);
 }
 
@@ -550,7 +550,7 @@ void testForwardSymRejectsTermsOverBound(void) {
     adaptivePoolRun_t r = buildSym(NULL, inDims, 1, outDims);
     r.input = buildSymTensorWithBits(inDims, 3, 16);
 
-    ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dForward(r.layer, r.input, r.output));
+    ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dForward(r.layer, r.input, r.output, NULL));
 }
 
 /* Value-sum guard, width branch: a 31-bit loss-grad mantissa can overflow the
@@ -565,7 +565,8 @@ void testBackwardSymRejectsWideLossGrad(void) {
     tensor_t *lossGrad = buildSymTensorWithBits(outDims, 3, 31);
     tensor_t *propLoss = buildSymTensor(inDims, 3, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(
+        adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
 }
 
 /* #4 PR0: the SYM_INT32 dx kernel takes batch and channels from lossGrad but
@@ -582,7 +583,7 @@ void testAdaptiveAvgPool1dBackwardSymRejectsPropLossWithFewerChannels(void) {
 
     ASSERT_EXITS_WITH_OUTPUT(
         1, "AdaptiveAvgPool1d backward SYM_INT32 (rawOut): expected shape [2, 2, 6], got [2, 1, 6]",
-        adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+        adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
 
     freeTensor(propLoss);
     freeTensor(lossGrad);
@@ -605,7 +606,7 @@ void testAdaptiveAvgPool1dBackwardSymRejectsRank2PropLoss(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
                              "AdaptiveAvgPool1d backward SYM_INT32: lossGrad and rawOut must both "
                              "be rank-3, got ranks 3 and 2",
-                             adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss));
+                             adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
 
     freeTensor(propLoss);
     freeTensor(lossGrad);
@@ -627,7 +628,7 @@ void testAdaptiveAvgPool1dForwardSymRejectsOutputWithSmallerBatch(void) {
 
     ASSERT_EXITS_WITH_OUTPUT(
         1, "AdaptiveAvgPool1d forward SYM_INT32 (rawOut): expected shape [2, 2, 4], got [1, 2, 4]",
-        adaptiveAvgPool1dForward(r.layer, r.input, smallOutput));
+        adaptiveAvgPool1dForward(r.layer, r.input, smallOutput, NULL));
 
     freeTensor(smallOutput);
     freeTensor(r.output);
@@ -704,7 +705,7 @@ void testAdaptiveAvgPool1dForwardBfpBorrowedGroupedInput(void) {
     layer_t layer;
     adaptiveBuildBfpLayer(&cfg, &lc, &layer, (size_t)kBfpAdaptiveOutputSize, wireQ);
 
-    adaptiveAvgPool1dForward(&layer, input, output);
+    adaptiveAvgPool1dForward(&layer, input, output, NULL);
 
     TEST_ASSERT_EQUAL_MEMORY_MESSAGE(kBfpAdaptiveExpectedForward, output->data,
                                      kBfpAdaptiveExpectedForward_len * sizeof(float),
@@ -743,8 +744,8 @@ void testAdaptiveAvgPool1dBackwardBfpScattersIntoFloat32Raw(void) {
      * THIS layer the doubled call did not kill the dropped-memset mutant in
      * one build — the observability is stack-layout dependent. The durable fix
      * is funnel-level zeroing of the Phase-2 raw (PR4 follow-up FU-1). */
-    adaptiveAvgPool1dBackward(&layer, NULL, lossGrad, propLoss);
-    adaptiveAvgPool1dBackward(&layer, NULL, lossGrad, propLoss);
+    adaptiveAvgPool1dBackward(&layer, NULL, lossGrad, propLoss, NULL);
+    adaptiveAvgPool1dBackward(&layer, NULL, lossGrad, propLoss, NULL);
 
     TEST_ASSERT_EQUAL_MEMORY_MESSAGE(kBfpAdaptiveExpectedBackward, propLoss->data,
                                      kBfpAdaptiveExpectedBackward_len * sizeof(float),
@@ -794,10 +795,10 @@ void testAdaptiveAvgPool1dBfpRejectsMismatchedShapes(void) {
     layer_t layer;
     adaptiveBuildBfpLayer(&cfg, &lc, &layer, (size_t)kBfpAdaptiveOutputSize, wireQ);
 
-    ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dForward(&layer, input, badChannels));
-    ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dForward(&layer, input, badBatch));
-    ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dBackward(&layer, NULL, lossGrad, badPropLoss));
-    ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dForward(&layer, input, badRank));
+    ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dForward(&layer, input, badChannels, NULL));
+    ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dForward(&layer, input, badBatch, NULL));
+    ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dBackward(&layer, NULL, lossGrad, badPropLoss, NULL));
+    ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dForward(&layer, input, badRank, NULL));
 
     freeQuantization(wireQ);
     freeTensor(badRank);
@@ -831,9 +832,9 @@ void testAdaptiveAvgPool1dBackwardBfpGuardsNarrowedNotRemoved(void) {
     layer_t floatLayer;
     adaptiveBuildBfpLayer(&floatCfg, &floatLc, &floatLayer, (size_t)kBfpAdaptiveOutputSize, floatQ);
     ASSERT_EXITS_WITH_FAILURE(
-        adaptiveAvgPool1dBackward(&floatLayer, NULL, bfpLossGrad, floatPropLoss));
+        adaptiveAvgPool1dBackward(&floatLayer, NULL, bfpLossGrad, floatPropLoss, NULL));
     ASSERT_EXITS_WITH_FAILURE(
-        adaptiveAvgPool1dBackward(&floatLayer, NULL, floatLossGrad, bfpPropLoss));
+        adaptiveAvgPool1dBackward(&floatLayer, NULL, floatLossGrad, bfpPropLoss, NULL));
 
     adaptiveAvgPool1dConfig_t bfpCfg = {0};
     bfpCfg.outputSize = (size_t)kBfpAdaptiveOutputSize;
@@ -844,8 +845,8 @@ void testAdaptiveAvgPool1dBackwardBfpGuardsNarrowedNotRemoved(void) {
     layerConfig_t bfpLc = {.adaptiveAvgPool1d = &bfpCfg};
     layer_t bfpLayer = {.type = ADAPTIVE_AVGPOOL1D, .config = &bfpLc};
     ASSERT_EXITS_WITH_FAILURE(
-        adaptiveAvgPool1dBackward(&bfpLayer, NULL, bfpLossGrad, floatPropLoss));
-    ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dForward(&bfpLayer, floatInput, floatOutput));
+        adaptiveAvgPool1dBackward(&bfpLayer, NULL, bfpLossGrad, floatPropLoss, NULL));
+    ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dForward(&bfpLayer, floatInput, floatOutput, NULL));
 
     /* The NON-NULL, non-BFP spelling of the same hole (the AvgPool/MaxPool
      * twins pin it too): a FLOAT32 produced-wire config is just as anchor-less
@@ -857,8 +858,9 @@ void testAdaptiveAvgPool1dBackwardBfpGuardsNarrowedNotRemoved(void) {
     layerConfig_t floatWireLc = {.adaptiveAvgPool1d = &floatWireCfg};
     layer_t floatWireLayer = {.type = ADAPTIVE_AVGPOOL1D, .config = &floatWireLc};
     ASSERT_EXITS_WITH_FAILURE(
-        adaptiveAvgPool1dBackward(&floatWireLayer, NULL, bfpLossGrad, floatPropLoss));
-    ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dForward(&floatWireLayer, floatInput, floatOutput));
+        adaptiveAvgPool1dBackward(&floatWireLayer, NULL, bfpLossGrad, floatPropLoss, NULL));
+    ASSERT_EXITS_WITH_FAILURE(
+        adaptiveAvgPool1dForward(&floatWireLayer, floatInput, floatOutput, NULL));
 
     freeQuantization(floatQ);
     freeTensor(floatInput);
@@ -905,8 +907,8 @@ void testAdaptiveAvgPool1dBfpRejectsRank2Operands(void) {
     layer_t layer;
     adaptiveBuildBfpLayer(&cfg, &lc, &layer, (size_t)kBfpAdaptiveOutputSize, wireQ);
 
-    ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dForward(&layer, badInput, output));
-    ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dBackward(&layer, NULL, badLossGrad, propLoss));
+    ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dForward(&layer, badInput, output, NULL));
+    ASSERT_EXITS_WITH_FAILURE(adaptiveAvgPool1dBackward(&layer, NULL, badLossGrad, propLoss, NULL));
 
     freeQuantization(wireQ);
     freeTensor(propLoss);

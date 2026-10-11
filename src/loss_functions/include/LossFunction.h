@@ -3,6 +3,10 @@
 
 #include "Tensor.h"
 
+/* Pointer-only use: the identical typedef lives in LayerExec.h (C11 allows the
+ * repetition), so this header needs no RNG include path. */
+typedef struct layerExec layerExec_t;
+
 typedef enum lossFuncType { MSE, CROSS_ENTROPY } lossFuncType_t;
 
 typedef enum reduction { REDUCTION_SUM, REDUCTION_MEAN } reduction_t;
@@ -37,7 +41,8 @@ lossConfig_t defaultLossConfig(lossFuncType_t funcType);
  * (orderOfDimensions is not compared). All microbatches in one macro batch
  * must have equal B (uniform microbatch size assumption — see
  * docs/CONVENTIONS.md §"Loss API: microbatch contracts"). */
-typedef float (*lossFwdFn_t)(tensor_t *modelOutput, tensor_t *label, reduction_t reduction);
+typedef float (*lossFwdFn_t)(tensor_t *modelOutput, tensor_t *label, reduction_t reduction,
+                             const layerExec_t *exec);
 
 /*! Per-microbatch backward.
  *
@@ -48,8 +53,11 @@ typedef float (*lossFwdFn_t)(tensor_t *modelOutput, tensor_t *label, reduction_t
  *
  * \param modelOutput  Same shape contract as forward.
  * \param label        Same rank and dimensions as modelOutput (enforced, #153).
- * \param result       Output buffer (same shape) for the raw per-element grad. */
-typedef void (*lossBwdFn_t)(tensor_t *modelOutput, tensor_t *label, tensor_t *result);
+ * \param result       Output buffer (same shape) for the raw per-element grad.
+ * \param exec         The context of the layer position after the last layer
+ *                     (the layer key); NULL = no randomness. */
+typedef void (*lossBwdFn_t)(tensor_t *modelOutput, tensor_t *label, tensor_t *result,
+                            const layerExec_t *exec);
 
 /* Per-loss MEAN-reduction scale factor (PyTorch parity).
  * Only called when backwardReduction == REDUCTION_MEAN.

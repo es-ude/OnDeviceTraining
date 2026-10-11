@@ -9,6 +9,7 @@
 #include "Tensor.h"
 
 typedef struct layer layer_t;
+typedef struct layerExec layerExec_t;
 
 typedef struct layerNormConfig {
     parameter_t *gamma;      /* shape normalizedShape; init 1 */
@@ -32,8 +33,9 @@ void initLayerNormConfig(layerNormConfig_t *cfg, parameter_t *gamma, parameter_t
                          size_t *normalizedShape, size_t numNormDims, float eps,
                          quantization_t *forwardQ, quantization_t *backwardQ);
 
-void layerNormForward(layer_t *layer, tensor_t *input, tensor_t *output);
-void layerNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss);
+void layerNormForward(layer_t *layer, tensor_t *input, tensor_t *output, const layerExec_t *exec);
+void layerNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss,
+                       const layerExec_t *exec);
 void layerNormCalcOutputShape(layer_t *layer, shape_t *inputShape, shape_t *outputShape);
 
 #endif // ODT_LAYERNORM_H

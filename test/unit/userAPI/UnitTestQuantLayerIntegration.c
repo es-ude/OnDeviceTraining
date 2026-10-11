@@ -586,7 +586,7 @@ void testQuantLayerAcceptsSameDtypeBfpPairForward(void) {
     setTensorValues(&output, outData, &shape, &outQ, NULL);
 
     layer_t *quant = buildQuantLayer(&outQ, &inQ); /* documents the config contract */
-    quantizationForward(quant, &input, &output);
+    quantizationForward(quant, &input, &output, NULL);
     freeQuantLayerShell(quant);
 
     TEST_ASSERT_EQUAL_UINT8(131, outQC.exponents[0]);
@@ -620,7 +620,7 @@ void testQuantLayerStillRejectsSameDtypeFloatPair(void) {
     setTensorValues(&output, (uint8_t *)outVals, &shape, &outQ, NULL);
 
     layer_t qLayer = {.type = QUANTIZATION, .config = NULL}; /* dispatch reads only tensors */
-    ASSERT_EXITS_WITH_FAILURE(quantizationForward(&qLayer, &input, &output));
+    ASSERT_EXITS_WITH_FAILURE(quantizationForward(&qLayer, &input, &output, NULL));
 }
 
 int main(void) {

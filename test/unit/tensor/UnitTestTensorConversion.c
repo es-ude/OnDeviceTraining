@@ -83,7 +83,7 @@ void testConversionIntFloat() {
     tensor_t floatTensor;
     setTensorValues(&floatTensor, (uint8_t *)floatData, &shape, &floatQ, NULL);
 
-    convertTensor(&intTensor, &floatTensor);
+    convertTensor(&intTensor, &floatTensor, NULL);
     float actual[numValues];
     readBytesAsFloatArray(numValues, (uint8_t *)floatData, actual);
 
@@ -118,7 +118,7 @@ void testConversionIntSymInt32() {
     tensor_t symInt32Tensor;
     setTensorValues(&symInt32Tensor, (uint8_t *)symInt32Data, &shape, &symInt32Q, NULL);
 
-    convertTensor(&intTensor, &symInt32Tensor);
+    convertTensor(&intTensor, &symInt32Tensor, NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(intTensor.data, symInt32Tensor.data, numValues);
 }
@@ -154,7 +154,7 @@ void testConversionIntAsym() {
 
     tensor_t asymTensor;
     setTensorValues(&asymTensor, asymData, &shape, &asymQ, NULL);
-    convertTensor(&intTensor, &asymTensor);
+    convertTensor(&intTensor, &asymTensor, NULL);
 
     uint8_t flattenedAsymData[numValues];
     byteConversion(asymTensor.data, asymQConfig.qBits, flattenedAsymData, 8, numValues);
@@ -193,7 +193,7 @@ void testConversionFloatInt() {
     int32_t intData[numValues];
     tensor_t intTensor;
     setTensorValues(&intTensor, (uint8_t *)intData, &shape, &intQ, NULL);
-    convertTensor(&floatTensor, &intTensor);
+    convertTensor(&floatTensor, &intTensor, NULL);
 
     int32_t actual[numValues];
     readBytesAsInt32Array(6, (uint8_t *)intData, actual);
@@ -227,7 +227,7 @@ void testConversionFloatSymInt32() {
     int32_t symInt32Data[numValues];
     tensor_t symInt32Tensor;
     setTensorValues(&symInt32Tensor, (uint8_t *)symInt32Data, &shape, &symInt32Q, NULL);
-    convertTensor(&floatTensor, &symInt32Tensor);
+    convertTensor(&floatTensor, &symInt32Tensor, NULL);
 
     /* absmax = 6.7; int12 scale = 6.7/2047 ≈ 0.003273083.
      * Quantized values: round(v / scale): 458, 886, 978, 1375, -367, -2047. */
@@ -238,7 +238,7 @@ void testConversionFloatSymInt32() {
     TEST_ASSERT_FLOAT_WITHIN(0.000001f, expectedScale, outputSymInt32QC->scale);
     TEST_ASSERT_EQUAL_INT32_ARRAY(expectedData, symInt32Tensor.data, numValues);
 
-    convertTensor(&symInt32Tensor, &floatTensor);
+    convertTensor(&symInt32Tensor, &floatTensor, NULL);
     float expectedFloat[] = {1.5f, 2.9f, 3.2f, 4.5f, -1.2f, -6.7f};
     float *actualFloat = (float *)floatTensor.data;
     /* int12 quantisation step = scale ≈ 0.00327; worst-case round-trip
@@ -277,7 +277,7 @@ void testConversionFloatAsym() {
     tensor_t asymTensor;
     setTensorValues(&asymTensor, asymData, &shape, &asymQ, NULL);
 
-    convertTensor(&floatTensor, &asymTensor);
+    convertTensor(&floatTensor, &asymTensor, NULL);
 
     uint8_t flattenedAsymData[numValues];
     byteConversion(asymTensor.data, asymQConfig.qBits, flattenedAsymData, 8, numValues);
@@ -329,7 +329,7 @@ void testConversionFloatAsymQBits16NegativeBandZeroPointAtCodeCeiling() {
     tensor_t asymTensor;
     setTensorValues(&asymTensor, asymData, &shape, &asymQ, NULL);
 
-    convertTensor(&floatTensor, &asymTensor);
+    convertTensor(&floatTensor, &asymTensor, NULL);
 
     TEST_ASSERT_EQUAL_UINT16((uint16_t)zp_asym_nudged_f2NegBand16, asymQConfig.zeroPoints[0]);
     TEST_ASSERT_EQUAL_UINT16(65535, asymQConfig.zeroPoints[0]); /* the uint16 ceiling itself */
@@ -344,7 +344,7 @@ void testConversionFloatAsymQBits16NegativeBandZeroPointAtCodeCeiling() {
     initFloat32Quantization(&floatOutQ);
     tensor_t floatOut;
     setTensorValues(&floatOut, (uint8_t *)decoded, &shape, &floatOutQ, NULL);
-    convertTensor(&asymTensor, &floatOut);
+    convertTensor(&asymTensor, &floatOut, NULL);
 
     float tol = asymQConfig.scales[0] * 0.5f + 1e-4f;
     for (size_t i = 0; i < numValues; i++) {
@@ -401,7 +401,7 @@ void testConversionFloatAsymFarNegativeBandDerivesNudgedGrid(void) {
     tensor_t asymTensor;
     setTensorValues(&asymTensor, asymData, &shape, &asymQ, NULL);
 
-    convertTensor(&floatTensor, &asymTensor);
+    convertTensor(&floatTensor, &asymTensor, NULL);
 
     TEST_ASSERT_EQUAL_UINT16((uint16_t)zp_asym_nudged_f3NegFar, asymQConfig.zeroPoints[0]);
     TEST_ASSERT_EQUAL_FLOAT(scale_asym_nudged_f3NegFar, asymQConfig.scales[0]);
@@ -422,7 +422,7 @@ void testConversionFloatAsymFarNegativeBandDerivesNudgedGrid(void) {
     initFloat32Quantization(&floatOutQ);
     tensor_t floatOut;
     setTensorValues(&floatOut, (uint8_t *)decoded, &shape, &floatOutQ, NULL);
-    convertTensor(&asymTensor, &floatOut);
+    convertTensor(&asymTensor, &floatOut, NULL);
     TEST_ASSERT_EQUAL_FLOAT(0.0f, decoded[0]);
     TEST_ASSERT_EQUAL_FLOAT(0.0f, decoded[1]);
 }
@@ -461,7 +461,7 @@ void testConversionFloatAsymEncodeClampAtBandEdgeTie(void) {
     tensor_t asymTensor;
     setTensorValues(&asymTensor, asymData, &shape, &asymQ, NULL);
 
-    convertTensor(&floatTensor, &asymTensor);
+    convertTensor(&floatTensor, &asymTensor, NULL);
 
     int32_t codes[4];
     byteConversion(asymTensor.data, 3, (uint8_t *)codes, 32, numValues);
@@ -476,7 +476,7 @@ void testConversionFloatAsymEncodeClampAtBandEdgeTie(void) {
     initFloat32Quantization(&floatOutQ);
     tensor_t floatOut;
     setTensorValues(&floatOut, (uint8_t *)decoded, &shape, &floatOutQ, NULL);
-    convertTensor(&asymTensor, &floatOut);
+    convertTensor(&asymTensor, &floatOut, NULL);
     TEST_ASSERT_EQUAL_FLOAT(0.0f, decoded[2]);
 }
 
@@ -504,7 +504,7 @@ void testConversionSymInt32Int() {
     tensor_t intTensor;
     setTensorValues(&intTensor, (uint8_t *)intData, &shape, &intQ, NULL);
 
-    convertTensor(&symInt32Tensor, &intTensor);
+    convertTensor(&symInt32Tensor, &intTensor, NULL);
 
     int32_t expected[] = {1, 2, 3, 4, -1, -2};
 
@@ -538,7 +538,7 @@ void testConversionSymInt32Float() {
     tensor_t floatTensor;
     setTensorValues(&floatTensor, (uint8_t *)floatData, &shape, &floatQ, NULL);
 
-    convertTensor(&symInt32Tensor, &floatTensor);
+    convertTensor(&symInt32Tensor, &floatTensor, NULL);
 
     float expected[] = {1.f, 2.f, 3.f, 4.f, -1.f, -2.f};
 
@@ -589,7 +589,7 @@ void testConversionSymInt32Asym() {
     tensor_t asymTensor;
     setTensorValues(&asymTensor, asymData, &shape, &asymQ, NULL);
 
-    convertTensor(&symInt32Tensor, &asymTensor);
+    convertTensor(&symInt32Tensor, &asymTensor, NULL);
 
     uint32_t output[numValues];
     byteConversion(asymTensor.data, asymQConfig.qBits, (uint8_t *)output, 32, numValues);
@@ -638,7 +638,7 @@ void testConversionAsymInt() {
     tensor_t intTensor;
     setTensorValues(&intTensor, (uint8_t *)intData, &shape, &intQ, NULL);
 
-    convertTensor(&asymTensor, &intTensor);
+    convertTensor(&asymTensor, &intTensor, NULL);
 
     int32_t actual[numValues];
     readBytesAsInt32Array(numValues, intTensor.data, actual);
@@ -679,7 +679,7 @@ void testConversionAsymFloat() {
     tensor_t floatTensor;
     setTensorValues(&floatTensor, (uint8_t *)floatData, &shape, &floatQ, NULL);
 
-    convertTensor(&asymTensor, &floatTensor);
+    convertTensor(&asymTensor, &floatTensor, NULL);
 
     float actual[numValues];
     readBytesAsFloatArray(numValues, floatTensor.data, actual);
@@ -723,7 +723,7 @@ void testConversionAsymSymInt32() {
     tensor_t symInt32Tensor;
     setTensorValues(&symInt32Tensor, (uint8_t *)symInt32Data, &shape, &symInt32Q, NULL);
 
-    convertTensor(&asymTensor, &symInt32Tensor);
+    convertTensor(&asymTensor, &symInt32Tensor, NULL);
 
     int32_t actual[numValues];
     readBytesAsInt32Array(numValues, symInt32Tensor.data, actual);
@@ -767,7 +767,7 @@ void testConversionBoolBoolCopiesOnlyPackedBytes() {
     tensor_t outTensor;
     setTensorValues(&outTensor, outBuffer, &shape, &outQ, NULL);
 
-    convertTensor(&inTensor, &outTensor);
+    convertTensor(&inTensor, &outTensor, NULL);
 
     /* Under-copy guard: all 9 bits must arrive. */
     for (size_t i = 0; i < N; i++) {
@@ -816,7 +816,7 @@ void testConversionSymInt32SameTypeCopyPropagatesScale() {
     tensor_t outTensor;
     setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
 
-    convertTensor(&inTensor, &outTensor);
+    convertTensor(&inTensor, &outTensor, NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(inData, outData, numValues);
     TEST_ASSERT_EQUAL_FLOAT(0.03125f, outQC.scale);
@@ -855,7 +855,7 @@ void testConversionSymSameTypeCopyPropagatesScale() {
     tensor_t out;
     setTensorValues(&out, outData, &shape, &outQ, NULL);
 
-    convertTensor(&in, &out);
+    convertTensor(&in, &out, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT(0.25f, outQC.scales[0]);
     TEST_ASSERT_EQUAL_UINT8(6, outQC.qBits);
@@ -895,7 +895,7 @@ void testConversionSymSameTypeWidthMismatchDies() {
     tensor_t out;
     setTensorValues(&out, outData, &shape, &outQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&in, &out));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&in, &out, NULL));
 }
 
 void testConversionAsymSameTypeWidthMismatchDies() {
@@ -934,7 +934,7 @@ void testConversionAsymSameTypeWidthMismatchDies() {
     tensor_t out;
     setTensorValues(&out, outData, &shape, &outQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&in, &out));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&in, &out, NULL));
 }
 
 void testRequantDynamicAccumulatorRangeMatchesGold() {
@@ -960,7 +960,7 @@ void testRequantDynamicAccumulatorRangeMatchesGold() {
     tensor_t outTensor;
     setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
 
-    requantSymInt32Tensor(&inTensor, &outTensor);
+    requantSymInt32Tensor(&inTensor, &outTensor, NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected_requant_f1AccumRange, outData,
                                   expected_requant_f1AccumRange_len);
@@ -995,7 +995,7 @@ void testRequantDynamicAbsmaxZeroGivesZerosScaleOne() {
     tensor_t outTensor;
     setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
 
-    requantSymInt32Tensor(&inTensor, &outTensor);
+    requantSymInt32Tensor(&inTensor, &outTensor, NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected_requant_f2AbsmaxZero, outData,
                                   expected_requant_f2AbsmaxZero_len);
@@ -1029,7 +1029,7 @@ void testRequantDynamicScaleTracksInputRescale() {
     tensor_t outTensor;
     setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
 
-    requantSymInt32Tensor(&inTensor, &outTensor);
+    requantSymInt32Tensor(&inTensor, &outTensor, NULL);
     TEST_ASSERT_EQUAL_INT32_ARRAY(expectedA_requant_f3Rescale, outData,
                                   expectedA_requant_f3Rescale_len);
     TEST_ASSERT_FLOAT_WITHIN(scaleTolA_requant_f3Rescale, expectedScaleA_requant_f3Rescale,
@@ -1037,7 +1037,7 @@ void testRequantDynamicScaleTracksInputRescale() {
 
     // same mantissas, input scale x10 -> fresh scale must track ~x10
     inQc.scale = inputScaleB_requant_f3Rescale;
-    requantSymInt32Tensor(&inTensor, &outTensor);
+    requantSymInt32Tensor(&inTensor, &outTensor, NULL);
     TEST_ASSERT_EQUAL_INT32_ARRAY(expectedB_requant_f3Rescale, outData,
                                   expectedB_requant_f3Rescale_len);
     TEST_ASSERT_FLOAT_WITHIN(scaleTolB_requant_f3Rescale, expectedScaleB_requant_f3Rescale,
@@ -1069,7 +1069,7 @@ void testRequantDynamicTieRoundsHalfAwayFromZero() {
     tensor_t outTensor;
     setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
 
-    requantSymInt32Tensor(&inTensor, &outTensor);
+    requantSymInt32Tensor(&inTensor, &outTensor, NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected_requant_f4Tie, outData, expected_requant_f4Tie_len);
     TEST_ASSERT_FLOAT_WITHIN(scaleTol_requant_f4Tie, expectedScale_requant_f4Tie, outQc.scale);
@@ -1095,7 +1095,7 @@ void testRequantDynamicInPlaceAliasMatchesGold() {
     tensor_t tensor;
     setTensorValues(&tensor, (uint8_t *)data, &shape, &q, NULL);
 
-    requantSymInt32Tensor(&tensor, &tensor);
+    requantSymInt32Tensor(&tensor, &tensor, NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected_requant_f1AccumRange, data,
                                   expected_requant_f1AccumRange_len);
@@ -1131,7 +1131,7 @@ void testRequantDynamicViaConversionMatrixDiagonal() {
     tensor_t outTensor;
     setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
 
-    conversionFn(&inTensor, &outTensor);
+    conversionFn(&inTensor, &outTensor, NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected_requant_f1AccumRange, outData,
                                   expected_requant_f1AccumRange_len);
@@ -1167,7 +1167,7 @@ void testConvertTensorSymInt32SameTypeKeepsCopySemantics() {
     tensor_t outTensor;
     setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
 
-    convertTensor(&inTensor, &outTensor);
+    convertTensor(&inTensor, &outTensor, NULL);
 
     int32_t expectedCopy[] = {100, -200, 300};
     TEST_ASSERT_EQUAL_INT32_ARRAY(expectedCopy, outData, 3);
@@ -1198,7 +1198,7 @@ void testRequantToScaleNonSaturatingMatchesGold() {
     tensor_t outTensor;
     setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
 
-    requantSymInt32TensorToScale(&inTensor, &outTensor);
+    requantSymInt32TensorToScale(&inTensor, &outTensor, NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected_requant_f5ToScaleFit, outData,
                                   expected_requant_f5ToScaleFit_len);
@@ -1232,7 +1232,7 @@ void testRequantToScaleSaturatesAtQMinQMax() {
     tensor_t outTensor;
     setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
 
-    requantSymInt32TensorToScale(&inTensor, &outTensor);
+    requantSymInt32TensorToScale(&inTensor, &outTensor, NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected_requant_f6ToScaleSat, outData,
                                   expected_requant_f6ToScaleSat_len);
@@ -1269,7 +1269,7 @@ void testRequantToScaleSharedBufferAliasMatchesGold() {
     tensor_t outView;
     setTensorValues(&outView, (uint8_t *)data, &shape, &outQ, NULL);
 
-    requantSymInt32TensorToScale(&inView, &outView);
+    requantSymInt32TensorToScale(&inView, &outView, NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected_requant_f6ToScaleSat, data,
                                   expected_requant_f6ToScaleSat_len);
@@ -1304,7 +1304,7 @@ void testConversionSymSymInt32SignExtends() {
     tensor_t outTensor;
     setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
 
-    convertTensor(&inTensor, &outTensor);
+    convertTensor(&inTensor, &outTensor, NULL);
 
     int32_t expectedMant[] = {3, -3, 31, -32};
     TEST_ASSERT_EQUAL_INT32_ARRAY(expectedMant, outData, numValues); /* sign preserved */
@@ -1336,7 +1336,7 @@ void testConversionSymFloat32Dequantizes() {
     tensor_t outTensor;
     setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
 
-    convertTensor(&inTensor, &outTensor);
+    convertTensor(&inTensor, &outTensor, NULL);
 
     float expected[] = {1.0f, -1.0f, 0.5f};
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, outData, n);
@@ -1366,7 +1366,7 @@ void testConversionSymInt32CodesDropScale() {
     tensor_t outTensor;
     setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
 
-    convertTensor(&inTensor, &outTensor);
+    convertTensor(&inTensor, &outTensor, NULL);
 
     int32_t expected[] = {5, -5, 1, -32};
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, outData, n);
@@ -1425,7 +1425,7 @@ void testConversionSymAsymRescaleRoundTrips() {
     setTensorValues(&floatTensor, (uint8_t *)outF, &shape, &floatQ, NULL);
 
     /* Convert SYM -> ASYM -> FLOAT32 */
-    convertTensor(&inTensor, &asymTensor);
+    convertTensor(&inTensor, &asymTensor, NULL);
     /* Re-pinned to the nudged code-domain grid (group-quant PR4, D6): the
      * dequantized band {5,-4,2,-1,3,-5} spans zero (nudge no-op), scale stays
      * 10/31, zp becomes code-domain +16 -- and unlike f1SpanZero the CODES
@@ -1441,7 +1441,7 @@ void testConversionSymAsymRescaleRoundTrips() {
     for (size_t i = 0; i < n; i++) {
         TEST_ASSERT_EQUAL_UINT8((uint8_t)codes_asym_nudged_f5SymDeq[i], flattenedAsymData[i]);
     }
-    convertTensor(&asymTensor, &floatTensor);
+    convertTensor(&asymTensor, &floatTensor, NULL);
 
     /* Expected: dequantized SYM values */
     float expected[] = {5.0f, -4.0f, 2.0f, -1.0f, 3.0f, -5.0f};
@@ -1486,7 +1486,7 @@ void testConversionSymInt32ToSymRescaleRoundTrips() {
     tensor_t symTensor;
     setTensorValues(&symTensor, symData, &shape, &outQ, NULL);
 
-    convertTensor(&inTensor, &symTensor);
+    convertTensor(&inTensor, &symTensor, NULL);
 
     /* Assert fresh output scale. */
     TEST_ASSERT_FLOAT_WITHIN(1e-6f, 10.0f / 31.0f, outQC.scales[0]);
@@ -1600,7 +1600,7 @@ void testConversionFloatToSymRoundTripsSymmetric() {
     tensor_t symTensor;
     setTensorValues(&symTensor, symData, &shape, &outQ, NULL);
 
-    convertTensor(&floatTensor, &symTensor);
+    convertTensor(&floatTensor, &symTensor, NULL);
 
     TEST_ASSERT_FLOAT_WITHIN(1e-6f, 3.5f / 31.0f, outQC.scales[0]);
 
@@ -1643,7 +1643,7 @@ void testConversionInt32ToSymNoRescaleScale1() {
     tensor_t symTensor;
     setTensorValues(&symTensor, symData, &shape, &outQ, NULL);
 
-    convertTensor(&intTensor, &symTensor);
+    convertTensor(&intTensor, &symTensor, NULL);
 
     int32_t codes[6];
     symTestUnpackSignExtend(symTensor.data, 6, codes, 6);
@@ -1678,7 +1678,7 @@ void testConversionInt32ToSymRejectsOutOfRange() {
     tensor_t symTensor;
     setTensorValues(&symTensor, symData, &shape, &outQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&intTensor, &symTensor));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&intTensor, &symTensor, NULL));
 }
 
 void testChunkedFloatToSymRoundTripsAtChunkBoundary(void) {
@@ -1714,14 +1714,14 @@ void testChunkedFloatToSymRoundTripsAtChunkBoundary(void) {
     tensor_t symOut;
     setTensorValues(&symOut, symData, &shape, &symQ, NULL);
 
-    convertTensor(&floatIn, &symOut);
+    convertTensor(&floatIn, &symOut, NULL);
 
     float *decoded = (float *)reserveMemory(n * sizeof(float));
     quantization_t floatOutQ;
     initFloat32Quantization(&floatOutQ);
     tensor_t floatOut;
     setTensorValues(&floatOut, (uint8_t *)decoded, &shape, &floatOutQ, NULL);
-    convertTensor(&symOut, &floatOut);
+    convertTensor(&symOut, &floatOut, NULL);
 
     float tol = symQC.scales[0] * 0.5f + 1e-3f;
     for (size_t i = 0; i < n; i++) {
@@ -1772,8 +1772,8 @@ void testConversionSymInt32AsymConstantTensorNoDivByZero() {
     tensor_t floatTensor;
     setTensorValues(&floatTensor, (uint8_t *)outF, &shape, &floatQ, NULL);
 
-    convertTensor(&inTensor, &asymTensor);    /* SYM_INT32 -> ASYM (constant) */
-    convertTensor(&asymTensor, &floatTensor); /* ASYM -> FLOAT32 round-trip */
+    convertTensor(&inTensor, &asymTensor, NULL);    /* SYM_INT32 -> ASYM (constant) */
+    convertTensor(&asymTensor, &floatTensor, NULL); /* ASYM -> FLOAT32 round-trip */
 
     for (size_t i = 0; i < n; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-4f, 4.0f, outF[i]);
@@ -1786,7 +1786,7 @@ void testConversionSymInt32AsymConstantTensorNoDivByZero() {
     int32_t zeroData[] = {0, 0, 0, 0};
     tensor_t zeroTensor;
     setTensorValues(&zeroTensor, (uint8_t *)zeroData, &shape, &inQ, NULL);
-    convertTensor(&zeroTensor, &asymTensor);
+    convertTensor(&zeroTensor, &asymTensor, NULL);
     TEST_ASSERT_EQUAL_FLOAT(1.f, asymQC.scales[0]);
     TEST_ASSERT_EQUAL_UINT16(0, asymQC.zeroPoints[0]);
     uint8_t zeroCodes[4];
@@ -1841,7 +1841,7 @@ void testConversionAsymToSymRescaleOffCenterRoundTrips() {
     tensor_t symTensor;
     setTensorValues(&symTensor, symData, &shape, &outQ, NULL);
 
-    convertTensor(&asymTensor, &symTensor);
+    convertTensor(&asymTensor, &symTensor, NULL);
 
     /* Assert FRESH symmetric scale proves rescale (NOT the carried asym 0.25):
      * absMax = 6.0; scale = 6.0 / (2^(6-1) - 1) = 6.0/31. */
@@ -1888,7 +1888,7 @@ void testConvertSymToInt32RejectsZeroQBits() {
     tensor_t outTensor;
     setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor, NULL));
 }
 
 void testConvertInt32ToSymRejectsZeroQBits() {
@@ -1914,7 +1914,7 @@ void testConvertInt32ToSymRejectsZeroQBits() {
     tensor_t symTensor;
     setTensorValues(&symTensor, symBuf, &shape, &outQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&intTensor, &symTensor));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&intTensor, &symTensor, NULL));
 }
 
 void testConvertersPreserveCallerOutputShape() {
@@ -1951,7 +1951,7 @@ void testConvertersPreserveCallerOutputShape() {
     uint8_t asymData[calcNumberOfBytesForData(&asymQ, 6)];
     tensor_t asymOut;
     setTensorValues(&asymOut, asymData, &outShape, &asymQ, NULL);
-    convertTensor(&floatIn, &asymOut);
+    convertTensor(&floatIn, &asymOut, NULL);
     TEST_ASSERT_EQUAL_PTR(&outShape, asymOut.shape);
 
     /* INT32 -> FLOAT32 */
@@ -1965,7 +1965,7 @@ void testConvertersPreserveCallerOutputShape() {
     float floatOutData[6];
     tensor_t floatOut;
     setTensorValues(&floatOut, (uint8_t *)floatOutData, &outShape, &floatOutQ, NULL);
-    convertTensor(&intIn, &floatOut);
+    convertTensor(&intIn, &floatOut, NULL);
     TEST_ASSERT_EQUAL_PTR(&outShape, floatOut.shape);
 
     /* ASYM -> FLOAT32 */
@@ -1989,7 +1989,7 @@ void testConvertersPreserveCallerOutputShape() {
     float floatOut2Data[6];
     tensor_t floatOut2;
     setTensorValues(&floatOut2, (uint8_t *)floatOut2Data, &outShape, &floatOut2Q, NULL);
-    convertTensor(&asymIn, &floatOut2);
+    convertTensor(&asymIn, &floatOut2, NULL);
     TEST_ASSERT_EQUAL_PTR(&outShape, floatOut2.shape);
 }
 
@@ -2292,7 +2292,7 @@ void testAccumulateAsymValueZeroAfterConfigReset(void) {
     initFloat32Quantization(&floatQ);
     tensor_t floatTensor;
     setTensorValues(&floatTensor, (uint8_t *)inc, &shape, &floatQ, NULL);
-    convertTensor(&floatTensor, &refTensor);
+    convertTensor(&floatTensor, &refTensor, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT(refQC.scales[0], qc.scales[0]);
     TEST_ASSERT_EQUAL_UINT16(refQC.zeroPoints[0], qc.zeroPoints[0]);
@@ -2533,14 +2533,14 @@ void testChunkedFloatToAsymMatchesReferenceAcrossChunkBoundaries(void) {
             tensor_t asymOut;
             setTensorValues(&asymOut, asymData, &shape, &asymQ, NULL);
 
-            convertTensor(&floatIn, &asymOut);
+            convertTensor(&floatIn, &asymOut, NULL);
 
             float *decoded = (float *)reserveMemory(n * sizeof(float));
             quantization_t floatOutQ;
             initFloat32Quantization(&floatOutQ);
             tensor_t floatOut;
             setTensorValues(&floatOut, (uint8_t *)decoded, &shape, &floatOutQ, NULL);
-            convertTensor(&asymOut, &floatOut);
+            convertTensor(&asymOut, &floatOut, NULL);
 
             float tol = asymQC.scales[0] * 0.5f + 1e-3f;
             for (size_t i = 0; i < n; i++) {
@@ -2594,7 +2594,7 @@ void testChunkedSymInt32ToSymRoundTripsAtChunkBoundary(void) {
     tensor_t symOut;
     setTensorValues(&symOut, symData, &shape, &outQ, NULL);
 
-    convertTensor(&inTensor, &symOut);
+    convertTensor(&inTensor, &symOut, NULL);
 
     float expectedScale = (100000.f * inQC.scale) / 31.f; /* qMax = 2^(6-1) - 1 */
     TEST_ASSERT_FLOAT_WITHIN(1e-3f, expectedScale, outQC.scales[0]);
@@ -2604,7 +2604,7 @@ void testChunkedSymInt32ToSymRoundTripsAtChunkBoundary(void) {
     initFloat32Quantization(&floatOutQ);
     tensor_t floatOut;
     setTensorValues(&floatOut, (uint8_t *)decoded, &shape, &floatOutQ, NULL);
-    convertTensor(&symOut, &floatOut);
+    convertTensor(&symOut, &floatOut, NULL);
 
     float tol = outQC.scales[0] * 0.5f + 1e-3f;
     for (size_t i = 0; i < n; i++) {
@@ -2661,7 +2661,7 @@ void testChunkedAsymToSymRoundTripsAtChunkBoundary(void) {
     tensor_t symOut;
     setTensorValues(&symOut, symData, &shape, &outQ, NULL);
 
-    convertTensor(&asymTensor, &symOut);
+    convertTensor(&asymTensor, &symOut, NULL);
 
     float expectedScale = 127.0f / 31.0f; /* qMax = 2^(6-1) - 1 */
     TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedScale, outQC.scales[0]);
@@ -2671,7 +2671,7 @@ void testChunkedAsymToSymRoundTripsAtChunkBoundary(void) {
     initFloat32Quantization(&floatOutQ);
     tensor_t floatOut;
     setTensorValues(&floatOut, (uint8_t *)decoded, &shape, &floatOutQ, NULL);
-    convertTensor(&symOut, &floatOut);
+    convertTensor(&symOut, &floatOut, NULL);
 
     float tol = outQC.scales[0] * 0.5f + 1e-3f;
     for (size_t i = 0; i < n; i++) {
@@ -2733,14 +2733,14 @@ void testChunkedSymToAsymRoundTripsAtChunkBoundary(void) {
     tensor_t asymOut;
     setTensorValues(&asymOut, asymData, &shape, &outQ, NULL);
 
-    convertTensor(&symTensor, &asymOut);
+    convertTensor(&symTensor, &asymOut, NULL);
 
     float *decoded = (float *)reserveMemory(n * sizeof(float));
     quantization_t floatOutQ;
     initFloat32Quantization(&floatOutQ);
     tensor_t floatOut;
     setTensorValues(&floatOut, (uint8_t *)decoded, &shape, &floatOutQ, NULL);
-    convertTensor(&asymOut, &floatOut);
+    convertTensor(&asymOut, &floatOut, NULL);
 
     float tol = outQC.scales[0] * 0.5f + 1e-3f;
     for (size_t i = 0; i < n; i++) {
@@ -2793,14 +2793,14 @@ void testChunkedSymInt32ToAsymRoundTripsAtChunkBoundary(void) {
     tensor_t asymOut;
     setTensorValues(&asymOut, asymData, &shape, &outQ, NULL);
 
-    convertTensor(&inTensor, &asymOut);
+    convertTensor(&inTensor, &asymOut, NULL);
 
     float *decoded = (float *)reserveMemory(n * sizeof(float));
     quantization_t floatOutQ;
     initFloat32Quantization(&floatOutQ);
     tensor_t floatOut;
     setTensorValues(&floatOut, (uint8_t *)decoded, &shape, &floatOutQ, NULL);
-    convertTensor(&asymOut, &floatOut);
+    convertTensor(&asymOut, &floatOut, NULL);
 
     float tol = outQC.scales[0] * 0.5f + 1e-3f;
     for (size_t i = 0; i < n; i++) {
@@ -2850,7 +2850,7 @@ void testChunkedSymToFloat32DequantizesAtChunkBoundary(void) {
     tensor_t outTensor;
     setTensorValues(&outTensor, (uint8_t *)decoded, &shape, &outQ, NULL);
 
-    convertTensor(&inTensor, &outTensor);
+    convertTensor(&inTensor, &outTensor, NULL);
 
     for (size_t i = 0; i < n; i++) {
         float expected = (float)mant[i] * inQC.scales[0];
@@ -2898,7 +2898,7 @@ void testChunkedAsymToFloat32DequantizesAtChunkBoundary(void) {
     tensor_t outTensor;
     setTensorValues(&outTensor, (uint8_t *)decoded, &shape, &outQ, NULL);
 
-    convertTensor(&inTensor, &outTensor);
+    convertTensor(&inTensor, &outTensor, NULL);
 
     for (size_t i = 0; i < n; i++) {
         float expected = (float)(codes[i] - (int32_t)inQC.zeroPoints[0]) * inQC.scales[0];
@@ -3175,7 +3175,7 @@ void testQuantizeFloatToAsymNoOpOnEmptyTensor(void) {
     tensor_t asymTensor;
     setTensorValues(&asymTensor, &asymDummy, &shape, &asymQ, NULL);
 
-    convertTensor(&floatTensor, &asymTensor);
+    convertTensor(&floatTensor, &asymTensor, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT(123.f, asymQC.scales[0]);
     TEST_ASSERT_EQUAL_UINT16(7, asymQC.zeroPoints[0]);
@@ -3241,7 +3241,7 @@ void testFloatToSymGroupedDerivesPerGroupScales(void) {
     tensor_t symTensor;
     setTensorValues(&symTensor, symData, &shape, &outQ, NULL);
 
-    convertTensor(&floatTensor, &symTensor);
+    convertTensor(&floatTensor, &symTensor, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT(kGroupQuantScales[0], outQC.scales[0]);
     TEST_ASSERT_EQUAL_FLOAT(kGroupQuantScales[1], outQC.scales[1]);
@@ -3282,7 +3282,7 @@ void testFloatToSymGroupedMatchesTorchPerChannel(void) {
     tensor_t symTensor;
     setTensorValues(&symTensor, symData, &shape, &outQ, NULL);
 
-    convertTensor(&floatTensor, &symTensor);
+    convertTensor(&floatTensor, &symTensor, NULL);
 
     for (size_t g = 0; g < 8; g++) {
         TEST_ASSERT_EQUAL_FLOAT(kTorchXCheckScales[g], outQC.scales[g]);
@@ -3322,7 +3322,7 @@ void testSymGroupedToFloatDequantsPerGroup(void) {
     tensor_t floatTensor;
     setTensorValues(&floatTensor, (uint8_t *)floatData, &shape, &floatQ, NULL);
 
-    convertTensor(&symTensor, &floatTensor);
+    convertTensor(&symTensor, &floatTensor, NULL);
 
     for (size_t i = 0; i < n; i++) {
         TEST_ASSERT_EQUAL_FLOAT(kGroupQuantInput[i], floatData[i]);
@@ -3357,7 +3357,7 @@ void testGroupedSymToSymInt32Dies(void) {
     tensor_t outTensor;
     setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&symTensor, &outTensor));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&symTensor, &outTensor, NULL));
 }
 
 void testGroupedSymInt32ToSymTargetDies(void) {
@@ -3385,7 +3385,7 @@ void testGroupedSymInt32ToSymTargetDies(void) {
     tensor_t outTensor;
     setTensorValues(&outTensor, outData, &shape, &outQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor, NULL));
 }
 
 void testGroupedSymToAsymDies(void) {
@@ -3421,7 +3421,7 @@ void testGroupedSymToAsymDies(void) {
     tensor_t outTensor;
     setTensorValues(&outTensor, outData, &shape, &outQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&symTensor, &outTensor));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&symTensor, &outTensor, NULL));
 }
 
 void testGroupedAsymToSymTargetDies(void) {
@@ -3456,7 +3456,7 @@ void testGroupedAsymToSymTargetDies(void) {
     tensor_t outTensor;
     setTensorValues(&outTensor, outData, &shape, &outQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor, NULL));
 }
 
 void testGroupedInt32ToSymTargetDies(void) {
@@ -3482,7 +3482,7 @@ void testGroupedInt32ToSymTargetDies(void) {
     tensor_t outTensor;
     setTensorValues(&outTensor, outData, &shape, &outQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor, NULL));
 }
 
 void testGroupedRepackSymInt32ToSymNoRescaleTargetDies(void) {
@@ -3569,7 +3569,7 @@ void testSameTypeSymCopyCarriesGroupArrays(void) {
     tensor_t out;
     setTensorValues(&out, outData, &shape, &outQ, NULL);
 
-    convertTensor(&in, &out);
+    convertTensor(&in, &out, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT(0.25f, outQC.scales[0]);
     TEST_ASSERT_EQUAL_FLOAT(0.5f, outQC.scales[1]);
@@ -3605,7 +3605,7 @@ void testSameTypeSymCopyRejectsGroupShapeMismatch(void) {
     tensor_t out;
     setTensorValues(&out, outData, &shape, &outQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&in, &out));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&in, &out, NULL));
 }
 
 void testRequantizeTensorInPlaceGrouped(void) {
@@ -3698,7 +3698,7 @@ void testFloatToAsymGroupedDerivesPerGroupGrids(void) {
     tensor_t asymTensor;
     setTensorValues(&asymTensor, asymData, &shape, &outQ, NULL);
 
-    convertTensor(&floatTensor, &asymTensor);
+    convertTensor(&floatTensor, &asymTensor, NULL);
 
     for (size_t g = 0; g < (size_t)kAsymGroupedNumGroups; g++) {
         TEST_ASSERT_EQUAL_FLOAT(kAsymGroupedScales[g], outQC.scales[g]);
@@ -3742,7 +3742,7 @@ void testFloatToAsymGroupedMatchesTorchPerChannel(void) {
     tensor_t asymTensor;
     setTensorValues(&asymTensor, asymData, &shape, &outQ, NULL);
 
-    convertTensor(&floatTensor, &asymTensor);
+    convertTensor(&floatTensor, &asymTensor, NULL);
 
     for (size_t g = 0; g < 8; g++) {
         TEST_ASSERT_EQUAL_FLOAT(kAsymTorchXCheckScales[g], outQC.scales[g]);
@@ -3789,7 +3789,7 @@ void testAsymGroupedToFloatDequantsPerGroup(void) {
     tensor_t floatTensor;
     setTensorValues(&floatTensor, (uint8_t *)floatData, &shape, &floatQ, NULL);
 
-    convertTensor(&asymTensor, &floatTensor);
+    convertTensor(&asymTensor, &floatTensor, NULL);
 
     for (size_t i = 0; i < n; i++) {
         TEST_ASSERT_EQUAL_FLOAT(kAsymGroupedDequant[i], floatData[i]);
@@ -3878,7 +3878,7 @@ void testGroupedAsymTargetFromInt32Dies(void) {
     tensor_t outTensor;
     setTensorValues(&outTensor, outData, &shape, &outQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor, NULL));
 }
 
 void testGroupedAsymTargetFromSymInt32Dies(void) {
@@ -3910,7 +3910,7 @@ void testGroupedAsymTargetFromSymInt32Dies(void) {
     tensor_t outTensor;
     setTensorValues(&outTensor, outData, &shape, &outQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor, NULL));
 }
 
 void testGroupedAsymTargetFromSymDies(void) {
@@ -3945,7 +3945,7 @@ void testGroupedAsymTargetFromSymDies(void) {
     tensor_t outTensor;
     setTensorValues(&outTensor, outData, &shape, &outQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor, NULL));
 }
 
 void testGroupedAsymSourceToInt32Dies(void) {
@@ -3977,7 +3977,7 @@ void testGroupedAsymSourceToInt32Dies(void) {
     tensor_t outTensor;
     setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor, NULL));
 }
 
 void testGroupedAsymSourceToSymInt32Dies(void) {
@@ -4012,7 +4012,7 @@ void testGroupedAsymSourceToSymInt32Dies(void) {
     tensor_t outTensor;
     setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor, NULL));
 }
 
 void testGroupedAsymSourceToSymDies(void) {
@@ -4047,7 +4047,7 @@ void testGroupedAsymSourceToSymDies(void) {
     tensor_t outTensor;
     setTensorValues(&outTensor, outData, &shape, &outQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor, NULL));
 }
 
 void testDequantChunkToFloatRejectsGroupedAsymSource(void) {
@@ -4179,7 +4179,7 @@ void testSameTypeAsymCopyCarriesGroupArrays(void) {
     tensor_t out;
     setTensorValues(&out, outData, &shape, &outQ, NULL);
 
-    convertTensor(&in, &out);
+    convertTensor(&in, &out, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT(0.25f, outQC.scales[0]);
     TEST_ASSERT_EQUAL_FLOAT(0.5f, outQC.scales[1]);
@@ -4227,7 +4227,7 @@ void testSameTypeAsymCopyRejectsGroupShapeMismatch(void) {
     tensor_t out;
     setTensorValues(&out, outData, &shape, &outQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&in, &out));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&in, &out, NULL));
 }
 
 void testFloatToBfpPerTensorBasic(void) {
@@ -4258,7 +4258,7 @@ void testFloatToBfpPerTensorBasic(void) {
     tensor_t dst;
     setTensorValues(&dst, bfpData, &shape, &bfpQ, NULL);
 
-    convertTensor(&src, &dst);
+    convertTensor(&src, &dst, NULL);
 
     bfpQConfig_t *qc = dst.quantization->qConfig;
     TEST_ASSERT_EQUAL_UINT8(127, qc->exponents[0]); /* E=0 */
@@ -4297,7 +4297,7 @@ void testFloatToBfpSnapsUpAndPowerOfTwoIsExact(void) {
     tensor_t dst;
     setTensorValues(&dst, bfpData, &shape, &bfpQ, NULL);
 
-    convertTensor(&src, &dst);
+    convertTensor(&src, &dst, NULL);
 
     bfpQConfig_t *qc = dst.quantization->qConfig;
     TEST_ASSERT_EQUAL_UINT8(128, qc->exponents[0]); /* E=+1 */
@@ -4334,7 +4334,7 @@ void testFloatToBfpGroupedIndependentExponents(void) {
     tensor_t dstGrouped2x4;
     setTensorValues(&dstGrouped2x4, bfpData, &shape, &bfpQ, NULL);
 
-    convertTensor(&src, &dstGrouped2x4);
+    convertTensor(&src, &dstGrouped2x4, NULL);
 
     bfpQConfig_t *qc = dstGrouped2x4.quantization->qConfig;
     TEST_ASSERT_EQUAL_UINT8(127, qc->exponents[0]);
@@ -4373,7 +4373,7 @@ void testFloatToBfpSaturatesNarrowExponentHigh(void) {
     tensor_t dstE2;
     setTensorValues(&dstE2, bfpData, &shape, &bfpQ, NULL);
 
-    convertTensor(&src, &dstE2);
+    convertTensor(&src, &dstE2, NULL);
 
     bfpQConfig_t *qc = dstE2.quantization->qConfig;
     TEST_ASSERT_EQUAL_UINT8(3, qc->exponents[0]);
@@ -4411,7 +4411,7 @@ void testFloatToBfpFlushesNarrowExponentLow(void) {
     tensor_t dstE2;
     setTensorValues(&dstE2, bfpData, &shape, &bfpQ, NULL);
 
-    convertTensor(&src, &dstE2);
+    convertTensor(&src, &dstE2, NULL);
 
     bfpQConfig_t *qc = dstE2.quantization->qConfig;
     TEST_ASSERT_EQUAL_UINT8(0, qc->exponents[0]);
@@ -4447,7 +4447,7 @@ void testFloatToBfpAllZeroGroupKeepsZeroStateExponent(void) {
     tensor_t dst;
     setTensorValues(&dst, bfpData, &shape, &bfpQ, NULL);
 
-    convertTensor(&src, &dst);
+    convertTensor(&src, &dst, NULL);
 
     bfpQConfig_t *qc = dst.quantization->qConfig;
     TEST_ASSERT_EQUAL_UINT8(127, qc->exponents[0]); /* = bias, scale 1 */
@@ -4491,8 +4491,8 @@ void testBfpToFloatRoundTripExactForRepresentable(void) {
     tensor_t backToFloat;
     setTensorValues(&backToFloat, (uint8_t *)backData, &shape, &backQ, NULL);
 
-    convertTensor(&src, &dstBfp);
-    convertTensor(&dstBfp, &backToFloat);
+    convertTensor(&src, &dstBfp, NULL);
+    convertTensor(&dstBfp, &backToFloat, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT(6.f, ((float *)backToFloat.data)[0]);
     TEST_ASSERT_EQUAL_FLOAT(-3.f, ((float *)backToFloat.data)[1]);
@@ -4531,7 +4531,7 @@ void testBfpGroupedToFloatDequantsPerGroup(void) {
     tensor_t dst;
     setTensorValues(&dst, (uint8_t *)floatData, &shape, &floatQ, NULL);
 
-    convertTensor(&src, &dst);
+    convertTensor(&src, &dst, NULL);
 
     float expected[8] = {6.f, 1.f, -2.f, 0.f, 28.f, -8.f, 4.f, 16.f};
     for (size_t i = 0; i < n; i++) {
@@ -4568,7 +4568,7 @@ void testFloatToBfpSrRoundingIsSeededDeterministic(void) {
     uint8_t refData[calcNumberOfBytesForData(&refQ, n)];
     tensor_t refDst;
     setTensorValues(&refDst, refData, &shape, &refQ, NULL);
-    convertTensor(&src, &refDst);
+    convertTensor(&src, &refDst, NULL);
     int32_t refMant[8];
     unpackSignExtend(refDst.data, 4, 0, refMant, 8);
 
@@ -4586,12 +4586,12 @@ void testFloatToBfpSrRoundingIsSeededDeterministic(void) {
     setTensorValues(&srDst, srData, &shape, &srQ, NULL);
 
     rngSetSeed(42);
-    convertTensor(&src, &srDst);
+    convertTensor(&src, &srDst, NULL);
     int32_t srMant1[8];
     unpackSignExtend(srDst.data, 4, 0, srMant1, 8);
 
     rngSetSeed(42);
-    convertTensor(&src, &srDst);
+    convertTensor(&src, &srDst, NULL);
     int32_t srMant2[8];
     unpackSignExtend(srDst.data, 4, 0, srMant2, 8);
 
@@ -4636,7 +4636,7 @@ void testInt32ToBfpIsCodesInWithZeroStateExponent(void) {
     tensor_t dst;
     setTensorValues(&dst, bfpData, &shape, &bfpQ, NULL);
 
-    convertTensor(&src, &dst);
+    convertTensor(&src, &dst, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(127, outQC.exponents[0]); /* bias: E=0, scale 1 */
     int32_t mant[2];
@@ -4673,7 +4673,7 @@ void testInt32ToBfpOverflowAborts(void) {
     tensor_t dst;
     setTensorValues(&dst, bfpData, &shape, &bfpQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&src, &dst));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&src, &dst, NULL));
 }
 
 void testBfpToInt32DropsExponent(void) {
@@ -4706,7 +4706,7 @@ void testBfpToInt32DropsExponent(void) {
     tensor_t dst;
     setTensorValues(&dst, (uint8_t *)outData, &shape, &intQ, NULL);
 
-    convertTensor(&src, &dst);
+    convertTensor(&src, &dst, NULL);
 
     TEST_ASSERT_EQUAL_INT32(6, ((int32_t *)dst.data)[0]);
     TEST_ASSERT_EQUAL_INT32(-3, ((int32_t *)dst.data)[1]);
@@ -4742,7 +4742,7 @@ void testSymInt32ToBfpPreservesValues(void) {
     tensor_t dst;
     setTensorValues(&dst, bfpData, &shape, &bfpQ, NULL);
 
-    convertTensor(&src, &dst);
+    convertTensor(&src, &dst, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(127, outQC.exponents[0]); /* E=0, scale 1 */
     int32_t mant[2];
@@ -4789,7 +4789,7 @@ void testBfpToSymInt32FreshAbsmaxGrid(void) {
     tensor_t dst;
     setTensorValues(&dst, (uint8_t *)outData, &shape, &outQ, NULL);
 
-    convertTensor(&src, &dst);
+    convertTensor(&src, &dst, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT(12.f / 2047.f, outQC.scale);
     TEST_ASSERT_EQUAL_INT32(2047, ((int32_t *)dst.data)[0]);
@@ -4833,7 +4833,7 @@ void testBfpGroupedToSymInt32UsesPerGroupScales(void) {
     tensor_t dst;
     setTensorValues(&dst, (uint8_t *)outData, &shape, &outQ, NULL);
 
-    convertTensor(&src, &dst);
+    convertTensor(&src, &dst, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT(24.f / 127.f, outQC.scale);
     TEST_ASSERT_EQUAL_INT32(127, ((int32_t *)dst.data)[0]);
@@ -4876,7 +4876,7 @@ void testSymPerTensorToBfpPreservesValues(void) {
     tensor_t dst;
     setTensorValues(&dst, bfpData, &shape, &bfpQ, NULL);
 
-    convertTensor(&src, &dst);
+    convertTensor(&src, &dst, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(124, outQC.exponents[0]); /* E=-3, scale 0.125 */
     int32_t mant[4];
@@ -4924,7 +4924,7 @@ void testSymGroupedSourceToBfpUsesPerGroupScales(void) {
     tensor_t dst;
     setTensorValues(&dst, bfpData, &shape, &bfpQ, NULL);
 
-    convertTensor(&src, &dst);
+    convertTensor(&src, &dst, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(126, outQC.exponents[0]); /* E=-1, scale 0.5 */
     int32_t mant[4];
@@ -4973,7 +4973,7 @@ void testBfpToSymPerTensorFreshAbsmax(void) {
     tensor_t dst;
     setTensorValues(&dst, outData, &shape, &outQ, NULL);
 
-    convertTensor(&src, &dst);
+    convertTensor(&src, &dst, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT(4.f, outQC.scales[0]);
     int32_t mant[2];
@@ -5014,7 +5014,7 @@ void testBfpToSymGroupedTargetDenies(void) {
     tensor_t dst;
     setTensorValues(&dst, outData, &shape, &outQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&src, &dst));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&src, &dst, NULL));
 }
 
 void testAsymToBfpPreservesValues(void) {
@@ -5061,7 +5061,7 @@ void testAsymToBfpPreservesValues(void) {
     tensor_t dst;
     setTensorValues(&dst, bfpData, &shape, &bfpQ, NULL);
 
-    convertTensor(&src, &dst);
+    convertTensor(&src, &dst, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(127, outQC.exponents[0]); /* E=0, scale 1 */
     int32_t mant[4];
@@ -5117,7 +5117,7 @@ void testAsymGroupedSourceToBfpUsesPerGroupGrids(void) {
     tensor_t dst;
     setTensorValues(&dst, bfpData, &shape, &bfpQ, NULL);
 
-    convertTensor(&src, &dst);
+    convertTensor(&src, &dst, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(126, outQC.exponents[0]); /* E=-1, scale 0.5 */
     int32_t mant[4];
@@ -5178,7 +5178,7 @@ void testBfpToAsymUsesCanonicalGrid(void) {
     tensor_t dst;
     setTensorValues(&dst, outData, &shape, &outQ, NULL);
 
-    convertTensor(&src, &dst);
+    convertTensor(&src, &dst, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT(16.f / 15.f, outQC.scales[0]);
     TEST_ASSERT_EQUAL_UINT16(4, outQC.zeroPoints[0]);
@@ -5229,7 +5229,7 @@ void testBfpToAsymGroupedTargetDenies(void) {
     tensor_t dst;
     setTensorValues(&dst, outData, &shape, &outQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&src, &dst));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&src, &dst, NULL));
 }
 
 void testSameTypeBfpConvertCopiesWhenIdentical(void) {
@@ -5271,7 +5271,7 @@ void testSameTypeBfpConvertCopiesWhenIdentical(void) {
     tensor_t dst;
     setTensorValues(&dst, outData, &shape, &outQ, NULL);
 
-    convertTensor(&src, &dst);
+    convertTensor(&src, &dst, NULL);
 
     TEST_ASSERT_EQUAL_UINT8_ARRAY(inData, outData, calcNumberOfBytesForData(&inQ, n));
     TEST_ASSERT_EQUAL_UINT8(127, outQC.exponents[0]);
@@ -5318,7 +5318,7 @@ void testSameTypeBfpConvertRejectsGeometryMismatch(void) {
     tensor_t dst;
     setTensorValues(&dst, outData, &shape, &outQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&src, &dst));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&src, &dst, NULL));
 }
 
 void testSameTypeBfpConvertRejectsExponentWidthMismatch(void) {
@@ -5358,7 +5358,7 @@ void testSameTypeBfpConvertRejectsExponentWidthMismatch(void) {
     tensor_t dst;
     setTensorValues(&dst, outData, &shape, &outQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&src, &dst));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&src, &dst, NULL));
 }
 
 void testRequantBfpReblocksToTargetGeometry(void) {
@@ -5407,7 +5407,7 @@ void testRequantBfpReblocksToTargetGeometry(void) {
     tensor_t dst;
     setTensorValues(&dst, outData, &shape, &outQ, NULL);
 
-    conversionMatrix[BFP][BFP](&src, &dst);
+    conversionMatrix[BFP][BFP](&src, &dst, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(127, outQC.exponents[0]);
     TEST_ASSERT_EQUAL_UINT8(129, outQC.exponents[1]);
@@ -5457,7 +5457,7 @@ void testRequantBfpWidthChange(void) {
     tensor_t dst;
     setTensorValues(&dst, outData, &shape, &outQ, NULL);
 
-    conversionMatrix[BFP][BFP](&src, &dst);
+    conversionMatrix[BFP][BFP](&src, &dst, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(131, outQC.exponents[0]); /* E=+4, scale 16 */
     int32_t mant[4];
@@ -5527,7 +5527,7 @@ void testChunkedFloatToBfpGroupedRoundTripsAcrossChunkBoundaries(void) {
     tensor_t bfpA;
     setTensorValues(&bfpA, payloadA, &shape, &bfpQA, NULL);
 
-    convertTensor(&floatIn, &bfpA);
+    convertTensor(&floatIn, &bfpA, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(127, exponentsA[0]);
     TEST_ASSERT_EQUAL_UINT8(127, exponentsA[19]);
@@ -5538,7 +5538,7 @@ void testChunkedFloatToBfpGroupedRoundTripsAcrossChunkBoundaries(void) {
     initFloat32Quantization(&floatMidQ);
     tensor_t floatMid;
     setTensorValues(&floatMid, (uint8_t *)mid, &shape, &floatMidQ, NULL);
-    convertTensor(&bfpA, &floatMid);
+    convertTensor(&bfpA, &floatMid, NULL);
 
     /* every group derived E=0 (scale 1) -> half-step tolerance 0.5 */
     for (size_t i = 0; i < n; i++) {
@@ -5563,7 +5563,7 @@ void testChunkedFloatToBfpGroupedRoundTripsAcrossChunkBoundaries(void) {
     tensor_t bfpB;
     setTensorValues(&bfpB, payloadB, &shape, &bfpQB, NULL);
 
-    convertTensor(&floatMid, &bfpB);
+    convertTensor(&floatMid, &bfpB, NULL);
 
     TEST_ASSERT_EQUAL_UINT8_ARRAY(exponentsA, exponentsB, numGroups);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(payloadA, payloadB, payloadBytes);
@@ -5627,7 +5627,7 @@ void testStreamPackBfpMultiChunkViaSymSource(void) {
     tensor_t bfpA;
     setTensorValues(&bfpA, payloadA, &shape, &bfpQA, NULL);
 
-    convertTensor(&src, &bfpA);
+    convertTensor(&src, &bfpA, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(127, exponentsA[0]);
     TEST_ASSERT_EQUAL_UINT8(126, exponentsA[1]);
@@ -5640,7 +5640,7 @@ void testStreamPackBfpMultiChunkViaSymSource(void) {
     initFloat32Quantization(&refQ);
     tensor_t refFloat;
     setTensorValues(&refFloat, (uint8_t *)ref, &shape, &refQ, NULL);
-    convertTensor(&src, &refFloat);
+    convertTensor(&src, &refFloat, NULL);
 
     uint8_t exponentsB[40];
     memset(exponentsB, 0xEE, sizeof(exponentsB));
@@ -5656,7 +5656,7 @@ void testStreamPackBfpMultiChunkViaSymSource(void) {
     memset(payloadB, 0xAA, payloadBytes);
     tensor_t bfpB;
     setTensorValues(&bfpB, payloadB, &shape, &bfpQB, NULL);
-    convertTensor(&refFloat, &bfpB);
+    convertTensor(&refFloat, &bfpB, NULL);
 
     TEST_ASSERT_EQUAL_UINT8_ARRAY(exponentsA, exponentsB, numGroups);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(payloadA, payloadB, payloadBytes);
@@ -5670,7 +5670,7 @@ void testStreamPackBfpMultiChunkViaSymSource(void) {
     initFloat32Quantization(&backQ);
     tensor_t floatBack;
     setTensorValues(&floatBack, (uint8_t *)back, &shape, &backQ, NULL);
-    convertTensor(&bfpA, &floatBack);
+    convertTensor(&bfpA, &floatBack, NULL);
 
     int32_t codes[520];
     unpackSignExtend(payloadA, 6, 0, codes, n);
@@ -5739,7 +5739,7 @@ void testRequantBfpMultiChunkReblock(void) {
     tensor_t dstA;
     setTensorValues(&dstA, payloadA, &shape, &dstQA, NULL);
 
-    conversionMatrix[BFP][BFP](&src, &dstA);
+    conversionMatrix[BFP][BFP](&src, &dstA, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(128, exponentsA[0]);
     TEST_ASSERT_EQUAL_UINT8(128, exponentsA[19]);
@@ -5752,7 +5752,7 @@ void testRequantBfpMultiChunkReblock(void) {
     initFloat32Quantization(&midQ);
     tensor_t floatMid;
     setTensorValues(&floatMid, (uint8_t *)mid, &shape, &midQ, NULL);
-    convertTensor(&src, &floatMid);
+    convertTensor(&src, &floatMid, NULL);
 
     uint8_t exponentsB[40];
     memset(exponentsB, 0xEE, sizeof(exponentsB));
@@ -5768,7 +5768,7 @@ void testRequantBfpMultiChunkReblock(void) {
     memset(payloadB, 0xAA, payloadBytes);
     tensor_t dstB;
     setTensorValues(&dstB, payloadB, &shape, &dstQB, NULL);
-    convertTensor(&floatMid, &dstB);
+    convertTensor(&floatMid, &dstB, NULL);
 
     TEST_ASSERT_EQUAL_UINT8_ARRAY(exponentsA, exponentsB, numGroups);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(payloadA, payloadB, payloadBytes);
@@ -5816,7 +5816,7 @@ void testRequantBfpTensorRejectsAliasedBuffers(void) {
     tensor_t tAliasedView;
     setTensorValues(&tAliasedView, bfpData, &shape, &viewQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(requantBfpTensor(&t, &tAliasedView));
+    ASSERT_EXITS_WITH_FAILURE(requantBfpTensor(&t, &tAliasedView, NULL));
 }
 
 void testQuantizeFloatBufferToBfpCodesPerTensor(void) {
@@ -6330,7 +6330,7 @@ void testAccumulateFloatIntoBfpRescaleZeroTargetMultiChunkEqualsPack(void) {
     uint8_t refData[calcNumberOfBytesForData(&refQ, n)];
     tensor_t ref;
     setTensorValues(&ref, refData, &shape, &refQ, NULL);
-    convertTensor(&incT, &ref);
+    convertTensor(&incT, &ref, NULL);
 
     uint8_t exponents[3] = {127, 127, 127}; /* zero-state grid */
     bfpQConfig_t qc = {.exponents = exponents,
@@ -6420,7 +6420,7 @@ void testAccumulateFloatIntoBfpRescaleSeededMultiChunkEqualsDecodedPack(void) {
     uint8_t refData[calcNumberOfBytesForData(&refQ, n)];
     tensor_t ref;
     setTensorValues(&ref, refData, &shape, &refQ, NULL);
-    convertTensor(&decodedT, &ref);
+    convertTensor(&decodedT, &ref, NULL);
 
     uint8_t exponents[3] = {oldExponents[0], oldExponents[1], oldExponents[2]};
     bfpQConfig_t qc = {.exponents = exponents,
@@ -6485,7 +6485,7 @@ void testScaleBfpTensorInPlaceSeededMultiChunkEqualsDecodedPack(void) {
     uint8_t refData[calcNumberOfBytesForData(&refQ, n)];
     tensor_t ref;
     setTensorValues(&ref, refData, &shape, &refQ, NULL);
-    convertTensor(&scaledT, &ref);
+    convertTensor(&scaledT, &ref, NULL);
 
     uint8_t exponents[3] = {oldExponents[0], oldExponents[1], oldExponents[2]};
     bfpQConfig_t qc = {.exponents = exponents,
@@ -6546,7 +6546,7 @@ void testAccumulateTensorIntoBfpFixedGridFreshMultiChunkEqualsPack(void) {
     uint8_t refData[calcNumberOfBytesForData(&refQ, n)];
     tensor_t ref;
     setTensorValues(&ref, refData, &shape, &refQ, NULL);
-    convertTensor(&incT, &ref);
+    convertTensor(&incT, &ref, NULL);
 
     uint8_t exponents[3] = {127, 127, 127}; /* zero-state grid */
     bfpQConfig_t qc = {.exponents = exponents,
@@ -7101,7 +7101,7 @@ void testRequantBfpTensorRejectsBadTargetGroupGeometry(void) {
     tensor_t dst;
     buildBadGeometryBfpTarget(&dst, dstData, &dstShape, &dstQ, &dstQc, n);
 
-    ASSERT_EXITS_WITH_FAILURE(requantBfpTensor(&src, &dst));
+    ASSERT_EXITS_WITH_FAILURE(requantBfpTensor(&src, &dst, NULL));
 }
 
 /* #420 G3: the two FLOAT-pointer accumulate wrappers document that `n` must
@@ -7200,7 +7200,7 @@ void testFloatToBfpRejectsBadTargetGroupGeometry(void) {
     tensor_t dst;
     setTensorValues(&dst, data, &shape, &q, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&src, &dst));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&src, &dst, NULL));
 }
 
 void testQuantizeFloatBufferToBfpCodesRejectsBadGroupGeometry(void) {
@@ -7264,7 +7264,7 @@ void testFloatToBfpRejectsNonFiniteInputValue(void) {
     tensor_t dst;
     setTensorValues(&dst, data, &shape, &q, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(convertTensor(&src, &dst));
+    ASSERT_EXITS_WITH_FAILURE(convertTensor(&src, &dst, NULL));
 }
 
 void testQuantizeFloatBufferToBfpCodesRejectsNonFiniteInputValue(void) {
@@ -7322,7 +7322,7 @@ void testRequantBfpTensorRejectsNonFiniteSourceValue(void) {
     tensor_t dst;
     setTensorValues(&dst, dstData, &dstShape, &dstQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(requantBfpTensor(&src, &dst));
+    ASSERT_EXITS_WITH_FAILURE(requantBfpTensor(&src, &dst, NULL));
 }
 
 /* ---- #421 U2: clamp before the round at EVERY BFP emit site --------------
@@ -7370,7 +7370,7 @@ void testFloatToBfpCapRegimeSaturatesFiniteQuotient(void) {
     tensor_t dst;
     setTensorValues(&dst, data, &shape, &q, NULL);
 
-    convertTensor(&src, &dst);
+    convertTensor(&src, &dst, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(3, exponents[0]); /* BFP D6 high clamp: E = 2, scale 4 */
     int32_t got[4];
@@ -7437,7 +7437,7 @@ void testRequantBfpTensorCapRegimeSaturatesFiniteQuotient(void) {
     tensor_t dst;
     setTensorValues(&dst, dstData, &dstShape, &dstQ, NULL);
 
-    requantBfpTensor(&src, &dst);
+    requantBfpTensor(&src, &dst, NULL);
 
     TEST_ASSERT_EQUAL_UINT8(3, dstExponents[0]);
     int32_t got[4];
@@ -7745,6 +7745,101 @@ void testAccumulateTensorIntoBfpFixedGridEmptyTensorResetsToZeroState(void) {
 void setUp() {}
 void tearDown() {}
 
+/* ---- the stream parameter of the conversion layer ---- */
+
+static rngStream_t *recordedCellStream;
+static uint32_t recordedCellCalls;
+
+static void recordingCell(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t *rs) {
+    (void)inputTensor;
+    (void)outputTensor;
+    recordedCellStream = rs;
+    recordedCellCalls++;
+}
+
+/* The matrix cell is where a conversion rounds, so convertTensor must hand it
+ * the caller's stream unchanged. */
+void testConvertTensorHandsTheStreamToTheMatrixCell(void) {
+    int32_t intData[2] = {1, -2};
+    float floatData[2] = {0.f, 0.f};
+    size_t dims[] = {2};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    quantization_t intQ;
+    initInt32Quantization(&intQ);
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    tensor_t intTensor;
+    tensor_t floatTensor;
+    setTensorValues(&intTensor, (uint8_t *)intData, &shape, &intQ, NULL);
+    setTensorValues(&floatTensor, (uint8_t *)floatData, &shape, &floatQ, NULL);
+    rngStream_t stream = rngOpen(rngKeyFromSeed(3u));
+    conversionFunction_t saved = conversionMatrix[INT32][FLOAT32];
+    conversionMatrix[INT32][FLOAT32] = recordingCell;
+    recordedCellStream = NULL;
+    recordedCellCalls = 0;
+
+    convertTensor(&intTensor, &floatTensor, &stream);
+
+    conversionMatrix[INT32][FLOAT32] = saved;
+    TEST_ASSERT_EQUAL_UINT32(1u, recordedCellCalls);
+    TEST_ASSERT_EQUAL_PTR(&stream, recordedCellStream);
+}
+
+/* A same-type conversion is a verbatim copy and never rounds, so it needs no
+ * stream even when both configs ask for stochastic rounding. */
+void testSameTypeConversionNeedsNoStream(void) {
+    int32_t inData[3] = {7, -3, 0};
+    int32_t outData[3] = {0, 0, 0};
+    size_t dims[] = {3};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    symInt32QConfig_t inQC;
+    initSymInt32QConfig(SR_HALF_AWAY, &inQC);
+    inQC.scale = 0.5f;
+    symInt32QConfig_t outQC;
+    initSymInt32QConfig(SR_HALF_AWAY, &outQC);
+    quantization_t inQ;
+    initSymInt32Quantization(&inQC, &inQ);
+    quantization_t outQ;
+    initSymInt32Quantization(&outQC, &outQ);
+    tensor_t in;
+    tensor_t out;
+    setTensorValues(&in, (uint8_t *)inData, &shape, &inQ, NULL);
+    setTensorValues(&out, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    convertTensor(&in, &out, NULL);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY(inData, outData, 3);
+    TEST_ASSERT_EQUAL_FLOAT(0.5f, outQC.scale);
+}
+
+/* A conversion into FLOAT32 never rounds, so an SR-configured source needs no
+ * stream either. */
+void testConversionIntoFloat32NeedsNoStream(void) {
+    int32_t inData[2] = {4, -6};
+    float outData[2] = {0.f, 0.f};
+    size_t dims[] = {2};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    symInt32QConfig_t inQC;
+    initSymInt32QConfig(SR_HALF_AWAY, &inQC);
+    inQC.scale = 0.25f;
+    quantization_t inQ;
+    initSymInt32Quantization(&inQC, &inQ);
+    quantization_t outQ;
+    initFloat32Quantization(&outQ);
+    tensor_t in;
+    tensor_t out;
+    setTensorValues(&in, (uint8_t *)inData, &shape, &inQ, NULL);
+    setTensorValues(&out, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    convertTensor(&in, &out, NULL);
+
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, outData[0]);
+    TEST_ASSERT_EQUAL_FLOAT(-1.5f, outData[1]);
+}
+
 int main(void) {
     UNITY_BEGIN();
 
@@ -7947,6 +8042,9 @@ int main(void) {
     RUN_TEST(testRequantBfpTensorCapRegimeSaturatesFiniteQuotient);
     RUN_TEST(testAccumulateFloatIntoBfpRescaleCapRegimeSaturatesFiniteQuotient);
     RUN_TEST(testAccumulateFloatIntoBfpFixedGridCapRegimeAbortsInsteadOfUB);
+    RUN_TEST(testConvertTensorHandsTheStreamToTheMatrixCell);
+    RUN_TEST(testSameTypeConversionNeedsNoStream);
+    RUN_TEST(testConversionIntoFloat32NeedsNoStream);
 
     return UNITY_END();
 }

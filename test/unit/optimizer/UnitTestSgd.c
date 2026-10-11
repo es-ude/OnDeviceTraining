@@ -1335,7 +1335,7 @@ void testSgdStepMMixedDtypeMovesBothParamsCorrectly(void) {
     initFloat32Quantization(&bAfterFloatQ);
     uint8_t bAfterFloatData[2 * sizeof(float)];
     setTensorValuesForConversion(bAfterFloatData, &bAfterFloatQ, paramB, &bAfterFloat);
-    convertTensor(paramB, &bAfterFloat);
+    convertTensor(paramB, &bAfterFloat, NULL);
     float bAfter[2];
     bAfter[0] = ((float *)bAfterFloat.data)[0];
     bAfter[1] = ((float *)bAfterFloat.data)[1];

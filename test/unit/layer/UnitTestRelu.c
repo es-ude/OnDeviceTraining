@@ -106,7 +106,7 @@ void testReluForwardSymInt32() {
     shape_t *outFloatShape = reserveMemory(sizeof(shape_t));
     setShape(outFloatShape, outFloatDims, 2, outFloatOrder);
     tensor_t *outputFloat = initTensor(outFloatShape, quantizationInitFloat(), NULL);
-    convertTensor(output, outputFloat);
+    convertTensor(output, outputFloat, NULL);
 
     /* 5. CAPTURE. */
     float captured[6];
@@ -234,7 +234,7 @@ void testReluBackwardSymInt32() {
     shape_t *propLossFloatShape = reserveMemory(sizeof(shape_t));
     setShape(propLossFloatShape, propLossFloatDims, 1, propLossFloatOrder);
     tensor_t *propLossFloat = initTensor(propLossFloatShape, quantizationInitFloat(), NULL);
-    convertTensor(propLoss, propLossFloat);
+    convertTensor(propLoss, propLossFloat, NULL);
 
     /* 6. CAPTURE. */
     float captured[6];

@@ -183,7 +183,7 @@ produced wires: `outputQ`/`propLossQ`). The `executeOp` funnel reads arithmetic 
 dispatch float vs. SYM kernels and configure intermediate scratch; it then routes
 the result through `OUT_WRITE` or `OUT_ACC_*` epilogues that honor the storage config's
 dtype and qMaxBits on the produced wire. When input and output dtypes differ, a
-kernel-less form `executeConvert(input, target)` performs the storage-to-storage
+kernel-less form `executeConvert(input, target, rs)` performs the storage-to-storage
 conversion for any populated `conversionMatrix` cell — including previously-aborting
 paths (ASYM, BOOL, SYM width-restore), unifying the Quantization layer into a pure
 conversion node (#266). This separation keeps arithmetic orthogonal to storage,

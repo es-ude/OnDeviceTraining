@@ -1934,7 +1934,7 @@ void testGroupNormBackwardBfpFakeQuantPinCrossCheck(void) {
     tensor_t *expDxFloat = buildFloatTensorND(3, dims, NULL);
     gnBfpCExpectedBackward(expDgamma, expDbeta, expDxFloat);
     tensor_t *expDxWire = buildGnBfpAOutputWire(dims);
-    convertTensor(expDxFloat, expDxWire);
+    convertTensor(expDxFloat, expDxWire, NULL);
 
     size_t payloadBytes = calcNumberOfBytesForData(propLoss->quantization, 16);
     bfpQConfig_t *plQC = propLoss->quantization->qConfig;
@@ -2103,7 +2103,7 @@ void testGroupNormBackwardBfpFrozenSkipsGrads(void) {
     tensor_t *expDxFloat = buildFloatTensorND(3, dims, NULL);
     gnBfpCExpectedBackward(expDgamma, expDbeta, expDxFloat);
     tensor_t *expDxWire = buildGnBfpAOutputWire(dims);
-    convertTensor(expDxFloat, expDxWire);
+    convertTensor(expDxFloat, expDxWire, NULL);
 
     size_t payloadBytes = calcNumberOfBytesForData(propLoss->quantization, 16);
     bfpQConfig_t *plQC = propLoss->quantization->qConfig;

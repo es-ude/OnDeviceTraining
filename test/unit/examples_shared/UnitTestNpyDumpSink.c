@@ -116,7 +116,7 @@ void testDumpSymMatchesConvertTensorDequant(void) {
     tensor_t *t = makeTensor2x3(quantizationInitSym(4, HALF_AWAY));
     tensorFillFromFloatBuffer(t, kSource, 6);
     tensor_t *ref = makeTensor2x3(quantizationInitFloat());
-    convertTensor(t, ref);
+    convertTensor(t, ref, NULL);
     float expected[6];
     memcpy(expected, ref->data, sizeof(expected));
     char path[512];

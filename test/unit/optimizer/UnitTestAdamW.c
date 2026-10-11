@@ -521,8 +521,8 @@ void testAdamWCreateOptimSymMomentSmoke(void) {
 
     tensor_t *mSDecoded = makeFloatTensor1D(NULL, 32);
     tensor_t *vSDecoded = makeFloatTensor1D(NULL, 32);
-    executeConvert(optimS->states[0]->stateBuffers[0], mSDecoded);
-    executeConvert(optimS->states[0]->stateBuffers[1], vSDecoded);
+    executeConvert(optimS->states[0]->stateBuffers[0], mSDecoded, NULL);
+    executeConvert(optimS->states[0]->stateBuffers[1], vSDecoded, NULL);
 
     float mF1Sum = 0.f, vF1Sum = 0.f, mS1Sum = 0.f, vS1Sum = 0.f;
     const float *mF1 = (const float *)optimF->states[0]->stateBuffers[0]->data;
@@ -542,8 +542,8 @@ void testAdamWCreateOptimSymMomentSmoke(void) {
     optimizerFunctions[optimF->type].step(optimF);
     optimizerFunctions[optimS->type].step(optimS);
 
-    executeConvert(optimS->states[0]->stateBuffers[0], mSDecoded);
-    executeConvert(optimS->states[0]->stateBuffers[1], vSDecoded);
+    executeConvert(optimS->states[0]->stateBuffers[0], mSDecoded, NULL);
+    executeConvert(optimS->states[0]->stateBuffers[1], vSDecoded, NULL);
 
     float mFFinal[32], vFFinal[32], mSFinal[32], vSFinal[32], pSFinal[32];
     memcpy(mFFinal, optimF->states[0]->stateBuffers[0]->data, sizeof mFFinal);
@@ -795,8 +795,8 @@ static void adamWStepWithSymMoments(roundingMode_t writeBackRounding, float *mOu
 
     tensor_t *mDecoded = makeFloatTensor1D(NULL, 6);
     tensor_t *vDecoded = makeFloatTensor1D(NULL, 6);
-    executeConvert(m, mDecoded);
-    executeConvert(v, vDecoded);
+    executeConvert(m, mDecoded, NULL);
+    executeConvert(v, vDecoded, NULL);
     memcpy(mOut, mDecoded->data, 6 * sizeof(float));
     memcpy(vOut, vDecoded->data, 6 * sizeof(float));
 

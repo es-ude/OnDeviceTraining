@@ -69,7 +69,7 @@ static float crossEntropyForwardFakeQuant(tensor_t *softmaxOutput, tensor_t *dis
     uint8_t softmaxOutputFloatData[inputSize * sizeof(float)];
     setTensorValuesForConversion(softmaxOutputFloatData, &softmaxOutputFloatQ, softmaxOutput,
                                  &softmaxOutputFloat);
-    convertTensor(softmaxOutput, &softmaxOutputFloat);
+    convertTensor(softmaxOutput, &softmaxOutputFloat, NULL);
 
     tensor_t distributionFloat;
     quantization_t distributionFloatQ;
@@ -77,7 +77,7 @@ static float crossEntropyForwardFakeQuant(tensor_t *softmaxOutput, tensor_t *dis
     uint8_t distributionFloatData[inputSize * sizeof(float)];
     setTensorValuesForConversion(distributionFloatData, &distributionFloatQ, distribution,
                                  &distributionFloat);
-    convertTensor(distribution, &distributionFloat);
+    convertTensor(distribution, &distributionFloat, NULL);
 
     return crossEntropyForwardFloat(&softmaxOutputFloat, &distributionFloat, reduction);
 }
@@ -126,7 +126,7 @@ static void crossEntropySoftmaxBackwardFakeQuant(tensor_t *softmaxOutput, tensor
     uint8_t softmaxOutputFloatData[inputSize * sizeof(float)];
     setTensorValuesForConversion(softmaxOutputFloatData, &softmaxOutputFloatQ, softmaxOutput,
                                  &softmaxOutputFloat);
-    convertTensor(softmaxOutput, &softmaxOutputFloat);
+    convertTensor(softmaxOutput, &softmaxOutputFloat, NULL);
 
     tensor_t distributionFloat;
     quantization_t distributionFloatQ;
@@ -134,7 +134,7 @@ static void crossEntropySoftmaxBackwardFakeQuant(tensor_t *softmaxOutput, tensor
     uint8_t distributionFloatData[inputSize * sizeof(float)];
     setTensorValuesForConversion(distributionFloatData, &distributionFloatQ, distribution,
                                  &distributionFloat);
-    convertTensor(distribution, &distributionFloat);
+    convertTensor(distribution, &distributionFloat, NULL);
 
     /* Write-only scratch: the loop below overwrites every element, so the
      * pre-call contents of `loss` are never dequantized (MSE.c precedent —
@@ -153,7 +153,7 @@ static void crossEntropySoftmaxBackwardFakeQuant(tensor_t *softmaxOutput, tensor
         lossFloatArr[i] = softmaxOutputFloatArr[i] - distributionFloatArr[i];
     }
 
-    convertTensor(&lossFloat, loss);
+    convertTensor(&lossFloat, loss, NULL);
 }
 
 // IMPORTANT: This implementation already takes the softmax backward into account

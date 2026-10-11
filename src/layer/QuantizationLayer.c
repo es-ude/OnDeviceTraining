@@ -24,7 +24,7 @@ static void dispatchQuantization(tensor_t *input, tensor_t *output) {
                     (int)inputDType);
         exit(1);
     }
-    executeConvert(input, output);
+    executeConvert(input, output, NULL);
 }
 
 void quantizationForward(layer_t *layer, tensor_t *inputTensor, tensor_t *outputTensor) {

@@ -3,9 +3,15 @@
 
 #include "Tensor.h"
 
-typedef void (*conversionFunction_t)(tensor_t *inputTensor, tensor_t *outputTensor);
+/* Pointer-only use: the identical typedef lives in RNG.h (C11 allows the
+ * repetition), so this header needs no RNG include path. */
+typedef struct rngStream rngStream_t;
 
-void convertTensor(tensor_t *inputTensor, tensor_t *outputTensor);
+/* rs: handed to the cell's rounding calls; a cell that never rounds ignores it. */
+typedef void (*conversionFunction_t)(tensor_t *inputTensor, tensor_t *outputTensor,
+                                     rngStream_t *rs);
+
+void convertTensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t *rs);
 
 #define ODT_CONVERSION_CHUNK_ELEMS 256
 /* Streams `count` elements of src (FLOAT32/SYM_INT32/SYM/ASYM) starting at
@@ -35,7 +41,7 @@ void dequantChunkToFloat(const tensor_t *src, size_t elemOffset, size_t count, f
  * Wired into conversionMatrix[SYM_INT32][SYM_INT32]; convertTensor's
  * same-type branch short-circuits BEFORE the matrix, so this is reachable
  * only via direct matrix dispatch. */
-void requantSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTensor);
+void requantSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t *rs);
 /*! @brief SYM_INT32 -> SYM_INT32 requantization into a PRE-SET target scale.
  *
  * The target scale is the OUTPUT tensor's symInt32QConfig_t->scale and must
@@ -55,7 +61,7 @@ void requantSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTensor);
  * Flat storage order; orderOfDimensions is ignored; shape/sparsity are not
  * touched. NOT wired into conversionMatrix (the dynamic variant owns the
  * diagonal). */
-void requantSymInt32TensorToScale(tensor_t *inputTensor, tensor_t *outputTensor);
+void requantSymInt32TensorToScale(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t *rs);
 /*! @brief BFP -> BFP requantization onto the TARGET's geometry/widths.
  *
  * Two-pass value-domain repack: pass 1 streams the source through
@@ -79,7 +85,7 @@ void requantSymInt32TensorToScale(tensor_t *inputTensor, tensor_t *outputTensor)
  * copy between IDENTICAL configs) short-circuits BEFORE the matrix, so this
  * is reachable only via direct matrix dispatch (executeConvert / the
  * OUT_WRITE epilogue). */
-void requantBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor);
+void requantBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t *rs);
 /* The single BFP exponent authority (frexpf snap-up, BFP D6 clamp both ends).
    A NON-FINITE absMax (inf or NaN -- an overflowed product in a caller's
    pass 1) has no derivable exponent and saturates at the cap, BFP D6's high

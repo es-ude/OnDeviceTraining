@@ -117,7 +117,7 @@ void exemplarBufferAdd(exemplarBuffer_t *buf, const tensor_t *item, size_t class
     }
     tensor_t *copy = initTensor(getShapeLike(item->shape), getQLike(item->quantization), NULL);
     /* sources-never-mutated funnel contract: stripping const is safe */
-    executeConvert((tensor_t *)item, copy);
+    executeConvert((tensor_t *)item, copy, NULL);
     buf->items[classIndex * buf->capacity + buf->counts[classIndex]] = copy;
     buf->counts[classIndex]++;
 }

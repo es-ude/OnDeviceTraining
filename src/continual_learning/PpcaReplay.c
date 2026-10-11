@@ -154,7 +154,7 @@ void ppcaReplayMean(const ppcaReplay_t *g, tensor_t *out) {
         PRINT_ERROR("ppcaReplayMean: out storage must be FLOAT32/SYM/ASYM");
         exit(1);
     }
-    executeConvert(g->mean, out);
+    executeConvert(g->mean, out, NULL);
 }
 
 /* Stack-bound FLOAT32 view over a workspace buffer (no allocation; the
@@ -358,7 +358,7 @@ void ppcaReplayUpdate(ppcaReplay_t *g, const tensor_t *samples, ppcaWorkspace_t 
      * executeConvert = the funnel's kernel-less form; heap target, zero
      * stack. Sources are never mutated. */
     tensor_t *sampleRegion = bindFloatView(&vIngest, ws->bT + k * d, 2, m, d);
-    executeConvert((tensor_t *)samples, sampleRegion);
+    executeConvert((tensor_t *)samples, sampleRegion, NULL);
 
     /* Step 1 — batch mean over the ingested region via a [d,m] transpose
      * view (Reduce is trailing-axes-only; reads are permutation-aware). */
@@ -370,7 +370,7 @@ void ppcaReplayUpdate(ppcaReplay_t *g, const tensor_t *samples, ppcaWorkspace_t 
     /* Step 2 — stage muOld (dequants packed mean ONCE; preserves it against
      * step 5's overwrite). */
     tensor_t *muOldView = bindFloatView(&vMuOld, ws->muOld, 1, d, 0);
-    executeConvert(g->mean, muOldView);
+    executeConvert(g->mean, muOldView, NULL);
 
     /* Step 3 — the merge op (target: basis state). */
     ppcaMergeCtx_t ctx = {
@@ -561,9 +561,9 @@ void ppcaReplayUpdateStreaming(ppcaReplay_t *g, const tensor_t *x, ppcaWorkspace
 
     /* Step 0 — ingest x (any dtype) + stage muOld. */
     tensor_t *xView = bindFloatView(&vX, ws->meanBatch, 1, d, 0);
-    executeConvert((tensor_t *)x, xView);
+    executeConvert((tensor_t *)x, xView, NULL);
     tensor_t *muOldView = bindFloatView(&vMuOld, ws->muOld, 1, d, 0);
-    executeConvert(g->mean, muOldView);
+    executeConvert(g->mean, muOldView, NULL);
 
     ws->totalVarOut = g->totalVar;
     ppcaCcipcaCtx_t ctx = {.ws = ws, .nOld = g->count};

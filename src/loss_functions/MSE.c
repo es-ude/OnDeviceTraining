@@ -44,14 +44,14 @@ static float mseLossForwardFakeQuant(tensor_t *output, tensor_t *label, reductio
     quantization_t outputFloatQ;
     initFloat32Quantization(&outputFloatQ);
     setTensorValuesForConversion((uint8_t *)outputFloatData, &outputFloatQ, output, &outputFloat);
-    convertTensor(output, &outputFloat);
+    convertTensor(output, &outputFloat, NULL);
 
     tensor_t labelFloat;
     float labelFloatData[size];
     quantization_t labelFloatQ;
     initFloat32Quantization(&labelFloatQ);
     setTensorValuesForConversion((uint8_t *)labelFloatData, &labelFloatQ, label, &labelFloat);
-    convertTensor(label, &labelFloat);
+    convertTensor(label, &labelFloat, NULL);
 
     float *outputFloatArr = (float *)outputFloat.data;
     float *labelFloatArr = (float *)labelFloat.data;
@@ -108,14 +108,14 @@ static void mseLossBackwardFakeQuant(tensor_t *modelOutput, tensor_t *label, ten
     uint8_t modelOutputFloatData[numberOfElements * sizeof(float)];
     setTensorValuesForConversion(modelOutputFloatData, &modelOutputFloatQ, modelOutput,
                                  &modelOutputFloat);
-    convertTensor(modelOutput, &modelOutputFloat);
+    convertTensor(modelOutput, &modelOutputFloat, NULL);
 
     tensor_t labelFloat;
     quantization_t labelFloatQ;
     initFloat32Quantization(&labelFloatQ);
     uint8_t labelFloatData[numberOfElements * sizeof(float)];
     setTensorValuesForConversion(labelFloatData, &labelFloatQ, label, &labelFloat);
-    convertTensor(label, &labelFloat);
+    convertTensor(label, &labelFloat, NULL);
 
     tensor_t resultFloat;
     quantization_t resultFloatQ;
@@ -131,7 +131,7 @@ static void mseLossBackwardFakeQuant(tensor_t *modelOutput, tensor_t *label, ten
         resultArray[i] = 2.0f * (modelOutputArray[i] - labelArray[i]);
     }
 
-    convertTensor(&resultFloat, result);
+    convertTensor(&resultFloat, result, NULL);
 }
 
 void mseLossBackward(tensor_t *modelOutput, tensor_t *label, tensor_t *result) {

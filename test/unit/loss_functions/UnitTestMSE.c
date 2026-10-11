@@ -129,7 +129,7 @@ void testMSELossBackward_SymInt32WritesRawPerElementGrad() {
     uint8_t modelOutputSymInt32Data[numberOfElements * sizeof(int32_t)];
     setTensorValuesForConversion(modelOutputSymInt32Data, &modelOutputSymInt32Q, &modelOutput,
                                  &modelOutputSymInt32);
-    convertTensor(&modelOutput, &modelOutputSymInt32);
+    convertTensor(&modelOutput, &modelOutputSymInt32, NULL);
 
     tensor_t label;
     quantization_t labelQ;
@@ -144,7 +144,7 @@ void testMSELossBackward_SymInt32WritesRawPerElementGrad() {
     initSymInt32Quantization(&labelSymInt32QC, &labelSymInt32Q);
     uint8_t labelSymInt32Data[numberOfElements * sizeof(int32_t)];
     setTensorValuesForConversion(labelSymInt32Data, &labelSymInt32Q, &label, &labelSymInt32);
-    convertTensor(&label, &labelSymInt32);
+    convertTensor(&label, &labelSymInt32, NULL);
 
     tensor_t result;
     quantization_t resultQ;
@@ -162,7 +162,7 @@ void testMSELossBackward_SymInt32WritesRawPerElementGrad() {
     setTensorValuesForConversion(resultSymInt32Data, &resultSymInt32Q, &result, &resultSymInt32);
 
     mseLossBackward(&modelOutputSymInt32, &labelSymInt32, &resultSymInt32);
-    convertTensor(&resultSymInt32, &result);
+    convertTensor(&resultSymInt32, &result, NULL);
 
     /* Raw per-element gradient over the [1, 3] wire; wider tolerance for fixed-point. */
     float expected[] = {12.f, 12.f, -10.f};

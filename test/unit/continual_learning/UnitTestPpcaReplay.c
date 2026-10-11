@@ -882,9 +882,9 @@ void testPackedStateSamplingDegradationBounded(void) { /* T5 */
 
     ppcaReplayConfig_t cfgP = packedConfig(8, 2, 256, SYM);
     ppcaReplay_t *gP = ppcaReplayCreate(&cfgP);
-    executeConvert(gF->mean, gP->mean);
-    executeConvert(gF->basis, gP->basis);
-    executeConvert(gF->eigvals, gP->eigvals);
+    executeConvert(gF->mean, gP->mean, NULL);
+    executeConvert(gF->basis, gP->basis, NULL);
+    executeConvert(gF->eigvals, gP->eigvals, NULL);
     gP->sigma2 = gF->sigma2;
     gP->totalVar = gF->totalVar;
     gP->count = gF->count;
@@ -943,7 +943,7 @@ void testPackedStateStreamingGridBounded(void) { /* T7 */
      * FLOAT32 twin is the accuracy reference. subspaceProjection reads raw
      * float data, so dequant gP's packed basis into a float twin first. */
     ppcaReplay_t *gPF = ppcaReplayCreate(&cfgF);
-    executeConvert(gP->basis, gPF->basis);
+    executeConvert(gP->basis, gPF->basis, NULL);
     gPF->count = gP->count;
     float projF = subspaceProjection(gF, &kTrueBasis8[0]);
     float projP = subspaceProjection(gPF, &kTrueBasis8[0]);

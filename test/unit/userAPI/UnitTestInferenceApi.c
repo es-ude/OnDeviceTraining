@@ -134,7 +134,7 @@ void testInferenceLinearReluSymInt32() {
     shape_t *outShape = reserveMemory(sizeof(shape_t));
     setShape(outShape, outDims, 2, outOrder);
     tensor_t *outputFloat = initTensor(outShape, quantizationInitFloat(), NULL);
-    convertTensor(outputSymInt32, outputFloat);
+    convertTensor(outputSymInt32, outputFloat, NULL);
 
     /* CAPTURE assertion values. */
     float capturedActual[2];

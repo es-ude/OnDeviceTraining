@@ -389,28 +389,28 @@ static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *p
     initFloat32Quantization(&inputFloatQ);
     uint8_t inputFloatData[inputSize * sizeof(float)];
     setTensorValuesForConversion(inputFloatData, &inputFloatQ, input, &inputFloat);
-    convertTensor(input, &inputFloat);
+    convertTensor(input, &inputFloat, NULL);
 
     tensor_t lossFloat;
     quantization_t lossFloatQ;
     initFloat32Quantization(&lossFloatQ);
     uint8_t lossFloatData[inputSize * sizeof(float)];
     setTensorValuesForConversion(lossFloatData, &lossFloatQ, loss, &lossFloat);
-    convertTensor(loss, &lossFloat);
+    convertTensor(loss, &lossFloat, NULL);
 
     tensor_t propLossFloat;
     quantization_t propLossFloatQ;
     initFloat32Quantization(&propLossFloatQ);
     uint8_t propLossFloatData[inputSize * sizeof(float)];
     setTensorValuesForConversion(propLossFloatData, &propLossFloatQ, propLoss, &propLossFloat);
-    convertTensor(propLoss, &propLossFloat);
+    convertTensor(propLoss, &propLossFloat, NULL);
 
     /* P6-1 root fix: same recompute as the float arm -- the dequantized
      * inputFloat is the layer INPUT (logits), not the softmax OUTPUT. */
     softmaxVjpRows((const float *)inputFloat.data, (const float *)lossFloat.data,
                    (float *)propLossFloat.data, rows, rowLen);
 
-    convertTensor(&propLossFloat, propLoss);
+    convertTensor(&propLossFloat, propLoss, NULL);
 }
 
 /* BFP epic PR6 Task 5 (P6-6): the native ARITH_BFP softmax backward -- ONE

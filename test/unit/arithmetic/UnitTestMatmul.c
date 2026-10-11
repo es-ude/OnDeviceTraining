@@ -272,7 +272,7 @@ void testMatmulSymInt32Tensors() {
 
     tensor_t actual;
     setTensorValues(&actual, (uint8_t *)actualData, &outputShape, &actualQ, NULL);
-    convertTensor(&outputTensor, &actual);
+    convertTensor(&outputTensor, &actual, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, actual.data, 4);
 }
@@ -418,7 +418,7 @@ void testMatmulSymInt32TensorsWithBiasRescalesBias() {
     initFloat32Quantization(&actualQ);
     tensor_t actual;
     setTensorValues(&actual, (uint8_t *)actualData, &outputShape, &actualQ, NULL);
-    convertTensor(&outputTensor, &actual);
+    convertTensor(&outputTensor, &actual, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, actual.data, 4);
 }

@@ -128,7 +128,7 @@ void testLayerLoadWeightsLinearQuantizesForSymStorage(void) {
         initTensor(getShapeLike(weightParam->shape), quantizationInitSymInt32(HALF_AWAY), NULL);
     tensor_t weightSrcView;
     setTensorValues(&weightSrcView, (uint8_t *)weightData, weightGold->shape, &floatQ, NULL);
-    convertTensor(&weightSrcView, weightGold);
+    convertTensor(&weightSrcView, weightGold, NULL);
     int32_t goldWeightMantissas[6];
     memcpy(goldWeightMantissas, weightGold->data, sizeof(goldWeightMantissas));
     float goldWeightScale = ((symInt32QConfig_t *)weightGold->quantization->qConfig)->scale;
@@ -137,7 +137,7 @@ void testLayerLoadWeightsLinearQuantizesForSymStorage(void) {
         initTensor(getShapeLike(biasParam->shape), quantizationInitSymInt32(HALF_AWAY), NULL);
     tensor_t biasSrcView;
     setTensorValues(&biasSrcView, (uint8_t *)biasData, biasGold->shape, &floatQ, NULL);
-    convertTensor(&biasSrcView, biasGold);
+    convertTensor(&biasSrcView, biasGold, NULL);
     int32_t goldBiasMantissas[2];
     memcpy(goldBiasMantissas, biasGold->data, sizeof(goldBiasMantissas));
     float goldBiasScale = ((symInt32QConfig_t *)biasGold->quantization->qConfig)->scale;

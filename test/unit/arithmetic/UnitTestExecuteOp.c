@@ -171,8 +171,8 @@ void testPrologueConvertsFloatOperandIntoSymArithmetic(void) {
      * to the target exactly as the epilogue's OUT_WRITE diagonal does. */
     tensor_t *ref = buildSym(3, (int32_t[]){0, 0, 0}, 1.0f);
     tensor_t *inSym = buildSym(3, (int32_t[]){0, 0, 0}, 1.0f);
-    convertTensor(in, inSym);
-    conversionMatrix[SYM_INT32][SYM_INT32](inSym, ref);
+    convertTensor(in, inSym, NULL);
+    conversionMatrix[SYM_INT32][SYM_INT32](inSym, ref, NULL);
 
     int32_t got[3];
     int32_t want[3];
@@ -258,7 +258,7 @@ void testOutWriteSymToSymBitEqualsDiagonalRequant(void) {
         out);
 
     tensor_t *ref = buildSym(3, (int32_t[]){0, 0, 0}, 1.0f);
-    conversionMatrix[SYM_INT32][SYM_INT32](in, ref);
+    conversionMatrix[SYM_INT32][SYM_INT32](in, ref, NULL);
 
     int32_t got[3];
     int32_t want[3];
@@ -426,7 +426,7 @@ void testAccDynamicFloatIncIntoSymTargetMatchesLayerNormReference(void) {
     tensor_t *refGrad = buildSym(3, (int32_t[]){40, -80, 120}, 0.02f);
     tensor_t *refIncFloat = buildFloat(3, incVals);
     tensor_t *refIncSym = buildSym(3, (int32_t[]){0, 0, 0}, 1.0f); /* int12 shell, HALF_AWAY */
-    convertTensor(refIncFloat, refIncSym);
+    convertTensor(refIncFloat, refIncSym, NULL);
     addSymInt32TensorsInplace(refGrad, refIncSym);
 
     int32_t got[3];
@@ -1609,7 +1609,7 @@ void testExecuteConvertKeepsTargetStorageRounding(void) {
     ((symInt32QConfig_t *)out->quantization->qConfig)->roundingMode = SR_HALF_AWAY;
 
     rngSetSeed(99);
-    executeConvert(in, out);
+    executeConvert(in, out, NULL);
 
     int32_t got0 = ((int32_t *)out->data)[0];
     int32_t got1 = ((int32_t *)out->data)[1];
@@ -1630,8 +1630,8 @@ void testExecuteConvertSymToSymRequantsThroughDiagonal(void) {
     tensor_t *out = buildSym(4, (int32_t[]){0, 0, 0, 0}, 1.0f);
     tensor_t *gold = buildSym(4, (int32_t[]){0, 0, 0, 0}, 1.0f);
 
-    conversionMatrix[SYM_INT32][SYM_INT32](in, gold);
-    executeConvert(in, out);
+    conversionMatrix[SYM_INT32][SYM_INT32](in, gold, NULL);
+    executeConvert(in, out, NULL);
 
     int32_t got[4];
     int32_t want[4];
@@ -1658,8 +1658,8 @@ void testExecuteConvertFloatToSymMatchesConvertTensor(void) {
     tensor_t *out = buildSym(3, (int32_t[]){0, 0, 0}, 1.0f);
     tensor_t *gold = buildSym(3, (int32_t[]){0, 0, 0}, 1.0f);
 
-    convertTensor(in, gold);
-    executeConvert(in, out);
+    convertTensor(in, gold, NULL);
+    executeConvert(in, out, NULL);
 
     int32_t got[3];
     int32_t want[3];
@@ -1722,7 +1722,7 @@ void testExecuteConvertBfpToBfpRoutesDiagonal(void) {
     tensor_t dst;
     setTensorValues(&dst, outData, &shape, &outQ, NULL);
 
-    executeConvert(&src, &dst);
+    executeConvert(&src, &dst, NULL);
 
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(127, outQC.exponents[0],
                                     "diagonal must derive the target exponent FRESH "
@@ -2566,6 +2566,64 @@ void testExecuteOpFloatArithmeticStillDequantsGroupedBfp(void) {
     }
 }
 
+/* ---- executeConvert hands its stream to the matrix cell on every route ---- */
+
+static rngStream_t *routeCellStream;
+static uint32_t routeCellCalls;
+
+static void routeRecordingCell(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t *rs) {
+    (void)inputTensor;
+    (void)outputTensor;
+    routeCellStream = rs;
+    routeCellCalls++;
+}
+
+/* executeConvert reaches a matrix cell on three routes: the SYM_INT32 and BFP
+ * diagonals (called directly, so a same-type pair requantizes instead of
+ * copying) and convertTensor for every other pair. Each route must hand the
+ * caller's stream through unchanged. */
+void testExecuteConvertHandsTheStreamToTheCellOnEveryRoute(void) {
+    static const char *const routes[3] = {"SYM_INT32 diagonal", "BFP diagonal", "convertTensor"};
+    int32_t inData[1] = {0};
+    int32_t outData[1] = {0};
+    size_t dims[] = {1};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    symInt32QConfig_t symInQC;
+    symInt32QConfig_t symOutQC;
+    initSymInt32QConfig(HALF_AWAY, &symInQC);
+    initSymInt32QConfig(HALF_AWAY, &symOutQC);
+    bfpQConfig_t bfpInQC = {0};
+    bfpQConfig_t bfpOutQC = {0};
+    quantization_t inQ[3];
+    quantization_t outQ[3];
+    initSymInt32Quantization(&symInQC, &inQ[0]);
+    initSymInt32Quantization(&symOutQC, &outQ[0]);
+    initBfpQuantization(&bfpInQC, &inQ[1]);
+    initBfpQuantization(&bfpOutQC, &outQ[1]);
+    initInt32Quantization(&inQ[2]);
+    initFloat32Quantization(&outQ[2]);
+    rngStream_t stream = rngOpen(rngKeyFromSeed(5u));
+
+    for (size_t r = 0; r < 3; r++) {
+        tensor_t in;
+        tensor_t out;
+        setTensorValues(&in, (uint8_t *)inData, &shape, &inQ[r], NULL);
+        setTensorValues(&out, (uint8_t *)outData, &shape, &outQ[r], NULL);
+        conversionFunction_t *cell = &conversionMatrix[inQ[r].type][outQ[r].type];
+        conversionFunction_t saved = *cell;
+        *cell = routeRecordingCell;
+        routeCellStream = NULL;
+        routeCellCalls = 0;
+
+        executeConvert(&in, &out, &stream);
+
+        *cell = saved;
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(1u, routeCellCalls, routes[r]);
+        TEST_ASSERT_EQUAL_PTR_MESSAGE(&stream, routeCellStream, routes[r]);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testProloguePassesMatchingOperandThroughUntouched);
@@ -2624,5 +2682,6 @@ int main(void) {
     RUN_TEST(testExecuteOpStagesGroupedAndPerTensorOperandsDistinctSlices);
     RUN_TEST(testExecuteOpBfpStagingSrIsSeededDeterministic);
     RUN_TEST(testExecuteOpBfpRawIsFloat32AndPacksTarget);
+    RUN_TEST(testExecuteConvertHandsTheStreamToTheCellOnEveryRoute);
     return UNITY_END();
 }

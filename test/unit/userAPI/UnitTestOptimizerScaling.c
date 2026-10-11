@@ -407,7 +407,7 @@ static void dequantGradToFloat(tensor_t *grad, float *out, size_t n) {
     initFloat32Quantization(&floatQ);
     uint8_t floatBytes[n * sizeof(float)];
     setTensorValuesForConversion(floatBytes, &floatQ, grad, &floatView);
-    convertTensor(grad, &floatView);
+    convertTensor(grad, &floatView, NULL);
     memcpy(out, floatView.data, n * sizeof(float));
 }
 

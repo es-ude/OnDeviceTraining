@@ -9,6 +9,10 @@
 #include "Common.h"
 #include "Tensor.h"
 
+/* Pointer-only use: the identical typedef lives in RNG.h (C11 allows the
+ * repetition), so this header needs no RNG include path. */
+typedef struct rngStream rngStream_t;
+
 /* The one conversion funnel (PR1b.2 D1, docs/conventions/arithmetic-sym.md). Every op runs:
  *   prologue   — operands whose dtype != arithmetic are converted into
  *                transient stack scratch (sources are never mutated)
@@ -167,7 +171,7 @@ void executeOpIdentityKernel(tensor_t **operands, size_t nOperands, tensor_t *ra
  * diagonal (requant), never the same-type memmove. Supports every
  * populated conversionMatrix cell. Unlike executeOp's OUT_WRITE epilogue,
  * a bare conversion IS a storage encode: it rounds by the target's own
- * qConfig roundingMode (#282). */
-void executeConvert(tensor_t *input, tensor_t *target);
+ * qConfig roundingMode (#282). rs is handed to the cell's rounding calls. */
+void executeConvert(tensor_t *input, tensor_t *target, rngStream_t *rs);
 
 #endif // ENV5_RUNTIME_EXECUTE_OP_H

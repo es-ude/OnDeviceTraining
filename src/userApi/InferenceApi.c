@@ -200,7 +200,7 @@ tensor_t *inference(layer_t **model, size_t numberOfLayers, tensor_t *input) {
     }
 
     tensor_t *output = getTensorLike(&outputNext);
-    convertTensor(&outputNext, output);
+    convertTensor(&outputNext, output, NULL);
     deInitBuffer(&outputNext);
     return output;
 }
@@ -263,7 +263,7 @@ static inferenceStats_t *inferenceOnScheduler(layer_t **model, size_t numberOfLa
              * before rematDone releases ACT n. */
             float loss = lossFunctions[funcType].forward(op.in, label, forwardReduction);
             inferenceStats = reserveInferenceStats(op.in);
-            convertTensor(op.in, inferenceStats->output);
+            convertTensor(op.in, inferenceStats->output, NULL);
             inferenceStats->loss = loss;
         }
         rematDone(s, &st);
@@ -304,7 +304,7 @@ inferenceStats_t *inferenceWithLoss(layer_t **model, size_t numberOfLayers, tens
     float loss = lossFns.forward(&outputNext, label, forwardReduction);
 
     inferenceStats_t *inferenceStats = reserveInferenceStats(&outputNext);
-    convertTensor(&outputNext, inferenceStats->output);
+    convertTensor(&outputNext, inferenceStats->output, NULL);
     inferenceStats->loss = loss;
 
     deInitBuffer(&outputNext);

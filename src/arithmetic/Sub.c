@@ -120,18 +120,18 @@ void subSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTe
         initFloat32Quantization(&aFloatQ);
         uint8_t aFloatData[aNumberOfValues * sizeof(float)];
         setTensorValuesForConversion(aFloatData, &aFloatQ, aTensor, &aFloat);
-        convertTensor(aTensor, &aFloat);
+        convertTensor(aTensor, &aFloat, NULL);
 
         tensor_t bFloat;
         quantization_t bFloatQ;
         initFloat32Quantization(&bFloatQ);
         uint8_t bFloatData[aNumberOfValues * sizeof(float)];
         setTensorValuesForConversion(bFloatData, &bFloatQ, bTensor, &bFloat);
-        convertTensor(bTensor, &bFloat);
+        convertTensor(bTensor, &bFloat, NULL);
 
         subFloat32TensorsInplace(&aFloat, &bFloat);
 
-        convertTensor(&aFloat, outputTensor);
+        convertTensor(&aFloat, outputTensor, NULL);
     }
 }
 
@@ -167,16 +167,16 @@ void subSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor) {
         uint8_t aFloatData[aNumberOfValues * sizeof(float)];
         tensor_t aFloat;
         setTensorValuesForConversion(aFloatData, &floatQ, &aFloat, aTensor);
-        convertTensor(aTensor, &aFloat);
+        convertTensor(aTensor, &aFloat, NULL);
 
         uint8_t bFloatData[aNumberOfValues * sizeof(float)];
         tensor_t bFloat;
         setTensorValuesForConversion(bFloatData, &floatQ, bTensor, &bFloat);
-        convertTensor(bTensor, &bFloat);
+        convertTensor(bTensor, &bFloat, NULL);
 
         subFloat32TensorsInplace(&aFloat, &bFloat);
 
-        convertTensor(&aFloat, aTensor);
+        convertTensor(&aFloat, aTensor, NULL);
     }
 }
 

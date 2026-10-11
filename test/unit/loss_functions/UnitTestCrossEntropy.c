@@ -282,7 +282,7 @@ static void makeSymFromFloat(symStackTensor_t *st, uint8_t *storage, tensor_t *f
     initSymInt32QConfig(HALF_AWAY, &st->qc);
     initSymInt32Quantization(&st->qc, &st->q);
     setTensorValuesForConversion(storage, &st->q, floatSrc, &st->tensor);
-    convertTensor(floatSrc, &st->tensor);
+    convertTensor(floatSrc, &st->tensor, NULL);
 }
 
 static void makeFloatStack(tensor_t *t, float *data, shape_t *shape, quantization_t *q) {

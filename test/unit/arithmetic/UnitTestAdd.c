@@ -186,7 +186,7 @@ void testAddSymInt32TensorsInplace() {
     shape_t *outputShape = reserveMemory(sizeof(shape_t));
     setShape(outputShape, outputDims, 1, outputOrder);
     tensor_t *floatTensor = initTensor(outputShape, quantizationInitFloat(), NULL);
-    convertTensor(&aTensor, floatTensor);
+    convertTensor(&aTensor, floatTensor, NULL);
 
     /* CAPTURE before free. */
     float captured[numberOfValues];

@@ -161,7 +161,7 @@ void testFlattenForwardSymInt32_PropagatesScaleAndValues(void) {
     shape_t *roundTripShape = reserveMemory(sizeof(shape_t));
     setShape(roundTripShape, roundTripDims, 2, roundTripOrder);
     tensor_t *roundTrip = initTensor(roundTripShape, quantizationInitFloat(), NULL);
-    convertTensor(output, roundTrip);
+    convertTensor(output, roundTrip, NULL);
 
     /* 5. CAPTURE roundtrip values before frees. */
     float captured[6];
@@ -299,7 +299,7 @@ void testFlattenBackwardSymInt32_PropagatesScale(void) {
     shape_t *roundTripShape = reserveMemory(sizeof(shape_t));
     setShape(roundTripShape, roundTripDims, 3, roundTripOrder);
     tensor_t *roundTrip = initTensor(roundTripShape, quantizationInitFloat(), NULL);
-    convertTensor(propLoss, roundTrip);
+    convertTensor(propLoss, roundTrip, NULL);
 
     /* 6. CAPTURE roundtrip values before frees. */
     float captured[6];

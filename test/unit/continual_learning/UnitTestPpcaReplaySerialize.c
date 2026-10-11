@@ -204,9 +204,9 @@ void testRoundTripPacked(void) {
     ppcaReplayConfig_t cfgP = packedConfig(6, 2, 8, SYM);
     ppcaReplaySet_t *serial = ppcaReplaySetCreate(1, &cfgP);
     ppcaReplaySet_t *deserial = ppcaReplaySetCreate(1, &cfgP);
-    executeConvert(train->generators[0]->mean, serial->generators[0]->mean);
-    executeConvert(train->generators[0]->basis, serial->generators[0]->basis);
-    executeConvert(train->generators[0]->eigvals, serial->generators[0]->eigvals);
+    executeConvert(train->generators[0]->mean, serial->generators[0]->mean, NULL);
+    executeConvert(train->generators[0]->basis, serial->generators[0]->basis, NULL);
+    executeConvert(train->generators[0]->eigvals, serial->generators[0]->eigvals, NULL);
     serial->generators[0]->sigma2 = 0.75f;
     serial->generators[0]->totalVar = 12.5f;
     serial->generators[0]->count = 9;
@@ -256,9 +256,9 @@ void testRoundTripPackedGroupedSym(void) {
     seedSet(train);
     ppcaReplayConfig_t cfgGrouped = groupedPackedConfig(6, 2, 8);
     ppcaReplaySet_t *serial = ppcaReplaySetCreate(1, &cfgGrouped);
-    executeConvert(train->generators[0]->mean, serial->generators[0]->mean);
-    executeConvert(train->generators[0]->basis, serial->generators[0]->basis);
-    executeConvert(train->generators[0]->eigvals, serial->generators[0]->eigvals);
+    executeConvert(train->generators[0]->mean, serial->generators[0]->mean, NULL);
+    executeConvert(train->generators[0]->basis, serial->generators[0]->basis, NULL);
+    executeConvert(train->generators[0]->eigvals, serial->generators[0]->eigvals, NULL);
     serial->generators[0]->sigma2 = 0.75f;
     serial->generators[0]->totalVar = 12.5f;
     serial->generators[0]->count = 9;
@@ -319,9 +319,9 @@ void testRoundTripPackedGroupedAsym(void) {
     seedSet(train);
     ppcaReplayConfig_t cfgGrouped = groupedAsymPackedConfig(6, 2, 8);
     ppcaReplaySet_t *serial = ppcaReplaySetCreate(1, &cfgGrouped);
-    executeConvert(train->generators[0]->mean, serial->generators[0]->mean);
-    executeConvert(train->generators[0]->basis, serial->generators[0]->basis);
-    executeConvert(train->generators[0]->eigvals, serial->generators[0]->eigvals);
+    executeConvert(train->generators[0]->mean, serial->generators[0]->mean, NULL);
+    executeConvert(train->generators[0]->basis, serial->generators[0]->basis, NULL);
+    executeConvert(train->generators[0]->eigvals, serial->generators[0]->eigvals, NULL);
     serial->generators[0]->sigma2 = 0.75f;
     serial->generators[0]->totalVar = 12.5f;
     serial->generators[0]->count = 9;

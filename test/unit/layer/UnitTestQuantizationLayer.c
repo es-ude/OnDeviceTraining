@@ -75,7 +75,7 @@ void testQuantizationForwardSymToSymMatchesDirectRequant(void) {
     ((symInt32QConfig_t *)input->quantization->qConfig)->scale = 1e-4f;
 
     tensor_t *expected = buildSym2D(2, 3);
-    requantSymInt32Tensor(input, expected);
+    requantSymInt32Tensor(input, expected, NULL);
 
     /* Fixture sanity: the requant must actually change mantissas + scale,
      * otherwise the differential assert below is vacuous (scale-freeze class). */
@@ -108,7 +108,7 @@ void testQuantizationForwardSymToFloatMatchesConvertTensor(void) {
     ((symInt32QConfig_t *)input->quantization->qConfig)->scale = 0.5f;
 
     tensor_t *expected = buildFloat2D(2, 2);
-    convertTensor(input, expected);
+    convertTensor(input, expected, NULL);
 
     tensor_t *actual = buildFloat2D(2, 2);
     layer_t qLayer = {.type = QUANTIZATION, .config = NULL};
@@ -151,7 +151,7 @@ void testQuantLayerConvertsAsymToSymInt32MatchesConvertTensor(void) {
     memcpy(input->data, codes, sizeof(codes));
 
     tensor_t *expected = buildSym2D(2, 2);
-    convertTensor(input, expected);
+    convertTensor(input, expected, NULL);
 
     /* Fixture sanity: the direct conversion must preserve the ASYM scale
      * verbatim (not re-derive one), otherwise the differential assert below
@@ -201,7 +201,7 @@ void testQuantizationBackwardRequantsDyMantissasLikeDirectRequant(void) {
     ((symInt32QConfig_t *)loss->quantization->qConfig)->scale = 2e-5f;
 
     tensor_t *expected = buildSym2D(2, 3);
-    requantSymInt32Tensor(loss, expected);
+    requantSymInt32Tensor(loss, expected, NULL);
 
     tensor_t *forwardInput = buildSym2D(2, 3); /* unused: straight-through backward */
     tensor_t *propLoss = buildSym2D(2, 3);

@@ -41,7 +41,7 @@ void npyDumpSink(void *ctxV, size_t layerIdx, layerType_t layerType, const char 
     const float *data = (const float *)tensor->data;
     if (tensor->quantization->type != FLOAT32) {
         floatScratch = initTensor(getShapeLike(tensor->shape), quantizationInitFloat(), NULL);
-        convertTensor(tensor, floatScratch);
+        convertTensor(tensor, floatScratch, NULL);
         data = (const float *)floatScratch->data;
     }
 

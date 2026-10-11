@@ -125,7 +125,7 @@ void testLinearForwardSymInt32Rank1BiasRank2Output() {
     shape_t *outFloatShape = reserveMemory(sizeof(shape_t));
     setShape(outFloatShape, outFloatDims, 2, outFloatOrder);
     tensor_t *outputFloat = initTensor(outFloatShape, quantizationInitFloat(), NULL);
-    convertTensor(output, outputFloat);
+    convertTensor(output, outputFloat, NULL);
 
     float captured[2];
     for (size_t i = 0; i < numberOfOutputs; i++) {
@@ -292,7 +292,7 @@ void testLinearBackwardSymInt32Rank1Bias() {
     shape_t *wgShape = reserveMemory(sizeof(shape_t));
     setShape(wgShape, wgDims, 2, wgOrder);
     tensor_t *weightGradFloat = initTensor(wgShape, quantizationInitFloat(), NULL);
-    convertTensor(weights->grad, weightGradFloat);
+    convertTensor(weights->grad, weightGradFloat, NULL);
 
     /* RANK-1 bias-grad convert-back block. */
     size_t *bgDims = reserveMemory(1 * sizeof(size_t));
@@ -302,7 +302,7 @@ void testLinearBackwardSymInt32Rank1Bias() {
     shape_t *bgShape = reserveMemory(sizeof(shape_t));
     setShape(bgShape, bgDims, 1, bgOrder);
     tensor_t *biasGradFloat = initTensor(bgShape, quantizationInitFloat(), NULL);
-    convertTensor(bias->grad, biasGradFloat);
+    convertTensor(bias->grad, biasGradFloat, NULL);
 
     size_t *plDims = reserveMemory(1 * sizeof(size_t));
     plDims[0] = numberOfForwardInputs;
@@ -311,7 +311,7 @@ void testLinearBackwardSymInt32Rank1Bias() {
     shape_t *plShape = reserveMemory(sizeof(shape_t));
     setShape(plShape, plDims, 1, plOrder);
     tensor_t *propLossFloat = initTensor(plShape, quantizationInitFloat(), NULL);
-    convertTensor(propLoss, propLossFloat);
+    convertTensor(propLoss, propLossFloat, NULL);
 
     /* 8. CAPTURE. */
     float capturedWeightGrad[6];
@@ -583,7 +583,7 @@ void testLinearForwardSymInt32() {
     shape_t *outFloatShape = reserveMemory(sizeof(shape_t));
     setShape(outFloatShape, outFloatDims, 2, outFloatOrder);
     tensor_t *outputFloat = initTensor(outFloatShape, quantizationInitFloat(), NULL);
-    convertTensor(output, outputFloat);
+    convertTensor(output, outputFloat, NULL);
 
     /* 7. CAPTURE. */
     float captured[2];
@@ -683,7 +683,7 @@ void testLinearBackwardSymInt32() {
     shape_t *wgShape = reserveMemory(sizeof(shape_t));
     setShape(wgShape, wgDims, 2, wgOrder);
     tensor_t *weightGradFloat = initTensor(wgShape, quantizationInitFloat(), NULL);
-    convertTensor(weights->grad, weightGradFloat);
+    convertTensor(weights->grad, weightGradFloat, NULL);
 
     size_t *bgDims = reserveMemory(2 * sizeof(size_t));
     bgDims[0] = 1;
@@ -693,7 +693,7 @@ void testLinearBackwardSymInt32() {
     shape_t *bgShape = reserveMemory(sizeof(shape_t));
     setShape(bgShape, bgDims, 2, bgOrder);
     tensor_t *biasGradFloat = initTensor(bgShape, quantizationInitFloat(), NULL);
-    convertTensor(bias->grad, biasGradFloat);
+    convertTensor(bias->grad, biasGradFloat, NULL);
 
     size_t *plDims = reserveMemory(1 * sizeof(size_t));
     plDims[0] = numberOfForwardInputs;
@@ -702,7 +702,7 @@ void testLinearBackwardSymInt32() {
     shape_t *plShape = reserveMemory(sizeof(shape_t));
     setShape(plShape, plDims, 1, plOrder);
     tensor_t *propLossFloat = initTensor(plShape, quantizationInitFloat(), NULL);
-    convertTensor(propLoss, propLossFloat);
+    convertTensor(propLoss, propLossFloat, NULL);
 
     /* 8. CAPTURE. */
     float capturedWeightGrad[6];
@@ -1751,7 +1751,7 @@ void testLinearSymInt32GradAccumulatesOverTwoMicrobatchesAndSteps(void) {
         initFloat32Quantization(&gfQ);
         uint8_t gfData[6 * sizeof(float)];
         setTensorValuesForConversion(gfData, &gfQ, symWGrad, &gf);
-        convertTensor(symWGrad, &gf);
+        convertTensor(symWGrad, &gf, NULL);
         for (size_t i = 0; i < nW; i++) {
             symGradFloat[i] = ((float *)gf.data)[i];
         }
@@ -2108,7 +2108,7 @@ void testLinearForwardGroupedSymWeights(void) {
     shape_t *outFloatShape = reserveMemory(sizeof(shape_t));
     setShape(outFloatShape, outFloatDims, 2, outFloatOrder);
     tensor_t *outputFloat = initTensor(outFloatShape, quantizationInitFloat(), NULL);
-    convertTensor(output, outputFloat);
+    convertTensor(output, outputFloat, NULL);
 
     float captured[6];
     for (size_t i = 0; i < 6; i++) {

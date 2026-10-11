@@ -68,7 +68,7 @@ void tensorFillFromFloatBuffer(tensor_t *tensor, const float *source, size_t cou
     srcView.quantization = &floatQ;
     srcView.sparsity = NULL;
 
-    convertTensor(&srcView, tensor);
+    convertTensor(&srcView, tensor, NULL);
 }
 
 void tensorFillFromBoolBuffer(tensor_t *tensor, const bool *source, size_t count) {
@@ -417,7 +417,7 @@ void requantizeTensorInPlace(tensor_t *t, quantization_t *targetQ) {
     uint8_t *newData = getDataLike(newQ, numElements);
 
     tensor_t view = {.data = newData, .shape = t->shape, .quantization = newQ, .sparsity = NULL};
-    convertTensor(t, &view);
+    convertTensor(t, &view, NULL);
 
     freeData(t);
     freeQuantization(t->quantization);

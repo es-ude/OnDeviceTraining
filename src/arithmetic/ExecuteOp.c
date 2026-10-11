@@ -31,19 +31,19 @@ void executeOpIdentityKernel(tensor_t **operands, size_t nOperands, tensor_t *ra
  * SYM->SYM must REQUANT via the conversionMatrix diagonal — convertTensor's
  * same-type branch is a memmove that would pass raw mantissas through
  * unrestored (the QuantizationLayer.c trap). */
-static void writeOutConversion(tensor_t *intermediate, tensor_t *target) {
+static void writeOutConversion(tensor_t *intermediate, tensor_t *target, rngStream_t *rs) {
     if (intermediate->quantization->type == SYM_INT32 && target->quantization->type == SYM_INT32) {
-        conversionMatrix[SYM_INT32][SYM_INT32](intermediate, target);
+        conversionMatrix[SYM_INT32][SYM_INT32](intermediate, target, rs);
         return;
     }
     /* Same trap class for BFP: the same-type branch either dies on the width
      * guard or copies stale exponents verbatim; the diagonal re-derives the
      * target's per-group exponents fresh on the target's geometry. */
     if (intermediate->quantization->type == BFP && target->quantization->type == BFP) {
-        conversionMatrix[BFP][BFP](intermediate, target);
+        conversionMatrix[BFP][BFP](intermediate, target, rs);
         return;
     }
-    convertTensor(intermediate, target);
+    convertTensor(intermediate, target, rs);
 }
 
 /* #282 seam: where a quantized tensor keeps its storage-requant rounding
@@ -74,20 +74,20 @@ static roundingMode_t *storageRoundingSlot(tensor_t *tensor) {
 static void writeOut(tensor_t *intermediate, tensor_t *target, roundingMode_t opRounding) {
     roundingMode_t *slot = storageRoundingSlot(target);
     if (slot == NULL) {
-        writeOutConversion(intermediate, target);
+        writeOutConversion(intermediate, target, NULL);
         return;
     }
     roundingMode_t storageMode = *slot;
     *slot = opRounding;
-    writeOutConversion(intermediate, target);
+    writeOutConversion(intermediate, target, NULL);
     *slot = storageMode;
 }
 
-void executeConvert(tensor_t *input, tensor_t *target) {
+void executeConvert(tensor_t *input, tensor_t *target, rngStream_t *rs) {
     /* Bare storage-to-storage conversion: a conversion node's rounding IS a
      * storage encode, so the target's own qConfig roundingMode applies here —
      * unlike the OUT_WRITE epilogue, which rounds by the operation (#282). */
-    writeOutConversion(input, target);
+    writeOutConversion(input, target, rs);
 }
 
 /* Phase 4, ACC modes. The SYM_INT32->SYM_INT32 add is Strategy A via
@@ -154,7 +154,7 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
         uint8_t incSymData[(n > 0 ? n : 1) * sizeof(int32_t)];
         tensor_t incSym;
         setTensorValuesForConversion(incSymData, &incQ, intermediate, &incSym);
-        convertTensor(intermediate, &incSym);
+        convertTensor(intermediate, &incSym, NULL);
         addSymInt32TensorsInplace(target, &incSym);
         return;
     }
@@ -344,7 +344,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
             initFloat32Quantization(&scratchQ[i]);
             setTensorValuesForConversion(&scratch[scratchOffset], &scratchQ[i], inputs[i],
                                          &scratchTensors[i]);
-            convertTensor(inputs[i], &scratchTensors[i]);
+            convertTensor(inputs[i], &scratchTensors[i], NULL);
             break;
         case ARITH_SYM_INT32: {
             /* PR2-Decision 11 (BFP epic PR2): deny BEFORE the convertTensor route
@@ -402,7 +402,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
                  * ctx (e.g. Matmul's weightGroups), never this field. */
                 scratchQC[i].scale = 1.0f;
             } else {
-                convertTensor(inputs[i], &scratchTensors[i]);
+                convertTensor(inputs[i], &scratchTensors[i], NULL);
             }
             break;
         }

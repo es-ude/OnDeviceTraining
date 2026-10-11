@@ -5,6 +5,7 @@
 #include <stdlib.h>
 
 #include "Common.h"
+#include "LayerExec.h"
 #include "LossFunctionInternal.h"
 #include "MSE.h"
 #include "Sub.h"
@@ -99,8 +100,9 @@ void mseLossBackwardFloat(tensor_t *modelOutput, tensor_t *label, tensor_t *resu
 
 /* Backward twin of mseLossForwardFakeQuant above — same dtype-generic
  * contract, plus the final convertTensor that requantizes the raw grad into
- * the result's own quantized grid. */
-static void mseLossBackwardFakeQuant(tensor_t *modelOutput, tensor_t *label, tensor_t *result) {
+ * the result's own quantized grid, drawing from rs. */
+static void mseLossBackwardFakeQuant(tensor_t *modelOutput, tensor_t *label, tensor_t *result,
+                                     rngStream_t *rs) {
     size_t numberOfElements = calcNumberOfElementsByTensor(modelOutput);
 
     tensor_t modelOutputFloat;
@@ -132,7 +134,7 @@ static void mseLossBackwardFakeQuant(tensor_t *modelOutput, tensor_t *label, ten
         resultArray[i] = 2.0f * (modelOutputArray[i] - labelArray[i]);
     }
 
-    convertTensor(&resultFloat, result, NULL);
+    convertTensor(&resultFloat, result, rs);
 }
 
 void mseLossBackward(tensor_t *modelOutput, tensor_t *label, tensor_t *result,
@@ -140,6 +142,7 @@ void mseLossBackward(tensor_t *modelOutput, tensor_t *label, tensor_t *result,
     requireOperandMatchesOutput(modelOutput, label, "label", "mseLossBackward");
     requireOperandMatchesOutput(modelOutput, result, "result (grad wire)", "mseLossBackward");
     qtype_t modelOutputQType = modelOutput->quantization->type;
+    rngStream_t lossStorage;
 
     switch (modelOutputQType) {
     case FLOAT32:
@@ -147,7 +150,9 @@ void mseLossBackward(tensor_t *modelOutput, tensor_t *label, tensor_t *result,
         break;
     case SYM_INT32:
     case BFP:
-        mseLossBackwardFakeQuant(modelOutput, label, result);
+        mseLossBackwardFakeQuant(
+            modelOutput, label, result,
+            layerExecPurposeStream(exec, RNG_TAG_BACKWARD, RNG_TAG_LOSS, &lossStorage));
         break;
     default:
         PRINT_ERROR("mseLossBackward: model-output dtype %d not supported "

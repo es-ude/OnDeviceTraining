@@ -9,6 +9,7 @@
 #include "Dropout.h"
 #include "DropoutApi.h"
 #include "Layer.h"
+#include "LayerExec.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
 #include "StorageApi.h"
@@ -169,6 +170,69 @@ static void stubKeepEven(tensor_t *mask, float probTrue, rngStream_t *rs) {
     for (size_t i = 0; i < n; i++) {
         tensorBoolSet(mask, i, (i % 2) == 0);
     }
+}
+
+/* The stream the forward hands the sampler. Python, tags as numbers
+ * (FORWARD 4, DROPOUT_MASK 13):
+ *   uv run python -c "from examples._shared.keyed_rng import (fold, key_from_seed as kfs,
+ *   open_stream as o); print(hex(o(fold(fold(kfs(0x1a7e), 4, 0), 13, 0))))" */
+#define DROPOUT_EXEC_TEST_SEED 0x1a7eu
+#define DROPOUT_MASK_STREAM_STATE 0x86a64e58u
+
+static bool recordedMaskHasStream;
+static uint32_t recordedMaskState;
+
+static void recordingKeepEven(tensor_t *mask, float probTrue, rngStream_t *rs) {
+    recordedMaskHasStream = rs != NULL;
+    recordedMaskState = (rs != NULL) ? rs->state : 0u;
+    stubKeepEven(mask, probTrue, rs);
+}
+
+static void runTrainingForwardRecordingTheMaskStream(const layerExec_t *exec) {
+    tensor_t *input = buildFloatTensor(4, (float[]){1.f, 2.f, 3.f, 4.f});
+    tensor_t *output = buildFloatTensor(4, NULL);
+    tensor_t *mask = buildBoolMask(4);
+    quantization_t *fq = quantizationInitFloat();
+    quantization_t *bq = quantizationInitFloat();
+    dropoutConfig_t dcfg;
+    initDropoutConfig(&dcfg, 0.5f, mask, fq, bq);
+    dcfg.training = true;
+    layerConfig_t lcfg;
+    layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
+    bernoulliFillMaskFn_t saved = bernoulliGetFillMaskFn();
+    bernoulliSetFillMaskFn(recordingKeepEven);
+    recordedMaskHasStream = false;
+    recordedMaskState = 0u;
+
+    dropoutForward(&layer, input, output, exec);
+
+    bernoulliSetFillMaskFn(saved);
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeTensor(mask);
+    freeTensor(output);
+    freeTensor(input);
+}
+
+/* The mask fill draws from the forward's DROPOUT_MASK stream. */
+void testDropoutForwardDrawsTheMaskFromItsMaskStream(void) {
+    layerExec_t exec = {.key = rngKeyFromSeed(DROPOUT_EXEC_TEST_SEED)};
+    rngKey_t phase;
+
+    runTrainingForwardRecordingTheMaskStream(&exec);
+
+    TEST_ASSERT_TRUE(recordedMaskHasStream);
+    rngKey_t maskKey =
+        rngFold(*layerExecPhaseKey(&exec, RNG_TAG_FORWARD, &phase), RNG_TAG_DROPOUT_MASK, 0u);
+    TEST_ASSERT_EQUAL_HEX32(rngOpen(maskKey).state, recordedMaskState);
+    TEST_ASSERT_EQUAL_HEX32(DROPOUT_MASK_STREAM_STATE, recordedMaskState);
+}
+
+/* Without a context the sampler gets no stream. */
+void testDropoutForwardWithoutAContextGivesTheSamplerNoStream(void) {
+    runTrainingForwardRecordingTheMaskStream(NULL);
+
+    TEST_ASSERT_FALSE(recordedMaskHasStream);
 }
 
 void testForwardTrainingFloatScalesAndDrops(void) {
@@ -959,6 +1023,8 @@ int main(void) {
     RUN_TEST(testForwardEvalIdentityFloat);
     RUN_TEST(testForwardEvalIdentitySymInt32);
     RUN_TEST(testForwardTrainingFloatScalesAndDrops);
+    RUN_TEST(testDropoutForwardDrawsTheMaskFromItsMaskStream);
+    RUN_TEST(testDropoutForwardWithoutAContextGivesTheSamplerNoStream);
     RUN_TEST(testForwardTrainingSymInt32ScaleFold);
     RUN_TEST(testBackwardFloatUsesMaskAndScale);
     RUN_TEST(testBackwardSymInt32UsesMaskAndScaleFold);

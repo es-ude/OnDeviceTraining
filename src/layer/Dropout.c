@@ -11,6 +11,7 @@
 #include "BfpKernelSupport.h"
 #include "Common.h"
 #include "Layer.h"
+#include "LayerExec.h"
 #include "Quantization.h"
 #include "Rounding.h"
 #include "Tensor.h"
@@ -140,7 +141,8 @@ static void dropoutCopyBfpVerbatim(tensor_t *src, tensor_t *dst) {
  * outside the funnel and has no op-owned rounding slot to swap in.
  * p = 0.5 is exact and falls out of the float path; no power-of-two
  * special-casing. The BOOL mask is dtype-agnostic and needs no BFP handling. */
-static void dropoutMaskScaleBfp(dropoutConfig_t *cfg, tensor_t *src, tensor_t *dst) {
+static void dropoutMaskScaleBfp(dropoutConfig_t *cfg, tensor_t *src, tensor_t *dst,
+                                rngStream_t *bridge) {
     size_t n = calcNumberOfElementsByTensor(src);
     const bfpQConfig_t *srcQC = src->quantization->qConfig;
     bfpQConfig_t *dstQC = dst->quantization->qConfig;
@@ -251,7 +253,7 @@ static void dropoutMaskScaleBfp(dropoutConfig_t *cfg, tensor_t *src, tensor_t *d
                 float v =
                     tensorBoolGet(cfg->mask, i) ? (float)mant[i - off] * srcScale * factor : 0.f;
                 float q = clamp(v / dstScale, qMin, qMax);
-                codes[i - off] = clampInt32(roundByMode(q, dstQC->roundingMode, NULL),
+                codes[i - off] = clampInt32(roundByMode(q, dstQC->roundingMode, bridge),
                                             (int32_t)qMin, (int32_t)qMax);
             }
             idx = runEnd;
@@ -273,16 +275,18 @@ static void requireBfpPairForArm(tensor_t *a, tensor_t *b, const char *whatA, co
                            b->quantization->qConfig, calcNumberOfElementsByTensor(b), whatPair);
 }
 
-static void dropoutForwardBfp(dropoutConfig_t *cfg, tensor_t *input, tensor_t *output) {
+static void dropoutForwardBfp(dropoutConfig_t *cfg, tensor_t *input, tensor_t *output,
+                              rngStream_t *bridge) {
     if (!cfg->training) {
         dropoutCopyBfpVerbatim(input, output);
         return;
     }
-    dropoutMaskScaleBfp(cfg, input, output);
+    dropoutMaskScaleBfp(cfg, input, output, bridge);
 }
 
-static void dropoutBackwardBfp(dropoutConfig_t *cfg, tensor_t *loss, tensor_t *propLoss) {
-    dropoutMaskScaleBfp(cfg, loss, propLoss);
+static void dropoutBackwardBfp(dropoutConfig_t *cfg, tensor_t *loss, tensor_t *propLoss,
+                               rngStream_t *bridge) {
+    dropoutMaskScaleBfp(cfg, loss, propLoss, bridge);
 }
 
 void dropoutForward(layer_t *dropoutLayer, tensor_t *input, tensor_t *output,
@@ -318,7 +322,10 @@ void dropoutForward(layer_t *dropoutLayer, tensor_t *input, tensor_t *output,
                         maskElements, inputElements);
             exit(1);
         }
-        bernoulliFillMask(cfg->mask, 1.0f - cfg->p, NULL); // fill once before dtype apply
+        rngStream_t maskStorage;
+        bernoulliFillMask(cfg->mask, 1.0f - cfg->p,
+                          layerExecPurposeStream(exec, RNG_TAG_FORWARD, RNG_TAG_DROPOUT_MASK,
+                                                 &maskStorage)); // fill once before dtype apply
     }
     /* The first switch has already rejected everything but the three known
      * arms, so this default IS the BFP arm — no unreachable duplicate error. */
@@ -329,9 +336,13 @@ void dropoutForward(layer_t *dropoutLayer, tensor_t *input, tensor_t *output,
     case ARITH_SYM_INT32:
         dropoutForwardSymInt32(cfg, input, output);
         break;
-    default:
-        dropoutForwardBfp(cfg, input, output);
+    default: {
+        rngStream_t bridgeStorage;
+        dropoutForwardBfp(
+            cfg, input, output,
+            layerExecPurposeStream(exec, RNG_TAG_FORWARD, RNG_TAG_DROPOUT_BRIDGE, &bridgeStorage));
         break;
+    }
     }
 }
 
@@ -404,7 +415,10 @@ void dropoutBackward(layer_t *dropoutLayer, tensor_t *forwardInput, tensor_t *lo
         requireBfpPairForArm(loss, propLoss, "Dropout backward (loss)",
                              "Dropout backward (propLoss)",
                              "Dropout backward BFP (loss -> propLoss)");
-        dropoutBackwardBfp(cfg, loss, propLoss);
+        rngStream_t bridgeStorage;
+        dropoutBackwardBfp(
+            cfg, loss, propLoss,
+            layerExecPurposeStream(exec, RNG_TAG_BACKWARD, RNG_TAG_DROPOUT_BRIDGE, &bridgeStorage));
         break;
     default:
         PRINT_ERROR("Dropout backward: quantization type not implemented");

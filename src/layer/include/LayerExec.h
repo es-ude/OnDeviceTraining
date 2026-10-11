@@ -25,4 +25,12 @@ const rngKey_t *layerExecPhaseKey(const layerExec_t *exec, uint32_t phaseTag, rn
 const rngKey_t *layerExecOpKey(const layerExec_t *exec, uint32_t phaseTag, uint32_t opIndex,
                                rngKey_t *storage);
 
+/* The stream of one draw site that does not go through the funnel (a Dropout
+ * mask, a requantizing convert, a loss gradient): NULL iff exec is NULL;
+ * otherwise *storage = rngOpen(rngFold(rngFold(exec->key, phaseTag, 0),
+ * purposeTag, 0)) and the result is storage. Open it once per call, before
+ * the loop that draws from it. */
+rngStream_t *layerExecPurposeStream(const layerExec_t *exec, uint32_t phaseTag, uint32_t purposeTag,
+                                    rngStream_t *storage);
+
 #endif

@@ -6,6 +6,7 @@
 
 #include "DeathTest.h"
 #include "Layer.h"
+#include "LayerExec.h"
 #include "LayerQuant.h"
 #include "QuantLayerApi.h"
 #include "Quantization.h"
@@ -324,6 +325,88 @@ void testQuantLayerInitOwningFreesAllAllocationsWithoutLeak(void) {
     TEST_PASS();
 }
 
+/* ---- the layer converts with its CONVERT stream ---- */
+
+/* Python, tags as numbers (FORWARD 4, BACKWARD 5, CONVERT 12):
+ *   uv run python -c "from examples._shared.keyed_rng import (fold, key_from_seed as kfs,
+ *   open_stream as o); k = kfs(0x1a7e); print([hex(o(fold(fold(k, p, 0), 12, 0)))
+ *   for p in (4, 5)])" */
+#define QL_EXEC_TEST_SEED 0x1a7eu
+
+static conversionFunction_t qlSavedCell;
+static size_t qlCellCalls;
+static bool qlCellHasStream;
+static uint32_t qlCellState;
+
+static void qlRecordingCell(tensor_t *in, tensor_t *out, rngStream_t *rs) {
+    qlCellCalls++;
+    qlCellHasStream = rs != NULL;
+    qlCellState = (rs != NULL) ? rs->state : 0u;
+    qlSavedCell(in, out, rs);
+}
+
+static void qlAssertConvertStream(uint32_t phaseTag, uint32_t pythonState) {
+    layerExec_t exec = {.key = rngKeyFromSeed(QL_EXEC_TEST_SEED)};
+    rngKey_t phase;
+    TEST_ASSERT_EQUAL_UINT32(1u, (uint32_t)qlCellCalls);
+    TEST_ASSERT_TRUE(qlCellHasStream);
+    rngKey_t convertKey = rngFold(*layerExecPhaseKey(&exec, phaseTag, &phase), RNG_TAG_CONVERT, 0u);
+    TEST_ASSERT_EQUAL_HEX32(rngOpen(convertKey).state, qlCellState);
+    TEST_ASSERT_EQUAL_HEX32(pythonState, qlCellState);
+}
+
+static void qlRunForward(const layerExec_t *exec) {
+    tensor_t *input = buildFloat2D(2, 2);
+    tensor_t *output = buildSym2D(2, 2);
+    layer_t qLayer = {.type = QUANTIZATION, .config = NULL};
+    qlSavedCell = conversionMatrix[FLOAT32][SYM_INT32];
+    conversionMatrix[FLOAT32][SYM_INT32] = qlRecordingCell;
+    qlCellCalls = 0;
+
+    quantizationForward(&qLayer, input, output, exec);
+
+    conversionMatrix[FLOAT32][SYM_INT32] = qlSavedCell;
+    freeTensor(output);
+    freeTensor(input);
+}
+
+/* FLOAT32 -> SYM_INT32 goes through [FLOAT32][SYM_INT32] with (FORWARD, CONVERT). */
+void testQuantizationForwardConvertsWithItsForwardConvertStream(void) {
+    layerExec_t exec = {.key = rngKeyFromSeed(QL_EXEC_TEST_SEED)};
+
+    qlRunForward(&exec);
+
+    qlAssertConvertStream(RNG_TAG_FORWARD, 0x1ccf7b1cu);
+}
+
+/* The backward requantizes the dy through the SYM_INT32 diagonal with
+ * (BACKWARD, CONVERT): forward and backward never share a stream. */
+void testQuantizationBackwardConvertsWithItsBackwardConvertStream(void) {
+    layerExec_t exec = {.key = rngKeyFromSeed(QL_EXEC_TEST_SEED)};
+    tensor_t *loss = buildSym2D(2, 2);
+    tensor_t *forwardInput = buildSym2D(2, 2);
+    tensor_t *propLoss = buildSym2D(2, 2);
+    layer_t qLayer = {.type = QUANTIZATION, .config = NULL};
+    qlSavedCell = conversionMatrix[SYM_INT32][SYM_INT32];
+    conversionMatrix[SYM_INT32][SYM_INT32] = qlRecordingCell;
+    qlCellCalls = 0;
+
+    quantizationBackward(&qLayer, forwardInput, loss, propLoss, &exec);
+
+    conversionMatrix[SYM_INT32][SYM_INT32] = qlSavedCell;
+    freeTensor(propLoss);
+    freeTensor(forwardInput);
+    freeTensor(loss);
+    qlAssertConvertStream(RNG_TAG_BACKWARD, 0x143ac223u);
+}
+
+void testQuantizationForwardWithoutAContextConvertsWithoutAStream(void) {
+    qlRunForward(NULL);
+
+    TEST_ASSERT_EQUAL_UINT32(1u, (uint32_t)qlCellCalls);
+    TEST_ASSERT_FALSE(qlCellHasStream);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testQuantizationForwardSymToSymMatchesDirectRequant);
@@ -337,5 +420,8 @@ int main(void) {
     RUN_TEST(testQuantLayerInitBorrowingStoresQuantPointersVerbatim);
     RUN_TEST(testQuantLayerInitOwningDeepCopiesQuantizations);
     RUN_TEST(testQuantLayerInitOwningFreesAllAllocationsWithoutLeak);
+    RUN_TEST(testQuantizationForwardConvertsWithItsForwardConvertStream);
+    RUN_TEST(testQuantizationBackwardConvertsWithItsBackwardConvertStream);
+    RUN_TEST(testQuantizationForwardWithoutAContextConvertsWithoutAStream);
     return UNITY_END();
 }

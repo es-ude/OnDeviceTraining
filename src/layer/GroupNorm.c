@@ -842,6 +842,9 @@ static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardI
      * (no dx write, no propLoss scale refresh; stats/absmax bookkeeping in
      * pass A above already ran unconditionally). */
     if (propLoss != NULL) {
+        rngStream_t dxStorage;
+        rngStream_t *dxStream =
+            layerExecPurposeStream(exec, RNG_TAG_BACKWARD, RNG_TAG_NORM_DX, &dxStorage);
         /* One-time config-derived range constants — orchestration (see forward). */
         const float qHalfRange = powf(2, (float)(plQC->qMaxBits - 1));
         const float qMax = subFloat32s(qHalfRange, 1.0f);
@@ -891,7 +894,7 @@ static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardI
                     float dxv = mulFloat32s(invSigma[k], subFloat32s(subFloat32s(dn, meanDn),
                                                                      mulFloat32s(nval, meanDnN)));
                     dxq[off] = roundByMode(clamp(divFloat32s(dxv, dxScale), qMin, qMax),
-                                           plQC->roundingMode, NULL);
+                                           plQC->roundingMode, dxStream);
                 }
             }
         }

@@ -6,6 +6,8 @@ target_link_libraries(CrossEntropy PRIVATE
         Log
         Common
         CommonLayerLibs
+        LayerExec
+        RNG
 )
 
 add_library(LossFunction
@@ -29,4 +31,6 @@ target_link_libraries(MSE PRIVATE
         Square
         Sub
         Common
+        LayerExec
+        RNG
 )

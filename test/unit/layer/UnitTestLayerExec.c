@@ -96,6 +96,50 @@ void testLayerExecOpKeyIsNullWithoutAContext(void) {
     assertKey(0xdeadbeefu, 0xdeadbeefu, storage);
 }
 
+/* A purpose stream is the stream of the phase key folded with (purpose, 0).
+ * Python, tags as numbers (FORWARD 4, BACKWARD 5, CONVERT 12, DROPOUT_MASK 13,
+ * DROPOUT_BRIDGE 14, SOFTMAX_SHIFT 15, NORM_DX 16, LOSS 17):
+ *   uv run python -c "from examples._shared.keyed_rng import (fold, key_from_seed as kfs,
+ *   open_stream as o); k = kfs(0x1a7e); print([hex(o(fold(fold(k, p, 0), t, 0))) for (p, t) in
+ *   ((4, 12), (5, 12), (4, 13), (4, 14), (5, 14), (4, 15), (5, 16), (5, 17))])" */
+void testLayerExecPurposeStreamOpensThePhaseKeyFoldedWithThePurpose(void) {
+    static const struct {
+        uint32_t phase;
+        uint32_t purpose;
+        uint32_t pythonState;
+    } cases[] = {
+        {RNG_TAG_FORWARD, RNG_TAG_CONVERT, 0x1ccf7b1cu},
+        {RNG_TAG_BACKWARD, RNG_TAG_CONVERT, 0x143ac223u},
+        {RNG_TAG_FORWARD, RNG_TAG_DROPOUT_MASK, 0x86a64e58u},
+        {RNG_TAG_FORWARD, RNG_TAG_DROPOUT_BRIDGE, 0x25c63c10u},
+        {RNG_TAG_BACKWARD, RNG_TAG_DROPOUT_BRIDGE, 0xa9448e71u},
+        {RNG_TAG_FORWARD, RNG_TAG_SOFTMAX_SHIFT, 0xdfc1f67cu},
+        {RNG_TAG_BACKWARD, RNG_TAG_NORM_DX, 0x8683620bu},
+        {RNG_TAG_BACKWARD, RNG_TAG_LOSS, 0x7114be1fu},
+    };
+    layerExec_t exec = {.key = rngKeyFromSeed(LAYER_EXEC_TEST_SEED)};
+    for (size_t c = 0; c < sizeof cases / sizeof cases[0]; c++) {
+        rngKey_t phase;
+        rngStream_t storage;
+
+        rngStream_t *stream =
+            layerExecPurposeStream(&exec, cases[c].phase, cases[c].purpose, &storage);
+
+        TEST_ASSERT_EQUAL_PTR(&storage, stream);
+        rngKey_t purposeKey =
+            rngFold(*layerExecPhaseKey(&exec, cases[c].phase, &phase), cases[c].purpose, 0u);
+        TEST_ASSERT_EQUAL_HEX32(rngOpen(purposeKey).state, storage.state);
+        TEST_ASSERT_EQUAL_HEX32(cases[c].pythonState, storage.state);
+    }
+}
+
+void testLayerExecPurposeStreamIsNullWithoutAContext(void) {
+    rngStream_t storage = {.state = 0xdeadbeefu};
+
+    TEST_ASSERT_NULL(layerExecPurposeStream(NULL, RNG_TAG_BACKWARD, RNG_TAG_LOSS, &storage));
+    TEST_ASSERT_EQUAL_HEX32(0xdeadbeefu, storage.state);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLayerExecPhaseKeyIsNullWithoutAContext);
@@ -103,5 +147,7 @@ int main(void) {
     RUN_TEST(testLayerExecPhaseKeyFoldsTheBackwardPhase);
     RUN_TEST(testLayerExecOpKeyFoldsThePhaseThenTheOpIndex);
     RUN_TEST(testLayerExecOpKeyIsNullWithoutAContext);
+    RUN_TEST(testLayerExecPurposeStreamOpensThePhaseKeyFoldedWithThePurpose);
+    RUN_TEST(testLayerExecPurposeStreamIsNullWithoutAContext);
     return UNITY_END();
 }

@@ -1,6 +1,7 @@
 #define SOURCE_FILE "UnitTestMSE"
 
 #include "DeathTest.h"
+#include "LayerExec.h"
 #include "MSE.h"
 #include "QuantizationApi.h"
 #include "Rounding.h"
@@ -494,6 +495,62 @@ void testComputeMeanScaleMseRejectsRank1View(void) {
 void setUp() {}
 void tearDown() {}
 
+/* ---- the loss gradient rounds with the loss's BACKWARD stream ---- */
+
+/* Python, tags as numbers (BACKWARD 5, LOSS 17):
+ *   uv run python -c "from examples._shared.keyed_rng import (fold, key_from_seed as kfs,
+ *   open_stream as o); print(hex(o(fold(fold(kfs(0x1a7e), 5, 0), 17, 0))))" */
+static conversionFunction_t mseSavedCell;
+static size_t mseCellCalls;
+static bool mseCellHasStream;
+static uint32_t mseCellState;
+
+static void mseRecordingCell(tensor_t *in, tensor_t *out, rngStream_t *rs) {
+    mseCellCalls++;
+    mseCellHasStream = rs != NULL;
+    mseCellState = (rs != NULL) ? rs->state : 0u;
+    mseSavedCell(in, out, rs);
+}
+
+static tensor_t *mseBuildSym1x3(void) {
+    size_t *dims = reserveMemory(2 * sizeof(size_t));
+    dims[0] = 1;
+    dims[1] = 3;
+    size_t *order = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 2, order);
+    return initTensor(shape, quantizationInitSymInt32(HALF_AWAY), NULL);
+}
+
+/* A SYM_INT32 model output takes the fake-quant backward: the raw grad is
+ * requantized into the SYM_INT32 result with (BACKWARD, LOSS) of the context
+ * the loss receives; the operand dequantizations go into FLOAT32 (another
+ * cell) and draw nothing. */
+void testMseBackwardRequantizesTheGradWithItsLossStream(void) {
+    layerExec_t exec = {.key = rngKeyFromSeed(0x1a7eu)};
+    rngKey_t phase;
+    tensor_t *output = mseBuildSym1x3();
+    tensor_t *label = mseBuildSym1x3();
+    tensor_t *result = mseBuildSym1x3();
+    mseSavedCell = conversionMatrix[FLOAT32][SYM_INT32];
+    conversionMatrix[FLOAT32][SYM_INT32] = mseRecordingCell;
+    mseCellCalls = 0;
+
+    mseLossBackward(output, label, result, &exec);
+
+    conversionMatrix[FLOAT32][SYM_INT32] = mseSavedCell;
+    freeTensor(result);
+    freeTensor(label);
+    freeTensor(output);
+    TEST_ASSERT_EQUAL_UINT32(1u, (uint32_t)mseCellCalls);
+    TEST_ASSERT_TRUE(mseCellHasStream);
+    rngKey_t lossKey =
+        rngFold(*layerExecPhaseKey(&exec, RNG_TAG_BACKWARD, &phase), RNG_TAG_LOSS, 0u);
+    TEST_ASSERT_EQUAL_HEX32(rngOpen(lossKey).state, mseCellState);
+    TEST_ASSERT_EQUAL_HEX32(0x7114be1fu, mseCellState);
+}
+
 int main(void) {
     UNITY_BEGIN();
 
@@ -521,6 +578,7 @@ int main(void) {
 
     RUN_TEST(testComputeMeanScaleMseRejectsEmptyBatch);
     RUN_TEST(testComputeMeanScaleMseRejectsRank1View);
+    RUN_TEST(testMseBackwardRequantizesTheGradWithItsLossStream);
 
     return UNITY_END();
 }

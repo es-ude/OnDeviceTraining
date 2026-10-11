@@ -22,7 +22,10 @@ typedef void (*bernoulliFillMaskFn_t)(tensor_t *mask, float probTrue, rngStream_
  *  can be restored after swapping. */
 void bernoulliFillMaskReference(tensor_t *mask, float probTrue, rngStream_t *rs);
 
-/*! Install a sampler implementation. Passing NULL restores the reference. */
+/*! Install a sampler implementation. Passing NULL restores the reference.
+ *  The slot is process-wide: install the sampler before training starts. An
+ *  installed sampler must be a pure function of its `rs`, `probTrue` and the
+ *  mask geometry, or a recomputed forward draws a different mask. */
 void bernoulliSetFillMaskFn(bernoulliFillMaskFn_t fn);
 
 /*! Returns the currently active sampler (for save/restore in tests). */

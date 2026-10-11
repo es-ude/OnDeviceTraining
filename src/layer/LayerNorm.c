@@ -777,6 +777,9 @@ static void layerNormBackwardSymInt32(layerNormConfig_t *cfg, tensor_t *forwardI
      * (no dx write, no propLoss scale refresh; stats/absmax bookkeeping in
      * pass A above already ran unconditionally). */
     if (propLoss != NULL) {
+        rngStream_t dxStorage;
+        rngStream_t *dxStream =
+            layerExecPurposeStream(exec, RNG_TAG_BACKWARD, RNG_TAG_NORM_DX, &dxStorage);
         const float qMax = powf(2, (float)plQC->qMaxBits - 1) - 1;
         const float qMin = -powf(2, (float)plQC->qMaxBits - 1);
 
@@ -819,7 +822,7 @@ static void layerNormBackwardSymInt32(layerNormConfig_t *cfg, tensor_t *forwardI
                 float dxv = invSigma[g] * (dn - meanDn - nval * meanDnN);
                 size_t dxoff = layerNormPhysOffset(propLoss, cfg->numNormDims, g, j);
                 dxq[dxoff] =
-                    roundByMode(clamp(dxv / dxScale, qMin, qMax), plQC->roundingMode, NULL);
+                    roundByMode(clamp(dxv / dxScale, qMin, qMax), plQC->roundingMode, dxStream);
             }
         }
         plQC->scale = dxScale;

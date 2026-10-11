@@ -15,6 +15,8 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         CrossEntropy
         MORE_LIBS
+        LayerExec
+        RNG
         CommonLayerLibs
         odt_test_death
         Log
@@ -34,6 +36,8 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         MSE
         MORE_LIBS
+        LayerExec
+        RNG
         CommonLayerLibs
         odt_test_death
         TensorApi

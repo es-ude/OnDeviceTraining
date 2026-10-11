@@ -5,6 +5,7 @@
 
 #include "Common.h"
 #include "ExecuteOp.h"
+#include "LayerExec.h"
 #include "QuantizationLayer.h"
 
 /* The Quantization layer is a pure conversion node (#266): no arithmetic, no
@@ -13,7 +14,7 @@
  * the sanctioned requant, BFP the sanctioned re-block/width-change point).
  * Any other same-dtype pair stays a config error: a Quantization layer that
  * neither changes dtype nor requantizes is a misconfigured no-op. */
-static void dispatchQuantization(tensor_t *input, tensor_t *output) {
+static void dispatchQuantization(tensor_t *input, tensor_t *output, rngStream_t *convert) {
     qtype_t inputDType = input->quantization->type;
     qtype_t outputDType = output->quantization->type;
 
@@ -24,7 +25,7 @@ static void dispatchQuantization(tensor_t *input, tensor_t *output) {
                     (int)inputDType);
         exit(1);
     }
-    executeConvert(input, output, NULL);
+    executeConvert(input, output, convert);
 }
 
 void quantizationForward(layer_t *layer, tensor_t *inputTensor, tensor_t *outputTensor,
@@ -32,7 +33,10 @@ void quantizationForward(layer_t *layer, tensor_t *inputTensor, tensor_t *output
     (void)layer; /* dtype dispatch reads the tensors; config->quantization->outputQ
                   * already determined outputTensor's dtype when its header was
                   * derived (the remat wire table's bind / initBufferOutput). */
-    dispatchQuantization(inputTensor, outputTensor);
+    rngStream_t convertStorage;
+    dispatchQuantization(
+        inputTensor, outputTensor,
+        layerExecPurposeStream(exec, RNG_TAG_FORWARD, RNG_TAG_CONVERT, &convertStorage));
 }
 
 void quantizationBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss,
@@ -42,7 +46,10 @@ void quantizationBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss
                          * and backward requant map their own absmax exactly onto
                          * qMax, so neither pass saturates and no STE clipping mask
                          * is needed (#192 D3). */
-    dispatchQuantization(loss, propLoss);
+    rngStream_t convertStorage;
+    dispatchQuantization(
+        loss, propLoss,
+        layerExecPurposeStream(exec, RNG_TAG_BACKWARD, RNG_TAG_CONVERT, &convertStorage));
 }
 
 void quantizationCalcOutputShape(layer_t *layer, shape_t *inputShape, shape_t *outputShape) {

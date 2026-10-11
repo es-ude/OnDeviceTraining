@@ -123,7 +123,8 @@ static void softmaxForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, ten
  * the >>z inside bfpIExpQ) -- staging and the OUT_WRITE pack keep the normal
  * roundingMode_t machinery. Raw out is FLOAT32 (BFP D7). Task 5's backward
  * recompute path calls this helper verbatim. */
-static void softmaxValuesBfp(const tensor_t *input, bfpShiftRounding_t mode, float *sOut) {
+static void softmaxValuesBfp(const tensor_t *input, bfpShiftRounding_t mode, float *sOut,
+                             rngStream_t *shift) {
     /* n == 0 handled by caller. */
     const bfpQConfig_t *qC = input->quantization->qConfig;
     const int32_t bias = bfpExponentBias(qC);
@@ -158,14 +159,14 @@ static void softmaxValuesBfp(const tensor_t *input, bfpShiftRounding_t mode, flo
      * (ei > eMax) -- such elements take an EXACT saturating LEFT shift. */
     const int32_t sigma = eMax + BFP_SOFTMAX_EXP_FRAC_BITS;
     const uint32_t down = (sigma < 0) ? (uint32_t)(-sigma) : 0u;
-    const int32_t mMaxW = bfpShiftRightRounded(mMax, down, mode, NULL);
+    const int32_t mMaxW = bfpShiftRightRounded(mMax, down, mode, shift);
     float sum = 0.f;
     for (size_t i = 0; i < n; i++) {
         const int32_t ei = (int32_t)qC->exponents[bfpGroupOf(qC, i)] - bias;
         const int32_t si = (eMax - ei) + (int32_t)down;
         int32_t aligned;
         if (si >= 0) {
-            aligned = bfpShiftRightRounded(m[i], (uint32_t)si, mode, NULL);
+            aligned = bfpShiftRightRounded(m[i], (uint32_t)si, mode, shift);
         } else {
             const uint32_t up = (uint32_t)(-si);
             if (m[i] < 0 && (up >= 31u || m[i] < -(INT32_MAX >> up))) {
@@ -218,7 +219,7 @@ static void softmaxValuesBfp(const tensor_t *input, bfpShiftRounding_t mode, flo
         }
         /* (4) Integer core (lossy site 3 is the >>z inside); (5) float
          * boundary (P6-5): S_out = A * 2^-28, float sum in index order. */
-        const int32_t qe = bfpIExpQ(qW, mode, NULL);
+        const int32_t qe = bfpIExpQ(qW, mode, shift);
         const float e = ldexpf((float)qe * BFP_SOFTMAX_A, -28);
         sOut[i] = e;
         sum += e;
@@ -228,18 +229,27 @@ static void softmaxValuesBfp(const tensor_t *input, bfpShiftRounding_t mode, flo
     }
 }
 
+/* The BFP kernels' ctx: the layer config plus the stream of the shift sites
+ * in softmaxValuesBfp. Both phases hand the FORWARD key's shift stream, so the
+ * backward's recompute of s replays the forward's draws. */
+typedef struct {
+    const softmaxConfig_t *cfg;
+    rngStream_t *shift;
+} softmaxKernelCtx_t;
+
 static void softmaxForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                                     const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
-    const softmaxConfig_t *cfg = ctx;
+    const softmaxKernelCtx_t *kctx = ctx;
+    const softmaxConfig_t *cfg = kctx->cfg;
     tensor_t *input = ops[0];
     size_t count = calcNumberOfElementsByTensor(input);
     if (count == 0) {
         return;
     }
     validateBfpQConfigShape(input->quantization->qConfig, count);
-    softmaxValuesBfp(input, cfg->bfpExpShiftRounding, (float *)rawOut->data);
+    softmaxValuesBfp(input, cfg->bfpExpShiftRounding, (float *)rawOut->data, kctx->shift);
 }
 
 /* #152: the native BFP pipeline runs ONE max/alignment grid and
@@ -279,9 +289,14 @@ void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output,
                               .roundingMode = cfg->forwardMath.roundingMode,
                               .mantissaBits = anchor->mantissaBits,
                               .exponentBits = anchor->exponentBits};
+        rngStream_t shiftStorage;
+        softmaxKernelCtx_t kctx = {.cfg = cfg,
+                                   .shift = layerExecPurposeStream(exec, RNG_TAG_FORWARD,
+                                                                   RNG_TAG_SOFTMAX_SHIFT,
+                                                                   &shiftStorage)};
         executeOp(
             &(opSpec_t){.kernel = softmaxForwardKernelBfp,
-                        .ctx = cfg,
+                        .ctx = &kctx,
                         .inputs = (tensor_t *[]){input},
                         .nInputs = 1,
                         .arithmetic = cfg->forwardMath,
@@ -390,7 +405,8 @@ static void softmaxBackwardFloat(tensor_t *input, tensor_t *loss, tensor_t *prop
                    rows, rowLen);
 }
 
-static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *propLoss) {
+static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *propLoss,
+                                    rngStream_t *convert) {
     size_t rows;
     size_t rowLen;
     size_t inputSize = softmaxBackwardRequireWires(input, loss, propLoss, &rows, &rowLen);
@@ -424,7 +440,7 @@ static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *p
     softmaxVjpRows((const float *)inputFloat.data, (const float *)lossFloat.data,
                    (float *)propLossFloat.data, rows, rowLen);
 
-    convertTensor(&propLossFloat, propLoss, NULL);
+    convertTensor(&propLossFloat, propLoss, convert);
 }
 
 /* BFP epic PR6 Task 5 (P6-6): the native ARITH_BFP softmax backward -- ONE
@@ -444,7 +460,8 @@ static void softmaxBackwardKernelBfp(tensor_t **ops, size_t nOps, tensor_t *rawO
                                      tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)nOps;
     (void)auxOut;
-    const softmaxConfig_t *cfg = ctx;
+    const softmaxKernelCtx_t *kctx = ctx;
+    const softmaxConfig_t *cfg = kctx->cfg;
     tensor_t *x = ops[0];
     tensor_t *dLdsT = ops[1];
     size_t n = calcNumberOfElementsByTensor(x);
@@ -458,7 +475,7 @@ static void softmaxBackwardKernelBfp(tensor_t **ops, size_t nOps, tensor_t *rawO
                            "Softmax backward BFP (loss)");
 
     float s[n];
-    softmaxValuesBfp(x, cfg->bfpExpShiftRounding, s); /* P6-6: R-N4 recompute */
+    softmaxValuesBfp(x, cfg->bfpExpShiftRounding, s, kctx->shift); /* P6-6: R-N4 recompute */
 
     const int32_t lBias = bfpExponentBias(lQC);
     int32_t const *lArr = (int32_t const *)dLdsT->data;
@@ -494,7 +511,10 @@ void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, ten
         bfpRequireNoBfpWire(input, "Softmax backward (input)");
         bfpRequireNoBfpWire(loss, "Softmax backward (loss)");
         bfpRequireNoBfpWire(propLoss, "Softmax backward (propLoss)");
-        softmaxBackwardSymInt32(input, loss, propLoss);
+        rngStream_t convertStorage;
+        softmaxBackwardSymInt32(
+            input, loss, propLoss,
+            layerExecPurposeStream(exec, RNG_TAG_BACKWARD, RNG_TAG_CONVERT, &convertStorage));
         break;
     case ARITH_BFP: {
         if (propLoss == NULL) {
@@ -502,15 +522,27 @@ void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, ten
         }
         softmaxBfpRequireSingleRow(input, "Softmax backward");
         const bfpQConfig_t *anchor = bfpWireAnchor(cfg->propLossQ, "Softmax backward");
+        /* Known deviation, kept on purpose: a FLOAT32-stored input is
+         * re-staged here with propLossMath's rounding and the BACKWARD op's
+         * stage stream, while the forward staged it with forwardMath's and the
+         * FORWARD op's. The recompute replays the forward's shift draws (the
+         * kctx below), but s matches the forward's only when both stagings
+         * agree: always for a BFP-stored input, and for a FLOAT32 one only
+         * when the two modes are the same deterministic mode. */
         bfpQConfig_t stage = {.exponents = NULL,
                               .numGroups = 1,
                               .groupSize = 0,
                               .roundingMode = cfg->propLossMath.roundingMode,
                               .mantissaBits = anchor->mantissaBits,
                               .exponentBits = anchor->exponentBits};
+        rngStream_t shiftStorage;
+        softmaxKernelCtx_t kctx = {.cfg = cfg,
+                                   .shift = layerExecPurposeStream(exec, RNG_TAG_FORWARD,
+                                                                   RNG_TAG_SOFTMAX_SHIFT,
+                                                                   &shiftStorage)};
         executeOp(
             &(opSpec_t){.kernel = softmaxBackwardKernelBfp,
-                        .ctx = cfg,
+                        .ctx = &kctx,
                         .inputs = (tensor_t *[]){input, loss},
                         .nInputs = 2,
                         .arithmetic = cfg->propLossMath,

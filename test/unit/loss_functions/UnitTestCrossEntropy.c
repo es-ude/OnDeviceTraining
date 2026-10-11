@@ -2,6 +2,7 @@
 
 #include "CrossEntropy.h"
 #include "DeathTest.h"
+#include "LayerExec.h"
 #include "LayerQuant.h"
 #include "QuantizationApi.h"
 #include "Softmax.h"
@@ -676,6 +677,62 @@ void testCrossEntropyForward_InfiniteSoftmaxReturnsNanInsteadOfAborting(void) {
 void setUp() {}
 void tearDown() {}
 
+/* ---- the loss gradient rounds with the loss's BACKWARD stream ---- */
+
+/* Python, tags as numbers (BACKWARD 5, LOSS 17):
+ *   uv run python -c "from examples._shared.keyed_rng import (fold, key_from_seed as kfs,
+ *   open_stream as o); print(hex(o(fold(fold(kfs(0x1a7e), 5, 0), 17, 0))))" */
+static conversionFunction_t ceSavedCell;
+static size_t ceCellCalls;
+static bool ceCellHasStream;
+static uint32_t ceCellState;
+
+static void ceRecordingCell(tensor_t *in, tensor_t *out, rngStream_t *rs) {
+    ceCellCalls++;
+    ceCellHasStream = rs != NULL;
+    ceCellState = (rs != NULL) ? rs->state : 0u;
+    ceSavedCell(in, out, rs);
+}
+
+static tensor_t *ceBuildSym1x3(void) {
+    size_t *dims = reserveMemory(2 * sizeof(size_t));
+    dims[0] = 1;
+    dims[1] = 3;
+    size_t *order = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 2, order);
+    return initTensor(shape, quantizationInitSymInt32(HALF_AWAY), NULL);
+}
+
+/* A SYM_INT32 softmax output takes the fake-quant backward: the raw (p - y)
+ * is requantized into the SYM_INT32 grad with (BACKWARD, LOSS) of the context
+ * the loss receives; the operand dequantizations go into FLOAT32 (another
+ * cell) and draw nothing. */
+void testCrossEntropyBackwardRequantizesTheGradWithItsLossStream(void) {
+    layerExec_t exec = {.key = rngKeyFromSeed(0x1a7eu)};
+    rngKey_t phase;
+    tensor_t *output = ceBuildSym1x3();
+    tensor_t *label = ceBuildSym1x3();
+    tensor_t *result = ceBuildSym1x3();
+    ceSavedCell = conversionMatrix[FLOAT32][SYM_INT32];
+    conversionMatrix[FLOAT32][SYM_INT32] = ceRecordingCell;
+    ceCellCalls = 0;
+
+    crossEntropySoftmaxBackward(output, label, result, &exec);
+
+    conversionMatrix[FLOAT32][SYM_INT32] = ceSavedCell;
+    freeTensor(result);
+    freeTensor(label);
+    freeTensor(output);
+    TEST_ASSERT_EQUAL_UINT32(1u, (uint32_t)ceCellCalls);
+    TEST_ASSERT_TRUE(ceCellHasStream);
+    rngKey_t lossKey =
+        rngFold(*layerExecPhaseKey(&exec, RNG_TAG_BACKWARD, &phase), RNG_TAG_LOSS, 0u);
+    TEST_ASSERT_EQUAL_HEX32(rngOpen(lossKey).state, ceCellState);
+    TEST_ASSERT_EQUAL_HEX32(0x7114be1fu, ceCellState);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(unitTestCrossEntropySoftmaxBackward);
@@ -699,5 +756,6 @@ int main() {
     RUN_TEST(testCrossEntropySoftmaxBackwardRejectsDistributionRankMismatch);
     RUN_TEST(testCrossEntropyForward_NonFiniteSoftmaxReturnsNanInsteadOfAborting);
     RUN_TEST(testCrossEntropyForward_InfiniteSoftmaxReturnsNanInsteadOfAborting);
+    RUN_TEST(testCrossEntropyBackwardRequantizesTheGradWithItsLossStream);
     return UNITY_END();
 }

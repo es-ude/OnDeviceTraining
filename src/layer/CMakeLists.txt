@@ -99,6 +99,8 @@ target_link_libraries(Dropout PRIVATE
         Common
         Bernoulli
         Rounding
+        LayerExec
+        RNG
         m
 )
 
@@ -223,6 +225,8 @@ target_link_libraries(QuantizationLayer PRIVATE
         Rounding
         Tensor
         ExecuteOp
+        LayerExec
+        RNG
 )
 
 add_library(Relu Relu.c)

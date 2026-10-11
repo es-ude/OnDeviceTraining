@@ -4,6 +4,7 @@
 
 #include "Common.h"
 #include "CrossEntropy.h"
+#include "LayerExec.h"
 #include "Log.h"
 #include "LossFunctionInternal.h"
 #include "TensorConversion.h"
@@ -116,9 +117,9 @@ static void crossEntropySoftmaxBackwardFloat(tensor_t *softmaxOutput, tensor_t *
  * convertTensor, so the same body serves ASYM (its original home) and
  * SYM_INT32 (#206). The final convertTensor requantizes the raw (p-y) into
  * the result's own quantized config (fresh absmax scale for SYM — dynamic
- * activation scaling, like every quantized wire producer). */
+ * activation scaling, like every quantized wire producer), drawing from rs. */
 static void crossEntropySoftmaxBackwardFakeQuant(tensor_t *softmaxOutput, tensor_t *distribution,
-                                                 tensor_t *loss) {
+                                                 tensor_t *loss, rngStream_t *rs) {
     size_t inputSize = calcNumberOfElementsByTensor(softmaxOutput);
 
     tensor_t softmaxOutputFloat;
@@ -154,7 +155,7 @@ static void crossEntropySoftmaxBackwardFakeQuant(tensor_t *softmaxOutput, tensor
         lossFloatArr[i] = softmaxOutputFloatArr[i] - distributionFloatArr[i];
     }
 
-    convertTensor(&lossFloat, loss, NULL);
+    convertTensor(&lossFloat, loss, rs);
 }
 
 // IMPORTANT: This implementation already takes the softmax backward into account
@@ -164,6 +165,7 @@ void crossEntropySoftmaxBackward(tensor_t *softmaxOutput, tensor_t *distribution
                                 "crossEntropySoftmaxBackward");
     requireOperandMatchesOutput(softmaxOutput, loss, "loss (grad wire)",
                                 "crossEntropySoftmaxBackward");
+    rngStream_t lossStorage;
     switch (softmaxOutput->quantization->type) {
     case FLOAT32:
         crossEntropySoftmaxBackwardFloat(softmaxOutput, distribution, loss);
@@ -171,7 +173,9 @@ void crossEntropySoftmaxBackward(tensor_t *softmaxOutput, tensor_t *distribution
     case SYM_INT32:
     case ASYM:
     case BFP:
-        crossEntropySoftmaxBackwardFakeQuant(softmaxOutput, distribution, loss);
+        crossEntropySoftmaxBackwardFakeQuant(
+            softmaxOutput, distribution, loss,
+            layerExecPurposeStream(exec, RNG_TAG_BACKWARD, RNG_TAG_LOSS, &lossStorage));
         break;
     default:
         PRINT_ERROR("crossEntropySoftmaxBackward: model-output dtype %d not supported "

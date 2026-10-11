@@ -352,6 +352,7 @@ add_elastic_ai_unit_test(
         CommonLayerLibs
         Bernoulli
         RNG
+        LayerExec
         TensorApi
         QuantizationApi
         LayerQuant
@@ -506,6 +507,8 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         QuantizationLayer
         MORE_LIBS
+        LayerExec
+        RNG
         CommonLayerLibs
         TensorApi
         TensorConversion

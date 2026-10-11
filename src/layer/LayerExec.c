@@ -21,3 +21,13 @@ const rngKey_t *layerExecOpKey(const layerExec_t *exec, uint32_t phaseTag, uint3
     *storage = rngFold(phase, RNG_TAG_OP, opIndex);
     return storage;
 }
+
+rngStream_t *layerExecPurposeStream(const layerExec_t *exec, uint32_t phaseTag, uint32_t purposeTag,
+                                    rngStream_t *storage) {
+    rngKey_t phase;
+    if (layerExecPhaseKey(exec, phaseTag, &phase) == NULL) {
+        return NULL;
+    }
+    *storage = rngOpen(rngFold(phase, purposeTag, 0u));
+    return storage;
+}

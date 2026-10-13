@@ -879,6 +879,69 @@ void testScaleOptimizerGradientsRejectsGroupedSymGrad(void) {
     });
 }
 
+#define SR_SCALE_ELEMENTS 16
+
+/* A FLOAT32 param with a per-tensor 6-bit BFP grad that rounds SR: a 0.3
+ * scale leaves most codes between two grid points. */
+static parameter_t *buildSrBfpGradParam(void) {
+    size_t *dims = reserveMemory(sizeof(size_t));
+    dims[0] = SR_SCALE_ELEMENTS;
+    size_t *order = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    tensor_t *param = initTensor(shape, quantizationInitFloat(), NULL);
+    float zeros[SR_SCALE_ELEMENTS] = {0.f};
+    tensorFillFromFloatBuffer(param, zeros, SR_SCALE_ELEMENTS);
+
+    quantization_t *gradQ = quantizationInitBfp(6, 8, HALF_AWAY);
+    tensor_t *grad = gradInit(param, gradQ, NULL);
+    freeQuantization(gradQ);
+    float values[SR_SCALE_ELEMENTS];
+    for (size_t i = 0; i < SR_SCALE_ELEMENTS; i++) {
+        values[i] = (i % 2 == 0) ? (float)(i + 1) : -(float)(i + 1);
+    }
+    tensorFillFromFloatBuffer(grad, values, SR_SCALE_ELEMENTS);
+    ((bfpQConfig_t *)grad->quantization->qConfig)->roundingMode = SR_HALF_AWAY;
+    return parameterInit(param, grad);
+}
+
+/* Mean-scale two params with equal SR BFP grads under updateKey;
+ * out[p] = param p's grad after the scale. */
+static void scaleTwoSrBfpGrads(const rngKey_t *updateKey, float out[2][SR_SCALE_ELEMENTS]) {
+    parameter_t *params[2] = {buildSrBfpGradParam(), buildSrBfpGradParam()};
+    optimizer_t optim = {.type = SGD_M, .parameter = params, .sizeStates = 2};
+
+    scaleOptimizerGradients(&optim, 0.3f, updateKey);
+
+    for (size_t p = 0; p < 2; p++) {
+        dequantGradToFloat(params[p]->grad, out[p], SR_SCALE_ELEMENTS);
+        freeParameter(params[p]);
+    }
+}
+
+/* The mean-scale draws are a function of the update key and the parameter
+ * index only: the same key repeats them, another key or another parameter
+ * index draws others. */
+void testMeanScaleOfAnSrBfpGradIsAPureFunctionOfTheUpdateKeyAndTheParam(void) {
+    const rngKey_t updateKey = rngKeyFromSeed(0x5ca1eu);
+    const rngKey_t otherKey = rngKeyFromSeed(0x5ca1fu);
+    float first[2][SR_SCALE_ELEMENTS];
+    float again[2][SR_SCALE_ELEMENTS];
+    float other[2][SR_SCALE_ELEMENTS];
+
+    scaleTwoSrBfpGrads(&updateKey, first);
+    scaleTwoSrBfpGrads(&updateKey, again);
+    scaleTwoSrBfpGrads(&otherKey, other);
+
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(first, again, sizeof(first),
+                                     "the same key repeats both scaled grads");
+    TEST_ASSERT_FALSE_MESSAGE(memcmp(first[0], other[0], sizeof(first[0])) == 0,
+                              "another update key scales param 0 otherwise");
+    TEST_ASSERT_FALSE_MESSAGE(memcmp(first[0], first[1], sizeof(first[0])) == 0,
+                              "two equal grads under one key scale otherwise");
+}
+
 #if SIZE_MAX > UINT32_MAX
 static void scalePastUint32MaxParams(void) {
     const rngKey_t updateKey = rngKeyFromSeed(1u);
@@ -893,6 +956,19 @@ void testScaleOptimizerGradientsExitsWhenAParameterIndexExceedsUint32Max(void) {
                              scalePastUint32MaxParams());
 }
 #endif
+
+/* A mean-scale over no parameters (every layer frozen) under an update key:
+ * there is no parameter index to check, so the check must not wrap
+ * sizeStates - 1. */
+static void scaleNoParametersUnderAKey(void) {
+    const rngKey_t updateKey = rngKeyFromSeed(1u);
+    optimizer_t optim = {.type = SGD_M, .sizeStates = 0};
+    scaleOptimizerGradients(&optim, 0.5f, &updateKey);
+}
+
+void testScaleOptimizerGradientsOverNoParametersUnderAKeyDoesNotExit(void) {
+    ASSERT_EXITS_WITH_OUTPUT(0, "", scaleNoParametersUnderAKey());
+}
 
 int main(void) {
     UNITY_BEGIN();
@@ -910,8 +986,10 @@ int main(void) {
     RUN_TEST(testScaleOptimizerGradients_Bfp_NonFiniteFactorAborts);
     RUN_TEST(testScaleOptimizerGradientsWithoutAnUpdateKeyExitsOnAnSrBfpGrad);
     RUN_TEST(testScaleOptimizerGradientsRejectsGroupedSymGrad);
+    RUN_TEST(testMeanScaleOfAnSrBfpGradIsAPureFunctionOfTheUpdateKeyAndTheParam);
 #if SIZE_MAX > UINT32_MAX
     RUN_TEST(testScaleOptimizerGradientsExitsWhenAParameterIndexExceedsUint32Max);
 #endif
+    RUN_TEST(testScaleOptimizerGradientsOverNoParametersUnderAKeyDoesNotExit);
     return UNITY_END();
 }

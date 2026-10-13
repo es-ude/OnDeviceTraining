@@ -3,9 +3,11 @@
 
 #include "ArithmeticType.h"
 #include "DeathTest.h"
+#include "LayerExec.h"
 #include "LayerQuant.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "Softmax.h"
 #include "SoftmaxApi.h"
 #include "StorageApi.h"
@@ -1061,6 +1063,59 @@ void unitTestSoftmaxForwardBfpNativeHalfAway(void) {
     TEST_ASSERT_EQUAL_UINT8_ARRAY(kSmBfpOutExponentsHalfAway, gotExps, 2);
 }
 
+static void decodeSmWire(tensor_t *t, float out[8]) {
+    tensor_t view;
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    uint8_t bytes[8 * sizeof(float)];
+    setTensorValuesForConversion(bytes, &floatQ, t, &view);
+    convertTensor(t, &view, NULL);
+    memcpy(out, view.data, sizeof(bytes));
+}
+
+/* The backward recomputes s from the BFP-stored x with the forward's shift
+ * draws (its FORWARD-phase SOFTMAX_SHIFT stream), so under SR shifts its dx is
+ * s * (dL - <s, dL>) of the very s the forward produced. Both produced wires
+ * are per-tensor 16-bit BFP, fine enough to read s and dx back. */
+void testSoftmaxBfpBackwardRecomputesTheForwardsSoftmaxUnderSrShifts(void) {
+    const int32_t zeros[8] = {0};
+    const int32_t lossCodes[8] = {1200, -800, 300, 2500, -1700, 900, -400, 1500};
+    tensor_t *in = buildSmBfpAInput();
+    tensor_t *out = buildSmBfpWireWithCodes(8, 16, 8, 1, 0, zeros, (uint8_t[]){127});
+    tensor_t *loss = buildSmBfpWireWithCodes(8, 16, 8, 1, 0, lossCodes, (uint8_t[]){115});
+    tensor_t *propLoss = buildSmBfpWireWithCodes(8, 16, 8, 1, 0, zeros, (uint8_t[]){127});
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, out->quantization);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+    softmaxSetBfpExpShiftRounding(softmaxLayer, BFP_SHIFT_SR);
+    const layerExec_t exec = {.key = rngKeyFromSeed(0x5f7au)};
+
+    layerFunctions[SOFTMAX].forward(softmaxLayer, in, out, &exec);
+    layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, propLoss, &exec);
+
+    float s[8];
+    float dL[8];
+    float dx[8];
+    decodeSmWire(out, s);
+    decodeSmWire(loss, dL);
+    decodeSmWire(propLoss, dx);
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(out);
+    freeTensor(in);
+
+    float dot = 0.0f;
+    for (size_t i = 0; i < 8; i++) {
+        dot += s[i] * dL[i];
+    }
+    /* s and dx are read back through 16-bit grids (step 2^-16 at s = 0.51): 5e-5
+     * covers that read-back; s from other shift draws misses by up to 7e-4. */
+    for (size_t i = 0; i < 8; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(5e-5f, s[i] * (dL[i] - dot), dx[i]);
+    }
+}
+
 /* R-S2 step 2 (arithmetic-bfp.md §5.9): the coarse-negative-block regime. Block
  * A holds the SIGNED max (2.0 at E=-5); block B {-100, -80, +1.0, -50} is
  * negative-dominated, so its absmax-minimal grid (E=0) is legitimately
@@ -1620,6 +1675,7 @@ int main() {
 
     RUN_TEST(unitTestSoftmaxForwardBfpNativeTrunc);
     RUN_TEST(unitTestSoftmaxForwardBfpNativeHalfAway);
+    RUN_TEST(testSoftmaxBfpBackwardRecomputesTheForwardsSoftmaxUnderSrShifts);
     RUN_TEST(unitTestSoftmaxForwardBfpCoarseNegativeBlock);
     RUN_TEST(unitTestSoftmaxForwardBfpCoarseSaturation);
     RUN_TEST(unitTestSoftmaxForwardBfpStagedWidths);

@@ -1767,6 +1767,64 @@ void testLinearSrForwardWithoutAContextExits(void) {
                              linearSrForwardWithoutAContext());
 }
 
+#define LINEAR_PURITY_OUT 16
+
+/* One SR forward of a Linear(3 -> 16) into a fresh 8-bit SYM_INT32 output
+ * under the key of `seed`: every output element is rounded by its own draw. */
+static void linearSrForwardUnder(layer_t *layer, tensor_t *input, uint64_t seed,
+                                 int32_t codes[LINEAR_PURITY_OUT], float *scale) {
+    size_t *d = reserveMemory(2 * sizeof(size_t));
+    d[0] = 1;
+    d[1] = LINEAR_PURITY_OUT;
+    size_t *o = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, o);
+    shape_t *s = reserveMemory(sizeof(shape_t));
+    setShape(s, d, 2, o);
+    tensor_t *output = initTensor(s, quantizationInitSymInt32WithBits(HALF_AWAY, 8), NULL);
+    const layerExec_t exec = {.key = rngKeyFromSeed(seed)};
+
+    linearForward(layer, input, output, &exec);
+
+    memcpy(codes, output->data, LINEAR_PURITY_OUT * sizeof(int32_t));
+    *scale = ((symInt32QConfig_t *)output->quantization->qConfig)->scale;
+    freeTensor(output);
+}
+
+/* The same key gives the same codes and scale, whatever the global stream did
+ * in between; another key gives other codes. */
+void testLinearSrForwardIsAPureFunctionOfItsKey(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    lq.forwardMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = SR_HALF_AWAY};
+    layer_t *layer = linearLayerInitOwning(&(linearInit_t){.inFeatures = 3,
+                                                           .outFeatures = LINEAR_PURITY_OUT,
+                                                           .trainable = TRAINABLE_FALSE},
+                                           &lq);
+    freeQuantization(q);
+    tensor_t *input = e2eMakeInput((float[]){0.5f, -1.f, 2.f});
+    int32_t first[LINEAR_PURITY_OUT];
+    int32_t again[LINEAR_PURITY_OUT];
+    int32_t other[LINEAR_PURITY_OUT];
+    float firstScale;
+    float againScale;
+    float otherScale;
+
+    linearSrForwardUnder(layer, input, 0x1eafu, first, &firstScale);
+    (void)rngNextFloat();
+    linearSrForwardUnder(layer, input, 0x1eafu, again, &againScale);
+    linearSrForwardUnder(layer, input, 0x1eb0u, other, &otherScale);
+
+    freeTensor(input);
+    freeLinearLayer(layer);
+    TEST_ASSERT_EQUAL_INT32_ARRAY_MESSAGE(first, again, LINEAR_PURITY_OUT,
+                                          "the same key repeats the codes");
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(&firstScale, &againScale, sizeof(float),
+                                     "the same key repeats the scale");
+    TEST_ASSERT_FALSE_MESSAGE(memcmp(first, other, sizeof(first)) == 0,
+                              "another key rounds otherwise");
+}
+
 /* #380 PR2 Task 1: propLoss == NULL is a grads-only call -- weight/bias grads
  * must be computed exactly as with a real propLoss, and no dx memory may be
  * touched. Twin fixture (both TRAINABLE, hand-seeded, bit-identical) mirrors
@@ -3314,6 +3372,7 @@ int main(void) {
     RUN_TEST(testLinearBackwardDxOpDrawsFromItsBackwardOpKey);
     RUN_TEST(testLinearForwardWithoutAContextHandsTheFunnelNoStream);
     RUN_TEST(testLinearSrForwardWithoutAContextExits);
+    RUN_TEST(testLinearSrForwardIsAPureFunctionOfItsKey);
     RUN_TEST(testLinearBackwardNullPropLossComputesGradsOnly);
     RUN_TEST(testLinearForwardGroupedSymWeights);
     RUN_TEST(testLinearForwardGroupedFloatPathAgreesWithinTolerance);

@@ -557,8 +557,12 @@ checkpointing, limitations, literature).
   global one — PPCA/exemplar replay sampling. A keyed, order-independent core also
   exists (`rngKeyFromSeed`, `rngFold` = one Threefry-2x32-20 block per key-tree edge,
   `rngOpen` with `rngNextU32`/`rngNextUnitFloat`/`rngNextBounded` on a keyed xorshift32
-  state; mirrored in `examples/_shared/keyed_rng.py`); Dropout masks and every stochastic
-  rounding draw from it.
+  state; mirrored in `examples/_shared/keyed_rng.py`). Dropout masks and every stochastic
+  rounding (layer ops, conversions, the optimizer write-back and mean-scale, the BFP softmax
+  shift) draw from it: the trainer's `trainingRng_t` hands each training, evaluation and
+  update call its key, so a draw is a pure function of (seed, update or epoch, call, layer,
+  op) and does not depend on execution order or on other draws; a draw without a key stops
+  with a named error.
 - **Observer / trace** — `traceSink_t` callback facility (not a layer) that hands
   fwd/activation-grad/loss-grad/param tensors to a caller-supplied sink; used for
   layer-by-layer C-vs-PyTorch parity debugging (`npyDumpSink`, kws_raw harness).

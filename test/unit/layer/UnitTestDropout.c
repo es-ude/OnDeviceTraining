@@ -235,6 +235,94 @@ void testDropoutForwardWithoutAContextGivesTheSamplerNoStream(void) {
     TEST_ASSERT_FALSE(recordedMaskHasStream);
 }
 
+#define DROPOUT_PURITY_N 16
+#define DROPOUT_PURITY_BYTES 160
+
+static size_t appendBytes(uint8_t *out, size_t used, const void *src, size_t n) {
+    TEST_ASSERT_TRUE(used + n <= DROPOUT_PURITY_BYTES);
+    memcpy(out + used, src, n);
+    return used + n;
+}
+
+/* One training forward (p = 0.25, the reference sampler) under the key of
+ * `seed`; out = the output bytes, then (BFP) its exponents, then the mask.
+ * The BFP arm's output rounds SR: the bridge's 4/3 rescale leaves codes
+ * between two grid points. */
+static size_t dropoutTrainingForwardUnder(bool bfpSr, uint64_t seed,
+                                          uint8_t out[DROPOUT_PURITY_BYTES]) {
+    size_t dims[] = {1, DROPOUT_PURITY_N};
+    int32_t codes[DROPOUT_PURITY_N];
+    float values[DROPOUT_PURITY_N];
+    for (size_t i = 0; i < DROPOUT_PURITY_N; i++) {
+        codes[i] = (i % 2 == 0) ? (int32_t)(3 * i + 1) : -(int32_t)(3 * i + 1);
+        values[i] = (float)codes[i];
+    }
+    uint8_t exponents[2] = {127, 127};
+    tensor_t *input;
+    tensor_t *output;
+    quantization_t *fq;
+    quantization_t *bq;
+    if (bfpSr) {
+        input = buildBfpWireWithCodes(dims, 2, 8, 8, 2, 8, codes, exponents);
+        output = buildBfpWireWithCodes(dims, 2, 8, 8, 2, 8, NULL, exponents);
+        ((bfpQConfig_t *)output->quantization->qConfig)->roundingMode = SR_HALF_AWAY;
+        fq = quantizationInitBfpGrouped(8, 8, SR_HALF_AWAY, 2, 8);
+        bq = quantizationInitBfpGrouped(8, 8, SR_HALF_AWAY, 2, 8);
+    } else {
+        input = buildFloatTensor(DROPOUT_PURITY_N, values);
+        output = buildFloatTensor(DROPOUT_PURITY_N, NULL);
+        fq = quantizationInitFloat();
+        bq = quantizationInitFloat();
+    }
+    tensor_t *mask = buildBoolMask(DROPOUT_PURITY_N);
+    dropoutConfig_t dcfg;
+    initDropoutConfig(&dcfg, 0.25f, mask, fq, bq);
+    dcfg.training = true;
+    layerConfig_t lcfg;
+    layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
+    const layerExec_t exec = {.key = rngKeyFromSeed(seed)};
+
+    dropoutForward(&layer, input, output, &exec);
+
+    size_t used = appendBytes(out, 0, output->data, calcBytesPerTensor(output));
+    if (bfpSr) {
+        used =
+            appendBytes(out, used, ((bfpQConfig_t *)output->quantization->qConfig)->exponents, 2);
+    }
+    used = appendBytes(out, used, mask->data, calcBytesPerTensor(mask));
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeTensor(mask);
+    freeTensor(output);
+    freeTensor(input);
+    return used;
+}
+
+/* The same key gives the same output, exponents and mask, whatever the global
+ * stream did in between; another key gives another output. */
+static void assertDropoutTrainingForwardIsAPureFunctionOfItsKey(bool bfpSr) {
+    uint8_t first[DROPOUT_PURITY_BYTES];
+    uint8_t again[DROPOUT_PURITY_BYTES];
+    uint8_t other[DROPOUT_PURITY_BYTES];
+
+    size_t n = dropoutTrainingForwardUnder(bfpSr, 0xd0d0u, first);
+    (void)rngNextFloat();
+    size_t againBytes = dropoutTrainingForwardUnder(bfpSr, 0xd0d0u, again);
+    dropoutTrainingForwardUnder(bfpSr, 0xd0d1u, other);
+
+    TEST_ASSERT_EQUAL_size_t(n, againBytes);
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(first, again, n, "the same key repeats the forward");
+    TEST_ASSERT_FALSE_MESSAGE(memcmp(first, other, n) == 0, "another key draws another forward");
+}
+
+void testDropoutFloatTrainingForwardIsAPureFunctionOfItsKey(void) {
+    assertDropoutTrainingForwardIsAPureFunctionOfItsKey(false);
+}
+
+void testDropoutBfpSrTrainingForwardIsAPureFunctionOfItsKey(void) {
+    assertDropoutTrainingForwardIsAPureFunctionOfItsKey(true);
+}
+
 void testForwardTrainingFloatScalesAndDrops(void) {
     size_t n = 4;
     float in[] = {1.f, 2.f, 3.f, 4.f};
@@ -1027,6 +1115,8 @@ int main(void) {
     RUN_TEST(testForwardTrainingFloatScalesAndDrops);
     RUN_TEST(testDropoutForwardDrawsTheMaskFromItsMaskStream);
     RUN_TEST(testDropoutForwardWithoutAContextGivesTheSamplerNoStream);
+    RUN_TEST(testDropoutFloatTrainingForwardIsAPureFunctionOfItsKey);
+    RUN_TEST(testDropoutBfpSrTrainingForwardIsAPureFunctionOfItsKey);
     RUN_TEST(testForwardTrainingSymInt32ScaleFold);
     RUN_TEST(testBackwardFloatUsesMaskAndScale);
     RUN_TEST(testBackwardSymInt32UsesMaskAndScaleFold);

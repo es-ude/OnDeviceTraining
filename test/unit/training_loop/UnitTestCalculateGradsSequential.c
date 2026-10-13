@@ -1182,6 +1182,163 @@ void testCalculateGradsWithoutAKeyHandsNoLayerContext(void) {
     }
 }
 
+#define ORDER_HIDDEN 16
+#define ORDER_SEED 0x0dd5u
+
+typedef struct {
+    quantization_t *floatQ;
+    quantization_t *wireQ;
+    layer_t *model[2];
+    tensor_t *x;
+    tensor_t *label;
+} orderModel_t;
+
+static tensor_t *makeSymRow(size_t n) {
+    size_t *dims = reserveMemory(2 * sizeof(size_t));
+    dims[0] = 1;
+    dims[1] = n;
+    size_t *order = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 2, order);
+    return initTensor(shape, quantizationInitSymInt32WithBits(HALF_AWAY, 8), NULL);
+}
+
+/* Linear(3 -> 16) rounding its forward SR into an 8-bit SYM_INT32 wire, then
+ * Linear(16 -> 2) rounding its dx SR into the same kind of wire: one draw per
+ * element in layer 0's forward and in layer 1's backward. */
+static void buildOrderModel(orderModel_t *m) {
+    rngSetSeed(ORDER_SEED);
+    m->floatQ = quantizationInitFloat();
+    m->wireQ = quantizationInitSymInt32WithBits(HALF_AWAY, 8);
+    const arithmetic_t sr = {.type = ARITH_FLOAT32, .roundingMode = SR_HALF_AWAY};
+    layerQuant_t lq0;
+    layerQuantInitUniform(&lq0, m->floatQ);
+    lq0.forwardMath = sr;
+    lq0.outputQ = m->wireQ;
+    m->model[0] =
+        linearLayerInit(&(linearInit_t){.inFeatures = 3, .outFeatures = ORDER_HIDDEN}, &lq0);
+    layerQuant_t lq1;
+    layerQuantInitUniform(&lq1, m->floatQ);
+    lq1.propLossMath = sr;
+    lq1.propLossQ = m->wireQ;
+    m->model[1] =
+        linearLayerInit(&(linearInit_t){.inFeatures = ORDER_HIDDEN, .outFeatures = 2}, &lq1);
+    m->x = makeRowVecN((float[]){0.5f, -1.f, 2.f}, 3);
+    m->label = makeRowVec2(0.3f, -0.2f);
+}
+
+static void freeOrderModel(orderModel_t *m) {
+    freeTensor(m->label);
+    freeTensor(m->x);
+    freeLinearLayer(m->model[1]);
+    freeLinearLayer(m->model[0]);
+    freeQuantization(m->wireQ);
+    freeQuantization(m->floatQ);
+}
+
+#define ORDER_BYTES 512
+
+static size_t appendTensorBytes(uint8_t *out, size_t used, tensor_t *t) {
+    size_t n = calcBytesPerTensor(t);
+    TEST_ASSERT_TRUE(used + n <= ORDER_BYTES);
+    memcpy(out + used, t->data, n);
+    return used + n;
+}
+
+/* The loss, the output and every grad of one call. */
+static size_t captureCallResult(orderModel_t *m, trainingStats_t *stats, uint8_t *out) {
+    memcpy(out, &stats->loss, sizeof(float));
+    size_t used = appendTensorBytes(out, sizeof(float), stats->output);
+    for (size_t l = 0; l < 2; l++) {
+        linearConfig_t *cfg = m->model[l]->config->linear;
+        used = appendTensorBytes(out, used, getGradFromParameter(cfg->weights));
+        used = appendTensorBytes(out, used, getGradFromParameter(cfg->bias));
+    }
+    return used;
+}
+
+/* Copies of the wires a standalone run needs, plus an unrelated keyed draw and
+ * a global draw at every trace event. */
+typedef struct {
+    tensor_t *forward0; /* layer 0's output = layer 1's forward input */
+    tensor_t *gradIn1;  /* the loss grad entering layer 1's backward */
+    tensor_t *dx1;      /* layer 1's dx = agrad@0 */
+    rngStream_t unrelated;
+} orderCapture_t;
+
+static void interposingSink(void *ctx, size_t layerIdx, layerType_t type, const char *phase,
+                            tensor_t *t) {
+    (void)type;
+    orderCapture_t *c = ctx;
+    (void)rngNextUnitFloat(&c->unrelated);
+    (void)rngNextFloat();
+    if (layerIdx == 0 && strcmp(phase, "fwd") == 0) {
+        copyTensor(c->forward0, t);
+    } else if (layerIdx == 1 && strcmp(phase, "agrad") == 0) {
+        copyTensor(c->gradIn1, t);
+    } else if (layerIdx == 0 && strcmp(phase, "agrad") == 0) {
+        copyTensor(c->dx1, t);
+    }
+}
+
+static void assertSameSymWire(tensor_t *expected, tensor_t *actual, const char *what) {
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(expected->data, actual->data, calcBytesPerTensor(expected),
+                                     what);
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(&((symInt32QConfig_t *)expected->quantization->qConfig)->scale,
+                                     &((symInt32QConfig_t *)actual->quantization->qConfig)->scale,
+                                     sizeof(float), what);
+}
+
+/* Draws depend on the call key and the layer's index only: draws interposed
+ * between the steps change nothing, and layer 0's forward and layer 1's
+ * backward, each run standalone under its layer key, reproduce the in-call
+ * wires. */
+void testCalculateGradsIsIndependentOfDrawsAroundItsSteps(void) {
+    const rngKey_t callKey = rngKeyFromSeed(DRIVER_CALL_KEY_SEED);
+    uint8_t plain[ORDER_BYTES];
+    uint8_t interposed[ORDER_BYTES];
+
+    orderModel_t m;
+    buildOrderModel(&m);
+    trainingStats_t *stats =
+        calculateGradsSequential(m.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, m.x, m.label,
+                                 &(trainingCall_t){.key = &callKey});
+    size_t plainBytes = captureCallResult(&m, stats, plain);
+    freeTrainingStats(stats);
+    freeOrderModel(&m);
+
+    buildOrderModel(&m);
+    orderCapture_t cap = {.forward0 = makeSymRow(ORDER_HIDDEN),
+                          .gradIn1 = makeRowVec2(0.f, 0.f),
+                          .dx1 = makeSymRow(ORDER_HIDDEN),
+                          .unrelated = rngOpen(rngKeyFromSeed(0xfeedu))};
+    stats = tracedGrads(m.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, m.x, m.label,
+                        interposingSink, &cap, &(trainingCall_t){.key = &callKey});
+    size_t interposedBytes = captureCallResult(&m, stats, interposed);
+    freeTrainingStats(stats);
+
+    layerExec_t exStorage;
+    tensor_t *forward0 = makeSymRow(ORDER_HIDDEN);
+    layerFunctions[LINEAR].forward(m.model[0], m.x, forward0,
+                                   layerExecForLayer(&callKey, 0, &exStorage));
+    tensor_t *dx1 = makeSymRow(ORDER_HIDDEN);
+    layerFunctions[LINEAR].backward(m.model[1], cap.forward0, cap.gradIn1, dx1,
+                                    layerExecForLayer(&callKey, 1, &exStorage));
+
+    TEST_ASSERT_EQUAL_size_t(plainBytes, interposedBytes);
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(plain, interposed, plainBytes,
+                                     "draws around the steps must not move the call");
+    assertSameSymWire(cap.forward0, forward0, "layer 0's standalone forward");
+    assertSameSymWire(cap.dx1, dx1, "layer 1's standalone backward");
+    freeTensor(dx1);
+    freeTensor(forward0);
+    freeTensor(cap.dx1);
+    freeTensor(cap.gradIn1);
+    freeTensor(cap.forward0);
+    freeOrderModel(&m);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testCalculateGradsSequentialClosedForm);
@@ -1198,5 +1355,6 @@ int main(void) {
     RUN_TEST(testCalculateGradsFactoryMaxPoolGrowsToBatch2);
     RUN_TEST(testCalculateGradsHandsEachStepTheLayerKeyOfItsIndex);
     RUN_TEST(testCalculateGradsWithoutAKeyHandsNoLayerContext);
+    RUN_TEST(testCalculateGradsIsIndependentOfDrawsAroundItsSteps);
     return UNITY_END();
 }

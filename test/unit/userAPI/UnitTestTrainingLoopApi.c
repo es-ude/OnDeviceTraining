@@ -3673,6 +3673,94 @@ void testTrainingRunCountsTheEpochBeforeTheCallback(void) {
     TEST_ASSERT_EQUAL_UINT32(2u, g_callbackRngEpochs[1]);
 }
 
+#define SR_EVAL_HIDDEN 16
+
+/* Linear(2 -> 16) rounding its forward SR into an 8-bit SYM_INT32 wire, then
+ * Linear(16 -> 2), trained at lr 0 so every epoch evaluates the same weights. */
+typedef struct {
+    quantization_t testQ;
+    quantization_t *wireQ;
+    quantization_t *momentumQ;
+    layer_t *model[2];
+    optimizer_t *sgd;
+    dataLoader_t *trainDl;
+    dataLoader_t *evalDl;
+} srEvalFixture_t;
+
+static parameter_t *buildFloatParam(size_t d0, size_t d1, float step, float offset) {
+    float values[2 * SR_EVAL_HIDDEN];
+    for (size_t i = 0; i < d0 * d1; i++) {
+        values[i] = step * (float)((i * 7) % 13) + offset;
+    }
+    tensor_t *t = buildFloatTensor2D(d0, d1, values, d0 * d1);
+    return parameterInit(t, gradInitFloat(t, NULL));
+}
+
+static void buildSrEvalFixture(srEvalFixture_t *f) {
+    initFloat32Quantization(&f->testQ);
+    f->wireQ = quantizationInitSymInt32WithBits(HALF_AWAY, 8);
+    f->model[0] = buildBorrowedLinearLayer(buildFloatParam(SR_EVAL_HIDDEN, 2, 0.1f, -0.6f),
+                                           buildFloatParam(1, SR_EVAL_HIDDEN, 0.f, 0.f), &f->testQ);
+    f->model[0]->config->linear->forwardMath =
+        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = SR_HALF_AWAY};
+    f->model[0]->config->linear->outputQ = f->wireQ;
+    f->model[1] = buildBorrowedLinearLayer(buildFloatParam(2, SR_EVAL_HIDDEN, 0.05f, -0.3f),
+                                           buildFloatParam(1, 2, 0.f, 0.f), &f->testQ);
+    f->momentumQ = quantizationInitFloat();
+    f->sgd = sgdMCreateOptim(0.f, 0.f, 0.f, f->model, 2, f->momentumQ,
+                             (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    initEpochDataset();
+    f->trainDl = dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+    f->evalDl = dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+}
+
+static void freeSrEvalFixture(srEvalFixture_t *f) {
+    freeOptim(f->sgd);
+    freeQuantization(f->momentumQ);
+    freeDataLoader(f->evalDl);
+    freeDataLoader(f->trainDl);
+    freeLinearLayerShellOnly(f->model[1]);
+    freeLinearLayerShellOnly(f->model[0]);
+    freeQuantization(f->wireQ);
+    freeEpochDataset();
+}
+
+static float g_srEvalLosses[2];
+
+static void recordSrEvalLoss(epochInfo_t info, epochStats_t evalStats) {
+    g_srEvalLosses[info.epoch] = evalStats.loss;
+}
+
+/* Two epochs of trainingRun on the SR fixture; losses[e] = epoch e's evaluation. */
+static void runSrEvaluation(uint64_t seed, float losses[2]) {
+    srEvalFixture_t f;
+    buildSrEvalFixture(&f);
+    trainingRng_t rng;
+    trainingRngInit(&rng, seed);
+    (void)trainingRun(f.model, 2, defaultLossConfig(MSE), f.trainDl, f.evalDl, f.sgd, 2,
+                      calculateGradsSequential, inferenceWithLoss,
+                      &(trainingRunOptions_t){.callback = recordSrEvalLoss, .rng = &rng});
+    losses[0] = g_srEvalLosses[0];
+    losses[1] = g_srEvalLosses[1];
+    freeSrEvalFixture(&f);
+}
+
+/* The evaluation draws under the run's EVAL key of its epoch: one seed repeats
+ * every epoch's evaluation, and two epochs over the same weights evaluate
+ * under different keys. */
+void testTrainingRunEvaluatesEachEpochUnderItsOwnEvalKey(void) {
+    float first[2];
+    float again[2];
+
+    runSrEvaluation(KEYED_RUN_SEED, first);
+    runSrEvaluation(KEYED_RUN_SEED, again);
+
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(first, again, sizeof(first),
+                                     "one seed repeats every epoch's evaluation");
+    TEST_ASSERT_FALSE_MESSAGE(first[0] == first[1],
+                              "the two epochs evaluate the same weights under their own keys");
+}
+
 /* The epoch level reads only .rng: a .key on its own call never reaches a
  * training call. */
 void testTrainingEpochDoesNotHandItsOwnKeyDown(void) {
@@ -3748,6 +3836,35 @@ void testTrainingEpochStepsWithoutAKeyWithoutAnRng(void) {
     TEST_ASSERT_EQUAL_size_t(2, g_updateKeyCount);
     TEST_ASSERT_FALSE(g_updateKeys[0].hasKey);
     TEST_ASSERT_FALSE(g_updateKeys[1].hasKey);
+}
+
+/* A Linear whose forward rounds stochastically into a SYM_INT32 output,
+ * evaluated through the public batch entry point, which passes no call. */
+static void evaluateAnSrForwardWithoutAKey(void) {
+    tensor_t *wParam = buildFloatTensor2D(2, 3, (float[]){1.f, 1.f, 1.f, 1.f, 1.f, 1.f}, 6);
+    parameter_t *w = parameterInit(wParam, gradInitFloat(wParam, NULL));
+    tensor_t *bParam = buildFloatTensor2D(1, 2, (float[]){-1.f, 3.f}, 2);
+    parameter_t *b = parameterInit(bParam, gradInitFloat(bParam, NULL));
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    layer_t *linear = buildBorrowedLinearLayer(w, b, &floatQ);
+    linear->config->linear->forwardMath =
+        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = SR_HALF_AWAY};
+    linear->config->linear->outputQ = quantizationInitSymInt32WithBits(HALF_AWAY, 8);
+    layer_t *model[] = {linear};
+    sample_t *s = reserveMemory(sizeof(sample_t));
+    s->item = buildFloatTensor1D(3, (float[]){0.5f, 1.f, 2.f});
+    s->label = buildFloatTensor1D(2, (float[]){10.f, 20.f});
+    sample_t *samples[] = {s};
+    batch_t batch = {.samples = samples, .size = 1};
+    (void)evaluationBatch(model, 1, MSE, &batch, inferenceWithLoss, REDUCTION_MEAN);
+}
+
+/* No key, no randomness: the public evaluation entry points are key-less, so
+ * a model whose forward draws stops at its first draw. */
+void testEvaluationOfADrawingForwardWithoutAKeyExits(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "roundByMode: SR rounding without a stream",
+                             evaluateAnSrForwardWithoutAKey());
 }
 
 int main(void) {
@@ -3829,8 +3946,10 @@ int main(void) {
     RUN_TEST(testTrainingRunKeysEachEvaluationCallByItsPositionInTheEpoch);
     RUN_TEST(testTrainingRunNumbersStackedEvaluationCallsByChunk);
     RUN_TEST(testTrainingRunWithoutAnRngHandsNoKeys);
+    RUN_TEST(testTrainingRunEvaluatesEachEpochUnderItsOwnEvalKey);
     RUN_TEST(testTrainingEpochDoesNotHandItsOwnKeyDown);
     RUN_TEST(testTrainingEpochStepsEachUpdateUnderItsUpdateKey);
     RUN_TEST(testTrainingEpochStepsWithoutAKeyWithoutAnRng);
+    RUN_TEST(testEvaluationOfADrawingForwardWithoutAKeyExits);
     return UNITY_END();
 }

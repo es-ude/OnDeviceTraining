@@ -1778,6 +1778,244 @@ void testBfpGradStorageTrainsUnderReductionMean(void) {
                                      "grads are per-tensor-only (#300 axis)");
 }
 
+#define LOOP_PARITY_BYTES 256
+
+/* Appends a tensor's stored bytes: its data, then a BFP grid's exponents. */
+static size_t appendStoredBytes(uint8_t out[LOOP_PARITY_BYTES], size_t used, tensor_t *t) {
+    size_t n = calcBytesPerTensor(t);
+    TEST_ASSERT_TRUE(used + n <= LOOP_PARITY_BYTES);
+    memcpy(out + used, t->data, n);
+    used += n;
+    if (t->quantization->type == BFP) {
+        bfpQConfig_t *qc = t->quantization->qConfig;
+        TEST_ASSERT_TRUE(used + qc->numGroups <= LOOP_PARITY_BYTES);
+        memcpy(out + used, qc->exponents, qc->numGroups);
+        used += qc->numGroups;
+    }
+    return used;
+}
+
+/* Every parameter's stored bytes. */
+static size_t captureParamBytes(optimizer_t *optim, uint8_t out[LOOP_PARITY_BYTES]) {
+    size_t used = 0;
+    for (size_t p = 0; p < optim->sizeStates; p++) {
+        used = appendStoredBytes(out, used, optim->parameter[p]->param);
+    }
+    return used;
+}
+
+/* Every parameter's stored grad bytes. */
+static size_t captureGradBytes(optimizer_t *optim, uint8_t out[LOOP_PARITY_BYTES]) {
+    size_t used = 0;
+    for (size_t p = 0; p < optim->sizeStates; p++) {
+        used = appendStoredBytes(out, used, optim->parameter[p]->grad);
+    }
+    return used;
+}
+
+/* One update of the two-sample batch, keyed only through the training-state
+ * helpers: call j under CALL(j) of the step key, then the mean-scale and the
+ * step under the update key. */
+static void trainOneUpdateFromTheHelpers(bfpNativeFixture_t *f, trainingRng_t *rng) {
+    const rngKey_t stepKey = trainingRngStepKey(rng);
+    for (size_t j = 0; j < 2; j++) {
+        const rngKey_t callKey = trainingRngCallKey(stepKey, j);
+        batchView_t itemView;
+        batchView_t labelView;
+        freeTrainingStats(calculateGradsSequential(
+            f->model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
+            batchViewOf(&itemView, bfpMeanEpochItems[j]),
+            batchViewOf(&labelView, bfpMeanEpochLabels[j]), &(trainingCall_t){.key = &callKey}));
+    }
+    const rngKey_t updateKey = trainingRngUpdateKey(rng);
+    batchView_t labelRefView;
+    scaleOptimizerGradients(
+        f->sgd,
+        lossFunctions[MSE].computeMeanScale(2, batchViewOf(&labelRefView, bfpMeanEpochLabels[0])),
+        &updateKey);
+    optimizerStep(f->sgd, &updateKey);
+    trainingRngAdvance(rng);
+    optimizerFunctions[f->sgd->type].zero(f->sgd);
+}
+
+/* Two updates of the SR fixture (BFP forward wire, SR BFP grads, SR write-back)
+ * with the same seed into the training state. */
+static size_t trainTwoUpdates(bool throughTheEpochLoop, uint64_t seed, dataLoader_t *dl,
+                              uint8_t out[LOOP_PARITY_BYTES]) {
+    rngSetSeed(1717u);
+    quantization_t *gradKnob = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    bfpNativeFixture_t f;
+    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false, gradKnob);
+    freeQuantization(gradKnob);
+    trainingRng_t rng;
+    trainingRngInit(&rng, seed);
+    for (size_t u = 0; u < 2; u++) {
+        if (throughTheEpochLoop) {
+            trainingEpochDefault(f.model, 2, defaultLossConfig(MSE), dl, f.sgd,
+                                 calculateGradsSequential, REDUCTION_MEAN, 1,
+                                 &(trainingCall_t){.rng = &rng});
+        } else {
+            trainOneUpdateFromTheHelpers(&f, &rng);
+        }
+    }
+    size_t used = captureParamBytes(f.sgd, out);
+    freeBfpNativeFixture(&f);
+    return used;
+}
+
+/* A loop written from the training-state helpers trains exactly as
+ * trainingEpochDefault: two calls per update (batch size 2), two updates. */
+void testADirectLoopFromTheHelpersTrainsAsTrainingEpochDefault(void) {
+    bfpMeanEpochItems[0] = buildFloatTensor1D(3, (float[]){1.0f, 2.0f, 3.0f});
+    bfpMeanEpochLabels[0] = buildFloatTensor1D(2, (float[]){0.2f, -0.3f});
+    bfpMeanEpochItems[1] = buildFloatTensor1D(3, (float[]){0.5f, -1.0f, 2.0f});
+    bfpMeanEpochLabels[1] = buildFloatTensor1D(2, (float[]){-0.1f, 0.4f});
+    dataLoader_t *dl = dataLoaderInit(getBfpMeanEpochSample, getBfpMeanEpochDatasetSize, 2, NULL,
+                                      NULL, false, 0, true);
+    uint8_t viaEpoch[LOOP_PARITY_BYTES];
+    uint8_t direct[LOOP_PARITY_BYTES];
+    uint8_t otherSeed[LOOP_PARITY_BYTES];
+
+    size_t epochBytes = trainTwoUpdates(true, 0x7d7du, dl, viaEpoch);
+    size_t directBytes = trainTwoUpdates(false, 0x7d7du, dl, direct);
+    size_t otherBytes = trainTwoUpdates(false, 0x7d7eu, dl, otherSeed);
+
+    freeDataLoader(dl);
+    freeTensor(bfpMeanEpochLabels[1]);
+    freeTensor(bfpMeanEpochItems[1]);
+    freeTensor(bfpMeanEpochLabels[0]);
+    freeTensor(bfpMeanEpochItems[0]);
+
+    TEST_ASSERT_EQUAL_size_t(epochBytes, directBytes);
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(viaEpoch, direct, epochBytes,
+                                     "the helper loop must train as trainingEpochDefault");
+    TEST_ASSERT_EQUAL_size_t(epochBytes, otherBytes);
+    TEST_ASSERT_FALSE_MESSAGE(memcmp(direct, otherSeed, directBytes) == 0,
+                              "guard: another training seed must train otherwise (the fixture "
+                              "draws)");
+}
+
+#define SCALE_SAMPLES 3
+
+/* Three samples for the mean-scale check below: at batch size 3 the MSE mean
+ * scale is 1 / 6, not a power of two, so the SR BFP mean-scale leaves codes
+ * between grid points and its draws show in the scaled grad (at 1 / 4 every
+ * mantissa stays an integer, whatever the draws). */
+static tensor_t *bfpScaleItems[SCALE_SAMPLES];
+static tensor_t *bfpScaleLabels[SCALE_SAMPLES];
+
+static sample_t *getBfpScaleSample(size_t id) {
+    sample_t *s = reserveMemory(sizeof(sample_t));
+    s->item = bfpScaleItems[id];
+    s->label = bfpScaleLabels[id];
+    return s;
+}
+
+static size_t getBfpScaleDatasetSize(void) {
+    return SCALE_SAMPLES;
+}
+
+static stepFn_t g_savedScaleStep;
+static uint8_t g_epochScaledGrads[LOOP_PARITY_BYTES];
+static size_t g_epochScaledGradBytes;
+
+/* Records the grads as the epoch hands them to its step: after the mean-scale,
+ * before the write-back folds them into the parameters (where a learning rate
+ * of 0.002 hides a one-code difference). */
+static void gradRecordingStep(optimizer_t *optim, const rngKey_t *updateKey) {
+    g_epochScaledGradBytes = captureGradBytes(optim, g_epochScaledGrads);
+    g_savedScaleStep(optim, updateKey);
+}
+
+/* The SR fixture built fresh, with `seed` into the training state. */
+static void buildSrFixtureWithRng(bfpNativeFixture_t *f, trainingRng_t *rng, uint64_t seed) {
+    rngSetSeed(1717u);
+    quantization_t *gradKnob = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    buildBfpNativeFixture(f, /*pinWeightGradMath=*/false, gradKnob);
+    freeQuantization(gradKnob);
+    trainingRngInit(rng, seed);
+}
+
+/* One epoch (one update of the three-sample batch) through
+ * trainingEpochDefault; out = the grads its step received. */
+static size_t scaledGradsFromTheEpoch(uint64_t seed, dataLoader_t *dl,
+                                      uint8_t out[LOOP_PARITY_BYTES]) {
+    bfpNativeFixture_t f;
+    trainingRng_t rng;
+    buildSrFixtureWithRng(&f, &rng, seed);
+    g_savedScaleStep = optimizerFunctions[SGD_M].step;
+    optimizerFunctions[SGD_M].step = gradRecordingStep;
+    trainingEpochDefault(f.model, 2, defaultLossConfig(MSE), dl, f.sgd, calculateGradsSequential,
+                         REDUCTION_MEAN, 1, &(trainingCall_t){.rng = &rng});
+    optimizerFunctions[SGD_M].step = g_savedScaleStep;
+    freeBfpNativeFixture(&f);
+    memcpy(out, g_epochScaledGrads, g_epochScaledGradBytes);
+    return g_epochScaledGradBytes;
+}
+
+/* The same three calls under CALL(j) of the step key, then the mean-scale
+ * under the update key (or, for the guard, under the step key); out = the
+ * scaled grads. */
+static size_t scaledGradsFromTheHelpers(uint64_t seed, bool underTheUpdateKey,
+                                        uint8_t out[LOOP_PARITY_BYTES]) {
+    bfpNativeFixture_t f;
+    trainingRng_t rng;
+    buildSrFixtureWithRng(&f, &rng, seed);
+    const rngKey_t stepKey = trainingRngStepKey(&rng);
+    for (size_t j = 0; j < SCALE_SAMPLES; j++) {
+        const rngKey_t callKey = trainingRngCallKey(stepKey, j);
+        batchView_t itemView;
+        batchView_t labelView;
+        freeTrainingStats(calculateGradsSequential(
+            f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
+            batchViewOf(&itemView, bfpScaleItems[j]), batchViewOf(&labelView, bfpScaleLabels[j]),
+            &(trainingCall_t){.key = &callKey}));
+    }
+    const rngKey_t updateKey = trainingRngUpdateKey(&rng);
+    batchView_t labelRefView;
+    scaleOptimizerGradients(f.sgd,
+                            lossFunctions[MSE].computeMeanScale(
+                                SCALE_SAMPLES, batchViewOf(&labelRefView, bfpScaleLabels[0])),
+                            underTheUpdateKey ? &updateKey : &stepKey);
+    size_t used = captureGradBytes(f.sgd, out);
+    freeBfpNativeFixture(&f);
+    return used;
+}
+
+/* The epoch mean-scales under the update key of its update: the grads it hands
+ * to its step are the helpers' grads mean-scaled under trainingRngUpdateKey,
+ * and not those mean-scaled under another key. */
+void testTrainingEpochMeanScalesUnderTheUpdateKey(void) {
+    bfpScaleItems[0] = buildFloatTensor1D(3, (float[]){1.0f, 2.0f, 3.0f});
+    bfpScaleLabels[0] = buildFloatTensor1D(2, (float[]){0.2f, -0.3f});
+    bfpScaleItems[1] = buildFloatTensor1D(3, (float[]){0.5f, -1.0f, 2.0f});
+    bfpScaleLabels[1] = buildFloatTensor1D(2, (float[]){-0.1f, 0.4f});
+    bfpScaleItems[2] = buildFloatTensor1D(3, (float[]){-1.5f, 0.5f, 1.0f});
+    bfpScaleLabels[2] = buildFloatTensor1D(2, (float[]){0.3f, 0.1f});
+    dataLoader_t *dl = dataLoaderInit(getBfpScaleSample, getBfpScaleDatasetSize, SCALE_SAMPLES,
+                                      NULL, NULL, false, 0, true);
+    uint8_t viaEpoch[LOOP_PARITY_BYTES];
+    uint8_t direct[LOOP_PARITY_BYTES];
+    uint8_t otherKey[LOOP_PARITY_BYTES];
+
+    size_t epochBytes = scaledGradsFromTheEpoch(0x5ca1eu, dl, viaEpoch);
+    size_t directBytes = scaledGradsFromTheHelpers(0x5ca1eu, true, direct);
+    size_t otherBytes = scaledGradsFromTheHelpers(0x5ca1eu, false, otherKey);
+
+    freeDataLoader(dl);
+    for (size_t i = SCALE_SAMPLES; i-- > 0;) {
+        freeTensor(bfpScaleLabels[i]);
+        freeTensor(bfpScaleItems[i]);
+    }
+
+    TEST_ASSERT_EQUAL_size_t(directBytes, epochBytes);
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(direct, viaEpoch, directBytes,
+                                     "the epoch must mean-scale under the update key");
+    TEST_ASSERT_EQUAL_size_t(directBytes, otherBytes);
+    TEST_ASSERT_FALSE_MESSAGE(memcmp(direct, otherKey, directBytes) == 0,
+                              "guard: the mean-scale under another key must scale otherwise");
+}
+
 /* ===========================================================================
  * #420 C2: CONV-FAMILY BFP grad-storage capstone.
  *
@@ -3092,6 +3330,8 @@ int main(void) {
     RUN_TEST(testBfpDxWireThroughPinnedFloat32BackwardTrains);
     RUN_TEST(testBfpGradStorageTrainingAccumulatesAndSteps);
     RUN_TEST(testBfpGradStorageTrainsUnderReductionMean);
+    RUN_TEST(testADirectLoopFromTheHelpersTrainsAsTrainingEpochDefault);
+    RUN_TEST(testTrainingEpochMeanScalesUnderTheUpdateKey);
     RUN_TEST(testBfpConvGradStorageTrainsUnderDefaultEpoch);
     RUN_TEST(testBfpUniformPoolActivationModelTrains);
     RUN_TEST(testBfpUniformNormModelTrainsAndGridsMove);

@@ -2706,6 +2706,79 @@ void testSgdFloat32SrWriteBackStepsWithoutAnUpdateKey(void) {
     ASSERT_EXITS_WITH_OUTPUT(0, "", stepFloat32SrWithoutAKey());
 }
 
+#define HALF_STEP_ELEMENTS 16
+
+/* Element 0 anchors the default 12-bit scale at 100 / 2047; one step moves
+ * each of elements 1..15 by half a code step, so each one is rounded by its
+ * own draw of the SR write-back. */
+static parameter_t *buildHalfStepParam(float lr) {
+    size_t *dims = reserveMemory(sizeof(size_t));
+    dims[0] = HALF_STEP_ELEMENTS;
+    size_t *order = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    tensor_t *p = initTensor(shape, quantizationInitSymInt32(HALF_AWAY), NULL);
+    float values[HALF_STEP_ELEMENTS] = {100.f};
+    tensorFillFromFloatBuffer(p, values, HALF_STEP_ELEMENTS);
+
+    const float halfStep = 0.5f * (100.f / 2047.f);
+    float grads[HALF_STEP_ELEMENTS] = {0.f};
+    for (size_t i = 1; i < HALF_STEP_ELEMENTS; i++) {
+        grads[i] = halfStep / lr;
+    }
+    tensor_t *g = gradInitFloat(p, NULL);
+    tensorFillFromFloatBuffer(g, grads, HALF_STEP_ELEMENTS);
+    return parameterInit(p, g);
+}
+
+/* One SR step of two identical params under updateKey; codes[p] = param p. */
+static void stepTwoHalfStepParams(const rngKey_t *updateKey, int32_t codes[2][HALF_STEP_ELEMENTS]) {
+    const float lr = 0.1f;
+    parameter_t *params[2] = {buildHalfStepParam(lr), buildHalfStepParam(lr)};
+    sgd_t sgd;
+    sgdInit(&sgd, lr, 0.f, 0.f, (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    optimImpl_t impl = {.sgd = &sgd};
+    optimizer_t optim = {.type = SGD_M,
+                         .impl = &impl,
+                         .parameter = params,
+                         .states = NULL,
+                         .sizeStates = 2,
+                         .writeBackRounding = SR_HALF_AWAY};
+
+    optimizerStep(&optim, updateKey);
+
+    for (size_t p = 0; p < 2; p++) {
+        memcpy(codes[p], params[p]->param->data, sizeof(codes[p]));
+        freeParameter(params[p]);
+    }
+}
+
+/* The write-back draws are a function of the update key and the parameter
+ * index only: the same key repeats them, another key or another parameter
+ * index draws others. (The update key's own dependence on the root and the
+ * update count is the training state's.) */
+void testSgdSrWriteBackIsAPureFunctionOfTheUpdateKeyAndTheParam(void) {
+    const rngKey_t updateKey = rngKeyFromSeed(UPDATE_KEY_TEST_SEED);
+    const rngKey_t otherKey = rngKeyFromSeed(UPDATE_KEY_TEST_SEED + 1u);
+    int32_t first[2][HALF_STEP_ELEMENTS];
+    int32_t again[2][HALF_STEP_ELEMENTS];
+    int32_t other[2][HALF_STEP_ELEMENTS];
+
+    stepTwoHalfStepParams(&updateKey, first);
+    stepTwoHalfStepParams(&updateKey, again);
+    stepTwoHalfStepParams(&otherKey, other);
+
+    TEST_ASSERT_EQUAL_INT32_ARRAY_MESSAGE(first[0], again[0], HALF_STEP_ELEMENTS,
+                                          "the same key repeats param 0's codes");
+    TEST_ASSERT_EQUAL_INT32_ARRAY_MESSAGE(first[1], again[1], HALF_STEP_ELEMENTS,
+                                          "the same key repeats param 1's codes");
+    TEST_ASSERT_FALSE_MESSAGE(memcmp(first[0], other[0], sizeof(first[0])) == 0,
+                              "another update key rounds param 0 otherwise");
+    TEST_ASSERT_FALSE_MESSAGE(memcmp(first[0], first[1], sizeof(first[0])) == 0,
+                              "two equal params under one key round otherwise");
+}
+
 #if SIZE_MAX > UINT32_MAX
 static void stepPastUint32MaxParams(void) {
     const rngKey_t updateKey = rngKeyFromSeed(UPDATE_KEY_TEST_SEED);
@@ -2720,6 +2793,23 @@ void testOptimizerStepExitsWhenAParameterIndexExceedsUint32Max(void) {
                              stepPastUint32MaxParams());
 }
 #endif
+
+/* An optimizer over no parameters (every layer frozen) under an update key:
+ * there is no parameter index to check, so the check must not wrap
+ * sizeStates - 1. */
+static void stepNoParametersUnderAKey(void) {
+    const rngKey_t updateKey = rngKeyFromSeed(UPDATE_KEY_TEST_SEED);
+    sgd_t sgd;
+    sgdInit(&sgd, 0.1f, 0.f, 0.f, (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    optimImpl_t impl = {.sgd = &sgd};
+    optimizer_t optim = {
+        .type = SGD_M, .impl = &impl, .sizeStates = 0, .writeBackRounding = SR_HALF_AWAY};
+    optimizerStep(&optim, &updateKey);
+}
+
+void testOptimizerStepOverNoParametersUnderAKeyDoesNotExit(void) {
+    ASSERT_EXITS_WITH_OUTPUT(0, "", stepNoParametersUnderAKey());
+}
 
 int main() {
     UNITY_BEGIN();
@@ -2776,8 +2866,10 @@ int main() {
     RUN_TEST(testOptimizerStepWithoutAnUpdateKeyExitsOnAnSrWriteBack);
     RUN_TEST(testSgdMomentumStepWritesStateThenParamUnderTheirOpKeys);
     RUN_TEST(testSgdFloat32SrWriteBackStepsWithoutAnUpdateKey);
+    RUN_TEST(testSgdSrWriteBackIsAPureFunctionOfTheUpdateKeyAndTheParam);
 #if SIZE_MAX > UINT32_MAX
     RUN_TEST(testOptimizerStepExitsWhenAParameterIndexExceedsUint32Max);
 #endif
+    RUN_TEST(testOptimizerStepOverNoParametersUnderAKeyDoesNotExit);
     return UNITY_END();
 }

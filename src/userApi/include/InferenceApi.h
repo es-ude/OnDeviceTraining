@@ -14,10 +14,15 @@ typedef struct inferenceStats {
 
 void freeInferenceStats(inferenceStats_t *inferenceStats);
 
+/*! Key-less: every layer gets a NULL context, so it serves forwards that draw
+ *  nothing. A forward that draws (stochastic rounding, a BFP_SHIFT_SR softmax,
+ *  a Dropout layer left in training mode) needs a key: run it through
+ *  inferenceWithLoss with call->key (a keyed inference() is #491). */
 tensor_t *inference(layer_t **model, size_t numberOfLayers, tensor_t *input);
 
 /*! Wraps each sample with batchViewOf before calling inference() -- see
- *  docs/conventions/data-shape.md, "Who adds the batch axis". */
+ *  docs/conventions/data-shape.md, "Who adds the batch axis". Key-less like
+ *  inference(). */
 tensor_t **inferenceBatched(layer_t **model, size_t numberOfLayers, batch_t *batch);
 
 /*! call is NULLable: a NULL call or a NULL call->remat runs the forward on
@@ -27,7 +32,10 @@ tensor_t **inferenceBatched(layer_t **model, size_t numberOfLayers, batch_t *bat
  *  naming the field. input is borrowed, never copied or written. Output
  *  values, shape, dtype, dynamic quantization state and the loss equal the
  *  NULL path's bit for bit; only an input's sparsity marker is dropped (the
- *  output is unmarked, where the NULL path marks it). */
+ *  output is unmarked, where the NULL path marks it). A non-NULL call->key is
+ *  this call's key: layer i gets it folded with (LAYER, i) and the loss with
+ *  (LAYER, numberOfLayers), on either path; without it every layer gets a
+ *  NULL context. */
 inferenceStats_t *inferenceWithLoss(layer_t **model, size_t numberOfLayers, tensor_t *input,
                                     tensor_t *label, lossFuncType_t funcType,
                                     reduction_t forwardReduction, const trainingCall_t *call);

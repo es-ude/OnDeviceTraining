@@ -24,10 +24,12 @@ static float trainingBatchPerSample(layer_t **model, size_t modelSize, lossConfi
          * (docs/conventions/data-shape.md) and hands the model [1, ...] views. */
         batchView_t itemView;
         batchView_t labelView;
-        trainingStats_t *stats =
-            calculateGradsFn(model, modelSize, lossConfig, forwardReduction,
-                             batchViewOf(&itemView, batch->samples[i]->item),
-                             batchViewOf(&labelView, batch->samples[i]->label), call);
+        trainingCall_t next;
+        rngKey_t callKey;
+        trainingStats_t *stats = calculateGradsFn(model, modelSize, lossConfig, forwardReduction,
+                                                  batchViewOf(&itemView, batch->samples[i]->item),
+                                                  batchViewOf(&labelView, batch->samples[i]->label),
+                                                  trainingCallForIndex(call, i, &next, &callKey));
         totalLoss += stats->loss;
         freeTrainingStats(stats);
         freeSample(batch->samples[i]);
@@ -82,8 +84,12 @@ static float trainingBatchStacked(layer_t **model, size_t modelSize, lossConfig_
         stackedLabel->data = labelBuffer;
         labelView.dimensions[0] = m;
 
-        trainingStats_t *stats = calculateGradsFn(model, modelSize, lossConfig, forwardReduction,
-                                                  stackedItem, stackedLabel, call);
+        /* One call per chunk: the call index counts chunks, not samples. */
+        trainingCall_t next;
+        rngKey_t callKey;
+        trainingStats_t *stats =
+            calculateGradsFn(model, modelSize, lossConfig, forwardReduction, stackedItem,
+                             stackedLabel, trainingCallForIndex(call, first / m, &next, &callKey));
         totalLoss += stats->loss * rowWeight;
         freeTrainingStats(stats);
         for (size_t r = 0; r < m; r++) {

@@ -9,6 +9,7 @@ target_link_libraries(CalculateGradsSequential PRIVATE
         RematScheduler
         RematCheck
         TrainingLoopApi
+        LayerExec
         RNG
         TensorApi
         Tensor

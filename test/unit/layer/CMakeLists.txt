@@ -526,6 +526,7 @@ add_elastic_ai_unit_test(
         LayerExec
         MORE_LIBS
         RNG
+        odt_test_death
 )
 
 # #4 PR0: Layer.c's model-walk helpers (layerParameters, deepestTrainableIndex).

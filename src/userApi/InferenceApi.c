@@ -16,6 +16,7 @@
 #include "InferenceApi.h"
 #include "Layer.h"
 #include "LayerConfigAccess.h"
+#include "LayerExec.h"
 #include "LayerNorm.h"
 #include "Linear.h"
 #include "MaxPool1d.h"
@@ -241,7 +242,7 @@ void freeInferenceStats(inferenceStats_t *inferenceStats) {
 static inferenceStats_t *inferenceOnScheduler(layer_t **model, size_t numberOfLayers,
                                               tensor_t *input, tensor_t *label,
                                               lossFuncType_t funcType, reduction_t forwardReduction,
-                                              rematScheduler_t *s) {
+                                              rematScheduler_t *s, const rngKey_t *callKey) {
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t chk;
     rematCheckInit(&chk, s, model, numberOfLayers, funcType, REMAT_MODE_EVAL, producedGen);
@@ -254,14 +255,17 @@ static inferenceStats_t *inferenceOnScheduler(layer_t **model, size_t numberOfLa
         }
         rematOperands_t op;
         rematCheckStep(&chk, &st, &op);
+        /* From the checked step's layer index only, as in the training driver. */
+        layerExec_t exStorage;
+        const layerExec_t *ex = layerExecForLayer(callKey, st.layer, &exStorage);
         if (st.kind == REMAT_STEP_FORWARD) {
             layer_t *layer = model[st.layer];
-            layerFunctions[layer->type].forward(layer, op.in, op.out, NULL);
+            layerFunctions[layer->type].forward(layer, op.in, op.out, ex);
         } else { /* LOSS_FORWARD: the checker admits nothing else in EVAL */
             /* As on the NULL path: the loss first (a label whose shape differs
              * from the output exits before the stats exist, #153), and all of it
              * before rematDone releases ACT n. */
-            float loss = lossFunctions[funcType].forward(op.in, label, forwardReduction, NULL);
+            float loss = lossFunctions[funcType].forward(op.in, label, forwardReduction, ex);
             inferenceStats = reserveInferenceStats(op.in);
             convertTensor(op.in, inferenceStats->output, NULL);
             inferenceStats->loss = loss;
@@ -277,9 +281,10 @@ static inferenceStats_t *inferenceOnScheduler(layer_t **model, size_t numberOfLa
 inferenceStats_t *inferenceWithLoss(layer_t **model, size_t numberOfLayers, tensor_t *input,
                                     tensor_t *label, lossFuncType_t funcType,
                                     reduction_t forwardReduction, const trainingCall_t *call) {
+    const rngKey_t *callKey = (call != NULL) ? call->key : NULL;
     if (call != NULL && call->remat != NULL) {
         return inferenceOnScheduler(model, numberOfLayers, input, label, funcType, forwardReduction,
-                                    call->remat);
+                                    call->remat, callKey);
     }
     tensor_t outputNext;
     initBufferInput(input, &outputNext);
@@ -292,7 +297,8 @@ inferenceStats_t *inferenceWithLoss(layer_t **model, size_t numberOfLayers, tens
         tensor_t outputCurr;
         initBufferOutput(&outputCurr, currentLayer, outputNext.shape, outputNext.sparsity,
                          outputNext.quantization);
-        forward(currentLayer, &outputNext, &outputCurr, NULL);
+        layerExec_t exStorage;
+        forward(currentLayer, &outputNext, &outputCurr, layerExecForLayer(callKey, i, &exStorage));
         deInitBuffer(&outputNext);
         outputNext = outputCurr;
     }
@@ -301,7 +307,9 @@ inferenceStats_t *inferenceWithLoss(layer_t **model, size_t numberOfLayers, tens
      * differs from the output exits before reserveInferenceStats (#153). The
      * loss only reads outputNext. */
     lossFunctions_t lossFns = lossFunctions[funcType];
-    float loss = lossFns.forward(&outputNext, label, forwardReduction, NULL);
+    layerExec_t lossExec;
+    float loss = lossFns.forward(&outputNext, label, forwardReduction,
+                                 layerExecForLayer(callKey, numberOfLayers, &lossExec));
 
     inferenceStats_t *inferenceStats = reserveInferenceStats(&outputNext);
     convertTensor(&outputNext, inferenceStats->output, NULL);

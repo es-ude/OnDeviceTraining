@@ -11,6 +11,7 @@
 #include "Dropout.h"
 #include "Layer.h"
 #include "LayerConfigAccess.h"
+#include "LayerExec.h"
 #include "LossFunction.h"
 #include "OdtHook.h"
 #include "RematCheck.h"
@@ -72,6 +73,7 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
 
     rematScheduler_t ephemeral;
     rematScheduler_t *s = (call != NULL) ? call->remat : NULL;
+    const rngKey_t *callKey = (call != NULL) ? call->key : NULL;
     if (s == NULL) {
         if (!rematHeapInit(&ephemeral, model, modelSize, lossConfig, input, &defaultPlanSpec)) {
             PRINT_ERROR("calculateGrads: ephemeral HEAP scheduler: reserveMemory failed");
@@ -91,9 +93,13 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
         rematOperands_t op;
         rematCheckStep(&chk, &st, &op);
         layer_t *layer = (st.layer < modelSize) ? model[st.layer] : NULL;
+        /* From the checked step's layer index only, so the scheduler cannot
+         * change which draws a layer sees. */
+        layerExec_t exStorage;
+        const layerExec_t *ex = layerExecForLayer(callKey, st.layer, &exStorage);
         switch (st.kind) {
         case REMAT_STEP_FORWARD:
-            layerFunctions[layer->type].forward(layer, op.in, op.out, NULL);
+            layerFunctions[layer->type].forward(layer, op.in, op.out, ex);
             if (sink != NULL) {
                 sink(sinkCtx, st.layer, layer->type, "fwd", op.out);
             }
@@ -101,7 +107,7 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
         case REMAT_STEP_LOSS_FORWARD:
             trainingStats = initTrainingStats(op.in);
             copyTensor(trainingStats->output, op.in);
-            trainingStats->loss = lossFns.forward(op.in, label, forwardReduction, NULL);
+            trainingStats->loss = lossFns.forward(op.in, label, forwardReduction, ex);
             odtHookFire(ODT_EVENT_FORWARD_END);
             /* BACKWARD fires unconditionally -- also around a truncated or
              * skipped backward (all-frozen model) -- so the per-call event
@@ -110,7 +116,7 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
             odtHookFire(ODT_EVENT_BACKWARD_BEGIN);
             break;
         case REMAT_STEP_LOSS_BACKWARD:
-            lossFns.backward(op.in, label, op.out, NULL);
+            lossFns.backward(op.in, label, op.out, ex);
             if (sink != NULL) {
                 sink(sinkCtx, modelSize, model[modelSize - 1]->type, "lossgrad", op.out);
             }
@@ -136,7 +142,7 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
             }
 #endif
             /* op.out is NULL at deepest: grads only, nothing below consumes dx. */
-            layerFunctions[layer->type].backward(layer, x, op.gradIn, op.out, NULL);
+            layerFunctions[layer->type].backward(layer, x, op.gradIn, op.out, ex);
             break;
         }
         default:

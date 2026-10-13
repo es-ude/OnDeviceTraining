@@ -310,13 +310,14 @@ static void requireChunkOutput(const char *caller, inferenceStats_t *stats, size
 
 /* One inferenceFn call over `rows` gathered samples: stack views of the
  * reference re-pointed at the gather buffers (dims[0] = rows). Returns the
- * row-weighted loss (x rows for MEAN, plain for SUM). */
+ * row-weighted loss (x rows for MEAN, plain for SUM). callIndex numbers the
+ * evaluation epoch's calls, one per chunk. */
 static float evaluateChunk(const char *caller, layer_t **model, size_t modelSize,
                            lossFuncType_t funcType, inferenceWithLossFn_t inferenceFn,
                            reduction_t forwardReduction, tensor_t *referenceItem,
                            tensor_t *referenceLabel, uint8_t *itemBuffer, uint8_t *labelBuffer,
-                           size_t rows, size_t C, size_t chunkFirst, evalCounts_t *counts,
-                           const trainingCall_t *call) {
+                           size_t rows, size_t C, size_t chunkFirst, size_t callIndex,
+                           evalCounts_t *counts, const trainingCall_t *call) {
     batchView_t itemView;
     batchView_t labelView;
     tensor_t *item = batchViewOf(&itemView, referenceItem);
@@ -326,8 +327,10 @@ static float evaluateChunk(const char *caller, layer_t **model, size_t modelSize
     label->data = labelBuffer;
     labelView.dimensions[0] = rows;
 
-    inferenceStats_t *stats =
-        inferenceFn(model, modelSize, item, label, funcType, forwardReduction, call);
+    trainingCall_t next;
+    rngKey_t callKey;
+    inferenceStats_t *stats = inferenceFn(model, modelSize, item, label, funcType, forwardReduction,
+                                          trainingCallForIndex(call, callIndex, &next, &callKey));
     requireChunkOutput(caller, stats, rows, C, chunkFirst);
     if (counts != NULL) {
         const float *out = (const float *)stats->output->data;
@@ -398,16 +401,17 @@ static float evaluateStacked(const char *caller, const char *knob, layer_t **mod
                 totalLoss +=
                     evaluateChunk(caller, model, modelSize, funcType, inferenceFn, forwardReduction,
                                   referenceItem, referenceLabel, itemBuffer, labelBuffer, rows, C,
-                                  streamed - rows, counts, call);
+                                  streamed - rows, (streamed - rows) / m, counts, call);
                 rows = 0;
             }
         }
         freeBatch(batch);
     }
     if (rows > 0) {
-        totalLoss += evaluateChunk(caller, model, modelSize, funcType, inferenceFn,
-                                   forwardReduction, referenceItem, referenceLabel, itemBuffer,
-                                   labelBuffer, rows, C, streamed - rows, counts, call);
+        totalLoss +=
+            evaluateChunk(caller, model, modelSize, funcType, inferenceFn, forwardReduction,
+                          referenceItem, referenceLabel, itemBuffer, labelBuffer, rows, C,
+                          streamed - rows, (streamed - rows) / m, counts, call);
     }
     if (labelBuffer != NULL) {
         freeReservedMemory(labelBuffer);
@@ -455,18 +459,23 @@ float evaluationEpoch(layer_t **model, size_t modelSize, lossFuncType_t funcType
     return totalLoss;
 }
 
+/* callBase: the evaluation epoch's call index of the batch's first sample (one
+ * call per sample). */
 static float evaluateBatchInternal(layer_t **model, size_t modelSize, lossFuncType_t funcType,
                                    batch_t *batch, inferenceWithLossFn_t inferenceFn,
                                    evalCounts_t *counts, reduction_t forwardReduction,
-                                   const trainingCall_t *call) {
+                                   size_t callBase, const trainingCall_t *call) {
     float totalLoss = 0.0f;
 
     for (size_t i = 0; i < batch->size; i++) {
         batchView_t itemView;
         batchView_t labelView;
+        trainingCall_t next;
+        rngKey_t callKey;
         inferenceStats_t *stats = inferenceFn(
             model, modelSize, batchViewOf(&itemView, batch->samples[i]->item),
-            batchViewOf(&labelView, batch->samples[i]->label), funcType, forwardReduction, call);
+            batchViewOf(&labelView, batch->samples[i]->label), funcType, forwardReduction,
+            trainingCallForIndex(call, callBase + i, &next, &callKey));
         totalLoss += stats->loss;
 
         size_t predicted = argmaxByTensor(stats->output, counts->numClasses);
@@ -561,7 +570,7 @@ static epochStats_t evaluateEpochInternal(const char *knob, layer_t **model, siz
                 firstSeen = true;
             }
             totalLoss += evaluateBatchInternal(model, modelSize, funcType, batch, inferenceFn,
-                                               &counts, forwardReduction, call);
+                                               &counts, forwardReduction, totalSamples, call);
             totalSamples += batch->size;
             freeBatch(batch);
         }
@@ -656,8 +665,11 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
                                     ? options->evalMicroBatchSize
                                     : microBatchSize;
     /* Every training call gets the options' scheduler; evaluation gets it
-     * behind the entry check below (remat D19). */
-    const trainingCall_t trainCall = {.remat = (options != NULL) ? options->remat : NULL};
+     * behind the entry check below (remat D19). The epoch level reads rng;
+     * evaluation gets one key per epoch in the loop below. */
+    trainingRng_t *rng = (options != NULL) ? options->rng : NULL;
+    const trainingCall_t trainCall = {.remat = (options != NULL) ? options->remat : NULL,
+                                      .rng = rng};
 
     if (lrScheduler != NULL && lrScheduler->optimizer != optimizer) {
         PRINT_ERROR("trainingRun: lrScheduler is wired to a different optimizer than the one "
@@ -767,10 +779,19 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
         float trainLoss =
             trainingEpochDefault(model, modelSize, lossConfig, trainDataLoader, optimizer,
                                  calculateGradsFn, forwardReduction, microBatchSize, &trainCall);
+        rngKey_t evalKey;
+        trainingCall_t epochEvalCall = evalCall;
+        if (rng != NULL) {
+            evalKey = trainingRngEvalKey(rng);
+            epochEvalCall.key = &evalKey;
+        }
         epochStats_t evalStats =
             evaluateEpochInternal("evalMicroBatchSize", model, modelSize, lossConfig.funcType,
                                   evalDataLoader, inferenceFn, NULL, numClasses, forwardReduction,
-                                  evalMicroBatchSize, "trainingRun", &evalCall);
+                                  evalMicroBatchSize, "trainingRun", &epochEvalCall);
+        if (rng != NULL) {
+            trainingRngAdvanceEpoch(rng);
+        }
         info.trainLoss = trainLoss;
 
         if (callback != NULL) {

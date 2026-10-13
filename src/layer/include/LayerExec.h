@@ -1,6 +1,7 @@
 #ifndef ODT_LAYER_EXEC_H
 #define ODT_LAYER_EXEC_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "RNG.h"
@@ -32,5 +33,12 @@ const rngKey_t *layerExecOpKey(const layerExec_t *exec, uint32_t phaseTag, uint3
  * the loop that draws from it. */
 rngStream_t *layerExecPurposeStream(const layerExec_t *exec, uint32_t phaseTag, uint32_t purposeTag,
                                     rngStream_t *storage);
+
+/* The context of model index layerIndex (the loss is index n) in the call
+ * keyed callKey: NULL iff callKey is NULL; otherwise storage->key =
+ * rngFold(*callKey, RNG_TAG_LAYER, layerIndex) and the result is storage. An
+ * index above UINT32_MAX stops the program with a named error. */
+const layerExec_t *layerExecForLayer(const rngKey_t *callKey, size_t layerIndex,
+                                     layerExec_t *storage);
 
 #endif

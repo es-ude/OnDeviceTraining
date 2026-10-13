@@ -22,6 +22,8 @@ target_link_libraries(LayerCommon PRIVATE
 add_library(InferenceApi InferenceApi.c)
 target_include_directories(InferenceApi PUBLIC include)
 target_link_libraries(InferenceApi PRIVATE
+        LayerExec
+        RNG
         TensorApi
         Tensor
         Rounding

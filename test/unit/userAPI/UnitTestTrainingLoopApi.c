@@ -3376,6 +3376,321 @@ void testTrainingRngCallKeyExitsAboveUint32Max(void) {
 }
 #endif
 
+/* ---- the keys the training and evaluation loops hand down (#4) ---- */
+
+#define KEYED_RUN_SEED 0x5eedu
+#define KEY_RECORDS 16
+
+/* A NULL call stays NULL: nothing to copy, no key to derive. */
+void testTrainingCallForIndexKeepsANullCallNull(void) {
+    trainingCall_t next;
+    rngKey_t callKey = {{0xdeadbeefu, 0xdeadbeefu}};
+
+    TEST_ASSERT_NULL(trainingCallForIndex(NULL, 3u, &next, &callKey));
+    TEST_ASSERT_EQUAL_HEX32(0xdeadbeefu, callKey.w[0]);
+}
+
+/* A call without a key is copied with .key NULL; every other field carries over. */
+void testTrainingCallForIndexCopiesACallWithoutAKey(void) {
+    trainingRng_t rng;
+    rematScheduler_t s;
+    const trainingCall_t call = {.remat = &s, .rng = &rng};
+    trainingCall_t next;
+    rngKey_t callKey;
+
+    const trainingCall_t *got = trainingCallForIndex(&call, 3u, &next, &callKey);
+
+    TEST_ASSERT_EQUAL_PTR(&next, got);
+    TEST_ASSERT_EQUAL_PTR(&s, next.remat);
+    TEST_ASSERT_EQUAL_PTR(&rng, next.rng);
+    TEST_ASSERT_NULL(next.key);
+}
+
+/* A keyed call is copied with .key replaced by the key of the call index
+ * under it, written into the caller's storage. */
+void testTrainingCallForIndexDerivesTheCallKeyUnderTheParentKey(void) {
+    trainingRng_t rng;
+    trainingRngInit(&rng, KEYED_RUN_SEED);
+    rematScheduler_t s;
+    const rngKey_t parent = trainingRngStepKey(&rng);
+    const trainingCall_t call = {.remat = &s, .key = &parent, .rng = &rng};
+    trainingCall_t next;
+    rngKey_t callKey;
+
+    const trainingCall_t *got = trainingCallForIndex(&call, 3u, &next, &callKey);
+
+    TEST_ASSERT_EQUAL_PTR(&next, got);
+    TEST_ASSERT_EQUAL_PTR(&callKey, next.key);
+    assertSameKey(trainingRngCallKey(parent, 3u), callKey);
+    TEST_ASSERT_EQUAL_PTR(&s, next.remat);
+    TEST_ASSERT_EQUAL_PTR(&rng, next.rng);
+}
+
+/* next may be the call itself: the key is still derived from the parent key
+ * the call held before the copy. */
+void testTrainingCallForIndexDerivesTheKeyInPlace(void) {
+    trainingRng_t rng;
+    trainingRngInit(&rng, KEYED_RUN_SEED);
+    rematScheduler_t s;
+    const rngKey_t parent = trainingRngStepKey(&rng);
+    trainingCall_t call = {.remat = &s, .key = &parent, .rng = &rng};
+    rngKey_t callKey;
+
+    const trainingCall_t *got = trainingCallForIndex(&call, 3u, &call, &callKey);
+
+    TEST_ASSERT_EQUAL_PTR(&call, got);
+    TEST_ASSERT_EQUAL_PTR(&callKey, call.key);
+    assertSameKey(trainingRngCallKey(parent, 3u), callKey);
+    TEST_ASSERT_EQUAL_PTR(&s, call.remat);
+    TEST_ASSERT_EQUAL_PTR(&rng, call.rng);
+}
+
+typedef struct {
+    bool hasKey;
+    rngKey_t key;
+} keyRecord_t;
+
+static keyRecord_t g_gradKeys[KEY_RECORDS];
+static size_t g_gradKeyCount;
+static keyRecord_t g_evalKeys[KEY_RECORDS];
+static size_t g_evalKeyCount;
+
+static void recordCallKey(keyRecord_t *records, size_t *count, const trainingCall_t *call) {
+    if (*count < KEY_RECORDS) {
+        records[*count].hasKey = call != NULL && call->key != NULL;
+        if (records[*count].hasKey) {
+            records[*count].key = *call->key;
+        }
+    }
+    (*count)++;
+}
+
+static trainingStats_t *keyRecordingGrads(layer_t **model, size_t modelSize,
+                                          lossConfig_t lossConfig, reduction_t forwardReduction,
+                                          tensor_t *input, tensor_t *label,
+                                          const trainingCall_t *call) {
+    recordCallKey(g_gradKeys, &g_gradKeyCount, call);
+    return calculateGradsSequential(model, modelSize, lossConfig, forwardReduction, input, label,
+                                    call);
+}
+
+static inferenceStats_t *keyRecordingInference(layer_t **model, size_t numberOfLayers,
+                                               tensor_t *input, tensor_t *label,
+                                               lossFuncType_t funcType,
+                                               reduction_t forwardReduction,
+                                               const trainingCall_t *call) {
+    recordCallKey(g_evalKeys, &g_evalKeyCount, call);
+    return inferenceWithLoss(model, numberOfLayers, input, label, funcType, forwardReduction, call);
+}
+
+/* runMicroBatched's one-Linear model and SGD over the 4-sample dataset:
+ * training batches of trainBatch, evaluation over the first evalCount
+ * samples in batches of evalBatch. */
+typedef struct {
+    quantization_t testQ;
+    layer_t *linear;
+    layer_t *model[1];
+    quantization_t *momentumQ;
+    optimizer_t *sgd;
+    dataLoader_t *trainDl;
+    dataLoader_t *evalDl;
+} keyedFixture_t;
+
+static void buildKeyedFixture(keyedFixture_t *f, uint16_t trainBatch, uint16_t evalBatch,
+                              size_t evalCount) {
+    tensor_t *wParam = buildFloatTensor2D(2, 2, (float[]){1.f, 0.f, 0.f, 1.f}, 4);
+    parameter_t *w = parameterInit(wParam, gradInitFloat(wParam, NULL));
+    tensor_t *bParam = buildFloatTensor2D(1, 2, (float[]){0.f, 0.f}, 2);
+    parameter_t *b = parameterInit(bParam, gradInitFloat(bParam, NULL));
+    initFloat32Quantization(&f->testQ);
+    f->linear = buildBorrowedLinearLayer(w, b, &f->testQ);
+    f->model[0] = f->linear;
+    f->momentumQ = quantizationInitFloat();
+    f->sgd = sgdMCreateOptim(0.01f, 0.f, 0.f, f->model, 1, f->momentumQ,
+                             (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    initEpochDataset();
+    g_evalCount = evalCount;
+    f->trainDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, trainBatch, NULL, NULL, false, 0, true);
+    f->evalDl = dataLoaderInit(getEpochSample, getEvalCountDatasetSize, evalBatch, NULL, NULL,
+                               false, 0, true);
+    g_gradKeyCount = 0;
+    g_evalKeyCount = 0;
+}
+
+static void freeKeyedFixture(keyedFixture_t *f) {
+    freeOptim(f->sgd);
+    freeQuantization(f->momentumQ);
+    freeDataLoader(f->evalDl);
+    freeDataLoader(f->trainDl);
+    freeLinearLayerShellOnly(f->linear);
+    freeEpochDataset();
+}
+
+/* Two epochs of trainingRun at training micro-batch m and evaluation micro-batch mEval. */
+static void runKeyed(uint16_t trainBatch, size_t m, uint16_t evalBatch, size_t evalCount,
+                     size_t mEval, trainingRng_t *rng) {
+    keyedFixture_t f;
+    buildKeyedFixture(&f, trainBatch, evalBatch, evalCount);
+    (void)trainingRun(
+        f.model, 1, defaultLossConfig(MSE), f.trainDl, f.evalDl, f.sgd, 2, keyRecordingGrads,
+        keyRecordingInference,
+        &(trainingRunOptions_t){.microBatchSize = m, .evalMicroBatchSize = mEval, .rng = rng});
+    freeKeyedFixture(&f);
+}
+
+static void assertCallKey(rngKey_t parent, size_t callIndex, keyRecord_t record) {
+    TEST_ASSERT_TRUE(record.hasKey);
+    assertSameKey(trainingRngCallKey(parent, callIndex), record.key);
+}
+
+/* Each training call gets the key of its index under the step key of its
+ * update; the step counts every update of the run, across epochs. */
+void testTrainingRunHandsEachTrainingCallTheCallKeyOfItsUpdate(void) {
+    trainingRng_t rng;
+    trainingRngInit(&rng, KEYED_RUN_SEED);
+
+    runKeyed(2, 1, 1, 4, 1, &rng);
+
+    TEST_ASSERT_EQUAL_UINT32(4u, rng.step);
+    TEST_ASSERT_EQUAL_UINT32(2u, rng.epoch);
+    TEST_ASSERT_EQUAL_size_t(8, g_gradKeyCount);
+    trainingRng_t expected;
+    trainingRngInit(&expected, KEYED_RUN_SEED);
+    for (size_t u = 0; u < 4; u++) {
+        const rngKey_t stepKey = trainingRngStepKey(&expected);
+        for (size_t i = 0; i < 2; i++) {
+            assertCallKey(stepKey, i, g_gradKeys[2 * u + i]);
+        }
+        trainingRngAdvance(&expected);
+    }
+}
+
+/* At m > 1 one call covers m samples, so the index counts chunks: a batch of
+ * four at m = 2 makes calls 0 and 1. */
+void testTrainingRunNumbersStackedTrainingCallsByChunk(void) {
+    trainingRng_t rng;
+    trainingRngInit(&rng, KEYED_RUN_SEED);
+
+    runKeyed(4, 2, 1, 4, 1, &rng);
+
+    TEST_ASSERT_EQUAL_UINT32(2u, rng.step);
+    TEST_ASSERT_EQUAL_size_t(4, g_gradKeyCount);
+    trainingRng_t expected;
+    trainingRngInit(&expected, KEYED_RUN_SEED);
+    for (size_t u = 0; u < 2; u++) {
+        const rngKey_t stepKey = trainingRngStepKey(&expected);
+        assertCallKey(stepKey, 0, g_gradKeys[2 * u]);
+        assertCallKey(stepKey, 1, g_gradKeys[2 * u + 1]);
+        trainingRngAdvance(&expected);
+    }
+}
+
+/* Each evaluation call gets the key of its position in the epoch under that
+ * epoch's evaluation key; positions run on across the loader's batches. */
+void testTrainingRunKeysEachEvaluationCallByItsPositionInTheEpoch(void) {
+    trainingRng_t rng;
+    trainingRngInit(&rng, KEYED_RUN_SEED);
+
+    runKeyed(2, 1, 2, 4, 1, &rng);
+
+    TEST_ASSERT_EQUAL_size_t(8, g_evalKeyCount);
+    trainingRng_t expected;
+    trainingRngInit(&expected, KEYED_RUN_SEED);
+    for (size_t e = 0; e < 2; e++) {
+        const rngKey_t evalKey = trainingRngEvalKey(&expected);
+        for (size_t j = 0; j < 4; j++) {
+            assertCallKey(evalKey, j, g_evalKeys[4 * e + j]);
+        }
+        trainingRngAdvanceEpoch(&expected);
+    }
+}
+
+/* At m > 1 an evaluation call covers a chunk, so the index counts chunks:
+ * three samples at m = 2 make a full chunk and the shorter last one, four make
+ * two full chunks; both are calls 0 and 1. */
+void testTrainingRunNumbersStackedEvaluationCallsByChunk(void) {
+    for (size_t evalCount = 3; evalCount <= 4; evalCount++) {
+        trainingRng_t rng;
+        trainingRngInit(&rng, KEYED_RUN_SEED);
+
+        runKeyed(2, 2, 1, evalCount, 2, &rng);
+
+        TEST_ASSERT_EQUAL_size_t(4, g_evalKeyCount);
+        trainingRng_t expected;
+        trainingRngInit(&expected, KEYED_RUN_SEED);
+        for (size_t e = 0; e < 2; e++) {
+            const rngKey_t evalKey = trainingRngEvalKey(&expected);
+            assertCallKey(evalKey, 0, g_evalKeys[2 * e]);
+            assertCallKey(evalKey, 1, g_evalKeys[2 * e + 1]);
+            trainingRngAdvanceEpoch(&expected);
+        }
+    }
+}
+
+/* Without options->rng no training and no evaluation call gets a key. */
+void testTrainingRunWithoutAnRngHandsNoKeys(void) {
+    runKeyed(2, 1, 2, 4, 1, NULL);
+
+    TEST_ASSERT_EQUAL_size_t(8, g_gradKeyCount);
+    TEST_ASSERT_EQUAL_size_t(8, g_evalKeyCount);
+    for (size_t r = 0; r < 8; r++) {
+        TEST_ASSERT_FALSE(g_gradKeys[r].hasKey);
+        TEST_ASSERT_FALSE(g_evalKeys[r].hasKey);
+    }
+}
+
+static const trainingRng_t *g_callbackRng;
+static uint32_t g_callbackRngEpochs[2];
+static size_t g_callbackCount;
+
+static void recordRngEpochCallback(epochInfo_t info, epochStats_t evalStats) {
+    (void)info;
+    (void)evalStats;
+    if (g_callbackCount < 2) {
+        g_callbackRngEpochs[g_callbackCount] = g_callbackRng->epoch;
+    }
+    g_callbackCount++;
+}
+
+/* The epoch counter advances right after the evaluation, so the callback of
+ * an epoch already sees that epoch counted. */
+void testTrainingRunCountsTheEpochBeforeTheCallback(void) {
+    trainingRng_t rng;
+    trainingRngInit(&rng, KEYED_RUN_SEED);
+    g_callbackRng = &rng;
+    g_callbackCount = 0;
+    keyedFixture_t f;
+    buildKeyedFixture(&f, 2, 2, 4);
+
+    (void)trainingRun(f.model, 1, defaultLossConfig(MSE), f.trainDl, f.evalDl, f.sgd, 2,
+                      calculateGradsSequential, inferenceWithLoss,
+                      &(trainingRunOptions_t){.callback = recordRngEpochCallback, .rng = &rng});
+    freeKeyedFixture(&f);
+
+    TEST_ASSERT_EQUAL_size_t(2, g_callbackCount);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_callbackRngEpochs[0]);
+    TEST_ASSERT_EQUAL_UINT32(2u, g_callbackRngEpochs[1]);
+}
+
+/* The epoch level reads only .rng: a .key on its own call never reaches a
+ * training call. */
+void testTrainingEpochDoesNotHandItsOwnKeyDown(void) {
+    keyedFixture_t f;
+    buildKeyedFixture(&f, 2, 1, 4);
+    const rngKey_t stray = rngKeyFromSeed(KEYED_RUN_SEED);
+
+    (void)trainingEpochDefault(f.model, 1, defaultLossConfig(MSE), f.trainDl, f.sgd,
+                               keyRecordingGrads, REDUCTION_MEAN, 1,
+                               &(trainingCall_t){.key = &stray});
+
+    freeKeyedFixture(&f);
+    TEST_ASSERT_EQUAL_size_t(4, g_gradKeyCount);
+    for (size_t r = 0; r < 4; r++) {
+        TEST_ASSERT_FALSE(g_gradKeys[r].hasKey);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testTrainingBatchDefaultHandsCalculateGradsBatchAxisViews);
@@ -3445,5 +3760,16 @@ int main(void) {
 #if SIZE_MAX > UINT32_MAX
     RUN_TEST(testTrainingRngCallKeyExitsAboveUint32Max);
 #endif
+    RUN_TEST(testTrainingCallForIndexKeepsANullCallNull);
+    RUN_TEST(testTrainingCallForIndexCopiesACallWithoutAKey);
+    RUN_TEST(testTrainingCallForIndexDerivesTheCallKeyUnderTheParentKey);
+    RUN_TEST(testTrainingCallForIndexDerivesTheKeyInPlace);
+    RUN_TEST(testTrainingRunHandsEachTrainingCallTheCallKeyOfItsUpdate);
+    RUN_TEST(testTrainingRunCountsTheEpochBeforeTheCallback);
+    RUN_TEST(testTrainingRunNumbersStackedTrainingCallsByChunk);
+    RUN_TEST(testTrainingRunKeysEachEvaluationCallByItsPositionInTheEpoch);
+    RUN_TEST(testTrainingRunNumbersStackedEvaluationCallsByChunk);
+    RUN_TEST(testTrainingRunWithoutAnRngHandsNoKeys);
+    RUN_TEST(testTrainingEpochDoesNotHandItsOwnKeyDown);
     return UNITY_END();
 }

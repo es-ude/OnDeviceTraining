@@ -73,6 +73,8 @@ add_elastic_ai_unit_test(
         InferenceApi
         MORE_LIBS
         RematScheduler
+        LayerExec
+        RNG
         CommonLayerLibs
         TensorApi
         LinearApi

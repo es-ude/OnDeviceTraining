@@ -37,8 +37,17 @@ float trainingEpochDefault(layer_t **model, size_t modelSize, lossConfig_t lossC
     }
     optimizerFunctions_t optimFns = optimizerFunctions[optimizer->type];
     float totalLoss = 0.0f;
+    /* The only level that reads .rng; it never hands its own .key down. */
+    trainingRng_t *rng = (call != NULL) ? call->rng : NULL;
 
     for (size_t i = 0; i < numberOfBatches; i++) {
+        rngKey_t stepKey;
+        trainingCall_t next = (call != NULL) ? *call : (trainingCall_t){0};
+        next.key = NULL;
+        if (rng != NULL) {
+            stepKey = trainingRngStepKey(rng);
+            next.key = &stepKey;
+        }
         batch_t *batch = dataLoader->getBatch(dataLoader, i);
 
         /* Capture a reference to the first sample's label BEFORE
@@ -49,7 +58,7 @@ float trainingEpochDefault(layer_t **model, size_t modelSize, lossConfig_t lossC
         tensor_t *labelRef = batch->samples[0]->label;
 
         totalLoss += trainingBatchDefault(model, modelSize, lossConfig, batch, calculateGradsFn,
-                                          forwardReduction, m, call);
+                                          forwardReduction, m, (call != NULL) ? &next : NULL);
 
         if (lossConfig.backwardReduction == REDUCTION_MEAN) {
             /* Each loss family derives F from labelRef's shape itself, reading
@@ -65,6 +74,9 @@ float trainingEpochDefault(layer_t **model, size_t modelSize, lossConfig_t lossC
         }
 
         optimizerStep(optimizer);
+        if (rng != NULL) {
+            trainingRngAdvance(rng);
+        }
         optimFns.zero(optimizer);
         freeBatch(batch);
     }

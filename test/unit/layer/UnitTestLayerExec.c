@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "DeathTest.h"
 #include "LayerExec.h"
 #include "unity.h"
 
@@ -140,6 +141,47 @@ void testLayerExecPurposeStreamIsNullWithoutAContext(void) {
     TEST_ASSERT_EQUAL_HEX32(0xdeadbeefu, storage.state);
 }
 
+/* The context of a call's layer i is the call key folded with (LAYER, i); the
+ * loss is layer n. Expected words from the Python mirror (LAYER spelled 3):
+ *   uv run python -c "from examples._shared.keyed_rng import (fold,
+ *   key_from_seed as kfs); print([hex(w) for w in fold(kfs(0x1a7e), 3, 2)])" */
+void testLayerExecForLayerFoldsTheLayerIndex(void) {
+    const rngKey_t callKey = rngKeyFromSeed(LAYER_EXEC_TEST_SEED);
+    layerExec_t storage;
+
+    const layerExec_t *exec = layerExecForLayer(&callKey, 2u, &storage);
+
+    TEST_ASSERT_EQUAL_PTR(&storage, exec);
+    assertSameKey(rngFold(callKey, RNG_TAG_LAYER, 2u), storage.key);
+    assertKey(0x322854b6u, 0x8b4d9779u, storage.key);
+}
+
+/* Without a call key no layer gets a context, and the storage is left alone. */
+void testLayerExecForLayerIsNullWithoutACallKey(void) {
+    layerExec_t storage = {.key = {{0xdeadbeefu, 0xdeadbeefu}}};
+
+    TEST_ASSERT_NULL(layerExecForLayer(NULL, 2u, &storage));
+    assertKey(0xdeadbeefu, 0xdeadbeefu, storage.key);
+}
+
+#if SIZE_MAX > UINT32_MAX
+static void forLayerPastUint32Max(void) {
+    const rngKey_t callKey = rngKeyFromSeed(LAYER_EXEC_TEST_SEED);
+    layerExec_t storage;
+    (void)layerExecForLayer(&callKey, (size_t)UINT32_MAX + 1u, &storage);
+}
+
+/* rngFold's index is 32 bits wide: the last index still folds, the next one
+ * stops the program instead of reusing layer 0's key. */
+void testLayerExecForLayerExitsAboveUint32Max(void) {
+    const rngKey_t callKey = rngKeyFromSeed(LAYER_EXEC_TEST_SEED);
+    layerExec_t storage;
+    TEST_ASSERT_NOT_NULL(layerExecForLayer(&callKey, (size_t)UINT32_MAX, &storage));
+    ASSERT_EXITS_WITH_OUTPUT(1, "layerExecForLayer: layer index exceeds UINT32_MAX",
+                             forLayerPastUint32Max());
+}
+#endif
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLayerExecPhaseKeyIsNullWithoutAContext);
@@ -149,5 +191,10 @@ int main(void) {
     RUN_TEST(testLayerExecOpKeyIsNullWithoutAContext);
     RUN_TEST(testLayerExecPurposeStreamOpensThePhaseKeyFoldedWithThePurpose);
     RUN_TEST(testLayerExecPurposeStreamIsNullWithoutAContext);
+    RUN_TEST(testLayerExecForLayerFoldsTheLayerIndex);
+    RUN_TEST(testLayerExecForLayerIsNullWithoutACallKey);
+#if SIZE_MAX > UINT32_MAX
+    RUN_TEST(testLayerExecForLayerExitsAboveUint32Max);
+#endif
     return UNITY_END();
 }

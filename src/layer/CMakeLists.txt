@@ -173,6 +173,7 @@ add_library(LayerExec LayerExec.c)
 target_include_directories(LayerExec PUBLIC include)
 target_link_libraries(LayerExec PRIVATE
         RNG
+        Common
 )
 
 add_library(Layer Layer.c)

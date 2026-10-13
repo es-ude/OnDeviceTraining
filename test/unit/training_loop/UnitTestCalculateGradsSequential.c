@@ -12,6 +12,7 @@
 #include "Common.h"
 #include "Layer.h"
 #include "LayerCommon.h"
+#include "LayerExec.h"
 #include "LayerQuant.h"
 #include "Linear.h"
 #include "LinearApi.h"
@@ -1039,6 +1040,146 @@ void testCalculateGradsFactoryMaxPoolGrowsToBatch2(void) {
     TEST_ASSERT_EQUAL_FLOAT(2.2109375f, capturedLoss2);
 }
 
+/* ---- the layer keys the driver hands out (#4) ---- */
+
+/* Expected words from the Python mirror (LAYER spelled 3), repository root:
+ *   uv run python -c "from examples._shared.keyed_rng import (fold,
+ *   key_from_seed as kfs); c = kfs(0xd21f); print([[hex(w) for w in fold(c, 3, i)]
+ *   for i in (0, 1, 2)])"
+ * Each check also compares with the explicit rngFold chain. */
+#define DRIVER_CALL_KEY_SEED 0xd21fu
+#define DRIVER_EXEC_RECORDS 12
+
+typedef struct {
+    bool hasExec;
+    rngKey_t key;
+} execRecord_t;
+
+static execRecord_t g_execRecords[DRIVER_EXEC_RECORDS];
+static size_t g_execRecordCount;
+static layerFunctions_t g_savedLinear;
+static layerFunctions_t g_savedSoftmax;
+static lossFunctions_t g_savedCrossEntropy;
+
+static void recordExec(const layerExec_t *exec) {
+    if (g_execRecordCount < DRIVER_EXEC_RECORDS) {
+        g_execRecords[g_execRecordCount].hasExec = exec != NULL;
+        if (exec != NULL) {
+            g_execRecords[g_execRecordCount].key = exec->key;
+        }
+    }
+    g_execRecordCount++;
+}
+
+static void spyForward(layer_t *layer, tensor_t *in, tensor_t *out, const layerExec_t *exec) {
+    recordExec(exec);
+    (layer->type == LINEAR ? g_savedLinear : g_savedSoftmax).forward(layer, in, out, exec);
+}
+
+static void spyBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss,
+                        const layerExec_t *exec) {
+    recordExec(exec);
+    g_savedLinear.backward(layer, forwardInput, loss, propLoss, exec);
+}
+
+static float spyLossForward(tensor_t *out, tensor_t *label, reduction_t reduction,
+                            const layerExec_t *exec) {
+    recordExec(exec);
+    return g_savedCrossEntropy.forward(out, label, reduction, exec);
+}
+
+static void spyLossBackward(tensor_t *out, tensor_t *label, tensor_t *result,
+                            const layerExec_t *exec) {
+    recordExec(exec);
+    g_savedCrossEntropy.backward(out, label, result, exec);
+}
+
+static void installExecSpies(void) {
+    g_savedLinear = layerFunctions[LINEAR];
+    g_savedSoftmax = layerFunctions[SOFTMAX];
+    g_savedCrossEntropy = lossFunctions[CROSS_ENTROPY];
+    layerFunctions[LINEAR].forward = spyForward;
+    layerFunctions[LINEAR].backward = spyBackward;
+    layerFunctions[SOFTMAX].forward = spyForward;
+    lossFunctions[CROSS_ENTROPY].forward = spyLossForward;
+    lossFunctions[CROSS_ENTROPY].backward = spyLossBackward;
+    g_execRecordCount = 0;
+}
+
+static void restoreExecSpies(void) {
+    layerFunctions[LINEAR] = g_savedLinear;
+    layerFunctions[SOFTMAX] = g_savedSoftmax;
+    lossFunctions[CROSS_ENTROPY] = g_savedCrossEntropy;
+}
+
+static void assertLayerExec(size_t record, rngKey_t callKey, uint32_t layer, uint32_t w0,
+                            uint32_t w1) {
+    rngKey_t expected = rngFold(callKey, RNG_TAG_LAYER, layer);
+    TEST_ASSERT_TRUE(g_execRecords[record].hasExec);
+    TEST_ASSERT_EQUAL_HEX32(expected.w[0], g_execRecords[record].key.w[0]);
+    TEST_ASSERT_EQUAL_HEX32(expected.w[1], g_execRecords[record].key.w[1]);
+    TEST_ASSERT_EQUAL_HEX32(w0, g_execRecords[record].key.w[0]);
+    TEST_ASSERT_EQUAL_HEX32(w1, g_execRecords[record].key.w[1]);
+}
+
+/* testCalculateGradsSequentialClosedForm's Linear + Softmax under CE, run
+ * once with `call`; the spies see every forward, backward and loss call. */
+static void runSpiedGradsCall(const trainingCall_t *call) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *model[2];
+    model[0] = linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &lq);
+    model[1] = softmaxLayerInit(&lq);
+    float W[4] = {0.1f, 0.2f, 0.3f, 0.4f}, B[2] = {0};
+    modelLoadStateDict(model, 2,
+                       (stateDictEntry_t[]){{.name = "fc", .weightData = W, .biasData = B}}, 1);
+    tensor_t *x = makeRowVec2(1.0f, 1.0f);
+    tensor_t *label = makeRowVec2(1.0f, 0.0f);
+    installExecSpies();
+
+    trainingStats_t *stats = calculateGradsSequential(model, 2, defaultLossConfig(CROSS_ENTROPY),
+                                                      REDUCTION_MEAN, x, label, call);
+
+    restoreExecSpies();
+    freeTrainingStats(stats);
+    freeTensor(x);
+    freeTensor(label);
+    freeLinearLayer(model[0]);
+    freeSoftmaxLayer(model[1]);
+    freeQuantization(q);
+}
+
+/* Every step gets the call key folded with its checked layer index; the loss
+ * steps are layer n. Order: forward 0, forward 1, loss forward, loss
+ * backward, backward 0 (the Softmax backward is skipped under CE). */
+void testCalculateGradsHandsEachStepTheLayerKeyOfItsIndex(void) {
+    const rngKey_t callKey = rngKeyFromSeed(DRIVER_CALL_KEY_SEED);
+
+    runSpiedGradsCall(&(trainingCall_t){.key = &callKey});
+
+    TEST_ASSERT_EQUAL_size_t(5, g_execRecordCount);
+    assertLayerExec(0, callKey, 0u, 0x6842c650u, 0xaf1109a3u);
+    assertLayerExec(1, callKey, 1u, 0x47477cedu, 0xab1bacc3u);
+    assertLayerExec(2, callKey, 2u, 0x626020c6u, 0x288f25e1u);
+    assertLayerExec(3, callKey, 2u, 0x626020c6u, 0x288f25e1u);
+    assertLayerExec(4, callKey, 0u, 0x6842c650u, 0xaf1109a3u);
+}
+
+/* Without a key (a NULL call, or a call without .key) no step gets a context. */
+void testCalculateGradsWithoutAKeyHandsNoLayerContext(void) {
+    runSpiedGradsCall(NULL);
+    TEST_ASSERT_EQUAL_size_t(5, g_execRecordCount);
+    for (size_t r = 0; r < 5; r++) {
+        TEST_ASSERT_FALSE(g_execRecords[r].hasExec);
+    }
+    runSpiedGradsCall(&(trainingCall_t){.remat = NULL});
+    TEST_ASSERT_EQUAL_size_t(5, g_execRecordCount);
+    for (size_t r = 0; r < 5; r++) {
+        TEST_ASSERT_FALSE(g_execRecords[r].hasExec);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testCalculateGradsSequentialClosedForm);
@@ -1053,5 +1194,7 @@ int main(void) {
     RUN_TEST(testTruncationPreservesUpperLayerGrads);
     RUN_TEST(testAllFrozenModelSkipsBackwardEntirely);
     RUN_TEST(testCalculateGradsFactoryMaxPoolGrowsToBatch2);
+    RUN_TEST(testCalculateGradsHandsEachStepTheLayerKeyOfItsIndex);
+    RUN_TEST(testCalculateGradsWithoutAKeyHandsNoLayerContext);
     return UNITY_END();
 }

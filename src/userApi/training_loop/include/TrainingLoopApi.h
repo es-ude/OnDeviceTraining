@@ -56,6 +56,14 @@ void trainingRngAdvance(trainingRng_t *rng);
 /*! Call after each completed epoch, under the same rule as trainingRngAdvance. */
 void trainingRngAdvanceEpoch(trainingRng_t *rng);
 
+/*! The call a level hands its callee for call `callIndex`: NULL for a NULL
+ * call; otherwise *next = *call with only .key replaced, by the key of that
+ * call under call->key (written to *callKey), or by NULL when call->key is
+ * NULL. next may be call. The result points into next and callKey: keep both
+ * alive for the callee's call. */
+const trainingCall_t *trainingCallForIndex(const trainingCall_t *call, size_t callIndex,
+                                           trainingCall_t *next, rngKey_t *callKey);
+
 typedef struct trainingStats {
     tensor_t *output;
     float loss;
@@ -144,7 +152,8 @@ typedef trainingStats_t *(*calculateGradsFn_t)(layer_t **model, size_t modelSize
  *  next chunk. The function returns an output whose leading dimension is
  *  rows and whose per-row block holds the C class scores (#468), and the
  *  loss reduced over the rows per forwardReduction. trainingRun's evaluation
- *  passes its call (see trainingRunOptions_t.remat), the public evaluation
+ *  passes its call with this call's key (see trainingRunOptions_t.remat and
+ *  .rng), the public evaluation
  *  functions pass NULL; a function that routes through inferenceWithLoss
  *  forwards call. */
 typedef inferenceStats_t *(*inferenceWithLossFn_t)(layer_t **model, size_t numberOfLayers,
@@ -165,7 +174,8 @@ typedef struct epochInfo {
     float learningRate;      /* getLr(optimizer) this epoch trained with */
 } epochInfo_t;
 
-/*! Invoked once per training epoch, after evaluation, before the schedulers step. */
+/*! Invoked once per training epoch, after evaluation and after options->rng
+ * counts the epoch, before the schedulers step. */
 typedef void (*epochCallbackFn_t)(epochInfo_t info, epochStats_t evalStats);
 
 /*! Optional inputs of trainingRun(). NULL, or a zero-initialised struct, means
@@ -210,6 +220,11 @@ typedef struct trainingRunOptions {
                                     eval call whose input differs exits naming the mismatch),
                                     and a loader whose stream differs from its nominal count
                                     exits at its first ragged chunk. */
+    trainingRng_t *rng;         /* NULLable; NULL runs without keys. Otherwise caller-initialised
+                                    (trainingRngInit) and caller-owned: every training epoch
+                                    derives its step keys from it, each epoch's evaluation gets
+                                    the epoch's evaluation key, and the epoch counter advances
+                                    after each evaluation. */
 } trainingRunOptions_t;
 
 void freeTrainingStats(trainingStats_t *trainingStats);
@@ -244,8 +259,9 @@ classificationReport_t evaluationEpochWithReport(layer_t **model, size_t modelSi
 
 /*! Runs numberOfEpochs of train+eval. Per epoch, in this order: reshuffle
  * the train loader (epoch > 0, #381) -> capture epochInfo_t (batch, updates,
- * LR the epoch trains with) -> trainingEpochDefault -> evaluate -> callback
- * -> lrSchedulerStep -> bsSchedulerStep (last: it only writes
+ * LR the epoch trains with) -> trainingEpochDefault -> evaluate -> count the
+ * epoch in options->rng -> callback -> lrSchedulerStep -> bsSchedulerStep
+ * (last: it only writes
  * trainDataLoader->batchSize, which the next epoch reads fresh). A callback
  * that logs the LR/batch therefore reports the values this epoch actually
  * trained with. Fails fast (before the first batch) if: the LR scheduler is

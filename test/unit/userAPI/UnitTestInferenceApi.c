@@ -7,6 +7,7 @@
 #include "DeathTest.h"
 #include "InferenceApi.h"
 #include "Layer.h"
+#include "LayerExec.h"
 #include "LayerNormApi.h"
 #include "LayerQuant.h"
 #include "LayerWeightsApi.h"
@@ -875,6 +876,122 @@ void testInferenceWithLossTakesACallWithoutAScheduler(void) {
     TEST_ASSERT_EQUAL_MEMORY(out[0], out[1], sizeof out[0]);
 }
 
+/* ---- the layer keys inferenceWithLoss hands out (#4) ---- */
+
+/* Expected words from the Python mirror (LAYER spelled 3), repository root:
+ *   uv run python -c "from examples._shared.keyed_rng import (fold,
+ *   key_from_seed as kfs); c = kfs(0xd21f); print([[hex(w) for w in fold(c, 3, i)]
+ *   for i in (0, 1, 2)])"
+ * Each check also compares with the explicit rngFold chain. */
+#define EVAL_CALL_KEY_SEED 0xd21fu
+#define EVAL_EXEC_RECORDS 12
+
+typedef struct {
+    bool hasExec;
+    rngKey_t key;
+} execRecord_t;
+
+static execRecord_t g_execRecords[EVAL_EXEC_RECORDS];
+static size_t g_execRecordCount;
+static layerFunctions_t g_savedLinear;
+static layerFunctions_t g_savedRelu;
+static lossFunctions_t g_savedMse;
+
+static void recordExec(const layerExec_t *exec) {
+    if (g_execRecordCount < EVAL_EXEC_RECORDS) {
+        g_execRecords[g_execRecordCount].hasExec = exec != NULL;
+        if (exec != NULL) {
+            g_execRecords[g_execRecordCount].key = exec->key;
+        }
+    }
+    g_execRecordCount++;
+}
+
+static void spyForward(layer_t *layer, tensor_t *in, tensor_t *out, const layerExec_t *exec) {
+    recordExec(exec);
+    (layer->type == LINEAR ? g_savedLinear : g_savedRelu).forward(layer, in, out, exec);
+}
+
+static float spyLossForward(tensor_t *out, tensor_t *label, reduction_t reduction,
+                            const layerExec_t *exec) {
+    recordExec(exec);
+    return g_savedMse.forward(out, label, reduction, exec);
+}
+
+static void installExecSpies(void) {
+    g_savedLinear = layerFunctions[LINEAR];
+    g_savedRelu = layerFunctions[RELU];
+    g_savedMse = lossFunctions[MSE];
+    layerFunctions[LINEAR].forward = spyForward;
+    layerFunctions[RELU].forward = spyForward;
+    lossFunctions[MSE].forward = spyLossForward;
+    g_execRecordCount = 0;
+}
+
+static void restoreExecSpies(void) {
+    layerFunctions[LINEAR] = g_savedLinear;
+    layerFunctions[RELU] = g_savedRelu;
+    lossFunctions[MSE] = g_savedMse;
+}
+
+static void assertThreeLayerKeys(rngKey_t callKey) {
+    const uint32_t python[3][2] = {
+        {0x6842c650u, 0xaf1109a3u}, {0x47477cedu, 0xab1bacc3u}, {0x626020c6u, 0x288f25e1u}};
+    TEST_ASSERT_EQUAL_size_t(3, g_execRecordCount);
+    for (uint32_t layer = 0; layer < 3u; layer++) {
+        rngKey_t expected = rngFold(callKey, RNG_TAG_LAYER, layer);
+        TEST_ASSERT_TRUE(g_execRecords[layer].hasExec);
+        TEST_ASSERT_EQUAL_HEX32(expected.w[0], g_execRecords[layer].key.w[0]);
+        TEST_ASSERT_EQUAL_HEX32(expected.w[1], g_execRecords[layer].key.w[1]);
+        TEST_ASSERT_EQUAL_HEX32(python[layer][0], g_execRecords[layer].key.w[0]);
+        TEST_ASSERT_EQUAL_HEX32(python[layer][1], g_execRecords[layer].key.w[1]);
+    }
+}
+
+/* A keyed call hands layer i the call key folded with (LAYER, i) and the loss
+ * that of index n, without a scheduler and on a caller's scheduler alike. */
+void testInferenceWithLossHandsEachLayerItsLayerKey(void) {
+    evalFixture_t f;
+    buildEvalFixture(&f);
+    const rngKey_t callKey = rngKeyFromSeed(EVAL_CALL_KEY_SEED);
+    rematScheduler_t heap;
+    TEST_ASSERT_TRUE(rematHeapInit(&heap, f.model, 2, defaultLossConfig(MSE), f.input, NULL));
+
+    installExecSpies();
+    freeInferenceStats(inferenceWithLoss(f.model, 2, f.input, f.label, MSE, REDUCTION_MEAN,
+                                         &(trainingCall_t){.key = &callKey}));
+    restoreExecSpies();
+    assertThreeLayerKeys(callKey);
+
+    installExecSpies();
+    freeInferenceStats(inferenceWithLoss(f.model, 2, f.input, f.label, MSE, REDUCTION_MEAN,
+                                         &(trainingCall_t){.remat = &heap, .key = &callKey}));
+    restoreExecSpies();
+    assertThreeLayerKeys(callKey);
+
+    rematSchedulerDeinit(&heap);
+    freeEvalFixture(&f);
+}
+
+/* Without a key no layer gets a context, and inference() never hands one. */
+void testInferenceWithoutAKeyHandsNoLayerContext(void) {
+    evalFixture_t f;
+    buildEvalFixture(&f);
+    installExecSpies();
+
+    freeInferenceStats(inferenceWithLoss(f.model, 2, f.input, f.label, MSE, REDUCTION_MEAN, NULL));
+    freeInferenceStats(
+        inferenceWithLoss(f.model, 2, f.input, f.label, MSE, REDUCTION_MEAN, &(trainingCall_t){0}));
+    freeTensor(inference(f.model, 2, f.input));
+
+    restoreExecSpies();
+    freeEvalFixture(&f);
+    TEST_ASSERT_EQUAL_size_t(8, g_execRecordCount);
+    for (size_t r = 0; r < 8; r++) {
+        TEST_ASSERT_FALSE(g_execRecords[r].hasExec);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testInferenceLinearReluFloat);
@@ -896,5 +1013,7 @@ int main(void) {
     RUN_TEST(testInferenceBatchedAddsBatchAxisToNaturalSamples);
     RUN_TEST(testInferenceWithLossRunsOnACallersScheduler);
     RUN_TEST(testInferenceWithLossTakesACallWithoutAScheduler);
+    RUN_TEST(testInferenceWithLossHandsEachLayerItsLayerKey);
+    RUN_TEST(testInferenceWithoutAKeyHandsNoLayerContext);
     return UNITY_END();
 }

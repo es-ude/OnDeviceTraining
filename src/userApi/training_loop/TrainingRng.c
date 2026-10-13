@@ -64,3 +64,18 @@ void trainingRngAdvanceEpoch(trainingRng_t *rng) {
     }
     rng->epoch++;
 }
+
+const trainingCall_t *trainingCallForIndex(const trainingCall_t *call, size_t callIndex,
+                                           trainingCall_t *next, rngKey_t *callKey) {
+    if (call == NULL) {
+        return NULL;
+    }
+    const rngKey_t *parentKey = call->key;
+    *next = *call;
+    next->key = NULL;
+    if (parentKey != NULL) {
+        *callKey = trainingRngCallKey(*parentKey, callIndex);
+        next->key = callKey;
+    }
+    return next;
+}

@@ -274,6 +274,8 @@ int main(void) {
      * (DETERMINISM.md contract; previously the RNG ran from its default
      * state=1). BIT_PARITY loads a state_dict over these weights. */
     rngSetSeed(SEED);
+    trainingRng_t rng;
+    trainingRngInit(&rng, SEED);
 
     layer_t *model[MODEL_SIZE];
     buildModel(model, &lq);
@@ -320,7 +322,7 @@ int main(void) {
             (lossConfig_t){
                 .funcType = MSE, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL},
             trainLoader, valLoader, sgd, EPOCHS, calculateGradsSequential, inferenceWithLoss,
-            &(trainingRunOptions_t){.callback = epochCallback});
+            &(trainingRunOptions_t){.callback = epochCallback, .rng = &rng});
         (void)result;
 
         float testLoss = evaluationEpoch(model, MODEL_SIZE, MSE, testLoader, inferenceWithLoss,

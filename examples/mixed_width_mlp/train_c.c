@@ -356,8 +356,13 @@ int main(void) {
     };
 
     layer_t *model[MODEL_SIZE];
-    rngSetSeed(1); /* fixed seed, sed-able literal: the 10-seed sweep harness
-                    * patches this integer per run */
+    /* Fixed seed. The 10-seed sweep harness patches the sed-able literal on
+     * the next line per run; that one variable seeds both the global rng and
+     * the keys of the training draws. */
+    const uint32_t seed = 1u;
+    rngSetSeed(seed);
+    trainingRng_t rng;
+    trainingRngInit(&rng, seed);
     buildModel(model, &mq);
 
     /* Requantize Linear0/Linear1's weight/bias PARAM tensors to the pinned
@@ -371,8 +376,9 @@ int main(void) {
         requantizeTensorInPlace(cfg->bias->param, mq.biasQ);
     }
 
-    /* Factory default (#279): param write-backs run under seeded SR_HALF_AWAY
-     * (dead-zone escape) -- deterministic given the fixed rngSetSeed above.
+    /* Factory default (#279): param write-backs run under SR_HALF_AWAY
+     * (dead-zone escape), keyed per update by rng -- deterministic given the
+     * fixed seed above.
      * The gates below are dtype + loss-decrease checks, not gold values, so
      * this example deliberately trains under the framework default. */
     optimizer_t *sgd = sgdMCreateOptim(
@@ -403,14 +409,18 @@ int main(void) {
         tensor_t *input = batchViewOf(&itemView, smp->item);
         tensor_t *labelBatch = batchViewOf(&labelView, label);
 
+        /* One update per sample: its one call is call 0 under the update's
+         * step key, derived through the helpers as trainingEpochDefault does. */
+        rngKey_t callKey = trainingRngCallKey(trainingRngStepKey(&rng), 0);
+        const trainingCall_t call = {.key = &callKey};
         trainingStats_t *stats;
         if (i == 0) {
             /* One traced step: also probes Linear0's own forward wire. */
             stats = tracedGrads(model, MODEL_SIZE, lossCfg, REDUCTION_MEAN, input, labelBatch,
-                                linear0WireGateSink, &wireCtx, NULL);
+                                linear0WireGateSink, &wireCtx, &call);
         } else {
             stats = calculateGradsSequential(model, MODEL_SIZE, lossCfg, REDUCTION_MEAN, input,
-                                             labelBatch, NULL);
+                                             labelBatch, &call);
         }
         freeTrainingStats(stats);
         freeSample(smp);
@@ -420,7 +430,9 @@ int main(void) {
          * is a no-op, so a bare step/zero per sample is exact (CLAUDE.md
          * loss/training_loop microbatch contract). The step goes through
          * optimizerStep so the OPTIMIZER phase events fire (#432). */
-        optimizerStep(sgd, NULL);
+        rngKey_t updateKey = trainingRngUpdateKey(&rng);
+        optimizerStep(sgd, &updateKey);
+        trainingRngAdvance(&rng);
         optimFns.zero(sgd);
 
         if (i == 0) {

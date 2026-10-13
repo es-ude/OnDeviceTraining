@@ -343,6 +343,8 @@ int main(int argc, char **argv) {
     float meanScale = lossFunctions[lossCfg.funcType].computeMeanScale(
         effB, batchViewOf(&firstLabelView, firstLabel));
 
+    trainingRng_t rng;
+    trainingRngInit(&rng, SEED);
     ensureDir("examples/kws_raw/dump_c");
     for (size_t step = 0; step < g_steps; step++) {
         char dir[256];
@@ -359,6 +361,8 @@ int main(int argc, char **argv) {
         /* tiers 1 & 2 per sample (first g_actSamples); grads accumulate over ALL B samples.
          * No zero-grad between samples => param->grad ends up the SUM over the batch.
          * (Grads start at zero: calloc-backed after sgdMCreateOptim / optimFns.zero below.) */
+        /* Keys as trainingEpochDefault derives them: call s under the step key. */
+        const rngKey_t stepKey = trainingRngStepKey(&rng);
         double sumLoss = 0.0;
         for (size_t s = 0; s < effB; s++) {
             size_t idx = g_sampleStart + s;
@@ -369,10 +373,11 @@ int main(int argc, char **argv) {
             /* tracedGrads is tensor-level ([B, ...]); the sample is natural-shape. */
             batchView_t itemView;
             batchView_t labelView;
-            trainingStats_t *stats =
-                tracedGrads(model, MODEL_SIZE, lossCfg, REDUCTION_MEAN,
-                            batchViewOf(&itemView, smp->item), batchViewOf(&labelView, label),
-                            dumpActs ? npyDumpSink : NULL, dumpActs ? &ctx : NULL, NULL);
+            const rngKey_t callKey = trainingRngCallKey(stepKey, s);
+            trainingStats_t *stats = tracedGrads(
+                model, MODEL_SIZE, lossCfg, REDUCTION_MEAN, batchViewOf(&itemView, smp->item),
+                batchViewOf(&labelView, label), dumpActs ? npyDumpSink : NULL,
+                dumpActs ? &ctx : NULL, &(trainingCall_t){.key = &callKey});
             sumLoss += (double)stats->loss;
             freeTrainingStats(stats);
             freeSample(smp);
@@ -383,14 +388,16 @@ int main(int argc, char **argv) {
         traceModelGrads(model, MODEL_SIZE, "grad_raw", npyDumpSink, &ctx);
 
         /* mean-reduction scaling, exactly as TrainingEpochDefault does it. */
-        scaleOptimizerGradients(sgd, meanScale, NULL);
+        const rngKey_t updateKey = trainingRngUpdateKey(&rng);
+        scaleOptimizerGradients(sgd, meanScale, &updateKey);
 
         /* tier 3b: scaled grads (MEAN, pre-step). */
         traceModelGrads(model, MODEL_SIZE, "grad_scaled", npyDumpSink, &ctx);
 
         /* the update (through optimizerStep so an attached profiler sees the
          * OPTIMIZER phase, #432), then tier 4b: weights after. */
-        optimizerStep(sgd, NULL);
+        optimizerStep(sgd, &updateKey);
+        trainingRngAdvance(&rng);
         traceModelWeights(model, MODEL_SIZE, "w_after", npyDumpSink, &ctx);
         optimFns.zero(sgd);
 

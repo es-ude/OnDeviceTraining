@@ -260,16 +260,16 @@ static void absorbDomain(ppcaReplaySet_t *set, dataset_t *domainTrain) {
 }
 
 /* Fine-tune the model for `epochs` epochs on the given (possibly replay-wrapped)
- * loader; prints one line per epoch. */
+ * loader, keyed by the run's rng; prints one line per epoch. */
 static void trainEpochs(layer_t **model, optimizer_t *sgd, dataLoader_t *loader, int epochs,
-                        int domain, const char *phase) {
+                        int domain, const char *phase, trainingRng_t *rng) {
     for (int e = 0; e < epochs; e++) {
-        float loss =
-            trainingEpochDefault(model, MODEL_SIZE,
-                                 (lossConfig_t){.funcType = CROSS_ENTROPY,
-                                                .backwardReduction = REDUCTION_MEAN,
-                                                .classWeights = NULL},
-                                 loader, sgd, calculateGradsSequential, REDUCTION_MEAN, 1, NULL);
+        float loss = trainingEpochDefault(model, MODEL_SIZE,
+                                          (lossConfig_t){.funcType = CROSS_ENTROPY,
+                                                         .backwardReduction = REDUCTION_MEAN,
+                                                         .classWeights = NULL},
+                                          loader, sgd, calculateGradsSequential, REDUCTION_MEAN, 1,
+                                          &(trainingCall_t){.rng = rng});
         fprintf(stdout, "[domain %d %s] epoch %d/%d train_loss=%.4f\n", domain, phase, e + 1,
                 epochs, (double)loss);
         fflush(stdout);
@@ -368,6 +368,8 @@ int main(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, quantizationInitFloat());
     rngSetSeed(g_seed);
+    trainingRng_t rng;
+    trainingRngInit(&rng, g_seed);
     layer_t *model[MODEL_SIZE];
     buildModel(model, &lq);
 
@@ -422,7 +424,7 @@ int main(void) {
     dataLoader_t *loader0 =
         dataLoaderInit(getTrainSample, getTrainSize, BATCH, NULL, NULL,
                        /*shuffle*/ true, /*shuffleSeed*/ g_seed, /*dropLast*/ true);
-    trainEpochs(model, sgd, loader0, g_pretrainEpochs, 0, "pretrain");
+    trainEpochs(model, sgd, loader0, g_pretrainEpochs, 0, "pretrain", &rng);
     freeDataLoader(loader0);
 
     if (g_replay && exemplars != NULL) {
@@ -452,7 +454,7 @@ int main(void) {
                                               .stream = &replayStream,
                                               .mode = g_replayMode});
         }
-        trainEpochs(model, sgd, loader, g_epochsPerDomain, (int)t, "finetune");
+        trainEpochs(model, sgd, loader, g_epochsPerDomain, (int)t, "finetune", &rng);
         /* Free the WRAPPER with freeReplayDataLoader and the base with
          * freeDataLoader — never freeDataLoader on the wrapper. */
         if (g_replay) {

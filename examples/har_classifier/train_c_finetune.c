@@ -363,6 +363,9 @@ int main(void) {
     layerQuantInitUniform(&lq, quantizationInitFloat());
 
     rngSetSeed(g_seed);
+    trainingRng_t rng;
+    trainingRngInit(&rng, g_seed);
+    rematCall.rng = &rng;
 
     if (rematSel.dryPlan) {
         /* The stage-2 plan depends on topology, frozen flags and the input
@@ -417,7 +420,7 @@ int main(void) {
     trainingRunResult_t stage1Result =
         trainingRun(model, MODEL_SIZE, lossConfig, trainLoader, valLoader, sgd1, g_stage1Epochs,
                     calculateGradsSequential, inferenceWithLoss,
-                    &(trainingRunOptions_t){.callback = epochCallback});
+                    &(trainingRunOptions_t){.callback = epochCallback, .rng = &rng});
     (void)stage1Result;
 
     epochStats_t stage1TestStats = evaluationEpochWithMetrics(
@@ -495,10 +498,10 @@ int main(void) {
 
     clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
     g_currentStage = 2;
-    trainingRunResult_t stage2Result =
-        trainingRun(model2, MODEL_SIZE, lossConfig, trainLoader, valLoader, sgd2, g_stage2Epochs,
-                    calculateGradsSequential, inferenceWithLoss,
-                    &(trainingRunOptions_t){.callback = epochCallback, .remat = rematCall.remat});
+    trainingRunResult_t stage2Result = trainingRun(
+        model2, MODEL_SIZE, lossConfig, trainLoader, valLoader, sgd2, g_stage2Epochs,
+        calculateGradsSequential, inferenceWithLoss,
+        &(trainingRunOptions_t){.callback = epochCallback, .remat = rematCall.remat, .rng = &rng});
     (void)stage2Result;
 
     epochStats_t stage2TestStats = evaluationEpochWithMetrics(

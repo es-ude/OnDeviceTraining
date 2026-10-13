@@ -190,6 +190,19 @@ size_t memInstrumentHarWireOverheadBytes(size_t microBatch,
 static void memOneStepThunk(void *p) {
     memStepCtx_t *c = (memStepCtx_t *)p;
     optimizerFunctions_t fns = optimizerFunctions[c->optim->type];
+    /* One update of one call, keyed as trainingEpochDefault and
+     * trainingBatchDefault key it: the call key of call 0 under the step key,
+     * the update key, then the update is counted. */
+    trainingCall_t next = (c->call != NULL) ? *c->call : (trainingCall_t){0};
+    trainingRng_t *rng = next.rng;
+    rngKey_t callKey;
+    rngKey_t updateKey;
+    next.key = NULL;
+    if (rng != NULL) {
+        callKey = trainingRngCallKey(trainingRngStepKey(rng), 0);
+        next.key = &callKey;
+        updateKey = trainingRngUpdateKey(rng);
+    }
 
     fns.zero(c->optim);
     /* The two [1, ...] views live in this frame exactly as they live in
@@ -199,13 +212,16 @@ static void memOneStepThunk(void *p) {
     batchView_t labelView;
     trainingStats_t *stats = calculateGradsSequential(
         c->model, c->modelSize, c->lossConfig, REDUCTION_MEAN, batchViewOf(&itemView, c->input),
-        batchViewOf(&labelView, c->label), c->call);
+        batchViewOf(&labelView, c->label), &next);
     freeTrainingStats(stats);
     /* No scaleOptimizerGradients: the macro-batch mean scale is a scalar grad
      * multiply that does not deepen the call stack; the step itself does.
      * optimizerStep, not fns.step: the probe measures trainingRun's path, and
      * trainingEpochDefault steps through that wrapper (one extra frame; #432). */
-    optimizerStep(c->optim, NULL);
+    optimizerStep(c->optim, (rng != NULL) ? &updateKey : NULL);
+    if (rng != NULL) {
+        trainingRngAdvance(rng);
+    }
     fns.zero(c->optim);
 }
 

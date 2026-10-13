@@ -139,7 +139,8 @@ typedef struct memStepCtx {
     tensor_t *label; /* the batch axis with batchViewOf, as trainingBatchDefault does */
     optimizer_t *optim;
     /* The trainer's training call, so the probe runs the step on the run's
-     * scheduler; NULL (or a NULL .remat) is the training call's default. */
+     * scheduler; NULL (or a NULL .remat) is the training call's default. With
+     * a .rng the step is keyed like one training update and counted in it. */
     const trainingCall_t *call;
 } memStepCtx_t;
 

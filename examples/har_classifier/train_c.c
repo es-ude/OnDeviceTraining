@@ -477,6 +477,9 @@ int main(void) {
      * never seeded — it ran from its default state=1). BIT_PARITY overwrites
      * these weights from the state_dict, so this does not perturb the CI gate. */
     rngSetSeed(g_seed);
+    trainingRng_t rng;
+    trainingRngInit(&rng, g_seed);
+    rematCall.rng = &rng;
 
     layer_t *model[MODEL_SIZE];
 #ifdef ODT_MEM_PROFILE
@@ -551,7 +554,8 @@ int main(void) {
          * framework backstop. */
         lrScheduler_t lrSched;
         bsScheduler_t bsSched;
-        trainingRunOptions_t options = {.callback = epochCallback, .remat = rematCall.remat};
+        trainingRunOptions_t options = {
+            .callback = epochCallback, .remat = rematCall.remat, .rng = &rng};
         /* final.diverged in the log is derived from this stop; keep it on */
         options.stopOnNonFiniteLoss = true;
         if (strcmp(g_lrSchedule, "step") == 0) {

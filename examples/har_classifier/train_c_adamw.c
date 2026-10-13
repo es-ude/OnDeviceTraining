@@ -315,6 +315,8 @@ int main(void) {
      * never seeded — it ran from its default state=1). BIT_PARITY overwrites
      * these weights from the state_dict, so this does not perturb the CI gate. */
     rngSetSeed(g_seed);
+    trainingRng_t rng;
+    trainingRngInit(&rng, g_seed);
 
     layer_t *model[MODEL_SIZE];
 #ifdef ODT_MEM_PROFILE
@@ -376,13 +378,13 @@ int main(void) {
 
         clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
 
-        trainingRunResult_t result =
-            trainingRun(model, MODEL_SIZE,
-                        (lossConfig_t){.funcType = CROSS_ENTROPY,
-                                       .backwardReduction = REDUCTION_MEAN,
-                                       .classWeights = NULL},
-                        trainLoader, valLoader, optim, g_epochs, calculateGradsSequential,
-                        inferenceWithLoss, &(trainingRunOptions_t){.callback = epochCallback});
+        trainingRunResult_t result = trainingRun(
+            model, MODEL_SIZE,
+            (lossConfig_t){.funcType = CROSS_ENTROPY,
+                           .backwardReduction = REDUCTION_MEAN,
+                           .classWeights = NULL},
+            trainLoader, valLoader, optim, g_epochs, calculateGradsSequential, inferenceWithLoss,
+            &(trainingRunOptions_t){.callback = epochCallback, .rng = &rng});
         (void)result;
 
         epochStats_t testStats = evaluationEpochWithMetrics(
@@ -466,6 +468,7 @@ int main(void) {
             .input = stepSample->item,
             .label = stepSample->label,
             .optim = optim,
+            .call = &(trainingCall_t){.rng = &rng},
         };
         report.stack_peak_b = memInstrumentStackPeakBytes(&stepCtx, 1u << 20);
         freeSample(stepSample);

@@ -903,6 +903,8 @@ int main(void) {
 
     layer_t *model[MODEL_SIZE];
     rngSetSeed(g_seed);
+    trainingRng_t rng;
+    trainingRngInit(&rng, g_seed);
 #ifdef ODT_MEM_PROFILE
     size_t markBeforeModel = memProfileMark();
 #endif
@@ -1025,7 +1027,7 @@ int main(void) {
         (lossConfig_t){
             .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL},
         trainLoader, valLoader, sgd, g_epochs, firstStepGatedGrads, inferenceWithLoss,
-        &(trainingRunOptions_t){.lrScheduler = sched, .callback = epochCallback});
+        &(trainingRunOptions_t){.lrScheduler = sched, .callback = epochCallback, .rng = &rng});
     (void)result;
 
     epochStats_t testStats = evaluationEpochWithMetrics(
@@ -1069,6 +1071,7 @@ int main(void) {
         .input = stepSample->item,
         .label = stepSample->label,
         .optim = sgd,
+        .call = &(trainingCall_t){.rng = &rng},
     };
     report.stack_peak_b = memInstrumentStackPeakBytes(&stepCtx, 1u << 20);
     freeSample(stepSample);

@@ -137,8 +137,12 @@ add_elastic_ai_unit_test(
         Kernel
         Quantization
         StorageApi
+        LayerExec
+        RNG
+        TensorConversion
         odt_test_death
         odt_test_layer_builders
+        odt_test_keyed_draw
 )
 add_dependencies(UnitTestConv1d generate_expected_conv1d)
 add_dependencies(UnitTestConv1d generate_expected_conv1d_grouped)
@@ -249,7 +253,11 @@ add_elastic_ai_unit_test(
         Rounding
         RNG
         StorageApi
+        BfpSoftmaxExp
+        LayerExec
+        TensorConversion
         odt_test_death
+        odt_test_keyed_draw
 )
 add_dependencies(UnitTestSoftmax generate_expected_softmax)
 add_dependencies(UnitTestSoftmax generate_expected_bfp_softmax)
@@ -280,7 +288,11 @@ add_elastic_ai_unit_test(
         ConvTranspose1dKernel
         Kernel
         StorageApi
+        LayerExec
+        RNG
+        TensorConversion
         odt_test_death
+        odt_test_keyed_draw
 )
 add_dependencies(UnitTestConv1dTransposed generate_expected_conv1d_transposed)
 add_dependencies(UnitTestConv1dTransposed generate_expected_convT1d_grouped)
@@ -302,7 +314,11 @@ add_elastic_ai_unit_test(
         TensorApi
         QuantizationApi
         StorageApi
+        LayerExec
+        RNG
+        TensorConversion
         odt_test_death
+        odt_test_keyed_draw
 )
 add_dependencies(UnitTestMaxPool1d generate_expected_max_pool_1d)
 target_include_directories(UnitTestMaxPool1d PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
@@ -315,7 +331,11 @@ add_elastic_ai_unit_test(
         TensorApi
         QuantizationApi
         StorageApi
+        LayerExec
+        RNG
+        TensorConversion
         odt_test_death
+        odt_test_keyed_draw
 )
 add_dependencies(UnitTestAvgPool1d generate_expected_avg_pool_1d)
 target_include_directories(UnitTestAvgPool1d PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
@@ -341,7 +361,11 @@ add_elastic_ai_unit_test(
         TensorApi
         QuantizationApi
         StorageApi
+        LayerExec
+        RNG
+        TensorConversion
         odt_test_death
+        odt_test_keyed_draw
 )
 add_dependencies(UnitTestAdaptiveAvgPool1d generate_expected_adaptive_avg_pool_1d)
 target_include_directories(UnitTestAdaptiveAvgPool1d PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
@@ -361,7 +385,9 @@ add_elastic_ai_unit_test(
         Rounding
         StorageApi
         DropoutApi
+        TensorConversion
         odt_test_death
+        odt_test_keyed_draw
 )
 add_dependencies(UnitTestDropout generate_expected_bfp_dropout)
 target_include_directories(UnitTestDropout PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
@@ -432,7 +458,11 @@ add_elastic_ai_unit_test(
         Rounding
         Arithmetic
         StorageApi
+        LayerExec
+        RNG
+        TensorConversion
         odt_test_death
+        odt_test_keyed_draw
 )
 add_dependencies(UnitTestLayerNorm generate_expected_layernorm)
 add_dependencies(UnitTestLayerNorm generate_expected_layernorm_sym)
@@ -467,7 +497,11 @@ add_elastic_ai_unit_test(
         Arithmetic
         StorageApi
         Reduce
+        LayerExec
+        RNG
+        TensorConversion
         odt_test_death
+        odt_test_keyed_draw
 )
 add_dependencies(UnitTestGroupNorm generate_expected_groupnorm)
 target_include_directories(UnitTestGroupNorm PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
@@ -520,6 +554,7 @@ add_elastic_ai_unit_test(
         Rounding
         StorageApi
         odt_test_death
+        odt_test_keyed_draw
 )
 
 add_elastic_ai_unit_test(

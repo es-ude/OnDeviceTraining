@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "DeathTest.h"
+#include "KeyedDrawCheck.h"
 #include "Layer.h"
 #include "MaxPool1d.h"
 #include "Quantization.h"
@@ -1494,6 +1495,47 @@ void testMaxPool1dBackwardBfpRejectsBatch1ArgmaxAtBatch2(void) {
     freeTensor(batch1Input);
 }
 
+/* The SR forward rounds in the OUT_WRITE epilogue of its forward op: OP 0
+ * under the FORWARD phase of the layer key. The state from the Python mirror,
+ * tags as numbers (FORWARD 4, OP 7, OUT 10):
+ *   uv run python -c "from examples._shared.keyed_rng import fold, key_from_seed as kfs,
+ *   open_stream as o; print(hex(o(fold(fold(fold(kfs(0xa001), 4, 0), 7, 0), 10, 0))))" */
+#define MAXPOOL1D_KEYED_SEED 0xa001u
+#define MAXPOOL1D_KEYED_OUT_STATE 0xcf3d22e6u
+
+/* MaxPool1d(k = 2, stride 1) over 4 channels of length 5: 16 outputs, each
+ * rounded SR into an 8-bit SYM_INT32 output by its own draw. */
+void testMaxPool1dSrForwardIsAPureFunctionOfItsForwardOpKey(void) {
+    size_t inputDims[] = {1, 4, 5};
+    size_t outputDims[] = {1, 4, 4};
+    kernel_t kernel;
+    initKernel(&kernel, 2, VALID, 1, 1);
+    quantization_t *q = quantizationInitFloat();
+    tensor_t *argmax = makeInt32Tensor(outputDims, 3);
+    maxPool1dConfig_t cfg;
+    initMaxPool1dConfig(&cfg, &kernel, argmax, q, q);
+    layerConfig_t lc = {.maxPool1d = &cfg};
+    layer_t layer = {.type = MAXPOOL1D, .config = &lc};
+    float values[20];
+    for (size_t i = 0; i < 20; i++) {
+        values[i] = 0.37f * (float)((i * 7) % 20) - 3.1f;
+    }
+    tensor_t *input = makeFloatTensor(inputDims, 3, values);
+    keyedSymForward_t f = {.layer = &layer,
+                           .input = input,
+                           .outDims = {1, 4, 4},
+                           .outRank = 3,
+                           .forwardRounding = &cfg.forwardMath.roundingMode};
+
+    assertKeyedSymForwardDrawsFrom(&f, MAXPOOL1D_KEYED_SEED,
+                                   keyedOpOutState(MAXPOOL1D_KEYED_SEED, RNG_TAG_FORWARD, 0u),
+                                   MAXPOOL1D_KEYED_OUT_STATE);
+
+    freeTensor(input);
+    freeTensor(argmax);
+    freeQuantization(q);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMaxPool1dForwardBasic);
@@ -1535,5 +1577,6 @@ int main(void) {
     RUN_TEST(testMaxPool1dBackwardSymRejectsBatch1ArgmaxAtBatch2);
     RUN_TEST(testMaxPool1dForwardBfpRejectsArgmaxLengthMismatchAtBatch2);
     RUN_TEST(testMaxPool1dBackwardBfpRejectsBatch1ArgmaxAtBatch2);
+    RUN_TEST(testMaxPool1dSrForwardIsAPureFunctionOfItsForwardOpKey);
     return UNITY_END();
 }

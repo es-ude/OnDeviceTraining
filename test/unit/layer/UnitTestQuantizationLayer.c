@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "DeathTest.h"
+#include "KeyedDrawCheck.h"
 #include "Layer.h"
 #include "LayerExec.h"
 #include "LayerQuant.h"
@@ -407,6 +408,31 @@ void testQuantizationForwardWithoutAContextConvertsWithoutAStream(void) {
     TEST_ASSERT_FALSE(qlCellHasStream);
 }
 
+/* The state from the Python mirror, tags as numbers (FORWARD 4, CONVERT 12):
+ *   uv run python -c "from examples._shared.keyed_rng import fold, key_from_seed as kfs,
+ *   open_stream as o; print(hex(o(fold(fold(kfs(0x9a01), 4, 0), 12, 0))))" */
+#define QL_KEYED_SEED 0x9a01u
+#define QL_KEYED_CONVERT_STATE 0xbba72004u
+
+/* A FLOAT32 [2, 8] requantized SR into an 8-bit SYM_INT32 output: 16
+ * elements, each rounded by its own draw of the (FORWARD, CONVERT) stream. */
+void testQuantizationSrForwardIsAPureFunctionOfItsConvertStream(void) {
+    tensor_t *input = buildFloat2D(2, 8);
+    for (size_t i = 0; i < 16; i++) {
+        ((float *)input->data)[i] = 0.37f * (float)((i * 7) % 16) - 3.1f;
+    }
+    layer_t qLayer = {.type = QUANTIZATION, .config = NULL};
+    keyedSymForward_t f = {
+        .layer = &qLayer, .input = input, .outDims = {2, 8}, .outRank = 2, .forwardRounding = NULL};
+
+    assertKeyedSymForwardDrawsFrom(
+        &f, QL_KEYED_SEED,
+        keyedPurposeStream(QL_KEYED_SEED, RNG_TAG_FORWARD, RNG_TAG_CONVERT).state,
+        QL_KEYED_CONVERT_STATE);
+
+    freeTensor(input);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testQuantizationForwardSymToSymMatchesDirectRequant);
@@ -423,5 +449,6 @@ int main(void) {
     RUN_TEST(testQuantizationForwardConvertsWithItsForwardConvertStream);
     RUN_TEST(testQuantizationBackwardConvertsWithItsBackwardConvertStream);
     RUN_TEST(testQuantizationForwardWithoutAContextConvertsWithoutAStream);
+    RUN_TEST(testQuantizationSrForwardIsAPureFunctionOfItsConvertStream);
     return UNITY_END();
 }

@@ -7,6 +7,7 @@
 #include "AvgPool1d.h"
 #include "BfpKernelSupport.h"
 #include "DeathTest.h"
+#include "KeyedDrawCheck.h"
 #include "Layer.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
@@ -1118,6 +1119,44 @@ void testAvgPool1dBfpRejectsRank2Operands(void) {
     freeTensor(badInput);
 }
 
+/* The SR forward rounds in the OUT_WRITE epilogue of its forward op: OP 0
+ * under the FORWARD phase of the layer key. The state from the Python mirror,
+ * tags as numbers (FORWARD 4, OP 7, OUT 10):
+ *   uv run python -c "from examples._shared.keyed_rng import fold, key_from_seed as kfs,
+ *   open_stream as o; print(hex(o(fold(fold(fold(kfs(0xa002), 4, 0), 7, 0), 10, 0))))" */
+#define AVGPOOL1D_KEYED_SEED 0xa002u
+#define AVGPOOL1D_KEYED_OUT_STATE 0xbafc192fu
+
+/* AvgPool1d(k = 2, stride 1) over 4 channels of length 5: 16 outputs, each
+ * rounded SR into an 8-bit SYM_INT32 output by its own draw. */
+void testAvgPool1dSrForwardIsAPureFunctionOfItsForwardOpKey(void) {
+    size_t inputDims[] = {1, 4, 5};
+    kernel_t kernel;
+    initKernel(&kernel, 2, VALID, 1, 1);
+    quantization_t *q = quantizationInitFloat();
+    avgPool1dConfig_t cfg;
+    initAvgPool1dConfig(&cfg, &kernel, q, q);
+    layerConfig_t lc = {.avgPool1d = &cfg};
+    layer_t layer = {.type = AVGPOOL1D, .config = &lc};
+    float values[20];
+    for (size_t i = 0; i < 20; i++) {
+        values[i] = 0.37f * (float)((i * 7) % 20) - 3.1f;
+    }
+    tensor_t *input = makeFloatTensor(inputDims, 3, values);
+    keyedSymForward_t f = {.layer = &layer,
+                           .input = input,
+                           .outDims = {1, 4, 4},
+                           .outRank = 3,
+                           .forwardRounding = &cfg.forwardMath.roundingMode};
+
+    assertKeyedSymForwardDrawsFrom(&f, AVGPOOL1D_KEYED_SEED,
+                                   keyedOpOutState(AVGPOOL1D_KEYED_SEED, RNG_TAG_FORWARD, 0u),
+                                   AVGPOOL1D_KEYED_OUT_STATE);
+
+    freeTensor(input);
+    freeQuantization(q);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testAvgPool1dForwardBasic);
@@ -1151,5 +1190,6 @@ int main(void) {
     RUN_TEST(testAvgPool1dBackwardBfpScattersIntoFloat32Raw);
     RUN_TEST(testAvgPool1dBackwardBfpGuardsNarrowedNotRemoved);
     RUN_TEST(testAvgPool1dBfpRejectsRank2Operands);
+    RUN_TEST(testAvgPool1dSrForwardIsAPureFunctionOfItsForwardOpKey);
     return UNITY_END();
 }

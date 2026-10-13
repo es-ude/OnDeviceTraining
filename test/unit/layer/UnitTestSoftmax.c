@@ -3,6 +3,7 @@
 
 #include "ArithmeticType.h"
 #include "DeathTest.h"
+#include "KeyedDrawCheck.h"
 #include "LayerExec.h"
 #include "LayerQuant.h"
 #include "Quantization.h"
@@ -1640,6 +1641,210 @@ void unitTestSoftmaxBackwardBfpSingleRowRank2MatchesRank1(void) {
     TEST_ASSERT_EQUAL_UINT8_ARRAY(kSmBfpBwdOutExponents, gotExps, 2);
 }
 
+/* ---- keyed draws: the BFP pack, the BFP shifts and the SYM dx convert ---- */
+
+/* The states from the Python mirror, tags as numbers (FORWARD 4, BACKWARD 5,
+ * OP 7, OUT 10, CONVERT 12, SOFTMAX_SHIFT 15):
+ *   uv run python -c "from examples._shared.keyed_rng import fold, key_from_seed as kfs,
+ *   open_stream as o; print(hex(o(fold(fold(fold(kfs(0x5f01), 4, 0), 7, 0), 10, 0))),
+ *   hex(o(fold(fold(kfs(0x5f02), 4, 0), 15, 0))), hex(o(fold(fold(kfs(0x5f03), 5, 0), 12, 0))))" */
+#define SM_KEYED_PACK_SEED 0x5f01u
+#define SM_KEYED_PACK_OUT_STATE 0x9e2670f7u
+#define SM_KEYED_SHIFT_SEED 0x5f02u
+#define SM_KEYED_SHIFT_STATE 0x0ce9eb21u
+#define SM_KEYED_CONVERT_SEED 0x5f03u
+#define SM_KEYED_CONVERT_STATE 0x67798201u
+#define SM_KEYED_N 16
+/* One per-tensor block at stored exponent 110: x = m * 2^-17, so the work grid
+ * 2^-14 sits 3 bits above the storage grid and every element's alignment
+ * shift is a 3-bit rounded shift. */
+#define SM_KEYED_EXPONENT 110
+#define SM_KEYED_EMAX (-17)
+
+static const int32_t kSmKeyedCodes[SM_KEYED_N] = {12001, -3407,  25603, 801,   -17005, 9999,
+                                                  30017, -22221, 4711,  18183, -8191,  27001,
+                                                  1234,  -29999, 15555, 6006};
+
+static tensor_t *buildSmKeyedInput(void) {
+    return buildSmBfpWireWithCodes(SM_KEYED_N, 16, 8, 1, 0, kSmKeyedCodes,
+                                   (uint8_t[]){SM_KEYED_EXPONENT});
+}
+
+typedef struct {
+    layer_t *layer;
+    tensor_t *input;
+    tensor_t *loss; /* backward runs only */
+} smKeyedFixture_t;
+
+/* A keyedRun_t: one BFP forward into a fresh per-tensor 8-bit BFP output whose
+ * pack rounds SR (stochastic) or half away; out = the codes, then the
+ * exponent. */
+static size_t smBfpPackRun(void *ctx, uint64_t seed, bool stochastic,
+                           uint8_t out[KEYED_DRAW_MAX_BYTES]) {
+    smKeyedFixture_t *f = ctx;
+    const int32_t zeros[SM_KEYED_N] = {0};
+    tensor_t *output = buildSmBfpWireWithCodes(SM_KEYED_N, 8, 8, 1, 0, zeros, (uint8_t[]){127});
+    f->layer->config->softmax->forwardMath.roundingMode = stochastic ? SR_HALF_AWAY : HALF_AWAY;
+    const layerExec_t exec = {.key = rngKeyFromSeed(seed)};
+
+    layerFunctions[SOFTMAX].forward(f->layer, f->input, output, &exec);
+
+    size_t n = calcBytesPerTensor(output);
+    memcpy(out, output->data, n);
+    out[n] = ((bfpQConfig_t *)output->quantization->qConfig)->exponents[0];
+    freeTensor(output);
+    return n + 1;
+}
+
+/* The BFP forward packs its float softmax into the BFP output in the OUT_WRITE
+ * epilogue of its forward op (OP 0 under FORWARD): 16 codes, each rounded SR
+ * by its own draw. */
+void testSoftmaxBfpSrPackIsAPureFunctionOfItsForwardOpKey(void) {
+    tensor_t *input = buildSmKeyedInput();
+    quantization_t *wireQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, wireQ);
+    smKeyedFixture_t f = {.layer = softmaxLayerInit(&lq), .input = input};
+    uint8_t bytes[KEYED_DRAW_MAX_BYTES];
+
+    keyedCellInstall(FLOAT32, BFP);
+    smBfpPackRun(&f, SM_KEYED_PACK_SEED, true, bytes);
+    keyedCellRestore();
+    assertKeyedCellSawOneStream(keyedOpOutState(SM_KEYED_PACK_SEED, RNG_TAG_FORWARD, 0u),
+                                SM_KEYED_PACK_OUT_STATE);
+    assertKeyedRunIsPure(smBfpPackRun, &f, SM_KEYED_PACK_SEED);
+
+    freeSoftmaxLayer(f.layer);
+    freeQuantization(wireQ);
+    freeTensor(input);
+}
+
+/* softmaxValuesBfp of the fixture (one block, sigma < 0) rebuilt from the
+ * public shift primitives on `shift`: the argmax's shift, then per element its
+ * alignment shift and the exp core's shift, in that order. */
+static void smReferenceUnderSrShifts(rngStream_t *shift, float s[SM_KEYED_N]) {
+    const int32_t sigma = SM_KEYED_EMAX + BFP_SOFTMAX_EXP_FRAC_BITS;
+    TEST_ASSERT_TRUE(sigma < 0);
+    const uint32_t down = (uint32_t)(-sigma);
+    int32_t mMax = kSmKeyedCodes[0];
+    for (size_t i = 1; i < SM_KEYED_N; i++) {
+        if (kSmKeyedCodes[i] > mMax) {
+            mMax = kSmKeyedCodes[i];
+        }
+    }
+    const int32_t mMaxW = bfpShiftRightRounded(mMax, down, BFP_SHIFT_SR, shift);
+    float sum = 0.f;
+    for (size_t i = 0; i < SM_KEYED_N; i++) {
+        int32_t qT = bfpShiftRightRounded(kSmKeyedCodes[i], down, BFP_SHIFT_SR, shift) - mMaxW;
+        if (qT > 0) {
+            qT = 0;
+        }
+        const int32_t qe = bfpIExpQ(qT, BFP_SHIFT_SR, shift);
+        s[i] = ldexpf((float)qe * BFP_SOFTMAX_A, -28);
+        sum += s[i];
+    }
+    for (size_t i = 0; i < SM_KEYED_N; i++) {
+        s[i] /= sum;
+    }
+}
+
+/* A keyedRun_t: one BFP forward into a FLOAT32 output (the raw softmax) with
+ * SR shifts (stochastic) or truncating ones; out = the 16 floats. */
+static size_t smBfpShiftRun(void *ctx, uint64_t seed, bool stochastic,
+                            uint8_t out[KEYED_DRAW_MAX_BYTES]) {
+    smKeyedFixture_t *f = ctx;
+    tensor_t *output = buildSoftmaxWire1D(SM_KEYED_N, quantizationInitFloat());
+    softmaxSetBfpExpShiftRounding(f->layer, stochastic ? BFP_SHIFT_SR : BFP_SHIFT_TRUNC);
+    const layerExec_t exec = {.key = rngKeyFromSeed(seed)};
+
+    layerFunctions[SOFTMAX].forward(f->layer, f->input, output, &exec);
+
+    memcpy(out, output->data, SM_KEYED_N * sizeof(float));
+    freeTensor(output);
+    return SM_KEYED_N * sizeof(float);
+}
+
+/* Under SR shifts the BFP forward draws every shift from the SOFTMAX_SHIFT
+ * stream of the FORWARD phase: its softmax equals the one rebuilt from the
+ * public shift primitives on that stream, and it is a pure function of the
+ * layer key. */
+void testSoftmaxBfpSrShiftsDrawFromTheForwardShiftStream(void) {
+    tensor_t *input = buildSmKeyedInput();
+    quantization_t *wireQ = quantizationInitBfp(16, 8, HALF_AWAY);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, wireQ);
+    smKeyedFixture_t f = {.layer = softmaxLayerInit(&lq), .input = input};
+    uint8_t bytes[KEYED_DRAW_MAX_BYTES];
+    float got[SM_KEYED_N];
+
+    smBfpShiftRun(&f, SM_KEYED_SHIFT_SEED, true, bytes);
+    memcpy(got, bytes, sizeof(got));
+
+    rngStream_t s = keyedPurposeStream(SM_KEYED_SHIFT_SEED, RNG_TAG_FORWARD, RNG_TAG_SOFTMAX_SHIFT);
+    TEST_ASSERT_EQUAL_HEX32(SM_KEYED_SHIFT_STATE, s.state);
+    float expected[SM_KEYED_N];
+    smReferenceUnderSrShifts(&s, expected);
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(expected, got, sizeof(got),
+                                     "the forward's shifts are the shift stream's");
+    assertKeyedRunIsPure(smBfpShiftRun, &f, SM_KEYED_SHIFT_SEED);
+
+    freeSoftmaxLayer(f.layer);
+    freeQuantization(wireQ);
+    freeTensor(input);
+}
+
+/* A keyedRun_t: one SYM backward into a fresh 8-bit SYM_INT32 dx that rounds
+ * SR (stochastic) or half away; out = the codes, then the scale. */
+static size_t smSymBackwardRun(void *ctx, uint64_t seed, bool stochastic,
+                               uint8_t out[KEYED_DRAW_MAX_BYTES]) {
+    smKeyedFixture_t *f = ctx;
+    tensor_t *propLoss = buildSoftmaxWire1D(
+        SM_KEYED_N, quantizationInitSymInt32WithBits(stochastic ? SR_HALF_AWAY : HALF_AWAY, 8));
+    const layerExec_t exec = {.key = rngKeyFromSeed(seed)};
+
+    layerFunctions[SOFTMAX].backward(f->layer, f->input, f->loss, propLoss, &exec);
+
+    memcpy(out, propLoss->data, SM_KEYED_N * sizeof(int32_t));
+    memcpy(out + SM_KEYED_N * sizeof(int32_t),
+           &((symInt32QConfig_t *)propLoss->quantization->qConfig)->scale, sizeof(float));
+    freeTensor(propLoss);
+    return SM_KEYED_N * sizeof(int32_t) + sizeof(float);
+}
+
+/* The SYM backward requantizes its float dx through [FLOAT32][SYM_INT32] with
+ * the CONVERT stream of the BACKWARD phase: 16 elements, each rounded SR by
+ * its own draw. */
+void testSoftmaxSymBackwardConvertsWithItsBackwardConvertStream(void) {
+    float inValues[SM_KEYED_N];
+    float lossValues[SM_KEYED_N];
+    for (size_t i = 0; i < SM_KEYED_N; i++) {
+        inValues[i] = 0.29f * (float)((i * 5) % SM_KEYED_N) - 2.3f;
+        lossValues[i] = 0.37f * (float)((i * 7) % SM_KEYED_N) - 3.1f;
+    }
+    tensor_t *input = buildSoftmaxWire1D(SM_KEYED_N, quantizationInitSymInt32(HALF_AWAY));
+    tensorFillFromFloatBuffer(input, inValues, SM_KEYED_N);
+    tensor_t *loss = buildSoftmaxWire1D(SM_KEYED_N, quantizationInitSymInt32(HALF_AWAY));
+    tensorFillFromFloatBuffer(loss, lossValues, SM_KEYED_N);
+    quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, symQ);
+    smKeyedFixture_t f = {.layer = softmaxLayerInit(&lq), .input = input, .loss = loss};
+    uint8_t bytes[KEYED_DRAW_MAX_BYTES];
+
+    keyedCellInstall(FLOAT32, SYM_INT32);
+    smSymBackwardRun(&f, SM_KEYED_CONVERT_SEED, true, bytes);
+    keyedCellRestore();
+    assertKeyedCellSawOneStream(
+        keyedPurposeStream(SM_KEYED_CONVERT_SEED, RNG_TAG_BACKWARD, RNG_TAG_CONVERT).state,
+        SM_KEYED_CONVERT_STATE);
+    assertKeyedRunIsPure(smSymBackwardRun, &f, SM_KEYED_CONVERT_SEED);
+
+    freeSoftmaxLayer(f.layer);
+    freeQuantization(symQ);
+    freeTensor(loss);
+    freeTensor(input);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(unitTestSoftmaxForwardFloat);
@@ -1696,5 +1901,8 @@ int main() {
     RUN_TEST(testSoftmaxLayerInitAndFreeRoundTrip);
     RUN_TEST(testSoftmaxLayerInitBorrowingStoresLqPointers);
     RUN_TEST(testSoftmaxLayerInitOwningDeepCopiesLqPointers);
+    RUN_TEST(testSoftmaxBfpSrPackIsAPureFunctionOfItsForwardOpKey);
+    RUN_TEST(testSoftmaxBfpSrShiftsDrawFromTheForwardShiftStream);
+    RUN_TEST(testSoftmaxSymBackwardConvertsWithItsBackwardConvertStream);
     return UNITY_END();
 }

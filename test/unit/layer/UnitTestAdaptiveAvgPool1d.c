@@ -6,6 +6,7 @@
 
 #include "AdaptiveAvgPool1d.h"
 #include "DeathTest.h"
+#include "KeyedDrawCheck.h"
 #include "Layer.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
@@ -917,6 +918,42 @@ void testAdaptiveAvgPool1dBfpRejectsRank2Operands(void) {
     freeTensor(badInput);
 }
 
+/* The SR forward rounds in the OUT_WRITE epilogue of its forward op: OP 0
+ * under the FORWARD phase of the layer key. The state from the Python mirror,
+ * tags as numbers (FORWARD 4, OP 7, OUT 10):
+ *   uv run python -c "from examples._shared.keyed_rng import fold, key_from_seed as kfs,
+ *   open_stream as o; print(hex(o(fold(fold(fold(kfs(0xa003), 4, 0), 7, 0), 10, 0))))" */
+#define ADAPTIVE_KEYED_SEED 0xa003u
+#define ADAPTIVE_KEYED_OUT_STATE 0x13cb30fau
+
+/* AdaptiveAvgPool1d(4) over 4 channels of length 6: 16 outputs, each rounded
+ * SR into an 8-bit SYM_INT32 output by its own draw. */
+void testAdaptiveAvgPool1dSrForwardIsAPureFunctionOfItsForwardOpKey(void) {
+    size_t inputDims[] = {1, 4, 6};
+    quantization_t *q = quantizationInitFloat();
+    adaptiveAvgPool1dConfig_t cfg;
+    initAdaptiveAvgPool1dConfig(&cfg, 4, q, q);
+    layerConfig_t lc = {.adaptiveAvgPool1d = &cfg};
+    layer_t layer = {.type = ADAPTIVE_AVGPOOL1D, .config = &lc};
+    float values[24];
+    for (size_t i = 0; i < 24; i++) {
+        values[i] = 0.37f * (float)((i * 7) % 24) - 3.1f;
+    }
+    tensor_t *input = makeFloatTensor(inputDims, 3, values);
+    keyedSymForward_t f = {.layer = &layer,
+                           .input = input,
+                           .outDims = {1, 4, 4},
+                           .outRank = 3,
+                           .forwardRounding = &cfg.forwardMath.roundingMode};
+
+    assertKeyedSymForwardDrawsFrom(&f, ADAPTIVE_KEYED_SEED,
+                                   keyedOpOutState(ADAPTIVE_KEYED_SEED, RNG_TAG_FORWARD, 0u),
+                                   ADAPTIVE_KEYED_OUT_STATE);
+
+    freeTensor(input);
+    freeQuantization(q);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testForwardBasic);
@@ -948,5 +985,6 @@ int main(void) {
     RUN_TEST(testAdaptiveAvgPool1dBfpRejectsMismatchedShapes);
     RUN_TEST(testAdaptiveAvgPool1dBackwardBfpGuardsNarrowedNotRemoved);
     RUN_TEST(testAdaptiveAvgPool1dBfpRejectsRank2Operands);
+    RUN_TEST(testAdaptiveAvgPool1dSrForwardIsAPureFunctionOfItsForwardOpKey);
     return UNITY_END();
 }

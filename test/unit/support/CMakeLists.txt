@@ -20,6 +20,13 @@ target_include_directories(odt_test_layer_builders INTERFACE ${CMAKE_CURRENT_SOU
 add_library(odt_test_assert INTERFACE)
 target_include_directories(odt_test_assert INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+# Keyed-draw checks (KeyedDrawCheck.h): a recording conversionMatrix cell and
+# the purity assertion. Header-only; a consumer also links the owners of the
+# headers it includes (LayerExec, RNG, TensorConversion, and the layer and
+# tensor libraries every layer test already lists).
+add_library(odt_test_keyed_draw INTERFACE)
+target_include_directories(odt_test_keyed_draw INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
 # Self-test of DeathTest.h. Explicit add_executable (not add_elastic_ai_unit_test):
 # odt_test_death does not follow the UnitTest<Lib> naming rule. Common supplies
 # the real PRINT_ERROR banner the output-matching macro must see. TIMEOUT turns

@@ -942,6 +942,41 @@ void testMeanScaleOfAnSrBfpGradIsAPureFunctionOfTheUpdateKeyAndTheParam(void) {
                               "two equal grads under one key scale otherwise");
 }
 
+/* The states from the Python mirror, tags as numbers (PARAM 19, SCALE 20):
+ *   uv run python -c "from examples._shared.keyed_rng import fold, key_from_seed as kfs,
+ *   open_stream as o; u = kfs(0x5ca2);
+ *   print([hex(o(fold(fold(u, 19, p), 20, 0))) for p in (0, 1)])" */
+#define SCALE_STREAM_SEED 0x5ca2u
+static const uint32_t kScaleStreamStates[2] = {0xfd909bd0u, 0x958eab4bu};
+
+/* Each param's SR mean-scale draws from the SCALE stream of its PARAM index
+ * under the update key: its grad equals scaleBfpTensorInPlace run on a stream
+ * opened from that chain. */
+void testMeanScaleOfAnSrBfpGradDrawsFromItsParamsScaleStream(void) {
+    const rngKey_t updateKey = rngKeyFromSeed(SCALE_STREAM_SEED);
+    parameter_t *params[2] = {buildSrBfpGradParam(), buildSrBfpGradParam()};
+    optimizer_t optim = {.type = SGD_M, .parameter = params, .sizeStates = 2};
+
+    scaleOptimizerGradients(&optim, 0.3f, &updateKey);
+
+    for (uint32_t p = 0; p < 2; p++) {
+        rngStream_t s = rngOpen(rngFold(rngFold(updateKey, RNG_TAG_PARAM, p), RNG_TAG_SCALE, 0u));
+        TEST_ASSERT_EQUAL_HEX32(kScaleStreamStates[p], s.state);
+        parameter_t *reference = buildSrBfpGradParam();
+        scaleBfpTensorInPlace(reference->grad, 0.3f, &s);
+        TEST_ASSERT_EQUAL_MEMORY_MESSAGE(reference->grad->data, params[p]->grad->data,
+                                         calcBytesPerTensor(reference->grad),
+                                         "the codes are the scale stream's");
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(
+            ((bfpQConfig_t *)reference->grad->quantization->qConfig)->exponents[0],
+            ((bfpQConfig_t *)params[p]->grad->quantization->qConfig)->exponents[0],
+            "the exponent is the scale stream's");
+        freeParameter(reference);
+    }
+    freeParameter(params[1]);
+    freeParameter(params[0]);
+}
+
 #if SIZE_MAX > UINT32_MAX
 static void scalePastUint32MaxParams(void) {
     const rngKey_t updateKey = rngKeyFromSeed(1u);
@@ -991,5 +1026,6 @@ int main(void) {
     RUN_TEST(testScaleOptimizerGradientsExitsWhenAParameterIndexExceedsUint32Max);
 #endif
     RUN_TEST(testScaleOptimizerGradientsOverNoParametersUnderAKeyDoesNotExit);
+    RUN_TEST(testMeanScaleOfAnSrBfpGradDrawsFromItsParamsScaleStream);
     return UNITY_END();
 }

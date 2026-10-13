@@ -20,6 +20,8 @@
 #include "unity.h"
 
 #include "DeathTest.h"
+#include "KeyedDrawCheck.h"
+#include "Rounding.h"
 #include "expected_bfp_layernorm.h"
 #include "expected_layernorm.h"
 #include "expected_layernorm_sym.h"
@@ -3625,6 +3627,125 @@ void testFactoryOwningBfpDeepCopiesQuantizations(void) {
     }
 }
 
+/* ---- keyed draws: the forward op and the dx requant ---- */
+
+/* The states from the Python mirror, tags as numbers (FORWARD 4, BACKWARD 5,
+ * OP 7, OUT 10, NORM_DX 16):
+ *   uv run python -c "from examples._shared.keyed_rng import fold, key_from_seed as kfs,
+ *   open_stream as o; print(hex(o(fold(fold(fold(kfs(0x1a01), 4, 0), 7, 0), 10, 0))),
+ *   hex(o(fold(fold(kfs(0x1a02), 5, 0), 16, 0))))" */
+#define LAYERNORM_KEYED_SEED 0x1a01u
+#define LAYERNORM_KEYED_OUT_STATE 0x54b4864bu
+#define LAYERNORM_DX_SEED 0x1a02u
+#define LAYERNORM_DX_STREAM_STATE 0x17b56df4u
+
+/* LayerNorm over the last 4 of a [4, 4] input: 16 outputs, each rounded SR into
+ * an 8-bit SYM_INT32 output by its own draw (OP 0 under FORWARD). */
+void testLayerNormSrForwardIsAPureFunctionOfItsForwardOpKey(void) {
+    layer_t *layer = buildFloatLayerNormWithTrainable(TRAINABLE_FALSE);
+    size_t dims[] = {4, 4};
+    float values[16];
+    for (size_t i = 0; i < 16; i++) {
+        values[i] = 0.37f * (float)((i * 7) % 16) - 3.1f;
+    }
+    tensor_t *input = buildFloatTensorND(2, dims, values);
+    keyedSymForward_t f = {.layer = layer,
+                           .input = input,
+                           .outDims = {4, 4},
+                           .outRank = 2,
+                           .forwardRounding = &layer->config->layerNorm->forwardMath.roundingMode};
+
+    assertKeyedSymForwardDrawsFrom(&f, LAYERNORM_KEYED_SEED,
+                                   keyedOpOutState(LAYERNORM_KEYED_SEED, RNG_TAG_FORWARD, 0u),
+                                   LAYERNORM_KEYED_OUT_STATE);
+
+    freeTensor(input);
+    freeLayerNormLayer(layer);
+}
+
+#define NORM_DX_N 16
+
+/* x = +-1 at scale 1 (mean 0, variance 1, eps 0: unit statistics), gamma = 1,
+ * and dy in +-pairs with zero mean and zero correlation with x, so dx = dy
+ * exactly. dy at scale 0.25 with |dy| <= 63.5 gives the dx scale 63.5 / 127 =
+ * 0.5: dx lands on code dyCode / 2 before rounding, half a code for every odd
+ * dyCode, and each half code goes up or down with its own draw. */
+static const int32_t kNormDxX[NORM_DX_N] = {1, 1, -1, -1, 1, 1, -1, -1, 1, 1, -1, -1, 1, 1, -1, -1};
+static const int32_t kNormDxDy[NORM_DX_N] = {254, -254, 77, -77, 13,  -13,  201, -201,
+                                             55,  -55,  3,  -3,  149, -149, 99,  -99};
+
+/* A SYM_INT32 tensor of NORM_DX_N exact codes (NULL: zeros) at the given scale. */
+static tensor_t *buildSymCodes(size_t numDims, const size_t *dimsIn, const int32_t *codes,
+                               float scale, roundingMode_t mode, uint8_t bits) {
+    size_t *dims = reserveMemory(numDims * sizeof(size_t));
+    memcpy(dims, dimsIn, numDims * sizeof(size_t));
+    size_t *order = reserveMemory(numDims * sizeof(size_t));
+    setOrderOfDimsForNewTensor(numDims, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, numDims, order);
+    tensor_t *t = initTensor(shape, quantizationInitSymInt32WithBits(mode, bits), NULL);
+    if (codes != NULL) {
+        memcpy(t->data, codes, NORM_DX_N * sizeof(int32_t));
+    }
+    ((symInt32QConfig_t *)t->quantization->qConfig)->scale = scale;
+    return t;
+}
+
+/* The SYM dx requant draws from the NORM_DX stream of the BACKWARD phase: the
+ * layer's dx equals roundByMode run on a stream opened from that chain. */
+void testLayerNormSymDxRoundsWithItsNormDxStream(void) {
+    size_t dims[] = {1, NORM_DX_N};
+    size_t ns[] = {NORM_DX_N};
+    tensor_t *x = buildSymCodes(2, dims, kNormDxX, 1.0f, HALF_AWAY, 12);
+    tensor_t *dy = buildSymCodes(2, dims, kNormDxDy, 0.25f, HALF_AWAY, 12);
+    tensor_t *dx = buildSymCodes(2, dims, NULL, 1.0f, SR_HALF_AWAY, 8);
+    parameter_t *gamma = buildSymParam(1, ns, NULL);
+    parameter_t *beta = buildSymParam(1, ns, NULL);
+    for (size_t j = 0; j < NORM_DX_N; j++) {
+        ((int32_t *)gamma->param->data)[j] = 1;
+    }
+    ((symInt32QConfig_t *)gamma->param->quantization->qConfig)->scale = 1.0f;
+    size_t *normShape = reserveMemory(sizeof(size_t));
+    normShape[0] = NORM_DX_N;
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *bq = quantizationInitSymInt32(HALF_AWAY);
+    layerNormConfig_t cfg;
+    initLayerNormConfig(&cfg, gamma, beta, normShape, 1, 0.0f, fq, bq);
+    cfg.frozen = true;
+    layerConfig_t lcfg;
+    layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
+    const layerExec_t exec = {.key = rngKeyFromSeed(LAYERNORM_DX_SEED)};
+
+    layerFunctions[LAYERNORM].backward(&layer, x, dy, dx, &exec);
+
+    rngStream_t s = keyedPurposeStream(LAYERNORM_DX_SEED, RNG_TAG_BACKWARD, RNG_TAG_NORM_DX);
+    int32_t expected[NORM_DX_N];
+    int32_t halfAway[NORM_DX_N];
+    for (size_t i = 0; i < NORM_DX_N; i++) {
+        expected[i] = roundByMode(0.5f * (float)kNormDxDy[i], SR_HALF_AWAY, &s);
+        halfAway[i] = roundByMode(0.5f * (float)kNormDxDy[i], HALF_AWAY, NULL);
+    }
+    int32_t got[NORM_DX_N];
+    memcpy(got, dx->data, sizeof(got));
+    float dxScale = symScaleOf(dx);
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeReservedMemory(normShape);
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(dx);
+    freeTensor(dy);
+    freeTensor(x);
+
+    TEST_ASSERT_EQUAL_HEX32(
+        LAYERNORM_DX_STREAM_STATE,
+        keyedPurposeStream(LAYERNORM_DX_SEED, RNG_TAG_BACKWARD, RNG_TAG_NORM_DX).state);
+    TEST_ASSERT_FALSE_MESSAGE(memcmp(expected, halfAway, sizeof(expected)) == 0,
+                              "guard: the fixture's dx draws");
+    TEST_ASSERT_EQUAL_FLOAT(0.5f, dxScale);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, NORM_DX_N);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConfigStructIsPopulated);
@@ -3705,5 +3826,7 @@ int main(void) {
     RUN_TEST(testFactoryRejectsGroupedBfpGradTemplate);
     RUN_TEST(testFactoryBfpGradStorageBuildsPerTensor);
     RUN_TEST(testFactoryOwningBfpDeepCopiesQuantizations);
+    RUN_TEST(testLayerNormSrForwardIsAPureFunctionOfItsForwardOpKey);
+    RUN_TEST(testLayerNormSymDxRoundsWithItsNormDxStream);
     return UNITY_END();
 }

@@ -6,6 +6,7 @@
 #include "Conv1dApi.h"
 #include "ConvTranspose1dKernel.h"
 #include "DeathTest.h"
+#include "KeyedDrawCheck.h"
 #include "Layer.h"
 #include "LayerCommon.h"
 #include "LayerQuant.h"
@@ -2898,6 +2899,44 @@ void testConv1dCalcWeightGradsBfpRejectsInputChannelMismatch(void) {
     freeQuantization(floatQ);
 }
 
+/* The SR forward rounds in the OUT_WRITE epilogue of its forward op: OP 0
+ * under the FORWARD phase of the layer key. The state from the Python mirror,
+ * tags as numbers (FORWARD 4, OP 7, OUT 10):
+ *   uv run python -c "from examples._shared.keyed_rng import fold, key_from_seed as kfs,
+ *   open_stream as o; print(hex(o(fold(fold(fold(kfs(0xc0d1), 4, 0), 7, 0), 10, 0))))" */
+#define CONV1D_KEYED_SEED 0xc0d1u
+#define CONV1D_KEYED_OUT_STATE 0x39535df6u
+
+/* Conv1d(2 -> 4, k = 3) over a length-6 input: 16 outputs, each rounded SR
+ * into an 8-bit SYM_INT32 output by its own draw. */
+void testConv1dSrForwardIsAPureFunctionOfItsForwardOpKey(void) {
+    rngSetSeed(CONV1D_KEYED_SEED);
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *layer = conv1dLayerInitOwning(
+        &(conv1dInit_t){
+            .inChannels = 2, .outChannels = 4, .kernelSize = 3, .trainable = TRAINABLE_FALSE},
+        &lq);
+    freeQuantization(q);
+    size_t inputDims[] = {1, 2, 6};
+    tensor_t *input = makeFloatTensor(
+        inputDims, 3,
+        (float[]){0.5f, -1.f, 2.f, 0.25f, -0.75f, 1.5f, -2.f, 1.f, 0.125f, -0.5f, 0.75f, -1.25f});
+    keyedSymForward_t f = {.layer = layer,
+                           .input = input,
+                           .outDims = {1, 4, 4},
+                           .outRank = 3,
+                           .forwardRounding = &layer->config->conv1d->forwardMath.roundingMode};
+
+    assertKeyedSymForwardDrawsFrom(&f, CONV1D_KEYED_SEED,
+                                   keyedOpOutState(CONV1D_KEYED_SEED, RNG_TAG_FORWARD, 0u),
+                                   CONV1D_KEYED_OUT_STATE);
+
+    freeTensor(input);
+    freeConv1dLayer(layer);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testConv1dForwardMultiChannelWithBias);
@@ -2965,5 +3004,6 @@ int main() {
     RUN_TEST(testConv1dCalcWeightGradsBfpRejectsFloat32Weights);
     RUN_TEST(testConv1dCalcBiasGradsBfpRejectsFloat32Weights);
     RUN_TEST(testConv1dCalcWeightGradsBfpRejectsInputChannelMismatch);
+    RUN_TEST(testConv1dSrForwardIsAPureFunctionOfItsForwardOpKey);
     return UNITY_END();
 }

@@ -2608,6 +2608,7 @@ void testExecuteOpFloatArithmeticStillDequantsGroupedBfp(void) {
 #define FUNNEL_OUT0_STATE 0xcc59e4b1u
 #define FUNNEL_ACC0_STATE 0x3ecc80e6u
 #define FUNNEL_ACC1_STATE 0xac44fd15u
+#define FUNNEL_STAGE0_STATE 0x72195ec4u
 #define FUNNEL_MAX_RECORDS 4
 
 typedef struct {
@@ -2730,6 +2731,34 @@ void testExecuteOpOpensTheOutStreamFromTheOpKey(void) {
     TEST_ASSERT_EQUAL_UINT32(2u, (uint32_t)funnelRecordCount);
     assertFunnelStream(0, FUNNEL_KERNEL0_STATE, RNG_TAG_KERNEL, 0u);
     assertFunnelStream(1, FUNNEL_OUT0_STATE, RNG_TAG_OUT, 0u);
+}
+
+/* A FLOAT32 operand under SYM_INT32 arithmetic is staged through
+ * [FLOAT32][SYM_INT32] with STAGE(i) of its operand index (0 here). The
+ * identity kernel carries the staged codes into the raw, and the FLOAT32
+ * target takes them back through [SYM_INT32][FLOAT32], which is not recorded:
+ * the staging is the only call the recorded cell sees. */
+void testExecuteOpOpensTheSymInt32StageStreamFromTheOpKey(void) {
+    tensor_t *a = buildFloat(2, (float[]){1.0f, -2.0f});
+    tensor_t *out = buildFloat(2, (float[]){0.f, 0.f});
+    rngKey_t key = rngKeyFromSeed(FUNNEL_TEST_SEED);
+    funnelRecordCount = 0;
+    funnelInstallCell(FLOAT32, SYM_INT32);
+
+    executeOp(&(opSpec_t){.kernel = executeOpIdentityKernel,
+                          .inputs = (tensor_t *[]){a},
+                          .nInputs = 1,
+                          .arithmetic =
+                              (arithmetic_t){.type = ARITH_SYM_INT32, .roundingMode = HALF_AWAY},
+                          .key = &key,
+                          .mode = OUT_WRITE},
+              out);
+
+    funnelRestoreCell(FLOAT32, SYM_INT32);
+    freeTensor(out);
+    freeTensor(a);
+    TEST_ASSERT_EQUAL_UINT32(1u, (uint32_t)funnelRecordCount);
+    assertFunnelStream(0, FUNNEL_STAGE0_STATE, RNG_TAG_STAGE, 0u);
 }
 
 /* The dynamic-rescale ACC of a FLOAT32 intermediate into a SYM_INT32 target
@@ -2906,6 +2935,7 @@ int main(void) {
     RUN_TEST(testExecuteConvertHandsTheStreamToTheCellOnEveryRoute);
     RUN_TEST(testExecuteOpOpensTheStageAndKernelStreamsFromTheOpKey);
     RUN_TEST(testExecuteOpOpensTheOutStreamFromTheOpKey);
+    RUN_TEST(testExecuteOpOpensTheSymInt32StageStreamFromTheOpKey);
     RUN_TEST(testExecuteOpOpensOneAccStreamPerRoundingPass);
     RUN_TEST(testExecuteOpWithoutAKeyHandsEveryPhaseANullStream);
     return UNITY_END();

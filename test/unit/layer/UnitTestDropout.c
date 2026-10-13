@@ -8,10 +8,12 @@
 #include "DeathTest.h"
 #include "Dropout.h"
 #include "DropoutApi.h"
+#include "KeyedDrawCheck.h"
 #include "Layer.h"
 #include "LayerExec.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
+#include "Rounding.h"
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
@@ -1108,6 +1110,109 @@ void testDropoutBfpRejectsUnequalCountsAndAliasedExponents(void) {
     freeTensor(longWire);
 }
 
+/* ---- keyed draws: the BFP bridge of each phase ---- */
+
+/* The states from the Python mirror, tags as numbers (FORWARD 4, BACKWARD 5,
+ * DROPOUT_BRIDGE 14):
+ *   uv run python -c "from examples._shared.keyed_rng import fold, key_from_seed as kfs,
+ *   open_stream as o; print(hex(o(fold(fold(kfs(0xd0b1), 4, 0), 14, 0))),
+ *   hex(o(fold(fold(kfs(0xd0b2), 5, 0), 14, 0))))" */
+#define BRIDGE_FORWARD_SEED 0xd0b1u
+#define BRIDGE_FORWARD_STATE 0xaa106a14u
+#define BRIDGE_BACKWARD_SEED 0xd0b2u
+#define BRIDGE_BACKWARD_STATE 0xd4a51fc5u
+#define BRIDGE_N 16
+
+/* No code is a multiple of 3: the 4/3 rescale (p = 0.25) leaves every value
+ * between two codes of the fresh grid, so each element goes up or down with
+ * its own draw. Two groups of 8. */
+static int32_t kBridgeCodes[BRIDGE_N] = {95, -94, 91, -89, 88, -86, 85, -83,
+                                         82, -80, 79, -77, 76, -74, 73, -71};
+
+static void stubKeepAll(tensor_t *mask, float probTrue, rngStream_t *rs) {
+    (void)probTrue;
+    (void)rs;
+    for (size_t i = 0; i < calcNumberOfElementsByTensor(mask); i++) {
+        tensorBoolSet(mask, i, true);
+    }
+}
+
+/* One SR bridge (p = 0.25, every element kept) under the key of seed: the
+ * training forward (its mask stubbed to keep all) or the backward. got = the
+ * output codes; expected = roundByMode on the documented bridge stream of that
+ * phase, applied to each element's value on the source grid divided by the
+ * scale of the output's fresh group exponent. */
+static void runBfpBridge(bool backward, uint64_t seed, int32_t got[BRIDGE_N],
+                         int32_t expected[BRIDGE_N]) {
+    size_t dims[] = {1, BRIDGE_N};
+    uint8_t exponents[2] = {127, 127};
+    tensor_t *src = buildBfpWireWithCodes(dims, 2, 8, 8, 2, 8, kBridgeCodes, exponents);
+    tensor_t *dst = buildBfpWireWithCodes(dims, 2, 8, 8, 2, 8, NULL, exponents);
+    bfpQConfig_t *dstQC = dst->quantization->qConfig;
+    dstQC->roundingMode = SR_HALF_AWAY;
+    tensor_t *mask = buildBoolMask(BRIDGE_N);
+    stubKeepAll(mask, 1.f, NULL);
+    quantization_t *fq = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 8);
+    quantization_t *bq = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 8);
+    dropoutConfig_t dcfg;
+    initDropoutConfig(&dcfg, 0.25f, mask, fq, bq);
+    dcfg.training = true;
+    layerConfig_t lcfg;
+    layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
+    const layerExec_t exec = {.key = rngKeyFromSeed(seed)};
+
+    if (backward) {
+        dropoutBackward(&layer, NULL, src, dst, &exec);
+    } else {
+        bernoulliFillMaskFn_t saved = bernoulliGetFillMaskFn();
+        bernoulliSetFillMaskFn(stubKeepAll);
+        dropoutForward(&layer, src, dst, &exec);
+        bernoulliSetFillMaskFn(saved);
+    }
+
+    unpackSignExtend(dst->data, 8, 0, got, BRIDGE_N);
+    rngStream_t bridge = keyedPurposeStream(seed, backward ? RNG_TAG_BACKWARD : RNG_TAG_FORWARD,
+                                            RNG_TAG_DROPOUT_BRIDGE);
+    const float factor = 1.0f / (1.0f - 0.25f);
+    for (size_t i = 0; i < BRIDGE_N; i++) {
+        const float v = (float)kBridgeCodes[i] * ldexpf(1.f, 127 - bfpExponentBias(dstQC)) * factor;
+        expected[i] = roundByMode(v / bfpGroupScale(dstQC, i / 8), SR_HALF_AWAY, &bridge);
+    }
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeTensor(mask);
+    freeTensor(dst);
+    freeTensor(src);
+}
+
+/* The training forward's BFP bridge draws from the DROPOUT_BRIDGE stream of
+ * the FORWARD phase. */
+void testDropoutBfpForwardBridgeRoundsWithItsForwardBridgeStream(void) {
+    int32_t got[BRIDGE_N];
+    int32_t expected[BRIDGE_N];
+
+    runBfpBridge(false, BRIDGE_FORWARD_SEED, got, expected);
+
+    TEST_ASSERT_EQUAL_HEX32(
+        BRIDGE_FORWARD_STATE,
+        keyedPurposeStream(BRIDGE_FORWARD_SEED, RNG_TAG_FORWARD, RNG_TAG_DROPOUT_BRIDGE).state);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, BRIDGE_N);
+}
+
+/* The backward's BFP bridge draws from the DROPOUT_BRIDGE stream of the
+ * BACKWARD phase. */
+void testDropoutBfpBackwardBridgeRoundsWithItsBackwardBridgeStream(void) {
+    int32_t got[BRIDGE_N];
+    int32_t expected[BRIDGE_N];
+
+    runBfpBridge(true, BRIDGE_BACKWARD_SEED, got, expected);
+
+    TEST_ASSERT_EQUAL_HEX32(
+        BRIDGE_BACKWARD_STATE,
+        keyedPurposeStream(BRIDGE_BACKWARD_SEED, RNG_TAG_BACKWARD, RNG_TAG_DROPOUT_BRIDGE).state);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, BRIDGE_N);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testForwardEvalIdentityFloat);
@@ -1133,5 +1238,7 @@ int main(void) {
     RUN_TEST(testFactoryBuildsAndForwards);
     RUN_TEST(testForwardTrainingP0KeepsAllNoScale);
     RUN_TEST(testForwardTrainingFloatP025Scale);
+    RUN_TEST(testDropoutBfpForwardBridgeRoundsWithItsForwardBridgeStream);
+    RUN_TEST(testDropoutBfpBackwardBridgeRoundsWithItsBackwardBridgeStream);
     return UNITY_END();
 }

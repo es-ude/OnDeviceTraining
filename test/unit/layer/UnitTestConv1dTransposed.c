@@ -5,6 +5,7 @@
 #include "Conv1dTransposedApi.h"
 #include "ConvTranspose1dKernel.h"
 #include "DeathTest.h"
+#include "KeyedDrawCheck.h"
 #include "Layer.h"
 #include "LayerCommon.h"
 #include "LayerQuant.h"
@@ -2527,6 +2528,43 @@ void testConvT1dCalcWeightGradsBfpRejectsInputChannelMismatch(void) {
     freeQuantization(floatQ);
 }
 
+/* The SR forward rounds in the OUT_WRITE epilogue of its forward op: OP 0
+ * under the FORWARD phase of the layer key. The state from the Python mirror,
+ * tags as numbers (FORWARD 4, OP 7, OUT 10):
+ *   uv run python -c "from examples._shared.keyed_rng import fold, key_from_seed as kfs,
+ *   open_stream as o; print(hex(o(fold(fold(fold(kfs(0xc0d2), 4, 0), 7, 0), 10, 0))))" */
+#define CONVT1D_KEYED_SEED 0xc0d2u
+#define CONVT1D_KEYED_OUT_STATE 0x323add63u
+
+/* ConvTranspose1d(2 -> 4, k = 3) over a length-2 input: 16 outputs, each
+ * rounded SR into an 8-bit SYM_INT32 output by its own draw. */
+void testConv1dTransposedSrForwardIsAPureFunctionOfItsForwardOpKey(void) {
+    rngSetSeed(CONVT1D_KEYED_SEED);
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *layer = conv1dTransposedLayerInitOwning(
+        &(conv1dTransposedInit_t){
+            .inChannels = 2, .outChannels = 4, .kernelSize = 3, .trainable = TRAINABLE_FALSE},
+        &lq);
+    freeQuantization(q);
+    size_t inputDims[] = {1, 2, 2};
+    tensor_t *input = makeFloatTensor(inputDims, 3, (float[]){0.5f, -1.f, 2.f, -0.75f});
+    keyedSymForward_t f = {.layer = layer,
+                           .input = input,
+                           .outDims = {1, 4, 4},
+                           .outRank = 3,
+                           .forwardRounding =
+                               &layer->config->conv1dTransposed->forwardMath.roundingMode};
+
+    assertKeyedSymForwardDrawsFrom(&f, CONVT1D_KEYED_SEED,
+                                   keyedOpOutState(CONVT1D_KEYED_SEED, RNG_TAG_FORWARD, 0u),
+                                   CONVT1D_KEYED_OUT_STATE);
+
+    freeTensor(input);
+    freeConv1dTransposedLayer(layer);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testConv1dTransposedForwardSingleChannelSingleBatch);
@@ -2587,5 +2625,6 @@ int main() {
     RUN_TEST(testConv1dTransposedCalcWeightGradsBfpRejectsFloat32Weights);
     RUN_TEST(testConv1dTransposedCalcBiasGradsBfpRejectsFloat32Weights);
     RUN_TEST(testConvT1dCalcWeightGradsBfpRejectsInputChannelMismatch);
+    RUN_TEST(testConv1dTransposedSrForwardIsAPureFunctionOfItsForwardOpKey);
     return UNITY_END();
 }

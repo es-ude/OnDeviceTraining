@@ -298,9 +298,10 @@ decisions and those with nothing in force yet are left out.
   later rows that need no driver or interface change.
 - **remat D33** ARENA conformance runs under `unit_test_asan` (its
   `undefined` sanitizer covers alignment) plus manual poisoning.
-- **remat D42** Test strategy: an in-process Legacy oracle (the pre-remat
-  driver, kept verbatim), a row-contract harness, deaths matched on message
-  substrings, tampered schedulers, conformance P1-P10, poison on both rows.
+- **remat D42** Test strategy: an in-process oracle (the pre-remat driver,
+  kept verbatim, until remat D57 replaced it by an explicit reference), a
+  row-contract harness, deaths matched on message substrings, tampered
+  schedulers, conformance P1-P10, poison on both rows.
 - **remat D44** Keyed randomness: every random value becomes a function of
   an explicit key and a counter, and the module-global stream goes away.
   In force now: every stochastic rounding and Dropout mask draws from a
@@ -320,10 +321,14 @@ decisions and those with nothing in force yet are left out.
   imply one another in that order, so a failed init still reports what
   its flags allow. More than `ODT_REMAT_MAX_RANGES` (default 1024) ranges
   exit at init, naming it.
-- **remat D57** The Legacy oracle retires when keyed randomness reaches the
-  layer path; from then on fixtures compare against an explicit HEAP +
-  STORE_ALL reference with the same call key. Until then nobody fixes it:
-  a fix would move the oracle.
+- **remat D57** The Legacy oracle is retired: keyed randomness reached the
+  layer path, and Legacy hands its layers no key. Every fixture compares
+  against an explicit HEAP + STORE_ALL reference (the driver on an ephemeral
+  scheduler) with the same call key. The reference is the driver itself, so
+  a value bug every scheduler shares is the job of the layer and loss golds.
+  Since then the conformance tests no longer see a layer that reads its
+  output buffer before writing it (in test builds fresh buffers are poisoned
+  on every side); the layer unit tests cover it; follow-up #490.
 - **remat D60** Every size product and sum in the remat libraries is
   overflow-checked. An overflow exits at init, naming the wire and the
   quantity, before any reservation.
@@ -349,7 +354,8 @@ decisions and those with nothing in force yet are left out.
   leaves no non-borrowed wire resident, and `deinit` is safe after a failed
   init.
 
-**Conformance properties** (each row and plan against the Legacy oracle).
+**Conformance properties** (each row and plan against the explicit HEAP +
+STORE_ALL reference, remat D57).
 - **remat P1** Parameter grads, loss, output snapshot, SYM scales and BFP
   exponents equal the oracle's byte for byte.
 - **remat P2** The global RNG stream after the call equals the oracle's;

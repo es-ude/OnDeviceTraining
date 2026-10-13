@@ -18,7 +18,6 @@
 #include "InferenceApi.h"
 #include "Layer.h"
 #include "LayerQuant.h"
-#include "LegacyCalculateGrads.h"
 #include "LossFunction.h"
 #include "OdtHook.h"
 #include "Quantization.h"
@@ -424,8 +423,8 @@ typedef struct runCapture {
     blob_t values;                         /* remat P1 */
     blob_t trace;                          /* remat P4 */
 } runCapture_t;
-/* The oracle's capture: Legacy's on a fixture that never draws, the explicit
- * reference's on one that draws (Legacy hands its layers no key). */
+/* The oracle's capture: the explicit reference's (initReference), under the
+ * same call key as the side it is compared with. */
 static runCapture_t g_oracle;
 static runCapture_t g_driver;
 
@@ -571,9 +570,9 @@ static void assertInputUnchanged(const inputSnapshot_t *s, const tensor_t *x) {
 }
 static inputSnapshot_t g_input;
 
-/* RUN_REFERENCE is the driver on the explicit HEAP + STORE_ALL reference;
- * like Legacy it is an oracle, so its run saves the BN running stats. */
-typedef enum { RUN_LEGACY, RUN_DRIVER, RUN_REFERENCE } runner_t;
+/* RUN_REFERENCE is the driver on the explicit HEAP + STORE_ALL reference; it
+ * is the oracle, so its run saves the BN running stats. */
+typedef enum { RUN_DRIVER, RUN_REFERENCE } runner_t;
 
 /* One call from the same starting state: zeroed grads (they accumulate,
  * OUT_ACC), restored BN running stats, the global stream at ZOO_SEED. The
@@ -590,11 +589,8 @@ static void captureRun(runner_t runner, zooFixture_t *f, const trainingCall_t *c
 
     cap->memBefore = memProfileCurrentBytes();
     odtHookSet(countingHook, cap);
-    trainingStats_t *stats = (runner == RUN_LEGACY)
-                                 ? legacyCalculateGrads(f->model, f->n, f->loss, REDUCTION_MEAN,
-                                                        f->x, f->y, recordingSink, &cap->trace)
-                                 : tracedGrads(f->model, f->n, f->loss, REDUCTION_MEAN, f->x, f->y,
-                                               recordingSink, &cap->trace, call);
+    trainingStats_t *stats = tracedGrads(f->model, f->n, f->loss, REDUCTION_MEAN, f->x, f->y,
+                                         recordingSink, &cap->trace, call);
     odtHookSet(NULL, NULL);
     cap->seedAfter = rngGetSeed();
     cap->loss = stats->loss;
@@ -653,18 +649,11 @@ static void assertConforms(const char *cell) {
         say(cell, "remat P5: the driver releases everything but the stats"));
 }
 
-static void assertNullPathMatchesLegacy(void (*build)(zooFixture_t *)) {
-    zooFixture_t f;
-    build(&f);
-    captureRun(RUN_LEGACY, &f, NULL, &g_oracle);
-    captureRun(RUN_DRIVER, &f, NULL, &g_driver);
-    freeZoo(&f);
-    assertConforms(NULL);
-}
-
-/* The oracle of a fixture that draws: the driver on an explicit HEAP +
- * STORE_ALL scheduler (not the NULL path, which runs the default LIVENESS
- * plan), under the same call key as the side it is compared with. */
+/* The oracle: the driver on an explicit HEAP + STORE_ALL scheduler (not the
+ * NULL path, which runs the default LIVENESS plan), under the same call key
+ * as the side it is compared with. It is the driver itself, so a value bug
+ * that every scheduler shares cannot show here; the layer and loss golds
+ * catch those. */
 static void initReference(rematScheduler_t *s, zooFixture_t *f) {
     TEST_ASSERT_TRUE_MESSAGE(rematHeapInit(s, f->model, f->n, f->loss, f->x, NULL),
                              "the reference's init");
@@ -697,11 +686,8 @@ static void assertNullPathMatchesTheReference(void (*build)(zooFixture_t *)) {
     assertConforms(NULL);
 }
 
-static trainingStats_t *runOnce(runner_t runner, zooFixture_t *f, const trainingCall_t *call) {
-    return (runner == RUN_LEGACY) ? legacyCalculateGrads(f->model, f->n, f->loss, REDUCTION_MEAN,
-                                                         f->x, f->y, NULL, NULL)
-                                  : calculateGradsSequential(f->model, f->n, f->loss,
-                                                             REDUCTION_MEAN, f->x, f->y, call);
+static trainingStats_t *runOnce(zooFixture_t *f, const trainingCall_t *call) {
+    return calculateGradsSequential(f->model, f->n, f->loss, REDUCTION_MEAN, f->x, f->y, call);
 }
 
 /* A caller that does not zero between calls: the grads accumulate over both,
@@ -712,25 +698,14 @@ static void captureTwoCalls(runner_t runner, zooFixture_t *f, const trainingCall
     bnStateIo(f, runner != RUN_DRIVER, NULL);
     cap->values.used = 0;
     rngSetSeed(ZOO_SEED);
-    freeTrainingStats(runOnce(runner, f, first));
-    trainingStats_t *stats = runOnce(runner, f, second);
+    freeTrainingStats(runOnce(f, first));
+    trainingStats_t *stats = runOnce(f, second);
     cap->seedAfter = rngGetSeed();
     cap->loss = stats->loss;
     captureTensor(&cap->values, stats->output);
     freeTrainingStats(stats);
     forEachGrad(f->model, f->n, &cap->values);
     bnStateIo(f, false, &cap->values);
-}
-
-static void assertTwoCallsMatchLegacy(void (*build)(zooFixture_t *)) {
-    zooFixture_t f;
-    build(&f);
-    captureTwoCalls(RUN_LEGACY, &f, NULL, NULL, &g_oracle);
-    captureTwoCalls(RUN_DRIVER, &f, NULL, NULL, &g_driver);
-    freeZoo(&f);
-    assertSameValues(NULL);
-    TEST_ASSERT_EQUAL_HEX32_MESSAGE(ZOO_SEED, g_driver.seedAfter,
-                                    "remat P2: two calls leave the global stream untouched");
 }
 
 /* remat P6 on the reference: two reference calls, each under its own call
@@ -752,21 +727,24 @@ static void assertTwoCallsMatchTheReference(void (*build)(zooFixture_t *)) {
                                     "remat P2: two calls leave the global stream untouched");
 }
 
-/* ---- the NULL scheduler against the Legacy oracle, fixture by fixture ---- */
+/* ---- the NULL scheduler against the reference, fixture by fixture ---- */
 
 /* The plain wrapper as well: calculateGradsSequential and tracedGrads share
  * one body, and the sink only observes. */
-void testNullPathMatchesLegacyOnTheMlp(void) {
+void testNullPathMatchesTheReferenceOnTheMlp(void) {
     zooFixture_t f;
     buildMlp(&f);
+    rematScheduler_t ref;
+    initReference(&ref, &f);
     forEachGrad(f.model, f.n, NULL);
-    trainingStats_t *legacy =
-        legacyCalculateGrads(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y, NULL, NULL);
+    trainingStats_t *reference = calculateGradsSequential(f.model, f.n, f.loss, REDUCTION_MEAN, f.x,
+                                                          f.y, &(trainingCall_t){.remat = &ref});
     g_oracle.values.used = 0;
-    g_oracle.loss = legacy->loss;
-    captureTensor(&g_oracle.values, legacy->output);
-    freeTrainingStats(legacy);
+    g_oracle.loss = reference->loss;
+    captureTensor(&g_oracle.values, reference->output);
+    freeTrainingStats(reference);
     forEachGrad(f.model, f.n, &g_oracle.values);
+    rematSchedulerDeinit(&ref);
 
     forEachGrad(f.model, f.n, NULL);
     trainingStats_t *driver =
@@ -781,31 +759,31 @@ void testNullPathMatchesLegacyOnTheMlp(void) {
 }
 
 void testTracedMlpConforms(void) {
-    assertNullPathMatchesLegacy(buildMlp);
+    assertNullPathMatchesTheReference(buildMlp);
 }
 
 void testHarCnnUnderCeConforms(void) {
-    assertNullPathMatchesLegacy(buildHarCnn);
+    assertNullPathMatchesTheReference(buildHarCnn);
 }
 
 void testSoftmaxUnderMseConforms(void) {
-    assertNullPathMatchesLegacy(buildSoftmaxMse);
+    assertNullPathMatchesTheReference(buildSoftmaxMse);
 }
 
 void testFrozenLayerNormAboveDeepestConforms(void) {
-    assertNullPathMatchesLegacy(buildFrozenLayerNorm);
+    assertNullPathMatchesTheReference(buildFrozenLayerNorm);
 }
 
 void testFrozenGroupNormAboveDeepestConforms(void) {
-    assertNullPathMatchesLegacy(buildFrozenGroupNorm);
+    assertNullPathMatchesTheReference(buildFrozenGroupNorm);
 }
 
 void testTruncatedHarConforms(void) {
-    assertNullPathMatchesLegacy(buildTruncatedHar);
+    assertNullPathMatchesTheReference(buildTruncatedHar);
 }
 
 void testAllFrozenModelConforms(void) {
-    assertNullPathMatchesLegacy(buildAllFrozen);
+    assertNullPathMatchesTheReference(buildAllFrozen);
 }
 
 void testDropoutConforms(void) {
@@ -831,51 +809,51 @@ void testCalculateGradsWithoutAKeyExitsOnAnSrFixture(void) {
 }
 
 void testQuantizationToSymInt32WiresConforms(void) {
-    assertNullPathMatchesLegacy(buildQuantSym);
+    assertNullPathMatchesTheReference(buildQuantSym);
 }
 
 void testFlattenAt0Conforms(void) {
-    assertNullPathMatchesLegacy(buildFlattenAt0);
+    assertNullPathMatchesTheReference(buildFlattenAt0);
 }
 
 void testPerTensorBfpF1ModelConforms(void) {
-    assertNullPathMatchesLegacy(buildF1Zoo);
+    assertNullPathMatchesTheReference(buildF1Zoo);
 }
 
 void testGroupedBfpWireConforms(void) {
-    assertNullPathMatchesLegacy(buildGroupedBfp);
+    assertNullPathMatchesTheReference(buildGroupedBfp);
 }
 
 void testSingleLayerUnderCeConforms(void) {
-    assertNullPathMatchesLegacy(buildSingleLayerCe);
+    assertNullPathMatchesTheReference(buildSingleLayerCe);
 }
 
 void testCeWithOnlyTheLastLinearTrainableConforms(void) {
-    assertNullPathMatchesLegacy(buildCeLastLinearOnly);
+    assertNullPathMatchesTheReference(buildCeLastLinearOnly);
 }
 
 void testBatchNormConforms(void) {
-    assertNullPathMatchesLegacy(buildBatchNorm);
+    assertNullPathMatchesTheReference(buildBatchNorm);
 }
 
 void testCeWithoutATrailingSoftmaxConforms(void) {
-    assertNullPathMatchesLegacy(buildCeWithoutSoftmax);
+    assertNullPathMatchesTheReference(buildCeWithoutSoftmax);
 }
 
 void testConvTransposedConforms(void) {
-    assertNullPathMatchesLegacy(buildConvTransposedTrainable);
+    assertNullPathMatchesTheReference(buildConvTransposedTrainable);
 }
 
 void testFrozenConvTransposedAboveDeepestConforms(void) {
-    assertNullPathMatchesLegacy(buildFrozenConvTransposed);
+    assertNullPathMatchesTheReference(buildFrozenConvTransposed);
 }
 
 void testAdaptiveAvgPoolConforms(void) {
-    assertNullPathMatchesLegacy(buildAdaptiveAvgPool);
+    assertNullPathMatchesTheReference(buildAdaptiveAvgPool);
 }
 
-void testTwoCallsInARowMatchLegacyOnBatchNorm(void) {
-    assertTwoCallsMatchLegacy(buildBatchNorm);
+void testTwoCallsInARowMatchTheReferenceOnBatchNorm(void) {
+    assertTwoCallsMatchTheReference(buildBatchNorm);
 }
 
 void testTwoCallsInARowMatchTheReferenceOnDropout(void) {
@@ -917,26 +895,19 @@ static void agradOrderSink(void *ctx, size_t layerIdx, layerType_t layerType, co
     }
 }
 
-static agradProbe_t probeAgradOrder(runner_t runner) {
+static agradProbe_t probeAgradOrder(void) {
     zooFixture_t f;
     buildMlp(&f);
     forEachGrad(f.model, f.n, NULL);
     agradProbe_t p = {.f = &f};
-    trainingStats_t *stats =
-        (runner == RUN_LEGACY)
-            ? legacyCalculateGrads(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y, agradOrderSink,
-                                   &p)
-            : tracedGrads(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y, agradOrderSink, &p, NULL);
-    freeTrainingStats(stats);
+    freeTrainingStats(
+        tracedGrads(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y, agradOrderSink, &p, NULL));
     freeZoo(&f);
     return p;
 }
 
 void testAgradFiresBeforeTheLayersBackward(void) {
-    agradProbe_t legacy = probeAgradOrder(RUN_LEGACY);
-    agradProbe_t driver = probeAgradOrder(RUN_DRIVER);
-    TEST_ASSERT_EQUAL_size_t_MESSAGE(3, legacy.agrads, "Legacy: agrad at layers 2, 1, 0");
-    TEST_ASSERT_EQUAL_size_t_MESSAGE(0, legacy.writtenAtAgrad, "Legacy: agrad before backward");
+    agradProbe_t driver = probeAgradOrder();
     TEST_ASSERT_EQUAL_size_t_MESSAGE(3, driver.agrads, "driver: agrad at layers 2, 1, 0");
     TEST_ASSERT_EQUAL_size_t_MESSAGE(0, driver.writtenAtAgrad, "driver: agrad before backward");
 }
@@ -973,15 +944,13 @@ void testAnEmptyModelExitsNamingIt(void) {
 
 /* Wire headers carry no sparsity marker (an input's marker is not
  * propagated), so a marked input yields an unmarked output snapshot and
- * nothing is reserved for markers. The values still match Legacy. The memory
- * baseline is taken after the Legacy run, which leaks its markers
- * (freeSparsity is a no-op). */
+ * nothing is reserved for markers. The values still match the reference. */
 void testAMarkedInputYieldsAnUnmarkedOutputAndLeaksNothing(void) {
     zooFixture_t f;
     buildMlp(&f);
     sparsity_t marker = {0};
     f.x->sparsity = &marker;
-    captureRun(RUN_LEGACY, &f, NULL, &g_oracle);
+    captureReferenceRun(&f, NULL, &g_oracle);
 
     forEachGrad(f.model, f.n, NULL);
     g_driver.values.used = 0;
@@ -1030,18 +999,22 @@ void testAFailedEphemeralBuildExitsNamingIt(void) {
 
 /* remat P1's values of one call from zeroed grads: the loss, the output snapshot and
  * every parameter grad. */
-static void captureValues(runner_t runner, zooFixture_t *f, const trainingCall_t *call,
-                          runCapture_t *cap) {
+static void captureValues(zooFixture_t *f, const trainingCall_t *call, runCapture_t *cap) {
     forEachGrad(f->model, f->n, NULL);
     cap->values.used = 0;
     trainingStats_t *stats =
-        (runner == RUN_LEGACY)
-            ? legacyCalculateGrads(f->model, f->n, f->loss, REDUCTION_MEAN, f->x, f->y, NULL, NULL)
-            : calculateGradsSequential(f->model, f->n, f->loss, REDUCTION_MEAN, f->x, f->y, call);
+        calculateGradsSequential(f->model, f->n, f->loss, REDUCTION_MEAN, f->x, f->y, call);
     cap->loss = stats->loss;
     captureTensor(&cap->values, stats->output);
     freeTrainingStats(stats);
     forEachGrad(f->model, f->n, &cap->values);
+}
+
+static void captureReferenceValues(zooFixture_t *f, runCapture_t *cap) {
+    rematScheduler_t ref;
+    initReference(&ref, f);
+    captureValues(f, &(trainingCall_t){.remat = &ref}, cap);
+    rematSchedulerDeinit(&ref);
 }
 
 /* Built from the fixture's own model and input, so the first bind's key check
@@ -1063,11 +1036,11 @@ static rematReport_t reportOf(const rematScheduler_t *s) {
 void testCalculateGradsSequentialRunsOnTheCallersScheduler(void) {
     zooFixture_t f;
     buildMlp(&f);
-    captureValues(RUN_LEGACY, &f, NULL, &g_oracle);
+    captureReferenceValues(&f, &g_oracle);
     rematScheduler_t s;
     initFixtureHeap(&s, &f);
     size_t observedBefore = reportOf(&s).observedPeakLiveBytes;
-    captureValues(RUN_DRIVER, &f, &(trainingCall_t){.remat = &s}, &g_driver);
+    captureValues(&f, &(trainingCall_t){.remat = &s}, &g_driver);
     rematReport_t after = reportOf(&s);
     rematSchedulerDeinit(&s);
     freeZoo(&f);
@@ -1125,8 +1098,8 @@ void testAZeroInitialisedCallIsTheNullScheduler(void) {
         0, "",
         freeTrainingStats(calculateGradsSequential(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y,
                                                    &(trainingCall_t){0})));
-    captureValues(RUN_LEGACY, &f, NULL, &g_oracle);
-    captureValues(RUN_DRIVER, &f, &(trainingCall_t){0}, &g_driver);
+    captureReferenceValues(&f, &g_oracle);
+    captureValues(&f, &(trainingCall_t){0}, &g_driver);
     freeZoo(&f);
     assertSameValues(NULL);
 }
@@ -1264,17 +1237,12 @@ typedef struct cellRun {
 
 /* A fresh fixture per cell, so every cell starts from the state the oracle saw.
  * remat P5's call bracket starts after the init, whose blocks the caller owns, and
- * the deinit must return them. key == NULL: Legacy is the oracle and the cell
- * runs key-less; otherwise the reference is, and both run under *key. */
+ * the deinit must return them. The reference and the cell run under *key. */
 static cellRun_t captureCell(void (*build)(zooFixture_t *), const matrixCell_t *cell,
                              const rngKey_t *key) {
     zooFixture_t f;
     build(&f);
-    if (key == NULL) {
-        captureRun(RUN_LEGACY, &f, NULL, &g_oracle);
-    } else {
-        captureReferenceRun(&f, key, &g_oracle);
-    }
+    captureReferenceRun(&f, key, &g_oracle);
     cellRun_t c;
     c.memBeforeInit = memProfileCurrentBytes();
     rematScheduler_t s;
@@ -1288,15 +1256,16 @@ static cellRun_t captureCell(void (*build)(zooFixture_t *), const matrixCell_t *
 }
 
 /* One test per fixture and row, so a failing row cannot mask the other: the
- * poison mutation must turn both red. */
-static void assertRowMatchesTheOracle(void (*build)(zooFixture_t *), rematSchedulerType_t row,
-                                      const rngKey_t *key) {
+ * poison mutation must turn both red. The row's heap/store-all cell is the
+ * reference itself; the other cells of the two rows carry the proof. */
+static void assertRowMatchesTheReference(void (*build)(zooFixture_t *), rematSchedulerType_t row) {
+    const rngKey_t key = zooCallKey(0);
     for (size_t k = 0; k < MATRIX_CELLS; k++) {
         const matrixCell_t *cell = &g_cells[k];
         if (cell->row != row) {
             continue;
         }
-        cellRun_t c = captureCell(build, cell, key);
+        cellRun_t c = captureCell(build, cell, &key);
         TEST_ASSERT_EQUAL_INT_MESSAGE(cell->row, c.report.type, say(cell->name, "the cell's row"));
         TEST_ASSERT_EQUAL_INT_MESSAGE(cell->spec == NULL ? REMAT_PLAN_STORE_ALL
                                                          : cell->spec->policy,
@@ -1313,71 +1282,60 @@ static void assertRowMatchesTheOracle(void (*build)(zooFixture_t *), rematSchedu
     }
 }
 
-static void assertRowMatchesLegacy(void (*build)(zooFixture_t *), rematSchedulerType_t row) {
-    assertRowMatchesTheOracle(build, row, NULL);
+void testMlpMatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildMlp, REMAT_ARENA);
 }
 
-/* The row's heap/store-all cell is the reference itself; the other cells of
- * the two rows carry the proof. */
-static void assertRowMatchesTheReference(void (*build)(zooFixture_t *), rematSchedulerType_t row) {
-    const rngKey_t key = zooCallKey(0);
-    assertRowMatchesTheOracle(build, row, &key);
+void testMlpMatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildMlp, REMAT_HEAP);
 }
 
-void testMlpMatchesLegacyOnArena(void) {
-    assertRowMatchesLegacy(buildMlp, REMAT_ARENA);
+void testHarCnnMatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildHarCnn, REMAT_ARENA);
 }
 
-void testMlpMatchesLegacyOnHeap(void) {
-    assertRowMatchesLegacy(buildMlp, REMAT_HEAP);
+void testHarCnnMatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildHarCnn, REMAT_HEAP);
 }
 
-void testHarCnnMatchesLegacyOnArena(void) {
-    assertRowMatchesLegacy(buildHarCnn, REMAT_ARENA);
+void testTruncatedHarMatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildTruncatedHar, REMAT_ARENA);
 }
 
-void testHarCnnMatchesLegacyOnHeap(void) {
-    assertRowMatchesLegacy(buildHarCnn, REMAT_HEAP);
+void testTruncatedHarMatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildTruncatedHar, REMAT_HEAP);
 }
 
-void testTruncatedHarMatchesLegacyOnArena(void) {
-    assertRowMatchesLegacy(buildTruncatedHar, REMAT_ARENA);
+void testSoftmaxMseMatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildSoftmaxMse, REMAT_ARENA);
 }
 
-void testTruncatedHarMatchesLegacyOnHeap(void) {
-    assertRowMatchesLegacy(buildTruncatedHar, REMAT_HEAP);
+void testSoftmaxMseMatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildSoftmaxMse, REMAT_HEAP);
 }
 
-void testSoftmaxMseMatchesLegacyOnArena(void) {
-    assertRowMatchesLegacy(buildSoftmaxMse, REMAT_ARENA);
+void testFrozenLayerNormMatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildFrozenLayerNorm, REMAT_ARENA);
 }
 
-void testSoftmaxMseMatchesLegacyOnHeap(void) {
-    assertRowMatchesLegacy(buildSoftmaxMse, REMAT_HEAP);
+void testFrozenLayerNormMatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildFrozenLayerNorm, REMAT_HEAP);
 }
 
-void testFrozenLayerNormMatchesLegacyOnArena(void) {
-    assertRowMatchesLegacy(buildFrozenLayerNorm, REMAT_ARENA);
+void testFrozenGroupNormMatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildFrozenGroupNorm, REMAT_ARENA);
 }
 
-void testFrozenLayerNormMatchesLegacyOnHeap(void) {
-    assertRowMatchesLegacy(buildFrozenLayerNorm, REMAT_HEAP);
+void testFrozenGroupNormMatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildFrozenGroupNorm, REMAT_HEAP);
 }
 
-void testFrozenGroupNormMatchesLegacyOnArena(void) {
-    assertRowMatchesLegacy(buildFrozenGroupNorm, REMAT_ARENA);
+void testAllFrozenMatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildAllFrozen, REMAT_ARENA);
 }
 
-void testFrozenGroupNormMatchesLegacyOnHeap(void) {
-    assertRowMatchesLegacy(buildFrozenGroupNorm, REMAT_HEAP);
-}
-
-void testAllFrozenMatchesLegacyOnArena(void) {
-    assertRowMatchesLegacy(buildAllFrozen, REMAT_ARENA);
-}
-
-void testAllFrozenMatchesLegacyOnHeap(void) {
-    assertRowMatchesLegacy(buildAllFrozen, REMAT_HEAP);
+void testAllFrozenMatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildAllFrozen, REMAT_HEAP);
 }
 
 void testDropoutMatchesTheReferenceOnArena(void) {
@@ -1396,111 +1354,121 @@ void testSrForwardMatchesTheReferenceOnHeap(void) {
     assertRowMatchesTheReference(buildSrForward, REMAT_HEAP);
 }
 
-void testQuantSymMatchesLegacyOnArena(void) {
-    assertRowMatchesLegacy(buildQuantSym, REMAT_ARENA);
+void testQuantSymMatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildQuantSym, REMAT_ARENA);
 }
 
-void testQuantSymMatchesLegacyOnHeap(void) {
-    assertRowMatchesLegacy(buildQuantSym, REMAT_HEAP);
+void testQuantSymMatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildQuantSym, REMAT_HEAP);
 }
 
-void testFlattenAt0MatchesLegacyOnArena(void) {
-    assertRowMatchesLegacy(buildFlattenAt0, REMAT_ARENA);
+void testFlattenAt0MatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildFlattenAt0, REMAT_ARENA);
 }
 
-void testFlattenAt0MatchesLegacyOnHeap(void) {
-    assertRowMatchesLegacy(buildFlattenAt0, REMAT_HEAP);
+void testFlattenAt0MatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildFlattenAt0, REMAT_HEAP);
 }
 
-void testF1ZooMatchesLegacyOnArena(void) {
-    assertRowMatchesLegacy(buildF1Zoo, REMAT_ARENA);
+void testF1ZooMatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildF1Zoo, REMAT_ARENA);
 }
 
-void testF1ZooMatchesLegacyOnHeap(void) {
-    assertRowMatchesLegacy(buildF1Zoo, REMAT_HEAP);
+void testF1ZooMatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildF1Zoo, REMAT_HEAP);
 }
 
-void testGroupedBfpMatchesLegacyOnArena(void) {
-    assertRowMatchesLegacy(buildGroupedBfp, REMAT_ARENA);
+void testGroupedBfpMatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildGroupedBfp, REMAT_ARENA);
 }
 
-void testGroupedBfpMatchesLegacyOnHeap(void) {
-    assertRowMatchesLegacy(buildGroupedBfp, REMAT_HEAP);
+void testGroupedBfpMatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildGroupedBfp, REMAT_HEAP);
 }
 
-void testSingleLayerCeMatchesLegacyOnArena(void) {
-    assertRowMatchesLegacy(buildSingleLayerCe, REMAT_ARENA);
+void testSingleLayerCeMatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildSingleLayerCe, REMAT_ARENA);
 }
 
-void testSingleLayerCeMatchesLegacyOnHeap(void) {
-    assertRowMatchesLegacy(buildSingleLayerCe, REMAT_HEAP);
+void testSingleLayerCeMatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildSingleLayerCe, REMAT_HEAP);
 }
 
-void testCeLastLinearOnlyMatchesLegacyOnArena(void) {
-    assertRowMatchesLegacy(buildCeLastLinearOnly, REMAT_ARENA);
+void testCeLastLinearOnlyMatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildCeLastLinearOnly, REMAT_ARENA);
 }
 
-void testCeLastLinearOnlyMatchesLegacyOnHeap(void) {
-    assertRowMatchesLegacy(buildCeLastLinearOnly, REMAT_HEAP);
+void testCeLastLinearOnlyMatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildCeLastLinearOnly, REMAT_HEAP);
 }
 
-void testCeWithoutSoftmaxMatchesLegacyOnArena(void) {
-    assertRowMatchesLegacy(buildCeWithoutSoftmax, REMAT_ARENA);
+void testCeWithoutSoftmaxMatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildCeWithoutSoftmax, REMAT_ARENA);
 }
 
-void testCeWithoutSoftmaxMatchesLegacyOnHeap(void) {
-    assertRowMatchesLegacy(buildCeWithoutSoftmax, REMAT_HEAP);
+void testCeWithoutSoftmaxMatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildCeWithoutSoftmax, REMAT_HEAP);
 }
 
-void testBatchNormMatchesLegacyOnArena(void) {
-    assertRowMatchesLegacy(buildBatchNorm, REMAT_ARENA);
+void testBatchNormMatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildBatchNorm, REMAT_ARENA);
 }
 
-void testBatchNormMatchesLegacyOnHeap(void) {
-    assertRowMatchesLegacy(buildBatchNorm, REMAT_HEAP);
+void testBatchNormMatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildBatchNorm, REMAT_HEAP);
 }
 
-void testConvTransposedMatchesLegacyOnArena(void) {
-    assertRowMatchesLegacy(buildConvTransposedTrainable, REMAT_ARENA);
+void testConvTransposedMatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildConvTransposedTrainable, REMAT_ARENA);
 }
 
-void testConvTransposedMatchesLegacyOnHeap(void) {
-    assertRowMatchesLegacy(buildConvTransposedTrainable, REMAT_HEAP);
+void testConvTransposedMatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildConvTransposedTrainable, REMAT_HEAP);
 }
 
-void testFrozenConvTransposedMatchesLegacyOnArena(void) {
-    assertRowMatchesLegacy(buildFrozenConvTransposed, REMAT_ARENA);
+void testFrozenConvTransposedMatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildFrozenConvTransposed, REMAT_ARENA);
 }
 
-void testFrozenConvTransposedMatchesLegacyOnHeap(void) {
-    assertRowMatchesLegacy(buildFrozenConvTransposed, REMAT_HEAP);
+void testFrozenConvTransposedMatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildFrozenConvTransposed, REMAT_HEAP);
 }
 
-void testAdaptiveAvgPoolMatchesLegacyOnArena(void) {
-    assertRowMatchesLegacy(buildAdaptiveAvgPool, REMAT_ARENA);
+void testAdaptiveAvgPoolMatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildAdaptiveAvgPool, REMAT_ARENA);
 }
 
-void testAdaptiveAvgPoolMatchesLegacyOnHeap(void) {
-    assertRowMatchesLegacy(buildAdaptiveAvgPool, REMAT_HEAP);
+void testAdaptiveAvgPoolMatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildAdaptiveAvgPool, REMAT_HEAP);
 }
 
 /* ---- one persistent instance across calls (remat P6, P9) ---- */
 
 typedef void (*fixtureEdit_t)(zooFixture_t *f);
 
-/* Two calls on scheduler s from zeroed grads, without zeroing between them,
- * and `edit` applied to the live fixture between them; call i runs under
- * keys[i] (keys == NULL: key-less). Legacy ignores s and the keys. */
-static void captureEditedTwoCalls(runner_t runner, zooFixture_t *f, rematScheduler_t *s,
-                                  const rngKey_t *keys, fixtureEdit_t edit, runCapture_t *cap) {
+/* One call on s; with s == NULL, on a reference built on the fixture as it
+ * is at this call, so the oracle reads every config live. */
+static trainingStats_t *runEditedCall(zooFixture_t *f, rematScheduler_t *s, const rngKey_t *key) {
+    if (s != NULL) {
+        return runOnce(f, &(trainingCall_t){.remat = s, .key = key});
+    }
+    rematScheduler_t ref;
+    initReference(&ref, f);
+    trainingStats_t *stats = runOnce(f, &(trainingCall_t){.remat = &ref, .key = key});
+    rematSchedulerDeinit(&ref);
+    return stats;
+}
+
+/* Two calls from zeroed grads, without zeroing between them, and `edit`
+ * applied to the live fixture between them; call i runs under keys[i]. */
+static void captureEditedTwoCalls(zooFixture_t *f, rematScheduler_t *s, const rngKey_t *keys,
+                                  fixtureEdit_t edit, runCapture_t *cap) {
     forEachGrad(f->model, f->n, NULL);
     cap->values.used = 0;
     rngSetSeed(ZOO_SEED);
-    freeTrainingStats(
-        runOnce(runner, f, &(trainingCall_t){.remat = s, .key = (keys != NULL) ? &keys[0] : NULL}));
+    freeTrainingStats(runEditedCall(f, s, &keys[0]));
     edit(f);
-    trainingStats_t *stats =
-        runOnce(runner, f, &(trainingCall_t){.remat = s, .key = (keys != NULL) ? &keys[1] : NULL});
+    trainingStats_t *stats = runEditedCall(f, s, &keys[1]);
     cap->seedAfter = rngGetSeed();
     cap->loss = stats->loss;
     captureTensor(&cap->values, stats->output);
@@ -1508,30 +1476,23 @@ static void captureEditedTwoCalls(runner_t runner, zooFixture_t *f, rematSchedul
     forEachGrad(f->model, f->n, &cap->values);
 }
 
-/* Legacy reads every config live; each cell's scheduler, and the reference's,
- * is built on the unedited fixture before the first call, so its second bind
- * must re-derive the edited wire (a key-preserving edit, remat P6). keys ==
- * NULL: Legacy is the oracle and every call runs key-less; otherwise the
- * reference is, and call i of both sides runs under keys[i]. */
-static void assertEditedTwoCallsMatchTheOracle(void (*build)(zooFixture_t *), fixtureEdit_t edit,
-                                               const rngKey_t *keys) {
+/* The reference is built anew for each call; each cell's scheduler is built
+ * on the unedited fixture before the first call, so its second bind must
+ * re-derive the edited wire (a key-preserving edit, remat P6). Call i of both
+ * sides runs under the call key zooCallKey(i). */
+static void assertEditedTwoCallsMatchTheReference(void (*build)(zooFixture_t *),
+                                                  fixtureEdit_t edit) {
+    const rngKey_t keys[2] = {zooCallKey(0), zooCallKey(1)};
     for (size_t k = 0; k < MATRIX_CELLS; k++) {
         const matrixCell_t *cell = &g_cells[k];
         zooFixture_t f;
         build(&f);
-        if (keys == NULL) {
-            captureEditedTwoCalls(RUN_LEGACY, &f, NULL, NULL, edit, &g_oracle);
-        } else {
-            rematScheduler_t ref;
-            initReference(&ref, &f);
-            captureEditedTwoCalls(RUN_REFERENCE, &f, &ref, keys, edit, &g_oracle);
-            rematSchedulerDeinit(&ref);
-        }
+        captureEditedTwoCalls(&f, NULL, keys, edit, &g_oracle);
         freeZoo(&f);
         build(&f);
         rematScheduler_t s;
         initCell(&s, cell, &f);
-        captureEditedTwoCalls(RUN_DRIVER, &f, &s, keys, edit, &g_driver);
+        captureEditedTwoCalls(&f, &s, keys, edit, &g_driver);
         rematSchedulerDeinit(&s);
         freeZoo(&f);
         assertSameValues(cell->name);
@@ -1539,16 +1500,6 @@ static void assertEditedTwoCallsMatchTheOracle(void (*build)(zooFixture_t *), fi
             ZOO_SEED, g_driver.seedAfter,
             say(cell->name, "remat P2: two calls leave the global stream untouched"));
     }
-}
-
-static void assertEditedTwoCallsMatchLegacy(void (*build)(zooFixture_t *), fixtureEdit_t edit) {
-    assertEditedTwoCallsMatchTheOracle(build, edit, NULL);
-}
-
-static void assertEditedTwoCallsMatchTheReference(void (*build)(zooFixture_t *),
-                                                  fixtureEdit_t edit) {
-    const rngKey_t keys[2] = {zooCallKey(0), zooCallKey(1)};
-    assertEditedTwoCallsMatchTheOracle(build, edit, keys);
 }
 
 /* buildQuantSym's ACT template is its first kept template. */
@@ -1565,8 +1516,8 @@ static void roundTheActStochastically(zooFixture_t *f) {
 }
 
 /* remat P6: qMaxBits 8 -> 16 between two calls on one instance. */
-void testTwoCallsAcrossAWidthEditMatchLegacy(void) {
-    assertEditedTwoCallsMatchLegacy(buildQuantSym, raiseTheActWidthTo16);
+void testTwoCallsAcrossAWidthEditMatchTheReference(void) {
+    assertEditedTwoCallsMatchTheReference(buildQuantSym, raiseTheActWidthTo16);
 }
 
 /* The draw-count half of testBindRederivesRoundingModeAndDrawCount: after the
@@ -1604,12 +1555,12 @@ static void regroupTheInput(zooFixture_t *f) {
     f->x = makeBfpInput(2, 8);
 }
 
-void testTwoCallsAcrossAnInputRegroupMatchLegacy(void) {
-    assertEditedTwoCallsMatchLegacy(buildBfpFlattenAt0, regroupTheInput);
+void testTwoCallsAcrossAnInputRegroupMatchTheReference(void) {
+    assertEditedTwoCallsMatchTheReference(buildBfpFlattenAt0, regroupTheInput);
 }
 
 /* remat P9, second half: a scheduler built on sample A runs sample B (same shape,
- * other bytes) exactly as Legacy runs B, and leaves B untouched. */
+ * other bytes) exactly as the reference runs B, and leaves B untouched. */
 void testASchedulerBuiltOnSampleARunsSampleB(void) {
     for (size_t k = 0; k < MATRIX_CELLS; k++) {
         const matrixCell_t *cell = &g_cells[k];
@@ -1618,7 +1569,7 @@ void testASchedulerBuiltOnSampleARunsSampleB(void) {
         tensor_t *sampleA = f.x;
         tensor_t *sampleB = makeFloatTensor((size_t[]){1, 4}, 2, -0.75f);
         f.x = sampleB;
-        captureRun(RUN_LEGACY, &f, NULL, &g_oracle);
+        captureReferenceRun(&f, NULL, &g_oracle);
         f.x = sampleA;
         rematScheduler_t s;
         initCell(&s, cell, &f);
@@ -1653,7 +1604,7 @@ void testADrawingRowFailsP2(void) {
         const matrixCell_t *cell = &g_cells[k];
         zooFixture_t f;
         buildMlp(&f);
-        captureRun(RUN_LEGACY, &f, NULL, &g_oracle);
+        captureReferenceRun(&f, NULL, &g_oracle);
         rematScheduler_t s;
         initCell(&s, cell, &f);
         s.fns = &g_drawing;
@@ -1898,10 +1849,11 @@ void testEveryZooInitReservesWhatItsReportAccountsFor(void) {
 #endif
 
 /* One persistent scheduler across modes: train, evaluate, train again equals
- * Legacy train, the NULL path's eval, Legacy train (remat P1 on both training
- * calls; the eval call leaves nothing the next training call sees), and an
- * eval call on sample B of a scheduler built on sample A equals the NULL path
- * on B (remat P9). BatchNorm carries running stats from training into eval.
+ * the reference's train, the NULL path's eval, the reference's train (remat P1
+ * on both training calls; the eval call leaves nothing the next training call
+ * sees), and an eval call on sample B of a scheduler built on sample A equals
+ * the NULL path on B (remat P9). BatchNorm carries running stats from training
+ * into eval.
  * Each eval call leaves the parameter grads and BatchNorm running stats as the
  * NULL path's eval does; it is compared right there, because the training
  * captures reset both. */
@@ -1915,7 +1867,7 @@ static void assertTrainEvalTrainMatches(rematSchedulerType_t row) {
             }
             zooFixture_t f;
             fixtures[z].build(&f);
-            captureRun(RUN_LEGACY, &f, NULL, &g_oracle);
+            captureReferenceRun(&f, NULL, &g_oracle);
             captureEval(&f, NULL, &g_evalNull);
             rematScheduler_t s;
             initCell(&s, cell, &f);
@@ -1940,17 +1892,17 @@ static void assertTrainEvalTrainMatches(rematSchedulerType_t row) {
     }
 }
 
-void testTrainEvalTrainOnOneArenaMatchesLegacy(void) {
+void testTrainEvalTrainOnOneArenaMatchesTheReference(void) {
     assertTrainEvalTrainMatches(REMAT_ARENA);
 }
 
-void testTrainEvalTrainOnOneHeapMatchesLegacy(void) {
+void testTrainEvalTrainOnOneHeapMatchesTheReference(void) {
     assertTrainEvalTrainMatches(REMAT_HEAP);
 }
 
 int main(void) {
     UNITY_BEGIN();
-    RUN_TEST(testNullPathMatchesLegacyOnTheMlp);
+    RUN_TEST(testNullPathMatchesTheReferenceOnTheMlp);
     RUN_TEST(testTracedMlpConforms);
     RUN_TEST(testHarCnnUnderCeConforms);
     RUN_TEST(testSoftmaxUnderMseConforms);
@@ -1972,7 +1924,7 @@ int main(void) {
     RUN_TEST(testConvTransposedConforms);
     RUN_TEST(testFrozenConvTransposedAboveDeepestConforms);
     RUN_TEST(testAdaptiveAvgPoolConforms);
-    RUN_TEST(testTwoCallsInARowMatchLegacyOnBatchNorm);
+    RUN_TEST(testTwoCallsInARowMatchTheReferenceOnBatchNorm);
     RUN_TEST(testTwoCallsInARowMatchTheReferenceOnDropout);
     RUN_TEST(testAgradFiresBeforeTheLayersBackward);
     RUN_TEST(testAnInputWithoutBytesExitsBeforeLayer0Runs);
@@ -1991,55 +1943,55 @@ int main(void) {
     RUN_TEST(testANullSchedulerHoldsLessThanStoreAllMidBackward);
     RUN_TEST(testEveryZooInitReservesWhatItsReportAccountsFor);
 #endif
-    RUN_TEST(testMlpMatchesLegacyOnArena);
-    RUN_TEST(testMlpMatchesLegacyOnHeap);
-    RUN_TEST(testHarCnnMatchesLegacyOnArena);
-    RUN_TEST(testHarCnnMatchesLegacyOnHeap);
-    RUN_TEST(testTruncatedHarMatchesLegacyOnArena);
-    RUN_TEST(testTruncatedHarMatchesLegacyOnHeap);
-    RUN_TEST(testSoftmaxMseMatchesLegacyOnArena);
-    RUN_TEST(testSoftmaxMseMatchesLegacyOnHeap);
-    RUN_TEST(testFrozenLayerNormMatchesLegacyOnArena);
-    RUN_TEST(testFrozenLayerNormMatchesLegacyOnHeap);
-    RUN_TEST(testFrozenGroupNormMatchesLegacyOnArena);
-    RUN_TEST(testFrozenGroupNormMatchesLegacyOnHeap);
-    RUN_TEST(testAllFrozenMatchesLegacyOnArena);
-    RUN_TEST(testAllFrozenMatchesLegacyOnHeap);
+    RUN_TEST(testMlpMatchesTheReferenceOnArena);
+    RUN_TEST(testMlpMatchesTheReferenceOnHeap);
+    RUN_TEST(testHarCnnMatchesTheReferenceOnArena);
+    RUN_TEST(testHarCnnMatchesTheReferenceOnHeap);
+    RUN_TEST(testTruncatedHarMatchesTheReferenceOnArena);
+    RUN_TEST(testTruncatedHarMatchesTheReferenceOnHeap);
+    RUN_TEST(testSoftmaxMseMatchesTheReferenceOnArena);
+    RUN_TEST(testSoftmaxMseMatchesTheReferenceOnHeap);
+    RUN_TEST(testFrozenLayerNormMatchesTheReferenceOnArena);
+    RUN_TEST(testFrozenLayerNormMatchesTheReferenceOnHeap);
+    RUN_TEST(testFrozenGroupNormMatchesTheReferenceOnArena);
+    RUN_TEST(testFrozenGroupNormMatchesTheReferenceOnHeap);
+    RUN_TEST(testAllFrozenMatchesTheReferenceOnArena);
+    RUN_TEST(testAllFrozenMatchesTheReferenceOnHeap);
     RUN_TEST(testDropoutMatchesTheReferenceOnArena);
     RUN_TEST(testDropoutMatchesTheReferenceOnHeap);
     RUN_TEST(testSrForwardMatchesTheReferenceOnArena);
     RUN_TEST(testSrForwardMatchesTheReferenceOnHeap);
-    RUN_TEST(testQuantSymMatchesLegacyOnArena);
-    RUN_TEST(testQuantSymMatchesLegacyOnHeap);
-    RUN_TEST(testFlattenAt0MatchesLegacyOnArena);
-    RUN_TEST(testFlattenAt0MatchesLegacyOnHeap);
-    RUN_TEST(testF1ZooMatchesLegacyOnArena);
-    RUN_TEST(testF1ZooMatchesLegacyOnHeap);
-    RUN_TEST(testGroupedBfpMatchesLegacyOnArena);
-    RUN_TEST(testGroupedBfpMatchesLegacyOnHeap);
-    RUN_TEST(testSingleLayerCeMatchesLegacyOnArena);
-    RUN_TEST(testSingleLayerCeMatchesLegacyOnHeap);
-    RUN_TEST(testCeLastLinearOnlyMatchesLegacyOnArena);
-    RUN_TEST(testCeLastLinearOnlyMatchesLegacyOnHeap);
-    RUN_TEST(testCeWithoutSoftmaxMatchesLegacyOnArena);
-    RUN_TEST(testCeWithoutSoftmaxMatchesLegacyOnHeap);
-    RUN_TEST(testBatchNormMatchesLegacyOnArena);
-    RUN_TEST(testBatchNormMatchesLegacyOnHeap);
-    RUN_TEST(testConvTransposedMatchesLegacyOnArena);
-    RUN_TEST(testConvTransposedMatchesLegacyOnHeap);
-    RUN_TEST(testFrozenConvTransposedMatchesLegacyOnArena);
-    RUN_TEST(testFrozenConvTransposedMatchesLegacyOnHeap);
-    RUN_TEST(testAdaptiveAvgPoolMatchesLegacyOnArena);
-    RUN_TEST(testAdaptiveAvgPoolMatchesLegacyOnHeap);
-    RUN_TEST(testTwoCallsAcrossAWidthEditMatchLegacy);
+    RUN_TEST(testQuantSymMatchesTheReferenceOnArena);
+    RUN_TEST(testQuantSymMatchesTheReferenceOnHeap);
+    RUN_TEST(testFlattenAt0MatchesTheReferenceOnArena);
+    RUN_TEST(testFlattenAt0MatchesTheReferenceOnHeap);
+    RUN_TEST(testF1ZooMatchesTheReferenceOnArena);
+    RUN_TEST(testF1ZooMatchesTheReferenceOnHeap);
+    RUN_TEST(testGroupedBfpMatchesTheReferenceOnArena);
+    RUN_TEST(testGroupedBfpMatchesTheReferenceOnHeap);
+    RUN_TEST(testSingleLayerCeMatchesTheReferenceOnArena);
+    RUN_TEST(testSingleLayerCeMatchesTheReferenceOnHeap);
+    RUN_TEST(testCeLastLinearOnlyMatchesTheReferenceOnArena);
+    RUN_TEST(testCeLastLinearOnlyMatchesTheReferenceOnHeap);
+    RUN_TEST(testCeWithoutSoftmaxMatchesTheReferenceOnArena);
+    RUN_TEST(testCeWithoutSoftmaxMatchesTheReferenceOnHeap);
+    RUN_TEST(testBatchNormMatchesTheReferenceOnArena);
+    RUN_TEST(testBatchNormMatchesTheReferenceOnHeap);
+    RUN_TEST(testConvTransposedMatchesTheReferenceOnArena);
+    RUN_TEST(testConvTransposedMatchesTheReferenceOnHeap);
+    RUN_TEST(testFrozenConvTransposedMatchesTheReferenceOnArena);
+    RUN_TEST(testFrozenConvTransposedMatchesTheReferenceOnHeap);
+    RUN_TEST(testAdaptiveAvgPoolMatchesTheReferenceOnArena);
+    RUN_TEST(testAdaptiveAvgPoolMatchesTheReferenceOnHeap);
+    RUN_TEST(testTwoCallsAcrossAWidthEditMatchTheReference);
     RUN_TEST(testTwoCallsAcrossARoundingEditMatchTheReference);
-    RUN_TEST(testTwoCallsAcrossAnInputRegroupMatchLegacy);
+    RUN_TEST(testTwoCallsAcrossAnInputRegroupMatchTheReference);
     RUN_TEST(testASchedulerBuiltOnSampleARunsSampleB);
     RUN_TEST(testADrawingRowFailsP2);
     RUN_TEST(testAMarkedInputEvaluatesToAnUnmarkedOutputOnEitherRow);
     RUN_TEST(testEvalOverTheZooMatchesTheNullPathOnArena);
     RUN_TEST(testEvalOverTheZooMatchesTheNullPathOnHeap);
-    RUN_TEST(testTrainEvalTrainOnOneArenaMatchesLegacy);
-    RUN_TEST(testTrainEvalTrainOnOneHeapMatchesLegacy);
+    RUN_TEST(testTrainEvalTrainOnOneArenaMatchesTheReference);
+    RUN_TEST(testTrainEvalTrainOnOneHeapMatchesTheReference);
     return UNITY_END();
 }

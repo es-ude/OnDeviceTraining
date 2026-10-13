@@ -145,15 +145,14 @@ add_elastic_ai_unit_test(
         odt_test_death
 )
 
-# Remat PR2 (#4): the driver against the Legacy oracle (remat D42) over a
-# fixture zoo. Registered by hand, like UnitTestDeathTest:
-# add_elastic_ai_unit_test names the binary after its LIB_UNDER_TEST, and this
-# binary tests the driver against a second library rather than one library on
-# its own.
+# Remat PR2 (#4): every scheduler row and plan against an explicit HEAP +
+# STORE_ALL reference with the same call key (remat D57), over a fixture zoo.
+# Registered by hand, like UnitTestDeathTest: add_elastic_ai_unit_test names
+# the binary after its LIB_UNDER_TEST, and this binary tests the driver across
+# the scheduler libraries rather than one library on its own.
 add_executable(UnitTestCalculateGradsConformance UnitTestCalculateGradsConformance.c)
 target_link_libraries(UnitTestCalculateGradsConformance PRIVATE
         CalculateGradsSequential
-        odt_test_legacy_grads
         unity
         RematScheduler
         RematPlan
@@ -197,7 +196,7 @@ __register_target_as_unit_test(UnitTestCalculateGradsConformance)
 # Remat PR2 (#4): the driver-level deaths (tampered plans, decorator rows,
 # schedule-key mismatches), each asserted on both rows. Registered by hand
 # like the conformance binary; a binary of its own because the deaths need
-# small models and decorator rows, not the zoo or Legacy. RematPlan is listed
+# small models and decorator rows, not the zoo. RematPlan is listed
 # because the tamper tests edit the plan (RematPlan.h).
 add_executable(UnitTestCalculateGradsDeaths UnitTestCalculateGradsDeaths.c)
 target_link_libraries(UnitTestCalculateGradsDeaths PRIVATE

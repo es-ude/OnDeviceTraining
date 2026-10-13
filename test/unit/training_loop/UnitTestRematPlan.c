@@ -358,9 +358,9 @@ void testBackwardRangeSingleLayerUnderCrossEntropyIsMinusOne(void) {
 
 /* ---- the one BFP wire-grouping rule ---- */
 
-/* The helper must reproduce the pre-remat driver's rule (the Legacy oracle's
- * ACT and dx wire allocators) and initBufferOutput's copy (InferenceApi.c)
- * on its canonical cases. */
+/* The helper must reproduce the pre-remat driver's rule (its ACT and dx wire
+ * allocators) and initBufferOutput's copy (InferenceApi.c) on its canonical
+ * cases. */
 static void assertGrouping(size_t tmplGroups, size_t tmplGroupSize, size_t elements,
                            size_t numGroups, size_t groupSize) {
     uint8_t exponents[8];

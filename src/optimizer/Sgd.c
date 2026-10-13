@@ -7,6 +7,7 @@
 #include "ArithmeticType.h"
 #include "Common.h"
 #include "ExecuteOp.h"
+#include "OptimizerKeys.h"
 #include "Sgd.h"
 #include "Tensor.h"
 
@@ -95,7 +96,12 @@ static void sgdMParamKernel(tensor_t **op, size_t n, tensor_t *rawOut, tensor_t 
     }
 }
 
-void sgdStepM(optimizer_t *optim) {
+/* The update ops' OP(k) under (PARAM, p), one numbering for both paths (the
+ * stateless path runs only the param write). Part of the value contract:
+ * append, never renumber. */
+enum { SGD_OP_STATE = 0, SGD_OP_PARAM = 1 };
+
+void sgdStepM(optimizer_t *optim, const rngKey_t *updateKey) {
     sgd_t *sgd = optim->impl->sgd;
 
     /* Re-checked here (not only in sgdInit): the update kernels raw-cast
@@ -122,6 +128,7 @@ void sgdStepM(optimizer_t *optim) {
         for (size_t i = 0; i < optim->sizeStates; i++) {
             parameter_t *p = optim->parameter[i];
             sgdUpdateCtx_t ctx = {.lr = sgd->learningRate, .weightDecay = sgd->weightDecay};
+            rngKey_t opKey;
             /* #296 Stage 1: all three update kernels are elementwise (read i before
              * write i), so the FLOAT32 fast paths may write params/state in place
              * instead of staging through rawData. */
@@ -132,6 +139,7 @@ void sgdStepM(optimizer_t *optim) {
                     .inputs = (tensor_t *[]){p->param, p->grad},
                     .nInputs = 2,
                     .arithmetic = updateMath,
+                    .key = optimizerUpdateOpKey(updateKey, (uint32_t)i, SGD_OP_PARAM, &opKey),
                     .mode = OUT_WRITE,
                     .auxOut = NULL,
                     .writesInPlaceSafe = true,
@@ -149,6 +157,7 @@ void sgdStepM(optimizer_t *optim) {
         tensor_t *state = optim->states[i]->stateBuffers[0];
 
         sgdMStateCtx_t sc = {.momentum = sgd->momentumFactor, .weightDecay = sgd->weightDecay};
+        rngKey_t stateKey;
         executeOp(
             &(opSpec_t){
                 .kernel = sgdMStateKernel,
@@ -156,6 +165,7 @@ void sgdStepM(optimizer_t *optim) {
                 .inputs = (tensor_t *[]){state, p->grad, p->param},
                 .nInputs = 3,
                 .arithmetic = updateMath,
+                .key = optimizerUpdateOpKey(updateKey, (uint32_t)i, SGD_OP_STATE, &stateKey),
                 .mode = OUT_WRITE,
                 .auxOut = NULL,
                 .writesInPlaceSafe = true,
@@ -168,6 +178,7 @@ void sgdStepM(optimizer_t *optim) {
             state);
 
         sgdMParamCtx_t pc = {.lr = sgd->learningRate};
+        rngKey_t paramKey;
         executeOp(
             &(opSpec_t){
                 .kernel = sgdMParamKernel,
@@ -175,6 +186,7 @@ void sgdStepM(optimizer_t *optim) {
                 .inputs = (tensor_t *[]){p->param, state},
                 .nInputs = 2,
                 .arithmetic = updateMath,
+                .key = optimizerUpdateOpKey(updateKey, (uint32_t)i, SGD_OP_PARAM, &paramKey),
                 .mode = OUT_WRITE,
                 .auxOut = NULL,
                 .writesInPlaceSafe = true,

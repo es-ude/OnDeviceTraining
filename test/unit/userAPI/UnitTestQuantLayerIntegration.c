@@ -333,7 +333,7 @@ void testFullSymChainTrainingStepMatchesFloatTwin(void) {
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     trainingStats_t *statsS = calculateGradsSequential(modelSym, 5, defaultLossConfig(MSE),
                                                        REDUCTION_MEAN, inS, labelS, NULL);
-    sgdStepM(optimS);
+    sgdStepM(optimS, NULL);
 
     bool symStatsNotNull = (statsS != NULL);
     float symLoss = statsS ? statsS->loss : NAN;
@@ -368,7 +368,7 @@ void testFullSymChainTrainingStepMatchesFloatTwin(void) {
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     trainingStats_t *statsF = calculateGradsSequential(modelF, 3, defaultLossConfig(MSE),
                                                        REDUCTION_MEAN, inF, labelF, NULL);
-    sgdStepM(optimF);
+    sgdStepM(optimF, NULL);
 
     float w0F[12], b0F[3], gammaF[3], betaF[3], w1F[6], b1F[2];
     dequantParam(lin0F->config->linear->weights, w0F, 12, false);
@@ -481,7 +481,7 @@ void testConv1dTransposedSymChainTrains(void) {
             firstLoss = st->loss;
         }
         lastLoss = st->loss;
-        sgdStepM(opt);
+        sgdStepM(opt, NULL);
         optimizerZeroGrad(opt);
         freeTrainingStats(st);
         freeTensor(label);

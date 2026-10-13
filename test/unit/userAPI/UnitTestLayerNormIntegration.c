@@ -105,7 +105,7 @@ void testLinearLayerNormLinearOneTrainingStep(void) {
 
     trainingStats_t *stats = calculateGradsSequential(model, 3, defaultLossConfig(MSE),
                                                       REDUCTION_MEAN, input, label, NULL);
-    sgdStepM(optim);
+    sgdStepM(optim, NULL);
 
     bool statsNotNull = (stats != NULL);
     float loss = stats ? stats->loss : NAN;
@@ -193,7 +193,7 @@ void testLayerNormSymInt32SingleLayerTrainingStep(void) {
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     trainingStats_t *statsSym = calculateGradsSequential(modelSym, 1, defaultLossConfig(MSE),
                                                          REDUCTION_MEAN, inSym, labelSym, NULL);
-    sgdStepM(optimSym);
+    sgdStepM(optimSym, NULL);
 
     float gammaSym[4], betaSym[4];
     {
@@ -225,7 +225,7 @@ void testLayerNormSymInt32SingleLayerTrainingStep(void) {
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     trainingStats_t *statsF = calculateGradsSequential(modelF, 1, defaultLossConfig(MSE),
                                                        REDUCTION_MEAN, inF, labelF, NULL);
-    sgdStepM(optimF);
+    sgdStepM(optimF, NULL);
 
     float gammaF[4], betaF[4];
     for (size_t i = 0; i < 4; i++) {

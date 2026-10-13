@@ -21,8 +21,13 @@
  * element, a per-tensor scale) and propagate it, so the failure stays loud
  * downstream. A BFP-stored grad instead fails fast (exit(1)) inside
  * scaleBfpTensorInPlace: a (mantissa, shared exponent) grid has no
- * non-finite code, so there is nothing to propagate it into. */
-void scaleOptimizerGradients(optimizer_t *optimizer, float factor);
+ * non-finite code, so there is nothing to propagate it into.
+ * updateKey is the key of the update the gradients belong to (the key
+ * optimizerStep gets next); parameter p's BFP rescale draws under it folded
+ * with (PARAM, p), then (SCALE, 0). NULL means the caller supplies no
+ * randomness. With a key, more than 2^32 parameters stop the program with a
+ * named error before any gradient changes. */
+void scaleOptimizerGradients(optimizer_t *optimizer, float factor, const rngKey_t *updateKey);
 
 /* #382: global-norm gradient clipping, `torch.nn.utils.clip_grad_norm_`
  * parity. Call-site contract: AFTER grad accumulation and mean-scaling

@@ -1,6 +1,7 @@
 #define SOURCE_FILE "OPTIMIZER_API"
 
 #include <math.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 #include "BatchNorm1d.h"
@@ -12,13 +13,20 @@
 #include "LayerNorm.h"
 #include "Linear.h"
 #include "OptimizerApi.h"
+#include "OptimizerKeys.h"
 #include "Quantization.h"
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
 
-void scaleOptimizerGradients(optimizer_t *optimizer, float factor) {
+void scaleOptimizerGradients(optimizer_t *optimizer, float factor, const rngKey_t *updateKey) {
+    /* rngFold's index is 32 bits wide: a larger parameter index would reuse
+     * the scale stream of an earlier parameter. */
+    if (updateKey != NULL && optimizer->sizeStates > 0 && optimizer->sizeStates - 1 > UINT32_MAX) {
+        PRINT_ERROR("scaleOptimizerGradients: parameter index exceeds UINT32_MAX");
+        exit(1);
+    }
     /* Validation: warn (currently via PRINT_ERROR — see #151 for unified
      * warn/assert macros) on non-positive or non-finite factor. */
     if (!(factor > 0.0f && isfinite(factor))) {
@@ -111,7 +119,9 @@ void scaleOptimizerGradients(optimizer_t *optimizer, float factor) {
              * silently skipping would mask the caller's bug and saturating
              * would invent data. Precedent for the exit: optimizerClipGradNorm
              * below. */
-            scaleBfpTensorInPlace(param->grad, factor, NULL);
+            rngStream_t scaleStream;
+            scaleBfpTensorInPlace(param->grad, factor,
+                                  optimizerScaleStream(updateKey, (uint32_t)i, &scaleStream));
             break;
         }
         default:
@@ -184,7 +194,9 @@ float optimizerClipGradNorm(optimizer_t *optimizer, float maxNorm) {
     float totalNorm = (float)sqrt(sumSquares);
     float clipCoef = maxNorm / (totalNorm + 1e-6f);
     if (clipCoef < 1.0f) {
-        scaleOptimizerGradients(optimizer, clipCoef);
+        /* The clip accepts only FLOAT32 and SYM_INT32 grads, which rescale
+         * without rounding: no key. */
+        scaleOptimizerGradients(optimizer, clipCoef, NULL);
     }
     return totalNorm;
 }

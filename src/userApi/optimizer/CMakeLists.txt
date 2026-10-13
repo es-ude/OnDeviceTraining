@@ -3,6 +3,8 @@ target_include_directories(OptimizerApi PUBLIC include)
 target_link_libraries(OptimizerApi PRIVATE
         Sgd
         Optimizer
+        OptimizerKeys
+        RNG
         Tensor
         TensorApi
         TensorConversion

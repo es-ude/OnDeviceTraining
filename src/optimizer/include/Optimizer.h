@@ -7,6 +7,9 @@
 
 typedef struct sgd sgd_t;
 typedef struct adamW adamW_t;
+/* Pointer-only use: the identical typedef lives in RNG.h (C11 allows the
+ * repetition), so this header needs no RNG include path. */
+typedef struct rngKey rngKey_t;
 
 typedef struct states {
     tensor_t **stateBuffers;
@@ -39,7 +42,9 @@ typedef struct optimizer {
     roundingMode_t writeBackRounding;
 } optimizer_t;
 
-typedef void (*stepFn_t)(optimizer_t *optim);
+/* updateKey: NULLable, borrowed for the call; the key of this update (see
+ * optimizerStep). */
+typedef void (*stepFn_t)(optimizer_t *optim, const rngKey_t *updateKey);
 typedef void (*zeroFn_t)(optimizer_t *optim);
 /* #327: optimizer-agnostic LR access for the scheduler. LR stays in the impl
  * structs; these accessors are the only sanctioned cross-impl path.
@@ -75,8 +80,12 @@ void optimizerSetWriteBackRounding(optimizer_t *optimizer, roundingMode_t writeB
  * the identical update but fires no events. Grad zeroing stays a separate
  * call (optimizerFunctions[type].zero / optimizerZeroGrad); it is not part
  * of the measured phase. trainingEpochDefault (hence trainingRun) steps
- * through here. */
-void optimizerStep(optimizer_t *optimizer);
+ * through here.
+ * updateKey is the key of this update (trainingRngUpdateKey); each update op
+ * of parameter p draws under it folded with (PARAM, p), then (OP, k). NULL
+ * means the caller supplies no randomness. With a key, more than 2^32
+ * parameters stop the program with a named error before the step begins. */
+void optimizerStep(optimizer_t *optimizer, const rngKey_t *updateKey);
 
 size_t calcTotalNumberOfStates(layer_t **model, size_t sizeModel);
 

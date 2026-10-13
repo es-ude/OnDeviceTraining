@@ -78,8 +78,9 @@ The macro-batch divisor lives at the optimizer:
 
 - `lossFunctions[lossConfig.funcType].computeMeanScale(N, modelOutput)`
   returns the PyTorch-parity divisor (`1/(N*F)` for MSE, `1/N` for CE).
-- `scaleOptimizerGradients(optimizer, factor)` multiplies every parameter's
-  `grad` field by the factor in place.
+- `scaleOptimizerGradients(optimizer, factor, updateKey)` multiplies every
+  parameter's `grad` field by the factor in place (a BFP grad is rescaled with
+  rounding, under the update's key).
 - `trainingEpochDefault` calls these between accumulation and `step`,
   but only when `backwardReduction == REDUCTION_MEAN`.
 

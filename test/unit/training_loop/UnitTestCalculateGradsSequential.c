@@ -715,7 +715,7 @@ void testFrozenLayerSurvivesTrainingUntouched(void) {
         }
         lastLoss = stats->loss;
         freeTrainingStats(stats);
-        optimFns.step(optim);
+        optimFns.step(optim, NULL);
     }
 
     /* CAPTURE (before any free touches the parameter data). */

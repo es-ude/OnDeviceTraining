@@ -10,6 +10,7 @@
 #include "Common.h"
 #include "ExecuteOp.h"
 #include "Mul.h"
+#include "OptimizerKeys.h"
 #include "PointwiseFused.h"
 #include "Tensor.h"
 
@@ -110,7 +111,11 @@ static void adamWParamKernel(tensor_t **op, size_t n, tensor_t *rawOut, tensor_t
     addcdivDenomFloat32TensorsInplace(rawOut, op[1], op[2], ctx->bc2sqrt, ctx->eps, ctx->stepScale);
 }
 
-void adamWStep(optimizer_t *optim) {
+/* The update ops' OP(k) under (PARAM, p), in program order. Part of the
+ * value contract: append, never renumber. */
+enum { ADAMW_OP_MOMENT = 0, ADAMW_OP_VARIANCE = 1, ADAMW_OP_PARAM = 2 };
+
+void adamWStep(optimizer_t *optim, const rngKey_t *updateKey) {
     adamW_t *adamW = optim->impl->adamW;
 
     /* Re-checked here (not only in adamWInit): hand-assembled optimizers
@@ -151,12 +156,15 @@ void adamWStep(optimizer_t *optim) {
         parameter_t *p = optim->parameter[i];
         tensor_t *m = optim->states[i]->stateBuffers[0];
         tensor_t *v = optim->states[i]->stateBuffers[1];
+        rngKey_t opKey[3];
 
         executeOp(&(opSpec_t){.kernel = adamWMomentKernel,
                               .ctx = &mc,
                               .inputs = (tensor_t *[]){m, p->grad},
                               .nInputs = 2,
                               .arithmetic = updateMath,
+                              .key = optimizerUpdateOpKey(updateKey, (uint32_t)i, ADAMW_OP_MOMENT,
+                                                          &opKey[ADAMW_OP_MOMENT]),
                               .mode = OUT_WRITE,
                               .auxOut = NULL,
                               .writesInPlaceSafe = true},
@@ -166,6 +174,8 @@ void adamWStep(optimizer_t *optim) {
                               .inputs = (tensor_t *[]){v, p->grad},
                               .nInputs = 2,
                               .arithmetic = updateMath,
+                              .key = optimizerUpdateOpKey(updateKey, (uint32_t)i, ADAMW_OP_VARIANCE,
+                                                          &opKey[ADAMW_OP_VARIANCE]),
                               .mode = OUT_WRITE,
                               .auxOut = NULL,
                               .writesInPlaceSafe = true},
@@ -175,6 +185,8 @@ void adamWStep(optimizer_t *optim) {
                               .inputs = (tensor_t *[]){p->param, m, v},
                               .nInputs = 3,
                               .arithmetic = updateMath,
+                              .key = optimizerUpdateOpKey(updateKey, (uint32_t)i, ADAMW_OP_PARAM,
+                                                          &opKey[ADAMW_OP_PARAM]),
                               .mode = OUT_WRITE,
                               .auxOut = NULL,
                               .writesInPlaceSafe = true,

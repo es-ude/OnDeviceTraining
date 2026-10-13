@@ -14,6 +14,7 @@
 #include "OptimizerApi.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "Rounding.h"
 #include "SgdApi.h"
 #include "StorageApi.h"
@@ -90,7 +91,7 @@ void testScaleOptimizerGradients_DoublesGradients() {
 
     optimizer_t *sgd = buildOneLayerOptimWithGrads(model, &w, &b, wInit, bInit);
 
-    scaleOptimizerGradients(sgd, 2.0f);
+    scaleOptimizerGradients(sgd, 2.0f, NULL);
 
     /* CAPTURE before any free. */
     float capturedWGrad[6];
@@ -134,7 +135,7 @@ void testScaleOptimizerGradients_FactorZero_DoesNotAbort() {
     optimizer_t *sgd = buildOneLayerOptimWithGrads(model, &w, &b, wInit, bInit);
 
     /* Must not abort — validation is a warning. */
-    scaleOptimizerGradients(sgd, 0.0f);
+    scaleOptimizerGradients(sgd, 0.0f, NULL);
 
     /* CAPTURE that grads are now zero (factor 0 multiplied through). */
     float capturedFirst = ((float *)w->grad->data)[0];
@@ -156,7 +157,7 @@ void testScaleOptimizerGradients_FactorNaN_DoesNotAbort() {
 
     /* NaN propagates through; we just want to prove the function returns. */
     float nanFactor = 0.0f / 0.0f;
-    scaleOptimizerGradients(sgd, nanFactor);
+    scaleOptimizerGradients(sgd, nanFactor, NULL);
 
     float captured = ((float *)w->grad->data)[0];
 
@@ -249,7 +250,7 @@ void testScaleOptimizerGradients_SymInt32_ScalesScaleOnly() {
     optimizer_t *sgd =
         buildSymInt32OneLayerOptim(model, &w, &b, wScale0, wGradInt, bScale0, bGradInt, 0.01f, 0.f);
 
-    scaleOptimizerGradients(sgd, factor);
+    scaleOptimizerGradients(sgd, factor, NULL);
 
     /* CAPTURE before frees. */
     int32_t capturedWInt[6];
@@ -299,7 +300,7 @@ void testScaleOptimizerGradients_SymInt32_DequantEquivalence() {
     optimizer_t *sgd =
         buildSymInt32OneLayerOptim(model, &w, &b, wScale0, wGradInt, bScale0, bGradInt, 0.01f, 0.f);
 
-    scaleOptimizerGradients(sgd, factor);
+    scaleOptimizerGradients(sgd, factor, NULL);
 
     /* CAPTURE dequantized values after scaling, using post-scale int32 + scale. */
     float wDequantAfter[6];
@@ -361,8 +362,8 @@ void testScaleOptimizerGradients_SymInt32_MomentumSgdAppliesScaledGradient() {
     optimizer_t *sgd = buildSymInt32OneLayerOptim(model, &w, &b, wScale0, wGradInt, bScale0,
                                                   bGradInt, lr, 0.f /* momentum=0 first step */);
 
-    scaleOptimizerGradients(sgd, factor);
-    optimizerFunctions[sgd->type].step(sgd);
+    scaleOptimizerGradients(sgd, factor, NULL);
+    optimizerFunctions[sgd->type].step(sgd, NULL);
 
     /* CAPTURE param-after-step as dequantized floats. */
     float wParamAfter[6];
@@ -489,7 +490,7 @@ void testScaleOptimizerGradients_Sym_ScalesScaleOnly(void) {
     float wScaleBefore = ((symQConfig_t *)w->grad->quantization->qConfig)->scales[0];
     float bScaleBefore = ((symQConfig_t *)b->grad->quantization->qConfig)->scales[0];
 
-    scaleOptimizerGradients(sgd, factor);
+    scaleOptimizerGradients(sgd, factor, NULL);
 
     /* CAPTURE before frees. */
     uint8_t wBytesAfter[wBytes];
@@ -527,7 +528,7 @@ void testScaleOptimizerGradients_Sym_DequantEquivalence(void) {
     dequantGradToFloat(w->grad, wDequantBefore, 6);
     dequantGradToFloat(b->grad, bDequantBefore, 2);
 
-    scaleOptimizerGradients(sgd, factor);
+    scaleOptimizerGradients(sgd, factor, NULL);
 
     float wDequantAfter[6];
     float bDequantAfter[2];
@@ -622,7 +623,7 @@ void testScaleOptimizerGradients_Asym_ScalesScaleOnly(void) {
     uint16_t wZeroPointBefore = wQ->zeroPoints[0];
     uint16_t bZeroPointBefore = bQ->zeroPoints[0];
 
-    scaleOptimizerGradients(sgd, factor);
+    scaleOptimizerGradients(sgd, factor, NULL);
 
     /* CAPTURE before frees. */
     uint8_t wBytesAfter[wBytes];
@@ -665,7 +666,7 @@ void testScaleOptimizerGradients_Asym_DequantEquivalence(void) {
     dequantGradToFloat(w->grad, wDequantBefore, 6);
     dequantGradToFloat(b->grad, bDequantBefore, 2);
 
-    scaleOptimizerGradients(sgd, factor);
+    scaleOptimizerGradients(sgd, factor, NULL);
 
     float wDequantAfter[6];
     float bDequantAfter[2];
@@ -764,7 +765,7 @@ void testScaleOptimizerGradients_Bfp_DequantEquivalence(void) {
     dequantGradToFloat(w->grad, wDequantBefore, 6);
     dequantGradToFloat(b->grad, bDequantBefore, 2);
 
-    scaleOptimizerGradients(sgd, factor);
+    scaleOptimizerGradients(sgd, factor, NULL);
 
     float wDequantAfter[6];
     float bDequantAfter[2];
@@ -805,7 +806,7 @@ void testScaleOptimizerGradients_Bfp_NonFiniteFactorAborts(void) {
 
     optimizer_t *sgd = buildBfpOneLayerOptim(model, &w, &b, wGradInit, bGradInit, 6, 8, 0.01f, 0.f);
 
-    ASSERT_EXITS_WITH_FAILURE(scaleOptimizerGradients(sgd, nanFactor));
+    ASSERT_EXITS_WITH_FAILURE(scaleOptimizerGradients(sgd, nanFactor, NULL));
 
     freeOptim(sgd);
     freeLinearLayerShellOnly(model[0]);
@@ -852,9 +853,24 @@ void testScaleOptimizerGradientsRejectsGroupedSymGrad(void) {
          * the comma enclosed. */
         optimizer_t optim = ((optimizer_t){.parameter = parArr, .sizeStates = 1});
 
-        scaleOptimizerGradients(&optim, 2.0f);
+        scaleOptimizerGradients(&optim, 2.0f, NULL);
     });
 }
+
+#if SIZE_MAX > UINT32_MAX
+static void scalePastUint32MaxParams(void) {
+    const rngKey_t updateKey = rngKeyFromSeed(1u);
+    optimizer_t optim = {.type = SGD_M, .sizeStates = (size_t)UINT32_MAX + 2u};
+    scaleOptimizerGradients(&optim, 0.5f, &updateKey);
+}
+
+/* rngFold's index is 32 bits wide: a keyed mean-scale over more than 2^32
+ * parameters stops before it touches one. */
+void testScaleOptimizerGradientsExitsWhenAParameterIndexExceedsUint32Max(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "scaleOptimizerGradients: parameter index exceeds UINT32_MAX",
+                             scalePastUint32MaxParams());
+}
+#endif
 
 int main(void) {
     UNITY_BEGIN();
@@ -871,5 +887,8 @@ int main(void) {
     RUN_TEST(testScaleOptimizerGradients_Bfp_DequantEquivalence);
     RUN_TEST(testScaleOptimizerGradients_Bfp_NonFiniteFactorAborts);
     RUN_TEST(testScaleOptimizerGradientsRejectsGroupedSymGrad);
+#if SIZE_MAX > UINT32_MAX
+    RUN_TEST(testScaleOptimizerGradientsExitsWhenAParameterIndexExceedsUint32Max);
+#endif
     return UNITY_END();
 }

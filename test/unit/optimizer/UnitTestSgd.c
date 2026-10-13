@@ -13,6 +13,7 @@
 #include "LinearApi.h"
 #include "Optimizer.h"
 #include "OptimizerApi.h"
+#include "OptimizerKeys.h"
 #include "QuantizationApi.h"
 #include "RNG.h"
 #include "Sgd.h"
@@ -319,7 +320,7 @@ void testSGDStep() {
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     optimizerFunctions_t sgdFns = optimizerFunctions[sgd->type];
-    sgdFns.step(sgd);
+    sgdFns.step(sgd, NULL);
 
     /* CAPTURE first-step values before second step. */
     float capturedWAfterStep1[3];
@@ -331,7 +332,7 @@ void testSGDStep() {
         capturedBAfterStep1[i] = ((float *)linear->config->linear->bias->param->data)[i];
     }
 
-    sgdFns.step(sgd);
+    sgdFns.step(sgd, NULL);
 
     /* CAPTURE second-step values before frees. */
     float capturedWAfterStep2[3];
@@ -764,7 +765,7 @@ void testSgdStepSymInt32DoesNotRoundTripGrad(void) {
     optim.writeBackRounding =
         HALF_AWAY; /* hand-built: field is otherwise uninitialized stack (#279) */
 
-    sgdStepM(&optim);
+    sgdStepM(&optim, NULL);
 
     /* CAPTURE -> free -> assert: grad mantissas + scale must be untouched. */
     int32_t m0 = ((int32_t *)g->data)[0];
@@ -814,7 +815,7 @@ void testSgdStepMMomentumZeroIgnoresStatesAndUpdatesParam(void) {
     optim.writeBackRounding =
         HALF_AWAY; /* hand-built: field is otherwise uninitialized stack (#279) */
 
-    sgdStepM(&optim);
+    sgdStepM(&optim, NULL);
 
     /* CAPTURE -> free -> assert (file convention). */
     float p0 = ((float *)p->data)[0];
@@ -1195,7 +1196,7 @@ void testSgdStepMRejectsNonFloat32UpdateMath(void) {
     optim.writeBackRounding =
         HALF_AWAY; /* hand-built: field is otherwise uninitialized stack (#279) */
 
-    ASSERT_EXITS_WITH_FAILURE(sgdStepM(&optim));
+    ASSERT_EXITS_WITH_FAILURE(sgdStepM(&optim, NULL));
 
     freeParameter(param);
 }
@@ -1248,7 +1249,7 @@ void testSgdStepMFloatReadsPackedSymGradGeneric(void) {
     optim.writeBackRounding =
         HALF_AWAY; /* hand-built: field is otherwise uninitialized stack (#279) */
 
-    sgdStepM(&optim);
+    sgdStepM(&optim, NULL);
 
     /* CAPTURE -> free -> assert: derive expected with the SAME formula the
      * comment above walks through (float scale = 2.0f/127.f), not hardcoded
@@ -1322,7 +1323,7 @@ void testSgdStepMMixedDtypeMovesBothParamsCorrectly(void) {
     optim.writeBackRounding =
         HALF_AWAY; /* hand-built: field is otherwise uninitialized stack (#279) */
 
-    sgdStepM(&optim);
+    sgdStepM(&optim, NULL);
 
     /* CAPTURE -> free -> assert (file convention). */
     float aAfter[2];
@@ -1425,7 +1426,7 @@ void testSgdStepHalfAwayNeverEscapesSymDeadZone(void) {
 
     int codeEverMoved = 0;
     for (int i = 0; i < 500; i++) {
-        sgdStepM(&optim);
+        sgdStepM(&optim, NULL);
         if (((int32_t *)param->param->data)[1] != initialTargetCode) {
             codeEverMoved = 1;
         }
@@ -1468,7 +1469,7 @@ void testSgdStepDetWriteBackOverridesSrParamQConfig(void) {
 
     int codeEverMoved = 0;
     for (int i = 0; i < 500; i++) {
-        sgdStepM(&optim);
+        sgdStepM(&optim, NULL);
         if (((int32_t *)param->param->data)[1] != initialTargetCode) {
             codeEverMoved = 1;
         }
@@ -1515,7 +1516,7 @@ void testSgdStepOptimizerSrWriteBackOverridesHalfAwayParamQConfig(void) {
 
     int codeEverMoved = 0;
     for (int i = 0; i < 500; i++) {
-        sgdStepM(&optim);
+        sgdStepM(&optim, NULL);
         if (((int32_t *)param->param->data)[1] != initialTargetCode) {
             codeEverMoved = 1;
         }
@@ -1570,7 +1571,7 @@ void testSgdStepMMomentumPathHonorsOptimizerSrWriteBack(void) {
 
     int codeEverMoved = 0;
     for (int i = 0; i < 500; i++) {
-        sgdStepM(&optim);
+        sgdStepM(&optim, NULL);
         if (((int32_t *)param->param->data)[1] != initialTargetCode) {
             codeEverMoved = 1;
         }
@@ -1636,7 +1637,7 @@ void testSgdStepMStateWriteBackHonorsOptimizerSrRounding(void) {
 
     int stateCodeEverMoved = 0;
     for (int i = 0; i < 500; i++) {
-        sgdStepM(&optim);
+        sgdStepM(&optim, NULL);
         if (((int32_t *)state->data)[1] != initialStateCode) {
             stateCodeEverMoved = 1;
         }
@@ -2215,7 +2216,7 @@ void testSgdStepGroupedSymParamMatchesGold(void) {
                           * SR_HALF_AWAY). */
                          .writeBackRounding = HALF_AWAY};
 
-    sgdStepM(&optim);
+    sgdStepM(&optim, NULL);
 
     /* CAPTURE -> free -> assert (file convention). */
     int32_t mant[6];
@@ -2262,7 +2263,7 @@ void testSgdStepGroupedSymParamMomentumMatchesGold(void) {
                          .impl = &impl,
                          .writeBackRounding = HALF_AWAY};
 
-    sgdStepM(&optim);
+    sgdStepM(&optim, NULL);
 
     /* CAPTURE -> free -> assert. */
     int32_t mant[6];
@@ -2333,7 +2334,7 @@ static void runBfpMomentumGoldCase(int32_t mantissaBits, int32_t exponentBits,
                          .impl = &impl,
                          .writeBackRounding = HALF_AWAY};
 
-    sgdStepM(&optim);
+    sgdStepM(&optim, NULL);
 
     /* CAPTURE -> free -> assert. */
     int32_t paramCodes[6], stateCodes[6];
@@ -2439,7 +2440,7 @@ void testSgdStepGroupedAsymParamMatchesGold(void) {
                           * SR_HALF_AWAY). */
                          .writeBackRounding = HALF_AWAY};
 
-    sgdStepM(&optim);
+    sgdStepM(&optim, NULL);
 
     /* CAPTURE -> free -> assert (file convention). Codes are non-negative:
      * zero-extend readback (byteConversion widen), no sign restore. */
@@ -2493,6 +2494,217 @@ void testSgdCreateGroupedAsymMomentumQuantExits(void) {
     });
 }
 
+/* ---- the update keys of the optimizer step (#4) ---- */
+
+/* Expected values from the Python mirror (PARAM 19, OP 7, OUT 10, SCALE 20
+ * spelled as numbers), repository root:
+ *   uv run python -c "from examples._shared.keyed_rng import (fold, key_from_seed as kfs,
+ *   open_stream as o); u = kfs(0x0b7e); op = lambda p, k: fold(fold(u, 19, p), 7, k); print(
+ *   [hex(w) for w in op(1, 1)]); print([hex(o(fold(op(p, k), 10, 0)))
+ *   for (p, k) in ((0, 1), (1, 1), (0, 0), (0, 2))]); print(hex(o(fold(fold(u, 19, 1), 20, 0))))"
+ * Each check also compares with the explicit rngFold chain. */
+#define UPDATE_KEY_TEST_SEED 0x0b7eu
+#define SGD_CELL_RECORDS 4
+
+/* An update op's key is the update key folded with (PARAM, p), then (OP, k). */
+void testOptimizerUpdateOpKeyFoldsTheParamThenTheOp(void) {
+    const rngKey_t updateKey = rngKeyFromSeed(UPDATE_KEY_TEST_SEED);
+    rngKey_t storage;
+
+    const rngKey_t *key = optimizerUpdateOpKey(&updateKey, 1u, 1u, &storage);
+
+    TEST_ASSERT_EQUAL_PTR(&storage, key);
+    rngKey_t chain = rngFold(rngFold(updateKey, RNG_TAG_PARAM, 1u), RNG_TAG_OP, 1u);
+    TEST_ASSERT_EQUAL_HEX32(chain.w[0], storage.w[0]);
+    TEST_ASSERT_EQUAL_HEX32(chain.w[1], storage.w[1]);
+    TEST_ASSERT_EQUAL_HEX32(0x5a6e3440u, storage.w[0]);
+    TEST_ASSERT_EQUAL_HEX32(0xa8bd4dc8u, storage.w[1]);
+}
+
+/* A gradient mean-scale draws from the update key folded with (PARAM, p),
+ * then (SCALE, 0). */
+void testOptimizerScaleStreamOpensTheScaleKeyOfTheParam(void) {
+    const rngKey_t updateKey = rngKeyFromSeed(UPDATE_KEY_TEST_SEED);
+    rngStream_t storage;
+
+    rngStream_t *stream = optimizerScaleStream(&updateKey, 1u, &storage);
+
+    TEST_ASSERT_EQUAL_PTR(&storage, stream);
+    rngKey_t chain = rngFold(rngFold(updateKey, RNG_TAG_PARAM, 1u), RNG_TAG_SCALE, 0u);
+    TEST_ASSERT_EQUAL_HEX32(rngOpen(chain).state, storage.state);
+    TEST_ASSERT_EQUAL_HEX32(0x07e65303u, storage.state);
+}
+
+/* Without an update key there is no op key and no stream; storage is left alone. */
+void testOptimizerUpdateKeysAreNullWithoutAnUpdateKey(void) {
+    rngKey_t key = {{0xdeadbeefu, 0xdeadbeefu}};
+    rngStream_t stream = {.state = 0xdeadbeefu};
+
+    TEST_ASSERT_NULL(optimizerUpdateOpKey(NULL, 1u, 1u, &key));
+    TEST_ASSERT_NULL(optimizerScaleStream(NULL, 1u, &stream));
+    TEST_ASSERT_EQUAL_HEX32(0xdeadbeefu, key.w[0]);
+    TEST_ASSERT_EQUAL_HEX32(0xdeadbeefu, stream.state);
+}
+
+typedef struct {
+    bool hasStream;
+    uint32_t state;
+} sgdCellRecord_t;
+
+static sgdCellRecord_t sgdCellRecords[SGD_CELL_RECORDS];
+static size_t sgdCellRecordCount;
+static conversionFunction_t sgdSavedCell;
+
+/* Records the stream, then runs the real [FLOAT32][SYM_INT32] cell: every
+ * OUT_WRITE of a SYM_INT32 param or state passes here. */
+static void sgdRecordingCell(tensor_t *in, tensor_t *out, rngStream_t *rs) {
+    if (sgdCellRecordCount < SGD_CELL_RECORDS) {
+        sgdCellRecords[sgdCellRecordCount].hasStream = rs != NULL;
+        sgdCellRecords[sgdCellRecordCount].state = (rs != NULL) ? rs->state : 0u;
+    }
+    sgdCellRecordCount++;
+    sgdSavedCell(in, out, rs);
+}
+
+static void sgdInstallRecordingCell(void) {
+    sgdSavedCell = conversionMatrix[FLOAT32][SYM_INT32];
+    conversionMatrix[FLOAT32][SYM_INT32] = sgdRecordingCell;
+    sgdCellRecordCount = 0;
+}
+
+static void sgdRestoreCell(void) {
+    conversionMatrix[FLOAT32][SYM_INT32] = sgdSavedCell;
+}
+
+static void assertUpdateOutStream(size_t record, rngKey_t updateKey, uint32_t param, uint32_t op,
+                                  uint32_t pythonState) {
+    rngKey_t opKey = rngFold(rngFold(updateKey, RNG_TAG_PARAM, param), RNG_TAG_OP, op);
+    TEST_ASSERT_TRUE(sgdCellRecords[record].hasStream);
+    TEST_ASSERT_EQUAL_HEX32(rngOpen(rngFold(opKey, RNG_TAG_OUT, 0u)).state,
+                            sgdCellRecords[record].state);
+    TEST_ASSERT_EQUAL_HEX32(pythonState, sgdCellRecords[record].state);
+}
+
+/* One stateless SGD step over two SYM_INT32 params. */
+static void stepTwoSymParams(const rngKey_t *updateKey) {
+    parameter_t *params[2] = {buildSymDeadZoneFixture(HALF_AWAY, 0.1f),
+                              buildSymDeadZoneFixture(HALF_AWAY, 0.1f)};
+    sgd_t sgd;
+    sgdInit(&sgd, 0.1f, 0.f, 0.f, (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    optimImpl_t impl = {.sgd = &sgd};
+    optimizer_t optim = {.type = SGD_M,
+                         .impl = &impl,
+                         .parameter = params,
+                         .states = NULL,
+                         .sizeStates = 2,
+                         .writeBackRounding = SR_HALF_AWAY};
+    sgdInstallRecordingCell();
+
+    sgdStepM(&optim, updateKey);
+
+    sgdRestoreCell();
+    freeParameter(params[0]);
+    freeParameter(params[1]);
+}
+
+/* Stateless SGD writes param p back under (PARAM, p)/(OP, 1): the param
+ * write is OP 1 on both SGD paths. */
+void testSgdStepWritesEachParamBackUnderItsUpdateOpKey(void) {
+    const rngKey_t updateKey = rngKeyFromSeed(UPDATE_KEY_TEST_SEED);
+
+    stepTwoSymParams(&updateKey);
+
+    TEST_ASSERT_EQUAL_UINT32(2u, (uint32_t)sgdCellRecordCount);
+    assertUpdateOutStream(0, updateKey, 0u, 1u, 0x08a6cedfu);
+    assertUpdateOutStream(1, updateKey, 1u, 1u, 0xb26eb23au);
+}
+
+/* Without an update key the write-backs get no stream. */
+void testSgdStepWithoutAnUpdateKeyHandsTheWriteBackNoStream(void) {
+    stepTwoSymParams(NULL);
+
+    TEST_ASSERT_EQUAL_UINT32(2u, (uint32_t)sgdCellRecordCount);
+    TEST_ASSERT_FALSE(sgdCellRecords[0].hasStream);
+    TEST_ASSERT_FALSE(sgdCellRecords[1].hasStream);
+}
+
+/* Momentum SGD writes the state first (OP 0), then the param (OP 1). */
+void testSgdMomentumStepWritesStateThenParamUnderTheirOpKeys(void) {
+    const rngKey_t updateKey = rngKeyFromSeed(UPDATE_KEY_TEST_SEED);
+    parameter_t *param = buildSymDeadZoneFixture(HALF_AWAY, 0.1f);
+    size_t *sDims = reserveMemory(sizeof(size_t));
+    sDims[0] = 2;
+    size_t *sOrder = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, sOrder);
+    shape_t *sShape = reserveMemory(sizeof(shape_t));
+    setShape(sShape, sDims, 1, sOrder);
+    tensor_t *state = initTensor(sShape, quantizationInitSymInt32(HALF_AWAY), NULL);
+    tensor_t *stateBuffers[1] = {state};
+    states_t st = {.stateBuffers = stateBuffers, .statesPerParameter = 1};
+    states_t *stArr[1] = {&st};
+    parameter_t *params[1] = {param};
+    sgd_t sgd;
+    sgdInit(&sgd, 0.1f, 0.25f, 0.f,
+            (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    optimImpl_t impl = {.sgd = &sgd};
+    optimizer_t optim = {.type = SGD_M,
+                         .impl = &impl,
+                         .parameter = params,
+                         .states = stArr,
+                         .sizeStates = 1,
+                         .writeBackRounding = SR_HALF_AWAY};
+    sgdInstallRecordingCell();
+
+    sgdStepM(&optim, &updateKey);
+
+    sgdRestoreCell();
+    freeTensor(state);
+    freeParameter(param);
+    TEST_ASSERT_EQUAL_UINT32(2u, (uint32_t)sgdCellRecordCount);
+    assertUpdateOutStream(0, updateKey, 0u, 0u, 0xba8218a2u);
+    assertUpdateOutStream(1, updateKey, 0u, 1u, 0x08a6cedfu);
+}
+
+/* A FLOAT32 param has no rounding step: an SR write-back without an update
+ * key steps normally (a missing key matters only where a draw happens). */
+static void stepFloat32SrWithoutAKey(void) {
+    tensor_t *p = buildFloatTensor1D((float[]){1.f, -2.f}, 2);
+    tensor_t *g = gradInitFloat(p, NULL);
+    tensorFillFromFloatBuffer(g, (float[]){0.5f, 0.25f}, 2);
+    parameter_t *param = parameterInit(p, g);
+    parameter_t *params[1] = {param};
+    sgd_t sgd;
+    sgdInit(&sgd, 0.1f, 0.f, 0.f, (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    optimImpl_t impl = {.sgd = &sgd};
+    optimizer_t optim = {.type = SGD_M,
+                         .impl = &impl,
+                         .parameter = params,
+                         .states = NULL,
+                         .sizeStates = 1,
+                         .writeBackRounding = SR_HALF_AWAY};
+    optimizerStep(&optim, NULL);
+    freeParameter(param);
+}
+
+void testSgdFloat32SrWriteBackStepsWithoutAnUpdateKey(void) {
+    ASSERT_EXITS_WITH_OUTPUT(0, "", stepFloat32SrWithoutAKey());
+}
+
+#if SIZE_MAX > UINT32_MAX
+static void stepPastUint32MaxParams(void) {
+    const rngKey_t updateKey = rngKeyFromSeed(UPDATE_KEY_TEST_SEED);
+    optimizer_t optim = {.type = SGD_M, .sizeStates = (size_t)UINT32_MAX + 2u};
+    optimizerStep(&optim, &updateKey);
+}
+
+/* rngFold's index is 32 bits wide: a keyed step over more than 2^32
+ * parameters stops before it touches one. */
+void testOptimizerStepExitsWhenAParameterIndexExceedsUint32Max(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "optimizerStep: parameter index exceeds UINT32_MAX",
+                             stepPastUint32MaxParams());
+}
+#endif
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testOptimizerSkipsFrozenLayerInCountAndCollection);
@@ -2541,5 +2753,15 @@ int main() {
     RUN_TEST(testSgdStepBfpParamBfpMomentumStateBinadeCrossMatchesGold);
     RUN_TEST(testSgdStepGroupedAsymParamMatchesGold);
     RUN_TEST(testSgdCreateGroupedAsymMomentumQuantExits);
+    RUN_TEST(testOptimizerUpdateOpKeyFoldsTheParamThenTheOp);
+    RUN_TEST(testOptimizerScaleStreamOpensTheScaleKeyOfTheParam);
+    RUN_TEST(testOptimizerUpdateKeysAreNullWithoutAnUpdateKey);
+    RUN_TEST(testSgdStepWritesEachParamBackUnderItsUpdateOpKey);
+    RUN_TEST(testSgdStepWithoutAnUpdateKeyHandsTheWriteBackNoStream);
+    RUN_TEST(testSgdMomentumStepWritesStateThenParamUnderTheirOpKeys);
+    RUN_TEST(testSgdFloat32SrWriteBackStepsWithoutAnUpdateKey);
+#if SIZE_MAX > UINT32_MAX
+    RUN_TEST(testOptimizerStepExitsWhenAParameterIndexExceedsUint32Max);
+#endif
     return UNITY_END();
 }

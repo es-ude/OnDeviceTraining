@@ -501,6 +501,7 @@ target_link_libraries(UnitTestOptimizerScaling PRIVATE
         TensorApi
         QuantizationApi
         StorageApi
+        RNG
         odt_test_layer_builders
         odt_test_death
 )

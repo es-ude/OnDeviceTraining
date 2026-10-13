@@ -33,8 +33,8 @@ typedef struct trainingCall {
      * below this level. */
     const rngKey_t *key;
     /* NULLable, borrowed: read only by the epoch level, which derives the
-     * step key of each update from it and counts the updates; every other
-     * level ignores it. */
+     * step and update keys of each update from it and counts the updates;
+     * every other level ignores it. */
     trainingRng_t *rng;
 } trainingCall_t;
 

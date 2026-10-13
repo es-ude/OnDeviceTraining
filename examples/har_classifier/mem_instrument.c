@@ -205,7 +205,7 @@ static void memOneStepThunk(void *p) {
      * multiply that does not deepen the call stack; the step itself does.
      * optimizerStep, not fns.step: the probe measures trainingRun's path, and
      * trainingEpochDefault steps through that wrapper (one extra frame; #432). */
-    optimizerStep(c->optim);
+    optimizerStep(c->optim, NULL);
     fns.zero(c->optim);
 }
 

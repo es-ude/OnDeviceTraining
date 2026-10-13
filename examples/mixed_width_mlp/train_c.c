@@ -420,7 +420,7 @@ int main(void) {
          * is a no-op, so a bare step/zero per sample is exact (CLAUDE.md
          * loss/training_loop microbatch contract). The step goes through
          * optimizerStep so the OPTIMIZER phase events fire (#432). */
-        optimizerStep(sgd);
+        optimizerStep(sgd, NULL);
         optimFns.zero(sgd);
 
         if (i == 0) {

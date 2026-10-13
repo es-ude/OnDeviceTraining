@@ -51,6 +51,6 @@ void adamWSetLr(optimizer_t *optimizer, float learningRate);
  *  Op-for-op torch.optim.AdamW single-tensor sequence via three executeOp
  *  kernels (m: lerp / v: mul+addcmul / param: mul+addcdivDenom), 5
  *  elementwise passes per parameter, no denom tensor materialized. */
-void adamWStep(optimizer_t *optimizer);
+void adamWStep(optimizer_t *optimizer, const rngKey_t *updateKey);
 
 #endif // ADAM_W_H

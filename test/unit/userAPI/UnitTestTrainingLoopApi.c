@@ -129,9 +129,9 @@ void testCalculateGradsSequential_MatchesPyTorch() {
          * 1/F = 1/2 scaling here. trainingEpochDefault does this implicitly when
          * backwardReduction == REDUCTION_MEAN; this test exercises calculateGradsSequential
          * directly, so the scaling must be manual. */
-        scaleOptimizerGradients(sgd, 1.0f / 2.0f);
+        scaleOptimizerGradients(sgd, 1.0f / 2.0f, NULL);
 
-        sgdFns.step(sgd);
+        sgdFns.step(sgd, NULL);
         sgdFns.zero(sgd);
 
         freeTrainingStats(ts0);
@@ -3691,6 +3691,65 @@ void testTrainingEpochDoesNotHandItsOwnKeyDown(void) {
     }
 }
 
+static stepFn_t g_savedSgdStep;
+static keyRecord_t g_updateKeys[KEY_RECORDS];
+static size_t g_updateKeyCount;
+
+/* Records the update key of each optimizer step, then runs the real step. */
+static void keyRecordingStep(optimizer_t *optim, const rngKey_t *updateKey) {
+    if (g_updateKeyCount < KEY_RECORDS) {
+        g_updateKeys[g_updateKeyCount].hasKey = updateKey != NULL;
+        if (updateKey != NULL) {
+            g_updateKeys[g_updateKeyCount].key = *updateKey;
+        }
+    }
+    g_updateKeyCount++;
+    g_savedSgdStep(optim, updateKey);
+}
+
+/* One epoch of two updates with the SGD step recorded. */
+static void epochWithRecordedSteps(const trainingCall_t *call) {
+    keyedFixture_t f;
+    buildKeyedFixture(&f, 2, 1, 4);
+    g_savedSgdStep = optimizerFunctions[SGD_M].step;
+    optimizerFunctions[SGD_M].step = keyRecordingStep;
+    g_updateKeyCount = 0;
+
+    (void)trainingEpochDefault(f.model, 1, defaultLossConfig(MSE), f.trainDl, f.sgd,
+                               keyRecordingGrads, REDUCTION_MEAN, 1, call);
+
+    optimizerFunctions[SGD_M].step = g_savedSgdStep;
+    freeKeyedFixture(&f);
+}
+
+/* Each update steps the optimizer under that update's key; the step counter
+ * advances after the step, so the next update gets the next key. */
+void testTrainingEpochStepsEachUpdateUnderItsUpdateKey(void) {
+    trainingRng_t rng;
+    trainingRngInit(&rng, KEYED_RUN_SEED);
+
+    epochWithRecordedSteps(&(trainingCall_t){.rng = &rng});
+
+    TEST_ASSERT_EQUAL_UINT32(2u, rng.step);
+    TEST_ASSERT_EQUAL_size_t(2, g_updateKeyCount);
+    trainingRng_t expected;
+    trainingRngInit(&expected, KEYED_RUN_SEED);
+    for (size_t u = 0; u < 2; u++) {
+        TEST_ASSERT_TRUE(g_updateKeys[u].hasKey);
+        assertSameKey(trainingRngUpdateKey(&expected), g_updateKeys[u].key);
+        trainingRngAdvance(&expected);
+    }
+}
+
+/* Without an rng every update steps without a key. */
+void testTrainingEpochStepsWithoutAKeyWithoutAnRng(void) {
+    epochWithRecordedSteps(NULL);
+
+    TEST_ASSERT_EQUAL_size_t(2, g_updateKeyCount);
+    TEST_ASSERT_FALSE(g_updateKeys[0].hasKey);
+    TEST_ASSERT_FALSE(g_updateKeys[1].hasKey);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testTrainingBatchDefaultHandsCalculateGradsBatchAxisViews);
@@ -3771,5 +3830,7 @@ int main(void) {
     RUN_TEST(testTrainingRunNumbersStackedEvaluationCallsByChunk);
     RUN_TEST(testTrainingRunWithoutAnRngHandsNoKeys);
     RUN_TEST(testTrainingEpochDoesNotHandItsOwnKeyDown);
+    RUN_TEST(testTrainingEpochStepsEachUpdateUnderItsUpdateKey);
+    RUN_TEST(testTrainingEpochStepsWithoutAKeyWithoutAnRng);
     return UNITY_END();
 }

@@ -60,6 +60,14 @@ float trainingEpochDefault(layer_t **model, size_t modelSize, lossConfig_t lossC
         totalLoss += trainingBatchDefault(model, modelSize, lossConfig, batch, calculateGradsFn,
                                           forwardReduction, m, (call != NULL) ? &next : NULL);
 
+        /* The update's key: its mean-scale and its optimizer step draw under it. */
+        rngKey_t updateKeyStorage;
+        const rngKey_t *updateKey = NULL;
+        if (rng != NULL) {
+            updateKeyStorage = trainingRngUpdateKey(rng);
+            updateKey = &updateKeyStorage;
+        }
+
         if (lossConfig.backwardReduction == REDUCTION_MEAN) {
             /* Each loss family derives F from labelRef's shape itself, reading
              * dims[0] as the batch axis -- so it gets the same [1, ...] view the
@@ -70,10 +78,10 @@ float trainingEpochDefault(layer_t **model, size_t modelSize, lossConfig_t lossC
             batchView_t labelRefView;
             float meanScale = lossFunctions[lossConfig.funcType].computeMeanScale(
                 batch->size, batchViewOf(&labelRefView, labelRef));
-            scaleOptimizerGradients(optimizer, meanScale);
+            scaleOptimizerGradients(optimizer, meanScale, updateKey);
         }
 
-        optimizerStep(optimizer);
+        optimizerStep(optimizer, updateKey);
         if (rng != NULL) {
             trainingRngAdvance(rng);
         }

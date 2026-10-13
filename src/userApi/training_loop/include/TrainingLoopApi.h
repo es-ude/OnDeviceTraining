@@ -222,9 +222,9 @@ typedef struct trainingRunOptions {
                                     exits at its first ragged chunk. */
     trainingRng_t *rng;         /* NULLable; NULL runs without keys. Otherwise caller-initialised
                                     (trainingRngInit) and caller-owned: every training epoch
-                                    derives its step keys from it, each epoch's evaluation gets
-                                    the epoch's evaluation key, and the epoch counter advances
-                                    after each evaluation. */
+                                    derives its step and update keys from it, each epoch's
+                                    evaluation gets the epoch's evaluation key, and the epoch
+                                    counter advances after each evaluation. */
 } trainingRunOptions_t;
 
 void freeTrainingStats(trainingStats_t *trainingStats);

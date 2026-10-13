@@ -48,7 +48,7 @@ typedef float (*lossFwdFn_t)(tensor_t *modelOutput, tensor_t *label, reduction_t
  *
  * Writes raw per-element gradient (no batchSize/reduction divisor).
  * Macro-batch scaling is applied at the optimizer step via
- * scaleOptimizerGradients(optimizer, computeMeanScale(...)) in
+ * scaleOptimizerGradients(optimizer, computeMeanScale(...), updateKey) in
  * trainingEpochDefault when backwardReduction == REDUCTION_MEAN.
  *
  * \param modelOutput  Same shape contract as forward.

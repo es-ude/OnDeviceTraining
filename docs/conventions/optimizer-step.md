@@ -4,7 +4,7 @@
 
 Every training loop, example, and benchmark steps the optimizer through
 `optimizerStep()` (`src/optimizer/include/Optimizer.h`). The raw vtable call
-`optimizerFunctions[type].step(optim)` performs the identical parameter update
+`optimizerFunctions[type].step(optim, updateKey)` performs the identical parameter update
 but fires none of the `ODT_EVENT_OPTIMIZER_BEGIN`/`END` phase-hook events
 (`src/common/include/OdtHook.h`, #429).
 

@@ -267,7 +267,7 @@ void testSixEventsFireInOrderForOneGradsCallPlusOneStep(void) {
     odtHookSet(recordingHook, &g_ctxToken);
     trainingStats_t *stats =
         calculateGradsSequential(model, 2, ceMeanLoss(), REDUCTION_MEAN, x, label, NULL);
-    optimizerStep(optim);
+    optimizerStep(optim, NULL);
     odtHookSet(NULL, NULL);
 
     size_t count = g_logCount;
@@ -304,7 +304,7 @@ void testNothingFiresWhenHookUnset(void) {
     odtHookSet(NULL, NULL);
     trainingStats_t *stats =
         calculateGradsSequential(model, 2, ceMeanLoss(), REDUCTION_MEAN, x, label, NULL);
-    optimizerStep(optim);
+    optimizerStep(optim, NULL);
 
     size_t count = g_logCount;
     freeTrainingStats(stats);

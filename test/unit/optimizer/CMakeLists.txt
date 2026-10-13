@@ -13,6 +13,7 @@ add_elastic_ai_unit_test(
         LayerQuant
         ArithmeticType
         RNG
+        OptimizerKeys
         odt_test_death
         odt_test_layer_builders
 )

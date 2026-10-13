@@ -48,6 +48,8 @@ rngKey_t rngKeyFromSeed(uint64_t seed);
 #define RNG_TAG_NORM_DX 16u
 #define RNG_TAG_LOSS 17u
 #define RNG_TAG_UPDATE 18u
+#define RNG_TAG_PARAM 19u
+#define RNG_TAG_SCALE 20u
 
 /* The draws under one key. Owned by its caller, usually on the stack of the op
  * that draws. Backend v1: keyed xorshift32, today's draw math. Start a stream

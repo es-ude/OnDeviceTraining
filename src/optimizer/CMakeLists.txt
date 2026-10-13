@@ -19,9 +19,17 @@ target_link_libraries(Optimizer PRIVATE
         AdamW
 )
 
+add_library(OptimizerKeys OptimizerKeys.c)
+target_include_directories(OptimizerKeys PUBLIC include)
+target_link_libraries(OptimizerKeys PRIVATE
+        RNG
+)
+
 add_library(Sgd Sgd.c)
 target_include_directories(Sgd PUBLIC include)
 target_link_libraries(Sgd PRIVATE
+        OptimizerKeys
+        RNG
         DTypes
         Tensor
         Arithmetic
@@ -34,6 +42,8 @@ target_link_libraries(Sgd PRIVATE
 add_library(AdamW AdamW.c)
 target_include_directories(AdamW PUBLIC include)
 target_link_libraries(AdamW PRIVATE
+        OptimizerKeys
+        RNG
         DTypes
         Tensor
         Mul

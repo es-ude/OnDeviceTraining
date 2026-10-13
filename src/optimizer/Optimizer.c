@@ -1,5 +1,6 @@
 #define SOURCE_FILE "OPTIMIZER"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -14,9 +15,16 @@
 #include "Optimizer.h"
 #include "Sgd.h"
 
-void optimizerStep(optimizer_t *optimizer) {
+void optimizerStep(optimizer_t *optimizer, const rngKey_t *updateKey) {
+    /* rngFold's index is 32 bits wide: a larger parameter index would reuse
+     * the update keys of an earlier parameter. Checked before the BEGIN
+     * event, so an exit never leaves the phase open. */
+    if (updateKey != NULL && optimizer->sizeStates > 0 && optimizer->sizeStates - 1 > UINT32_MAX) {
+        PRINT_ERROR("optimizerStep: parameter index exceeds UINT32_MAX");
+        exit(1);
+    }
     odtHookFire(ODT_EVENT_OPTIMIZER_BEGIN);
-    optimizerFunctions[optimizer->type].step(optimizer);
+    optimizerFunctions[optimizer->type].step(optimizer, updateKey);
     odtHookFire(ODT_EVENT_OPTIMIZER_END);
 }
 

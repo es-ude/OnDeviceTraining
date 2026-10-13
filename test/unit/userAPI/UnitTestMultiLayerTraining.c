@@ -411,7 +411,7 @@ void testMultiLayerTraining_MultipleSteps_GradsAccumulate() {
         capturedLoss[step] = stats ? stats->loss : -1.0f;
         freeTrainingStats(stats);
 
-        sgdFns.step(sgd);
+        sgdFns.step(sgd, NULL);
         sgdFns.zero(sgd);
     }
 
@@ -576,7 +576,7 @@ void testBfpFakeQuantTrainingLossDecreasesAndGridMoves(void) {
         lastLoss = stats->loss;
         freeTrainingStats(stats);
 
-        sgdFns.step(sgd);
+        sgdFns.step(sgd, NULL);
         sgdFns.zero(sgd);
     }
 
@@ -825,7 +825,7 @@ void testBfpWireFakeQuantTrainingLossDecreasesAndWirePacks(void) {
         }
         lastLoss = stats->loss;
         freeTrainingStats(stats);
-        sgdFns.step(f.sgd);
+        sgdFns.step(f.sgd, NULL);
         sgdFns.zero(f.sgd);
     }
 
@@ -1092,7 +1092,7 @@ void testBfpDxWireNativeBackwardTrains(void) {
         }
         lastLoss = stats->loss;
         freeTrainingStats(stats);
-        sgdFns.step(f.sgd);
+        sgdFns.step(f.sgd, NULL);
         sgdFns.zero(f.sgd);
     }
 
@@ -1317,7 +1317,7 @@ void testBfpNativeForwardTrainingLossDecreasesAndGridMoves(void) {
         }
         lastLoss = stats->loss;
         freeTrainingStats(stats);
-        sgdFns.step(f.sgd);
+        sgdFns.step(f.sgd, NULL);
         sgdFns.zero(f.sgd);
     }
 
@@ -1406,7 +1406,7 @@ void testBfpPinnedFloat32BackwardTrainingLossDecreases(void) {
         }
         lastLoss = stats->loss;
         freeTrainingStats(stats);
-        sgdFns.step(f.sgd);
+        sgdFns.step(f.sgd, NULL);
         sgdFns.zero(f.sgd);
     }
 
@@ -1516,7 +1516,7 @@ void testBfpDxWireThroughPinnedFloat32BackwardTrains(void) {
         }
         lastLoss = stats->loss;
         freeTrainingStats(stats);
-        sgdFns.step(f.sgd);
+        sgdFns.step(f.sgd, NULL);
         sgdFns.zero(f.sgd);
     }
     bool weightsStillBfp = getParamFromParameter(cfg1->weights)->quantization->type == BFP;
@@ -1594,7 +1594,7 @@ void testBfpGradStorageTrainingAccumulatesAndSteps(void) {
             bfpQConfig_t *gradQC = w0Grad->quantization->qConfig;
             gradExponentAfterBackward = gradQC->exponents[0];
         }
-        sgdFns.step(f.sgd);
+        sgdFns.step(f.sgd, NULL);
         sgdFns.zero(f.sgd);
     }
 
@@ -2098,7 +2098,7 @@ void testBfpUniformPoolActivationModelTrains(void) {
         }
         lastLoss = stats->loss;
         freeTrainingStats(stats);
-        sgdFns.step(sgd);
+        sgdFns.step(sgd, NULL);
         sgdFns.zero(sgd);
     }
 
@@ -2432,7 +2432,7 @@ void testBfpUniformNormModelTrainsAndGridsMove(void) {
             firstLoss = 0.5f * stepLoss;
         }
         lastLoss = 0.5f * stepLoss;
-        sgdFns.step(sgd);
+        sgdFns.step(sgd, NULL);
         sgdFns.zero(sgd);
     }
 
@@ -2619,7 +2619,7 @@ void testBfpNormGradStorageAccumulatesAndSteps(void) {
      * (0.972 / 0.513 / 0.889 / 1.099) reproduce codes 125, 65 | 57, 71 at the
      * two groups' re-derived exponents. */
     optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
-    sgdFns.step(sgd);
+    sgdFns.step(sgd, NULL);
     bool paramMoved = memcmp(paramBefore, gammaParam->data, paramBytes) != 0;
 
     /* (d) zeroGrad's BFP arm: codes back to zero AND exponents back to bias. */
@@ -2937,7 +2937,7 @@ void unitTestUniformBfpSoftmaxMseTrains(void) {
         }
         lastLoss = stats->loss;
         freeTrainingStats(stats);
-        sgdFns.step(sgd);
+        sgdFns.step(sgd, NULL);
         sgdFns.zero(sgd);
     }
 

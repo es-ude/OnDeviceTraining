@@ -174,7 +174,7 @@ void testAdamWStepMatchesGoldStep1Defaults(void) {
     adamWHarness_t h;
     optimizer_t *optim = harnessInit(&h, adamw_step1_default_p0, adamw_step1_default_g, 32, 0.001f,
                                      0.9, 0.999, 1e-8, 0.01);
-    adamWStep(optim);
+    adamWStep(optim, NULL);
     float pOut[32], mOut[32], vOut[32];
     memcpy(pOut, h.par->param->data, sizeof pOut);
     memcpy(mOut, h.m->data, sizeof mOut);
@@ -195,7 +195,7 @@ void testAdamWStepMatchesGoldStep1WdZero(void) {
     adamWHarness_t h;
     optimizer_t *optim =
         harnessInit(&h, adamw_step1_wd0_p0, adamw_step1_wd0_g, 32, 0.001f, 0.9, 0.999, 1e-8, 0.0);
-    adamWStep(optim);
+    adamWStep(optim, NULL);
     float pOut[32], mOut[32], vOut[32];
     memcpy(pOut, h.par->param->data, sizeof pOut);
     memcpy(mOut, h.m->data, sizeof mOut);
@@ -214,7 +214,7 @@ void testAdamWStepMatchesGoldStep1OrderDiscrim(void) {
     adamWHarness_t h;
     optimizer_t *optim = harnessInit(&h, adamw_step1_orderdiscrim_p0, adamw_step1_orderdiscrim_g,
                                      32, 0.1f, 0.9, 0.999, 1e-8, 0.5);
-    adamWStep(optim);
+    adamWStep(optim, NULL);
     float pOut[32];
     memcpy(pOut, h.par->param->data, sizeof pOut);
     harnessFree(&h);
@@ -233,8 +233,8 @@ void testAdamWStepIncrementsStepCountPerCall(void) {
     adamWHarness_t h;
     optimizer_t *optim = harnessInit(&h, adamw_step1_default_p0, adamw_step1_default_g, 32, 0.001f,
                                      0.9, 0.999, 1e-8, 0.01);
-    adamWStep(optim);
-    adamWStep(optim);
+    adamWStep(optim, NULL);
+    adamWStep(optim, NULL);
     size_t captured = h.adamW.stepCount;
     harnessFree(&h);
     TEST_ASSERT_EQUAL_size_t(2, captured);
@@ -247,7 +247,7 @@ void testAdamWStepRejectsTamperedUpdateMath(void) {
     optimizer_t *optim = harnessInit(&h, adamw_step1_default_p0, adamw_step1_default_g, 32, 0.001f,
                                      0.9, 0.999, 1e-8, 0.01);
     h.adamW.updateMath.type = ARITH_SYM_INT32;
-    ASSERT_EXITS_WITH_FAILURE(adamWStep(optim));
+    ASSERT_EXITS_WITH_FAILURE(adamWStep(optim, NULL));
     h.adamW.updateMath.type = ARITH_FLOAT32; /* restore for clean teardown */
     harnessFree(&h);
 }
@@ -259,7 +259,7 @@ void testAdamWTrajectoryMatchesGoldEveryStep(void) {
     float pSteps[8][32];
     for (size_t s = 0; s < 8; s++) {
         tensorFillFromFloatBuffer(h.par->grad, &adamw_traj_default_g[s * 32], 32);
-        adamWStep(optim);
+        adamWStep(optim, NULL);
         memcpy(pSteps[s], h.par->param->data, sizeof pSteps[s]);
     }
     float mOut[32], vOut[32];
@@ -285,7 +285,7 @@ void testAdamWTrajectoryWdZeroMatchesGold(void) {
         harnessInit(&h, adamw_traj_wd0_p0, adamw_traj_wd0_g, 32, 0.001f, 0.9, 0.999, 1e-8, 0.0);
     for (size_t s = 0; s < 8; s++) {
         tensorFillFromFloatBuffer(h.par->grad, &adamw_traj_wd0_g[s * 32], 32);
-        adamWStep(optim);
+        adamWStep(optim, NULL);
     }
     float pOut[32], mOut[32], vOut[32];
     memcpy(pOut, h.par->param->data, sizeof pOut);
@@ -312,7 +312,7 @@ void testAdamWWithCosineSchedulerMatchesGold(void) {
     for (size_t e = 0; e < 5; e++) {
         lrSeen[e] = optimizerFunctions[ADAM_W].getLr(optim);
         tensorFillFromFloatBuffer(h.par->grad, &adamw_sched_cosine_g[e * 32], 32);
-        optimizerFunctions[ADAM_W].step(optim);
+        optimizerFunctions[ADAM_W].step(optim, NULL);
         lrSchedulerStep(&sched);
     }
     float pOut[32];
@@ -434,7 +434,7 @@ void testAdamWCreateOptimStepMatchesHandAssembledGold(void) {
         adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, model, 1, momentQ,
                          (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
-    optimizerFunctions[optim->type].step(optim);
+    optimizerFunctions[optim->type].step(optim, NULL);
 
     /* capture */
     float pOut[32], mOut[32], vOut[32];
@@ -516,8 +516,8 @@ void testAdamWCreateOptimSymMomentSmoke(void) {
     optimizerSetWriteBackRounding(optimS, HALF_AWAY);
 
     /* Step 1 (both runs). */
-    optimizerFunctions[optimF->type].step(optimF);
-    optimizerFunctions[optimS->type].step(optimS);
+    optimizerFunctions[optimF->type].step(optimF, NULL);
+    optimizerFunctions[optimS->type].step(optimS, NULL);
 
     tensor_t *mSDecoded = makeFloatTensor1D(NULL, 32);
     tensor_t *vSDecoded = makeFloatTensor1D(NULL, 32);
@@ -539,8 +539,8 @@ void testAdamWCreateOptimSymMomentSmoke(void) {
     /* Step 2 (both runs), grad refilled with the same values. */
     tensorFillFromFloatBuffer(weightsF->grad, adamw_step1_default_g, 32);
     tensorFillFromFloatBuffer(weightsS->grad, adamw_step1_default_g, 32);
-    optimizerFunctions[optimF->type].step(optimF);
-    optimizerFunctions[optimS->type].step(optimS);
+    optimizerFunctions[optimF->type].step(optimF, NULL);
+    optimizerFunctions[optimS->type].step(optimS, NULL);
 
     executeConvert(optimS->states[0]->stateBuffers[0], mSDecoded, NULL);
     executeConvert(optimS->states[0]->stateBuffers[1], vSDecoded, NULL);
@@ -742,7 +742,7 @@ void testAdamWStepOptimizerSrWriteBackEscapesSymDeadZone(void) {
 
     int codeEverMoved = 0;
     for (int i = 0; i < 500; i++) {
-        adamWStep(&optim);
+        adamWStep(&optim, NULL);
         if (((int32_t *)p->data)[1] != initialTargetCode) {
             codeEverMoved = 1;
         }
@@ -789,9 +789,9 @@ static void adamWStepWithSymMoments(roundingMode_t writeBackRounding, float *mOu
                          .sizeStates = 1,
                          .writeBackRounding = writeBackRounding};
 
-    adamWStep(&optim);
-    adamWStep(&optim);
-    adamWStep(&optim);
+    adamWStep(&optim, NULL);
+    adamWStep(&optim, NULL);
+    adamWStep(&optim, NULL);
 
     tensor_t *mDecoded = makeFloatTensor1D(NULL, 6);
     tensor_t *vDecoded = makeFloatTensor1D(NULL, 6);
@@ -1116,7 +1116,7 @@ void testAdamWStepGroupedSymParamRunsAndRequantsPerGroup(void) {
                           * the requant's rounding is reproducible. */
                          .writeBackRounding = HALF_AWAY};
 
-    adamWStep(&optim);
+    adamWStep(&optim, NULL);
 
     /* CAPTURE -> free -> assert (file convention). */
     int32_t mant[6];
@@ -1210,7 +1210,7 @@ void testAdamWStepBfpMomentsRunAndRequantize(void) {
     optimizerSetWriteBackRounding(optim, HALF_AWAY);
 
     for (int s = 0; s < 5; s++) {
-        adamWStep(optim);
+        adamWStep(optim, NULL);
     }
 
     /* CAPTURE -> free -> assert (file convention; freeOptim's cascade frees
@@ -1254,6 +1254,101 @@ void testAdamWStepBfpMomentsRunAndRequantize(void) {
     }
 }
 
+/* ---- the update keys of the AdamW step (#4) ---- */
+
+/* Expected state from the Python mirror (PARAM 19, OP 7, OUT 10 spelled as
+ * numbers), repository root:
+ *   uv run python -c "from examples._shared.keyed_rng import (fold, key_from_seed as kfs,
+ *   open_stream as o); print(hex(o(fold(fold(fold(kfs(0x0b7e), 19, 0), 7, 2), 10, 0))))" */
+#define ADAMW_UPDATE_KEY_TEST_SEED 0x0b7eu
+
+typedef struct {
+    size_t count;
+    bool hasStream;
+    uint32_t state;
+} adamWCellRecord_t;
+
+static adamWCellRecord_t adamWCellRecord;
+static conversionFunction_t adamWSavedCell;
+
+/* Records the first stream, then runs the real [FLOAT32][SYM_INT32] cell. */
+static void adamWRecordingCell(tensor_t *in, tensor_t *out, rngStream_t *rs) {
+    if (adamWCellRecord.count++ == 0) {
+        adamWCellRecord.hasStream = rs != NULL;
+        adamWCellRecord.state = (rs != NULL) ? rs->state : 0u;
+    }
+    adamWSavedCell(in, out, rs);
+}
+
+static tensor_t *makeSymParam1D(void) {
+    size_t *pDims = reserveMemory(1 * sizeof(size_t));
+    pDims[0] = 2;
+    size_t *pOrder = reserveMemory(1 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, pOrder);
+    shape_t *pShape = reserveMemory(sizeof(shape_t));
+    setShape(pShape, pDims, 1, pOrder);
+    tensor_t *p = initTensor(pShape, quantizationInitSymInt32(HALF_AWAY), NULL);
+    tensorFillFromFloatBuffer(p, (float[]){100.f, 0.f}, 2);
+    return p;
+}
+
+/* One AdamW step through optimizerStep over one param with FLOAT32 moments.
+ * For a SYM_INT32 param only the param write-back (OP 2, after the moment
+ * OP 0 and the variance OP 1) passes the SYM_INT32 cell. */
+static void stepOneParam(const rngKey_t *updateKey, bool symParam) {
+    tensor_t *p = symParam ? makeSymParam1D() : makeFloatTensor1D((float[]){100.f, 0.f}, 2);
+    parameter_t *par = parameterInit(p, makeFloatTensor1D((float[]){0.f, 1.f}, 2));
+    adamW_t adamW;
+    adamWInit(&adamW, 0.01f, 0.9, 0.999, 1e-8, 0.0,
+              (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    optimImpl_t impl = {.adamW = &adamW};
+    tensor_t *m = makeFloatTensor1D(NULL, 2);
+    tensor_t *v = makeFloatTensor1D(NULL, 2);
+    tensor_t *stateBuffers[2] = {m, v};
+    states_t st = {.stateBuffers = stateBuffers, .statesPerParameter = 2};
+    parameter_t *parArr[1] = {par};
+    states_t *stArr[1] = {&st};
+    optimizer_t optim = {.type = ADAM_W,
+                         .impl = &impl,
+                         .parameter = parArr,
+                         .states = stArr,
+                         .sizeStates = 1,
+                         .writeBackRounding = SR_HALF_AWAY};
+    adamWSavedCell = conversionMatrix[FLOAT32][SYM_INT32];
+    conversionMatrix[FLOAT32][SYM_INT32] = adamWRecordingCell;
+    adamWCellRecord = (adamWCellRecord_t){0};
+
+    optimizerStep(&optim, updateKey);
+
+    conversionMatrix[FLOAT32][SYM_INT32] = adamWSavedCell;
+    freeTensor(m);
+    freeTensor(v);
+    freeParameter(par);
+}
+
+/* The param write-back of param p draws under (PARAM, p)/(OP, 2). */
+void testAdamWStepWritesTheParamBackUnderItsUpdateOpKey(void) {
+    const rngKey_t updateKey = rngKeyFromSeed(ADAMW_UPDATE_KEY_TEST_SEED);
+
+    stepOneParam(&updateKey, true);
+
+    TEST_ASSERT_EQUAL_size_t(1, adamWCellRecord.count);
+    TEST_ASSERT_TRUE(adamWCellRecord.hasStream);
+    rngKey_t opKey = rngFold(rngFold(updateKey, RNG_TAG_PARAM, 0u), RNG_TAG_OP, 2u);
+    TEST_ASSERT_EQUAL_HEX32(rngOpen(rngFold(opKey, RNG_TAG_OUT, 0u)).state, adamWCellRecord.state);
+    TEST_ASSERT_EQUAL_HEX32(0xd7a8ca00u, adamWCellRecord.state);
+}
+
+static void stepFloat32SrWithoutAKey(void) {
+    stepOneParam(NULL, false);
+}
+
+/* A FLOAT32 param has no rounding step: an SR write-back without an update
+ * key steps normally (a missing key matters only where a draw happens). */
+void testAdamWFloat32SrWriteBackStepsWithoutAnUpdateKey(void) {
+    ASSERT_EXITS_WITH_OUTPUT(0, "", stepFloat32SrWithoutAKey());
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testAdamWOptimizerSkipsFrozenLayerInCountAndCollection);
@@ -1287,5 +1382,7 @@ int main(void) {
     RUN_TEST(testAdamWCreateOptimRejectsInt32GradStorage);
     RUN_TEST(testAdamWStepGroupedSymParamRunsAndRequantsPerGroup);
     RUN_TEST(testAdamWStepBfpMomentsRunAndRequantize);
+    RUN_TEST(testAdamWStepWritesTheParamBackUnderItsUpdateOpKey);
+    RUN_TEST(testAdamWFloat32SrWriteBackStepsWithoutAnUpdateKey);
     return UNITY_END();
 }

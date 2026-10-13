@@ -383,14 +383,14 @@ int main(int argc, char **argv) {
         traceModelGrads(model, MODEL_SIZE, "grad_raw", npyDumpSink, &ctx);
 
         /* mean-reduction scaling, exactly as TrainingEpochDefault does it. */
-        scaleOptimizerGradients(sgd, meanScale);
+        scaleOptimizerGradients(sgd, meanScale, NULL);
 
         /* tier 3b: scaled grads (MEAN, pre-step). */
         traceModelGrads(model, MODEL_SIZE, "grad_scaled", npyDumpSink, &ctx);
 
         /* the update (through optimizerStep so an attached profiler sees the
          * OPTIMIZER phase, #432), then tier 4b: weights after. */
-        optimizerStep(sgd);
+        optimizerStep(sgd, NULL);
         traceModelWeights(model, MODEL_SIZE, "w_after", npyDumpSink, &ctx);
         optimFns.zero(sgd);
 

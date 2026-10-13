@@ -251,6 +251,28 @@ static void buildQuantSym(zooFixture_t *f) {
     mseLabel(f, 2);
 }
 
+/* A Linear whose forward op rounds stochastically into a SYM_INT32 wire: its
+ * OUT_WRITE epilogue draws once per element under the op's own rounding (the
+ * wire's storage config stays HALF_AWAY). A Quantization layer dequantizes the
+ * wire for the trained Linear behind it and hands back a HALF_AWAY SYM_INT32
+ * dx, so only the forward draws. */
+static void buildSrForward(zooFixture_t *f) {
+    beginZoo(f);
+    quantization_t *act = keepTemplate(f, quantizationInitSymInt32WithBits(HALF_AWAY, 8));
+    quantization_t *grad = keepTemplate(f, quantizationInitSymInt32WithBits(HALF_AWAY, 10));
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, &g_floatQ);
+    lq.forwardMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = SR_HALF_AWAY};
+    lq.outputQ = act;
+    f->model[0] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 4, .outFeatures = 16, .trainable = TRAINABLE_DEFAULT}, &lq);
+    f->model[1] = makeQuant(&g_floatQ, grad);
+    f->model[2] = makeLinear(16, 2, false);
+    f->n = 3;
+    f->x = makeFloatTensor((size_t[]){1, 4}, 2, 1.0f);
+    mseLabel(f, 2);
+}
+
 /* Flatten at 0: ACT 1 takes the caller's input config. */
 static void buildFlattenAt0(zooFixture_t *f) {
     beginZoo(f);
@@ -402,7 +424,9 @@ typedef struct runCapture {
     blob_t values;                         /* remat P1 */
     blob_t trace;                          /* remat P4 */
 } runCapture_t;
-static runCapture_t g_legacy;
+/* The oracle's capture: Legacy's on a fixture that never draws, the explicit
+ * reference's on one that draws (Legacy hands its layers no key). */
+static runCapture_t g_oracle;
 static runCapture_t g_driver;
 
 static void appendBytes(blob_t *b, const void *src, size_t n) {
@@ -547,7 +571,9 @@ static void assertInputUnchanged(const inputSnapshot_t *s, const tensor_t *x) {
 }
 static inputSnapshot_t g_input;
 
-typedef enum { RUN_LEGACY, RUN_DRIVER } runner_t;
+/* RUN_REFERENCE is the driver on the explicit HEAP + STORE_ALL reference;
+ * like Legacy it is an oracle, so its run saves the BN running stats. */
+typedef enum { RUN_LEGACY, RUN_DRIVER, RUN_REFERENCE } runner_t;
 
 /* One call from the same starting state: zeroed grads (they accumulate,
  * OUT_ACC), restored BN running stats, the global stream at ZOO_SEED. The
@@ -555,7 +581,7 @@ typedef enum { RUN_LEGACY, RUN_DRIVER } runner_t;
 static void captureRun(runner_t runner, zooFixture_t *f, const trainingCall_t *call,
                        runCapture_t *cap) {
     forEachGrad(f->model, f->n, NULL);
-    bnStateIo(f, runner == RUN_LEGACY, NULL);
+    bnStateIo(f, runner != RUN_DRIVER, NULL);
     cap->numEvents = 0;
     cap->values.used = 0;
     cap->trace.used = 0;
@@ -593,34 +619,34 @@ static const char *say(const char *cell, const char *what) {
 }
 
 static void assertSameValues(const char *cell) {
-    TEST_ASSERT_TRUE(g_legacy.values.used > 0);
-    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(&g_legacy.loss, &g_driver.loss, sizeof g_legacy.loss,
+    TEST_ASSERT_TRUE(g_oracle.values.used > 0);
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(&g_oracle.loss, &g_driver.loss, sizeof g_oracle.loss,
                                      say(cell, "remat P1: loss"));
-    TEST_ASSERT_EQUAL_size_t_MESSAGE(g_legacy.values.used, g_driver.values.used,
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(g_oracle.values.used, g_driver.values.used,
                                      say(cell, "remat P1: captured byte count"));
     TEST_ASSERT_EQUAL_MEMORY_MESSAGE(
-        g_legacy.values.bytes, g_driver.values.bytes, g_legacy.values.used,
+        g_oracle.values.bytes, g_driver.values.bytes, g_oracle.values.used,
         say(cell, "remat P1: output snapshot, parameter grads, BN running stats"));
 }
 
 static void assertConforms(const char *cell) {
     assertSameValues(cell);
-    TEST_ASSERT_EQUAL_HEX32_MESSAGE(g_legacy.seedAfter, g_driver.seedAfter,
+    TEST_ASSERT_EQUAL_HEX32_MESSAGE(g_oracle.seedAfter, g_driver.seedAfter,
                                     say(cell, "remat P2: the global stream after the call"));
     TEST_ASSERT_EQUAL_size_t_MESSAGE(4, g_driver.numEvents,
                                      say(cell, "remat P3: four hook events"));
-    TEST_ASSERT_EQUAL_size_t_MESSAGE(g_legacy.numEvents, g_driver.numEvents,
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(g_oracle.numEvents, g_driver.numEvents,
                                      say(cell, "remat P3: event count"));
-    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(g_legacy.events, g_driver.events,
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(g_oracle.events, g_driver.events,
                                      g_driver.numEvents * sizeof(odtEvent_t),
                                      say(cell, "remat P3: event order"));
-    TEST_ASSERT_EQUAL_size_t_MESSAGE(g_legacy.trace.used, g_driver.trace.used,
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(g_oracle.trace.used, g_driver.trace.used,
                                      say(cell, "remat P4: trace byte count"));
-    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(g_legacy.trace.bytes, g_driver.trace.bytes,
-                                     g_legacy.trace.used,
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(g_oracle.trace.bytes, g_driver.trace.bytes,
+                                     g_oracle.trace.used,
                                      say(cell, "remat P4: trace (idx, phase, tensor)"));
-    TEST_ASSERT_EQUAL_size_t_MESSAGE(g_legacy.memBefore, g_legacy.memAfter,
-                                     "remat P5: Legacy releases everything but the stats");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(g_oracle.memBefore, g_oracle.memAfter,
+                                     "remat P5: the oracle releases everything but the stats");
     TEST_ASSERT_EQUAL_size_t_MESSAGE(
         g_driver.memBefore, g_driver.memAfter,
         say(cell, "remat P5: the driver releases everything but the stats"));
@@ -629,8 +655,43 @@ static void assertConforms(const char *cell) {
 static void assertNullPathMatchesLegacy(void (*build)(zooFixture_t *)) {
     zooFixture_t f;
     build(&f);
-    captureRun(RUN_LEGACY, &f, NULL, &g_legacy);
+    captureRun(RUN_LEGACY, &f, NULL, &g_oracle);
     captureRun(RUN_DRIVER, &f, NULL, &g_driver);
+    freeZoo(&f);
+    assertConforms(NULL);
+}
+
+/* The oracle of a fixture that draws: the driver on an explicit HEAP +
+ * STORE_ALL scheduler (not the NULL path, which runs the default LIVENESS
+ * plan), under the same call key as the side it is compared with. */
+static void initReference(rematScheduler_t *s, zooFixture_t *f) {
+    TEST_ASSERT_TRUE_MESSAGE(rematHeapInit(s, f->model, f->n, f->loss, f->x, NULL),
+                             "the reference's init");
+}
+
+#define ZOO_KEY_SEED 0x2a5eu
+
+/* Call i of one update under a fixed root: every side of a comparison runs
+ * call i under this key, so a draw can differ only by order or by key path. */
+static rngKey_t zooCallKey(size_t callIndex) {
+    trainingRng_t rng;
+    trainingRngInit(&rng, ZOO_KEY_SEED);
+    return trainingRngCallKey(trainingRngStepKey(&rng), callIndex);
+}
+
+static void captureReferenceRun(zooFixture_t *f, const rngKey_t *key, runCapture_t *cap) {
+    rematScheduler_t ref;
+    initReference(&ref, f);
+    captureRun(RUN_REFERENCE, f, &(trainingCall_t){.remat = &ref, .key = key}, cap);
+    rematSchedulerDeinit(&ref);
+}
+
+static void assertNullPathMatchesTheReference(void (*build)(zooFixture_t *)) {
+    const rngKey_t key = zooCallKey(0);
+    zooFixture_t f;
+    build(&f);
+    captureReferenceRun(&f, &key, &g_oracle);
+    captureRun(RUN_DRIVER, &f, &(trainingCall_t){.key = &key}, &g_driver);
     freeZoo(&f);
     assertConforms(NULL);
 }
@@ -643,14 +704,15 @@ static trainingStats_t *runOnce(runner_t runner, zooFixture_t *f, const training
 }
 
 /* A caller that does not zero between calls: the grads accumulate over both,
- * BN's running stats move twice and Dropout's stream advances twice. */
-static void captureTwoCalls(runner_t runner, zooFixture_t *f, runCapture_t *cap) {
+ * BN's running stats move twice and Dropout draws a mask in each call. */
+static void captureTwoCalls(runner_t runner, zooFixture_t *f, const trainingCall_t *first,
+                            const trainingCall_t *second, runCapture_t *cap) {
     forEachGrad(f->model, f->n, NULL);
-    bnStateIo(f, runner == RUN_LEGACY, NULL);
+    bnStateIo(f, runner != RUN_DRIVER, NULL);
     cap->values.used = 0;
     rngSetSeed(ZOO_SEED);
-    freeTrainingStats(runOnce(runner, f, NULL));
-    trainingStats_t *stats = runOnce(runner, f, NULL);
+    freeTrainingStats(runOnce(runner, f, first));
+    trainingStats_t *stats = runOnce(runner, f, second);
     cap->seedAfter = rngGetSeed();
     cap->loss = stats->loss;
     captureTensor(&cap->values, stats->output);
@@ -662,11 +724,30 @@ static void captureTwoCalls(runner_t runner, zooFixture_t *f, runCapture_t *cap)
 static void assertTwoCallsMatchLegacy(void (*build)(zooFixture_t *)) {
     zooFixture_t f;
     build(&f);
-    captureTwoCalls(RUN_LEGACY, &f, &g_legacy);
-    captureTwoCalls(RUN_DRIVER, &f, &g_driver);
+    captureTwoCalls(RUN_LEGACY, &f, NULL, NULL, &g_oracle);
+    captureTwoCalls(RUN_DRIVER, &f, NULL, NULL, &g_driver);
     freeZoo(&f);
     assertSameValues(NULL);
-    TEST_ASSERT_EQUAL_HEX32_MESSAGE(g_legacy.seedAfter, g_driver.seedAfter,
+    TEST_ASSERT_EQUAL_HEX32_MESSAGE(g_oracle.seedAfter, g_driver.seedAfter,
+                                    "remat P2: the global stream after two calls");
+}
+
+/* remat P6 on the reference: two reference calls, each under its own call
+ * key, against two NULL-path calls under the same two keys. */
+static void assertTwoCallsMatchTheReference(void (*build)(zooFixture_t *)) {
+    const rngKey_t keys[2] = {zooCallKey(0), zooCallKey(1)};
+    zooFixture_t f;
+    build(&f);
+    rematScheduler_t ref;
+    initReference(&ref, &f);
+    captureTwoCalls(RUN_REFERENCE, &f, &(trainingCall_t){.remat = &ref, .key = &keys[0]},
+                    &(trainingCall_t){.remat = &ref, .key = &keys[1]}, &g_oracle);
+    rematSchedulerDeinit(&ref);
+    captureTwoCalls(RUN_DRIVER, &f, &(trainingCall_t){.key = &keys[0]},
+                    &(trainingCall_t){.key = &keys[1]}, &g_driver);
+    freeZoo(&f);
+    assertSameValues(NULL);
+    TEST_ASSERT_EQUAL_HEX32_MESSAGE(g_oracle.seedAfter, g_driver.seedAfter,
                                     "remat P2: the global stream after two calls");
 }
 
@@ -680,11 +761,11 @@ void testNullPathMatchesLegacyOnTheMlp(void) {
     forEachGrad(f.model, f.n, NULL);
     trainingStats_t *legacy =
         legacyCalculateGrads(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y, NULL, NULL);
-    g_legacy.values.used = 0;
-    g_legacy.loss = legacy->loss;
-    captureTensor(&g_legacy.values, legacy->output);
+    g_oracle.values.used = 0;
+    g_oracle.loss = legacy->loss;
+    captureTensor(&g_oracle.values, legacy->output);
     freeTrainingStats(legacy);
-    forEachGrad(f.model, f.n, &g_legacy.values);
+    forEachGrad(f.model, f.n, &g_oracle.values);
 
     forEachGrad(f.model, f.n, NULL);
     trainingStats_t *driver =
@@ -727,7 +808,11 @@ void testAllFrozenModelConforms(void) {
 }
 
 void testDropoutConforms(void) {
-    assertNullPathMatchesLegacy(buildDropout);
+    assertNullPathMatchesTheReference(buildDropout);
+}
+
+void testSrForwardConforms(void) {
+    assertNullPathMatchesTheReference(buildSrForward);
 }
 
 void testQuantizationToSymInt32WiresConforms(void) {
@@ -778,8 +863,8 @@ void testTwoCallsInARowMatchLegacyOnBatchNorm(void) {
     assertTwoCallsMatchLegacy(buildBatchNorm);
 }
 
-void testTwoCallsInARowMatchLegacyOnDropout(void) {
-    assertTwoCallsMatchLegacy(buildDropout);
+void testTwoCallsInARowMatchTheReferenceOnDropout(void) {
+    assertTwoCallsMatchTheReference(buildDropout);
 }
 
 /* The "agrad" trace phase fires BEFORE the layer's backward. No layer writes
@@ -881,7 +966,7 @@ void testAMarkedInputYieldsAnUnmarkedOutputAndLeaksNothing(void) {
     buildMlp(&f);
     sparsity_t marker = {0};
     f.x->sparsity = &marker;
-    captureRun(RUN_LEGACY, &f, NULL, &g_legacy);
+    captureRun(RUN_LEGACY, &f, NULL, &g_oracle);
 
     forEachGrad(f.model, f.n, NULL);
     g_driver.values.used = 0;
@@ -963,7 +1048,7 @@ static rematReport_t reportOf(const rematScheduler_t *s) {
 void testCalculateGradsSequentialRunsOnTheCallersScheduler(void) {
     zooFixture_t f;
     buildMlp(&f);
-    captureValues(RUN_LEGACY, &f, NULL, &g_legacy);
+    captureValues(RUN_LEGACY, &f, NULL, &g_oracle);
     rematScheduler_t s;
     initFixtureHeap(&s, &f);
     size_t observedBefore = reportOf(&s).observedPeakLiveBytes;
@@ -1025,7 +1110,7 @@ void testAZeroInitialisedCallIsTheNullScheduler(void) {
         0, "",
         freeTrainingStats(calculateGradsSequential(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y,
                                                    &(trainingCall_t){0})));
-    captureValues(RUN_LEGACY, &f, NULL, &g_legacy);
+    captureValues(RUN_LEGACY, &f, NULL, &g_oracle);
     captureValues(RUN_DRIVER, &f, &(trainingCall_t){0}, &g_driver);
     freeZoo(&f);
     assertSameValues(NULL);
@@ -1162,18 +1247,24 @@ typedef struct cellRun {
     size_t memAfterDeinit;
 } cellRun_t;
 
-/* A fresh fixture per cell, so every cell starts from the state Legacy saw.
+/* A fresh fixture per cell, so every cell starts from the state the oracle saw.
  * remat P5's call bracket starts after the init, whose blocks the caller owns, and
- * the deinit must return them. */
-static cellRun_t captureCell(void (*build)(zooFixture_t *), const matrixCell_t *cell) {
+ * the deinit must return them. key == NULL: Legacy is the oracle and the cell
+ * runs key-less; otherwise the reference is, and both run under *key. */
+static cellRun_t captureCell(void (*build)(zooFixture_t *), const matrixCell_t *cell,
+                             const rngKey_t *key) {
     zooFixture_t f;
     build(&f);
-    captureRun(RUN_LEGACY, &f, NULL, &g_legacy);
+    if (key == NULL) {
+        captureRun(RUN_LEGACY, &f, NULL, &g_oracle);
+    } else {
+        captureReferenceRun(&f, key, &g_oracle);
+    }
     cellRun_t c;
     c.memBeforeInit = memProfileCurrentBytes();
     rematScheduler_t s;
     initCell(&s, cell, &f);
-    captureRun(RUN_DRIVER, &f, &(trainingCall_t){.remat = &s}, &g_driver);
+    captureRun(RUN_DRIVER, &f, &(trainingCall_t){.remat = &s, .key = key}, &g_driver);
     c.report = reportOf(&s);
     rematSchedulerDeinit(&s);
     c.memAfterDeinit = memProfileCurrentBytes();
@@ -1183,13 +1274,14 @@ static cellRun_t captureCell(void (*build)(zooFixture_t *), const matrixCell_t *
 
 /* One test per fixture and row, so a failing row cannot mask the other: the
  * poison mutation must turn both red. */
-static void assertRowMatchesLegacy(void (*build)(zooFixture_t *), rematSchedulerType_t row) {
+static void assertRowMatchesTheOracle(void (*build)(zooFixture_t *), rematSchedulerType_t row,
+                                      const rngKey_t *key) {
     for (size_t k = 0; k < MATRIX_CELLS; k++) {
         const matrixCell_t *cell = &g_cells[k];
         if (cell->row != row) {
             continue;
         }
-        cellRun_t c = captureCell(build, cell);
+        cellRun_t c = captureCell(build, cell, key);
         TEST_ASSERT_EQUAL_INT_MESSAGE(cell->row, c.report.type, say(cell->name, "the cell's row"));
         TEST_ASSERT_EQUAL_INT_MESSAGE(cell->spec == NULL ? REMAT_PLAN_STORE_ALL
                                                          : cell->spec->policy,
@@ -1204,6 +1296,17 @@ static void assertRowMatchesLegacy(void (*build)(zooFixture_t *), rematScheduler
             c.memBeforeInit, c.memAfterDeinit,
             say(cell->name, "remat P5: the deinit returns what the init reserved"));
     }
+}
+
+static void assertRowMatchesLegacy(void (*build)(zooFixture_t *), rematSchedulerType_t row) {
+    assertRowMatchesTheOracle(build, row, NULL);
+}
+
+/* The row's heap/store-all cell is the reference itself; the other cells of
+ * the two rows carry the proof. */
+static void assertRowMatchesTheReference(void (*build)(zooFixture_t *), rematSchedulerType_t row) {
+    const rngKey_t key = zooCallKey(0);
+    assertRowMatchesTheOracle(build, row, &key);
 }
 
 void testMlpMatchesLegacyOnArena(void) {
@@ -1262,12 +1365,20 @@ void testAllFrozenMatchesLegacyOnHeap(void) {
     assertRowMatchesLegacy(buildAllFrozen, REMAT_HEAP);
 }
 
-void testDropoutMatchesLegacyOnArena(void) {
-    assertRowMatchesLegacy(buildDropout, REMAT_ARENA);
+void testDropoutMatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildDropout, REMAT_ARENA);
 }
 
-void testDropoutMatchesLegacyOnHeap(void) {
-    assertRowMatchesLegacy(buildDropout, REMAT_HEAP);
+void testDropoutMatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildDropout, REMAT_HEAP);
+}
+
+void testSrForwardMatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildSrForward, REMAT_ARENA);
+}
+
+void testSrForwardMatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildSrForward, REMAT_HEAP);
 }
 
 void testQuantSymMatchesLegacyOnArena(void) {
@@ -1362,16 +1473,19 @@ void testAdaptiveAvgPoolMatchesLegacyOnHeap(void) {
 
 typedef void (*fixtureEdit_t)(zooFixture_t *f);
 
-/* Two calls from zeroed grads, without zeroing between them, and `edit`
- * applied to the live fixture between them. */
-static void captureEditedTwoCalls(runner_t runner, zooFixture_t *f, const trainingCall_t *call,
-                                  fixtureEdit_t edit, runCapture_t *cap) {
+/* Two calls on scheduler s from zeroed grads, without zeroing between them,
+ * and `edit` applied to the live fixture between them; call i runs under
+ * keys[i] (keys == NULL: key-less). Legacy ignores s and the keys. */
+static void captureEditedTwoCalls(runner_t runner, zooFixture_t *f, rematScheduler_t *s,
+                                  const rngKey_t *keys, fixtureEdit_t edit, runCapture_t *cap) {
     forEachGrad(f->model, f->n, NULL);
     cap->values.used = 0;
     rngSetSeed(ZOO_SEED);
-    freeTrainingStats(runOnce(runner, f, call));
+    freeTrainingStats(
+        runOnce(runner, f, &(trainingCall_t){.remat = s, .key = (keys != NULL) ? &keys[0] : NULL}));
     edit(f);
-    trainingStats_t *stats = runOnce(runner, f, call);
+    trainingStats_t *stats =
+        runOnce(runner, f, &(trainingCall_t){.remat = s, .key = (keys != NULL) ? &keys[1] : NULL});
     cap->seedAfter = rngGetSeed();
     cap->loss = stats->loss;
     captureTensor(&cap->values, stats->output);
@@ -1379,27 +1493,47 @@ static void captureEditedTwoCalls(runner_t runner, zooFixture_t *f, const traini
     forEachGrad(f->model, f->n, &cap->values);
 }
 
-/* Legacy reads every config live; each cell's scheduler is built on the
- * unedited fixture before the first call, so its second bind must re-derive
- * the edited wire (a key-preserving edit, remat P6). */
-static void assertEditedTwoCallsMatchLegacy(void (*build)(zooFixture_t *), fixtureEdit_t edit) {
+/* Legacy reads every config live; each cell's scheduler, and the reference's,
+ * is built on the unedited fixture before the first call, so its second bind
+ * must re-derive the edited wire (a key-preserving edit, remat P6). keys ==
+ * NULL: Legacy is the oracle and every call runs key-less; otherwise the
+ * reference is, and call i of both sides runs under keys[i]. */
+static void assertEditedTwoCallsMatchTheOracle(void (*build)(zooFixture_t *), fixtureEdit_t edit,
+                                               const rngKey_t *keys) {
     for (size_t k = 0; k < MATRIX_CELLS; k++) {
         const matrixCell_t *cell = &g_cells[k];
         zooFixture_t f;
         build(&f);
-        captureEditedTwoCalls(RUN_LEGACY, &f, NULL, edit, &g_legacy);
+        if (keys == NULL) {
+            captureEditedTwoCalls(RUN_LEGACY, &f, NULL, NULL, edit, &g_oracle);
+        } else {
+            rematScheduler_t ref;
+            initReference(&ref, &f);
+            captureEditedTwoCalls(RUN_REFERENCE, &f, &ref, keys, edit, &g_oracle);
+            rematSchedulerDeinit(&ref);
+        }
         freeZoo(&f);
         build(&f);
         rematScheduler_t s;
         initCell(&s, cell, &f);
-        captureEditedTwoCalls(RUN_DRIVER, &f, &(trainingCall_t){.remat = &s}, edit, &g_driver);
+        captureEditedTwoCalls(RUN_DRIVER, &f, &s, keys, edit, &g_driver);
         rematSchedulerDeinit(&s);
         freeZoo(&f);
         assertSameValues(cell->name);
         TEST_ASSERT_EQUAL_HEX32_MESSAGE(
-            g_legacy.seedAfter, g_driver.seedAfter,
+            g_oracle.seedAfter, g_driver.seedAfter,
             say(cell->name, "remat P2: the global stream after two calls"));
     }
+}
+
+static void assertEditedTwoCallsMatchLegacy(void (*build)(zooFixture_t *), fixtureEdit_t edit) {
+    assertEditedTwoCallsMatchTheOracle(build, edit, NULL);
+}
+
+static void assertEditedTwoCallsMatchTheReference(void (*build)(zooFixture_t *),
+                                                  fixtureEdit_t edit) {
+    const rngKey_t keys[2] = {zooCallKey(0), zooCallKey(1)};
+    assertEditedTwoCallsMatchTheOracle(build, edit, keys);
 }
 
 /* buildQuantSym's ACT template is its first kept template. */
@@ -1421,10 +1555,10 @@ void testTwoCallsAcrossAWidthEditMatchLegacy(void) {
 }
 
 /* The draw-count half of testBindRederivesRoundingModeAndDrawCount: after the
- * switch to stochastic rounding the second call draws from the global stream,
- * as many times as Legacy's (remat P2). */
-void testTwoCallsAcrossARoundingEditMatchLegacy(void) {
-    assertEditedTwoCallsMatchLegacy(buildQuantSym, roundTheActStochastically);
+ * switch to stochastic rounding the second call draws, and each cell must draw
+ * exactly what the reference's second call draws under the same call key. */
+void testTwoCallsAcrossARoundingEditMatchTheReference(void) {
+    assertEditedTwoCallsMatchTheReference(buildQuantSym, roundTheActStochastically);
 }
 
 /* A [1, 4, 4] input quantized to BFP in numGroups groups of groupSize. */
@@ -1469,7 +1603,7 @@ void testASchedulerBuiltOnSampleARunsSampleB(void) {
         tensor_t *sampleA = f.x;
         tensor_t *sampleB = makeFloatTensor((size_t[]){1, 4}, 2, -0.75f);
         f.x = sampleB;
-        captureRun(RUN_LEGACY, &f, NULL, &g_legacy);
+        captureRun(RUN_LEGACY, &f, NULL, &g_oracle);
         f.x = sampleA;
         rematScheduler_t s;
         initCell(&s, cell, &f);
@@ -1504,7 +1638,7 @@ void testADrawingRowFailsP2AgainstLegacy(void) {
         const matrixCell_t *cell = &g_cells[k];
         zooFixture_t f;
         buildMlp(&f);
-        captureRun(RUN_LEGACY, &f, NULL, &g_legacy);
+        captureRun(RUN_LEGACY, &f, NULL, &g_oracle);
         rematScheduler_t s;
         initCell(&s, cell, &f);
         s.fns = &g_drawing;
@@ -1514,7 +1648,7 @@ void testADrawingRowFailsP2AgainstLegacy(void) {
         freeZoo(&f);
         assertSameValues(cell->name);
         TEST_ASSERT_NOT_EQUAL_HEX32_MESSAGE(
-            g_legacy.seedAfter, g_driver.seedAfter,
+            g_oracle.seedAfter, g_driver.seedAfter,
             say(cell->name, "remat P2: a drawing row moves the stream"));
     }
 }
@@ -1766,7 +1900,7 @@ static void assertTrainEvalTrainMatches(rematSchedulerType_t row) {
             }
             zooFixture_t f;
             fixtures[z].build(&f);
-            captureRun(RUN_LEGACY, &f, NULL, &g_legacy);
+            captureRun(RUN_LEGACY, &f, NULL, &g_oracle);
             captureEval(&f, NULL, &g_evalNull);
             rematScheduler_t s;
             initCell(&s, cell, &f);
@@ -1810,6 +1944,7 @@ int main(void) {
     RUN_TEST(testTruncatedHarConforms);
     RUN_TEST(testAllFrozenModelConforms);
     RUN_TEST(testDropoutConforms);
+    RUN_TEST(testSrForwardConforms);
     RUN_TEST(testQuantizationToSymInt32WiresConforms);
     RUN_TEST(testFlattenAt0Conforms);
     RUN_TEST(testPerTensorBfpF1ModelConforms);
@@ -1822,7 +1957,7 @@ int main(void) {
     RUN_TEST(testFrozenConvTransposedAboveDeepestConforms);
     RUN_TEST(testAdaptiveAvgPoolConforms);
     RUN_TEST(testTwoCallsInARowMatchLegacyOnBatchNorm);
-    RUN_TEST(testTwoCallsInARowMatchLegacyOnDropout);
+    RUN_TEST(testTwoCallsInARowMatchTheReferenceOnDropout);
     RUN_TEST(testAgradFiresBeforeTheLayersBackward);
     RUN_TEST(testAnInputWithoutBytesExitsBeforeLayer0Runs);
     RUN_TEST(testAnEmptyModelExitsNamingIt);
@@ -1854,8 +1989,10 @@ int main(void) {
     RUN_TEST(testFrozenGroupNormMatchesLegacyOnHeap);
     RUN_TEST(testAllFrozenMatchesLegacyOnArena);
     RUN_TEST(testAllFrozenMatchesLegacyOnHeap);
-    RUN_TEST(testDropoutMatchesLegacyOnArena);
-    RUN_TEST(testDropoutMatchesLegacyOnHeap);
+    RUN_TEST(testDropoutMatchesTheReferenceOnArena);
+    RUN_TEST(testDropoutMatchesTheReferenceOnHeap);
+    RUN_TEST(testSrForwardMatchesTheReferenceOnArena);
+    RUN_TEST(testSrForwardMatchesTheReferenceOnHeap);
     RUN_TEST(testQuantSymMatchesLegacyOnArena);
     RUN_TEST(testQuantSymMatchesLegacyOnHeap);
     RUN_TEST(testFlattenAt0MatchesLegacyOnArena);
@@ -1879,7 +2016,7 @@ int main(void) {
     RUN_TEST(testAdaptiveAvgPoolMatchesLegacyOnArena);
     RUN_TEST(testAdaptiveAvgPoolMatchesLegacyOnHeap);
     RUN_TEST(testTwoCallsAcrossAWidthEditMatchLegacy);
-    RUN_TEST(testTwoCallsAcrossARoundingEditMatchLegacy);
+    RUN_TEST(testTwoCallsAcrossARoundingEditMatchTheReference);
     RUN_TEST(testTwoCallsAcrossAnInputRegroupMatchLegacy);
     RUN_TEST(testASchedulerBuiltOnSampleARunsSampleB);
     RUN_TEST(testADrawingRowFailsP2AgainstLegacy);

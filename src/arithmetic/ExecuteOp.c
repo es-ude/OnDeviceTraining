@@ -156,11 +156,13 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
             return;
         }
         /* #296 residual: this arm quantizes the whole increment
-         * before the add — two sequential rounding blocks. An O(chunk)
-         * version would have to re-draw or reorder the SR stream (bit-parity
-         * break), so it keeps whole-tensor staging until an RNG-state
-         * snapshot/replay exists. Reached only by SYM_INT32-STORED grads,
-         * which #261 already discourages. */
+         * before the add — two sequential rounding blocks, each on its own
+         * ACC stream (ACC 0 for the quantize, ACC 1 for the add). A
+         * sequential chunked rewrite would draw each stream in element order
+         * exactly as this whole-tensor staging does, so it is no longer
+         * blocked on the RNG; out-of-order or parallel chunks would need
+         * per-chunk keys. Reached only by SYM_INT32-STORED grads, which #261
+         * already discourages. */
         /* FLOAT32 intermediate: quantize to operand width first, roundingMode
          * from the TARGET's qConfig (LayerNorm.c:446-463 reproduction). */
         symInt32QConfig_t incQC;

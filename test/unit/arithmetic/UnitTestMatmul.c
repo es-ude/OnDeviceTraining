@@ -714,13 +714,13 @@ void testMatmulGroupedEqualScalesBitIdenticalToScalar(void) {
 }
 
 /* Rounding-mode-honored check (substitutes for a Python-emulated SR-mode
- * gold fixture, which would need the C-side seeded RNG stream — no existing
+ * gold fixture, which would need the C-side keyed stream — no existing
  * goldgen script emulates SR_HALF_AWAY, see generate_expected_group_matmul.py's
  * docstring). Reuses the general-groups fixture (known non-exact combine
  * quotients) with SR_HALF_AWAY as the op's rounding mode (carried via b's own
  * qConfig — the same field the executeOp prologue would set from
  * arithmetic.roundingMode). If the combine hardcoded HALF_AWAY instead of
- * honoring roundingMode, two runs under different RNG seeds would be BIT-
+ * honoring roundingMode, two runs on streams of different keys would be BIT-
  * IDENTICAL (SR jitter never consumed); a correct implementation must differ
  * on at least one output element. */
 void testMatmulGroupedHonorsOpRoundingMode(void) {
@@ -778,10 +778,10 @@ void testMatmulGroupedHonorsOpRoundingMode(void) {
     initSymInt32Quantization(&out2QC, &out2Q);
     setTensorValues(&out2, (uint8_t *)out2Data, &outShape, &out2Q, NULL);
 
-    rngSetSeed(1);
-    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &out1, &weightGroups, NULL);
-    rngSetSeed(2);
-    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &out2, &weightGroups, NULL);
+    rngStream_t rs1 = rngOpen(rngKeyFromSeed(1u));
+    rngStream_t rs2 = rngOpen(rngKeyFromSeed(2u));
+    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &out1, &weightGroups, &rs1);
+    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &out2, &weightGroups, &rs2);
 
     bool anyDiffer = false;
     for (size_t i = 0; i < 6; i++) {

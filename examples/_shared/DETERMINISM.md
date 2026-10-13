@@ -37,10 +37,11 @@ identity reset. The Python side continues the same stream with
 which is **bit-exact under one condition**: nothing else may draw from the C
 global RNG between the init shuffle and the reshuffles. The float32 HAR binary
 satisfies it (no dropout, no stochastic rounding; the weight init draws
-happen before the train loader is seeded). Examples with Dropout or
-seeded-SR write-back rounding do NOT satisfy it — their reshuffle draws would
-interleave with mask/rounding draws — so their twins stay shuffle-once
-(`DataLoader.c` default, the `reshufflePerEpoch` flag off).
+happen before the train loader is seeded). Dropout masks and stochastic
+rounding no longer draw from the global RNG (they use keyed streams handed
+down from the trainer's `trainingRng_t`), so they cannot interleave with the
+reshuffle draws; twins still stay shuffle-once (`DataLoader.c` default, the
+`reshufflePerEpoch` flag off) until the shuffle is keyed too.
 
 ## Parity assertion regime
 

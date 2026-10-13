@@ -400,11 +400,13 @@ void testDxWireHonorsProducerPropLossQ(void) {
     tensor_t *label = initTensor(lShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(label, (float[]){0.0f, 0.0f}, 2);
 
+    /* The SR dx wire makes the backward draw, so the call carries a key. */
+    const rngKey_t callKey = rngKeyFromSeed(0x221u);
     agradCapCtx_t ctx = {.capturedAgrad = false};
     trainingStats_t *stats = tracedGrads(
         model, 4,
         (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM, .classWeights = NULL},
-        REDUCTION_SUM, x, label, agradCaptureSink, &ctx, NULL);
+        REDUCTION_SUM, x, label, agradCaptureSink, &ctx, &(trainingCall_t){.key = &callKey});
 
     /* Capture before teardown (ASSERT LAST convention). */
     bool captured = ctx.capturedAgrad;

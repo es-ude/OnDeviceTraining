@@ -412,6 +412,21 @@ void testMeanReplayIsExactCentroid(void) {
     freePpcaReplay(g);
 }
 
+static void meanReplayIntoAnSrTensor(void) {
+    ppcaReplay_t *g = buildKnownGenerator();
+    tensor_t *out = buildFloat32TensorND(1, (size_t[]){6}, NULL);
+    requantizeTensorInPlace(out, quantizationInitSym(8, HALF_AWAY));
+    ((symQConfig_t *)out->quantization->qConfig)->roundingMode = SR_HALF_AWAY;
+    ppcaReplayMean(g, out);
+}
+
+/* No key, no randomness: the mean replay into an SR-configured SYM output
+ * stops at its first rounding (into FLOAT32 it is an exact copy). */
+void testMeanReplayIntoAnSrTensorExits(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "roundByMode: SR rounding without a stream",
+                             meanReplayIntoAnSrTensor());
+}
+
 void testMeanReplayRejectsCountZero(void) {
     ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
     ppcaReplay_t *g = ppcaReplayCreate(&cfg);
@@ -1029,6 +1044,7 @@ int main(void) {
     RUN_TEST(testSampleRejectsElementCountMismatch);
     RUN_TEST(testSampleAcceptsReshapedOut);
     RUN_TEST(testMeanReplayIsExactCentroid);
+    RUN_TEST(testMeanReplayIntoAnSrTensorExits);
     RUN_TEST(testMeanReplayRejectsCountZero);
     RUN_TEST(testMeanReplayRejectsElementCountMismatch);
     RUN_TEST(testUpdateBatchFitRecoversModel);

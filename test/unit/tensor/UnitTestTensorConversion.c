@@ -4539,12 +4539,13 @@ void testBfpGroupedToFloatDequantsPerGroup(void) {
     }
 }
 
-void testFloatToBfpSrRoundingIsSeededDeterministic(void) {
-    /* Same fixture through HALF_AWAY vs seeded SR_HALF_AWAY: the exponent
+void testFloatToBfpSrRoundingIsAFunctionOfItsStream(void) {
+    /* Same fixture through HALF_AWAY vs keyed SR_HALF_AWAY: the exponent
      * derivation is rounding-free (absMax 14 -> ratio 2 -> frac==0.5 -> E=+1,
-     * stored 128, identical in every run); the SR mantissa stream must be
-     * deterministic under rngSetSeed(42) and differ from the HALF_AWAY result
-     * somewhere (7 of 8 quotients are fractional at scale 2). */
+     * stored 128, identical in every run); the SR mantissas must be equal for
+     * two streams opened from one key, differ for another key, and differ
+     * from the HALF_AWAY result somewhere (7 of 8 quotients are fractional at
+     * scale 2). */
     size_t n = 8;
     size_t dims[] = {8};
     size_t order[] = {0};
@@ -4585,19 +4586,25 @@ void testFloatToBfpSrRoundingIsSeededDeterministic(void) {
     tensor_t srDst;
     setTensorValues(&srDst, srData, &shape, &srQ, NULL);
 
-    rngSetSeed(42);
-    convertTensor(&src, &srDst, NULL);
+    rngStream_t rs1 = rngOpen(rngKeyFromSeed(42u));
+    convertTensor(&src, &srDst, &rs1);
     int32_t srMant1[8];
     unpackSignExtend(srDst.data, 4, 0, srMant1, 8);
 
-    rngSetSeed(42);
-    convertTensor(&src, &srDst, NULL);
+    rngStream_t rs2 = rngOpen(rngKeyFromSeed(42u));
+    convertTensor(&src, &srDst, &rs2);
     int32_t srMant2[8];
     unpackSignExtend(srDst.data, 4, 0, srMant2, 8);
+
+    rngStream_t rsOther = rngOpen(rngKeyFromSeed(43u));
+    convertTensor(&src, &srDst, &rsOther);
+    int32_t srMantOther[8];
+    unpackSignExtend(srDst.data, 4, 0, srMantOther, 8);
 
     TEST_ASSERT_EQUAL_UINT8(128, refQC.exponents[0]);
     TEST_ASSERT_EQUAL_UINT8(128, srQC.exponents[0]);
     TEST_ASSERT_EQUAL_INT32_ARRAY(srMant1, srMant2, 8);
+    TEST_ASSERT_FALSE(memcmp(srMant1, srMantOther, sizeof srMant1) == 0);
     bool anyDiffers = false;
     for (size_t i = 0; i < n; i++) {
         if (srMant1[i] != refMant[i]) {
@@ -4605,6 +4612,34 @@ void testFloatToBfpSrRoundingIsSeededDeterministic(void) {
         }
     }
     TEST_ASSERT_TRUE(anyDiffers);
+}
+
+static void convertIntoAnSrTargetWithoutAStream(void) {
+    size_t dims[] = {2};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    float vals[2] = {352.5f, -2047.0f};
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    tensor_t src;
+    setTensorValues(&src, (uint8_t *)vals, &shape, &floatQ, NULL);
+    symInt32QConfig_t symQC;
+    initSymInt32QConfig(SR_HALF_AWAY, &symQC);
+    quantization_t symQ;
+    initSymInt32Quantization(&symQC, &symQ);
+    int32_t symData[2] = {0, 0};
+    tensor_t dst;
+    setTensorValues(&dst, (uint8_t *)symData, &shape, &symQ, NULL);
+    convertTensor(&src, &dst, NULL);
+}
+
+/* No key, no randomness: a conversion into an SR target without a stream
+ * stops at its first rounding (a conversion into FLOAT32 and a same-type copy
+ * never draw: testConversionIntoFloat32NeedsNoStream,
+ * testSameTypeConversionNeedsNoStream). */
+void testConversionIntoAnSrTargetWithoutAStreamExits(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "roundByMode: SR rounding without a stream",
+                             convertIntoAnSrTargetWithoutAStream());
 }
 
 void testInt32ToBfpIsCodesInWithZeroStateExponent(void) {
@@ -7962,7 +7997,8 @@ int main(void) {
     RUN_TEST(testFloatToBfpAllZeroGroupKeepsZeroStateExponent);
     RUN_TEST(testBfpToFloatRoundTripExactForRepresentable);
     RUN_TEST(testBfpGroupedToFloatDequantsPerGroup);
-    RUN_TEST(testFloatToBfpSrRoundingIsSeededDeterministic);
+    RUN_TEST(testFloatToBfpSrRoundingIsAFunctionOfItsStream);
+    RUN_TEST(testConversionIntoAnSrTargetWithoutAStreamExits);
 
     RUN_TEST(testInt32ToBfpIsCodesInWithZeroStateExponent);
     RUN_TEST(testInt32ToBfpOverflowAborts);

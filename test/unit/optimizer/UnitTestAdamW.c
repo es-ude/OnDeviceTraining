@@ -689,7 +689,7 @@ void testAdamWCreateOptimDefaultsWriteBackRoundingToSr(void) {
 
     TEST_ASSERT_EQUAL_INT_MESSAGE(SR_HALF_AWAY, capturedDefault,
                                   "#279: adamWCreateOptim must default writeBackRounding "
-                                  "to seeded SR_HALF_AWAY");
+                                  "to SR_HALF_AWAY");
 }
 
 void testAdamWStepOptimizerSrWriteBackEscapesSymDeadZone(void) {
@@ -701,9 +701,7 @@ void testAdamWStepOptimizerSrWriteBackEscapesSymDeadZone(void) {
      * freezes the code forever, SR escapes with per-step probability ~0.25.
      * Anchor element (grad 0 -> m = v = 0 -> delta 0 at wd = 0) pins the
      * re-derived scale, same construction as UnitTestSgd's dead-zone
-     * fixture. */
-    rngSetSeed(13579u);
-
+     * fixture. Each step runs under its own update key. */
     size_t *pDims = reserveMemory(1 * sizeof(size_t));
     pDims[0] = 2;
     size_t *pOrder = reserveMemory(1 * sizeof(size_t));
@@ -742,7 +740,8 @@ void testAdamWStepOptimizerSrWriteBackEscapesSymDeadZone(void) {
 
     int codeEverMoved = 0;
     for (int i = 0; i < 500; i++) {
-        adamWStep(&optim, NULL);
+        const rngKey_t updateKey = rngKeyFromSeed(13579u + (uint64_t)i);
+        adamWStep(&optim, &updateKey);
         if (((int32_t *)p->data)[1] != initialTargetCode) {
             codeEverMoved = 1;
         }
@@ -763,8 +762,9 @@ void testAdamWStepOptimizerSrWriteBackEscapesSymDeadZone(void) {
  * given optimizer write-back rounding; decodes both moments into the caller's
  * float buffers. Fixed p/g so two calls differ ONLY in the rounding mode; 3
  * steps x 6 elements gives 18 SR draws per moment over step-evolving requant
- * fractions, so an SR run cannot stay bit-identical to the deterministic
- * one by fraction luck (a single step can: seed-dependent ~15%). */
+ * fractions, step u under the update key of seed 1 + u. Even so, the decoded
+ * v stays bit-identical to the deterministic run for some keys (seeds 2, 3
+ * and 7 of eight tried), so the keys are fixed to ones that move both. */
 static void adamWStepWithSymMoments(roundingMode_t writeBackRounding, float *mOut, float *vOut) {
     const float p0[6] = {0.5f, -0.25f, 0.125f, 0.75f, -0.5f, 0.3f};
     const float g0[6] = {0.11f, 0.23f, -0.37f, 0.41f, -0.53f, 0.61f};
@@ -789,9 +789,10 @@ static void adamWStepWithSymMoments(roundingMode_t writeBackRounding, float *mOu
                          .sizeStates = 1,
                          .writeBackRounding = writeBackRounding};
 
-    adamWStep(&optim, NULL);
-    adamWStep(&optim, NULL);
-    adamWStep(&optim, NULL);
+    for (uint64_t u = 0; u < 3u; u++) {
+        const rngKey_t updateKey = rngKeyFromSeed(1u + u);
+        adamWStep(&optim, &updateKey);
+    }
 
     tensor_t *mDecoded = makeFloatTensor1D(NULL, 6);
     tensor_t *vDecoded = makeFloatTensor1D(NULL, 6);
@@ -812,11 +813,10 @@ void testAdamWMomentWriteBacksHonorOptimizerSrRounding(void) {
      * requants into packed-SYM storage) must also run under the optimizer's
      * writeBackRounding. Two otherwise-identical single steps -- one SR, one
      * deterministic -- must decode to different m AND different v: the m/v
-     * requant fractions are generic values, so seeded-SR jitter almost surely
-     * moves at least one of the 6 codes per moment (and with this seed,
+     * requant fractions are generic values, so keyed-SR jitter almost surely
+     * moves at least one of the 6 codes per moment (and with these keys,
      * reproducibly does). If either kernel's write-back ignored the optimizer
      * mode, its decoded moments would be bit-identical across the two runs. */
-    rngSetSeed(11111u);
     float mSr[6], vSr[6];
     adamWStepWithSymMoments(SR_HALF_AWAY, mSr, vSr);
 

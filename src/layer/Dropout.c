@@ -292,14 +292,12 @@ static void dropoutBackwardBfp(dropoutConfig_t *cfg, tensor_t *loss, tensor_t *p
 void dropoutForward(layer_t *dropoutLayer, tensor_t *input, tensor_t *output,
                     const layerExec_t *exec) {
     dropoutConfig_t *cfg = dropoutLayer->config->dropout;
-    /* Before bernoulliFillMask: a rejected call must not consume RNG draws, so
-     * the ARITH_BFP case validates EVERYTHING here — dtype, element counts,
-     * grid, widths — and not just the dtype. Leaving the geometry half inside
-     * dropoutForwardBfp (which runs after the fill) would make a
-     * geometry-rejected call burn a mask draw and desync every later layer's
-     * dropout pattern from the reference run, which is precisely the property
-     * this ordering exists to protect. R-P3: keyed on the wire's STORAGE
-     * dtype, narrowed per declared arm. */
+    /* Before bernoulliFillMask: a rejected call must fail before it touches
+     * the mask, so the ARITH_BFP case validates EVERYTHING here — dtype,
+     * element counts, grid, widths — and not just the dtype. Leaving the
+     * geometry half inside dropoutForwardBfp (which runs after the fill)
+     * would let a geometry-rejected call overwrite the mask first. R-P3:
+     * keyed on the wire's STORAGE dtype, narrowed per declared arm. */
     switch (cfg->forwardMath.type) {
     case ARITH_FLOAT32:
     case ARITH_SYM_INT32:

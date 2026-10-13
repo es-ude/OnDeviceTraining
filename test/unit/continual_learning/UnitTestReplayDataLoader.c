@@ -314,6 +314,22 @@ void testExemplarBufferKeepsFirstKAndCopies(void) {
     freeExemplarBuffer(buf);
 }
 
+static void addAnSrItemToAnExemplarBuffer(void) {
+    exemplarBuffer_t *buf = exemplarBufferCreate(1, 1);
+    tensor_t *item = buildFloat32TensorND(1, (size_t[]){2}, (float[]){352.5f, -2047.0f});
+    requantizeTensorInPlace(item, quantizationInitSymInt32(HALF_AWAY));
+    ((symInt32QConfig_t *)item->quantization->qConfig)->roundingMode = SR_HALF_AWAY;
+    exemplarBufferAdd(buf, item, 0);
+}
+
+/* No key, no randomness: storing a copy of an SR-configured SYM_INT32 item
+ * re-rounds into the item's own SR config and stops there (a FLOAT32 item is
+ * a plain copy). */
+void testExemplarBufferAddOfAnSrItemExits(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "roundByMode: SR rounding without a stream",
+                             addAnSrItemToAnExemplarBuffer());
+}
+
 void testExemplarBufferRejectsBadClassAndShape(void) {
     exemplarBuffer_t *buf = exemplarBufferCreate(2, 2);
     tensor_t *ok = buildFloat32TensorND(1, (size_t[]){6}, NULL);
@@ -707,6 +723,7 @@ int main(void) {
     RUN_TEST(testMeanModeReplaysClassCentroidsWithoutStream);
     RUN_TEST(testPpcaModeStillRequiresStream);
     RUN_TEST(testExemplarBufferKeepsFirstKAndCopies);
+    RUN_TEST(testExemplarBufferAddOfAnSrItemExits);
     RUN_TEST(testExemplarBufferRejectsBadClassAndShape);
     RUN_TEST(testExemplarBufferRejectsSameCountDifferentRank);
     RUN_TEST(testExemplarBufferRejectsSameRankDifferentDimensions);

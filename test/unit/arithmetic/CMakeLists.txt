@@ -109,6 +109,7 @@ add_elastic_ai_unit_test(
         MORE_LIBS
         RNG
         m
+        odt_test_death
 )
 add_dependencies(UnitTestBfpSoftmaxExp generate_expected_bfp_softmax_core)
 target_include_directories(UnitTestBfpSoftmaxExp PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
@@ -228,6 +229,8 @@ add_elastic_ai_unit_test(
         Rounding
         MORE_LIBS
         Tensor
+        RNG
+        odt_test_death
 )
 
 add_elastic_ai_unit_test(

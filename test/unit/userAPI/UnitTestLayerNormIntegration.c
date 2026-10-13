@@ -18,6 +18,7 @@
 #include "OptimizerApi.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "SgdApi.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -193,7 +194,9 @@ void testLayerNormSymInt32SingleLayerTrainingStep(void) {
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     trainingStats_t *statsSym = calculateGradsSequential(modelSym, 1, defaultLossConfig(MSE),
                                                          REDUCTION_MEAN, inSym, labelSym, NULL);
-    sgdStepM(optimSym, NULL);
+    /* The factory's SR write-back into the SYM_INT32 params draws. */
+    const rngKey_t updateKey = rngKeyFromSeed(158u);
+    sgdStepM(optimSym, &updateKey);
 
     float gammaSym[4], betaSym[4];
     {

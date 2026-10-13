@@ -73,11 +73,11 @@ void dataLoaderSetReshufflePerEpoch(dataLoader_t *dataLoader, bool enable);
  * permutation while the whole run stays reproducible end-to-end under the
  * one top-level seed set at init.
  *
- * Consequence for run-to-run comparisons (#299): the reshuffle draws are
- * interleaved into the SAME global stream that Dropout masks and SR
- * write-back rounding consume — a flag-ON run therefore differs from a
- * flag-OFF run in those draws too, not just in sample order. Compare like
- * with like.
+ * Consequence for run-to-run comparisons (#299): Dropout masks and
+ * stochastic rounding draw from keyed streams, not from this global stream,
+ * so a flag-ON run differs from a flag-OFF run in the sample order (and in
+ * every value that follows from it), not in those draws. Compare like with
+ * like.
  *
  * \param dataLoader: Pointer to dataloader to reshuffle
  */

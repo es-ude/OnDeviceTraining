@@ -5,6 +5,7 @@
 #include "ArithmeticType.h"
 #include "BorrowedLayer.h"
 #include "DeathTest.h"
+#include "DropoutApi.h"
 #include "InferenceApi.h"
 #include "Layer.h"
 #include "LayerExec.h"
@@ -992,6 +993,30 @@ void testInferenceWithoutAKeyHandsNoLayerContext(void) {
     }
 }
 
+/* inference() does not switch layer modes: a Dropout layer left in training
+ * mode draws its mask, here with no key. */
+static void inferThroughADropoutLeftInTrainingMode(void) {
+    size_t *dims = reserveMemory(sizeof(size_t));
+    dims[0] = 4;
+    size_t *order = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    tensor_t *mask = initTensor(shape, quantizationInitBool(), NULL);
+    quantization_t *q = quantizationInitFloat();
+    layer_t *dropout = dropoutLayerInit(0.5f, mask, q, q);
+    dropout->config->dropout->training = true;
+    layer_t *model[1] = {dropout};
+    (void)inference(model, 1, buildFloatTensor2DInf(1, 4, (float[]){1.f, 2.f, 3.f, 4.f}));
+}
+
+/* No key, no randomness: inference() is key-less, so a forward that draws
+ * stops at its first draw. */
+void testInferenceOnADrawingForwardExits(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "bernoulliFillMaskReference: Bernoulli draw without a stream",
+                             inferThroughADropoutLeftInTrainingMode());
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testInferenceLinearReluFloat);
@@ -1015,5 +1040,6 @@ int main(void) {
     RUN_TEST(testInferenceWithLossTakesACallWithoutAScheduler);
     RUN_TEST(testInferenceWithLossHandsEachLayerItsLayerKey);
     RUN_TEST(testInferenceWithoutAKeyHandsNoLayerContext);
+    RUN_TEST(testInferenceOnADrawingForwardExits);
     return UNITY_END();
 }

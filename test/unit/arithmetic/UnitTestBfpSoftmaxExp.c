@@ -1,8 +1,10 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "BfpSoftmaxExp.h"
+#include "DeathTest.h"
 #include "RNG.h"
 #include "expected_bfp_softmax_core.h"
 #include "unity.h"
@@ -69,13 +71,12 @@ void testShiftHalfAwayVectors() {
 void testShiftSrExactWhenRemainderZero() {
     static const int32_t base[] = {13, -13, 22167, -22167, 5, -5, 0};
     static const uint32_t ks[] = {1u, 3u, 14u};
-    rngSetSeed(9001u);
+    rngStream_t rs = rngOpen(rngKeyFromSeed(9001u));
     for (size_t b = 0; b < sizeof base / sizeof base[0]; b++) {
         for (size_t j = 0; j < sizeof ks / sizeof ks[0]; j++) {
             const int32_t v = base[b] * (int32_t)(1u << ks[j]);
             for (int rep = 0; rep < 10; rep++) {
-                TEST_ASSERT_EQUAL_INT32(base[b],
-                                        bfpShiftRightRounded(v, ks[j], BFP_SHIFT_SR, NULL));
+                TEST_ASSERT_EQUAL_INT32(base[b], bfpShiftRightRounded(v, ks[j], BFP_SHIFT_SR, &rs));
             }
         }
     }
@@ -93,12 +94,12 @@ void testShiftSrBracketsFloor() {
         {-13, 1u, -7}, /* rem = 1 of 2: exact half     */
         {5, 3u, 0},    /* rem = 5 of 8: p = 0.625      */
     };
-    rngSetSeed(4242u);
+    rngStream_t rs = rngOpen(rngKeyFromSeed(4242u));
     for (size_t c = 0; c < sizeof cases / sizeof cases[0]; c++) {
         int sawFloor = 0;
         int sawFloorPlusOne = 0;
         for (int draw = 0; draw < 100; draw++) {
-            const int32_t r = bfpShiftRightRounded(cases[c].v, cases[c].k, BFP_SHIFT_SR, NULL);
+            const int32_t r = bfpShiftRightRounded(cases[c].v, cases[c].k, BFP_SHIFT_SR, &rs);
             if (r == cases[c].floorQ) {
                 sawFloor++;
             } else if (r == cases[c].floorQ + 1) {
@@ -112,20 +113,36 @@ void testShiftSrBracketsFloor() {
     }
 }
 
-void testShiftSrSeededDeterminism() {
+static void shiftSrSequence(rngKey_t key, int32_t out[32]) {
+    rngStream_t rs = rngOpen(key);
+    for (int i = 0; i < 32; i++) {
+        out[i] =
+            bfpShiftRightRounded(kShiftV[i % SHIFT_NUM_V], kShiftK[1 + (i % 4)], BFP_SHIFT_SR, &rs);
+    }
+}
+
+/* SR shifts are a function of their stream: the same key gives the same 32
+ * results, another key different ones. */
+void testShiftSrIsAFunctionOfItsStream() {
     int32_t first[32];
     int32_t second[32];
-    rngSetSeed(77u);
-    for (int i = 0; i < 32; i++) {
-        first[i] = bfpShiftRightRounded(kShiftV[i % SHIFT_NUM_V], kShiftK[1 + (i % 4)],
-                                        BFP_SHIFT_SR, NULL);
-    }
-    rngSetSeed(77u);
-    for (int i = 0; i < 32; i++) {
-        second[i] = bfpShiftRightRounded(kShiftV[i % SHIFT_NUM_V], kShiftK[1 + (i % 4)],
-                                         BFP_SHIFT_SR, NULL);
-    }
+    int32_t other[32];
+    shiftSrSequence(rngKeyFromSeed(77u), first);
+    shiftSrSequence(rngKeyFromSeed(77u), second);
+    shiftSrSequence(rngKeyFromSeed(78u), other);
     TEST_ASSERT_EQUAL_INT32_ARRAY(first, second, 32);
+    TEST_ASSERT_FALSE(memcmp(first, other, sizeof first) == 0);
+}
+
+static void shiftSrWithoutAStream(void) {
+    (void)bfpShiftRightRounded(13, 1u, BFP_SHIFT_SR, NULL);
+}
+
+/* No key, no randomness: an SR shift by k > 0 without a stream stops at the
+ * draw (a shift by 0 and the underflow floor never draw, and never stop). */
+void testShiftSrWithoutAStreamExits() {
+    ASSERT_EXITS_WITH_OUTPUT(1, "bfpShiftRightRounded: SR shift without a stream",
+                             shiftSrWithoutAStream());
 }
 
 void testIExpVectorsTrunc() {
@@ -148,17 +165,20 @@ void testIExpVectorsHalfAway() {
 
 /* The QFLOOR gate: qW <= QFLOOR is an EXACT zero in every mode, with no RNG
  * draw (the SR stream must stay untouched -- a dropped gate would advance it
- * and occasionally return 1 from the Bernoulli on the clamped 31-shift). */
+ * and occasionally return 1 from the Bernoulli on the clamped 31-shift), so a
+ * NULL stream never stops there either. */
 void testIExpUnderflowFloorIsExactZero() {
     static const int32_t inputs[] = {BFP_SOFTMAX_QFLOOR, BFP_SOFTMAX_QFLOOR - 5, INT32_MIN};
     static const bfpShiftRounding_t modes[] = {BFP_SHIFT_TRUNC, BFP_SHIFT_HALF_AWAY, BFP_SHIFT_SR};
     for (size_t i = 0; i < sizeof inputs / sizeof inputs[0]; i++) {
         for (size_t m = 0; m < sizeof modes / sizeof modes[0]; m++) {
-            rngSetSeed(42u);
+            rngStream_t rs = rngOpen(rngKeyFromSeed(42u));
+            const uint32_t before = rs.state;
             for (int rep = 0; rep < 32; rep++) {
                 TEST_ASSERT_EQUAL_INT32(0, bfpIExpQ(inputs[i], modes[m], NULL));
+                TEST_ASSERT_EQUAL_INT32(0, bfpIExpQ(inputs[i], modes[m], &rs));
             }
-            TEST_ASSERT_EQUAL_UINT32(42u, rngGetSeed());
+            TEST_ASSERT_EQUAL_UINT32(before, rs.state);
         }
     }
 }
@@ -203,7 +223,8 @@ int main(void) {
     RUN_TEST(testShiftHalfAwayVectors);
     RUN_TEST(testShiftSrExactWhenRemainderZero);
     RUN_TEST(testShiftSrBracketsFloor);
-    RUN_TEST(testShiftSrSeededDeterminism);
+    RUN_TEST(testShiftSrIsAFunctionOfItsStream);
+    RUN_TEST(testShiftSrWithoutAStreamExits);
     RUN_TEST(testIExpVectorsTrunc);
     RUN_TEST(testIExpVectorsHalfAway);
     RUN_TEST(testIExpUnderflowFloorIsExactZero);

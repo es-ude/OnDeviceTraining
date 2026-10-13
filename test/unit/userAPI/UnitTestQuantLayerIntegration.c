@@ -26,6 +26,7 @@
 #include "Quantization.h"
 #include "QuantizationApi.h"
 #include "QuantizationLayer.h"
+#include "RNG.h"
 #include "SgdApi.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -333,7 +334,9 @@ void testFullSymChainTrainingStepMatchesFloatTwin(void) {
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     trainingStats_t *statsS = calculateGradsSequential(modelSym, 5, defaultLossConfig(MSE),
                                                        REDUCTION_MEAN, inS, labelS, NULL);
-    sgdStepM(optimS, NULL);
+    /* The factory's SR write-back into the SYM_INT32 params draws. */
+    const rngKey_t updateKey = rngKeyFromSeed(308u);
+    sgdStepM(optimS, &updateKey);
 
     bool symStatsNotNull = (statsS != NULL);
     float symLoss = statsS ? statsS->loss : NAN;
@@ -481,7 +484,8 @@ void testConv1dTransposedSymChainTrains(void) {
             firstLoss = st->loss;
         }
         lastLoss = st->loss;
-        sgdStepM(opt, NULL);
+        const rngKey_t updateKey = rngKeyFromSeed(433u + (uint64_t)s);
+        sgdStepM(opt, &updateKey);
         optimizerZeroGrad(opt);
         freeTrainingStats(st);
         freeTensor(label);

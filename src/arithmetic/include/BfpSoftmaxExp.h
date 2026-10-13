@@ -23,7 +23,7 @@
 typedef enum bfpShiftRounding {
     BFP_SHIFT_TRUNC = 0, /* arithmetic >>: floor (two's complement). I-BERT-faithful default. */
     BFP_SHIFT_HALF_AWAY, /* round-half-away-from-zero of v / 2^k                              */
-    BFP_SHIFT_SR,        /* floor + Bernoulli(remainder / 2^k), one rngNextFloat() draw       */
+    BFP_SHIFT_SR,        /* floor + Bernoulli(remainder / 2^k), one draw from the stream      */
 } bfpShiftRounding_t;
 
 /* Pointer-only use: the identical typedef lives in RNG.h (C11 allows the
@@ -32,19 +32,20 @@ typedef struct rngStream rngStream_t;
 
 /*! @brief Rounded arithmetic right shift v / 2^k in one of three modes.
  *
- * k == 0 returns v unchanged (no RNG draw). k >= 31 is clamped to 31
+ * k == 0 returns v unchanged (no draw). k >= 31 is clamped to 31
  * (documented; only reachable via extreme exponent spreads whose true
- * results round to 0 or ±1). SR draws exactly ONE rngNextFloat() per call
- * with k > 0, and a zero remainder never increments (exact shifts stay
- * exact under SR). HALF_AWAY requires |v| ≤ 2^30 (holds at every call
- * site) so the magnitude add cannot overflow. */
+ * results round to 0 or ±1). SR draws exactly ONE unit float from `rs` per
+ * call with k > 0 and stops with a named error when `rs` is NULL; a zero
+ * remainder never increments (exact shifts stay exact under SR). TRUNC and
+ * HALF_AWAY never draw and take NULL. HALF_AWAY requires |v| ≤ 2^30 (holds
+ * at every call site) so the magnitude add cannot overflow. */
 int32_t bfpShiftRightRounded(int32_t v, uint32_t k, bfpShiftRounding_t mode, rngStream_t *rs);
 
 /*! @brief Integer exponential on the 2^-F work grid.
  *
  * Input qW ≤ 0 at scale 2^-F; output q_e ≥ 0 at scale S_out = A * 2^-28,
  * i.e. exp(qW * 2^-F) ≈ q_e * 0.3585 * 2^-28. qW ≤ BFP_SOFTMAX_QFLOOR is
- * an exact 0 (exp underflow; also keeps z ≤ ZMAX and skips the RNG in SR
+ * an exact 0 (exp underflow; also keeps z ≤ ZMAX and draws nothing in SR
  * mode). `mode` picks the rounding of the final >> z renormalization. */
 int32_t bfpIExpQ(int32_t qW, bfpShiftRounding_t mode, rngStream_t *rs);
 

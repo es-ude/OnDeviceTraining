@@ -1,5 +1,7 @@
 #include <stddef.h>
 
+#include "DeathTest.h"
+#include "RNG.h"
 #include "Rounding.h"
 #include "unity.h"
 
@@ -52,6 +54,30 @@ void testRoundHalfAway() {
     TEST_ASSERT_EQUAL(expected, actual);
 }
 
+/* SR rounding draws exactly one unit float from the stream it is handed. The
+ * first draw of rngOpen(rngKeyFromSeed(31)):
+ *   uv run python -c "from examples._shared.keyed_rng import (key_from_seed as kfs,
+ *   open_stream as o, next_unit_float as u); print(u(o(kfs(31)))[1])"
+ * prints 0.1786224..., so round(352.5 + j - 0.5) = 352 (HALF_AWAY: 353). */
+void testRoundByModeSrDrawsOneUnitFloatFromItsStream() {
+    rngStream_t rs = rngOpen(rngKeyFromSeed(31u));
+    rngStream_t oneStepOn = rngOpen(rngKeyFromSeed(31u));
+    (void)rngNextU32(&oneStepOn);
+    TEST_ASSERT_EQUAL_INT32(352, roundByMode(352.5f, SR_HALF_AWAY, &rs));
+    TEST_ASSERT_EQUAL_HEX32(oneStepOn.state, rs.state);
+}
+
+static void roundSrWithoutAStream(void) {
+    (void)roundByMode(352.5f, SR_HALF_AWAY, NULL);
+}
+
+/* No key, no randomness: SR rounding without a stream stops at the draw;
+ * HALF_AWAY never draws and takes NULL (testRoundHalfAway). */
+void testRoundByModeSrWithoutAStreamExits() {
+    ASSERT_EXITS_WITH_OUTPUT(1, "roundByMode: SR rounding without a stream",
+                             roundSrWithoutAStream());
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -59,6 +85,8 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testRoundHalfAway);
     RUN_TEST(testRescaleIntoAccumulatorScale);
+    RUN_TEST(testRoundByModeSrDrawsOneUnitFloatFromItsStream);
+    RUN_TEST(testRoundByModeSrWithoutAStreamExits);
 
     return UNITY_END();
 }

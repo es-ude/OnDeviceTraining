@@ -2,13 +2,20 @@
 
 #include "Bernoulli.h"
 
+#include <stdlib.h>
+
+#include "Common.h"
 #include "RNG.h"
 #include "Tensor.h"
 
 void bernoulliFillMaskReference(tensor_t *mask, float probTrue, rngStream_t *rs) {
     size_t numberOfElements = calcNumberOfElementsByTensor(mask);
+    if (numberOfElements > 0 && rs == NULL) {
+        PRINT_ERROR("bernoulliFillMaskReference: Bernoulli draw without a stream");
+        exit(1);
+    }
     for (size_t i = 0; i < numberOfElements; i++) {
-        tensorBoolSet(mask, i, rngNextFloat() < probTrue);
+        tensorBoolSet(mask, i, rngNextUnitFloat(rs) < probTrue);
     }
 }
 

@@ -9,9 +9,9 @@ typedef struct rngStream rngStream_t;
 
 /*! Fills `mask` (a BOOL tensor) with independent Bernoulli draws: each bit is
  *  set (1) with probability `probTrue`, clear (0) with probability 1-probTrue.
- *  Uses the canonical RNG (`rngNextFloat`); seed via `rngSetSeed` for
- *  reproducibility. `mask` must be BOOL-quantized with its data buffer
- *  allocated. */
+ *  The installed sampler draws from `rs` only; the reference sampler stops
+ *  with a named error when it has elements to draw and `rs` is NULL. `mask`
+ *  must be BOOL-quantized with its data buffer allocated. */
 void bernoulliFillMask(tensor_t *mask, float probTrue, rngStream_t *rs);
 
 /*! Signature of a Bernoulli mask-fill implementation, for swapping in
@@ -25,7 +25,8 @@ void bernoulliFillMaskReference(tensor_t *mask, float probTrue, rngStream_t *rs)
 /*! Install a sampler implementation. Passing NULL restores the reference.
  *  The slot is process-wide: install the sampler before training starts. An
  *  installed sampler must be a pure function of its `rs`, `probTrue` and the
- *  mask geometry, or a recomputed forward draws a different mask. */
+ *  mask geometry, or a recomputed forward draws a different mask; one that
+ *  draws must itself stop on a NULL `rs`, as the reference does. */
 void bernoulliSetFillMaskFn(bernoulliFillMaskFn_t fn);
 
 /*! Returns the currently active sampler (for save/restore in tests). */

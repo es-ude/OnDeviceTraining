@@ -76,6 +76,7 @@ add_elastic_ai_unit_test(
         LayerExec
         RNG
         CommonLayerLibs
+        DropoutApi
         TensorApi
         LinearApi
         LayerWeightsApi

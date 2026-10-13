@@ -12,12 +12,8 @@ int32_t roundHalfAway(float input) {
     return round(input);
 }
 
-float randfloat() {
-    return rngNextFloat();
-}
-
-int32_t roundSRHalfAway(const float input, rngStream_t *rs) {
-    return roundHalfAway(input + randfloat() - 0.5f);
+static int32_t roundSRHalfAway(const float input, rngStream_t *rs) {
+    return roundHalfAway(input + rngNextUnitFloat(rs) - 0.5f);
 }
 
 int32_t roundByMode(const float input, const roundingMode_t roundingMode, rngStream_t *rs) {
@@ -25,6 +21,10 @@ int32_t roundByMode(const float input, const roundingMode_t roundingMode, rngStr
     case HALF_AWAY:
         return roundHalfAway(input);
     case SR_HALF_AWAY:
+        if (rs == NULL) {
+            PRINT_ERROR("roundByMode: SR rounding without a stream");
+            exit(1);
+        }
         return roundSRHalfAway(input, rs);
     }
     return 0;

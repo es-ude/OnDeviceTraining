@@ -235,7 +235,7 @@ Notes on the qualified cells:
   `arithmetic.roundingMode` (#282) — training write-backs are **optimizer-owned**
   (#279): both step functions run every param/state OUT_WRITE with
   `optim->writeBackRounding` as the update ops' rounding (superseding
-  `updateMath.roundingMode`), which the factories default to **seeded
+  `updateMath.roundingMode`), which the factories default to **keyed
   `SR_HALF_AWAY`** (the sweep-ratified dead-zone escape: sub-ULP updates on
   quantized storage survive in expectation).
   `optimizerSetWriteBackRounding(optim, HALF_AWAY)` is the explicit deterministic
@@ -550,14 +550,15 @@ checkpointing, limitations, literature).
   `true` supported). `initDataLoader` fails fast on `batchSize == 0`. No
   dedicated MNIST loader in `src/` (examples preprocess to `.npy`).
 - **RNG** — global XorShift32, seedable and reproducible, **byte-mirrored in Python**
-  and CI-verified. Drives weight init, the Dropout Bernoulli mask (swappable fill hook),
-  and DataLoader shuffle. A context-passing variant (`rng32_t` + `rngNextFloatCtx`,
+  and CI-verified. Drives weight init and DataLoader shuffle; the Dropout Bernoulli mask
+  (swappable fill hook) draws from the keyed core below. A context-passing variant
+  (`rng32_t` + `rngNextFloatCtx`,
   same draw math on caller-owned state) serves streams that must not perturb the
   global one — PPCA/exemplar replay sampling. A keyed, order-independent core also
   exists (`rngKeyFromSeed`, `rngFold` = one Threefry-2x32-20 block per key-tree edge,
   `rngOpen` with `rngNextU32`/`rngNextUnitFloat`/`rngNextBounded` on a keyed xorshift32
-  state; mirrored in `examples/_shared/keyed_rng.py`); nothing uses it yet, consumers
-  move to it in later steps.
+  state; mirrored in `examples/_shared/keyed_rng.py`); Dropout masks and every stochastic
+  rounding draw from it.
 - **Observer / trace** — `traceSink_t` callback facility (not a layer) that hands
   fwd/activation-grad/loss-grad/param tensors to a caller-supplied sink; used for
   layer-by-layer C-vs-PyTorch parity debugging (`npyDumpSink`, kws_raw harness).

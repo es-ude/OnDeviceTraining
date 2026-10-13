@@ -1316,6 +1316,38 @@ void testBatchViewOfRejectsRankEight(void) {
     ASSERT_EXITS_WITH_FAILURE(batchViewOf(&view, &sample));
 }
 
+static tensor_t *newVectorOfTwo(quantization_t *q) {
+    size_t *dims = reserveMemory(sizeof(size_t));
+    dims[0] = 2;
+    size_t *order = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    return initTensor(shape, q, NULL);
+}
+
+static void requantizeIntoAnSrTemplate(void) {
+    tensor_t *t = newVectorOfTwo(quantizationInitFloat());
+    tensorFillFromFloatBuffer(t, (float[]){352.5f, -2047.0f}, 2);
+    requantizeTensorInPlace(t, quantizationInitSymInt32(SR_HALF_AWAY));
+}
+
+static void fillAnSrTensor(void) {
+    tensor_t *t = newVectorOfTwo(quantizationInitSymInt32(SR_HALF_AWAY));
+    tensorFillFromFloatBuffer(t, (float[]){352.5f, -2047.0f}, 2);
+}
+
+/* No key, no randomness: the key-less public entry points stop at the first
+ * rounding into an SR template (into a HALF_AWAY one they never draw). */
+void testRequantizeIntoAnSrTemplateExits(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "roundByMode: SR rounding without a stream",
+                             requantizeIntoAnSrTemplate());
+}
+
+void testFillFromFloatBufferIntoAnSrTensorExits(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "roundByMode: SR rounding without a stream", fillAnSrTensor());
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testTensorInitWithDistribution_Zeros_InitializesProductOfDimsValues);
@@ -1371,5 +1403,7 @@ int main(void) {
     RUN_TEST(testBatchViewOfRefillWithLowerRankLeavesNoStaleAxes);
     RUN_TEST(testBatchViewOfAcceptsRankSevenFillingEveryViewSlot);
     RUN_TEST(testBatchViewOfRejectsRankEight);
+    RUN_TEST(testRequantizeIntoAnSrTemplateExits);
+    RUN_TEST(testFillFromFloatBufferIntoAnSrTensorExits);
     return UNITY_END();
 }

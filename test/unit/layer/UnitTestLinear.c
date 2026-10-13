@@ -1752,6 +1752,21 @@ void testLinearForwardWithoutAContextHandsTheFunnelNoStream(void) {
     TEST_ASSERT_FALSE(linearCellRecords[0].hasStream);
 }
 
+static void linearSrForwardWithoutAContext(void) {
+    layer_t *layer = buildFloatLinearWithTrainable(TRAINABLE_FALSE);
+    layer->config->linear->forwardMath =
+        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = SR_HALF_AWAY};
+    linearForward(layer, e2eMakeInput((float[]){0.5f, -1.f, 2.f}), linearMakeSym1x2(), NULL);
+}
+
+/* No key, no randomness: a Linear forward that rounds stochastically into a
+ * SYM_INT32 output stops at its first draw when the layer has no context
+ * (the HALF_AWAY forward above takes NULL and never stops). */
+void testLinearSrForwardWithoutAContextExits(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "roundByMode: SR rounding without a stream",
+                             linearSrForwardWithoutAContext());
+}
+
 /* #380 PR2 Task 1: propLoss == NULL is a grads-only call -- weight/bias grads
  * must be computed exactly as with a real propLoss, and no dx memory may be
  * touched. Twin fixture (both TRAINABLE, hand-seeded, bit-identical) mirrors
@@ -3298,6 +3313,7 @@ int main(void) {
     RUN_TEST(testLinearForwardOpDrawsFromItsForwardOpKey);
     RUN_TEST(testLinearBackwardDxOpDrawsFromItsBackwardOpKey);
     RUN_TEST(testLinearForwardWithoutAContextHandsTheFunnelNoStream);
+    RUN_TEST(testLinearSrForwardWithoutAContextExits);
     RUN_TEST(testLinearBackwardNullPropLossComputesGradsOnly);
     RUN_TEST(testLinearForwardGroupedSymWeights);
     RUN_TEST(testLinearForwardGroupedFloatPathAgreesWithinTolerance);

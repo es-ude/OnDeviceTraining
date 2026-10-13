@@ -1277,21 +1277,25 @@ void testAuxOutIsKernelWrittenVerbatimAndNeverFunnelConverted(void) {
  * rescaleIntoAccumulatorScale, not a bare roundf (which is HALF_AWAY-only and
  * ignores SR jitter entirely). Values are chosen so the pre-rescale ratio
  * lands exactly on a HALF_AWAY tie (705*0.01/0.02 = 352.5, -705*... = -352.5)
- * so the two rounding modes provably diverge for ANY jitter draw that lands
+ * so the two rounding modes provably diverge for a jitter draw that lands
  * before the tie boundary.
  *
- * Derivation (verified by compiling Rounding.c+RNG.c standalone against
- * rngSetSeed(99) — see task-1-report.md): with the module-global RNG seeded
- * to 99, the two draws consumed by roundSRHalfAway (one per element, in
- * element order) are jitter0=0.005865..., jitter1=0.558617... :
+ * The rescale draws twice (one per element, in element order) from the op
+ * key's ACC(0) stream, fold(key, ACC = 11, 0), key = rngKeyFromSeed(31):
+ *   uv run python -c "from examples._shared.keyed_rng import (fold, key_from_seed as kfs,
+ *   open_stream as o, next_unit_float as u); s = o(fold(kfs(31), 11, 0)); s, j0 = u(s); print(
+ *   j0, u(s)[1])"
+ * prints j0 = 0.0817152..., j1 = 0.7940227... :
  *   HALF_AWAY:   round(352.5)  = 353 ;  round(-352.5) = -353  (the OLD bare-
  *                roundf behavior this test would still show if the epilogue
  *                ignored the target's roundingMode - anti-vacuity)
- *   SR_HALF_AWAY: round(352.5 + jitter0 - 0.5) = round(352.005...) = 352
- *                 round(-352.5 + jitter1 - 0.5) = round(-352.44...) = -352
+ *   SR_HALF_AWAY: round(352.5 + j0 - 0.5) = round(352.08...) = 352
+ *                 round(-352.5 + j1 - 0.5) = round(-352.21...) = -352
  * Target scale must stay EXACTLY 0.02 (never re-derived), matching
  * testAccFixedSymIntoSymRescalesIntoExistingScale's HALF_AWAY pin (PR1b.2 D4's
  * "bit-identical for HALF_AWAY" case). */
+#define SR_GOLD_KEY_SEED 31u
+
 void testAccFixedScaleHonorsTargetSrRoundingMode(void) {
     tensor_t *inc = buildSym(2, (int32_t[]){705, -705}, 0.01f);
     tensor_t *grad = buildSym(2, (int32_t[]){0, 0}, 0.02f);
@@ -1303,14 +1307,15 @@ void testAccFixedScaleHonorsTargetSrRoundingMode(void) {
                                                * epilogue rescale (target's is
                                                * what counts, per PR1b.2 D4) */
     initSymInt32Quantization(&arithQC, &arith);
+    const rngKey_t key = rngKeyFromSeed(SR_GOLD_KEY_SEED);
 
-    rngSetSeed(99);
     executeOp(
         &(opSpec_t){
             .kernel = executeOpIdentityKernel,
             .inputs = (tensor_t *[]){inc},
             .nInputs = 1,
             .arithmetic = arithmeticFromQuantization(&arith),
+            .key = &key,
             .mode = OUT_ACC_FIXED_SCALE,
         },
         grad);
@@ -1433,24 +1438,28 @@ void testExecuteOpNeverAliasesSymTarget(void) {
  * be RESTORED after the call). Fixture puts element 0 exactly on a HALF_AWAY
  * tie: floats {352.5, -2047.0} -> absMax 2047 -> scale = 2047/2047 = 1.0f
  * EXACTLY, so the requant ratios are 352.5 (tie) and -2047.0 (integral).
- * Seed 99 draws (verified against RNG.c's xorshift32, and matching the
- * documented draws in testAccFixedScaleHonorsTargetSrRoundingMode):
- * j0=0.005865..., j1=0.558617... :
- *   SR_HALF_AWAY: round(352.5 + j0 - 0.5) = round(352.006) = 352
- *                 round(-2047.0 + j1 - 0.5) = round(-2046.94) = -2047
+ * The epilogue draws from the op key's OUT(0) stream, fold(key, OUT = 10, 0),
+ * key = rngKeyFromSeed(31):
+ *   uv run python -c "from examples._shared.keyed_rng import (fold, key_from_seed as kfs,
+ *   open_stream as o, next_unit_float as u); s = o(fold(kfs(31), 10, 0)); s, j0 = u(s); print(
+ *   j0, u(s)[1])"
+ * prints j0 = 0.0749632..., j1 = 0.2810223... :
+ *   SR_HALF_AWAY: round(352.5 + j0 - 0.5) = round(352.07...) = 352
+ *                 round(-2047.0 + j1 - 0.5) = round(-2047.21...) = -2047
  *   HALF_AWAY:    round(352.5) = 353 (what the target's config would give —
  *                 anti-vacuity: the two modes provably diverge on element 0) */
 void testOutWriteEpilogueRoundsByArithmeticNotTargetQConfig(void) {
     tensor_t *in = buildFloat(2, (float[]){352.5f, -2047.0f});
     tensor_t *out = buildSym(2, (int32_t[]){0, 0}, 1.0f); /* storage: HALF_AWAY */
+    const rngKey_t key = rngKeyFromSeed(SR_GOLD_KEY_SEED);
 
-    rngSetSeed(99);
     executeOp(
         &(opSpec_t){
             .kernel = executeOpIdentityKernel,
             .inputs = (tensor_t *[]){in},
             .nInputs = 1,
             .arithmetic = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = SR_HALF_AWAY},
+            .key = &key,
             .mode = OUT_WRITE,
         },
         out);
@@ -1475,14 +1484,14 @@ void testOutWriteEpilogueRoundsByArithmeticNotTargetQConfig(void) {
 /* Inverse direction: a deterministic op must stay deterministic even when the
  * target's storage config says SR — the storage mode never leaks into the op
  * (the #279 both-directions pin, now at the funnel level). Same fixture; with
- * the target's SR config in charge (the OLD semantics) seed 99 would yield
- * 352 on element 0 — the pinned 353 diverges from that. */
+ * the target's SR config in charge (the OLD semantics) element 0 would round
+ * stochastically, and without a key it would stop with the named error: the
+ * key-less op reaching 353 is the proof that it never draws. */
 void testOutWriteDetArithmeticOverridesSrTargetQConfig(void) {
     tensor_t *in = buildFloat(2, (float[]){352.5f, -2047.0f});
     tensor_t *out = buildSym(2, (int32_t[]){0, 0}, 1.0f);
     ((symInt32QConfig_t *)out->quantization->qConfig)->roundingMode = SR_HALF_AWAY;
 
-    rngSetSeed(99);
     executeOp(
         &(opSpec_t){
             .kernel = executeOpIdentityKernel,
@@ -1509,19 +1518,21 @@ void testOutWriteDetArithmeticOverridesSrTargetQConfig(void) {
 /* Same contract through writeOut's OTHER branch, the SYM->SYM conversionMatrix
  * diagonal (requantSymInt32Tensor): mantissas {705, 4094} @ 0.5 dequantize to
  * {352.5, 2047.0} -> absMax 2047 -> scale 1.0f exactly, requant ratio
- * 705*(0.5/1.0) = 352.5 lands on the tie for element 0. Seed 99:
- * SR 352 vs the target config's HALF_AWAY 353. */
+ * 705*(0.5/1.0) = 352.5 lands on the tie for element 0. The same OUT(0)
+ * stream as testOutWriteEpilogueRoundsByArithmeticNotTargetQConfig (j0 =
+ * 0.0749632...): SR 352 vs the target config's HALF_AWAY 353. */
 void testOutWriteSymDiagonalRoundsByArithmetic(void) {
     tensor_t *in = buildSym(2, (int32_t[]){705, 4094}, 0.5f);
     tensor_t *out = buildSym(2, (int32_t[]){0, 0}, 1.0f); /* storage: HALF_AWAY */
+    const rngKey_t key = rngKeyFromSeed(SR_GOLD_KEY_SEED);
 
-    rngSetSeed(99);
     executeOp(
         &(opSpec_t){
             .kernel = executeOpIdentityKernel,
             .inputs = (tensor_t *[]){in},
             .nInputs = 1,
             .arithmetic = (arithmetic_t){.type = ARITH_SYM_INT32, .roundingMode = SR_HALF_AWAY},
+            .key = &key,
             .mode = OUT_WRITE,
         },
         out);
@@ -1548,10 +1559,9 @@ void testOutWriteSymDiagonalRoundsByArithmetic(void) {
  * per-tensor BFP target (m=4, e=8). Group absMax = 7.0 (element 1) -> qMax=7
  * (m=4) -> derived E=0, scale=1.0f EXACTLY, so element 0's quotient 3.5/1.0
  * is a TRUE HALF_AWAY tie: the op's HALF_AWAY rounding must give mantissa 4
- * deterministically. The target's OWN storage config is SR_HALF_AWAY (seed
- * 99, first draw 0.005865...): 3.5 + 0.005865 - 0.5 = 3.005865 -> rounds to
- * 3 -- the value storageRoundingSlot returning NULL for BFP would silently
- * substitute instead (op rounding ignored, storage mode leaks through). */
+ * deterministically. The target's OWN storage config is SR_HALF_AWAY: had it
+ * leaked through (storageRoundingSlot returning NULL for BFP, op rounding
+ * ignored), this key-less op would stop with the named SR error instead. */
 void testOutWriteBfpTargetUsesOpRoundingAndRestoresSlot(void) {
     tensor_t *in = buildFloat(2, (float[]){3.5f, 7.0f});
 
@@ -1571,7 +1581,6 @@ void testOutWriteBfpTargetUsesOpRoundingAndRestoresSlot(void) {
     tensor_t out;
     setTensorValues(&out, outData, &shape, &outQ, NULL);
 
-    rngSetSeed(99);
     executeOp(
         &(opSpec_t){
             .kernel = executeOpIdentityKernel,
@@ -1602,14 +1611,19 @@ void testOutWriteBfpTargetUsesOpRoundingAndRestoresSlot(void) {
 /* Counter-pin: executeConvert is a BARE storage-to-storage conversion — a
  * conversion node's rounding IS a storage encode, so the TARGET's qConfig
  * roundingMode applies there (unlike the OUT_WRITE epilogue above). Same
- * fixture, SR on the storage config: seed 99 must yield the SR result. */
+ * fixture, SR on the storage config. A bare conversion draws from the stream
+ * it is handed, here rngOpen(rngKeyFromSeed(31)):
+ *   uv run python -c "from examples._shared.keyed_rng import (key_from_seed as kfs,
+ *   open_stream as o, next_unit_float as u); s = o(kfs(31)); s, j0 = u(s); print(j0, u(s)[1])"
+ * prints j0 = 0.1786224..., j1 = 0.0632895...: round(352.5 + j0 - 0.5) = 352
+ * (HALF_AWAY: 353), round(-2047.0 + j1 - 0.5) = -2047. */
 void testExecuteConvertKeepsTargetStorageRounding(void) {
     tensor_t *in = buildFloat(2, (float[]){352.5f, -2047.0f});
     tensor_t *out = buildSym(2, (int32_t[]){0, 0}, 1.0f);
     ((symInt32QConfig_t *)out->quantization->qConfig)->roundingMode = SR_HALF_AWAY;
+    rngStream_t rs = rngOpen(rngKeyFromSeed(SR_GOLD_KEY_SEED));
 
-    rngSetSeed(99);
-    executeConvert(in, out, NULL);
+    executeConvert(in, out, &rs);
 
     int32_t got0 = ((int32_t *)out->data)[0];
     int32_t got1 = ((int32_t *)out->data)[1];
@@ -2352,13 +2366,22 @@ void testExecuteOpBfpStageGeometryMismatchDies(void) {
     ASSERT_EXITS_WITH_FAILURE(bfpStageGeometryMismatchBody());
 }
 
-/* (f) SR staging determinism (UnitTestTensorConversion.c:4541 idiom): staging
- * with SR_HALF_AWAY must consume the seeded repo RNG — same seed twice gives
- * identical codes, and they differ somewhere from a HALF_AWAY run (7 of 8
- * quotients fractional at the derived scale 2, exponent derivation itself is
- * rounding-free -> stored 128 every run). Kills a hardcoded-HALF_AWAY
- * staging mutation. */
-void testExecuteOpBfpStagingSrIsSeededDeterministic(void) {
+/* (f) SR staging draws from the op key's STAGE(0) stream, fold(key, STAGE = 8,
+ * 0): the quotients v / 2 at the derived scale 2 (stored exponent 128, the
+ * derivation itself is rounding-free) round to these codes for key
+ * rngKeyFromSeed(31), by the C float arithmetic (round half away of
+ * (q + j) - 0.5 in float, then the [-8, 7] clamp):
+ *   uv run python -c "import struct, math, itertools; from examples._shared.keyed_rng import (
+ *   fold, key_from_seed as kfs, open_stream as o, next_unit_float as u); f = lambda v: (
+ *   struct.unpack('f', struct.pack('f', v))[0]); r = lambda x: int(math.copysign(
+ *   math.floor(abs(x) + 0.5), x)); st = list(itertools.accumulate(range(8),
+ *   lambda s, _: u(s)[0], initial=o(fold(kfs(31), 8, 0))))[1:]; print([max(-8, min(7,
+ *   r(f(f(q + (s >> 8) / 2**24) - 0.5)))) for q, s in zip((7, 1.75, -0.875, 1.3125, 3.5,
+ *   -5.25, 0.4375, 2.625), st)])"
+ * prints [7, 2, -1, 1, 3, -6, 0, 3]; HALF_AWAY gives 7 2 -1 1 4 -5 0 3. The same key
+ * twice gives the same codes, a different key (32) different ones. Kills a
+ * hardcoded-HALF_AWAY staging mutation. */
+void testExecuteOpBfpStagingSrDrawsFromTheStageStream(void) {
     float vals[8] = {14.f, 3.5f, -1.75f, 2.625f, 7.f, -10.5f, 0.875f, 5.25f};
     tensor_t *in = buildFloat(8, vals);
     tensor_t *out = buildFloat(8, (float[]){0, 0, 0, 0, 0, 0, 0, 0});
@@ -2369,25 +2392,32 @@ void testExecuteOpBfpStagingSrIsSeededDeterministic(void) {
                           .roundingMode = HALF_AWAY, /* ignored either way */
                           .mantissaBits = 4,
                           .exponentBits = 8};
+    const rngKey_t key = rngKeyFromSeed(SR_GOLD_KEY_SEED);
+    const rngKey_t otherKey = rngKeyFromSeed(SR_GOLD_KEY_SEED + 1u);
     opSpec_t srSpec = {
         .kernel = captureBfpOperandKernel,
         .inputs = (tensor_t *[]){in},
         .nInputs = 1,
         .arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = SR_HALF_AWAY},
+        .key = &key,
         .mode = OUT_WRITE,
         .bfpStage = {&stage},
     };
 
-    rngSetSeed(7);
     executeOp(&srSpec, out);
     int32_t sr1[8];
     memcpy(sr1, g_bfpCapCodes, sizeof(sr1));
     uint8_t srExponent = g_bfpCapExponents[0];
 
-    rngSetSeed(7);
     executeOp(&srSpec, out);
     int32_t sr2[8];
     memcpy(sr2, g_bfpCapCodes, sizeof(sr2));
+
+    opSpec_t otherSpec = srSpec;
+    otherSpec.key = &otherKey;
+    executeOp(&otherSpec, out);
+    int32_t other[8];
+    memcpy(other, g_bfpCapCodes, sizeof(other));
 
     opSpec_t refSpec = srSpec;
     refSpec.arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
@@ -2398,14 +2428,10 @@ void testExecuteOpBfpStagingSrIsSeededDeterministic(void) {
     freeTensor(out);
     freeTensor(in);
     TEST_ASSERT_EQUAL_UINT8(128, srExponent);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){7, 2, -1, 1, 3, -6, 0, 3}), sr1, 8);
     TEST_ASSERT_EQUAL_INT32_ARRAY(sr1, sr2, 8);
-    bool anyDiffers = false;
-    for (size_t i = 0; i < 8; i++) {
-        if (sr1[i] != ref[i]) {
-            anyDiffers = true;
-        }
-    }
-    TEST_ASSERT_TRUE(anyDiffers);
+    TEST_ASSERT_FALSE(memcmp(sr1, other, sizeof sr1) == 0);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){7, 2, -1, 1, 4, -5, 0, 3}), ref, 8);
 }
 
 static void writeKnownFloatsKernel(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
@@ -2875,7 +2901,7 @@ int main(void) {
     RUN_TEST(testExecuteOpBfpStoredOperandUnpacksAndBorrows);
     RUN_TEST(testExecuteOpFloat32OperandStagedToBfpCodes);
     RUN_TEST(testExecuteOpStagesGroupedAndPerTensorOperandsDistinctSlices);
-    RUN_TEST(testExecuteOpBfpStagingSrIsSeededDeterministic);
+    RUN_TEST(testExecuteOpBfpStagingSrDrawsFromTheStageStream);
     RUN_TEST(testExecuteOpBfpRawIsFloat32AndPacksTarget);
     RUN_TEST(testExecuteConvertHandsTheStreamToTheCellOnEveryRoute);
     RUN_TEST(testExecuteOpOpensTheStageAndKernelStreamsFromTheOpKey);

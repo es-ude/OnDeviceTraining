@@ -301,9 +301,12 @@ decisions and those with nothing in force yet are left out.
 - **remat D42** Test strategy: an in-process Legacy oracle (the pre-remat
   driver, kept verbatim), a row-contract harness, deaths matched on message
   substrings, tampered schedulers, conformance P1-P10, poison on both rows.
-- **remat D44** Keyed randomness (planned): every random value becomes a
-  function of an explicit key and a counter, and the module-global stream
-  goes away. In force now: rows and the validator call no RNG function.
+- **remat D44** Keyed randomness: every random value becomes a function of
+  an explicit key and a counter, and the module-global stream goes away.
+  In force now: every stochastic rounding and Dropout mask draws from a
+  keyed stream handed down from the trainer's training state; init, shuffle
+  and replay still draw from the module-global stream; rows and the
+  validator call no RNG function.
 - **remat D50** Rows never receive or derive a key and call no `rng`
   function (the `remat-row-contract` gate). A future EVICT row selects
   victims by a deterministic scan; sampling there is an open question.

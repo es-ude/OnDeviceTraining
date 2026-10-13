@@ -222,8 +222,8 @@ static void buildAllFrozen(zooFixture_t *f) {
     mseLabel(f, 2);
 }
 
-/* Dropout draws its mask from the global stream: remat P2 compares the stream
- * position after the call. */
+/* Dropout draws its mask from its layer's mask stream under the call key, so
+ * a call leaves the global stream untouched (remat P2). */
 static void buildDropout(zooFixture_t *f) {
     beginZoo(f);
     f->mask = makeBoolMask(4);
@@ -631,8 +631,9 @@ static void assertSameValues(const char *cell) {
 
 static void assertConforms(const char *cell) {
     assertSameValues(cell);
-    TEST_ASSERT_EQUAL_HEX32_MESSAGE(g_oracle.seedAfter, g_driver.seedAfter,
-                                    say(cell, "remat P2: the global stream after the call"));
+    TEST_ASSERT_EQUAL_HEX32_MESSAGE(
+        ZOO_SEED, g_driver.seedAfter,
+        say(cell, "remat P2: the call leaves the global stream untouched"));
     TEST_ASSERT_EQUAL_size_t_MESSAGE(4, g_driver.numEvents,
                                      say(cell, "remat P3: four hook events"));
     TEST_ASSERT_EQUAL_size_t_MESSAGE(g_oracle.numEvents, g_driver.numEvents,
@@ -728,8 +729,8 @@ static void assertTwoCallsMatchLegacy(void (*build)(zooFixture_t *)) {
     captureTwoCalls(RUN_DRIVER, &f, NULL, NULL, &g_driver);
     freeZoo(&f);
     assertSameValues(NULL);
-    TEST_ASSERT_EQUAL_HEX32_MESSAGE(g_oracle.seedAfter, g_driver.seedAfter,
-                                    "remat P2: the global stream after two calls");
+    TEST_ASSERT_EQUAL_HEX32_MESSAGE(ZOO_SEED, g_driver.seedAfter,
+                                    "remat P2: two calls leave the global stream untouched");
 }
 
 /* remat P6 on the reference: two reference calls, each under its own call
@@ -747,8 +748,8 @@ static void assertTwoCallsMatchTheReference(void (*build)(zooFixture_t *)) {
                     &(trainingCall_t){.key = &keys[1]}, &g_driver);
     freeZoo(&f);
     assertSameValues(NULL);
-    TEST_ASSERT_EQUAL_HEX32_MESSAGE(g_oracle.seedAfter, g_driver.seedAfter,
-                                    "remat P2: the global stream after two calls");
+    TEST_ASSERT_EQUAL_HEX32_MESSAGE(ZOO_SEED, g_driver.seedAfter,
+                                    "remat P2: two calls leave the global stream untouched");
 }
 
 /* ---- the NULL scheduler against the Legacy oracle, fixture by fixture ---- */
@@ -813,6 +814,20 @@ void testDropoutConforms(void) {
 
 void testSrForwardConforms(void) {
     assertNullPathMatchesTheReference(buildSrForward);
+}
+
+static void runTheSrForwardFixtureWithoutAKey(void) {
+    zooFixture_t f;
+    buildSrForward(&f);
+    freeTrainingStats(
+        calculateGradsSequential(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y, NULL));
+}
+
+/* No key, no randomness: a training call on a fixture that draws stops at
+ * its first draw when the call carries no key. */
+void testCalculateGradsWithoutAKeyExitsOnAnSrFixture(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "roundByMode: SR rounding without a stream",
+                             runTheSrForwardFixtureWithoutAKey());
 }
 
 void testQuantizationToSymInt32WiresConforms(void) {
@@ -1521,8 +1536,8 @@ static void assertEditedTwoCallsMatchTheOracle(void (*build)(zooFixture_t *), fi
         freeZoo(&f);
         assertSameValues(cell->name);
         TEST_ASSERT_EQUAL_HEX32_MESSAGE(
-            g_oracle.seedAfter, g_driver.seedAfter,
-            say(cell->name, "remat P2: the global stream after two calls"));
+            ZOO_SEED, g_driver.seedAfter,
+            say(cell->name, "remat P2: two calls leave the global stream untouched"));
     }
 }
 
@@ -1633,7 +1648,7 @@ static const rematSchedulerFunctions_t g_drawing = {.name = "drawing",
                                                     .end = decoratedEnd,
                                                     .deinit = decoratedDeinit};
 
-void testADrawingRowFailsP2AgainstLegacy(void) {
+void testADrawingRowFailsP2(void) {
     for (size_t k = 0; k < MATRIX_CELLS; k++) {
         const matrixCell_t *cell = &g_cells[k];
         zooFixture_t f;
@@ -1648,7 +1663,7 @@ void testADrawingRowFailsP2AgainstLegacy(void) {
         freeZoo(&f);
         assertSameValues(cell->name);
         TEST_ASSERT_NOT_EQUAL_HEX32_MESSAGE(
-            g_oracle.seedAfter, g_driver.seedAfter,
+            ZOO_SEED, g_driver.seedAfter,
             say(cell->name, "remat P2: a drawing row moves the stream"));
     }
 }
@@ -1945,6 +1960,7 @@ int main(void) {
     RUN_TEST(testAllFrozenModelConforms);
     RUN_TEST(testDropoutConforms);
     RUN_TEST(testSrForwardConforms);
+    RUN_TEST(testCalculateGradsWithoutAKeyExitsOnAnSrFixture);
     RUN_TEST(testQuantizationToSymInt32WiresConforms);
     RUN_TEST(testFlattenAt0Conforms);
     RUN_TEST(testPerTensorBfpF1ModelConforms);
@@ -2019,7 +2035,7 @@ int main(void) {
     RUN_TEST(testTwoCallsAcrossARoundingEditMatchTheReference);
     RUN_TEST(testTwoCallsAcrossAnInputRegroupMatchLegacy);
     RUN_TEST(testASchedulerBuiltOnSampleARunsSampleB);
-    RUN_TEST(testADrawingRowFailsP2AgainstLegacy);
+    RUN_TEST(testADrawingRowFailsP2);
     RUN_TEST(testAMarkedInputEvaluatesToAnUnmarkedOutputOnEitherRow);
     RUN_TEST(testEvalOverTheZooMatchesTheNullPathOnArena);
     RUN_TEST(testEvalOverTheZooMatchesTheNullPathOnHeap);

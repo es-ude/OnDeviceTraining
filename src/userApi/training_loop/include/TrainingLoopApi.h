@@ -229,6 +229,10 @@ typedef struct trainingRunOptions {
 
 void freeTrainingStats(trainingStats_t *trainingStats);
 
+/* The evaluation entry points below are key-less: a model whose forward draws
+ * (stochastic rounding) stops with a named error at its first draw; trainingRun
+ * evaluates under each epoch's evaluation key. */
+
 /*! Per-sample primitive over one batch_t: never stacks (the epoch entry points do, #468). */
 float evaluationBatch(layer_t **model, size_t modelSize, lossFuncType_t funcType, batch_t *batch,
                       inferenceWithLossFn_t inferenceFn, reduction_t forwardReduction);

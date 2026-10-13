@@ -363,7 +363,10 @@ void testScaleOptimizerGradients_SymInt32_MomentumSgdAppliesScaledGradient() {
                                                   bGradInt, lr, 0.f /* momentum=0 first step */);
 
     scaleOptimizerGradients(sgd, factor, NULL);
-    optimizerFunctions[sgd->type].step(sgd, NULL);
+    /* The SR write-back into the SYM_INT32 params draws; the test's 1e-3
+     * tolerance absorbs it. */
+    const rngKey_t updateKey = rngKeyFromSeed(333u);
+    optimizerFunctions[sgd->type].step(sgd, &updateKey);
 
     /* CAPTURE param-after-step as dequantized floats. */
     float wParamAfter[6];
@@ -812,6 +815,25 @@ void testScaleOptimizerGradients_Bfp_NonFiniteFactorAborts(void) {
     freeLinearLayerShellOnly(model[0]);
 }
 
+static void scaleAnSrBfpGradWithoutAKey(void) {
+    layer_t *model[1];
+    parameter_t *w;
+    parameter_t *b;
+    optimizer_t *sgd =
+        buildBfpOneLayerOptim(model, &w, &b, (float[]){1.f, -2.f, 3.f, -4.f, 5.f, -6.f},
+                              (float[]){0.5f, -0.5f}, 6, 8, 0.01f, 0.f);
+    ((bfpQConfig_t *)w->grad->quantization->qConfig)->roundingMode = SR_HALF_AWAY;
+    scaleOptimizerGradients(sgd, 0.3f, NULL);
+}
+
+/* No key, no randomness: the mean-scale of an SR BFP grad without an update
+ * key stops at its first rounding (FLOAT32, SYM_INT32 and HALF_AWAY BFP grads
+ * take NULL: the tests above). */
+void testScaleOptimizerGradientsWithoutAnUpdateKeyExitsOnAnSrBfpGrad(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "roundByMode: SR rounding without a stream",
+                             scaleAnSrBfpGradWithoutAKey());
+}
+
 /* Group-quant PR3 Task 4: defensive belt-and-suspenders fail-fast on the
  * SYM grad arm. gradInit's own carrier gate already rejects a grouped SYM
  * template before a grad tensor is ever built through the sanctioned API
@@ -886,6 +908,7 @@ int main(void) {
     RUN_TEST(testScaleOptimizerGradients_Asym_DequantEquivalence);
     RUN_TEST(testScaleOptimizerGradients_Bfp_DequantEquivalence);
     RUN_TEST(testScaleOptimizerGradients_Bfp_NonFiniteFactorAborts);
+    RUN_TEST(testScaleOptimizerGradientsWithoutAnUpdateKeyExitsOnAnSrBfpGrad);
     RUN_TEST(testScaleOptimizerGradientsRejectsGroupedSymGrad);
 #if SIZE_MAX > UINT32_MAX
     RUN_TEST(testScaleOptimizerGradientsExitsWhenAParameterIndexExceedsUint32Max);

@@ -762,9 +762,11 @@ void testForwardTrainingP0KeepsAllNoScale(void) {
     layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
 
     // p=0 → reference sampler fills probTrue=1.0 → all keep; scale=1/(1-0)=1 → identity.
+    // The sampler still draws once per element, so the layer needs a key.
+    layerExec_t exec = {.key = rngKeyFromSeed(DROPOUT_EXEC_TEST_SEED)};
     bernoulliFillMaskFn_t saved = bernoulliGetFillMaskFn();
     bernoulliSetFillMaskFn(bernoulliFillMaskReference);
-    dropoutForward(&layer, input, output, NULL);
+    dropoutForward(&layer, input, output, &exec);
     bernoulliSetFillMaskFn(saved);
 
     float captured[4];

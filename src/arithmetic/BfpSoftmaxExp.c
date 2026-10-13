@@ -2,6 +2,8 @@
 
 #include "BfpSoftmaxExp.h"
 
+#include <stdlib.h>
+
 #include "Common.h"
 #include "RNG.h"
 
@@ -26,9 +28,13 @@ int32_t bfpShiftRightRounded(int32_t v, uint32_t k, bfpShiftRounding_t mode, rng
          * The unsigned re-shift reproduces f * 2^k in two's complement
          * without the signed-left-shift UB; rem ∈ [0, 2^k). The cast draw
          * is >= 0, so rem == 0 never increments. */
+        if (rs == NULL) {
+            PRINT_ERROR("bfpShiftRightRounded: SR shift without a stream");
+            exit(1);
+        }
         const int32_t floorQ = v >> k;
         const int32_t rem = v - (int32_t)((uint32_t)floorQ << k);
-        const int32_t draw = (int32_t)(rngNextFloat() * (float)(1u << k));
+        const int32_t draw = (int32_t)(rngNextUnitFloat(rs) * (float)(1u << k));
         return floorQ + ((draw < rem) ? 1 : 0);
     }
     }

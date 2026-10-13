@@ -17,7 +17,8 @@ void freeInferenceStats(inferenceStats_t *inferenceStats);
 /*! Key-less: every layer gets a NULL context, so it serves forwards that draw
  *  nothing. A forward that draws (stochastic rounding, a BFP_SHIFT_SR softmax,
  *  a Dropout layer left in training mode) needs a key: run it through
- *  inferenceWithLoss with call->key (a keyed inference() is #491). */
+ *  inferenceWithLoss with call->key (a keyed inference() is #491); here it
+ *  stops with a named error at its first draw. */
 tensor_t *inference(layer_t **model, size_t numberOfLayers, tensor_t *input);
 
 /*! Wraps each sample with batchViewOf before calling inference() -- see

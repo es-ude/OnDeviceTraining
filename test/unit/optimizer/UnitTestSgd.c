@@ -1376,10 +1376,13 @@ static parameter_t *buildSymDeadZoneFixture(roundingMode_t roundingMode, float l
     setOrderOfDimsForNewTensor(1, pOrder);
     shape_t *pShape = reserveMemory(sizeof(shape_t));
     setShape(pShape, pDims, 1, pOrder);
-    tensor_t *p = initTensor(pShape, quantizationInitSymInt32(roundingMode), NULL);
+    tensor_t *p = initTensor(pShape, quantizationInitSymInt32(HALF_AWAY), NULL);
 
+    /* Filled under HALF_AWAY (a key-less fill into an SR template stops),
+     * then the storage mode the test asks for; both codes are exact. */
     const float anchorVal = 100.f;
     tensorFillFromFloatBuffer(p, (float[]){anchorVal, 0.f}, 2);
+    ((symInt32QConfig_t *)p->quantization->qConfig)->roundingMode = roundingMode;
 
     /* qMax for the default 12-bit SYM_INT32 operand width (ODT_SYM_OPERAND_QMAXBITS,
      * #227): 2^(12-1) - 1. Mirrors convertFloatTensorToSymInt32Tensor's own
@@ -1446,9 +1449,8 @@ void testSgdStepDetWriteBackOverridesSrParamQConfig(void) {
      * must stay frozen. Together with the SR-over-HALF_AWAY test below this
      * pins that the optimizer's writeBackRounding wins in BOTH directions
      * (the storage qConfig never leaks into the training write-back), which
-     * is what makes HALF_AWAY-for-storage + SR-for-training composable. */
-    rngSetSeed(12345u);
-
+     * is what makes HALF_AWAY-for-storage + SR-for-training composable. The
+     * steps run key-less: a HALF_AWAY write-back never draws. */
     const float lr = 0.1f;
     parameter_t *param = buildSymDeadZoneFixture(SR_HALF_AWAY, lr);
 
@@ -1493,9 +1495,9 @@ void testSgdStepOptimizerSrWriteBackOverridesHalfAwayParamQConfig(void) {
      * A param whose storage qConfig says HALF_AWAY (the obvious construction,
      * and what serialization persists) must still escape the dead-zone when
      * optim->writeBackRounding is SR_HALF_AWAY -- and the swap must be
-     * transient: after stepping, the storage config still reads HALF_AWAY. */
-    rngSetSeed(24680u);
-
+     * transient: after stepping, the storage config still reads HALF_AWAY.
+     * Each step runs under its own update key (one reused key would repeat
+     * one draw every step). */
     const float lr = 0.1f;
     parameter_t *param = buildSymDeadZoneFixture(HALF_AWAY, lr);
 
@@ -1516,7 +1518,8 @@ void testSgdStepOptimizerSrWriteBackOverridesHalfAwayParamQConfig(void) {
 
     int codeEverMoved = 0;
     for (int i = 0; i < 500; i++) {
-        sgdStepM(&optim, NULL);
+        const rngKey_t updateKey = rngKeyFromSeed(24680u + (uint64_t)i);
+        sgdStepM(&optim, &updateKey);
         if (((int32_t *)param->param->data)[1] != initialTargetCode) {
             codeEverMoved = 1;
         }
@@ -1542,9 +1545,8 @@ void testSgdStepMMomentumPathHonorsOptimizerSrWriteBack(void) {
      * fraction/(1-m) = 0.333*scale -- still sub-ULP (< the 0.5 half-grid
      * boundary a deterministic round needs), so HALF_AWAY would stay frozen
      * forever while SR escapes with per-step probability >= 0.25. FLOAT32
-     * momentum state (the shipped #277 decoupling) accumulates exactly. */
-    rngSetSeed(97531u);
-
+     * momentum state (the shipped #277 decoupling) accumulates exactly. Each
+     * step runs under its own update key. */
     const float lr = 0.1f;
     parameter_t *param = buildSymDeadZoneFixture(HALF_AWAY, lr);
 
@@ -1571,7 +1573,8 @@ void testSgdStepMMomentumPathHonorsOptimizerSrWriteBack(void) {
 
     int codeEverMoved = 0;
     for (int i = 0; i < 500; i++) {
-        sgdStepM(&optim, NULL);
+        const rngKey_t updateKey = rngKeyFromSeed(97531u + (uint64_t)i);
+        sgdStepM(&optim, &updateKey);
         if (((int32_t *)param->param->data)[1] != initialTargetCode) {
             codeEverMoved = 1;
         }
@@ -1593,9 +1596,8 @@ void testSgdStepMStateWriteBackHonorsOptimizerSrRounding(void) {
      * the state kernel out = state + grad, so a grad of 0.25*scale is a pure
      * sub-ULP state increment. HALF_AWAY on the state's own qConfig would
      * freeze it; the optimizer's SR_HALF_AWAY must move it. The param is
-     * FLOAT32 so the param write-back stays out of the picture. */
-    rngSetSeed(86420u);
-
+     * FLOAT32 so the param write-back stays out of the picture. Each step runs
+     * under its own update key. */
     size_t *pDims = reserveMemory(1 * sizeof(size_t));
     pDims[0] = 2;
     size_t *pOrder = reserveMemory(1 * sizeof(size_t));
@@ -1637,7 +1639,8 @@ void testSgdStepMStateWriteBackHonorsOptimizerSrRounding(void) {
 
     int stateCodeEverMoved = 0;
     for (int i = 0; i < 500; i++) {
-        sgdStepM(&optim, NULL);
+        const rngKey_t updateKey = rngKeyFromSeed(86420u + (uint64_t)i);
+        sgdStepM(&optim, &updateKey);
         if (((int32_t *)state->data)[1] != initialStateCode) {
             stateCodeEverMoved = 1;
         }
@@ -2619,13 +2622,26 @@ void testSgdStepWritesEachParamBackUnderItsUpdateOpKey(void) {
     assertUpdateOutStream(1, updateKey, 1u, 1u, 0xb26eb23au);
 }
 
-/* Without an update key the write-backs get no stream. */
-void testSgdStepWithoutAnUpdateKeyHandsTheWriteBackNoStream(void) {
-    stepTwoSymParams(NULL);
+static void stepSymParamSrWithoutAKey(void) {
+    parameter_t *params[1] = {buildSymDeadZoneFixture(HALF_AWAY, 0.1f)};
+    sgd_t sgd;
+    sgdInit(&sgd, 0.1f, 0.f, 0.f, (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    optimImpl_t impl = {.sgd = &sgd};
+    optimizer_t optim = {.type = SGD_M,
+                         .impl = &impl,
+                         .parameter = params,
+                         .states = NULL,
+                         .sizeStates = 1,
+                         .writeBackRounding = SR_HALF_AWAY};
+    optimizerStep(&optim, NULL);
+}
 
-    TEST_ASSERT_EQUAL_UINT32(2u, (uint32_t)sgdCellRecordCount);
-    TEST_ASSERT_FALSE(sgdCellRecords[0].hasStream);
-    TEST_ASSERT_FALSE(sgdCellRecords[1].hasStream);
+/* No key, no randomness: an SR write-back into a SYM_INT32 param without an
+ * update key stops at its first rounding (a FLOAT32 param never draws:
+ * testSgdFloat32SrWriteBackStepsWithoutAnUpdateKey). */
+void testOptimizerStepWithoutAnUpdateKeyExitsOnAnSrWriteBack(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "roundByMode: SR rounding without a stream",
+                             stepSymParamSrWithoutAKey());
 }
 
 /* Momentum SGD writes the state first (OP 0), then the param (OP 1). */
@@ -2757,7 +2773,7 @@ int main() {
     RUN_TEST(testOptimizerScaleStreamOpensTheScaleKeyOfTheParam);
     RUN_TEST(testOptimizerUpdateKeysAreNullWithoutAnUpdateKey);
     RUN_TEST(testSgdStepWritesEachParamBackUnderItsUpdateOpKey);
-    RUN_TEST(testSgdStepWithoutAnUpdateKeyHandsTheWriteBackNoStream);
+    RUN_TEST(testOptimizerStepWithoutAnUpdateKeyExitsOnAnSrWriteBack);
     RUN_TEST(testSgdMomentumStepWritesStateThenParamUnderTheirOpKeys);
     RUN_TEST(testSgdFloat32SrWriteBackStepsWithoutAnUpdateKey);
 #if SIZE_MAX > UINT32_MAX

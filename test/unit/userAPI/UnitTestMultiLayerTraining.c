@@ -46,6 +46,24 @@
 void setUp() {}
 void tearDown() {}
 
+/* The keys of one update, built only through the trainingRng helpers: the
+ * training call is call 0 under the step key, the step runs under the update
+ * key (the chain trainingEpochDefault hands out at m = 1 and one sample). The
+ * SR tests below draw from these; the caller advances the counter after the
+ * step. Their BFP params reach storage through a key-less
+ * requantizeTensorInPlace, so those templates round HALF_AWAY (a key-less
+ * requantize into an SR template stops); the training write-back rounds by
+ * the optimizer's SR default either way. */
+typedef struct {
+    rngKey_t callKey;
+    rngKey_t updateKey;
+} updateKeys_t;
+
+static updateKeys_t keysOfThisUpdate(const trainingRng_t *rng) {
+    return (updateKeys_t){.callKey = trainingRngCallKey(trainingRngStepKey(rng), 0),
+                          .updateKey = trainingRngUpdateKey(rng)};
+}
+
 /*! Integration test: multi-layer model (Linear→ReLU→Linear→Softmax) with CrossEntropy.
  *  Reproduces the MnistExperiment structure at small scale (3→4→2).
  *  Uses initDistribution to init weights/biases with ZEROS — exposes the += vs *= bug.
@@ -452,9 +470,11 @@ void testMultiLayerTraining_MultipleSteps_GradsAccumulate() {
  *  the conversionMatrix diagonal, honoring writeBackRounding through the
  *  target's storage slot (Task 8 Arm 2) -- textbook fake-quant training. */
 void testBfpFakeQuantTrainingLossDecreasesAndGridMoves(void) {
-    /* BFP epic PR2 Task 8 carry-over: the SR_HALF_AWAY configs below draw from
-     * the module-global RNG -- seed it so the run is reproducible. */
+    /* The SR_HALF_AWAY configs below draw from the run's keys; the global
+     * seed keeps the random init reproducible. */
     rngSetSeed(20250811u);
+    trainingRng_t rng;
+    trainingRngInit(&rng, 20250811u);
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
@@ -522,10 +542,10 @@ void testBfpFakeQuantTrainingLossDecreasesAndGridMoves(void) {
 
     /* Requantize BOTH weight PARAMs to grouped BFP -- per-output-row blocks
      * (numGroups=outFeatures, groupSize=inFeatures); bias/grads stay FLOAT32. */
-    quantization_t *w0BfpQ = quantizationInitBfpGrouped(8, 8, SR_HALF_AWAY, 4, 3);
+    quantization_t *w0BfpQ = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 4, 3);
     requantizeTensorInPlace(w0Param, w0BfpQ);
     freeQuantization(w0BfpQ); /* getQLike deep-clones -- template unused after */
-    quantization_t *w1BfpQ = quantizationInitBfpGrouped(8, 8, SR_HALF_AWAY, 2, 4);
+    quantization_t *w1BfpQ = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 4);
     requantizeTensorInPlace(w1Param, w1BfpQ);
     freeQuantization(w1BfpQ);
 
@@ -568,16 +588,19 @@ void testBfpFakeQuantTrainingLossDecreasesAndGridMoves(void) {
     float firstLoss = NAN;
     float lastLoss = NAN;
     for (size_t step = 0; step < STEPS; step++) {
-        trainingStats_t *stats = calculateGradsSequential(model, sizeModel, defaultLossConfig(MSE),
-                                                          REDUCTION_MEAN, input, label, NULL);
+        const updateKeys_t keys = keysOfThisUpdate(&rng);
+        trainingStats_t *stats =
+            calculateGradsSequential(model, sizeModel, defaultLossConfig(MSE), REDUCTION_MEAN,
+                                     input, label, &(trainingCall_t){.key = &keys.callKey});
         if (step == 0) {
             firstLoss = stats->loss;
         }
         lastLoss = stats->loss;
         freeTrainingStats(stats);
 
-        sgdFns.step(sgd, NULL);
+        sgdFns.step(sgd, &keys.updateKey);
         sgdFns.zero(sgd);
+        trainingRngAdvance(&rng);
     }
 
     /* CAPTURE post-training state before frees. */
@@ -811,22 +834,26 @@ void testBfpWireFakeQuantTrainingLossDecreasesAndWirePacks(void) {
     rngSetSeed(4242u);
     bfpWireFixture_t f;
     buildBfpWireFixture(&f, /*hidden=*/6, /*templateNumGroups=*/2, /*wireGroupSize=*/2);
+    trainingRng_t rng;
+    trainingRngInit(&rng, 4242u);
 
     bfpWireCapture_t cap = {0};
     optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
     float firstLoss = NAN;
     float lastLoss = NAN;
     for (size_t step = 0; step < 20; step++) {
+        const updateKeys_t keys = keysOfThisUpdate(&rng);
         trainingStats_t *stats =
             tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
-                        captureLayer0ForwardWire, &cap, NULL);
+                        captureLayer0ForwardWire, &cap, &(trainingCall_t){.key = &keys.callKey});
         if (step == 0) {
             firstLoss = stats->loss;
         }
         lastLoss = stats->loss;
         freeTrainingStats(stats);
-        sgdFns.step(f.sgd, NULL);
+        sgdFns.step(f.sgd, &keys.updateKey);
         sgdFns.zero(f.sgd);
+        trainingRngAdvance(&rng);
     }
 
     /* CAPTURE (cap is already a value copy) then FREE, assert last. */
@@ -866,10 +893,14 @@ void testBfpWireGeometryIgnoresTemplateNumGroups(void) {
     rngSetSeed(4242u);
     bfpWireFixture_t f;
     buildBfpWireFixture(&f, /*hidden=*/6, /*templateNumGroups=*/7, /*wireGroupSize=*/2);
+    trainingRng_t rng;
+    trainingRngInit(&rng, 4242u);
+    const updateKeys_t keys = keysOfThisUpdate(&rng);
 
     bfpWireCapture_t cap = {0};
-    trainingStats_t *stats = tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
-                                         f.input, f.label, captureLayer0ForwardWire, &cap, NULL);
+    trainingStats_t *stats =
+        tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
+                    captureLayer0ForwardWire, &cap, &(trainingCall_t){.key = &keys.callKey});
     freeTrainingStats(stats);
     freeBfpWireFixture(&f);
 
@@ -949,7 +980,7 @@ static void moveBfpTemplateToDxWire(bfpWireFixture_t *f, bool pinPropLossMath) {
             (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = SR_HALF_AWAY};
     } else {
         f->linear1->config->linear->propLossMath = arithmeticFromQuantization(f->bfpWireQ);
-        quantization_t *w1BfpQ = quantizationInitBfpGrouped(8, 8, SR_HALF_AWAY, 2, 6);
+        quantization_t *w1BfpQ = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 6);
         requantizeTensorInPlace(getParamFromParameter(f->linear1->config->linear->weights), w1BfpQ);
         freeQuantization(w1BfpQ);
     }
@@ -966,10 +997,14 @@ void testBfpDxWireAllocatesThroughInitGradTensor(void) {
     bfpWireFixture_t f;
     buildBfpWireFixture(&f, /*hidden=*/6, /*templateNumGroups=*/2, /*wireGroupSize=*/2);
     moveBfpTemplateToDxWire(&f, /*pinPropLossMath=*/true);
+    trainingRng_t rng;
+    trainingRngInit(&rng, 4242u);
+    const updateKeys_t keys = keysOfThisUpdate(&rng);
 
     bfpWireCapture_t cap = {0};
-    trainingStats_t *stats = tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
-                                         f.input, f.label, captureLayer0BackwardWire, &cap, NULL);
+    trainingStats_t *stats =
+        tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
+                    captureLayer0BackwardWire, &cap, &(trainingCall_t){.key = &keys.callKey});
     float loss = stats->loss;
     freeTrainingStats(stats);
     freeBfpWireFixture(&f);
@@ -993,10 +1028,14 @@ void testBfpWireGroupSizeEqualToWireElementsNormalizesToPerTensor(void) {
     rngSetSeed(4242u);
     bfpWireFixture_t f;
     buildBfpWireFixture(&f, /*hidden=*/6, /*templateNumGroups=*/2, /*wireGroupSize=*/6);
+    trainingRng_t rng;
+    trainingRngInit(&rng, 4242u);
+    const updateKeys_t keys = keysOfThisUpdate(&rng);
 
     bfpWireCapture_t cap = {0};
-    trainingStats_t *stats = tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
-                                         f.input, f.label, captureLayer0ForwardWire, &cap, NULL);
+    trainingStats_t *stats =
+        tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
+                    captureLayer0ForwardWire, &cap, &(trainingCall_t){.key = &keys.callKey});
     float loss = stats->loss;
     freeTrainingStats(stats);
     freeBfpWireFixture(&f);
@@ -1017,10 +1056,14 @@ void testBfpDxWireGroupSizeEqualToWireElementsNormalizesToPerTensor(void) {
     bfpWireFixture_t f;
     buildBfpWireFixture(&f, /*hidden=*/6, /*templateNumGroups=*/2, /*wireGroupSize=*/6);
     moveBfpTemplateToDxWire(&f, /*pinPropLossMath=*/true);
+    trainingRng_t rng;
+    trainingRngInit(&rng, 4242u);
+    const updateKeys_t keys = keysOfThisUpdate(&rng);
 
     bfpWireCapture_t cap = {0};
-    trainingStats_t *stats = tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
-                                         f.input, f.label, captureLayer0BackwardWire, &cap, NULL);
+    trainingStats_t *stats =
+        tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
+                    captureLayer0BackwardWire, &cap, &(trainingCall_t){.key = &keys.callKey});
     float loss = stats->loss;
     freeTrainingStats(stats);
     freeBfpWireFixture(&f);
@@ -1078,22 +1121,26 @@ void testBfpDxWireNativeBackwardTrains(void) {
     bfpWireFixture_t f;
     buildBfpWireFixture(&f, /*hidden=*/6, /*templateNumGroups=*/2, /*wireGroupSize=*/2);
     moveBfpTemplateToDxWire(&f, /*pinPropLossMath=*/false);
+    trainingRng_t rng;
+    trainingRngInit(&rng, 4242u);
 
     bfpWireCapture_t cap = {0};
     optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
     float firstLoss = NAN;
     float lastLoss = NAN;
     for (size_t step = 0; step < 5; step++) {
+        const updateKeys_t keys = keysOfThisUpdate(&rng);
         trainingStats_t *stats =
             tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
-                        captureLayer0BackwardWire, &cap, NULL);
+                        captureLayer0BackwardWire, &cap, &(trainingCall_t){.key = &keys.callKey});
         if (step == 0) {
             firstLoss = stats->loss;
         }
         lastLoss = stats->loss;
         freeTrainingStats(stats);
-        sgdFns.step(f.sgd, NULL);
+        sgdFns.step(f.sgd, &keys.updateKey);
         sgdFns.zero(f.sgd);
+        trainingRngAdvance(&rng);
     }
 
     /* CAPTURE, then FREE, then assert (Unity longjmps out of the first failure).
@@ -1246,10 +1293,10 @@ static void buildBfpNativeFixture(bfpNativeFixture_t *f, bool pinWeightGradMath,
      * count, the validateBfpQConfigShape gate). Bias: per-tensor {1, 0} -- the
      * matmul dequantizes the bias seed through its own group scale, so its
      * widths need not match the weights'. */
-    quantization_t *w0BfpQ = quantizationInitBfpGrouped(8, 8, SR_HALF_AWAY, 4, 3);
+    quantization_t *w0BfpQ = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 4, 3);
     requantizeTensorInPlace(getParamFromParameter(f->linear0->config->linear->weights), w0BfpQ);
     freeQuantization(w0BfpQ);
-    quantization_t *b0BfpQ = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    quantization_t *b0BfpQ = quantizationInitBfp(8, 8, HALF_AWAY);
     requantizeTensorInPlace(getParamFromParameter(f->linear0->config->linear->bias), b0BfpQ);
     freeQuantization(b0BfpQ);
 
@@ -1303,22 +1350,29 @@ void testBfpNativeForwardTrainingLossDecreasesAndGridMoves(void) {
     tensor_t *b0Grad = getGradFromParameter(f.linear0->config->linear->bias);
     uint8_t w0ExpBefore[4];
     memcpy(w0ExpBefore, ((bfpQConfig_t *)w0Param->quantization->qConfig)->exponents, 4);
+    /* "The grid must move" is key-sensitive: 25 SR steps move a weight group's
+     * exponent under the keys of seed 1 (and 2, 3, 7, 99, 1718), not under
+     * those of 1717 or 4242. */
+    trainingRng_t rng;
+    trainingRngInit(&rng, 1u);
 
     bfpWireCapture_t cap = {0};
     optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
     float firstLoss = NAN;
     float lastLoss = NAN;
     for (size_t step = 0; step < 25; step++) {
+        const updateKeys_t keys = keysOfThisUpdate(&rng);
         trainingStats_t *stats =
             tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
-                        captureLayer0ForwardWire, &cap, NULL);
+                        captureLayer0ForwardWire, &cap, &(trainingCall_t){.key = &keys.callKey});
         if (step == 0) {
             firstLoss = stats->loss;
         }
         lastLoss = stats->loss;
         freeTrainingStats(stats);
-        sgdFns.step(f.sgd, NULL);
+        sgdFns.step(f.sgd, &keys.updateKey);
         sgdFns.zero(f.sgd);
+        trainingRngAdvance(&rng);
     }
 
     /* CAPTURE, then FREE, then assert (Unity longjmps out of the first failure). */
@@ -1394,20 +1448,25 @@ void testBfpPinnedFloat32BackwardTrainingLossDecreases(void) {
     rngSetSeed(1717u);
     bfpNativeFixture_t f;
     buildBfpNativeFixture(&f, /*pinWeightGradMath=*/true, /*weightGradStorage=*/NULL);
+    trainingRng_t rng;
+    trainingRngInit(&rng, 1717u);
 
     optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
     float firstLoss = NAN;
     float lastLoss = NAN;
     for (size_t step = 0; step < 25; step++) {
-        trainingStats_t *stats = calculateGradsSequential(f.model, 2, defaultLossConfig(MSE),
-                                                          REDUCTION_MEAN, f.input, f.label, NULL);
+        const updateKeys_t keys = keysOfThisUpdate(&rng);
+        trainingStats_t *stats =
+            calculateGradsSequential(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input,
+                                     f.label, &(trainingCall_t){.key = &keys.callKey});
         if (step == 0) {
             firstLoss = stats->loss;
         }
         lastLoss = stats->loss;
         freeTrainingStats(stats);
-        sgdFns.step(f.sgd, NULL);
+        sgdFns.step(f.sgd, &keys.updateKey);
         sgdFns.zero(f.sgd);
+        trainingRngAdvance(&rng);
     }
 
     /* CAPTURE, then FREE, then assert. */
@@ -1488,12 +1547,15 @@ void testBfpDxWireThroughPinnedFloat32BackwardTrains(void) {
 
     /* Arm-C shape on layer 1: BFP-stored weights + bias (per-tensor {1,0},
      * the arithmetic-bfp.md §5.2 two-step recipe), all four math slots pinned ARITH_FLOAT32, a
-     * BFP dx wire. Layer 0 stays fully native and consumes that dx. */
+     * BFP dx wire. Layer 0 stays fully native and consumes that dx. The
+     * storage templates round HALF_AWAY (a key-less requantize into an SR
+     * template stops); the training write-back rounds by the optimizer's SR
+     * default either way. */
     linearConfig_t *cfg1 = f.linear1->config->linear;
-    quantization_t *w1Q = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    quantization_t *w1Q = quantizationInitBfp(8, 8, HALF_AWAY);
     requantizeTensorInPlace(getParamFromParameter(cfg1->weights), w1Q);
     freeQuantization(w1Q);
-    quantization_t *b1Q = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    quantization_t *b1Q = quantizationInitBfp(8, 8, HALF_AWAY);
     requantizeTensorInPlace(getParamFromParameter(cfg1->bias), b1Q);
     freeQuantization(b1Q);
     arithmetic_t pinned = {.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
@@ -1502,22 +1564,26 @@ void testBfpDxWireThroughPinnedFloat32BackwardTrains(void) {
     cfg1->biasGradMath = pinned;
     cfg1->propLossMath = pinned;
     cfg1->propLossQ = f.bfpWireQ; /* borrowed (ownsQuantizations == false) */
+    trainingRng_t rng;
+    trainingRngInit(&rng, 2727u);
 
     optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
     dxWireCapture_t cap = {0};
     float firstLoss = NAN;
     float lastLoss = NAN;
     for (size_t step = 0; step < 25; step++) {
+        const updateKeys_t keys = keysOfThisUpdate(&rng);
         trainingStats_t *stats =
             tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
-                        captureLinear0IncomingDx, &cap, NULL);
+                        captureLinear0IncomingDx, &cap, &(trainingCall_t){.key = &keys.callKey});
         if (step == 0) {
             firstLoss = stats->loss;
         }
         lastLoss = stats->loss;
         freeTrainingStats(stats);
-        sgdFns.step(f.sgd, NULL);
+        sgdFns.step(f.sgd, &keys.updateKey);
         sgdFns.zero(f.sgd);
+        trainingRngAdvance(&rng);
     }
     bool weightsStillBfp = getParamFromParameter(cfg1->weights)->quantization->type == BFP;
     freeBfpNativeFixture(&f);
@@ -1573,14 +1639,18 @@ void testBfpGradStorageTrainingAccumulatesAndSteps(void) {
     tensor_t *w0Grad = getGradFromParameter(f.linear0->config->linear->weights);
     TEST_ASSERT_EQUAL_INT_MESSAGE(BFP, w0Grad->quantization->type,
                                   "guard: weightGradStorage knob must land BFP grad storage");
+    trainingRng_t rng;
+    trainingRngInit(&rng, 1717u);
 
     optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
     float firstLoss = NAN;
     float lastLoss = NAN;
     uint8_t gradExponentAfterBackward = (uint8_t)bfpExponentBias(w0Grad->quantization->qConfig);
     for (size_t step = 0; step < 5; step++) {
-        trainingStats_t *stats = calculateGradsSequential(f.model, 2, defaultLossConfig(MSE),
-                                                          REDUCTION_MEAN, f.input, f.label, NULL);
+        const updateKeys_t keys = keysOfThisUpdate(&rng);
+        trainingStats_t *stats =
+            calculateGradsSequential(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input,
+                                     f.label, &(trainingCall_t){.key = &keys.callKey});
         if (step == 0) {
             firstLoss = stats->loss;
         }
@@ -1594,8 +1664,9 @@ void testBfpGradStorageTrainingAccumulatesAndSteps(void) {
             bfpQConfig_t *gradQC = w0Grad->quantization->qConfig;
             gradExponentAfterBackward = gradQC->exponents[0];
         }
-        sgdFns.step(f.sgd, NULL);
+        sgdFns.step(f.sgd, &keys.updateKey);
         sgdFns.zero(f.sgd);
+        trainingRngAdvance(&rng);
     }
 
     /* CAPTURE post-loop (post-zero) state, then FREE, then assert. */
@@ -1671,11 +1742,14 @@ void testBfpGradStorageTrainsUnderReductionMean(void) {
                                       NULL, false, 0, true);
 
     tensor_t *w0Grad = getGradFromParameter(f.linear0->config->linear->weights);
+    trainingRng_t rng;
+    trainingRngInit(&rng, 1717u);
     float firstEpochLoss = NAN;
     float lastEpochLoss = NAN;
     for (size_t epoch = 0; epoch < 8; epoch++) {
         float epochLoss = trainingEpochDefault(f.model, 2, defaultLossConfig(MSE), dl, f.sgd,
-                                               calculateGradsSequential, REDUCTION_MEAN, 1, NULL);
+                                               calculateGradsSequential, REDUCTION_MEAN, 1,
+                                               &(trainingCall_t){.rng = &rng});
         if (epoch == 0) {
             firstEpochLoss = epochLoss;
         }
@@ -2038,7 +2112,7 @@ void testBfpUniformPoolActivationModelTrains(void) {
      * kernel_t is heap-allocated because freeConv1dLayerShellOnly (above)
      * frees it; buildBorrowedConv1dLayer only borrows the pointer. */
     parameter_t *convW = buildRampParam3D(2, 1, 3, 0.20f, 0.05f);
-    quantization_t *convWQ = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    quantization_t *convWQ = quantizationInitBfp(8, 8, HALF_AWAY);
     requantizeTensorInPlace(getParamFromParameter(convW), convWQ);
     freeQuantization(convWQ); /* requantizeTensorInPlace clones the template */
     kernel_t *convKernel = reserveMemory(sizeof(kernel_t));
@@ -2057,8 +2131,8 @@ void testBfpUniformPoolActivationModelTrains(void) {
     /* linear 6 -> 2. */
     parameter_t *linW = buildRampParam2D(2, 6, 0.10f, 0.03f);
     parameter_t *linB = buildRampParam2D(1, 2, 0.05f, 0.05f);
-    quantization_t *linWQ = quantizationInitBfp(8, 8, SR_HALF_AWAY);
-    quantization_t *linBQ = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    quantization_t *linWQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    quantization_t *linBQ = quantizationInitBfp(8, 8, HALF_AWAY);
     requantizeTensorInPlace(getParamFromParameter(linW), linWQ);
     requantizeTensorInPlace(getParamFromParameter(linB), linBQ);
     freeQuantization(linBQ);
@@ -2087,19 +2161,23 @@ void testBfpUniformPoolActivationModelTrains(void) {
 
     optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
     pr4CarryCapture_t carry = {0};
+    trainingRng_t rng;
+    trainingRngInit(&rng, 4242u);
     float firstLoss = NAN;
     float lastLoss = NAN;
     for (size_t step = 0; step < 10; step++) {
+        const updateKeys_t keys = keysOfThisUpdate(&rng);
         trainingStats_t *stats =
             tracedGrads(model, 6, defaultLossConfig(CROSS_ENTROPY), REDUCTION_MEAN, input, label,
-                        capturePr4FlattenCarry, &carry, NULL);
+                        capturePr4FlattenCarry, &carry, &(trainingCall_t){.key = &keys.callKey});
         if (step == 0) {
             firstLoss = stats->loss;
         }
         lastLoss = stats->loss;
         freeTrainingStats(stats);
-        sgdFns.step(sgd, NULL);
+        sgdFns.step(sgd, &keys.updateKey);
         sgdFns.zero(sgd);
+        trainingRngAdvance(&rng);
     }
 
     /* CAPTURE -> FREE (reverse init order) -> assert (Unity longjmps out of
@@ -2191,19 +2269,19 @@ void testBfpUniformPoolActivationModelTrains(void) {
     TEST_ASSERT_TRUE_MESSAGE(carryGroupCountsMatch,
                              "a reshape preserves the element count, so both wires of each pair "
                              "must derive the same numGroups");
-    /* Two seed-dependent assertions follow, both pinned by rngSetSeed(4242u)
-     * above (the C2 test makes the same disclosure for its own proxy):
+    /* Two key-dependent assertions follow, both pinned by the training keys of
+     * trainingRngInit(&rng, 4242u) above (the C2 test makes the same disclosure
+     * for its own proxy):
      * (a) "moved off the zero state" is a PROXY -- the zero state IS
      *     exponent == bias == 127, so a grid whose absmax happened to derive
      *     exactly 127 would false-fail. At mantissaBits 8 (qMax 127) that
      *     needs a per-group absmax in [64, 127]; this fixture's values are of
      *     order 0.5, three binades away, so it is robust but not immune.
-     * (b) lastLoss < firstLoss is the genuinely seed-sensitive one: the wires
+     * (b) lastLoss < firstLoss is the genuinely key-sensitive one: the wires
      *     round SR_HALF_AWAY (stochastic), so the trajectory depends on the
-     *     draw. A seed change -- or an RNG-consumption change anywhere
-     *     upstream -- must re-confirm both. The four STRUCTURAL assertions
-     *     (arith slots, weight dtype, both exponent carries) do not depend on
-     *     the seed. */
+     *     draws. A change of the training seed must re-confirm both. The four
+     *     STRUCTURAL assertions (arith slots, weight dtype, both exponent
+     *     carries) do not depend on the keys. */
     TEST_ASSERT_TRUE_MESSAGE(fwdSourceGridMoved,
                              "non-vacuity: MaxPool's output grid must have left the zero state");
     TEST_ASSERT_TRUE_MESSAGE(agradSourceGridMoved,
@@ -2317,11 +2395,10 @@ static void freeGroupNormLayerShellOnly(layer_t *layer) {
  *  ARITH_BFP dispatches into Task 4's i-exp kernel) whose native backward
  *  (Task 5) CrossEntropy's fused gradient still skips entirely.
  *
- *  Seed discipline: rngSetSeed(4242u) pins the SR_HALF_AWAY draws, so the
- *  trajectory -- and with it `lastLoss < firstLoss` -- is deterministic but
- *  seed-sensitive; the structural assertions (arith slots, wire dtypes) are
- *  not. 4242u is the FIRST seed tried and it passed, so no adjacent seed was
- *  needed. */
+ *  Seed discipline: trainingRngInit(&rng, 4242u) keys the SR_HALF_AWAY draws
+ *  (rngSetSeed(4242u) the random init), so the trajectory -- and with it
+ *  `lastLoss < firstLoss` -- is deterministic but key-sensitive; the
+ *  structural assertions (arith slots, wire dtypes) are not. */
 void testBfpUniformNormModelTrainsAndGridsMove(void) {
     rngSetSeed(4242u);
     quantization_t *bfpWireQ = quantizationInitBfpGrouped(8, 8, SR_HALF_AWAY, 2, 2);
@@ -2336,29 +2413,35 @@ void testBfpUniformNormModelTrainsAndGridsMove(void) {
         -0.20f, 0.40f,  -0.40f, -0.10f, 0.25f, 0.35f,  0.15f,  -0.30f};
     parameter_t *convW =
         buildFloatParam3D(BFP_NORM_CONV_CHANNELS, BFP_NORM_IN_CHANNELS, 3, convWValues);
-    quantization_t *convWQ = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    quantization_t *convWQ = quantizationInitBfp(8, 8, HALF_AWAY);
     requantizeTensorInPlace(getParamFromParameter(convW), convWQ);
     freeQuantization(convWQ); /* requantizeTensorInPlace clones the template */
     kernel_t *convKernel = reserveMemory(sizeof(kernel_t));
     initKernel(convKernel, 3, SAME, /*dilation=*/1, /*stride=*/1);
     layer_t *conv = buildBorrowedConv1dLayer(convW, NULL, convKernel, bfpWireQ);
 
+    /* The norm factories fill gamma and beta key-less, so their storage
+     * template rounds HALF_AWAY (a key-less fill into an SR template stops). */
+    quantization_t *normParamQ = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 2);
+    layerQuant_t normLq = lq;
+    normLq.weightStorage = normParamQ;
+    normLq.biasStorage = normParamQ;
     layer_t *groupNorm = groupNormLayerInit(
-        &(groupNormInit_t){.numGroups = 1, .numChannels = BFP_NORM_CONV_CHANNELS}, &lq);
+        &(groupNormInit_t){.numGroups = 1, .numChannels = BFP_NORM_CONV_CHANNELS}, &normLq);
     layer_t *relu = reluLayerInit(&lq);
     layer_t *pool = adaptiveAvgPool1dLayerInit(&(adaptiveAvgPool1dInit_t){.outputSize = 1}, &lq);
     layer_t *flatten = flattenLayerInit(); /* [1, 4, 1] -> [1, 4] */
     size_t normShape[1] = {BFP_NORM_CONV_CHANNELS};
-    layer_t *layerNorm =
-        layerNormLayerInit(&(layerNormInit_t){.normalizedShape = normShape, .numNormDims = 1}, &lq);
+    layer_t *layerNorm = layerNormLayerInit(
+        &(layerNormInit_t){.normalizedShape = normShape, .numNormDims = 1}, &normLq);
 
     static const float linWValues[BFP_NORM_LIN_W_COUNT] = {0.30f,  -0.20f, 0.15f,  -0.35f,
                                                            -0.25f, 0.40f,  -0.10f, 0.20f};
     static const float linBValues[BFP_NORM_NUM_CLASSES] = {0.05f, -0.05f};
     parameter_t *linW = buildFloatParam2D(BFP_NORM_NUM_CLASSES, BFP_NORM_CONV_CHANNELS, linWValues);
     parameter_t *linB = buildFloatParam2D(1, BFP_NORM_NUM_CLASSES, linBValues);
-    quantization_t *linWQ = quantizationInitBfp(8, 8, SR_HALF_AWAY);
-    quantization_t *linBQ = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    quantization_t *linWQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    quantization_t *linBQ = quantizationInitBfp(8, 8, HALF_AWAY);
     requantizeTensorInPlace(getParamFromParameter(linW), linWQ);
     requantizeTensorInPlace(getParamFromParameter(linB), linBQ);
     freeQuantization(linBQ);
@@ -2417,14 +2500,19 @@ void testBfpUniformNormModelTrainsAndGridsMove(void) {
 
     optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
     pr5NormCapture_t cap = {0};
+    trainingRng_t rng;
+    trainingRngInit(&rng, 4242u);
     float firstLoss = NAN;
     float lastLoss = NAN;
     for (size_t step = 0; step < 12; step++) {
+        const rngKey_t stepKey = trainingRngStepKey(&rng);
         float stepLoss = 0.f;
         for (size_t s = 0; s < 2; s++) {
-            trainingStats_t *stats = tracedGrads(
-                model, BFP_NORM_MODEL_SIZE, defaultLossConfig(CROSS_ENTROPY), REDUCTION_MEAN,
-                inputs[s], labels[s], capturePr5LayerNormWire, &cap, NULL);
+            const rngKey_t callKey = trainingRngCallKey(stepKey, s);
+            trainingStats_t *stats =
+                tracedGrads(model, BFP_NORM_MODEL_SIZE, defaultLossConfig(CROSS_ENTROPY),
+                            REDUCTION_MEAN, inputs[s], labels[s], capturePr5LayerNormWire, &cap,
+                            &(trainingCall_t){.key = &callKey});
             stepLoss += stats->loss;
             freeTrainingStats(stats);
         }
@@ -2432,8 +2520,10 @@ void testBfpUniformNormModelTrainsAndGridsMove(void) {
             firstLoss = 0.5f * stepLoss;
         }
         lastLoss = 0.5f * stepLoss;
-        sgdFns.step(sgd, NULL);
+        const rngKey_t updateKey = trainingRngUpdateKey(&rng);
+        sgdFns.step(sgd, &updateKey);
         sgdFns.zero(sgd);
+        trainingRngAdvance(&rng);
     }
 
     /* CAPTURE -> FREE (reverse init order) -> assert (Unity longjmps out of the
@@ -2478,6 +2568,7 @@ void testBfpUniformNormModelTrainsAndGridsMove(void) {
     freeGroupNormLayerShellOnly(groupNorm);
     freeConv1dLayerShellOnly(conv);
     freeQuantization(momentumQ);
+    freeQuantization(normParamQ);
     freeQuantization(bfpWireQ);
 
     TEST_ASSERT_TRUE_MESSAGE(normsDeclareBfpMath,
@@ -2500,11 +2591,12 @@ void testBfpUniformNormModelTrainsAndGridsMove(void) {
     TEST_ASSERT_TRUE_MESSAGE(lnProbeFired, "the LayerNorm forward-wire probe must have fired");
     TEST_ASSERT_EQUAL_UINT_MESSAGE(2, lnWireGroups,
                                    "the LayerNorm output wire is 4 elements / groupSize 2");
-    /* Two seed-dependent claims, both pinned by rngSetSeed(4242u): "moved off
-     * the zero state" is a PROXY (the zero state IS exponent == bias == 127, so
-     * a grid whose absmax happened to derive exactly 127 would false-fail), and
-     * lastLoss < firstLoss depends on the SR_HALF_AWAY draw. A seed change --
-     * or an RNG-consumption change anywhere upstream -- must re-confirm both. */
+    /* Two key-dependent claims, both pinned by the training keys of
+     * trainingRngInit(&rng, 4242u): "moved off the zero state" is a PROXY (the
+     * zero state IS exponent == bias == 127, so a grid whose absmax happened to
+     * derive exactly 127 would false-fail), and lastLoss < firstLoss depends on
+     * the SR_HALF_AWAY draws. A change of the training seed must re-confirm
+     * both. */
     TEST_ASSERT_TRUE_MESSAGE(lnWireGridMoved,
                              "the LayerNorm forward's OUT_WRITE must DERIVE the output wire's "
                              "exponent grid: at least one group must leave the zero state");
@@ -2533,8 +2625,13 @@ void testBfpNormGradStorageAccumulatesAndSteps(void) {
     rngSetSeed(4242u);
     quantization_t *bfpWireQ = quantizationInitBfpGrouped(8, 8, SR_HALF_AWAY, 2, 2);
     quantization_t *gradKnob = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    /* The factory fills gamma and beta key-less, so their storage template
+     * rounds HALF_AWAY (a key-less fill into an SR template stops). */
+    quantization_t *normParamQ = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 2);
     layerQuant_t lq;
     layerQuantInitUniform(&lq, bfpWireQ);
+    lq.weightStorage = normParamQ;
+    lq.biasStorage = normParamQ;
     lq.weightGradStorage = gradKnob;
     lq.biasGradStorage = gradKnob;
 
@@ -2588,8 +2685,12 @@ void testBfpNormGradStorageAccumulatesAndSteps(void) {
         }
     }
 
-    trainingStats_t *stats = calculateGradsSequential(model, 1, defaultLossConfig(MSE),
-                                                      REDUCTION_MEAN, input, label, NULL);
+    trainingRng_t rng;
+    trainingRngInit(&rng, 4242u);
+    const updateKeys_t keys = keysOfThisUpdate(&rng);
+    trainingStats_t *stats =
+        calculateGradsSequential(model, 1, defaultLossConfig(MSE), REDUCTION_MEAN, input, label,
+                                 &(trainingCall_t){.key = &keys.callKey});
     float loss = stats->loss;
     freeTrainingStats(stats);
 
@@ -2615,11 +2716,10 @@ void testBfpNormGradStorageAccumulatesAndSteps(void) {
      * to be observable at all -- which is why lr is 0.2 here and not the 0.01
      * the model capstone above uses: |dgamma| runs ~0.1-2.4 on this fixture, so
      * every one of the four codes moves by tens of LSBs, far from the knife
-     * edge. Hand-checked against the kernel math: the four post-step gammas
-     * (0.972 / 0.513 / 0.889 / 1.099) reproduce codes 125, 65 | 57, 71 at the
-     * two groups' re-derived exponents. */
+     * edge. The exact post-step gammas depend on the SR draws of the call and
+     * the step; the assertion needs only that the stored codes change. */
     optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
-    sgdFns.step(sgd, NULL);
+    sgdFns.step(sgd, &keys.updateKey);
     bool paramMoved = memcmp(paramBefore, gammaParam->data, paramBytes) != 0;
 
     /* (d) zeroGrad's BFP arm: codes back to zero AND exponents back to bias. */
@@ -2641,6 +2741,7 @@ void testBfpNormGradStorageAccumulatesAndSteps(void) {
     freeOptim(sgd); /* frees gamma/beta + their BFP grads */
     freeLayerNormLayerShellOnly(layerNorm);
     freeQuantization(momentumQ);
+    freeQuantization(normParamQ);
     freeQuantization(bfpWireQ);
 
     TEST_ASSERT_EQUAL_INT_MESSAGE(
@@ -2660,8 +2761,8 @@ void testBfpNormGradStorageAccumulatesAndSteps(void) {
                              "into the BFP grad");
     /* Seed-dependent proxy, same disclosure as the PR3/PR4 grad-storage
      * capstones: the zero state IS exponent == bias, so a grad whose absmax
-     * happened to derive exactly that would false-fail. rngSetSeed(4242u) pins
-     * it; a seed change must re-confirm. */
+     * happened to derive exactly that would false-fail. The training keys of
+     * trainingRngInit(&rng, 4242u) pin it; a seed change must re-confirm. */
     TEST_ASSERT_NOT_EQUAL_MESSAGE(zeroStateBias, gammaGradExponentAfterBackward,
                                   "the accumulate arm must have moved the gamma grad's exponent "
                                   "off the zero state during backward");
@@ -2898,8 +2999,8 @@ void unitTestUniformBfpSoftmaxMseTrains(void) {
     /* linear 4 -> 3. */
     parameter_t *linW = buildRampParam2D(3, 4, 0.10f, 0.03f);
     parameter_t *linB = buildRampParam2D(1, 3, 0.05f, 0.05f);
-    quantization_t *linWQ = quantizationInitBfp(8, 8, SR_HALF_AWAY);
-    quantization_t *linBQ = quantizationInitBfp(8, 8, SR_HALF_AWAY);
+    quantization_t *linWQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    quantization_t *linBQ = quantizationInitBfp(8, 8, HALF_AWAY);
     requantizeTensorInPlace(getParamFromParameter(linW), linWQ);
     requantizeTensorInPlace(getParamFromParameter(linB), linBQ);
     freeQuantization(linBQ);
@@ -2927,18 +3028,23 @@ void unitTestUniformBfpSoftmaxMseTrains(void) {
     memcpy(before, linWTensor->data, linWBytes);
 
     optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
+    trainingRng_t rng;
+    trainingRngInit(&rng, 4242u);
     float firstLoss = NAN;
     float lastLoss = NAN;
     for (size_t step = 0; step < 10; step++) {
-        trainingStats_t *stats = calculateGradsSequential(model, 2, defaultLossConfig(MSE),
-                                                          REDUCTION_MEAN, input, label, NULL);
+        const updateKeys_t keys = keysOfThisUpdate(&rng);
+        trainingStats_t *stats =
+            calculateGradsSequential(model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, input, label,
+                                     &(trainingCall_t){.key = &keys.callKey});
         if (step == 0) {
             firstLoss = stats->loss;
         }
         lastLoss = stats->loss;
         freeTrainingStats(stats);
-        sgdFns.step(sgd, NULL);
+        sgdFns.step(sgd, &keys.updateKey);
         sgdFns.zero(sgd);
+        trainingRngAdvance(&rng);
     }
 
     /* CAPTURE -> FREE (reverse init order) -> assert (Unity longjmps out of

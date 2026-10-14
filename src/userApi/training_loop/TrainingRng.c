@@ -2,11 +2,17 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "Common.h"
 #include "RNG.h"
+#include "SerialWire.h"
 #include "TrainingLoopApi.h"
+
+#define ODTK_MAGIC "ODTK"
+#define ODTK_FORMAT_VERSION 1u
 
 static void requireState(const trainingRng_t *rng, const char *helper) {
     if (rng == NULL) {
@@ -84,6 +90,37 @@ rngKey_t trainingRngInitKey(const trainingRng_t *rng, size_t layerIndex) {
         exit(1);
     }
     return rngFold(rng->root, RNG_TAG_INIT, (uint32_t)layerIndex);
+}
+
+void trainingRngSerialize(const trainingRng_t *rng, FILE *f) {
+    requireState(rng, "trainingRngSerialize");
+    serialWriteBytes(ODTK_MAGIC, 4, f);
+    serialWriteU32LE(ODTK_FORMAT_VERSION, f);
+    serialWriteU32LE(rng->root.w[0], f);
+    serialWriteU32LE(rng->root.w[1], f);
+    serialWriteU32LE(rng->step, f);
+    serialWriteU32LE(rng->epoch, f);
+}
+
+void trainingRngDeserialize(trainingRng_t *rng, FILE *f) {
+    requireState(rng, "trainingRngDeserialize");
+    char magic[4];
+    serialReadBytes(magic, 4, f);
+    if (memcmp(magic, ODTK_MAGIC, 4) != 0) {
+        PRINT_ERROR("trainingRngDeserialize: bad magic (not an ODTK record)");
+        exit(1);
+    }
+    const uint32_t version = serialReadU32LE(f);
+    if (version != ODTK_FORMAT_VERSION) {
+        PRINT_ERROR("trainingRngDeserialize: unsupported version %u", (unsigned)version);
+        exit(1);
+    }
+    trainingRng_t read;
+    read.root.w[0] = serialReadU32LE(f);
+    read.root.w[1] = serialReadU32LE(f);
+    read.step = serialReadU32LE(f);
+    read.epoch = serialReadU32LE(f);
+    *rng = read;
 }
 
 const trainingCall_t *trainingCallForIndex(const trainingCall_t *call, size_t callIndex,

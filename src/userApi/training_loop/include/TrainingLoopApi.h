@@ -2,6 +2,7 @@
 #define TRAINING_LOOP_API_H
 
 #include <stdbool.h>
+#include <stdio.h>
 
 #include "DataLoader.h"
 #include "InferenceApi.h"
@@ -70,6 +71,17 @@ rngKey_t trainingRngShuffleEvalKey(const trainingRng_t *rng);
  * key does not depend on the counters. An index above UINT32_MAX stops the
  * program with a named error: it would reuse the key of an earlier layer. */
 rngKey_t trainingRngInitKey(const trainingRng_t *rng, size_t layerIndex);
+
+/*! Writes the state as one ODTK v1 record of 24 bytes, every field a
+ * little-endian u32: "ODTK" | version 1 | root.w[0] | root.w[1] | step | epoch.
+ * Saved with the model's ODTS file, it lets a stopped run go on with the keys
+ * it would have used. It holds no position inside an epoch: save between
+ * epochs. */
+void trainingRngSerialize(const trainingRng_t *rng, FILE *f);
+
+/*! Reads one ODTK record into *rng. A record that is not ODTK, a version other
+ * than 1 or a short stream stops the program with a named error. */
+void trainingRngDeserialize(trainingRng_t *rng, FILE *f);
 
 /*! The call a level hands its callee for call `callIndex`: NULL for a NULL
  * call; otherwise *next = *call with only .key replaced, by the key of that

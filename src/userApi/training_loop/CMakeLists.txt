@@ -20,6 +20,7 @@ target_link_libraries(TrainingLoopApi PRIVATE
         LossFunction
         Optimizer
         RNG
+        SerialWire
         LrScheduler
         BsScheduler
         Common

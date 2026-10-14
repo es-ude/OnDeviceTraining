@@ -3,6 +3,7 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include "ArithmeticType.h"
 #include "BatchView.h"
@@ -3467,6 +3468,150 @@ void testTrainingRngInitKeyExitsAboveUint32Max(void) {
 }
 #endif
 
+/* ---- ODTK: the training-stream state on disk ---- */
+
+/* The expected bytes come from Python's struct module over the mirror's root
+ * key, not from the C writer. From the repository root:
+ *   uv run python -c "import struct; from examples._shared.keyed_rng import (
+ *   key_from_seed as kfs); b = struct.pack('<4sIIIII', b'ODTK', 1,
+ *   *kfs(0x0123456789abcdef), 0x11223344, 0x55667788); print(len(b), ', '.join(
+ *   '0x%02x' % x for x in b))"
+ */
+#define ODTK_RECORD_BYTES 24u
+
+static const uint8_t kOdtkRecord[ODTK_RECORD_BYTES] = {
+    0x4f, 0x44, 0x54, 0x4b, 0x01, 0x00, 0x00, 0x00, 0x70, 0x5d, 0x44, 0xd1,
+    0xde, 0xeb, 0x66, 0x22, 0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55};
+
+static trainingRng_t odtkTestState(void) {
+    trainingRng_t rng;
+    trainingRngInit(&rng, TRAINING_RNG_TEST_SEED);
+    rng.step = 0x11223344u;
+    rng.epoch = 0x55667788u;
+    return rng;
+}
+
+/* A stream positioned at the start of the given bytes. */
+static FILE *odtkStreamOf(const uint8_t *bytes, size_t numberOfBytes) {
+    FILE *f = tmpfile();
+    TEST_ASSERT_NOT_NULL(f);
+    TEST_ASSERT_EQUAL_UINT((unsigned)numberOfBytes, (unsigned)fwrite(bytes, 1, numberOfBytes, f));
+    rewind(f);
+    return f;
+}
+
+void testTrainingRngSerializeWritesTheOdtkRecord(void) {
+    const trainingRng_t rng = odtkTestState();
+    FILE *f = tmpfile();
+    TEST_ASSERT_NOT_NULL(f);
+
+    trainingRngSerialize(&rng, f);
+
+    TEST_ASSERT_EQUAL_INT((int)ODTK_RECORD_BYTES, (int)ftell(f));
+    rewind(f);
+    uint8_t bytes[ODTK_RECORD_BYTES];
+    TEST_ASSERT_EQUAL_UINT(ODTK_RECORD_BYTES, (unsigned)fread(bytes, 1, sizeof bytes, f));
+    fclose(f);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(kOdtkRecord, bytes, ODTK_RECORD_BYTES);
+}
+
+/* The reader takes exactly the record's bytes and leaves what follows. */
+void testTrainingRngDeserializeReadsTheOdtkRecord(void) {
+    const uint8_t recordThenMore[ODTK_RECORD_BYTES + 1u] = {
+        0x4f, 0x44, 0x54, 0x4b, 0x01, 0x00, 0x00, 0x00, 0x70, 0x5d, 0x44, 0xd1, 0xde,
+        0xeb, 0x66, 0x22, 0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55, 0x5a};
+    FILE *f = odtkStreamOf(recordThenMore, sizeof recordThenMore);
+    trainingRng_t rng = {.root = {{0xdeadbeefu, 0xdeadbeefu}}, .step = 7u, .epoch = 9u};
+
+    trainingRngDeserialize(&rng, f);
+
+    const int next = fgetc(f);
+    fclose(f);
+    assertTrainingKey(0xd1445d70u, 0x2266ebdeu, rng.root);
+    TEST_ASSERT_EQUAL_HEX32(0x11223344u, rng.step);
+    TEST_ASSERT_EQUAL_HEX32(0x55667788u, rng.epoch);
+    TEST_ASSERT_EQUAL_INT(0x5a, next);
+}
+
+/* A restored state hands out the keys of the saved one. */
+void testTrainingRngDeserializeRestoresWhatSerializeSaved(void) {
+    const trainingRng_t saved = odtkTestState();
+    FILE *f = tmpfile();
+    TEST_ASSERT_NOT_NULL(f);
+    trainingRngSerialize(&saved, f);
+    rewind(f);
+    trainingRng_t restored;
+    trainingRngInit(&restored, 1u);
+
+    trainingRngDeserialize(&restored, f);
+
+    fclose(f);
+    assertSameKey(saved.root, restored.root);
+    TEST_ASSERT_EQUAL_HEX32(saved.step, restored.step);
+    TEST_ASSERT_EQUAL_HEX32(saved.epoch, restored.epoch);
+    assertSameKey(trainingRngStepKey(&saved), trainingRngStepKey(&restored));
+    assertSameKey(trainingRngShuffleKey(&saved, true), trainingRngShuffleKey(&restored, true));
+}
+
+static void deserializeEditedRecord(size_t at, uint8_t value) {
+    uint8_t bytes[ODTK_RECORD_BYTES];
+    for (size_t i = 0; i < ODTK_RECORD_BYTES; i++) {
+        bytes[i] = kOdtkRecord[i];
+    }
+    bytes[at] = value;
+    FILE *f = odtkStreamOf(bytes, ODTK_RECORD_BYTES);
+    trainingRng_t rng;
+    trainingRngDeserialize(&rng, f);
+}
+
+static void deserializeAModelFileMagic(void) {
+    deserializeEditedRecord(3u, 'S'); /* "ODTS" */
+}
+
+static void deserializeVersion2(void) {
+    deserializeEditedRecord(4u, 0x02u);
+}
+
+static void deserializeATruncatedRecord(void) {
+    FILE *f = odtkStreamOf(kOdtkRecord, ODTK_RECORD_BYTES - 4u);
+    trainingRng_t rng;
+    trainingRngDeserialize(&rng, f);
+}
+
+static void serializeANullState(void) {
+    FILE *f = tmpfile();
+    trainingRngSerialize(NULL, f);
+}
+
+static void deserializeIntoANullState(void) {
+    FILE *f = odtkStreamOf(kOdtkRecord, ODTK_RECORD_BYTES);
+    trainingRngDeserialize(NULL, f);
+}
+
+void testTrainingRngDeserializeExitsOnABadMagic(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngDeserialize: bad magic (not an ODTK record)",
+                             deserializeAModelFileMagic());
+}
+
+void testTrainingRngDeserializeExitsOnAnUnsupportedVersion(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngDeserialize: unsupported version 2",
+                             deserializeVersion2());
+}
+
+/* A short stream stops in the shared wire reader, with its text. */
+void testTrainingRngDeserializeExitsOnATruncatedRecord(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "short read (4 bytes): truncated or corrupt stream",
+                             deserializeATruncatedRecord());
+}
+
+void testTrainingRngSerializeExitsOnANullState(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngSerialize: rng is NULL", serializeANullState());
+}
+
+void testTrainingRngDeserializeExitsOnANullState(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngDeserialize: rng is NULL", deserializeIntoANullState());
+}
+
 /* ---- the keys the training and evaluation loops hand down (#4) ---- */
 
 #define KEYED_RUN_SEED 0x5eedu
@@ -4036,6 +4181,14 @@ int main(void) {
 #if SIZE_MAX > UINT32_MAX
     RUN_TEST(testTrainingRngInitKeyExitsAboveUint32Max);
 #endif
+    RUN_TEST(testTrainingRngSerializeWritesTheOdtkRecord);
+    RUN_TEST(testTrainingRngDeserializeReadsTheOdtkRecord);
+    RUN_TEST(testTrainingRngDeserializeRestoresWhatSerializeSaved);
+    RUN_TEST(testTrainingRngDeserializeExitsOnABadMagic);
+    RUN_TEST(testTrainingRngDeserializeExitsOnAnUnsupportedVersion);
+    RUN_TEST(testTrainingRngDeserializeExitsOnATruncatedRecord);
+    RUN_TEST(testTrainingRngSerializeExitsOnANullState);
+    RUN_TEST(testTrainingRngDeserializeExitsOnANullState);
     RUN_TEST(testTrainingCallForIndexKeepsANullCallNull);
     RUN_TEST(testTrainingCallForIndexCopiesACallWithoutAKey);
     RUN_TEST(testTrainingCallForIndexDerivesTheCallKeyUnderTheParentKey);

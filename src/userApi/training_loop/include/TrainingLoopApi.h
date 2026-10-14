@@ -56,6 +56,21 @@ void trainingRngAdvance(trainingRng_t *rng);
 /*! Call after each completed epoch, under the same rule as trainingRngAdvance. */
 void trainingRngAdvanceEpoch(trainingRng_t *rng);
 
+/*! The key of the training loader's sample order. perEpoch = true gives each
+ * epoch its own order (the key of the current epoch); false keeps epoch 0's
+ * key, so the order is the same in every epoch. */
+rngKey_t trainingRngShuffleKey(const trainingRng_t *rng, bool perEpoch);
+
+/*! The key of the evaluation loader's sample order: one key per run, so every
+ * evaluation sees the same order. */
+rngKey_t trainingRngShuffleEvalKey(const trainingRng_t *rng);
+
+/*! The key of the random initial values of the layer at `layerIndex`, its
+ * position in the model. Build the model with these keys before training: the
+ * key does not depend on the counters. An index above UINT32_MAX stops the
+ * program with a named error: it would reuse the key of an earlier layer. */
+rngKey_t trainingRngInitKey(const trainingRng_t *rng, size_t layerIndex);
+
 /*! The call a level hands its callee for call `callIndex`: NULL for a NULL
  * call; otherwise *next = *call with only .key replaced, by the key of that
  * call under call->key (written to *callKey), or by NULL when call->key is

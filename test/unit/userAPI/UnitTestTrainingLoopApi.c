@@ -3376,6 +3376,97 @@ void testTrainingRngCallKeyExitsAboveUint32Max(void) {
 }
 #endif
 
+/* ---- shuffle and init keys: the roots outside the step chain ---- */
+
+/* From the Python mirror, tag values spelled as numbers (SHUFFLE 21, INIT 22,
+ * SHUFFLE_EVAL 26); same root as the tests above. From the repository root:
+ *   uv run python -c "from examples._shared.keyed_rng import (fold,
+ *   key_from_seed as kfs); r = kfs(0x0123456789abcdef); print([[hex(w) for w in k]
+ *   for k in (fold(r, 21, 0), fold(r, 21, 2), fold(r, 26, 0), fold(r, 22, 0),
+ *   fold(r, 22, 3), fold(r, 22, 0xffffffff))])"
+ */
+
+/* A per-epoch shuffle follows the epoch counter; a shuffle-once loader keeps
+ * epoch 0's key for the whole run. The step counter never enters either. */
+void testTrainingRngShuffleKeyFollowsTheEpochOnlyWhenPerEpoch(void) {
+    trainingRng_t rng;
+    trainingRngInit(&rng, TRAINING_RNG_TEST_SEED);
+    assertSameKey(trainingRngShuffleKey(&rng, false), trainingRngShuffleKey(&rng, true));
+    trainingRngAdvance(&rng);
+    trainingRngAdvanceEpoch(&rng);
+    trainingRngAdvanceEpoch(&rng);
+    assertSameKey(rngFold(rng.root, RNG_TAG_SHUFFLE, 2u), trainingRngShuffleKey(&rng, true));
+    assertTrainingKey(0x0d7b6f6du, 0x8d2a882du, trainingRngShuffleKey(&rng, true));
+    assertSameKey(rngFold(rng.root, RNG_TAG_SHUFFLE, 0u), trainingRngShuffleKey(&rng, false));
+    assertTrainingKey(0x03ce5c0bu, 0x84d3a650u, trainingRngShuffleKey(&rng, false));
+}
+
+/* The evaluation loader is shuffled once per run: its key ignores both counters
+ * and differs from the training loader's epoch-0 key. */
+void testTrainingRngShuffleEvalKeyIsOneKeyPerRun(void) {
+    trainingRng_t rng;
+    trainingRngInit(&rng, TRAINING_RNG_TEST_SEED);
+    trainingRngAdvance(&rng);
+    trainingRngAdvanceEpoch(&rng);
+    assertSameKey(rngFold(rng.root, RNG_TAG_SHUFFLE_EVAL, 0u), trainingRngShuffleEvalKey(&rng));
+    assertTrainingKey(0xdf93fb35u, 0xcf8b986bu, trainingRngShuffleEvalKey(&rng));
+    const rngKey_t trainKey = trainingRngShuffleKey(&rng, false);
+    const rngKey_t evalKey = trainingRngShuffleEvalKey(&rng);
+    TEST_ASSERT_FALSE(trainKey.w[0] == evalKey.w[0] && trainKey.w[1] == evalKey.w[1]);
+}
+
+/* One init key per layer index, independent of the counters; the last 32-bit
+ * index is still usable. */
+void testTrainingRngInitKeyIsTheInitFoldOfTheLayerIndex(void) {
+    trainingRng_t rng;
+    trainingRngInit(&rng, TRAINING_RNG_TEST_SEED);
+    trainingRngAdvance(&rng);
+    trainingRngAdvanceEpoch(&rng);
+    assertSameKey(rngFold(rng.root, RNG_TAG_INIT, 0u), trainingRngInitKey(&rng, 0u));
+    assertTrainingKey(0x9b266274u, 0xf3f69b89u, trainingRngInitKey(&rng, 0u));
+    assertSameKey(rngFold(rng.root, RNG_TAG_INIT, 3u), trainingRngInitKey(&rng, 3u));
+    assertTrainingKey(0x5cdda14fu, 0xe704a5f1u, trainingRngInitKey(&rng, 3u));
+    assertTrainingKey(0x32cb78bcu, 0xb2b4e2ddu, trainingRngInitKey(&rng, (size_t)UINT32_MAX));
+}
+
+static void shuffleKeyOfANullState(void) {
+    (void)trainingRngShuffleKey(NULL, true);
+}
+
+static void shuffleEvalKeyOfANullState(void) {
+    (void)trainingRngShuffleEvalKey(NULL);
+}
+
+static void initKeyOfANullState(void) {
+    (void)trainingRngInitKey(NULL, 0u);
+}
+
+void testTrainingRngShuffleKeyExitsOnANullState(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngShuffleKey: rng is NULL", shuffleKeyOfANullState());
+}
+
+void testTrainingRngShuffleEvalKeyExitsOnANullState(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngShuffleEvalKey: rng is NULL",
+                             shuffleEvalKeyOfANullState());
+}
+
+void testTrainingRngInitKeyExitsOnANullState(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngInitKey: rng is NULL", initKeyOfANullState());
+}
+
+#if SIZE_MAX > UINT32_MAX
+static void initKeyPastUint32Max(void) {
+    trainingRng_t rng;
+    trainingRngInit(&rng, 1u);
+    (void)trainingRngInitKey(&rng, (size_t)UINT32_MAX + 1u);
+}
+
+void testTrainingRngInitKeyExitsAboveUint32Max(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngInitKey: layer index exceeds UINT32_MAX",
+                             initKeyPastUint32Max());
+}
+#endif
+
 /* ---- the keys the training and evaluation loops hand down (#4) ---- */
 
 #define KEYED_RUN_SEED 0x5eedu
@@ -3935,6 +4026,15 @@ int main(void) {
     RUN_TEST(testTrainingRngAdvanceEpochExitsWhenTheEpochCounterIsExhausted);
 #if SIZE_MAX > UINT32_MAX
     RUN_TEST(testTrainingRngCallKeyExitsAboveUint32Max);
+#endif
+    RUN_TEST(testTrainingRngShuffleKeyFollowsTheEpochOnlyWhenPerEpoch);
+    RUN_TEST(testTrainingRngShuffleEvalKeyIsOneKeyPerRun);
+    RUN_TEST(testTrainingRngInitKeyIsTheInitFoldOfTheLayerIndex);
+    RUN_TEST(testTrainingRngShuffleKeyExitsOnANullState);
+    RUN_TEST(testTrainingRngShuffleEvalKeyExitsOnANullState);
+    RUN_TEST(testTrainingRngInitKeyExitsOnANullState);
+#if SIZE_MAX > UINT32_MAX
+    RUN_TEST(testTrainingRngInitKeyExitsAboveUint32Max);
 #endif
     RUN_TEST(testTrainingCallForIndexKeepsANullCallNull);
     RUN_TEST(testTrainingCallForIndexCopiesACallWithoutAKey);

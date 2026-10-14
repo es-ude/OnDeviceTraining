@@ -65,6 +65,27 @@ void trainingRngAdvanceEpoch(trainingRng_t *rng) {
     rng->epoch++;
 }
 
+rngKey_t trainingRngShuffleKey(const trainingRng_t *rng, bool perEpoch) {
+    requireState(rng, "trainingRngShuffleKey");
+    return rngFold(rng->root, RNG_TAG_SHUFFLE, perEpoch ? rng->epoch : 0u);
+}
+
+rngKey_t trainingRngShuffleEvalKey(const trainingRng_t *rng) {
+    requireState(rng, "trainingRngShuffleEvalKey");
+    return rngFold(rng->root, RNG_TAG_SHUFFLE_EVAL, 0u);
+}
+
+rngKey_t trainingRngInitKey(const trainingRng_t *rng, size_t layerIndex) {
+    requireState(rng, "trainingRngInitKey");
+    /* rngFold's index is 32 bits wide: a larger index would wrap onto the key
+     * of an earlier layer. */
+    if (layerIndex > UINT32_MAX) {
+        PRINT_ERROR("trainingRngInitKey: layer index exceeds UINT32_MAX");
+        exit(1);
+    }
+    return rngFold(rng->root, RNG_TAG_INIT, (uint32_t)layerIndex);
+}
+
 const trainingCall_t *trainingCallForIndex(const trainingCall_t *call, size_t callIndex,
                                            trainingCall_t *next, rngKey_t *callKey) {
     if (call == NULL) {

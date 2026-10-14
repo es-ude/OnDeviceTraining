@@ -50,6 +50,9 @@ rngKey_t rngKeyFromSeed(uint64_t seed);
 #define RNG_TAG_UPDATE 18u
 #define RNG_TAG_PARAM 19u
 #define RNG_TAG_SCALE 20u
+#define RNG_TAG_SHUFFLE 21u
+#define RNG_TAG_INIT 22u
+#define RNG_TAG_SHUFFLE_EVAL 26u
 
 /* The draws under one key. Owned by its caller, usually on the stack of the op
  * that draws. Backend v1: keyed xorshift32, today's draw math. Start a stream

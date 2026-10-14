@@ -32,7 +32,7 @@ tensor_t *initTensor(shape_t *shape, quantization_t *quantization, sparsity_t *s
  * \param tensor: Pre-initialized FLOAT32 tensor.
  * \param distribution: Recipe for value generation. Read-only.
  */
-void initDistribution(tensor_t *tensor, const distribution_t *distribution);
+void initDistribution(tensor_t *tensor, const distribution_t *distribution, rngStream_t *rs);
 
 /*! Copies `count` floats from a caller-owned source into a tensor's data
  * buffer. Caller retains ownership of `source`. If the tensor is non-FLOAT32

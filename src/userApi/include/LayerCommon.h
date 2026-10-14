@@ -7,6 +7,10 @@
 
 #include "Tensor.h"
 
+/* Pointer-only use: the identical typedef lives in RNG.h (C11 allows the
+ * repetition), so this header needs no RNG include path. */
+typedef struct rngKey rngKey_t;
+
 /*! Bias presence tri-state for layer init structs.
  *  BIAS_DEFAULT lands at C99 zero-init; factories resolve it to the PyTorch
  *  default for that layer type (true for Conv / Linear).  */
@@ -38,6 +42,7 @@ _Static_assert(INIT_DEFAULT == 0,
 typedef struct weightInit {
     initScheme_t scheme;
     float gain; /*!< 0 selects the scheme's default gain. Ignored for INIT_DEFAULT. */
+    const rngKey_t *key;
 } weightInit_t;
 
 /*! Trainability tri-state for layer init structs (#380).
@@ -71,6 +76,6 @@ void initWeightTensor(tensor_t *weight, weightInit_t cfg, size_t fanIn, size_t f
 
 /*! Initialize a FLOAT32 bias tensor in place to PyTorch's default
  *  uniform(+/- 1/sqrt(fanIn)). Aborts if the tensor is not FLOAT32. */
-void initBiasTensor(tensor_t *bias, size_t fanIn);
+void initBiasTensor(tensor_t *bias, size_t fanIn, const rngKey_t *initKey);
 
 #endif /* LAYER_COMMON_H */

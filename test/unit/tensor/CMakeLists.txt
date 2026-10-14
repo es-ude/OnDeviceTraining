@@ -80,6 +80,7 @@ add_elastic_ai_unit_test(
         Quantization
         QuantizationApi
         StorageApi
+        RNG
         odt_test_death
 )
 add_executable(UnitTestTensorBool UnitTestTensorBool.c)

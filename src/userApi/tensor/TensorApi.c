@@ -86,7 +86,7 @@ void tensorFillFromBoolBuffer(tensor_t *tensor, const bool *source, size_t count
     }
 }
 
-void initDistribution(tensor_t *tensor, const distribution_t *distribution) {
+void initDistribution(tensor_t *tensor, const distribution_t *distribution, rngStream_t *rs) {
     if (tensor->quantization->type != FLOAT32) {
         PRINT_ERROR("initDistribution only supports FLOAT32 in this iteration");
         exit(1);
@@ -119,7 +119,7 @@ void initDistribution(tensor_t *tensor, const distribution_t *distribution) {
         for (size_t i = 0; i < n; ++i) {
             vals[i] =
                 xavierUniform(distribution->params.xavier.gain, distribution->params.xavier.fanIn,
-                              distribution->params.xavier.fanOut);
+                              distribution->params.xavier.fanOut, rs);
         }
         break;
     case XAVIER_NORMAL:
@@ -132,7 +132,7 @@ void initDistribution(tensor_t *tensor, const distribution_t *distribution) {
     case KAIMING_UNIFORM:
         for (size_t i = 0; i < n; ++i) {
             vals[i] = kaimingUniform(distribution->params.kaiming.gain,
-                                     distribution->params.kaiming.fanMode);
+                                     distribution->params.kaiming.fanMode, rs);
         }
         break;
     case KAIMING_NORMAL:

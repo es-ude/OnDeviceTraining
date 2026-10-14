@@ -74,6 +74,11 @@ void fillNormalFloat32Tensor(tensor_t *out, rng32_t *rng, float mean, float stdd
  */
 float randomUniform(float min, float max);
 
+/*! A uniform draw in [min, max) from a caller-owned stream: min + u * (max - min)
+ * with u the stream's next unit float. The global generator is not touched. A
+ * NULL stream stops the program with a named error. */
+float randomUniformCtx(rngStream_t *rs, float min, float max);
+
 /*! Gets random value from Kaiming distribution using normal distribution.
  *
  * @param gain Optional scaling factor for non-linearity
@@ -90,7 +95,7 @@ float kaimingNormal(float gain, size_t fanMode);
  *
  * @returns Float value
  */
-float kaimingUniform(float gain, size_t fanMode);
+float kaimingUniform(float gain, size_t fanMode, rngStream_t *rs);
 
 /*! Gets random value from Xavier distribution using the normal distribution.
  *
@@ -110,6 +115,6 @@ float xavierNormal(float gain, size_t fanIn, size_t fanOut);
  *
  * @returns Float value
  */
-float xavierUniform(float gain, size_t fanIn, size_t fanOut);
+float xavierUniform(float gain, size_t fanIn, size_t fanOut, rngStream_t *rs);
 
 #endif // ODT_DISTRIBUTIONS_H

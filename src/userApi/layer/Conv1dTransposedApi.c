@@ -79,12 +79,12 @@ static parameter_t *allocateConv1dTransposedWeights(size_t inChannels, size_t ou
 
 static parameter_t *allocateConv1dTransposedBias(size_t outChannels, size_t fanIn,
                                                  quantization_t *storageQ, quantization_t *gradQ,
-                                                 bool trainable) {
+                                                 bool trainable, const rngKey_t *initKey) {
     /* PyTorch draws bias from uniform(+/- 1/sqrt(fan_in)) using the WEIGHT's
      * fan_in (= outPerGroup*kernelSize). */
     shape_t *shape = buildOwnedShape((size_t[]){outChannels}, 1);
     tensor_t *paramTensor = initTensor(shape, getQLike(storageQ), NULL);
-    initBiasTensor(paramTensor, fanIn);
+    initBiasTensor(paramTensor, fanIn, initKey);
     tensor_t *gradTensor = trainable ? gradInit(paramTensor, gradQ, NULL) : NULL;
     return parameterInit(paramTensor, gradTensor);
 }
@@ -165,7 +165,7 @@ static layer_t *buildConv1dTransposedLayerSkeleton(conv1dTransposedInit_t *init,
                                                    init->kernelSize, init->weightInit,
                                                    lq->weightStorage, weightGradQ, trainable);
     cfg->bias = hasBias ? allocateConv1dTransposedBias(init->outChannels, fanIn, lq->biasStorage,
-                                                       biasGradQ, trainable)
+                                                       biasGradQ, trainable, init->weightInit.key)
                         : NULL;
     freeQuantization(floatGradQ);
     cfg->groups = groups;

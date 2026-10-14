@@ -83,7 +83,7 @@ void testMultiLayerBackward_WithCrossEntropy_DoesNotCrash() {
     shape_t *w0Shape = reserveMemory(sizeof(shape_t));
     setShape(w0Shape, w0Dims, 2, w0Order);
     tensor_t *w0Param = initTensor(w0Shape, quantizationInitFloat(), NULL);
-    initDistribution(w0Param, &zeros);
+    initDistribution(w0Param, &zeros, NULL);
     tensor_t *w0Grad = gradInitFloat(w0Param, NULL);
     parameter_t *w0 = parameterInit(w0Param, w0Grad);
 
@@ -96,7 +96,7 @@ void testMultiLayerBackward_WithCrossEntropy_DoesNotCrash() {
     shape_t *b0Shape = reserveMemory(sizeof(shape_t));
     setShape(b0Shape, b0Dims, 2, b0Order);
     tensor_t *b0Param = initTensor(b0Shape, quantizationInitFloat(), NULL);
-    initDistribution(b0Param, &zeros);
+    initDistribution(b0Param, &zeros, NULL);
     tensor_t *b0Grad = gradInitFloat(b0Param, NULL);
     parameter_t *b0 = parameterInit(b0Param, b0Grad);
 
@@ -112,7 +112,7 @@ void testMultiLayerBackward_WithCrossEntropy_DoesNotCrash() {
     shape_t *w1Shape = reserveMemory(sizeof(shape_t));
     setShape(w1Shape, w1Dims, 2, w1Order);
     tensor_t *w1Param = initTensor(w1Shape, quantizationInitFloat(), NULL);
-    initDistribution(w1Param, &zeros);
+    initDistribution(w1Param, &zeros, NULL);
     tensor_t *w1Grad = gradInitFloat(w1Param, NULL);
     parameter_t *w1 = parameterInit(w1Param, w1Grad);
 
@@ -125,7 +125,7 @@ void testMultiLayerBackward_WithCrossEntropy_DoesNotCrash() {
     shape_t *b1Shape = reserveMemory(sizeof(shape_t));
     setShape(b1Shape, b1Dims, 2, b1Order);
     tensor_t *b1Param = initTensor(b1Shape, quantizationInitFloat(), NULL);
-    initDistribution(b1Param, &zeros);
+    initDistribution(b1Param, &zeros, NULL);
     tensor_t *b1Grad = gradInitFloat(b1Param, NULL);
     parameter_t *b1 = parameterInit(b1Param, b1Grad);
 

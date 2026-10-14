@@ -59,7 +59,7 @@ void initWeightTensor(tensor_t *weight, weightInit_t cfg, size_t fanIn, size_t f
         exit(1);
     }
 
-    initDistribution(weight, &dist);
+    initDistribution(weight, &dist, NULL);
 }
 
 bool resolveTrainable(trainable_t t, const char *factoryName) {
@@ -75,7 +75,7 @@ bool resolveTrainable(trainable_t t, const char *factoryName) {
     }
 }
 
-void initBiasTensor(tensor_t *bias, size_t fanIn) {
+void initBiasTensor(tensor_t *bias, size_t fanIn, const rngKey_t *initKey) {
     requireFloat32(bias, "initBiasTensor");
 
     /* PyTorch bias default: uniform(+/- 1/sqrt(fan_in)), independent of the
@@ -84,5 +84,5 @@ void initBiasTensor(tensor_t *bias, size_t fanIn) {
         .type = KAIMING_UNIFORM,
         .params.kaiming = {.gain = INIT_DEFAULT_GAIN, .fanMode = fanIn},
     };
-    initDistribution(bias, &dist);
+    initDistribution(bias, &dist, NULL);
 }

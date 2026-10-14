@@ -160,7 +160,7 @@ setOrderOfDimsForNewTensor(N, order);
 shape_t *s    = reserveMemory(sizeof(shape_t));
 setShape(s, dims, N, order);
 tensor_t *t   = initTensor(s, quantizationInitFloat(), NULL);
-tensorFillFromFloatBuffer(t, src, count);   /* or initDistribution(t, &d); */
+tensorFillFromFloatBuffer(t, src, count);   /* or initDistribution(t, &d, rs); */
 ```
 
 The `tensorInitFloat` / `tensorInitSymInt32` / `tensorInit*` family was

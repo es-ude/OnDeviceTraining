@@ -57,12 +57,21 @@ float randomUniform(float min, float max) {
     return min + r * (max - min);
 }
 
+float randomUniformCtx(rngStream_t *rs, float min, float max) {
+    if (rs == NULL) {
+        PRINT_ERROR("randomUniformCtx: draw without a stream");
+        exit(1);
+    }
+    float r = rngNextUnitFloat(rs);
+    return min + r * (max - min);
+}
+
 float kaimingNormal(float gain, size_t fanMode) {
     float std = gain / sqrtf((float)fanMode);
     return randomNormal(0.0f, std);
 }
 
-float kaimingUniform(float gain, size_t fanMode) {
+float kaimingUniform(float gain, size_t fanMode, rngStream_t *rs) {
     float limit = gain * sqrtf(3.0f / (float)fanMode);
     return randomUniform(-limit, limit);
 }
@@ -72,7 +81,7 @@ float xavierNormal(float gain, size_t fanIn, size_t fanOut) {
     return randomNormal(0.0f, std);
 }
 
-float xavierUniform(float gain, size_t fanIn, size_t fanOut) {
+float xavierUniform(float gain, size_t fanIn, size_t fanOut, rngStream_t *rs) {
     float limit = gain * sqrtf(6.0f / (float)(fanIn + fanOut));
     return randomUniform(-limit, limit);
 }

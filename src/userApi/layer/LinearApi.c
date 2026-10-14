@@ -66,12 +66,13 @@ static parameter_t *allocateLinearWeights(size_t inFeatures, size_t outFeatures,
 }
 
 static parameter_t *allocateLinearBias(size_t outFeatures, size_t fanIn, quantization_t *storageQ,
-                                       quantization_t *gradQ, bool trainable) {
+                                       quantization_t *gradQ, bool trainable,
+                                       const rngKey_t *initKey) {
     /* Bias tensor: shape [outFeatures]. PyTorch draws bias from
      * uniform(+/- 1/sqrt(fan_in)) using the WEIGHT's fan_in (= inFeatures). */
     shape_t *shape = buildOwnedShape((size_t[]){outFeatures}, 1);
     tensor_t *paramTensor = initTensor(shape, getQLike(storageQ), NULL);
-    initBiasTensor(paramTensor, fanIn);
+    initBiasTensor(paramTensor, fanIn, initKey);
 
     tensor_t *gradTensor = trainable ? gradInit(paramTensor, gradQ, NULL) : NULL;
     return parameterInit(paramTensor, gradTensor);
@@ -140,7 +141,7 @@ layer_t *linearLayerInit(linearInit_t *init, layerQuant_t *lq) {
     cfg->weights = allocateLinearWeights(init->inFeatures, init->outFeatures, init->weightInit,
                                          lq->weightStorage, weightGradQ, trainable);
     cfg->bias = hasBias ? allocateLinearBias(init->outFeatures, init->inFeatures, lq->biasStorage,
-                                             biasGradQ, trainable)
+                                             biasGradQ, trainable, init->weightInit.key)
                         : NULL;
     freeQuantization(floatGradQ);
 
@@ -190,7 +191,7 @@ layer_t *linearLayerInitOwning(linearInit_t *init, layerQuant_t *lq) {
     cfg->weights = allocateLinearWeights(init->inFeatures, init->outFeatures, init->weightInit,
                                          lq->weightStorage, weightGradQ, trainable);
     cfg->bias = hasBias ? allocateLinearBias(init->outFeatures, init->inFeatures, lq->biasStorage,
-                                             biasGradQ, trainable)
+                                             biasGradQ, trainable, init->weightInit.key)
                         : NULL;
     freeQuantization(floatGradQ);
 

@@ -80,12 +80,13 @@ static parameter_t *allocateConv1dWeights(size_t outChannels, size_t inChannels,
 }
 
 static parameter_t *allocateConv1dBias(size_t outChannels, size_t fanIn, quantization_t *storageQ,
-                                       quantization_t *gradQ, bool trainable) {
+                                       quantization_t *gradQ, bool trainable,
+                                       const rngKey_t *initKey) {
     /* Bias tensor: shape [outChannels]. PyTorch draws bias from
      * uniform(+/- 1/sqrt(fan_in)) using the WEIGHT's fan_in. */
     shape_t *shape = buildOwnedShape((size_t[]){outChannels}, 1);
     tensor_t *paramTensor = initTensor(shape, getQLike(storageQ), NULL);
-    initBiasTensor(paramTensor, fanIn);
+    initBiasTensor(paramTensor, fanIn, initKey);
 
     tensor_t *gradTensor = trainable ? gradInit(paramTensor, gradQ, NULL) : NULL;
     return parameterInit(paramTensor, gradTensor);
@@ -181,7 +182,7 @@ layer_t *conv1dLayerInit(conv1dInit_t *init, layerQuant_t *lq) {
         allocateConv1dWeights(init->outChannels, init->inChannels, groups, init->kernelSize,
                               init->weightInit, lq->weightStorage, weightGradQ, trainable);
     cfg->bias = hasBias ? allocateConv1dBias(init->outChannels, fanIn, lq->biasStorage, biasGradQ,
-                                             trainable)
+                                             trainable, init->weightInit.key)
                         : NULL;
     freeQuantization(floatGradQ);
     cfg->groups = groups;
@@ -236,7 +237,7 @@ layer_t *conv1dLayerInitOwning(conv1dInit_t *init, layerQuant_t *lq) {
         allocateConv1dWeights(init->outChannels, init->inChannels, groups, init->kernelSize,
                               init->weightInit, lq->weightStorage, weightGradQ, trainable);
     cfg->bias = hasBias ? allocateConv1dBias(init->outChannels, fanIn, lq->biasStorage, biasGradQ,
-                                             trainable)
+                                             trainable, init->weightInit.key)
                         : NULL;
     freeQuantization(floatGradQ);
     cfg->groups = groups;

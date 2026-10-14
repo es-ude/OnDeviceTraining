@@ -1,4 +1,5 @@
 #include <math.h>
+#include <stddef.h>
 #include <string.h>
 
 #include "ArithmeticType.h"
@@ -26,6 +27,17 @@
 #include "expected_bfp_layer_forward.h"
 #include "expected_linear_grouped_asym.h"
 #include "unity.h"
+
+/* The init recipe carries the layer's init key, appended last so that a
+ * zero-initialised recipe leaves it NULL; the bias takes the same key. */
+_Static_assert(_Generic(((weightInit_t){0}).key, const rngKey_t *: 1, default: 0),
+               "weightInit_t.key must be a const rngKey_t *");
+_Static_assert(offsetof(weightInit_t, key) > offsetof(weightInit_t, gain),
+               "weightInit_t.key must be the last field");
+_Static_assert(_Generic((&initBiasTensor),
+                   void (*)(tensor_t *, size_t, const rngKey_t *): 1,
+                   default: 0),
+               "initBiasTensor must take (tensor_t *, size_t, const rngKey_t *)");
 
 void testLinearForwardFloatRank1BiasRank2Output() {
     size_t *inputDims = reserveMemory(2 * sizeof(size_t));

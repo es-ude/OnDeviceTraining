@@ -124,8 +124,9 @@ void testKaimingUniform() {
     float samples[n];
 
     rngSetSeed(42);
+    rngStream_t rs = rngOpen(rngKeyFromSeed(42u));
     for (size_t i = 0; i < n; i++) {
-        samples[i] = kaimingUniform(1, fan_in);
+        samples[i] = kaimingUniform(1, fan_in, &rs);
     }
 
     float mean = calculateMean(samples, n);
@@ -176,8 +177,9 @@ void testXavierUniform() {
     float samples[n];
 
     rngSetSeed(42);
+    rngStream_t rs = rngOpen(rngKeyFromSeed(42u));
     for (size_t i = 0; i < n; i++) {
-        samples[i] = xavierUniform(1, fan_in, fan_out);
+        samples[i] = xavierUniform(1, fan_in, fan_out, &rs);
     }
 
     float mean = calculateMean(samples, n);
@@ -282,6 +284,35 @@ void testFillNormalRejectsNonFloat(void) {
     freeTensor(t);
 }
 
+/* The keyed uniform scales the stream's unit floats, u -> min + u * (max - min),
+ * and leaves the global generator alone. Golds from the Python mirror (the
+ * stream of the root of seed 42; -1 + 2u is exact in float32), from the
+ * repository root:
+ *   uv run python -c "from examples._shared.keyed_rng import (key_from_seed,
+ *   open_stream, next_unit_float as nuf); t = (open_stream(key_from_seed(42)), 0.0); d = [
+ *   (t := nuf(t[0])) for _ in range(3)]; print([repr(-1 + 2 * u) for _, u in d])"
+ */
+void testRandomUniformCtxScalesTheStreamsUnitFloats(void) {
+    const float gold[3] = {-0.13961052894592285f, -0.08065330982208252f, 0.9558695554733276f};
+    rngStream_t rs = rngOpen(rngKeyFromSeed(42u));
+    const uint32_t globalBefore = rngGetSeed();
+    float draws[3];
+    for (size_t i = 0; i < 3; i++) {
+        draws[i] = randomUniformCtx(&rs, -1.0f, 1.0f);
+    }
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(gold, draws, 3);
+    TEST_ASSERT_EQUAL_UINT32(globalBefore, rngGetSeed());
+}
+
+static void uniformDrawWithoutAStream(void) {
+    (void)randomUniformCtx(NULL, 0.0f, 1.0f);
+}
+
+void testRandomUniformCtxExitsWithoutAStream(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "randomUniformCtx: draw without a stream",
+                             uniformDrawWithoutAStream());
+}
+
 void setUp(void) {}
 
 void tearDown(void) {}
@@ -300,6 +331,8 @@ int main(void) {
     RUN_TEST(testFillNormalFloat32TensorStats);
     RUN_TEST(testFillNormalFloat32TensorDeterministic);
     RUN_TEST(testFillNormalRejectsNonFloat);
+    RUN_TEST(testRandomUniformCtxScalesTheStreamsUnitFloats);
+    RUN_TEST(testRandomUniformCtxExitsWithoutAStream);
 
     return UNITY_END();
 }

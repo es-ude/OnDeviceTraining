@@ -9,6 +9,7 @@
 #include "DeathTest.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
@@ -21,11 +22,12 @@ _Static_assert(_Generic((&initTensor),
                    default: 0),
                "initTensor must take (shape_t *, quantization_t *, sparsity_t *)");
 
-/* Compile-time contract: initDistribution takes tensor_t * and const distribution_t *. */
+/* Compile-time contract: initDistribution takes tensor_t *, const distribution_t *
+ * and a stream (NULL for ZEROS and ONES). */
 _Static_assert(_Generic((&initDistribution),
-                   void (*)(tensor_t *, const distribution_t *): 1,
+                   void (*)(tensor_t *, const distribution_t *, rngStream_t *): 1,
                    default: 0),
-               "initDistribution must take (tensor_t *, const distribution_t *)");
+               "initDistribution must take (tensor_t *, const distribution_t *, rngStream_t *)");
 
 /* Compile-time contract: tensorFillFromFloatBuffer takes (tensor_t *, const float *, size_t). */
 _Static_assert(_Generic((&tensorFillFromFloatBuffer),
@@ -80,7 +82,7 @@ void testTensorInitWithDistribution_Zeros_InitializesProductOfDimsValues() {
     }
 
     distribution_t d = {.type = ZEROS};
-    initDistribution(t, &d);
+    initDistribution(t, &d, NULL);
 
     /* CAPTURE before free. */
     float captured[10];
@@ -106,7 +108,7 @@ void testTensorInitWithDistribution_Ones_InitializesAllValues() {
     }
 
     distribution_t d = {.type = ONES};
-    initDistribution(t, &d);
+    initDistribution(t, &d, NULL);
 
     /* CAPTURE. */
     float captured[12];
@@ -132,7 +134,8 @@ void testTensorInitWithDistribution_Normal_InitializesAllValues() {
     }
 
     distribution_t d = {.type = NORMAL, .params.normal = {0.0f, 0.01f}};
-    initDistribution(t, &d);
+    rngStream_t rs = rngOpen(rngKeyFromSeed(1u));
+    initDistribution(t, &d, &rs);
 
     /* CAPTURE the derived sentinel count. */
     size_t sentinelCount = 0;
@@ -152,7 +155,7 @@ void testTensorInitWithDistribution_ShapeIsCorrect() {
      * initDistribution runs. */
     tensor_t *t = makeFloatTensorForDistTest(2, 3);
     distribution_t d = {.type = ZEROS};
-    initDistribution(t, &d);
+    initDistribution(t, &d, NULL);
 
     /* CAPTURE shape data before free. */
     size_t capturedNumDims = t->shape->numberOfDimensions;
@@ -208,7 +211,7 @@ void testInitDistribution_Zeros_AllValuesAreZero(void) {
     }
 
     distribution_t d = {.type = ZEROS};
-    initDistribution(t, &d);
+    initDistribution(t, &d, NULL);
 
     /* CAPTURE values before free. */
     float captured[12];
@@ -226,7 +229,7 @@ void testInitDistribution_Zeros_AllValuesAreZero(void) {
 void testInitDistribution_Ones_AllValuesAreOne(void) {
     tensor_t *t = makeFloatTensorForDistTest(3, 4);
     distribution_t d = {.type = ONES};
-    initDistribution(t, &d);
+    initDistribution(t, &d, NULL);
     float *vals = (float *)t->data;
 
     /* CAPTURE. */
@@ -245,7 +248,8 @@ void testInitDistribution_Ones_AllValuesAreOne(void) {
 void testInitDistribution_Uniform_AllValuesInRange(void) {
     tensor_t *t = makeFloatTensorForDistTest(4, 5);
     distribution_t d = {.type = UNIFORM, .params.uniform = {-0.5f, 0.5f}};
-    initDistribution(t, &d);
+    rngStream_t rs = rngOpen(rngKeyFromSeed(1u));
+    initDistribution(t, &d, &rs);
     float *vals = (float *)t->data;
 
     /* CAPTURE values + derived bool flag. */
@@ -273,7 +277,8 @@ void testInitDistribution_Normal_NotAllSentinel(void) {
         vals[i] = -999.0f;
     }
     distribution_t d = {.type = NORMAL, .params.normal = {0.0f, 0.01f}};
-    initDistribution(t, &d);
+    rngStream_t rs = rngOpen(rngKeyFromSeed(1u));
+    initDistribution(t, &d, &rs);
 
     /* CAPTURE the derived sentinel count. */
     size_t sentinelCount = 0;
@@ -292,7 +297,8 @@ void testInitDistribution_XavierUniform_NotAllZero(void) {
     tensor_t *t = makeFloatTensorForDistTest(4, 5);
     distribution_t d = {.type = XAVIER_UNIFORM,
                         .params.xavier = {.gain = 1.0f, .fanIn = 4, .fanOut = 5}};
-    initDistribution(t, &d);
+    rngStream_t rs = rngOpen(rngKeyFromSeed(1u));
+    initDistribution(t, &d, &rs);
     float *vals = (float *)t->data;
 
     /* CAPTURE the derived bool flag. */
@@ -313,7 +319,8 @@ void testInitDistribution_XavierNormal_NotAllZero(void) {
     tensor_t *t = makeFloatTensorForDistTest(4, 5);
     distribution_t d = {.type = XAVIER_NORMAL,
                         .params.xavier = {.gain = 1.0f, .fanIn = 4, .fanOut = 5}};
-    initDistribution(t, &d);
+    rngStream_t rs = rngOpen(rngKeyFromSeed(1u));
+    initDistribution(t, &d, &rs);
     float *vals = (float *)t->data;
 
     /* CAPTURE. */
@@ -334,7 +341,8 @@ void testInitDistribution_KaimingUniform_NotAllZero(void) {
     tensor_t *t = makeFloatTensorForDistTest(4, 5);
     distribution_t d = {.type = KAIMING_UNIFORM,
                         .params.kaiming = {.gain = sqrtf(2.0f), .fanMode = 4}};
-    initDistribution(t, &d);
+    rngStream_t rs = rngOpen(rngKeyFromSeed(1u));
+    initDistribution(t, &d, &rs);
     float *vals = (float *)t->data;
 
     /* CAPTURE. */
@@ -355,7 +363,8 @@ void testInitDistribution_KaimingNormal_NotAllZero(void) {
     tensor_t *t = makeFloatTensorForDistTest(4, 5);
     distribution_t d = {.type = KAIMING_NORMAL,
                         .params.kaiming = {.gain = sqrtf(2.0f), .fanMode = 4}};
-    initDistribution(t, &d);
+    rngStream_t rs = rngOpen(rngKeyFromSeed(1u));
+    initDistribution(t, &d, &rs);
     float *vals = (float *)t->data;
 
     /* CAPTURE. */

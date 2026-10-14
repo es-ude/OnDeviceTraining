@@ -16,6 +16,7 @@
 #include "LossFunction.h"
 #include "OptimizerApi.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "ReluApi.h"
 #include "SgdApi.h"
 #include "SoftmaxApi.h"
@@ -104,19 +105,23 @@ static void buildModel(layer_t **model, quantization_t **q_out) {
      * uniform(+/- 1/sqrt(fan_in)) rather than the pre-migration ZEROS — this
      * test only asserts that training reduces the loss, not specific
      * parameter values, so the divergence is harmless. */
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey2 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 2u);
     model[0] = linearLayerInit(
-        &(linearInit_t){.inFeatures = INPUT_DIM,
-                        .outFeatures = HIDDEN_DIM,
-                        .bias = BIAS_TRUE,
-                        .weightInit = {.scheme = INIT_XAVIER_UNIFORM, .gain = 1.0f}},
+        &(linearInit_t){
+            .inFeatures = INPUT_DIM,
+            .outFeatures = HIDDEN_DIM,
+            .bias = BIAS_TRUE,
+            .weightInit = {.scheme = INIT_XAVIER_UNIFORM, .gain = 1.0f, .key = &initKey0}},
         &lq);
     model[1] = reluLayerInit(&lq);
 
     model[2] = linearLayerInit(
-        &(linearInit_t){.inFeatures = HIDDEN_DIM,
-                        .outFeatures = NUM_CLASSES,
-                        .bias = BIAS_TRUE,
-                        .weightInit = {.scheme = INIT_XAVIER_UNIFORM, .gain = 1.0f}},
+        &(linearInit_t){
+            .inFeatures = HIDDEN_DIM,
+            .outFeatures = NUM_CLASSES,
+            .bias = BIAS_TRUE,
+            .weightInit = {.scheme = INIT_XAVIER_UNIFORM, .gain = 1.0f, .key = &initKey2}},
         &lq);
     model[3] = softmaxLayerInit(&lq);
 }

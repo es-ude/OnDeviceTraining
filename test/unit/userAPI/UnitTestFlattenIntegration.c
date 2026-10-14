@@ -10,6 +10,7 @@
 #include "LinearApi.h"
 #include "LossFunction.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "SoftmaxApi.h"
 #include "StorageApi.h"
 #include "TensorApi.h"
@@ -24,11 +25,13 @@ void testCalculateGradsSequential_WithFlattenFirst_DoesNotCrash(void) {
     layerQuantInitUniform(&lq, q);
 
     layer_t *flatten = flattenLayerInit();
+    const rngKey_t initKey1 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 1u);
     layer_t *linear = linearLayerInit(
-        &(linearInit_t){.inFeatures = 6,
-                        .outFeatures = 2,
-                        .bias = BIAS_TRUE,
-                        .weightInit = {.scheme = INIT_XAVIER_UNIFORM, .gain = 1.0f}},
+        &(linearInit_t){
+            .inFeatures = 6,
+            .outFeatures = 2,
+            .bias = BIAS_TRUE,
+            .weightInit = {.scheme = INIT_XAVIER_UNIFORM, .gain = 1.0f, .key = &initKey1}},
         &lq);
     layer_t *softmax = softmaxLayerInit(&lq);
     layer_t *model[3] = {flatten, linear, softmax};

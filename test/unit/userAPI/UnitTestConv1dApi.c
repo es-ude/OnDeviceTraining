@@ -40,6 +40,7 @@ void testConv1dLayerInitBorrowingBuildsLayerWithCorrectShape(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = conv1dLayerInit(
         &(conv1dInit_t){
             .inChannels = 3,
@@ -50,6 +51,7 @@ void testConv1dLayerInitBorrowingBuildsLayerWithCorrectShape(void) {
             .dilation = 1,
             .groups = 1,
             .bias = BIAS_TRUE,
+            .weightInit.key = &initKey,
         },
         &lq);
 
@@ -102,12 +104,14 @@ void testConv1dLayerInitBorrowingBiasDefaultResolvesToTrue(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = conv1dLayerInit(
         &(conv1dInit_t){
             .inChannels = 1,
             .outChannels = 2,
             .kernelSize = 3,
             /* .bias omitted → BIAS_DEFAULT (0) → resolves to true */
+            .weightInit.key = &initKey,
         },
         &lq);
 
@@ -123,12 +127,14 @@ void testConv1dLayerInitBorrowingBiasFalseLeavesBiasNull(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = conv1dLayerInit(
         &(conv1dInit_t){
             .inChannels = 1,
             .outChannels = 2,
             .kernelSize = 3,
             .bias = BIAS_FALSE,
+            .weightInit.key = &initKey,
         },
         &lq);
 
@@ -144,6 +150,7 @@ void testConv1dLayerInitBorrowingPaddingDefaultIsValid(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = conv1dLayerInit(
         &(conv1dInit_t){
             .inChannels = 1,
@@ -151,6 +158,7 @@ void testConv1dLayerInitBorrowingPaddingDefaultIsValid(void) {
             .kernelSize = 3,
             /* .padding omitted → VALID (enum value 0) */
             /* .stride, .dilation, .groups omitted → 1 (resolved from 0) */
+            .weightInit.key = &initKey,
         },
         &lq);
 
@@ -169,12 +177,14 @@ void testConv1dLayerInitOwningDeepCopiesQuantizations(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = conv1dLayerInitOwning(
         &(conv1dInit_t){
             .inChannels = 3,
             .outChannels = 4,
             .kernelSize = 5,
             .bias = BIAS_TRUE,
+            .weightInit.key = &initKey,
         },
         &lq);
 
@@ -203,12 +213,14 @@ void testConv1dLayerInitOwningFreesAllAllocationsWithoutLeak(void) {
         layerQuant_t lq;
         layerQuantInitUniform(&lq, q);
 
+        const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
         layer_t *layer = conv1dLayerInitOwning(
             &(conv1dInit_t){
                 .inChannels = 8,
                 .outChannels = 4,
                 .kernelSize = 3,
                 .bias = BIAS_TRUE,
+                .weightInit.key = &initKey,
             },
             &lq);
 
@@ -234,12 +246,14 @@ void testConv1dLayerInitKeepsFloat32GradEvenWithSymInt32BackwardMath(void) {
         .biasStorage = fwd,
     };
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = conv1dLayerInit(
         &(conv1dInit_t){
             .inChannels = 2,
             .outChannels = 4,
             .kernelSize = 3,
             .bias = BIAS_TRUE,
+            .weightInit.key = &initKey,
         },
         &lq);
 
@@ -268,12 +282,14 @@ void testConv1dLayerInitOwningWeightGradStorageKnobOverridesFloatDefault(void) {
     quantization_t *gradKnob = quantizationInitSymInt32WithBits(HALF_AWAY, 16);
     lq.weightGradStorage = gradKnob;
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = conv1dLayerInitOwning(
         &(conv1dInit_t){
             .inChannels = 3,
             .outChannels = 4,
             .kernelSize = 5,
             .bias = BIAS_TRUE,
+            .weightInit.key = &initKey,
         },
         &lq);
 
@@ -309,12 +325,14 @@ void testConv1dLayerInitDefaultWeightsWithinPyTorchBound(void) {
     layerQuantInitUniform(&lq, q);
 
     rngSetSeed(123);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(123u), RNG_TAG_INIT, 0u);
     layer_t *layer = conv1dLayerInit(
         &(conv1dInit_t){
             .inChannels = inChannels,
             .outChannels = outChannels,
             .kernelSize = kernelSize,
             .bias = BIAS_TRUE,
+            .weightInit.key = &initKey,
         },
         &lq);
 
@@ -353,13 +371,14 @@ void testConv1dLayerInitKaimingUniformOverrideUsesHeBound(void) {
     layerQuantInitUniform(&lq, q);
 
     rngSetSeed(123);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(123u), RNG_TAG_INIT, 0u);
     layer_t *layer = conv1dLayerInit(
         &(conv1dInit_t){
             .inChannels = inChannels,
             .outChannels = outChannels,
             .kernelSize = kernelSize,
             .bias = BIAS_TRUE,
-            .weightInit = {INIT_KAIMING_UNIFORM},
+            .weightInit = {INIT_KAIMING_UNIFORM, .key = &initKey},
         },
         &lq);
 

@@ -23,6 +23,7 @@
 #include "Optimizer.h"
 #include "OptimizerApi.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "ReluApi.h"
 #include "SgdApi.h"
 #include "SoftmaxApi.h"
@@ -190,20 +191,25 @@ static void buildModel(layer_t **model, quantization_t *q) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey5 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 5u);
     model[0] = conv1dLayerInit(&(conv1dInit_t){.inChannels = IN_CHANNELS,
                                                .outChannels = CONV_CHANNELS,
                                                .kernelSize = 3,
                                                .padding = SAME,
-                                               .bias = BIAS_FALSE},
+                                               .bias = BIAS_FALSE,
+                                               .weightInit.key = &initKey0},
                                &lq);
     model[1] =
         groupNormLayerInit(&(groupNormInit_t){.numGroups = 1, .numChannels = CONV_CHANNELS}, &lq);
     model[2] = reluLayerInit(&lq);
     model[3] = adaptiveAvgPool1dLayerInit(&(adaptiveAvgPool1dInit_t){.outputSize = 1}, &lq);
     model[4] = flattenLayerInit();
-    model[5] = linearLayerInit(
-        &(linearInit_t){.inFeatures = CONV_CHANNELS, .outFeatures = NUM_CLASSES, .bias = BIAS_TRUE},
-        &lq);
+    model[5] = linearLayerInit(&(linearInit_t){.inFeatures = CONV_CHANNELS,
+                                               .outFeatures = NUM_CLASSES,
+                                               .bias = BIAS_TRUE,
+                                               .weightInit.key = &initKey5},
+                               &lq);
     model[6] = softmaxLayerInit(&lq);
 }
 

@@ -17,6 +17,7 @@
 #include "Optimizer.h"
 #include "OptimizerApi.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "SgdApi.h"
 #include "StateDictApi.h"
 #include "StorageApi.h"
@@ -183,14 +184,20 @@ void testMultiLayer_LinearDropoutLinear_BackwardCompletes(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
-    layer_t *linear0 =
-        linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = 4, .bias = BIAS_TRUE}, &lq);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey2 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 2u);
+    layer_t *linear0 = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 4, .outFeatures = 4, .bias = BIAS_TRUE, .weightInit.key = &initKey0},
+        &lq);
 
     tensor_t *mask = buildBoolMask(4);
     layer_t *drop = dropoutLayerInit(0.5f, mask, q, q);
 
-    layer_t *linear1 =
-        linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = 4, .bias = BIAS_TRUE}, &lq);
+    layer_t *linear1 = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 4, .outFeatures = 4, .bias = BIAS_TRUE, .weightInit.key = &initKey2},
+        &lq);
 
     layer_t *model[3] = {linear0, drop, linear1};
 

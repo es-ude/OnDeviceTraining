@@ -15,6 +15,7 @@
 #include "Linear.h"
 #include "LinearApi.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
@@ -29,11 +30,13 @@ void testLayerLoadWeightsLinearOverwritesWeightAndBiasTensors(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = linearLayerInit(
         &(linearInit_t){
             .inFeatures = 3,
             .outFeatures = 2,
             .bias = BIAS_TRUE,
+            .weightInit.key = &initKey,
         },
         &lq);
 
@@ -57,11 +60,13 @@ void testLayerLoadWeightsLinearNoBiasAcceptsNullBiasData(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = linearLayerInit(
         &(linearInit_t){
             .inFeatures = 3,
             .outFeatures = 2,
             .bias = BIAS_FALSE,
+            .weightInit.key = &initKey,
         },
         &lq);
 
@@ -159,12 +164,14 @@ void testLayerLoadWeightsConv1dOverwritesWeightAndBiasTensors(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = conv1dLayerInit(
         &(conv1dInit_t){
             .inChannels = 2,
             .outChannels = 3,
             .kernelSize = 4,
             .bias = BIAS_TRUE,
+            .weightInit.key = &initKey,
         },
         &lq);
 
@@ -194,12 +201,14 @@ void testLayerLoadWeightsConv1dNoBiasAcceptsNullBiasData(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = conv1dLayerInit(
         &(conv1dInit_t){
             .inChannels = 1,
             .outChannels = 1,
             .kernelSize = 3,
             .bias = BIAS_FALSE,
+            .weightInit.key = &initKey,
         },
         &lq);
 
@@ -220,12 +229,14 @@ void testLayerLoadWeightsConv1dTransposedOverwritesWeightAndBiasTensors(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = conv1dTransposedLayerInit(
         &(conv1dTransposedInit_t){
             .inChannels = 4,
             .outChannels = 2,
             .kernelSize = 3,
             .bias = BIAS_TRUE,
+            .weightInit.key = &initKey,
         },
         &lq);
 

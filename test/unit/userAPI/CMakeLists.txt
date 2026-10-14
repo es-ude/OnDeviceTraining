@@ -26,6 +26,7 @@ add_elastic_ai_unit_test(
         LayerWeightsApi
         MORE_LIBS
         Common
+        RNG
         LinearApi
         Conv1dApi
         Conv1dTransposedApi
@@ -51,6 +52,7 @@ add_elastic_ai_unit_test(
         StateDictApi
         MORE_LIBS
         Common
+        RNG
         LinearApi
         ReluApi
         LayerNormApi
@@ -571,6 +573,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         LayerConfigAccess
         MORE_LIBS
+        RNG
         ArithmeticType
         CommonLayerLibs
         BatchNorm1dApi
@@ -672,6 +675,7 @@ __register_target_as_unit_test(UnitTestMicroBatchStacking)
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST StackGather
         MORE_LIBS
+        RNG
         TensorApi
         Tensor
         QuantizationApi

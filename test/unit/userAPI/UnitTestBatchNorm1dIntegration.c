@@ -26,6 +26,7 @@
 #include "LossFunction.h"
 #include "OptimizerApi.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "SgdApi.h"
 #include "StateDictApi.h"
 #include "StorageApi.h"
@@ -203,8 +204,10 @@ static const float kY[8] = {0.1f, 0.4f, -0.3f, 0.9f, 0.2f, -0.7f, 0.6f, -0.2f};
 
 /* [BN(2) -> Linear(2->2)] with deterministic Linear weights. */
 static void buildBnLinear(layer_t **model, trainable_t bnTrainable) {
+    const rngKey_t initKey1 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 1u);
     model[0] = bnLayer(2, false, false, bnTrainable);
-    model[1] = linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &g_lq);
+    model[1] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey1}, &g_lq);
     float w[4] = {0.5f, -0.25f, 0.75f, 1.0f};
     float b[2] = {0.1f, -0.1f};
     layerLoadWeights(model[1], w, b);
@@ -384,8 +387,10 @@ static batch_t *buildCadBatch(tensor_t **items, tensor_t **labels) {
 
 static void runCadence(size_t m, float *rm, float *rv, uint64_t *nbt, float *grads) {
     layer_t *model[2];
+    const rngKey_t initKey1 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 1u);
     model[0] = bnLayer(3, false, false, TRAINABLE_DEFAULT);
-    model[1] = linearLayerInit(&(linearInit_t){.inFeatures = 3, .outFeatures = 2}, &g_lq);
+    model[1] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 3, .outFeatures = 2, .weightInit.key = &initKey1}, &g_lq);
     float g[3], be[3], w[6], b[2];
     memcpy(g, bnCadGamma, sizeof g);
     memcpy(be, bnCadBeta, sizeof be);
@@ -502,9 +507,12 @@ void testTrainingRunRejectsUntrackedRank2BatchNormBeforeEpoch0(void) {
     g_pfDatasetSize = 2;
     pfItem = buildFloatTensor((size_t[]){2}, 1, (float[]){0.1f, 0.2f});
     pfLabel = buildFloatTensor((size_t[]){2}, 1, (float[]){0.f, 1.f});
+    const rngKey_t initKey1 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 1u);
     layer_t *model[2] = {
         bnLayer(2, false, true, TRAINABLE_DEFAULT),
-        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &g_lq)};
+        linearLayerInit(
+            &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey1},
+            &g_lq)};
     ASSERT_EXITS_WITH_FAILURE(runPreflightOnly(model, 2, 1));
     freeLinearLayer(model[1]);
     freeBatchNorm1dLayer(model[0]);
@@ -546,9 +554,12 @@ void testTrainingRunRejectsUntrackedRank3SingleStep(void) {
     g_pfDatasetSize = 2;
     pfItem = buildFloatTensor((size_t[]){2, 1}, 2, (float[]){0.1f, 0.2f});
     pfLabel = buildFloatTensor((size_t[]){2}, 1, (float[]){0.f, 1.f});
+    const rngKey_t initKey2 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 2u);
     layer_t *model[3] = {
         bnLayer(2, false, true, TRAINABLE_DEFAULT), flattenLayerInit(),
-        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &g_lq)};
+        linearLayerInit(
+            &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey2},
+            &g_lq)};
     ASSERT_EXITS_WITH_FAILURE(runPreflightOnly(model, 3, 1));
     freeLinearLayer(model[2]);
     freeFlattenLayer(model[1]);
@@ -581,9 +592,12 @@ void testTrainingRunAcceptsTrackedRank2BatchNorm(void) {
     g_pfDatasetSize = 2;
     pfItem = buildFloatTensor((size_t[]){2}, 1, (float[]){0.1f, 0.2f});
     pfLabel = buildFloatTensor((size_t[]){2}, 1, (float[]){0.f, 1.f});
+    const rngKey_t initKey1 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 1u);
     layer_t *model[2] = {
         bnLayer(2, false, false, TRAINABLE_DEFAULT),
-        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &g_lq)};
+        linearLayerInit(
+            &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey1},
+            &g_lq)};
 
     dataLoader_t *trainDl =
         dataLoaderInit(pfGetSample, pfDatasetSize, 2, NULL, NULL, false, 0, true);
@@ -619,9 +633,12 @@ static size_t acceptUntrackedRank3(size_t evalMicroBatchSize) {
     g_pfDatasetSize = 2;
     pfItem = buildFloatTensor((size_t[]){2, 3}, 2, (float[]){0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f});
     pfLabel = buildFloatTensor((size_t[]){2}, 1, (float[]){0.f, 1.f});
+    const rngKey_t initKey2 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 2u);
     layer_t *model[3] = {
         bnLayer(2, false, true, TRAINABLE_DEFAULT), flattenLayerInit(),
-        linearLayerInit(&(linearInit_t){.inFeatures = 6, .outFeatures = 2}, &g_lq)};
+        linearLayerInit(
+            &(linearInit_t){.inFeatures = 6, .outFeatures = 2, .weightInit.key = &initKey2},
+            &g_lq)};
 
     dataLoader_t *trainDl =
         dataLoaderInit(pfGetSample, pfDatasetSize, 2, NULL, NULL, false, 0, true);
@@ -666,9 +683,12 @@ void testTrainingRunPassesPreflightForUntrackedRank2WhenEvalStacks(void) {
     g_pfDatasetSize = 2;
     pfItem = buildFloatTensor((size_t[]){2}, 1, (float[]){0.1f, 0.2f});
     pfLabel = buildFloatTensor((size_t[]){2}, 1, (float[]){0.f, 1.f});
+    const rngKey_t initKey1 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 1u);
     layer_t *model[2] = {
         bnLayer(2, false, true, TRAINABLE_DEFAULT),
-        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &g_lq)};
+        linearLayerInit(
+            &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey1},
+            &g_lq)};
     ASSERT_EXITS_WITH(2, runPreflightOnly(model, 2, 0));
     ASSERT_EXITS_WITH(2, runPreflightOnly(model, 2, 2));
     freeLinearLayer(model[1]);
@@ -682,9 +702,12 @@ void testTrainingRunRejectsUntrackedRank2WithOneRowTail(void) {
     g_pfDatasetSize = 3;
     pfItem = buildFloatTensor((size_t[]){2}, 1, (float[]){0.1f, 0.2f});
     pfLabel = buildFloatTensor((size_t[]){2}, 1, (float[]){0.f, 1.f});
+    const rngKey_t initKey1 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 1u);
     layer_t *model[2] = {
         bnLayer(2, false, true, TRAINABLE_DEFAULT),
-        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &g_lq)};
+        linearLayerInit(
+            &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey1},
+            &g_lq)};
     ASSERT_EXITS_WITH_FAILURE(runPreflightOnly(model, 2, 2));
     ASSERT_EXITS_WITH(2, runPreflightOnly(model, 2, 3)); /* one 3-row chunk */
     freeLinearLayer(model[1]);
@@ -698,9 +721,12 @@ void testTrainingRunRejectsUntrackedRank2WithOneRowTail(void) {
 void testPreflightJudgesMinOfMAndN(void) {
     pfItem = buildFloatTensor((size_t[]){2}, 1, (float[]){0.1f, 0.2f});
     pfLabel = buildFloatTensor((size_t[]){2}, 1, (float[]){0.f, 1.f});
+    const rngKey_t initKey1 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 1u);
     layer_t *model[2] = {
         bnLayer(2, false, true, TRAINABLE_DEFAULT),
-        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &g_lq)};
+        linearLayerInit(
+            &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey1},
+            &g_lq)};
     g_pfDatasetSize = 3;
     ASSERT_EXITS_WITH(2, runPreflightOnly(model, 2, 8));
     g_pfDatasetSize = 1;
@@ -718,8 +744,9 @@ static void runSymForwardPreflight(void) {
     g_pfDatasetSize = 2;
     pfItem = buildFloatTensor((size_t[]){2}, 1, (float[]){0.1f, 0.2f});
     pfLabel = buildFloatTensor((size_t[]){2}, 1, (float[]){0.f, 1.f});
-    layer_t *model[1] = {
-        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &g_lq)};
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *model[1] = {linearLayerInit(
+        &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey}, &g_lq)};
     model[0]->config->linear->forwardMath.type = ARITH_SYM_INT32; /* child only */
     dataLoader_t trainDl = {
         .getDatasetSize = twoSamples, .batchSize = 2, .getBatch = trainGetBatchMustNotRun};
@@ -786,8 +813,9 @@ static size_t oneSample(void) {
     return 1;
 }
 static void runEmptyEvalLoader(void) {
-    layer_t *model[1] = {
-        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &g_lq)};
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *model[1] = {linearLayerInit(
+        &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey}, &g_lq)};
     dataLoader_t trainDl = {
         .getDatasetSize = twoSamples, .batchSize = 2, .getBatch = trainGetBatchMustNotRun};
     dataLoader_t evalDl = {
@@ -813,8 +841,9 @@ static batch_t *emptyEvalGetBatch(dataLoader_t *dl, size_t index) {
     return b;
 }
 static void runEmptyFirstEvalBatch(void) {
-    layer_t *model[1] = {
-        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &g_lq)};
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *model[1] = {linearLayerInit(
+        &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey}, &g_lq)};
     dataLoader_t trainDl = {
         .getDatasetSize = twoSamples, .batchSize = 2, .getBatch = trainGetBatchMustNotRun};
     dataLoader_t evalDl = {
@@ -907,9 +936,12 @@ void testTrainingRunTrainsAndEvaluatesUntrackedRank2BatchNorm(void) {
         e2eLabels[i] =
             buildFloatTensor((size_t[]){2}, 1, (float[]){(float)(i % 2), (float)((i + 1) % 2)});
     }
+    const rngKey_t initKey1 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 1u);
     layer_t *model[2] = {
         bnLayer(2, false, true, TRAINABLE_DEFAULT),
-        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &g_lq)};
+        linearLayerInit(
+            &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey1},
+            &g_lq)};
     dataLoader_t *trainDl =
         dataLoaderInit(e2eGetSample, fourSamples, 2, NULL, NULL, false, 0, true);
     dataLoader_t *evalDl = dataLoaderInit(e2eGetSample, fourSamples, 1, NULL, NULL, false, 0, true);

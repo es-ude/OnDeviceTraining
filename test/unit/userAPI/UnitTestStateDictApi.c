@@ -7,6 +7,7 @@
 #include "Linear.h"
 #include "LinearApi.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "ReluApi.h"
 #include "StateDictApi.h"
 #include "TensorApi.h"
@@ -21,11 +22,17 @@ void testModelLoadStateDictLoadsTwoLinearLayersSkippingRelu(void) {
     layerQuantInitUniform(&lq, q);
 
     layer_t *model[3];
-    model[0] =
-        linearLayerInit(&(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE}, &lq);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey2 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 2u);
+    model[0] = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE, .weightInit.key = &initKey0},
+        &lq);
     model[1] = reluLayerInit(&lq);
-    model[2] =
-        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 1, .bias = BIAS_TRUE}, &lq);
+    model[2] = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 2, .outFeatures = 1, .bias = BIAS_TRUE, .weightInit.key = &initKey2},
+        &lq);
 
     float w0[6] = {1, 2, 3, 4, 5, 6};
     float b0[2] = {10, 20};

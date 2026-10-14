@@ -220,10 +220,15 @@ static void freeModelBData(void) {
     }
 }
 
-static void buildModelB(layer_t **model, layerQuant_t *lq) {
-    model[0] = linearLayerInit(&(linearInit_t){.inFeatures = B_IN, .outFeatures = 4}, lq);
+/* initSeed roots the init keys: equal seeds build equal initial weights. */
+static void buildModelB(layer_t **model, layerQuant_t *lq, uint64_t initSeed) {
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(initSeed), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey2 = rngFold(rngKeyFromSeed(initSeed), RNG_TAG_INIT, 2u);
+    model[0] = linearLayerInit(
+        &(linearInit_t){.inFeatures = B_IN, .outFeatures = 4, .weightInit.key = &initKey0}, lq);
     model[1] = reluLayerInit(lq);
-    model[2] = linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = B_OUT}, lq);
+    model[2] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 4, .outFeatures = B_OUT, .weightInit.key = &initKey2}, lq);
 }
 
 static void freeModelB(layer_t **model) {
@@ -244,21 +249,30 @@ static void freeModelB(layer_t **model) {
 
 static size_t A_LN_SHAPE[1] = {4};
 
-static void buildModelA(layer_t **model, layerQuant_t *lq) {
-    model[0] =
-        conv1dLayerInit(&(conv1dInit_t){.inChannels = 2, .outChannels = 4, .kernelSize = 3}, lq);
+static void buildModelA(layer_t **model, layerQuant_t *lq, uint64_t initSeed) {
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(initSeed), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey4 = rngFold(rngKeyFromSeed(initSeed), RNG_TAG_INIT, 4u);
+    const rngKey_t initKey9 = rngFold(rngKeyFromSeed(initSeed), RNG_TAG_INIT, 9u);
+    model[0] = conv1dLayerInit(
+        &(conv1dInit_t){
+            .inChannels = 2, .outChannels = 4, .kernelSize = 3, .weightInit.key = &initKey0},
+        lq);
     model[1] = groupNormLayerInit(&(groupNormInit_t){.numGroups = 2, .numChannels = 4}, lq);
     model[2] = reluLayerInit(lq);
     model[3] = maxPool1dLayerInit(
         &(maxPool1dInit_t){.kernelSize = 2, .stride = 2, .inputChannels = 4, .inputLength = 6}, lq);
     model[4] = conv1dTransposedLayerInit(
-        &(conv1dTransposedInit_t){.inChannels = 4, .outChannels = 3, .kernelSize = 2}, lq);
+        &(conv1dTransposedInit_t){
+            .inChannels = 4, .outChannels = 3, .kernelSize = 2, .weightInit.key = &initKey4},
+        lq);
     model[5] =
         layerNormLayerInit(&(layerNormInit_t){.normalizedShape = A_LN_SHAPE, .numNormDims = 1}, lq);
     model[6] = adaptiveAvgPool1dLayerInit(&(adaptiveAvgPool1dInit_t){.outputSize = 3}, lq);
     model[7] = avgPool1dLayerInit(&(avgPool1dInit_t){.kernelSize = 2, .stride = 1}, lq);
     model[8] = flattenLayerInit();
-    model[9] = linearLayerInit(&(linearInit_t){.inFeatures = 6, .outFeatures = A_CLASSES}, lq);
+    model[9] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 6, .outFeatures = A_CLASSES, .weightInit.key = &initKey9},
+        lq);
     model[10] = softmaxLayerInit(lq);
 }
 
@@ -285,7 +299,7 @@ void testStackedChunkWalkCallsOncePerChunkWithMRows(void) {
     layerQuantInitUniform(&lq, q);
     rngSetSeed(11u);
     layer_t *model[B_SIZE];
-    buildModelB(model, &lq);
+    buildModelB(model, &lq, 11u);
 
     resetRecording();
     batch_t *batch = buildBatch(bItems, bLabels, B_N);
@@ -330,7 +344,7 @@ void testMicroBatchZeroBehavesExactlyLikeOne(void) {
     layerQuantInitUniform(&lq, q);
     rngSetSeed(12u);
     layer_t *model[B_SIZE];
-    buildModelB(model, &lq);
+    buildModelB(model, &lq, 12u);
     float grads[2][B_GRADS];
     float loss[2];
     size_t calls[2];
@@ -368,7 +382,7 @@ void testStackedLossIsRowWeightedForMeanAndPlainForSum(void) {
     layerQuantInitUniform(&lq, q);
     rngSetSeed(13u);
     layer_t *model[B_SIZE];
-    buildModelB(model, &lq);
+    buildModelB(model, &lq, 13u);
     float mean[2];
     float sum[2];
     const size_t ms[2] = {1, 4};
@@ -407,7 +421,7 @@ void testStackedBatchReturnsItsGatherBuffers(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
     layer_t *model[A_SIZE];
-    buildModelA(model, &lq);
+    buildModelA(model, &lq, 1523u);
     tensor_t *items[4];
     tensor_t *labels[4];
     for (size_t s = 0; s < 4; s++) {
@@ -452,7 +466,7 @@ void testStackedMatchesPerSampleOnModelA(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
     layer_t *model[A_SIZE];
-    buildModelA(model, &lq);
+    buildModelA(model, &lq, 1521u);
     static const size_t classOf[B_N] = {0, 2, 1, 1, 0, 2, 2, 0};
     tensor_t *items[B_N];
     tensor_t *labels[B_N];
@@ -514,7 +528,7 @@ void testStackedMatchesPerSampleOnMseModelB(void) {
     layerQuantInitUniform(&lq, q);
     rngSetSeed(14u);
     layer_t *model[B_SIZE];
-    buildModelB(model, &lq);
+    buildModelB(model, &lq, 14u);
     lossConfig_t cfg = defaultLossConfig(MSE);
     batchView_t labelRefView;
     /* MSE mean scale = 1 / (b * F) with F read off the [1, 3] label view. */
@@ -563,9 +577,12 @@ void testStackedBatchMatchesPyTorchGold(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
     layer_t *model[GOLD_SIZE];
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey4 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 4u);
     model[0] = conv1dLayerInit(&(conv1dInit_t){.inChannels = MB_GOLD_C_IN,
                                                .outChannels = MB_GOLD_C_OUT,
-                                               .kernelSize = MB_GOLD_K},
+                                               .kernelSize = MB_GOLD_K,
+                                               .weightInit.key = &initKey0},
                                &lq);
     model[1] = reluLayerInit(&lq);
     model[2] = maxPool1dLayerInit(&(maxPool1dInit_t){.kernelSize = 2,
@@ -574,8 +591,10 @@ void testStackedBatchMatchesPyTorchGold(void) {
                                                      .inputLength = MB_GOLD_L_IN - MB_GOLD_K + 1},
                                   &lq);
     model[3] = flattenLayerInit();
-    model[4] = linearLayerInit(
-        &(linearInit_t){.inFeatures = MB_GOLD_FLAT, .outFeatures = MB_GOLD_CLASSES}, &lq);
+    model[4] = linearLayerInit(&(linearInit_t){.inFeatures = MB_GOLD_FLAT,
+                                               .outFeatures = MB_GOLD_CLASSES,
+                                               .weightInit.key = &initKey4},
+                               &lq);
     model[5] = softmaxLayerInit(&lq);
     float convW[18];
     float convB[3];
@@ -731,7 +750,7 @@ void testTrainingBatchDefaultRejectsBatchNotDivisibleByMicroBatch(void) {
     layerQuantInitUniform(&lq, q);
     rngSetSeed(15u);
     layer_t *model[B_SIZE];
-    buildModelB(model, &lq);
+    buildModelB(model, &lq, 15u);
     char message[512];
     int code = -2;
 
@@ -763,7 +782,7 @@ void testStackedRejectsEmptyBatch(void) {
     layerQuantInitUniform(&lq, q);
     rngSetSeed(26u);
     layer_t *model[B_SIZE];
-    buildModelB(model, &lq);
+    buildModelB(model, &lq, 26u);
 
     ASSERT_EXITS_WITH_FAILURE(trainEmptyBatchOrDie(model, 2));
 
@@ -788,7 +807,7 @@ void testStackedGatherSizeOverflowFailsFast(void) {
     layerQuantInitUniform(&lq, q);
     rngSetSeed(16u);
     layer_t *model[B_SIZE];
-    buildModelB(model, &lq);
+    buildModelB(model, &lq, 16u);
     float eight[8] = {0};
     tensor_t *item = buildFloatTensor((size_t[]){8}, 1, eight);
     tensor_t *label = buildFloatTensor((size_t[]){8}, 1, eight);
@@ -823,7 +842,7 @@ void testStackedGatherReservationFailureFailsFast(void) {
     layerQuantInitUniform(&lq, q);
     rngSetSeed(27u);
     layer_t *model[B_SIZE];
-    buildModelB(model, &lq);
+    buildModelB(model, &lq, 27u);
     float itemData[B_IN] = {0};
     size_t hugeDims[1] = {SIZE_MAX / 8};
     size_t hugeOrder[1] = {0};
@@ -865,9 +884,13 @@ void testStackedDropoutFailsFastOnItsMaskCount(void) {
     rngSetSeed(17u);
     tensor_t *mask = buildBoolMask(4);
     layer_t *model[B_SIZE];
-    model[0] = linearLayerInit(&(linearInit_t){.inFeatures = B_IN, .outFeatures = 4}, &lq);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(17u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey2 = rngFold(rngKeyFromSeed(17u), RNG_TAG_INIT, 2u);
+    model[0] = linearLayerInit(
+        &(linearInit_t){.inFeatures = B_IN, .outFeatures = 4, .weightInit.key = &initKey0}, &lq);
     model[1] = dropoutLayerInit(0.5f, mask, q, q);
-    model[2] = linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = B_OUT}, &lq);
+    model[2] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 4, .outFeatures = B_OUT, .weightInit.key = &initKey2}, &lq);
 
     ASSERT_EXITS_WITH_FAILURE(trainModelBBatchOrDie(model, 4, 2));
 
@@ -888,9 +911,11 @@ void testStackedDropoutFailsFastOnItsMaskCount(void) {
 #define C_N 4
 #define C_SIZE 2
 
-static void buildModelC(layer_t **model, layerQuant_t *lq) {
+static void buildModelC(layer_t **model, layerQuant_t *lq, uint64_t initSeed) {
+    const rngKey_t initKey1 = rngFold(rngKeyFromSeed(initSeed), RNG_TAG_INIT, 1u);
     model[0] = flattenLayerInit();
-    model[1] = linearLayerInit(&(linearInit_t){.inFeatures = 8, .outFeatures = 4}, lq);
+    model[1] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 8, .outFeatures = 4, .weightInit.key = &initKey1}, lq);
 }
 
 static void freeModelC(layer_t **model) {
@@ -930,7 +955,7 @@ static void assertStackingRejects(tensor_t *badTensor, size_t bad, bool isLabel)
     layerQuantInitUniform(&lq, q);
     rngSetSeed(18u);
     layer_t *model[C_SIZE];
-    buildModelC(model, &lq);
+    buildModelC(model, &lq, 18u);
     tensor_t *items[C_N];
     tensor_t *labels[C_N];
     initModelCData(items, labels);
@@ -1038,7 +1063,7 @@ void testStackedRejectsChunkDifferingFromSampleZero(void) {
     layerQuantInitUniform(&lq, q);
     rngSetSeed(19u);
     layer_t *model[C_SIZE];
-    buildModelC(model, &lq);
+    buildModelC(model, &lq, 19u);
     tensor_t *items[C_N];
     tensor_t *labels[C_N];
     initModelCData(items, labels);
@@ -1089,8 +1114,10 @@ void testStackedGateRejectsSymLayer(void) {
                        .weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE,
                        .biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE};
     rngSetSeed(20u);
-    layer_t *model[1] = {
-        linearLayerInit(&(linearInit_t){.inFeatures = B_IN, .outFeatures = B_OUT}, &lq)};
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(20u), RNG_TAG_INIT, 0u);
+    layer_t *model[1] = {linearLayerInit(
+        &(linearInit_t){.inFeatures = B_IN, .outFeatures = B_OUT, .weightInit.key = &initKey},
+        &lq)};
 
     assertStackedGateRejects(model, 1);
 
@@ -1115,9 +1142,15 @@ void testStackedGateRejectsBfpLayer(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, floatQ);
     rngSetSeed(28u);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(28u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey1 = rngFold(rngKeyFromSeed(28u), RNG_TAG_INIT, 1u);
     layer_t *model[2] = {
-        linearLayerInit(&(linearInit_t){.inFeatures = B_IN, .outFeatures = 4}, &bfpLq),
-        linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = B_OUT}, &lq)};
+        linearLayerInit(
+            &(linearInit_t){.inFeatures = B_IN, .outFeatures = 4, .weightInit.key = &initKey0},
+            &bfpLq),
+        linearLayerInit(
+            &(linearInit_t){.inFeatures = 4, .outFeatures = B_OUT, .weightInit.key = &initKey1},
+            &lq)};
     linearConfig_t *bfpLinear = model[0]->config->linear;
     requantizeTensorInPlace(getParamFromParameter(bfpLinear->weights), bfpQ);
     requantizeTensorInPlace(getParamFromParameter(bfpLinear->bias), bfpQ);
@@ -1139,9 +1172,15 @@ void testStackedGateRejectsBfpWire(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, floatQ);
     rngSetSeed(21u);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(21u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey1 = rngFold(rngKeyFromSeed(21u), RNG_TAG_INIT, 1u);
     layer_t *model[2] = {
-        linearLayerInit(&(linearInit_t){.inFeatures = B_IN, .outFeatures = 4}, &bfpOut),
-        linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = B_OUT}, &lq)};
+        linearLayerInit(
+            &(linearInit_t){.inFeatures = B_IN, .outFeatures = 4, .weightInit.key = &initKey0},
+            &bfpOut),
+        linearLayerInit(
+            &(linearInit_t){.inFeatures = 4, .outFeatures = B_OUT, .weightInit.key = &initKey1},
+            &lq)};
 
     assertStackedGateRejects(model, 2);
 
@@ -1167,7 +1206,7 @@ void testStackedGateRejectsQuantizationLayer(void) {
     layerQuantInitUniform(&toSym, symQ);
     rngSetSeed(22u);
     layer_t *model[B_SIZE + 1];
-    buildModelB(model, &lq);
+    buildModelB(model, &lq, 22u);
     model[B_SIZE] = quantLayerInit(&toSym);
     initModelBData();
     char message[512];
@@ -1201,8 +1240,10 @@ void testStackedGateRejectsPerOpSymMathOnFloat32Storage(void) {
     layerQuantInitUniform(&lq, floatQ);
     lq.weightGradMath = (arithmetic_t){.type = ARITH_SYM_INT32, .roundingMode = HALF_AWAY};
     rngSetSeed(23u);
-    layer_t *model[1] = {
-        linearLayerInit(&(linearInit_t){.inFeatures = B_IN, .outFeatures = B_OUT}, &lq)};
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(23u), RNG_TAG_INIT, 0u);
+    layer_t *model[1] = {linearLayerInit(
+        &(linearInit_t){.inFeatures = B_IN, .outFeatures = B_OUT, .weightInit.key = &initKey},
+        &lq)};
 
     assertStackedGateRejects(model, 1);
 
@@ -1217,8 +1258,10 @@ void testStackedGateRejectsSymGradStorage(void) {
     layerQuantInitUniform(&lq, floatQ);
     lq.weightGradStorage = symQ; /* FLOAT32 math and wires, SYM_INT32 grads */
     rngSetSeed(24u);
-    layer_t *model[1] = {
-        linearLayerInit(&(linearInit_t){.inFeatures = B_IN, .outFeatures = B_OUT}, &lq)};
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(24u), RNG_TAG_INIT, 0u);
+    layer_t *model[1] = {linearLayerInit(
+        &(linearInit_t){.inFeatures = B_IN, .outFeatures = B_OUT, .weightInit.key = &initKey},
+        &lq)};
 
     assertStackedGateRejects(model, 1);
 
@@ -1236,10 +1279,16 @@ void testStackedTrainingWithFrozenFirstLayerMatchesPerSample(void) {
     layerQuantInitUniform(&lq, q);
     rngSetSeed(25u);
     layer_t *model[B_SIZE];
-    model[0] = linearLayerInit(
-        &(linearInit_t){.inFeatures = B_IN, .outFeatures = 4, .trainable = TRAINABLE_FALSE}, &lq);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(25u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey2 = rngFold(rngKeyFromSeed(25u), RNG_TAG_INIT, 2u);
+    model[0] = linearLayerInit(&(linearInit_t){.inFeatures = B_IN,
+                                               .outFeatures = 4,
+                                               .trainable = TRAINABLE_FALSE,
+                                               .weightInit.key = &initKey0},
+                               &lq);
     model[1] = reluLayerInit(&lq);
-    model[2] = linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = B_OUT}, &lq);
+    model[2] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 4, .outFeatures = B_OUT, .weightInit.key = &initKey2}, &lq);
     float ref[4 * B_OUT + B_OUT];
     float got[4 * B_OUT + B_OUT];
     float loss[2];
@@ -1331,9 +1380,13 @@ static batch_t *getBatchWithOneExtraSample(dataLoader_t *dataLoader, size_t inde
 
 static void buildClassifier(layer_t **model, layerQuant_t *lq) {
     rngSetSeed(4242u); /* identical initial weights on every build */
-    model[0] = linearLayerInit(&(linearInit_t){.inFeatures = CLS_IN, .outFeatures = 4}, lq);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(4242u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey2 = rngFold(rngKeyFromSeed(4242u), RNG_TAG_INIT, 2u);
+    model[0] = linearLayerInit(
+        &(linearInit_t){.inFeatures = CLS_IN, .outFeatures = 4, .weightInit.key = &initKey0}, lq);
     model[1] = reluLayerInit(lq);
-    model[2] = linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = CLS_OUT}, lq);
+    model[2] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 4, .outFeatures = CLS_OUT, .weightInit.key = &initKey2}, lq);
     model[3] = softmaxLayerInit(lq);
 }
 
@@ -1727,7 +1780,7 @@ static void trainModelBOnAScheduler(size_t m, rematReport_t *out) {
     layerQuantInitUniform(&lq, q);
     rngSetSeed(13u);
     layer_t *model[B_SIZE];
-    buildModelB(model, &lq);
+    buildModelB(model, &lq, 13u);
     rematScheduler_t s;
     initHeapForRows(&s, model, B_SIZE, defaultLossConfig(MSE), bItems[0], m);
     batch_t *batch = buildBatch(bItems, bLabels, B_N);
@@ -1767,7 +1820,7 @@ static void trainModelBOnAMiskeyedScheduler(rematRowInit_t init, size_t m, size_
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
     layer_t *model[B_SIZE];
-    buildModelB(model, &lq);
+    buildModelB(model, &lq, 1u);
     batchView_t view;
     tensor_t *key = batchViewOf(&view, bItems[0]);
     view.dimensions[0] = keyedRows;

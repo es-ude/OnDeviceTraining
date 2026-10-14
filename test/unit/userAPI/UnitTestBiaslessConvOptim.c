@@ -14,6 +14,7 @@
 #include "Optimizer.h"
 #include "OptimizerApi.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "SgdApi.h"
 #include "StorageApi.h"
 #include "TensorApi.h"
@@ -67,12 +68,14 @@ void testOptimizer_OneStateForBiaslessConv1d(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *conv = conv1dLayerInit(
         &(conv1dInit_t){
             .inChannels = 2,
             .outChannels = 4,
             .kernelSize = 3,
             .bias = BIAS_FALSE,
+            .weightInit.key = &initKey,
         },
         &lq);
     layer_t *model[1] = {conv};
@@ -104,12 +107,14 @@ void testOptimizer_TwoStatesForBiasedConv1d(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q); /* sets biasStorage so the bias tensor allocates */
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *conv = conv1dLayerInit(
         &(conv1dInit_t){
             .inChannels = 2,
             .outChannels = 4,
             .kernelSize = 3,
             .bias = BIAS_TRUE,
+            .weightInit.key = &initKey,
         },
         &lq);
     layer_t *model[1] = {conv};
@@ -140,12 +145,14 @@ void testOptimizer_OneStateForBiaslessConv1dTransposed(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *convT = conv1dTransposedLayerInit(
         &(conv1dTransposedInit_t){
             .inChannels = 2,
             .outChannels = 4,
             .kernelSize = 3,
             .bias = BIAS_FALSE,
+            .weightInit.key = &initKey,
         },
         &lq);
     layer_t *model[1] = {convT};
@@ -178,11 +185,13 @@ void testBiaslessLinearCountsOneStateAndOptimizerSurvives(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *linear = linearLayerInit(
         &(linearInit_t){
             .inFeatures = 3,
             .outFeatures = 2,
             .bias = BIAS_FALSE,
+            .weightInit.key = &initKey,
         },
         &lq);
     layer_t *model[1] = {linear};

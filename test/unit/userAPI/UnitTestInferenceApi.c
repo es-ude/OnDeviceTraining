@@ -18,6 +18,7 @@
 #include "Pool1dApi.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "ReluApi.h"
 #include "RematScheduler.h"
 #include "StorageApi.h"
@@ -43,8 +44,11 @@ void testInferenceLinearReluFloat() {
     tensorFillFromFloatBuffer(input, (float[]){0.f, 1.f, 2.f}, 3);
 
     /* 5. Build layers; both layers share the same q (no ownership transfer). */
-    layer_t *linear =
-        linearLayerInit(&(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE}, &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *linear = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE, .weightInit.key = &initKey},
+        &lq);
     layerLoadWeights(linear, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, 6.f}, (float[]){-1.f, 3.f});
     layer_t *relu = reluLayerInit(&lq);
     layer_t *model[] = {linear, relu};
@@ -186,8 +190,11 @@ void testInferenceWithLossLinearReluFloat() {
     tensorFillFromFloatBuffer(label0, (float[]){59.f, -23.f}, 2);
 
     /* Layers. */
-    layer_t *linear =
-        linearLayerInit(&(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE}, &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *linear = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE, .weightInit.key = &initKey},
+        &lq);
     layerLoadWeights(linear, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, 6.f}, (float[]){-1.f, 3.f});
     layer_t *relu = reluLayerInit(&lq);
     layer_t *model[] = {linear, relu};
@@ -249,8 +256,11 @@ void testInferenceWithLossRejectsRank1LabelAgainstBatchedOutput(void) {
     tensorFillFromFloatBuffer(label, (float[]){59.f, -23.f, 4.f}, 3);
 
     /* Layers: Linear(2->3) + Relu -> rank-2 [1,3] output. */
-    layer_t *linear =
-        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 3, .bias = BIAS_TRUE}, &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *linear = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 2, .outFeatures = 3, .bias = BIAS_TRUE, .weightInit.key = &initKey},
+        &lq);
     layerLoadWeights(linear, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, 6.f}, (float[]){-1.f, 3.f, -2.f});
     layer_t *relu = reluLayerInit(&lq);
     layer_t *model[] = {linear, relu};
@@ -414,8 +424,11 @@ void testInferenceBufferOutputCarriesBfpWire(void) {
     lq.outputQ = bfpWireQ;
 
     tensor_t *input = buildFloatTensor2DInf(1, 2, (float[]){1.f, 2.f});
-    layer_t *linear =
-        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 4, .bias = BIAS_TRUE}, &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *linear = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 2, .outFeatures = 4, .bias = BIAS_TRUE, .weightInit.key = &initKey},
+        &lq);
     layerLoadWeights(linear, (float[]){1.f, 0.f, 0.f, 1.f, 1.f, 1.f, 2.f, 0.f},
                      (float[]){0.f, 0.f, 0.f, 0.f});
     layer_t *model[] = {linear};
@@ -470,8 +483,11 @@ void testInferenceBufferOutputBfpGroupSizeEqualToWireNormalizesToPerTensor(void)
     lq.outputQ = bfpWireQ;
 
     tensor_t *input = buildFloatTensor2DInf(1, 2, (float[]){1.f, 2.f});
-    layer_t *linear =
-        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 4, .bias = BIAS_TRUE}, &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *linear = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 2, .outFeatures = 4, .bias = BIAS_TRUE, .weightInit.key = &initKey},
+        &lq);
     layerLoadWeights(linear, (float[]){1.f, 0.f, 0.f, 1.f, 1.f, 1.f, 2.f, 0.f},
                      (float[]){0.f, 0.f, 0.f, 0.f});
     layer_t *model[] = {linear};
@@ -533,8 +549,11 @@ void testInferenceBufferInputCarriesBfpExponents(void) {
     tensor_t *input = initTensor(shape, quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 1), NULL);
     tensorFillFromFloatBuffer(input, (float[]){1.5f, 24.f}, 2);
 
-    layer_t *linear =
-        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2, .bias = BIAS_TRUE}, &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *linear = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 2, .outFeatures = 2, .bias = BIAS_TRUE, .weightInit.key = &initKey},
+        &lq);
     layerLoadWeights(linear, (float[]){1.f, 0.f, 0.f, 1.f}, (float[]){0.f, 0.f});
     layer_t *model[] = {linear};
 
@@ -571,8 +590,11 @@ void testInitBufferOutputBfpGroupSizeMismatchDies(void) {
     lq.outputQ = bfpWireQ;
 
     tensor_t *input = buildFloatTensor2DInf(1, 2, (float[]){1.f, 2.f});
-    layer_t *linear =
-        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 5, .bias = BIAS_TRUE}, &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *linear = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 2, .outFeatures = 5, .bias = BIAS_TRUE, .weightInit.key = &initKey},
+        &lq);
     layer_t *model[] = {linear};
 
     ASSERT_EXITS_WITH_FAILURE(freeTensor(inference(model, 1, input)));
@@ -797,8 +819,11 @@ static void buildEvalFixture(evalFixture_t *f) {
     f->q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, f->q);
-    f->model[0] =
-        linearLayerInit(&(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE}, &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    f->model[0] = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE, .weightInit.key = &initKey},
+        &lq);
     layerLoadWeights(f->model[0], (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, 6.f}, (float[]){-1.f, 3.f});
     f->model[1] = reluLayerInit(&lq);
     f->input = buildFloatTensor2DInf(1, 3, (float[]){0.f, 1.f, 2.f});

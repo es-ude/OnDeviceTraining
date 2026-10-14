@@ -9,6 +9,7 @@
 #include "Linear.h"
 #include "LinearApi.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "StackGather.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -67,7 +68,9 @@ void testRequireFloat32ModelUsesTheGivenAccessor(void) {
     quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
-    layer_t *lin = linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *lin = linearLayerInit(
+        &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey}, &lq);
     layer_t *model[1] = {lin};
     quantization_t *saved = lin->config->linear->propLossQ;
     lin->config->linear->propLossQ = symQ; /* backward-only field */

@@ -31,6 +31,7 @@
 #include "Pool1dApi.h"
 #include "QuantLayerApi.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "Relu.h"
 #include "ReluApi.h"
 #include "Softmax.h"
@@ -92,7 +93,9 @@ void testLinearAccessorsMatchConfig(void) {
         .weightStorage = qStorage,
         .biasStorage = qStorage,
     };
-    layer_t *layer = linearLayerInit(&(linearInit_t){.inFeatures = 1, .outFeatures = 1}, &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *layer = linearLayerInit(
+        &(linearInit_t){.inFeatures = 1, .outFeatures = 1, .weightInit.key = &initKey}, &lq);
 
     linearConfig_t *cfg = layer->config->linear;
     TEST_ASSERT_EQUAL_PTR(cfg->outputQ, layerOutputQ(layer));
@@ -128,8 +131,11 @@ void testConv1dAccessorsMatchConfig(void) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
-    layer_t *layer =
-        conv1dLayerInit(&(conv1dInit_t){.inChannels = 1, .outChannels = 1, .kernelSize = 1}, &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *layer = conv1dLayerInit(
+        &(conv1dInit_t){
+            .inChannels = 1, .outChannels = 1, .kernelSize = 1, .weightInit.key = &initKey},
+        &lq);
 
     conv1dConfig_t *cfg = layer->config->conv1d;
     TEST_ASSERT_EQUAL_PTR(cfg->outputQ, layerOutputQ(layer));
@@ -144,9 +150,14 @@ void testConv1dTransposedAccessorsMatchConfig(void) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
-    layer_t *layer = conv1dTransposedLayerInit(
-        &(conv1dTransposedInit_t){.inChannels = 1, .outChannels = 1, .kernelSize = 1, .stride = 1},
-        &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *layer =
+        conv1dTransposedLayerInit(&(conv1dTransposedInit_t){.inChannels = 1,
+                                                            .outChannels = 1,
+                                                            .kernelSize = 1,
+                                                            .stride = 1,
+                                                            .weightInit.key = &initKey},
+                                  &lq);
 
     conv1dTransposedConfig_t *cfg = layer->config->conv1dTransposed;
     TEST_ASSERT_EQUAL_PTR(cfg->outputQ, layerOutputQ(layer));
@@ -359,11 +370,20 @@ void testLayerIsFloat32OnlyAcceptsEveryUniformFloat32LayerType(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
     tensor_t *mask = buildBoolMask(4);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey1 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 1u);
+    const rngKey_t initKey2 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 2u);
     layer_t *layers[12] = {
-        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &lq),
-        conv1dLayerInit(&(conv1dInit_t){.inChannels = 1, .outChannels = 1, .kernelSize = 1}, &lq),
+        linearLayerInit(
+            &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey0}, &lq),
+        conv1dLayerInit(
+            &(conv1dInit_t){
+                .inChannels = 1, .outChannels = 1, .kernelSize = 1, .weightInit.key = &initKey1},
+            &lq),
         conv1dTransposedLayerInit(
-            &(conv1dTransposedInit_t){.inChannels = 1, .outChannels = 1, .kernelSize = 1}, &lq),
+            &(conv1dTransposedInit_t){
+                .inChannels = 1, .outChannels = 1, .kernelSize = 1, .weightInit.key = &initKey2},
+            &lq),
         layerNormLayerInit(&(layerNormInit_t){.normalizedShape = (size_t[]){2}, .numNormDims = 1},
                            &lq),
         groupNormLayerInit(&(groupNormInit_t){.numGroups = 1, .numChannels = 2}, &lq),
@@ -423,11 +443,20 @@ void testLayerNonFloat32FieldNamesEveryGemmFamilyField(void) {
     quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey1 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 1u);
+    const rngKey_t initKey2 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 2u);
     layer_t *layers[3] = {
-        linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &lq),
-        conv1dLayerInit(&(conv1dInit_t){.inChannels = 1, .outChannels = 1, .kernelSize = 1}, &lq),
+        linearLayerInit(
+            &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey0}, &lq),
+        conv1dLayerInit(
+            &(conv1dInit_t){
+                .inChannels = 1, .outChannels = 1, .kernelSize = 1, .weightInit.key = &initKey1},
+            &lq),
         conv1dTransposedLayerInit(
-            &(conv1dTransposedInit_t){.inChannels = 1, .outChannels = 1, .kernelSize = 1}, &lq)};
+            &(conv1dTransposedInit_t){
+                .inChannels = 1, .outChannels = 1, .kernelSize = 1, .weightInit.key = &initKey2},
+            &lq)};
     const char *got[3][10];
 
     linearConfig_t *lin = layers[0]->config->linear;
@@ -601,11 +630,18 @@ void testLayerIsFloat32OnlyAcceptsFrozenBiaslessAndPassthroughLayers(void) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
-    layer_t *frozen = linearLayerInit(
-        &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .trainable = TRAINABLE_FALSE}, &lq);
-    layer_t *biasless = conv1dLayerInit(
-        &(conv1dInit_t){.inChannels = 1, .outChannels = 1, .kernelSize = 1, .bias = BIAS_FALSE},
-        &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *frozen = linearLayerInit(&(linearInit_t){.inFeatures = 2,
+                                                      .outFeatures = 2,
+                                                      .trainable = TRAINABLE_FALSE,
+                                                      .weightInit.key = &initKey},
+                                      &lq);
+    layer_t *biasless = conv1dLayerInit(&(conv1dInit_t){.inChannels = 1,
+                                                        .outChannels = 1,
+                                                        .kernelSize = 1,
+                                                        .bias = BIAS_FALSE,
+                                                        .weightInit.key = &initKey},
+                                        &lq);
     layer_t *relu = reluLayerInit(&lq);
     relu->config->relu->outputQ = NULL;
     bool frozenGradIsNull = frozen->config->linear->weights->grad == NULL;
@@ -707,7 +743,9 @@ void testLayerForwardNonFloat32FieldIgnoresBackwardOnlyFields(void) {
     quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
-    layer_t *lin = linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *lin = linearLayerInit(
+        &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey}, &lq);
     layer_t *ln = layerNormLayerInit(
         &(layerNormInit_t){.normalizedShape = (size_t[]){2}, .numNormDims = 1}, &lq);
     layer_t *relu = reluLayerInit(&lq);

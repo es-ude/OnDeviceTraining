@@ -1191,9 +1191,12 @@ void testOwningFactoryBfpOutputQFreesExponents(void) {
     layerQuantInitUniform(&lq, floatQ);
     lq.outputQ = bfpQ;
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     size_t liveBytesBefore = memProfileMark();
     layer_t *layer = linearLayerInitOwning(
-        &(linearInit_t){.inFeatures = 3, .outFeatures = 4, .bias = BIAS_TRUE}, &lq);
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 4, .bias = BIAS_TRUE, .weightInit.key = &initKey},
+        &lq);
     freeLinearLayer(layer);
     size_t liveBytesAfter = memProfileMark();
 
@@ -1265,7 +1268,9 @@ typedef struct bfpNativeFixture {
  *  0's weight grad into BFP storage end-to-end -- the load-bearing e2e knob
  *  both existing callers below leave unexercised. */
 static void buildBfpNativeFixture(bfpNativeFixture_t *f, bool pinWeightGradMath,
-                                  quantization_t *weightGradStorage) {
+                                  quantization_t *weightGradStorage, uint64_t initSeed) {
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(initSeed), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey1 = rngFold(rngKeyFromSeed(initSeed), RNG_TAG_INIT, 1u);
     f->floatQ = quantizationInitFloat();
     /* groupSize 2 over the [1, 4] hidden wire -> derived numGroups 2. */
     f->bfpWireQ = quantizationInitBfpGrouped(6, 8, SR_HALF_AWAY, 2, 2);
@@ -1287,7 +1292,9 @@ static void buildBfpNativeFixture(bfpNativeFixture_t *f, bool pinWeightGradMath,
     lq0.biasStorage = f->floatQ;
     lq0.weightGradStorage = weightGradStorage;
     f->linear0 = linearLayerInit(
-        &(linearInit_t){.inFeatures = 3, .outFeatures = 4, .bias = BIAS_TRUE}, &lq0);
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 4, .bias = BIAS_TRUE, .weightInit.key = &initKey0},
+        &lq0);
 
     /* Weights: one group per output row (4 rows x 3 in-features == the element
      * count, the validateBfpQConfigShape gate). Bias: per-tensor {1, 0} -- the
@@ -1303,7 +1310,9 @@ static void buildBfpNativeFixture(bfpNativeFixture_t *f, bool pinWeightGradMath,
     layerQuant_t lq1;
     layerQuantInitUniform(&lq1, f->floatQ);
     f->linear1 = linearLayerInit(
-        &(linearInit_t){.inFeatures = 4, .outFeatures = 2, .bias = BIAS_TRUE}, &lq1);
+        &(linearInit_t){
+            .inFeatures = 4, .outFeatures = 2, .bias = BIAS_TRUE, .weightInit.key = &initKey1},
+        &lq1);
 
     f->model[0] = f->linear0;
     f->model[1] = f->linear1;
@@ -1343,7 +1352,7 @@ static void freeBfpNativeFixture(bfpNativeFixture_t *f) {
 void testBfpNativeForwardTrainingLossDecreasesAndGridMoves(void) {
     rngSetSeed(1717u);
     bfpNativeFixture_t f;
-    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false, /*weightGradStorage=*/NULL);
+    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false, /*weightGradStorage=*/NULL, 1717u);
 
     tensor_t *w0Param = getParamFromParameter(f.linear0->config->linear->weights);
     tensor_t *w0Grad = getGradFromParameter(f.linear0->config->linear->weights);
@@ -1447,7 +1456,7 @@ void testBfpNativeForwardTrainingLossDecreasesAndGridMoves(void) {
 void testBfpPinnedFloat32BackwardTrainingLossDecreases(void) {
     rngSetSeed(1717u);
     bfpNativeFixture_t f;
-    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/true, /*weightGradStorage=*/NULL);
+    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/true, /*weightGradStorage=*/NULL, 1717u);
     trainingRng_t rng;
     trainingRngInit(&rng, 1717u);
 
@@ -1543,7 +1552,7 @@ static void captureLinear0IncomingDx(void *ctx, size_t layerIdx, layerType_t lay
 void testBfpDxWireThroughPinnedFloat32BackwardTrains(void) {
     rngSetSeed(2727u);
     bfpNativeFixture_t f;
-    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false, /*weightGradStorage=*/NULL);
+    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false, /*weightGradStorage=*/NULL, 2727u);
 
     /* Arm-C shape on layer 1: BFP-stored weights + bias (per-tensor {1,0},
      * the arithmetic-bfp.md §5.2 two-step recipe), all four math slots pinned ARITH_FLOAT32, a
@@ -1633,7 +1642,7 @@ void testBfpGradStorageTrainingAccumulatesAndSteps(void) {
     rngSetSeed(1717u);
     quantization_t *gradKnob = quantizationInitBfp(8, 8, HALF_AWAY);
     bfpNativeFixture_t f;
-    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false, gradKnob);
+    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false, gradKnob, 1717u);
     freeQuantization(gradKnob); /* gradInit clones via getQLike -- template unused after */
 
     tensor_t *w0Grad = getGradFromParameter(f.linear0->config->linear->weights);
@@ -1731,7 +1740,7 @@ void testBfpGradStorageTrainsUnderReductionMean(void) {
     rngSetSeed(1717u);
     quantization_t *gradKnob = quantizationInitBfp(8, 8, HALF_AWAY);
     bfpNativeFixture_t f;
-    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false, gradKnob);
+    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false, gradKnob, 1717u);
     freeQuantization(gradKnob);
 
     bfpMeanEpochItems[0] = buildFloatTensor1D(3, (float[]){1.0f, 2.0f, 3.0f});
@@ -1845,7 +1854,7 @@ static size_t trainTwoUpdates(bool throughTheEpochLoop, uint64_t seed, dataLoade
     rngSetSeed(1717u);
     quantization_t *gradKnob = quantizationInitBfp(8, 8, SR_HALF_AWAY);
     bfpNativeFixture_t f;
-    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false, gradKnob);
+    buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false, gradKnob, 1717u);
     freeQuantization(gradKnob);
     trainingRng_t rng;
     trainingRngInit(&rng, seed);
@@ -1931,7 +1940,7 @@ static void gradRecordingStep(optimizer_t *optim, const rngKey_t *updateKey) {
 static void buildSrFixtureWithRng(bfpNativeFixture_t *f, trainingRng_t *rng, uint64_t seed) {
     rngSetSeed(1717u);
     quantization_t *gradKnob = quantizationInitBfp(8, 8, SR_HALF_AWAY);
-    buildBfpNativeFixture(f, /*pinWeightGradMath=*/false, gradKnob);
+    buildBfpNativeFixture(f, /*pinWeightGradMath=*/false, gradKnob, 1717u);
     freeQuantization(gradKnob);
     trainingRngInit(rng, seed);
 }
@@ -2094,10 +2103,13 @@ void testBfpConvGradStorageTrainsUnderDefaultEpoch(void) {
     layerQuantInitUniform(&lqConv, floatQ);
     lqConv.weightGradStorage = gradKnob;
     lqConv.biasGradStorage = gradKnob;
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(1717u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey2 = rngFold(rngKeyFromSeed(1717u), RNG_TAG_INIT, 2u);
     layer_t *conv = conv1dLayerInit(&(conv1dInit_t){.inChannels = BFP_CONV_IN_CHANNELS,
                                                     .outChannels = BFP_CONV_OUT_CHANNELS,
                                                     .kernelSize = BFP_CONV_KERNEL_SIZE,
-                                                    .bias = BIAS_TRUE},
+                                                    .bias = BIAS_TRUE,
+                                                    .weightInit.key = &initKey0},
                                     &lqConv);
     freeQuantization(gradKnob); /* gradInit deep-clones via getQLike */
 
@@ -2106,7 +2118,8 @@ void testBfpConvGradStorageTrainsUnderDefaultEpoch(void) {
     layer_t *flat = flattenLayerInit();
     layer_t *head = linearLayerInit(&(linearInit_t){.inFeatures = BFP_CONV_FLAT_FEATURES,
                                                     .outFeatures = BFP_CONV_NUM_CLASSES,
-                                                    .bias = BIAS_TRUE},
+                                                    .bias = BIAS_TRUE,
+                                                    .weightInit.key = &initKey2},
                                     &lqPlain);
     layer_t *model[BFP_CONV_MODEL_SIZE] = {conv, flat, head};
 

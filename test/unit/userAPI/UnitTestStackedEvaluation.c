@@ -19,6 +19,7 @@
 #include "LinearApi.h"
 #include "LossFunction.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "Relu.h"
 #include "ReluApi.h"
 #include "StorageApi.h"
@@ -124,9 +125,14 @@ static void fillPattern(tensor_t *t, float phase) {
 }
 
 static void buildModel(layer_t **model) {
-    model[0] = linearLayerInit(&(linearInit_t){.inFeatures = IN_F, .outFeatures = HID}, &g_lq);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey2 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 2u);
+    model[0] = linearLayerInit(
+        &(linearInit_t){.inFeatures = IN_F, .outFeatures = HID, .weightInit.key = &initKey0},
+        &g_lq);
     model[1] = reluLayerInit(&g_lq);
-    model[2] = linearLayerInit(&(linearInit_t){.inFeatures = HID, .outFeatures = CLS}, &g_lq);
+    model[2] = linearLayerInit(
+        &(linearInit_t){.inFeatures = HID, .outFeatures = CLS, .weightInit.key = &initKey2}, &g_lq);
     fillPattern(model[0]->config->linear->weights->param, 0.31f);
     fillPattern(model[0]->config->linear->bias->param, 1.7f);
     fillPattern(model[2]->config->linear->weights->param, 2.9f);
@@ -612,11 +618,16 @@ static sample_t *getConvSample(size_t id) {
 
 static void convReport(size_t m, size_t *cm, epochStats_t *out) {
     layer_t *model[4];
-    model[0] =
-        conv1dLayerInit(&(conv1dInit_t){.inChannels = 1, .outChannels = 2, .kernelSize = 3}, &g_lq);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey3 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 3u);
+    model[0] = conv1dLayerInit(
+        &(conv1dInit_t){
+            .inChannels = 1, .outChannels = 2, .kernelSize = 3, .weightInit.key = &initKey0},
+        &g_lq);
     model[1] = reluLayerInit(&g_lq);
     model[2] = flattenLayerInit();
-    model[3] = linearLayerInit(&(linearInit_t){.inFeatures = 8, .outFeatures = CLS}, &g_lq);
+    model[3] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 8, .outFeatures = CLS, .weightInit.key = &initKey3}, &g_lq);
     fillPattern(model[0]->config->conv1d->weights->param, 0.9f);
     fillPattern(model[0]->config->conv1d->bias->param, 0.2f);
     fillPattern(model[3]->config->linear->weights->param, 1.1f);

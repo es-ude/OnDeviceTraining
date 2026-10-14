@@ -84,12 +84,18 @@ void testLinearLayerNormLinearOneTrainingStep(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
-    layer_t *linear0 =
-        linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = 3, .bias = BIAS_TRUE}, &lq);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey2 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 2u);
+    layer_t *linear0 = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 4, .outFeatures = 3, .bias = BIAS_TRUE, .weightInit.key = &initKey0},
+        &lq);
     layer_t *norm = layerNormLayerInit(
         &(layerNormInit_t){.normalizedShape = (size_t[]){3}, .numNormDims = 1}, &lq);
-    layer_t *linear1 =
-        linearLayerInit(&(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE}, &lq);
+    layer_t *linear1 = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE, .weightInit.key = &initKey2},
+        &lq);
     layer_t *model[3] = {linear0, norm, linear1};
 
     tensor_t *input =

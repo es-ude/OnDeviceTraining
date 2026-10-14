@@ -381,6 +381,65 @@ void testInitDistribution_KaimingNormal_NotAllZero(void) {
     TEST_ASSERT_TRUE(any_nonzero);
 }
 
+/* The three uniform kinds fill element by element from the stream they are
+ * handed, exactly as the matching draw function does on its own stream. */
+void testInitDistributionUniformKindsDrawFromTheStream(void) {
+    const rngKey_t key = rngKeyFromSeed(3u);
+    const distribution_t kinds[3] = {
+        {.type = UNIFORM, .params.uniform = {-0.5f, 0.5f}},
+        {.type = XAVIER_UNIFORM, .params.xavier = {.gain = 1.0f, .fanIn = 4, .fanOut = 5}},
+        {.type = KAIMING_UNIFORM, .params.kaiming = {.gain = 2.0f, .fanMode = 4}},
+    };
+    float got[3][20];
+    float want[3][20];
+    for (size_t k = 0; k < 3; k++) {
+        tensor_t *t = makeFloatTensorForDistTest(4, 5);
+        rngStream_t rs = rngOpen(key);
+        initDistribution(t, &kinds[k], &rs);
+        memcpy(got[k], t->data, sizeof got[k]);
+        freeTensor(t);
+        rngStream_t ref = rngOpen(key);
+        for (size_t i = 0; i < 20; i++) {
+            want[k][i] = k == 0   ? randomUniformCtx(&ref, -0.5f, 0.5f)
+                         : k == 1 ? xavierUniform(1.0f, 4, 5, &ref)
+                                  : kaimingUniform(2.0f, 4, &ref);
+        }
+    }
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(want[0], got[0], 20);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(want[1], got[1], 20);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(want[2], got[2], 20);
+}
+
+static void randomInitWithoutAStream(const distribution_t *kind) {
+    tensor_t *t = makeFloatTensorForDistTest(2, 3);
+    initDistribution(t, kind, NULL);
+}
+
+/* Each uniform kind stops before its first draw, with initDistribution's own message. */
+void testInitDistributionRandomKindWithoutAStreamExits(void) {
+    const distribution_t kinds[3] = {
+        {.type = UNIFORM, .params.uniform = {0.0f, 1.0f}},
+        {.type = XAVIER_UNIFORM, .params.xavier = {.gain = 1.0f, .fanIn = 2, .fanOut = 3}},
+        {.type = KAIMING_UNIFORM, .params.kaiming = {.gain = 1.0f, .fanMode = 2}},
+    };
+    for (size_t k = 0; k < 3; k++) {
+        ASSERT_EXITS_WITH_OUTPUT(1, "initDistribution: random distribution without a stream",
+                                 randomInitWithoutAStream(&kinds[k]));
+    }
+}
+
+/* An empty tensor draws nothing, so it needs no stream. Host only: a
+ * zero-element allocation may be NULL on newlib (#160). */
+static void uniformInitOfAnEmptyTensor(void) {
+    tensor_t *t = makeFloatTensorForDistTest(0, 3);
+    initDistribution(t, &(distribution_t){.type = UNIFORM, .params.uniform = {0.0f, 1.0f}}, NULL);
+    freeTensor(t);
+}
+
+void testInitDistributionOfAnEmptyTensorNeedsNoStream(void) {
+    ASSERT_EXITS_WITH(0, uniformInitOfAnEmptyTensor());
+}
+
 void testTensorFillFromBoolBuffer_RoundTrip_N12(void) {
     /* N=12 → 2 bytes; mixed pattern across byte boundary. */
     const bool source[12] = {true,  false, false, true,  true, false,
@@ -1414,5 +1473,8 @@ int main(void) {
     RUN_TEST(testBatchViewOfRejectsRankEight);
     RUN_TEST(testRequantizeIntoAnSrTemplateExits);
     RUN_TEST(testFillFromFloatBufferIntoAnSrTensorExits);
+    RUN_TEST(testInitDistributionUniformKindsDrawFromTheStream);
+    RUN_TEST(testInitDistributionRandomKindWithoutAStreamExits);
+    RUN_TEST(testInitDistributionOfAnEmptyTensorNeedsNoStream);
     return UNITY_END();
 }

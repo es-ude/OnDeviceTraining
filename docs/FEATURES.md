@@ -550,9 +550,9 @@ checkpointing, limitations, literature).
   `true` supported). `initDataLoader` fails fast on `batchSize == 0`. No
   dedicated MNIST loader in `src/` (examples preprocess to `.npy`).
 - **RNG** — global XorShift32, seedable and reproducible, **byte-mirrored in Python**
-  and CI-verified. Drives weight init and DataLoader shuffle; the Dropout Bernoulli mask
-  (swappable fill hook) draws from the keyed core below. A context-passing variant
-  (`rng32_t` + `rngNextFloatCtx`,
+  and CI-verified. Drives the DataLoader shuffle; weight init (the init key of each layer)
+  and the Dropout Bernoulli mask (swappable fill hook) draw from the keyed core below.
+  A context-passing variant (`rng32_t` + `rngNextFloatCtx`,
   same draw math on caller-owned state) serves streams that must not perturb the
   global one — PPCA/exemplar replay sampling. A keyed, order-independent core also
   exists (`rngKeyFromSeed`, `rngFold` = one Threefry-2x32-20 block per key-tree edge,
@@ -734,6 +734,8 @@ checkpointing, limitations, literature).
   `docs/conventions/arithmetic-bfp.md`.
 - **Weight init** — PyTorch-compatible: `INIT_DEFAULT` reproduces
   `kaiming_uniform_(a=√5)`, plus kaiming/xavier schemes (`weightInit_t`). FLOAT32-only.
+  The values come from the layer's init key (`weightInit_t.key`, from `trainingRngInitKey`);
+  a factory without one stops at its first draw.
 - **userApi** — `inference` (single/batched/with-loss), `StateDictApi` (weight **load**
   only), `LayerWeightsApi`, `ModelValidationApi` (near-stub after PR1b.2 retired the
   SYM-producer rule), `LayerQuant` uniform config, and `StorageApi` as the single

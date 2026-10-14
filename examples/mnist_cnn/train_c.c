@@ -303,9 +303,10 @@ int main(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, quantizationInitFloat());
 
-    /* Seed weight init so the run log's "seed" is the seed actually used
-     * (DETERMINISM.md contract; previously the RNG ran from its default
-     * state=1). BIT_PARITY loads a state_dict over these weights. */
+    /* Weight init draws from the init keys of `rng`, seeded with SEED, so the
+     * run log's "seed" is the seed actually used (DETERMINISM.md contract).
+     * The global seed below no longer feeds any draw; it stays until the
+     * global RNG is retired. BIT_PARITY loads a state_dict over these weights. */
     rngSetSeed(SEED);
     trainingRng_t rng;
     trainingRngInit(&rng, SEED);

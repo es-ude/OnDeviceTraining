@@ -305,8 +305,9 @@ decisions and those with nothing in force yet are left out.
 - **remat D44** Keyed randomness: every random value becomes a function of
   an explicit key and a counter, and the module-global stream goes away.
   In force now: every stochastic rounding and Dropout mask draws from a
-  keyed stream handed down from the trainer's training state; init, shuffle
-  and replay still draw from the module-global stream; rows and the
+  keyed stream handed down from the trainer's training state, and so does
+  weight init (the init key of each layer); shuffle and replay still draw
+  from the module-global stream; rows and the
   validator call no RNG function.
 - **remat D50** Rows never receive or derive a key and call no `rng`
   function (the `remat-row-contract` gate). A future EVICT row selects

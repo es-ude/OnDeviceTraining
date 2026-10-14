@@ -18,6 +18,7 @@
 #include "InferenceApi.h"
 #include "Layer.h"
 #include "LayerQuant.h"
+#include "Linear.h"
 #include "LossFunction.h"
 #include "OdtHook.h"
 #include "Quantization.h"
@@ -93,7 +94,7 @@ typedef struct zooFixture {
 
 static void beginZoo(zooFixture_t *f) {
     memset(f, 0, sizeof *f);
-    rngSetSeed(7u); /* deterministic random init */
+    rngSetSeed(7u); /* init draws from the builders' keys, not from here */
 }
 
 static quantization_t *keepTemplate(zooFixture_t *f, quantization_t *q) {
@@ -787,6 +788,18 @@ void testSoftmaxUnderMseConforms(void) {
 
 void testFrozenLayerNormAboveDeepestConforms(void) {
     assertNullPathMatchesTheReference(buildFrozenLayerNorm);
+}
+
+/* Same-shape layers of one model start from different weights (each makeLinear
+ * position roots its own init key): a scheduler that bound one Linear's
+ * parameters to the other's would otherwise still match the reference. */
+void testFrozenLayerNormSameShapeLinearsStartFromDifferentWeights(void) {
+    zooFixture_t f;
+    buildFrozenLayerNorm(&f);
+    const float *w0 = (const float *)f.model[0]->config->linear->weights->param->data;
+    const float *w2 = (const float *)f.model[2]->config->linear->weights->param->data;
+    TEST_ASSERT_FALSE(memcmp(w0, w2, 16 * sizeof(float)) == 0);
+    freeZoo(&f);
 }
 
 void testFrozenGroupNormAboveDeepestConforms(void) {
@@ -1922,6 +1935,7 @@ int main(void) {
     RUN_TEST(testHarCnnUnderCeConforms);
     RUN_TEST(testSoftmaxUnderMseConforms);
     RUN_TEST(testFrozenLayerNormAboveDeepestConforms);
+    RUN_TEST(testFrozenLayerNormSameShapeLinearsStartFromDifferentWeights);
     RUN_TEST(testFrozenGroupNormAboveDeepestConforms);
     RUN_TEST(testTruncatedHarConforms);
     RUN_TEST(testAllFrozenModelConforms);

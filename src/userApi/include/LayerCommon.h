@@ -42,6 +42,10 @@ _Static_assert(INIT_DEFAULT == 0,
 typedef struct weightInit {
     initScheme_t scheme;
     float gain; /*!< 0 selects the scheme's default gain. Ignored for INIT_DEFAULT. */
+    /*! The layer's init key (trainingRngInitKey(rng, l), l = the layer's position
+     *  in the model): the weight draws from its (PARAM, 0) stream, the bias from
+     *  (PARAM, 1). Required: a factory without one stops at its first draw. Read
+     *  during the factory call only. */
     const rngKey_t *key;
 } weightInit_t;
 
@@ -71,11 +75,14 @@ bool resolveTrainable(trainable_t t, const char *factoryName);
  *  - INIT_KAIMING_UNIFORM: kaimingUniform(gain ? gain : sqrt(2), fanIn).
  *  - INIT_XAVIER_UNIFORM: xavierUniform(gain ? gain : 1, fanIn, fanOut).
  *
- *  Aborts (PRINT_ERROR + exit) if the tensor is not FLOAT32. */
+ *  Draws from the (PARAM, 0) stream of cfg.key. Aborts (PRINT_ERROR + exit) if
+ *  the tensor is not FLOAT32, or at the first draw if cfg.key is NULL. */
 void initWeightTensor(tensor_t *weight, weightInit_t cfg, size_t fanIn, size_t fanOut);
 
 /*! Initialize a FLOAT32 bias tensor in place to PyTorch's default
- *  uniform(+/- 1/sqrt(fanIn)). Aborts if the tensor is not FLOAT32. */
+ *  uniform(+/- 1/sqrt(fanIn)), drawn from the (PARAM, 1) stream of the layer's
+ *  init key. Aborts if the tensor is not FLOAT32, or at the first draw if
+ *  initKey is NULL. */
 void initBiasTensor(tensor_t *bias, size_t fanIn, const rngKey_t *initKey);
 
 #endif /* LAYER_COMMON_H */

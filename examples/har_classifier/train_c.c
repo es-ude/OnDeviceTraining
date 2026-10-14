@@ -484,9 +484,9 @@ int main(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, quantizationInitFloat());
 
-    /* Seed the RNG so weight init is reproducible AND matches the seed recorded
-     * in the run log (previously the config claimed seed 42 but the RNG was
-     * never seeded — it ran from its default state=1). BIT_PARITY overwrites
+    /* Weight init draws from the init keys of `rng`, seeded with g_seed, the
+     * seed recorded in the run log. The global seed below no longer feeds any
+     * draw; it stays until the global RNG is retired. BIT_PARITY overwrites
      * these weights from the state_dict, so this does not perturb the CI gate. */
     rngSetSeed(g_seed);
     trainingRng_t rng;

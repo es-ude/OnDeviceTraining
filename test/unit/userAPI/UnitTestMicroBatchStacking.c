@@ -1379,7 +1379,7 @@ static batch_t *getBatchWithOneExtraSample(dataLoader_t *dataLoader, size_t inde
 }
 
 static void buildClassifier(layer_t **model, layerQuant_t *lq) {
-    rngSetSeed(4242u); /* identical initial weights on every build */
+    rngSetSeed(4242u); /* init no longer draws from here; the keys below fix the weights */
     const rngKey_t initKey0 = rngFold(rngKeyFromSeed(4242u), RNG_TAG_INIT, 0u);
     const rngKey_t initKey2 = rngFold(rngKeyFromSeed(4242u), RNG_TAG_INIT, 2u);
     model[0] = linearLayerInit(

@@ -313,6 +313,36 @@ void testRandomUniformCtxExitsWithoutAStream(void) {
                              uniformDrawWithoutAStream());
 }
 
+/* The uniform init helpers draw from the stream they are handed — the keyed
+ * uniform over their bound — and leave the global generator alone. */
+void testUniformInitHelpersDrawFromTheirStream(void) {
+    const rngKey_t key = rngKeyFromSeed(42u);
+    rngStream_t got = rngOpen(key);
+    rngStream_t want = rngOpen(key);
+    const float kaimingLimit = 1.0f * sqrtf(3.0f / 784.0f);
+    const float xavierLimit = 1.0f * sqrtf(6.0f / (float)(784 + 128));
+    const uint32_t globalBefore = rngGetSeed();
+    for (size_t i = 0; i < 4; i++) {
+        /* Locals: Unity evaluates a macro argument more than once. */
+        const float k = kaimingUniform(1.0f, 784, &got);
+        const float kWant = randomUniformCtx(&want, -kaimingLimit, kaimingLimit);
+        TEST_ASSERT_EQUAL_FLOAT(kWant, k);
+        const float x = xavierUniform(1.0f, 784, 128, &got);
+        const float xWant = randomUniformCtx(&want, -xavierLimit, xavierLimit);
+        TEST_ASSERT_EQUAL_FLOAT(xWant, x);
+    }
+    TEST_ASSERT_EQUAL_UINT32(globalBefore, rngGetSeed());
+}
+
+static void kaimingDrawWithoutAStream(void) {
+    (void)kaimingUniform(1.0f, 784, NULL);
+}
+
+void testKaimingUniformExitsWithoutAStream(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "randomUniformCtx: draw without a stream",
+                             kaimingDrawWithoutAStream());
+}
+
 void setUp(void) {}
 
 void tearDown(void) {}
@@ -333,6 +363,8 @@ int main(void) {
     RUN_TEST(testFillNormalRejectsNonFloat);
     RUN_TEST(testRandomUniformCtxScalesTheStreamsUnitFloats);
     RUN_TEST(testRandomUniformCtxExitsWithoutAStream);
+    RUN_TEST(testUniformInitHelpersDrawFromTheirStream);
+    RUN_TEST(testKaimingUniformExitsWithoutAStream);
 
     return UNITY_END();
 }

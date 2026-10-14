@@ -2194,6 +2194,91 @@ void testLinearLayerInitXavierUniformOverrideUsesGlorotBound(void) {
                              "Bias must stay PyTorch default uniform regardless of weight scheme");
 }
 
+/* A Linear(4 -> 3) built from `initKey` with a Xavier(gain 1) recipe; its
+ * weights and bias are copied out before the layer is freed. */
+static void linearInitValuesOf(const rngKey_t *initKey, float weights[12], float bias[3]) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *layer = linearLayerInit(
+        &(linearInit_t){.inFeatures = 4,
+                        .outFeatures = 3,
+                        .bias = BIAS_TRUE,
+                        .weightInit = {INIT_XAVIER_UNIFORM, .gain = 1.0f, .key = initKey}},
+        &lq);
+    memcpy(weights, layer->config->linear->weights->param->data, 12 * sizeof(float));
+    memcpy(bias, layer->config->linear->bias->param->data, 3 * sizeof(float));
+    freeLinearLayer(layer);
+    freeQuantization(q);
+}
+
+/* The weight draws from the (PARAM, 0) stream of the layer's init key, the
+ * bias from (PARAM, 1). The bias always uses PyTorch's default,
+ * kaimingUniform(sqrt(1/3), fan_in): 0.57735026919f is that gain, as
+ * LayerCommon.c spells it. */
+void testLinearInitDrawsWeightAndBiasFromTheParamStreamsOfItsKey(void) {
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(5u), RNG_TAG_INIT, 0u);
+    float weights[12];
+    float bias[3];
+    linearInitValuesOf(&initKey, weights, bias);
+    float wantWeights[12];
+    float wantBias[3];
+    rngStream_t weightStream = rngOpen(rngFold(initKey, RNG_TAG_PARAM, 0u));
+    for (size_t i = 0; i < 12; i++) {
+        wantWeights[i] = xavierUniform(1.0f, 4, 3, &weightStream);
+    }
+    rngStream_t biasStream = rngOpen(rngFold(initKey, RNG_TAG_PARAM, 1u));
+    for (size_t i = 0; i < 3; i++) {
+        wantBias[i] = kaimingUniform(0.57735026919f, 4, &biasStream);
+    }
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(wantWeights, weights, 12);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(wantBias, bias, 3);
+    /* Independent golds, the first three of each, from the Python mirror (tag
+     * values spelled as numbers: INIT 22, PARAM 19), from the repository root:
+     *   uv run python -c "from examples._shared.keyed_rng import (key_from_seed, fold,
+     *   open_stream, next_unit_float as nuf); import numpy as np; f = np.float32; k = fold(
+     *   key_from_seed(5), 22, 0); lw = np.sqrt(f(6) / f(7)); lb = f(0.57735026919) * np.sqrt(
+     *   f(3) / f(4)); t = (open_stream(fold(k, 19, 0)), 0.0); w = [(t := nuf(t[0]))[1] for _ in (
+     *   0, 1, 2)]; t = (open_stream(fold(k, 19, 1)), 0.0); b = [(t := nuf(t[0]))[1] for _ in (
+     *   0, 1, 2)]; print([repr(float(-lw + f(u) * (lw + lw))) for u in w], [repr(float(
+     *   -lb + f(u) * (lb + lb))) for u in b])"
+     */
+    const float goldWeights[3] = {-0.36196327209472656f, -0.7439754009246826f,
+                                  0.49748659133911133f};
+    const float goldBias[3] = {0.12533333897590637f, -0.012614428997039795f, -0.02550959587097168f};
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(goldWeights, weights, 3);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(goldBias, bias, 3);
+}
+
+/* Initial values depend on the key alone: the same key gives the same values
+ * whatever was built in between, the next layer position other values. */
+void testLinearInitIsAFunctionOfItsKeyAlone(void) {
+    const rngKey_t root = rngKeyFromSeed(5u);
+    const rngKey_t key0 = rngFold(root, RNG_TAG_INIT, 0u);
+    const rngKey_t key1 = rngFold(root, RNG_TAG_INIT, 1u);
+    float first[12], firstBias[3], other[12], otherBias[3], again[12], againBias[3];
+    linearInitValuesOf(&key0, first, firstBias);
+    linearInitValuesOf(&key1, other, otherBias);
+    linearInitValuesOf(&key0, again, againBias);
+    TEST_ASSERT_EQUAL_MEMORY(first, again, sizeof first);
+    TEST_ASSERT_EQUAL_MEMORY(firstBias, againBias, sizeof firstBias);
+    TEST_ASSERT_FALSE(memcmp(first, other, sizeof first) == 0);
+    TEST_ASSERT_FALSE(memcmp(firstBias, otherBias, sizeof firstBias) == 0);
+}
+
+static void linearInitWithoutAKey(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    (void)linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &lq);
+}
+
+/* No default key: a factory without one stops at its first draw. */
+void testLinearInitWithoutAKeyExits(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "initDistribution: random distribution without a stream",
+                             linearInitWithoutAKey());
+}
+
 void testLinearBackwardWithoutBiasDoesNotCrash(void) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
@@ -3432,6 +3517,9 @@ int main(void) {
     RUN_TEST(testLinearLayerInitOwningBfpWeightGradStorageKnob);
     RUN_TEST(testLinearLayerInitDefaultWeightsWithinPyTorchBound);
     RUN_TEST(testLinearLayerInitXavierUniformOverrideUsesGlorotBound);
+    RUN_TEST(testLinearInitDrawsWeightAndBiasFromTheParamStreamsOfItsKey);
+    RUN_TEST(testLinearInitIsAFunctionOfItsKeyAlone);
+    RUN_TEST(testLinearInitWithoutAKeyExits);
     RUN_TEST(testLinearBackwardWithoutBiasDoesNotCrash);
     RUN_TEST(testLinearForwardWithoutBiasDoesNotCrash);
 

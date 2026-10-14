@@ -2214,9 +2214,9 @@ void testBfpConvGradStorageTrainsUnderDefaultEpoch(void) {
                                   "biasGradStorage must land BFP storage on the conv bias grad");
     /* "Moved off the zero state" is a proxy: the zero state IS exponent == bias
      * (scale 1.0), so a grad whose absmax happened to derive exactly that exponent
-     * would false-fail here. rngSetSeed(1717u) above pins the draw that makes this
-     * deterministic -- the exponents are not otherwise asserted, so a seed change
-     * must re-confirm both of these. */
+     * would false-fail here. The init keys of seed 1717u above pin the draw that
+     * makes this deterministic -- the exponents are not otherwise asserted, so a
+     * seed change must re-confirm both of these. */
     TEST_ASSERT_NOT_EQUAL_MESSAGE(zeroStateBias, wGradExponent,
                                   "the conv weightGrad accumulate route must move the BFP grad's "
                                   "exponent off the zero state during backward");

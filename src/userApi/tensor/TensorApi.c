@@ -86,6 +86,15 @@ void tensorFillFromBoolBuffer(tensor_t *tensor, const bool *source, size_t count
     }
 }
 
+/* The random kinds draw only inside their per-element loops: a missing stream
+ * stops before the first element, and an empty tensor never needs one. */
+static void requireStream(const rngStream_t *rs, size_t n) {
+    if (rs == NULL && n > 0) {
+        PRINT_ERROR("initDistribution: random distribution without a stream");
+        exit(1);
+    }
+}
+
 void initDistribution(tensor_t *tensor, const distribution_t *distribution, rngStream_t *rs) {
     if (tensor->quantization->type != FLOAT32) {
         PRINT_ERROR("initDistribution only supports FLOAT32 in this iteration");
@@ -104,9 +113,10 @@ void initDistribution(tensor_t *tensor, const distribution_t *distribution, rngS
         }
         break;
     case UNIFORM:
+        requireStream(rs, n);
         for (size_t i = 0; i < n; ++i) {
-            vals[i] =
-                randomUniform(distribution->params.uniform.min, distribution->params.uniform.max);
+            vals[i] = randomUniformCtx(rs, distribution->params.uniform.min,
+                                       distribution->params.uniform.max);
         }
         break;
     case NORMAL:
@@ -116,6 +126,7 @@ void initDistribution(tensor_t *tensor, const distribution_t *distribution, rngS
         }
         break;
     case XAVIER_UNIFORM:
+        requireStream(rs, n);
         for (size_t i = 0; i < n; ++i) {
             vals[i] =
                 xavierUniform(distribution->params.xavier.gain, distribution->params.xavier.fanIn,
@@ -130,6 +141,7 @@ void initDistribution(tensor_t *tensor, const distribution_t *distribution, rngS
         }
         break;
     case KAIMING_UNIFORM:
+        requireStream(rs, n);
         for (size_t i = 0; i < n; ++i) {
             vals[i] = kaimingUniform(distribution->params.kaiming.gain,
                                      distribution->params.kaiming.fanMode, rs);

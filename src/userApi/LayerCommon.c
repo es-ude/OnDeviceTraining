@@ -5,6 +5,7 @@
 #include "Common.h"
 #include "Distributions.h"
 #include "LayerCommon.h"
+#include "RNG.h"
 #include "TensorApi.h"
 
 /* PyTorch's default weight/bias init draws from uniform(+/- 1/sqrt(fan_in)).
@@ -26,6 +27,17 @@ static void requireFloat32(const tensor_t *t, const char *what) {
                     (int)t->quantization->type);
         exit(1);
     }
+}
+
+/* The draws of one parameter: the stream of (PARAM, slot) under the layer's
+ * init key; slot 0 is the weight, 1 the bias. Without a key there is no stream,
+ * and initDistribution stops at the first draw. */
+static rngStream_t *openParamStream(const rngKey_t *initKey, uint32_t slot, rngStream_t *storage) {
+    if (initKey == NULL) {
+        return NULL;
+    }
+    *storage = rngOpen(rngFold(*initKey, RNG_TAG_PARAM, slot));
+    return storage;
 }
 
 void initWeightTensor(tensor_t *weight, weightInit_t cfg, size_t fanIn, size_t fanOut) {
@@ -59,7 +71,8 @@ void initWeightTensor(tensor_t *weight, weightInit_t cfg, size_t fanIn, size_t f
         exit(1);
     }
 
-    initDistribution(weight, &dist, NULL);
+    rngStream_t rs;
+    initDistribution(weight, &dist, openParamStream(cfg.key, 0u, &rs));
 }
 
 bool resolveTrainable(trainable_t t, const char *factoryName) {
@@ -84,5 +97,6 @@ void initBiasTensor(tensor_t *bias, size_t fanIn, const rngKey_t *initKey) {
         .type = KAIMING_UNIFORM,
         .params.kaiming = {.gain = INIT_DEFAULT_GAIN, .fanMode = fanIn},
     };
-    initDistribution(bias, &dist, NULL);
+    rngStream_t rs;
+    initDistribution(bias, &dist, openParamStream(initKey, 1u, &rs));
 }

@@ -15,6 +15,7 @@ target_include_directories(LayerCommon PUBLIC include)
 target_link_libraries(LayerCommon PRIVATE
         Common
         Distributions
+        RNG
         Tensor
         TensorApi
 )

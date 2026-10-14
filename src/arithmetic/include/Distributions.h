@@ -92,6 +92,7 @@ float kaimingNormal(float gain, size_t fanMode);
  *
  * @param gain Optional scaling factor for non-linearity
  * @param fanMode: Number of input/output features
+ * @param rs: Stream the draw comes from (randomUniformCtx; NULL stops the program)
  *
  * @returns Float value
  */
@@ -112,6 +113,7 @@ float xavierNormal(float gain, size_t fanIn, size_t fanOut);
  * @param gain Optional scaling factor for non-linearity
  * @param fanIn: Number of input features
  * @param fanOut: Number of output features
+ * @param rs: Stream the draw comes from (randomUniformCtx; NULL stops the program)
  *
  * @returns Float value
  */

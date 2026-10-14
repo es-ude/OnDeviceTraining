@@ -73,7 +73,7 @@ float kaimingNormal(float gain, size_t fanMode) {
 
 float kaimingUniform(float gain, size_t fanMode, rngStream_t *rs) {
     float limit = gain * sqrtf(3.0f / (float)fanMode);
-    return randomUniform(-limit, limit);
+    return randomUniformCtx(rs, -limit, limit);
 }
 
 float xavierNormal(float gain, size_t fanIn, size_t fanOut) {
@@ -83,5 +83,5 @@ float xavierNormal(float gain, size_t fanIn, size_t fanOut) {
 
 float xavierUniform(float gain, size_t fanIn, size_t fanOut, rngStream_t *rs) {
     float limit = gain * sqrtf(6.0f / (float)(fanIn + fanOut));
-    return randomUniform(-limit, limit);
+    return randomUniformCtx(rs, -limit, limit);
 }

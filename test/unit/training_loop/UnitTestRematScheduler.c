@@ -683,7 +683,7 @@ static void buildMixedChain(mixedChain_t *c, uint32_t *state) {
         c->bfpQ[k] = (quantization_t){.type = BFP, .qConfig = &c->bfpQc[k]};
     }
     size_t features = 1u + nextRandom(state) % 9u;
-    c->model[0] = makeLinear(features, features, false);
+    c->model[0] = makeLinear(features, features, false, 0);
     c->n = 2u + nextRandom(state) % MIXED_MAX_RELUS;
     for (size_t i = 1; i < c->n; i++) {
         uint32_t pick = nextRandom(state) % 4u;

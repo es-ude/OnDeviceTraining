@@ -20,6 +20,7 @@
 #include "Pool1dApi.h"
 #include "QuantizationApi.h"
 #include "QuantizationLayer.h"
+#include "RNG.h"
 #include "ReluApi.h"
 #include "SgdApi.h"
 #include "SoftmaxApi.h"
@@ -73,7 +74,9 @@ void testCalculateGradsSequentialClosedForm() {
     layerQuantInitUniform(&lq, quantizationInitFloat());
 
     layer_t *model[2];
-    model[0] = linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &lq);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    model[0] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey0}, &lq);
     model[1] = softmaxLayerInit(&lq);
 
     /* Set known weights/bias: W = {{0.1,0.2},{0.3,0.4}}, b = {0,0}. */
@@ -137,7 +140,9 @@ void testTracedGradsFiresInOrder() {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, quantizationInitFloat());
     layer_t *model[2];
-    model[0] = linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &lq);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    model[0] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey0}, &lq);
     model[1] = softmaxLayerInit(&lq);
     float W[4] = {0.1f, 0.2f, 0.3f, 0.4f}, B[2] = {0};
     modelLoadStateDict(model, 2,
@@ -178,7 +183,9 @@ void testTraceModelParamsFiresPerTrainableParam() {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, quantizationInitFloat());
     layer_t *model[2];
-    model[0] = linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &lq);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    model[0] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey0}, &lq);
     model[1] = softmaxLayerInit(&lq);
     float W[4] = {0.1f, 0.2f, 0.3f, 0.4f}, B[2] = {0};
     modelLoadStateDict(model, 2,
@@ -239,9 +246,15 @@ void testTraceModelGradsSkipsFrozenLayerNeverPassesNull(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, quantizationInitFloat());
     layer_t *model[2];
-    model[0] = linearLayerInit(
-        &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .trainable = TRAINABLE_FALSE}, &lq);
-    model[1] = linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &lq);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey1 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 1u);
+    model[0] = linearLayerInit(&(linearInit_t){.inFeatures = 2,
+                                               .outFeatures = 2,
+                                               .trainable = TRAINABLE_FALSE,
+                                               .weightInit.key = &initKey0},
+                               &lq);
+    model[1] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey1}, &lq);
 
     gradTraceCounts_t counts = {.callCount = 0, .sawNoNull = true};
     traceModelGrads(model, 2, "grad", countingSink, &counts);
@@ -649,10 +662,16 @@ void testFrozenLayerSurvivesTrainingUntouched(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
-    layer_t *frozenL = linearLayerInit(
-        &(linearInit_t){.inFeatures = 4, .outFeatures = 4, .trainable = TRAINABLE_FALSE}, &lq);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey2 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 2u);
+    layer_t *frozenL = linearLayerInit(&(linearInit_t){.inFeatures = 4,
+                                                       .outFeatures = 4,
+                                                       .trainable = TRAINABLE_FALSE,
+                                                       .weightInit.key = &initKey0},
+                                       &lq);
     layer_t *reluL = reluLayerInit(&lq);
-    layer_t *trainL = linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = 2}, &lq);
+    layer_t *trainL = linearLayerInit(
+        &(linearInit_t){.inFeatures = 4, .outFeatures = 2, .weightInit.key = &initKey2}, &lq);
     layer_t *model[3] = {frozenL, reluL, trainL};
 
     float frozenW[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
@@ -767,10 +786,16 @@ void testBackwardStopsAtDeepestTrainableLayer(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, quantizationInitFloat());
 
-    layer_t *frozenL = linearLayerInit(
-        &(linearInit_t){.inFeatures = 4, .outFeatures = 4, .trainable = TRAINABLE_FALSE}, &lq);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey2 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 2u);
+    layer_t *frozenL = linearLayerInit(&(linearInit_t){.inFeatures = 4,
+                                                       .outFeatures = 4,
+                                                       .trainable = TRAINABLE_FALSE,
+                                                       .weightInit.key = &initKey0},
+                                       &lq);
     layer_t *reluL = reluLayerInit(&lq);
-    layer_t *trainL = linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = 2}, &lq);
+    layer_t *trainL = linearLayerInit(
+        &(linearInit_t){.inFeatures = 4, .outFeatures = 2, .weightInit.key = &initKey2}, &lq);
     layer_t *model[3] = {frozenL, reluL, trainL};
 
     float frozenW[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
@@ -862,15 +887,23 @@ void testTruncationPreservesUpperLayerGrads(void) {
     float seedT[8] = {0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f};
     float seedTBias[2] = {0.0f, 0.0f};
 
-    layer_t *m1Bottom = linearLayerInit(
-        &(linearInit_t){.inFeatures = 4, .outFeatures = 4, .trainable = TRAINABLE_FALSE}, &lq);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey2 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 2u);
+    layer_t *m1Bottom = linearLayerInit(&(linearInit_t){.inFeatures = 4,
+                                                        .outFeatures = 4,
+                                                        .trainable = TRAINABLE_FALSE,
+                                                        .weightInit.key = &initKey0},
+                                        &lq);
     layer_t *m1Relu = reluLayerInit(&lq);
-    layer_t *m1Top = linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = 2}, &lq);
+    layer_t *m1Top = linearLayerInit(
+        &(linearInit_t){.inFeatures = 4, .outFeatures = 2, .weightInit.key = &initKey2}, &lq);
     layer_t *m1[3] = {m1Bottom, m1Relu, m1Top};
 
-    layer_t *m2Bottom = linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = 4}, &lq);
+    layer_t *m2Bottom = linearLayerInit(
+        &(linearInit_t){.inFeatures = 4, .outFeatures = 4, .weightInit.key = &initKey0}, &lq);
     layer_t *m2Relu = reluLayerInit(&lq);
-    layer_t *m2Top = linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = 2}, &lq);
+    layer_t *m2Top = linearLayerInit(
+        &(linearInit_t){.inFeatures = 4, .outFeatures = 2, .weightInit.key = &initKey2}, &lq);
     layer_t *m2[3] = {m2Bottom, m2Relu, m2Top};
 
     modelLoadStateDict(
@@ -939,8 +972,12 @@ void testAllFrozenModelSkipsBackwardEntirely(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, quantizationInitFloat());
 
-    layer_t *frozenL = linearLayerInit(
-        &(linearInit_t){.inFeatures = 4, .outFeatures = 2, .trainable = TRAINABLE_FALSE}, &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *frozenL = linearLayerInit(&(linearInit_t){.inFeatures = 4,
+                                                       .outFeatures = 2,
+                                                       .trainable = TRAINABLE_FALSE,
+                                                       .weightInit.key = &initKey},
+                                       &lq);
     layer_t *model[1] = {frozenL};
 
     float W[8] = {0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f};
@@ -1131,7 +1168,9 @@ static void runSpiedGradsCall(const trainingCall_t *call) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
     layer_t *model[2];
-    model[0] = linearLayerInit(&(linearInit_t){.inFeatures = 2, .outFeatures = 2}, &lq);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    model[0] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey0}, &lq);
     model[1] = softmaxLayerInit(&lq);
     float W[4] = {0.1f, 0.2f, 0.3f, 0.4f}, B[2] = {0};
     modelLoadStateDict(model, 2,
@@ -1216,14 +1255,18 @@ static void buildOrderModel(orderModel_t *m) {
     layerQuantInitUniform(&lq0, m->floatQ);
     lq0.forwardMath = sr;
     lq0.outputQ = m->wireQ;
-    m->model[0] =
-        linearLayerInit(&(linearInit_t){.inFeatures = 3, .outFeatures = ORDER_HIDDEN}, &lq0);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(ORDER_SEED), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey1 = rngFold(rngKeyFromSeed(ORDER_SEED), RNG_TAG_INIT, 1u);
+    m->model[0] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 3, .outFeatures = ORDER_HIDDEN, .weightInit.key = &initKey0},
+        &lq0);
     layerQuant_t lq1;
     layerQuantInitUniform(&lq1, m->floatQ);
     lq1.propLossMath = sr;
     lq1.propLossQ = m->wireQ;
-    m->model[1] =
-        linearLayerInit(&(linearInit_t){.inFeatures = ORDER_HIDDEN, .outFeatures = 2}, &lq1);
+    m->model[1] = linearLayerInit(
+        &(linearInit_t){.inFeatures = ORDER_HIDDEN, .outFeatures = 2, .weightInit.key = &initKey1},
+        &lq1);
     m->x = makeRowVecN((float[]){0.5f, -1.f, 2.f}, 3);
     m->label = makeRowVec2(0.3f, -0.2f);
 }

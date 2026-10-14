@@ -154,7 +154,11 @@ static size_t getTestSize(void) {
     return g_testDataset.items->size;
 }
 
-static void buildModel(layer_t **model, layerQuant_t *lq) {
+static void buildModel(layer_t **model, layerQuant_t *lq, const trainingRng_t *rng) {
+    const rngKey_t initKey1 = trainingRngInitKey(rng, 1);
+    const rngKey_t initKey5 = trainingRngInitKey(rng, 5);
+    const rngKey_t initKey9 = trainingRngInitKey(rng, 9);
+    const rngKey_t initKey15 = trainingRngInitKey(rng, 15);
     /* Sample [1, 16000]; the loop's batch view makes it [1, 1, 16000]. */
     /* Front downsample: AvgPool1d(K=16,S=16) -> length 1000 (16 kHz -> 1 kHz). */
     model[0] = avgPool1dLayerInit(&(avgPool1dInit_t){.kernelSize = DS_K, .stride = DS_K}, lq);
@@ -164,10 +168,12 @@ static void buildModel(layer_t **model, layerQuant_t *lq) {
      * stable convergence: a 10-seed sweep showed end-feature LayerNorm collapses on ~40% of
      * seeds while per-conv converges 10/10. normalizedShape is L-coupled like the MaxPool
      * inputLengths, so it tracks the downsample rate. */
-    model[1] = conv1dLayerInit(
-        &(conv1dInit_t){
-            .inChannels = IN_CHANNELS, .outChannels = C1_OUT, .kernelSize = C1_K, .padding = SAME},
-        lq);
+    model[1] = conv1dLayerInit(&(conv1dInit_t){.inChannels = IN_CHANNELS,
+                                               .outChannels = C1_OUT,
+                                               .kernelSize = C1_K,
+                                               .padding = SAME,
+                                               .weightInit.key = &initKey1},
+                               lq);
     model[2] = layerNormLayerInit(&(layerNormInit_t){.normalizedShape = (size_t[]){C1_OUT, LEN_DS},
                                                      .numNormDims = 2,
                                                      .eps = 1e-5f},
@@ -178,10 +184,12 @@ static void buildModel(layer_t **model, layerQuant_t *lq) {
             .kernelSize = 4, .stride = 4, .inputChannels = C1_OUT, .inputLength = LEN_DS},
         lq);
 
-    model[5] = conv1dLayerInit(
-        &(conv1dInit_t){
-            .inChannels = C1_OUT, .outChannels = C2_OUT, .kernelSize = C2_K, .padding = SAME},
-        lq);
+    model[5] = conv1dLayerInit(&(conv1dInit_t){.inChannels = C1_OUT,
+                                               .outChannels = C2_OUT,
+                                               .kernelSize = C2_K,
+                                               .padding = SAME,
+                                               .weightInit.key = &initKey5},
+                               lq);
     model[6] = layerNormLayerInit(
         &(layerNormInit_t){
             .normalizedShape = (size_t[]){C2_OUT, LEN_DS / 4}, .numNormDims = 2, .eps = 1e-5f},
@@ -192,10 +200,12 @@ static void buildModel(layer_t **model, layerQuant_t *lq) {
             .kernelSize = 4, .stride = 4, .inputChannels = C2_OUT, .inputLength = LEN_DS / 4},
         lq);
 
-    model[9] = conv1dLayerInit(
-        &(conv1dInit_t){
-            .inChannels = C2_OUT, .outChannels = C3_OUT, .kernelSize = C3_K, .padding = SAME},
-        lq);
+    model[9] = conv1dLayerInit(&(conv1dInit_t){.inChannels = C2_OUT,
+                                               .outChannels = C3_OUT,
+                                               .kernelSize = C3_K,
+                                               .padding = SAME,
+                                               .weightInit.key = &initKey9},
+                               lq);
     model[10] = layerNormLayerInit(
         &(layerNormInit_t){
             .normalizedShape = (size_t[]){C3_OUT, LEN_DS / 16}, .numNormDims = 2, .eps = 1e-5f},
@@ -209,8 +219,10 @@ static void buildModel(layer_t **model, layerQuant_t *lq) {
     /* Rate-agnostic head: AdaptiveAvgPool1d(1) -> Flatten -> Linear -> Softmax. */
     model[13] = adaptiveAvgPool1dLayerInit(&(adaptiveAvgPool1dInit_t){.outputSize = 1}, lq);
     model[14] = flattenLayerInit();
-    model[15] =
-        linearLayerInit(&(linearInit_t){.inFeatures = C3_OUT, .outFeatures = g_numClasses}, lq);
+    model[15] = linearLayerInit(&(linearInit_t){.inFeatures = C3_OUT,
+                                                .outFeatures = g_numClasses,
+                                                .weightInit.key = &initKey15},
+                                lq);
     model[16] = softmaxLayerInit(lq);
 }
 
@@ -330,7 +342,7 @@ int main(void) {
     trainingRngInit(&rng, SEED);
 
     layer_t *model[MODEL_SIZE];
-    buildModel(model, &lq);
+    buildModel(model, &lq, &rng);
 
     const char *bitParity = getenv("BIT_PARITY");
     if (bitParity != NULL && bitParity[0] != '\0') {

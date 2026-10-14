@@ -67,8 +67,11 @@ static layer_t *buildFloatLinearWithTrainable(trainable_t trainable) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = linearLayerInitOwning(
-        &(linearInit_t){.inFeatures = 3, .outFeatures = 2, .trainable = trainable}, &lq);
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .trainable = trainable, .weightInit.key = &initKey},
+        &lq);
     freeQuantization(q);
     return layer;
 }
@@ -452,8 +455,11 @@ void testSgdZeroGradOnSymInt32GradZeroesMantissasAndResetsScale(void) {
                        .biasStorage = fwd,
                        .weightGradStorage = bwd,
                        .biasGradStorage = bwd};
-    layer_t *layer =
-        linearLayerInit(&(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE}, &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *layer = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE, .weightInit.key = &initKey},
+        &lq);
 
     tensor_t *wGrad = layer->config->linear->weights->grad;
     TEST_ASSERT_EQUAL_INT(SYM_INT32, wGrad->quantization->type); /* guard */
@@ -519,8 +525,11 @@ void testSgdZeroGradBfpResetsExponentsToZeroState(void) {
                        .biasStorage = fwd,
                        .weightGradStorage = bwd,
                        .biasGradStorage = bwd};
-    layer_t *layer =
-        linearLayerInit(&(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE}, &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *layer = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE, .weightInit.key = &initKey},
+        &lq);
 
     tensor_t *wGrad = layer->config->linear->weights->grad;
     TEST_ASSERT_EQUAL_INT(BFP, wGrad->quantization->type); /* guard */

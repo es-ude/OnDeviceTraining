@@ -107,14 +107,20 @@ static size_t getTestSize(void) {
     return g_testDataset.items->size;
 }
 
-static void buildModel(layer_t **model, layerQuant_t *lq) {
+static void buildModel(layer_t **model, layerQuant_t *lq, const trainingRng_t *rng) {
+    const rngKey_t initKey0 = trainingRngInitKey(rng, 0);
+    const rngKey_t initKey3 = trainingRngInitKey(rng, 3);
+    const rngKey_t initKey6 = trainingRngInitKey(rng, 6);
+    const rngKey_t initKey8 = trainingRngInitKey(rng, 8);
+    const rngKey_t initKey10 = trainingRngInitKey(rng, 10);
     /* Encoder */
     model[0] = conv1dLayerInit(&(conv1dInit_t){.inChannels = IN_CHANNELS,
                                                .outChannels = E1_OUT,
                                                .kernelSize = E1_K,
                                                .stride = E1_S,
                                                .padding = EXPLICIT,
-                                               .paddingAmount = E1_PAD},
+                                               .paddingAmount = E1_PAD,
+                                               .weightInit.key = &initKey0},
                                lq);
     model[1] = reluLayerInit(lq);
     model[2] = maxPool1dLayerInit(
@@ -122,30 +128,38 @@ static void buildModel(layer_t **model, layerQuant_t *lq) {
             .kernelSize = 2, .stride = 2, .inputChannels = E1_OUT, .inputLength = LEN_INPUT / E1_S},
         lq);
 
-    model[3] = conv1dLayerInit(
-        &(conv1dInit_t){
-            .inChannels = E1_OUT, .outChannels = E2_OUT, .kernelSize = E2_K, .padding = SAME},
-        lq);
+    model[3] = conv1dLayerInit(&(conv1dInit_t){.inChannels = E1_OUT,
+                                               .outChannels = E2_OUT,
+                                               .kernelSize = E2_K,
+                                               .padding = SAME,
+                                               .weightInit.key = &initKey3},
+                               lq);
     model[4] = reluLayerInit(lq);
     model[5] = avgPool1dLayerInit(&(avgPool1dInit_t){.kernelSize = 5, .stride = 5}, lq);
 
     /* Decoder */
-    model[6] = conv1dTransposedLayerInit(
-        &(conv1dTransposedInit_t){
-            .inChannels = E2_OUT, .outChannels = D1_OUT, .kernelSize = D1_K, .stride = D1_S},
-        lq);
+    model[6] = conv1dTransposedLayerInit(&(conv1dTransposedInit_t){.inChannels = E2_OUT,
+                                                                   .outChannels = D1_OUT,
+                                                                   .kernelSize = D1_K,
+                                                                   .stride = D1_S,
+                                                                   .weightInit.key = &initKey6},
+                                         lq);
     model[7] = reluLayerInit(lq);
 
-    model[8] = conv1dTransposedLayerInit(
-        &(conv1dTransposedInit_t){
-            .inChannels = D1_OUT, .outChannels = D2_OUT, .kernelSize = D2_K, .stride = D2_S},
-        lq);
+    model[8] = conv1dTransposedLayerInit(&(conv1dTransposedInit_t){.inChannels = D1_OUT,
+                                                                   .outChannels = D2_OUT,
+                                                                   .kernelSize = D2_K,
+                                                                   .stride = D2_S,
+                                                                   .weightInit.key = &initKey8},
+                                         lq);
     model[9] = reluLayerInit(lq);
 
-    model[10] = conv1dTransposedLayerInit(
-        &(conv1dTransposedInit_t){
-            .inChannels = D2_OUT, .outChannels = D3_OUT, .kernelSize = D3_K, .stride = D3_S},
-        lq);
+    model[10] = conv1dTransposedLayerInit(&(conv1dTransposedInit_t){.inChannels = D2_OUT,
+                                                                    .outChannels = D3_OUT,
+                                                                    .kernelSize = D3_K,
+                                                                    .stride = D3_S,
+                                                                    .weightInit.key = &initKey10},
+                                          lq);
 }
 
 static int loadStateDictFromDir(layer_t **model, const char *weightsDir) {
@@ -278,7 +292,7 @@ int main(void) {
     trainingRngInit(&rng, SEED);
 
     layer_t *model[MODEL_SIZE];
-    buildModel(model, &lq);
+    buildModel(model, &lq, &rng);
 
     const char *bitParity = getenv("BIT_PARITY");
     if (bitParity != NULL && bitParity[0] != '\0') {

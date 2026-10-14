@@ -117,12 +117,17 @@ static size_t getTestSize(void) {
     return g_testDataset.items->size;
 }
 
-static void buildModel(layer_t **model, layerQuant_t *lq) {
+static void buildModel(layer_t **model, layerQuant_t *lq, const trainingRng_t *rng) {
+    const rngKey_t initKey1 = trainingRngInitKey(rng, 1);
+    const rngKey_t initKey3 = trainingRngInitKey(rng, 3);
     /* Flatten [1,1,28,28] -> [1,784]: the natural [1,28,28] image plus the loop's batch axis. */
     model[0] = flattenLayerInit();
-    model[1] = linearLayerInit(&(linearInit_t){.inFeatures = 28 * 28, .outFeatures = 64}, lq);
+    model[1] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 28 * 28, .outFeatures = 64, .weightInit.key = &initKey1}, lq);
     model[2] = reluLayerInit(lq);
-    model[3] = linearLayerInit(&(linearInit_t){.inFeatures = 64, .outFeatures = NUM_CLASSES}, lq);
+    model[3] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 64, .outFeatures = NUM_CLASSES, .weightInit.key = &initKey3},
+        lq);
     model[4] = softmaxLayerInit(lq);
 }
 
@@ -229,7 +234,7 @@ int main(void) {
     trainingRngInit(&rng, SEED);
 
     layer_t *model[MODEL_SIZE];
-    buildModel(model, &lq);
+    buildModel(model, &lq, &rng);
 
     const char *bitParity = getenv("BIT_PARITY");
     if (bitParity != NULL && bitParity[0] != '\0') {

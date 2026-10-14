@@ -35,9 +35,9 @@ void tearDown(void) {}
  * before any value matters. */
 static void buildMlpModel(fixture_t *f) {
     memset(f, 0, sizeof *f);
-    f->model[0] = makeLinear(4, 3, false);
+    f->model[0] = makeLinear(4, 3, false, 0);
     f->model[1] = makeRelu(&g_floatQ);
-    f->model[2] = makeLinear(3, 2, false);
+    f->model[2] = makeLinear(3, 2, false, 2);
     f->n = 3;
     f->lt = MSE;
     f->x = makeResidentInput(&f->in, (size_t[]){1, 4}, 2);
@@ -359,7 +359,7 @@ static void buildBfpSeedModel(fixture_t *f) {
     memset(f, 0, sizeof *f);
     initBfpQConfigInto(8, 8, HALF_AWAY, f->bfpExponent, &f->bfpQc);
     f->bfpQ = (quantization_t){.type = BFP, .qConfig = &f->bfpQc};
-    f->model[0] = makeLinear(2, 8, false);
+    f->model[0] = makeLinear(2, 8, false, 0);
     f->model[1] = makeQuant(&f->bfpQ, &g_floatQ);
     f->n = 2;
     f->lt = MSE;
@@ -577,7 +577,7 @@ static void buildBfpQuantModel(fixture_t *f) {
     initBfpQConfigInto(8, 8, HALF_AWAY, f->bfpExponent, &f->bfpQc);
     f->bfpQ = (quantization_t){.type = BFP, .qConfig = &f->bfpQc};
     f->model[0] = makeQuant(&f->bfpQ, &g_floatQ);
-    f->model[1] = makeLinear(8, 2, false);
+    f->model[1] = makeLinear(8, 2, false, 1);
     f->n = 2;
     f->lt = MSE;
     f->x = makeResidentInput(&f->in, (size_t[]){1, 8}, 2);

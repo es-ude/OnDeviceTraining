@@ -148,22 +148,29 @@ static size_t getTestSize(void) {
     return g_testDataset.items->size;
 }
 
-static void buildModel(layer_t **model, layerQuant_t *lq) {
+static void buildModel(layer_t **model, layerQuant_t *lq, const trainingRng_t *rng) {
+    const rngKey_t initKey0 = trainingRngInitKey(rng, 0);
+    const rngKey_t initKey3 = trainingRngInitKey(rng, 3);
+    const rngKey_t initKey8 = trainingRngInitKey(rng, 8);
     /* Sample [40, 32]; the loop's batch view makes it [1, 40, 32]. */
-    model[0] = conv1dLayerInit(
-        &(conv1dInit_t){
-            .inChannels = IN_CHANNELS, .outChannels = C1_OUT, .kernelSize = C1_K, .padding = SAME},
-        lq);
+    model[0] = conv1dLayerInit(&(conv1dInit_t){.inChannels = IN_CHANNELS,
+                                               .outChannels = C1_OUT,
+                                               .kernelSize = C1_K,
+                                               .padding = SAME,
+                                               .weightInit.key = &initKey0},
+                               lq);
     model[1] = reluLayerInit(lq);
     model[2] = maxPool1dLayerInit(
         &(maxPool1dInit_t){
             .kernelSize = 2, .stride = 2, .inputChannels = C1_OUT, .inputLength = LEN_INPUT},
         lq);
 
-    model[3] = conv1dLayerInit(
-        &(conv1dInit_t){
-            .inChannels = C1_OUT, .outChannels = C2_OUT, .kernelSize = C2_K, .padding = SAME},
-        lq);
+    model[3] = conv1dLayerInit(&(conv1dInit_t){.inChannels = C1_OUT,
+                                               .outChannels = C2_OUT,
+                                               .kernelSize = C2_K,
+                                               .padding = SAME,
+                                               .weightInit.key = &initKey3},
+                               lq);
     model[4] = reluLayerInit(lq);
     model[5] = maxPool1dLayerInit(
         &(maxPool1dInit_t){
@@ -173,8 +180,10 @@ static void buildModel(layer_t **model, layerQuant_t *lq) {
     /* Rate-agnostic head: AdaptiveAvgPool1d(1) -> Flatten -> Linear -> Softmax. */
     model[6] = adaptiveAvgPool1dLayerInit(&(adaptiveAvgPool1dInit_t){.outputSize = 1}, lq);
     model[7] = flattenLayerInit();
-    model[8] =
-        linearLayerInit(&(linearInit_t){.inFeatures = C2_OUT, .outFeatures = g_numClasses}, lq);
+    model[8] = linearLayerInit(&(linearInit_t){.inFeatures = C2_OUT,
+                                               .outFeatures = g_numClasses,
+                                               .weightInit.key = &initKey8},
+                               lq);
     model[9] = softmaxLayerInit(lq);
 }
 
@@ -288,7 +297,7 @@ int main(void) {
     trainingRngInit(&rng, SEED);
 
     layer_t *model[MODEL_SIZE];
-    buildModel(model, &lq);
+    buildModel(model, &lq, &rng);
 
     const char *bitParity = getenv("BIT_PARITY");
     if (bitParity != NULL && bitParity[0] != '\0') {

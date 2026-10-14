@@ -143,9 +143,9 @@ static void mseLabel(zooFixture_t *f, size_t outFeatures) {
  * one dx wire, grads-only at deepest. */
 static void buildMlp(zooFixture_t *f) {
     beginZoo(f);
-    f->model[0] = makeLinear(4, 3, false);
+    f->model[0] = makeLinear(4, 3, false, 0);
     f->model[1] = makeRelu(&g_floatQ);
-    f->model[2] = makeLinear(3, 2, false);
+    f->model[2] = makeLinear(3, 2, false, 2);
     f->n = 3;
     f->x = makeFloatTensor((size_t[]){1, 4}, 2, 1.0f);
     mseLabel(f, 2);
@@ -174,7 +174,7 @@ static void buildTruncatedHar(zooFixture_t *f) {
  * positional skip). */
 static void buildSoftmaxMse(zooFixture_t *f) {
     beginZoo(f);
-    f->model[0] = makeLinear(4, 3, false);
+    f->model[0] = makeLinear(4, 3, false, 0);
     f->model[1] = makeSoftmax();
     f->n = 2;
     f->x = makeFloatTensor((size_t[]){1, 4}, 2, 1.0f);
@@ -185,10 +185,10 @@ static void buildSoftmaxMse(zooFixture_t *f) {
  * reads its input, the frozen GEMM's does not. */
 static void buildFrozenLayerNorm(zooFixture_t *f) {
     beginZoo(f);
-    f->model[0] = makeLinear(4, 4, false);
+    f->model[0] = makeLinear(4, 4, false, 0);
     f->model[1] = makeLayerNorm(4, true);
-    f->model[2] = makeLinear(4, 4, true);
-    f->model[3] = makeLinear(4, 2, false);
+    f->model[2] = makeLinear(4, 4, true, 2);
+    f->model[3] = makeLinear(4, 2, false, 3);
     f->n = 4;
     f->x = makeFloatTensor((size_t[]){1, 4}, 2, 1.0f);
     mseLabel(f, 2);
@@ -200,12 +200,15 @@ static void buildFrozenGroupNorm(zooFixture_t *f) {
     beginZoo(f);
     layerQuant_t lq;
     layerQuantInitUniform(&lq, &g_floatQ);
-    f->model[0] =
-        conv1dLayerInit(&(conv1dInit_t){.inChannels = 4, .outChannels = 4, .kernelSize = 1}, &lq);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(7u), RNG_TAG_INIT, 0u);
+    f->model[0] = conv1dLayerInit(
+        &(conv1dInit_t){
+            .inChannels = 4, .outChannels = 4, .kernelSize = 1, .weightInit.key = &initKey0},
+        &lq);
     f->model[1] = groupNormLayerInit(
         &(groupNormInit_t){.numGroups = 2, .numChannels = 4, .trainable = TRAINABLE_FALSE}, &lq);
     f->model[2] = flattenLayerInit();
-    f->model[3] = makeLinear(12, 2, false);
+    f->model[3] = makeLinear(12, 2, false, 3);
     f->n = 4;
     f->x = makeFloatTensor((size_t[]){1, 4, 3}, 3, 1.0f);
     mseLabel(f, 2);
@@ -214,7 +217,7 @@ static void buildFrozenGroupNorm(zooFixture_t *f) {
 /* Nothing trains: FORWARD x n and LOSS_FORWARD only, four events still. */
 static void buildAllFrozen(zooFixture_t *f) {
     beginZoo(f);
-    f->model[0] = makeLinear(4, 2, true);
+    f->model[0] = makeLinear(4, 2, true, 0);
     f->model[1] = makeRelu(&g_floatQ);
     f->n = 2;
     f->x = makeFloatTensor((size_t[]){1, 4}, 2, 1.0f);
@@ -226,9 +229,9 @@ static void buildAllFrozen(zooFixture_t *f) {
 static void buildDropout(zooFixture_t *f) {
     beginZoo(f);
     f->mask = makeBoolMask(4);
-    f->model[0] = makeLinear(4, 4, false);
+    f->model[0] = makeLinear(4, 4, false, 0);
     f->model[1] = dropoutLayerInit(0.5f, f->mask, &g_floatQ, &g_floatQ);
-    f->model[2] = makeLinear(4, 2, false);
+    f->model[2] = makeLinear(4, 2, false, 2);
     f->n = 3;
     f->x = makeFloatTensor((size_t[]){1, 4}, 2, 1.0f);
     mseLabel(f, 2);
@@ -241,10 +244,10 @@ static void buildQuantSym(zooFixture_t *f) {
     beginZoo(f);
     quantization_t *act = keepTemplate(f, quantizationInitSymInt32WithBits(HALF_AWAY, 8));
     quantization_t *grad = keepTemplate(f, quantizationInitSymInt32WithBits(HALF_AWAY, 10));
-    f->model[0] = makeLinear(4, 4, false);
+    f->model[0] = makeLinear(4, 4, false, 0);
     f->model[1] = makeQuant(act, grad);
     f->model[2] = makeQuant(&g_floatQ, grad);
-    f->model[3] = makeLinear(4, 2, false);
+    f->model[3] = makeLinear(4, 2, false, 3);
     f->n = 4;
     f->x = makeFloatTensor((size_t[]){1, 4}, 2, 1.0f);
     mseLabel(f, 2);
@@ -263,10 +266,14 @@ static void buildSrForward(zooFixture_t *f) {
     layerQuantInitUniform(&lq, &g_floatQ);
     lq.forwardMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = SR_HALF_AWAY};
     lq.outputQ = act;
-    f->model[0] = linearLayerInit(
-        &(linearInit_t){.inFeatures = 4, .outFeatures = 16, .trainable = TRAINABLE_DEFAULT}, &lq);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(7u), RNG_TAG_INIT, 0u);
+    f->model[0] = linearLayerInit(&(linearInit_t){.inFeatures = 4,
+                                                  .outFeatures = 16,
+                                                  .trainable = TRAINABLE_DEFAULT,
+                                                  .weightInit.key = &initKey0},
+                                  &lq);
     f->model[1] = makeQuant(&g_floatQ, grad);
-    f->model[2] = makeLinear(16, 2, false);
+    f->model[2] = makeLinear(16, 2, false, 2);
     f->n = 3;
     f->x = makeFloatTensor((size_t[]){1, 4}, 2, 1.0f);
     mseLabel(f, 2);
@@ -276,7 +283,7 @@ static void buildSrForward(zooFixture_t *f) {
 static void buildFlattenAt0(zooFixture_t *f) {
     beginZoo(f);
     f->model[0] = flattenLayerInit();
-    f->model[1] = makeLinear(6, 2, false);
+    f->model[1] = makeLinear(6, 2, false, 1);
     f->n = 2;
     f->x = makeFloatTensor((size_t[]){1, 2, 3}, 3, 1.0f);
     mseLabel(f, 2);
@@ -287,7 +294,7 @@ static void buildF1Zoo(zooFixture_t *f) {
     beginZoo(f);
     quantization_t *bfp = keepTemplate(f, quantizationInitBfp(8, 8, HALF_AWAY));
     f->model[0] = makeQuant(bfp, &g_floatQ);
-    f->model[1] = makeLinear(5, 1, false);
+    f->model[1] = makeLinear(5, 1, false, 1);
     f->n = 2;
     f->x = makeFloatTensor((size_t[]){1, 5}, 2, 1.0f);
     mseLabel(f, 1);
@@ -299,7 +306,7 @@ static void buildGroupedBfp(zooFixture_t *f) {
     beginZoo(f);
     quantization_t *bfp = keepTemplate(f, quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 4));
     f->model[0] = makeQuant(bfp, &g_floatQ);
-    f->model[1] = makeLinear(8, 2, false);
+    f->model[1] = makeLinear(8, 2, false, 1);
     f->n = 2;
     f->x = makeFloatTensor((size_t[]){1, 8}, 2, 1.0f);
     mseLabel(f, 2);
@@ -308,7 +315,7 @@ static void buildGroupedBfp(zooFixture_t *f) {
 /* n = 1 under CE: top = -1 < deepest = 0 (remat D20), LOSS_BACKWARD and no BACKWARD. */
 static void buildSingleLayerCe(zooFixture_t *f) {
     beginZoo(f);
-    f->model[0] = makeLinear(4, 3, false);
+    f->model[0] = makeLinear(4, 3, false, 0);
     f->n = 1;
     f->loss = defaultLossConfig(CROSS_ENTROPY);
     f->x = makeFloatTensor((size_t[]){1, 4}, 2, 1.0f);
@@ -318,9 +325,9 @@ static void buildSingleLayerCe(zooFixture_t *f) {
 /* CE with only the last Linear trainable: deepest 2 = top. */
 static void buildCeLastLinearOnly(zooFixture_t *f) {
     beginZoo(f);
-    f->model[0] = makeLinear(4, 4, true);
+    f->model[0] = makeLinear(4, 4, true, 0);
     f->model[1] = makeRelu(&g_floatQ);
-    f->model[2] = makeLinear(4, 3, false);
+    f->model[2] = makeLinear(4, 3, false, 2);
     f->model[3] = makeSoftmax();
     f->n = 4;
     f->loss = defaultLossConfig(CROSS_ENTROPY);
@@ -332,7 +339,7 @@ static void buildCeLastLinearOnly(zooFixture_t *f) {
  * still skips layer n - 1's backward, exactly as the old driver did. */
 static void buildCeWithoutSoftmax(zooFixture_t *f) {
     beginZoo(f);
-    f->model[0] = makeLinear(4, 3, false);
+    f->model[0] = makeLinear(4, 3, false, 0);
     f->model[1] = makeRelu(&g_floatQ);
     f->n = 2;
     f->loss = defaultLossConfig(CROSS_ENTROPY);
@@ -347,7 +354,7 @@ static void buildBatchNorm(zooFixture_t *f) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, &g_floatQ);
     f->model[0] = batchNorm1dLayerInit(&(batchNorm1dInit_t){.numChannels = 2}, &lq);
-    f->model[1] = makeLinear(2, 2, false);
+    f->model[1] = makeLinear(2, 2, false, 1);
     f->n = 2;
     f->loss = defaultLossConfig(MSE);
     f->x = makeFloatTensor((size_t[]){4, 2}, 2, 1.0f);
@@ -362,16 +369,21 @@ static void buildConvTransposed(zooFixture_t *f, bool frozen) {
     beginZoo(f);
     layerQuant_t lq;
     layerQuantInitUniform(&lq, &g_floatQ);
-    f->model[0] =
-        conv1dLayerInit(&(conv1dInit_t){.inChannels = 2, .outChannels = 2, .kernelSize = 1}, &lq);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(7u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey1 = rngFold(rngKeyFromSeed(7u), RNG_TAG_INIT, 1u);
+    f->model[0] = conv1dLayerInit(
+        &(conv1dInit_t){
+            .inChannels = 2, .outChannels = 2, .kernelSize = 1, .weightInit.key = &initKey0},
+        &lq);
     f->model[1] = conv1dTransposedLayerInit(
         &(conv1dTransposedInit_t){.inChannels = 2,
                                   .outChannels = 2,
                                   .kernelSize = 2,
-                                  .trainable = frozen ? TRAINABLE_FALSE : TRAINABLE_DEFAULT},
+                                  .trainable = frozen ? TRAINABLE_FALSE : TRAINABLE_DEFAULT,
+                                  .weightInit.key = &initKey1},
         &lq);
     f->model[2] = flattenLayerInit();
-    f->model[3] = makeLinear(8, 2, false);
+    f->model[3] = makeLinear(8, 2, false, 3);
     f->n = 4;
     f->x = makeFloatTensor((size_t[]){1, 2, 3}, 3, 1.0f);
     mseLabel(f, 2);
@@ -392,11 +404,14 @@ static void buildAdaptiveAvgPool(zooFixture_t *f) {
     beginZoo(f);
     layerQuant_t lq;
     layerQuantInitUniform(&lq, &g_floatQ);
-    f->model[0] =
-        conv1dLayerInit(&(conv1dInit_t){.inChannels = 2, .outChannels = 2, .kernelSize = 1}, &lq);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(7u), RNG_TAG_INIT, 0u);
+    f->model[0] = conv1dLayerInit(
+        &(conv1dInit_t){
+            .inChannels = 2, .outChannels = 2, .kernelSize = 1, .weightInit.key = &initKey0},
+        &lq);
     f->model[1] = adaptiveAvgPool1dLayerInit(&(adaptiveAvgPool1dInit_t){.outputSize = 2}, &lq);
     f->model[2] = flattenLayerInit();
-    f->model[3] = makeLinear(4, 2, false);
+    f->model[3] = makeLinear(4, 2, false, 3);
     f->n = 4;
     f->x = makeFloatTensor((size_t[]){1, 2, 5}, 3, 1.0f);
     mseLabel(f, 2);
@@ -1542,7 +1557,7 @@ static void buildBfpFlattenAt0(zooFixture_t *f) {
     beginZoo(f);
     f->model[0] = flattenLayerInit();
     f->model[1] = makeQuant(&g_floatQ, &g_floatQ);
-    f->model[2] = makeLinear(16, 2, false);
+    f->model[2] = makeLinear(16, 2, false, 2);
     f->n = 3;
     f->x = makeBfpInput(4, 4);
     mseLabel(f, 2);
@@ -1630,7 +1645,7 @@ typedef struct zooEntry {
 static void buildSymOutput(zooFixture_t *f) {
     beginZoo(f);
     quantization_t *act = keepTemplate(f, quantizationInitSymInt32WithBits(HALF_AWAY, 8));
-    f->model[0] = makeLinear(4, 2, false);
+    f->model[0] = makeLinear(4, 2, false, 0);
     f->model[1] = makeQuant(act, &g_floatQ);
     f->n = 2;
     f->x = makeFloatTensor((size_t[]){1, 4}, 2, 1.0f);
@@ -1641,7 +1656,7 @@ static void buildSymOutput(zooFixture_t *f) {
 static void buildBfpOutput(zooFixture_t *f) {
     beginZoo(f);
     quantization_t *bfp = keepTemplate(f, quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 4));
-    f->model[0] = makeLinear(8, 8, false);
+    f->model[0] = makeLinear(8, 8, false, 0);
     f->model[1] = makeQuant(bfp, &g_floatQ);
     f->n = 2;
     f->x = makeFloatTensor((size_t[]){1, 8}, 2, 1.0f);

@@ -23,6 +23,7 @@
 #include "Pool1dApi.h"
 #include "QuantLayerApi.h"
 #include "Quantization.h"
+#include "RNG.h"
 #include "ReluApi.h"
 #include "RematScheduler.h"
 #include "SoftmaxApi.h"
@@ -33,13 +34,17 @@
  * every fixture model. Tests that edit a template use a local one. */
 static quantization_t g_floatQ = {.type = FLOAT32, .qConfig = NULL};
 
-static layer_t *makeLinear(size_t in, size_t out, bool frozen) {
+/* position = the layer's index in its model; it picks the layer's init key, so
+ * same-shape layers of one model do not share a key. */
+static layer_t *makeLinear(size_t in, size_t out, bool frozen, size_t position) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, &g_floatQ);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, (uint32_t)position);
     return linearLayerInit(
         &(linearInit_t){.inFeatures = in,
                         .outFeatures = out,
-                        .trainable = frozen ? TRAINABLE_FALSE : TRAINABLE_DEFAULT},
+                        .trainable = frozen ? TRAINABLE_FALSE : TRAINABLE_DEFAULT,
+                        .weightInit.key = &initKey},
         &lq);
 }
 
@@ -144,11 +149,16 @@ static void buildHar(layer_t **model, bool freezeConvs) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, &g_floatQ);
     trainable_t conv = freezeConvs ? TRAINABLE_FALSE : TRAINABLE_DEFAULT;
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey3 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 3u);
+    const rngKey_t initKey6 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 6u);
+    const rngKey_t initKey10 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 10u);
     model[0] = conv1dLayerInit(&(conv1dInit_t){.inChannels = 9,
                                                .outChannels = 16,
                                                .kernelSize = 7,
                                                .padding = SAME,
-                                               .trainable = conv},
+                                               .trainable = conv,
+                                               .weightInit.key = &initKey0},
                                &lq);
     model[1] = reluLayerInit(&lq);
     model[2] = maxPool1dLayerInit(
@@ -158,7 +168,8 @@ static void buildHar(layer_t **model, bool freezeConvs) {
                                                .outChannels = 32,
                                                .kernelSize = 5,
                                                .padding = SAME,
-                                               .trainable = conv},
+                                               .trainable = conv,
+                                               .weightInit.key = &initKey3},
                                &lq);
     model[4] = reluLayerInit(&lq);
     model[5] = maxPool1dLayerInit(
@@ -168,12 +179,14 @@ static void buildHar(layer_t **model, bool freezeConvs) {
                                                .outChannels = 64,
                                                .kernelSize = 3,
                                                .padding = SAME,
-                                               .trainable = conv},
+                                               .trainable = conv,
+                                               .weightInit.key = &initKey6},
                                &lq);
     model[7] = reluLayerInit(&lq);
     model[8] = avgPool1dLayerInit(&(avgPool1dInit_t){.kernelSize = 32, .stride = 32}, &lq);
     model[9] = flattenLayerInit();
-    model[10] = linearLayerInit(&(linearInit_t){.inFeatures = 64, .outFeatures = 6}, &lq);
+    model[10] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 64, .outFeatures = 6, .weightInit.key = &initKey10}, &lq);
     model[11] = softmaxLayerInit(&lq);
 }
 
@@ -186,21 +199,33 @@ static tensor_t *makeHarInput(inputLike_t *in) {
 static void buildMnistCnn(layer_t **model) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, &g_floatQ);
-    model[0] = conv1dLayerInit(
-        &(conv1dInit_t){.inChannels = 1, .outChannels = 8, .kernelSize = 3, .padding = SAME}, &lq);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey3 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 3u);
+    const rngKey_t initKey8 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 8u);
+    model[0] = conv1dLayerInit(&(conv1dInit_t){.inChannels = 1,
+                                               .outChannels = 8,
+                                               .kernelSize = 3,
+                                               .padding = SAME,
+                                               .weightInit.key = &initKey0},
+                               &lq);
     model[1] = reluLayerInit(&lq);
     model[2] = maxPool1dLayerInit(
         &(maxPool1dInit_t){.kernelSize = 2, .stride = 2, .inputChannels = 8, .inputLength = 784},
         &lq);
-    model[3] = conv1dLayerInit(
-        &(conv1dInit_t){.inChannels = 8, .outChannels = 16, .kernelSize = 3, .padding = SAME}, &lq);
+    model[3] = conv1dLayerInit(&(conv1dInit_t){.inChannels = 8,
+                                               .outChannels = 16,
+                                               .kernelSize = 3,
+                                               .padding = SAME,
+                                               .weightInit.key = &initKey3},
+                               &lq);
     model[4] = reluLayerInit(&lq);
     model[5] = maxPool1dLayerInit(
         &(maxPool1dInit_t){.kernelSize = 2, .stride = 2, .inputChannels = 16, .inputLength = 392},
         &lq);
     model[6] = avgPool1dLayerInit(&(avgPool1dInit_t){.kernelSize = 196, .stride = 196}, &lq);
     model[7] = flattenLayerInit();
-    model[8] = linearLayerInit(&(linearInit_t){.inFeatures = 16, .outFeatures = 10}, &lq);
+    model[8] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 16, .outFeatures = 10, .weightInit.key = &initKey8}, &lq);
     model[9] = softmaxLayerInit(&lq);
 }
 
@@ -250,7 +275,7 @@ static void buildF1Model(fixture_t *f) {
     initBfpQConfigInto(8, 8, HALF_AWAY, f->bfpExponent, &f->bfpQc);
     f->bfpQ = (quantization_t){.type = BFP, .qConfig = &f->bfpQc};
     f->model[0] = makeQuant(&f->bfpQ, &g_floatQ);
-    f->model[1] = makeLinear(5, 1, false);
+    f->model[1] = makeLinear(5, 1, false, 1);
     f->n = 2;
     f->lt = MSE;
     f->x = makeResidentInput(&f->in, (size_t[]){1, 5}, 2);

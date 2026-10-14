@@ -302,39 +302,51 @@ static size_t getTestSize(void) {
     return g_testDataset.items->size;
 }
 
-static void buildModel(layer_t **model) {
+static void buildModel(layer_t **model, const trainingRng_t *rng) {
     layerQuant_t lq[MODEL_SIZE];
     for (size_t i = 0; i < MODEL_SIZE; i++) {
         lq[i] = layerQuantFor(i);
     }
-    model[0] = conv1dLayerInit(
-        &(conv1dInit_t){
-            .inChannels = IN_CHANNELS, .outChannels = C1_OUT, .kernelSize = C1_K, .padding = SAME},
-        &lq[0]);
+    const rngKey_t initKey0 = trainingRngInitKey(rng, 0);
+    const rngKey_t initKey3 = trainingRngInitKey(rng, 3);
+    const rngKey_t initKey6 = trainingRngInitKey(rng, 6);
+    const rngKey_t initKey10 = trainingRngInitKey(rng, 10);
+    model[0] = conv1dLayerInit(&(conv1dInit_t){.inChannels = IN_CHANNELS,
+                                               .outChannels = C1_OUT,
+                                               .kernelSize = C1_K,
+                                               .padding = SAME,
+                                               .weightInit.key = &initKey0},
+                               &lq[0]);
     model[1] = reluLayerInit(&lq[1]);
     model[2] = maxPool1dLayerInit(
         &(maxPool1dInit_t){
             .kernelSize = 2, .stride = 2, .inputChannels = C1_OUT, .inputLength = LEN_INPUT},
         &lq[2]);
-    model[3] = conv1dLayerInit(
-        &(conv1dInit_t){
-            .inChannels = C1_OUT, .outChannels = C2_OUT, .kernelSize = C2_K, .padding = SAME},
-        &lq[3]);
+    model[3] = conv1dLayerInit(&(conv1dInit_t){.inChannels = C1_OUT,
+                                               .outChannels = C2_OUT,
+                                               .kernelSize = C2_K,
+                                               .padding = SAME,
+                                               .weightInit.key = &initKey3},
+                               &lq[3]);
     model[4] = reluLayerInit(&lq[4]);
     model[5] = maxPool1dLayerInit(
         &(maxPool1dInit_t){
             .kernelSize = 2, .stride = 2, .inputChannels = C2_OUT, .inputLength = LEN_INPUT / 2},
         &lq[5]);
-    model[6] = conv1dLayerInit(
-        &(conv1dInit_t){
-            .inChannels = C2_OUT, .outChannels = C3_OUT, .kernelSize = C3_K, .padding = SAME},
-        &lq[6]);
+    model[6] = conv1dLayerInit(&(conv1dInit_t){.inChannels = C2_OUT,
+                                               .outChannels = C3_OUT,
+                                               .kernelSize = C3_K,
+                                               .padding = SAME,
+                                               .weightInit.key = &initKey6},
+                               &lq[6]);
     model[7] = reluLayerInit(&lq[7]);
     model[8] = avgPool1dLayerInit(
         &(avgPool1dInit_t){.kernelSize = LEN_INPUT / 4, .stride = LEN_INPUT / 4}, &lq[8]);
     model[9] = flattenLayerInit();
-    model[10] =
-        linearLayerInit(&(linearInit_t){.inFeatures = C3_OUT, .outFeatures = NUM_CLASSES}, &lq[10]);
+    model[10] = linearLayerInit(&(linearInit_t){.inFeatures = C3_OUT,
+                                                .outFeatures = NUM_CLASSES,
+                                                .weightInit.key = &initKey10},
+                                &lq[10]);
     model[11] = softmaxLayerInit(&lq[11]);
 }
 
@@ -908,7 +920,7 @@ int main(void) {
 #ifdef ODT_MEM_PROFILE
     size_t markBeforeModel = memProfileMark();
 #endif
-    buildModel(model);
+    buildModel(model, &rng);
     requantizeParamsToBfp(model);
 #ifdef ODT_MEM_PROFILE
     size_t markAfterModel = memProfileMark(); /* params_grads_b = delta */

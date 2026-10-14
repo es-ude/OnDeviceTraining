@@ -170,15 +170,21 @@ static size_t getTestSize(void) {
 /* Same 12-layer topology as train_c.c. `freezeConv` sets `.trainable =
  * TRAINABLE_FALSE` on the three Conv1d factories (model[0]/[3]/[6]) for stage
  * 2 -- the head Linear (model[10]) always stays at the trainable default. */
-static void buildModel(layer_t **model, layerQuant_t *lq, bool freezeConv) {
+static void buildModel(layer_t **model, layerQuant_t *lq, bool freezeConv,
+                       const trainingRng_t *rng) {
     trainable_t convTrainable = freezeConv ? TRAINABLE_FALSE : TRAINABLE_DEFAULT;
+    const rngKey_t initKey0 = trainingRngInitKey(rng, 0);
+    const rngKey_t initKey3 = trainingRngInitKey(rng, 3);
+    const rngKey_t initKey6 = trainingRngInitKey(rng, 6);
+    const rngKey_t initKey10 = trainingRngInitKey(rng, 10);
 
     /* Block 1: Conv1d(9->16, K=7, padding=SAME), ReLU, MaxPool(K=2, S=2). */
     model[0] = conv1dLayerInit(&(conv1dInit_t){.inChannels = IN_CHANNELS,
                                                .outChannels = C1_OUT,
                                                .kernelSize = C1_K,
                                                .padding = SAME,
-                                               .trainable = convTrainable},
+                                               .trainable = convTrainable,
+                                               .weightInit.key = &initKey0},
                                lq);
     model[1] = reluLayerInit(lq);
     model[2] = maxPool1dLayerInit(
@@ -191,7 +197,8 @@ static void buildModel(layer_t **model, layerQuant_t *lq, bool freezeConv) {
                                                .outChannels = C2_OUT,
                                                .kernelSize = C2_K,
                                                .padding = SAME,
-                                               .trainable = convTrainable},
+                                               .trainable = convTrainable,
+                                               .weightInit.key = &initKey3},
                                lq);
     model[4] = reluLayerInit(lq);
     model[5] = maxPool1dLayerInit(
@@ -204,7 +211,8 @@ static void buildModel(layer_t **model, layerQuant_t *lq, bool freezeConv) {
                                                .outChannels = C3_OUT,
                                                .kernelSize = C3_K,
                                                .padding = SAME,
-                                               .trainable = convTrainable},
+                                               .trainable = convTrainable,
+                                               .weightInit.key = &initKey6},
                                lq);
     model[7] = reluLayerInit(lq);
     model[8] = avgPool1dLayerInit(
@@ -212,8 +220,10 @@ static void buildModel(layer_t **model, layerQuant_t *lq, bool freezeConv) {
 
     /* Head — always trainable, even in stage 2. */
     model[9] = flattenLayerInit();
-    model[10] =
-        linearLayerInit(&(linearInit_t){.inFeatures = C3_OUT, .outFeatures = NUM_CLASSES}, lq);
+    model[10] = linearLayerInit(&(linearInit_t){.inFeatures = C3_OUT,
+                                                .outFeatures = NUM_CLASSES,
+                                                .weightInit.key = &initKey10},
+                                lq);
     model[11] = softmaxLayerInit(lq);
 }
 
@@ -371,7 +381,7 @@ int main(void) {
         /* The stage-2 plan depends on topology, frozen flags and the input
          * shape, not on weights: no stage-1 checkpoint is needed. */
         layer_t *planModel[MODEL_SIZE];
-        buildModel(planModel, &lq, /*freezeConv*/ true);
+        buildModel(planModel, &lq, /*freezeConv*/ true, &rng);
         if (!buildStage2Remat(&remat, &rematSel, planModel, lossConfig)) {
             return 1;
         }
@@ -408,7 +418,7 @@ int main(void) {
     /* ---- Stage 1: full trainable model ------------------------------------ */
 
     layer_t *model[MODEL_SIZE];
-    buildModel(model, &lq, /*freezeConv*/ false);
+    buildModel(model, &lq, /*freezeConv*/ false, &rng);
 
     quantization_t *momentumQ1 = quantizationInitFloat();
     optimizer_t *sgd1 =
@@ -457,7 +467,7 @@ int main(void) {
     size_t markBeforeModel2 = memProfileMark();
 #endif
     layer_t *model2[MODEL_SIZE];
-    buildModel(model2, &lq, /*freezeConv*/ true);
+    buildModel(model2, &lq, /*freezeConv*/ true, &rng);
 #ifdef ODT_MEM_PROFILE
     size_t markAfterModel2 = memProfileMark(); /* params_grads_b = delta */
     size_t markBeforeOpt2 = 0, markAfterOpt2 = 0;

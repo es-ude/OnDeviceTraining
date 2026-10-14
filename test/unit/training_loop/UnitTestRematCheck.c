@@ -708,10 +708,10 @@ void testStepExitsOnAnInputWithoutBytes(void) {
  * forward (its backward does not read it), while the frozen LayerNorm's ACT 1
  * lives to BACKWARD(1). */
 static void buildFrozenZooModel(fixture_t *f) {
-    f->model[0] = makeLinear(4, 4, false);
+    f->model[0] = makeLinear(4, 4, false, 0);
     f->model[1] = makeLayerNorm(4, true);
-    f->model[2] = makeLinear(4, 4, true);
-    f->model[3] = makeLinear(4, 2, false);
+    f->model[2] = makeLinear(4, 4, true, 2);
+    f->model[3] = makeLinear(4, 2, false, 3);
     f->n = 4;
     f->lt = MSE;
     f->x = makeResidentInput(&f->in, (size_t[]){1, 4}, 2);
@@ -948,7 +948,7 @@ void testFinishExitsWhenARowEatsTheLastStepInternally(void) {
  * stream is FORWARD 0, LOSS_FORWARD, LOSS_BACKWARD and no BACKWARD at all;
  * wires ACT 0, ACT 1, the seed GRAD 1. */
 static void buildCeSingleLinearModel(fixture_t *f) {
-    f->model[0] = makeLinear(4, 3, false);
+    f->model[0] = makeLinear(4, 3, false, 0);
     f->n = 1;
     f->lt = CROSS_ENTROPY;
     f->x = makeResidentInput(&f->in, (size_t[]){1, 4}, 2);

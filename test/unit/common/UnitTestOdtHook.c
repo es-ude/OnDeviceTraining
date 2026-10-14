@@ -19,6 +19,7 @@
 #include "Optimizer.h"
 #include "OptimizerApi.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "SgdApi.h"
 #include "SoftmaxApi.h"
 #include "StateDictApi.h"
@@ -137,8 +138,11 @@ static tensor_t *makeVec2(float a, float b) {
 static void buildLinearSoftmaxModel(layer_t *model[2], quantization_t *q, trainable_t trainable) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     model[0] = linearLayerInit(
-        &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .trainable = trainable}, &lq);
+        &(linearInit_t){
+            .inFeatures = 2, .outFeatures = 2, .trainable = trainable, .weightInit.key = &initKey0},
+        &lq);
     model[1] = softmaxLayerInit(&lq);
     float W[4] = {0.1f, 0.2f, 0.3f, 0.4f};
     float B[2] = {0.0f, 0.0f};

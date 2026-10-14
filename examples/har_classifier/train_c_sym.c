@@ -255,14 +255,21 @@ static layerQuant_t symLayerQuant(symQuant_t *sq) {
     };
 }
 
-static void buildModel(layer_t **model, symQuant_t *sq, layerQuant_t *lqNontrain) {
+static void buildModel(layer_t **model, symQuant_t *sq, layerQuant_t *lqNontrain,
+                       const trainingRng_t *rng) {
     layerQuant_t lqSym = symLayerQuant(sq);
+    const rngKey_t initKey0 = trainingRngInitKey(rng, 0);
+    const rngKey_t initKey3 = trainingRngInitKey(rng, 3);
+    const rngKey_t initKey6 = trainingRngInitKey(rng, 6);
+    const rngKey_t initKey10 = trainingRngInitKey(rng, 10);
 
     /* Block 1: Conv1d(9->16, K=7, SAME), ReLU, MaxPool(K=2, S=2). */
-    model[0] = conv1dLayerInit(
-        &(conv1dInit_t){
-            .inChannels = IN_CHANNELS, .outChannels = C1_OUT, .kernelSize = C1_K, .padding = SAME},
-        &lqSym);
+    model[0] = conv1dLayerInit(&(conv1dInit_t){.inChannels = IN_CHANNELS,
+                                               .outChannels = C1_OUT,
+                                               .kernelSize = C1_K,
+                                               .padding = SAME,
+                                               .weightInit.key = &initKey0},
+                               &lqSym);
     model[1] = reluLayerInit(lqNontrain);
     model[2] = maxPool1dLayerInit(
         &(maxPool1dInit_t){
@@ -270,10 +277,12 @@ static void buildModel(layer_t **model, symQuant_t *sq, layerQuant_t *lqNontrain
         lqNontrain);
 
     /* Block 2 */
-    model[3] = conv1dLayerInit(
-        &(conv1dInit_t){
-            .inChannels = C1_OUT, .outChannels = C2_OUT, .kernelSize = C2_K, .padding = SAME},
-        &lqSym);
+    model[3] = conv1dLayerInit(&(conv1dInit_t){.inChannels = C1_OUT,
+                                               .outChannels = C2_OUT,
+                                               .kernelSize = C2_K,
+                                               .padding = SAME,
+                                               .weightInit.key = &initKey3},
+                               &lqSym);
     model[4] = reluLayerInit(lqNontrain);
     model[5] = maxPool1dLayerInit(
         &(maxPool1dInit_t){
@@ -281,18 +290,22 @@ static void buildModel(layer_t **model, symQuant_t *sq, layerQuant_t *lqNontrain
         lqNontrain);
 
     /* Block 3 */
-    model[6] = conv1dLayerInit(
-        &(conv1dInit_t){
-            .inChannels = C2_OUT, .outChannels = C3_OUT, .kernelSize = C3_K, .padding = SAME},
-        &lqSym);
+    model[6] = conv1dLayerInit(&(conv1dInit_t){.inChannels = C2_OUT,
+                                               .outChannels = C3_OUT,
+                                               .kernelSize = C3_K,
+                                               .padding = SAME,
+                                               .weightInit.key = &initKey6},
+                               &lqSym);
     model[7] = reluLayerInit(lqNontrain);
     model[8] = avgPool1dLayerInit(
         &(avgPool1dInit_t){.kernelSize = LEN_INPUT / 4, .stride = LEN_INPUT / 4}, lqNontrain);
 
     /* Head */
     model[9] = flattenLayerInit();
-    model[10] =
-        linearLayerInit(&(linearInit_t){.inFeatures = C3_OUT, .outFeatures = NUM_CLASSES}, &lqSym);
+    model[10] = linearLayerInit(&(linearInit_t){.inFeatures = C3_OUT,
+                                                .outFeatures = NUM_CLASSES,
+                                                .weightInit.key = &initKey10},
+                                &lqSym);
     model[11] = softmaxLayerInit(lqNontrain);
 }
 
@@ -580,7 +593,8 @@ static int ensureDir(const char *p) {
  * exercised here on a REAL model rather than only the unit-test fixtures. A
  * mismatch is a genuine round-trip defect (loud stderr + exit 1), not a
  * recorded finding, unlike the convergence diagnostic at the end of main. */
-static void runOdtsRoundtrip(layer_t **model, dataLoader_t *testLoader, epochStats_t original) {
+static void runOdtsRoundtrip(layer_t **model, dataLoader_t *testLoader, epochStats_t original,
+                             const trainingRng_t *rng) {
     if (ensureDir("examples/har_classifier/outputs") != 0) {
         exit(1);
     }
@@ -607,7 +621,7 @@ static void runOdtsRoundtrip(layer_t **model, dataLoader_t *testLoader, epochSta
     layerQuant_t lqNontrain2;
     layerQuantInitUniform(&lqNontrain2, g_symWires ? sq2.symWireQ : quantizationInitFloat());
     layer_t *model2[MODEL_SIZE];
-    buildModel(model2, &sq2, &lqNontrain2);
+    buildModel(model2, &sq2, &lqNontrain2, rng);
     requantizeParamsToPerTensorSym(model2);
 
     FILE *fIn = fopen(path, "rb");
@@ -779,7 +793,7 @@ int main(void) {
 #ifdef ODT_MEM_PROFILE
     size_t markBeforeModel = memProfileMark();
 #endif
-    buildModel(model, &sq, &lqNontrain);
+    buildModel(model, &sq, &lqNontrain, &rng);
     requantizeParamsToSym(model);
 #ifdef ODT_MEM_PROFILE
     size_t markAfterModel = memProfileMark(); /* params_grads_b = delta */
@@ -925,7 +939,7 @@ int main(void) {
     size_t heapPeakBeforeRoundtrip = memProfilePeakBytes();
 #endif
     if (odtsRoundtrip) {
-        runOdtsRoundtrip(model, testLoader, testStats);
+        runOdtsRoundtrip(model, testLoader, testStats, &rng);
     }
 
 #ifdef ODT_MEM_PROFILE

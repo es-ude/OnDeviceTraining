@@ -148,7 +148,9 @@ typedef struct mixedWidthQuant {
 /* Flatten [1,1,28,28] -> [1,784] (the sample is the natural [1,28,28] image; the batch axis
  * is added by batchViewOf / the loop) -> Linear0 -> Relu -> Linear1 -> Quant1 -> Softmax, CE
  * loss. */
-static void buildModel(layer_t **model, mixedWidthQuant_t *mq) {
+static void buildModel(layer_t **model, mixedWidthQuant_t *mq, const trainingRng_t *rng) {
+    const rngKey_t initKey0 = trainingRngInitKey(rng, LINEAR0_IDX);
+    const rngKey_t initKey1 = trainingRngInitKey(rng, LINEAR1_IDX);
     model[FLATTEN_IDX] = flattenLayerInit();
 
     /* Linear0/Linear1 share the identical pinned profile: forward
@@ -207,10 +209,13 @@ static void buildModel(layer_t **model, mixedWidthQuant_t *mq) {
         .weightGradAccMode = OUT_ACC_FIXED_SCALE,
         .biasGradAccMode = OUT_ACC_FIXED_SCALE,
     };
-    model[LINEAR0_IDX] =
-        linearLayerInit(&(linearInit_t){.inFeatures = 28 * 28, .outFeatures = HIDDEN}, &lqLinear);
-    model[LINEAR1_IDX] = linearLayerInit(
-        &(linearInit_t){.inFeatures = HIDDEN, .outFeatures = NUM_CLASSES}, &lqLinear);
+    model[LINEAR0_IDX] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 28 * 28, .outFeatures = HIDDEN, .weightInit.key = &initKey0},
+        &lqLinear);
+    model[LINEAR1_IDX] = linearLayerInit(&(linearInit_t){.inFeatures = HIDDEN,
+                                                         .outFeatures = NUM_CLASSES,
+                                                         .weightInit.key = &initKey1},
+                                         &lqLinear);
 
     layerQuant_t lqRelu = {
         .forwardMath = (arithmetic_t){ARITH_SYM_INT32, HALF_AWAY},
@@ -363,7 +368,7 @@ int main(void) {
     rngSetSeed(seed);
     trainingRng_t rng;
     trainingRngInit(&rng, seed);
-    buildModel(model, &mq);
+    buildModel(model, &mq, &rng);
 
     /* Requantize Linear0/Linear1's weight/bias PARAM tensors to the pinned
      * SYM_INT32 widths now that PyTorch-parity init has run against the

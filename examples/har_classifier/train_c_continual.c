@@ -149,12 +149,18 @@ static size_t getEvalSize(void) {
     return g_curEval->items->size;
 }
 
-static void buildModel(layer_t **model, layerQuant_t *lq) {
+static void buildModel(layer_t **model, layerQuant_t *lq, const trainingRng_t *rng) {
+    const rngKey_t initKey0 = trainingRngInitKey(rng, 0);
+    const rngKey_t initKey3 = trainingRngInitKey(rng, 3);
+    const rngKey_t initKey6 = trainingRngInitKey(rng, 6);
+    const rngKey_t initKey10 = trainingRngInitKey(rng, 10);
     /* Block 1: Conv1d(9->16, K=7, padding=SAME), ReLU, MaxPool(K=2, S=2). */
-    model[0] = conv1dLayerInit(
-        &(conv1dInit_t){
-            .inChannels = IN_CHANNELS, .outChannels = C1_OUT, .kernelSize = C1_K, .padding = SAME},
-        lq);
+    model[0] = conv1dLayerInit(&(conv1dInit_t){.inChannels = IN_CHANNELS,
+                                               .outChannels = C1_OUT,
+                                               .kernelSize = C1_K,
+                                               .padding = SAME,
+                                               .weightInit.key = &initKey0},
+                               lq);
     model[1] = reluLayerInit(lq);
     model[2] = maxPool1dLayerInit(
         &(maxPool1dInit_t){
@@ -162,10 +168,12 @@ static void buildModel(layer_t **model, layerQuant_t *lq) {
         lq);
 
     /* Block 2 */
-    model[3] = conv1dLayerInit(
-        &(conv1dInit_t){
-            .inChannels = C1_OUT, .outChannels = C2_OUT, .kernelSize = C2_K, .padding = SAME},
-        lq);
+    model[3] = conv1dLayerInit(&(conv1dInit_t){.inChannels = C1_OUT,
+                                               .outChannels = C2_OUT,
+                                               .kernelSize = C2_K,
+                                               .padding = SAME,
+                                               .weightInit.key = &initKey3},
+                               lq);
     model[4] = reluLayerInit(lq);
     model[5] = maxPool1dLayerInit(
         &(maxPool1dInit_t){
@@ -173,18 +181,22 @@ static void buildModel(layer_t **model, layerQuant_t *lq) {
         lq);
 
     /* Block 3 */
-    model[6] = conv1dLayerInit(
-        &(conv1dInit_t){
-            .inChannels = C2_OUT, .outChannels = C3_OUT, .kernelSize = C3_K, .padding = SAME},
-        lq);
+    model[6] = conv1dLayerInit(&(conv1dInit_t){.inChannels = C2_OUT,
+                                               .outChannels = C3_OUT,
+                                               .kernelSize = C3_K,
+                                               .padding = SAME,
+                                               .weightInit.key = &initKey6},
+                               lq);
     model[7] = reluLayerInit(lq);
     model[8] = avgPool1dLayerInit(
         &(avgPool1dInit_t){.kernelSize = LEN_INPUT / 4, .stride = LEN_INPUT / 4}, lq);
 
     /* Head */
     model[9] = flattenLayerInit();
-    model[10] =
-        linearLayerInit(&(linearInit_t){.inFeatures = C3_OUT, .outFeatures = NUM_CLASSES}, lq);
+    model[10] = linearLayerInit(&(linearInit_t){.inFeatures = C3_OUT,
+                                                .outFeatures = NUM_CLASSES,
+                                                .weightInit.key = &initKey10},
+                                lq);
     model[11] = softmaxLayerInit(lq);
 }
 
@@ -371,7 +383,7 @@ int main(void) {
     trainingRng_t rng;
     trainingRngInit(&rng, g_seed);
     layer_t *model[MODEL_SIZE];
-    buildModel(model, &lq);
+    buildModel(model, &lq, &rng);
 
     /* FLOAT32 momentum accumulator; optimizer clones the config per state via
      * getQLike and does NOT take ownership. One optimizer spans all domains so

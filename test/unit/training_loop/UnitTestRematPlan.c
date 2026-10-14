@@ -26,6 +26,7 @@
 #include "Pool1dApi.h"
 #include "QuantLayerApi.h"
 #include "Quantization.h"
+#include "RNG.h"
 #include "ReluApi.h"
 #include "RematPlan.h"
 #include "RematTestFixtures.h"
@@ -69,7 +70,7 @@ typedef struct seedFixture {
 static void buildBfpSeedFixture(seedFixture_t *f) {
     initBfpQConfigInto(8, 8, HALF_AWAY, f->tmplExponent, &f->tmplQc);
     f->tmplQ = (quantization_t){.type = BFP, .qConfig = &f->tmplQc};
-    f->model[0] = makeLinear(2, 8, false);
+    f->model[0] = makeLinear(2, 8, false, 0);
     f->model[1] = makeQuant(&f->tmplQ, &g_floatQ);
     f->x = makeInput(&f->in, (size_t[]){1, 2}, 2, &g_floatQ);
     f->t = initTable(f->model, 2, MSE, f->x);
@@ -172,10 +173,10 @@ static void assertCoLiveUnderBothPolicies(layer_t **model, size_t n, lossFuncTyp
     rematWireTableFree(t);
 }
 
-static layer_t *randomRank2Layer(uint32_t *state) {
+static layer_t *randomRank2Layer(uint32_t *state, size_t position) {
     switch (nextRandom(state) % 4u) {
     case 0:
-        return makeLinear(4, 4, nextRandom(state) % 2u == 0u);
+        return makeLinear(4, 4, nextRandom(state) % 2u == 0u, position);
     case 1:
         return makeRelu(&g_floatQ);
     case 2:
@@ -209,7 +210,7 @@ static void buildHarStoreAllFixture(grammarFixture_t *f) {
 }
 
 static void buildAllFrozenFixture(grammarFixture_t *f) {
-    f->model[0] = makeLinear(2, 4, true);
+    f->model[0] = makeLinear(2, 4, true, 0);
     f->model[1] = makeRelu(&g_floatQ);
     f->n = 2;
     f->t = initTable(f->model, 2, MSE, makeInput(&f->in, (size_t[]){1, 2}, 2, &g_floatQ));
@@ -306,7 +307,8 @@ static void endGrad10BeforeBackwardReadsIt(rematProgram_t *p) {
 /* ---- rematBackwardRange ---- */
 
 void testBackwardRangeMseRunsFromLastLayerToDeepest(void) {
-    layer_t *model[3] = {makeLinear(2, 4, false), makeRelu(&g_floatQ), makeLinear(4, 2, false)};
+    layer_t *model[3] = {makeLinear(2, 4, false, 0), makeRelu(&g_floatQ),
+                         makeLinear(4, 2, false, 2)};
     size_t deepest = 99;
     ptrdiff_t top = 99;
     rematBackwardRange(model, 3, MSE, &deepest, &top);
@@ -316,7 +318,7 @@ void testBackwardRangeMseRunsFromLastLayerToDeepest(void) {
 }
 
 void testBackwardRangeCrossEntropySkipsTheLastLayerPositionally(void) {
-    layer_t *model[2] = {makeLinear(2, 3, false), makeSoftmax()};
+    layer_t *model[2] = {makeLinear(2, 3, false, 0), makeSoftmax()};
     size_t deepest = 99;
     ptrdiff_t top = 99;
     rematBackwardRange(model, 2, CROSS_ENTROPY, &deepest, &top);
@@ -326,7 +328,8 @@ void testBackwardRangeCrossEntropySkipsTheLastLayerPositionally(void) {
 }
 
 void testBackwardRangeTruncatesAtDeepestTrainable(void) {
-    layer_t *model[3] = {makeLinear(2, 4, true), makeRelu(&g_floatQ), makeLinear(4, 2, false)};
+    layer_t *model[3] = {makeLinear(2, 4, true, 0), makeRelu(&g_floatQ),
+                         makeLinear(4, 2, false, 2)};
     size_t deepest = 99;
     ptrdiff_t top = 99;
     rematBackwardRange(model, 3, MSE, &deepest, &top);
@@ -336,7 +339,7 @@ void testBackwardRangeTruncatesAtDeepestTrainable(void) {
 }
 
 void testBackwardRangeAllFrozenReturnsModelSize(void) {
-    layer_t *model[2] = {makeLinear(2, 4, true), makeRelu(&g_floatQ)};
+    layer_t *model[2] = {makeLinear(2, 4, true, 0), makeRelu(&g_floatQ)};
     size_t deepest = 99;
     ptrdiff_t top = 99;
     rematBackwardRange(model, 2, MSE, &deepest, &top);
@@ -347,7 +350,7 @@ void testBackwardRangeAllFrozenReturnsModelSize(void) {
 
 /* n = 1 under CE keeps today's signed top = -1. */
 void testBackwardRangeSingleLayerUnderCrossEntropyIsMinusOne(void) {
-    layer_t *model[1] = {makeLinear(2, 3, false)};
+    layer_t *model[1] = {makeLinear(2, 3, false, 0)};
     size_t deepest = 99;
     ptrdiff_t top = 99;
     rematBackwardRange(model, 1, CROSS_ENTROPY, &deepest, &top);
@@ -476,8 +479,11 @@ void testSharedGroupedBfpTemplateGroupsPerWire(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, &g_floatQ);
     lq.outputQ = &bfpQ;
-    layer_t *model[2] = {makeQuant(&bfpQ, &g_floatQ),
-                         linearLayerInit(&(linearInit_t){.inFeatures = 4, .outFeatures = 16}, &lq)};
+    const rngKey_t initKey1 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 1u);
+    layer_t *model[2] = {
+        makeQuant(&bfpQ, &g_floatQ),
+        linearLayerInit(
+            &(linearInit_t){.inFeatures = 4, .outFeatures = 16, .weightInit.key = &initKey1}, &lq)};
     inputLike_t in;
     rematWireTable_t *t = initTable(model, 2, MSE, makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ));
 
@@ -1194,7 +1200,7 @@ void testBindExitsOnAChangedModelSize(void) {
 }
 
 void testBindExitsOnAChangedLossType(void) {
-    layer_t *model[2] = {makeLinear(4, 3, false), makeSoftmax()};
+    layer_t *model[2] = {makeLinear(4, 3, false, 0), makeSoftmax()};
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
     rematWireTable_t *t = initTable(model, 2, CROSS_ENTROPY, x);
@@ -1455,7 +1461,7 @@ void testWireBindInheritedSymTakesConfigNotScale(void) {
     symInt32QConfig_t symQc;
     initSymInt32QConfigWithQMaxBits(SR_HALF_AWAY, &symQc, 10);
     quantization_t symQ = {.type = SYM_INT32, .qConfig = &symQc};
-    layer_t *model[2] = {makeLinear(2, 4, false), makeQuant(&symQ, &g_floatQ)};
+    layer_t *model[2] = {makeLinear(2, 4, false, 0), makeQuant(&symQ, &g_floatQ)};
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ);
     rematWireTable_t *t = initTable(model, 2, MSE, x);
@@ -1482,7 +1488,7 @@ void testWireBindInheritedGradChecksTheLiveDtypeWhenByteNeutral(void) {
     symInt32QConfig_t symQc;
     initSymInt32QConfigWithQMaxBits(SR_HALF_AWAY, &symQc, 10);
     quantization_t symQ = {.type = SYM_INT32, .qConfig = &symQc};
-    layer_t *model[2] = {makeLinear(2, 4, false), makeQuant(&symQ, &g_floatQ)};
+    layer_t *model[2] = {makeLinear(2, 4, false, 0), makeQuant(&symQ, &g_floatQ)};
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ);
     rematWireTable_t *t = initTable(model, 2, MSE, x);
@@ -1995,7 +2001,7 @@ void testEvalPeakIsTheLargestAdjacentActPair(void) {
     rematPlanFree(p);
     rematWireTableFree(t);
     freeModel(har, HAR_N);
-    layer_t *one[1] = {makeLinear(2, 3, false)};
+    layer_t *one[1] = {makeLinear(2, 3, false, 0)};
     t = initTable(one, 1, CROSS_ENTROPY, makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ));
     p = buildPlan(t, one, NULL);
     TEST_ASSERT_EQUAL_size_t(2, rematPlanProgram(p, REMAT_MODE_EVAL)->numSteps);
@@ -2056,7 +2062,7 @@ void testPlanBuildExitsOnAnUnknownPolicy(void) {
 /* n = 1 under CE has LOSS_BACKWARD but no BACKWARD (top = -1 < deepest);
  * the seed lives [LOSS_BACKWARD, LOSS_BACKWARD]. */
 void testSingleLayerUnderCrossEntropyHasASeedButNoBackwardStep(void) {
-    layer_t *model[1] = {makeLinear(2, 3, false)};
+    layer_t *model[1] = {makeLinear(2, 3, false, 0)};
     inputLike_t in;
     rematWireTable_t *t =
         initTable(model, 1, CROSS_ENTROPY, makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ));
@@ -2074,7 +2080,7 @@ void testSingleLayerUnderCrossEntropyHasASeedButNoBackwardStep(void) {
 
 /* All frozen: no LOSS_BACKWARD, no GRAD wire (hasBackward false). */
 void testAllFrozenPlanHasNoBackwardPhase(void) {
-    layer_t *model[2] = {makeLinear(2, 4, true), makeRelu(&g_floatQ)};
+    layer_t *model[2] = {makeLinear(2, 4, true, 0), makeRelu(&g_floatQ)};
     inputLike_t in;
     rematWireTable_t *t = initTable(model, 2, MSE, makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ));
     rematPlan_t *p = buildPlan(t, model, NULL);
@@ -2193,7 +2199,7 @@ void testActPeakOfMnistCnnIs125648StoreAllAnd100352Liveness(void) {
  * testSingleLayerUnderCrossEntropyHasASeedButNoBackwardStep, built under
  * LIVENESS instead of STORE_ALL. */
 void testLivenessSingleLayerUnderCrossEntropyEndsBothWiresAtLossBackward(void) {
-    layer_t *model[1] = {makeLinear(2, 3, false)};
+    layer_t *model[1] = {makeLinear(2, 3, false, 0)};
     inputLike_t in;
     rematWireTable_t *t =
         initTable(model, 1, CROSS_ENTROPY, makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ));
@@ -2209,8 +2215,8 @@ void testLivenessSingleLayerUnderCrossEntropyEndsBothWiresAtLossBackward(void) {
  * GEMM's input dies at its forward. [Linear T, LayerNorm frozen, Linear frozen,
  * Linear T] under MSE: n = 4, top = 3, B(l) = 6 + (3 - l). */
 void testFrozenNormStillNeedsItsInputWhileAFrozenGemmDoesNot(void) {
-    layer_t *model[4] = {makeLinear(4, 4, false), makeLayerNorm(4, true), makeLinear(4, 4, true),
-                         makeLinear(4, 2, false)};
+    layer_t *model[4] = {makeLinear(4, 4, false, 0), makeLayerNorm(4, true),
+                         makeLinear(4, 4, true, 2), makeLinear(4, 2, false, 3)};
     inputLike_t in;
     rematWireTable_t *t = initTable(model, 4, MSE, makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ));
     rematPlan_t *p = buildPlan(t, model, &g_liveness);
@@ -2224,7 +2230,7 @@ void testFrozenNormStillNeedsItsInputWhileAFrozenGemmDoesNot(void) {
 /* Under CE the logits die at FORWARD(n-1) (the positional skip means no
  * BACKWARD reads them); under MSE after Softmax they live to BACKWARD(n-1). */
 void testCeLogitsDieAtForwardWhileMseSoftmaxInputIsRetained(void) {
-    layer_t *model[2] = {makeLinear(2, 3, false), makeSoftmax()};
+    layer_t *model[2] = {makeLinear(2, 3, false, 0), makeSoftmax()};
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ);
     rematWireTable_t *ce = initTable(model, 2, CROSS_ENTROPY, x);
@@ -2312,7 +2318,7 @@ void testEveryStepsOperandsAreCoLiveOnRandomChains(void) {
         size_t n = 1u + nextRandom(&state) % 6u;
         layer_t *model[6];
         for (size_t i = 0; i < n; i++) {
-            model[i] = randomRank2Layer(&state);
+            model[i] = randomRank2Layer(&state, i);
         }
         lossFuncType_t lt = (nextRandom(&state) % 2u == 0u) ? MSE : CROSS_ENTROPY;
         inputLike_t in;
@@ -2488,7 +2494,7 @@ void testPlanBuildExitsWhenTheModelFreezesALayerTheTableSawTrainable(void) {
     buildHarLivenessFixture(&f);
     layer_t *other[HAR_N];
     memcpy(other, f.model, sizeof other);
-    other[10] = makeLinear(64, 6, true);
+    other[10] = makeLinear(64, 6, true, 10);
     ASSERT_EXITS_WITH_OUTPUT(
         1, "the model differs from the table's key at 'frozen[10]': table 0, model 1",
         buildLivenessPlanOn(&f, other));

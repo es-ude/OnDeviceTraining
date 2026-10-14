@@ -62,8 +62,11 @@ void testLinearForwardFloatRank1BiasRank2Output() {
     quantization_t *testQ = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, testQ);
-    layer_t *linearLayer =
-        linearLayerInit(&(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE}, &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *linearLayer = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE, .weightInit.key = &initKey},
+        &lq);
     layerLoadWeights(linearLayer, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, -6.f}, (float[]){-1.f, 3.f});
 
     linearForward(linearLayer, input, output, NULL);
@@ -190,8 +193,11 @@ void testLinearBackwardFloatRank1Bias() {
     quantization_t *testQ = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, testQ);
-    layer_t *linearLayer =
-        linearLayerInit(&(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE}, &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *linearLayer = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE, .weightInit.key = &initKey},
+        &lq);
     layerLoadWeights(linearLayer, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, -6.f}, (float[]){-1.f, 3.f});
     linearConfig_t *cfg = linearLayer->config->linear;
 
@@ -372,8 +378,11 @@ static layer_t *buildFloatLinearWithTrainable(trainable_t trainable) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = linearLayerInitOwning(
-        &(linearInit_t){.inFeatures = 3, .outFeatures = 2, .trainable = trainable}, &lq);
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .trainable = trainable, .weightInit.key = &initKey},
+        &lq);
     freeQuantization(q);
     return layer;
 }
@@ -430,8 +439,11 @@ void testLinearForwardFloat() {
     quantization_t *testQ = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, testQ);
-    layer_t *linearLayer =
-        linearLayerInit(&(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE}, &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *linearLayer = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE, .weightInit.key = &initKey},
+        &lq);
     layerLoadWeights(linearLayer, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, -6.f}, (float[]){-1.f, 3.f});
 
     linearForward(linearLayer, input, output, NULL);
@@ -489,8 +501,11 @@ void testLinearBackwardFloat() {
     quantization_t *testQ = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, testQ);
-    layer_t *linearLayer =
-        linearLayerInit(&(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE}, &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *linearLayer = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE, .weightInit.key = &initKey},
+        &lq);
     layerLoadWeights(linearLayer, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, -6.f}, (float[]){-1.f, 3.f});
     linearConfig_t *cfg = linearLayer->config->linear;
 
@@ -1008,8 +1023,11 @@ void testLinearBackwardFloatWithMismatchedQuantizations() {
     quantization_t *testQ = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, testQ);
-    layer_t *linearLayer =
-        linearLayerInit(&(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE}, &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *linearLayer = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE, .weightInit.key = &initKey},
+        &lq);
     layerLoadWeights(linearLayer, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, -6.f}, (float[]){-1.f, 3.f});
     linearConfig_t *cfg = linearLayer->config->linear;
 
@@ -1161,7 +1179,9 @@ void testLinearLayerInitAndFreeRoundTrip(void) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
-    layer_t *linearLayer = linearLayerInit(&(linearInit_t){.inFeatures = 1, .outFeatures = 1}, &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *linearLayer = linearLayerInit(
+        &(linearInit_t){.inFeatures = 1, .outFeatures = 1, .weightInit.key = &initKey}, &lq);
     TEST_ASSERT_NOT_NULL(linearLayer);
     TEST_ASSERT_EQUAL_INT(LINEAR, linearLayer->type);
     TEST_ASSERT_NOT_NULL(linearLayer->config);
@@ -1180,11 +1200,13 @@ void testLinearLayerInitBorrowingBuildsLayerWithCorrectShapeAndStoresQuantPointe
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = linearLayerInit(
         &(linearInit_t){
             .inFeatures = 3,
             .outFeatures = 2,
             .bias = BIAS_TRUE,
+            .weightInit.key = &initKey,
         },
         &lq);
 
@@ -1231,11 +1253,13 @@ void testLinearLayerInitBorrowingBiasDefaultResolvesToTrue(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = linearLayerInit(
         &(linearInit_t){
             .inFeatures = 4,
             .outFeatures = 1,
             /* .bias omitted -> BIAS_DEFAULT (0) -> resolves to true */
+            .weightInit.key = &initKey,
         },
         &lq);
 
@@ -1250,11 +1274,13 @@ void testLinearLayerInitBorrowingBiasFalseLeavesBiasNull(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = linearLayerInit(
         &(linearInit_t){
             .inFeatures = 4,
             .outFeatures = 1,
             .bias = BIAS_FALSE,
+            .weightInit.key = &initKey,
         },
         &lq);
 
@@ -1282,11 +1308,13 @@ void testLinearLayerInitDefaultGradStorageIsFloat32DespiteSymPropLossQ(void) {
         /* weightGradStorage / biasGradStorage deliberately left NULL. */
     };
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = linearLayerInit(
         &(linearInit_t){
             .inFeatures = 3,
             .outFeatures = 2,
             .bias = BIAS_TRUE,
+            .weightInit.key = &initKey,
         },
         &lq);
 
@@ -1325,11 +1353,13 @@ void testLinearLayerInitSymInt32BackwardMathYieldsSymInt32Grad(void) {
         .biasGradStorage = bwd,
     };
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = linearLayerInit(
         &(linearInit_t){
             .inFeatures = 3,
             .outFeatures = 2,
             .bias = BIAS_TRUE,
+            .weightInit.key = &initKey,
         },
         &lq);
 
@@ -1352,11 +1382,13 @@ void testLinearLayerInitOwningDeepCopiesQuantizations(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = linearLayerInitOwning(
         &(linearInit_t){
             .inFeatures = 3,
             .outFeatures = 2,
             .bias = BIAS_TRUE,
+            .weightInit.key = &initKey,
         },
         &lq);
 
@@ -1384,11 +1416,13 @@ void testLinearLayerInitOwningFreesAllAllocationsWithoutLeak(void) {
         layerQuant_t lq;
         layerQuantInitUniform(&lq, q);
 
+        const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
         layer_t *layer = linearLayerInitOwning(
             &(linearInit_t){
                 .inFeatures = 8,
                 .outFeatures = 4,
                 .bias = BIAS_TRUE,
+                .weightInit.key = &initKey,
             },
             &lq);
 
@@ -1417,8 +1451,11 @@ void testLinearLayerInitOwningWeightGradStorageKnobOverridesPropLossQDefault(voi
     quantization_t *gradKnob = quantizationInitSymInt32WithBits(HALF_AWAY, 16);
     lq.weightGradStorage = gradKnob;
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = linearLayerInitOwning(
-        &(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE}, &lq);
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE, .weightInit.key = &initKey},
+        &lq);
 
     linearConfig_t *cfg = layer->config->linear;
     tensor_t *wGrad = getGradFromParameter(cfg->weights);
@@ -1448,8 +1485,11 @@ void testLinearLayerInitOwningBoolWeightGradStorageKnobAborts(void) {
     quantization_t *boolGradQ = quantizationInitBool();
     lq.weightGradStorage = boolGradQ;
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     ASSERT_EXITS_WITH_FAILURE(linearLayerInitOwning(
-        &(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE}, &lq));
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE, .weightInit.key = &initKey},
+        &lq));
 
     freeQuantization(boolGradQ);
     freeQuantization(q);
@@ -1468,8 +1508,11 @@ void testLinearLayerInitOwningBfpWeightGradStorageKnob(void) {
     quantization_t *gradKnob = quantizationInitBfp(8, 8, HALF_AWAY);
     lq.weightGradStorage = gradKnob;
 
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = linearLayerInitOwning(
-        &(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE}, &lq);
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE, .weightInit.key = &initKey},
+        &lq);
 
     linearConfig_t *cfg = layer->config->linear;
     tensor_t *wGrad = getGradFromParameter(cfg->weights);
@@ -1809,9 +1852,11 @@ void testLinearSrForwardIsAPureFunctionOfItsKey(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
     lq.forwardMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = SR_HALF_AWAY};
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = linearLayerInitOwning(&(linearInit_t){.inFeatures = 3,
                                                            .outFeatures = LINEAR_PURITY_OUT,
-                                                           .trainable = TRAINABLE_FALSE},
+                                                           .trainable = TRAINABLE_FALSE,
+                                                           .weightInit.key = &initKey},
                                            &lq);
     freeQuantization(q);
     tensor_t *input = e2eMakeInput((float[]){0.5f, -1.f, 2.f});
@@ -1930,8 +1975,11 @@ void testLinearSymInt32GradAccumulatesOverTwoMicrobatchesAndSteps(void) {
                           .biasGradStorage = bwd,
                           .weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE,
                           .biasGradAccMode = OUT_ACC_FIXED_SCALE};
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *symLayer = linearLayerInit(
-        &(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE}, &lqSym);
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE, .weightInit.key = &initKey},
+        &lqSym);
 
     tensor_t *symWGrad = symLayer->config->linear->weights->grad;
     TEST_ASSERT_EQUAL_INT(SYM_INT32, symWGrad->quantization->type); /* guard */
@@ -1990,7 +2038,9 @@ void testLinearSymInt32GradAccumulatesOverTwoMicrobatchesAndSteps(void) {
                         .weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE,
                         .biasGradAccMode = OUT_ACC_FIXED_SCALE};
     layer_t *fLayer = linearLayerInit(
-        &(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE}, &lqF);
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE, .weightInit.key = &initKey},
+        &lqF);
     tensor_t *fWGrad = fLayer->config->linear->weights->grad;
 
     tensor_t *fIn1 = e2eMakeInput(inputVals);
@@ -2076,11 +2126,13 @@ void testLinearLayerInitDefaultWeightsWithinPyTorchBound(void) {
     layerQuantInitUniform(&lq, q);
 
     rngSetSeed(7);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(7u), RNG_TAG_INIT, 0u);
     layer_t *layer = linearLayerInit(
         &(linearInit_t){
             .inFeatures = inFeatures,
             .outFeatures = outFeatures,
             .bias = BIAS_TRUE,
+            .weightInit.key = &initKey,
         },
         &lq);
 
@@ -2115,12 +2167,13 @@ void testLinearLayerInitXavierUniformOverrideUsesGlorotBound(void) {
     layerQuantInitUniform(&lq, q);
 
     rngSetSeed(7);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(7u), RNG_TAG_INIT, 0u);
     layer_t *layer = linearLayerInit(
         &(linearInit_t){
             .inFeatures = inFeatures,
             .outFeatures = outFeatures,
             .bias = BIAS_TRUE,
-            .weightInit = {INIT_XAVIER_UNIFORM},
+            .weightInit = {INIT_XAVIER_UNIFORM, .key = &initKey},
         },
         &lq);
 
@@ -2145,8 +2198,11 @@ void testLinearBackwardWithoutBiasDoesNotCrash(void) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = linearLayerInit(
-        &(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_FALSE}, &lq);
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .bias = BIAS_FALSE, .weightInit.key = &initKey},
+        &lq);
 
     tensor_t *fwdIn = buildFloatTensor2d(1, 3, (float[]){1.f, 2.f, 3.f});
     tensor_t *loss = buildFloatTensor2d(1, 2, (float[]){0.5f, -0.5f});
@@ -2175,8 +2231,11 @@ void testLinearForwardWithoutBiasDoesNotCrash(void) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = linearLayerInit(
-        &(linearInit_t){.inFeatures = 3, .outFeatures = 2, .bias = BIAS_FALSE}, &lq);
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .bias = BIAS_FALSE, .weightInit.key = &initKey},
+        &lq);
     layerLoadWeights(layer, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, -6.f}, NULL);
 
     tensor_t *input = buildFloatTensor2d(1, 3, (float[]){0.f, 1.f, 2.f});

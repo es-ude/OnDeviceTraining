@@ -11,6 +11,7 @@
 #include "LayerCommon.h"
 #include "LayerQuant.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
@@ -1440,9 +1441,13 @@ static layer_t *buildFloatConv1dWithTrainable(trainable_t trainable) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
-    layer_t *layer = conv1dLayerInitOwning(
-        &(conv1dInit_t){.inChannels = 2, .outChannels = 3, .kernelSize = 3, .trainable = trainable},
-        &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *layer = conv1dLayerInitOwning(&(conv1dInit_t){.inChannels = 2,
+                                                           .outChannels = 3,
+                                                           .kernelSize = 3,
+                                                           .trainable = trainable,
+                                                           .weightInit.key = &initKey},
+                                           &lq);
     freeQuantization(q);
     return layer;
 }
@@ -2914,10 +2919,13 @@ void testConv1dSrForwardIsAPureFunctionOfItsForwardOpKey(void) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
-    layer_t *layer = conv1dLayerInitOwning(
-        &(conv1dInit_t){
-            .inChannels = 2, .outChannels = 4, .kernelSize = 3, .trainable = TRAINABLE_FALSE},
-        &lq);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(CONV1D_KEYED_SEED), RNG_TAG_INIT, 0u);
+    layer_t *layer = conv1dLayerInitOwning(&(conv1dInit_t){.inChannels = 2,
+                                                           .outChannels = 4,
+                                                           .kernelSize = 3,
+                                                           .trainable = TRAINABLE_FALSE,
+                                                           .weightInit.key = &initKey},
+                                           &lq);
     freeQuantization(q);
     size_t inputDims[] = {1, 2, 6};
     tensor_t *input = makeFloatTensor(

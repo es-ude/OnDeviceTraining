@@ -37,6 +37,7 @@ add_elastic_ai_unit_test(
         Serialize
         MORE_LIBS
         Common
+        RNG
         Deserialize
         TensorApi
         Tensor

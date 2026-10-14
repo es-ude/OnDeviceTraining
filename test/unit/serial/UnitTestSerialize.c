@@ -35,6 +35,7 @@
 #include "QuantLayerApi.h"
 #include "QuantizationApi.h"
 #include "QuantizationLayer.h"
+#include "RNG.h"
 #include "Relu.h"
 #include "ReluApi.h"
 #include "Serialize.h"
@@ -107,9 +108,12 @@ static void testRoundTripLinear(void) {
     layerQuantInitUniform(&lq, floatQ);
     lq.biasGradMath = (arithmetic_t){.type = ARITH_SYM_INT32, .roundingMode = SR_HALF_AWAY};
 
-    linearInit_t init = {.inFeatures = 4, .outFeatures = 3};
+    const rngKey_t serialKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t skeletonKey = rngFold(rngKeyFromSeed(2u), RNG_TAG_INIT, 0u);
+    linearInit_t init = {.inFeatures = 4, .outFeatures = 3, .weightInit.key = &serialKey};
 
     layer_t *serialLayer = linearLayerInitOwning(&init, &lq);
+    init.weightInit.key = &skeletonKey;
     layer_t *deserialLayer = linearLayerInitOwning(&init, &lq);
 
     linearConfig_t *serialCfg = serialLayer->config->linear;
@@ -234,9 +238,15 @@ static void testRoundTripLinearFrozen(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, floatQ);
 
-    linearInit_t init = {.inFeatures = 4, .outFeatures = 3, .trainable = TRAINABLE_FALSE};
+    const rngKey_t serialKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t skeletonKey = rngFold(rngKeyFromSeed(2u), RNG_TAG_INIT, 0u);
+    linearInit_t init = {.inFeatures = 4,
+                         .outFeatures = 3,
+                         .trainable = TRAINABLE_FALSE,
+                         .weightInit.key = &serialKey};
 
     layer_t *serialLayer = linearLayerInitOwning(&init, &lq);
+    init.weightInit.key = &skeletonKey;
     layer_t *deserialLayer = linearLayerInitOwning(&init, &lq);
 
     linearConfig_t *serialCfg = serialLayer->config->linear;
@@ -304,11 +314,18 @@ static void testRoundTripLinearNoBias(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, floatQ);
 
-    linearInit_t initNoBias = {.inFeatures = 4, .outFeatures = 3, .bias = BIAS_FALSE};
-    linearInit_t initBias = {.inFeatures = 3, .outFeatures = 2};
+    const rngKey_t serialKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t serialKey1 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 1u);
+    const rngKey_t skeletonKey0 = rngFold(rngKeyFromSeed(2u), RNG_TAG_INIT, 0u);
+    const rngKey_t skeletonKey1 = rngFold(rngKeyFromSeed(2u), RNG_TAG_INIT, 1u);
+    linearInit_t initNoBias = {
+        .inFeatures = 4, .outFeatures = 3, .bias = BIAS_FALSE, .weightInit.key = &serialKey0};
+    linearInit_t initBias = {.inFeatures = 3, .outFeatures = 2, .weightInit.key = &serialKey1};
 
     layer_t *serialNoBias = linearLayerInitOwning(&initNoBias, &lq);
     layer_t *serialBias = linearLayerInitOwning(&initBias, &lq);
+    initNoBias.weightInit.key = &skeletonKey0;
+    initBias.weightInit.key = &skeletonKey1;
     layer_t *deserialNoBias = linearLayerInitOwning(&initNoBias, &lq);
     layer_t *deserialBias = linearLayerInitOwning(&initBias, &lq);
 
@@ -369,8 +386,12 @@ static void assertLinearBiasPresenceMismatchRejected(bias_t serialBias, bias_t s
     layerQuant_t lq;
     layerQuantInitUniform(&lq, floatQ);
 
-    linearInit_t serialInit = {.inFeatures = 4, .outFeatures = 3, .bias = serialBias};
-    linearInit_t skeletonInit = {.inFeatures = 4, .outFeatures = 3, .bias = skeletonBias};
+    const rngKey_t serialKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t skeletonKey = rngFold(rngKeyFromSeed(2u), RNG_TAG_INIT, 0u);
+    linearInit_t serialInit = {
+        .inFeatures = 4, .outFeatures = 3, .bias = serialBias, .weightInit.key = &serialKey};
+    linearInit_t skeletonInit = {
+        .inFeatures = 4, .outFeatures = 3, .bias = skeletonBias, .weightInit.key = &skeletonKey};
     layer_t *serialLayer = linearLayerInitOwning(&serialInit, &lq);
     layer_t *skeletonLayer = linearLayerInitOwning(&skeletonInit, &lq);
     layer_t *serialModel[] = {serialLayer};
@@ -399,10 +420,17 @@ static void assertConv1dBiasPresenceMismatchRejected(bias_t serialBias, bias_t s
     layerQuant_t lq;
     layerQuantInitUniform(&lq, floatQ);
 
-    conv1dInit_t serialInit = {
-        .inChannels = 2, .outChannels = 3, .kernelSize = 3, .groups = 1, .bias = serialBias};
+    const rngKey_t serialKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t skeletonKey = rngFold(rngKeyFromSeed(2u), RNG_TAG_INIT, 0u);
+    conv1dInit_t serialInit = {.inChannels = 2,
+                               .outChannels = 3,
+                               .kernelSize = 3,
+                               .groups = 1,
+                               .bias = serialBias,
+                               .weightInit.key = &serialKey};
     conv1dInit_t skeletonInit = serialInit;
     skeletonInit.bias = skeletonBias;
+    skeletonInit.weightInit.key = &skeletonKey;
     layer_t *serialLayer = conv1dLayerInitOwning(&serialInit, &lq);
     layer_t *skeletonLayer = conv1dLayerInitOwning(&skeletonInit, &lq);
     layer_t *serialModel[] = {serialLayer};
@@ -432,10 +460,17 @@ static void assertConv1dTransposedBiasPresenceMismatchRejected(bias_t serialBias
     layerQuant_t lq;
     layerQuantInitUniform(&lq, floatQ);
 
-    conv1dTransposedInit_t serialInit = {
-        .inChannels = 2, .outChannels = 3, .kernelSize = 3, .groups = 1, .bias = serialBias};
+    const rngKey_t serialKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t skeletonKey = rngFold(rngKeyFromSeed(2u), RNG_TAG_INIT, 0u);
+    conv1dTransposedInit_t serialInit = {.inChannels = 2,
+                                         .outChannels = 3,
+                                         .kernelSize = 3,
+                                         .groups = 1,
+                                         .bias = serialBias,
+                                         .weightInit.key = &serialKey};
     conv1dTransposedInit_t skeletonInit = serialInit;
     skeletonInit.bias = skeletonBias;
+    skeletonInit.weightInit.key = &skeletonKey;
     layer_t *serialLayer = conv1dTransposedLayerInitOwning(&serialInit, &lq);
     layer_t *skeletonLayer = conv1dTransposedLayerInitOwning(&skeletonInit, &lq);
     layer_t *serialModel[] = {serialLayer};
@@ -473,9 +508,15 @@ static void testDeserializeRejectsLinearHasBiasByteOutOfRange(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, floatQ);
 
-    linearInit_t init = {
-        .inFeatures = 1, .outFeatures = 1, .bias = BIAS_FALSE, .trainable = TRAINABLE_FALSE};
+    const rngKey_t serialKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t skeletonKey = rngFold(rngKeyFromSeed(2u), RNG_TAG_INIT, 0u);
+    linearInit_t init = {.inFeatures = 1,
+                         .outFeatures = 1,
+                         .bias = BIAS_FALSE,
+                         .trainable = TRAINABLE_FALSE,
+                         .weightInit.key = &serialKey};
     layer_t *serialLayer = linearLayerInitOwning(&init, &lq);
+    init.weightInit.key = &skeletonKey;
     layer_t *skeletonLayer = linearLayerInitOwning(&init, &lq);
     layer_t *serialModel[] = {serialLayer};
     layer_t *skeletonModel[] = {skeletonLayer};
@@ -717,6 +758,8 @@ static void testRoundTripConv1d(void) {
     layerQuantInitUniform(&lq, floatQ);
     lq.biasGradMath = (arithmetic_t){.type = ARITH_SYM_INT32, .roundingMode = SR_HALF_AWAY};
 
+    const rngKey_t serialKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t skeletonKey = rngFold(rngKeyFromSeed(2u), RNG_TAG_INIT, 0u);
     conv1dInit_t initBias = {
         .inChannels = 4,
         .outChannels = 6,
@@ -726,13 +769,16 @@ static void testRoundTripConv1d(void) {
         .paddingAmount = 1,
         .groups = 1,
         .bias = BIAS_TRUE,
+        .weightInit.key = &serialKey,
     };
     conv1dInit_t initNoBias = initBias;
     initNoBias.bias = BIAS_FALSE;
 
     layer_t *serialBias = conv1dLayerInitOwning(&initBias, &lq);
+    initBias.weightInit.key = &skeletonKey;
     layer_t *deserialBias = conv1dLayerInitOwning(&initBias, &lq);
     layer_t *serialNoBias = conv1dLayerInitOwning(&initNoBias, &lq);
+    initNoBias.weightInit.key = &skeletonKey;
     layer_t *deserialNoBias = conv1dLayerInitOwning(&initNoBias, &lq);
 
     conv1dConfig_t *serialBiasCfg = serialBias->config->conv1d;
@@ -897,6 +943,8 @@ static void testRoundTripConv1dTransposed(void) {
     layerQuantInitUniform(&lq, floatQ);
     lq.weightGradMath = (arithmetic_t){.type = ARITH_SYM_INT32, .roundingMode = SR_HALF_AWAY};
 
+    const rngKey_t serialKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t skeletonKey = rngFold(rngKeyFromSeed(2u), RNG_TAG_INIT, 0u);
     conv1dTransposedInit_t init = {
         .inChannels = 4,
         .outChannels = 6,
@@ -905,9 +953,11 @@ static void testRoundTripConv1dTransposed(void) {
         .groups = 1,
         .outputPadding = 1,
         .bias = BIAS_TRUE,
+        .weightInit.key = &serialKey,
     };
 
     layer_t *serialLayer = conv1dTransposedLayerInitOwning(&init, &lq);
+    init.weightInit.key = &skeletonKey;
     layer_t *deserialLayer = conv1dTransposedLayerInitOwning(&init, &lq);
 
     conv1dTransposedConfig_t *serialCfg = serialLayer->config->conv1dTransposed;
@@ -2419,7 +2469,11 @@ static void testGoldenBytesModelLinearFrozenV7(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, floatQ);
 
-    linearInit_t init = {.inFeatures = 1, .outFeatures = 1, .trainable = TRAINABLE_FALSE};
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    linearInit_t init = {.inFeatures = 1,
+                         .outFeatures = 1,
+                         .trainable = TRAINABLE_FALSE,
+                         .weightInit.key = &initKey};
     layer_t *layer = linearLayerInitOwning(&init, &lq);
     linearConfig_t *cfg = layer->config->linear;
 
@@ -2729,8 +2783,12 @@ static void testDeserializeSkipsGradIntoFrozenSkeleton(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, floatQ);
 
-    linearInit_t init1 = {.inFeatures = 4, .outFeatures = 3};
-    linearInit_t init2 = {.inFeatures = 3, .outFeatures = 5};
+    const rngKey_t serialKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t serialKey1 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 1u);
+    const rngKey_t skeletonKey0 = rngFold(rngKeyFromSeed(2u), RNG_TAG_INIT, 0u);
+    const rngKey_t skeletonKey1 = rngFold(rngKeyFromSeed(2u), RNG_TAG_INIT, 1u);
+    linearInit_t init1 = {.inFeatures = 4, .outFeatures = 3, .weightInit.key = &serialKey0};
+    linearInit_t init2 = {.inFeatures = 3, .outFeatures = 5, .weightInit.key = &serialKey1};
 
     layer_t *serialLayer1 = linearLayerInitOwning(&init1, &lq);
     layer_t *serialLayer2 = linearLayerInitOwning(&init2, &lq);
@@ -2766,6 +2824,8 @@ static void testDeserializeSkipsGradIntoFrozenSkeleton(void) {
 
     linearInit_t frozenInit1 = init1;
     frozenInit1.trainable = TRAINABLE_FALSE;
+    frozenInit1.weightInit.key = &skeletonKey0;
+    init2.weightInit.key = &skeletonKey1;
     layer_t *skeletonLayer1 = linearLayerInitOwning(&frozenInit1, &lq);
     layer_t *skeletonLayer2 = linearLayerInitOwning(&init2, &lq);
     layer_t *skeletonModel[] = {skeletonLayer1, skeletonLayer2};
@@ -2866,7 +2926,9 @@ static void testDeserializeSkipsSymGradIntoFrozenSkeleton(void) {
     layerQuantInitUniform(&lq, floatQ);
     lq.weightGradStorage = symGradQ;
 
-    linearInit_t init = {.inFeatures = 4, .outFeatures = 3};
+    const rngKey_t serialKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    const rngKey_t skeletonKey = rngFold(rngKeyFromSeed(2u), RNG_TAG_INIT, 0u);
+    linearInit_t init = {.inFeatures = 4, .outFeatures = 3, .weightInit.key = &serialKey};
     layer_t *serialLayer = linearLayerInitOwning(&init, &lq);
     linearConfig_t *serialCfg = serialLayer->config->linear;
 
@@ -2891,6 +2953,7 @@ static void testDeserializeSkipsSymGradIntoFrozenSkeleton(void) {
 
     linearInit_t frozenInit = init;
     frozenInit.trainable = TRAINABLE_FALSE;
+    frozenInit.weightInit.key = &skeletonKey;
     layer_t *skeletonLayer = linearLayerInitOwning(&frozenInit, &lq);
     layer_t *skeletonModel[] = {skeletonLayer};
 

@@ -305,7 +305,12 @@ classificationReport_t evaluationEpochWithReport(layer_t **model, size_t modelSi
  * (last: it only writes
  * trainDataLoader->batchSize, which the next epoch reads fresh). A callback
  * that logs the LR/batch therefore reports the values this epoch actually
- * trained with. Fails fast (before the first batch) if: the LR scheduler is
+ * trained with. trainDataLoader and evalDataLoader must be distinct objects:
+ * the eval loader keeps one order per run and is never resized, while the
+ * train loader is reshuffled each epoch and resized by the batch scheduler;
+ * to evaluate on the training data, build a second loader over the same
+ * dataset. Fails fast (before the first batch) if: the same loader object is
+ * passed as both; the LR scheduler is
  * wired to another optimizer (#327); the batch scheduler is wired to a loader
  * other than trainDataLoader (the eval loader is never resized); its LR
  * compensation is wired to another optimizer; an LR scheduler and a

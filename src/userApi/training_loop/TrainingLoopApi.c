@@ -671,6 +671,14 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
     const trainingCall_t trainCall = {.remat = (options != NULL) ? options->remat : NULL,
                                       .rng = rng};
 
+    if (trainDataLoader == evalDataLoader) {
+        PRINT_ERROR("trainingRun: trainDataLoader and evalDataLoader must be distinct loader "
+                    "objects (the eval loader keeps one order per run and is never resized, "
+                    "while the train loader is reshuffled each epoch and resized by the "
+                    "batch-size scheduler; to evaluate on the training data, build a second "
+                    "loader over the same dataset)");
+        exit(1);
+    }
     if (lrScheduler != NULL && lrScheduler->optimizer != optimizer) {
         PRINT_ERROR("trainingRun: lrScheduler is wired to a different optimizer than the one "
                     "passed to trainingRun (#327)");

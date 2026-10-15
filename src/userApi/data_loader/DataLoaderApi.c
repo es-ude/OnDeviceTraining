@@ -49,6 +49,12 @@ static sample_t *getSampleByIndex(dataLoader_t *dataLoader, size_t index) {
 }
 
 static batch_t *getBatch(dataLoader_t *dataLoader, size_t index) {
+    /* Before dataLoaderShuffle a shuffle = true loader would silently serve the
+     * identity order. */
+    if (dataLoader->shuffle && !dataLoader->shuffled) {
+        PRINT_ERROR("getBatch: shuffle = true loader was never shuffled (call dataLoaderShuffle)");
+        exit(1);
+    }
     batch_t *batch = reserveMemory(sizeof(batch_t));
 
     size_t batchSize = dataLoader->batchSize;

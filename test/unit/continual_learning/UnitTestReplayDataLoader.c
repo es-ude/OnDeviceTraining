@@ -10,6 +10,7 @@
 #include "PpcaReplayApi.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
@@ -519,72 +520,79 @@ void testExemplarModeRequiresBufferAndStream(void) {
     freeFakeDataset();
 }
 
-/* #381: replayDataLoaderWrap borrows every base field via a flat struct copy
- * (`rl->pub = *base`) — a pointer field like `indices` is therefore SHARED
- * (same underlying array) even though `rl->pub` is its own struct instance,
- * while plain bool/int fields (shuffle, reshufflePerEpoch, shuffleSeed) are
- * frozen COPIES taken at wrap time. Setting the flag on base BEFORE wrapping
- * means the wrapper's copy matches, so dataLoaderReshuffle(wrapped) gates
- * open and shuffles the array both loaders point at. No pool/PPCA fixtures
- * needed: getBatch is never called, so an empty exemplar buffer + a tiny
- * dummy dataset (size 8, never actually sampled) is enough. */
-#define RESHUFFLE_WRAP_DATASET_SIZE 8
+/* replayDataLoaderWrap copies the base loader's fields at wrap time but shares
+ * its order array, so the order a shuffle sets is the base's order too: both
+ * loaders fetch in it, whether the shuffle went through the wrapper or to the
+ * base after wrapping. A CLASS_MEAN set with no eligible class (all counts 0)
+ * makes the wrapper hand the base batch through untouched. The order is
+ * keyed_shuffle(4, fold(key_from_seed(42), 21, 0)) = [2, 1, 3, 0] (Python
+ * mirror, SHUFFLE = 21). */
+typedef struct {
+    ppcaReplaySet_t *set;
+    dataLoader_t *base;
+    dataLoader_t *wrapped;
+} shuffleWrapFixture_t;
 
-static sample_t *reshuffleWrapGetSample(size_t id) {
-    (void)id;
-    return NULL; /* dataLoaderReshuffle never calls getSample/getBatch */
+static void buildShuffleWrapFixture(shuffleWrapFixture_t *f) {
+    buildFakeDataset();
+    f->base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, true, 999, true);
+    f->base->shuffled = false;
+    ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
+    f->set = ppcaReplaySetCreate(2, &cfg);
+    replayLoaderConfig_t rcfg = {
+        .set = f->set, .samplesPerClass = 1, .minCount = 1, .mode = REPLAY_MODE_CLASS_MEAN};
+    f->wrapped = replayDataLoaderWrap(f->base, &rcfg);
 }
 
-static size_t reshuffleWrapGetDatasetSize(void) {
-    return RESHUFFLE_WRAP_DATASET_SIZE;
+static void freeShuffleWrapFixture(shuffleWrapFixture_t *f) {
+    freeReplayDataLoader(f->wrapped);
+    freeDataLoader(f->base);
+    freePpcaReplaySet(f->set);
 }
 
-void testReshuffleWrappedReplayLoaderReachesBase(void) {
-    dataLoader_t *base = dataLoaderInit(reshuffleWrapGetSample, reshuffleWrapGetDatasetSize, 1,
-                                        NULL, NULL, true, 999, true);
-    dataLoaderSetReshufflePerEpoch(base, true);
-
-    size_t snapshot[RESHUFFLE_WRAP_DATASET_SIZE];
-    for (size_t i = 0; i < RESHUFFLE_WRAP_DATASET_SIZE; i++) {
-        snapshot[i] = base->indices[i];
+/* Fetches batch `index` (2 samples) and records its two items. */
+static void fetchItems(dataLoader_t *dl, size_t index, tensor_t *items[2]) {
+    batch_t *batch = dl->getBatch(dl, index);
+    for (size_t s = 0; s < 2; s++) {
+        items[s] = batch->samples[s]->item;
+        freeSample(batch->samples[s]);
     }
+    freeBatch(batch);
+}
 
-    exemplarBuffer_t *buf = exemplarBufferCreate(1, 1); /* stays empty; getBatch unused */
-    rng32_t stream = {.state = 1};
-    replayLoaderConfig_t rcfg = {.exemplars = buf,
-                                 .samplesPerClass = 1,
-                                 .minCount = 1,
-                                 .stream = &stream,
-                                 .mode = REPLAY_MODE_EXEMPLAR};
-    dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
+void testShufflingTheReplayWrapperOrdersTheBaseToo(void) {
+    shuffleWrapFixture_t f;
+    buildShuffleWrapFixture(&f);
+    const rngKey_t key = rngFold(rngKeyFromSeed(42u), RNG_TAG_SHUFFLE, 0u);
 
-    /* CAPTURE. Structural guarantee: the wrapper's indices pointer IS base's
-     * indices pointer (same array, not a copy) — captured as a bool so the
-     * assert can run after the frees (ASSERT LAST, testing.md Rule 3). */
-    bool indicesShared = base->indices == wrapped->indices;
+    dataLoaderShuffle(f.wrapped, &key);
+    tensor_t *seen[4];
+    fetchItems(f.wrapped, 0, seen);
+    fetchItems(f.base, 1, seen + 2);
+    bool indicesShared = f.base->indices == f.wrapped->indices;
+    freeShuffleWrapFixture(&f);
 
-    dataLoaderReshuffle(wrapped);
-
-    size_t capturedBaseIndices[RESHUFFLE_WRAP_DATASET_SIZE];
-    for (size_t i = 0; i < RESHUFFLE_WRAP_DATASET_SIZE; i++) {
-        capturedBaseIndices[i] = base->indices[i];
-    }
-
-    /* FREE. */
-    freeReplayDataLoader(wrapped);
-    freeDataLoader(base);
-    freeExemplarBuffer(buf);
-
-    /* ASSERT. Reshuffling the WRAPPER changed the BASE's indices. */
     TEST_ASSERT_TRUE(indicesShared);
-    bool baseChanged = false;
-    for (size_t i = 0; i < RESHUFFLE_WRAP_DATASET_SIZE; i++) {
-        if (capturedBaseIndices[i] != snapshot[i]) {
-            baseChanged = true;
-            break;
-        }
-    }
-    TEST_ASSERT_TRUE(baseChanged);
+    TEST_ASSERT_EQUAL_PTR(g_items[2], seen[0]);
+    TEST_ASSERT_EQUAL_PTR(g_items[1], seen[1]);
+    TEST_ASSERT_EQUAL_PTR(g_items[3], seen[2]);
+    TEST_ASSERT_EQUAL_PTR(g_items[0], seen[3]);
+    freeFakeDataset();
+}
+
+void testShufflingTheBaseAfterWrappingKeepsTheWrapperFetching(void) {
+    shuffleWrapFixture_t f;
+    buildShuffleWrapFixture(&f);
+    const rngKey_t key = rngFold(rngKeyFromSeed(42u), RNG_TAG_SHUFFLE, 0u);
+
+    dataLoaderShuffle(f.base, &key);
+    tensor_t *seen[2];
+    fetchItems(f.wrapped, 0, seen);
+    freeShuffleWrapFixture(&f);
+
+    TEST_ASSERT_EQUAL_PTR(g_items[2], seen[0]);
+    TEST_ASSERT_EQUAL_PTR(g_items[1], seen[1]);
+    freeFakeDataset();
 }
 
 /* #152 PR3a: the training loop adds the batch axis to EVERY sample it is
@@ -738,7 +746,8 @@ int main(void) {
     RUN_TEST(testExemplarModeReplaysStoredSamplesZeroCopy);
     RUN_TEST(testExemplarModePicksDeterministic);
     RUN_TEST(testExemplarModeRequiresBufferAndStream);
-    RUN_TEST(testReshuffleWrappedReplayLoaderReachesBase);
+    RUN_TEST(testShufflingTheReplayWrapperOrdersTheBaseToo);
+    RUN_TEST(testShufflingTheBaseAfterWrappingKeepsTheWrapperFetching);
     RUN_TEST(testPpcaReplayedSamplesKeepTheRealSamplesNaturalShape);
     RUN_TEST(testExemplarReplayedSamplesKeepTheRealSamplesNaturalShape);
     return UNITY_END();

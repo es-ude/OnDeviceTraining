@@ -50,10 +50,37 @@ void initDataLoader(dataLoader_t *dataLoader, getSampleFn_t getSample,
         rngSetSeed(shuffleSeed);
         rngShuffleIndices(indices, sizeDataset);
     }
+    dataLoader->shuffled = shuffle;
 }
 
 void dataLoaderSetReshufflePerEpoch(dataLoader_t *dataLoader, bool enable) {
     dataLoader->reshufflePerEpoch = enable;
+}
+
+void dataLoaderShuffle(dataLoader_t *dataLoader, const rngKey_t *key) {
+    if (!dataLoader->shuffle) {
+        return;
+    }
+    size_t n = dataLoader->getDatasetSize();
+    if (n >= 2 && key == NULL) {
+        PRINT_ERROR("dataLoaderShuffle: shuffle without a key");
+        exit(1);
+    }
+    /* From the identity order, so the order depends on the key alone. */
+    size_t *indices = dataLoader->indices;
+    for (size_t i = 0; i < n; ++i) {
+        indices[i] = i;
+    }
+    if (n >= 2) {
+        rngStream_t stream = rngOpen(*key);
+        for (size_t i = n - 1; i > 0; --i) {
+            size_t j = rngNextBounded(&stream, i + 1);
+            size_t swapped = indices[i];
+            indices[i] = indices[j];
+            indices[j] = swapped;
+        }
+    }
+    dataLoader->shuffled = true;
 }
 
 void dataLoaderReshuffle(dataLoader_t *dataLoader) {

@@ -8,6 +8,10 @@
 
 typedef struct dataLoader dataLoader_t;
 
+/* Pointer-only use: the identical typedef lives in RNG.h (C11 allows the
+ * repetition), so this header needs no RNG include path. */
+typedef struct rngKey rngKey_t;
+
 typedef tensor_t *(*transformFn_t)(tensor_t *tensor);
 typedef sample_t *(*getSampleFn_t)(size_t id);
 typedef size_t (*getDatasetSizeFn_t)();
@@ -27,6 +31,8 @@ struct dataLoader {
     bool shuffle;
     uint32_t shuffleSeed;
     size_t *indices; /*!< List of indices with getDatasetSize many entries. Used for shuffling */
+    bool shuffled;   /*!< True once the order of a shuffle = true loader has been set; the
+                          default getBatch stops while it is false. */
 
     bool reshufflePerEpoch; /*!< Opt-in: re-permute indices on each dataLoaderReshuffle() call
                                 (trainingRun drives this once per epoch after the first).
@@ -61,6 +67,19 @@ void initDataLoader(dataLoader_t *dataLoader, getSampleFn_t getSample,
  * \param enable: true to reshuffle indices on every dataLoaderReshuffle() call
  */
 void dataLoaderSetReshufflePerEpoch(dataLoader_t *dataLoader, bool enable);
+
+/*! Sets the sample order of a shuffle = true loader: the identity order,
+ * shuffled with Fisher-Yates (the loop and swap of rngShuffleIndices) over the
+ * stream of `key`. The order depends on the key alone, never on the order
+ * before the call, so one key always gives one order. A loader with
+ * shuffle = false keeps its order and needs no key; fewer than two samples
+ * draw nothing and need no key either. Otherwise a NULL key stops the program
+ * with a named error.
+ *
+ * \param dataLoader: Pointer to dataloader to order
+ * \param key: Key of this order; read during the call only
+ */
+void dataLoaderShuffle(dataLoader_t *dataLoader, const rngKey_t *key);
 
 /*! Re-permutes `indices` in place — self-gating no-op unless both `shuffle`
  * and `reshufflePerEpoch` are set. Intended to be called once per epoch

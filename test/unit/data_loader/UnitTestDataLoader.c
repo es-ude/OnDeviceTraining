@@ -483,6 +483,124 @@ void testDataLoaderInitRejectsZeroBatchSize(void) {
         dataLoaderInit(getProxySample, getProxyDatasetSize, 0, NULL, NULL, false, 0, true));
 }
 
+/* ---- the keyed shuffle (#4) ---- */
+
+static size_t singleSampleDatasetSize(void) {
+    return 1;
+}
+
+/* A shuffle = true loader over the proxy dataset whose order nobody has set yet. */
+static dataLoader_t *unshuffledProxyLoader(size_t batchSize) {
+    dataLoader_t *dl =
+        dataLoaderInit(getProxySample, getProxyDatasetSize, batchSize, NULL, NULL, true, 42, true);
+    dl->shuffled = false;
+    return dl;
+}
+
+/* Fisher-Yates from the identity order under the key: the order depends on the
+ * key alone, never on the order before the call. Golds from the Python mirror,
+ * tag value spelled as a number (SHUFFLE 21). From the repository root:
+ *   uv run python -c "from examples._shared.keyed_rng import (fold,
+ *   key_from_seed as kfs, keyed_shuffle as ks); r = kfs(42); print([ks(n,
+ *   fold(r, 21, e)) for (n, e) in ((8, 0), (8, 1), (4, 0))])"
+ */
+void testDataLoaderShuffleIsFisherYatesFromTheIdentityUnderItsKey(void) {
+    size_t indices[RESHUFFLE_DATASET_SIZE];
+    dataLoader_t dl;
+    initDataLoader(&dl, reshuffleDummyGetSample, reshuffleDummyGetDatasetSize,
+                   reshuffleDummyGetBatch, 1, NULL, NULL, true, 42, indices, true);
+    const rngKey_t epoch0 = rngFold(rngKeyFromSeed(42u), RNG_TAG_SHUFFLE, 0u);
+    const rngKey_t epoch1 = rngFold(rngKeyFromSeed(42u), RNG_TAG_SHUFFLE, 1u);
+
+    dataLoaderShuffle(&dl, &epoch0);
+    size_t first[RESHUFFLE_DATASET_SIZE];
+    for (size_t i = 0; i < RESHUFFLE_DATASET_SIZE; i++) {
+        first[i] = indices[i];
+    }
+    dataLoaderShuffle(&dl, &epoch0);
+    size_t again[RESHUFFLE_DATASET_SIZE];
+    for (size_t i = 0; i < RESHUFFLE_DATASET_SIZE; i++) {
+        again[i] = indices[i];
+    }
+    dataLoaderShuffle(&dl, &epoch1);
+
+    size_t expected0[RESHUFFLE_DATASET_SIZE] = {1, 0, 7, 3, 2, 5, 6, 4};
+    size_t expected1[RESHUFFLE_DATASET_SIZE] = {4, 5, 1, 6, 3, 0, 2, 7};
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expected0, first, RESHUFFLE_DATASET_SIZE);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expected0, again, RESHUFFLE_DATASET_SIZE);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expected1, indices, RESHUFFLE_DATASET_SIZE);
+}
+
+/* The default getBatch serves the order the shuffle set: (4, 0) above is
+ * [2, 1, 3, 0], and proxy sample k starts with the value 2k + 1. */
+void testGetBatchServesTheOrderOfTheKeyedShuffle(void) {
+    makeProxyDataset();
+    dataLoader_t *dl = unshuffledProxyLoader(2);
+    const rngKey_t key = rngFold(rngKeyFromSeed(42u), RNG_TAG_SHUFFLE, 0u);
+    dataLoaderShuffle(dl, &key);
+
+    float seen[PROXY_DATASET_SIZE];
+    for (size_t b = 0; b < 2; b++) {
+        batch_t *batch = dl->getBatch(dl, b);
+        for (size_t i = 0; i < 2; i++) {
+            seen[b * 2 + i] = ((float *)batch->samples[i]->item->data)[0];
+            freeSample(batch->samples[i]);
+        }
+        freeBatch(batch);
+    }
+    freeDataLoader(dl);
+    freeProxyDataset();
+
+    float expected[PROXY_DATASET_SIZE] = {5.f, 3.f, 7.f, 1.f};
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, seen, PROXY_DATASET_SIZE);
+}
+
+/* Only a draw needs a key: a loader with shuffle = false keeps its order, and
+ * one sample is its own shuffled order. */
+void testDataLoaderShuffleWithoutADrawNeedsNoKey(void) {
+    size_t indices[RESHUFFLE_DATASET_SIZE];
+    dataLoader_t plain;
+    initDataLoader(&plain, reshuffleDummyGetSample, reshuffleDummyGetDatasetSize,
+                   reshuffleDummyGetBatch, 1, NULL, NULL, false, 0, indices, true);
+    dataLoaderShuffle(&plain, NULL);
+
+    size_t single[1];
+    dataLoader_t one;
+    initDataLoader(&one, reshuffleDummyGetSample, singleSampleDatasetSize, reshuffleDummyGetBatch,
+                   1, NULL, NULL, true, 42, single, true);
+    one.shuffled = false;
+    dataLoaderShuffle(&one, NULL);
+
+    size_t identity[RESHUFFLE_DATASET_SIZE] = {0, 1, 2, 3, 4, 5, 6, 7};
+    ODT_ASSERT_EQUAL_size_t_ARRAY(identity, indices, RESHUFFLE_DATASET_SIZE);
+    TEST_ASSERT_EQUAL_size_t(0, single[0]);
+    TEST_ASSERT_TRUE(one.shuffled);
+}
+
+static void shuffleWithoutAKey(void) {
+    size_t indices[RESHUFFLE_DATASET_SIZE];
+    dataLoader_t dl;
+    initDataLoader(&dl, reshuffleDummyGetSample, reshuffleDummyGetDatasetSize,
+                   reshuffleDummyGetBatch, 1, NULL, NULL, true, 42, indices, true);
+    dataLoaderShuffle(&dl, NULL);
+}
+
+void testDataLoaderShuffleWithoutAKeyExits(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "dataLoaderShuffle: shuffle without a key", shuffleWithoutAKey());
+}
+
+static void fetchFromAnUnshuffledLoader(void) {
+    makeProxyDataset();
+    dataLoader_t *dl = unshuffledProxyLoader(2);
+    (void)dl->getBatch(dl, 0);
+}
+
+void testGetBatchOfANeverShuffledLoaderExits(void) {
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "getBatch: shuffle = true loader was never shuffled (call dataLoaderShuffle)",
+        fetchFromAnUnshuffledLoader());
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testGetSample);
@@ -496,5 +614,10 @@ int main() {
     RUN_TEST(testReshuffleDrawsFromLiveRngStateNotFixedSeed);
     RUN_TEST(testInitDataLoaderRejectsZeroBatchSize);
     RUN_TEST(testDataLoaderInitRejectsZeroBatchSize);
+    RUN_TEST(testDataLoaderShuffleIsFisherYatesFromTheIdentityUnderItsKey);
+    RUN_TEST(testGetBatchServesTheOrderOfTheKeyedShuffle);
+    RUN_TEST(testDataLoaderShuffleWithoutADrawNeedsNoKey);
+    RUN_TEST(testDataLoaderShuffleWithoutAKeyExits);
+    RUN_TEST(testGetBatchOfANeverShuffledLoaderExits);
     return UNITY_END();
 }

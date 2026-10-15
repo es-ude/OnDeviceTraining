@@ -247,8 +247,8 @@ void testGroupNormClassifierTrainsAndRoundTrips(void) {
     /* Full-batch (batchSize == dataset size): one deterministic step per epoch,
      * no shuffling. */
     dataLoader_t *trainDl =
-        dataLoaderInit(getSample, getDatasetSize, NUM_SAMPLES, NULL, NULL, false, 0, true);
-    dataLoader_t *evalDl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getSample, getDatasetSize, NUM_SAMPLES, NULL, NULL, false, true);
+    dataLoader_t *evalDl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, true);
 
     quantization_t *momentumQ = quantizationInitFloat();
     /* lr 0.1 / momentum 0.5: the separable fixture drives the loss ~30x below

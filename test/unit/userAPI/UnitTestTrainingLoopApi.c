@@ -324,7 +324,7 @@ void testEvaluationEpoch_ReturnsAverageLossAcrossBatches() {
     layer_t *model[] = {linear};
 
     dataLoader_t *dl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     float totalAvg = evaluationEpoch(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, 0);
 
@@ -368,7 +368,7 @@ void testEvaluationEpoch_MinibatchMatchesMicrobatchAverage() {
      * Per-sample losses: 8.5, 8.5, 2.5, 2.5
      * flat aggregator: totalLoss=22, totalSamples=4, mean=22/4=5.5 */
     dataLoader_t *dl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 2, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 2, NULL, NULL, false, true);
 
     float totalAvg = evaluationEpoch(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, 0);
 
@@ -562,7 +562,7 @@ void testTrainingEpochDefault_DoesOptimizerStepPerBatch() {
     /* Use epoch dataset (batchSize=1 → 4 batches) */
     initEpochDataset();
     dataLoader_t *dl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     float epochLoss = trainingEpochDefault(
         model, sizeModel, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, dl,
@@ -627,7 +627,7 @@ void testTrainingEpochDefault_MinibatchStepsOncePerMinibatch() {
 
     initEpochDataset();
     dataLoader_t *dl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 2, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 2, NULL, NULL, false, true);
 
     float epochLoss = trainingEpochDefault(
         model, sizeModel, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, dl,
@@ -679,9 +679,9 @@ void testTrainingRun_ReturnsResult() {
 
     initEpochDataset();
     dataLoader_t *trainDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
     dataLoader_t *evalDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     trainingRunResult_t result =
         trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
@@ -745,9 +745,9 @@ void testTrainingRun_CallsCallbackEachEpochWithStats() {
 
     initEpochDataset();
     dataLoader_t *trainDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
     dataLoader_t *evalDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     size_t numberOfEpochs = 3;
     trainingRunResult_t result =
@@ -858,8 +858,8 @@ void testEvaluationEpochWithMetrics_SymOutputWire() {
     layer_t *linear = buildBorrowedLinearLayer(w, b, symQ);
     layer_t *model[] = {linear};
 
-    dataLoader_t *dl = dataLoaderInit(getSymMetricsSample, getSymMetricsDatasetSize, 1, NULL, NULL,
-                                      false, 0, true);
+    dataLoader_t *dl =
+        dataLoaderInit(getSymMetricsSample, getSymMetricsDatasetSize, 1, NULL, NULL, false, true);
 
     epochStats_t stats =
         evaluationEpochWithMetrics(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, 0);
@@ -893,7 +893,7 @@ void testEvaluationEpochWithMetrics_AllCorrect() {
     layer_t *model[] = {linear};
 
     dataLoader_t *dl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     /* Identity model: all 4 samples predict correctly (same as testEvaluationEpochAccuracy) */
     epochStats_t stats =
@@ -1010,7 +1010,7 @@ void testTrainingEpochDefault_MeanScalesGradByOneOverNF() {
 
     initSingleSampleDataset();
     dataLoader_t *dl =
-        dataLoaderInit(getSingleSample, getSingleSampleDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getSingleSample, getSingleSampleDatasetSize, 1, NULL, NULL, false, true);
 
     /* defaultLossConfig: backwardReduction = REDUCTION_MEAN. */
     lossConfig_t cfg = defaultLossConfig(MSE);
@@ -1110,7 +1110,7 @@ void testEvaluationEpochWithMetrics_PartiallyCorrect() {
     layer_t *model[] = {linear};
 
     dataLoader_t *dl =
-        dataLoaderInit(getPartialSample, getPartialDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getPartialSample, getPartialDatasetSize, 1, NULL, NULL, false, true);
 
     epochStats_t stats =
         evaluationEpochWithMetrics(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, 0);
@@ -1218,7 +1218,7 @@ void testEvaluationEpochWithMetrics_HandlesZeroPredictionClass() {
     layer_t *model[] = {linear};
 
     dataLoader_t *dl =
-        dataLoaderInit(getZeroPredSample, getZeroPredDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getZeroPredSample, getZeroPredDatasetSize, 1, NULL, NULL, false, true);
 
     epochStats_t stats =
         evaluationEpochWithMetrics(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, 0);
@@ -1273,7 +1273,7 @@ void testEvaluationEpochWithReport_ReturnsConfusionMatrix() {
     layer_t *model[] = {linear};
 
     dataLoader_t *dl =
-        dataLoaderInit(getPartialSample, getPartialDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getPartialSample, getPartialDatasetSize, 1, NULL, NULL, false, true);
 
     /* Pre-fill with non-zero to verify WithReport zeroes the caller's buffer before accumulating */
     size_t cm[2 * 2] = {99, 99, 99, 99};
@@ -1376,7 +1376,7 @@ void testTrainingEpochDefault_SumBackwardSkipsOptimizerScaling() {
 
     initEpochDataset();
     dataLoader_t *dl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     /* SUM backwardReduction skips scaleOptimizerGradients. */
     lossConfig_t cfg = defaultLossConfig(MSE);
@@ -1435,7 +1435,7 @@ void testTrainingEpochDefault_MeanForwardSumBackward_MixedCombination() {
 
     initEpochDataset();
     dataLoader_t *dl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     lossConfig_t cfg = defaultLossConfig(MSE);
     cfg.backwardReduction = REDUCTION_SUM; /* SUM gradients, no optimizer scaling */
@@ -1491,7 +1491,7 @@ void testEvaluationEpoch_FlatAggregator_DivisionByTotalSamples() {
      * Flat aggregator: totalLoss = 8.5+8.5+2.5+2.5 = 22; totalSamples = 4;
      * mean = 22/4 = 5.5. */
     dataLoader_t *dl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 2, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 2, NULL, NULL, false, true);
 
     /* MEAN: divides by totalSamples. */
     float meanLoss = evaluationEpoch(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, 0);
@@ -1523,7 +1523,7 @@ void testEvaluationEpoch_SumPath_ReturnsRawTotal() {
     layer_t *model[] = {linear};
 
     dataLoader_t *dl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     /* SUM forwardReduction: returns raw totalLoss = sum of per-sample
      * SUM losses. Per-sample SUM: 17, 17, 5, 5 (= per-sample MEAN * F=2). */
@@ -1566,9 +1566,9 @@ void testTrainingRun_HardcodesForwardReductionMean() {
 
     initEpochDataset();
     dataLoader_t *trainDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
     dataLoader_t *evalDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     /* trainingRun hardcodes forwardReduction = MEAN for train/eval comparability.
      * This test uses defaultLossConfig (backwardReduction = MEAN) to act as a
@@ -1630,9 +1630,9 @@ void testTrainingRunStepsSchedulerOncePerEpoch(void) {
 
     initEpochDataset();
     dataLoader_t *trainDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
     dataLoader_t *evalDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     lrScheduler_t sched;
     stepLrInit(&sched, sgd, 1, 0.5f); /* halve every epoch */
@@ -1673,9 +1673,9 @@ void testTrainingRunNullSchedulerKeepsLrConstant(void) {
 
     initEpochDataset();
     dataLoader_t *trainDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
     dataLoader_t *evalDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     float lrBefore = optimizerFunctions[SGD_M].getLr(sgd);
     trainingRunResult_t result =
@@ -1713,9 +1713,9 @@ void testTrainingRunRejectsSchedulerWiredToDifferentOptimizer(void) {
 
     initEpochDataset();
     dataLoader_t *trainDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
     dataLoader_t *evalDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     /* A second, unrelated optimizer the scheduler is (wrongly) wired to. */
     sgd_t otherSgd;
@@ -1765,9 +1765,9 @@ void testTrainingRunCallbackObservesTheEpochsOwnLr(void) {
 
     initEpochDataset();
     dataLoader_t *trainDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
     dataLoader_t *evalDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     g_lrCaptureCount = 0;
     g_capturedOptim = sgd;
@@ -1835,9 +1835,9 @@ void testTrainingRunZeroOptionsBehavesLikeNull(void) {
 
     initEpochDataset();
     dataLoader_t *trainDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
     dataLoader_t *evalDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     trainingRunOptions_t zero = {0};
     trainingRunResult_t result =
@@ -1884,9 +1884,9 @@ void testTrainingRunStepsBsSchedulerOncePerEpochAndCallbackSeesTheEpochsBatch(vo
 
     initEpochDataset();
     dataLoader_t *trainDl =
-        dataLoaderInit(getEpochSample8, getEpochDatasetSize8, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample8, getEpochDatasetSize8, 1, NULL, NULL, false, true);
     dataLoader_t *evalDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     g_infoCaptureCount = 0;
     bsScheduler_t bsSched;
@@ -1956,9 +1956,9 @@ void testTrainingRunCallbackObservesTheEpochsOwnLrAndBatchWithBothSchedulers(voi
 
     initEpochDataset();
     dataLoader_t *trainDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
     dataLoader_t *evalDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     g_infoCaptureCount = 0;
     lrScheduler_t lrSched;
@@ -2028,9 +2028,9 @@ void testTrainingRunCompensatingBsSchedulerWritesTheLrEachEpoch(void) {
 
     initEpochDataset();
     dataLoader_t *trainDl =
-        dataLoaderInit(getEpochSample8, getEpochDatasetSize8, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample8, getEpochDatasetSize8, 1, NULL, NULL, false, true);
     dataLoader_t *evalDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     g_infoCaptureCount = 0;
     bsScheduler_t bsSched;
@@ -2089,7 +2089,7 @@ void testTrainingEpochDefaultRejectsBatchLargerThanDataset(void) {
 
     initEpochDataset();
     dataLoader_t *trainDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 8, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 8, NULL, NULL, false, true);
 
     ASSERT_EXITS_WITH_FAILURE(trainingEpochDefault(
         model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, trainDl, sgd,
@@ -2124,9 +2124,9 @@ void testTrainingRunRejectsBsSchedulerWiredToAnotherLoader(void) {
 
     initEpochDataset();
     dataLoader_t *trainDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
     dataLoader_t *evalDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     /* Wired to the EVAL loader — the eval loader must never be resized. */
     bsScheduler_t bsSched;
@@ -2165,9 +2165,9 @@ void testTrainingRunRejectsBsCompensationWiredToAnotherOptimizer(void) {
 
     initEpochDataset();
     dataLoader_t *trainDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
     dataLoader_t *evalDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     /* A second, unrelated optimizer the compensation is (wrongly) wired to. */
     sgd_t otherSgd;
@@ -2212,9 +2212,9 @@ void testTrainingRunRejectsLrSchedulerNextToCompensatingBsScheduler(void) {
 
     initEpochDataset();
     dataLoader_t *trainDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
     dataLoader_t *evalDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     /* Both correctly wired to `sgd` — and exactly that is the conflict: two
      * writers of the same LR every epoch, last writer wins silently. */
@@ -2275,10 +2275,9 @@ static void buildShuffleRunFixture(shuffleRunFixture_t *f, bool reshufflePerEpoc
     f->sgd = sgdMCreateOptim(0.01f, 0.f, 0.f, f->model, 1, f->momentumQ,
                              (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     initEpochDataset();
-    f->trainDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, true, 123, true);
+    f->trainDl = dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, true, true);
     f->evalDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, shuffleEval, 456, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, shuffleEval, true);
     dataLoaderSetReshufflePerEpoch(f->trainDl, reshufflePerEpoch);
 }
 
@@ -2468,9 +2467,9 @@ void testTrainingRun_DefaultRunsAllEpochsThroughNonFiniteLoss(void) {
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     initEpochDataset();
     dataLoader_t *trainDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
     dataLoader_t *evalDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     trainingRunResult_t result =
         trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
@@ -2509,9 +2508,9 @@ void testTrainingRun_StopsOnNonFiniteLossWhenRequested(void) {
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     initEpochDataset();
     dataLoader_t *trainDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
     dataLoader_t *evalDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
     cbCallCount = 0;
 
     trainingRunResult_t result = trainingRun(
@@ -2559,9 +2558,9 @@ void testTrainingRun_StopOnNonFiniteLoss_LastEpochStillCountsAsCompleted(void) {
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     initEpochDataset();
     dataLoader_t *trainDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
     dataLoader_t *evalDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     trainingRunResult_t result =
         trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
@@ -2605,9 +2604,9 @@ void testTrainingRun_StopOnNonFiniteLoss_DoesNotStepSchedulersOnTheStoppingEpoch
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     initEpochDataset();
     dataLoader_t *trainDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
     dataLoader_t *evalDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     lrScheduler_t sched;
     stepLrInit(&sched, sgd, 1, 0.5f); /* halve every epoch */
@@ -2707,8 +2706,8 @@ void testEvaluationEpochWithMetrics_BfpOutputWireDequantCompares() {
     bfpMetricsItem = buildFloatTensor1D(2, (float[]){1.f, 1.f});
     bfpMetricsLabel = buildFloatTensor1D(2, (float[]){0.f, 1.f});
 
-    dataLoader_t *dl = dataLoaderInit(getBfpMetricsSample, getBfpMetricsDatasetSize, 1, NULL, NULL,
-                                      false, 0, true);
+    dataLoader_t *dl =
+        dataLoaderInit(getBfpMetricsSample, getBfpMetricsDatasetSize, 1, NULL, NULL, false, true);
 
     epochStats_t stats =
         evaluationEpochWithMetrics(NULL, 0, MSE, dl, bfpOutputWireInference, REDUCTION_MEAN, 0);
@@ -2904,7 +2903,7 @@ void testEvaluationEpochWithMetricsHandsInferenceBatchAxisViews(void) {
     probeDatasetItem = buildProbeItem();
     probeDatasetLabel = buildProbeLabel();
     dataLoader_t *dl =
-        dataLoaderInit(getProbeSample, getProbeDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getProbeSample, getProbeDatasetSize, 1, NULL, NULL, false, true);
     g_probe = (shapeProbe_t){0};
 
     epochStats_t stats =
@@ -2947,7 +2946,7 @@ void testTrainingEpochDefaultMeanScaleSeesLabelBatchAxis(void) {
         sgdMCreateOptim(1.0f, 0.f, 0.f, model, 1, momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     dataLoader_t *dl =
-        dataLoaderInit(getProbeSample, getProbeDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getProbeSample, getProbeDatasetSize, 1, NULL, NULL, false, true);
     g_probe = (shapeProbe_t){0};
     g_probeGrad = wGrad;
 
@@ -2999,9 +2998,9 @@ static remRun_t runTwoEpochs(bool withScheduler, bool deinitBeforeTheRun) {
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     initEpochDataset();
     dataLoader_t *trainDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
     dataLoader_t *evalDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
     lossConfig_t cfg = defaultLossConfig(MSE);
 
     remRun_t run = {0};
@@ -3109,10 +3108,10 @@ static remRun_t runMicroBatched(size_t m, size_t mEval, size_t evalCount,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     initEpochDataset();
     g_evalCount = evalCount;
-    dataLoader_t *trainDl = dataLoaderInit(getEpochSample, getEpochDatasetSize, (uint16_t)m, NULL,
-                                           NULL, false, 0, true);
+    dataLoader_t *trainDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, (uint16_t)m, NULL, NULL, false, true);
     dataLoader_t *evalDl =
-        dataLoaderInit(getEpochSample, getEvalCountDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getEpochSample, getEvalCountDatasetSize, 1, NULL, NULL, false, true);
     if (g_evalGetBatchOverride != NULL) {
         g_baseGetBatch = evalDl->getBatch;
         evalDl->getBatch = g_evalGetBatchOverride;
@@ -3773,9 +3772,9 @@ static void buildKeyedFixture(keyedFixture_t *f, uint16_t trainBatch, uint16_t e
     initEpochDataset();
     g_evalCount = evalCount;
     f->trainDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, trainBatch, NULL, NULL, false, 0, true);
-    f->evalDl = dataLoaderInit(getEpochSample, getEvalCountDatasetSize, evalBatch, NULL, NULL,
-                               false, 0, true);
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, trainBatch, NULL, NULL, false, true);
+    f->evalDl =
+        dataLoaderInit(getEpochSample, getEvalCountDatasetSize, evalBatch, NULL, NULL, false, true);
     g_gradKeyCount = 0;
     g_evalKeyCount = 0;
 }
@@ -3972,8 +3971,8 @@ static void buildSrEvalFixture(srEvalFixture_t *f) {
     f->sgd = sgdMCreateOptim(0.f, 0.f, 0.f, f->model, 2, f->momentumQ,
                              (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     initEpochDataset();
-    f->trainDl = dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
-    f->evalDl = dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
+    f->trainDl = dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
+    f->evalDl = dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 }
 
 static void freeSrEvalFixture(srEvalFixture_t *f) {

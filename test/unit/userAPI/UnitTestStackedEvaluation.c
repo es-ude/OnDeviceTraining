@@ -193,7 +193,7 @@ static void reportWithNumClasses(size_t numClasses, size_t m) {
     initData();
     layer_t *model[MODEL_SIZE];
     buildModel(model);
-    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, true);
     size_t cm[(CLS + 1) * (CLS + 1)];
     (void)evaluationEpochWithReport(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, cm, numClasses,
                                     REDUCTION_MEAN, m);
@@ -213,7 +213,7 @@ static classificationReport_t runReport(size_t m, uint16_t batchSize, size_t *cm
     layer_t *model[MODEL_SIZE];
     buildModel(model);
     dataLoader_t *dl =
-        dataLoaderInit(getSample, getDatasetSize, batchSize, NULL, NULL, false, 0, true);
+        dataLoaderInit(getSample, getDatasetSize, batchSize, NULL, NULL, false, true);
     classificationReport_t r = evaluationEpochWithReport(
         model, MODEL_SIZE, MSE, dl, inferenceWithLoss, cm, CLS, REDUCTION_MEAN, m);
     freeDataLoader(dl);
@@ -224,7 +224,7 @@ static classificationReport_t runReport(size_t m, uint16_t batchSize, size_t *cm
 static float runPlainLoss(size_t m, reduction_t reduction) {
     layer_t *model[MODEL_SIZE];
     buildModel(model);
-    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, true);
     float loss = evaluationEpoch(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, reduction, m);
     freeDataLoader(dl);
     freeModel(model);
@@ -307,7 +307,7 @@ static batch_t *countingGetBatch(dataLoader_t *dl, size_t index) {
 static size_t countGetBatch(entryPoint_t via, size_t m) {
     layer_t *model[MODEL_SIZE];
     buildModel(model);
-    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, true);
     g_realGetBatch = dl->getBatch;
     dl->getBatch = countingGetBatch;
     g_getBatchCalls = 0;
@@ -366,7 +366,7 @@ static batch_t *oneExtraSampleGetBatch(dataLoader_t *dl, size_t index) {
 static float runGrownLoss(size_t m, reduction_t reduction) {
     layer_t *model[MODEL_SIZE];
     buildModel(model);
-    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, true);
     g_realGetBatch = dl->getBatch;
     dl->getBatch = oneExtraSampleGetBatch;
     float loss = evaluationEpoch(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, reduction, m);
@@ -392,7 +392,7 @@ void testStackedMeanDividesByStreamedCount(void) {
 static void metricsWith(inferenceWithLossFn_t fn, size_t m) {
     layer_t *model[MODEL_SIZE];
     buildModel(model);
-    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, true);
     (void)evaluationEpochWithMetrics(model, MODEL_SIZE, MSE, dl, fn, REDUCTION_MEAN, m);
 }
 
@@ -480,7 +480,7 @@ static batch_t *emptyGetBatch(dataLoader_t *dl, size_t index) {
 static void metricsOverEmptyStream(size_t m) {
     layer_t *model[MODEL_SIZE];
     buildModel(model);
-    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, true);
     dl->getBatch = emptyGetBatch;
     (void)evaluationEpoch(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, m);
 }
@@ -495,7 +495,7 @@ void testEmptyStreamFailsFast(void) {
 static void metricsWithEmptyFirstBatch(void) {
     layer_t *model[MODEL_SIZE];
     buildModel(model);
-    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, true);
     dl->getBatch = emptyGetBatch;
     (void)evaluationEpochWithMetrics(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, REDUCTION_MEAN,
                                      1);
@@ -563,7 +563,7 @@ static void metricsWithSymForward(size_t m) {
     layer_t *model[MODEL_SIZE];
     buildModel(model);
     model[1]->config->relu->forwardMath.type = ARITH_SYM_INT32; /* child only */
-    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, true);
     g_realGetBatch = dl->getBatch;
     dl->getBatch = getBatchMustNotRunAfterGate;
     (void)evaluationEpochWithMetrics(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, REDUCTION_MEAN,
@@ -585,7 +585,7 @@ static void reportWithSymPropLoss(size_t m, size_t *cm, epochStats_t *out) {
     buildModel(model);
     quantization_t *saved = model[0]->config->linear->propLossQ;
     model[0]->config->linear->propLossQ = symQ;
-    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, true);
     *out = evaluationEpochWithReport(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, cm, CLS,
                                      REDUCTION_MEAN, m)
                .stats;
@@ -632,7 +632,7 @@ static void convReport(size_t m, size_t *cm, epochStats_t *out) {
     fillPattern(model[0]->config->conv1d->bias->param, 0.2f);
     fillPattern(model[3]->config->linear->weights->param, 1.1f);
     fillPattern(model[3]->config->linear->bias->param, 2.3f);
-    dataLoader_t *dl = dataLoaderInit(getConvSample, getDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *dl = dataLoaderInit(getConvSample, getDatasetSize, 1, NULL, NULL, false, true);
     *out =
         evaluationEpochWithReport(model, 4, MSE, dl, inferenceWithLoss, cm, CLS, REDUCTION_MEAN, m)
             .stats;

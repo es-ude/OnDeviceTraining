@@ -478,7 +478,7 @@ int main(void) {
 #endif
 
     dataLoader_t *testLoader = dataLoaderInit(getTestSample, getTestSize, 1, NULL, NULL,
-                                              /*shuffle*/ false, /*shuffleSeed*/ 0,
+                                              /*shuffle*/ false,
                                               /*dropLast*/ true);
 
     layerQuant_t lq;
@@ -534,10 +534,10 @@ int main(void) {
         }
         dataLoader_t *trainLoader =
             dataLoaderInit(getTrainSample, getTrainSize, (uint16_t)g_batchSize, NULL, NULL,
-                           /*shuffle*/ true, /*shuffleSeed*/ g_shuffleSeed, /*dropLast*/ true);
+                           /*shuffle*/ true, /*dropLast*/ true);
         dataLoaderSetReshufflePerEpoch(trainLoader, g_reshuffle != 0);
         dataLoader_t *valLoader = dataLoaderInit(getValSample, getValSize, 1, NULL, NULL,
-                                                 /*shuffle*/ false, /*shuffleSeed*/ 0,
+                                                 /*shuffle*/ false,
                                                  /*dropLast*/ true);
 
 #ifdef ODT_MEM_PROFILE

@@ -14,23 +14,19 @@
 #include "TensorApi.h"
 #include "unity.h"
 
-/* Compile-time contract (#396): the shuffle seed is exactly as wide as the
- * canonical RNG state (rngSetSeed takes uint32_t). A wider seed type would
- * silently drop its high bits, so seeds differing only there would alias to
- * the same permutation. */
-_Static_assert(_Generic(((dataLoader_t *)0)->shuffleSeed, uint32_t: 1, default: 0),
-               "dataLoader_t.shuffleSeed must be uint32_t (RNG state width)");
+/* Compile-time contract: a loader takes no seed of its own. Its order comes
+ * from the key handed to dataLoaderShuffle, so one root seed drives the
+ * order, the initial values and every other draw of a run. */
 _Static_assert(_Generic((&initDataLoader),
                    void (*)(dataLoader_t *, getSampleFn_t, getDatasetSizeFn_t, getBatchFn_t,
-                            uint16_t, transformFn_t, transformFn_t, bool, uint32_t, size_t *,
-                            bool): 1,
+                            uint16_t, transformFn_t, transformFn_t, bool, size_t *, bool): 1,
                    default: 0),
-               "initDataLoader must take a uint32_t shuffleSeed");
+               "initDataLoader takes no shuffle seed");
 _Static_assert(_Generic((&dataLoaderInit),
                    dataLoader_t *(*)(getSampleFn_t, getDatasetSizeFn_t, uint16_t, transformFn_t,
-                                     transformFn_t, bool, uint32_t, bool): 1,
+                                     transformFn_t, bool, bool): 1,
                    default: 0),
-               "dataLoaderInit must take a uint32_t shuffleSeed");
+               "dataLoaderInit takes no shuffle seed");
 
 #define PROXY_DATASET_SIZE 4
 #define PROXY_FEATURES 2
@@ -144,7 +140,7 @@ void testGetSample() {
     makeProxyDataset();
 
     dataLoader_t *dl =
-        dataLoaderInit(getProxySample, getProxyDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getProxySample, getProxyDatasetSize, 1, NULL, NULL, false, true);
 
     sample_t *s = dl->getSample(0);
 
@@ -178,7 +174,7 @@ void testGetBatch() {
     size_t batchSize = 2;
     size_t numBatches = PROXY_DATASET_SIZE / batchSize;
     dataLoader_t *dl =
-        dataLoaderInit(getProxySample, getProxyDatasetSize, batchSize, NULL, NULL, false, 0, true);
+        dataLoaderInit(getProxySample, getProxyDatasetSize, batchSize, NULL, NULL, false, true);
 
     /* CAPTURE: walk every batch, copy each sample's data side-by-side with
      * the expected dataset values. Frees happen along the way (samples,
@@ -220,7 +216,7 @@ void testGetBatch_ShuffledMinibatchCoversAllSamples() {
     size_t batchSize = 2;
     size_t numBatches = PROXY_DATASET_SIZE / batchSize;
     dataLoader_t *dl =
-        dataLoaderInit(getProxySample, getProxyDatasetSize, batchSize, NULL, NULL, true, 42, true);
+        dataLoaderInit(getProxySample, getProxyDatasetSize, batchSize, NULL, NULL, true, true);
     const rngKey_t key = rngFold(rngKeyFromSeed(42u), RNG_TAG_SHUFFLE, 0u);
     dataLoaderShuffle(dl, &key);
 
@@ -264,7 +260,7 @@ void testGetBatch_NpyBackedDataset() {
     size_t batchSize = 2;
     size_t numBatches = PROXY_DATASET_SIZE / batchSize;
     dataLoader_t *dl = dataLoaderInit(getNpyProxySample, getNpyProxyDatasetSize, batchSize, NULL,
-                                      NULL, false, 0, true);
+                                      NULL, false, true);
 
     float capturedItems[PROXY_DATASET_SIZE][PROXY_FEATURES];
     float capturedLabels[PROXY_DATASET_SIZE][PROXY_FEATURES];
@@ -374,13 +370,13 @@ void testInitDataLoaderRejectsZeroBatchSize(void) {
     size_t indices[RESHUFFLE_DATASET_SIZE];
     ASSERT_EXITS_WITH_FAILURE(initDataLoader(&dl, reshuffleDummyGetSample,
                                              reshuffleDummyGetDatasetSize, reshuffleDummyGetBatch,
-                                             0, NULL, NULL, true, 42, indices, true));
+                                             0, NULL, NULL, true, indices, true));
 }
 
 void testDataLoaderInitRejectsZeroBatchSize(void) {
     /* The API wrapper reaches the same guard. */
     ASSERT_EXITS_WITH_FAILURE(
-        dataLoaderInit(getProxySample, getProxyDatasetSize, 0, NULL, NULL, false, 0, true));
+        dataLoaderInit(getProxySample, getProxyDatasetSize, 0, NULL, NULL, false, true));
 }
 
 /* ---- the keyed shuffle (#4) ---- */
@@ -391,8 +387,7 @@ static size_t singleSampleDatasetSize(void) {
 
 /* A shuffle = true loader over the proxy dataset whose order nobody has set yet. */
 static dataLoader_t *unshuffledProxyLoader(size_t batchSize) {
-    return dataLoaderInit(getProxySample, getProxyDatasetSize, batchSize, NULL, NULL, true, 42,
-                          true);
+    return dataLoaderInit(getProxySample, getProxyDatasetSize, batchSize, NULL, NULL, true, true);
 }
 
 /* Fisher-Yates from the identity order under the key: the order depends on the
@@ -406,7 +401,7 @@ void testDataLoaderShuffleIsFisherYatesFromTheIdentityUnderItsKey(void) {
     size_t indices[RESHUFFLE_DATASET_SIZE];
     dataLoader_t dl;
     initDataLoader(&dl, reshuffleDummyGetSample, reshuffleDummyGetDatasetSize,
-                   reshuffleDummyGetBatch, 1, NULL, NULL, true, 42, indices, true);
+                   reshuffleDummyGetBatch, 1, NULL, NULL, true, indices, true);
     const rngKey_t epoch0 = rngFold(rngKeyFromSeed(42u), RNG_TAG_SHUFFLE, 0u);
     const rngKey_t epoch1 = rngFold(rngKeyFromSeed(42u), RNG_TAG_SHUFFLE, 1u);
 
@@ -459,13 +454,13 @@ void testDataLoaderShuffleWithoutADrawNeedsNoKey(void) {
     size_t indices[RESHUFFLE_DATASET_SIZE];
     dataLoader_t plain;
     initDataLoader(&plain, reshuffleDummyGetSample, reshuffleDummyGetDatasetSize,
-                   reshuffleDummyGetBatch, 1, NULL, NULL, false, 0, indices, true);
+                   reshuffleDummyGetBatch, 1, NULL, NULL, false, indices, true);
     dataLoaderShuffle(&plain, NULL);
 
     size_t single[1];
     dataLoader_t one;
     initDataLoader(&one, reshuffleDummyGetSample, singleSampleDatasetSize, reshuffleDummyGetBatch,
-                   1, NULL, NULL, true, 42, single, true);
+                   1, NULL, NULL, true, single, true);
     dataLoaderShuffle(&one, NULL);
 
     size_t identity[RESHUFFLE_DATASET_SIZE] = {0, 1, 2, 3, 4, 5, 6, 7};
@@ -478,7 +473,7 @@ static void shuffleWithoutAKey(void) {
     size_t indices[RESHUFFLE_DATASET_SIZE];
     dataLoader_t dl;
     initDataLoader(&dl, reshuffleDummyGetSample, reshuffleDummyGetDatasetSize,
-                   reshuffleDummyGetBatch, 1, NULL, NULL, true, 42, indices, true);
+                   reshuffleDummyGetBatch, 1, NULL, NULL, true, indices, true);
     dataLoaderShuffle(&dl, NULL);
 }
 

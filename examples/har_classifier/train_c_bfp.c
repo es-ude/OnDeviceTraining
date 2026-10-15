@@ -942,11 +942,11 @@ int main(void) {
     fflush(stdout);
 
     dataLoader_t *trainLoader = dataLoaderInit(getTrainSample, getTrainSize, BATCH, NULL, NULL,
-                                               /*shuffle*/ true, g_shuffleSeed, /*dropLast*/ true);
+                                               /*shuffle*/ true, /*dropLast*/ true);
     dataLoader_t *valLoader = dataLoaderInit(getValSample, getValSize, 1, NULL, NULL,
-                                             /*shuffle*/ false, 0, /*dropLast*/ true);
+                                             /*shuffle*/ false, /*dropLast*/ true);
     dataLoader_t *testLoader = dataLoaderInit(getTestSample, getTestSize, 1, NULL, NULL,
-                                              /*shuffle*/ false, 0, /*dropLast*/ true);
+                                              /*shuffle*/ false, /*dropLast*/ true);
 
     /* ---- Gate: sane initial loss (~ln(6)=1.7918 for 6-class near-uniform) -- */
     epochStats_t initStats = evaluationEpochWithMetrics(model, MODEL_SIZE, CROSS_ENTROPY, valLoader,

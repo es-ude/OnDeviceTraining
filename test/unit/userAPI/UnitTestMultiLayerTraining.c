@@ -1748,7 +1748,7 @@ void testBfpGradStorageTrainsUnderReductionMean(void) {
     bfpMeanEpochItems[1] = buildFloatTensor1D(3, (float[]){0.5f, -1.0f, 2.0f});
     bfpMeanEpochLabels[1] = buildFloatTensor1D(2, (float[]){-0.1f, 0.4f});
     dataLoader_t *dl = dataLoaderInit(getBfpMeanEpochSample, getBfpMeanEpochDatasetSize, 1, NULL,
-                                      NULL, false, 0, true);
+                                      NULL, false, true);
 
     tensor_t *w0Grad = getGradFromParameter(f.linear0->config->linear->weights);
     trainingRng_t rng;
@@ -1880,7 +1880,7 @@ void testADirectLoopFromTheHelpersTrainsAsTrainingEpochDefault(void) {
     bfpMeanEpochItems[1] = buildFloatTensor1D(3, (float[]){0.5f, -1.0f, 2.0f});
     bfpMeanEpochLabels[1] = buildFloatTensor1D(2, (float[]){-0.1f, 0.4f});
     dataLoader_t *dl = dataLoaderInit(getBfpMeanEpochSample, getBfpMeanEpochDatasetSize, 2, NULL,
-                                      NULL, false, 0, true);
+                                      NULL, false, true);
     uint8_t viaEpoch[LOOP_PARITY_BYTES];
     uint8_t direct[LOOP_PARITY_BYTES];
     uint8_t otherSeed[LOOP_PARITY_BYTES];
@@ -2002,7 +2002,7 @@ void testTrainingEpochMeanScalesUnderTheUpdateKey(void) {
     bfpScaleItems[2] = buildFloatTensor1D(3, (float[]){-1.5f, 0.5f, 1.0f});
     bfpScaleLabels[2] = buildFloatTensor1D(2, (float[]){0.3f, 0.1f});
     dataLoader_t *dl = dataLoaderInit(getBfpScaleSample, getBfpScaleDatasetSize, SCALE_SAMPLES,
-                                      NULL, NULL, false, 0, true);
+                                      NULL, NULL, false, true);
     uint8_t viaEpoch[LOOP_PARITY_BYTES];
     uint8_t direct[LOOP_PARITY_BYTES];
     uint8_t otherKey[LOOP_PARITY_BYTES];
@@ -2137,7 +2137,7 @@ void testBfpConvGradStorageTrainsUnderDefaultEpoch(void) {
                                               (float[]){0.5f, -1.0f, 2.0f, -0.25f});
     bfpConvEpochLabels[1] = buildFloatTensor1D(BFP_CONV_NUM_CLASSES, (float[]){-0.1f, 0.4f});
     dataLoader_t *dl = dataLoaderInit(getBfpConvEpochSample, getBfpConvEpochDatasetSize, 1, NULL,
-                                      NULL, false, 0, true);
+                                      NULL, false, true);
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =

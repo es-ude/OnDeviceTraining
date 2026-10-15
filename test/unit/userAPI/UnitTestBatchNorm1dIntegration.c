@@ -491,8 +491,7 @@ static size_t pfDatasetSize(void) {
 static void runPreflightOnly(layer_t **model, size_t n, size_t evalMicroBatchSize) {
     dataLoader_t trainDl = {
         .getDatasetSize = twoSamples, .batchSize = 2, .getBatch = trainGetBatchMustNotRun};
-    dataLoader_t *evalDl =
-        dataLoaderInit(pfGetSample, pfDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *evalDl = dataLoaderInit(pfGetSample, pfDatasetSize, 1, NULL, NULL, false, true);
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
         sgdMCreateOptim(0.01f, 0.f, 0.f, model, n, momentumQ,
@@ -599,10 +598,8 @@ void testTrainingRunAcceptsTrackedRank2BatchNorm(void) {
             &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey1},
             &g_lq)};
 
-    dataLoader_t *trainDl =
-        dataLoaderInit(pfGetSample, pfDatasetSize, 2, NULL, NULL, false, 0, true);
-    dataLoader_t *evalDl =
-        dataLoaderInit(pfGetSample, pfDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *trainDl = dataLoaderInit(pfGetSample, pfDatasetSize, 2, NULL, NULL, false, true);
+    dataLoader_t *evalDl = dataLoaderInit(pfGetSample, pfDatasetSize, 1, NULL, NULL, false, true);
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
         sgdMCreateOptim(0.01f, 0.f, 0.f, model, 2, momentumQ,
@@ -640,10 +637,8 @@ static size_t acceptUntrackedRank3(size_t evalMicroBatchSize) {
             &(linearInit_t){.inFeatures = 6, .outFeatures = 2, .weightInit.key = &initKey2},
             &g_lq)};
 
-    dataLoader_t *trainDl =
-        dataLoaderInit(pfGetSample, pfDatasetSize, 2, NULL, NULL, false, 0, true);
-    dataLoader_t *evalDl =
-        dataLoaderInit(pfGetSample, pfDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *trainDl = dataLoaderInit(pfGetSample, pfDatasetSize, 2, NULL, NULL, false, true);
+    dataLoader_t *evalDl = dataLoaderInit(pfGetSample, pfDatasetSize, 1, NULL, NULL, false, true);
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
         sgdMCreateOptim(0.01f, 0.f, 0.f, model, 3, momentumQ,
@@ -750,8 +745,7 @@ static void runSymForwardPreflight(void) {
     model[0]->config->linear->forwardMath.type = ARITH_SYM_INT32; /* child only */
     dataLoader_t trainDl = {
         .getDatasetSize = twoSamples, .batchSize = 2, .getBatch = trainGetBatchMustNotRun};
-    dataLoader_t *evalDl =
-        dataLoaderInit(pfGetSample, pfDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *evalDl = dataLoaderInit(pfGetSample, pfDatasetSize, 1, NULL, NULL, false, true);
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
         sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
@@ -898,7 +892,7 @@ void testUntrackedRank2BatchNormEvaluatesPerChunk(void) {
             buildFloatTensor((size_t[]){2}, 1, (float[]){(float)(i % 2), (float)((i + 1) % 2)});
     }
     layer_t *model[1] = {bnLayer(2, true /* noAffine */, true, TRAINABLE_DEFAULT)};
-    dataLoader_t *evalDl = dataLoaderInit(e2eGetSample, fourSamples, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *evalDl = dataLoaderInit(e2eGetSample, fourSamples, 1, NULL, NULL, false, true);
     e2eCalls = 0;
     epochStats_t stats =
         evaluationEpochWithMetrics(model, 1, MSE, evalDl, recordingInference, REDUCTION_MEAN, 2);
@@ -942,9 +936,8 @@ void testTrainingRunTrainsAndEvaluatesUntrackedRank2BatchNorm(void) {
         linearLayerInit(
             &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey1},
             &g_lq)};
-    dataLoader_t *trainDl =
-        dataLoaderInit(e2eGetSample, fourSamples, 2, NULL, NULL, false, 0, true);
-    dataLoader_t *evalDl = dataLoaderInit(e2eGetSample, fourSamples, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *trainDl = dataLoaderInit(e2eGetSample, fourSamples, 2, NULL, NULL, false, true);
+    dataLoader_t *evalDl = dataLoaderInit(e2eGetSample, fourSamples, 1, NULL, NULL, false, true);
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
         sgdMCreateOptim(0.01f, 0.f, 0.f, model, 2, momentumQ,
@@ -992,8 +985,7 @@ static void untrackedMetrics(inferenceWithLossFn_t fn, size_t m) {
     pfLabel = buildFloatTensor((size_t[]){2}, 1, (float[]){0.f, 1.f});
     g_pfDatasetSize = 2;
     layer_t *model[1] = {bnLayer(2, true, true, TRAINABLE_DEFAULT)};
-    dataLoader_t *evalDl =
-        dataLoaderInit(pfGetSample, pfDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *evalDl = dataLoaderInit(pfGetSample, pfDatasetSize, 1, NULL, NULL, false, true);
     (void)evaluationEpochWithMetrics(model, 1, MSE, evalDl, fn, REDUCTION_MEAN, m);
 }
 
@@ -1022,8 +1014,7 @@ static void untrackedAfterEmptyFirstBatch(bool viaReport) {
     pfLabel = buildFloatTensor((size_t[]){2}, 1, (float[]){0.f, 1.f});
     g_pfDatasetSize = 2;
     layer_t *model[1] = {bnLayer(2, true, true, TRAINABLE_DEFAULT)};
-    dataLoader_t *evalDl =
-        dataLoaderInit(pfGetSample, pfDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *evalDl = dataLoaderInit(pfGetSample, pfDatasetSize, 1, NULL, NULL, false, true);
     g_realGetBatch = evalDl->getBatch;
     evalDl->getBatch = emptyFirstGetBatch;
     if (viaReport) {

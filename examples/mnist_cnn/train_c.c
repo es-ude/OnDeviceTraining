@@ -297,7 +297,7 @@ int main(void) {
     initDataSets();
 
     dataLoader_t *testLoader = dataLoaderInit(getTestSample, getTestSize, 1, NULL, NULL,
-                                              /*shuffle*/ false, /*shuffleSeed*/ 0,
+                                              /*shuffle*/ false,
                                               /*dropLast*/ true);
 
     layerQuant_t lq;
@@ -341,10 +341,10 @@ int main(void) {
             }
         }
         dataLoader_t *trainLoader = dataLoaderInit(getTrainSample, getTrainSize, BATCH, NULL, NULL,
-                                                   /*shuffle*/ true, /*shuffleSeed*/ SHUFFLE_SEED,
+                                                   /*shuffle*/ true,
                                                    /*dropLast*/ true);
         dataLoader_t *valLoader = dataLoaderInit(getValSample, getValSize, 1, NULL, NULL,
-                                                 /*shuffle*/ false, /*shuffleSeed*/ 0,
+                                                 /*shuffle*/ false,
                                                  /*dropLast*/ true);
 
         optimizer_t *sgd = sgdMCreateOptim(

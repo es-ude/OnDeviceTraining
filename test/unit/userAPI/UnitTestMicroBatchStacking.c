@@ -1439,7 +1439,7 @@ static float runClassifierEpoch(uint16_t batchSize, size_t microBatchSize,
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd = buildSgd(model, momentumQ);
     dataLoader_t *dl = dataLoaderInit(getClassifierSample, getClassifierDatasetSize, batchSize,
-                                      NULL, NULL, false, 0, true);
+                                      NULL, NULL, false, true);
     float loss = trainingEpochDefault(model, CLS_SIZE, defaultLossConfig(CROSS_ENTROPY), dl, sgd,
                                       calculateGradsFn, REDUCTION_MEAN, microBatchSize, NULL);
     snapshotParams(model, CLS_SIZE, params, CLS_PARAMS);
@@ -1469,7 +1469,7 @@ void testTrainingEpochDefaultRejectsBatchNotDivisibleByMicroBatch(void) {
      * which would print the same 6 and 4) and names b and m (numbers plus
      * the keyword "microBatchSize"). */
     dataLoader_t *dl =
-        dataLoaderInit(getTripwireSample, getClassifierDatasetSize, 6, NULL, NULL, false, 0, true);
+        dataLoaderInit(getTripwireSample, getClassifierDatasetSize, 6, NULL, NULL, false, true);
     char message[512];
     int code = -2;
 
@@ -1489,8 +1489,8 @@ void testTrainingEpochDefaultBackstopsAnIndivisibleReplayBatch(void) {
      * message's b is the batch's 5 -- a number check 3, which only sees the
      * loader's 4, can never print. */
     initClassifierData();
-    dataLoader_t *dl = dataLoaderInit(getClassifierSample, getClassifierDatasetSize, 4, NULL, NULL,
-                                      false, 0, true);
+    dataLoader_t *dl =
+        dataLoaderInit(getClassifierSample, getClassifierDatasetSize, 4, NULL, NULL, false, true);
     dl->getBatch = getBatchWithOneExtraSample;
     char message[512];
     int code = -2;
@@ -1584,9 +1584,9 @@ static trainingRunResult_t runClassifier(getSampleFn_t getSample, uint16_t batch
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd = buildSgd(model, momentumQ);
     dataLoader_t *trainDl =
-        dataLoaderInit(getSample, getClassifierDatasetSize, batchSize, NULL, NULL, false, 0, true);
+        dataLoaderInit(getSample, getClassifierDatasetSize, batchSize, NULL, NULL, false, true);
     dataLoader_t *evalDl =
-        dataLoaderInit(getSample, getClassifierDatasetSize, 1, NULL, NULL, false, 0, true);
+        dataLoaderInit(getSample, getClassifierDatasetSize, 1, NULL, NULL, false, true);
     bsScheduler_t bs;
     trainingRunOptions_t options = {0};
     if (baseOptions != NULL) {
@@ -1856,8 +1856,8 @@ void testTrainingEpochDefaultHandsTheCallToItsBatches(void) {
     buildClassifier(model, &lq);
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd = buildSgd(model, momentumQ);
-    dataLoader_t *dl = dataLoaderInit(getClassifierSample, getClassifierDatasetSize, 4, NULL, NULL,
-                                      false, 0, true);
+    dataLoader_t *dl =
+        dataLoaderInit(getClassifierSample, getClassifierDatasetSize, 4, NULL, NULL, false, true);
     rematScheduler_t s;
     initHeapForRows(&s, model, CLS_SIZE, defaultLossConfig(CROSS_ENTROPY), clsItems[0], 1);
     trainingEpochDefault(model, CLS_SIZE, defaultLossConfig(CROSS_ENTROPY), dl, sgd,

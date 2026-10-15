@@ -364,7 +364,7 @@ void testTrainingEpochDefaultStepsThroughOptimizerStep(void) {
         sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 2, momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     dataLoader_t *dl = dataLoaderInit(getEpochSample, getEpochDatasetSize, /*batchSize*/ 2, NULL,
-                                      NULL, /*shuffle*/ false, /*seed*/ 0, /*dropLast*/ true);
+                                      NULL, /*shuffle*/ false, /*dropLast*/ true);
 
     odtHookSet(recordingHook, &g_ctxToken);
     float epochLoss = trainingEpochDefault(model, 2, ceMeanLoss(), dl, optim,
@@ -425,7 +425,7 @@ void testTrainingEpochDefaultFiresOneQuadPerMicroBatchChunk(void) {
         sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 2, momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     dataLoader_t *dl = dataLoaderInit(getEpochSample, getEpochDatasetSize, /*batchSize*/ 4, NULL,
-                                      NULL, /*shuffle*/ false, /*seed*/ 0, /*dropLast*/ true);
+                                      NULL, /*shuffle*/ false, /*dropLast*/ true);
 
     odtHookSet(recordingHook, &g_ctxToken);
     float epochLoss = trainingEpochDefault(model, 2, ceMeanLoss(), dl, optim,

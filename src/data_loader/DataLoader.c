@@ -10,7 +10,7 @@
 void initDataLoader(dataLoader_t *dataLoader, getSampleFn_t getSample,
                     getDatasetSizeFn_t getDatasetSize, getBatchFn_t getBatch, uint16_t batchSize,
                     transformFn_t transform, transformFn_t targetTransform, bool shuffle,
-                    uint32_t shuffleSeed, size_t *indices, bool dropLast) {
+                    size_t *indices, bool dropLast) {
 
     if (dropLast == false) {
         PRINT_ERROR("dropLast == false is not supported!");
@@ -33,7 +33,6 @@ void initDataLoader(dataLoader_t *dataLoader, getSampleFn_t getSample,
     dataLoader->targetTransform = targetTransform;
 
     dataLoader->shuffle = shuffle;
-    dataLoader->shuffleSeed = shuffleSeed;
     dataLoader->indices = indices;
 
     dataLoader->reshufflePerEpoch = false;

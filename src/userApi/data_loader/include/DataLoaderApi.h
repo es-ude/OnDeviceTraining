@@ -14,14 +14,12 @@
  * \param targetTransform: Pointer to transform function to be used for each getBatch()
  * \param shuffle: Shuffle or not; a shuffle = true loader serves no batch until
  *                 dataLoaderShuffle has set its order
- * \param shuffleSeed: Unused; the order comes from dataLoaderShuffle's key
  * \param dropLast: If last batch can't be filled, drop or not
  * \return Pointer to initialized data loader
  */
 dataLoader_t *dataLoaderInit(getSampleFn_t getSample, getDatasetSizeFn_t getDatasetSize,
                              uint16_t batchSize, transformFn_t transform,
-                             transformFn_t targetTransform, bool shuffle, uint32_t shuffleSeed,
-                             bool dropLast);
+                             transformFn_t targetTransform, bool shuffle, bool dropLast);
 
 /*!
  * Free sample_t pointer.

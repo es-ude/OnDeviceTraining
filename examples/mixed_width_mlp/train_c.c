@@ -396,7 +396,7 @@ int main(void) {
     /* Same 256-sample subset for training and for the before/after loss
      * sanity check (index-based batches, so re-running is safe/repeatable). */
     dataLoader_t *evalLoader = dataLoaderInit(getTrainSample, getTrainSubsetSize, /*batchSize*/ 32,
-                                              NULL, NULL, /*shuffle*/ false, /*shuffleSeed*/ 0,
+                                              NULL, NULL, /*shuffle*/ false,
                                               /*dropLast*/ true);
 
     epochStats_t initialStats = evaluationEpochWithMetrics(

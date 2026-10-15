@@ -147,9 +147,8 @@ static void captureEpoch(epochInfo_t info, epochStats_t evalStats) {
 void testMnistSmoke_FullTrainingPipelineReducesLoss() {
     initDataset();
 
-    dataLoader_t *trainDl =
-        dataLoaderInit(getSample, getDatasetSize, 2, NULL, NULL, false, 0, true);
-    dataLoader_t *evalDl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *trainDl = dataLoaderInit(getSample, getDatasetSize, 2, NULL, NULL, false, true);
+    dataLoader_t *evalDl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, true);
 
     layer_t *model[MODEL_SIZE];
     quantization_t *q = NULL;
@@ -209,9 +208,8 @@ void testMnistSmoke_FullTrainingPipelineReducesLoss() {
 void testMnistSmoke_SnprintfGmtimeRBetweenSetupAndTrainingRun_NoSilentExit() {
     initDataset();
 
-    dataLoader_t *trainDl =
-        dataLoaderInit(getSample, getDatasetSize, 2, NULL, NULL, false, 0, true);
-    dataLoader_t *evalDl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, 0, true);
+    dataLoader_t *trainDl = dataLoaderInit(getSample, getDatasetSize, 2, NULL, NULL, false, true);
+    dataLoader_t *evalDl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, true);
 
     layer_t *model[MODEL_SIZE];
     quantization_t *q = NULL;

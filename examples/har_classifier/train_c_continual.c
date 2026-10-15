@@ -292,7 +292,7 @@ static void trainEpochs(layer_t **model, optimizer_t *sgd, dataLoader_t *loader,
 static float evalDomain(layer_t **model, dataset_t *evalSet) {
     g_curEval = evalSet;
     dataLoader_t *loader = dataLoaderInit(getEvalSample, getEvalSize, 1, NULL, NULL,
-                                          /*shuffle*/ false, /*shuffleSeed*/ 0, /*dropLast*/ true);
+                                          /*shuffle*/ false, /*dropLast*/ true);
     epochStats_t stats = evaluationEpochWithMetrics(model, MODEL_SIZE, CROSS_ENTROPY, loader,
                                                     inferenceWithLoss, REDUCTION_MEAN, 0);
     freeDataLoader(loader);
@@ -433,9 +433,8 @@ int main(void) {
 
     /* Protocol (domains 0-indexed). Domain 0: pretrain. */
     g_curTrain = &trainSets[0];
-    dataLoader_t *loader0 =
-        dataLoaderInit(getTrainSample, getTrainSize, BATCH, NULL, NULL,
-                       /*shuffle*/ true, /*shuffleSeed*/ g_seed, /*dropLast*/ true);
+    dataLoader_t *loader0 = dataLoaderInit(getTrainSample, getTrainSize, BATCH, NULL, NULL,
+                                           /*shuffle*/ true, /*dropLast*/ true);
     /* trainEpochs drives trainingEpochDefault itself, so this example orders
      * each domain's loader: once, under epoch 0's shuffle key, as trainingRun
      * does for a loader that does not reshuffle per epoch. */
@@ -458,9 +457,8 @@ int main(void) {
     /* Domains 1..T-1: fine-tune (optionally replay-wrapped), eval, absorb. */
     for (size_t t = 1; t < T; t++) {
         g_curTrain = &trainSets[t];
-        dataLoader_t *base =
-            dataLoaderInit(getTrainSample, getTrainSize, BATCH, NULL, NULL,
-                           /*shuffle*/ true, /*shuffleSeed*/ g_seed, /*dropLast*/ true);
+        dataLoader_t *base = dataLoaderInit(getTrainSample, getTrainSize, BATCH, NULL, NULL,
+                                            /*shuffle*/ true, /*dropLast*/ true);
         dataLoaderShuffle(base, &shuffleKey);
         dataLoader_t *loader = base;
         if (g_replay) {

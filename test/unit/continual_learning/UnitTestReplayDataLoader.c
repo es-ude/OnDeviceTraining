@@ -113,7 +113,7 @@ static void makeSetSampleable(ppcaReplaySet_t *set) {
 
 void testWrappedBatchAppendsSyntheticSamples(void) {
     buildFakeDataset();
-    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, 0, true);
+    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
     ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
     ppcaReplaySet_t *set = ppcaReplaySetCreate(2, &cfg);
     makeSetSampleable(set);
@@ -156,7 +156,7 @@ void testWrappedBatchAppendsSyntheticSamples(void) {
 
 void testMinCountGatesClasses(void) {
     buildFakeDataset();
-    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, 0, true);
+    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
     ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
     ppcaReplaySet_t *set = ppcaReplaySetCreate(2, &cfg);
     makeSetSampleable(set);
@@ -180,7 +180,7 @@ void testMinCountGatesClasses(void) {
 
 void testNoEligibleClassPassesBaseBatchThrough(void) {
     buildFakeDataset();
-    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, 0, true);
+    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
     ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
     ppcaReplaySet_t *set = ppcaReplaySetCreate(2, &cfg); /* counts all 0 */
     rng32_t stream = {.state = 5};
@@ -203,8 +203,7 @@ void testSyntheticSamplingDeterministic(void) {
     buildFakeDataset();
     for (int run = 0; run < 2; run++) {
         static float firstRun[6];
-        dataLoader_t *base =
-            dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, 0, true);
+        dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
         ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
         ppcaReplaySet_t *set = ppcaReplaySetCreate(2, &cfg);
         makeSetSampleable(set);
@@ -237,7 +236,7 @@ void testMeanModeReplaysClassCentroidsWithoutStream(void) {
      * the running class centroids, exactly; mean replay is deterministic, so
      * no RNG stream is required (NULL is legal in this mode only). */
     buildFakeDataset();
-    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, 0, true);
+    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
     ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
     ppcaReplaySet_t *set = ppcaReplaySetCreate(2, &cfg);
     makeSetSampleable(set);
@@ -277,7 +276,7 @@ void testPpcaModeStillRequiresStream(void) {
     /* The relaxed NULL-stream rule is mode-scoped: default (zero-init) PPCA
      * mode must keep failing fast without a stream. */
     buildFakeDataset();
-    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, 0, true);
+    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
     ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
     ppcaReplaySet_t *set = ppcaReplaySetCreate(2, &cfg);
     replayLoaderConfig_t rcfg = {.set = set, .samplesPerClass = 1, .minCount = 1, .stream = NULL};
@@ -406,7 +405,7 @@ void testExemplarModeReplaysStoredSamplesZeroCopy(void) {
     /* REPLAY_MODE_EXEMPLAR: slots point INTO the buffer (no copy); classes
      * with an empty buffer are skipped; the PPCA set is not required. */
     buildFakeDataset();
-    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, 0, true);
+    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
     exemplarBuffer_t *buf = exemplarBufferCreate(2, 2);
     float e0[6] = {1, 1, 1, 1, 1, 1};
     float e1[6] = {2, 2, 2, 2, 2, 2};
@@ -459,8 +458,7 @@ void testExemplarModePicksDeterministic(void) {
     buildFakeDataset();
     static size_t firstRun[4];
     for (int run = 0; run < 2; run++) {
-        dataLoader_t *base =
-            dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, 0, true);
+        dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
         exemplarBuffer_t *buf = exemplarBufferCreate(2, 3);
         tensor_t *t = buildFloat32TensorND(1, (size_t[]){6}, NULL);
         for (size_t c = 0; c < 2; c++) {
@@ -506,7 +504,7 @@ void testExemplarModePicksDeterministic(void) {
 
 void testExemplarModeRequiresBufferAndStream(void) {
     buildFakeDataset();
-    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, 0, true);
+    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
     exemplarBuffer_t *buf = exemplarBufferCreate(2, 2);
     rng32_t stream = {.state = 1};
     replayLoaderConfig_t noBuf = {
@@ -535,7 +533,7 @@ typedef struct {
 
 static void buildShuffleWrapFixture(shuffleWrapFixture_t *f) {
     buildFakeDataset();
-    f->base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, true, 999, true);
+    f->base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, true, true);
     ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
     f->set = ppcaReplaySetCreate(2, &cfg);
     replayLoaderConfig_t rcfg = {
@@ -660,8 +658,7 @@ static void assertSyntheticShapesAreNatural(size_t itemRank[2], size_t itemDims[
 
 void testPpcaReplayedSamplesKeepTheRealSamplesNaturalShape(void) {
     buildFake2dDataset();
-    dataLoader_t *base =
-        dataLoaderInit(fake2dGetSample, fake2dGetSize, 2, NULL, NULL, false, 0, true);
+    dataLoader_t *base = dataLoaderInit(fake2dGetSample, fake2dGetSize, 2, NULL, NULL, false, true);
     ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
     ppcaReplaySet_t *set = ppcaReplaySetCreate(2, &cfg);
     makeSetSampleable(set);
@@ -690,8 +687,7 @@ void testPpcaReplayedSamplesKeepTheRealSamplesNaturalShape(void) {
 
 void testExemplarReplayedSamplesKeepTheRealSamplesNaturalShape(void) {
     buildFake2dDataset();
-    dataLoader_t *base =
-        dataLoaderInit(fake2dGetSample, fake2dGetSize, 2, NULL, NULL, false, 0, true);
+    dataLoader_t *base = dataLoaderInit(fake2dGetSample, fake2dGetSize, 2, NULL, NULL, false, true);
     exemplarBuffer_t *buf = exemplarBufferCreate(2, 1);
     exemplarBufferAdd(buf, g_items2d[0], 0);
     exemplarBufferAdd(buf, g_items2d[1], 1);

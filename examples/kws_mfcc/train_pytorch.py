@@ -19,8 +19,8 @@ import torch.nn.functional as F
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 from examples._shared.log_schema import RunLog, dump_log  # noqa: E402
-from examples._shared.seeds import SEED, SHUFFLE_SEED  # noqa: E402
-from examples._shared.xorshift32 import shuffle_indices  # noqa: E402
+from examples._shared.keyed_sampler import KeyedShuffleSampler  # noqa: E402
+from examples._shared.seeds import SEED  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 NUM_CLASSES = int(os.environ.get("KWS_CLASSES", "6"))
@@ -47,18 +47,6 @@ class KwsDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         return self.x[idx], self.y[idx]
-
-
-class XorShift32Sampler(torch.utils.data.Sampler[int]):
-    """Single-shot shuffle, no per-epoch reshuffle, matching framework DataLoader.c."""
-    def __init__(self, n: int, seed: int) -> None:
-        self.indices = shuffle_indices(n, seed)
-
-    def __iter__(self):
-        return iter(self.indices)
-
-    def __len__(self) -> int:
-        return len(self.indices)
 
 
 class KwsMfccCnn(nn.Module):
@@ -106,7 +94,7 @@ def main() -> None:
     test_y = np.load(DATA / "test_y.npy")
 
     train_ds = KwsDataset(train_x, train_y)
-    sampler = XorShift32Sampler(len(train_ds), SHUFFLE_SEED)
+    sampler = KeyedShuffleSampler(len(train_ds), SEED, reshuffle=False)
     loader = torch.utils.data.DataLoader(train_ds, batch_size=BATCH, sampler=sampler, drop_last=True)
 
     model = KwsMfccCnn(NUM_CLASSES)
@@ -135,7 +123,7 @@ def main() -> None:
     log: RunLog = {
         "impl": "pytorch", "example": "kws_mfcc",
         "config": {"epochs": EPOCHS, "batch": BATCH, "lr": LR, "momentum": MOMENTUM,
-                   "seed": SEED, "shuffle_seed": SHUFFLE_SEED},
+                   "seed": SEED},
         "epochs": epoch_records,  # type: ignore[typeddict-item]
         "final": {"test_loss": test_loss, "test_acc": test_acc, "test_auc": None},
     }

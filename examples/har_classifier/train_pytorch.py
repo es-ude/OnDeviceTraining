@@ -18,8 +18,8 @@ import torch.nn.functional as F
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 from examples._shared.log_schema import RunLog, dump_log  # noqa: E402
-from examples._shared.seeds import SEED, SHUFFLE_SEED  # noqa: E402
-from examples._shared.xorshift32 import reshuffle_indices, shuffle_indices_with_state  # noqa: E402
+from examples._shared.keyed_sampler import KeyedShuffleSampler  # noqa: E402
+from examples._shared.seeds import SEED  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 DATA = HERE / "data"
@@ -45,10 +45,9 @@ SCHEDULER: str | None = None
 LR_MIN = 0.0
 
 # Per-epoch reshuffle mirror of train_c.c's RESHUFFLE knob (default on). The C
-# side reshuffles the train loader at the start of every epoch > 0 by continuing
-# the global xorshift stream (dataLoaderReshuffle: no reseed); the float32 HAR
-# binary draws nothing else from that stream, so XorShift32Sampler below is
-# bit-exact. RESHUFFLE=0 restores shuffle-once on this side, as on the C side.
+# trainer orders epoch e under its seed's shuffle key of epoch e (epoch 0's key
+# in every epoch with RESHUFFLE=0); KeyedShuffleSampler yields the same orders
+# from the same seed (SEED here, the C trainer's default SEED).
 RESHUFFLE = int(os.environ.get("RESHUFFLE", "1"))
 
 
@@ -62,25 +61,6 @@ class HarDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         return self.x[idx], self.y[idx]
-
-
-class XorShift32Sampler(torch.utils.data.Sampler[int]):
-    """Mirrors the framework DataLoader: one Fisher-Yates shuffle at init from
-    `seed`, then — with `reshuffle` on — a Fisher-Yates of the CURRENT order at
-    the start of every epoch after the first, continuing the same RNG state."""
-    def __init__(self, n: int, seed: int, reshuffle: bool) -> None:
-        self.indices, self.state = shuffle_indices_with_state(n, seed)
-        self.reshuffle = reshuffle
-        self.epochs_started = 0
-
-    def __iter__(self):
-        if self.reshuffle and self.epochs_started > 0:
-            self.state = reshuffle_indices(self.indices, self.state)
-        self.epochs_started += 1
-        return iter(self.indices)
-
-    def __len__(self) -> int:
-        return len(self.indices)
 
 
 class HarModel(nn.Module):
@@ -130,7 +110,7 @@ def main() -> None:
     test_y = np.load(DATA / "test_y.npy")
 
     train_ds = HarDataset(train_x, train_y)
-    sampler = XorShift32Sampler(len(train_ds), SHUFFLE_SEED, reshuffle=RESHUFFLE != 0)
+    sampler = KeyedShuffleSampler(len(train_ds), SEED, reshuffle=RESHUFFLE != 0)
     loader = torch.utils.data.DataLoader(train_ds, batch_size=BATCH, sampler=sampler, drop_last=True)
 
     model = HarModel()
@@ -180,7 +160,7 @@ def main() -> None:
     test_loss, test_acc = evaluate(model, test_x, test_y, BATCH)
     config = {
         "epochs": EPOCHS, "batch": BATCH, "lr": LR,
-        "seed": SEED, "shuffle_seed": SHUFFLE_SEED,
+        "seed": SEED,
         "lr_schedule": SCHEDULER or "none", "lr_min": LR_MIN,
         "optimizer": OPTIMIZER,
         "reshuffle": int(RESHUFFLE != 0),

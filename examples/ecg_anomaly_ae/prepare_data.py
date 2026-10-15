@@ -22,7 +22,7 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
-from examples._shared.seeds import SHUFFLE_SEED  # noqa: E402
+from examples._shared.seeds import SPLIT_SEED  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 DATA_DIR = HERE / "data"
@@ -76,7 +76,7 @@ def main() -> None:
     assert train_x_normal.shape[0] > 0, "train set has no class-1 (normal) samples?"
 
     # Carve VAL_FRACTION of the normal training samples as validation.
-    rng = np.random.default_rng(SHUFFLE_SEED)
+    rng = np.random.default_rng(SPLIT_SEED)
     perm = rng.permutation(train_x_normal.shape[0])
     n_val = max(1, int(round(VAL_FRACTION * train_x_normal.shape[0])))
     val_idx = perm[:n_val]

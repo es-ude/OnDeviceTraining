@@ -31,7 +31,7 @@ SAMPLE_RATE = 16000
 CLIP_LEN = 16000  # 1 s
 KEYWORDS_6 = ["yes", "no", "up", "down"]
 SILENCE_STD = 0.05
-SHUFFLE_SEED = 42  # mirrors examples/_shared/seeds.py; kept local to avoid an import cycle
+SPLIT_SEED = 42  # mirrors examples/_shared/seeds.py; kept local to avoid an import cycle
 _SUBSETS = {"train": "training", "val": "validation", "test": "testing"}
 
 
@@ -101,7 +101,7 @@ def _build_split_6(paths_by_label, split_index: int) -> tuple[np.ndarray, np.nda
         ys.append(y)
     n_per = int(round(np.mean([len(paths_by_label.get(kw, [])) for kw in KEYWORDS_6])))
 
-    rng = np.random.default_rng(SHUFFLE_SEED + split_index)
+    rng = np.random.default_rng(SPLIT_SEED + split_index)
     # silence (label 4): synthetic low-amplitude Gaussian noise
     silence = rng.normal(0.0, SILENCE_STD, size=(n_per, CLIP_LEN)).astype(np.float32)
     silence = np.clip(silence, -1.0, 1.0)

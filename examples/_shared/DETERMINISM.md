@@ -3,8 +3,10 @@
 Both PyTorch and C training programs in `examples/` must seed every
 source of randomness from `examples/_shared/seeds.py` constants:
 
-- `SEED = 42` — used for any deterministic init (`torch.manual_seed`, etc.).
-- `SHUFFLE_SEED = 42` — passed to the data loader's shuffle.
+- `SEED = 42` — used for any deterministic init (`torch.manual_seed`, etc.)
+  and, on both sides, for the training sample order (see "Shuffle ordering").
+- `SPLIT_SEED = 42` — seeds the numpy train/validation split of every
+  `prepare_data.py`; neither trainer draws with it.
 
 ## Init weights
 
@@ -30,7 +32,10 @@ otherwise, and a `shuffle = true` eval loader once per run under its own key.
 `examples/_shared/keyed_rng.py` reproduces every order in Python:
 `keyed_shuffle(n, fold(key_from_seed(SEED), 21, e))` is epoch `e`'s order of
 an `n`-sample train loader (21 is the shuffle tag; `e = 0` in every epoch
-without the per-epoch reshuffle).
+without the per-epoch reshuffle). The PyTorch twins train in these orders:
+`KeyedShuffleSampler(n, SEED, reshuffle)` (`examples/_shared/keyed_sampler.py`)
+yields them from `SEED`, the seed the C trainers hand to `trainingRngInit` by
+default, so both sides see the same samples in the same order.
 
 ## Parity assertion regime
 

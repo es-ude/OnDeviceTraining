@@ -44,7 +44,6 @@
 #define LR 0.01f
 #define MOMENTUM 0.9f
 #define SEED 42
-#define SHUFFLE_SEED 42
 #define NUM_CLASSES 10
 
 #define LEN_INPUT 784
@@ -361,8 +360,8 @@ int main(void) {
                 "  \"impl\": \"c\",\n"
                 "  \"example\": \"mnist_cnn\",\n"
                 "  \"config\": {\"epochs\": %d, \"batch\": %d, \"lr\": %.6f, "
-                "\"momentum\": %.6f, \"seed\": %d, \"shuffle_seed\": %d",
-                EPOCHS, BATCH, (double)LR, (double)MOMENTUM, SEED, SHUFFLE_SEED);
+                "\"momentum\": %.6f, \"seed\": %d",
+                EPOCHS, BATCH, (double)LR, (double)MOMENTUM, SEED);
         rematSelectPrintConfigKeys(g_log_file, &rematSel);
         fprintf(g_log_file, "},\n  \"epochs\": [\n");
         fflush(g_log_file);

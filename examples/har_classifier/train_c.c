@@ -72,7 +72,6 @@ static int g_epochs = 20;
 static float g_lr = 0.01f;
 static float g_momentum = 0.9f;
 static unsigned g_seed = 42;
-static unsigned g_shuffleSeed = 42;
 static int g_batchSize = 64;              /* BATCH_SIZE: the train loader's INITIAL batch */
 static const char *g_lrSchedule = "none"; /* LR_SCHEDULE: none | step | exp */
 static const char *g_bsSchedule = "none"; /* BS_SCHEDULE: none | step | exp */
@@ -385,7 +384,6 @@ int main(void) {
     g_lr = envFloat("LR", g_lr);
     g_momentum = envFloat("MOMENTUM", g_momentum);
     g_seed = (unsigned)envInt("SEED", (int)g_seed);
-    g_shuffleSeed = (unsigned)envInt("SHUFFLE_SEED", (int)g_shuffleSeed);
     g_batchSize = envInt("BATCH_SIZE", g_batchSize);
     g_lrSchedule = envStr("LR_SCHEDULE", g_lrSchedule);
     g_bsSchedule = envStr("BS_SCHEDULE", g_bsSchedule);
@@ -600,14 +598,13 @@ int main(void) {
                 "  \"impl\": \"c\",\n"
                 "  \"example\": \"har_classifier\",\n"
                 "  \"config\": {\"epochs\": %d, \"batch\": %d, \"lr\": %.6f, "
-                "\"momentum\": %.6f, \"seed\": %u, \"shuffle_seed\": %u, "
+                "\"momentum\": %.6f, \"seed\": %u, "
                 "\"lr_schedule\": \"%s\", \"bs_schedule\": \"%s\", \"bs_lr_compensation\": %d, "
                 "\"gamma\": %#.9g, \"step_size\": %d, \"max_batch_size\": %d, "
                 "\"reshuffle\": %d",
-                g_epochs, g_batchSize, (double)g_lr, (double)g_momentum, g_seed, g_shuffleSeed,
-                g_lrSchedule, g_bsSchedule,
-                (options.bsScheduler != NULL && g_bsLrCompensation != 0), (double)g_gamma,
-                g_stepSize, g_maxBatchSize, g_reshuffle != 0);
+                g_epochs, g_batchSize, (double)g_lr, (double)g_momentum, g_seed, g_lrSchedule,
+                g_bsSchedule, (options.bsScheduler != NULL && g_bsLrCompensation != 0),
+                (double)g_gamma, g_stepSize, g_maxBatchSize, g_reshuffle != 0);
         rematSelectPrintConfigKeys(g_log_file, &rematSel);
         fprintf(g_log_file, ", \"toolchain\": \"");
         fputsJsonEscaped(g_log_file, __VERSION__);

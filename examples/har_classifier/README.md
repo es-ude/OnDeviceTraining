@@ -74,7 +74,7 @@ old shuffle-once baseline.
 
 | env | default | effect |
 |---|---|---|
-| `EPOCHS`, `LR`, `MOMENTUM`, `SEED`, `SHUFFLE_SEED`, `LOG_PATH` | 20, 0.01, 0.9, 42, 42, `logs/c.json` | as before |
+| `EPOCHS`, `LR`, `MOMENTUM`, `SEED`, `LOG_PATH` | 20, 0.01, 0.9, 42, `logs/c.json` | as before; `SEED` also drives the sample order |
 | `BATCH_SIZE` | 64 | the train loader's initial batch (`config.batch` in the log) |
 | `LR_SCHEDULE` | `none` | `none` \| `step` \| `exp` — torch StepLR / ExponentialLR (`LrScheduler`, #327): LR × `GAMMA` |
 | `BS_SCHEDULE` | `none` | `none` \| `step` \| `exp` — the batch analogue (`BsScheduler`): batch ÷ `GAMMA`, `clamp(round(·), 1, MAX_BATCH_SIZE)` |
@@ -253,7 +253,7 @@ it, and fine-tunes. Freezing makes the three conv layers optimizer-invisible
 
 Env-overridable like the rest of the file's config: `STAGE1_EPOCHS`,
 `STAGE2_EPOCHS` (default 20 each), plus the usual `LR`/`MOMENTUM`/`SEED`/
-`SHUFFLE_SEED`/`LOG_PATH`.
+`LOG_PATH`.
 
 Three memory metrics tell the freezing story — run the binary and read the
 `FREEZE`-prefixed stdout lines:
@@ -404,7 +404,7 @@ a weight's element count — conv1 at 32/64, like the SYM g32/g64 arms), `BFP_WI
 float|tensor|N` (`float` keeps FLOAT32 wires; N resolves PER WIRE and falls back to
 per-tensor on the 6-element head wires), `BFP_MATH=native|fq`, `BFP_GRADS=0|1`,
 `BFP_STATE=0|1` (needs GRADS=1), `BFP_ROUNDING=sr|det`; plus `LR/MOMENTUM/EPOCHS/SEED/
-SHUFFLE_SEED/LR_SCHEDULE/LR_MIN/LOG_PATH`. `MOMENTUM` must be finite and > 0 — rejected at
+LR_SCHEDULE/LR_MIN/LOG_PATH`. `MOMENTUM` must be finite and > 0 — rejected at
 the env gate (exit 1); behind it the STATE gate expects the optimizer's eight momentum
 buffers to exist (`MOMENTUM=0` would allocate none).
 

@@ -51,6 +51,19 @@ def test_load_validates_required_top_level_keys(tmp_path):
         raise AssertionError("expected KeyError on missing required top-level key")
 
 
+def test_shuffle_seed_is_optional_and_old_logs_still_load(tmp_path):
+    """One root seed drives the sample order, so new logs omit the loader's own seed;
+    logs written before that carry it and must still load."""
+    assert "shuffle_seed" in TrainConfig.__optional_keys__
+    for config in ({"epochs": 1, "batch": 8, "lr": 0.01, "seed": 42},
+                   {"epochs": 1, "batch": 8, "lr": 0.01, "seed": 42, "shuffle_seed": 42}):
+        log = {"impl": "c", "example": "har_classifier", "config": config, "epochs": [],
+               "final": {"test_loss": 0.5, "test_acc": 0.5, "test_auc": None}}
+        path = tmp_path / "log.json"
+        dump_log(path, log)
+        assert load_log(path)["config"] == config
+
+
 def test_scheduler_and_provenance_keys_are_declared_optional():
     """The C HAR harness writes these (batch-size scheduler port, design A4). A key the
     schema does not declare is a silent contract drift, so pin them as NotRequired."""

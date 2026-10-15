@@ -20,7 +20,7 @@ class TrainConfig(TypedDict):
     lr: float
     momentum: NotRequired[float]  # absent for optimizers without momentum (#328)
     seed: int
-    shuffle_seed: int
+    shuffle_seed: NotRequired[int]  # the loader's own seed in older logs; absent = `seed` drives the order too
     lr_schedule: NotRequired[str]  # "none" | "cosine" (#327) | "step" | "exp" (batch-size scheduler port); absent = constant LR
     lr_min: NotRequired[float]
     optimizer: NotRequired[str]  # "sgd" | "adamw" (#328); absent = sgd

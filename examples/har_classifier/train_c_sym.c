@@ -111,7 +111,6 @@ static float g_lr = 0.01f;
 static float g_momentum = 0.9f;
 static int g_epochs = 50;
 static unsigned g_seed = 1;
-static unsigned g_shuffleSeed = 1;
 static int g_symBits = 12;
 static int g_symWires = 0;          /* SYM_WIRES=1 -> full-SYM wires (#206 acceptance) */
 static int g_useCosine = 0;         /* LR_SCHEDULE=cosine */
@@ -667,7 +666,6 @@ int main(void) {
     g_momentum = envFloat("MOMENTUM", g_momentum);
     g_epochs = envInt("EPOCHS", g_epochs);
     g_seed = (unsigned)envInt("SEED", (int)g_seed);
-    g_shuffleSeed = (unsigned)envInt("SHUFFLE_SEED", (int)g_shuffleSeed);
     g_trackMovement = envInt("LOG_CODE_MOVEMENT", 0);
     const char *schedEnv = getenv("LR_SCHEDULE");
     if (schedEnv != NULL && schedEnv[0] != '\0') {
@@ -742,10 +740,10 @@ int main(void) {
     int groupSizeForLog = (g_groupMode == GROUP_MODE_SIZE) ? g_groupSize : 0;
 
     fprintf(stdout,
-            "CONFIG sym_bits=%d lr=%.5f momentum=%.3f epochs=%d seed=%u shuffle_seed=%u "
+            "CONFIG sym_bits=%d lr=%.5f momentum=%.3f epochs=%d seed=%u "
             "group_mode=%s group_size=%d weight_dtype=%s\n",
-            g_symBits, (double)g_lr, (double)g_momentum, g_epochs, g_seed, g_shuffleSeed,
-            groupModeStr, groupSizeForLog, weightDtypeStr);
+            g_symBits, (double)g_lr, (double)g_momentum, g_epochs, g_seed, groupModeStr,
+            groupSizeForLog, weightDtypeStr);
 
 #ifdef ODT_MEM_PROFILE
     /* Reset the heap counter to 0 BEFORE the first allocation so dataset_b is
@@ -892,19 +890,18 @@ int main(void) {
             fprintf(g_log_file,
                     "{\n  \"impl\": \"c-sym-weights\", \"example\": \"har_classifier\",\n"
                     "  \"config\": {\"sym_bits\": %d, \"epochs\": %d, \"batch\": %d, \"lr\": %.6f, "
-                    "\"momentum\": %.6f, \"seed\": %u, \"shuffle_seed\": %u, "
+                    "\"momentum\": %.6f, \"seed\": %u, "
                     "\"lr_schedule\": \"%s\", \"lr_min\": %.6f, "
                     "\"weight_dtype\": \"%s\", \"group_mode\": \"%s\", \"group_size\": %d, "
                     "\"groups_resolved\": {\"conv1\": [%zu, %zu], \"conv2\": [%zu, %zu], "
                     "\"conv3\": [%zu, %zu], \"linear\": [%zu, %zu]}, "
                     "\"group_overhead_b\": %zu%s},\n  \"epochs\": [\n",
                     g_symBits, g_epochs, BATCH, (double)g_lr, (double)g_momentum, g_seed,
-                    g_shuffleSeed, g_useCosine ? "cosine" : "none", (double)g_lrMin, weightDtypeStr,
-                    groupModeStr, groupSizeForLog, groupInfo.conv1.numGroups,
-                    groupInfo.conv1.groupSize, groupInfo.conv2.numGroups, groupInfo.conv2.groupSize,
-                    groupInfo.conv3.numGroups, groupInfo.conv3.groupSize,
-                    groupInfo.linear.numGroups, groupInfo.linear.groupSize, groupInfo.overheadBytes,
-                    odtsRoundtripFrag);
+                    g_useCosine ? "cosine" : "none", (double)g_lrMin, weightDtypeStr, groupModeStr,
+                    groupSizeForLog, groupInfo.conv1.numGroups, groupInfo.conv1.groupSize,
+                    groupInfo.conv2.numGroups, groupInfo.conv2.groupSize, groupInfo.conv3.numGroups,
+                    groupInfo.conv3.groupSize, groupInfo.linear.numGroups,
+                    groupInfo.linear.groupSize, groupInfo.overheadBytes, odtsRoundtripFrag);
         }
     }
 

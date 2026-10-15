@@ -47,7 +47,6 @@
 #define LR 0.005f
 #define MOMENTUM 0.9f
 #define SEED 42
-#define SHUFFLE_SEED 42
 #define NUM_CLASSES_DEFAULT 6
 
 #define IN_CHANNELS 1

@@ -90,7 +90,6 @@ static int g_stage2Epochs = 20;
 static float g_lr = 0.01f;
 static float g_momentum = 0.9f;
 static unsigned g_seed = 42;
-static unsigned g_shuffleSeed = 42;
 
 static float envFloat(const char *name, float dflt) {
     const char *v = getenv(name);
@@ -333,7 +332,6 @@ int main(void) {
     g_lr = envFloat("LR", g_lr);
     g_momentum = envFloat("MOMENTUM", g_momentum);
     g_seed = (unsigned)envInt("SEED", (int)g_seed);
-    g_shuffleSeed = (unsigned)envInt("SHUFFLE_SEED", (int)g_shuffleSeed);
     const char *logPath = getenv("LOG_PATH");
     const char *checkpointPath = "examples/har_classifier/outputs/har_pretrained.odts";
     rematSelection_t rematSel;
@@ -402,9 +400,8 @@ int main(void) {
             "  \"impl\": \"c-finetune\",\n"
             "  \"example\": \"har_classifier\",\n"
             "  \"config\": {\"stage1_epochs\": %d, \"stage2_epochs\": %d, \"batch\": %d, "
-            "\"lr\": %.6f, \"momentum\": %.6f, \"seed\": %u, \"shuffle_seed\": %u",
-            g_stage1Epochs, g_stage2Epochs, BATCH, (double)g_lr, (double)g_momentum, g_seed,
-            g_shuffleSeed);
+            "\"lr\": %.6f, \"momentum\": %.6f, \"seed\": %u",
+            g_stage1Epochs, g_stage2Epochs, BATCH, (double)g_lr, (double)g_momentum, g_seed);
     rematSelectPrintConfigKeys(g_log_file, &rematSel);
     if (rematSel.chosen) {
         /* Stage 1 runs on the training call's default: the scheduler and the

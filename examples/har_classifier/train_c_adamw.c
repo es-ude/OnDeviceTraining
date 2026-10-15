@@ -70,7 +70,6 @@ static int g_epochs = 20;
 static float g_lr =
     0.001f; /* torch.optim.AdamW default; SGD's 0.01 is deliberately not carried over */
 static unsigned g_seed = 42;
-static unsigned g_shuffleSeed = 42;
 
 /* torch.optim.AdamW defaults; doubles on purpose (AdamW numerics contract).
  * Deliberately NOT env-tunable: env floats would round wd through float32
@@ -300,7 +299,6 @@ int main(void) {
     g_epochs = envInt("EPOCHS", g_epochs);
     g_lr = envFloat("LR", g_lr);
     g_seed = (unsigned)envInt("SEED", (int)g_seed);
-    g_shuffleSeed = (unsigned)envInt("SHUFFLE_SEED", (int)g_shuffleSeed);
     const char *logPath = getenv("LOG_PATH");
 
 #ifdef ODT_MEM_PROFILE
@@ -381,10 +379,9 @@ int main(void) {
                 "  \"impl\": \"c-adamw\",\n"
                 "  \"example\": \"har_classifier\",\n"
                 "  \"config\": {\"epochs\": %d, \"batch\": %d, \"lr\": %.6f, "
-                "\"optimizer\": \"adamw\", \"weight_decay\": %.6f, \"seed\": %u, "
-                "\"shuffle_seed\": %u},\n"
+                "\"optimizer\": \"adamw\", \"weight_decay\": %.6f, \"seed\": %u},\n"
                 "  \"epochs\": [\n",
-                g_epochs, BATCH, (double)g_lr, kWeightDecay, g_seed, g_shuffleSeed);
+                g_epochs, BATCH, (double)g_lr, kWeightDecay, g_seed);
         fflush(g_log_file);
 
         clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);

@@ -28,7 +28,7 @@
  *
  * Knobs: BFP_MANTISSA_BITS BFP_EXPONENT_BITS BFP_WEIGHT_BLOCK BFP_WIRE_BLOCK
  * BFP_MATH BFP_GRADS BFP_STATE BFP_ROUNDING (examples/_shared/param_gate.h)
- * + LR MOMENTUM EPOCHS SEED SHUFFLE_SEED LR_SCHEDULE LR_MIN LOG_PATH
+ * + LR MOMENTUM EPOCHS SEED LR_SCHEDULE LR_MIN LOG_PATH
  * LOG_CODE_MOVEMENT (inherited). The SYM-only knobs are ignored with a WARN. */
 
 #include <math.h>
@@ -104,7 +104,6 @@ static float g_lr = 0.01f;
 static float g_momentum = 0.9f;
 static int g_epochs = 50;
 static unsigned g_seed = 1;
-static unsigned g_shuffleSeed = 1;
 static int g_useCosine = 0;         /* LR_SCHEDULE=cosine */
 static float g_lrMin = 0.0f;        /* LR_MIN (cosine floor) */
 static optimizer_t *g_optim = NULL; /* for per-epoch LR logging in epochCallback */
@@ -872,7 +871,6 @@ int main(void) {
     }
     g_epochs = envInt("EPOCHS", g_epochs);
     g_seed = (unsigned)envInt("SEED", (int)g_seed);
-    g_shuffleSeed = (unsigned)envInt("SHUFFLE_SEED", (int)g_shuffleSeed);
     g_trackMovement = envInt("LOG_CODE_MOVEMENT", 0);
     /* run_matrix passes LR_SCHEDULE=none explicitly (every knob in the name);
      * the SYM trainer only knew "cosine", so accept "none" here. */
@@ -891,11 +889,10 @@ int main(void) {
 
     fprintf(stdout,
             "CONFIG mantissa_bits=%u exponent_bits=%u weight_block=%s wire_block=%s bfp_math=%s "
-            "bfp_grads=%d bfp_state=%d bfp_rounding=%s lr=%.5f momentum=%.3f epochs=%d seed=%u "
-            "shuffle_seed=%u\n",
+            "bfp_grads=%d bfp_state=%d bfp_rounding=%s lr=%.5f momentum=%.3f epochs=%d seed=%u\n",
             g_cfg.mantissaBits, g_cfg.exponentBits, g_cfg.weightBlockStr, g_cfg.wireBlockStr,
             mathStr, (int)g_cfg.bfpGrads, (int)g_cfg.bfpState, roundingStr, (double)g_lr,
-            (double)g_momentum, g_epochs, g_seed, g_shuffleSeed);
+            (double)g_momentum, g_epochs, g_seed);
 
 #ifdef ODT_MEM_PROFILE
     /* Reset the heap counter to 0 BEFORE the first allocation so dataset_b is
@@ -1008,14 +1005,14 @@ int main(void) {
             fprintf(g_log_file,
                     "{\n  \"impl\": \"c-bfp\", \"example\": \"har_classifier\",\n"
                     "  \"config\": {\"epochs\": %d, \"batch\": %d, \"lr\": %.6f, "
-                    "\"momentum\": %.6f, \"seed\": %u, \"shuffle_seed\": %u, "
+                    "\"momentum\": %.6f, \"seed\": %u, "
                     "\"lr_schedule\": \"%s\", \"lr_min\": %.6f, "
                     "\"weight_dtype\": \"bfp\", \"mantissa_bits\": %u, \"exponent_bits\": %u, "
                     "\"weight_block\": \"%s\", \"wire_block\": \"%s\", \"bfp_math\": \"%s\", "
                     "\"bfp_grads\": %d, \"bfp_state\": %d, \"bfp_rounding\": \"%s\", "
                     "\"groups_resolved\": {\"conv1\": [%zu, %zu], \"conv2\": [%zu, %zu], "
                     "\"conv3\": [%zu, %zu], \"linear\": [%zu, %zu]}, ",
-                    g_epochs, BATCH, (double)g_lr, (double)g_momentum, g_seed, g_shuffleSeed,
+                    g_epochs, BATCH, (double)g_lr, (double)g_momentum, g_seed,
                     g_useCosine ? "cosine" : "none", (double)g_lrMin, g_cfg.mantissaBits,
                     g_cfg.exponentBits, g_cfg.weightBlockStr, g_cfg.wireBlockStr, mathStr,
                     (int)g_cfg.bfpGrads, (int)g_cfg.bfpState, roundingStr,

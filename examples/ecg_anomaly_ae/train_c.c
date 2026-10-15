@@ -40,7 +40,6 @@
 #define LR 0.005f
 #define MOMENTUM 0.9f
 #define SEED 42
-#define SHUFFLE_SEED 42
 
 #define IN_CHANNELS 1
 #define LEN_INPUT 140
@@ -325,9 +324,9 @@ int main(void) {
                 "  \"impl\": \"c\",\n"
                 "  \"example\": \"ecg_anomaly_ae\",\n"
                 "  \"config\": {\"epochs\": %d, \"batch\": %d, \"lr\": %.6f, "
-                "\"momentum\": %.6f, \"seed\": %d, \"shuffle_seed\": %d},\n"
+                "\"momentum\": %.6f, \"seed\": %d},\n"
                 "  \"epochs\": [\n",
-                EPOCHS, BATCH, (double)LR, (double)MOMENTUM, SEED, SHUFFLE_SEED);
+                EPOCHS, BATCH, (double)LR, (double)MOMENTUM, SEED);
         fflush(g_log_file);
 
         clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);

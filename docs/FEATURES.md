@@ -563,7 +563,11 @@ checkpointing, limitations, literature).
   shift) draw from it: the trainer's `trainingRng_t` hands each training, evaluation and
   update call its key, so a draw is a pure function of (seed, update or epoch, call, layer,
   op) and does not depend on execution order or on other draws; a draw without a key stops
-  with a named error.
+  with a named error. One seed (`trainingRngInit`) now fixes a run's sample order, initial
+  values, replay samples and every other draw, and `trainingRngSerialize`/
+  `trainingRngDeserialize` save that training state as a 24-byte `"ODTK"` record beside
+  the model's ODTS file, so a stopped run resumes between epochs with the keys it would
+  have used (SGD without momentum and no scheduler: their state is not saved, #350).
 - **Observer / trace** — `traceSink_t` callback facility (not a layer) that hands
   fwd/activation-grad/loss-grad/param tensors to a caller-supplied sink; used for
   layer-by-layer C-vs-PyTorch parity debugging (`npyDumpSink`, kws_raw harness).

@@ -227,7 +227,11 @@ target_link_libraries(UnitTestDropoutIntegration PRIVATE
         LossFunction
         InferenceApi
         DataLoader
+        DataLoaderApi
         StorageApi
+        Serialize
+        Deserialize
+        odt_test_layer_builders
 )
 __register_target_as_unit_test(UnitTestDropoutIntegration)
 

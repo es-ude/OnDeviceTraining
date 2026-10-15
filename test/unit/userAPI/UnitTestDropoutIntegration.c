@@ -1,28 +1,35 @@
 #define SOURCE_FILE "UNIT_TEST_DROPOUT_INTEGRATION"
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 #include <math.h>
 
 #include "Bernoulli.h"
+#include "BorrowedLayer.h"
 #include "CalculateGradsSequential.h"
+#include "DataLoaderApi.h"
+#include "Deserialize.h"
 #include "Dropout.h"
 #include "DropoutApi.h"
 #include "InferenceApi.h"
 #include "Layer.h"
 #include "LayerQuant.h"
+#include "Linear.h"
 #include "LinearApi.h"
 #include "LossFunction.h"
 #include "Optimizer.h"
 #include "OptimizerApi.h"
 #include "QuantizationApi.h"
 #include "RNG.h"
+#include "Serialize.h"
 #include "SgdApi.h"
 #include "StateDictApi.h"
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
+#include "TrainingLoopApi.h"
 #include "unity.h"
 
 void setUp(void) {}
@@ -230,6 +237,170 @@ void testMultiLayer_LinearDropoutLinear_BackwardCompletes(void) {
     TEST_ASSERT_EQUAL_UINT(4, outElems);
 }
 
+/* ---- resuming a run at an epoch boundary (#4) ---- */
+
+#define RESUME_SAMPLES 4
+#define RESUME_PARAMS 23 /* Linear(4 -> 3): 12 + 3, Linear(3 -> 2): 6 + 2 */
+
+static tensor_t *g_resumeItems[RESUME_SAMPLES];
+static tensor_t *g_resumeLabels[RESUME_SAMPLES];
+
+static tensor_t *build1DFloat(size_t n, const float *data) {
+    size_t *dims = reserveMemory(sizeof(size_t));
+    dims[0] = n;
+    size_t *order = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
+    tensorFillFromFloatBuffer(t, (float *)data, n);
+    return t;
+}
+
+static void buildResumeDataset(void) {
+    for (size_t i = 0; i < RESUME_SAMPLES; i++) {
+        const float x[4] = {0.5f * (float)i - 1.0f, 1.0f, -0.5f, 0.25f * (float)i};
+        const float y[2] = {(float)(i % 2), (float)(1 - i % 2)};
+        g_resumeItems[i] = build1DFloat(4, x);
+        g_resumeLabels[i] = build1DFloat(2, y);
+    }
+}
+
+static void freeResumeDataset(void) {
+    for (size_t i = 0; i < RESUME_SAMPLES; i++) {
+        freeTensor(g_resumeItems[i]);
+        freeTensor(g_resumeLabels[i]);
+    }
+}
+
+static sample_t *getResumeSample(size_t id) {
+    sample_t *s = reserveMemory(sizeof(sample_t));
+    s->item = g_resumeItems[id];
+    s->label = g_resumeLabels[id];
+    return s;
+}
+
+static size_t resumeDatasetSize(void) {
+    return RESUME_SAMPLES;
+}
+
+/* Linear(4 -> 3) -> Dropout(0.5) -> Linear(3 -> 2) under SGD without momentum,
+ * initialised from the init keys of initSeed; the train loader reshuffles per
+ * epoch. */
+typedef struct {
+    quantization_t *q;
+    layerQuant_t lq;
+    tensor_t *mask;
+    layer_t *model[3];
+    quantization_t *momentumQ;
+    optimizer_t *sgd;
+    dataLoader_t *trainDl;
+    dataLoader_t *evalDl;
+} resumeRun_t;
+
+static void buildResumeRun(resumeRun_t *r, uint64_t initSeed) {
+    r->q = quantizationInitFloat();
+    layerQuantInitUniform(&r->lq, r->q);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(initSeed), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey2 = rngFold(rngKeyFromSeed(initSeed), RNG_TAG_INIT, 2u);
+    r->model[0] = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 4, .outFeatures = 3, .bias = BIAS_TRUE, .weightInit.key = &initKey0},
+        &r->lq);
+    r->mask = buildBoolMask(3);
+    r->model[1] = dropoutLayerInit(0.5f, r->mask, r->q, r->q);
+    r->model[2] = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE, .weightInit.key = &initKey2},
+        &r->lq);
+    r->momentumQ = quantizationInitFloat();
+    r->sgd = sgdMCreateOptim(0.05f, 0.f, 0.f, r->model, 3, r->momentumQ,
+                             (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    r->trainDl = dataLoaderInit(getResumeSample, resumeDatasetSize, 1, NULL, NULL, true, true);
+    dataLoaderSetReshufflePerEpoch(r->trainDl, true);
+    r->evalDl = dataLoaderInit(getResumeSample, resumeDatasetSize, 1, NULL, NULL, false, true);
+}
+
+static void runResume(resumeRun_t *r, size_t epochs, trainingRng_t *rng) {
+    (void)trainingRun(r->model, 3,
+                      (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_MEAN},
+                      r->trainDl, r->evalDl, r->sgd, epochs, calculateGradsSequential,
+                      inferenceWithLoss, &(trainingRunOptions_t){.rng = rng});
+}
+
+/* Fills params[0..22] with both Linears' weights, then their biases. */
+static void captureResumeParams(resumeRun_t *r, float params[RESUME_PARAMS]) {
+    size_t at = 0;
+    for (size_t l = 0; l < 3; l += 2) {
+        tensor_t *w = r->model[l]->config->linear->weights->param;
+        tensor_t *b = r->model[l]->config->linear->bias->param;
+        for (size_t i = 0; i < calcNumberOfElementsByTensor(w); i++) {
+            params[at++] = ((const float *)w->data)[i];
+        }
+        for (size_t i = 0; i < calcNumberOfElementsByTensor(b); i++) {
+            params[at++] = ((const float *)b->data)[i];
+        }
+    }
+}
+
+/* freeOptim frees every model parameter, so the Linears go as shells. */
+static void freeResumeRun(resumeRun_t *r) {
+    freeOptim(r->sgd);
+    freeQuantization(r->momentumQ);
+    freeDataLoader(r->evalDl);
+    freeDataLoader(r->trainDl);
+    freeLinearLayerShellOnly(r->model[2]);
+    freeDropoutLayer(r->model[1]);
+    freeTensor(r->mask);
+    freeLinearLayerShellOnly(r->model[0]);
+    freeQuantization(r->q);
+}
+
+/* Two epochs in one go, and one epoch + save (the model as ODTS, the training
+ * state as ODTK) + load into a fresh skeleton with other initial values and
+ * another training state + one more epoch, end bit for bit alike: the second
+ * epoch's sample order follows the restored epoch counter, its Dropout masks
+ * the restored step counter. Resume only between epochs (no batch cursor),
+ * with SGD without momentum and no scheduler (neither state is saved). */
+void testResumingAtAnEpochBoundaryContinuesTheRunBitForBit(void) {
+    buildResumeDataset();
+
+    resumeRun_t whole;
+    buildResumeRun(&whole, 1u);
+    trainingRng_t wholeRng;
+    trainingRngInit(&wholeRng, 7u);
+    runResume(&whole, 2, &wholeRng);
+    float wholeParams[RESUME_PARAMS];
+    captureResumeParams(&whole, wholeParams);
+    freeResumeRun(&whole);
+
+    resumeRun_t first;
+    buildResumeRun(&first, 1u);
+    trainingRng_t firstRng;
+    trainingRngInit(&firstRng, 7u);
+    runResume(&first, 1, &firstRng);
+    FILE *f = tmpfile();
+    serializeModel(first.model, 3, f);
+    trainingRngSerialize(&firstRng, f);
+    freeResumeRun(&first);
+
+    resumeRun_t resumed;
+    buildResumeRun(&resumed, 999u);
+    trainingRng_t resumedRng;
+    trainingRngInit(&resumedRng, 999u);
+    rewind(f);
+    deserializeModel(resumed.model, 3, f);
+    trainingRngDeserialize(&resumedRng, f);
+    fclose(f);
+    runResume(&resumed, 1, &resumedRng);
+    float resumedParams[RESUME_PARAMS];
+    captureResumeParams(&resumed, resumedParams);
+    freeResumeRun(&resumed);
+    freeResumeDataset();
+
+    TEST_ASSERT_EQUAL_MEMORY(wholeParams, resumedParams, sizeof wholeParams);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testTrainingStep_DropoutActiveThenFlagRestored);
@@ -237,5 +408,6 @@ int main(void) {
     RUN_TEST(testOptimizer_ZeroStatesForDropout);
     RUN_TEST(testStateDictLoad_DropoutNoParams);
     RUN_TEST(testMultiLayer_LinearDropoutLinear_BackwardCompletes);
+    RUN_TEST(testResumingAtAnEpochBoundaryContinuesTheRunBitForBit);
     return UNITY_END();
 }

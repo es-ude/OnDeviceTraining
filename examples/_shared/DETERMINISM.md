@@ -35,7 +35,9 @@ an `n`-sample train loader (21 is the shuffle tag; `e = 0` in every epoch
 without the per-epoch reshuffle). The PyTorch twins train in these orders:
 `KeyedShuffleSampler(n, SEED, reshuffle)` (`examples/_shared/keyed_sampler.py`)
 yields them from `SEED`, the seed the C trainers hand to `trainingRngInit` by
-default, so both sides see the same samples in the same order.
+default, so both sides see the same samples in the same order. A run resumed from
+its `trainingRngSerialize` record (saved between epochs) continues with the order
+of the epoch it stopped at.
 
 ## Parity assertion regime
 

@@ -76,7 +76,10 @@ rngKey_t trainingRngInitKey(const trainingRng_t *rng, size_t layerIndex);
  * little-endian u32: "ODTK" | version 1 | root.w[0] | root.w[1] | step | epoch.
  * Saved with the model's ODTS file, it lets a stopped run go on with the keys
  * it would have used. It holds no position inside an epoch: save between
- * epochs. */
+ * epochs. Optimizer state (SGD momentum, AdamW moments and step count, #350)
+ * and LR/batch-size scheduler state are not part of it, and trainingRun's
+ * schedulers count epochs from 0 on every call: an exact resume needs SGD
+ * without momentum and no scheduler. */
 void trainingRngSerialize(const trainingRng_t *rng, FILE *f);
 
 /*! Reads one ODTK record into *rng. A record that is not ODTK, a version other

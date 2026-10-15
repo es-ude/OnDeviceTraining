@@ -96,3 +96,17 @@ def next_bounded(state: int, bound: int) -> tuple[int, int]:
         state = xorshift32_next(state)
         if state < reject:
             return state, state % bound
+
+
+def keyed_shuffle(n: int, key: tuple[int, int]) -> list[int]:
+    """Fisher-Yates from the identity order over the stream of `key`, with the
+    loop and swap of rngShuffleIndices: from the last slot down, slot i swaps
+    with next_bounded(i + 1). n < 2 draws nothing."""
+    if n < 0:
+        raise ValueError(f"n must be >= 0, got {n}")
+    order = list(range(n))
+    state = open_stream(key)
+    for i in range(n - 1, 0, -1):
+        state, j = next_bounded(state, i + 1)
+        order[i], order[j] = order[j], order[i]
+    return order

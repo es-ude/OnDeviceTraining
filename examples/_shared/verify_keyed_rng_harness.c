@@ -16,6 +16,8 @@
  *   u32 <w0> <w1> <count>           count draws of the key's stream (hex)
  *   float <w0> <w1> <count>         count unit floats as bit patterns (hex)
  *   bounded <w0> <w1> <bound>...    one bounded draw per bound on one stream (decimal)
+ *   shuffle <w0> <w1> <n>           0 ... n-1 shuffled over the key's stream with the loop
+ *                                   and swap of rngShuffleIndices (decimal)
  */
 static unsigned long long number(const char *text) {
     return strtoull(text, NULL, 0);
@@ -61,6 +63,35 @@ int main(int argc, char **argv) {
         }
         return 0;
     }
-    fprintf(stderr, "usage: %s key|fold|u32|float|bounded ...\n", argv[0]);
+    if (argc == 5 && strcmp(argv[1], "shuffle") == 0) {
+        rngStream_t stream = rngOpen(keyOf(argv + 2));
+        const unsigned long long count = number(argv[4]);
+        if (count > SIZE_MAX / sizeof(size_t)) {
+            return 2; /* the buffer size count * sizeof(size_t) would wrap */
+        }
+        const size_t n = (size_t)count;
+        size_t *order = malloc((n > 0 ? n : 1) * sizeof *order);
+        if (order == NULL) {
+            return 2;
+        }
+        for (size_t i = 0; i < n; ++i) {
+            order[i] = i;
+        }
+        if (n >= 2) {
+            for (size_t i = n - 1; i > 0; --i) {
+                const size_t j = rngNextBounded(&stream, i + 1);
+                const size_t swapped = order[i];
+                order[i] = order[j];
+                order[j] = swapped;
+            }
+        }
+        for (size_t i = 0; i < n; ++i) {
+            printf("%zu ", order[i]);
+        }
+        printf("\n");
+        free(order);
+        return 0;
+    }
+    fprintf(stderr, "usage: %s key|fold|u32|float|bounded|shuffle ...\n", argv[0]);
     return 1;
 }

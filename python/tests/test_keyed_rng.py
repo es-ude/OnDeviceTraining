@@ -16,6 +16,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from examples._shared.keyed_rng import (  # noqa: E402
     fold,
     key_from_seed,
+    keyed_shuffle,
     next_bounded,
     next_u32,
     next_unit_float,
@@ -104,6 +105,25 @@ def test_out_of_range_inputs_raise():
         next_bounded(1, UINT32_MAX + 1)
 
 
+def test_keyed_shuffle_is_fisher_yates_from_the_identity_order():
+    """From the last slot down, slot i swaps with a draw below i + 1. The derived
+    key's draws for the bounds 5, 4, 3, 2 are 2, 3, 1, 0, so [0, 1, 2, 3, 4]
+    becomes [0, 1, 4, 3, 2], stays, then [0, 4, 1, 3, 2], then [4, 0, 1, 3, 2]."""
+    state, drawn = open_stream(DERIVED_KEY), []
+    for bound in (5, 4, 3, 2):
+        state, value = next_bounded(state, bound)
+        drawn.append(value)
+    assert drawn == [2, 3, 1, 0]
+    assert keyed_shuffle(5, DERIVED_KEY) == [4, 0, 1, 3, 2]
+
+
+def test_keyed_shuffle_draws_nothing_below_two_samples():
+    assert keyed_shuffle(0, DERIVED_KEY) == []
+    assert keyed_shuffle(1, DERIVED_KEY) == [0]
+    with pytest.raises(ValueError):
+        keyed_shuffle(-1, DERIVED_KEY)
+
+
 @pytest.fixture(scope="module")
 def harness(tmp_path_factory) -> Path:
     """Compile the C harness against src/rng/RNG.c once per module."""
@@ -170,3 +190,12 @@ def test_mirror_matches_c_bounded(harness):
         result = subprocess.run([str(harness), "bounded", *map(str, key), *map(str, bounds)],
                                 check=True, capture_output=True, text=True)
         assert [int(tok) for tok in result.stdout.split()] == drawn, key
+
+
+def test_mirror_matches_c_keyed_shuffle(harness):
+    """n = 0 and 1 draw nothing; 1000 crosses many rejection limits."""
+    for key in KEYS:
+        for n in (0, 1, 2, 3, 8, 100, 1000):
+            result = subprocess.run([str(harness), "shuffle", *map(str, key), str(n)],
+                                    check=True, capture_output=True, text=True)
+            assert [int(tok) for tok in result.stdout.split()] == keyed_shuffle(n, key), (key, n)

@@ -45,12 +45,8 @@ void initDataLoader(dataLoader_t *dataLoader, getSampleFn_t getSample,
     for (size_t i = 0; i < sizeDataset; ++i) {
         indices[i] = i;
     }
-
-    if (shuffle) {
-        rngSetSeed(shuffleSeed);
-        rngShuffleIndices(indices, sizeDataset);
-    }
-    dataLoader->shuffled = shuffle;
+    /* The order of a shuffle = true loader stays unset until dataLoaderShuffle. */
+    dataLoader->shuffled = false;
 }
 
 void dataLoaderSetReshufflePerEpoch(dataLoader_t *dataLoader, bool enable) {
@@ -81,15 +77,6 @@ void dataLoaderShuffle(dataLoader_t *dataLoader, const rngKey_t *key) {
         }
     }
     dataLoader->shuffled = true;
-}
-
-void dataLoaderReshuffle(dataLoader_t *dataLoader) {
-    if (!dataLoader->shuffle || !dataLoader->reshufflePerEpoch) {
-        return;
-    }
-
-    /* NO rngSetSeed() here on purpose — see the doc comment in DataLoader.h. */
-    rngShuffleIndices(dataLoader->indices, dataLoader->getDatasetSize());
 }
 
 tensor_t *transform(tensor_t *tensorList);

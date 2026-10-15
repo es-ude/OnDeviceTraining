@@ -2235,192 +2235,218 @@ void testTrainingRunRejectsLrSchedulerNextToCompensatingBsScheduler(void) {
     freeEpochDataset();
 }
 
-/* #381: trainingRun's epoch loop must gate dataLoaderReshuffle() on the
- * TRAIN loader's reshufflePerEpoch flag, calling it only for epoch > 0 (epoch
- * 0 already got its permutation from dataLoaderInit's init-shuffle), and must
- * NEVER touch the eval loader — even when the eval loader's own flag is set,
- * which would catch an accidental reshuffle-both regression. */
-void testTrainingRunReshuffleFlagOffKeepsTrainIndices(void) {
-    tensor_t *wParam = buildFloatTensor2D(2, 2, (float[]){1.f, 0.f, 0.f, 1.f}, 4);
-    tensor_t *wGrad = gradInitFloat(wParam, NULL);
-    parameter_t *w = parameterInit(wParam, wGrad);
+/* ---- trainingRun's keyed shuffle (#4) ---- */
 
-    tensor_t *bParam = buildFloatTensor2D(1, 2, (float[]){0.f, 0.f}, 2);
-    tensor_t *bGrad = gradInitFloat(bParam, NULL);
-    parameter_t *b = parameterInit(bParam, bGrad);
+/* Golds from the Python mirror, tag values spelled as numbers (SHUFFLE 21,
+ * SHUFFLE_EVAL 26), for the 4-sample epoch dataset under the run seed 42. From
+ * the repository root:
+ *   uv run python -c "from examples._shared.keyed_rng import (fold,
+ *   key_from_seed as kfs, keyed_shuffle as ks); r = kfs(42); print([ks(4,
+ *   fold(r, t, e)) for (t, e) in ((21, 0), (21, 1), (21, 2), (26, 0))])"
+ * None of the four orders is the identity and no two are equal. */
+#define SHUFFLE_RUN_SEED 42u
+static const size_t kTrainOrderGold[3][4] = {{2, 1, 3, 0}, {2, 0, 1, 3}, {1, 3, 0, 2}};
+static const size_t kEvalOrderGold[4] = {0, 2, 3, 1};
 
+/* An identity Linear (2 -> 2) under SGD over the 4-sample epoch dataset at
+ * batch 1; the train loader shuffles, the eval loader as asked. */
+typedef struct {
     quantization_t testQ;
-    initFloat32Quantization(&testQ);
-    layer_t *linear = buildBorrowedLinearLayer(w, b, &testQ);
-    layer_t *model[] = {linear};
+    tensor_t *wParam;
+    tensor_t *bParam;
+    layer_t *linear;
+    layer_t *model[1];
+    quantization_t *momentumQ;
+    optimizer_t *sgd;
+    dataLoader_t *trainDl;
+    dataLoader_t *evalDl;
+} shuffleRunFixture_t;
 
-    quantization_t *momentumQ = quantizationInitFloat();
-    optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
-                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
-
+static void buildShuffleRunFixture(shuffleRunFixture_t *f, bool reshufflePerEpoch,
+                                   bool shuffleEval) {
+    f->wParam = buildFloatTensor2D(2, 2, (float[]){1.f, 0.f, 0.f, 1.f}, 4);
+    f->bParam = buildFloatTensor2D(1, 2, (float[]){0.f, 0.f}, 2);
+    initFloat32Quantization(&f->testQ);
+    f->linear = buildBorrowedLinearLayer(parameterInit(f->wParam, gradInitFloat(f->wParam, NULL)),
+                                         parameterInit(f->bParam, gradInitFloat(f->bParam, NULL)),
+                                         &f->testQ);
+    f->model[0] = f->linear;
+    f->momentumQ = quantizationInitFloat();
+    f->sgd = sgdMCreateOptim(0.01f, 0.f, 0.f, f->model, 1, f->momentumQ,
+                             (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     initEpochDataset();
-    /* shuffle=true so the loader actually owns a live permutation to protect;
-     * reshufflePerEpoch stays at its default (false) — not set here. */
-    dataLoader_t *trainDl =
+    f->trainDl =
         dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, true, 123, true);
-    dataLoader_t *evalDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
-
-    size_t snapshot[4];
-    for (size_t i = 0; i < 4; i++) {
-        snapshot[i] = trainDl->indices[i];
-    }
-
-    trainingRunResult_t result =
-        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-                    trainDl, evalDl, sgd, 2, calculateGradsSequential, inferenceWithLoss, NULL);
-    (void)result;
-
-    /* CAPTURE. */
-    size_t capturedIndices[4];
-    for (size_t i = 0; i < 4; i++) {
-        capturedIndices[i] = trainDl->indices[i];
-    }
-
-    /* FREE. */
-    freeOptim(sgd);
-    freeQuantization(momentumQ);
-    freeDataLoader(evalDl);
-    freeDataLoader(trainDl);
-    freeLinearLayerShellOnly(linear);
-    freeEpochDataset();
-
-    /* ASSERT. */
-    ODT_ASSERT_EQUAL_size_t_ARRAY(snapshot, capturedIndices, 4);
+    f->evalDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, shuffleEval, 456, true);
+    dataLoaderSetReshufflePerEpoch(f->trainDl, reshufflePerEpoch);
 }
 
-void testTrainingRunReshuffleFlagOnChangesTrainButNotEvalIndices(void) {
-    tensor_t *wParam = buildFloatTensor2D(2, 2, (float[]){1.f, 0.f, 0.f, 1.f}, 4);
-    tensor_t *wGrad = gradInitFloat(wParam, NULL);
-    parameter_t *w = parameterInit(wParam, wGrad);
-
-    tensor_t *bParam = buildFloatTensor2D(1, 2, (float[]){0.f, 0.f}, 2);
-    tensor_t *bGrad = gradInitFloat(bParam, NULL);
-    parameter_t *b = parameterInit(bParam, bGrad);
-
-    quantization_t testQ;
-    initFloat32Quantization(&testQ);
-    layer_t *linear = buildBorrowedLinearLayer(w, b, &testQ);
-    layer_t *model[] = {linear};
-
-    quantization_t *momentumQ = quantizationInitFloat();
-    optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
-                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
-
-    initEpochDataset();
-    dataLoader_t *trainDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, true, 123, true);
-    /* eval loader ALSO flagged on: proves trainingRun never reshuffles eval,
-     * not merely that it happens to leave a never-flagged loader alone. */
-    dataLoader_t *evalDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, true, 456, true);
-    dataLoaderSetReshufflePerEpoch(trainDl, true);
-    dataLoaderSetReshufflePerEpoch(evalDl, true);
-
-    size_t trainSnapshot[4];
-    size_t evalSnapshot[4];
-    for (size_t i = 0; i < 4; i++) {
-        trainSnapshot[i] = trainDl->indices[i];
-        evalSnapshot[i] = evalDl->indices[i];
-    }
-
-    trainingRunResult_t result =
-        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-                    trainDl, evalDl, sgd, 2, calculateGradsSequential, inferenceWithLoss, NULL);
-    (void)result;
-
-    /* CAPTURE. */
-    size_t capturedTrainIndices[4];
-    size_t capturedEvalIndices[4];
-    for (size_t i = 0; i < 4; i++) {
-        capturedTrainIndices[i] = trainDl->indices[i];
-        capturedEvalIndices[i] = evalDl->indices[i];
-    }
-
-    /* FREE. */
-    freeOptim(sgd);
-    freeQuantization(momentumQ);
-    freeDataLoader(evalDl);
-    freeDataLoader(trainDl);
-    freeLinearLayerShellOnly(linear);
+static void freeShuffleRunFixture(shuffleRunFixture_t *f) {
+    freeOptim(f->sgd);
+    freeQuantization(f->momentumQ);
+    freeDataLoader(f->evalDl);
+    freeDataLoader(f->trainDl);
+    freeLinearLayerShellOnly(f->linear);
     freeEpochDataset();
+}
 
-    /* ASSERT. */
-    bool trainChanged = false;
-    for (size_t i = 0; i < 4; i++) {
-        if (capturedTrainIndices[i] != trainSnapshot[i]) {
-            trainChanged = true;
-            break;
+static const dataLoader_t *g_shuffleTrainDl;
+static const dataLoader_t *g_shuffleEvalDl;
+static size_t g_trainOrders[3][4];
+static size_t g_evalOrders[3][4];
+static size_t g_shuffleEpochs;
+
+/* The callback runs after an epoch's training and evaluation: both loaders
+ * still hold that epoch's orders. */
+static void recordShuffleOrders(epochInfo_t info, epochStats_t evalStats) {
+    (void)info;
+    (void)evalStats;
+    if (g_shuffleEpochs < 3) {
+        for (size_t i = 0; i < 4; i++) {
+            g_trainOrders[g_shuffleEpochs][i] = g_shuffleTrainDl->indices[i];
+            g_evalOrders[g_shuffleEpochs][i] = g_shuffleEvalDl->indices[i];
         }
     }
-    TEST_ASSERT_TRUE(trainChanged);
-    ODT_ASSERT_EQUAL_size_t_ARRAY(evalSnapshot, capturedEvalIndices, 4);
+    g_shuffleEpochs++;
 }
 
-/* Pins down the "epoch 0 uses the init shuffle" half of the #381 contract
- * specifically: a single-epoch run must NEVER call dataLoaderReshuffle (the
- * two tests above only prove the flag gates something across >=2 epochs;
- * they'd stay green even if trainingRun mistakenly reshuffled epoch 0 too,
- * since "changed at all" doesn't pin down WHICH epoch boundary caused it). */
-void testTrainingRunReshuffleFlagOn_SingleEpochNeverReshuffles(void) {
-    tensor_t *wParam = buildFloatTensor2D(2, 2, (float[]){1.f, 0.f, 0.f, 1.f}, 4);
-    tensor_t *wGrad = gradInitFloat(wParam, NULL);
-    parameter_t *w = parameterInit(wParam, wGrad);
+static void runShuffled(shuffleRunFixture_t *f, size_t epochs, trainingRng_t *rng) {
+    g_shuffleTrainDl = f->trainDl;
+    g_shuffleEvalDl = f->evalDl;
+    (void)trainingRun(f->model, 1, defaultLossConfig(MSE), f->trainDl, f->evalDl, f->sgd, epochs,
+                      calculateGradsSequential, inferenceWithLoss,
+                      &(trainingRunOptions_t){.callback = recordShuffleOrders, .rng = rng});
+}
 
-    tensor_t *bParam = buildFloatTensor2D(1, 2, (float[]){0.f, 0.f}, 2);
-    tensor_t *bGrad = gradInitFloat(bParam, NULL);
-    parameter_t *b = parameterInit(bParam, bGrad);
+/* Every epoch trains in the order of its own shuffle key, epoch 0 included,
+ * and the shuffle = true eval loader keeps the one order of the run's eval
+ * shuffle key in every epoch. */
+void testTrainingRunShufflesEachEpochUnderItsOwnKey(void) {
+    shuffleRunFixture_t f;
+    buildShuffleRunFixture(&f, true, true);
+    trainingRng_t rng;
+    trainingRngInit(&rng, SHUFFLE_RUN_SEED);
+    g_shuffleEpochs = 0;
+    runShuffled(&f, 3, &rng);
+    freeShuffleRunFixture(&f);
 
-    quantization_t testQ;
-    initFloat32Quantization(&testQ);
-    layer_t *linear = buildBorrowedLinearLayer(w, b, &testQ);
-    layer_t *model[] = {linear};
+    TEST_ASSERT_EQUAL_size_t(3, g_shuffleEpochs);
+    for (size_t e = 0; e < 3; e++) {
+        ODT_ASSERT_EQUAL_size_t_ARRAY(kTrainOrderGold[e], g_trainOrders[e], 4);
+        ODT_ASSERT_EQUAL_size_t_ARRAY(kEvalOrderGold, g_evalOrders[e], 4);
+    }
+}
 
-    quantization_t *momentumQ = quantizationInitFloat();
-    optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
-                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+/* A train loader that does not reshuffle per epoch keeps epoch 0's order in
+ * every epoch; a shuffle = false eval loader keeps the identity order. */
+void testTrainingRunKeepsEpochZerosOrderWithoutPerEpochReshuffle(void) {
+    shuffleRunFixture_t f;
+    buildShuffleRunFixture(&f, false, false);
+    trainingRng_t rng;
+    trainingRngInit(&rng, SHUFFLE_RUN_SEED);
+    g_shuffleEpochs = 0;
+    runShuffled(&f, 2, &rng);
+    freeShuffleRunFixture(&f);
 
-    initEpochDataset();
-    dataLoader_t *trainDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, true, 123, true);
-    dataLoader_t *evalDl =
-        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, 0, true);
-    dataLoaderSetReshufflePerEpoch(trainDl, true);
+    const size_t identity[4] = {0, 1, 2, 3};
+    TEST_ASSERT_EQUAL_size_t(2, g_shuffleEpochs);
+    for (size_t e = 0; e < 2; e++) {
+        ODT_ASSERT_EQUAL_size_t_ARRAY(kTrainOrderGold[0], g_trainOrders[e], 4);
+        ODT_ASSERT_EQUAL_size_t_ARRAY(identity, g_evalOrders[e], 4);
+    }
+}
 
-    size_t snapshot[4];
+/* Fills params[0..5] with the fixture's weights, then its biases. */
+static void captureShuffleRunParams(const shuffleRunFixture_t *f, float params[6]) {
     for (size_t i = 0; i < 4; i++) {
-        snapshot[i] = trainDl->indices[i];
+        params[i] = ((const float *)f->wParam->data)[i];
+    }
+    for (size_t i = 0; i < 2; i++) {
+        params[4 + i] = ((const float *)f->bParam->data)[i];
+    }
+}
+
+/* The epoch key follows the run's epoch counter, which outlives a trainingRun
+ * call: two one-epoch runs train in the orders of epochs 0 and 1 (the eval
+ * order staying the run's one order) and end with the parameters of one
+ * two-epoch run, bit for bit. */
+void testTrainingRunShuffleFollowsTheEpochCounterAcrossCalls(void) {
+    shuffleRunFixture_t split;
+    buildShuffleRunFixture(&split, true, true);
+    trainingRng_t splitRng;
+    trainingRngInit(&splitRng, SHUFFLE_RUN_SEED);
+    g_shuffleEpochs = 0;
+    runShuffled(&split, 1, &splitRng);
+    runShuffled(&split, 1, &splitRng);
+    float splitParams[6];
+    captureShuffleRunParams(&split, splitParams);
+    freeShuffleRunFixture(&split);
+    size_t splitEpochs = g_shuffleEpochs;
+    size_t splitTrain[2][4];
+    size_t splitEval[2][4];
+    for (size_t e = 0; e < 2; e++) {
+        for (size_t i = 0; i < 4; i++) {
+            splitTrain[e][i] = g_trainOrders[e][i];
+            splitEval[e][i] = g_evalOrders[e][i];
+        }
     }
 
-    trainingRunResult_t result =
-        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-                    trainDl, evalDl, sgd, 1, calculateGradsSequential, inferenceWithLoss, NULL);
-    (void)result;
+    shuffleRunFixture_t whole;
+    buildShuffleRunFixture(&whole, true, true);
+    trainingRng_t wholeRng;
+    trainingRngInit(&wholeRng, SHUFFLE_RUN_SEED);
+    g_shuffleEpochs = 0;
+    runShuffled(&whole, 2, &wholeRng);
+    float wholeParams[6];
+    captureShuffleRunParams(&whole, wholeParams);
+    freeShuffleRunFixture(&whole);
 
-    /* CAPTURE. */
-    size_t capturedIndices[4];
-    for (size_t i = 0; i < 4; i++) {
-        capturedIndices[i] = trainDl->indices[i];
+    TEST_ASSERT_EQUAL_size_t(2, splitEpochs);
+    for (size_t e = 0; e < 2; e++) {
+        ODT_ASSERT_EQUAL_size_t_ARRAY(kTrainOrderGold[e], splitTrain[e], 4);
+        ODT_ASSERT_EQUAL_size_t_ARRAY(kEvalOrderGold, splitEval[e], 4);
     }
+    TEST_ASSERT_EQUAL_MEMORY(wholeParams, splitParams, sizeof splitParams);
+}
 
-    /* FREE. */
-    freeOptim(sgd);
-    freeQuantization(momentumQ);
-    freeDataLoader(evalDl);
-    freeDataLoader(trainDl);
-    freeLinearLayerShellOnly(linear);
-    freeEpochDataset();
+static void runWithoutAnRngOverAShuffledEvalLoader(void) {
+    shuffleRunFixture_t f;
+    buildShuffleRunFixture(&f, false, true);
+    runShuffled(&f, 1, NULL);
+}
 
-    /* ASSERT. */
-    ODT_ASSERT_EQUAL_size_t_ARRAY(snapshot, capturedIndices, 4);
+static void runWithoutAnRngOverAShuffledTrainLoader(void) {
+    shuffleRunFixture_t f;
+    buildShuffleRunFixture(&f, false, false);
+    runShuffled(&f, 1, NULL);
+}
+
+static void evaluateANeverShuffledLoader(void) {
+    shuffleRunFixture_t f;
+    buildShuffleRunFixture(&f, false, true);
+    (void)evaluationEpoch(f.model, 1, MSE, f.evalDl, inferenceWithLoss, REDUCTION_MEAN, 1);
+}
+
+/* Without options->rng a shuffle = true loader has no key: the eval loader's
+ * shuffle stops before the label probe fetches from it, and the train loader's
+ * stops at the start of epoch 0. */
+void testTrainingRunWithoutAnRngStopsAtAShuffledEvalLoader(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "dataLoaderShuffle: shuffle without a key",
+                             runWithoutAnRngOverAShuffledEvalLoader());
+}
+
+void testTrainingRunWithoutAnRngStopsAtAShuffledTrainLoader(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "dataLoaderShuffle: shuffle without a key",
+                             runWithoutAnRngOverAShuffledTrainLoader());
+}
+
+/* The public evaluation entry points never shuffle: a shuffle = true loader
+ * must be shuffled by its caller first. */
+void testEvaluationEpochOfANeverShuffledLoaderExits(void) {
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "getBatch: shuffle = true loader was never shuffled (call dataLoaderShuffle)",
+        evaluateANeverShuffledLoader());
 }
 
 /* A learning rate of 1e30 blows the 2x2 linear model up on the first step; the
@@ -4144,9 +4170,12 @@ int main(void) {
     RUN_TEST(testTrainingRunRejectsBsSchedulerWiredToAnotherLoader);
     RUN_TEST(testTrainingRunRejectsBsCompensationWiredToAnotherOptimizer);
     RUN_TEST(testTrainingRunRejectsLrSchedulerNextToCompensatingBsScheduler);
-    RUN_TEST(testTrainingRunReshuffleFlagOffKeepsTrainIndices);
-    RUN_TEST(testTrainingRunReshuffleFlagOnChangesTrainButNotEvalIndices);
-    RUN_TEST(testTrainingRunReshuffleFlagOn_SingleEpochNeverReshuffles);
+    RUN_TEST(testTrainingRunShufflesEachEpochUnderItsOwnKey);
+    RUN_TEST(testTrainingRunKeepsEpochZerosOrderWithoutPerEpochReshuffle);
+    RUN_TEST(testTrainingRunShuffleFollowsTheEpochCounterAcrossCalls);
+    RUN_TEST(testTrainingRunWithoutAnRngStopsAtAShuffledEvalLoader);
+    RUN_TEST(testTrainingRunWithoutAnRngStopsAtAShuffledTrainLoader);
+    RUN_TEST(testEvaluationEpochOfANeverShuffledLoaderExits);
     RUN_TEST(testTrainingRun_DefaultRunsAllEpochsThroughNonFiniteLoss);
     RUN_TEST(testTrainingRun_StopsOnNonFiniteLossWhenRequested);
     RUN_TEST(testTrainingRun_StopOnNonFiniteLoss_LastEpochStillCountsAsCompleted);

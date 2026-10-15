@@ -722,6 +722,16 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
     }
 
     (void)requireEvalBatches(evalDataLoader, "trainingRun");
+    /* A shuffle = true eval loader gets one order per run, under the run's
+     * evaluation shuffle key, before the label probe below fetches from it;
+     * it is never reshuffled, so every evaluation sees the same order. Without
+     * options->rng it has no key and stops here. */
+    if (rng != NULL) {
+        rngKey_t evalShuffleKey = trainingRngShuffleEvalKey(rng);
+        dataLoaderShuffle(evalDataLoader, &evalShuffleKey);
+    } else {
+        dataLoaderShuffle(evalDataLoader, NULL);
+    }
     batch_t *firstBatch = evalDataLoader->getBatch(evalDataLoader, 0);
     requireNonEmptyFirstBatch(firstBatch, "trainingRun");
     size_t numClasses = calcNumberOfElementsByTensor(firstBatch->samples[0]->label);
@@ -756,14 +766,18 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
     const reduction_t forwardReduction = REDUCTION_MEAN;
 
     for (size_t epoch = 0; epoch < numberOfEpochs; epoch++) {
-        /* epoch 0 already got its permutation from dataLoaderInit's
-         * init-shuffle; from epoch 1 on, opt in to a fresh per-epoch
-         * permutation (#381). dataLoaderReshuffle self-gates on
-         * shuffle/reshufflePerEpoch, so this is a no-op unless the caller
-         * explicitly enabled it via dataLoaderSetReshufflePerEpoch. The eval
-         * loader is NEVER reshuffled — evaluation stays order-stable. */
-        if (epoch > 0) {
-            dataLoaderReshuffle(trainDataLoader);
+        /* Every epoch, epoch 0 included, starts from the train loader's order
+         * under its shuffle key: the current epoch's (rng->epoch, which also
+         * counts the epochs of earlier trainingRun calls, never this loop's
+         * counter) when the loader reshuffles per epoch (#381), else epoch
+         * 0's, so a shuffle-once loader keeps one order. A shuffle = false
+         * loader keeps its order; without options->rng a shuffle = true loader
+         * has no key and stops here. */
+        if (rng != NULL) {
+            rngKey_t shuffleKey = trainingRngShuffleKey(rng, trainDataLoader->reshufflePerEpoch);
+            dataLoaderShuffle(trainDataLoader, &shuffleKey);
+        } else {
+            dataLoaderShuffle(trainDataLoader, NULL);
         }
 
         /* Captured BEFORE training: the values this epoch trains with. The

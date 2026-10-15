@@ -247,18 +247,21 @@ typedef struct trainingRunOptions {
                                     eval call whose input differs exits naming the mismatch),
                                     and a loader whose stream differs from its nominal count
                                     exits at its first ragged chunk. */
-    trainingRng_t *rng;         /* NULLable; NULL runs without keys. Otherwise caller-initialised
-                                    (trainingRngInit) and caller-owned: every training epoch
-                                    derives its step and update keys from it, each epoch's
-                                    evaluation gets the epoch's evaluation key, and the epoch
-                                    counter advances after each evaluation. */
+    trainingRng_t *rng;         /* NULLable; NULL runs without keys, so a shuffle = true train
+                                    or eval loader stops at its shuffle. Otherwise
+                                    caller-initialised (trainingRngInit) and caller-owned: the
+                                    loaders' shuffle keys, every training epoch's step and
+                                    update keys and each epoch's evaluation key come from it,
+                                    and the epoch counter advances after each evaluation. */
 } trainingRunOptions_t;
 
 void freeTrainingStats(trainingStats_t *trainingStats);
 
 /* The evaluation entry points below are key-less: a model whose forward draws
  * (stochastic rounding) stops with a named error at its first draw; trainingRun
- * evaluates under each epoch's evaluation key. */
+ * evaluates under each epoch's evaluation key. They never shuffle: a
+ * shuffle = true loader stops at its first batch unless dataLoaderShuffle has
+ * set its order. */
 
 /*! Per-sample primitive over one batch_t: never stacks (the epoch entry points do, #468). */
 float evaluationBatch(layer_t **model, size_t modelSize, lossFuncType_t funcType, batch_t *batch,
@@ -288,8 +291,12 @@ classificationReport_t evaluationEpochWithReport(layer_t **model, size_t modelSi
                                                  reduction_t forwardReduction,
                                                  size_t microBatchSize);
 
-/*! Runs numberOfEpochs of train+eval. Per epoch, in this order: reshuffle
- * the train loader (epoch > 0, #381) -> capture epochInfo_t (batch, updates,
+/*! Runs numberOfEpochs of train+eval. Before the first epoch a shuffle = true
+ * eval loader is shuffled once under trainingRngShuffleEvalKey (never again).
+ * Per epoch, in this order: shuffle the train loader under
+ * trainingRngShuffleKey(rng, reshufflePerEpoch) (#381; the epoch is the
+ * counter in options->rng, so a run split over several calls keeps its
+ * orders) -> capture epochInfo_t (batch, updates,
  * LR the epoch trains with) -> trainingEpochDefault -> evaluate -> count the
  * epoch in options->rng -> callback -> lrSchedulerStep -> bsSchedulerStep
  * (last: it only writes

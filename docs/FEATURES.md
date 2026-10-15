@@ -540,18 +540,20 @@ checkpointing, limitations, literature).
   skipped, though the forward loss value is always computed.
 - **Data loading** — `.npy` (`<f4`/`<i4`) datasets (plus a generic CSV row
   reader/writer helper, `src/csv/include/CSVHelper.h`, not wired as a `DataLoader` source);
-  `DataLoader` with batch + shuffle
-  (once at init) + opt-in per-epoch reshuffle (`dataLoaderSetReshufflePerEpoch`,
-  default off, #381): `trainingRun` calls `dataLoaderReshuffle` on the TRAIN
-  loader only, skipping epoch 0 (already permuted by init) and never touching
-  the eval loader; reshuffling draws from the live RNG stream instead of
-  re-seeding, so every epoch gets a distinct permutation while the whole run
-  stays reproducible under the one top-level seed. Plus `dropLast` (only
+  `DataLoader` with batch + keyed shuffle: `dataLoaderShuffle(loader, key)` sets
+  a `shuffle = true` loader's order (Fisher-Yates from the identity order, a
+  function of the key alone), and its default `getBatch` stops on a loader whose
+  order was never set. `trainingRun` shuffles the train loader at the start of
+  every epoch, under that epoch's key with the opt-in per-epoch reshuffle
+  (`dataLoaderSetReshufflePerEpoch`, default off, #381) and under epoch 0's key
+  without it, and a `shuffle = true` eval loader once per run under its own key.
+  Plus `dropLast` (only
   `true` supported). `initDataLoader` fails fast on `batchSize == 0`. No
   dedicated MNIST loader in `src/` (examples preprocess to `.npy`).
 - **RNG** — global XorShift32, seedable and reproducible, **byte-mirrored in Python**
-  and CI-verified. Drives the DataLoader shuffle; weight init (the init key of each layer)
-  and the Dropout Bernoulli mask (swappable fill hook) draw from the keyed core below.
+  and CI-verified. The DataLoader shuffle (the shuffle keys of the training state), weight
+  init (the init key of each layer) and the Dropout Bernoulli mask (swappable fill hook)
+  draw from the keyed core below.
   A context-passing variant (`rng32_t` + `rngNextFloatCtx`,
   same draw math on caller-owned state) serves streams that must not perturb the
   global one — PPCA/exemplar replay sampling. A keyed, order-independent core also

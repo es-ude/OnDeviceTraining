@@ -7,9 +7,8 @@
 #include "RNG.h"
 
 /* Compile alongside src/rng/RNG.c. Usage: ./harness <n> <seed> [<k>]
- * Seeds, shuffles [0, n) once (dataLoaderInit's init shuffle), then applies
- * k (default 0) further rngShuffleIndices calls on the CURRENT permutation
- * WITHOUT reseeding (dataLoaderReshuffle, once per epoch > 0). Emits the
+ * Seeds, shuffles [0, n) once, then applies k (default 0) further
+ * rngShuffleIndices calls on the CURRENT permutation WITHOUT reseeding. Emits the
  * final permutation to stdout, space-separated, one trailing newline.
  */
 int main(int argc, char **argv) {

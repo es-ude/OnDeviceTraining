@@ -436,6 +436,11 @@ int main(void) {
     dataLoader_t *loader0 =
         dataLoaderInit(getTrainSample, getTrainSize, BATCH, NULL, NULL,
                        /*shuffle*/ true, /*shuffleSeed*/ g_seed, /*dropLast*/ true);
+    /* trainEpochs drives trainingEpochDefault itself, so this example orders
+     * each domain's loader: once, under epoch 0's shuffle key, as trainingRun
+     * does for a loader that does not reshuffle per epoch. */
+    rngKey_t shuffleKey = trainingRngShuffleKey(&rng, false);
+    dataLoaderShuffle(loader0, &shuffleKey);
     trainEpochs(model, sgd, loader0, g_pretrainEpochs, 0, "pretrain", &rng);
     freeDataLoader(loader0);
 
@@ -456,6 +461,7 @@ int main(void) {
         dataLoader_t *base =
             dataLoaderInit(getTrainSample, getTrainSize, BATCH, NULL, NULL,
                            /*shuffle*/ true, /*shuffleSeed*/ g_seed, /*dropLast*/ true);
+        dataLoaderShuffle(base, &shuffleKey);
         dataLoader_t *loader = base;
         if (g_replay) {
             loader = replayDataLoaderWrap(

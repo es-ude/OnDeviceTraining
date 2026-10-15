@@ -50,8 +50,7 @@ def _compile_and_run_c_harness(n: int, seed: int, reshuffles: int = 0) -> list[i
     """Compile the C harness against src/rng/RNG.c, run it, parse stdout.
 
     reshuffles > 0 asks the harness for k additional rngShuffleIndices calls on
-    the CURRENT permutation without reseeding — exactly what dataLoaderReshuffle
-    does once per epoch > 0."""
+    the CURRENT permutation without reseeding."""
     harness_src = REPO_ROOT / "examples" / "_shared" / "verify_xorshift32_harness.c"
     rng_src = REPO_ROOT / "src" / "rng" / "RNG.c"
     rng_inc = REPO_ROOT / "src" / "rng" / "include"

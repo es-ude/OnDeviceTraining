@@ -536,7 +536,6 @@ typedef struct {
 static void buildShuffleWrapFixture(shuffleWrapFixture_t *f) {
     buildFakeDataset();
     f->base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, true, 999, true);
-    f->base->shuffled = false;
     ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
     f->set = ppcaReplaySetCreate(2, &cfg);
     replayLoaderConfig_t rcfg = {

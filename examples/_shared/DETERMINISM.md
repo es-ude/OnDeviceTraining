@@ -19,29 +19,18 @@ drift.
 
 ## Shuffle ordering
 
-Both sides shuffle the training set's index list once at init time
-using a Marsaglia 32-bit XorShift (shifts 13/17/5) seeded from
-`SHUFFLE_SEED`. The Python side mirrors `src/rng/RNG.c` via
-`examples/_shared/xorshift32.py`. The C side uses the framework's
-`rngSetSeed` + `rngShuffleIndices` directly.
-
-### Per-epoch reshuffle (HAR float32 example)
-
-The HAR example (`har_classifier/train_c.c`, `train_pytorch.py`) reshuffles
-the train order at the start of every epoch after the first, **on both sides
-by default** (`RESHUFFLE=1`; `RESHUFFLE=0` on both sides restores
-shuffle-once). The C side calls `dataLoaderReshuffle` (#381): Fisher-Yates on
-the *current* permutation, continuing the global RNG stream — no reseed, no
-identity reset. The Python side continues the same stream with
-`shuffle_indices_with_state` + `reshuffle_indices` (`XorShift32Sampler`),
-which is **bit-exact under one condition**: nothing else may draw from the C
-global RNG between the init shuffle and the reshuffles. The float32 HAR binary
-satisfies it (no dropout, no stochastic rounding; weight init draws from
-keyed streams, not from the global RNG). Dropout masks and stochastic
-rounding no longer draw from the global RNG (they use keyed streams handed
-down from the trainer's `trainingRng_t`), so they cannot interleave with the
-reshuffle draws; twins still stay shuffle-once (`DataLoader.c` default, the
-`reshufflePerEpoch` flag off) until the shuffle is keyed too.
+The C data loader orders a `shuffle = true` loader with `dataLoaderShuffle`:
+Fisher-Yates from the identity order over the stream of one key, so an order
+is a function of its key alone and no other draw can change it. `trainingRun`
+takes the keys from the trainer's `trainingRng_t` (seeded with `SEED`): it
+shuffles the train loader at the start of every epoch, under that epoch's key
+when the loader reshuffles per epoch (`dataLoaderSetReshufflePerEpoch`; the
+HAR float32 trainer's `RESHUFFLE=1`, its default) and under epoch 0's key
+otherwise, and a `shuffle = true` eval loader once per run under its own key.
+`examples/_shared/keyed_rng.py` reproduces every order in Python:
+`keyed_shuffle(n, fold(key_from_seed(SEED), 21, e))` is epoch `e`'s order of
+an `n`-sample train loader (21 is the shuffle tag; `e = 0` in every epoch
+without the per-epoch reshuffle).
 
 ## Parity assertion regime
 
@@ -50,13 +39,12 @@ test accuracy / loss within per-example tolerance tables in `compare.py`.
 The framework's `parity.ParityCheck` either uses absolute or relative
 tolerance, never both.
 
-## Verifying the XorShift32 mirror
+## Verifying the shuffle mirrors
 
-The Python test `python/tests/test_xorshift32.py::test_python_mirror_matches_c_for_*`
-compiles a tiny C harness against `src/rng/RNG.c` at test time and
-asserts byte-identical permutations. If you change either the Python
-mirror or `src/rng/RNG.c`, that test will catch divergence.
-`test_reshuffle_mirror_matches_c_after_k_reshuffles` does the same for the
-per-epoch reshuffle: the harness performs `k` extra `rngShuffleIndices` calls
-on the continued state and the Python mirror must reproduce the final
-permutation.
+`python/tests/test_keyed_rng.py::test_mirror_matches_c_keyed_shuffle`
+compiles a C harness against `src/rng/RNG.c` at test time and checks
+`keyed_shuffle` against the same Fisher-Yates loop on the keyed stream; the C
+unit tests check `dataLoaderShuffle` and `trainingRun` against orders derived
+with `keyed_shuffle`. The module-global generator's shuffle
+(`rngSetSeed` + `rngShuffleIndices`, mirrored by `xorshift32.py`) is checked
+the same way by `python/tests/test_xorshift32.py`.

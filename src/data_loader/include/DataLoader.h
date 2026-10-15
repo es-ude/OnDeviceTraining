@@ -34,10 +34,11 @@ struct dataLoader {
     bool shuffled;   /*!< True once the order of a shuffle = true loader has been set; the
                           default getBatch stops while it is false. */
 
-    bool reshufflePerEpoch; /*!< Opt-in: re-permute indices on each dataLoaderReshuffle() call
-                                (trainingRun drives this once per epoch after the first).
-                                Default false (zero-init; initDataLoader also sets it
-                                explicitly) keeps today's shuffle-once-at-init behavior. */
+    bool reshufflePerEpoch; /*!< Opt-in: trainingRun shuffles the train loader at the start of
+                                every epoch under that epoch's shuffle key (true) or under
+                                epoch 0's key (false), so a loader without it keeps one
+                                order. Default false (zero-init; initDataLoader also sets it
+                                explicitly). */
 
     bool dropLast;
 };
@@ -51,8 +52,10 @@ struct dataLoader {
  * \param batchSize: Batch size
  * \param transform: Pointer to function to be used once after loading the dataset
  * \param targetTransform: Pointer to function to be used for each batch
- * \param shuffle: Use shuffle, or not
- * \param shuffleSeed: Seed for shuffling (reproducibility); 32-bit = RNG state width
+ * \param shuffle: Use shuffle, or not. The order starts as the identity and a
+ *                 shuffle = true loader serves no batch until dataLoaderShuffle
+ *                 has set its order.
+ * \param shuffleSeed: Unused; the order comes from dataLoaderShuffle's key
  * \param indices: List of indices for shuffling
  * \param dropLast: If last batch cannot be filled, drop batch
  */
@@ -64,7 +67,7 @@ void initDataLoader(dataLoader_t *dataLoader, getSampleFn_t getSample,
 /*! Enables/disables opt-in per-epoch reshuffling (#381). Default off.
  *
  * \param dataLoader: Pointer to dataloader to configure
- * \param enable: true to reshuffle indices on every dataLoaderReshuffle() call
+ * \param enable: true to give every epoch of trainingRun its own order
  */
 void dataLoaderSetReshufflePerEpoch(dataLoader_t *dataLoader, bool enable);
 
@@ -76,30 +79,14 @@ void dataLoaderSetReshufflePerEpoch(dataLoader_t *dataLoader, bool enable);
  * draw nothing and need no key either. Otherwise a NULL key stops the program
  * with a named error.
  *
+ * trainingRun shuffles its loaders itself (the train loader at the start of
+ * every epoch, a shuffle = true eval loader once per run). A caller that drives
+ * trainingEpochDefault, getBatch or an evaluation entry point directly shuffles
+ * first, with a key from the trainingRng helpers (trainingRngShuffleKey).
+ *
  * \param dataLoader: Pointer to dataloader to order
  * \param key: Key of this order; read during the call only
  */
 void dataLoaderShuffle(dataLoader_t *dataLoader, const rngKey_t *key);
-
-/*! Re-permutes `indices` in place — self-gating no-op unless both `shuffle`
- * and `reshufflePerEpoch` are set. Intended to be called once per epoch
- * (skipping epoch 0, which already got its permutation from initDataLoader)
- * by trainingRun, on the TRAIN loader only.
- *
- * Deliberately does NOT call rngSetSeed(): re-seeding would replay the exact
- * permutation produced at init on every single epoch. Drawing from the live,
- * already-advanced global RNG stream instead gives every epoch a distinct
- * permutation while the whole run stays reproducible end-to-end under the
- * one top-level seed set at init.
- *
- * Consequence for run-to-run comparisons (#299): Dropout masks and
- * stochastic rounding draw from keyed streams, not from this global stream,
- * so a flag-ON run differs from a flag-OFF run in the sample order (and in
- * every value that follows from it), not in those draws. Compare like with
- * like.
- *
- * \param dataLoader: Pointer to dataloader to reshuffle
- */
-void dataLoaderReshuffle(dataLoader_t *dataLoader);
 
 #endif // DATALOADER_H

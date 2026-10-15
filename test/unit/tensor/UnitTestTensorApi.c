@@ -410,19 +410,51 @@ void testInitDistributionUniformKindsDrawFromTheStream(void) {
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(want[2], got[2], 20);
 }
 
+/* The three normal kinds fill element by element from the stream they are
+ * handed, exactly as the matching draw function does on its own stream. */
+void testInitDistributionNormalKindsDrawFromTheStream(void) {
+    const rngKey_t key = rngKeyFromSeed(4u);
+    const distribution_t kinds[3] = {
+        {.type = NORMAL, .params.normal = {0.5f, 2.0f}},
+        {.type = XAVIER_NORMAL, .params.xavier = {.gain = 1.0f, .fanIn = 4, .fanOut = 5}},
+        {.type = KAIMING_NORMAL, .params.kaiming = {.gain = 2.0f, .fanMode = 4}},
+    };
+    float got[3][20];
+    float want[3][20];
+    for (size_t k = 0; k < 3; k++) {
+        tensor_t *t = makeFloatTensorForDistTest(4, 5);
+        rngStream_t rs = rngOpen(key);
+        initDistribution(t, &kinds[k], &rs);
+        memcpy(got[k], t->data, sizeof got[k]);
+        freeTensor(t);
+        rngStream_t ref = rngOpen(key);
+        for (size_t i = 0; i < 20; i++) {
+            want[k][i] = k == 0   ? randomNormalCtx(&ref, 0.5f, 2.0f)
+                         : k == 1 ? xavierNormal(1.0f, 4, 5, &ref)
+                                  : kaimingNormal(2.0f, 4, &ref);
+        }
+    }
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(want[0], got[0], 20);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(want[1], got[1], 20);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(want[2], got[2], 20);
+}
+
 static void randomInitWithoutAStream(const distribution_t *kind) {
     tensor_t *t = makeFloatTensorForDistTest(2, 3);
     initDistribution(t, kind, NULL);
 }
 
-/* Each uniform kind stops before its first draw, with initDistribution's own message. */
+/* Each random kind stops before its first draw, with initDistribution's own message. */
 void testInitDistributionRandomKindWithoutAStreamExits(void) {
-    const distribution_t kinds[3] = {
+    const distribution_t kinds[6] = {
         {.type = UNIFORM, .params.uniform = {0.0f, 1.0f}},
         {.type = XAVIER_UNIFORM, .params.xavier = {.gain = 1.0f, .fanIn = 2, .fanOut = 3}},
         {.type = KAIMING_UNIFORM, .params.kaiming = {.gain = 1.0f, .fanMode = 2}},
+        {.type = NORMAL, .params.normal = {0.0f, 1.0f}},
+        {.type = XAVIER_NORMAL, .params.xavier = {.gain = 1.0f, .fanIn = 2, .fanOut = 3}},
+        {.type = KAIMING_NORMAL, .params.kaiming = {.gain = 1.0f, .fanMode = 2}},
     };
-    for (size_t k = 0; k < 3; k++) {
+    for (size_t k = 0; k < 6; k++) {
         ASSERT_EXITS_WITH_OUTPUT(1, "initDistribution: random distribution without a stream",
                                  randomInitWithoutAStream(&kinds[k]));
     }
@@ -1474,6 +1506,7 @@ int main(void) {
     RUN_TEST(testRequantizeIntoAnSrTemplateExits);
     RUN_TEST(testFillFromFloatBufferIntoAnSrTensorExits);
     RUN_TEST(testInitDistributionUniformKindsDrawFromTheStream);
+    RUN_TEST(testInitDistributionNormalKindsDrawFromTheStream);
     RUN_TEST(testInitDistributionRandomKindWithoutAStreamExits);
     RUN_TEST(testInitDistributionOfAnEmptyTensorNeedsNoStream);
     return UNITY_END();

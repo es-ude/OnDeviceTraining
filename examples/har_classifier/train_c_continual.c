@@ -397,7 +397,6 @@ int main(void) {
      * exemplar buffer for exemplar mode (no generators, no workspace). */
     ppcaReplaySet_t *set = NULL;
     exemplarBuffer_t *exemplars = NULL;
-    rng32_t replayStream = {.state = g_seed * 2654435761u | 1u};
     if (g_replay && g_replayMode == REPLAY_MODE_EXEMPLAR) {
         exemplars = exemplarBufferCreate(NUM_CLASSES, (size_t)g_exemplarsPerClass);
     } else if (g_replay) {
@@ -467,7 +466,6 @@ int main(void) {
                                               .exemplars = exemplars,
                                               .samplesPerClass = (size_t)g_rPerClass,
                                               .minCount = (uint32_t)g_minCount,
-                                              .stream = &replayStream,
                                               .mode = g_replayMode});
         }
         trainEpochs(model, sgd, loader, g_epochsPerDomain, (int)t, "finetune", &rng);

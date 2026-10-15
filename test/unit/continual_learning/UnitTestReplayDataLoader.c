@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "AsanDeath.h"
 #include "DataLoaderApi.h"
@@ -117,12 +118,12 @@ void testWrappedBatchAppendsSyntheticSamples(void) {
     ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
     ppcaReplaySet_t *set = ppcaReplaySetCreate(2, &cfg);
     makeSetSampleable(set);
-    rng32_t stream = {.state = 99};
-    replayLoaderConfig_t rcfg = {
-        .set = set, .samplesPerClass = 1, .minCount = 1, .stream = &stream};
+    replayLoaderConfig_t rcfg = {.set = set, .samplesPerClass = 1, .minCount = 1};
     dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
+    const rngKey_t step0 = rngFold(rngKeyFromSeed(99u), RNG_TAG_STEP, 0u);
+    const rngKey_t step1 = rngFold(rngKeyFromSeed(99u), RNG_TAG_STEP, 1u);
 
-    batch_t *batch = wrapped->getBatch(wrapped, 0, NULL);
+    batch_t *batch = wrapped->getBatch(wrapped, 0, &step0);
 
     TEST_ASSERT_EQUAL_size_t(4, batch->size); /* 2 real + 2 classes * r=1 */
     /* real first: pointer identity with the dataset tensors */
@@ -141,7 +142,7 @@ void testWrappedBatchAppendsSyntheticSamples(void) {
     freeBatch(batch);
 
     /* pools are REUSED: a second batch must not crash and stays sized */
-    batch_t *batch2 = wrapped->getBatch(wrapped, 1, NULL);
+    batch_t *batch2 = wrapped->getBatch(wrapped, 1, &step1);
     TEST_ASSERT_EQUAL_size_t(4, batch2->size);
     for (size_t s = 0; s < batch2->size; s++) {
         freeSample(batch2->samples[s]);
@@ -161,12 +162,11 @@ void testMinCountGatesClasses(void) {
     ppcaReplaySet_t *set = ppcaReplaySetCreate(2, &cfg);
     makeSetSampleable(set);
     set->generators[1]->count = 0; /* class 1 not eligible */
-    rng32_t stream = {.state = 5};
-    replayLoaderConfig_t rcfg = {
-        .set = set, .samplesPerClass = 2, .minCount = 1, .stream = &stream};
+    replayLoaderConfig_t rcfg = {.set = set, .samplesPerClass = 2, .minCount = 1};
     dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
+    const rngKey_t stepKey = rngFold(rngKeyFromSeed(5u), RNG_TAG_STEP, 0u);
 
-    batch_t *batch = wrapped->getBatch(wrapped, 0, NULL);
+    batch_t *batch = wrapped->getBatch(wrapped, 0, &stepKey);
     TEST_ASSERT_EQUAL_size_t(2 + 2, batch->size); /* only class 0 adds r=2 */
     for (size_t s = 0; s < batch->size; s++) {
         freeSample(batch->samples[s]);
@@ -183,10 +183,9 @@ void testNoEligibleClassPassesBaseBatchThrough(void) {
     dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
     ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
     ppcaReplaySet_t *set = ppcaReplaySetCreate(2, &cfg); /* counts all 0 */
-    rng32_t stream = {.state = 5};
-    replayLoaderConfig_t rcfg = {
-        .set = set, .samplesPerClass = 1, .minCount = 1, .stream = &stream};
+    replayLoaderConfig_t rcfg = {.set = set, .samplesPerClass = 1, .minCount = 1};
     dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
+    /* No class replays, so nothing draws: no step key needed. */
     batch_t *batch = wrapped->getBatch(wrapped, 0, NULL);
     TEST_ASSERT_EQUAL_size_t(2, batch->size);
     for (size_t s = 0; s < batch->size; s++) {
@@ -207,11 +206,10 @@ void testSyntheticSamplingDeterministic(void) {
         ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
         ppcaReplaySet_t *set = ppcaReplaySetCreate(2, &cfg);
         makeSetSampleable(set);
-        rng32_t stream = {.state = 12345};
-        replayLoaderConfig_t rcfg = {
-            .set = set, .samplesPerClass = 1, .minCount = 1, .stream = &stream};
+        replayLoaderConfig_t rcfg = {.set = set, .samplesPerClass = 1, .minCount = 1};
         dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
-        batch_t *batch = wrapped->getBatch(wrapped, 0, NULL);
+        const rngKey_t stepKey = rngFold(rngKeyFromSeed(12345u), RNG_TAG_STEP, 0u);
+        batch_t *batch = wrapped->getBatch(wrapped, 0, &stepKey);
         float *synth = (float *)batch->samples[2]->item->data;
         if (run == 0) {
             for (size_t j = 0; j < 6; j++) {
@@ -233,8 +231,8 @@ void testSyntheticSamplingDeterministic(void) {
 
 void testMeanModeReplaysClassCentroidsWithoutStream(void) {
     /* REPLAY_MODE_CLASS_MEAN (#326 fair-comparison baseline): pool items are
-     * the running class centroids, exactly; mean replay is deterministic, so
-     * no RNG stream is required (NULL is legal in this mode only). */
+     * the running class centroids, exactly; mean replay draws nothing, so it
+     * needs no step key. */
     buildFakeDataset();
     dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
     ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
@@ -246,11 +244,8 @@ void testMeanModeReplaysClassCentroidsWithoutStream(void) {
             mu[j] = (float)(100 * (c + 1) + j);
         }
     }
-    replayLoaderConfig_t rcfg = {.set = set,
-                                 .samplesPerClass = 2,
-                                 .minCount = 1,
-                                 .stream = NULL,
-                                 .mode = REPLAY_MODE_CLASS_MEAN};
+    replayLoaderConfig_t rcfg = {
+        .set = set, .samplesPerClass = 2, .minCount = 1, .mode = REPLAY_MODE_CLASS_MEAN};
     dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
 
     batch_t *batch = wrapped->getBatch(wrapped, 0, NULL);
@@ -272,18 +267,36 @@ void testMeanModeReplaysClassCentroidsWithoutStream(void) {
     freeFakeDataset();
 }
 
-void testPpcaModeStillRequiresStream(void) {
-    /* The relaxed NULL-stream rule is mode-scoped: default (zero-init) PPCA
-     * mode must keep failing fast without a stream. */
+static void fetchPpcaReplayWithoutAStepKey(void) {
     buildFakeDataset();
     dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
     ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
     ppcaReplaySet_t *set = ppcaReplaySetCreate(2, &cfg);
-    replayLoaderConfig_t rcfg = {.set = set, .samplesPerClass = 1, .minCount = 1, .stream = NULL};
-    ASSERT_EXITS_WITH_FAILURE(replayDataLoaderWrap(base, &rcfg));
-    freeDataLoader(base);
-    freePpcaReplaySet(set);
-    freeFakeDataset();
+    makeSetSampleable(set);
+    replayLoaderConfig_t rcfg = {.set = set, .samplesPerClass = 1, .minCount = 1};
+    dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
+    (void)wrapped->getBatch(wrapped, 0, NULL);
+}
+
+void testPpcaReplayWithoutAStepKeyExits(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "replayGetBatch: replay draw without a step key",
+                             fetchPpcaReplayWithoutAStepKey());
+}
+
+static void fetchExemplarReplayWithoutAStepKey(void) {
+    buildFakeDataset();
+    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
+    exemplarBuffer_t *buf = exemplarBufferCreate(2, 1);
+    exemplarBufferAdd(buf, g_items[0], 0);
+    replayLoaderConfig_t rcfg = {
+        .exemplars = buf, .samplesPerClass = 1, .minCount = 1, .mode = REPLAY_MODE_EXEMPLAR};
+    dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
+    (void)wrapped->getBatch(wrapped, 0, NULL);
+}
+
+void testExemplarReplayWithoutAStepKeyExits(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "replayGetBatch: replay draw without a step key",
+                             fetchExemplarReplayWithoutAStepKey());
 }
 
 void testExemplarBufferKeepsFirstKAndCopies(void) {
@@ -415,19 +428,16 @@ void testExemplarModeReplaysStoredSamplesZeroCopy(void) {
     exemplarBufferAdd(buf, t1, 0); /* class 1 stays empty -> not eligible */
     freeTensor(t1);
     freeTensor(t0);
-    rng32_t stream = {.state = 77};
-    replayLoaderConfig_t rcfg = {.exemplars = buf,
-                                 .samplesPerClass = 2,
-                                 .minCount = 1,
-                                 .stream = &stream,
-                                 .mode = REPLAY_MODE_EXEMPLAR};
+    replayLoaderConfig_t rcfg = {
+        .exemplars = buf, .samplesPerClass = 2, .minCount = 1, .mode = REPLAY_MODE_EXEMPLAR};
     dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
 
-    /* over several batches the uniform pick must reach BOTH stored
+    /* over several updates the uniform pick must reach BOTH stored
      * exemplars of class 0 (kills a fixed-index pick) */
     int seen[2] = {0, 0};
     for (size_t b = 0; b < 6; b++) {
-        batch_t *batch = wrapped->getBatch(wrapped, b % 2, NULL);
+        const rngKey_t stepKey = rngFold(rngKeyFromSeed(77u), RNG_TAG_STEP, (uint32_t)b);
+        batch_t *batch = wrapped->getBatch(wrapped, b % 2, &stepKey);
         TEST_ASSERT_EQUAL_size_t(2 + 2, batch->size); /* only class 0 adds r=2 */
         for (size_t s = 2; s < 4; s++) {
             tensor_t *item = batch->samples[s]->item;
@@ -454,68 +464,137 @@ void testExemplarModeReplaysStoredSamplesZeroCopy(void) {
     freeFakeDataset();
 }
 
-void testExemplarModePicksDeterministic(void) {
+/* Slot i of class c draws one bounded pick under its own key,
+ * STEP(u)/(CL_REPLAY, 0)/(CLASS, c)/(SLOT, i). Golds from the Python mirror,
+ * tag values as numbers (STEP 1, CL_REPLAY 23, CLASS 24, SLOT 25). From the
+ * repository root:
+ *   uv run python -c "from examples._shared.keyed_rng import (fold, key_from_seed
+ *   as kfs, open_stream as op, next_bounded as nb); r = fold(kfs(2), 1, 0); print([nb(op(
+ *   fold(fold(fold(r, 23, 0), 24, c), 25, i)), 3)[1] for c in (0, 1) for i in (0, 1)])"
+ */
+void testExemplarPicksFollowTheSlotKeys(void) {
     buildFakeDataset();
-    static size_t firstRun[4];
-    for (int run = 0; run < 2; run++) {
-        dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
-        exemplarBuffer_t *buf = exemplarBufferCreate(2, 3);
-        tensor_t *t = buildFloat32TensorND(1, (size_t[]){6}, NULL);
-        for (size_t c = 0; c < 2; c++) {
-            for (size_t i = 0; i < 3; i++) {
-                exemplarBufferAdd(buf, t, c);
-            }
+    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
+    exemplarBuffer_t *buf = exemplarBufferCreate(2, 3);
+    tensor_t *t = buildFloat32TensorND(1, (size_t[]){6}, NULL);
+    for (size_t c = 0; c < 2; c++) {
+        for (size_t i = 0; i < 3; i++) {
+            exemplarBufferAdd(buf, t, c);
         }
-        freeTensor(t);
-        rng32_t stream = {.state = 4242};
-        replayLoaderConfig_t rcfg = {.exemplars = buf,
-                                     .samplesPerClass = 2,
-                                     .minCount = 1,
-                                     .stream = &stream,
-                                     .mode = REPLAY_MODE_EXEMPLAR};
-        dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
-        batch_t *batch = wrapped->getBatch(wrapped, 0, NULL);
-        for (size_t s = 2; s < 6; s++) {
-            /* compare picked buffer SLOT indices across runs via pointer
-             * offsets (tensors are per-run heap objects) */
-            size_t slot = SIZE_MAX;
-            for (size_t k = 0; k < 6; k++) {
-                if (batch->samples[s]->item == buf->items[k]) {
-                    slot = k;
-                }
-            }
-            TEST_ASSERT_TRUE(slot != SIZE_MAX);
-            if (run == 0) {
-                firstRun[s - 2] = slot;
-            } else {
-                TEST_ASSERT_EQUAL_size_t(firstRun[s - 2], slot);
-            }
-        }
-        for (size_t s = 0; s < batch->size; s++) {
-            freeSample(batch->samples[s]);
-        }
-        freeBatch(batch);
-        freeReplayDataLoader(wrapped);
-        freeDataLoader(base);
-        freeExemplarBuffer(buf);
     }
+    freeTensor(t);
+    replayLoaderConfig_t rcfg = {
+        .exemplars = buf, .samplesPerClass = 2, .minCount = 1, .mode = REPLAY_MODE_EXEMPLAR};
+    dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
+    const rngKey_t stepKey = rngFold(rngKeyFromSeed(2u), RNG_TAG_STEP, 0u);
+    batch_t *batch = wrapped->getBatch(wrapped, 0, &stepKey);
+    size_t picks[4];
+    for (size_t s = 2; s < 6; s++) {
+        size_t c = (s - 2) / 2; /* class-major: two slots per class */
+        picks[s - 2] = SIZE_MAX;
+        for (size_t k = 0; k < 3; k++) {
+            if (batch->samples[s]->item == buf->items[c * buf->capacity + k]) {
+                picks[s - 2] = k;
+            }
+        }
+    }
+    for (size_t s = 0; s < batch->size; s++) {
+        freeSample(batch->samples[s]);
+    }
+    freeBatch(batch);
+    freeReplayDataLoader(wrapped);
+    freeDataLoader(base);
+    freeExemplarBuffer(buf);
+    freeFakeDataset();
+
+    const size_t expected[4] = {2, 0, 1, 1};
+    for (size_t s = 0; s < 4; s++) {
+        TEST_ASSERT_EQUAL_size_t(expected[s], picks[s]);
+    }
+}
+
+void testExemplarModeRequiresABuffer(void) {
+    buildFakeDataset();
+    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
+    replayLoaderConfig_t noBuf = {
+        .samplesPerClass = 1, .minCount = 1, .mode = REPLAY_MODE_EXEMPLAR};
+    ASSERT_EXITS_WITH_FAILURE(replayDataLoaderWrap(base, &noBuf));
+    freeDataLoader(base);
     freeFakeDataset();
 }
 
-void testExemplarModeRequiresBufferAndStream(void) {
+#if SIZE_MAX > UINT32_MAX
+/* Slot i draws under (SLOT, i), a 32-bit index: a class cannot replay more
+ * slots than there are slot keys. */
+static void wrapWithMoreSlotsPerClassThanSlotKeys(void) {
     buildFakeDataset();
     dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
-    exemplarBuffer_t *buf = exemplarBufferCreate(2, 2);
-    rng32_t stream = {.state = 1};
-    replayLoaderConfig_t noBuf = {
-        .samplesPerClass = 1, .minCount = 1, .stream = &stream, .mode = REPLAY_MODE_EXEMPLAR};
-    ASSERT_EXITS_WITH_FAILURE(replayDataLoaderWrap(base, &noBuf));
-    replayLoaderConfig_t noStream = {
-        .exemplars = buf, .samplesPerClass = 1, .minCount = 1, .mode = REPLAY_MODE_EXEMPLAR};
-    ASSERT_EXITS_WITH_FAILURE(replayDataLoaderWrap(base, &noStream));
-    freeExemplarBuffer(buf);
-    freeDataLoader(base);
+    exemplarBuffer_t *buf = exemplarBufferCreate(2, 1);
+    replayLoaderConfig_t rcfg = {.exemplars = buf,
+                                 .samplesPerClass = (size_t)UINT32_MAX + 1u,
+                                 .minCount = 1,
+                                 .mode = REPLAY_MODE_EXEMPLAR};
+    (void)replayDataLoaderWrap(base, &rcfg);
+}
+
+void testReplayWrapRejectsMoreSlotsPerClassThanSlotKeys(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "replayDataLoaderWrap: samplesPerClass exceeds UINT32_MAX",
+                             wrapWithMoreSlotsPerClassThanSlotKeys());
+}
+#endif
+
+/* Fetches one batch of the two-class, r = 2 PPCA fixture under stepKey and
+ * copies its four replayed samples (class-major: c0 s0, c0 s1, c1 s0, c1 s1). */
+static void fetchReplayed(dataLoader_t *wrapped, const rngKey_t *stepKey, float out[4][6]) {
+    batch_t *batch = wrapped->getBatch(wrapped, 0, stepKey);
+    for (size_t s = 0; s < 4; s++) {
+        memcpy(out[s], batch->samples[2 + s]->item->data, sizeof out[s]);
+    }
+    for (size_t s = 0; s < batch->size; s++) {
+        freeSample(batch->samples[s]);
+    }
+    freeBatch(batch);
+}
+
+/* A replayed sample is a function of the update's key, its class and its slot
+ * alone: fetching other updates first changes nothing, and no two slots or
+ * classes share a sample (both classes have the same generator here). So a
+ * batch replays the same samples whether trainingEpochDefault or a hand-written
+ * loop fetched it: both hand over the update's key. */
+void testReplayDrawsDependOnTheStepKeyAlone(void) {
+    buildFakeDataset();
+    const rngKey_t root = rngKeyFromSeed(31u);
+    const rngKey_t update5 = rngFold(root, RNG_TAG_STEP, 5u);
+    float direct[4][6];
+    float afterOthers[4][6];
+    float scratch[4][6];
+    for (int run = 0; run < 2; run++) {
+        dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
+        ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
+        ppcaReplaySet_t *set = ppcaReplaySetCreate(2, &cfg);
+        makeSetSampleable(set);
+        replayLoaderConfig_t rcfg = {.set = set, .samplesPerClass = 2, .minCount = 1};
+        dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
+        if (run == 0) {
+            fetchReplayed(wrapped, &update5, direct);
+        } else {
+            for (uint32_t u = 0; u < 3; u++) {
+                const rngKey_t other = rngFold(root, RNG_TAG_STEP, u);
+                fetchReplayed(wrapped, &other, scratch);
+            }
+            fetchReplayed(wrapped, &update5, afterOthers);
+        }
+        freeReplayDataLoader(wrapped);
+        freeDataLoader(base);
+        freePpcaReplaySet(set);
+    }
     freeFakeDataset();
+
+    for (size_t s = 0; s < 4; s++) {
+        TEST_ASSERT_EQUAL_MEMORY(direct[s], afterOthers[s], sizeof direct[s]);
+    }
+    TEST_ASSERT_TRUE(memcmp(direct[0], direct[1], sizeof direct[0]) != 0); /* two slots */
+    TEST_ASSERT_TRUE(memcmp(direct[0], direct[2], sizeof direct[0]) != 0); /* two classes */
 }
 
 /* replayDataLoaderWrap copies the base loader's fields at wrap time but shares
@@ -698,12 +777,11 @@ void testPpcaReplayedSamplesKeepTheRealSamplesNaturalShape(void) {
     ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
     ppcaReplaySet_t *set = ppcaReplaySetCreate(2, &cfg);
     makeSetSampleable(set);
-    rng32_t stream = {.state = 99};
-    replayLoaderConfig_t rcfg = {
-        .set = set, .samplesPerClass = 1, .minCount = 1, .stream = &stream};
+    replayLoaderConfig_t rcfg = {.set = set, .samplesPerClass = 1, .minCount = 1};
     dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
+    const rngKey_t stepKey = rngFold(rngKeyFromSeed(99u), RNG_TAG_STEP, 0u);
 
-    batch_t *batch = wrapped->getBatch(wrapped, 0, NULL);
+    batch_t *batch = wrapped->getBatch(wrapped, 0, &stepKey);
     size_t batchSize = batch->size;
     size_t itemRank[2], itemDims[2][2], labelRank[2], labelDim0[2];
     captureSyntheticShapes(batch, itemRank, itemDims, labelRank, labelDim0);
@@ -727,15 +805,12 @@ void testExemplarReplayedSamplesKeepTheRealSamplesNaturalShape(void) {
     exemplarBuffer_t *buf = exemplarBufferCreate(2, 1);
     exemplarBufferAdd(buf, g_items2d[0], 0);
     exemplarBufferAdd(buf, g_items2d[1], 1);
-    rng32_t stream = {.state = 7};
-    replayLoaderConfig_t rcfg = {.exemplars = buf,
-                                 .samplesPerClass = 1,
-                                 .minCount = 1,
-                                 .stream = &stream,
-                                 .mode = REPLAY_MODE_EXEMPLAR};
+    replayLoaderConfig_t rcfg = {
+        .exemplars = buf, .samplesPerClass = 1, .minCount = 1, .mode = REPLAY_MODE_EXEMPLAR};
     dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
+    const rngKey_t stepKey = rngFold(rngKeyFromSeed(7u), RNG_TAG_STEP, 0u);
 
-    batch_t *batch = wrapped->getBatch(wrapped, 0, NULL);
+    batch_t *batch = wrapped->getBatch(wrapped, 0, &stepKey);
     size_t batchSize = batch->size;
     size_t itemRank[2], itemDims[2][2], labelRank[2], labelDim0[2];
     captureSyntheticShapes(batch, itemRank, itemDims, labelRank, labelDim0);
@@ -760,7 +835,8 @@ int main(void) {
     RUN_TEST(testNoEligibleClassPassesBaseBatchThrough);
     RUN_TEST(testSyntheticSamplingDeterministic);
     RUN_TEST(testMeanModeReplaysClassCentroidsWithoutStream);
-    RUN_TEST(testPpcaModeStillRequiresStream);
+    RUN_TEST(testPpcaReplayWithoutAStepKeyExits);
+    RUN_TEST(testExemplarReplayWithoutAStepKeyExits);
     RUN_TEST(testExemplarBufferKeepsFirstKAndCopies);
     RUN_TEST(testExemplarBufferAddOfAnSrItemExits);
     RUN_TEST(testExemplarBufferRejectsBadClassAndShape);
@@ -775,8 +851,12 @@ int main(void) {
 #endif
 #endif
     RUN_TEST(testExemplarModeReplaysStoredSamplesZeroCopy);
-    RUN_TEST(testExemplarModePicksDeterministic);
-    RUN_TEST(testExemplarModeRequiresBufferAndStream);
+    RUN_TEST(testExemplarPicksFollowTheSlotKeys);
+    RUN_TEST(testExemplarModeRequiresABuffer);
+#if SIZE_MAX > UINT32_MAX
+    RUN_TEST(testReplayWrapRejectsMoreSlotsPerClassThanSlotKeys);
+#endif
+    RUN_TEST(testReplayDrawsDependOnTheStepKeyAlone);
     RUN_TEST(testShufflingTheReplayWrapperOrdersTheBaseToo);
     RUN_TEST(testShufflingTheBaseAfterWrappingKeepsTheWrapperFetching);
     RUN_TEST(testReplayFetchesItsBaseWithTheStepKey);

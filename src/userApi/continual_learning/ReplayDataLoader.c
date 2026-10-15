@@ -111,6 +111,17 @@ static batch_t *replayGetBatch(dataLoader_t *dl, size_t index, const rngKey_t *s
     if (eligible == 0) {
         return baseBatch; /* untouched pass-through */
     }
+    /* One key per replayed slot, under the update's key: a slot's draw depends
+     * on (update, class, slot) alone, never on the fetches before it. The class
+     * means draw nothing and need no key. */
+    rngKey_t replayKey = {{0u, 0u}};
+    if (rl->cfg.mode != REPLAY_MODE_CLASS_MEAN) {
+        if (stepKey == NULL) {
+            PRINT_ERROR("replayGetBatch: replay draw without a step key");
+            exit(1);
+        }
+        replayKey = rngFold(*stepKey, RNG_TAG_CL_REPLAY, 0u);
+    }
 
     size_t newSize = baseBatch->size + eligible * r;
     sample_t **samples = reserveMemory(newSize * sizeof(sample_t *));
@@ -122,16 +133,18 @@ static batch_t *replayGetBatch(dataLoader_t *dl, size_t index, const rngKey_t *s
         if (!classEligible(rl, c)) {
             continue;
         }
+        const rngKey_t classKey = rngFold(replayKey, RNG_TAG_CLASS, (uint32_t)c);
         for (size_t i = 0; i < r; i++) {
+            const rngKey_t slotKey = rngFold(classKey, RNG_TAG_SLOT, (uint32_t)i);
             tensor_t *item;
             if (rl->cfg.mode == REPLAY_MODE_EXEMPLAR) {
                 /* uniform pick WITH replacement (mirrors PPCA's independent
-                 * per-slot draws); zero-copy: the buffer lends the tensor */
+                 * per-slot draws) by the shuffle's bounded rule; an eligible
+                 * class holds at least one exemplar. Zero-copy: the buffer
+                 * lends the tensor. */
                 exemplarBuffer_t *buf = rl->cfg.exemplars;
-                size_t pick = (size_t)(rngNextFloatCtx(rl->cfg.stream) * (float)buf->counts[c]);
-                if (pick >= buf->counts[c]) {
-                    pick = buf->counts[c] - 1;
-                }
+                rngStream_t pickStream = rngOpen(slotKey);
+                size_t pick = rngNextBounded(&pickStream, buf->counts[c]);
                 item = buf->items[c * buf->capacity + pick];
             } else {
                 ppcaReplay_t *g = rl->cfg.set->generators[c];
@@ -139,7 +152,7 @@ static batch_t *replayGetBatch(dataLoader_t *dl, size_t index, const rngKey_t *s
                 if (rl->cfg.mode == REPLAY_MODE_CLASS_MEAN) {
                     ppcaReplayMean(g, item);
                 } else {
-                    ppcaReplaySample(g, rl->cfg.stream, item);
+                    ppcaReplaySample(g, &slotKey, item);
                 }
             }
             sample_t *s = reserveMemory(sizeof(sample_t));
@@ -160,11 +173,14 @@ static batch_t *replayGetBatch(dataLoader_t *dl, size_t index, const rngKey_t *s
 
 dataLoader_t *replayDataLoaderWrap(dataLoader_t *base, const replayLoaderConfig_t *cfg) {
     if (base == NULL || cfg == NULL || cfg->samplesPerClass == 0 ||
-        (cfg->mode == REPLAY_MODE_EXEMPLAR ? cfg->exemplars == NULL : cfg->set == NULL) ||
-        (cfg->stream == NULL && cfg->mode != REPLAY_MODE_CLASS_MEAN)) {
+        (cfg->mode == REPLAY_MODE_EXEMPLAR ? cfg->exemplars == NULL : cfg->set == NULL)) {
         PRINT_ERROR("replayDataLoaderWrap: base required, samplesPerClass >= 1, source "
-                    "required (set, or exemplars for REPLAY_MODE_EXEMPLAR), stream "
-                    "required unless REPLAY_MODE_CLASS_MEAN");
+                    "required (set, or exemplars for REPLAY_MODE_EXEMPLAR)");
+        exit(1);
+    }
+    /* Slot i draws under (SLOT, i), a 32-bit fold index. */
+    if (cfg->samplesPerClass > UINT32_MAX) {
+        PRINT_ERROR("replayDataLoaderWrap: samplesPerClass exceeds UINT32_MAX");
         exit(1);
     }
     replayLoader_t *rl = reserveMemory(sizeof(replayLoader_t));

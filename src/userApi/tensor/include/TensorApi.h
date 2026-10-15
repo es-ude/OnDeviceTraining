@@ -31,9 +31,10 @@ tensor_t *initTensor(shape_t *shape, quantization_t *quantization, sparsity_t *s
  *
  * \param tensor: Pre-initialized FLOAT32 tensor.
  * \param distribution: Recipe for value generation. Read-only.
- * \param rs: The stream UNIFORM, XAVIER_UNIFORM and KAIMING_UNIFORM draw from, element
- *            by element; NULL stops the program for those kinds on a non-empty tensor.
- *            ZEROS and ONES draw nothing and take NULL.
+ * \param rs: The stream every random kind (UNIFORM, NORMAL and the XAVIER_* and
+ *            KAIMING_* kinds) draws from, element by element; NULL stops the program
+ *            for those kinds on a non-empty tensor. ZEROS and ONES draw nothing and
+ *            take NULL.
  */
 void initDistribution(tensor_t *tensor, const distribution_t *distribution, rngStream_t *rs);
 

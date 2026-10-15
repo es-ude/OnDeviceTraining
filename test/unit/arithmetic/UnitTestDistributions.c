@@ -99,8 +99,9 @@ void testKaimingNormal() {
     float samples[n];
 
     rngSetSeed(42);
+    rngStream_t rs = rngOpen(rngKeyFromSeed(42u));
     for (size_t i = 0; i < n; i++) {
-        samples[i] = kaimingNormal(1, fan_in);
+        samples[i] = kaimingNormal(1, fan_in, &rs);
     }
 
     float mean = calculateMean(samples, n);
@@ -151,8 +152,9 @@ void testXavierNormal() {
     float samples[n];
 
     rngSetSeed(42);
+    rngStream_t rs = rngOpen(rngKeyFromSeed(42u));
     for (size_t i = 0; i < n; i++) {
-        samples[i] = xavierNormal(1, fan_in, fan_out);
+        samples[i] = xavierNormal(1, fan_in, fan_out, &rs);
     }
 
     float mean = calculateMean(samples, n);
@@ -197,13 +199,16 @@ void testXavierUniform() {
     TEST_ASSERT_TRUE(max <= limit && max >= limit * 0.9f);
 }
 
+/* The keyed normal is the global normal's math (Box-Muller on the same unit
+ * floats): with the global generator set to a stream's state, both draw the
+ * same values. */
 void testRandomNormalCtxMatchesGlobal(void) {
-    rng32_t ctx = {.state = 42};
-    rngSetSeed(42);
+    rngStream_t rs = rngOpen(rngKeyFromSeed(42u));
+    rngSetSeed(rs.state);
     for (size_t i = 0; i < 200; i++) {
         // Capture both values in locals to avoid double-evaluation bug in Unity
         float globalValue = randomNormal(1.5f, 2.0f);
-        float ctxValue = randomNormalCtx(&ctx, 1.5f, 2.0f);
+        float ctxValue = randomNormalCtx(&rs, 1.5f, 2.0f);
         TEST_ASSERT_EQUAL_FLOAT(globalValue, ctxValue);
     }
 }
@@ -219,8 +224,8 @@ void testFillNormalFloat32TensorStats(void) {
     shape->numberOfDimensions = 1;
     tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
 
-    rng32_t ctx = {.state = 42};
-    fillNormalFloat32Tensor(t, &ctx, 0.5f, 2.0f);
+    rngStream_t rs = rngOpen(rngKeyFromSeed(42u));
+    fillNormalFloat32Tensor(t, &rs, 0.5f, 2.0f);
 
     float *v = (float *)t->data;
     float sum = 0.0f;
@@ -258,8 +263,8 @@ void testFillNormalFloat32TensorDeterministic(void) {
     shape2->numberOfDimensions = 1;
     tensor_t *t2 = initTensor(shape2, quantizationInitFloat(), NULL);
 
-    rng32_t a = {.state = 7};
-    rng32_t b = {.state = 7};
+    rngStream_t a = rngOpen(rngKeyFromSeed(7u));
+    rngStream_t b = rngOpen(rngKeyFromSeed(7u));
     fillNormalFloat32Tensor(t1, &a, 0.0f, 1.0f);
     fillNormalFloat32Tensor(t2, &b, 0.0f, 1.0f);
     TEST_ASSERT_EQUAL_FLOAT_ARRAY((float *)t1->data, (float *)t2->data, 16);
@@ -279,8 +284,8 @@ void testFillNormalRejectsNonFloat(void) {
     quantization_t *q = reserveMemory(sizeof(quantization_t));
     initInt32Quantization(q);
     tensor_t *t = initTensor(shape, q, NULL);
-    rng32_t ctx = {.state = 1};
-    ASSERT_EXITS_WITH_FAILURE(fillNormalFloat32Tensor(t, &ctx, 0.0f, 1.0f));
+    rngStream_t rs = rngOpen(rngKeyFromSeed(1u));
+    ASSERT_EXITS_WITH_FAILURE(fillNormalFloat32Tensor(t, &rs, 0.0f, 1.0f));
     freeTensor(t);
 }
 
@@ -343,6 +348,65 @@ void testKaimingUniformExitsWithoutAStream(void) {
                              kaimingDrawWithoutAStream());
 }
 
+/* The normal init helpers draw from the stream they are handed -- the keyed
+ * normal at their standard deviation -- and leave the global generator alone. */
+void testNormalInitHelpersDrawFromTheirStream(void) {
+    const rngKey_t key = rngKeyFromSeed(42u);
+    rngStream_t got = rngOpen(key);
+    rngStream_t want = rngOpen(key);
+    const float kaimingStd = 1.0f / sqrtf(784.0f);
+    const float xavierStd = 1.0f * sqrtf(2.0f / (float)(784 + 128));
+    const uint32_t globalBefore = rngGetSeed();
+    for (size_t i = 0; i < 4; i++) {
+        /* Locals: Unity evaluates a macro argument more than once. */
+        const float k = kaimingNormal(1.0f, 784, &got);
+        const float kWant = randomNormalCtx(&want, 0.0f, kaimingStd);
+        TEST_ASSERT_EQUAL_FLOAT(kWant, k);
+        const float x = xavierNormal(1.0f, 784, 128, &got);
+        const float xWant = randomNormalCtx(&want, 0.0f, xavierStd);
+        TEST_ASSERT_EQUAL_FLOAT(xWant, x);
+    }
+    TEST_ASSERT_EQUAL_UINT32(globalBefore, rngGetSeed());
+}
+
+static void normalDrawWithoutAStream(void) {
+    (void)randomNormalCtx(NULL, 0.0f, 1.0f);
+}
+
+void testRandomNormalCtxExitsWithoutAStream(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "randomNormalCtx: draw without a stream",
+                             normalDrawWithoutAStream());
+}
+
+static void kaimingNormalDrawWithoutAStream(void) {
+    (void)kaimingNormal(1.0f, 784, NULL);
+}
+
+void testKaimingNormalExitsWithoutAStream(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "randomNormalCtx: draw without a stream",
+                             kaimingNormalDrawWithoutAStream());
+}
+
+/* An empty tensor draws nothing, so it needs no stream. Host only: a
+ * zero-element allocation may be NULL on newlib (#160). */
+static void normalFillOfAnEmptyTensor(void) {
+    size_t *dims = reserveMemory(sizeof(size_t));
+    size_t *order = reserveMemory(sizeof(size_t));
+    dims[0] = 0;
+    order[0] = 0;
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    shape->dimensions = dims;
+    shape->orderOfDimensions = order;
+    shape->numberOfDimensions = 1;
+    tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
+    fillNormalFloat32Tensor(t, NULL, 0.0f, 1.0f);
+    freeTensor(t);
+}
+
+void testFillNormalOfAnEmptyTensorNeedsNoStream(void) {
+    ASSERT_EXITS_WITH(0, normalFillOfAnEmptyTensor());
+}
+
 void setUp(void) {}
 
 void tearDown(void) {}
@@ -365,6 +429,10 @@ int main(void) {
     RUN_TEST(testRandomUniformCtxExitsWithoutAStream);
     RUN_TEST(testUniformInitHelpersDrawFromTheirStream);
     RUN_TEST(testKaimingUniformExitsWithoutAStream);
+    RUN_TEST(testNormalInitHelpersDrawFromTheirStream);
+    RUN_TEST(testRandomNormalCtxExitsWithoutAStream);
+    RUN_TEST(testKaimingNormalExitsWithoutAStream);
+    RUN_TEST(testFillNormalOfAnEmptyTensorNeedsNoStream);
 
     return UNITY_END();
 }

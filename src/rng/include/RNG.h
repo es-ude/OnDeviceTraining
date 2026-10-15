@@ -52,6 +52,9 @@ rngKey_t rngKeyFromSeed(uint64_t seed);
 #define RNG_TAG_SCALE 20u
 #define RNG_TAG_SHUFFLE 21u
 #define RNG_TAG_INIT 22u
+#define RNG_TAG_CL_REPLAY 23u
+#define RNG_TAG_CLASS 24u
+#define RNG_TAG_SLOT 25u
 #define RNG_TAG_SHUFFLE_EVAL 26u
 
 /* The draws under one key. Owned by its caller, usually on the stack of the op
@@ -88,8 +91,8 @@ void rngSetSeed(uint32_t seed);
 uint32_t rngGetSeed(void);
 
 /* Context-passing variant: same draw math as rngNextFloat() on caller-owned
- * state. Use for streams that must not perturb the module-global stream
- * (e.g. PPCA replay sampling, #326). The global functions delegate here. */
+ * state. Use for streams that must not perturb the module-global stream. The
+ * global functions delegate here. */
 float rngNextFloatCtx(rng32_t *rng);
 
 float rngNextFloat(void);

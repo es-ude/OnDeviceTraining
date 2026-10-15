@@ -56,14 +56,16 @@ typedef struct {
  */
 float randomNormal(float mean, float standardDeviation);
 
-/*! Context-passing Box-Muller draw; same math as randomNormal() on a
- * caller-owned stream (see RNG.h). randomNormal() and this variant share the
- * same Box-Muller core (bit-identical streams on both paths). */
-float randomNormalCtx(rng32_t *rng, float mean, float standardDeviation);
+/*! A normal draw from a caller-owned stream: randomNormal()'s Box-Muller core
+ * on the stream's unit floats (u1, then u2; u1 is redrawn while <= 1e-7). The
+ * global generator is not touched. A NULL stream stops the program with a
+ * named error. */
+float randomNormalCtx(rngStream_t *rs, float mean, float standardDeviation);
 
 /*! Fills a FLOAT32 tensor with i.i.d. N(mean, stddev^2) draws from the given
- * stream, element-storage order. Fails fast on non-FLOAT32 tensors. */
-void fillNormalFloat32Tensor(tensor_t *out, rng32_t *rng, float mean, float stddev);
+ * stream, element-storage order. Fails fast on non-FLOAT32 tensors; an empty
+ * tensor draws nothing and needs no stream. */
+void fillNormalFloat32Tensor(tensor_t *out, rngStream_t *rs, float mean, float stddev);
 
 /*! Gets random value from uniform distribution.
  *
@@ -83,10 +85,11 @@ float randomUniformCtx(rngStream_t *rs, float min, float max);
  *
  * @param gain Optional scaling factor for non-linearity
  * @param fanMode: Number of input/output features
+ * @param rs: Stream the draw comes from (randomNormalCtx; NULL stops the program)
  *
  * @returns Float value
  */
-float kaimingNormal(float gain, size_t fanMode);
+float kaimingNormal(float gain, size_t fanMode, rngStream_t *rs);
 
 /*! Gets random value from Kaiming distribution using uniform distribution.
  *
@@ -103,10 +106,11 @@ float kaimingUniform(float gain, size_t fanMode, rngStream_t *rs);
  * @param gain Optional scaling factor for non-linearity
  * @param fanIn: Number of input features
  * @param fanOut: Number of output features
+ * @param rs: Stream the draw comes from (randomNormalCtx; NULL stops the program)
  *
  * @returns Float value
  */
-float xavierNormal(float gain, size_t fanIn, size_t fanOut);
+float xavierNormal(float gain, size_t fanIn, size_t fanOut, rngStream_t *rs);
 
 /*! Gets random value from Xavier distribution using the uniform distribution.
  *

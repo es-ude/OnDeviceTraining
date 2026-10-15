@@ -16,13 +16,17 @@ static float boxMullerFromUniforms(float u1, float u2, float mean, float standar
     return mean + standardDeviation * r * cosf(2.0f * (float)M_PI * u2);
 }
 
-float randomNormalCtx(rng32_t *rng, float mean, float standardDeviation) {
-    float u1 = rngNextFloatCtx(rng);
-    float u2 = rngNextFloatCtx(rng);
+float randomNormalCtx(rngStream_t *rs, float mean, float standardDeviation) {
+    if (rs == NULL) {
+        PRINT_ERROR("randomNormalCtx: draw without a stream");
+        exit(1);
+    }
+    float u1 = rngNextUnitFloat(rs);
+    float u2 = rngNextUnitFloat(rs);
 
     // Avoid log(0)
     while (u1 <= 1e-7f) {
-        u1 = rngNextFloatCtx(rng);
+        u1 = rngNextUnitFloat(rs);
     }
 
     return boxMullerFromUniforms(u1, u2, mean, standardDeviation);
@@ -40,7 +44,7 @@ float randomNormal(float mean, float standardDeviation) {
     return boxMullerFromUniforms(u1, u2, mean, standardDeviation);
 }
 
-void fillNormalFloat32Tensor(tensor_t *out, rng32_t *rng, float mean, float stddev) {
+void fillNormalFloat32Tensor(tensor_t *out, rngStream_t *rs, float mean, float stddev) {
     if (out->quantization->type != FLOAT32) {
         PRINT_ERROR("fillNormalFloat32Tensor: FLOAT32 tensors only");
         exit(1);
@@ -48,7 +52,7 @@ void fillNormalFloat32Tensor(tensor_t *out, rng32_t *rng, float mean, float stdd
     size_t n = calcNumberOfElementsByTensor(out);
     float *data = (float *)out->data;
     for (size_t i = 0; i < n; i++) {
-        data[i] = randomNormalCtx(rng, mean, stddev);
+        data[i] = randomNormalCtx(rs, mean, stddev);
     }
 }
 
@@ -66,9 +70,9 @@ float randomUniformCtx(rngStream_t *rs, float min, float max) {
     return min + r * (max - min);
 }
 
-float kaimingNormal(float gain, size_t fanMode) {
+float kaimingNormal(float gain, size_t fanMode, rngStream_t *rs) {
     float std = gain / sqrtf((float)fanMode);
-    return randomNormal(0.0f, std);
+    return randomNormalCtx(rs, 0.0f, std);
 }
 
 float kaimingUniform(float gain, size_t fanMode, rngStream_t *rs) {
@@ -76,9 +80,9 @@ float kaimingUniform(float gain, size_t fanMode, rngStream_t *rs) {
     return randomUniformCtx(rs, -limit, limit);
 }
 
-float xavierNormal(float gain, size_t fanIn, size_t fanOut) {
+float xavierNormal(float gain, size_t fanIn, size_t fanOut, rngStream_t *rs) {
     float std = gain * sqrtf(2.0f / (float)(fanIn + fanOut));
-    return randomNormal(0.0f, std);
+    return randomNormalCtx(rs, 0.0f, std);
 }
 
 float xavierUniform(float gain, size_t fanIn, size_t fanOut, rngStream_t *rs) {

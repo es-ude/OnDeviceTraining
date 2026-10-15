@@ -60,13 +60,13 @@ size_t ppcaReplayIsoExemplarCount(const ppcaReplay_t *g, size_t bytesPerExemplar
 typedef struct {
     float sigma2;
     size_t kEff;
-    rng32_t *rng;
 } ppcaSampleCtx_t;
 
 /* operands {mean, basis, eigvals} (ARITH_FLOAT32 views via the funnel
- * prologue) -> rawOut = mu + sum_i coeff_i * basisRow_i + sigma*eps.
- * ALWAYS draws rank + dim variates: z beyond kEff is drawn and
- * discarded so the stream position never depends on kEff. */
+ * prologue) -> rawOut = mu + sum_i coeff_i * basisRow_i + sigma*eps, drawn
+ * from rs (the KERNEL stream of the slot key). ALWAYS draws rank + dim
+ * variates: z beyond kEff is drawn and discarded so the noise never depends
+ * on kEff. */
 static void ppcaSampleKernelFloat(tensor_t **op, size_t n, tensor_t *rawOut, tensor_t *aux,
                                   const void *ctxv, rngStream_t *rs) {
     (void)n;
@@ -84,7 +84,7 @@ static void ppcaSampleKernelFloat(tensor_t **op, size_t n, tensor_t *rawOut, ten
         out[j] = mu[j];
     }
     for (size_t i = 0; i < k; i++) {
-        float z = randomNormalCtx(ctx->rng, 0.0f, 1.0f); /* always drawn */
+        float z = randomNormalCtx(rs, 0.0f, 1.0f); /* always drawn */
         if (i < ctx->kEff) {
             float coeff = sqrtFloat32(maxFloat32s(lam[i] - ctx->sigma2, 0.0f)) * z;
             for (size_t j = 0; j < d; j++) {
@@ -93,11 +93,11 @@ static void ppcaSampleKernelFloat(tensor_t **op, size_t n, tensor_t *rawOut, ten
         }
     }
     for (size_t j = 0; j < d; j++) {
-        out[j] += sigma * randomNormalCtx(ctx->rng, 0.0f, 1.0f);
+        out[j] += sigma * randomNormalCtx(rs, 0.0f, 1.0f);
     }
 }
 
-void ppcaReplaySample(const ppcaReplay_t *g, rng32_t *rng, tensor_t *out) {
+void ppcaReplaySample(const ppcaReplay_t *g, const rngKey_t *slotKey, tensor_t *out) {
     ppcaValidateFloatArith(g->sampleMath, "ppcaReplaySample sampleMath");
     if (g->count == 0) {
         PRINT_ERROR("ppcaReplaySample: generator has absorbed no data (count == 0)");
@@ -116,7 +116,7 @@ void ppcaReplaySample(const ppcaReplay_t *g, rng32_t *rng, tensor_t *out) {
     if ((size_t)(g->count - 1) < kEff) {
         kEff = (size_t)(g->count - 1);
     }
-    ppcaSampleCtx_t ctx = {.sigma2 = g->sigma2, .kEff = kEff, .rng = rng};
+    ppcaSampleCtx_t ctx = {.sigma2 = g->sigma2, .kEff = kEff};
     executeOp(
         &(opSpec_t){
             .kernel = ppcaSampleKernelFloat,
@@ -131,6 +131,7 @@ void ppcaReplaySample(const ppcaReplay_t *g, rng32_t *rng, tensor_t *out) {
             .mode = OUT_WRITE,
             .auxOut = NULL,
             .writesInPlaceSafe = false,
+            .key = slotKey,
         },
         out);
 }

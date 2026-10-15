@@ -249,10 +249,9 @@ void testSampleDeterministicAndGlobalStreamUntouched(void) {
     tensor_t *o2 = buildFloat32TensorND(1, (size_t[]){6}, NULL);
     rngSetSeed(4711);
     uint32_t globalBefore = rngGetSeed();
-    rng32_t a = {.state = 99};
-    rng32_t b = {.state = 99};
-    ppcaReplaySample(g, &a, o1);
-    ppcaReplaySample(g, &b, o2);
+    const rngKey_t slot = rngFold(rngKeyFromSeed(99u), RNG_TAG_SLOT, 0u);
+    ppcaReplaySample(g, &slot, o1);
+    ppcaReplaySample(g, &slot, o2);
     TEST_ASSERT_EQUAL_FLOAT_ARRAY((float *)o1->data, (float *)o2->data, 6);
     TEST_ASSERT_EQUAL_UINT32(globalBefore, rngGetSeed());
     freeTensor(o2);
@@ -260,18 +259,28 @@ void testSampleDeterministicAndGlobalStreamUntouched(void) {
     freePpcaReplay(g);
 }
 
+/* The sample under one slot key, from an independent float32 mirror: the
+ * KERNEL stream of the key (tag values as numbers: SLOT 25, KERNEL 9), cosine
+ * Box-Muller (u1 first, then u2), then mu + sum_i sqrt(lambda_i - sigma2) z_i
+ * u_i + sigma eps. From the repository root:
+ *   uv run python -c "import numpy as np; from examples._shared.keyed_rng import (fold,
+ *   key_from_seed as kfs, open_stream as op, next_unit_float as nuf); f = np.float32; p = (
+ *   op(fold(fold(kfs(424242), 25, 0), 9, 0)), 0.0); u = [f((p := nuf(p[0]))[1]) for _ in range(
+ *   16)]; assert min(u[0::2]) > f(1e-7); z = [np.sqrt(f(-2) * np.log(u[2 * k])) * np.cos(f(2)
+ *   * f(np.pi) * u[2 * k + 1]) for k in range(8)]; s = f(1) / np.sqrt(f(2)); b = [[s, s, 0, 0,
+ *   0, 0], [0, 0, s, -s, 0, 0]]; c = [np.sqrt(f(4) - f(0.25)) * z[0], np.sqrt(f(1) - f(0.25))
+ *   * z[1]]; o = [f(j) for j in range(6)]; o = [o[j] + c[0] * f(b[0][j]) for j in range(6)]; o = [
+ *   o[j] + c[1] * f(b[1][j]) for j in range(6)]; print([repr(float(o[j] + f(0.5) * z[2 + j]))
+ *   for j in range(6)])"
+ * Unity's relative float tolerance absorbs a last-bit libm or FMA difference. */
 void testSampleGoldenConstants(void) {
-    /* Host-vs-host determinism: pinned constants. AFTER the
-     * implementation first passes the other tests, run once with the
-     * printf below, paste the values, delete the printf. */
     ppcaReplay_t *g = buildKnownGenerator();
     tensor_t *out = buildFloat32TensorND(1, (size_t[]){6}, NULL);
-    rng32_t stream = {.state = 424242};
-    ppcaReplaySample(g, &stream, out);
+    const rngKey_t slot = rngFold(rngKeyFromSeed(424242u), RNG_TAG_SLOT, 0u);
+    ppcaReplaySample(g, &slot, out);
     float *v = (float *)out->data;
-    /* for (size_t j = 0; j < 6; j++) printf("%.9gf,\n", (double)v[j]); */
-    float golden[6] = {2.6510756f,  2.71321058f, 3.19746828f,
-                       3.02661514f, 3.7248354f,  4.89183283f}; /* pinned 2026-07-12 */
+    float golden[6] = {-0.9322748184204102f, -0.1285301148891449f, 1.794725775718689f,
+                       3.8350772857666016f,  4.8823137283325195f,  4.941965103149414f};
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(golden, v, 6);
     freeTensor(out);
     freePpcaReplay(g);
@@ -283,7 +292,7 @@ void testSampleCovarianceMatchesModel(void) {
      * mean must approach mu. */
     ppcaReplay_t *g = buildKnownGenerator();
     tensor_t *out = buildFloat32TensorND(1, (size_t[]){6}, NULL);
-    rng32_t stream = {.state = 20260712};
+    const rngKey_t root = rngKeyFromSeed(20260712u);
     enum { N = 20000 };
     float s = 1.0f / sqrtf(2.0f);
     float dir0[6] = {s, s, 0, 0, 0, 0};
@@ -291,7 +300,8 @@ void testSampleCovarianceMatchesModel(void) {
     float orth[6] = {0, 0, 0, 0, 1.0f, 0};
     double sum0 = 0, sq0 = 0, sum1 = 0, sq1 = 0, sumO = 0, sqO = 0, sumMean = 0;
     for (size_t n = 0; n < N; n++) {
-        ppcaReplaySample(g, &stream, out);
+        const rngKey_t slot = rngFold(root, RNG_TAG_SLOT, (uint32_t)n);
+        ppcaReplaySample(g, &slot, out);
         float *v = (float *)out->data;
         float p0 = 0, p1 = 0, pO = 0;
         for (size_t j = 0; j < 6; j++) {
@@ -320,21 +330,25 @@ void testSampleCovarianceMatchesModel(void) {
     freePpcaReplay(g);
 }
 
-void testSampleStreamPositionIndependentOfKeff(void) {
-    /* Always k+d draws: two generators differing only in count (k_eff 1 vs 2)
-     * must leave an identical stream position. */
+void testSampleNoiseIndependentOfKeff(void) {
+    /* Always k+d draws: under one slot key, generators differing only in count
+     * (k_eff 2 vs 1) draw the same noise. Coordinates 4 and 5 lie outside both
+     * basis rows, so there a sample is mu + sigma * eps for either generator. */
     ppcaReplay_t *g1 = buildKnownGenerator();
     ppcaReplay_t *g2 = buildKnownGenerator();
     g2->count = 2; /* k_eff = min(2, 1) = 1 */
-    tensor_t *out = buildFloat32TensorND(1, (size_t[]){6}, NULL);
-    rng32_t a = {.state = 5};
-    rng32_t b = {.state = 5};
-    ppcaReplaySample(g1, &a, out);
-    ppcaReplaySample(g2, &b, out);
-    TEST_ASSERT_EQUAL_UINT32(a.state, b.state);
-    freeTensor(out);
+    tensor_t *o1 = buildFloat32TensorND(1, (size_t[]){6}, NULL);
+    tensor_t *o2 = buildFloat32TensorND(1, (size_t[]){6}, NULL);
+    const rngKey_t slot = rngFold(rngKeyFromSeed(5u), RNG_TAG_SLOT, 0u);
+    ppcaReplaySample(g1, &slot, o1);
+    ppcaReplaySample(g2, &slot, o2);
+    float keepsTwo[2] = {((float *)o1->data)[4], ((float *)o1->data)[5]};
+    float keepsOne[2] = {((float *)o2->data)[4], ((float *)o2->data)[5]};
+    freeTensor(o2);
+    freeTensor(o1);
     freePpcaReplay(g2);
     freePpcaReplay(g1);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(keepsTwo, keepsOne, 2);
 }
 
 void testSampleCountOneIsMeanPlusNoise(void) {
@@ -342,11 +356,12 @@ void testSampleCountOneIsMeanPlusNoise(void) {
     ppcaReplay_t *g = buildKnownGenerator();
     g->count = 1;
     tensor_t *out = buildFloat32TensorND(1, (size_t[]){6}, NULL);
-    rng32_t stream = {.state = 7};
+    const rngKey_t root = rngKeyFromSeed(7u);
     double sq = 0;
     enum { N = 5000 };
     for (size_t n = 0; n < N; n++) {
-        ppcaReplaySample(g, &stream, out);
+        const rngKey_t slot = rngFold(root, RNG_TAG_SLOT, (uint32_t)n);
+        ppcaReplaySample(g, &slot, out);
         float centered = ((float *)out->data)[0] - 0.0f;
         sq += (double)centered * centered;
     }
@@ -361,11 +376,11 @@ void testSampleZeroSteadyStateAllocation(void) {
      * passing); the memprofile examples preset makes it a real assertion. */
     ppcaReplay_t *g = buildKnownGenerator();
     tensor_t *out = buildFloat32TensorND(1, (size_t[]){6}, NULL);
-    rng32_t stream = {.state = 13};
-    ppcaReplaySample(g, &stream, out); /* warm-up */
+    const rngKey_t slot = rngFold(rngKeyFromSeed(13u), RNG_TAG_SLOT, 0u);
+    ppcaReplaySample(g, &slot, out); /* warm-up */
     size_t before = memProfileMark();
     for (size_t n = 0; n < 100; n++) {
-        ppcaReplaySample(g, &stream, out);
+        ppcaReplaySample(g, &slot, out);
     }
     TEST_ASSERT_EQUAL_size_t(before, memProfileMark());
     freeTensor(out);
@@ -376,8 +391,8 @@ void testSampleRejectsCountZero(void) {
     ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
     ppcaReplay_t *g = ppcaReplayCreate(&cfg);
     tensor_t *out = buildFloat32TensorND(1, (size_t[]){6}, NULL);
-    rng32_t stream = {.state = 1};
-    ASSERT_EXITS_WITH_FAILURE(ppcaReplaySample(g, &stream, out));
+    const rngKey_t slot = rngFold(rngKeyFromSeed(1u), RNG_TAG_SLOT, 0u);
+    ASSERT_EXITS_WITH_FAILURE(ppcaReplaySample(g, &slot, out));
     freeTensor(out);
     freePpcaReplay(g);
 }
@@ -385,18 +400,28 @@ void testSampleRejectsCountZero(void) {
 void testSampleRejectsElementCountMismatch(void) {
     ppcaReplay_t *g = buildKnownGenerator();
     tensor_t *out = buildFloat32TensorND(1, (size_t[]){5}, NULL);
-    rng32_t stream = {.state = 1};
-    ASSERT_EXITS_WITH_FAILURE(ppcaReplaySample(g, &stream, out));
+    const rngKey_t slot = rngFold(rngKeyFromSeed(1u), RNG_TAG_SLOT, 0u);
+    ASSERT_EXITS_WITH_FAILURE(ppcaReplaySample(g, &slot, out));
     freeTensor(out);
     freePpcaReplay(g);
+}
+
+static void sampleWithoutASlotKey(void) {
+    ppcaReplay_t *g = buildKnownGenerator();
+    tensor_t *out = buildFloat32TensorND(1, (size_t[]){6}, NULL);
+    ppcaReplaySample(g, NULL, out);
+}
+
+void testSampleWithoutASlotKeyExits(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "randomNormalCtx: draw without a stream", sampleWithoutASlotKey());
 }
 
 void testSampleAcceptsReshapedOut(void) {
     /* [1,2,3] has 6 elements == dim: allowed (natural-shape pool tensors). */
     ppcaReplay_t *g = buildKnownGenerator();
     tensor_t *out = buildFloat32TensorND(3, (size_t[]){1, 2, 3}, NULL);
-    rng32_t stream = {.state = 11};
-    ppcaReplaySample(g, &stream, out);
+    const rngKey_t slot = rngFold(rngKeyFromSeed(11u), RNG_TAG_SLOT, 0u);
+    ppcaReplaySample(g, &slot, out);
     freeTensor(out);
     freePpcaReplay(g);
 }
@@ -448,7 +473,7 @@ void testMeanReplayRejectsElementCountMismatch(void) {
  * into a [m,d] FLOAT32 tensor. basisRows: kTrue x d orthonormal. */
 static tensor_t *drawSyntheticSamples(size_t m, size_t d, const float *mu, const float *basisRows,
                                       size_t kTrue, const float *lamTotal, float sigma2,
-                                      rng32_t *rng) {
+                                      rngStream_t *rng) {
     tensor_t *t = buildFloat32TensorND(2, (size_t[]){m, d}, NULL);
     float *x = (float *)t->data;
     float sigma = sqrtf(sigma2);
@@ -495,7 +520,7 @@ void testUpdateBatchFitRecoversModel(void) { /* T1: n=0 bootstrap == batch fit *
     ppcaReplayConfig_t cfg = floatConfig(8, 2, 256);
     ppcaReplay_t *g = ppcaReplayCreate(&cfg);
     ppcaWorkspace_t *ws = ppcaWorkspaceCreate(8, 2, 256);
-    rng32_t rng = {.state = 20260712};
+    rngStream_t rng = rngOpen(rngKeyFromSeed(20260712u));
     tensor_t *samples =
         drawSyntheticSamples(200, 8, kTrueMu8, kTrueBasis8, 2, kTrueLam8, 0.04f, &rng);
 
@@ -522,7 +547,7 @@ void testUpdateIncrementalEqualsPooled(void) { /* T2: the Gram-conditioning gate
     ppcaReplay_t *gInc = ppcaReplayCreate(&cfg);
     ppcaReplay_t *gPool = ppcaReplayCreate(&cfg);
     ppcaWorkspace_t *ws = ppcaWorkspaceCreate(8, 2, 256);
-    rng32_t rng = {.state = 777};
+    rngStream_t rng = rngOpen(rngKeyFromSeed(777u));
     tensor_t *all = drawSyntheticSamples(240, 8, kTrueMu8, kTrueBasis8, 2, kTrueLam8, 0.04f, &rng);
 
     ppcaReplayUpdate(gPool, all, ws);
@@ -573,7 +598,7 @@ void testUpdateMeanShiftedIncrementalEqualsPooled(void) {
     ppcaReplay_t *gInc = ppcaReplayCreate(&cfg);
     ppcaReplay_t *gPool = ppcaReplayCreate(&cfg);
     ppcaWorkspace_t *ws = ppcaWorkspaceCreate(8, 2, 256);
-    rng32_t rng = {.state = 20260713};
+    rngStream_t rng = rngOpen(rngKeyFromSeed(20260713u));
     tensor_t *sessions[3];
     for (size_t s = 0; s < 3; s++) {
         float muS[8];
@@ -656,7 +681,7 @@ void testUpdateOrthonormalAcrossTenMerges(void) { /* T4 strict (path A) */
     ppcaReplayConfig_t cfg = floatConfig(8, 2, 64);
     ppcaReplay_t *g = ppcaReplayCreate(&cfg);
     ppcaWorkspace_t *ws = ppcaWorkspaceCreate(8, 2, 64);
-    rng32_t rng = {.state = 31337};
+    rngStream_t rng = rngOpen(rngKeyFromSeed(31337u));
     for (size_t s = 0; s < 10; s++) {
         tensor_t *samples =
             drawSyntheticSamples(40, 8, kTrueMu8, kTrueBasis8, 2, kTrueLam8, 0.04f, &rng);
@@ -699,8 +724,8 @@ void testUpdateRankDeficientSessionNoNaN(void) {
         TEST_ASSERT_EQUAL_FLOAT(0.0f, b[3 * 6 + j]);
     }
     tensor_t *out = buildFloat32TensorND(1, (size_t[]){6}, NULL);
-    rng32_t stream = {.state = 3};
-    ppcaReplaySample(g, &stream, out); /* must not crash */
+    const rngKey_t slot = rngFold(rngKeyFromSeed(3u), RNG_TAG_SLOT, 0u);
+    ppcaReplaySample(g, &slot, out); /* must not crash */
     freeTensor(out);
     freeTensor(samples);
     freePpcaWorkspace(ws);
@@ -714,7 +739,7 @@ void testUpdateShrinkagePinnedFormula(void) {
     ppcaReplay_t *g0 = ppcaReplayCreate(&cfg0);
     ppcaReplay_t *gG = ppcaReplayCreate(&cfgG);
     ppcaWorkspace_t *ws = ppcaWorkspaceCreate(8, 2, 256);
-    rng32_t rng = {.state = 1234};
+    rngStream_t rng = rngOpen(rngKeyFromSeed(1234u));
     tensor_t *samples =
         drawSyntheticSamples(100, 8, kTrueMu8, kTrueBasis8, 2, kTrueLam8, 0.04f, &rng);
     ppcaReplayUpdate(g0, samples, ws);
@@ -784,7 +809,7 @@ void testStreamingConvergesToTopComponents(void) {
     ppcaReplayConfig_t cfg = floatConfig(8, 2, 8);
     ppcaReplay_t *g = ppcaReplayCreate(&cfg);
     ppcaWorkspace_t *ws = ppcaWorkspaceCreate(8, 2, 8);
-    rng32_t rng = {.state = 90210};
+    rngStream_t rng = rngOpen(rngKeyFromSeed(90210u));
     tensor_t *x = buildFloat32TensorND(1, (size_t[]){8}, NULL);
     /* seed 90210 is a slow-mixing case for amnesic-free CCIPCA: the d01
      * cross-term only crosses under its bound near ~6k samples; 8000 buys
@@ -889,7 +914,7 @@ void testPackedStateSamplingDegradationBounded(void) { /* T5 */
     ppcaReplayConfig_t cfgF = floatConfig(8, 2, 256);
     ppcaReplay_t *gF = ppcaReplayCreate(&cfgF);
     ppcaWorkspace_t *ws = ppcaWorkspaceCreate(8, 2, 256);
-    rng32_t rng = {.state = 555};
+    rngStream_t rng = rngOpen(rngKeyFromSeed(555u));
     tensor_t *samples =
         drawSyntheticSamples(200, 8, kTrueMu8, kTrueBasis8, 2, kTrueLam8, 0.04f, &rng);
     ppcaReplayUpdate(gF, samples, ws);
@@ -907,15 +932,16 @@ void testPackedStateSamplingDegradationBounded(void) { /* T5 */
     tensor_t *out = buildFloat32TensorND(1, (size_t[]){8}, NULL);
     enum { N = 8000 };
     double sumF[8] = {0}, sumP[8] = {0}, sqF = 0, sqP = 0;
-    rng32_t sf = {.state = 42}, sp = {.state = 42};
+    const rngKey_t root = rngKeyFromSeed(42u);
     for (size_t n = 0; n < N; n++) {
-        ppcaReplaySample(gF, &sf, out);
+        const rngKey_t slot = rngFold(root, RNG_TAG_SLOT, (uint32_t)n);
+        ppcaReplaySample(gF, &slot, out);
         for (size_t j = 0; j < 8; j++) {
             float v = ((float *)out->data)[j];
             sumF[j] += v;
             sqF += (double)v * v;
         }
-        ppcaReplaySample(gP, &sp, out);
+        ppcaReplaySample(gP, &slot, out);
         for (size_t j = 0; j < 8; j++) {
             float v = ((float *)out->data)[j];
             TEST_ASSERT_TRUE(v == v); /* no NaN from packed state */
@@ -941,7 +967,7 @@ void testPackedStateStreamingGridBounded(void) { /* T7 */
     ppcaReplay_t *gF = ppcaReplayCreate(&cfgF);
     ppcaReplay_t *gP = ppcaReplayCreate(&cfgP);
     ppcaWorkspace_t *ws = ppcaWorkspaceCreate(8, 2, 8);
-    rng32_t rng = {.state = 2222};
+    rngStream_t rng = rngOpen(rngKeyFromSeed(2222u));
     tensor_t *x = buildFloat32TensorND(1, (size_t[]){8}, NULL);
     for (size_t s = 0; s < 500; s++) {
         tensor_t *one =
@@ -1037,11 +1063,12 @@ int main(void) {
     RUN_TEST(testSampleDeterministicAndGlobalStreamUntouched);
     RUN_TEST(testSampleGoldenConstants);
     RUN_TEST(testSampleCovarianceMatchesModel);
-    RUN_TEST(testSampleStreamPositionIndependentOfKeff);
+    RUN_TEST(testSampleNoiseIndependentOfKeff);
     RUN_TEST(testSampleCountOneIsMeanPlusNoise);
     RUN_TEST(testSampleZeroSteadyStateAllocation);
     RUN_TEST(testSampleRejectsCountZero);
     RUN_TEST(testSampleRejectsElementCountMismatch);
+    RUN_TEST(testSampleWithoutASlotKeyExits);
     RUN_TEST(testSampleAcceptsReshapedOut);
     RUN_TEST(testMeanReplayIsExactCentroid);
     RUN_TEST(testMeanReplayIntoAnSrTensorExits);

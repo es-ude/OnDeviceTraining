@@ -62,7 +62,10 @@ typedef struct {
 /* Math API (no allocation in steady state; all funnel-routed). */
 void ppcaReplayUpdate(ppcaReplay_t *g, const tensor_t *samples, ppcaWorkspace_t *ws);
 void ppcaReplayUpdateStreaming(ppcaReplay_t *g, const tensor_t *x, ppcaWorkspace_t *ws);
-void ppcaReplaySample(const ppcaReplay_t *g, rng32_t *rng, tensor_t *out);
+/* One synthetic sample under slotKey: every draw comes from the KERNEL stream
+ * of the key, so the sample is a pure function of the generator and the key. A
+ * NULL key stops at the first draw (randomNormalCtx: draw without a stream). */
+void ppcaReplaySample(const ppcaReplay_t *g, const rngKey_t *slotKey, tensor_t *out);
 void ppcaReplayMean(const ppcaReplay_t *g, tensor_t *out);
 
 size_t ppcaReplayBytes(const ppcaReplay_t *g);

@@ -552,11 +552,10 @@ checkpointing, limitations, literature).
   dedicated MNIST loader in `src/` (examples preprocess to `.npy`).
 - **RNG** — global XorShift32, seedable and reproducible, **byte-mirrored in Python**
   and CI-verified. The DataLoader shuffle (the shuffle keys of the training state), weight
-  init (the init key of each layer) and the Dropout Bernoulli mask (swappable fill hook)
-  draw from the keyed core below.
-  A context-passing variant (`rng32_t` + `rngNextFloatCtx`,
-  same draw math on caller-owned state) serves streams that must not perturb the
-  global one — PPCA/exemplar replay sampling. A keyed, order-independent core also
+  init (the init key of each layer), PPCA/exemplar replay (the key of the update a
+  replayed batch feeds) and the Dropout Bernoulli mask (swappable fill hook) draw from
+  the keyed core below. A context-passing variant (`rng32_t` + `rngNextFloatCtx`, same
+  draw math on caller-owned state) also exists. A keyed, order-independent core also
   exists (`rngKeyFromSeed`, `rngFold` = one Threefry-2x32-20 block per key-tree edge,
   `rngOpen` with `rngNextU32`/`rngNextUnitFloat`/`rngNextBounded` on a keyed xorshift32
   state; mirrored in `examples/_shared/keyed_rng.py`). Dropout masks and every stochastic

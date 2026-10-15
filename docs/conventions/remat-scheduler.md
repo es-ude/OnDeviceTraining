@@ -307,8 +307,8 @@ decisions and those with nothing in force yet are left out.
   In force now: every stochastic rounding and Dropout mask draws from a
   keyed stream handed down from the trainer's training state, and so does
   weight init (the init key of each layer) and the data-loader shuffle (the
-  shuffle keys of the training state); replay still draws from the
-  module-global stream; rows and the
+  shuffle keys of the training state) and replay (the key of the update a
+  replayed batch feeds, one per class and slot); rows and the
   validator call no RNG function.
 - **remat D50** Rows never receive or derive a key and call no `rng`
   function (the `remat-row-contract` gate). A future EVICT row selects

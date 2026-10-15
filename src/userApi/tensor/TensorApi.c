@@ -120,9 +120,10 @@ void initDistribution(tensor_t *tensor, const distribution_t *distribution, rngS
         }
         break;
     case NORMAL:
+        requireStream(rs, n);
         for (size_t i = 0; i < n; ++i) {
-            vals[i] =
-                randomNormal(distribution->params.normal.mean, distribution->params.normal.stddev);
+            vals[i] = randomNormalCtx(rs, distribution->params.normal.mean,
+                                      distribution->params.normal.stddev);
         }
         break;
     case XAVIER_UNIFORM:
@@ -134,10 +135,11 @@ void initDistribution(tensor_t *tensor, const distribution_t *distribution, rngS
         }
         break;
     case XAVIER_NORMAL:
+        requireStream(rs, n);
         for (size_t i = 0; i < n; ++i) {
             vals[i] =
                 xavierNormal(distribution->params.xavier.gain, distribution->params.xavier.fanIn,
-                             distribution->params.xavier.fanOut);
+                             distribution->params.xavier.fanOut, rs);
         }
         break;
     case KAIMING_UNIFORM:
@@ -148,9 +150,10 @@ void initDistribution(tensor_t *tensor, const distribution_t *distribution, rngS
         }
         break;
     case KAIMING_NORMAL:
+        requireStream(rs, n);
         for (size_t i = 0; i < n; ++i) {
             vals[i] = kaimingNormal(distribution->params.kaiming.gain,
-                                    distribution->params.kaiming.fanMode);
+                                    distribution->params.kaiming.fanMode, rs);
         }
         break;
     default:

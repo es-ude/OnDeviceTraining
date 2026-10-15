@@ -34,8 +34,6 @@ typedef struct {
     uint32_t minCount;           /* class eligible once generator count >= minCount
                                     (PPCA_SAMPLE/CLASS_MEAN; EXEMPLAR gates on a
                                     non-empty class buffer instead) */
-    rng32_t *stream;             /* caller-owned sampling stream; unused (NULL ok)
-                                    in REPLAY_MODE_CLASS_MEAN */
     replayMode_t mode;           /* zero-init = PPCA sampling */
 } replayLoaderConfig_t;
 
@@ -51,7 +49,15 @@ typedef struct {
  * Known limitation (#152): at microBatchSize m > 1 the replayed batch size
  * base + eligible * r must stay divisible by m. trainingRun and
  * trainingEpochDefault check only the loader's batchSize, so an indivisible
- * replayed batch makes trainingBatchDefault fail fast mid-epoch. */
+ * replayed batch makes trainingBatchDefault fail fast mid-epoch.
+ * Draws: slot i of class c in the batch of update u draws under
+ * STEP(u)/(CL_REPLAY, 0)/(CLASS, c)/(SLOT, i), STEP(u) being the step key the
+ * fetch is handed -- a PPCA sample from that key's KERNEL stream, an exemplar
+ * pick by one bounded draw on the key's own stream -- so a replayed sample
+ * depends on (update, class, slot) alone. A drawing mode fetched without a
+ * step key stops; evaluation fetches pass none, so the wrapper is a training
+ * loader. CLASS_MEAN and a batch with no eligible class draw nothing and need
+ * no key. samplesPerClass must fit 32 bits. */
 dataLoader_t *replayDataLoaderWrap(dataLoader_t *base, const replayLoaderConfig_t *cfg);
 void freeReplayDataLoader(dataLoader_t *wrapped);
 

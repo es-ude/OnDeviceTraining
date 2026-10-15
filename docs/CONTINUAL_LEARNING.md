@@ -58,18 +58,19 @@ typedef struct {
 
 Each generator models its class as a `d`-dimensional Gaussian with a `k`-dim
 principal subspace plus isotropic residual noise (Tipping & Bishop's PPCA).
-`ppcaReplaySample(g, rng, out)` draws a synthetic sample:
+`ppcaReplaySample(g, slotKey, out)` draws a synthetic sample:
 
 ```
 x = mu + Σ_i sqrt(max(λ_i − σ², 0)) · z_i · u_i + σ·ε
 ```
 
 summing over `k_eff = min(rank, count − 1)` kept components (`u_i` = basis
-row `i`, `z_i, ε ~ N(0,1)` drawn via `randomNormalCtx` on a caller-owned
-`rng32_t *` stream). The kernel **always** draws `rank + dim` variates —
-components beyond `k_eff` are drawn and discarded — so the stream position
-never depends on how many components a generator currently has (important
-for determinism fixtures across updates). A freshly-updated generator with
+row `i`, `z_i, ε ~ N(0,1)` drawn via `randomNormalCtx` from the stream of
+the slot key, so a sample is a pure function of the generator and the key).
+The kernel **always** draws `rank + dim` variates — components beyond `k_eff`
+are drawn and discarded — so the noise never depends on how many components
+a generator currently has (important for determinism fixtures across
+updates). A NULL key stops at the first draw. A freshly-updated generator with
 `count == 1` has `k_eff == 0`: its first sample is just `mu + σ·ε`, isotropic
 noise around the single point it has seen so far.
 
@@ -83,10 +84,17 @@ typedef struct {
     exemplarBuffer_t *exemplars; /* EXEMPLAR only; caller-owned */
     size_t samplesPerClass;      /* r */
     uint32_t minCount;           /* class eligible once generator count >= minCount */
-    rng32_t *stream;             /* caller-owned sampling stream; NULL ok in CLASS_MEAN */
     replayMode_t mode;           /* zero-init = REPLAY_MODE_PPCA_SAMPLE */
 } replayLoaderConfig_t;
 ```
+
+The replayed slots draw under the step key the fetch is handed (the key of
+the update the batch feeds; `trainingEpochDefault` hands it over): slot `i` of
+class `c` draws under `STEP(u)/(CL_REPLAY, 0)/(CLASS, c)/(SLOT, i)`, so a
+replayed sample depends on the update, its class and its slot alone — never on
+how many batches were fetched before. A drawing mode fetched without a step key
+stops with a named error (evaluation passes none, so the wrapper is a training
+loader); `REPLAY_MODE_CLASS_MEAN` draws nothing and needs no key.
 
 `mode` selects what fills the `r` replay slots per eligible class:
 

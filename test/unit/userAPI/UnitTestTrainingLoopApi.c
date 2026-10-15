@@ -2448,6 +2448,90 @@ void testEvaluationEpochOfANeverShuffledLoaderExits(void) {
         evaluateANeverShuffledLoader());
 }
 
+/* ---- the step key of a batch fetch (#4) ---- */
+
+/* The loaders' own getBatch, which the recorders below forward to. */
+static getBatchFn_t g_keyRecordingBase;
+static rngKey_t g_trainFetchKeys[8];
+static bool g_trainFetchHadAKey[8];
+static size_t g_trainFetches;
+static size_t g_evalFetches;
+static size_t g_evalFetchesWithAKey;
+
+static batch_t *recordTrainFetchKey(dataLoader_t *dataLoader, size_t index,
+                                    const rngKey_t *stepKey) {
+    if (g_trainFetches < 8) {
+        g_trainFetchHadAKey[g_trainFetches] = stepKey != NULL;
+        if (stepKey != NULL) {
+            g_trainFetchKeys[g_trainFetches] = *stepKey;
+        }
+    }
+    g_trainFetches++;
+    return g_keyRecordingBase(dataLoader, index, stepKey);
+}
+
+static batch_t *recordEvalFetchKey(dataLoader_t *dataLoader, size_t index,
+                                   const rngKey_t *stepKey) {
+    g_evalFetches++;
+    if (stepKey != NULL) {
+        g_evalFetchesWithAKey++;
+    }
+    return g_keyRecordingBase(dataLoader, index, stepKey);
+}
+
+static void recordFetchKeys(shuffleRunFixture_t *f) {
+    g_keyRecordingBase = f->trainDl->getBatch;
+    f->trainDl->getBatch = recordTrainFetchKey;
+    f->evalDl->getBatch = recordEvalFetchKey;
+    g_trainFetches = 0;
+    g_evalFetches = 0;
+    g_evalFetchesWithAKey = 0;
+}
+
+/* Batch u of a run is fetched with the key of update u -- the key its forward,
+ * backward and step draw under -- so a loader that draws (the replay wrapper)
+ * draws under the update the batch feeds. Evaluation trains nothing: it
+ * fetches without a key. */
+void testTrainingRunFetchesEachTrainBatchWithTheKeyOfItsUpdate(void) {
+    shuffleRunFixture_t f;
+    buildShuffleRunFixture(&f, true, false);
+    recordFetchKeys(&f);
+    trainingRng_t rng;
+    trainingRngInit(&rng, SHUFFLE_RUN_SEED);
+    const rngKey_t root = rng.root;
+    g_shuffleEpochs = 0;
+    runShuffled(&f, 2, &rng);
+    freeShuffleRunFixture(&f);
+
+    TEST_ASSERT_EQUAL_size_t(8, g_trainFetches);
+    for (uint32_t u = 0; u < 8; u++) {
+        const rngKey_t expected = rngFold(root, RNG_TAG_STEP, u);
+        TEST_ASSERT_TRUE(g_trainFetchHadAKey[u]);
+        TEST_ASSERT_EQUAL_HEX32(expected.w[0], g_trainFetchKeys[u].w[0]);
+        TEST_ASSERT_EQUAL_HEX32(expected.w[1], g_trainFetchKeys[u].w[1]);
+    }
+    TEST_ASSERT_TRUE(g_evalFetches > 0);
+    TEST_ASSERT_EQUAL_size_t(0, g_evalFetchesWithAKey);
+}
+
+/* Without a training state there is no update key, and a fetch gets none --
+ * never the address of a key nobody set. */
+void testTrainingEpochDefaultWithoutAnRngFetchesWithoutAKey(void) {
+    shuffleRunFixture_t f;
+    buildShuffleRunFixture(&f, false, false);
+    const rngKey_t shuffleKey = rngFold(rngKeyFromSeed(SHUFFLE_RUN_SEED), RNG_TAG_SHUFFLE, 0u);
+    dataLoaderShuffle(f.trainDl, &shuffleKey);
+    recordFetchKeys(&f);
+    (void)trainingEpochDefault(f.model, 1, defaultLossConfig(MSE), f.trainDl, f.sgd,
+                               calculateGradsSequential, REDUCTION_MEAN, 1, NULL);
+    freeShuffleRunFixture(&f);
+
+    TEST_ASSERT_EQUAL_size_t(4, g_trainFetches);
+    for (size_t u = 0; u < 4; u++) {
+        TEST_ASSERT_FALSE(g_trainFetchHadAKey[u]);
+    }
+}
+
 /* A learning rate of 1e30 blows the 2x2 linear model up on the first step; the
  * next epoch's MSE is inf. Default options (no stop flag): all epochs run. */
 void testTrainingRun_DefaultRunsAllEpochsThroughNonFiniteLoss(void) {
@@ -3210,8 +3294,9 @@ void testTrainingRunEvaluatesOnTheSchedulerWhenEveryChunkHasTheTrainingRowCount(
  * loader whose stream is shorter than nominal (here its last batch comes back
  * empty, so 3 of 4 samples stream at m = 2) passes it, and the ragged last
  * chunk meets the scheduler's bind check, which names the row count. */
-static batch_t *droppingTheLastSample(dataLoader_t *dataLoader, size_t index) {
-    batch_t *batch = g_baseGetBatch(dataLoader, index);
+static batch_t *droppingTheLastSample(dataLoader_t *dataLoader, size_t index,
+                                      const rngKey_t *stepKey) {
+    batch_t *batch = g_baseGetBatch(dataLoader, index, stepKey);
     size_t last = dataLoader->getDatasetSize() / dataLoader->batchSize - 1u;
     if (index == last && batch->size > 0) {
         batch->size--;
@@ -4175,6 +4260,8 @@ int main(void) {
     RUN_TEST(testTrainingRunWithoutAnRngStopsAtAShuffledEvalLoader);
     RUN_TEST(testTrainingRunWithoutAnRngStopsAtAShuffledTrainLoader);
     RUN_TEST(testEvaluationEpochOfANeverShuffledLoaderExits);
+    RUN_TEST(testTrainingRunFetchesEachTrainBatchWithTheKeyOfItsUpdate);
+    RUN_TEST(testTrainingEpochDefaultWithoutAnRngFetchesWithoutAKey);
     RUN_TEST(testTrainingRun_DefaultRunsAllEpochsThroughNonFiniteLoss);
     RUN_TEST(testTrainingRun_StopsOnNonFiniteLossWhenRequested);
     RUN_TEST(testTrainingRun_StopOnNonFiniteLoss_LastEpochStillCountsAsCompleted);

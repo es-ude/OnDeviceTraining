@@ -15,7 +15,11 @@ typedef struct rngKey rngKey_t;
 typedef tensor_t *(*transformFn_t)(tensor_t *tensor);
 typedef sample_t *(*getSampleFn_t)(size_t id);
 typedef size_t (*getDatasetSizeFn_t)();
-typedef batch_t *(*getBatchFn_t)(dataLoader_t *dataLoader, size_t index);
+/* stepKey: the key of the update the batch feeds, NULL outside training (an
+ * evaluation fetch, a probe). A loader that draws -- the replay wrapper --
+ * draws under it and hands it to the loader it wraps; a plain loader ignores
+ * it. Read during the call only. */
+typedef batch_t *(*getBatchFn_t)(dataLoader_t *dataLoader, size_t index, const rngKey_t *stepKey);
 
 struct dataLoader {
     getSampleFn_t getSample;           /*!< Pointer to function to get a sample from the dataset*/

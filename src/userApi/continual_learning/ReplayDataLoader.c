@@ -86,7 +86,7 @@ static bool classEligible(const replayLoader_t *rl, size_t c) {
     return rl->cfg.set->generators[c]->count >= rl->cfg.minCount;
 }
 
-static batch_t *replayGetBatch(dataLoader_t *dl, size_t index) {
+static batch_t *replayGetBatch(dataLoader_t *dl, size_t index, const rngKey_t *stepKey) {
     replayLoader_t *rl = (replayLoader_t *)dl;
     /* The wrapper copied the base's fields when it wrapped it, but both share
      * one order array: an order set through the wrapper is the base's order
@@ -95,7 +95,7 @@ static batch_t *replayGetBatch(dataLoader_t *dl, size_t index) {
     if (rl->pub.shuffled) {
         rl->base->shuffled = true;
     }
-    batch_t *baseBatch = rl->base->getBatch(rl->base, index);
+    batch_t *baseBatch = rl->base->getBatch(rl->base, index, stepKey);
     if (!rl->poolsReady) {
         initPoolsFromFirstSample(rl, baseBatch->samples[0]);
     }

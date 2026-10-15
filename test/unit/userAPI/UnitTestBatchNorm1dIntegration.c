@@ -462,9 +462,10 @@ void testGhostBatchNormCadenceM8(void) {
 /* The train loader must never be read: if the pre-flight is missing, the run
  * reaches epoch 0's first getBatch and the child exits 2, not 1 -- that is
  * what proves the failure happens BEFORE training, not at the first eval. */
-static batch_t *trainGetBatchMustNotRun(dataLoader_t *dl, size_t index) {
+static batch_t *trainGetBatchMustNotRun(dataLoader_t *dl, size_t index, const rngKey_t *stepKey) {
     (void)dl;
     (void)index;
+    (void)stepKey;
     _exit(2);
 }
 static size_t twoSamples(void) {
@@ -798,9 +799,10 @@ void testTrainingRunEvalGateNamesEvalMicroBatchSize(void) {
 }
 
 /* In trainingRun: an eval dataset smaller than its batchSize fails before the peek. */
-static batch_t *evalGetBatchMustNotRun(dataLoader_t *dl, size_t index) {
+static batch_t *evalGetBatchMustNotRun(dataLoader_t *dl, size_t index, const rngKey_t *stepKey) {
     (void)dl;
     (void)index;
+    (void)stepKey;
     _exit(3);
 }
 static size_t oneSample(void) {
@@ -826,9 +828,10 @@ void testTrainingRunRejectsEmptyEvalLoaderBeforeThePeek(void) {
     ASSERT_EXITS_WITH_FAILURE(runEmptyEvalLoader());
 }
 
-static batch_t *emptyEvalGetBatch(dataLoader_t *dl, size_t index) {
+static batch_t *emptyEvalGetBatch(dataLoader_t *dl, size_t index, const rngKey_t *stepKey) {
     (void)dl;
     (void)index;
+    (void)stepKey;
     batch_t *b = reserveMemory(sizeof(batch_t));
     b->size = 0;
     b->samples = reserveMemory(sizeof(sample_t *));
@@ -999,14 +1002,14 @@ void testEntryPointPreflightsUntrackedBatchNormInline(void) {
  * BN reach inferenceFn (the tripwire would exit 2). evaluationEpochWithMetrics
  * is left out: its numClasses peek reads batch 0's first sample. */
 static getBatchFn_t g_realGetBatch;
-static batch_t *emptyFirstGetBatch(dataLoader_t *dl, size_t index) {
+static batch_t *emptyFirstGetBatch(dataLoader_t *dl, size_t index, const rngKey_t *stepKey) {
     if (index == 0) {
         batch_t *b = reserveMemory(sizeof(batch_t));
         b->size = 0;
         b->samples = reserveMemory(sizeof(sample_t *));
         return b;
     }
-    return g_realGetBatch(dl, index);
+    return g_realGetBatch(dl, index, stepKey);
 }
 
 static void untrackedAfterEmptyFirstBatch(bool viaReport) {

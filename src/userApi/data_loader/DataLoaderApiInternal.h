@@ -20,8 +20,9 @@ static sample_t *getSampleByIndex(dataLoader_t *dataLoader, size_t index);
  *
  * \param dataLoader: Pointer to data loader
  * \param index: Index of batch
+ * \param stepKey: Key of the update the batch feeds; a plain loader draws nothing
  * \return Pointer to batch
  */
-static batch_t *getBatch(dataLoader_t *dataLoader, size_t index);
+static batch_t *getBatch(dataLoader_t *dataLoader, size_t index, const rngKey_t *stepKey);
 
 #endif // DATALOADERAPIINTERNAL_H

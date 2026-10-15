@@ -368,7 +368,7 @@ static float evaluateStacked(const char *caller, const char *knob, layer_t **mod
     float totalLoss = 0.0f;
 
     for (size_t b = 0; b < numberOfBatches; b++) {
-        batch_t *batch = dataLoader->getBatch(dataLoader, b);
+        batch_t *batch = dataLoader->getBatch(dataLoader, b, NULL);
         for (size_t i = 0; i < batch->size; i++) {
             sample_t *sample = batch->samples[i];
             if (referenceItem == NULL) {
@@ -435,7 +435,7 @@ float evaluationEpoch(layer_t **model, size_t modelSize, lossFuncType_t funcType
         /* The first sample of the first NON-EMPTY batch, as on the m > 1 path. */
         bool firstSeen = false;
         for (size_t i = 0; i < numberOfBatches; i++) {
-            batch_t *batch = dataLoader->getBatch(dataLoader, i);
+            batch_t *batch = dataLoader->getBatch(dataLoader, i, NULL);
             if (!firstSeen && batch->size > 0) {
                 evalFirstSample(model, modelSize, dataLoader, batch->samples[0], m, 0,
                                 "evaluationEpoch");
@@ -563,7 +563,7 @@ static epochStats_t evaluateEpochInternal(const char *knob, layer_t **model, siz
         /* The first sample of the first NON-EMPTY batch, as on the m > 1 path. */
         bool firstSeen = false;
         for (size_t i = 0; i < numberOfBatches; i++) {
-            batch_t *batch = dataLoader->getBatch(dataLoader, i);
+            batch_t *batch = dataLoader->getBatch(dataLoader, i, NULL);
             if (!firstSeen && batch->size > 0) {
                 evalFirstSample(model, modelSize, dataLoader, batch->samples[0], m, numClasses,
                                 caller);
@@ -605,7 +605,7 @@ epochStats_t evaluationEpochWithMetrics(layer_t **model, size_t modelSize, lossF
     size_t m = resolveEvalMicroBatch(microBatchSize);
     (void)requireEvalBatches(dataLoader, "evaluationEpochWithMetrics");
     // Peek at first sample to derive numClasses from label shape
-    batch_t *firstBatch = dataLoader->getBatch(dataLoader, 0);
+    batch_t *firstBatch = dataLoader->getBatch(dataLoader, 0, NULL);
     requireNonEmptyFirstBatch(firstBatch, "evaluationEpochWithMetrics");
     size_t numClasses = calcNumberOfElementsByTensor(firstBatch->samples[0]->label);
     for (size_t i = 0; i < firstBatch->size; i++) {
@@ -732,7 +732,7 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
     } else {
         dataLoaderShuffle(evalDataLoader, NULL);
     }
-    batch_t *firstBatch = evalDataLoader->getBatch(evalDataLoader, 0);
+    batch_t *firstBatch = evalDataLoader->getBatch(evalDataLoader, 0, NULL);
     requireNonEmptyFirstBatch(firstBatch, "trainingRun");
     size_t numClasses = calcNumberOfElementsByTensor(firstBatch->samples[0]->label);
     if (evalMicroBatchSize > 1) {

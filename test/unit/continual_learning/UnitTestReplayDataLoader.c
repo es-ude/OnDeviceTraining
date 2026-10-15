@@ -122,7 +122,7 @@ void testWrappedBatchAppendsSyntheticSamples(void) {
         .set = set, .samplesPerClass = 1, .minCount = 1, .stream = &stream};
     dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
 
-    batch_t *batch = wrapped->getBatch(wrapped, 0);
+    batch_t *batch = wrapped->getBatch(wrapped, 0, NULL);
 
     TEST_ASSERT_EQUAL_size_t(4, batch->size); /* 2 real + 2 classes * r=1 */
     /* real first: pointer identity with the dataset tensors */
@@ -141,7 +141,7 @@ void testWrappedBatchAppendsSyntheticSamples(void) {
     freeBatch(batch);
 
     /* pools are REUSED: a second batch must not crash and stays sized */
-    batch_t *batch2 = wrapped->getBatch(wrapped, 1);
+    batch_t *batch2 = wrapped->getBatch(wrapped, 1, NULL);
     TEST_ASSERT_EQUAL_size_t(4, batch2->size);
     for (size_t s = 0; s < batch2->size; s++) {
         freeSample(batch2->samples[s]);
@@ -166,7 +166,7 @@ void testMinCountGatesClasses(void) {
         .set = set, .samplesPerClass = 2, .minCount = 1, .stream = &stream};
     dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
 
-    batch_t *batch = wrapped->getBatch(wrapped, 0);
+    batch_t *batch = wrapped->getBatch(wrapped, 0, NULL);
     TEST_ASSERT_EQUAL_size_t(2 + 2, batch->size); /* only class 0 adds r=2 */
     for (size_t s = 0; s < batch->size; s++) {
         freeSample(batch->samples[s]);
@@ -187,7 +187,7 @@ void testNoEligibleClassPassesBaseBatchThrough(void) {
     replayLoaderConfig_t rcfg = {
         .set = set, .samplesPerClass = 1, .minCount = 1, .stream = &stream};
     dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
-    batch_t *batch = wrapped->getBatch(wrapped, 0);
+    batch_t *batch = wrapped->getBatch(wrapped, 0, NULL);
     TEST_ASSERT_EQUAL_size_t(2, batch->size);
     for (size_t s = 0; s < batch->size; s++) {
         freeSample(batch->samples[s]);
@@ -211,7 +211,7 @@ void testSyntheticSamplingDeterministic(void) {
         replayLoaderConfig_t rcfg = {
             .set = set, .samplesPerClass = 1, .minCount = 1, .stream = &stream};
         dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
-        batch_t *batch = wrapped->getBatch(wrapped, 0);
+        batch_t *batch = wrapped->getBatch(wrapped, 0, NULL);
         float *synth = (float *)batch->samples[2]->item->data;
         if (run == 0) {
             for (size_t j = 0; j < 6; j++) {
@@ -253,7 +253,7 @@ void testMeanModeReplaysClassCentroidsWithoutStream(void) {
                                  .mode = REPLAY_MODE_CLASS_MEAN};
     dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
 
-    batch_t *batch = wrapped->getBatch(wrapped, 0);
+    batch_t *batch = wrapped->getBatch(wrapped, 0, NULL);
     TEST_ASSERT_EQUAL_size_t(2 + 2 * 2, batch->size);
     for (size_t s = 2; s < 6; s++) {
         size_t c = (s - 2) / 2; /* synthetic samples appended class-major */
@@ -427,7 +427,7 @@ void testExemplarModeReplaysStoredSamplesZeroCopy(void) {
      * exemplars of class 0 (kills a fixed-index pick) */
     int seen[2] = {0, 0};
     for (size_t b = 0; b < 6; b++) {
-        batch_t *batch = wrapped->getBatch(wrapped, b % 2);
+        batch_t *batch = wrapped->getBatch(wrapped, b % 2, NULL);
         TEST_ASSERT_EQUAL_size_t(2 + 2, batch->size); /* only class 0 adds r=2 */
         for (size_t s = 2; s < 4; s++) {
             tensor_t *item = batch->samples[s]->item;
@@ -474,7 +474,7 @@ void testExemplarModePicksDeterministic(void) {
                                      .stream = &stream,
                                      .mode = REPLAY_MODE_EXEMPLAR};
         dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
-        batch_t *batch = wrapped->getBatch(wrapped, 0);
+        batch_t *batch = wrapped->getBatch(wrapped, 0, NULL);
         for (size_t s = 2; s < 6; s++) {
             /* compare picked buffer SLOT indices across runs via pointer
              * offsets (tensors are per-run heap objects) */
@@ -549,7 +549,7 @@ static void freeShuffleWrapFixture(shuffleWrapFixture_t *f) {
 
 /* Fetches batch `index` (2 samples) and records its two items. */
 static void fetchItems(dataLoader_t *dl, size_t index, tensor_t *items[2]) {
-    batch_t *batch = dl->getBatch(dl, index);
+    batch_t *batch = dl->getBatch(dl, index, NULL);
     for (size_t s = 0; s < 2; s++) {
         items[s] = batch->samples[s]->item;
         freeSample(batch->samples[s]);
@@ -590,6 +590,42 @@ void testShufflingTheBaseAfterWrappingKeepsTheWrapperFetching(void) {
     TEST_ASSERT_EQUAL_PTR(g_items[2], seen[0]);
     TEST_ASSERT_EQUAL_PTR(g_items[1], seen[1]);
     freeFakeDataset();
+}
+
+/* The wrapper fetches its base batch with the step key it was handed, so a
+ * base that draws (another wrapper) draws under the same update. */
+static getBatchFn_t g_replayBaseGetBatch;
+static const rngKey_t *g_baseFetchKey;
+
+static batch_t *recordBaseFetchKey(dataLoader_t *dl, size_t index, const rngKey_t *stepKey) {
+    g_baseFetchKey = stepKey;
+    return g_replayBaseGetBatch(dl, index, stepKey);
+}
+
+void testReplayFetchesItsBaseWithTheStepKey(void) {
+    buildFakeDataset();
+    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
+    ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
+    ppcaReplaySet_t *set = ppcaReplaySetCreate(2, &cfg); /* counts all 0: nothing replays */
+    replayLoaderConfig_t rcfg = {
+        .set = set, .samplesPerClass = 1, .minCount = 1, .mode = REPLAY_MODE_CLASS_MEAN};
+    dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
+    g_replayBaseGetBatch = base->getBatch;
+    base->getBatch = recordBaseFetchKey;
+    const rngKey_t stepKey = rngFold(rngKeyFromSeed(7u), RNG_TAG_STEP, 3u);
+
+    batch_t *batch = wrapped->getBatch(wrapped, 0, &stepKey);
+    const rngKey_t *seen = g_baseFetchKey;
+    for (size_t s = 0; s < batch->size; s++) {
+        freeSample(batch->samples[s]);
+    }
+    freeBatch(batch);
+    freeReplayDataLoader(wrapped);
+    freeDataLoader(base);
+    freePpcaReplaySet(set);
+    freeFakeDataset();
+
+    TEST_ASSERT_EQUAL_PTR(&stepKey, seen);
 }
 
 /* #152 PR3a: the training loop adds the batch axis to EVERY sample it is
@@ -667,7 +703,7 @@ void testPpcaReplayedSamplesKeepTheRealSamplesNaturalShape(void) {
         .set = set, .samplesPerClass = 1, .minCount = 1, .stream = &stream};
     dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
 
-    batch_t *batch = wrapped->getBatch(wrapped, 0);
+    batch_t *batch = wrapped->getBatch(wrapped, 0, NULL);
     size_t batchSize = batch->size;
     size_t itemRank[2], itemDims[2][2], labelRank[2], labelDim0[2];
     captureSyntheticShapes(batch, itemRank, itemDims, labelRank, labelDim0);
@@ -699,7 +735,7 @@ void testExemplarReplayedSamplesKeepTheRealSamplesNaturalShape(void) {
                                  .mode = REPLAY_MODE_EXEMPLAR};
     dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
 
-    batch_t *batch = wrapped->getBatch(wrapped, 0);
+    batch_t *batch = wrapped->getBatch(wrapped, 0, NULL);
     size_t batchSize = batch->size;
     size_t itemRank[2], itemDims[2][2], labelRank[2], labelDim0[2];
     captureSyntheticShapes(batch, itemRank, itemDims, labelRank, labelDim0);
@@ -743,6 +779,7 @@ int main(void) {
     RUN_TEST(testExemplarModeRequiresBufferAndStream);
     RUN_TEST(testShufflingTheReplayWrapperOrdersTheBaseToo);
     RUN_TEST(testShufflingTheBaseAfterWrappingKeepsTheWrapperFetching);
+    RUN_TEST(testReplayFetchesItsBaseWithTheStepKey);
     RUN_TEST(testPpcaReplayedSamplesKeepTheRealSamplesNaturalShape);
     RUN_TEST(testExemplarReplayedSamplesKeepTheRealSamplesNaturalShape);
     return UNITY_END();

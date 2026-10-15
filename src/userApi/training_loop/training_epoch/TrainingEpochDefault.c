@@ -48,7 +48,9 @@ float trainingEpochDefault(layer_t **model, size_t modelSize, lossConfig_t lossC
             stepKey = trainingRngStepKey(rng);
             next.key = &stepKey;
         }
-        batch_t *batch = dataLoader->getBatch(dataLoader, i);
+        /* next.key, not &stepKey: without an rng stepKey is never set, and a
+         * loader that draws must stop instead of drawing under it. */
+        batch_t *batch = dataLoader->getBatch(dataLoader, i, next.key);
 
         /* Capture a reference to the first sample's label BEFORE
          * trainingBatchDefault consumes the samples. freeSample only

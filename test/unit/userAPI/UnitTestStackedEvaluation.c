@@ -147,9 +147,10 @@ static void freeModel(layer_t **model) {
 
 /* ---- an eval loader with no batch fails before any getBatch --------------- */
 
-static batch_t *getBatchMustNotRun(dataLoader_t *dl, size_t index) {
+static batch_t *getBatchMustNotRun(dataLoader_t *dl, size_t index, const rngKey_t *stepKey) {
     (void)dl;
     (void)index;
+    (void)stepKey;
     _exit(2);
 }
 
@@ -299,9 +300,9 @@ void testStackedSpansLoaderBatchesAndRespectsDropLast(void) {
 static size_t g_getBatchCalls;
 static getBatchFn_t g_realGetBatch;
 
-static batch_t *countingGetBatch(dataLoader_t *dl, size_t index) {
+static batch_t *countingGetBatch(dataLoader_t *dl, size_t index, const rngKey_t *stepKey) {
     g_getBatchCalls++;
-    return g_realGetBatch(dl, index);
+    return g_realGetBatch(dl, index, stepKey);
 }
 
 static size_t countGetBatch(entryPoint_t via, size_t m) {
@@ -350,8 +351,8 @@ void testEntryPointsKeepTodaysGetBatchCallCount(void) {
 /* ---- MEAN divides by the STREAMED count ---------------------------------- */
 
 /* A replay-like loader: batch 0 carries one extra sample beyond batchSize. */
-static batch_t *oneExtraSampleGetBatch(dataLoader_t *dl, size_t index) {
-    batch_t *b = g_realGetBatch(dl, index);
+static batch_t *oneExtraSampleGetBatch(dataLoader_t *dl, size_t index, const rngKey_t *stepKey) {
+    batch_t *b = g_realGetBatch(dl, index, stepKey);
     if (index == 0) {
         sample_t **grown = reserveMemory((b->size + 1) * sizeof(sample_t *));
         memcpy(grown, b->samples, b->size * sizeof(sample_t *));
@@ -468,9 +469,10 @@ static inferenceStats_t *nullShapeInference(layer_t **model, size_t n, tensor_t 
 
 /* A stream that yields no sample at all (custom getBatch returning empty
  * batches) must fail fast instead of dividing MEAN loss and metrics by 0. */
-static batch_t *emptyGetBatch(dataLoader_t *dl, size_t index) {
+static batch_t *emptyGetBatch(dataLoader_t *dl, size_t index, const rngKey_t *stepKey) {
     (void)dl;
     (void)index;
+    (void)stepKey;
     batch_t *b = reserveMemory(sizeof(batch_t));
     b->size = 0;
     b->samples = reserveMemory(sizeof(sample_t *));
@@ -552,11 +554,12 @@ void testStackedRejectsUnstackableSamples(void) {
 /* Allows WithMetrics' numClasses peek (call 0), exits 2 on any later call:
  * proves the gate fires before the stream starts. */
 static size_t g_gateCalls;
-static batch_t *getBatchMustNotRunAfterGate(dataLoader_t *dl, size_t index) {
+static batch_t *getBatchMustNotRunAfterGate(dataLoader_t *dl, size_t index,
+                                            const rngKey_t *stepKey) {
     if (g_gateCalls++ > 0) {
         _exit(2);
     }
-    return g_realGetBatch(dl, index);
+    return g_realGetBatch(dl, index, stepKey);
 }
 
 static void metricsWithSymForward(size_t m) {

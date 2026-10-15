@@ -47,7 +47,8 @@ static sample_t *getSampleByIndex(dataLoader_t *dataLoader, size_t index) {
     return dataLoader->getSample(shuffledIndex);
 }
 
-static batch_t *getBatch(dataLoader_t *dataLoader, size_t index) {
+static batch_t *getBatch(dataLoader_t *dataLoader, size_t index, const rngKey_t *stepKey) {
+    (void)stepKey;
     /* Before dataLoaderShuffle a shuffle = true loader would silently serve the
      * identity order. */
     if (dataLoader->shuffle && !dataLoader->shuffled) {

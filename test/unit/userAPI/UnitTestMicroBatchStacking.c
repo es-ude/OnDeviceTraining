@@ -1367,7 +1367,9 @@ static sample_t *getTripwireSample(size_t id) {
  * samples array carries one SPARE valid entry past batch->size, so a missing
  * check 4 trains the ragged tail silently (exit 0) instead of reading past
  * the array -- the backstop death test then pins check 4 itself. */
-static batch_t *getBatchWithOneExtraSample(dataLoader_t *dataLoader, size_t index) {
+static batch_t *getBatchWithOneExtraSample(dataLoader_t *dataLoader, size_t index,
+                                           const rngKey_t *stepKey) {
+    (void)stepKey;
     size_t n = (size_t)dataLoader->batchSize + 1;
     batch_t *batch = reserveMemory(sizeof(batch_t));
     batch->size = n;

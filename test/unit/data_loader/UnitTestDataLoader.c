@@ -28,6 +28,13 @@ _Static_assert(_Generic((&dataLoaderInit),
                    default: 0),
                "dataLoaderInit takes no shuffle seed");
 
+/* Compile-time contract: a batch fetch is handed the key of the update the
+ * batch feeds, so a loader that draws (the replay wrapper) draws under it. */
+_Static_assert(_Generic((getBatchFn_t)0,
+                   batch_t *(*)(dataLoader_t *, size_t, const rngKey_t *): 1,
+                   default: 0),
+               "getBatchFn_t takes the step key");
+
 #define PROXY_DATASET_SIZE 4
 #define PROXY_FEATURES 2
 
@@ -185,7 +192,7 @@ void testGetBatch() {
     float expectedLabels[PROXY_DATASET_SIZE][PROXY_FEATURES];
 
     for (size_t b = 0; b < numBatches; b++) {
-        batch_t *batch = dl->getBatch(dl, b);
+        batch_t *batch = dl->getBatch(dl, b, NULL);
 
         for (size_t i = 0; i < batchSize; i++) {
             size_t k = b * batchSize + i;
@@ -224,7 +231,7 @@ void testGetBatch_ShuffledMinibatchCoversAllSamples() {
      * batches; assertions wait until everything is freed. */
     float seen[PROXY_DATASET_SIZE];
     for (size_t b = 0; b < numBatches; b++) {
-        batch_t *batch = dl->getBatch(dl, b);
+        batch_t *batch = dl->getBatch(dl, b, NULL);
         for (size_t i = 0; i < batchSize; i++) {
             seen[b * batchSize + i] = ((float *)batch->samples[i]->item->data)[0];
             freeSample(batch->samples[i]);
@@ -268,7 +275,7 @@ void testGetBatch_NpyBackedDataset() {
     float expectedLabels[PROXY_DATASET_SIZE][PROXY_FEATURES];
 
     for (size_t b = 0; b < numBatches; b++) {
-        batch_t *batch = dl->getBatch(dl, b);
+        batch_t *batch = dl->getBatch(dl, b, NULL);
 
         for (size_t i = 0; i < batchSize; i++) {
             size_t k = b * batchSize + i;
@@ -358,9 +365,11 @@ static size_t reshuffleDummyGetDatasetSize(void) {
     return RESHUFFLE_DATASET_SIZE;
 }
 
-static batch_t *reshuffleDummyGetBatch(dataLoader_t *dataLoader, size_t index) {
+static batch_t *reshuffleDummyGetBatch(dataLoader_t *dataLoader, size_t index,
+                                       const rngKey_t *stepKey) {
     (void)dataLoader;
     (void)index;
+    (void)stepKey;
     return NULL; /* never invoked */
 }
 
@@ -434,7 +443,7 @@ void testGetBatchServesTheOrderOfTheKeyedShuffle(void) {
 
     float seen[PROXY_DATASET_SIZE];
     for (size_t b = 0; b < 2; b++) {
-        batch_t *batch = dl->getBatch(dl, b);
+        batch_t *batch = dl->getBatch(dl, b, NULL);
         for (size_t i = 0; i < 2; i++) {
             seen[b * 2 + i] = ((float *)batch->samples[i]->item->data)[0];
             freeSample(batch->samples[i]);
@@ -484,7 +493,7 @@ void testDataLoaderShuffleWithoutAKeyExits(void) {
 static void fetchFromAnUnshuffledLoader(void) {
     makeProxyDataset();
     dataLoader_t *dl = unshuffledProxyLoader(2);
-    (void)dl->getBatch(dl, 0);
+    (void)dl->getBatch(dl, 0, NULL);
 }
 
 void testGetBatchOfANeverShuffledLoaderExits(void) {

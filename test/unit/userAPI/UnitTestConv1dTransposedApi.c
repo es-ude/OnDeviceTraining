@@ -286,7 +286,6 @@ void testConv1dTransposedLayerInitDefaultWeightsWithinPyTorchBound(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
-    rngSetSeed(99);
     const rngKey_t initKey = rngFold(rngKeyFromSeed(99u), RNG_TAG_INIT, 0u);
     layer_t *layer = conv1dTransposedLayerInit(
         &(conv1dTransposedInit_t){
@@ -329,7 +328,6 @@ void testConv1dTransposedLayerInitKaimingUniformOverrideUsesHeBound(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
-    rngSetSeed(99);
     const rngKey_t initKey = rngFold(rngKeyFromSeed(99u), RNG_TAG_INIT, 0u);
     layer_t *layer = conv1dTransposedLayerInit(
         &(conv1dTransposedInit_t){

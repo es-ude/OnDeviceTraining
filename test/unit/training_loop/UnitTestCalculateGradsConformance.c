@@ -94,7 +94,6 @@ typedef struct zooFixture {
 
 static void beginZoo(zooFixture_t *f) {
     memset(f, 0, sizeof *f);
-    rngSetSeed(7u); /* init draws from the builders' keys, not from here */
 }
 
 static quantization_t *keepTemplate(zooFixture_t *f, quantization_t *q) {

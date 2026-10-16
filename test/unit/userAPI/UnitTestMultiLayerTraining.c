@@ -470,9 +470,7 @@ void testMultiLayerTraining_MultipleSteps_GradsAccumulate() {
  *  the conversionMatrix diagonal, honoring writeBackRounding through the
  *  target's storage slot (Task 8 Arm 2) -- textbook fake-quant training. */
 void testBfpFakeQuantTrainingLossDecreasesAndGridMoves(void) {
-    /* The SR_HALF_AWAY configs below draw from the run's keys; the global
-     * seed keeps the random init reproducible. */
-    rngSetSeed(20250811u);
+    /* The SR_HALF_AWAY configs below draw from the run's keys. */
     trainingRng_t rng;
     trainingRngInit(&rng, 20250811u);
     quantization_t *q = quantizationInitFloat();
@@ -831,7 +829,6 @@ static void freeBfpWireFixture(bfpWireFixture_t *f) {
  *  declares numGroups=2, which is WRONG for this wire -- the allocator derives
  *  6/2 = 3 groups (PR2-Decision 5). Trains 20 fake-quant SGD steps. */
 void testBfpWireFakeQuantTrainingLossDecreasesAndWirePacks(void) {
-    rngSetSeed(4242u);
     bfpWireFixture_t f;
     buildBfpWireFixture(&f, /*hidden=*/6, /*templateNumGroups=*/2, /*wireGroupSize=*/2);
     trainingRng_t rng;
@@ -890,7 +887,6 @@ void testBfpWireFakeQuantTrainingLossDecreasesAndWirePacks(void) {
  *  derived from the wire's own element count. Without the derivation the
  *  allocator would build a 7-group config over a 6-element buffer. */
 void testBfpWireGeometryIgnoresTemplateNumGroups(void) {
-    rngSetSeed(4242u);
     bfpWireFixture_t f;
     buildBfpWireFixture(&f, /*hidden=*/6, /*templateNumGroups=*/7, /*wireGroupSize=*/2);
     trainingRng_t rng;
@@ -993,7 +989,6 @@ static void moveBfpTemplateToDxWire(bfpWireFixture_t *f, bool pinPropLossMath) {
  *  moveBfpTemplateToDxWire): layer 1's backward OUT_WRITEs its dx into the BFP
  *  wire, layer 0's weight-grad GEMM IN_READs it back. */
 void testBfpDxWireAllocatesThroughInitGradTensor(void) {
-    rngSetSeed(4242u);
     bfpWireFixture_t f;
     buildBfpWireFixture(&f, /*hidden=*/6, /*templateNumGroups=*/2, /*wireGroupSize=*/2);
     moveBfpTemplateToDxWire(&f, /*pinPropLossMath=*/true);
@@ -1025,7 +1020,6 @@ void testBfpDxWireAllocatesThroughInitGradTensor(void) {
  *  to the per-tensor config instead of dying: the divisibility guard has
  *  passed, so its "pick a divisor" guidance was already followed. */
 void testBfpWireGroupSizeEqualToWireElementsNormalizesToPerTensor(void) {
-    rngSetSeed(4242u);
     bfpWireFixture_t f;
     buildBfpWireFixture(&f, /*hidden=*/6, /*templateNumGroups=*/2, /*wireGroupSize=*/6);
     trainingRng_t rng;
@@ -1052,7 +1046,6 @@ void testBfpWireGroupSizeEqualToWireElementsNormalizesToPerTensor(void) {
 /*! dx-wire twin of the normalization above: the dx wire has 6 elements,
  *  template groupSize 6 -> per-tensor {1,0}, not a {1,6} grammar death. */
 void testBfpDxWireGroupSizeEqualToWireElementsNormalizesToPerTensor(void) {
-    rngSetSeed(4242u);
     bfpWireFixture_t f;
     buildBfpWireFixture(&f, /*hidden=*/6, /*templateNumGroups=*/2, /*wireGroupSize=*/6);
     moveBfpTemplateToDxWire(&f, /*pinPropLossMath=*/true);
@@ -1086,7 +1079,6 @@ void testBfpDxWireGroupSizeEqualToWireElementsNormalizesToPerTensor(void) {
  *  make this test vacuous.) The GRAD wire is checked with every other wire
  *  when the call builds its scheduler, so it dies before the first forward. */
 void testBfpGradWireGroupSizeMismatchDiesNamingTheWire(void) {
-    rngSetSeed(4242u);
     bfpWireFixture_t f;
     buildBfpWireFixture(&f, /*hidden=*/9, /*templateNumGroups=*/2, /*wireGroupSize=*/2);
     moveBfpTemplateToDxWire(&f, /*pinPropLossMath=*/true);
@@ -1117,7 +1109,6 @@ void testBfpGradWireGroupSizeMismatchDiesNamingTheWire(void) {
  *  implemented") -- verified, then restored, before this test was accepted
  *  green. */
 void testBfpDxWireNativeBackwardTrains(void) {
-    rngSetSeed(4242u);
     bfpWireFixture_t f;
     buildBfpWireFixture(&f, /*hidden=*/6, /*templateNumGroups=*/2, /*wireGroupSize=*/2);
     moveBfpTemplateToDxWire(&f, /*pinPropLossMath=*/false);
@@ -1350,7 +1341,6 @@ static void freeBfpNativeFixture(bfpNativeFixture_t *f) {
  *  geometry and a grid the optimizer's OUT_WRITE requant moved, and (e) grads
  *  stay FLOAT32 (#261). */
 void testBfpNativeForwardTrainingLossDecreasesAndGridMoves(void) {
-    rngSetSeed(1717u);
     bfpNativeFixture_t f;
     buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false, /*weightGradStorage=*/NULL, 1717u);
 
@@ -1454,7 +1444,6 @@ void testBfpNativeForwardTrainingLossDecreasesAndGridMoves(void) {
  *  fully-derived model would also train, so loss alone cannot detect a broken
  *  flag) and training must converge. */
 void testBfpPinnedFloat32BackwardTrainingLossDecreases(void) {
-    rngSetSeed(1717u);
     bfpNativeFixture_t f;
     buildBfpNativeFixture(&f, /*pinWeightGradMath=*/true, /*weightGradStorage=*/NULL, 1717u);
     trainingRng_t rng;
@@ -1550,7 +1539,6 @@ static void captureLinear0IncomingDx(void *ctx, size_t layerIdx, layerType_t lay
 }
 
 void testBfpDxWireThroughPinnedFloat32BackwardTrains(void) {
-    rngSetSeed(2727u);
     bfpNativeFixture_t f;
     buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false, /*weightGradStorage=*/NULL, 2727u);
 
@@ -1639,7 +1627,6 @@ void testBfpDxWireThroughPinnedFloat32BackwardTrains(void) {
  *  then-unconditional BFP reject (TensorApi.c) killed the whole binary the
  *  instant this fixture built layer 0's weight grad tensor. */
 void testBfpGradStorageTrainingAccumulatesAndSteps(void) {
-    rngSetSeed(1717u);
     quantization_t *gradKnob = quantizationInitBfp(8, 8, HALF_AWAY);
     bfpNativeFixture_t f;
     buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false, gradKnob, 1717u);
@@ -1737,7 +1724,6 @@ static size_t getBfpMeanEpochDatasetSize() {
  *  this test's RED, and the finite decreasing loss is the proof the last gap
  *  in the default epoch loop is closed. */
 void testBfpGradStorageTrainsUnderReductionMean(void) {
-    rngSetSeed(1717u);
     quantization_t *gradKnob = quantizationInitBfp(8, 8, HALF_AWAY);
     bfpNativeFixture_t f;
     buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false, gradKnob, 1717u);
@@ -1851,7 +1837,6 @@ static void trainOneUpdateFromTheHelpers(bfpNativeFixture_t *f, trainingRng_t *r
  * with the same seed into the training state. */
 static size_t trainTwoUpdates(bool throughTheEpochLoop, uint64_t seed, dataLoader_t *dl,
                               uint8_t out[LOOP_PARITY_BYTES]) {
-    rngSetSeed(1717u);
     quantization_t *gradKnob = quantizationInitBfp(8, 8, SR_HALF_AWAY);
     bfpNativeFixture_t f;
     buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false, gradKnob, 1717u);
@@ -1938,7 +1923,6 @@ static void gradRecordingStep(optimizer_t *optim, const rngKey_t *updateKey) {
 
 /* The SR fixture built fresh, with `seed` into the training state. */
 static void buildSrFixtureWithRng(bfpNativeFixture_t *f, trainingRng_t *rng, uint64_t seed) {
-    rngSetSeed(1717u);
     quantization_t *gradKnob = quantizationInitBfp(8, 8, SR_HALF_AWAY);
     buildBfpNativeFixture(f, /*pinWeightGradMath=*/false, gradKnob, 1717u);
     freeQuantization(gradKnob);
@@ -2095,7 +2079,6 @@ static void freeConv1dLayerShellOnly(layer_t *layer) {
 }
 
 void testBfpConvGradStorageTrainsUnderDefaultEpoch(void) {
-    rngSetSeed(1717u);
     quantization_t *floatQ = quantizationInitFloat();
     quantization_t *gradKnob = quantizationInitBfp(8, 8, HALF_AWAY);
 
@@ -2354,7 +2337,6 @@ static void capturePr4FlattenCarry(void *ctx, size_t layerIdx, layerType_t layer
  * use a per-tensor {1, 0} BFP config: the conv weight's reduction run is
  * ic*k = 3, and the param rule demands groupSize divide it. */
 void testBfpUniformPoolActivationModelTrains(void) {
-    rngSetSeed(4242u);
     quantization_t *bfpWireQ = quantizationInitBfpGrouped(8, 8, SR_HALF_AWAY, 2, 2);
     layerQuant_t lq;
     layerQuantInitUniform(&lq, bfpWireQ);
@@ -2646,12 +2628,11 @@ static void freeGroupNormLayerShellOnly(layer_t *layer) {
  *  ARITH_BFP dispatches into Task 4's i-exp kernel) whose native backward
  *  (Task 5) CrossEntropy's fused gradient still skips entirely.
  *
- *  Seed discipline: trainingRngInit(&rng, 4242u) keys the SR_HALF_AWAY draws
- *  (rngSetSeed(4242u) the random init), so the trajectory -- and with it
- *  `lastLoss < firstLoss` -- is deterministic but key-sensitive; the
- *  structural assertions (arith slots, wire dtypes) are not. */
+ *  Seed discipline: trainingRngInit(&rng, 4242u) keys the SR_HALF_AWAY draws,
+ *  so the trajectory -- and with it `lastLoss < firstLoss` -- is deterministic
+ *  but key-sensitive; the structural assertions (arith slots, wire dtypes)
+ *  are not. */
 void testBfpUniformNormModelTrainsAndGridsMove(void) {
-    rngSetSeed(4242u);
     quantization_t *bfpWireQ = quantizationInitBfpGrouped(8, 8, SR_HALF_AWAY, 2, 2);
     layerQuant_t lq;
     layerQuantInitUniform(&lq, bfpWireQ);
@@ -2873,7 +2854,6 @@ void testBfpUniformNormModelTrainsAndGridsMove(void) {
  *  truncation hands its backward propLoss == NULL: the dgamma/dbeta ops run,
  *  the dx op does not. That is the point; dx has its own PR5 coverage. */
 void testBfpNormGradStorageAccumulatesAndSteps(void) {
-    rngSetSeed(4242u);
     quantization_t *bfpWireQ = quantizationInitBfpGrouped(8, 8, SR_HALF_AWAY, 2, 2);
     quantization_t *gradKnob = quantizationInitBfp(8, 8, SR_HALF_AWAY);
     /* The factory fills gamma and beta key-less, so their storage template
@@ -3242,7 +3222,6 @@ void unitTestSoftmaxMseTwoRowsBackwardThroughLoop(void) {
  *  code (see the task-6 report for the transcript -- a permanent poison
  *  would defeat its own purpose). */
 void unitTestUniformBfpSoftmaxMseTrains(void) {
-    rngSetSeed(4242u);
     quantization_t *bfpWireQ = quantizationInitBfp(8, 8, SR_HALF_AWAY);
     layerQuant_t lq;
     layerQuantInitUniform(&lq, bfpWireQ);

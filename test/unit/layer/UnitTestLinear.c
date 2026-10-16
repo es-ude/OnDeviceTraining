@@ -2125,7 +2125,6 @@ void testLinearLayerInitDefaultWeightsWithinPyTorchBound(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
-    rngSetSeed(7);
     const rngKey_t initKey = rngFold(rngKeyFromSeed(7u), RNG_TAG_INIT, 0u);
     layer_t *layer = linearLayerInit(
         &(linearInit_t){
@@ -2166,7 +2165,6 @@ void testLinearLayerInitXavierUniformOverrideUsesGlorotBound(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
 
-    rngSetSeed(7);
     const rngKey_t initKey = rngFold(rngKeyFromSeed(7u), RNG_TAG_INIT, 0u);
     layer_t *layer = linearLayerInit(
         &(linearInit_t){

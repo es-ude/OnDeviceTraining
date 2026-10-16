@@ -1247,7 +1247,6 @@ static tensor_t *makeSymRow(size_t n) {
  * Linear(16 -> 2) rounding its dx SR into the same kind of wire: one draw per
  * element in layer 0's forward and in layer 1's backward. */
 static void buildOrderModel(orderModel_t *m) {
-    rngSetSeed(ORDER_SEED);
     m->floatQ = quantizationInitFloat();
     m->wireQ = quantizationInitSymInt32WithBits(HALF_AWAY, 8);
     const arithmetic_t sr = {.type = ARITH_FLOAT32, .roundingMode = SR_HALF_AWAY};

@@ -2544,7 +2544,6 @@ void testConvT1dCalcWeightGradsBfpRejectsInputChannelMismatch(void) {
 /* ConvTranspose1d(2 -> 4, k = 3) over a length-2 input: 16 outputs, each
  * rounded SR into an 8-bit SYM_INT32 output by its own draw. */
 void testConv1dTransposedSrForwardIsAPureFunctionOfItsForwardOpKey(void) {
-    rngSetSeed(CONVT1D_KEYED_SEED);
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);

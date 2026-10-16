@@ -98,7 +98,6 @@ void testKaimingNormal() {
     const size_t fan_in = 784;
     float samples[n];
 
-    rngSetSeed(42);
     rngStream_t rs = rngOpen(rngKeyFromSeed(42u));
     for (size_t i = 0; i < n; i++) {
         samples[i] = kaimingNormal(1, fan_in, &rs);
@@ -124,7 +123,6 @@ void testKaimingUniform() {
     const size_t fan_in = 784;
     float samples[n];
 
-    rngSetSeed(42);
     rngStream_t rs = rngOpen(rngKeyFromSeed(42u));
     for (size_t i = 0; i < n; i++) {
         samples[i] = kaimingUniform(1, fan_in, &rs);
@@ -151,7 +149,6 @@ void testXavierNormal() {
     const size_t fan_out = 128;
     float samples[n];
 
-    rngSetSeed(42);
     rngStream_t rs = rngOpen(rngKeyFromSeed(42u));
     for (size_t i = 0; i < n; i++) {
         samples[i] = xavierNormal(1, fan_in, fan_out, &rs);
@@ -178,7 +175,6 @@ void testXavierUniform() {
     const size_t fan_out = 128;
     float samples[n];
 
-    rngSetSeed(42);
     rngStream_t rs = rngOpen(rngKeyFromSeed(42u));
     for (size_t i = 0; i < n; i++) {
         samples[i] = xavierUniform(1, fan_in, fan_out, &rs);

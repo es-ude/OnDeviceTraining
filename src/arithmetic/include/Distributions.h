@@ -46,20 +46,9 @@ typedef struct {
     } params;
 } distribution_t;
 
-/*! Gets random value from normal distribution.\n
- * Uses the Box-Muller transform.
- *
- * @param mean: Mean to be used
- * @param standardDeviation: Standard deviation to be used
- *
- * @returns Float value
- */
-float randomNormal(float mean, float standardDeviation);
-
-/*! A normal draw from a caller-owned stream: randomNormal()'s Box-Muller core
- * on the stream's unit floats (u1, then u2; u1 is redrawn while <= 1e-7). The
- * global generator is not touched. A NULL stream stops the program with a
- * named error. */
+/*! A normal draw from a caller-owned stream: the Box-Muller transform (cosine
+ * branch) on the stream's unit floats (u1, then u2; u1 is redrawn while
+ * <= 1e-7). A NULL stream stops the program with a named error. */
 float randomNormalCtx(rngStream_t *rs, float mean, float standardDeviation);
 
 /*! Fills a FLOAT32 tensor with i.i.d. N(mean, stddev^2) draws from the given
@@ -67,18 +56,9 @@ float randomNormalCtx(rngStream_t *rs, float mean, float standardDeviation);
  * tensor draws nothing and needs no stream. */
 void fillNormalFloat32Tensor(tensor_t *out, rngStream_t *rs, float mean, float stddev);
 
-/*! Gets random value from uniform distribution.
- *
- * \param min: Minimum value
- * \param max: Maximum value
- *
- * \returns Float value
- */
-float randomUniform(float min, float max);
-
 /*! A uniform draw in [min, max) from a caller-owned stream: min + u * (max - min)
- * with u the stream's next unit float. The global generator is not touched. A
- * NULL stream stops the program with a named error. */
+ * with u the stream's next unit float. A NULL stream stops the program with a
+ * named error. */
 float randomUniformCtx(rngStream_t *rs, float min, float max);
 
 /*! Gets random value from Kaiming distribution using normal distribution.

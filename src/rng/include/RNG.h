@@ -4,14 +4,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
-typedef struct {
-    uint32_t state;
-} rng32_t;
-
 /* Keyed randomness. A key names one node of a key tree, and every random value
  * is a pure function of a key and a position, so values do not depend on call
- * order, thread or recomputation. The functions in this block keep no module
- * state: safe from any thread, with caller-owned streams. */
+ * order, thread or recomputation. No function in this header keeps mutable
+ * module state: every stream is caller-owned and every key is a value, so the
+ * functions are safe from any thread. */
 typedef struct rngKey {
     uint32_t w[2];
 } rngKey_t;
@@ -80,21 +77,5 @@ float rngNextUnitFloat(rngStream_t *stream);
  * (a draw at or above it is redrawn), taken modulo bound. bound must be in
  * [1, UINT32_MAX]; any other bound stops the program with a named error. */
 size_t rngNextBounded(rngStream_t *stream, size_t bound);
-
-// NOTE: not thread-safe — all functions below use module-global RNG state.
-// When multi-threading support is added, migrate to context-passing variants.
-
-void rngShuffleIndices(size_t *indices, size_t n);
-
-void rngSetSeed(uint32_t seed);
-
-uint32_t rngGetSeed(void);
-
-/* Context-passing variant: same draw math as rngNextFloat() on caller-owned
- * state. Use for streams that must not perturb the module-global stream. The
- * global functions delegate here. */
-float rngNextFloatCtx(rng32_t *rng);
-
-float rngNextFloat(void);
 
 #endif // RNG_H

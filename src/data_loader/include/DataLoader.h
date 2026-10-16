@@ -74,7 +74,7 @@ void initDataLoader(dataLoader_t *dataLoader, getSampleFn_t getSample,
 void dataLoaderSetReshufflePerEpoch(dataLoader_t *dataLoader, bool enable);
 
 /*! Sets the sample order of a shuffle = true loader: the identity order,
- * shuffled with Fisher-Yates (the loop and swap of rngShuffleIndices) over the
+ * shuffled with Fisher-Yates (rngNextBounded, from the last slot down) over the
  * stream of `key`. The order depends on the key alone, never on the order
  * before the call, so one key always gives one order. A loader with
  * shuffle = false keeps its order and needs no key; fewer than two samples

@@ -8,9 +8,9 @@
 #include "Quantization.h"
 #include "Tensor.h"
 
-/* Core Box-Muller on an abstract uniform source. u1 floored at 1e-7f to
- * avoid log(0); cosine branch only (second variate discarded) — preserves
- * the existing randomNormal() stream exactly. */
+/* Box-Muller on two uniforms, cosine branch only (the second variate is
+ * discarded). The caller redraws u1 while it is at or below 1e-7f, so log(u1)
+ * is finite. */
 static float boxMullerFromUniforms(float u1, float u2, float mean, float standardDeviation) {
     float r = sqrtf(-2.0f * logf(u1));
     return mean + standardDeviation * r * cosf(2.0f * (float)M_PI * u2);
@@ -32,18 +32,6 @@ float randomNormalCtx(rngStream_t *rs, float mean, float standardDeviation) {
     return boxMullerFromUniforms(u1, u2, mean, standardDeviation);
 }
 
-float randomNormal(float mean, float standardDeviation) {
-    float u1 = rngNextFloat();
-    float u2 = rngNextFloat();
-
-    // Avoid log(0)
-    while (u1 <= 1e-7f) {
-        u1 = rngNextFloat();
-    }
-
-    return boxMullerFromUniforms(u1, u2, mean, standardDeviation);
-}
-
 void fillNormalFloat32Tensor(tensor_t *out, rngStream_t *rs, float mean, float stddev) {
     if (out->quantization->type != FLOAT32) {
         PRINT_ERROR("fillNormalFloat32Tensor: FLOAT32 tensors only");
@@ -54,11 +42,6 @@ void fillNormalFloat32Tensor(tensor_t *out, rngStream_t *rs, float mean, float s
     for (size_t i = 0; i < n; i++) {
         data[i] = randomNormalCtx(rs, mean, stddev);
     }
-}
-
-float randomUniform(float min, float max) {
-    float r = rngNextFloat();
-    return min + r * (max - min);
 }
 
 float randomUniformCtx(rngStream_t *rs, float min, float max) {

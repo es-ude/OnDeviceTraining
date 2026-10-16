@@ -550,20 +550,21 @@ checkpointing, limitations, literature).
   Plus `dropLast` (only
   `true` supported). `initDataLoader` fails fast on `batchSize == 0`. No
   dedicated MNIST loader in `src/` (examples preprocess to `.npy`).
-- **RNG** — global XorShift32, seedable and reproducible, **byte-mirrored in Python**
-  and CI-verified. The DataLoader shuffle (the shuffle keys of the training state), weight
-  init (the init key of each layer), PPCA/exemplar replay (the key of the update a
-  replayed batch feeds) and the Dropout Bernoulli mask (swappable fill hook) draw from
-  the keyed core below. A context-passing variant (`rng32_t` + `rngNextFloatCtx`, same
-  draw math on caller-owned state) also exists. A keyed, order-independent core also
-  exists (`rngKeyFromSeed`, `rngFold` = one Threefry-2x32-20 block per key-tree edge,
-  `rngOpen` with `rngNextU32`/`rngNextUnitFloat`/`rngNextBounded` on a keyed xorshift32
-  state; mirrored in `examples/_shared/keyed_rng.py`). Dropout masks and every stochastic
+- **RNG** — keyed and order-independent, **byte-mirrored in Python** and CI-verified:
+  `rngKeyFromSeed`, `rngFold` = one Threefry-2x32-20 block per key-tree edge, `rngOpen`
+  with `rngNextU32`/`rngNextUnitFloat`/`rngNextBounded` on a keyed xorshift32 state
+  (mirrored in `examples/_shared/keyed_rng.py`). Streams are caller-owned and no `RNG.h`
+  function keeps module state. The module-global generator is gone (`rng32_t`,
+  `rngNextFloat`, `rngNextFloatCtx`, `rngSetSeed`, `rngGetSeed`, `rngShuffleIndices`, the
+  global `randomNormal`/`randomUniform`; use `randomNormalCtx`/`randomUniformCtx` on a
+  stream). The DataLoader shuffle (the shuffle keys of the training state), weight init
+  (the init key of each layer), PPCA/exemplar replay (the key of the update a replayed
+  batch feeds), the Dropout Bernoulli mask (swappable fill hook) and every stochastic
   rounding (layer ops, conversions, the optimizer write-back and mean-scale, the BFP softmax
   shift) draw from it: the trainer's `trainingRng_t` hands each training, evaluation and
   update call its key, so a draw is a pure function of (seed, update or epoch, call, layer,
   op) and does not depend on execution order or on other draws; a draw without a key stops
-  with a named error. One seed (`trainingRngInit`) now fixes a run's sample order, initial
+  with a named error. One seed (`trainingRngInit`) fixes a run's sample order, initial
   values, replay samples and every other draw, and `trainingRngSerialize`/
   `trainingRngDeserialize` save that training state as a 24-byte `"ODTK"` record beside
   the model's ODTS file, so a stopped run resumes between epochs with the keys it would

@@ -90,9 +90,9 @@ static tensor_t *buildFloatTensor(const size_t *dims, size_t rank, const float *
 
 /* Deterministic, non-uniform values in [-1, 1): uniform data would make the
  * row-order and gather mutations vacuous. */
-static void fillRandom(float *dst, size_t n) {
+static void fillRandom(rngStream_t *rs, float *dst, size_t n) {
     for (size_t i = 0; i < n; i++) {
-        dst[i] = 2.0f * rngNextFloat() - 1.0f;
+        dst[i] = 2.0f * rngNextUnitFloat(rs) - 1.0f;
     }
 }
 
@@ -202,12 +202,13 @@ static tensor_t *bItems[B_N];
 static tensor_t *bLabels[B_N];
 
 static void initModelBData(void) {
-    rngSetSeed(1522u);
+    /* Raw key {S, 0}: same draws as the former global stream seeded with S != 0. */
+    rngStream_t rs = rngOpen((rngKey_t){{1522u, 0u}});
     for (size_t s = 0; s < B_N; s++) {
         float item[B_IN];
         float label[B_OUT];
-        fillRandom(item, B_IN);
-        fillRandom(label, B_OUT);
+        fillRandom(&rs, item, B_IN);
+        fillRandom(&rs, label, B_OUT);
         bItems[s] = buildFloatTensor((size_t[]){B_IN}, 1, item);
         bLabels[s] = buildFloatTensor((size_t[]){B_OUT}, 1, label);
     }
@@ -413,7 +414,8 @@ void testStackedLossIsRowWeightedForMeanAndPlainForSum(void) {
  * (which frees the 4 sample_t) and frees the batch shell, so every byte the
  * window does not return is the loop's. */
 void testStackedBatchReturnsItsGatherBuffers(void) {
-    rngSetSeed(1523u);
+    /* Raw key {S, 0}: same draws as the former global stream seeded with S != 0. */
+    rngStream_t rs = rngOpen((rngKey_t){{1523u, 0u}});
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
@@ -423,7 +425,7 @@ void testStackedBatchReturnsItsGatherBuffers(void) {
     tensor_t *labels[4];
     for (size_t s = 0; s < 4; s++) {
         float item[2 * 8];
-        fillRandom(item, 2 * 8);
+        fillRandom(&rs, item, 2 * 8);
         float label[A_CLASSES] = {0.0f, 0.0f, 0.0f};
         label[s % A_CLASSES] = 1.0f;
         items[s] = buildFloatTensor((size_t[]){2, 8}, 2, item);
@@ -458,7 +460,8 @@ void testStackedBatchReturnsItsGatherBuffers(void) {
 /* ---- parity across m ----------------------------------------------------- */
 
 void testStackedMatchesPerSampleOnModelA(void) {
-    rngSetSeed(1521u);
+    /* Raw key {S, 0}: same draws as the former global stream seeded with S != 0. */
+    rngStream_t rs = rngOpen((rngKey_t){{1521u, 0u}});
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
@@ -469,7 +472,7 @@ void testStackedMatchesPerSampleOnModelA(void) {
     tensor_t *labels[B_N];
     for (size_t s = 0; s < B_N; s++) {
         float item[2 * 8];
-        fillRandom(item, 2 * 8);
+        fillRandom(&rs, item, 2 * 8);
         float label[A_CLASSES] = {0.0f, 0.0f, 0.0f};
         label[classOf[s]] = 1.0f;
         items[s] = buildFloatTensor((size_t[]){2, 8}, 2, item);
@@ -915,12 +918,13 @@ static void freeModelC(layer_t **model) {
 }
 
 static void initModelCData(tensor_t **items, tensor_t **labels) {
-    rngSetSeed(1523u);
+    /* Raw key {S, 0}: same draws as the former global stream seeded with S != 0. */
+    rngStream_t rs = rngOpen((rngKey_t){{1523u, 0u}});
     for (size_t s = 0; s < C_N; s++) {
         float item[8];
         float label[4];
-        fillRandom(item, 8);
-        fillRandom(label, 4);
+        fillRandom(&rs, item, 8);
+        fillRandom(&rs, label, 4);
         items[s] = buildFloatTensor((size_t[]){2, 4}, 2, item);
         labels[s] = buildFloatTensor((size_t[]){4}, 1, label);
     }
@@ -1307,10 +1311,11 @@ static tensor_t *clsItems[CLS_N];
 static tensor_t *clsLabels[CLS_N];
 
 static void initClassifierData(void) {
-    rngSetSeed(1524u);
+    /* Raw key {S, 0}: same draws as the former global stream seeded with S != 0. */
+    rngStream_t rs = rngOpen((rngKey_t){{1524u, 0u}});
     for (size_t s = 0; s < CLS_N; s++) {
         float item[CLS_IN];
-        fillRandom(item, CLS_IN);
+        fillRandom(&rs, item, CLS_IN);
         float label[CLS_OUT] = {0.0f, 0.0f, 0.0f};
         label[s % CLS_OUT] = 1.0f;
         clsItems[s] = buildFloatTensor((size_t[]){CLS_IN}, 1, item);

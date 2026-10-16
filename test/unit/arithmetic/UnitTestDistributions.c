@@ -30,16 +30,17 @@ static float calculateStd(float *samples, size_t n) {
     return sqrtf(variance);
 }
 
-void testRandomUniform() {
+void testRandomUniformCtxStatistics(void) {
     const size_t n = 10000;
     float samples[n];
 
-    rngSetSeed(42);
+    /* Raw key {S, 0}: same draws as the former global stream seeded with S != 0. */
+    rngStream_t rs = rngOpen((rngKey_t){{42u, 0u}});
     float min_val = -0.5f;
     float max_val = 0.5f;
 
     for (size_t i = 0; i < n; i++) {
-        samples[i] = randomUniform(min_val, max_val);
+        samples[i] = randomUniformCtx(&rs, min_val, max_val);
     }
 
     float mean = calculateMean(samples, n);
@@ -56,16 +57,17 @@ void testRandomUniform() {
     TEST_ASSERT_TRUE(max <= max_val && max >= max_val - 0.01f);
 }
 
-void testRandomNormal() {
+void testRandomNormalCtxStatistics(void) {
     const size_t n = 10000;
     float samples[n];
 
-    rngSetSeed(42);
+    /* Raw key {S, 0}: same draws as the former global stream seeded with S != 0. */
+    rngStream_t rs = rngOpen((rngKey_t){{42u, 0u}});
     float expected_mean = 0.0f;
     float expected_std = 0.1f;
 
     for (size_t i = 0; i < n; i++) {
-        samples[i] = randomNormal(expected_mean, expected_std);
+        samples[i] = randomNormalCtx(&rs, expected_mean, expected_std);
     }
 
     float mean = calculateMean(samples, n);
@@ -193,20 +195,6 @@ void testXavierUniform() {
 
     TEST_ASSERT_TRUE(min >= -limit && min <= -limit * 0.9f);
     TEST_ASSERT_TRUE(max <= limit && max >= limit * 0.9f);
-}
-
-/* The keyed normal is the global normal's math (Box-Muller on the same unit
- * floats): with the global generator set to a stream's state, both draw the
- * same values. */
-void testRandomNormalCtxMatchesGlobal(void) {
-    rngStream_t rs = rngOpen(rngKeyFromSeed(42u));
-    rngSetSeed(rs.state);
-    for (size_t i = 0; i < 200; i++) {
-        // Capture both values in locals to avoid double-evaluation bug in Unity
-        float globalValue = randomNormal(1.5f, 2.0f);
-        float ctxValue = randomNormalCtx(&rs, 1.5f, 2.0f);
-        TEST_ASSERT_EQUAL_FLOAT(globalValue, ctxValue);
-    }
 }
 
 void testFillNormalFloat32TensorStats(void) {
@@ -409,15 +397,14 @@ void tearDown(void) {}
 
 int main(void) {
     UNITY_BEGIN();
-    RUN_TEST(testRandomUniform);
-    RUN_TEST(testRandomNormal);
+    RUN_TEST(testRandomUniformCtxStatistics);
+    RUN_TEST(testRandomNormalCtxStatistics);
 
     RUN_TEST(testKaimingNormal);
     RUN_TEST(testKaimingUniform);
     RUN_TEST(testXavierNormal);
     RUN_TEST(testXavierUniform);
 
-    RUN_TEST(testRandomNormalCtxMatchesGlobal);
     RUN_TEST(testFillNormalFloat32TensorStats);
     RUN_TEST(testFillNormalFloat32TensorDeterministic);
     RUN_TEST(testFillNormalRejectsNonFloat);

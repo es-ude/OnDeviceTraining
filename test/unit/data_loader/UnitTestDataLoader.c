@@ -339,34 +339,22 @@ void testNpyLoadFlat_LoadsFullMultiDimTensor() {
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, captured, 24);
 }
 
-void testShuffle() {
-    /* Stack-only test: stays in the stack-only tier per CONVENTIONS Rule 1.
-     * No heap fixtures, no frees needed. Asserts directly. */
-    size_t indices[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
-
-    rngSetSeed(1);
-    rngShuffleIndices(indices, 10);
-
-    size_t expected[] = {3, 1, 0, 2, 6, 7, 8, 5, 4, 9};
-    ODT_ASSERT_EQUAL_size_t_ARRAY(expected, indices, 10);
-}
-
 /* Order-only fixtures: dataLoaderShuffle and the init checks touch only the
  * indices (never getSample/getBatch), so a stack-only dummy dataset (no
- * tensors, no heap) is enough — mirrors testShuffle's stack-only tier. */
-#define RESHUFFLE_DATASET_SIZE 8
+ * tensors, no heap) is enough. */
+#define ORDER_DATASET_SIZE 8
 
-static sample_t *reshuffleDummyGetSample(size_t id) {
+static sample_t *orderDummyGetSample(size_t id) {
     (void)id;
     return NULL; /* never invoked: these tests only exercise indices/RNG */
 }
 
-static size_t reshuffleDummyGetDatasetSize(void) {
-    return RESHUFFLE_DATASET_SIZE;
+static size_t orderDummyGetDatasetSize(void) {
+    return ORDER_DATASET_SIZE;
 }
 
-static batch_t *reshuffleDummyGetBatch(dataLoader_t *dataLoader, size_t index,
-                                       const rngKey_t *stepKey) {
+static batch_t *orderDummyGetBatch(dataLoader_t *dataLoader, size_t index,
+                                   const rngKey_t *stepKey) {
     (void)dataLoader;
     (void)index;
     (void)stepKey;
@@ -376,10 +364,10 @@ static batch_t *reshuffleDummyGetBatch(dataLoader_t *dataLoader, size_t index,
 void testInitDataLoaderRejectsZeroBatchSize(void) {
     /* Every consumer divides datasetSize / batchSize; 0 must die at init. */
     dataLoader_t dl;
-    size_t indices[RESHUFFLE_DATASET_SIZE];
-    ASSERT_EXITS_WITH_FAILURE(initDataLoader(&dl, reshuffleDummyGetSample,
-                                             reshuffleDummyGetDatasetSize, reshuffleDummyGetBatch,
-                                             0, NULL, NULL, true, indices, true));
+    size_t indices[ORDER_DATASET_SIZE];
+    ASSERT_EXITS_WITH_FAILURE(initDataLoader(&dl, orderDummyGetSample, orderDummyGetDatasetSize,
+                                             orderDummyGetBatch, 0, NULL, NULL, true, indices,
+                                             true));
 }
 
 void testDataLoaderInitRejectsZeroBatchSize(void) {
@@ -407,30 +395,30 @@ static dataLoader_t *unshuffledProxyLoader(size_t batchSize) {
  *   fold(r, 21, e)) for (n, e) in ((8, 0), (8, 1), (4, 0))])"
  */
 void testDataLoaderShuffleIsFisherYatesFromTheIdentityUnderItsKey(void) {
-    size_t indices[RESHUFFLE_DATASET_SIZE];
+    size_t indices[ORDER_DATASET_SIZE];
     dataLoader_t dl;
-    initDataLoader(&dl, reshuffleDummyGetSample, reshuffleDummyGetDatasetSize,
-                   reshuffleDummyGetBatch, 1, NULL, NULL, true, indices, true);
+    initDataLoader(&dl, orderDummyGetSample, orderDummyGetDatasetSize, orderDummyGetBatch, 1, NULL,
+                   NULL, true, indices, true);
     const rngKey_t epoch0 = rngFold(rngKeyFromSeed(42u), RNG_TAG_SHUFFLE, 0u);
     const rngKey_t epoch1 = rngFold(rngKeyFromSeed(42u), RNG_TAG_SHUFFLE, 1u);
 
     dataLoaderShuffle(&dl, &epoch0);
-    size_t first[RESHUFFLE_DATASET_SIZE];
-    for (size_t i = 0; i < RESHUFFLE_DATASET_SIZE; i++) {
+    size_t first[ORDER_DATASET_SIZE];
+    for (size_t i = 0; i < ORDER_DATASET_SIZE; i++) {
         first[i] = indices[i];
     }
     dataLoaderShuffle(&dl, &epoch0);
-    size_t again[RESHUFFLE_DATASET_SIZE];
-    for (size_t i = 0; i < RESHUFFLE_DATASET_SIZE; i++) {
+    size_t again[ORDER_DATASET_SIZE];
+    for (size_t i = 0; i < ORDER_DATASET_SIZE; i++) {
         again[i] = indices[i];
     }
     dataLoaderShuffle(&dl, &epoch1);
 
-    size_t expected0[RESHUFFLE_DATASET_SIZE] = {1, 0, 7, 3, 2, 5, 6, 4};
-    size_t expected1[RESHUFFLE_DATASET_SIZE] = {4, 5, 1, 6, 3, 0, 2, 7};
-    ODT_ASSERT_EQUAL_size_t_ARRAY(expected0, first, RESHUFFLE_DATASET_SIZE);
-    ODT_ASSERT_EQUAL_size_t_ARRAY(expected0, again, RESHUFFLE_DATASET_SIZE);
-    ODT_ASSERT_EQUAL_size_t_ARRAY(expected1, indices, RESHUFFLE_DATASET_SIZE);
+    size_t expected0[ORDER_DATASET_SIZE] = {1, 0, 7, 3, 2, 5, 6, 4};
+    size_t expected1[ORDER_DATASET_SIZE] = {4, 5, 1, 6, 3, 0, 2, 7};
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expected0, first, ORDER_DATASET_SIZE);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expected0, again, ORDER_DATASET_SIZE);
+    ODT_ASSERT_EQUAL_size_t_ARRAY(expected1, indices, ORDER_DATASET_SIZE);
 }
 
 /* The default getBatch serves the order the shuffle set: (4, 0) above is
@@ -460,29 +448,29 @@ void testGetBatchServesTheOrderOfTheKeyedShuffle(void) {
 /* Only a draw needs a key: a loader with shuffle = false keeps its order, and
  * one sample is its own shuffled order. */
 void testDataLoaderShuffleWithoutADrawNeedsNoKey(void) {
-    size_t indices[RESHUFFLE_DATASET_SIZE];
+    size_t indices[ORDER_DATASET_SIZE];
     dataLoader_t plain;
-    initDataLoader(&plain, reshuffleDummyGetSample, reshuffleDummyGetDatasetSize,
-                   reshuffleDummyGetBatch, 1, NULL, NULL, false, indices, true);
+    initDataLoader(&plain, orderDummyGetSample, orderDummyGetDatasetSize, orderDummyGetBatch, 1,
+                   NULL, NULL, false, indices, true);
     dataLoaderShuffle(&plain, NULL);
 
     size_t single[1];
     dataLoader_t one;
-    initDataLoader(&one, reshuffleDummyGetSample, singleSampleDatasetSize, reshuffleDummyGetBatch,
-                   1, NULL, NULL, true, single, true);
+    initDataLoader(&one, orderDummyGetSample, singleSampleDatasetSize, orderDummyGetBatch, 1, NULL,
+                   NULL, true, single, true);
     dataLoaderShuffle(&one, NULL);
 
-    size_t identity[RESHUFFLE_DATASET_SIZE] = {0, 1, 2, 3, 4, 5, 6, 7};
-    ODT_ASSERT_EQUAL_size_t_ARRAY(identity, indices, RESHUFFLE_DATASET_SIZE);
+    size_t identity[ORDER_DATASET_SIZE] = {0, 1, 2, 3, 4, 5, 6, 7};
+    ODT_ASSERT_EQUAL_size_t_ARRAY(identity, indices, ORDER_DATASET_SIZE);
     TEST_ASSERT_EQUAL_size_t(0, single[0]);
     TEST_ASSERT_TRUE(one.shuffled);
 }
 
 static void shuffleWithoutAKey(void) {
-    size_t indices[RESHUFFLE_DATASET_SIZE];
+    size_t indices[ORDER_DATASET_SIZE];
     dataLoader_t dl;
-    initDataLoader(&dl, reshuffleDummyGetSample, reshuffleDummyGetDatasetSize,
-                   reshuffleDummyGetBatch, 1, NULL, NULL, true, indices, true);
+    initDataLoader(&dl, orderDummyGetSample, orderDummyGetDatasetSize, orderDummyGetBatch, 1, NULL,
+                   NULL, true, indices, true);
     dataLoaderShuffle(&dl, NULL);
 }
 
@@ -509,7 +497,6 @@ int main() {
     RUN_TEST(testGetBatch_ShuffledMinibatchCoversAllSamples);
     RUN_TEST(testGetBatch_NpyBackedDataset);
     RUN_TEST(testNpyLoadFlat_LoadsFullMultiDimTensor);
-    RUN_TEST(testShuffle);
     RUN_TEST(testInitDataLoaderRejectsZeroBatchSize);
     RUN_TEST(testDataLoaderInitRejectsZeroBatchSize);
     RUN_TEST(testDataLoaderShuffleIsFisherYatesFromTheIdentityUnderItsKey);

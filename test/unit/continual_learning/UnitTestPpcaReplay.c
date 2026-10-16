@@ -243,17 +243,14 @@ static ppcaReplay_t *buildKnownGenerator(void) {
     return g;
 }
 
-void testSampleDeterministicAndGlobalStreamUntouched(void) {
+void testSampleUnderOneSlotKeyIsDeterministic(void) {
     ppcaReplay_t *g = buildKnownGenerator();
     tensor_t *o1 = buildFloat32TensorND(1, (size_t[]){6}, NULL);
     tensor_t *o2 = buildFloat32TensorND(1, (size_t[]){6}, NULL);
-    rngSetSeed(4711);
-    uint32_t globalBefore = rngGetSeed();
     const rngKey_t slot = rngFold(rngKeyFromSeed(99u), RNG_TAG_SLOT, 0u);
     ppcaReplaySample(g, &slot, o1);
     ppcaReplaySample(g, &slot, o2);
     TEST_ASSERT_EQUAL_FLOAT_ARRAY((float *)o1->data, (float *)o2->data, 6);
-    TEST_ASSERT_EQUAL_UINT32(globalBefore, rngGetSeed());
     freeTensor(o2);
     freeTensor(o1);
     freePpcaReplay(g);
@@ -910,7 +907,7 @@ static ppcaReplayConfig_t packedConfig(size_t dim, size_t rank, size_t maxM, qty
 
 void testPackedStateSamplingDegradationBounded(void) { /* T5 */
     /* Train a FLOAT32 generator, snapshot into a packed-state twin via
-     * executeConvert, sample both with the same stream, compare stats. */
+     * executeConvert, sample both under the same slot keys, compare stats. */
     ppcaReplayConfig_t cfgF = floatConfig(8, 2, 256);
     ppcaReplay_t *gF = ppcaReplayCreate(&cfgF);
     ppcaWorkspace_t *ws = ppcaWorkspaceCreate(8, 2, 256);
@@ -1060,7 +1057,7 @@ int main(void) {
     RUN_TEST(testCreateRejectsGroupedBfpStorage);
     RUN_TEST(testCreateRejectsSymInt32Arithmetic);
     RUN_TEST(testWorkspaceCreateRejectsZeroSessionBound);
-    RUN_TEST(testSampleDeterministicAndGlobalStreamUntouched);
+    RUN_TEST(testSampleUnderOneSlotKeyIsDeterministic);
     RUN_TEST(testSampleGoldenConstants);
     RUN_TEST(testSampleCovarianceMatchesModel);
     RUN_TEST(testSampleNoiseIndependentOfKeff);

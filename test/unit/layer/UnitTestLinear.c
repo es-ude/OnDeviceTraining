@@ -1845,8 +1845,7 @@ static void linearSrForwardUnder(layer_t *layer, tensor_t *input, uint64_t seed,
     freeTensor(output);
 }
 
-/* The same key gives the same codes and scale, whatever the global stream did
- * in between; another key gives other codes. */
+/* The same key gives the same codes and scale; another key gives other codes. */
 void testLinearSrForwardIsAPureFunctionOfItsKey(void) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
@@ -1868,7 +1867,6 @@ void testLinearSrForwardIsAPureFunctionOfItsKey(void) {
     float otherScale;
 
     linearSrForwardUnder(layer, input, 0x1eafu, first, &firstScale);
-    (void)rngNextFloat();
     linearSrForwardUnder(layer, input, 0x1eafu, again, &againScale);
     linearSrForwardUnder(layer, input, 0x1eb0u, other, &otherScale);
 

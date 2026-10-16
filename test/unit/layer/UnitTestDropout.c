@@ -300,15 +300,14 @@ static size_t dropoutTrainingForwardUnder(bool bfpSr, uint64_t seed,
     return used;
 }
 
-/* The same key gives the same output, exponents and mask, whatever the global
- * stream did in between; another key gives another output. */
+/* The same key gives the same output, exponents and mask; another key gives
+ * another output. */
 static void assertDropoutTrainingForwardIsAPureFunctionOfItsKey(bool bfpSr) {
     uint8_t first[DROPOUT_PURITY_BYTES];
     uint8_t again[DROPOUT_PURITY_BYTES];
     uint8_t other[DROPOUT_PURITY_BYTES];
 
     size_t n = dropoutTrainingForwardUnder(bfpSr, 0xd0d0u, first);
-    (void)rngNextFloat();
     size_t againBytes = dropoutTrainingForwardUnder(bfpSr, 0xd0d0u, again);
     dropoutTrainingForwardUnder(bfpSr, 0xd0d1u, other);
 

@@ -1300,8 +1300,8 @@ static size_t captureCallResult(orderModel_t *m, trainingStats_t *stats, uint8_t
     return used;
 }
 
-/* Copies of the wires a standalone run needs, plus an unrelated keyed draw and
- * a global draw at every trace event. */
+/* Copies of the wires a standalone run needs, plus an unrelated keyed draw at
+ * every trace event. */
 typedef struct {
     tensor_t *forward0; /* layer 0's output = layer 1's forward input */
     tensor_t *gradIn1;  /* the loss grad entering layer 1's backward */
@@ -1314,7 +1314,6 @@ static void interposingSink(void *ctx, size_t layerIdx, layerType_t type, const 
     (void)type;
     orderCapture_t *c = ctx;
     (void)rngNextUnitFloat(&c->unrelated);
-    (void)rngNextFloat();
     if (layerIdx == 0 && strcmp(phase, "fwd") == 0) {
         copyTensor(c->forward0, t);
     } else if (layerIdx == 1 && strcmp(phase, "agrad") == 0) {

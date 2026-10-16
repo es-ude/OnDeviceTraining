@@ -93,9 +93,8 @@ static inline void assertKeyedCellSawOneStream(uint32_t chainState, uint32_t pyt
 typedef size_t (*keyedRun_t)(void *ctx, uint64_t seed, bool stochastic,
                              uint8_t out[KEYED_DRAW_MAX_BYTES]);
 
-/* The same key repeats the result, whatever the global stream did in between;
- * another key draws another result; without draws the key changes nothing
- * (so the difference is the draws'). */
+/* The same key repeats the result; another key draws another result; without
+ * draws the key changes nothing (so the difference is the draws'). */
 static inline void assertKeyedRunIsPure(keyedRun_t run, void *ctx, uint64_t seed) {
     uint8_t first[KEYED_DRAW_MAX_BYTES];
     uint8_t again[KEYED_DRAW_MAX_BYTES];
@@ -104,7 +103,6 @@ static inline void assertKeyedRunIsPure(keyedRun_t run, void *ctx, uint64_t seed
     uint8_t fixedOther[KEYED_DRAW_MAX_BYTES];
 
     size_t n = run(ctx, seed, true, first);
-    (void)rngNextFloat();
     size_t againBytes = run(ctx, seed, true, again);
     run(ctx, seed + 1u, true, other);
     run(ctx, seed, false, fixed);

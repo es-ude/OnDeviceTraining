@@ -273,8 +273,8 @@ void testFillNormalRejectsNonFloat(void) {
     freeTensor(t);
 }
 
-/* The keyed uniform scales the stream's unit floats, u -> min + u * (max - min),
- * and leaves the global generator alone. Golds from the Python mirror (the
+/* The keyed uniform scales the stream's unit floats, u -> min + u * (max - min).
+ * Golds from the Python mirror (the
  * stream of the root of seed 42; -1 + 2u is exact in float32), from the
  * repository root:
  *   uv run python -c "from examples._shared.keyed_rng import (key_from_seed,
@@ -284,13 +284,11 @@ void testFillNormalRejectsNonFloat(void) {
 void testRandomUniformCtxScalesTheStreamsUnitFloats(void) {
     const float gold[3] = {-0.13961052894592285f, -0.08065330982208252f, 0.9558695554733276f};
     rngStream_t rs = rngOpen(rngKeyFromSeed(42u));
-    const uint32_t globalBefore = rngGetSeed();
     float draws[3];
     for (size_t i = 0; i < 3; i++) {
         draws[i] = randomUniformCtx(&rs, -1.0f, 1.0f);
     }
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(gold, draws, 3);
-    TEST_ASSERT_EQUAL_UINT32(globalBefore, rngGetSeed());
 }
 
 static void uniformDrawWithoutAStream(void) {
@@ -303,14 +301,13 @@ void testRandomUniformCtxExitsWithoutAStream(void) {
 }
 
 /* The uniform init helpers draw from the stream they are handed — the keyed
- * uniform over their bound — and leave the global generator alone. */
+ * uniform over their bound. */
 void testUniformInitHelpersDrawFromTheirStream(void) {
     const rngKey_t key = rngKeyFromSeed(42u);
     rngStream_t got = rngOpen(key);
     rngStream_t want = rngOpen(key);
     const float kaimingLimit = 1.0f * sqrtf(3.0f / 784.0f);
     const float xavierLimit = 1.0f * sqrtf(6.0f / (float)(784 + 128));
-    const uint32_t globalBefore = rngGetSeed();
     for (size_t i = 0; i < 4; i++) {
         /* Locals: Unity evaluates a macro argument more than once. */
         const float k = kaimingUniform(1.0f, 784, &got);
@@ -320,7 +317,6 @@ void testUniformInitHelpersDrawFromTheirStream(void) {
         const float xWant = randomUniformCtx(&want, -xavierLimit, xavierLimit);
         TEST_ASSERT_EQUAL_FLOAT(xWant, x);
     }
-    TEST_ASSERT_EQUAL_UINT32(globalBefore, rngGetSeed());
 }
 
 static void kaimingDrawWithoutAStream(void) {
@@ -333,14 +329,13 @@ void testKaimingUniformExitsWithoutAStream(void) {
 }
 
 /* The normal init helpers draw from the stream they are handed -- the keyed
- * normal at their standard deviation -- and leave the global generator alone. */
+ * normal at their standard deviation. */
 void testNormalInitHelpersDrawFromTheirStream(void) {
     const rngKey_t key = rngKeyFromSeed(42u);
     rngStream_t got = rngOpen(key);
     rngStream_t want = rngOpen(key);
     const float kaimingStd = 1.0f / sqrtf(784.0f);
     const float xavierStd = 1.0f * sqrtf(2.0f / (float)(784 + 128));
-    const uint32_t globalBefore = rngGetSeed();
     for (size_t i = 0; i < 4; i++) {
         /* Locals: Unity evaluates a macro argument more than once. */
         const float k = kaimingNormal(1.0f, 784, &got);
@@ -350,7 +345,6 @@ void testNormalInitHelpersDrawFromTheirStream(void) {
         const float xWant = randomNormalCtx(&want, 0.0f, xavierStd);
         TEST_ASSERT_EQUAL_FLOAT(xWant, x);
     }
-    TEST_ASSERT_EQUAL_UINT32(globalBefore, rngGetSeed());
 }
 
 static void normalDrawWithoutAStream(void) {

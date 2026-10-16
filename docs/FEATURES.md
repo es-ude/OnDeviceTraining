@@ -553,8 +553,10 @@ checkpointing, limitations, literature).
 - **RNG** — keyed and order-independent, **byte-mirrored in Python** and CI-verified:
   `rngKeyFromSeed`, `rngFold` = one Threefry-2x32-20 block per key-tree edge, `rngOpen`
   with `rngNextU32`/`rngNextUnitFloat`/`rngNextBounded` on a keyed xorshift32 state
-  (mirrored in `examples/_shared/keyed_rng.py`). Streams are caller-owned and no `RNG.h`
-  function keeps module state. The module-global generator is gone (`rng32_t`,
+  (mirrored in `examples/_shared/keyed_rng.py`, the tag table included as `TAGS`;
+  `examples/_shared/DETERMINISM.md` states the key-derivation contract). Streams are
+  caller-owned and no `RNG.h` function keeps module state. The module-global generator
+  is gone (`rng32_t`,
   `rngNextFloat`, `rngNextFloatCtx`, `rngSetSeed`, `rngGetSeed`, `rngShuffleIndices`, the
   global `randomNormal`/`randomUniform`; use `randomNormalCtx`/`randomUniformCtx` on a
   stream). The DataLoader shuffle (the shuffle keys of the training state), weight init

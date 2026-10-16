@@ -2,6 +2,7 @@
 
 The golden values are those of test/unit/rng/UnitTestRNG.c. The mirror is also
 compared with the C code through a harness compiled against src/rng/RNG.c."""
+import re
 import struct
 import subprocess
 import sys
@@ -14,6 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from examples._shared.keyed_rng import (  # noqa: E402
+    TAGS,
     UINT32_MAX,
     fold,
     key_from_seed,
@@ -132,6 +134,38 @@ def test_keyed_shuffle_draws_nothing_below_two_samples():
     assert keyed_shuffle(1, DERIVED_KEY) == [0]
     with pytest.raises(ValueError):
         keyed_shuffle(-1, DERIVED_KEY)
+
+
+def _c_tags(tmp_path: Path) -> dict[str, int]:
+    """RNG.h's tag table as the C preprocessor of the default build defines it."""
+    probe = tmp_path / "tags.c"
+    probe.write_text('#include "RNG.h"\n')
+    result = subprocess.run(
+        ["cc", "-std=c11", "-dM", "-E", f"-I{REPO_ROOT / 'src' / 'rng' / 'include'}", str(probe)],
+        check=True, capture_output=True, text=True)
+    tags = {}
+    for line in result.stdout.splitlines():
+        if line.startswith("#define RNG_TAG_"):
+            match = re.fullmatch(r"#define RNG_TAG_([A-Z0-9_]+) ([0-9]+)u", line)
+            assert match, f"a tag define this test cannot read: {line!r}"
+            tags[match.group(1)] = int(match.group(2))
+    return tags
+
+
+def test_tags_mirror_the_c_tag_table(tmp_path):
+    """Read through the preprocessor, so a tag added to RNG.h but not to TAGS fails
+    here. A tag behind a build flag is checked only in a run with that flag."""
+    c_tags = _c_tags(tmp_path)
+    assert c_tags, "no RNG_TAG_ define reached the preprocessor"
+    assert TAGS == c_tags
+
+
+def test_tags_are_nonzero_and_unique():
+    """0 is never a tag and no two tags share a value, so every key path decodes
+    one way. Gaps are allowed: a tag behind a build flag keeps its value."""
+    values = list(TAGS.values())
+    assert all(1 <= value <= UINT32_MAX for value in values)
+    assert len(set(values)) == len(values)
 
 
 @pytest.fixture(scope="module")

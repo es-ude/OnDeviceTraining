@@ -13,6 +13,39 @@ from __future__ import annotations
 UINT32_MAX = 0xFFFFFFFF
 UINT64_MAX = 0xFFFFFFFFFFFFFFFF
 
+# The tags of the key tree's edges (fold's `tag`): RNG_TAG_<NAME> in
+# src/rng/include/RNG.h, which python/tests/test_keyed_rng.py checks this table
+# against. Append-only and never renumbered: a tag's value is part of the value
+# contract.
+TAGS = {
+    "STEP": 1,
+    "CALL": 2,
+    "LAYER": 3,
+    "FORWARD": 4,
+    "BACKWARD": 5,
+    "EVAL": 6,
+    "OP": 7,
+    "STAGE": 8,
+    "KERNEL": 9,
+    "OUT": 10,
+    "ACC": 11,
+    "CONVERT": 12,
+    "DROPOUT_MASK": 13,
+    "DROPOUT_BRIDGE": 14,
+    "SOFTMAX_SHIFT": 15,
+    "NORM_DX": 16,
+    "LOSS": 17,
+    "UPDATE": 18,
+    "PARAM": 19,
+    "SCALE": 20,
+    "SHUFFLE": 21,
+    "INIT": 22,
+    "CL_REPLAY": 23,
+    "CLASS": 24,
+    "SLOT": 25,
+    "SHUFFLE_EVAL": 26,
+}
+
 # Threefry-2x32 rotation constants; round i uses entry i % 8.
 _ROTATIONS = (13, 15, 26, 6, 17, 29, 16, 24)
 # Threefry's key-schedule parity constant.

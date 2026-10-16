@@ -145,9 +145,9 @@ which macOS ERE ignores):
 - `odtHook(Fire|Set)`, `layerFunctions`, `lossFunctions`: hooks, layer and
   loss execution;
 - `rng[A-Z]…(` after a non-identifier character: every call of the RNG API,
-  which names its functions `rng` plus an upper-case letter (`rngSetSeed`,
-  `rngNextFloatCtx`, the keyed API that replaces the global stream); a
-  lower-case `rngseed(` would not match, and the type `rng32_t` is not a call;
+  which names its functions `rng` plus an upper-case letter (`rngOpen`,
+  `rngFold`, `rngNextU32`); a lower-case `rngseed(` would not match, and the
+  type `rngStream_t` is not a call;
 - `.data` or `->data` followed by `=`, a compound assignment (`+=`, `<<=`, …),
   `++` or `--`, or preceded by `++`/`--` (an operand without blanks, e.g.
   `++(s->wires[i].hdr->data)`): every write of a data pointer, in
@@ -173,7 +173,7 @@ look at the rest of R1 and R4: a write of other header content
 rest on review and the tests. Within its scope it misses a
 write through a copied pointer (`uint8_t **p = &h->data; *p = x;`),
 `memcpy(&h->data, …)`, a macro that expands to a banned call, a function
-pointer taken without a call (`f = rngNextFloat;`), a call split across
+pointer taken without a call (`f = rngNextU32;`), a call split across
 lines, a parenthesized lvalue before the operator (`(h->data)++`), a
 block comment between `data` and the operator (`h->data /* x */ = b;`), a
 `++`/`--` operand that holds a blank (`++(f(a, b)->data)`), and row code in
@@ -235,8 +235,7 @@ decisions and those with nothing in force yet are left out.
   without a second signature sweep. No per-layer flags.
 - **remat D9** Acceptance: a call on any row and plan is bit-identical to
   the store-all driver. Parameter grads, loss, output snapshot, SYM scales
-  and BFP exponents compare by `memcmp`; while the global RNG stream exists,
-  its state after the call matches too (remat P2).
+  and BFP exponents compare by `memcmp`.
 - **remat D11** ARENA and HEAP are peer rows behind one swappable,
   step-by-step scheduler, which picks the steps. Placement offsets are
   ARENA-private. Every memory block comes from `reserveMemory`.
@@ -302,9 +301,9 @@ decisions and those with nothing in force yet are left out.
   kept verbatim, until remat D57 replaced it by an explicit reference), a
   row-contract harness, deaths matched on message substrings, tampered
   schedulers, conformance P1-P10, poison on both rows.
-- **remat D44** Keyed randomness: every random value becomes a function of
-  an explicit key and a counter, and the module-global stream goes away.
-  In force now: every stochastic rounding and Dropout mask draws from a
+- **remat D44** Keyed randomness: every random value is a function of an
+  explicit key and a counter; there is no module-global stream. Every
+  stochastic rounding and Dropout mask draws from a
   keyed stream handed down from the trainer's training state, and so does
   weight init (the init key of each layer) and the data-loader shuffle (the
   shuffle keys of the training state) and replay (the key of the update a
@@ -360,9 +359,10 @@ decisions and those with nothing in force yet are left out.
 STORE_ALL reference, remat D57).
 - **remat P1** Parameter grads, loss, output snapshot, SYM scales and BFP
   exponents equal the oracle's byte for byte.
-- **remat P2** The global RNG stream after the call equals the oracle's;
-  once a call draws nothing from it, it is unchanged across the call; it
-  retires with the stream.
+- **remat P2** Retired with the module-global RNG stream, whose state after
+  the call it compared with the oracle's. Every draw is keyed, so P1 covers
+  the drawn values, and the `remat-row-contract` gate keeps rows from
+  calling the RNG.
 - **remat P3** Exactly four hook events per call, in order.
 - **remat P4** The trace's `(idx, phase)` sequence and tensors match.
 - **remat P5** Once the caller frees the returned `trainingStats_t`,

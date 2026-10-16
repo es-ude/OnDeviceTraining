@@ -20,7 +20,6 @@
 #include "Pool1dApi.h"
 #include "QuantLayerApi.h"
 #include "Quantization.h"
-#include "RNG.h"
 #include "ReluApi.h"
 #include "RematPlace.h"
 #include "RematPlan.h"
@@ -1241,21 +1240,15 @@ static void walkWithTheContractChecks(fixture_t *f, rematScheduler_t *s, rematMo
 }
 
 /* Two calls: ARENA reuses its resident bytes without zeroing, HEAP reserves
- * fresh blocks (VERIFY poisons both at every bind on the test presets). While
- * the global stream exists (PR1-PR5c), a row neither draws from nor reseeds
- * it; the conv factories draw their initial weights, so the pin starts
- * after the model is built. */
+ * fresh blocks (VERIFY poisons both at every bind on the test presets). */
 static void assertRowContract(rowInit_t init, void (*build)(fixture_t *),
                               const rematPlanSpec_t *spec) {
     fixture_t f;
     build(&f);
-    uint32_t seed = rngGetSeed();
     rematScheduler_t s = init(&f, spec);
     walkWithTheContractChecks(&f, &s, REMAT_MODE_TRAIN);
     walkWithTheContractChecks(&f, &s, REMAT_MODE_TRAIN);
-    TEST_ASSERT_EQUAL_UINT32_MESSAGE(seed, rngGetSeed(), "a row touched the global RNG stream");
     freeFixture(&f, &s);
-    TEST_ASSERT_EQUAL_UINT32_MESSAGE(seed, rngGetSeed(), "a row touched the global RNG stream");
 }
 
 /* Evaluation on a persistent scheduler between training calls: every call
@@ -1266,13 +1259,11 @@ static void assertRowContractAcrossModes(rowInit_t init, void (*build)(fixture_t
                                          const rematPlanSpec_t *spec) {
     fixture_t f;
     build(&f);
-    uint32_t seed = rngGetSeed();
     rematScheduler_t s = init(&f, spec);
     walkWithTheContractChecks(&f, &s, REMAT_MODE_TRAIN);
     walkWithTheContractChecks(&f, &s, REMAT_MODE_EVAL);
     walkWithTheContractChecks(&f, &s, REMAT_MODE_EVAL);
     walkWithTheContractChecks(&f, &s, REMAT_MODE_TRAIN);
-    TEST_ASSERT_EQUAL_UINT32_MESSAGE(seed, rngGetSeed(), "a row touched the global RNG stream");
     freeFixture(&f, &s);
 }
 

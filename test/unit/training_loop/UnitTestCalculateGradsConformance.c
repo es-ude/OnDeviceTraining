@@ -25,7 +25,6 @@
 #include "QuantizationApi.h"
 #include "RNG.h"
 #include "RematPlan.h"
-#include "RematTestDecorators.h"
 #include "RematTestFixtures.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -79,7 +78,6 @@ static tensor_t *makeBoolMask(size_t elements) {
 
 #define ZOO_MAX_LAYERS 12
 #define ZOO_MAX_TEMPLATES 4
-#define ZOO_SEED 4242u
 typedef struct zooFixture {
     layer_t *model[ZOO_MAX_LAYERS];
     size_t n;
@@ -224,8 +222,7 @@ static void buildAllFrozen(zooFixture_t *f) {
     mseLabel(f, 2);
 }
 
-/* Dropout draws its mask from its layer's mask stream under the call key, so
- * a call leaves the global stream untouched (remat P2). */
+/* Dropout draws its mask from its layer's mask stream under the call key. */
 static void buildDropout(zooFixture_t *f) {
     beginZoo(f);
     f->mask = makeBoolMask(4);
@@ -417,7 +414,7 @@ static void buildAdaptiveAvgPool(zooFixture_t *f) {
     mseLabel(f, 2);
 }
 
-/* ---- capturing one call (remat P1-P5, P9) ---- */
+/* ---- capturing one call (remat P1, P3-P5, P9) ---- */
 
 /* Static, never reserved, so a capture cannot move the memory-profile
  * counters it sits beside (remat P5). */
@@ -430,7 +427,6 @@ typedef struct blob {
 #define CAPTURE_MAX_EVENTS 8
 typedef struct runCapture {
     float loss;
-    uint32_t seedAfter;                    /* remat P2 */
     size_t numEvents;                      /* remat P3 */
     odtEvent_t events[CAPTURE_MAX_EVENTS]; /* remat P3 */
     size_t memBefore;                      /* remat P5 */
@@ -590,8 +586,8 @@ static inputSnapshot_t g_input;
 typedef enum { RUN_DRIVER, RUN_REFERENCE } runner_t;
 
 /* One call from the same starting state: zeroed grads (they accumulate,
- * OUT_ACC), restored BN running stats, the global stream at ZOO_SEED. The
- * counting hook is installed around the call only. */
+ * OUT_ACC) and restored BN running stats. The counting hook is installed
+ * around the call only. */
 static void captureRun(runner_t runner, zooFixture_t *f, const trainingCall_t *call,
                        runCapture_t *cap) {
     forEachGrad(f->model, f->n, NULL);
@@ -600,14 +596,12 @@ static void captureRun(runner_t runner, zooFixture_t *f, const trainingCall_t *c
     cap->values.used = 0;
     cap->trace.used = 0;
     snapshotInput(&g_input, f->x);
-    rngSetSeed(ZOO_SEED);
 
     cap->memBefore = memProfileCurrentBytes();
     odtHookSet(countingHook, cap);
     trainingStats_t *stats = tracedGrads(f->model, f->n, f->loss, REDUCTION_MEAN, f->x, f->y,
                                          recordingSink, &cap->trace, call);
     odtHookSet(NULL, NULL);
-    cap->seedAfter = rngGetSeed();
     cap->loss = stats->loss;
     captureTensor(&cap->values, stats->output);
     freeTrainingStats(stats);
@@ -642,9 +636,6 @@ static void assertSameValues(const char *cell) {
 
 static void assertConforms(const char *cell) {
     assertSameValues(cell);
-    TEST_ASSERT_EQUAL_HEX32_MESSAGE(
-        ZOO_SEED, g_driver.seedAfter,
-        say(cell, "remat P2: the call leaves the global stream untouched"));
     TEST_ASSERT_EQUAL_size_t_MESSAGE(4, g_driver.numEvents,
                                      say(cell, "remat P3: four hook events"));
     TEST_ASSERT_EQUAL_size_t_MESSAGE(g_oracle.numEvents, g_driver.numEvents,
@@ -712,10 +703,8 @@ static void captureTwoCalls(runner_t runner, zooFixture_t *f, const trainingCall
     forEachGrad(f->model, f->n, NULL);
     bnStateIo(f, runner != RUN_DRIVER, NULL);
     cap->values.used = 0;
-    rngSetSeed(ZOO_SEED);
     freeTrainingStats(runOnce(f, first));
     trainingStats_t *stats = runOnce(f, second);
-    cap->seedAfter = rngGetSeed();
     cap->loss = stats->loss;
     captureTensor(&cap->values, stats->output);
     freeTrainingStats(stats);
@@ -738,8 +727,6 @@ static void assertTwoCallsMatchTheReference(void (*build)(zooFixture_t *)) {
                     &(trainingCall_t){.key = &keys[1]}, &g_driver);
     freeZoo(&f);
     assertSameValues(NULL);
-    TEST_ASSERT_EQUAL_HEX32_MESSAGE(ZOO_SEED, g_driver.seedAfter,
-                                    "remat P2: two calls leave the global stream untouched");
 }
 
 /* ---- the NULL scheduler against the reference, fixture by fixture ---- */
@@ -1255,7 +1242,7 @@ static void initCell(rematScheduler_t *s, const matrixCell_t *cell, zooFixture_t
     TEST_ASSERT_TRUE_MESSAGE(built, say(cell->name, "init"));
 }
 
-/* One cell's own observations; the call's remat P1-P5 and P9 land in g_driver. */
+/* One cell's own observations; the call's remat P1, P3-P5 and P9 land in g_driver. */
 typedef struct cellRun {
     rematReport_t report;
     size_t memBeforeInit;
@@ -1492,11 +1479,9 @@ static void captureEditedTwoCalls(zooFixture_t *f, rematScheduler_t *s, const rn
                                   fixtureEdit_t edit, runCapture_t *cap) {
     forEachGrad(f->model, f->n, NULL);
     cap->values.used = 0;
-    rngSetSeed(ZOO_SEED);
     freeTrainingStats(runEditedCall(f, s, &keys[0]));
     edit(f);
     trainingStats_t *stats = runEditedCall(f, s, &keys[1]);
-    cap->seedAfter = rngGetSeed();
     cap->loss = stats->loss;
     captureTensor(&cap->values, stats->output);
     freeTrainingStats(stats);
@@ -1523,9 +1508,6 @@ static void assertEditedTwoCallsMatchTheReference(void (*build)(zooFixture_t *),
         rematSchedulerDeinit(&s);
         freeZoo(&f);
         assertSameValues(cell->name);
-        TEST_ASSERT_EQUAL_HEX32_MESSAGE(
-            ZOO_SEED, g_driver.seedAfter,
-            say(cell->name, "remat P2: two calls leave the global stream untouched"));
     }
 }
 
@@ -1607,42 +1589,6 @@ void testASchedulerBuiltOnSampleARunsSampleB(void) {
         freeTensor(sampleB);
         freeZoo(&f);
         assertConforms(cell->name);
-    }
-}
-
-/* ---- remat P2 has teeth: a row that draws is caught ---- */
-
-/* A row that draws from the global stream in next(): every value still
- * matches, only remat P2 can see it. */
-static bool drawingNext(rematScheduler_t *s, rematStep_t *st) {
-    (void)rngNextFloat();
-    return decoratedNext(s, st);
-}
-
-static const rematSchedulerFunctions_t g_drawing = {.name = "drawing",
-                                                    .begin = decoratedBegin,
-                                                    .next = drawingNext,
-                                                    .done = decoratedDone,
-                                                    .end = decoratedEnd,
-                                                    .deinit = decoratedDeinit};
-
-void testADrawingRowFailsP2(void) {
-    for (size_t k = 0; k < MATRIX_CELLS; k++) {
-        const matrixCell_t *cell = &g_cells[k];
-        zooFixture_t f;
-        buildMlp(&f);
-        captureReferenceRun(&f, NULL, &g_oracle);
-        rematScheduler_t s;
-        initCell(&s, cell, &f);
-        s.fns = &g_drawing;
-        captureRun(RUN_DRIVER, &f, &(trainingCall_t){.remat = &s}, &g_driver);
-        s.fns = &rematSchedulerFunctions[s.type];
-        rematSchedulerDeinit(&s);
-        freeZoo(&f);
-        assertSameValues(cell->name);
-        TEST_ASSERT_NOT_EQUAL_HEX32_MESSAGE(
-            ZOO_SEED, g_driver.seedAfter,
-            say(cell->name, "remat P2: a drawing row moves the stream"));
     }
 }
 
@@ -2015,7 +1961,6 @@ int main(void) {
     RUN_TEST(testTwoCallsAcrossARoundingEditMatchTheReference);
     RUN_TEST(testTwoCallsAcrossAnInputRegroupMatchTheReference);
     RUN_TEST(testASchedulerBuiltOnSampleARunsSampleB);
-    RUN_TEST(testADrawingRowFailsP2);
     RUN_TEST(testAMarkedInputEvaluatesToAnUnmarkedOutputOnEitherRow);
     RUN_TEST(testEvalOverTheZooMatchesTheNullPathOnArena);
     RUN_TEST(testEvalOverTheZooMatchesTheNullPathOnHeap);

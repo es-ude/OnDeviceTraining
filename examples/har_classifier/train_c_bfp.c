@@ -911,7 +911,6 @@ int main(void) {
 #endif
 
     layer_t *model[MODEL_SIZE];
-    rngSetSeed(g_seed);
     trainingRng_t rng;
     trainingRngInit(&rng, g_seed);
 #ifdef ODT_MEM_PROFILE

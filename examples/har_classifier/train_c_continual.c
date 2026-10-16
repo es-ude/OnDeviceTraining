@@ -379,7 +379,6 @@ int main(void) {
     /* Model: identical topology + seed handling as train_c.c. */
     layerQuant_t lq;
     layerQuantInitUniform(&lq, quantizationInitFloat());
-    rngSetSeed(g_seed);
     trainingRng_t rng;
     trainingRngInit(&rng, g_seed);
     layer_t *model[MODEL_SIZE];

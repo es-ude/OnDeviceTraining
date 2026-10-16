@@ -369,7 +369,6 @@ int main(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, quantizationInitFloat());
 
-    rngSetSeed(g_seed);
     trainingRng_t rng;
     trainingRngInit(&rng, g_seed);
     rematCall.rng = &rng;

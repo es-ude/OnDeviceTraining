@@ -362,10 +362,9 @@ int main(void) {
 
     layer_t *model[MODEL_SIZE];
     /* Fixed seed. The 10-seed sweep harness patches the sed-able literal on
-     * the next line per run; that one variable seeds both the global rng and
-     * the keys of the training draws. */
+     * the next line per run; that one variable seeds the keys of the training
+     * draws. */
     const uint32_t seed = 1u;
-    rngSetSeed(seed);
     trainingRng_t rng;
     trainingRngInit(&rng, seed);
     buildModel(model, &mq, &rng);

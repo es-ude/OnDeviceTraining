@@ -285,9 +285,7 @@ int main(void) {
 
     /* Weight init draws from the init keys of `rng`, seeded with SEED, so the
      * run log's "seed" is the seed actually used (DETERMINISM.md contract).
-     * The global seed below no longer feeds any draw; it stays until the
-     * global RNG is retired. BIT_PARITY loads a state_dict over these weights. */
-    rngSetSeed(SEED);
+     * BIT_PARITY loads a state_dict over these weights. */
     trainingRng_t rng;
     trainingRngInit(&rng, SEED);
 

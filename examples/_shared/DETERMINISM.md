@@ -52,6 +52,4 @@ tolerance, never both.
 compiles a C harness against `src/rng/RNG.c` at test time and checks
 `keyed_shuffle` against the same Fisher-Yates loop on the keyed stream; the C
 unit tests check `dataLoaderShuffle` and `trainingRun` against orders derived
-with `keyed_shuffle`. The module-global generator's shuffle
-(`rngSetSeed` + `rngShuffleIndices`, mirrored by `xorshift32.py`) is checked
-the same way by `python/tests/test_xorshift32.py`.
+with `keyed_shuffle`.

@@ -28,7 +28,7 @@ Read in this order:
 | `test/unit/` | Unity unit tests, one `UnitTest<LibName>.c` per library |
 | `examples/` | End-to-end training demos (PyTorch reference + C twin + parity harness) |
 | `python/odt/` | Python package skeleton: `providers/`, `ir2c/`, `resource_estimator/` (not started yet) |
-| `python/tests/` | Active pytest suite for the `examples/` tooling (parity helpers, XorShift32 mirror, log schema, `.npy` writer, stack-watermark checker, memory/sweep aggregation) plus a package-import smoke test |
+| `python/tests/` | Active pytest suite for the `examples/` tooling (parity helpers, keyed RNG mirror, log schema, `.npy` writer, stack-watermark checker, memory/sweep aggregation) plus a package-import smoke test |
 | `docs/` | Feature matrix, conventions index, per-subsystem conventions |
 | `cmake/` | Build helpers and external dependencies (Unity via FetchContent) |
 | `.github/workflows/` | CI pipeline (see [CI](#branches-prs--ci)) |

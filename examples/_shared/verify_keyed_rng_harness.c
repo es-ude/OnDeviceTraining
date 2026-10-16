@@ -16,8 +16,9 @@
  *   u32 <w0> <w1> <count>           count draws of the key's stream (hex)
  *   float <w0> <w1> <count>         count unit floats as bit patterns (hex)
  *   bounded <w0> <w1> <bound>...    one bounded draw per bound on one stream (decimal)
- *   shuffle <w0> <w1> <n>           0 ... n-1 shuffled over the key's stream with the loop
- *                                   and swap of rngShuffleIndices (decimal)
+ *   shuffle <w0> <w1> <n>           0 ... n-1 shuffled over the key's stream by Fisher-Yates
+ *                                   from the last slot down (decimal); exit 2 with a
+ *                                   message when n indices do not fit in memory
  */
 static unsigned long long number(const char *text) {
     return strtoull(text, NULL, 0);
@@ -67,11 +68,13 @@ int main(int argc, char **argv) {
         rngStream_t stream = rngOpen(keyOf(argv + 2));
         const unsigned long long count = number(argv[4]);
         if (count > SIZE_MAX / sizeof(size_t)) {
-            return 2; /* the buffer size count * sizeof(size_t) would wrap */
+            fprintf(stderr, "shuffle: n = %llu would overflow the buffer size\n", count);
+            return 2;
         }
         const size_t n = (size_t)count;
         size_t *order = malloc((n > 0 ? n : 1) * sizeof *order);
         if (order == NULL) {
+            fprintf(stderr, "shuffle: cannot allocate %zu indices\n", n);
             return 2;
         }
         for (size_t i = 0; i < n; ++i) {

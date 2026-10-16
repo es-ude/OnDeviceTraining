@@ -4,14 +4,13 @@ Keys form a tree: key_from_seed(seed) is the root and fold(parent, tag, index)
 one edge (one Threefry-2x32-20 block). Every random value comes from the stream
 that open_stream(key) starts, so it depends on its key's path only, never on
 draw order. Backend v1 is xorshift32 on a keyed state. A stream is its
-state (an int); each draw returns (new_state, value), like xorshift32._bounded.
+state (an int); each draw returns (new_state, value).
 python/tests/test_keyed_rng.py checks every function against the C code
 through a compiled harness.
 """
 from __future__ import annotations
 
-from examples._shared.xorshift32 import UINT32_MAX, xorshift32_next
-
+UINT32_MAX = 0xFFFFFFFF
 UINT64_MAX = 0xFFFFFFFFFFFFFFFF
 
 # Threefry-2x32 rotation constants; round i uses entry i % 8.
@@ -35,6 +34,20 @@ def _state(state: int) -> int:
 
 def _rotl32(x: int, r: int) -> int:
     return ((x << r) | (x >> (32 - r))) & UINT32_MAX
+
+
+def xorshift32_next(state: int) -> int:
+    """One step of Marsaglia 32-bit XorShift with shifts (13, 17, 5).
+
+    All XOR-shifts are masked to 32 bits because Python ints are
+    arbitrary-precision; without the mask, drift appears within ~30
+    iterations.
+    """
+    x = state
+    x ^= (x << 13) & UINT32_MAX
+    x ^= x >> 17
+    x ^= (x << 5) & UINT32_MAX
+    return x
 
 
 def fold(parent: tuple[int, int], tag: int, index: int) -> tuple[int, int]:
@@ -63,8 +76,7 @@ def key_from_seed(seed: int) -> tuple[int, int]:
 
 
 def open_stream(key: tuple[int, int]) -> int:
-    """The v1 state, mirroring rngOpen: w[0], else w[1], else 1. Not the seed
-    rule of xorshift32.py (0 -> UINT32_MAX)."""
+    """The v1 state, mirroring rngOpen: w[0], else w[1], else 1."""
     w0, w1 = _word("key[0]", key[0]), _word("key[1]", key[1])
     return w0 if w0 else (w1 if w1 else 1)
 

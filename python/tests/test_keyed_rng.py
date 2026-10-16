@@ -14,6 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from examples._shared.keyed_rng import (  # noqa: E402
+    UINT32_MAX,
     fold,
     key_from_seed,
     keyed_shuffle,
@@ -21,8 +22,8 @@ from examples._shared.keyed_rng import (  # noqa: E402
     next_u32,
     next_unit_float,
     open_stream,
+    xorshift32_next,
 )
-from examples._shared.xorshift32 import UINT32_MAX  # noqa: E402
 
 # Threefry-2x32 known answers at 20 rounds, read as fold((KEY0, KEY1), CTR0, CTR1).
 # Source: tests/kat_vectors of https://github.com/DEShawResearch/random123 at
@@ -39,6 +40,15 @@ DERIVED_KEY = (0x929C8A01, 0xEE4A7510)
 
 def _float_bits(value: float) -> int:
     return struct.unpack("<I", struct.pack("<f", value))[0]
+
+
+def test_xorshift32_next_known_vectors():
+    """The first four steps from state 1 with shifts (13, 17, 5)."""
+    state, drawn = 1, []
+    for _ in range(4):
+        state = xorshift32_next(state)
+        drawn.append(state)
+    assert drawn == [270369, 67634689, 2647435461, 307599695]
 
 
 def test_fold_matches_threefry_known_answers():
@@ -60,7 +70,7 @@ def test_key_from_seed_matches_reference():
 
 
 def test_open_stream_reduces_the_key_to_a_non_zero_state():
-    """w[0], else w[1], else 1 -- not xorshift32.py's 0 -> UINT32_MAX alias."""
+    """w[0], else w[1], else 1: state 0 would stick, so it never occurs."""
     assert open_stream(DERIVED_KEY) == 0x929C8A01
     assert open_stream((0, 0xEE4A7510)) == 0xEE4A7510
     assert open_stream((0, 0)) == 1
@@ -199,3 +209,26 @@ def test_mirror_matches_c_keyed_shuffle(harness):
             result = subprocess.run([str(harness), "shuffle", *map(str, key), str(n)],
                                     check=True, capture_output=True, text=True)
             assert [int(tok) for tok in result.stdout.split()] == keyed_shuffle(n, key), (key, n)
+
+
+# The harness's largest shuffle on a 64-bit host: SIZE_MAX / sizeof(size_t).
+SHUFFLE_LIMIT = ((1 << 64) - 1) // 8
+
+
+def _shuffle(harness: Path, n: int) -> subprocess.CompletedProcess:
+    return subprocess.run([str(harness), "shuffle", "1", "0", str(n)], capture_output=True,
+                          text=True)
+
+
+def test_harness_names_a_shuffle_whose_buffer_size_would_wrap(harness):
+    result = _shuffle(harness, SHUFFLE_LIMIT + 1)
+    assert result.returncode == 2
+    assert "would overflow the buffer size" in result.stderr
+
+
+def test_harness_names_a_failed_allocation(harness):
+    """SHUFFLE_LIMIT passes the size check and asks for about 2**64 bytes, which no
+    64-bit host grants."""
+    result = _shuffle(harness, SHUFFLE_LIMIT)
+    assert result.returncode == 2
+    assert "cannot allocate" in result.stderr

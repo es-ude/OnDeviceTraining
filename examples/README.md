@@ -58,7 +58,7 @@ presets do not build them.
 ## Shared infrastructure
 
 All examples share `examples/_shared/`: seed constants, the Python mirror
-of the C `XorShift32` RNG (so train-set shuffle order matches between
+of the C keyed RNG (so train-set shuffle order matches between
 implementations), JSON log schema, parity-tolerance helpers, matplotlib
 plotting helpers, and a tiny C `.npy` writer for prediction output.
 

@@ -3,7 +3,7 @@
 Keys form a tree: key_from_seed(seed) is the root and fold(parent, tag, index)
 one edge (one Threefry-2x32-20 block). Every random value comes from the stream
 that open_stream(key) starts, so it depends on its key's path only, never on
-draw order. Backend v1 is today's xorshift32 on a keyed state. A stream is its
+draw order. Backend v1 is xorshift32 on a keyed state. A stream is its
 state (an int); each draw returns (new_state, value), like xorshift32._bounded.
 python/tests/test_keyed_rng.py checks every function against the C code
 through a compiled harness.
@@ -83,7 +83,8 @@ def next_unit_float(state: int) -> tuple[int, float]:
 
 
 def next_bounded(state: int, bound: int) -> tuple[int, int]:
-    """Mirrors rngNextBounded: today's rejection rule, its >= included."""
+    """Mirrors rngNextBounded: a draw at or above UINT32_MAX - UINT32_MAX % bound
+    is redrawn, the accepted draw is taken modulo bound."""
     if bound == 0:
         raise ValueError("rngNextBounded: bound is 0")
     if bound > UINT32_MAX:
@@ -99,9 +100,9 @@ def next_bounded(state: int, bound: int) -> tuple[int, int]:
 
 
 def keyed_shuffle(n: int, key: tuple[int, int]) -> list[int]:
-    """Fisher-Yates from the identity order over the stream of `key`, with the
-    loop and swap of rngShuffleIndices: from the last slot down, slot i swaps
-    with next_bounded(i + 1). n < 2 draws nothing."""
+    """Fisher-Yates from the identity order over the stream of `key`: from the
+    last slot down, slot i swaps with next_bounded(i + 1). n < 2 draws
+    nothing."""
     if n < 0:
         raise ValueError(f"n must be >= 0, got {n}")
     order = list(range(n))

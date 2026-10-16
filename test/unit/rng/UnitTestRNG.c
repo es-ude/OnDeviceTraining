@@ -8,23 +8,68 @@ void setUp(void) {}
 
 void tearDown(void) {}
 
-void testRngNextFloatInRange(void) {
-    rngSetSeed(42);
+/* ---- test-local reference, written from the definitions, not from RNG.c ---- */
+
+/* One xorshift32 step (shifts 13, 17, 5). */
+static uint32_t referenceXorshift32(uint32_t x) {
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    return x;
+}
+
+/* Fisher-Yates from the identity order, from state `state` (n >= 1): from the
+ * last slot down, slot i swaps with the next draw below UINT32_MAX -
+ * UINT32_MAX % (i + 1), taken modulo i + 1; a draw at or above it is redrawn. */
+static void referenceShuffle(size_t *order, size_t n, uint32_t state) {
+    for (size_t i = 0; i < n; ++i) {
+        order[i] = i;
+    }
+    for (size_t i = n - 1; i > 0; --i) {
+        const uint32_t bound = (uint32_t)(i + 1);
+        do {
+            state = referenceXorshift32(state);
+        } while (state >= UINT32_MAX - UINT32_MAX % bound);
+        const size_t j = state % bound;
+        const size_t tmp = order[i];
+        order[i] = order[j];
+        order[j] = tmp;
+    }
+}
+
+/* The same loop and swap with rngNextBounded on the stream of `key`. */
+static void keyedShuffle(size_t *order, size_t n, rngKey_t key) {
+    rngStream_t stream = rngOpen(key);
+    for (size_t i = 0; i < n; ++i) {
+        order[i] = i;
+    }
+    for (size_t i = n - 1; i > 0; --i) {
+        const size_t j = rngNextBounded(&stream, i + 1);
+        const size_t tmp = order[i];
+        order[i] = order[j];
+        order[j] = tmp;
+    }
+}
+
+void testRngNextUnitFloatInRange(void) {
+    /* Raw key {S, 0}: same draws as the former global stream seeded with S != 0. */
+    rngStream_t stream = rngOpen((rngKey_t){{42u, 0u}});
     for (size_t i = 0; i < 10000; i++) {
-        float val = rngNextFloat();
+        float val = rngNextUnitFloat(&stream);
         TEST_ASSERT_TRUE(val >= 0.0f);
         TEST_ASSERT_TRUE(val < 1.0f);
     }
 }
 
-void testRngNextFloatDistribution(void) {
-    rngSetSeed(42);
+void testRngNextUnitFloatDistribution(void) {
+    /* Raw key {S, 0}: same draws as the former global stream seeded with S != 0. */
+    rngStream_t stream = rngOpen((rngKey_t){{42u, 0u}});
     const size_t n = 10000;
     const size_t buckets = 10;
     size_t counts[10] = {0};
 
     for (size_t i = 0; i < n; i++) {
-        float val = rngNextFloat();
+        float val = rngNextUnitFloat(&stream);
         size_t bucket = (size_t)(val * buckets);
         if (bucket >= buckets) {
             bucket = buckets - 1;
@@ -36,86 +81,6 @@ void testRngNextFloatDistribution(void) {
     for (size_t b = 0; b < buckets; b++) {
         TEST_ASSERT_INT_WITHIN(200, 1000, (int)counts[b]);
     }
-}
-
-void testRngNextFloatReproducible(void) {
-    float first[100];
-    float second[100];
-
-    rngSetSeed(123);
-    for (size_t i = 0; i < 100; i++) {
-        first[i] = rngNextFloat();
-    }
-
-    rngSetSeed(123);
-    for (size_t i = 0; i < 100; i++) {
-        second[i] = rngNextFloat();
-    }
-
-    for (size_t i = 0; i < 100; i++) {
-        TEST_ASSERT_EQUAL_FLOAT(first[i], second[i]);
-    }
-}
-
-void testRngShuffleUsesGlobalState(void) {
-    size_t indices1[10] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
-    size_t indices2[10] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
-
-    rngSetSeed(42);
-    rngShuffleIndices(indices1, 10);
-
-    rngSetSeed(42);
-    rngShuffleIndices(indices2, 10);
-
-    for (size_t i = 0; i < 10; i++) {
-        TEST_ASSERT_EQUAL_UINT(indices1[i], indices2[i]);
-    }
-}
-
-void testRngSetSeedZeroNotAliasedToOne(void) {
-    rngSetSeed(0);
-    float a0 = rngNextFloat();
-
-    rngSetSeed(1);
-    float b0 = rngNextFloat();
-
-    TEST_ASSERT_TRUE(a0 != b0);
-
-    rngSetSeed(0);
-    float a1 = rngNextFloat();
-    TEST_ASSERT_EQUAL_FLOAT(a0, a1);
-}
-
-void testRngNextFloatCtxReproducible(void) {
-    rng32_t a = {.state = 123};
-    rng32_t b = {.state = 123};
-    for (size_t i = 0; i < 100; i++) {
-        float val_a = rngNextFloatCtx(&a);
-        float val_b = rngNextFloatCtx(&b);
-        TEST_ASSERT_EQUAL_FLOAT(val_a, val_b);
-    }
-}
-
-void testRngNextFloatCtxMatchesGlobalStream(void) {
-    /* The global rngNextFloat() must be a bit-identical delegate of the ctx
-     * variant: same seed -> same sequence. Seed 123 maps to state 123. */
-    rng32_t ctx = {.state = 123};
-    rngSetSeed(123);
-    for (size_t i = 0; i < 100; i++) {
-        float global_val = rngNextFloat();
-        float ctx_val = rngNextFloatCtx(&ctx);
-        TEST_ASSERT_EQUAL_FLOAT(global_val, ctx_val);
-    }
-}
-
-void testRngNextFloatCtxDoesNotTouchGlobalStream(void) {
-    rngSetSeed(77);
-    uint32_t before = rngGetSeed();
-    rng32_t ctx = {.state = 999};
-    for (size_t i = 0; i < 50; i++) {
-        (void)rngNextFloatCtx(&ctx);
-    }
-    TEST_ASSERT_EQUAL_UINT32(before, rngGetSeed());
 }
 
 /* ---- keyed core: rngFold ---- */
@@ -191,18 +156,6 @@ void testRngFoldKeysDoNotDependOnDerivationOrder(void) {
     TEST_ASSERT_TRUE(keysEqual(c1, c2));
 }
 
-/* The keyed core keeps no module state: deriving keys never moves the global
- * stream that the not yet migrated consumers draw from. */
-void testRngFoldDoesNotMoveTheGlobalStream(void) {
-    rngSetSeed(77);
-    const uint32_t before = rngGetSeed();
-    rngKey_t key = {{1u, 2u}};
-    for (uint32_t i = 0; i < 50u; ++i) {
-        key = rngFold(rngFold(key, 7u, i), 3u, i);
-    }
-    TEST_ASSERT_EQUAL_UINT32(before, rngGetSeed());
-}
-
 /* ---- keyed core: rngKeyFromSeed ---- */
 
 /* Seed 0 is the all-zero counter under the all-zero key, Random123's first
@@ -224,19 +177,11 @@ void testRngKeyFromSeedIsTheFoldOfItsSeedWords(void) {
         keysEqual(rngFold(zero, 0xffffffffu, 0xffffffffu), rngKeyFromSeed(UINT64_MAX)));
 }
 
-/* Unlike rngSetSeed, seed 0 is not an alias of UINT32_MAX. */
+/* Seed 0 is an ordinary seed: its key is neither that of 0xFFFFFFFF nor that
+ * of 1. */
 void testRngKeyFromSeedTreatsZeroAsAnOrdinarySeed(void) {
     TEST_ASSERT_FALSE(keysEqual(rngKeyFromSeed(0u), rngKeyFromSeed(0xFFFFFFFFu)));
     TEST_ASSERT_FALSE(keysEqual(rngKeyFromSeed(0u), rngKeyFromSeed(1u)));
-}
-
-void testRngKeyFromSeedDoesNotMoveTheGlobalStream(void) {
-    rngSetSeed(77);
-    const uint32_t before = rngGetSeed();
-    for (uint64_t seed = 0; seed < 50u; ++seed) {
-        (void)rngKeyFromSeed(seed);
-    }
-    TEST_ASSERT_EQUAL_UINT32(before, rngGetSeed());
 }
 
 /* ---- keyed core: rngOpen and rngNextU32 (backend v1, keyed xorshift32) ---- */
@@ -252,10 +197,10 @@ void testRngOpenReducesTheKeyToANonZeroState(void) {
     TEST_ASSERT_EQUAL_HEX32(1u, bothWordsZero.state);
 }
 
-/* Backend v1 is today's generator on a keyed state: from state 1 the first
- * draws are the known xorshift32 vectors, and from any state s each draw is
- * the state that the global step leaves in an rng32_t holding s. */
-void testRngNextU32ReproducesTheGlobalGenerator(void) {
+/* Backend v1 is xorshift32 on a keyed state: from state 1 the first draws are
+ * the known xorshift32 vectors, and from any state each draw is one step of
+ * the reference recurrence, the draw being the new state. */
+void testRngNextU32IsTheXorshift32Recurrence(void) {
     rngStream_t one = rngOpen((rngKey_t){{1u, 0xdeadbeefu}});
     TEST_ASSERT_EQUAL_UINT32(270369u, rngNextU32(&one));
     TEST_ASSERT_EQUAL_UINT32(67634689u, rngNextU32(&one));
@@ -263,11 +208,11 @@ void testRngNextU32ReproducesTheGlobalGenerator(void) {
     TEST_ASSERT_EQUAL_UINT32(307599695u, rngNextU32(&one));
     const uint32_t states[4] = {1u, 42u, 0x9e3779b9u, 0xffffffffu};
     for (size_t k = 0; k < 4; ++k) {
-        rng32_t ctx = {.state = states[k]};
+        uint32_t expected = states[k];
         rngStream_t stream = rngOpen((rngKey_t){{states[k], 0u}});
         for (size_t i = 0; i < 100; ++i) {
-            (void)rngNextFloatCtx(&ctx);
-            TEST_ASSERT_EQUAL_HEX32(ctx.state, rngNextU32(&stream));
+            expected = referenceXorshift32(expected);
+            TEST_ASSERT_EQUAL_HEX32(expected, rngNextU32(&stream));
         }
     }
 }
@@ -332,16 +277,6 @@ void testRngReopenedStreamReplaysItsValues(void) {
     }
 }
 
-void testRngKeyedStreamsDoNotMoveTheGlobalStream(void) {
-    rngSetSeed(77);
-    const uint32_t before = rngGetSeed();
-    rngStream_t stream = rngOpen(rngKeyFromSeed(5u));
-    for (size_t i = 0; i < 50; ++i) {
-        (void)rngNextU32(&stream);
-    }
-    TEST_ASSERT_EQUAL_UINT32(before, rngGetSeed());
-}
-
 /* ---- keyed core: rngNextUnitFloat ---- */
 
 static uint32_t floatBits(float value) {
@@ -350,15 +285,17 @@ static uint32_t floatBits(float value) {
     return bits;
 }
 
-/* Today's mapping bit for bit, and in [0, 1). Unity's float compare has a
- * tolerance, so the identity compares bit patterns. */
-void testRngNextUnitFloatIsBitIdenticalToTheGlobalMapping(void) {
+/* The unit float is the draw's top 24 bits times 2^-24, which a float holds
+ * exactly, so it lies in [0, 1). Unity's float compare has a tolerance, so the
+ * check compares bit patterns. */
+void testRngNextUnitFloatIsTheTop24BitsOfTheDraw(void) {
     const uint32_t states[3] = {1u, 0x929c8a01u, 0xffffffffu};
     for (size_t k = 0; k < 3; ++k) {
-        rng32_t ctx = {.state = states[k]};
+        uint32_t draw = states[k];
         rngStream_t stream = rngOpen((rngKey_t){{states[k], 0u}});
         for (size_t i = 0; i < 1000; ++i) {
-            const float expected = rngNextFloatCtx(&ctx);
+            draw = referenceXorshift32(draw);
+            const float expected = (float)(draw >> 8) * 0x1p-24f;
             const float actual = rngNextUnitFloat(&stream);
             TEST_ASSERT_EQUAL_HEX32(floatBits(expected), floatBits(actual));
             TEST_ASSERT_TRUE(actual >= 0.0f && actual < 1.0f);
@@ -378,36 +315,38 @@ void testRngNextUnitFloatMatchesReferenceOnADerivedKey(void) {
 /* ---- keyed core: rngNextBounded ---- */
 
 /* Fisher-Yates with the keyed bounded draw on the stream of {seed, 0} gives
- * the permutation of rngSetSeed(seed) + rngShuffleIndices: the same rejection
- * rule, bias included. n <= 1000, seed != 0 (rngSetSeed aliases 0). */
-static void assertShuffleIdentity(size_t n, uint32_t seed) {
+ * the reference permutation of state seed (seed != 0, n <= 1000). */
+static void assertShuffleMatchesTheReference(size_t n, uint32_t seed) {
     size_t expected[1000];
     size_t actual[1000];
-    for (size_t i = 0; i < n; ++i) {
-        expected[i] = i;
-        actual[i] = i;
-    }
-    rngSetSeed(seed);
-    rngShuffleIndices(expected, n);
-    rngStream_t stream = rngOpen((rngKey_t){{seed, 0u}});
-    for (size_t i = n - 1; i > 0; --i) {
-        const size_t j = rngNextBounded(&stream, i + 1);
-        const size_t tmp = actual[i];
-        actual[i] = actual[j];
-        actual[j] = tmp;
-    }
+    referenceShuffle(expected, n, seed);
+    keyedShuffle(actual, n, (rngKey_t){{seed, 0u}});
     for (size_t i = 0; i < n; ++i) {
         TEST_ASSERT_EQUAL_size_t(expected[i], actual[i]);
     }
 }
 
-/* 0xfc7d0b53's first draw is 0xfffffed8, exactly the rejection limit for
- * bound 1000, so this case also checks that the limit itself is rejected. */
-void testRngNextBoundedReproducesTheGlobalShuffle(void) {
-    assertShuffleIdentity(10, 42u);
-    assertShuffleIdentity(100, 99u);
-    assertShuffleIdentity(1000, 1u);
-    assertShuffleIdentity(1000, 0xfc7d0b53u);
+/* Recorded values, from the repository root:
+ *   uv run python -c "from examples._shared.keyed_rng import (keyed_shuffle as ks,
+ *   open_stream as o, next_u32 as u, next_bounded as nb); s = o((0xFC7D0B53, 0)); print(
+ *   ks(10, (1, 0)), hex(u(s)[1]), nb(s, 1000)[1])"
+ * prints [3, 1, 0, 2, 6, 7, 8, 5, 4, 9] 0xfffffed8 218. 0xfc7d0b53's first draw
+ * is exactly the rejection limit for bound 1000, so the limit itself must be
+ * rejected and the second draw gives 218. */
+void testRngNextBoundedShufflesLikeTheReference(void) {
+    const size_t recorded[10] = {3, 1, 0, 2, 6, 7, 8, 5, 4, 9};
+    size_t order[10];
+    keyedShuffle(order, 10, (rngKey_t){{1u, 0u}});
+    for (size_t i = 0; i < 10; ++i) {
+        TEST_ASSERT_EQUAL_size_t(recorded[i], order[i]);
+    }
+    TEST_ASSERT_EQUAL_HEX32(UINT32_MAX - UINT32_MAX % 1000u, referenceXorshift32(0xfc7d0b53u));
+    rngStream_t atTheLimit = rngOpen((rngKey_t){{0xfc7d0b53u, 0u}});
+    TEST_ASSERT_EQUAL_size_t(218, rngNextBounded(&atTheLimit, 1000));
+    assertShuffleMatchesTheReference(10, 42u);
+    assertShuffleMatchesTheReference(100, 99u);
+    assertShuffleMatchesTheReference(1000, 1u);
+    assertShuffleMatchesTheReference(1000, 0xfc7d0b53u);
 }
 
 /* Bounds 10, 1000, then the smallest and the largest valid bound on one
@@ -449,34 +388,25 @@ void testRngNextBoundedExitsAboveUint32Max(void) {
 
 int main(void) {
     UNITY_BEGIN();
-    RUN_TEST(testRngNextFloatInRange);
-    RUN_TEST(testRngNextFloatDistribution);
-    RUN_TEST(testRngNextFloatReproducible);
-    RUN_TEST(testRngShuffleUsesGlobalState);
-    RUN_TEST(testRngSetSeedZeroNotAliasedToOne);
-    RUN_TEST(testRngNextFloatCtxReproducible);
-    RUN_TEST(testRngNextFloatCtxMatchesGlobalStream);
-    RUN_TEST(testRngNextFloatCtxDoesNotTouchGlobalStream);
+    RUN_TEST(testRngNextUnitFloatInRange);
+    RUN_TEST(testRngNextUnitFloatDistribution);
     RUN_TEST(testRngFoldMatchesThreefryKnownAnswers);
     RUN_TEST(testRngFoldIsNotSymmetricInTagAndIndex);
     RUN_TEST(testRngFoldDistinctEdgesGiveDistinctKeys);
     RUN_TEST(testRngFoldTwoEdgePathMatchesReference);
     RUN_TEST(testRngFoldKeysDoNotDependOnDerivationOrder);
-    RUN_TEST(testRngFoldDoesNotMoveTheGlobalStream);
     RUN_TEST(testRngKeyFromSeedMatchesReference);
     RUN_TEST(testRngKeyFromSeedIsTheFoldOfItsSeedWords);
     RUN_TEST(testRngKeyFromSeedTreatsZeroAsAnOrdinarySeed);
-    RUN_TEST(testRngKeyFromSeedDoesNotMoveTheGlobalStream);
     RUN_TEST(testRngOpenReducesTheKeyToANonZeroState);
-    RUN_TEST(testRngNextU32ReproducesTheGlobalGenerator);
+    RUN_TEST(testRngNextU32IsTheXorshift32Recurrence);
     RUN_TEST(testRngNextU32MatchesReferenceOnADerivedKey);
     RUN_TEST(testRngOpenedZeroKeysNeverStickAtZero);
     RUN_TEST(testRngStreamsDrawIndependently);
     RUN_TEST(testRngReopenedStreamReplaysItsValues);
-    RUN_TEST(testRngKeyedStreamsDoNotMoveTheGlobalStream);
-    RUN_TEST(testRngNextUnitFloatIsBitIdenticalToTheGlobalMapping);
+    RUN_TEST(testRngNextUnitFloatIsTheTop24BitsOfTheDraw);
     RUN_TEST(testRngNextUnitFloatMatchesReferenceOnADerivedKey);
-    RUN_TEST(testRngNextBoundedReproducesTheGlobalShuffle);
+    RUN_TEST(testRngNextBoundedShufflesLikeTheReference);
     RUN_TEST(testRngNextBoundedMatchesReferenceOnADerivedKey);
     RUN_TEST(testRngNextBoundedExitsOnBoundZero);
 #if SIZE_MAX > UINT32_MAX

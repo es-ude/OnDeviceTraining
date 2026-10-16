@@ -110,8 +110,9 @@ float rngNextUnitFloat(rngStream_t *stream) {
     return (float)(rngNextU32(stream) >> 8) / 0x1p24f;
 }
 
-/* Today's rule, its >= and its residue bias included (a non-zero xorshift32
- * state never draws 0): identity with the global shuffle is the contract. */
+/* The rejection rule is part of the value contract, its >= and its residue
+ * bias included (a non-zero xorshift32 state never draws 0): every keyed
+ * shuffle and the Python mirror repeat it. */
 size_t rngNextBounded(rngStream_t *stream, size_t bound) {
     /* Bound 0 has no valid draw. A draw is 32 bits wide, so a bound above
      * UINT32_MAX cannot be met: the 32-bit cast below would divide by zero

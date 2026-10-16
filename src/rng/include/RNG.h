@@ -58,8 +58,8 @@ rngKey_t rngKeyFromSeed(uint64_t seed);
 #define RNG_TAG_SHUFFLE_EVAL 26u
 
 /* The draws under one key. Owned by its caller, usually on the stack of the op
- * that draws. Backend v1: keyed xorshift32, today's draw math. Start a stream
- * with rngOpen only: a hand-set state 0 would draw 0 forever. */
+ * that draws. Backend v1: keyed xorshift32. Start a stream with rngOpen only:
+ * a hand-set state 0 would draw 0 forever. */
 typedef struct rngStream {
     uint32_t state;
 } rngStream_t;
@@ -69,15 +69,15 @@ typedef struct rngStream {
  * the values of the first computation. */
 rngStream_t rngOpen(rngKey_t key);
 
-/* The next draw: one xorshift32 step (shifts 13, 17, 5), the math of
- * rngNextFloatCtx's step. */
+/* The next draw: one xorshift32 step (shifts 13, 17, 5); the draw is the new
+ * state. */
 uint32_t rngNextU32(rngStream_t *stream);
 
-/* A float in [0, 1) from the next draw: the mapping of rngNextFloatCtx. */
+/* A float in [0, 1) from the next draw: its top 24 bits over 2^24. */
 float rngNextUnitFloat(rngStream_t *stream);
 
-/* A draw in [0, bound) by the rejection rule of rngShuffleIndices, so a keyed
- * Fisher-Yates reproduces today's permutations. bound must be in
+/* A draw in [0, bound): the next draw below UINT32_MAX - UINT32_MAX % bound
+ * (a draw at or above it is redrawn), taken modulo bound. bound must be in
  * [1, UINT32_MAX]; any other bound stops the program with a named error. */
 size_t rngNextBounded(rngStream_t *stream, size_t bound);
 

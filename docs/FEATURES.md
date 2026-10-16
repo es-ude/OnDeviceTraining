@@ -559,7 +559,8 @@ checkpointing, limitations, literature).
   is gone (`rng32_t`,
   `rngNextFloat`, `rngNextFloatCtx`, `rngSetSeed`, `rngGetSeed`, `rngShuffleIndices`, the
   global `randomNormal`/`randomUniform`; use `randomNormalCtx`/`randomUniformCtx` on a
-  stream). The DataLoader shuffle (the shuffle keys of the training state), weight init
+  stream; the CI job `no-global-rng` keeps these names out of every C source). The
+  DataLoader shuffle (the shuffle keys of the training state), weight init
   (the init key of each layer), PPCA/exemplar replay (the key of the update a replayed
   batch feeds), the Dropout Bernoulli mask (swappable fill hook) and every stochastic
   rounding (layer ops, conversions, the optimizer write-back and mean-scale, the BFP softmax

@@ -165,3 +165,6 @@ tolerance, never both.
   `test_tags_are_nonzero_and_unique`); `python/tests/test_keyed_sampler.py`
   checks `KeyedShuffleSampler` against the orders the C training-loop tests
   expect.
+- No module-global stream: the CI job `no-global-rng` (`.github/workflows/ci.yml`,
+  run locally by the devenv `ci` script) fails on any name of the deleted
+  generator in a tracked `.c`/`.h` file under `src/`, `test/` or `examples/`.

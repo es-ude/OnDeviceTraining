@@ -276,6 +276,144 @@ in
 					set -e
 				fi
 				# end remat-row-contract
+				# no-global-rng (#4): the run block of the no-global-rng job in
+				# .github/workflows/ci.yml, verbatim but for indentation. Outside a git work
+				# tree (a jj secondary workspace) git grep cannot scan: skip loudly here, never
+				# pass vacuously (the CI job fails closed instead).
+				if ! git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+					echo "no-global-rng: SKIPPED, not a git work tree (jj secondary workspace?); this is NOT a pass"
+				else
+					set +e
+					BAN='(^|[^A-Za-z0-9_])(rng32_t|rngNextFloat|rngNextFloatCtx|rngSetSeed|rngGetSeed|rngShuffleIndices|randomNormal|randomUniform|randfloat)([^A-Za-z0-9_]|$)'
+					ban_git() {
+						root=$1
+						shift
+						git -C "$root" "$@" -- 'src/*.c' 'src/*.h' 'test/*.c' 'test/*.h' 'examples/*.c' 'examples/*.h'
+					}
+					# Sets hits to the matches and links to the tracked symlinks under the repo
+					# root $1; returns 2 when git itself fails (git grep rc 1 only means no match).
+					scan() {
+						hits=$(ban_git "$1" grep -nE -e "$BAN")
+						rc=$?
+						if [ "$rc" -gt 1 ]; then
+							echo "no-global-rng: git grep failed (rc=$rc) in $1"
+							return 2
+						fi
+						staged=$(git -C "$1" ls-files -s -- src test examples)
+						if [ $? -ne 0 ]; then
+							echo "no-global-rng: git ls-files failed in $1"
+							return 2
+						fi
+						links=$(printf '%s\n' "$staged" | grep '^120000 ' | cut -f2)
+						return 0
+					}
+					if ! git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+						echo "no-global-rng: not a git work tree, so git grep cannot scan; failing closed."
+						exit 1
+					fi
+					gated=$(ban_git . ls-files)
+					if [ $? -ne 0 ]; then
+						echo "no-global-rng: git ls-files failed; failing closed."
+						exit 1
+					fi
+					for f in src/rng/RNG.c src/rng/include/RNG.h; do
+						if ! printf '%s\n' "$gated" | grep -qxF "$f"; then
+							echo "no-global-rng: $f is not in the scanned set; the scan would be vacuous."
+							exit 1
+						fi
+					done
+					scan . || exit 1
+					if [ -n "$hits" ] || [ -n "$links" ]; then
+						echo "No-global-rng violation: the module-global RNG was deleted. Draw from a keyed stream:"
+						echo "rngOpen with rngNextU32/rngNextUnitFloat/rngNextBounded, or randomNormalCtx/randomUniformCtx"
+						echo "(src/rng/include/RNG.h). A tracked symlink under src/, test/ or examples/ is not allowed."
+						echo
+						echo "Offending lines:"
+						echo "$hits"
+						echo "Tracked symlinks:"
+						echo "$links"
+						exit 1
+					fi
+					# Self-test in a throwaway repo, never in the checkout: each banned name must
+					# fire on its plant, the controls must stay silent, and a new tracked file in
+					# each scanned place and a tracked symlink must be caught.
+					(
+						tmp=$(mktemp -d) || exit 1
+						trap 'rm -rf "$tmp"' EXIT
+						git ls-files -z -- src/rng | while IFS= read -r -d "" f; do
+							mkdir -p "$tmp/$(dirname "$f")" && cp "$f" "$tmp/$f" || exit 1
+						done || exit 1
+						git -C "$tmp" init -q && git -C "$tmp" add -A || exit 1
+						rngc="$tmp/src/rng/RNG.c"
+						cp "$rngc" "$tmp/rngc.orig" || exit 1
+						failed=0
+						scan "$tmp" || exit 1
+						if [ -n "$hits" ] || [ -n "$links" ]; then
+							echo "no-global-rng self-test: the unplanted copy is not clean"
+							failed=1
+						fi
+						probe() {
+							printf '%s\n' "$2" >> "$rngc"
+							scan "$tmp" || exit 1
+							cp "$tmp/rngc.orig" "$rngc" || exit 1
+							if [ "$1" = fire ] && [ -z "$hits" ]; then
+								echo "no-global-rng self-test: the pattern missed: $2"
+								failed=1
+							elif [ "$1" = silent ] && [ -n "$hits" ]; then
+								echo "no-global-rng self-test: a control line fired: $2"
+								failed=1
+							fi
+						}
+						probe fire 'rngSetSeed(1u);'
+						probe fire 'uint32_t s = rngGetSeed();'
+						probe fire 'float f = rngNextFloat();'
+						probe fire 'fp = rngNextFloat;'
+						probe fire 'fp = &rngNextFloat'
+						probe fire '(void)rngNextFloatCtx(&r);'
+						probe fire 'rng32_t r;'
+						probe fire 'rngShuffleIndices(ix, n);'
+						probe fire 'x = randomNormal(0.0f, 1.0f);'
+						probe fire 'x = randomUniform(0.0f, 1.0f);'
+						probe fire 'x = randfloat();'
+						probe fire '// rngSetSeed(1u);'
+						probe silent 'randomNormalCtx(rs, 0.0f, 1.0f);'
+						probe silent 'randomUniformCtx(rs, 0.0f, 1.0f);'
+						probe silent 'rngNextUnitFloat(&s);'
+						probe silent 'rngStream_t s;'
+						probe silent 'myrngSetSeed(1u);'
+						probe silent 'rngSetSeedX(1u);'
+						probe silent 'myrngSetSeedX();'
+						probe silent 'rng32_tx y;'
+						# A new tracked file in each scanned place must fire on its own.
+						for new in src/planted/P.c src/planted/P.h test/planted/P.c test/planted/P.h examples/planted/P.c examples/planted/P.h; do
+							mkdir -p "$tmp/$(dirname "$new")" || exit 1
+							printf '%s\n' 'rngSetSeed(1u);' > "$tmp/$new"
+							git -C "$tmp" add "$new" || exit 1
+							scan "$tmp" || exit 1
+							git -C "$tmp" rm -q --cached "$new" && rm "$tmp/$new" || exit 1
+							if [ -z "$hits" ]; then
+								echo "no-global-rng self-test: a new tracked file is not scanned: $new"
+								failed=1
+							fi
+						done
+						# A tracked symlink must fail the scan, whatever its target holds.
+						ln -s ../rng/RNG.c "$tmp/src/planted/link.c" || exit 1
+						git -C "$tmp" add src/planted/link.c || exit 1
+						scan "$tmp" || exit 1
+						if [ -z "$links" ]; then
+							echo "no-global-rng self-test: a tracked symlink is not caught"
+							failed=1
+						fi
+						exit "$failed"
+					)
+					if [ $? -ne 0 ]; then
+						echo "no-global-rng: the self-test failed; the gate no longer catches what it must."
+						exit 1
+					fi
+					echo "no-global-rng: clean; self-test passed (12 plants, 6 new files and a tracked symlink fire, 8 controls stay silent)."
+					set -e
+				fi
+				# end no-global-rng
 				find src test examples \( -name '*.c' -o -name '*.h' \) -print0 \
 					| xargs -0 clang-format --dry-run -Werror
 				CC=gcc cmake --preset unit_test

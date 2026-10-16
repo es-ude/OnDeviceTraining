@@ -65,7 +65,7 @@ versions, plus these scripts:
 | `run_ai_unit_tests` | Run all Unity unit tests via ctest |
 | `run_asan_tests` | Configure + build + run the suite under ASan/UBSan |
 | `clean_cmake` | Clean the `unit_test` build tree |
-| `ci` | Most of the CI pipeline locally: allocation-locality, optimizer-step-entry and private-paths gates, `clang-format` check, C tests, ASan/UBSan tests, Python tests |
+| `ci` | Most of the CI pipeline locally: allocation-locality, optimizer-step-entry, private-paths, remat-row-contract and no-global-rng gates, `clang-format` check, C tests, ASan/UBSan tests, Python tests |
 
 Without devenv you need CMake ≥ 3.20, Ninja, a C compiler, and
 [uv](https://docs.astral.sh/uv/) for anything Python. Python work always goes

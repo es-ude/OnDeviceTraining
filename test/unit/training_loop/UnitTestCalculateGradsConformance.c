@@ -414,6 +414,55 @@ static void buildAdaptiveAvgPool(zooFixture_t *f) {
     mseLabel(f, 2);
 }
 
+/* buildQuantSym with a stochastically rounded ACT template and 16 features
+ * (enough draws that two keys do not round alike): Quantization layer 1
+ * converts the FLOAT32 ACT 1 into the SYM_INT32 ACT 2 with one draw per
+ * element from its FORWARD-phase convert stream. */
+static void buildSrQuant(zooFixture_t *f) {
+    beginZoo(f);
+    quantization_t *act = keepTemplate(f, quantizationInitSymInt32WithBits(SR_HALF_AWAY, 8));
+    quantization_t *grad = keepTemplate(f, quantizationInitSymInt32WithBits(HALF_AWAY, 10));
+    f->model[0] = makeLinear(4, 16, false, 0);
+    f->model[1] = makeQuant(act, grad);
+    f->model[2] = makeQuant(&g_floatQ, grad);
+    f->model[3] = makeLinear(16, 2, false, 3);
+    f->n = 4;
+    f->x = makeFloatTensor((size_t[]){1, 4}, 2, 1.0f);
+    mseLabel(f, 2);
+}
+
+/* A frozen Linear on SYM_INT32 arithmetic that rounds stochastically: its
+ * forward draws for the SYM operands it writes and for its bias seed, whose
+ * SYM_INT32 parameter rounds SR_HALF_AWAY when it is rescaled into the
+ * accumulator's scale. Parameters are FLOAT32-initialised and requantized in
+ * place (the factory initialises FLOAT32 storage only); a Quantization layer
+ * hands FLOAT32 to the trained Linear behind it. */
+static void buildSymSrBias(zooFixture_t *f) {
+    beginZoo(f);
+    quantization_t *act = keepTemplate(f, quantizationInitSymInt32WithBits(HALF_AWAY, 12));
+    quantization_t *weightQ = keepTemplate(f, quantizationInitSymInt32WithBits(HALF_AWAY, 8));
+    quantization_t *biasQ = keepTemplate(f, quantizationInitSymInt32WithBits(HALF_AWAY, 16));
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, &g_floatQ);
+    lq.forwardMath = (arithmetic_t){.type = ARITH_SYM_INT32, .roundingMode = SR_HALF_AWAY};
+    lq.outputQ = act;
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(7u), RNG_TAG_INIT, 0u);
+    f->model[0] = linearLayerInit(&(linearInit_t){.inFeatures = 4,
+                                                  .outFeatures = 4,
+                                                  .trainable = TRAINABLE_FALSE,
+                                                  .weightInit.key = &initKey0},
+                                  &lq);
+    linearConfig_t *cfg = f->model[0]->config->linear;
+    requantizeTensorInPlace(cfg->weights->param, weightQ);
+    requantizeTensorInPlace(cfg->bias->param, biasQ);
+    ((symInt32QConfig_t *)cfg->bias->param->quantization->qConfig)->roundingMode = SR_HALF_AWAY;
+    f->model[1] = makeQuant(&g_floatQ, &g_floatQ);
+    f->model[2] = makeLinear(4, 2, false, 2);
+    f->n = 3;
+    f->x = makeFloatTensor((size_t[]){1, 4}, 2, 1.0f);
+    mseLabel(f, 2);
+}
+
 /* ---- capturing one call (remat P1, P3-P5, P9) ---- */
 
 /* Static, never reserved, so a capture cannot move the memory-profile
@@ -1463,6 +1512,30 @@ void testAdaptiveAvgPoolMatchesTheReferenceOnHeap(void) {
     assertRowMatchesTheReference(buildAdaptiveAvgPool, REMAT_HEAP);
 }
 
+void testSrQuantConforms(void) {
+    assertNullPathMatchesTheReference(buildSrQuant);
+}
+
+void testSrQuantMatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildSrQuant, REMAT_ARENA);
+}
+
+void testSrQuantMatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildSrQuant, REMAT_HEAP);
+}
+
+void testSymSrBiasConforms(void) {
+    assertNullPathMatchesTheReference(buildSymSrBias);
+}
+
+void testSymSrBiasMatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildSymSrBias, REMAT_ARENA);
+}
+
+void testSymSrBiasMatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildSymSrBias, REMAT_HEAP);
+}
+
 /* ---- one persistent instance across calls (remat P6, P9) ---- */
 
 typedef void (*fixtureEdit_t)(zooFixture_t *f);
@@ -2108,6 +2181,12 @@ int main(void) {
     RUN_TEST(testFrozenConvTransposedMatchesTheReferenceOnHeap);
     RUN_TEST(testAdaptiveAvgPoolMatchesTheReferenceOnArena);
     RUN_TEST(testAdaptiveAvgPoolMatchesTheReferenceOnHeap);
+    RUN_TEST(testSrQuantConforms);
+    RUN_TEST(testSrQuantMatchesTheReferenceOnArena);
+    RUN_TEST(testSrQuantMatchesTheReferenceOnHeap);
+    RUN_TEST(testSymSrBiasConforms);
+    RUN_TEST(testSymSrBiasMatchesTheReferenceOnArena);
+    RUN_TEST(testSymSrBiasMatchesTheReferenceOnHeap);
     RUN_TEST(testTwoCallsAcrossAWidthEditMatchTheReference);
     RUN_TEST(testTwoCallsAcrossARoundingEditMatchTheReference);
     RUN_TEST(testTwoCallsAcrossAnInputRegroupMatchTheReference);

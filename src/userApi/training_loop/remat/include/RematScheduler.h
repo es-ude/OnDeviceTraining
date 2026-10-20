@@ -13,7 +13,7 @@
  * and walk types the static plan shares, and the scheduler with its rows
  * (ARENA, HEAP), its const vtable and the rematBegin/Next/Done/End dispatch. */
 
-/* APPEND-ONLY: stored in plan tables and (PR6) caller/ir2c sequences. */
+/* APPEND-ONLY: stored in plan tables and in caller step lists (REMAT_PLAN_SEQUENCE). */
 typedef enum rematStepKind {
     REMAT_STEP_FORWARD = 0,   /* layer l: ACT l -> ACT l+1 */
     REMAT_STEP_LOSS_FORWARD,  /* layer == n: output snapshot + loss of ACT n; forward->backward
@@ -25,7 +25,7 @@ typedef enum rematStepKind {
 } rematStepKind_t;
 
 /* One record, three roles: plan-table entry, the value a row's next() fills
- * in, and (PR6) the offline sequence record. No tensor pointers: the driver
+ * in, and the record of a caller's step list. No tensor pointers: the driver
  * resolves operands positionally. No explicit pad byte until a byte-image
  * consumer (#62 ir2c .rodata) needs one; uint16_t
  * alignment keeps the implicit pad at one byte on every target. */
@@ -36,12 +36,25 @@ typedef struct rematStep {
 } rematStep_t;
 _Static_assert(sizeof(rematStep_t) == 4, "fixed-width step record");
 
-typedef enum rematPlanPolicy { REMAT_PLAN_STORE_ALL = 0, REMAT_PLAN_LIVENESS } rematPlanPolicy_t;
+typedef enum rematPlanPolicy {
+    REMAT_PLAN_STORE_ALL = 0,
+    REMAT_PLAN_LIVENESS,
+    REMAT_PLAN_SEQUENCE, /* the caller's TRAIN step list, verbatim; its ranges come from a scan */
+} rematPlanPolicy_t;
 
 /* NULL, or a zero-initialised struct, means STORE_ALL (the trainingRunOptions_t
- * zero-initialisation idiom). */
+ * zero-initialisation idiom). sequence and sequenceLen belong to
+ * REMAT_PLAN_SEQUENCE; any other policy with either set exits. sequence must
+ * point at sequenceLen readable records (C cannot detect a shorter buffer),
+ * and 1 <= sequenceLen <= min(UINT16_MAX, 2n + 2 + n(n+1)/2) for a model of n
+ * layers. rematPlanBuild copies the steps into the plan and keeps no pointer
+ * to them: the caller may free or reuse the buffer once it returns. The buffer
+ * must stay unchanged while rematPlanBuild runs: rematPlanBuild reads the steps
+ * twice, once to count the ranges and once to copy them. */
 typedef struct rematPlanSpec {
     rematPlanPolicy_t policy;
+    const rematStep_t *sequence;
+    size_t sequenceLen;
 } rematPlanSpec_t;
 
 /* Which of the plan's programs a call walks. TRAIN = 0: a zero-initialised

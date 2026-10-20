@@ -105,22 +105,15 @@ static size_t peakOf(layer_t **model, size_t n, lossFuncType_t lt, const tensor_
     return peak;
 }
 
-static const rematRange_t *rangeOfWire(const rematProgram_t *p, uint16_t wire) {
-    for (size_t r = 0; r < p->numRanges; r++) {
-        if (p->ranges[r].wire == wire) {
-            return &p->ranges[r];
-        }
-    }
-    return NULL;
-}
-
 static void assertLiveAt(const rematProgram_t *p, uint16_t wire, size_t step, const char *what) {
     if (wire == 0) {
         return; /* ACT 0 is borrowed: always present, never ranged */
     }
-    const rematRange_t *r = rangeOfWire(p, wire);
-    TEST_ASSERT_NOT_NULL_MESSAGE(r, what);
-    TEST_ASSERT_TRUE_MESSAGE(r->begin <= step && step <= r->end, what);
+    bool live = false; /* any range of the wire: a recomputed wire has several */
+    for (size_t r = 0; r < p->numRanges && !live; r++) {
+        live = p->ranges[r].wire == wire && p->ranges[r].begin <= step && step <= p->ranges[r].end;
+    }
+    TEST_ASSERT_TRUE_MESSAGE(live, what);
 }
 
 /* The operands of every step, derived here independently of the generator,
@@ -134,8 +127,9 @@ static void assertEveryStepsOperandsAreCoLive(const rematProgram_t *p, const rem
         size_t l = p->steps[s].layer;
         switch (p->steps[s].kind) {
         case REMAT_STEP_FORWARD:
-            assertLiveAt(p, rematActId(t, l), s, "FORWARD input");
-            assertLiveAt(p, rematActId(t, l + 1), s, "FORWARD output");
+        case REMAT_STEP_REFORWARD:
+            assertLiveAt(p, rematActId(t, l), s, "FORWARD or REFORWARD input");
+            assertLiveAt(p, rematActId(t, l + 1), s, "FORWARD or REFORWARD output");
             break;
         case REMAT_STEP_LOSS_FORWARD:
             assertLiveAt(p, rematActId(t, n), s, "LOSS_FORWARD reads ACT n");
@@ -144,7 +138,7 @@ static void assertEveryStepsOperandsAreCoLive(const rematProgram_t *p, const rem
             assertLiveAt(p, rematActId(t, n), s, "LOSS_BACKWARD reads ACT n");
             assertLiveAt(p, rematGradId(t, n), s, "LOSS_BACKWARD writes the seed");
             break;
-        default: { /* REMAT_STEP_BACKWARD */
+        case REMAT_STEP_BACKWARD: {
             uint16_t gradIn =
                 ((ptrdiff_t)l == t->backwardTop) ? rematGradId(t, n) : rematGradId(t, l + 1);
             assertLiveAt(p, gradIn, s, "BACKWARD reads gradIn");
@@ -156,6 +150,8 @@ static void assertEveryStepsOperandsAreCoLive(const rematProgram_t *p, const rem
             }
             break;
         }
+        default:
+            TEST_FAIL_MESSAGE("a step of unknown kind in a built plan");
         }
     }
 }
@@ -2726,6 +2722,277 @@ void testGrammarRejectsARangeThatOpensWithoutAWrite(void) {
                            buildMlp3Hand, steps, ranges, validateHandTrain);
 }
 
+/* ---- REMAT_PLAN_SEQUENCE ---- */
+
+static rematPlanSpec_t sequenceSpec(const rematStep_t *steps, size_t len) {
+    return (rematPlanSpec_t){.policy = REMAT_PLAN_SEQUENCE, .sequence = steps, .sequenceLen = len};
+}
+
+static void assertSameSteps(const rematStep_t *want, size_t numSteps, const rematProgram_t *got) {
+    TEST_ASSERT_EQUAL_size_t(numSteps, got->numSteps);
+    for (size_t s = 0; s < numSteps; s++) {
+        TEST_ASSERT_EQUAL_UINT8(want[s].kind, got->steps[s].kind);
+        TEST_ASSERT_EQUAL_UINT16(want[s].layer, got->steps[s].layer);
+    }
+}
+
+static void assertSameRanges(const rematRange_t *want, size_t numRanges,
+                             const rematProgram_t *got) {
+    TEST_ASSERT_EQUAL_size_t(numRanges, got->numRanges);
+    for (size_t r = 0; r < numRanges; r++) {
+        TEST_ASSERT_EQUAL_UINT16(want[r].wire, got->ranges[r].wire);
+        TEST_ASSERT_EQUAL_UINT16(want[r].begin, got->ranges[r].begin);
+        TEST_ASSERT_EQUAL_UINT16(want[r].end, got->ranges[r].end);
+    }
+}
+
+static rematWireTable_t *initMlp3Table(layer_t **model, inputLike_t *in) {
+    buildMlp3(model);
+    return initTable(model, MLP3_N, MSE, makeInput(in, (size_t[]){1, 2}, 2, &g_floatQ));
+}
+
+/* The ranges by hand (each write opens a range that ends at the last read of
+ * its wire before the wire's next write): ACT 1 [0,1] [5,6] [8,9], ACT 2
+ * [1,2] [6,7], ACT 3 [2,4], GRAD 3 [4,7], GRAD 2 [7,9], GRAD 1 [9,10]; in
+ * begin order, with ACT j = wire j, GRAD 3 = 4, GRAD 2 = 5, GRAD 1 = 6. */
+void testSequencePlanCopiesTheStepsAndScansTheRanges(void) {
+    const rematStep_t steps[] = MLP3_RECOMPUTE_TWICE_STEPS;
+    const rematRange_t want[] = {RANGE_OF(1, 0, 1), RANGE_OF(2, 1, 2), RANGE_OF(3, 2, 4),
+                                 RANGE_OF(4, 4, 7), RANGE_OF(1, 5, 6), RANGE_OF(2, 6, 7),
+                                 RANGE_OF(5, 7, 9), RANGE_OF(1, 8, 9), RANGE_OF(6, 9, 10)};
+    layer_t *model[MLP3_N];
+    inputLike_t in;
+    rematWireTable_t *t = initMlp3Table(model, &in);
+    rematPlanSpec_t spec = sequenceSpec(steps, COUNT_OF(steps));
+    rematPlan_t *p = buildPlan(t, model, &spec);
+    TEST_ASSERT_EQUAL_INT(REMAT_PLAN_SEQUENCE, p->policy);
+    assertSameSteps(steps, COUNT_OF(steps), &p->train);
+    assertSameRanges(want, COUNT_OF(want), &p->train);
+    assertEveryStepsOperandsAreCoLive(&p->train, t, model);
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, MLP3_N);
+}
+
+void testSequencePlanKeepsItsOwnCopyOfTheSteps(void) {
+    rematStep_t steps[] = MLP3_RECOMPUTE_TWICE_STEPS;
+    const rematStep_t untouched[] = MLP3_RECOMPUTE_TWICE_STEPS;
+    layer_t *model[MLP3_N];
+    inputLike_t in;
+    rematWireTable_t *t = initMlp3Table(model, &in);
+    rematPlanSpec_t spec = sequenceSpec(steps, COUNT_OF(steps));
+    rematPlan_t *p = buildPlan(t, model, &spec);
+    memset(steps, 0, sizeof steps);
+    TEST_ASSERT_TRUE(p->train.steps != steps);
+    assertSameSteps(untouched, COUNT_OF(untouched), &p->train);
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, MLP3_N);
+}
+
+/* Evaluation never recomputes: a SEQUENCE plan's EVAL program is STORE_ALL's. */
+void testSequencePlanEvalProgramIsTheStoreAllEvalProgram(void) {
+    const rematStep_t steps[] = MLP3_RECOMPUTE_TWICE_STEPS;
+    layer_t *model[MLP3_N];
+    inputLike_t in;
+    rematWireTable_t *t = initMlp3Table(model, &in);
+    rematPlanSpec_t spec = sequenceSpec(steps, COUNT_OF(steps));
+    rematPlan_t *seq = buildPlan(t, model, &spec);
+    rematPlan_t *all = buildPlan(t, model, NULL);
+    assertSameSteps(all->eval.steps, all->eval.numSteps, &seq->eval);
+    assertSameRanges(all->eval.ranges, all->eval.numRanges, &seq->eval);
+    TEST_ASSERT_EQUAL_size_t(all->eval.peakLiveBytes, seq->eval.peakLiveBytes);
+    rematPlanFree(all);
+    rematPlanFree(seq);
+    rematWireTableFree(t);
+    freeModel(model, MLP3_N);
+}
+
+/* An independent check of the scan against the closed-form generator: the
+ * LIVENESS step list fed back as a SEQUENCE yields LIVENESS's ranges and
+ * both of its peaks. */
+static void assertLivenessStepsAsASequenceMatchLiveness(layer_t **model, size_t n,
+                                                        lossFuncType_t lt, const tensor_t *x) {
+    rematWireTable_t *t = initTable(model, n, lt, x);
+    rematPlan_t *live = buildPlan(t, model, &g_liveness);
+    rematPlanSpec_t spec = sequenceSpec(live->train.steps, live->train.numSteps);
+    rematPlan_t *seq = buildPlan(t, model, &spec);
+    assertSameRanges(live->train.ranges, live->train.numRanges, &seq->train);
+    TEST_ASSERT_EQUAL_size_t(live->train.peakLiveBytes, seq->train.peakLiveBytes);
+    TEST_ASSERT_EQUAL_size_t(rematProgramActPeakBytes(&live->train, t),
+                             rematProgramActPeakBytes(&seq->train, t));
+    rematPlanFree(seq);
+    rematPlanFree(live);
+    rematWireTableFree(t);
+}
+
+void testLivenessStepsAsASequenceGiveTheLivenessPlanOnTheZoo(void) {
+    inputLike_t in;
+    layer_t *har[HAR_N];
+    buildHar(har, false);
+    assertLivenessStepsAsASequenceMatchLiveness(har, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    freeModel(har, HAR_N);
+    layer_t *finetune[HAR_N];
+    buildHar(finetune, true);
+    assertLivenessStepsAsASequenceMatchLiveness(finetune, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    freeModel(finetune, HAR_N);
+    layer_t *mnist[MNIST_N];
+    buildMnistCnn(mnist);
+    assertLivenessStepsAsASequenceMatchLiveness(
+        mnist, MNIST_N, CROSS_ENTROPY, makeInput(&in, (size_t[]){1, 1, 784}, 3, &g_floatQ));
+    freeModel(mnist, MNIST_N);
+}
+
+/* The 50 random chains of the co-live property, under both losses. */
+void testLivenessStepsAsASequenceGiveTheLivenessPlanOnRandomChains(void) {
+    uint32_t state = 0x2545F491u;
+    for (int trial = 0; trial < 50; trial++) {
+        size_t n = 1u + nextRandom(&state) % 6u;
+        layer_t *model[6];
+        for (size_t i = 0; i < n; i++) {
+            model[i] = randomRank2Layer(&state, i);
+        }
+        lossFuncType_t lt = (nextRandom(&state) % 2u == 0u) ? MSE : CROSS_ENTROPY;
+        inputLike_t in;
+        assertLivenessStepsAsASequenceMatchLiveness(model, n, lt,
+                                                    makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ));
+        freeModel(model, n);
+    }
+}
+
+static void planBuildExpectingAnExit(const rematWireTable_t *t, layer_t **model,
+                                     const rematPlanSpec_t *spec) {
+    rematPlan_t *p = NULL;
+    g_memBeforeExit = memProfileCurrentBytes();
+    (void)atexit(printReservedBeforeExit);
+    (void)rematPlanBuild(&p, t, model, spec);
+}
+
+/* A step list written for the full HAR model, used after its convolutions
+ * were frozen (deepest moves from 0 to 10): BACKWARD(9) at step 15 is one
+ * backward step too many. */
+void testSequencePlanRejectsAStepListOfAnotherFreezeState(void) {
+    grammarFixture_t f;
+    buildHarLivenessFixture(&f);
+    layer_t *frozen[HAR_N];
+    buildHar(frozen, true);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(frozen, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    rematPlanSpec_t spec = sequenceSpec(f.p->train.steps, f.p->train.numSteps);
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "step #15 (kind 3, layer 9) violates grammar rule 3: BACKWARD "
+                             "top..deepest, descending, after LOSS_BACKWARD",
+                             planBuildExpectingAnExit(t, frozen, &spec));
+    rematWireTableFree(t);
+    freeModel(frozen, HAR_N);
+    freeGrammarFixture(&f);
+}
+
+/* The pre-copy checks exit before the plan block exists: nothing is reserved. */
+static void assertExitsBeforeThePlanBlock(const rematWireTable_t *t, layer_t **model,
+                                          const rematPlanSpec_t *spec, const char *message) {
+    ASSERT_EXITS_WITH_OUTPUT(1, message, planBuildExpectingAnExit(t, model, spec));
+    ASSERT_EXITS_WITH_OUTPUT(1, "reservedBeforeExit=0\n", planBuildExpectingAnExit(t, model, spec));
+}
+
+void testSequencePlanExitsOnANullSequenceBeforeReserving(void) {
+    layer_t *model[MLP3_N];
+    inputLike_t in;
+    rematWireTable_t *t = initMlp3Table(model, &in);
+    rematPlanSpec_t spec = sequenceSpec(NULL, 3);
+    assertExitsBeforeThePlanBlock(t, model, &spec,
+                                  "REMAT_PLAN_SEQUENCE needs a sequence, got NULL");
+    rematWireTableFree(t);
+    freeModel(model, MLP3_N);
+}
+
+void testSequencePlanExitsOnAnEmptySequenceBeforeReserving(void) {
+    const rematStep_t steps[] = MLP3_RECOMPUTE_TWICE_STEPS;
+    layer_t *model[MLP3_N];
+    inputLike_t in;
+    rematWireTable_t *t = initMlp3Table(model, &in);
+    rematPlanSpec_t spec = sequenceSpec(steps, 0);
+    assertExitsBeforeThePlanBlock(t, model, &spec,
+                                  "REMAT_PLAN_SEQUENCE needs at least one step, got sequenceLen 0");
+    rematWireTableFree(t);
+    freeModel(model, MLP3_N);
+}
+
+/* HAR: 2n + 2 + n(n+1)/2 = 24 + 2 + 78 = 104. The buffer holds exactly 104
+ * records, so a length check that ran after the counting pass or the copy
+ * would read past it (ASan builds report that read; elsewhere the plan block
+ * would exist at the exit and reservedBeforeExit would not be 0). */
+void testSequencePlanExitsOneStepAboveTheBoundBeforeReserving(void) {
+    rematStep_t steps[104] = {{0}};
+    grammarFixture_t f;
+    buildHarStoreAllFixture(&f);
+    rematPlanSpec_t spec = sequenceSpec(steps, 105);
+    assertExitsBeforeThePlanBlock(f.t, f.model, &spec,
+                                  "sequenceLen 105 is above the step bound 104 "
+                                  "(min(UINT16_MAX, 2n + 2 + n(n+1)/2), n = 12)");
+    freeGrammarFixture(&f);
+}
+
+/* At the bound the length check passes and the grammar judges the steps: 104
+ * copies of FORWARD(0) fail rule 1 at the second one. */
+void testSequencePlanAcceptsALengthAtTheBound(void) {
+    rematStep_t steps[104] = {{0}};
+    grammarFixture_t f;
+    buildHarStoreAllFixture(&f);
+    rematPlanSpec_t spec = sequenceSpec(steps, 104);
+    ASSERT_EXITS_WITH_OUTPUT(1, "step #1 (kind 0, layer 0) violates grammar rule 1",
+                             planBuildExpectingAnExit(f.t, f.model, &spec));
+    freeGrammarFixture(&f);
+}
+
+/* From n = 360 on, 2n + 2 + n(n+1)/2 (65702 at 360) passes UINT16_MAX, which
+ * then bounds the length: step indexes and range ids are uint16_t. */
+#define LONG_CHAIN_N 360u
+static rematStep_t g_uint16MaxSteps[UINT16_MAX];
+
+void testSequencePlanExitsAboveUint16MaxStepsBeforeReserving(void) {
+    layer_t *relu = makeRelu(&g_floatQ);
+    layer_t *model[LONG_CHAIN_N];
+    for (size_t i = 0; i < LONG_CHAIN_N; i++) {
+        model[i] = relu;
+    }
+    inputLike_t in;
+    rematWireTable_t *t =
+        initTable(model, LONG_CHAIN_N, MSE, makeInput(&in, (size_t[]){1, 1}, 2, &g_floatQ));
+    rematPlanSpec_t spec = sequenceSpec(g_uint16MaxSteps, (size_t)UINT16_MAX + 1u);
+    assertExitsBeforeThePlanBlock(t, model, &spec,
+                                  "sequenceLen 65536 is above the step bound 65535 "
+                                  "(min(UINT16_MAX, 2n + 2 + n(n+1)/2), n = 360)");
+    rematWireTableFree(t);
+    freeReluLayer(relu);
+}
+
+/* Fields that belong to another policy exit instead of being ignored. */
+void testPlanBuildExitsOnASequenceForAnotherPolicy(void) {
+    const rematStep_t steps[] = MLP3_RECOMPUTE_TWICE_STEPS;
+    layer_t *model[MLP3_N];
+    inputLike_t in;
+    rematWireTable_t *t = initMlp3Table(model, &in);
+    rematPlanSpec_t spec = {.policy = REMAT_PLAN_LIVENESS, .sequence = steps};
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "sequence or sequenceLen is set, but the policy 1 is not REMAT_PLAN_SEQUENCE",
+        planBuildExpectingAnExit(t, model, &spec));
+    rematWireTableFree(t);
+    freeModel(model, MLP3_N);
+}
+
+void testPlanBuildExitsOnASequenceLengthForAnotherPolicy(void) {
+    layer_t *model[MLP3_N];
+    inputLike_t in;
+    rematWireTable_t *t = initMlp3Table(model, &in);
+    rematPlanSpec_t spec = {.policy = REMAT_PLAN_STORE_ALL, .sequenceLen = 2};
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "sequence or sequenceLen is set, but the policy 0 is not REMAT_PLAN_SEQUENCE",
+        planBuildExpectingAnExit(t, model, &spec));
+    rematWireTableFree(t);
+    freeModel(model, MLP3_N);
+}
+
 /* rematPlanBuild runs the grammar on what it generates: a table record that
  * claims GRAD 8 is GRAD 7 (wire 16) yields a range that opens one step after
  * BACKWARD(8) writes it. */
@@ -2933,6 +3200,19 @@ int main(void) {
     RUN_TEST(testGrammarRejectsRangesOutOfBeginOrder);
     RUN_TEST(testGrammarRejectsTwoRangesOfOneWireOpeningTogether);
     RUN_TEST(testGrammarRejectsARangeThatOpensWithoutAWrite);
+    RUN_TEST(testSequencePlanCopiesTheStepsAndScansTheRanges);
+    RUN_TEST(testSequencePlanKeepsItsOwnCopyOfTheSteps);
+    RUN_TEST(testSequencePlanEvalProgramIsTheStoreAllEvalProgram);
+    RUN_TEST(testLivenessStepsAsASequenceGiveTheLivenessPlanOnTheZoo);
+    RUN_TEST(testLivenessStepsAsASequenceGiveTheLivenessPlanOnRandomChains);
+    RUN_TEST(testSequencePlanRejectsAStepListOfAnotherFreezeState);
+    RUN_TEST(testSequencePlanExitsOnANullSequenceBeforeReserving);
+    RUN_TEST(testSequencePlanExitsOnAnEmptySequenceBeforeReserving);
+    RUN_TEST(testSequencePlanExitsOneStepAboveTheBoundBeforeReserving);
+    RUN_TEST(testSequencePlanAcceptsALengthAtTheBound);
+    RUN_TEST(testSequencePlanExitsAboveUint16MaxStepsBeforeReserving);
+    RUN_TEST(testPlanBuildExitsOnASequenceForAnotherPolicy);
+    RUN_TEST(testPlanBuildExitsOnASequenceLengthForAnotherPolicy);
     RUN_TEST(testPlanBuildRunsTheGrammarOnWhatItGenerates);
     RUN_TEST(testPlanBuildExitsWhenTheModelFreezesALayerTheTableSawTrainable);
     RUN_TEST(testPlanBuildExitsWhenTheModelSwapsALayerType);

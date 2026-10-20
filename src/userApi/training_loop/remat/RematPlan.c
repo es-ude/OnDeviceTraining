@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "Common.h"
 #include "Layer.h"
@@ -58,16 +59,16 @@ static void sortEndOrder(rematProgram_t *p) {
 }
 
 /* Overflow-checked here are the plan-block size (stepsAt/rangesAt/endOrderAt/
- * blockBytes, via planAdd/planMul) and the two peaks, peakLiveBytes and the
- * activation-only peak (accumulated with planAdd in peakBytesUpTo, each under
- * its own label). rematTrainStepCount, rematBackwardStep and
- * numRanges = numWires - 1 are plain size_t arithmetic on modelSize,
- * backwardTop, deepest and numWires -- all bounded well under SIZE_MAX by the
- * table's numWires < REMAT_NONE guard, so they cannot overflow. In PR1 the
- * checked exits above are themselves unreachable -- each wire has one range,
- * so the peak never exceeds the table's checked total of wire bytes -- and
- * have no dedicated death test (PR6's multi-range and SEQUENCE plans make
- * them reachable). */
+ * blockBytes, via planAdd/planMul), the SEQUENCE step bound, and the two
+ * peaks, peakLiveBytes and the activation-only peak (accumulated with planAdd
+ * in peakBytesUpTo, each under its own label). rematTrainStepCount,
+ * rematBackwardStep and numRanges = numWires - 1 are plain size_t arithmetic
+ * on modelSize, backwardTop, deepest and numWires -- all bounded well under
+ * SIZE_MAX by the table's numWires < REMAT_NONE guard, so they cannot
+ * overflow. The checked exits are unreachable too and have no dedicated death
+ * test: a program holds at most UINT16_MAX steps and no more ranges than
+ * steps, and grammar rule 6 keeps the ranges of one wire apart, so a peak
+ * never exceeds the table's checked total of wire bytes. */
 static size_t planAdd(size_t a, size_t b, const char *quantity) {
     size_t out;
     if (!checkedAddSize(a, b, &out)) {
@@ -406,17 +407,72 @@ static void requireTheTablesModel(const rematWireTable_t *t, layer_t **model) {
     }
 }
 
+/* min(UINT16_MAX, 2n + 2 + n(n+1)/2): the most steps a TRAIN program of n
+ * layers may hold (grammar rules 5 and 6), for the checks that must run
+ * before the plan block exists. */
+static size_t stepBound(size_t n) {
+    size_t triangle = planMul(n, n + 1u, "the step bound") / 2u;
+    size_t bound = planAdd(planAdd(planMul(2u, n, "the step bound"), 2u, "the step bound"),
+                           triangle, "the step bound");
+    return (bound < UINT16_MAX) ? bound : UINT16_MAX;
+}
+
+/* A field of another policy is a caller error, never ignored. */
+static void requireTheFieldsOfThePolicy(const rematPlanSpec_t *spec) {
+    if (spec->policy != REMAT_PLAN_SEQUENCE &&
+        (spec->sequence != NULL || spec->sequenceLen != 0u)) {
+        PRINT_ERROR("rematPlanBuild: sequence or sequenceLen is set, but the policy %d is not "
+                    "REMAT_PLAN_SEQUENCE",
+                    (int)spec->policy);
+        exit(1);
+    }
+}
+
+/* SEQUENCE's checks before anything reads the caller's records: the counting
+ * pass and the copy read exactly sequenceLen of them. The checked byte count
+ * of the copy is layoutProgram's, before reserveMemory; it cannot overflow
+ * once the length is at most UINT16_MAX, so it has no death test. */
+static void requireASequenceWithinTheBound(const rematPlanSpec_t *spec, size_t n) {
+    if (spec->sequence == NULL) {
+        PRINT_ERROR("rematPlanBuild: REMAT_PLAN_SEQUENCE needs a sequence, got NULL");
+        exit(1);
+    }
+    if (spec->sequenceLen == 0u) {
+        PRINT_ERROR("rematPlanBuild: REMAT_PLAN_SEQUENCE needs at least one step, got "
+                    "sequenceLen 0");
+        exit(1);
+    }
+    size_t bound = stepBound(n);
+    if (spec->sequenceLen > bound) {
+        PRINT_ERROR("rematPlanBuild: sequenceLen %zu is above the step bound %zu "
+                    "(min(UINT16_MAX, 2n + 2 + n(n+1)/2), n = %zu)",
+                    spec->sequenceLen, bound, n);
+        exit(1);
+    }
+}
+
 bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **model,
                     const rematPlanSpec_t *spec) {
     *out = NULL;
-    rematPlanPolicy_t policy = (spec == NULL) ? REMAT_PLAN_STORE_ALL : spec->policy;
-    if (policy != REMAT_PLAN_STORE_ALL && policy != REMAT_PLAN_LIVENESS) {
+    const rematPlanSpec_t storeAll = {.policy = REMAT_PLAN_STORE_ALL};
+    if (spec == NULL) {
+        spec = &storeAll;
+    }
+    rematPlanPolicy_t policy = spec->policy;
+    if (policy != REMAT_PLAN_STORE_ALL && policy != REMAT_PLAN_LIVENESS &&
+        policy != REMAT_PLAN_SEQUENCE) {
         PRINT_ERROR("rematPlanBuild: unknown policy %d", (int)policy);
         exit(1);
     }
+    requireTheFieldsOfThePolicy(spec);
     requireTheTablesModel(t, model);
     size_t numSteps = rematTrainStepCount(t);
     size_t numRanges = t->numWires - 1u;
+    if (policy == REMAT_PLAN_SEQUENCE) {
+        requireASequenceWithinTheBound(spec, t->modelSize);
+        numSteps = spec->sequenceLen;
+        numRanges = rematScanRangeCount(t, spec->sequence, numSteps);
+    }
     size_t evalSteps = t->modelSize + 1u;
     size_t evalRanges = t->modelSize;
     programLayout_t trainAt = layoutProgram(sizeof(rematPlan_t), numSteps, numRanges);
@@ -430,8 +486,13 @@ bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **mode
     p->blockBytes = evalAt.end;
     rematProgram_t *train = &p->train;
     placeProgram(train, block, &trainAt, numSteps, numRanges);
-    rematFillTrainSteps(t, train->steps);
-    rematFillTrainRanges(policy, t, model, numSteps, train->ranges);
+    if (policy == REMAT_PLAN_SEQUENCE) {
+        memcpy(train->steps, spec->sequence, numSteps * sizeof(rematStep_t));
+        rematScanRanges(t, model, train->steps, numSteps, train->ranges);
+    } else {
+        rematFillTrainSteps(t, train->steps);
+        rematFillTrainRanges(policy, t, model, numSteps, train->ranges);
+    }
     sortEndOrder(train);
     rematPlanValidateGrammar(train, t, model, REMAT_MODE_TRAIN);
     train->peakLiveBytes = peakLiveBytesOf(train, t);

@@ -270,6 +270,11 @@ static void buildMlp3(layer_t **model) {
 #define MLP3_RECOMPUTE_RANGES                                                                      \
     {RANGE_OF(1, 0, 1), RANGE_OF(2, 1, 2), RANGE_OF(3, 2, 4), RANGE_OF(4, 4, 7),                   \
      RANGE_OF(1, 5, 8), RANGE_OF(2, 6, 7), RANGE_OF(5, 7, 8), RANGE_OF(6, 8, 9)}
+/* The same MLP3 recomputing ACT 1 twice: the run 0..1 before BACKWARD(2), and
+ * REFORWARD(0) once more before BACKWARD(1). 11 steps, 9 writes. */
+#define MLP3_RECOMPUTE_TWICE_STEPS                                                                 \
+    {STEP_F(0),  STEP_F(1), STEP_F(2),  STEP_LF(3), STEP_LB(3), STEP_RF(0),                        \
+     STEP_RF(1), STEP_B(2), STEP_RF(0), STEP_B(1),  STEP_B(0)}
 
 /* One fixture model and its resident input. The F1 model's BFP template lives
  * here too, because its layers borrow it: the fixture must not move while the

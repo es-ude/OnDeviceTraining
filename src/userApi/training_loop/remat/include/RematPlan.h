@@ -148,9 +148,11 @@ uint16_t rematActId(const rematWireTable_t *t, size_t j);
 uint16_t rematGradId(const rematWireTable_t *t, size_t j); /* REMAT_NONE if absent */
 size_t rematWireBytes(const rematWireTable_t *t, uint16_t w);
 
-/* One inclusive range per slab wire in PR1: begin = its producing step, end =
- * its last reader (policy-dependent). No placement (ARENA offsets are private
- * to the row). */
+/* One inclusive lifetime of a wire: begin = the step that writes it, end = its
+ * last reader (policy-dependent). STORE_ALL and LIVENESS give each slab wire
+ * one range; a SEQUENCE plan opens one range per write, so a recomputed wire
+ * has several, which never overlap. No placement (ARENA offsets are private to
+ * the row). */
 typedef struct rematRange {
     uint16_t wire, begin, end;
 } rematRange_t;

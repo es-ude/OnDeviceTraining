@@ -1565,6 +1565,35 @@ void testHeapReportIsPlacedAndReservedWithoutAnArena(void) {
     assertHeapReport(&g_liveness, REMAT_PLAN_LIVENESS, 49152);
 }
 
+/* A SEQUENCE plan's steps live in the one plan block, so HEAP init's
+ * reserved == reported check (memory-counter builds) and metadataBytes count
+ * them. MLP3 STORE_ALL holds 8 steps and 6 ranges, the recompute-twice
+ * SEQUENCE 11 steps and 9 ranges. A TRAIN program costs 4 B per step and 8 B
+ * per range (a 6 B range and its 2 B endOrder entry; every array is 2-aligned,
+ * so no padding), and the EVAL program is the same in both: the block grows
+ * by 4 * 3 + 8 * 3 = 36 B. */
+void testHeapPlanBlockHoldsTheSequenceSteps(void) {
+    const rematStep_t steps[] = MLP3_RECOMPUTE_TWICE_STEPS;
+    layer_t *model[MLP3_N];
+    buildMlp3(model);
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ);
+    rematScheduler_t all;
+    TEST_ASSERT_TRUE(rematHeapInit(&all, model, MLP3_N, defaultLossConfig(MSE), x, NULL));
+    const rematPlanSpec_t spec = {
+        .policy = REMAT_PLAN_SEQUENCE, .sequence = steps, .sequenceLen = COUNT_OF(steps)};
+    rematScheduler_t seq;
+    TEST_ASSERT_TRUE(rematHeapInit(&seq, model, MLP3_N, defaultLossConfig(MSE), x, &spec));
+    TEST_ASSERT_EQUAL_size_t(all.plan->blockBytes + 36u, seq.plan->blockBytes);
+    rematReport_t r;
+    rematSchedulerReport(&seq, &r);
+    TEST_ASSERT_EQUAL_size_t(11, r.numSteps);
+    TEST_ASSERT_EQUAL_size_t(seq.wires->slabBytes + seq.plan->blockBytes, r.metadataBytes);
+    rematSchedulerDeinit(&seq);
+    rematSchedulerDeinit(&all);
+    freeModel(model, MLP3_N);
+}
+
 static void heapInitExpectingAnExit(layer_t **model, const tensor_t *x) {
     rematScheduler_t s;
     (void)rematHeapInit(&s, model, 1, defaultLossConfig(MSE), x, NULL);
@@ -2236,6 +2265,7 @@ int main(void) {
     RUN_TEST(testHeapInitReservesOnlyTheTableAndThePlan);
 #endif
     RUN_TEST(testHeapReportIsPlacedAndReservedWithoutAnArena);
+    RUN_TEST(testHeapPlanBlockHoldsTheSequenceSteps);
     RUN_TEST(testHeapInitExitsOnAByteCountOverflow);
     RUN_TEST(testHeapWalkHandsOutThePlanStepsAndEndsWithNothingBound);
 #ifdef ODT_MEM_PROFILE

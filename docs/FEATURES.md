@@ -760,7 +760,10 @@ checkpointing, limitations, literature).
   `c-stack-watermark`.
 - **Tensor rematerialization (#4, PR0–PR4)** —
   `src/userApi/training_loop/remat/`: a static wire plan (`RematPlan`,
-  `REMAT_PLAN_STORE_ALL`/`REMAT_PLAN_LIVENESS`), a step scheduler with two storage
+  `REMAT_PLAN_STORE_ALL`/`REMAT_PLAN_LIVENESS`, or `REMAT_PLAN_SEQUENCE`: a caller's
+  own TRAIN step list, length-checked before anything is reserved, copied into the
+  plan, its ranges derived by one scan of the steps, and validated by the plan
+  grammar), a step scheduler with two storage
   schemes behind one interface (`RematScheduler.h`): `REMAT_ARENA` (one resident
   block, first-fit-decreasing placement) and `REMAT_HEAP` (one block per buffer),
   and a validating checker (`RematCheck.h`). Training calls take a caller's

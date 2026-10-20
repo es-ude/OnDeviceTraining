@@ -92,6 +92,102 @@ void rematFillTrainRanges(rematPlanPolicy_t policy, const rematWireTable_t *t, l
     }
 }
 
+/* Does BACKWARD(l) belong to this table's backward set top..deepest? */
+static bool backwardRuns(const rematWireTable_t *t, size_t l) {
+    return t->hasBackward && l >= t->deepest && (ptrdiff_t)l <= t->backwardTop;
+}
+
+/* The wire a step writes as the scan sees it: REMAT_NONE for LOSS_FORWARD,
+ * the grads-only BACKWARD at deepest, and every step the grammar rejects
+ * later, so the scan never names a wire the table does not have. */
+static uint16_t scanWrite(const rematWireTable_t *t, const rematStep_t *st) {
+    size_t n = t->modelSize;
+    size_t l = st->layer;
+    switch (st->kind) {
+    case REMAT_STEP_FORWARD:
+    case REMAT_STEP_REFORWARD:
+        return (l < n) ? rematActId(t, l + 1u) : REMAT_NONE;
+    case REMAT_STEP_LOSS_FORWARD:
+        return REMAT_NONE;
+    case REMAT_STEP_LOSS_BACKWARD:
+        return t->hasBackward ? rematGradId(t, n) : REMAT_NONE;
+    case REMAT_STEP_BACKWARD:
+        return (backwardRuns(t, l) && l > t->deepest) ? rematGradId(t, l) : REMAT_NONE;
+    default:
+        return REMAT_NONE; /* an unknown kind: the grammar exits on it after the scan */
+    }
+}
+
+/* The wires a step reads as the scan sees it (ACT 0 included: it has no
+ * range, so the scan extends nothing for it); none for a rejected step. */
+static size_t scanReads(const rematWireTable_t *t, layer_t **model, const rematStep_t *st,
+                        uint16_t reads[2]) {
+    size_t n = t->modelSize;
+    size_t l = st->layer;
+    switch (st->kind) {
+    case REMAT_STEP_FORWARD:
+    case REMAT_STEP_REFORWARD:
+        if (l >= n) {
+            return 0u;
+        }
+        reads[0] = rematActId(t, l);
+        return 1u;
+    case REMAT_STEP_LOSS_FORWARD:
+    case REMAT_STEP_LOSS_BACKWARD:
+        reads[0] = rematActId(t, n);
+        return 1u;
+    case REMAT_STEP_BACKWARD: {
+        if (!backwardRuns(t, l)) {
+            return 0u;
+        }
+        size_t k = 0;
+        reads[k++] = ((ptrdiff_t)l == t->backwardTop) ? rematGradId(t, n) : rematGradId(t, l + 1u);
+        if (layerBackwardReadsInput(model[l])) {
+            reads[k++] = rematActId(t, l);
+        }
+        return k;
+    }
+    default:
+        return 0u; /* an unknown kind: the grammar exits on it after the scan */
+    }
+}
+
+size_t rematScanRangeCount(const rematWireTable_t *t, const rematStep_t *steps, size_t numSteps) {
+    size_t count = 0;
+    for (size_t s = 0; s < numSteps; s++) {
+        if (scanWrite(t, &steps[s]) != REMAT_NONE) {
+            count++;
+        }
+    }
+    return count;
+}
+
+/* One pass in step order. A read extends the newest range of its wire,
+ * found by searching back from the last range opened: O(S * R), no scratch.
+ * A read before any write of its wire extends nothing (grammar rule 4 rejects
+ * it). Each step writes at most one wire, so begins strictly increase. */
+void rematScanRanges(const rematWireTable_t *t, layer_t **model, const rematStep_t *steps,
+                     size_t numSteps, rematRange_t *ranges) {
+    size_t opened = 0;
+    for (size_t s = 0; s < numSteps; s++) {
+        uint16_t reads[2];
+        size_t numReads = scanReads(t, model, &steps[s], reads);
+        for (size_t i = 0; i < numReads; i++) {
+            for (size_t r = opened; r > 0; r--) {
+                if (ranges[r - 1u].wire == reads[i]) {
+                    ranges[r - 1u].end = (uint16_t)s;
+                    break;
+                }
+            }
+        }
+        uint16_t write = scanWrite(t, &steps[s]);
+        if (write != REMAT_NONE) {
+            ranges[opened++] =
+                (rematRange_t){.wire = write, .begin = (uint16_t)s, .end = (uint16_t)s};
+        }
+    }
+}
+
 /* Ping-pong lifetimes: ACT j from the FORWARD that writes it (step j - 1) to
  * the step that reads it (step j: FORWARD(j), or LOSS_FORWARD for ACT n). */
 void rematFillEvalProgram(const rematWireTable_t *t, rematStep_t *steps, rematRange_t *ranges) {

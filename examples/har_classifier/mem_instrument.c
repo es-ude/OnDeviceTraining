@@ -266,9 +266,10 @@ void memInstrumentEmitJson(FILE *f, const memReport_t *r) {
     if (r->hasRemat) {
         fprintf(f,
                 ", \"wires_peak_b\": %zu, \"activations_peak_b\": %zu, \"arena_b\": %zu, "
-                "\"arena_pad_b\": %zu, \"arena_gap_b\": %zu, \"wire_metadata_b\": %zu",
+                "\"arena_pad_b\": %zu, \"arena_gap_b\": %zu, \"wire_metadata_b\": %zu, "
+                "\"refwd_steps\": %zu, \"forward_cost\": %zu, \"recompute_cost\": %zu",
                 r->wires_peak_b, r->activations_peak_b, r->arena_b, r->arena_pad_b, r->arena_gap_b,
-                r->wire_metadata_b);
+                r->wire_metadata_b, r->refwd_steps, r->forward_cost, r->recompute_cost);
     }
     fputc('}', f);
 }
@@ -286,6 +287,9 @@ void memInstrumentSetRemat(memReport_t *r, const rematScheduler_t *s) {
     r->arena_pad_b = rr.arenaPadBytes;
     r->arena_gap_b = rr.arenaGapBytes;
     r->wire_metadata_b = rr.metadataBytes;
+    r->refwd_steps = rr.refwdSteps;
+    r->forward_cost = rr.forwardCost;
+    r->recompute_cost = rr.recomputeCost;
 }
 
 void memInstrumentPrintReconciliation(const memReport_t *r) {

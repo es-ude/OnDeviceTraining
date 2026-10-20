@@ -335,7 +335,7 @@ int main(void) {
     const char *logPath = getenv("LOG_PATH");
     const char *checkpointPath = "examples/har_classifier/outputs/har_pretrained.odts";
     rematSelection_t rematSel;
-    if (!rematSelectFromEnv(&rematSel)) {
+    if (!rematSelectFromEnv(&rematSel, MODEL_SIZE)) {
         return 1;
     }
     const lossConfig_t lossConfig = {
@@ -381,7 +381,7 @@ int main(void) {
         if (!buildStage2Remat(&remat, &rematSel, planModel, lossConfig)) {
             return 1;
         }
-        rematSelectPrintPlan(stdout, "har_classifier_finetune", &remat);
+        rematSelectPrintPlan(stdout, "har_classifier_finetune", &rematSel, &remat);
         rematSchedulerDeinit(&remat);
         return 0;
     }

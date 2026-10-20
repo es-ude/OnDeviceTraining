@@ -40,3 +40,20 @@ target_link_libraries(UnitTestParamGate PRIVATE
         ArithmeticType
 )
 __register_target_as_unit_test(UnitTestParamGate)
+
+# remat_select.c: the trainers' REMAT_PLAN parser, its masks and its log
+# lines (#4). The headers it includes come from the libraries listed here.
+add_executable(UnitTestRematSelect UnitTestRematSelect.c)
+target_link_libraries(UnitTestRematSelect PRIVATE
+        unity
+        examples_shared
+        RematScheduler
+        LossFunction
+        Layer
+        Tensor
+        Quantization
+        Rounding
+        Common
+        odt_test_death
+)
+__register_target_as_unit_test(UnitTestRematSelect)

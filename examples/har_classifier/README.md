@@ -571,7 +571,7 @@ read three environment variables at start-up (the other HAR binaries ignore them
 | Variable | Values | Meaning |
 |---|---|---|
 | `REMAT_STORAGE` | `arena` \| `heap` | one resident block placed at start-up, or one allocation per buffer |
-| `REMAT_PLAN` | `store_all` \| `liveness` | keep every activation to the end of the call, or free each after its last reader |
+| `REMAT_PLAN` | `store_all` \| `liveness` \| `retain:<j>[,<j>...]` \| `retain:sqrt` \| `retain:speed` | keep every activation to the end of the call; free each after its last reader; or keep only some and recompute the others where the backward pass reads them (below) |
 | `DRY_PLAN` | `1` | print the plan's numbers in one line and stop (nothing is trained; no log, checkpoint or prediction file is written) |
 
 With none set, the trainer passes no scheduler and each training call runs its own
@@ -584,17 +584,34 @@ choice.
 ```bash
 B=./build/examples/examples/har_classifier/train_c_har_classifier
 REMAT_STORAGE=arena DRY_PLAN=1 $B
-# DRY_PLAN example=har_classifier storage=arena plan=liveness planned=1 placed=1 data_reserved=1 steps=25 wires_peak_b=49152 activations_peak_b=41216 arena_b=49152 arena_pad_b=0 arena_gap_b=0 wire_metadata_b=5576
+# DRY_PLAN example=har_classifier storage=arena plan=liveness planned=1 placed=1 data_reserved=1 steps=25 wires_peak_b=49152 activations_peak_b=41216 arena_b=49152 arena_pad_b=0 arena_gap_b=0 wire_metadata_b=5600 refwd_steps=0 forward_cost=502150 recompute_cost=0
+REMAT_STORAGE=arena REMAT_PLAN=retain:3,7 DRY_PLAN=1 $B
+# DRY_PLAN example=har_classifier storage=arena plan=retain:3,7,12 planned=1 placed=1 data_reserved=1 steps=32 wires_peak_b=32768 activations_peak_b=24576 arena_b=36864 arena_pad_b=0 arena_gap_b=4096 wire_metadata_b=5740 refwd_steps=7 forward_cost=502150 recompute_cost=301056
 REMAT_STORAGE=arena REMAT_PLAN=liveness EPOCHS=1 $B
 ```
+
+A recompute plan keeps the outputs `ACT j` of the listed layers (`retain:3,7`:
+the outputs of layers 3 and 7, counted from 1, ascending, at most the layer count)
+and recomputes each other activation from the nearest kept one below it, just
+before a backward step reads it. It always keeps the last output too (the loss
+reads it at once), so `retain:3,7` runs as `retain:3,7,12`. `retain:sqrt` keeps
+every k-th output, k = ceil(sqrt(n)) for n layers (Chen et al. 2016, "Training
+deep nets with sublinear memory cost"); `retain:speed` keeps the output of every
+Linear and convolution layer (the expensive ones to recompute, the "speed"
+choice of the cybertronai gradient-checkpointing package). A recomputed output
+is the same bytes as the first one, so training results do not change.
 
 `wires_peak_b` is the plan's peak of live training buffers (input excluded),
 `activations_peak_b` the same for activations alone, `arena_b` the resident block
 (`arena_pad_b` alignment, `arena_gap_b` the first-fit placer's unused bytes,
-recorded, never assumed), `wire_metadata_b` the scheduler's tables. The run log
-records the choice in `config` (`remat_storage`, `remat_plan`; the finetune trainer
-adds `remat_stage: 2`, because stage 1 always runs on the default), and a
-memory-profiling build adds the six numbers to the `memory` block. For the finetune
+recorded, never assumed), `wire_metadata_b` the scheduler's tables;
+`refwd_steps` counts the plan's recomputes, `forward_cost` and `recompute_cost`
+price the forwards and the recomputes in multiply-accumulates (an analytic
+count per layer, the same for every dtype; a proxy, not a measured time). The run
+log records the choice in `config` (`remat_storage`, `remat_plan`, with a retain
+list as it runs, e.g. `retain:3,7,12`; the finetune trainer adds `remat_stage: 2`,
+because stage 1 always runs on the default), and a memory-profiling build adds the
+nine numbers to the `memory` block. For the finetune
 trainer the numbers are stage 2's (frozen backbone): `DRY_PLAN=1` needs no stage-1
 checkpoint. An opted-in one-block run's `heap_peak_b` counts its resident block for
 the whole run, so compare plans by `wires_peak_b` / `arena_b`, not by `heap_peak_b`.

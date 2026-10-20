@@ -73,6 +73,9 @@ typedef struct memReport {
     size_t arena_pad_b;
     size_t arena_gap_b;
     size_t wire_metadata_b;
+    size_t refwd_steps;    /* REFORWARD steps of the training call's plan */
+    size_t forward_cost;   /* layerForwardCost summed over its forwards */
+    size_t recompute_cost; /* the same over its REFORWARDs */
 } memReport_t;
 
 /* Analytic byte sums over the optimizer's authoritative trainable-parameter

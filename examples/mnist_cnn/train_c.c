@@ -275,7 +275,7 @@ int main(void) {
         return 1;
     }
     rematSelection_t rematSel;
-    if (!rematSelectFromEnv(&rematSel)) {
+    if (!rematSelectFromEnv(&rematSel, MODEL_SIZE)) {
         return 1;
     }
     /* A BIT_PARITY run makes no training call, so a chosen memory scheme
@@ -332,7 +332,7 @@ int main(void) {
             }
             rematCall.remat = &remat;
             if (rematSel.dryPlan) {
-                rematSelectPrintPlan(stdout, "mnist_cnn", &remat);
+                rematSelectPrintPlan(stdout, "mnist_cnn", &rematSel, &remat);
                 rematSchedulerDeinit(&remat);
                 return 0;
             }

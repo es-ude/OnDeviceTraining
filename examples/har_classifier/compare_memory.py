@@ -114,7 +114,19 @@ SCALARS = [
 # scheduler (REMAT_STORAGE / REMAT_PLAN), so never in SCALARS (read with
 # float(mem[key]) on every log). An absent key is omitted, never 0.
 REMAT_SCALARS = ["wires_peak_b", "activations_peak_b", "arena_b", "arena_pad_b", "arena_gap_b",
-                 "wire_metadata_b"]
+                 "wire_metadata_b", "refwd_steps", "forward_cost", "recompute_cost"]
+# Composed here from REMAT_SCALARS (the C report records the two costs), aggregated
+# by the same rule.
+REMAT_COMPOSED = ["recompute_fwd_frac"]
+
+
+def _recompute_fwd_frac(mem: dict) -> float | None:
+    """recompute_cost / forward_cost: None when the log has no forward cost or it
+    is 0 (nothing to divide by; never NaN), 0.0 when nothing is recomputed."""
+    forward = mem.get("forward_cost")
+    if not forward:
+        return None
+    return float(mem.get("recompute_cost", 0)) / float(forward)
 
 ACC_TOL = 0.01  # "keeps up with FLOAT32" = within 1 accuracy point
 
@@ -245,6 +257,9 @@ def _run_scalars(log: RunLog) -> dict[str, float]:
         for key in REMAT_SCALARS:
             if mem.get(key) is not None:
                 out[key] = float(mem[key])
+        frac = _recompute_fwd_frac(mem)
+        if frac is not None:
+            out["recompute_fwd_frac"] = frac
         c_total = float(mem["mcu_total_b"])
         analytic = sum(out[k] for k in CATEGORIES)
         if analytic != c_total:
@@ -328,7 +343,7 @@ def aggregate(runs: dict[str, dict[int, RunLog]]) -> dict:
                 # sample std (ddof=1) needs >=2 points; else 0.0
                 "std": float(np.nanstd(vals, ddof=1)) if np.count_nonzero(~np.isnan(vals)) > 1 else 0.0,
             }
-        for key in REMAT_SCALARS:
+        for key in (*REMAT_SCALARS, *REMAT_COMPOSED):
             if not all(key in r for r in scal):
                 continue  # only seeds that all built a scheduler are comparable
             vals = np.array([r[key] for r in scal], dtype=float)

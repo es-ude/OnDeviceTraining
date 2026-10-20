@@ -55,7 +55,9 @@ class TrainConfig(TypedDict):
     # that fails to build stops the run, so a complete log with these keys ran on it. Absent =
     # none chosen (the training call's default plan).
     remat_storage: NotRequired[str]  # "arena" (one block) | "heap" (one allocation per buffer)
-    remat_plan: NotRequired[str]  # "store_all" | "liveness"
+    # "store_all" | "liveness" | "retain:<j>,..." (as it runs: ACT n included) | "retain:sqrt"
+    # | "retain:speed"
+    remat_plan: NotRequired[str]
     remat_stage: NotRequired[int]  # finetune: the stage the scheduler and the remat memory keys belong to (2)
 
 
@@ -121,6 +123,9 @@ class MemoryLog(TypedDict):
     arena_pad_b: NotRequired[int]  # alignment padding at the peak
     arena_gap_b: NotRequired[int]  # first-fit placement gap: recorded, never assumed
     wire_metadata_b: NotRequired[int]  # wire table + plan block (+ arena offsets)
+    refwd_steps: NotRequired[int]  # the plan's recomputed layer forwards per training call
+    forward_cost: NotRequired[int]  # multiply-accumulate proxy of the call's forwards
+    recompute_cost: NotRequired[int]  # the same proxy over its recomputed forwards
 
 
 class RunLog(TypedDict, total=False):

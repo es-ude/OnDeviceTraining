@@ -361,7 +361,8 @@ def test_eleven_categories_sum_to_the_c_total_for_post_pr7_logs():
 
 
 _REMAT = {"wires_peak_b": 49152, "activations_peak_b": 41216, "arena_b": 49152,
-          "arena_pad_b": 0, "arena_gap_b": 0, "wire_metadata_b": 5576}
+          "arena_pad_b": 0, "arena_gap_b": 0, "wire_metadata_b": 5600,
+          "refwd_steps": 0, "forward_cost": 502150, "recompute_cost": 0}
 
 
 def test_remat_keys_are_aggregated_when_every_seed_has_them():
@@ -385,6 +386,42 @@ def test_a_log_without_remat_keys_omits_them_never_zero():
     per_config = aggregate(runs)["per_config"]
     for config in runs:
         assert not set(_REMAT) & set(per_config[config]["stats"])
+        assert "recompute_fwd_frac" not in per_config[config]["stats"]
+
+
+def _remat_runs(**memory: int) -> dict:
+    runs = {"bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst": {}}
+    for seed in (1, 2):
+        log = _bfp_log(acc=0.9)
+        log["memory"].update(_REMAT)
+        log["memory"].update(memory)
+        runs["bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst"][seed] = log
+    return aggregate(runs)["per_config"]["bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst"]["stats"]
+
+
+def test_recompute_fwd_frac_is_the_recompute_cost_over_the_forward_cost():
+    """HAR with ACT 3, 7 and 12 kept: 7 REFORWARDs costing 301056 of the
+    forwards' 502150."""
+    stats = _remat_runs(refwd_steps=7, recompute_cost=301056)
+    assert stats["recompute_fwd_frac"] == {"mean": 301056 / 502150, "std": 0.0}
+
+
+def test_recompute_fwd_frac_is_zero_when_nothing_is_recomputed():
+    assert _remat_runs()["recompute_fwd_frac"] == {"mean": 0.0, "std": 0.0}
+
+
+def test_recompute_fwd_frac_is_absent_without_a_forward_cost():
+    """No forward cost, or a zero one (nothing ran forward): no fraction, not
+    NaN and not 0."""
+    assert "recompute_fwd_frac" not in _remat_runs(forward_cost=0)
+    runs = {"bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst": {}}
+    for seed in (1, 2):
+        log = _bfp_log(acc=0.9)
+        log["memory"].update({k: v for k, v in _REMAT.items() if k != "forward_cost"})
+        runs["bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst"][seed] = log
+    stats = aggregate(runs)["per_config"]["bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst"]["stats"]
+    assert "recompute_fwd_frac" not in stats
+    assert "forward_cost" not in stats
 
 
 def test_post_pr7_c_total_drift_is_loud():

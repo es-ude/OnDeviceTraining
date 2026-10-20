@@ -165,5 +165,5 @@ def test_remat_keys_are_declared_optional():
     assert {"remat_storage", "remat_plan", "remat_stage"} <= TrainConfig.__optional_keys__
     assert {
         "wires_peak_b", "activations_peak_b", "arena_b", "arena_pad_b", "arena_gap_b",
-        "wire_metadata_b",
+        "wire_metadata_b", "refwd_steps", "forward_cost", "recompute_cost",
     } <= MemoryLog.__optional_keys__

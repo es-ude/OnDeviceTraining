@@ -224,7 +224,8 @@ bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t
     const rematProgram_t *p = &s->plan->train;
     /* Authoritative: the placement below relies on it. No input reaches it
      * today, so it has no dedicated test: STORE_ALL and LIVENESS stop at the
-     * pre-check above, and rematPlanBuild already caps a SEQUENCE plan. */
+     * pre-check above, and rematPlanBuild already caps SEQUENCE and
+     * RETAIN_LIST plans. */
     if (p->numRanges > ODT_REMAT_MAX_RANGES) {
         PRINT_ERROR("remat[arena]: plan has %zu ranges, above ODT_REMAT_MAX_RANGES (%u)",
                     p->numRanges, (unsigned)ODT_REMAT_MAX_RANGES);

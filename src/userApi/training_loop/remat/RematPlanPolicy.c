@@ -188,6 +188,68 @@ void rematScanRanges(const rematWireTable_t *t, layer_t **model, const rematStep
     }
 }
 
+/* The generator's output cursor; with steps == NULL it only counts. */
+typedef struct retainEmitter {
+    rematStep_t *steps;
+    size_t numSteps;
+    size_t numWrites;
+} retainEmitter_t;
+
+static void emitStep(const rematWireTable_t *t, retainEmitter_t *e, rematStepKind_t kind,
+                     size_t layer) {
+    rematStep_t st = {.kind = (uint8_t)kind, .layer = (uint16_t)layer};
+    if (e->steps != NULL) {
+        e->steps[e->numSteps] = st;
+    }
+    e->numSteps++;
+    if (scanWrite(t, &st) != REMAT_NONE) {
+        e->numWrites++;
+    }
+}
+
+/* Makes ACT j present for the backward-phase step about to read it. ACTs
+ * from *recomputedFrom up to the last need are present from earlier runs
+ * (n + 1: none yet); a later need is never above an earlier one. */
+static void recomputeIfDropped(const rematWireTable_t *t, const bool *retain, retainEmitter_t *e,
+                               size_t j, size_t *recomputedFrom) {
+    if (j == 0u || retain[j] || j >= *recomputedFrom) {
+        return;
+    }
+    size_t k = j - 1u;
+    while (k > 0u && !retain[k]) {
+        k--;
+    }
+    for (size_t l = k; l < j; l++) {
+        emitStep(t, e, REMAT_STEP_REFORWARD, l);
+    }
+    *recomputedFrom = k + 1u;
+}
+
+size_t rematFillRetainSteps(const rematWireTable_t *t, layer_t **model, const bool *retain,
+                            rematStep_t *steps, size_t *numWrites) {
+    size_t n = t->modelSize;
+    retainEmitter_t e = {.steps = steps, .numSteps = 0, .numWrites = 0};
+    for (size_t l = 0; l < n; l++) {
+        emitStep(t, &e, REMAT_STEP_FORWARD, l);
+    }
+    emitStep(t, &e, REMAT_STEP_LOSS_FORWARD, n);
+    if (t->hasBackward) {
+        size_t recomputedFrom = n + 1u;
+        recomputeIfDropped(t, retain, &e, n, &recomputedFrom);
+        emitStep(t, &e, REMAT_STEP_LOSS_BACKWARD, n);
+        for (ptrdiff_t l = t->backwardTop; l >= (ptrdiff_t)t->deepest; l--) {
+            if (layerBackwardReadsInput(model[l])) {
+                recomputeIfDropped(t, retain, &e, (size_t)l, &recomputedFrom);
+            }
+            emitStep(t, &e, REMAT_STEP_BACKWARD, (size_t)l);
+        }
+    }
+    if (numWrites != NULL) {
+        *numWrites = e.numWrites;
+    }
+    return e.numSteps;
+}
+
 /* Ping-pong lifetimes: ACT j from the FORWARD that writes it (step j - 1) to
  * the step that reads it (step j: FORWARD(j), or LOSS_FORWARD for ACT n). */
 void rematFillEvalProgram(const rematWireTable_t *t, rematStep_t *steps, rematRange_t *ranges) {

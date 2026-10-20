@@ -33,13 +33,14 @@
 #define REMAT_NONE ((uint16_t)0xFFFFu)
 
 /* The range budget, one definition for the plan and the rows: a
- * REMAT_PLAN_SEQUENCE plan above it exits in rematPlanBuild before its block is
- * reserved, under every row, and ARENA checks every plan against it at init.
- * HEAP admits STORE_ALL and LIVENESS (numWires - 1 ranges) of any size. It
- * bounds the quadratic plan work of a SEQUENCE plan: the end-order sort
- * O(R^2), grammar rule 4's coverage scan O(S * R) and ARENA's placement check
- * O(R^2). A plan fact, not an OOM. Host test builds may raise it; its value
- * belongs in the plan dump, like ODT_WIRE_ALIGN. */
+ * REMAT_PLAN_SEQUENCE or REMAT_PLAN_RETAIN_LIST plan above it exits in
+ * rematPlanBuild before its block is reserved, under every row, and ARENA
+ * checks every plan against it at init. HEAP admits STORE_ALL and LIVENESS
+ * (numWires - 1 ranges) of any size. It bounds the quadratic plan work of the
+ * two capped kinds: the end-order sort O(R^2), grammar rule 4's coverage scan
+ * O(S * R) and ARENA's placement check O(R^2). A plan fact, not an OOM. Host
+ * test builds may raise it; its value belongs in the plan dump, like
+ * ODT_WIRE_ALIGN. */
 #ifndef ODT_REMAT_MAX_RANGES
 #define ODT_REMAT_MAX_RANGES 1024u
 #endif
@@ -164,9 +165,9 @@ size_t rematWireBytes(const rematWireTable_t *t, uint16_t w);
 
 /* One inclusive lifetime of a wire: begin = the step that writes it, end = its
  * last reader (policy-dependent). STORE_ALL and LIVENESS give each slab wire
- * one range; a SEQUENCE plan opens one range per write, so a recomputed wire
- * has several, which never overlap. No placement (ARENA offsets are private to
- * the row). */
+ * one range; SEQUENCE and RETAIN_LIST plans open one range per write, so a
+ * recomputed wire has several, which never overlap. No placement (ARENA
+ * offsets are private to the row). */
 typedef struct rematRange {
     uint16_t wire, begin, end;
 } rematRange_t;

@@ -763,7 +763,10 @@ checkpointing, limitations, literature).
   `REMAT_PLAN_STORE_ALL`/`REMAT_PLAN_LIVENESS`, or `REMAT_PLAN_SEQUENCE`: a caller's
   own TRAIN step list, length-checked before anything is reserved, copied into the
   plan, its ranges derived by one scan of the steps, and validated by the plan
-  grammar; a SEQUENCE plan with more than `ODT_REMAT_MAX_RANGES` ranges, default
+  grammar; or `REMAT_PLAN_RETAIN_LIST`: a mask of the activations to keep, from which
+  the plan writes the step list, recomputing each dropped activation that a backward
+  step reads from the nearest present one below it, at most once; a SEQUENCE or
+  RETAIN_LIST plan with more than `ODT_REMAT_MAX_RANGES` ranges, default
   1024, exits at build under either storage scheme), a step scheduler with two storage
   schemes behind one interface (`RematScheduler.h`): `REMAT_ARENA` (one resident
   block, first-fit-decreasing placement) and `REMAT_HEAP` (one block per buffer),
@@ -785,7 +788,7 @@ checkpointing, limitations, literature).
   `ODT_REMAT_VERIFY` (ON in the `unit_test`/`unit_test_debug`/`unit_test_asan`
   presets and, by inheritance, `unit_test_ubsan`). A plan may recompute a
   layer's forward output during the backward phase (`REMAT_STEP_REFORWARD`,
-  in a `REMAT_PLAN_SEQUENCE` step list): the driver runs it with
+  in a `REMAT_PLAN_SEQUENCE` step list or a `REMAT_PLAN_RETAIN_LIST` plan): the driver runs it with
   the first forward's key, so the output is the same bytes, and traces it as
   `"refwd"`; the checker admits it only while a pending backward step still
   reads that output and within 2n + 2 + n(n+1)/2 steps, and both the plan

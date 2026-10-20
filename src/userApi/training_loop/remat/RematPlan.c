@@ -43,7 +43,8 @@ static bool endsBefore(const rematRange_t *ranges, uint16_t a, uint16_t b) {
 
 /* In place, no scratch: O(R^2) worst case, within the O(R^2 log R) of the
  * ARENA placement that follows it at init. R is numWires - 1 for STORE_ALL
- * and LIVENESS, and at most ODT_REMAT_MAX_RANGES for a SEQUENCE plan. */
+ * and LIVENESS, and at most ODT_REMAT_MAX_RANGES for a SEQUENCE or
+ * RETAIN_LIST plan. */
 static void sortEndOrder(rematProgram_t *p) {
     for (size_t i = 0; i < p->numRanges; i++) {
         p->endOrder[i] = (uint16_t)i;
@@ -60,7 +61,7 @@ static void sortEndOrder(rematProgram_t *p) {
 }
 
 /* Overflow-checked here are the plan-block size (stepsAt/rangesAt/endOrderAt/
- * blockBytes, via planAdd/planMul), the SEQUENCE step bound, and the two
+ * blockBytes, via planAdd/planMul), the step bound, and the two
  * peaks, peakLiveBytes and the activation-only peak (accumulated with planAdd
  * in peakBytesUpTo, each under its own label). rematTrainStepCount,
  * rematBackwardStep and numRanges = numWires - 1 are plain size_t arithmetic
@@ -436,6 +437,43 @@ static void requireTheFieldsOfThePolicy(const rematPlanSpec_t *spec) {
                     (int)spec->policy);
         exit(1);
     }
+    if (spec->policy != REMAT_PLAN_RETAIN_LIST && spec->retain != NULL) {
+        PRINT_ERROR("rematPlanBuild: retain is set, but the policy %d is not "
+                    "REMAT_PLAN_RETAIN_LIST",
+                    (int)spec->policy);
+        exit(1);
+    }
+}
+
+/* RETAIN_LIST's checks before the counting pass reads the mask. A model whose
+ * loss backward runs but no BACKWARD step does (n = 1 under cross entropy, or
+ * only the last layer trains) has no REFORWARD window: a dropped ACT n could
+ * never be recomputed before LOSS_BACKWARD reads it. */
+static void requireARetainMaskWithAWindow(const rematPlanSpec_t *spec, const rematWireTable_t *t) {
+    if (spec->retain == NULL) {
+        PRINT_ERROR("rematPlanBuild: REMAT_PLAN_RETAIN_LIST needs a retain mask, got NULL");
+        exit(1);
+    }
+    size_t n = t->modelSize;
+    if (t->hasBackward && t->backwardTop < (ptrdiff_t)t->deepest && !spec->retain[n]) {
+        PRINT_ERROR("rematPlanBuild: RETAIN_LIST drops ACT %zu but no REFORWARD window exists "
+                    "(LOSS_BACKWARD reads it and no BACKWARD step runs); keep ACT %zu",
+                    n, n);
+        exit(1);
+    }
+}
+
+/* Rule 5 for a generated program, before anything is reserved or cast to
+ * uint16_t. A RETAIN_LIST program holds at most 3n + 2 steps, never more than
+ * 2n + 2 + n(n+1)/2, so only UINT16_MAX can stop it. */
+static void requireAProgramWithinTheBound(size_t numSteps, size_t n) {
+    size_t bound = stepBound(n);
+    if (numSteps > bound) {
+        PRINT_ERROR("rematPlanBuild: the RETAIN_LIST program has %zu steps, above the step bound "
+                    "%zu (min(UINT16_MAX, 2n + 2 + n(n+1)/2), n = %zu)",
+                    numSteps, bound, n);
+        exit(1);
+    }
 }
 
 /* SEQUENCE's checks before anything reads the caller's records: the counting
@@ -461,9 +499,9 @@ static void requireASequenceWithinTheBound(const rematPlanSpec_t *spec, size_t n
     }
 }
 
-/* A SEQUENCE plan opens a range per write, up to one per step: the cap
- * bounds its quadratic plan work before anything is reserved. STORE_ALL and
- * LIVENESS keep numWires - 1 ranges and are not capped here. */
+/* A SEQUENCE or RETAIN_LIST plan opens a range per write, up to one per step:
+ * the cap bounds its quadratic plan work before anything is reserved.
+ * STORE_ALL and LIVENESS keep numWires - 1 ranges and are not capped here. */
 static void requireRangesWithinTheCap(size_t numRanges) {
     if (numRanges > ODT_REMAT_MAX_RANGES) {
         PRINT_ERROR("rematPlanBuild: plan has %zu ranges, above ODT_REMAT_MAX_RANGES (%u)",
@@ -481,7 +519,7 @@ bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **mode
     }
     rematPlanPolicy_t policy = spec->policy;
     if (policy != REMAT_PLAN_STORE_ALL && policy != REMAT_PLAN_LIVENESS &&
-        policy != REMAT_PLAN_SEQUENCE) {
+        policy != REMAT_PLAN_SEQUENCE && policy != REMAT_PLAN_RETAIN_LIST) {
         PRINT_ERROR("rematPlanBuild: unknown policy %d", (int)policy);
         exit(1);
     }
@@ -493,6 +531,11 @@ bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **mode
         requireASequenceWithinTheBound(spec, t->modelSize);
         numSteps = spec->sequenceLen;
         numRanges = rematScanRangeCount(t, spec->sequence, numSteps);
+        requireRangesWithinTheCap(numRanges);
+    } else if (policy == REMAT_PLAN_RETAIN_LIST) {
+        requireARetainMaskWithAWindow(spec, t);
+        numSteps = rematFillRetainSteps(t, model, spec->retain, NULL, &numRanges);
+        requireAProgramWithinTheBound(numSteps, t->modelSize);
         requireRangesWithinTheCap(numRanges);
     }
     size_t evalSteps = t->modelSize + 1u;
@@ -510,6 +553,9 @@ bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **mode
     placeProgram(train, block, &trainAt, numSteps, numRanges);
     if (policy == REMAT_PLAN_SEQUENCE) {
         memcpy(train->steps, spec->sequence, numSteps * sizeof(rematStep_t));
+        rematScanRanges(t, model, train->steps, numSteps, train->ranges);
+    } else if (policy == REMAT_PLAN_RETAIN_LIST) {
+        (void)rematFillRetainSteps(t, model, spec->retain, train->steps, NULL);
         rematScanRanges(t, model, train->steps, numSteps, train->ranges);
     } else {
         rematFillTrainSteps(t, train->steps);

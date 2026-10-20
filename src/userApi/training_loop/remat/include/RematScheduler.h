@@ -40,21 +40,31 @@ typedef enum rematPlanPolicy {
     REMAT_PLAN_STORE_ALL = 0,
     REMAT_PLAN_LIVENESS,
     REMAT_PLAN_SEQUENCE, /* the caller's TRAIN step list, verbatim; its ranges come from a scan */
+    REMAT_PLAN_RETAIN_LIST, /* the ACTs to keep; the plan recomputes the others where read */
 } rematPlanPolicy_t;
 
 /* NULL, or a zero-initialised struct, means STORE_ALL (the trainingRunOptions_t
  * zero-initialisation idiom). sequence and sequenceLen belong to
- * REMAT_PLAN_SEQUENCE; any other policy with either set exits. sequence must
- * point at sequenceLen readable records (C cannot detect a shorter buffer),
- * and 1 <= sequenceLen <= min(UINT16_MAX, 2n + 2 + n(n+1)/2) for a model of n
- * layers. rematPlanBuild copies the steps into the plan and keeps no pointer
- * to them: the caller may free or reuse the buffer once it returns. The buffer
- * must stay unchanged while rematPlanBuild runs: rematPlanBuild reads the steps
- * twice, once to count the ranges and once to copy them. */
+ * REMAT_PLAN_SEQUENCE, retain to REMAT_PLAN_RETAIN_LIST; any other policy with
+ * one of them set exits. sequence must point at sequenceLen readable records
+ * (C cannot detect a shorter buffer), and 1 <= sequenceLen <= min(UINT16_MAX,
+ * 2n + 2 + n(n+1)/2) for a model of n layers. rematPlanBuild copies the steps
+ * into the plan and keeps no pointer to them: the caller may free or reuse the
+ * buffer once it returns. The buffer must stay unchanged while rematPlanBuild
+ * runs: rematPlanBuild reads the steps twice, once to count the ranges and once
+ * to copy them. retain points at n + 1 flags, retain[j] for ACT j (retain[0] is
+ * ignored: the input is the caller's), read only while rematPlanBuild runs; it
+ * is read more than once too (to check, to count, to write the steps), so it
+ * must also stay unchanged meanwhile. A dropped ACT that a backward step
+ * reads is recomputed just before that step from the nearest ACT below it
+ * that is present; the build exits where no REFORWARD may run (a loss
+ * backward and no backward layer step) and where that would recompute a
+ * BatchNorm1d whose training forward updates its running statistics. */
 typedef struct rematPlanSpec {
     rematPlanPolicy_t policy;
     const rematStep_t *sequence;
     size_t sequenceLen;
+    const bool *retain;
 } rematPlanSpec_t;
 
 /* Which of the plan's programs a call walks. TRAIN = 0: a zero-initialised

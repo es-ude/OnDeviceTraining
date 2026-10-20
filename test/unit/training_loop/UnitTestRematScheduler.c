@@ -1490,6 +1490,26 @@ void testRowContractHeapOnARecomputePlan(void) {
     assertRowContract(initHeap, buildMlp3Model, &g_mlp3Recompute);
 }
 
+static void assertRowContractOverRandomRetainMasks(rowInit_t init) {
+    uint32_t state = 0x9E3779B9u;
+    for (int trial = 0; trial < 8; trial++) {
+        bool retain[HAR_N + 1];
+        for (size_t j = 0; j <= HAR_N; j++) {
+            retain[j] = nextRandom(&state) % 2u == 0u;
+        }
+        const rematPlanSpec_t spec = {.policy = REMAT_PLAN_RETAIN_LIST, .retain = retain};
+        assertRowContract(init, buildHarModel, &spec);
+    }
+}
+
+void testRowContractArenaOnRandomRetainMasks(void) {
+    assertRowContractOverRandomRetainMasks(initArena);
+}
+
+void testRowContractHeapOnRandomRetainMasks(void) {
+    assertRowContractOverRandomRetainMasks(initHeap);
+}
+
 /* PR1a carry: under LIVENESS, Flatten's dx (GRAD 9) binds at BACKWARD(9)
  * after its source ACT 9 died. Pinned here so a planner change that keeps
  * ACT 9 alive cannot silently drop the harness's coverage of it. */
@@ -2393,6 +2413,8 @@ int main(void) {
     RUN_TEST(testRowContractHeapF1Liveness);
     RUN_TEST(testRowContractArenaOnARecomputePlan);
     RUN_TEST(testRowContractHeapOnARecomputePlan);
+    RUN_TEST(testRowContractArenaOnRandomRetainMasks);
+    RUN_TEST(testRowContractHeapOnRandomRetainMasks);
     RUN_TEST(testRowContractHeapHarAcrossModes);
     RUN_TEST(testRowContractHeapF1AcrossModesLiveness);
     RUN_TEST(testRowContractArenaHarAcrossModes);

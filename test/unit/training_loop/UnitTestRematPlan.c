@@ -3078,6 +3078,378 @@ void testSequencePlanRecomputesAFrozenTrackedBatchNorm(void) {
     freeBnPlanFixture(&f);
 }
 
+/* ---- REMAT_PLAN_RETAIN_LIST ---- */
+
+/* The largest model of the plan-level retain tests (HAR), plus ACT 0. */
+#define RETAIN_MAX (HAR_N + 1)
+
+static rematPlanSpec_t retainSpec(const bool *retain) {
+    return (rematPlanSpec_t){.policy = REMAT_PLAN_RETAIN_LIST, .retain = retain};
+}
+
+/* MLP3 keeping ACT 3 only: BACKWARD(2) reads ACT 2 and BACKWARD(1) reads
+ * ACT 1, so the run 0..1 from ACT 0 recomputes both before BACKWARD(2), and
+ * BACKWARD(1) reads the recomputed ACT 1. That is the hand-written recompute
+ * program, with its hand-derived ranges. */
+void testRetainListPlanOnTheMlpIsTheRecomputeProgram(void) {
+    const bool retain[MLP3_N + 1] = {false, false, false, true};
+    const rematStep_t steps[] = MLP3_RECOMPUTE_STEPS;
+    const rematRange_t ranges[] = MLP3_RECOMPUTE_RANGES;
+    layer_t *model[MLP3_N];
+    inputLike_t in;
+    rematWireTable_t *t = initMlp3Table(model, &in);
+    rematPlanSpec_t spec = retainSpec(retain);
+    rematPlan_t *p = buildPlan(t, model, &spec);
+    TEST_ASSERT_EQUAL_INT(REMAT_PLAN_RETAIN_LIST, p->policy);
+    assertSameSteps(steps, COUNT_OF(steps), &p->train);
+    assertSameRanges(ranges, COUNT_OF(ranges), &p->train);
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, MLP3_N);
+}
+
+/* Evaluation never recomputes: a RETAIN_LIST plan's EVAL program is
+ * STORE_ALL's. */
+void testRetainListPlanEvalProgramIsTheStoreAllEvalProgram(void) {
+    const bool retain[MLP3_N + 1] = {false, false, false, true};
+    layer_t *model[MLP3_N];
+    inputLike_t in;
+    rematWireTable_t *t = initMlp3Table(model, &in);
+    rematPlanSpec_t spec = retainSpec(retain);
+    rematPlan_t *kept = buildPlan(t, model, &spec);
+    rematPlan_t *all = buildPlan(t, model, NULL);
+    assertSameSteps(all->eval.steps, all->eval.numSteps, &kept->eval);
+    assertSameRanges(all->eval.ranges, all->eval.numRanges, &kept->eval);
+    TEST_ASSERT_EQUAL_size_t(all->eval.peakLiveBytes, kept->eval.peakLiveBytes);
+    rematPlanFree(all);
+    rematPlanFree(kept);
+    rematWireTableFree(t);
+    freeModel(model, MLP3_N);
+}
+
+/* Every ACT kept: nothing is recomputed, the generated list is the LIVENESS
+ * step list, and its scan gives LIVENESS's ranges and both peaks. */
+static void assertKeepingEveryActIsLiveness(layer_t **model, size_t n, lossFuncType_t lt,
+                                            const tensor_t *x) {
+    bool retain[RETAIN_MAX];
+    TEST_ASSERT_TRUE(n < RETAIN_MAX);
+    for (size_t j = 0; j <= n; j++) {
+        retain[j] = true;
+    }
+    rematWireTable_t *t = initTable(model, n, lt, x);
+    rematPlan_t *live = buildPlan(t, model, &g_liveness);
+    rematPlanSpec_t spec = retainSpec(retain);
+    rematPlan_t *kept = buildPlan(t, model, &spec);
+    assertSameSteps(live->train.steps, live->train.numSteps, &kept->train);
+    assertSameRanges(live->train.ranges, live->train.numRanges, &kept->train);
+    TEST_ASSERT_EQUAL_size_t(live->train.peakLiveBytes, kept->train.peakLiveBytes);
+    TEST_ASSERT_EQUAL_size_t(rematProgramActPeakBytes(&live->train, t),
+                             rematProgramActPeakBytes(&kept->train, t));
+    rematPlanFree(kept);
+    rematPlanFree(live);
+    rematWireTableFree(t);
+}
+
+void testRetainListPlanKeepingEveryActIsTheLivenessPlanOnTheZoo(void) {
+    inputLike_t in;
+    layer_t *har[HAR_N];
+    buildHar(har, false);
+    assertKeepingEveryActIsLiveness(har, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    freeModel(har, HAR_N);
+    layer_t *finetune[HAR_N];
+    buildHar(finetune, true);
+    assertKeepingEveryActIsLiveness(finetune, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    freeModel(finetune, HAR_N);
+    layer_t *mnist[MNIST_N];
+    buildMnistCnn(mnist);
+    assertKeepingEveryActIsLiveness(mnist, MNIST_N, CROSS_ENTROPY,
+                                    makeInput(&in, (size_t[]){1, 1, 784}, 3, &g_floatQ));
+    freeModel(mnist, MNIST_N);
+}
+
+/* The 50 random chains of the co-live property, under both losses. */
+void testRetainListPlanKeepingEveryActIsTheLivenessPlanOnRandomChains(void) {
+    uint32_t state = 0x2545F491u;
+    for (int trial = 0; trial < 50; trial++) {
+        size_t n = 1u + nextRandom(&state) % 6u;
+        layer_t *model[6];
+        for (size_t i = 0; i < n; i++) {
+            model[i] = randomRank2Layer(&state, i);
+        }
+        lossFuncType_t lt = (nextRandom(&state) % 2u == 0u) ? MSE : CROSS_ENTROPY;
+        inputLike_t in;
+        assertKeepingEveryActIsLiveness(model, n, lt,
+                                        makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ));
+        freeModel(model, n);
+    }
+}
+
+static void assertRetainListPlanIsSound(layer_t **model, size_t n, lossFuncType_t lt,
+                                        const tensor_t *x, const bool *retain) {
+    rematWireTable_t *t = initTable(model, n, lt, x);
+    rematPlanSpec_t spec = retainSpec(retain);
+    rematPlan_t *kept = buildPlan(t, model, &spec);
+    assertEveryStepsOperandsAreCoLive(&kept->train, t, model);
+    for (size_t j = 1; j <= n; j++) {
+        size_t rangesOfAct = 0;
+        for (size_t r = 0; r < kept->train.numRanges; r++) {
+            rangesOfAct += (kept->train.ranges[r].wire == rematActId(t, j)) ? 1u : 0u;
+        }
+        TEST_ASSERT_TRUE_MESSAGE(rangesOfAct <= 2u, "an ACT recomputed more than once");
+        if (retain[j]) {
+            TEST_ASSERT_EQUAL_size_t_MESSAGE(1, rangesOfAct, "a kept ACT was recomputed");
+        }
+    }
+    rematPlanSpec_t again = sequenceSpec(kept->train.steps, kept->train.numSteps);
+    rematPlan_t *seq = buildPlan(t, model, &again);
+    assertSameSteps(kept->train.steps, kept->train.numSteps, &seq->train);
+    assertSameRanges(kept->train.ranges, kept->train.numRanges, &seq->train);
+    TEST_ASSERT_EQUAL_MEMORY(kept->train.endOrder, seq->train.endOrder,
+                             kept->train.numRanges * sizeof(uint16_t));
+    TEST_ASSERT_EQUAL_size_t(kept->train.peakLiveBytes, seq->train.peakLiveBytes);
+    TEST_ASSERT_EQUAL_size_t(rematProgramActPeakBytes(&kept->train, t),
+                             rematProgramActPeakBytes(&seq->train, t));
+    rematPlanFree(seq);
+    rematPlanFree(kept);
+    rematWireTableFree(t);
+}
+
+/* Three masks per model: nothing kept, every other ACT kept, only ACT n
+ * kept. HAR, its frozen-convolution stage 2 and mnist_cnn all have a
+ * backward step under the loss backward, so every mask is valid. */
+void testRetainListPlansAreSoundOnTheZoo(void) {
+    for (int mask = 0; mask < 3; mask++) {
+        bool retain[RETAIN_MAX];
+        for (size_t j = 0; j < RETAIN_MAX; j++) {
+            retain[j] = (mask == 1) && (j % 2u == 0u);
+        }
+        inputLike_t in;
+        layer_t *har[HAR_N];
+        buildHar(har, false);
+        retain[HAR_N] = retain[HAR_N] || mask == 2;
+        assertRetainListPlanIsSound(har, HAR_N, CROSS_ENTROPY, makeHarInput(&in), retain);
+        freeModel(har, HAR_N);
+        layer_t *finetune[HAR_N];
+        buildHar(finetune, true);
+        assertRetainListPlanIsSound(finetune, HAR_N, CROSS_ENTROPY, makeHarInput(&in), retain);
+        freeModel(finetune, HAR_N);
+        layer_t *mnist[MNIST_N];
+        buildMnistCnn(mnist);
+        retain[MNIST_N] = retain[MNIST_N] || mask == 2;
+        assertRetainListPlanIsSound(mnist, MNIST_N, CROSS_ENTROPY,
+                                    makeInput(&in, (size_t[]){1, 1, 784}, 3, &g_floatQ), retain);
+        freeModel(mnist, MNIST_N);
+    }
+}
+
+/* A random mask for a model of n layers. ACT n stays kept where no
+ * REFORWARD window exists (the loss backward runs and no BACKWARD step
+ * does): that mask exits by design (its own test below). */
+static void randomRetainMask(uint32_t *state, layer_t **model, size_t n, lossFuncType_t lt,
+                             bool *retain) {
+    for (size_t j = 0; j <= n; j++) {
+        retain[j] = nextRandom(state) % 2u == 0u;
+    }
+    size_t deepest;
+    ptrdiff_t top;
+    rematBackwardRange(model, n, lt, &deepest, &top);
+    if (deepest < n && top < (ptrdiff_t)deepest) {
+        retain[n] = true;
+    }
+}
+
+/* The 50 random chains of the co-live property, each under a random mask. */
+void testRetainListPlansAreSoundOnRandomChains(void) {
+    uint32_t state = 0x2545F491u;
+    for (int trial = 0; trial < 50; trial++) {
+        size_t n = 1u + nextRandom(&state) % 6u;
+        layer_t *model[6];
+        for (size_t i = 0; i < n; i++) {
+            model[i] = randomRank2Layer(&state, i);
+        }
+        lossFuncType_t lt = (nextRandom(&state) % 2u == 0u) ? MSE : CROSS_ENTROPY;
+        bool retain[7];
+        randomRetainMask(&state, model, n, lt, retain);
+        inputLike_t in;
+        assertRetainListPlanIsSound(model, n, lt, makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ),
+                                    retain);
+        freeModel(model, n);
+    }
+}
+
+void testRetainListPlanExitsOnANullMaskBeforeReserving(void) {
+    layer_t *model[MLP3_N];
+    inputLike_t in;
+    rematWireTable_t *t = initMlp3Table(model, &in);
+    rematPlanSpec_t spec = retainSpec(NULL);
+    assertExitsBeforeThePlanBlock(t, model, &spec,
+                                  "REMAT_PLAN_RETAIN_LIST needs a retain mask, got NULL");
+    rematWireTableFree(t);
+    freeModel(model, MLP3_N);
+}
+
+/* A mask with another policy exits instead of being ignored, and so do the
+ * SEQUENCE fields with RETAIN_LIST. */
+void testPlanBuildExitsOnARetainMaskForAnotherPolicy(void) {
+    const bool retain[MLP3_N + 1] = {false, false, false, true};
+    layer_t *model[MLP3_N];
+    inputLike_t in;
+    rematWireTable_t *t = initMlp3Table(model, &in);
+    rematPlanSpec_t spec = {.policy = REMAT_PLAN_LIVENESS, .retain = retain};
+    ASSERT_EXITS_WITH_OUTPUT(1, "retain is set, but the policy 1 is not REMAT_PLAN_RETAIN_LIST",
+                             planBuildExpectingAnExit(t, model, &spec));
+    rematWireTableFree(t);
+    freeModel(model, MLP3_N);
+}
+
+void testRetainListPlanExitsOnASequenceForItsPolicy(void) {
+    const bool retain[MLP3_N + 1] = {false, false, false, true};
+    const rematStep_t steps[] = MLP3_RECOMPUTE_STEPS;
+    layer_t *model[MLP3_N];
+    inputLike_t in;
+    rematWireTable_t *t = initMlp3Table(model, &in);
+    rematPlanSpec_t spec = {.policy = REMAT_PLAN_RETAIN_LIST,
+                            .sequence = steps,
+                            .sequenceLen = COUNT_OF(steps),
+                            .retain = retain};
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "sequence or sequenceLen is set, but the policy 3 is not REMAT_PLAN_SEQUENCE",
+        planBuildExpectingAnExit(t, model, &spec));
+    rematWireTableFree(t);
+    freeModel(model, MLP3_N);
+}
+
+/* n = 1 under cross entropy: LOSS_BACKWARD reads ACT 1 and no BACKWARD step
+ * runs (top = -1 < deepest = 0), so no REFORWARD may recompute ACT 1. */
+void testRetainListPlanExitsWhenSingleLayerCeDropsActN(void) {
+    const bool retain[2] = {false, false};
+    layer_t *model[1] = {makeLinear(2, 3, false, 0)};
+    inputLike_t in;
+    rematWireTable_t *t =
+        initTable(model, 1, CROSS_ENTROPY, makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ));
+    rematPlanSpec_t spec = retainSpec(retain);
+    assertExitsBeforeThePlanBlock(t, model, &spec,
+                                  "RETAIN_LIST drops ACT 1 but no REFORWARD window exists "
+                                  "(LOSS_BACKWARD reads it and no BACKWARD step runs); keep "
+                                  "ACT 1");
+    rematWireTableFree(t);
+    freeModel(model, 1);
+}
+
+/* Cross entropy with only the last Linear trainable: top = 1 < deepest = 2.
+ * Dropping ACT 3 exits; keeping it needs no recompute, and the plan is the
+ * forward program, LOSS_BACKWARD, and nothing else. */
+void testRetainListPlanExitsWhenTheTopIsBelowDeepestAndActNIsDropped(void) {
+    const bool dropped[4] = {false, false, false, false};
+    const bool kept[4] = {false, false, false, true};
+    const rematStep_t steps[] = {STEP_F(0), STEP_F(1), STEP_F(2), STEP_LF(3), STEP_LB(3)};
+    handProgram_t h;
+    buildCeTopBelowDeepestHand(&h);
+    rematPlanSpec_t dropSpec = retainSpec(dropped);
+    assertExitsBeforeThePlanBlock(h.t, h.model, &dropSpec,
+                                  "RETAIN_LIST drops ACT 3 but no REFORWARD window exists "
+                                  "(LOSS_BACKWARD reads it and no BACKWARD step runs); keep "
+                                  "ACT 3");
+    rematPlanSpec_t keepSpec = retainSpec(kept);
+    rematPlan_t *p = buildPlan(h.t, h.model, &keepSpec);
+    assertSameSteps(steps, COUNT_OF(steps), &p->train);
+    rematPlanFree(p);
+    freeHandProgram(&h);
+}
+
+/* The BatchNorm1d plan fixture with ACT 2 kept: BACKWARD(1) reads the
+ * dropped ACT 1, so the run would recompute layer 0, a tracked, unfrozen
+ * BatchNorm1d. The plan exits by name and says which ACT to keep; it never
+ * keeps ACT 1 on its own. */
+void testRetainListPlanRejectsRecomputingATrackedBatchNorm(void) {
+    const bool retain[3] = {false, false, true};
+    rematPlanSpec_t spec = retainSpec(retain);
+    bnPlanFixture_t f;
+    buildBnPlanFixture(&f, true, false);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1,
+        "step #4 (kind 4, layer 0) violates grammar rule 6: layer 0 updates its state in every "
+        "training forward (a tracked, unfrozen BatchNorm1d), so it is never recomputed; keep "
+        "ACT 1",
+        planBuildExpectingAnExit(f.t, f.model, &spec));
+    freeBnPlanFixture(&f);
+}
+
+/* The same mask over an untracked BatchNorm1d recomputes it. */
+void testRetainListPlanRecomputesAnUntrackedBatchNorm(void) {
+    const bool retain[3] = {false, false, true};
+    const rematStep_t steps[] = BN_RECOMPUTE_STEPS;
+    rematPlanSpec_t spec = retainSpec(retain);
+    bnPlanFixture_t f;
+    buildBnPlanFixture(&f, false, false);
+    rematPlan_t *p = buildPlan(f.t, f.model, &spec);
+    assertSameSteps(steps, COUNT_OF(steps), &p->train);
+    rematPlanFree(p);
+    freeBnPlanFixture(&f);
+}
+
+#define RETAIN_CHAIN_MAX 21845u
+static layer_t *g_retainChain[RETAIN_CHAIN_MAX];
+static bool g_retainMask[RETAIN_CHAIN_MAX + 1u];
+
+/* model[0] = linear, the rest the one shared relu; g_retainMask cleared. */
+static rematWireTable_t *initRetainChain(size_t n, layer_t *linear, layer_t *relu,
+                                         inputLike_t *in) {
+    g_retainChain[0] = linear;
+    for (size_t i = 1; i < n; i++) {
+        g_retainChain[i] = relu;
+    }
+    memset(g_retainMask, 0, sizeof g_retainMask);
+    return initTable(g_retainChain, n, MSE, makeInput(in, (size_t[]){1, 1}, 2, &g_floatQ));
+}
+
+void testRetainListPlanExitsAboveUint16MaxStepsBeforeReserving(void) {
+    layer_t *linear = makeLinear(1, 1, false, 0);
+    layer_t *relu = makeRelu(&g_floatQ);
+    inputLike_t in;
+    rematWireTable_t *t = initRetainChain(21845u, linear, relu, &in);
+    rematPlanSpec_t spec = retainSpec(g_retainMask);
+    assertExitsBeforeThePlanBlock(t, g_retainChain, &spec,
+                                  "the RETAIN_LIST program has 65537 steps, above the step bound "
+                                  "65535 (min(UINT16_MAX, 2n + 2 + n(n+1)/2), n = 21845)");
+    rematWireTableFree(t);
+    freeReluLayer(relu);
+    freeLinearLayer(linear);
+}
+
+void testRetainListPlanAtTheStepBoundStopsAtTheRangeCap(void) {
+    layer_t *linear = makeLinear(1, 1, false, 0);
+    layer_t *relu = makeRelu(&g_floatQ);
+    inputLike_t in;
+    rematWireTable_t *t = initRetainChain(21844u, linear, relu, &in);
+    rematPlanSpec_t spec = retainSpec(g_retainMask);
+    assertExitsBeforeThePlanBlock(t, g_retainChain, &spec,
+                                  "plan has 65532 ranges, above ODT_REMAT_MAX_RANGES (1024)");
+    rematWireTableFree(t);
+    freeReluLayer(relu);
+    freeLinearLayer(linear);
+}
+
+void testRetainListPlanAcceptsExactlyMaxRangesAndExitsAboveThem(void) {
+    layer_t *linear = makeLinear(1, 1, false, 0);
+    layer_t *relu = makeRelu(&g_floatQ);
+    inputLike_t in;
+    rematWireTable_t *t = initRetainChain(511u, linear, relu, &in);
+    for (size_t j = 1; j <= 509u; j++) {
+        g_retainMask[j] = true;
+    }
+    rematPlanSpec_t spec = retainSpec(g_retainMask);
+    rematPlan_t *p = buildPlan(t, g_retainChain, &spec);
+    TEST_ASSERT_EQUAL_size_t(ODT_REMAT_MAX_RANGES, p->train.numRanges);
+    rematPlanFree(p);
+    g_retainMask[509] = false;
+    assertExitsBeforeThePlanBlock(t, g_retainChain, &spec,
+                                  "plan has 1025 ranges, above ODT_REMAT_MAX_RANGES (1024)");
+    rematWireTableFree(t);
+    freeReluLayer(relu);
+    freeLinearLayer(linear);
+}
+
 /* rematPlanBuild runs the grammar on what it generates: a table record that
  * claims GRAD 8 is GRAD 7 (wire 16) yields a range that opens one step after
  * BACKWARD(8) writes it. */
@@ -3301,6 +3673,22 @@ int main(void) {
     RUN_TEST(testSequencePlanRejectsRecomputingATrackedBatchNorm);
     RUN_TEST(testSequencePlanRecomputesAnUntrackedBatchNorm);
     RUN_TEST(testSequencePlanRecomputesAFrozenTrackedBatchNorm);
+    RUN_TEST(testRetainListPlanOnTheMlpIsTheRecomputeProgram);
+    RUN_TEST(testRetainListPlanEvalProgramIsTheStoreAllEvalProgram);
+    RUN_TEST(testRetainListPlanKeepingEveryActIsTheLivenessPlanOnTheZoo);
+    RUN_TEST(testRetainListPlanKeepingEveryActIsTheLivenessPlanOnRandomChains);
+    RUN_TEST(testRetainListPlansAreSoundOnTheZoo);
+    RUN_TEST(testRetainListPlansAreSoundOnRandomChains);
+    RUN_TEST(testRetainListPlanExitsOnANullMaskBeforeReserving);
+    RUN_TEST(testPlanBuildExitsOnARetainMaskForAnotherPolicy);
+    RUN_TEST(testRetainListPlanExitsOnASequenceForItsPolicy);
+    RUN_TEST(testRetainListPlanExitsWhenSingleLayerCeDropsActN);
+    RUN_TEST(testRetainListPlanExitsWhenTheTopIsBelowDeepestAndActNIsDropped);
+    RUN_TEST(testRetainListPlanRejectsRecomputingATrackedBatchNorm);
+    RUN_TEST(testRetainListPlanRecomputesAnUntrackedBatchNorm);
+    RUN_TEST(testRetainListPlanExitsAboveUint16MaxStepsBeforeReserving);
+    RUN_TEST(testRetainListPlanAtTheStepBoundStopsAtTheRangeCap);
+    RUN_TEST(testRetainListPlanAcceptsExactlyMaxRangesAndExitsAboveThem);
     RUN_TEST(testPlanBuildRunsTheGrammarOnWhatItGenerates);
     RUN_TEST(testPlanBuildExitsWhenTheModelFreezesALayerTheTableSawTrainable);
     RUN_TEST(testPlanBuildExitsWhenTheModelSwapsALayerType);

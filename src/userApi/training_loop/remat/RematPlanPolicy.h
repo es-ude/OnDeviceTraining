@@ -26,6 +26,17 @@ void rematFillTrainRanges(rematPlanPolicy_t policy, const rematWireTable_t *t, l
 size_t rematScanRangeCount(const rematWireTable_t *t, const rematStep_t *steps, size_t numSteps);
 void rematScanRanges(const rematWireTable_t *t, layer_t **model, const rematStep_t *steps,
                      size_t numSteps, rematRange_t *ranges);
+/* The RETAIN_LIST generator: FORWARD 0..n-1 and LOSS_FORWARD; then, before
+ * LOSS_BACKWARD and before every BACKWARD(l) that reads its input, the
+ * REFORWARD run k..j-1 that recomputes a dropped ACT j (j = n, or l) from the
+ * nearest present ACT k < j: ACT 0, a kept one, or one an earlier run
+ * recomputed. The needs only descend, so each ACT is recomputed at most once
+ * and a program holds at most 3n + 2 steps. With steps == NULL it only counts
+ * (the plan sizes its block first). Returns the step count; *numWrites (if
+ * not NULL) gets the number of steps that write a wire, which is
+ * rematScanRangeCount of the same list. */
+size_t rematFillRetainSteps(const rematWireTable_t *t, layer_t **model, const bool *retain,
+                            rematStep_t *steps, size_t *numWrites);
 /* The EVAL generator: n + 1 steps and n ranges (ACT 1..n, in wire-id order),
  * whatever the policy. */
 void rematFillEvalProgram(const rematWireTable_t *t, rematStep_t *steps, rematRange_t *ranges);

@@ -275,6 +275,12 @@ static void buildMlp3(layer_t **model) {
 #define MLP3_RECOMPUTE_TWICE_STEPS                                                                 \
     {STEP_F(0),  STEP_F(1), STEP_F(2),  STEP_LF(3), STEP_LB(3), STEP_RF(0),                        \
      STEP_RF(1), STEP_B(2), STEP_RF(0), STEP_B(1),  STEP_B(0)}
+/* MLP3_RECOMPUTE_STEPS as a plan input: it fits every 3-layer model under MSE
+ * whose layer 0 trains and whose layers 1 and 2 read their input in backward. */
+static const rematStep_t g_mlp3RecomputeSteps[] = MLP3_RECOMPUTE_STEPS;
+static const rematPlanSpec_t g_mlp3Recompute = {.policy = REMAT_PLAN_SEQUENCE,
+                                                .sequence = g_mlp3RecomputeSteps,
+                                                .sequenceLen = COUNT_OF(g_mlp3RecomputeSteps)};
 
 /* One fixture model and its resident input. The F1 model's BFP template lives
  * here too, because its layers borrow it: the fixture must not move while the
@@ -315,6 +321,14 @@ static void buildF1Model(fixture_t *f) {
     f->n = 2;
     f->lt = MSE;
     f->x = makeResidentInput(&f->in, (size_t[]){1, 5}, 2);
+}
+
+/* buildMlp3's model under MSE on a resident [1, 2] input. */
+static void buildMlp3Model(fixture_t *f) {
+    buildMlp3(f->model);
+    f->n = MLP3_N;
+    f->lt = MSE;
+    f->x = makeResidentInput(&f->in, (size_t[]){1, 2}, 2);
 }
 
 static void buildMnistCnnModel(fixture_t *f) {

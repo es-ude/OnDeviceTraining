@@ -104,6 +104,14 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
                 sink(sinkCtx, st.layer, layer->type, "fwd", op.out);
             }
             break;
+        case REMAT_STEP_REFORWARD:
+            /* FORWARD's arm under FORWARD's key (ex derives from the layer
+             * index alone): the recomputed output is the first one's bytes. */
+            layerFunctions[layer->type].forward(layer, op.in, op.out, ex);
+            if (sink != NULL) {
+                sink(sinkCtx, st.layer, layer->type, "refwd", op.out);
+            }
+            break;
         case REMAT_STEP_LOSS_FORWARD:
             trainingStats = initTrainingStats(op.in);
             copyTensor(trainingStats->output, op.in);

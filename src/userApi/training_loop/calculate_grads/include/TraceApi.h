@@ -14,16 +14,19 @@
  *
  *  - layerIdx:   model index of the layer; for the loss gradient, == modelSize.
  *  - layerType:  the layer's type (for naming / dtype decisions).
- *  - phase:      "fwd" | "agrad" | "lossgrad" for tracedGrads (Task 2);
+ *  - phase:      "fwd" | "refwd" | "agrad" | "lossgrad" for tracedGrads;
  *                "<tag>.weight" / "<tag>.bias" for traceModelWeights/Grads (Task 3).
  *  - tensor:     borrowed; valid only for the duration of the call. */
 typedef void (*traceSink_t)(void *ctx, size_t layerIdx, layerType_t layerType, const char *phase,
                             tensor_t *tensor);
 
 /*! Same forward+backward as calculateGradsSequential, but fires `sink` after
- *  each layer's forward ("fwd"), after the loss backward ("lossgrad",
- *  layerIdx == modelSize), and before each layer's backward ("agrad", with
- *  the gradient entering it: the gradient w.r.t. that layer's output).
+ *  each layer's forward ("fwd"), after each recompute of a layer's forward
+ *  that the scheduler's plan asks for during the backward phase ("refwd",
+ *  with the recomputed output; a plan may recompute a layer more than once),
+ *  after the loss backward ("lossgrad", layerIdx == modelSize), and before
+ *  each layer's backward ("agrad", with the gradient entering it: the
+ *  gradient w.r.t. that layer's output).
  *
  *  Backward truncates at the deepest (closest-to-input) trainable layer
  *  (#380 PR2): "lossgrad"/"agrad" fire only for that layer and everything

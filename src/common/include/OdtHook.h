@@ -12,13 +12,15 @@
  *  What each phase spans (the FORWARD and BACKWARD pair TILE one whole
  *  calculateGradsSequential / tracedGrads call, no gap between them):
  *   - FORWARD:   the Dropout and BatchNorm1d train-mode flip, the scheduler
- *                build (NULL scheduler) and bind, every layer forward, the
- *                output snapshot copied into trainingStats_t, and the loss
- *                FORWARD.
- *   - BACKWARD:  the loss backward, every layer backward, the scheduler's end
- *                and teardown, and the Dropout and BatchNorm1d train-mode
- *                reset. Fires even when backward truncates at the deepest
- *                trainable layer or is skipped entirely (all-frozen model):
+ *                build (NULL scheduler) and bind, every layer's first
+ *                forward, the output snapshot copied into trainingStats_t,
+ *                and the loss FORWARD.
+ *   - BACKWARD:  the loss backward, every recompute of a layer forward that
+ *                the scheduler's plan asks for, every layer backward, the
+ *                scheduler's end and teardown, and the Dropout and
+ *                BatchNorm1d train-mode reset. Fires even when backward
+ *                truncates at the deepest trainable layer or is skipped
+ *                entirely (all-frozen model), and a recompute adds no event:
  *                every call yields exactly FORWARD_BEGIN, FORWARD_END,
  *                BACKWARD_BEGIN, BACKWARD_END in that order, so an external
  *                occurrence count per step is a constant, never a function of

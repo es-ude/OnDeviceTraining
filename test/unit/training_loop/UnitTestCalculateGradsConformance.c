@@ -507,6 +507,9 @@ static void bnStateIo(zooFixture_t *f, bool save, blob_t *b) {
             continue;
         }
         batchNorm1dConfig_t *c = f->model[i]->config->batchNorm1d;
+        if (c->runningMean == NULL) {
+            continue; /* untracked: no running statistics */
+        }
         size_t bytes = calcNumberOfElementsByTensor(c->runningMean) * sizeof(float);
         TEST_ASSERT_TRUE(bytes <= sizeof g_bnSaved[i].mean);
         if (b != NULL) {
@@ -533,9 +536,13 @@ static void countingHook(void *ctx, odtEvent_t event) {
     cap->numEvents++;
 }
 
-/* remat P4: the (idx, phase) sequence and every traced tensor's bytes. */
+/* remat P4: the (idx, phase) sequence and every traced tensor's bytes, without
+ * the "refwd" records a recompute plan adds (the reference has none). */
 static void recordingSink(void *ctx, size_t layerIdx, layerType_t layerType, const char *phase,
                           tensor_t *tensor) {
+    if (strcmp(phase, "refwd") == 0) {
+        return;
+    }
     blob_t *b = ctx;
     char name[16] = {0};
     strncpy(name, phase, sizeof name - 1);
@@ -1873,6 +1880,150 @@ void testTrainEvalTrainOnOneHeapMatchesTheReference(void) {
     assertTrainEvalTrainMatches(REMAT_HEAP);
 }
 
+/* ---- recompute: a REFORWARD runs FORWARD's arm under FORWARD's key ---- */
+
+/* buildMlp's model with a BatchNorm1d(3) in ReLU's place, on 4 rows so the
+ * batch variance is not 0. Untracked, it keeps no running statistics; frozen,
+ * it normalizes with them and never moves them. Both forwards are pure, so a
+ * plan may recompute them. */
+static void buildMlpWithBatchNorm(zooFixture_t *f, bool tracked, bool frozen) {
+    beginZoo(f);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, &g_floatQ);
+    f->model[0] = makeLinear(4, 3, false, 0);
+    f->model[1] = batchNorm1dLayerInit(
+        &(batchNorm1dInit_t){.numChannels = 3,
+                             .noRunningStats = !tracked,
+                             .trainable = frozen ? TRAINABLE_FALSE : TRAINABLE_DEFAULT},
+        &lq);
+    f->model[2] = makeLinear(3, 2, false, 2);
+    f->n = 3;
+    f->loss = defaultLossConfig(MSE);
+    f->x = makeFloatTensor((size_t[]){4, 4}, 2, 1.0f);
+    f->y = makeFloatTensor((size_t[]){4, 2}, 2, 0.5f);
+}
+
+static void buildMlpWithAnUntrackedBatchNorm(zooFixture_t *f) {
+    buildMlpWithBatchNorm(f, false, false);
+}
+
+static void buildMlpWithAFrozenBatchNorm(zooFixture_t *f) {
+    buildMlpWithBatchNorm(f, true, true);
+}
+
+/* The row's cell on the MLP3 recompute plan (REFORWARD(0) and REFORWARD(1)
+ * regenerate ACT 1 and ACT 2 after LOSS_BACKWARD) against the reference:
+ * values (BN running statistics included), four hook events, the trace
+ * without its "refwd" records, and every byte returned. */
+static void assertRecomputeMatchesTheReference(void (*build)(zooFixture_t *),
+                                               rematSchedulerType_t row) {
+    const rngKey_t key = zooCallKey(0);
+    const matrixCell_t cell = {row == REMAT_ARENA ? "arena/recompute" : "heap/recompute", row,
+                               &g_mlp3Recompute};
+    cellRun_t c = captureCell(build, &cell, &key);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(REMAT_PLAN_SEQUENCE, c.report.policy,
+                                  say(cell.name, "the cell's plan"));
+    assertConforms(cell.name);
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(
+        c.report.peakLiveBytes, c.report.observedPeakLiveBytes,
+        say(cell.name, "remat P8: the call ran on the cell's scheduler"));
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(
+        c.memBeforeInit, c.memAfterDeinit,
+        say(cell.name, "remat P5: the deinit returns what the init reserved"));
+}
+
+void testMlpRecomputePlanMatchesTheReferenceOnArena(void) {
+    assertRecomputeMatchesTheReference(buildMlp, REMAT_ARENA);
+}
+
+void testMlpRecomputePlanMatchesTheReferenceOnHeap(void) {
+    assertRecomputeMatchesTheReference(buildMlp, REMAT_HEAP);
+}
+
+void testRecomputingAnUntrackedBatchNormMatchesTheReferenceOnArena(void) {
+    assertRecomputeMatchesTheReference(buildMlpWithAnUntrackedBatchNorm, REMAT_ARENA);
+}
+
+void testRecomputingAnUntrackedBatchNormMatchesTheReferenceOnHeap(void) {
+    assertRecomputeMatchesTheReference(buildMlpWithAnUntrackedBatchNorm, REMAT_HEAP);
+}
+
+void testRecomputingAFrozenBatchNormMatchesTheReferenceOnArena(void) {
+    assertRecomputeMatchesTheReference(buildMlpWithAFrozenBatchNorm, REMAT_ARENA);
+}
+
+void testRecomputingAFrozenBatchNormMatchesTheReferenceOnHeap(void) {
+    assertRecomputeMatchesTheReference(buildMlpWithAFrozenBatchNorm, REMAT_HEAP);
+}
+
+typedef struct traceOrder {
+    char text[160];
+    size_t used;
+} traceOrder_t;
+
+static void traceOrderSink(void *ctx, size_t layerIdx, layerType_t layerType, const char *phase,
+                           tensor_t *tensor) {
+    (void)layerType;
+    (void)tensor;
+    traceOrder_t *o = ctx;
+    size_t room = sizeof o->text - o->used;
+    int wrote =
+        snprintf(o->text + o->used, room, "%s%s%zu", (o->used > 0) ? " " : "", phase, layerIdx);
+    TEST_ASSERT_TRUE_MESSAGE(wrote > 0 && (size_t)wrote < room, "raise traceOrder_t.text");
+    o->used += (size_t)wrote;
+}
+
+/* MLP3's recompute order: the run 0..1 sits between the loss gradient
+ * ("lossgrad", layerIdx == n) and BACKWARD(2)'s "agrad". */
+void testRecomputePlanTraceOrderOnTheMlp(void) {
+    const rngKey_t key = zooCallKey(0);
+    zooFixture_t f;
+    buildMlp(&f);
+    rematScheduler_t s;
+    TEST_ASSERT_TRUE(rematHeapInit(&s, f.model, f.n, f.loss, f.x, &g_mlp3Recompute));
+    traceOrder_t o = {.used = 0};
+    freeTrainingStats(tracedGrads(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y, traceOrderSink,
+                                  &o, &(trainingCall_t){.remat = &s, .key = &key}));
+    rematSchedulerDeinit(&s);
+    freeZoo(&f);
+    TEST_ASSERT_EQUAL_STRING("fwd0 fwd1 fwd2 lossgrad3 refwd0 refwd1 agrad2 agrad1 agrad0", o.text);
+}
+
+/* trackRunningStats is not in the table's key: a caller that switches it on
+ * after the build reaches the run, and the checker stops the REFORWARD before
+ * the second forward moves the running statistics (the one training forward
+ * so far has moved the batch counter to 1). */
+static const batchNorm1dConfig_t *g_bnAtExit;
+
+static void printBatchesTrackedAtExit(void) {
+    printf("numBatchesTracked=%llu\n", (unsigned long long)g_bnAtExit->numBatchesTracked);
+}
+
+static void runWithTrackingSwitchedOnAfterTheBuild(zooFixture_t *f) {
+    batchNorm1dConfig_t *bn = f->model[1]->config->batchNorm1d;
+    bn->trackRunningStats = false;
+    rematScheduler_t s;
+    TEST_ASSERT_TRUE(rematHeapInit(&s, f->model, f->n, f->loss, f->x, &g_mlp3Recompute));
+    bn->trackRunningStats = true;
+    g_bnAtExit = bn;
+    (void)atexit(printBatchesTrackedAtExit);
+    const rngKey_t key = zooCallKey(0);
+    (void)runOnce(f, &(trainingCall_t){.remat = &s, .key = &key});
+}
+
+void testATrackedBatchNormSwitchedOnAfterTheBuildExitsBeforeItsSecondForward(void) {
+    zooFixture_t f;
+    buildMlpWithBatchNorm(&f, true, false);
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "remat[heap]: step #6 REFORWARD(layer 1) violates 'reforward of a "
+                             "state-updating layer' (layer 1 updates its state in every training "
+                             "forward: a tracked, unfrozen BatchNorm1d; keep ACT 2)",
+                             runWithTrackingSwitchedOnAfterTheBuild(&f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "numBatchesTracked=1\n",
+                             runWithTrackingSwitchedOnAfterTheBuild(&f));
+    freeZoo(&f);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testNullPathMatchesTheReferenceOnTheMlp);
@@ -1966,5 +2117,13 @@ int main(void) {
     RUN_TEST(testEvalOverTheZooMatchesTheNullPathOnHeap);
     RUN_TEST(testTrainEvalTrainOnOneArenaMatchesTheReference);
     RUN_TEST(testTrainEvalTrainOnOneHeapMatchesTheReference);
+    RUN_TEST(testMlpRecomputePlanMatchesTheReferenceOnArena);
+    RUN_TEST(testMlpRecomputePlanMatchesTheReferenceOnHeap);
+    RUN_TEST(testRecomputingAnUntrackedBatchNormMatchesTheReferenceOnArena);
+    RUN_TEST(testRecomputingAnUntrackedBatchNormMatchesTheReferenceOnHeap);
+    RUN_TEST(testRecomputingAFrozenBatchNormMatchesTheReferenceOnArena);
+    RUN_TEST(testRecomputingAFrozenBatchNormMatchesTheReferenceOnHeap);
+    RUN_TEST(testRecomputePlanTraceOrderOnTheMlp);
+    RUN_TEST(testATrackedBatchNormSwitchedOnAfterTheBuildExitsBeforeItsSecondForward);
     return UNITY_END();
 }

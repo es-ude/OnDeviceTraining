@@ -10,6 +10,7 @@
 #include "LayerConfigAccess.h"
 #include "LossFunction.h"
 #include "RematCheck.h"
+#include "RematCheckedSize.h"
 #include "RematPlan.h"
 #include "RematScheduler.h"
 
@@ -28,6 +29,20 @@ void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, layer_t **model, size_
     size_t deepest;
     ptrdiff_t top;
     rematBackwardRange(model, n, lt, &deepest, &top);
+    /* REFORWARD's step budget, 2n + 2 + n(n+1)/2: the minimum-memory
+     * schedule's n(n+1)/2 recomputes on top of a plain stream. Computed here,
+     * apart from the plan grammar's bound, so a mistake in one shows in the
+     * other. */
+    size_t nPlusOne = 0;
+    size_t product = 0;
+    size_t twoN = 0;
+    size_t maxSteps = 0;
+    if (!checkedAddSize(n, 1u, &nPlusOne) || !checkedMulSize(n, nPlusOne, &product) ||
+        !checkedMulSize(2u, n, &twoN) || !checkedAddSize(twoN, 2u + product / 2u, &maxSteps)) {
+        PRINT_ERROR("rematCheckInit: the step budget 2n + 2 + n(n+1)/2 overflows size_t (n = %zu)",
+                    n);
+        exit(1);
+    }
     *c = (rematCheck_t){.sched = s,
                         .mode = mode,
                         .model = model,
@@ -36,6 +51,7 @@ void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, layer_t **model, size_
                         .backwardTop = top,
                         .hasBackward = deepest < n,
                         .nextBackward = top,
+                        .maxSteps = maxSteps,
                         .producedGen = producedGen};
     for (size_t w = 0; w < numWires; w++) {
         producedGen[w] = 0u;
@@ -52,6 +68,8 @@ static const char *kindName(uint8_t kind) {
         return "LOSS_BACKWARD";
     case REMAT_STEP_BACKWARD:
         return "BACKWARD";
+    case REMAT_STEP_REFORWARD:
+        return "REFORWARD";
     default:
         return "UNKNOWN";
     }
@@ -73,11 +91,13 @@ static const char *kindName(uint8_t kind) {
  * layer. */
 static void requireKindAndLayer(const rematCheck_t *c, const rematStep_t *st) {
     if (c->mode == REMAT_MODE_EVAL &&
-        (st->kind == REMAT_STEP_LOSS_BACKWARD || st->kind == REMAT_STEP_BACKWARD)) {
+        (st->kind == REMAT_STEP_LOSS_BACKWARD || st->kind == REMAT_STEP_BACKWARD ||
+         st->kind == REMAT_STEP_REFORWARD)) {
         REMAT_CHECK_EXIT(c, st, "'step not allowed in eval'");
     }
     switch (st->kind) {
     case REMAT_STEP_FORWARD:
+    case REMAT_STEP_REFORWARD:
     case REMAT_STEP_BACKWARD:
         if (st->layer >= c->n) {
             REMAT_CHECK_EXIT(c, st, "'layer out of range' (n = %zu)", c->n);
@@ -96,7 +116,9 @@ static void requireKindAndLayer(const rematCheck_t *c, const rematStep_t *st) {
 
 /* Rule 2: FORWARD strictly ascending and BACKWARD strictly
  * descending, so "exactly once, in order" is "matches the cursor"; no
- * per-layer bitset. Every cursor comparison is signed. */
+ * per-layer bitset. Every cursor comparison is signed. A REFORWARD moves no
+ * cursor: it is admitted inside the backward window, within the step budget,
+ * and never for a layer whose training forward updates its state. */
 static void requireOrder(const rematCheck_t *c, const rematStep_t *st) {
     switch (st->kind) {
     case REMAT_STEP_FORWARD:
@@ -127,7 +149,29 @@ static void requireOrder(const rematCheck_t *c, const rematStep_t *st) {
             REMAT_CHECK_EXIT(c, st, "'duplicate loss-backward'");
         }
         break;
-    default: /* REMAT_STEP_BACKWARD */
+    case REMAT_STEP_REFORWARD:
+        /* A pending step still reads ACT l+1. hasBackward is implied by the
+         * deepest clause (without it deepest == n > top >= nextBackward); it
+         * stays as the rule reads. */
+        if (!c->lossForwardSeen || !c->hasBackward || c->nextBackward < (ptrdiff_t)c->deepest ||
+            (ptrdiff_t)st->layer >= (c->lossBackwardSeen ? c->nextBackward : (ptrdiff_t)c->n)) {
+            REMAT_CHECK_EXIT(c, st, "'reforward outside window'");
+        }
+        if (c->stepIndex >= c->maxSteps) {
+            REMAT_CHECK_EXIT(c, st, "'step budget exceeded' (maxSteps = %zu)", c->maxSteps);
+        }
+        /* trackRunningStats is not in the table's key, so a layer reconfigured
+         * after the plan was built gets here. The config must not change during
+         * a call: this check does not make a concurrent change safe. */
+        if (layerForwardUpdatesState(c->model[st->layer])) {
+            REMAT_CHECK_EXIT(
+                c, st,
+                "'reforward of a state-updating layer' (layer %u updates its state in "
+                "every training forward: a tracked, unfrozen BatchNorm1d; keep ACT %u)",
+                (unsigned)st->layer, (unsigned)st->layer + 1u);
+        }
+        break;
+    case REMAT_STEP_BACKWARD:
         if (!c->lossBackwardSeen) {
             REMAT_CHECK_EXIT(c, st, "'backward before loss-backward'");
         }
@@ -141,6 +185,8 @@ static void requireOrder(const rematCheck_t *c, const rematStep_t *st) {
                              (long)c->nextBackward);
         }
         break;
+    default:
+        break; /* unreachable: rule 1 exits on an unknown kind first */
     }
 }
 
@@ -159,6 +205,7 @@ static stepWires_t resolve(const rematCheck_t *c, const rematStep_t *st) {
     stepWires_t w = {REMAT_NONE, REMAT_NONE, REMAT_NONE, true};
     switch (st->kind) {
     case REMAT_STEP_FORWARD:
+    case REMAT_STEP_REFORWARD:
         w.in = rematActId(t, l);
         w.out = rematActId(t, l + 1u);
         break;
@@ -169,7 +216,7 @@ static stepWires_t resolve(const rematCheck_t *c, const rematStep_t *st) {
         w.in = rematActId(t, c->n);
         w.out = rematGradId(t, c->n);
         break;
-    default: /* REMAT_STEP_BACKWARD; rule 1 admitted nothing else */
+    case REMAT_STEP_BACKWARD:
         w.in = rematActId(t, l);
         w.readsIn = layerBackwardReadsInput(c->model[l]);
         w.gradIn = rematGradId(t, (ptrdiff_t)l == c->backwardTop ? c->n : l + 1u);
@@ -177,6 +224,8 @@ static stepWires_t resolve(const rematCheck_t *c, const rematStep_t *st) {
          * deepest, and the bind keeps its deepest equal to the live one. */
         w.out = rematGradId(t, l);
         break;
+    default:
+        break; /* unreachable: rule 1 exits on an unknown kind first */
     }
     return w;
 }
@@ -291,9 +340,13 @@ static void commit(rematCheck_t *c, const rematStep_t *st, const stepWires_t *w)
     case REMAT_STEP_LOSS_BACKWARD:
         c->lossBackwardSeen = true;
         break;
-    default:
+    case REMAT_STEP_BACKWARD:
         c->nextBackward--;
         break;
+    case REMAT_STEP_REFORWARD:
+        break; /* only its output's bind generation, below */
+    default:
+        break; /* unreachable: rule 1 exits on an unknown kind first */
     }
     if (w->out != REMAT_NONE) {
         c->producedGen[w->out] = c->sched->wires->wires[w->out].bindGen;

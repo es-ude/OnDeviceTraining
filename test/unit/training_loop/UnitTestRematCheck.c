@@ -116,6 +116,7 @@ static void assertResolved(const rematCheck_t *c, const rematStep_t *st,
     size_t l = st->layer;
     switch (st->kind) {
     case REMAT_STEP_FORWARD:
+    case REMAT_STEP_REFORWARD:
         TEST_ASSERT_EQUAL_PTR(rematActHdr(t, l), op->in);
         TEST_ASSERT_NULL(op->gradIn);
         TEST_ASSERT_EQUAL_PTR(rematActHdr(t, l + 1u), op->out);
@@ -131,7 +132,7 @@ static void assertResolved(const rematCheck_t *c, const rematStep_t *st,
         TEST_ASSERT_NOT_NULL(op->out);
         TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, n), op->out);
         break;
-    default: /* REMAT_STEP_BACKWARD */
+    case REMAT_STEP_BACKWARD:
         TEST_ASSERT_EQUAL_PTR(rematActHdr(t, l), op->in);
         TEST_ASSERT_NOT_NULL(op->gradIn);
         TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, (ptrdiff_t)l == c->backwardTop ? n : l + 1u),
@@ -143,6 +144,8 @@ static void assertResolved(const rematCheck_t *c, const rematStep_t *st,
             TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, l), op->out);
         }
         break;
+    default:
+        TEST_FAIL_MESSAGE("the checker resolved a step of unknown kind");
     }
 }
 
@@ -278,8 +281,8 @@ void testEvalRejectsABackwardBeforeItsLayerIsChecked(void) {
     freeFixture(&f, &s);
 }
 
-/* The eval rule names only the two backward kinds: an unknown kind in EVAL
- * still reaches the unknown-kind exit, as in TRAIN. */
+/* The eval rule names only the two backward kinds and REFORWARD: an unknown
+ * kind in EVAL still reaches the unknown-kind exit, as in TRAIN. */
 void testEvalStillNamesAnUnknownStepKind(void) {
     fixture_t f;
     buildHarModel(&f);
@@ -590,6 +593,214 @@ void testStepExitsOnABackwardAfterTheLastOne(void) {
     ASSERT_EXITS_WITH_OUTPUT(
         1, "violates 'backward order: expected no further BACKWARD' (deepest = 0)",
         offerStep(&f, &s, 25, &againAtZero, NULL));
+    freeFixture(&f, &s);
+}
+
+/* ---- REFORWARD: the backward window, the step budget, EVAL ---- */
+
+/* A SEQUENCE plan with the REFORWARD run 0..1 on both rows, two calls each:
+ * every REFORWARD resolves as a FORWARD, moves no cursor and commits only its
+ * output's bind generation. */
+void testCheckAcceptsEveryStepOfARecomputePlanOnBothRows(void) {
+    rowInit_t rows[2] = {initArena, initHeap};
+    for (size_t k = 0; k < 2u; k++) {
+        fixture_t f;
+        buildMlp3Model(&f);
+        rematScheduler_t s = rows[k](&f, &g_mlp3Recompute);
+        checkedCall(&f, &s);
+        checkedCall(&f, &s);
+        freeFixture(&f, &s);
+    }
+}
+
+/* MLP3 under MSE regenerating ACT 3 between LOSS_FORWARD and LOSS_BACKWARD,
+ * which reads it. Before LOSS_BACKWARD the window reaches layer n - 1 = 2;
+ * after it, BACKWARD(2) is pending and REFORWARD(2) would lie outside. */
+static const rematStep_t g_mlp3ReforwardBeforeLossBackwardSteps[] = {
+    STEP_F(0),  STEP_F(1), STEP_F(2), STEP_LF(3), STEP_RF(2),
+    STEP_LB(3), STEP_B(2), STEP_B(1), STEP_B(0)};
+static const rematPlanSpec_t g_mlp3ReforwardBeforeLossBackward = {
+    .policy = REMAT_PLAN_SEQUENCE,
+    .sequence = g_mlp3ReforwardBeforeLossBackwardSteps,
+    .sequenceLen = COUNT_OF(g_mlp3ReforwardBeforeLossBackwardSteps)};
+
+void testCheckAcceptsAReforwardOfTheLastLayerBeforeTheLossBackward(void) {
+    rowInit_t rows[2] = {initArena, initHeap};
+    for (size_t k = 0; k < 2u; k++) {
+        fixture_t f;
+        buildMlp3Model(&f);
+        rematScheduler_t s = rows[k](&f, &g_mlp3ReforwardBeforeLossBackward);
+        checkedCall(&f, &s);
+        checkedCall(&f, &s);
+        freeFixture(&f, &s);
+    }
+}
+
+/* 2n + 2 + n(n+1)/2 from the live model: HAR (n = 12) 104, MLP3 14. */
+void testInitSetsTheStepBudgetFromTheModelSize(void) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initHeap(&f, NULL);
+    uint32_t producedGen[rematCheckNumWires(&s)];
+    rematCheck_t c;
+    rematCheckInit(&c, &s, f.model, f.n, f.lt, REMAT_MODE_TRAIN, producedGen);
+    TEST_ASSERT_EQUAL_size_t(104, c.maxSteps);
+    freeFixture(&f, &s);
+    buildMlp3Model(&f);
+    s = initHeap(&f, NULL);
+    uint32_t producedGenMlp3[rematCheckNumWires(&s)];
+    rematCheckInit(&c, &s, f.model, f.n, f.lt, REMAT_MODE_TRAIN, producedGenMlp3);
+    TEST_ASSERT_EQUAL_size_t(14, c.maxSteps);
+    freeFixture(&f, &s);
+}
+
+/* n(n + 1) overflows size_t at n = SIZE_MAX / 2. HAR's layer 0 trains, so
+ * the deepest-layer scan stops there and never reads past the model. */
+static void initWithAnOverflowingBudget(fixture_t *f, rematScheduler_t *s) {
+    uint32_t producedGen[rematCheckNumWires(s)];
+    rematCheck_t c;
+    rematCheckInit(&c, s, f->model, SIZE_MAX / 2u, f->lt, REMAT_MODE_TRAIN, producedGen);
+}
+
+void testInitExitsOnAStepBudgetThatOverflows(void) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initHeap(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "rematCheckInit: the step budget 2n + 2 + n(n+1)/2 overflows size_t (n = ",
+        initWithAnOverflowingBudget(&f, &s));
+    freeFixture(&f, &s);
+}
+
+void testStepExitsOnAReforwardBeforeTheLossForward(void) {
+    assertF1RejectsAt(
+        1, (rematStep_t){.kind = REMAT_STEP_REFORWARD, .layer = 0u},
+        "remat[arena]: step #1 REFORWARD(layer 0) violates 'reforward outside window'");
+}
+
+/* Nothing trains ([ReLU] under MSE: deepest = n = 1): after LOSS_FORWARD no
+ * backward step is pending. */
+void testStepExitsOnAReforwardWhenNothingTrains(void) {
+    fixture_t f;
+    buildAllFrozenModel(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    rematStep_t reforward = {.kind = REMAT_STEP_REFORWARD, .layer = 0u};
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "remat[arena]: step #2 REFORWARD(layer 0) violates 'reforward outside window'",
+        offerStep(&f, &s, 2, &reforward, NULL));
+    freeFixture(&f, &s);
+}
+
+/* After HAR's LOSS_BACKWARD (#13) BACKWARD(10) is pending: REFORWARD(10)
+ * would regenerate ACT 11, which no pending step reads. */
+void testStepExitsOnAReforwardAtThePendingBackward(void) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    rematStep_t atTheCursor = {.kind = REMAT_STEP_REFORWARD, .layer = 10u};
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "remat[arena]: step #14 REFORWARD(layer 10) violates 'reforward outside window'",
+        offerStep(&f, &s, 14, &atTheCursor, NULL));
+    freeFixture(&f, &s);
+}
+
+/* After HAR's last BACKWARD (deepest 0) the cursor is -1: compared signed,
+ * nothing is pending. */
+void testStepExitsOnAReforwardAfterTheLastBackward(void) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    rematStep_t afterTheEnd = {.kind = REMAT_STEP_REFORWARD, .layer = 0u};
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "remat[arena]: step #25 REFORWARD(layer 0) violates 'reforward outside window'",
+        offerStep(&f, &s, 25, &afterTheEnd, NULL));
+    freeFixture(&f, &s);
+}
+
+/* Linear(2->4) frozen, ReLU, Linear(4->2) under CE: top = n - 2 = 1 lies
+ * below deepest = 2, so no BACKWARD runs and a REFORWARD has no reader. */
+static void buildCeTopBelowDeepestModel(fixture_t *f) {
+    f->model[0] = makeLinear(2, 4, true, 0);
+    f->model[1] = makeRelu(&g_floatQ);
+    f->model[2] = makeLinear(4, 2, false, 2);
+    f->n = 3;
+    f->lt = CROSS_ENTROPY;
+    f->x = makeResidentInput(&f->in, (size_t[]){1, 2}, 2);
+}
+
+void testStepExitsOnAReforwardWhenTheTopIsBelowDeepest(void) {
+    fixture_t f;
+    buildCeTopBelowDeepestModel(&f);
+    rematScheduler_t s = initArena(&f, NULL);
+    rematStep_t reforward = {.kind = REMAT_STEP_REFORWARD, .layer = 0u};
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "remat[arena]: step #4 REFORWARD(layer 0) violates 'reforward outside window'",
+        offerStep(&f, &s, 4, &reforward, NULL));
+    freeFixture(&f, &s);
+}
+
+void testStepExitsOnAReforwardPastTheModel(void) {
+    assertF1RejectsAt(
+        4, (rematStep_t){.kind = REMAT_STEP_REFORWARD, .layer = 2u},
+        "remat[arena]: step #4 REFORWARD(layer 2) violates 'layer out of range' (n = 2)");
+}
+
+/* HAR's stream up to its LOSS_BACKWARD (#0..#13), then REFORWARD(0) again and
+ * again: ACT 0 is borrowed and STORE_ALL keeps ACT 1 bound to the stream's
+ * end, so only the step budget stops it. */
+static void reforwardUntilTheBudgetStops(fixture_t *f, rematScheduler_t *s) {
+    uint32_t producedGen[rematCheckNumWires(s)];
+    rematCheck_t c;
+    rematCheckInit(&c, s, f->model, f->n, f->lt, REMAT_MODE_TRAIN, producedGen);
+    rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
+    rematStep_t st;
+    rematOperands_t op;
+    for (size_t i = 0; i < 14u && rematNext(s, &st); i++) {
+        rematCheckStep(&c, &st, &op);
+        rematDone(s, &st);
+    }
+    const rematStep_t again = {.kind = REMAT_STEP_REFORWARD, .layer = 0u};
+    for (size_t i = 0; i < 2u * c.maxSteps; i++) {
+        rematCheckStep(&c, &again, &op);
+    }
+}
+
+void testStepExitsOnAReforwardBeyondTheStepBudget(void) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initHeap(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "remat[heap]: step #104 REFORWARD(layer 0) violates 'step budget "
+                             "exceeded' (maxSteps = 104)",
+                             reforwardUntilTheBudgetStops(&f, &s));
+    freeFixture(&f, &s);
+}
+
+/* An EVAL call handed `forged` at step k. */
+static void evalOfferStep(fixture_t *f, rematScheduler_t *s, size_t k, const rematStep_t *forged) {
+    uint32_t producedGen[rematCheckNumWires(s)];
+    rematCheck_t c;
+    rematCheckInit(&c, s, f->model, f->n, f->lt, REMAT_MODE_EVAL, producedGen);
+    rematBeginEval(s, f->model, f->n, f->lt, f->x);
+    rematStep_t st;
+    rematOperands_t op;
+    for (size_t i = 0; i < k && rematNext(s, &st); i++) {
+        rematCheckStep(&c, &st, &op);
+        rematDone(s, &st);
+    }
+    rematCheckStep(&c, forged, &op);
+}
+
+/* hasBackward ignores the mode: after LOSS_FORWARD the window alone would
+ * admit a REFORWARD in EVAL, so the eval rule must name it. */
+void testEvalRejectsAReforwardAfterTheLossForward(void) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initHeap(&f, NULL);
+    rematStep_t reforward = {.kind = REMAT_STEP_REFORWARD, .layer = 0u};
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "remat[heap]: step #13 REFORWARD(layer 0) violates 'step not allowed in eval'",
+        evalOfferStep(&f, &s, 13, &reforward));
     freeFixture(&f, &s);
 }
 
@@ -1079,6 +1290,18 @@ int main(void) {
     RUN_TEST(testStepExitsOnABackwardBeforeTheLossBackward);
     RUN_TEST(testStepExitsOnABackwardOutOfOrder);
     RUN_TEST(testStepExitsOnABackwardAfterTheLastOne);
+    RUN_TEST(testCheckAcceptsEveryStepOfARecomputePlanOnBothRows);
+    RUN_TEST(testInitSetsTheStepBudgetFromTheModelSize);
+    RUN_TEST(testInitExitsOnAStepBudgetThatOverflows);
+    RUN_TEST(testCheckAcceptsAReforwardOfTheLastLayerBeforeTheLossBackward);
+    RUN_TEST(testStepExitsOnAReforwardBeforeTheLossForward);
+    RUN_TEST(testStepExitsOnAReforwardWhenNothingTrains);
+    RUN_TEST(testStepExitsOnAReforwardAtThePendingBackward);
+    RUN_TEST(testStepExitsOnAReforwardAfterTheLastBackward);
+    RUN_TEST(testStepExitsOnAReforwardWhenTheTopIsBelowDeepest);
+    RUN_TEST(testStepExitsOnAReforwardPastTheModel);
+    RUN_TEST(testStepExitsOnAReforwardBeyondTheStepBudget);
+    RUN_TEST(testEvalRejectsAReforwardAfterTheLossForward);
     RUN_TEST(testASecondCallWithoutReInitExitsAtItsFirstStep);
     RUN_TEST(testStepExitsWhenAnInputIsNotResident);
     RUN_TEST(testStepExitsWhenAReadingBackwardsInputIsNotResident);

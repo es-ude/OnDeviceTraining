@@ -38,6 +38,7 @@ typedef struct rematCheck {
     ptrdiff_t nextBackward; /* -1 once BACKWARD(0) ran: compare it only as ptrdiff_t */
     bool lossForwardSeen, lossBackwardSeen;
     size_t stepIndex;
+    size_t maxSteps;       /* 2n + 2 + n(n+1)/2: no REFORWARD at or past this step index */
     uint32_t *producedGen; /* [rematCheckNumWires(sched)], the caller's; 0 = not produced */
 } rematCheck_t;
 

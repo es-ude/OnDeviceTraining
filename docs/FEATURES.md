@@ -783,7 +783,14 @@ checkpointing, limitations, literature).
   memory-profiling build also logs the numbers (`mnist_cnn` prints them only in
   its `DRY_PLAN` line). Wire bytes are poisoned at bind/release under
   `ODT_REMAT_VERIFY` (ON in the `unit_test`/`unit_test_debug`/`unit_test_asan`
-  presets and, by inheritance, `unit_test_ubsan`). No recompute policy yet.
+  presets and, by inheritance, `unit_test_ubsan`). A plan may recompute a
+  layer's forward output during the backward phase (`REMAT_STEP_REFORWARD`,
+  in a `REMAT_PLAN_SEQUENCE` step list): the driver runs it with
+  the first forward's key, so the output is the same bytes, and traces it as
+  `"refwd"`; the checker admits it only while a pending backward step still
+  reads that output and within 2n + 2 + n(n+1)/2 steps, and both the plan
+  grammar and the checker reject recomputing a BatchNorm1d that tracks running
+  statistics and is not frozen (its second forward would move them again).
 - **Examples** — 7 end-to-end: `har_classifier` (`train_c_har_classifier` plus the
   `train_c_har_classifier_{adamw,sym,bfp,finetune}` variants — `_finetune` is the
   pretrain → freeze → fine-tune flow, #380 PR3 — and the continual-learning

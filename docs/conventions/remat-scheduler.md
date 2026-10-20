@@ -40,7 +40,7 @@ Every row satisfies these before it joins the conformance matrix.
   The driver resolves operands through `RematCheck`; a row never hands them
   over.
 - **R3 Versioned binding.** Every bind increments `bindGen`. Bind a wire only
-  for a step that produces it (FORWARD, LOSS_BACKWARD, BACKWARD).
+  for a step that produces it (FORWARD, REFORWARD, LOSS_BACKWARD, BACKWARD).
 - **R4 No side effects; RNG-free.** Never run a layer or a loss, fire a hook,
   or call a trace sink. Call no `rng*` function: rows neither draw nor set
   anything, and never receive or derive a key.
@@ -364,7 +364,9 @@ STORE_ALL reference, remat D57).
   the drawn values, and the `remat-row-contract` gate keeps rows from
   calling the RNG.
 - **remat P3** Exactly four hook events per call, in order.
-- **remat P4** The trace's `(idx, phase)` sequence and tensors match.
+- **remat P4** The trace's `(idx, phase)` sequence and tensors match, once
+  every `refwd` record is removed: a plan that recomputes adds one per
+  REFORWARD step, and the reference has none.
 - **remat P5** Once the caller frees the returned `trainingStats_t`,
   `ODT_MEM_PROFILE`'s current bytes are back at their pre-call value.
 - **remat P6** Two consecutive calls on one persistent instance, with a

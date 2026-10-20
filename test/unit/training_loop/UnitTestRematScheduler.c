@@ -1221,8 +1221,9 @@ static void assertOperandsResident(const rematWireTable_t *t, layer_t **model,
     size_t l = st->layer;
     switch (st->kind) {
     case REMAT_STEP_FORWARD:
-        assertResident(t, rematActId(t, l), "FORWARD reads its input");
-        assertResident(t, rematActId(t, l + 1u), "FORWARD writes its output");
+    case REMAT_STEP_REFORWARD:
+        assertResident(t, rematActId(t, l), "FORWARD or REFORWARD reads its input");
+        assertResident(t, rematActId(t, l + 1u), "FORWARD or REFORWARD writes its output");
         break;
     case REMAT_STEP_LOSS_FORWARD:
         assertResident(t, rematActId(t, n), "LOSS_FORWARD reads ACT n");
@@ -1231,7 +1232,7 @@ static void assertOperandsResident(const rematWireTable_t *t, layer_t **model,
         assertResident(t, rematActId(t, n), "LOSS_BACKWARD reads ACT n");
         assertResident(t, rematGradId(t, n), "LOSS_BACKWARD writes the seed");
         break;
-    default: { /* REMAT_STEP_BACKWARD */
+    case REMAT_STEP_BACKWARD: {
         uint16_t gradIn =
             ((ptrdiff_t)l == t->backwardTop) ? rematGradId(t, n) : rematGradId(t, l + 1u);
         assertResident(t, gradIn, "BACKWARD reads gradIn");
@@ -1243,6 +1244,8 @@ static void assertOperandsResident(const rematWireTable_t *t, layer_t **model,
         }
         break;
     }
+    default:
+        TEST_FAIL_MESSAGE("a row handed out a step of unknown kind");
     }
 }
 
@@ -1475,6 +1478,16 @@ void testRowContractHeapF1StoreAll(void) {
 
 void testRowContractHeapF1Liveness(void) {
     assertRowContract(initHeap, buildF1Model, &g_liveness);
+}
+
+/* A recompute plan rebinds ACT 1 and ACT 2 for REFORWARD(0) and REFORWARD(1)
+ * after their first ranges closed. */
+void testRowContractArenaOnARecomputePlan(void) {
+    assertRowContract(initArena, buildMlp3Model, &g_mlp3Recompute);
+}
+
+void testRowContractHeapOnARecomputePlan(void) {
+    assertRowContract(initHeap, buildMlp3Model, &g_mlp3Recompute);
 }
 
 /* PR1a carry: under LIVENESS, Flatten's dx (GRAD 9) binds at BACKWARD(9)
@@ -2378,6 +2391,8 @@ int main(void) {
     RUN_TEST(testRowContractHeapHarLiveness);
     RUN_TEST(testRowContractHeapF1StoreAll);
     RUN_TEST(testRowContractHeapF1Liveness);
+    RUN_TEST(testRowContractArenaOnARecomputePlan);
+    RUN_TEST(testRowContractHeapOnARecomputePlan);
     RUN_TEST(testRowContractHeapHarAcrossModes);
     RUN_TEST(testRowContractHeapF1AcrossModesLiveness);
     RUN_TEST(testRowContractArenaHarAcrossModes);

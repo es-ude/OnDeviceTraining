@@ -758,7 +758,7 @@ checkpointing, limitations, literature).
   `memProfileRssPeakKb` (process peak RSS). Consumed by the HAR trainers
   (`examples/har_classifier/mem_instrument.c`) and the report-only CI job
   `c-stack-watermark`.
-- **Tensor rematerialization (#4, PR0–PR4)** —
+- **Tensor rematerialization (#4)** —
   `src/userApi/training_loop/remat/`: a static wire plan (`RematPlan`,
   `REMAT_PLAN_STORE_ALL`/`REMAT_PLAN_LIVENESS`, or `REMAT_PLAN_SEQUENCE`: a caller's
   own TRAIN step list, length-checked before anything is reserved, copied into the
@@ -778,14 +778,17 @@ checkpointing, limitations, literature).
   training call builds an ephemeral HEAP one on its own default plan, LIVENESS
   (`calculateGradsDefaultPlanSpec()`); evaluation and `inference()` without one
   keep their own buffers. `rematSchedulerReport` gives the plan's numbers (TRAIN
-  wires peak, activation-only peak, arena size, padding, first-fit gap, metadata);
+  wires peak, activation-only peak, arena size, padding, first-fit gap, metadata,
+  and the plan's recompute count with the multiply-accumulate cost of its forwards
+  and of its recomputes, from `layerForwardCost`, an analytic count per layer);
   in builds with the memory counter every init checks that it reserved exactly
   what its report claims. The HAR main trainer, finetune stage 2 and `mnist_cnn`
   choose the scheme at start-up (`REMAT_STORAGE=arena|heap`,
-  `REMAT_PLAN=store_all|liveness`, `DRY_PLAN=1`) and log the choice; the HAR
-  memory-profiling build also logs the numbers (`mnist_cnn` prints them only in
-  its `DRY_PLAN` line). Wire bytes are poisoned at bind/release under
-  `ODT_REMAT_VERIFY` (ON in the `unit_test`/`unit_test_debug`/`unit_test_asan`
+  `REMAT_PLAN=store_all|liveness|retain:<j>[,<j>...]|retain:sqrt|retain:speed`,
+  `DRY_PLAN=1`) and log the choice (a retain list as it runs, the last output
+  always kept); the HAR memory-profiling build also logs the numbers (`mnist_cnn`
+  prints them only in its `DRY_PLAN` line). Wire bytes are poisoned at bind/release
+  under `ODT_REMAT_VERIFY` (ON in the `unit_test`/`unit_test_debug`/`unit_test_asan`
   presets and, by inheritance, `unit_test_ubsan`). A plan may recompute a
   layer's forward output during the backward phase (`REMAT_STEP_REFORWARD`,
   in a `REMAT_PLAN_SEQUENCE` step list or a `REMAT_PLAN_RETAIN_LIST` plan): the driver runs it with
@@ -794,6 +797,9 @@ checkpointing, limitations, literature).
   reads that output and within 2n + 2 + n(n+1)/2 steps, and both the plan
   grammar and the checker reject recomputing a BatchNorm1d that tracks running
   statistics and is not frozen (its second forward would move them again).
+  The peak stack of a training call under a recompute plan is the larger of a
+  layer forward and a layer backward, as without recompute; the CI stack
+  measurement runs the default plan only.
 - **Examples** — 7 end-to-end: `har_classifier` (`train_c_har_classifier` plus the
   `train_c_har_classifier_{adamw,sym,bfp,finetune}` variants — `_finetune` is the
   pretrain → freeze → fine-tune flow, #380 PR3 — and the continual-learning

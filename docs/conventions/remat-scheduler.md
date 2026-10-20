@@ -76,6 +76,16 @@ A scheduler binds against the model as it is at each call.
   initialise a fresh scheduler.
 - A scheduler keyed to a different input shape than the one the grads level
   receives exits on its first call, naming ACT 0's field.
+- **A BatchNorm1d that starts tracking running statistics after the build**
+  exits at the first REFORWARD of that layer, before its second forward moves
+  the statistics: `trackRunningStats` is not a key fact, so the checker
+  re-checks the layer at run time. A plan never recomputes a BatchNorm1d that
+  tracks running statistics and is not frozen; untracked and frozen ones are
+  recomputed. The re-check does not make a configuration change during a call
+  safe.
+- **The report's recompute numbers are those of the init** (`refwdSteps`,
+  `forwardCost`, `recomputeCost`): a later edit that changes a layer's forward
+  cost but no key fact shows in them only after a fresh init.
 - **Evaluation binds the same key.** `inferenceWithLoss` on a scheduler
   exits at bind when its input differs from the training input the
   scheduler was keyed to (batch rows, rank, order, dtype), naming ACT 0's

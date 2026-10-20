@@ -599,7 +599,10 @@ every k-th output, k = ceil(sqrt(n)) for n layers (Chen et al. 2016, "Training
 deep nets with sublinear memory cost"); `retain:speed` keeps the output of every
 Linear and convolution layer (the expensive ones to recompute, the "speed"
 choice of the cybertronai gradient-checkpointing package). A recomputed output
-is the same bytes as the first one, so training results do not change.
+is the same bytes as the first one, so training results do not change. A
+recompute plan's stack peak is the larger of a layer forward and a layer
+backward, as without recompute (`check_stack_watermark.py` measures the default
+plan).
 
 `wires_peak_b` is the plan's peak of live training buffers (input excluded),
 `activations_peak_b` the same for activations alone, `arena_b` the resident block

@@ -197,11 +197,15 @@ size_t rematProgramActPeakBytes(const rematProgram_t *p, const rematWireTable_t 
 size_t rematWalkOpening(const rematProgram_t *p, rematWalk_t *w);
 size_t rematWalkClosing(const rematProgram_t *p, rematWalk_t *w);
 
-/* Grammar validation (rules 1-4). Deliberately independent of
+/* Grammar validation (rules 1-4 and 6). Deliberately independent of
  * RematCheck, so a mutation in one is caught by the other. rematPlanBuild runs
  * it on every program it generates; tests run it on tampered programs. Exits
- * naming the step index and the rule. An EVAL program has no backward step:
- * rule 2 rejects LOSS_BACKWARD and BACKWARD there, and rule 3 does not apply. */
+ * naming the step index (or the range index) and the rule. An EVAL program has
+ * no backward step: rule 2 rejects LOSS_BACKWARD and BACKWARD there, rule 6
+ * rejects REFORWARD, and rule 3 does not apply. Rule 6 also bounds the step
+ * count, admits a REFORWARD only inside the backward window, makes every write
+ * open a range of its own, and keeps the ranges begin-sorted and inside the
+ * stream. */
 void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t, layer_t **model,
                               rematMode_t mode);
 

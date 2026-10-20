@@ -240,6 +240,37 @@ static uint32_t nextRandom(uint32_t *state) { /* xorshift32, test-local */
 
 static const rematPlanSpec_t g_liveness = {.policy = REMAT_PLAN_LIVENESS};
 
+/* Step and range records for hand-written programs and sequences. */
+#define STEP_F(l) {.kind = REMAT_STEP_FORWARD, .layer = (l)}
+#define STEP_LF(n) {.kind = REMAT_STEP_LOSS_FORWARD, .layer = (n)}
+#define STEP_LB(n) {.kind = REMAT_STEP_LOSS_BACKWARD, .layer = (n)}
+#define STEP_B(l) {.kind = REMAT_STEP_BACKWARD, .layer = (l)}
+#define STEP_RF(l) {.kind = REMAT_STEP_REFORWARD, .layer = (l)}
+#define RANGE_OF(w, b, e) {.wire = (w), .begin = (b), .end = (e)}
+#define COUNT_OF(a) (sizeof(a) / sizeof((a)[0]))
+
+/* The recompute tests' 3-layer MLP: Linear(2->4), ReLU, Linear(4->2), every
+ * layer trainable, input [1, 2] FLOAT32. Under MSE deepest = 0 and top = 2;
+ * ACT 0..3 are wires 0..3, GRAD 3 (the seed) is 4, GRAD 2 is 5, GRAD 1 is 6. */
+#define MLP3_N 3
+static void buildMlp3(layer_t **model) {
+    model[0] = makeLinear(2, 4, false, 0);
+    model[1] = makeRelu(&g_floatQ);
+    model[2] = makeLinear(4, 2, false, 2);
+}
+
+/* MLP3 under MSE with ACT 3 kept and ACT 1, ACT 2 dropped after their last
+ * forward reads: the REFORWARD run 0..1 regenerates both before BACKWARD(2),
+ * which reads ACT 2; BACKWARD(1) (ReLU) then reads the regenerated ACT 1. */
+#define MLP3_RECOMPUTE_STEPS                                                                       \
+    {STEP_F(0),  STEP_F(1),  STEP_F(2), STEP_LF(3), STEP_LB(3),                                    \
+     STEP_RF(0), STEP_RF(1), STEP_B(2), STEP_B(1),  STEP_B(0)}
+/* Its ranges, derived by hand from the steps above: each write opens a range
+ * that ends at the last read of that wire before its next write. */
+#define MLP3_RECOMPUTE_RANGES                                                                      \
+    {RANGE_OF(1, 0, 1), RANGE_OF(2, 1, 2), RANGE_OF(3, 2, 4), RANGE_OF(4, 4, 7),                   \
+     RANGE_OF(1, 5, 8), RANGE_OF(2, 6, 7), RANGE_OF(5, 7, 8), RANGE_OF(6, 8, 9)}
+
 /* One fixture model and its resident input. The F1 model's BFP template lives
  * here too, because its layers borrow it: the fixture must not move while the
  * model is alive. */

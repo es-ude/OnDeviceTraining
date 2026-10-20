@@ -1041,9 +1041,10 @@ void testArenaEndExitsOnAnIncompleteWalk(void) {
     freeFixture(&f, &s);
 }
 
-/* A tampered or imported range ending past the last step would stay bound
- * across the call boundary; the grammar does not check range ends before
- * PR6. F1 STORE_ALL: every range ends at step 4, the seed is last in endOrder. */
+/* A range tampered after the build and ending past the last step would stay
+ * bound across the call boundary: grammar rule 6 keeps a built plan's ranges
+ * inside the stream, so only the walk's end check sees it. F1 STORE_ALL:
+ * every range ends at step 4, the seed is last in endOrder. */
 static void walkWithTheLastRangeLeftOpen(fixture_t *f, rematScheduler_t *s) {
     rematProgram_t *p = &s->plan->train;
     p->ranges[p->endOrder[p->numRanges - 1u]].end = (uint16_t)p->numSteps;

@@ -2460,6 +2460,272 @@ void testGrammarRejectsALayerBackwardInAnEvalProgram(void) {
     freeGrammarFixture(&f);
 }
 
+/* ---- REFORWARD and the rule-6 range checks (hand-written programs) ---- */
+
+/* A program in test-owned arrays: the grammar reads only steps and ranges. */
+#define HAND_MAX 16
+typedef struct handProgram {
+    layer_t *model[MLP3_N];
+    size_t n;
+    inputLike_t in;
+    rematWireTable_t *t;
+    rematStep_t steps[HAND_MAX];
+    rematRange_t ranges[HAND_MAX];
+    rematProgram_t p;
+} handProgram_t;
+
+static void buildMlp3Hand(handProgram_t *h) {
+    buildMlp3(h->model);
+    h->n = MLP3_N;
+    h->t = initTable(h->model, MLP3_N, MSE, makeInput(&h->in, (size_t[]){1, 2}, 2, &g_floatQ));
+}
+
+/* Linear(2->4) frozen, ReLU, Linear(4->2) under CE: top = n - 2 = 1 is below
+ * deepest = 2, so LOSS_BACKWARD runs and no BACKWARD follows it. */
+static void buildCeTopBelowDeepestHand(handProgram_t *h) {
+    h->model[0] = makeLinear(2, 4, true, 0);
+    h->model[1] = makeRelu(&g_floatQ);
+    h->model[2] = makeLinear(4, 2, false, 2);
+    h->n = 3;
+    h->t = initTable(h->model, 3, CROSS_ENTROPY, makeInput(&h->in, (size_t[]){1, 2}, 2, &g_floatQ));
+}
+
+/* Linear(2->4) frozen, ReLU under MSE: nothing trains (deepest = n = 2). */
+static void buildAllFrozenHand(handProgram_t *h) {
+    h->model[0] = makeLinear(2, 4, true, 0);
+    h->model[1] = makeRelu(&g_floatQ);
+    h->n = 2;
+    h->t = initTable(h->model, 2, MSE, makeInput(&h->in, (size_t[]){1, 2}, 2, &g_floatQ));
+}
+
+/* One Linear(2->2) under MSE: the step bound 2n + 2 + n(n+1)/2 is 5. */
+static void buildSingleLinearHand(handProgram_t *h) {
+    h->model[0] = makeLinear(2, 2, false, 0);
+    h->n = 1;
+    h->t = initTable(h->model, 1, MSE, makeInput(&h->in, (size_t[]){1, 2}, 2, &g_floatQ));
+}
+
+static void setHandProgram(handProgram_t *h, const rematStep_t *steps, size_t numSteps,
+                           const rematRange_t *ranges, size_t numRanges) {
+    TEST_ASSERT_TRUE(numSteps <= HAND_MAX && numRanges <= HAND_MAX);
+    memcpy(h->steps, steps, numSteps * sizeof *steps);
+    memcpy(h->ranges, ranges, numRanges * sizeof *ranges);
+    h->p = (rematProgram_t){
+        .numSteps = numSteps, .steps = h->steps, .numRanges = numRanges, .ranges = h->ranges};
+}
+
+static void freeHandProgram(handProgram_t *h) {
+    rematWireTableFree(h->t);
+    freeModel(h->model, h->n);
+}
+
+static void validateHandTrain(handProgram_t *h) {
+    rematPlanValidateGrammar(&h->p, h->t, h->model, REMAT_MODE_TRAIN);
+}
+
+static void validateHandEval(handProgram_t *h) {
+    rematPlanValidateGrammar(&h->p, h->t, h->model, REMAT_MODE_EVAL);
+}
+
+/* code 0: the grammar accepts the program; code 1 + message: it exits. */
+#define ASSERT_HAND_EXITS_WITH(code, message, build, steps, ranges, validate)                      \
+    do {                                                                                           \
+        handProgram_t _h;                                                                          \
+        build(&_h);                                                                                \
+        setHandProgram(&_h, steps, COUNT_OF(steps), ranges, COUNT_OF(ranges));                     \
+        ASSERT_EXITS_WITH_OUTPUT(code, message, validate(&_h));                                    \
+        freeHandProgram(&_h);                                                                      \
+    } while (0)
+
+void testGrammarAcceptsAReforwardRunInsideTheWindow(void) {
+    const rematStep_t steps[] = MLP3_RECOMPUTE_STEPS;
+    const rematRange_t ranges[] = MLP3_RECOMPUTE_RANGES;
+    handProgram_t h;
+    buildMlp3Hand(&h);
+    TEST_ASSERT_EQUAL_UINT16(4, rematGradId(h.t, 3));
+    TEST_ASSERT_EQUAL_UINT16(5, rematGradId(h.t, 2));
+    TEST_ASSERT_EQUAL_UINT16(6, rematGradId(h.t, 1));
+    freeHandProgram(&h);
+    ASSERT_HAND_EXITS_WITH(0, "", buildMlp3Hand, steps, ranges, validateHandTrain);
+}
+
+/* F0 LOSS_FORWARD REFORWARD(0) LOSS_BACKWARD B0: exactly 5 steps, the bound. */
+void testGrammarAcceptsAProgramAtTheStepBound(void) {
+    const rematStep_t steps[] = {STEP_F(0), STEP_LF(1), STEP_RF(0), STEP_LB(1), STEP_B(0)};
+    const rematRange_t ranges[] = {RANGE_OF(1, 0, 1), RANGE_OF(1, 2, 3), RANGE_OF(2, 3, 4)};
+    ASSERT_HAND_EXITS_WITH(0, "", buildSingleLinearHand, steps, ranges, validateHandTrain);
+}
+
+void testGrammarRejectsMoreStepsThanTheBound(void) {
+    const rematStep_t steps[] = {STEP_F(0),  STEP_LF(1), STEP_RF(0),
+                                 STEP_RF(0), STEP_LB(1), STEP_B(0)};
+    const rematRange_t ranges[] = {RANGE_OF(1, 0, 1), RANGE_OF(1, 2, 2), RANGE_OF(1, 3, 4),
+                                   RANGE_OF(2, 4, 5)};
+    ASSERT_HAND_EXITS_WITH(
+        1, "the stream of 6 steps violates grammar rule 6: more steps than 2n + 2 + n(n+1)/2",
+        buildSingleLinearHand, steps, ranges, validateHandTrain);
+}
+
+void testGrammarRejectsAReforwardBeforeLossForward(void) {
+    rematStep_t steps[] = MLP3_RECOMPUTE_STEPS;
+    const rematRange_t ranges[] = MLP3_RECOMPUTE_RANGES;
+    steps[3] = (rematStep_t)STEP_RF(0); /* in LOSS_FORWARD's place */
+    ASSERT_HAND_EXITS_WITH(1,
+                           "step #3 (kind 4, layer 0) violates grammar rule 6: a REFORWARD "
+                           "comes after LOSS_FORWARD, below a pending backward step",
+                           buildMlp3Hand, steps, ranges, validateHandTrain);
+}
+
+/* After LOSS_BACKWARD the next pending backward is BACKWARD(2): a REFORWARD
+ * of layer 2 would regenerate ACT 3, which no pending step reads. */
+void testGrammarRejectsAReforwardAtOrAboveThePendingBackward(void) {
+    rematStep_t steps[] = MLP3_RECOMPUTE_STEPS;
+    const rematRange_t ranges[] = MLP3_RECOMPUTE_RANGES;
+    steps[6] = (rematStep_t)STEP_RF(2);
+    ASSERT_HAND_EXITS_WITH(1,
+                           "step #6 (kind 4, layer 2) violates grammar rule 6: a REFORWARD "
+                           "comes after LOSS_FORWARD, below a pending backward step",
+                           buildMlp3Hand, steps, ranges, validateHandTrain);
+}
+
+/* After BACKWARD(0) at deepest == 0 the backward cursor is -1: the window
+ * compares it signed, so nothing is pending. */
+void testGrammarRejectsAReforwardAfterTheFinalBackwardAtDeepestZero(void) {
+    const rematStep_t steps[] = {STEP_F(0),  STEP_F(1),  STEP_F(2),  STEP_LF(3),
+                                 STEP_LB(3), STEP_RF(0), STEP_RF(1), STEP_B(2),
+                                 STEP_B(1),  STEP_B(0),  STEP_RF(0)};
+    const rematRange_t ranges[] = MLP3_RECOMPUTE_RANGES;
+    ASSERT_HAND_EXITS_WITH(1,
+                           "step #10 (kind 4, layer 0) violates grammar rule 6: a REFORWARD "
+                           "comes after LOSS_FORWARD, below a pending backward step",
+                           buildMlp3Hand, steps, ranges, validateHandTrain);
+}
+
+void testGrammarRejectsAReforwardWhenNothingTrains(void) {
+    const rematStep_t steps[] = {STEP_F(0), STEP_F(1), STEP_LF(2), STEP_RF(0)};
+    const rematRange_t ranges[] = {RANGE_OF(1, 0, 1), RANGE_OF(2, 1, 2)};
+    ASSERT_HAND_EXITS_WITH(1,
+                           "step #3 (kind 4, layer 0) violates grammar rule 6: a REFORWARD "
+                           "comes after LOSS_FORWARD, below a pending backward step",
+                           buildAllFrozenHand, steps, ranges, validateHandTrain);
+}
+
+void testGrammarRejectsAReforwardWhenTheTopIsBelowDeepest(void) {
+    const rematStep_t steps[] = {STEP_F(0),  STEP_F(1),  STEP_F(2),
+                                 STEP_LF(3), STEP_LB(3), STEP_RF(0)};
+    const rematRange_t ranges[] = {RANGE_OF(1, 0, 1), RANGE_OF(2, 1, 2), RANGE_OF(3, 2, 4),
+                                   RANGE_OF(4, 4, 4)};
+    ASSERT_HAND_EXITS_WITH(1,
+                           "step #5 (kind 4, layer 0) violates grammar rule 6: a REFORWARD "
+                           "comes after LOSS_FORWARD, below a pending backward step",
+                           buildCeTopBelowDeepestHand, steps, ranges, validateHandTrain);
+}
+
+void testGrammarRejectsAReforwardInAnEvalProgram(void) {
+    const rematStep_t steps[] = {STEP_F(0), STEP_F(1), STEP_F(2), STEP_LF(3), STEP_RF(0)};
+    const rematRange_t ranges[] = {RANGE_OF(1, 0, 1), RANGE_OF(2, 1, 2), RANGE_OF(3, 2, 3)};
+    ASSERT_HAND_EXITS_WITH(
+        1, "step #4 (kind 4, layer 0) violates grammar rule 6: no REFORWARD in an EVAL program",
+        buildMlp3Hand, steps, ranges, validateHandEval);
+}
+
+/* REFORWARD(1) reads ACT 1 at step 6, after ACT 1's second range (shortened
+ * to step 5) has closed. */
+void testGrammarRejectsAReforwardReadingOutsideItsRange(void) {
+    const rematStep_t steps[] = MLP3_RECOMPUTE_STEPS;
+    rematRange_t ranges[] = MLP3_RECOMPUTE_RANGES;
+    ranges[4].end = 5;
+    ASSERT_HAND_EXITS_WITH(
+        1,
+        "step #6 (kind 4, layer 1) violates grammar rule 4: it reads wire 1 outside any open range",
+        buildMlp3Hand, steps, ranges, validateHandTrain);
+}
+
+/* ACT 1's first range stretched over the recompute, its second range gone:
+ * REFORWARD(0) writes into a range FORWARD(0) opened. */
+void testGrammarRejectsAWriteIntoARangeOpenedEarlier(void) {
+    const rematStep_t steps[] = MLP3_RECOMPUTE_STEPS;
+    const rematRange_t ranges[] = {RANGE_OF(1, 0, 8), RANGE_OF(2, 1, 2), RANGE_OF(3, 2, 4),
+                                   RANGE_OF(4, 4, 7), RANGE_OF(2, 6, 7), RANGE_OF(5, 7, 8),
+                                   RANGE_OF(6, 8, 9)};
+    ASSERT_HAND_EXITS_WITH(1,
+                           "step #5 (kind 4, layer 0) violates grammar rule 6: it writes wire 1 "
+                           "into a range opened earlier",
+                           buildMlp3Hand, steps, ranges, validateHandTrain);
+}
+
+/* Two ranges of ACT 1 overlap at steps 5..6. */
+void testGrammarRejectsOverlappingRangesOfOneWire(void) {
+    const rematStep_t steps[] = MLP3_RECOMPUTE_STEPS;
+    rematRange_t ranges[] = MLP3_RECOMPUTE_RANGES;
+    ranges[0].end = 6;
+    ASSERT_HAND_EXITS_WITH(1,
+                           "step #5 (kind 4, layer 0) violates grammar rule 6: it writes wire 1 "
+                           "into a range opened earlier",
+                           buildMlp3Hand, steps, ranges, validateHandTrain);
+}
+
+/* REFORWARD(0) runs twice in a row: the first one's output (range #4) is
+ * overwritten before anything reads it. */
+void testGrammarRejectsAReforwardWhoseOutputIsNeverRead(void) {
+    const rematStep_t steps[] = {STEP_F(0),  STEP_F(1),  STEP_F(2),  STEP_LF(3),
+                                 STEP_LB(3), STEP_RF(0), STEP_RF(0), STEP_RF(1),
+                                 STEP_B(2),  STEP_B(1),  STEP_B(0)};
+    const rematRange_t ranges[] = {RANGE_OF(1, 0, 1), RANGE_OF(2, 1, 2), RANGE_OF(3, 2, 4),
+                                   RANGE_OF(4, 4, 8), RANGE_OF(1, 5, 5), RANGE_OF(1, 6, 9),
+                                   RANGE_OF(2, 7, 8), RANGE_OF(5, 8, 9), RANGE_OF(6, 9, 10)};
+    ASSERT_HAND_EXITS_WITH(1,
+                           "range #4 (wire 1, steps 5..5) violates grammar rule 6: a "
+                           "REFORWARD's output is read inside its range",
+                           buildMlp3Hand, steps, ranges, validateHandTrain);
+}
+
+void testGrammarRejectsARangeEndingPastTheStream(void) {
+    const rematStep_t steps[] = MLP3_RECOMPUTE_STEPS;
+    rematRange_t ranges[] = MLP3_RECOMPUTE_RANGES;
+    ranges[7].end = 10;
+    ASSERT_HAND_EXITS_WITH(
+        1, "range #7 (wire 6, steps 8..10) violates grammar rule 6: ranges lie inside the stream",
+        buildMlp3Hand, steps, ranges, validateHandTrain);
+}
+
+/* The walk opens ranges in array order, so the array must be begin-sorted. */
+void testGrammarRejectsRangesOutOfBeginOrder(void) {
+    const rematStep_t steps[] = MLP3_RECOMPUTE_STEPS;
+    rematRange_t ranges[] = MLP3_RECOMPUTE_RANGES;
+    rematRange_t first = ranges[0];
+    ranges[0] = ranges[1];
+    ranges[1] = first;
+    ASSERT_HAND_EXITS_WITH(1,
+                           "range #1 (wire 1, steps 0..1) violates grammar rule 6: ranges "
+                           "sorted by begin, ties by wire id",
+                           buildMlp3Hand, steps, ranges, validateHandTrain);
+}
+
+/* ACT 1's first range twice: the row would bind the wire twice at step 0. */
+void testGrammarRejectsTwoRangesOfOneWireOpeningTogether(void) {
+    const rematStep_t steps[] = MLP3_RECOMPUTE_STEPS;
+    const rematRange_t ranges[] = {RANGE_OF(1, 0, 1), RANGE_OF(1, 0, 1), RANGE_OF(2, 1, 2),
+                                   RANGE_OF(3, 2, 4), RANGE_OF(4, 4, 7), RANGE_OF(1, 5, 8),
+                                   RANGE_OF(2, 6, 7), RANGE_OF(5, 7, 8), RANGE_OF(6, 8, 9)};
+    ASSERT_HAND_EXITS_WITH(1,
+                           "range #1 (wire 1, steps 0..1) violates grammar rule 6: ranges "
+                           "sorted by begin, ties by wire id",
+                           buildMlp3Hand, steps, ranges, validateHandTrain);
+}
+
+/* An extra range of ACT 1 at LOSS_FORWARD (step 3), which writes nothing. */
+void testGrammarRejectsARangeThatOpensWithoutAWrite(void) {
+    const rematStep_t steps[] = MLP3_RECOMPUTE_STEPS;
+    const rematRange_t ranges[] = {RANGE_OF(1, 0, 1), RANGE_OF(2, 1, 2), RANGE_OF(3, 2, 4),
+                                   RANGE_OF(1, 3, 3), RANGE_OF(4, 4, 7), RANGE_OF(1, 5, 8),
+                                   RANGE_OF(2, 6, 7), RANGE_OF(5, 7, 8), RANGE_OF(6, 8, 9)};
+    ASSERT_HAND_EXITS_WITH(1,
+                           "range #3 (wire 1, steps 3..3) violates grammar rule 6: a range "
+                           "opens where its wire is written",
+                           buildMlp3Hand, steps, ranges, validateHandTrain);
+}
+
 /* rematPlanBuild runs the grammar on what it generates: a table record that
  * claims GRAD 8 is GRAD 7 (wire 16) yields a range that opens one step after
  * BACKWARD(8) writes it. */
@@ -2650,6 +2916,23 @@ int main(void) {
     RUN_TEST(testGrammarRejectsABackwardReadingGradInOutsideItsRange);
     RUN_TEST(testGrammarRejectsABackwardStepInAnEvalProgram);
     RUN_TEST(testGrammarRejectsALayerBackwardInAnEvalProgram);
+    RUN_TEST(testGrammarAcceptsAReforwardRunInsideTheWindow);
+    RUN_TEST(testGrammarAcceptsAProgramAtTheStepBound);
+    RUN_TEST(testGrammarRejectsMoreStepsThanTheBound);
+    RUN_TEST(testGrammarRejectsAReforwardBeforeLossForward);
+    RUN_TEST(testGrammarRejectsAReforwardAtOrAboveThePendingBackward);
+    RUN_TEST(testGrammarRejectsAReforwardAfterTheFinalBackwardAtDeepestZero);
+    RUN_TEST(testGrammarRejectsAReforwardWhenNothingTrains);
+    RUN_TEST(testGrammarRejectsAReforwardWhenTheTopIsBelowDeepest);
+    RUN_TEST(testGrammarRejectsAReforwardInAnEvalProgram);
+    RUN_TEST(testGrammarRejectsAReforwardReadingOutsideItsRange);
+    RUN_TEST(testGrammarRejectsAWriteIntoARangeOpenedEarlier);
+    RUN_TEST(testGrammarRejectsOverlappingRangesOfOneWire);
+    RUN_TEST(testGrammarRejectsAReforwardWhoseOutputIsNeverRead);
+    RUN_TEST(testGrammarRejectsARangeEndingPastTheStream);
+    RUN_TEST(testGrammarRejectsRangesOutOfBeginOrder);
+    RUN_TEST(testGrammarRejectsTwoRangesOfOneWireOpeningTogether);
+    RUN_TEST(testGrammarRejectsARangeThatOpensWithoutAWrite);
     RUN_TEST(testPlanBuildRunsTheGrammarOnWhatItGenerates);
     RUN_TEST(testPlanBuildExitsWhenTheModelFreezesALayerTheTableSawTrainable);
     RUN_TEST(testPlanBuildExitsWhenTheModelSwapsALayerType);

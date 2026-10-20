@@ -20,6 +20,8 @@ typedef enum rematStepKind {
                                  boundary */
     REMAT_STEP_LOSS_BACKWARD, /* layer == n: ACT n -> GRAD n (the seed) */
     REMAT_STEP_BACKWARD,      /* layer l: (ACT l, GRAD in(l)) -> GRAD l, or grads-only at deepest */
+    REMAT_STEP_REFORWARD,     /* layer l, during the backward phase: ACT l -> ACT l+1 again, with
+                                 FORWARD(l)'s key, for a pending backward step that reads it */
 } rematStepKind_t;
 
 /* One record, three roles: plan-table entry, the value a row's next() fills

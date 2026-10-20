@@ -182,37 +182,127 @@ static void requireCovered(const rematProgram_t *p, size_t s, uint16_t wire, con
     exit(1);
 }
 
-/* Rule 4 for one step that rules 1-3 already admitted: rule 1 bounds a FORWARD's
- * layer below n, LOSS_* steps carry layer n, and rule 3 keeps a BACKWARD's layer
- * in [deepest, top], so every operand id below is a real wire. */
-static void requireOperandsCovered(const rematProgram_t *p, const rematWireTable_t *t,
-                                   layer_t **model, size_t s) {
+/* Rule 6 for a write: no range of the wire that opened before this step is
+ * still open, so the write starts a range of its own and the ranges of one
+ * wire never overlap. Linear in the ranges, like requireCovered. */
+static void requireNoEarlierRangeOpen(const rematProgram_t *p, size_t s, uint16_t wire) {
+    for (size_t r = 0; r < p->numRanges; r++) {
+        const rematRange_t *range = &p->ranges[r];
+        if (range->wire == wire && range->begin < s && s <= range->end) {
+            const rematStep_t *st = &p->steps[s];
+            PRINT_ERROR("rematPlanBuild: step #%zu (kind %u, layer %u) violates grammar rule 6: "
+                        "it writes wire %u into a range opened earlier",
+                        s, (unsigned)st->kind, (unsigned)st->layer, (unsigned)wire);
+            exit(1);
+        }
+    }
+}
+
+/* The wires one step reads and the one it writes (REMAT_NONE: none), for a
+ * step the kind rules already admitted: rule 1 and the rule-6 window bound a
+ * FORWARD's and a REFORWARD's layer below n, LOSS_* steps carry layer n, and
+ * rule 3 keeps a BACKWARD's layer in [deepest, top], so every id is a real
+ * wire. A REFORWARD has a FORWARD's operands. */
+typedef struct stepOperands {
+    uint16_t reads[2];
+    size_t numReads;
+    uint16_t write;
+} stepOperands_t;
+
+static stepOperands_t operandsOf(const rematWireTable_t *t, layer_t **model,
+                                 const rematStep_t *st) {
     size_t n = t->modelSize;
-    size_t l = p->steps[s].layer;
-    switch (p->steps[s].kind) {
+    size_t l = st->layer;
+    stepOperands_t o = {.numReads = 0, .write = REMAT_NONE};
+    switch (st->kind) {
     case REMAT_STEP_FORWARD:
-        requireCovered(p, s, rematActId(t, l), "reads");
-        requireCovered(p, s, rematActId(t, l + 1u), "writes");
+    case REMAT_STEP_REFORWARD:
+        o.reads[o.numReads++] = rematActId(t, l);
+        o.write = rematActId(t, l + 1u);
         break;
     case REMAT_STEP_LOSS_FORWARD:
-        requireCovered(p, s, rematActId(t, n), "reads");
+        o.reads[o.numReads++] = rematActId(t, n);
         break;
     case REMAT_STEP_LOSS_BACKWARD:
-        requireCovered(p, s, rematActId(t, n), "reads");
-        requireCovered(p, s, rematGradId(t, n), "writes");
+        o.reads[o.numReads++] = rematActId(t, n);
+        o.write = rematGradId(t, n);
         break;
-    default: { /* REMAT_STEP_BACKWARD */
-        uint16_t gradIn =
+    case REMAT_STEP_BACKWARD:
+        o.reads[o.numReads++] =
             ((ptrdiff_t)l == t->backwardTop) ? rematGradId(t, n) : rematGradId(t, l + 1u);
-        requireCovered(p, s, gradIn, "reads");
         if (layerBackwardReadsInput(model[l])) {
-            requireCovered(p, s, rematActId(t, l), "reads");
+            o.reads[o.numReads++] = rematActId(t, l);
         }
         if (l > t->deepest) {
-            requireCovered(p, s, rematGradId(t, l), "writes");
+            o.write = rematGradId(t, l);
         }
         break;
+    default:
+        break; /* unreachable: the grammar's kind switch exits on an unknown kind first */
     }
+    return o;
+}
+
+/* Rule 4 (every operand inside a range of its wire) and rule 6's write rule. */
+static void requireOperandsCovered(const rematProgram_t *p, const rematWireTable_t *t,
+                                   layer_t **model, size_t s) {
+    stepOperands_t o = operandsOf(t, model, &p->steps[s]);
+    for (size_t i = 0; i < o.numReads; i++) {
+        requireCovered(p, s, o.reads[i], "reads");
+    }
+    if (o.write != REMAT_NONE) {
+        requireCovered(p, s, o.write, "writes");
+        requireNoEarlierRangeOpen(p, s, o.write);
+    }
+}
+
+static bool stepReads(const rematWireTable_t *t, layer_t **model, const rematStep_t *st,
+                      uint16_t wire) {
+    stepOperands_t o = operandsOf(t, model, st);
+    for (size_t i = 0; i < o.numReads; i++) {
+        if (o.reads[i] == wire) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void rangeExit(size_t r, const rematRange_t *range, const char *rule) {
+    PRINT_ERROR("rematPlanBuild: range #%zu (wire %u, steps %u..%u) violates grammar rule 6: %s", r,
+                (unsigned)range->wire, (unsigned)range->begin, (unsigned)range->end, rule);
+    exit(1);
+}
+
+/* Rule 6 over the ranges, once every step has passed: each range lies inside
+ * the stream; the array is sorted by begin, ties by wire id (the walk opens
+ * ranges in array order); each range opens at the step that writes its wire;
+ * and a range a REFORWARD opens holds a read of that wire, so no recompute is
+ * dead. O(R) plus the lengths of the REFORWARD ranges. */
+static void requireRangesWellFormed(const rematProgram_t *p, const rematWireTable_t *t,
+                                    layer_t **model) {
+    for (size_t r = 0; r < p->numRanges; r++) {
+        const rematRange_t *range = &p->ranges[r];
+        if (range->begin > range->end || range->end >= p->numSteps) {
+            rangeExit(r, range, "ranges lie inside the stream");
+        }
+        const rematRange_t *prev = (r > 0) ? &p->ranges[r - 1u] : NULL;
+        if (prev != NULL && (prev->begin > range->begin ||
+                             (prev->begin == range->begin && prev->wire >= range->wire))) {
+            rangeExit(r, range, "ranges sorted by begin, ties by wire id");
+        }
+        const rematStep_t *opener = &p->steps[range->begin];
+        if (operandsOf(t, model, opener).write != range->wire) {
+            rangeExit(r, range, "a range opens where its wire is written");
+        }
+        if (opener->kind == REMAT_STEP_REFORWARD) {
+            bool read = false;
+            for (size_t s = range->begin + 1u; s <= range->end && !read; s++) {
+                read = stepReads(t, model, &p->steps[s], range->wire);
+            }
+            if (!read) {
+                rangeExit(r, range, "a REFORWARD's output is read inside its range");
+            }
+        }
     }
 }
 
@@ -223,11 +313,19 @@ void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t
     ptrdiff_t nextBackward = t->backwardTop;
     bool lossForward = false;
     bool lossBackward = false;
+    /* Rule 6's step bound. The table keeps n below UINT16_MAX, so n(n + 1)
+     * fits even a 32-bit size_t and the sum needs no checked arithmetic. */
+    if (p->numSteps > 2u * n + 2u + n * (n + 1u) / 2u) {
+        grammarEndExit(p->numSteps, "rule 6: more steps than 2n + 2 + n(n+1)/2");
+    }
     for (size_t s = 0; s < p->numSteps; s++) {
         const rematStep_t *st = &p->steps[s];
         if (mode == REMAT_MODE_EVAL &&
             (st->kind == REMAT_STEP_LOSS_BACKWARD || st->kind == REMAT_STEP_BACKWARD)) {
             grammarExit(s, st, "rule 2: no LOSS_BACKWARD or BACKWARD in an EVAL program");
+        }
+        if (mode == REMAT_MODE_EVAL && st->kind == REMAT_STEP_REFORWARD) {
+            grammarExit(s, st, "rule 6: no REFORWARD in an EVAL program");
         }
         switch (st->kind) {
         case REMAT_STEP_FORWARD:
@@ -257,6 +355,16 @@ void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t
             }
             nextBackward--;
             break;
+        case REMAT_STEP_REFORWARD:
+            /* The checker's window, coded here on its own. hasBackward needs no
+             * test: without it deepest == n > top >= nextBackward. */
+            if (!lossForward || nextBackward < (ptrdiff_t)t->deepest ||
+                (ptrdiff_t)st->layer >= (lossBackward ? nextBackward : (ptrdiff_t)n)) {
+                grammarExit(s, st,
+                            "rule 6: a REFORWARD comes after LOSS_FORWARD, below a pending "
+                            "backward step");
+            }
+            break;
         default:
             PRINT_ERROR("rematPlanBuild: step #%zu (kind %u, layer %u) violates grammar: unknown "
                         "step kind",
@@ -268,15 +376,13 @@ void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t
     if (!lossForward) {
         grammarEndExit(p->numSteps, "rule 1: no LOSS_FORWARD");
     }
-    if (mode == REMAT_MODE_EVAL) {
-        return;
-    }
-    if (lossBackward != t->hasBackward) {
+    if (mode == REMAT_MODE_TRAIN && lossBackward != t->hasBackward) {
         grammarEndExit(p->numSteps, "rule 2: LOSS_BACKWARD missing");
     }
-    if (t->hasBackward && nextBackward >= (ptrdiff_t)t->deepest) {
+    if (mode == REMAT_MODE_TRAIN && t->hasBackward && nextBackward >= (ptrdiff_t)t->deepest) {
         grammarEndExit(p->numSteps, "rule 3: BACKWARD set incomplete");
     }
+    requireRangesWellFormed(p, t, model);
 }
 
 /* The generator and grammar rule 4 both read the read-set off `model`, so a

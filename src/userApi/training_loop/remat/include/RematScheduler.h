@@ -161,7 +161,8 @@ void rematSchedulerDeinit(rematScheduler_t *s);
 typedef struct rematReport {
     rematSchedulerType_t type;
     rematPlanPolicy_t policy;
-    bool planned; /* table + plan built: numSteps, peakLiveBytes, metadataBytes */
+    /* table + plan built: numSteps, the peaks, metadataBytes, the recompute numbers */
+    bool planned;
     /* ARENA: placement computed + verified (the three arena fields). HEAP:
      * == planned, arena fields 0; it places each range in its own block. */
     bool placed;
@@ -179,6 +180,12 @@ typedef struct rematReport {
     size_t arenaPadBytes;         /* peakPlacedBytes - peakLiveBytes (alignment) -> arena_pad_b */
     size_t arenaGapBytes;         /* arenaBytes - peakPlacedBytes (FFD heuristic) -> arena_gap_b */
     size_t metadataBytes; /* table block + plan block + the offsets block -> wire_metadata_b */
+    /* The TRAIN program's REFORWARD steps (-> refwd_steps) and the forward cost
+     * (layerForwardCost, a multiply-accumulate count) of its FORWARD steps
+     * (-> forward_cost) and of its REFORWARD steps (-> recompute_cost). */
+    size_t refwdSteps;
+    size_t forwardCost;
+    size_t recomputeCost;
 } rematReport_t;
 void rematSchedulerReport(const rematScheduler_t *s, rematReport_t *out);
 

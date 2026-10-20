@@ -61,16 +61,19 @@ static void sortEndOrder(rematProgram_t *p) {
 }
 
 /* Overflow-checked here are the plan-block size (stepsAt/rangesAt/endOrderAt/
- * blockBytes, via planAdd/planMul), the step bound, and the two
+ * blockBytes, via planAdd/planMul), the step bound, the two
  * peaks, peakLiveBytes and the activation-only peak (accumulated with planAdd
- * in peakBytesUpTo, each under its own label). rematTrainStepCount,
- * rematBackwardStep and numRanges = numWires - 1 are plain size_t arithmetic
- * on modelSize, backwardTop, deepest and numWires -- all bounded well under
- * SIZE_MAX by the table's numWires < REMAT_NONE guard, so they cannot
- * overflow. The checked exits are unreachable too and have no dedicated death
- * test: a program holds at most UINT16_MAX steps and no more ranges than
+ * in peakBytesUpTo, each under its own label), the activations' element
+ * counts, and the two costs, forwardCost and recomputeCost.
+ * rematTrainStepCount, rematBackwardStep and numRanges = numWires - 1 are
+ * plain size_t arithmetic on modelSize, backwardTop, deepest and numWires --
+ * all bounded well under SIZE_MAX by the table's numWires < REMAT_NONE guard,
+ * so they cannot overflow. Only the two costs' exits are reachable (a layer's
+ * cost has no bound the table checked) and have death tests. The others have
+ * none: a program holds at most UINT16_MAX steps and no more ranges than
  * steps, and grammar rule 6 keeps the ranges of one wire apart, so a peak
- * never exceeds the table's checked total of wire bytes. */
+ * never exceeds the table's checked total of wire bytes; an element count is
+ * a product the table checked when it derived the same shape. */
 static size_t planAdd(size_t a, size_t b, const char *quantity) {
     size_t out;
     if (!checkedAddSize(a, b, &out)) {
@@ -510,6 +513,63 @@ static void requireRangesWithinTheCap(size_t numRanges) {
     }
 }
 
+static size_t activationElements(const shape_t *shape) {
+    size_t count = 1;
+    for (size_t d = 0; d < shape->numberOfDimensions; d++) {
+        count = planMul(count, shape->dimensions[d], "the element count of an activation");
+    }
+    return count;
+}
+
+/* The TRAIN program's recompute numbers. The element counts come from the
+ * table's input key through the calcOutputShape chain the table derived its
+ * wires from, on stack scratch of maxRank dims (the table keeps bytes, which
+ * do not give BFP element counts). Grammar rule 1 runs every layer's FORWARD
+ * once, so forwardCost is the sum over the layers. A layer's REFORWARDs are
+ * counted by a scan of the steps, only in a program that recomputes: a
+ * SEQUENCE or RETAIN_LIST plan, whose range cap keeps n at most
+ * ODT_REMAT_MAX_RANGES (every slab wire has a range), so the scans read at
+ * most n * numSteps steps. */
+static void recordRecomputeNumbers(rematPlan_t *p, const rematWireTable_t *t, layer_t **model) {
+    const rematProgram_t *train = &p->train;
+    size_t refwdSteps = 0;
+    for (size_t s = 0; s < train->numSteps; s++) {
+        refwdSteps += (train->steps[s].kind == REMAT_STEP_REFORWARD) ? 1u : 0u;
+    }
+    size_t maxRank = t->maxRank;
+    size_t dimsA[maxRank], orderA[maxRank], dimsB[maxRank], orderB[maxRank];
+    shape_t scratch[2] = {{.dimensions = dimsA, .orderOfDimensions = orderA},
+                          {.dimensions = dimsB, .orderOfDimensions = orderB}};
+    shape_t input = {.numberOfDimensions = t->inputRank,
+                     .dimensions = t->inputDims,
+                     .orderOfDimensions = t->inputOrder};
+    shape_t *prev = &input;
+    size_t forwardCost = 0;
+    size_t recomputeCost = 0;
+    for (size_t l = 0; l < t->modelSize; l++) {
+        layer_t *layer = model[l];
+        shape_t *out = &scratch[l % 2u];
+        out->numberOfDimensions = (layer->type == FLATTEN) ? 2u : prev->numberOfDimensions;
+        layerFunctions[layer->type].calcOutputShape(layer, prev, out);
+        size_t cost = layerForwardCost(layer, activationElements(prev), activationElements(out));
+        forwardCost = planAdd(forwardCost, cost, "forwardCost");
+        if (refwdSteps > 0u) {
+            size_t recomputes = 0;
+            for (size_t s = 0; s < train->numSteps; s++) {
+                if (train->steps[s].kind == REMAT_STEP_REFORWARD && train->steps[s].layer == l) {
+                    recomputes++;
+                }
+            }
+            recomputeCost =
+                planAdd(recomputeCost, planMul(cost, recomputes, "recomputeCost"), "recomputeCost");
+        }
+        prev = out;
+    }
+    p->refwdSteps = refwdSteps;
+    p->forwardCost = forwardCost;
+    p->recomputeCost = recomputeCost;
+}
+
 bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **model,
                     const rematPlanSpec_t *spec) {
     *out = NULL;
@@ -564,6 +624,7 @@ bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **mode
     sortEndOrder(train);
     rematPlanValidateGrammar(train, t, model, REMAT_MODE_TRAIN);
     train->peakLiveBytes = peakLiveBytesOf(train, t);
+    recordRecomputeNumbers(p, t, model);
     rematProgram_t *eval = &p->eval;
     placeProgram(eval, block, &evalAt, evalSteps, evalRanges);
     rematFillEvalProgram(t, eval->steps, eval->ranges);

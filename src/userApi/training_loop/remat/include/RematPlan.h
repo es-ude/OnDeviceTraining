@@ -188,6 +188,12 @@ typedef struct rematPlan {
      * ACT n [FORWARD(n-1), LOSS_FORWARD]; no GRAD range. The same for every
      * policy: eval never recomputes. */
     rematProgram_t eval;
+    /* The TRAIN program's REFORWARD steps and layerForwardCost summed over its
+     * FORWARD and over its REFORWARD steps: computed at build, because
+     * rematSchedulerReport sees no model. */
+    size_t refwdSteps;
+    size_t forwardCost;
+    size_t recomputeCost;
     size_t blockBytes; /* the one plan block, struct included */
 } rematPlan_t;
 

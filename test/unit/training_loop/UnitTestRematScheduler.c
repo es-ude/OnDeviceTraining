@@ -99,7 +99,7 @@ void testReportMetadataCountsTheResidentBlocks(void) {
     rematScheduler_t s = initArena(&f, NULL);
     rematReport_t r;
     rematSchedulerReport(&s, &r);
-    /* slab + plan block + the offsets block: 4,848 + 544 + 23 * 8 = 5,576 on LP64 */
+    /* slab + plan block + the offsets block: 4,848 + 568 + 23 * 8 = 5,600 on LP64 */
     TEST_ASSERT_EQUAL_size_t(s.wires->slabBytes + s.plan->blockBytes +
                                  s.plan->train.numRanges * sizeof(size_t),
                              r.metadataBytes);
@@ -642,6 +642,25 @@ void testReportArenaBytesHarRetainFfdRegressionGuard(void) {
     }
 }
 
+/* ACT 3, 7 and 12 kept (every other entry false): 7 REFORWARDs that cost
+ * 301056 of the forwards' 502150, derived in UnitTestRematPlan above its
+ * RETAIN_LIST tests; the same on both rows. */
+void testReportCarriesTheRecomputeNumbersOfARetainListPlan(void) {
+    static const bool keep3And7And12[HAR_N + 1] = {[3] = true, [7] = true, [12] = true};
+    const rematPlanSpec_t spec = {.policy = REMAT_PLAN_RETAIN_LIST, .retain = keep3And7And12};
+    for (int row = 0; row < 2; row++) {
+        fixture_t f;
+        buildHarModel(&f);
+        rematScheduler_t s = (row == 0) ? initArena(&f, &spec) : initHeap(&f, &spec);
+        rematReport_t r;
+        rematSchedulerReport(&s, &r);
+        TEST_ASSERT_EQUAL_size_t(7, r.refwdSteps);
+        TEST_ASSERT_EQUAL_size_t(502150, r.forwardCost);
+        TEST_ASSERT_EQUAL_size_t(301056, r.recomputeCost);
+        freeFixture(&f, &s);
+    }
+}
+
 static void buildFinetuneStage2Model(fixture_t *f) {
     buildHarFixture(f, true);
 }
@@ -771,6 +790,9 @@ void testArenaInitFailureKeepsAnalyticReport(void) {
     TEST_ASSERT_FALSE(r.dataReserved);
     TEST_ASSERT_EQUAL_size_t(2, r.numSteps);
     TEST_ASSERT_EQUAL_size_t((size_t)1 << 62, r.peakLiveBytes);
+    TEST_ASSERT_EQUAL_size_t(0, r.refwdSteps);
+    TEST_ASSERT_EQUAL_size_t((size_t)1 << 60, r.forwardCost);
+    TEST_ASSERT_EQUAL_size_t(0, r.recomputeCost);
     TEST_ASSERT_EQUAL_size_t((size_t)1 << 62, r.arenaBytes);
     TEST_ASSERT_EQUAL_size_t(0, r.arenaPadBytes);
     TEST_ASSERT_EQUAL_size_t(0, r.arenaGapBytes);
@@ -1733,7 +1755,12 @@ static void assertHeapReport(const rematPlanSpec_t *spec, rematPlanPolicy_t poli
     TEST_ASSERT_EQUAL_size_t(0, r.arenaBytes);
     TEST_ASSERT_EQUAL_size_t(0, r.arenaPadBytes);
     TEST_ASSERT_EQUAL_size_t(0, r.arenaGapBytes);
-    /* slab + plan block, no row table: 4,848 + 544 = 5,392 on LP64 */
+    /* Every forward once, nothing recomputed: HAR's forward cost, derived in
+     * UnitTestRematPlan above its RETAIN_LIST tests. */
+    TEST_ASSERT_EQUAL_size_t(0, r.refwdSteps);
+    TEST_ASSERT_EQUAL_size_t(502150, r.forwardCost);
+    TEST_ASSERT_EQUAL_size_t(0, r.recomputeCost);
+    /* slab + plan block, no row table: 4,848 + 568 = 5,416 on LP64 */
     TEST_ASSERT_EQUAL_size_t(s.wires->slabBytes + s.plan->blockBytes, r.metadataBytes);
     freeFixture(&f, &s);
 }
@@ -2303,15 +2330,15 @@ static void selfCheckWithOneExtraByte(rowInit_t init) {
 
 void testInitSelfCheckExitsOnAnUnaccountedByteOnHeap(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[heap]: init reserved 5393 B, but its report accounts for "
-                             "5392 B (arenaBytes 0 + metadataBytes 5392)",
+                             "remat[heap]: init reserved 5417 B, but its report accounts for "
+                             "5416 B (arenaBytes 0 + metadataBytes 5416)",
                              selfCheckWithOneExtraByte(initHeap));
 }
 
 void testInitSelfCheckExitsOnAnUnaccountedByteOnArena(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[arena]: init reserved 83961 B, but its report accounts for "
-                             "83960 B (arenaBytes 78384 + metadataBytes 5576)",
+                             "remat[arena]: init reserved 83985 B, but its report accounts for "
+                             "83984 B (arenaBytes 78384 + metadataBytes 5600)",
                              selfCheckWithOneExtraByte(initArena));
 }
 
@@ -2347,15 +2374,15 @@ static void initWithAnUnaccountedReservation(rematSchedulerType_t row) {
 
 void testHeapInitExitsOnAnUnaccountedReservation(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[heap]: init reserved 5400 B, but its report accounts for "
-                             "5392 B (arenaBytes 0 + metadataBytes 5392)",
+                             "remat[heap]: init reserved 5424 B, but its report accounts for "
+                             "5416 B (arenaBytes 0 + metadataBytes 5416)",
                              initWithAnUnaccountedReservation(REMAT_HEAP));
 }
 
 void testArenaInitExitsOnAnUnaccountedReservation(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[arena]: init reserved 83968 B, but its report accounts for "
-                             "83960 B (arenaBytes 78384 + metadataBytes 5576)",
+                             "remat[arena]: init reserved 83992 B, but its report accounts for "
+                             "83984 B (arenaBytes 78384 + metadataBytes 5600)",
                              initWithAnUnaccountedReservation(REMAT_ARENA));
 }
 #endif
@@ -2394,6 +2421,7 @@ int main(void) {
     RUN_TEST(testReportPadOnTheF1ModelIsEleven);
     RUN_TEST(testReportArenaBytesHarFfdRegressionGuard);
     RUN_TEST(testReportArenaBytesHarRetainFfdRegressionGuard);
+    RUN_TEST(testReportCarriesTheRecomputeNumbersOfARetainListPlan);
     RUN_TEST(testReportArenaBytesMnistCnnAndFinetuneFfdRegressionGuards);
     RUN_TEST(testReportActivationsPeakOnHarOnBothRows);
     RUN_TEST(testArenaOffsetsAlignedOnRandomMixedChains);

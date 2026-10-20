@@ -2253,6 +2253,8 @@ static void assertRecomputeCell(const recomputeEntry_t *e, rematSchedulerType_t 
         refwds += g_refwds[l];
     }
     TEST_ASSERT_EQUAL_INT_MESSAGE(e->recomputes, refwds > 0, say(name, "the plan recomputes"));
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(c.report.refwdSteps, refwds,
+                                     say(name, "the report counts every REFORWARD the driver ran"));
     if (e->drawing >= 0) {
         TEST_ASSERT_TRUE_MESSAGE(g_refwds[e->drawing] >= 1,
                                  say(name, "the drawing layer is recomputed"));

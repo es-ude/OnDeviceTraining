@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "AdaptiveAvgPool1d.h"
 #include "AsanDeath.h"
 #include "BatchNorm1d.h"
 #include "Common.h"
@@ -3209,6 +3210,9 @@ static void assertRetainListPlanIsSound(layer_t **model, size_t n, lossFuncType_
     TEST_ASSERT_EQUAL_size_t(kept->train.peakLiveBytes, seq->train.peakLiveBytes);
     TEST_ASSERT_EQUAL_size_t(rematProgramActPeakBytes(&kept->train, t),
                              rematProgramActPeakBytes(&seq->train, t));
+    TEST_ASSERT_EQUAL_size_t(kept->refwdSteps, seq->refwdSteps);
+    TEST_ASSERT_EQUAL_size_t(kept->forwardCost, seq->forwardCost);
+    TEST_ASSERT_EQUAL_size_t(kept->recomputeCost, seq->recomputeCost);
     rematPlanFree(seq);
     rematPlanFree(kept);
     rematWireTableFree(t);
@@ -3491,6 +3495,20 @@ static size_t reforwardsOf(const rematProgram_t *p) {
     return count;
 }
 
+/* HAR's forward costs at B = 1 (layerForwardCost on each layer's element
+ * counts): Conv1d 9->16 K7 2048 outputs * 9 * 7 = 129024; ReLU 2048; MaxPool
+ * 1024 * 2 = 2048; Conv1d 16->32 K5 2048 * 16 * 5 = 163840; ReLU 2048; MaxPool
+ * 2048; Conv1d 32->64 K3 2048 * 32 * 3 = 196608; ReLU 2048; AvgPool 64 * 32 =
+ * 2048; Flatten 0; Linear 64->6 6 * 64 = 384; Softmax 6. Every plan runs each
+ * forward once: 502150. With ACT 3, 7 and 12 kept the plan recomputes layers
+ * 7, 8, 9, 3, 4, 5 and 0: 2048 + 2048 + 0 + 163840 + 2048 + 2048 + 129024 =
+ * 301056, 0.5995 of the forwards; with ACT 12 dropped too, also layers 10 and
+ * 11: 301446. The two sums:
+ *   uv run python -c "print(sum([
+ *       2048 * 9 * 7, 2048, 1024 * 2, 2048 * 16 * 5, 2048, 1024 * 2,
+ *       2048 * 32 * 3, 2048, 64 * 32, 0, 6 * 64, 6]),
+ *       2048 + 64 * 32 + 0 + 2048 * 16 * 5 + 2048 + 1024 * 2 + 2048 * 9 * 7)"
+ */
 /* The peak is at REFORWARD(5), step 23: ACT 3 4096 + GRAD 7 8192 + ACT 4 8192
  * + ACT 5 8192 + ACT 6 4096 = 32768 bytes; the same step without GRAD 7 is
  * the activation peak, 24576 (LIVENESS: 49152 and 41216). Derived by hand
@@ -3509,6 +3527,9 @@ void testRetainListHarKeepingActs3And7And12(void) {
     assertSameSteps(steps, COUNT_OF(steps), &p->train);
     assertSameRanges(ranges, COUNT_OF(ranges), &p->train);
     TEST_ASSERT_EQUAL_size_t(7, reforwardsOf(&p->train));
+    TEST_ASSERT_EQUAL_size_t(7, p->refwdSteps);
+    TEST_ASSERT_EQUAL_size_t(502150, p->forwardCost);
+    TEST_ASSERT_EQUAL_size_t(301056, p->recomputeCost);
     TEST_ASSERT_EQUAL_size_t(32768, p->train.peakLiveBytes);
     TEST_ASSERT_EQUAL_size_t(24576, rematProgramActPeakBytes(&p->train, t));
     rematPlanFree(p);
@@ -3531,11 +3552,87 @@ void testRetainListHarKeepingActs3And7(void) {
     assertSameSteps(steps, COUNT_OF(steps), &p->train);
     TEST_ASSERT_EQUAL_size_t(32, p->train.numRanges);
     TEST_ASSERT_EQUAL_size_t(9, reforwardsOf(&p->train));
+    TEST_ASSERT_EQUAL_size_t(9, p->refwdSteps);
+    TEST_ASSERT_EQUAL_size_t(502150, p->forwardCost);
+    TEST_ASSERT_EQUAL_size_t(301446, p->recomputeCost);
     TEST_ASSERT_EQUAL_size_t(32768, p->train.peakLiveBytes);
     TEST_ASSERT_EQUAL_size_t(24576, rematProgramActPeakBytes(&p->train, t));
     rematPlanFree(p);
     rematWireTableFree(t);
     freeModel(model, HAR_N);
+}
+
+/* ---- the recompute numbers of the report ---- */
+
+/* MLP3 on [1, 2]: Linear 2->4 costs 4 outputs * 2 = 8, ReLU 4, Linear 4->2
+ * costs 2 * 4 = 8, so every plan's forward cost is 20. The recompute program
+ * recomputes layers 0 and 1 (8 + 4 = 12), the recompute-twice program layer 0
+ * twice and layer 1 once (8 + 4 + 8 = 20). */
+static void assertMlp3Costs(const rematPlanSpec_t *spec, size_t refwdSteps, size_t recomputeCost) {
+    layer_t *model[MLP3_N];
+    inputLike_t in;
+    rematWireTable_t *t = initMlp3Table(model, &in);
+    rematPlan_t *p = buildPlan(t, model, spec);
+    TEST_ASSERT_EQUAL_size_t(refwdSteps, p->refwdSteps);
+    TEST_ASSERT_EQUAL_size_t(20, p->forwardCost);
+    TEST_ASSERT_EQUAL_size_t(recomputeCost, p->recomputeCost);
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, MLP3_N);
+}
+
+void testPlanCostsEveryForwardAndEveryRecomputeOfMlp3(void) {
+    const rematStep_t twice[] = MLP3_RECOMPUTE_TWICE_STEPS;
+    rematPlanSpec_t twiceSpec = sequenceSpec(twice, COUNT_OF(twice));
+    assertMlp3Costs(NULL, 0, 0);
+    assertMlp3Costs(&g_liveness, 0, 0);
+    assertMlp3Costs(&g_mlp3Recompute, 2, 12);
+    assertMlp3Costs(&twiceSpec, 3, 20);
+}
+
+/* The plan hands each layer its input's element count too: an adaptive pool
+ * over [1, 3, 8] to 2 outputs per channel costs its 24 inputs, not its 6
+ * outputs. Nothing trains, so the plan is the forward and the loss. */
+void testPlanCostsAnAdaptivePoolOnItsInput(void) {
+    adaptiveAvgPool1dConfig_t poolConfig = {
+        .outputSize = 2, .outputQ = &g_floatQ, .propLossQ = &g_floatQ};
+    layer_t pool = {.type = ADAPTIVE_AVGPOOL1D,
+                    .config = &(layerConfig_t){.adaptiveAvgPool1d = &poolConfig}};
+    layer_t *model[1] = {&pool};
+    inputLike_t in;
+    rematWireTable_t *t =
+        initTable(model, 1, MSE, makeInput(&in, (size_t[]){1, 3, 8}, 3, &g_floatQ));
+    rematPlan_t *p = buildPlan(t, model, NULL);
+    TEST_ASSERT_EQUAL_size_t(24, p->forwardCost);
+    rematPlanFree(p);
+    rematWireTableFree(t);
+}
+
+/* Layer 0's input width raised in its weights' shape, which only the cost
+ * reads (the table and the grammar read the output width): with SIZE_MAX / 4,
+ * Linear 2->4 costs 4 * (SIZE_MAX / 4) = SIZE_MAX - 3, and ReLU's 4 more
+ * cannot be added. */
+static void buildMlp3PlanWithLayer0Width(const rematPlanSpec_t *spec, size_t inFeatures) {
+    layer_t *model[MLP3_N];
+    inputLike_t in;
+    rematWireTable_t *t = initMlp3Table(model, &in);
+    model[0]->config->linear->weights->param->shape->dimensions[1] = inFeatures;
+    rematPlan_t *p = NULL;
+    (void)rematPlanBuild(&p, t, model, spec);
+}
+
+void testPlanBuildExitsOnAForwardCostAboveSizeMax(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematPlanBuild: size overflow computing forwardCost",
+                             buildMlp3PlanWithLayer0Width(NULL, SIZE_MAX / 4u));
+}
+
+/* With SIZE_MAX / 6, layer 0 costs about two thirds of SIZE_MAX: the forward
+ * cost still fits, but the recompute-twice program recomputes layer 0 twice. */
+void testPlanBuildExitsOnARecomputeCostAboveSizeMax(void) {
+    const rematStep_t twice[] = MLP3_RECOMPUTE_TWICE_STEPS;
+    rematPlanSpec_t spec = sequenceSpec(twice, COUNT_OF(twice));
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematPlanBuild: size overflow computing recomputeCost",
+                             buildMlp3PlanWithLayer0Width(&spec, SIZE_MAX / 6u));
 }
 
 /* rematPlanBuild runs the grammar on what it generates: a table record that
@@ -3764,6 +3861,10 @@ int main(void) {
     RUN_TEST(testRetainListPlanOnTheMlpIsTheRecomputeProgram);
     RUN_TEST(testRetainListHarKeepingActs3And7And12);
     RUN_TEST(testRetainListHarKeepingActs3And7);
+    RUN_TEST(testPlanCostsEveryForwardAndEveryRecomputeOfMlp3);
+    RUN_TEST(testPlanCostsAnAdaptivePoolOnItsInput);
+    RUN_TEST(testPlanBuildExitsOnAForwardCostAboveSizeMax);
+    RUN_TEST(testPlanBuildExitsOnARecomputeCostAboveSizeMax);
     RUN_TEST(testRetainListPlanEvalProgramIsTheStoreAllEvalProgram);
     RUN_TEST(testRetainListPlanKeepingEveryActIsTheLivenessPlanOnTheZoo);
     RUN_TEST(testRetainListPlanKeepingEveryActIsTheLivenessPlanOnRandomChains);

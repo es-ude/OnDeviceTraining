@@ -219,9 +219,10 @@ size_t rematWalkClosing(const rematProgram_t *p, rematWalk_t *w);
  * naming the step index (or the range index) and the rule. An EVAL program has
  * no backward step: rule 2 rejects LOSS_BACKWARD and BACKWARD there, rule 6
  * rejects REFORWARD, and rule 3 does not apply. Rule 6 also bounds the step
- * count, admits a REFORWARD only inside the backward window, makes every write
- * open a range of its own, and keeps the ranges begin-sorted and inside the
- * stream. */
+ * count, admits a REFORWARD only inside the backward window and never for a
+ * layer whose training forward updates its state (layerForwardUpdatesState),
+ * makes every write open a range of its own, and keeps the ranges
+ * begin-sorted and inside the stream. */
 void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t, layer_t **model,
                               rematMode_t mode);
 

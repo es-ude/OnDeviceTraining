@@ -729,6 +729,58 @@ void testLayerBackwardReadsInputRejectsUnknownType(void) {
                              (void)layerBackwardReadsInput(&unknown));
 }
 
+/* #4 (remat): the recompute rule's truth table. Only BatchNorm1d's
+ * trackRunningStats and frozen decide; its momentary training flag never does
+ * (plans are built outside a training call). The thirteen other rows keep
+ * config == NULL: the rule must not read their configs. */
+static void assertUpdatesState(bool expected, layerType_t type, layerConfig_t *config,
+                               const char *row) {
+    layer_t layer = {.type = type, .config = config};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(expected, layerForwardUpdatesState(&layer), row);
+}
+
+void testLayerForwardUpdatesStateTruthTable(void) {
+    batchNorm1dConfig_t tracked = {.trackRunningStats = true};
+    batchNorm1dConfig_t trackedTraining = {.trackRunningStats = true, .training = true};
+    batchNorm1dConfig_t trackedFrozen = {.trackRunningStats = true, .frozen = true};
+    batchNorm1dConfig_t untracked = {.trackRunningStats = false};
+    batchNorm1dConfig_t untrackedTraining = {.trackRunningStats = false, .training = true};
+
+    assertUpdatesState(true, BATCHNORM1D, &(layerConfig_t){.batchNorm1d = &tracked},
+                       "tracked BATCHNORM1D");
+    assertUpdatesState(true, BATCHNORM1D, &(layerConfig_t){.batchNorm1d = &trackedTraining},
+                       "tracked BATCHNORM1D in training mode");
+    assertUpdatesState(false, BATCHNORM1D, &(layerConfig_t){.batchNorm1d = &trackedFrozen},
+                       "frozen tracked BATCHNORM1D");
+    assertUpdatesState(false, BATCHNORM1D, &(layerConfig_t){.batchNorm1d = &untracked},
+                       "untracked BATCHNORM1D");
+    assertUpdatesState(false, BATCHNORM1D, &(layerConfig_t){.batchNorm1d = &untrackedTraining},
+                       "untracked BATCHNORM1D in training mode");
+    /* Dropout's mask and MaxPool's argmax are rewritten with the same values
+     * by a forward with the same input and key. */
+    assertUpdatesState(false, LINEAR, NULL, "LINEAR");
+    assertUpdatesState(false, CONV1D, NULL, "CONV1D");
+    assertUpdatesState(false, CONV1D_TRANSPOSED, NULL, "CONV1D_TRANSPOSED");
+    assertUpdatesState(false, LAYERNORM, NULL, "LAYERNORM");
+    assertUpdatesState(false, GROUPNORM, NULL, "GROUPNORM");
+    assertUpdatesState(false, RELU, NULL, "RELU");
+    assertUpdatesState(false, SOFTMAX, NULL, "SOFTMAX");
+    assertUpdatesState(false, MAXPOOL1D, NULL, "MAXPOOL1D");
+    assertUpdatesState(false, AVGPOOL1D, NULL, "AVGPOOL1D");
+    assertUpdatesState(false, ADAPTIVE_AVGPOOL1D, NULL, "ADAPTIVE_AVGPOOL1D");
+    assertUpdatesState(false, FLATTEN, NULL, "FLATTEN");
+    assertUpdatesState(false, QUANTIZATION, NULL, "QUANTIZATION");
+    assertUpdatesState(false, DROPOUT, NULL, "DROPOUT");
+}
+
+/* A type appended without a row must fail fast: a silent `false` would let a
+ * plan recompute a forward whose state update then runs twice. */
+void testLayerForwardUpdatesStateRejectsUnknownType(void) {
+    layer_t unknown = {.type = (layerType_t)127, .config = NULL};
+    ASSERT_EXITS_WITH_OUTPUT(1, "layerForwardUpdatesState: unknown layerType_t 127",
+                             (void)layerForwardUpdatesState(&unknown));
+}
+
 /* #468: stacked evaluation only runs forwards -- backward arithmetic,
  * the prop-loss wire and grad storage must not reject a layer. Slot order
  * matches GEMM_FIELDS / NORM_FIELDS / WIRE_FIELDS. */
@@ -847,6 +899,8 @@ int main(void) {
     RUN_TEST(testLayerIsFloat32OnlyAcceptsFrozenBiaslessAndPassthroughLayers);
     RUN_TEST(testLayerBackwardReadsInputTruthTable);
     RUN_TEST(testLayerBackwardReadsInputRejectsUnknownType);
+    RUN_TEST(testLayerForwardUpdatesStateTruthTable);
+    RUN_TEST(testLayerForwardUpdatesStateRejectsUnknownType);
     RUN_TEST(testLayerForwardNonFloat32FieldIgnoresBackwardOnlyFields);
     RUN_TEST(testLayerForwardNonFloat32FieldGatesBatchNorm1dRunningBuffers);
     return UNITY_END();

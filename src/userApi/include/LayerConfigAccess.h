@@ -52,6 +52,17 @@ const char *layerNonFloat32Field(layer_t *layer);
  * NULL. An unknown type exits. */
 bool layerBackwardReadsInput(const layer_t *layer);
 
+/* Recompute rule (#4, remat): true iff the layer's training forward updates
+ * layer state that a second forward on the same input would update again, so
+ * a plan must never recompute it. Only a BatchNorm1d that tracks running
+ * statistics and is not frozen: every training forward moves its running
+ * mean, running variance and batch counter. Dropout's mask and MaxPool's
+ * argmax are rewritten with the same values by a forward with the same input
+ * and key, so they count as false. Reads the config, never the momentary
+ * `training` flag: plans are built outside a training call. An unknown type
+ * exits. */
+bool layerForwardUpdatesState(const layer_t *layer);
+
 /* Forward-only variant for stacked evaluation (#468): the first
  * non-FLOAT32 among forwardMath, outputQ and every parameter's (and
  * BatchNorm1d's running buffers') storage, or NULL. Backward arithmetic, the

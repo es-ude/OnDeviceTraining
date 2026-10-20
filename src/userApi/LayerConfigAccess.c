@@ -357,3 +357,31 @@ bool layerBackwardReadsInput(const layer_t *layer) {
         exit(1);
     }
 }
+
+/* An unknown type exits rather than defaulting: a wrong `false` lets a plan
+ * recompute a forward whose state update then runs twice. */
+bool layerForwardUpdatesState(const layer_t *layer) {
+    switch (layer->type) {
+    case BATCHNORM1D: {
+        const batchNorm1dConfig_t *c = layer->config->batchNorm1d;
+        return c->trackRunningStats && !c->frozen;
+    }
+    case LINEAR:
+    case CONV1D:
+    case CONV1D_TRANSPOSED:
+    case LAYERNORM:
+    case GROUPNORM:
+    case RELU:
+    case SOFTMAX:
+    case MAXPOOL1D:
+    case AVGPOOL1D:
+    case ADAPTIVE_AVGPOOL1D:
+    case FLATTEN:
+    case QUANTIZATION:
+    case DROPOUT:
+        return false;
+    default:
+        PRINT_ERROR("layerForwardUpdatesState: unknown layerType_t %d", (int)layer->type);
+        exit(1);
+    }
+}

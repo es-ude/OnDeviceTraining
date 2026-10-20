@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "AsanDeath.h"
+#include "BatchNorm1d.h"
 #include "Common.h"
 #include "Conv1d.h"
 #include "Conv1dApi.h"
@@ -2993,6 +2994,90 @@ void testPlanBuildExitsOnASequenceLengthForAnotherPolicy(void) {
     freeModel(model, MLP3_N);
 }
 
+/* ---- BatchNorm1d under recompute: a forward that updates state is never recomputed ---- */
+
+/* BatchNorm1d(2) -> Linear(2->2) under MSE on a [4, 2] input (the zoo's
+ * BatchNorm shape). A plan reads a layer only through its type and config, so
+ * the BatchNorm1d is a stack-built config without buffers: nothing runs it. */
+typedef struct bnPlanFixture {
+    batchNorm1dConfig_t bn;
+    layerConfig_t bnConfig;
+    layer_t bnLayer;
+    layer_t *model[2];
+    inputLike_t in;
+    rematWireTable_t *t;
+} bnPlanFixture_t;
+
+static void buildBnPlanFixture(bnPlanFixture_t *f, bool tracked, bool frozen) {
+    f->bn = (batchNorm1dConfig_t){.numChannels = 2,
+                                  .affine = true,
+                                  .trackRunningStats = tracked,
+                                  .frozen = frozen,
+                                  .outputQ = &g_floatQ,
+                                  .propLossQ = &g_floatQ};
+    f->bnConfig = (layerConfig_t){.batchNorm1d = &f->bn};
+    f->bnLayer = (layer_t){.type = BATCHNORM1D, .config = &f->bnConfig};
+    f->model[0] = &f->bnLayer;
+    f->model[1] = makeLinear(2, 2, false, 1);
+    f->t = initTable(f->model, 2, MSE, makeInput(&f->in, (size_t[]){4, 2}, 2, &g_floatQ));
+}
+
+static void freeBnPlanFixture(bnPlanFixture_t *f) {
+    rematWireTableFree(f->t);
+    freeLinearLayer(f->model[1]);
+}
+
+/* deepest = 0 and top = 1: BACKWARD(1) reads ACT 1, so REFORWARD(0)
+ * regenerates it after LOSS_BACKWARD. */
+#define BN_RECOMPUTE_STEPS                                                                         \
+    {STEP_F(0), STEP_F(1), STEP_LF(2), STEP_LB(2), STEP_RF(0), STEP_B(1), STEP_B(0)}
+
+/* A tracked BatchNorm1d's training forward moves its running statistics: a
+ * second forward would move them again. The build decides from the config
+ * alone, whatever the momentary training flag says. */
+void testSequencePlanRejectsRecomputingATrackedBatchNorm(void) {
+    const rematStep_t steps[] = BN_RECOMPUTE_STEPS;
+    rematPlanSpec_t spec = sequenceSpec(steps, COUNT_OF(steps));
+    const char *message =
+        "step #4 (kind 4, layer 0) violates grammar rule 6: layer 0 updates its state in every "
+        "training forward (a tracked, unfrozen BatchNorm1d), so it is never recomputed; keep "
+        "ACT 1";
+    bnPlanFixture_t f;
+    buildBnPlanFixture(&f, true, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, message, planBuildExpectingAnExit(f.t, f.model, &spec));
+    f.bn.training = true;
+    ASSERT_EXITS_WITH_OUTPUT(1, message, planBuildExpectingAnExit(f.t, f.model, &spec));
+    freeBnPlanFixture(&f);
+}
+
+/* An untracked BatchNorm1d always normalizes over the batch and keeps no
+ * running statistics: its forward is a pure function of its input. */
+void testSequencePlanRecomputesAnUntrackedBatchNorm(void) {
+    const rematStep_t steps[] = BN_RECOMPUTE_STEPS;
+    rematPlanSpec_t spec = sequenceSpec(steps, COUNT_OF(steps));
+    bnPlanFixture_t f;
+    buildBnPlanFixture(&f, false, false);
+    rematPlan_t *p = buildPlan(f.t, f.model, &spec);
+    assertSameSteps(steps, COUNT_OF(steps), &p->train);
+    rematPlanFree(p);
+    freeBnPlanFixture(&f);
+}
+
+/* A frozen BatchNorm1d normalizes with its running statistics and never
+ * moves them. It does not train, so deepest = 1 and BACKWARD(1) is the last
+ * backward step. */
+void testSequencePlanRecomputesAFrozenTrackedBatchNorm(void) {
+    const rematStep_t steps[] = {STEP_F(0),  STEP_F(1),  STEP_LF(2),
+                                 STEP_LB(2), STEP_RF(0), STEP_B(1)};
+    rematPlanSpec_t spec = sequenceSpec(steps, COUNT_OF(steps));
+    bnPlanFixture_t f;
+    buildBnPlanFixture(&f, true, true);
+    rematPlan_t *p = buildPlan(f.t, f.model, &spec);
+    assertSameSteps(steps, COUNT_OF(steps), &p->train);
+    rematPlanFree(p);
+    freeBnPlanFixture(&f);
+}
+
 /* rematPlanBuild runs the grammar on what it generates: a table record that
  * claims GRAD 8 is GRAD 7 (wire 16) yields a range that opens one step after
  * BACKWARD(8) writes it. */
@@ -3213,6 +3298,9 @@ int main(void) {
     RUN_TEST(testSequencePlanExitsAboveUint16MaxStepsBeforeReserving);
     RUN_TEST(testPlanBuildExitsOnASequenceForAnotherPolicy);
     RUN_TEST(testPlanBuildExitsOnASequenceLengthForAnotherPolicy);
+    RUN_TEST(testSequencePlanRejectsRecomputingATrackedBatchNorm);
+    RUN_TEST(testSequencePlanRecomputesAnUntrackedBatchNorm);
+    RUN_TEST(testSequencePlanRecomputesAFrozenTrackedBatchNorm);
     RUN_TEST(testPlanBuildRunsTheGrammarOnWhatItGenerates);
     RUN_TEST(testPlanBuildExitsWhenTheModelFreezesALayerTheTableSawTrainable);
     RUN_TEST(testPlanBuildExitsWhenTheModelSwapsALayerType);

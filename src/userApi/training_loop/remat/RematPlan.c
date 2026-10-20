@@ -367,6 +367,14 @@ void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t
                             "rule 6: a REFORWARD comes after LOSS_FORWARD, below a pending "
                             "backward step");
             }
+            if (layerForwardUpdatesState(model[st->layer])) {
+                PRINT_ERROR("rematPlanBuild: step #%zu (kind %u, layer %u) violates grammar rule "
+                            "6: layer %u updates its state in every training forward (a tracked, "
+                            "unfrozen BatchNorm1d), so it is never recomputed; keep ACT %u",
+                            s, (unsigned)st->kind, (unsigned)st->layer, (unsigned)st->layer,
+                            (unsigned)st->layer + 1u);
+                exit(1);
+            }
             break;
         default:
             PRINT_ERROR("rematPlanBuild: step #%zu (kind %u, layer %u) violates grammar: unknown "

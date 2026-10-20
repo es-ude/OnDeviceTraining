@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "AdaptiveAvgPool1d.h"
@@ -781,6 +782,166 @@ void testLayerForwardUpdatesStateRejectsUnknownType(void) {
                              (void)layerForwardUpdatesState(&unknown));
 }
 
+/* #4 (remat): the forward-cost classes, one row per type, on 7 input and 6
+ * output elements, so a swapped operand shows. The weights carry only a shape:
+ * Linear [outF 3, inF 5], Conv1d [Cout 4, Cin/groups 3, K 5], Conv1dTransposed
+ * [Cin 4, Cout/groups 2, K 3]; both pools a window of 4. The other rows keep
+ * config == NULL: their class must not read a config. */
+static size_t forwardCostOf(layerType_t type, layerConfig_t *config, size_t in, size_t out) {
+    layer_t layer = {.type = type, .config = config};
+    return layerForwardCost(&layer, in, out);
+}
+
+void testLayerForwardCostTruthTable(void) {
+    size_t linearDims[2] = {3, 5};
+    size_t convDims[3] = {4, 3, 5};
+    size_t convTDims[3] = {4, 2, 3};
+    shape_t linearShape = {.numberOfDimensions = 2, .dimensions = linearDims};
+    shape_t convShape = {.numberOfDimensions = 3, .dimensions = convDims};
+    shape_t convTShape = {.numberOfDimensions = 3, .dimensions = convTDims};
+    tensor_t linearW = {.shape = &linearShape};
+    tensor_t convW = {.shape = &convShape};
+    tensor_t convTW = {.shape = &convTShape};
+    parameter_t linearP = {.param = &linearW};
+    parameter_t convP = {.param = &convW};
+    parameter_t convTP = {.param = &convTW};
+    linearConfig_t linear = {.weights = &linearP};
+    conv1dConfig_t conv = {.weights = &convP};
+    conv1dTransposedConfig_t convT = {.weights = &convTP};
+    kernel_t window = {.size = 4};
+    maxPool1dConfig_t maxPool = {.kernel = &window};
+    avgPool1dConfig_t avgPool = {.kernel = &window};
+
+    /* GEMM: one multiply-accumulate per weight an output (transposed: an
+     * input) element reads. */
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(
+        6u * 5u, forwardCostOf(LINEAR, &(layerConfig_t){.linear = &linear}, 7u, 6u), "LINEAR");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(
+        6u * 3u * 5u, forwardCostOf(CONV1D, &(layerConfig_t){.conv1d = &conv}, 7u, 6u), "CONV1D");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(
+        7u * 2u * 3u,
+        forwardCostOf(CONV1D_TRANSPOSED, &(layerConfig_t){.conv1dTransposed = &convT}, 7u, 6u),
+        "CONV1D_TRANSPOSED");
+    /* Pools: the window per output; the adaptive pool's windows cover the input. */
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(
+        6u * 4u, forwardCostOf(MAXPOOL1D, &(layerConfig_t){.maxPool1d = &maxPool}, 7u, 6u),
+        "MAXPOOL1D");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(
+        6u * 4u, forwardCostOf(AVGPOOL1D, &(layerConfig_t){.avgPool1d = &avgPool}, 7u, 6u),
+        "AVGPOOL1D");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(7u, forwardCostOf(ADAPTIVE_AVGPOOL1D, NULL, 7u, 6u),
+                                     "ADAPTIVE_AVGPOOL1D");
+    /* One unit per output element. */
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(6u, forwardCostOf(LAYERNORM, NULL, 7u, 6u), "LAYERNORM");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(6u, forwardCostOf(GROUPNORM, NULL, 7u, 6u), "GROUPNORM");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(6u, forwardCostOf(BATCHNORM1D, NULL, 7u, 6u), "BATCHNORM1D");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(6u, forwardCostOf(SOFTMAX, NULL, 7u, 6u), "SOFTMAX");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(6u, forwardCostOf(RELU, NULL, 7u, 6u), "RELU");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(6u, forwardCostOf(DROPOUT, NULL, 7u, 6u), "DROPOUT");
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(6u, forwardCostOf(QUANTIZATION, NULL, 7u, 6u), "QUANTIZATION");
+    /* A reshape computes nothing. */
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(0u, forwardCostOf(FLATTEN, NULL, 7u, 6u), "FLATTEN");
+}
+
+/* A type appended without a cost class must fail fast: a silent 0 would hide
+ * its recomputes from the report. */
+void testLayerForwardCostRejectsUnknownType(void) {
+    layer_t unknown = {.type = (layerType_t)127, .config = NULL};
+    ASSERT_EXITS_WITH_OUTPUT(1, "layerForwardCost: unknown layerType_t 127",
+                             (void)layerForwardCost(&unknown, 7u, 6u));
+}
+
+/* SIZE_MAX outputs times an input width of 2 cannot be represented: the cost
+ * exits by name instead of wrapping to a small number. */
+static void costOfAnOverflowingLinear(void) {
+    size_t dims[2] = {1, 2};
+    shape_t shape = {.numberOfDimensions = 2, .dimensions = dims};
+    tensor_t w = {.shape = &shape};
+    parameter_t p = {.param = &w};
+    linearConfig_t linear = {.weights = &p};
+    (void)forwardCostOf(LINEAR, &(layerConfig_t){.linear = &linear}, 2u, SIZE_MAX);
+}
+
+void testLayerForwardCostExitsOnAnOverflow(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "layerForwardCost: the forward cost of layerType_t 0 overflows "
+                             "size_t",
+                             costOfAnOverflowingLinear());
+}
+
+/* The convolutions multiply twice. A middle weight dimension of 1 keeps the
+ * first product at SIZE_MAX, so only the second product (times a kernel of 2)
+ * overflows: an unchecked second product would wrap instead of exiting. */
+static void costOfAnOverflowingConv1d(void) {
+    size_t dims[3] = {1, 1, 2};
+    shape_t shape = {.numberOfDimensions = 3, .dimensions = dims};
+    tensor_t w = {.shape = &shape};
+    parameter_t p = {.param = &w};
+    conv1dConfig_t conv = {.weights = &p};
+    (void)forwardCostOf(CONV1D, &(layerConfig_t){.conv1d = &conv}, 1u, SIZE_MAX);
+}
+
+void testLayerForwardCostExitsOnAConv1dOverflow(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "layerForwardCost: the forward cost of layerType_t 2 overflows "
+                             "size_t",
+                             costOfAnOverflowingConv1d());
+}
+
+/* The transposed convolution counts input elements, so the input is SIZE_MAX. */
+static void costOfAnOverflowingConv1dTransposed(void) {
+    size_t dims[3] = {1, 1, 2};
+    shape_t shape = {.numberOfDimensions = 3, .dimensions = dims};
+    tensor_t w = {.shape = &shape};
+    parameter_t p = {.param = &w};
+    conv1dTransposedConfig_t convT = {.weights = &p};
+    (void)forwardCostOf(CONV1D_TRANSPOSED, &(layerConfig_t){.conv1dTransposed = &convT}, SIZE_MAX,
+                        1u);
+}
+
+void testLayerForwardCostExitsOnAConv1dTransposedOverflow(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "layerForwardCost: the forward cost of layerType_t 3 overflows "
+                             "size_t",
+                             costOfAnOverflowingConv1dTransposed());
+}
+
+/* A middle weight dimension of 2 makes the first product overflow, and a
+ * kernel of 1 keeps the second one harmless: an unchecked first product would
+ * wrap to SIZE_MAX - 1 and pass the second check. */
+static void costOfAConv1dFirstProductOverflow(void) {
+    size_t dims[3] = {1, 2, 1};
+    shape_t shape = {.numberOfDimensions = 3, .dimensions = dims};
+    tensor_t w = {.shape = &shape};
+    parameter_t p = {.param = &w};
+    conv1dConfig_t conv = {.weights = &p};
+    (void)forwardCostOf(CONV1D, &(layerConfig_t){.conv1d = &conv}, 1u, SIZE_MAX);
+}
+
+void testLayerForwardCostExitsOnAConv1dFirstProductOverflow(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "layerForwardCost: the forward cost of layerType_t 2 overflows "
+                             "size_t",
+                             costOfAConv1dFirstProductOverflow());
+}
+
+static void costOfAConv1dTransposedFirstProductOverflow(void) {
+    size_t dims[3] = {1, 2, 1};
+    shape_t shape = {.numberOfDimensions = 3, .dimensions = dims};
+    tensor_t w = {.shape = &shape};
+    parameter_t p = {.param = &w};
+    conv1dTransposedConfig_t convT = {.weights = &p};
+    (void)forwardCostOf(CONV1D_TRANSPOSED, &(layerConfig_t){.conv1dTransposed = &convT}, SIZE_MAX,
+                        1u);
+}
+
+void testLayerForwardCostExitsOnAConv1dTransposedFirstProductOverflow(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "layerForwardCost: the forward cost of layerType_t 3 overflows "
+                             "size_t",
+                             costOfAConv1dTransposedFirstProductOverflow());
+}
+
 /* #468: stacked evaluation only runs forwards -- backward arithmetic,
  * the prop-loss wire and grad storage must not reject a layer. Slot order
  * matches GEMM_FIELDS / NORM_FIELDS / WIRE_FIELDS. */
@@ -901,6 +1062,13 @@ int main(void) {
     RUN_TEST(testLayerBackwardReadsInputRejectsUnknownType);
     RUN_TEST(testLayerForwardUpdatesStateTruthTable);
     RUN_TEST(testLayerForwardUpdatesStateRejectsUnknownType);
+    RUN_TEST(testLayerForwardCostTruthTable);
+    RUN_TEST(testLayerForwardCostRejectsUnknownType);
+    RUN_TEST(testLayerForwardCostExitsOnAnOverflow);
+    RUN_TEST(testLayerForwardCostExitsOnAConv1dOverflow);
+    RUN_TEST(testLayerForwardCostExitsOnAConv1dTransposedOverflow);
+    RUN_TEST(testLayerForwardCostExitsOnAConv1dFirstProductOverflow);
+    RUN_TEST(testLayerForwardCostExitsOnAConv1dTransposedFirstProductOverflow);
     RUN_TEST(testLayerForwardNonFloat32FieldIgnoresBackwardOnlyFields);
     RUN_TEST(testLayerForwardNonFloat32FieldGatesBatchNorm1dRunningBuffers);
     return UNITY_END();

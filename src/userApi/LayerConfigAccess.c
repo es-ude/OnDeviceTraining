@@ -1,5 +1,6 @@
 #define SOURCE_FILE "LAYER_CONFIG_ACCESS"
 
+#include <stdint.h>
 #include <stdlib.h>
 
 #include "AdaptiveAvgPool1d.h"
@@ -382,6 +383,62 @@ bool layerForwardUpdatesState(const layer_t *layer) {
         return false;
     default:
         PRINT_ERROR("layerForwardUpdatesState: unknown layerType_t %d", (int)layer->type);
+        exit(1);
+    }
+}
+
+/* A wrapped product would report a recompute as nearly free. */
+static size_t forwardCostProduct(const layer_t *layer, size_t a, size_t b) {
+    if (a != 0u && b > SIZE_MAX / a) {
+        PRINT_ERROR("layerForwardCost: the forward cost of layerType_t %d overflows size_t",
+                    (int)layer->type);
+        exit(1);
+    }
+    return a * b;
+}
+
+/* An unknown type exits rather than defaulting: a silent 0 would hide the
+ * cost of recomputing it. */
+size_t layerForwardCost(const layer_t *layer, size_t inElements, size_t outElements) {
+    switch (layer->type) {
+    /* Weights [outF, inF]: inF per output element. */
+    case LINEAR: {
+        const shape_t *w = layer->config->linear->weights->param->shape;
+        return forwardCostProduct(layer, outElements, w->dimensions[1]);
+    }
+    /* Weights [Cout, Cin/groups, K]: (Cin/groups) * K per output element. */
+    case CONV1D: {
+        const shape_t *w = layer->config->conv1d->weights->param->shape;
+        return forwardCostProduct(layer, forwardCostProduct(layer, outElements, w->dimensions[1]),
+                                  w->dimensions[2]);
+    }
+    /* Weights [Cin, Cout/groups, K]: each input element scatters into
+     * (Cout/groups) * K outputs. */
+    case CONV1D_TRANSPOSED: {
+        const shape_t *w = layer->config->conv1dTransposed->weights->param->shape;
+        return forwardCostProduct(layer, forwardCostProduct(layer, inElements, w->dimensions[1]),
+                                  w->dimensions[2]);
+    }
+    case MAXPOOL1D:
+        return forwardCostProduct(layer, outElements, layer->config->maxPool1d->kernel->size);
+    case AVGPOOL1D:
+        return forwardCostProduct(layer, outElements, layer->config->avgPool1d->kernel->size);
+    /* Its windows cover the input; where outputSize does not divide the
+     * length they overlap, which the class does not count. */
+    case ADAPTIVE_AVGPOOL1D:
+        return inElements;
+    case LAYERNORM:
+    case GROUPNORM:
+    case BATCHNORM1D:
+    case SOFTMAX:
+    case RELU:
+    case DROPOUT:
+    case QUANTIZATION:
+        return outElements;
+    case FLATTEN:
+        return 0u;
+    default:
+        PRINT_ERROR("layerForwardCost: unknown layerType_t %d", (int)layer->type);
         exit(1);
     }
 }

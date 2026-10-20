@@ -63,6 +63,16 @@ bool layerBackwardReadsInput(const layer_t *layer);
  * exits. */
 bool layerForwardUpdatesState(const layer_t *layer);
 
+/* Forward-cost class (#4, remat): an analytic multiply-accumulate count of one
+ * forward of the layer on inElements input and outElements output elements
+ * (the batch included), the same for every dtype. The remat plan sums it over
+ * the forwards and the recomputes of a training call (its report). A GEMM
+ * layer counts one per weight an output reads (Conv1dTransposed: an input), a
+ * pool its window per output (the adaptive pool its input once), a norm,
+ * Softmax, ReLU, Dropout or Quantization one per output, Flatten nothing. A
+ * proxy, not a cycle count. An unknown type or a count above SIZE_MAX exits. */
+size_t layerForwardCost(const layer_t *layer, size_t inElements, size_t outElements);
+
 /* Forward-only variant for stacked evaluation (#468): the first
  * non-FLOAT32 among forwardMath, outputQ and every parameter's (and
  * BatchNorm1d's running buffers') storage, or NULL. Backward arithmetic, the

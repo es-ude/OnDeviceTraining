@@ -3450,6 +3450,94 @@ void testRetainListPlanAcceptsExactlyMaxRangesAndExitsAboveThem(void) {
     freeLinearLayer(linear);
 }
 
+/* HAR with ACT 3, ACT 7 and ACT 12 kept: retain[3] = retain[7] = retain[12] =
+ * true, every other entry false (retain[0] is ignored). BACKWARD(10) reads the
+ * dropped ACT 10: the run 7..9 from the kept ACT 7. BACKWARD(6) reads the
+ * dropped ACT 6: the run 3..5 from the kept ACT 3, which also makes ACT 4
+ * present for BACKWARD(4). BACKWARD(1) reads the dropped ACT 1: REFORWARD(0)
+ * from the input. 7 REFORWARDs, 32 steps, 30 ranges (wire ids: ACT j = j,
+ * GRAD 12 = 13, GRAD l = 24 - l for l <= 10). */
+#define HAR_RETAIN_3_7_12_STEPS                                                                    \
+    {STEP_F(0),  STEP_F(1),  STEP_F(2),  STEP_F(3),  STEP_F(4),  STEP_F(5),   STEP_F(6),           \
+     STEP_F(7),  STEP_F(8),  STEP_F(9),  STEP_F(10), STEP_F(11), STEP_LF(12), STEP_LB(12),         \
+     STEP_RF(7), STEP_RF(8), STEP_RF(9), STEP_B(10), STEP_B(9),  STEP_B(8),   STEP_B(7),           \
+     STEP_RF(3), STEP_RF(4), STEP_RF(5), STEP_B(6),  STEP_B(5),  STEP_B(4),   STEP_B(3),           \
+     STEP_B(2),  STEP_RF(0), STEP_B(1),  STEP_B(0)}
+#define HAR_RETAIN_3_7_12_RANGES                                                                   \
+    {RANGE_OF(1, 0, 1),    RANGE_OF(2, 1, 2),    RANGE_OF(3, 2, 27),   RANGE_OF(4, 3, 4),          \
+     RANGE_OF(5, 4, 5),    RANGE_OF(6, 5, 6),    RANGE_OF(7, 6, 20),   RANGE_OF(8, 7, 8),          \
+     RANGE_OF(9, 8, 9),    RANGE_OF(10, 9, 10),  RANGE_OF(11, 10, 11), RANGE_OF(12, 11, 13),       \
+     RANGE_OF(13, 13, 17), RANGE_OF(8, 14, 15),  RANGE_OF(9, 15, 16),  RANGE_OF(10, 16, 17),       \
+     RANGE_OF(14, 17, 18), RANGE_OF(15, 18, 19), RANGE_OF(16, 19, 20), RANGE_OF(17, 20, 24),       \
+     RANGE_OF(4, 21, 26),  RANGE_OF(5, 22, 23),  RANGE_OF(6, 23, 24),  RANGE_OF(18, 24, 25),       \
+     RANGE_OF(19, 25, 26), RANGE_OF(20, 26, 27), RANGE_OF(21, 27, 28), RANGE_OF(22, 28, 30),       \
+     RANGE_OF(1, 29, 30),  RANGE_OF(23, 30, 31)}
+/* The same with ACT 12 dropped too (retain[3] = retain[7] = true, every other
+ * entry false): LOSS_BACKWARD reads ACT 12, so the run 7..11 sits between
+ * LOSS_FORWARD and LOSS_BACKWARD and already covers ACT 10 for BACKWARD(10):
+ * 9 REFORWARDs, 34 steps, 32 ranges. */
+#define HAR_RETAIN_3_7_STEPS                                                                       \
+    {STEP_F(0),  STEP_F(1),  STEP_F(2),   STEP_F(3),   STEP_F(4),   STEP_F(5),   STEP_F(6),        \
+     STEP_F(7),  STEP_F(8),  STEP_F(9),   STEP_F(10),  STEP_F(11),  STEP_LF(12), STEP_RF(7),       \
+     STEP_RF(8), STEP_RF(9), STEP_RF(10), STEP_RF(11), STEP_LB(12), STEP_B(10),  STEP_B(9),        \
+     STEP_B(8),  STEP_B(7),  STEP_RF(3),  STEP_RF(4),  STEP_RF(5),  STEP_B(6),   STEP_B(5),        \
+     STEP_B(4),  STEP_B(3),  STEP_B(2),   STEP_RF(0),  STEP_B(1),   STEP_B(0)}
+
+static size_t reforwardsOf(const rematProgram_t *p) {
+    size_t count = 0;
+    for (size_t s = 0; s < p->numSteps; s++) {
+        count += (p->steps[s].kind == REMAT_STEP_REFORWARD) ? 1u : 0u;
+    }
+    return count;
+}
+
+/* The peak is at REFORWARD(5), step 23: ACT 3 4096 + GRAD 7 8192 + ACT 4 8192
+ * + ACT 5 8192 + ACT 6 4096 = 32768 bytes; the same step without GRAD 7 is
+ * the activation peak, 24576 (LIVENESS: 49152 and 41216). Derived by hand
+ * from the steps above and by an independent scan model. */
+void testRetainListHarKeepingActs3And7And12(void) {
+    bool retain[HAR_N + 1] = {false};
+    retain[3] = retain[7] = retain[12] = true;
+    const rematStep_t steps[] = HAR_RETAIN_3_7_12_STEPS;
+    const rematRange_t ranges[] = HAR_RETAIN_3_7_12_RANGES;
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    rematPlanSpec_t spec = retainSpec(retain);
+    rematPlan_t *p = buildPlan(t, model, &spec);
+    assertSameSteps(steps, COUNT_OF(steps), &p->train);
+    assertSameRanges(ranges, COUNT_OF(ranges), &p->train);
+    TEST_ASSERT_EQUAL_size_t(7, reforwardsOf(&p->train));
+    TEST_ASSERT_EQUAL_size_t(32768, p->train.peakLiveBytes);
+    TEST_ASSERT_EQUAL_size_t(24576, rematProgramActPeakBytes(&p->train, t));
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+/* ACT 12 is 24 bytes and dies before the run 3..5, so the peak stays at
+ * REFORWARD(5), now step 25, over the same wires: 32768 and 24576. */
+void testRetainListHarKeepingActs3And7(void) {
+    bool retain[HAR_N + 1] = {false};
+    retain[3] = retain[7] = true;
+    const rematStep_t steps[] = HAR_RETAIN_3_7_STEPS;
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    rematPlanSpec_t spec = retainSpec(retain);
+    rematPlan_t *p = buildPlan(t, model, &spec);
+    assertSameSteps(steps, COUNT_OF(steps), &p->train);
+    TEST_ASSERT_EQUAL_size_t(32, p->train.numRanges);
+    TEST_ASSERT_EQUAL_size_t(9, reforwardsOf(&p->train));
+    TEST_ASSERT_EQUAL_size_t(32768, p->train.peakLiveBytes);
+    TEST_ASSERT_EQUAL_size_t(24576, rematProgramActPeakBytes(&p->train, t));
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
 /* rematPlanBuild runs the grammar on what it generates: a table record that
  * claims GRAD 8 is GRAD 7 (wire 16) yields a range that opens one step after
  * BACKWARD(8) writes it. */
@@ -3674,6 +3762,8 @@ int main(void) {
     RUN_TEST(testSequencePlanRecomputesAnUntrackedBatchNorm);
     RUN_TEST(testSequencePlanRecomputesAFrozenTrackedBatchNorm);
     RUN_TEST(testRetainListPlanOnTheMlpIsTheRecomputeProgram);
+    RUN_TEST(testRetainListHarKeepingActs3And7And12);
+    RUN_TEST(testRetainListHarKeepingActs3And7);
     RUN_TEST(testRetainListPlanEvalProgramIsTheStoreAllEvalProgram);
     RUN_TEST(testRetainListPlanKeepingEveryActIsTheLivenessPlanOnTheZoo);
     RUN_TEST(testRetainListPlanKeepingEveryActIsTheLivenessPlanOnRandomChains);

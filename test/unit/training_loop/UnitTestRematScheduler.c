@@ -624,6 +624,24 @@ void testReportArenaBytesHarFfdRegressionGuard(void) {
     TEST_ASSERT_EQUAL_size_t(49152, reportAfterInit(buildHarModel, &g_liveness).arenaBytes);
 }
 
+/* FFD heuristic, like the guards above: recorded from the implementation and
+ * cross-checked against an independent FFD of the first-fit rule on the same
+ * ranges. HAR with ACT 3, ACT 7 and ACT 12 kept (retain[3] = retain[7] =
+ * retain[12] = true, the rest false), and with ACT 12 dropped too: both place
+ * 36,864 B for their 32,768 B peak, a 4,096 B gap. */
+void testReportArenaBytesHarRetainFfdRegressionGuard(void) {
+    static const bool keep3And7And12[HAR_N + 1] = {[3] = true, [7] = true, [12] = true};
+    static const bool keep3And7[HAR_N + 1] = {[3] = true, [7] = true};
+    const bool *masks[2] = {keep3And7And12, keep3And7};
+    for (size_t m = 0; m < 2u; m++) {
+        const rematPlanSpec_t spec = {.policy = REMAT_PLAN_RETAIN_LIST, .retain = masks[m]};
+        rematReport_t r = reportAfterInit(buildHarModel, &spec);
+        TEST_ASSERT_EQUAL_size_t(36864, r.arenaBytes);
+        TEST_ASSERT_EQUAL_size_t(32768, r.peakLiveBytes);
+        TEST_ASSERT_EQUAL_size_t(24576, r.activationsPeakBytes);
+    }
+}
+
 static void buildFinetuneStage2Model(fixture_t *f) {
     buildHarFixture(f, true);
 }
@@ -2375,6 +2393,7 @@ int main(void) {
     RUN_TEST(testReportPadIsZeroOnHar);
     RUN_TEST(testReportPadOnTheF1ModelIsEleven);
     RUN_TEST(testReportArenaBytesHarFfdRegressionGuard);
+    RUN_TEST(testReportArenaBytesHarRetainFfdRegressionGuard);
     RUN_TEST(testReportArenaBytesMnistCnnAndFinetuneFfdRegressionGuards);
     RUN_TEST(testReportActivationsPeakOnHarOnBothRows);
     RUN_TEST(testArenaOffsetsAlignedOnRandomMixedChains);

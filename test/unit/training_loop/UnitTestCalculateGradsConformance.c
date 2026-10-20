@@ -20,6 +20,7 @@
 #include "LayerQuant.h"
 #include "Linear.h"
 #include "LossFunction.h"
+#include "MaxPool1d.h"
 #include "OdtHook.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
@@ -625,11 +626,18 @@ static void countingHook(void *ctx, odtEvent_t event) {
     cap->numEvents++;
 }
 
+/* "refwd" records per layer since the last reset: the recompute cells check
+ * that their plan recomputed. */
+static size_t g_refwds[ZOO_MAX_LAYERS];
+
 /* remat P4: the (idx, phase) sequence and every traced tensor's bytes, without
  * the "refwd" records a recompute plan adds (the reference has none). */
 static void recordingSink(void *ctx, size_t layerIdx, layerType_t layerType, const char *phase,
                           tensor_t *tensor) {
     if (strcmp(phase, "refwd") == 0) {
+        TEST_ASSERT_LESS_THAN_size_t_MESSAGE(ZOO_MAX_LAYERS, layerIdx,
+                                             "refwd record: layer index outside the zoo bound");
+        g_refwds[layerIdx]++;
         return;
     }
     blob_t *b = ctx;
@@ -2161,6 +2169,268 @@ void testATrackedBatchNormSwitchedOnAfterTheBuildExitsBeforeItsSecondForward(voi
     freeZoo(&f);
 }
 
+/* ---- the equivalence suite: recompute plans against the reference ---- */
+
+/* One fixture of the suite: its RETAIN_LIST mask (retain[j] for ACT j,
+ * written out per fixture), the layer whose forward draws (-1: none), whether
+ * the mask recomputes anything, and whether MLP3's recompute-twice step list
+ * fits its shape (3 layers under MSE, layer 0 trains, layers 1 and 2 read
+ * their input in backward). */
+typedef struct recomputeEntry {
+    const char *name;
+    void (*build)(zooFixture_t *f);
+    bool retain[ZOO_MAX_LAYERS + 1];
+    int drawing;
+    bool recomputes;
+    bool twice;
+} recomputeEntry_t;
+
+static void buildMlpWithATrackedBatchNorm(zooFixture_t *f) {
+    buildMlpWithBatchNorm(f, true, false);
+}
+
+/* Every mask keeps ACT n, unless the backward reads nothing a run could
+ * rebuild before LOSS_BACKWARD (ce-without-softmax keeps nothing); HAR keeps
+ * ACT 3, ACT 7 and ACT 12; the BFP Softmax keeps its input, so its output is
+ * rebuilt for LOSS_BACKWARD. The tracked BatchNorm1d keeps its own output:
+ * the run then recomputes only the Linear below it. Left out: single-layer
+ * cross entropy (no window: its own death test) and the zoo's BatchNorm1d at
+ * layer 0 (any run would recompute it: the death tests). */
+#define RECOMPUTE_ENTRIES 25
+static const recomputeEntry_t g_recompute[RECOMPUTE_ENTRIES] = {
+    {"mlp", buildMlp, {[3] = true}, -1, true, true},
+    {"har-cnn", buildHarCnn, {[3] = true, [7] = true, [12] = true}, -1, true, false},
+    {"softmax-mse", buildSoftmaxMse, {[2] = true}, -1, true, false},
+    {"frozen-layernorm", buildFrozenLayerNorm, {[4] = true}, -1, true, false},
+    {"frozen-groupnorm", buildFrozenGroupNorm, {[4] = true}, -1, true, false},
+    {"truncated-har", buildTruncatedHar, {[12] = true}, -1, true, false},
+    {"all-frozen", buildAllFrozen, {[2] = true}, -1, false, false},
+    {"dropout", buildDropout, {[3] = true}, 1, true, false},
+    {"sr-forward", buildSrForward, {[3] = true}, 0, true, false},
+    {"quant-sym", buildQuantSym, {[4] = true}, -1, true, false},
+    {"flatten-at-0", buildFlattenAt0, {[2] = true}, -1, true, false},
+    {"f1-bfp", buildF1Zoo, {[2] = true}, -1, true, false},
+    {"grouped-bfp", buildGroupedBfp, {[2] = true}, -1, true, false},
+    {"ce-last-linear-only", buildCeLastLinearOnly, {[4] = true}, -1, true, false},
+    {"ce-without-softmax", buildCeWithoutSoftmax, {false}, -1, true, false},
+    {"conv-transposed", buildConvTransposedTrainable, {[4] = true}, -1, true, false},
+    {"frozen-conv-transposed", buildFrozenConvTransposed, {[4] = true}, -1, true, false},
+    {"adaptive-avgpool", buildAdaptiveAvgPool, {[4] = true}, -1, true, false},
+    {"sr-quant", buildSrQuant, {[4] = true}, 1, true, false},
+    {"sym-sr-bias", buildSymSrBias, {[3] = true}, 0, true, false},
+    {"bfp-sr-softmax-mse", buildBfpSrSoftmaxMse, {[2] = true}, 2, true, false},
+    {"bfp-sr-dropout-bridge", buildBfpSrDropoutBridge, {[4] = true}, 1, true, false},
+    {"untracked-bn-mlp", buildMlpWithAnUntrackedBatchNorm, {[3] = true}, -1, true, true},
+    {"frozen-bn-mlp", buildMlpWithAFrozenBatchNorm, {[3] = true}, -1, true, true},
+    {"tracked-bn-mlp", buildMlpWithATrackedBatchNorm, {[2] = true, [3] = true}, -1, true, false},
+};
+
+static const rematStep_t g_mlp3RecomputeTwiceSteps[] = MLP3_RECOMPUTE_TWICE_STEPS;
+
+/* One recompute cell against the reference under one call key: values (BN
+ * running statistics included), four hook events, the trace without its
+ * "refwd" records, every byte returned, the planned peak observed; and the
+ * plan really recomputed: at least one REFORWARD, and one of the drawing
+ * layer, whose output the grammar guarantees is read. */
+static void assertRecomputeCell(const recomputeEntry_t *e, rematSchedulerType_t row,
+                                const rematPlanSpec_t *spec, const char *what) {
+    char name[96];
+    (void)snprintf(name, sizeof name, "%s/%s/%s", e->name, row == REMAT_ARENA ? "arena" : "heap",
+                   what);
+    const rngKey_t key = zooCallKey(0);
+    const matrixCell_t cell = {name, row, spec};
+    memset(g_refwds, 0, sizeof g_refwds);
+    cellRun_t c = captureCell(e->build, &cell, &key);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(spec->policy, c.report.policy, say(name, "the cell's plan"));
+    assertConforms(name);
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(c.report.peakLiveBytes, c.report.observedPeakLiveBytes,
+                                     say(name, "remat P8: the call ran on the cell's scheduler"));
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(
+        c.memBeforeInit, c.memAfterDeinit,
+        say(name, "remat P5: the deinit returns what the init reserved"));
+    size_t refwds = 0;
+    for (size_t l = 0; l < ZOO_MAX_LAYERS; l++) {
+        refwds += g_refwds[l];
+    }
+    TEST_ASSERT_EQUAL_INT_MESSAGE(e->recomputes, refwds > 0, say(name, "the plan recomputes"));
+    if (e->drawing >= 0) {
+        TEST_ASSERT_TRUE_MESSAGE(g_refwds[e->drawing] >= 1,
+                                 say(name, "the drawing layer is recomputed"));
+    }
+}
+
+static void assertEntryMatchesTheReference(const recomputeEntry_t *e, rematSchedulerType_t row) {
+    const rematPlanSpec_t retain = {.policy = REMAT_PLAN_RETAIN_LIST, .retain = e->retain};
+    assertRecomputeCell(e, row, &retain, "retain");
+    if (e->twice) {
+        const rematPlanSpec_t twice = {.policy = REMAT_PLAN_SEQUENCE,
+                                       .sequence = g_mlp3RecomputeTwiceSteps,
+                                       .sequenceLen = COUNT_OF(g_mlp3RecomputeTwiceSteps)};
+        assertRecomputeCell(e, row, &twice, "twice");
+    }
+}
+
+static void assertTheSuiteMatchesTheReference(rematSchedulerType_t row) {
+    for (size_t k = 0; k < RECOMPUTE_ENTRIES; k++) {
+        assertEntryMatchesTheReference(&g_recompute[k], row);
+    }
+}
+
+void testRematGradsBitIdenticalToStoreAllOnArena(void) {
+    assertTheSuiteMatchesTheReference(REMAT_ARENA);
+}
+
+void testRematGradsBitIdenticalToStoreAllOnHeap(void) {
+    assertTheSuiteMatchesTheReference(REMAT_HEAP);
+}
+
+/* Each stochastic-rounding fixture on its own, so a key change in the
+ * recompute turns every one of them red, not only the first in the table. */
+static void assertDrawingEntryMatchesTheReference(const char *name, rematSchedulerType_t row) {
+    for (size_t k = 0; k < RECOMPUTE_ENTRIES; k++) {
+        if (strcmp(g_recompute[k].name, name) == 0) {
+            TEST_ASSERT_TRUE(g_recompute[k].drawing >= 0);
+            assertEntryMatchesTheReference(&g_recompute[k], row);
+            return;
+        }
+    }
+    TEST_FAIL_MESSAGE("no such fixture in g_recompute");
+}
+
+void testRecomputingTheDropoutMatchesTheReferenceOnArena(void) {
+    assertDrawingEntryMatchesTheReference("dropout", REMAT_ARENA);
+}
+
+void testRecomputingTheDropoutMatchesTheReferenceOnHeap(void) {
+    assertDrawingEntryMatchesTheReference("dropout", REMAT_HEAP);
+}
+
+void testRecomputingTheSrForwardMatchesTheReferenceOnArena(void) {
+    assertDrawingEntryMatchesTheReference("sr-forward", REMAT_ARENA);
+}
+
+void testRecomputingTheSrForwardMatchesTheReferenceOnHeap(void) {
+    assertDrawingEntryMatchesTheReference("sr-forward", REMAT_HEAP);
+}
+
+void testRecomputingTheSrQuantMatchesTheReferenceOnArena(void) {
+    assertDrawingEntryMatchesTheReference("sr-quant", REMAT_ARENA);
+}
+
+void testRecomputingTheSrQuantMatchesTheReferenceOnHeap(void) {
+    assertDrawingEntryMatchesTheReference("sr-quant", REMAT_HEAP);
+}
+
+void testRecomputingTheSymSrBiasMatchesTheReferenceOnArena(void) {
+    assertDrawingEntryMatchesTheReference("sym-sr-bias", REMAT_ARENA);
+}
+
+void testRecomputingTheSymSrBiasMatchesTheReferenceOnHeap(void) {
+    assertDrawingEntryMatchesTheReference("sym-sr-bias", REMAT_HEAP);
+}
+
+void testRecomputingTheBfpSrSoftmaxMatchesTheReferenceOnArena(void) {
+    assertDrawingEntryMatchesTheReference("bfp-sr-softmax-mse", REMAT_ARENA);
+}
+
+void testRecomputingTheBfpSrSoftmaxMatchesTheReferenceOnHeap(void) {
+    assertDrawingEntryMatchesTheReference("bfp-sr-softmax-mse", REMAT_HEAP);
+}
+
+void testRecomputingTheBfpSrDropoutBridgeMatchesTheReferenceOnArena(void) {
+    assertDrawingEntryMatchesTheReference("bfp-sr-dropout-bridge", REMAT_ARENA);
+}
+
+void testRecomputingTheBfpSrDropoutBridgeMatchesTheReferenceOnHeap(void) {
+    assertDrawingEntryMatchesTheReference("bfp-sr-dropout-bridge", REMAT_HEAP);
+}
+
+/* ---- a recomputed output is the first forward's bytes ---- */
+
+/* Per layer, what its first forward left: the output with its shape and
+ * dynamic state (SYM scale, BFP exponents), and the layer state no wire
+ * holds: Dropout's mask and MaxPool's argmax. */
+#define FORWARD_SNAPSHOT_MAX_BYTES 20480u
+typedef struct forwardSnapshot {
+    size_t used;
+    uint8_t bytes[FORWARD_SNAPSHOT_MAX_BYTES];
+} forwardSnapshot_t;
+static forwardSnapshot_t g_firstForward[ZOO_MAX_LAYERS];
+static blob_t g_forwardScratch;
+
+typedef struct refwdCheck {
+    zooFixture_t *f;
+    size_t compared;
+    size_t dropoutMasks;
+    size_t maxPoolArgmaxes;
+} refwdCheck_t;
+
+static void captureForward(refwdCheck_t *chk, size_t l, tensor_t *out) {
+    g_forwardScratch.used = 0;
+    captureTensor(&g_forwardScratch, out);
+    layer_t *layer = chk->f->model[l];
+    if (layer->type == DROPOUT) {
+        captureTensor(&g_forwardScratch, layer->config->dropout->mask);
+    } else if (layer->type == MAXPOOL1D) {
+        captureTensor(&g_forwardScratch, layer->config->maxPool1d->argmaxIndices);
+    }
+}
+
+static void refwdCheckSink(void *ctx, size_t layerIdx, layerType_t layerType, const char *phase,
+                           tensor_t *tensor) {
+    refwdCheck_t *chk = ctx;
+    bool first = strcmp(phase, "fwd") == 0;
+    if (!first && strcmp(phase, "refwd") != 0) {
+        return;
+    }
+    TEST_ASSERT_TRUE(layerIdx < ZOO_MAX_LAYERS);
+    captureForward(chk, layerIdx, tensor);
+    forwardSnapshot_t *snap = &g_firstForward[layerIdx];
+    if (first) {
+        TEST_ASSERT_TRUE_MESSAGE(g_forwardScratch.used <= FORWARD_SNAPSHOT_MAX_BYTES,
+                                 "raise FORWARD_SNAPSHOT_MAX_BYTES");
+        snap->used = g_forwardScratch.used;
+        memcpy(snap->bytes, g_forwardScratch.bytes, snap->used);
+        return;
+    }
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(snap->used, g_forwardScratch.used,
+                                     "refwd: captured byte count");
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(snap->bytes, g_forwardScratch.bytes, snap->used,
+                                     "refwd: output, its SYM scale or BFP exponents, or the "
+                                     "Dropout mask or MaxPool argmax differ from the forward's");
+    chk->compared++;
+    chk->dropoutMasks += (layerType == DROPOUT) ? 1u : 0u;
+    chk->maxPoolArgmaxes += (layerType == MAXPOOL1D) ? 1u : 0u;
+}
+
+/* Every recompute of the suite, on both rows: each "refwd" record and the
+ * layer state after it equal what the same layer's "fwd" left. */
+void testRefwdWireBitIdenticalToFwd(void) {
+    const rngKey_t key = zooCallKey(0);
+    refwdCheck_t chk = {.f = NULL, .compared = 0, .dropoutMasks = 0, .maxPoolArgmaxes = 0};
+    for (size_t k = 0; k < RECOMPUTE_ENTRIES; k++) {
+        const recomputeEntry_t *e = &g_recompute[k];
+        const rematPlanSpec_t spec = {.policy = REMAT_PLAN_RETAIN_LIST, .retain = e->retain};
+        for (int r = 0; r < 2; r++) {
+            zooFixture_t f;
+            e->build(&f);
+            chk.f = &f;
+            size_t before = chk.compared;
+            rematScheduler_t s;
+            const matrixCell_t cell = {e->name, r == 0 ? REMAT_ARENA : REMAT_HEAP, &spec};
+            initCell(&s, &cell, &f);
+            freeTrainingStats(tracedGrads(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y,
+                                          refwdCheckSink, &chk,
+                                          &(trainingCall_t){.remat = &s, .key = &key}));
+            rematSchedulerDeinit(&s);
+            freeZoo(&f);
+            TEST_ASSERT_EQUAL_INT_MESSAGE(e->recomputes, chk.compared > before, e->name);
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(chk.dropoutMasks > 0, "no Dropout mask was compared");
+    TEST_ASSERT_TRUE_MESSAGE(chk.maxPoolArgmaxes > 0, "no MaxPool argmax was compared");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testNullPathMatchesTheReferenceOnTheMlp);
@@ -2274,5 +2544,20 @@ int main(void) {
     RUN_TEST(testRecomputingAFrozenBatchNormMatchesTheReferenceOnHeap);
     RUN_TEST(testRecomputePlanTraceOrderOnTheMlp);
     RUN_TEST(testATrackedBatchNormSwitchedOnAfterTheBuildExitsBeforeItsSecondForward);
+    RUN_TEST(testRematGradsBitIdenticalToStoreAllOnArena);
+    RUN_TEST(testRematGradsBitIdenticalToStoreAllOnHeap);
+    RUN_TEST(testRecomputingTheDropoutMatchesTheReferenceOnArena);
+    RUN_TEST(testRecomputingTheDropoutMatchesTheReferenceOnHeap);
+    RUN_TEST(testRecomputingTheSrForwardMatchesTheReferenceOnArena);
+    RUN_TEST(testRecomputingTheSrForwardMatchesTheReferenceOnHeap);
+    RUN_TEST(testRecomputingTheSrQuantMatchesTheReferenceOnArena);
+    RUN_TEST(testRecomputingTheSrQuantMatchesTheReferenceOnHeap);
+    RUN_TEST(testRecomputingTheSymSrBiasMatchesTheReferenceOnArena);
+    RUN_TEST(testRecomputingTheSymSrBiasMatchesTheReferenceOnHeap);
+    RUN_TEST(testRecomputingTheBfpSrSoftmaxMatchesTheReferenceOnArena);
+    RUN_TEST(testRecomputingTheBfpSrSoftmaxMatchesTheReferenceOnHeap);
+    RUN_TEST(testRecomputingTheBfpSrDropoutBridgeMatchesTheReferenceOnArena);
+    RUN_TEST(testRecomputingTheBfpSrDropoutBridgeMatchesTheReferenceOnHeap);
+    RUN_TEST(testRefwdWireBitIdenticalToFwd);
     return UNITY_END();
 }

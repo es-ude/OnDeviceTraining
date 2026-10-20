@@ -42,7 +42,8 @@ static bool endsBefore(const rematRange_t *ranges, uint16_t a, uint16_t b) {
 }
 
 /* In place, no scratch: O(R^2) worst case, within the O(R^2 log R) of the
- * ARENA placement that follows it at init. */
+ * ARENA placement that follows it at init. R is numWires - 1 for STORE_ALL
+ * and LIVENESS, and at most ODT_REMAT_MAX_RANGES for a SEQUENCE plan. */
 static void sortEndOrder(rematProgram_t *p) {
     for (size_t i = 0; i < p->numRanges; i++) {
         p->endOrder[i] = (uint16_t)i;
@@ -165,7 +166,8 @@ static void grammarEndExit(size_t numSteps, const char *rule) {
     exit(1);
 }
 
-/* Linear in the ranges on purpose: independent of the walk and of endOrder. */
+/* Linear in the ranges on purpose (O(S * R) over a program): independent of
+ * the walk and of endOrder. */
 static void requireCovered(const rematProgram_t *p, size_t s, uint16_t wire, const char *role) {
     if (wire == 0) {
         return; /* ACT 0 is borrowed: always present */
@@ -451,6 +453,17 @@ static void requireASequenceWithinTheBound(const rematPlanSpec_t *spec, size_t n
     }
 }
 
+/* A SEQUENCE plan opens a range per write, up to one per step: the cap
+ * bounds its quadratic plan work before anything is reserved. STORE_ALL and
+ * LIVENESS keep numWires - 1 ranges and are not capped here. */
+static void requireRangesWithinTheCap(size_t numRanges) {
+    if (numRanges > ODT_REMAT_MAX_RANGES) {
+        PRINT_ERROR("rematPlanBuild: plan has %zu ranges, above ODT_REMAT_MAX_RANGES (%u)",
+                    numRanges, (unsigned)ODT_REMAT_MAX_RANGES);
+        exit(1);
+    }
+}
+
 bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **model,
                     const rematPlanSpec_t *spec) {
     *out = NULL;
@@ -472,6 +485,7 @@ bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **mode
         requireASequenceWithinTheBound(spec, t->modelSize);
         numSteps = spec->sequenceLen;
         numRanges = rematScanRangeCount(t, spec->sequence, numSteps);
+        requireRangesWithinTheCap(numRanges);
     }
     size_t evalSteps = t->modelSize + 1u;
     size_t evalRanges = t->modelSize;

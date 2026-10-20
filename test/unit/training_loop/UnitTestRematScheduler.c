@@ -879,6 +879,133 @@ void testArenaInitAcceptsExactlyMaxRanges(void) {
     freeReluLayer(relu);
 }
 
+/* ---- the range cap of the new plan kinds (HEAP and ARENA) ---- */
+
+/* The ReLU chain's STORE_ALL steps, written out: FORWARD 0..n-1, LOSS_FORWARD.
+ * As a SEQUENCE they open one range per FORWARD, n in all. */
+static size_t fillChainSequence(rematStep_t *steps, size_t n) {
+    for (size_t l = 0; l < n; l++) {
+        steps[l] = (rematStep_t){.kind = REMAT_STEP_FORWARD, .layer = (uint16_t)l};
+    }
+    steps[n] = (rematStep_t){.kind = REMAT_STEP_LOSS_FORWARD, .layer = (uint16_t)n};
+    return n + 1u;
+}
+
+static void heapInitAndExitWithTheVerdict(layer_t **model, size_t n, const tensor_t *x,
+                                          const rematPlanSpec_t *spec, size_t numRanges) {
+    rematScheduler_t s;
+    bool ok = rematHeapInit(&s, model, n, defaultLossConfig(MSE), x, spec) &&
+              s.plan->train.numRanges == numRanges;
+    rematSchedulerDeinit(&s);
+    _exit(ok ? 0 : 2);
+}
+
+static void heapInitWithSpecExpectingAnExit(layer_t **model, size_t n, const tensor_t *x,
+                                            const rematPlanSpec_t *spec) {
+    rematScheduler_t s;
+    g_memBeforeExit = memProfileCurrentBytes();
+    (void)atexit(printReservedBeforeExit);
+    (void)rematHeapInit(&s, model, n, defaultLossConfig(MSE), x, spec);
+}
+
+static void arenaInitWithSpecExpectingAnExit(layer_t **model, size_t n, const tensor_t *x,
+                                             const rematPlanSpec_t *spec) {
+    rematScheduler_t s;
+    (void)rematArenaInit(&s, model, n, defaultLossConfig(MSE), x, spec);
+}
+
+/* HEAP admits a STORE_ALL or LIVENESS plan of any size: the cap covers only
+ * the plan kinds that can hold more ranges than wires. */
+void testHeapInitAcceptsAStoreAllPlanAboveMaxRanges(void) {
+    layer_t *relu = makeRelu(&g_floatQ);
+    layer_t *model[ODT_REMAT_MAX_RANGES + 1u];
+    fillReluChain(model, ODT_REMAT_MAX_RANGES + 1u, relu);
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 1}, 2, &g_floatQ);
+    ASSERT_EXITS_WITH(0, heapInitAndExitWithTheVerdict(model, ODT_REMAT_MAX_RANGES + 1u, x, NULL,
+                                                       ODT_REMAT_MAX_RANGES + 1u));
+    freeReluLayer(relu);
+}
+
+/* The same chain's steps as a SEQUENCE: 1025 ranges exit in rematPlanBuild,
+ * before the plan block exists (only the table is live at the exit). */
+void testHeapInitExitsOnASequenceAboveMaxRangesBeforeThePlanBlock(void) {
+    layer_t *relu = makeRelu(&g_floatQ);
+    layer_t *model[ODT_REMAT_MAX_RANGES + 1u];
+    fillReluChain(model, ODT_REMAT_MAX_RANGES + 1u, relu);
+    rematStep_t steps[ODT_REMAT_MAX_RANGES + 2u];
+    rematPlanSpec_t spec = {.policy = REMAT_PLAN_SEQUENCE,
+                            .sequence = steps,
+                            .sequenceLen = fillChainSequence(steps, ODT_REMAT_MAX_RANGES + 1u)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 1}, 2, &g_floatQ);
+    char message[96];
+    (void)snprintf(message, sizeof message,
+                   "rematPlanBuild: plan has %u ranges, above ODT_REMAT_MAX_RANGES (%u)",
+                   (unsigned)(ODT_REMAT_MAX_RANGES + 1u), (unsigned)ODT_REMAT_MAX_RANGES);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, message, heapInitWithSpecExpectingAnExit(model, ODT_REMAT_MAX_RANGES + 1u, x, &spec));
+    char reserved[64];
+    (void)snprintf(reserved, sizeof reserved, "reservedBeforeExit=%zu\n",
+                   tableBlockBytes(model, ODT_REMAT_MAX_RANGES + 1u, MSE, x));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, reserved, heapInitWithSpecExpectingAnExit(model, ODT_REMAT_MAX_RANGES + 1u, x, &spec));
+    freeReluLayer(relu);
+}
+
+void testHeapInitAcceptsASequenceOfExactlyMaxRanges(void) {
+    layer_t *relu = makeRelu(&g_floatQ);
+    layer_t *model[ODT_REMAT_MAX_RANGES];
+    fillReluChain(model, ODT_REMAT_MAX_RANGES, relu);
+    rematStep_t steps[ODT_REMAT_MAX_RANGES + 1u];
+    rematPlanSpec_t spec = {.policy = REMAT_PLAN_SEQUENCE,
+                            .sequence = steps,
+                            .sequenceLen = fillChainSequence(steps, ODT_REMAT_MAX_RANGES)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 1}, 2, &g_floatQ);
+    ASSERT_EXITS_WITH(0, heapInitAndExitWithTheVerdict(model, ODT_REMAT_MAX_RANGES, x, &spec,
+                                                       ODT_REMAT_MAX_RANGES));
+    freeReluLayer(relu);
+}
+
+/* The minimum-memory schedule of a chain of 44 trainable Linear(1->1) under
+ * MSE: after LOSS_BACKWARD, BACKWARD(l) for l = 43 down to 0, each preceded
+ * by the REFORWARD run 0..l-1 that regenerates its input from ACT 0. Writes:
+ * 44 FORWARDs, LOSS_BACKWARD, the 43 BACKWARDs above deepest, and
+ * 43 * 44 / 2 = 946 REFORWARDs: 1034 ranges over 88 slab wires, so ARENA's
+ * pre-check (88 wires) passes and the plan's own cap decides. */
+#define MIN_MEMORY_CHAIN_N 44u
+static size_t fillMinMemorySequence(rematStep_t *steps, size_t n) {
+    size_t s = fillChainSequence(steps, n);
+    steps[s++] = (rematStep_t){.kind = REMAT_STEP_LOSS_BACKWARD, .layer = (uint16_t)n};
+    for (size_t l = n; l-- > 0;) {
+        for (size_t k = 0; k < l; k++) {
+            steps[s++] = (rematStep_t){.kind = REMAT_STEP_REFORWARD, .layer = (uint16_t)k};
+        }
+        steps[s++] = (rematStep_t){.kind = REMAT_STEP_BACKWARD, .layer = (uint16_t)l};
+    }
+    return s;
+}
+
+void testArenaInitExitsOnASequenceAboveMaxRangesInThePlanBuild(void) {
+    layer_t *model[MIN_MEMORY_CHAIN_N];
+    for (size_t i = 0; i < MIN_MEMORY_CHAIN_N; i++) {
+        model[i] = makeLinear(1, 1, false, i);
+    }
+    rematStep_t steps[1036];
+    rematPlanSpec_t spec = {.policy = REMAT_PLAN_SEQUENCE,
+                            .sequence = steps,
+                            .sequenceLen = fillMinMemorySequence(steps, MIN_MEMORY_CHAIN_N)};
+    TEST_ASSERT_EQUAL_size_t(1036, spec.sequenceLen);
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 1}, 2, &g_floatQ);
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "rematPlanBuild: plan has 1034 ranges, above ODT_REMAT_MAX_RANGES "
+                             "(1024)",
+                             arenaInitWithSpecExpectingAnExit(model, MIN_MEMORY_CHAIN_N, x, &spec));
+    freeModel(model, MIN_MEMORY_CHAIN_N);
+}
+
 /* ACT 1 holds 4 * (2^62 - 1) = SIZE_MAX - 3 bytes; rounding it up to 8 wraps. */
 void testArenaInitExitsOnAPlacedSizeOverflowBeforeAnyRowReservation(void) {
     layer_t *model[1] = {makeRelu(&g_floatQ)};
@@ -2226,6 +2353,10 @@ int main(void) {
 #endif
     RUN_TEST(testArenaInitExitsAboveMaxRangesBeforeThePlanIsBuilt);
     RUN_TEST(testArenaInitAcceptsExactlyMaxRanges);
+    RUN_TEST(testHeapInitAcceptsAStoreAllPlanAboveMaxRanges);
+    RUN_TEST(testHeapInitExitsOnASequenceAboveMaxRangesBeforeThePlanBlock);
+    RUN_TEST(testHeapInitAcceptsASequenceOfExactlyMaxRanges);
+    RUN_TEST(testArenaInitExitsOnASequenceAboveMaxRangesInThePlanBuild);
     RUN_TEST(testArenaInitExitsOnAPlacedSizeOverflowBeforeAnyRowReservation);
     RUN_TEST(testArenaInitExitsOnAnArenaSumOverflowBeforeAnyRowReservation);
     RUN_TEST(testArenaNextHandsOutThePlanStepsInOrder);

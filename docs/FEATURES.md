@@ -763,7 +763,8 @@ checkpointing, limitations, literature).
   `REMAT_PLAN_STORE_ALL`/`REMAT_PLAN_LIVENESS`, or `REMAT_PLAN_SEQUENCE`: a caller's
   own TRAIN step list, length-checked before anything is reserved, copied into the
   plan, its ranges derived by one scan of the steps, and validated by the plan
-  grammar), a step scheduler with two storage
+  grammar; a SEQUENCE plan with more than `ODT_REMAT_MAX_RANGES` ranges, default
+  1024, exits at build under either storage scheme), a step scheduler with two storage
   schemes behind one interface (`RematScheduler.h`): `REMAT_ARENA` (one resident
   block, first-fit-decreasing placement) and `REMAT_HEAP` (one block per buffer),
   and a validating checker (`RematCheck.h`). Training calls take a caller's

@@ -104,8 +104,8 @@ static size_t arenaPeakPlacedBytes(const rematWireTable_t *t, const rematProgram
 
 bool arenaPlaceFirstFitDecreasing(const rematWireTable_t *t, const rematProgram_t *p,
                                   size_t *offsets, size_t *bytes, size_t *peakPlacedBytes) {
-    /* numRanges < REMAT_NONE (the table's wire-id guard): the uint16_t ids and
-     * this product fit. */
+    /* numRanges <= ODT_REMAT_MAX_RANGES < REMAT_NONE (rematArenaInit checks
+     * the cap first): the uint16_t ids and this product fit. */
     uint16_t *byOffset = reserveMemory(p->numRanges * sizeof(uint16_t));
     if (byOffset == NULL) {
         return false;
@@ -207,9 +207,10 @@ bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t
     if (!rematWireTableInit(&s->wires, model, n, loss, inputLike)) {
         return false;
     }
-    /* Early bound, before the plan block exists:
-     * in PR1 every slab wire gets exactly one range, so the plan would hold
-     * numWires - 1 ranges. The post-build check below stays authoritative. */
+    /* Early bound, before the plan block exists: every TRAIN plan writes each
+     * slab wire at least once, so it holds at least numWires - 1 ranges
+     * (exactly that many under STORE_ALL and LIVENESS). The post-build check
+     * below stays authoritative. */
     if (s->wires->numWires - 1u > ODT_REMAT_MAX_RANGES) {
         PRINT_ERROR("remat[arena]: model needs %zu ranges, above ODT_REMAT_MAX_RANGES (%u)",
                     s->wires->numWires - 1u, (unsigned)ODT_REMAT_MAX_RANGES);
@@ -221,9 +222,9 @@ bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t
         return false;
     }
     const rematProgram_t *p = &s->plan->train;
-    /* Authoritative: PR6 plans (RETAIN_LIST, SEQUENCE) hold more ranges than
-     * wires. Unreachable in PR1 behind the pre-check above (no dedicated
-     * test). */
+    /* Authoritative: the placement below relies on it. No input reaches it
+     * today, so it has no dedicated test: STORE_ALL and LIVENESS stop at the
+     * pre-check above, and rematPlanBuild already caps a SEQUENCE plan. */
     if (p->numRanges > ODT_REMAT_MAX_RANGES) {
         PRINT_ERROR("remat[arena]: plan has %zu ranges, above ODT_REMAT_MAX_RANGES (%u)",
                     p->numRanges, (unsigned)ODT_REMAT_MAX_RANGES);

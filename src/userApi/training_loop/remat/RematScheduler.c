@@ -120,6 +120,10 @@ void rematSchedulerDeinit(rematScheduler_t *s) {
     *s = (rematScheduler_t){0};
 }
 
+/* walk.open needs no check: grammar rule 6 keeps every range inside the
+ * stream and the ranges begin-sorted, so the walk opens all of them by the
+ * last step, and a range that closed without opening would already have
+ * exited in rematWireRelease (its wire is not bound). */
 void rematRequireWalkComplete(const rematScheduler_t *s, const char *row) {
     const rematProgram_t *p = rematPlanProgram(s->plan, s->mode);
     if (s->walk.step != p->numSteps || s->walk.close != p->numRanges) {

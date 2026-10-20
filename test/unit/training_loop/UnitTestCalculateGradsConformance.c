@@ -463,6 +463,46 @@ static void buildSymSrBias(zooFixture_t *f) {
     mseLabel(f, 2);
 }
 
+/* A native BFP Softmax under MSE that rounds stochastically twice in its
+ * forward: the exp's shifts (BFP_SHIFT_SR, its SOFTMAX_SHIFT stream) and the
+ * pack into its BFP output (SR_HALF_AWAY, the OUT_WRITE epilogue). Its
+ * backward recomputes the softmax from its input with the forward's shift
+ * draws. One row of 8: the BFP Softmax is single-row. */
+static void buildBfpSrSoftmaxMse(zooFixture_t *f) {
+    beginZoo(f);
+    quantization_t *in = keepTemplate(f, quantizationInitBfp(16, 8, HALF_AWAY));
+    quantization_t *out = keepTemplate(f, quantizationInitBfp(16, 8, SR_HALF_AWAY));
+    f->model[0] = makeLinear(4, 8, false, 0);
+    f->model[1] = makeQuant(in, &g_floatQ);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, out);
+    f->model[2] = softmaxLayerInit(&lq);
+    softmaxSetBfpExpShiftRounding(f->model[2], BFP_SHIFT_SR);
+    f->n = 3;
+    f->x = makeFloatTensor((size_t[]){1, 4}, 2, 1.0f);
+    mseLabel(f, 8);
+}
+
+/* Dropout on BFP wires (the ARITH_BFP arm): its forward draws the mask and
+ * re-packs the masked, scaled values into a BFP output that rounds
+ * stochastically (its DROPOUT_BRIDGE stream). p = 0.25 scales by 4/3, so the
+ * re-pack is inexact and its draws matter (p = 0.5 scales by 2, exactly).
+ * Both wires share one block grid (8 elements in groups of 4); a Quantization
+ * layer hands FLOAT32 to the trained Linear behind it. */
+static void buildBfpSrDropoutBridge(zooFixture_t *f) {
+    beginZoo(f);
+    quantization_t *in = keepTemplate(f, quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 4));
+    quantization_t *out = keepTemplate(f, quantizationInitBfpGrouped(8, 8, SR_HALF_AWAY, 2, 4));
+    f->mask = makeBoolMask(8);
+    f->model[0] = makeQuant(in, &g_floatQ);
+    f->model[1] = dropoutLayerInit(0.25f, f->mask, out, out);
+    f->model[2] = makeQuant(&g_floatQ, &g_floatQ);
+    f->model[3] = makeLinear(8, 2, false, 3);
+    f->n = 4;
+    f->x = makeFloatTensor((size_t[]){1, 8}, 2, 1.0f);
+    mseLabel(f, 2);
+}
+
 /* ---- capturing one call (remat P1, P3-P5, P9) ---- */
 
 /* Static, never reserved, so a capture cannot move the memory-profile
@@ -1536,6 +1576,30 @@ void testSymSrBiasMatchesTheReferenceOnHeap(void) {
     assertRowMatchesTheReference(buildSymSrBias, REMAT_HEAP);
 }
 
+void testBfpSrSoftmaxMseConforms(void) {
+    assertNullPathMatchesTheReference(buildBfpSrSoftmaxMse);
+}
+
+void testBfpSrSoftmaxMseMatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildBfpSrSoftmaxMse, REMAT_ARENA);
+}
+
+void testBfpSrSoftmaxMseMatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildBfpSrSoftmaxMse, REMAT_HEAP);
+}
+
+void testBfpSrDropoutBridgeConforms(void) {
+    assertNullPathMatchesTheReference(buildBfpSrDropoutBridge);
+}
+
+void testBfpSrDropoutBridgeMatchesTheReferenceOnArena(void) {
+    assertRowMatchesTheReference(buildBfpSrDropoutBridge, REMAT_ARENA);
+}
+
+void testBfpSrDropoutBridgeMatchesTheReferenceOnHeap(void) {
+    assertRowMatchesTheReference(buildBfpSrDropoutBridge, REMAT_HEAP);
+}
+
 /* ---- one persistent instance across calls (remat P6, P9) ---- */
 
 typedef void (*fixtureEdit_t)(zooFixture_t *f);
@@ -2187,6 +2251,12 @@ int main(void) {
     RUN_TEST(testSymSrBiasConforms);
     RUN_TEST(testSymSrBiasMatchesTheReferenceOnArena);
     RUN_TEST(testSymSrBiasMatchesTheReferenceOnHeap);
+    RUN_TEST(testBfpSrSoftmaxMseConforms);
+    RUN_TEST(testBfpSrSoftmaxMseMatchesTheReferenceOnArena);
+    RUN_TEST(testBfpSrSoftmaxMseMatchesTheReferenceOnHeap);
+    RUN_TEST(testBfpSrDropoutBridgeConforms);
+    RUN_TEST(testBfpSrDropoutBridgeMatchesTheReferenceOnArena);
+    RUN_TEST(testBfpSrDropoutBridgeMatchesTheReferenceOnHeap);
     RUN_TEST(testTwoCallsAcrossAWidthEditMatchTheReference);
     RUN_TEST(testTwoCallsAcrossARoundingEditMatchTheReference);
     RUN_TEST(testTwoCallsAcrossAnInputRegroupMatchTheReference);

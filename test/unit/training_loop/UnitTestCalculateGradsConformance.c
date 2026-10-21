@@ -1351,7 +1351,23 @@ typedef struct cellRun {
     rematReport_t report;
     size_t memBeforeInit;
     size_t memAfterDeinit;
+    uint32_t members;
 } cellRun_t;
+
+/* The wires the cell's plan marks as in-place members, one bit per wire id;
+ * 0 for a plan without marks. */
+static uint32_t inPlaceMembers(const rematScheduler_t *s) {
+    const uint8_t *marks = s->plan->inPlace;
+    if (marks == NULL) {
+        return 0;
+    }
+    TEST_ASSERT_TRUE_MESSAGE(s->wires->numWires <= 32u, "a fixture of at most 32 wires");
+    uint32_t bits = 0;
+    for (size_t w = 0; w < s->wires->numWires; w++) {
+        bits |= (marks[w] != 0u) ? (1u << w) : 0u;
+    }
+    return bits;
+}
 
 /* A fresh fixture per cell, so every cell starts from the state the oracle saw.
  * remat P5's call bracket starts after the init, whose blocks the caller owns, and
@@ -1367,6 +1383,7 @@ static cellRun_t captureCell(void (*build)(zooFixture_t *), const matrixCell_t *
     initCell(&s, cell, &f);
     captureRun(RUN_DRIVER, &f, &(trainingCall_t){.remat = &s, .key = key}, &g_driver);
     c.report = reportOf(&s);
+    c.members = inPlaceMembers(&s);
     rematSchedulerDeinit(&s);
     c.memAfterDeinit = memProfileCurrentBytes();
     freeZoo(&f);
@@ -1982,11 +1999,12 @@ void testEveryZooInitReservesWhatItsReportAccountsFor(void) {
  * Each eval call leaves the parameter grads and BatchNorm running stats as the
  * NULL path's eval does; it is compared right there, because the training
  * captures reset both. */
-static void assertTrainEvalTrainMatches(rematSchedulerType_t row) {
+static void assertTrainEvalTrainMatches(const matrixCell_t *cells, size_t numCells,
+                                        rematSchedulerType_t row) {
     const zooEntry_t fixtures[2] = {{"har-cnn", buildHarCnn}, {"batchnorm", buildBatchNorm}};
     for (size_t z = 0; z < 2u; z++) {
-        for (size_t k = 0; k < MATRIX_CELLS; k++) {
-            const matrixCell_t *cell = &g_cells[k];
+        for (size_t k = 0; k < numCells; k++) {
+            const matrixCell_t *cell = &cells[k];
             if (cell->row != row) {
                 continue;
             }
@@ -2018,11 +2036,11 @@ static void assertTrainEvalTrainMatches(rematSchedulerType_t row) {
 }
 
 void testTrainEvalTrainOnOneArenaMatchesTheReference(void) {
-    assertTrainEvalTrainMatches(REMAT_ARENA);
+    assertTrainEvalTrainMatches(g_cells, MATRIX_CELLS, REMAT_ARENA);
 }
 
 void testTrainEvalTrainOnOneHeapMatchesTheReference(void) {
-    assertTrainEvalTrainMatches(REMAT_HEAP);
+    assertTrainEvalTrainMatches(g_cells, MATRIX_CELLS, REMAT_HEAP);
 }
 
 /* ---- recompute: a REFORWARD runs FORWARD's arm under FORWARD's key ---- */
@@ -2463,6 +2481,163 @@ void testAnInPlaceMlpMatchesTheReferenceOnBothRows(void) {
     }
 }
 
+/* Linear(4->4) -> ReLU -> Dropout -> Linear(4->2) under MSE: a chain of two
+ * members. Wires ACT 0..4 = 0..4, the seed GRAD 4 = 5, the root GRAD 3 = 6,
+ * Dropout's dx GRAD 2 = 7 and the ReLU's GRAD 1 = 8, 16 B each. */
+static void buildReluDropoutChain(zooFixture_t *f) {
+    beginZoo(f);
+    f->mask = makeBoolMask(4);
+    f->model[0] = makeLinear(4, 4, false, 0);
+    f->model[1] = makeRelu(&g_floatQ);
+    f->model[2] = dropoutLayerInit(0.5f, f->mask, &g_floatQ, &g_floatQ);
+    f->model[3] = makeLinear(4, 2, false, 3);
+    f->n = 4;
+    f->x = makeFloatTensor((size_t[]){1, 4}, 2, 1.0f);
+    mseLabel(f, 2);
+}
+
+/* Linear(4->4) -> ReLU -> Softmax under CE: the ReLU at n - 2 runs the top
+ * BACKWARD, so its dx GRAD 1 (wire 5) writes into the loss seed GRAD 3 (wire
+ * 4), a root whose header the table derives from ACT 3. */
+static void buildCeReluSoftmax(zooFixture_t *f) {
+    beginZoo(f);
+    f->model[0] = makeLinear(4, 4, false, 0);
+    f->model[1] = makeRelu(&g_floatQ);
+    f->model[2] = makeSoftmax();
+    f->n = 3;
+    f->loss = defaultLossConfig(CROSS_ENTROPY);
+    f->x = makeFloatTensor((size_t[]){1, 4}, 2, 1.0f);
+    f->y = makeOneHot(4, 1);
+}
+
+/* Linear(4->4, the deepest, SYM weight grad over a 12-bit ACT 1) -> ReLU
+ * (12-bit wires) -> Linear(4->2) whose dx is stored at 14 bits, under MSE,
+ * B = 1. In place, the ReLU's 12-bit GRAD 1 (wire 6) writes into the bytes of
+ * the 14-bit GRAD 2 (wire 5): equal bytes make the pair, the widths do not.
+ * The widths cross a known gap: the ReLU SYM backward copies codes without
+ * narrowing them to its 12-bit propLoss, so GRAD 1 carries codes wider than
+ * 12 bits, which the operand guard of the weight-grad GEMM below cannot see
+ * (it reads the declared width; with K = B = 1 no int32 sum can overflow).
+ * So a config shared across the pair shows: GRAD 1 then declares 14 bits and
+ * the guard stops the call. Should the ReLU narrow later, the in-place run
+ * and the reference narrow alike, and a shared config still declares 14. */
+static void buildSymReluUnderA14BitDx(zooFixture_t *f) {
+    beginZoo(f);
+    quantization_t *sym12 = keepTemplate(f, quantizationInitSymInt32WithBits(HALF_AWAY, 12));
+    quantization_t *sym14 = keepTemplate(f, quantizationInitSymInt32WithBits(HALF_AWAY, 14));
+    f->model[0] = makeLinear(4, 4, false, 0);
+    f->model[0]->config->linear->outputQ = sym12;
+    f->model[0]->config->linear->weightGradMath =
+        (arithmetic_t){.type = ARITH_SYM_INT32, .roundingMode = HALF_AWAY};
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, sym12);
+    f->model[1] = reluLayerInit(&lq);
+    f->model[2] = makeLinear(4, 2, false, 2);
+    f->model[2]->config->linear->propLossQ = sym14;
+    f->n = 3;
+    f->x = makeFloatTensor((size_t[]){1, 4}, 2, 1.0f);
+    mseLabel(f, 2);
+}
+
+/* One in-place fixture: the ACTs its RETAIN_LIST plan keeps, whether MLP3's
+ * recompute step list fits it, and the wires its plan marks as members, one
+ * bit per wire id. */
+typedef struct inPlaceEntry {
+    const char *name;
+    void (*build)(zooFixture_t *f);
+    bool retain[ZOO_MAX_LAYERS + 1];
+    bool sequence;
+    uint32_t members;
+} inPlaceEntry_t;
+
+#define WIRE_BIT(w) (1u << (w))
+/* HAR's members are Flatten's dx and the three ReLUs' (wires 15, 17, 20,
+ * 23); its RETAIN_LIST plan recomputes inside the chains' root ranges. */
+#define IN_PLACE_FLOAT_ENTRIES 4
+static const inPlaceEntry_t g_inPlaceFloat[IN_PLACE_FLOAT_ENTRIES] = {
+    {"mlp", buildMlp, {[3] = true}, true, WIRE_BIT(6)},
+    {"relu-dropout", buildReluDropoutChain, {[4] = true}, false, WIRE_BIT(7) | WIRE_BIT(8)},
+    {"har-cnn",
+     buildHarCnn,
+     {[3] = true, [7] = true, [12] = true},
+     false,
+     WIRE_BIT(15) | WIRE_BIT(17) | WIRE_BIT(20) | WIRE_BIT(23)},
+    {"ce-relu-softmax", buildCeReluSoftmax, {[3] = true}, false, WIRE_BIT(5)},
+};
+static const inPlaceEntry_t g_inPlaceSym = {
+    "sym-12-under-14", buildSymReluUnderA14BitDx, {[3] = true}, true, WIRE_BIT(6)};
+
+/* Every plan kind with inPlaceDx on one fixture and row: STORE_ALL,
+ * LIVENESS, RETAIN_LIST and, where it fits, MLP3's SEQUENCE. Each call
+ * equals the HEAP + STORE_ALL reference under the same key (remat P1,
+ * P3-P5) and observes its planned peak (P8), and its plan marks exactly the
+ * fixture's members, so no cell passes without sharing bytes. */
+static void assertInPlaceEntryMatchesTheReference(const inPlaceEntry_t *e,
+                                                  rematSchedulerType_t row) {
+    const rematPlanSpec_t specs[4] = {
+        {.policy = REMAT_PLAN_STORE_ALL, .inPlaceDx = true},
+        {.policy = REMAT_PLAN_LIVENESS, .inPlaceDx = true},
+        {.policy = REMAT_PLAN_RETAIN_LIST, .retain = e->retain, .inPlaceDx = true},
+        {.policy = REMAT_PLAN_SEQUENCE,
+         .sequence = g_mlp3RecomputeSteps,
+         .sequenceLen = COUNT_OF(g_mlp3RecomputeSteps),
+         .inPlaceDx = true},
+    };
+    static const char *const kinds[4] = {"store-all+inplace", "liveness+inplace", "retain+inplace",
+                                         "sequence+inplace"};
+    const rngKey_t key = zooCallKey(0);
+    for (size_t p = 0; p < (e->sequence ? 4u : 3u); p++) {
+        char name[96];
+        (void)snprintf(name, sizeof name, "%s/%s/%s", e->name,
+                       row == REMAT_ARENA ? "arena" : "heap", kinds[p]);
+        const matrixCell_t cell = {name, row, &specs[p]};
+        cellRun_t c = captureCell(e->build, &cell, &key);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(specs[p].policy, c.report.policy,
+                                      say(name, "the cell's plan"));
+        TEST_ASSERT_EQUAL_HEX32_MESSAGE(e->members, c.members,
+                                        say(name, "the plan's in-place members"));
+        assertConforms(name);
+        TEST_ASSERT_TRUE_MESSAGE(c.report.peakLiveBytes > 0, say(name, "remat P8: a planned peak"));
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(c.report.peakLiveBytes, c.report.observedPeakLiveBytes,
+                                         say(name, "remat P8: the planned peak"));
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(
+            c.memBeforeInit, c.memAfterDeinit,
+            say(name, "remat P5: the deinit returns what the init reserved"));
+    }
+}
+
+static void assertTheFloatEntriesMatchTheReference(rematSchedulerType_t row) {
+    for (size_t k = 0; k < IN_PLACE_FLOAT_ENTRIES; k++) {
+        assertInPlaceEntryMatchesTheReference(&g_inPlaceFloat[k], row);
+    }
+}
+
+void testInPlaceDxGradsBitIdenticalFloat32OnArena(void) {
+    assertTheFloatEntriesMatchTheReference(REMAT_ARENA);
+}
+
+void testInPlaceDxGradsBitIdenticalFloat32OnHeap(void) {
+    assertTheFloatEntriesMatchTheReference(REMAT_HEAP);
+}
+
+/* An evaluation call between two training calls on one in-place scheduler:
+ * it binds no member, and the next training call shares again. */
+void testTrainEvalTrainInPlaceOnOneArenaMatchesTheReference(void) {
+    assertTrainEvalTrainMatches(g_inPlaceCells, COUNT_OF(g_inPlaceCells), REMAT_ARENA);
+}
+
+void testTrainEvalTrainInPlaceOnOneHeapMatchesTheReference(void) {
+    assertTrainEvalTrainMatches(g_inPlaceCells, COUNT_OF(g_inPlaceCells), REMAT_HEAP);
+}
+
+void testInPlaceDxGradsBitIdenticalSymInt32OnArena(void) {
+    assertInPlaceEntryMatchesTheReference(&g_inPlaceSym, REMAT_ARENA);
+}
+
+void testInPlaceDxGradsBitIdenticalSymInt32OnHeap(void) {
+    assertInPlaceEntryMatchesTheReference(&g_inPlaceSym, REMAT_HEAP);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testNullPathMatchesTheReferenceOnTheMlp);
@@ -2592,5 +2767,11 @@ int main(void) {
     RUN_TEST(testRecomputingTheBfpSrDropoutBridgeMatchesTheReferenceOnHeap);
     RUN_TEST(testRefwdWireBitIdenticalToFwd);
     RUN_TEST(testAnInPlaceMlpMatchesTheReferenceOnBothRows);
+    RUN_TEST(testInPlaceDxGradsBitIdenticalFloat32OnArena);
+    RUN_TEST(testInPlaceDxGradsBitIdenticalFloat32OnHeap);
+    RUN_TEST(testTrainEvalTrainInPlaceOnOneArenaMatchesTheReference);
+    RUN_TEST(testTrainEvalTrainInPlaceOnOneHeapMatchesTheReference);
+    RUN_TEST(testInPlaceDxGradsBitIdenticalSymInt32OnArena);
+    RUN_TEST(testInPlaceDxGradsBitIdenticalSymInt32OnHeap);
     return UNITY_END();
 }

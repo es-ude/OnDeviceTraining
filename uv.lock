@@ -3,18 +3,6 @@ revision = 3
 requires-python = ">=3.12"
 
 [[package]]
-name = "click"
-version = "8.3.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/57/75/31212c6bf2503fdf920d87fee5d7a86a2e3bcf444984126f13d8e4016804/click-8.3.2.tar.gz", hash = "sha256:14162b8b3b3550a7d479eafa77dfd3c38d9dc8951f6f69c78913a8f9a7540fd5", size = 302856, upload-time = "2026-04-03T19:14:45.118Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/e4/20/71885d8b97d4f3dde17b1fdb92dbd4908b00541c5a3379787137285f602e/click-8.3.2-py3-none-any.whl", hash = "sha256:1924d2c27c5653561cd2cae4548d1406039cb79b858b747cfea24924bbc1616d", size = 108379, upload-time = "2026-04-03T19:14:43.505Z" },
-]
-
-[[package]]
 name = "cocotb"
 version = "2.0.1"
 source = { registry = "https://pypi.org/simple" }
@@ -192,10 +180,9 @@ wheels = [
 
 [[package]]
 name = "elasticai-creator"
-version = "0.67.1.dev53+g9178a2c39"
-source = { git = "https://github.com/es-ude/elastic-ai.creator.git?rev=training-implementation-provider#9178a2c396964577d994a050048776a79bc02a90" }
+version = "0.68.0"
+source = { git = "https://github.com/es-ude/elastic-ai.creator.git?rev=feat%2Favgpool1d-handlers#0e03e163657a6f269418afecad1e1e002d721518" }
 dependencies = [
-    { name = "click" },
     { name = "cocotb" },
     { name = "numpy" },
     { name = "pytest" },
@@ -742,7 +729,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "elasticai-creator", git = "https://github.com/es-ude/elastic-ai.creator.git?rev=training-implementation-provider" },
+    { name = "elasticai-creator", git = "https://github.com/es-ude/elastic-ai.creator.git?rev=feat%2Favgpool1d-handlers" },
     { name = "matplotlib", specifier = ">=3.10.9" },
     { name = "torch", specifier = ">=2.11.0" },
     { name = "torchaudio", specifier = ">=2.11.0" },

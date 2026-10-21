@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "ODT Python pipeline: providers, ir2c, resource estimation for on-device training"
 requires-python = ">=3.12"
 dependencies = [
-    "elasticai-creator @ git+https://github.com/es-ude/elastic-ai.creator.git@training-implementation-provider",
+    "elasticai-creator @ git+https://github.com/es-ude/elastic-ai.creator.git@feat/avgpool1d-handlers",
     "matplotlib>=3.10.9",
     "torch>=2.11.0",
     "torchaudio>=2.11.0",

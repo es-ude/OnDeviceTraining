@@ -1,9 +1,4 @@
-"""Smoke test: verify package structure and creator dependency are accessible."""
-
-from elasticai.creator.experimental.ir.implementation_provider.implementation_provider import (
-    TrainingImplementationProvider,
-    apply_training_provider,
-)
+"""Smoke test: verify package structure and the creator IR reducer hook are accessible."""
 
 
 def test_odt_package_importable():
@@ -14,12 +9,7 @@ def test_odt_package_importable():
     assert resource_estimator is not None
 
 
-def test_creator_protocol_accessible():
-    assert hasattr(TrainingImplementationProvider, "model_attributes")
-    assert hasattr(TrainingImplementationProvider, "training_function")
-    assert hasattr(TrainingImplementationProvider, "optimizer")
-    assert hasattr(TrainingImplementationProvider, "loss")
+def test_creator_execution_order_graph_reducer_accessible():
+    from elasticai.creator.ir import ExecutionOrderGraphReducer
 
-
-def test_apply_training_provider_callable():
-    assert callable(apply_training_provider)
+    assert callable(ExecutionOrderGraphReducer)

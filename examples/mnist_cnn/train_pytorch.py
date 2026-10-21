@@ -34,9 +34,14 @@ MOMENTUM = 0.9
 NUM_CLASSES = 10
 
 
+def to_model_input(x: np.ndarray) -> torch.Tensor:
+    """Images [N,28,28] (or flat [N,784]) -> float32 [N,1,784] single-channel 1D signals."""
+    return torch.from_numpy(np.ascontiguousarray(x, dtype=np.float32)).reshape(x.shape[0], 1, 28 * 28)
+
+
 class MnistDataset(torch.utils.data.Dataset):
     def __init__(self, x: np.ndarray, y: np.ndarray) -> None:
-        self.x = torch.from_numpy(x.astype(np.float32))
+        self.x = to_model_input(x)
         self.y = torch.from_numpy(y.astype(np.int64))
 
     def __len__(self) -> int:
@@ -52,15 +57,20 @@ class MnistCnn(nn.Module):
         self.conv1 = nn.Conv1d(1, 8, kernel_size=3, padding=1)   # SAME (K odd, stride 1)
         self.conv2 = nn.Conv1d(8, 16, kernel_size=3, padding=1)
         self.fc = nn.Linear(16, NUM_CLASSES)
+        # parameter-free layers are modules so the model traces to module calls only
+        self.relu1 = nn.ReLU()
+        self.pool1 = nn.MaxPool1d(2)           # 784 -> 392
+        self.relu2 = nn.ReLU()
+        self.pool2 = nn.MaxPool1d(2)           # 392 -> 196
+        self.gap = nn.AvgPool1d(196)           # global avg pool -> [B,16,1]
+        self.flatten = nn.Flatten(start_dim=1)  # -> [B,16]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.view(x.size(0), 1, 28 * 28)     # [B,1,28,28] -> [B,1,784]
-        x = F.relu(self.conv1(x))
-        x = F.max_pool1d(x, 2)                # 784 -> 392
-        x = F.relu(self.conv2(x))
-        x = F.max_pool1d(x, 2)                # 392 -> 196
-        x = F.avg_pool1d(x, kernel_size=196)  # global avg pool -> [B,16,1]
-        x = x.flatten(start_dim=1)            # -> [B,16]
+        # x: [B,1,784], see to_model_input
+        x = self.pool1(self.relu1(self.conv1(x)))
+        x = self.pool2(self.relu2(self.conv2(x)))
+        x = self.gap(x)
+        x = self.flatten(x)
         return self.fc(x)
 
 
@@ -69,7 +79,7 @@ def evaluate(model: nn.Module, x: np.ndarray, y: np.ndarray, batch: int) -> tupl
     total_loss, total_correct, total = 0.0, 0, 0
     with torch.no_grad():
         for i in range(0, len(x), batch):
-            xb = torch.from_numpy(x[i : i + batch].astype(np.float32))
+            xb = to_model_input(x[i : i + batch])
             yb = torch.from_numpy(y[i : i + batch].astype(np.int64))
             logits = model(xb)
             loss = F.cross_entropy(logits, yb, reduction="sum")
@@ -131,7 +141,7 @@ def main() -> None:
 
     model.eval()
     with torch.no_grad():
-        preds = model(torch.from_numpy(test_x.astype(np.float32))).argmax(dim=1).numpy().astype(np.int32)
+        preds = model(to_model_input(test_x)).argmax(dim=1).numpy().astype(np.int32)
     np.save(OUTPUTS / "pytorch_predictions.npy", preds)
     print(f"FINAL test_loss={test_loss:.4f} test_acc={test_acc:.4f}", flush=True)
 

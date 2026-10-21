@@ -70,15 +70,20 @@ class HarModel(nn.Module):
         self.conv2 = nn.Conv1d(16, 32, kernel_size=5, padding=2)
         self.conv3 = nn.Conv1d(32, 64, kernel_size=3, padding=1)
         self.fc = nn.Linear(64, NUM_CLASSES)
+        # parameter-free layers are modules so the model traces to module calls only
+        self.relu1 = nn.ReLU()
+        self.pool1 = nn.MaxPool1d(2)
+        self.relu2 = nn.ReLU()
+        self.pool2 = nn.MaxPool1d(2)
+        self.relu3 = nn.ReLU()
+        self.gap = nn.AvgPool1d(32)  # global avg pool over remaining length
+        self.flatten = nn.Flatten(start_dim=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.relu(self.conv1(x))
-        x = F.max_pool1d(x, 2)
-        x = F.relu(self.conv2(x))
-        x = F.max_pool1d(x, 2)
-        x = F.relu(self.conv3(x))
-        x = F.avg_pool1d(x, kernel_size=32)  # global avg pool over remaining length
-        x = x.flatten(start_dim=1)
+        x = self.pool1(self.relu1(self.conv1(x)))
+        x = self.pool2(self.relu2(self.conv2(x)))
+        x = self.gap(self.relu3(self.conv3(x)))
+        x = self.flatten(x)
         return self.fc(x)  # logits, CrossEntropyLoss applies log_softmax internally
 
 

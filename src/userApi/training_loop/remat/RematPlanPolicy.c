@@ -63,15 +63,49 @@ static size_t actLastReader(const rematWireTable_t *t, layer_t **model, size_t j
     return last;
 }
 
+/* Wire w is an in-place member: the dx GRAD l of a ReLU, Dropout or Flatten
+ * (only deepest < l <= top have one; the seed GRAD n never is), and it and
+ * wire w - 1 have one dtype, FLOAT32 or SYM_INT32, and equal bytes. Wire
+ * numbering puts the gradient BACKWARD(l) reads at w - 1; the grammar checks
+ * that on the stored marks. Equal bytes is the test that matters to the rows
+ * and the checker; qMaxBits is not compared, since each wire keeps its own
+ * qConfig. Reads only the table, so the plan can count before it reserves. */
+static bool inPlaceMember(const rematWireTable_t *t, bool inPlaceDx, size_t w) {
+    const rematWire_t *out = &t->wires[w];
+    if (!inPlaceDx || out->kind != REMAT_WIRE_GRAD || out->index == t->modelSize) {
+        return false;
+    }
+    uint8_t type = t->layerType[out->index];
+    if (type != RELU && type != DROPOUT && type != FLATTEN) {
+        return false;
+    }
+    const rematWire_t *in = &t->wires[w - 1u];
+    return out->dtype == in->dtype && (out->dtype == FLOAT32 || out->dtype == SYM_INT32) &&
+           out->bytes == in->bytes;
+}
+
+size_t rematFillInPlaceMarks(const rematWireTable_t *t, uint8_t *inPlace) {
+    size_t members = 0;
+    for (size_t w = 0; w < t->numWires; w++) {
+        bool member = inPlaceMember(t, true, w);
+        if (inPlace != NULL) {
+            inPlace[w] = member ? 1u : 0u;
+        }
+        members += member ? 1u : 0u;
+    }
+    return members;
+}
+
 /* STORE_ALL reproduces the pre-remat driver's lifetimes: every ACT lives to
  * the end of the call, the seed from LOSS_BACKWARD to the first BACKWARD, and
  * each dx wire from the BACKWARD that writes it to the one that reads it.
  * LIVENESS, the plan of a NULL scheduler (remat D15), differs only in where
  * an ACT range ends. */
 void rematFillTrainRanges(rematPlanPolicy_t policy, const rematWireTable_t *t, layer_t **model,
-                          size_t numSteps, rematRange_t *ranges) {
+                          size_t numSteps, bool inPlaceDx, rematRange_t *ranges) {
     size_t n = t->modelSize;
     size_t lossBackward = n + 1u;
+    size_t k = 0;
     for (size_t id = 1; id < t->numWires; id++) {
         const rematWire_t *w = &t->wires[id];
         size_t begin;
@@ -87,7 +121,14 @@ void rematFillTrainRanges(rematPlanPolicy_t policy, const rematWireTable_t *t, l
             begin = rematBackwardStep(t, w->index);
             end = rematBackwardStep(t, w->index - 1u);
         }
-        ranges[id - 1] =
+        if (inPlaceMember(t, inPlaceDx, id)) {
+            /* Members follow their root in id order, and each one's reader
+             * runs after the one before it: the chain's range is the last one
+             * written, and it ends here. */
+            ranges[k - 1u].end = (uint16_t)end;
+            continue;
+        }
+        ranges[k++] =
             (rematRange_t){.wire = (uint16_t)id, .begin = (uint16_t)begin, .end = (uint16_t)end};
     }
 }
@@ -98,9 +139,10 @@ static bool backwardRuns(const rematWireTable_t *t, size_t l) {
 }
 
 /* The wire a step writes as the scan sees it: REMAT_NONE for LOSS_FORWARD,
- * the grads-only BACKWARD at deepest, and every step the grammar rejects
- * later, so the scan never names a wire the table does not have. */
-static uint16_t scanWrite(const rematWireTable_t *t, const rematStep_t *st) {
+ * the grads-only BACKWARD at deepest, an in-place member (its root's range
+ * holds it), and every step the grammar rejects later, so the scan never
+ * names a wire the table does not have. */
+static uint16_t scanWrite(const rematWireTable_t *t, bool inPlaceDx, const rematStep_t *st) {
     size_t n = t->modelSize;
     size_t l = st->layer;
     switch (st->kind) {
@@ -111,17 +153,30 @@ static uint16_t scanWrite(const rematWireTable_t *t, const rematStep_t *st) {
         return REMAT_NONE;
     case REMAT_STEP_LOSS_BACKWARD:
         return t->hasBackward ? rematGradId(t, n) : REMAT_NONE;
-    case REMAT_STEP_BACKWARD:
-        return (backwardRuns(t, l) && l > t->deepest) ? rematGradId(t, l) : REMAT_NONE;
+    case REMAT_STEP_BACKWARD: {
+        if (!backwardRuns(t, l) || l <= t->deepest) {
+            return REMAT_NONE;
+        }
+        uint16_t w = rematGradId(t, l);
+        return inPlaceMember(t, inPlaceDx, w) ? REMAT_NONE : w;
+    }
     default:
         return REMAT_NONE; /* an unknown kind: the grammar exits on it after the scan */
     }
 }
 
+static uint16_t scanRootOf(const rematWireTable_t *t, bool inPlaceDx, uint16_t w) {
+    while (inPlaceMember(t, inPlaceDx, w)) {
+        w--;
+    }
+    return w;
+}
+
 /* The wires a step reads as the scan sees it (ACT 0 included: it has no
- * range, so the scan extends nothing for it); none for a rejected step. */
-static size_t scanReads(const rematWireTable_t *t, layer_t **model, const rematStep_t *st,
-                        uint16_t reads[2]) {
+ * range, so the scan extends nothing for it), an in-place member as its
+ * chain's root; none for a rejected step. */
+static size_t scanReads(const rematWireTable_t *t, layer_t **model, bool inPlaceDx,
+                        const rematStep_t *st, uint16_t reads[2]) {
     size_t n = t->modelSize;
     size_t l = st->layer;
     switch (st->kind) {
@@ -141,7 +196,9 @@ static size_t scanReads(const rematWireTable_t *t, layer_t **model, const rematS
             return 0u;
         }
         size_t k = 0;
-        reads[k++] = ((ptrdiff_t)l == t->backwardTop) ? rematGradId(t, n) : rematGradId(t, l + 1u);
+        uint16_t gradIn =
+            ((ptrdiff_t)l == t->backwardTop) ? rematGradId(t, n) : rematGradId(t, l + 1u);
+        reads[k++] = scanRootOf(t, inPlaceDx, gradIn);
         if (layerBackwardReadsInput(model[l])) {
             reads[k++] = rematActId(t, l);
         }
@@ -152,10 +209,11 @@ static size_t scanReads(const rematWireTable_t *t, layer_t **model, const rematS
     }
 }
 
-size_t rematScanRangeCount(const rematWireTable_t *t, const rematStep_t *steps, size_t numSteps) {
+size_t rematScanRangeCount(const rematWireTable_t *t, const rematStep_t *steps, size_t numSteps,
+                           bool inPlaceDx) {
     size_t count = 0;
     for (size_t s = 0; s < numSteps; s++) {
-        if (scanWrite(t, &steps[s]) != REMAT_NONE) {
+        if (scanWrite(t, inPlaceDx, &steps[s]) != REMAT_NONE) {
             count++;
         }
     }
@@ -167,11 +225,11 @@ size_t rematScanRangeCount(const rematWireTable_t *t, const rematStep_t *steps, 
  * A read before any write of its wire extends nothing (grammar rule 4 rejects
  * it). Each step writes at most one wire, so begins strictly increase. */
 void rematScanRanges(const rematWireTable_t *t, layer_t **model, const rematStep_t *steps,
-                     size_t numSteps, rematRange_t *ranges) {
+                     size_t numSteps, bool inPlaceDx, rematRange_t *ranges) {
     size_t opened = 0;
     for (size_t s = 0; s < numSteps; s++) {
         uint16_t reads[2];
-        size_t numReads = scanReads(t, model, &steps[s], reads);
+        size_t numReads = scanReads(t, model, inPlaceDx, &steps[s], reads);
         for (size_t i = 0; i < numReads; i++) {
             for (size_t r = opened; r > 0; r--) {
                 if (ranges[r - 1u].wire == reads[i]) {
@@ -180,7 +238,7 @@ void rematScanRanges(const rematWireTable_t *t, layer_t **model, const rematStep
                 }
             }
         }
-        uint16_t write = scanWrite(t, &steps[s]);
+        uint16_t write = scanWrite(t, inPlaceDx, &steps[s]);
         if (write != REMAT_NONE) {
             ranges[opened++] =
                 (rematRange_t){.wire = write, .begin = (uint16_t)s, .end = (uint16_t)s};
@@ -193,6 +251,7 @@ typedef struct retainEmitter {
     rematStep_t *steps;
     size_t numSteps;
     size_t numWrites;
+    bool inPlaceDx;
 } retainEmitter_t;
 
 static void emitStep(const rematWireTable_t *t, retainEmitter_t *e, rematStepKind_t kind,
@@ -202,7 +261,7 @@ static void emitStep(const rematWireTable_t *t, retainEmitter_t *e, rematStepKin
         e->steps[e->numSteps] = st;
     }
     e->numSteps++;
-    if (scanWrite(t, &st) != REMAT_NONE) {
+    if (scanWrite(t, e->inPlaceDx, &st) != REMAT_NONE) {
         e->numWrites++;
     }
 }
@@ -226,9 +285,9 @@ static void recomputeIfDropped(const rematWireTable_t *t, const bool *retain, re
 }
 
 size_t rematFillRetainSteps(const rematWireTable_t *t, layer_t **model, const bool *retain,
-                            rematStep_t *steps, size_t *numWrites) {
+                            bool inPlaceDx, rematStep_t *steps, size_t *numWrites) {
     size_t n = t->modelSize;
-    retainEmitter_t e = {.steps = steps, .numSteps = 0, .numWrites = 0};
+    retainEmitter_t e = {.steps = steps, .numSteps = 0, .numWrites = 0, .inPlaceDx = inPlaceDx};
     for (size_t l = 0; l < n; l++) {
         emitStep(t, &e, REMAT_STEP_FORWARD, l);
     }

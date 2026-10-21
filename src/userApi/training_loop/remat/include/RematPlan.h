@@ -36,7 +36,7 @@
  * REMAT_PLAN_SEQUENCE or REMAT_PLAN_RETAIN_LIST plan above it exits in
  * rematPlanBuild before its block is reserved, under every row, and ARENA
  * checks every plan against it at init. HEAP admits STORE_ALL and LIVENESS
- * (numWires - 1 ranges) of any size. It bounds the quadratic plan work of the
+ * (at most numWires - 1 ranges) of any size. It bounds the quadratic plan work of the
  * two capped kinds: the end-order sort O(R^2), grammar rule 4's coverage scan
  * O(S * R) and ARENA's placement check O(R^2). A plan fact, not an OOM. Host
  * test builds may raise it; its value belongs in the plan dump, like
@@ -166,8 +166,9 @@ size_t rematWireBytes(const rematWireTable_t *t, uint16_t w);
 /* One inclusive lifetime of a wire: begin = the step that writes it, end = its
  * last reader (policy-dependent). STORE_ALL and LIVENESS give each slab wire
  * one range; SEQUENCE and RETAIN_LIST plans open one range per write, so a
- * recomputed wire has several, which never overlap. No placement (ARENA
- * offsets are private to the row). */
+ * recomputed wire has several, which never overlap. An in-place member
+ * (rematPlan_t.inPlace) has none: its chain root's range runs on to the last
+ * read of the chain. No placement (ARENA offsets are private to the row). */
 typedef struct rematRange {
     uint16_t wire, begin, end;
 } rematRange_t;
@@ -195,6 +196,13 @@ typedef struct rematPlan {
     size_t forwardCost;
     size_t recomputeCost;
     size_t blockBytes; /* the one plan block, struct included */
+    /* [numWires] inside the block when the spec set inPlaceDx, else NULL.
+     * inPlace[w] == 1: wire w is an in-place member, which its layer's
+     * BACKWARD writes into the bytes of wire w - 1, the gradient that step
+     * reads. The first unmarked wire below a member is its chain's root, and
+     * the root's range is the chain's only one. TRAIN only: an EVAL program
+     * has no backward step. */
+    uint8_t *inPlace;
 } rematPlan_t;
 
 /* Generates the TRAIN and the EVAL program for the table's built model in ONE
@@ -229,8 +237,10 @@ size_t rematWalkClosing(const rematProgram_t *p, rematWalk_t *w);
  * count, admits a REFORWARD only inside the backward window and never for a
  * layer whose training forward updates its state (layerForwardUpdatesState),
  * makes every write open a range of its own, and keeps the ranges
- * begin-sorted and inside the stream. */
+ * begin-sorted and inside the stream. inPlace is the plan's marks (NULL:
+ * none): a member's reads and its write count against its chain root's
+ * range, and its write lands in that range although the root opened it. */
 void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t, layer_t **model,
-                              rematMode_t mode);
+                              rematMode_t mode, const uint8_t *inPlace);
 
 #endif // ODT_REMAT_PLAN_H

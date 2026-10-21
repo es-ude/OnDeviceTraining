@@ -59,12 +59,20 @@ typedef enum rematPlanPolicy {
  * reads is recomputed just before that step from the nearest ACT below it
  * that is present; the build exits where no REFORWARD may run (a loss
  * backward and no backward layer step) and where that would recompute a
- * BatchNorm1d whose training forward updates its running statistics. */
+ * BatchNorm1d whose training forward updates its running statistics.
+ * inPlaceDx, under every policy, lets the backward of a ReLU, Dropout or
+ * Flatten write its dx into the bytes of the gradient it reads when both
+ * wires have one dtype, FLOAT32 or SYM_INT32, and equal bytes (BFP wires
+ * never share bytes); the plan then keeps one range per chain of such steps.
+ * It is a request, not a promise: a step that does not qualify keeps its own
+ * bytes, and a model without such a step gets the steps and ranges it gets
+ * without inPlaceDx. */
 typedef struct rematPlanSpec {
     rematPlanPolicy_t policy;
     const rematStep_t *sequence;
     size_t sequenceLen;
     const bool *retain;
+    bool inPlaceDx;
 } rematPlanSpec_t;
 
 /* Which of the plan's programs a call walks. TRAIN = 0: a zero-initialised

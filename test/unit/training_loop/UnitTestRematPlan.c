@@ -107,7 +107,15 @@ static size_t peakOf(layer_t **model, size_t n, lossFuncType_t lt, const tensor_
     return peak;
 }
 
-static void assertLiveAt(const rematProgram_t *p, uint16_t wire, size_t step, const char *what) {
+static const rematPlanSpec_t g_livenessInPlace = {.policy = REMAT_PLAN_LIVENESS, .inPlaceDx = true};
+
+/* inPlace: the plan's marks or NULL; a member is live inside its chain
+ * root's range. */
+static void assertLiveAt(const rematProgram_t *p, const uint8_t *inPlace, uint16_t wire,
+                         size_t step, const char *what) {
+    while (inPlace != NULL && inPlace[wire] != 0u) {
+        wire--;
+    }
     if (wire == 0) {
         return; /* ACT 0 is borrowed: always present, never ranged */
     }
@@ -122,33 +130,33 @@ static void assertLiveAt(const rematProgram_t *p, uint16_t wire, size_t step, co
  * must all be live at that step: inclusive ranges are what keep
  * a FORWARD's input and output, GRAD l+1 and GRAD l, and ACT l and GRAD l at a
  * reading BACKWARD(l) out of each other's bytes. */
-static void assertEveryStepsOperandsAreCoLive(const rematProgram_t *p, const rematWireTable_t *t,
-                                              layer_t **model) {
+static void assertEveryStepsOperandsAreCoLive(const rematProgram_t *p, const uint8_t *inPlace,
+                                              const rematWireTable_t *t, layer_t **model) {
     size_t n = t->modelSize;
     for (size_t s = 0; s < p->numSteps; s++) {
         size_t l = p->steps[s].layer;
         switch (p->steps[s].kind) {
         case REMAT_STEP_FORWARD:
         case REMAT_STEP_REFORWARD:
-            assertLiveAt(p, rematActId(t, l), s, "FORWARD or REFORWARD input");
-            assertLiveAt(p, rematActId(t, l + 1), s, "FORWARD or REFORWARD output");
+            assertLiveAt(p, inPlace, rematActId(t, l), s, "FORWARD or REFORWARD input");
+            assertLiveAt(p, inPlace, rematActId(t, l + 1), s, "FORWARD or REFORWARD output");
             break;
         case REMAT_STEP_LOSS_FORWARD:
-            assertLiveAt(p, rematActId(t, n), s, "LOSS_FORWARD reads ACT n");
+            assertLiveAt(p, inPlace, rematActId(t, n), s, "LOSS_FORWARD reads ACT n");
             break;
         case REMAT_STEP_LOSS_BACKWARD:
-            assertLiveAt(p, rematActId(t, n), s, "LOSS_BACKWARD reads ACT n");
-            assertLiveAt(p, rematGradId(t, n), s, "LOSS_BACKWARD writes the seed");
+            assertLiveAt(p, inPlace, rematActId(t, n), s, "LOSS_BACKWARD reads ACT n");
+            assertLiveAt(p, inPlace, rematGradId(t, n), s, "LOSS_BACKWARD writes the seed");
             break;
         case REMAT_STEP_BACKWARD: {
             uint16_t gradIn =
                 ((ptrdiff_t)l == t->backwardTop) ? rematGradId(t, n) : rematGradId(t, l + 1);
-            assertLiveAt(p, gradIn, s, "BACKWARD reads gradIn");
+            assertLiveAt(p, inPlace, gradIn, s, "BACKWARD reads gradIn");
             if (layerBackwardReadsInput(model[l])) {
-                assertLiveAt(p, rematActId(t, l), s, "BACKWARD reads its input");
+                assertLiveAt(p, inPlace, rematActId(t, l), s, "BACKWARD reads its input");
             }
             if (l > t->deepest) {
-                assertLiveAt(p, rematGradId(t, l), s, "BACKWARD writes its dx");
+                assertLiveAt(p, inPlace, rematGradId(t, l), s, "BACKWARD writes its dx");
             }
             break;
         }
@@ -163,9 +171,13 @@ static void assertCoLiveUnderBothPolicies(layer_t **model, size_t n, lossFuncTyp
     rematWireTable_t *t = initTable(model, n, lt, x);
     rematPlan_t *all = buildPlan(t, model, NULL);
     rematPlan_t *live = buildPlan(t, model, &g_liveness);
-    assertEveryStepsOperandsAreCoLive(&all->train, t, model);
-    assertEveryStepsOperandsAreCoLive(&live->train, t, model);
+    assertEveryStepsOperandsAreCoLive(&all->train, NULL, t, model);
+    assertEveryStepsOperandsAreCoLive(&live->train, NULL, t, model);
     TEST_ASSERT_TRUE(live->train.peakLiveBytes <= all->train.peakLiveBytes);
+    rematPlan_t *shared = buildPlan(t, model, &g_livenessInPlace);
+    assertEveryStepsOperandsAreCoLive(&shared->train, shared->inPlace, t, model);
+    TEST_ASSERT_TRUE(shared->train.peakLiveBytes <= live->train.peakLiveBytes);
+    rematPlanFree(shared);
     rematPlanFree(live);
     rematPlanFree(all);
     rematWireTableFree(t);
@@ -223,7 +235,7 @@ static void freeGrammarFixture(grammarFixture_t *f) {
 
 static void tamperAndValidate(grammarFixture_t *f, void (*tamper)(rematProgram_t *)) {
     tamper(&f->p->train);
-    rematPlanValidateGrammar(&f->p->train, f->t, f->model, REMAT_MODE_TRAIN);
+    rematPlanValidateGrammar(&f->p->train, f->t, f->model, REMAT_MODE_TRAIN, NULL);
 }
 
 #define ASSERT_GRAMMAR_EXIT(buildFixture, tamper, rule)                                            \
@@ -2349,7 +2361,7 @@ void testGrammarRejectsAForwardBeyondTheLastLayer(void) {
  * the LOSS_BACKWARD at step 13 is the first step rule 2 rejects. */
 static void clearHasBackwardAndValidate(grammarFixture_t *f) {
     f->t->hasBackward = false;
-    rematPlanValidateGrammar(&f->p->train, f->t, f->model, REMAT_MODE_TRAIN);
+    rematPlanValidateGrammar(&f->p->train, f->t, f->model, REMAT_MODE_TRAIN, NULL);
 }
 
 void testGrammarRejectsALossBackwardWithoutABackwardPhase(void) {
@@ -2427,7 +2439,7 @@ void testGrammarRejectsABackwardReadingGradInOutsideItsRange(void) {
 static void lossBackwardInEvalAndValidate(grammarFixture_t *f) {
     rematProgram_t *eval = &f->p->eval;
     eval->steps[12] = (rematStep_t){.kind = REMAT_STEP_LOSS_BACKWARD, .layer = 12};
-    rematPlanValidateGrammar(eval, f->t, f->model, REMAT_MODE_EVAL);
+    rematPlanValidateGrammar(eval, f->t, f->model, REMAT_MODE_EVAL, NULL);
 }
 
 void testGrammarRejectsABackwardStepInAnEvalProgram(void) {
@@ -2445,7 +2457,7 @@ void testGrammarRejectsABackwardStepInAnEvalProgram(void) {
 static void layerBackwardInEvalAndValidate(grammarFixture_t *f) {
     rematProgram_t *eval = &f->p->eval;
     eval->steps[12] = (rematStep_t){.kind = REMAT_STEP_BACKWARD, .layer = 11};
-    rematPlanValidateGrammar(eval, f->t, f->model, REMAT_MODE_EVAL);
+    rematPlanValidateGrammar(eval, f->t, f->model, REMAT_MODE_EVAL, NULL);
 }
 
 void testGrammarRejectsALayerBackwardInAnEvalProgram(void) {
@@ -2518,11 +2530,11 @@ static void freeHandProgram(handProgram_t *h) {
 }
 
 static void validateHandTrain(handProgram_t *h) {
-    rematPlanValidateGrammar(&h->p, h->t, h->model, REMAT_MODE_TRAIN);
+    rematPlanValidateGrammar(&h->p, h->t, h->model, REMAT_MODE_TRAIN, NULL);
 }
 
 static void validateHandEval(handProgram_t *h) {
-    rematPlanValidateGrammar(&h->p, h->t, h->model, REMAT_MODE_EVAL);
+    rematPlanValidateGrammar(&h->p, h->t, h->model, REMAT_MODE_EVAL, NULL);
 }
 
 /* code 0: the grammar accepts the program; code 1 + message: it exits. */
@@ -2770,7 +2782,7 @@ void testSequencePlanCopiesTheStepsAndScansTheRanges(void) {
     TEST_ASSERT_EQUAL_INT(REMAT_PLAN_SEQUENCE, p->policy);
     assertSameSteps(steps, COUNT_OF(steps), &p->train);
     assertSameRanges(want, COUNT_OF(want), &p->train);
-    assertEveryStepsOperandsAreCoLive(&p->train, t, model);
+    assertEveryStepsOperandsAreCoLive(&p->train, NULL, t, model);
     rematPlanFree(p);
     rematWireTableFree(t);
     freeModel(model, MLP3_N);
@@ -2812,19 +2824,23 @@ void testSequencePlanEvalProgramIsTheStoreAllEvalProgram(void) {
 
 /* An independent check of the scan against the closed-form generator: the
  * LIVENESS step list fed back as a SEQUENCE yields LIVENESS's ranges and
- * both of its peaks. */
+ * both of its peaks, with and without inPlaceDx. */
 static void assertLivenessStepsAsASequenceMatchLiveness(layer_t **model, size_t n,
                                                         lossFuncType_t lt, const tensor_t *x) {
     rematWireTable_t *t = initTable(model, n, lt, x);
-    rematPlan_t *live = buildPlan(t, model, &g_liveness);
-    rematPlanSpec_t spec = sequenceSpec(live->train.steps, live->train.numSteps);
-    rematPlan_t *seq = buildPlan(t, model, &spec);
-    assertSameRanges(live->train.ranges, live->train.numRanges, &seq->train);
-    TEST_ASSERT_EQUAL_size_t(live->train.peakLiveBytes, seq->train.peakLiveBytes);
-    TEST_ASSERT_EQUAL_size_t(rematProgramActPeakBytes(&live->train, t),
-                             rematProgramActPeakBytes(&seq->train, t));
-    rematPlanFree(seq);
-    rematPlanFree(live);
+    for (int inPlaceDx = 0; inPlaceDx <= 1; inPlaceDx++) {
+        const rematPlanSpec_t liveSpec = {.policy = REMAT_PLAN_LIVENESS, .inPlaceDx = inPlaceDx};
+        rematPlan_t *live = buildPlan(t, model, &liveSpec);
+        rematPlanSpec_t spec = sequenceSpec(live->train.steps, live->train.numSteps);
+        spec.inPlaceDx = inPlaceDx;
+        rematPlan_t *seq = buildPlan(t, model, &spec);
+        assertSameRanges(live->train.ranges, live->train.numRanges, &seq->train);
+        TEST_ASSERT_EQUAL_size_t(live->train.peakLiveBytes, seq->train.peakLiveBytes);
+        TEST_ASSERT_EQUAL_size_t(rematProgramActPeakBytes(&live->train, t),
+                                 rematProgramActPeakBytes(&seq->train, t));
+        rematPlanFree(seq);
+        rematPlanFree(live);
+    }
     rematWireTableFree(t);
 }
 
@@ -3138,16 +3154,20 @@ static void assertKeepingEveryActIsLiveness(layer_t **model, size_t n, lossFuncT
         retain[j] = true;
     }
     rematWireTable_t *t = initTable(model, n, lt, x);
-    rematPlan_t *live = buildPlan(t, model, &g_liveness);
-    rematPlanSpec_t spec = retainSpec(retain);
-    rematPlan_t *kept = buildPlan(t, model, &spec);
-    assertSameSteps(live->train.steps, live->train.numSteps, &kept->train);
-    assertSameRanges(live->train.ranges, live->train.numRanges, &kept->train);
-    TEST_ASSERT_EQUAL_size_t(live->train.peakLiveBytes, kept->train.peakLiveBytes);
-    TEST_ASSERT_EQUAL_size_t(rematProgramActPeakBytes(&live->train, t),
-                             rematProgramActPeakBytes(&kept->train, t));
-    rematPlanFree(kept);
-    rematPlanFree(live);
+    for (int inPlaceDx = 0; inPlaceDx <= 1; inPlaceDx++) {
+        const rematPlanSpec_t liveSpec = {.policy = REMAT_PLAN_LIVENESS, .inPlaceDx = inPlaceDx};
+        rematPlan_t *live = buildPlan(t, model, &liveSpec);
+        rematPlanSpec_t spec = retainSpec(retain);
+        spec.inPlaceDx = inPlaceDx;
+        rematPlan_t *kept = buildPlan(t, model, &spec);
+        assertSameSteps(live->train.steps, live->train.numSteps, &kept->train);
+        assertSameRanges(live->train.ranges, live->train.numRanges, &kept->train);
+        TEST_ASSERT_EQUAL_size_t(live->train.peakLiveBytes, kept->train.peakLiveBytes);
+        TEST_ASSERT_EQUAL_size_t(rematProgramActPeakBytes(&live->train, t),
+                                 rematProgramActPeakBytes(&kept->train, t));
+        rematPlanFree(kept);
+        rematPlanFree(live);
+    }
     rematWireTableFree(t);
 }
 
@@ -3190,7 +3210,7 @@ static void assertRetainListPlanIsSound(layer_t **model, size_t n, lossFuncType_
     rematWireTable_t *t = initTable(model, n, lt, x);
     rematPlanSpec_t spec = retainSpec(retain);
     rematPlan_t *kept = buildPlan(t, model, &spec);
-    assertEveryStepsOperandsAreCoLive(&kept->train, t, model);
+    assertEveryStepsOperandsAreCoLive(&kept->train, NULL, t, model);
     for (size_t j = 1; j <= n; j++) {
         size_t rangesOfAct = 0;
         for (size_t r = 0; r < kept->train.numRanges; r++) {
@@ -3691,6 +3711,324 @@ void testPlanBuildExitsWhenTheModelSwapsALayerType(void) {
     freeGrammarFixture(&f);
 }
 
+/* ---- in-place dx ---- */
+
+/* The live bytes at one step, summed over the ranges that cover it: a sum of
+ * its own, apart from the plan's peak walk. */
+static size_t liveBytesAt(const rematProgram_t *p, const rematWireTable_t *t, size_t step) {
+    size_t live = 0;
+    for (size_t r = 0; r < p->numRanges; r++) {
+        if (p->ranges[r].begin <= step && step <= p->ranges[r].end) {
+            live += rematWireBytes(t, p->ranges[r].wire);
+        }
+    }
+    return live;
+}
+
+/* members: the marked wire ids, ascending; every other wire is unmarked. */
+static void assertMarks(const rematPlan_t *p, const rematWireTable_t *t, const uint16_t *members,
+                        size_t numMembers) {
+    TEST_ASSERT_NOT_NULL(p->inPlace);
+    size_t k = 0;
+    for (uint16_t w = 0; w < t->numWires; w++) {
+        bool member = k < numMembers && members[k] == w;
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(member ? 1u : 0u, p->inPlace[w], "in-place mark");
+        k += member ? 1u : 0u;
+    }
+    TEST_ASSERT_EQUAL_size_t(numMembers, k);
+}
+
+/* The in-place ranges are the plain plan's with every member's range dropped
+ * and its chain root's newest range ending where the member's ended. */
+#define FOLD_MAX 64
+static void assertFoldedFrom(const rematProgram_t *plain, const uint8_t *inPlace,
+                             const rematProgram_t *folded) {
+    rematRange_t want[FOLD_MAX];
+    size_t k = 0;
+    TEST_ASSERT_TRUE(plain->numRanges <= FOLD_MAX);
+    for (size_t r = 0; r < plain->numRanges; r++) {
+        uint16_t root = plain->ranges[r].wire;
+        while (inPlace[root] != 0u) {
+            root--;
+        }
+        if (root == plain->ranges[r].wire) {
+            want[k++] = plain->ranges[r];
+            continue;
+        }
+        size_t j = k;
+        while (j > 0u && want[j - 1u].wire != root) {
+            j--;
+        }
+        TEST_ASSERT_TRUE_MESSAGE(j > 0u, "a member's range before its root's");
+        want[j - 1u].end = plain->ranges[r].end;
+    }
+    assertSameRanges(want, k, folded);
+}
+
+/* The one range of a wire that has exactly one. */
+static void assertOnlyRangeOf(const rematProgram_t *p, uint16_t wire, uint16_t begin,
+                              uint16_t end) {
+    size_t found = 0;
+    for (size_t r = 0; r < p->numRanges; r++) {
+        if (p->ranges[r].wire == wire) {
+            TEST_ASSERT_EQUAL_UINT16(begin, p->ranges[r].begin);
+            TEST_ASSERT_EQUAL_UINT16(end, p->ranges[r].end);
+            found++;
+        }
+    }
+    TEST_ASSERT_EQUAL_size_t(1, found);
+}
+
+/* HAR's pairs: the backwards of Flatten 9 and ReLU 7, 4, 1 keep their wire's
+ * size; every other backward changes it. With GRAD 12 = wire 13 and GRAD l =
+ * wire 24 - l (l <= 10), the members are wires 15, 17, 20, 23, and their
+ * roots 14, 16, 19, 22 run on to the members' readers (19 ranges, not 23).
+ * The peak stays at FORWARD(8) and BACKWARD(8), 41216 B (49152 without); the
+ * steps between show which wires share: BACKWARD(9) (step 15) holds ACT 1
+ * 8192 + ACT 3 4096 + ACT 4 8192 + ACT 6 4096 + ACT 7 8192 + GRAD 10 256 =
+ * 33024; BACKWARD(7) (17) the same ACTs + GRAD 8 8192 = 40960 (49152 with
+ * GRAD 7's own bytes); BACKWARD(4) (20) ACT 1 + ACT 3 + ACT 4 + GRAD 5 =
+ * 28672; BACKWARD(1) (23) ACT 1 + GRAD 2 = 16384. Derived by hand from the
+ * ranges and by an independent scan model. */
+void testInPlaceLivenessHarPeakLiveBytesIs41216(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    rematPlan_t *plain = buildPlan(t, model, &g_liveness);
+    rematPlan_t *p = buildPlan(t, model, &g_livenessInPlace);
+    const uint16_t members[] = {15, 17, 20, 23};
+    assertMarks(p, t, members, COUNT_OF(members));
+    assertFoldedFrom(&plain->train, p->inPlace, &p->train);
+    TEST_ASSERT_EQUAL_size_t(19, p->train.numRanges);
+    assertOnlyRangeOf(&p->train, 14, 14, 16);
+    assertOnlyRangeOf(&p->train, 16, 16, 18);
+    assertOnlyRangeOf(&p->train, 19, 19, 21);
+    assertOnlyRangeOf(&p->train, 22, 22, 24);
+    TEST_ASSERT_EQUAL_size_t(41216, p->train.peakLiveBytes);
+    TEST_ASSERT_EQUAL_size_t(49152, liveBytesAt(&plain->train, t, 17));
+    TEST_ASSERT_EQUAL_size_t(33024, liveBytesAt(&p->train, t, 15));
+    TEST_ASSERT_EQUAL_size_t(40960, liveBytesAt(&p->train, t, 17));
+    TEST_ASSERT_EQUAL_size_t(28672, liveBytesAt(&p->train, t, 20));
+    TEST_ASSERT_EQUAL_size_t(16384, liveBytesAt(&p->train, t, 23));
+    rematPlanFree(p);
+    rematPlanFree(plain);
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+/* GRAD ranges do not depend on the policy: STORE_ALL folds the same chains.
+ * Its peak, 70192 B (74288 without), is at BACKWARD(6) (step 18): every ACT,
+ * 57904, + GRAD 8 8192 (GRAD 7 shares it) + GRAD 6 4096. */
+void testInPlaceStoreAllHarPeakLiveBytesIs70192(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    rematPlan_t *plain = buildPlan(t, model, NULL);
+    const rematPlanSpec_t spec = {.policy = REMAT_PLAN_STORE_ALL, .inPlaceDx = true};
+    rematPlan_t *p = buildPlan(t, model, &spec);
+    const uint16_t members[] = {15, 17, 20, 23};
+    assertMarks(p, t, members, COUNT_OF(members));
+    assertFoldedFrom(&plain->train, p->inPlace, &p->train);
+    TEST_ASSERT_EQUAL_size_t(19, p->train.numRanges);
+    TEST_ASSERT_EQUAL_size_t(70192, p->train.peakLiveBytes);
+    TEST_ASSERT_EQUAL_size_t(70192, liveBytesAt(&p->train, t, 18));
+    TEST_ASSERT_EQUAL_size_t(57904, rematProgramActPeakBytes(&p->train, t));
+    rematPlanFree(p);
+    rematPlanFree(plain);
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+/* Linear(2->4) -> ReLU -> Softmax under CE: top = n - 2 = 1, so BACKWARD(1)
+ * reads the seed GRAD 3 (wire 4, 16 B, the Softmax output's shape) and writes
+ * GRAD 1 (wire 5, 16 B) into it. One range for both, from LOSS_BACKWARD (step
+ * 4) to BACKWARD(0) (step 6), which reads GRAD 1: 4 ranges. */
+void testInPlaceReluAtTheCrossEntropyTopSharesTheSeed(void) {
+    layer_t *model[3] = {makeLinear(2, 4, false, 0), makeRelu(&g_floatQ), makeSoftmax()};
+    inputLike_t in;
+    rematWireTable_t *t =
+        initTable(model, 3, CROSS_ENTROPY, makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ));
+    rematPlan_t *p = buildPlan(t, model, &g_livenessInPlace);
+    const uint16_t members[] = {5};
+    assertMarks(p, t, members, COUNT_OF(members));
+    TEST_ASSERT_EQUAL_UINT16(4, rematGradId(t, 3));
+    TEST_ASSERT_EQUAL_size_t(4, p->train.numRanges);
+    assertOnlyRangeOf(&p->train, 4, 4, 6);
+    TEST_ASSERT_EQUAL_size_t(48, p->train.peakLiveBytes);
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, 3);
+}
+
+/* Linear(2->4) -> ReLU -> Flatten -> Linear(4->2) under MSE: BACKWARD(2)
+ * (Flatten) writes GRAD 2 (wire 7) into GRAD 3 (wire 6), and BACKWARD(1)
+ * (ReLU) writes GRAD 1 (wire 8) into GRAD 2's bytes, which are GRAD 3's: one
+ * range, wire 6 from BACKWARD(3) (step 6) to BACKWARD(0) (step 9); 6 ranges.
+ * The peak, 56 B, is at step 6: ACT 1 16 + ACT 3 16 + the seed 8 + GRAD 3 16. */
+void testInPlaceChainOfTwoMembersHasOneRange(void) {
+    layer_t *model[4] = {makeLinear(2, 4, false, 0), makeRelu(&g_floatQ), flattenLayerInit(),
+                         makeLinear(4, 2, false, 3)};
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, 4, MSE, makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ));
+    rematPlan_t *p = buildPlan(t, model, &g_livenessInPlace);
+    const uint16_t members[] = {7, 8};
+    assertMarks(p, t, members, COUNT_OF(members));
+    TEST_ASSERT_EQUAL_size_t(6, p->train.numRanges);
+    assertOnlyRangeOf(&p->train, 6, 6, 9);
+    TEST_ASSERT_EQUAL_size_t(56, p->train.peakLiveBytes);
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, 4);
+}
+
+/* Linear(2->4) -> middle -> Linear(4->2) under MSE, layer 2's dx stored as
+ * dxQ (NULL: FLOAT32): the middle layer's BACKWARD writes GRAD 1 (wire 6) and
+ * reads GRAD 2 (wire 5), both of 4 elements. Returns wire 6's mark; no other
+ * wire may carry one. Frees the model. */
+static uint8_t middleLayerMark(layer_t *middle, quantization_t *dxQ, size_t grad1Bytes) {
+    layer_t *model[3] = {makeLinear(2, 4, false, 0), middle, makeLinear(4, 2, false, 2)};
+    if (dxQ != NULL) {
+        model[2]->config->linear->propLossQ = dxQ;
+    }
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, 3, MSE, makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ));
+    if (grad1Bytes != 0u) {
+        t->wires[6].bytes = grad1Bytes; /* a record no real layer produces */
+    }
+    rematPlan_t *p = buildPlan(t, model, &g_livenessInPlace);
+    TEST_ASSERT_EQUAL_size_t(7, t->numWires);
+    for (uint16_t w = 0; w < 6; w++) {
+        TEST_ASSERT_EQUAL_UINT8(0, p->inPlace[w]);
+    }
+    uint8_t mark = p->inPlace[6];
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, 3);
+    return mark;
+}
+
+/* The rows a type-, dtype- or size-blind rule would pair: each keeps four
+ * elements on both wires. SYM_INT32 widths are not compared (12 bits under
+ * 14 pairs): each wire keeps its own qConfig. Dropout's row is in the
+ * driver's conformance suite, whose binary links the Dropout layer. */
+void testInPlaceEligibilityTruthTable(void) {
+    uint8_t exponent[1];
+    bfpQConfig_t bfpQc;
+    initBfpQConfigInto(8, 8, HALF_AWAY, exponent, &bfpQc);
+    quantization_t bfpQ = {.type = BFP, .qConfig = &bfpQc};
+    symInt32QConfig_t sym12Qc;
+    symInt32QConfig_t sym14Qc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &sym12Qc, 12);
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &sym14Qc, 14);
+    quantization_t sym12Q = {.type = SYM_INT32, .qConfig = &sym12Qc};
+    quantization_t sym14Q = {.type = SYM_INT32, .qConfig = &sym14Qc};
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, middleLayerMark(makeRelu(&g_floatQ), NULL, 0), "ReLU");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, middleLayerMark(flattenLayerInit(), NULL, 0), "Flatten");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, middleLayerMark(makeLinear(4, 4, false, 1), NULL, 0),
+                                    "square Linear");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, middleLayerMark(makeLayerNorm(4, false), NULL, 0),
+                                    "LayerNorm");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, middleLayerMark(makeSoftmax(), NULL, 0), "Softmax");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, middleLayerMark(makeQuant(&g_floatQ, &g_floatQ), NULL, 0),
+                                    "FLOAT32 Quantization");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, middleLayerMark(makeRelu(&sym12Q), &sym14Q, 0),
+                                    "SYM_INT32 12 under 14 bits");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, middleLayerMark(makeRelu(&bfpQ), &bfpQ, 0), "BFP");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, middleLayerMark(makeRelu(&sym12Q), NULL, 0),
+                                    "SYM_INT32 under FLOAT32");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, middleLayerMark(makeRelu(&g_floatQ), NULL, 32),
+                                    "other bytes");
+}
+
+/* inPlaceDx on a model without a pair changes nothing but the marks at the
+ * block's end, all zero: the steps, ranges and peak stay those of the plan
+ * without it, under STORE_ALL and LIVENESS. */
+static void assertNoPairKeepsThePlan(layer_t **model, size_t n, lossFuncType_t lt,
+                                     const tensor_t *x) {
+    rematWireTable_t *t = initTable(model, n, lt, x);
+    for (int policy = REMAT_PLAN_STORE_ALL; policy <= REMAT_PLAN_LIVENESS; policy++) {
+        const rematPlanSpec_t offSpec = {.policy = (rematPlanPolicy_t)policy};
+        const rematPlanSpec_t onSpec = {.policy = (rematPlanPolicy_t)policy, .inPlaceDx = true};
+        rematPlan_t *off = buildPlan(t, model, &offSpec);
+        rematPlan_t *on = buildPlan(t, model, &onSpec);
+        TEST_ASSERT_NULL(off->inPlace);
+        assertMarks(on, t, NULL, 0);
+        assertSameSteps(off->train.steps, off->train.numSteps, &on->train);
+        assertSameRanges(off->train.ranges, off->train.numRanges, &on->train);
+        TEST_ASSERT_EQUAL_size_t(off->train.peakLiveBytes, on->train.peakLiveBytes);
+        TEST_ASSERT_EQUAL_size_t(off->blockBytes + t->numWires, on->blockBytes);
+        rematPlanFree(on);
+        rematPlanFree(off);
+    }
+    rematWireTableFree(t);
+}
+
+/* A ReLU below the deepest trainable layer has no backward step, HAR's
+ * stage-2 backbone trains only its Linear, and BFP wires never pair. */
+void testInPlaceDxWithoutAPairKeepsThePlan(void) {
+    inputLike_t in;
+    layer_t *belowDeepest[3] = {makeLinear(2, 4, true, 0), makeRelu(&g_floatQ),
+                                makeLinear(4, 2, false, 2)};
+    assertNoPairKeepsThePlan(belowDeepest, 3, MSE, makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ));
+    freeModel(belowDeepest, 3);
+    layer_t *finetune[HAR_N];
+    buildHar(finetune, true);
+    assertNoPairKeepsThePlan(finetune, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    freeModel(finetune, HAR_N);
+    uint8_t exponent[1];
+    bfpQConfig_t bfpQc;
+    initBfpQConfigInto(8, 8, HALF_AWAY, exponent, &bfpQc);
+    quantization_t bfpQ = {.type = BFP, .qConfig = &bfpQc};
+    layer_t *bfp[3] = {makeLinear(2, 4, false, 0), makeRelu(&bfpQ), makeLinear(4, 2, false, 2)};
+    bfp[2]->config->linear->propLossQ = &bfpQ;
+    assertNoPairKeepsThePlan(bfp, 3, MSE, makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ));
+    freeModel(bfp, 3);
+}
+
+/* HAR_RETAIN_3_7_12_RANGES folded: wires 15, 17, 20, 23 lose their ranges,
+ * and 14, 16, 19, 22 end where those ended. */
+#define HAR_RETAIN_3_7_12_IN_PLACE_RANGES                                                          \
+    {RANGE_OF(1, 0, 1),    RANGE_OF(2, 1, 2),    RANGE_OF(3, 2, 27),   RANGE_OF(4, 3, 4),          \
+     RANGE_OF(5, 4, 5),    RANGE_OF(6, 5, 6),    RANGE_OF(7, 6, 20),   RANGE_OF(8, 7, 8),          \
+     RANGE_OF(9, 8, 9),    RANGE_OF(10, 9, 10),  RANGE_OF(11, 10, 11), RANGE_OF(12, 11, 13),       \
+     RANGE_OF(13, 13, 17), RANGE_OF(8, 14, 15),  RANGE_OF(9, 15, 16),  RANGE_OF(10, 16, 17),       \
+     RANGE_OF(14, 17, 19), RANGE_OF(16, 19, 24), RANGE_OF(4, 21, 26),  RANGE_OF(5, 22, 23),        \
+     RANGE_OF(6, 23, 24),  RANGE_OF(18, 24, 25), RANGE_OF(19, 25, 27), RANGE_OF(21, 27, 28),       \
+     RANGE_OF(22, 28, 31), RANGE_OF(1, 29, 30)}
+
+/* The scan folds the chains over a recompute program: BACKWARD(7) (step 20)
+ * writes GRAD 7 into GRAD 8 (wire 16) and opens no range; BACKWARD(6) reads
+ * GRAD 7 only after the REFORWARD run 3..5 (steps 21..23), so the root's
+ * range runs over the run to step 24. 26 ranges instead of 30. The peak stays
+ * at REFORWARD(5) (step 23), 32768 B: ACT 3 4096 + ACT 4 8192 + ACT 5 8192 +
+ * ACT 6 4096 + GRAD 8 8192, whose bytes GRAD 7 holds there; without the pair
+ * GRAD 7 had its own 8192 and GRAD 8 had ended. Derived by hand from the
+ * steps and by an independent scan model. */
+void testInPlaceRetainListHarRunsARootOverAReforwardRun(void) {
+    bool retain[HAR_N + 1] = {false};
+    retain[3] = retain[7] = retain[12] = true;
+    const rematStep_t steps[] = HAR_RETAIN_3_7_12_STEPS;
+    const rematRange_t ranges[] = HAR_RETAIN_3_7_12_IN_PLACE_RANGES;
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    rematPlanSpec_t spec = retainSpec(retain);
+    spec.inPlaceDx = true;
+    rematPlan_t *p = buildPlan(t, model, &spec);
+    const uint16_t members[] = {15, 17, 20, 23};
+    assertMarks(p, t, members, COUNT_OF(members));
+    assertSameSteps(steps, COUNT_OF(steps), &p->train);
+    assertSameRanges(ranges, COUNT_OF(ranges), &p->train);
+    TEST_ASSERT_EQUAL_size_t(32768, p->train.peakLiveBytes);
+    TEST_ASSERT_EQUAL_size_t(24576, rematProgramActPeakBytes(&p->train, t));
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testBackwardRangeMseRunsFromLastLayerToDeepest);
@@ -3883,5 +4221,12 @@ int main(void) {
     RUN_TEST(testPlanBuildRunsTheGrammarOnWhatItGenerates);
     RUN_TEST(testPlanBuildExitsWhenTheModelFreezesALayerTheTableSawTrainable);
     RUN_TEST(testPlanBuildExitsWhenTheModelSwapsALayerType);
+    RUN_TEST(testInPlaceLivenessHarPeakLiveBytesIs41216);
+    RUN_TEST(testInPlaceStoreAllHarPeakLiveBytesIs70192);
+    RUN_TEST(testInPlaceReluAtTheCrossEntropyTopSharesTheSeed);
+    RUN_TEST(testInPlaceChainOfTwoMembersHasOneRange);
+    RUN_TEST(testInPlaceEligibilityTruthTable);
+    RUN_TEST(testInPlaceDxWithoutAPairKeepsThePlan);
+    RUN_TEST(testInPlaceRetainListHarRunsARootOverAReforwardRun);
     return UNITY_END();
 }

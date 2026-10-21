@@ -208,9 +208,12 @@ bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t
         return false;
     }
     /* Early bound, before the plan block exists: every TRAIN plan writes each
-     * slab wire at least once, so it holds at least numWires - 1 ranges
-     * (exactly that many under STORE_ALL and LIVENESS). The post-build check
-     * below stays authoritative. */
+     * slab wire at least once, so without inPlaceDx it holds at least
+     * numWires - 1 ranges (exactly that many under STORE_ALL and LIVENESS).
+     * An in-place plan holds fewer, one per chain, so near the cap this bound
+     * may reject a model the post-build check would admit; such a model has
+     * over 500 layers, far beyond MCU scale. The post-build check below stays
+     * authoritative. */
     if (s->wires->numWires - 1u > ODT_REMAT_MAX_RANGES) {
         PRINT_ERROR("remat[arena]: model needs %zu ranges, above ODT_REMAT_MAX_RANGES (%u)",
                     s->wires->numWires - 1u, (unsigned)ODT_REMAT_MAX_RANGES);

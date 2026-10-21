@@ -8,6 +8,9 @@
 
 #include "DeathTest.h"
 #include "Layer.h"
+#include "LossFunction.h"
+#include "Quantization.h"
+#include "RematPlan.h"
 #include "RematScheduler.h"
 #include "remat_select.h"
 #include "unity.h"
@@ -134,6 +137,16 @@ static void exitWithTheVerdictOn(const char *plan, size_t modelSize) {
     exit(rematSelectFromEnv(&sel, modelSize) ? 0 : 1);
 }
 
+static void assertStopsNamingTheAllowedValues(const char *plan) {
+    char expected[224];
+    (void)snprintf(expected, sizeof expected,
+                   "ERROR: REMAT_PLAN=%s (expected store_all|liveness|retain:<j>[,<j>...]|"
+                   "retain:sqrt|retain:speed, optionally followed by +inplace, 1 <= j <= 12 "
+                   "ascending)",
+                   plan);
+    ASSERT_EXITS_WITH_OUTPUT(1, expected, exitWithTheVerdictOn(plan, HAR_N));
+}
+
 /* A mistyped list stops before any data is loaded, naming the value and the
  * allowed forms; it never selects a different plan. */
 void testAMistypedRetainListStopsBeforeTraining(void) {
@@ -143,12 +156,43 @@ void testAMistypedRetainListStopsBeforeTraining(void) {
         "retain:-1",   "retain: 3",  "retain:sqrt,3", "retain:99999999999999999999999",
         "retain"};
     for (size_t i = 0; i < COUNT_OF(mistyped); i++) {
-        char expected[192];
+        assertStopsNamingTheAllowedValues(mistyped[i]);
+    }
+}
+
+/* "+inplace" after any plan asks for in-place gradients on top of it: the
+ * plan and its mask stay as without the suffix, and the run log names both. */
+void testTheInPlaceSuffixParsesOnEveryPlan(void) {
+    static const char *const plans[] = {"store_all", "liveness", "retain:3,7", "retain:sqrt",
+                                        "retain:speed"};
+    static const char *const logged[] = {"store_all", "liveness", "retain:3,7,12", "retain:sqrt",
+                                         "retain:speed"};
+    for (size_t i = 0; i < COUNT_OF(plans); i++) {
+        char value[32];
+        (void)snprintf(value, sizeof value, "%s+inplace", plans[i]);
+        rematSelection_t without = selectFor(plans[i], HAR_N);
+        rematSelection_t with = selectFor(value, HAR_N);
+        TEST_ASSERT_FALSE_MESSAGE(without.plan.inPlaceDx, plans[i]);
+        TEST_ASSERT_TRUE_MESSAGE(with.plan.inPlaceDx, value);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(without.plan.policy, with.plan.policy, value);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(without.retainForm, with.retainForm, value);
+        TEST_ASSERT_EQUAL_MEMORY_MESSAGE(without.retain, with.retain, sizeof with.retain, value);
+        char expected[96];
         (void)snprintf(expected, sizeof expected,
-                       "ERROR: REMAT_PLAN=%s (expected store_all|liveness|retain:<j>[,<j>...]|"
-                       "retain:sqrt|retain:speed, 1 <= j <= 12 ascending)",
-                       mistyped[i]);
-        ASSERT_EXITS_WITH_OUTPUT(1, expected, exitWithTheVerdictOn(mistyped[i], HAR_N));
+                       ", \"remat_storage\": \"heap\", \"remat_plan\": \"%s+inplace\"", logged[i]);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(expected, configKeysOf(&with), value);
+    }
+}
+
+/* A mistyped suffix stops like a mistyped plan: never a plan without the
+ * sharing that was asked for, nor one with sharing that was not. */
+void testAMistypedInPlaceSuffixStopsBeforeTraining(void) {
+    static const char *const mistyped[] = {
+        "+inplace",         "liveness+inplace+inplace", "liveness+in",          "LIVENESS+INPLACE",
+        "liveness+INPLACE", "retain:7,3+inplace",       "retain:+inplace",      "liveness+",
+        "inplace",          "liveness +inplace",        "retain:sqrt+inplace,3"};
+    for (size_t i = 0; i < COUNT_OF(mistyped); i++) {
+        assertStopsNamingTheAllowedValues(mistyped[i]);
     }
 }
 
@@ -190,12 +234,44 @@ void testInitRefusesARetainPlanReadForAnotherLayerCount(void) {
                              exitWithTheInitVerdictForElevenLayers());
 }
 
+/* rematSelectInit hands the selection's plan to the scheduler: "+inplace"
+ * reaches the plan as its mark array, the plain value as none. One Flatten
+ * (it has no config) over a stack input is enough: the plan reserves its
+ * marks whenever the spec asks for them, pair or not. */
+static void assertInitMarksExactlyWithTheSuffix(const char *plan, bool withSuffix) {
+    rematSelection_t sel = selectFor(plan, 1u);
+    layer_t flatten = {.type = FLATTEN, .config = NULL};
+    layer_t *model[1] = {&flatten};
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    float x[4] = {0};
+    size_t dims[] = {1, 4};
+    size_t order[] = {0, 1};
+    shape_t shape = {.numberOfDimensions = 2, .dimensions = dims, .orderOfDimensions = order};
+    tensor_t input;
+    setTensorValues(&input, (uint8_t *)x, &shape, &floatQ, NULL);
+    rematScheduler_t s;
+    TEST_ASSERT_TRUE_MESSAGE(
+        rematSelectInit(&s, &sel, "unit", model, 1u, defaultLossConfig(MSE), &input), plan);
+    TEST_ASSERT_EQUAL_MESSAGE(withSuffix, s.plan->inPlace != NULL, plan);
+    rematSchedulerDeinit(&s);
+}
+
+void testInitPassesTheInPlaceSuffixToThePlan(void) {
+    assertInitMarksExactlyWithTheSuffix("liveness", false);
+    assertInitMarksExactlyWithTheSuffix("liveness+inplace", true);
+    assertInitMarksExactlyWithTheSuffix("store_all+inplace", true);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testARetainListKeepsItsActsAndTheLastOne);
     RUN_TEST(testTheRetainPresetsResolveAgainstTheModel);
     RUN_TEST(testTheOtherPlansKeepTheirNames);
     RUN_TEST(testAMistypedRetainListStopsBeforeTraining);
+    RUN_TEST(testTheInPlaceSuffixParsesOnEveryPlan);
+    RUN_TEST(testAMistypedInPlaceSuffixStopsBeforeTraining);
+    RUN_TEST(testInitPassesTheInPlaceSuffixToThePlan);
     RUN_TEST(testARetainPlanNeedsAModelOfAtMost64Layers);
     RUN_TEST(testTheDryPlanLineNamesThePlanAndEndsWithTheRecomputeNumbers);
     RUN_TEST(testInitRefusesARetainPlanReadForAnotherLayerCount);

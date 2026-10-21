@@ -361,7 +361,7 @@ def test_eleven_categories_sum_to_the_c_total_for_post_pr7_logs():
 
 
 _REMAT = {"wires_peak_b": 49152, "activations_peak_b": 41216, "arena_b": 49152,
-          "arena_pad_b": 0, "arena_gap_b": 0, "wire_metadata_b": 5600,
+          "arena_pad_b": 0, "arena_gap_b": 0, "wire_metadata_b": 5616,
           "refwd_steps": 0, "forward_cost": 502150, "recompute_cost": 0}
 
 

@@ -571,7 +571,7 @@ read three environment variables at start-up (the other HAR binaries ignore them
 | Variable | Values | Meaning |
 |---|---|---|
 | `REMAT_STORAGE` | `arena` \| `heap` | one resident block placed at start-up, or one allocation per buffer |
-| `REMAT_PLAN` | `store_all` \| `liveness` \| `retain:<j>[,<j>...]` \| `retain:sqrt` \| `retain:speed` | keep every activation to the end of the call; free each after its last reader; or keep only some and recompute the others where the backward pass reads them (below) |
+| `REMAT_PLAN` | `store_all` \| `liveness` \| `retain:<j>[,<j>...]` \| `retain:sqrt` \| `retain:speed`, each optionally followed by `+inplace` | keep every activation to the end of the call; free each after its last reader; or keep only some and recompute the others where the backward pass reads them; `+inplace` also lets a ReLU, Dropout or Flatten backward write its gradient over the gradient it reads (below) |
 | `DRY_PLAN` | `1` | print the plan's numbers in one line and stop (nothing is trained; no log, checkpoint or prediction file is written) |
 
 With none set, the trainer passes no scheduler and each training call runs its own
@@ -584,9 +584,11 @@ choice.
 ```bash
 B=./build/examples/examples/har_classifier/train_c_har_classifier
 REMAT_STORAGE=arena DRY_PLAN=1 $B
-# DRY_PLAN example=har_classifier storage=arena plan=liveness planned=1 placed=1 data_reserved=1 steps=25 wires_peak_b=49152 activations_peak_b=41216 arena_b=49152 arena_pad_b=0 arena_gap_b=0 wire_metadata_b=5600 refwd_steps=0 forward_cost=502150 recompute_cost=0
+# DRY_PLAN example=har_classifier storage=arena plan=liveness planned=1 placed=1 data_reserved=1 steps=25 wires_peak_b=49152 activations_peak_b=41216 arena_b=49152 arena_pad_b=0 arena_gap_b=0 wire_metadata_b=5616 refwd_steps=0 forward_cost=502150 recompute_cost=0
 REMAT_STORAGE=arena REMAT_PLAN=retain:3,7 DRY_PLAN=1 $B
-# DRY_PLAN example=har_classifier storage=arena plan=retain:3,7,12 planned=1 placed=1 data_reserved=1 steps=32 wires_peak_b=32768 activations_peak_b=24576 arena_b=36864 arena_pad_b=0 arena_gap_b=4096 wire_metadata_b=5740 refwd_steps=7 forward_cost=502150 recompute_cost=301056
+# DRY_PLAN example=har_classifier storage=arena plan=retain:3,7,12 planned=1 placed=1 data_reserved=1 steps=32 wires_peak_b=32768 activations_peak_b=24576 arena_b=36864 arena_pad_b=0 arena_gap_b=4096 wire_metadata_b=5756 refwd_steps=7 forward_cost=502150 recompute_cost=301056
+REMAT_STORAGE=arena REMAT_PLAN=liveness+inplace DRY_PLAN=1 $B
+# DRY_PLAN example=har_classifier storage=arena plan=liveness+inplace planned=1 placed=1 data_reserved=1 steps=25 wires_peak_b=41216 activations_peak_b=41216 arena_b=45056 arena_pad_b=0 arena_gap_b=3840 wire_metadata_b=5576 refwd_steps=0 forward_cost=502150 recompute_cost=0
 REMAT_STORAGE=arena REMAT_PLAN=liveness EPOCHS=1 $B
 ```
 
@@ -603,6 +605,15 @@ is the same bytes as the first one, so training results do not change. A
 recompute plan's stack peak is the larger of a layer forward and a layer
 backward, as without recompute (`check_stack_watermark.py` measures the default
 plan).
+
+`+inplace` (e.g. `liveness+inplace`, `retain:3,7+inplace`) lets the backward of a
+ReLU, Dropout or Flatten layer write its gradient into the bytes of the gradient it
+reads, when both have one dtype (FLOAT32 or SYM_INT32) and the same size; a BFP
+gradient never shares. The gradients are the same bytes as without it. On HAR the
+three ReLUs and the Flatten share, so `liveness+inplace` needs 41216 B of training
+buffers instead of 49152 (the first-fit block is 45056 B); its `wire_metadata_b` is
+smaller, because the plan holds fewer buffer lifetimes, although it keeps one more
+byte per buffer to mark which ones share.
 
 `wires_peak_b` is the plan's peak of live training buffers (input excluded),
 `activations_peak_b` the same for activations alone, `arena_b` the resident block

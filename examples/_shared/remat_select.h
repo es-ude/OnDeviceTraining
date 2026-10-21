@@ -21,7 +21,11 @@
  * Conv1d and Conv1dTransposed layer (the outputs of the expensive ops, the
  * "speed" choice of the cybertronai gradient-checkpointing package). A
  * recompute plan always keeps ACT n too: the loss reads it right after the
- * last forward writes it, so dropping it saves nothing. With none of the
+ * last forward writes it, so dropping it saves nothing. Any of them may end
+ * in +inplace (liveness+inplace, retain:3,7+inplace): a ReLU, Dropout or
+ * Flatten backward then writes its gradient into the bytes of the gradient
+ * it reads, where both have one dtype (FLOAT32 or SYM_INT32) and one size;
+ * the gradients stay the same bytes, the peak may fall. With none of the
  * variables set a trainer passes no scheduler, so the training call runs its
  * own default plan. A trainer keeps the scheduler on main's stack and deinits
  * it at the end. */

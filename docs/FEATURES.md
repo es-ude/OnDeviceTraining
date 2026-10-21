@@ -785,6 +785,7 @@ checkpointing, limitations, literature).
   what its report claims. The HAR main trainer, finetune stage 2 and `mnist_cnn`
   choose the scheme at start-up (`REMAT_STORAGE=arena|heap`,
   `REMAT_PLAN=store_all|liveness|retain:<j>[,<j>...]|retain:sqrt|retain:speed`,
+  each optionally followed by `+inplace`,
   `DRY_PLAN=1`) and log the choice (a retain list as it runs, the last output
   always kept); the HAR memory-profiling build also logs the numbers (`mnist_cnn`
   prints them only in its `DRY_PLAN` line). Wire bytes are poisoned at bind/release

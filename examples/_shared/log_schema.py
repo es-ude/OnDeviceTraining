@@ -56,7 +56,7 @@ class TrainConfig(TypedDict):
     # none chosen (the training call's default plan).
     remat_storage: NotRequired[str]  # "arena" (one block) | "heap" (one allocation per buffer)
     # "store_all" | "liveness" | "retain:<j>,..." (as it runs: ACT n included) | "retain:sqrt"
-    # | "retain:speed"
+    # | "retain:speed", each optionally followed by "+inplace" (in-place gradients)
     remat_plan: NotRequired[str]
     remat_stage: NotRequired[int]  # finetune: the stage the scheduler and the remat memory keys belong to (2)
 

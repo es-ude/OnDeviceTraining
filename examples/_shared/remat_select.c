@@ -14,17 +14,27 @@ static const char *envValue(const char *name) {
     return (v != NULL && v[0] != '\0') ? v : NULL;
 }
 
-/* <j>[,<j>...] in decimal, strictly ascending in 1..n. Every digit is
- * checked against n before the next one, so no value can wrap. */
-static bool parseRetainList(const char *list, size_t n, bool *retain) {
+/* The value [plan, end) is exactly word. */
+static bool isWord(const char *plan, const char *end, const char *word) {
+    size_t len = strlen(word);
+    return (size_t)(end - plan) == len && strncmp(plan, word, len) == 0;
+}
+
+static bool isDigit(const char *p, const char *end) {
+    return p < end && *p >= '0' && *p <= '9';
+}
+
+/* <j>[,<j>...] in decimal over [list, end), strictly ascending in 1..n. Every
+ * digit is checked against n before the next one, so no value can wrap. */
+static bool parseRetainList(const char *list, const char *end, size_t n, bool *retain) {
     size_t last = 0;
     const char *p = list;
     for (;;) {
-        if (*p < '0' || *p > '9') {
+        if (!isDigit(p, end)) {
             return false;
         }
         size_t j = 0;
-        while (*p >= '0' && *p <= '9') {
+        while (isDigit(p, end)) {
             j = j * 10u + (size_t)(*p - '0');
             if (j > n) {
                 return false;
@@ -36,7 +46,7 @@ static bool parseRetainList(const char *list, size_t n, bool *retain) {
         }
         retain[j] = true;
         last = j;
-        if (*p == '\0') {
+        if (p == end) {
             return true;
         }
         if (*p != ',') {
@@ -46,47 +56,56 @@ static bool parseRetainList(const char *list, size_t n, bool *retain) {
     }
 }
 
-static bool selectRetain(rematSelection_t *sel, const char *what, size_t n) {
+static bool selectRetain(rematSelection_t *sel, const char *what, const char *end, size_t n) {
     sel->plan.policy = REMAT_PLAN_RETAIN_LIST;
-    if (strcmp(what, "sqrt") == 0) {
+    if (isWord(what, end, "sqrt")) {
         sel->retainForm = REMAT_RETAIN_SQRT;
         return true;
     }
-    if (strcmp(what, "speed") == 0) {
+    if (isWord(what, end, "speed")) {
         sel->retainForm = REMAT_RETAIN_SPEED;
         return true;
     }
     sel->retainForm = REMAT_RETAIN_LIST;
-    if (!parseRetainList(what, n, sel->retain)) {
+    if (!parseRetainList(what, end, n, sel->retain)) {
         return false;
     }
     sel->retain[n] = true;
     return true;
 }
 
+/* The plan, then optionally "+inplace" (once, at the end): in-place
+ * gradients on top of any plan. */
 static bool selectPlan(rematSelection_t *sel, const char *plan, size_t modelSize) {
-    if (strcmp(plan, "store_all") == 0) {
+    static const char suffix[] = "+inplace";
+    const size_t suffixLen = sizeof suffix - 1u;
+    const char *end = plan + strlen(plan);
+    if ((size_t)(end - plan) > suffixLen && strcmp(end - suffixLen, suffix) == 0) {
+        sel->plan.inPlaceDx = true;
+        end -= suffixLen;
+    }
+    if (isWord(plan, end, "store_all")) {
         sel->plan.policy = REMAT_PLAN_STORE_ALL;
         return true;
     }
-    if (strcmp(plan, "liveness") == 0) {
+    if (isWord(plan, end, "liveness")) {
         sel->plan.policy = REMAT_PLAN_LIVENESS;
         return true;
     }
-    if (strncmp(plan, "retain:", 7) == 0) {
+    if (end - plan >= 7 && strncmp(plan, "retain:", 7) == 0) {
         if (modelSize > REMAT_SELECT_MAX_LAYERS) {
             fprintf(stderr,
                     "ERROR: REMAT_PLAN=%s needs a model of at most %u layers, this one has %zu\n",
                     plan, REMAT_SELECT_MAX_LAYERS, modelSize);
             return false;
         }
-        if (selectRetain(sel, plan + 7, modelSize)) {
+        if (selectRetain(sel, plan + 7, end, modelSize)) {
             return true;
         }
     }
     fprintf(stderr,
             "ERROR: REMAT_PLAN=%s (expected store_all|liveness|retain:<j>[,<j>...]|retain:sqrt|"
-            "retain:speed, 1 <= j <= %zu ascending)\n",
+            "retain:speed, optionally followed by +inplace, 1 <= j <= %zu ascending)\n",
             plan, modelSize);
     return false;
 }
@@ -150,7 +169,7 @@ static const char *storageName(rematSchedulerType_t t) {
 }
 
 /* The plan as selected; a SEQUENCE is never selected here, but has a name. */
-static void printPlanName(FILE *f, const rematSelection_t *sel) {
+static void printPolicyName(FILE *f, const rematSelection_t *sel) {
     switch (sel->plan.policy) {
     case REMAT_PLAN_STORE_ALL:
         fputs("store_all", f);
@@ -181,6 +200,13 @@ static void printPlanName(FILE *f, const rematSelection_t *sel) {
             fprintf(f, "%s%zu", separator, j);
             separator = ",";
         }
+    }
+}
+
+static void printPlanName(FILE *f, const rematSelection_t *sel) {
+    printPolicyName(f, sel);
+    if (sel->plan.inPlaceDx) {
+        fputs("+inplace", f);
     }
 }
 

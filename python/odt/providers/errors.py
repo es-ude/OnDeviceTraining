@@ -11,7 +11,10 @@ class UnsupportedLayerError(ValueError):
 
 
 class UnsupportedDtypeError(ValueError):
-    """A parameter or buffer dtype other than float32 was found."""
+    """A parameter or floating-point buffer whose dtype is not float32 was found.
+
+    Integer buffers are allowed.
+    """
 
 
 class NotAChainError(ValueError):

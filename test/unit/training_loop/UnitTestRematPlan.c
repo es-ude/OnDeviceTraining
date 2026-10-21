@@ -4029,6 +4029,166 @@ void testInPlaceRetainListHarRunsARootOverAReforwardRun(void) {
     freeModel(model, HAR_N);
 }
 
+/* MLP3's LIVENESS program with GRAD 1 (wire 6) in place over GRAD 2 (wire
+ * 5): GRAD 2's range runs from BACKWARD(2) (step 5) to BACKWARD(0) (step 7),
+ * which reads GRAD 1; no range of wire 6. */
+#define MLP3_LIVENESS_STEPS                                                                        \
+    {STEP_F(0), STEP_F(1), STEP_F(2), STEP_LF(3), STEP_LB(3), STEP_B(2), STEP_B(1), STEP_B(0)}
+#define MLP3_IN_PLACE_RANGES                                                                       \
+    {RANGE_OF(1, 0, 6), RANGE_OF(2, 1, 5), RANGE_OF(3, 2, 4), RANGE_OF(4, 4, 5), RANGE_OF(5, 5, 7)}
+
+/* The grammar with one mark, on `marked`, of MLP3's seven wires. */
+static void validateHandMarking(handProgram_t *h, uint16_t marked) {
+    uint8_t marks[7] = {0};
+    TEST_ASSERT_EQUAL_size_t(7, h->t->numWires);
+    marks[marked] = 1u;
+    rematPlanValidateGrammar(&h->p, h->t, h->model, REMAT_MODE_TRAIN, marks);
+}
+
+static void validateHandMarkingGrad1(handProgram_t *h) {
+    validateHandMarking(h, 6);
+}
+
+static void validateHandMarkingTheSeed(handProgram_t *h) {
+    validateHandMarking(h, 4);
+}
+
+static void validateHandMarkingAct2(handProgram_t *h) {
+    validateHandMarking(h, 2);
+}
+
+/* Linear(2->4) -> Linear(4->4) -> Linear(4->2) under MSE: MLP3's wires, but
+ * layer 1 never aliases, though its two dx wires are equal in size. */
+static void buildSquareLinearHand(handProgram_t *h) {
+    buildMlp3Hand(h);
+    freeReluLayer(h->model[1]);
+    h->model[1] = makeLinear(4, 4, false, 1);
+}
+
+/* Each of these edits a table record after MLP3's table is built: the
+ * numbering puts GRAD 3 where BACKWARD(1) reads, or GRAD 1's record changes
+ * its size or dtype. */
+static void buildMlp3HandReadingTheSeedAtBackward1(handProgram_t *h) {
+    buildMlp3Hand(h);
+    h->t->gradIdOf[2] = 4;
+}
+
+static void buildMlp3HandWithBfpDxWires(handProgram_t *h) {
+    buildMlp3Hand(h);
+    h->t->wires[5].dtype = BFP;
+    h->t->wires[6].dtype = BFP;
+}
+
+static void buildMlp3HandWithAWiderGrad1(handProgram_t *h) {
+    buildMlp3Hand(h);
+    h->t->wires[6].bytes = 32;
+}
+
+static void buildMlp3HandWithASymInt32Grad1(handProgram_t *h) {
+    buildMlp3Hand(h);
+    h->t->wires[6].dtype = SYM_INT32;
+}
+
+static void buildMlp3HandWithAsymDxWires(handProgram_t *h) {
+    buildMlp3Hand(h);
+    h->t->wires[5].dtype = ASYM;
+    h->t->wires[6].dtype = ASYM;
+}
+
+void testGrammarAcceptsAnInPlaceMemberInsideItsRootsRange(void) {
+    const rematStep_t steps[] = MLP3_LIVENESS_STEPS;
+    const rematRange_t ranges[] = MLP3_IN_PLACE_RANGES;
+    ASSERT_HAND_EXITS_WITH(0, "", buildMlp3Hand, steps, ranges, validateHandMarkingGrad1);
+}
+
+/* The seed's wire - 1 is ACT n; ACT 2 is no dx wire at all. */
+void testGrammarRejectsAMarkOnAWireThatIsNotALayersDx(void) {
+    const rematStep_t steps[] = MLP3_LIVENESS_STEPS;
+    const rematRange_t ranges[] = MLP3_IN_PLACE_RANGES;
+    ASSERT_HAND_EXITS_WITH(1,
+                           "rematPlanBuild: wire 4 carries an in-place mark, but it is not a "
+                           "layer's dx wire (GRAD l, l < n)",
+                           buildMlp3Hand, steps, ranges, validateHandMarkingTheSeed);
+    ASSERT_HAND_EXITS_WITH(1,
+                           "rematPlanBuild: wire 2 carries an in-place mark, but it is not a "
+                           "layer's dx wire (GRAD l, l < n)",
+                           buildMlp3Hand, steps, ranges, validateHandMarkingAct2);
+}
+
+void testGrammarRejectsAMarkOnALayerThatNeverAliases(void) {
+    const rematStep_t steps[] = MLP3_LIVENESS_STEPS;
+    const rematRange_t ranges[] = MLP3_IN_PLACE_RANGES;
+    ASSERT_HAND_EXITS_WITH(1,
+                           "rematPlanBuild: wire 6 carries an in-place mark, but layer 1 is not a "
+                           "ReLU, Dropout or Flatten",
+                           buildSquareLinearHand, steps, ranges, validateHandMarkingGrad1);
+}
+
+void testGrammarRejectsAMarkWhoseGradientIsNotTheWireBefore(void) {
+    const rematStep_t steps[] = MLP3_LIVENESS_STEPS;
+    const rematRange_t ranges[] = MLP3_IN_PLACE_RANGES;
+    ASSERT_HAND_EXITS_WITH(1,
+                           "rematPlanBuild: wire 6 carries an in-place mark, but BACKWARD(1) "
+                           "reads wire 4, not wire 5",
+                           buildMlp3HandReadingTheSeedAtBackward1, steps, ranges,
+                           validateHandMarkingGrad1);
+}
+
+void testGrammarRejectsAMarkOnBfpWires(void) {
+    const rematStep_t steps[] = MLP3_LIVENESS_STEPS;
+    const rematRange_t ranges[] = MLP3_IN_PLACE_RANGES;
+    ASSERT_HAND_EXITS_WITH(
+        1, "rematPlanBuild: wire 6 carries an in-place mark, but BFP wires never alias",
+        buildMlp3HandWithBfpDxWires, steps, ranges, validateHandMarkingGrad1);
+}
+
+void testGrammarRejectsAMarkOnWiresOfAnotherSizeOrDtype(void) {
+    const rematStep_t steps[] = MLP3_LIVENESS_STEPS;
+    const rematRange_t ranges[] = MLP3_IN_PLACE_RANGES;
+    const char *message = "rematPlanBuild: wire 6 carries an in-place mark, but wires 5 and 6 "
+                          "differ in dtype or bytes, or are neither FLOAT32 nor SYM_INT32";
+    ASSERT_HAND_EXITS_WITH(1, message, buildMlp3HandWithAWiderGrad1, steps, ranges,
+                           validateHandMarkingGrad1);
+    ASSERT_HAND_EXITS_WITH(1, message, buildMlp3HandWithASymInt32Grad1, steps, ranges,
+                           validateHandMarkingGrad1);
+    ASSERT_HAND_EXITS_WITH(1, message, buildMlp3HandWithAsymDxWires, steps, ranges,
+                           validateHandMarkingGrad1);
+}
+
+void testGrammarRejectsARangeOnAnInPlaceMember(void) {
+    const rematStep_t steps[] = MLP3_LIVENESS_STEPS;
+    const rematRange_t ranges[] = {RANGE_OF(1, 0, 6), RANGE_OF(2, 1, 5), RANGE_OF(3, 2, 4),
+                                   RANGE_OF(4, 4, 5), RANGE_OF(5, 5, 7), RANGE_OF(6, 6, 7)};
+    ASSERT_HAND_EXITS_WITH(1,
+                           "range #5 (wire 6, steps 6..7) violates grammar rule 6: no range "
+                           "names an in-place member",
+                           buildMlp3Hand, steps, ranges, validateHandMarkingGrad1);
+}
+
+/* Wire 7 is the first id past MLP3's seven wires: the marks hold one byte
+ * per wire, so the range check bounds the id before it reads a mark. */
+void testGrammarRejectsARangeOnAWireOutsideTheTable(void) {
+    const rematStep_t steps[] = MLP3_LIVENESS_STEPS;
+    const rematRange_t ranges[] = {RANGE_OF(1, 0, 6), RANGE_OF(2, 1, 5), RANGE_OF(3, 2, 4),
+                                   RANGE_OF(4, 4, 5), RANGE_OF(5, 5, 7), RANGE_OF(7, 7, 7)};
+    ASSERT_HAND_EXITS_WITH(1,
+                           "range #5 (wire 7, steps 7..7) violates grammar rule 6: ranges name "
+                           "a wire of the table",
+                           buildMlp3Hand, steps, ranges, validateHandMarkingGrad1);
+}
+
+/* GRAD 2's range ends at BACKWARD(1) (step 6), before BACKWARD(0) reads
+ * GRAD 1 in GRAD 2's bytes. */
+void testGrammarRejectsAMemberReadOutsideItsRootsRange(void) {
+    const rematStep_t steps[] = MLP3_LIVENESS_STEPS;
+    const rematRange_t ranges[] = {RANGE_OF(1, 0, 6), RANGE_OF(2, 1, 5), RANGE_OF(3, 2, 4),
+                                   RANGE_OF(4, 4, 5), RANGE_OF(5, 5, 6)};
+    ASSERT_HAND_EXITS_WITH(1,
+                           "step #7 (kind 3, layer 0) violates grammar rule 4: it reads wire 6 "
+                           "outside any open range",
+                           buildMlp3Hand, steps, ranges, validateHandMarkingGrad1);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testBackwardRangeMseRunsFromLastLayerToDeepest);
@@ -4228,5 +4388,14 @@ int main(void) {
     RUN_TEST(testInPlaceEligibilityTruthTable);
     RUN_TEST(testInPlaceDxWithoutAPairKeepsThePlan);
     RUN_TEST(testInPlaceRetainListHarRunsARootOverAReforwardRun);
+    RUN_TEST(testGrammarAcceptsAnInPlaceMemberInsideItsRootsRange);
+    RUN_TEST(testGrammarRejectsAMarkOnAWireThatIsNotALayersDx);
+    RUN_TEST(testGrammarRejectsAMarkOnALayerThatNeverAliases);
+    RUN_TEST(testGrammarRejectsAMarkWhoseGradientIsNotTheWireBefore);
+    RUN_TEST(testGrammarRejectsAMarkOnBfpWires);
+    RUN_TEST(testGrammarRejectsAMarkOnWiresOfAnotherSizeOrDtype);
+    RUN_TEST(testGrammarRejectsARangeOnAnInPlaceMember);
+    RUN_TEST(testGrammarRejectsARangeOnAWireOutsideTheTable);
+    RUN_TEST(testGrammarRejectsAMemberReadOutsideItsRootsRange);
     return UNITY_END();
 }

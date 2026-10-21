@@ -299,15 +299,23 @@ static void rangeExit(size_t r, const rematRange_t *range, const char *rule) {
     exit(1);
 }
 
-/* Rule 6 over the ranges, once every step has passed: each range lies inside
- * the stream; the array is sorted by begin, ties by wire id (the walk opens
- * ranges in array order); each range opens at the step that writes its wire;
- * and a range a REFORWARD opens holds a read of that wire, so no recompute is
- * dead. O(R) plus the lengths of the REFORWARD ranges. */
+/* Rule 6 over the ranges, once every step has passed: each range names a
+ * wire of the table; no range names an in-place member (its root's range
+ * holds it); each range lies inside the stream; the array is sorted by
+ * begin, ties by wire id (the walk opens ranges in array order); each range
+ * opens at the step that writes its wire; and a range a REFORWARD opens holds
+ * a read of that wire, so no recompute is dead. O(R) plus the lengths of the
+ * REFORWARD ranges. */
 static void requireRangesWellFormed(const rematProgram_t *p, const rematWireTable_t *t,
-                                    layer_t **model) {
+                                    layer_t **model, const uint8_t *inPlace) {
     for (size_t r = 0; r < p->numRanges; r++) {
         const rematRange_t *range = &p->ranges[r];
+        if (range->wire >= t->numWires) {
+            rangeExit(r, range, "ranges name a wire of the table");
+        }
+        if (inPlace != NULL && inPlace[range->wire] != 0u) {
+            rangeExit(r, range, "no range names an in-place member");
+        }
         if (range->begin > range->end || range->end >= p->numSteps) {
             rangeExit(r, range, "ranges lie inside the stream");
         }
@@ -332,8 +340,64 @@ static void requireRangesWellFormed(const rematProgram_t *p, const rematWireTabl
     }
 }
 
+/* The stored marks, against the grammar's own reading of the model (the
+ * generator decides them apart from it): a mark sits on the dx GRAD l of a
+ * ReLU, Dropout or Flatten, so wire - 1 is a GRAD too, never ACT n; the
+ * gradient BACKWARD(l) reads is wire - 1; and the two wires share one dtype,
+ * FLOAT32 or SYM_INT32, and their bytes. BFP wires never alias. It runs
+ * before the steps, so chainRoot only ever walks down a valid chain. */
+static void requireMarksOnAliasPairs(const rematWireTable_t *t, layer_t **model,
+                                     const uint8_t *inPlace) {
+    size_t n = t->modelSize;
+    for (size_t w = 0; w < t->numWires; w++) {
+        if (inPlace[w] == 0u) {
+            continue;
+        }
+        const rematWire_t *out = &t->wires[w];
+        if (out->kind != REMAT_WIRE_GRAD || out->index == n) {
+            PRINT_ERROR("rematPlanBuild: wire %zu carries an in-place mark, but it is not a "
+                        "layer's dx wire (GRAD l, l < n)",
+                        w);
+            exit(1);
+        }
+        size_t l = out->index;
+        layerType_t type = model[l]->type;
+        if (type != RELU && type != DROPOUT && type != FLATTEN) {
+            PRINT_ERROR("rematPlanBuild: wire %zu carries an in-place mark, but layer %zu is not a "
+                        "ReLU, Dropout or Flatten",
+                        w, l);
+            exit(1);
+        }
+        uint16_t gradIn =
+            ((ptrdiff_t)l == t->backwardTop) ? rematGradId(t, n) : rematGradId(t, l + 1u);
+        if (gradIn != w - 1u) {
+            PRINT_ERROR("rematPlanBuild: wire %zu carries an in-place mark, but BACKWARD(%zu) "
+                        "reads wire %u, not wire %zu",
+                        w, l, (unsigned)gradIn, w - 1u);
+            exit(1);
+        }
+        const rematWire_t *in = &t->wires[gradIn];
+        if (out->dtype == BFP || in->dtype == BFP) {
+            PRINT_ERROR("rematPlanBuild: wire %zu carries an in-place mark, but BFP wires never "
+                        "alias",
+                        w);
+            exit(1);
+        }
+        if (out->dtype != in->dtype || out->bytes != in->bytes ||
+            (out->dtype != FLOAT32 && out->dtype != SYM_INT32)) {
+            PRINT_ERROR("rematPlanBuild: wire %zu carries an in-place mark, but wires %u and %zu "
+                        "differ in dtype or bytes, or are neither FLOAT32 nor SYM_INT32",
+                        w, (unsigned)gradIn, w);
+            exit(1);
+        }
+    }
+}
+
 void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t, layer_t **model,
                               rematMode_t mode, const uint8_t *inPlace) {
+    if (inPlace != NULL) {
+        requireMarksOnAliasPairs(t, model, inPlace);
+    }
     size_t n = t->modelSize;
     size_t nextForward = 0;
     ptrdiff_t nextBackward = t->backwardTop;
@@ -416,7 +480,7 @@ void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t
     if (mode == REMAT_MODE_TRAIN && t->hasBackward && nextBackward >= (ptrdiff_t)t->deepest) {
         grammarEndExit(p->numSteps, "rule 3: BACKWARD set incomplete");
     }
-    requireRangesWellFormed(p, t, model);
+    requireRangesWellFormed(p, t, model, inPlace);
 }
 
 /* The generator and grammar rule 4 both read the read-set off `model`, so a

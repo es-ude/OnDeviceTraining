@@ -45,6 +45,9 @@ static void beginCall(rematScheduler_t *s, const char *verb, layer_t **model, si
         exit(1);
     }
     rematWireTableBind(s->wires, model, n, lt, mode, input);
+    /* After the table bind, for a training call only: an evaluation program
+     * has no backward step, so no chain. */
+    s->wires->inPlace = (mode == REMAT_MODE_TRAIN) ? s->plan->inPlace : NULL;
     s->mode = mode;
     s->inCall = true;
     s->fns->begin(s);

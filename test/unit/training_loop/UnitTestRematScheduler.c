@@ -15,11 +15,13 @@
 #include "Layer.h"
 #include "LayerConfigAccess.h"
 #include "LayerQuant.h"
+#include "Linear.h"
 #include "LinearApi.h"
 #include "LossFunction.h"
 #include "Pool1dApi.h"
 #include "QuantLayerApi.h"
 #include "Quantization.h"
+#include "Relu.h"
 #include "ReluApi.h"
 #include "RematPlace.h"
 #include "RematPlan.h"
@@ -1289,8 +1291,36 @@ static void assertOperandsResident(const rematWireTable_t *t, layer_t **model,
     }
 }
 
-/* O(W^2), tests only. */
-static void assertResidentHeadersDisjoint(const rematWireTable_t *t) {
+/* The wire whose range holds this one's bytes: an in-place member walks down
+ * to its chain's root; with inPlace NULL every wire is its own. */
+static uint16_t rootOf(const uint8_t *inPlace, uint16_t w) {
+    while (inPlace != NULL && inPlace[w] != 0u) {
+        w--;
+    }
+    return w;
+}
+
+/* Two wires of one chain share their root's bytes and bind generation, and
+ * nothing else: each keeps its own header, quantization, qConfig (FLOAT32 has
+ * none) and shape. */
+static void assertOneChain(const rematWireTable_t *t, uint16_t a, uint16_t b) {
+    const tensor_t *ha = rematWireHdr(t, a);
+    const tensor_t *hb = rematWireHdr(t, b);
+    TEST_ASSERT_EQUAL_PTR_MESSAGE(ha->data, hb->data, "a chain's wires do not share its bytes");
+    TEST_ASSERT_EQUAL_size_t(rematWireBytes(t, a), rematWireBytes(t, b));
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(t->wires[a].bindGen, t->wires[b].bindGen,
+                                     "a chain's wires differ in bind generation");
+    TEST_ASSERT_TRUE_MESSAGE(ha != hb && ha->quantization != hb->quantization &&
+                                 ha->shape != hb->shape,
+                             "a chain's wires share a header, a quantization or a shape");
+    TEST_ASSERT_TRUE_MESSAGE(ha->quantization->qConfig == NULL ||
+                                 ha->quantization->qConfig != hb->quantization->qConfig,
+                             "a chain's wires share a qConfig");
+}
+
+/* O(W^2), tests only. inPlace: the marks of the program walked (NULL: none);
+ * the wires of one chain must share their bytes exactly, all others none. */
+static void assertResidentHeadersDisjoint(const rematWireTable_t *t, const uint8_t *inPlace) {
     for (uint16_t a = 1; a < t->numWires; a++) {
         const uint8_t *da = rematWireHdr(t, a)->data;
         if (da == NULL) {
@@ -1299,6 +1329,10 @@ static void assertResidentHeadersDisjoint(const rematWireTable_t *t) {
         for (uint16_t b = (uint16_t)(a + 1u); b < t->numWires; b++) {
             const uint8_t *db = rematWireHdr(t, b)->data;
             if (db == NULL) {
+                continue;
+            }
+            if (rootOf(inPlace, a) == rootOf(inPlace, b)) {
+                assertOneChain(t, a, b);
                 continue;
             }
             /* Integer intervals: HEAP wires live in separate blocks, whose
@@ -1311,27 +1345,35 @@ static void assertResidentHeadersDisjoint(const rematWireTable_t *t) {
     }
 }
 
-static void assertEndedRangesReleased(const rematProgram_t *p, const rematWireTable_t *t,
-                                      size_t step) {
+/* A range that ended releases its wire and every member of its chain. */
+static void assertEndedRangesReleased(const rematProgram_t *p, const uint8_t *inPlace,
+                                      const rematWireTable_t *t, size_t step) {
     for (size_t r = 0; r < p->numRanges; r++) {
-        if (p->ranges[r].end == step) {
-            TEST_ASSERT_NULL_MESSAGE(rematWireHdr(t, p->ranges[r].wire)->data,
-                                     "a range that ended at this step is still bound");
+        if (p->ranges[r].end != step) {
+            continue;
         }
+        uint16_t w = p->ranges[r].wire;
+        do {
+            TEST_ASSERT_NULL_MESSAGE(rematWireHdr(t, w)->data,
+                                     "a range that ended at this step is still bound");
+            w++;
+        } while (w < t->numWires && rootOf(inPlace, w) == p->ranges[r].wire);
     }
 }
 
 /* A row binds a wire at its range's first step and releases it after its last
  * (P8), no earlier and no later: the memory check compares against the SDK's
  * liveBytes, which an early bind raises too, so only this pins the bound set.
- * After next a range ending at the step is still live; after done it is not. */
-static void assertBoundIsExactlyTheLiveSet(const rematProgram_t *p, const rematWireTable_t *t,
-                                           size_t step, bool afterDone) {
+ * After next a range ending at the step is still live; after done it is not.
+ * An in-place member is live exactly while its chain root's range is. */
+static void assertBoundIsExactlyTheLiveSet(const rematProgram_t *p, const uint8_t *inPlace,
+                                           const rematWireTable_t *t, size_t step, bool afterDone) {
     for (uint16_t w = 1; w < t->numWires; w++) {
+        uint16_t root = rootOf(inPlace, w);
         bool live = false;
         for (size_t r = 0; r < p->numRanges; r++) {
             const rematRange_t *rg = &p->ranges[r];
-            if (rg->wire == w && rg->begin <= step &&
+            if (rg->wire == root && rg->begin <= step &&
                 (afterDone ? rg->end > step : rg->end >= step)) {
                 live = true;
             }
@@ -1373,17 +1415,20 @@ static size_t heldInsideTheCall(const rematScheduler_t *s) {
 static void walkWithTheContractChecks(fixture_t *f, rematScheduler_t *s, rematMode_t mode) {
     rematWireTable_t *t = s->wires;
     const rematProgram_t *p = rematPlanProgram(s->plan, mode);
+    const uint8_t *inPlace = (mode == REMAT_MODE_TRAIN) ? s->plan->inPlace : NULL;
     size_t memAfterInit = memProfileCurrentBytes();
     size_t peakHeld = 0;
     bindAndBeginIn(f, s, mode);
     TEST_ASSERT_EQUAL_PTR(f->x, rematActHdr(t, 0));
+    TEST_ASSERT_EQUAL_PTR_MESSAGE(inPlace, t->inPlace,
+                                  "the table borrows the plan's marks for a training call only");
     rematStep_t st;
     size_t step = 0;
     while (rematNext(s, &st)) {
         assertOperandsResident(t, f->model, &st);
-        assertResidentHeadersDisjoint(t);
+        assertResidentHeadersDisjoint(t, inPlace);
         assertBoundDataAligned(t);
-        assertBoundIsExactlyTheLiveSet(p, t, step, false);
+        assertBoundIsExactlyTheLiveSet(p, inPlace, t, step, false);
         size_t held = memProfileCurrentBytes() - memAfterInit;
         TEST_ASSERT_EQUAL_size_t_MESSAGE(
             heldInsideTheCall(s), held, "the row holds other bytes than its live wires after next");
@@ -1391,8 +1436,8 @@ static void walkWithTheContractChecks(fixture_t *f, rematScheduler_t *s, rematMo
             peakHeld = held;
         }
         rematDone(s, &st);
-        assertEndedRangesReleased(p, t, step);
-        assertBoundIsExactlyTheLiveSet(p, t, step, true);
+        assertEndedRangesReleased(p, inPlace, t, step);
+        assertBoundIsExactlyTheLiveSet(p, inPlace, t, step, true);
         TEST_ASSERT_EQUAL_size_t_MESSAGE(
             heldInsideTheCall(s), memProfileCurrentBytes() - memAfterInit,
             "the row holds other bytes than its live wires after done");
@@ -1407,6 +1452,7 @@ static void walkWithTheContractChecks(fixture_t *f, rematScheduler_t *s, rematMo
         TEST_ASSERT_NULL_MESSAGE(rematWireHdr(t, w)->data, "a wire is still bound after end");
     }
     TEST_ASSERT_NULL(rematActHdr(t, 0));
+    TEST_ASSERT_NULL_MESSAGE(t->inPlace, "the table still borrows the marks after end");
     TEST_ASSERT_EQUAL_size_t(memAfterInit, memProfileCurrentBytes());
 }
 
@@ -1530,24 +1576,140 @@ void testRowContractHeapOnARecomputePlan(void) {
     assertRowContract(initHeap, buildMlp3Model, &g_mlp3Recompute);
 }
 
-static void assertRowContractOverRandomRetainMasks(rowInit_t init) {
+static void assertRowContractOverRandomRetainMasks(rowInit_t init, bool inPlaceDx) {
     uint32_t state = 0x9E3779B9u;
     for (int trial = 0; trial < 8; trial++) {
         bool retain[HAR_N + 1];
         for (size_t j = 0; j <= HAR_N; j++) {
             retain[j] = nextRandom(&state) % 2u == 0u;
         }
-        const rematPlanSpec_t spec = {.policy = REMAT_PLAN_RETAIN_LIST, .retain = retain};
+        const rematPlanSpec_t spec = {
+            .policy = REMAT_PLAN_RETAIN_LIST, .retain = retain, .inPlaceDx = inPlaceDx};
         assertRowContract(init, buildHarModel, &spec);
     }
 }
 
 void testRowContractArenaOnRandomRetainMasks(void) {
-    assertRowContractOverRandomRetainMasks(initArena);
+    assertRowContractOverRandomRetainMasks(initArena, false);
 }
 
 void testRowContractHeapOnRandomRetainMasks(void) {
-    assertRowContractOverRandomRetainMasks(initHeap);
+    assertRowContractOverRandomRetainMasks(initHeap, false);
+}
+
+/* ---- in-place dx: the SDK binds a chain through its root ---- */
+
+/* HAR under LIVENESS + inPlaceDx: the members 15 (GRAD 9, Flatten's dx), 17,
+ * 20 and 23 bind and release with their roots 14, 16, 19 and 22. Every check
+ * of the walk reads the chains from the plan's marks, across training and
+ * evaluation calls; on HEAP the row holds exactly the SDK's liveBytes at every
+ * step and peaks at the plan's peak, so a chain counts its bytes once. */
+void testRowContractArenaHarLivenessInPlaceAcrossModes(void) {
+    assertRowContractAcrossModes(initArena, buildHarModel, &g_livenessInPlace);
+}
+
+void testRowContractHeapHarLivenessInPlaceAcrossModes(void) {
+    assertRowContractAcrossModes(initHeap, buildHarModel, &g_livenessInPlace);
+}
+
+/* GRAD ranges do not depend on the policy: STORE_ALL, RETAIN_LIST (ACT 3, 7
+ * and 12 kept, and random masks) and MLP3's SEQUENCE recompute plan bind
+ * their chains through the roots too. */
+static void assertInPlaceRowContractUnderEveryPolicy(rowInit_t init) {
+    static const bool keep3And7And12[HAR_N + 1] = {[3] = true, [7] = true, [12] = true};
+    const rematPlanSpec_t storeAll = {.policy = REMAT_PLAN_STORE_ALL, .inPlaceDx = true};
+    const rematPlanSpec_t retain = {
+        .policy = REMAT_PLAN_RETAIN_LIST, .retain = keep3And7And12, .inPlaceDx = true};
+    rematPlanSpec_t recompute = g_mlp3Recompute;
+    recompute.inPlaceDx = true;
+    assertRowContract(init, buildHarModel, &storeAll);
+    assertRowContract(init, buildHarModel, &retain);
+    assertRowContract(init, buildMlp3Model, &recompute);
+    assertRowContractOverRandomRetainMasks(init, true);
+}
+
+void testRowContractArenaInPlaceUnderEveryPolicy(void) {
+    assertInPlaceRowContractUnderEveryPolicy(initArena);
+}
+
+void testRowContractHeapInPlaceUnderEveryPolicy(void) {
+    assertInPlaceRowContractUnderEveryPolicy(initHeap);
+}
+
+/* MLP3 with its ReLU's wires stored SYM_INT32 12 bits (ACT 2, GRAD 2 by the
+ * last Linear's dx, GRAD 1): the in-place pair wire 6 over wire 5 carries a
+ * qConfig on each header. The template outlives every fixture. */
+static symInt32QConfig_t g_sym12Qc;
+static quantization_t g_sym12Q = {.type = SYM_INT32, .qConfig = &g_sym12Qc};
+static void buildSymChainModel(fixture_t *f) {
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &g_sym12Qc, 12);
+    f->model[0] = makeLinear(2, 4, false, 0);
+    f->model[1] = makeRelu(&g_sym12Q);
+    f->model[2] = makeLinear(4, 2, false, 2);
+    f->model[2]->config->linear->propLossQ = &g_sym12Q;
+    f->n = MLP3_N;
+    f->lt = MSE;
+    f->x = makeResidentInput(&f->in, (size_t[]){1, 2}, 2);
+}
+
+/* Only ->data is shared: the walk's chain check finds two headers, two
+ * quantizations, two qConfigs and two shapes for the pair, on both rows. */
+void testAnInPlaceSymPairKeepsTwoHeadersOnBothRows(void) {
+    const rowInit_t inits[] = {initArena, initHeap};
+    for (size_t k = 0; k < 2u; k++) {
+        fixture_t f;
+        buildSymChainModel(&f);
+        rematScheduler_t s = inits[k](&f, &g_livenessInPlace);
+        TEST_ASSERT_EQUAL_UINT8(1, s.plan->inPlace[6]);
+        TEST_ASSERT_NOT_NULL(rematWireHdr(s.wires, 5)->quantization->qConfig);
+        TEST_ASSERT_NOT_NULL(rematWireHdr(s.wires, 6)->quantization->qConfig);
+        walkWithTheContractChecks(&f, &s, REMAT_MODE_TRAIN);
+        freeFixture(&f, &s);
+    }
+}
+
+/* A member's header is derived when its root binds, through the same path as
+ * every inherited wire: GRAD 9, Flatten's dx and a member of GRAD 10's chain,
+ * takes ACT 9's dtype and shape at rootStep, although ACT 9's bytes died long
+ * before (LIVENESS: BACKWARD(10), step 14; RETAIN_LIST keeping ACT 3, 7 and
+ * 12: step 17). */
+static void assertFlattenMemberDerivedAtItsRootsBind(rowInit_t init, const rematPlanSpec_t *spec,
+                                                     size_t rootStep) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = init(&f, spec);
+    TEST_ASSERT_EQUAL_UINT8(1, s.plan->inPlace[15]);
+    bindAndBegin(&f, &s);
+    rematStep_t st;
+    size_t step = 0;
+    while (rematNext(&s, &st)) {
+        const tensor_t *member = rematGradHdr(s.wires, 9);
+        if (step < rootStep) {
+            TEST_ASSERT_NULL(member->data);
+        } else if (step == rootStep) {
+            const tensor_t *src = rematActHdr(s.wires, 9);
+            TEST_ASSERT_NULL(src->data);
+            TEST_ASSERT_EQUAL_PTR(rematGradHdr(s.wires, 10)->data, member->data);
+            TEST_ASSERT_EQUAL_INT(FLOAT32, member->quantization->type);
+            TEST_ASSERT_EQUAL_size_t(3, member->shape->numberOfDimensions);
+            TEST_ASSERT_EQUAL_MEMORY(src->shape->dimensions, member->shape->dimensions,
+                                     3 * sizeof(size_t));
+        }
+        rematDone(&s, &st);
+        step++;
+    }
+    endAndUnbind(&s);
+    freeFixture(&f, &s);
+}
+
+void testAnInPlaceFlattenMemberTakesItsHeaderAtItsRootsBind(void) {
+    static const bool keep3And7And12[HAR_N + 1] = {[3] = true, [7] = true, [12] = true};
+    const rematPlanSpec_t retain = {
+        .policy = REMAT_PLAN_RETAIN_LIST, .retain = keep3And7And12, .inPlaceDx = true};
+    assertFlattenMemberDerivedAtItsRootsBind(initArena, &g_livenessInPlace, 14);
+    assertFlattenMemberDerivedAtItsRootsBind(initHeap, &g_livenessInPlace, 14);
+    assertFlattenMemberDerivedAtItsRootsBind(initArena, &retain, 17);
+    assertFlattenMemberDerivedAtItsRootsBind(initHeap, &retain, 17);
 }
 
 /* PR1a carry: under LIVENESS, Flatten's dx (GRAD 9) binds at BACKWARD(9)
@@ -1608,6 +1770,116 @@ void testReportObservedPeakEqualsThePlannedPeak(void) {
         assertObservedPeakIsThePlannedPeak(inits[k], buildF1Model, NULL);
         assertObservedPeakIsThePlannedPeak(inits[k], buildF1Model, &g_liveness);
     }
+}
+
+/* P8 on an in-place plan: HAR under LIVENESS + inPlaceDx plans 41216 B
+ * (49152 without), and a call observes exactly that on both rows, so each
+ * chain counts its bytes once. First fit decreasing, an FFD heuristic like
+ * the guards above (recorded from the implementation, cross-checked against an
+ * independent first fit on the same ranges), places it in 45056 B, a 3840 B
+ * gap; STORE_ALL + inPlaceDx places its 70192 B peak with no gap. */
+void testHarLivenessInPlaceObservesItsPlannedPeakOnBothRows(void) {
+    assertObservedPeakIsThePlannedPeak(initArena, buildHarModel, &g_livenessInPlace);
+    assertObservedPeakIsThePlannedPeak(initHeap, buildHarModel, &g_livenessInPlace);
+    rematReport_t r = reportAfterInit(buildHarModel, &g_livenessInPlace);
+    TEST_ASSERT_EQUAL_size_t(41216, r.peakLiveBytes);
+    TEST_ASSERT_EQUAL_size_t(45056, r.arenaBytes);
+    const rematPlanSpec_t storeAll = {.policy = REMAT_PLAN_STORE_ALL, .inPlaceDx = true};
+    r = reportAfterInit(buildHarModel, &storeAll);
+    TEST_ASSERT_EQUAL_size_t(70192, r.peakLiveBytes);
+    TEST_ASSERT_EQUAL_size_t(70192, r.arenaBytes);
+}
+
+/* HAR under LIVENESS + inPlaceDx on HEAP, inside a training call: steps 0 to
+ * k - 1 walked. BACKWARD(10), step 14, binds GRAD 10 (wire 14) and with it its
+ * member GRAD 9 (wire 15). The bytes are a local: every child exits before it
+ * returns. */
+static void walkHarInPlaceTo(fixture_t *f, rematScheduler_t *s, size_t k) {
+    bindAndBegin(f, s);
+    rematStep_t st;
+    for (size_t i = 0; i < k; i++) {
+        TEST_ASSERT_TRUE(rematNext(s, &st));
+        rematDone(s, &st);
+    }
+}
+
+static void bindAMember(fixture_t *f, rematScheduler_t *s) {
+    float bytes[64];
+    walkHarInPlaceTo(f, s, 14);
+    rematWireBind(s->wires, 15, (uint8_t *)bytes);
+}
+
+static void releaseAMember(fixture_t *f, rematScheduler_t *s) {
+    rematStep_t st;
+    walkHarInPlaceTo(f, s, 14);
+    TEST_ASSERT_TRUE(rematNext(s, &st));
+    rematWireRelease(s->wires, 15);
+}
+
+static void bindARootWhoseMemberIsBound(fixture_t *f, rematScheduler_t *s) {
+    float bytes[64];
+    rematStep_t st;
+    walkHarInPlaceTo(f, s, 14);
+    rematGradHdr(s->wires, 9)->data = (uint8_t *)bytes;
+    (void)rematNext(s, &st);
+}
+
+static void releaseARootWhoseMemberMoved(fixture_t *f, rematScheduler_t *s) {
+    float bytes[64];
+    rematStep_t st;
+    walkHarInPlaceTo(f, s, 14);
+    TEST_ASSERT_TRUE(rematNext(s, &st));
+    rematGradHdr(s->wires, 9)->data = (uint8_t *)bytes;
+    rematWireRelease(s->wires, 14);
+}
+
+static void assertHarInPlaceExits(void (*misuse)(fixture_t *, rematScheduler_t *),
+                                  const char *message) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initHeap(&f, &g_livenessInPlace);
+    ASSERT_EXITS_WITH_OUTPUT(1, message, misuse(&f, &s));
+    freeFixture(&f, &s);
+}
+
+/* Rows bind only ranges, and a member has none: a Bind or Release that names
+ * a member is a row bug. */
+void testBindAndReleaseExitOnAnInPlaceMember(void) {
+    assertHarInPlaceExits(bindAMember, "rematWireBind: wire GRAD 9 is an in-place member of GRAD "
+                                       "10; bind the chain's root");
+    assertHarInPlaceExits(releaseAMember, "rematWireRelease: wire GRAD 9 is an in-place member of "
+                                          "GRAD 10; release the chain's root");
+}
+
+/* A member that left its root's bytes (bound on its own, or moved while
+ * bound) stops the root's Bind or Release by name. */
+void testARootsBindAndReleaseExitWhenAMemberLeftItsBytes(void) {
+    assertHarInPlaceExits(bindARootWhoseMemberIsBound,
+                          "rematWireBind: wire GRAD 9, an in-place member of GRAD 10, is already "
+                          "bound");
+    assertHarInPlaceExits(releaseARootWhoseMemberMoved,
+                          "rematWireRelease: wire GRAD 9, an in-place member of GRAD 10, does not "
+                          "hold its root's bytes");
+}
+
+static void beginAfterTheMembersDtypeChanged(fixture_t *f, rematScheduler_t *s) {
+    f->model[1]->config->relu->propLossQ = &g_sym12Q;
+    bindAndBegin(f, s);
+}
+
+/* The plan decided its pairs from the keyed wire facts: a call on a model
+ * whose paired dx changed dtype since init exits at the key check, before any
+ * chain is bound. */
+void testAnInPlaceCallExitsAtTheKeyCheckWhenAMemberChangedDtype(void) {
+    fixture_t f;
+    buildMlp3Model(&f);
+    rematScheduler_t s = initHeap(&f, &g_livenessInPlace);
+    TEST_ASSERT_EQUAL_UINT8(1, s.plan->inPlace[6]);
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &g_sym12Qc, 12);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "rematWireTableBind: key mismatch on wire GRAD 1, field 'dtype': built 1, live 2",
+        beginAfterTheMembersDtypeChanged(&f, &s));
+    freeFixture(&f, &s);
 }
 
 /* ---- ASan poisoning of the arena (asan preset only) ---- */
@@ -1846,10 +2118,10 @@ void testHeapWalkHandsOutThePlanStepsAndEndsWithNothingBound(void) {
  * (StorageApi.c:41), so a row that reserves exactly bytes(w) per live range
  * holds exactly the SDK's liveBytes at every point of the call, and its
  * per-call peak of reserved bytes is the plan's peakLiveBytes. */
-void testHeapHoldsExactlyTheLiveBytesAtEveryStep(void) {
+static void assertHeapHoldsTheLiveBytes(const rematPlanSpec_t *spec, size_t peakBytes) {
     fixture_t f;
     buildHarModel(&f);
-    rematScheduler_t s = initHeap(&f, &g_liveness);
+    rematScheduler_t s = initHeap(&f, spec);
     size_t memAfterInit = memProfileCurrentBytes();
     bindAndBegin(&f, &s);
     rematStep_t st;
@@ -1864,9 +2136,18 @@ void testHeapHoldsExactlyTheLiveBytesAtEveryStep(void) {
         TEST_ASSERT_EQUAL_size_t(s.wires->liveBytes, memProfileCurrentBytes() - memAfterInit);
     }
     endAndUnbind(&s);
-    TEST_ASSERT_EQUAL_size_t(49152, peak);
+    TEST_ASSERT_EQUAL_size_t(peakBytes, peak);
     TEST_ASSERT_EQUAL_size_t(memAfterInit, memProfileCurrentBytes());
     freeFixture(&f, &s);
+}
+
+void testHeapHoldsExactlyTheLiveBytesAtEveryStep(void) {
+    assertHeapHoldsTheLiveBytes(&g_liveness, 49152);
+}
+
+/* One block per range, the chain root's: 41216 B at the peak, not 49152. */
+void testHeapHoldsExactlyTheLiveBytesAtEveryStepInPlace(void) {
+    assertHeapHoldsTheLiveBytes(&g_livenessInPlace, 41216);
 }
 #endif
 
@@ -2313,6 +2594,38 @@ void testHeapReadAfterReleaseTripsAsan(void) {
     ASSERT_EXITS_WITH(ODT_ASAN_DEATH_EXIT, readAHeapWireAfterItsRelease(&f, &s));
     freeFixture(&f, &s);
 }
+
+/* HAR LIVENESS + inPlaceDx: GRAD 9 (wire 15) holds GRAD 10's block, which
+ * done() of BACKWARD(8), step 16, frees with the chain's one range, so a
+ * pointer saved from the member while it was bound trips ASan as a use after
+ * free. */
+static void readAnInPlaceMemberAfterItsChainEnded(fixture_t *f, rematScheduler_t *s) {
+    odtInstallAsanDeathExit();
+    bindAndBegin(f, s);
+    rematStep_t st;
+    volatile uint8_t *member = NULL;
+    while (rematNext(s, &st)) {
+        if (st.kind == REMAT_STEP_BACKWARD && st.layer == 9u) {
+            member = rematGradHdr(s->wires, 9)->data;
+        }
+        rematDone(s, &st);
+        if (st.kind == REMAT_STEP_BACKWARD && st.layer == 8u) {
+            break;
+        }
+    }
+    if (member == NULL) {
+        _exit(0); /* never captured: a NULL read's SEGV would also exit 86 */
+    }
+    (void)member[0];
+}
+
+void testHeapReadOfAnInPlaceMemberAfterItsChainEndedTripsAsan(void) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initHeap(&f, &g_livenessInPlace);
+    ASSERT_EXITS_WITH(ODT_ASAN_DEATH_EXIT, readAnInPlaceMemberAfterItsChainEnded(&f, &s));
+    freeFixture(&f, &s);
+}
 #endif
 
 /* The init self-check: the bytes the memory counter saw a successful init
@@ -2330,15 +2643,15 @@ static void selfCheckWithOneExtraByte(rowInit_t init) {
 
 void testInitSelfCheckExitsOnAnUnaccountedByteOnHeap(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[heap]: init reserved 5425 B, but its report accounts for "
-                             "5424 B (arenaBytes 0 + metadataBytes 5424)",
+                             "remat[heap]: init reserved 5433 B, but its report accounts for "
+                             "5432 B (arenaBytes 0 + metadataBytes 5432)",
                              selfCheckWithOneExtraByte(initHeap));
 }
 
 void testInitSelfCheckExitsOnAnUnaccountedByteOnArena(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[arena]: init reserved 83993 B, but its report accounts for "
-                             "83992 B (arenaBytes 78384 + metadataBytes 5608)",
+                             "remat[arena]: init reserved 84001 B, but its report accounts for "
+                             "84000 B (arenaBytes 78384 + metadataBytes 5616)",
                              selfCheckWithOneExtraByte(initArena));
 }
 
@@ -2374,15 +2687,15 @@ static void initWithAnUnaccountedReservation(rematSchedulerType_t row) {
 
 void testHeapInitExitsOnAnUnaccountedReservation(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[heap]: init reserved 5432 B, but its report accounts for "
-                             "5424 B (arenaBytes 0 + metadataBytes 5424)",
+                             "remat[heap]: init reserved 5440 B, but its report accounts for "
+                             "5432 B (arenaBytes 0 + metadataBytes 5432)",
                              initWithAnUnaccountedReservation(REMAT_HEAP));
 }
 
 void testArenaInitExitsOnAnUnaccountedReservation(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[arena]: init reserved 84000 B, but its report accounts for "
-                             "83992 B (arenaBytes 78384 + metadataBytes 5608)",
+                             "remat[arena]: init reserved 84008 B, but its report accounts for "
+                             "84000 B (arenaBytes 78384 + metadataBytes 5616)",
                              initWithAnUnaccountedReservation(REMAT_ARENA));
 }
 #endif
@@ -2469,6 +2782,16 @@ int main(void) {
     RUN_TEST(testArenaEvalPlacesEvenActsAtTheBottomAndOddActsAtTheTop);
     RUN_TEST(testArenaHarLivenessBindsFlattenDxAfterItsSourceDied);
     RUN_TEST(testReportObservedPeakEqualsThePlannedPeak);
+    RUN_TEST(testRowContractArenaHarLivenessInPlaceAcrossModes);
+    RUN_TEST(testRowContractHeapHarLivenessInPlaceAcrossModes);
+    RUN_TEST(testRowContractArenaInPlaceUnderEveryPolicy);
+    RUN_TEST(testRowContractHeapInPlaceUnderEveryPolicy);
+    RUN_TEST(testAnInPlaceSymPairKeepsTwoHeadersOnBothRows);
+    RUN_TEST(testAnInPlaceFlattenMemberTakesItsHeaderAtItsRootsBind);
+    RUN_TEST(testHarLivenessInPlaceObservesItsPlannedPeakOnBothRows);
+    RUN_TEST(testBindAndReleaseExitOnAnInPlaceMember);
+    RUN_TEST(testARootsBindAndReleaseExitWhenAMemberLeftItsBytes);
+    RUN_TEST(testAnInPlaceCallExitsAtTheKeyCheckWhenAMemberChangedDtype);
 #ifdef ODT_TEST_ASAN
     RUN_TEST(testArenaIsPoisonedUntilARangeOpens);
     RUN_TEST(testArenaPadStaysPoisonedWhileBound);
@@ -2485,6 +2808,7 @@ int main(void) {
     RUN_TEST(testHeapWalkHandsOutThePlanStepsAndEndsWithNothingBound);
 #ifdef ODT_MEM_PROFILE
     RUN_TEST(testHeapHoldsExactlyTheLiveBytesAtEveryStep);
+    RUN_TEST(testHeapHoldsExactlyTheLiveBytesAtEveryStepInPlace);
 #endif
     RUN_TEST(testHeapSecondCallRestartsTheWalk);
     RUN_TEST(testHeapEndExitsOnAnIncompleteWalk);
@@ -2515,6 +2839,7 @@ int main(void) {
 #ifdef ODT_TEST_ASAN
     RUN_TEST(testHeapWireEndsAtItsExactBytes);
     RUN_TEST(testHeapReadAfterReleaseTripsAsan);
+    RUN_TEST(testHeapReadOfAnInPlaceMemberAfterItsChainEndedTripsAsan);
 #endif
     return UNITY_END();
 }

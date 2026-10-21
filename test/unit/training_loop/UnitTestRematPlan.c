@@ -107,8 +107,6 @@ static size_t peakOf(layer_t **model, size_t n, lossFuncType_t lt, const tensor_
     return peak;
 }
 
-static const rematPlanSpec_t g_livenessInPlace = {.policy = REMAT_PLAN_LIVENESS, .inPlaceDx = true};
-
 /* inPlace: the plan's marks or NULL; a member is live inside its chain
  * root's range. */
 static void assertLiveAt(const rematProgram_t *p, const uint8_t *inPlace, uint16_t wire,
@@ -1146,16 +1144,16 @@ void testBindRunsSampleBOnATableBuiltOnSampleA(void) {
 }
 
 /* The bind's per-wire derivation scratch lives inside the
- * table block. LP64 layout arithmetic (not a scan-model pin): table struct 144
+ * table block. LP64 layout arithmetic (not a scan-model pin): table struct 152
  * + 24 records x 40 + gradIdOf 26 + layerType/frozen 24, rounded to 8, + the
- * input key 48 = 1208; the bind scratch 960; the headers 2680. Total 4848.
+ * input key 48 = 1216; the bind scratch 960; the headers 2680. Total 4856.
  * Every host preset is LP64. */
 void testHarSlabHoldsTheBindScratch(void) {
     layer_t *model[HAR_N];
     buildHar(model, false);
     inputLike_t in;
     rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
-    TEST_ASSERT_EQUAL_size_t(4848, t->slabBytes);
+    TEST_ASSERT_EQUAL_size_t(4856, t->slabBytes);
     const uint8_t *scratch = (const uint8_t *)t->bindScratch;
     TEST_ASSERT_TRUE(scratch >= (const uint8_t *)(t->inputOrder + t->inputRank));
     TEST_ASSERT_TRUE(scratch + t->numWires * sizeof(rematWireFact_t) <=

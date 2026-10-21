@@ -239,6 +239,7 @@ static uint32_t nextRandom(uint32_t *state) { /* xorshift32, test-local */
 }
 
 static const rematPlanSpec_t g_liveness = {.policy = REMAT_PLAN_LIVENESS};
+static const rematPlanSpec_t g_livenessInPlace = {.policy = REMAT_PLAN_LIVENESS, .inPlaceDx = true};
 
 /* Step and range records for hand-written programs and sequences. */
 #define STEP_F(l) {.kind = REMAT_STEP_FORWARD, .layer = (l)}

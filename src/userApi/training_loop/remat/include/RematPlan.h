@@ -99,6 +99,10 @@ typedef struct rematWireTable {
     size_t liveBytes;             /* rises in rematWireBind, falls in rematWireRelease */
     size_t observedPeakLiveBytes; /* its high-water mark since the last rematWireTableBind */
     size_t slabBytes;             /* the whole table block, padding included, no trailing pad */
+    /* The plan's in-place marks (rematPlan_t.inPlace), borrowed for a training
+     * call, else NULL. Rows bind only ranges and never see a chain, so the SDK
+     * binds and releases a chain's members with its root. */
+    const uint8_t *inPlace;
 } rematWireTable_t;
 
 typedef struct rematBfpGroups {
@@ -138,7 +142,7 @@ void rematWireTableFree(rematWireTable_t *t);
  * no GRAD header: eval binds no GRAD wire. */
 void rematWireTableBind(rematWireTable_t *t, layer_t **model, size_t n, lossFuncType_t lt,
                         rematMode_t mode, tensor_t *input);
-void rematWireTableUnbind(rematWireTable_t *t); /* ACT 0 hdr = NULL */
+void rematWireTableUnbind(rematWireTable_t *t); /* ACT 0 hdr = NULL, inPlace = NULL */
 
 /* The row SDK: the ONLY writers of a header's ->data. A bind
  * requires this table's rematWireTableBind to have already run earlier in the
@@ -149,7 +153,11 @@ void rematWireTableUnbind(rematWireTable_t *t); /* ACT 0 hdr = NULL */
  * died, and PR1d must not require the source to be resident) -- checking
  * dtype, rank, the live payload bytes and BFP capacity before any write.
  * Both exit on the borrowed ACT 0, on an unbalanced call, on a NULL
- * bytes and on a wire id at or above numWires. */
+ * bytes and on a wire id at or above numWires. While the table borrows a
+ * plan's in-place marks (a training call), Bind and Release of a chain's root
+ * also bind and release its members: each member takes the root's bytes and
+ * keeps its own header, liveBytes counts the chain once, and both calls exit
+ * when they name a member. */
 void rematWireBind(rematWireTable_t *t, uint16_t w, uint8_t *bytes);
 void rematWireRelease(rematWireTable_t *t, uint16_t w);
 

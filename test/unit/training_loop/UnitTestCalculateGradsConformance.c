@@ -2433,6 +2433,33 @@ void testRefwdWireBitIdenticalToFwd(void) {
     TEST_ASSERT_TRUE_MESSAGE(chk.maxPoolArgmaxes > 0, "no MaxPool argmax was compared");
 }
 
+/* ---- in-place dx ---- */
+
+/* buildMlp's ReLU is an in-place pair under inPlaceDx: its BACKWARD (step #6)
+ * writes GRAD 1 into GRAD 2's bytes, 12 B each. */
+static const matrixCell_t g_inPlaceCells[2] = {
+    {"arena/liveness+inplace", REMAT_ARENA, &g_livenessInPlace},
+    {"heap/liveness+inplace", REMAT_HEAP, &g_livenessInPlace},
+};
+
+static void runTheMlpInPlace(const matrixCell_t *cell) {
+    const rngKey_t key = zooCallKey(0);
+    (void)captureCell(buildMlp, cell, &key);
+}
+
+/* Until the checker admits a pair the plan marked, a call on an in-place plan
+ * stops by name at the first in-place step, never runs unchecked. */
+void testAnInPlaceCallStopsAtTheCheckersByteRuleOnBothRows(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "remat[arena]: step #6 BACKWARD(layer 1) violates 'operands share "
+                             "bytes: gradIn/out' (GRAD 2 and GRAD 1)",
+                             runTheMlpInPlace(&g_inPlaceCells[0]));
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "remat[heap]: step #6 BACKWARD(layer 1) violates 'operands share "
+                             "bytes: gradIn/out' (GRAD 2 and GRAD 1)",
+                             runTheMlpInPlace(&g_inPlaceCells[1]));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testNullPathMatchesTheReferenceOnTheMlp);
@@ -2561,5 +2588,6 @@ int main(void) {
     RUN_TEST(testRecomputingTheBfpSrDropoutBridgeMatchesTheReferenceOnArena);
     RUN_TEST(testRecomputingTheBfpSrDropoutBridgeMatchesTheReferenceOnHeap);
     RUN_TEST(testRefwdWireBitIdenticalToFwd);
+    RUN_TEST(testAnInPlaceCallStopsAtTheCheckersByteRuleOnBothRows);
     return UNITY_END();
 }

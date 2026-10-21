@@ -566,6 +566,7 @@ void rematWireTableBind(rematWireTable_t *t, layer_t **model, size_t n, lossFunc
 
 void rematWireTableUnbind(rematWireTable_t *t) {
     t->wires[0].hdr = NULL;
+    t->inPlace = NULL;
 }
 
 /* Names a record in a size-overflow exit (the checked helpers take a rematWireFact_t). */
@@ -638,6 +639,65 @@ static void poisonWireBytes(const rematWire_t *w, uint8_t *bytes) {
 }
 #endif
 
+/* An in-place member of the borrowed marks: a wire whose layer's BACKWARD
+ * writes into the bytes of the wire before it. */
+static bool isMember(const rematWireTable_t *t, size_t w) {
+    return t->inPlace != NULL && w < t->numWires && t->inPlace[w] != 0u;
+}
+
+/* Bind and Release name only a chain's root, as rows name only ranges. */
+static void requireNotAMember(const rematWireTable_t *t, uint16_t w, const char *call,
+                              const char *verb) {
+    if (!isMember(t, w)) {
+        return;
+    }
+    uint16_t root = w;
+    while (isMember(t, root)) {
+        root--;
+    }
+    PRINT_ERROR("%s: wire %s %u is an in-place member of %s %u; %s the chain's root", call,
+                wireKindName(t->wires[w].kind), (unsigned)t->wires[w].index,
+                wireKindName(t->wires[root].kind), (unsigned)t->wires[root].index, verb);
+    exit(1);
+}
+
+/* A root's bind binds its chain: every member takes the root's bytes and a
+ * bind generation of its own, and an inherited member (Flatten's dx) derives
+ * its header here, through the path of every inherited wire, since it is
+ * never bound on its own. Members follow their root in id order. The root's
+ * bytes are poisoned and counted once. */
+static void bindMembers(rematWireTable_t *t, uint16_t root, uint8_t *bytes) {
+    for (size_t m = root + 1u; isMember(t, m); m++) {
+        rematWire_t *rec = &t->wires[m];
+        if (rec->hdr->data != NULL) {
+            PRINT_ERROR("rematWireBind: wire %s %u, an in-place member of %s %u, is already bound",
+                        wireKindName(rec->kind), (unsigned)rec->index,
+                        wireKindName(t->wires[root].kind), (unsigned)t->wires[root].index);
+            exit(1);
+        }
+        if (rec->inheritFrom != REMAT_NONE) {
+            deriveInheritedHeader(t, (uint16_t)m);
+        }
+        rec->hdr->data = bytes;
+        rec->bindGen++;
+    }
+}
+
+static void releaseMembers(rematWireTable_t *t, uint16_t root) {
+    const uint8_t *bytes = t->wires[root].hdr->data;
+    for (size_t m = root + 1u; isMember(t, m); m++) {
+        rematWire_t *rec = &t->wires[m];
+        if (rec->hdr->data != bytes) {
+            PRINT_ERROR("rematWireRelease: wire %s %u, an in-place member of %s %u, does not hold "
+                        "its root's bytes",
+                        wireKindName(rec->kind), (unsigned)rec->index,
+                        wireKindName(t->wires[root].kind), (unsigned)t->wires[root].index);
+            exit(1);
+        }
+        rec->hdr->data = NULL;
+    }
+}
+
 void rematWireBind(rematWireTable_t *t, uint16_t w, uint8_t *bytes) {
     if (w >= t->numWires) {
         PRINT_ERROR("rematWireBind: wire id %u out of range (numWires %zu)", (unsigned)w,
@@ -653,6 +713,7 @@ void rematWireBind(rematWireTable_t *t, uint16_t w, uint8_t *bytes) {
         PRINT_ERROR("rematWireBind: wire ACT 0 is the caller's borrowed input; it is never bound");
         exit(1);
     }
+    requireNotAMember(t, w, "rematWireBind", "bind");
     if (rec->hdr->data != NULL) {
         PRINT_ERROR("rematWireBind: wire %s %u is already bound", wireKindName(rec->kind),
                     (unsigned)rec->index);
@@ -666,6 +727,7 @@ void rematWireBind(rematWireTable_t *t, uint16_t w, uint8_t *bytes) {
     poisonWireBytes(rec, bytes);
 #endif
     rec->bindGen++;
+    bindMembers(t, w, bytes);
     /* Overflow-checked, though each wire counts at most once (a bound wire cannot
      * be bound again), so init's checked total of wire bytes already bounds the
      * sum: this exit is unreachable and has no dedicated test. */
@@ -688,6 +750,7 @@ void rematWireRelease(rematWireTable_t *t, uint16_t w) {
                     "released");
         exit(1);
     }
+    requireNotAMember(t, w, "rematWireRelease", "release");
     if (rec->hdr->data == NULL) {
         PRINT_ERROR("rematWireRelease: wire %s %u is not bound", wireKindName(rec->kind),
                     (unsigned)rec->index);
@@ -699,6 +762,7 @@ void rematWireRelease(rematWireTable_t *t, uint16_t w) {
                     wireKindName(rec->kind), (unsigned)rec->index);
         exit(1);
     }
+    releaseMembers(t, w);
 #ifdef ODT_REMAT_VERIFY
     poisonWireBytes(rec, rec->hdr->data);
 #endif

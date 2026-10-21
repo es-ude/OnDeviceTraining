@@ -20,6 +20,11 @@ already mattered enough to work around in code.
   their own `CMAKE_C_FLAGS`, which under CMake-preset semantics fully
   replaces the inherited value rather than appending to it — the pin
   deliberately does not reach them.
+- Every CI job runs on a pinned runner image (`ubuntu-24.04`, which ships
+  gcc 13; one ARM job on `ubuntu-22.04`), never on `ubuntu-latest`. GitHub
+  moved `ubuntu-latest` to 26.04 with gcc 15 in October 2026, and the guard
+  below stopped CI. Moving to a newer image is a deliberate toolchain change,
+  made together with the guard and checked against the bit-parity job.
 - CI asserts `gcc -dumpversion` major == `13` in `c-build-and-test` and
   `c-bit-parity` — the two jobs whose output feeds gold comparisons. The
   `c-ubsan-build-and-test` job also runs the gold suite on gcc but is not

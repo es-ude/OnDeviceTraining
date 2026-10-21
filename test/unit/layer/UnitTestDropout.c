@@ -1212,6 +1212,151 @@ void testDropoutBfpBackwardBridgeRoundsWithItsBackwardBridgeStream(void) {
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, BRIDGE_N);
 }
 
+/* Two headers over one block: loss and propLoss keep their own tensor_t, shape
+ * and quantization but share `block`, as an in-place dx plan binds a
+ * backward's gradIn and gradOut. */
+static void initTwoHeadersOverOneBlock(void *block, shape_t *lossShape, quantization_t *lossQ,
+                                       shape_t *propLossShape, quantization_t *propLossQ,
+                                       tensor_t *loss, tensor_t *propLoss) {
+    setTensorValues(loss, (uint8_t *)block, lossShape, lossQ, NULL);
+    setTensorValues(propLoss, (uint8_t *)block, propLossShape, propLossQ, NULL);
+}
+
+/* The FLOAT32 backward reads and writes index by index, so propLoss may share
+ * loss's bytes: the aliased run leaves exactly the bytes the disjoint run
+ * writes (the values of testBackwardFloatUsesMaskAndScale). */
+void testDropoutBackwardFloatAliasedMatchesDisjoint(void) {
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t lossShape = {.numberOfDimensions = 1, .dimensions = dims, .orderOfDimensions = order};
+    shape_t propLossShape = lossShape;
+    quantization_t lossQ;
+    quantization_t propLossQ;
+    initFloat32Quantization(&lossQ);
+    initFloat32Quantization(&propLossQ);
+    tensor_t *mask = buildBoolMask(4);
+    fillMaskKeepEven(mask);
+    quantization_t *fq = quantizationInitFloat();
+    quantization_t *bq = quantizationInitFloat();
+    dropoutConfig_t dcfg;
+    initDropoutConfig(&dcfg, 0.5f, mask, fq, bq);
+    dcfg.training = true;
+    layerConfig_t lcfg;
+    layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
+
+    float lossData[4] = {1.f, 2.f, 3.f, 4.f};
+    float disjointData[4] = {0};
+    tensor_t loss;
+    tensor_t propLoss;
+    setTensorValues(&loss, (uint8_t *)lossData, &lossShape, &lossQ, NULL);
+    setTensorValues(&propLoss, (uint8_t *)disjointData, &propLossShape, &propLossQ, NULL);
+    dropoutBackward(&layer, NULL, &loss, &propLoss, NULL);
+
+    float block[4] = {1.f, 2.f, 3.f, 4.f};
+    tensor_t aliasLoss;
+    tensor_t aliasPropLoss;
+    initTwoHeadersOverOneBlock(block, &lossShape, &lossQ, &propLossShape, &propLossQ, &aliasLoss,
+                               &aliasPropLoss);
+    dropoutBackward(&layer, NULL, &aliasLoss, &aliasPropLoss, NULL);
+
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeTensor(mask);
+
+    float expected[4] = {2.f, 0.f, 6.f, 0.f};
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, disjointData, 4);
+    TEST_ASSERT_EQUAL_MEMORY(disjointData, block, sizeof block);
+}
+
+/* The SYM_INT32 backward copies codes index by index and folds the 1/(1-p)
+ * factor into propLoss's own scale. Aliased, the codes equal the disjoint
+ * run's, the propLoss scale is bit-equal to it, and the loss header's scale is
+ * unchanged. */
+void testDropoutBackwardSymInt32AliasedMatchesDisjoint(void) {
+    const float lossScale = 0.2f;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t lossShape = {.numberOfDimensions = 1, .dimensions = dims, .orderOfDimensions = order};
+    shape_t propLossShape = lossShape;
+    symInt32QConfig_t qc[4];
+    quantization_t q[4]; /* loss, propLoss, aliased loss, aliased propLoss */
+    for (size_t i = 0; i < 4; i++) {
+        initSymInt32QConfig(HALF_AWAY, &qc[i]);
+        qc[i].scale = 1.f;
+        initSymInt32Quantization(&qc[i], &q[i]);
+    }
+    qc[0].scale = lossScale;
+    qc[2].scale = lossScale;
+    tensor_t *mask = buildBoolMask(4);
+    fillMaskKeepEven(mask);
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *bq = quantizationInitSymInt32(HALF_AWAY);
+    dropoutConfig_t dcfg;
+    initDropoutConfig(&dcfg, 0.5f, mask, fq, bq);
+    dcfg.training = true;
+    layerConfig_t lcfg;
+    layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
+
+    int32_t lossCodes[4] = {5, 6, 7, 8};
+    int32_t disjointCodes[4] = {0};
+    tensor_t loss;
+    tensor_t propLoss;
+    setTensorValues(&loss, (uint8_t *)lossCodes, &lossShape, &q[0], NULL);
+    setTensorValues(&propLoss, (uint8_t *)disjointCodes, &propLossShape, &q[1], NULL);
+    dropoutBackward(&layer, NULL, &loss, &propLoss, NULL);
+
+    int32_t block[4] = {5, 6, 7, 8};
+    tensor_t aliasLoss;
+    tensor_t aliasPropLoss;
+    initTwoHeadersOverOneBlock(block, &lossShape, &q[2], &propLossShape, &q[3], &aliasLoss,
+                               &aliasPropLoss);
+    dropoutBackward(&layer, NULL, &aliasLoss, &aliasPropLoss, NULL);
+
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeTensor(mask);
+
+    int32_t expected[4] = {5, 0, 7, 0};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, disjointCodes, 4);
+    TEST_ASSERT_EQUAL_MEMORY(disjointCodes, block, sizeof block);
+    TEST_ASSERT_EQUAL_MEMORY(&qc[1].scale, &qc[3].scale, sizeof(float));
+    TEST_ASSERT_EQUAL_MEMORY(&lossScale, &qc[2].scale, sizeof(float));
+}
+
+/* The backward's BFP bridge re-reads the source in its second pass, so it
+ * rejects a propLoss that shares loss's packed payload (an in-place dx plan
+ * never pairs BFP wires). The fixture shares the payload only: each header
+ * keeps its own qConfig and exponent array. */
+void testDropoutBackwardBfpRejectsAPayloadAlias(void) {
+    size_t dims[] = {1, 8};
+    tensor_t *loss = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, NULL, NULL);
+    tensor_t *propLoss = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, NULL, NULL);
+    tensor_t *mask = buildBoolMask(8);
+    fillMaskKeepEven(mask);
+    quantization_t *fq = quantizationInitBfpGrouped(6, 8, HALF_AWAY, 2, 4);
+    quantization_t *bq = quantizationInitBfpGrouped(6, 8, HALF_AWAY, 2, 4);
+    dropoutConfig_t dcfg;
+    initDropoutConfig(&dcfg, 0.5f, mask, fq, bq);
+    dcfg.training = true;
+    layerConfig_t lcfg;
+    layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
+    tensor_t payloadAlias;
+    setTensorValues(&payloadAlias, loss->data, propLoss->shape, propLoss->quantization, NULL);
+
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "Dropout BFP bridge: source and destination wires must not alias in "
+                             "EITHER their packed payload or their exponent array -- pass 2 "
+                             "re-reads the source under its ORIGINAL exponents, which pass 1 has "
+                             "already overwritten on the destination",
+                             dropoutBackward(&layer, NULL, loss, &payloadAlias, NULL));
+
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeTensor(mask);
+    freeTensor(propLoss);
+    freeTensor(loss);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testForwardEvalIdentityFloat);
@@ -1224,6 +1369,8 @@ int main(void) {
     RUN_TEST(testForwardTrainingSymInt32ScaleFold);
     RUN_TEST(testBackwardFloatUsesMaskAndScale);
     RUN_TEST(testBackwardSymInt32UsesMaskAndScaleFold);
+    RUN_TEST(testDropoutBackwardFloatAliasedMatchesDisjoint);
+    RUN_TEST(testDropoutBackwardSymInt32AliasedMatchesDisjoint);
     RUN_TEST(testDropoutBackwardExitsOnDtypeMismatch);
     RUN_TEST(testDropoutForwardTrainingBfpBridgeRepacksWithFreshExponents);
     RUN_TEST(testDropoutForwardTrainingBfpSaturatesAtTheExponentCap);
@@ -1232,6 +1379,7 @@ int main(void) {
     RUN_TEST(testDropoutBackwardBfpArmDispatchesThroughDropoutBackward);
     RUN_TEST(testDropoutBfpGuardsNarrowedNotRemoved);
     RUN_TEST(testDropoutBfpRejectsUnequalCountsAndAliasedExponents);
+    RUN_TEST(testDropoutBackwardBfpRejectsAPayloadAlias);
     RUN_TEST(testVtableForwardIdentityFloat);
     RUN_TEST(testCalcOutputShapeIsIdentity);
     RUN_TEST(testFactoryBuildsAndForwards);

@@ -344,6 +344,8 @@ void dropoutForward(layer_t *dropoutLayer, tensor_t *input, tensor_t *output,
     }
 }
 
+/* Alias-capable: propLoss may share loss's bytes (same-index read-then-write),
+ * as an in-place dx plan binds them. */
 static void dropoutBackwardFloat(dropoutConfig_t *cfg, tensor_t *loss, tensor_t *propLoss) {
     size_t numberOfElements = calcNumberOfElementsByTensor(loss);
     float *gradOut = (float *)loss->data;
@@ -355,6 +357,9 @@ static void dropoutBackwardFloat(dropoutConfig_t *cfg, tensor_t *loss, tensor_t 
     }
 }
 
+/* Alias-capable: propLoss may share loss's bytes (same-index read-then-write),
+ * as an in-place dx plan binds them; the two wires keep their own qConfigs, so
+ * the scale fold below writes propLoss's config only. */
 static void dropoutBackwardSymInt32(dropoutConfig_t *cfg, tensor_t *loss, tensor_t *propLoss) {
     size_t numberOfElements = calcNumberOfElementsByTensor(loss);
     int32_t *gradOut = (int32_t *)loss->data;

@@ -69,7 +69,13 @@ void flattenBackward(layer_t *flattenLayer, tensor_t *forwardInput, tensor_t *lo
 
     size_t numberOfElements = calcNumberOfElementsByTensor(loss);
     size_t numberOfBytes = calcNumberOfBytesForData(loss->quantization, numberOfElements);
-    memcpy(propLoss->data, loss->data, numberOfBytes);
+    /* propLoss may be bound over loss's bytes (an in-place dx plan does so). A
+     * copy onto itself is the identity, and memcpy's restrict parameters make
+     * memcpy(p, p, n) undefined, so each copy is skipped on its own alias (the
+     * Dropout verbatim-carry idiom). */
+    if (propLoss->data != loss->data) {
+        memcpy(propLoss->data, loss->data, numberOfBytes);
+    }
 
     if (loss->quantization->type == SYM_INT32) {
         symInt32QConfig_t *lossQC = loss->quantization->qConfig;
@@ -78,7 +84,9 @@ void flattenBackward(layer_t *flattenLayer, tensor_t *forwardInput, tensor_t *lo
     } else if (loss->quantization->type == BFP) {
         const bfpQConfig_t *lossQC = loss->quantization->qConfig;
         bfpQConfig_t *propLossQC = propLoss->quantization->qConfig;
-        memcpy(propLossQC->exponents, lossQC->exponents, lossQC->numGroups);
+        if (propLossQC->exponents != lossQC->exponents) {
+            memcpy(propLossQC->exponents, lossQC->exponents, lossQC->numGroups);
+        }
     }
 }
 

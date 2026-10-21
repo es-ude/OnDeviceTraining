@@ -448,6 +448,81 @@ void testFlattenRejectsUnequalBfpElementCounts(void) {
     freeTensor(bfpIn);
 }
 
+/* Two headers over one block: loss and propLoss keep their own tensor_t, shape
+ * and quantization but share `block`, as an in-place dx plan binds a
+ * backward's gradIn and gradOut. */
+static void initTwoHeadersOverOneBlock(void *block, shape_t *lossShape, quantization_t *lossQ,
+                                       shape_t *propLossShape, quantization_t *propLossQ,
+                                       tensor_t *loss, tensor_t *propLoss) {
+    setTensorValues(loss, (uint8_t *)block, lossShape, lossQ, NULL);
+    setTensorValues(propLoss, (uint8_t *)block, propLossShape, propLossQ, NULL);
+}
+
+/* Bound in place, Flatten's backward copies a block onto itself: the bytes, the
+ * SYM scale and the BFP exponents stay as they were. The two headers keep
+ * their own ranks ([1, 6] for loss, [1, 2, 3] for propLoss); the BFP pair also
+ * shares one exponent array, filled into caller-owned storage. */
+void testFlattenBackwardAliasedIsIdentity(void) {
+    size_t lossDims[] = {1, 6};
+    size_t lossOrder[] = {0, 1};
+    size_t propLossDims[] = {1, 2, 3};
+    size_t propLossOrder[] = {0, 1, 2};
+    shape_t lossShape = {
+        .numberOfDimensions = 2, .dimensions = lossDims, .orderOfDimensions = lossOrder};
+    shape_t propLossShape = {
+        .numberOfDimensions = 3, .dimensions = propLossDims, .orderOfDimensions = propLossOrder};
+    tensor_t loss;
+    tensor_t propLoss;
+
+    float floatBlock[6] = {0.1f, 0.2f, -0.3f, 0.4f, 0.5f, 0.6f};
+    float floatBefore[6];
+    memcpy(floatBefore, floatBlock, sizeof floatBlock);
+    quantization_t floatLossQ;
+    quantization_t floatPropLossQ;
+    initFloat32Quantization(&floatLossQ);
+    initFloat32Quantization(&floatPropLossQ);
+    initTwoHeadersOverOneBlock(floatBlock, &lossShape, &floatLossQ, &propLossShape, &floatPropLossQ,
+                               &loss, &propLoss);
+    flattenBackward(NULL, NULL, &loss, &propLoss, NULL);
+    TEST_ASSERT_EQUAL_MEMORY(floatBefore, floatBlock, sizeof floatBlock);
+
+    int32_t symBlock[6] = {1, -2, 3, -4, 5, -6};
+    int32_t symBefore[6];
+    memcpy(symBefore, symBlock, sizeof symBlock);
+    symInt32QConfig_t symLossQC;
+    symInt32QConfig_t symPropLossQC;
+    initSymInt32QConfig(HALF_AWAY, &symLossQC);
+    initSymInt32QConfig(HALF_AWAY, &symPropLossQC);
+    symLossQC.scale = 0.5f;
+    symPropLossQC.scale = 1.f;
+    quantization_t symLossQ;
+    quantization_t symPropLossQ;
+    initSymInt32Quantization(&symLossQC, &symLossQ);
+    initSymInt32Quantization(&symPropLossQC, &symPropLossQ);
+    initTwoHeadersOverOneBlock(symBlock, &lossShape, &symLossQ, &propLossShape, &symPropLossQ,
+                               &loss, &propLoss);
+    flattenBackward(NULL, NULL, &loss, &propLoss, NULL);
+    TEST_ASSERT_EQUAL_MEMORY(symBefore, symBlock, sizeof symBlock);
+    TEST_ASSERT_EQUAL_FLOAT(0.5f, symPropLossQC.scale);
+
+    uint8_t bfpBlock[6] = {0x11, 0xEE, 0x22, 0xDD, 0x33, 0xCC}; /* six 8-bit codes */
+    uint8_t bfpBefore[6];
+    memcpy(bfpBefore, bfpBlock, sizeof bfpBlock);
+    uint8_t exponents[1];
+    bfpQConfig_t bfpLossQC;
+    bfpQConfig_t bfpPropLossQC;
+    initBfpQConfigInto(8, 8, HALF_AWAY, exponents, &bfpLossQC);
+    initBfpQConfigInto(8, 8, HALF_AWAY, exponents, &bfpPropLossQC);
+    exponents[0] = 130;
+    quantization_t bfpLossQ = {.type = BFP, .qConfig = &bfpLossQC};
+    quantization_t bfpPropLossQ = {.type = BFP, .qConfig = &bfpPropLossQC};
+    initTwoHeadersOverOneBlock(bfpBlock, &lossShape, &bfpLossQ, &propLossShape, &bfpPropLossQ,
+                               &loss, &propLoss);
+    flattenBackward(NULL, NULL, &loss, &propLoss, NULL);
+    TEST_ASSERT_EQUAL_MEMORY(bfpBefore, bfpBlock, sizeof bfpBlock);
+    TEST_ASSERT_EQUAL_UINT8(130, exponents[0]);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testFlattenLayerInit_ReturnsFlattenTypedLayer);
@@ -458,6 +533,7 @@ int main(void) {
     RUN_TEST(testFlattenBackwardSymInt32_PropagatesScale);
     RUN_TEST(testFlattenForwardCarriesBfpExponents);
     RUN_TEST(testFlattenBackwardCarriesBfpExponents);
+    RUN_TEST(testFlattenBackwardAliasedIsIdentity);
     RUN_TEST(testFlattenRejectsMixedAndMismatchedBfpWires);
     RUN_TEST(testFlattenRejectsUnequalBfpElementCounts);
     return UNITY_END();

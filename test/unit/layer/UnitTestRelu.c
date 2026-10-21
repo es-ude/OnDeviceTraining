@@ -693,6 +693,153 @@ void testReluBackwardExitsOnDtypeMismatch() {
     freeQuantization(floatQ);
 }
 
+/* Two headers over one block: loss and propLoss keep their own tensor_t, shape
+ * and quantization but share `block`, as an in-place dx plan binds a
+ * backward's gradIn and gradOut. */
+static void initTwoHeadersOverOneBlock(void *block, shape_t *lossShape, quantization_t *lossQ,
+                                       shape_t *propLossShape, quantization_t *propLossQ,
+                                       tensor_t *loss, tensor_t *propLoss) {
+    setTensorValues(loss, (uint8_t *)block, lossShape, lossQ, NULL);
+    setTensorValues(propLoss, (uint8_t *)block, propLossShape, propLossQ, NULL);
+}
+
+/* The FLOAT32 backward reads and writes index by index, so propLoss may share
+ * loss's bytes: the aliased run leaves exactly the bytes the disjoint run
+ * writes (the values of testReluBackwardFloat). */
+void testReluBackwardFloatAliasedMatchesDisjoint(void) {
+    size_t dims[] = {6};
+    size_t order[] = {0};
+    shape_t fwdShape = {.numberOfDimensions = 1, .dimensions = dims, .orderOfDimensions = order};
+    shape_t lossShape = fwdShape;
+    shape_t propLossShape = fwdShape;
+    quantization_t fwdQ;
+    quantization_t lossQ;
+    quantization_t propLossQ;
+    initFloat32Quantization(&fwdQ);
+    initFloat32Quantization(&lossQ);
+    initFloat32Quantization(&propLossQ);
+    reluConfig_t cfg = {0};
+    cfg.propLossMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
+    layerConfig_t lc = {.relu = &cfg};
+    layer_t layer = {.type = RELU, .config = &lc};
+    float fwdData[6] = {-1.f, 0.f, 1.f, 2.f, 5.f, -6.f};
+    tensor_t forwardInput;
+    setTensorValues(&forwardInput, (uint8_t *)fwdData, &fwdShape, &fwdQ, NULL);
+
+    float lossData[6] = {0.f, 2.f, -4.f, 6.f, 3.f, 2.f};
+    float disjointData[6] = {0};
+    tensor_t loss;
+    tensor_t propLoss;
+    setTensorValues(&loss, (uint8_t *)lossData, &lossShape, &lossQ, NULL);
+    setTensorValues(&propLoss, (uint8_t *)disjointData, &propLossShape, &propLossQ, NULL);
+    reluBackward(&layer, &forwardInput, &loss, &propLoss, NULL);
+
+    float block[6] = {0.f, 2.f, -4.f, 6.f, 3.f, 2.f};
+    tensor_t aliasLoss;
+    tensor_t aliasPropLoss;
+    initTwoHeadersOverOneBlock(block, &lossShape, &lossQ, &propLossShape, &propLossQ, &aliasLoss,
+                               &aliasPropLoss);
+    reluBackward(&layer, &forwardInput, &aliasLoss, &aliasPropLoss, NULL);
+
+    float expected[6] = {0.f, 0.f, -4.f, 6.f, 3.f, 0.f};
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, disjointData, 6);
+    TEST_ASSERT_EQUAL_MEMORY(disjointData, block, sizeof block);
+}
+
+/* The SYM_INT32 backward copies codes index by index and the scale from loss's
+ * qConfig into propLoss's. Aliased, the codes equal the disjoint run's, the
+ * propLoss scale is bit-equal to it, and the loss header's scale is unchanged. */
+void testReluBackwardSymInt32AliasedMatchesDisjoint(void) {
+    const float lossScale = 0.25f;
+    size_t dims[] = {6};
+    size_t order[] = {0};
+    shape_t fwdShape = {.numberOfDimensions = 1, .dimensions = dims, .orderOfDimensions = order};
+    shape_t lossShape = fwdShape;
+    shape_t propLossShape = fwdShape;
+    symInt32QConfig_t qc[5];
+    quantization_t q[5]; /* forwardInput, loss, propLoss, aliased loss, aliased propLoss */
+    for (size_t i = 0; i < 5; i++) {
+        initSymInt32QConfig(HALF_AWAY, &qc[i]);
+        qc[i].scale = 1.f;
+        initSymInt32Quantization(&qc[i], &q[i]);
+    }
+    qc[1].scale = lossScale;
+    qc[3].scale = lossScale;
+    reluConfig_t cfg = {0};
+    cfg.propLossMath = (arithmetic_t){.type = ARITH_SYM_INT32, .roundingMode = HALF_AWAY};
+    layerConfig_t lc = {.relu = &cfg};
+    layer_t layer = {.type = RELU, .config = &lc};
+    int32_t fwdCodes[6] = {-1, 0, 1, 2, 5, -6};
+    tensor_t forwardInput;
+    setTensorValues(&forwardInput, (uint8_t *)fwdCodes, &fwdShape, &q[0], NULL);
+
+    int32_t lossCodes[6] = {0, 2, -4, 6, 3, 2};
+    int32_t disjointCodes[6] = {0};
+    tensor_t loss;
+    tensor_t propLoss;
+    setTensorValues(&loss, (uint8_t *)lossCodes, &lossShape, &q[1], NULL);
+    setTensorValues(&propLoss, (uint8_t *)disjointCodes, &propLossShape, &q[2], NULL);
+    reluBackward(&layer, &forwardInput, &loss, &propLoss, NULL);
+
+    int32_t block[6] = {0, 2, -4, 6, 3, 2};
+    tensor_t aliasLoss;
+    tensor_t aliasPropLoss;
+    initTwoHeadersOverOneBlock(block, &lossShape, &q[3], &propLossShape, &q[4], &aliasLoss,
+                               &aliasPropLoss);
+    reluBackward(&layer, &forwardInput, &aliasLoss, &aliasPropLoss, NULL);
+
+    int32_t expected[6] = {0, 0, -4, 6, 3, 0};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, disjointCodes, 6);
+    TEST_ASSERT_EQUAL_MEMORY(disjointCodes, block, sizeof block);
+    TEST_ASSERT_EQUAL_MEMORY(&qc[2].scale, &qc[4].scale, sizeof(float));
+    TEST_ASSERT_EQUAL_MEMORY(&lossScale, &qc[3].scale, sizeof(float));
+}
+
+/* BFP wires never alias: the kernel rejects a loss/propLoss pair that shares
+ * its packed payload, its qConfig or its exponent array. Each fixture shares
+ * one of them; the shared qConfig also shares its exponent array (one qConfig
+ * owns one array), and two distinct qConfigs share one array only when both
+ * are filled into caller-owned storage. */
+void testReluBackwardBfpRejectsEveryAlias(void) {
+    const char *message = "ReLU BFP backward: loss and propLoss must not alias in their packed "
+                          "payload, their qConfig or their exponent array -- BFP wires never "
+                          "share bytes";
+    size_t dims[] = {1, 8};
+    int32_t fwdCodes[8] = {5, -3, 0, 40, -1, 17, 9, -80};
+    uint8_t fwdExps[1] = {129};
+    int32_t lossCodes[8] = {11, -6, 30, -12, 4, -20, 7, 25};
+    uint8_t lossExps[2] = {131, 124};
+    tensor_t *forwardInput = buildBfpWireWithCodes(dims, 2, 8, 8, 1, 0, fwdCodes, fwdExps);
+    tensor_t *loss = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, lossCodes, lossExps);
+    tensor_t *propLoss = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, NULL, NULL);
+
+    tensor_t payloadAlias; /* propLoss's own qConfig over loss's payload */
+    setTensorValues(&payloadAlias, loss->data, propLoss->shape, propLoss->quantization, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(1, message, reluBackwardBfp(forwardInput, loss, &payloadAlias));
+
+    tensor_t qConfigAlias; /* propLoss's own payload under loss's quantization */
+    setTensorValues(&qConfigAlias, propLoss->data, propLoss->shape, loss->quantization, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(1, message, reluBackwardBfp(forwardInput, loss, &qConfigAlias));
+
+    uint8_t sharedExps[2];
+    bfpQConfig_t lossQC;
+    bfpQConfig_t propLossQC;
+    initBfpQConfigGroupedInto(6, 8, HALF_AWAY, 2, 4, sharedExps, &lossQC);
+    initBfpQConfigGroupedInto(6, 8, HALF_AWAY, 2, 4, sharedExps, &propLossQC);
+    quantization_t lossQ = {.type = BFP, .qConfig = &lossQC};
+    quantization_t propLossQ = {.type = BFP, .qConfig = &propLossQC};
+    tensor_t exponentsLoss;
+    tensor_t exponentsAlias; /* own payloads, own qConfigs, one exponent array */
+    setTensorValues(&exponentsLoss, loss->data, loss->shape, &lossQ, NULL);
+    setTensorValues(&exponentsAlias, propLoss->data, propLoss->shape, &propLossQ, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(1, message,
+                             reluBackwardBfp(forwardInput, &exponentsLoss, &exponentsAlias));
+
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(forwardInput);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testReluForwardFloat);
@@ -700,6 +847,8 @@ int main(void) {
 
     RUN_TEST(testReluBackwardFloat);
     RUN_TEST(testReluBackwardSymInt32);
+    RUN_TEST(testReluBackwardFloatAliasedMatchesDisjoint);
+    RUN_TEST(testReluBackwardSymInt32AliasedMatchesDisjoint);
     RUN_TEST(testReluBackwardExitsOnDtypeMismatch);
     RUN_TEST(testReluForwardBfpClampsCodesAndCarriesExponents);
     RUN_TEST(testReluForwardBfpArmDispatchesThroughReluForward);
@@ -710,6 +859,7 @@ int main(void) {
     RUN_TEST(testReluBackwardBfpArmDispatchesThroughReluBackward);
     RUN_TEST(testReluBackwardBfpArmRejectsNonBfpWire);
     RUN_TEST(testReluBackwardBfpArmRejectsUnequalElementCounts);
+    RUN_TEST(testReluBackwardBfpRejectsEveryAlias);
 
     RUN_TEST(testReluLayerInitAndFreeRoundTrip);
 

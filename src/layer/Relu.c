@@ -76,6 +76,8 @@ void reluForward(layer_t *reluLayer, tensor_t *input, tensor_t *output, const la
     }
 }
 
+/* Alias-capable: propLoss may share loss's bytes (same-index read-then-write),
+ * as an in-place dx plan binds them. */
 void reluBackwardFloat(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
     size_t numberOfElements = calcNumberOfElementsByTensor(forwardInput);
 
@@ -92,6 +94,9 @@ void reluBackwardFloat(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLos
     }
 }
 
+/* Alias-capable: propLoss may share loss's bytes (same-index read-then-write),
+ * as an in-place dx plan binds them; the two wires keep their own qConfigs, so
+ * the scale copy below goes from one config to the other. */
 void reluBackwardSymInt32(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
     size_t numberOfElements = calcNumberOfElementsByTensor(forwardInput);
 
@@ -141,6 +146,17 @@ void reluBackwardBfp(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss)
     bfpRequireSameGeometry(lossQC, numberOfElements, propLossQC,
                            calcNumberOfElementsByTensor(propLoss),
                            "ReLU backward BFP (loss -> propLoss)");
+    /* BFP wires never alias: an in-place dx plan never pairs them, so a shared
+     * payload, qConfig or exponent array here is a caller error. The loop below
+     * reads each chunk before writing it, so this reject enforces the rule; it
+     * does not fix a hazard. A shared qConfig implies a shared exponent array;
+     * the qConfig term stays so the condition reads like Dropout's bridge. */
+    if (propLoss->data == loss->data || propLossQC == lossQC ||
+        propLossQC->exponents == lossQC->exponents) {
+        PRINT_ERROR("ReLU BFP backward: loss and propLoss must not alias in their packed payload, "
+                    "their qConfig or their exponent array -- BFP wires never share bytes");
+        exit(1);
+    }
 
     int32_t inCodes[ODT_CONVERSION_CHUNK_ELEMS];
     int32_t lossCodes[ODT_CONVERSION_CHUNK_ELEMS];

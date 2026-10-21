@@ -1044,6 +1044,115 @@ void testStepAcceptsADeadInputSharingBytesWithTheOutput(void) {
     freeFixture(&f, &s);
 }
 
+/* ---- in-place dx: the one sharing the rules admit ---- */
+
+/* HAR's chains (members GRAD 9, 7, 4 and 1) and MLP3's (GRAD 1 over GRAD 2)
+ * under LIVENESS + inPlaceDx: every marked pair shares one base, and every
+ * call is otherwise checked as before, twice per plan, on both rows. */
+void testCheckAcceptsTheMarkedInPlacePairsOnBothRows(void) {
+    const rowInit_t inits[] = {initArena, initHeap};
+    void (*builds[])(fixture_t *) = {buildHarModel, buildMlp3Model};
+    for (size_t k = 0; k < 2u; k++) {
+        for (size_t b = 0; b < 2u; b++) {
+            fixture_t f;
+            builds[b](&f);
+            rematScheduler_t s = inits[k](&f, &g_livenessInPlace);
+            checkedCall(&f, &s);
+            checkedCall(&f, &s);
+            freeFixture(&f, &s);
+        }
+    }
+}
+
+/* Linear(2->4) -> ReLU -> Linear(4->4) -> Linear(4->2) under MSE: wires ACT
+ * 0..4 = 0..4, the seed GRAD 4 = 5, GRAD 3 = 6, GRAD 2 = 7, GRAD 1 = 8; steps
+ * F0..F3, LF, LB, B3..B0 = 0..9. Under inPlaceDx the ReLU's GRAD 1 is a member
+ * over GRAD 2; the square Linear's GRAD 2 has GRAD 3's 16 bytes but no mark. */
+static void buildSquareLinearChainModel(fixture_t *f) {
+    f->model[0] = makeLinear(2, 4, false, 0);
+    f->model[1] = makeRelu(&g_floatQ);
+    f->model[2] = makeLinear(4, 4, false, 2);
+    f->model[3] = makeLinear(4, 2, false, 3);
+    f->n = 4;
+    f->lt = MSE;
+    f->x = makeResidentInput(&f->in, (size_t[]){1, 2}, 2);
+}
+
+/* The mark is the only key: in a plan that has marks, an unmarked pair of
+ * equal bytes placed on one base still dies (the unmarked HAR pair above,
+ * GRAD 9 onto GRAD 10 in a plan without marks, stays as it is). */
+void testStepExitsOnAnUnmarkedPairOfEqualBytesInAnInPlacePlan(void) {
+    fixture_t f;
+    buildSquareLinearChainModel(&f);
+    rematScheduler_t s = initArena(&f, &g_livenessInPlace);
+    TEST_ASSERT_EQUAL_UINT8(1, s.plan->inPlace[8]);
+    TEST_ASSERT_EQUAL_UINT8(0, s.plan->inPlace[7]);
+    const rematProgram_t *p = &s.plan->train;
+    s.row.arena.offsets[rangeOf(p, 7)] = s.row.arena.offsets[rangeOf(p, 6)];
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "step #7 BACKWARD(layer 2) violates 'operands share bytes: "
+                             "gradIn/out' (GRAD 3 and GRAD 2)",
+                             driveCall(&f, &s));
+    freeFixture(&f, &s);
+}
+
+/* MLP3 under LIVENESS + inPlaceDx: BACKWARD(1), step 6, reads ACT 1 and GRAD 2
+ * (wire 5) and writes GRAD 1 (wire 6), the member, into GRAD 2's bytes. */
+static void assertMlp3InPlaceRejectsAtTheRelu(tamperFn_t tamper, const char *violation) {
+    fixture_t f;
+    buildMlp3Model(&f);
+    rematScheduler_t s = initArena(&f, &g_livenessInPlace);
+    ASSERT_EXITS_WITH_OUTPUT(1, violation, offerStep(&f, &s, 6, NULL, tamper));
+    freeFixture(&f, &s);
+}
+
+static void shiftTheMemberByOneFloat(rematCheck_t *c, rematScheduler_t *s) {
+    (void)c;
+    rematGradHdr(s->wires, 1)->data += sizeof(float);
+}
+
+static void shrinkTheMembersRecord(rematCheck_t *c, rematScheduler_t *s) {
+    (void)c;
+    s->wires->wires[rematGradId(s->wires, 1)].bytes -= sizeof(float);
+}
+
+/* An identical base and equal bytes, nothing looser: a marked pair that
+ * overlaps in part, or whose sizes differ, dies. */
+void testStepExitsOnAMarkedPairThatIsNotAnExactAlias(void) {
+    assertMlp3InPlaceRejectsAtTheRelu(shiftTheMemberByOneFloat,
+                                      "step #6 BACKWARD(layer 1) violates 'operands share bytes: "
+                                      "gradIn/out' (GRAD 2 and GRAD 1)");
+    assertMlp3InPlaceRejectsAtTheRelu(shrinkTheMembersRecord,
+                                      "step #6 BACKWARD(layer 1) violates 'operands share bytes: "
+                                      "gradIn/out' (GRAD 2 and GRAD 1)");
+}
+
+static void aliasAct1OntoTheChain(rematCheck_t *c, rematScheduler_t *s) {
+    (void)c;
+    rematActHdr(s->wires, 1)->data = rematGradHdr(s->wires, 2)->data;
+}
+
+/* Only gradIn/out is exempt: the ReLU reads its input, which never shares. */
+void testStepExitsWhenAMarkedStepsInputSharesTheChain(void) {
+    assertMlp3InPlaceRejectsAtTheRelu(aliasAct1OntoTheChain,
+                                      "step #6 BACKWARD(layer 1) violates 'operands share bytes: "
+                                      "in/gradIn' (ACT 1 and GRAD 2)");
+}
+
+static void dropThePlansMarks(rematCheck_t *c, rematScheduler_t *s) {
+    (void)c;
+    s->plan->inPlace = NULL;
+}
+
+/* The checker reads the marks from the plan, not from the table the SDK binds
+ * through: without the plan's marks the shared pair dies, although the table
+ * still holds them. */
+void testStepReadsTheMarksFromThePlan(void) {
+    assertMlp3InPlaceRejectsAtTheRelu(dropThePlansMarks,
+                                      "step #6 BACKWARD(layer 1) violates 'operands share bytes: "
+                                      "gradIn/out' (GRAD 2 and GRAD 1)");
+}
+
 /* ---- the stream-level checks ---- */
 
 /* Death-test children only: `k` checked steps, then the stream is declared
@@ -1318,6 +1427,11 @@ int main(void) {
     RUN_TEST(testStepExitsWhenALossBackwardsInputAndOutputShareBytes);
     RUN_TEST(testStepExitsOnNonResidencyBeforeSharedBytes);
     RUN_TEST(testStepAcceptsADeadInputSharingBytesWithTheOutput);
+    RUN_TEST(testCheckAcceptsTheMarkedInPlacePairsOnBothRows);
+    RUN_TEST(testStepExitsOnAnUnmarkedPairOfEqualBytesInAnInPlacePlan);
+    RUN_TEST(testStepExitsOnAMarkedPairThatIsNotAnExactAlias);
+    RUN_TEST(testStepExitsWhenAMarkedStepsInputSharesTheChain);
+    RUN_TEST(testStepReadsTheMarksFromThePlan);
     RUN_TEST(testFinishExitsOnAMissingForward);
     RUN_TEST(testFinishExitsOnAMissingLossForward);
     RUN_TEST(testFinishExitsOnAMissingLossBackward);

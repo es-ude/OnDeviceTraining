@@ -2442,22 +2442,25 @@ static const matrixCell_t g_inPlaceCells[2] = {
     {"heap/liveness+inplace", REMAT_HEAP, &g_livenessInPlace},
 };
 
-static void runTheMlpInPlace(const matrixCell_t *cell) {
+/* The first in-place call end to end: on both rows the MLP under LIVENESS +
+ * inPlaceDx gives the reference's loss, output, grads, hook events and trace
+ * (remat P1, P3-P5) and observes its planned peak (P8). The trace's agrad of
+ * the ReLU's gradIn is taken before the ReLU writes over it: a sink borrows
+ * the tensor only for the duration of the call. */
+void testAnInPlaceMlpMatchesTheReferenceOnBothRows(void) {
     const rngKey_t key = zooCallKey(0);
-    (void)captureCell(buildMlp, cell, &key);
-}
-
-/* Until the checker admits a pair the plan marked, a call on an in-place plan
- * stops by name at the first in-place step, never runs unchecked. */
-void testAnInPlaceCallStopsAtTheCheckersByteRuleOnBothRows(void) {
-    ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[arena]: step #6 BACKWARD(layer 1) violates 'operands share "
-                             "bytes: gradIn/out' (GRAD 2 and GRAD 1)",
-                             runTheMlpInPlace(&g_inPlaceCells[0]));
-    ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[heap]: step #6 BACKWARD(layer 1) violates 'operands share "
-                             "bytes: gradIn/out' (GRAD 2 and GRAD 1)",
-                             runTheMlpInPlace(&g_inPlaceCells[1]));
+    for (size_t k = 0; k < 2u; k++) {
+        const matrixCell_t *cell = &g_inPlaceCells[k];
+        cellRun_t c = captureCell(buildMlp, cell, &key);
+        assertConforms(cell->name);
+        TEST_ASSERT_TRUE_MESSAGE(c.report.peakLiveBytes > 0,
+                                 say(cell->name, "remat P8: a planned peak"));
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(c.report.peakLiveBytes, c.report.observedPeakLiveBytes,
+                                         say(cell->name, "remat P8: the planned peak"));
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(
+            c.memBeforeInit, c.memAfterDeinit,
+            say(cell->name, "remat P5: the deinit returns what the init reserved"));
+    }
 }
 
 int main(void) {
@@ -2588,6 +2591,6 @@ int main(void) {
     RUN_TEST(testRecomputingTheBfpSrDropoutBridgeMatchesTheReferenceOnArena);
     RUN_TEST(testRecomputingTheBfpSrDropoutBridgeMatchesTheReferenceOnHeap);
     RUN_TEST(testRefwdWireBitIdenticalToFwd);
-    RUN_TEST(testAnInPlaceCallStopsAtTheCheckersByteRuleOnBothRows);
+    RUN_TEST(testAnInPlaceMlpMatchesTheReferenceOnBothRows);
     return UNITY_END();
 }

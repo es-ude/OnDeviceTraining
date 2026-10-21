@@ -302,6 +302,22 @@ static void requireApart(const rematCheck_t *c, const rematStep_t *st, uint16_t 
     }
 }
 
+/* The one sharing the rules admit: a BACKWARD that writes its dx into the
+ * bytes of the gradient it reads, for a pair the plan marked (out right after
+ * gradIn), at an identical base and of equal bytes, never a partial overlap.
+ * The marks come from the plan, not from the table the rows bind through, so
+ * a call whose table missed them stops by name. The overwritten gradient
+ * needs no stale-read guard: it is read by exactly one BACKWARD, this one, and
+ * rule 3 fixes the order. */
+static bool inPlacePair(const rematCheck_t *c, const stepWires_t *w) {
+    const uint8_t *marks = c->sched->plan->inPlace;
+    const rematWireTable_t *t = c->sched->wires;
+    return marks != NULL && w->gradIn != REMAT_NONE && w->out != REMAT_NONE &&
+           marks[w->out] != 0u && w->gradIn + 1u == w->out &&
+           rematWireHdr(t, w->gradIn)->data == rematWireHdr(t, w->out)->data &&
+           rematWireBytes(t, w->gradIn) == rematWireBytes(t, w->out);
+}
+
 /* Pairwise over every operand the step touches, not only gradIn/out: a
  * LayerNorm-style backward writes dx while it still reads x. A
  * dead input (W_dead) is not touched, so it is not compared. */
@@ -321,8 +337,12 @@ static void requireDisjoint(const rematCheck_t *c, const rematStep_t *st, const 
         ids[k] = w->out;
         roles[k++] = "out";
     }
+    bool alias = inPlacePair(c, w);
     for (size_t i = 0; i < k; i++) {
         for (size_t j = i + 1u; j < k; j++) {
+            if (alias && ids[i] == w->gradIn && ids[j] == w->out) {
+                continue;
+            }
             requireApart(c, st, ids[i], roles[i], ids[j], roles[j]);
         }
     }

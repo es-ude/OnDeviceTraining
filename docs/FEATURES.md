@@ -798,6 +798,13 @@ checkpointing, limitations, literature).
   reads that output and within 2n + 2 + n(n+1)/2 steps, and both the plan
   grammar and the checker reject recomputing a BatchNorm1d that tracks running
   statistics and is not frozen (its second forward would move them again).
+  With `rematPlanSpec_t.inPlaceDx` a ReLU, Dropout or Flatten backward writes
+  its dx into the bytes of the gradient it reads when both have one dtype, FLOAT32 or
+  SYM_INT32, and equal bytes (a BFP wire never shares); the plan keeps one
+  range per such chain, the buffer table binds the chain with its root, and
+  the checker admits exactly these plan-marked pairs (remat D41). The
+  gradients stay bit-identical; HAR's LIVENESS peak of training buffers falls
+  from 49152 B to 41216 B.
   The peak stack of a training call under a recompute plan is the larger of a
   layer forward and a layer backward, as without recompute; the CI stack
   measurement runs the default plan only.

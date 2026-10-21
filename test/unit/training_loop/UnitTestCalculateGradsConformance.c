@@ -978,10 +978,12 @@ void testTwoCallsInARowMatchTheReferenceOnDropout(void) {
     assertTwoCallsMatchTheReference(buildDropout);
 }
 
-/* The "agrad" trace phase fires BEFORE the layer's backward. No layer writes
- * its gradIn before #4 PR7 (in-place dx), so the traced bytes cannot tell
- * before from after; the layer's own weight grad can: zeroed before the
- * call, written by its backward. */
+/* The "agrad" trace phase fires BEFORE the layer's backward. Most backwards
+ * leave their gradIn as it is, so the traced bytes cannot tell before from
+ * after; in an in-place call a ReLU, Dropout or Flatten backward overwrites
+ * its gradIn, and the sink sees the bytes before that write. The layer's own
+ * weight grad tells the order: zeroed before the call, written by its
+ * backward. */
 typedef struct agradProbe {
     zooFixture_t *f;
     size_t agrads;

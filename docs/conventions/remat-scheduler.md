@@ -19,6 +19,13 @@ quantization, qConfig, BFP exponents), layer and loss execution, hooks, trace
 and randomness belong to the shared code and the driver. Rows cannot produce a
 stale header, and the validator's bind-generation check stays sound.
 
+Rows never see an in-place chain (remat D41): they bind and release ranges
+only, and a chain has one range, its root's. For a training call the buffer
+table borrows the plan's in-place marks, and the SDK's bind and release of a
+root also bind and release every member of its chain: each member takes the
+root's bytes and keeps its own header and `bindGen`. A bind or release that
+names a member exits.
+
 Who owns which memory (every block comes from `reserveMemory` and goes back
 through `freeReservedMemory`; bound wire bytes never come from raw `malloc`,
 a static array or the stack; the scheduler struct and the validator state
@@ -41,6 +48,8 @@ Every row satisfies these before it joins the conformance matrix.
   over.
 - **R3 Versioned binding.** Every bind increments `bindGen`. Bind a wire only
   for a step that produces it (FORWARD, REFORWARD, LOSS_BACKWARD, BACKWARD).
+  An in-place member is never bound by a row: the SDK binds it with its
+  chain's root (remat D41).
 - **R4 No side effects; RNG-free.** Never run a layer or a loss, fire a hook,
   or call a trace sink. Call no `rng*` function: rows neither draw nor set
   anything, and never receive or derive a key.
@@ -256,6 +265,10 @@ decisions and those with nothing in force yet are left out.
   not the scheduler library's, whose NULL plan spec keeps meaning
   STORE_ALL. Evaluation and `inference()` build no scheduler on their NULL
   path and are unaffected.
+- **remat D16** Flatten belongs to the in-place set (remat D41). With ReLU
+  and Dropout the set is every backward that only moves or masks values
+  element by element, at the cost of two pointer-equality guards in the
+  Flatten backward (an aliased copy is skipped) and one test.
 - **remat D17** The schedule key fixes the batch size exactly: a scheduler
   keyed to batch B exits at bind on any other B. No plan-per-B cache.
 - **remat D19** Evaluation runs on the caller's scheduler: `inferenceWithLoss`
@@ -307,6 +320,19 @@ decisions and those with nothing in force yet are left out.
   later rows that need no driver or interface change.
 - **remat D33** ARENA conformance runs under `unit_test_asan` (its
   `undefined` sanitizer covers alignment) plus manual poisoning.
+- **remat D41** In-place dx, opt-in (`rematPlanSpec_t.inPlaceDx`, any
+  policy): the BACKWARD of a ReLU, Dropout or Flatten writes its dx into the
+  bytes of the gradient it reads when both wires have one dtype, FLOAT32 or
+  SYM_INT32, and equal bytes; a BFP wire never shares. Pairs are decided per
+  BACKWARD step from the keyed table, so no schedule-key field is added, and
+  marked in the plan, one byte per wire. A chain of such steps has one
+  range, its root's, from the root's producing step to the chain's last
+  read. Only `->data` is shared: each wire keeps its own header,
+  quantization, qConfig and shape. The SDK binds and releases the members
+  with their root; the checker lets gradIn and out share bytes only for a
+  pair the plan marked, at an identical base and of equal bytes, and reads
+  the marks from the plan. The overwritten gradient needs no stale-read
+  guard: the one BACKWARD that overwrites it is its only reader.
 - **remat D42** Test strategy: an in-process oracle (the pre-remat driver,
   kept verbatim, until remat D57 replaced it by an explicit reference), a
   row-contract harness, deaths matched on message substrings, tampered
@@ -350,7 +376,8 @@ decisions and those with nothing in force yet are left out.
 - **remat R2** `next` fills a caller-provided `rematStep_t`; the driver
   resolves the operands, a row never hands them over.
 - **remat R3** Every bind increments `bindGen`; a wire is bound only for a
-  step that produces it.
+  step that produces it, except an in-place member, which the SDK binds
+  with its chain's root (remat D41).
 - **remat R4** A row runs no layer or loss, fires no hook, calls no trace
   sink and calls no `rng` function.
 - **remat R5** Placement (offsets, pools, tiers) stays in the row's member

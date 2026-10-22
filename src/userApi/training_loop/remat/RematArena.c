@@ -57,30 +57,152 @@ static bool arenaCoLive(const rematRange_t *a, const rematRange_t *b) {
     return a->begin <= b->end && b->begin <= a->end;
 }
 
-static bool arenaPlacesBefore(const rematWireTable_t *t, const rematProgram_t *p, size_t a,
-                              size_t b) {
-    size_t placedA = arenaPlaced(t, p->ranges[a].wire);
-    size_t placedB = arenaPlaced(t, p->ranges[b].wire);
+/* What a placement order compares. */
+typedef struct arenaOrder {
+    const rematWireTable_t *t;
+    const rematProgram_t *p;
+} arenaOrder_t;
+
+typedef bool (*arenaBefore_t)(const arenaOrder_t *o, size_t a, size_t b);
+
+static size_t arenaRangePlaced(const rematWireTable_t *t, const rematProgram_t *p, size_t r) {
+    return arenaPlaced(t, p->ranges[r].wire);
+}
+
+/* First-fit-decreasing: placed size descending, then begin, then wire id. */
+static bool arenaPlacesBefore(const arenaOrder_t *o, size_t a, size_t b) {
+    size_t placedA = arenaRangePlaced(o->t, o->p, a);
+    size_t placedB = arenaRangePlaced(o->t, o->p, b);
     if (placedA != placedB) {
         return placedA > placedB;
     }
-    if (p->ranges[a].begin != p->ranges[b].begin) {
-        return p->ranges[a].begin < p->ranges[b].begin;
+    if (o->p->ranges[a].begin != o->p->ranges[b].begin) {
+        return o->p->ranges[a].begin < o->p->ranges[b].begin;
     }
-    return p->ranges[a].wire < p->ranges[b].wire;
+    return o->p->ranges[a].wire < o->p->ranges[b].wire;
+}
+
+static bool arenaSizeThenEndBefore(const arenaOrder_t *o, size_t a, size_t b) {
+    size_t placedA = arenaRangePlaced(o->t, o->p, a);
+    size_t placedB = arenaRangePlaced(o->t, o->p, b);
+    if (placedA != placedB) {
+        return placedA > placedB;
+    }
+    const rematRange_t *ra = &o->p->ranges[a];
+    const rematRange_t *rb = &o->p->ranges[b];
+    if (ra->end != rb->end) {
+        return ra->end > rb->end;
+    }
+    if (ra->begin != rb->begin) {
+        return ra->begin < rb->begin;
+    }
+    return a < b;
+}
+
+/* Begin, then end descending, then placed size descending, then range id. */
+static bool arenaStreamBefore(const arenaOrder_t *o, size_t a, size_t b) {
+    const rematRange_t *ra = &o->p->ranges[a];
+    const rematRange_t *rb = &o->p->ranges[b];
+    if (ra->begin != rb->begin) {
+        return ra->begin < rb->begin;
+    }
+    if (ra->end != rb->end) {
+        return ra->end > rb->end;
+    }
+    size_t placedA = arenaRangePlaced(o->t, o->p, a);
+    size_t placedB = arenaRangePlaced(o->t, o->p, b);
+    if (placedA != placedB) {
+        return placedA > placedB;
+    }
+    return a < b;
 }
 
 /* O(R) selection per range keeps the placement order without an order array. */
-static size_t arenaNextToPlace(const rematWireTable_t *t, const rematProgram_t *p,
-                               const size_t *offsets) {
-    size_t next = p->numRanges;
-    for (size_t r = 0; r < p->numRanges; r++) {
-        if (offsets[r] == ARENA_UNPLACED &&
-            (next == p->numRanges || arenaPlacesBefore(t, p, r, next))) {
+static size_t arenaNextToPlace(const arenaOrder_t *o, arenaBefore_t before, const size_t *offsets) {
+    size_t next = o->p->numRanges;
+    for (size_t r = 0; r < o->p->numRanges; r++) {
+        if (offsets[r] == ARENA_UNPLACED && (next == o->p->numRanges || before(o, r, next))) {
             next = r;
         }
     }
     return next;
+}
+
+/* The ranges placed so far, by ascending offset. */
+typedef struct arenaFit {
+    const rematWireTable_t *t;
+    const rematProgram_t *p;
+    size_t *offsets;
+    uint16_t *byOffset;
+    size_t numPlaced;
+} arenaFit_t;
+
+/* numRanges <= ODT_REMAT_MAX_RANGES < REMAT_NONE (rematArenaInit checks the
+ * cap first): the uint16_t ids and this product fit. */
+static bool arenaFitInit(arenaFit_t *f, const rematWireTable_t *t, const rematProgram_t *p,
+                         size_t *offsets) {
+    *f = (arenaFit_t){.t = t, .p = p, .offsets = offsets};
+    f->byOffset = reserveMemory(p->numRanges * sizeof(uint16_t));
+    if (f->byOffset == NULL) {
+        return false;
+    }
+    for (size_t r = 0; r < p->numRanges; r++) {
+        offsets[r] = ARENA_UNPLACED;
+    }
+    return true;
+}
+
+/* The first-fit rule: the lowest offset that is 0 or the end of a co-live
+ * placed range and overlaps no co-live placed range. Sweeping byOffset, off is
+ * always such a candidate, and it moves past a co-live range only when that
+ * range overlaps [off, off + size); the first co-live range starting at or
+ * above off + size therefore closes the lowest feasible candidate.
+ * O(R) per range, O(R^2) overall. */
+static size_t arenaLowestFit(const arenaFit_t *f, size_t r) {
+    uint16_t w = f->p->ranges[r].wire;
+    size_t size = arenaPlaced(f->t, w);
+    size_t off = 0;
+    for (size_t i = 0; i < f->numPlaced; i++) {
+        size_t q = f->byOffset[i];
+        if (!arenaCoLive(&f->p->ranges[q], &f->p->ranges[r])) {
+            continue;
+        }
+        if (f->offsets[q] >= arenaAdd(f->t, w, off, size, "offset + placed bytes")) {
+            break;
+        }
+        uint16_t qw = f->p->ranges[q].wire;
+        size_t qEnd =
+            arenaAdd(f->t, qw, f->offsets[q], arenaPlaced(f->t, qw), "offset + placed bytes");
+        if (qEnd > off) {
+            off = qEnd;
+        }
+    }
+    return off;
+}
+
+static void arenaFitRecord(arenaFit_t *f, size_t r, size_t off) {
+    f->offsets[r] = off;
+    size_t slot = f->numPlaced;
+    while (slot > 0 && f->offsets[f->byOffset[slot - 1]] > off) {
+        f->byOffset[slot] = f->byOffset[slot - 1];
+        slot--;
+    }
+    f->byOffset[slot] = (uint16_t)r;
+    f->numPlaced++;
+}
+
+/* max(offset + placed): the bytes a layout needs. */
+static size_t arenaExtent(const rematWireTable_t *t, const rematProgram_t *p,
+                          const size_t *offsets) {
+    size_t end = 0;
+    for (size_t r = 0; r < p->numRanges; r++) {
+        uint16_t w = p->ranges[r].wire;
+        size_t rEnd = arenaAdd(t, w, offsets[r], arenaPlaced(t, w), "arena bytes");
+        if (rEnd > end) {
+            end = rEnd;
+        }
+    }
+    return end;
 }
 
 static size_t arenaPeakPlacedBytes(const rematWireTable_t *t, const rematProgram_t *p) {
@@ -102,58 +224,117 @@ static size_t arenaPeakPlacedBytes(const rematWireTable_t *t, const rematProgram
     return peak;
 }
 
-bool arenaPlaceFirstFitDecreasing(const rematWireTable_t *t, const rematProgram_t *p,
-                                  size_t *offsets, size_t *bytes, size_t *peakPlacedBytes) {
-    /* numRanges <= ODT_REMAT_MAX_RANGES < REMAT_NONE (rematArenaInit checks
-     * the cap first): the uint16_t ids and this product fit. */
-    uint16_t *byOffset = reserveMemory(p->numRanges * sizeof(uint16_t));
-    if (byOffset == NULL) {
+static bool arenaFirstFitInOrder(const arenaOrder_t *o, arenaBefore_t before, size_t *offsets,
+                                 size_t *bytes) {
+    arenaFit_t f;
+    if (!arenaFitInit(&f, o->t, o->p, offsets)) {
         return false;
     }
-    for (size_t r = 0; r < p->numRanges; r++) {
-        offsets[r] = ARENA_UNPLACED;
+    while (f.numPlaced < o->p->numRanges) {
+        size_t r = arenaNextToPlace(o, before, offsets);
+        arenaFitRecord(&f, r, arenaLowestFit(&f, r));
     }
-    size_t end = 0;
-    for (size_t numPlaced = 0; numPlaced < p->numRanges; numPlaced++) {
-        size_t r = arenaNextToPlace(t, p, offsets);
-        uint16_t w = p->ranges[r].wire;
-        size_t size = arenaPlaced(t, w);
-        /* byOffset holds the placed ranges by ascending offset. Sweeping it, off
-         * is always 0 or the end of a co-live placed range, and it moves past a
-         * co-live range only when that range overlaps [off, off + size); the
-         * first co-live range starting at or above off + size therefore closes
-         * the lowest feasible candidate of the first-fit rule.
-         * O(R) per range, O(R^2) overall. */
-        size_t off = 0;
-        for (size_t i = 0; i < numPlaced; i++) {
-            size_t q = byOffset[i];
-            if (!arenaCoLive(&p->ranges[q], &p->ranges[r])) {
-                continue;
-            }
-            if (offsets[q] >= arenaAdd(t, w, off, size, "offset + placed bytes")) {
-                break;
-            }
-            uint16_t qw = p->ranges[q].wire;
-            size_t qEnd = arenaAdd(t, qw, offsets[q], arenaPlaced(t, qw), "offset + placed bytes");
-            if (qEnd > off) {
-                off = qEnd;
-            }
-        }
-        offsets[r] = off;
-        size_t slot = numPlaced;
-        while (slot > 0 && offsets[byOffset[slot - 1]] > off) {
-            byOffset[slot] = byOffset[slot - 1];
-            slot--;
-        }
-        byOffset[slot] = (uint16_t)r;
-        size_t rEnd = arenaAdd(t, w, off, size, "arena bytes");
-        if (rEnd > end) {
-            end = rEnd;
-        }
+    freeReservedMemory(f.byOffset);
+    *bytes = arenaExtent(o->t, o->p, offsets);
+    return true;
+}
+
+bool arenaPlaceFirstFitDecreasing(const rematWireTable_t *t, const rematProgram_t *p,
+                                  size_t *offsets, size_t *bytes, size_t *peakPlacedBytes) {
+    const arenaOrder_t o = {.t = t, .p = p};
+    if (!arenaFirstFitInOrder(&o, arenaPlacesBefore, offsets, bytes)) {
+        return false;
     }
-    freeReservedMemory(byOffset);
-    *bytes = end;
     *peakPlacedBytes = arenaPeakPlacedBytes(t, p);
+    return true;
+}
+
+bool arenaPlaceSizeThenEnd(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
+                           size_t *offsets, size_t *bytes) {
+    (void)placedPeak;
+    const arenaOrder_t o = {.t = t, .p = p};
+    return arenaFirstFitInOrder(&o, arenaSizeThenEndBefore, offsets, bytes);
+}
+
+static bool arenaBeganLater(const rematProgram_t *p, size_t a, size_t b) {
+    if (p->ranges[a].begin != p->ranges[b].begin) {
+        return p->ranges[a].begin > p->ranges[b].begin;
+    }
+    return a > b;
+}
+
+/* Sweeping the co-live placed ranges by offset gives the gaps between them and
+ * the open space above the last one. low = the start of the first gap that
+ * holds the range; high = the highest offset at which a gap holds it below
+ * placedPeak. All operands are offsets and placed sizes inside the bound that
+ * arenaRequirePlaceableSizes checked, and each difference is taken only when
+ * it cannot wrap. */
+static size_t arenaPingPongOffset(const arenaFit_t *f, size_t r, size_t placedPeak) {
+    const rematProgram_t *p = f->p;
+    size_t size = arenaRangePlaced(f->t, p, r);
+    size_t prev = 0;
+    size_t low = 0;
+    bool haveLow = false;
+    size_t high = 0;
+    bool haveHigh = false;
+    size_t latest = p->numRanges;
+    for (size_t i = 0; i < f->numPlaced; i++) {
+        size_t q = f->byOffset[i];
+        if (!arenaCoLive(&p->ranges[q], &p->ranges[r])) {
+            continue;
+        }
+        if (latest == p->numRanges || arenaBeganLater(p, q, latest)) {
+            latest = q;
+        }
+        size_t gapEnd = f->offsets[q];
+        if (gapEnd > prev) {
+            if (!haveLow && gapEnd - prev >= size) {
+                low = prev;
+                haveLow = true;
+            }
+            size_t top = gapEnd < placedPeak ? gapEnd : placedPeak;
+            if (top >= prev && top - prev >= size) {
+                high = top - size;
+                haveHigh = true;
+            }
+        }
+        size_t qEnd = arenaAdd(f->t, p->ranges[q].wire, gapEnd, arenaRangePlaced(f->t, p, q),
+                               "offset + placed bytes");
+        if (qEnd > prev) {
+            prev = qEnd;
+        }
+    }
+    if (!haveLow) {
+        low = prev;
+    }
+    if (placedPeak >= prev && placedPeak - prev >= size) {
+        high = placedPeak - size;
+        haveHigh = true;
+    }
+    if (latest == p->numRanges || !haveHigh) {
+        return low;
+    }
+    size_t latestOff = f->offsets[latest];
+    size_t latestEnd = arenaAdd(f->t, p->ranges[latest].wire, latestOff,
+                                arenaRangePlaced(f->t, p, latest), "offset + placed bytes");
+    /* 2 x latestOff + placed < placedPeak, without the doubled sum. */
+    bool lowerHalf = latestEnd <= placedPeak && latestOff < placedPeak - latestEnd;
+    return lowerHalf ? high : low;
+}
+
+bool arenaPlacePingPong(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
+                        size_t *offsets, size_t *bytes) {
+    const arenaOrder_t o = {.t = t, .p = p};
+    arenaFit_t f;
+    if (!arenaFitInit(&f, t, p, offsets)) {
+        return false;
+    }
+    while (f.numPlaced < p->numRanges) {
+        size_t r = arenaNextToPlace(&o, arenaStreamBefore, offsets);
+        arenaFitRecord(&f, r, arenaPingPongOffset(&f, r, placedPeak));
+    }
+    freeReservedMemory(f.byOffset);
+    *bytes = arenaExtent(t, p, offsets);
     return true;
 }
 

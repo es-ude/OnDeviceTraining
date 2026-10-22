@@ -59,6 +59,25 @@ size_t arenaPlaced(const rematWireTable_t *t, uint16_t w);
 bool arenaPlaceFirstFitDecreasing(const rematWireTable_t *t, const rematProgram_t *p,
                                   size_t *offsets, size_t *bytes, size_t *peakPlacedBytes);
 
+/* The portfolio's other members. Each places every range into
+ * offsets[range id], sets bytes = max(offset + placed) and returns false only
+ * when its scratch cannot be reserved. placedPeak is the peak of the placed
+ * sums over the steps, which ping-pong uses as its height. */
+
+/* First fit in the order: placed size descending, then end descending, then
+ * begin, then range id. */
+bool arenaPlaceSizeThenEnd(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
+                           size_t *offsets, size_t *bytes);
+
+/* Ranges in begin order (then end descending, placed size descending, range
+ * id). Over the gaps between its co-live placed ranges a range has a lowest
+ * offset that fits and a highest one whose end stays at or below placedPeak;
+ * it takes the highest when the co-live placed range that began last lies in
+ * the lower half (2 x offset + placed < placedPeak), else the lowest, so a
+ * chain of buffers alternates between bottom and top. */
+bool arenaPlacePingPong(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
+                        size_t *offsets, size_t *bytes);
+
 /* Always runs (firmware too) and trusts no layout, imported ones included:
  * every offset a multiple of ODT_WIRE_ALIGN, every range inside [0,
  * bytes), co-live (inclusive) ranges byte-disjoint. Exits naming the wire(s). */

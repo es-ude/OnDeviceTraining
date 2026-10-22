@@ -258,6 +258,24 @@ typedef struct randomPlan {
     rematProgram_t program;
 } randomPlan_t;
 
+/* endOrder, the table and the program of a plan whose ranges and wires are set. */
+static void finishPlan(randomPlan_t *rp, size_t numRanges, size_t numSteps) {
+    for (size_t i = 0; i < numRanges; i++) {
+        size_t k = i;
+        while (k > 0 && rp->ranges[rp->endOrder[k - 1]].end > rp->ranges[i].end) {
+            rp->endOrder[k] = rp->endOrder[k - 1];
+            k--;
+        }
+        rp->endOrder[k] = (uint16_t)i;
+    }
+    rp->table = (rematWireTable_t){.numWires = numRanges + 1u, .wires = rp->wires};
+    rp->program = (rematProgram_t){.numSteps = numSteps,
+                                   .steps = NULL,
+                                   .numRanges = numRanges,
+                                   .ranges = rp->ranges,
+                                   .endOrder = rp->endOrder};
+}
+
 static void buildRandomPlan(randomPlan_t *rp, uint32_t *state) {
     size_t numSteps = 1u + nextRandom(state) % ORACLE_MAX_STEPS;
     size_t numRanges = 1u + nextRandom(state) % ORACLE_MAX_RANGES;
@@ -295,21 +313,48 @@ static void buildRandomPlan(randomPlan_t *rp, uint32_t *state) {
         rp->wires[perm[r]] =
             (rematWire_t){.kind = REMAT_WIRE_ACT, .index = perm[r], .bytes = bytes};
     }
-    for (size_t i = 0; i < numRanges; i++) {
-        size_t k = i;
-        while (k > 0 && rp->ranges[rp->endOrder[k - 1]].end > rp->ranges[i].end) {
-            rp->endOrder[k] = rp->endOrder[k - 1];
-            k--;
-        }
-        rp->endOrder[k] = (uint16_t)i;
-    }
-    rp->table = (rematWireTable_t){.numWires = numRanges + 1u, .wires = rp->wires};
-    rp->program = (rematProgram_t){.numSteps = numSteps,
-                                   .steps = NULL,
-                                   .numRanges = numRanges,
-                                   .ranges = rp->ranges,
-                                   .endOrder = rp->endOrder};
+    finishPlan(rp, numRanges, numSteps);
 }
+
+typedef struct handRange {
+    size_t bytes;
+    uint16_t begin, end;
+    uint8_t kind;
+} handRange_t;
+
+typedef struct handPlan {
+    handRange_t ranges[5];
+    size_t numRanges;
+    size_t numSteps;
+} handPlan_t;
+
+/* Range r is wire r + 1; the ranges come in begin order. */
+static void buildHandPlan(randomPlan_t *rp, const handPlan_t *hp) {
+    rp->wires[0] = (rematWire_t){.kind = REMAT_WIRE_ACT, .index = 0, .borrowed = 1u};
+    for (size_t r = 0; r < hp->numRanges; r++) {
+        const handRange_t *hr = &hp->ranges[r];
+        uint16_t w = (uint16_t)(r + 1u);
+        rp->wires[w] = (rematWire_t){.kind = hr->kind, .index = w, .bytes = hr->bytes};
+        rp->ranges[r] = (rematRange_t){.wire = w, .begin = hr->begin, .end = hr->end};
+    }
+    finishPlan(rp, hp->numRanges, hp->numSteps);
+}
+
+/* Hand plans, each placed at its peak by exactly one portfolio member; the
+ * member tests below derive each layout. */
+static const handPlan_t g_sizeThenEndPlan = {{{16, 0, 3, REMAT_WIRE_ACT},
+                                              {16, 1, 4, REMAT_WIRE_ACT},
+                                              {8, 3, 5, REMAT_WIRE_ACT},
+                                              {8, 4, 5, REMAT_WIRE_ACT},
+                                              {24, 5, 5, REMAT_WIRE_GRAD}},
+                                             5,
+                                             6};
+static const handPlan_t g_pingPongPlan = {{{24, 0, 2, REMAT_WIRE_ACT},
+                                           {16, 1, 3, REMAT_WIRE_ACT},
+                                           {16, 2, 2, REMAT_WIRE_GRAD},
+                                           {32, 3, 3, REMAT_WIRE_ACT}},
+                                          4,
+                                          4};
 
 static size_t oraclePlaced(size_t bytes) {
     return (bytes + 7u) / 8u * 8u;
@@ -331,6 +376,22 @@ static bool oraclePlacesFirst(const randomPlan_t *rp, size_t a, size_t b) {
         return rp->ranges[a].begin < rp->ranges[b].begin;
     }
     return rp->ranges[a].wire < rp->ranges[b].wire;
+}
+
+static size_t oraclePeakPlaced(const randomPlan_t *rp) {
+    size_t peak = 0;
+    for (size_t s = 0; s < rp->program.numSteps; s++) {
+        size_t sum = 0;
+        for (size_t r = 0; r < rp->program.numRanges; r++) {
+            if (rp->ranges[r].begin <= s && s <= rp->ranges[r].end) {
+                sum += oracleRangePlaced(rp, r);
+            }
+        }
+        if (sum > peak) {
+            peak = sum;
+        }
+    }
+    return peak;
 }
 
 /* The first-fit rule taken literally, O(R^3): every candidate (0, or the end of a
@@ -376,18 +437,7 @@ static size_t oracleFirstFitDecreasing(const randomPlan_t *rp, size_t *offsets,
             bytes = best + size;
         }
     }
-    *peakPlaced = 0;
-    for (size_t s = 0; s < rp->program.numSteps; s++) {
-        size_t sum = 0;
-        for (size_t r = 0; r < numRanges; r++) {
-            if (rp->ranges[r].begin <= s && s <= rp->ranges[r].end) {
-                sum += oracleRangePlaced(rp, r);
-            }
-        }
-        if (sum > *peakPlaced) {
-            *peakPlaced = sum;
-        }
-    }
+    *peakPlaced = oraclePeakPlaced(rp);
     return bytes;
 }
 
@@ -447,6 +497,90 @@ void testFfdReleasesItsScratch(void) {
     TEST_ASSERT_EQUAL_size_t(before, memProfileCurrentBytes());
     freeTableAndPlan(&b);
     freeModel(h.model, h.n);
+}
+#endif
+
+/* ---- the portfolio's other members ---- */
+
+typedef bool (*placeMember_t)(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
+                              size_t *offsets, size_t *bytes);
+
+static void assertMemberPlacesTheHandPlan(placeMember_t place, const handPlan_t *hp,
+                                          const size_t *expected, size_t expectedBytes) {
+    randomPlan_t rp;
+    buildHandPlan(&rp, hp);
+    size_t offsets[ORACLE_MAX_RANGES];
+    size_t bytes = 0;
+    TEST_ASSERT_TRUE(place(&rp.table, &rp.program, oraclePeakPlaced(&rp), offsets, &bytes));
+    for (size_t r = 0; r < hp->numRanges; r++) {
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(expected[r], offsets[r], "offset differs");
+    }
+    TEST_ASSERT_EQUAL_size_t(expectedBytes, bytes);
+}
+
+/* Size, then the later end first: ranges 4, 1, 0, 2, 3. Range 2 [3,5] climbs
+ * past 1 (0..16), 4 (0..24) and 0 (16..32) to 32; range 3 [4,5] fits under
+ * range 2 at 24. 40 B = the peak (16 + 16 + 8 at step 3); first-fit-decreasing
+ * needs 48. */
+void testSizeThenEndPlacesTheHandPlan(void) {
+    static const size_t expected[5] = {16, 0, 32, 24, 0};
+    assertMemberPlacesTheHandPlan(arenaPlaceSizeThenEnd, &g_sizeThenEndPlan, expected, 40);
+}
+
+/* Height 56 = the peak at step 2 (24 + 16 + 16). Range 1 begins under range 0
+ * (offset 0, lower half), so it takes the top: 56 - 16 = 40. Range 2's latest
+ * co-live range is range 1 (upper half): the low gap 24..40. Range 3 [3,3]
+ * sees only range 1 and takes 0. First-fit-decreasing needs 64. */
+void testPingPongPlacesTheHandPlan(void) {
+    static const size_t expected[4] = {0, 40, 24, 0};
+    assertMemberPlacesTheHandPlan(arenaPlacePingPong, &g_pingPongPlan, expected, 56);
+}
+
+/* Every layout a member returns passes the verifier, its bytes is the extent
+ * of its offsets, and no layout is below the placed peak. */
+static void assertMemberVerifiesOnRandomPlans(placeMember_t place) {
+    uint32_t state = 0x9E3779B9u;
+    for (size_t trial = 0; trial < 500u; trial++) {
+        randomPlan_t rp;
+        buildRandomPlan(&rp, &state);
+        size_t offsets[ORACLE_MAX_RANGES];
+        size_t bytes = 0;
+        size_t peak = oraclePeakPlaced(&rp);
+        TEST_ASSERT_TRUE(place(&rp.table, &rp.program, peak, offsets, &bytes));
+        arenaVerifyPlacement(&rp.table, &rp.program, offsets, bytes);
+        size_t extent = 0;
+        for (size_t r = 0; r < rp.program.numRanges; r++) {
+            if (offsets[r] + oracleRangePlaced(&rp, r) > extent) {
+                extent = offsets[r] + oracleRangePlaced(&rp, r);
+            }
+        }
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(extent, bytes, "bytes is not the layout's extent");
+        TEST_ASSERT_TRUE_MESSAGE(bytes >= peak, "arena below the placed peak");
+    }
+}
+
+void testNewMembersVerifyOnRandomPlans(void) {
+    assertMemberVerifiesOnRandomPlans(arenaPlaceSizeThenEnd);
+    assertMemberVerifiesOnRandomPlans(arenaPlacePingPong);
+}
+
+#ifdef ODT_MEM_PROFILE
+static void assertMemberReleasesItsScratch(placeMember_t place) {
+    fixture_t h;
+    buildHarModel(&h);
+    builtPlan_t b = buildTableAndPlan(h.model, h.n, h.lt, h.x, NULL);
+    size_t offsets[23];
+    size_t bytes = 0;
+    size_t before = memProfileCurrentBytes();
+    TEST_ASSERT_TRUE(place(b.t, &b.p->train, 74288, offsets, &bytes));
+    TEST_ASSERT_EQUAL_size_t(before, memProfileCurrentBytes());
+    freeTableAndPlan(&b);
+    freeModel(h.model, h.n);
+}
+
+void testNewMembersReleaseTheirScratch(void) {
+    assertMemberReleasesItsScratch(arenaPlaceSizeThenEnd);
+    assertMemberReleasesItsScratch(arenaPlacePingPong);
 }
 #endif
 
@@ -2720,6 +2854,12 @@ int main(void) {
     RUN_TEST(testArenaPlacedExitsNamingTheWireOnOverflow);
 #ifdef ODT_MEM_PROFILE
     RUN_TEST(testFfdReleasesItsScratch);
+#endif
+    RUN_TEST(testSizeThenEndPlacesTheHandPlan);
+    RUN_TEST(testPingPongPlacesTheHandPlan);
+    RUN_TEST(testNewMembersVerifyOnRandomPlans);
+#ifdef ODT_MEM_PROFILE
+    RUN_TEST(testNewMembersReleaseTheirScratch);
 #endif
     RUN_TEST(testVerifierAcceptsTheFfdPlacementOnTheZoo);
     RUN_TEST(testVerifierExitsNamingBothWiresOnCoLiveOverlap);

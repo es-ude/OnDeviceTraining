@@ -1,5 +1,6 @@
 #define SOURCE_FILE "remat_select"
 
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -7,6 +8,7 @@
 #include <string.h>
 
 #include "CalculateGradsSequential.h"
+#include "LayerConfigAccess.h"
 #include "RematScheduler.h"
 #include "remat_select.h"
 
@@ -327,4 +329,200 @@ void rematSelectPrintConfigKeys(FILE *f, const rematSelection_t *sel) {
     fprintf(f, ", \"remat_storage\": \"%s\", \"remat_plan\": \"", storageName(sel->storage));
     printPlanName(f, sel);
     fputc('"', f);
+}
+
+#define REMAT_PROBLEM_HASH_PRIME UINT64_C(0x100000001b3)
+/* The problem's shapes have the input's rank, or 2 after a Flatten. */
+#define REMAT_DUMP_MAX_RANK 8u
+
+uint64_t rematSelectProblemHash(uint64_t state, const char *bytes, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        state ^= (uint8_t)bytes[i];
+        state *= REMAT_PROBLEM_HASH_PRIME;
+    }
+    return state;
+}
+
+/* The layer types of the example trainers, each with a C reference run; NULL
+ * for every other type. */
+static const char *dumpTypeName(layerType_t type) {
+    switch (type) {
+    case CONV1D:
+        return "CONV1D";
+    case RELU:
+        return "RELU";
+    case MAXPOOL1D:
+        return "MAXPOOL1D";
+    case AVGPOOL1D:
+        return "AVGPOOL1D";
+    case FLATTEN:
+        return "FLATTEN";
+    case LINEAR:
+        return "LINEAR";
+    case SOFTMAX:
+        return "SOFTMAX";
+    default:
+        return NULL;
+    }
+}
+
+/* Everything the problem cannot hold is refused before a byte is written, so
+ * a refused dump leaves json empty. A Flatten's dtypes are its input's. */
+static bool dumpCanWrite(layer_t **model, size_t modelSize, lossConfig_t loss,
+                         const tensor_t *inputLike) {
+    const shape_t *in = inputLike->shape;
+    if (in->numberOfDimensions == 0u || in->numberOfDimensions > REMAT_DUMP_MAX_RANK) {
+        fprintf(stderr,
+                "ERROR: DUMP_PROBLEM: the input has rank %zu (the problem dump writes ranks 1 to "
+                "%u)\n",
+                in->numberOfDimensions, REMAT_DUMP_MAX_RANK);
+        return false;
+    }
+    if (in->dimensions[0] != 1u) {
+        fprintf(stderr,
+                "ERROR: DUMP_PROBLEM: the input's first dimension is %zu (the problem is written "
+                "at batch 1)\n",
+                in->dimensions[0]);
+        return false;
+    }
+    if (inputLike->quantization->type != FLOAT32) {
+        fprintf(stderr,
+                "ERROR: DUMP_PROBLEM: the input has qtype_t %d (the problem dump writes FLOAT32 "
+                "only)\n",
+                (int)inputLike->quantization->type);
+        return false;
+    }
+    if (loss.funcType != CROSS_ENTROPY && loss.funcType != MSE) {
+        fprintf(stderr, "ERROR: DUMP_PROBLEM: unknown lossFuncType_t %d\n", (int)loss.funcType);
+        return false;
+    }
+    for (size_t l = 0; l < modelSize; l++) {
+        layer_t *layer = model[l];
+        if (dumpTypeName(layer->type) == NULL) {
+            fprintf(stderr,
+                    "ERROR: DUMP_PROBLEM: layer %zu has layerType_t %d, which the problem dump "
+                    "does not write (it writes CONV1D, RELU, MAXPOOL1D, AVGPOOL1D, FLATTEN, "
+                    "LINEAR and SOFTMAX)\n",
+                    l, (int)layer->type);
+            return false;
+        }
+        if (layer->type == FLATTEN) {
+            continue;
+        }
+        if (layerOutputQ(layer)->type != FLOAT32) {
+            fprintf(stderr,
+                    "ERROR: DUMP_PROBLEM: layer %zu has outputDtype qtype_t %d (the problem dump "
+                    "writes FLOAT32 only)\n",
+                    l, (int)layerOutputQ(layer)->type);
+            return false;
+        }
+        if (backwardWireQ(layer)->type != FLOAT32) {
+            fprintf(stderr,
+                    "ERROR: DUMP_PROBLEM: layer %zu has propLossDtype qtype_t %d (the problem dump "
+                    "writes FLOAT32 only)\n",
+                    l, (int)backwardWireQ(layer)->type);
+            return false;
+        }
+    }
+    return true;
+}
+
+/* One writer feeds the stream and the hash, so the hash covers exactly the
+ * bytes written. */
+typedef struct problemWriter {
+    FILE *f;
+    uint64_t hash;
+} problemWriter_t;
+
+static void emit(problemWriter_t *w, const char *text) {
+    size_t n = strlen(text);
+    (void)fwrite(text, 1u, n, w->f);
+    w->hash = rematSelectProblemHash(w->hash, text, n);
+}
+
+static void emitSize(problemWriter_t *w, size_t v) {
+    char digits[24];
+    (void)snprintf(digits, sizeof digits, "%zu", v);
+    emit(w, digits);
+}
+
+static void emitShape(problemWriter_t *w, const shape_t *s) {
+    emit(w, "[");
+    for (size_t d = 0; d < s->numberOfDimensions; d++) {
+        if (d > 0u) {
+            emit(w, ",");
+        }
+        emitSize(w, s->dimensions[d]);
+    }
+    emit(w, "]");
+}
+
+/* The forward-cost class of these types is linear in the output element
+ * count, so the cost of one output element is the operand: Cin/groups * K or
+ * inF multiply-accumulates, or the pool window. The other types cost their
+ * element count (Flatten 0) and carry no operand. */
+static void emitCost(problemWriter_t *w, const layer_t *layer) {
+    switch (layer->type) {
+    case CONV1D:
+    case LINEAR:
+        emit(w, ",\"cost\":{\"macPerElement\":");
+        break;
+    case MAXPOOL1D:
+    case AVGPOOL1D:
+        emit(w, ",\"cost\":{\"kernel\":");
+        break;
+    default:
+        return;
+    }
+    emitSize(w, layerForwardCost(layer, 0u, 1u));
+    emit(w, "}");
+}
+
+/* Only a BatchNorm1d tracks running statistics; the dump writes none. */
+static void emitLayer(problemWriter_t *w, const layer_t *layer, const shape_t *out) {
+    emit(w, "{\"type\":\"");
+    emit(w, dumpTypeName(layer->type));
+    emit(w, layerIsFrozen(layer) ? "\",\"frozen\":true" : "\",\"frozen\":false");
+    emit(w, ",\"trackRunningStats\":false,\"outShape\":");
+    emitShape(w, out);
+    emit(w, ",\"outputDtype\":{\"kind\":\"FLOAT32\"},\"propLossDtype\":{\"kind\":\"FLOAT32\"}");
+    emitCost(w, layer);
+    emit(w, "}");
+}
+
+bool rematSelectDumpProblem(FILE *json, FILE *hashLine, layer_t **model, size_t modelSize,
+                            lossConfig_t loss, const tensor_t *inputLike) {
+    if (!dumpCanWrite(model, modelSize, loss, inputLike)) {
+        return false;
+    }
+    problemWriter_t w = {.f = json, .hash = REMAT_PROBLEM_HASH_BASIS};
+    emit(&w, "{\"schema_version\":0,\"input\":{\"shape\":");
+    emitShape(&w, inputLike->shape);
+    emit(&w, ",\"dtype\":{\"kind\":\"FLOAT32\"}},\"loss\":\"");
+    emit(&w, loss.funcType == CROSS_ENTROPY ? "CROSS_ENTROPY" : "MSE");
+    emit(&w, "\",\"layers\":[");
+    size_t dims[2][REMAT_DUMP_MAX_RANK];
+    size_t order[2][REMAT_DUMP_MAX_RANK];
+    shape_t scratch[2] = {{.dimensions = dims[0], .orderOfDimensions = order[0]},
+                          {.dimensions = dims[1], .orderOfDimensions = order[1]}};
+    shape_t *prev = inputLike->shape;
+    for (size_t l = 0; l < modelSize; l++) {
+        layer_t *layer = model[l];
+        shape_t *out = &scratch[l % 2u];
+        /* As the remat wire table: a Flatten writes [batch, features]. */
+        out->numberOfDimensions = (layer->type == FLATTEN) ? 2u : prev->numberOfDimensions;
+        layerFunctions[layer->type].calcOutputShape(layer, prev, out);
+        if (l > 0u) {
+            emit(&w, ",");
+        }
+        emitLayer(&w, layer, out);
+        prev = out;
+    }
+    emit(&w, "]}\n");
+    if (fflush(json) != 0 || ferror(json)) {
+        fprintf(stderr, "ERROR: DUMP_PROBLEM: writing the problem failed\n");
+        return false;
+    }
+    return fprintf(hashLine, "PROBLEM_HASH fnv1a64=%016" PRIx64 "\n", w.hash) > 0 &&
+           fflush(hashLine) == 0;
 }

@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 
 #include "Layer.h"
@@ -84,5 +85,29 @@ void rematSelectPrintPlan(FILE *f, const char *example, const rematSelection_t *
  * ("remat_storage", "remat_plan"); nothing when none was chosen. A retain
  * list is logged with ACT n added (retain:3,7,12); the presets by name. */
 void rematSelectPrintConfigKeys(FILE *f, const rematSelection_t *sel);
+
+/* FNV-1a 64 of bytes[0..n), continued from state; a hash starts from
+ * REMAT_PROBLEM_HASH_BASIS. The problem hash is this over every byte the dump
+ * writes, its final newline included, so a planner recomputes it from the
+ * file's bytes. */
+#define REMAT_PROBLEM_HASH_BASIS UINT64_C(0xcbf29ce484222325)
+uint64_t rematSelectProblemHash(uint64_t state, const char *bytes, size_t n);
+
+/* DUMP_PROBLEM=1: the model as the planner's problem, schema version 0, one
+ * JSON line to json: the input's shape (batch 1) and dtype, the loss, and per
+ * layer its type, frozen flag, output shape at batch 1, output and gradient
+ * dtypes as written in its config, and the cost operand the forward-cost
+ * class reads beyond the element counts (macPerElement for Conv1d and Linear,
+ * kernel for the pools). Then "PROBLEM_HASH fnv1a64=<16 hex digits>\n" to
+ * hashLine. It writes the layer types and dtypes the example trainers use
+ * (Conv1d, ReLU, MaxPool1d, AvgPool1d, Flatten, Linear, Softmax; FLOAT32);
+ * everything else is refused by name: it, an input not at batch 1 or of rank
+ * above 8, and an unknown loss print the reason to stderr and return false
+ * before a byte is written. A failed write of the problem prints its reason
+ * and returns false without the hash line; a failed write of the hash line
+ * returns false with no message (the trainers write it to stderr, so no
+ * stream is left to name it on). */
+bool rematSelectDumpProblem(FILE *json, FILE *hashLine, layer_t **model, size_t modelSize,
+                            lossConfig_t loss, const tensor_t *inputLike);
 
 #endif // EXAMPLES_SHARED_REMAT_SELECT_H

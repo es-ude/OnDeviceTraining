@@ -7,12 +7,20 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "Conv1dApi.h"
 #include "DeathTest.h"
+#include "FlattenApi.h"
 #include "Layer.h"
+#include "LayerQuant.h"
+#include "LinearApi.h"
 #include "LossFunction.h"
+#include "Pool1dApi.h"
 #include "Quantization.h"
+#include "RNG.h"
+#include "ReluApi.h"
 #include "RematPlan.h"
 #include "RematScheduler.h"
+#include "SoftmaxApi.h"
 #include "remat_select.h"
 #include "unity.h"
 
@@ -54,14 +62,19 @@ static rematSelection_t selectFor(const char *plan, size_t modelSize) {
 }
 
 /* What a print writes, read back through a temporary file. */
-static char g_printed[512];
+static char g_printed[4096];
+static char g_hashLine[64];
+
+static const char *readInto(FILE *f, char *text, size_t size) {
+    rewind(f);
+    size_t got = fread(text, 1u, size - 1u, f);
+    text[got] = '\0';
+    fclose(f);
+    return text;
+}
 
 static const char *readBack(FILE *f) {
-    rewind(f);
-    size_t got = fread(g_printed, 1u, sizeof g_printed - 1u, f);
-    g_printed[got] = '\0';
-    fclose(f);
-    return g_printed;
+    return readInto(f, g_printed, sizeof g_printed);
 }
 
 static const char *configKeysOf(const rematSelection_t *sel) {
@@ -315,6 +328,319 @@ void testDumpProblemStandsAlone(void) {
                              exitWithTheVerdictOnTheVariables(NULL, NULL, NULL, "yes", NULL));
 }
 
+static uint64_t hashOf(const char *text) {
+    return rematSelectProblemHash(REMAT_PROBLEM_HASH_BASIS, text, strlen(text));
+}
+
+/* FNV-1a 64 (offset basis 0xcbf29ce484222325, prime 0x100000001b3): the
+ * published test vectors, and a hash continued over a second part equals the
+ * hash of the whole. */
+void testTheProblemHashIsFnv1a64(void) {
+    TEST_ASSERT_EQUAL_HEX64(0xcbf29ce484222325u, hashOf(""));
+    TEST_ASSERT_EQUAL_HEX64(0xaf63dc4c8601ec8cu, hashOf("a"));
+    TEST_ASSERT_EQUAL_HEX64(0x85944171f73967e8u, hashOf("foobar"));
+    TEST_ASSERT_EQUAL_HEX64(hashOf("foobar"), rematSelectProblemHash(hashOf("foo"), "bar", 3u));
+}
+
+/* examples/har_classifier/train_c.c buildModel; freezeConvs gives the
+ * stage-2 model of train_c_finetune.c. The dump reads no weight value, so one
+ * init key serves every layer. */
+#define HAR_IN_LENGTH 128u
+static void buildHar(layer_t **model, bool freezeConvs) {
+    static quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, &floatQ);
+    const rngKey_t key = rngKeyFromSeed(1u);
+    const trainable_t conv = freezeConvs ? TRAINABLE_FALSE : TRAINABLE_DEFAULT;
+    static const size_t channels[4] = {9, 16, 32, 64};
+    static const size_t kernels[3] = {7, 5, 3};
+    for (size_t b = 0; b < 3u; b++) {
+        model[3u * b] = conv1dLayerInit(&(conv1dInit_t){.inChannels = channels[b],
+                                                        .outChannels = channels[b + 1u],
+                                                        .kernelSize = kernels[b],
+                                                        .padding = SAME,
+                                                        .trainable = conv,
+                                                        .weightInit.key = &key},
+                                        &lq);
+        model[3u * b + 1u] = reluLayerInit(&lq);
+    }
+    model[2] = maxPool1dLayerInit(
+        &(maxPool1dInit_t){
+            .kernelSize = 2, .stride = 2, .inputChannels = 16, .inputLength = HAR_IN_LENGTH},
+        &lq);
+    model[5] = maxPool1dLayerInit(
+        &(maxPool1dInit_t){
+            .kernelSize = 2, .stride = 2, .inputChannels = 32, .inputLength = HAR_IN_LENGTH / 2u},
+        &lq);
+    model[8] = avgPool1dLayerInit(
+        &(avgPool1dInit_t){.kernelSize = HAR_IN_LENGTH / 4u, .stride = HAR_IN_LENGTH / 4u}, &lq);
+    model[9] = flattenLayerInit();
+    model[10] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 64, .outFeatures = 6, .weightInit.key = &key}, &lq);
+    model[11] = softmaxLayerInit(&lq);
+}
+
+static void freeHar(layer_t **model) {
+    for (size_t b = 0; b < 3u; b++) {
+        freeConv1dLayer(model[3u * b]);
+        freeReluLayer(model[3u * b + 1u]);
+    }
+    freeMaxPool1dLayer(model[2]);
+    freeMaxPool1dLayer(model[5]);
+    freeAvgPool1dLayer(model[8]);
+    freeFlattenLayer(model[9]);
+    freeLinearLayer(model[10]);
+    freeSoftmaxLayer(model[11]);
+}
+
+/* A [1, ...] input header; the dump reads its shape and dtype, never data. */
+typedef struct inputHeader {
+    size_t dims[9];
+    size_t order[9];
+    shape_t shape;
+    tensor_t tensor;
+} inputHeader_t;
+
+static const tensor_t *makeInputHeader(inputHeader_t *h, const size_t *dims, size_t rank,
+                                       quantization_t *q) {
+    for (size_t d = 0; d < rank; d++) {
+        h->dims[d] = dims[d];
+        h->order[d] = d;
+    }
+    h->shape =
+        (shape_t){.numberOfDimensions = rank, .dimensions = h->dims, .orderOfDimensions = h->order};
+    h->tensor = (tensor_t){.data = NULL, .shape = &h->shape, .quantization = q, .sparsity = NULL};
+    return &h->tensor;
+}
+
+static const lossConfig_t g_crossEntropy = {
+    .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL};
+
+/* Dumps into g_printed (the JSON) and g_hashLine. */
+static bool dumpOf(layer_t **model, size_t n, lossConfig_t loss, const tensor_t *input) {
+    FILE *json = tmpfile();
+    FILE *hashLine = tmpfile();
+    TEST_ASSERT_NOT_NULL(json);
+    TEST_ASSERT_NOT_NULL(hashLine);
+    bool dumped = rematSelectDumpProblem(json, hashLine, model, n, loss, input);
+    (void)readInto(json, g_printed, sizeof g_printed);
+    (void)readInto(hashLine, g_hashLine, sizeof g_hashLine);
+    return dumped;
+}
+
+/* HAR's problem line, spelled out by layer (one JSON line, its keys in a
+ * fixed order). Shapes at batch 1: the SAME convs keep the length, each
+ * MaxPool halves it, the AvgPool window 32 leaves 1, Flatten gives [1, 64].
+ * macPerElement = Cin * K (9 * 7, 16 * 5, 32 * 3) and inF (64); kernel = the
+ * pool window. Derived a second time, with both hashes (this line, then the
+ * same model with its convs frozen), by
+ * uv run python -c "import json, functools; [print(s, end=''
+ *     ) or print(format(functools.reduce(lambda h, b: ((h ^ b) * 0x100000001b3) % 2**64,
+ *     s.encode(), 0xcbf29ce484222325), '016x')) for s in [json.dumps({'schema_version': 0,
+ *     'input': {'shape': [1, 9, 128], 'dtype': {'kind': 'FLOAT32'}}, 'loss': 'CROSS_ENTROPY',
+ *     'layers': [dict({'type': t, 'frozen': frozen and t == 'CONV1D', 'trackRunningStats': False,
+ *     'outShape': [1] + o, 'outputDtype': {'kind': 'FLOAT32'}, 'propLossDtype': {'kind':
+ *     'FLOAT32'}}, **({'cost': {c[0]: c[1]}} if c else {})) for t, o, *c in [('CONV1D', [16,
+ *     128], 'macPerElement', 63), ('RELU', [16, 128]), ('MAXPOOL1D', [16, 64], 'kernel', 2), (
+ *     'CONV1D', [32, 64], 'macPerElement', 80), ('RELU', [32, 64]), ('MAXPOOL1D', [32, 32],
+ *     'kernel', 2), ('CONV1D', [64, 32], 'macPerElement', 96), ('RELU', [64, 32]), ('AVGPOOL1D',
+ *     [64, 1], 'kernel', 32), ('FLATTEN', [64]), ('LINEAR', [6], 'macPerElement', 64), (
+ *     'SOFTMAX', [6])]]}, separators=(',', ':')) + '\n' for frozen in (False, True)]]"
+ */
+static const char g_harProblem[] =
+    "{\"schema_version\":0,\"input\":{\"shape\":[1,9,128],\"dtype\":{\"kind\":\"FLOAT32\"}},"
+    "\"loss\":\"CROSS_ENTROPY\",\"layers\":["
+    "{\"type\":\"CONV1D\",\"frozen\":false,\"trackRunningStats\":false,\"outShape\":[1,16,128],"
+    "\"outputDtype\":{\"kind\":\"FLOAT32\"},\"propLossDtype\":{\"kind\":\"FLOAT32\"},"
+    "\"cost\":{\"macPerElement\":63}},"
+    "{\"type\":\"RELU\",\"frozen\":false,\"trackRunningStats\":false,\"outShape\":[1,16,128],"
+    "\"outputDtype\":{\"kind\":\"FLOAT32\"},\"propLossDtype\":{\"kind\":\"FLOAT32\"}},"
+    "{\"type\":\"MAXPOOL1D\",\"frozen\":false,\"trackRunningStats\":false,\"outShape\":[1,16,64],"
+    "\"outputDtype\":{\"kind\":\"FLOAT32\"},\"propLossDtype\":{\"kind\":\"FLOAT32\"},"
+    "\"cost\":{\"kernel\":2}},"
+    "{\"type\":\"CONV1D\",\"frozen\":false,\"trackRunningStats\":false,\"outShape\":[1,32,64],"
+    "\"outputDtype\":{\"kind\":\"FLOAT32\"},\"propLossDtype\":{\"kind\":\"FLOAT32\"},"
+    "\"cost\":{\"macPerElement\":80}},"
+    "{\"type\":\"RELU\",\"frozen\":false,\"trackRunningStats\":false,\"outShape\":[1,32,64],"
+    "\"outputDtype\":{\"kind\":\"FLOAT32\"},\"propLossDtype\":{\"kind\":\"FLOAT32\"}},"
+    "{\"type\":\"MAXPOOL1D\",\"frozen\":false,\"trackRunningStats\":false,\"outShape\":[1,32,32],"
+    "\"outputDtype\":{\"kind\":\"FLOAT32\"},\"propLossDtype\":{\"kind\":\"FLOAT32\"},"
+    "\"cost\":{\"kernel\":2}},"
+    "{\"type\":\"CONV1D\",\"frozen\":false,\"trackRunningStats\":false,\"outShape\":[1,64,32],"
+    "\"outputDtype\":{\"kind\":\"FLOAT32\"},\"propLossDtype\":{\"kind\":\"FLOAT32\"},"
+    "\"cost\":{\"macPerElement\":96}},"
+    "{\"type\":\"RELU\",\"frozen\":false,\"trackRunningStats\":false,\"outShape\":[1,64,32],"
+    "\"outputDtype\":{\"kind\":\"FLOAT32\"},\"propLossDtype\":{\"kind\":\"FLOAT32\"}},"
+    "{\"type\":\"AVGPOOL1D\",\"frozen\":false,\"trackRunningStats\":false,\"outShape\":[1,64,1],"
+    "\"outputDtype\":{\"kind\":\"FLOAT32\"},\"propLossDtype\":{\"kind\":\"FLOAT32\"},"
+    "\"cost\":{\"kernel\":32}},"
+    "{\"type\":\"FLATTEN\",\"frozen\":false,\"trackRunningStats\":false,\"outShape\":[1,64],"
+    "\"outputDtype\":{\"kind\":\"FLOAT32\"},\"propLossDtype\":{\"kind\":\"FLOAT32\"}},"
+    "{\"type\":\"LINEAR\",\"frozen\":false,\"trackRunningStats\":false,\"outShape\":[1,6],"
+    "\"outputDtype\":{\"kind\":\"FLOAT32\"},\"propLossDtype\":{\"kind\":\"FLOAT32\"},"
+    "\"cost\":{\"macPerElement\":64}},"
+    "{\"type\":\"SOFTMAX\",\"frozen\":false,\"trackRunningStats\":false,\"outShape\":[1,6],"
+    "\"outputDtype\":{\"kind\":\"FLOAT32\"},\"propLossDtype\":{\"kind\":\"FLOAT32\"}}"
+    "]}\n";
+
+/* The input every HAR trainer keys its plan to: one [1, 9, 128] sample. */
+static const tensor_t *harInput(inputHeader_t *in) {
+    static quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    return makeInputHeader(in, (const size_t[]){1, 9, HAR_IN_LENGTH}, 3u, &floatQ);
+}
+
+/* The whole problem line and its hash; the HAR trainer's DUMP_PROBLEM=1
+ * writes the same bytes. */
+void testTheProblemOfHarIsItsWholeModel(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputHeader_t in;
+    TEST_ASSERT_TRUE(dumpOf(model, HAR_N, g_crossEntropy, harInput(&in)));
+    TEST_ASSERT_EQUAL_STRING(g_harProblem, g_printed);
+    TEST_ASSERT_EQUAL_STRING("PROBLEM_HASH fnv1a64=26b4a7babc5f10bf\n", g_hashLine);
+    freeHar(model);
+}
+
+/* Stage 2 of the finetune trainer: HAR's line with its three convs marked
+ * frozen ("true" is one byte shorter than "false"); the hash, derived from
+ * that line, covers every other byte. */
+void testTheProblemOfTheFinetuneModelMarksItsFrozenConvs(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, true);
+    inputHeader_t in;
+    TEST_ASSERT_TRUE(dumpOf(model, HAR_N, g_crossEntropy, harInput(&in)));
+    TEST_ASSERT_EQUAL_STRING("PROBLEM_HASH fnv1a64=2eda621ed208752a\n", g_hashLine);
+    TEST_ASSERT_EQUAL_size_t(sizeof g_harProblem - 1u - 3u, strlen(g_printed));
+    size_t frozenConvs = 0;
+    for (const char *p = g_printed; (p = strstr(p, "\"CONV1D\",\"frozen\":true")) != NULL; p++) {
+        frozenConvs++;
+    }
+    TEST_ASSERT_EQUAL_size_t(3, frozenConvs);
+    freeHar(model);
+}
+
+/* The reason goes to stderr, here moved onto the harness's stdout. Exit 0 =
+ * dumped, 1 = refused with nothing written, 2 = refused after writing. */
+static void exitWithTheDumpVerdict(FILE *json, layer_t **model, size_t n, lossConfig_t loss,
+                                   const tensor_t *input) {
+    (void)dup2(STDOUT_FILENO, fileno(stderr));
+    bool dumped = rematSelectDumpProblem(json, stdout, model, n, loss, input);
+    exit(dumped ? 0 : (ftell(json) == 0 ? 1 : 2));
+}
+
+/* What the problem cannot hold is refused before a byte is written: the
+ * input's rank, batch and dtype, the loss, a layer type the dump does not
+ * write, and a wire that is not FLOAT32. */
+void testTheProblemDumpRefusesWhatTheProblemCannotHold(void) {
+    static quantization_t floatQ;
+    static quantization_t symQ;
+    static symInt32QConfig_t symConfig;
+    initFloat32Quantization(&floatQ);
+    initSymInt32QConfig(HALF_AWAY, &symConfig);
+    initSymInt32Quantization(&symConfig, &symQ);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, &floatQ);
+    layerQuant_t symOut = lq;
+    symOut.outputQ = &symQ;
+    layerQuant_t symDx = lq;
+    symDx.propLossQ = &symQ;
+    layer_t dropout = {.type = DROPOUT, .config = NULL};
+    layer_t unknown = {.type = (layerType_t)99, .config = NULL};
+    layer_t *relu[2] = {reluLayerInit(&lq), &dropout};
+    layer_t *bad[2] = {&unknown, NULL};
+    layer_t *reluSymOut[1] = {reluLayerInit(&symOut)};
+    layer_t *reluSymDx[1] = {reluLayerInit(&symDx)};
+    inputHeader_t in;
+    const tensor_t *x = makeInputHeader(&in, (const size_t[]){1, 4}, 2u, &floatQ);
+    inputHeader_t in9;
+    const tensor_t *x9 =
+        makeInputHeader(&in9, (const size_t[]){1, 1, 1, 1, 1, 1, 1, 1, 4}, 9u, &floatQ);
+    inputHeader_t inBatch2;
+    const tensor_t *xBatch2 = makeInputHeader(&inBatch2, (const size_t[]){2, 4}, 2u, &floatQ);
+    inputHeader_t inSym;
+    const tensor_t *xSym = makeInputHeader(&inSym, (const size_t[]){1, 4}, 2u, &symQ);
+    const lossConfig_t unknownLoss = {.funcType = (lossFuncType_t)7};
+    ASSERT_EXITS_WITH(0, exitWithTheDumpVerdict(tmpfile(), relu, 1u, g_crossEntropy, x));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "ERROR: DUMP_PROBLEM: the input has rank 9 (the problem dump writes ranks 1 to 8)",
+        exitWithTheDumpVerdict(tmpfile(), relu, 1u, g_crossEntropy, x9));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1,
+        "ERROR: DUMP_PROBLEM: the input's first dimension is 2 (the problem is written at batch 1)",
+        exitWithTheDumpVerdict(tmpfile(), relu, 1u, g_crossEntropy, xBatch2));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "ERROR: DUMP_PROBLEM: the input has qtype_t 2 (the problem dump writes FLOAT32 only)",
+        exitWithTheDumpVerdict(tmpfile(), relu, 1u, g_crossEntropy, xSym));
+    ASSERT_EXITS_WITH_OUTPUT(1, "ERROR: DUMP_PROBLEM: unknown lossFuncType_t 7",
+                             exitWithTheDumpVerdict(tmpfile(), relu, 1u, unknownLoss, x));
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "ERROR: DUMP_PROBLEM: layer 1 has layerType_t 10, which the problem "
+                             "dump does not write (it writes CONV1D, RELU, MAXPOOL1D, AVGPOOL1D, "
+                             "FLATTEN, LINEAR and SOFTMAX)",
+                             exitWithTheDumpVerdict(tmpfile(), relu, 2u, g_crossEntropy, x));
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "ERROR: DUMP_PROBLEM: layer 0 has layerType_t 99, which the problem "
+                             "dump does not write (it writes CONV1D, RELU, MAXPOOL1D, AVGPOOL1D, "
+                             "FLATTEN, LINEAR and SOFTMAX)",
+                             exitWithTheDumpVerdict(tmpfile(), bad, 1u, g_crossEntropy, x));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1,
+        "ERROR: DUMP_PROBLEM: layer 0 has outputDtype qtype_t 2 (the problem dump writes FLOAT32 "
+        "only)",
+        exitWithTheDumpVerdict(tmpfile(), reluSymOut, 1u, g_crossEntropy, x));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1,
+        "ERROR: DUMP_PROBLEM: layer 0 has propLossDtype qtype_t 2 (the problem dump writes "
+        "FLOAT32 only)",
+        exitWithTheDumpVerdict(tmpfile(), reluSymDx, 1u, g_crossEntropy, x));
+    freeReluLayer(relu[0]);
+    freeReluLayer(reluSymOut[0]);
+    freeReluLayer(reluSymDx[0]);
+}
+
+/* The trainers write the hash line to stderr, so a failure there has no
+ * stream left to be named on: the dump returns false and the trainer exits 1. */
+void testAFailedHashLineFailsTheDump(void) {
+    static quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, &floatQ);
+    layer_t *relu[1] = {reluLayerInit(&lq)};
+    inputHeader_t in;
+    const tensor_t *x = makeInputHeader(&in, (const size_t[]){1, 4}, 2u, &floatQ);
+    FILE *json = tmpfile();
+    FILE *hashLine = fopen("/dev/null", "r");
+    TEST_ASSERT_NOT_NULL(json);
+    TEST_ASSERT_NOT_NULL(hashLine);
+    TEST_ASSERT_FALSE(rematSelectDumpProblem(json, hashLine, relu, 1u, g_crossEntropy, x));
+    (void)fclose(hashLine);
+    (void)fclose(json);
+    freeReluLayer(relu[0]);
+}
+
+/* A read-only stream stands for one that takes no bytes (a full disk): the
+ * failure is named, and the dump returns false before its hash line. */
+static void exitWithTheWriteVerdict(layer_t **model, const tensor_t *input) {
+    (void)dup2(STDOUT_FILENO, fileno(stderr));
+    FILE *json = fopen("/dev/null", "r");
+    exit(rematSelectDumpProblem(json, stdout, model, 1u, g_crossEntropy, input) ? 0 : 1);
+}
+
+void testAFailedProblemWriteIsNamed(void) {
+    static quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, &floatQ);
+    layer_t *relu[1] = {reluLayerInit(&lq)};
+    inputHeader_t in;
+    const tensor_t *x = makeInputHeader(&in, (const size_t[]){1, 4}, 2u, &floatQ);
+    ASSERT_EXITS_WITH_OUTPUT(1, "ERROR: DUMP_PROBLEM: writing the problem failed",
+                             exitWithTheWriteVerdict(relu, x));
+    freeReluLayer(relu[0]);
+}
+
 /* A zeroed scheduler reports nothing, so the line shows the format alone:
  * the plan as selected, and the recompute numbers at the end. */
 void testTheDryPlanLineNamesThePlanAndEndsWithTheRecomputeNumbers(void) {
@@ -391,5 +717,11 @@ int main(void) {
     RUN_TEST(testAMalformedBudgetStopsBeforeTraining);
     RUN_TEST(testABudgetNeedsArenaStorage);
     RUN_TEST(testDumpProblemStandsAlone);
+    RUN_TEST(testTheProblemHashIsFnv1a64);
+    RUN_TEST(testTheProblemOfHarIsItsWholeModel);
+    RUN_TEST(testTheProblemOfTheFinetuneModelMarksItsFrozenConvs);
+    RUN_TEST(testTheProblemDumpRefusesWhatTheProblemCannotHold);
+    RUN_TEST(testAFailedHashLineFailsTheDump);
+    RUN_TEST(testAFailedProblemWriteIsNamed);
     return UNITY_END();
 }

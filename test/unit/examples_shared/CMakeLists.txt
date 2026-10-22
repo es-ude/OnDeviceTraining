@@ -41,13 +41,26 @@ target_link_libraries(UnitTestParamGate PRIVATE
 )
 __register_target_as_unit_test(UnitTestParamGate)
 
-# remat_select.c: the trainers' REMAT_PLAN parser, its masks and its log
-# lines (#4). The headers it includes come from the libraries listed here.
+# remat_select.c: the trainers' REMAT_PLAN parser, its masks, its log lines
+# and the problem dump (#4). The headers it includes come from the libraries
+# listed here; the layer APIs, LayerQuant, LayerCommon, Kernel and RNG build
+# the HAR-shaped models the dump tests write.
 add_executable(UnitTestRematSelect UnitTestRematSelect.c)
 target_link_libraries(UnitTestRematSelect PRIVATE
         unity
         examples_shared
         RematScheduler
+        LayerConfigAccess
+        Conv1dApi
+        LinearApi
+        ReluApi
+        SoftmaxApi
+        FlattenApi
+        Pool1dApi
+        LayerQuant
+        LayerCommon
+        Kernel
+        RNG
         LossFunction
         Layer
         Tensor

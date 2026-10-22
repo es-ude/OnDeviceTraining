@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "Common.h"
 #include "Layer.h"
@@ -503,6 +504,54 @@ bool arenaPlaceTwoEnded(const rematWireTable_t *t, const rematProgram_t *p, size
     return true;
 }
 
+static bool arenaPlaceFfdMember(const rematWireTable_t *t, const rematProgram_t *p,
+                                size_t placedPeak, size_t *offsets, size_t *bytes) {
+    (void)placedPeak;
+    const arenaOrder_t o = {.t = t, .p = p};
+    return arenaFirstFitInOrder(&o, arenaPlacesBefore, offsets, bytes);
+}
+
+typedef bool (*arenaMember_t)(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
+                              size_t *offsets, size_t *bytes);
+
+/* Fixed at compile time; the order decides ties. A new member is one entry
+ * here and its twin in the Python planner's copy of this placer. */
+static const struct arenaMemberEntry {
+    arenaMember_t place;
+    bool needsGradRange;
+} arenaMembers[] = {
+    {arenaPlaceFfdMember, false}, {arenaPlaceBreadthArea, false}, {arenaPlacePingPong, false},
+    {arenaPlaceTwoEnded, true},   {arenaPlaceSizeThenEnd, false},
+};
+
+bool arenaPlacePortfolio(const rematWireTable_t *t, const rematProgram_t *p, size_t *offsets,
+                         size_t *bytes, size_t *peakPlacedBytes) {
+    size_t placedPeak = arenaPeakPlacedBytes(t, p, NULL);
+    if (!arenaMembers[0].place(t, p, placedPeak, offsets, bytes)) {
+        return false;
+    }
+    size_t *trial = reserveMemory(p->numRanges * sizeof(size_t));
+    if (trial == NULL) {
+        return false;
+    }
+    bool hasGradRange = arenaPlanHasGradRange(t, p);
+    bool placed = true;
+    for (size_t m = 1; placed && m < sizeof arenaMembers / sizeof arenaMembers[0]; m++) {
+        if (arenaMembers[m].needsGradRange && !hasGradRange) {
+            continue;
+        }
+        size_t trialBytes = 0;
+        placed = arenaMembers[m].place(t, p, placedPeak, trial, &trialBytes);
+        if (placed && trialBytes < *bytes) {
+            memcpy(offsets, trial, p->numRanges * sizeof(size_t));
+            *bytes = trialBytes;
+        }
+    }
+    freeReservedMemory(trial);
+    *peakPlacedBytes = placedPeak;
+    return placed;
+}
+
 void arenaVerifyPlacement(const rematWireTable_t *t, const rematProgram_t *p, const size_t *offsets,
                           size_t bytes) {
     for (size_t r = 0; r < p->numRanges; r++) {
@@ -591,8 +640,8 @@ bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t
         return false; /* planned, !placed */
     }
     size_t bytes;
-    if (!arenaPlaceFirstFitDecreasing(s->wires, p, s->row.arena.offsets, &bytes,
-                                      &s->row.arena.peakPlacedBytes)) {
+    if (!arenaPlacePortfolio(s->wires, p, s->row.arena.offsets, &bytes,
+                             &s->row.arena.peakPlacedBytes)) {
         return false; /* the placement's scratch: planned, !placed */
     }
     arenaVerifyPlacement(s->wires, p, s->row.arena.offsets, bytes);

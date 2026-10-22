@@ -96,6 +96,17 @@ bool arenaPlaceTwoEnded(const rematWireTable_t *t, const rematProgram_t *p, size
 /* False for a plan without a backward (no GRAD wire has a range). */
 bool arenaPlanHasGradRange(const rematWireTable_t *t, const rematProgram_t *p);
 
+/* ARENA's placement: runs first-fit-decreasing, breadth/area, ping-pong,
+ * two-ended (only on a plan with a GRAD range) and size-then-end, in that
+ * fixed order, and keeps the layout with the fewest bytes; on equal bytes the
+ * earlier member's. So no layout is larger than first-fit-decreasing's.
+ * peakPlacedBytes as in arenaPlaceFirstFitDecreasing. Returns false only when
+ * a scratch block cannot be reserved: the trial layouts' numRanges x size_t
+ * block, or a member's own; every one is released before it returns, so the
+ * init reserves no byte its report does not account for. */
+bool arenaPlacePortfolio(const rematWireTable_t *t, const rematProgram_t *p, size_t *offsets,
+                         size_t *bytes, size_t *peakPlacedBytes);
+
 /* Always runs (firmware too) and trusts no layout, imported ones included:
  * every offset a multiple of ODT_WIRE_ALIGN, every range inside [0,
  * bytes), co-live (inclusive) ranges byte-disjoint. Exits naming the wire(s). */

@@ -676,6 +676,103 @@ void testNewMembersReleaseTheirScratch(void) {
 }
 #endif
 
+/* ---- the portfolio ---- */
+
+/* First-fit-decreasing is a member, so no layout is larger than its; the
+ * chosen layout passes the verifier, and the placed peak does not depend on
+ * the layout. Every second plan gets GRAD ranges, so two-ended runs. */
+void testPortfolioIsNeverWorseThanFfdOnRandomPlans(void) {
+    uint32_t state = 0x85EBCA6Bu;
+    for (size_t trial = 0; trial < 500u; trial++) {
+        randomPlan_t rp;
+        buildRandomPlan(&rp, &state);
+        if (trial % 2u == 1u) {
+            markLaterHalfGrad(&rp);
+        }
+        size_t ffd[ORACLE_MAX_RANGES];
+        size_t best[ORACLE_MAX_RANGES];
+        size_t ffdBytes = 0;
+        size_t ffdPeak = 0;
+        size_t bytes = 0;
+        size_t peak = 0;
+        TEST_ASSERT_TRUE(
+            arenaPlaceFirstFitDecreasing(&rp.table, &rp.program, ffd, &ffdBytes, &ffdPeak));
+        TEST_ASSERT_TRUE(arenaPlacePortfolio(&rp.table, &rp.program, best, &bytes, &peak));
+        arenaVerifyPlacement(&rp.table, &rp.program, best, bytes);
+        TEST_ASSERT_TRUE_MESSAGE(bytes <= ffdBytes, "portfolio larger than first-fit-decreasing");
+        TEST_ASSERT_EQUAL_size_t(ffdPeak, peak);
+    }
+}
+
+/* HAR LIVENESS: first-fit-decreasing, breadth/area, ping-pong and
+ * size-then-end each place 49152 B with a layout of their own (two-ended
+ * 49688 B); the first member keeps its layout. */
+void testPortfolioKeepsTheEarlierMemberOnATie(void) {
+    fixture_t h;
+    buildHarModel(&h);
+    builtPlan_t b = buildTableAndPlan(h.model, h.n, h.lt, h.x, &g_liveness);
+    const rematProgram_t *p = &b.p->train;
+    size_t ffd[23];
+    size_t later[23];
+    size_t best[23];
+    size_t ffdBytes = 0;
+    size_t laterBytes = 0;
+    size_t bytes = 0;
+    size_t peak = 0;
+    TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(b.t, p, ffd, &ffdBytes, &peak));
+    TEST_ASSERT_TRUE(arenaPlaceSizeThenEnd(b.t, p, peak, later, &laterBytes));
+    TEST_ASSERT_EQUAL_size_t(49152, ffdBytes);
+    TEST_ASSERT_EQUAL_size_t(49152, laterBytes);
+    TEST_ASSERT_TRUE(memcmp(ffd, later, p->numRanges * sizeof(size_t)) != 0);
+    TEST_ASSERT_TRUE(arenaPlacePortfolio(b.t, p, best, &bytes, &peak));
+    TEST_ASSERT_EQUAL_size_t(49152, bytes);
+    for (size_t r = 0; r < p->numRanges; r++) {
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(ffd[r], best[r], "not the first member's layout");
+    }
+    freeTableAndPlan(&b);
+    freeModel(h.model, h.n);
+}
+
+static size_t portfolioBytesOf(const handPlan_t *hp) {
+    randomPlan_t rp;
+    buildHandPlan(&rp, hp);
+    size_t offsets[ORACLE_MAX_RANGES];
+    size_t bytes = 0;
+    size_t peak = 0;
+    TEST_ASSERT_TRUE(arenaPlacePortfolio(&rp.table, &rp.program, offsets, &bytes, &peak));
+    TEST_ASSERT_EQUAL_size_t(peak, bytes);
+    return bytes;
+}
+
+/* Each hand plan reaches its peak through one member only, so dropping any
+ * member from the portfolio raises one of these four numbers. On HAR,
+ * mnist_cnn and HAR finetune two-ended is never the only order at the peak; it
+ * stays for models outside them. */
+void testEveryPortfolioMemberIsTheOnlyOneAtThePeakOfSomePlan(void) {
+    TEST_ASSERT_EQUAL_size_t(64, portfolioBytesOf(&g_breadthAreaPlan));
+    TEST_ASSERT_EQUAL_size_t(56, portfolioBytesOf(&g_pingPongPlan));
+    TEST_ASSERT_EQUAL_size_t(56, portfolioBytesOf(&g_twoEndedPlan));
+    TEST_ASSERT_EQUAL_size_t(40, portfolioBytesOf(&g_sizeThenEndPlan));
+}
+
+#ifdef ODT_MEM_PROFILE
+/* The trial layouts' block is released before the portfolio returns, so an
+ * init still reserves exactly its report's arena + metadata bytes. */
+void testPortfolioReleasesItsScratch(void) {
+    fixture_t h;
+    buildHarModel(&h);
+    builtPlan_t b = buildTableAndPlan(h.model, h.n, h.lt, h.x, NULL);
+    size_t offsets[23];
+    size_t bytes = 0;
+    size_t peak = 0;
+    size_t before = memProfileCurrentBytes();
+    TEST_ASSERT_TRUE(arenaPlacePortfolio(b.t, &b.p->train, offsets, &bytes, &peak));
+    TEST_ASSERT_EQUAL_size_t(before, memProfileCurrentBytes());
+    freeTableAndPlan(&b);
+    freeModel(h.model, h.n);
+}
+#endif
+
 /* ---- the placement verifier ---- */
 
 typedef struct placedPlan {
@@ -843,28 +940,25 @@ void testReportPadOnTheF1ModelIsEleven(void) {
     }
 }
 
-/* FFD heuristic; a change needs a stated reason. The one
- * pin recorded from the implementation, cross-checked against an independent
- * FFD of the first-fit rule on the hand-derived HAR ranges:
- * STORE_ALL leaves a 4,096 B gap above its 74,288 B peak, LIVENESS none. */
-void testReportArenaBytesHarFfdRegressionGuard(void) {
-    TEST_ASSERT_EQUAL_size_t(78384, reportAfterInit(buildHarModel, NULL).arenaBytes);
+/* The portfolio places HAR at its placed peak, a change needs a stated
+ * reason: STORE_ALL 74,288 B (only ping-pong reaches it; first-fit-decreasing
+ * alone leaves a 4,096 B gap) and LIVENESS 49,152 B. */
+void testReportArenaBytesHarRegressionGuard(void) {
+    TEST_ASSERT_EQUAL_size_t(74288, reportAfterInit(buildHarModel, NULL).arenaBytes);
     TEST_ASSERT_EQUAL_size_t(49152, reportAfterInit(buildHarModel, &g_liveness).arenaBytes);
 }
 
-/* FFD heuristic, like the guards above: recorded from the implementation and
- * cross-checked against an independent FFD of the first-fit rule on the same
- * ranges. HAR with ACT 3, ACT 7 and ACT 12 kept (retain[3] = retain[7] =
- * retain[12] = true, the rest false), and with ACT 12 dropped too: both place
- * 36,864 B for their 32,768 B peak, a 4,096 B gap. */
-void testReportArenaBytesHarRetainFfdRegressionGuard(void) {
+/* HAR with ACT 3, ACT 7 and ACT 12 kept (retain[3] = retain[7] = retain[12] =
+ * true, the rest false), and with ACT 12 dropped too: both place exactly their
+ * 32,768 B peak (first-fit-decreasing alone needs 36,864 B). */
+void testReportArenaBytesHarRetainRegressionGuard(void) {
     static const bool keep3And7And12[HAR_N + 1] = {[3] = true, [7] = true, [12] = true};
     static const bool keep3And7[HAR_N + 1] = {[3] = true, [7] = true};
     const bool *masks[2] = {keep3And7And12, keep3And7};
     for (size_t m = 0; m < 2u; m++) {
         const rematPlanSpec_t spec = {.policy = REMAT_PLAN_RETAIN_LIST, .retain = masks[m]};
         rematReport_t r = reportAfterInit(buildHarModel, &spec);
-        TEST_ASSERT_EQUAL_size_t(36864, r.arenaBytes);
+        TEST_ASSERT_EQUAL_size_t(32768, r.arenaBytes);
         TEST_ASSERT_EQUAL_size_t(32768, r.peakLiveBytes);
         TEST_ASSERT_EQUAL_size_t(24576, r.activationsPeakBytes);
     }
@@ -893,18 +987,39 @@ static void buildFinetuneStage2Model(fixture_t *f) {
     buildHarFixture(f, true);
 }
 
-/* FFD heuristic, like the HAR guard above: recorded from the
- * implementation, a change needs a stated reason. mnist_cnn: STORE_ALL places
- * 188,368 B for its 175,824 B peak (a 12,544 B gap), LIVENESS exactly its
- * 112,896 B peak. Finetune stage 2: STORE_ALL exactly its 57,928 B peak;
- * LIVENESS places every 8,192 B wire first and needs 20,480 B for a 16,384 B
- * peak, a layout of 16,384 B exists. */
-void testReportArenaBytesMnistCnnAndFinetuneFfdRegressionGuards(void) {
-    TEST_ASSERT_EQUAL_size_t(188368, reportAfterInit(buildMnistCnnModel, NULL).arenaBytes);
+/* Like the HAR guard above, every value is the placed peak; a change needs a
+ * stated reason. mnist_cnn: STORE_ALL 175,824 B (only ping-pong reaches it;
+ * first-fit-decreasing alone 188,368) and LIVENESS 112,896 B. Finetune stage
+ * 2: STORE_ALL 57,928 B; LIVENESS 16,384 B, a chain of 8,192 / 8,192 / 4,096 B
+ * buffers that ping-pong alternates between bottom and top (first-fit-
+ * decreasing gives the 4,096 B buffer a third slot: 20,480 B). */
+void testReportArenaBytesMnistCnnAndFinetuneRegressionGuards(void) {
+    TEST_ASSERT_EQUAL_size_t(175824, reportAfterInit(buildMnistCnnModel, NULL).arenaBytes);
     TEST_ASSERT_EQUAL_size_t(112896, reportAfterInit(buildMnistCnnModel, &g_liveness).arenaBytes);
     TEST_ASSERT_EQUAL_size_t(57928, reportAfterInit(buildFinetuneStage2Model, NULL).arenaBytes);
-    TEST_ASSERT_EQUAL_size_t(20480,
+    TEST_ASSERT_EQUAL_size_t(16384,
                              reportAfterInit(buildFinetuneStage2Model, &g_liveness).arenaBytes);
+}
+
+/* The arena equals the placed peak on two HAR retain plans where only one
+ * member reaches it. Keeping ACT 1, 3, 7 and 12: 40960 B, only through
+ * breadth/area (first-fit-decreasing 45056). Keeping ACT 4, 6, 7, 10 and 12
+ * with inPlaceDx: 28928 B, only through size-then-end (two-ended 29184,
+ * first-fit-decreasing 32768); it is the cheapest in-place plan whose placed
+ * peak is at most 28928 B, so the planner's frontier needs this arena. */
+void testReportArenaBytesHarRetainPlansAtTheirPeak(void) {
+    static const bool keep1_3_7_12[HAR_N + 1] = {[1] = true, [3] = true, [7] = true, [12] = true};
+    static const bool keep4_6_7_10_12[HAR_N + 1] = {
+        [4] = true, [6] = true, [7] = true, [10] = true, [12] = true};
+    const rematPlanSpec_t a = {.policy = REMAT_PLAN_RETAIN_LIST, .retain = keep1_3_7_12};
+    rematReport_t r = reportAfterInit(buildHarModel, &a);
+    TEST_ASSERT_EQUAL_size_t(40960, r.peakLiveBytes);
+    TEST_ASSERT_EQUAL_size_t(40960, r.arenaBytes);
+    const rematPlanSpec_t b = {
+        .policy = REMAT_PLAN_RETAIN_LIST, .retain = keep4_6_7_10_12, .inPlaceDx = true};
+    r = reportAfterInit(buildHarModel, &b);
+    TEST_ASSERT_EQUAL_size_t(28928, r.peakLiveBytes);
+    TEST_ASSERT_EQUAL_size_t(28928, r.arenaBytes);
 }
 
 /* The report's activation-only peak is the TRAIN program's, on either row
@@ -2000,16 +2115,15 @@ void testReportObservedPeakEqualsThePlannedPeak(void) {
 
 /* P8 on an in-place plan: HAR under LIVENESS + inPlaceDx plans 41216 B
  * (49152 without), and a call observes exactly that on both rows, so each
- * chain counts its bytes once. First fit decreasing, an FFD heuristic like
- * the guards above (recorded from the implementation, cross-checked against an
- * independent first fit on the same ranges), places it in 45056 B, a 3840 B
- * gap; STORE_ALL + inPlaceDx places its 70192 B peak with no gap. */
+ * chain counts its bytes once. The portfolio places it in exactly 41216 B
+ * (first-fit-decreasing alone: 45056 B, a 3840 B gap); STORE_ALL + inPlaceDx
+ * places its 70192 B peak. */
 void testHarLivenessInPlaceObservesItsPlannedPeakOnBothRows(void) {
     assertObservedPeakIsThePlannedPeak(initArena, buildHarModel, &g_livenessInPlace);
     assertObservedPeakIsThePlannedPeak(initHeap, buildHarModel, &g_livenessInPlace);
     rematReport_t r = reportAfterInit(buildHarModel, &g_livenessInPlace);
     TEST_ASSERT_EQUAL_size_t(41216, r.peakLiveBytes);
-    TEST_ASSERT_EQUAL_size_t(45056, r.arenaBytes);
+    TEST_ASSERT_EQUAL_size_t(41216, r.arenaBytes);
     const rematPlanSpec_t storeAll = {.policy = REMAT_PLAN_STORE_ALL, .inPlaceDx = true};
     r = reportAfterInit(buildHarModel, &storeAll);
     TEST_ASSERT_EQUAL_size_t(70192, r.peakLiveBytes);
@@ -2876,8 +2990,8 @@ void testInitSelfCheckExitsOnAnUnaccountedByteOnHeap(void) {
 
 void testInitSelfCheckExitsOnAnUnaccountedByteOnArena(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[arena]: init reserved 84001 B, but its report accounts for "
-                             "84000 B (arenaBytes 78384 + metadataBytes 5616)",
+                             "remat[arena]: init reserved 79905 B, but its report accounts for "
+                             "79904 B (arenaBytes 74288 + metadataBytes 5616)",
                              selfCheckWithOneExtraByte(initArena));
 }
 
@@ -2920,8 +3034,8 @@ void testHeapInitExitsOnAnUnaccountedReservation(void) {
 
 void testArenaInitExitsOnAnUnaccountedReservation(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[arena]: init reserved 84008 B, but its report accounts for "
-                             "84000 B (arenaBytes 78384 + metadataBytes 5616)",
+                             "remat[arena]: init reserved 79912 B, but its report accounts for "
+                             "79904 B (arenaBytes 74288 + metadataBytes 5616)",
                              initWithAnUnaccountedReservation(REMAT_ARENA));
 }
 #endif
@@ -2958,6 +3072,12 @@ int main(void) {
 #ifdef ODT_MEM_PROFILE
     RUN_TEST(testNewMembersReleaseTheirScratch);
 #endif
+    RUN_TEST(testPortfolioIsNeverWorseThanFfdOnRandomPlans);
+    RUN_TEST(testPortfolioKeepsTheEarlierMemberOnATie);
+    RUN_TEST(testEveryPortfolioMemberIsTheOnlyOneAtThePeakOfSomePlan);
+#ifdef ODT_MEM_PROFILE
+    RUN_TEST(testPortfolioReleasesItsScratch);
+#endif
     RUN_TEST(testVerifierAcceptsTheFfdPlacementOnTheZoo);
     RUN_TEST(testVerifierExitsNamingBothWiresOnCoLiveOverlap);
     RUN_TEST(testVerifierTreatsRangesMeetingAtOneStepAsCoLive);
@@ -2969,10 +3089,11 @@ int main(void) {
     RUN_TEST(testReportArenaBytesIsPeakPlusPadPlusGap);
     RUN_TEST(testReportPadIsZeroOnHar);
     RUN_TEST(testReportPadOnTheF1ModelIsEleven);
-    RUN_TEST(testReportArenaBytesHarFfdRegressionGuard);
-    RUN_TEST(testReportArenaBytesHarRetainFfdRegressionGuard);
+    RUN_TEST(testReportArenaBytesHarRegressionGuard);
+    RUN_TEST(testReportArenaBytesHarRetainRegressionGuard);
     RUN_TEST(testReportCarriesTheRecomputeNumbersOfARetainListPlan);
-    RUN_TEST(testReportArenaBytesMnistCnnAndFinetuneFfdRegressionGuards);
+    RUN_TEST(testReportArenaBytesMnistCnnAndFinetuneRegressionGuards);
+    RUN_TEST(testReportArenaBytesHarRetainPlansAtTheirPeak);
     RUN_TEST(testReportActivationsPeakOnHarOnBothRows);
     RUN_TEST(testArenaOffsetsAlignedOnRandomMixedChains);
 #ifdef ODT_MEM_PROFILE

@@ -4,6 +4,7 @@ The goldens are C output: `planner_goldens/<model>.dry_plan.txt` holds raw DRY_P
 (REMAT_STORAGE=arena) for a fixed sample of retain plans, written by regenerate.py.
 """
 import dataclasses
+import random
 import re
 from functools import cache
 from pathlib import Path
@@ -16,10 +17,18 @@ from odt.planner.cmodel import (
     FORWARD,
     LOSS_BACKWARD,
     LOSS_FORWARD,
+    MEMBERS,
     REFORWARD,
+    Range,
+    Wire,
+    WireTable,
+    extent,
+    place_portfolio,
+    place_two_ended,
     plan_numbers,
     retain_steps,
     scan_ranges,
+    step_live,
     wire_table,
 )
 
@@ -124,3 +133,93 @@ def test_the_copy_of_c_refuses_a_problem_the_planner_does_not_accept():
     p = load_problem(GOLDENS / "har.problem.json")
     with pytest.raises(UnsupportedProblem, match=r"^loss: MSE has no C reference run"):
         wire_table(dataclasses.replace(p, loss="MSE"), 1)
+
+
+# ---- the placer: C's portfolio, compared on arena bytes ----
+
+def hand_plan(spec):
+    """spec: (bytes, begin, end, kind) per range in begin order; range r is wire r + 1."""
+    wires = (Wire("ACT", 0, 0, "FLOAT32"),) + tuple(
+        Wire(kind, r + 1, nbytes, "FLOAT32") for r, (nbytes, _, _, kind) in enumerate(spec))
+    t = WireTable(0, 0, 0, True, wires, (), (), ())
+    return t, [Range(r + 1, begin, end) for r, (_, begin, end, _) in enumerate(spec)]
+
+
+def check_layout(t, ranges, offsets) -> int:
+    """Independent of the placer: aligned, non-negative, co-live ranges disjoint."""
+    sizes = [(t.wires[r.wire].bytes + 7) // 8 * 8 for r in ranges]
+    assert all(o >= 0 and o % 8 == 0 for o in offsets)
+    for a in range(len(ranges)):
+        for b in range(a):
+            if ranges[a].begin <= ranges[b].end and ranges[b].begin <= ranges[a].end:
+                assert offsets[a] + sizes[a] <= offsets[b] or offsets[b] + sizes[b] <= offsets[a]
+    return max(o + s for o, s in zip(offsets, sizes))
+
+
+def random_plan(rng):
+    steps = rng.randint(1, 24)
+    begins = sorted(rng.randrange(steps) for _ in range(rng.randint(1, 20)))
+    return hand_plan([(rng.randint(1, 4096), b, rng.randint(b, steps - 1),
+                       rng.choice(("ACT", "GRAD"))) for b in begins])
+
+
+ACT, GRAD = "ACT", "GRAD"
+HAND_PLANS = {  # the C unit test's hand plans: each reaches its peak through one member only
+    "size-then-end": ([(16, 0, 3, ACT), (16, 1, 4, ACT), (8, 3, 5, ACT), (8, 4, 5, ACT),
+                       (24, 5, 5, GRAD)], [16, 0, 32, 24, 0], 40),
+    "ping-pong": ([(24, 0, 2, ACT), (16, 1, 3, ACT), (16, 2, 2, GRAD), (32, 3, 3, ACT)],
+                  [0, 40, 24, 0], 56),
+    "breadth/area": ([(16, 0, 3, ACT), (24, 1, 2, GRAD), (24, 2, 4, GRAD), (8, 3, 4, GRAD),
+                      (32, 4, 4, GRAD)], [24, 40, 0, 56, 24], 64),
+    "two-ended": ([(32, 0, 1, ACT), (16, 1, 3, GRAD), (16, 2, 3, GRAD), (24, 3, 5, GRAD),
+                   (32, 4, 4, GRAD)], [0, 40, 24, 0, 24], 56),
+}
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_every_golden_dry_plan_line_has_the_arena_of_the_copy_of_c(model):
+    t = table(model)
+    for row in golden_rows(model):
+        numbers = plan_numbers(t, *parse_plan(row["plan"], t.n))
+        placement = place_portfolio(t, numbers.ranges)
+        assert (row["plan"], placement.bytes, placement.bytes - numbers.placed_peak_b) == (
+            row["plan"], row["arena_b"], row["arena_gap_b"])
+
+
+@pytest.mark.parametrize("name", list(HAND_PLANS))
+def test_each_member_alone_places_its_hand_plan_at_the_peak(name):
+    spec, offsets, nbytes = HAND_PLANS[name]
+    t, ranges = hand_plan(spec)
+    member = {m: f for m, f, _ in MEMBERS}[name]
+    assert member(t, ranges, nbytes) == offsets
+    placement = place_portfolio(t, ranges)
+    assert (placement.member, placement.bytes, list(placement.offsets)) == (name, nbytes, offsets)
+    for other, f, needs_grad in MEMBERS:
+        if other != name:
+            assert check_layout(t, ranges, f(t, ranges, nbytes)) > nbytes
+
+
+def test_every_member_layout_passes_the_overlap_check_and_the_portfolio_keeps_the_best():
+    rng = random.Random(4)
+    for _ in range(500):
+        t, ranges = random_plan(rng)
+        peak = max(step_live(t, ranges, max(r.end for r in ranges) + 1, True))
+        got = {}
+        for name, member, needs_grad in MEMBERS:
+            if needs_grad and not any(t.wires[r.wire].kind == "GRAD" for r in ranges):
+                continue
+            offsets = member(t, ranges, peak)
+            got[name] = check_layout(t, ranges, offsets)
+            assert got[name] == extent(t, ranges, offsets) >= peak
+        placement = place_portfolio(t, ranges)
+        assert placement.bytes == min(got.values()) <= got["first-fit-decreasing"]
+        assert placement.member == next(n for n in got if got[n] == placement.bytes)
+        assert check_layout(t, ranges, placement.offsets) == placement.bytes
+
+
+def test_two_ended_needs_a_grad_range_and_the_portfolio_skips_it_without_one():
+    t, ranges = hand_plan([(16, 0, 1, ACT), (8, 1, 2, ACT)])
+    with pytest.raises(ValueError, match=r"^remat\[arena\]: two-ended placement needs a GRAD "
+                                         r"range$"):
+        place_two_ended(t, ranges, 24)
+    assert place_portfolio(t, ranges).bytes == 24

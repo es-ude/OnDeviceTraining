@@ -68,6 +68,12 @@ def wire_table(problem: Problem, m: int) -> WireTable:
     top = n - 1 - (1 if problem.loss == "CROSS_ENTROPY" else 0)
     has_backward = deepest < n
     wires = [Wire("ACT", j, elements[j] * FLOAT32_BYTES, act_dtype[j]) for j in range(n + 1)]
+    for w in wires:  # C's elementsOf, then wireBytes, per ACT wire, ACT 0 included
+        for size, unit in ((elements[w.index], "elements"), (w.bytes, "B")):
+            if size > SIZE_MAX:
+                raise UnsupportedProblem(
+                    f"wire ACT {w.index}: {size} {unit} has no C reference run; the planner "
+                    f"accepts a wire of at most {SIZE_MAX} {unit}, as C's wire table does")
     if has_backward:
         wires.append(Wire("GRAD", n, wires[n].bytes, wires[n].dtype))
         wires += [Wire("GRAD", l, elements[l] * FLOAT32_BYTES, layers[l].prop_loss_dtype.kind)
@@ -80,8 +86,21 @@ def wire_table(problem: Problem, m: int) -> WireTable:
                 f"wires: more than {SIZE_MAX} B in total (passed at wire {w.kind} {w.index}) has "
                 f"no C reference run; the planner accepts wires that total at most {SIZE_MAX} B, "
                 "as C's wire table does")
+    costs = tuple(forward_cost(layer, elements[j], elements[j + 1])
+                  for j, layer in enumerate(layers))
+    cost_total = 0
+    for j, cost in enumerate(costs):  # every C plan build: layerForwardCost, then the sum
+        if cost > SIZE_MAX:
+            raise UnsupportedProblem(
+                f"layers[{j}].cost: a forward cost of {cost} has no C reference run; the "
+                f"planner accepts a layer forward cost of at most {SIZE_MAX}, as C's "
+                "layerForwardCost does")
+        cost_total += cost
+        if cost_total > SIZE_MAX:
+            raise UnsupportedProblem(
+                f"layers: more than {SIZE_MAX} forward cost in total (passed at layers[{j}]) "
+                f"has no C reference run; the planner accepts layers whose forward costs total "
+                f"at most {SIZE_MAX}, as C's plan build does")
     return WireTable(n, deepest, top, has_backward, tuple(wires),
                      tuple(layer.type for layer in layers),
-                     tuple(backward_reads_input(layer) for layer in layers),
-                     tuple(forward_cost(layer, elements[j], elements[j + 1])
-                           for j, layer in enumerate(layers)))
+                     tuple(backward_reads_input(layer) for layer in layers), costs)

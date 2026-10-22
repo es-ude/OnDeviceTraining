@@ -203,6 +203,101 @@ def test_a_problem_whose_wires_total_more_than_size_max_is_refused_by_name(tmp_p
     assert (done.returncode, done.stdout, done.stderr) == (1, "", f"odt.planner: {message}\n")
 
 
+def assert_refused_by_name(tmp_path, input_shape: list[int], layers: list[tuple], message: str):
+    """Through PlanSpace.build and through the CLI, with the same message."""
+    with pytest.raises(UnsupportedProblem, match=f"^{re.escape(message)}$"):
+        PlanSpace.build(chain_problem(input_shape, layers), 1)
+    path = tmp_path / "huge.problem.json"
+    path.write_text(json.dumps(chain_doc(input_shape, layers)))
+    done = run_cli("frontier", str(path), "--m", "1")
+    assert (done.returncode, done.stdout, done.stderr) == (1, "", f"odt.planner: {message}\n")
+
+
+SMALL_HEAD = [("LINEAR", [1, 2], False, {"macPerElement": 1}), ("SOFTMAX", [1, 2], False, None)]
+
+
+@pytest.mark.parametrize("input_shape, layers, message", [
+    pytest.param([1, 2**32, 2**32], SMALL_HEAD,
+                 "wire ACT 0: 18446744073709551616 elements has no C reference run; the planner "
+                 "accepts a wire of at most 18446744073709551615 elements, as C's wire table does",
+                 id="act0-elements"),
+    # (2^32 - 1)(2^32 + 1) = SIZE_MAX elements is allowed, so the refusal is for the bytes
+    pytest.param([1, 2**32 - 1, 2**32 + 1], SMALL_HEAD,
+                 "wire ACT 0: 73786976294838206460 B has no C reference run; the planner accepts a "
+                 "wire of at most 18446744073709551615 B, as C's wire table does",
+                 id="act0-elements-at-size-max"),
+    pytest.param([1, 2**62], SMALL_HEAD,
+                 "wire ACT 0: 18446744073709551616 B has no C reference run; the planner accepts a "
+                 "wire of at most 18446744073709551615 B, as C's wire table does",
+                 id="act0-bytes"),
+    pytest.param([1, 4], [("LINEAR", [1, 2**62], False, {"macPerElement": 1})] + SMALL_HEAD,
+                 "wire ACT 1: 18446744073709551616 B has no C reference run; the planner accepts a "
+                 "wire of at most 18446744073709551615 B, as C's wire table does",
+                 id="act1-bytes"),
+])
+def test_a_wire_of_more_than_size_max_elements_or_bytes_is_refused_by_name(
+        tmp_path, input_shape, layers, message):
+    """C's wire table derives every ACT wire in id order, ACT 0 (the borrowed input) first:
+    elementsOf multiplies its dimensions and wireBytes its bytes, each checked, and exits on the
+    first product that passes size_t -- before it adds up the total of ACT 1 .. n and the GRAD
+    wires. A GRAD wire has its ACT's elements and bytes, so it cannot pass first."""
+    assert_refused_by_name(tmp_path, input_shape, layers, message)
+
+
+@pytest.mark.parametrize("layers, message", [
+    pytest.param([("LINEAR", [1, 2], False, {"macPerElement": 2**63}),
+                  ("SOFTMAX", [1, 2], False, None)],
+                 "layers[0].cost: a forward cost of 18446744073709551616 has no C reference run; "
+                 "the planner accepts a layer forward cost of at most 18446744073709551615, as "
+                 "C's layerForwardCost does",
+                 id="layer-cost"),
+    # a layer cost of exactly SIZE_MAX is allowed, so the refusal is for the sum
+    pytest.param([("LINEAR", [1, 1], False, {"macPerElement": 2**64 - 1}),
+                  ("SOFTMAX", [1, 1], False, None)],
+                 "layers: more than 18446744073709551615 forward cost in total (passed at "
+                 "layers[1]) has no C reference run; the planner accepts layers whose forward "
+                 "costs total at most 18446744073709551615, as C's plan build does",
+                 id="layer-cost-at-size-max"),
+    pytest.param([("LINEAR", [1, 1], False, {"macPerElement": 2**63}),
+                  ("LINEAR", [1, 1], False, {"macPerElement": 2**63}),
+                  ("SOFTMAX", [1, 1], False, None)],
+                 "layers: more than 18446744073709551615 forward cost in total (passed at "
+                 "layers[1]) has no C reference run; the planner accepts layers whose forward "
+                 "costs total at most 18446744073709551615, as C's plan build does",
+                 id="cost-total"),
+])
+def test_a_forward_cost_past_size_max_is_refused_by_name(tmp_path, layers, message):
+    """Every C plan build sums the layers' forward costs in layer order (recordRecomputeNumbers):
+    layerForwardCost exits when a layer's checked product passes size_t, and the checked running
+    sum exits when the total does, so no plan for such a problem could run. The wires are small:
+    only the costs are past the limit."""
+    assert_refused_by_name(tmp_path, [1, 4], layers, message)
+
+
+@pytest.mark.parametrize("input_shape, layers", [
+    # LINEAR costs 1 x (2^64 - 2), SOFTMAX costs its 1 output element: SIZE_MAX in total
+    pytest.param([1, 4], [("LINEAR", [1, 1], False, {"macPerElement": 2**64 - 2}),
+                          ("SOFTMAX", [1, 1], False, None)], id="cost-total-at-size-max"),
+    # ACT 0 of 2^62 - 1 elements, 2^64 - 4 B; ACT 0 is not in the total
+    pytest.param([1, 2**62 - 1], SMALL_HEAD, id="act0-bytes-at-size-max-minus-3"),
+    # ACT 1, ACT 2 and GRAD 2 of (2^62 - 1) / 3 elements each: 2^64 - 4 B in total
+    pytest.param([1, 1], [("LINEAR", [1, (2**62 - 1) // 3], False, {"macPerElement": 1}),
+                          ("SOFTMAX", [1, (2**62 - 1) // 3], False, None)],
+                 id="wire-total-at-size-max-minus-3"),
+])
+def test_a_problem_at_the_size_max_limits_is_accepted(tmp_path, input_shape, layers):
+    """C refuses only a size past SIZE_MAX, so a problem right at the limit builds and has a
+    frontier, through PlanSpace.build and through the CLI. Wire bytes are 4 x elements, and
+    SIZE_MAX is not a multiple of 4, so a wire or a wire total can come no closer than
+    SIZE_MAX - 3 B; a forward cost total can be SIZE_MAX exactly."""
+    assert frontier(PlanSpace.build(chain_problem(input_shape, layers), 1))
+    path = tmp_path / "limit.problem.json"
+    path.write_text(json.dumps(chain_doc(input_shape, layers)))
+    done = run_cli("frontier", str(path), "--m", "1")
+    assert (done.returncode, done.stderr) == (0, "")
+    assert done.stdout
+
+
 def test_the_cli_names_a_missing_problem_file(tmp_path):
     missing = tmp_path / "nofile.json"
     done = run_cli("solve", str(missing), "--m", "1", "--budget", "5")

@@ -80,8 +80,11 @@ reference run covers — the three example trainers: every dtype FLOAT32, `m` = 
 CROSS_ENTROPY, layer types CONV1D, RELU, MAXPOOL1D, AVGPOOL1D, FLATTEN, LINEAR, SOFTMAX,
 frozen or not, at most 64 layers (the harness's `REMAT_SELECT_MAX_LAYERS`), an input of
 rank at most 8 with the batch axis counted (C can neither dump nor train a higher one;
-`accept.py`), and wires that total at most `SIZE_MAX` bytes, the limit of C's wire table
-(`cmodel/table.py`). Everything else raises `UnsupportedProblem` naming the field, before
+`accept.py`), an ACT wire of at most `SIZE_MAX` elements and at most `SIZE_MAX` bytes and
+wires that total at most `SIZE_MAX` bytes, as C's wire table does, and a layer forward cost
+of at most `SIZE_MAX`, as C's `layerForwardCost` does, with the layers' forward costs
+totalling at most `SIZE_MAX`, as C's plan build does (these four limits are in
+`cmodel/table.py`). Everything else raises `UnsupportedProblem` naming the field, before
 any plan is built. Widening it is one rule in `accept.py`, the matching rule in the
 copy of C (`cmodel/`), a C reference case and its goldens — never a schema change.
 

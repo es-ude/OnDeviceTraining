@@ -790,7 +790,20 @@ checkpointing, limitations, literature).
   each optionally followed by `+inplace`,
   `DRY_PLAN=1`) and log the choice (a retain list as it runs, the last output
   always kept); the HAR memory-profiling build also logs the numbers (`mnist_cnn`
-  prints them only in its `DRY_PLAN` line). Wire bytes are poisoned at bind/release
+  prints them only in its `DRY_PLAN` line). `DUMP_PROBLEM=1` writes the trainer's
+  model as a planner problem (one JSON line on stdout, its FNV-1a 64 hash on stderr)
+  and stops; `REMAT_BUDGET_B=<bytes>` (ARENA only) stops a run whose arena is larger,
+  naming both numbers, and logs the budget (`wire_budget_b`, `wire_cost_model`).
+  The budget planner (`python/odt/planner/`, host-only Python; remat D12, remat D18)
+  reads that file and prints the retain plan of least recompute whose arena fits
+  (`uv run -m odt.planner solve <problem> --m 1 --budget <bytes>` → `REMAT_PLAN` and
+  `REMAT_BUDGET_B`) or every budget breakpoint (`frontier`); it is exact over all
+  retain plans that keep ACT n, with or without in-place dx, and accepts FLOAT32,
+  micro-batch 1, CrossEntropy, the seven layer types of the three trainers and at
+  most 64 layers.
+  `examples/_shared/remat_frontier.py` writes an example's frontier as a CSV whose
+  rows C measured, and `examples/_shared/remat_conformance.py` trains every frontier
+  plan against STORE_ALL (a local check). Wire bytes are poisoned at bind/release
   under `ODT_REMAT_VERIFY` (ON in the `unit_test`/`unit_test_debug`/`unit_test_asan`
   presets and, by inheritance, `unit_test_ubsan`). A plan may recompute a
   layer's forward output during the backward phase (`REMAT_STEP_REFORWARD`,

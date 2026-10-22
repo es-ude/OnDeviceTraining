@@ -566,13 +566,15 @@ binary (`c-bit-parity`), not an accuracy or BWT gate.
 ### Choosing the training call's memory scheme (#4)
 
 The main trainer (`train_c_har_classifier`) and the finetune trainer's stage 2
-read three environment variables at start-up (the other HAR binaries ignore them):
+read five environment variables at start-up (the other HAR binaries ignore them):
 
 | Variable | Values | Meaning |
 |---|---|---|
 | `REMAT_STORAGE` | `arena` \| `heap` | one resident block placed at start-up, or one allocation per buffer |
 | `REMAT_PLAN` | `store_all` \| `liveness` \| `retain:<j>[,<j>...]` \| `retain:sqrt` \| `retain:speed`, each optionally followed by `+inplace` | keep every activation to the end of the call; free each after its last reader; or keep only some and recompute the others where the backward pass reads them; `+inplace` also lets a ReLU, Dropout or Flatten backward write its gradient over the gradient it reads (below) |
 | `DRY_PLAN` | `1` | print the plan's numbers in one line and stop (nothing is trained; no log, checkpoint or prediction file is written) |
+| `DUMP_PROBLEM` | `1` | write the model as a planner problem (one JSON line on stdout, `PROBLEM_HASH fnv1a64=<hex>` on stderr) and stop; it stands alone, so none of the other four may be set with it |
+| `REMAT_BUDGET_B` | bytes, `1` … `SIZE_MAX` | needs `REMAT_STORAGE=arena`: stop before training if the arena is larger than the budget, naming both numbers; an arena equal to it fits; set but empty, it is unset like the others (no budget) |
 
 With none set, the trainer passes no scheduler and each training call runs its own
 default (one allocation per buffer, `liveness`). A missing variable takes that
@@ -623,9 +625,10 @@ recorded, never assumed), `wire_metadata_b` the scheduler's tables;
 price the forwards and the recomputes in multiply-accumulates (an analytic
 count per layer, the same for every dtype; a proxy, not a measured time). The run
 log records the choice in `config` (`remat_storage`, `remat_plan`, with a retain
-list as it runs, e.g. `retain:3,7,12`; the finetune trainer adds `remat_stage: 2`,
-because stage 1 always runs on the default), and a memory-profiling build adds the
-nine numbers to the `memory` block. For the finetune
+list as it runs, e.g. `retain:3,7,12`; with `REMAT_BUDGET_B` also `wire_budget_b`
+and `wire_cost_model: "mac"`, the unit of the cost numbers; the finetune trainer adds
+`remat_stage: 2`, because stage 1 always runs on the default), and a memory-profiling
+build adds the nine numbers to the `memory` block. For the finetune
 trainer the numbers are stage 2's (frozen backbone): `DRY_PLAN=1` needs no stage-1
 checkpoint. An opted-in one-block run's `heap_peak_b` counts its resident block for
 the whole run, so compare plans by `wires_peak_b` / `arena_b`, not by `heap_peak_b`.
@@ -634,6 +637,36 @@ store-all sum, an upper bound kept for comparison with older logs: a run without
 scheduler runs `liveness`, frees each activation after its last reader and holds less;
 the plan's own figures are `wires_peak_b` and `activations_peak_b`, present only in
 the log of a memory-profiling run that set `REMAT_STORAGE` or `REMAT_PLAN`.
+
+#### Choosing the plan for an arena budget
+
+The budget planner (`python/odt/planner/`, see its `README.md`) answers "which plan
+recomputes least and still fits this arena?" from the trainer's own model:
+
+```bash
+B=./build/examples/examples/har_classifier/train_c_har_classifier
+DUMP_PROBLEM=1 $B > har.problem.json
+# (stderr) PROBLEM_HASH fnv1a64=26b4a7babc5f10bf
+uv run -m odt.planner solve har.problem.json --m 1 --budget 32768
+# # problem fnv1a64=26b4a7babc5f10bf
+# REMAT_PLAN=retain:4,6,7,10,12+inplace REMAT_BUDGET_B=32768
+REMAT_STORAGE=arena REMAT_PLAN=retain:4,6,7,10,12+inplace REMAT_BUDGET_B=32768 DRY_PLAN=1 $B
+# DRY_PLAN example=har_classifier storage=arena plan=retain:4,6,7,10,12+inplace planned=1 placed=1 data_reserved=1 steps=28 wires_peak_b=28928 activations_peak_b=28928 arena_b=28928 arena_pad_b=0 arena_gap_b=0 wire_metadata_b=5636 refwd_steps=3 forward_cost=502150 recompute_cost=133120
+REMAT_STORAGE=arena REMAT_PLAN=retain:3,7 REMAT_BUDGET_B=32767 $B
+# (stderr, exit 1, before any training) ERROR: remat arena 32768 B exceeds REMAT_BUDGET_B=32767 B
+```
+
+A plan is a list of positions: it fits the model it was made for, and the hash
+comment shows which model that was. `uv run -m odt.planner frontier har.problem.json
+--m 1` prints every budget at which the best plan changes (HAR: eight points, from
+41216 B down to 24576 B; a smaller budget fits no plan). `uv run
+examples/_shared/remat_frontier.py --example har_classifier --out har_frontier.csv`
+writes that frontier as a CSV whose every row C measured, and `uv run
+examples/_shared/remat_conformance.py --work <a new directory> --jobs 8` trains every
+frontier plan of HAR and mnist_cnn on the first 512 samples of each split and compares
+it with STORE_ALL (a local check, about a minute with eight runs at a time). In an
+environment that does not install the project, prefix the planner command with
+`PYTHONPATH=python`.
 
 ### Build with memory profiling
 

@@ -258,6 +258,13 @@ decisions and those with nothing in force yet are left out.
 - **remat D11** ARENA and HEAP are peer rows behind one swappable,
   step-by-step scheduler, which picks the steps. Placement offsets are
   ARENA-private. Every memory block comes from `reserveMemory`.
+- **remat D12** Planner objective: for a model, a micro-batch and an arena
+  budget, the retain plan of least recompute cost whose ARENA arena, as
+  ARENA's placement lays it out, is at most the budget. Ties go to fewer
+  recomputed forwards, then the lower peak of live training buffers, then
+  the plan without in-place dx, then the smaller mask (bit j - 1 keeps
+  ACT j). No tie key depends on placement, so a better placement only makes
+  more plans fit. Every plan keeps the last output, ACT n.
 - **remat D15** The default plan of a training call without a scheduler is
   LIVENESS: each activation is freed after its last reader, with values
   identical to STORE_ALL (remat D9). The default is the training call's
@@ -271,6 +278,19 @@ decisions and those with nothing in force yet are left out.
   Flatten backward (an aliased copy is skipped) and one test.
 - **remat D17** The schedule key fixes the batch size exactly: a scheduler
   keyed to batch B exits at bind on any other B. No plan-per-B cache.
+- **remat D18** The planner is a host-only Python package,
+  `python/odt/planner/`. It reads the problem file the example harness
+  writes (`DUMP_PROBLEM=1`), holds one copy of C's wire, step, range, cost
+  and placement rules, checked against committed C output, and answers with
+  a retain list that runs through `REMAT_PLAN=retain:...[+inplace]` and
+  `REMAT_BUDGET_B`. C stays the truth: no C code runs the planner, no
+  offsets, plan fingerprint or plan version cross over, and the harness
+  checks the arena against the budget itself. It accepts only inputs a C
+  reference run covers and refuses every other by name. The solver sits
+  behind a strategy interface, but that interface takes the retain-list
+  plan space and returns a retain-only plan: a second plan family (a
+  multi-level recompute strategy) needs its own plan-space object and a
+  payload field on the plan, a medium change rather than one more class.
 - **remat D19** Evaluation runs on the caller's scheduler: `inferenceWithLoss`
   with a non-NULL `call->remat` walks the plan's EVAL program (FORWARD and
   LOSS_FORWARD only) in that scheduler's memory, with ACT 0 the caller's

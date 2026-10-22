@@ -33,7 +33,7 @@ The repository is currently structured as a **CMake-based C project** and includ
 - `test/unit/` — unit tests
 - `examples/` — end-to-end training demos (PyTorch reference + C twin + parity checks) — see [`examples/README.md`](examples/README.md)
 - `docs/` — feature matrix, continual-learning guide, contributor conventions
-- `python/` — Python package skeleton (`python/odt/`, not started yet) and `python/tests/` (tests for the example tooling)
+- `python/` — the Python package `python/odt/` (the remat budget planner `python/odt/planner/`; the other subpackages are not started yet) and `python/tests/` (its tests and those of the example tooling)
 - `cmake/` — build helpers
 - `CMakePresets.json` — reproducible CMake configurations
 - `pyproject.toml` / `uv.lock` — Python dependencies, managed with [uv](https://docs.astral.sh/uv/)

@@ -48,8 +48,11 @@ Bit-parity mode requires exact equality; the train-from-scratch tolerances match
 `retain:<j>[,<j>...]` | `retain:sqrt` | `retain:speed`, each optionally followed by
 `+inplace`) and
 `DRY_PLAN=1` choose the training call's memory scheme at start-up, as in
-`har_classifier/README.md`. This example has no memory-profiling build; its plan's
-numbers are in the `DRY_PLAN` line, and the run log's `config` records the choice:
+`har_classifier/README.md`; `DUMP_PROBLEM=1` writes the model as a planner problem and
+`REMAT_BUDGET_B=<bytes>` stops a run whose arena is larger, as there too (mnist_cnn's
+frontier: 100352, 87808, 75264 and 62720 B, all with `+inplace`). This example has no
+memory-profiling build; its plan's numbers are in the `DRY_PLAN` line, and the run
+log's `config` records the choice:
 
 ```bash
 REMAT_STORAGE=arena DRY_PLAN=1 ./build/examples/examples/mnist_cnn/train_c_mnist_cnn

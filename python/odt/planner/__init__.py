@@ -1,5 +1,6 @@
 """Remat planner: for a model, a micro-batch and an arena budget, the retain list that
 recomputes least and still fits the arena C will place. Host-only; C stays the truth."""
+from odt.planner.accept import UnsupportedProblem, require_supported
 from odt.planner.schema import (
     Dtype,
     InputSpec,

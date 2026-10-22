@@ -121,7 +121,7 @@ class MemoryLog(TypedDict):
     activations_peak_b: NotRequired[int]  # the same, activation wires only
     arena_b: NotRequired[int]  # resident arena block; 0 for the heap scheme
     arena_pad_b: NotRequired[int]  # alignment padding at the peak
-    arena_gap_b: NotRequired[int]  # first-fit placement gap: recorded, never assumed
+    arena_gap_b: NotRequired[int]  # placement gap above the placed peak: recorded, never assumed
     wire_metadata_b: NotRequired[int]  # wire table + plan block (+ arena offsets)
     refwd_steps: NotRequired[int]  # the plan's recomputed layer forwards per training call
     forward_cost: NotRequired[int]  # multiply-accumulate proxy of the call's forwards

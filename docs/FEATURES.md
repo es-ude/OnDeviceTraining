@@ -769,7 +769,9 @@ checkpointing, limitations, literature).
   RETAIN_LIST plan with more than `ODT_REMAT_MAX_RANGES` ranges, default
   1024, exits at build under either storage scheme), a step scheduler with two storage
   schemes behind one interface (`RematScheduler.h`): `REMAT_ARENA` (one resident
-  block, first-fit-decreasing placement) and `REMAT_HEAP` (one block per buffer),
+  block; its init places the buffers with five fixed placement orders,
+  first-fit-decreasing among them, and keeps the smallest layout, so the block is
+  never larger than first-fit-decreasing's) and `REMAT_HEAP` (one block per buffer),
   and a validating checker (`RematCheck.h`). Training calls take a caller's
   scheduler through `trainingCall_t.remat` / `trainingRunOptions_t.remat`;
   `trainingRun` evaluates on the same scheduler when the evaluation micro-batch
@@ -778,7 +780,7 @@ checkpointing, limitations, literature).
   training call builds an ephemeral HEAP one on its own default plan, LIVENESS
   (`calculateGradsDefaultPlanSpec()`); evaluation and `inference()` without one
   keep their own buffers. `rematSchedulerReport` gives the plan's numbers (TRAIN
-  wires peak, activation-only peak, arena size, padding, first-fit gap, metadata,
+  wires peak, activation-only peak, arena size, padding, placement gap, metadata,
   and the plan's recompute count with the multiply-accumulate cost of its forwards
   and of its recomputes, from `layerForwardCost`, an analytic count per layer);
   in builds with the memory counter every init checks that it reserved exactly

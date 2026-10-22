@@ -353,9 +353,12 @@ decisions and those with nothing in force yet are left out.
   against `expCapacity`, and only then write a header. `rematWireBind`'s
   inherited GRAD derivation follows the same order.
 - **remat D55** ARENA init order: the offsets table in its own heap block,
-  first-fit-decreasing placement into it, the placement verifier, then the
-  arena data block. The report flags `planned`, `placed`, `dataReserved`
-  imply one another in that order, so a failed init still reports what
+  the placement into it (the smallest layout of five fixed placement orders,
+  first-fit-decreasing first, the earlier order on equal bytes; their scratch,
+  a second offsets table among it, is freed before init returns, a short heap
+  peak at init only), the placement verifier, then the arena data block. The
+  report flags `planned`, `placed`, `dataReserved` imply one another in that
+  order, so a failed init still reports what
   its flags allow. More than `ODT_REMAT_MAX_RANGES` (default 1024) ranges
   exit at init, naming it.
 - **remat D57** The Legacy oracle is retired: keyed randomness reached the

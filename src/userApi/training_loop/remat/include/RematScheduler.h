@@ -186,7 +186,7 @@ typedef struct rematReport {
     size_t observedPeakLiveBytes; /* SDK accounting over the last call, every row (P8) */
     size_t arenaBytes;            /* = peakLiveBytes + arenaPadBytes + arenaGapBytes */
     size_t arenaPadBytes;         /* peakPlacedBytes - peakLiveBytes (alignment) -> arena_pad_b */
-    size_t arenaGapBytes;         /* arenaBytes - peakPlacedBytes (FFD heuristic) -> arena_gap_b */
+    size_t arenaGapBytes;         /* arenaBytes - peakPlacedBytes (placement gap) -> arena_gap_b */
     size_t metadataBytes; /* table block + plan block + the offsets block -> wire_metadata_b */
     /* The TRAIN program's REFORWARD steps (-> refwd_steps) and the forward cost
      * (layerForwardCost, a multiply-accumulate count) of its FORWARD steps

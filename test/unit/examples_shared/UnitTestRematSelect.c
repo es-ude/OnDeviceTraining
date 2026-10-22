@@ -641,6 +641,46 @@ void testAFailedProblemWriteIsNamed(void) {
     freeReluLayer(relu[0]);
 }
 
+/* One Flatten under MSE on a [1, 4] FLOAT32 input: no layer trains, so the
+ * plan has no gradient wire, and ARENA places only the Flatten's output, 4
+ * floats = 16 B (8-aligned already). */
+static bool initFlattenWithBudget(rematScheduler_t *s, const char *budget) {
+    rematSelection_t sel = selectWith("arena", NULL, NULL, NULL, budget);
+    static layer_t flatten = {.type = FLATTEN, .config = NULL};
+    static layer_t *model[1] = {&flatten};
+    static quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    static inputHeader_t in;
+    const tensor_t *x = makeInputHeader(&in, (const size_t[]){1, 4}, 2u, &floatQ);
+    return rematSelectInit(s, &sel, "unit", model, 1u, defaultLossConfig(MSE), x);
+}
+
+static void exitWithTheBudgetVerdict(const char *budget) {
+    (void)dup2(STDOUT_FILENO, fileno(stderr));
+    rematScheduler_t s;
+    exit(initFlattenWithBudget(&s, budget) ? 0 : 1);
+}
+
+/* The budget bounds ARENA's arena only (the metadata is not in it), and an
+ * arena equal to the budget fits. */
+void testAnArenaWithinItsBudgetRuns(void) {
+    rematScheduler_t s;
+    TEST_ASSERT_TRUE(initFlattenWithBudget(&s, "16"));
+    rematReport_t r;
+    rematSchedulerReport(&s, &r);
+    TEST_ASSERT_EQUAL_size_t(16, r.arenaBytes);
+    TEST_ASSERT_TRUE(r.metadataBytes > 0u);
+    rematSchedulerDeinit(&s);
+    ASSERT_EXITS_WITH(0, exitWithTheBudgetVerdict("16"));
+}
+
+/* One byte less stops the run before it starts, naming both numbers; the
+ * scheduler is deinitialised, as on a failed reservation. */
+void testAnArenaOverItsBudgetStopsNamingBoth(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "ERROR: remat arena 16 B exceeds REMAT_BUDGET_B=15 B",
+                             exitWithTheBudgetVerdict("15"));
+}
+
 /* A zeroed scheduler reports nothing, so the line shows the format alone:
  * the plan as selected, and the recompute numbers at the end. */
 void testTheDryPlanLineNamesThePlanAndEndsWithTheRecomputeNumbers(void) {
@@ -723,5 +763,7 @@ int main(void) {
     RUN_TEST(testTheProblemDumpRefusesWhatTheProblemCannotHold);
     RUN_TEST(testAFailedHashLineFailsTheDump);
     RUN_TEST(testAFailedProblemWriteIsNamed);
+    RUN_TEST(testAnArenaWithinItsBudgetRuns);
+    RUN_TEST(testAnArenaOverItsBudgetStopsNamingBoth);
     return UNITY_END();
 }

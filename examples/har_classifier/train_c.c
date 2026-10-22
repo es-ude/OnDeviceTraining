@@ -515,8 +515,15 @@ int main(void) {
              * call runs at micro-batch 1, whatever the batch schedule does. */
             sample_t *keySample = getTrainSample(0);
             batchView_t keyView;
+            const tensor_t *inputLike = batchViewOf(&keyView, keySample->item);
+            if (rematSel.dumpProblem) {
+                bool dumped = rematSelectDumpProblem(stdout, stderr, model, MODEL_SIZE, lossConfig,
+                                                     inputLike);
+                freeSample(keySample);
+                return dumped ? 0 : 1;
+            }
             bool built = rematSelectInit(&remat, &rematSel, "har_classifier", model, MODEL_SIZE,
-                                         lossConfig, batchViewOf(&keyView, keySample->item));
+                                         lossConfig, inputLike);
             freeSample(keySample);
             if (!built) {
                 return 1;

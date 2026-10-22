@@ -311,8 +311,19 @@ bool rematSelectInit(rematScheduler_t *s, const rematSelection_t *sel, const cha
         rematSchedulerReport(s, &r);
         printFields(stderr, "ERROR: remat scheduler init failed (did not run): ", example, sel, &r);
         rematSchedulerDeinit(s);
+        return false;
     }
-    return built;
+    if (sel->budgetBytes != 0u) {
+        rematReport_t r;
+        rematSchedulerReport(s, &r);
+        if (r.arenaBytes > sel->budgetBytes) {
+            fprintf(stderr, "ERROR: remat arena %zu B exceeds REMAT_BUDGET_B=%zu B\n", r.arenaBytes,
+                    sel->budgetBytes);
+            rematSchedulerDeinit(s);
+            return false;
+        }
+    }
+    return true;
 }
 
 void rematSelectPrintPlan(FILE *f, const char *example, const rematSelection_t *sel,

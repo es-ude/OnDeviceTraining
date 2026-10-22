@@ -13,8 +13,13 @@
 
 /* The examples' start-up choice of the training call's memory scheme (#4).
  * REMAT_STORAGE (arena | heap) picks the storage scheme, REMAT_PLAN the plan,
- * DRY_PLAN=1 prints the plan and stops. REMAT_PLAN is store_all | liveness, or
- * a recompute plan that keeps some activations and recomputes the others in
+ * DRY_PLAN=1 prints the plan and stops. REMAT_BUDGET_B=<bytes> (with
+ * REMAT_STORAGE=arena) stops the run when the scheduler is built, before its
+ * first training call, if the arena is larger. DUMP_PROBLEM=1, on its own,
+ * writes the model as the planner's problem file (JSON on stdout, its hash on
+ * stderr) and stops; the planner answers with a REMAT_PLAN and a
+ * REMAT_BUDGET_B. REMAT_PLAN is store_all | liveness, or a recompute plan
+ * that keeps some activations and recomputes the others in
  * the backward pass: retain:<j>[,<j>...] keeps the outputs ACT j of the
  * listed layers (1 <= j <= n, ascending); retain:sqrt keeps ACT j for every
  * j < n divisible by k = ceil(sqrt(n)) (Chen et al. 2016, "Training deep nets
@@ -71,7 +76,9 @@ void rematSelectRetainMask(const rematSelection_t *sel, layer_t **model, size_t 
  * shape] view of one training sample). A failed reservation prints the
  * did-not-run line to stderr, deinits s and returns false. A recompute plan
  * read for another layer count prints the mismatch and returns false before
- * s is touched. */
+ * s is touched. With REMAT_BUDGET_B set, an arena larger than the budget (the
+ * arena only, not the metadata) prints both numbers to stderr, deinits s and
+ * returns false; an arena equal to it fits. */
 bool rematSelectInit(rematScheduler_t *s, const rematSelection_t *sel, const char *example,
                      layer_t **model, size_t modelSize, lossConfig_t loss,
                      const tensor_t *inputLike);

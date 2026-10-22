@@ -319,6 +319,16 @@ static bool buildStage2Remat(rematScheduler_t *s, const rematSelection_t *sel, l
     return built;
 }
 
+/* DUMP_PROBLEM=1: stage 2's problem, the one its scheduler is built for. */
+static bool dumpStage2Problem(layer_t **model2, lossConfig_t lossConfig) {
+    sample_t *keySample = getTrainSample(0);
+    batchView_t keyView;
+    bool dumped = rematSelectDumpProblem(stdout, stderr, model2, MODEL_SIZE, lossConfig,
+                                         batchViewOf(&keyView, keySample->item));
+    freeSample(keySample);
+    return dumped;
+}
+
 int main(void) {
     if (ensureDir("examples/har_classifier/logs") != 0) {
         return 1;
@@ -373,11 +383,14 @@ int main(void) {
     trainingRngInit(&rng, g_seed);
     rematCall.rng = &rng;
 
-    if (rematSel.dryPlan) {
-        /* The stage-2 plan depends on topology, frozen flags and the input
-         * shape, not on weights: no stage-1 checkpoint is needed. */
+    if (rematSel.dryPlan || rematSel.dumpProblem) {
+        /* The stage-2 plan and problem depend on topology, frozen flags and
+         * the input shape, not on weights: no stage-1 checkpoint is needed. */
         layer_t *planModel[MODEL_SIZE];
         buildModel(planModel, &lq, /*freezeConv*/ true, &rng);
+        if (rematSel.dumpProblem) {
+            return dumpStage2Problem(planModel, lossConfig) ? 0 : 1;
+        }
         if (!buildStage2Remat(&remat, &rematSel, planModel, lossConfig)) {
             return 1;
         }

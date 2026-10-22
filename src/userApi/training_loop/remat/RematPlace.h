@@ -78,6 +78,24 @@ bool arenaPlaceSizeThenEnd(const rematWireTable_t *t, const rematProgram_t *p, s
 bool arenaPlacePingPong(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
                         size_t *offsets, size_t *bytes);
 
+/* Busiest step first: the steps by live placed bytes descending (the earlier
+ * step on ties); at each step its ranges not yet ordered, by placed size x
+ * lifetime in steps descending, then wire id; then first fit in that order. */
+bool arenaPlaceBreadthArea(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
+                           size_t *offsets, size_t *bytes);
+
+/* The ranges alive across the first backward step (the earliest begin of a
+ * GRAD range) first fit from the bottom in (begin, end descending, range id);
+ * the others first fit on their own in (begin, end descending, placed size
+ * descending, range id) and are mirrored from the top of the lowest height at
+ * which no co-live pair of the two groups overlaps. A plan without a GRAD
+ * range exits naming it (arenaPlanHasGradRange). */
+bool arenaPlaceTwoEnded(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
+                        size_t *offsets, size_t *bytes);
+
+/* False for a plan without a backward (no GRAD wire has a range). */
+bool arenaPlanHasGradRange(const rematWireTable_t *t, const rematProgram_t *p);
+
 /* Always runs (firmware too) and trusts no layout, imported ones included:
  * every offset a multiple of ODT_WIRE_ALIGN, every range inside [0,
  * bytes), co-live (inclusive) ranges byte-disjoint. Exits naming the wire(s). */

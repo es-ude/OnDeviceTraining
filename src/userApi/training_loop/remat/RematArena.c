@@ -57,10 +57,14 @@ static bool arenaCoLive(const rematRange_t *a, const rematRange_t *b) {
     return a->begin <= b->end && b->begin <= a->end;
 }
 
-/* What a placement order compares. */
+/* What a placement order compares. The last three fields are read only by the
+ * members that set them. */
 typedef struct arenaOrder {
     const rematWireTable_t *t;
     const rematProgram_t *p;
+    const size_t *stepLive;      /* breadth/area: placed bytes live at each step */
+    const uint16_t *busiestStep; /* breadth/area: per range, its step of most live bytes */
+    uint16_t boundary;           /* two-ended: the first backward step */
 } arenaOrder_t;
 
 typedef bool (*arenaBefore_t)(const arenaOrder_t *o, size_t a, size_t b);
@@ -205,7 +209,10 @@ static size_t arenaExtent(const rematWireTable_t *t, const rematProgram_t *p,
     return end;
 }
 
-static size_t arenaPeakPlacedBytes(const rematWireTable_t *t, const rematProgram_t *p) {
+/* The peak of the placed bytes live at a step; with stepLive != NULL also
+ * each step's sum. */
+static size_t arenaPeakPlacedBytes(const rematWireTable_t *t, const rematProgram_t *p,
+                                   size_t *stepLive) {
     rematWalk_t walk = {0};
     size_t live = 0;
     size_t peak = 0;
@@ -213,6 +220,9 @@ static size_t arenaPeakPlacedBytes(const rematWireTable_t *t, const rematProgram
         for (size_t r; (r = rematWalkOpening(p, &walk)) != REMAT_NONE;) {
             uint16_t w = p->ranges[r].wire;
             live = arenaAdd(t, w, live, arenaPlaced(t, w), "peakPlacedBytes");
+        }
+        if (stepLive != NULL) {
+            stepLive[walk.step] = live;
         }
         if (live > peak) {
             peak = live;
@@ -245,7 +255,7 @@ bool arenaPlaceFirstFitDecreasing(const rematWireTable_t *t, const rematProgram_
     if (!arenaFirstFitInOrder(&o, arenaPlacesBefore, offsets, bytes)) {
         return false;
     }
-    *peakPlacedBytes = arenaPeakPlacedBytes(t, p);
+    *peakPlacedBytes = arenaPeakPlacedBytes(t, p, NULL);
     return true;
 }
 
@@ -334,6 +344,161 @@ bool arenaPlacePingPong(const rematWireTable_t *t, const rematProgram_t *p, size
         arenaFitRecord(&f, r, arenaPingPongOffset(&f, r, placedPeak));
     }
     freeReservedMemory(f.byOffset);
+    *bytes = arenaExtent(t, p, offsets);
+    return true;
+}
+
+/* placed x lifetime as hi * 2^16 + lo: exact for every placed size, because a
+ * lifetime is at most 2^16 steps. */
+static void arenaArea(const arenaOrder_t *o, size_t r, size_t *hi, size_t *lo) {
+    size_t placed = arenaRangePlaced(o->t, o->p, r);
+    size_t steps = (size_t)o->p->ranges[r].end - o->p->ranges[r].begin + 1u;
+    size_t low = (placed & 0xFFFFu) * steps;
+    *hi = (placed >> 16) * steps + (low >> 16);
+    *lo = low & 0xFFFFu;
+}
+
+/* Within one step the wire id decides the last tie: the ranges of one wire are
+ * never co-live. */
+static bool arenaBreadthAreaBefore(const arenaOrder_t *o, size_t a, size_t b) {
+    uint16_t stepA = o->busiestStep[a];
+    uint16_t stepB = o->busiestStep[b];
+    if (stepA != stepB) {
+        if (o->stepLive[stepA] != o->stepLive[stepB]) {
+            return o->stepLive[stepA] > o->stepLive[stepB];
+        }
+        return stepA < stepB;
+    }
+    size_t hiA, loA, hiB, loB;
+    arenaArea(o, a, &hiA, &loA);
+    arenaArea(o, b, &hiB, &loB);
+    if (hiA != hiB) {
+        return hiA > hiB;
+    }
+    if (loA != loB) {
+        return loA > loB;
+    }
+    return o->p->ranges[a].wire < o->p->ranges[b].wire;
+}
+
+/* A range is ordered at the first visited step that holds it: its step of
+ * most live bytes, the earliest on ties. One scratch block holds the live
+ * bytes per step and that step per range. */
+bool arenaPlaceBreadthArea(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
+                           size_t *offsets, size_t *bytes) {
+    (void)placedPeak;
+    size_t *stepLive =
+        reserveMemory(p->numSteps * sizeof(size_t) + p->numRanges * sizeof(uint16_t));
+    if (stepLive == NULL) {
+        return false;
+    }
+    uint16_t *busiestStep = (uint16_t *)(stepLive + p->numSteps);
+    (void)arenaPeakPlacedBytes(t, p, stepLive);
+    for (size_t r = 0; r < p->numRanges; r++) {
+        uint16_t best = p->ranges[r].begin;
+        for (uint16_t s = best; s < p->ranges[r].end; s++) {
+            if (stepLive[s + 1u] > stepLive[best]) {
+                best = (uint16_t)(s + 1u);
+            }
+        }
+        busiestStep[r] = best;
+    }
+    const arenaOrder_t o = {.t = t, .p = p, .stepLive = stepLive, .busiestStep = busiestStep};
+    bool placed = arenaFirstFitInOrder(&o, arenaBreadthAreaBefore, offsets, bytes);
+    freeReservedMemory(stepLive);
+    return placed;
+}
+
+bool arenaPlanHasGradRange(const rematWireTable_t *t, const rematProgram_t *p) {
+    for (size_t r = 0; r < p->numRanges; r++) {
+        if (t->wires[p->ranges[r].wire].kind == REMAT_WIRE_GRAD) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool arenaStored(const arenaOrder_t *o, size_t r) {
+    return o->p->ranges[r].begin < o->boundary && o->boundary <= o->p->ranges[r].end;
+}
+
+/* Every stored range before every other; the stored ones by (begin, end
+ * descending, range id), the others in the stream order. */
+static bool arenaTwoEndedBefore(const arenaOrder_t *o, size_t a, size_t b) {
+    bool storedA = arenaStored(o, a);
+    if (storedA != arenaStored(o, b)) {
+        return storedA;
+    }
+    if (!storedA) {
+        return arenaStreamBefore(o, a, b);
+    }
+    const rematRange_t *ra = &o->p->ranges[a];
+    const rematRange_t *rb = &o->p->ranges[b];
+    if (ra->begin != rb->begin) {
+        return ra->begin < rb->begin;
+    }
+    if (ra->end != rb->end) {
+        return ra->end > rb->end;
+    }
+    return a < b;
+}
+
+static size_t arenaRangeEnd(const rematWireTable_t *t, const rematProgram_t *p,
+                            const size_t *offsets, size_t r) {
+    return arenaAdd(t, p->ranges[r].wire, offsets[r], arenaRangePlaced(t, p, r),
+                    "offset + placed bytes");
+}
+
+bool arenaPlaceTwoEnded(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
+                        size_t *offsets, size_t *bytes) {
+    (void)placedPeak;
+    if (!arenaPlanHasGradRange(t, p)) {
+        PRINT_ERROR("remat[arena]: two-ended placement needs a GRAD range");
+        exit(1);
+    }
+    arenaOrder_t o = {.t = t, .p = p, .boundary = UINT16_MAX};
+    for (size_t r = 0; r < p->numRanges; r++) {
+        if (t->wires[p->ranges[r].wire].kind == REMAT_WIRE_GRAD &&
+            p->ranges[r].begin < o.boundary) {
+            o.boundary = p->ranges[r].begin;
+        }
+    }
+    arenaFit_t f;
+    if (!arenaFitInit(&f, t, p, offsets)) {
+        return false;
+    }
+    bool others = false;
+    for (size_t k = 0; k < p->numRanges; k++) {
+        size_t r = arenaNextToPlace(&o, arenaTwoEndedBefore, offsets);
+        if (!others && !arenaStored(&o, r)) {
+            others = true;
+            f.numPlaced = 0; /* the others first fit on their own */
+        }
+        arenaFitRecord(&f, r, arenaLowestFit(&f, r));
+    }
+    freeReservedMemory(f.byOffset);
+    /* Each group is first fit on its own, so an end within a group is at most
+     * that group's placed total, and a stored end plus another end stays
+     * inside the bound arenaRequirePlaceableSizes checked. */
+    size_t height = arenaExtent(t, p, offsets);
+    for (size_t a = 0; a < p->numRanges; a++) {
+        for (size_t b = 0; b < p->numRanges; b++) {
+            if (arenaStored(&o, a) && !arenaStored(&o, b) &&
+                arenaCoLive(&p->ranges[a], &p->ranges[b])) {
+                size_t pair = arenaAdd(t, p->ranges[b].wire, arenaRangeEnd(t, p, offsets, a),
+                                       arenaRangeEnd(t, p, offsets, b), "two-ended height");
+                if (pair > height) {
+                    height = pair;
+                }
+            }
+        }
+    }
+    /* height >= every end, so the mirrored offset cannot wrap. */
+    for (size_t r = 0; r < p->numRanges; r++) {
+        if (!arenaStored(&o, r)) {
+            offsets[r] = height - arenaRangeEnd(t, p, offsets, r);
+        }
+    }
     *bytes = arenaExtent(t, p, offsets);
     return true;
 }

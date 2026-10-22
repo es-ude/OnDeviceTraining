@@ -355,6 +355,20 @@ static const handPlan_t g_pingPongPlan = {{{24, 0, 2, REMAT_WIRE_ACT},
                                            {32, 3, 3, REMAT_WIRE_ACT}},
                                           4,
                                           4};
+static const handPlan_t g_breadthAreaPlan = {{{16, 0, 3, REMAT_WIRE_ACT},
+                                              {24, 1, 2, REMAT_WIRE_GRAD},
+                                              {24, 2, 4, REMAT_WIRE_GRAD},
+                                              {8, 3, 4, REMAT_WIRE_GRAD},
+                                              {32, 4, 4, REMAT_WIRE_GRAD}},
+                                             5,
+                                             5};
+static const handPlan_t g_twoEndedPlan = {{{32, 0, 1, REMAT_WIRE_ACT},
+                                           {16, 1, 3, REMAT_WIRE_GRAD},
+                                           {16, 2, 3, REMAT_WIRE_GRAD},
+                                           {24, 3, 5, REMAT_WIRE_GRAD},
+                                           {32, 4, 4, REMAT_WIRE_GRAD}},
+                                          5,
+                                          6};
 
 static size_t oraclePlaced(size_t bytes) {
     return (bytes + 7u) / 8u * 8u;
@@ -536,13 +550,87 @@ void testPingPongPlacesTheHandPlan(void) {
     assertMemberPlacesTheHandPlan(arenaPlacePingPong, &g_pingPongPlan, expected, 56);
 }
 
+/* Steps 2 and 4 hold 64 B, the peak; step 2 comes first: ranges 2 (24 x 3
+ * steps), 0 (16 x 4) and 1 (24 x 2) in area order, then step 4's ranges 4
+ * and 3. First fit stacks 2, 0, 1 at 0, 24, 40, puts 4 above 2 at 24 and 3
+ * above 4 and 0 at 56. First-fit-decreasing needs 80. */
+void testBreadthAreaPlacesTheHandPlan(void) {
+    static const size_t expected[5] = {24, 40, 0, 56, 24};
+    assertMemberPlacesTheHandPlan(arenaPlaceBreadthArea, &g_breadthAreaPlan, expected, 64);
+}
+
+/* Placed size times lifetime is compared exactly: 2^60 B x 16 steps = 2^64
+ * exceeds 2^61 B x 4 steps = 2^63, so the longer range is placed first,
+ * although the first product wraps to 0 in a size_t. Both meet the busiest
+ * step 0 (3 x 2^60 B). */
+void testBreadthAreaComparesAreasWithoutWrapping(void) {
+    static const handPlan_t hp = {
+        {{(size_t)1 << 60, 0, 15, REMAT_WIRE_ACT}, {(size_t)1 << 61, 0, 3, REMAT_WIRE_ACT}}, 2, 16};
+    static const size_t expected[2] = {0, (size_t)1 << 60};
+    assertMemberPlacesTheHandPlan(arenaPlaceBreadthArea, &hp, expected, (size_t)3 << 60);
+}
+
+/* The first backward step is 1 (range 1, the first GRAD); range 0 [0,1] is
+ * alive across it and stays at the bottom. The others first fit on their own
+ * at 0, 16, 32, 0; their extent, 56 (range 3 at 32 + 24), already keeps range
+ * 1 (end 16) clear of range 0 (end 32), the only co-live pair across the
+ * groups, so they are mirrored below 56. Every other member needs 72. */
+void testTwoEndedPlacesTheHandPlan(void) {
+    static const size_t expected[5] = {0, 40, 24, 0, 24};
+    assertMemberPlacesTheHandPlan(arenaPlaceTwoEnded, &g_twoEndedPlan, expected, 56);
+}
+
+/* A plan without a backward has no GRAD range: one ReLU under MSE (no layer
+ * with parameters, so nothing is trained). */
+void testPlanHasGradRangeOnlyWithABackward(void) {
+    layer_t *model[1] = {makeRelu(&g_floatQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
+    builtPlan_t b = buildTableAndPlan(model, 1, MSE, x, NULL);
+    TEST_ASSERT_FALSE(arenaPlanHasGradRange(b.t, &b.p->train));
+    freeTableAndPlan(&b);
+    freeModel(model, 1);
+    fixture_t h;
+    buildHarModel(&h);
+    builtPlan_t hb = buildTableAndPlan(h.model, h.n, h.lt, h.x, NULL);
+    TEST_ASSERT_TRUE(arenaPlanHasGradRange(hb.t, &hb.p->train));
+    freeTableAndPlan(&hb);
+    freeModel(h.model, h.n);
+}
+
+static void placeTwoEndedWithoutGrad(void) {
+    static const handPlan_t hp = {{{8, 0, 0, REMAT_WIRE_ACT}}, 1, 1};
+    randomPlan_t rp;
+    buildHandPlan(&rp, &hp);
+    size_t offsets[1];
+    size_t bytes = 0;
+    (void)arenaPlaceTwoEnded(&rp.table, &rp.program, 8, offsets, &bytes);
+}
+
+void testTwoEndedExitsOnAPlanWithoutGradRanges(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "remat[arena]: two-ended placement needs a GRAD range",
+                             placeTwoEndedWithoutGrad());
+}
+
+/* The random plans hold only ACT wires; two-ended needs GRAD ranges, so its
+ * run marks the later half of each plan's ranges GRAD, as a backward follows
+ * the forward. */
+static void markLaterHalfGrad(randomPlan_t *rp) {
+    for (size_t r = rp->program.numRanges / 2u; r < rp->program.numRanges; r++) {
+        rp->wires[rp->ranges[r].wire].kind = REMAT_WIRE_GRAD;
+    }
+}
+
 /* Every layout a member returns passes the verifier, its bytes is the extent
  * of its offsets, and no layout is below the placed peak. */
-static void assertMemberVerifiesOnRandomPlans(placeMember_t place) {
+static void assertMemberVerifiesOnRandomPlans(placeMember_t place, bool withGrad) {
     uint32_t state = 0x9E3779B9u;
     for (size_t trial = 0; trial < 500u; trial++) {
         randomPlan_t rp;
         buildRandomPlan(&rp, &state);
+        if (withGrad) {
+            markLaterHalfGrad(&rp);
+        }
         size_t offsets[ORACLE_MAX_RANGES];
         size_t bytes = 0;
         size_t peak = oraclePeakPlaced(&rp);
@@ -560,8 +648,10 @@ static void assertMemberVerifiesOnRandomPlans(placeMember_t place) {
 }
 
 void testNewMembersVerifyOnRandomPlans(void) {
-    assertMemberVerifiesOnRandomPlans(arenaPlaceSizeThenEnd);
-    assertMemberVerifiesOnRandomPlans(arenaPlacePingPong);
+    assertMemberVerifiesOnRandomPlans(arenaPlaceSizeThenEnd, false);
+    assertMemberVerifiesOnRandomPlans(arenaPlacePingPong, false);
+    assertMemberVerifiesOnRandomPlans(arenaPlaceBreadthArea, false);
+    assertMemberVerifiesOnRandomPlans(arenaPlaceTwoEnded, true);
 }
 
 #ifdef ODT_MEM_PROFILE
@@ -581,6 +671,8 @@ static void assertMemberReleasesItsScratch(placeMember_t place) {
 void testNewMembersReleaseTheirScratch(void) {
     assertMemberReleasesItsScratch(arenaPlaceSizeThenEnd);
     assertMemberReleasesItsScratch(arenaPlacePingPong);
+    assertMemberReleasesItsScratch(arenaPlaceBreadthArea);
+    assertMemberReleasesItsScratch(arenaPlaceTwoEnded);
 }
 #endif
 
@@ -2857,6 +2949,11 @@ int main(void) {
 #endif
     RUN_TEST(testSizeThenEndPlacesTheHandPlan);
     RUN_TEST(testPingPongPlacesTheHandPlan);
+    RUN_TEST(testBreadthAreaPlacesTheHandPlan);
+    RUN_TEST(testBreadthAreaComparesAreasWithoutWrapping);
+    RUN_TEST(testTwoEndedPlacesTheHandPlan);
+    RUN_TEST(testPlanHasGradRangeOnlyWithABackward);
+    RUN_TEST(testTwoEndedExitsOnAPlanWithoutGradRanges);
     RUN_TEST(testNewMembersVerifyOnRandomPlans);
 #ifdef ODT_MEM_PROFILE
     RUN_TEST(testNewMembersReleaseTheirScratch);

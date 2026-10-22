@@ -689,6 +689,13 @@ jobs:
         # (#235) and the legacy v1 trainers silently rot — nothing built them.
         run: cmake --build --preset examples
 
+      - name: Planner goldens are what the trainers print today
+        # python/tests/planner_goldens/ is C output the planner's tests compare against; a C
+        # change to plans, ranges or placement that leaves it stale fails here.
+        run: |
+          uv run python -B python/tests/planner_goldens/regenerate.py
+          git diff --exit-code -- python/tests/planner_goldens
+
       - name: Run mixed_width_mlp acceptance example (per-op arithmetic + declared-width storage)
         # Does NOT join bit-parity: mixed SYM_INT32/FLOAT32 wires have no PyTorch
         # twin (SYM divergence is by design). The binary's own in-process hard

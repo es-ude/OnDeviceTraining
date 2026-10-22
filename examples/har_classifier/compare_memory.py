@@ -118,6 +118,18 @@ REMAT_SCALARS = ["wires_peak_b", "activations_peak_b", "arena_b", "arena_pad_b",
 # Composed here from REMAT_SCALARS (the C report records the two costs), aggregated
 # by the same rule.
 REMAT_COMPOSED = ["recompute_fwd_frac"]
+# Run inputs a REMAT_BUDGET_B run logs in config: reported per config when every seed
+# logged the same value, absent otherwise (never 0, never one seed's value).
+REMAT_RUN_INPUTS = ["wire_budget_b", "wire_cost_model"]
+
+
+def _run_inputs(logs: list[RunLog]) -> dict:
+    out = {}
+    for key in REMAT_RUN_INPUTS:
+        values = {log["config"].get(key) for log in logs}
+        if len(values) == 1 and None not in values:
+            out[key] = values.pop()
+    return out
 
 
 def _recompute_fwd_frac(mem: dict) -> float | None:
@@ -357,6 +369,7 @@ def aggregate(runs: dict[str, dict[int, RunLog]]) -> dict:
             "seeds": seeds,
             "stats": stats,
             "converged_k": int(sum(converged)),
+            **_run_inputs([by_seed[s] for s in seeds]),
         }
 
     # Directional consistency vs FLOAT32, paired by seed (accuracy tradeoff).

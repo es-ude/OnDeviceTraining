@@ -3,6 +3,7 @@ import json
 import math
 import sys
 from pathlib import Path
+from typing import get_type_hints
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -167,3 +168,11 @@ def test_remat_keys_are_declared_optional():
         "wires_peak_b", "activations_peak_b", "arena_b", "arena_pad_b", "arena_gap_b",
         "wire_metadata_b", "refwd_steps", "forward_cost", "recompute_cost",
     } <= MemoryLog.__optional_keys__
+
+
+def test_the_budget_keys_are_declared_optional():
+    """A run with REMAT_BUDGET_B logs the arena budget it was checked against and the unit
+    of its plan's cost numbers in config; every other log omits both."""
+    assert {"wire_budget_b", "wire_cost_model"} <= TrainConfig.__optional_keys__
+    hints = get_type_hints(TrainConfig)
+    assert (hints["wire_budget_b"], hints["wire_cost_model"]) == (int, str)

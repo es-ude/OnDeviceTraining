@@ -340,6 +340,9 @@ void rematSelectPrintConfigKeys(FILE *f, const rematSelection_t *sel) {
     fprintf(f, ", \"remat_storage\": \"%s\", \"remat_plan\": \"", storageName(sel->storage));
     printPlanName(f, sel);
     fputc('"', f);
+    if (sel->budgetBytes != 0u) {
+        fprintf(f, ", \"wire_budget_b\": %zu, \"wire_cost_model\": \"mac\"", sel->budgetBytes);
+    }
 }
 
 #define REMAT_PROBLEM_HASH_PRIME UINT64_C(0x100000001b3)

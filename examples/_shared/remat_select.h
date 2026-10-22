@@ -90,7 +90,9 @@ void rematSelectPrintPlan(FILE *f, const char *example, const rematSelection_t *
 
 /* The run log's config keys of a chosen scheme, each preceded by ", "
  * ("remat_storage", "remat_plan"); nothing when none was chosen. A retain
- * list is logged with ACT n added (retain:3,7,12); the presets by name. */
+ * list is logged with ACT n added (retain:3,7,12); the presets by name. With
+ * REMAT_BUDGET_B set, "wire_budget_b" (the budget) and "wire_cost_model"
+ * ("mac", the unit of the plan's cost numbers) follow. */
 void rematSelectPrintConfigKeys(FILE *f, const rematSelection_t *sel);
 
 /* FNV-1a 64 of bytes[0..n), continued from state; a hash starts from

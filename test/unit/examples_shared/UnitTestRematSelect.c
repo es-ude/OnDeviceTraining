@@ -271,6 +271,17 @@ void testABudgetIsReadInBytes(void) {
     TEST_ASSERT_EQUAL_size_t(SIZE_MAX, selectWith("arena", NULL, NULL, NULL, largest).budgetBytes);
 }
 
+/* A run with a budget logs it after the plan, with the unit of its cost
+ * numbers ("mac": the multiply-accumulate count of layerForwardCost); a run
+ * without one logs neither key (the pins above). */
+void testABudgetIsLoggedWithItsCostModel(void) {
+    rematSelection_t sel = selectWith("arena", "retain:4,7,10", NULL, NULL, "41216");
+    TEST_ASSERT_EQUAL_STRING(
+        ", \"remat_storage\": \"arena\", \"remat_plan\": \"retain:4,7,10,12\", "
+        "\"wire_budget_b\": 41216, \"wire_cost_model\": \"mac\"",
+        configKeysOf(&sel));
+}
+
 /* Not a byte count in 1..SIZE_MAX: the run stops before any data is loaded,
  * naming the value and the allowed range; it never runs without the check. */
 static void assertTheBudgetStops(const char *budget) {
@@ -754,6 +765,7 @@ int main(void) {
     RUN_TEST(testInitRefusesARetainPlanReadForAnotherLayerCount);
     RUN_TEST(testDumpProblemAloneAsksForTheProblem);
     RUN_TEST(testABudgetIsReadInBytes);
+    RUN_TEST(testABudgetIsLoggedWithItsCostModel);
     RUN_TEST(testAMalformedBudgetStopsBeforeTraining);
     RUN_TEST(testABudgetNeedsArenaStorage);
     RUN_TEST(testDumpProblemStandsAlone);

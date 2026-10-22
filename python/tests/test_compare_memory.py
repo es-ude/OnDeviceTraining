@@ -448,3 +448,29 @@ def test_bfp_configs_are_ordered_and_grouped_with_plotting():
     assert plotting._MEM_CONFIG_ORDER == CONFIG_ORDER
     assert plotting._MEM_CATEGORIES == CATEGORIES
     assert set(plotting._MEM_CAT_COLORS) == set(CATEGORIES)
+
+
+def _budget_runs(*budgets: int | None) -> dict:
+    """One seed per budget; None = a seed logged without REMAT_BUDGET_B."""
+    runs = {"bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst": {}}
+    for seed, budget in enumerate(budgets, start=1):
+        log = _bfp_log(acc=0.9)
+        if budget is not None:
+            log["config"].update({"wire_budget_b": budget, "wire_cost_model": "mac"})
+        runs["bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst"][seed] = log
+    return aggregate(runs)["per_config"]["bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst"]
+
+
+def test_the_budget_and_its_cost_model_are_reported_per_config():
+    """Every seed ran under REMAT_BUDGET_B=41216: the config reports the budget and the
+    unit of its cost numbers as run inputs, not as aggregated numbers."""
+    per_config = _budget_runs(41216, 41216)
+    assert (per_config["wire_budget_b"], per_config["wire_cost_model"]) == (41216, "mac")
+    assert "wire_budget_b" not in per_config["stats"]
+
+
+def test_a_budget_not_shared_by_every_seed_is_absent_never_guessed():
+    for budgets in ((41216, None), (41216, 32768), (None, None)):
+        per_config = _budget_runs(*budgets)
+        assert "wire_budget_b" not in per_config, budgets
+    assert "wire_cost_model" not in _budget_runs(41216, None)

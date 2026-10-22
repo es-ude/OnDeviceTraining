@@ -59,6 +59,10 @@ class TrainConfig(TypedDict):
     # | "retain:speed", each optionally followed by "+inplace" (in-place gradients)
     remat_plan: NotRequired[str]
     remat_stage: NotRequired[int]  # finetune: the stage the scheduler and the remat memory keys belong to (2)
+    # Present iff REMAT_BUDGET_B was set: the arena budget C checked the plan's arena against,
+    # and the unit of the plan's cost numbers ("mac": multiply-accumulates, layerForwardCost)
+    wire_budget_b: NotRequired[int]
+    wire_cost_model: NotRequired[str]
 
 
 class EpochLog(TypedDict):

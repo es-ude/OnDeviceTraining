@@ -7,8 +7,8 @@ trainers load their dataset before they dump or plan; they run from the reposito
 
 Writes, per model, `<model>.problem.json` (the trainer's stdout under DUMP_PROBLEM=1),
 `<model>.problem.hash` (its stderr line) and `<model>.dry_plan.txt` (one DRY_PLAN line per
-plan of a fixed sample, REMAT_STORAGE=arena). These files are C output: never edit them by
-hand.
+plan of a fixed sample and of the planner's frontier, REMAT_STORAGE=arena). These files are
+C output: never edit them by hand.
 """
 import json
 import os
@@ -70,11 +70,26 @@ def write_dry_plans(model: str, plans: list[str]) -> None:
     (HERE / f"{model}.dry_plan.txt").write_text("".join(lines))
 
 
+def frontier_plans(model: str) -> list[str]:
+    """Every frontier plan the planner computes from the problem just written, with and
+    without in-place dx: the parity tests need C's line for each. The planner chooses these
+    plans itself; the FRONTIER table in test_planner_frontier.py, pinned from a second
+    derivation, is what keeps that honest, so never replace it with this function's output."""
+    sys.path.insert(0, str(ROOT / "python"))
+    from odt.planner import PlanSpace, load_problem
+    from odt.planner.frontier import frontier
+
+    problem = load_problem(HERE / f"{model}.problem.json")
+    return [point.plan.to_remat_plan() for allow in (True, False)
+            for point in frontier(PlanSpace.build(problem, 1, allow))]
+
+
 def main() -> None:
     for model in TRAINERS:
         write_problem(model)
         n = len(json.loads((HERE / f"{model}.problem.json").read_bytes())["layers"])
         plans = sample_plans(model, n)
+        plans += [p for p in frontier_plans(model) if p not in plans]
         write_dry_plans(model, plans)
         print(f"regenerate: {model}: problem and {len(plans)} DRY_PLAN lines written")
 

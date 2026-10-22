@@ -13,6 +13,10 @@ MAX_LAYERS = 64
 # src/userApi/tensor/include/BatchView.h: C can neither dump nor train an input of a higher rank
 # (the batch axis counted), so no plan for one could run.
 MAX_INPUT_RANK = 8
+# size_t on the 64-bit host: examples/_shared/remat_select.c reads REMAT_BUDGET_B into one, and
+# src/userApi/training_loop/remat/RematWireTable.c adds every wire's bytes into one and exits by
+# name when the total passes it, so no plan for a heavier problem could run.
+SIZE_MAX = 2**64 - 1
 
 
 class UnsupportedProblem(ValueError):

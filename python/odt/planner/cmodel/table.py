@@ -4,7 +4,7 @@ the parity tests compare every number against C output."""
 import math
 from dataclasses import dataclass
 
-from odt.planner.accept import require_supported
+from odt.planner.accept import SIZE_MAX, UnsupportedProblem, require_supported
 from odt.planner.schema import LayerSpec, Problem
 
 ALIGN = 8  # ODT_WIRE_ALIGN: every placed buffer is rounded up to it
@@ -72,6 +72,14 @@ def wire_table(problem: Problem, m: int) -> WireTable:
         wires.append(Wire("GRAD", n, wires[n].bytes, wires[n].dtype))
         wires += [Wire("GRAD", l, elements[l] * FLOAT32_BYTES, layers[l].prop_loss_dtype.kind)
                   for l in range(top, deepest, -1)]
+    total = 0
+    for w in wires[1:]:  # C's id order: ACT 1 .. ACT n, then the GRAD wires
+        total += w.bytes
+        if total > SIZE_MAX:
+            raise UnsupportedProblem(
+                f"wires: more than {SIZE_MAX} B in total (passed at wire {w.kind} {w.index}) has "
+                f"no C reference run; the planner accepts wires that total at most {SIZE_MAX} B, "
+                "as C's wire table does")
     return WireTable(n, deepest, top, has_backward, tuple(wires),
                      tuple(layer.type for layer in layers),
                      tuple(backward_reads_input(layer) for layer in layers),

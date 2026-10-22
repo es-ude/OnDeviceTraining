@@ -26,8 +26,8 @@ def frontier(plans: list[Plan]) -> list[Plan]:
     return points
 
 
-def chain_problem(input_shape: list[int], layers: list[tuple]) -> Problem:
-    """A problem through the loader. layers: (type, outShape, frozen, cost or None)."""
+def chain_doc(input_shape: list[int], layers: list[tuple]) -> dict:
+    """A problem file's content. layers: (type, outShape, frozen, cost or None)."""
     f32 = {"kind": "FLOAT32"}
     doc = {"schema_version": 0, "input": {"shape": input_shape, "dtype": f32},
            "loss": "CROSS_ENTROPY", "layers": []}
@@ -37,7 +37,12 @@ def chain_problem(input_shape: list[int], layers: list[tuple]) -> Problem:
         if cost is not None:
             layer["cost"] = cost
         doc["layers"].append(layer)
-    return parse_problem(json.dumps(doc).encode())
+    return doc
+
+
+def chain_problem(input_shape: list[int], layers: list[tuple]) -> Problem:
+    """A problem through the loader."""
+    return parse_problem(json.dumps(chain_doc(input_shape, layers)).encode())
 
 
 def random_chain(seed: int, n: int) -> Problem:

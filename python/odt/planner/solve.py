@@ -30,6 +30,7 @@ h depends on the budget (its edges test S + local <= budget): it is built for ea
 Reusing one built for another budget prunes plans that fit or keeps ones that do not.
 """
 import heapq
+import math
 from typing import Protocol
 
 from odt.planner.plan import NothingFits, Plan
@@ -37,7 +38,9 @@ from odt.planner.space import PlanSpace
 
 
 class Strategy(Protocol):
-    def solve(self, space: PlanSpace, budget_b: int) -> Plan | NothingFits: ...
+    """budget_b None means no limit: every plan fits (the frontier's first solve)."""
+
+    def solve(self, space: PlanSpace, budget_b: int | None) -> Plan | NothingFits: ...
 
 
 class _PeakFeasibleCost:
@@ -86,7 +89,8 @@ def _best_fit(tier: list[Plan], budget_b: int) -> Plan | None:
 
 
 class ExactRetainStrategy:
-    def solve(self, space: PlanSpace, budget_b: int) -> Plan | NothingFits:
+    def solve(self, space: PlanSpace, budget_b: int | None) -> Plan | NothingFits:
+        budget_b = math.inf if budget_b is None else budget_b
         h = _PeakFeasibleCost(space, budget_b)
         heap = []
         for ip in space.settings:

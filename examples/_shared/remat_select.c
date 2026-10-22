@@ -1,6 +1,7 @@
 #define SOURCE_FILE "remat_select"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -110,10 +111,64 @@ static bool selectPlan(rematSelection_t *sel, const char *plan, size_t modelSize
     return false;
 }
 
+/* Decimal digits only, 1 <= value <= SIZE_MAX. Every digit is checked before
+ * it is added, so no value can wrap. */
+static bool parseBudget(const char *text, size_t *bytes) {
+    size_t v = 0;
+    for (const char *p = text; *p != '\0'; p++) {
+        if (*p < '0' || *p > '9') {
+            return false;
+        }
+        size_t d = (size_t)(*p - '0');
+        if (v > (SIZE_MAX - d) / 10u) {
+            return false;
+        }
+        v = v * 10u + d;
+    }
+    *bytes = v;
+    return v != 0u;
+}
+
+/* DUMP_PROBLEM=1 alone, and REMAT_BUDGET_B as a byte count on arena storage.
+ * The problem does not depend on the storage, the plan or the budget, so any
+ * of them next to the dump is a mistake; heap storage reports no arena, so a
+ * budget on it would pass for nothing. */
+static bool selectDumpAndBudget(rematSelection_t *sel, const char *dump, const char *budget,
+                                bool othersSet) {
+    if (dump != NULL) {
+        if (strcmp(dump, "1") != 0) {
+            fprintf(stderr, "ERROR: DUMP_PROBLEM=%s (expected 1)\n", dump);
+            return false;
+        }
+        sel->dumpProblem = true;
+    }
+    if (budget != NULL && !parseBudget(budget, &sel->budgetBytes)) {
+        fprintf(stderr,
+                "ERROR: REMAT_BUDGET_B=%s (expected the arena budget in bytes: decimal digits, "
+                "1 <= value <= %zu)\n",
+                budget, (size_t)SIZE_MAX);
+        return false;
+    }
+    if (dump != NULL && (othersSet || budget != NULL)) {
+        fprintf(stderr, "ERROR: DUMP_PROBLEM=1 stands alone: it writes the problem, which no "
+                        "storage, plan or budget changes, and stops (unset REMAT_STORAGE, "
+                        "REMAT_PLAN, DRY_PLAN and REMAT_BUDGET_B)\n");
+        return false;
+    }
+    if (budget != NULL && sel->storage != REMAT_ARENA) {
+        fprintf(stderr, "ERROR: REMAT_BUDGET_B needs REMAT_STORAGE=arena (the budget bounds the "
+                        "arena; heap storage has none)\n");
+        return false;
+    }
+    return true;
+}
+
 bool rematSelectFromEnv(rematSelection_t *sel, size_t modelSize) {
     const char *storage = envValue("REMAT_STORAGE");
     const char *plan = envValue("REMAT_PLAN");
     const char *dry = envValue("DRY_PLAN");
+    const char *dump = envValue("DUMP_PROBLEM");
+    const char *budget = envValue("REMAT_BUDGET_B");
     *sel = (rematSelection_t){
         .storage = REMAT_HEAP, .plan = *calculateGradsDefaultPlanSpec(), .modelSize = modelSize};
     if (storage != NULL) {
@@ -134,7 +189,11 @@ bool rematSelectFromEnv(rematSelection_t *sel, size_t modelSize) {
         }
         sel->dryPlan = true;
     }
-    sel->chosen = storage != NULL || plan != NULL || dry != NULL;
+    bool othersSet = storage != NULL || plan != NULL || dry != NULL;
+    if (!selectDumpAndBudget(sel, dump, budget, othersSet)) {
+        return false;
+    }
+    sel->chosen = othersSet || dump != NULL || budget != NULL;
     return true;
 }
 

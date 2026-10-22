@@ -1,6 +1,7 @@
 #define SOURCE_FILE "UNIT_TEST_REMAT_SELECT"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,10 +27,23 @@ void tearDown(void) {}
 static const layerType_t g_harTypes[HAR_N] = {CONV1D, RELU, MAXPOOL1D, CONV1D,  RELU,   MAXPOOL1D,
                                               CONV1D, RELU, AVGPOOL1D, FLATTEN, LINEAR, SOFTMAX};
 
+/* Sets exactly the given variables; NULL unsets one. */
+static void setTheVariables(const char *storage, const char *plan, const char *dry,
+                            const char *dump, const char *budget) {
+    static const char *const names[] = {"REMAT_STORAGE", "REMAT_PLAN", "DRY_PLAN", "DUMP_PROBLEM",
+                                        "REMAT_BUDGET_B"};
+    const char *const values[] = {storage, plan, dry, dump, budget};
+    for (size_t i = 0; i < COUNT_OF(names); i++) {
+        if (values[i] == NULL) {
+            unsetenv(names[i]);
+        } else {
+            setenv(names[i], values[i], 1);
+        }
+    }
+}
+
 static void setOnlyThePlan(const char *plan) {
-    unsetenv("REMAT_STORAGE");
-    unsetenv("DRY_PLAN");
-    setenv("REMAT_PLAN", plan, 1);
+    setTheVariables(NULL, plan, NULL, NULL, NULL);
 }
 
 static rematSelection_t selectFor(const char *plan, size_t modelSize) {
@@ -204,6 +218,103 @@ void testARetainPlanNeedsAModelOfAtMost64Layers(void) {
     ASSERT_EXITS_WITH(0, exitWithTheVerdictOn("retain:3", 64u));
 }
 
+static rematSelection_t selectWith(const char *storage, const char *plan, const char *dry,
+                                   const char *dump, const char *budget) {
+    setTheVariables(storage, plan, dry, dump, budget);
+    rematSelection_t sel;
+    TEST_ASSERT_TRUE(rematSelectFromEnv(&sel, HAR_N));
+    return sel;
+}
+
+static void exitWithTheVerdictOnTheVariables(const char *storage, const char *plan, const char *dry,
+                                             const char *dump, const char *budget) {
+    (void)dup2(STDOUT_FILENO, fileno(stderr));
+    setTheVariables(storage, plan, dry, dump, budget);
+    rematSelection_t sel;
+    exit(rematSelectFromEnv(&sel, HAR_N) ? 0 : 1);
+}
+
+/* DUMP_PROBLEM=1 alone asks for the problem file: the trainer reaches its
+ * remat branch (chosen), and no plan is printed or checked. */
+void testDumpProblemAloneAsksForTheProblem(void) {
+    rematSelection_t sel = selectWith(NULL, NULL, NULL, "1", NULL);
+    TEST_ASSERT_TRUE(sel.dumpProblem);
+    TEST_ASSERT_TRUE(sel.chosen);
+    TEST_ASSERT_FALSE(sel.dryPlan);
+    TEST_ASSERT_EQUAL_size_t(0, sel.budgetBytes);
+    rematSelection_t none = selectWith(NULL, NULL, NULL, NULL, NULL);
+    TEST_ASSERT_FALSE(none.dumpProblem);
+    TEST_ASSERT_FALSE(none.chosen);
+    TEST_ASSERT_EQUAL_size_t(0, none.budgetBytes);
+}
+
+/* The budget is a byte count up to SIZE_MAX, read digit by digit. */
+void testABudgetIsReadInBytes(void) {
+    rematSelection_t sel = selectWith("arena", "retain:4,7,10", NULL, NULL, "41216");
+    TEST_ASSERT_EQUAL_size_t(41216, sel.budgetBytes);
+    TEST_ASSERT_TRUE(sel.chosen);
+    char largest[32];
+    (void)snprintf(largest, sizeof largest, "%zu", (size_t)SIZE_MAX);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, selectWith("arena", NULL, NULL, NULL, largest).budgetBytes);
+}
+
+/* Not a byte count in 1..SIZE_MAX: the run stops before any data is loaded,
+ * naming the value and the allowed range; it never runs without the check. */
+static void assertTheBudgetStops(const char *budget) {
+    char expected[160];
+    (void)snprintf(expected, sizeof expected,
+                   "ERROR: REMAT_BUDGET_B=%s (expected the arena budget in bytes: decimal "
+                   "digits, 1 <= value <= %zu)",
+                   budget, (size_t)SIZE_MAX);
+    ASSERT_EXITS_WITH_OUTPUT(1, expected,
+                             exitWithTheVerdictOnTheVariables("arena", NULL, NULL, NULL, budget));
+}
+
+void testAMalformedBudgetStopsBeforeTraining(void) {
+    static const char *const malformed[] = {"0",  "00",  "-1",  "+5",   " 5",
+                                            "5 ", "12a", "abc", "0x10", "99999999999999999999999"};
+    for (size_t i = 0; i < COUNT_OF(malformed); i++) {
+        assertTheBudgetStops(malformed[i]);
+    }
+    char tenTimesLargest[32];
+    (void)snprintf(tenTimesLargest, sizeof tenTimesLargest, "%zu0", (size_t)SIZE_MAX);
+    assertTheBudgetStops(tenTimesLargest);
+}
+
+/* Heap storage has no arena (it reports 0 B), so a budget would pass for
+ * nothing: it needs REMAT_STORAGE=arena, also when the storage is left at
+ * its heap default. */
+void testABudgetNeedsArenaStorage(void) {
+    static const char message[] = "ERROR: REMAT_BUDGET_B needs REMAT_STORAGE=arena (the budget "
+                                  "bounds the arena; heap storage has none)";
+    ASSERT_EXITS_WITH_OUTPUT(1, message,
+                             exitWithTheVerdictOnTheVariables(NULL, NULL, NULL, NULL, "4096"));
+    ASSERT_EXITS_WITH_OUTPUT(1, message,
+                             exitWithTheVerdictOnTheVariables("heap", NULL, NULL, NULL, "4096"));
+    ASSERT_EXITS_WITH(0, exitWithTheVerdictOnTheVariables("arena", NULL, NULL, NULL, "4096"));
+}
+
+/* The problem does not depend on the storage, the plan or the budget, and
+ * the dump prints no plan: any of them next to DUMP_PROBLEM=1 is a mistake,
+ * named, never ignored. A value other than 1 is named too. */
+void testDumpProblemStandsAlone(void) {
+    static const char alone[] = "ERROR: DUMP_PROBLEM=1 stands alone: it writes the problem, "
+                                "which no storage, plan or budget changes, and stops (unset "
+                                "REMAT_STORAGE, REMAT_PLAN, DRY_PLAN and REMAT_BUDGET_B)";
+    ASSERT_EXITS_WITH_OUTPUT(1, alone,
+                             exitWithTheVerdictOnTheVariables("arena", NULL, NULL, "1", NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, alone,
+                             exitWithTheVerdictOnTheVariables(NULL, "liveness", NULL, "1", NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, alone,
+                             exitWithTheVerdictOnTheVariables(NULL, NULL, "1", "1", NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, alone,
+                             exitWithTheVerdictOnTheVariables("arena", NULL, NULL, "1", "4096"));
+    ASSERT_EXITS_WITH_OUTPUT(1, "ERROR: DUMP_PROBLEM=2 (expected 1)",
+                             exitWithTheVerdictOnTheVariables(NULL, NULL, NULL, "2", NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "ERROR: DUMP_PROBLEM=yes (expected 1)",
+                             exitWithTheVerdictOnTheVariables(NULL, NULL, NULL, "yes", NULL));
+}
+
 /* A zeroed scheduler reports nothing, so the line shows the format alone:
  * the plan as selected, and the recompute numbers at the end. */
 void testTheDryPlanLineNamesThePlanAndEndsWithTheRecomputeNumbers(void) {
@@ -275,5 +386,10 @@ int main(void) {
     RUN_TEST(testARetainPlanNeedsAModelOfAtMost64Layers);
     RUN_TEST(testTheDryPlanLineNamesThePlanAndEndsWithTheRecomputeNumbers);
     RUN_TEST(testInitRefusesARetainPlanReadForAnotherLayerCount);
+    RUN_TEST(testDumpProblemAloneAsksForTheProblem);
+    RUN_TEST(testABudgetIsReadInBytes);
+    RUN_TEST(testAMalformedBudgetStopsBeforeTraining);
+    RUN_TEST(testABudgetNeedsArenaStorage);
+    RUN_TEST(testDumpProblemStandsAlone);
     return UNITY_END();
 }

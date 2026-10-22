@@ -440,8 +440,8 @@ int main(void) {
      * cannot apply: refuse it instead of ignoring it. */
     const char *bitParityEnv = getenv("BIT_PARITY");
     if (rematSel.chosen && bitParityEnv != NULL && bitParityEnv[0] != '\0') {
-        fprintf(stderr, "ERROR: REMAT_STORAGE, REMAT_PLAN and DRY_PLAN do not apply to a "
-                        "BIT_PARITY run (it trains nothing)\n");
+        fprintf(stderr, "ERROR: REMAT_STORAGE, REMAT_PLAN, DRY_PLAN, DUMP_PROBLEM and "
+                        "REMAT_BUDGET_B do not apply to a BIT_PARITY run (it trains nothing)\n");
         return 1;
     }
     const lossConfig_t lossConfig = {

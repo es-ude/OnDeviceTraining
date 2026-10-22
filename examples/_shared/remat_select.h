@@ -38,8 +38,10 @@ typedef enum rematRetainForm {
 } rematRetainForm_t;
 
 typedef struct rematSelection {
-    bool chosen;  /* any of the three variables is set */
-    bool dryPlan; /* DRY_PLAN=1 */
+    bool chosen;        /* any of the five variables is set */
+    bool dryPlan;       /* DRY_PLAN=1 */
+    bool dumpProblem;   /* DUMP_PROBLEM=1 */
+    size_t budgetBytes; /* REMAT_BUDGET_B; 0 = unset */
     rematSchedulerType_t storage;
     rematPlanSpec_t plan;         /* plan.retain stays NULL: rematSelectInit resolves the mask */
     size_t modelSize;             /* the n rematSelectFromEnv checked the plan against */
@@ -48,10 +50,13 @@ typedef struct rematSelection {
 } rematSelection_t;
 
 /* A missing REMAT_STORAGE means heap, a missing REMAT_PLAN the training
- * call's default plan; an empty value counts as missing, as for LOG_PATH and
+ * call's default plan, a missing REMAT_BUDGET_B no budget; an empty value of
+ * any of the five variables counts as missing, as for LOG_PATH and
  * BIT_PARITY. An unknown value, a retain list that is not ascending in
- * 1..modelSize, and a recompute plan for a model of more than
- * REMAT_SELECT_MAX_LAYERS layers print the reason to stderr and return false;
+ * 1..modelSize, a recompute plan for a model of more than
+ * REMAT_SELECT_MAX_LAYERS layers, a REMAT_BUDGET_B that is not a byte count in
+ * 1..SIZE_MAX or comes without REMAT_STORAGE=arena, and a DUMP_PROBLEM=1 next
+ * to any other of the variables print the reason to stderr and return false;
  * call it before any data is loaded, with the model's layer count. */
 bool rematSelectFromEnv(rematSelection_t *sel, size_t modelSize);
 

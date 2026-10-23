@@ -4,10 +4,10 @@ REMAT_PLAN and REMAT_BUDGET_B that run the best plan in the example trainers;
 import argparse
 import sys
 
+from odt.planner.accept import SIZE_MAX, UnsupportedProblem
 from odt.planner.frontier import frontier
 from odt.planner.plan import NothingFits
 from odt.planner.schema import ProblemError, load_problem
-from odt.planner.accept import SIZE_MAX, UnsupportedProblem
 from odt.planner.solve import ExactRetainStrategy
 from odt.planner.space import PlanSpace
 

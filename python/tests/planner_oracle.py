@@ -45,8 +45,9 @@ def chain_problem(input_shape: list[int], layers: list[tuple]) -> Problem:
     return parse_problem(json.dumps(chain_doc(input_shape, layers)).encode())
 
 
-def random_chain(seed: int, n: int) -> Problem:
-    """n layers ending in SOFTMAX: conv/relu/pool blocks, maybe a flatten into linear/relu.
+def random_chain_spec(seed: int, n: int) -> tuple[list[int], list[tuple]]:
+    """The (input_shape, layers) of n layers ending in SOFTMAX: conv/relu/pool blocks, maybe a
+    flatten into linear/relu.
     Up to two layers with parameters at the front are frozen (no backward reads their ACT),
     pools and flattens leave ACTs no backward reads, and one layer with parameters trains."""
     rng = random.Random(seed)
@@ -77,4 +78,9 @@ def random_chain(seed: int, n: int) -> Problem:
         kind, out_shape, _, cost = layers[trains[-1]]
         layers[trains[-1]] = (kind, out_shape, False, cost)
     layers.append(("SOFTMAX", list(shape), False, None))
-    return chain_problem(input_shape, layers)
+    return input_shape, layers
+
+
+def random_chain(seed: int, n: int) -> Problem:
+    """The problem random_chain_spec describes."""
+    return chain_problem(*random_chain_spec(seed, n))

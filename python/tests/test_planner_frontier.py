@@ -11,11 +11,11 @@ from pathlib import Path
 import pytest
 
 from odt.planner import (ExactRetainStrategy, NothingFits, PlanSpace, UnsupportedProblem,
-                         load_problem)
+                         load_problem, peak_floor)
 from odt.planner.__main__ import nothing_fits_message
 from odt.planner.frontier import FrontierPoint, frontier
 from tests.planner_oracle import (all_plans, chain_doc, chain_problem, frontier as oracle_frontier,
-                                  random_chain)
+                                  random_chain, random_chain_spec)
 
 GOLDENS = Path(__file__).resolve().parent / "planner_goldens"
 PYTHON_DIR = Path(__file__).resolve().parents[1]
@@ -162,9 +162,9 @@ def test_the_cli_names_a_budget_nothing_fits_and_its_peak_floor():
 
 def test_the_nothing_fits_message_names_a_placement_gap_at_or_above_the_peak_floor():
     """The solver also answers "nothing fits" when the budget covers some plan's placed peak
-    but placement gaps lift every such plan's arena above it. No problem of the test
-    fixtures reaches that case through the command line (on every one, the smallest arena
-    equals the peak floor), so the two wordings are checked on the message itself."""
+    but placement gaps lift every such plan's arena above it. No golden
+    problem file reaches it; the generated chain of the CLI test below does. Here the two
+    wordings are checked on the message itself."""
     assert nothing_fits_message(NothingFits(budget_b=63, peak_floor_b=64)) == (
         "odt.planner: nothing fits REMAT_BUDGET_B=63: no retain plan's arena is at most 63 B "
         "(the smallest placed peak of any plan is 64 B; the frontier's last point is the "
@@ -175,6 +175,17 @@ def test_the_nothing_fits_message_names_a_placement_gap_at_or_above_the_peak_flo
             f"most {budget_b} B (the smallest placed peak of any plan, 64 B, is within the "
             "budget, but a placement gap lifts the arena of every such plan above it; the "
             "frontier's last point is the smallest arena)")
+
+
+def test_the_cli_names_a_placement_gap_at_or_above_the_peak_floor(tmp_path):
+    SEED, N, FLOOR = 7, 7, 392
+    path = tmp_path / "gap.problem.json"
+    path.write_text(json.dumps(chain_doc(*random_chain_spec(SEED, N))))
+    assert peak_floor(PlanSpace.build(load_problem(path), 1)) == FLOOR
+    done = run_cli("solve", str(path), "--m", "1", "--budget", str(FLOOR))
+    assert (done.returncode, done.stdout, done.stderr) == (
+        1, "", nothing_fits_message(NothingFits(FLOOR, FLOOR)) + "\n")
+    assert "is within the budget, but a placement gap" in done.stderr
 
 
 def test_the_cli_refuses_an_unsupported_problem_by_name():

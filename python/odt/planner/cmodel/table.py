@@ -48,11 +48,17 @@ def backward_reads_input(layer: LayerSpec) -> bool:
 
 
 def forward_cost(layer: LayerSpec, in_elements: int, out_elements: int) -> int:
-    if layer.mac_per_element is not None:
+    """C's layerForwardCost: the switch is on the layer type, not on which operand is set."""
+    t = layer.type
+    if t in ("LINEAR", "CONV1D"):
         return out_elements * layer.mac_per_element
-    if layer.kernel is not None:
+    if t == "CONV1D_TRANSPOSED":
+        return in_elements * layer.mac_per_element
+    if t in ("MAXPOOL1D", "AVGPOOL1D"):
         return out_elements * layer.kernel
-    return 0 if layer.type == "FLATTEN" else out_elements
+    if t == "ADAPTIVE_AVGPOOL1D":
+        return in_elements
+    return 0 if t == "FLATTEN" else out_elements
 
 
 def wire_table(problem: Problem, m: int) -> WireTable:

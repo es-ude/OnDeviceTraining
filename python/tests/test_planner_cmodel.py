@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from odt.planner import UnsupportedProblem, load_problem
+from odt.planner.schema import COST_KEY, LAYER_TYPES, Dtype, LayerSpec
 from odt.planner.cmodel import (
     BACKWARD,
     FORWARD,
@@ -31,6 +32,7 @@ from odt.planner.cmodel import (
     step_live,
     wire_table,
 )
+from odt.planner.cmodel.table import forward_cost
 
 GOLDENS = Path(__file__).resolve().parent / "planner_goldens"
 MODELS = ("har", "har_finetune", "mnist_cnn")
@@ -48,8 +50,8 @@ def retain_of(n: int, kept) -> tuple[bool, ...]:
 
 
 def parse_plan(name: str, n: int) -> tuple[tuple[bool, ...], bool]:
-    body, plus, _ = name.partition("+")
-    assert body.startswith("retain:") and plus in ("", "+")
+    body, plus, rest = name.partition("+")
+    assert body.startswith("retain:") and rest == ("inplace" if plus else "")
     return retain_of(n, {int(j) for j in body[len("retain:"):].split(",")}), plus == "+"
 
 
@@ -223,3 +225,36 @@ def test_two_ended_needs_a_grad_range_and_the_portfolio_skips_it_without_one():
                                          r"range$"):
         place_two_ended(t, ranges, 24)
     assert place_portfolio(t, ranges).bytes == 24
+
+
+FORWARD_COST_OF_C = {"LINEAR": 21, "CONV1D": 21, "CONV1D_TRANSPOSED": 30, "MAXPOOL1D": 21,
+                     "AVGPOOL1D": 21, "ADAPTIVE_AVGPOOL1D": 10, "FLATTEN": 0}
+
+
+def test_forward_cost_follows_cs_switch_for_every_schema_type():
+    # Types outside the accepted set are unreachable through wire_table today; this pins the
+    # copy of layerForwardCost for when they are admitted.
+    float32 = Dtype("FLOAT32")
+    for kind in LAYER_TYPES:
+        operand = 3 if kind in COST_KEY else None
+        layer = LayerSpec(kind, False, False, (1, 7), float32, float32,
+                          mac_per_element=operand if COST_KEY.get(kind) == "macPerElement" else None,
+                          kernel=operand if COST_KEY.get(kind) == "kernel" else None)
+        assert forward_cost(layer, 10, 7) == FORWARD_COST_OF_C.get(kind, 7), kind
+
+
+@pytest.mark.parametrize("length", (12, 14))
+def test_a_retain_list_of_the_wrong_length_is_refused(length):
+    with pytest.raises(ValueError, match=rf"^retain: {length} entries for a 12-layer model; "
+                                         r"expected 13 \(ACT 0 to ACT 12\)$"):
+        retain_steps(table("har"), (True,) * length)
+
+
+def test_the_portfolio_refuses_to_place_with_no_member():
+    message = (r"^remat\[arena\]: no placement member ran \(none given, or only members that need "
+               r"a GRAD range on a plan without one\)$")
+    t, ranges = hand_plan([(16, 0, 1, ACT), (8, 1, 2, ACT)])
+    with pytest.raises(ValueError, match=message):
+        place_portfolio(t, ranges, members=())
+    with pytest.raises(ValueError, match=message):
+        place_portfolio(t, ranges, members=(("two-ended", place_two_ended, True),))

@@ -43,6 +43,9 @@ class PlanNumbers:
 def retain_steps(t: WireTable, retain: Sequence[bool]) -> list[Step]:
     """retain[j]: ACT j is kept (index 0 is the input, always present)."""
     n = t.n
+    if len(retain) != n + 1:
+        raise ValueError(f"retain: {len(retain)} entries for a {n}-layer model; "
+                         f"expected {n + 1} (ACT 0 to ACT {n})")
     steps: list[Step] = [(FORWARD, l) for l in range(n)] + [(LOSS_FORWARD, n)]
     if not t.has_backward:
         return steps

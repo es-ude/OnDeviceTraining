@@ -161,4 +161,7 @@ def place_portfolio(t: WireTable, ranges: Sequence[Range],
         size = extent(t, ranges, offsets)
         if best is None or size < best.bytes:
             best = Placement(size, tuple(offsets), name)
+    if best is None:
+        raise ValueError("remat[arena]: no placement member ran (none given, or only members "
+                         "that need a GRAD range on a plan without one)")
     return best

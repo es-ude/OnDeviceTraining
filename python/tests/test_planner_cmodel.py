@@ -207,7 +207,6 @@ def test_each_member_alone_places_its_hand_plan_at_the_peak(name):
             assert check_layout(t, ranges, f(t, ranges, nbytes)) > nbytes
 
 
-
 @pytest.mark.parametrize("name", list(TIE_PLANS))
 def test_each_member_breaks_its_tie_as_c_does(name):
     spec, offsets, nbytes = TIE_PLANS[name]
@@ -215,6 +214,7 @@ def test_each_member_breaks_its_tie_as_c_does(name):
     member = {m: f for m, f, _ in MEMBERS}[name]
     got = member(t, ranges, nbytes)
     assert (got, check_layout(t, ranges, got)) == (offsets, nbytes)
+
 
 def test_every_member_layout_passes_the_overlap_check_and_the_portfolio_keeps_the_best():
     rng = random.Random(4)

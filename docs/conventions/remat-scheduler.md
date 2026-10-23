@@ -286,7 +286,7 @@ decisions and those with nothing in force yet are left out.
   dump output, CI regenerates them, and a test pins the problems the IR
   builds to them byte for byte. The dump stays for two reasons. A PyTorch
   model carries no per-layer ODT quantization, so the IR side stamps one
-  FLOAT32 profile on every layer; once non-FLOAT32 wires are admitted, only
+  uniform profile (FLOAT32 by default) on every layer; once non-FLOAT32 wires are admitted, only
   the dump shows what C builds. And C's `DRY_PLAN` check compares totals
   only: a MAXPOOL/AVGPOOL swap or a same-size shape permutation passes it,
   while the byte pin catches both. The planner holds one copy of C's wire,

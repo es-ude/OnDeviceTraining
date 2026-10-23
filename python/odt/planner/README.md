@@ -22,7 +22,9 @@ Path("har.problem.json").write_bytes(problem_bytes(problem))
 
 `problem_bytes` writes the bytes C's `DUMP_PROBLEM=1` writes for the same model, so the
 file's hash is C's `PROBLEM_HASH`. The IR builder takes a rank-3 input `(N, C, L)` with
-N = 1 and builds FLOAT32 problems only; it refuses anything else by name.
+N = 1 and stamps one uniform profile (FLOAT32 by default) on every layer; it refuses
+non-FLOAT32 torch parameters and buffers by name. The planner's own FLOAT32 gate is
+the acceptance check, not the builder.
 
 The C trainer writes the same file itself. That dump is C's own check: the planner's
 goldens are dump output, and a test pins the IR-built problems to them byte for byte. A

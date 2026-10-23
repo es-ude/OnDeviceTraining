@@ -1,6 +1,7 @@
-"""Problem schema v0: the model data a planner solves for, as the C harness writes it.
+"""Problem schema v0: the model data a planner solves for.
 
-One JSON object (C's DUMP_PROBLEM=1 writes it as one line):
+Two producers write it: the IR builder (`odt.providers.build_problem` + `problem_bytes`)
+and the C harness (DUMP_PROBLEM=1). One JSON object, one line:
 
     {"schema_version": 0,
      "input": {"shape": [1, ...], "dtype": {"kind": ...}},

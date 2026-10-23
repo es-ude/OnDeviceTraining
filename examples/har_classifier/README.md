@@ -643,7 +643,7 @@ the log of a memory-profiling run that set `REMAT_STORAGE` or `REMAT_PLAN`.
 The budget planner (`python/odt/planner/`, see its `README.md`) answers "which plan
 recomputes least and still fits this arena?" for the model. Its primary source is the
 PyTorch model itself: `odt.providers.build_problem` traces `HarModel` and
-`problem_bytes` writes the problem file, the same bytes the C trainer dumps (run from
+`problem_bytes` writes the problem file, the same bytes the C trainer dumps for this FLOAT32 model (run from
 the repository root, so `examples` imports):
 
 ```bash

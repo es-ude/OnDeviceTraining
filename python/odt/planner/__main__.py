@@ -17,7 +17,7 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("solve", "frontier"):
         command = commands.add_parser(name)
-        command.add_argument("problem", help="a problem file, as DUMP_PROBLEM=1 writes it")
+        command.add_argument("problem", help="a problem file: odt.providers.problem_bytes or the C DUMP_PROBLEM=1 dump")
         command.add_argument("--m", type=int, required=True, help="the micro-batch")
         command.add_argument("--no-inplace", action="store_true",
                              help="only plans without in-place dx")

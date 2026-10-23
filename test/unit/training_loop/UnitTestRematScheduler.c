@@ -104,7 +104,7 @@ void testReportMetadataCountsTheResidentBlocks(void) {
     rematScheduler_t s = initArena(&f, NULL);
     rematReport_t r;
     rematSchedulerReport(&s, &r);
-    /* slab + plan block + the offsets block: 4,848 + 568 + 23 * 8 = 5,600 on LP64 */
+    /* slab + plan block + the offsets block: 4,848 + 568 + HAR_RANGES * 8 = 5,600 on LP64 */
     TEST_ASSERT_EQUAL_size_t(s.wires->slabBytes + s.plan->blockBytes +
                                  s.plan->train.numRanges * sizeof(size_t),
                              r.metadataBytes);
@@ -224,14 +224,11 @@ void testArenaOffsetsAligned(void) {
     assertF1Placement(&g_liveness);
 }
 
-void testFfdPeakPlacedBytesIsThePeakOfPlacedSums(void) {
+void testPlacedPeakBytesIsThePeakOfPlacedSums(void) {
     fixture_t f;
     buildF1Model(&f);
     builtPlan_t b = buildTableAndPlan(f.model, f.n, f.lt, f.x, NULL);
-    size_t offsets[3];
-    size_t bytes = 0;
     size_t peak = arenaPlacedPeakBytes(b.t, &b.p->train);
-    TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(b.t, &b.p->train, peak, offsets, &bytes));
     TEST_ASSERT_EQUAL_size_t(24, peak); /* all three co-live at step 3: 8 + 8 + 8, exact 13 */
     freeTableAndPlan(&b);
     freeModel(f.model, f.n);
@@ -239,10 +236,8 @@ void testFfdPeakPlacedBytesIsThePeakOfPlacedSums(void) {
     fixture_t h;
     buildHarModel(&h);
     builtPlan_t hb = buildTableAndPlan(h.model, h.n, h.lt, h.x, NULL);
-    size_t harOffsets[HAR_RANGES];
     TEST_ASSERT_EQUAL_size_t(HAR_RANGES, hb.p->train.numRanges);
     peak = arenaPlacedPeakBytes(hb.t, &hb.p->train);
-    TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(hb.t, &hb.p->train, peak, harOffsets, &bytes));
     TEST_ASSERT_EQUAL_size_t(74288, peak); /* HAR pads nothing: the scan-model STORE_ALL peak */
     freeTableAndPlan(&hb);
     freeModel(h.model, h.n);
@@ -804,12 +799,11 @@ void testPortfolioKeepsTheEarlierMemberOnATie(void) {
     size_t ffd[HAR_RANGES];
     size_t later[HAR_RANGES];
     size_t best[HAR_RANGES];
-    size_t ffdBytes = 0;
-    size_t laterBytes = 0;
+    size_t scratch = 0;
     size_t bytes = 0;
     size_t peak = arenaPlacedPeakBytes(b.t, p);
-    TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(b.t, p, peak, ffd, &ffdBytes));
-    TEST_ASSERT_TRUE(arenaPlaceSizeThenEnd(b.t, p, peak, later, &laterBytes));
+    TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(b.t, p, peak, ffd, &scratch));
+    TEST_ASSERT_TRUE(arenaPlaceSizeThenEnd(b.t, p, peak, later, &scratch));
     static const size_t memberBytes[5] = {49152, 49152, 49152, 49688, 49152};
     for (size_t m = 0; m < sizeof kMembers / sizeof kMembers[0]; m++) {
         size_t trial[HAR_RANGES];
@@ -3165,7 +3159,7 @@ int main(void) {
 #endif
     RUN_TEST(testArenaPlacedRoundsEveryWireUpToTheWireAlignment);
     RUN_TEST(testArenaOffsetsAligned);
-    RUN_TEST(testFfdPeakPlacedBytesIsThePeakOfPlacedSums);
+    RUN_TEST(testPlacedPeakBytesIsThePeakOfPlacedSums);
     RUN_TEST(testFfdMatchesTheNaiveOracleOnRandomPlans);
     RUN_TEST(testArenaPlacedExitsNamingTheWireOnOverflow);
 #ifdef ODT_MEM_PROFILE

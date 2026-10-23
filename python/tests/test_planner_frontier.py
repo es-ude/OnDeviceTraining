@@ -178,6 +178,8 @@ def test_the_nothing_fits_message_names_a_placement_gap_at_or_above_the_peak_flo
 
 
 def test_the_cli_names_a_placement_gap_at_or_above_the_peak_floor(tmp_path):
+    # First seed-major hit of random_chain(seed, n), n in 3..12, where solve at the peak floor
+    # answers nothing-fits.
     SEED, N, FLOOR = 7, 7, 392
     path = tmp_path / "gap.problem.json"
     path.write_text(json.dumps(chain_doc(*random_chain_spec(SEED, N))))

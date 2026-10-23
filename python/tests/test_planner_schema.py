@@ -167,6 +167,22 @@ def test_the_schema_holds_more_than_the_planner_accepts():
     assert p.layers[2].output_dtype.params == (("qBits", 4),)
 
 
+@pytest.mark.parametrize("dtype", [
+    {"kind": "ASYM", "qBits": 1},
+    {"kind": "ASYM", "qBits": 16},
+    {"kind": "BFP", "mantissaBits": 2, "exponentBits": 8, "groupSize": 0},
+    {"kind": "BFP", "mantissaBits": 16, "exponentBits": 8, "groupSize": 0},
+    {"kind": "BFP", "mantissaBits": 8, "exponentBits": 2, "groupSize": 0},
+    {"kind": "BFP", "mantissaBits": 8, "exponentBits": 8, "groupSize": 0},
+], ids=["asym-1", "asym-16", "mantissa-2", "mantissa-16", "exponent-2", "exponent-8"])
+def test_a_width_on_the_edge_of_c_range_is_accepted(dtype):
+    data = base()
+    data["layers"][2]["outputDtype"] = dtype
+    p = parse_problem(json.dumps(data).encode())
+    assert dict(p.layers[2].output_dtype.params).items() >= {k: v for k, v in dtype.items()
+                                                             if k != "kind"}.items()
+
+
 def test_bfp_per_tensor_group_size_0_is_valid_schema():
     data = base()
     data["layers"][2]["propLossDtype"] = {"kind": "BFP", "mantissaBits": 8, "exponentBits": 8,

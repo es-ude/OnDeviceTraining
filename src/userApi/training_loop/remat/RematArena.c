@@ -212,8 +212,8 @@ static size_t arenaExtent(const rematWireTable_t *t, const rematProgram_t *p,
 
 /* The peak of the placed bytes live at a step; with stepLive != NULL also
  * each step's sum. */
-static size_t arenaPeakPlacedBytes(const rematWireTable_t *t, const rematProgram_t *p,
-                                   size_t *stepLive) {
+static size_t arenaStepLivePlaced(const rematWireTable_t *t, const rematProgram_t *p,
+                                  size_t *stepLive) {
     rematWalk_t walk = {0};
     size_t live = 0;
     size_t peak = 0;
@@ -251,7 +251,7 @@ static bool arenaFirstFitInOrder(const arenaOrder_t *o, arenaBefore_t before, si
 }
 
 size_t arenaPlacedPeakBytes(const rematWireTable_t *t, const rematProgram_t *p) {
-    return arenaPeakPlacedBytes(t, p, NULL);
+    return arenaStepLivePlaced(t, p, NULL);
 }
 
 bool arenaPlaceFirstFitDecreasing(const rematWireTable_t *t, const rematProgram_t *p,
@@ -398,7 +398,7 @@ bool arenaPlaceBreadthArea(const rematWireTable_t *t, const rematProgram_t *p, s
         return false;
     }
     uint16_t *busiestStep = (uint16_t *)(stepLive + p->numSteps);
-    (void)arenaPeakPlacedBytes(t, p, stepLive);
+    (void)arenaStepLivePlaced(t, p, stepLive);
     for (size_t r = 0; r < p->numRanges; r++) {
         uint16_t best = p->ranges[r].begin;
         for (uint16_t s = best; s < p->ranges[r].end; s++) {
@@ -524,7 +524,7 @@ static const struct arenaMemberEntry {
 
 bool arenaPlacePortfolio(const rematWireTable_t *t, const rematProgram_t *p, size_t *offsets,
                          size_t *bytes, size_t *peakPlacedBytes) {
-    size_t placedPeak = arenaPeakPlacedBytes(t, p, NULL);
+    size_t placedPeak = arenaPlacedPeakBytes(t, p);
     if (!arenaMembers[0].place(t, p, placedPeak, offsets, bytes)) {
         return false;
     }

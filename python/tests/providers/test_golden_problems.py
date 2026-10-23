@@ -55,9 +55,9 @@ def test_har_problem_matches_c_layout() -> None:
         [1, 64, 32], [1, 64, 32], [1, 64, 1],
         [1, 64], [1, 6], [1, 6],
     ]  # fmt: skip
-    assert _costs(p, "CONV1D", "macPerOutput") == [63, 80, 96]
+    assert _costs(p, "CONV1D", "macPerElement") == [63, 80, 96]
     assert _pool_kernels(p) == [2, 2, 32]
-    assert _costs(p, "LINEAR", "macPerOutput") == [64]
+    assert _costs(p, "LINEAR", "macPerElement") == [64]
 
 
 def test_mnist_cnn_problem_matches_c_layout() -> None:
@@ -73,9 +73,9 @@ def test_mnist_cnn_problem_matches_c_layout() -> None:
         [1, 16, 392], [1, 16, 392], [1, 16, 196],
         [1, 16, 1], [1, 16], [1, 10], [1, 10],
     ]  # fmt: skip
-    assert _costs(p, "CONV1D", "macPerOutput") == [3, 24]
+    assert _costs(p, "CONV1D", "macPerElement") == [3, 24]
     assert _pool_kernels(p) == [2, 2, 196]
-    assert _costs(p, "LINEAR", "macPerOutput") == [16]
+    assert _costs(p, "LINEAR", "macPerElement") == [16]
 
 
 @pytest.mark.parametrize(

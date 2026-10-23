@@ -64,13 +64,13 @@ def test_annotate_writes_training_block_per_layer() -> None:
     ]
 
     conv, relu, maxpool, avgpool, flatten, linear = blocks
-    assert dict(conv["cost"]) == {"macPerOutput": 2 * 3}
-    assert dict(linear["cost"]) == {"macPerOutput": 8}
+    assert dict(conv["cost"]) == {"macPerElement": 2 * 3}
+    assert dict(linear["cost"]) == {"macPerElement": 8}
     assert dict(maxpool["cost"]) == {"kernel": 2}
     assert dict(avgpool["cost"]) == {"kernel": 4}
     assert type(maxpool["cost"]["kernel"]) is int
     assert type(avgpool["cost"]["kernel"]) is int
-    assert type(conv["cost"]["macPerOutput"]) is int
+    assert type(conv["cost"]["macPerElement"]) is int
     assert "cost" not in relu
     assert "cost" not in flatten
 

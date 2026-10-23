@@ -103,7 +103,7 @@ def _input(node: ir.Node, acc: _Acc) -> _Acc:
 def _conv1d(node: ir.Node, acc: _Acc) -> _Acc:
     a = _impl_attrs(acc, node)
     mac = (a["in_channels"] // a["groups"]) * _unwrap1(a["kernel_size"])
-    return _layer(acc, node, "CONV1D", {"macPerOutput": mac})
+    return _layer(acc, node, "CONV1D", {"macPerElement": mac})
 
 
 def _relu(node: ir.Node, acc: _Acc) -> _Acc:
@@ -136,7 +136,7 @@ def _linear(node: ir.Node, acc: _Acc) -> _Acc:
     if rank != 2:
         raise UnsupportedLayerError(f"LINEAR on rank-{rank} input", node.name)
     in_features = _impl_attrs(acc, node)["in_features"]
-    return _layer(acc, node, "LINEAR", {"macPerOutput": in_features})
+    return _layer(acc, node, "LINEAR", {"macPerElement": in_features})
 
 
 def _output(node: ir.Node, acc: _Acc) -> _Acc:

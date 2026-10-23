@@ -18,7 +18,7 @@ import pytest
 from examples.har_classifier.train_pytorch import HarModel
 from examples.mnist_cnn.train_pytorch import MnistCnn
 from odt.planner import problem_hash
-from odt.providers import build_problem
+from odt.providers import build_problem, problem_bytes
 
 C_DUMPS = REPO_ROOT / "python/tests/planner_goldens"
 
@@ -37,11 +37,6 @@ def _har_finetune() -> dict:
 
 def _mnist_cnn() -> dict:
     return build_problem(MnistCnn(), (1, 1, 784), "CROSS_ENTROPY")
-
-
-def _as_c_dump(problem: dict) -> bytes:
-    """Serialize as C does: one compact line, keys in emission order, then a newline."""
-    return (json.dumps(problem, separators=(",", ":")) + "\n").encode()
 
 
 def _costs(p: dict, layer_type: str, key: str) -> list[int]:
@@ -100,7 +95,7 @@ def test_mnist_cnn_problem_matches_c_layout() -> None:
     ids=["har", "har_finetune", "mnist_cnn"],
 )
 def test_problem_bytes_equal_c_dump(build, model: str) -> None:
-    ir_bytes = _as_c_dump(build())
+    ir_bytes = problem_bytes(build())
     c_bytes = (C_DUMPS / f"{model}.problem.json").read_bytes()
     c_hash_line = (C_DUMPS / f"{model}.problem.hash").read_text()
 

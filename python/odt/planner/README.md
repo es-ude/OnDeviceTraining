@@ -9,9 +9,34 @@ and the trainer checks the arena against the budget itself.
 
 ## Use
 
+Build the problem from the PyTorch model. This is the primary source:
+
+```python
+from pathlib import Path
+from odt.providers import build_problem, problem_bytes
+
+# model: the PyTorch twin of the C trainer, e.g. HAR's HarModel
+problem = build_problem(model, (1, 9, 128), "CROSS_ENTROPY")
+Path("har.problem.json").write_bytes(problem_bytes(problem))
+```
+
+`problem_bytes` writes the bytes C's `DUMP_PROBLEM=1` writes for the same model, so the
+file's hash is C's `PROBLEM_HASH`. The IR builder takes a rank-3 input `(N, C, L)` with
+N = 1 and builds FLOAT32 problems only; it refuses anything else by name.
+
+The C trainer writes the same file itself. That dump is C's own check: the planner's
+goldens are dump output, and a test pins the IR-built problems to them byte for byte. A
+PyTorch model carries no per-layer ODT quantization, so once the planner admits
+non-FLOAT32 wires, only the dump shows what C builds (remat D18):
+
 ```bash
 B=./build/examples/examples/har_classifier/train_c_har_classifier
 DUMP_PROBLEM=1 $B > har.problem.json            # the trainer's model; the hash goes to stderr
+```
+
+Then solve, from either file:
+
+```bash
 uv run -m odt.planner solve har.problem.json --m 1 --budget 32768
 # # problem fnv1a64=26b4a7babc5f10bf
 # REMAT_PLAN=retain:4,6,7,10,12+inplace REMAT_BUDGET_B=32768
@@ -44,9 +69,10 @@ measured every row (the planner's numbers sit next to C's and must match);
 
 ## The problem file (schema v0)
 
-One JSON object, as `DUMP_PROBLEM=1` writes it (one line, `\n` at the end). The dump
-writes the layer types and dtypes the example trainers use; everything else is refused
-by name. The schema itself is wider (below), so a later dump can grow into it.
+One JSON object, as `DUMP_PROBLEM=1` and `problem_bytes` write it (one line, `\n` at the
+end). The dump writes the layer types and dtypes the example trainers use; everything
+else is refused by name. The schema itself is wider (below), so a later dump can grow
+into it.
 
 ```text
 {"schema_version": 0,

@@ -279,14 +279,24 @@ decisions and those with nothing in force yet are left out.
 - **remat D17** The schedule key fixes the batch size exactly: a scheduler
   keyed to batch B exits at bind on any other B. No plan-per-B cache.
 - **remat D18** The planner is a host-only Python package,
-  `python/odt/planner/`. It reads the problem file the example harness
-  writes (`DUMP_PROBLEM=1`), holds one copy of C's wire, step, range, cost
-  and placement rules, checked against committed C output, and answers with
-  a retain list that runs through `REMAT_PLAN=retain:...[+inplace]` and
-  `REMAT_BUDGET_B`. C stays the truth: no C code runs the planner, no
-  offsets, plan fingerprint or plan version cross over, and the harness
-  checks the arena against the budget itself. It accepts only inputs a C
-  reference run covers and refuses every other by name. The solver sits
+  `python/odt/planner/`. It reads a problem file from either of two
+  producers: `odt.providers.build_problem` on the PyTorch model (the
+  primary source; `problem_bytes` writes the file) or the example harness
+  (`DUMP_PROBLEM=1`), which stays as C's own check. The planner goldens are
+  dump output, CI regenerates them, and a test pins the problems the IR
+  builds to them byte for byte. The dump stays for two reasons. A PyTorch
+  model carries no per-layer ODT quantization, so the IR side stamps one
+  FLOAT32 profile on every layer; once non-FLOAT32 wires are admitted, only
+  the dump shows what C builds. And C's `DRY_PLAN` check compares totals
+  only: a MAXPOOL/AVGPOOL swap or a same-size shape permutation passes it,
+  while the byte pin catches both. The planner holds one copy of C's wire,
+  step, range, cost and placement rules, checked against committed C
+  output, and answers with a retain list that runs through
+  `REMAT_PLAN=retain:...[+inplace]` and `REMAT_BUDGET_B`. C stays the
+  truth: no C code runs the planner, no offsets, plan fingerprint or plan
+  version cross over, and the harness checks the arena against the budget
+  itself. It accepts only inputs a C reference run covers and refuses every
+  other by name. The solver sits
   behind a strategy interface, but that interface takes the retain-list
   plan space and returns a retain-only plan: a second plan family (a
   multi-level recompute strategy) needs its own plan-space object and a

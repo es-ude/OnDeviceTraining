@@ -80,6 +80,12 @@ class Problem:
     hash: str
 
 
+def problem_bytes(problem: dict) -> bytes:
+    """The bytes C's DUMP_PROBLEM=1 writes for the same problem: one compact line, keys in
+    the dict's order, then a newline. Write a problem file with these, so its hash is C's."""
+    return (json.dumps(problem, separators=(",", ":")) + "\n").encode()
+
+
 def problem_hash(data: bytes) -> str:
     """FNV-1a 64 over the exact bytes, as 16 lowercase hex digits (C prints the same)."""
     return format(functools.reduce(lambda h, b: ((h ^ b) * FNV_PRIME) % 2**64, data, FNV_BASIS),

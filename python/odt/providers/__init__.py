@@ -2,6 +2,8 @@
 
 from torch import nn
 
+from odt.planner import problem_bytes
+
 from .annotate import annotate
 from .errors import NotAChainError, UnsupportedDtypeError, UnsupportedLayerError
 from .problem import problem_from_annotated
@@ -15,6 +17,7 @@ __all__ = [
     "UnsupportedDtypeError",
     "UnsupportedLayerError",
     "build_problem",
+    "problem_bytes",
 ]
 
 

@@ -795,12 +795,17 @@ checkpointing, limitations, literature).
   and stops; `REMAT_BUDGET_B=<bytes>` (ARENA only) stops a run whose arena is larger,
   naming both numbers, and logs the budget (`wire_budget_b`, `wire_cost_model`).
   The budget planner (`python/odt/planner/`, host-only Python; remat D12, remat D18)
-  reads that file and prints the retain plan of least recompute whose arena fits
+  reads a problem file from either source: `odt.providers.build_problem` on the
+  PyTorch model, written with `problem_bytes` (the primary source; rank-3 input,
+  FLOAT32 only), or that dump, which stays as C's check (a test pins the IR-built
+  problems to the dumped goldens byte for byte). It prints the retain plan of least
+  recompute whose arena fits
   (`uv run -m odt.planner solve <problem> --m 1 --budget <bytes>` → `REMAT_PLAN` and
   `REMAT_BUDGET_B`) or every budget breakpoint (`frontier`); it is exact over all
   retain plans that keep ACT n, with or without in-place dx, and accepts FLOAT32,
-  micro-batch 1, CrossEntropy, the seven layer types of the three trainers and at
-  most 64 layers.
+  micro-batch 1, CrossEntropy, the seven layer types of the three trainers, at most
+  64 layers, an input of rank at most 8, and wires, a wire total, layer forward
+  costs and their total each at most `SIZE_MAX`.
   `examples/_shared/remat_frontier.py` writes an example's frontier as a CSV whose
   rows C measured, and `examples/_shared/remat_conformance.py` trains every frontier
   plan against STORE_ALL (a local check). Wire bytes are poisoned at bind/release

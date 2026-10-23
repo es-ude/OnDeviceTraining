@@ -691,10 +691,12 @@ jobs:
 
       - name: Planner goldens are what the trainers print today
         # python/tests/planner_goldens/ is C output the planner's tests compare against; a C
-        # change to plans, ranges or placement that leaves it stale fails here.
+        # change to plans, ranges or placement leaves a stale or new file, and either fails
+        # here (git status, not git diff, so an untracked new file counts too).
         run: |
           uv run python -B python/tests/planner_goldens/regenerate.py
-          git diff --exit-code -- python/tests/planner_goldens
+          changes=$(git status --porcelain -- python/tests/planner_goldens)
+          if [ -n "$changes" ]; then echo "$changes"; git diff -- python/tests/planner_goldens; exit 1; fi
 
       - name: Run mixed_width_mlp acceptance example (per-op arithmetic + declared-width storage)
         # Does NOT join bit-parity: mixed SYM_INT32/FLOAT32 wires have no PyTorch

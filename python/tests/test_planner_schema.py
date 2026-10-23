@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from odt.planner import Dtype, Problem, ProblemError, load_problem, parse_problem, problem_hash
+from odt.planner import (Dtype, Problem, ProblemError, load_problem, parse_problem, problem_bytes,
+                         problem_hash)
 
 GOLDENS = Path(__file__).resolve().parent / "planner_goldens"
 MODELS = ("har", "har_finetune", "mnist_cnn")
@@ -54,6 +55,15 @@ def test_the_problem_hash_is_fnv1a_64():
     assert problem_hash(b"") == "cbf29ce484222325"
     assert problem_hash(b"a") == "af63dc4c8601ec8c"
     assert problem_hash(b"foobar") == "85944171f73967e8"
+
+
+def test_problem_bytes_is_one_compact_line_in_key_order():
+    # odt.providers imports torch, so only this test pays for it
+    import odt.planner
+    import odt.providers
+
+    assert problem_bytes({"b": 1, "a": [1, 2]}) == b'{"b":1,"a":[1,2]}\n'
+    assert odt.providers.problem_bytes is odt.planner.problem_bytes
 
 
 def base() -> dict:

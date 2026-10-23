@@ -4,7 +4,8 @@
         [--samples 512] [--epochs 2] [--jobs 8]
 
 Run from the repository root after `cmake --build --preset examples` (the plain preset, never a
-build with other optimisation flags: the check compares bytes), with the data prepared. Per
+build with other optimisation flags: the predictions check compares file bytes, which a
+build with other flags changes), with the data prepared. Per
 example (default: har_classifier and mnist_cnn) the planner's frontier with and without
 in-place dx gives the plans, each once. One reference run uses REMAT_PLAN=store_all; each
 plan's run uses REMAT_STORAGE=arena, REMAT_PLAN=<plan> and REMAT_BUDGET_B=<its arena>, so C
@@ -42,6 +43,11 @@ REMAT_CONFIG_KEYS = ("remat_storage", "remat_plan", "wire_budget_b", "wire_cost_
 
 class ConformanceError(Exception):
     """The reference run failed, so no plan can be compared; the message names it."""
+
+
+class MissingOutput(Exception):
+    """A run that exited 0 left out the file (relative path) in the message; `check` words it
+    for the reference or the plan."""
 
 
 def data_dir_of(example: str) -> Path:
@@ -110,20 +116,30 @@ def check(example: str, work: Path, samples: int, epochs: int, jobs: int, runner
 
     def outputs(k: int) -> tuple[dict, bytes]:
         base = dirs[k] / "examples" / example
+        for relpath in ("logs/c.json", "outputs/c_predictions.npy"):
+            if not (base / relpath).is_file():
+                raise MissingOutput(relpath)
         return (load_log(base / "logs/c.json"),
                 (base / "outputs/c_predictions.npy").read_bytes())
 
     if done[0][0] != 0:
         raise ConformanceError(f"{example}: the STORE_ALL run exited {done[0][0]}: "
                                f"{done[0][2].strip()}")
-    ref_log, ref_predictions = outputs(0)
+    try:
+        ref_log, ref_predictions = outputs(0)
+    except MissingOutput as e:
+        raise ConformanceError(f"{example}: the STORE_ALL run exited 0 but wrote no {e}") from None
     report = []
     for k, (plan, _) in enumerate(plans, start=1):
         rc, _, err = done[k]
         if rc != 0:
             report.append((example, plan, [f"the run exited {rc}: {err.strip()}"]))
             continue
-        log, predictions = outputs(k)
+        try:
+            log, predictions = outputs(k)
+        except MissingOutput as e:
+            report.append((example, plan, [f"the run exited 0 but wrote no {e}"]))
+            continue
         found = differences(ref_log, log)
         if predictions != ref_predictions:
             found.append("outputs/c_predictions.npy: the bytes differ")
@@ -133,7 +149,10 @@ def check(example: str, work: Path, samples: int, epochs: int, jobs: int, runner
 
 def _at_least_one(text: str) -> int:
     """A count for argparse: below one, no plan would be tested (or the pool cannot start)."""
-    n = int(text)
+    try:
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a whole number, not {text!r}") from None
     if n < 1:
         raise argparse.ArgumentTypeError(f"must be at least 1, not {n}")
     return n

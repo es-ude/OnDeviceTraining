@@ -5,6 +5,7 @@ C goldens (python/tests/planner_goldens/, written by running the trainers), so t
 never run C and still compare the planner against C's own lines.
 """
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -13,7 +14,9 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from examples._shared.remat_frontier import COLUMNS, FrontierError, main, measure  # noqa: E402
+from examples._shared import remat_frontier  # noqa: E402
+from examples._shared.remat_frontier import (COLUMNS, FrontierError, main, measure,  # noqa: E402
+                                             run_trainer)
 
 GOLDENS = REPO_ROOT / "python/tests/planner_goldens"
 GOLDEN_OF = {"har_classifier": "har", "har_classifier_finetune": "har_finetune",
@@ -138,3 +141,24 @@ def test_a_failure_is_one_stderr_line_and_exit_1_with_no_csv(tmp_path, capsys):
         "REMAT_BUDGET_B=41216): C exited 1: ERROR: remat arena 41224 B exceeds "
         "REMAT_BUDGET_B=41216 B\n")
     assert not out.exists()
+
+
+def test_a_missing_trainer_names_the_binary_and_the_build_command(tmp_path, monkeypatch):
+    monkeypatch.setattr(remat_frontier, "BUILD", tmp_path)
+    with pytest.raises(FrontierError, match=r"does not exist: build the examples preset first "
+                                           r"\(cmake --build --preset examples\)$"):
+        run_trainer("har_classifier", {})
+
+
+def test_a_trainer_past_the_timeout_is_one_named_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(remat_frontier, "BUILD", tmp_path)
+    binary = tmp_path / remat_frontier.TRAINERS["har_classifier"]
+    binary.parent.mkdir(parents=True)
+    binary.touch()
+
+    def hang(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", hang)
+    with pytest.raises(FrontierError, match=rf"{re.escape(str(binary))} ran past 3600 s"):
+        run_trainer("har_classifier", {})

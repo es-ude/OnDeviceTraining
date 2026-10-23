@@ -69,10 +69,15 @@ def test_the_plans_are_both_frontiers_each_once_with_their_arenas():
 class FakeTraining:
     """Writes the run log and the predictions file into the run's working directory; the run
     of plan `drift` computes one different loss, that of `other_predictions` one other
-    prediction."""
+    prediction. `fails` maps a REMAT_PLAN ("store_all" for the reference) to the (exit code,
+    stderr) of its run, which then writes nothing; `skip` maps it to the files of
+    {"logs/c.json", "outputs/c_predictions.npy"} its run exits 0 without writing."""
 
-    def __init__(self, drift: str | None = None, other_predictions: str | None = None):
+    def __init__(self, drift: str | None = None, other_predictions: str | None = None,
+                 fails: dict[str, tuple[int, str]] | None = None,
+                 skip: dict[str, set[str]] | None = None):
         self.drift, self.other_predictions = drift, other_predictions
+        self.fails, self.skip = fails or {}, skip or {}
         self.runs, self.golden = [], GoldenTrainer("mnist_cnn")
 
     def __call__(self, example, variables, cwd):
@@ -80,13 +85,18 @@ class FakeTraining:
             return self.golden(example, variables)
         self.runs.append((variables, cwd))
         assert np.load(cwd / "examples/mnist_cnn/data/train_x.npy").shape == (4, 1, 28, 28)
+        plan = variables.get("REMAT_PLAN")
+        if plan in self.fails:
+            return self.fails[plan][0], "", self.fails[plan][1]
+        skipped = self.skip.get(plan, set())
         log = changed(epochs__0__wall_s=random.random())
         if variables.get("REMAT_PLAN") == self.drift:
             log["epochs"][0]["val_loss"] = 1.303708
-        (cwd / "examples/mnist_cnn/logs/c.json").write_text(json.dumps(log))
-        predictions = b"NPY 3 1 4 2" if variables.get("REMAT_PLAN") == self.other_predictions \
-            else b"NPY 3 1 4 1"
-        (cwd / "examples/mnist_cnn/outputs/c_predictions.npy").write_bytes(predictions)
+        predictions = b"NPY 3 1 4 2" if plan == self.other_predictions else b"NPY 3 1 4 1"
+        if "logs/c.json" not in skipped:
+            (cwd / "examples/mnist_cnn/logs/c.json").write_text(json.dumps(log))
+        if "outputs/c_predictions.npy" not in skipped:
+            (cwd / "examples/mnist_cnn/outputs/c_predictions.npy").write_bytes(predictions)
         return 0, "", ""
 
 
@@ -157,3 +167,53 @@ def test_a_count_below_one_is_refused_before_any_work(tmp_path, capsys, flag, va
     assert stop.value.code == 2
     assert not (tmp_path / "work").exists()
     assert flag in capsys.readouterr().err
+
+
+PLAN = "retain:1,4,8,10"
+
+
+def run_main(tmp_path, data, monkeypatch, trainer):
+    monkeypatch.setattr("examples._shared.remat_conformance.data_dir_of", lambda example: data)
+    argv = ["--example", "mnist_cnn", "--work", str(tmp_path / "work"), "--samples", "4"]
+    return main(argv, trainer)
+
+
+def test_a_plan_run_that_fails_is_one_differs_line(tmp_path, data, capsys, monkeypatch):
+    trainer = FakeTraining(fails={PLAN: (3, "boom\n")})
+    assert run_main(tmp_path, data, monkeypatch, trainer) == 1
+    assert f"DIFFERS mnist_cnn {PLAN}: the run exited 3: boom" in \
+        capsys.readouterr().out.splitlines()
+
+
+def test_a_failed_store_all_run_stops_the_check_with_its_stderr(tmp_path, data, capsys,
+                                                                 monkeypatch):
+    trainer = FakeTraining(fails={"store_all": (2, "no data\n")})
+    assert run_main(tmp_path, data, monkeypatch, trainer) == 1
+    assert capsys.readouterr().err == (
+        "remat_conformance: mnist_cnn: the STORE_ALL run exited 2: no data\n")
+
+
+@pytest.mark.parametrize("relpath", ["logs/c.json", "outputs/c_predictions.npy"])
+def test_a_plan_run_that_exits_0_without_its_file_is_one_differs_line(
+        tmp_path, data, capsys, monkeypatch, relpath):
+    trainer = FakeTraining(skip={PLAN: {relpath}})
+    assert run_main(tmp_path, data, monkeypatch, trainer) == 1
+    assert f"DIFFERS mnist_cnn {PLAN}: the run exited 0 but wrote no {relpath}" in \
+        capsys.readouterr().out.splitlines()
+
+
+@pytest.mark.parametrize("relpath", ["logs/c.json", "outputs/c_predictions.npy"])
+def test_a_store_all_run_that_exits_0_without_its_file_stops_the_check(
+        tmp_path, data, capsys, monkeypatch, relpath):
+    trainer = FakeTraining(skip={"store_all": {relpath}})
+    assert run_main(tmp_path, data, monkeypatch, trainer) == 1
+    assert capsys.readouterr().err == (
+        f"remat_conformance: mnist_cnn: the STORE_ALL run exited 0 but wrote no {relpath}\n")
+
+
+def test_a_non_number_count_is_refused_by_name(tmp_path, capsys):
+    with pytest.raises(SystemExit) as stop:
+        main(["--example", "mnist_cnn", "--work", str(tmp_path / "work"), "--samples", "x"])
+    assert stop.value.code == 2
+    assert capsys.readouterr().err.rstrip().endswith(
+        "argument --samples: expected a whole number, not 'x'")

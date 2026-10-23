@@ -26,6 +26,7 @@ from odt.planner import parse_problem  # noqa: E402
 from odt.planner.frontier import frontier  # noqa: E402
 
 BUILD = ROOT / "build/examples/examples"
+TIMEOUT_S = 3600
 TRAINERS = {
     "har_classifier": "har_classifier/train_c_har_classifier",
     "har_classifier_finetune": "har_classifier/train_c_har_classifier_finetune",
@@ -53,7 +54,11 @@ def run_trainer(example: str, variables: dict[str, str], cwd: Path = ROOT) -> tu
         raise FrontierError(f"{binary} does not exist: build the examples preset first "
                             f"(cmake --build --preset examples)")
     env = {"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", ""), **variables}
-    done = subprocess.run([str(binary)], cwd=cwd, env=env, capture_output=True, timeout=3600)
+    try:
+        done = subprocess.run([str(binary)], cwd=cwd, env=env, capture_output=True,
+                              timeout=TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        raise FrontierError(f"{binary} ran past {TIMEOUT_S} s: the run was killed") from None
     return done.returncode, done.stdout.decode(), done.stderr.decode()
 
 

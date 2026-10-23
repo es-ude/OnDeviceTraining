@@ -33,6 +33,9 @@
 #include "Tensor.h"
 #include "unity.h"
 
+/* Every HAR plan these tests build has 23 ranges: 12 ACTs, the seed, 10 dx. */
+#define HAR_RANGES 23u
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -205,8 +208,8 @@ static void assertF1Placement(const rematPlanSpec_t *spec) {
     }
     size_t offsets[3];
     size_t bytes = 0;
-    size_t peak = 0;
-    TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(b.t, p, offsets, &bytes, &peak));
+    size_t peak = arenaPlacedPeakBytes(b.t, p);
+    TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(b.t, p, peak, offsets, &bytes));
     TEST_ASSERT_EQUAL_size_t(0, offsets[0]);  /* ACT 1 */
     TEST_ASSERT_EQUAL_size_t(8, offsets[1]);  /* ACT 2; unaligned: 5 */
     TEST_ASSERT_EQUAL_size_t(16, offsets[2]); /* the seed; unaligned: 9 */
@@ -227,8 +230,8 @@ void testFfdPeakPlacedBytesIsThePeakOfPlacedSums(void) {
     builtPlan_t b = buildTableAndPlan(f.model, f.n, f.lt, f.x, NULL);
     size_t offsets[3];
     size_t bytes = 0;
-    size_t peak = 0;
-    TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(b.t, &b.p->train, offsets, &bytes, &peak));
+    size_t peak = arenaPlacedPeakBytes(b.t, &b.p->train);
+    TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(b.t, &b.p->train, peak, offsets, &bytes));
     TEST_ASSERT_EQUAL_size_t(24, peak); /* all three co-live at step 3: 8 + 8 + 8, exact 13 */
     freeTableAndPlan(&b);
     freeModel(f.model, f.n);
@@ -236,9 +239,10 @@ void testFfdPeakPlacedBytesIsThePeakOfPlacedSums(void) {
     fixture_t h;
     buildHarModel(&h);
     builtPlan_t hb = buildTableAndPlan(h.model, h.n, h.lt, h.x, NULL);
-    size_t harOffsets[23];
-    TEST_ASSERT_EQUAL_size_t(23, hb.p->train.numRanges);
-    TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(hb.t, &hb.p->train, harOffsets, &bytes, &peak));
+    size_t harOffsets[HAR_RANGES];
+    TEST_ASSERT_EQUAL_size_t(HAR_RANGES, hb.p->train.numRanges);
+    peak = arenaPlacedPeakBytes(hb.t, &hb.p->train);
+    TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(hb.t, &hb.p->train, peak, harOffsets, &bytes));
     TEST_ASSERT_EQUAL_size_t(74288, peak); /* HAR pads nothing: the scan-model STORE_ALL peak */
     freeTableAndPlan(&hb);
     freeModel(h.model, h.n);
@@ -468,8 +472,9 @@ void testFfdMatchesTheNaiveOracleOnRandomPlans(void) {
         size_t actualBytes = 0;
         size_t actualPeak = 0;
         size_t expectedBytes = oracleFirstFitDecreasing(&rp, expected, &expectedPeak);
-        TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(&rp.table, &rp.program, actual, &actualBytes,
-                                                      &actualPeak));
+        actualPeak = arenaPlacedPeakBytes(&rp.table, &rp.program);
+        TEST_ASSERT_TRUE(
+            arenaPlaceFirstFitDecreasing(&rp.table, &rp.program, actualPeak, actual, &actualBytes));
         for (size_t r = 0; r < rp.program.numRanges; r++) {
             TEST_ASSERT_EQUAL_size_t_MESSAGE(expected[r], actual[r],
                                              "offset differs from the oracle");
@@ -503,11 +508,11 @@ void testFfdReleasesItsScratch(void) {
     fixture_t h;
     buildHarModel(&h);
     builtPlan_t b = buildTableAndPlan(h.model, h.n, h.lt, h.x, &g_liveness);
-    size_t offsets[23];
+    size_t offsets[HAR_RANGES];
     size_t bytes = 0;
-    size_t peak = 0;
+    size_t peak = arenaPlacedPeakBytes(b.t, &b.p->train);
     size_t before = memProfileCurrentBytes();
-    TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(b.t, &b.p->train, offsets, &bytes, &peak));
+    TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(b.t, &b.p->train, peak, offsets, &bytes));
     TEST_ASSERT_EQUAL_size_t(before, memProfileCurrentBytes());
     freeTableAndPlan(&b);
     freeModel(h.model, h.n);
@@ -518,6 +523,9 @@ void testFfdReleasesItsScratch(void) {
 
 typedef bool (*placeMember_t)(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
                               size_t *offsets, size_t *bytes);
+
+_Static_assert(_Generic(arenaPlaceFirstFitDecreasing, placeMember_t: 1, default: 0),
+               "first-fit-decreasing is a portfolio member");
 
 static void assertMemberPlacesTheHandPlan(placeMember_t place, const handPlan_t *hp,
                                           const size_t *expected, size_t expectedBytes) {
@@ -659,10 +667,11 @@ static void assertMemberReleasesItsScratch(placeMember_t place) {
     fixture_t h;
     buildHarModel(&h);
     builtPlan_t b = buildTableAndPlan(h.model, h.n, h.lt, h.x, NULL);
-    size_t offsets[23];
+    size_t offsets[HAR_RANGES];
     size_t bytes = 0;
     size_t before = memProfileCurrentBytes();
-    TEST_ASSERT_TRUE(place(b.t, &b.p->train, 74288, offsets, &bytes));
+    TEST_ASSERT_TRUE(
+        place(b.t, &b.p->train, arenaPlacedPeakBytes(b.t, &b.p->train), offsets, &bytes));
     TEST_ASSERT_EQUAL_size_t(before, memProfileCurrentBytes());
     freeTableAndPlan(&b);
     freeModel(h.model, h.n);
@@ -695,8 +704,9 @@ void testPortfolioIsNeverWorseThanFfdOnRandomPlans(void) {
         size_t ffdPeak = 0;
         size_t bytes = 0;
         size_t peak = 0;
+        ffdPeak = arenaPlacedPeakBytes(&rp.table, &rp.program);
         TEST_ASSERT_TRUE(
-            arenaPlaceFirstFitDecreasing(&rp.table, &rp.program, ffd, &ffdBytes, &ffdPeak));
+            arenaPlaceFirstFitDecreasing(&rp.table, &rp.program, ffdPeak, ffd, &ffdBytes));
         TEST_ASSERT_TRUE(arenaPlacePortfolio(&rp.table, &rp.program, best, &bytes, &peak));
         arenaVerifyPlacement(&rp.table, &rp.program, best, bytes);
         TEST_ASSERT_TRUE_MESSAGE(bytes <= ffdBytes, "portfolio larger than first-fit-decreasing");
@@ -712,14 +722,14 @@ void testPortfolioKeepsTheEarlierMemberOnATie(void) {
     buildHarModel(&h);
     builtPlan_t b = buildTableAndPlan(h.model, h.n, h.lt, h.x, &g_liveness);
     const rematProgram_t *p = &b.p->train;
-    size_t ffd[23];
-    size_t later[23];
-    size_t best[23];
+    size_t ffd[HAR_RANGES];
+    size_t later[HAR_RANGES];
+    size_t best[HAR_RANGES];
     size_t ffdBytes = 0;
     size_t laterBytes = 0;
     size_t bytes = 0;
-    size_t peak = 0;
-    TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(b.t, p, ffd, &ffdBytes, &peak));
+    size_t peak = arenaPlacedPeakBytes(b.t, p);
+    TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(b.t, p, peak, ffd, &ffdBytes));
     TEST_ASSERT_TRUE(arenaPlaceSizeThenEnd(b.t, p, peak, later, &laterBytes));
     TEST_ASSERT_EQUAL_size_t(49152, ffdBytes);
     TEST_ASSERT_EQUAL_size_t(49152, laterBytes);
@@ -762,7 +772,7 @@ void testPortfolioReleasesItsScratch(void) {
     fixture_t h;
     buildHarModel(&h);
     builtPlan_t b = buildTableAndPlan(h.model, h.n, h.lt, h.x, NULL);
-    size_t offsets[23];
+    size_t offsets[HAR_RANGES];
     size_t bytes = 0;
     size_t peak = 0;
     size_t before = memProfileCurrentBytes();
@@ -778,7 +788,7 @@ void testPortfolioReleasesItsScratch(void) {
 typedef struct placedPlan {
     fixture_t f;
     builtPlan_t b;
-    size_t offsets[23];
+    size_t offsets[HAR_RANGES];
     size_t bytes;
 } placedPlan_t;
 
@@ -786,10 +796,10 @@ static void placeFixture(placedPlan_t *pp, void (*build)(fixture_t *),
                          const rematPlanSpec_t *spec) {
     build(&pp->f);
     pp->b = buildTableAndPlan(pp->f.model, pp->f.n, pp->f.lt, pp->f.x, spec);
-    size_t peak = 0;
-    TEST_ASSERT_TRUE(pp->b.p->train.numRanges <= 23u);
+    size_t peak = arenaPlacedPeakBytes(pp->b.t, &pp->b.p->train);
+    TEST_ASSERT_TRUE(pp->b.p->train.numRanges <= HAR_RANGES);
     TEST_ASSERT_TRUE(
-        arenaPlaceFirstFitDecreasing(pp->b.t, &pp->b.p->train, pp->offsets, &pp->bytes, &peak));
+        arenaPlaceFirstFitDecreasing(pp->b.t, &pp->b.p->train, peak, pp->offsets, &pp->bytes));
 }
 
 static void freePlacedFixture(placedPlan_t *pp) {

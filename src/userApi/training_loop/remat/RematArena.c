@@ -250,14 +250,15 @@ static bool arenaFirstFitInOrder(const arenaOrder_t *o, arenaBefore_t before, si
     return true;
 }
 
+size_t arenaPlacedPeakBytes(const rematWireTable_t *t, const rematProgram_t *p) {
+    return arenaPeakPlacedBytes(t, p, NULL);
+}
+
 bool arenaPlaceFirstFitDecreasing(const rematWireTable_t *t, const rematProgram_t *p,
-                                  size_t *offsets, size_t *bytes, size_t *peakPlacedBytes) {
+                                  size_t placedPeak, size_t *offsets, size_t *bytes) {
+    (void)placedPeak;
     const arenaOrder_t o = {.t = t, .p = p};
-    if (!arenaFirstFitInOrder(&o, arenaPlacesBefore, offsets, bytes)) {
-        return false;
-    }
-    *peakPlacedBytes = arenaPeakPlacedBytes(t, p, NULL);
-    return true;
+    return arenaFirstFitInOrder(&o, arenaPlacesBefore, offsets, bytes);
 }
 
 bool arenaPlaceSizeThenEnd(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
@@ -359,8 +360,11 @@ static void arenaArea(const arenaOrder_t *o, size_t r, size_t *hi, size_t *lo) {
     *lo = low & 0xFFFFu;
 }
 
-/* Within one step the wire id decides the last tie: the ranges of one wire are
- * never co-live. */
+/* The order: the range whose busiest step holds more live placed bytes first
+ * (the earlier step on equal bytes); within one step, larger placed size x
+ * lifetime first; then the lower wire id. Wire id suffices as the last key: two
+ * ranges of one wire are never co-live, so their order cannot change a
+ * layout. */
 static bool arenaBreadthAreaBefore(const arenaOrder_t *o, size_t a, size_t b) {
     uint16_t stepA = o->busiestStep[a];
     uint16_t stepB = o->busiestStep[b];
@@ -504,13 +508,6 @@ bool arenaPlaceTwoEnded(const rematWireTable_t *t, const rematProgram_t *p, size
     return true;
 }
 
-static bool arenaPlaceFfdMember(const rematWireTable_t *t, const rematProgram_t *p,
-                                size_t placedPeak, size_t *offsets, size_t *bytes) {
-    (void)placedPeak;
-    const arenaOrder_t o = {.t = t, .p = p};
-    return arenaFirstFitInOrder(&o, arenaPlacesBefore, offsets, bytes);
-}
-
 typedef bool (*arenaMember_t)(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
                               size_t *offsets, size_t *bytes);
 
@@ -520,8 +517,9 @@ static const struct arenaMemberEntry {
     arenaMember_t place;
     bool needsGradRange;
 } arenaMembers[] = {
-    {arenaPlaceFfdMember, false}, {arenaPlaceBreadthArea, false}, {arenaPlacePingPong, false},
-    {arenaPlaceTwoEnded, true},   {arenaPlaceSizeThenEnd, false},
+    {arenaPlaceFirstFitDecreasing, false}, {arenaPlaceBreadthArea, false},
+    {arenaPlacePingPong, false},           {arenaPlaceTwoEnded, true},
+    {arenaPlaceSizeThenEnd, false},
 };
 
 bool arenaPlacePortfolio(const rematWireTable_t *t, const rematProgram_t *p, size_t *offsets,

@@ -50,16 +50,19 @@ void __asan_unpoison_memory_region(void const volatile *addr, size_t size);
 /* roundUp(bytes(w), ODT_WIRE_ALIGN), overflow-checked: exits naming the wire. */
 size_t arenaPlaced(const rematWireTable_t *t, uint16_t w);
 
+/* The peak of the placed (ODT_WIRE_ALIGN-rounded) live sums over the steps:
+ * the placedPeak the members take and the portfolio reports. */
+size_t arenaPlacedPeakBytes(const rematWireTable_t *t, const rematProgram_t *p);
+
 /* First-fit-decreasing into offsets[range id]: placed size descending, then
  * begin, then wire id; each range takes the lowest offset that is 0 or the end
  * of a co-live (inclusive) placed range and overlaps no co-live placed range.
- * bytes = max(offset + placed); peakPlacedBytes = the peak of the placed sums
- * over the steps. Returns false only when its numRanges x uint16_t scratch
- * cannot be reserved. */
+ * bytes = max(offset + placed). Returns false only when its numRanges x
+ * uint16_t scratch cannot be reserved. placedPeak is unused. */
 bool arenaPlaceFirstFitDecreasing(const rematWireTable_t *t, const rematProgram_t *p,
-                                  size_t *offsets, size_t *bytes, size_t *peakPlacedBytes);
+                                  size_t placedPeak, size_t *offsets, size_t *bytes);
 
-/* The portfolio's other members. Each places every range into
+/* The other portfolio members. Each places every range into
  * offsets[range id], sets bytes = max(offset + placed) and returns false only
  * when its scratch cannot be reserved. placedPeak is the peak of the placed
  * sums over the steps, which ping-pong uses as its height. */
@@ -100,7 +103,7 @@ bool arenaPlanHasGradRange(const rematWireTable_t *t, const rematProgram_t *p);
  * two-ended (only on a plan with a GRAD range) and size-then-end, in that
  * fixed order, and keeps the layout with the fewest bytes; on equal bytes the
  * earlier member's. So no layout is larger than first-fit-decreasing's.
- * peakPlacedBytes as in arenaPlaceFirstFitDecreasing. Returns false only when
+ * peakPlacedBytes = arenaPlacedPeakBytes. Returns false only when
  * a scratch block cannot be reserved: the trial layouts' numRanges x size_t
  * block, or a member's own; every one is released before it returns, so the
  * init reserves no byte its report does not account for. */

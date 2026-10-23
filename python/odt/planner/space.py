@@ -11,7 +11,9 @@ so every step of segment (k, k2] has live bytes S + local(k, k2, in_place), wher
 placed bytes of the kept ACTs below k (`local`; the backward runs top-down, so a higher
 segment's own wires are gone by then).
 """
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from odt.planner.cmodel import (BACKWARD, LOSS_BACKWARD, LOSS_FORWARD, REFORWARD, WireTable,
                                 place_portfolio, placed, plan_numbers, retain_steps,
@@ -30,6 +32,11 @@ def _segment_live(t: WireTable, k: int, k2: int, ip: bool) -> int:
                or (k2 == t.n and kind in (LOSS_FORWARD, LOSS_BACKWARD)))
 
 
+def _segment_allowed(needed: tuple[bool, ...], seg: Mapping, k: int, k2: int) -> bool:
+    """k -> k2 can be a segment of a plan's effective path."""
+    return k == 0 or needed[k] or seg[(k, k2)][2]
+
+
 @dataclass(frozen=True)
 class PlanSpace:
     problem: Problem
@@ -38,9 +45,9 @@ class PlanSpace:
     settings: tuple[bool, ...]  # the in-place dx settings the solver may choose
     needed: tuple[bool, ...]  # ACT j is read by a backward step
     act_placed: tuple[int, ...]  # placed bytes of ACT j; 0 for ACT 0, which has no range
-    seg: dict  # (k, k2) -> (recompute cost, REFORWARD count, has a recompute)
-    local: dict  # (k, k2, in_place) -> max over the segment's steps of its own live bytes
-    out_edges: dict  # (k, in_place) -> ((k2, local, cost, REFORWARDs), ...) of allowed k2
+    seg: Mapping  # (k, k2) -> (recompute cost, REFORWARD count, has a recompute)
+    local: Mapping  # (k, k2, in_place) -> max over the segment's steps of its own live bytes
+    out_edges: Mapping  # (k, in_place) -> ((k2, local, cost, REFORWARDs), ...) of allowed k2
 
     @classmethod
     def build(cls, problem: Problem, m: int, allow_inplace: bool = True) -> "PlanSpace":
@@ -60,12 +67,13 @@ class PlanSpace:
                                 (sum(t.layer_cost[k:top_need]), top_need - k, True))
             for ip in settings:
                 for k2 in range(k + 1, n + 1):
-                    if k == 0 or needed[k] or seg[(k, k2)][2]:
+                    if _segment_allowed(needed, seg, k, k2):
                         local[(k, k2, ip)] = _segment_live(t, k, k2, ip)
                 out_edges[(k, ip)] = tuple((k2, local[(k, k2, ip)]) + seg[(k, k2)][:2]
                                            for k2 in range(k + 1, n + 1) if (k, k2, ip) in local)
         acts = (0,) + tuple(placed(t.wires[j].bytes) for j in range(1, n + 1))
-        return cls(problem, m, t, settings, needed, acts, seg, local, out_edges)
+        return cls(problem, m, t, settings, needed, acts, MappingProxyType(seg),
+                   MappingProxyType(local), MappingProxyType(out_edges))
 
     @property
     def n(self) -> int:
@@ -73,7 +81,7 @@ class PlanSpace:
 
     def allowed(self, k: int, k2: int) -> bool:
         """k -> k2 can be a segment of a plan's effective path."""
-        return k == 0 or self.needed[k] or self.seg[(k, k2)][2]
+        return _segment_allowed(self.needed, self.seg, k, k2)
 
     def retain_of(self, mask: int) -> tuple[bool, ...]:
         if mask >> (self.n - 1) != 1:
@@ -86,7 +94,7 @@ class PlanSpace:
         retain = self.retain_of(mask)
         path = [self.n]
         for j in range(self.n - 1, 0, -1):
-            if retain[j] and (self.needed[j] or self.seg[(j, path[0])][2]):
+            if retain[j] and _segment_allowed(self.needed, self.seg, j, path[0]):
                 path.insert(0, j)
         return (0, *path)
 

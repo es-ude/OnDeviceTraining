@@ -36,8 +36,9 @@ def cost_of(answer) -> float:
     return math.inf if isinstance(answer, NothingFits) else answer.recompute_cost
 
 
-def same_answer(got, want: Plan | None, budget: int) -> bool:
-    return got == (NothingFits(budget, got.peak_floor_b) if want is None else want)
+def same_answer(got, want: Plan | None, budget: int, floor: int) -> bool:
+    """`floor` comes from the brute-force side, so a wrong peak_floor cannot agree with itself."""
+    return got == (NothingFits(budget, floor) if want is None else want)
 
 
 def test_a_plan_prints_as_the_retain_list_c_runs():
@@ -64,13 +65,26 @@ def test_a_retain_mask_keeps_act_n_and_no_higher_bit():
             sp.retain_of(mask)
 
 
+def test_the_plan_space_tables_are_read_only():
+    sp = space("har", True)
+    with pytest.raises(TypeError):
+        sp.seg[(0, 1)] = (0, 0, False)
+    with pytest.raises(TypeError):
+        sp.local[(0, 1, True)] = 0
+    with pytest.raises(TypeError):
+        sp.out_edges[(0, True)] = ()
+
+
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("allow_inplace", (True, False))
 def test_the_solver_equals_brute_force_at_every_arena_and_one_byte_below(model, allow_inplace):
     plans = oracle(model, allow_inplace)
+    floor = min(p.placed_peak_b for p in plans)
+    if model in ("har", "mnist_cnn"):
+        assert floor == PEAK_FLOOR[(model, allow_inplace)]
     for budget in sorted({p.arena_b for p in plans} | {p.arena_b - 1 for p in plans}):
         assert same_answer(SOLVER.solve(space(model, allow_inplace), budget), best(plans, budget),
-                           budget), (model, allow_inplace, budget)
+                           budget, floor), (model, allow_inplace, budget)
 
 
 @pytest.mark.parametrize("seed", range(12))
@@ -79,9 +93,10 @@ def test_the_solver_equals_brute_force_on_random_chains(seed):
     for allow_inplace in (True, False):
         sp = PlanSpace.build(problem, 1, allow_inplace)
         plans = all_plans(sp)
+        floor = min(p.placed_peak_b for p in plans)
         for budget in sorted({p.arena_b for p in plans} | {p.arena_b - 1 for p in plans}):
-            assert same_answer(SOLVER.solve(sp, budget), best(plans, budget), budget), (
-                seed, allow_inplace, budget)
+            assert same_answer(SOLVER.solve(sp, budget), best(plans, budget),
+                               budget, floor), (seed, allow_inplace, budget)
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -128,11 +143,13 @@ def test_a_budget_equal_to_a_plans_arena_returns_that_plan(model):
 def test_one_plan_space_answers_each_budget_on_its_own():
     """The solver's peak table depends on the budget: one space serves budgets in any order."""
     plans = oracle("har", True)
+    floor = min(p.placed_peak_b for p in plans)
     budgets = sorted({p.arena_b for p in plans})
     for order in (budgets, budgets[::-1]):
         shared = PlanSpace.build(load_problem(GOLDENS / "har.problem.json"), 1)
         for budget in order:
-            assert same_answer(SOLVER.solve(shared, budget), best(plans, budget), budget), budget
+            assert same_answer(SOLVER.solve(shared, budget), best(plans, budget), budget,
+                               floor), budget
 
 
 @pytest.mark.parametrize("model", MODELS)

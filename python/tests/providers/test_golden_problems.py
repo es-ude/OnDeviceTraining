@@ -1,7 +1,9 @@
 """Golden memory problems for the HAR and mnist_cnn twins.
 
 The expected types, shapes and costs are the layer chains the C examples build
-for the same models; the JSON fixtures pin the full problems.
+for the same models. The full problems are pinned against the C trainers' own
+DUMP_PROBLEM=1 output (python/tests/planner_goldens): the IR adapter and the C
+dump must agree byte for byte, so a change on either side fails here.
 """
 
 import json
@@ -15,17 +17,31 @@ import pytest
 
 from examples.har_classifier.train_pytorch import HarModel
 from examples.mnist_cnn.train_pytorch import MnistCnn
+from odt.planner import problem_hash
 from odt.providers import build_problem
 
-FIXTURES = Path(__file__).resolve().parent / "fixtures"
+C_DUMPS = REPO_ROOT / "python/tests/planner_goldens"
 
 
 def _har() -> dict:
     return build_problem(HarModel(), (1, 9, 128), "CROSS_ENTROPY")
 
 
+def _har_finetune() -> dict:
+    # the C finetune trainer freezes the three convs and trains the head
+    model = HarModel()
+    for conv in (model.conv1, model.conv2, model.conv3):
+        conv.requires_grad_(False)
+    return build_problem(model, (1, 9, 128), "CROSS_ENTROPY")
+
+
 def _mnist_cnn() -> dict:
     return build_problem(MnistCnn(), (1, 1, 784), "CROSS_ENTROPY")
+
+
+def _as_c_dump(problem: dict) -> bytes:
+    """Serialize as C does: one compact line, keys in emission order, then a newline."""
+    return (json.dumps(problem, separators=(",", ":")) + "\n").encode()
 
 
 def _costs(p: dict, layer_type: str, key: str) -> list[int]:
@@ -79,11 +95,16 @@ def test_mnist_cnn_problem_matches_c_layout() -> None:
 
 
 @pytest.mark.parametrize(
-    ("build", "fixture"),
-    [(_har, "har_problem_v0.json"), (_mnist_cnn, "mnist_cnn_problem_v0.json")],
-    ids=["har", "mnist_cnn"],
+    ("build", "model"),
+    [(_har, "har"), (_har_finetune, "har_finetune"), (_mnist_cnn, "mnist_cnn")],
+    ids=["har", "har_finetune", "mnist_cnn"],
 )
-def test_problems_equal_fixtures(build, fixture: str) -> None:
-    expected = json.loads((FIXTURES / fixture).read_text())
+def test_problem_bytes_equal_c_dump(build, model: str) -> None:
+    ir_bytes = _as_c_dump(build())
+    c_bytes = (C_DUMPS / f"{model}.problem.json").read_bytes()
+    c_hash_line = (C_DUMPS / f"{model}.problem.hash").read_text()
 
-    assert build() == expected
+    # parsed first, so a mismatch shows the differing field, not two byte strings
+    assert json.loads(ir_bytes) == json.loads(c_bytes)
+    assert ir_bytes == c_bytes
+    assert f"PROBLEM_HASH fnv1a64={problem_hash(ir_bytes)}\n" == c_hash_line

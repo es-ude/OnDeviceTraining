@@ -111,6 +111,29 @@ BAD = [
     ("relu cost", with_change(("layers", 1, "cost"), {"kernel": 2}),
      "layers[1].cost: RELU takes no cost operand"),
     ("no layers", with_change(("layers",), []), "layers: expected a non-empty list"),
+    ("sym zero bits", with_change(("layers", 2, "outputDtype"), {"kind": "SYM", "qBits": 0}),
+     "layers[2].outputDtype: SYM qBits must be at least 1, got 0"),
+    ("asym 17 bits", with_change(("layers", 2, "outputDtype"), {"kind": "ASYM", "qBits": 17}),
+     "layers[2].outputDtype: ASYM qBits 17 is outside C's range 1 to 16"),
+    ("asym 0 bits", with_change(("layers", 2, "outputDtype"), {"kind": "ASYM", "qBits": 0}),
+     "layers[2].outputDtype: ASYM qBits 0 is outside C's range 1 to 16"),
+    ("bfp mantissa 1", with_change(
+        ("layers", 2, "propLossDtype"),
+        {"kind": "BFP", "mantissaBits": 1, "exponentBits": 8, "groupSize": 0}),
+     "layers[2].propLossDtype: BFP mantissaBits 1 is outside C's range 2 to 16"),
+    ("bfp exponent 9", with_change(
+        ("layers", 2, "propLossDtype"),
+        {"kind": "BFP", "mantissaBits": 8, "exponentBits": 9, "groupSize": 0}),
+     "layers[2].propLossDtype: BFP exponentBits 9 is outside C's range 2 to 8"),
+    ("relu null cost", with_change(("layers", 1, "cost"), None),
+     "layers[1].cost: RELU takes no cost operand"),
+    ("dtype not object", with_change(("input", "dtype"), "FLOAT32"),
+     "input.dtype: expected an object"),
+    ("stats not bool", with_change(("layers", 1, "trackRunningStats"), 1),
+     "layers[1].trackRunningStats: expected true or false"),
+    ("bool cost", with_change(("layers", 0, "cost"), {"macPerElement": True}),
+     'layers[0].cost: CONV1D needs {"macPerElement": <positive integer>}'),
+    ("layers not list", with_change(("layers",), {"0": {}}), "layers: expected a non-empty list"),
 ]
 
 
@@ -132,3 +155,12 @@ def test_the_schema_holds_more_than_the_planner_accepts():
                                           ("mantissaBits", 8)))
     assert p.layers[1].track_running_stats
     assert p.layers[2].output_dtype.params == (("qBits", 4),)
+
+
+def test_bfp_per_tensor_group_size_0_is_valid_schema():
+    data = base()
+    data["layers"][2]["propLossDtype"] = {"kind": "BFP", "mantissaBits": 8, "exponentBits": 8,
+                                          "groupSize": 0}
+    p = parse_problem(json.dumps(data).encode())
+    assert p.layers[2].prop_loss_dtype.params == (("exponentBits", 8), ("groupSize", 0),
+                                                  ("mantissaBits", 8))

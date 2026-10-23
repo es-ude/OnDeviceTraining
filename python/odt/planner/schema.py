@@ -9,6 +9,7 @@ One JSON object (C's DUMP_PROBLEM=1 writes it as one line):
                  "propLossDtype", "cost"?}, ...]}
 
 Shapes carry the leading batch dimension, which is 1: the micro-batch is a planner input.
+Dtype widths are checked against C's ranges (WIDTH_RANGE), not just for being integers.
 `layers` is positional, one entry per C layer (Softmax included under CROSS_ENTROPY).
 `cost` holds the operand C's forward-cost count needs beyond element counts: CONV1D and
 LINEAR `{"macPerElement"}` per output element, CONV1D_TRANSPOSED per input element,
@@ -24,6 +25,10 @@ SCHEMA_VERSION = 0
 KINDS = ("INT32", "FLOAT32", "SYM_INT32", "SYM", "ASYM", "BOOL", "BFP")
 KIND_FIELDS = {"SYM": ("qBits",), "ASYM": ("qBits",),
                "BFP": ("exponentBits", "groupSize", "mantissaBits")}
+# C validates these (validateAsymQBits; the BFP init); SYM qBits has no C validator, so only 0
+# (the sub-byte packer underflows) is refused.
+WIDTH_RANGE = {("ASYM", "qBits"): (1, 16), ("BFP", "mantissaBits"): (2, 16),
+               ("BFP", "exponentBits"): (2, 8)}
 LOSSES = ("CROSS_ENTROPY", "MSE")
 LAYER_TYPES = ("LINEAR", "RELU", "CONV1D", "CONV1D_TRANSPOSED", "MAXPOOL1D", "AVGPOOL1D",
                "SOFTMAX", "FLATTEN", "QUANTIZATION", "ADAPTIVE_AVGPOOL1D", "DROPOUT",
@@ -146,6 +151,11 @@ def _dtype(v, where: str) -> Dtype:
     for key in fields:
         if not _is_int(v.get(key)) or v[key] < 0:
             raise ProblemError(f"{where}: {kind} needs the integer field {key!r}")
+        if kind == "SYM" and v[key] == 0:
+            raise ProblemError(f"{where}: SYM qBits must be at least 1, got 0")
+        lo, hi = WIDTH_RANGE.get((kind, key), (None, None))
+        if lo is not None and not lo <= v[key] <= hi:
+            raise ProblemError(f"{where}: {kind} {key} {v[key]} is outside C's range {lo} to {hi}")
     return Dtype(kind, tuple((key, v[key]) for key in fields))
 
 
@@ -162,7 +172,7 @@ def _layer(v, where: str) -> LayerSpec:
         raise ProblemError(f"{where}.type: {kind!r} is not a layer type this schema knows")
     operand = COST_KEY.get(kind)
     cost = v.get("cost")
-    if operand is None and cost is not None:
+    if operand is None and "cost" in v:
         raise ProblemError(f"{where}.cost: {kind} takes no cost operand")
     if operand is not None and (not isinstance(cost, dict) or list(cost) != [operand]
                                 or not _is_int(cost[operand]) or cost[operand] < 1):

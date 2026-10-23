@@ -177,6 +177,12 @@ HAND_PLANS = {  # the C unit test's hand plans: each reaches its peak through on
                    (32, 4, 4, GRAD)], [0, 40, 24, 0, 24], 56),
 }
 
+TIE_PLANS = {  # the C unit test's tie plans: two ranges tie on the member's first key
+    "size-then-end": ([(16, 0, 1, ACT), (16, 1, 3, GRAD)], [16, 0], 32),
+    "ping-pong": ([(16, 0, 1, ACT), (16, 0, 2, GRAD)], [16, 0], 32),
+    "breadth/area": ([(16, 0, 1, ACT), (16, 0, 0, ACT), (16, 1, 1, GRAD)], [0, 16, 16], 32),
+    "two-ended": ([(16, 0, 2, ACT), (16, 0, 3, ACT), (8, 2, 3, GRAD)], [16, 0, 32], 40),
+}
 
 @pytest.mark.parametrize("model", MODELS)
 def test_every_golden_dry_plan_line_has_the_arena_of_the_copy_of_c(model):
@@ -200,6 +206,15 @@ def test_each_member_alone_places_its_hand_plan_at_the_peak(name):
         if other != name:
             assert check_layout(t, ranges, f(t, ranges, nbytes)) > nbytes
 
+
+
+@pytest.mark.parametrize("name", list(TIE_PLANS))
+def test_each_member_breaks_its_tie_as_c_does(name):
+    spec, offsets, nbytes = TIE_PLANS[name]
+    t, ranges = hand_plan(spec)
+    member = {m: f for m, f, _ in MEMBERS}[name]
+    got = member(t, ranges, nbytes)
+    assert (got, check_layout(t, ranges, got)) == (offsets, nbytes)
 
 def test_every_member_layout_passes_the_overlap_check_and_the_portfolio_keeps_the_best():
     rng = random.Random(4)

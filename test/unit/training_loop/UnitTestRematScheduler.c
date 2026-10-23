@@ -374,6 +374,18 @@ static const handPlan_t g_twoEndedPlan = {{{32, 0, 1, REMAT_WIRE_ACT},
                                           5,
                                           6};
 
+/* Tie plans: on each, two co-live ranges tie on one member's first key, so
+ * only its second key decides which takes offset 0. The tie tests below say
+ * what the reversed key would place. */
+static const handPlan_t g_sizeThenEndTie = {
+    {{16, 0, 1, REMAT_WIRE_ACT}, {16, 1, 3, REMAT_WIRE_GRAD}}, 2, 4};
+static const handPlan_t g_pingPongTie = {
+    {{16, 0, 1, REMAT_WIRE_ACT}, {16, 0, 2, REMAT_WIRE_GRAD}}, 2, 3};
+static const handPlan_t g_breadthAreaTie = {
+    {{16, 0, 1, REMAT_WIRE_ACT}, {16, 0, 0, REMAT_WIRE_ACT}, {16, 1, 1, REMAT_WIRE_GRAD}}, 3, 2};
+static const handPlan_t g_twoEndedTie = {
+    {{16, 0, 2, REMAT_WIRE_ACT}, {16, 0, 3, REMAT_WIRE_ACT}, {8, 2, 3, REMAT_WIRE_GRAD}}, 3, 4};
+
 static size_t oraclePlaced(size_t bytes) {
     return (bytes + 7u) / 8u * 8u;
 }
@@ -527,6 +539,28 @@ typedef bool (*placeMember_t)(const rematWireTable_t *t, const rematProgram_t *p
 _Static_assert(_Generic(arenaPlaceFirstFitDecreasing, placeMember_t: 1, default: 0),
                "first-fit-decreasing is a portfolio member");
 
+/* The portfolio's members in its order, the order that decides its ties. */
+static const struct {
+    const char *name;
+    placeMember_t place;
+    bool needsGrad;
+} kMembers[5] = {
+    {"first-fit-decreasing", arenaPlaceFirstFitDecreasing, false},
+    {"breadth/area", arenaPlaceBreadthArea, false},
+    {"ping-pong", arenaPlacePingPong, false},
+    {"two-ended", arenaPlaceTwoEnded, true},
+    {"size-then-end", arenaPlaceSizeThenEnd, false},
+};
+
+static size_t memberBytesOf(placeMember_t place, const handPlan_t *hp) {
+    randomPlan_t rp;
+    buildHandPlan(&rp, hp);
+    size_t offsets[ORACLE_MAX_RANGES];
+    size_t bytes = 0;
+    TEST_ASSERT_TRUE(place(&rp.table, &rp.program, oraclePeakPlaced(&rp), offsets, &bytes));
+    return bytes;
+}
+
 static void assertMemberPlacesTheHandPlan(placeMember_t place, const handPlan_t *hp,
                                           const size_t *expected, size_t expectedBytes) {
     randomPlan_t rp;
@@ -547,6 +581,15 @@ static void assertMemberPlacesTheHandPlan(placeMember_t place, const handPlan_t 
 void testSizeThenEndPlacesTheHandPlan(void) {
     static const size_t expected[5] = {16, 0, 32, 24, 0};
     assertMemberPlacesTheHandPlan(arenaPlaceSizeThenEnd, &g_sizeThenEndPlan, expected, 40);
+    TEST_ASSERT_EQUAL_size_t(48, memberBytesOf(arenaPlaceFirstFitDecreasing, &g_sizeThenEndPlan));
+}
+
+/* Ranges 0 [0,1] and 1 [1,3] tie on size (16 B) and meet at step 1. Range 1
+ * ends later, so it takes 0 and range 0 sits on it at 16; the earlier end
+ * first would give {0, 16}. */
+void testSizeThenEndBreaksASizeTieByTheLaterEnd(void) {
+    static const size_t expected[2] = {16, 0};
+    assertMemberPlacesTheHandPlan(arenaPlaceSizeThenEnd, &g_sizeThenEndTie, expected, 32);
 }
 
 /* Height 56 = the peak at step 2 (24 + 16 + 16). Range 1 begins under range 0
@@ -556,6 +599,16 @@ void testSizeThenEndPlacesTheHandPlan(void) {
 void testPingPongPlacesTheHandPlan(void) {
     static const size_t expected[4] = {0, 40, 24, 0};
     assertMemberPlacesTheHandPlan(arenaPlacePingPong, &g_pingPongPlan, expected, 56);
+    TEST_ASSERT_EQUAL_size_t(64, memberBytesOf(arenaPlaceFirstFitDecreasing, &g_pingPongPlan));
+}
+
+/* Ranges 0 [0,1] and 1 [0,2] both begin at step 0. Range 1 ends later, so it
+ * is streamed first and, with nothing placed, takes 0; range 0 then sees it in
+ * the lower half of the 32 B peak and takes the top, 16. The earlier end first
+ * would give {0, 16}. */
+void testPingPongStreamsATiedBeginByTheLaterEnd(void) {
+    static const size_t expected[2] = {16, 0};
+    assertMemberPlacesTheHandPlan(arenaPlacePingPong, &g_pingPongTie, expected, 32);
 }
 
 /* Steps 2 and 4 hold 64 B, the peak; step 2 comes first: ranges 2 (24 x 3
@@ -565,6 +618,16 @@ void testPingPongPlacesTheHandPlan(void) {
 void testBreadthAreaPlacesTheHandPlan(void) {
     static const size_t expected[5] = {24, 40, 0, 56, 24};
     assertMemberPlacesTheHandPlan(arenaPlaceBreadthArea, &g_breadthAreaPlan, expected, 64);
+    TEST_ASSERT_EQUAL_size_t(80, memberBytesOf(arenaPlaceFirstFitDecreasing, &g_breadthAreaPlan));
+}
+
+/* Steps 0 and 1 both hold 32 B. Ranges 0 [0,1] and 1 [0,0] are ordered at step
+ * 0, range 2 [1,1] at step 1; on the equal load step 0 goes first: range 0
+ * (the larger area) at 0, range 1 at 16, then range 2 on range 0 at 16. The
+ * later step first would give {16, 0, 0}. */
+void testBreadthAreaBreaksATiedBusiestLoadByTheEarlierStep(void) {
+    static const size_t expected[3] = {0, 16, 16};
+    assertMemberPlacesTheHandPlan(arenaPlaceBreadthArea, &g_breadthAreaTie, expected, 32);
 }
 
 /* Placed size times lifetime is compared exactly: 2^60 B x 16 steps = 2^64
@@ -586,6 +649,22 @@ void testBreadthAreaComparesAreasWithoutWrapping(void) {
 void testTwoEndedPlacesTheHandPlan(void) {
     static const size_t expected[5] = {0, 40, 24, 0, 24};
     assertMemberPlacesTheHandPlan(arenaPlaceTwoEnded, &g_twoEndedPlan, expected, 56);
+    for (size_t m = 0; m < sizeof kMembers / sizeof kMembers[0]; m++) {
+        if (kMembers[m].place != arenaPlaceTwoEnded) {
+            TEST_ASSERT_EQUAL_size_t_MESSAGE(72, memberBytesOf(kMembers[m].place, &g_twoEndedPlan),
+                                             kMembers[m].name);
+        }
+    }
+}
+
+/* The first backward step is 2 (range 2, the GRAD); ranges 0 [0,2] and 1 [0,3]
+ * are stored across it and both begin at step 0. Range 1 ends later, so it
+ * takes the bottom and range 0 sits on it at 16; range 2 is mirrored below the
+ * height 40 (range 0's end 32 + 8) to 32. The earlier end first would give
+ * {0, 16, 32}. */
+void testTwoEndedOrdersItsStoredRangesByBeginThenLaterEnd(void) {
+    static const size_t expected[3] = {16, 0, 32};
+    assertMemberPlacesTheHandPlan(arenaPlaceTwoEnded, &g_twoEndedTie, expected, 40);
 }
 
 /* A plan without a backward has no GRAD range: one ReLU under MSE (no layer
@@ -731,8 +810,13 @@ void testPortfolioKeepsTheEarlierMemberOnATie(void) {
     size_t peak = arenaPlacedPeakBytes(b.t, p);
     TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(b.t, p, peak, ffd, &ffdBytes));
     TEST_ASSERT_TRUE(arenaPlaceSizeThenEnd(b.t, p, peak, later, &laterBytes));
-    TEST_ASSERT_EQUAL_size_t(49152, ffdBytes);
-    TEST_ASSERT_EQUAL_size_t(49152, laterBytes);
+    static const size_t memberBytes[5] = {49152, 49152, 49152, 49688, 49152};
+    for (size_t m = 0; m < sizeof kMembers / sizeof kMembers[0]; m++) {
+        size_t trial[HAR_RANGES];
+        size_t trialBytes = 0;
+        TEST_ASSERT_TRUE(kMembers[m].place(b.t, p, peak, trial, &trialBytes));
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(memberBytes[m], trialBytes, kMembers[m].name);
+    }
     TEST_ASSERT_TRUE(memcmp(ffd, later, p->numRanges * sizeof(size_t)) != 0);
     TEST_ASSERT_TRUE(arenaPlacePortfolio(b.t, p, best, &bytes, &peak));
     TEST_ASSERT_EQUAL_size_t(49152, bytes);
@@ -754,15 +838,31 @@ static size_t portfolioBytesOf(const handPlan_t *hp) {
     return bytes;
 }
 
+static void assertOnlyMemberAtThePeak(placeMember_t member, const handPlan_t *hp,
+                                      size_t peakBytes) {
+    TEST_ASSERT_EQUAL_size_t(peakBytes, portfolioBytesOf(hp));
+    TEST_ASSERT_EQUAL_size_t(peakBytes, memberBytesOf(member, hp));
+    randomPlan_t rp;
+    buildHandPlan(&rp, hp);
+    bool hasGrad = arenaPlanHasGradRange(&rp.table, &rp.program);
+    for (size_t m = 0; m < sizeof kMembers / sizeof kMembers[0]; m++) {
+        if (kMembers[m].place == member || (kMembers[m].needsGrad && !hasGrad)) {
+            continue;
+        }
+        TEST_ASSERT_TRUE_MESSAGE(memberBytesOf(kMembers[m].place, hp) > peakBytes,
+                                 kMembers[m].name);
+    }
+}
+
 /* Each hand plan reaches its peak through one member only, so dropping any
  * member from the portfolio raises one of these four numbers. On HAR,
  * mnist_cnn and HAR finetune two-ended is never the only order at the peak; it
  * stays for models outside them. */
 void testEveryPortfolioMemberIsTheOnlyOneAtThePeakOfSomePlan(void) {
-    TEST_ASSERT_EQUAL_size_t(64, portfolioBytesOf(&g_breadthAreaPlan));
-    TEST_ASSERT_EQUAL_size_t(56, portfolioBytesOf(&g_pingPongPlan));
-    TEST_ASSERT_EQUAL_size_t(56, portfolioBytesOf(&g_twoEndedPlan));
-    TEST_ASSERT_EQUAL_size_t(40, portfolioBytesOf(&g_sizeThenEndPlan));
+    assertOnlyMemberAtThePeak(arenaPlaceBreadthArea, &g_breadthAreaPlan, 64);
+    assertOnlyMemberAtThePeak(arenaPlacePingPong, &g_pingPongPlan, 56);
+    assertOnlyMemberAtThePeak(arenaPlaceTwoEnded, &g_twoEndedPlan, 56);
+    assertOnlyMemberAtThePeak(arenaPlaceSizeThenEnd, &g_sizeThenEndPlan, 40);
 }
 
 #ifdef ODT_MEM_PROFILE
@@ -3072,10 +3172,14 @@ int main(void) {
     RUN_TEST(testFfdReleasesItsScratch);
 #endif
     RUN_TEST(testSizeThenEndPlacesTheHandPlan);
+    RUN_TEST(testSizeThenEndBreaksASizeTieByTheLaterEnd);
     RUN_TEST(testPingPongPlacesTheHandPlan);
+    RUN_TEST(testPingPongStreamsATiedBeginByTheLaterEnd);
     RUN_TEST(testBreadthAreaPlacesTheHandPlan);
+    RUN_TEST(testBreadthAreaBreaksATiedBusiestLoadByTheEarlierStep);
     RUN_TEST(testBreadthAreaComparesAreasWithoutWrapping);
     RUN_TEST(testTwoEndedPlacesTheHandPlan);
+    RUN_TEST(testTwoEndedOrdersItsStoredRangesByBeginThenLaterEnd);
     RUN_TEST(testPlanHasGradRangeOnlyWithABackward);
     RUN_TEST(testTwoEndedExitsOnAPlanWithoutGradRanges);
     RUN_TEST(testNewMembersVerifyOnRandomPlans);

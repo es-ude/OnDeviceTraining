@@ -97,7 +97,7 @@ def parse_problem(data: bytes) -> Problem:
         raise ProblemError("problem: not a JSON document") from e
     _keys(doc, "problem", TOP_KEYS, ())
     version = doc["schema_version"]
-    if not _is_int(version):
+    if not is_int(version):
         raise ProblemError("schema_version: expected an integer")
     if version != SCHEMA_VERSION:
         raise ProblemError(f"schema_version: {version} is not a schema version this planner "
@@ -115,7 +115,7 @@ def parse_problem(data: bytes) -> Problem:
                                               for j, x in enumerate(layers)), problem_hash(data))
 
 
-def _is_int(v) -> bool:
+def is_int(v) -> bool:
     return isinstance(v, int) and not isinstance(v, bool)
 
 
@@ -131,7 +131,7 @@ def _keys(node, where: str, required: tuple[str, ...], optional: tuple[str, ...]
 
 
 def _shape(v, where: str) -> tuple[int, ...]:
-    if not isinstance(v, list) or not v or not all(_is_int(d) and d >= 1 for d in v):
+    if not isinstance(v, list) or not v or not all(is_int(d) and d >= 1 for d in v):
         raise ProblemError(f"{where}: expected a non-empty list of positive integers")
     if v[0] != 1:
         raise ProblemError(f"{where}: the first dimension is the batch and must be 1, got {v[0]}")
@@ -149,7 +149,7 @@ def _dtype(v, where: str) -> Dtype:
         if key != "kind" and key not in fields:
             raise ProblemError(f"{where}: {kind} takes no field {key!r}")
     for key in fields:
-        if not _is_int(v.get(key)) or v[key] < 0:
+        if not is_int(v.get(key)) or v[key] < 0:
             raise ProblemError(f"{where}: {kind} needs the integer field {key!r}")
         if kind == "SYM" and v[key] == 0:
             raise ProblemError(f"{where}: SYM qBits must be at least 1, got 0")
@@ -175,7 +175,7 @@ def _layer(v, where: str) -> LayerSpec:
     if operand is None and "cost" in v:
         raise ProblemError(f"{where}.cost: {kind} takes no cost operand")
     if operand is not None and (not isinstance(cost, dict) or list(cost) != [operand]
-                                or not _is_int(cost[operand]) or cost[operand] < 1):
+                                or not is_int(cost[operand]) or cost[operand] < 1):
         raise ProblemError(f'{where}.cost: {kind} needs {{"{operand}": <positive integer>}}')
     value = None if operand is None else cost[operand]
     return LayerSpec(kind, _flag(v["frozen"], f"{where}.frozen"),

@@ -22,7 +22,7 @@ def test_the_three_c_trainers_are_accepted_at_a_micro_batch_of_1(model):
     assert require_supported(load_problem(GOLDENS / f"{model}.problem.json"), 1) is None
 
 
-@pytest.mark.parametrize("m", (0, 2, 8))
+@pytest.mark.parametrize("m", (0, 2, 8, 1.0, True))
 def test_a_micro_batch_other_than_1_is_refused(m):
     refused(HAR, m, f"m: {m} has no C reference run; the planner accepts 1")
 
@@ -73,3 +73,13 @@ def test_a_problem_of_more_than_64_layers_is_refused_before_its_layers_are_check
     refused(dataclasses.replace(HAR, layers=dropout_first), 1,
             "layers: 65 has no C reference run; the planner accepts at most 64 layers (the "
             "example harness's REMAT_SELECT_MAX_LAYERS)")
+
+
+def test_a_problem_breaking_several_rules_names_the_first_in_check_order():
+    p = dataclasses.replace(
+        HAR, loss="MSE", layers=HAR.layers[:1] * 65,
+        input=dataclasses.replace(HAR.input, dtype=Dtype("SYM_INT32")))
+    refused(p, 2, "m: 2 has no C reference run; the planner accepts 1")
+    refused(p, 1, "loss: MSE has no C reference run; the planner accepts CROSS_ENTROPY")
+    p = dataclasses.replace(p, loss="CROSS_ENTROPY")
+    refused(p, 1, "input.dtype: SYM_INT32 has no C reference run; the planner accepts FLOAT32")

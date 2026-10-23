@@ -3,7 +3,7 @@
 Widening it is one rule here plus its C reference case and its copy-of-C rule, never a
 schema change: the schema already holds every dtype, loss and layer type.
 """
-from odt.planner.schema import Problem
+from odt.planner.schema import Problem, is_int
 
 ACCEPTED_TYPES = ("CONV1D", "RELU", "MAXPOOL1D", "AVGPOOL1D", "FLATTEN", "LINEAR", "SOFTMAX")
 # REMAT_SELECT_MAX_LAYERS in examples/_shared/remat_select.h: the harness refuses a retain plan
@@ -29,7 +29,7 @@ def _refuse(field: str, value, allowed: str) -> None:
 
 
 def require_supported(problem: Problem, m: int) -> None:
-    if isinstance(m, bool) or m != 1:
+    if not is_int(m) or m != 1:
         _refuse("m", m, "1")
     if problem.loss != "CROSS_ENTROPY":
         _refuse("loss", problem.loss, "CROSS_ENTROPY")

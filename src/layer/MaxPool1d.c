@@ -409,6 +409,27 @@ void maxPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const l
         output);
 }
 
+/* -1 is the only legal out-of-range argmax (empty window). The argmax is
+ * kernel-written and never funnel-converted, so its content is unvalidated: a
+ * stale argmax from a differently-shaped forward scatters past the grad row,
+ * and a blanket `< 0` sentinel would drop a corrupt negative silently. The
+ * explicit `idx < 0` states intent; the size_t wrap would only catch it by
+ * accident. */
+static bool maxPoolArgmaxIsSentinel(int32_t idx, size_t inputLength, size_t outIdx,
+                                    const char *where) {
+    if (idx == -1) {
+        return true;
+    }
+    if (idx < 0 || (size_t)idx >= inputLength) {
+        PRINT_ERROR("%s: argmax index %d at output position %zu is outside [0, %zu) and is not "
+                    "the -1 empty-window sentinel -- the recorded argmax does not belong to this "
+                    "input shape (stale forward?)",
+                    where, idx, outIdx, inputLength);
+        exit(1);
+    }
+    return false;
+}
+
 void maxPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
                             tensor_t *propLoss) {
     maxPool1dConfig_t *cfg = layer->config->maxPool1d;
@@ -443,8 +464,9 @@ void maxPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tensor_t *lo
             for (size_t outPos = 0; outPos < outputLength; outPos++) {
                 size_t outIdx = (b * channels + c) * outputLength + outPos;
                 int32_t inputIdx = argmaxArr[outIdx];
-                if (inputIdx < 0) {
-                    continue; // sentinel: empty window, no gradient flows
+                if (maxPoolArgmaxIsSentinel(inputIdx, inputLength, outIdx,
+                                            "MaxPool1d backward FLOAT32")) {
+                    continue;
                 }
                 gxArr[(b * channels + c) * inputLength + (size_t)inputIdx] += gyArr[outIdx];
             }
@@ -526,8 +548,9 @@ static void maxPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *
             for (size_t outPos = 0; outPos < outputLength; outPos++) {
                 size_t outIdx = (b * channels + c) * outputLength + outPos;
                 int32_t inputIdx = argmaxArr[outIdx];
-                if (inputIdx < 0) {
-                    continue; // sentinel: empty window, no gradient flows
+                if (maxPoolArgmaxIsSentinel(inputIdx, inputLength, outIdx,
+                                            "MaxPool1d backward SYM_INT32")) {
+                    continue;
                 }
                 gxArr[(b * channels + c) * inputLength + (size_t)inputIdx] += gyArr[outIdx];
             }
@@ -588,33 +611,9 @@ static void maxPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOu
             for (size_t outPos = 0; outPos < outputLength; outPos++) {
                 size_t outIdx = (b * channels + c) * outputLength + outPos;
                 int32_t inputIdx = argmaxArr[outIdx];
-                if (inputIdx == -1) {
-                    continue; // sentinel: empty window, no gradient flows
-                }
-                /* F7: -1 is the ONLY legal out-of-range value. Any other index
-                 * outside [0, inputLength) is a scatter past the end of the
-                 * raw grad buffer — a silent heap write, not a wrong number.
-                 * The argmax tensor is kernel-written and never funnel-
-                 * converted, so nothing upstream has validated its CONTENT;
-                 * a stale argmax left over from a differently-shaped forward
-                 * is exactly how a too-large index arrives. Bounds-check on
-                 * read rather than trusting the producer.
-                 *
-                 * PR4 adversarial gate: the sentinel test is STRICT
-                 * equality, so every other negative falls into this guard
-                 * instead of being silently skipped -- a blanket `< 0`
-                 * sentinel would treat corruption as an empty window and drop
-                 * the gradient without a word. `inputIdx < 0` is spelled out
-                 * even though the size_t cast below already wraps a negative
-                 * past inputLength: the wrap is an accident of the cast, the
-                 * intent is that only -1 is legal. */
-                if (inputIdx < 0 || (size_t)inputIdx >= inputLength) {
-                    PRINT_ERROR("MaxPool1d backward BFP: argmax index %d at output position %zu "
-                                "is outside [0, %zu) and is not the -1 empty-window sentinel -- "
-                                "the recorded argmax does not belong to this input shape (stale "
-                                "forward?)",
-                                inputIdx, outIdx, inputLength);
-                    exit(1);
+                if (maxPoolArgmaxIsSentinel(inputIdx, inputLength, outIdx,
+                                            "MaxPool1d backward BFP")) {
+                    continue;
                 }
                 size_t g = bfpGroupOf(qC, outIdx);
                 gxArr[(b * channels + c) * inputLength + (size_t)inputIdx] +=

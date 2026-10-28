@@ -1104,13 +1104,13 @@ void testMaxPool1dBackwardBfpGuardsNarrowedNotRemoved(void) {
  * inspects operand rank (it sizes the raw from the TARGET only), so a rank-2
  * BFP operand reaches the kernel, which would read dimensions[0..2] off a
  * two-element dims array — an over-read of the shape itself. Both kernels
- * therefore open with their own rank check BEFORE poolBfpRequireDims3, and
+ * therefore open with their own rank check BEFORE poolRequireDims3, and
  * these two deaths are the only ones that can reach it: every other BFP
  * rank-2 case in this file passes a rank-2 OUTPUT, which dies in
- * poolBfpRequireDims3 first (a rank-2 argmax dies in maxPoolRequireArgmaxShape).
+ * poolRequireDims3 first (a rank-2 argmax dies in maxPoolRequireArgmaxShape).
  *
  * MUTATION STATUS, stated honestly: DELETING either rank guard does NOT redden
- * this test — the over-read dims[0..2] then reach poolBfpRequireDims3, which
+ * this test — the over-read dims[0..2] then reach poolRequireDims3, which
  * exit(1)s all the same, and the death harness compares exit codes only.
  * Defense in depth, not coverage. What IS proven: giving each rank guard a
  * distinct exit code makes exactly the matching assertion below fail, so both

@@ -12,6 +12,7 @@
 #include "ExecuteOp.h"
 #include "Layer.h"
 #include "LayerExec.h"
+#include "LayerWireGuards.h"
 #include "Quantization.h"
 #include "Tensor.h"
 
@@ -27,29 +28,6 @@ void initAdaptiveAvgPool1dConfig(adaptiveAvgPool1dConfig_t *cfg, size_t outputSi
     cfg->outputQ = forwardQ;
     cfg->propLossQ = propLossQ;
     cfg->ownsQuantizations = false;
-}
-
-/* BFP epic PR4 (F5), every arm since #4 PR0: the pool kernels index their
- * outputs as DENSE [batch][channels][length] arrays whose batch and channels
- * come from the OPERAND's dims (input forward, lossGrad backward), so an
- * output that disagrees on dim 0 or dim 1 is written past its end even when
- * its length is right — checking dimensions[2] alone is not enough. Rank is
- * checked first: dimensions[0..2] on a rank-2 shape is itself an over-read,
- * which is also why a backward arm rank-checks its dx output before reading
- * that output's length to pass in here. */
-static void poolBfpRequireDims3(const tensor_t *t, size_t d0, size_t d1, size_t d2,
-                                const char *what) {
-    if (t->shape->numberOfDimensions != 3) {
-        PRINT_ERROR("%s: expected a rank-3 [batch, channels, length] tensor, got rank %zu", what,
-                    t->shape->numberOfDimensions);
-        exit(1);
-    }
-    if (t->shape->dimensions[0] != d0 || t->shape->dimensions[1] != d1 ||
-        t->shape->dimensions[2] != d2) {
-        PRINT_ERROR("%s: expected shape [%zu, %zu, %zu], got [%zu, %zu, %zu]", what, d0, d1, d2,
-                    t->shape->dimensions[0], t->shape->dimensions[1], t->shape->dimensions[2]);
-        exit(1);
-    }
 }
 
 /* executeOp forward kernel adapter — ctx = adaptiveAvgPool1dConfig_t* (outputSize
@@ -69,8 +47,8 @@ static void adaptiveAvgPool1dForwardKernel(tensor_t **ops, size_t n, tensor_t *r
     size_t outputLength = cfg->outputSize;
 
     // batch/channels come from the input but size the rawOut writes (F5 parity).
-    poolBfpRequireDims3(rawOut, batch, channels, outputLength,
-                        "AdaptiveAvgPool1d forward FLOAT32 (rawOut)");
+    poolRequireDims3(rawOut, batch, channels, outputLength,
+                     "AdaptiveAvgPool1d forward FLOAT32 (rawOut)");
 
     float const *xArr = (float const *)input->data;
     float *yArr = (float *)rawOut->data;
@@ -147,8 +125,8 @@ static void adaptiveAvgPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, ten
     size_t outputLength = cfg->outputSize;
 
     // batch/channels come from the input but size the rawOut writes (F5 parity).
-    poolBfpRequireDims3(rawOut, batch, channels, outputLength,
-                        "AdaptiveAvgPool1d forward SYM_INT32 (rawOut)");
+    poolRequireDims3(rawOut, batch, channels, outputLength,
+                     "AdaptiveAvgPool1d forward SYM_INT32 (rawOut)");
 
     /* Max adaptive window count = ceil((o+1)L/O) - floor(oL/O) <= L/O + 1,
      * conservatively bounded by ceil(L/O) + 1. */
@@ -203,9 +181,9 @@ static void adaptiveAvgPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t
     size_t inputLength = input->shape->dimensions[2];
     size_t outputLength = cfg->outputSize;
 
-    /* All three dims (F5), not just the length — see poolBfpRequireDims3. */
-    poolBfpRequireDims3(rawOut, batch, channels, outputLength,
-                        "AdaptiveAvgPool1d forward BFP (rawOut)");
+    /* All three dims (F5), not just the length — see poolRequireDims3. */
+    poolRequireDims3(rawOut, batch, channels, outputLength,
+                     "AdaptiveAvgPool1d forward BFP (rawOut)");
 
     const bfpQConfig_t *qC = input->quantization->qConfig;
     validateBfpQConfigShape(qC, calcNumberOfElementsByTensor(input));
@@ -326,8 +304,8 @@ void adaptiveAvgPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tens
     size_t inputLength = propLoss->shape->dimensions[2];
 
     // batch/channels come from lossGrad but size the propLoss memset + scatter (F5 parity).
-    poolBfpRequireDims3(propLoss, batch, channels, inputLength,
-                        "AdaptiveAvgPool1d backward FLOAT32 (propLoss)");
+    poolRequireDims3(propLoss, batch, channels, inputLength,
+                     "AdaptiveAvgPool1d backward FLOAT32 (propLoss)");
 
     if (outputLength != cfg->outputSize) {
         PRINT_ERROR("AdaptiveAvgPool1d backward: lossGrad outputLength (%zu) does not match "
@@ -383,8 +361,8 @@ static void adaptiveAvgPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, te
     size_t inputLength = rawOut->shape->dimensions[2];
 
     // batch/channels come from lossGrad but size the rawOut memset + scatter (F5 parity).
-    poolBfpRequireDims3(rawOut, batch, channels, inputLength,
-                        "AdaptiveAvgPool1d backward SYM_INT32 (rawOut)");
+    poolRequireDims3(rawOut, batch, channels, inputLength,
+                     "AdaptiveAvgPool1d backward SYM_INT32 (rawOut)");
 
     if (outputLength != cfg->outputSize) {
         PRINT_ERROR("AdaptiveAvgPool1d backward: lossGrad outputLength (%zu) does not match "
@@ -454,8 +432,8 @@ static void adaptiveAvgPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_
     }
     /* All three dims (F5): the memset sizes batch * channels * inputLength
      * floats and the scatter uses batch/channels off the LOSSGRAD. */
-    poolBfpRequireDims3(rawOut, batch, channels, inputLength,
-                        "AdaptiveAvgPool1d backward BFP (rawOut)");
+    poolRequireDims3(rawOut, batch, channels, inputLength,
+                     "AdaptiveAvgPool1d backward BFP (rawOut)");
 
     const bfpQConfig_t *qC = lossGrad->quantization->qConfig;
     validateBfpQConfigShape(qC, calcNumberOfElementsByTensor(lossGrad));

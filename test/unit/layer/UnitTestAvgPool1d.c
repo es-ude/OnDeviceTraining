@@ -1072,14 +1072,14 @@ void testAvgPool1dBackwardBfpGuardsNarrowedNotRemoved(void) {
  * inspects operand rank (it sizes the raw from the TARGET only), so a rank-2
  * BFP operand reaches the kernel, which would read dimensions[0..2] off a
  * two-element dims array — an over-read of the shape itself. Both kernels
- * therefore open with their own rank check BEFORE poolBfpRequireDims3, and
+ * therefore open with their own rank check BEFORE poolRequireDims3, and
  * these two deaths are the only ones that can reach it: every other rank-2
- * case in this file passes a rank-2 OUTPUT, which dies in poolBfpRequireDims3
+ * case in this file passes a rank-2 OUTPUT, which dies in poolRequireDims3
  * first. Operands carry no codes — the guard fires before any data read.
  *
  * MUTATION STATUS, stated honestly: DELETING either rank guard does NOT redden
  * this test. The statements right after it feed the over-read dims[0..2] into
- * poolBfpRequireDims3 (and, in the backward, the geometry check), which
+ * poolRequireDims3 (and, in the backward, the geometry check), which
  * exit(1) all the same — and the death harness compares exit codes only, with
  * no message capture, so it cannot tell the two deaths apart. That is defense
  * in depth, not coverage. What IS proven: giving each rank guard a distinct

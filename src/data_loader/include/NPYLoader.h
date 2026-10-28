@@ -1,6 +1,11 @@
 #ifndef NPYLOADER_H
 #define NPYLOADER_H
 
+#include <stddef.h>
+#include <stdio.h>
+
+#include "Dataset.h"
+
 /*! Opens a given path to .npy file.
  *
  * \param path: Path to .npy file
@@ -9,27 +14,19 @@
  */
 FILE *openNPYFile(char *path);
 
-/*! Check magic if file is actually a .npy file.
- *
- * \param f: Pointer to file
- */
-void checkMagic(FILE *f);
+#define NPY_MAX_HEADER_BYTES 10000u /* numpy np.load max_header_size default */
 
-/*! Read size of header.
+/*! Reads magic, version and header length, checks the length against
+ * NPY_MAX_HEADER_BYTES and the file size, and returns the NUL-terminated header
+ * text (reserveMemory; the caller frees it with freeReservedMemory). Leaves f at
+ * the payload. Every failure prints the path and the reason and exits(1).
  *
- * \param f: Pointer to file
+ * \param f: File opened at offset 0
+ * \param path: Path of f, for the error messages
  *
- * \returns Size of header
+ * \returns Header text
  */
-uint32_t readHeaderSize(FILE *f);
-
-/*! Read header of .npy file with given header size.
- *
- * \param header: String of header
- * \param headerSize: Size of header
- * \param f: Pointer to file
- */
-void readHeader(char *header, uint32_t headerSize, FILE *f);
+char *npyReadHeaderText(FILE *f, const char *path);
 
 /*! Gets datatype from header.
  *

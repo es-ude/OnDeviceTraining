@@ -12,5 +12,6 @@ target_include_directories(NPYLoader PUBLIC include)
 target_link_libraries(NPYLoader PRIVATE
         Tensor
         Rounding
+        StorageApi
         Common
 )

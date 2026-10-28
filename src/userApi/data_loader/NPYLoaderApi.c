@@ -16,11 +16,7 @@
 tensorArray_t *npyLoad(char *path) {
     FILE *f = openNPYFile(path);
 
-    checkMagic(f);
-
-    uint32_t headerSize = readHeaderSize(f);
-    char *header = reserveMemory(headerSize + 1);
-    readHeader(header, headerSize, f);
+    char *header = npyReadHeaderText(f, path);
 
     dtype_t dtype = getDTypeFromHeader(header);
     quantization_t *q = initQByDType(dtype);
@@ -87,11 +83,7 @@ tensorArray_t *npyLoad(char *path) {
 tensor_t *npyLoadFlat(char *path) {
     FILE *f = openNPYFile(path);
 
-    checkMagic(f);
-
-    uint32_t headerSize = readHeaderSize(f);
-    char *header = reserveMemory(headerSize + 1);
-    readHeader(header, headerSize, f);
+    char *header = npyReadHeaderText(f, path);
 
     dtype_t dtype = getDTypeFromHeader(header);
     quantization_t *q = initQByDType(dtype);

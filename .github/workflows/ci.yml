@@ -110,6 +110,23 @@ jobs:
             exit 1
           fi
 
+      - name: Reject %lu format specifiers in src/
+        # #459: every %lu in src/ prints a size_t, which is unsigned int on
+        # 32-bit ARM, so %lu is undefined behaviour there; %zu is the portable
+        # spelling. No -Wformat runs in CI, so this grep is the only guard.
+        run: |
+          set +e
+          matches=$(git grep -n '%lu' -- 'src/*.c' 'src/*.h')
+          set -e
+          if [ -n "$matches" ]; then
+            echo "Format-specifier violation: print size_t with %zu, not %lu (#459)."
+            echo "%lu mismatches size_t on 32-bit targets (unsigned int there)."
+            echo
+            echo "Offending lines:"
+            echo "$matches"
+            exit 1
+          fi
+
   private-paths:
     needs: gate
     if: needs.gate.outputs.proceed == 'true'

@@ -382,16 +382,16 @@ void printTensor(tensor_t *t) {
 void printShape(shape_t *shape) {
     size_t numberOfDims = shape->numberOfDimensions;
 
-    printf("NumberOfDims: %lu\n", numberOfDims);
+    printf("NumberOfDims: %zu\n", numberOfDims);
 
     printf("Dims: \n");
     for (size_t i = 0; i < numberOfDims; i++) {
-        printf("%lu\n", shape->dimensions[i]);
+        printf("%zu\n", shape->dimensions[i]);
     }
 
     printf("OrderOfDims: \n");
     for (size_t i = 0; i < numberOfDims; i++) {
-        printf("%lu\n", shape->orderOfDimensions[i]);
+        printf("%zu\n", shape->orderOfDimensions[i]);
     }
     printf("__________\n");
 }

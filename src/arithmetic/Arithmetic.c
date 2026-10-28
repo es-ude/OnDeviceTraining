@@ -15,7 +15,7 @@ size_t getDimensionsByIndex(tensor_t *tensor, size_t index) {
             return tensor->shape->dimensions[i];
         }
     }
-    PRINT_ERROR("Tensor doesn't have %lu dimensions!", index);
+    PRINT_ERROR("Tensor doesn't have %zu dimensions!", index);
     exit(1);
 }
 
@@ -30,7 +30,7 @@ bool doDimensionsMatch(tensor_t *a, tensor_t *b) {
     size_t bNumberOfDims = b->shape->numberOfDimensions;
 
     if (aNumberOfDims != bNumberOfDims) {
-        PRINT_ERROR("Rank mismatch: %lu vs %lu\n", aNumberOfDims, bNumberOfDims);
+        PRINT_ERROR("Rank mismatch: %zu vs %zu", aNumberOfDims, bNumberOfDims);
         exit(1);
     }
 
@@ -42,7 +42,7 @@ bool doDimensionsMatch(tensor_t *a, tensor_t *b) {
 
     for (size_t i = 0; i < aNumberOfDims; i++) {
         if (aOrderedDims[i] != bOrderedDims[i]) {
-            PRINT_DEBUG("Dim 1: %lu, Dims 2: %lu\n", aOrderedDims[i], bOrderedDims[i]);
+            PRINT_DEBUG("Dim 1: %zu, Dims 2: %zu", aOrderedDims[i], bOrderedDims[i]);
             return false;
         }
     }

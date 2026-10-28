@@ -583,7 +583,7 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
 
 void linearCalcOutputShape(layer_t *linearLayer, shape_t *inputShape, shape_t *outputShape) {
     if (inputShape->numberOfDimensions != 2) {
-        PRINT_ERROR("Linear layer expects 2D input, got %luD\n", inputShape->numberOfDimensions);
+        PRINT_ERROR("Linear layer expects 2D input, got %zuD", inputShape->numberOfDimensions);
         exit(1);
     }
 

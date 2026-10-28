@@ -1110,7 +1110,7 @@ void conv1dTransposedBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *
 
 void conv1dTransposedCalcOutputShape(layer_t *layer, shape_t *inputShape, shape_t *outputShape) {
     if (inputShape->numberOfDimensions != 3) {
-        PRINT_ERROR("Conv1dTransposed expects 3D input [batch, channel, length], got %luD",
+        PRINT_ERROR("Conv1dTransposed expects 3D input [batch, channel, length], got %zuD",
                     inputShape->numberOfDimensions);
         exit(1);
     }

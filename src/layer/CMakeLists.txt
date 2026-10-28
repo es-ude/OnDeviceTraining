@@ -80,6 +80,7 @@ target_link_libraries(AdaptiveAvgPool1d PRIVATE
         DTypes
         Tensor
         Quantization
+        Arithmetic
         ArithmeticType
         ExecuteOp
         Common

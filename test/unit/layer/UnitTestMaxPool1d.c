@@ -1549,6 +1549,90 @@ void testMaxPool1dInitConfigClearsOwnsQuantizations(void) {
     freeTensor(argmax);
 }
 
+/* #425: a config built without initMaxPool1dConfig can carry a NULL argmax;
+ * every backward arm must die with a message, not a SIGSEGV on its shape. */
+void testMaxPool1dBackwardFloatRejectsNullArgmax(void) {
+    size_t inputDims[] = {1, 2, 6};
+    size_t outputDims[] = {1, 2, 3};
+    maxPool1dRunResult_t r =
+        maxPool1dBuild(NULL, inputDims, 2, VALID, 1, 2, NULL, NULL, outputDims);
+    tensor_t *lossGrad = makeFloatTensor(outputDims, 3, NULL);
+    tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
+
+    r.layer->config->maxPool1d->argmaxIndices = NULL;
+    ASSERT_EXITS_WITH_OUTPUT(1, "argmaxIndices must not be NULL",
+                             maxPool1dBackward(r.layer, NULL, lossGrad, propLoss, NULL));
+    r.layer->config->maxPool1d->argmaxIndices = r.argmax;
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+}
+
+/* The forward twin is caught by the dispatcher's argmax sizing, before any arm. */
+void testMaxPool1dForwardRejectsNullArgmax(void) {
+    size_t inputDims[] = {1, 2, 6};
+    size_t outputDims[] = {1, 2, 3};
+    maxPool1dRunResult_t r =
+        maxPool1dBuild(NULL, inputDims, 2, VALID, 1, 2, NULL, NULL, outputDims);
+
+    r.layer->config->maxPool1d->argmaxIndices = NULL;
+    ASSERT_EXITS_WITH_OUTPUT(1, "MaxPool1d forward: argmaxIndices must be a rank-3",
+                             maxPool1dForward(r.layer, r.input, r.output, NULL));
+    r.layer->config->maxPool1d->argmaxIndices = r.argmax;
+
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+}
+
+void testMaxPool1dBackwardSymRejectsNullArgmax(void) {
+    size_t inputDims[] = {1, 2, 6};
+    size_t outputDims[] = {1, 2, 3};
+    maxPool1dSymRun_t r = maxPool1dBuildSym(NULL, inputDims, 2, VALID, 1, 2, outputDims);
+    tensor_t *lossGrad = buildSymTensor(outputDims, 3, NULL);
+    tensor_t *propLoss = buildSymTensor(inputDims, 3, NULL);
+
+    r.layer->config->maxPool1d->argmaxIndices = NULL;
+    ASSERT_EXITS_WITH_OUTPUT(1, "argmaxIndices must not be NULL",
+                             maxPool1dBackward(r.layer, NULL, lossGrad, propLoss, NULL));
+    r.layer->config->maxPool1d->argmaxIndices = r.argmax;
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+}
+
+void testMaxPool1dBackwardBfpRejectsNullArgmax(void) {
+    size_t inputDims[] = {1, 2, 6};
+    size_t outputDims[] = {1, 2, 3};
+    tensor_t *lossGrad = makeFloatTensor(outputDims, 3, NULL);
+    tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
+    tensor_t *argmax = makeInt32Tensor(outputDims, 3);
+    quantization_t *wireQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    kernel_t k;
+    maxPool1dConfig_t cfg;
+    layerConfig_t lc;
+    layer_t layer;
+    maxPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, argmax, 2, VALID, 1, 2, wireQ);
+
+    layer.config->maxPool1d->argmaxIndices = NULL;
+    ASSERT_EXITS_WITH_OUTPUT(1, "argmaxIndices must not be NULL",
+                             maxPool1dBackward(&layer, NULL, lossGrad, propLoss, NULL));
+    layer.config->maxPool1d->argmaxIndices = argmax;
+
+    freeQuantization(wireQ);
+    freeTensor(argmax);
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMaxPool1dForwardBasic);
@@ -1592,5 +1676,9 @@ int main(void) {
     RUN_TEST(testMaxPool1dBackwardBfpRejectsBatch1ArgmaxAtBatch2);
     RUN_TEST(testMaxPool1dSrForwardIsAPureFunctionOfItsForwardOpKey);
     RUN_TEST(testMaxPool1dInitConfigClearsOwnsQuantizations);
+    RUN_TEST(testMaxPool1dBackwardFloatRejectsNullArgmax);
+    RUN_TEST(testMaxPool1dForwardRejectsNullArgmax);
+    RUN_TEST(testMaxPool1dBackwardSymRejectsNullArgmax);
+    RUN_TEST(testMaxPool1dBackwardBfpRejectsNullArgmax);
     return UNITY_END();
 }

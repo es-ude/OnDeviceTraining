@@ -4,8 +4,8 @@
 #include <stddef.h>
 #include <stdlib.h>
 
+#include "CheckedSize.h"
 #include "Common.h"
-#include "RematCheckedSize.h"
 #include "RematPlan.h"
 #include "RematRows.h"
 #include "RematScheduler.h"

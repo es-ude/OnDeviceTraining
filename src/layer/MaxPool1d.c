@@ -8,6 +8,7 @@
 
 #include "ArithmeticType.h"
 #include "BfpKernelSupport.h"
+#include "CheckedSize.h"
 #include "Common.h"
 #include "ExecuteOp.h"
 #include "Layer.h"
@@ -296,14 +297,6 @@ static void maxPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut
     }
 }
 
-static bool maxPoolMulFits(size_t a, size_t b, size_t *product) {
-    if (a != 0 && b > SIZE_MAX / a) {
-        return false;
-    }
-    *product = a * b;
-    return true;
-}
-
 /* #152 PR3b: size the argmax for THIS call's batch before any arm
  * runs, so every arm (FLOAT32, SYM_INT32, BFP) and inference() see a buffer
  * holding B rows. Growth reserves the new [B, C, Lout] block BEFORE freeing
@@ -339,9 +332,9 @@ static void maxPoolEnsureArgmaxRows(maxPool1dConfig_t *cfg, const tensor_t *inpu
     size_t rowElements = 0;
     size_t needed = 0;
     size_t bytes = 0;
-    if (!maxPoolMulFits(channels, outputLength, &rowElements) ||
-        !maxPoolMulFits(batch, rowElements, &needed) ||
-        !maxPoolMulFits(needed, sizeof(int32_t), &bytes)) {
+    if (!checkedMulSize(channels, outputLength, &rowElements) ||
+        !checkedMulSize(batch, rowElements, &needed) ||
+        !checkedMulSize(needed, sizeof(int32_t), &bytes)) {
         PRINT_ERROR("MaxPool1d forward: argmax size [%zu, %zu, %zu] overflows size_t", batch,
                     channels, outputLength);
         exit(1);

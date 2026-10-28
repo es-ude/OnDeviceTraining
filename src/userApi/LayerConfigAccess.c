@@ -6,6 +6,7 @@
 #include "AdaptiveAvgPool1d.h"
 #include "AvgPool1d.h"
 #include "BatchNorm1d.h"
+#include "CheckedSize.h"
 #include "Common.h"
 #include "Conv1d.h"
 #include "Conv1dTransposed.h"
@@ -389,12 +390,13 @@ bool layerForwardUpdatesState(const layer_t *layer) {
 
 /* A wrapped product would report a recompute as nearly free. */
 static size_t forwardCostProduct(const layer_t *layer, size_t a, size_t b) {
-    if (a != 0u && b > SIZE_MAX / a) {
+    size_t product;
+    if (!checkedMulSize(a, b, &product)) {
         PRINT_ERROR("layerForwardCost: the forward cost of layerType_t %d overflows size_t",
                     (int)layer->type);
         exit(1);
     }
-    return a * b;
+    return product;
 }
 
 /* An unknown type exits rather than defaulting: a silent 0 would hide the

@@ -5,12 +5,12 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include "CheckedSize.h"
 #include "Common.h"
 #include "Layer.h"
 #include "LayerConfigAccess.h"
 #include "LossFunction.h"
 #include "RematCheck.h"
-#include "RematCheckedSize.h"
 #include "RematPlan.h"
 #include "RematScheduler.h"
 

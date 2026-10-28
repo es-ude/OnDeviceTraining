@@ -4,20 +4,13 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include "CheckedSize.h"
 #include "Common.h"
 #include "ExecuteOp.h"
 #include "ExemplarBuffer.h"
 #include "QuantizationApi.h"
 #include "StorageApi.h"
 #include "TensorApi.h"
-
-static bool exemplarMulFits(size_t a, size_t b, size_t *product) {
-    if (a != 0 && b > SIZE_MAX / a) {
-        return false;
-    }
-    *product = a * b;
-    return true;
-}
 
 static void *reserveOrExit(size_t bytes, const char *what) {
     void *p = reserveMemory(bytes);
@@ -36,8 +29,8 @@ exemplarBuffer_t *exemplarBufferCreate(size_t numClasses, size_t capacity) {
     /* the counts array cannot wrap once the slot bytes fit: numClasses <= slots
      * and sizeof(uint32_t) <= sizeof(tensor_t *) */
     size_t slots, slotBytes;
-    if (!exemplarMulFits(numClasses, capacity, &slots) ||
-        !exemplarMulFits(slots, sizeof(tensor_t *), &slotBytes)) {
+    if (!checkedMulSize(numClasses, capacity, &slots) ||
+        !checkedMulSize(slots, sizeof(tensor_t *), &slotBytes)) {
         PRINT_ERROR("exemplarBufferCreate: numClasses %zu * capacity %zu overflows size_t",
                     numClasses, capacity);
         exit(1);

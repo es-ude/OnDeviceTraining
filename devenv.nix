@@ -150,7 +150,6 @@ in
 					#   RematScheduler.c     the shared dispatch and the row vtable
 					#   RematWireTable.c     the row SDK: the one ->data writer; derives headers
 					#                        through layerFunctions at bind
-					#   RematCheckedSize.h   size helpers shared by the table, the plan and rows
 					#   RematRows.h          the rows' entry points, included by the dispatch
 					remat_git() {
 						root=$1
@@ -162,7 +161,6 @@ in
 							":!$REMAT/RematPlanPolicy.h" \
 							":!$REMAT/RematScheduler.c" \
 							":!$REMAT/RematWireTable.c" \
-							":!$REMAT/RematCheckedSize.h" \
 							":!$REMAT/RematRows.h"
 					}
 					# Sets hits to the non-comment matches under the repo root $1; returns 2

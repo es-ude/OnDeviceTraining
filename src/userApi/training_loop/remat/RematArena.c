@@ -6,10 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "CheckedSize.h"
 #include "Common.h"
 #include "Layer.h"
 #include "LossFunction.h"
-#include "RematCheckedSize.h"
 #include "RematPlace.h"
 #include "RematPlan.h"
 #include "RematRows.h"

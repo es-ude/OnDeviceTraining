@@ -57,7 +57,8 @@ something that will drift again.
 - [`conventions/loss.md`](conventions/loss.md) — loss forward/backward/reduction
   microbatch contracts; where the macro-batch divisor lives.
 - [`conventions/allocation.md`](conventions/allocation.md) — allocation locality
-  (alloc primitives only in `src/userApi/`; everything else via StorageApi).
+  (alloc primitives only in `src/userApi/`; everything else via StorageApi); size math
+  on untrusted counts via `CheckedSize.h`.
 - [`conventions/optimizer-step.md`](conventions/optimizer-step.md) — optimizer step
   entry (`optimizerStep()` fires the `OPTIMIZER` phase events; the raw vtable
   step is for unit tests under `test/` only; CI gate on `examples/`).

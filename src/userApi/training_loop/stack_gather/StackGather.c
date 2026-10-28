@@ -3,19 +3,21 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include "CheckedSize.h"
 #include "Common.h"
 #include "StackGather.h"
 #include "StorageApi.h"
 
 uint8_t *stackGatherReserveBuffer(const char *caller, const char *knob, size_t m,
                                   size_t perSampleBytes, const char *what) {
-    if (perSampleBytes != 0 && m > SIZE_MAX / perSampleBytes) {
+    size_t bytes;
+    if (!checkedMulSize(m, perSampleBytes, &bytes)) {
         PRINT_ERROR("%s: the %s gather buffer (%s %zu x %zu bytes "
                     "per sample) overflows size_t",
                     caller, what, knob, m, perSampleBytes);
         exit(1);
     }
-    uint8_t *buffer = reserveMemory(m * perSampleBytes);
+    uint8_t *buffer = reserveMemory(bytes);
     if (buffer == NULL) {
         PRINT_ERROR("%s: reserving the %s gather buffer failed (%s "
                     "%zu x %zu bytes per sample)",

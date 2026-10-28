@@ -150,8 +150,8 @@ continues, while the CI job fails closed.
 **Files.** Every `.c` and `.h` under `src/userApi/training_loop/remat/`,
 `include/` too, except an explicit list of shared files: `RematCheck.c`,
 `RematPlan.c`, `RematPlanPolicy.c`, `RematPlanPolicy.h`, `RematScheduler.c`,
-`RematWireTable.c` (the row SDK, the one legitimate `->data` writer),
-`RematCheckedSize.h` and `RematRows.h`. A new file is therefore a row until
+`RematWireTable.c` (the row SDK, the one legitimate `->data` writer)
+and `RematRows.h`. A new file is therefore a row until
 someone says otherwise. `RematPlace.h`, ARENA's private placement, is gated
 as row code, and so is the public API in `include/`: its comments may name a
 banned symbol, its code may not. Every exclusion carries a "shared, because

@@ -1,11 +1,14 @@
 #include "DTypes.h"
 #include "DeathTest.h"
 #include "OdtAssert.h"
+#include "ReferenceByteConversion.h"
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "unity.h"
 
+#include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -408,6 +411,172 @@ void testByteConversionAppend_NegativeCodeStoresLowBits() {
     byteConversionAppend((uint8_t *)vals, 32, dataOut, 6, 1, 5, 0);
     uint8_t expectedBytes[] = {0xA0, 0x07};
     TEST_ASSERT_EQUAL_UINT8_ARRAY(expectedBytes, dataOut, 2);
+}
+
+/* Differential pin of byteConversionAppend against the pre-#505 bit-walking
+ * engine (ReferenceByteConversion.h) over every width pair 0..32, src/dst bit
+ * offsets that cover each in-byte phase plus a multi-byte one, and element
+ * counts that end on and off byte boundaries. Variant A surrounds both
+ * buffers with canaries, so any changed byte outside the payload is caught on
+ * every preset. Variant B uses exact-size heap buffers without canaries, so
+ * the unit_test_asan preset catches out-of-bounds reads and same-value
+ * out-of-bounds write-backs, which no byte comparison can see. */
+#define BYTE_CONV_CANARY 4
+#define BYTE_CONV_SRC_CANARY 0xA5
+#define BYTE_CONV_DST_CANARY 0x5A
+
+static uint32_t byteConvLcgState;
+
+static uint8_t byteConvNextByte(void) {
+    byteConvLcgState = byteConvLcgState * 1664525u + 1013904223u;
+    return (uint8_t)(byteConvLcgState >> 24);
+}
+
+static void byteConvFill(uint8_t *p, size_t n, bool nonZero) {
+    for (size_t i = 0; i < n; i++) {
+        uint8_t b = byteConvNextByte();
+        p[i] = (nonZero && b == 0) ? 0x81 : b;
+    }
+}
+
+static void byteConvFail(const char *what, char variant, size_t in, size_t out, size_t srcStart,
+                         size_t dstStart, size_t n) {
+    char msg[192];
+    snprintf(msg, sizeof msg, "variant %c: %s (in=%zu out=%zu srcStart=%zu dstStart=%zu n=%zu)",
+             variant, what, in, out, srcStart, dstStart, n);
+    TEST_FAIL_MESSAGE(msg);
+}
+
+static void byteConvCheckCanaryCase(size_t in, size_t out, size_t srcStart, size_t dstStart,
+                                    size_t n) {
+    size_t srcBytes = (srcStart + n * in + 7) / 8;
+    if (srcBytes == 0) {
+        srcBytes = 1;
+    }
+    size_t dstBytes = (dstStart + n * out + 7) / 8;
+    size_t srcTotal = srcBytes + 2 * BYTE_CONV_CANARY;
+    size_t dstTotal = dstBytes + 2 * BYTE_CONV_CANARY;
+    uint8_t *src = reserveMemory(srcTotal);
+    uint8_t *srcCopy = reserveMemory(srcTotal);
+    uint8_t *dstGot = reserveMemory(dstTotal);
+    uint8_t *dstRef = reserveMemory(dstTotal);
+
+    memset(src, BYTE_CONV_SRC_CANARY, srcTotal);
+    byteConvFill(src + BYTE_CONV_CANARY, srcBytes, false);
+    memcpy(srcCopy, src, srcTotal);
+    memset(dstGot, BYTE_CONV_DST_CANARY, dstTotal);
+    byteConvFill(dstGot + BYTE_CONV_CANARY, dstBytes, true);
+    memcpy(dstRef, dstGot, dstTotal);
+
+    byteConversionAppend(src + BYTE_CONV_CANARY, in, dstGot + BYTE_CONV_CANARY, out, n, dstStart,
+                         srcStart);
+    refByteConversionAppend(src + BYTE_CONV_CANARY, in, dstRef + BYTE_CONV_CANARY, out, n, dstStart,
+                            srcStart);
+
+    for (size_t i = 0; i < BYTE_CONV_CANARY; i++) {
+        if (dstGot[i] != BYTE_CONV_DST_CANARY || dstGot[dstTotal - 1 - i] != BYTE_CONV_DST_CANARY) {
+            byteConvFail("dst canary changed", 'A', in, out, srcStart, dstStart, n);
+        }
+    }
+    if (memcmp(dstGot, dstRef, dstTotal) != 0) {
+        byteConvFail("dst differs from reference", 'A', in, out, srcStart, dstStart, n);
+    }
+    if (memcmp(src, srcCopy, srcTotal) != 0) {
+        byteConvFail("src changed", 'A', in, out, srcStart, dstStart, n);
+    }
+
+    freeReservedMemory(src);
+    freeReservedMemory(srcCopy);
+    freeReservedMemory(dstGot);
+    freeReservedMemory(dstRef);
+}
+
+static void byteConvCheckExactSizeCase(size_t in, size_t out, size_t srcStart, size_t dstStart,
+                                       size_t n) {
+    size_t srcBytes = (srcStart + n * in + 7) / 8;
+    if (srcBytes == 0) {
+        srcBytes = 1;
+    }
+    size_t dstBytes = (dstStart + n * out + 7) / 8;
+    uint8_t *src = reserveMemory(srcBytes);
+    uint8_t *srcCopy = reserveMemory(srcBytes);
+    uint8_t *dstGot = NULL;
+    uint8_t *dstRef = NULL;
+
+    byteConvFill(src, srcBytes, false);
+    memcpy(srcCopy, src, srcBytes);
+    if (dstBytes > 0) {
+        dstGot = reserveMemory(dstBytes);
+        dstRef = reserveMemory(dstBytes);
+        byteConvFill(dstGot, dstBytes, true);
+        memcpy(dstRef, dstGot, dstBytes);
+    }
+
+    byteConversionAppend(src, in, dstGot, out, n, dstStart, srcStart);
+    refByteConversionAppend(src, in, dstRef, out, n, dstStart, srcStart);
+
+    if (dstBytes > 0 && memcmp(dstGot, dstRef, dstBytes) != 0) {
+        byteConvFail("dst differs from reference", 'B', in, out, srcStart, dstStart, n);
+    }
+    if (memcmp(src, srcCopy, srcBytes) != 0) {
+        byteConvFail("src changed", 'B', in, out, srcStart, dstStart, n);
+    }
+
+    freeReservedMemory(src);
+    freeReservedMemory(srcCopy);
+    if (dstBytes > 0) {
+        freeReservedMemory(dstGot);
+        freeReservedMemory(dstRef);
+    }
+}
+
+static void byteConvCheckCase(size_t in, size_t out, size_t srcStart, size_t dstStart, size_t n) {
+    byteConvCheckCanaryCase(in, out, srcStart, dstStart, n);
+    byteConvCheckExactSizeCase(in, out, srcStart, dstStart, n);
+}
+
+void testByteConversionAppendMatchesReferenceEngine() {
+    static const size_t offsets[] = {0, 1, 2, 3, 4, 5, 6, 7, 13};
+    static const size_t counts[] = {1, 2, 3, 7, 9};
+    static const size_t wideWidths[] = {33, 40, 63, 64, 71};
+    static const size_t wideOffsets[] = {0, 5};
+    static const size_t wideCounts[] = {1, 3};
+    const size_t numOffsets = sizeof offsets / sizeof offsets[0];
+    const size_t numCounts = sizeof counts / sizeof counts[0];
+    const size_t numWide = sizeof wideWidths / sizeof wideWidths[0];
+    byteConvLcgState = 0x505u;
+
+    for (size_t in = 0; in <= 32; in++) {
+        for (size_t out = 0; out <= 32; out++) {
+            for (size_t s = 0; s < numOffsets; s++) {
+                for (size_t d = 0; d < numOffsets; d++) {
+                    for (size_t c = 0; c < numCounts; c++) {
+                        byteConvCheckCase(in, out, offsets[s], offsets[d], counts[c]);
+                    }
+                }
+            }
+        }
+    }
+    for (size_t i = 0; i < numWide; i++) {
+        for (size_t o = 0; o < numWide; o++) {
+            for (size_t s = 0; s < 2; s++) {
+                for (size_t d = 0; d < 2; d++) {
+                    for (size_t c = 0; c < 2; c++) {
+                        byteConvCheckCase(wideWidths[i], wideWidths[o], wideOffsets[s],
+                                          wideOffsets[d], wideCounts[c]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* #160: an N=0 destination may be NULL, so nothing-to-write must not touch dst. */
+void testByteConversionAppendNullDstWithNothingToWriteIsNoOp() {
+    uint8_t src[1] = {0xFF};
+    byteConversionAppend(src, 8, NULL, 8, 0, 0, 0);
+    byteConversion(src, 8, NULL, 8, 0);
+    TEST_ASSERT_EQUAL_UINT8(0xFF, src[0]);
 }
 
 void testCopyTensor() {
@@ -996,6 +1165,8 @@ int main(void) {
     RUN_TEST(testByteConversionAppend_NarrowsFromSrcBitOffsetTruncatesLowBits);
     RUN_TEST(testByteConversionAppend_RoundTripsMixedWidthStream);
     RUN_TEST(testByteConversionAppend_NegativeCodeStoresLowBits);
+    RUN_TEST(testByteConversionAppendMatchesReferenceEngine);
+    RUN_TEST(testByteConversionAppendNullDstWithNothingToWriteIsNoOp);
 
     RUN_TEST(testGetBitmask);
     RUN_TEST(testGetBitmask2);

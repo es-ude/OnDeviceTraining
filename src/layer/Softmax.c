@@ -20,6 +20,7 @@ void softmaxInitConfig(softmaxConfig_t *softmaxConfig, quantization_t *forwardQ,
     softmaxConfig->propLossMath = arithmeticFromQuantizationOrDefault(backwardQ);
     softmaxConfig->outputQ = forwardQ;
     softmaxConfig->propLossQ = backwardQ;
+    softmaxConfig->ownsQuantizations = false;
     softmaxConfig->bfpExpShiftRounding = BFP_SHIFT_TRUNC;
 }
 

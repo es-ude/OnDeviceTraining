@@ -32,6 +32,7 @@ void initMaxPool1dConfig(maxPool1dConfig_t *cfg, kernel_t *kernel, tensor_t *arg
     cfg->propLossMath = arithmeticFromQuantizationOrDefault(propLossQ);
     cfg->outputQ = forwardQ;
     cfg->propLossQ = propLossQ;
+    cfg->ownsQuantizations = false;
 }
 
 /* #152: every arm indexes the argmax at (b * channels + c) * outputLength +

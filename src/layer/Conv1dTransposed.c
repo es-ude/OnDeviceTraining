@@ -53,6 +53,7 @@ void initConv1dTransposedConfigWithWeightsAndBias(
     cfg->propLossMath = arithmeticFromQuantizationOrDefault(propLossQ);
     cfg->outputQ = forwardQ;
     cfg->propLossQ = propLossQ;
+    cfg->ownsQuantizations = false;
 
     /* Today's per-callsite hardcodes (conv1dTransposedCalcWeightGradsFloat32/
      * SymInt32, conv1dTransposedCalcBiasGradsFloat32/SymInt32 below), now

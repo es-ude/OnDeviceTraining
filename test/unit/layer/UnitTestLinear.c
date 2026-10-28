@@ -3479,6 +3479,16 @@ void testInferenceOneLinearModelRejectsRank1Sample(void) {
     freeLinearLayer(layer);
 }
 
+/* #440: a hand-wired config must not inherit a stale ownsQuantizations, or
+ * freeLinearLayer would tear down caller-owned quantizations. Read through
+ * unsigned char because loading a bool that holds 0xFF is UB. */
+void testLinearInitConfigClearsOwnsQuantizations(void) {
+    linearConfig_t cfg;
+    memset(&cfg, 0xFF, sizeof cfg);
+    linearInitConfig(&cfg, NULL, NULL, NULL, NULL, NULL);
+    TEST_ASSERT_EQUAL_UINT8(0, *(const unsigned char *)&cfg.ownsQuantizations);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLinearForwardFloat);
@@ -3549,5 +3559,6 @@ int main(void) {
     RUN_TEST(testLinearCalcOutputShapeRejectsRank1Input);
     RUN_TEST(testLinearCalcOutputShapeRejectsRank3Input);
     RUN_TEST(testInferenceOneLinearModelRejectsRank1Sample);
+    RUN_TEST(testLinearInitConfigClearsOwnsQuantizations);
     return UNITY_END();
 }

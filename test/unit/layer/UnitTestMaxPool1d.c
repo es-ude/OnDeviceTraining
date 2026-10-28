@@ -1536,6 +1536,19 @@ void testMaxPool1dSrForwardIsAPureFunctionOfItsForwardOpKey(void) {
     freeQuantization(q);
 }
 
+/* #440: see testLinearInitConfigClearsOwnsQuantizations. */
+void testMaxPool1dInitConfigClearsOwnsQuantizations(void) {
+    kernel_t kernel;
+    initKernel(&kernel, 2, VALID, 1, 1);
+    size_t argmaxDims[] = {1, 1, 1};
+    tensor_t *argmax = makeInt32Tensor(argmaxDims, 3);
+    maxPool1dConfig_t cfg;
+    memset(&cfg, 0xFF, sizeof cfg);
+    initMaxPool1dConfig(&cfg, &kernel, argmax, NULL, NULL);
+    TEST_ASSERT_EQUAL_UINT8(0, *(const unsigned char *)&cfg.ownsQuantizations);
+    freeTensor(argmax);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMaxPool1dForwardBasic);
@@ -1578,5 +1591,6 @@ int main(void) {
     RUN_TEST(testMaxPool1dForwardBfpRejectsArgmaxLengthMismatchAtBatch2);
     RUN_TEST(testMaxPool1dBackwardBfpRejectsBatch1ArgmaxAtBatch2);
     RUN_TEST(testMaxPool1dSrForwardIsAPureFunctionOfItsForwardOpKey);
+    RUN_TEST(testMaxPool1dInitConfigClearsOwnsQuantizations);
     return UNITY_END();
 }

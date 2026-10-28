@@ -1845,6 +1845,14 @@ void testSoftmaxSymBackwardConvertsWithItsBackwardConvertStream(void) {
     freeTensor(input);
 }
 
+/* #440: see testLinearInitConfigClearsOwnsQuantizations. */
+void testSoftmaxInitConfigClearsOwnsQuantizations(void) {
+    softmaxConfig_t cfg;
+    memset(&cfg, 0xFF, sizeof cfg);
+    softmaxInitConfig(&cfg, NULL, NULL);
+    TEST_ASSERT_EQUAL_UINT8(0, *(const unsigned char *)&cfg.ownsQuantizations);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(unitTestSoftmaxForwardFloat);
@@ -1904,5 +1912,6 @@ int main() {
     RUN_TEST(testSoftmaxBfpSrPackIsAPureFunctionOfItsForwardOpKey);
     RUN_TEST(testSoftmaxBfpSrShiftsDrawFromTheForwardShiftStream);
     RUN_TEST(testSoftmaxSymBackwardConvertsWithItsBackwardConvertStream);
+    RUN_TEST(testSoftmaxInitConfigClearsOwnsQuantizations);
     return UNITY_END();
 }

@@ -44,6 +44,7 @@
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
+#include "TensorRecord.h"
 #include "unity.h"
 
 /* WIRE-FORMAT PINS (#serial): the serialized layer record's uint8 tag IS the
@@ -2083,6 +2084,15 @@ static void testSerializeTensorBoolRoundTripsPackedData(void) {
         TEST_ASSERT_EQUAL_INT(pattern[i], got[i]);
     }
 }
+
+/* Ties these golden fixtures to record version 5: bumping the constant without
+ * updating the version pinned here is a compile error; regenerate the goldens at
+ * the same time. Changing the bytes serializeTensor writes is caught by the
+ * golden-bytes tests going RED; the fix is to bump ODTS_TENSOR_RECORD_VERSION
+ * together with SERIALIZE_FORMAT_VERSION and regenerate the goldens. */
+_Static_assert(ODTS_TENSOR_RECORD_VERSION == 5u,
+               "these golden fixtures are tied to tensor-record version 5: regenerate them and "
+               "update this pin when bumping ODTS_TENSOR_RECORD_VERSION");
 
 /*! GOLDEN BYTES (#370, wire format v2): serializeTensor's exact encoding,
  *  pinned byte-for-byte against a hand-computed fixture. Shape fields are u32

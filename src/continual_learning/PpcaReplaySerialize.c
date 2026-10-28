@@ -14,14 +14,17 @@
 #define PPCA_SERIALIZE_MAGIC "ODTR"
 /* v2 (#370): embedded ODTS tensor records switched to fixed-width LE fields
  * and the ODTR scalars are LE-pinned via SerialWire — v1 checkpoints were
- * host-local artifacts, no back-compat shim. */
-#define PPCA_SERIALIZE_FORMAT_VERSION 2u
+ * host-local artifacts, no back-compat shim.
+ * v3 (#401): ODTS_TENSOR_RECORD_VERSION follows the container version, so a
+ * checkpoint written under another tensor-record layout fails by name. */
+#define PPCA_SERIALIZE_FORMAT_VERSION 3u
 /* PPCA state tensors are rank 1 or 2 by construction (mean/eigvals, basis). */
 #define PPCA_MAX_TENSOR_RANK 2
 
 void ppcaReplaySetSerialize(const ppcaReplaySet_t *set, FILE *f) {
     serialWriteBytes(PPCA_SERIALIZE_MAGIC, 4, f);
     serialWriteU32LE(PPCA_SERIALIZE_FORMAT_VERSION, f);
+    serialWriteU32LE(ODTS_TENSOR_RECORD_VERSION, f);
     serialWriteSizeAsU32LE(set->numClasses, f);
     for (size_t c = 0; c < set->numClasses; c++) {
         const ppcaReplay_t *g = set->generators[c];
@@ -146,6 +149,12 @@ void ppcaReplaySetDeserialize(ppcaReplaySet_t *skeleton, FILE *f) {
     uint32_t version = serialReadU32LE(f);
     if (version != PPCA_SERIALIZE_FORMAT_VERSION) {
         PRINT_ERROR("ppcaReplaySetDeserialize: unsupported version %u", version);
+        exit(1);
+    }
+    uint32_t recordVersion = serialReadU32LE(f);
+    if (recordVersion != ODTS_TENSOR_RECORD_VERSION) {
+        PRINT_ERROR("ppcaReplaySetDeserialize: tensor-record version %u, this build reads %u",
+                    (unsigned)recordVersion, (unsigned)ODTS_TENSOR_RECORD_VERSION);
         exit(1);
     }
     uint32_t numClasses = serialReadU32LE(f);

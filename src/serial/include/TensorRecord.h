@@ -9,6 +9,14 @@
  * exceeds rank 8. */
 #define ODTS_TENSOR_RECORD_MAX_RANK 8u
 
+/* Layout version of the bytes serializeTensor writes: 5 is the ODTS version
+ * that last changed them (v5 SYM/ASYM/BFP qconfig records). Containers that
+ * embed tensor records (ODTR) store it so a file written under another record
+ * layout fails at load by name. Changing those bytes is caught by the tensor
+ * golden-bytes tests in UnitTestSerialize.c going RED; the fix is to bump this
+ * together with SERIALIZE_FORMAT_VERSION and regenerate the goldens. */
+#define ODTS_TENSOR_RECORD_VERSION 5u
+
 typedef struct {
     size_t numberOfDimensions;
     size_t dimensions[ODTS_TENSOR_RECORD_MAX_RANK];

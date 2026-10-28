@@ -501,7 +501,8 @@ checkpointing, limitations, literature).
 - **Serialization** — `ppcaReplaySetSerialize`/`ppcaReplaySetDeserialize`
   (`PpcaReplaySerialize.h`), the repo's first non-layer checkpoint format
   (`"ODTR"` magic), with a peek-validate-rewind guard against the
-  #316-class deserialize-overwrite hazard; requires a seekable stream.
+  #316-class deserialize-overwrite hazard; requires a seekable stream. ODTR v3
+  embeds `ODTS_TENSOR_RECORD_VERSION` and rejects a mismatch by name (#401).
 
 ## Other subsystems
 

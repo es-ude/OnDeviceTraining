@@ -725,9 +725,9 @@ void testDeserializeRejectsDimMismatch(void) {
     ppcaReplaySetSerialize(serial, f);
     fclose(f);
 
-    /* "ODTR" + version + numClasses (12) | dim, rank, count, sigma2,
-     * totalVar (20) | mean record: numDims u32, then dims[0] u32 LE. */
-    const long meanDim0Offset = 12 + 20 + 4;
+    /* "ODTR" + version + tensorRecordVersion + numClasses (16) | dim, rank,
+     * count, sigma2, totalVar (20) | mean record: numDims u32, then dims[0]. */
+    const long meanDim0Offset = 16 + 20 + 4;
     f = fopen(FILE_PATH, "r+b");
     TEST_ASSERT_EQUAL_INT(0, fseek(f, meanDim0Offset, SEEK_SET));
     uint8_t le[4];
@@ -808,6 +808,54 @@ void testDeserializeRejectsPayloadTruncation(void) {
     freePpcaReplaySet(skeleton);
 }
 
+static void writeFloatSet(void) {
+    ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
+    ppcaReplaySet_t *set = ppcaReplaySetCreate(1, &cfg);
+    FILE *f = fopen(FILE_PATH, "wb");
+    ppcaReplaySetSerialize(set, f);
+    fclose(f);
+    freePpcaReplaySet(set);
+}
+
+static void patchByte(long offset, uint8_t value) {
+    FILE *f = fopen(FILE_PATH, "r+b");
+    TEST_ASSERT_EQUAL_INT(0, fseek(f, offset, SEEK_SET));
+    TEST_ASSERT_EQUAL_size_t(1, fwrite(&value, 1, 1, f));
+    fclose(f);
+}
+
+void testSerializeWritesContainerAndRecordVersion(void) {
+    writeFloatSet();
+    const uint8_t expected[12] = {'O', 'D', 'T', 'R', 3, 0, 0, 0, 5, 0, 0, 0};
+    uint8_t got[12];
+    FILE *f = fopen(FILE_PATH, "rb");
+    TEST_ASSERT_EQUAL_size_t(12, fread(got, 1, 12, f));
+    fclose(f);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, got, 12);
+}
+
+void testDeserializeRejectsTensorRecordVersionMismatch(void) {
+    writeFloatSet();
+    patchByte(8, 4);
+    ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
+    ppcaReplaySet_t *skeleton = ppcaReplaySetCreate(1, &cfg);
+    FILE *f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1, "tensor-record version 4", ppcaReplaySetDeserialize(skeleton, f));
+    fclose(f);
+    freePpcaReplaySet(skeleton);
+}
+
+void testDeserializeRejectsV2Container(void) {
+    writeFloatSet();
+    patchByte(4, 2);
+    ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
+    ppcaReplaySet_t *skeleton = ppcaReplaySetCreate(1, &cfg);
+    FILE *f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1, "unsupported version 2", ppcaReplaySetDeserialize(skeleton, f));
+    fclose(f);
+    freePpcaReplaySet(skeleton);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testRoundTripFloat);
@@ -822,5 +870,8 @@ int main(void) {
     RUN_TEST(testDeserializeRejectsDimMismatch);
     RUN_TEST(testDeserializeRejectsBadMagicAndTruncation);
     RUN_TEST(testDeserializeRejectsPayloadTruncation);
+    RUN_TEST(testSerializeWritesContainerAndRecordVersion);
+    RUN_TEST(testDeserializeRejectsTensorRecordVersionMismatch);
+    RUN_TEST(testDeserializeRejectsV2Container);
     return UNITY_END();
 }

@@ -343,16 +343,29 @@ void ppcaReplaySetDeserialize(ppcaReplaySet_t *skeleton, FILE *f);
 ```
 
 (`PpcaReplaySerialize.h`) — the repo's first non-layer serialized state.
-Wire format: `"ODTR"` magic, `u32 version(=2)`, `u32 numClasses`, then per
-class: `u32 dim`, `u32 rank`, `u32 count`, `f32 sigma2`, `f32 totalVar`,
-followed by the three tensors (`mean`, `basis`, `eigvals`) via the existing
-tensor-tier `serializeTensor`/`deserializeTensor`. Since v2 (#370) every
-scalar is fixed-width little-endian via the checked `SerialWire` primitives.
-The embedded tensor records follow the CURRENT ODTS tensor-tier layout —
-ODTS v7, whose qconfig records last changed in v5 (numGroups/groupSize-
-prefixed SYM and ASYM records, ASYM `u16 zeroPoints[]`, the BFP record);
-the ODTR container version (still 2) does NOT track ODTS record changes (an old checkpoint with SYM tensors fails only via downstream
-guards — formal linkage tracked in #401).
+Wire format: `"ODTR"` magic, `u32 version(=3)`, `u32 tensorRecordVersion(=5)`,
+`u32 numClasses`, then per class: `u32 dim`, `u32 rank`, `u32 count`,
+`f32 sigma2`, `f32 totalVar`, followed by the three tensors (`mean`, `basis`,
+`eigvals`) via the existing tensor-tier `serializeTensor`/`deserializeTensor`.
+Since v2 (#370) every scalar is fixed-width little-endian via the checked
+`SerialWire` primitives. The embedded tensor records follow the CURRENT ODTS
+tensor-tier layout — ODTS v7, whose qconfig records last changed in v5
+(numGroups/groupSize-prefixed SYM and ASYM records, ASYM `u16 zeroPoints[]`,
+the BFP record).
+
+**Linkage to the ODTS record layout (v3, #401).** `tensorRecordVersion` is
+`ODTS_TENSOR_RECORD_VERSION` (`TensorRecord.h`), the ODTS version that last
+changed the bytes `serializeTensor` writes. The reader rejects any other
+value (`tensor-record version N, this build reads 5`), so an old ODTR file
+written under another record layout fails at load by name, and layer-only
+ODTS bumps do not invalidate PPCA checkpoints. Changing the bytes
+`serializeTensor` writes is caught by the tensor golden-bytes tests in
+`UnitTestSerialize.c` going RED; the fix is to bump
+`ODTS_TENSOR_RECORD_VERSION` together with `SERIALIZE_FORMAT_VERSION` and
+regenerate the goldens. A `_Static_assert(ODTS_TENSOR_RECORD_VERSION == 5u)`
+beside those goldens ties them to record version 5: bumping the constant
+without updating the version pinned beside the goldens is a compile error;
+regenerate the goldens at the same time.
 
 **Deserialize fills a pre-built skeleton in place** — it does not allocate a
 set for you. Build the skeleton with `ppcaReplaySetCreate(numClasses, cfg)`

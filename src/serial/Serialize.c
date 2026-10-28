@@ -24,6 +24,7 @@
 #include "SerializeInternal.h"
 #include "Softmax.h"
 #include "Tensor.h"
+#include "TensorRecord.h"
 
 /* v7 (#391): the LINEAR record gains `u8 hasBias` between the weights and
  * bias parameter records (bias record omitted when 0) -- the same presence
@@ -90,6 +91,8 @@
  * grad-presence byte are untouched by this bump. */
 #define SERIALIZE_MAGIC "ODTS"
 #define SERIALIZE_FORMAT_VERSION 7u
+_Static_assert(SERIALIZE_FORMAT_VERSION >= ODTS_TENSOR_RECORD_VERSION,
+               "the tensor-record version names the ODTS version that introduced its layout");
 
 void serializeTensor(tensor_t *tensor, FILE *f) {
     size_t numberOfValues = calcNumberOfElementsByTensor(tensor);

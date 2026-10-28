@@ -5,13 +5,17 @@
 
 #include "PpcaReplay.h"
 
-/* Standalone "ODTR" v1 checkpoint for a ppcaReplaySet_t — the repo's first
- * non-layer serialized state. Wire format:
- *   "ODTR" | u32 version=1 | u32 numClasses
+/* Standalone "ODTR" v3 checkpoint for a ppcaReplaySet_t — the repo's first
+ * non-layer serialized state. Wire format (every scalar little-endian):
+ *   "ODTR" | u32 version=3 | u32 tensorRecordVersion | u32 numClasses
  *   per class: u32 dim | u32 rank | u32 count | f32 sigma2 | f32 totalVar
  *              | serializeTensor(mean) | serializeTensor(basis)
  *              | serializeTensor(eigvals)
- * Host-native widths/endianness (inherited from the model format).
+ * tensorRecordVersion is ODTS_TENSOR_RECORD_VERSION (TensorRecord.h): a file
+ * written under another tensor-record layout fails at load by name. A change
+ * to the bytes serializeTensor writes is caught by the tensor golden-bytes
+ * tests going RED; the fix is to bump ODTS_TENSOR_RECORD_VERSION together
+ * with SERIALIZE_FORMAT_VERSION and regenerate the goldens.
  *
  * Deserialize fills a pre-built matching skeleton IN PLACE and guards
  * BEFORE any overwrite via peek-validate-rewind (the #316 guard pattern:

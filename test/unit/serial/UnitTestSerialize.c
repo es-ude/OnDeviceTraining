@@ -2020,7 +2020,7 @@ static void testSerializeTensorSymSubByteRoundTripsPackedData(void) {
     f = fopen(FILE_PATH, "rb");
     deserializeTensor(dst, f);
     uint32_t sentinelIn = 0;
-    fread(&sentinelIn, sizeof(sentinelIn), 1, f);
+    size_t sentinelRead = fread(&sentinelIn, sizeof(sentinelIn), 1, f);
     fclose(f);
 
     /* CAPTURE -> free -> assert (file convention). */
@@ -2030,6 +2030,7 @@ static void testSerializeTensorSymSubByteRoundTripsPackedData(void) {
     freeTensor(src);
     freeTensor(dst);
 
+    TEST_ASSERT_EQUAL_size_t(1u, sentinelRead);
     TEST_ASSERT_EQUAL_HEX32(0x53454E54u, sentinelIn);
     TEST_ASSERT_EQUAL_FLOAT(srcScale, dstScale);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(srcBytes, dstBytes, 5);
@@ -2068,7 +2069,7 @@ static void testSerializeTensorBoolRoundTripsPackedData(void) {
     f = fopen(FILE_PATH, "rb");
     deserializeTensor(dst, f);
     uint32_t sentinelIn = 0;
-    fread(&sentinelIn, sizeof(sentinelIn), 1, f);
+    size_t sentinelRead = fread(&sentinelIn, sizeof(sentinelIn), 1, f);
     fclose(f);
 
     bool got[12];
@@ -2078,6 +2079,7 @@ static void testSerializeTensorBoolRoundTripsPackedData(void) {
     freeTensor(src);
     freeTensor(dst);
 
+    TEST_ASSERT_EQUAL_size_t(1u, sentinelRead);
     TEST_ASSERT_EQUAL_HEX32(0x53454E54u, sentinelIn);
     for (size_t i = 0; i < 12; i++) {
         TEST_ASSERT_EQUAL_INT(pattern[i], got[i]);

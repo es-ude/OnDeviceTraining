@@ -416,12 +416,13 @@ static void testDeserializeTensorFailsFastOnTruncatedPayload(void) {
 
     FILE *in = fopen(FILE_PATH, "rb");
     uint8_t *buf = reserveMemory((size_t)full);
-    fread(buf, 1, (size_t)full, in);
+    size_t got = fread(buf, 1, (size_t)full, in);
     fclose(in);
     f = fopen(FILE_PATH, "wb");
     fwrite(buf, 1, (size_t)full - 2, f);
     fclose(f);
     freeReservedMemory(buf);
+    TEST_ASSERT_EQUAL_size_t((size_t)full, got);
 
     tensor_t *skeleton = makeFloatTensor2D(2, 3, NULL, 0);
     f = fopen(FILE_PATH, "rb");
@@ -1287,12 +1288,13 @@ static void testSkipSerializedTensorRejectsTruncatedPayload(void) {
 
     FILE *in = fopen(FILE_PATH, "rb");
     uint8_t *buf = reserveMemory((size_t)full);
-    fread(buf, 1, (size_t)full, in);
+    size_t got = fread(buf, 1, (size_t)full, in);
     fclose(in);
     f = fopen(FILE_PATH, "wb");
     fwrite(buf, 1, (size_t)full - 2, f); /* cuts into the grad tensor's payload tail */
     fclose(f);
     freeReservedMemory(buf);
+    TEST_ASSERT_EQUAL_size_t((size_t)full, got);
 
     tensor_t *skeletonParamTensor = makeFloatTensor2D(2, 3, NULL, 0);
     parameter_t frozenSkeleton = {.param = skeletonParamTensor, .grad = NULL};

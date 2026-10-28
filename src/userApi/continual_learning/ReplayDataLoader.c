@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 
+#include "CheckedSize.h"
 #include "Common.h"
 #include "DataLoader.h"
 #include "DataLoaderApi.h"
@@ -21,6 +22,15 @@ typedef struct {
     tensor_t **itemPool;  /* [numClasses * samplesPerClass], lazily built */
     tensor_t **labelPool; /* [numClasses] shared one-hot labels */
 } replayLoader_t;
+
+static void *reserveOrExit(size_t bytes, const char *what) {
+    void *p = reserveMemory(bytes);
+    if (p == NULL) {
+        PRINT_ERROR("replayDataLoader: cannot reserve %zu bytes for the %s", bytes, what);
+        exit(1);
+    }
+    return p;
+}
 
 static size_t loaderNumClasses(const replayLoader_t *rl) {
     return rl->cfg.mode == REPLAY_MODE_EXEMPLAR ? rl->cfg.exemplars->numClasses
@@ -59,7 +69,8 @@ static void initPoolsFromFirstSample(replayLoader_t *rl, const sample_t *first) 
                         calcNumberOfElementsByTensor(first->item), dim);
             exit(1);
         }
-        rl->itemPool = reserveMemory(numClasses * r * sizeof(tensor_t *));
+        /* the wrap-time batch-array bound also bounds this product */
+        rl->itemPool = reserveOrExit(numClasses * r * sizeof(tensor_t *), "replay item pool");
         for (size_t c = 0; c < numClasses; c++) {
             for (size_t i = 0; i < r; i++) {
                 rl->itemPool[c * r + i] = initTensor(getShapeLike(first->item->shape),
@@ -123,8 +134,16 @@ static batch_t *replayGetBatch(dataLoader_t *dl, size_t index, const rngKey_t *s
         replayKey = rngFold(*stepKey, RNG_TAG_CL_REPLAY, 0u);
     }
 
-    size_t newSize = baseBatch->size + eligible * r;
-    sample_t **samples = reserveMemory(newSize * sizeof(sample_t *));
+    /* eligible * r <= numClasses * r, bounded at wrap time */
+    size_t newSize;
+    size_t bytes;
+    if (!checkedAddSize(baseBatch->size, eligible * r, &newSize) ||
+        !checkedMulSize(newSize, sizeof(sample_t *), &bytes)) {
+        PRINT_ERROR("replayGetBatch: base batch of %zu samples plus %zu replayed overflows",
+                    baseBatch->size, eligible * r);
+        exit(1);
+    }
+    sample_t **samples = reserveOrExit(bytes, "replayed batch");
     for (size_t i = 0; i < baseBatch->size; i++) {
         samples[i] = baseBatch->samples[i]; /* REAL FIRST (labelRef contract) */
     }
@@ -181,6 +200,20 @@ dataLoader_t *replayDataLoaderWrap(dataLoader_t *base, const replayLoaderConfig_
     /* Slot i draws under (SLOT, i), a 32-bit fold index. */
     if (cfg->samplesPerClass > UINT32_MAX) {
         PRINT_ERROR("replayDataLoaderWrap: samplesPerClass exceeds UINT32_MAX");
+        exit(1);
+    }
+    /* A batch holds batchSize real + numClasses * r replayed pointers at most. */
+    size_t numClasses =
+        cfg->mode == REPLAY_MODE_EXEMPLAR ? cfg->exemplars->numClasses : cfg->set->numClasses;
+    size_t slots;
+    size_t total;
+    size_t bytes;
+    if (!checkedMulSize(numClasses, cfg->samplesPerClass, &slots) ||
+        !checkedAddSize(slots, base->batchSize, &total) ||
+        !checkedMulSize(total, sizeof(sample_t *), &bytes)) {
+        PRINT_ERROR("replayDataLoaderWrap: batchSize %u + numClasses %zu x samplesPerClass %zu "
+                    "overflows the batch array",
+                    (unsigned)base->batchSize, numClasses, cfg->samplesPerClass);
         exit(1);
     }
     replayLoader_t *rl = reserveMemory(sizeof(replayLoader_t));

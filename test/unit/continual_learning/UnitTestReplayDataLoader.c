@@ -707,6 +707,100 @@ void testReplayFetchesItsBaseWithTheStepKey(void) {
     TEST_ASSERT_EQUAL_PTR(&stepKey, seen);
 }
 
+/* #458: a replayed batch holds B + numClasses * r sample pointers (B = 2
+ * here). The wrap reads nothing but numClasses from its source, so a stack
+ * source can claim a class count no real set could hold. */
+static void wrapAndFreeWithClassCount(replayMode_t mode, size_t numClasses,
+                                      size_t samplesPerClass) {
+    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
+    ppcaReplaySet_t set = {.numClasses = numClasses};
+    exemplarBuffer_t buf = {.numClasses = numClasses};
+    replayLoaderConfig_t rcfg = {.samplesPerClass = samplesPerClass, .minCount = 1, .mode = mode};
+    if (mode == REPLAY_MODE_EXEMPLAR) {
+        rcfg.exemplars = &buf;
+    } else {
+        rcfg.set = &set;
+    }
+    freeReplayDataLoader(replayDataLoaderWrap(base, &rcfg));
+    freeDataLoader(base);
+}
+
+static const replayMode_t kBoundModes[2] = {REPLAY_MODE_PPCA_SAMPLE, REPLAY_MODE_EXEMPLAR};
+
+void testWrapAcceptsBatchArrayAtLimit(void) {
+    const size_t limit = SIZE_MAX / sizeof(sample_t *) - 2u;
+    for (size_t m = 0; m < 2u; m++) {
+        replayMode_t mode = kBoundModes[m];
+        wrapAndFreeWithClassCount(mode, limit, 1);
+        wrapAndFreeWithClassCount(mode, limit / 2u, 2);
+    }
+}
+
+/* r = 2 with numClasses = SIZE_MAX/2 + 1 wraps numClasses * r to 0, which an
+ * unchecked product would accept as an empty replay set. */
+void testWrapRejectsBatchArrayOverflow(void) {
+    for (size_t m = 0; m < 2u; m++) {
+        replayMode_t mode = kBoundModes[m];
+        ASSERT_EXITS_WITH_OUTPUT(
+            1, "overflows the batch array",
+            wrapAndFreeWithClassCount(mode, SIZE_MAX / sizeof(sample_t *) - 1u, 1));
+        ASSERT_EXITS_WITH_OUTPUT(1, "overflows the batch array",
+                                 wrapAndFreeWithClassCount(mode, SIZE_MAX / 2u + 1u, 2));
+    }
+}
+
+/* A base batch whose size claims more samples than it holds: the replay
+ * bound must reject it before copying. */
+static size_t g_claimedBaseBatchSize;
+
+static batch_t *oneRealSampleClaimingSize(dataLoader_t *dl, size_t index, const rngKey_t *stepKey) {
+    (void)dl;
+    (void)index;
+    (void)stepKey;
+    batch_t *batch = reserveMemory(sizeof(batch_t));
+    batch->samples = reserveMemory(sizeof(sample_t *));
+    batch->samples[0] = fakeGetSample(0);
+    batch->size = g_claimedBaseBatchSize;
+    return batch;
+}
+
+static void fetchExemplarReplayOverBaseBatchClaiming(size_t claimedSize) {
+    buildFakeDataset();
+    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
+    exemplarBuffer_t *buf = exemplarBufferCreate(2, 1);
+    exemplarBufferAdd(buf, g_items[0], 0);
+    exemplarBufferAdd(buf, g_items[1], 1);
+    replayLoaderConfig_t rcfg = {
+        .exemplars = buf, .samplesPerClass = 1, .minCount = 1, .mode = REPLAY_MODE_EXEMPLAR};
+    dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
+    g_claimedBaseBatchSize = claimedSize;
+    base->getBatch = oneRealSampleClaimingSize;
+    const rngKey_t stepKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_STEP, 0u);
+    (void)wrapped->getBatch(wrapped, 0, &stepKey);
+}
+
+void testGetBatchRejectsBaseSizeAddOverflow(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "replayed overflows",
+                             fetchExemplarReplayOverBaseBatchClaiming(SIZE_MAX));
+}
+
+void testGetBatchRejectsBaseSizeByteOverflow(void) {
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "replayed overflows",
+        fetchExemplarReplayOverBaseBatchClaiming(SIZE_MAX / sizeof(sample_t *)));
+}
+
+#if SIZE_MAX > UINT32_MAX
+#ifndef ODT_TEST_ASAN
+/* 2^62 bytes neither wrap nor fit on any 64-bit host. Skipped under ASan,
+ * which aborts on oversized requests unless allocator_may_return_null=1. */
+void testGetBatchFailsFastWhenReservationFails(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "cannot reserve",
+                             fetchExemplarReplayOverBaseBatchClaiming((size_t)1 << 59));
+}
+#endif
+#endif
+
 /* #152 PR3a: the training loop adds the batch axis to EVERY sample it is
  * handed, real or replayed -- so a replayed sample must carry exactly the real
  * samples' natural shape. A pool (or exemplar copy) with a flattened [dim]
@@ -860,6 +954,15 @@ int main(void) {
     RUN_TEST(testShufflingTheReplayWrapperOrdersTheBaseToo);
     RUN_TEST(testShufflingTheBaseAfterWrappingKeepsTheWrapperFetching);
     RUN_TEST(testReplayFetchesItsBaseWithTheStepKey);
+    RUN_TEST(testWrapAcceptsBatchArrayAtLimit);
+    RUN_TEST(testWrapRejectsBatchArrayOverflow);
+    RUN_TEST(testGetBatchRejectsBaseSizeAddOverflow);
+    RUN_TEST(testGetBatchRejectsBaseSizeByteOverflow);
+#if SIZE_MAX > UINT32_MAX
+#ifndef ODT_TEST_ASAN
+    RUN_TEST(testGetBatchFailsFastWhenReservationFails);
+#endif
+#endif
     RUN_TEST(testPpcaReplayedSamplesKeepTheRealSamplesNaturalShape);
     RUN_TEST(testExemplarReplayedSamplesKeepTheRealSamplesNaturalShape);
     return UNITY_END();

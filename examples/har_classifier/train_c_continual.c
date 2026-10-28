@@ -366,6 +366,15 @@ int main(void) {
         fprintf(stderr, "ERROR: DOMAINS must be >= 1 (got %d)\n", g_domains);
         return 1;
     }
+    /* Both are cast to size_t below: a negative value would become huge. */
+    if (g_replay && g_rPerClass < 1) {
+        fprintf(stderr, "ERROR: R_PER_CLASS must be >= 1 (got %d)\n", g_rPerClass);
+        return 1;
+    }
+    if (g_replay && g_replayMode == REPLAY_MODE_EXEMPLAR && g_exemplarsPerClass < 1) {
+        fprintf(stderr, "ERROR: EXEMPLARS_PER_CLASS must be >= 1 (got %d)\n", g_exemplarsPerClass);
+        return 1;
+    }
     size_t T = (size_t)g_domains;
 
     /* Keep all T domains' datasets resident (host demo). */

@@ -199,7 +199,10 @@ for realistic `dim`/`maxSessionSamples` — it is `reserveMemory`-backed
 - **`samplesPerClass` (r, synthetic samples per eligible class per batch)**
   — start **1–4**. Larger `r` biases each batch more toward rehearsal of
   earlier domains, at the cost of a proportionally larger batch
-  (`batch->size` grows by up to `eligible · r`).
+  (`batch->size` grows by up to `eligible · r`). An `r` whose batch array
+  (`batchSize + numClasses · r` sample pointers) would overflow `size_t`
+  stops at wrap time (`replayDataLoaderWrap` exits with "overflows the batch
+  array").
 - **`minCount`** (gates immature generators out of replay: a class is
   eligible once its generator's `count >= minCount`) — start at **`>= 2k`**
   as a rule of thumb (enough absorbed samples for the merge's

@@ -1067,7 +1067,7 @@ void conv1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad, 
 
 void conv1dCalcOutputShape(layer_t *conv1dLayer, shape_t *inputShape, shape_t *outputShape) {
     if (inputShape->numberOfDimensions != 3) {
-        PRINT_ERROR("Conv1d expects 3D input [batch, channel, length], got %luD",
+        PRINT_ERROR("Conv1d expects 3D input [batch, channel, length], got %zuD",
                     inputShape->numberOfDimensions);
         exit(1);
     }

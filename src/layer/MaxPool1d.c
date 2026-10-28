@@ -701,7 +701,7 @@ void maxPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGra
 
 void maxPool1dCalcOutputShape(layer_t *layer, shape_t *inputShape, shape_t *outputShape) {
     if (inputShape->numberOfDimensions != 3) {
-        PRINT_ERROR("MaxPool1d expects 3D input [batch, channel, length], got %luD",
+        PRINT_ERROR("MaxPool1d expects 3D input [batch, channel, length], got %zuD",
                     inputShape->numberOfDimensions);
         exit(1);
     }

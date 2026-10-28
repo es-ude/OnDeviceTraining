@@ -53,7 +53,7 @@ static void matmulIntCore(tensor_t *aTensor, tensor_t *bTensor, tensor_t *output
 
     if (aColumns != bRows) {
         PRINT_ERROR("Rows dont match Columns");
-        PRINT_DEBUG("aColumns: %lu, bRows: %lu\n", aColumns, bRows);
+        PRINT_DEBUG("aColumns: %zu, bRows: %zu", aColumns, bRows);
         exit(1);
     }
 
@@ -141,7 +141,7 @@ static void matmulFloatCore(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outp
 
     if (aColumns != bRows) {
         PRINT_ERROR("Rows dont match Columns");
-        PRINT_DEBUG("aColumns: %lu, bRows: %lu\n", aColumns, bRows);
+        PRINT_DEBUG("aColumns: %zu, bRows: %zu", aColumns, bRows);
         exit(1);
     }
 
@@ -338,7 +338,7 @@ static void matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor_t 
 
     if (aColumns != bRows) {
         PRINT_ERROR("Rows dont match Columns");
-        PRINT_DEBUG("aColumns: %lu, bRows: %lu\n", aColumns, bRows);
+        PRINT_DEBUG("aColumns: %zu, bRows: %zu", aColumns, bRows);
         exit(1);
     }
 
@@ -518,7 +518,7 @@ void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
 
     if (aColumns != bRows) {
         PRINT_ERROR("Rows dont match Columns");
-        PRINT_DEBUG("aColumns: %lu, bRows: %lu\n", aColumns, bRows);
+        PRINT_DEBUG("aColumns: %zu, bRows: %zu", aColumns, bRows);
         exit(1);
     }
 

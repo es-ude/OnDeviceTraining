@@ -28,8 +28,9 @@ typedef struct {
 /*! Reads the preamble and the header dict of a .npy file: magic, version 1.0/2.0/3.0,
  * a header length within NPY_MAX_HEADER_BYTES and the file size, then the keys
  * 'descr' ('<f4' or '<i4'), 'fortran_order' (False) and 'shape' (at most NPY_MAX_DIMS
- * dimensions, each fitting size_t). Leaves f at the payload. Every failure prints the
- * path and the reason and exits(1).
+ * dimensions, each fitting size_t), then checks that the element count and payload byte
+ * count fit size_t and that the bytes after the header equal the payload exactly. Leaves
+ * f at the payload. Every failure prints the path and the reason and exits(1).
  *
  * \param f: File opened at offset 0
  * \param path: Path of f, for the error messages

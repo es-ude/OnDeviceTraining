@@ -4,7 +4,11 @@
 #include "Dataset.h"
 
 /*!
- * Loads a .npy file as a tensor array.
+ * Loads a .npy file as a tensor array, one tensor per entry of the leading dimension.
+ *
+ * Stops with exit(1) and a message naming the path when the file is malformed (see
+ * npyReadHeader), its payload size does not match the shape, the shape is 0-d, or the
+ * file holds zero samples or zero elements.
  *
  * \param path: Path to .npy file
  * \return Pointer to tensor array
@@ -21,6 +25,9 @@ tensorArray_t *npyLoad(char *path);
  * shape [out, in, k] with npyLoad() yields `out` separate [in, k] tensors, so
  * only the first output channel is reachable as array[0]; npyLoadFlat() keeps
  * all `out * in * k` elements contiguous in one tensor.
+ *
+ * A 0-d shape loads as a single element. Stops with exit(1) like npyLoad() when the file
+ * is malformed, its payload size does not match the shape, or it holds zero elements.
  *
  * The caller owns the returned tensor and must release it with freeTensor().
  *

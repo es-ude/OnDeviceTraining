@@ -245,6 +245,74 @@ void testNpyParsesShapeSpellings(void) {
     assertShapeSpellingLoads("{'descr': '<f4', 'fortran_order': False, 'shape': (6,), }", 6);
 }
 
+void testNpyLoadRejectsZeroDimShape(void) {
+    writeDict("{'descr': '<f4', 'fortran_order': False, 'shape': (), }", SIX_FLOATS, sizeof(float));
+    ASSERT_EXITS_WITH_OUTPUT(1, "leading sample dimension", loadUnderAlarm());
+}
+
+void testNpyRejectsZeroSamples(void) {
+    writeDict("{'descr': '<f4', 'fortran_order': False, 'shape': (0, 4), }", NULL, 0);
+    ASSERT_EXITS_WITH_OUTPUT(1, "has zero samples", loadUnderAlarm());
+    ASSERT_EXITS_WITH_OUTPUT(1, "has zero elements", loadFlatUnderAlarm());
+
+    writeDict("{'descr': '<f4', 'fortran_order': False, 'shape': (0,), }", NULL, 0);
+    ASSERT_EXITS_WITH_OUTPUT(1, "has zero samples", loadUnderAlarm());
+    ASSERT_EXITS_WITH_OUTPUT(1, "has zero elements", loadFlatUnderAlarm());
+}
+
+/* The 64-bit literals below would stop at "shape dimension overflows size_t" on a
+ * 32-bit size_t and miss their substring. */
+#if SIZE_MAX > UINT32_MAX
+void testNpyRejectsZeroElementRow(void) {
+    /* 2^61 samples of zero elements: without the elements check the tensor_t *
+     * array reservation is 2^61 * 8 bytes, which wraps to 0. */
+    writeDict("{'descr': '<f4', 'fortran_order': False, 'shape': (2305843009213693952, 0), }", NULL,
+              0);
+    ASSERT_EXITS_WITH_OUTPUT(1, "has zero elements", loadUnderAlarm());
+}
+
+void testNpyRejectsElementCountOverflow(void) {
+    writeDict("{'descr': '<i4', 'fortran_order': False, 'shape': (4611686018427387905, 4), }",
+              SIX_FLOATS, sizeof(float));
+    ASSERT_EXITS_WITH_OUTPUT(1, "element count of the shape overflows", loadUnderAlarm());
+    ASSERT_EXITS_WITH_OUTPUT(1, "element count of the shape overflows", loadFlatUnderAlarm());
+}
+
+void testNpyRejectsPayloadSizeOverflow(void) {
+    /* 2^62 + 1 elements fit size_t; times 4 bytes they do not. */
+    writeDict("{'descr': '<i4', 'fortran_order': False, 'shape': (4611686018427387905,), }",
+              SIX_FLOATS, sizeof(float));
+    ASSERT_EXITS_WITH_OUTPUT(1, "payload size of the shape overflows", loadUnderAlarm());
+    ASSERT_EXITS_WITH_OUTPUT(1, "payload size of the shape overflows", loadFlatUnderAlarm());
+}
+
+void testNpyRejectsPayloadShorterThanShape(void) {
+    writeDict("{'descr': '<i4', 'fortran_order': False, 'shape': (2305843009213693953,), }",
+              SIX_FLOATS, sizeof(float));
+    ASSERT_EXITS_WITH_OUTPUT(1, "shape needs", loadUnderAlarm());
+    ASSERT_EXITS_WITH_OUTPUT(1, "shape needs", loadFlatUnderAlarm());
+}
+#endif
+
+void testNpyRejectsTrailingBytes(void) {
+    writeDict("{'descr': '<f4', 'fortran_order': False, 'shape': (2,), }", SIX_FLOATS,
+              3 * sizeof(float));
+    ASSERT_EXITS_WITH_OUTPUT(1, "shape needs", loadUnderAlarm());
+    ASSERT_EXITS_WITH_OUTPUT(1, "shape needs", loadFlatUnderAlarm());
+}
+
+void testNpyLoadFlatAcceptsScalar(void) {
+    writeDict("{'descr': '<f4', 'fortran_order': False, 'shape': (), }", SIX_FLOATS, sizeof(float));
+
+    tensor_t *flat = npyLoadFlat(NPY_FIXTURE_PATH);
+    size_t elements = calcNumberOfElementsByTensor(flat);
+    float value = ((float *)flat->data)[0];
+    freeTensor(flat);
+
+    TEST_ASSERT_EQUAL_size_t(1, elements);
+    TEST_ASSERT_EQUAL_FLOAT(SIX_FLOATS[0], value);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testNpyRejectsBadMagic);
@@ -265,5 +333,15 @@ int main(void) {
     RUN_TEST(testNpyRejectsDimensionOverflow);
     RUN_TEST(testNpyRejectsTooManyDims);
     RUN_TEST(testNpyParsesShapeSpellings);
+    RUN_TEST(testNpyLoadRejectsZeroDimShape);
+    RUN_TEST(testNpyRejectsZeroSamples);
+#if SIZE_MAX > UINT32_MAX
+    RUN_TEST(testNpyRejectsZeroElementRow);
+    RUN_TEST(testNpyRejectsElementCountOverflow);
+    RUN_TEST(testNpyRejectsPayloadSizeOverflow);
+    RUN_TEST(testNpyRejectsPayloadShorterThanShape);
+#endif
+    RUN_TEST(testNpyRejectsTrailingBytes);
+    RUN_TEST(testNpyLoadFlatAcceptsScalar);
     return UNITY_END();
 }

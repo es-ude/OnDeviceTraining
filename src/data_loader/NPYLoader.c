@@ -120,6 +120,9 @@ static const char *findValue(const char *header, const char *key, const char *pa
     return skipSpaces(p + 1);
 }
 
+/* Both supported descrs, '<f4' and '<i4', are 4 bytes wide. */
+#define NPY_ELEMENT_BYTES 4u
+
 static dtype_t parseDescr(const char *p, const char *path) {
     if (strncmp(p, "'<f4'", 5) == 0) {
         return FLOAT_32;
@@ -184,6 +187,34 @@ void npyReadHeader(FILE *f, const char *path, npyHeader_t *out) {
     out->dtype = parseDescr(descr, path);
     parseFortranOrder(fortranOrder, path);
     parseShape(shape, path, out);
-
     freeReservedMemory(header);
+
+    size_t numberOfElements = 1;
+    for (size_t i = 0; i < out->numberOfDims; i++) {
+        if (!checkedMulSize(numberOfElements, out->dims[i], &numberOfElements)) {
+            NPY_HEADER_FAIL(path, "element count of the shape overflows size_t");
+        }
+    }
+    size_t payloadBytes;
+    if (!checkedMulSize(numberOfElements, NPY_ELEMENT_BYTES, &payloadBytes)) {
+        NPY_HEADER_FAIL(path, "payload size of the shape overflows size_t");
+    }
+    out->numberOfElements = numberOfElements;
+    out->payloadBytes = payloadBytes;
+
+    /* Both loaders fread right after this returns, so f goes back to the payload start. */
+    long payloadStart = ftell(f);
+    if (payloadStart < 0 || fseek(f, 0, SEEK_END) != 0) {
+        NPY_HEADER_FAIL(path, "cannot determine the file size");
+    }
+    long fileSize = ftell(f);
+    if (fileSize < payloadStart || fseek(f, payloadStart, SEEK_SET) != 0) {
+        NPY_HEADER_FAIL(path, "cannot determine the file size");
+    }
+    /* Equality, not >=: np.save and npy_writer.c never pad, so surplus bytes mean a
+     * descr or shape that does not describe the data. */
+    size_t remaining = (size_t)(fileSize - payloadStart);
+    if (remaining != payloadBytes) {
+        NPY_HEADER_FAIL(path, "payload is %zu bytes, shape needs %zu", remaining, payloadBytes);
+    }
 }

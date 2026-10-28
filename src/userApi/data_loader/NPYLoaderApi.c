@@ -19,6 +19,21 @@ tensorArray_t *npyLoad(char *path) {
     npyHeader_t header;
     npyReadHeader(f, path, &header);
 
+    /* Order matters: (2^61, 0) passes the sample check and must still stop at the
+     * element check before numberOfTensors sizes a reservation. */
+    if (header.numberOfDims < 1) {
+        PRINT_ERROR("npyLoad: %s has a 0-d shape; need a leading sample dimension", path);
+        exit(1);
+    }
+    if (header.dims[0] < 1) {
+        PRINT_ERROR("npyLoad: %s has zero samples", path);
+        exit(1);
+    }
+    if (header.numberOfElements < 1) {
+        PRINT_ERROR("npyLoad: %s has zero elements", path);
+        exit(1);
+    }
+
     quantization_t *q = initQByDType(header.dtype);
 
     shape_t totalShape;
@@ -41,6 +56,10 @@ tensorArray_t *npyLoad(char *path) {
     size_t numberOfValuesInRow = calcNumberOfElementsByShape(&rowShape);
 
     tensorArray_t *tensorArr = reserveMemory(sizeof(tensorArray_t));
+    /* Cannot wrap, even with a 32-bit long: elements are 4 bytes for both supported
+     * dtypes and every sample holds at least one, so numberOfTensors <= numberOfElements
+     * and numberOfTensors * sizeof(tensor_t *) <= 2 * payloadBytes, where payloadBytes
+     * equals the file bytes after the header (an ftell difference, <= LONG_MAX). */
     tensor_t **arr = reserveMemory(numberOfTensors * sizeof(tensor_t *));
     tensorArr->array = arr;
     tensorArr->size = numberOfTensors;
@@ -81,6 +100,11 @@ tensor_t *npyLoadFlat(char *path) {
 
     npyHeader_t header;
     npyReadHeader(f, path, &header);
+
+    if (header.numberOfElements < 1) {
+        PRINT_ERROR("npyLoadFlat: %s has zero elements", path);
+        exit(1);
+    }
 
     quantization_t *q = initQByDType(header.dtype);
 

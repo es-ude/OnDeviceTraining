@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -1342,6 +1343,79 @@ static void testSkipSerializedTensorRejectsTruncatedPayload(void) {
     freeTensor(paramTensor);
 }
 
+#if SIZE_MAX == UINT64_MAX
+/*! #394: the grad-skip path must compute the element count through the
+ *  checked tensor core -- these dims wrap a size_t product to 64 elements, so
+ *  an unchecked product seeks 256 bytes forward into a file that has them and
+ *  silently desyncs the stream. */
+static void testSkipSerializedTensorRejectsWrappingDims(void) {
+    float paramData[] = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f};
+    tensor_t *paramTensor = makeFloatTensor2D(2, 3, paramData, 6);
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    uint8_t hasGrad = 1;
+    fwrite(&hasGrad, sizeof(uint8_t), 1, f);
+    serializeTensor(paramTensor, f);
+    writeU32LE(f, 3u);
+    writeU32LE(f, 320u);
+    writeU32LE(f, 107367629u);
+    writeU32LE(f, 536903681u);
+    for (uint32_t d = 0; d < 3u; d++) {
+        writeU32LE(f, d);
+    }
+    uint8_t floatType = (uint8_t)FLOAT32;
+    fwrite(&floatType, 1, 1, f);
+    uint8_t payload[256] = {0};
+    fwrite(payload, 1, sizeof(payload), f);
+    fclose(f);
+
+    tensor_t *skeletonParamTensor = makeFloatTensor2D(2, 3, NULL, 0);
+    parameter_t frozenSkeleton = {.param = skeletonParamTensor, .grad = NULL};
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1, "element count overflows",
+                             deserializeParameter(&frozenSkeleton, f));
+    fclose(f);
+
+    freeTensor(skeletonParamTensor);
+    freeTensor(paramTensor);
+}
+#endif
+
+#if SIZE_MAX == UINT64_MAX && LONG_MAX == INT64_MAX
+/*! #394: 2^62 - 4 FLOAT32 elements need 2^64 - 16 payload bytes -- no size_t
+ *  wrap, but the (long) seek offset becomes -16, so the skip would step
+ *  backwards inside the file and pass the truncation check. */
+static void testSkipSerializedTensorRejectsPayloadBeyondLongMax(void) {
+    float paramData[] = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f};
+    tensor_t *paramTensor = makeFloatTensor2D(2, 3, paramData, 6);
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    uint8_t hasGrad = 1;
+    fwrite(&hasGrad, sizeof(uint8_t), 1, f);
+    serializeTensor(paramTensor, f);
+    writeU32LE(f, 2u);
+    writeU32LE(f, 4027518961u);
+    writeU32LE(f, 1145043900u);
+    writeU32LE(f, 0u);
+    writeU32LE(f, 1u);
+    uint8_t floatType = (uint8_t)FLOAT32;
+    fwrite(&floatType, 1, 1, f);
+    fclose(f);
+
+    tensor_t *skeletonParamTensor = makeFloatTensor2D(2, 3, NULL, 0);
+    parameter_t frozenSkeleton = {.param = skeletonParamTensor, .grad = NULL};
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1, "exceeds the seekable range",
+                             deserializeParameter(&frozenSkeleton, f));
+    fclose(f);
+
+    freeTensor(skeletonParamTensor);
+    freeTensor(paramTensor);
+}
+#endif
+
 /*! Group-quant PR2 (Task 5) mutation guard: skipSerializedTensor's SYM branch
  *  must parse a GROUPED v4 record (numGroups=3, groupSize=2) exactly -- the
  *  payload byte count is independent of numGroups (sized by qBits x element
@@ -2414,6 +2488,12 @@ int main(void) {
     RUN_TEST(testDeserializeWeightsOnlyIntoTrainableSkeleton);
     RUN_TEST(testSkipSerializedTensorRejectsRankAboveCap);
     RUN_TEST(testSkipSerializedTensorRejectsTruncatedPayload);
+#if SIZE_MAX == UINT64_MAX
+    RUN_TEST(testSkipSerializedTensorRejectsWrappingDims);
+#endif
+#if SIZE_MAX == UINT64_MAX && LONG_MAX == INT64_MAX
+    RUN_TEST(testSkipSerializedTensorRejectsPayloadBeyondLongMax);
+#endif
     RUN_TEST(testSkipSerializedGroupedSymGrad);
     RUN_TEST(testDeserializeSymRejectsOversizedNumGroupsInWireConfig);
     RUN_TEST(testDeserializeAsymRejectsOversizedNumGroupsInWireConfig);

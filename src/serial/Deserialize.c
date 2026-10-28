@@ -1,5 +1,6 @@
 #define SOURCE_FILE "DESERIALIZE"
 
+#include <limits.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -550,9 +551,9 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
 }
 
 /* Sanity cap on skipSerializedTensor's untrusted file rank: no shipped tensor
- * exceeds rank 8, so a larger value is a corrupt/malicious record. Bounds the
- * dims-read loop below -- no dims[] array is sized off this value (#380 PR3
- * review: the array was write-only, dropped in favor of an inline product). */
+ * exceeds rank 8, so a larger value is a corrupt/malicious record. Sizes the
+ * stack dims[] the element count is computed from (#394: through the checked
+ * tensor core, so a wrapping product fails fast instead of desyncing). */
 #define SKIP_TENSOR_MAX_DIMS 8
 
 static void skipSerializedTensor(FILE *f) {
@@ -569,10 +570,13 @@ static void skipSerializedTensor(FILE *f) {
                     (unsigned)numDims, SKIP_TENSOR_MAX_DIMS);
         exit(1);
     }
-    size_t numberOfElements = 1;
+    size_t dims[SKIP_TENSOR_MAX_DIMS];
     for (uint32_t d = 0; d < numDims; d++) {
-        numberOfElements *= (size_t)serialReadU32LE(f);
+        dims[d] = (size_t)serialReadU32LE(f);
     }
+    shape_t wireShape = {
+        .numberOfDimensions = numDims, .dimensions = dims, .orderOfDimensions = NULL};
+    size_t numberOfElements = calcNumberOfElementsByShape(&wireShape);
     /* orderOfDimensions: positional only, irrelevant to a discarded record. */
     if (fseek(f, (long)numDims * (long)sizeof(uint32_t), SEEK_CUR) != 0) {
         PRINT_ERROR("skipSerializedTensor: seek past orderOfDimensions failed");
@@ -674,6 +678,13 @@ static void skipSerializedTensor(FILE *f) {
     }
 
     size_t payloadBytes = calcNumberOfBytesForData(&scratchQ, numberOfElements);
+    /* A larger value turns negative in the (long) cast and seeks backwards,
+     * which the truncation check below cannot see. */
+    if (payloadBytes > (size_t)LONG_MAX) {
+        PRINT_ERROR("skipSerializedTensor: payload of %zu bytes exceeds the seekable range",
+                    payloadBytes);
+        exit(1);
+    }
     if (fseek(f, (long)payloadBytes, SEEK_CUR) != 0) {
         PRINT_ERROR("skipSerializedTensor: seek past payload failed");
         exit(1);

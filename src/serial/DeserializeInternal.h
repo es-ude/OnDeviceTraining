@@ -103,6 +103,9 @@ static void deserializeSparsity();
  *  does not divide its own element count fails fast on this path too, not
  *  just when a live tensor backs the config. Requires a seekable stream
  *  (fseek/ftell), matching the ODTR/PPCA deserialize precedent (#316 wave).
+ *  Fails fast (#394) when the dims product overflows size_t (the message is
+ *  calcNumberOfElementsByShape's, not this function's) and when the payload
+ *  exceeds LONG_MAX bytes, which the (long) fseek offset cannot express.
  *
  * \param f: Pointer of file to skip a tensor record from
  */

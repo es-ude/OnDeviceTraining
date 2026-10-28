@@ -41,6 +41,7 @@ void initConv1dConfigWithWeightsAndBias(conv1dConfig_t *conv1dConfig, kernel_t *
     conv1dConfig->propLossMath = arithmeticFromQuantizationOrDefault(propLossQ);
     conv1dConfig->outputQ = forwardQ;
     conv1dConfig->propLossQ = propLossQ;
+    conv1dConfig->ownsQuantizations = false;
 
     /* Today's per-callsite hardcodes (conv1dCalcWeightGradsFloat32/SymInt32,
      * conv1dCalcBiasGradsFloat32/SymInt32 below), now carried on the config so

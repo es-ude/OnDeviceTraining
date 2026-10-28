@@ -26,6 +26,7 @@ void initAvgPool1dConfig(avgPool1dConfig_t *cfg, kernel_t *kernel, quantization_
     cfg->propLossMath = arithmeticFromQuantizationOrDefault(propLossQ);
     cfg->outputQ = forwardQ;
     cfg->propLossQ = propLossQ;
+    cfg->ownsQuantizations = false;
 }
 
 /* BFP epic PR4 (F5), every arm since #4 PR0: the pool kernels index their

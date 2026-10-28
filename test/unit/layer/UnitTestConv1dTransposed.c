@@ -2573,6 +2573,23 @@ void testConv1dTransposedSrForwardIsAPureFunctionOfItsForwardOpKey(void) {
     freeConv1dTransposedLayer(layer);
 }
 
+/* #440: see testConv1dInitConfigClearsOwnsQuantizations. */
+void testConv1dTransposedInitConfigClearsOwnsQuantizations(void) {
+    kernel_t kernel;
+    initKernel(&kernel, 2, VALID, 1, 1);
+    size_t weightDims[] = {1, 1, 2};
+    size_t weightOrder[] = {0, 1, 2};
+    shape_t weightShape = {
+        .dimensions = weightDims, .orderOfDimensions = weightOrder, .numberOfDimensions = 3};
+    tensor_t weightTensor = {.shape = &weightShape};
+    parameter_t weights = {.param = &weightTensor, .grad = NULL};
+    conv1dTransposedConfig_t cfg;
+    memset(&cfg, 0xFF, sizeof cfg);
+    initConv1dTransposedConfigWithWeightsAndBias(&cfg, &kernel, &weights, NULL, 1, 0, NULL, NULL,
+                                                 NULL, NULL);
+    TEST_ASSERT_EQUAL_UINT8(0, *(const unsigned char *)&cfg.ownsQuantizations);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testConv1dTransposedForwardSingleChannelSingleBatch);
@@ -2634,5 +2651,6 @@ int main() {
     RUN_TEST(testConv1dTransposedCalcBiasGradsBfpRejectsFloat32Weights);
     RUN_TEST(testConvT1dCalcWeightGradsBfpRejectsInputChannelMismatch);
     RUN_TEST(testConv1dTransposedSrForwardIsAPureFunctionOfItsForwardOpKey);
+    RUN_TEST(testConv1dTransposedInitConfigClearsOwnsQuantizations);
     return UNITY_END();
 }

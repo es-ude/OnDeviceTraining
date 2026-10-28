@@ -954,6 +954,14 @@ void testAdaptiveAvgPool1dSrForwardIsAPureFunctionOfItsForwardOpKey(void) {
     freeQuantization(q);
 }
 
+/* #440: see testLinearInitConfigClearsOwnsQuantizations. */
+void testAdaptiveAvgPool1dInitConfigClearsOwnsQuantizations(void) {
+    adaptiveAvgPool1dConfig_t cfg;
+    memset(&cfg, 0xFF, sizeof cfg);
+    initAdaptiveAvgPool1dConfig(&cfg, 2, NULL, NULL);
+    TEST_ASSERT_EQUAL_UINT8(0, *(const unsigned char *)&cfg.ownsQuantizations);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testForwardBasic);
@@ -986,5 +994,6 @@ int main(void) {
     RUN_TEST(testAdaptiveAvgPool1dBackwardBfpGuardsNarrowedNotRemoved);
     RUN_TEST(testAdaptiveAvgPool1dBfpRejectsRank2Operands);
     RUN_TEST(testAdaptiveAvgPool1dSrForwardIsAPureFunctionOfItsForwardOpKey);
+    RUN_TEST(testAdaptiveAvgPool1dInitConfigClearsOwnsQuantizations);
     return UNITY_END();
 }

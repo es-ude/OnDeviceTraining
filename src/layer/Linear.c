@@ -28,6 +28,7 @@ void linearInitConfig(linearConfig_t *linearConfig, parameter_t *weights, parame
     linearConfig->propLossMath = arithmeticFromQuantizationOrDefault(backwardMath);
     linearConfig->outputQ = forwardQ;
     linearConfig->propLossQ = propLossQ;
+    linearConfig->ownsQuantizations = false;
 
     /* Today's per-callsite hardcodes (linearBackward, below), now carried on
      * the config so every caller of this init function -- factory-built or

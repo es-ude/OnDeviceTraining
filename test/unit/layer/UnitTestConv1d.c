@@ -2944,6 +2944,23 @@ void testConv1dSrForwardIsAPureFunctionOfItsForwardOpKey(void) {
     freeConv1dLayer(layer);
 }
 
+/* #440: see testLinearInitConfigClearsOwnsQuantizations. The init reads only
+ * the weight's dimensions[2], so a stack shape is enough. */
+void testConv1dInitConfigClearsOwnsQuantizations(void) {
+    kernel_t kernel;
+    initKernel(&kernel, 2, VALID, 1, 1);
+    size_t weightDims[] = {1, 1, 2};
+    size_t weightOrder[] = {0, 1, 2};
+    shape_t weightShape = {
+        .dimensions = weightDims, .orderOfDimensions = weightOrder, .numberOfDimensions = 3};
+    tensor_t weightTensor = {.shape = &weightShape};
+    parameter_t weights = {.param = &weightTensor, .grad = NULL};
+    conv1dConfig_t cfg;
+    memset(&cfg, 0xFF, sizeof cfg);
+    initConv1dConfigWithWeightsAndBias(&cfg, &kernel, &weights, NULL, 1, NULL, NULL, NULL, NULL);
+    TEST_ASSERT_EQUAL_UINT8(0, *(const unsigned char *)&cfg.ownsQuantizations);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testConv1dForwardMultiChannelWithBias);
@@ -3012,5 +3029,6 @@ int main() {
     RUN_TEST(testConv1dCalcBiasGradsBfpRejectsFloat32Weights);
     RUN_TEST(testConv1dCalcWeightGradsBfpRejectsInputChannelMismatch);
     RUN_TEST(testConv1dSrForwardIsAPureFunctionOfItsForwardOpKey);
+    RUN_TEST(testConv1dInitConfigClearsOwnsQuantizations);
     return UNITY_END();
 }

@@ -1231,7 +1231,10 @@ void testConv1dBackwardSymStrideDilation() {
  * weight Cout). Each guard must fail-fast via exit(1). FLOAT helpers are static,
  * so they are exercised through the public conv1dBackward entry point; the SYM
  * helpers are exported and called directly. Data is all-zero — the guards read
- * shapes only and fire before any allocation or accumulation.
+ * shapes only and fire before any allocation or accumulation. The Float
+ * batch/outChannels pair now dies at the #436 op-entry loss gate and asserts
+ * that banner; those two FLOAT wrapper checks are unreachable from the public
+ * entry, so only the SYM twins pin that check class.
  * ------------------------------------------------------------------------- */
 
 void testConv1dWeightGradFloatRejectsBatchMismatch() {
@@ -1265,7 +1268,8 @@ void testConv1dWeightGradFloatRejectsBatchMismatch() {
     size_t propDims[] = {2, 1, 5};
     tensor_t *propLoss = makeFloatTensor(propDims, 3, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "Conv1d backward: loss dim 0",
+                             conv1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
 }
 
 void testConv1dWeightGradFloatRejectsOutChannelMismatch() {
@@ -1299,7 +1303,8 @@ void testConv1dWeightGradFloatRejectsOutChannelMismatch() {
     size_t propDims[] = {1, 1, 5};
     tensor_t *propLoss = makeFloatTensor(propDims, 3, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "Conv1d backward: loss dim 1",
+                             conv1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
 }
 
 void testConv1dWeightGradSymRejectsBatchMismatch() {
@@ -1365,7 +1370,8 @@ void testConv1dWeightGradFloatRejectsInputChannelMismatch() {
     float lossData[8] = {0};
     tensor_t *lossGrad = makeFloatTensor(lossDims, 3, lossData);
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dBackward(layer, input, lossGrad, NULL, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "(weightGrad): forwardInput inChannels",
+                             conv1dBackward(layer, input, lossGrad, NULL, NULL));
 }
 
 void testConv1dWeightGradSymRejectsInputChannelMismatch() {
@@ -1415,7 +1421,8 @@ void testConv1dBiasGradFloatRejectsOutChannelMismatch() {
     size_t propDims[] = {1, 1, 5};
     tensor_t *propLoss = makeFloatTensor(propDims, 3, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dBackward(layer, input, lossGrad, propLoss, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "(biasGrad): lossGrad outChannels",
+                             conv1dBackward(layer, input, lossGrad, propLoss, NULL));
 }
 
 void testConv1dBiasGradSymRejectsOutChannelMismatch() {
@@ -2961,6 +2968,115 @@ void testConv1dInitConfigClearsOwnsQuantizations(void) {
     TEST_ASSERT_EQUAL_UINT8(0, *(const unsigned char *)&cfg.ownsQuantizations);
 }
 
+/* #436: the conv kernels read every wire's batch/channels/length from its
+ * physical dims and index it flat, so a produced wire and the consumed loss
+ * must be dense identity-order tensors of exactly the expected shape. Fixtures
+ * perturb the batch dim only (a wider channel would over-read the weight): a
+ * wider produced wire is under-filled and a narrower loss on a frozen layer is
+ * half-read, so an ungated call returns normally (clean RED, child exit 0). */
+void testConv1dForwardFloatRejectsWrongOutputShape(void) {
+    layer_t *layer = buildFloatConv1dWithTrainable(TRAINABLE_DEFAULT); /* 2 -> 3, K=3 */
+    size_t inputDims[] = {1, 2, 5};
+    size_t outputDims[] = {2, 3, 3};
+    tensor_t *input =
+        makeFloatTensor(inputDims, 3, (float[]){1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f, 8.f, 9.f, 10.f});
+    tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "Conv1d forward: output",
+                             conv1dForward(layer, input, output, NULL));
+
+    freeTensor(output);
+    freeTensor(input);
+    freeConv1dLayer(layer);
+}
+
+/* SYM_INT32 forward math: the gate must sit before the arithmetic dispatch. */
+void testConv1dForwardSymRejectsWrongOutputShape(void) {
+    size_t weightDims[] = {1, 1, 2};
+    size_t inputDims[] = {1, 1, 4};
+    size_t outputDims[] = {2, 1, 3};
+    parameter_t *weights = buildSymParam(3, weightDims, weight_conv1dSym_singleChannelSingleBatch);
+    tensor_t *input = buildSymTensor(3, inputDims, input_conv1dSym_singleChannelSingleBatch);
+    tensor_t *output = buildSymTensor(3, outputDims, NULL);
+    kernel_t *kernel = reserveMemory(sizeof(kernel_t));
+    initKernel(kernel, 2, VALID, 1, 1);
+    quantization_t *sq = quantizationInitSymInt32(HALF_AWAY);
+    layer_t *layer = buildBorrowedConv1dLayer(weights, NULL, kernel, sq);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "Conv1d forward: output",
+                             conv1dForward(layer, input, output, NULL));
+
+    freeConv1dLayer(layer);
+    freeTensor(output);
+    freeTensor(input);
+    freeQuantization(sq);
+}
+
+void testConv1dBackwardFloatRejectsWrongPropLossShape(void) {
+    layer_t *layer = buildFloatConv1dWithTrainable(TRAINABLE_FALSE); /* 2 -> 3, K=3 */
+    size_t inputDims[] = {1, 2, 5};
+    size_t lossDims[] = {1, 3, 3};
+    size_t propLossDims[] = {2, 2, 5};
+    tensor_t *forwardInput =
+        makeFloatTensor(inputDims, 3, (float[]){1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f, 8.f, 9.f, 10.f});
+    tensor_t *lossGrad =
+        makeFloatTensor(lossDims, 3, (float[]){1.f, -1.f, 2.f, -2.f, 3.f, -3.f, 4.f, -4.f, 5.f});
+    tensor_t *propLoss = makeFloatTensor(propLossDims, 3, NULL);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "Conv1d backward: propLoss",
+                             conv1dBackward(layer, forwardInput, lossGrad, propLoss, NULL));
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(forwardInput);
+    freeConv1dLayer(layer);
+}
+
+/* ARITH_BFP dx: the gate must sit before the BFP anchor block and the arms. */
+void testConv1dBackwardBfpRejectsWrongPropLossShape(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layer_t *layer = buildBfpConv1dBackwardLayer(floatQ);
+    layer->config->conv1d->frozen = true;
+    layer->config->conv1d->propLossMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    tensor_t *forwardInput = buildBfpBwdForwardInput();
+    tensor_t *lossGrad = buildBfpBwdLossGrad();
+    size_t propLossDims[] = {(size_t)kConvBfpBatch + 1, (size_t)kConvBfpInChannels,
+                             (size_t)kConvBfpBwdInputLength};
+    tensor_t *propLoss = makeFloatTensor(propLossDims, 3, NULL);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "Conv1d backward: propLoss",
+                             conv1dBackward(layer, forwardInput, lossGrad, propLoss, NULL));
+
+    freeConv1dLayer(layer);
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(forwardInput);
+    freeQuantization(floatQ);
+}
+
+/* Frozen, so the weight-grad kernels (which check lossGrad on their own) never
+ * run and the dx op half-reads a two-row forward from a one-row loss. */
+void testConv1dBackwardFloatRejectsWrongLossShape(void) {
+    layer_t *layer = buildFloatConv1dWithTrainable(TRAINABLE_FALSE); /* 2 -> 3, K=3 */
+    size_t inputDims[] = {2, 2, 5};
+    size_t lossDims[] = {1, 3, 3};
+    tensor_t *forwardInput = makeFloatTensor(
+        inputDims, 3, (float[]){1.f,  2.f,  3.f,  4.f,  5.f,  6.f,  7.f,  8.f,  9.f,  10.f,
+                                -1.f, -2.f, -3.f, -4.f, -5.f, -6.f, -7.f, -8.f, -9.f, -10.f});
+    tensor_t *lossGrad =
+        makeFloatTensor(lossDims, 3, (float[]){1.f, -1.f, 2.f, -2.f, 3.f, -3.f, 4.f, -4.f, 5.f});
+    tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "Conv1d backward: loss",
+                             conv1dBackward(layer, forwardInput, lossGrad, propLoss, NULL));
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(forwardInput);
+    freeConv1dLayer(layer);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testConv1dForwardMultiChannelWithBias);
@@ -3030,5 +3146,10 @@ int main() {
     RUN_TEST(testConv1dCalcWeightGradsBfpRejectsInputChannelMismatch);
     RUN_TEST(testConv1dSrForwardIsAPureFunctionOfItsForwardOpKey);
     RUN_TEST(testConv1dInitConfigClearsOwnsQuantizations);
+    RUN_TEST(testConv1dForwardFloatRejectsWrongOutputShape);
+    RUN_TEST(testConv1dForwardSymRejectsWrongOutputShape);
+    RUN_TEST(testConv1dBackwardFloatRejectsWrongPropLossShape);
+    RUN_TEST(testConv1dBackwardBfpRejectsWrongPropLossShape);
+    RUN_TEST(testConv1dBackwardFloatRejectsWrongLossShape);
     return UNITY_END();
 }

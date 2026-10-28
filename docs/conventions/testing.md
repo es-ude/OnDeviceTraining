@@ -32,11 +32,12 @@ it from recurring.
 
 ## Sanitizer-driven memory bug detection
 
-The C unit-test suite is run twice in CI: once normally (`c-build-and-test`),
-and once under AddressSanitizer + UndefinedBehaviorSanitizer
-(`c-asan-build-and-test`). The sanitizer job is a hard gate — any heap-OOB,
-use-after-free, double-free, or UB diagnoses fails the PR. LeakSanitizer is
-deliberately **off** (`detect_leaks=0`) in CI; see the opt-in recipe below.
+The C unit-test suite is run three times in CI: once normally
+(`c-build-and-test`), once under AddressSanitizer + UndefinedBehaviorSanitizer
+with clang (`c-asan-build-and-test`), and once under UBSan alone with gcc
+(`c-ubsan-build-and-test`, see below). The sanitizer jobs are hard gates —
+any heap-OOB, use-after-free, double-free, or UB diagnoses fails the PR.
+LeakSanitizer is deliberately **off** (`detect_leaks=0`) in CI; see the opt-in recipe below.
 
 ### Local reproduction
 
@@ -76,6 +77,33 @@ combined ASan+UBSan runtime parses `UBSAN_OPTIONS` after `ASAN_OPTIONS`.
 aborts the test binary — earlier tests must run cleanly to surface later ones.
 When triaging multiple unrelated failures, isolate by running individual test
 binaries from `build/unit_test_asan/test/unit/...` directly.
+
+### The gcc UBSan job (`c-ubsan-build-and-test`)
+
+The `unit_test_ubsan` preset builds with
+`-fsanitize=undefined,float-cast-overflow -fno-sanitize-recover=all -g -O1`
+(same flags at link time) and CI runs it with gcc (`CC=gcc`). It uses the test
+preset's `UBSAN_OPTIONS` from the list above.
+
+- **`float-cast-overflow` is named on purpose.** gcc's `undefined` group leaves
+  it out, so `-fsanitize=undefined` alone would drop the check for an
+  out-of-range float-to-int conversion (C17 6.3.1.4), the UB the BFP pack's
+  float-domain clamp exists to prevent (#421 U2).
+- **No `float-divide-by-zero`.** It is in neither gcc's nor clang's
+  `undefined` group: Annex F defines `x / 0` as inf or NaN, and kernels may
+  rely on that.
+- **Why a second compiler.** The ASan job already runs clang's UBSan. gcc
+  instruments and optimises UB differently, and this job also runs the gold
+  suite on gcc. A report that only one compiler raises is still UB in the code.
+  Keep clang-only flags such as `-fno-sanitize=function` out of this preset:
+  gcc rejects them.
+- **Carve-outs: none.** A full-set run under gcc 16 and Apple clang (2026-10-28,
+  #441) was clean, so every check in the group is on. If a check class must be
+  switched off later, prefer
+  `__attribute__((no_sanitize("<check>")))` on the few functions that hit it,
+  and put `-fno-sanitize=<check>` in the preset only when the hits are spread
+  across modules. List each carve-out here with its scope and reason, since
+  JSON has no comments.
 
 ### macOS toolchain requirement (LLVM ≥ 22)
 

@@ -6,12 +6,14 @@
 #include <stdlib.h>
 
 #include "Add.h"
+#include "Arithmetic.h"
 #include "ArithmeticType.h"
 #include "BfpKernelSupport.h"
 #include "Common.h"
 #include "ExecuteOp.h"
 #include "Layer.h"
 #include "LayerExec.h"
+#include "LayerWireGuards.h"
 #include "Linear.h"
 #include "Matmul.h"
 #include "Rounding.h"
@@ -167,6 +169,12 @@ void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output,
 
     tensor_t *weights = getParamFromParameter(linearConfig->weights);
     tensor_t *bias = linearConfig->bias != NULL ? getParamFromParameter(linearConfig->bias) : NULL;
+
+    size_t outDims[2];
+    size_t outOrder[2];
+    shape_t outExpected = {.dimensions = outDims, .orderOfDimensions = outOrder};
+    linearCalcOutputShape(linearLayer, input->shape, &outExpected);
+    layerRequireDenseWire(output, &outExpected, "Linear forward", "output");
 
     /* BFP epic PR2 (Task 7), ARITH_BFP arm — identical layer-side rules in
      * Conv1d.c/Conv1dTransposed.c (arm parity):
@@ -480,6 +488,20 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
     rngKey_t opKey;
     linearConfig_t *cfg = linearLayer->config->linear;
     tensor_t *weights = getParamFromParameter(cfg->weights);
+
+    size_t lossDims[2];
+    size_t lossOrder[2];
+    shape_t lossExpected = {.dimensions = lossDims, .orderOfDimensions = lossOrder};
+    linearCalcOutputShape(linearLayer, forwardInput->shape, &lossExpected);
+    layerRequireLogicalShape(loss, &lossExpected, "Linear backward", "loss");
+    if (propLoss != NULL) {
+        size_t inDims[2] = {getDimensionsByIndex(forwardInput, 0),
+                            getDimensionsByIndex(forwardInput, 1)};
+        size_t inOrder[2] = {0, 1};
+        shape_t inExpected = {
+            .numberOfDimensions = 2, .dimensions = inDims, .orderOfDimensions = inOrder};
+        layerRequireDenseWire(propLoss, &inExpected, "Linear backward", "propLoss");
+    }
 
     /* BFP epic PR3, backward mirror of the forward's ARITH_BFP rules (see
      * linearForward): BFP-stored weights are the width anchor every

@@ -430,14 +430,6 @@ void maxPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const l
         output);
 }
 
-/* BFP epic PR4 (R-P4): the ARITH_BFP arm below IS the native pooling path, so
- * this guard is NARROWED to the two arms that raw-view ->data in their own
- * storage format — a packed BFP wire read as float* / int32_t* is a 4x heap
- * over-read on lossGrad and an over-write into the packed propLoss buffer.
- * Keyed on the wire's STORAGE dtype, not the declared arithmetic (#315
- * parity). forwardInput is NOT guarded: this layer never dereferences it
- * (the argmax indices recorded by the forward carry all the routing). */
-
 void maxPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
                             tensor_t *propLoss) {
     maxPool1dConfig_t *cfg = layer->config->maxPool1d;
@@ -660,6 +652,8 @@ void maxPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGra
     maxPool1dConfig_t *cfg = layer->config->maxPool1d;
     switch (cfg->propLossMath.type) {
     case ARITH_FLOAT32:
+        /* forwardInput is NOT guarded: this layer never dereferences it (the argmax
+         * indices recorded by the forward carry all the routing). */
         /* Runs OUTSIDE executeOp and raw-casts both wires to float*; a packed
          * BFP wire would be read as wide scalars (4x heap over-read on
          * lossGrad, over-write into the packed propLoss buffer). #315 parity. */

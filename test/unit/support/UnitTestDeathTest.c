@@ -9,6 +9,7 @@ static const char *odtTestDeathSink = "/dev/null";
 #include "DeathTest.h"
 #include "unity.h"
 
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -123,6 +124,23 @@ void testExitsWithOutputReportsSinkRedirectFailure(void) {
     ASSERT_EXITS_WITH(0, runExpectingUnityFailure(outputRedirectFailureBody));
 }
 
+static void signedOverflow(void) {
+    volatile int x = INT_MAX;
+    x = x + 1;
+    exit(0);
+}
+
+static void undefinedBehaviourBody(void) {
+    ASSERT_EXITS_WITH(1, signedOverflow());
+}
+
+/* Passes trivially on unit_test_debug (child exits 0); discriminates only under
+ * a UBSan preset whose runtime exits 1 on a report. */
+void testExitsWithRejectsUndefinedBehaviourDeath(void) {
+    ASSERT_EXITS_WITH(DEATH_TEST_UNITY_FAILED_EXIT,
+                      runExpectingUnityFailure(undefinedBehaviourBody));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testExitsWithOutputPassesOnMatchingCodeAndSubstring);
@@ -132,5 +150,6 @@ int main(void) {
     RUN_TEST(testExitsWithOutputFindsBannerAfterFloodingThePipe);
     RUN_TEST(testExitsWithReportsSinkRedirectFailure);
     RUN_TEST(testExitsWithOutputReportsSinkRedirectFailure);
+    RUN_TEST(testExitsWithRejectsUndefinedBehaviourDeath);
     return UNITY_END();
 }

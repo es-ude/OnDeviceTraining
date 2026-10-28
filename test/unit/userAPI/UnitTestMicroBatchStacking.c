@@ -680,7 +680,7 @@ void testStackedBatchMatchesPyTorchGold(void) {
             close(_odtPipe[0]);                                                                    \
             dup2(_odtPipe[1], STDOUT_FILENO);                                                      \
             close(_odtPipe[1]);                                                                    \
-            (void)freopen("/dev/null", "w", stderr);                                               \
+            odtDeathRedirectOrExit("/dev/null", stderr);                                           \
             statement;                                                                             \
             _exit(0);                                                                              \
         }                                                                                          \

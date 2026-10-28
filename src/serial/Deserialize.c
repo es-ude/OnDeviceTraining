@@ -27,6 +27,7 @@
 #include "Softmax.h"
 #include "StorageApi.h"
 #include "Tensor.h"
+#include "TensorRecord.h"
 
 /* v7 (#391): the LINEAR record gains the `u8 hasBias` presence byte the
  * CONV1D/CONV1D_TRANSPOSED records already carried (bias record skipped when
@@ -242,7 +243,7 @@ static void deserializeKernel(kernel_t *kernel, FILE *f) {
 
 /* Sanity cap on the untrusted wire
  * fileNumGroups (SYM qConfig record) read below, mirroring
- * SKIP_TENSOR_MAX_DIMS's role for the untrusted wire rank further down --
+ * ODTS_TENSOR_RECORD_MAX_RANK's role for the untrusted wire rank (TensorRecord.h) --
  * generous against any real model (a group count is bounded by the element
  * count of the largest parameter tensor it groups, never in the tens of
  * thousands), so this is headroom, not a real limit. It exists purely to
@@ -307,15 +308,13 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
             exit(1);
         }
         /* Whenever a live tensor backs this config (numberOfElements != 0 --
-         * the skip path now passes its own real count too, see
-         * skipSerializedTensor below), a config cannot have more groups than
-         * elements; reject that here, before the realloc, so the later
-         * validateSymQConfigShape call downstream keeps its own job
-         * (divisibility) uncomplicated by an out-of-range numGroups it would
-         * otherwise have to multiply against. numberOfElements == 0 (the
-         * layer outputQ/propLossQ wire-config call sites) has no tensor to
-         * bound against -- SERIAL_MAX_QCONFIG_GROUPS above is the only guard
-         * there, and is sized generously enough to cover it alone. */
+         * readTensorRecordHeader passes its record's own count too), a
+         * config cannot have more groups than elements; reject that here, before the realloc, so
+         * the later validateSymQConfigShape call downstream keeps its own job (divisibility)
+         * uncomplicated by an out-of-range numGroups it would otherwise have to multiply against.
+         * numberOfElements == 0 (the layer outputQ/propLossQ wire-config call sites) has no tensor
+         * to bound against -- SERIAL_MAX_QCONFIG_GROUPS above is the only guard there, and is sized
+         * generously enough to cover it alone. */
         if (numberOfElements != 0 && fileNumGroups > numberOfElements) {
             PRINT_ERROR("deserializeQConfig: SYM file numGroups %zu exceeds the %zu-element "
                         "tensor it attaches to",
@@ -348,8 +347,8 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
          * wire-config call sites in deserializeLayer -- no live tensor backs
          * q there (group-quant PR2's carrier gate keeps those per-tensor
          * anyway, so skipping this validate there costs nothing). Every
-         * other caller reaches this validate, INCLUDING skipSerializedTensor's
-         * grad-skip path (it threads the real element
+         * other caller reaches this validate, INCLUDING readTensorRecordHeader's
+         * scratch parse (it threads the real element
          * count it just parsed off the wire, not 0) -- a grouped grad record
          * whose numGroups*groupSize does not divide its own element count is
          * corrupt whether or not the resulting scratch qConfig ever attaches
@@ -550,134 +549,105 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
     }
 }
 
-/* Sanity cap on skipSerializedTensor's untrusted file rank: no shipped tensor
- * exceeds rank 8, so a larger value is a corrupt/malicious record. Sizes the
- * stack dims[] the element count is computed from (#394: through the checked
- * tensor core, so a wrapping product fails fast instead of desyncing). */
-#define SKIP_TENSOR_MAX_DIMS 8
-
-static void skipSerializedTensor(FILE *f) {
-    long recordStart = ftell(f);
-    if (recordStart < 0) {
-        PRINT_ERROR("skipSerializedTensor: stream not seekable (grad-record skip requires "
-                    "fseek/ftell support, #380 PR3)");
-        exit(1);
-    }
-
+void readTensorRecordHeader(tensorRecordHeader_t *header, FILE *f) {
     uint32_t numDims = serialReadU32LE(f);
-    if (numDims > SKIP_TENSOR_MAX_DIMS) {
-        PRINT_ERROR("skipSerializedTensor: rank %u exceeds the %d-dim skip-helper cap",
-                    (unsigned)numDims, SKIP_TENSOR_MAX_DIMS);
+    if (numDims > ODTS_TENSOR_RECORD_MAX_RANK) {
+        PRINT_ERROR("readTensorRecordHeader: rank %u exceeds the %u-dim cap", (unsigned)numDims,
+                    (unsigned)ODTS_TENSOR_RECORD_MAX_RANK);
         exit(1);
     }
-    size_t dims[SKIP_TENSOR_MAX_DIMS];
+    header->numberOfDimensions = numDims;
     for (uint32_t d = 0; d < numDims; d++) {
-        dims[d] = (size_t)serialReadU32LE(f);
+        header->dimensions[d] = (size_t)serialReadU32LE(f);
+    }
+    /* orderOfDimensions is positional only; read (not seeked) so a truncated
+     * record fails at the short read. */
+    for (uint32_t d = 0; d < numDims; d++) {
+        (void)serialReadU32LE(f);
     }
     shape_t wireShape = {
-        .numberOfDimensions = numDims, .dimensions = dims, .orderOfDimensions = NULL};
-    size_t numberOfElements = calcNumberOfElementsByShape(&wireShape);
-    /* orderOfDimensions: positional only, irrelevant to a discarded record. */
-    if (fseek(f, (long)numDims * (long)sizeof(uint32_t), SEEK_CUR) != 0) {
-        PRINT_ERROR("skipSerializedTensor: seek past orderOfDimensions failed");
-        exit(1);
-    }
+        .numberOfDimensions = numDims, .dimensions = header->dimensions, .orderOfDimensions = NULL};
+    header->numberOfElements = calcNumberOfElementsByShape(&wireShape);
 
     uint8_t type = serialReadU8(f);
-    quantization_t scratchQ = {.type = (qtype_t)type, .qConfig = NULL};
-    symInt32QConfig_t symIntScratch;
-    /* v4/group-quant PR2 (Task 5): unlike the OTHER scratch qConfigs here
-     * (symIntScratch/asymScratch, plain stack locals never freed), symScratch
-     * needs a REAL heap-allocated scales[1] from the start, not a stack
-     * array -- a GROUPED skipped record (file numGroups > 1) is no longer
-     * rejected, and deserializeQConfig's SYM arm unconditionally
-     * freeReservedMemory()s the OLD scales pointer before reserveMemory()ing
-     * a differently-sized one whenever the file's numGroups differs from
-     * the qConfig's own (the same contract every live tensor's heap-owned
-     * symQConfig relies on, Quantization.h's ownership note). A stack-backed
-     * initial array would make that free() undefined behavior -- verified:
-     * SIGABRT with no PRINT_ERROR on this host's allocator before this fix,
-     * exactly the "drop the free = leak" mutation's mirror image. Freed
-     * unconditionally below regardless of whether a reallocation actually
-     * happened: this whole qConfig is discarded at function exit, never
-     * attached to a real tensor, so nothing else owns whatever it ends up
-     * pointing at. The record's own numberOfElements
-     * (computed above from the dims it just read, not a hardcoded 0) is
-     * threaded into deserializeQConfig below, so a grouped record whose
-     * numGroups*groupSize does not divide its own element count fails fast
-     * here too -- the discarded scratch qConfig no longer exempts a
-     * corrupt/malformed grouped grad record from the divisibility check a
-     * live tensor's qConfig would get. */
-    symQConfig_t symScratch = {0};
-    /* asymScratch (group-quant PR4, Task 4): now the ASYM twin of symScratch
-     * above -- the v5 ASYM arm of deserializeQConfig unconditionally
-     * freeReservedMemory()s BOTH of asymScratch's current arrays before
-     * reserveMemory()ing differently-sized ones whenever the file's
-     * numGroups differs from the qConfig's own, exactly the SYM contract. A
-     * stack-backed initial array would make that free() undefined behavior
-     * (the same SIGABRT hazard symScratch's comment documents). Freed
-     * unconditionally below regardless of whether a reallocation actually
-     * happened, mirroring symScratch's disposal. */
-    asymQConfig_t asymScratch = {0};
-    /* BFP epic PR1 (Task 7): same heap-backed-scratch requirement as
-     * symScratch above (see its comment) -- a GROUPED skipped BFP record
-     * (file numGroups > 1) is not rejected either, and deserializeQConfig's
-     * BFP arm unconditionally freeReservedMemory()s the OLD exponents
-     * pointer before reserveMemory()ing a differently-sized one whenever the
-     * file's numGroups differs from the qConfig's own. A stack-backed
-     * initial array would make that free() undefined behavior. */
-    bfpQConfig_t bfpScratch = {0};
-    switch (scratchQ.type) {
+    header->quantization.type = (qtype_t)type;
+    header->quantization.qConfig = NULL;
+    memset(&header->qConfigStorage, 0, sizeof(header->qConfigStorage));
+    /* The per-group arrays start heap-backed (1 element): deserializeQConfig
+     * frees and re-reserves them when the file's numGroups differs, which
+     * would be undefined behavior on a stack array. */
+    switch (header->quantization.type) {
     case INT32:
     case FLOAT32:
     case BOOL:
         break;
     case SYM_INT32:
-        scratchQ.qConfig = &symIntScratch;
+        header->quantization.qConfig = &header->qConfigStorage.symInt32;
         break;
-    case SYM:
-        symScratch.scales = reserveMemory(sizeof(float));
-        symScratch.numGroups = 1;
-        symScratch.groupSize = 0;
-        scratchQ.qConfig = &symScratch;
+    case SYM: {
+        symQConfig_t *sym = &header->qConfigStorage.sym;
+        sym->scales = reserveMemory(sizeof(float));
+        sym->numGroups = 1;
+        header->quantization.qConfig = sym;
         break;
-    case ASYM:
-        asymScratch.scales = reserveMemory(sizeof(float));
-        asymScratch.zeroPoints = reserveMemory(sizeof(uint16_t));
-        asymScratch.numGroups = 1;
-        asymScratch.groupSize = 0;
-        asymScratch.qBits = 8;
-        asymScratch.roundingMode = HALF_AWAY;
-        scratchQ.qConfig = &asymScratch;
+    }
+    case ASYM: {
+        asymQConfig_t *asym = &header->qConfigStorage.asym;
+        asym->scales = reserveMemory(sizeof(float));
+        asym->zeroPoints = reserveMemory(sizeof(uint16_t));
+        asym->numGroups = 1;
+        header->quantization.qConfig = asym;
         break;
-    case BFP:
-        bfpScratch.exponents = reserveMemory(sizeof(uint8_t));
-        bfpScratch.numGroups = 1;
-        bfpScratch.groupSize = 0;
-        scratchQ.qConfig = &bfpScratch;
+    }
+    case BFP: {
+        bfpQConfig_t *bfp = &header->qConfigStorage.bfp;
+        bfp->exponents = reserveMemory(sizeof(uint8_t));
+        bfp->numGroups = 1;
+        header->quantization.qConfig = bfp;
         break;
+    }
     default:
-        PRINT_ERROR("skipSerializedTensor: unknown qtype %u", (unsigned)type);
+        PRINT_ERROR("readTensorRecordHeader: unknown qtype %u", (unsigned)type);
         exit(1);
     }
-    deserializeQConfig(&scratchQ, f, numberOfElements);
-    if (scratchQ.type == SYM) {
-        freeReservedMemory(symScratch.scales);
+    deserializeQConfig(&header->quantization, f, header->numberOfElements);
+    header->payloadBytes =
+        calcNumberOfBytesForData(&header->quantization, header->numberOfElements);
+}
+
+void freeTensorRecordHeader(tensorRecordHeader_t *header) {
+    switch (header->quantization.type) {
+    case SYM:
+        freeReservedMemory(header->qConfigStorage.sym.scales);
+        header->qConfigStorage.sym.scales = NULL;
+        break;
+    case ASYM:
+        freeReservedMemory(header->qConfigStorage.asym.scales);
+        freeReservedMemory(header->qConfigStorage.asym.zeroPoints);
+        header->qConfigStorage.asym.scales = NULL;
+        header->qConfigStorage.asym.zeroPoints = NULL;
+        break;
+    case BFP:
+        freeReservedMemory(header->qConfigStorage.bfp.exponents);
+        header->qConfigStorage.bfp.exponents = NULL;
+        break;
+    default:
+        break;
     }
-    if (scratchQ.type == ASYM) {
-        /* Task 4 mutation guard: dropping either free here leaks the
-         * reallocated array whenever a grouped grad's numGroups differs from
-         * this scratch's initial 1 -- LSan/ASan-visible (see the report's
-         * mutation transcript), never a functional test failure on its own
-         * since the scratch is discarded either way. */
-        freeReservedMemory(asymScratch.scales);
-        freeReservedMemory(asymScratch.zeroPoints);
-    }
-    if (scratchQ.type == BFP) {
-        freeReservedMemory(bfpScratch.exponents);
+}
+
+static void skipSerializedTensor(FILE *f) {
+    if (ftell(f) < 0) {
+        PRINT_ERROR("skipSerializedTensor: stream not seekable (grad-record skip requires "
+                    "fseek/ftell support, #380 PR3)");
+        exit(1);
     }
 
-    size_t payloadBytes = calcNumberOfBytesForData(&scratchQ, numberOfElements);
+    tensorRecordHeader_t header;
+    readTensorRecordHeader(&header, f);
+    size_t payloadBytes = header.payloadBytes;
+    freeTensorRecordHeader(&header);
+
     /* A larger value turns negative in the (long) cast and seeks backwards,
      * which the truncation check below cannot see. */
     if (payloadBytes > (size_t)LONG_MAX) {
@@ -691,10 +661,9 @@ static void skipSerializedTensor(FILE *f) {
     }
     /* deserializeSparsity() is a zero-byte TODO stub -- nothing to skip. */
 
-    /* Post-skip truncation guard (mirrors the ODTR/PPCA ftell precedent,
-     * #316 wave): fseek past a genuinely truncated file's real end succeeds
-     * silently (POSIX allows seeking beyond EOF), so only comparing against
-     * the actual on-disk size catches it. */
+    /* fseek past a truncated file's real end succeeds silently (POSIX allows
+     * seeking beyond EOF), so only comparing against the on-disk size
+     * catches it (mirrors the ODTR/PPCA ftell precedent, #316 wave). */
     long recordEnd = ftell(f);
     if (recordEnd < 0 || fseek(f, 0, SEEK_END) != 0) {
         PRINT_ERROR("skipSerializedTensor: position query failed after skip");

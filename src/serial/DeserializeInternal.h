@@ -74,10 +74,9 @@ static void deserializeKernel(kernel_t *kernel, FILE *f);
  *  outputQ/propLossQ wire-config call sites in deserializeLayer, where no
  *  live tensor backs q (group-quant PR2's carrier gate keeps those
  *  per-tensor anyway, so skipping the divisibility validate there costs
- *  nothing). Every other caller — including skipSerializedTensor's grad-skip
- *  path (it threads the real element count it just
- *  parsed off the wire, not a hardcoded 0) — passes its true count and gets
- *  the full validate.
+ *  nothing). Every other caller — including readTensorRecordHeader's scratch
+ *  parse (it threads the real element count it just parsed off the wire,
+ *  not a hardcoded 0) — passes its true count and gets the full validate.
  */
 static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElements);
 
@@ -90,22 +89,12 @@ static void deserializeSparsity();
  *  deserializeParameter to discard a grad record whose file hasGrad=1
  *  disagrees with a frozen skeleton (parameter->grad == NULL) — #380 PR3.
  *  Leaves the stream positioned right after the record, so a following
- *  sibling record parses in sync. Dims live in an 8-deep stack array and the
- *  payload is skipped via fseek, not read into a scratch buffer. The SYM
- *  scratch qConfig's scales[1] IS heap-allocated (unlike the other scratch
- *  qConfigs here), since a GROUPED SYM record (group-quant PR2, Task 5)
- *  makes deserializeQConfig reallocate it via the same free-then-reserveMemory
- *  path a live tensor's qConfig would take — a stack-backed array there would
- *  make that free() undefined behavior. Freed unconditionally after the call
- *  (see the .c file). Also threads the record's OWN element count (computed
- *  from the dims it just read) into deserializeQConfig
- *  instead of a hardcoded 0, so a grouped record whose numGroups*groupSize
- *  does not divide its own element count fails fast on this path too, not
- *  just when a live tensor backs the config. Requires a seekable stream
- *  (fseek/ftell), matching the ODTR/PPCA deserialize precedent (#316 wave).
- *  Fails fast (#394) when the dims product overflows size_t (the message is
- *  calcNumberOfElementsByShape's, not this function's) and when the payload
- *  exceeds LONG_MAX bytes, which the (long) fseek offset cannot express.
+ *  sibling record parses in sync. The header is parsed and validated by
+ *  readTensorRecordHeader (TensorRecord.h); the payload is skipped via fseek,
+ *  not read into a scratch buffer. Requires a seekable stream (fseek/ftell),
+ *  matching the ODTR/PPCA deserialize precedent (#316 wave). Fails fast when
+ *  the payload exceeds LONG_MAX bytes (#394), which the (long) fseek offset
+ *  cannot express, and when the skipped record extends past end of file.
  *
  * \param f: Pointer of file to skip a tensor record from
  */

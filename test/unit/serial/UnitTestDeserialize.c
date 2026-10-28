@@ -20,6 +20,7 @@
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
+#include "TensorRecord.h"
 #include "unity.h"
 
 /* SERIALIZE_TEST_FILE_PATH is injected by the CMake target_compile_definitions
@@ -1255,7 +1256,7 @@ static void testDeserializeWeightsOnlyIntoTrainableSkeleton(void) {
     }
 }
 
-/*! #380 PR3 review: skipSerializedTensor's rank-cap guard (SKIP_TENSOR_MAX_DIMS
+/*! #380 PR3 review: skipSerializedTensor's rank-cap guard (ODTS_TENSOR_RECORD_MAX_RANK
  *  == 8) must reject a grad record announcing a rank above that bound BEFORE
  *  reading a single dim value. The grad record is hand-crafted as an
  *  otherwise-well-formed rank-9 FLOAT32/1-element tensor (9 dims of 1, 9
@@ -1278,7 +1279,7 @@ static void testSkipSerializedTensorRejectsRankAboveCap(void) {
     fwrite(&hasGrad, sizeof(uint8_t), 1, f);
     serializeTensor(paramTensor, f);
 
-    const uint32_t oversizedRank = 9; /* > SKIP_TENSOR_MAX_DIMS (8) */
+    const uint32_t oversizedRank = 9; /* > ODTS_TENSOR_RECORD_MAX_RANK (8) */
     writeU32LE(f, oversizedRank);
     for (uint32_t d = 0; d < oversizedRank; d++) {
         writeU32LE(f, 1); /* dims[d] = 1 -> 1 element total, well-formed */
@@ -2449,6 +2450,137 @@ static void testDeserializeBatchNormRejectsNonFloat32ForwardMath(void) {
     freeBatchNorm1dLayer(skeleton);
 }
 
+/* Serializes src to FILE_PATH and reopens it for reading; *fileLength gets
+ * the on-disk size so a test can check readTensorRecordHeader stopped
+ * exactly at the payload. */
+static FILE *writeAndReopenRecord(tensor_t *src, long *fileLength) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeTensor(src, f);
+    fclose(f);
+    f = fopen(FILE_PATH, "rb");
+    fseek(f, 0, SEEK_END);
+    *fileLength = ftell(f);
+    rewind(f);
+    return f;
+}
+
+static void testReadTensorRecordHeaderFloat32(void) {
+    float data[] = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f};
+    tensor_t *src = makeFloatTensor2D(2, 3, data, 6);
+    long fileLength = 0;
+    FILE *f = writeAndReopenRecord(src, &fileLength);
+
+    tensorRecordHeader_t header;
+    readTensorRecordHeader(&header, f);
+    long position = ftell(f);
+    fclose(f);
+    freeTensorRecordHeader(&header);
+    freeTensor(src);
+
+    TEST_ASSERT_EQUAL_size_t(2, header.numberOfDimensions);
+    TEST_ASSERT_EQUAL_size_t(2, header.dimensions[0]);
+    TEST_ASSERT_EQUAL_size_t(3, header.dimensions[1]);
+    TEST_ASSERT_EQUAL_size_t(6, header.numberOfElements);
+    TEST_ASSERT_EQUAL_INT(FLOAT32, header.quantization.type);
+    TEST_ASSERT_EQUAL_size_t(24, header.payloadBytes);
+    TEST_ASSERT_EQUAL_INT64(fileLength - 24, position);
+}
+
+static void testReadTensorRecordHeaderGroupedSym(void) {
+    tensor_t *src = makeSymGroupedTensor1D(6, 4, HALF_AWAY, 3, 2);
+    size_t expectedPayload = calcNumberOfBytesForData(src->quantization, 6);
+    long fileLength = 0;
+    FILE *f = writeAndReopenRecord(src, &fileLength);
+
+    tensorRecordHeader_t header;
+    readTensorRecordHeader(&header, f);
+    long position = ftell(f);
+    fclose(f);
+    size_t numGroups = header.qConfigStorage.sym.numGroups;
+    size_t groupSize = header.qConfigStorage.sym.groupSize;
+    uint8_t qBits = header.qConfigStorage.sym.qBits;
+    freeTensorRecordHeader(&header);
+    freeTensor(src);
+
+    TEST_ASSERT_EQUAL_INT(SYM, header.quantization.type);
+    TEST_ASSERT_EQUAL_size_t(6, header.numberOfElements);
+    TEST_ASSERT_EQUAL_size_t(3, numGroups);
+    TEST_ASSERT_EQUAL_size_t(2, groupSize);
+    TEST_ASSERT_EQUAL_UINT8(4, qBits);
+    TEST_ASSERT_EQUAL_size_t(expectedPayload, header.payloadBytes);
+    TEST_ASSERT_EQUAL_INT64(fileLength - (long)expectedPayload, position);
+}
+
+static void testReadTensorRecordHeaderGroupedAsym(void) {
+    tensor_t *src = makeAsymGroupedTensor1D(6, 8, HALF_AWAY, 3, 2);
+    size_t expectedPayload = calcNumberOfBytesForData(src->quantization, 6);
+    long fileLength = 0;
+    FILE *f = writeAndReopenRecord(src, &fileLength);
+
+    tensorRecordHeader_t header;
+    readTensorRecordHeader(&header, f);
+    long position = ftell(f);
+    fclose(f);
+    size_t numGroups = header.qConfigStorage.asym.numGroups;
+    size_t groupSize = header.qConfigStorage.asym.groupSize;
+    uint8_t qBits = header.qConfigStorage.asym.qBits;
+    freeTensorRecordHeader(&header);
+    freeTensor(src);
+
+    TEST_ASSERT_EQUAL_INT(ASYM, header.quantization.type);
+    TEST_ASSERT_EQUAL_size_t(3, numGroups);
+    TEST_ASSERT_EQUAL_size_t(2, groupSize);
+    TEST_ASSERT_EQUAL_UINT8(8, qBits);
+    TEST_ASSERT_EQUAL_size_t(expectedPayload, header.payloadBytes);
+    TEST_ASSERT_EQUAL_INT64(fileLength - (long)expectedPayload, position);
+}
+
+static void testReadTensorRecordHeaderGroupedBfp(void) {
+    tensor_t *src = makeBfpGroupedTensor1D(6, 4, 6, HALF_AWAY, 3, 2);
+    size_t expectedPayload = calcNumberOfBytesForData(src->quantization, 6);
+    long fileLength = 0;
+    FILE *f = writeAndReopenRecord(src, &fileLength);
+
+    tensorRecordHeader_t header;
+    readTensorRecordHeader(&header, f);
+    long position = ftell(f);
+    fclose(f);
+    size_t numGroups = header.qConfigStorage.bfp.numGroups;
+    uint8_t mantissaBits = header.qConfigStorage.bfp.mantissaBits;
+    uint8_t exponentBits = header.qConfigStorage.bfp.exponentBits;
+    freeTensorRecordHeader(&header);
+    freeTensor(src);
+
+    TEST_ASSERT_EQUAL_INT(BFP, header.quantization.type);
+    TEST_ASSERT_EQUAL_size_t(3, numGroups);
+    TEST_ASSERT_EQUAL_UINT8(4, mantissaBits);
+    TEST_ASSERT_EQUAL_UINT8(6, exponentBits);
+    TEST_ASSERT_EQUAL_size_t(expectedPayload, header.payloadBytes);
+    TEST_ASSERT_EQUAL_INT64(fileLength - (long)expectedPayload, position);
+}
+
+/*! Well-formed rank-9 record, so only the cap (not a short read) can stop it. */
+static void testReadTensorRecordHeaderRejectsRankAboveCap(void) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    const uint32_t oversizedRank = ODTS_TENSOR_RECORD_MAX_RANK + 1u;
+    writeU32LE(f, oversizedRank);
+    for (uint32_t d = 0; d < oversizedRank; d++) {
+        writeU32LE(f, 1);
+    }
+    for (uint32_t d = 0; d < oversizedRank; d++) {
+        writeU32LE(f, d);
+    }
+    uint8_t floatType = (uint8_t)FLOAT32;
+    fwrite(&floatType, 1, 1, f);
+    writeF32LE(f, 0.f);
+    fclose(f);
+
+    tensorRecordHeader_t header;
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1, "exceeds the 8-dim cap", readTensorRecordHeader(&header, f));
+    fclose(f);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -2517,5 +2649,10 @@ int main(void) {
     RUN_TEST(testDeserializeBatchNormRejectsNegativeRunningVar);
     RUN_TEST(testDeserializeBatchNormFileHyperparametersWin);
     RUN_TEST(testDeserializeBatchNormRejectsNonFloat32ForwardMath);
+    RUN_TEST(testReadTensorRecordHeaderFloat32);
+    RUN_TEST(testReadTensorRecordHeaderGroupedSym);
+    RUN_TEST(testReadTensorRecordHeaderGroupedAsym);
+    RUN_TEST(testReadTensorRecordHeaderGroupedBfp);
+    RUN_TEST(testReadTensorRecordHeaderRejectsRankAboveCap);
     return UNITY_END();
 }

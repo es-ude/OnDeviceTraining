@@ -5,7 +5,7 @@
 
 #include "Tensor.h"
 
-#define BATCH_VIEW_MAX_RANK 8 /* same cap as the deserializer's SKIP_TENSOR_MAX_DIMS */
+#define BATCH_VIEW_MAX_RANK 8 /* same cap as ODTS_TENSOR_RECORD_MAX_RANK (TensorRecord.h) */
 
 /*! Caller-owned storage for a [1, ...sample] view of ONE natural-shape
  *  dataset sample (docs/conventions/data-shape.md: the loop owns the batch

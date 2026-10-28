@@ -1645,6 +1645,121 @@ static void testDeserializeAsymRejectsWireQBitsAboveSixteen(void) {
     freeTensor(skeleton);
 }
 
+static void writeSymTensorRecordWithQBits(uint8_t qBits) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    writeU32LE(f, 1); /* numberOfDimensions */
+    writeU32LE(f, 4); /* dimensions[0] */
+    writeU32LE(f, 0); /* orderOfDimensions[0] */
+    uint8_t symType = (uint8_t)SYM;
+    fwrite(&symType, 1, 1, f);
+    writeU32LE(f, 1); /* numGroups */
+    writeU32LE(f, 0); /* groupSize */
+    writeF32LE(f, 0.5f);
+    fwrite(&qBits, 1, 1, f);
+    uint8_t roundingMode = 0; /* HALF_AWAY */
+    fwrite(&roundingMode, 1, 1, f);
+    uint8_t payload[16] = {0}; /* never reached: the guard dies first */
+    fwrite(payload, 1, sizeof(payload), f);
+    fclose(f);
+}
+
+/* A complete RELU record whose outputQ wire config carries qBits: without the guard the whole
+ * model parses, because numberOfElements == 0 there skips validateSymQConfigShape. */
+static void writeReluSymOutputWireRecordWithQBits(uint8_t qBits) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    fwrite("ODTS", 1, 4, f);
+    writeU32LE(f, ODTS_VERSION);
+    writeU32LE(f, 1); /* layerCount */
+    uint8_t tag = (uint8_t)RELU;
+    fwrite(&tag, 1, 1, f);
+    uint8_t arithByte = 0;
+    fwrite(&arithByte, 1, 1, f);
+    fwrite(&arithByte, 1, 1, f);
+    fwrite(&arithByte, 1, 1, f);
+    fwrite(&arithByte, 1, 1, f);
+    uint8_t symType = (uint8_t)SYM;
+    fwrite(&symType, 1, 1, f);
+    writeU32LE(f, 1); /* numGroups */
+    writeU32LE(f, 0); /* groupSize */
+    writeF32LE(f, 0.5f);
+    fwrite(&qBits, 1, 1, f);
+    uint8_t roundingMode = 0;
+    fwrite(&roundingMode, 1, 1, f);
+    uint8_t propLossFloatTag = (uint8_t)FLOAT32;
+    fwrite(&propLossFloatTag, 1, 1, f);
+    fclose(f);
+}
+
+static void assertSymTensorRecordQBitsRejected(uint8_t qBits) {
+    writeSymTensorRecordWithQBits(qBits);
+    tensor_t *skeleton = makeSymTensor1D(4, 8, HALF_AWAY);
+    FILE *f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeQConfig: SYM file qBits",
+                             deserializeTensor(skeleton, f));
+    fclose(f);
+    freeTensor(skeleton);
+}
+
+static void assertSymWireConfigQBitsRejected(uint8_t qBits) {
+    writeReluSymOutputWireRecordWithQBits(qBits);
+    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *symOutputQ = quantizationInitSym(8, HALF_AWAY);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    lq.outputQ = symOutputQ;
+    layer_t *layer = reluLayerInit(&lq);
+    layer_t *model[] = {layer};
+    FILE *f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeQConfig: SYM file qBits",
+                             deserializeModel(model, 1, f));
+    fclose(f);
+    freeReluLayer(layer);
+    freeQuantization(symOutputQ);
+    freeQuantization(floatQ);
+}
+
+/*! #479: the SYM twin of the ASYM wire-qBits guard, at the [1, 31] storage ceiling. The
+ *  wire-config variants are the ones only this guard can catch. */
+static void testDeserializeSymRejectsWireQBitsZero(void) {
+    assertSymTensorRecordQBitsRejected(0);
+}
+
+static void testDeserializeSymRejectsWireQBitsZeroInWireConfig(void) {
+    assertSymWireConfigQBitsRejected(0);
+}
+
+static void testDeserializeSymRejectsWireQBitsAbove31(void) {
+    assertSymTensorRecordQBitsRejected(32);
+}
+
+static void testDeserializeSymRejectsWireQBitsAbove31InWireConfig(void) {
+    assertSymWireConfigQBitsRejected(32);
+}
+
+/*! #479: pins both inclusive ends of [1, 31], so an off-by-one tightening of the guard fails. */
+static void testDeserializeSymAcceptsWireQBitsBoundsInWireConfig(void) {
+    const uint8_t bounds[] = {1, 31};
+    for (size_t i = 0; i < 2; i++) {
+        writeReluSymOutputWireRecordWithQBits(bounds[i]);
+        quantization_t *floatQ = quantizationInitFloat();
+        quantization_t *symOutputQ = quantizationInitSym(8, HALF_AWAY);
+        layerQuant_t lq;
+        layerQuantInitUniform(&lq, floatQ);
+        lq.outputQ = symOutputQ;
+        layer_t *layer = reluLayerInit(&lq);
+        layer_t *model[] = {layer};
+        FILE *f = fopen(FILE_PATH, "rb");
+        deserializeModel(model, 1, f);
+        fclose(f);
+        symQConfig_t *qC = layer->config->relu->outputQ->qConfig;
+        uint8_t capturedQBits = qC->qBits;
+        freeReluLayer(layer);
+        freeQuantization(symOutputQ);
+        freeQuantization(floatQ);
+        TEST_ASSERT_EQUAL_UINT8(bounds[i], capturedQBits);
+    }
+}
+
 static tensor_t *makeAsymGroupedTensor1D(size_t d0, uint8_t qBits, roundingMode_t roundingMode,
                                          size_t numGroups, size_t groupSize) {
     size_t *dims = reserveMemory(1 * sizeof(size_t));
@@ -2381,6 +2496,11 @@ int main(void) {
     RUN_TEST(testDeserializeSymRejectsZeroNumGroupsInWireConfig);
     RUN_TEST(testDeserializeAsymRejectsZeroNumGroupsInWireConfig);
     RUN_TEST(testDeserializeAsymRejectsWireQBitsAboveSixteen);
+    RUN_TEST(testDeserializeSymRejectsWireQBitsZero);
+    RUN_TEST(testDeserializeSymRejectsWireQBitsZeroInWireConfig);
+    RUN_TEST(testDeserializeSymRejectsWireQBitsAbove31);
+    RUN_TEST(testDeserializeSymRejectsWireQBitsAbove31InWireConfig);
+    RUN_TEST(testDeserializeSymAcceptsWireQBitsBoundsInWireConfig);
     RUN_TEST(testDeserializeGroupedAsymRejectsBadDivisibility);
     RUN_TEST(testDeserializeGroupedAsymIntoPerTensorSkeleton);
     RUN_TEST(testSkipSerializedGroupedAsymGrad);

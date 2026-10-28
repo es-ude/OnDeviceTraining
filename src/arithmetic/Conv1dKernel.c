@@ -6,6 +6,7 @@
 
 #include "BfpKernelSupport.h"
 #include "Common.h"
+#include "GroupCursor.h"
 #include "Mul.h"
 #include "Rounding.h"
 #include "SlidingWindow1d.h"
@@ -165,8 +166,8 @@ void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_
 
 /* Group-quant PR2 (Task 4): entry guards mirror matmulValidateWeightGroups
  * (Matmul.c) exactly -- non-NULL, qBits within the operand contract, and the
- * per-tensor sentinel {numGroups=1, groupSize=0} rejected (its groupSize=0
- * would divide-by-zero below; per-tensor weights take conv1dKernelSymInt32). */
+ * per-tensor sentinel {numGroups=1, groupSize=0} rejected (per-tensor weights
+ * take conv1dKernelSymInt32). */
 static void conv1dValidateWeightGroups(const symQConfig_t *weightGroups, size_t weightElemCount) {
     if (weightGroups == NULL) {
         PRINT_ERROR("conv1dKernelSymInt32Grouped: weightGroups must not be NULL");
@@ -256,6 +257,7 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
         }
     }
 
+    groupCursor_t wCursor = groupCursorInit(weightGroups->groupSize);
     for (size_t b = 0; b < batch; b++) {
         for (size_t g = 0; g < groups; g++) {
             size_t inLo = g * inChPerGroup;
@@ -277,13 +279,8 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                             size_t inputIdx = slice.firstValidInputIdx + i * geom.dilation;
                             size_t kernelIdx = slice.firstValidKernelOffset + i;
                             size_t wStorageIdx = wBase + icOffset * kernelSize + kernelIdx;
-                            /* Per-element division, unlike Matmul's grouped kernel (which
-                             * precomputes a run length to the next group boundary): padding
-                             * (VALID/SAME/EXPLICIT) makes slice.validCount skip invalid kernel
-                             * positions, so consecutive wStorageIdx values here can have gaps --
-                             * a precomputed run length would overshoot past a skipped index.
-                             * Dividing the actual visited index is gap-robust. */
-                            size_t elemGroup = wStorageIdx / weightGroups->groupSize;
+                            /* Cursor, not a run length: clipped taps leave gaps. */
+                            size_t elemGroup = groupCursorOf(&wCursor, wStorageIdx);
 
                             if (elemGroup != currentGroup) {
                                 if (currentGroup != SIZE_MAX) {
@@ -418,6 +415,8 @@ void conv1dKernelBfp(tensor_t const *input, tensor_t const *weight, tensor_t con
         }
     }
 
+    groupCursor_t inCursor = groupCursorInit(inQC->groupSize);
+    groupCursor_t wCursor = groupCursorInit(wQC->groupSize);
     for (size_t b = 0; b < batch; b++) {
         for (size_t g = 0; g < groups; g++) {
             size_t inLo = g * inChPerGroup;
@@ -441,13 +440,8 @@ void conv1dKernelBfp(tensor_t const *input, tensor_t const *weight, tensor_t con
                             size_t kernelIdx = slice.firstValidKernelOffset + i;
                             size_t wIdx = wBase + icOffset * kernelSize + kernelIdx;
                             size_t inIdx = (b * inChannels + ic) * inputLength + inputIdx;
-                            /* Per-element division on BOTH operands (see the SYM
-                             * grouped kernel's gap rationale): clipped windows skip
-                             * taps, so consecutive visited indices can have gaps on
-                             * the weight AND -- across icOffset transitions -- jump
-                             * by inputLength on the input. */
-                            size_t inGroup = bfpGroupOf(inQC, inIdx);
-                            size_t wGroup = bfpGroupOf(wQC, wIdx);
+                            size_t inGroup = groupCursorOf(&inCursor, inIdx);
+                            size_t wGroup = groupCursorOf(&wCursor, wIdx);
 
                             if (currentWGroup == SIZE_MAX) {
                                 currentInGroup = inGroup;

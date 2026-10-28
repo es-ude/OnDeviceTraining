@@ -10,6 +10,7 @@
 #include "Conv1dKernel.h"
 #include "ConvTranspose1dKernel.h"
 #include "ExecuteOp.h"
+#include "GroupCursor.h"
 #include "Layer.h"
 #include "LayerExec.h"
 #include "Mul.h"
@@ -626,6 +627,8 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
     size_t stride = cfg->kernel->stride;
     size_t dilation = cfg->kernel->dilation;
 
+    groupCursor_t xCursor = groupCursorInit(xQC->groupSize);
+    groupCursor_t gyCursor = groupCursorInit(gyQC->groupSize);
     for (size_t g = 0; g < groups; g++) {
         size_t inLo = g * inChPerGroup;
         size_t outLo = g * outChPerGroup;
@@ -655,13 +658,8 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
                             }
                             size_t xIdx = (b * inChannels + ic) * inputLength + inPos;
                             size_t gyIdx = (b * outChannels + oc) * outputLength + outIdx;
-                            /* Per-element division on BOTH operands (the SYM
-                             * grouped kernels' gap rationale): consecutive
-                             * contributors hop by stride on the loss and by
-                             * inputLength/outputLength across channels and
-                             * batches. */
-                            size_t xGroup = bfpGroupOf(xQC, xIdx);
-                            size_t gyGroup = bfpGroupOf(gyQC, gyIdx);
+                            size_t xGroup = groupCursorOf(&xCursor, xIdx);
+                            size_t gyGroup = groupCursorOf(&gyCursor, gyIdx);
 
                             if (currentGyGroup == SIZE_MAX) {
                                 currentXGroup = xGroup;

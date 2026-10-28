@@ -330,11 +330,13 @@ Every `ARITH_BFP` kernel (`matmulBfpTensors`, `conv1dKernelBfp`,
   product, i.e. HBFP's per-dot-product recompute rule. **Epic PR3 does not do
   that.** D8 was amended 2026-09-02 (§9) to spell out that for
   ALREADY-QUANTIZED BFP-stored operands, op-local blocking realizes as the
-  SAME PR2 fold contract instead (§5.6): per-element `bfpGroupOf` lookup,
-  folding on EITHER operand's group change, never a re-quantize onto fresh
-  reduction-axis blocks. Only the FOLD FREQUENCY differs between forward and
-  backward — a transposed or output-centric walk crosses group boundaries
-  more often than the forward's storage-order walk does, so it folds more
+  SAME PR2 fold contract instead (§5.6): per-step group id via
+  `groupCursor_t` (GroupCursor.h), exact for any visit order (`bfpGroupOf`
+  remains the per-element form), folding on EITHER operand's group change,
+  never a re-quantize onto fresh reduction-axis blocks. Only the FOLD
+  FREQUENCY differs between forward and backward — a transposed or
+  output-centric walk crosses group boundaries more often than the forward's
+  storage-order walk does, so it folds more
   often — never what the exponents mean or where they come from. The
   regression coverage for this contract lives entirely in the PR3 backward
   test suite now that native backward ships end to end; the PR2-era pins that
@@ -474,9 +476,11 @@ silent wrong arithmetic, not a crash.
   `weights` as the second operand instead of the forward input.
 - **BFP-stored operands entering any backward op go through the EXACT SAME
   fold contract as the forward (§5.3), never a re-quantize.** Every operand
-  is looked up per-element (`bfpGroupOf`); the running `int32` partial folds
-  into the `float32` accumulator via a lossless `ldexpf` power-of-two shift
-  on ANY group-boundary crossing (either operand) and once more at the tail
+  resolves its group id per step via `groupCursor_t` (GroupCursor.h), exact
+  for any visit order (`bfpGroupOf` remains the per-element form); the
+  running `int32` partial folds into the `float32` accumulator via a
+  lossless `ldexpf` power-of-two shift on ANY group-boundary crossing
+  (either operand) and once more at the tail
   — identical mechanics whether the reduction axis matches storage order
   (forward) or not (backward's transposed/output-centric walks). This is the
   **D8 amendment** (§9). FLOAT32-stored operands still STAGE — per-tensor, at
@@ -1548,16 +1552,17 @@ records how PR3 actually resolved it.
 Epic PR3 does **not** implement that recompute. For an ALREADY-QUANTIZED
 (BFP-stored) operand, op-local blocking realizes instead as the PR2 **exact
 fold-segmentation contract** carried over verbatim from the forward (§5.3,
-§5.6): per-element `bfpGroupOf` lookup, folding the running `int32` partial
-into the `float32` accumulator on EITHER operand's group change (plus a tail
-fold) — never a re-quantize onto fresh reduction-axis blocks. A BFP-stored
-operand's exponents are borrowed read-only (zero-copy) in the backward
-exactly as in the forward; the only thing that changes between forward and
-backward is HOW OFTEN a segment closes (the forward folds once per storage
-group, since storage groups are contiguous along the forward's reduction
-axis; the backward's transposed/output-centric walks cross group boundaries
-more often, so they fold more often) — never what the exponents mean or
-where they come from.
+§5.6): per-step group id via `groupCursor_t` (GroupCursor.h), exact for any
+visit order (`bfpGroupOf` remains the per-element form), folding the running
+`int32` partial into the `float32` accumulator on EITHER operand's group
+change (plus a tail fold) — never a re-quantize onto fresh reduction-axis
+blocks. A BFP-stored operand's exponents are borrowed read-only (zero-copy)
+in the backward exactly as in the forward; the only thing that changes
+between forward and backward is HOW OFTEN a segment closes (the forward
+folds once per storage group, since storage groups are contiguous along the
+forward's reduction axis; the backward's transposed/output-centric walks
+cross group boundaries more often, so they fold more often) — never what the
+exponents mean or where they come from.
 
 **Rationale — why re-blocking would be wrong here, not merely unimplemented.**
 HBFP's recompute rule addresses giving a FRESH block structure to

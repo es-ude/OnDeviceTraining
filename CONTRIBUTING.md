@@ -87,7 +87,7 @@ ctest --preset unit_test_debug          # run all unit tests
 | `unit_test` | Plain unit-test build (what CI runs); sets `ODT_REMAT_VERIFY=ON` |
 | `unit_test_error` / `unit_test_info` / `unit_test_debug` | Increasing log verbosity (`DEBUG_MODE_*`); `debug` also enables `ODT_MEM_PROFILE`, `ODT_TRACK_INSTRUCTIONS` and `ODT_REMAT_VERIFY` |
 | `unit_test_asan` | AddressSanitizer + UBSan, plus `ODT_MEM_PROFILE`, `ODT_TRACK_INSTRUCTIONS`, `ODT_REMAT_VERIFY`. On macOS this needs compiler-rt ≥ LLVM 22 — see [`docs/conventions/testing.md`](docs/conventions/testing.md) (the devenv shell handles it) |
-| `unit_test_ubsan` | Signed-overflow / float-cast UBSan build; inherits `unit_test_debug` (same `ODT_*` options) |
+| `unit_test_ubsan` | UBSan with gcc's full `undefined` set plus `float-cast-overflow` (configure with `CC=gcc`, as CI does); inherits `unit_test_debug` (same `ODT_*` options) |
 | `examples` | `BUILD_EXAMPLES=ON`; the default `all` target compiles **every** example binary |
 | `examples_memprofile` | `examples` + `ODT_MEM_PROFILE=ON` |
 | `arm_cross` | Compile-only `arm-none-eabi` cross build (`cmake/arm-none-eabi.cmake`, `-Werror`, no tests); its build preset compiles an explicit list of core library targets |
@@ -175,7 +175,7 @@ PRs to `main`/`develop`:
 | `c-format-check` | `clang-format --dry-run -Werror` over `src`, `test`, `examples` |
 | `c-build-and-test` | `unit_test` preset: configure, build, ctest |
 | `c-asan-build-and-test` | The suite under ASan + UBSan |
-| `c-ubsan-build-and-test` | The suite under overflow-focused UBSan |
+| `c-ubsan-build-and-test` | The suite under gcc's full UBSan set plus `float-cast-overflow` |
 | `c-bit-parity` | Builds **all** example binaries, then parity of the C twins against PyTorch (exact int32 predictions; ECG reconstructions via allclose); also runs the `mixed_width_mlp` acceptance binary (in-binary gates, no parity) and the continual-learning mini-gate (`train_c_continual` machinery smoke) |
 | `c-arm-cross-compile` | `arm_cross` preset with Arm GNU 13.3.Rel1 (devenv parity); non-required |
 | `c-arm-cross-compile-min` | `arm_cross` preset with apt arm-gcc 10.x — the pre-C23 portability floor; non-required |
@@ -185,8 +185,9 @@ PRs to `main`/`develop`:
 The devenv `ci` script mirrors this pipeline locally (all but the `gate`,
 UBSan, bit-parity, both ARM cross-compile and stack-watermark jobs) — run it
 before opening a PR. If your change touches
-numerics or training behavior, also run the `unit_test_ubsan` preset and the
-affected examples' parity checks yourself.
+numerics or training behavior, also run the `unit_test_ubsan` preset under gcc
+(`CC=gcc cmake --preset unit_test_ubsan`) and the affected examples' parity
+checks yourself.
 
 ## The bigger picture
 

@@ -1,10 +1,12 @@
 #define SOURCE_FILE "NPY_LOADER"
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "CheckedSize.h"
 #include "Common.h"
 #include "DataLoader.h"
 #include "NPYLoader.h"
@@ -19,24 +21,24 @@ FILE *openNPYFile(char *path) {
     return f;
 }
 
-char *npyReadHeaderText(FILE *f, const char *path) {
+static char *npyReadHeaderText(FILE *f, const char *path) {
     static const uint8_t magic[6] = {0x93, 'N', 'U', 'M', 'P', 'Y'};
     uint8_t preamble[6];
     if (fread(preamble, 1, sizeof(preamble), f) != sizeof(preamble) ||
         memcmp(preamble, magic, sizeof(magic)) != 0) {
-        PRINT_ERROR("npyReadHeaderText: %s: is not a .npy file", path);
+        PRINT_ERROR("npyReadHeader: %s: is not a .npy file", path);
         exit(1);
     }
 
     uint8_t version[2];
     if (fread(version, 1, sizeof(version), f) != sizeof(version)) {
-        PRINT_ERROR("npyReadHeaderText: %s: truncated preamble", path);
+        PRINT_ERROR("npyReadHeader: %s: truncated preamble", path);
         exit(1);
     }
     unsigned major = version[0];
     unsigned minor = version[1];
     if ((major < 1u || major > 3u) || minor != 0u) {
-        PRINT_ERROR("npyReadHeaderText: %s: unsupported .npy version %u.%u", path, major, minor);
+        PRINT_ERROR("npyReadHeader: %s: unsupported .npy version %u.%u", path, major, minor);
         exit(1);
     }
 
@@ -44,14 +46,14 @@ char *npyReadHeaderText(FILE *f, const char *path) {
     size_t lengthBytes = (major == 1u) ? 2u : 4u;
     uint8_t lengthField[4] = {0};
     if (fread(lengthField, 1, lengthBytes, f) != lengthBytes) {
-        PRINT_ERROR("npyReadHeaderText: %s: truncated preamble", path);
+        PRINT_ERROR("npyReadHeader: %s: truncated preamble", path);
         exit(1);
     }
     uint32_t length = (uint32_t)lengthField[0] | ((uint32_t)lengthField[1] << 8) |
                       ((uint32_t)lengthField[2] << 16) | ((uint32_t)lengthField[3] << 24);
 
     if (length > NPY_MAX_HEADER_BYTES) {
-        PRINT_ERROR("npyReadHeaderText: %s: header length %u exceeds the %u-byte cap", path,
+        PRINT_ERROR("npyReadHeader: %s: header length %u exceeds the %u-byte cap", path,
                     (unsigned)length, (unsigned)NPY_MAX_HEADER_BYTES);
         exit(1);
     }
@@ -60,105 +62,128 @@ char *npyReadHeaderText(FILE *f, const char *path) {
      * or a short read. length <= the cap keeps the comparison 32-bit-long safe. */
     long headerStart = ftell(f);
     if (headerStart < 0 || fseek(f, 0, SEEK_END) != 0) {
-        PRINT_ERROR("npyReadHeaderText: %s: cannot determine the file size", path);
+        PRINT_ERROR("npyReadHeader: %s: cannot determine the file size", path);
         exit(1);
     }
     long fileSize = ftell(f);
     if (fileSize < headerStart || fseek(f, headerStart, SEEK_SET) != 0) {
-        PRINT_ERROR("npyReadHeaderText: %s: cannot determine the file size", path);
+        PRINT_ERROR("npyReadHeader: %s: cannot determine the file size", path);
         exit(1);
     }
     if (fileSize - headerStart < (long)length) {
-        PRINT_ERROR("npyReadHeaderText: %s: header length %u runs past the end of the file", path,
+        PRINT_ERROR("npyReadHeader: %s: header length %u runs past the end of the file", path,
                     (unsigned)length);
         exit(1);
     }
 
     char *header = reserveMemory((size_t)length + 1u);
     if (header == NULL) {
-        PRINT_ERROR("npyReadHeaderText: %s: cannot reserve %u bytes for the header", path,
+        PRINT_ERROR("npyReadHeader: %s: cannot reserve %u bytes for the header", path,
                     (unsigned)length + 1u);
         exit(1);
     }
     if (fread(header, 1, length, f) != length) {
-        PRINT_ERROR("npyReadHeaderText: %s: short read of the %u-byte header", path,
-                    (unsigned)length);
+        PRINT_ERROR("npyReadHeader: %s: short read of the %u-byte header", path, (unsigned)length);
         exit(1);
     }
     header[length] = '\0';
     return header;
 }
 
-static dtype_t parseHeaderDescription(char *s) {
-    if (strcmp(s, "<f4") == 0) {
+#define NPY_HEADER_FAIL(path, fmt, ...)                                                            \
+    do {                                                                                           \
+        PRINT_ERROR("npyReadHeader: %s: " fmt, path, ##__VA_ARGS__);                               \
+        exit(1);                                                                                   \
+    } while (0)
+
+static const char *skipSpaces(const char *p) {
+    while (*p == ' ') {
+        p++;
+    }
+    return p;
+}
+
+static bool isDigit(char c) {
+    return c >= '0' && c <= '9';
+}
+
+/* Returns the start of the key's value; the caller parses the value. */
+static const char *findValue(const char *header, const char *key, const char *path) {
+    const char *p = strstr(header, key);
+    if (p == NULL) {
+        NPY_HEADER_FAIL(path, "no %s key", key);
+    }
+    p = skipSpaces(p + strlen(key));
+    if (*p != ':') {
+        NPY_HEADER_FAIL(path, "malformed header dict: no ':' after %s", key);
+    }
+    return skipSpaces(p + 1);
+}
+
+static dtype_t parseDescr(const char *p, const char *path) {
+    if (strncmp(p, "'<f4'", 5) == 0) {
         return FLOAT_32;
     }
-    if (strcmp(s, "<i4") == 0) {
+    if (strncmp(p, "'<i4'", 5) == 0) {
         return INT_32;
     }
-
-    fprintf(stderr, "Unsupported dtype: %s\n", s);
-    exit(1);
+    NPY_HEADER_FAIL(path, "unsupported dtype (only '<f4' and '<i4' are supported)");
 }
 
-dtype_t getDTypeFromHeader(char *header) {
-    char descr[8];
-    sscanf(strstr(header, "'descr'"), "'descr': '%7[^']'", descr);
-    dtype_t dtype = parseHeaderDescription(descr);
-    return dtype;
+static void parseFortranOrder(const char *p, const char *path) {
+    if (strncmp(p, "True", 4) == 0) {
+        NPY_HEADER_FAIL(path, "fortran_order True is not supported");
+    }
+    if (strncmp(p, "False", 5) != 0 || (p[5] != ',' && p[5] != ' ' && p[5] != '}')) {
+        NPY_HEADER_FAIL(path, "fortran_order must be False");
+    }
 }
 
-size_t getNumberOfDimsFromHeader(char *header) {
-    char *p = strstr(header, "shape");
-    p = strchr(p, '(') + 1;
-
+/* shape := '(' ws* [ item ( ws* ',' ws* item )* [ ws* ',' ] ] ws* ')' with item := digit+:
+ * numpy writes (2, 3) and (3,), examples/_shared/npy_writer.c writes (2,3,). */
+static void parseShape(const char *p, const char *path, npyHeader_t *out) {
+    if (*p != '(') {
+        NPY_HEADER_FAIL(path, "malformed shape tuple");
+    }
+    p = skipSpaces(p + 1);
     size_t numberOfDims = 0;
-
     while (*p != ')') {
-        while (*p == ' ') {
-            p++;
+        if (!isDigit(*p)) {
+            NPY_HEADER_FAIL(path, "malformed shape tuple");
         }
-
-        if (*p >= '0' && *p <= '9') {
-            numberOfDims++;
-            while (*p >= '0' && *p <= '9') {
-                p++;
+        if (numberOfDims == NPY_MAX_DIMS) {
+            NPY_HEADER_FAIL(path, "shape has more than %u dimensions", (unsigned)NPY_MAX_DIMS);
+        }
+        size_t value = 0;
+        while (isDigit(*p)) {
+            if (!checkedMulSize(value, 10u, &value) ||
+                !checkedAddSize(value, (size_t)(*p - '0'), &value)) {
+                NPY_HEADER_FAIL(path, "shape dimension overflows size_t");
             }
-        }
-
-        if (*p == ',') {
             p++;
+        }
+        out->dims[numberOfDims++] = value;
+        p = skipSpaces(p);
+        if (*p == ',') {
+            p = skipSpaces(p + 1);
+        } else if (*p != ')') {
+            NPY_HEADER_FAIL(path, "malformed shape tuple");
         }
     }
-
-    return numberOfDims;
+    out->numberOfDims = numberOfDims;
 }
 
-void getShapeFromHeader(shape_t *shape, size_t *dims, size_t *orderOfDims, char *header,
-                        size_t numberOfDims) {
-    shape->numberOfDimensions = numberOfDims;
-    shape->dimensions = dims;
-    shape->orderOfDimensions = orderOfDims;
+void npyReadHeader(FILE *f, const char *path, npyHeader_t *out) {
+    memset(out, 0, sizeof(*out));
+    char *header = npyReadHeaderText(f, path);
 
-    char *p = strstr(header, "shape");
-    p = strchr(p, '(');
-    p++;
+    const char *descr = findValue(header, "'descr'", path);
+    const char *fortranOrder = findValue(header, "'fortran_order'", path);
+    const char *shape = findValue(header, "'shape'", path);
 
-    for (size_t i = 0; i < numberOfDims; i++) {
-        while (*p == ' ') {
-            p++;
-        }
+    out->dtype = parseDescr(descr, path);
+    parseFortranOrder(fortranOrder, path);
+    parseShape(shape, path, out);
 
-        char *end;
-        size_t value = strtoull(p, &end, 10);
-
-        shape->dimensions[i] = value;
-        shape->orderOfDimensions[i] = i;
-
-        p = end;
-
-        if (*p == ',') {
-            p++;
-        }
-    }
+    freeReservedMemory(header);
 }

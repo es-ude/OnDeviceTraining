@@ -15,44 +15,26 @@
 FILE *openNPYFile(char *path);
 
 #define NPY_MAX_HEADER_BYTES 10000u /* numpy np.load max_header_size default */
+#define NPY_MAX_DIMS 32u            /* numpy 1.x NPY_MAXDIMS */
 
-/*! Reads magic, version and header length, checks the length against
- * NPY_MAX_HEADER_BYTES and the file size, and returns the NUL-terminated header
- * text (reserveMemory; the caller frees it with freeReservedMemory). Leaves f at
- * the payload. Every failure prints the path and the reason and exits(1).
+typedef struct {
+    dtype_t dtype;
+    size_t numberOfDims;
+    size_t dims[NPY_MAX_DIMS];
+    size_t numberOfElements;
+    size_t payloadBytes;
+} npyHeader_t;
+
+/*! Reads the preamble and the header dict of a .npy file: magic, version 1.0/2.0/3.0,
+ * a header length within NPY_MAX_HEADER_BYTES and the file size, then the keys
+ * 'descr' ('<f4' or '<i4'), 'fortran_order' (False) and 'shape' (at most NPY_MAX_DIMS
+ * dimensions, each fitting size_t). Leaves f at the payload. Every failure prints the
+ * path and the reason and exits(1).
  *
  * \param f: File opened at offset 0
  * \param path: Path of f, for the error messages
- *
- * \returns Header text
+ * \param out: Parsed header
  */
-char *npyReadHeaderText(FILE *f, const char *path);
-
-/*! Gets datatype from header.
- *
- * \param header: String of header
- *
- * \returns Enum of datatype
- */
-dtype_t getDTypeFromHeader(char *header);
-
-/*! Get number of dims from header
- *
- * \param header: String of header
- *
- * \returns Number of dims
- */
-size_t getNumberOfDimsFromHeader(char *header);
-
-/*! Fills given shape with correct number of dims, dims and orderOfDims.
- *
- * \param shape: Shape buffer
- * \param dims: Dims buffer
- * \param orderOfDims: Order of dims buffer
- * \param header: String of header
- * \param numberOfDims: Number of dims
- */
-void getShapeFromHeader(shape_t *shape, size_t *dims, size_t *orderOfDims, char *header,
-                        size_t numberOfDims);
+void npyReadHeader(FILE *f, const char *path, npyHeader_t *out);
 
 #endif // NPYLOADER_H

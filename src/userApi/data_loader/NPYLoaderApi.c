@@ -16,26 +16,22 @@
 tensorArray_t *npyLoad(char *path) {
     FILE *f = openNPYFile(path);
 
-    char *header = npyReadHeaderText(f, path);
+    npyHeader_t header;
+    npyReadHeader(f, path, &header);
 
-    dtype_t dtype = getDTypeFromHeader(header);
-    quantization_t *q = initQByDType(dtype);
+    quantization_t *q = initQByDType(header.dtype);
 
-    size_t numberOfDims = getNumberOfDimsFromHeader(header);
     shape_t totalShape;
-    size_t totalDims[numberOfDims];
-    size_t orderOfDims[numberOfDims];
-    getShapeFromHeader(&totalShape, totalDims, orderOfDims, header, numberOfDims);
-
-    /* Header is fully consumed; release before the per-tensor loop runs. */
-    freeReservedMemory(header);
+    size_t orderOfDims[NPY_MAX_DIMS];
+    setOrderOfDimsForNewTensor(header.numberOfDims, orderOfDims);
+    setShape(&totalShape, header.dims, header.numberOfDims, orderOfDims);
 
     size_t numberOfTensors = totalShape.dimensions[0];
 
     shape_t rowShape;
     size_t rowNumberOfDims = totalShape.numberOfDimensions - 1;
-    size_t rowDims[rowNumberOfDims];
-    size_t rowOrder[rowNumberOfDims];
+    size_t rowDims[NPY_MAX_DIMS];
+    size_t rowOrder[NPY_MAX_DIMS];
     rowShape.dimensions = rowDims;
     rowShape.numberOfDimensions = rowNumberOfDims;
     rowShape.orderOfDimensions = rowOrder;
@@ -83,19 +79,17 @@ tensorArray_t *npyLoad(char *path) {
 tensor_t *npyLoadFlat(char *path) {
     FILE *f = openNPYFile(path);
 
-    char *header = npyReadHeaderText(f, path);
+    npyHeader_t header;
+    npyReadHeader(f, path, &header);
 
-    dtype_t dtype = getDTypeFromHeader(header);
-    quantization_t *q = initQByDType(dtype);
+    quantization_t *q = initQByDType(header.dtype);
 
-    size_t numberOfDims = getNumberOfDimsFromHeader(header);
+    size_t numberOfDims = header.numberOfDims;
+    size_t *fileDims = header.dims;
     shape_t fileShape;
-    size_t fileDims[numberOfDims];
-    size_t fileOrder[numberOfDims];
-    getShapeFromHeader(&fileShape, fileDims, fileOrder, header, numberOfDims);
-
-    /* Header is fully consumed; release before allocating the tensor. */
-    freeReservedMemory(header);
+    size_t fileOrder[NPY_MAX_DIMS];
+    setOrderOfDimsForNewTensor(numberOfDims, fileOrder);
+    setShape(&fileShape, fileDims, numberOfDims, fileOrder);
 
     /* Owned copy of the FULL on-disk shape (dim0 included) so the entire payload
      * lands in one contiguous tensor — no dim0 slicing as npyLoad() does. */

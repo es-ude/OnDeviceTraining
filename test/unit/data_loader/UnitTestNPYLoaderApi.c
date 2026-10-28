@@ -8,6 +8,7 @@
 #include "DeathTest.h"
 #include "NPYLoaderApi.h"
 #include "Tensor.h"
+#include "TensorApi.h"
 #include "unity.h"
 
 #define NPY_TEST_ALARM_SECONDS 5u
@@ -117,6 +118,133 @@ void testNpyLoadsV2Header(void) {
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(SIX_FLOATS, captured, 6);
 }
 
+static void writeDict(const char *dict, const void *payload, size_t payloadBytes) {
+    writeNpy(1, 0, (uint32_t)strlen(dict), dict, payload, payloadBytes);
+}
+
+void testNpyRejectsMissingShapeKey(void) {
+    writeDict("{'descr': '<f4', 'fortran_order': False, }", SIX_FLOATS, sizeof(SIX_FLOATS));
+    ASSERT_EXITS_WITH_OUTPUT(1, "no 'shape' key", loadUnderAlarm());
+    ASSERT_EXITS_WITH_OUTPUT(1, "no 'shape' key", loadFlatUnderAlarm());
+}
+
+void testNpyRejectsMissingDescrKey(void) {
+    writeDict("{'fortran_order': False, 'shape': (2, 3), }", SIX_FLOATS, sizeof(SIX_FLOATS));
+    ASSERT_EXITS_WITH_OUTPUT(1, "no 'descr' key", loadUnderAlarm());
+    ASSERT_EXITS_WITH_OUTPUT(1, "no 'descr' key", loadFlatUnderAlarm());
+}
+
+void testNpyRejectsMissingFortranOrderKey(void) {
+    writeDict("{'descr': '<f4', 'shape': (2, 3), }", SIX_FLOATS, sizeof(SIX_FLOATS));
+    ASSERT_EXITS_WITH_OUTPUT(1, "no 'fortran_order' key", loadUnderAlarm());
+}
+
+void testNpyRejectsKeyWithoutColon(void) {
+    writeDict("{'descr': '<f4', 'fortran_order': False, 'shape' (2, 3), }", SIX_FLOATS,
+              sizeof(SIX_FLOATS));
+    ASSERT_EXITS_WITH_OUTPUT(1, "no ':' after 'shape'", loadUnderAlarm());
+}
+
+void testNpyRejectsUnsupportedDtype(void) {
+    writeDict("{'descr': '<f8', 'fortran_order': False, 'shape': (3,), }", SIX_FLOATS,
+              sizeof(SIX_FLOATS));
+    ASSERT_EXITS_WITH_OUTPUT(1, "unsupported dtype", loadUnderAlarm());
+    ASSERT_EXITS_WITH_OUTPUT(1, "unsupported dtype", loadFlatUnderAlarm());
+}
+
+void testNpyRejectsFortranOrder(void) {
+    writeDict("{'descr': '<f4', 'fortran_order': True, 'shape': (2, 3), }", SIX_FLOATS,
+              sizeof(SIX_FLOATS));
+    ASSERT_EXITS_WITH_OUTPUT(1, "fortran_order True", loadUnderAlarm());
+    ASSERT_EXITS_WITH_OUTPUT(1, "fortran_order True", loadFlatUnderAlarm());
+
+    writeDict("{'descr': '<f4', 'fortran_order': 0, 'shape': (2, 3), }", SIX_FLOATS,
+              sizeof(SIX_FLOATS));
+    ASSERT_EXITS_WITH_OUTPUT(1, "fortran_order must be False", loadUnderAlarm());
+
+    writeDict("{'descr': '<f4', 'fortran_order': Falsey, 'shape': (2, 3), }", SIX_FLOATS,
+              sizeof(SIX_FLOATS));
+    ASSERT_EXITS_WITH_OUTPUT(1, "fortran_order must be False", loadUnderAlarm());
+}
+
+void testNpyRejectsBadShapeChar(void) {
+    writeDict("{'descr': '<f4', 'fortran_order': False, 'shape': (3, x), }", SIX_FLOATS,
+              sizeof(SIX_FLOATS));
+    ASSERT_EXITS_WITH_OUTPUT(1, "malformed shape tuple", loadUnderAlarm());
+    ASSERT_EXITS_WITH_OUTPUT(1, "malformed shape tuple", loadFlatUnderAlarm());
+
+    writeDict("{'descr': '<f4', 'fortran_order': False, 'shape': [6), }", SIX_FLOATS,
+              sizeof(SIX_FLOATS));
+    ASSERT_EXITS_WITH_OUTPUT(1, "malformed shape tuple", loadUnderAlarm());
+}
+
+void testNpyRejectsMisplacedShapeCommas(void) {
+    writeDict("{'descr': '<f4', 'fortran_order': False, 'shape': (2,, 3), }", SIX_FLOATS,
+              sizeof(SIX_FLOATS));
+    ASSERT_EXITS_WITH_OUTPUT(1, "malformed shape tuple", loadUnderAlarm());
+
+    writeDict("{'descr': '<f4', 'fortran_order': False, 'shape': (, 6), }", SIX_FLOATS,
+              sizeof(SIX_FLOATS));
+    ASSERT_EXITS_WITH_OUTPUT(1, "malformed shape tuple", loadUnderAlarm());
+
+    writeDict("{'descr': '<f4', 'fortran_order': False, 'shape': (2 3), }", SIX_FLOATS,
+              sizeof(SIX_FLOATS));
+    ASSERT_EXITS_WITH_OUTPUT(1, "malformed shape tuple", loadUnderAlarm());
+}
+
+void testNpyRejectsUnclosedShape(void) {
+    writeDict("{'descr': '<f4', 'fortran_order': False, 'shape': (3, 4", SIX_FLOATS,
+              sizeof(SIX_FLOATS));
+    ASSERT_EXITS_WITH_OUTPUT(1, "malformed shape tuple", loadUnderAlarm());
+    ASSERT_EXITS_WITH_OUTPUT(1, "malformed shape tuple", loadFlatUnderAlarm());
+}
+
+void testNpyRejectsDimensionOverflow(void) {
+    writeDict("{'descr': '<f4', 'fortran_order': False, 'shape': (99999999999999999999, 1), }",
+              SIX_FLOATS, sizeof(SIX_FLOATS));
+    ASSERT_EXITS_WITH_OUTPUT(1, "shape dimension overflows", loadUnderAlarm());
+    ASSERT_EXITS_WITH_OUTPUT(1, "shape dimension overflows", loadFlatUnderAlarm());
+}
+
+void testNpyRejectsTooManyDims(void) {
+    static char dict[256];
+    size_t n = 0;
+    const char *head = "{'descr': '<f4', 'fortran_order': False, 'shape': (";
+    memcpy(dict, head, strlen(head));
+    n += strlen(head);
+    for (size_t i = 0; i < 33; i++) {
+        memcpy(dict + n, "1, ", 3);
+        n += 3;
+    }
+    memcpy(dict + n, "), }", 5);
+    writeDict(dict, SIX_FLOATS, sizeof(float));
+    ASSERT_EXITS_WITH_OUTPUT(1, "more than 32 dimensions", loadUnderAlarm());
+    ASSERT_EXITS_WITH_OUTPUT(1, "more than 32 dimensions", loadFlatUnderAlarm());
+}
+
+static void assertShapeSpellingLoads(const char *dict, size_t expectedSamples) {
+    writeDict(dict, SIX_FLOATS, sizeof(SIX_FLOATS));
+
+    tensor_t *flat = npyLoadFlat(NPY_FIXTURE_PATH);
+    size_t flatElements = calcNumberOfElementsByTensor(flat);
+    float flatCaptured[6] = {0};
+    memcpy(flatCaptured, flat->data, sizeof(flatCaptured));
+    freeTensor(flat);
+    TEST_ASSERT_EQUAL_size_t(6, flatElements);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(SIX_FLOATS, flatCaptured, 6);
+
+    tensorArray_t *arr = npyLoad(NPY_FIXTURE_PATH);
+    size_t samples = arr->size;
+    freeTensorArray(arr);
+    TEST_ASSERT_EQUAL_size_t(expectedSamples, samples);
+}
+
+void testNpyParsesShapeSpellings(void) {
+    assertShapeSpellingLoads("{'descr': '<f4', 'fortran_order': False, 'shape': (2, 3), }", 2);
+    assertShapeSpellingLoads("{'descr': '<f4', 'fortran_order': False, 'shape': (2,3,), }", 2);
+    assertShapeSpellingLoads("{'descr': '<f4', 'fortran_order': False, 'shape': (6,), }", 6);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testNpyRejectsBadMagic);
@@ -125,5 +253,17 @@ int main(void) {
     RUN_TEST(testNpyRejectsHeaderLengthAboveCap);
     RUN_TEST(testNpyRejectsHeaderLengthBeyondFile);
     RUN_TEST(testNpyLoadsV2Header);
+    RUN_TEST(testNpyRejectsMissingShapeKey);
+    RUN_TEST(testNpyRejectsMissingDescrKey);
+    RUN_TEST(testNpyRejectsMissingFortranOrderKey);
+    RUN_TEST(testNpyRejectsKeyWithoutColon);
+    RUN_TEST(testNpyRejectsUnsupportedDtype);
+    RUN_TEST(testNpyRejectsFortranOrder);
+    RUN_TEST(testNpyRejectsBadShapeChar);
+    RUN_TEST(testNpyRejectsMisplacedShapeCommas);
+    RUN_TEST(testNpyRejectsUnclosedShape);
+    RUN_TEST(testNpyRejectsDimensionOverflow);
+    RUN_TEST(testNpyRejectsTooManyDims);
+    RUN_TEST(testNpyParsesShapeSpellings);
     return UNITY_END();
 }

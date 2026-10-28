@@ -1633,6 +1633,152 @@ void testMaxPool1dBackwardBfpRejectsNullArgmax(void) {
     freeTensor(lossGrad);
 }
 
+/* #425 item 1: k=2 s=2 VALID on [1,2,6] -> Lout 3. Every slot is filled so a
+ * zero in dx is never an untouched calloc index 0. Slot 0 (b=0, c=0, outPos=0)
+ * is a non-last row, so an index of 6 there lands in ch1's row (in-bounds
+ * misroute) unless the content check fires. */
+static const float kArgmaxGuardLossGrad[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+static const float kArgmaxGuardDxWithSentinel[] = {0.0f, 0.0f, 2.0f, 0.0f, 3.0f, 0.0f,
+                                                   0.0f, 4.0f, 0.0f, 5.0f, 0.0f, 6.0f};
+
+static void fillArgmaxGuardIndices(tensor_t *argmax, int32_t slot0) {
+    static const int32_t valid[] = {1, 2, 4, 1, 3, 5};
+    int32_t *a = (int32_t *)argmax->data;
+    memcpy(a, valid, sizeof valid);
+    a[0] = slot0;
+}
+
+static void assertMaxPoolFloatBackwardDiesOnSlot0(int32_t slot0) {
+    size_t inputDims[] = {1, 2, 6};
+    size_t outputDims[] = {1, 2, 3};
+    maxPool1dRunResult_t r =
+        maxPool1dBuild(NULL, inputDims, 2, VALID, 1, 2, NULL, NULL, outputDims);
+    tensor_t *lossGrad = makeFloatTensor(outputDims, 3, kArgmaxGuardLossGrad);
+    tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
+    fillArgmaxGuardIndices(r.argmax, slot0);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "not the -1 empty-window sentinel",
+                             maxPool1dBackward(r.layer, NULL, lossGrad, propLoss, NULL));
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+}
+
+void testMaxPool1dBackwardFloatRejectsArgmaxIndexAtInputLength(void) {
+    assertMaxPoolFloatBackwardDiesOnSlot0(6);
+}
+
+void testMaxPool1dBackwardFloatRejectsNegativeNonSentinelArgmax(void) {
+    assertMaxPoolFloatBackwardDiesOnSlot0(-2);
+}
+
+void testMaxPool1dBackwardFloatSkipsMinusOneSentinel(void) {
+    size_t inputDims[] = {1, 2, 6};
+    size_t outputDims[] = {1, 2, 3};
+    maxPool1dRunResult_t r =
+        maxPool1dBuild(NULL, inputDims, 2, VALID, 1, 2, NULL, NULL, outputDims);
+    tensor_t *lossGrad = makeFloatTensor(outputDims, 3, kArgmaxGuardLossGrad);
+    tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
+    fillArgmaxGuardIndices(r.argmax, -1);
+
+    maxPool1dBackward(r.layer, NULL, lossGrad, propLoss, NULL);
+
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(kArgmaxGuardDxWithSentinel, (float *)propLoss->data, 12);
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+}
+
+/* SAME k=2 s=2 on L=6 keeps Lout 3 for L=5 too, so a backward on a shorter
+ * propLoss passes every shape gate; only the content check sees ch0's 5. */
+void testMaxPool1dBackwardFloatRejectsStaleForwardArgmax(void) {
+    size_t inputDims[] = {1, 2, 6};
+    size_t outputDims[] = {1, 2, 3};
+    size_t shortInputDims[] = {1, 2, 5};
+    float input[] = {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 0.0f, 1.0f, 2.0f, 3.0f, 9.0f, 8.0f};
+    maxPool1dRunResult_t r =
+        maxPool1dBuild(input, inputDims, 2, SAME, 1, 2, NULL, NULL, outputDims);
+    tensor_t *lossGrad = makeFloatTensor(outputDims, 3, kArgmaxGuardLossGrad);
+    tensor_t *propLoss = makeFloatTensor(shortInputDims, 3, NULL);
+
+    maxPool1dForward(r.layer, r.input, r.output, NULL);
+    TEST_ASSERT_EQUAL_INT32(5, ((int32_t *)r.argmax->data)[2]);
+    TEST_ASSERT_EQUAL_INT32(4, ((int32_t *)r.argmax->data)[5]);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "not the -1 empty-window sentinel",
+                             maxPool1dBackward(r.layer, NULL, lossGrad, propLoss, NULL));
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+}
+
+static void assertMaxPoolSymBackwardDiesOnSlot0(int32_t slot0) {
+    size_t inputDims[] = {1, 2, 6};
+    size_t outputDims[] = {1, 2, 3};
+    maxPool1dSymRun_t r = maxPool1dBuildSym(NULL, inputDims, 2, VALID, 1, 2, outputDims);
+    tensor_t *lossGrad = buildSymTensor(outputDims, 3, kArgmaxGuardLossGrad);
+    tensor_t *propLoss = buildSymTensor(inputDims, 3, NULL);
+    fillArgmaxGuardIndices(r.argmax, slot0);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "not the -1 empty-window sentinel",
+                             maxPool1dBackward(r.layer, NULL, lossGrad, propLoss, NULL));
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+}
+
+void testMaxPool1dBackwardSymRejectsArgmaxIndexAtInputLength(void) {
+    assertMaxPoolSymBackwardDiesOnSlot0(6);
+}
+
+void testMaxPool1dBackwardSymRejectsNegativeNonSentinelArgmax(void) {
+    assertMaxPoolSymBackwardDiesOnSlot0(-2);
+}
+
+/* propLoss is the width-restored wire, so scattered cells are checked as
+ * dequant within one step; zeros are exact under any scale. */
+void testMaxPool1dBackwardSymSkipsMinusOneSentinel(void) {
+    size_t inputDims[] = {1, 2, 6};
+    size_t outputDims[] = {1, 2, 3};
+    maxPool1dSymRun_t r = maxPool1dBuildSym(NULL, inputDims, 2, VALID, 1, 2, outputDims);
+    tensor_t *lossGrad = buildSymTensor(outputDims, 3, kArgmaxGuardLossGrad);
+    tensor_t *propLoss = buildSymTensor(inputDims, 3, NULL);
+    fillArgmaxGuardIndices(r.argmax, -1);
+
+    maxPool1dBackward(r.layer, NULL, lossGrad, propLoss, NULL);
+
+    int32_t const *m = (int32_t const *)propLoss->data;
+    float scale = ((symInt32QConfig_t *)propLoss->quantization->qConfig)->scale;
+    for (size_t i = 0; i < 12; i++) {
+        if (kArgmaxGuardDxWithSentinel[i] == 0.0f) {
+            TEST_ASSERT_EQUAL_INT32(0, m[i]);
+        } else {
+            TEST_ASSERT_FLOAT_WITHIN(scale, kArgmaxGuardDxWithSentinel[i], (float)m[i] * scale);
+        }
+    }
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMaxPool1dForwardBasic);
@@ -1680,5 +1826,12 @@ int main(void) {
     RUN_TEST(testMaxPool1dForwardRejectsNullArgmax);
     RUN_TEST(testMaxPool1dBackwardSymRejectsNullArgmax);
     RUN_TEST(testMaxPool1dBackwardBfpRejectsNullArgmax);
+    RUN_TEST(testMaxPool1dBackwardFloatRejectsArgmaxIndexAtInputLength);
+    RUN_TEST(testMaxPool1dBackwardFloatRejectsNegativeNonSentinelArgmax);
+    RUN_TEST(testMaxPool1dBackwardFloatSkipsMinusOneSentinel);
+    RUN_TEST(testMaxPool1dBackwardFloatRejectsStaleForwardArgmax);
+    RUN_TEST(testMaxPool1dBackwardSymRejectsArgmaxIndexAtInputLength);
+    RUN_TEST(testMaxPool1dBackwardSymRejectsNegativeNonSentinelArgmax);
+    RUN_TEST(testMaxPool1dBackwardSymSkipsMinusOneSentinel);
     return UNITY_END();
 }

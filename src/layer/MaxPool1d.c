@@ -51,6 +51,10 @@ void initMaxPool1dConfig(maxPool1dConfig_t *cfg, kernel_t *kernel, tensor_t *arg
  * rank check because every calling arm has already read them. */
 static void maxPoolRequireArgmaxShape(const tensor_t *argmax, const tensor_t *input,
                                       size_t outputLength, const char *where) {
+    if (argmax == NULL) {
+        PRINT_ERROR("%s: argmaxIndices must not be NULL (factory-bypass config?)", where);
+        exit(1);
+    }
     size_t batch = input->shape->dimensions[0];
     size_t channels = input->shape->dimensions[1];
     if (argmax->shape->numberOfDimensions != 3) {

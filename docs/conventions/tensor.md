@@ -140,6 +140,17 @@ D6 mandates the code domain). ASYM `qBits` is therefore capped at **[1, 16]**
 against untrusted wire input in the ODTS v5 deserializer. On the wire, zeroPoints
 ride as `u16` LE per group (ODTS v5; the old v4 `i32` slot died with the v5 bump).
 
+**SYM width contract (#479).** SYM `qBits` is capped at **[1, 31]**, the
+storage ceiling: `packChunkGuarded` accepts at most 31 bits and the
+SYM→SYM_INT32 `qMaxBits` cap is 31 (#202); `qBits = 0` would underflow the
+packer. The narrower operand (`ODT_SYM_OPERAND_QMAXBITS`, 12) and grad-target
+(`ODT_SYM_GRAD_QMAXBITS`, 16) caps are enforced at the kernels / `executeOp`,
+not at init. Enforced in `initSymQConfigGrouped` (and `initSymQConfig` through
+it), re-checked at attach time in `validateSymQConfigShape`, and checked
+unconditionally against untrusted wire input in `deserializeQConfig`'s SYM arm
+(including the `outputQ`/`propLossQ` wire configs, which never reach the
+attach-time validator).
+
 **Grad-accumulate primitives (PR3, #261).** `accumulateFloatIntoSymTensorFixedGrid` /
 `accumulateFloatIntoSymTensorRescale` / `accumulateFloatIntoAsymTensorRescale`
 (`src/tensor/TensorConversion.c`) are the packed-grad accumulate primitives that back

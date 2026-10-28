@@ -13,6 +13,7 @@
 #include "ExecuteOp.h"
 #include "Layer.h"
 #include "LayerExec.h"
+#include "LayerWireGuards.h"
 #include "Quantization.h"
 #include "SlidingWindow1d.h"
 #include "StorageApi.h"
@@ -67,30 +68,6 @@ static void maxPoolRequireArgmaxShape(const tensor_t *argmax, const tensor_t *in
     }
 }
 
-/* BFP epic PR4 (F5), every arm since #4 PR0: the pool kernels index their
- * outputs as DENSE [batch][channels][length] arrays whose batch and channels
- * come from the OPERAND's dims (input forward, lossGrad backward), so an
- * output that disagrees on dim 0 or dim 1 is written past its end even when
- * its length is right — checking dimensions[2] alone is not enough. Rank is
- * checked first: dimensions[0..2] on a rank-2 shape is itself an over-read,
- * which is also why a backward arm rank-checks its dx output before reading
- * that output's length to pass in here. The argmax is validated separately
- * through maxPoolRequireArgmaxShape (#152). */
-static void poolBfpRequireDims3(const tensor_t *t, size_t d0, size_t d1, size_t d2,
-                                const char *what) {
-    if (t->shape->numberOfDimensions != 3) {
-        PRINT_ERROR("%s: expected a rank-3 [batch, channels, length] tensor, got rank %zu", what,
-                    t->shape->numberOfDimensions);
-        exit(1);
-    }
-    if (t->shape->dimensions[0] != d0 || t->shape->dimensions[1] != d1 ||
-        t->shape->dimensions[2] != d2) {
-        PRINT_ERROR("%s: expected shape [%zu, %zu, %zu], got [%zu, %zu, %zu]", what, d0, d1, d2,
-                    t->shape->dimensions[0], t->shape->dimensions[1], t->shape->dimensions[2]);
-        exit(1);
-    }
-}
-
 /* executeOp forward kernel adapter — ctx = maxPool1dConfig_t* for kernel_t
  * geometry (mirrors AvgPool1d/Conv1d's ctx convention). auxOut = the layer's
  * pre-allocated argmaxIndices tensor (opSpec_t.auxOut, PR1b.2 D1): the funnel
@@ -112,8 +89,7 @@ static void maxPool1dForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, t
     size_t outputLength = geom.outputLength;
 
     // batch/channels come from the input but size the rawOut writes (F5 parity).
-    poolBfpRequireDims3(rawOut, batch, channels, outputLength,
-                        "MaxPool1d forward FLOAT32 (rawOut)");
+    poolRequireDims3(rawOut, batch, channels, outputLength, "MaxPool1d forward FLOAT32 (rawOut)");
     maxPoolRequireArgmaxShape(auxOut, input, outputLength, "MaxPool1d forward FLOAT32");
 
     float const *xArr = (float const *)input->data;
@@ -174,8 +150,7 @@ static void maxPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *r
     size_t outputLength = geom.outputLength;
 
     // batch/channels come from the input but size the rawOut writes (F5 parity).
-    poolBfpRequireDims3(rawOut, batch, channels, outputLength,
-                        "MaxPool1d forward SYM_INT32 (rawOut)");
+    poolRequireDims3(rawOut, batch, channels, outputLength, "MaxPool1d forward SYM_INT32 (rawOut)");
     maxPoolRequireArgmaxShape(auxOut, input, outputLength, "MaxPool1d forward SYM_INT32");
 
     int32_t const *xArr = (int32_t const *)input->data;
@@ -252,7 +227,7 @@ static void maxPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut
      * SAME (b * channels + c) * outputLength + outPos, batch/channels taken
      * from the input, so both need all three dims validated — auxOut most of
      * all, because it is never funnel-converted and is written raw. */
-    poolBfpRequireDims3(rawOut, batch, channels, outputLength, "MaxPool1d forward BFP (rawOut)");
+    poolRequireDims3(rawOut, batch, channels, outputLength, "MaxPool1d forward BFP (rawOut)");
     maxPoolRequireArgmaxShape(auxOut, input, outputLength, "MaxPool1d forward BFP");
 
     const bfpQConfig_t *qC = input->quantization->qConfig;
@@ -440,8 +415,8 @@ void maxPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tensor_t *lo
     size_t inputLength = propLoss->shape->dimensions[2];
 
     // batch/channels come from lossGrad but size the propLoss memset + scatter (F5 parity).
-    poolBfpRequireDims3(propLoss, batch, channels, inputLength,
-                        "MaxPool1d backward FLOAT32 (propLoss)");
+    poolRequireDims3(propLoss, batch, channels, inputLength,
+                     "MaxPool1d backward FLOAT32 (propLoss)");
     maxPoolRequireArgmaxShape(cfg->argmaxIndices, lossGrad, outputLength,
                               "MaxPool1d backward FLOAT32");
 
@@ -518,8 +493,7 @@ static void maxPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *
     size_t inputLength = rawOut->shape->dimensions[2];
 
     // batch/channels come from lossGrad but size the rawOut memset + scatter (F5 parity).
-    poolBfpRequireDims3(rawOut, batch, channels, inputLength,
-                        "MaxPool1d backward SYM_INT32 (rawOut)");
+    poolRequireDims3(rawOut, batch, channels, inputLength, "MaxPool1d backward SYM_INT32 (rawOut)");
     maxPoolRequireArgmaxShape(cfg->argmaxIndices, lossGrad, outputLength,
                               "MaxPool1d backward SYM_INT32");
 
@@ -585,7 +559,7 @@ static void maxPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOu
      * inputLength floats, and argmaxArr is read at the SAME flat index as
      * lossGrad — an argmax tensor that matches only on outputLength is read
      * past its end for every b, c beyond its own. */
-    poolBfpRequireDims3(rawOut, batch, channels, inputLength, "MaxPool1d backward BFP (rawOut)");
+    poolRequireDims3(rawOut, batch, channels, inputLength, "MaxPool1d backward BFP (rawOut)");
     maxPoolRequireArgmaxShape(cfg->argmaxIndices, lossGrad, outputLength, "MaxPool1d backward BFP");
 
     const bfpQConfig_t *qC = lossGrad->quantization->qConfig;

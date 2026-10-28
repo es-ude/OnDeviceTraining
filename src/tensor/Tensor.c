@@ -212,59 +212,109 @@ void byteConversion(uint8_t *dataIn, size_t dataInBits, uint8_t *dataOut, size_t
     byteConversionAppend(dataIn, dataInBits, dataOut, dataOutBits, numValues, 0, 0);
 }
 
+/* Streaming bit engine for byteConversionAppend. Pieces are capped at 24 bits
+ * so every shift stays below 32 on a uint32_t buffer (no 64-bit shifts on
+ * Cortex-M0+): the reader holds at most 23 bits before loading a byte, the
+ * writer at most 7 after flushing. Bytes are assembled with explicit shifts,
+ * so the code is independent of host endianness. */
+#define BIT_STREAM_MAX_PIECE 24u
+
+typedef struct {
+    const uint8_t *p;
+    uint32_t buf;
+    uint32_t avail;
+} bitReader_t;
+
+typedef struct {
+    uint8_t *p;
+    uint32_t buf;
+    uint32_t used;
+} bitWriter_t;
+
+/* Loads a byte only while it holds a requested bit, so the read never runs
+ * past ceil((srcStartBit + n*dataInBits)/8). */
+static inline uint32_t bitReaderTake(bitReader_t *r, uint32_t bits) {
+    while (r->avail < bits) {
+        r->buf |= (uint32_t)*r->p++ << r->avail;
+        r->avail += 8;
+    }
+    uint32_t v = r->buf & ((1u << bits) - 1u);
+    r->buf >>= bits;
+    r->avail -= bits;
+    return v;
+}
+
+/* Whole skipped bytes are stepped over without loading them. */
+static inline void bitReaderSkip(bitReader_t *r, size_t bits) {
+    if (bits <= r->avail) {
+        r->buf >>= bits;
+        r->avail -= (uint32_t)bits;
+        return;
+    }
+    bits -= r->avail;
+    r->p += bits / 8;
+    r->buf = 0;
+    r->avail = 0;
+    if (bits % 8 != 0) {
+        bitReaderTake(r, (uint32_t)(bits % 8));
+    }
+}
+
+/* Interior dst bytes lie fully inside the written range and are overwritten;
+ * only the first (seeded) and last (bitWriterFinish) bytes keep foreign bits. */
+static inline void bitWriterPut(bitWriter_t *w, uint32_t v, uint32_t bits) {
+    w->buf |= v << w->used;
+    w->used += bits;
+    while (w->used >= 8) {
+        *w->p++ = (uint8_t)w->buf;
+        w->buf >>= 8;
+        w->used -= 8;
+    }
+}
+
+/* Only called with bits pending: a range that ends on a byte boundary must not
+ * touch the byte behind it, which an exact-size dst does not have. */
+static inline void bitWriterFinish(bitWriter_t *w) {
+    uint32_t keep = ~((1u << w->used) - 1u);
+    *w->p = (uint8_t)((*w->p & keep) | w->buf);
+}
+
 void byteConversionAppend(uint8_t *dataIn, size_t dataInBits, uint8_t *dataOut, size_t dataOutBits,
                           size_t numValues, size_t dstStartBit, size_t srcStartBit) {
-    size_t dataOutIndex = dstStartBit / 8;
-    size_t dataInIndex = srcStartBit / 8;
-    int dataOutStartbit = (int)(dstStartBit % 8);
-    int dataInStartbit = (int)(srcStartBit % 8);
-    int dataInEndbit = dataInStartbit + (int)dataInBits;
-    int dataOutEndbit = dataOutStartbit + (int)dataOutBits;
+    if (numValues == 0 || dataOutBits == 0) {
+        return;
+    }
+    size_t copyBits = dataInBits < dataOutBits ? dataInBits : dataOutBits;
+    size_t dropBits = dataInBits - copyBits;
+    size_t fillBits = dataOutBits - copyBits;
+
+    bitReader_t r = {.p = dataIn, .buf = 0, .avail = 0};
+    if (dataInBits > 0) {
+        r.p += srcStartBit / 8;
+        bitReaderSkip(&r, srcStartBit % 8);
+    }
+    bitWriter_t w = {.p = dataOut + dstStartBit / 8, .buf = 0, .used = (uint32_t)(dstStartBit % 8)};
+    if (w.used > 0) {
+        w.buf = *w.p & ((1u << w.used) - 1u);
+    }
+
     for (size_t i = 0; i < numValues; i++) {
-        while ((dataInStartbit < dataInEndbit) | (dataOutStartbit < dataOutEndbit)) {
-            /* Guard each side: input may exhaust before output (widening) or
-             * output may fill before input (narrowing); skipping the
-             * out-of-range access avoids OOB while preserving zero-fill
-             * semantics. */
-            uint8_t data = 0;
-            if (dataInStartbit < dataInEndbit) {
-                data = readByte(dataIn[dataInIndex], dataInStartbit, dataInEndbit);
-            }
-            if (dataOutStartbit < dataOutEndbit) {
-                dataOut[dataOutIndex] =
-                    writeByte(dataOut[dataOutIndex], data, dataOutStartbit, dataOutEndbit);
-            }
-
-            int valuesRead = min(dataInEndbit - dataInStartbit, 8 - dataInStartbit % 8);
-            int valuesWritten = min(dataOutEndbit - dataOutStartbit, 8 - dataOutStartbit % 8);
-            int minValue = min(valuesRead, valuesWritten);
-
-            uint8_t deltaIn = minValue;
-            uint8_t deltaOut = minValue;
-            if (dataInStartbit == dataInEndbit) {
-                dataOutStartbit += valuesWritten;
-                deltaOut = valuesWritten;
-            } else {
-                dataOutStartbit += minValue;
-            }
-            if (dataOutStartbit == dataOutEndbit) {
-                dataInStartbit += valuesRead;
-                deltaIn = valuesRead;
-            } else {
-                dataInStartbit += minValue;
-            }
-
-            if (dataInStartbit / 8 > (dataInStartbit - deltaIn) / 8) {
-                dataInIndex += 1;
-            }
-            if (dataOutStartbit / 8 > (dataOutStartbit - deltaOut) / 8) {
-                dataOutIndex += 1;
-            }
+        for (size_t left = copyBits; left > 0;) {
+            uint32_t piece = left < BIT_STREAM_MAX_PIECE ? (uint32_t)left : BIT_STREAM_MAX_PIECE;
+            bitWriterPut(&w, bitReaderTake(&r, piece), piece);
+            left -= piece;
         }
-        dataInStartbit = dataInEndbit % 8;
-        dataInEndbit = dataInStartbit + (int)dataInBits;
-        dataOutStartbit = dataOutEndbit % 8;
-        dataOutEndbit = dataOutStartbit + (int)dataOutBits;
+        if (dropBits > 0) {
+            bitReaderSkip(&r, dropBits);
+        }
+        for (size_t left = fillBits; left > 0;) {
+            uint32_t piece = left < BIT_STREAM_MAX_PIECE ? (uint32_t)left : BIT_STREAM_MAX_PIECE;
+            bitWriterPut(&w, 0, piece);
+            left -= piece;
+        }
+    }
+    if (w.used > 0) {
+        bitWriterFinish(&w);
     }
 }
 

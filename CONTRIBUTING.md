@@ -169,7 +169,7 @@ PRs to `main`/`develop`:
 | Job | Checks |
 |---|---|
 | `gate` | Skips a push run when the same commit is already the head of an open PR (that PR's run covers it); every other job depends on it |
-| `alloc-locality` | No allocation primitives outside `src/userApi/` |
+| `alloc-locality` | No allocation primitives outside `src/userApi/`; fails closed when git cannot scan, and a planted-violation self-test proves the gate can fire (#488) |
 | `optimizer-step-entry` | `examples/` step the optimizer through `optimizerStep()`, never the raw vtable (#432) |
 | `private-paths` | No tracked file references the gitignored maintainer-local directories (superpowers specs/plans, Claude Code rules, SDD scratch); cite the decision registers in `docs/conventions/` instead |
 | `c-format-check` | `clang-format --dry-run -Werror` over `src`, `test`, `examples` |

@@ -17,6 +17,8 @@
  *   - child called exit(code)        -> WIFEXITED && WEXITSTATUS == code  (pass)
  *   - statement returned (no exit)   -> child _exit(0): code mismatch     (fail)
  *   - child died by signal (SIGSEGV) -> !WIFEXITED: clear failure message (fail)
+ *   - child could not redirect stdio -> _exit(ODT_DEATH_REDIRECT_FAILED_EXIT):
+ *                                       code mismatch (fail)
  */
 
 #include <errno.h>
@@ -29,6 +31,26 @@
 
 #include "unity.h"
 
+/* Exit status of a child whose stdio redirect failed. Distinct from 0, 1, 2, 3
+ * and ODT_ASAN_DEATH_EXIT (86), so the mismatch cannot pass as a guard's exit. */
+#define ODT_DEATH_REDIRECT_FAILED_EXIT 87
+
+/* Where the child sends silenced streams. A TU may define it before the include
+ * as any const char * expression. */
+#ifndef ODT_DEATH_SINK
+#define ODT_DEATH_SINK "/dev/null"
+#endif
+
+/* Child-side only. A failed redirect must not let the statement run: its guard
+ * would exit with the expected code and the test would pass unchecked. The
+ * comparison consumes freopen's result; a (void) cast does not silence glibc's
+ * warn_unused_result. */
+static inline void odtDeathRedirectOrExit(const char *path, FILE *stream) {
+    if (freopen(path, "w", stream) == NULL) {
+        _exit(ODT_DEATH_REDIRECT_FAILED_EXIT);
+    }
+}
+
 #define ASSERT_EXITS_WITH(expectedCode, statement)                                                 \
     do {                                                                                           \
         fflush(stdout);                                                                            \
@@ -38,8 +60,8 @@
         if (_odtDeathPid == 0) {                                                                   \
             /* Child: silence the guard's PRINT_ERROR banner, run, and - if the                    \
              * statement does NOT exit - report "no death" via exit code 0. */                     \
-            (void)freopen("/dev/null", "w", stdout);                                               \
-            (void)freopen("/dev/null", "w", stderr);                                               \
+            odtDeathRedirectOrExit(ODT_DEATH_SINK, stdout);                                        \
+            odtDeathRedirectOrExit(ODT_DEATH_SINK, stderr);                                        \
             statement;                                                                             \
             _exit(0);                                                                              \
         }                                                                                          \
@@ -121,7 +143,7 @@ static inline bool odtDeathDrainAndFind(int fd, const char *needle, char *tail, 
             if (_odtPipe[1] != STDOUT_FILENO) {                                                    \
                 (void)close(_odtPipe[1]);                                                          \
             }                                                                                      \
-            (void)freopen("/dev/null", "w", stderr);                                               \
+            odtDeathRedirectOrExit(ODT_DEATH_SINK, stderr);                                        \
             statement;                                                                             \
             (void)fflush(stdout);                                                                  \
             _exit(0);                                                                              \

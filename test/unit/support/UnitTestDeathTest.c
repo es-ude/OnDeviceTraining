@@ -1,6 +1,11 @@
 #define SOURCE_FILE "UNIT_TEST_DEATH_TEST"
 
 #include "Common.h"
+
+/* Mutable so a test can point the death-test child at an unwritable sink. */
+static const char *odtTestDeathSink = "/dev/null";
+#define ODT_DEATH_SINK odtTestDeathSink
+
 #include "DeathTest.h"
 #include "unity.h"
 
@@ -96,6 +101,28 @@ void testExitsWithOutputFindsBannerAfterFloodingThePipe(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "'residency'", floodThenViolate());
 }
 
+#define UNWRITABLE_SINK "/nonexistent-odt-death-sink-dir/sink"
+
+static void redirectFailureBody(void) {
+    odtTestDeathSink = UNWRITABLE_SINK;
+    ASSERT_EXITS_WITH(ODT_DEATH_REDIRECT_FAILED_EXIT, violate("residency", 1));
+}
+
+/* Expected code 0: here the inner assertion must PASS. The outer child only
+ * isolates the sink change from this process. */
+void testExitsWithReportsSinkRedirectFailure(void) {
+    ASSERT_EXITS_WITH(0, runExpectingUnityFailure(redirectFailureBody));
+}
+
+static void outputRedirectFailureBody(void) {
+    odtTestDeathSink = UNWRITABLE_SINK;
+    ASSERT_EXITS_WITH_OUTPUT(ODT_DEATH_REDIRECT_FAILED_EXIT, "", violate("residency", 1));
+}
+
+void testExitsWithOutputReportsSinkRedirectFailure(void) {
+    ASSERT_EXITS_WITH(0, runExpectingUnityFailure(outputRedirectFailureBody));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testExitsWithOutputPassesOnMatchingCodeAndSubstring);
@@ -103,5 +130,7 @@ int main(void) {
     RUN_TEST(testExitsWithOutputFailsWhenExitCodeDiffers);
     RUN_TEST(testExitsWithOutputFailsWhenChildDiesBySignal);
     RUN_TEST(testExitsWithOutputFindsBannerAfterFloodingThePipe);
+    RUN_TEST(testExitsWithReportsSinkRedirectFailure);
+    RUN_TEST(testExitsWithOutputReportsSinkRedirectFailure);
     return UNITY_END();
 }

@@ -866,8 +866,10 @@ checkpointing, limitations, literature).
 - `TRACK_INSTRUCTIONS` counters exist on the legacy `Square`/`Matmul` libs but are
   unsafe to enable: a name mismatch fails compilation for `Square`, both libs lack a
   reset helper, and `Matmul`'s SYM_INT32 path double-increments (#351). `Add`/`Sub`/
-  `Mul`/`Div` carry latent counters too; none of these libs gets the define from
-  `ODT_TRACK_INSTRUCTIONS` (only `PointwiseFused` does).
+  `Mul`/`Div` carry latent counters too (the `Mul` per-MAC counter behind the
+  header-inline `mulInt32s` is selected in the including translation unit); none
+  of these libs gets the define from `ODT_TRACK_INSTRUCTIONS` (only
+  `PointwiseFused` does).
 - BFP (block-floating-point epic PR1–PR7) native compute now covers
   Linear/Conv1d/Conv1dTransposed **forward AND backward**: `ARITH_BFP` runs
   both, with both operands blocked and headroom-guarded `int32` block

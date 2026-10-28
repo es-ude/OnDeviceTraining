@@ -76,6 +76,23 @@ void testMulFloatElementWithTensor() {
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, aTensor.data, numberOfElements);
 }
 
+void testMulInt32sMatchesNativeProduct() {
+    TEST_ASSERT_EQUAL_INT32(-42, mulInt32s(-7, 6));
+    TEST_ASSERT_EQUAL_INT32(2147395600, mulInt32s(46340, 46340));
+    TEST_ASSERT_EQUAL_INT32(-1073709056, mulInt32s(-32768, 32767));
+    TEST_ASSERT_EQUAL_INT32(0, mulInt32s(0, INT32_MIN));
+}
+
+#ifdef TRACK_INSTRUCTIONS
+void testMulInt32sCountsUnderTrackInstructions() {
+    size_t before = getMulInstructionCounter();
+    for (int32_t i = 0; i < 5; i++) {
+        (void)mulInt32s(i, 3);
+    }
+    TEST_ASSERT_EQUAL_size_t(5, getMulInstructionCounter() - before);
+}
+#endif
+
 void setUp() {}
 void tearDown() {}
 
@@ -83,6 +100,10 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMulFloatTensors);
     RUN_TEST(testMulFloatElementWithTensor);
+    RUN_TEST(testMulInt32sMatchesNativeProduct);
+#ifdef TRACK_INSTRUCTIONS
+    RUN_TEST(testMulInt32sCountsUnderTrackInstructions);
+#endif
 
     return UNITY_END();
 }

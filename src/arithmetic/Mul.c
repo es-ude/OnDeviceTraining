@@ -28,10 +28,6 @@ int32_t mulIntsWithInstructionCounter(int32_t a, int32_t b) {
     return a * b;
 }
 
-int32_t mulInt32s(int32_t a, int32_t b) {
-    return MUL_FUNC_INT(a, b);
-}
-
 float mulFloats(float a, float b) {
     return a * b;
 }

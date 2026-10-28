@@ -5,7 +5,17 @@
 #include <stddef.h>
 #include <stdint.h>
 
-int32_t mulInt32s(int32_t a, int32_t b);
+int32_t mulIntsWithInstructionCounter(int32_t a, int32_t b);
+
+/* Inline so the int MAC loops can fold the multiply; TRACK_INSTRUCTIONS is
+ * therefore evaluated in the including translation unit, not in Mul.c. */
+static inline int32_t mulInt32s(int32_t a, int32_t b) {
+#ifdef TRACK_INSTRUCTIONS
+    return mulIntsWithInstructionCounter(a, b);
+#else
+    return a * b;
+#endif
+}
 
 float mulFloat32s(float a, float b);
 

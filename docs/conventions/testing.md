@@ -63,7 +63,14 @@ target.
 Runtime options the test preset sets:
 
 - `ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:halt_on_error=1:strict_string_checks=1:check_initialization_order=1`
-- `UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1`
+- `UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1:abort_on_error=1` (the
+  `unit_test_ubsan` test preset sets the same value)
+
+`abort_on_error=1` in `UBSAN_OPTIONS` is required: the Linux default (`0`)
+makes a UBSan report `exit(1)`, the code most death tests expect from a guard,
+so UB inside a death-test child would pass; with it the child dies by
+`SIGABRT` and the death test fails. It is stated in both presets because the
+combined ASan+UBSan runtime parses `UBSAN_OPTIONS` after `ASAN_OPTIONS`.
 
 `halt_on_error=1` plus `-fno-sanitize-recover=all` means the **first** finding
 aborts the test binary — earlier tests must run cleanly to surface later ones.

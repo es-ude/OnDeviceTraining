@@ -254,7 +254,7 @@
       },
       "environment": {
         "ASAN_OPTIONS": "detect_leaks=0:abort_on_error=1:halt_on_error=1:strict_string_checks=1:check_initialization_order=1",
-        "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1"
+        "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1:abort_on_error=1"
       }
     },
     {
@@ -271,7 +271,7 @@
         }
       },
       "environment": {
-        "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1"
+        "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1:abort_on_error=1"
       }
     }
   ]

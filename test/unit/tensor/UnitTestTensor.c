@@ -5,6 +5,7 @@
 #include "Tensor.h"
 #include "unity.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -849,6 +850,53 @@ void testCopyTensorBfpGroupShapeMismatchDies() {
     ASSERT_EXITS_WITH_FAILURE(copyTensor(&dst, &src));
 }
 
+/* #394: shapes and counts come from files and callers; a wrapped product
+ * would size an allocation far below the data later written into it. */
+void testElementCountOverflowExits() {
+    size_t dims[] = {SIZE_MAX / 2u + 1u, 2u};
+    size_t order[] = {0, 1};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 2, .orderOfDimensions = order};
+    ASSERT_EXITS_WITH_OUTPUT(1, "element count overflows",
+                             (void)calcNumberOfElementsByShape(&shape));
+}
+
+void testElementCountAtLimitFits() {
+    size_t dims[] = {SIZE_MAX / 2u, 2u};
+    size_t order[] = {0, 1};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 2, .orderOfDimensions = order};
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX - 1u, calcNumberOfElementsByShape(&shape));
+}
+
+void testByteCountOverflowExits() {
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    size_t floatLimit = SIZE_MAX / 4u;
+    ASSERT_EXITS_WITH_OUTPUT(1, "byte count overflows",
+                             (void)calcNumberOfBytesForData(&floatQ, floatLimit + 1u));
+    TEST_ASSERT_EQUAL_size_t(floatLimit * 4u, calcNumberOfBytesForData(&floatQ, floatLimit));
+
+    float cfgScale[1] = {1.0f};
+    symQConfig_t cfg = {
+        .scales = cfgScale, .numGroups = 1, .groupSize = 0, .qBits = 3, .roundingMode = HALF_AWAY};
+    quantization_t symQ;
+    initSymQuantization(&cfg, &symQ);
+    /* bits * n wraps */
+    ASSERT_EXITS_WITH_OUTPUT(1, "byte count overflows",
+                             (void)calcNumberOfBytesForData(&symQ, SIZE_MAX / 3u + 1u));
+    /* bits * n fits, the + 7 round-up wraps */
+    size_t symLimit = (SIZE_MAX - 7u) / 3u;
+    ASSERT_EXITS_WITH_OUTPUT(1, "byte count overflows",
+                             (void)calcNumberOfBytesForData(&symQ, symLimit + 1u));
+    TEST_ASSERT_EQUAL_size_t((3u * symLimit + 7u) / 8u, calcNumberOfBytesForData(&symQ, symLimit));
+
+    quantization_t boolQ;
+    initBoolQuantization(&boolQ);
+    ASSERT_EXITS_WITH_OUTPUT(1, "byte count overflows",
+                             (void)calcNumberOfBytesForData(&boolQ, SIZE_MAX - 6u));
+    TEST_ASSERT_EQUAL_size_t((SIZE_MAX - 7u + 7u) / 8u,
+                             calcNumberOfBytesForData(&boolQ, SIZE_MAX - 7u));
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -899,5 +947,8 @@ int main(void) {
     RUN_TEST(test_calcBytesPerTensor_SymQBits3N10_Ceils);
     RUN_TEST(test_calcBytesPerTensor_BoolN3_CeilsTo1);
     RUN_TEST(testCalcSizesForBfp);
+    RUN_TEST(testElementCountOverflowExits);
+    RUN_TEST(testElementCountAtLimitFits);
+    RUN_TEST(testByteCountOverflowExits);
     return UNITY_END();
 }

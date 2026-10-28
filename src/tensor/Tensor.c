@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "CheckedSize.h"
 #include "Common.h"
 #include "DTypes.h"
 #include "MinMax.h"
@@ -16,7 +17,14 @@ size_t calcNumberOfElementsByShape(shape_t *shape) {
     size_t numberOfDimensions = shape->numberOfDimensions;
     size_t *dimensions = shape->dimensions;
     for (size_t i = 0; i < numberOfDimensions; i++) {
-        numElem *= dimensions[i];
+        size_t next;
+        if (!checkedMulSize(numElem, dimensions[i], &next)) {
+            PRINT_ERROR("calcNumberOfElementsByShape: element count overflows size_t at dim %zu "
+                        "(value %zu, running product %zu)",
+                        i, dimensions[i], numElem);
+            exit(1);
+        }
+        numElem = next;
     }
     return numElem;
 }
@@ -91,24 +99,66 @@ size_t calcBytesPerTensor(tensor_t *tensor) {
     return calcNumberOfBytesForData(tensor->quantization, numberOfElements);
 }
 
+/* Local because quantTypeToString lives in TensorConversion, which links Tensor. */
+static const char *qtypeName(qtype_t type) {
+    switch (type) {
+    case INT32:
+        return "INT32";
+    case FLOAT32:
+        return "FLOAT32";
+    case SYM_INT32:
+        return "SYM_INT32";
+    case SYM:
+        return "SYM";
+    case ASYM:
+        return "ASYM";
+    case BOOL:
+        return "BOOL";
+    case BFP:
+        return "BFP";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+static _Noreturn void exitOnByteCountOverflow(quantization_t *q, size_t numberOfElements,
+                                              size_t bitsPerElement) {
+    PRINT_ERROR("calcNumberOfBytesForData: byte count overflows size_t (numberOfElements %zu, "
+                "dtype %s/%d, %zu bits per element)",
+                numberOfElements, qtypeName(q->type), (int)q->type, bitsPerElement);
+    exit(1);
+}
+
+static size_t wordBytes(quantization_t *q, size_t numberOfElements, size_t bytesPerElement) {
+    size_t bytes;
+    if (!checkedMulSize(numberOfElements, bytesPerElement, &bytes)) {
+        exitOnByteCountOverflow(q, numberOfElements, bytesPerElement * 8u);
+    }
+    return bytes;
+}
+
+static size_t packedBytes(quantization_t *q, size_t numberOfElements, size_t bitsPerElement) {
+    size_t bits;
+    size_t roundedBits;
+    if (!checkedMulSize(bitsPerElement, numberOfElements, &bits) ||
+        !checkedAddSize(bits, 7u, &roundedBits)) {
+        exitOnByteCountOverflow(q, numberOfElements, bitsPerElement);
+    }
+    return roundedBits / 8u;
+}
+
 size_t calcNumberOfBytesForData(quantization_t *q, size_t numberOfElements) {
     switch (q->type) {
     case FLOAT32:
-        return numberOfElements * sizeof(float);
+        return wordBytes(q, numberOfElements, sizeof(float));
     case INT32:
-        return numberOfElements * sizeof(int32_t);
     case SYM_INT32:
-        return numberOfElements * sizeof(int32_t);
+        return wordBytes(q, numberOfElements, sizeof(int32_t));
     case SYM:
-        return (calcBitsPerElement(q) * numberOfElements + 7) / 8;
-    case ASYM: {
-        size_t bitsPerElement = calcBitsPerElement(q);
-        return (bitsPerElement * numberOfElements + 7) / 8;
-    }
-    case BOOL:
-        return (numberOfElements + 7) / 8;
+    case ASYM:
     case BFP:
-        return (calcBitsPerElement(q) * numberOfElements + 7) / 8;
+    case BOOL:
+        return packedBytes(q, numberOfElements, calcBitsPerElement(q));
     default:
         PRINT_ERROR("Unknown QType!");
         exit(1);

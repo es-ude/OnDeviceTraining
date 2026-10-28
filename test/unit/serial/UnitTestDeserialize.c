@@ -385,6 +385,42 @@ static void testDeserializeTensorRejectsSymRecordIntoFloatSkeleton(void) {
     freeTensor(symTensor);
 }
 
+#if SIZE_MAX == UINT64_MAX
+/* #394: dims whose product (2^64 + 64) wraps to the skeleton's 64 elements
+ * would match the payload-size check and be accepted with a corrupt shape. */
+static void testDeserializeTensorRejectsWrappingDims(void) {
+    size_t *dims = reserveMemory(3 * sizeof(size_t));
+    dims[0] = 4;
+    dims[1] = 4;
+    dims[2] = 4;
+    size_t *order = reserveMemory(3 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(3, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 3, order);
+    tensor_t *skeleton = initTensor(shape, quantizationInitFloat(), NULL);
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    writeU32LE(f, 3u);
+    writeU32LE(f, 320u);
+    writeU32LE(f, 107367629u);
+    writeU32LE(f, 536903681u);
+    for (uint32_t d = 0; d < 3u; d++) {
+        writeU32LE(f, d);
+    }
+    uint8_t dtype = (uint8_t)FLOAT32;
+    fwrite(&dtype, 1, 1, f);
+    uint8_t payload[256] = {0};
+    fwrite(payload, 1, sizeof(payload), f);
+    fclose(f);
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1, "element count overflows", deserializeTensor(skeleton, f));
+    fclose(f);
+
+    freeTensor(skeleton);
+}
+#endif
+
 /* #370: a header cut mid-field (magic + half the version u32) must fail fast —
  * pre-v2 the unchecked fread left the version uninitialized/garbage. */
 static void testDeserializeModelFailsFastOnTruncatedHeader(void) {
@@ -2356,6 +2392,9 @@ int main(void) {
     RUN_TEST(testDeserializeTensorRejectsDtypeMismatch);
     RUN_TEST(testDeserializeTensorRejectsPayloadSizeMismatch);
     RUN_TEST(testDeserializeTensorRejectsSymRecordIntoFloatSkeleton);
+#if SIZE_MAX == UINT64_MAX
+    RUN_TEST(testDeserializeTensorRejectsWrappingDims);
+#endif
     RUN_TEST(testDeserializeModelFailsFastOnTruncatedHeader);
     RUN_TEST(testDeserializeTensorFailsFastOnTruncatedPayload);
     RUN_TEST(testDeserializeTensorRejectsRankMismatch);

@@ -97,6 +97,29 @@ void testInitSymQConfigGroupedRejectsSentinelViolations(void) {
     ASSERT_EXITS_WITH(1, { initSymQConfigGrouped(4, HALF_AWAY, 0, 0, &qc); });
 }
 
+/* #479: qBits == 0 underflows the sub-byte packer; > 31 exceeds the SYM storage ceiling. */
+void testInitSymQConfigRejectsZeroQBits(void) {
+    symQConfig_t qc;
+    ASSERT_EXITS_WITH_OUTPUT(1, "outside the SYM range", initSymQConfig(0, HALF_AWAY, &qc));
+}
+
+void testInitSymQConfigGroupedRejectsQBitsAbove31(void) {
+    symQConfig_t qc;
+    ASSERT_EXITS_WITH_OUTPUT(1, "outside the SYM range",
+                             initSymQConfigGrouped(32, HALF_AWAY, 2, 5, &qc));
+}
+
+void testInitSymQConfigAcceptsQBitsBounds(void) {
+    symQConfig_t lo;
+    symQConfig_t hi;
+    initSymQConfig(1, HALF_AWAY, &lo);
+    initSymQConfig(31, HALF_AWAY, &hi);
+    TEST_ASSERT_EQUAL_UINT8(1, lo.qBits);
+    TEST_ASSERT_EQUAL_UINT8(31, hi.qBits);
+    freeReservedMemory(lo.scales);
+    freeReservedMemory(hi.scales);
+}
+
 void testValidateSymQConfigShapeDivisibility(void) {
     float s[2] = {1.f, 1.f};
     symQConfig_t ok = {
@@ -430,6 +453,9 @@ int main(void) {
     RUN_TEST(testInitSymQConfigAllocatesIndependentScalesArrays);
     RUN_TEST(testInitSymQConfigGroupedAllocatesPerGroupScales);
     RUN_TEST(testInitSymQConfigGroupedRejectsSentinelViolations);
+    RUN_TEST(testInitSymQConfigRejectsZeroQBits);
+    RUN_TEST(testInitSymQConfigGroupedRejectsQBitsAbove31);
+    RUN_TEST(testInitSymQConfigAcceptsQBitsBounds);
     RUN_TEST(testValidateSymQConfigShapeDivisibility);
     RUN_TEST(testInitAsymQConfigProducesPerTensorSentinelWithZeroZp);
     RUN_TEST(testInitAsymQConfigAllocatesIndependentArrays);

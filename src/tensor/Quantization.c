@@ -68,8 +68,19 @@ void validateSymQConfigShape(const symQConfig_t *qC, size_t numberOfElements) {
     }
 }
 
+/* #479 storage ceiling: 31 is what packChunkGuarded accepts and what a SYM->SYM_INT32 copy can
+ * carry into qMaxBits (#202). The narrower operand (12) and grad-target (16) contracts are
+ * enforced at the kernels and in ExecuteOp, not here. qBits == 0 would underflow the packer. */
+static void validateSymQBits(uint8_t qBits, const char *what) {
+    if (qBits == 0 || qBits > 31) {
+        PRINT_ERROR("%s: qBits (%u) outside the SYM range [1, 31]", what, (unsigned)qBits);
+        exit(1);
+    }
+}
+
 void initSymQConfigGrouped(uint8_t qBits, roundingMode_t roundingMode, size_t numGroups,
                            size_t groupSize, symQConfig_t *qC) {
+    validateSymQBits(qBits, "initSymQConfigGrouped");
     /* Caller allocates the outer struct; this init allocates the
      * numGroups-element scales array (contract per the header doc) -- the
      * filled config owns a heap scales array, pair with freeReservedMemory

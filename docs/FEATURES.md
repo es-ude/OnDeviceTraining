@@ -424,8 +424,9 @@ Notes on the qualified cells:
   `u32 numGroups`, `u32 groupSize`, `u8 exponents[numGroups]`, `u8 mantissaBits`,
   `u8 exponentBits`, `u8 rounding`, following the same group-general-since-day-one and
   reallocate-on-mismatch rules as the SYM v4 arm. The PPCA replay checkpoint's
-  (`"ODTR"`) peek-validate-rewind guard (see Continual learning below) was extended in
-  lockstep for the ASYM and BFP qconfig records' wider layouts (#316-class
+  (`"ODTR"`) peek-validate-rewind guard (see Continual learning below) validates each
+  record through the shared ODTS header parse (`readTensorRecordHeader`, #400), so it
+  covers the ASYM and BFP qconfig records' wider layouts by construction (#316-class
   width-mismatch parity). Since v6 (#460) the BATCHNORM1D record (tag 13): `u32
   numChannels, f32 eps, u8 momentumMode (1 VALUE | 2 CUMULATIVE), f32 momentum,
   u8 affine, u8 track, [gamma, beta parameter records iff affine], [f32

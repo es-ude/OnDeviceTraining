@@ -16,9 +16,11 @@
  * Deserialize fills a pre-built matching skeleton IN PLACE and guards
  * BEFORE any overwrite via peek-validate-rewind (the #316 guard pattern:
  * the public deserializeTensor trusts file bytes, so every record header
- * is pre-read into locals, validated against the skeleton — dims, dtype,
- * qBits, payload size from the PRE-overwrite skeleton — then the stream
- * is rewound and deserializeTensor consumes the validated record).
+ * is first parsed by the shared ODTS header parse (readTensorRecordHeader,
+ * TensorRecord.h, which applies deserializeTensor's own qConfig checks),
+ * compared with the skeleton — rank, dims, dtype, SYM/ASYM qBits, BFP
+ * widths — then the stream is rewound and deserializeTensor consumes the
+ * validated record).
  * Requires a SEEKABLE stream. Fail-fast on any mismatch. */
 void ppcaReplaySetSerialize(const ppcaReplaySet_t *set, FILE *f);
 void ppcaReplaySetDeserialize(ppcaReplaySet_t *skeleton, FILE *f);

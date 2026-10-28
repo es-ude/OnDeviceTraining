@@ -621,7 +621,7 @@ void testDeserializeRejectsBfpWidthMismatch(void) {
         .numClasses = 1, .generators = deserialGenerators, .workspace = NULL};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(ppcaReplaySetDeserialize(&deserialSet, f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "BFP width mismatch", ppcaReplaySetDeserialize(&deserialSet, f));
     fclose(f);
 
     freeTensor(serialMean);
@@ -645,7 +645,7 @@ void testDeserializeRejectsDtypeMismatch(void) {
     ppcaReplayConfig_t cfgP = packedConfig(6, 2, 8, SYM);
     ppcaReplaySet_t *skeleton = ppcaReplaySetCreate(1, &cfgP);
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(ppcaReplaySetDeserialize(skeleton, f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "dtype mismatch", ppcaReplaySetDeserialize(skeleton, f));
     fclose(f);
     freePpcaReplaySet(skeleton);
     freePpcaReplaySet(serial);
@@ -681,22 +681,68 @@ void testDeserializeRejectsQBitsMismatch(void) {
     cfg4.meanQ = &aq;
     ppcaReplaySet_t *skeleton = ppcaReplaySetCreate(1, &cfg4);
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(ppcaReplaySetDeserialize(skeleton, f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "SYM qBits mismatch", ppcaReplaySetDeserialize(skeleton, f));
     fclose(f);
     freePpcaReplaySet(skeleton);
     freePpcaReplaySet(serial);
 }
 
+/* ASYM@8 mean record into an ASYM@4 skeleton mean: same dtype, so only the
+ * qBits compare can stop it before the #316 overflow. */
+void testDeserializeRejectsAsymQBitsMismatch(void) {
+    ppcaReplayConfig_t cfg8 = packedConfig(6, 2, 8, ASYM);
+    ppcaReplaySet_t *serial = ppcaReplaySetCreate(1, &cfg8);
+    FILE *f = fopen(FILE_PATH, "wb");
+    ppcaReplaySetSerialize(serial, f);
+    fclose(f);
+
+    ppcaReplayConfig_t cfg4 = packedConfig(6, 2, 8, ASYM);
+    static float aqc4Scale[1] = {1.f};
+    static uint16_t aqc4Zp[1] = {0};
+    static asymQConfig_t aqc4 = {.scales = aqc4Scale,
+                                 .zeroPoints = aqc4Zp,
+                                 .numGroups = 1,
+                                 .groupSize = 0,
+                                 .roundingMode = HALF_AWAY,
+                                 .qBits = 4};
+    static quantization_t aq4;
+    initAsymQuantization(&aqc4, &aq4);
+    cfg4.meanQ = &aq4;
+    ppcaReplaySet_t *skeleton = ppcaReplaySetCreate(1, &cfg4);
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1, "ASYM qBits mismatch", ppcaReplaySetDeserialize(skeleton, f));
+    fclose(f);
+    freePpcaReplaySet(skeleton);
+    freePpcaReplaySet(serial);
+}
+
+/* Class-level dim/rank agree, so only the per-record dim compare can catch a
+ * mean record whose own dims[0] disagrees with the skeleton. */
 void testDeserializeRejectsDimMismatch(void) {
     ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
     ppcaReplaySet_t *serial = ppcaReplaySetCreate(1, &cfg);
     FILE *f = fopen(FILE_PATH, "wb");
     ppcaReplaySetSerialize(serial, f);
     fclose(f);
-    ppcaReplayConfig_t cfgBig = floatConfig(8, 2, 8);
-    ppcaReplaySet_t *skeleton = ppcaReplaySetCreate(1, &cfgBig);
+
+    /* "ODTR" + version + numClasses (12) | dim, rank, count, sigma2,
+     * totalVar (20) | mean record: numDims u32, then dims[0] u32 LE. */
+    const long meanDim0Offset = 12 + 20 + 4;
+    f = fopen(FILE_PATH, "r+b");
+    TEST_ASSERT_EQUAL_INT(0, fseek(f, meanDim0Offset, SEEK_SET));
+    uint8_t le[4];
+    TEST_ASSERT_EQUAL_size_t(4, fread(le, 1, 4, f));
+    uint32_t onWire =
+        (uint32_t)le[0] | (uint32_t)le[1] << 8 | (uint32_t)le[2] << 16 | (uint32_t)le[3] << 24;
+    TEST_ASSERT_EQUAL_UINT32(6, onWire);
+    le[0] = 7;
+    TEST_ASSERT_EQUAL_INT(0, fseek(f, meanDim0Offset, SEEK_SET));
+    TEST_ASSERT_EQUAL_size_t(4, fwrite(le, 1, 4, f));
+    fclose(f);
+
+    ppcaReplaySet_t *skeleton = ppcaReplaySetCreate(1, &cfg);
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(ppcaReplaySetDeserialize(skeleton, f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "dim[0] mismatch", ppcaReplaySetDeserialize(skeleton, f));
     fclose(f);
     freePpcaReplaySet(skeleton);
     freePpcaReplaySet(serial);
@@ -772,6 +818,7 @@ int main(void) {
     RUN_TEST(testDeserializeRejectsBfpWidthMismatch);
     RUN_TEST(testDeserializeRejectsDtypeMismatch);
     RUN_TEST(testDeserializeRejectsQBitsMismatch);
+    RUN_TEST(testDeserializeRejectsAsymQBitsMismatch);
     RUN_TEST(testDeserializeRejectsDimMismatch);
     RUN_TEST(testDeserializeRejectsBadMagicAndTruncation);
     RUN_TEST(testDeserializeRejectsPayloadTruncation);

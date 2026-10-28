@@ -265,8 +265,7 @@ static void deserializeKernel(kernel_t *kernel, FILE *f) {
  * allocation and an fread of that many bytes, so an unbounded value still
  * invites a multi-gigabyte request (calloc-NULL) even though the
  * byte-per-element multiplier makes the 32-bit size_t-wrap risk above moot
- * for it. Keep PpcaReplaySerialize.c's PPCA_MAX_QCONFIG_GROUPS literal equal
- * to this by hand (see that file's lockstep comment). */
+ * for it. */
 #define SERIAL_MAX_QCONFIG_GROUPS 65536u
 
 static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElements) {

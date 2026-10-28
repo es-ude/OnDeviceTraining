@@ -203,7 +203,8 @@ void initSymQConfigGrouped(uint8_t qBits, roundingMode_t roundingMode, size_t nu
                            size_t groupSize, symQConfig_t *qC);
 /*! Group-quant PR2: attach-time shape check for a SYM config against a
  * concrete element count. Fail-fasts unless (numGroups==1 && groupSize==0)
- * or (numGroups>1 && groupSize>0 && numGroups*groupSize==numberOfElements).
+ * or (numGroups>1 && groupSize>0 && numGroups*groupSize==numberOfElements),
+ * PLUS the #479 qBits-in-[1,31] re-check for field-assigned configs.
  * Called by initTensor for SYM tensors; also the choke point the ODTS
  * deserialize path (Deserialize.c's deserializeQConfig, Task 5) re-validates
  * against after reallocating a skeleton's scales[] to a file's numGroups --

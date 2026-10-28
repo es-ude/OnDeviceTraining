@@ -130,6 +130,17 @@ void testValidateSymQConfigShapeDivisibility(void) {
     TEST_ASSERT_TRUE(true); /* reached ⇒ ok-case did not exit */
 }
 
+void testValidateSymQConfigShapeRejectsFieldAssignedQBits(void) {
+    /* #479: a field-assigned config never passed the init funnel, so attach re-checks the width */
+    float s[1] = {1.f};
+    symQConfig_t zero = {.scales = s, .numGroups = 1, .groupSize = 0, .qBits = 0};
+    ASSERT_EXITS_WITH_OUTPUT(1, "validateSymQConfigShape: qBits",
+                             validateSymQConfigShape(&zero, 4));
+    symQConfig_t wide = {.scales = s, .numGroups = 1, .groupSize = 0, .qBits = 32};
+    ASSERT_EXITS_WITH_OUTPUT(1, "validateSymQConfigShape: qBits",
+                             validateSymQConfigShape(&wide, 4));
+}
+
 /* Group-quant PR4 (Task 1, group-quant D6): asymQConfig_t goes always-array
  * (scales[numGroups] + CODE-domain uint16 zeroPoints[numGroups]) with the
  * same {1,0}-per-tensor / {>1,>0}-grouped shape grammar as symQConfig_t.
@@ -411,6 +422,7 @@ int main(void) {
     RUN_TEST(testInitSymQConfigGroupedRejectsQBitsAbove31);
     RUN_TEST(testInitSymQConfigAcceptsQBitsBounds);
     RUN_TEST(testValidateSymQConfigShapeDivisibility);
+    RUN_TEST(testValidateSymQConfigShapeRejectsFieldAssignedQBits);
     RUN_TEST(testInitAsymQConfigProducesPerTensorSentinelWithZeroZp);
     RUN_TEST(testInitAsymQConfigAllocatesIndependentArrays);
     RUN_TEST(testInitAsymQConfigGroupedAllocatesPerGroupArrays);

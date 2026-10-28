@@ -40,7 +40,18 @@ void initSymQConfig(uint8_t qBits, roundingMode_t roundingMode, symQConfig_t *sy
     initSymQConfigGrouped(qBits, roundingMode, 1, 0, symQConfig);
 }
 
+/* #479 storage ceiling: 31 is what packChunkGuarded accepts and what a SYM->SYM_INT32 copy can
+ * carry into qMaxBits (#202). The narrower operand (12) and grad-target (16) contracts are
+ * enforced at the kernels and in ExecuteOp, not here. qBits == 0 would underflow the packer. */
+static void validateSymQBits(uint8_t qBits, const char *what) {
+    if (qBits == 0 || qBits > 31) {
+        PRINT_ERROR("%s: qBits (%u) outside the SYM range [1, 31]", what, (unsigned)qBits);
+        exit(1);
+    }
+}
+
 void validateSymQConfigShape(const symQConfig_t *qC, size_t numberOfElements) {
+    validateSymQBits(qC->qBits, "validateSymQConfigShape");
     bool perTensor = qC->numGroups == 1 && qC->groupSize == 0;
     bool grouped =
         qC->numGroups > 1 && qC->groupSize > 0 && qC->numGroups * qC->groupSize == numberOfElements;
@@ -49,16 +60,6 @@ void validateSymQConfigShape(const symQConfig_t *qC, size_t numberOfElements) {
                     "groupSize=%zu for %zu elements (per-tensor is {1,0}; grouped needs "
                     "numGroups*groupSize == elements)",
                     qC->numGroups, qC->groupSize, numberOfElements);
-        exit(1);
-    }
-}
-
-/* #479 storage ceiling: 31 is what packChunkGuarded accepts and what a SYM->SYM_INT32 copy can
- * carry into qMaxBits (#202). The narrower operand (12) and grad-target (16) contracts are
- * enforced at the kernels and in ExecuteOp, not here. qBits == 0 would underflow the packer. */
-static void validateSymQBits(uint8_t qBits, const char *what) {
-    if (qBits == 0 || qBits > 31) {
-        PRINT_ERROR("%s: qBits (%u) outside the SYM range [1, 31]", what, (unsigned)qBits);
         exit(1);
     }
 }

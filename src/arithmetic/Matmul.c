@@ -18,6 +18,7 @@
 #include "BfpKernelSupport.h"
 #include "Common.h"
 #include "DTypes.h"
+#include "GroupCursor.h"
 #include "Matmul.h"
 #include "Mul.h"
 #include "Rounding.h"
@@ -343,6 +344,7 @@ static void matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor_t 
     }
 
     size_t resultCounter = 0;
+    groupCursor_t wCursor = groupCursorInit(weightGroups->groupSize);
     for (size_t rowIndex = 0; rowIndex < aRows; rowIndex++) {
         for (size_t columnIndex = 0; columnIndex < bColumns; columnIndex++) {
             int32_t acc = biasSeed ? biasSeed[columnIndex] : 0;
@@ -351,13 +353,9 @@ static void matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor_t 
             for (size_t i = 0; i < aColumns; i++) {
                 size_t bIndices[] = {i, columnIndex};
                 size_t wStorageIdx = calcElementIndexByIndices(2, bDims, bIndices, bOrder);
-                /* Per-element division (Conv1dKernel.c's grouped-loop
-                 * precedent): the reduction axis may be storage-strided
-                 * (Linear dx: stride = inFeatures), so consecutive visited
-                 * indices can jump groups arbitrarily — a precomputed run
-                 * length to the next boundary would overshoot past skipped
-                 * indices. Dividing the actual visited index is gap-robust. */
-                size_t g = wStorageIdx / weightGroups->groupSize;
+                /* Cursor, not a run length: a strided reduction axis (Linear
+                 * dx) jumps groups. */
+                size_t g = groupCursorOf(&wCursor, wStorageIdx);
 
                 if (g != currentGroup) {
                     if (currentGroup != SIZE_MAX) {
@@ -548,6 +546,8 @@ void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
     int32_t bExpBias = bfpExponentBias(bQC);
 
     size_t resultCounter = 0;
+    groupCursor_t aCursor = groupCursorInit(aQC->groupSize);
+    groupCursor_t bCursor = groupCursorInit(bQC->groupSize);
     for (size_t rowIndex = 0; rowIndex < aRows; rowIndex++) {
         for (size_t columnIndex = 0; columnIndex < bColumns; columnIndex++) {
             float acc = 0.f;
@@ -577,8 +577,8 @@ void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
                     bValueIndex = calcElementIndexByIndices(bNumberOfDims, bDims, bIndices,
                                                             bTensor->shape->orderOfDimensions);
                 }
-                size_t aGroup = bfpGroupOf(aQC, aValueIndex);
-                size_t bGroup = bfpGroupOf(bQC, bValueIndex);
+                size_t aGroup = groupCursorOf(&aCursor, aValueIndex);
+                size_t bGroup = groupCursorOf(&bCursor, bValueIndex);
                 if (i == 0) {
                     currentAGroup = aGroup;
                     currentBGroup = bGroup;

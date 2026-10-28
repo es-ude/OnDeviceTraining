@@ -93,6 +93,36 @@ windowSlice1d_t windowSlice1dAt(windowGeometry1d_t const *geometry, size_t outpu
     return s;
 }
 
+void windowTapOutputRange1d(windowGeometry1d_t const *geometry, size_t k, size_t *outLo,
+                            size_t *outHi) {
+    // signed: the tap offset relative to the window start is negative when
+    // padLeft exceeds k*dilation
+    long long tapOffset = (long long)(k * geometry->dilation) - (long long)geometry->padLeft;
+    long long stride = (long long)geometry->stride;
+    long long inputLen = (long long)geometry->inputLength;
+
+    // first outPos with outPos*stride + tapOffset >= 0
+    long long lo = 0;
+    if (tapOffset < 0) {
+        lo = (-tapOffset + stride - 1) / stride;
+    }
+
+    // first outPos with outPos*stride + tapOffset >= inputLen
+    long long hi = 0;
+    if (inputLen - tapOffset > 0) {
+        hi = (inputLen - tapOffset + stride - 1) / stride;
+    }
+    if (hi > (long long)geometry->outputLength) {
+        hi = (long long)geometry->outputLength;
+    }
+    if (lo > hi) {
+        lo = hi;
+    }
+
+    *outLo = (size_t)lo;
+    *outHi = (size_t)hi;
+}
+
 size_t convTranspose1dTapsAt(size_t outPos, size_t inputLength, size_t kernelSize, size_t stride,
                              size_t dilation, size_t padLeft, convTransposeTap_t *taps) {
     size_t count = 0;

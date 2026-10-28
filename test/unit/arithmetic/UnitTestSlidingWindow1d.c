@@ -1,3 +1,6 @@
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "SlidingWindow1d.h"
 #include "unity.h"
 
@@ -371,6 +374,93 @@ void testTransposeTapsMatchScatterEnumeration() {
     TEST_ASSERT_EQUAL_size_t(18, totalTaps);
 }
 
+typedef struct tapRangeSweepStats {
+    size_t ranges;
+    size_t emptyRanges;
+    size_t leftClipped;
+    size_t clampEngaged;
+} tapRangeSweepStats_t;
+
+static void checkTapRangesAgainstSlices(kernel_t const *kernel, size_t inputLength,
+                                        tapRangeSweepStats_t *stats) {
+    windowGeometry1d_t g = windowGeometry1dCalc(inputLength, kernel);
+    for (size_t k = 0; k < g.kernelSize; k++) {
+        size_t lo = SIZE_MAX;
+        size_t hi = SIZE_MAX;
+        windowTapOutputRange1d(&g, k, &lo, &hi);
+
+        // Explicit: the slice-membership check below cannot see an unclamped
+        // hi, because slices past outputLength still report tap k as valid.
+        TEST_ASSERT_TRUE(lo <= hi);
+        TEST_ASSERT_TRUE(hi <= g.outputLength);
+
+        stats->ranges++;
+        stats->emptyRanges += (lo == hi);
+        stats->leftClipped += (lo > 0);
+        long long unclampedReach =
+            (long long)(g.outputLength * g.stride + k * g.dilation) - (long long)g.padLeft;
+        stats->clampEngaged +=
+            (unclampedReach < (long long)inputLength && hi == g.outputLength && lo < hi);
+
+        for (size_t outPos = 0; outPos < g.outputLength; outPos++) {
+            windowSlice1d_t s = windowSlice1dAt(&g, outPos);
+            bool coveredBySlice =
+                k >= s.firstValidKernelOffset && k < s.firstValidKernelOffset + s.validCount;
+            bool inRange = lo <= outPos && outPos < hi;
+            TEST_ASSERT_EQUAL(coveredBySlice, inRange);
+            if (inRange) {
+                size_t inputIdx = outPos * g.stride + k * g.dilation - g.padLeft;
+                TEST_ASSERT_EQUAL_size_t(
+                    s.firstValidInputIdx + (k - s.firstValidKernelOffset) * g.dilation, inputIdx);
+            }
+        }
+    }
+}
+
+void testTapOutputRangeMatchesSliceBruteForce() {
+    tapRangeSweepStats_t stats = {0};
+    for (size_t inputLength = 1; inputLength <= 12; inputLength++) {
+        for (size_t kernelSize = 1; kernelSize <= 5; kernelSize++) {
+            for (size_t stride = 1; stride <= 3; stride++) {
+                for (size_t dilation = 1; dilation <= 3; dilation++) {
+                    kernel_t kernel;
+                    initKernel(&kernel, kernelSize, VALID, dilation, stride);
+                    checkTapRangesAgainstSlices(&kernel, inputLength, &stats);
+                    initKernel(&kernel, kernelSize, SAME, dilation, stride);
+                    checkTapRangesAgainstSlices(&kernel, inputLength, &stats);
+                    for (size_t padding = 0; padding <= 4; padding++) {
+                        initKernelExplicit(&kernel, kernelSize, padding, dilation, stride);
+                        checkTapRangesAgainstSlices(&kernel, inputLength, &stats);
+                    }
+                }
+            }
+        }
+    }
+    TEST_ASSERT_TRUE(stats.emptyRanges > 0);
+    TEST_ASSERT_TRUE(stats.leftClipped > 0);
+    TEST_ASSERT_TRUE(stats.clampEngaged > 0);
+    TEST_ASSERT_TRUE(stats.ranges > stats.emptyRanges);
+}
+
+void testTapOutputRangeEmptyWhenStrideSkipsTheInput() {
+    // L=1, K=2, stride 2, padding 1: outputLength 1, tap 0's only window
+    // reads index -1, tap 1 reads index 0.
+    kernel_t kernel;
+    initKernelExplicit(&kernel, 2, 1, 1, 2); // size, padding, dilation, stride
+    windowGeometry1d_t g = windowGeometry1dCalc(1, &kernel);
+    TEST_ASSERT_EQUAL_size_t(1, g.outputLength);
+
+    size_t lo = SIZE_MAX;
+    size_t hi = SIZE_MAX;
+    windowTapOutputRange1d(&g, 0, &lo, &hi);
+    TEST_ASSERT_EQUAL_size_t(lo, hi);
+    TEST_ASSERT_TRUE(hi <= g.outputLength);
+
+    windowTapOutputRange1d(&g, 1, &lo, &hi);
+    TEST_ASSERT_EQUAL_size_t(0, lo);
+    TEST_ASSERT_EQUAL_size_t(1, hi);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -403,5 +493,7 @@ int main(void) {
     RUN_TEST(testTransposeTapsDilation2);
     RUN_TEST(testTransposeTapsPadLeft1);
     RUN_TEST(testTransposeTapsMatchScatterEnumeration);
+    RUN_TEST(testTapOutputRangeMatchesSliceBruteForce);
+    RUN_TEST(testTapOutputRangeEmptyWhenStrideSkipsTheInput);
     return UNITY_END();
 }

@@ -34,6 +34,13 @@ typedef struct windowSlice1d {
 
 windowSlice1d_t windowSlice1dAt(windowGeometry1d_t const *geometry, size_t outputPos);
 
+/*! Output positions [*outLo, *outHi) whose window covers kernel tap k
+ *  (contiguous); the tap reads input index outPos*stride + k*dilation - padLeft.
+ *  An empty range gives *outLo == *outHi. Lets a per-tap loop skip the
+ *  per-outPos windowSlice1dAt membership test. */
+void windowTapOutputRange1d(windowGeometry1d_t const *geometry, size_t k, size_t *outLo,
+                            size_t *outHi);
+
 /*! BFP epic PR2 (D9): enumerate the contributors of ConvT1d output position
  *  outPos: kernel taps k with (outPos + padLeft - k*dilation) % stride == 0 and
  *  inPos = (outPos + padLeft - k*dilation) / stride in [0, inputLength).

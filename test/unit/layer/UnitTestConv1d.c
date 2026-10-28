@@ -2652,6 +2652,67 @@ void testConv1dBackwardBfpWeightGradGroupedPaddedMatchesGold(void) {
     TEST_ASSERT_EQUAL_MEMORY(kConvBfpGrpWgExpected, captured, sizeof(captured));
 }
 
+/* A tap clipped in EVERY window must seed no BFP segment and keep grad 0.
+ * The grouped-padded gold above clips taps 0/4 only once outPos hits
+ * outputLength; this geometry (L=1, K=2, stride 2, EXPLICIT padding 1,
+ * outputLength 1) empties tap 0 through the stride rounding instead: its only
+ * window reads input index -1, tap 1 reads index 0. Power-of-two grids make
+ * the FLOAT32 weight grad exact, so every other cell must match it bit for
+ * bit. */
+static void runFullyClippedTapWeightGrad(bool bfp, float *gwOut) {
+    size_t const weightDims[] = {2, 2, 2};
+    size_t const xDims[] = {2, 2, 1};
+    size_t const gyDims[] = {2, 2, 1};
+    float const wVals[] = {1.0f, -2.0f, 3.0f, 0.5f, -1.5f, 2.0f, 0.25f, -3.0f};
+    float const xVals[] = {1.5f, -2.0f, 3.5f, 0.5f};
+    float const gyVals[] = {-1.0f, 2.5f, 0.5f, -3.0f};
+
+    quantization_t *floatQ = quantizationInitFloat();
+    tensor_t *weightsParam = makeFloatTensor(weightDims, 3, wVals);
+    if (bfp) {
+        quantization_t *bfpTemplate = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 4);
+        requantizeTensorInPlace(weightsParam, bfpTemplate);
+        freeQuantization(bfpTemplate);
+    }
+    parameter_t *weights = parameterInit(weightsParam, gradInitFloat(weightsParam, NULL));
+    kernel_t *kernel = reserveMemory(sizeof(kernel_t));
+    initKernelExplicit(kernel, 2, 1, 1, 2); // size, padding, dilation, stride
+    layer_t *layer = buildBorrowedConv1dLayer(weights, NULL, kernel, floatQ);
+    if (bfp) {
+        layer->config->conv1d->weightGradMath =
+            (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    }
+
+    tensor_t *forwardInput = makeFloatTensor(xDims, 3, xVals);
+    tensor_t *lossGrad = makeFloatTensor(gyDims, 3, gyVals);
+
+    conv1dBackward(layer, forwardInput, lossGrad, NULL, NULL);
+    memcpy(gwOut, layer->config->conv1d->weights->grad->data, 8 * sizeof(float));
+
+    freeConv1dLayer(layer);
+    freeTensor(lossGrad);
+    freeTensor(forwardInput);
+    freeQuantization(floatQ);
+}
+
+void testConv1dBackwardBfpWeightGradFullyClippedTapIsZero(void) {
+    float floatGw[8];
+    float bfpGw[8];
+    runFullyClippedTapWeightGrad(false, floatGw);
+    runFullyClippedTapWeightGrad(true, bfpGw);
+
+    bool nonDegenerate = false;
+    for (size_t cell = 0; cell < 4; cell++) { /* (oc, ic) pairs, kernelSize 2 */
+        TEST_ASSERT_EQUAL_FLOAT(0.0f, floatGw[cell * 2]);
+        TEST_ASSERT_EQUAL_UINT32(0u, ((uint32_t *)bfpGw)[cell * 2]);
+        if (floatGw[cell * 2 + 1] != 0.0f) {
+            nonDegenerate = true;
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(nonDegenerate, "fully-clipped-tap twin is vacuously all-zero");
+    TEST_ASSERT_EQUAL_MEMORY(floatGw, bfpGw, sizeof(floatGw));
+}
+
 /* dx power-of-two twin (layer sibling of the forward
  * testConv1dForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer; exactness
  * argument there and in testConv1dBackwardGroupedDxEqualScalesBitIdenticalToScalar,
@@ -3139,6 +3200,7 @@ int main() {
     RUN_TEST(testConv1dBackwardBfpBiasGradMatchesGold);
     RUN_TEST(testConv1dBackwardBfpDxMatchesGold);
     RUN_TEST(testConv1dBackwardBfpWeightGradGroupedPaddedMatchesGold);
+    RUN_TEST(testConv1dBackwardBfpWeightGradFullyClippedTapIsZero);
     RUN_TEST(testConv1dBackwardBfpDxPowerOfTwoBitIdenticalToGroupedSym);
     RUN_TEST(testConv1dBackwardBfpDxConvGroups2MatchesGold);
     RUN_TEST(testConv1dCalcWeightGradsBfpRejectsFloat32Weights);

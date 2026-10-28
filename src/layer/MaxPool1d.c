@@ -444,6 +444,13 @@ void maxPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tensor_t *lo
                      "MaxPool1d backward FLOAT32 (propLoss)");
     maxPoolRequireArgmaxShape(cfg->argmaxIndices, lossGrad, outputLength,
                               "MaxPool1d backward FLOAT32");
+    size_t geomOutputLength = windowGeometry1dCalc(inputLength, cfg->kernel).outputLength;
+    if (geomOutputLength != outputLength) {
+        PRINT_ERROR("MaxPool1d backward FLOAT32: lossGrad outputLength (%zu) does not match "
+                    "geometry-derived (%zu)",
+                    outputLength, geomOutputLength);
+        exit(1);
+    }
 
     float const *gyArr = (float const *)lossGrad->data;
     int32_t const *argmaxArr = (int32_t const *)cfg->argmaxIndices->data;
@@ -522,6 +529,13 @@ static void maxPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *
     poolRequireDims3(rawOut, batch, channels, inputLength, "MaxPool1d backward SYM_INT32 (rawOut)");
     maxPoolRequireArgmaxShape(cfg->argmaxIndices, lossGrad, outputLength,
                               "MaxPool1d backward SYM_INT32");
+    size_t geomOutputLength = windowGeometry1dCalc(inputLength, cfg->kernel).outputLength;
+    if (geomOutputLength != outputLength) {
+        PRINT_ERROR("MaxPool1d backward SYM_INT32: lossGrad outputLength (%zu) does not match "
+                    "geometry-derived (%zu)",
+                    outputLength, geomOutputLength);
+        exit(1);
+    }
 
     /* An input position can be argmax only of windows CONTAINING it, so the
      * worst-case scatter collisions per cell = covering windows =
@@ -588,6 +602,13 @@ static void maxPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOu
      * past its end for every b, c beyond its own. */
     poolRequireDims3(rawOut, batch, channels, inputLength, "MaxPool1d backward BFP (rawOut)");
     maxPoolRequireArgmaxShape(cfg->argmaxIndices, lossGrad, outputLength, "MaxPool1d backward BFP");
+    size_t geomOutputLength = windowGeometry1dCalc(inputLength, cfg->kernel).outputLength;
+    if (geomOutputLength != outputLength) {
+        PRINT_ERROR("MaxPool1d backward BFP: lossGrad outputLength (%zu) does not match "
+                    "geometry-derived (%zu)",
+                    outputLength, geomOutputLength);
+        exit(1);
+    }
 
     const bfpQConfig_t *qC = lossGrad->quantization->qConfig;
     validateBfpQConfigShape(qC, calcNumberOfElementsByTensor(lossGrad));

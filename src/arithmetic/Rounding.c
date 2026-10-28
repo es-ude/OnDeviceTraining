@@ -7,9 +7,10 @@
 #include "RNG.h"
 #include "Rounding.h"
 
-// C round(): rounds half away from zero (C17 7.12.9.6)
+// C roundf(): rounds half away from zero (C17 7.12.9.6); float, not double, keeps soft-float MCUs
+// off the double path
 int32_t roundHalfAway(float input) {
-    return round(input);
+    return roundf(input);
 }
 
 static int32_t roundSRHalfAway(const float input, rngStream_t *rs) {

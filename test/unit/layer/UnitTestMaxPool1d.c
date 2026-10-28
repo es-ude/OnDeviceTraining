@@ -1779,6 +1779,70 @@ void testMaxPool1dBackwardSymSkipsMinusOneSentinel(void) {
     freeTensor(r.input);
 }
 
+/* #425 item 2: k=2 s=2 VALID on a length-8 propLoss derives Lout 4, but
+ * lossGrad and argmax agree with each other on 3, so every other shape and
+ * content gate passes; only the geometry check sees the mismatch. */
+void testMaxPool1dBackwardFloatRejectsGeometryMismatch(void) {
+    size_t inputDims[] = {1, 2, 8};
+    size_t outputDims[] = {1, 2, 3};
+    maxPool1dRunResult_t r =
+        maxPool1dBuild(NULL, inputDims, 2, VALID, 1, 2, NULL, NULL, outputDims);
+    tensor_t *lossGrad = makeFloatTensor(outputDims, 3, kArgmaxGuardLossGrad);
+    tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
+    fillArgmaxGuardIndices(r.argmax, 1);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "does not match geometry-derived",
+                             maxPool1dBackward(r.layer, NULL, lossGrad, propLoss, NULL));
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+}
+
+void testMaxPool1dBackwardSymRejectsGeometryMismatch(void) {
+    size_t inputDims[] = {1, 2, 8};
+    size_t outputDims[] = {1, 2, 3};
+    maxPool1dSymRun_t r = maxPool1dBuildSym(NULL, inputDims, 2, VALID, 1, 2, outputDims);
+    tensor_t *lossGrad = buildSymTensor(outputDims, 3, kArgmaxGuardLossGrad);
+    tensor_t *propLoss = buildSymTensor(inputDims, 3, NULL);
+    fillArgmaxGuardIndices(r.argmax, 1);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "does not match geometry-derived",
+                             maxPool1dBackward(r.layer, NULL, lossGrad, propLoss, NULL));
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(r.argmax);
+    freeTensor(r.output);
+    freeTensor(r.input);
+}
+
+void testMaxPool1dBackwardBfpRejectsGeometryMismatch(void) {
+    size_t inputDims[] = {1, 2, 8};
+    size_t outputDims[] = {1, 2, 3};
+    tensor_t *lossGrad = makeFloatTensor(outputDims, 3, kArgmaxGuardLossGrad);
+    tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
+    tensor_t *argmax = makeInt32Tensor(outputDims, 3);
+    fillArgmaxGuardIndices(argmax, 1);
+    quantization_t *wireQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    kernel_t k;
+    maxPool1dConfig_t cfg;
+    layerConfig_t lc;
+    layer_t layer;
+    maxPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, argmax, 2, VALID, 1, 2, wireQ);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "does not match geometry-derived",
+                             maxPool1dBackward(&layer, NULL, lossGrad, propLoss, NULL));
+
+    freeQuantization(wireQ);
+    freeTensor(argmax);
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMaxPool1dForwardBasic);
@@ -1833,5 +1897,8 @@ int main(void) {
     RUN_TEST(testMaxPool1dBackwardSymRejectsArgmaxIndexAtInputLength);
     RUN_TEST(testMaxPool1dBackwardSymRejectsNegativeNonSentinelArgmax);
     RUN_TEST(testMaxPool1dBackwardSymSkipsMinusOneSentinel);
+    RUN_TEST(testMaxPool1dBackwardFloatRejectsGeometryMismatch);
+    RUN_TEST(testMaxPool1dBackwardSymRejectsGeometryMismatch);
+    RUN_TEST(testMaxPool1dBackwardBfpRejectsGeometryMismatch);
     return UNITY_END();
 }

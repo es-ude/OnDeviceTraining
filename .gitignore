@@ -113,6 +113,8 @@ compile_commands.json
 CTestTestfile.cmake
 _deps
 build/
+# ctest presets write their JUnit report relative to the invoking directory
+*.junit
 
 
 ### devenv

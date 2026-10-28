@@ -13,6 +13,7 @@
 #include "ExecuteOp.h"
 #include "Layer.h"
 #include "LayerExec.h"
+#include "LayerWireGuards.h"
 #include "Mul.h"
 #include "Quantization.h"
 #include "SlidingWindow1d.h"
@@ -171,6 +172,12 @@ void conv1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const laye
     const symQConfig_t *weightGroups = groupedWeightViewOrNull(weightTensor, &asymWeightView);
     bool grouped = weightGroups != NULL;
     conv1dForwardCtx_t fctx = {.cfg = cfg, .weightGroups = weightGroups};
+
+    size_t outDims[3];
+    size_t outOrder[3];
+    shape_t outExpected = {.dimensions = outDims, .orderOfDimensions = outOrder};
+    conv1dCalcOutputShape(layer, input->shape, &outExpected);
+    layerRequireDenseWire(output, &outExpected, "Conv1d forward", "output");
 
     switch (cfg->forwardMath.type) {
     case ARITH_FLOAT32:
@@ -904,6 +911,19 @@ void conv1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad, 
     rngKey_t opKey;
     conv1dConfig_t *cfg = layer->config->conv1d;
     tensor_t *weightTensor = cfg->weights->param;
+
+    size_t lossDims[3];
+    size_t lossOrder[3];
+    shape_t lossExpected = {.dimensions = lossDims, .orderOfDimensions = lossOrder};
+    conv1dCalcOutputShape(layer, forwardInput->shape, &lossExpected);
+    layerRequireDenseWire(lossGrad, &lossExpected, "Conv1d backward", "loss");
+    if (propLoss != NULL) {
+        size_t inOrder[3] = {0, 1, 2};
+        shape_t inExpected = {.numberOfDimensions = 3,
+                              .dimensions = forwardInput->shape->dimensions,
+                              .orderOfDimensions = inOrder};
+        layerRequireDenseWire(propLoss, &inExpected, "Conv1d backward", "propLoss");
+    }
 
     /* BFP epic PR3, backward mirror of the forward's ARITH_BFP rule 1 (see
      * conv1dForward; Linear.c's linearBackward is the canonical backward

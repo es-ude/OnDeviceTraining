@@ -61,7 +61,8 @@ jobs:
       - name: Reject malloc/calloc/realloc/free outside src/userApi/
         # Outside src/userApi/, memory goes through reserveMemory/freeReservedMemory
         # (src/userApi/StorageApi.{c,h}). It is a text check over tracked files under
-        # src/ and test/: comment lines (// or a leading *) and Markdown are skipped.
+        # src/ and test/: comment lines (//, or a leading * followed by whitespace, / or
+        # the line end) and Markdown are skipped.
         # It fails closed outside a git work tree or when git grep errors, and the
         # coverage checks fail the job if StorageApi.c is no longer tracked or no src/
         # file is in the scanned set. The self-test, in a throwaway repo, proves that
@@ -89,7 +90,7 @@ jobs:
             fi
             hits=
             if [ -n "$raw" ]; then
-              hits=$(printf '%s\n' "$raw" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|\*)')
+              hits=$(printf '%s\n' "$raw" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|\*([[:space:]]|/|$))')
             fi
             return 0
           }
@@ -154,6 +155,7 @@ jobs:
               probe fire "$f" '(void)realloc(p, 8);'
             done
             probe fire src/planted/P.c 'free(p);'
+            probe fire src/a.c '*out = malloc(n);'
             probe silent src/userApi/a.c 'free(p);'
             probe silent src/a.md 'free(p);'
             probe silent src/a.c '// free(p);'
@@ -168,7 +170,7 @@ jobs:
             echo "alloc-locality: the self-test failed; the gate no longer catches what it must."
             exit 1
           fi
-          echo "alloc-locality: clean; self-test passed (11 plants fire, 8 controls stay silent)."
+          echo "alloc-locality: clean; self-test passed (12 plants fire, 8 controls stay silent)."
           set -e
 
   optimizer-step-entry:

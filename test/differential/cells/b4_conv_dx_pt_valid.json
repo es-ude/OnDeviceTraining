@@ -1,0 +1,61 @@
+{
+  "name": "b4_conv_dx_pt_valid",
+  "description": "B4 Conv1d dx (= the gather adjoint, section 5.6), VALID, per-tensor loss m8 / weight m8: one segment per dx element.",
+  "family": "bfp_gemm",
+  "op": "conv1d",
+  "direction": "dx",
+  "tiers": [
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "geometry": {
+    "kernelSize": 3,
+    "padding": "VALID"
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3207,
+    "batch": 2,
+    "cin": 4,
+    "length": 12,
+    "cout": 4,
+    "kernelSize": 3,
+    "input": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 2.0,
+      "expSpread": 0
+    },
+    "weight": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.25,
+      "expSpread": 0
+    },
+    "bias": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.1,
+      "expSpread": 0
+    },
+    "loss": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 1.0,
+      "expSpread": 0
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED"
+  }
+}

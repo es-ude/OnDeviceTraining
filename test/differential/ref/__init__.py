@@ -9,7 +9,7 @@ recorded in ``DOC_GAPS`` of the module (and surfaced in the report), not
 filled in by reading the C sources.
 
 - ``sym_ref``   Leg A for SYM_INT32 (``docs/conventions/arithmetic-sym.md``)
-- ``bfp_ref``   Leg A for BFP (``docs/conventions/arithmetic-bfp.md``) -- stub
+- ``bfp_ref``   Leg A for BFP (``docs/conventions/arithmetic-bfp.md``)
 - ``exact_ref`` Leg B: float64 math on dequantized values
 - ``census``    mismatch census and the result taxonomy
 - ``sr_stats``  stochastic-rounding statistics -- stub

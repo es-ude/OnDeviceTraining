@@ -1,0 +1,58 @@
+{
+  "name": "b5_fq_convt_fwd_s2_op1_g2",
+  "description": "B5 fq twin: ConvT1d forward stride 2 outputPadding 1 convGroups 2 under ARITH_FLOAT32 (m12 grids: the float32 kernel rounds) over grouped BFP weights/bias.",
+  "family": "bfp_fq",
+  "op": "convt1d",
+  "direction": "forward",
+  "tiers": [
+    "layer"
+  ],
+  "arith": {
+    "type": "FLOAT32",
+    "rounding": "HALF_AWAY"
+  },
+  "geometry": {
+    "kernelSize": 3,
+    "padding": "VALID",
+    "stride": 2,
+    "outputPadding": 1,
+    "groups": 2
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3307,
+    "batch": 2,
+    "cin": 4,
+    "length": 8,
+    "cout": 4,
+    "kernelSize": 3,
+    "input": {
+      "m": 12,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 2.0,
+      "expSpread": 0,
+      "storage": "FLOAT32"
+    },
+    "weight": {
+      "m": 12,
+      "e": 8,
+      "groupSize": 3,
+      "absmax": 0.25,
+      "expSpread": 1
+    },
+    "bias": {
+      "m": 12,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.1,
+      "expSpread": 0
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED"
+  }
+}

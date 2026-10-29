@@ -1,0 +1,40 @@
+{
+  "name": "b2x_lin_fwd_abort_m16w8_n512",
+  "description": "B2 headroom probe: per-tensor m16 x m8, N=512 > bfpSegmentLimit(16,8)=511 -> the documented guard must fail fast (Leg A predicts ABORT).",
+  "family": "bfp_gemm",
+  "op": "linear",
+  "direction": "forward",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3109,
+    "batch": 1,
+    "inF": 512,
+    "outF": 2,
+    "input": {
+      "m": 16,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 2.0,
+      "expSpread": 0
+    },
+    "weight": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.25,
+      "expSpread": 0
+    },
+    "bias": null
+  },
+  "expect": {
+    "abort": true
+  }
+}

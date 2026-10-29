@@ -1,0 +1,59 @@
+{
+  "name": "b2_convt_fwd_s2_op1_g2_m8w6",
+  "description": "B2 ConvT1d forward stride 2, outputPadding 1, convGroups 2, grouped operands (input gs 4, weight gs 3), m8 x m6 + grouped bias: tail positions stay at the bias seed.",
+  "family": "bfp_gemm",
+  "op": "convt1d",
+  "direction": "forward",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "geometry": {
+    "kernelSize": 3,
+    "padding": "VALID",
+    "stride": 2,
+    "outputPadding": 1,
+    "groups": 2
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3205,
+    "batch": 2,
+    "cin": 4,
+    "length": 8,
+    "cout": 4,
+    "kernelSize": 3,
+    "input": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 4,
+      "absmax": 2.0,
+      "expSpread": 1
+    },
+    "weight": {
+      "m": 6,
+      "e": 8,
+      "groupSize": 3,
+      "absmax": 0.25,
+      "expSpread": 1
+    },
+    "bias": {
+      "m": 6,
+      "e": 8,
+      "groupSize": 2,
+      "absmax": 0.1,
+      "expSpread": 1
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED"
+  }
+}

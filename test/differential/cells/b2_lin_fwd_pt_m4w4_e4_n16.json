@@ -1,0 +1,43 @@
+{
+  "name": "b2_lin_fwd_pt_m4w4_e4_n16",
+  "description": "B2 Linear forward per-tensor m4 x m4 at exponentBits 4 (bias 7), N=16, no bias: coarse grids, one segment.",
+  "family": "bfp_gemm",
+  "op": "linear",
+  "direction": "forward",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3103,
+    "batch": 2,
+    "inF": 16,
+    "outF": 4,
+    "input": {
+      "m": 4,
+      "e": 4,
+      "groupSize": 0,
+      "absmax": 2.0,
+      "expSpread": 0
+    },
+    "weight": {
+      "m": 4,
+      "e": 4,
+      "groupSize": 0,
+      "absmax": 0.25,
+      "expSpread": 0
+    },
+    "bias": null
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED"
+  }
+}

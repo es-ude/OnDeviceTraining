@@ -25,7 +25,9 @@ Writes out/report.md and out/report.json. Exit status 1 if any row FAILs.
 Op families: `conv1d` (forward), `linear` (forward, dx, weightGrad) and
 `convert` (encode, requant_dynamic, requant_fixed). A Linear backward cell
 runs ONE backward on the layer tier; the direction names the output the row
-evaluates (dx -> propLoss, weightGrad -> weightGrad + biasGrad).
+evaluates (dx -> propLoss, weightGrad -> weightGrad + biasGrad). Cells with a
+`family` of `bfp_pack` / `bfp_gemm` / `bfp_fq` (design step 3, BFP) are
+dispatched to bfp_rows.py, which follows the same row shape.
 """
 
 from __future__ import annotations
@@ -45,7 +47,8 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 sys.path.insert(0, str(HERE))
 
-from ref import census, exact_ref, sym_ref  # noqa: E402
+import bfp_rows  # noqa: E402
+from ref import bfp_ref, census, exact_ref, sym_ref  # noqa: E402
 from ref.census import SEED_REF, ChannelSeed  # noqa: E402
 from ref.sym_ref import ConvGeometry  # noqa: E402
 
@@ -1236,7 +1239,7 @@ def fmt_row(r: dict) -> str:
     cls = a.get("mismatch_class", "-")
     ov = r.get("int32")
     if ov is None:
-        ov_s = "-"
+        ov_s = r.get("bfp", {}).get("summary", "-")
     else:
         ov_s = f"{'fits' if ov['fits'] else 'OVERFLOW'} N={ov['reduction']} wrap@{ov['n_wrap_full_scale']}"
     if "overflow" in r:
@@ -1313,10 +1316,13 @@ def main() -> int:
     for path in cell_files:
         cell = json.loads(Path(path).read_text())
         cell.setdefault("name", Path(path).stem)
+        if cell.get("family", "").startswith("bfp"):
+            rows.extend(bfp_rows.run_cell(cell, driver, out_root, args.k, run_driver))
+            continue
         for tier in cell.get("tiers", ["kernel", "layer"]):
             rows.extend(run_row(cell, tier, driver, out_root, args.k, gold_header))
 
-    doc_gaps = {"sym_ref": sym_ref.DOC_GAPS}
+    doc_gaps = {"sym_ref": sym_ref.DOC_GAPS, "bfp_ref": bfp_ref.DOC_GAPS}
     summary = {
         "n_rows": len(rows),
         "n_pass": sum(r["verdict"] == "PASS" for r in rows),
@@ -1340,6 +1346,8 @@ def main() -> int:
         "",
     ]
     md += [f"- {g}" for g in sym_ref.DOC_GAPS]
+    md += ["", "## Documentation gaps hit by Leg A (ref/bfp_ref.py DOC_GAPS)", ""]
+    md += [f"- {g}" for g in bfp_ref.DOC_GAPS]
     (out_root / "report.md").write_text("\n".join(md) + "\n")
     print("\n".join(md[:3 + len(rows) + 2]))
     return 0 if summary["n_fail"] == 0 and summary["n_error"] == 0 else 1

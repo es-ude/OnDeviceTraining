@@ -1,0 +1,51 @@
+{
+  "name": "b2_lin_fwd_lossy_m16w8_gs400_n400",
+  "description": "B2 lossy regime: m16 input per-tensor (full-scale codes) x m8 weight grouped gs 400 (= inF: one segment per output), N=400 < limit 511: the int32 partial (~1.66e9) is far above 2^24, the (float)partial cast rounds (section 7) -- single segment, predicted to the bit incl. the cast.",
+  "family": "bfp_gemm",
+  "op": "linear",
+  "direction": "forward",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3106,
+    "batch": 1,
+    "inF": 400,
+    "outF": 2,
+    "input": {
+      "m": 16,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 2.0,
+      "expSpread": 0,
+      "codes": "full_scale"
+    },
+    "weight": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 400,
+      "absmax": 0.25,
+      "expSpread": 0,
+      "codes": "full_scale"
+    },
+    "bias": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.1,
+      "expSpread": 0
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED"
+  }
+}

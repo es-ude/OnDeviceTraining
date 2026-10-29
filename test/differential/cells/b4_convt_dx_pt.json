@@ -1,0 +1,61 @@
+{
+  "name": "b4_convt_dx_pt",
+  "description": "B4 ConvT1d dx (= a Conv1d of the loss with W, section 5.6), VALID stride 1, per-tensor operands: one segment per dx element.",
+  "family": "bfp_gemm",
+  "op": "convt1d",
+  "direction": "dx",
+  "tiers": [
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "geometry": {
+    "kernelSize": 3,
+    "padding": "VALID"
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3212,
+    "batch": 2,
+    "cin": 4,
+    "length": 8,
+    "cout": 4,
+    "kernelSize": 3,
+    "input": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 2.0,
+      "expSpread": 0
+    },
+    "weight": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.25,
+      "expSpread": 0
+    },
+    "bias": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.1,
+      "expSpread": 0
+    },
+    "loss": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 1.0,
+      "expSpread": 0
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED"
+  }
+}

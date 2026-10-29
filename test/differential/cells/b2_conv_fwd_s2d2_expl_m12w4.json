@@ -1,0 +1,53 @@
+{
+  "name": "b2_conv_fwd_s2d2_expl_m12w4",
+  "description": "B2 Conv1d forward stride 2, dilation 2, EXPLICIT padding 2, K=4, grouped operands, m12 x m4, no bias.",
+  "family": "bfp_gemm",
+  "op": "conv1d",
+  "direction": "forward",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "geometry": {
+    "kernelSize": 4,
+    "padding": "EXPLICIT",
+    "paddingAmount": 2,
+    "stride": 2,
+    "dilation": 2
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3203,
+    "batch": 2,
+    "cin": 4,
+    "length": 12,
+    "cout": 4,
+    "kernelSize": 4,
+    "input": {
+      "m": 12,
+      "e": 8,
+      "groupSize": 8,
+      "absmax": 2.0,
+      "expSpread": 1
+    },
+    "weight": {
+      "m": 4,
+      "e": 8,
+      "groupSize": 8,
+      "absmax": 0.25,
+      "expSpread": 1
+    },
+    "bias": null
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED"
+  }
+}

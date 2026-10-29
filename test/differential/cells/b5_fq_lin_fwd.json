@@ -1,0 +1,49 @@
+{
+  "name": "b5_fq_lin_fwd",
+  "description": "B5 fq twin: Linear forward under ARITH_FLOAT32 (m12 grids: the float32 kernel rounds) with BFP-stored weights/bias (grouped) must equal the FLOAT32 layer run on the exact dequantized weights bit for bit.",
+  "family": "bfp_fq",
+  "op": "linear",
+  "direction": "forward",
+  "tiers": [
+    "layer"
+  ],
+  "arith": {
+    "type": "FLOAT32",
+    "rounding": "HALF_AWAY"
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3301,
+    "batch": 2,
+    "inF": 64,
+    "outF": 6,
+    "input": {
+      "m": 12,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 2.0,
+      "expSpread": 0,
+      "storage": "FLOAT32"
+    },
+    "weight": {
+      "m": 12,
+      "e": 8,
+      "groupSize": 16,
+      "absmax": 0.25,
+      "expSpread": 1
+    },
+    "bias": {
+      "m": 12,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.1,
+      "expSpread": 0
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED"
+  }
+}

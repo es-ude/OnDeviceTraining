@@ -1,0 +1,55 @@
+{
+  "name": "b3_lin_fwd_wire_pt_m8",
+  "description": "B3 Linear forward onto a per-tensor BFP wire (m8 e8): the raw is single-segment (predicted to the bit), so the OUT_WRITE pack must be the exact rule on it (E census at the boundary, codes exact).",
+  "family": "bfp_gemm",
+  "op": "linear",
+  "direction": "forward",
+  "tiers": [
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3112,
+    "batch": 2,
+    "inF": 64,
+    "outF": 4,
+    "input": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 2.0,
+      "expSpread": 0
+    },
+    "weight": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.25,
+      "expSpread": 0
+    },
+    "bias": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.1,
+      "expSpread": 0
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED"
+  },
+  "output": {
+    "dtype": "BFP",
+    "m": 8,
+    "e": 8,
+    "groupSize": 0
+  }
+}

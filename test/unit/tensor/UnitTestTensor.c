@@ -874,27 +874,100 @@ void testByteCountOverflowExits() {
     ASSERT_EXITS_WITH_OUTPUT(1, "byte count overflows",
                              (void)calcNumberOfBytesForData(&floatQ, floatLimit + 1u));
     TEST_ASSERT_EQUAL_size_t(floatLimit * 4u, calcNumberOfBytesForData(&floatQ, floatLimit));
+}
 
-    float cfgScale[1] = {1.0f};
-    symQConfig_t cfg = {
-        .scales = cfgScale, .numGroups = 1, .groupSize = 0, .qBits = 3, .roundingMode = HALF_AWAY};
+/* Exact ceil(n * bits / 8) in a type wider than size_t, as an oracle that is
+ * independent of the implementation's split arithmetic. */
+#if SIZE_MAX <= UINT32_MAX
+typedef uint64_t wideSize_t;
+#define HAVE_WIDE_SIZE 1
+#elif defined(__SIZEOF_INT128__)
+typedef unsigned __int128 wideSize_t;
+#define HAVE_WIDE_SIZE 1
+#endif
+
+#ifdef HAVE_WIDE_SIZE
+static wideSize_t ceilBytes(size_t n, size_t bits) {
+    return ((wideSize_t)n * bits + 7u) / 8u;
+}
+
+static void initSymBits(symQConfig_t *cfg, float *scale, uint8_t qBits, quantization_t *q) {
+    *cfg = (symQConfig_t){
+        .scales = scale, .numGroups = 1, .groupSize = 0, .qBits = qBits, .roundingMode = HALF_AWAY};
+    initSymQuantization(cfg, q);
+}
+
+/* Tensor.h promises a stop only when the BYTE count overflows; n * bits may
+ * wrap while ceil(n * bits / 8) still fits. */
+void testPackedByteCountFitsWhenBitCountWraps() {
+    float scale[1] = {1.0f};
+    symQConfig_t cfg;
     quantization_t symQ;
-    initSymQuantization(&cfg, &symQ);
-    /* bits * n wraps */
-    ASSERT_EXITS_WITH_OUTPUT(1, "byte count overflows",
-                             (void)calcNumberOfBytesForData(&symQ, SIZE_MAX / 3u + 1u));
-    /* bits * n fits, the + 7 round-up wraps */
-    size_t symLimit = (SIZE_MAX - 7u) / 3u;
-    ASSERT_EXITS_WITH_OUTPUT(1, "byte count overflows",
-                             (void)calcNumberOfBytesForData(&symQ, symLimit + 1u));
-    TEST_ASSERT_EQUAL_size_t((3u * symLimit + 7u) / 8u, calcNumberOfBytesForData(&symQ, symLimit));
+
+    initSymBits(&cfg, scale, 3, &symQ);
+    size_t n = SIZE_MAX / 3u + 1u; /* 3 * n wraps */
+    TEST_ASSERT_TRUE(ceilBytes(n, 3) <= SIZE_MAX);
+    TEST_ASSERT_EQUAL_size_t((size_t)ceilBytes(n, 3), calcNumberOfBytesForData(&symQ, n));
+    TEST_ASSERT_EQUAL_size_t((size_t)ceilBytes(SIZE_MAX, 3),
+                             calcNumberOfBytesForData(&symQ, SIZE_MAX));
+
+    initSymBits(&cfg, scale, 8, &symQ);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, calcNumberOfBytesForData(&symQ, SIZE_MAX));
 
     quantization_t boolQ;
     initBoolQuantization(&boolQ);
+    /* n * 1 fits, the + 7 round-up wraps */
+    TEST_ASSERT_EQUAL_size_t((size_t)ceilBytes(SIZE_MAX - 6u, 1),
+                             calcNumberOfBytesForData(&boolQ, SIZE_MAX - 6u));
+    TEST_ASSERT_EQUAL_size_t((size_t)ceilBytes(SIZE_MAX, 1),
+                             calcNumberOfBytesForData(&boolQ, SIZE_MAX));
+}
+
+void testPackedByteCountOverflowExits() {
+    float scale[1] = {1.0f};
+    symQConfig_t cfg;
+    quantization_t symQ;
+
+    initSymBits(&cfg, scale, 16, &symQ);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX - 1u, calcNumberOfBytesForData(&symQ, SIZE_MAX / 2u));
     ASSERT_EXITS_WITH_OUTPUT(1, "byte count overflows",
-                             (void)calcNumberOfBytesForData(&boolQ, SIZE_MAX - 6u));
-    TEST_ASSERT_EQUAL_size_t((SIZE_MAX - 7u + 7u) / 8u,
-                             calcNumberOfBytesForData(&boolQ, SIZE_MAX - 7u));
+                             (void)calcNumberOfBytesForData(&symQ, SIZE_MAX / 2u + 1u));
+
+    /* Largest n with ceil(9n / 8) <= SIZE_MAX is floor(8 * SIZE_MAX / 9). */
+    initSymBits(&cfg, scale, 9, &symQ);
+    size_t nMax = (size_t)(((wideSize_t)SIZE_MAX * 8u) / 9u);
+    TEST_ASSERT_TRUE(ceilBytes(nMax, 9) <= SIZE_MAX);
+    TEST_ASSERT_TRUE(ceilBytes(nMax + 1u, 9) > SIZE_MAX);
+    TEST_ASSERT_EQUAL_size_t((size_t)ceilBytes(nMax, 9), calcNumberOfBytesForData(&symQ, nMax));
+    ASSERT_EXITS_WITH_OUTPUT(1, "byte count overflows",
+                             (void)calcNumberOfBytesForData(&symQ, nMax + 1u));
+
+    initSymBits(&cfg, scale, 32, &symQ);
+    ASSERT_EXITS_WITH_OUTPUT(1, "byte count overflows",
+                             (void)calcNumberOfBytesForData(&symQ, SIZE_MAX));
+}
+#endif
+
+void testPackedByteCountMatchesCeilTable() {
+    float scale[1] = {1.0f};
+    symQConfig_t cfg;
+    quantization_t symQ;
+    for (uint8_t bits = 1; bits <= 32; bits++) {
+        cfg = (symQConfig_t){.scales = scale,
+                             .numGroups = 1,
+                             .groupSize = 0,
+                             .qBits = bits,
+                             .roundingMode = HALF_AWAY};
+        initSymQuantization(&cfg, &symQ);
+        for (size_t n = 0; n <= 64; n++) {
+            TEST_ASSERT_EQUAL_size_t((n * bits + 7u) / 8u, calcNumberOfBytesForData(&symQ, n));
+        }
+    }
+    quantization_t boolQ;
+    initBoolQuantization(&boolQ);
+    for (size_t n = 0; n <= 64; n++) {
+        TEST_ASSERT_EQUAL_size_t((n + 7u) / 8u, calcNumberOfBytesForData(&boolQ, n));
+    }
 }
 
 void setUp() {}
@@ -950,5 +1023,10 @@ int main(void) {
     RUN_TEST(testElementCountOverflowExits);
     RUN_TEST(testElementCountAtLimitFits);
     RUN_TEST(testByteCountOverflowExits);
+#ifdef HAVE_WIDE_SIZE
+    RUN_TEST(testPackedByteCountFitsWhenBitCountWraps);
+    RUN_TEST(testPackedByteCountOverflowExits);
+#endif
+    RUN_TEST(testPackedByteCountMatchesCeilTable);
     return UNITY_END();
 }

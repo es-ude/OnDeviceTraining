@@ -137,14 +137,20 @@ static size_t wordBytes(quantization_t *q, size_t numberOfElements, size_t bytes
     return bytes;
 }
 
+/* ceil(n * bits / 8) without forming n * bits, which can wrap while the byte
+ * count still fits: with n = 8q + r it equals q * bits + ceil(r * bits / 8). */
 static size_t packedBytes(quantization_t *q, size_t numberOfElements, size_t bitsPerElement) {
-    size_t bits;
-    size_t roundedBits;
-    if (!checkedMulSize(bitsPerElement, numberOfElements, &bits) ||
-        !checkedAddSize(bits, 7u, &roundedBits)) {
+    size_t fullBytes;
+    size_t tailBits;
+    size_t roundedTailBits;
+    size_t bytes;
+    if (!checkedMulSize(numberOfElements / 8u, bitsPerElement, &fullBytes) ||
+        !checkedMulSize(numberOfElements % 8u, bitsPerElement, &tailBits) ||
+        !checkedAddSize(tailBits, 7u, &roundedTailBits) ||
+        !checkedAddSize(fullBytes, roundedTailBits / 8u, &bytes)) {
         exitOnByteCountOverflow(q, numberOfElements, bitsPerElement);
     }
-    return roundedBits / 8u;
+    return bytes;
 }
 
 size_t calcNumberOfBytesForData(quantization_t *q, size_t numberOfElements) {

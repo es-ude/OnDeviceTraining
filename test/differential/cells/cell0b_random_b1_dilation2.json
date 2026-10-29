@@ -1,0 +1,19 @@
+{
+  "name": "cell0b_random_b1_dilation2",
+  "description": "Cell 0 (b): seeded random codes with dilation 2. B=1 Cin=3 Cout=5 L=24 K=3 dilation=2, VALID, bias, HALF_AWAY.",
+  "op": "conv1d",
+  "direction": "forward",
+  "tiers": ["kernel", "layer"],
+  "arith": {"type": "SYM_INT32", "rounding": "HALF_AWAY"},
+  "geometry": {"kernelSize": 3, "stride": 1, "dilation": 2, "padding": "VALID", "groups": 1},
+  "operandBits": 12,
+  "outputBits": 12,
+  "fixture": {
+    "type": "random_codes",
+    "seed": 14,
+    "input_shape": [1, 3, 24],
+    "weight_shape": [5, 3, 3],
+    "bias_shape": [5]
+  },
+  "expect": {"legA": ["EXACT", "TIE_ONLY"], "legB": "BOUNDED"}
+}

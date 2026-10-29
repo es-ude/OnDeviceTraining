@@ -1,0 +1,19 @@
+{
+  "name": "cell0b_random_b2_bias_stride2",
+  "description": "Cell 0 (b): seeded random codes, batch 2. B=2 Cin=4 Cout=6 L=20 K=5 stride=2, VALID, bias, HALF_AWAY.",
+  "op": "conv1d",
+  "direction": "forward",
+  "tiers": ["kernel", "layer"],
+  "arith": {"type": "SYM_INT32", "rounding": "HALF_AWAY"},
+  "geometry": {"kernelSize": 5, "stride": 2, "dilation": 1, "padding": "VALID", "groups": 1},
+  "operandBits": 12,
+  "outputBits": 12,
+  "fixture": {
+    "type": "random_codes",
+    "seed": 12,
+    "input_shape": [2, 4, 20],
+    "weight_shape": [6, 4, 5],
+    "bias_shape": [6]
+  },
+  "expect": {"legA": ["EXACT", "TIE_ONLY"], "legB": "BOUNDED"}
+}

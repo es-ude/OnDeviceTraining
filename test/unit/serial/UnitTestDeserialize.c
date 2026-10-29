@@ -498,6 +498,71 @@ static void testDeserializeTensorRejectsRankMismatch(void) {
     freeTensor(src);
 }
 
+/* Well-formed FLOAT32 [2,3] record except for the two orderOfDimensions
+ * entries, so only the permutation check can stop it. */
+static void writeFloat2x3RecordWithOrder(uint32_t order0, uint32_t order1) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    writeU32LE(f, 2);
+    writeU32LE(f, 2);
+    writeU32LE(f, 3);
+    writeU32LE(f, order0);
+    writeU32LE(f, order1);
+    fputc(FLOAT32, f);
+    for (int i = 0; i < 6; i++) {
+        writeF32LE(f, (float)i);
+    }
+    fclose(f);
+}
+
+/* orderOfDimensions indexes dimensions[]: an entry >= rank reads past it, and
+ * a repeated entry leaves a dimension unreachable, so the strides it implies
+ * no longer cover the payload. */
+static void testDeserializeTensorRejectsOutOfRangeOrderOfDimensions(void) {
+    tensor_t *skeleton = makeFloatTensor2D(2, 3, NULL, 0);
+
+    writeFloat2x3RecordWithOrder(0, 2);
+    FILE *f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeShape: orderOfDimensions[1] = 2 is out of range",
+                             deserializeTensor(skeleton, f));
+    fclose(f);
+
+    writeFloat2x3RecordWithOrder(0xFFFFFFFFu, 1);
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "deserializeShape: orderOfDimensions[0] = 4294967295 is out of range",
+                             deserializeTensor(skeleton, f));
+    fclose(f);
+
+    freeTensor(skeleton);
+}
+
+static void testDeserializeTensorRejectsDuplicateOrderOfDimensions(void) {
+    tensor_t *skeleton = makeFloatTensor2D(2, 3, NULL, 0);
+
+    writeFloat2x3RecordWithOrder(1, 1);
+    FILE *f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "deserializeShape: orderOfDimensions[1] = 1 repeats an earlier entry",
+                             deserializeTensor(skeleton, f));
+    fclose(f);
+
+    freeTensor(skeleton);
+}
+
+/* The permutation check must not reject a real transpose. */
+static void testDeserializeTensorAcceptsTransposedOrderOfDimensions(void) {
+    tensor_t *skeleton = makeFloatTensor2D(2, 3, NULL, 0);
+
+    writeFloat2x3RecordWithOrder(1, 0);
+    FILE *f = fopen(FILE_PATH, "rb");
+    deserializeTensor(skeleton, f);
+    fclose(f);
+
+    TEST_ASSERT_EQUAL_size_t(1, skeleton->shape->orderOfDimensions[0]);
+    TEST_ASSERT_EQUAL_size_t(0, skeleton->shape->orderOfDimensions[1]);
+    freeTensor(skeleton);
+}
+
 static tensor_t *makeAsymTensor1D(size_t d0) {
     size_t *dims = reserveMemory(1 * sizeof(size_t));
     dims[0] = d0;
@@ -2604,6 +2669,9 @@ int main(void) {
     RUN_TEST(testDeserializeModelFailsFastOnTruncatedHeader);
     RUN_TEST(testDeserializeTensorFailsFastOnTruncatedPayload);
     RUN_TEST(testDeserializeTensorRejectsRankMismatch);
+    RUN_TEST(testDeserializeTensorRejectsOutOfRangeOrderOfDimensions);
+    RUN_TEST(testDeserializeTensorRejectsDuplicateOrderOfDimensions);
+    RUN_TEST(testDeserializeTensorAcceptsTransposedOrderOfDimensions);
     RUN_TEST(testDeserializeTensorRoundTripsAsymZeroPoint);
     RUN_TEST(testDeserializeQConfigAcceptsWideZeroPoint);
     RUN_TEST(testDeserializeQConfigAcceptsNumGroupsMismatchViaReallocation);

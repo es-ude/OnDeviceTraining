@@ -190,8 +190,26 @@ static void deserializeShape(shape_t *shape, FILE *f) {
     for (size_t d = 0; d < shape->numberOfDimensions; d++) {
         shape->dimensions[d] = (size_t)serialReadU32LE(f);
     }
+    /* orderOfDimensions indexes dimensions[], so it must be a permutation of
+     * 0..rank-1: an entry >= rank reads past the array, and a repeat leaves a
+     * dimension unreachable. Quadratic scan: the rank is the skeleton's own. */
     for (size_t d = 0; d < shape->numberOfDimensions; d++) {
-        shape->orderOfDimensions[d] = (size_t)serialReadU32LE(f);
+        uint32_t axis = serialReadU32LE(f);
+        if ((size_t)axis >= shape->numberOfDimensions) {
+            PRINT_ERROR("deserializeShape: orderOfDimensions[%zu] = %u is out of range for rank "
+                        "%zu",
+                        d, (unsigned)axis, shape->numberOfDimensions);
+            exit(1);
+        }
+        for (size_t prev = 0; prev < d; prev++) {
+            if (shape->orderOfDimensions[prev] == (size_t)axis) {
+                PRINT_ERROR("deserializeShape: orderOfDimensions[%zu] = %u repeats an earlier "
+                            "entry (not a permutation of 0..%zu)",
+                            d, (unsigned)axis, shape->numberOfDimensions - 1);
+                exit(1);
+            }
+        }
+        shape->orderOfDimensions[d] = (size_t)axis;
     }
 }
 

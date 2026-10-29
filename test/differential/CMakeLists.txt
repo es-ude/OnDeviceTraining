@@ -10,6 +10,7 @@ add_executable(odt_diffdrive odt_diffdrive.c)
 target_link_libraries(odt_diffdrive PRIVATE
         CommonLayerLibs
         Conv1d
+        Linear
         Conv1dKernel
         ConvTranspose1dKernel
         Kernel

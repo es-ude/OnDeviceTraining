@@ -1,0 +1,33 @@
+{
+  "name": "s1_fwd_n512_b4",
+  "description": "S1 Linear forward: B=4 inF=512 outF=6, FLOAT32 input staged to int12 (grid-exact), packed SYM@8 weights and bias, non-power-of-two scales, HALF_AWAY.",
+  "op": "linear",
+  "direction": "forward",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "SYM_INT32",
+    "rounding": "HALF_AWAY"
+  },
+  "outputBits": 12,
+  "fixture": {
+    "type": "linear_grid",
+    "seed": 210,
+    "batch": 4,
+    "inF": 512,
+    "outF": 6,
+    "inputStorage": "FLOAT32",
+    "weightStorage": "SYM",
+    "weightBits": 8,
+    "bias": true
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED"
+  }
+}

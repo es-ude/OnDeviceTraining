@@ -1,0 +1,33 @@
+{
+  "name": "s2_dx_n511_b4",
+  "description": "S2 Linear dx: B=4 outF=511 (the reduction) inF=6, int12 loss, packed SYM@8 weights, dx wire int12, HALF_AWAY.",
+  "op": "linear",
+  "direction": "dx",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "SYM_INT32",
+    "rounding": "HALF_AWAY"
+  },
+  "outputBits": 12,
+  "fixture": {
+    "type": "linear_grid",
+    "seed": 308,
+    "batch": 4,
+    "inF": 6,
+    "outF": 511,
+    "inputStorage": "FLOAT32",
+    "weightStorage": "SYM",
+    "weightBits": 8,
+    "bias": true
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED"
+  }
+}

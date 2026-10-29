@@ -49,6 +49,34 @@ DOC_GAPS: list[str] = [
     "Definition of HALF_AWAY: the doc names the mode ('half-away-from-zero = roundByMode("
     "HALF_AWAY) semantics', Pooling SYM_INT32) but never writes the function. Assumed the "
     "standard one: sign(v) * floor(|v| + 0.5) (an exact .5 goes away from zero).",
+    # --- step 2 (Linear, staging, grads, requant) ---
+    "Linear weight layout and orientation: docs/conventions never state that a Linear weight "
+    "is [outFeatures, inFeatures] with y = x @ W^T + b (data-shape only says shapes follow the "
+    "PyTorch convention; arithmetic-sym names 'Linear forward / propLoss / weightGrad' as "
+    "matmulIntCore users and 'per-channel Linear dx = outFeatures' as the dx reduction). "
+    "Assumed PyTorch nn.Linear: forward x[B,inF] @ W[outF,inF]^T, dx = L[B,outF] @ W, "
+    "weightGrad = L^T @ x, biasGrad = sum over the batch of L.",
+    "Staging of a FLOAT32 operand under ARITH_SYM_INT32: the doc says the funnel prologue "
+    "converts operands into the arithmetic representation but not with which rule, width, "
+    "granularity or rounding. Assumed the documented dynamic encode (#192 D1, absmax -> qMax) "
+    "at the documented operand default width (int12, ODT_SYM_OPERAND_QMAXBITS), per TENSOR "
+    "(one scale for the whole [B, inF] input, not per sample), rounded by the op's mode. The "
+    "GEMM cells use grid-exact float inputs so this assumption is checked on the scale and the "
+    "codes without a float32 encode tie ever entering the MAC (a staging +-1 is not a tie).",
+    "FLOAT32 grad storage receiving a SYM_INT32 raw increment: the doc says 'on FLOAT32 "
+    "targets both [accumulate modes] collapse to the exact float add (no quantization)' but "
+    "not how the raw int32 at s_raw becomes a float. Assumed value = raw * s_raw with at most "
+    "three float32 roundings (the int->float cast, the s_loss*s_in product, the multiply); "
+    "the first store into a zeroed grad is then that value exactly.",
+    "int32 accumulator soundness bound: the doc states 'int12 is sound only for reductions N "
+    "<= 511' from the product bound 2^(2b-2) = 2^22, but the largest int12 code product is "
+    "2047^2 = 4190209 < 2^22 (qMin = -2048 is never produced by an absmax-derived HALF_AWAY "
+    "encode, DOC_GAPS[0]); Leg A predicts the first wrap from the exact code products of each "
+    "fixture (N = 513 for sign-aligned +-2047 operands without a seed). The doc's figure is "
+    "conservative by one term, not wrong.",
+    "Fixed-scale requant (#192 D1 'requant into a preset target scale'): the doc does not say "
+    "what happens to a value outside the target grid. Assumed clamp to [qMin, qMax] (the "
+    "design's D3 says only the DYNAMIC requant 'never saturates', implying the fixed one may).",
 ]
 
 
@@ -323,3 +351,171 @@ def restore_sym(raw: np.ndarray, s_raw: float, q_max_bits: int) -> Restored:
     pre = values / scale
     codes = np.clip(round_half_away(pre), qmin(q_max_bits), qmax(q_max_bits))
     return Restored(codes=codes, scale=scale, pre=pre)
+
+
+# --------------------------------------------------------------------------- #
+# Linear (step 2): forward, dx, weightGrad raw contracts                      #
+# --------------------------------------------------------------------------- #
+
+
+def linear_int_mac(x_codes: np.ndarray, w_codes: np.ndarray) -> np.ndarray:
+    """Exact integer x @ W^T of code tensors (int64), x [B, inF], W [outF, inF].
+
+    arithmetic-sym, 'Operand bit-width': 'matmulIntCore (Linear forward /
+    propLoss / weightGrad) ... run on int12 operands' with an int32
+    accumulator of code products; the layout [outF, inF] and the W^T
+    orientation are the PyTorch convention (DOC_GAPS[9]).
+    """
+    x = np.asarray(x_codes, dtype=np.int64)
+    w = np.asarray(w_codes, dtype=np.int64)
+    if x.ndim != 2 or w.ndim != 2 or x.shape[1] != w.shape[1]:
+        raise ValueError("x must be [B, inF] and W [outF, inF]")
+    return x @ w.T
+
+
+def linear_sym_forward_raw(
+    x_codes: np.ndarray,
+    s_x: float,
+    w_codes: np.ndarray,
+    s_w: float,
+    b_codes: np.ndarray | None,
+    s_b: float | None,
+) -> RawForward:
+    """The Linear kernel contract: raw int32-range mantissas at s_in * s_w.
+
+    arithmetic-sym, 'SYM_INT32 seed-rescale': the forward bias seed ('Matmul
+    today') is refolded per output column with ``bias_seed`` and added into
+    the integer accumulator; the product scale is s_in * s_w (same contract
+    as 'Conv1d / Conv1dTransposed SYM_INT32', 'raw accumulator-range int32
+    mantissas at output scale s_in*s_w'). The result is returned as
+    [B, outF, 1] so the per-output-channel seed/restore resolvers shared with
+    Conv1d apply unchanged (channel axis 1).
+    """
+    mac = linear_int_mac(x_codes, w_codes)[:, :, None]
+    s_raw = float(s_x) * float(s_w)
+    seed = None
+    raw = mac
+    if b_codes is not None:
+        seed = bias_seed(b_codes, s_b, s_raw)
+        raw = mac + seed.seed.reshape(1, -1, 1)
+    return RawForward(mac=mac, raw=raw, s_raw=s_raw, seed=seed)
+
+
+def linear_sym_dx_raw(l_codes: np.ndarray, s_l: float, w_codes: np.ndarray, s_w: float) -> RawForward:
+    """dx = L @ W, raw at s_loss * s_w, L [B, outF], W [outF, inF] -> [B, inF, 1].
+
+    arithmetic-sym, 'dx / propLoss (SYM)' (Conv section; Linear 'propLoss' is
+    the matmulIntCore sibling): the kernel 'emits the raw s_loss*s_w mantissa
+    into the funnel intermediate; the OUT_WRITE epilogue then width-restores
+    it at the producer'. The reduction runs over outFeatures ('per-channel
+    Linear dx = outFeatures', 'Grouped backward & update'); no bias enters
+    the dx (DOC_GAPS[9] for the orientation).
+    """
+    l = np.asarray(l_codes, dtype=np.int64)
+    w = np.asarray(w_codes, dtype=np.int64)
+    if l.ndim != 2 or w.ndim != 2 or l.shape[1] != w.shape[0]:
+        raise ValueError("L must be [B, outF] and W [outF, inF]")
+    mac = (l @ w)[:, :, None]
+    return RawForward(mac=mac, raw=mac, s_raw=float(s_l) * float(s_w), seed=None)
+
+
+def linear_sym_weight_grad_raw(
+    l_codes: np.ndarray, s_l: float, x_codes: np.ndarray, s_x: float
+) -> RawForward:
+    """weightGrad = L^T @ x, raw at s_loss * s_in, -> [1, outF, inF].
+
+    arithmetic-sym, 'weightGrad (SYM) = strategy A: integer gather into the
+    funnel's Phase-2 intermediate at scale s_loss*s_in, then the
+    OUT_ACC_DYNAMIC_RESCALE epilogue' (Conv section; 'Two accumulation
+    schemes': Linear SYM weight grads are Strategy A too). The reduction is
+    over the batch. Returned with a leading batch axis of 1 so the shared
+    resolvers see [B=1, C=outF, L=inF].
+    """
+    l = np.asarray(l_codes, dtype=np.int64)
+    x = np.asarray(x_codes, dtype=np.int64)
+    if l.ndim != 2 or x.ndim != 2 or l.shape[0] != x.shape[0]:
+        raise ValueError("L must be [B, outF] and x [B, inF]")
+    mac = (l.T @ x)[None, :, :]
+    return RawForward(mac=mac, raw=mac, s_raw=float(s_l) * float(s_x), seed=None)
+
+
+def linear_sym_bias_grad_raw(l_codes: np.ndarray) -> np.ndarray:
+    """biasGrad raw value sum over the batch, int64 [outF], at s_loss.
+
+    arithmetic-sym, 'biasGrad (SYM) = an int32 (batch x outputLength)
+    accumulator per output channel' (Conv section; Linear is the batch-only
+    case), 'a value-sum' ('Realized framework-wide int12 contract').
+    """
+    return np.asarray(l_codes, dtype=np.int64).sum(axis=0)
+
+
+# --------------------------------------------------------------------------- #
+# int32 accumulator hazard (F9)                                               #
+# --------------------------------------------------------------------------- #
+
+INT32_MAX = 2**31 - 1
+INT32_MIN = -(2**31)
+
+
+def wrap_int32(v: np.ndarray) -> np.ndarray:
+    """Two's-complement wrap of int64 values into int32 (what a wrapping
+    accumulator ends up holding; signed overflow is UB in C, so this is the
+    prediction for a wrapping build, not a documented behaviour)."""
+    v = np.asarray(v, dtype=np.int64)
+    return ((v + 2**31) % 2**32) - 2**31
+
+
+@dataclass
+class OverflowReport:
+    fits: bool  # every exact raw accumulator value in [INT32_MIN, INT32_MAX]
+    max_abs_raw: int
+    n_wrap_full_scale: int  # first reduction length at which sign-aligned full-scale
+    # products (qMax_a * qMax_b each) plus the largest |seed| exceed INT32_MAX
+    reduction: int
+
+    def to_json(self) -> dict:
+        return {
+            "fits": self.fits,
+            "max_abs_raw": self.max_abs_raw,
+            "n_wrap_full_scale": self.n_wrap_full_scale,
+            "reduction": self.reduction,
+        }
+
+
+def overflow_report(raw: np.ndarray, reduction: int, bits_a: int, bits_b: int, seed_abs_max: int = 0) -> OverflowReport:
+    """Does the exact integer accumulator fit int32, and where would full-scale
+    operands first wrap?
+
+    arithmetic-sym, 'Operand bit-width': 'an int32 accumulator (~2^31) holds
+    only ~2^(33-2b) worst-case product terms', 'int12 is sound only for
+    reductions N <= 511'. The doc bounds each product by 2^(2b-2); the exact
+    bound for codes on the HALF_AWAY grid is qMax_a * qMax_b (DOC_GAPS[12]),
+    so n_wrap = floor((INT32_MAX - |seed|) / (qMax_a * qMax_b)) + 1.
+    """
+    r = np.asarray(raw, dtype=np.int64)
+    max_abs = int(np.abs(r).max()) if r.size else 0
+    product = qmax(bits_a) * qmax(bits_b)
+    n_wrap = (INT32_MAX - int(seed_abs_max)) // product + 1
+    return OverflowReport(
+        fits=bool(max_abs <= INT32_MAX), max_abs_raw=max_abs, n_wrap_full_scale=n_wrap, reduction=reduction
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Fixed-scale requant (S11)                                                   #
+# --------------------------------------------------------------------------- #
+
+
+def requant_fixed(codes: np.ndarray, s_in: float, s_target: float, q_max_bits: int) -> Restored:
+    """SYM_INT32 -> SYM_INT32 requant into a PRESET target scale.
+
+    arithmetic-sym decision register '#192 D1': 'a fixed-scale one (requant
+    into a preset target scale)'. codes = round_half_away(m * s_in /
+    s_target), clamped to the target grid (clamping is an assumption,
+    DOC_GAPS[13]; the lower bound is DOC_GAPS[0]). The scale is the given
+    target, unchanged.
+    """
+    values = np.asarray(codes, dtype=np.float64) * float(s_in)
+    pre = values / float(s_target)
+    out = np.clip(round_half_away(pre), qmin(q_max_bits), qmax(q_max_bits))
+    return Restored(codes=out, scale=float(s_target), pre=pre)

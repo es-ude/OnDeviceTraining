@@ -1,0 +1,34 @@
+{
+  "name": "s1p_fwd_staging_rows_n64_b4",
+  "description": "S1 probe: B=4 inF=64 outF=6, only input row 0 carries a +-2047 code. Leg A stages per TENSOR (DOC_GAPS[10]); a per-sample staging in C would show as a code MISMATCH -- a doc finding either way.",
+  "op": "linear",
+  "direction": "forward",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "SYM_INT32",
+    "rounding": "HALF_AWAY"
+  },
+  "outputBits": 12,
+  "fixture": {
+    "type": "linear_grid",
+    "seed": 777,
+    "batch": 4,
+    "inF": 64,
+    "outF": 6,
+    "rowAbsmax": "first_only",
+    "inputStorage": "FLOAT32",
+    "weightStorage": "SYM",
+    "weightBits": 8,
+    "bias": true
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED"
+  }
+}

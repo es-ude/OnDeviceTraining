@@ -11,16 +11,31 @@
  * real libraries, and writes every produced tensor back as CODES + scale
  * (never dequantized floats: the comparison needs the scale separately).
  *
- * Two tiers today, both Conv1d SYM_INT32 forward:
- *   kernel  -- the raw arithmetic entry (conv1dKernelSymInt32): accumulator-
- *              range int32 at scale s_in * s_w, which the funnel never exposes
- *   layer   -- layerFunctions[CONV1D].forward through the executeOp funnel
- *              with the declared forwardMath and the produced outputQ wire
+ * Ops and tiers (opTable[] at the bottom):
+ *   conv1d  kernel/forward   conv1dKernelSymInt32: accumulator-range int32 at
+ *                            scale s_in * s_w, which the funnel never exposes
+ *           layer/forward    layerFunctions[CONV1D].forward through executeOp
+ *   linear  kernel/forward   linearForwardSymInt32 (the funnel's kernel adapter
+ *                            target: transpose dance + matmulSymInt32TensorsWithBias)
+ *           kernel/dx        linearCalcPropLossSymInt32 (matmulSymInt32Tensors)
+ *           kernel/weightGrad linearCalcWeightGradsSymInt32 (+ the raw bias-grad
+ *                            value sum linearCalcBiasGradsSymInt32 when a bias
+ *                            operand is given)
+ *           layer/forward    layerFunctions[LINEAR].forward: FLOAT32 or SYM_INT32
+ *                            input, packed SYM or SYM_INT32 weight/bias
+ *           layer/dx, layer/weightGrad  one layerFunctions[LINEAR].backward
+ *                            emitting propLoss + weightGrad (+ biasGrad); the
+ *                            grads are stored FLOAT32 (the production default)
+ *   convert convert/encode           executeConvert FLOAT32 -> SYM_INT32
+ *           convert/requant_dynamic  executeConvert SYM_INT32 -> SYM_INT32 (the
+ *                                    conversionMatrix diagonal, fresh scale)
+ *           convert/requant_fixed    requantSymInt32TensorToScale into the
+ *                                    pre-set spec.output.scale
  *
  * The structure (operand loader by dtype, op table keyed on op/tier/direction,
- * output registry) is meant to grow: later steps add Linear (all directions),
- * convert/encode/requant, and BFP modes as new table rows, loader arms and
- * quantization builders -- not by rewriting this file.
+ * output registry) is meant to grow: later steps add the acc, optim, sr and
+ * BFP modes as new table rows, loader arms and quantization builders -- not
+ * by rewriting this file.
  *
  * Spec errors fail fast on stderr with the key path and exit 2. Library-side
  * fail-fasts (PRINT_ERROR + exit(1)) are visible only when the build defines
@@ -46,6 +61,7 @@
 #include "ExecuteOp.h"
 #include "Kernel.h"
 #include "Layer.h"
+#include "Linear.h"
 #include "NPYLoaderApi.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
@@ -496,13 +512,28 @@ static void joinPath(char *out, size_t outSize, const char *dir, const char *fil
     }
 }
 
+/* Codes must sit on the declared grid: |code| <= qMax = 2^(bits-1)-1. */
+static void checkCodeRange(const int32_t *codes, size_t n, size_t bits, const char *path) {
+    const int32_t qMax = (int32_t)((1u << (bits - 1)) - 1u);
+    for (size_t i = 0; i < n; i++) {
+        if (codes[i] < -qMax || codes[i] > qMax) {
+            failf("spec: %s: code %ld at flat index %zu is outside [-%ld, %ld] (%zu bits)", path,
+                  (long)codes[i], i, (long)qMax, (long)qMax, bits);
+        }
+    }
+}
+
 /* Loads operand `name` of spec.operands:
  *   {"file": "x.npy", "dtype": "SYM_INT32", "scale": "0x1p-9",
  *    "qMaxBits": 12, "rounding": "HALF_AWAY"}
  * SYM_INT32: the .npy holds int32 CODES; the tensor is rebuilt with a
  * SYM_INT32 quantization carrying the given scale/width/rounding (same
- * int32 payload layout, copied). FLOAT32: the .npy holds float32 values.
- * Returns NULL when the operand is absent and `required` is false. */
+ * int32 payload layout, copied). SYM ("qBits" instead of "qMaxBits"): the
+ * .npy holds int32 CODES that are bit-packed into a per-tensor sub-byte SYM
+ * tensor through repackSymInt32ToSymNoRescale, which carries the given scale
+ * verbatim (the FLOAT32 -> SYM pack would re-derive it). FLOAT32: the .npy
+ * holds float32 values. Returns NULL when the operand is absent and
+ * `required` is false. */
 static tensor_t *loadOperand(const jsonNode_t *operands, const char *name, const char *inDir,
                              bool required) {
     const jsonNode_t *o = jsonMember(operands, name);
@@ -550,18 +581,37 @@ static tensor_t *loadOperand(const jsonNode_t *operands, const char *name, const
         size_t n = calcNumberOfElementsByTensor(loaded);
         memcpy(t->data, loaded->data, calcNumberOfBytesForData(t->quantization, n));
         freeTensor(loaded);
-        /* Codes must sit on the declared grid: |code| <= qMax = 2^(bits-1)-1. */
-        const int32_t qMax = (int32_t)((1u << (bits - 1)) - 1u);
-        const int32_t *codes = (const int32_t *)t->data;
-        for (size_t i = 0; i < n; i++) {
-            if (codes[i] < -qMax || codes[i] > qMax) {
-                failf("spec: %s: code %ld at flat index %zu is outside [-%ld, %ld] (qMaxBits=%zu)",
-                      path, (long)codes[i], i, (long)qMax, (long)qMax, bits);
-            }
-        }
+        checkCodeRange((const int32_t *)t->data, n, bits, path);
         return t;
     }
-    failf("spec: %s.dtype \"%s\" is not supported in this step (FLOAT32 | SYM_INT32)", path, dtype);
+    if (strcmp(dtype, "SYM") == 0) {
+        if (loaded->quantization->type != INT32) {
+            failf("%s: %s declares SYM but the .npy is not int32 (codes expected)", path, file);
+        }
+        size_t bits = jsonSizeOr(o, "qBits", 8, path);
+        if (bits < 2 || bits > 16) {
+            failf("spec: %s.qBits must be in [2, 16]", path);
+        }
+        roundingMode_t rm = parseRounding(jsonStringOr(o, "rounding", "HALF_AWAY", path), path);
+        float scale = jsonRequireFloat32Hex(o, "scale", path);
+        if (!(scale > 0.0f)) {
+            failf("spec: %s.scale must be > 0", path);
+        }
+        size_t n = calcNumberOfElementsByTensor(loaded);
+        checkCodeRange((const int32_t *)loaded->data, n, bits, path);
+        tensor_t *staged = makeTensor(loaded->shape->numberOfDimensions, loaded->shape->dimensions,
+                                      quantizationInitSymInt32WithBits(rm, (uint8_t)bits));
+        ((symInt32QConfig_t *)staged->quantization->qConfig)->scale = scale;
+        memcpy(staged->data, loaded->data, n * sizeof(int32_t));
+        tensor_t *packed = makeTensor(loaded->shape->numberOfDimensions, loaded->shape->dimensions,
+                                      quantizationInitSym((uint8_t)bits, rm));
+        repackSymInt32ToSymNoRescale(staged, packed);
+        freeTensor(staged);
+        freeTensor(loaded);
+        return packed;
+    }
+    failf("spec: %s.dtype \"%s\" is not supported in this step (FLOAT32 | SYM_INT32 | SYM)", path,
+          dtype);
 }
 
 /* The spec vocabulary for dtypes (quantTypeToString spells SYM_INT32 as
@@ -860,6 +910,325 @@ static void runConv1dLayerForward(const runCtx_t *ctx) {
     freeQuantization(outputQ);
 }
 
+/* ------------------------------------------------------------------------- */
+/* Linear                                                                    */
+/* ------------------------------------------------------------------------- */
+
+static void requireDtype2(const tensor_t *t, qtype_t a, qtype_t b, const char *what) {
+    if (t->quantization->type != a && t->quantization->type != b) {
+        failf("%s must be stored %s or %s for this op/tier (got %s)", what, dtypeName(a),
+              dtypeName(b), dtypeName(t->quantization->type));
+    }
+}
+
+/* The checks both Linear tiers run before touching a library entry: ranks
+ * (input [B, inF], weight [outF, inF], bias [outF], loss [B, outF]), the
+ * shared dims, and the storage dtypes each tier accepts. The kernel entries
+ * take SYM_INT32 only; the layer tier stages a FLOAT32 input and unpacks
+ * packed SYM weights/bias in the funnel prologue. The loss is the int12 dx
+ * wire of the layer above and arrives SYM_INT32 on both tiers. Code range
+ * is checked at load (loadOperand). */
+static void validateLinearOperands(const tensor_t *input, const tensor_t *weight,
+                                   const tensor_t *bias, const tensor_t *loss, bool kernelTier) {
+    requireRank(input, 2, "spec.operands.input");
+    requireRank(weight, 2, "spec.operands.weight");
+    if (kernelTier) {
+        requireDtype(input, SYM_INT32, "spec.operands.input");
+        requireDtype(weight, SYM_INT32, "spec.operands.weight");
+    } else {
+        requireDtype2(input, FLOAT32, SYM_INT32, "spec.operands.input");
+        requireDtype2(weight, SYM, SYM_INT32, "spec.operands.weight");
+    }
+    const size_t batch = input->shape->dimensions[0];
+    const size_t inF = input->shape->dimensions[1];
+    const size_t outF = weight->shape->dimensions[0];
+    if (weight->shape->dimensions[1] != inF) {
+        failf("spec.operands.weight dim 1 (%zu) != spec.operands.input dim 1 (inF=%zu)",
+              weight->shape->dimensions[1], inF);
+    }
+    if (bias != NULL) {
+        requireRank(bias, 1, "spec.operands.bias");
+        if (kernelTier) {
+            requireDtype(bias, SYM_INT32, "spec.operands.bias");
+        } else {
+            requireDtype2(bias, SYM, SYM_INT32, "spec.operands.bias");
+        }
+        if (bias->shape->dimensions[0] != outF) {
+            failf("spec.operands.bias length (%zu) != spec.operands.weight dim 0 (outF=%zu)",
+                  bias->shape->dimensions[0], outF);
+        }
+    }
+    if (loss != NULL) {
+        requireRank(loss, 2, "spec.operands.loss");
+        requireDtype(loss, SYM_INT32, "spec.operands.loss");
+        if (loss->shape->dimensions[0] != batch || loss->shape->dimensions[1] != outF) {
+            failf("spec.operands.loss must be [B=%zu, outF=%zu], got [%zu, %zu]", batch, outF,
+                  loss->shape->dimensions[0], loss->shape->dimensions[1]);
+        }
+    }
+}
+
+typedef struct linearOperands {
+    tensor_t *input;
+    tensor_t *weight;
+    tensor_t *bias; /* NULL without a bias operand */
+    tensor_t *loss; /* NULL unless requested */
+} linearOperands_t;
+
+static linearOperands_t loadLinearOperands(const runCtx_t *ctx, bool withLoss, bool kernelTier) {
+    const jsonNode_t *operands = jsonRequireObject(ctx->spec, "operands", "spec");
+    linearOperands_t ops;
+    ops.input = loadOperand(operands, "input", ctx->inDir, true);
+    ops.weight = loadOperand(operands, "weight", ctx->inDir, true);
+    ops.bias = loadOperand(operands, "bias", ctx->inDir, false);
+    ops.loss = withLoss ? loadOperand(operands, "loss", ctx->inDir, true) : NULL;
+    validateLinearOperands(ops.input, ops.weight, ops.bias, ops.loss, kernelTier);
+    return ops;
+}
+
+static void freeLinearOperands(linearOperands_t *ops) {
+    freeTensor(ops->input);
+    freeTensor(ops->weight);
+    if (ops->bias != NULL) {
+        freeTensor(ops->bias);
+    }
+    if (ops->loss != NULL) {
+        freeTensor(ops->loss);
+    }
+}
+
+/* A raw SYM_INT32 wire for a kernel-tier output: the kernel overwrites the
+ * scale; width/rounding are carried for the record only. */
+static tensor_t *makeRawWire(size_t ndim, const size_t *dims, roundingMode_t rm) {
+    return makeTensor(ndim, dims, quantizationInitSymInt32WithBits(rm, ODT_SYM_OPERAND_QMAXBITS));
+}
+
+static arithmetic_t requireSymArith(const runCtx_t *ctx, const char *what) {
+    arithmetic_t arith = parseArithmetic(ctx->spec);
+    if (arith.type != ARITH_SYM_INT32) {
+        failf("%s: only arith.type SYM_INT32 is implemented in this step", what);
+    }
+    return arith;
+}
+
+/* linear / kernel / forward: linearForwardSymInt32 -- the entry the funnel's
+ * kernel adapter calls (transpose dance around matmulSymInt32TensorsWithBias).
+ * Calling it rather than matmul directly keeps the weight orientation under
+ * test: Leg A's y = x W^T is the documented contract, not the driver's. Raw
+ * accumulator-range int32 at s_in * s_w, the bias refolded per column. */
+static void runLinearKernelForward(const runCtx_t *ctx) {
+    arithmetic_t arith = requireSymArith(ctx, "linear/kernel/forward");
+    linearOperands_t ops = loadLinearOperands(ctx, false, true);
+    size_t outDims[2] = {ops.input->shape->dimensions[0], ops.weight->shape->dimensions[0]};
+    tensor_t *out = makeRawWire(2, outDims, arith.roundingMode);
+    linearForwardSymInt32(ops.weight, ops.bias, ops.input, out, NULL);
+    addOutput("output", out);
+    freeLinearOperands(&ops);
+}
+
+/* linear / kernel / dx: linearCalcPropLossSymInt32 = matmulSymInt32Tensors
+ * (loss [B, outF], W [outF, inF]) -> raw [B, inF] at s_loss * s_w. */
+static void runLinearKernelDx(const runCtx_t *ctx) {
+    arithmetic_t arith = requireSymArith(ctx, "linear/kernel/dx");
+    linearOperands_t ops = loadLinearOperands(ctx, true, true);
+    size_t outDims[2] = {ops.input->shape->dimensions[0], ops.input->shape->dimensions[1]};
+    tensor_t *out = makeRawWire(2, outDims, arith.roundingMode);
+    linearCalcPropLossSymInt32(ops.weight, ops.loss, out);
+    addOutput("propLoss", out);
+    freeLinearOperands(&ops);
+}
+
+/* linear / kernel / weightGrad: linearCalcWeightGradsSymInt32 = loss^T @ x
+ * -> raw [outF, inF] at s_loss * s_in; with a bias operand also the raw
+ * bias-grad value sum over the batch (linearCalcBiasGradsSymInt32, at
+ * s_loss). Both are what the funnel's backward kernel adapters emit before
+ * the ACC epilogue. */
+static void runLinearKernelWeightGrad(const runCtx_t *ctx) {
+    arithmetic_t arith = requireSymArith(ctx, "linear/kernel/weightGrad");
+    linearOperands_t ops = loadLinearOperands(ctx, true, true);
+    size_t wgDims[2] = {ops.weight->shape->dimensions[0], ops.weight->shape->dimensions[1]};
+    tensor_t *wg = makeRawWire(2, wgDims, arith.roundingMode);
+    linearCalcWeightGradsSymInt32(ops.loss, ops.input, wg);
+    addOutput("weightGrad", wg);
+    if (ops.bias != NULL) {
+        size_t bgDims[1] = {ops.weight->shape->dimensions[0]};
+        tensor_t *bg = makeRawWire(1, bgDims, arith.roundingMode);
+        linearCalcBiasGradsSymInt32(bg, ops.loss);
+        addOutput("biasGrad", bg);
+    }
+    freeLinearOperands(&ops);
+}
+
+/* Hand-wired Linear layer (test/unit/support/include/BorrowedLayer.h pattern):
+ * borrowed parameter_t's, every math slot = spec.arith, the produced wires =
+ * the given storage configs, the packed-grad D1 accumulate modes at
+ * linearInitConfig's defaults (dynamic-rescale weights, fixed-scale bias --
+ * on FLOAT32 grads both are the exact float add). ownsQuantizations=false:
+ * the caller frees the configs. */
+static void wireLinearLayer(layer_t *layer, layerConfig_t *layerCfg, linearConfig_t *cfg,
+                            parameter_t *weights, parameter_t *bias, arithmetic_t arith,
+                            quantization_t *outputQ, quantization_t *propLossQ) {
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->weights = weights;
+    cfg->bias = bias;
+    cfg->forwardMath = arith;
+    cfg->weightGradMath = arith;
+    cfg->biasGradMath = arith;
+    cfg->propLossMath = arith;
+    cfg->outputQ = outputQ;
+    cfg->propLossQ = propLossQ;
+    cfg->weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
+    cfg->biasGradAccMode = OUT_ACC_FIXED_SCALE;
+    cfg->ownsQuantizations = false;
+    cfg->frozen = false;
+    layerCfg->linear = cfg;
+    initLayer(layer, LINEAR, layerCfg);
+}
+
+/* linear / layer / forward: layerFunctions[LINEAR].forward through the
+ * funnel. A FLOAT32 input is staged by the prologue (the harness's Leg A
+ * assumes the documented encode at the int12 operand default); packed SYM
+ * weights/bias are unpacked there. The output carries spec.output (width
+ * from the target, rounding op-owned per #282, as for Conv1d). */
+static void runLinearLayerForward(const runCtx_t *ctx) {
+    arithmetic_t arith = parseArithmetic(ctx->spec);
+    quantization_t *outputQ =
+        makeQuantization(jsonRequireObject(ctx->spec, "output", "spec"), "spec.output");
+    linearOperands_t ops = loadLinearOperands(ctx, false, false);
+
+    parameter_t *weights = parameterInit(ops.weight, gradInitFloat(ops.weight, NULL));
+    parameter_t *bias =
+        ops.bias != NULL ? parameterInit(ops.bias, gradInitFloat(ops.bias, NULL)) : NULL;
+    linearConfig_t cfg;
+    layerConfig_t layerCfg;
+    layer_t layer;
+    wireLinearLayer(&layer, &layerCfg, &cfg, weights, bias, arith, outputQ, outputQ);
+
+    size_t outDims[2];
+    size_t outOrder[2];
+    shape_t outShape = {
+        .numberOfDimensions = 2, .dimensions = outDims, .orderOfDimensions = outOrder};
+    layerFunctions[LINEAR].calcOutputShape(&layer, ops.input->shape, &outShape);
+    tensor_t *out = makeTensor(2, outDims, getQLike(outputQ));
+
+    layerFunctions[LINEAR].forward(&layer, ops.input, out, NULL);
+    addOutput("output", out);
+
+    freeTensor(ops.input);
+    freeParameter(weights); /* frees ops.weight and its grad */
+    if (bias != NULL) {
+        freeParameter(bias);
+    }
+    freeQuantization(outputQ);
+}
+
+/* linear / layer / {dx, weightGrad}: ONE layerFunctions[LINEAR].backward with
+ * every backward math slot = spec.arith, emitting propLoss (OUT_WRITE onto
+ * spec.output, the dx wire), weightGrad and biasGrad (the ACC epilogues into
+ * FLOAT32 grads -- spec.gradStorage, FLOAT32 only in this step, the
+ * production default). The Python side evaluates the output its cell's
+ * direction names; the others ride along in result.json. */
+static void runLinearLayerBackward(const runCtx_t *ctx) {
+    arithmetic_t arith = parseArithmetic(ctx->spec);
+    quantization_t *propLossQ =
+        makeQuantization(jsonRequireObject(ctx->spec, "output", "spec"), "spec.output");
+    const char *gradStorage = jsonStringOr(ctx->spec, "gradStorage", "FLOAT32", "spec");
+    if (strcmp(gradStorage, "FLOAT32") != 0) {
+        failf("spec.gradStorage \"%s\": only FLOAT32 grad storage is implemented in this step",
+              gradStorage);
+    }
+    linearOperands_t ops = loadLinearOperands(ctx, true, false);
+
+    parameter_t *weights = parameterInit(ops.weight, gradInitFloat(ops.weight, NULL));
+    parameter_t *bias =
+        ops.bias != NULL ? parameterInit(ops.bias, gradInitFloat(ops.bias, NULL)) : NULL;
+    linearConfig_t cfg;
+    layerConfig_t layerCfg;
+    layer_t layer;
+    wireLinearLayer(&layer, &layerCfg, &cfg, weights, bias, arith, propLossQ, propLossQ);
+
+    size_t dxDims[2] = {ops.input->shape->dimensions[0], ops.input->shape->dimensions[1]};
+    tensor_t *propLoss = makeTensor(2, dxDims, getQLike(propLossQ));
+
+    layerFunctions[LINEAR].backward(&layer, ops.input, ops.loss, propLoss, NULL);
+    addOutput("propLoss", propLoss);
+    /* The grads move to the output registry (which frees them); detach them
+     * from the parameters so freeParameter releases only the params. */
+    addOutput("weightGrad", weights->grad);
+    weights->grad = NULL;
+    if (bias != NULL) {
+        addOutput("biasGrad", bias->grad);
+        bias->grad = NULL;
+    }
+
+    freeTensor(ops.input);
+    freeTensor(ops.loss);
+    freeParameter(weights);
+    if (bias != NULL) {
+        freeParameter(bias);
+    }
+    freeQuantization(propLossQ);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Convert tier: one conversionMatrix cell / requant primitive              */
+/* ------------------------------------------------------------------------- */
+
+static tensor_t *loadConvertInput(const runCtx_t *ctx, qtype_t want) {
+    const jsonNode_t *operands = jsonRequireObject(ctx->spec, "operands", "spec");
+    tensor_t *input = loadOperand(operands, "input", ctx->inDir, true);
+    requireDtype(input, want, "spec.operands.input");
+    return input;
+}
+
+static tensor_t *makeConvertTarget(const runCtx_t *ctx, const tensor_t *input) {
+    quantization_t *targetQ =
+        makeQuantization(jsonRequireObject(ctx->spec, "output", "spec"), "spec.output");
+    if (targetQ->type != SYM_INT32) {
+        failf("spec.output.dtype: the convert tier targets SYM_INT32 in this step");
+    }
+    return makeTensor(input->shape->numberOfDimensions, input->shape->dimensions, targetQ);
+}
+
+/* convert / convert / encode: executeConvert FLOAT32 -> SYM_INT32, i.e. the
+ * conversionMatrix[FLOAT32][SYM_INT32] encode; a bare conversion rounds by
+ * the TARGET's storage roundingMode (#282), spec.output.rounding. */
+static void runConvertEncode(const runCtx_t *ctx) {
+    tensor_t *input = loadConvertInput(ctx, FLOAT32);
+    tensor_t *out = makeConvertTarget(ctx, input);
+    executeConvert(input, out, NULL);
+    addOutput("output", out);
+    freeTensor(input);
+}
+
+/* convert / convert / requant_dynamic: executeConvert SYM_INT32 -> SYM_INT32
+ * routes through the conversionMatrix diagonal (#192 D1 dynamic requant: fresh
+ * absmax scale at the target's qMaxBits) -- the OUT_WRITE width restore
+ * every SYM producer runs, here in isolation and at a chosen width pair. */
+static void runConvertRequantDynamic(const runCtx_t *ctx) {
+    tensor_t *input = loadConvertInput(ctx, SYM_INT32);
+    tensor_t *out = makeConvertTarget(ctx, input);
+    executeConvert(input, out, NULL);
+    addOutput("output", out);
+    freeTensor(input);
+}
+
+/* convert / convert / requant_fixed: requantSymInt32TensorToScale into the
+ * pre-set spec.output.scale (#192 D1 fixed-scale requant; not a matrix cell). */
+static void runConvertRequantFixed(const runCtx_t *ctx) {
+    tensor_t *input = loadConvertInput(ctx, SYM_INT32);
+    tensor_t *out = makeConvertTarget(ctx, input);
+    float target = jsonRequireFloat32Hex(jsonRequireObject(ctx->spec, "output", "spec"), "scale",
+                                         "spec.output");
+    if (!(target > 0.0f)) {
+        failf("spec.output.scale must be > 0 for requant_fixed");
+    }
+    ((symInt32QConfig_t *)out->quantization->qConfig)->scale = target;
+    requantSymInt32TensorToScale(input, out, NULL);
+    addOutput("output", out);
+    freeTensor(input);
+}
+
 typedef struct opEntry {
     const char *op;
     const char *tier;
@@ -867,11 +1236,20 @@ typedef struct opEntry {
     opRunFn_t run;
 } opEntry_t;
 
-/* Later steps append rows here: linear/{kernel,layer}/{forward,dx,weightGrad,
- * biasGrad}, the convert, acc, optim and sr modes, and the BFP twins. */
+/* Later steps append rows here: the acc, optim and sr modes, SYM grad
+ * storage for the Linear backward, and the BFP twins. */
 static const opEntry_t opTable[] = {
     {"conv1d", "kernel", "forward", runConv1dKernelForward},
     {"conv1d", "layer", "forward", runConv1dLayerForward},
+    {"linear", "kernel", "forward", runLinearKernelForward},
+    {"linear", "kernel", "dx", runLinearKernelDx},
+    {"linear", "kernel", "weightGrad", runLinearKernelWeightGrad},
+    {"linear", "layer", "forward", runLinearLayerForward},
+    {"linear", "layer", "dx", runLinearLayerBackward},
+    {"linear", "layer", "weightGrad", runLinearLayerBackward},
+    {"convert", "convert", "encode", runConvertEncode},
+    {"convert", "convert", "requant_dynamic", runConvertRequantDynamic},
+    {"convert", "convert", "requant_fixed", runConvertRequantFixed},
 };
 
 /* ------------------------------------------------------------------------- */

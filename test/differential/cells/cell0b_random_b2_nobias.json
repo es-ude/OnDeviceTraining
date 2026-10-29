@@ -1,0 +1,18 @@
+{
+  "name": "cell0b_random_b2_nobias",
+  "description": "Cell 0 (b): seeded random codes, batch 2, no bias (kernel tier must be bit-exact: the only rounding point is the restore). B=2 Cin=2 Cout=3 L=12 K=3, VALID, HALF_AWAY.",
+  "op": "conv1d",
+  "direction": "forward",
+  "tiers": ["kernel", "layer"],
+  "arith": {"type": "SYM_INT32", "rounding": "HALF_AWAY"},
+  "geometry": {"kernelSize": 3, "stride": 1, "dilation": 1, "padding": "VALID", "groups": 1},
+  "operandBits": 12,
+  "outputBits": 12,
+  "fixture": {
+    "type": "random_codes",
+    "seed": 13,
+    "input_shape": [2, 2, 12],
+    "weight_shape": [3, 2, 3]
+  },
+  "expect": {"legA": ["EXACT", "TIE_ONLY"], "legB": "BOUNDED"}
+}

@@ -107,13 +107,19 @@ static bool isDigit(char c) {
     return c >= '0' && c <= '9';
 }
 
-/* Returns the start of the key's value; the caller parses the value. */
+/* Returns the start of the key's value; the caller parses the value. A second
+ * occurrence is rejected: numpy's literal_eval keeps the LAST duplicate, so a
+ * first-match read could disagree with numpy (e.g. fortran_order) silently. */
 static const char *findValue(const char *header, const char *key, const char *path) {
     const char *p = strstr(header, key);
     if (p == NULL) {
         NPY_HEADER_FAIL(path, "no %s key", key);
     }
-    p = skipSpaces(p + strlen(key));
+    p += strlen(key);
+    if (strstr(p, key) != NULL) {
+        NPY_HEADER_FAIL(path, "duplicate %s key", key);
+    }
+    p = skipSpaces(p);
     if (*p != ':') {
         NPY_HEADER_FAIL(path, "malformed header dict: no ':' after %s", key);
     }

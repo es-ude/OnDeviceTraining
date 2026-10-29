@@ -49,4 +49,5 @@ add_elastic_ai_unit_test(
 
 target_compile_definitions(UnitTestNPYLoaderApi PRIVATE
         NPY_FIXTURE_PATH="${CMAKE_CURRENT_BINARY_DIR}/fixture.npy"
+        NPY_NUMPY_WRITTEN_PATH="${CMAKE_CURRENT_SOURCE_DIR}/proxy_x.npy"
 )

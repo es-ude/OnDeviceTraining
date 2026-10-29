@@ -301,6 +301,44 @@ void testNpyRejectsTrailingBytes(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "shape needs", loadFlatUnderAlarm());
 }
 
+/* numpy parses the header with ast.literal_eval, where the last duplicate key
+ * wins; a first-match parse would read this file as C-order while numpy reads
+ * it as Fortran-order, i.e. silently transposed. */
+void testNpyRejectsDuplicateFortranOrderKey(void) {
+    writeDict("{'descr': '<f4', 'fortran_order': False, 'shape': (2, 3), 'fortran_order': True, }",
+              SIX_FLOATS, sizeof(SIX_FLOATS));
+    ASSERT_EXITS_WITH_OUTPUT(1, "duplicate 'fortran_order' key", loadUnderAlarm());
+    ASSERT_EXITS_WITH_OUTPUT(1, "duplicate 'fortran_order' key", loadFlatUnderAlarm());
+}
+
+void testNpyRejectsDuplicateDescrKey(void) {
+    writeDict("{'descr': '<f4', 'fortran_order': False, 'shape': (2, 3), 'descr': '<i4', }",
+              SIX_FLOATS, sizeof(SIX_FLOATS));
+    ASSERT_EXITS_WITH_OUTPUT(1, "duplicate 'descr' key", loadUnderAlarm());
+    ASSERT_EXITS_WITH_OUTPUT(1, "duplicate 'descr' key", loadFlatUnderAlarm());
+}
+
+void testNpyRejectsDuplicateShapeKey(void) {
+    writeDict("{'descr': '<f4', 'fortran_order': False, 'shape': (2, 3), 'shape': (3, 2), }",
+              SIX_FLOATS, sizeof(SIX_FLOATS));
+    ASSERT_EXITS_WITH_OUTPUT(1, "duplicate 'shape' key", loadUnderAlarm());
+    ASSERT_EXITS_WITH_OUTPUT(1, "duplicate 'shape' key", loadFlatUnderAlarm());
+}
+
+/* proxy_x.npy is written by np.save (space padding, trailing newline), so the
+ * duplicate-key check also runs on a real numpy header, not only crafted ones. */
+void testNpyLoadsNumpyWrittenHeader(void) {
+    tensor_t *flat = npyLoadFlat(NPY_NUMPY_WRITTEN_PATH);
+    size_t elements = calcNumberOfElementsByTensor(flat);
+    freeTensor(flat);
+    TEST_ASSERT_EQUAL_size_t(8, elements);
+
+    tensorArray_t *arr = npyLoad(NPY_NUMPY_WRITTEN_PATH);
+    size_t samples = arr->size;
+    freeTensorArray(arr);
+    TEST_ASSERT_EQUAL_size_t(4, samples);
+}
+
 void testNpyLoadFlatAcceptsScalar(void) {
     writeDict("{'descr': '<f4', 'fortran_order': False, 'shape': (), }", SIX_FLOATS, sizeof(float));
 
@@ -343,5 +381,9 @@ int main(void) {
 #endif
     RUN_TEST(testNpyRejectsTrailingBytes);
     RUN_TEST(testNpyLoadFlatAcceptsScalar);
+    RUN_TEST(testNpyRejectsDuplicateFortranOrderKey);
+    RUN_TEST(testNpyRejectsDuplicateDescrKey);
+    RUN_TEST(testNpyRejectsDuplicateShapeKey);
+    RUN_TEST(testNpyLoadsNumpyWrittenHeader);
     return UNITY_END();
 }

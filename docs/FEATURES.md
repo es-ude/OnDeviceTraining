@@ -542,7 +542,7 @@ checkpointing, limitations, literature).
   skipped, though the forward loss value is always computed.
 - **Data loading** — `.npy` (`<f4`/`<i4`) datasets, with a strictly validated header
   (format version 1-3, header length at most 10000 bytes, at most 32 dims, C order
-  only, checked size math, payload exactly the shape's size; `npyLoad` also stops on
+  only, each key once, checked size math, payload exactly the shape's size; `npyLoad` also stops on
   zero samples, #486) (plus a generic CSV row
   reader/writer helper, `src/csv/include/CSVHelper.h`, not wired as a `DataLoader` source);
   `DataLoader` with batch + keyed shuffle: `dataLoaderShuffle(loader, key)` sets

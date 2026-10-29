@@ -9,7 +9,8 @@
  * "terminated by signal". Install the callback INSIDE the death-test
  * statement (the forked child): the sanitizer runtime calls it before it
  * honours abort_on_error, and it _exit()s with ODT_ASAN_DEATH_EXIT -- distinct
- * from 1 (every named guard's exit code) and 0 (the statement returned), so a
+ * from 1 (every named guard's exit code), 0 (the statement returned) and 87
+ * (ODT_DEATH_REDIRECT_FAILED_EXIT, the child's stdio redirect failed), so a
  * test expecting a named exit that hits ASan instead reads
  * "Expected 1 Was 86". _exit discards buffered stdout; the report goes to
  * stderr, which the death-test macros silence anyway.

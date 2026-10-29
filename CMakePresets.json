@@ -69,11 +69,11 @@
     },
     {
       "name": "unit_test_ubsan",
-      "displayName": "Unit-Test-UBSan",
+      "displayName": "Unit-Test-UBSan (full)",
       "inherits": "unit_test_debug",
       "cacheVariables": {
-        "CMAKE_C_FLAGS": "-fsanitize=signed-integer-overflow,float-cast-overflow -fno-sanitize-recover=all -g -O1",
-        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=signed-integer-overflow,float-cast-overflow"
+        "CMAKE_C_FLAGS": "-fsanitize=undefined,float-cast-overflow -fno-sanitize-recover=all -g -O1",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=undefined,float-cast-overflow"
       }
     },
     {
@@ -254,12 +254,12 @@
       },
       "environment": {
         "ASAN_OPTIONS": "detect_leaks=0:abort_on_error=1:halt_on_error=1:strict_string_checks=1:check_initialization_order=1",
-        "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1"
+        "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1:abort_on_error=1"
       }
     },
     {
       "name": "unit_test_ubsan",
-      "displayName": "Unit Tests (UBSan overflow)",
+      "displayName": "Unit Tests (UBSan)",
       "configurePreset": "unit_test_ubsan",
       "output": {
         "outputJUnitFile": "unit-test-ubsan.junit",
@@ -271,7 +271,7 @@
         }
       },
       "environment": {
-        "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1"
+        "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1:abort_on_error=1"
       }
     }
   ]

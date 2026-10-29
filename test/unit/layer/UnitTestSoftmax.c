@@ -1171,10 +1171,11 @@ void unitTestSoftmaxForwardBfpCoarseNegativeBlock(void) {
  * whose absence is formal UB (0 << 32, C11 6.5.7p3). Masked shifts return
  * the correct 0 on real targets, so there is NO behavioral RED for the
  * zero clause on this preset -- the pin is behavioral-under-sanitizer (the
- * unit_test_asan preset's UBSan aborts on the unfixed kernel) and the gold
- * vector equality is the oracle: the saturated elements pack to 0 while the
- * zero-code elements KEEP their true mass exp(-x_max)/sum (nonzero codes,
- * script-asserted), which any corrupted alignment would move. */
+ * unit_test_asan and unit_test_ubsan presets both abort on the unfixed
+ * kernel) and the gold vector equality is the oracle: the saturated elements
+ * pack to 0 while the zero-code elements KEEP their true mass
+ * exp(-x_max)/sum (nonzero codes, script-asserted), which any corrupted
+ * alignment would move. */
 void unitTestSoftmaxForwardBfpCoarseSaturation(void) {
     tensor_t *in = buildSmBfpWireWithCodes(
         8, (uint8_t)kSmBfpXMantissaBits, (uint8_t)kSmBfpXExponentBits, (size_t)kSmBfpCsXNumGroups,

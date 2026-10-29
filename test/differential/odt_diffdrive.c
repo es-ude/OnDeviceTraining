@@ -550,6 +550,15 @@ static tensor_t *loadOperand(const jsonNode_t *operands, const char *name, const
         size_t n = calcNumberOfElementsByTensor(loaded);
         memcpy(t->data, loaded->data, calcNumberOfBytesForData(t->quantization, n));
         freeTensor(loaded);
+        /* Codes must sit on the declared grid: |code| <= qMax = 2^(bits-1)-1. */
+        const int32_t qMax = (int32_t)((1u << (bits - 1)) - 1u);
+        const int32_t *codes = (const int32_t *)t->data;
+        for (size_t i = 0; i < n; i++) {
+            if (codes[i] < -qMax || codes[i] > qMax) {
+                failf("spec: %s: code %ld at flat index %zu is outside [-%ld, %ld] (qMaxBits=%zu)",
+                      path, (long)codes[i], i, (long)qMax, (long)qMax, bits);
+            }
+        }
         return t;
     }
     failf("spec: %s.dtype \"%s\" is not supported in this step (FLOAT32 | SYM_INT32)", path, dtype);
@@ -708,9 +717,47 @@ static void parseConvGeometry(const jsonNode_t *spec, kernel_t *kernel, size_t *
     }
 }
 
-static void requireRank3(const tensor_t *t, const char *what) {
-    if (t->shape->numberOfDimensions != 3) {
-        failf("%s must be rank 3, got rank %zu", what, t->shape->numberOfDimensions);
+static void requireRank(const tensor_t *t, size_t rank, const char *what) {
+    if (t->shape->numberOfDimensions != rank) {
+        failf("%s must be rank %zu, got rank %zu", what, rank, t->shape->numberOfDimensions);
+    }
+}
+
+/* The checks both Conv1d tiers run before touching a library entry (the
+ * kernel does not validate geometry; a wrong spec would read out of bounds
+ * or produce a shape the Python side cannot interpret): dtypes, ranks,
+ * kernelSize vs weight dim 2, Cin == groups * weight dim 1, Cout % groups,
+ * bias [Cout]. Code range is checked at load (loadOperand). */
+static void validateConv1dOperands(const tensor_t *input, const tensor_t *weight,
+                                   const tensor_t *bias, const kernel_t *kernel, size_t groups) {
+    requireRank(input, 3, "spec.operands.input");
+    requireRank(weight, 3, "spec.operands.weight");
+    requireDtype(input, SYM_INT32, "spec.operands.input");
+    requireDtype(weight, SYM_INT32, "spec.operands.weight");
+    const size_t cIn = input->shape->dimensions[1];
+    const size_t cOut = weight->shape->dimensions[0];
+    const size_t cInPerGroup = weight->shape->dimensions[1];
+    if (kernel->size != weight->shape->dimensions[2]) {
+        failf("spec.geometry.kernelSize (%zu) != spec.operands.weight dim 2 (%zu)", kernel->size,
+              weight->shape->dimensions[2]);
+    }
+    if (cIn != groups * cInPerGroup) {
+        failf("spec.operands.input dim 1 (Cin=%zu) != spec.geometry.groups (%zu) * "
+              "spec.operands.weight dim 1 (%zu)",
+              cIn, groups, cInPerGroup);
+    }
+    if (cOut % groups != 0) {
+        failf("spec.operands.weight dim 0 (Cout=%zu) is not a multiple of spec.geometry.groups "
+              "(%zu)",
+              cOut, groups);
+    }
+    if (bias != NULL) {
+        requireRank(bias, 1, "spec.operands.bias");
+        requireDtype(bias, SYM_INT32, "spec.operands.bias");
+        if (bias->shape->dimensions[0] != cOut) {
+            failf("spec.operands.bias length (%zu) != spec.operands.weight dim 0 (Cout=%zu)",
+                  bias->shape->dimensions[0], cOut);
+        }
     }
 }
 
@@ -741,17 +788,7 @@ static void runConv1dKernelForward(const runCtx_t *ctx) {
     tensor_t *input = loadOperand(operands, "input", ctx->inDir, true);
     tensor_t *weight = loadOperand(operands, "weight", ctx->inDir, true);
     tensor_t *bias = loadOperand(operands, "bias", ctx->inDir, false);
-    requireRank3(input, "operands.input");
-    requireRank3(weight, "operands.weight");
-    requireDtype(input, SYM_INT32, "operands.input");
-    requireDtype(weight, SYM_INT32, "operands.weight");
-    if (bias != NULL) {
-        requireDtype(bias, SYM_INT32, "operands.bias");
-    }
-    if (kernel.size != weight->shape->dimensions[2]) {
-        failf("spec.geometry.kernelSize (%zu) != weight dim 2 (%zu)", kernel.size,
-              weight->shape->dimensions[2]);
-    }
+    validateConv1dOperands(input, weight, bias, &kernel, groups);
 
     windowGeometry1d_t geom = windowGeometry1dCalc(input->shape->dimensions[2], &kernel);
     size_t outDims[3] = {input->shape->dimensions[0], weight->shape->dimensions[0],
@@ -774,8 +811,10 @@ static void runConv1dKernelForward(const runCtx_t *ctx) {
 /* conv1d / layer / forward: layerFunctions[CONV1D].forward through the funnel.
  * Config hand-wired like test/unit/support/include/BorrowedLayer.h: borrowed
  * parameter_t's, forwardMath = spec.arith, outputQ = spec.output. The output
- * tensor carries the spec.output storage config (the OUT_WRITE width-restore
- * reads width and rounding from the TARGET tensor's qConfig). */
+ * tensor carries the spec.output storage config: the OUT_WRITE width-restore
+ * takes the wire WIDTH (qMaxBits) from that target qConfig, while its
+ * ROUNDING is operation-owned (docs/conventions/arithmetic-sym.md, #282):
+ * cfg.forwardMath.roundingMode, i.e. spec.arith.rounding, not the target's. */
 static void runConv1dLayerForward(const runCtx_t *ctx) {
     arithmetic_t arith = parseArithmetic(ctx->spec);
     kernel_t kernel;
@@ -788,8 +827,7 @@ static void runConv1dLayerForward(const runCtx_t *ctx) {
     tensor_t *input = loadOperand(operands, "input", ctx->inDir, true);
     tensor_t *weightTensor = loadOperand(operands, "weight", ctx->inDir, true);
     tensor_t *biasTensor = loadOperand(operands, "bias", ctx->inDir, false);
-    requireRank3(input, "operands.input");
-    requireRank3(weightTensor, "operands.weight");
+    validateConv1dOperands(input, weightTensor, biasTensor, &kernel, groups);
 
     parameter_t *weights = parameterInit(weightTensor, gradInitFloat(weightTensor, NULL));
     parameter_t *bias =

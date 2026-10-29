@@ -11,7 +11,10 @@ For each cell JSON and each of its tiers:
      random codes with random non-power-of-two scales);
   2. write them (.npy + spec.json) and run `odt_diffdrive`;
   3. Leg A (ref/sym_ref.py, docs-only) recomputes the codes + scale; the
-     census (ref/census.py) classifies every mismatch (tie or not);
+     bias seed is resolved per output channel by the seed policy
+     (ref/census.py::seed_policy) and the census classifies every remaining
+     mismatch -- exactly on the kernel tier, +-1 at restore ties on the
+     layer tier;
   4. Leg B (ref/exact_ref.py) computes the float64 exact result on the
      dequantized operands and checks the analytic bound;
   5. optionally cross-checks the layer-tier output against the existing
@@ -23,11 +26,11 @@ from __future__ import annotations
 
 import argparse
 import glob
-import itertools
 import json
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -37,9 +40,8 @@ REPO = HERE.parent.parent
 sys.path.insert(0, str(HERE))
 
 from ref import census, exact_ref, sym_ref  # noqa: E402
+from ref.census import SEED_REF, ChannelSeed  # noqa: E402
 from ref.sym_ref import ConvGeometry  # noqa: E402
-
-MAX_SEED_TIE_CHANNELS = 12  # 2^12 Leg A candidates at most per row
 
 
 # --------------------------------------------------------------------------- #
@@ -192,17 +194,27 @@ def run_driver(driver: Path, spec_path: Path, in_dir: Path, out_dir: Path) -> di
 
 
 # --------------------------------------------------------------------------- #
-# Leg A with bias-seed tie candidates                                        #
+# Leg A: raw wire, seed policy, per-channel resolution                       #
 # --------------------------------------------------------------------------- #
 
 
-def leg_a_candidates(fx: Fixture, geom: ConvGeometry, tier: str, out_bits: int, k: int) -> dict:
-    """Leg A result plus the alternatives a bias-seed float32 tie allows.
+@dataclass
+class LegAInputs:
+    raw: sym_ref.RawForward  # mac, s_raw, real-valued seed (or None)
+    policy: list[ChannelSeed] | None  # per output channel; None without bias
+    f32_seed: np.ndarray | None  # the float32 left-to-right reading (NaN = undefined)
 
-    The seed is rounded once per output channel in C; when its pre-rounding
-    value is within k ulp32 of a .5 boundary, C may legitimately have rounded
-    the other way, shifting that whole channel by one raw LSB. Candidates
-    enumerate those per-channel alternatives (base candidate first)."""
+    @property
+    def allowed(self) -> list[list[tuple[int, str]]]:
+        """Acceptable (seed, kind) pairs per output channel; a single
+        (0, "none") without a bias."""
+        c_out = self.raw.mac.shape[1]
+        if self.policy is None:
+            return [[(0, "none")] for _ in range(c_out)]
+        return [cs.allowed for cs in self.policy]
+
+
+def leg_a_inputs(fx: Fixture, geom: ConvGeometry, k: int) -> LegAInputs:
     raw = sym_ref.conv1d_sym_forward_raw(
         fx.codes["input"],
         fx.scales["input"],
@@ -212,81 +224,199 @@ def leg_a_candidates(fx: Fixture, geom: ConvGeometry, tier: str, out_bits: int, 
         fx.scales.get("bias"),
         geom,
     )
-    tie_channels: list[int] = []
-    alt_seed = None
+    policy = None
+    f32_seed = None
     if raw.seed is not None:
-        ties = census.tie_mask(raw.seed.pre, k)
-        alt_seed = census.alt_rounding(raw.seed.pre, raw.seed.seed)
-        tie_channels = [int(i) for i in np.flatnonzero(ties)]
-        if len(tie_channels) > MAX_SEED_TIE_CHANNELS:
-            raise RuntimeError(
-                f"{len(tie_channels)} bias-seed tie channels; narrow the fixture "
-                f"(cap {MAX_SEED_TIE_CHANNELS})"
-            )
-
-    candidates = []
-    for flips in itertools.product((False, True), repeat=len(tie_channels)):
-        seed = None if raw.seed is None else raw.seed.seed.copy()
-        flipped = [ch for ch, f in zip(tie_channels, flips) if f]
-        if seed is not None:
-            for ch in flipped:
-                seed[ch] = alt_seed[ch]
-        raw_codes = raw.mac if seed is None else raw.mac + seed.reshape(1, -1, 1)
-        if tier == "kernel":
-            cand = {
-                "codes": raw_codes,
-                "pre": raw_codes.astype(np.float64),  # integers: no restore ties
-                "scale": raw.s_raw,
-            }
-        else:
-            restored = sym_ref.restore_sym(raw_codes, raw.s_raw, out_bits)
-            cand = {"codes": restored.codes, "pre": restored.pre, "scale": restored.scale}
-        cand["seed_flips"] = flipped
-        cand["seed"] = seed
-        candidates.append(cand)
-    seed_f32 = None
-    if raw.seed is not None and tier == "kernel":  # the seed is observable only on the raw wire
-        seed_f32 = sym_ref.bias_seed_f32_literal(
+        f32_seed = sym_ref.bias_seed_f32_literal(
             fx.codes["bias"], fx.scales["bias"], fx.scales["input"], fx.scales["weight"]
         )
+        policy = census.seed_policy(raw.seed.pre, f32_seed, k)
+    return LegAInputs(raw=raw, policy=policy, f32_seed=f32_seed)
+
+
+def seed_summary(inp: LegAInputs, chosen: list[tuple[int, str]], extra: list[dict] | None = None) -> dict | None:
+    """Per-channel record of what the seed policy allowed and what was used,
+    plus the counts the report prints. ``extra`` adds per-channel fields
+    (kernel tier: residual class)."""
+    if inp.policy is None:
+        return None
+    channels = []
+    n_alt = n_f32 = n_f32_differs = 0
+    max_dev = 0
+    f32_agree = 0
+    regimes: dict[str, int] = {}
+    for c, cs in enumerate(inp.policy):
+        seed, kind = chosen[c]
+        dev = int(seed - cs.ref)
+        max_dev = max(max_dev, abs(dev))
+        regimes[cs.regime] = regimes.get(cs.regime, 0) + 1
+        if kind == census.SEED_ALT:
+            n_alt += 1
+        elif kind == census.SEED_F32:
+            n_f32 += 1
+            if seed != cs.ref:
+                n_f32_differs += 1
+        if cs.f32 is not None and cs.f32 == cs.ref:
+            f32_agree += 1
+        entry = {
+            "channel": c,
+            "pre": cs.pre,
+            "ref": cs.ref,
+            "alt": cs.alt,
+            "f32": cs.f32,
+            "regime": cs.regime,
+            "granted_lsb": cs.granted_lsb,
+            "used": int(seed),
+            "kind": kind,
+            "deviation_from_ref": dev,
+        }
+        if extra is not None:
+            entry.update(extra[c])
+        channels.append(entry)
     return {
-        "candidates": candidates,
-        "s_raw": raw.s_raw,
-        "tie_channels": tie_channels,
-        "seed_pre": None if raw.seed is None else raw.seed.pre.tolist(),
-        "seed_f32_literal": seed_f32,
+        "n_channels": len(channels),
+        "regimes": regimes,
+        "n_alt": n_alt,
+        "n_f32_gated": n_f32,
+        "n_f32_gated_differs_from_ref": n_f32_differs,
+        "max_deviation_lsb": max_dev,
+        "f32_agrees_with_ref": {"channels_agree": f32_agree, "channels": len(channels)},
+        "channels": channels,
     }
 
 
-def evaluate_leg_a(c_codes: np.ndarray, c_scale: float, leg_a: dict, k: int) -> dict:
-    best = None
-    for cand in leg_a["candidates"]:
-        if cand["codes"].shape != c_codes.shape:
-            raise RuntimeError(f"shape mismatch C {c_codes.shape} vs ref {cand['codes'].shape}")
-        res = census.census(c_codes, cand["codes"], cand["pre"], k)
-        non_tie = res.n_mismatch - res.n_tie
-        key = (non_tie, res.n_mismatch, len(cand["seed_flips"]))
-        if best is None or key < best[0]:
-            best = (key, cand, res)
-    _key, cand, res = best
+def deviates(inp: LegAInputs, chosen: list[tuple[int, str]]) -> bool:
+    """True when some channel's accepted seed is not the real-valued
+    rounding (an alt flip, or a float32-gated seed that differs)."""
+    if inp.policy is None:
+        return False
+    return any(seed != cs.ref for cs, (seed, _k) in zip(inp.policy, chosen))
+
+
+def resolve_leg_a_kernel(c_codes: np.ndarray, c_scale: float, inp: LegAInputs, k: int) -> dict:
+    """Kernel tier: raw int32 must match EXACTLY. The seed decouples per
+    channel (s_raw does not depend on it), so each channel's residual
+    C - mac is examined on its own: a constant residual that is an allowed
+    seed is the channel's seed; a constant residual that is not is a
+    seed-class mismatch; a non-constant residual is a MAC-class mismatch."""
+    mac = inp.raw.mac
+    if c_codes.shape != mac.shape:
+        raise RuntimeError(f"shape mismatch C {c_codes.shape} vs ref {mac.shape}")
+    allowed = inp.allowed
+    chosen: list[tuple[int, str]] = []
+    extra: list[dict] = []
+    classes: set[str] = set()
+    for c in range(mac.shape[1]):
+        resid = c_codes[:, c, :] - mac[:, c, :]
+        constant = resid.size == 0 or bool((resid == resid.flat[0]).all())
+        implied = int(resid.flat[0]) if resid.size else 0
+        match = next(((s, kind) for s, kind in allowed[c] if constant and s == implied), None)
+        if match is None:
+            match = min(allowed[c], key=lambda sk: int((resid != sk[0]).sum()))
+            if resid.size:
+                classes.add("seed" if constant else "mac")
+        chosen.append(match)
+        extra.append({"residual_constant": constant, "implied_seed": implied if constant else None})
+    seeds = np.array([s for s, _ in chosen], dtype=np.int64)
+    ref_codes = mac + seeds.reshape(1, -1, 1)
+    res = census.census(c_codes, ref_codes, None, k)  # exact mode
     taxonomy = res.taxonomy
-    if cand["seed_flips"] and taxonomy in ("EXACT", "TIE_ONLY"):
-        taxonomy = "TIE_ONLY"  # exact only up to a bias-seed tie
-    scale = census.scale_check(c_scale, cand["scale"])
-    # Informational (never gating): does the seed the best candidate needed
-    # equal the doc expression evaluated left-to-right in float32?
-    seed_f32 = None
-    if cand.get("seed") is not None and leg_a["seed_f32_literal"] is not None:
-        agree = cand["seed"] == leg_a["seed_f32_literal"]
-        seed_f32 = {"channels_agree": int(agree.sum()), "channels": int(agree.size)}
+    if taxonomy == "EXACT" and deviates(inp, chosen):
+        taxonomy = "TIE_ONLY"
     return {
         "taxonomy": taxonomy,
         "census": res.to_json(),
-        "seed_flips_used": cand["seed_flips"],
-        "seed_tie_channels": leg_a["tie_channels"],
-        "seed_f32_literal": seed_f32,
+        "mismatch_class": "+".join(sorted(classes)) if classes else "none",
+        "seed": seed_summary(inp, chosen, extra),
+        "scale": census.scale_check(c_scale, inp.raw.s_raw),
+        "ref_scale": inp.raw.s_raw,
+    }
+
+
+def resolve_leg_a_layer(
+    c_codes: np.ndarray, c_scale: float, inp: LegAInputs, out_bits: int, k: int
+) -> dict:
+    """Layer tier: the restore couples the channels only through the fresh
+    scale absmax(raw * s_raw) / qMax. Every assignment of allowed seeds has
+    an absmax that is some channel's maximum under one of its allowed seeds,
+    so the realizable absmax values are enumerated (at most 2 * Cout), the
+    observed C scale selects those within 2^-22 relative (none: scale
+    MISMATCH, the closest is still evaluated for the report), and under each
+    selected scale the channels are resolved independently -- linear in
+    Cout instead of 2^(tie channels)."""
+    mac = inp.raw.mac
+    s_raw = inp.raw.s_raw
+    if c_codes.shape != mac.shape:
+        raise RuntimeError(f"shape mismatch C {c_codes.shape} vs ref {mac.shape}")
+    q_max = sym_ref.qmax(out_bits)
+    q_min = sym_ref.qmin(out_bits)
+    c_out = mac.shape[1]
+    allowed = inp.allowed
+    chmax = [
+        [int(np.abs(mac[:, c, :] + s).max()) if mac[:, c, :].size else 0 for s, _ in allowed[c]]
+        for c in range(c_out)
+    ]
+    lower = max((min(row) for row in chmax), default=0)
+    cands = sorted({v for row in chmax for v in row if v >= lower}) or [0]
+
+    def scale_of(v: int) -> float:
+        return 1.0 if v == 0 else v * s_raw / q_max
+
+    rels = {v: abs(c_scale - scale_of(v)) / scale_of(v) for v in cands}
+    matching = [v for v in cands if rels[v] <= census.SCALE_REL_TOL]
+    evaluate = matching if matching else [min(cands, key=lambda v: rels[v])]
+
+    best = None
+    for v in evaluate:
+        scale = scale_of(v)
+        per_channel: list[dict[int, tuple]] = []
+        chosen_idx: list[int] = []
+        for c in range(c_out):
+            opts: dict[int, tuple] = {}
+            for j, (s, kind) in enumerate(allowed[c]):
+                if chmax[c][j] > v:
+                    continue  # would exceed the candidate absmax
+                pre = (mac[:, c, :] + s) * s_raw / scale
+                codes = np.clip(sym_ref.round_half_away(pre), q_min, q_max)
+                res = census.census(c_codes[:, c, :], codes, pre, k)
+                opts[j] = (
+                    res.n_mismatch - res.n_tie,
+                    res.n_mismatch,
+                    0 if chmax[c][j] == v else 1,  # prefer realizing the candidate
+                    0 if kind in (SEED_REF, "none") else 1,  # then the real-valued rounding
+                )
+            per_channel.append(opts)
+            chosen_idx.append(min(opts, key=lambda j: opts[j]))
+        if not any(chmax[c][chosen_idx[c]] == v for c in range(c_out)):
+            # The best per-channel choices do not reach this absmax: force the
+            # cheapest realizer so the evaluated assignment is a legitimate
+            # Leg A outcome (its own absmax IS v).
+            realizers = [(c, j) for c in range(c_out) for j in per_channel[c] if chmax[c][j] == v]
+            c_force, j_force = min(realizers, key=lambda cj: per_channel[cj[0]][cj[1]])
+            chosen_idx[c_force] = j_force
+        chosen = [allowed[c][chosen_idx[c]] for c in range(c_out)]
+        seeds = np.array([s for s, _ in chosen], dtype=np.int64)
+        restored = sym_ref.restore_sym(mac + seeds.reshape(1, -1, 1), s_raw, out_bits)
+        if abs(restored.scale - scale) > 1e-9 * scale:
+            raise AssertionError("candidate absmax not realized by the chosen seeds")
+        res = census.census(c_codes, restored.codes, restored.pre, k)
+        n_dev = sum(seed != cs.ref for cs, (seed, _k) in zip(inp.policy or [], chosen))
+        key = (res.n_mismatch - res.n_tie, res.n_mismatch, n_dev)
+        if best is None or key < best[0]:
+            best = (key, v, chosen, res, restored.scale)
+    _key, v_best, chosen, res, ref_scale = best
+    taxonomy = res.taxonomy
+    if taxonomy == "EXACT" and deviates(inp, chosen):
+        taxonomy = "TIE_ONLY"
+    scale = census.scale_check(c_scale, ref_scale)
+    scale["ok"] = bool(matching)
+    return {
+        "taxonomy": taxonomy,
+        "census": res.to_json(),
+        "seed": seed_summary(inp, chosen),
         "scale": scale,
-        "ref_scale": cand["scale"],
+        "ref_scale": ref_scale,
+        "scale_candidates": {"realizable": len(cands), "matching": len(matching), "used_absmax": v_best},
     }
 
 
@@ -296,7 +426,14 @@ def evaluate_leg_a(c_codes: np.ndarray, c_scale: float, leg_a: dict, k: int) -> 
 
 
 def evaluate_leg_b(
-    fx: Fixture, geom: ConvGeometry, tier: str, c_codes: np.ndarray, c_scale: float, s_raw: float
+    fx: Fixture,
+    geom: ConvGeometry,
+    tier: str,
+    c_codes: np.ndarray,
+    c_scale: float,
+    inp: LegAInputs,
+    out_bits: int,
+    k: int,
 ) -> dict:
     length = fx.codes["input"].shape[2]
     pad_left, pad_right = geom.pads(length)
@@ -315,13 +452,22 @@ def evaluate_leg_b(
     deq_c = exact_ref.dequant(c_codes, c_scale)
     err_max = float(np.max(np.abs(deq_c - exact))) if exact.size else 0.0
     y_absmax = float(np.max(np.abs(exact))) if exact.size else 0.0
+    seed_granted = census.seed_granted_lsb(inp.policy)
     bound = exact_ref.bound_conv1d_forward(
-        tier, c_scale if tier == "layer" else None, s_raw, fx.has_bias, y_absmax
+        tier,
+        c_scale if tier == "layer" else None,
+        inp.raw.s_raw,
+        seed_granted,
+        y_absmax,
+        sym_ref.qmax(out_bits),
+        k,
     )
     out = census.leg_b_check(err_max, bound)
     out["y_absmax"] = y_absmax
     out["s_out"] = c_scale if tier == "layer" else None
-    out["s_raw"] = s_raw
+    out["s_raw"] = inp.raw.s_raw
+    out["seed_granted_lsb"] = seed_granted
+    out["restore_slack_codes"] = exact_ref.restore_slack_codes(sym_ref.qmax(out_bits), k) if tier == "layer" else None
     return out
 
 
@@ -402,14 +548,20 @@ def run_row(cell: dict, tier: str, driver: Path, out_root: Path, k: int, gold_he
     name = cell["name"]
     row = {"cell": name, "tier": tier, "op": cell["op"], "direction": cell["direction"]}
     geom = ConvGeometry.from_spec(cell["geometry"])
+    out_bits = int(cell.get("outputBits", 12))
     try:
         fx = build_fixture(cell)
         work = out_root / "runs" / f"{name}__{tier}"
         spec_path = write_inputs(work / "in", fx, cell, tier)
         drv = run_driver(driver, spec_path, work / "in", work / "out")
-        leg_a = leg_a_candidates(fx, geom, tier, int(cell.get("outputBits", 12)), k)
-        a = evaluate_leg_a(drv["codes"], drv["scale"], leg_a, k)
-        b = evaluate_leg_b(fx, geom, tier, drv["codes"], drv["scale"], leg_a["s_raw"])
+        inp = leg_a_inputs(fx, geom, k)
+        if tier == "kernel":
+            a = resolve_leg_a_kernel(drv["codes"], drv["scale"], inp, k)
+        elif tier == "layer":
+            a = resolve_leg_a_layer(drv["codes"], drv["scale"], inp, out_bits, k)
+        else:
+            raise ValueError(f"unknown tier {tier!r}")
+        b = evaluate_leg_b(fx, geom, tier, drv["codes"], drv["scale"], inp, out_bits, k)
         verdict = census.combine(a["taxonomy"], a["scale"]["ok"], b["taxonomy"])
         expect = cell.get("expect", {})
         if expect:
@@ -443,25 +595,48 @@ def run_row(cell: dict, tier: str, driver: Path, out_root: Path, k: int, gold_he
 
 def fmt_row(r: dict) -> str:
     if r["verdict"] == "ERROR":
-        return f"| {r['cell']} | {r['tier']} | ERROR | | | | | | | | | | | {r['error'].splitlines()[0]} |"
+        return f"| {r['cell']} | {r['tier']} | ERROR | | | | | | | | | | | | {r['error'].splitlines()[0]} |"
     a, b = r["legA"], r["legB"]
     c = a["census"]
     gold = r.get("gold")
     gold_s = "-" if gold is None else gold["status"]
-    sf = a.get("seed_f32_literal")
-    sf_s = "-" if sf is None else f"{sf['channels_agree']}/{sf['channels']}"
+    seed = a.get("seed")
+    if seed is None:
+        seed_s, dev_s, f32_s = "-", "-", "-"
+    else:
+        n = seed["n_channels"]
+        n_ref = n - seed["n_alt"] - seed["n_f32_gated"]
+        seed_s = f"{n_ref}/{seed['n_alt']}/{seed['n_f32_gated']}"
+        dev_s = str(seed["max_deviation_lsb"])
+        ag = seed["f32_agrees_with_ref"]
+        f32_s = f"{ag['channels_agree']}/{ag['channels']}"
+    cls = a.get("mismatch_class", "-")
     return (
         f"| {r['cell']} | {r['tier']} | {a['taxonomy']} | {c['n_mismatch']}/{c['n_elements']} | "
-        f"{c['n_tie']} | {len(a['seed_flips_used'])}/{len(a['seed_tie_channels'])} | {sf_s} | "
+        f"{c['n_tie']} | {cls} | {seed_s} | {dev_s} | {f32_s} | "
         f"{c['max_abs_diff']} | {a['scale']['rel']:.2e} | {b['taxonomy']} | "
         f"{b['err_max']:.3e} | {b['bound']:.3e} ({b['ratio']:.2f}) | {gold_s} | {r['verdict']} |"
     )
 
 
 HEADER = (
-    "| cell | tier | Leg A | mismatches | ties (restore) | seed flips/ties | seed f32-literal | "
-    "max code diff | scale rel | Leg B | max err | bound (ratio) | gold | verdict |\n"
-    "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+    "| cell | tier | Leg A | mismatches | ties (restore) | class | seed ref/alt/f32 | seed dev | "
+    "f32=real | max code diff | scale rel | Leg B | max err | bound (ratio) | gold | verdict |\n"
+    "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+)
+
+FOOTER = (
+    "Leg A taxonomy: EXACT | TIE_ONLY | MISMATCH; Leg B: BOUNDED | EXCESS. "
+    "`mismatches` = differing codes / total after the seed policy; `ties (restore)` = those "
+    "within k ulp32 of a .5 boundary of the restore (layer tier only; the kernel tier compares "
+    "raw int32 exactly); `class` (kernel tier) = seed (a constant per-channel residual that is "
+    "not an allowed seed) / mac (a non-constant residual) / none; `seed ref/alt/f32` = bias "
+    "channels resolved to the real-valued rounding / the other side of a float32-tied .5 "
+    "boundary / the float32 left-to-right reading (gating only where k*ulp32(|seed|) >= 0.5, "
+    "i.e. |seed| >= 2^20 at k = 4 -- an interpretation, see README); `seed dev` = largest "
+    "|used - real-valued rounding| in raw LSB (TIE_ONLY on an f32-gated channel can exceed 1); "
+    "`f32=real` (informational) = channels whose float32 reading equals the real-valued "
+    "rounding / channels."
 )
 
 
@@ -515,13 +690,7 @@ def main() -> int:
         f"rows: {summary['n_rows']}  PASS: {summary['n_pass']}  FAIL: {summary['n_fail']}  "
         f"ERROR: {summary['n_error']}  (tie window k = {args.k} ulp32)",
         "",
-        "Leg A taxonomy: EXACT | TIE_ONLY | MISMATCH; Leg B: BOUNDED | EXCESS. "
-        "`mismatches` = differing codes / total; `ties (restore)` = those within k ulp32 of a .5 "
-        "boundary of the restore; `seed flips/ties` = bias-seed channels where the other "
-        "rounding of a float32-tied seed was needed / number of such channels; "
-        "`seed f32-literal` (informational, never gating) = channels whose seed equals the doc "
-        "expression evaluated left-to-right in float32 / channels. Note: at |seed| >= 2^21 one "
-        "ulp32 is >= 0.25, so every seed counts as a tie and only this column discriminates.",
+        FOOTER,
         "",
         "## Documentation gaps hit by Leg A (ref/sym_ref.py DOC_GAPS)",
         "",

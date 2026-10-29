@@ -17,6 +17,13 @@
  * together with SERIALIZE_FORMAT_VERSION and regenerate the goldens. */
 #define ODTS_TENSOR_RECORD_VERSION 5u
 
+/* ODTS container format version, written by serializeModel and the only value
+ * deserializeModel accepts. One definition shared by writer, reader and the
+ * golden pins in UnitTestSerialize.c (version history: Serialize.c). */
+#define SERIALIZE_FORMAT_VERSION 7u
+_Static_assert(SERIALIZE_FORMAT_VERSION >= ODTS_TENSOR_RECORD_VERSION,
+               "the tensor-record version names the ODTS version that introduced its layout");
+
 typedef struct {
     size_t numberOfDimensions;
     size_t dimensions[ODTS_TENSOR_RECORD_MAX_RANK];

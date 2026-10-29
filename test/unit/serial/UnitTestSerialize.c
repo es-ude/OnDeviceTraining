@@ -2085,11 +2085,18 @@ static void testSerializeTensorBoolRoundTripsPackedData(void) {
     }
 }
 
-/* Ties these golden fixtures to record version 5: bumping the constant without
- * updating the version pinned here is a compile error; regenerate the goldens at
- * the same time. Changing the bytes serializeTensor writes is caught by the
- * golden-bytes tests going RED; the fix is to bump ODTS_TENSOR_RECORD_VERSION
- * together with SERIALIZE_FORMAT_VERSION and regenerate the goldens. */
+/* Ties the golden fixtures below to ODTS format version 7 and tensor-record
+ * version 5, in both directions:
+ * - bumping either constant without updating its pin here is a compile error;
+ *   regenerate the goldens and move the pin in the same change.
+ * - changing the bytes the writer produces without a bump turns the goldens
+ *   RED; the fix is a bump (which then trips the pins), never a silent golden
+ *   regeneration under the old version. The literal version bytes inside the
+ *   model goldens stay literals on purpose: spelling them via the macro would
+ *   let the goldens follow a bump unseen. */
+_Static_assert(SERIALIZE_FORMAT_VERSION == 7u,
+               "these golden fixtures are tied to ODTS format version 7: regenerate them and "
+               "update this pin when bumping SERIALIZE_FORMAT_VERSION");
 _Static_assert(ODTS_TENSOR_RECORD_VERSION == 5u,
                "these golden fixtures are tied to tensor-record version 5: regenerate them and "
                "update this pin when bumping ODTS_TENSOR_RECORD_VERSION");

@@ -87,9 +87,9 @@
  * (same relax as SYM's, same validateBfpQConfigShape choke point
  * afterwards) rather than failing fast. The sentinel invariant
  * (numGroups==1 <=> groupSize==0) and the shared SERIAL_MAX_QCONFIG_GROUPS
- * sanity cap are checked on the FILE's values, exactly as for SYM/ASYM. */
+ * sanity cap are checked on the FILE's values, exactly as for SYM/ASYM.
+ * SERIALIZE_FORMAT_VERSION itself is defined once in TensorRecord.h. */
 #define SERIALIZE_MAGIC "ODTS"
-#define SERIALIZE_FORMAT_VERSION 7u
 
 void deserializeTensor(tensor_t *tensor, FILE *f) {
     /* #316: capture the skeleton's expected payload size BEFORE the shape /

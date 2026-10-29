@@ -88,11 +88,9 @@
  * is a purely additive wire dtype: a pre-BFP v5 reader hitting the BFP tag
  * fails fast on the unknown tag, never misparses.
  * SYM/SYM_INT32/FLOAT32/INT32/BOOL records, layer arms, and the v3
- * grad-presence byte are untouched by this bump. */
+ * grad-presence byte are untouched by this bump.
+ * SERIALIZE_FORMAT_VERSION itself is defined once in TensorRecord.h. */
 #define SERIALIZE_MAGIC "ODTS"
-#define SERIALIZE_FORMAT_VERSION 7u
-_Static_assert(SERIALIZE_FORMAT_VERSION >= ODTS_TENSOR_RECORD_VERSION,
-               "the tensor-record version names the ODTS version that introduced its layout");
 
 void serializeTensor(tensor_t *tensor, FILE *f) {
     size_t numberOfValues = calcNumberOfElementsByTensor(tensor);

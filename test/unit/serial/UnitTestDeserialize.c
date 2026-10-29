@@ -1894,7 +1894,7 @@ static void assertSymWireConfigQBitsRejected(uint8_t qBits) {
     freeQuantization(floatQ);
 }
 
-/*! #479: the SYM twin of the ASYM wire-qBits guard, at the [1, 31] storage ceiling. The
+/*! #479: the SYM twin of the ASYM wire-qBits guard, at the [2, 31] storage ceiling. The
  *  wire-config variants are the ones only this guard can catch. */
 static void testDeserializeSymRejectsWireQBitsZero(void) {
     assertSymTensorRecordQBitsRejected(0);
@@ -1902,6 +1902,15 @@ static void testDeserializeSymRejectsWireQBitsZero(void) {
 
 static void testDeserializeSymRejectsWireQBitsZeroInWireConfig(void) {
     assertSymWireConfigQBitsRejected(0);
+}
+
+/*! qBits == 1 has qMax == 0, so its scale is inf and every dequant is NaN. */
+static void testDeserializeSymRejectsWireQBitsOne(void) {
+    assertSymTensorRecordQBitsRejected(1);
+}
+
+static void testDeserializeSymRejectsWireQBitsOneInWireConfig(void) {
+    assertSymWireConfigQBitsRejected(1);
 }
 
 static void testDeserializeSymRejectsWireQBitsAbove31(void) {
@@ -1912,9 +1921,9 @@ static void testDeserializeSymRejectsWireQBitsAbove31InWireConfig(void) {
     assertSymWireConfigQBitsRejected(32);
 }
 
-/*! #479: pins both inclusive ends of [1, 31], so an off-by-one tightening of the guard fails. */
+/*! #479: pins both inclusive ends of [2, 31], so an off-by-one tightening of the guard fails. */
 static void testDeserializeSymAcceptsWireQBitsBoundsInWireConfig(void) {
-    const uint8_t bounds[] = {1, 31};
+    const uint8_t bounds[] = {2, 31};
     for (size_t i = 0; i < 2; i++) {
         writeReluSymOutputWireRecordWithQBits(bounds[i]);
         quantization_t *floatQ = quantizationInitFloat();
@@ -2817,6 +2826,8 @@ int main(void) {
     RUN_TEST(testDeserializeAsymRejectsWireQBitsAboveSixteen);
     RUN_TEST(testDeserializeSymRejectsWireQBitsZero);
     RUN_TEST(testDeserializeSymRejectsWireQBitsZeroInWireConfig);
+    RUN_TEST(testDeserializeSymRejectsWireQBitsOne);
+    RUN_TEST(testDeserializeSymRejectsWireQBitsOneInWireConfig);
     RUN_TEST(testDeserializeSymRejectsWireQBitsAbove31);
     RUN_TEST(testDeserializeSymRejectsWireQBitsAbove31InWireConfig);
     RUN_TEST(testDeserializeSymAcceptsWireQBitsBoundsInWireConfig);

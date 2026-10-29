@@ -56,10 +56,11 @@ static size_t groupProductOrExit(size_t numGroups, size_t groupSize, const char 
 
 /* #479 storage ceiling: 31 is what packChunkGuarded accepts and what a SYM->SYM_INT32 copy can
  * carry into qMaxBits (#202). The narrower operand (12) and grad-target (16) contracts are
- * enforced at the kernels and in ExecuteOp, not here. qBits == 0 would underflow the packer. */
+ * enforced at the kernels and in ExecuteOp, not here. qBits == 0 would underflow the packer;
+ * qBits == 1 has qMax = 2^0 - 1 = 0, so pack's scale = absMax / 0 = inf and dequant is NaN. */
 static void validateSymQBits(uint8_t qBits, const char *what) {
-    if (qBits == 0 || qBits > 31) {
-        PRINT_ERROR("%s: qBits (%u) outside the SYM range [1, 31]", what, (unsigned)qBits);
+    if (qBits < 2 || qBits > 31) {
+        PRINT_ERROR("%s: qBits (%u) outside the SYM range [2, 31]", what, (unsigned)qBits);
         exit(1);
     }
 }

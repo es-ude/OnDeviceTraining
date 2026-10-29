@@ -1,6 +1,6 @@
 {
   "name": "s11b_requant_dyn_16to16",
-  "description": "S11 dynamic requant SYM_INT32@16 -> @16: absmax code 2114 makes m*qMax_out/2114 an EXACT .5 boundary for odd m (16 such codes); fresh scale = absmax/qMax_out.",
+  "description": "S11 dynamic requant SYM_INT32@16 -> @16: absmax code 8456 makes m*qMax_out/8456 an EXACT .5 boundary for m = 4 (mod 8) (16 such codes) and a k/8 fraction elsewhere; fresh scale = absmax/qMax_out.",
   "op": "convert",
   "direction": "requant_dynamic",
   "tiers": [
@@ -16,7 +16,7 @@
     "seed": 632,
     "n": 64,
     "inputBits": 16,
-    "absmaxCode": 2114,
+    "absmaxCode": 8456,
     "ties": 16
   },
   "expect": {

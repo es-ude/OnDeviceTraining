@@ -26,9 +26,10 @@ SCHEMA_VERSION = 0
 KINDS = ("INT32", "FLOAT32", "SYM_INT32", "SYM", "ASYM", "BOOL", "BFP")
 KIND_FIELDS = {"SYM": ("qBits",), "ASYM": ("qBits",),
                "BFP": ("exponentBits", "groupSize", "mantissaBits")}
-# C validates these (validateAsymQBits; the BFP init); SYM qBits has no C validator, so only 0
-# (the sub-byte packer underflows) is refused.
-WIDTH_RANGE = {("ASYM", "qBits"): (1, 16), ("BFP", "mantissaBits"): (2, 16),
+# C validates these (validateSymQBits, validateAsymQBits; the BFP init). SYM starts at 2:
+# at 1 bit qMax = 0 and the scale would be infinite (#479).
+WIDTH_RANGE = {("SYM", "qBits"): (2, 31), ("ASYM", "qBits"): (1, 16),
+               ("BFP", "mantissaBits"): (2, 16),
                ("BFP", "exponentBits"): (2, 8)}
 LOSSES = ("CROSS_ENTROPY", "MSE")
 LAYER_TYPES = ("LINEAR", "RELU", "CONV1D", "CONV1D_TRANSPOSED", "MAXPOOL1D", "AVGPOOL1D",
@@ -158,8 +159,6 @@ def _dtype(v, where: str) -> Dtype:
     for key in fields:
         if not is_int(v.get(key)) or v[key] < 0:
             raise ProblemError(f"{where}: {kind} needs the integer field {key!r}")
-        if kind == "SYM" and v[key] == 0:
-            raise ProblemError(f"{where}: SYM qBits must be at least 1, got 0")
         lo, hi = WIDTH_RANGE.get((kind, key), (None, None))
         if lo is not None and not lo <= v[key] <= hi:
             raise ProblemError(f"{where}: {kind} {key} {v[key]} is outside C's range {lo} to {hi}")

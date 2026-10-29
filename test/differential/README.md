@@ -256,9 +256,11 @@ ascending; Conv1d forward: input channel outer, tap inner; gather: tap outer,
 channel inner; conv weightGrad / biasGrad: batch outer, position inner) are
 therefore the shipped orders; they remain undocumented. The fq twins are
 bit-identical. The design's bound `N * 2^-24 * (sum|a_i b_i| + |bias|)` is
-met with ratio <= 4e-4 everywhere (the lossy rows' errors are exactly the
-cast losses Leg A predicts); the every-rounding-point count `(2N+1+bias)`
-is reported alongside (`ratio_rigorous`) and never needed.
+met with ratio <= 4e-4 on every raw FLOAT32 row (the lossy rows' errors are
+exactly the cast losses Leg A predicts; the BFP wire rows print ratios up
+to 1.00 because their bound is dominated by the half-code pack term, which
+the pack rounding uses up); the every-rounding-point count `(2N+1+bias)` is
+reported alongside (`ratio_rigorous`) and never needed.
 
 ## Leg B bounds
 

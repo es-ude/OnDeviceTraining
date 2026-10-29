@@ -39,6 +39,16 @@ DOC_GAPS: list[str] = [
     "(data-shape.md has no padding section). Assumed TF-minimal: left = floor(total/2), "
     "right = total - left. Not exercised by cell 0 (VALID/EXPLICIT only).",
     "Output length under VALID when L < effective kernel: not documented. Assumed 0.",
+    "Bias seed beyond the float32 tie window: the seed rule 'round(param_q * param_scale / "
+    "accumulator_scale)' is stated in reals, but at |seed| >= 2^20 (k = 4: k*ulp32 >= 0.5) no "
+    "float32 evaluation can place the value relative to a .5 boundary, so 'round' is not "
+    "checkable to +-1 from the doc alone. INTERPRETATION used as the gate there: the expression "
+    "evaluated left-to-right in float32 (q*param_scale, accumulator_scale = s_in*s_w as one "
+    "float32 product, then the quotient). A C seed that differs from this reading on such a "
+    "channel is reported as a MISMATCH -- an interpretation/doc finding, not waived.",
+    "Definition of HALF_AWAY: the doc names the mode ('half-away-from-zero = roundByMode("
+    "HALF_AWAY) semantics', Pooling SYM_INT32) but never writes the function. Assumed the "
+    "standard one: sign(v) * floor(|v| + 0.5) (an exact .5 goes away from zero).",
 ]
 
 
@@ -65,9 +75,12 @@ def qmin(q_max_bits: int) -> int:
 def round_half_away(v: np.ndarray) -> np.ndarray:
     """Round half away from zero, elementwise, float64 -> int64.
 
-    arithmetic-sym, 'Pooling SYM_INT32': 'half-away-from-zero =
-    roundByMode(HALF_AWAY) semantics'; the OUT_WRITE paragraph names
-    ``HALF_AWAY`` as the deterministic mode every det cell uses.
+    Semantics: arithmetic-sym, 'Pooling SYM_INT32', names the mode
+    ('half-away-from-zero = roundByMode(HALF_AWAY) semantics') but does not
+    write the function; the standard definition sign(v) * floor(|v| + 0.5)
+    is assumed (DOC_GAPS[8]). WHICH mode a cell rounds with is the cell's
+    own ``arith.rounding`` (operation-owned per #282), not something the
+    doc fixes; the deterministic cells of this harness declare HALF_AWAY.
     """
     v = np.asarray(v, dtype=np.float64)
     out = np.where(v >= 0.0, np.floor(v + 0.5), np.ceil(v - 0.5))
@@ -226,19 +239,26 @@ def bias_seed(b_codes: np.ndarray, s_b: float, s_acc: float) -> BiasSeed:
 def bias_seed_f32_literal(
     b_codes: np.ndarray, s_b: float, s_x: float, s_w: float
 ) -> np.ndarray:
-    """INFORMATIONAL twin of ``bias_seed``: the documented expression
-    'param_q * param_scale / accumulator_scale' with accumulator_scale =
-    s_in * s_w, evaluated left-to-right in float32 and rounded half away.
+    """The documented seed expression read left-to-right in float32.
 
-    Not part of the documented contract (DOC_GAPS[2]: the doc states the rule
-    in reals), so it never gates a cell. It exists because at |seed| >= 2^21
-    one float32 ulp is >= 0.25 and the k*ulp32 tie window of the census
-    accepts both roundings for every channel; this literal reading gives the
-    report a sharper, non-gating comparison there.
+    'seed = round(param_q * param_scale / accumulator_scale)' (arithmetic-sym,
+    'SYM_INT32 seed-rescale') with accumulator_scale = s_in * s_w ('Conv1d /
+    Conv1dTransposed SYM_INT32'): q * s_b first, s_in * s_w as one float32
+    product, then the quotient, rounded half away. The doc states the rule
+    in reals (DOC_GAPS[2]); this reading is the harness's INTERPRETATION
+    (DOC_GAPS[7]) and gates a channel only where the real-valued tie window
+    cannot discriminate (k * ulp32(|seed|) >= 0.5, i.e. |seed| >= 2^20 at
+    k = 4); elsewhere it is informational. Returns float64 with NaN where
+    the float32 evaluation is not finite (the reading is then undefined).
     """
     f = np.float32
-    pre32 = (np.asarray(b_codes).astype(f) * f(s_b)) / (f(s_x) * f(s_w))
-    return round_half_away(pre32.astype(np.float64))
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        pre32 = (np.asarray(b_codes).astype(f) * f(s_b)) / (f(s_x) * f(s_w))
+    pre64 = pre32.astype(np.float64)
+    finite = np.isfinite(pre64)
+    out = np.full(pre64.shape, np.nan, dtype=np.float64)
+    out[finite] = round_half_away(pre64[finite]).astype(np.float64)
+    return out
 
 
 @dataclass
@@ -291,7 +311,11 @@ def restore_sym(raw: np.ndarray, s_raw: float, q_max_bits: int) -> Restored:
     '#192 D1' defines that diagonal as the dynamic requant 'dequant -> absmax
     -> fresh scale'; 'D3': absmax maps exactly onto qMax (no saturation). So
     scale = max|raw * s_raw| / qMax, codes = round_half_away(raw * s_raw / scale).
-    absmax == 0 -> scale 1.0 (DOC_GAPS[1]).
+    absmax == 0 -> scale 1.0 (DOC_GAPS[1]). The width (q_max_bits) is the
+    produced wire's storage config; the rounding mode is the OP's
+    ('OUT_WRITE epilogue rounding is operation-owned (#282)': the op's
+    arithmetic.roundingMode, for which the storage config is only the
+    default) -- HALF_AWAY in every deterministic cell.
     """
     values = np.asarray(raw, dtype=np.float64) * float(s_raw)
     absmax = float(np.max(np.abs(values))) if values.size else 0.0

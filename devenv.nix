@@ -107,7 +107,7 @@ in
 						fi
 						hits=
 						if [ -n "$raw" ]; then
-							hits=$(printf '%s\n' "$raw" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|\*)')
+							hits=$(printf '%s\n' "$raw" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|\*([[:space:]]|/|$))')
 						fi
 						return 0
 					}
@@ -172,6 +172,7 @@ in
 							probe fire "$f" '(void)realloc(p, 8);'
 						done
 						probe fire src/planted/P.c 'free(p);'
+						probe fire src/a.c '*out = malloc(n);'
 						probe silent src/userApi/a.c 'free(p);'
 						probe silent src/a.md 'free(p);'
 						probe silent src/a.c '// free(p);'
@@ -186,7 +187,7 @@ in
 						echo "alloc-locality: the self-test failed; the gate no longer catches what it must."
 						exit 1
 					fi
-					echo "alloc-locality: clean; self-test passed (11 plants fire, 8 controls stay silent)."
+					echo "alloc-locality: clean; self-test passed (12 plants fire, 8 controls stay silent)."
 					set -e
 				fi
 				# end alloc-locality

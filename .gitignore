@@ -136,6 +136,9 @@ CLAUDE.md
 claude*
 docs/superpowers/
 
+# test/differential — harness outputs (operands, driver dumps, reports)
+test/differential/out/
+
 # examples — runtime artifacts
 examples/*/data/raw/
 examples/*/data/*.npy

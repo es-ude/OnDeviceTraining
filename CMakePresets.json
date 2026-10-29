@@ -94,6 +94,15 @@
       }
     },
     {
+      "name": "differential",
+      "displayName": "Differential numerics driver (ODT_BUILD_DIFFERENTIAL=ON, no unit tests)",
+      "inherits": "host",
+      "cacheVariables": {
+        "ODT_BUILD_DIFFERENTIAL": "ON",
+        "ODT_BUILD_TESTS": "OFF"
+      }
+    },
+    {
       "name": "arm_cross",
       "displayName": "ARM cross-compile (compile-only, core libs + training driver)",
       "inherits": "gen_ninja",
@@ -155,6 +164,12 @@
     {
       "name": "examples_memprofile",
       "configurePreset": "examples_memprofile"
+    },
+    {
+      "name": "differential",
+      "inherits": "host",
+      "configurePreset": "differential",
+      "targets": "odt_diffdrive"
     },
     {
       "name": "arm_cross",

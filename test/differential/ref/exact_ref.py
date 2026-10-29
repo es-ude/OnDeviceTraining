@@ -194,3 +194,126 @@ def bound_requant_roundtrip(s_out: float, q_max: int, k: int) -> float:
     reported separately.
     """
     return float(s_out) * (0.5 + restore_slack_codes(q_max, k) + q_max * F32_U)
+
+
+# --------------------------------------------------------------------------- #
+# BFP (step 3): dequant, the GEMM family in float64, the fold bound           #
+# --------------------------------------------------------------------------- #
+
+
+def bfp_dequant(codes: np.ndarray, stored: np.ndarray, exponent_bits: int, group_size: int) -> np.ndarray:
+    """mantissa * 2^(stored - bias) per flat-storage group, bias =
+    2^(exponentBits-1) - 1; exact in float64. Returns the flat float64 image
+    (the caller reshapes)."""
+    c = np.asarray(codes, dtype=np.int64).ravel()
+    g = np.zeros(c.size, dtype=np.int64) if group_size == 0 else np.arange(c.size) // group_size
+    e = np.asarray(stored, dtype=np.int64)[g] - ((1 << (exponent_bits - 1)) - 1)
+    return c.astype(np.float64) * np.ldexp(1.0, e)
+
+
+def _t(a: np.ndarray, grad: bool = False) -> torch.Tensor:
+    t = torch.from_numpy(np.ascontiguousarray(a, dtype=np.float64))
+    return t.requires_grad_(True) if grad else t
+
+
+def conv_transpose1d_exact(
+    x: np.ndarray, w: np.ndarray, b: np.ndarray | None, stride: int, dilation: int, groups: int, output_padding: int
+) -> np.ndarray:
+    """float64 F.conv_transpose1d, VALID geometry: x [B, Cin, L], w [Cin,
+    Cout/groups, K] -> [B, Cout, (L-1)*stride + dilation*(K-1) + output_padding + 1]."""
+    y = F.conv_transpose1d(
+        _t(x), _t(w), bias=None if b is None else _t(b), stride=stride, padding=0,
+        output_padding=output_padding, groups=groups, dilation=dilation,
+    )
+    return y.numpy()
+
+
+def gemm_family_exact(op: str, x: np.ndarray, w: np.ndarray, b: np.ndarray | None, geom: dict) -> np.ndarray:
+    """Forward of the three GEMM-family ops in float64. ``geom`` carries
+    stride/dilation/groups/pad_left/pad_right (conv1d) or
+    stride/dilation/groups/output_padding (convt1d); ignored for linear."""
+    if op == "linear":
+        return linear_exact(x, w, b)
+    if op == "conv1d":
+        return conv1d_exact(x, w, b, geom["stride"], geom["dilation"], geom["groups"], geom["pad_left"], geom["pad_right"])
+    if op == "convt1d":
+        return conv_transpose1d_exact(x, w, b, geom["stride"], geom["dilation"], geom["groups"], geom["output_padding"])
+    raise ValueError(op)
+
+
+def gemm_family_backward_exact(
+    op: str, x: np.ndarray, w: np.ndarray, has_bias: bool, loss: np.ndarray, geom: dict
+) -> dict[str, np.ndarray]:
+    """float64 autograd of sum(y * loss) for the op's forward on the dequantized
+    operands: {'dx': dL/dx, 'weightGrad': dL/dW, 'biasGrad': dL/db}. The
+    reductions are exactly the documented backward GEMMs (Linear dx = L @ W,
+    weightGrad = L^T @ x, biasGrad = batch sum; conv twins per autograd), so
+    the same function serves as the abs-sum oracle when called on |x|, |W|,
+    |L| (every term is then non-negative and the result IS sum|a_i b_i|)."""
+    xt = _t(x, True)
+    wt = _t(w, True)
+    bt = _t(np.zeros(_bias_len(op, w, geom)), True) if has_bias else None
+    if op == "linear":
+        y = xt @ wt.T + (bt[None, :] if bt is not None else 0.0)
+    elif op == "conv1d":
+        xp = F.pad(xt, (geom["pad_left"], geom["pad_right"])) if (geom["pad_left"] or geom["pad_right"]) else xt
+        y = F.conv1d(xp, wt, bias=bt, stride=geom["stride"], padding=0, dilation=geom["dilation"], groups=geom["groups"])
+    elif op == "convt1d":
+        y = F.conv_transpose1d(
+            xt, wt, bias=bt, stride=geom["stride"], padding=0, output_padding=geom["output_padding"],
+            groups=geom["groups"], dilation=geom["dilation"],
+        )
+    else:
+        raise ValueError(op)
+    (y * _t(loss)).sum().backward()
+    out = {"dx": xt.grad.numpy(), "weightGrad": wt.grad.numpy()}
+    if bt is not None:
+        out["biasGrad"] = bt.grad.numpy()
+    return out
+
+
+def _bias_len(op: str, w: np.ndarray, geom: dict) -> int:
+    if op == "convt1d":
+        return int(w.shape[1]) * int(geom["groups"])
+    return int(w.shape[0])
+
+
+def bound_bfp_fold(n_terms: int, abs_sum: np.ndarray) -> np.ndarray:
+    """The design's walk-order-free bound on |C - exact| for a rounding-free
+    BFP reduction (arithmetic-bfp 5.3/7/8): N float32 additions, each rounding
+    once (relative 2^-24) on a partial no larger than the absolute sum of the
+    terms, the (float)partial rounding of every segment being 2^-24 relative
+    to a value bounded by the same absolute sum: N * 2^-24 * (sum_i |a_i b_i|
+    + |bias|), elementwise, floored at float32 tiny so an all-zero element is
+    not divided by zero. ``abs_sum`` is the same op applied to |operands|
+    (plus |bias|). This is the acceptance bound of every BFP GEMM row (the
+    design fixes it; it is not widened after a run). Its rounding COUNT is
+    heuristic -- see ``bound_bfp_fold_rigorous`` for the derivation that
+    counts every rounding point; both figures are reported per row."""
+    return np.maximum(n_terms, 1) * F32_U * np.abs(np.asarray(abs_sum, dtype=np.float64)) + np.finfo(np.float32).tiny
+
+
+def bound_bfp_fold_rigorous(n_terms: int, abs_sum: np.ndarray, with_bias: bool) -> np.ndarray:
+    """Every rounding point of the section-5.3 fold counted, walk-order-free:
+    with n_seg <= N segments there are n_seg (float)partial casts (each at
+    most u * |partial| <= u * sum over that segment, so all casts together at
+    most u * S), n_seg fold additions (each at most u * |running sum| <= u *
+    S) and one bias-seed addition when a bias is present: (2 * N + 1 + bias)
+    * u * S with S = sum_i |a_i b_i| + |bias|. Informational: it shows when an
+    EXCESS against the design's N-count bound is a float32 rounding-count
+    effect rather than a scheme loss (reachable only at tiny N with a bias,
+    where 2 or 3 roundings meet a bound of N = 1 or 2 units)."""
+    n = max(int(n_terms), 1)
+    count = 2 * n + (1 if with_bias else 0)
+    return count * F32_U * np.abs(np.asarray(abs_sum, dtype=np.float64)) + np.finfo(np.float32).tiny
+
+
+def bound_float32_kernel(n_terms: int, abs_sum: np.ndarray, with_bias: bool) -> np.ndarray:
+    """Bound for the plain float32 GEMM kernel (the fake-quant twin of B5): N
+    products each rounding once (u * |a_i b_i|, together <= u * S), N
+    additions each rounding once on a running sum <= S, plus the bias
+    addition: (2 * N + 1 + bias) * u * S -- stated before the run; the twin's
+    own gate is bit-equality between the two C runs, not this bound."""
+    n = max(int(n_terms), 1)
+    count = 2 * n + (1 if with_bias else 0)
+    return count * F32_U * np.abs(np.asarray(abs_sum, dtype=np.float64)) + np.finfo(np.float32).tiny

@@ -611,7 +611,10 @@ void linearCalcOutputShape(layer_t *linearLayer, shape_t *inputShape, shape_t *o
         exit(1);
     }
 
-    size_t batchSize = inputShape->dimensions[0];
+    /* Logical, not physical: Matmul reads the input order-aware, and the
+     * backward propLoss gate takes the input's logical dims too. */
+    tensor_t inputView = {.shape = inputShape};
+    size_t batchSize = getDimensionsByIndex(&inputView, 0);
 
     linearConfig_t *cfg = linearLayer->config->linear;
     shape_t *weightShape = cfg->weights->param->shape;

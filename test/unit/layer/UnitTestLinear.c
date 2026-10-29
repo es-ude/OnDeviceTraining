@@ -3664,6 +3664,51 @@ void testLinearBackwardFloatDenseLossBatch2BiasGradSumsBatch(void) {
                                   6);
 }
 
+/* Matmul reads the input order-aware, so the output batch is the input's
+ * LOGICAL dim 0: physical [3, 2] transposed is a logical [2, 3] input. */
+void testLinearCalcOutputShapeUsesLogicalBatchOfTransposedInput(void) {
+    layer_t *layer = buildFloatLinearWithTrainable(TRAINABLE_DEFAULT); /* 3 -> 2 */
+    tensor_t *input = buildFloatTensor2d(3, 2, (float[]){1.f, 4.f, 2.f, 5.f, 3.f, 6.f});
+    transposeTensor(input, 0, 1);
+    size_t outDims[2] = {0};
+    size_t outOrder[2] = {0};
+    shape_t outShape = {.dimensions = outDims, .orderOfDimensions = outOrder};
+
+    linearCalcOutputShape(layer, input->shape, &outShape);
+
+    freeTensor(input);
+    freeLinearLayer(layer);
+
+    TEST_ASSERT_EQUAL_size_t(2, outShape.numberOfDimensions);
+    TEST_ASSERT_EQUAL_size_t_ARRAY(((size_t[]){2, 2}), outDims, 2);
+    TEST_ASSERT_EQUAL_size_t_ARRAY(((size_t[]){0, 1}), outOrder, 2);
+}
+
+/* User-visible consequence: the forward output gate takes its expected shape
+ * from linearCalcOutputShape, so a transposed input must reach the kernel. */
+void testLinearForwardFloatTransposedInputMatchesDense(void) {
+    quantization_t *q = quantizationInitFloat();
+    tensor_t *weightsParam = buildFloatTensor2d(2, 3, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, -6.f});
+    tensor_t *biasParam = buildFloatTensor2d(1, 2, (float[]){-1.f, 3.f});
+    layer_t *layer = buildBorrowedLinearLayer(parameterInit(weightsParam, NULL),
+                                              parameterInit(biasParam, NULL), q);
+    tensor_t *input = buildFloatTensor2d(3, 2, (float[]){1.f, 4.f, 2.f, 5.f, 3.f, 6.f});
+    transposeTensor(input, 0, 1); /* logical [[1, 2, 3], [4, 5, 6]] */
+    tensor_t *output = buildFloatTensor2d(2, 2, (float[]){0.f, 0.f, 0.f, 0.f});
+
+    linearForward(layer, input, output, NULL);
+
+    float got[4];
+    memcpy(got, output->data, sizeof got);
+
+    freeLinearLayer(layer);
+    freeTensor(output);
+    freeTensor(input);
+    freeQuantization(q);
+
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){-7.f, -1.f, -13.f, 8.f}), got, 4);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLinearForwardFloat);
@@ -3743,5 +3788,7 @@ int main(void) {
     RUN_TEST(testLinearBackwardFloatRejectsWrongLossShape);
     RUN_TEST(testLinearBackwardFloatRejectsTransposedLoss);
     RUN_TEST(testLinearBackwardFloatDenseLossBatch2BiasGradSumsBatch);
+    RUN_TEST(testLinearCalcOutputShapeUsesLogicalBatchOfTransposedInput);
+    RUN_TEST(testLinearForwardFloatTransposedInputMatchesDense);
     return UNITY_END();
 }

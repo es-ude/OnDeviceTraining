@@ -187,18 +187,25 @@ typedef struct quantization {
 void initSymInt32QConfig(roundingMode_t roundingMode, symInt32QConfig_t *symInt32QConfig);
 void initSymInt32QConfigWithQMaxBits(roundingMode_t roundingMode,
                                      symInt32QConfig_t *symInt32QConfig, uint8_t qMaxBits);
+/*! Both SYM inits fail-fast (exit 1) on qBits outside [2, 31] (#479): 31 is the
+ * SYM storage ceiling (the sub-byte packer and the SYM_INT32 qMaxBits cap, #202);
+ * 0 would underflow the packer, and 1 has qMax = 0 (inf scale, NaN dequant).
+ * The narrower operand (12) and grad-target (16) caps are enforced where those
+ * contracts apply, not at init. */
 void initSymQConfig(uint8_t qBits, roundingMode_t roundingMode, symQConfig_t *symQConfig);
 /*! Group-quant PR2: general-shape SYM config init. initSymQConfig delegates
  * here with (numGroups=1, groupSize=0). Allocates scales[numGroups] (each
- * 1.f); fail-fasts on numGroups == 0, on (numGroups == 1) != (groupSize == 0),
- * and on numGroups > 1 && groupSize == 0 -- i.e. only {1,0} (per-tensor) or
- * {>1,>0} (grouped) are constructible; {1,N>0} is rejected here even before
- * any tensor exists to validate group*groupSize against. */
+ * 1.f); fail-fasts on qBits outside [2, 31] (see above), on numGroups == 0,
+ * on (numGroups == 1) != (groupSize == 0), and on numGroups > 1 &&
+ * groupSize == 0 -- i.e. only {1,0} (per-tensor) or {>1,>0} (grouped) are
+ * constructible; {1,N>0} is rejected here even before any tensor exists to
+ * validate group*groupSize against. */
 void initSymQConfigGrouped(uint8_t qBits, roundingMode_t roundingMode, size_t numGroups,
                            size_t groupSize, symQConfig_t *qC);
 /*! Group-quant PR2: attach-time shape check for a SYM config against a
  * concrete element count. Fail-fasts unless (numGroups==1 && groupSize==0)
- * or (numGroups>1 && groupSize>0 && numGroups*groupSize==numberOfElements).
+ * or (numGroups>1 && groupSize>0 && numGroups*groupSize==numberOfElements),
+ * PLUS the #479 qBits-in-[2,31] re-check for field-assigned configs.
  * Called by initTensor for SYM tensors; also the choke point the ODTS
  * deserialize path (Deserialize.c's deserializeQConfig, Task 5) re-validates
  * against after reallocating a skeleton's scales[] to a file's numGroups --

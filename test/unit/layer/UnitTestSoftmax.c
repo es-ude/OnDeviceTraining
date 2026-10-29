@@ -953,6 +953,69 @@ void testSoftmaxBackwardRejectsTransposedMultiRowGrads(void) {
     freeQuantization(floatQ);
 }
 
+/* #436: the forward kernels write y flat at the input's row offsets into a
+ * rawOut sized from the output, so the output wire needs the input's dims and,
+ * when multi-row, identity order. The gate sits before the arm switch; the BFP
+ * case proves it is not confined to the FLOAT32/SYM arm. */
+void testSoftmaxForwardFloatRejectsWiderOutput(void) {
+    const size_t inDims[2] = {2, 3};
+    const size_t outDims[2] = {3, 3};
+    tensor_t *input = buildSoftmaxWireNd(inDims, 2, softmaxForwardX);
+    tensor_t *output = buildSoftmaxWireNd(outDims, 2, NULL);
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "Softmax forward: output must have the input's rank and dims",
+                             layerFunctions[SOFTMAX].forward(softmaxLayer, input, output, NULL));
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(output);
+    freeTensor(input);
+    freeQuantization(floatQ);
+}
+
+void testSoftmaxForwardBfpRejectsWiderOutput(void) {
+    const size_t inDims[2] = {1, 4};
+    const size_t outDims[2] = {1, 5};
+    const float x[4] = {0.5f, -1.0f, 2.0f, 0.25f};
+    tensor_t *input = buildSoftmaxWireNd(inDims, 2, x);
+    tensor_t *output = buildSoftmaxWireNdQ(outDims, 2, NULL, quantizationInitBfp(8, 8, HALF_AWAY));
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, output->quantization);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+    TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->forwardMath.type);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "Softmax forward: output must have the input's rank and dims",
+                             layerFunctions[SOFTMAX].forward(softmaxLayer, input, output, NULL));
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(output);
+    freeTensor(input);
+}
+
+/* Physical [2, 3] with order {1, 0}: the raw dims still match the input, so
+ * only the identity-order clause can catch the transposed placement. */
+void testSoftmaxForwardRejectsTransposedMultiRowOutput(void) {
+    const size_t dims[2] = {2, 3};
+    tensor_t *input = buildSoftmaxWireNd(dims, 2, softmaxForwardX);
+    tensor_t *output = buildSoftmaxWireNd(dims, 2, NULL);
+    transposeTensor(output, 0, 1);
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "a wire with 2 storage rows must be identity-order",
+                             layerFunctions[SOFTMAX].forward(softmaxLayer, input, output, NULL));
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(output);
+    freeTensor(input);
+    freeQuantization(floatQ);
+}
+
 /* ---- BFP epic PR6 Task 4: native ARITH_BFP forward (P6-2..P6-5) ----
  *
  * Gold: expected_bfp_softmax.h (generate_expected_bfp_softmax.py mirrors the
@@ -1845,6 +1908,14 @@ void testSoftmaxSymBackwardConvertsWithItsBackwardConvertStream(void) {
     freeTensor(input);
 }
 
+/* #440: see testLinearInitConfigClearsOwnsQuantizations. */
+void testSoftmaxInitConfigClearsOwnsQuantizations(void) {
+    softmaxConfig_t cfg;
+    memset(&cfg, 0xFF, sizeof cfg);
+    softmaxInitConfig(&cfg, NULL, NULL);
+    TEST_ASSERT_EQUAL_UINT8(0, *(const unsigned char *)&cfg.ownsQuantizations);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(unitTestSoftmaxForwardFloat);
@@ -1877,6 +1948,9 @@ int main() {
     RUN_TEST(testSoftmaxBackwardFloatRejectsReshapedLoss);
     RUN_TEST(testSoftmaxBackwardSymRejectsReshapedPropLoss);
     RUN_TEST(testSoftmaxBackwardRejectsTransposedMultiRowGrads);
+    RUN_TEST(testSoftmaxForwardFloatRejectsWiderOutput);
+    RUN_TEST(testSoftmaxForwardBfpRejectsWiderOutput);
+    RUN_TEST(testSoftmaxForwardRejectsTransposedMultiRowOutput);
 
     RUN_TEST(unitTestSoftmaxForwardBfpNativeTrunc);
     RUN_TEST(unitTestSoftmaxForwardBfpNativeHalfAway);
@@ -1904,5 +1978,6 @@ int main() {
     RUN_TEST(testSoftmaxBfpSrPackIsAPureFunctionOfItsForwardOpKey);
     RUN_TEST(testSoftmaxBfpSrShiftsDrawFromTheForwardShiftStream);
     RUN_TEST(testSoftmaxSymBackwardConvertsWithItsBackwardConvertStream);
+    RUN_TEST(testSoftmaxInitConfigClearsOwnsQuantizations);
     return UNITY_END();
 }

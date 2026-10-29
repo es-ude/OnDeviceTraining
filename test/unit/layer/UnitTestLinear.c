@@ -287,13 +287,14 @@ void testLinearBackwardSymInt32Rank1Bias() {
     tensor_t *loss = initTensor(lossShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(loss, (float[]){-4.f, -3.f}, 2);
 
-    /* 5. Build heap propLoss tensor (SymInt32, shape (3,)). */
-    size_t *propLossDims = reserveMemory(1 * sizeof(size_t));
-    propLossDims[0] = numberOfForwardInputs;
-    size_t *propLossOrder = reserveMemory(1 * sizeof(size_t));
-    setOrderOfDimsForNewTensor(1, propLossOrder);
+    /* 5. Build heap propLoss tensor (SymInt32, shape 1x3). */
+    size_t *propLossDims = reserveMemory(2 * sizeof(size_t));
+    propLossDims[0] = 1;
+    propLossDims[1] = numberOfForwardInputs;
+    size_t *propLossOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, propLossOrder);
     shape_t *propLossShape = reserveMemory(sizeof(shape_t));
-    setShape(propLossShape, propLossDims, 1, propLossOrder);
+    setShape(propLossShape, propLossDims, 2, propLossOrder);
     tensor_t *propLoss = initTensor(propLossShape, quantizationInitSymInt32(HALF_AWAY), NULL);
 
     /* 6. Build layer (shared SymInt32 quantization). */
@@ -323,12 +324,13 @@ void testLinearBackwardSymInt32Rank1Bias() {
     tensor_t *biasGradFloat = initTensor(bgShape, quantizationInitFloat(), NULL);
     convertTensor(bias->grad, biasGradFloat, NULL);
 
-    size_t *plDims = reserveMemory(1 * sizeof(size_t));
-    plDims[0] = numberOfForwardInputs;
-    size_t *plOrder = reserveMemory(1 * sizeof(size_t));
-    setOrderOfDimsForNewTensor(1, plOrder);
+    size_t *plDims = reserveMemory(2 * sizeof(size_t));
+    plDims[0] = 1;
+    plDims[1] = numberOfForwardInputs;
+    size_t *plOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, plOrder);
     shape_t *plShape = reserveMemory(sizeof(shape_t));
-    setShape(plShape, plDims, 1, plOrder);
+    setShape(plShape, plDims, 2, plOrder);
     tensor_t *propLossFloat = initTensor(plShape, quantizationInitFloat(), NULL);
     convertTensor(propLoss, propLossFloat, NULL);
 
@@ -426,13 +428,14 @@ void testLinearForwardFloat() {
     tensor_t *input = initTensor(inputShape, quantizationInitFloat(), NULL);
     tensorFillFromFloatBuffer(input, (float[]){0.f, 1.f, 2.f}, 3);
 
-    /* 4. Build heap output tensor (shape 2,). */
-    size_t *outputDims = reserveMemory(1 * sizeof(size_t));
-    outputDims[0] = 2;
-    size_t *outputOrder = reserveMemory(1 * sizeof(size_t));
-    setOrderOfDimsForNewTensor(1, outputOrder);
+    /* 4. Build heap output tensor (shape 1x2). */
+    size_t *outputDims = reserveMemory(2 * sizeof(size_t));
+    outputDims[0] = 1;
+    outputDims[1] = 2;
+    size_t *outputOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, outputOrder);
     shape_t *outputShape = reserveMemory(sizeof(shape_t));
-    setShape(outputShape, outputDims, 1, outputOrder);
+    setShape(outputShape, outputDims, 2, outputOrder);
     tensor_t *output = initTensor(outputShape, quantizationInitFloat(), NULL);
 
     /* 5. Build the layer with shared float quantization. */
@@ -686,13 +689,14 @@ void testLinearBackwardSymInt32() {
     tensor_t *loss = initTensor(lossShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(loss, (float[]){-4.f, -3.f}, 2);
 
-    /* 5. Build heap propLoss tensor (SymInt32, shape (3,)). */
-    size_t *propLossDims = reserveMemory(1 * sizeof(size_t));
-    propLossDims[0] = numberOfForwardInputs;
-    size_t *propLossOrder = reserveMemory(1 * sizeof(size_t));
-    setOrderOfDimsForNewTensor(1, propLossOrder);
+    /* 5. Build heap propLoss tensor (SymInt32, shape 1x3). */
+    size_t *propLossDims = reserveMemory(2 * sizeof(size_t));
+    propLossDims[0] = 1;
+    propLossDims[1] = numberOfForwardInputs;
+    size_t *propLossOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, propLossOrder);
     shape_t *propLossShape = reserveMemory(sizeof(shape_t));
-    setShape(propLossShape, propLossDims, 1, propLossOrder);
+    setShape(propLossShape, propLossDims, 2, propLossOrder);
     tensor_t *propLoss = initTensor(propLossShape, quantizationInitSymInt32(HALF_AWAY), NULL);
 
     /* 6. Build layer (shared SymInt32 quantization). */
@@ -723,12 +727,13 @@ void testLinearBackwardSymInt32() {
     tensor_t *biasGradFloat = initTensor(bgShape, quantizationInitFloat(), NULL);
     convertTensor(bias->grad, biasGradFloat, NULL);
 
-    size_t *plDims = reserveMemory(1 * sizeof(size_t));
-    plDims[0] = numberOfForwardInputs;
-    size_t *plOrder = reserveMemory(1 * sizeof(size_t));
-    setOrderOfDimsForNewTensor(1, plOrder);
+    size_t *plDims = reserveMemory(2 * sizeof(size_t));
+    plDims[0] = 1;
+    plDims[1] = numberOfForwardInputs;
+    size_t *plOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, plOrder);
     shape_t *plShape = reserveMemory(sizeof(shape_t));
-    setShape(plShape, plDims, 1, plOrder);
+    setShape(plShape, plDims, 2, plOrder);
     tensor_t *propLossFloat = initTensor(plShape, quantizationInitFloat(), NULL);
     convertTensor(propLoss, propLossFloat, NULL);
 
@@ -3479,6 +3484,231 @@ void testInferenceOneLinearModelRejectsRank1Sample(void) {
     freeLinearLayer(layer);
 }
 
+/* #440: a hand-wired config must not inherit a stale ownsQuantizations, or
+ * freeLinearLayer would tear down caller-owned quantizations. Read through
+ * unsigned char because loading a bool that holds 0xFF is UB. */
+void testLinearInitConfigClearsOwnsQuantizations(void) {
+    linearConfig_t cfg;
+    memset(&cfg, 0xFF, sizeof cfg);
+    linearInitConfig(&cfg, NULL, NULL, NULL, NULL, NULL);
+    TEST_ASSERT_EQUAL_UINT8(0, *(const unsigned char *)&cfg.ownsQuantizations);
+}
+
+/* #436: Matmul writes the output and dx flat in physical order, so a produced
+ * wire must be dense [batch, features] in identity order, and the consumed loss
+ * must carry the forward batch. Fixtures perturb the batch dim only: a wider
+ * produced wire is under-filled and a narrower loss on a frozen layer is
+ * half-read, so an ungated call returns normally (clean RED, child exit 0). */
+void testLinearForwardFloatRejectsWrongOutputShape(void) {
+    layer_t *layer = buildFloatLinearWithTrainable(TRAINABLE_DEFAULT); /* 3 -> 2 */
+    tensor_t *input = buildFloatTensor2d(1, 3, (float[]){1.f, 2.f, 3.f});
+    tensor_t *output = buildFloatTensor2d(2, 2, (float[]){0.f, 0.f, 0.f, 0.f});
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "Linear forward: output",
+                             linearForward(layer, input, output, NULL));
+
+    freeTensor(output);
+    freeTensor(input);
+    freeLinearLayer(layer);
+}
+
+/* SYM_INT32 forward math: the gate must sit before the arithmetic dispatch. */
+void testLinearForwardSymRejectsWrongOutputShape(void) {
+    quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
+    tensor_t *weightsParam = buildFloatTensor2d(2, 3, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, -6.f});
+    layer_t *layer = buildBorrowedLinearLayer(parameterInit(weightsParam, NULL), NULL, symQ);
+    tensor_t *input = buildFloatTensor2d(1, 3, (float[]){0.f, 1.f, 2.f});
+    tensor_t *output = buildFloatTensor2d(2, 2, (float[]){0.f, 0.f, 0.f, 0.f});
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "Linear forward: output",
+                             linearForward(layer, input, output, NULL));
+
+    freeLinearLayer(layer);
+    freeTensor(output);
+    freeTensor(input);
+    freeQuantization(symQ);
+}
+
+/* Square [2, 2] output transposed: the physical dims match, so only the
+ * identity-order clause can catch the mis-placed flat write. */
+void testLinearForwardFloatRejectsTransposedOutput(void) {
+    layer_t *layer = buildFloatLinearWithTrainable(TRAINABLE_DEFAULT); /* 3 -> 2 */
+    tensor_t *input = buildFloatTensor2d(2, 3, (float[]){1.f, 2.f, 3.f, 4.f, 5.f, 6.f});
+    tensor_t *output = buildFloatTensor2d(2, 2, (float[]){0.f, 0.f, 0.f, 0.f});
+    transposeTensor(output, 0, 1);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "Linear forward: output order",
+                             linearForward(layer, input, output, NULL));
+
+    freeTensor(output);
+    freeTensor(input);
+    freeLinearLayer(layer);
+}
+
+void testLinearBackwardFloatRejectsWrongPropLossShape(void) {
+    layer_t *layer = buildFloatLinearWithTrainable(TRAINABLE_FALSE); /* 3 -> 2 */
+    tensor_t *forwardInput = buildFloatTensor2d(1, 3, (float[]){1.f, 2.f, 3.f});
+    tensor_t *loss = buildFloatTensor2d(1, 2, (float[]){-4.f, 3.f});
+    tensor_t *propLoss = buildFloatTensor2d(2, 3, (float[]){0.f, 0.f, 0.f, 0.f, 0.f, 0.f});
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "Linear backward: propLoss",
+                             linearBackward(layer, forwardInput, loss, propLoss, NULL));
+
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(forwardInput);
+    freeLinearLayer(layer);
+}
+
+/* ARITH_BFP dx: the gate must sit before the BFP anchor check and the arms. */
+void testLinearBackwardBfpRejectsWrongPropLossShape(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *bfpTemplate = quantizationInitBfp(8, 8, HALF_AWAY);
+    size_t weightDims[] = {2, 3};
+    tensor_t *weightsParam =
+        makeFloatTensor(weightDims, 2, (float[]){0.5f, -1.f, 2.f, 1.f, 0.25f, -0.75f});
+    requantizeTensorInPlace(weightsParam, bfpTemplate);
+    layer_t *layer = buildBorrowedLinearLayer(parameterInit(weightsParam, NULL), NULL, floatQ);
+    layer->config->linear->frozen = true;
+    layer->config->linear->propLossMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+
+    size_t fwdDims[] = {1, 3};
+    tensor_t *forwardInput = makeFloatTensor(fwdDims, 2, (float[]){1.f, 2.f, 3.f});
+    size_t lossDims[] = {1, 2};
+    tensor_t *loss = makeFloatTensor(lossDims, 2, (float[]){-4.f, 3.f});
+    requantizeTensorInPlace(loss, bfpTemplate);
+    freeQuantization(bfpTemplate);
+    size_t propLossDims[] = {2, 3};
+    tensor_t *propLoss = makeFloatTensor(propLossDims, 2, NULL);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "Linear backward: propLoss",
+                             linearBackward(layer, forwardInput, loss, propLoss, NULL));
+
+    freeLinearLayer(layer);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(forwardInput);
+    freeQuantization(floatQ);
+}
+
+/* Frozen, so the weight-grad op (which would catch the mismatch on its own)
+ * never runs and the dx op half-reads a two-row forward from a one-row loss. */
+void testLinearBackwardFloatRejectsWrongLossShape(void) {
+    layer_t *layer = buildFloatLinearWithTrainable(TRAINABLE_FALSE); /* 3 -> 2 */
+    tensor_t *forwardInput = buildFloatTensor2d(2, 3, (float[]){1.f, 2.f, 3.f, 4.f, 5.f, 6.f});
+    tensor_t *loss = buildFloatTensor2d(1, 2, (float[]){-4.f, 3.f});
+    tensor_t *propLoss = buildFloatTensor2d(2, 3, (float[]){0.f, 0.f, 0.f, 0.f, 0.f, 0.f});
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "Linear backward: loss",
+                             linearBackward(layer, forwardInput, loss, propLoss, NULL));
+
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(forwardInput);
+    freeLinearLayer(layer);
+}
+
+/* The bias-grad kernels (FLOAT32, SYM_INT32, BFP) sum the loss by raw flat
+ * index, so a transposed loss view with the right logical dims gives wrong bias
+ * grads while weight-grad and dx (order-aware Matmul) stay right. Square [2, 2]
+ * so the physical dims match and only the identity-order clause can catch it. */
+void testLinearBackwardFloatRejectsTransposedLoss(void) {
+    layer_t *layer = buildFloatLinearWithTrainable(TRAINABLE_DEFAULT); /* 3 -> 2 */
+    tensor_t *forwardInput = buildFloatTensor2d(2, 3, (float[]){1.f, 2.f, 3.f, 4.f, 5.f, 6.f});
+    tensor_t *loss = buildFloatTensor2d(2, 2, (float[]){1.f, 2.f, 3.f, 4.f});
+    transposeTensor(loss, 0, 1);
+    tensor_t *propLoss = buildFloatTensor2d(2, 3, (float[]){0.f, 0.f, 0.f, 0.f, 0.f, 0.f});
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "Linear backward: loss order",
+                             linearBackward(layer, forwardInput, loss, propLoss, NULL));
+
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(forwardInput);
+    freeLinearLayer(layer);
+}
+
+/* The dense twin of the case above (same logical loss [[1, 3], [2, 4]]) must
+ * still pass the gate and sum the bias over the batch per feature. */
+void testLinearBackwardFloatDenseLossBatch2BiasGradSumsBatch(void) {
+    quantization_t *q = quantizationInitFloat();
+    tensor_t *weightsParam = buildFloatTensor2d(2, 3, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, -6.f});
+    tensor_t *weightsGrad = gradInitFloat(weightsParam, NULL);
+    tensor_t *biasParam = buildFloatTensor2d(1, 2, (float[]){-1.f, 3.f});
+    tensor_t *biasGrad = gradInitFloat(biasParam, NULL);
+    layer_t *layer = buildBorrowedLinearLayer(parameterInit(weightsParam, weightsGrad),
+                                              parameterInit(biasParam, biasGrad), q);
+    tensor_t *forwardInput = buildFloatTensor2d(2, 3, (float[]){1.f, 2.f, 3.f, 4.f, 5.f, 6.f});
+    tensor_t *loss = buildFloatTensor2d(2, 2, (float[]){1.f, 3.f, 2.f, 4.f});
+    tensor_t *propLoss = buildFloatTensor2d(2, 3, (float[]){0.f, 0.f, 0.f, 0.f, 0.f, 0.f});
+
+    linearBackward(layer, forwardInput, loss, propLoss, NULL);
+
+    float gotWeightGrad[6];
+    float gotBiasGrad[2];
+    float gotPropLoss[6];
+    memcpy(gotWeightGrad, weightsGrad->data, sizeof gotWeightGrad);
+    memcpy(gotBiasGrad, biasGrad->data, sizeof gotBiasGrad);
+    memcpy(gotPropLoss, propLoss->data, sizeof gotPropLoss);
+
+    freeLinearLayer(layer);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(forwardInput);
+    freeQuantization(q);
+
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){3.f, 7.f}), gotBiasGrad, 2);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){9.f, 12.f, 15.f, 19.f, 26.f, 33.f}), gotWeightGrad, 6);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){11.f, 17.f, -21.f, 14.f, 24.f, -30.f}), gotPropLoss,
+                                  6);
+}
+
+/* Matmul reads the input order-aware, so the output batch is the input's
+ * LOGICAL dim 0: physical [3, 2] transposed is a logical [2, 3] input. */
+void testLinearCalcOutputShapeUsesLogicalBatchOfTransposedInput(void) {
+    layer_t *layer = buildFloatLinearWithTrainable(TRAINABLE_DEFAULT); /* 3 -> 2 */
+    tensor_t *input = buildFloatTensor2d(3, 2, (float[]){1.f, 4.f, 2.f, 5.f, 3.f, 6.f});
+    transposeTensor(input, 0, 1);
+    size_t outDims[2] = {0};
+    size_t outOrder[2] = {0};
+    shape_t outShape = {.dimensions = outDims, .orderOfDimensions = outOrder};
+
+    linearCalcOutputShape(layer, input->shape, &outShape);
+
+    freeTensor(input);
+    freeLinearLayer(layer);
+
+    TEST_ASSERT_EQUAL_size_t(2, outShape.numberOfDimensions);
+    TEST_ASSERT_EQUAL_size_t_ARRAY(((size_t[]){2, 2}), outDims, 2);
+    TEST_ASSERT_EQUAL_size_t_ARRAY(((size_t[]){0, 1}), outOrder, 2);
+}
+
+/* User-visible consequence: the forward output gate takes its expected shape
+ * from linearCalcOutputShape, so a transposed input must reach the kernel. */
+void testLinearForwardFloatTransposedInputMatchesDense(void) {
+    quantization_t *q = quantizationInitFloat();
+    tensor_t *weightsParam = buildFloatTensor2d(2, 3, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, -6.f});
+    tensor_t *biasParam = buildFloatTensor2d(1, 2, (float[]){-1.f, 3.f});
+    layer_t *layer = buildBorrowedLinearLayer(parameterInit(weightsParam, NULL),
+                                              parameterInit(biasParam, NULL), q);
+    tensor_t *input = buildFloatTensor2d(3, 2, (float[]){1.f, 4.f, 2.f, 5.f, 3.f, 6.f});
+    transposeTensor(input, 0, 1); /* logical [[1, 2, 3], [4, 5, 6]] */
+    tensor_t *output = buildFloatTensor2d(2, 2, (float[]){0.f, 0.f, 0.f, 0.f});
+
+    linearForward(layer, input, output, NULL);
+
+    float got[4];
+    memcpy(got, output->data, sizeof got);
+
+    freeLinearLayer(layer);
+    freeTensor(output);
+    freeTensor(input);
+    freeQuantization(q);
+
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){-7.f, -1.f, -13.f, 8.f}), got, 4);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLinearForwardFloat);
@@ -3549,5 +3779,16 @@ int main(void) {
     RUN_TEST(testLinearCalcOutputShapeRejectsRank1Input);
     RUN_TEST(testLinearCalcOutputShapeRejectsRank3Input);
     RUN_TEST(testInferenceOneLinearModelRejectsRank1Sample);
+    RUN_TEST(testLinearInitConfigClearsOwnsQuantizations);
+    RUN_TEST(testLinearForwardFloatRejectsWrongOutputShape);
+    RUN_TEST(testLinearForwardSymRejectsWrongOutputShape);
+    RUN_TEST(testLinearForwardFloatRejectsTransposedOutput);
+    RUN_TEST(testLinearBackwardFloatRejectsWrongPropLossShape);
+    RUN_TEST(testLinearBackwardBfpRejectsWrongPropLossShape);
+    RUN_TEST(testLinearBackwardFloatRejectsWrongLossShape);
+    RUN_TEST(testLinearBackwardFloatRejectsTransposedLoss);
+    RUN_TEST(testLinearBackwardFloatDenseLossBatch2BiasGradSumsBatch);
+    RUN_TEST(testLinearCalcOutputShapeUsesLogicalBatchOfTransposedInput);
+    RUN_TEST(testLinearForwardFloatTransposedInputMatchesDense);
     return UNITY_END();
 }

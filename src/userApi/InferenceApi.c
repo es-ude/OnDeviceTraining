@@ -207,7 +207,7 @@ tensor_t *inference(layer_t **model, size_t numberOfLayers, tensor_t *input) {
 }
 
 tensor_t **inferenceBatched(layer_t **model, size_t numberOfLayers, batch_t *batch) {
-    tensor_t **tensorArr = reserveMemory(batch->size * sizeof(tensor_t));
+    tensor_t **tensorArr = reserveMemory(batch->size * sizeof(*tensorArr));
 
     for (size_t i = 0; i < batch->size; i++) {
         /* batch_t consumer: the sample is natural-shape, inference() takes [B, ...]. */

@@ -12,6 +12,7 @@
 #include "ExecuteOp.h"
 #include "Layer.h"
 #include "LayerExec.h"
+#include "LayerWireGuards.h"
 #include "Mul.h"
 #include "Quantization.h"
 #include "SlidingWindow1d.h"
@@ -53,6 +54,7 @@ void initConv1dTransposedConfigWithWeightsAndBias(
     cfg->propLossMath = arithmeticFromQuantizationOrDefault(propLossQ);
     cfg->outputQ = forwardQ;
     cfg->propLossQ = propLossQ;
+    cfg->ownsQuantizations = false;
 
     /* Today's per-callsite hardcodes (conv1dTransposedCalcWeightGradsFloat32/
      * SymInt32, conv1dTransposedCalcBiasGradsFloat32/SymInt32 below), now
@@ -187,6 +189,12 @@ void conv1dTransposedForward(layer_t *layer, tensor_t *input, tensor_t *output,
     const symQConfig_t *weightGroups = groupedWeightViewOrNull(weightTensor, &asymWeightView);
     bool grouped = weightGroups != NULL;
     convT1dForwardCtx_t fctx = {.cfg = cfg, .weightGroups = weightGroups};
+
+    size_t outDims[3];
+    size_t outOrder[3];
+    shape_t outExpected = {.dimensions = outDims, .orderOfDimensions = outOrder};
+    conv1dTransposedCalcOutputShape(layer, input->shape, &outExpected);
+    layerRequireDenseWire(output, &outExpected, "Conv1dTransposed forward", "output");
 
     switch (cfg->forwardMath.type) {
     case ARITH_FLOAT32:
@@ -943,6 +951,19 @@ void conv1dTransposedBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *
     conv1dTransposedConfig_t *cfg = layer->config->conv1dTransposed;
     tensor_t *weightTensor = cfg->weights->param;
 
+    size_t lossDims[3];
+    size_t lossOrder[3];
+    shape_t lossExpected = {.dimensions = lossDims, .orderOfDimensions = lossOrder};
+    conv1dTransposedCalcOutputShape(layer, forwardInput->shape, &lossExpected);
+    layerRequireDenseWire(lossGrad, &lossExpected, "Conv1dTransposed backward", "loss");
+    if (propLoss != NULL) {
+        size_t inOrder[3] = {0, 1, 2};
+        shape_t inExpected = {.numberOfDimensions = 3,
+                              .dimensions = forwardInput->shape->dimensions,
+                              .orderOfDimensions = inOrder};
+        layerRequireDenseWire(propLoss, &inExpected, "Conv1dTransposed backward", "propLoss");
+    }
+
     /* BFP epic PR3, backward mirror of the forward's ARITH_BFP rule 1 (see
      * conv1dTransposedForward; Linear.c's linearBackward is the canonical
      * backward copy): BFP-stored weights are the width anchor every
@@ -1109,7 +1130,7 @@ void conv1dTransposedBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *
 
 void conv1dTransposedCalcOutputShape(layer_t *layer, shape_t *inputShape, shape_t *outputShape) {
     if (inputShape->numberOfDimensions != 3) {
-        PRINT_ERROR("Conv1dTransposed expects 3D input [batch, channel, length], got %luD",
+        PRINT_ERROR("Conv1dTransposed expects 3D input [batch, channel, length], got %zuD",
                     inputShape->numberOfDimensions);
         exit(1);
     }

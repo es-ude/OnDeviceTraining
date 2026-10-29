@@ -906,6 +906,9 @@ void testConv1dTransposedBackwardSymDilation2() {
  * and exercised through conv1dTransposedBackward; SYM helpers are called
  * directly. Data is all-zero — guards read shapes only. convT1dBuild does not
  * run forward, so intentionally inconsistent layers are safe to build here.
+ * The Float batch/outChannels pair now dies at the #436 op-entry loss gate and
+ * asserts that banner; those two FLOAT wrapper checks are unreachable from the
+ * public entry, so only the SYM twins pin that check class.
  * ------------------------------------------------------------------------- */
 
 void testConv1dTransposedWeightGradFloatRejectsBatchMismatch() {
@@ -925,8 +928,8 @@ void testConv1dTransposedWeightGradFloatRejectsBatchMismatch() {
     size_t propDims[] = {2, 1, 3};
     tensor_t *propLoss = makeFloatTensor(propDims, 3, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(
-        conv1dTransposedBackward(&r.layer, r.input, lossGrad, propLoss, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "Conv1dTransposed backward: loss dim 0",
+                             conv1dTransposedBackward(&r.layer, r.input, lossGrad, propLoss, NULL));
 }
 
 void testConv1dTransposedWeightGradFloatRejectsOutChannelMismatch() {
@@ -946,8 +949,8 @@ void testConv1dTransposedWeightGradFloatRejectsOutChannelMismatch() {
     size_t propDims[] = {1, 1, 3};
     tensor_t *propLoss = makeFloatTensor(propDims, 3, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(
-        conv1dTransposedBackward(&r.layer, r.input, lossGrad, propLoss, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "Conv1dTransposed backward: loss dim 1",
+                             conv1dTransposedBackward(&r.layer, r.input, lossGrad, propLoss, NULL));
 }
 
 void testConv1dTransposedWeightGradSymRejectsBatchMismatch() {
@@ -1008,7 +1011,8 @@ void testConv1dTransposedWeightGradFloatRejectsInputChannelMismatch() {
     float lossData[4] = {0};
     tensor_t *lossGrad = makeFloatTensor(lossDims, 3, lossData);
 
-    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedBackward(&r.layer, r.input, lossGrad, NULL, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "(weightGrad): forwardInput inChannels",
+                             conv1dTransposedBackward(&r.layer, r.input, lossGrad, NULL, NULL));
 }
 
 void testConv1dTransposedWeightGradSymRejectsInputChannelMismatch() {
@@ -1052,8 +1056,8 @@ void testConv1dTransposedBiasGradFloatRejectsOutChannelMismatch() {
     size_t propDims[] = {1, 1, 3};
     tensor_t *propLoss = makeFloatTensor(propDims, 3, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(
-        conv1dTransposedBackward(&r.layer, r.input, lossGrad, propLoss, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "(biasGrad): lossGrad outChannels",
+                             conv1dTransposedBackward(&r.layer, r.input, lossGrad, propLoss, NULL));
 }
 
 void testConv1dTransposedBiasGradSymRejectsOutChannelMismatch() {
@@ -2573,6 +2577,143 @@ void testConv1dTransposedSrForwardIsAPureFunctionOfItsForwardOpKey(void) {
     freeConv1dTransposedLayer(layer);
 }
 
+/* #440: see testConv1dInitConfigClearsOwnsQuantizations. */
+void testConv1dTransposedInitConfigClearsOwnsQuantizations(void) {
+    kernel_t kernel;
+    initKernel(&kernel, 2, VALID, 1, 1);
+    size_t weightDims[] = {1, 1, 2};
+    size_t weightOrder[] = {0, 1, 2};
+    shape_t weightShape = {
+        .dimensions = weightDims, .orderOfDimensions = weightOrder, .numberOfDimensions = 3};
+    tensor_t weightTensor = {.shape = &weightShape};
+    parameter_t weights = {.param = &weightTensor, .grad = NULL};
+    conv1dTransposedConfig_t cfg;
+    memset(&cfg, 0xFF, sizeof cfg);
+    initConv1dTransposedConfigWithWeightsAndBias(&cfg, &kernel, &weights, NULL, 1, 0, NULL, NULL,
+                                                 NULL, NULL);
+    TEST_ASSERT_EQUAL_UINT8(0, *(const unsigned char *)&cfg.ownsQuantizations);
+}
+
+/* #436: the convT kernels read every wire's batch/channels/length from its
+ * physical dims and index it flat, so a produced wire and the consumed loss
+ * must be dense identity-order tensors of exactly the expected shape. Fixtures
+ * perturb the batch dim only (a wider channel would over-read the weight): a
+ * wider produced wire is under-filled and a narrower loss on a frozen layer is
+ * half-read, so an ungated call returns normally (clean RED, child exit 0). */
+void testConv1dTransposedForwardFloatRejectsWrongOutputShape(void) {
+    layer_t *layer = buildFloatConv1dTransposedWithTrainable(TRAINABLE_DEFAULT); /* 2 -> 3, K=3 */
+    size_t inputDims[] = {1, 2, 4};
+    size_t outputDims[] = {2, 3, 6};
+    tensor_t *input =
+        makeFloatTensor(inputDims, 3, (float[]){1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f, 8.f});
+    tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "Conv1dTransposed forward: output",
+                             conv1dTransposedForward(layer, input, output, NULL));
+
+    freeTensor(output);
+    freeTensor(input);
+    freeConv1dTransposedLayer(layer);
+}
+
+/* SYM_INT32 forward math: the gate must sit before the arithmetic dispatch. */
+void testConv1dTransposedForwardSymRejectsWrongOutputShape(void) {
+    size_t weightDims[] = {1, 1, 2};
+    size_t inputDims[] = {1, 1, 3};
+    size_t outputDims[] = {2, 1, 4};
+    parameter_t *weights = buildSymParam(3, weightDims, weight_convT1dSym_singleChannelSingleBatch);
+    tensor_t *input = buildSymTensor(3, inputDims, input_convT1dSym_singleChannelSingleBatch);
+    tensor_t *output = buildSymTensor(3, outputDims, NULL);
+    kernel_t kernel;
+    initKernel(&kernel, 2, VALID, 1, 1);
+    quantization_t *sq = quantizationInitSymInt32(HALF_AWAY);
+    conv1dTransposedConfig_t cfg;
+    initConv1dTransposedConfigWithWeightsAndBias(&cfg, &kernel, weights, NULL, 1, 0, sq, sq, sq,
+                                                 sq);
+    layerConfig_t lc = {.conv1dTransposed = &cfg};
+    layer_t layer = {.type = CONV1D_TRANSPOSED, .config = &lc};
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "Conv1dTransposed forward: output",
+                             conv1dTransposedForward(&layer, input, output, NULL));
+
+    freeTensor(output);
+    freeTensor(input);
+    freeParameter(weights);
+    freeQuantization(sq);
+}
+
+void testConv1dTransposedBackwardFloatRejectsWrongPropLossShape(void) {
+    layer_t *layer = buildFloatConv1dTransposedWithTrainable(TRAINABLE_FALSE); /* 2 -> 3, K=3 */
+    size_t inputDims[] = {1, 2, 4};
+    size_t lossDims[] = {1, 3, 6};
+    size_t propLossDims[] = {2, 2, 4};
+    tensor_t *forwardInput =
+        makeFloatTensor(inputDims, 3, (float[]){1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f, 8.f});
+    tensor_t *lossGrad =
+        makeFloatTensor(lossDims, 3,
+                        (float[]){1.f, -1.f, 2.f, -2.f, 3.f, -3.f, 4.f, -4.f, 5.f, -5.f, 6.f, -6.f,
+                                  7.f, -7.f, 8.f, -8.f, 9.f, -9.f});
+    tensor_t *propLoss = makeFloatTensor(propLossDims, 3, NULL);
+
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "Conv1dTransposed backward: propLoss",
+        conv1dTransposedBackward(layer, forwardInput, lossGrad, propLoss, NULL));
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(forwardInput);
+    freeConv1dTransposedLayer(layer);
+}
+
+/* ARITH_BFP dx: the gate must sit before the BFP anchor block and the arms. */
+void testConv1dTransposedBackwardBfpRejectsWrongPropLossShape(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layer_t *convT = buildBfpConvTBackwardLayer(floatQ, 1);
+    convT->config->conv1dTransposed->frozen = true;
+    convT->config->conv1dTransposed->propLossMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    tensor_t *forwardInput = buildBfpConvTBwdForwardInput();
+    tensor_t *lossGrad = buildBfpConvTBwdLossGrad();
+    size_t propLossDims[] = {(size_t)kConvTBfpBatch + 1, (size_t)kConvTBfpInChannels,
+                             (size_t)kConvTBfpBwdInputLength};
+    tensor_t *propLoss = makeFloatTensor(propLossDims, 3, NULL);
+
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "Conv1dTransposed backward: propLoss",
+        conv1dTransposedBackward(convT, forwardInput, lossGrad, propLoss, NULL));
+
+    freeConv1dTransposedLayer(convT);
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(forwardInput);
+    freeQuantization(floatQ);
+}
+
+/* Frozen, so the weight-grad kernels (which check lossGrad on their own) never
+ * run and the dx op half-reads a two-row forward from a one-row loss. */
+void testConv1dTransposedBackwardFloatRejectsWrongLossShape(void) {
+    layer_t *layer = buildFloatConv1dTransposedWithTrainable(TRAINABLE_FALSE); /* 2 -> 3, K=3 */
+    size_t inputDims[] = {2, 2, 4};
+    size_t lossDims[] = {1, 3, 6};
+    tensor_t *forwardInput = makeFloatTensor(inputDims, 3,
+                                             (float[]){1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f, 8.f, -1.f,
+                                                       -2.f, -3.f, -4.f, -5.f, -6.f, -7.f, -8.f});
+    tensor_t *lossGrad =
+        makeFloatTensor(lossDims, 3,
+                        (float[]){1.f, -1.f, 2.f, -2.f, 3.f, -3.f, 4.f, -4.f, 5.f, -5.f, 6.f, -6.f,
+                                  7.f, -7.f, 8.f, -8.f, 9.f, -9.f});
+    tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
+
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "Conv1dTransposed backward: loss",
+        conv1dTransposedBackward(layer, forwardInput, lossGrad, propLoss, NULL));
+
+    freeTensor(propLoss);
+    freeTensor(lossGrad);
+    freeTensor(forwardInput);
+    freeConv1dTransposedLayer(layer);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testConv1dTransposedForwardSingleChannelSingleBatch);
@@ -2634,5 +2775,11 @@ int main() {
     RUN_TEST(testConv1dTransposedCalcBiasGradsBfpRejectsFloat32Weights);
     RUN_TEST(testConvT1dCalcWeightGradsBfpRejectsInputChannelMismatch);
     RUN_TEST(testConv1dTransposedSrForwardIsAPureFunctionOfItsForwardOpKey);
+    RUN_TEST(testConv1dTransposedInitConfigClearsOwnsQuantizations);
+    RUN_TEST(testConv1dTransposedForwardFloatRejectsWrongOutputShape);
+    RUN_TEST(testConv1dTransposedForwardSymRejectsWrongOutputShape);
+    RUN_TEST(testConv1dTransposedBackwardFloatRejectsWrongPropLossShape);
+    RUN_TEST(testConv1dTransposedBackwardBfpRejectsWrongPropLossShape);
+    RUN_TEST(testConv1dTransposedBackwardFloatRejectsWrongLossShape);
     return UNITY_END();
 }

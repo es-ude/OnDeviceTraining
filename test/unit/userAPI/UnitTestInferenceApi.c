@@ -779,7 +779,13 @@ void testInferenceBatchedAddsBatchAxisToNaturalSamples(void) {
     for (size_t i = 0; i < 2; i++) {
         freeTensor(outputs[i]);
     }
+#ifdef ODT_MEM_PROFILE
+    size_t before = memProfileMark();
     freeReservedMemory(outputs);
+    size_t resultArrayBytes = before - memProfileMark();
+#else
+    freeReservedMemory(outputs);
+#endif
     /* inferenceBatched does not consume the samples (no freeSample inside); the
      * sample_t shells are plain reserveMemory blocks. */
     freeReservedMemory(s1);
@@ -789,6 +795,10 @@ void testInferenceBatchedAddsBatchAxisToNaturalSamples(void) {
     freeReluLayer(relu);
     freeQuantization(q);
 
+#ifdef ODT_MEM_PROFILE
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(batch.size * sizeof(tensor_t *), resultArrayBytes,
+                                     "result array holds pointers, not tensor_t (#459)");
+#endif
     TEST_ASSERT_EQUAL_size_t_MESSAGE(2, rank[0], "output 0 must be [1, 3]");
     TEST_ASSERT_EQUAL_size_t(1, dims[0][0]);
     TEST_ASSERT_EQUAL_size_t(3, dims[0][1]);

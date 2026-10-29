@@ -20,6 +20,7 @@ void softmaxInitConfig(softmaxConfig_t *softmaxConfig, quantization_t *forwardQ,
     softmaxConfig->propLossMath = arithmeticFromQuantizationOrDefault(backwardQ);
     softmaxConfig->outputQ = forwardQ;
     softmaxConfig->propLossQ = backwardQ;
+    softmaxConfig->ownsQuantizations = false;
     softmaxConfig->bfpExpShiftRounding = BFP_SHIFT_TRUNC;
 }
 
@@ -275,10 +276,33 @@ enum {
     SOFTMAX_OP_PROP_LOSS = 1,
 };
 
+static void softmaxRequireInputDims(const tensor_t *input, const tensor_t *t, const char *where,
+                                    const char *what) {
+    const shape_t *a = input->shape;
+    const shape_t *b = t->shape;
+    bool same = a->numberOfDimensions == b->numberOfDimensions;
+    for (size_t d = 0; same && d < a->numberOfDimensions; d++) {
+        same = a->dimensions[d] == b->dimensions[d];
+    }
+    if (!same) {
+        PRINT_ERROR("%s: %s must have the input's rank and dims (input rank %zu, %s rank %zu)",
+                    where, what, a->numberOfDimensions, what, b->numberOfDimensions);
+        exit(1);
+    }
+}
+
 void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output,
                     const layerExec_t *exec) {
     rngKey_t opKey;
     softmaxConfig_t *cfg = softmaxLayer->config->softmax;
+    /* #436: every arm writes y flat at the input's row offsets into a rawOut
+     * shaped like output -- a wider output is left partly unwritten, a
+     * multi-row permuted one silently transposed (softmaxBackwardRequireWires'
+     * twin). */
+    size_t outRows;
+    size_t outRowLen;
+    softmaxRowGeometry(output, "Softmax forward (output)", &outRows, &outRowLen);
+    softmaxRequireInputDims(input, output, "Softmax forward", "output");
     switch (cfg->forwardMath.type) {
     case ARITH_BFP: {
         softmaxBfpRequireSingleRow(input, "Softmax forward");
@@ -360,21 +384,6 @@ static void softmaxVjpRows(const float *x, const float *dLds, float *dLdx, size_
     }
 }
 
-static void softmaxRequireInputDims(const tensor_t *input, const tensor_t *t, const char *what) {
-    const shape_t *a = input->shape;
-    const shape_t *b = t->shape;
-    bool same = a->numberOfDimensions == b->numberOfDimensions;
-    for (size_t d = 0; same && d < a->numberOfDimensions; d++) {
-        same = a->dimensions[d] == b->dimensions[d];
-    }
-    if (!same) {
-        PRINT_ERROR("Softmax backward: %s must have the input's rank and dims (input rank %zu, "
-                    "%s rank %zu)",
-                    what, a->numberOfDimensions, what, b->numberOfDimensions);
-        exit(1);
-    }
-}
-
 /* #457: both non-BFP arms walk loss/propLoss in flat storage order at the
  * input's offsets (raw float* casts, or scratch sized from the input count),
  * so each wire needs the input's dims -- else an OOB read/write, a
@@ -389,8 +398,8 @@ static size_t softmaxBackwardRequireWires(tensor_t *input, tensor_t *loss, tenso
     softmaxRowGeometry(input, "Softmax backward", rows, rowLen);
     softmaxRowGeometry(loss, "Softmax backward (loss)", &wireRows, &wireRowLen);
     softmaxRowGeometry(propLoss, "Softmax backward (propLoss)", &wireRows, &wireRowLen);
-    softmaxRequireInputDims(input, loss, "loss");
-    softmaxRequireInputDims(input, propLoss, "propLoss");
+    softmaxRequireInputDims(input, loss, "Softmax backward", "loss");
+    softmaxRequireInputDims(input, propLoss, "Softmax backward", "propLoss");
     return calcNumberOfElementsByTensor(input);
 }
 

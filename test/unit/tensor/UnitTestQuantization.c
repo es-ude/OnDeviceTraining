@@ -96,6 +96,38 @@ void testInitSymQConfigGroupedRejectsSentinelViolations(void) {
     ASSERT_EXITS_WITH(1, { initSymQConfigGrouped(4, HALF_AWAY, 0, 0, &qc); });
 }
 
+/* #479: qBits == 0 underflows the sub-byte packer; > 31 exceeds the SYM storage ceiling. */
+void testInitSymQConfigRejectsZeroQBits(void) {
+    symQConfig_t qc;
+    ASSERT_EXITS_WITH_OUTPUT(1, "outside the SYM range", initSymQConfig(0, HALF_AWAY, &qc));
+}
+
+/* qBits == 1 has qMax = 2^0 - 1 = 0: pack would compute scale = absMax / 0 = inf, every code 0,
+ * and dequant 0 * inf = NaN. */
+void testInitSymQConfigRejectsOneQBit(void) {
+    symQConfig_t qc;
+    ASSERT_EXITS_WITH_OUTPUT(1, "outside the SYM range", initSymQConfig(1, HALF_AWAY, &qc));
+    ASSERT_EXITS_WITH_OUTPUT(1, "outside the SYM range",
+                             initSymQConfigGrouped(1, HALF_AWAY, 2, 5, &qc));
+}
+
+void testInitSymQConfigGroupedRejectsQBitsAbove31(void) {
+    symQConfig_t qc;
+    ASSERT_EXITS_WITH_OUTPUT(1, "outside the SYM range",
+                             initSymQConfigGrouped(32, HALF_AWAY, 2, 5, &qc));
+}
+
+void testInitSymQConfigAcceptsQBitsBounds(void) {
+    symQConfig_t lo;
+    symQConfig_t hi;
+    initSymQConfig(2, HALF_AWAY, &lo);
+    initSymQConfig(31, HALF_AWAY, &hi);
+    TEST_ASSERT_EQUAL_UINT8(2, lo.qBits);
+    TEST_ASSERT_EQUAL_UINT8(31, hi.qBits);
+    freeReservedMemory(lo.scales);
+    freeReservedMemory(hi.scales);
+}
+
 void testValidateSymQConfigShapeDivisibility(void) {
     float s[2] = {1.f, 1.f};
     symQConfig_t ok = {
@@ -105,6 +137,28 @@ void testValidateSymQConfigShapeDivisibility(void) {
         .scales = s, .numGroups = 2, .groupSize = 4, .roundingMode = HALF_AWAY, .qBits = 4};
     ASSERT_EXITS_WITH(1, { validateSymQConfigShape(&bad, 10); });
     TEST_ASSERT_TRUE(true); /* reached ⇒ ok-case did not exit */
+}
+
+void testValidateSymQConfigShapeRejectsFieldAssignedQBits(void) {
+    /* #479: a field-assigned config never passed the init funnel, so attach re-checks the width */
+    float s[1] = {1.f};
+    symQConfig_t zero = {.scales = s, .numGroups = 1, .groupSize = 0, .qBits = 0};
+    ASSERT_EXITS_WITH_OUTPUT(1, "validateSymQConfigShape: qBits",
+                             validateSymQConfigShape(&zero, 4));
+    symQConfig_t one = {.scales = s, .numGroups = 1, .groupSize = 0, .qBits = 1};
+    ASSERT_EXITS_WITH_OUTPUT(1, "validateSymQConfigShape: qBits", validateSymQConfigShape(&one, 4));
+    symQConfig_t wide = {.scales = s, .numGroups = 1, .groupSize = 0, .qBits = 32};
+    ASSERT_EXITS_WITH_OUTPUT(1, "validateSymQConfigShape: qBits",
+                             validateSymQConfigShape(&wide, 4));
+}
+
+void testValidateSymQConfigShapeAcceptsQBitsBounds(void) {
+    float s[1] = {1.f};
+    symQConfig_t lo = {.scales = s, .numGroups = 1, .groupSize = 0, .qBits = 2};
+    symQConfig_t hi = {.scales = s, .numGroups = 1, .groupSize = 0, .qBits = 31};
+    validateSymQConfigShape(&lo, 4); /* must NOT exit */
+    validateSymQConfigShape(&hi, 4);
+    TEST_ASSERT_TRUE(true); /* reached => neither bound exited */
 }
 
 /* Group-quant PR4 (Task 1, group-quant D6): asymQConfig_t goes always-array
@@ -384,7 +438,13 @@ int main(void) {
     RUN_TEST(testInitSymQConfigAllocatesIndependentScalesArrays);
     RUN_TEST(testInitSymQConfigGroupedAllocatesPerGroupScales);
     RUN_TEST(testInitSymQConfigGroupedRejectsSentinelViolations);
+    RUN_TEST(testInitSymQConfigRejectsZeroQBits);
+    RUN_TEST(testInitSymQConfigRejectsOneQBit);
+    RUN_TEST(testInitSymQConfigGroupedRejectsQBitsAbove31);
+    RUN_TEST(testInitSymQConfigAcceptsQBitsBounds);
     RUN_TEST(testValidateSymQConfigShapeDivisibility);
+    RUN_TEST(testValidateSymQConfigShapeRejectsFieldAssignedQBits);
+    RUN_TEST(testValidateSymQConfigShapeAcceptsQBitsBounds);
     RUN_TEST(testInitAsymQConfigProducesPerTensorSentinelWithZeroZp);
     RUN_TEST(testInitAsymQConfigAllocatesIndependentArrays);
     RUN_TEST(testInitAsymQConfigGroupedAllocatesPerGroupArrays);

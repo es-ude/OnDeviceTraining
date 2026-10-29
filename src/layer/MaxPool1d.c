@@ -12,6 +12,7 @@
 #include "ExecuteOp.h"
 #include "Layer.h"
 #include "LayerExec.h"
+#include "LayerWireGuards.h"
 #include "Quantization.h"
 #include "SlidingWindow1d.h"
 #include "StorageApi.h"
@@ -31,6 +32,7 @@ void initMaxPool1dConfig(maxPool1dConfig_t *cfg, kernel_t *kernel, tensor_t *arg
     cfg->propLossMath = arithmeticFromQuantizationOrDefault(propLossQ);
     cfg->outputQ = forwardQ;
     cfg->propLossQ = propLossQ;
+    cfg->ownsQuantizations = false;
 }
 
 /* #152: every arm indexes the argmax at (b * channels + c) * outputLength +
@@ -48,6 +50,10 @@ void initMaxPool1dConfig(maxPool1dConfig_t *cfg, kernel_t *kernel, tensor_t *arg
  * rank check because every calling arm has already read them. */
 static void maxPoolRequireArgmaxShape(const tensor_t *argmax, const tensor_t *input,
                                       size_t outputLength, const char *where) {
+    if (argmax == NULL) {
+        PRINT_ERROR("%s: argmaxIndices must not be NULL (factory-bypass config?)", where);
+        exit(1);
+    }
     size_t batch = input->shape->dimensions[0];
     size_t channels = input->shape->dimensions[1];
     if (argmax->shape->numberOfDimensions != 3) {
@@ -61,30 +67,6 @@ static void maxPoolRequireArgmaxShape(const tensor_t *argmax, const tensor_t *in
         PRINT_ERROR("%s: argmaxIndices shape must be [%zu, %zu, %zu] (batch, channels, "
                     "outputLength of this call), got [%zu, %zu, %zu]",
                     where, batch, channels, outputLength, got[0], got[1], got[2]);
-        exit(1);
-    }
-}
-
-/* BFP epic PR4 (F5), every arm since #4 PR0: the pool kernels index their
- * outputs as DENSE [batch][channels][length] arrays whose batch and channels
- * come from the OPERAND's dims (input forward, lossGrad backward), so an
- * output that disagrees on dim 0 or dim 1 is written past its end even when
- * its length is right — checking dimensions[2] alone is not enough. Rank is
- * checked first: dimensions[0..2] on a rank-2 shape is itself an over-read,
- * which is also why a backward arm rank-checks its dx output before reading
- * that output's length to pass in here. The argmax is validated separately
- * through maxPoolRequireArgmaxShape (#152). */
-static void poolBfpRequireDims3(const tensor_t *t, size_t d0, size_t d1, size_t d2,
-                                const char *what) {
-    if (t->shape->numberOfDimensions != 3) {
-        PRINT_ERROR("%s: expected a rank-3 [batch, channels, length] tensor, got rank %zu", what,
-                    t->shape->numberOfDimensions);
-        exit(1);
-    }
-    if (t->shape->dimensions[0] != d0 || t->shape->dimensions[1] != d1 ||
-        t->shape->dimensions[2] != d2) {
-        PRINT_ERROR("%s: expected shape [%zu, %zu, %zu], got [%zu, %zu, %zu]", what, d0, d1, d2,
-                    t->shape->dimensions[0], t->shape->dimensions[1], t->shape->dimensions[2]);
         exit(1);
     }
 }
@@ -110,8 +92,7 @@ static void maxPool1dForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, t
     size_t outputLength = geom.outputLength;
 
     // batch/channels come from the input but size the rawOut writes (F5 parity).
-    poolBfpRequireDims3(rawOut, batch, channels, outputLength,
-                        "MaxPool1d forward FLOAT32 (rawOut)");
+    poolRequireDims3(rawOut, batch, channels, outputLength, "MaxPool1d forward FLOAT32 (rawOut)");
     maxPoolRequireArgmaxShape(auxOut, input, outputLength, "MaxPool1d forward FLOAT32");
 
     float const *xArr = (float const *)input->data;
@@ -172,8 +153,7 @@ static void maxPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *r
     size_t outputLength = geom.outputLength;
 
     // batch/channels come from the input but size the rawOut writes (F5 parity).
-    poolBfpRequireDims3(rawOut, batch, channels, outputLength,
-                        "MaxPool1d forward SYM_INT32 (rawOut)");
+    poolRequireDims3(rawOut, batch, channels, outputLength, "MaxPool1d forward SYM_INT32 (rawOut)");
     maxPoolRequireArgmaxShape(auxOut, input, outputLength, "MaxPool1d forward SYM_INT32");
 
     int32_t const *xArr = (int32_t const *)input->data;
@@ -250,7 +230,7 @@ static void maxPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut
      * SAME (b * channels + c) * outputLength + outPos, batch/channels taken
      * from the input, so both need all three dims validated — auxOut most of
      * all, because it is never funnel-converted and is written raw. */
-    poolBfpRequireDims3(rawOut, batch, channels, outputLength, "MaxPool1d forward BFP (rawOut)");
+    poolRequireDims3(rawOut, batch, channels, outputLength, "MaxPool1d forward BFP (rawOut)");
     maxPoolRequireArgmaxShape(auxOut, input, outputLength, "MaxPool1d forward BFP");
 
     const bfpQConfig_t *qC = input->quantization->qConfig;
@@ -429,13 +409,26 @@ void maxPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const l
         output);
 }
 
-/* BFP epic PR4 (R-P4): the ARITH_BFP arm below IS the native pooling path, so
- * this guard is NARROWED to the two arms that raw-view ->data in their own
- * storage format — a packed BFP wire read as float* / int32_t* is a 4x heap
- * over-read on lossGrad and an over-write into the packed propLoss buffer.
- * Keyed on the wire's STORAGE dtype, not the declared arithmetic (#315
- * parity). forwardInput is NOT guarded: this layer never dereferences it
- * (the argmax indices recorded by the forward carry all the routing). */
+/* -1 is the only legal out-of-range argmax (empty window). The argmax is
+ * kernel-written and never funnel-converted, so its content is unvalidated: a
+ * stale argmax from a differently-shaped forward scatters past the grad row,
+ * and a blanket `< 0` sentinel would drop a corrupt negative silently. The
+ * explicit `idx < 0` states intent; the size_t wrap would only catch it by
+ * accident. */
+static bool maxPoolArgmaxIsSentinel(int32_t idx, size_t inputLength, size_t outIdx,
+                                    const char *where) {
+    if (idx == -1) {
+        return true;
+    }
+    if (idx < 0 || (size_t)idx >= inputLength) {
+        PRINT_ERROR("%s: argmax index %d at output position %zu is outside [0, %zu) and is not "
+                    "the -1 empty-window sentinel -- the recorded argmax does not belong to this "
+                    "input shape (stale forward?)",
+                    where, idx, outIdx, inputLength);
+        exit(1);
+    }
+    return false;
+}
 
 void maxPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
                             tensor_t *propLoss) {
@@ -454,10 +447,17 @@ void maxPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tensor_t *lo
     size_t inputLength = propLoss->shape->dimensions[2];
 
     // batch/channels come from lossGrad but size the propLoss memset + scatter (F5 parity).
-    poolBfpRequireDims3(propLoss, batch, channels, inputLength,
-                        "MaxPool1d backward FLOAT32 (propLoss)");
+    poolRequireDims3(propLoss, batch, channels, inputLength,
+                     "MaxPool1d backward FLOAT32 (propLoss)");
     maxPoolRequireArgmaxShape(cfg->argmaxIndices, lossGrad, outputLength,
                               "MaxPool1d backward FLOAT32");
+    size_t geomOutputLength = windowGeometry1dCalc(inputLength, cfg->kernel).outputLength;
+    if (geomOutputLength != outputLength) {
+        PRINT_ERROR("MaxPool1d backward FLOAT32: lossGrad outputLength (%zu) does not match "
+                    "geometry-derived (%zu)",
+                    outputLength, geomOutputLength);
+        exit(1);
+    }
 
     float const *gyArr = (float const *)lossGrad->data;
     int32_t const *argmaxArr = (int32_t const *)cfg->argmaxIndices->data;
@@ -471,8 +471,9 @@ void maxPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tensor_t *lo
             for (size_t outPos = 0; outPos < outputLength; outPos++) {
                 size_t outIdx = (b * channels + c) * outputLength + outPos;
                 int32_t inputIdx = argmaxArr[outIdx];
-                if (inputIdx < 0) {
-                    continue; // sentinel: empty window, no gradient flows
+                if (maxPoolArgmaxIsSentinel(inputIdx, inputLength, outIdx,
+                                            "MaxPool1d backward FLOAT32")) {
+                    continue;
                 }
                 gxArr[(b * channels + c) * inputLength + (size_t)inputIdx] += gyArr[outIdx];
             }
@@ -532,10 +533,16 @@ static void maxPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *
     size_t inputLength = rawOut->shape->dimensions[2];
 
     // batch/channels come from lossGrad but size the rawOut memset + scatter (F5 parity).
-    poolBfpRequireDims3(rawOut, batch, channels, inputLength,
-                        "MaxPool1d backward SYM_INT32 (rawOut)");
+    poolRequireDims3(rawOut, batch, channels, inputLength, "MaxPool1d backward SYM_INT32 (rawOut)");
     maxPoolRequireArgmaxShape(cfg->argmaxIndices, lossGrad, outputLength,
                               "MaxPool1d backward SYM_INT32");
+    size_t geomOutputLength = windowGeometry1dCalc(inputLength, cfg->kernel).outputLength;
+    if (geomOutputLength != outputLength) {
+        PRINT_ERROR("MaxPool1d backward SYM_INT32: lossGrad outputLength (%zu) does not match "
+                    "geometry-derived (%zu)",
+                    outputLength, geomOutputLength);
+        exit(1);
+    }
 
     /* An input position can be argmax only of windows CONTAINING it, so the
      * worst-case scatter collisions per cell = covering windows =
@@ -555,8 +562,9 @@ static void maxPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *
             for (size_t outPos = 0; outPos < outputLength; outPos++) {
                 size_t outIdx = (b * channels + c) * outputLength + outPos;
                 int32_t inputIdx = argmaxArr[outIdx];
-                if (inputIdx < 0) {
-                    continue; // sentinel: empty window, no gradient flows
+                if (maxPoolArgmaxIsSentinel(inputIdx, inputLength, outIdx,
+                                            "MaxPool1d backward SYM_INT32")) {
+                    continue;
                 }
                 gxArr[(b * channels + c) * inputLength + (size_t)inputIdx] += gyArr[outIdx];
             }
@@ -599,8 +607,15 @@ static void maxPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOu
      * inputLength floats, and argmaxArr is read at the SAME flat index as
      * lossGrad — an argmax tensor that matches only on outputLength is read
      * past its end for every b, c beyond its own. */
-    poolBfpRequireDims3(rawOut, batch, channels, inputLength, "MaxPool1d backward BFP (rawOut)");
+    poolRequireDims3(rawOut, batch, channels, inputLength, "MaxPool1d backward BFP (rawOut)");
     maxPoolRequireArgmaxShape(cfg->argmaxIndices, lossGrad, outputLength, "MaxPool1d backward BFP");
+    size_t geomOutputLength = windowGeometry1dCalc(inputLength, cfg->kernel).outputLength;
+    if (geomOutputLength != outputLength) {
+        PRINT_ERROR("MaxPool1d backward BFP: lossGrad outputLength (%zu) does not match "
+                    "geometry-derived (%zu)",
+                    outputLength, geomOutputLength);
+        exit(1);
+    }
 
     const bfpQConfig_t *qC = lossGrad->quantization->qConfig;
     validateBfpQConfigShape(qC, calcNumberOfElementsByTensor(lossGrad));
@@ -617,33 +632,9 @@ static void maxPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOu
             for (size_t outPos = 0; outPos < outputLength; outPos++) {
                 size_t outIdx = (b * channels + c) * outputLength + outPos;
                 int32_t inputIdx = argmaxArr[outIdx];
-                if (inputIdx == -1) {
-                    continue; // sentinel: empty window, no gradient flows
-                }
-                /* F7: -1 is the ONLY legal out-of-range value. Any other index
-                 * outside [0, inputLength) is a scatter past the end of the
-                 * raw grad buffer — a silent heap write, not a wrong number.
-                 * The argmax tensor is kernel-written and never funnel-
-                 * converted, so nothing upstream has validated its CONTENT;
-                 * a stale argmax left over from a differently-shaped forward
-                 * is exactly how a too-large index arrives. Bounds-check on
-                 * read rather than trusting the producer.
-                 *
-                 * PR4 adversarial gate: the sentinel test is STRICT
-                 * equality, so every other negative falls into this guard
-                 * instead of being silently skipped -- a blanket `< 0`
-                 * sentinel would treat corruption as an empty window and drop
-                 * the gradient without a word. `inputIdx < 0` is spelled out
-                 * even though the size_t cast below already wraps a negative
-                 * past inputLength: the wrap is an accident of the cast, the
-                 * intent is that only -1 is legal. */
-                if (inputIdx < 0 || (size_t)inputIdx >= inputLength) {
-                    PRINT_ERROR("MaxPool1d backward BFP: argmax index %d at output position %zu "
-                                "is outside [0, %zu) and is not the -1 empty-window sentinel -- "
-                                "the recorded argmax does not belong to this input shape (stale "
-                                "forward?)",
-                                inputIdx, outIdx, inputLength);
-                    exit(1);
+                if (maxPoolArgmaxIsSentinel(inputIdx, inputLength, outIdx,
+                                            "MaxPool1d backward BFP")) {
+                    continue;
                 }
                 size_t g = bfpGroupOf(qC, outIdx);
                 gxArr[(b * channels + c) * inputLength + (size_t)inputIdx] +=
@@ -659,6 +650,8 @@ void maxPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGra
     maxPool1dConfig_t *cfg = layer->config->maxPool1d;
     switch (cfg->propLossMath.type) {
     case ARITH_FLOAT32:
+        /* forwardInput is NOT guarded: this layer never dereferences it (the argmax
+         * indices recorded by the forward carry all the routing). */
         /* Runs OUTSIDE executeOp and raw-casts both wires to float*; a packed
          * BFP wire would be read as wide scalars (4x heap over-read on
          * lossGrad, over-write into the packed propLoss buffer). #315 parity. */
@@ -713,7 +706,7 @@ void maxPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGra
 
 void maxPool1dCalcOutputShape(layer_t *layer, shape_t *inputShape, shape_t *outputShape) {
     if (inputShape->numberOfDimensions != 3) {
-        PRINT_ERROR("MaxPool1d expects 3D input [batch, channel, length], got %luD",
+        PRINT_ERROR("MaxPool1d expects 3D input [batch, channel, length], got %zuD",
                     inputShape->numberOfDimensions);
         exit(1);
     }

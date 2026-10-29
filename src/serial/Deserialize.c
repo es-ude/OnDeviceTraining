@@ -341,7 +341,16 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
         for (size_t g = 0; g < fileNumGroups; g++) {
             symQC->scales[g] = serialReadF32LE(f);
         }
-        symQC->qBits = serialReadU8(f);
+        uint8_t fileQBits = serialReadU8(f);
+        /* #479: unconditional, like the ASYM arm -- the wire-config sites (numberOfElements == 0)
+         * never reach validateSymQConfigShape below. 31 is the SYM storage ceiling; 1 has
+         * qMax == 0 (inf scale, NaN dequant). */
+        if (fileQBits < 2 || fileQBits > 31) {
+            PRINT_ERROR("deserializeQConfig: SYM file qBits %u outside [2, 31]",
+                        (unsigned)fileQBits);
+            exit(1);
+        }
+        symQC->qBits = fileQBits;
         symQC->roundingMode = (roundingMode_t)serialReadU8(f);
         /* numberOfElements == 0 marks ONLY the layer outputQ/propLossQ
          * wire-config call sites in deserializeLayer -- no live tensor backs

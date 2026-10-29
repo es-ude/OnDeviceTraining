@@ -74,6 +74,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         InferenceApi
         MORE_LIBS
+        StorageApi
         RematScheduler
         LayerExec
         RNG

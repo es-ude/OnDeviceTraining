@@ -17,7 +17,7 @@ typedef struct lossConfig {
     tensor_t *classWeights;
 } lossConfig_t;
 
-/* Convenience initializer. Returns {funcType, REDUCTION_MEAN, REDUCTION_MEAN, NULL}.
+/* Convenience initializer. Returns {funcType, REDUCTION_MEAN, NULL}.
  * forwardReduction is intentionally NOT a config field — it is a per-call parameter
  * on aggregators. trainingRun hardcodes REDUCTION_MEAN to keep train/eval comparability. */
 lossConfig_t defaultLossConfig(lossFuncType_t funcType);
@@ -40,7 +40,7 @@ lossConfig_t defaultLossConfig(lossFuncType_t funcType);
  * and at least one element, and the label has modelOutput's rank and dimensions
  * (orderOfDimensions is not compared). All microbatches in one macro batch
  * must have equal B (uniform microbatch size assumption — see
- * docs/CONVENTIONS.md §"Loss API: microbatch contracts"). */
+ * docs/conventions/loss.md, "Loss API: microbatch contracts"). */
 typedef float (*lossFwdFn_t)(tensor_t *modelOutput, tensor_t *label, reduction_t reduction,
                              const layerExec_t *exec);
 
@@ -69,10 +69,11 @@ typedef void (*lossBwdFn_t)(tensor_t *modelOutput, tensor_t *label, tensor_t *re
  *
  * Contract on modelOutput: a `[B, ...]` tensor (rank >= 2, at least one
  * element) whose dims[0] is the batch axis; computeMeanScaleMSE fails fast
- * otherwise (#153), computeMeanScaleCE never reads it. The only caller
- * (trainingEpochDefault) does not pass the model output itself -- it passes
- * the batchViewOf view of sample 0's label (#152 PR3a), so for MSE this is
- * dims[0] of the LABEL's [1, ...] view, not the model's output tensor. */
+ * otherwise (#153), computeMeanScaleCE never reads it. The in-tree callers
+ * (trainingEpochDefault, examples/kws_raw/trace_c.c) do not pass the model
+ * output itself -- they pass the batchViewOf view of the first sample's
+ * label (#152 PR3a), so for MSE this is dims[0] of the LABEL's [1, ...]
+ * view, not the model's output tensor. */
 typedef float (*computeMeanScaleFn_t)(size_t totalSamples, tensor_t *modelOutput);
 
 typedef struct lossFunctions {

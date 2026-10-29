@@ -6,12 +6,14 @@
 #include <stdlib.h>
 
 #include "Add.h"
+#include "Arithmetic.h"
 #include "ArithmeticType.h"
 #include "BfpKernelSupport.h"
 #include "Common.h"
 #include "ExecuteOp.h"
 #include "Layer.h"
 #include "LayerExec.h"
+#include "LayerWireGuards.h"
 #include "Linear.h"
 #include "Matmul.h"
 #include "Rounding.h"
@@ -28,6 +30,7 @@ void linearInitConfig(linearConfig_t *linearConfig, parameter_t *weights, parame
     linearConfig->propLossMath = arithmeticFromQuantizationOrDefault(backwardMath);
     linearConfig->outputQ = forwardQ;
     linearConfig->propLossQ = propLossQ;
+    linearConfig->ownsQuantizations = false;
 
     /* Today's per-callsite hardcodes (linearBackward, below), now carried on
      * the config so every caller of this init function -- factory-built or
@@ -166,6 +169,12 @@ void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output,
 
     tensor_t *weights = getParamFromParameter(linearConfig->weights);
     tensor_t *bias = linearConfig->bias != NULL ? getParamFromParameter(linearConfig->bias) : NULL;
+
+    size_t outDims[2];
+    size_t outOrder[2];
+    shape_t outExpected = {.dimensions = outDims, .orderOfDimensions = outOrder};
+    linearCalcOutputShape(linearLayer, input->shape, &outExpected);
+    layerRequireDenseWire(output, &outExpected, "Linear forward", "output");
 
     /* BFP epic PR2 (Task 7), ARITH_BFP arm — identical layer-side rules in
      * Conv1d.c/Conv1dTransposed.c (arm parity):
@@ -480,6 +489,22 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
     linearConfig_t *cfg = linearLayer->config->linear;
     tensor_t *weights = getParamFromParameter(cfg->weights);
 
+    size_t lossDims[2];
+    size_t lossOrder[2];
+    shape_t lossExpected = {.dimensions = lossDims, .orderOfDimensions = lossOrder};
+    linearCalcOutputShape(linearLayer, forwardInput->shape, &lossExpected);
+    /* Dense, not logical: Matmul (weight-grad, dx) would honour a transposed
+     * loss view, but the bias-grad kernels sum it by raw flat index. */
+    layerRequireDenseWire(loss, &lossExpected, "Linear backward", "loss");
+    if (propLoss != NULL) {
+        size_t inDims[2] = {getDimensionsByIndex(forwardInput, 0),
+                            getDimensionsByIndex(forwardInput, 1)};
+        size_t inOrder[2] = {0, 1};
+        shape_t inExpected = {
+            .numberOfDimensions = 2, .dimensions = inDims, .orderOfDimensions = inOrder};
+        layerRequireDenseWire(propLoss, &inExpected, "Linear backward", "propLoss");
+    }
+
     /* BFP epic PR3, backward mirror of the forward's ARITH_BFP rules (see
      * linearForward): BFP-stored weights are the width anchor every
      * FLOAT32-stored operand stages at, and the stack template below covers
@@ -582,11 +607,14 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
 
 void linearCalcOutputShape(layer_t *linearLayer, shape_t *inputShape, shape_t *outputShape) {
     if (inputShape->numberOfDimensions != 2) {
-        PRINT_ERROR("Linear layer expects 2D input, got %luD\n", inputShape->numberOfDimensions);
+        PRINT_ERROR("Linear layer expects 2D input, got %zuD", inputShape->numberOfDimensions);
         exit(1);
     }
 
-    size_t batchSize = inputShape->dimensions[0];
+    /* Logical, not physical: Matmul reads the input order-aware, and the
+     * backward propLoss gate takes the input's logical dims too. */
+    tensor_t inputView = {.shape = inputShape};
+    size_t batchSize = getDimensionsByIndex(&inputView, 0);
 
     linearConfig_t *cfg = linearLayer->config->linear;
     shape_t *weightShape = cfg->weights->param->shape;

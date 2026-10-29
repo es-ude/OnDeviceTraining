@@ -493,7 +493,9 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
     size_t lossOrder[2];
     shape_t lossExpected = {.dimensions = lossDims, .orderOfDimensions = lossOrder};
     linearCalcOutputShape(linearLayer, forwardInput->shape, &lossExpected);
-    layerRequireLogicalShape(loss, &lossExpected, "Linear backward", "loss");
+    /* Dense, not logical: Matmul (weight-grad, dx) would honour a transposed
+     * loss view, but the bias-grad kernels sum it by raw flat index. */
+    layerRequireDenseWire(loss, &lossExpected, "Linear backward", "loss");
     if (propLoss != NULL) {
         size_t inDims[2] = {getDimensionsByIndex(forwardInput, 0),
                             getDimensionsByIndex(forwardInput, 1)};

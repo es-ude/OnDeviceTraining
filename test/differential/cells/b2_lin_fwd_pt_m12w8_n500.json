@@ -1,0 +1,49 @@
+{
+  "name": "b2_lin_fwd_pt_m12w8_n500",
+  "description": "B2 Linear forward per-tensor, mixed widths m12 x m8, N=500 (limit 8191): one segment whose partial exceeds 2^24, so (float)partial rounds (section 7) -- still predicted to the bit.",
+  "family": "bfp_gemm",
+  "op": "linear",
+  "direction": "forward",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3102,
+    "batch": 2,
+    "inF": 500,
+    "outF": 4,
+    "input": {
+      "m": 12,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 2.0,
+      "expSpread": 0
+    },
+    "weight": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.25,
+      "expSpread": 0
+    },
+    "bias": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.1,
+      "expSpread": 0
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED"
+  }
+}

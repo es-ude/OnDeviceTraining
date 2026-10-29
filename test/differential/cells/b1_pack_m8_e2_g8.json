@@ -1,0 +1,50 @@
+{
+  "name": "b1_pack_m8_e2_g8",
+  "description": "B1 pack grouped (groupSize 8, 16 groups), m=8 e=2: 8 random groups + boundary (0/+1/-1 ulp32 of qMax*2^k, F2), exact-half ties, an all-zero group (zero state), saturation and flush edges (D6), and a negative value far below -qMax at the cap (the clamp-floor inconsistency, DOC_GAPS[0]).",
+  "family": "bfp_pack",
+  "op": "convert",
+  "direction": "pack_bfp",
+  "tiers": [
+    "convert"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "output": {
+    "dtype": "BFP",
+    "m": 8,
+    "e": 2,
+    "groupSize": 8
+  },
+  "fixture": {
+    "type": "bfp_pack",
+    "seed": 3020,
+    "n": 128,
+    "groups": [
+      "random",
+      "random",
+      "random",
+      "random",
+      "random",
+      "random",
+      "random",
+      "random",
+      "boundary:0",
+      "boundary:1",
+      "boundary:-1",
+      "ties",
+      "zero",
+      "saturate",
+      "flush",
+      "negfloor"
+    ]
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED"
+  }
+}

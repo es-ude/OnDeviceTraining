@@ -1,8 +1,8 @@
 # Differential numerics harness
 
-Op-level check of the SYM_INT32 (and, in later steps, BFP) implementations
-against two references that are independent of the C code and of the Python
-mirror in `test/unit/goldgen/sym_gold.py`:
+Op-level check of the SYM_INT32 and BFP implementations against two
+references that are independent of the C code and of the Python mirror in
+`test/unit/goldgen/sym_gold.py`:
 
 - **Leg A** -- the *documented* scheme re-implemented from
   `docs/conventions/*.md` only (`ref/sym_ref.py`, `ref/bfp_ref.py`). Catches
@@ -22,13 +22,15 @@ mirror in `test/unit/goldgen/sym_gold.py`:
 The C side is one small driver, `odt_diffdrive`, that links the same static
 libraries the unit tests use and runs exactly one op per invocation: JSON spec
 + `.npy` integer codes (or float32 values for a FLOAT32-stored operand) in,
-codes + scale (or float32 values for a FLOAT32 grad) out -- never dequantized
-floats where a scale exists. Three tiers: `kernel` calls the raw arithmetic
-entry (accumulator-range int32 the funnel never exposes), `layer` goes
-through `layerFunctions[].forward/backward` and the `executeOp` funnel (the
-scheme tier: staging, width restore, rounding owner, grad accumulate), and
-`convert` runs one conversion primitive in isolation (encode, dynamic
-requant, fixed-scale requant).
+codes + scale (or float32 values for a FLOAT32 grad; codes + per-group
+exponents for a BFP wire) out -- never dequantized floats where a grid
+exists. Three tiers: `kernel` calls the raw arithmetic entry (accumulator-
+range int32 the funnel never exposes; the raw FLOAT32 of a BFP kernel),
+`layer` goes through `layerFunctions[].forward/backward` and the `executeOp`
+funnel (the scheme tier: staging, width restore, rounding owner, grad
+accumulate), and `convert` runs one conversion primitive in isolation
+(encode, dynamic requant, fixed-scale requant, BFP pack). Ops: `linear`,
+`conv1d`, `convt1d` (BFP only), `convert`.
 
 Not a ctest. Outputs under `out/` are gitignored.
 
@@ -65,6 +67,7 @@ signed-overflow behaviour is that of a plain wrapping build.
 | `TIE_ONLY` | the only differences are what the doc leaves to float32: on the layer tier, +-1 codes whose reference pre-rounding value is within k ulp32 of a .5 boundary; on either tier, a bias channel resolved to the other side of a float32-tied seed or to the float32 reading (see the seed policy); a FLOAT32 output within the float32 roundings its documented production takes (3 for a weight grad, 2 for a bias grad -- `sym_ref.DOC_GAPS[11]`) |
 | `MISMATCH` | a difference away from a tie, a seed outside the policy, or a scale miss -- implementation finding. The kernel tier also prints the `class`: `seed` (a constant per-channel residual that is not an allowed seed) or `mac` (a non-constant residual, i.e. the integer sum itself); `float` for a FLOAT32 output beyond its roundings |
 | `MATCH` / `ABORT` / `WRAP` / `SATURATE` | F9 rows only -- a reduction whose EXACT integer accumulator does not fit int32 (Leg A computes this per fixture). The C outcome is classified against `restore(exact)`, a library fail-fast (exit 1), `restore(wrap_int32(exact))` and `restore(clip(exact))`; `WRAP` is the silent overflow the doc's deferred runtime check would catch and is a finding (FAIL). The kernel tier is the authoritative row: on the layer tier the width restore can map different raw wires onto the same codes |
+| BFP rows (`bfp_rows.py`) | the same words, read on the BFP contract: `EXACT` = the raw float32 equals the documented fold bit for bit (single-segment reductions are predicted to the bit; multi-segment ones along the assumed walk, `bfp_ref.DOC_GAPS[4]`), a BFP wire / pack equals the exact exponent rule + round/clamp, an fq twin is bit-identical; `TIE_ONLY` = only what the doc leaves open -- class `fold_order` (a multi-segment raw inside the fold bound but not bit-equal to the assumed walk), `E_boundary` (a group exponent off by one inside the F2 window and self-consistent codes), `clamp_floor` (C `-2^(m-1)` where sections 1/2 say `-qMax` and 5.6 says `-2^(m-1)` -- the doc's own inconsistency); `MISMATCH` classes `fold` (raw differs beyond that), `E` / `code` (pack), `guard` (Leg A predicts the headroom fail-fast, the run completed), `abort` (the run failed fast inside the guard), `fq` (the twins differ); `ABORT` = the headroom guard fired where Leg A predicted it (PASS) |
 
 | Leg B | meaning |
 |---|---|
@@ -182,6 +185,81 @@ reproduced code-for-code; `random_codes` draws int12 codes and float32 scales
 directly (Conv1d); `linear_grid` / `full_scale` (Linear, above); `convert`
 (S11, above).
 
+**Step 3 (BFP, design cells B1-B5; `family` key dispatches to
+`bfp_rows.py`):**
+
+- `b1_pack_m{m}_e{e}_pt` / `_g8` (m in {2,4,6,8,12,16}, e in {2,4,8}) and
+  `b1x_census_m{m}_e8_g16` -- B1, the FLOAT32 -> BFP pack on the convert
+  tier (`conversionMatrix[FLOAT32][BFP]`). Per-tensor: one random binade.
+  Grouped (16 groups of 8): random groups, absmax exactly / +1 / -1 ulp32 of
+  `qMax * 2^k` (F2), exact-half ties (HALF_AWAY vs half-even), an all-zero
+  group (zero state), the D6 saturation and flush edges (reachable at e < 8;
+  at e = 8 the cap is `2^127` and every finite float32 fits for m > 2), and
+  a value far below `-qMax` at the cap (`negfloor`). The census cells put 18
+  groups at `j` ulp32 off a boundary, `j` in -4..4. Leg A = the section-3
+  rule in rational arithmetic + D6 + `+-qMax` clamp; Leg B = round trip
+  within half a code at the C's own exponent (clamped elements excluded,
+  counted). Observed: every E equals the exact rule (the F2 window never
+  opened: a float32 absmax divided by the integer qMax is correctly rounded
+  and lands on a power of two only when the exact quotient is one), codes
+  exact, and the saturating NEGATIVE values come back as `-2^(m-1)` where
+  sections 1/2 say `-qMax` (class `clamp_floor`, 3-5 elements per e < 8
+  grouped cell, e.g. m8 e4: value -130048, pre-rounding -508 at the cap
+  scale, C -128, Leg A -127) -- the inconsistency section 5.6 already names
+  as open (#420), reported, not waived into EXACT.
+- `b2_lin_fwd_*`, `b2_conv_fwd_*`, `b2_convt_fwd_*` -- B2, the GEMM-family
+  forward under `ARITH_BFP`, kernel tier (`linearForwardBfp`,
+  `conv1dKernelBfp`, `convTranspose1dKernelBfpGather` on the funnel's
+  unpacked scratch form) and layer tier (packed BFP operands borrowed by the
+  funnel, FLOAT32 `outputQ` = the raw). Per-tensor fixtures (one segment per
+  output: the fold is predicted to the bit, `expect EXACT`), grouped on both
+  operands with group sizes that do and do not divide the row length, mixed
+  widths (m12 x m8, m12 x m6, m12 x m4, m8 x m6), e = 4 and 8, conv groups,
+  SAME / EXPLICIT padding, stride and dilation, ConvT outputPadding (tail
+  positions stay at the bias seed), and the lossy regime of section 7: m16 x
+  m8 with a 400-term segment (int32 partial ~1.7e9 > 2^24: the `(float)
+  partial` cast rounds), two 200-term segments, and m16 x m16 with groupSize
+  1 (every product its own segment, 128 casts above 2^24). `b2x_*_abort_*`
+  sit one past `bfpSegmentLimit` (16 x 8 at N = 512; 16 x 16 at N = 2) and
+  must fail fast. `b2s_lin_fwd_f32in_*` gives the layer tier a grid-exact
+  FLOAT32 input: Decision 1 stages it per-tensor at the weight's widths, so
+  its codes must equal the ones the kernel tier receives.
+- `b3_*_wire_*` -- B3, the same forwards (and a Linear dx) onto a BFP wire
+  (`outputQ` / `propLossQ` BFP, per-tensor and grouped): the OUT_WRITE pack
+  of the raw. Leg A packs the PREDICTED raw (bit-exact for the
+  single-segment fixtures; for the one multi-segment fixture the fold bound,
+  in code units, is the tie window); Leg B = fold bound + half a code.
+- `b4_*` -- B4, native backward: Linear dx / weightGrad / biasGrad on both
+  tiers (`linearCalcPropLossBfp`, `linearCalcWeightGradsBfp`,
+  `linearCalcBiasGradsBfp` raw; the layer's ONE backward into a FLOAT32 dx
+  wire and FLOAT32 grads -- the ACC epilogue is the exact float add into a
+  zeroed grad, so the layer tier IS the raw tier), Conv1d / ConvT1d dx,
+  weightGrad and biasGrad on the layer tier (their grad kernels have no
+  public raw entry), batch 2, conv groups, SAME padding (padded weightGrad),
+  stride / dilation / outputPadding, per-tensor and grouped operands. Leg B
+  = float64 autograd on the dequantized operands within the fold bound.
+  `b4x_lin_dw_abort_sum_m16_b2` is the sum-headroom control (fits).
+- `b5_fq_*` -- B5, the fake-quant twin: the layer under `ARITH_FLOAT32`
+  with BFP-stored weights / bias / loss (m12, grouped) against the same
+  layer with every BFP operand replaced by its exact float32
+  dequantization. Both runs' outputs must be bit-identical (Leg A); Leg B is
+  float64 within the float32 kernel's (2N+1) roundings. Softmax fq (design
+  B5 column) is not in this step: the step text names the GEMM family.
+
+Observed in step 3 (all 119 rows PASS, none TIE_ONLY except the `clamp_floor`
+pack rows): every raw float32 output of every BFP GEMM-family op, forward
+and backward, kernel and layer tier, is BIT-EXACT against the documented fold
+evaluated along the assumed walk -- including the section-7 lossy rows, where
+the `(float)partial` cast is reproduced by the int64 -> float32 cast. The
+assumed walk orders of `bfp_ref.DOC_GAPS[4]` (Linear: reduction index
+ascending; Conv1d forward: input channel outer, tap inner; gather: tap outer,
+channel inner; conv weightGrad / biasGrad: batch outer, position inner) are
+therefore the shipped orders; they remain undocumented. The fq twins are
+bit-identical. The design's bound `N * 2^-24 * (sum|a_i b_i| + |bias|)` is
+met with ratio <= 4e-4 everywhere (the lossy rows' errors are exactly the
+cast losses Leg A predicts); the every-rounding-point count `(2N+1+bias)`
+is reported alongside (`ratio_rigorous`) and never needed.
+
 ## Leg B bounds
 
 `ref/exact_ref.py`, in value units:
@@ -208,6 +286,17 @@ directly (Conv1d); `linear_grid` / `full_scale` (Linear, above); `convert`
   `s_out * (0.5 + slack + qMax * u)`; elements the fixed requant clamps are
   outside any round-trip bound by construction and are excluded (reported
   as `n_clamped_excluded` with their own max error).
+- BFP GEMM family (`bound_bfp_fold`, elementwise): the design's
+  walk-order-free `N * 2^-24 * (sum_i |a_i b_i| + |bias|)` with `S = sum|.|`
+  computed by the same op on the absolute operands (autograd for the
+  backward directions), N the nominal reduction length. It is the gate; the
+  every-rounding-point count `(2N + 1 + bias) * u * S`
+  (`bound_bfp_fold_rigorous`: N casts, N fold additions, the bias add) is
+  reported as `ratio_rigorous` so an EXCESS at tiny N with a bias could be
+  told apart from a scheme loss (none occurred). A BFP wire adds half a code
+  at the C's exponent (the pack rounding). The pack round trip is half a
+  code at the C's exponent; the fq twin uses the float32 kernel's
+  `(2N + 1 + bias) * u * S` (`bound_float32_kernel`).
 
 ## Adding ops / tiers
 
@@ -220,7 +309,13 @@ directly (Conv1d); `linear_grid` / `full_scale` (Linear, above); `convert`
 - Python: a Leg A function per op in `ref/*.py` (docstring cites the doc
   section; doc silence goes into `DOC_GAPS`, never filled from C), a Leg B
   function + bound in `ref/exact_ref.py`, a fixture builder + row evaluator
-  per op family in `run_cells.py`, and the cell JSON.
+  per op family in `run_cells.py` (SYM) or `bfp_rows.py` (BFP; a cell's
+  `family` key routes it there), and the cell JSON. A BFP operand spec
+  carries int32 codes plus `mantissaBits`, `exponentBits`, `groupSize` and
+  the stored `exponents`; the kernel tier receives the unpacked scratch form,
+  the layer tier a packed tensor (INT32 -> BFP code-domain pack, exponents
+  set verbatim), and a BFP output comes back as codes (BFP -> INT32
+  int_repr) + exponents.
 - Non-vacuity: every new cell family must be shown to turn red under at
   least one planted `src/` mutation (restored afterwards; `jj diff --stat
   src/` empty). Record so far:
@@ -256,6 +351,35 @@ directly (Conv1d); `linear_grid` / `full_scale` (Linear, above); `convert`
     stay EXACT); the layer rows read MATCH because every output of the
     all-+2047 fixture is identical and the restore maps clip and exact onto
     the same codes -- the kernel tier is the authoritative F9 row.
+  - Step 3 (BFP). B2/B3/B4 Linear: `matmulBfpTensors`' tail fold shifted by
+    one (`ldexpf(..., shift + 1)`) -> every Linear forward / dx / weightGrad
+    row on both tiers MISMATCH class `fold` + Leg B EXCESS, the B3 wire row
+    MISMATCH class `E+code`; the biasGrad rows (a sum fold in `Linear.c`)
+    and the fq twin (a FLOAT32 path) stay green as they must. B2/B4 conv:
+    `conv1dKernelBfp`'s tail fold `(float)partial + 1.0f` -> every conv1d
+    forward row and both ConvT1d dx rows (which use that kernel) MISMATCH;
+    the m8 B3 conv wire stays EXACT (a one-product perturbation of the raw
+    is ~1e-3 of a wire code: a packed output cannot see errors below its
+    own resolution, by construction). `convTranspose1dKernelBfpGather`'s
+    tail fold likewise -> every ConvT1d forward row and both Conv1d dx rows
+    MISMATCH. B4 biasGrad: `linearCalcBiasGradsBfp`'s tail fold shift + 1
+    -> only the biasGrad rows MISMATCH. B4 weightGrad orientation: removing
+    the transpose view in `linearCalcWeightGradsBfp` -> the kernel aborts on
+    the shape (MISMATCH class `abort`). B1: dropping the `frac == 0.5`
+    correction in `deriveBfpStoredExponent` -> the census cell and the g8
+    cell MISMATCH class `E` (every exact-power-of-two absmax gets E + 1),
+    the per-tensor random cell stays EXACT (no boundary absmax), and the
+    staging probe `b2s_*` MISMATCHes on the layer tier only (the staged E
+    moves; the kernel tier gets codes). B1/B3: truncating the pack rounding
+    in `packFloatBufferAsBfp` -> every pack cell and both B3 wire cells
+    MISMATCH class `code`; `b2s_*` stays EXACT (grid-exact values truncate
+    to themselves -- the fixture's determinism, as intended). Headroom:
+    loosening `bfpValidateBlockHeadroom` by 100000 -> both `b2x_*_abort_*`
+    rows MISMATCH class `guard` (the run completes with wrapped partials).
+    B5: `dequantChunkToFloat`'s per-tensor BFP arm `* 1.0001f` -> the Linear
+    fq forward (per-tensor bias) MISMATCH class `fq`, the grouped-operand
+    twins unaffected; the grouped arm `* 1.0001f` -> every conv / convT /
+    Linear-dx twin MISMATCH class `fq`.
 
 ## Documentation gaps
 
@@ -267,4 +391,11 @@ added: the Linear weight layout, the staging rule for a FLOAT32 operand under
 SYM math (observed per tensor, int12, HALF_AWAY), the float32 dequant of a
 raw increment into a FLOAT32 grad, the doc's `N <= 511` versus the exact
 first wrap at 513, and the fixed-scale requant's clamp (observed:
-two's-complement grid).
+two's-complement grid). Step 3 records the BFP gaps in
+`ref/bfp_ref.py::DOC_GAPS`: the lower-clamp inconsistency (`-qMax` in
+sections 1/2 vs the shipped `-2^(m-1)` of 5.6 -- observed: `-2^(m-1)`),
+HALF_AWAY never written out, the exactness of the pack division, the bias
+seed order, the fold / walk order of every op (F10 -- observed: the
+in-order walks listed there, all bit-exact), the per-group zero state, the
+headroom guard wording, the `(float)partial` rounding mode and the staged
+grid's exponent rule.

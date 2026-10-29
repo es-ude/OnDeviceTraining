@@ -1,0 +1,57 @@
+{
+  "name": "b2_conv_fwd_g2_same_m8w6",
+  "description": "B2 Conv1d forward SAME, convGroups 2, K=3, grouped operands (input gs 6, weight gs 3), mixed m8 x m6: padded taps skipped, group hops inside the reduction.",
+  "family": "bfp_gemm",
+  "op": "conv1d",
+  "direction": "forward",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "geometry": {
+    "kernelSize": 3,
+    "padding": "SAME",
+    "groups": 2
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3202,
+    "batch": 2,
+    "cin": 4,
+    "length": 12,
+    "cout": 4,
+    "kernelSize": 3,
+    "input": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 6,
+      "absmax": 2.0,
+      "expSpread": 1
+    },
+    "weight": {
+      "m": 6,
+      "e": 8,
+      "groupSize": 3,
+      "absmax": 0.25,
+      "expSpread": 1
+    },
+    "bias": {
+      "m": 6,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.1,
+      "expSpread": 0
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED"
+  }
+}

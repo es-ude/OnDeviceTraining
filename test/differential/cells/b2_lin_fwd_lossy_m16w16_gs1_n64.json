@@ -1,0 +1,46 @@
+{
+  "name": "b2_lin_fwd_lossy_m16w16_gs1_n64",
+  "description": "B2 lossy regime at m16 x m16 (limit 1): weight gs 1 -> every product its own segment, 64 folds per output, each (float)partial (~1e9) rounds (section 7).",
+  "family": "bfp_gemm",
+  "op": "linear",
+  "direction": "forward",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3108,
+    "batch": 1,
+    "inF": 64,
+    "outF": 2,
+    "input": {
+      "m": 16,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 2.0,
+      "expSpread": 0,
+      "codes": "alternating"
+    },
+    "weight": {
+      "m": 16,
+      "e": 8,
+      "groupSize": 1,
+      "absmax": 0.25,
+      "expSpread": 1,
+      "codes": "full_scale"
+    },
+    "bias": null
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED"
+  }
+}

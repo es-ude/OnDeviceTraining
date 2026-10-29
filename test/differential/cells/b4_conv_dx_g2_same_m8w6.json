@@ -1,0 +1,63 @@
+{
+  "name": "b4_conv_dx_g2_same_m8w6",
+  "description": "B4 Conv1d dx SAME, convGroups 2, grouped loss (gs 6) and weight (gs 3), m8 x m6.",
+  "family": "bfp_gemm",
+  "op": "conv1d",
+  "direction": "dx",
+  "tiers": [
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "geometry": {
+    "kernelSize": 3,
+    "padding": "SAME",
+    "groups": 2
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3208,
+    "batch": 2,
+    "cin": 4,
+    "length": 12,
+    "cout": 4,
+    "kernelSize": 3,
+    "input": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 2.0,
+      "expSpread": 0
+    },
+    "weight": {
+      "m": 6,
+      "e": 8,
+      "groupSize": 3,
+      "absmax": 0.25,
+      "expSpread": 1
+    },
+    "bias": {
+      "m": 6,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.1,
+      "expSpread": 0
+    },
+    "loss": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 6,
+      "absmax": 1.0,
+      "expSpread": 1
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED"
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "name": "b3_lin_dx_wire_pt_m8",
+  "description": "B3 Linear dx onto a per-tensor BFP wire (m8 e8): the native dx OUT_WRITE pack (section 5.6 'Native BFP dx wires are legal').",
+  "family": "bfp_gemm",
+  "op": "linear",
+  "direction": "dx",
+  "tiers": [
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3115,
+    "batch": 2,
+    "inF": 16,
+    "outF": 64,
+    "input": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 2.0,
+      "expSpread": 0
+    },
+    "weight": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.25,
+      "expSpread": 0
+    },
+    "bias": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.1,
+      "expSpread": 0
+    },
+    "loss": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 1.0,
+      "expSpread": 0
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED"
+  },
+  "output": {
+    "dtype": "BFP",
+    "m": 8,
+    "e": 8,
+    "groupSize": 0
+  }
+}

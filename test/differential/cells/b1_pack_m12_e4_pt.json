@@ -1,0 +1,33 @@
+{
+  "name": "b1_pack_m12_e4_pt",
+  "description": "B1 pack FLOAT32 -> BFP per-tensor, m=12 e=4: 64 random values in one binade (absmax away from a boundary, one .5-at-finer-scale element). Leg A: exact exponent rule + round/clamp; Leg B: round trip within half a code.",
+  "family": "bfp_pack",
+  "op": "convert",
+  "direction": "pack_bfp",
+  "tiers": [
+    "convert"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "output": {
+    "dtype": "BFP",
+    "m": 12,
+    "e": 4,
+    "groupSize": 0
+  },
+  "fixture": {
+    "type": "bfp_pack",
+    "seed": 3027,
+    "n": 64,
+    "regime": "random"
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED"
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "name": "b4_convt_dw_pt_b2",
+  "description": "B4 ConvT1d weightGrad (+ biasGrad) VALID, batch 2, per-tensor loss / input: one segment.",
+  "family": "bfp_gemm",
+  "op": "convt1d",
+  "direction": "weightGrad",
+  "tiers": [
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "geometry": {
+    "kernelSize": 3,
+    "padding": "VALID"
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3214,
+    "batch": 2,
+    "cin": 4,
+    "length": 8,
+    "cout": 4,
+    "kernelSize": 3,
+    "input": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 2.0,
+      "expSpread": 0
+    },
+    "weight": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.25,
+      "expSpread": 0
+    },
+    "bias": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.1,
+      "expSpread": 0
+    },
+    "loss": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 1.0,
+      "expSpread": 0
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED"
+  }
+}

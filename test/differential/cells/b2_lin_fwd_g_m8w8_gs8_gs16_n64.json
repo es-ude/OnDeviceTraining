@@ -1,0 +1,50 @@
+{
+  "name": "b2_lin_fwd_g_m8w8_gs8_gs16_n64",
+  "description": "B2 Linear forward grouped on BOTH operands (input gs 8 along inF, weight gs 16), m8/m8, N=64: 8 segments per output; Leg A's in-order fold is reported, Leg B gates.",
+  "family": "bfp_gemm",
+  "op": "linear",
+  "direction": "forward",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3104,
+    "batch": 2,
+    "inF": 64,
+    "outF": 4,
+    "input": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 8,
+      "absmax": 2.0,
+      "expSpread": 1
+    },
+    "weight": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 16,
+      "absmax": 0.25,
+      "expSpread": 1
+    },
+    "bias": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.1,
+      "expSpread": 0
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED"
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "name": "b4x_lin_dw_abort_sum_m16_b2",
+  "description": "B4 biasGrad sum-headroom twin: loss m16 per-tensor over batch 2 fits (limit INT32_MAX >> 15 = 65535); the weightGrad product guard (16 x 8, N=2) also fits -- a control that the sum guard does NOT fire.",
+  "family": "bfp_gemm",
+  "op": "linear",
+  "direction": "weightGrad",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3120,
+    "batch": 2,
+    "inF": 8,
+    "outF": 4,
+    "input": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 2.0,
+      "expSpread": 0
+    },
+    "weight": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.25,
+      "expSpread": 0
+    },
+    "bias": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.1,
+      "expSpread": 0
+    },
+    "loss": {
+      "m": 16,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 1.0,
+      "expSpread": 0
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED"
+  }
+}

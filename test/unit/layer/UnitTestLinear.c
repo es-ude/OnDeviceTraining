@@ -3609,6 +3609,61 @@ void testLinearBackwardFloatRejectsWrongLossShape(void) {
     freeLinearLayer(layer);
 }
 
+/* The bias-grad kernels (FLOAT32, SYM_INT32, BFP) sum the loss by raw flat
+ * index, so a transposed loss view with the right logical dims gives wrong bias
+ * grads while weight-grad and dx (order-aware Matmul) stay right. Square [2, 2]
+ * so the physical dims match and only the identity-order clause can catch it. */
+void testLinearBackwardFloatRejectsTransposedLoss(void) {
+    layer_t *layer = buildFloatLinearWithTrainable(TRAINABLE_DEFAULT); /* 3 -> 2 */
+    tensor_t *forwardInput = buildFloatTensor2d(2, 3, (float[]){1.f, 2.f, 3.f, 4.f, 5.f, 6.f});
+    tensor_t *loss = buildFloatTensor2d(2, 2, (float[]){1.f, 2.f, 3.f, 4.f});
+    transposeTensor(loss, 0, 1);
+    tensor_t *propLoss = buildFloatTensor2d(2, 3, (float[]){0.f, 0.f, 0.f, 0.f, 0.f, 0.f});
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "Linear backward: loss order",
+                             linearBackward(layer, forwardInput, loss, propLoss, NULL));
+
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(forwardInput);
+    freeLinearLayer(layer);
+}
+
+/* The dense twin of the case above (same logical loss [[1, 3], [2, 4]]) must
+ * still pass the gate and sum the bias over the batch per feature. */
+void testLinearBackwardFloatDenseLossBatch2BiasGradSumsBatch(void) {
+    quantization_t *q = quantizationInitFloat();
+    tensor_t *weightsParam = buildFloatTensor2d(2, 3, (float[]){-1.f, 2.f, -3.f, 4.f, 5.f, -6.f});
+    tensor_t *weightsGrad = gradInitFloat(weightsParam, NULL);
+    tensor_t *biasParam = buildFloatTensor2d(1, 2, (float[]){-1.f, 3.f});
+    tensor_t *biasGrad = gradInitFloat(biasParam, NULL);
+    layer_t *layer = buildBorrowedLinearLayer(parameterInit(weightsParam, weightsGrad),
+                                              parameterInit(biasParam, biasGrad), q);
+    tensor_t *forwardInput = buildFloatTensor2d(2, 3, (float[]){1.f, 2.f, 3.f, 4.f, 5.f, 6.f});
+    tensor_t *loss = buildFloatTensor2d(2, 2, (float[]){1.f, 3.f, 2.f, 4.f});
+    tensor_t *propLoss = buildFloatTensor2d(2, 3, (float[]){0.f, 0.f, 0.f, 0.f, 0.f, 0.f});
+
+    linearBackward(layer, forwardInput, loss, propLoss, NULL);
+
+    float gotWeightGrad[6];
+    float gotBiasGrad[2];
+    float gotPropLoss[6];
+    memcpy(gotWeightGrad, weightsGrad->data, sizeof gotWeightGrad);
+    memcpy(gotBiasGrad, biasGrad->data, sizeof gotBiasGrad);
+    memcpy(gotPropLoss, propLoss->data, sizeof gotPropLoss);
+
+    freeLinearLayer(layer);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(forwardInput);
+    freeQuantization(q);
+
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){3.f, 7.f}), gotBiasGrad, 2);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){9.f, 12.f, 15.f, 19.f, 26.f, 33.f}), gotWeightGrad, 6);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){11.f, 17.f, -21.f, 14.f, 24.f, -30.f}), gotPropLoss,
+                                  6);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLinearForwardFloat);
@@ -3686,5 +3741,7 @@ int main(void) {
     RUN_TEST(testLinearBackwardFloatRejectsWrongPropLossShape);
     RUN_TEST(testLinearBackwardBfpRejectsWrongPropLossShape);
     RUN_TEST(testLinearBackwardFloatRejectsWrongLossShape);
+    RUN_TEST(testLinearBackwardFloatRejectsTransposedLoss);
+    RUN_TEST(testLinearBackwardFloatDenseLossBatch2BiasGradSumsBatch);
     return UNITY_END();
 }

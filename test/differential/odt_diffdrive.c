@@ -38,8 +38,10 @@
  * by rewriting this file.
  *
  * Spec errors fail fast on stderr with the key path and exit 2. Library-side
- * fail-fasts (PRINT_ERROR + exit(1)) are visible only when the build defines
- * DEBUG_MODE_ERROR (the `differential` preset does).
+ * fail-fasts are exit 1; their PRINT_ERROR text appears only when the build
+ * defines DEBUG_MODE_ERROR, which the `differential` preset does NOT (it sets
+ * only ODT_BUILD_DIFFERENTIAL / ODT_BUILD_TESTS), so the Python side
+ * classifies on the exit status (1 = ABORT) and must not rely on stderr.
  *
  * Allocation rule: no malloc/calloc here -- fixed static buffers for the spec
  * text and the JSON node pool, reserveMemory/freeReservedMemory for tensors.

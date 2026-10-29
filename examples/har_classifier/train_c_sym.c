@@ -725,11 +725,14 @@ int main(void) {
      * This ceiling applies to WEIGHT_DTYPE=asym too (ASYM's own group-quant D6 ceiling is
      * [1,16], looser): the ASYM-stored weight still converts to the same
      * SYM_INT32 forward operand every step (conversionMatrix[ASYM][SYM_INT32]). */
-    if (g_symBits < 1 || g_symBits > 12) {
+    /* SYM needs at least 2 bits (qMax = 2^(qBits-1)-1 is 0 at 1 bit, #479); ASYM keeps 1. */
+    int minSymBits = (g_weightDtype == WEIGHT_DTYPE_ASYM) ? 1 : 2;
+    if (g_symBits < minSymBits || g_symBits > 12) {
         fprintf(stderr,
-                "SYM_BITS must be in [1, 12]: the SYM_INT32 forward operand contract caps at 12 "
-                "bits (#227; int32 accumulator would overflow at wider widths). Got %d.\n",
-                g_symBits);
+                "SYM_BITS must be in [%d, 12] for WEIGHT_DTYPE=%s: the SYM_INT32 forward operand "
+                "contract caps at 12 bits (#227; int32 accumulator would overflow at wider "
+                "widths), and SYM has no 1-bit grid (#479). Got %d.\n",
+                minSymBits, (g_weightDtype == WEIGHT_DTYPE_ASYM) ? "asym" : "sym", g_symBits);
         return 2;
     }
 

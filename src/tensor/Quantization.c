@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include "CheckedSize.h"
 #include "Common.h"
 #include "Quantization.h"
 #include "Rounding.h"
@@ -40,10 +41,24 @@ void initSymQConfig(uint8_t qBits, roundingMode_t roundingMode, symQConfig_t *sy
     initSymQConfigGrouped(qBits, roundingMode, 1, 0, symQConfig);
 }
 
+/* The shape validators run on field-assigned configs too, so the group
+ * product is untrusted: a wrapping numGroups*groupSize could otherwise match
+ * the element count and pass a grouping that indexes far past the tensor. */
+static size_t groupProductOrExit(size_t numGroups, size_t groupSize, const char *what) {
+    size_t product;
+    if (!checkedMulSize(numGroups, groupSize, &product)) {
+        PRINT_ERROR("%s: numGroups*groupSize overflows size_t (numGroups=%zu groupSize=%zu)", what,
+                    numGroups, groupSize);
+        exit(1);
+    }
+    return product;
+}
+
 void validateSymQConfigShape(const symQConfig_t *qC, size_t numberOfElements) {
     bool perTensor = qC->numGroups == 1 && qC->groupSize == 0;
-    bool grouped =
-        qC->numGroups > 1 && qC->groupSize > 0 && qC->numGroups * qC->groupSize == numberOfElements;
+    size_t groupedElements =
+        groupProductOrExit(qC->numGroups, qC->groupSize, "validateSymQConfigShape");
+    bool grouped = qC->numGroups > 1 && qC->groupSize > 0 && groupedElements == numberOfElements;
     if (!perTensor && !grouped) {
         PRINT_ERROR("validateSymQConfigShape: invalid SYM group shape numGroups=%zu "
                     "groupSize=%zu for %zu elements (per-tensor is {1,0}; grouped needs "
@@ -125,8 +140,9 @@ void initAsymQConfigGrouped(uint8_t qBits, roundingMode_t rm, size_t numGroups, 
 void validateAsymQConfigShape(const asymQConfig_t *qC, size_t numberOfElements) {
     validateAsymQBits(qC->qBits, "validateAsymQConfigShape");
     bool perTensor = qC->numGroups == 1 && qC->groupSize == 0;
-    bool grouped =
-        qC->numGroups > 1 && qC->groupSize > 0 && qC->numGroups * qC->groupSize == numberOfElements;
+    size_t groupedElements =
+        groupProductOrExit(qC->numGroups, qC->groupSize, "validateAsymQConfigShape");
+    bool grouped = qC->numGroups > 1 && qC->groupSize > 0 && groupedElements == numberOfElements;
     if (!perTensor && !grouped) {
         PRINT_ERROR("validateAsymQConfigShape: invalid ASYM group shape numGroups=%zu "
                     "groupSize=%zu for %zu elements (per-tensor is {1,0}; grouped needs "
@@ -200,8 +216,9 @@ void initBfpQConfigInto(uint8_t mantissaBits, uint8_t exponentBits, roundingMode
 
 void validateBfpQConfigShape(const bfpQConfig_t *qC, size_t numberOfElements) {
     bool perTensor = qC->numGroups == 1 && qC->groupSize == 0;
-    bool grouped =
-        qC->numGroups > 1 && qC->groupSize > 0 && qC->numGroups * qC->groupSize == numberOfElements;
+    size_t groupedElements =
+        groupProductOrExit(qC->numGroups, qC->groupSize, "validateBfpQConfigShape");
+    bool grouped = qC->numGroups > 1 && qC->groupSize > 0 && groupedElements == numberOfElements;
     if (!perTensor && !grouped) {
         PRINT_ERROR("validateBfpQConfigShape: invalid BFP group shape numGroups=%zu "
                     "groupSize=%zu for %zu elements",

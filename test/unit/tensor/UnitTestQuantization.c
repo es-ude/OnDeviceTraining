@@ -1,4 +1,5 @@
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "DeathTest.h"
 #include "Quantization.h"
@@ -378,6 +379,51 @@ void testInitBfpQConfigGroupedValidatesUnderItsOwnName(void) {
                              initBfpQConfigGrouped(1, 8, HALF_AWAY, 1, 0, &qc));
 }
 
+/* A field-assigned config whose numGroups*groupSize wraps size_t onto the
+ * element count: (2^63 + 1) * 2 == 2 (mod 2^64) on a 64-bit size_t. An
+ * unchecked product reads this as a valid {>1,>0} grouping of 2 elements. */
+#define WRAPPING_NUM_GROUPS (SIZE_MAX / 2u + 2u)
+#define WRAPPING_GROUP_SIZE 2u
+#define WRAPPED_ELEMENTS 2u
+_Static_assert((size_t)(WRAPPING_NUM_GROUPS * WRAPPING_GROUP_SIZE) == WRAPPED_ELEMENTS,
+               "the fixture product must wrap onto WRAPPED_ELEMENTS");
+
+void testValidateSymQConfigShapeRejectsWrappingGroupProduct(void) {
+    float s[1] = {1.f};
+    symQConfig_t qc = {.scales = s,
+                       .numGroups = WRAPPING_NUM_GROUPS,
+                       .groupSize = WRAPPING_GROUP_SIZE,
+                       .roundingMode = HALF_AWAY,
+                       .qBits = 4};
+    ASSERT_EXITS_WITH_OUTPUT(1, "validateSymQConfigShape: numGroups*groupSize overflows size_t",
+                             validateSymQConfigShape(&qc, WRAPPED_ELEMENTS));
+}
+
+void testValidateAsymQConfigShapeRejectsWrappingGroupProduct(void) {
+    float s[1] = {1.f};
+    uint16_t z[1] = {0};
+    asymQConfig_t qc = {.scales = s,
+                        .zeroPoints = z,
+                        .numGroups = WRAPPING_NUM_GROUPS,
+                        .groupSize = WRAPPING_GROUP_SIZE,
+                        .roundingMode = HALF_AWAY,
+                        .qBits = 4};
+    ASSERT_EXITS_WITH_OUTPUT(1, "validateAsymQConfigShape: numGroups*groupSize overflows size_t",
+                             validateAsymQConfigShape(&qc, WRAPPED_ELEMENTS));
+}
+
+void testValidateBfpQConfigShapeRejectsWrappingGroupProduct(void) {
+    uint8_t e[1] = {127};
+    bfpQConfig_t qc = {.exponents = e,
+                       .numGroups = WRAPPING_NUM_GROUPS,
+                       .groupSize = WRAPPING_GROUP_SIZE,
+                       .roundingMode = HALF_AWAY,
+                       .mantissaBits = 8,
+                       .exponentBits = 8};
+    ASSERT_EXITS_WITH_OUTPUT(1, "validateBfpQConfigShape: numGroups*groupSize overflows size_t",
+                             validateBfpQConfigShape(&qc, WRAPPED_ELEMENTS));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testInitSymQConfigProducesPerTensorSentinel);
@@ -404,5 +450,8 @@ int main(void) {
     RUN_TEST(testInitBfpQConfigGroupedIntoRejectsNullExponents);
     RUN_TEST(testInitBfpQConfigIntoFillsPerTensorCallerStorage);
     RUN_TEST(testInitBfpQConfigGroupedValidatesUnderItsOwnName);
+    RUN_TEST(testValidateSymQConfigShapeRejectsWrappingGroupProduct);
+    RUN_TEST(testValidateAsymQConfigShapeRejectsWrappingGroupProduct);
+    RUN_TEST(testValidateBfpQConfigShapeRejectsWrappingGroupProduct);
     return UNITY_END();
 }

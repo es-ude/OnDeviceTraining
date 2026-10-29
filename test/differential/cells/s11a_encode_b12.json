@@ -1,0 +1,27 @@
+{
+  "name": "s11a_encode_b12",
+  "description": "S11 encode FLOAT32 -> SYM_INT32@12: 64 values, 17 within +-4 ulp32 of a .5 boundary (incl. qMax-0.5), absmax = qMax*scale with a 13-bit-exact scale.",
+  "op": "convert",
+  "direction": "encode",
+  "tiers": [
+    "convert"
+  ],
+  "arith": {
+    "type": "SYM_INT32",
+    "rounding": "HALF_AWAY"
+  },
+  "outputBits": 12,
+  "fixture": {
+    "type": "convert",
+    "seed": 512,
+    "n": 64,
+    "ties": 16
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED"
+  }
+}

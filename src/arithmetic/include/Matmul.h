@@ -67,14 +67,14 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
  *
  *  Kernel contract (shared across the BFP GEMM family): per output element
  *  ONE int32 partial; per reduction step both operands' STORAGE indices map
- *  to group ids (a groupCursor_t per operand -- exact on strided walks, like
- *  matmulIntCoreGrouped); when EITHER id changes, the
+ *  to group ids (bfpGroupOf -- gap-robust on strided walks, exactly like
+ *  matmulIntCoreGrouped's per-element division); when EITHER id changes, the
  *  finished segment folds via acc += ldexpf((float)partial, Ea + Eb - biasA
  *  - biasB) and the partial resets; tail-fold after the loop. The kernel
  *  never rounds (rounding lives at staging and the OUT_WRITE epilogue).
  *  Every operand's group shape is fail-fast-checked against its element
  *  count (validateBfpQConfigShape -- the SYM grouped entry's precedent),
- *  since groupCursorOf's division knows nothing of numGroups. int32 overflow
+ *  since bfpGroupOf's division knows nothing of numGroups. int32 overflow
  *  is excluded up front by bfpValidateBlockHeadroom
  *  (BfpKernelSupport.h): a same-exponent segment never accumulates more than
  *  min(runA, runB, K) products, which must stay within

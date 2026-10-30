@@ -1,9 +1,7 @@
-#include <stdint.h>
 #include <string.h>
 
 #include "Conv1dKernel.h"
 #include "DeathTest.h"
-#include "GroupCursor.h"
 #include "QuantizationApi.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -811,47 +809,11 @@ void testConv1dKernelBfpConvGroups2MatchesGold(void) {
                              kBfpConvG2Expected_len * sizeof(float));
 }
 
-/* The kernels feed the cursor clipped-tap gaps, ConvT's taps-outer backward
- * hops and Matmul's strided walks; SIZE_MAX exercises the per-tensor sentinel
- * exit and a last partial group whose upper bound would wrap (then small
- * indices must not alias into it). Registered first in main: a wrong group
- * makes a kernel test exit() before this one would run. */
-void testGroupCursorMatchesDivisionOnGappedNonMonotoneWalk(void) {
-    const size_t groupSizes[] = {0, 1, 2, 3, 7, 32};
-    for (size_t row = 0; row < sizeof(groupSizes) / sizeof(groupSizes[0]); row++) {
-        size_t gs = groupSizes[row];
-        groupCursor_t c = groupCursorInit(gs);
-        uint32_t lcg = 12345u + (uint32_t)row;
-        size_t idx = 0;
-        for (size_t step = 0; step < 20000; step++) {
-            lcg = lcg * 1664525u + 1013904223u;
-            uint32_t r = lcg >> 8;
-            switch (r % 3) {
-            case 0:
-                idx += 1;
-                break;
-            case 1:
-                idx += (r / 3) % (3 * gs + 3);
-                break;
-            default:
-                idx = idx ? (r / 3) % idx : 0;
-                break;
-            }
-            TEST_ASSERT_EQUAL_size_t(gs == 0 ? 0 : idx / gs, groupCursorOf(&c, idx));
-        }
-        const size_t tail[] = {SIZE_MAX, SIZE_MAX - 1, 0, 5, SIZE_MAX, 5};
-        for (size_t t = 0; t < sizeof(tail) / sizeof(tail[0]); t++) {
-            TEST_ASSERT_EQUAL_size_t(gs == 0 ? 0 : tail[t] / gs, groupCursorOf(&c, tail[t]));
-        }
-    }
-}
-
 void setUp() {}
 void tearDown() {}
 
 int main(void) {
     UNITY_BEGIN();
-    RUN_TEST(testGroupCursorMatchesDivisionOnGappedNonMonotoneWalk);
     RUN_TEST(testConv1dKernelSingleChannelSingleBatch);
     RUN_TEST(testConv1dKernelMultiChannelWithBias);
     RUN_TEST(testConv1dKernelMultiBatch);

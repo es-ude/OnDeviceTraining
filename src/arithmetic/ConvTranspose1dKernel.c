@@ -6,7 +6,6 @@
 
 #include "BfpKernelSupport.h"
 #include "Common.h"
-#include "GroupCursor.h"
 #include "Mul.h"
 #include "Rounding.h"
 #include "SlidingWindow1d.h"
@@ -235,8 +234,9 @@ void convTranspose1dKernelSymInt32(tensor_t const *input, tensor_t const *weight
 
 /* Group-quant PR3 (Task 2): entry guards mirror conv1dValidateWeightGroups
  * (Conv1dKernel.c) exactly -- non-NULL, qBits within the operand contract,
- * and the per-tensor sentinel {numGroups=1, groupSize=0} rejected (per-tensor
- * weights take convTranspose1dKernelSymInt32). */
+ * and the per-tensor sentinel {numGroups=1, groupSize=0} rejected (its
+ * groupSize=0 would divide-by-zero below; per-tensor weights take
+ * convTranspose1dKernelSymInt32). */
 static void convT1dValidateWeightGroups(const symQConfig_t *weightGroups, size_t weightElemCount) {
     if (weightGroups == NULL) {
         PRINT_ERROR("convTranspose1dKernelSymInt32Grouped: weightGroups must not be NULL");
@@ -314,7 +314,6 @@ void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const 
     long long outputLengthSigned = (long long)outputLength;
     long long dilation = (long long)kernel->dilation;
 
-    groupCursor_t wCursor = groupCursorInit(weightGroups->groupSize);
     for (size_t b = 0; b < batch; b++) {
         for (size_t g = 0; g < groups; g++) {
             size_t inLo = g * inChPerGroup;
@@ -342,8 +341,11 @@ void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const 
                              * partial could be carried without a second
                              * accumulator buffer. Cost: one rounding per
                              * product, |err| <= 0.5*C*sAcc per output element
-                             * (C = contributing products). */
-                            size_t elemGroup = groupCursorOf(&wCursor, wStorageIdx);
+                             * (C = contributing products). Per-element group
+                             * division (gap-robust): padding clips k taps, so
+                             * visited wStorageIdx values can have gaps -- a
+                             * precomputed run length would overshoot. */
+                            size_t elemGroup = wStorageIdx / weightGroups->groupSize;
                             int32_t product = mulInt32s(xv, wArr[wStorageIdx]);
                             yArr[(b * outChannels + oc) * outputLength + (size_t)outIdx] +=
                                 rescaleIntoAccumulatorScale(
@@ -471,8 +473,6 @@ void convTranspose1dKernelBfpGather(tensor_t const *input, tensor_t const *weigh
         }
     }
 
-    groupCursor_t inCursor = groupCursorInit(inQC->groupSize);
-    groupCursor_t wCursor = groupCursorInit(wQC->groupSize);
     for (size_t b = 0; b < batch; b++) {
         for (size_t g = 0; g < groups; g++) {
             size_t inLo = g * inChPerGroup;
@@ -496,15 +496,18 @@ void convTranspose1dKernelBfpGather(tensor_t const *input, tensor_t const *weigh
                     size_t currentWGroup = SIZE_MAX;
 
                     /* Taps OUTER, icOffset INNER (the BFP D9 normative reduction
-                     * order the gold emulation mirrors). */
+                     * order the gold emulation mirrors). Per-element group
+                     * lookup on BOTH operands: tap hops make both index
+                     * sequences non-contiguous, so no run length could be
+                     * precomputed (the SYM grouped kernels' gap rationale). */
                     for (size_t t = 0; t < tapCount; t++) {
                         for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
                             size_t ic = inLo + icOffset;
                             size_t inIdx = (b * inChannels + ic) * inputLength + taps[t].inPos;
                             size_t wIdx =
                                 (ic * outChPerGroup + ocOffset) * kernelSize + taps[t].kernelIdx;
-                            size_t inGroup = groupCursorOf(&inCursor, inIdx);
-                            size_t wGroup = groupCursorOf(&wCursor, wIdx);
+                            size_t inGroup = bfpGroupOf(inQC, inIdx);
+                            size_t wGroup = bfpGroupOf(wQC, wIdx);
 
                             if (currentWGroup == SIZE_MAX) {
                                 currentInGroup = inGroup;

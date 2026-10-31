@@ -1,0 +1,34 @@
+{
+  "name": "s1y_fwd_int12_random_n600_b2",
+  "description": "F9 checked path, forward: B=2 inF=600 outF=6, FLOAT32 input staged to int12 (grid-exact) x int12 weights, random signs. 600*2^22 > INT32_MAX so the guard's static proof fails and the CHECKED loop runs; the values fit (mixed signs), so the result must be EXACT (Leg A).",
+  "op": "linear",
+  "direction": "forward",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "SYM_INT32",
+    "rounding": "HALF_AWAY"
+  },
+  "outputBits": 12,
+  "fixture": {
+    "type": "linear_grid",
+    "inputStorage": "FLOAT32",
+    "weightStorage": "SYM_INT32",
+    "weightBits": 12,
+    "bias": true,
+    "seed": 701,
+    "batch": 2,
+    "inF": 600,
+    "outF": 6
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED",
+    "guardPath": "checked"
+  }
+}

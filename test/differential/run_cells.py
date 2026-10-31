@@ -53,6 +53,7 @@ from ref.census import SEED_REF, ChannelSeed  # noqa: E402
 from ref.sym_ref import ConvGeometry  # noqa: E402
 
 F32_U = 2.0**-24
+STAGING_BITS = 12  # ODT_SYM_OPERAND_QMAXBITS, the documented staging width
 
 
 # --------------------------------------------------------------------------- #
@@ -87,6 +88,19 @@ class Operand:
     scale: float  # float32 value as a Python float
     bits: int
     values: np.ndarray | None = None  # float32 values (FLOAT32 storage only)
+
+    def stages_exactly(self) -> bool:
+        """True when the funnel's staging of this FLOAT32 operand reproduces
+        its codes and scale bit for bit, so staging adds no error at all:
+        the values are code * scale exactly (``Fixture.add_codes`` verifies
+        it), the grid is the documented staging width (int12, arithmetic-sym
+        'Staging a FLOAT32 operand') and some code sits at +-qMax, so the
+        per-tensor absmax / qMax IS the fixture's scale (an exact product of
+        <= 11 x 13 bits divided by its own integer factor). Leg A's code and
+        scale comparison would show any deviation from this premise."""
+        if self.values is None or self.bits != STAGING_BITS:
+            return False
+        return bool(self.codes.size) and int(np.abs(self.codes).max()) == sym_ref.qmax(STAGING_BITS)
 
 
 class Fixture:
@@ -731,16 +745,72 @@ def resolve_leg_a_float(c_values: np.ndarray, ref: np.ndarray, n_roundings: int)
     }
 
 
-def classify_overflow(drv: DriverResult, out_name: str, raw_exact: np.ndarray, restore) -> dict:
-    """F9: the exact accumulator does not fit int32. The C outcome is one of
-    ABORT (library fail-fast, exit 1), MATCH (the codes equal what a widening
-    accumulator would produce -- `restore(raw_exact)`), WRAP (the codes equal
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+# The SYM accumulator guard's abort banner (arithmetic-sym 'SYM int32
+# accumulator guard (shipped)', item 3: it names the op, N, both operand
+# widths and max|seed|): "<op>: SYM int32 accumulator overflow -- N=.. terms,
+# operand widths (a, b), max|seed|=..; narrow ODT_SYM_OPERAND_QMAXBITS ...".
+SYM_GUARD_RE = re.compile(
+    r"(?P<op>[A-Za-z0-9_ ]+): SYM int32 accumulator overflow -- N=(?P<n>\d+) terms, "
+    r"operand widths \((?P<wa>\d+), (?P<wb>\d+)\), max\|seed\|=(?P<seed>\d+)"
+)
+
+
+def fail_fast_text(drv: DriverResult) -> str:
+    """Everything the driver printed on a library fail-fast. PRINT_ERROR
+    writes the banner to STDOUT (not stderr) in this build, so both streams
+    are searched; the banner patterns below are specific enough that the
+    extra stream cannot produce a false hit."""
+    return ANSI_RE.sub("", drv.stdout + "\n" + drv.stderr)
+
+
+def check_sym_guard_banner(stderr: str, op_name: str, n: int, bits: tuple[int, int], seed_abs_max: int | None) -> dict:
+    """(`stderr` is the driver's combined output, see ``fail_fast_text``.)
+    An exit 1 only counts as the F9 ABORT when stderr carries the guard's
+    banner AND the banner agrees with Leg A's reduction: op name, N, the
+    operand widths (compared as a pair: the doc does not order them) and,
+    when the fixture has no bias, max|seed| = 0. Any other fail-fast (a
+    spec, shape or width check) is a MISMATCH, not an F9 abort."""
+    text = ANSI_RE.sub("", stderr)
+    m = SYM_GUARD_RE.search(text)
+    if m is None:
+        return {"ok": False, "problems": ["exit 1 without the SYM accumulator-guard banner"], "stderr": text.strip().splitlines()[-1:]}
+    problems = []
+    if m["op"].strip() != op_name:
+        problems.append(f"banner op {m['op'].strip()!r} != {op_name!r}")
+    if int(m["n"]) != n:
+        problems.append(f"banner N={m['n']} != Leg A reduction {n}")
+    if sorted((int(m["wa"]), int(m["wb"]))) != sorted(bits):
+        problems.append(f"banner widths ({m['wa']}, {m['wb']}) != Leg A {tuple(bits)}")
+    if seed_abs_max == 0 and int(m["seed"]) != 0:
+        problems.append(f"banner max|seed|={m['seed']} but the fixture has no bias")
+    return {
+        "ok": not problems,
+        "problems": problems,
+        "banner": {"op": m["op"].strip(), "n": int(m["n"]), "widths": [int(m["wa"]), int(m["wb"])], "seed": int(m["seed"])},
+    }
+
+
+def _abort_outcome(drv: DriverResult, ctx: dict) -> dict:
+    chk = check_sym_guard_banner(fail_fast_text(drv), ctx["op"], ctx["n"], ctx["bits"], ctx["seed_abs_max"])
+    if chk["ok"]:
+        return {"kind": "ABORT", "detail": [], "banner": chk["banner"]}
+    return {"kind": "MISMATCH", "detail": chk["problems"]}
+
+
+def classify_overflow(drv: DriverResult, out_name: str, raw_exact: np.ndarray, restore, ctx: dict) -> dict:
+    """F9: the exact accumulator does not fit int32. The contract is ABORT:
+    the guard's checked loop fires and its banner names this reduction
+    (`ctx`: op, N, widths, max|seed| from Leg A). The other kinds classify a
+    C run that completed: MATCH (the codes equal what a widening accumulator
+    would produce -- `restore(raw_exact)`), WRAP (the codes equal
     `restore(wrap_int32(raw_exact))`, a silent two's-complement wrap: the
-    finding F9 predicts), SATURATE (equal `restore(clip)`), else MISMATCH.
-    `restore` maps an int64 raw wire to the compared codes (identity on the
-    kernel tier, the width restore on the layer tier)."""
+    finding F9 is about), SATURATE (equal `restore(clip)`), else MISMATCH;
+    all of them fail a cell that expects ABORT. `restore` maps an int64 raw
+    wire to the compared codes (identity on the kernel tier, the width
+    restore on the layer tier)."""
     if drv.exit != 0:
-        return {"kind": "ABORT", "detail": drv.stderr.strip().splitlines()[-1:] or ["(no stderr)"]}
+        return _abort_outcome(drv, ctx)
     c = drv.out(out_name)["codes"].ravel()  # flat: the wire's [B, outF] vs the ref's [B, C, L]
     options = {
         "MATCH": restore(raw_exact),
@@ -892,6 +962,8 @@ def linear_staging_term(fx: Fixture, direction: str, tier: str, k: int) -> float
     (layer tier only; zero for a SYM_INT32-stored input)."""
     if tier != "layer" or fx.ops["input"].storage != "FLOAT32":
         return 0.0
+    if fx.ops["input"].stages_exactly():
+        return 0.0  # grid-exact input: staged codes == fixture codes, nothing to bound
     s_x = fx.scale("input")
     q_in = sym_ref.qmax(fx.ops["input"].bits)
     if direction == "forward":
@@ -901,6 +973,16 @@ def linear_staging_term(fx: Fixture, direction: str, tier: str, k: int) -> float
     else:
         return 0.0  # dx does not touch the input
     return exact_ref.staging_term(s_x, q_in, other, k)
+
+
+def weight_grad_roundings(raw: np.ndarray) -> int:
+    """Float32 roundings the production of a FLOAT32 weight grad from the raw
+    int32 increment can take (sym_ref.DOC_GAPS[3]): the int->float cast, the
+    s_loss * s_in product, the multiply. The cast is exact when every
+    |raw| < 2^24 (a float32 holds 24 significant bits), leaving two; above
+    that, or when the raw is not known to be that small, all three count."""
+    peak = int(np.abs(np.asarray(raw, dtype=np.int64)).max()) if np.size(raw) else 0
+    return 2 if peak < 2**24 else 3
 
 
 def linear_reduction(fx: Fixture, direction: str) -> tuple[int, int, int]:
@@ -923,6 +1005,8 @@ def run_linear_row(cell: dict, tier: str, fx: Fixture, drv: DriverResult, k: int
     ov = sym_ref.overflow_report(inp.raw.raw, n_red, bits_a, bits_b, inp.seed_abs_max)
     out_name = {"forward": "output", "dx": "propLoss", "weightGrad": "weightGrad"}[direction]
     row: dict = {"output": out_name, "int32": ov.to_json()}
+    # Linear forward / dx / weightGrad are all the matmulIntCore family.
+    guard_ctx = {"op": "matmul SYM_INT32", "n": n_red, "bits": (bits_a, bits_b), "seed_abs_max": None if fx.has("bias") and direction == "forward" else 0}
     exact = linear_exact(fx, direction)
     staging = linear_staging_term(fx, direction, tier, k)
     batch_shape = inp.raw.mac.shape
@@ -937,9 +1021,9 @@ def run_linear_row(cell: dict, tier: str, fx: Fixture, drv: DriverResult, k: int
             restore = lambda r: sym_ref.restore_sym(r, inp.raw.s_raw, out_bits).codes  # noqa: E731
         raw_exact = inp.raw.raw
         if direction == "weightGrad" and tier == "layer":
-            cls = classify_overflow_float(drv, out_name, raw_exact, restore)
+            cls = classify_overflow_float(drv, out_name, raw_exact, restore, guard_ctx)
         else:
-            cls = classify_overflow(drv, out_name, raw_exact, restore)
+            cls = classify_overflow(drv, out_name, raw_exact, restore, guard_ctx)
         row["overflow"] = cls
         row["legA"] = {"taxonomy": cls["kind"], "census": None, "mismatch_class": "-", "seed": None,
                        "scale": {"c": None, "ref": inp.raw.s_raw, "rel": 0.0, "ok": True}, "ref_scale": inp.raw.s_raw}
@@ -968,12 +1052,14 @@ def run_linear_row(cell: dict, tier: str, fx: Fixture, drv: DriverResult, k: int
         b = gemm_leg_b(exact, tier, c.reshape(exact.shape), o["scale"], inp, out_bits, k, staging)
     elif direction == "weightGrad":
         # FLOAT32 grad: the first store into a zeroed grad is the increment's
-        # float32 value (sym_ref.DOC_GAPS[11]: <= 3 roundings from raw * s_raw).
+        # float32 value (sym_ref.DOC_GAPS[3]: <= 3 roundings from raw * s_raw).
+        n_round = weight_grad_roundings(inp.raw.raw)
         ref = sym_ref.dequant(inp.raw.raw.reshape(exact.shape), inp.raw.s_raw)
-        a = resolve_leg_a_float(o["values"].reshape(exact.shape), ref, 3)
+        a = resolve_leg_a_float(o["values"].reshape(exact.shape), ref, n_round)
         deq_c = o["values"].astype(np.float64).reshape(exact.shape)
         err = float(np.max(np.abs(deq_c - exact)))
-        b = census.leg_b_check(err, exact_ref.bound_float32_grad(float(np.abs(exact).max()), 3, staging))
+        b = census.leg_b_check(err, exact_ref.bound_float32_grad(float(np.abs(exact).max()), n_round, staging))
+        b["n_roundings"] = n_round
         b["staging_term"] = staging
     else:
         tol = SCALE_TOL_LAYER_STAGED if fx.ops["input"].storage == "FLOAT32" and direction == "forward" else SCALE_TOL_LAYER
@@ -987,11 +1073,12 @@ def run_linear_row(cell: dict, tier: str, fx: Fixture, drv: DriverResult, k: int
     return row
 
 
-def classify_overflow_float(drv: DriverResult, out_name: str, raw_exact: np.ndarray, restore) -> dict:
+def classify_overflow_float(drv: DriverResult, out_name: str, raw_exact: np.ndarray, restore, ctx: dict) -> dict:
     """``classify_overflow`` for a FLOAT32 output: equality within 3 float32
-    roundings of the candidate value instead of code equality."""
+    roundings of the candidate value instead of code equality (an overflowing
+    raw is >= 2^31 > 2^24, so the int->float cast rounds: all three count)."""
     if drv.exit != 0:
-        return {"kind": "ABORT", "detail": drv.stderr.strip().splitlines()[-1:] or ["(no stderr)"]}
+        return _abort_outcome(drv, ctx)
     c = drv.out(out_name)["values"].astype(np.float64).ravel()
     tol_rel = (1.0 + F32_U) ** 3 - 1.0
     options = {
@@ -1164,9 +1251,12 @@ def build_fixture(cell: dict, k: int) -> Fixture:
 
 def verdict_of(row: dict, expect: dict) -> str:
     a, b = row["legA"], row["legB"]
+    want_path = expect.get("guardPath")
+    if want_path is not None and row.get("int32", {}).get("path") != want_path:
+        return "FAIL"  # the cell was built to hit this guard path and no longer does
     if "overflow" in row:
         kind = row["overflow"]["kind"]
-        allowed = expect.get("overflow", ["MATCH", "ABORT"])
+        allowed = expect.get("overflow", ["ABORT"])  # the shipped guard's contract
         return "PASS" if kind in allowed else "FAIL"
     v = census.combine(a["taxonomy"], a["scale"]["ok"], b["taxonomy"])
     if expect:
@@ -1241,7 +1331,7 @@ def fmt_row(r: dict) -> str:
     if ov is None:
         ov_s = r.get("bfp", {}).get("summary", "-")
     else:
-        ov_s = f"{'fits' if ov['fits'] else 'OVERFLOW'} N={ov['reduction']} wrap@{ov['n_wrap_full_scale']}"
+        ov_s = f"{'fits' if ov['fits'] else 'OVERFLOW'} N={ov['reduction']} wrap@{ov['n_wrap_full_scale']} path={ov['path']}"
     if "overflow" in r:
         ov_s += f" -> {r['overflow']['kind']}"
     if c is None:

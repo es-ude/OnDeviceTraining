@@ -1,6 +1,6 @@
 {
   "name": "s2x_dx_overflow_int12_n513",
-  "description": "S2 F9 probe: loss codes +2047 and int12 weight codes +2047, reduction outF=513, B=1 inF=2: the dx accumulator N*2047^2 vs INT32_MAX, classified MATCH / ABORT / WRAP.",
+  "description": "S2 F9 probe: loss codes +2047 and int12 weight codes +2047, reduction outF=513, B=1 inF=2: the dx accumulator N*2047^2 vs INT32_MAX, must ABORT with the guard's banner (op, N, widths); any completed run FAILs.",
   "op": "linear",
   "direction": "dx",
   "tiers": [
@@ -29,8 +29,8 @@
     ],
     "legB": "BOUNDED",
     "overflow": [
-      "MATCH",
       "ABORT"
-    ]
+    ],
+    "guardPath": "abort"
   }
 }

@@ -1,0 +1,34 @@
+{
+  "name": "s2y_dx_int12_random_n600_b2",
+  "description": "F9 checked path, dx: B=2 outF=600 (the reduction) inF=6, int12 loss x int12 weights, random signs: static proof fails (600*2^22), values fit, EXACT.",
+  "op": "linear",
+  "direction": "dx",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "SYM_INT32",
+    "rounding": "HALF_AWAY"
+  },
+  "outputBits": 12,
+  "fixture": {
+    "type": "linear_grid",
+    "inputStorage": "FLOAT32",
+    "weightStorage": "SYM_INT32",
+    "weightBits": 12,
+    "bias": true,
+    "seed": 703,
+    "batch": 2,
+    "inF": 6,
+    "outF": 600
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED",
+    "guardPath": "checked"
+  }
+}

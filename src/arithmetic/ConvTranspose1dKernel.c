@@ -455,7 +455,12 @@ void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const 
                            .wArr = wArr,
                            .yArr = yArr};
     uint8_t xBits = ((symInt32QConfig_t *)input->quantization->qConfig)->qMaxBits;
-    uint8_t wBits = weightGroups->qBits;
+    /* Count the grouped weight ONE BIT wider than declared: a grouped ASYM
+     * weight reaches the kernel as a SYM view with its ASYM qBits, but the
+     * funnel unpacks it to mantissa = code - zp[g], which spans +-(2^qBits - 1).
+     * Conservative by one bit for true grouped SYM. The abort banner reports
+     * this bound width (declared + 1), not the declared one. */
+    uint8_t wBits = (uint8_t)(weightGroups->qBits + 1);
     symAccumSite_t site = symAccumSiteInit("convTranspose1dKernelSymInt32Grouped",
                                            inChPerGroup * kernelSize, xBits, wBits, 0);
     if (symAccumProvenSafe(&site)) {

@@ -3479,8 +3479,60 @@ void testInferenceOneLinearModelRejectsRank1Sample(void) {
     freeLinearLayer(layer);
 }
 
+/* Grouped ASYM weight whose zero point puts code - zp at -(2^qBits - 1): the
+ * funnel unpacks it to 13-bit mantissas under a declared qBits of 12. 511
+ * products of 4095 x 2047 exceed INT32_MAX though the declared-width bound
+ * (511 int12 terms) would have run them unchecked. */
+void testLinearForwardGroupedAsymWideMantissaAbortsInsteadOfWrapping(void) {
+    enum { IN = 511, GROUPS = 7, GROUP_SIZE = 73 };
+    size_t *weightDims = reserveMemory(2 * sizeof(size_t));
+    weightDims[0] = 1;
+    weightDims[1] = IN;
+    size_t *weightOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, weightOrder);
+    shape_t *weightShape = reserveMemory(sizeof(shape_t));
+    setShape(weightShape, weightDims, 2, weightOrder);
+    tensor_t *weightsParam = initTensor(
+        weightShape, quantizationInitAsymGrouped(12, HALF_AWAY, GROUPS, GROUP_SIZE), NULL);
+    memset(weightsParam->data, 0, (IN * 12 + 7) / 8); /* all codes 0 */
+    asymQConfig_t *weightQC = weightsParam->quantization->qConfig;
+    for (size_t g = 0; g < GROUPS; g++) {
+        weightQC->scales[g] = 1.f;
+        weightQC->zeroPoints[g] = 4095; /* mantissa = 0 - 4095 */
+    }
+    parameter_t *weights = parameterInit(weightsParam, NULL);
+
+    size_t *inputDims = reserveMemory(2 * sizeof(size_t));
+    inputDims[0] = 1;
+    inputDims[1] = IN;
+    size_t *inputOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, inputOrder);
+    shape_t *inputShape = reserveMemory(sizeof(shape_t));
+    setShape(inputShape, inputDims, 2, inputOrder);
+    tensor_t *input = initTensor(inputShape, quantizationInitSymInt32(HALF_AWAY), NULL);
+    for (size_t i = 0; i < IN; i++) {
+        ((int32_t *)input->data)[i] = -2047;
+    }
+    ((symInt32QConfig_t *)input->quantization->qConfig)->scale = 1.f;
+
+    quantization_t *q = quantizationInitSymInt32(HALF_AWAY);
+    layer_t *linearLayer = buildBorrowedLinearLayer(weights, NULL, q);
+    size_t *outDims = reserveMemory(2 * sizeof(size_t));
+    outDims[0] = 1;
+    outDims[1] = 1;
+    size_t *outOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, outOrder);
+    shape_t *outShape = reserveMemory(sizeof(shape_t));
+    setShape(outShape, outDims, 2, outOrder);
+    tensor_t *output = initTensor(outShape, quantizationInitFloat(), NULL);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "matmul SYM_INT32 grouped",
+                             linearForward(linearLayer, input, output, NULL));
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testLinearForwardGroupedAsymWideMantissaAbortsInsteadOfWrapping);
     RUN_TEST(testLinearForwardFloat);
     RUN_TEST(testLinearForwardFloatRank1BiasRank2Output);
     RUN_TEST(testLinearBackwardFloat);

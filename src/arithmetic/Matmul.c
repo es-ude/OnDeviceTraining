@@ -464,7 +464,12 @@ static void matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor_t 
      * sum is bounded by N products plus the seed. Proving the acc bound proves
      * the partial bound too (fewer terms, no seed), so one flag drives both. */
     uint8_t aBits = ((symInt32QConfig_t *)aTensor->quantization->qConfig)->qMaxBits;
-    uint8_t bBits = weightGroups->qBits;
+    /* Count the grouped weight ONE BIT wider than declared: a grouped ASYM
+     * weight reaches the kernel as a SYM view with its ASYM qBits, but the
+     * funnel unpacks it to mantissa = code - zp[g], which spans +-(2^qBits - 1).
+     * Conservative by one bit for true grouped SYM. The abort banner reports
+     * this bound width (declared + 1), not the declared one. */
+    uint8_t bBits = (uint8_t)(weightGroups->qBits + 1);
     size_t partialTerms = weightGroups->groupSize < aColumns ? weightGroups->groupSize : aColumns;
     symAccumSite_t partialSite = symAccumSiteInit("matmul SYM_INT32 grouped (raw group partial)",
                                                   partialTerms, aBits, bBits, 0);

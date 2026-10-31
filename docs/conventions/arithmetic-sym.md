@@ -154,6 +154,13 @@ only the quantization configs change; the int32 accumulator (no int64) is kept.
   3. *Abort:* `exit(1)` with a banner naming the op, N, both operand widths,
      `max|seed|` and the remedies "narrow `ODT_SYM_OPERAND_QMAXBITS` (one lever)
      or run this op under `ARITH_FLOAT32`".
+  *Grouped weights count one bit wider.* A grouped ASYM weight reaches the
+  grouped kernels as a SYM view carrying its ASYM `qBits`, but the funnel unpacks
+  it to the mantissa image `code - zp[g]`, which spans `±(2^qBits − 1)`. The three
+  grouped kernels therefore use `qBits + 1` for the weight in the static bound
+  (conservative by one bit for true grouped SYM), and the abort banner reports
+  that bound width. The view's `qBits` is not widened, so the operand-contract
+  check (`qBits ≤ ODT_SYM_OPERAND_QMAXBITS`) still admits 12-bit ASYM weights.
   Assumption: stored codes obey their declared width (`qMaxBits`/`qBits` is
   metadata and is not re-checked per code); every funnel-produced operand is
   clamped to it, so only a hand-built tensor whose codes exceed its own width can

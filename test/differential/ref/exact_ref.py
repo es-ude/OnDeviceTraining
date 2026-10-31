@@ -178,7 +178,7 @@ def bound_float32_grad(g_absmax: float, n_roundings: int, staging: float = 0.0) 
     the first store into a zeroed grad is the increment's float32 value,
     at most ``n_roundings`` float32 roundings away from raw * s_raw (the
     int->float cast, the s_loss * s_in product, the multiply -- three; see
-    sym_ref.DOC_GAPS[11]) -- ((1+u)^n - 1) relative -- plus the staging term
+    sym_ref.DOC_GAPS[3]) -- ((1+u)^n - 1) relative -- plus the staging term
     of a FLOAT32 forward input. The kernel tier has no float at all: its raw
     int32 is exact and only the float32 product scale (F32_REL) applies.
     """

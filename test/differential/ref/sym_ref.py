@@ -18,27 +18,50 @@ from dataclasses import dataclass
 
 import numpy as np
 
+# What the fixed docs now state, with the section that states it. Leg A cites
+# these instead of assuming them; they are not gaps. ``docs/conventions/``
+# names below are file + section heading.
+DOC_COVERED: dict[str, str] = {
+    "grid": "arithmetic-sym 'Rounding modes, the SYM_INT32 grid, encode and requant', Grid: "
+    "[qMin, qMax] = [-2^(b-1), 2^(b-1) - 1] (2047 and -2048 at int12); every SYM_INT32 requant "
+    "clamps to it; HALF_AWAY never produces qMin from an absmax scale, SR_HALF_AWAY can (u == 0).",
+    "zero_absmax": "same section, dynamic absmax encode: an all-zero tensor gets scale = 1.0 and "
+    "all-zero codes.",
+    "half_away": "same section, Rounding modes: HALF_AWAY = C round() (an exact .5 goes away from "
+    "zero), result converted to int32.",
+    "staging": "same document, 'Staging a FLOAT32 operand under ARITH_SYM_INT32': the dynamic absmax "
+    "encode at ODT_SYM_OPERAND_QMAXBITS (12), per TENSOR, rounded by the op's mode.",
+    "fixed_requant": "same section, fixed-scale requant: clamp(code * inScale / targetScale, qMin, "
+    "qMax) in the float domain, THEN round; no integer clamp after the rounding (under "
+    "SR_HALF_AWAY a value saturated at qMin can land on qMin - 1; the cells here are HALF_AWAY, "
+    "where the clamp bounds are integers and the rounding cannot leave the grid).",
+    "layouts": "data-shape 'Weight layouts, orientation and padding': Linear weight [outF, inF], "
+    "y = x W^T + b, dx = dL W, weightGrad = dL^T x, biasGrad = sum of dL over the batch; Conv1d "
+    "weight [Cout, Cin/groups, K], cross-correlation, tap k reads outPos*stride - padLeft + "
+    "k*dilation; Conv1dTransposed weight [Cin, Cout/groups, K].",
+    "padding": "data-shape, same section: VALID outputLength = (L - effK)/stride + 1, or 0 when "
+    "L < effK; EXPLICIT pads `padding` zeros per side; SAME outputLength = ceil(L/stride), "
+    "totalPad = max(0, effK + (outputLength-1)*stride - L), padLeft = totalPad/2 (floor), "
+    "padRight = totalPad - padLeft.",
+    "accumulator_bound": "arithmetic-sym 'Operand bit-width: int12, not int16', 'SYM int32 accumulator "
+    "guard (shipped)': a product of widths (qa, qb) is bounded by 2^(qa-1) * 2^(qb-1); int12 is "
+    "provably sound for N <= 511; when BOTH operands are absmax-encoded (|code| <= 2^(b-1) - 1) "
+    "the budget is 512 int12 terms (512 * 2047^2 < INT32_MAX, 513 wraps). The guard's static "
+    "proof is N_max * 2^(qa-1) * 2^(qb-1) + max|seed| <= INT32_MAX; an unprovable reduction runs "
+    "checked (exact when it fits, abort at the first real overflow).",
+}
+
+# Genuinely open: the fixed docs are still silent. Each is an assumption Leg A
+# had to make; a C/Leg A disagreement on one of them is a documentation
+# finding, not an implementation bug.
 DOC_GAPS: list[str] = [
-    # Each entry: what Leg A needed, where the doc is silent, what was assumed.
-    "qMin (lower clamp bound) of a SYM_INT32 grid: arithmetic-sym states the product "
-    "bound 2^(2b-2) and qMax = 2^(b-1)-1 only by example (2047 for int12); the lower "
-    "clamp is nowhere stated. Assumed the symmetric two's-complement range "
-    "[-2^(b-1), 2^(b-1)-1]; never reached under HALF_AWAY with an absmax-derived scale.",
-    "absmax == 0: the dynamic requant (#192 D1 'dequant -> absmax -> fresh scale') does "
-    "not say what scale an all-zero tensor gets. Assumed scale = 1.0 (codes all zero).",
-    "Float32 expression order of 'round(value / scale)' (encode, dynamic requant, bias "
-    "refold): the rule is stated in reals; the float32 evaluation order is not. Leg A "
-    "evaluates in float64; disagreements within k*ulp32 of a .5 boundary are ties.",
+    "Float32 evaluation order of the layer-tier width restore 'round(raw * s_raw / s_out)' and of "
+    "the bias refold: arithmetic-sym writes the encode as roundByMode(x / scale) and the dynamic "
+    "requant as (float)code * (inScale / scale), but not the float32 expression of the restore "
+    "chain. Leg A evaluates in float64; disagreements within k*ulp32 of a .5 boundary are ties.",
     "Rounding owner of the forward bias-seed refold: arithmetic-sym says 'seed = "
     "round(param_q * param_scale / accumulator_scale)' without naming the rounding "
     "mode's owner (op vs bias storage). Assumed HALF_AWAY (both coincide in det cells).",
-    "Conv1d orientation and weight layout ([Cout, Cin/groups, K], cross-correlation, no "
-    "kernel flip) are not stated in docs/conventions; data-shape only says shapes follow "
-    "the PyTorch convention. Assumed PyTorch F.conv1d semantics.",
-    "SAME padding split (left/right for an even total) is not in docs/conventions "
-    "(data-shape.md has no padding section). Assumed TF-minimal: left = floor(total/2), "
-    "right = total - left. Not exercised by cell 0 (VALID/EXPLICIT only).",
-    "Output length under VALID when L < effective kernel: not documented. Assumed 0.",
     "Bias seed beyond the float32 tie window: the seed rule 'round(param_q * param_scale / "
     "accumulator_scale)' is stated in reals, but at |seed| >= 2^20 (k = 4: k*ulp32 >= 0.5) no "
     "float32 evaluation can place the value relative to a .5 boundary, so 'round' is not "
@@ -46,38 +69,14 @@ DOC_GAPS: list[str] = [
     "evaluated left-to-right in float32 (q*param_scale, accumulator_scale = s_in*s_w as one "
     "float32 product, then the quotient). A C seed that differs from this reading on such a "
     "channel is reported as a MISMATCH -- an interpretation/doc finding, not waived.",
-    "Definition of HALF_AWAY: the doc names the mode ('half-away-from-zero = roundByMode("
-    "HALF_AWAY) semantics', Pooling SYM_INT32) but never writes the function. Assumed the "
-    "standard one: sign(v) * floor(|v| + 0.5) (an exact .5 goes away from zero).",
-    # --- step 2 (Linear, staging, grads, requant) ---
-    "Linear weight layout and orientation: docs/conventions never state that a Linear weight "
-    "is [outFeatures, inFeatures] with y = x @ W^T + b (data-shape only says shapes follow the "
-    "PyTorch convention; arithmetic-sym names 'Linear forward / propLoss / weightGrad' as "
-    "matmulIntCore users and 'per-channel Linear dx = outFeatures' as the dx reduction). "
-    "Assumed PyTorch nn.Linear: forward x[B,inF] @ W[outF,inF]^T, dx = L[B,outF] @ W, "
-    "weightGrad = L^T @ x, biasGrad = sum over the batch of L.",
-    "Staging of a FLOAT32 operand under ARITH_SYM_INT32: the doc says the funnel prologue "
-    "converts operands into the arithmetic representation but not with which rule, width, "
-    "granularity or rounding. Assumed the documented dynamic encode (#192 D1, absmax -> qMax) "
-    "at the documented operand default width (int12, ODT_SYM_OPERAND_QMAXBITS), per TENSOR "
-    "(one scale for the whole [B, inF] input, not per sample), rounded by the op's mode. The "
-    "GEMM cells use grid-exact float inputs so this assumption is checked on the scale and the "
-    "codes without a float32 encode tie ever entering the MAC (a staging +-1 is not a tie).",
-    "FLOAT32 grad storage receiving a SYM_INT32 raw increment: the doc says 'on FLOAT32 "
-    "targets both [accumulate modes] collapse to the exact float add (no quantization)' but "
-    "not how the raw int32 at s_raw becomes a float. Assumed value = raw * s_raw with at most "
-    "three float32 roundings (the int->float cast, the s_loss*s_in product, the multiply); "
-    "the first store into a zeroed grad is then that value exactly.",
-    "int32 accumulator soundness bound: the doc states 'int12 is sound only for reductions N "
-    "<= 511' from the product bound 2^(2b-2) = 2^22, but the largest int12 code product is "
-    "2047^2 = 4190209 < 2^22 (qMin = -2048 is never produced by an absmax-derived HALF_AWAY "
-    "encode, DOC_GAPS[0]); Leg A predicts the first wrap from the exact code products of each "
-    "fixture (N = 513 for sign-aligned +-2047 operands without a seed). The doc's figure is "
-    "conservative by one term, not wrong.",
-    "Fixed-scale requant (#192 D1 'requant into a preset target scale'): the doc does not say "
-    "what happens to a value outside the target grid. Assumed clamp to [qMin, qMax] (the "
-    "design's D3 says only the DYNAMIC requant 'never saturates', implying the fixed one may).",
+    "FLOAT32 grad storage receiving a SYM_INT32 raw increment: arithmetic-sym 'Quantized gradient "
+    "accumulation' says the accumulate modes 'collapse to the exact float add (no quantization)' "
+    "on FLOAT32 targets, but not how the raw int32 at s_raw becomes a float. Assumed value = raw * "
+    "s_raw with at most three float32 roundings (the int->float cast, the s_loss*s_in product, the "
+    "multiply; the cast is exact for |raw| < 2^24, leaving two); the first store into a zeroed grad "
+    "is then that value exactly.",
 ]
+
 
 
 # --------------------------------------------------------------------------- #
@@ -96,19 +95,18 @@ def qmax(q_max_bits: int) -> int:
 
 
 def qmin(q_max_bits: int) -> int:
-    """Smallest code of the grid, assumed -2^(b-1) (see DOC_GAPS[0])."""
+    """Smallest code of the grid, -2^(b-1) (arithmetic-sym 'Rounding modes, the SYM_INT32 grid...', Grid)."""
     return -(1 << (q_max_bits - 1))
 
 
 def round_half_away(v: np.ndarray) -> np.ndarray:
     """Round half away from zero, elementwise, float64 -> int64.
 
-    Semantics: arithmetic-sym, 'Pooling SYM_INT32', names the mode
-    ('half-away-from-zero = roundByMode(HALF_AWAY) semantics') but does not
-    write the function; the standard definition sign(v) * floor(|v| + 0.5)
-    is assumed (DOC_GAPS[8]). WHICH mode a cell rounds with is the cell's
-    own ``arith.rounding`` (operation-owned per #282), not something the
-    doc fixes; the deterministic cells of this harness declare HALF_AWAY.
+    Semantics: arithmetic-sym 'Rounding modes, the SYM_INT32 grid, encode and
+    requant' defines HALF_AWAY as C ``round()`` (an exact .5 goes away from
+    zero), i.e. sign(v) * floor(|v| + 0.5). WHICH mode a cell rounds with is
+    the cell's own ``arith.rounding`` (operation-owned per #282); the
+    deterministic cells of this harness declare HALF_AWAY.
     """
     v = np.asarray(v, dtype=np.float64)
     out = np.where(v >= 0.0, np.floor(v + 0.5), np.ceil(v - 0.5))
@@ -127,9 +125,11 @@ def encode_sym(x: np.ndarray, q_max_bits: int) -> Encoded:
 
     arithmetic-sym, decision register '#192 D1': 'a dynamic one (dequant ->
     absmax -> fresh scale ...)' and 'D3': 'forward requant maps absmax exactly
-    onto qMax, so it never saturates'. Hence scale = absmax / qMax and
-    codes = round_half_away(x / scale); the clamp to [qMin, qMax] is a no-op
-    by construction. absmax == 0 -> scale 1.0 (DOC_GAPS[1]).
+    onto qMax, so it never saturates'; arithmetic-sym 'Rounding modes, the
+    SYM_INT32 grid, encode and requant' gives scale = absmax / qMax and
+    code = clampInt32(roundByMode(x / scale), qMin, qMax). The clamp is a
+    no-op under HALF_AWAY (qMin is only produced by SR_HALF_AWAY at u == 0).
+    absmax == 0 -> scale 1.0 and all-zero codes (same section).
     """
     x = np.asarray(x, dtype=np.float64)
     absmax = float(np.max(np.abs(x))) if x.size else 0.0
@@ -173,13 +173,13 @@ class ConvGeometry:
 
     def effective_kernel(self) -> int:
         """Span of a dilated kernel, dilation * (K - 1) + 1 -- the PyTorch
-        definition the harness assumes (DOC_GAPS[4]: not in docs/conventions)."""
+        definition (data-shape 'Weight layouts, orientation and padding')."""
         return self.dilation * (self.kernel_size - 1) + 1
 
     def pads(self, length: int) -> tuple[int, int]:
         """(padLeft, padRight). VALID: none. EXPLICIT: the amount on each side
         (PyTorch ``padding=N``). SAME: output length ceil(L/stride) with the
-        minimal total pad split floor/ceil (DOC_GAPS[5])."""
+        totalPad = max(0, effK + (outLen - 1) * stride - L) split padLeft = floor(totalPad / 2) (data-shape 'Weight layouts, orientation and padding')."""
         if self.padding == "VALID":
             return 0, 0
         if self.padding == "EXPLICIT":
@@ -195,7 +195,7 @@ class ConvGeometry:
     def output_length(self, length: int) -> int:
         """floor((L + padLeft + padRight - effectiveKernel) / stride) + 1, the
         standard (PyTorch) formula; 0 when the padded input is shorter than
-        the effective kernel (DOC_GAPS[6])."""
+        the effective kernel (data-shape, same section: 0 when L < effK)."""
         left, right = self.pads(length)
         padded = length + left + right
         eff = self.effective_kernel()
@@ -210,7 +210,7 @@ def conv1d_int_mac(x_codes: np.ndarray, w_codes: np.ndarray, geom: ConvGeometry)
     arithmetic-sym, 'Conv1d / Conv1dTransposed SYM_INT32 (#45)': the gather
     forward emits 'raw accumulator-range int32 mantissas at output scale
     s_in*s_w' -- an exact integer sum of code products. Layout and orientation
-    assumed PyTorch (DOC_GAPS[4]): x [B, Cin, L], w [Cout, Cin/groups, K],
+    per data-shape 'Weight layouts, orientation and padding': x [B, Cin, L], w [Cout, Cin/groups, K],
     y[b, oc, t] = sum_{ic in group(oc), k} x[b, ic, t*stride + k*dilation - padLeft]
     * w[oc, ic - groupBase, k], with out-of-range taps contributing 0 (padding).
     """
@@ -258,7 +258,7 @@ def bias_seed(b_codes: np.ndarray, s_b: float, s_acc: float) -> BiasSeed:
     arithmetic-sym, 'SYM_INT32 seed-rescale + the #189 guard': 'seed =
     round(param_q * param_scale / accumulator_scale)', recomputed each forward
     and added into the integer accumulator; 'never raw-added' ('Conv1d /
-    Conv1dTransposed SYM_INT32'). Rounding mode assumed HALF_AWAY (DOC_GAPS[3]).
+    Conv1dTransposed SYM_INT32'). Rounding mode assumed HALF_AWAY (DOC_GAPS[1]).
     """
     pre = np.asarray(b_codes, dtype=np.float64) * float(s_b) / float(s_acc)
     return BiasSeed(seed=round_half_away(pre), pre=pre)
@@ -273,8 +273,8 @@ def bias_seed_f32_literal(
     'SYM_INT32 seed-rescale') with accumulator_scale = s_in * s_w ('Conv1d /
     Conv1dTransposed SYM_INT32'): q * s_b first, s_in * s_w as one float32
     product, then the quotient, rounded half away. The doc states the rule
-    in reals (DOC_GAPS[2]); this reading is the harness's INTERPRETATION
-    (DOC_GAPS[7]) and gates a channel only where the real-valued tie window
+    in reals (DOC_GAPS[0]); this reading is the harness's INTERPRETATION
+    (DOC_GAPS[2]) and gates a channel only where the real-valued tie window
     cannot discriminate (k * ulp32(|seed|) >= 0.5, i.e. |seed| >= 2^20 at
     k = 4); elsewhere it is informational. Returns float64 with NaN where
     the float32 evaluation is not finite (the reading is then undefined).
@@ -339,7 +339,7 @@ def restore_sym(raw: np.ndarray, s_raw: float, q_max_bits: int) -> Restored:
     '#192 D1' defines that diagonal as the dynamic requant 'dequant -> absmax
     -> fresh scale'; 'D3': absmax maps exactly onto qMax (no saturation). So
     scale = max|raw * s_raw| / qMax, codes = round_half_away(raw * s_raw / scale).
-    absmax == 0 -> scale 1.0 (DOC_GAPS[1]). The width (q_max_bits) is the
+    absmax == 0 -> scale 1.0 (arithmetic-sym, same section as the encode). The width (q_max_bits) is the
     produced wire's storage config; the rounding mode is the OP's
     ('OUT_WRITE epilogue rounding is operation-owned (#282)': the op's
     arithmetic.roundingMode, for which the storage config is only the
@@ -364,7 +364,7 @@ def linear_int_mac(x_codes: np.ndarray, w_codes: np.ndarray) -> np.ndarray:
     arithmetic-sym, 'Operand bit-width': 'matmulIntCore (Linear forward /
     propLoss / weightGrad) ... run on int12 operands' with an int32
     accumulator of code products; the layout [outF, inF] and the W^T
-    orientation are the PyTorch convention (DOC_GAPS[9]).
+    orientation are data-shape 'Weight layouts, orientation and padding'.
     """
     x = np.asarray(x_codes, dtype=np.int64)
     w = np.asarray(w_codes, dtype=np.int64)
@@ -409,7 +409,7 @@ def linear_sym_dx_raw(l_codes: np.ndarray, s_l: float, w_codes: np.ndarray, s_w:
     into the funnel intermediate; the OUT_WRITE epilogue then width-restores
     it at the producer'. The reduction runs over outFeatures ('per-channel
     Linear dx = outFeatures', 'Grouped backward & update'); no bias enters
-    the dx (DOC_GAPS[9] for the orientation).
+    the dx (data-shape 'Weight layouts, orientation and padding': dx = dL W).
     """
     l = np.asarray(l_codes, dtype=np.int64)
     w = np.asarray(w_codes, dtype=np.int64)
@@ -465,6 +465,21 @@ def wrap_int32(v: np.ndarray) -> np.ndarray:
     return ((v + 2**31) % 2**32) - 2**31
 
 
+def guard_static_proof(n_max: int, bits_a: int, bits_b: int, seed_abs_max: int = 0) -> bool:
+    """The SYM int32 accumulator guard's static proof, as the doc states it.
+
+    arithmetic-sym 'SYM int32 accumulator guard (shipped)', item 1: safe iff
+    ``N_max * 2^(qa-1) * 2^(qb-1) + max|seed| <= INT32_MAX`` with qa / qb the
+    operands' actual widths (the full two's-complement magnitude, because
+    -2^(b-1) is reachable through fixed-scale requant saturation) and
+    max|seed| the op's actual bias-seed array. Python ints are exact, so
+    neither a huge N nor a product past 2^31 wraps. When the proof holds the
+    kernel runs its original loop; otherwise the same loop runs checked
+    (exact when the values fit, abort at the first real overflow).
+    """
+    return int(n_max) * (1 << (bits_a - 1)) * (1 << (bits_b - 1)) + int(seed_abs_max) <= INT32_MAX
+
+
 @dataclass
 class OverflowReport:
     fits: bool  # every exact raw accumulator value in [INT32_MIN, INT32_MAX]
@@ -472,6 +487,22 @@ class OverflowReport:
     n_wrap_full_scale: int  # first reduction length at which sign-aligned full-scale
     # products (qMax_a * qMax_b each) plus the largest |seed| exceed INT32_MAX
     reduction: int
+    static_proof: bool = True  # the guard's static bound admits this reduction
+    bits: tuple[int, int] = (0, 0)
+    seed_abs_max: int = 0
+
+    @property
+    def path(self) -> str:
+        """Which guard path Leg A predicts: ``proved`` (original loop),
+        ``checked`` (checked loop, the values fit: exact result) or
+        ``abort`` (the exact accumulator leaves int32: the checked loop
+        fires). A fitting reduction whose PARTIAL sums leave int32 would
+        also abort on the checked path; the walk order is not documented,
+        so the cells keep the partials small (random signs) or one-signed
+        and fitting (the all-+qMax probes)."""
+        if not self.fits:
+            return "abort"
+        return "proved" if self.static_proof else "checked"
 
     def to_json(self) -> dict:
         return {
@@ -479,25 +510,36 @@ class OverflowReport:
             "max_abs_raw": self.max_abs_raw,
             "n_wrap_full_scale": self.n_wrap_full_scale,
             "reduction": self.reduction,
+            "static_proof": self.static_proof,
+            "path": self.path,
+            "bits": list(self.bits),
+            "seed_abs_max": self.seed_abs_max,
         }
 
 
 def overflow_report(raw: np.ndarray, reduction: int, bits_a: int, bits_b: int, seed_abs_max: int = 0) -> OverflowReport:
-    """Does the exact integer accumulator fit int32, and where would full-scale
-    operands first wrap?
+    """Does the exact integer accumulator fit int32, would the guard's static
+    proof admit the reduction, and where would full-scale operands first wrap?
 
     arithmetic-sym, 'Operand bit-width': 'an int32 accumulator (~2^31) holds
     only ~2^(33-2b) worst-case product terms', 'int12 is sound only for
-    reductions N <= 511'. The doc bounds each product by 2^(2b-2); the exact
-    bound for codes on the HALF_AWAY grid is qMax_a * qMax_b (DOC_GAPS[12]),
-    so n_wrap = floor((INT32_MAX - |seed|) / (qMax_a * qMax_b)) + 1.
+    reductions N <= 511', and 'When both operands are absmax-encoded
+    (|code| <= 2^(b-1) - 1) the budget is 512 int12 terms (512 * 2047^2 <
+    INT32_MAX, 513 wraps)'. So for codes on the HALF_AWAY absmax grid
+    n_wrap = floor((INT32_MAX - |seed|) / (qMax_a * qMax_b)) + 1.
     """
     r = np.asarray(raw, dtype=np.int64)
     max_abs = int(np.abs(r).max()) if r.size else 0
     product = qmax(bits_a) * qmax(bits_b)
     n_wrap = (INT32_MAX - int(seed_abs_max)) // product + 1
     return OverflowReport(
-        fits=bool(max_abs <= INT32_MAX), max_abs_raw=max_abs, n_wrap_full_scale=n_wrap, reduction=reduction
+        fits=bool(max_abs <= INT32_MAX),
+        max_abs_raw=max_abs,
+        n_wrap_full_scale=n_wrap,
+        reduction=reduction,
+        static_proof=guard_static_proof(reduction, bits_a, bits_b, seed_abs_max),
+        bits=(bits_a, bits_b),
+        seed_abs_max=int(seed_abs_max),
     )
 
 
@@ -510,12 +552,16 @@ def requant_fixed(codes: np.ndarray, s_in: float, s_target: float, q_max_bits: i
     """SYM_INT32 -> SYM_INT32 requant into a PRESET target scale.
 
     arithmetic-sym decision register '#192 D1': 'a fixed-scale one (requant
-    into a preset target scale)'. codes = round_half_away(m * s_in /
-    s_target), clamped to the target grid (clamping is an assumption,
-    DOC_GAPS[13]; the lower bound is DOC_GAPS[0]). The scale is the given
-    target, unchanged.
+    into a preset target scale)'; arithmetic-sym 'Rounding modes, the
+    SYM_INT32 grid, encode and requant' writes it as roundByMode(clamp(code *
+    inScale / targetScale, qMin, qMax)): the clamp is in the float domain
+    BEFORE the rounding and there is no integer clamp after it. Under
+    HALF_AWAY (every cell here) the clamp bounds are integers, so the rounded
+    value stays on the grid; under SR_HALF_AWAY a value saturated at qMin
+    could round to qMin - 1 (not exercised: no SR cell). The scale is the
+    given target, unchanged.
     """
     values = np.asarray(codes, dtype=np.float64) * float(s_in)
     pre = values / float(s_target)
-    out = np.clip(round_half_away(pre), qmin(q_max_bits), qmax(q_max_bits))
+    out = round_half_away(np.clip(pre, qmin(q_max_bits), qmax(q_max_bits)))
     return Restored(codes=out, scale=float(s_target), pre=pre)

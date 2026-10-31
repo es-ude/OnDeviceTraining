@@ -1,6 +1,6 @@
 {
   "name": "s1x_fwd_overflow_int12_n513",
-  "description": "S1 F9 probe: every input and weight code +2047 (int12 x int12), N=513, B=1 outF=2, no bias: exact accumulator N*2047^2 vs INT32_MAX. Leg A predicts the first wrap at N=513; the doc says 511 is the last sound N. Outcome classified MATCH / ABORT / WRAP (WRAP = finding).",
+  "description": "S1 F9 probe: every input and weight code +2047 (int12 x int12), N=513, B=1 outF=2, no bias: exact accumulator N*2047^2 vs INT32_MAX. Leg A predicts the first wrap at N=513; the doc says 511 is the last sound N. The shipped guard must ABORT (static proof fails, the checked loop overflows) and its banner must name op, N and widths; WRAP / MATCH / SATURATE all FAIL.",
   "op": "linear",
   "direction": "forward",
   "tiers": [
@@ -29,8 +29,8 @@
     ],
     "legB": "BOUNDED",
     "overflow": [
-      "MATCH",
       "ABORT"
-    ]
+    ],
+    "guardPath": "abort"
   }
 }

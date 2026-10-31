@@ -1,0 +1,42 @@
+{
+  "name": "s3y_dw_int12_random_b600",
+  "description": "F9 checked path, weightGrad: B=600 (the reduction) inF=5 outF=3, int12 loss x FLOAT32 input staged to int12 (grid-exact), FLOAT32 grad storage: static proof fails (600*2^22), values fit (random signs): kernel tier exact raw int32, layer tier the float32 grad.",
+  "op": "linear",
+  "direction": "weightGrad",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "SYM_INT32",
+    "rounding": "HALF_AWAY"
+  },
+  "outputBits": 12,
+  "gradStorage": "FLOAT32",
+  "fixture": {
+    "type": "linear_grid",
+    "inputStorage": "FLOAT32",
+    "weightStorage": "SYM_INT32",
+    "weightBits": 12,
+    "bias": true,
+    "seed": 704,
+    "batch": 600,
+    "inF": 5,
+    "outF": 3
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED",
+    "guardPath": "checked",
+    "biasGrad": {
+      "legA": [
+        "EXACT",
+        "TIE_ONLY"
+      ],
+      "legB": "BOUNDED"
+    }
+  }
+}

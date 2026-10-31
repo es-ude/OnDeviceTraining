@@ -1,6 +1,6 @@
 {
   "name": "s1x_fwd_overflow_int12_n511",
-  "description": "S1 F9 probe: every input and weight code +2047 (int12 x int12), N=511, B=1 outF=2, no bias: exact accumulator N*2047^2 vs INT32_MAX. Leg A predicts the first wrap at N=513; the doc says 511 is the last sound N. Outcome classified MATCH / ABORT / WRAP (WRAP = finding).",
+  "description": "S1 F9 probe: every input and weight code +2047 (int12 x int12), N=511, B=1 outF=2, no bias: exact accumulator N*2047^2 vs INT32_MAX. Leg A predicts the first wrap at N=513; the doc says 511 is the last sound N. N=511 is the last N the static proof admits (511*2^22 < 2^31): the original loop runs.",
   "op": "linear",
   "direction": "forward",
   "tiers": [
@@ -28,9 +28,6 @@
       "EXACT"
     ],
     "legB": "BOUNDED",
-    "overflow": [
-      "MATCH",
-      "ABORT"
-    ]
+    "guardPath": "proved"
   }
 }

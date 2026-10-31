@@ -1,6 +1,6 @@
 {
   "name": "s2x_dx_overflow_int12_n512",
-  "description": "S2 F9 probe: loss codes +2047 and int12 weight codes +2047, reduction outF=512, B=1 inF=2: the dx accumulator N*2047^2 vs INT32_MAX, classified MATCH / ABORT / WRAP.",
+  "description": "S2 F9 probe: loss codes +2047 and int12 weight codes +2047, reduction outF=512, B=1 inF=2: the dx accumulator N*2047^2 vs INT32_MAX, N=512 fits but the static proof (512*2^22 >= 2^31) fails: the CHECKED path must return the exact result.",
   "op": "linear",
   "direction": "dx",
   "tiers": [
@@ -28,9 +28,6 @@
       "EXACT"
     ],
     "legB": "BOUNDED",
-    "overflow": [
-      "MATCH",
-      "ABORT"
-    ]
+    "guardPath": "checked"
   }
 }

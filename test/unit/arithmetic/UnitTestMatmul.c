@@ -1807,14 +1807,25 @@ void testMatmulGroupedGuardCheckedPathStaysExactWhenValuesFit(void) {
     TEST_ASSERT_EQUAL_INT32(guardExpected(600), guardGroupedDot(600, 3));
 }
 
-void testMatmulGroupedGuardProvenSafeRunsExact(void) {
-    guardFill(511, -2048, -2048, false); /* 7 x 73 = 511 terms: bound proves it, unchecked loop */
+void testMatmulGroupedGuardFullScaleN511RunsExact(void) {
+    guardFill(511, -2048, -2048,
+              false); /* 7 x 73 = 511 terms: the +1 weight bit makes the bound unprovable, so this
+                         runs the checked loop and must stay exact */
     TEST_ASSERT_EQUAL_INT32(511 * 4194304, guardGroupedDot(511, 7));
+}
+
+void testMatmulGroupedGuardCountsTheAsymMantissaBitWider(void) {
+    /* A grouped ASYM weight unpacks to code - zp, up to 2^qBits - 1 = 4095 at a
+     * declared qBits of 12. 511 terms of 2047 x 4095 exceed INT32_MAX although the
+     * declared-width bound (511 int12 terms) would have called them safe. */
+    guardFill(511, 2047, 4095, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "matmul SYM_INT32 grouped", (void)guardGroupedDot(511, 7));
 }
 
 int main(void) {
 
     UNITY_BEGIN();
+    RUN_TEST(testMatmulGroupedGuardCountsTheAsymMantissaBitWider);
     RUN_TEST(testMatmulSymGuardProvenSafeBoundaryN511RunsExact);
     RUN_TEST(testMatmulSymGuardDiesAtFirstWrappingNFullScaleNegativeCodes);
     RUN_TEST(testMatmulSymGuardDiesAtN513FullScalePositiveCodes);
@@ -1824,7 +1835,7 @@ int main(void) {
     RUN_TEST(testMatmulGroupedGuardDiesOnRawGroupPartialOverflow);
     RUN_TEST(testMatmulGroupedGuardDiesOnRescaledAccumulatorOverflow);
     RUN_TEST(testMatmulGroupedGuardCheckedPathStaysExactWhenValuesFit);
-    RUN_TEST(testMatmulGroupedGuardProvenSafeRunsExact);
+    RUN_TEST(testMatmulGroupedGuardFullScaleN511RunsExact);
     RUN_TEST(testMatmulInt32);
     RUN_TEST(testMatmulInt32WithVector);
     RUN_TEST(testMatmulFloatVectors);

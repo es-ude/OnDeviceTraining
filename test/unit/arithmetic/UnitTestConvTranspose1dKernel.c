@@ -1125,7 +1125,7 @@ void testConvTranspose1dKernelSymGroupedGuardWidthsFollowTheInputWidth(void) {
     ctRun(30, 1, 1, 16, 12, NULL, 2);
     TEST_ASSERT_EQUAL_INT32(30 * 67108864, gCtY[0]);
     ctFill(32, -32768, -2048, false);
-    ASSERT_EXITS_WITH_OUTPUT(1, "widths (16, 12)", ctRun(32, 1, 1, 16, 12, NULL, 2));
+    ASSERT_EXITS_WITH_OUTPUT(1, "widths (16, 13)", ctRun(32, 1, 1, 16, 12, NULL, 2));
 }
 
 void testConvTranspose1dKernelSymGroupedGuardWideInputProductOverflowAborts(void) {
@@ -1146,7 +1146,9 @@ void testConvTranspose1dKernelSymGroupedGuardCheckedPathStaysExactWhenValuesFit(
     ctAssertExact(600, 1, 1, 0);
 }
 
-void testConvTranspose1dKernelSymGroupedGuardProvenSafeRunsExact(void) {
+/* 511 full-scale terms: the weight counts one bit wider (ASYM mantissa image), so the
+ * bound no longer proves this and the checked loop runs; it must stay exact. */
+void testConvTranspose1dKernelSymGroupedGuardFullScaleN511RunsExact(void) {
     ctFill(511, -2048, -2048, false);
     ctRun(511, 1, 1, 12, 12, NULL, 7);
     TEST_ASSERT_EQUAL_INT32(511 * 4194304, gCtY[0]);
@@ -1158,8 +1160,16 @@ void testConvTranspose1dKernelSymGroupedGuardPostScatterBiasIsCounted(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "max|seed|=4194304", ctRun(511, 1, 1, 12, 12, &seed, 7));
 }
 
+void testConvTranspose1dKernelSymGroupedGuardCountsTheAsymMantissaBitWider(void) {
+    /* grouped ASYM weights unpack to code - zp (up to 2^qBits - 1 = 4095 at qBits 12) */
+    ctFill(511, 2047, 4095, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "convTranspose1dKernelSymInt32Grouped",
+                             ctRun(511, 1, 1, 12, 12, NULL, 7));
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testConvTranspose1dKernelSymGroupedGuardCountsTheAsymMantissaBitWider);
     RUN_TEST(testConvTranspose1dKernelSymGuardProvenSafeN511RunsExact);
     RUN_TEST(testConvTranspose1dKernelSymGuardDiesAtFirstWrappingNChannels);
     RUN_TEST(testConvTranspose1dKernelSymGuardDiesAtN513PositiveCodes);
@@ -1173,7 +1183,7 @@ int main(void) {
     RUN_TEST(testConvTranspose1dKernelSymGroupedGuardCountsKernelTapsInN);
     RUN_TEST(testConvTranspose1dKernelSymGroupedGuardWideInputProductOverflowAborts);
     RUN_TEST(testConvTranspose1dKernelSymGroupedGuardCheckedPathStaysExactWhenValuesFit);
-    RUN_TEST(testConvTranspose1dKernelSymGroupedGuardProvenSafeRunsExact);
+    RUN_TEST(testConvTranspose1dKernelSymGroupedGuardFullScaleN511RunsExact);
     RUN_TEST(testConvTranspose1dKernelSymGroupedGuardPostScatterBiasIsCounted);
     RUN_TEST(testConvTranspose1dKernelBasic);
     RUN_TEST(testConvTranspose1dKernelWithStride);

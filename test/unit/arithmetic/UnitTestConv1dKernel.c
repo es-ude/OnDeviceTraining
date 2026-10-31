@@ -948,7 +948,9 @@ void testConv1dKernelSymGroupedGuardCheckedPathStaysExactWhenValuesFit(void) {
     TEST_ASSERT_EQUAL_INT32(cgExpected(600), cgRun(600, 1, 1, 12, 12, NULL, 3));
 }
 
-void testConv1dKernelSymGroupedGuardProvenSafeRunsExact(void) {
+/* 511 full-scale terms: the weight counts one bit wider (ASYM mantissa image), so the
+ * bound no longer proves this and the checked loop runs; it must stay exact. */
+void testConv1dKernelSymGroupedGuardFullScaleN511RunsExact(void) {
     cgFill(511, -2048, -2048, false);
     TEST_ASSERT_EQUAL_INT32(511 * 4194304, cgRun(511, 1, 1, 12, 12, NULL, 7));
 }
@@ -957,7 +959,7 @@ void testConv1dKernelSymGroupedGuardWidthsFollowTheInputWidth(void) {
     cgFill(30, -32768, -2048, false);
     TEST_ASSERT_EQUAL_INT32(30 * 67108864, cgRun(30, 1, 1, 16, 12, NULL, 2));
     cgFill(32, -32768, -2048, false);
-    ASSERT_EXITS_WITH_OUTPUT(1, "widths (16, 12)", (void)cgRun(32, 1, 1, 16, 12, NULL, 2));
+    ASSERT_EXITS_WITH_OUTPUT(1, "widths (16, 13)", (void)cgRun(32, 1, 1, 16, 12, NULL, 2));
 }
 
 void testConv1dKernelSymGroupedGuardWideInputProductOverflowAborts(void) {
@@ -971,8 +973,16 @@ void testConv1dKernelSymGroupedGuardCountsKernelTapsInN(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "N=512", (void)cgRun(1, 512, 512, 12, 12, NULL, 2));
 }
 
+void testConv1dKernelSymGroupedGuardCountsTheAsymMantissaBitWider(void) {
+    /* grouped ASYM weights unpack to code - zp (up to 2^qBits - 1 = 4095 at qBits 12) */
+    cgFill(511, 2047, 4095, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "conv1dKernelSymInt32Grouped",
+                             (void)cgRun(511, 1, 1, 12, 12, NULL, 7));
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testConv1dKernelSymGroupedGuardCountsTheAsymMantissaBitWider);
     RUN_TEST(testConv1dKernelSymGuardProvenSafeN511RunsExact);
     RUN_TEST(testConv1dKernelSymGuardDiesAtFirstWrappingNChannels);
     RUN_TEST(testConv1dKernelSymGuardDiesAtN513PositiveCodes);
@@ -984,7 +994,7 @@ int main(void) {
     RUN_TEST(testConv1dKernelSymGroupedGuardDiesOnRawGroupPartialOverflow);
     RUN_TEST(testConv1dKernelSymGroupedGuardDiesOnRescaledAccumulatorOverflow);
     RUN_TEST(testConv1dKernelSymGroupedGuardCheckedPathStaysExactWhenValuesFit);
-    RUN_TEST(testConv1dKernelSymGroupedGuardProvenSafeRunsExact);
+    RUN_TEST(testConv1dKernelSymGroupedGuardFullScaleN511RunsExact);
     RUN_TEST(testConv1dKernelSymGroupedGuardWidthsFollowTheInputWidth);
     RUN_TEST(testConv1dKernelSymGroupedGuardWideInputProductOverflowAborts);
     RUN_TEST(testConv1dKernelSymGroupedGuardCountsKernelTapsInN);

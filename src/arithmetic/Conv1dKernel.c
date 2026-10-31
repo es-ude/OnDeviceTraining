@@ -413,7 +413,12 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
      * it. Proving the acc proves the partial (fewer terms, no seed). */
     size_t nTerms = inChPerGroup * kernelSize;
     uint8_t xBits = ((symInt32QConfig_t *)input->quantization->qConfig)->qMaxBits;
-    uint8_t wBits = weightGroups->qBits;
+    /* Count the grouped weight ONE BIT wider than declared: a grouped ASYM
+     * weight reaches the kernel as a SYM view with its ASYM qBits, but the
+     * funnel unpacks it to mantissa = code - zp[g], which spans +-(2^qBits - 1).
+     * Conservative by one bit for true grouped SYM. The abort banner reports
+     * this bound width (declared + 1), not the declared one. */
+    uint8_t wBits = (uint8_t)(weightGroups->qBits + 1);
     size_t partialTerms = weightGroups->groupSize < nTerms ? weightGroups->groupSize : nTerms;
     symAccumSite_t partialSite = symAccumSiteInit("conv1dKernelSymInt32Grouped (raw group partial)",
                                                   partialTerms, xBits, wBits, 0);

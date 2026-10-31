@@ -9,6 +9,7 @@
 #include "Mul.h"
 #include "Rounding.h"
 #include "SlidingWindow1d.h"
+#include "SymAccumGuard.h"
 
 void conv1dKernelFloat32(tensor_t const *input, tensor_t const *weight, tensor_t const *bias,
                          kernel_t const *kernel, size_t groups, tensor_t *output) {
@@ -73,6 +74,61 @@ void conv1dKernelFloat32(tensor_t const *input, tensor_t const *weight, tensor_t
     }
 }
 
+/* Conv shape and operand views shared by the SYM loop nests below. */
+typedef struct convSymView {
+    size_t batch, inChannels, inputLength, outChannels, outputLength, kernelSize;
+    size_t groups, inChPerGroup, outChPerGroup;
+    const windowGeometry1d_t *geom;
+    const int32_t *xArr;
+    const int32_t *wArr;
+    int32_t *yArr;
+    const int32_t *seed;
+} convSymView_t;
+
+/* Instantiated twice by conv1dKernelSymInt32 with `checked` a compile-time
+ * constant: false is the historical body (sum + mulInt32s), true routes every
+ * accumulate through the SYM accumulator guard (SymAccumGuard.h). */
+SYM_ACCUM_ALWAYS_INLINE void conv1dSymLoops(const convSymView_t *v, const bool checked,
+                                            const symAccumSite_t *site) {
+    const size_t batch = v->batch, groups = v->groups, inChPerGroup = v->inChPerGroup;
+    const size_t outChPerGroup = v->outChPerGroup, outChannels = v->outChannels;
+    const size_t outputLength = v->outputLength, inChannels = v->inChannels;
+    const size_t inputLength = v->inputLength, kernelSize = v->kernelSize;
+    const windowGeometry1d_t geom = *v->geom;
+    const int32_t *xArr = v->xArr, *wArr = v->wArr, *seed = v->seed;
+    int32_t *yArr = v->yArr;
+
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t g = 0; g < groups; g++) {
+            size_t inLo = g * inChPerGroup;
+            size_t outLo = g * outChPerGroup;
+
+            for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
+                size_t oc = outLo + ocOffset;
+                for (size_t outPos = 0; outPos < outputLength; outPos++) {
+                    windowSlice1d_t slice = windowSlice1dAt(&geom, outPos);
+                    int32_t sum = seed[oc];
+
+                    for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
+                        size_t ic = inLo + icOffset;
+                        for (size_t i = 0; i < slice.validCount; i++) {
+                            size_t inputIdx = slice.firstValidInputIdx + i * geom.dilation;
+                            size_t kernelIdx = slice.firstValidKernelOffset + i;
+
+                            int32_t xv = xArr[(b * inChannels + ic) * inputLength + inputIdx];
+                            int32_t wv =
+                                wArr[(oc * inChPerGroup + icOffset) * kernelSize + kernelIdx];
+                            sum = symMac(sum, xv, wv, checked, site);
+                        }
+                    }
+
+                    yArr[(b * outChannels + oc) * outputLength + outPos] = sum;
+                }
+            }
+        }
+    }
+}
+
 void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_t const *bias,
                           kernel_t const *kernel, size_t groups, tensor_t *output,
                           rngStream_t *rs) {
@@ -126,34 +182,30 @@ void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_
         }
     }
 
-    for (size_t b = 0; b < batch; b++) {
-        for (size_t g = 0; g < groups; g++) {
-            size_t inLo = g * inChPerGroup;
-            size_t outLo = g * outChPerGroup;
-
-            for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
-                size_t oc = outLo + ocOffset;
-                for (size_t outPos = 0; outPos < outputLength; outPos++) {
-                    windowSlice1d_t slice = windowSlice1dAt(&geom, outPos);
-                    int32_t sum = seed[oc];
-
-                    for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
-                        size_t ic = inLo + icOffset;
-                        for (size_t i = 0; i < slice.validCount; i++) {
-                            size_t inputIdx = slice.firstValidInputIdx + i * geom.dilation;
-                            size_t kernelIdx = slice.firstValidKernelOffset + i;
-
-                            int32_t xv = xArr[(b * inChannels + ic) * inputLength + inputIdx];
-                            int32_t wv =
-                                wArr[(oc * inChPerGroup + icOffset) * kernelSize + kernelIdx];
-                            sum += mulInt32s(xv, wv);
-                        }
-                    }
-
-                    yArr[(b * outChannels + oc) * outputLength + outPos] = sum;
-                }
-            }
-        }
+    convSymView_t view = {.batch = batch,
+                          .inChannels = inChannels,
+                          .inputLength = inputLength,
+                          .outChannels = outChannels,
+                          .outputLength = outputLength,
+                          .kernelSize = kernelSize,
+                          .groups = groups,
+                          .inChPerGroup = inChPerGroup,
+                          .outChPerGroup = outChPerGroup,
+                          .geom = &geom,
+                          .xArr = xArr,
+                          .wArr = wArr,
+                          .yArr = yArr,
+                          .seed = seed};
+    /* Per output element: at most inChPerGroup * kernelSize products (padding
+     * only shrinks it), on top of the bias seed. */
+    uint8_t xBits = ((symInt32QConfig_t *)input->quantization->qConfig)->qMaxBits;
+    uint8_t wBits = ((symInt32QConfig_t *)weight->quantization->qConfig)->qMaxBits;
+    symAccumSite_t site = symAccumSiteInit("conv1dKernelSymInt32", inChPerGroup * kernelSize, xBits,
+                                           wBits, symAccumMaxAbsSeed(seed, outChannels));
+    if (symAccumProvenSafe(&site)) {
+        conv1dSymLoops(&view, false, &site);
+    } else {
+        conv1dSymLoops(&view, true, &site);
     }
 
     if (output->quantization->qConfig == NULL) {
@@ -184,6 +236,92 @@ static void conv1dValidateWeightGroups(const symQConfig_t *weightGroups, size_t 
         exit(1);
     }
     validateSymQConfigShape(weightGroups, weightElemCount);
+}
+
+/* Grouped twin of conv1dSymLoops: two int32 accumulators (the raw group
+ * partial and the running acc of rescaled partials), each with its own site. */
+SYM_ACCUM_ALWAYS_INLINE void
+conv1dSymGroupedLoops(const convSymView_t *v, const symQConfig_t *weightGroups, float inScale,
+                      float sAcc, roundingMode_t roundingMode, rngStream_t *rs, const bool checked,
+                      const symAccumSite_t *partialSite, const symAccumSite_t *accSite) {
+    const size_t batch = v->batch, groups = v->groups, inChPerGroup = v->inChPerGroup;
+    const size_t outChPerGroup = v->outChPerGroup, outChannels = v->outChannels;
+    const size_t outputLength = v->outputLength, inChannels = v->inChannels;
+    const size_t inputLength = v->inputLength, kernelSize = v->kernelSize;
+    const windowGeometry1d_t geom = *v->geom;
+    const int32_t *xArr = v->xArr, *wArr = v->wArr, *seed = v->seed;
+    int32_t *yArr = v->yArr;
+
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t g = 0; g < groups; g++) {
+            size_t inLo = g * inChPerGroup;
+            size_t outLo = g * outChPerGroup;
+
+            for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
+                size_t oc = outLo + ocOffset;
+                size_t wBase = oc * inChPerGroup * kernelSize;
+
+                for (size_t outPos = 0; outPos < outputLength; outPos++) {
+                    windowSlice1d_t slice = windowSlice1dAt(&geom, outPos);
+                    int32_t acc = seed[oc];
+                    int32_t partial = 0;
+                    size_t currentGroup = SIZE_MAX;
+
+                    for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
+                        size_t ic = inLo + icOffset;
+                        for (size_t i = 0; i < slice.validCount; i++) {
+                            size_t inputIdx = slice.firstValidInputIdx + i * geom.dilation;
+                            size_t kernelIdx = slice.firstValidKernelOffset + i;
+                            size_t wStorageIdx = wBase + icOffset * kernelSize + kernelIdx;
+                            /* Per-element division, unlike Matmul's grouped kernel (which
+                             * precomputes a run length to the next group boundary): padding
+                             * (VALID/SAME/EXPLICIT) makes slice.validCount skip invalid kernel
+                             * positions, so consecutive wStorageIdx values here can have gaps --
+                             * a precomputed run length would overshoot past a skipped index.
+                             * Dividing the actual visited index is gap-robust. */
+                            size_t elemGroup = wStorageIdx / weightGroups->groupSize;
+
+                            if (elemGroup != currentGroup) {
+                                if (currentGroup != SIZE_MAX) {
+                                    /* Group-boundary combine: fold the FINISHED
+                                     * group's raw int32 partial into the running
+                                     * accumulator scale (one rounding here,
+                                     * honoring the op's rounding mode). */
+                                    acc = symAdd(acc,
+                                                 rescaleIntoAccumulatorScale(
+                                                     partial,
+                                                     inScale * weightGroups->scales[currentGroup],
+                                                     sAcc, roundingMode, rs),
+                                                 checked, accSite);
+                                    partial = 0;
+                                }
+                                currentGroup = elemGroup;
+                            }
+
+                            int32_t xv = xArr[(b * inChannels + ic) * inputLength + inputIdx];
+                            int32_t wv = wArr[wStorageIdx];
+                            partial = symMac(partial, xv, wv, checked, partialSite);
+                        }
+                    }
+                    /* Tail combine: the LAST group visited never crosses a
+                     * further boundary, so its partial only ever gets folded
+                     * in here. Per-channel weights (groupSize == the full
+                     * inChPerGroup*kernelSize reduction) never hit the
+                     * mid-loop branch at all -- this is their ONLY weight
+                     * combine. */
+                    if (currentGroup != SIZE_MAX) {
+                        acc = symAdd(acc,
+                                     rescaleIntoAccumulatorScale(
+                                         partial, inScale * weightGroups->scales[currentGroup],
+                                         sAcc, roundingMode, rs),
+                                     checked, accSite);
+                    }
+
+                    yArr[(b * outChannels + oc) * outputLength + outPos] = acc;
+                }
+            }
+        }
+    }
 }
 
 void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
@@ -256,70 +394,38 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
         }
     }
 
-    for (size_t b = 0; b < batch; b++) {
-        for (size_t g = 0; g < groups; g++) {
-            size_t inLo = g * inChPerGroup;
-            size_t outLo = g * outChPerGroup;
-
-            for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
-                size_t oc = outLo + ocOffset;
-                size_t wBase = oc * inChPerGroup * kernelSize;
-
-                for (size_t outPos = 0; outPos < outputLength; outPos++) {
-                    windowSlice1d_t slice = windowSlice1dAt(&geom, outPos);
-                    int32_t acc = seed[oc];
-                    int32_t partial = 0;
-                    size_t currentGroup = SIZE_MAX;
-
-                    for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
-                        size_t ic = inLo + icOffset;
-                        for (size_t i = 0; i < slice.validCount; i++) {
-                            size_t inputIdx = slice.firstValidInputIdx + i * geom.dilation;
-                            size_t kernelIdx = slice.firstValidKernelOffset + i;
-                            size_t wStorageIdx = wBase + icOffset * kernelSize + kernelIdx;
-                            /* Per-element division, unlike Matmul's grouped kernel (which
-                             * precomputes a run length to the next group boundary): padding
-                             * (VALID/SAME/EXPLICIT) makes slice.validCount skip invalid kernel
-                             * positions, so consecutive wStorageIdx values here can have gaps --
-                             * a precomputed run length would overshoot past a skipped index.
-                             * Dividing the actual visited index is gap-robust. */
-                            size_t elemGroup = wStorageIdx / weightGroups->groupSize;
-
-                            if (elemGroup != currentGroup) {
-                                if (currentGroup != SIZE_MAX) {
-                                    /* Group-boundary combine: fold the FINISHED
-                                     * group's raw int32 partial into the running
-                                     * accumulator scale (one rounding here,
-                                     * honoring the op's rounding mode). */
-                                    acc += rescaleIntoAccumulatorScale(
-                                        partial, inScale * weightGroups->scales[currentGroup], sAcc,
-                                        wQC->roundingMode, rs);
-                                    partial = 0;
-                                }
-                                currentGroup = elemGroup;
-                            }
-
-                            int32_t xv = xArr[(b * inChannels + ic) * inputLength + inputIdx];
-                            int32_t wv = wArr[wStorageIdx];
-                            partial += mulInt32s(xv, wv);
-                        }
-                    }
-                    /* Tail combine: the LAST group visited never crosses a
-                     * further boundary, so its partial only ever gets folded
-                     * in here. Per-channel weights (groupSize == the full
-                     * inChPerGroup*kernelSize reduction) never hit the
-                     * mid-loop branch at all -- this is their ONLY weight
-                     * combine. */
-                    if (currentGroup != SIZE_MAX) {
-                        acc += rescaleIntoAccumulatorScale(
-                            partial, inScale * weightGroups->scales[currentGroup], sAcc,
-                            wQC->roundingMode, rs);
-                    }
-
-                    yArr[(b * outChannels + oc) * outputLength + outPos] = acc;
-                }
-            }
-        }
+    convSymView_t view = {.batch = batch,
+                          .inChannels = inChannels,
+                          .inputLength = inputLength,
+                          .outChannels = outChannels,
+                          .outputLength = outputLength,
+                          .kernelSize = kernelSize,
+                          .groups = groups,
+                          .inChPerGroup = inChPerGroup,
+                          .outChPerGroup = outChPerGroup,
+                          .geom = &geom,
+                          .xArr = xArr,
+                          .wArr = wArr,
+                          .yArr = yArr,
+                          .seed = seed};
+    /* Raw partial: at most min(groupSize, N) products; acc: the rescaled
+     * partials (each factor <= 1) plus the seed, so N products plus seed bound
+     * it. Proving the acc proves the partial (fewer terms, no seed). */
+    size_t nTerms = inChPerGroup * kernelSize;
+    uint8_t xBits = ((symInt32QConfig_t *)input->quantization->qConfig)->qMaxBits;
+    uint8_t wBits = weightGroups->qBits;
+    size_t partialTerms = weightGroups->groupSize < nTerms ? weightGroups->groupSize : nTerms;
+    symAccumSite_t partialSite = symAccumSiteInit("conv1dKernelSymInt32Grouped (raw group partial)",
+                                                  partialTerms, xBits, wBits, 0);
+    symAccumSite_t accSite =
+        symAccumSiteInit("conv1dKernelSymInt32Grouped (rescaled accumulator)", nTerms, xBits, wBits,
+                         symAccumMaxAbsSeed(seed, outChannels));
+    if (symAccumProvenSafe(&accSite)) {
+        conv1dSymGroupedLoops(&view, weightGroups, inScale, sAcc, wQC->roundingMode, rs, false,
+                              &partialSite, &accSite);
+    } else {
+        conv1dSymGroupedLoops(&view, weightGroups, inScale, sAcc, wQC->roundingMode, rs, true,
+                              &partialSite, &accSite);
     }
 
     if (output->quantization->qConfig == NULL) {

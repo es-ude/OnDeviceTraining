@@ -97,3 +97,32 @@ axes, since nothing here auto-detects the old shape:
   receive stack `[1, ...]` views borrowed for the duration of the call,
   not the long-lived dataset tensors they used to see — see
   `TrainingLoopApi.h`.
+
+## Weight layouts, orientation and padding
+
+Layer shapes follow the PyTorch convention; the points a re-implementation
+(or a reference model) has to get exactly right:
+
+- **Linear** (`src/layer/Linear.c`): the weight is `[outFeatures, inFeatures]`,
+  the bias `[outFeatures]`. Forward is `y = x Wᵀ + b` for `x` `[B, inFeatures]`
+  (`linearForwardFloat` transposes the weight view, zero-copy, then runs
+  `x @ Wᵀ`). Backward: `dx = dL W` (`dL` `[B, outFeatures]`, `W` as stored),
+  `weightGrad = dLᵀ x` (`[outFeatures, inFeatures]`), `biasGrad` = per-feature
+  sum of `dL` over the batch (`linearCalcBiasGradsFloat32`). Every matmul entry
+  computes `a @ b` of its two arguments.
+- **Conv1d** (`conv1dKernelFloat32`, `conv1dKernelSymInt32`): the weight is
+  `[Cout, Cin/groups, K]`, flat index `(oc · Cin/groups + ic) · K + k`; input
+  and output are `[B, C, L]`. It is a cross-correlation: kernel tap `k` reads
+  input position `outPos · stride − padLeft + k · dilation`, the kernel is not
+  flipped. Conv1dTransposed's layout is `[Cin, Cout/groups, K]` (see
+  [arithmetic-sym.md](arithmetic-sym.md)).
+- **Padding** (`windowGeometry1dCalc`, `src/arithmetic/SlidingWindow1d.c`),
+  with `effK = dilation · (K − 1) + 1`: `VALID` pads nothing and has
+  `outputLength = (L − effK) / stride + 1`, or **0 when `L < effK`**; `EXPLICIT`
+  pads `padding` zeros on each side with the same formula on the padded
+  length (also 0 when it is shorter than `effK`); `SAME` has
+  `outputLength = ceil(L / stride)` and
+  `totalPad = max(0, effK + (outputLength − 1) · stride − L)` split as
+  `padLeft = totalPad / 2` (floor) and `padRight = totalPad − padLeft`, i.e.
+  the extra zero of an odd total goes to the right (TF-minimal; PyTorch
+  `padding=N` is `EXPLICIT`).

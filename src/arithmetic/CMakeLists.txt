@@ -109,6 +109,7 @@ target_link_libraries(Log PRIVATE
 add_library(Matmul Matmul.c)
 target_include_directories(Matmul PUBLIC include)
 target_link_libraries(Matmul PRIVATE
+        SymAccumGuard
         Common
         Tensor
         DTypes

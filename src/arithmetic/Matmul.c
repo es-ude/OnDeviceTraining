@@ -76,6 +76,19 @@ SYM_ACCUM_ALWAYS_INLINE void matmulIntLoops(tensor_t *aTensor, tensor_t *bTensor
     }
 }
 
+SYM_ACCUM_NOINLINE void matmulIntLoopsSafe(tensor_t *a, tensor_t *b, tensor_t *out,
+                                           const int32_t *biasSeed, size_t aRows, size_t aColumns,
+                                           size_t bColumns, const symAccumSite_t *site) {
+    matmulIntLoops(a, b, out, biasSeed, aRows, aColumns, bColumns, false, site);
+}
+
+SYM_ACCUM_NOINLINE void matmulIntLoopsChecked(tensor_t *a, tensor_t *b, tensor_t *out,
+                                              const int32_t *biasSeed, size_t aRows,
+                                              size_t aColumns, size_t bColumns,
+                                              const symAccumSite_t *site) {
+    matmulIntLoops(a, b, out, biasSeed, aRows, aColumns, bColumns, true, site);
+}
+
 /* symGuard == false: plain INT32 matmul, widths unknown, no accumulator guard.
  * symGuard == true: SYM_INT32 operands of declared widths aBits/bBits -- the
  * static bound over (aColumns terms, max|biasSeed|) picks the unchanged loop
@@ -111,11 +124,11 @@ static void matmulIntCore(tensor_t *aTensor, tensor_t *bTensor, tensor_t *output
     symAccumSite_t site = symAccumSiteInit("matmul SYM_INT32", aColumns, aBits, bBits,
                                            symAccumMaxAbsSeed(biasSeed, bColumns));
     if (!symGuard || symAccumProvenSafe(&site)) {
-        matmulIntLoops(aTensor, bTensor, outputTensor, biasSeed, aRows, aColumns, bColumns, false,
-                       &site);
+        matmulIntLoopsSafe(aTensor, bTensor, outputTensor, biasSeed, aRows, aColumns, bColumns,
+                           &site);
     } else {
-        matmulIntLoops(aTensor, bTensor, outputTensor, biasSeed, aRows, aColumns, bColumns, true,
-                       &site);
+        matmulIntLoopsChecked(aTensor, bTensor, outputTensor, biasSeed, aRows, aColumns, bColumns,
+                              &site);
     }
 }
 
@@ -428,6 +441,23 @@ matmulGroupedLoops(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,
     }
 }
 
+#define MATMUL_GROUPED_PARAMS                                                                      \
+    tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor, const int32_t *biasSeed,         \
+        const symQConfig_t *weightGroups, float aScale, float sAcc, roundingMode_t roundingMode,   \
+        rngStream_t *rs, size_t aRows, size_t aColumns, size_t bColumns,                           \
+        const symAccumSite_t *partialSite, const symAccumSite_t *accSite
+#define MATMUL_GROUPED_ARGS(checked)                                                               \
+    aTensor, bTensor, outputTensor, biasSeed, weightGroups, aScale, sAcc, roundingMode, rs, aRows, \
+        aColumns, bColumns, checked, partialSite, accSite
+
+SYM_ACCUM_NOINLINE void matmulGroupedLoopsSafe(MATMUL_GROUPED_PARAMS) {
+    matmulGroupedLoops(MATMUL_GROUPED_ARGS(false));
+}
+
+SYM_ACCUM_NOINLINE void matmulGroupedLoopsChecked(MATMUL_GROUPED_PARAMS) {
+    matmulGroupedLoops(MATMUL_GROUPED_ARGS(true));
+}
+
 static void matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,
                                  const int32_t *biasSeed, const symQConfig_t *weightGroups,
                                  float aScale, float sAcc, roundingMode_t roundingMode,
@@ -477,13 +507,12 @@ static void matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor_t 
         symAccumSiteInit("matmul SYM_INT32 grouped (rescaled accumulator)", aColumns, aBits, bBits,
                          symAccumMaxAbsSeed(biasSeed, bColumns));
     if (symAccumProvenSafe(&accSite)) {
-        matmulGroupedLoops(aTensor, bTensor, outputTensor, biasSeed, weightGroups, aScale, sAcc,
-                           roundingMode, rs, aRows, aColumns, bColumns, false, &partialSite,
-                           &accSite);
+        matmulGroupedLoopsSafe(aTensor, bTensor, outputTensor, biasSeed, weightGroups, aScale, sAcc,
+                               roundingMode, rs, aRows, aColumns, bColumns, &partialSite, &accSite);
     } else {
-        matmulGroupedLoops(aTensor, bTensor, outputTensor, biasSeed, weightGroups, aScale, sAcc,
-                           roundingMode, rs, aRows, aColumns, bColumns, true, &partialSite,
-                           &accSite);
+        matmulGroupedLoopsChecked(aTensor, bTensor, outputTensor, biasSeed, weightGroups, aScale,
+                                  sAcc, roundingMode, rs, aRows, aColumns, bColumns, &partialSite,
+                                  &accSite);
     }
 }
 

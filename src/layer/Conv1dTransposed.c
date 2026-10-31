@@ -484,6 +484,23 @@ SYM_ACCUM_ALWAYS_INLINE void conv1dTransposedWeightGradSymScatter(
     }
 }
 
+#define CONVT_WG_PARAMS                                                                            \
+    size_t batch, size_t groups, size_t inChPerGroup, size_t outChPerGroup, size_t inChannels,     \
+        size_t outChannels, size_t inputLength, size_t outputLength, size_t kernelSize,            \
+        const kernel_t *kernel, const int32_t *xArr, const int32_t *gyArr, int32_t *interData,     \
+        const symAccumSite_t *site
+#define CONVT_WG_ARGS(checked)                                                                     \
+    batch, groups, inChPerGroup, outChPerGroup, inChannels, outChannels, inputLength,              \
+        outputLength, kernelSize, kernel, xArr, gyArr, interData, checked, site
+
+SYM_ACCUM_NOINLINE void conv1dTransposedWeightGradSymScatterSafe(CONVT_WG_PARAMS) {
+    conv1dTransposedWeightGradSymScatter(CONVT_WG_ARGS(false));
+}
+
+SYM_ACCUM_NOINLINE void conv1dTransposedWeightGradSymScatterChecked(CONVT_WG_PARAMS) {
+    conv1dTransposedWeightGradSymScatter(CONVT_WG_ARGS(true));
+}
+
 static void weightGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                                 const void *ctx, rngStream_t *rs) {
     (void)n;
@@ -557,13 +574,13 @@ static void weightGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tens
         symAccumSiteInit("conv1dTransposedCalcWeightGradsSymInt32 (batch*inputLength)",
                          batch * inputLength, xBits, gyBits, 0);
     if (symAccumProvenSafe(&site)) {
-        conv1dTransposedWeightGradSymScatter(batch, groups, inChPerGroup, outChPerGroup, inChannels,
-                                             outChannels, inputLength, outputLength, kernelSize,
-                                             cfg->kernel, xArr, gyArr, interData, false, &site);
+        conv1dTransposedWeightGradSymScatterSafe(
+            batch, groups, inChPerGroup, outChPerGroup, inChannels, outChannels, inputLength,
+            outputLength, kernelSize, cfg->kernel, xArr, gyArr, interData, &site);
     } else {
-        conv1dTransposedWeightGradSymScatter(batch, groups, inChPerGroup, outChPerGroup, inChannels,
-                                             outChannels, inputLength, outputLength, kernelSize,
-                                             cfg->kernel, xArr, gyArr, interData, true, &site);
+        conv1dTransposedWeightGradSymScatterChecked(
+            batch, groups, inChPerGroup, outChPerGroup, inChannels, outChannels, inputLength,
+            outputLength, kernelSize, cfg->kernel, xArr, gyArr, interData, &site);
     }
 }
 

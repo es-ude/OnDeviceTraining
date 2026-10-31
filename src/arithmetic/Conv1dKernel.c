@@ -129,6 +129,14 @@ SYM_ACCUM_ALWAYS_INLINE void conv1dSymLoops(const convSymView_t *v, const bool c
     }
 }
 
+SYM_ACCUM_NOINLINE void conv1dSymLoopsSafe(const convSymView_t *v, const symAccumSite_t *site) {
+    conv1dSymLoops(v, false, site);
+}
+
+SYM_ACCUM_NOINLINE void conv1dSymLoopsChecked(const convSymView_t *v, const symAccumSite_t *site) {
+    conv1dSymLoops(v, true, site);
+}
+
 void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_t const *bias,
                           kernel_t const *kernel, size_t groups, tensor_t *output,
                           rngStream_t *rs) {
@@ -203,9 +211,9 @@ void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_
     symAccumSite_t site = symAccumSiteInit("conv1dKernelSymInt32", inChPerGroup * kernelSize, xBits,
                                            wBits, symAccumMaxAbsSeed(seed, outChannels));
     if (symAccumProvenSafe(&site)) {
-        conv1dSymLoops(&view, false, &site);
+        conv1dSymLoopsSafe(&view, &site);
     } else {
-        conv1dSymLoops(&view, true, &site);
+        conv1dSymLoopsChecked(&view, &site);
     }
 
     if (output->quantization->qConfig == NULL) {
@@ -324,6 +332,21 @@ conv1dSymGroupedLoops(const convSymView_t *v, const symQConfig_t *weightGroups, 
     }
 }
 
+#define CONV1D_GROUPED_PARAMS                                                                      \
+    const convSymView_t *v, const symQConfig_t *weightGroups, float inScale, float sAcc,           \
+        roundingMode_t roundingMode, rngStream_t *rs, const symAccumSite_t *partialSite,           \
+        const symAccumSite_t *accSite
+#define CONV1D_GROUPED_ARGS(checked)                                                               \
+    v, weightGroups, inScale, sAcc, roundingMode, rs, checked, partialSite, accSite
+
+SYM_ACCUM_NOINLINE void conv1dSymGroupedLoopsSafe(CONV1D_GROUPED_PARAMS) {
+    conv1dSymGroupedLoops(CONV1D_GROUPED_ARGS(false));
+}
+
+SYM_ACCUM_NOINLINE void conv1dSymGroupedLoopsChecked(CONV1D_GROUPED_PARAMS) {
+    conv1dSymGroupedLoops(CONV1D_GROUPED_ARGS(true));
+}
+
 void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                                  tensor_t const *bias, kernel_t const *kernel, size_t groups,
                                  tensor_t *output, const symQConfig_t *weightGroups,
@@ -426,11 +449,11 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
         symAccumSiteInit("conv1dKernelSymInt32Grouped (rescaled accumulator)", nTerms, xBits, wBits,
                          symAccumMaxAbsSeed(seed, outChannels));
     if (symAccumProvenSafe(&accSite)) {
-        conv1dSymGroupedLoops(&view, weightGroups, inScale, sAcc, wQC->roundingMode, rs, false,
-                              &partialSite, &accSite);
+        conv1dSymGroupedLoopsSafe(&view, weightGroups, inScale, sAcc, wQC->roundingMode, rs,
+                                  &partialSite, &accSite);
     } else {
-        conv1dSymGroupedLoops(&view, weightGroups, inScale, sAcc, wQC->roundingMode, rs, true,
-                              &partialSite, &accSite);
+        conv1dSymGroupedLoopsChecked(&view, weightGroups, inScale, sAcc, wQC->roundingMode, rs,
+                                     &partialSite, &accSite);
     }
 
     if (output->quantization->qConfig == NULL) {

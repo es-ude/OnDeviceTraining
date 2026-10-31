@@ -120,18 +120,33 @@ static inline int32_t symAccumAddChecked(int32_t acc, int32_t term, const symAcc
     return r;
 }
 
-/* acc + a*b with every step checked. The product goes through mulInt32s (so
- * TRACK_INSTRUCTIONS counts it exactly like the unchecked path) only after the
- * wide-width mul check cleared it; for widths <= 16 |a*b| <= 2^30 already. */
-static inline int32_t symAccumMacChecked(int32_t acc, int32_t a, int32_t b,
-                                         const symAccumSite_t *s) {
+/* a*b with the wide-width product check: for widths <= 16 |a*b| <= 2^30
+ * already, so only a wide site tests the multiply. Goes through mulInt32s so
+ * TRACK_INSTRUCTIONS counts it exactly like the unchecked path. */
+static inline int32_t symAccumProductChecked(int32_t a, int32_t b, const symAccumSite_t *s) {
     if (s->wideProduct) {
         int32_t unused;
         if (__builtin_mul_overflow(a, b, &unused)) {
             symAccumAbort(s);
         }
     }
-    return symAccumAddChecked(acc, mulInt32s(a, b), s);
+    return mulInt32s(a, b);
+}
+
+/* acc + a*b with every step checked. */
+static inline int32_t symAccumMacChecked(int32_t acc, int32_t a, int32_t b,
+                                         const symAccumSite_t *s) {
+    return symAccumAddChecked(acc, symAccumProductChecked(a, b, s), s);
+}
+
+/* A standalone product (the grouped ConvT scatter rescales each product before
+ * accumulating it); `checked` must be a compile-time constant. */
+SYM_ACCUM_ALWAYS_INLINE int32_t symProduct(int32_t a, int32_t b, const bool checked,
+                                           const symAccumSite_t *s) {
+    if (!checked) {
+        return mulInt32s(a, b);
+    }
+    return symAccumProductChecked(a, b, s);
 }
 
 /* One accumulate step; `checked` must be a compile-time constant at the call

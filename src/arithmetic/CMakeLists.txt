@@ -214,6 +214,7 @@ target_link_libraries(Conv1dKernel PRIVATE
 add_library(ConvTranspose1dKernel ConvTranspose1dKernel.c)
 target_include_directories(ConvTranspose1dKernel PUBLIC include)
 target_link_libraries(ConvTranspose1dKernel PRIVATE
+        SymAccumGuard
         Tensor
         Kernel
         SlidingWindow1d

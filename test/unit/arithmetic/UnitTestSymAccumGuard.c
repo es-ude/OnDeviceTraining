@@ -105,6 +105,13 @@ void testMacCheckedExactResultAndWideProductAbort(void) {
     TEST_ASSERT_EQUAL_INT32(1000 + 40000, symAccumMacChecked(1000, 200, 200, &wide));
 }
 
+void testProductCheckedAbortsOnlyWhenWideAndOverflowing(void) {
+    symAccumSite_t wide = symAccumSiteInit("widemul", 1, 20, 20, 0);
+    TEST_ASSERT_EQUAL_INT32(40000, symProduct(200, 200, true, &wide));
+    TEST_ASSERT_EQUAL_INT32(12, symProduct(3, 4, false, &wide));
+    ASSERT_EXITS_WITH_OUTPUT(1, "widemul", (void)symProduct(65536, 65536, true, &wide));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testTermLimitInt12Seed0Is511);
@@ -121,5 +128,6 @@ int main(void) {
     RUN_TEST(testCheckedAddAbortsOnPositiveAndNegativeOverflow);
     RUN_TEST(testBannerNamesNWidthsSeedAndRemedies);
     RUN_TEST(testMacCheckedExactResultAndWideProductAbort);
+    RUN_TEST(testProductCheckedAbortsOnlyWhenWideAndOverflowing);
     return UNITY_END();
 }

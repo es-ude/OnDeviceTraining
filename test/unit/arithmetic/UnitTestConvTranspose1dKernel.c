@@ -1,3 +1,4 @@
+#include <stdbool.h>
 #include <string.h>
 
 #include "ConvTranspose1dKernel.h"
@@ -979,8 +980,201 @@ void testConvTranspose1dKernelBfpGatherConvGroups2MatchesGold(void) {
 void setUp() {}
 void tearDown() {}
 
+/* ---- SYM int32 accumulator guard (SymAccumGuard.h) ---------------------- */
+
+#define CT_MAXN 1100
+static int32_t gCtX[CT_MAXN];
+static int32_t gCtW[CT_MAXN];
+static int32_t gCtY[CT_MAXN * 2];
+
+static void ctFill(size_t n, int32_t xCode, int32_t wCode, bool wAlternates) {
+    for (size_t i = 0; i < n; i++) {
+        gCtX[i] = xCode;
+        gCtW[i] = (wAlternates && (i % 2 == 1)) ? -wCode : wCode;
+    }
+}
+
+/* x [1, inCh, len], w [inCh, 1, K], VALID stride 1 -> y [1, 1, len + K - 1];
+ * result in gCtY. numGroups == 0 -> per-tensor weight kernel, else the grouped
+ * kernel with equal scales. */
+static void ctRun(size_t inCh, size_t len, size_t k, uint8_t xBits, uint8_t wBits,
+                  const int32_t *biasCode, size_t numGroups) {
+    size_t outLen = len + k - 1;
+    size_t xDims[] = {1, inCh, len}, wDims[] = {inCh, 1, k}, yDims[] = {1, 1, outLen};
+    size_t order[] = {0, 1, 2}, biasDims[] = {1};
+    shape_t xS, wS, yS, biasS;
+    setShape(&xS, xDims, 3, order);
+    setShape(&wS, wDims, 3, order);
+    setShape(&yS, yDims, 3, order);
+    setShape(&biasS, biasDims, 1, order);
+    symInt32QConfig_t xQC, wQC, yQC, biasQC;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &xQC, xBits);
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &wQC, wBits);
+    initSymInt32QConfig(HALF_AWAY, &yQC);
+    initSymInt32QConfig(HALF_AWAY, &biasQC);
+    quantization_t xQ, wQ, yQ, biasQ;
+    initSymInt32Quantization(&xQC, &xQ);
+    initSymInt32Quantization(&wQC, &wQ);
+    initSymInt32Quantization(&yQC, &yQ);
+    initSymInt32Quantization(&biasQC, &biasQ);
+    int32_t biasData = biasCode ? *biasCode : 0;
+    tensor_t x, w, yT, bias;
+    setTensorValues(&x, (uint8_t *)gCtX, &xS, &xQ, NULL);
+    setTensorValues(&w, (uint8_t *)gCtW, &wS, &wQ, NULL);
+    setTensorValues(&yT, (uint8_t *)gCtY, &yS, &yQ, NULL);
+    setTensorValues(&bias, (uint8_t *)&biasData, &biasS, &biasQ, NULL);
+    kernel_t kernel;
+    initKernel(&kernel, k, VALID, 1, 1);
+    if (numGroups == 0) {
+        convTranspose1dKernelSymInt32(&x, &w, biasCode ? &bias : NULL, &kernel, 1, 0, &yT, NULL);
+    } else {
+        float scales[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+        symQConfig_t groups = {.scales = scales,
+                               .numGroups = numGroups,
+                               .groupSize = inCh * k / numGroups,
+                               .qBits = wBits,
+                               .roundingMode = HALF_AWAY};
+        convTranspose1dKernelSymInt32Grouped(&x, &w, biasCode ? &bias : NULL, &kernel, 1, 0, &yT,
+                                             &groups, NULL);
+    }
+}
+
+/* y[o] = bias + sum over (ic, inPos, tap) with inPos + tap == o of x * w, in int64 */
+static void ctExpected(size_t inCh, size_t len, size_t k, int32_t bias, int32_t *out) {
+    for (size_t o = 0; o < len + k - 1; o++) {
+        int64_t sum = bias;
+        for (size_t ic = 0; ic < inCh; ic++) {
+            for (size_t tap = 0; tap < k; tap++) {
+                if (o >= tap && o - tap < len) {
+                    sum += (int64_t)gCtX[ic * len + (o - tap)] * gCtW[ic * k + tap];
+                }
+            }
+        }
+        out[o] = (int32_t)sum;
+    }
+}
+
+static void ctAssertExact(size_t inCh, size_t len, size_t k, int32_t bias) {
+    int32_t expected[CT_MAXN * 2];
+    ctExpected(inCh, len, k, bias, expected);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, gCtY, len + k - 1);
+}
+
+void testConvTranspose1dKernelSymGuardProvenSafeN511RunsExact(void) {
+    ctFill(511, -2048, -2048, false);
+    ctRun(511, 1, 1, 12, 12, NULL, 0);
+    TEST_ASSERT_EQUAL_INT32(511 * 4194304, gCtY[0]);
+}
+
+void testConvTranspose1dKernelSymGuardDiesAtFirstWrappingNChannels(void) {
+    ctFill(512, -2048, -2048, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "convTranspose1dKernelSymInt32", ctRun(512, 1, 1, 12, 12, NULL, 0));
+}
+
+void testConvTranspose1dKernelSymGuardDiesAtN513PositiveCodes(void) {
+    ctFill(513, 2047, 2047, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "N=513", ctRun(513, 1, 1, 12, 12, NULL, 0));
+}
+
+void testConvTranspose1dKernelSymGuardCountsKernelTapsInN(void) {
+    ctFill(512, -2048, -2048, false); /* inCh = 1: y[511] scatters 512 taps */
+    ASSERT_EXITS_WITH_OUTPUT(1, "N=512", ctRun(1, 512, 512, 12, 12, NULL, 0));
+}
+
+void testConvTranspose1dKernelSymGuardCheckedPathStaysExactWhenValuesFit(void) {
+    ctFill(601, 2047, 2047, true);
+    ctRun(601, 1, 1, 12, 12, NULL, 0);
+    ctAssertExact(601, 1, 1, 0);
+}
+
+void testConvTranspose1dKernelSymGuardPostScatterBiasIsCounted(void) {
+    int32_t seed = 4194304; /* scatter alone = 511 * 2^22 fits; the bias pass tips it */
+    ctFill(511, -2048, -2048, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "max|seed|=4194304", ctRun(511, 1, 1, 12, 12, &seed, 0));
+    int32_t small = 4194303;
+    ctRun(511, 1, 1, 12, 12, &small, 0);
+    TEST_ASSERT_EQUAL_INT32(511 * 4194304 + 4194303, gCtY[0]);
+}
+
+void testConvTranspose1dKernelSymGuardWidthsFollowTheOperandsNotTheDefault(void) {
+    ctFill(31, -2048, -32768, false);
+    ctRun(31, 1, 1, 12, 16, NULL, 0);
+    TEST_ASSERT_EQUAL_INT32(31 * 67108864, gCtY[0]);
+    ctFill(32, -2048, -32768, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "widths (12, 16)", ctRun(32, 1, 1, 12, 16, NULL, 0));
+}
+
+void testConvTranspose1dKernelSymGuardWideProductOverflowAborts(void) {
+    ctFill(1, 524288, 524288, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "convTranspose1dKernelSymInt32", ctRun(1, 1, 1, 20, 20, NULL, 0));
+    ctFill(2, 100, 200, false);
+    ctRun(2, 1, 1, 20, 20, NULL, 0);
+    TEST_ASSERT_EQUAL_INT32(2 * 20000, gCtY[0]);
+}
+
+void testConvTranspose1dKernelSymGroupedGuardDiesAtFirstWrappingN(void) {
+    ctFill(1024, -2048, -2048, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "convTranspose1dKernelSymInt32Grouped",
+                             ctRun(1024, 1, 1, 12, 12, NULL, 4));
+}
+
+void testConvTranspose1dKernelSymGroupedGuardWidthsFollowTheInputWidth(void) {
+    /* the grouped entry caps the WEIGHT at the operand contract; the input may be
+     * wider: int16 x int12 products are <= 2^26, so 31 terms fit and 32 do not */
+    ctFill(30, -32768, -2048, false);
+    ctRun(30, 1, 1, 16, 12, NULL, 2);
+    TEST_ASSERT_EQUAL_INT32(30 * 67108864, gCtY[0]);
+    ctFill(32, -32768, -2048, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "widths (16, 12)", ctRun(32, 1, 1, 16, 12, NULL, 2));
+}
+
+void testConvTranspose1dKernelSymGroupedGuardWideInputProductOverflowAborts(void) {
+    /* 25-bit input x int12 weight: (2^24) * (2^11) = 2^35 leaves int32 on one product */
+    ctFill(2, -16777216, -2048, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "convTranspose1dKernelSymInt32Grouped",
+                             ctRun(2, 1, 1, 25, 12, NULL, 2));
+}
+
+void testConvTranspose1dKernelSymGroupedGuardCountsKernelTapsInN(void) {
+    ctFill(512, -2048, -2048, false); /* inCh = 1, K = 512 taps in 2 groups */
+    ASSERT_EXITS_WITH_OUTPUT(1, "N=512", ctRun(1, 512, 512, 12, 12, NULL, 2));
+}
+
+void testConvTranspose1dKernelSymGroupedGuardCheckedPathStaysExactWhenValuesFit(void) {
+    ctFill(600, 2047, 2047, true);
+    ctRun(600, 1, 1, 12, 12, NULL, 3);
+    ctAssertExact(600, 1, 1, 0);
+}
+
+void testConvTranspose1dKernelSymGroupedGuardProvenSafeRunsExact(void) {
+    ctFill(511, -2048, -2048, false);
+    ctRun(511, 1, 1, 12, 12, NULL, 7);
+    TEST_ASSERT_EQUAL_INT32(511 * 4194304, gCtY[0]);
+}
+
+void testConvTranspose1dKernelSymGroupedGuardPostScatterBiasIsCounted(void) {
+    int32_t seed = 4194304;
+    ctFill(511, -2048, -2048, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "max|seed|=4194304", ctRun(511, 1, 1, 12, 12, &seed, 7));
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testConvTranspose1dKernelSymGuardProvenSafeN511RunsExact);
+    RUN_TEST(testConvTranspose1dKernelSymGuardDiesAtFirstWrappingNChannels);
+    RUN_TEST(testConvTranspose1dKernelSymGuardDiesAtN513PositiveCodes);
+    RUN_TEST(testConvTranspose1dKernelSymGuardCountsKernelTapsInN);
+    RUN_TEST(testConvTranspose1dKernelSymGuardCheckedPathStaysExactWhenValuesFit);
+    RUN_TEST(testConvTranspose1dKernelSymGuardPostScatterBiasIsCounted);
+    RUN_TEST(testConvTranspose1dKernelSymGuardWidthsFollowTheOperandsNotTheDefault);
+    RUN_TEST(testConvTranspose1dKernelSymGuardWideProductOverflowAborts);
+    RUN_TEST(testConvTranspose1dKernelSymGroupedGuardDiesAtFirstWrappingN);
+    RUN_TEST(testConvTranspose1dKernelSymGroupedGuardWidthsFollowTheInputWidth);
+    RUN_TEST(testConvTranspose1dKernelSymGroupedGuardCountsKernelTapsInN);
+    RUN_TEST(testConvTranspose1dKernelSymGroupedGuardWideInputProductOverflowAborts);
+    RUN_TEST(testConvTranspose1dKernelSymGroupedGuardCheckedPathStaysExactWhenValuesFit);
+    RUN_TEST(testConvTranspose1dKernelSymGroupedGuardProvenSafeRunsExact);
+    RUN_TEST(testConvTranspose1dKernelSymGroupedGuardPostScatterBiasIsCounted);
     RUN_TEST(testConvTranspose1dKernelBasic);
     RUN_TEST(testConvTranspose1dKernelWithStride);
     RUN_TEST(testConvTranspose1dKernelWithOutputPadding);

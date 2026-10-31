@@ -200,6 +200,7 @@ target_link_libraries(AdaptiveWindow1d PRIVATE
 add_library(Conv1dKernel Conv1dKernel.c)
 target_include_directories(Conv1dKernel PUBLIC include)
 target_link_libraries(Conv1dKernel PRIVATE
+        SymAccumGuard
         Tensor
         Kernel
         SlidingWindow1d

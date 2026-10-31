@@ -1,4 +1,4 @@
-"""BFP cell families of the differential harness (design step 3): fixtures,
+"""BFP cell families of the differential harness (BFP): fixtures,
 driver I/O and row evaluation for
 
 - ``bfp_pack``  B1: FLOAT32 -> BFP pack on the convert tier (exponent rule,
@@ -10,7 +10,7 @@ driver I/O and row evaluation for
                 run on the dequantized operands, bit for bit.
 
 Leg A is ``ref/bfp_ref.py`` (docs only). Leg B is ``ref/exact_ref.py``
-(float64 on the dequantized operands) with the design's walk-order-free fold
+(float64 on the dequantized operands) with the walk-order-free fold
 bound N * 2^-24 * (sum|a_i b_i| + |bias|). Rows use the common taxonomy
 (README): EXACT | TIE_ONLY | MISMATCH (+ ABORT for a predicted headroom
 fail-fast) and BOUNDED | EXCESS.
@@ -638,7 +638,7 @@ def gemm_leg_a_fold(fx: GemmFixture, direction: str, walk: bfp_ref.Walk) -> bfp_
 def evaluate_gemm_output(fx: GemmFixture, direction: str, drv, out_name: str, k: int, with_bias_in_bound: bool) -> dict:
     """One output (forward output / propLoss / weightGrad / biasGrad): Leg A
     = headroom prediction + documented fold (bit prediction for single
-    segments, assumed walk otherwise), Leg B = float64 within the design
+    segments, assumed walk otherwise), Leg B = float64 within the fold
     bound; a BFP wire output is additionally judged as a pack of the
     predicted raw (compare_packed with the fold slack)."""
     walk = gemm_walk(fx, direction)

@@ -279,7 +279,7 @@ def _bias_len(op: str, w: np.ndarray, geom: dict) -> int:
 
 
 def bound_bfp_fold(n_terms: int, abs_sum: np.ndarray) -> np.ndarray:
-    """The design's walk-order-free bound on |C - exact| for a rounding-free
+    """The walk-order-free bound on |C - exact| for a rounding-free
     BFP reduction (arithmetic-bfp 5.3/7/8): N float32 additions, each rounding
     once (relative 2^-24) on a partial no larger than the absolute sum of the
     terms, the (float)partial rounding of every segment being 2^-24 relative
@@ -300,7 +300,7 @@ def bound_bfp_fold_rigorous(n_terms: int, abs_sum: np.ndarray, with_bias: bool) 
     most u * S), n_seg fold additions (each at most u * |running sum| <= u *
     S) and one bias-seed addition when a bias is present: (2 * N + 1 + bias)
     * u * S with S = sum_i |a_i b_i| + |bias|. Informational: it shows when an
-    EXCESS against the design's N-count bound is a float32 rounding-count
+    EXCESS against the N-count bound is a float32 rounding-count
     effect rather than a scheme loss (reachable only at tiny N with a bias,
     where 2 or 3 roundings meet a bound of N = 1 or 2 units)."""
     n = max(int(n_terms), 1)

@@ -26,7 +26,7 @@ Op families: `conv1d` (forward), `linear` (forward, dx, weightGrad) and
 `convert` (encode, requant_dynamic, requant_fixed). A Linear backward cell
 runs ONE backward on the layer tier; the direction names the output the row
 evaluates (dx -> propLoss, weightGrad -> weightGrad + biasGrad). Cells with a
-`family` of `bfp_pack` / `bfp_gemm` / `bfp_fq` (design step 3, BFP) are
+`family` of `bfp_pack` / `bfp_gemm` / `bfp_fq` (BFP) are
 dispatched to bfp_rows.py, which follows the same row shape.
 """
 

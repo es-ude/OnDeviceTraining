@@ -1,6 +1,6 @@
 {
   "name": "b2_lin_fwd_lossy_m16w8_gs200_n400",
-  "description": "B2 lossy regime, several segments: random m16 input x full-scale m8 weight grouped gs 200 -> 2 segments of 200 per output, partials > 2^24: two casts + folds per output; the design bound must hold (reported ratio).",
+  "description": "B2 lossy regime, several segments: random m16 input x full-scale m8 weight grouped gs 200 -> 2 segments of 200 per output, partials > 2^24: two casts + folds per output; the fold bound must hold (reported ratio).",
   "family": "bfp_gemm",
   "op": "linear",
   "direction": "forward",

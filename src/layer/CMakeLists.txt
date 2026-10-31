@@ -1,6 +1,7 @@
 add_library(Conv1d Conv1d.c)
 target_include_directories(Conv1d PUBLIC include)
 target_link_libraries(Conv1d PRIVATE
+        SymAccumGuard
         LayerExec
         RNG
         DTypes
@@ -20,6 +21,7 @@ target_link_libraries(Conv1d PRIVATE
 add_library(Conv1dTransposed Conv1dTransposed.c)
 target_include_directories(Conv1dTransposed PUBLIC include)
 target_link_libraries(Conv1dTransposed PRIVATE
+        SymAccumGuard
         LayerExec
         RNG
         DTypes

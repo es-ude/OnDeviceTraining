@@ -17,6 +17,7 @@
 #include "Mul.h"
 #include "Quantization.h"
 #include "SlidingWindow1d.h"
+#include "SymAccumGuard.h"
 #include "Tensor.h"
 
 void initConv1dConfigWithWeightsAndBias(conv1dConfig_t *conv1dConfig, kernel_t *kernel,
@@ -423,6 +424,44 @@ static void conv1dCalcBiasGradsFloat32(conv1dConfig_t *cfg, tensor_t *lossGrad,
         cfg->bias->grad);
 }
 
+/* Weight-grad scatter, instantiated twice by weightGradKernelSym with `checked`
+ * a compile-time constant: false is the historical `+= mulInt32s`, true routes
+ * every accumulate through the SYM accumulator guard (SymAccumGuard.h). */
+SYM_ACCUM_ALWAYS_INLINE void
+conv1dWeightGradSymScatter(size_t batch, size_t groups, size_t inChPerGroup, size_t outChPerGroup,
+                           size_t inChannels, size_t outChannels, size_t inputLength,
+                           size_t outputLength, size_t kernelSize, const windowGeometry1d_t *geomIn,
+                           const int32_t *xArr, const int32_t *gyArr, int32_t *interData,
+                           const bool checked, const symAccumSite_t *site) {
+    const windowGeometry1d_t geom = *geomIn;
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t g = 0; g < groups; g++) {
+            size_t inLo = g * inChPerGroup;
+            size_t outLo = g * outChPerGroup;
+
+            for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
+                size_t oc = outLo + ocOffset;
+                for (size_t outPos = 0; outPos < outputLength; outPos++) {
+                    windowSlice1d_t slice = windowSlice1dAt(&geom, outPos);
+                    int32_t gy = gyArr[(b * outChannels + oc) * outputLength + outPos];
+
+                    for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
+                        size_t ic = inLo + icOffset;
+                        for (size_t i = 0; i < slice.validCount; i++) {
+                            size_t inputIdx = slice.firstValidInputIdx + i * geom.dilation;
+                            size_t kernelIdx = slice.firstValidKernelOffset + i;
+
+                            int32_t xv = xArr[(b * inChannels + ic) * inputLength + inputIdx];
+                            size_t gwIdx = (oc * inChPerGroup + icOffset) * kernelSize + kernelIdx;
+                            interData[gwIdx] = symMac(interData[gwIdx], xv, gy, checked, site);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 static void weightGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                                 const void *ctx, rngStream_t *rs) {
     (void)n;
@@ -487,31 +526,20 @@ static void weightGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tens
     int32_t const *xArr = (int32_t const *)forwardInput->data;
     int32_t const *gyArr = (int32_t const *)lossGrad->data;
 
-    for (size_t b = 0; b < batch; b++) {
-        for (size_t g = 0; g < groups; g++) {
-            size_t inLo = g * inChPerGroup;
-            size_t outLo = g * outChPerGroup;
-
-            for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
-                size_t oc = outLo + ocOffset;
-                for (size_t outPos = 0; outPos < outputLength; outPos++) {
-                    windowSlice1d_t slice = windowSlice1dAt(&geom, outPos);
-                    int32_t gy = gyArr[(b * outChannels + oc) * outputLength + outPos];
-
-                    for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
-                        size_t ic = inLo + icOffset;
-                        for (size_t i = 0; i < slice.validCount; i++) {
-                            size_t inputIdx = slice.firstValidInputIdx + i * geom.dilation;
-                            size_t kernelIdx = slice.firstValidKernelOffset + i;
-
-                            int32_t xv = xArr[(b * inChannels + ic) * inputLength + inputIdx];
-                            interData[(oc * inChPerGroup + icOffset) * kernelSize + kernelIdx] +=
-                                mulInt32s(xv, gy);
-                        }
-                    }
-                }
-            }
-        }
+    /* Each weight-grad element receives one product per (batch, outPos) pair,
+     * so N = batch * outputLength; no seed (interData starts zeroed). */
+    uint8_t xBits = ((symInt32QConfig_t *)forwardInput->quantization->qConfig)->qMaxBits;
+    uint8_t gyBits = ((symInt32QConfig_t *)lossGrad->quantization->qConfig)->qMaxBits;
+    symAccumSite_t site = symAccumSiteInit("conv1dCalcWeightGradsSymInt32 (batch*outputLength)",
+                                           batch * outputLength, xBits, gyBits, 0);
+    if (symAccumProvenSafe(&site)) {
+        conv1dWeightGradSymScatter(batch, groups, inChPerGroup, outChPerGroup, inChannels,
+                                   outChannels, inputLength, outputLength, kernelSize, &geom, xArr,
+                                   gyArr, interData, false, &site);
+    } else {
+        conv1dWeightGradSymScatter(batch, groups, inChPerGroup, outChPerGroup, inChannels,
+                                   outChannels, inputLength, outputLength, kernelSize, &geom, xArr,
+                                   gyArr, interData, true, &site);
     }
 }
 

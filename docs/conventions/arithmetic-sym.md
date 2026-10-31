@@ -94,15 +94,20 @@ int64 — hard rule). For symmetric `b`-bit operands each product is ≤ 2^(2b�
 so an int32 accumulator (~2^31) holds only ~2^(33−2b) worst-case product terms
 before signed overflow (UB):
 
-| operand width | max product | int32 term at which overflow first occurs |
+| operand width | max product | int32 term at which overflow first occurs (two's-complement worst case) |
 |---|---|---|
 | int16 (qMaxBits=16) | 2^30 | 2 |
 | int12 (qMaxBits=12) | 2^22 | 512 |
 | int8  (qMaxBits=8)  | 2^14 | 131072 |
 
 The number of worst-case terms that still **fit** is one less: int16 survives 1,
-int12 survives **511**, int8 survives 131071 — i.e. int12 is sound for reductions
-of length **N ≤ 511** (`512·2^22 = 2^31 > INT32_MAX`).
+int12 survives **511**, int8 survives 131071 — i.e. int12 is provably sound for
+reductions of length **N ≤ 511** (`512·2^22 = 2^31 > INT32_MAX`). The table uses
+the full two's-complement magnitude `2^(b−1)`: the code `−2^(b−1)` IS reachable
+(fixed-scale requant saturation clamps to `qMin`). When **both** operands are
+absmax-encoded (`|code| ≤ 2^(b−1)−1`, e.g. every operand the funnel's absmax
+requant produces) the budget is **512** int12 terms (`512·2047² < INT32_MAX`,
+513 wraps).
 
 int16×int16→int32 is **unsound for product-accumulation** (forward, dx,
 weightGrad) — it overflows after ~2 full-scale terms; it is sound only for
@@ -129,9 +134,42 @@ only the quantization configs change; the int32 accumulator (no int64) is kept.
   in `gradInitSymInt32` (`getQLike` preserves the source width). biasGrad is a
   value-sum; weightGrad is a sum of products (int32 accumulate → requantize).
   Whether grads should be stored SYM_INT32 at all is under redesign — #261.
-- int12 is sound only for reductions **N ≤ 511**; the runtime N-vs-budget check
-  is a deferred follow-up. The #189 policy (release runs free, CI UBSan #204)
-  backstops residual overflow.
+- **SYM int32 accumulator guard (shipped).** int12 is provably sound only for
+  reductions **N ≤ 511**, and every SYM int32 *product* accumulator now enforces
+  it at run time (`src/arithmetic/include/SymAccumGuard.h`), in every build:
+  1. *Static proof, per op:* safe iff `N_max · 2^(qa−1) · 2^(qb−1) + max|seed|
+     ≤ INT32_MAX`, with `qa`/`qb` the operands' actual widths (input
+     `qMaxBits`, weight `qMaxBits` or `weightGroups->qBits`) and `max|seed|` the
+     op's actual bias-seed array (`INT32_MIN` counts as 2^31). The bound is
+     evaluated in 64-bit with a division, so neither it nor a huge `N` wraps; a
+     bound that cannot admit even one term (widths summing past 31 bits) proves
+     only `N == 0`. If the proof holds the kernel runs its original loop,
+     instruction for instruction.
+  2. *Otherwise the same loop body runs checked:* each accumulate is a
+     `__builtin_add_overflow`, and the product also goes through
+     `__builtin_mul_overflow` when either width exceeds 16 (the only case where
+     a single product can leave int32). A reduction the proof cannot cover but
+     whose values fit (small or mixed-sign codes) returns the exact result; the
+     first real overflow aborts.
+  3. *Abort:* `exit(1)` with a banner naming the op, N, both operand widths,
+     `max|seed|` and the remedies "narrow `ODT_SYM_OPERAND_QMAXBITS` (one lever)
+     or run this op under `ARITH_FLOAT32`".
+  Assumption: stored codes obey their declared width (`qMaxBits`/`qBits` is
+  metadata and is not re-checked per code); every funnel-produced operand is
+  clamped to it, so only a hand-built tensor whose codes exceed its own width can
+  defeat the proof.
+  Sites: `matmulIntCore` (`N = aColumns`) and `matmulIntCoreGrouped` (raw group
+  partial, bounded by `min(groupSize, N)` terms, **and** the int32 accumulator of
+  rescaled partials, bounded by `N` terms plus the seed), `conv1dKernelSymInt32`
+  and its grouped twin (`N = inChPerGroup·K`, both accumulators),
+  `convTranspose1dKernelSymInt32` and its grouped twin (`N = inChPerGroup·K`
+  contributors per output element; the post-scatter bias add is always checked),
+  and the Conv1d / Conv1dTransposed SYM weight-grad scatters (`N = batch ·
+  outputLength` / `batch · inputLength` contributors per weight-grad element).
+  **Not covered — follow-up:** the value-sum accumulators (bias grads, norm
+  sums, pool/reduce sums), which keep their own `N < 2^(32−q)` guards; a
+  `symValidateSumHeadroom` sibling of the BFP `bfpValidateSumHeadroom` would close
+  the remaining unguarded ones. BFP kernels have their own headroom guards.
 - Note: the conv weightGrad product mixes an int12 input with an int16 grad
   operand under the #218 grad-accumulator scheme — its budget is governed by
   #218/#45, not closed by this operand flip.

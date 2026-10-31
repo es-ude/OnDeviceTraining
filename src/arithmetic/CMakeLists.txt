@@ -253,3 +253,8 @@ target_compile_options(PointwiseFused PRIVATE -ffp-contract=off)
 # guarded test TUs inherit it through the link edge.
 target_compile_definitions(PointwiseFused PUBLIC
         $<$<BOOL:${ODT_TRACK_INSTRUCTIONS}>:TRACK_INSTRUCTIONS>)
+
+# Header-only SYM int32 accumulator guard (static bound + checked accumulate).
+add_library(SymAccumGuard INTERFACE)
+target_include_directories(SymAccumGuard INTERFACE include)
+target_link_libraries(SymAccumGuard INTERFACE Mul Tensor DTypes Common)

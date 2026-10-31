@@ -502,6 +502,17 @@ class LegAInputs:
             return 0
         return max((max(abs(s) for s, _k in cs.allowed) for cs in self.policy), default=0)
 
+    @property
+    def seed_abs_range(self) -> tuple[int, int]:
+        """Bounds on the C's max|seed| (what the guard's banner reports): each
+        channel's C seed is one of its allowed values, so the max over
+        channels lies between the max of the per-channel minima and the max
+        of the per-channel maxima."""
+        if self.policy is None:
+            return (0, 0)
+        lo = max((min(abs(s) for s, _k in cs.allowed) for cs in self.policy), default=0)
+        return (lo, self.seed_abs_max)
+
 
 def with_seed_policy(raw: sym_ref.RawForward, fx: Fixture, k: int) -> LegAInputs:
     """Attaches the per-channel seed policy when the raw wire carries a bias
@@ -764,12 +775,13 @@ def fail_fast_text(drv: DriverResult) -> str:
     return ANSI_RE.sub("", drv.stdout + "\n" + drv.stderr)
 
 
-def check_sym_guard_banner(stderr: str, op_name: str, n: int, bits: tuple[int, int], seed_abs_max: int | None) -> dict:
+def check_sym_guard_banner(stderr: str, op_name: str, n: int, bits: tuple[int, int], seed_range: tuple[int, int]) -> dict:
     """(`stderr` is the driver's combined output, see ``fail_fast_text``.)
     An exit 1 only counts as the F9 ABORT when stderr carries the guard's
     banner AND the banner agrees with Leg A's reduction: op name, N, the
-    operand widths (compared as a pair: the doc does not order them) and,
-    when the fixture has no bias, max|seed| = 0. Any other fail-fast (a
+    operand widths (compared as a pair: the doc does not order them) and
+    max|seed| inside the range the seed policy allows (exactly 0 without a
+    bias). Any other fail-fast (a
     spec, shape or width check) is a MISMATCH, not an F9 abort."""
     text = ANSI_RE.sub("", stderr)
     m = SYM_GUARD_RE.search(text)
@@ -782,8 +794,8 @@ def check_sym_guard_banner(stderr: str, op_name: str, n: int, bits: tuple[int, i
         problems.append(f"banner N={m['n']} != Leg A reduction {n}")
     if sorted((int(m["wa"]), int(m["wb"]))) != sorted(bits):
         problems.append(f"banner widths ({m['wa']}, {m['wb']}) != Leg A {tuple(bits)}")
-    if seed_abs_max == 0 and int(m["seed"]) != 0:
-        problems.append(f"banner max|seed|={m['seed']} but the fixture has no bias")
+    if not seed_range[0] <= int(m["seed"]) <= seed_range[1]:
+        problems.append(f"banner max|seed|={m['seed']} outside Leg A's [{seed_range[0]}, {seed_range[1]}]")
     return {
         "ok": not problems,
         "problems": problems,
@@ -792,7 +804,7 @@ def check_sym_guard_banner(stderr: str, op_name: str, n: int, bits: tuple[int, i
 
 
 def _abort_outcome(drv: DriverResult, ctx: dict) -> dict:
-    chk = check_sym_guard_banner(fail_fast_text(drv), ctx["op"], ctx["n"], ctx["bits"], ctx["seed_abs_max"])
+    chk = check_sym_guard_banner(fail_fast_text(drv), ctx["op"], ctx["n"], ctx["bits"], ctx["seed_range"])
     if chk["ok"]:
         return {"kind": "ABORT", "detail": [], "banner": chk["banner"]}
     return {"kind": "MISMATCH", "detail": chk["problems"]}
@@ -1006,7 +1018,7 @@ def run_linear_row(cell: dict, tier: str, fx: Fixture, drv: DriverResult, k: int
     out_name = {"forward": "output", "dx": "propLoss", "weightGrad": "weightGrad"}[direction]
     row: dict = {"output": out_name, "int32": ov.to_json()}
     # Linear forward / dx / weightGrad are all the matmulIntCore family.
-    guard_ctx = {"op": "matmul SYM_INT32", "n": n_red, "bits": (bits_a, bits_b), "seed_abs_max": None if fx.has("bias") and direction == "forward" else 0}
+    guard_ctx = {"op": "matmul SYM_INT32", "n": n_red, "bits": (bits_a, bits_b), "seed_range": inp.seed_abs_range if direction == "forward" else (0, 0)}
     exact = linear_exact(fx, direction)
     staging = linear_staging_term(fx, direction, tier, k)
     batch_shape = inp.raw.mac.shape

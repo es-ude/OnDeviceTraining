@@ -18,7 +18,7 @@ fail-fast) and BOUNDED | EXCESS.
 Single-segment reductions (every output element folds ONE same-exponent
 segment) are predicted to the bit by the documented fold and gate EXACT /
 MISMATCH; multi-segment reductions have no documented fold order (F10,
-``bfp_ref.DOC_GAPS[4]``) -- the documented algorithm along the assumed walk
+``bfp_ref.DOC_GAPS[2]``) -- the documented algorithm along the assumed walk
 is evaluated and reported (bit-exact or not, as `seq_fold`), the row gates on
 Leg B only, and a difference inside the bound is TIE_ONLY (class
 `fold_order`).
@@ -27,6 +27,7 @@ Leg B only, and a difference inside the bound is TIE_ONLY (class
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,6 +37,41 @@ from ref import bfp_ref, census, exact_ref
 from ref.sym_ref import ConvGeometry
 
 F32_U = 2.0**-24
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+# arithmetic-bfp 5.3 'Headroom, exact form' (product kernels) and 5.6 (the
+# sum twin) fail-fast at kernel entry. The banners name the segment, the
+# limit and the widths; PRINT_ERROR writes them to stdout in this build, so
+# the driver's combined output is searched.
+BFP_GUARD_PRODUCT_RE = re.compile(
+    r"bfpValidateBlockHeadroom\].*BFP block partial would overflow int32 -- max same-exponent "
+    r"segment (?P<seg>\d+) exceeds (?P<limit>\d+) products for mantissa widths \((?P<wa>\d+), (?P<wb>\d+)\)"
+)
+BFP_GUARD_SUM_RE = re.compile(
+    r"bfpValidateSumHeadroom\].*BFP sum partial would overflow int32 -- max same-exponent "
+    r"segment (?P<seg>\d+) exceeds (?P<limit>\d+) codes for mantissa width (?P<wa>\d+)"
+)
+
+
+def check_bfp_guard_banner(drv, hr: dict) -> list[str]:
+    """Problems with an exit-1 run's claim to be the documented headroom
+    guard: empty when the banner of the guard Leg A predicted is present and
+    its segment / limit / widths equal Leg A's. Any other fail-fast (a
+    shape, spec or width check) is NOT the guard."""
+    text = ANSI_RE.sub("", drv.stdout + "\n" + drv.stderr)
+    rx = BFP_GUARD_SUM_RE if hr["kind"] == "sum" else BFP_GUARD_PRODUCT_RE
+    m = rx.search(text)
+    if m is None:
+        return [f"exit 1 without the {'bfpValidateSumHeadroom' if hr['kind'] == 'sum' else 'bfpValidateBlockHeadroom'} banner"]
+    problems = []
+    if int(m["seg"]) != hr["max_segment"]:
+        problems.append(f"banner segment {m['seg']} != Leg A {hr['max_segment']}")
+    if int(m["limit"]) != hr["limit"]:
+        problems.append(f"banner limit {m['limit']} != Leg A {hr['limit']}")
+    widths = [int(m["wa"])] + ([int(m["wb"])] if hr["kind"] == "product" else [])
+    if sorted(widths) != sorted(hr["widths"]):
+        problems.append(f"banner widths {widths} != Leg A {hr['widths']}")
+    return problems
 
 
 # --------------------------------------------------------------------------- #
@@ -218,16 +254,14 @@ def compare_packed(
     section-3 rule; an E off by one is accepted only in the F2 window (the
     exact quotient absmax / qMax within k ulp32 of the power of two) and
     only if the codes are then self-consistent under the C's E. Codes: equal
-    under the (accepted) E, else MISMATCH -- except the documented clamp
-    inconsistency (C -2^(m-1) vs Leg A -qMax below -(qMax + 0.5), class
-    `clamp_floor`) and, when `code_slack` (code units per element) is given,
-    a +-1 whose pre-rounding value lies within that slack of a .5 boundary
-    (class `fold_order`: the raw being packed was itself only bounded)."""
+    under the (accepted) E, else MISMATCH -- except, when `code_slack` (code
+    units per element) is given, a +-1 whose pre-rounding value lies within
+    that slack of a .5 boundary (class `fold_order`: the raw being packed was
+    itself only bounded). The grid is [-2^(m-1), qMax] (arithmetic-bfp
+    section 1), so a saturating negative value is -2^(m-1) in Leg A too."""
     ref = bfp_ref.pack_bfp(values, m, e, gs)
     c_codes = np.asarray(c_codes, dtype=np.int64).ravel()
     c_stored = np.asarray(c_stored, dtype=np.int64)
-    q = bfp_ref.qmax(m)
-    floor_code = bfp_ref.code_floor_twos_complement(m)
     if c_stored.shape != ref.stored.shape:
         raise RuntimeError(f"numGroups: C {c_stored.size} vs ref {ref.stored.size}")
     classes: set[str] = set()
@@ -258,13 +292,9 @@ def compare_packed(
     pre = under_c.pre
     diff = c_codes - under_c.codes
     mism = np.flatnonzero(diff != 0)
-    n_clamp_floor = 0
     n_fold = 0
     worst = []
     for i in mism:
-        if c_codes[i] == floor_code and under_c.codes[i] == -q and pre[i] < -(q + 0.5):
-            n_clamp_floor += 1
-            continue
         if code_slack is not None and abs(diff[i]) == 1:
             frac = abs(pre[i]) - np.floor(abs(pre[i]))
             if abs(frac - 0.5) <= code_slack[i] and c_codes[i] == bfp_ref.round_half_away(np.array([pre[i]]))[0] + np.sign(diff[i]):
@@ -272,14 +302,12 @@ def compare_packed(
                 continue
         worst.append({"index": int(i), "c": int(c_codes[i]), "ref": int(under_c.codes[i]), "pre": float(pre[i])})
     worst.sort(key=lambda w: -abs(w["c"] - w["ref"]))
-    if n_clamp_floor:
-        classes.add("clamp_floor")
     if n_fold:
         classes.add("fold_order")
     if worst:
         classes.add("code")
     hard = bool(e_bad) or bool(worst)
-    soft = bool(e_boundary) or n_clamp_floor > 0 or n_fold > 0
+    soft = bool(e_boundary) or n_fold > 0
     taxonomy = "MISMATCH" if hard else ("TIE_ONLY" if soft else "EXACT")
     return {
         "taxonomy": taxonomy,
@@ -288,13 +316,12 @@ def compare_packed(
             "mode": "bfp_pack",
             "n_elements": int(c_codes.size),
             "n_mismatch": int(mism.size),
-            "n_tie": n_clamp_floor + n_fold,
+            "n_tie": n_fold,
             "max_abs_diff": int(np.abs(diff).max()) if diff.size else 0,
             "n_groups": int(ref.stored.size),
             "n_E_differs": len(e_boundary) + len(e_bad),
             "E_boundary": e_boundary[:8],
             "E_bad": e_bad[:8],
-            "n_clamp_floor": n_clamp_floor,
             "n_clamped_predicted": int(ref.n_clamped),
             "regimes": regimes,
             "worst": worst[:8],
@@ -308,16 +335,25 @@ def compare_packed(
     }
 
 
+def _outside_grid(pre: np.ndarray, m: int) -> np.ndarray:
+    """Elements whose pre-rounding value rounds outside [-2^(m-1), qMax]
+    (arithmetic-bfp section 1): saturated, so a round trip cannot return them."""
+    return (pre > bfp_ref.qmax(m) + 0.5) | (pre < bfp_ref.code_floor_twos_complement(m) - 0.5)
+
+
 def pack_roundtrip_leg_b(values: np.ndarray, c_codes: np.ndarray, c_stored: np.ndarray, m: int, e: int, gs: int) -> dict:
     """|x - deq(C)| <= 0.5 * 2^(E_C) for every element the grid can hold
-    (|pre| <= qMax + 0.5); clamped elements are outside any round-trip bound
-    by construction and reported separately."""
+    (round(pre) inside [-2^(m-1), qMax]); clamped elements are outside any
+    round-trip bound by construction and reported separately. Measured at the
+    C's own exponent: the exponent choice itself is gated by Leg A's exact E
+    check (compare_packed), so this leg judges the rounding the C's grid
+    implies, not the grid."""
     x = np.asarray(values, dtype=np.float32).ravel().astype(np.float64)
     deq = bfp_ref.dequant(c_codes, c_stored, e, gs)
     bias = bfp_ref.exponent_bias(e)
     scale = 2.0 ** (np.asarray(c_stored, dtype=np.int64)[bfp_ref.group_ids(x.size, gs)] - bias)
     pre = x / scale
-    clamped = np.abs(pre) > bfp_ref.qmax(m) + 0.5
+    clamped = _outside_grid(pre, m)
     err = np.abs(x - deq)
     bound = 0.5 * scale
     out = elementwise_leg_b(err, bound, ~clamped)
@@ -361,7 +397,7 @@ def build_pack_values(cell: dict, k: int) -> tuple[np.ndarray, list[str]]:
     the group scale, absmax a .5 itself: HALF_AWAY vs half-even), `zero`,
     `saturate` (absmax beyond the D6 cap), `flush` (absmax below the D6 floor
     for this exponentBits), `negfloor` (the most negative value far below
-    -qMax at the cap: the clamp-floor inconsistency)."""
+    -qMax at the cap: it lands on -2^(m-1), arithmetic-bfp section 1)."""
     fx = cell["fixture"]
     rng = np.random.default_rng(int(fx["seed"]))
     m, e = int(cell["output"]["m"]), int(cell["output"]["e"])
@@ -613,18 +649,22 @@ def evaluate_gemm_output(fx: GemmFixture, direction: str, drv, out_name: str, k:
     bound_rig = exact_ref.bound_bfp_fold_rigorous(n_red, s_abs, direction == "forward" and "bias" in fx.ops)
     row: dict = {"output": out_name, "n_elements": int(exact.size), "headroom": hr}
     if drv.exit != 0:
-        kind = "ABORT" if not hr["ok"] else "MISMATCH"
+        banner_problems = [] if hr["ok"] else check_bfp_guard_banner(drv, hr)
+        kind = "ABORT" if (not hr["ok"] and not banner_problems) else "MISMATCH"
+        abort_class = "abort" if hr["ok"] else "abort_banner"  # not predicted / predicted but not the guard
         row["legA"] = {
             "taxonomy": kind,
             "census": None,
-            "mismatch_class": "-" if kind == "ABORT" else "abort",
+            "mismatch_class": "-" if kind == "ABORT" else abort_class,
+            "banner_problems": banner_problems,
             "seed": None,
             "scale": {"c": None, "ref": None, "rel": None, "ok": kind == "ABORT"},
             "ref_scale": None,
         }
         row["legB"] = {"taxonomy": "n/a", "err_max": float("nan"), "bound": float("nan"), "ratio": float("nan")}
         row["c_scale"] = None
-        row["bfp"] = {"summary": f"N={n_red} seg<={hr['max_segment']} limit={hr['limit']} -> {'ABORT (predicted)' if kind == 'ABORT' else 'ABORT (NOT predicted)'}"}
+        verdict_s = "ABORT (guard banner matches)" if kind == "ABORT" else ("ABORT (NOT predicted)" if hr["ok"] else "exit 1 (NOT the guard: " + "; ".join(banner_problems) + ")")
+        row["bfp"] = {"summary": f"N={n_red} seg<={hr['max_segment']} limit={hr['limit']} -> {verdict_s}"}
         return row
     fold = gemm_leg_a_fold(fx, direction, walk)
     pred = fold.predicted.reshape(exact.shape)
@@ -635,7 +675,7 @@ def evaluate_gemm_output(fx: GemmFixture, direction: str, drv, out_name: str, k:
     c_vals = c_vals.reshape(exact.shape)
     st = fold.stats
     if not hr["ok"]:
-        # The guard should have fired (DOC_GAPS[6]); the run completed anyway.
+        # The guard should have fired (arithmetic-bfp section 5.3 'Headroom, exact form'); the run completed anyway.
         guard_class = "guard"
     else:
         guard_class = None
@@ -696,7 +736,7 @@ def evaluate_gemm_output(fx: GemmFixture, direction: str, drv, out_name: str, k:
         pack_bound = (0.5 * scale).reshape(exact.shape)
         err = np.abs(c_vals - exact)
         total = bound + pack_bound
-        clamped = (np.abs(pred.ravel() / scale) > bfp_ref.qmax(m) + 0.5).reshape(exact.shape)
+        clamped = _outside_grid(pred.ravel() / scale, m).reshape(exact.shape)
         b = elementwise_leg_b(err, total, ~clamped)
         b["bound_kind"] = "N*u*S + 0.5*2^E_C (design fold + pack)"
         b["n_clamped_excluded"] = int(clamped.sum())
@@ -814,10 +854,9 @@ def run_fq_cell(cell: dict, driver: Path, out_root: Path, k: int, run_driver) ->
             }
             bound = exact_ref.bound_float32_kernel(walk.reduction, s_abs, d == "forward" and "bias" in fx.ops)
             err = np.abs(c_bfp - exact)
-            ratio = float((err / bound).max()) if err.size else 0.0
-            b = census.leg_b_check(float(err.max()) if err.size else 0.0, float(bound.min()))
-            b["ratio"] = ratio
-            b["taxonomy"] = "BOUNDED" if ratio <= 1.0 else "EXCESS"
+            # elementwise: err_max / bound / ratio all belong to the element
+            # with the largest err / bound (not err.max() against bound.min()).
+            b = elementwise_leg_b(err, bound)
             b["bound_kind"] = "(2N+1)*u*S float32 kernel"
             row = dict(base)
             row.update({"output": out_name, "legA": a, "legB": b, "c_scale": None, "n_elements": int(exact.size), "fixture": fixture_info})

@@ -3135,6 +3135,24 @@ void testUnpackSignExtendOffsetZeroCoversFullSignedRange(void) {
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, 8);
 }
 
+/* Pack/unpack round trip over each sign-relevant code at 4 and 8 bits: the
+ * extremes, -1 (all ones) and the zero crossing. */
+void testPackUnpackSignExtendRoundTripsNegativeSym4AndSym8(void) {
+    int32_t codes4[6] = {-8, -7, -1, 0, 1, 7};
+    uint8_t buf4[3] = {0};
+    int32_t got4[6];
+    byteConversion((uint8_t *)codes4, 32, buf4, 4, 6);
+    unpackSignExtend(buf4, 4, 0, got4, 6);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(codes4, got4, 6);
+
+    int32_t codes8[6] = {-128, -127, -1, 0, 1, 127};
+    uint8_t buf8[6] = {0};
+    int32_t got8[6];
+    byteConversion((uint8_t *)codes8, 32, buf8, 8, 6);
+    unpackSignExtend(buf8, 8, 0, got8, 6);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(codes8, got8, 6);
+}
+
 void testQuantizeFloatToAsymNoOpOnEmptyTensor(void) {
     /* PR #324: n==0 must no-op, never read values[0].
      * Before the fix, quantizeFloatToAsym's findMinFloat/findMaxFloat both
@@ -7957,6 +7975,7 @@ int main(void) {
     RUN_TEST(testDequantChunkToFloatRejectsOutOfRangeOffset);
     RUN_TEST(testUnpackSignExtendReadsSignedCodeAtBitOffset);
     RUN_TEST(testUnpackSignExtendOffsetZeroCoversFullSignedRange);
+    RUN_TEST(testPackUnpackSignExtendRoundTripsNegativeSym4AndSym8);
     RUN_TEST(testQuantizeFloatToAsymNoOpOnEmptyTensor);
     RUN_TEST(testAccumulateTensorIntoSymRescaleRejectsSelfAliasedIncrement);
 

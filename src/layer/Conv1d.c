@@ -613,16 +613,14 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
                     int32_t partial = 0;
                     size_t currentXGroup = 0;
                     size_t currentGyGroup = SIZE_MAX;
+                    size_t tapLo;
+                    size_t tapHi;
+                    windowTapOutputRange1d(&geom, k, &tapLo, &tapHi);
 
                     for (size_t b = 0; b < batch; b++) {
-                        for (size_t outPos = 0; outPos < outputLength; outPos++) {
-                            windowSlice1d_t slice = windowSlice1dAt(&geom, outPos);
-                            if (k < slice.firstValidKernelOffset ||
-                                k >= slice.firstValidKernelOffset + slice.validCount) {
-                                continue; /* this window's clip skips tap k */
-                            }
-                            size_t inputIdx = slice.firstValidInputIdx +
-                                              (k - slice.firstValidKernelOffset) * geom.dilation;
+                        for (size_t outPos = tapLo; outPos < tapHi; outPos++) {
+                            size_t inputIdx =
+                                outPos * geom.stride + k * geom.dilation - geom.padLeft;
                             size_t xIdx = (b * inChannels + ic) * inputLength + inputIdx;
                             size_t gyIdx = (b * outChannels + oc) * outputLength + outPos;
                             /* Per-element division on BOTH operands (the SYM

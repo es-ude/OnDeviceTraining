@@ -3,7 +3,7 @@
 #include <stdint.h>
 
 /*! @brief Describes rounding
- * HALF_AWAY = round half away from zero (C round(), C17 7.12.9.6)
+ * HALF_AWAY = round half away from zero (C roundf(), C17 7.12.9.6)
  * SR_HALF_AWAY = stochastic rounding: uniform jitter in [-0.5, 0.5) is added
  *                before rounding half away from zero
  */

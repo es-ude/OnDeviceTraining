@@ -1,4 +1,4 @@
-"""Stochastic-rounding statistical cells -- STUB (design step 5 fills this in).
+"""Stochastic-rounding statistical cells -- STUB (not yet implemented).
 
 Planned checks (every result must lie in {floor(x), ceil(x)}; the mean must be
 unbiased within 4 sigma): ``roundByMode(x, SR_HALF_AWAY)`` across magnitudes,
@@ -15,4 +15,4 @@ DOC_GAPS: list[str] = [
 
 
 def not_implemented(*_args, **_kwargs):
-    raise NotImplementedError("sr_stats: SR cells land in design step 5")
+    raise NotImplementedError("sr_stats: SR cells are not implemented yet")

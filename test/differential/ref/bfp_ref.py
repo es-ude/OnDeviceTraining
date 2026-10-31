@@ -26,8 +26,8 @@ What the doc fixes exactly, and this leg therefore computes exactly:
 What the doc leaves open, and the harness therefore only bounds: the ORDER in
 which several segments fold into the float32 accumulator. In that regime the
 exact float64 dot product of the dequantized operands (``exact_ref``) is the
-reference and the float32 accumulation bound is the acceptance -- the design's
-"the two legs coincide".
+reference and the float32 accumulation bound is the acceptance, so the
+two legs coincide.
 
 Imports allowed: numpy, stdlib. Never ``sym_gold`` or a ``generate_expected_*``
 script.

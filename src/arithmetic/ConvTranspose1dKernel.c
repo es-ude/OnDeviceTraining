@@ -223,6 +223,15 @@ SYM_ACCUM_ALWAYS_INLINE void convTSymScatter(const convTSymView_t *v, const bool
     }
 }
 
+SYM_ACCUM_NOINLINE void convTSymScatterSafe(const convTSymView_t *v, const symAccumSite_t *site) {
+    convTSymScatter(v, false, site);
+}
+
+SYM_ACCUM_NOINLINE void convTSymScatterChecked(const convTSymView_t *v,
+                                               const symAccumSite_t *site) {
+    convTSymScatter(v, true, site);
+}
+
 void convTranspose1dKernelSymInt32(tensor_t const *input, tensor_t const *weight,
                                    tensor_t const *bias, kernel_t const *kernel, size_t groups,
                                    size_t outputPadding, tensor_t *output, rngStream_t *rs) {
@@ -280,9 +289,9 @@ void convTranspose1dKernelSymInt32(tensor_t const *input, tensor_t const *weight
     symAccumSite_t site = symAccumSiteInit("convTranspose1dKernelSymInt32",
                                            inChPerGroup * kernelSize, xBits, wBits, 0);
     if (symAccumProvenSafe(&site)) {
-        convTSymScatter(&view, false, &site);
+        convTSymScatterSafe(&view, &site);
     } else {
-        convTSymScatter(&view, true, &site);
+        convTSymScatterChecked(&view, &site);
     }
 
     /* Bias seed pass (refold), separate from the pure-+= scatter. NULL for Conv1d dx;
@@ -386,6 +395,19 @@ SYM_ACCUM_ALWAYS_INLINE void convTSymGroupedScatter(const convTSymView_t *v,
     }
 }
 
+#define CONVT_GROUPED_PARAMS                                                                       \
+    const convTSymView_t *v, const symQConfig_t *weightGroups, float inScale, float sAcc,          \
+        roundingMode_t roundingMode, rngStream_t *rs, const symAccumSite_t *site
+#define CONVT_GROUPED_ARGS(checked) v, weightGroups, inScale, sAcc, roundingMode, rs, checked, site
+
+SYM_ACCUM_NOINLINE void convTSymGroupedScatterSafe(CONVT_GROUPED_PARAMS) {
+    convTSymGroupedScatter(CONVT_GROUPED_ARGS(false));
+}
+
+SYM_ACCUM_NOINLINE void convTSymGroupedScatterChecked(CONVT_GROUPED_PARAMS) {
+    convTSymGroupedScatter(CONVT_GROUPED_ARGS(true));
+}
+
 void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                                           tensor_t const *bias, kernel_t const *kernel,
                                           size_t groups, size_t outputPadding, tensor_t *output,
@@ -464,11 +486,11 @@ void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const 
     symAccumSite_t site = symAccumSiteInit("convTranspose1dKernelSymInt32Grouped",
                                            inChPerGroup * kernelSize, xBits, wBits, 0);
     if (symAccumProvenSafe(&site)) {
-        convTSymGroupedScatter(&view, weightGroups, inScale, sAcc, wQC->roundingMode, rs, false,
-                               &site);
+        convTSymGroupedScatterSafe(&view, weightGroups, inScale, sAcc, wQC->roundingMode, rs,
+                                   &site);
     } else {
-        convTSymGroupedScatter(&view, weightGroups, inScale, sAcc, wQC->roundingMode, rs, true,
-                               &site);
+        convTSymGroupedScatterChecked(&view, weightGroups, inScale, sAcc, wQC->roundingMode, rs,
+                                      &site);
     }
 
     /* Bias seed pass (refold into sAcc), separate from the pure-+= scatter --

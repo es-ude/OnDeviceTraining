@@ -50,6 +50,17 @@
 #define SYM_ACCUM_ALWAYS_INLINE static inline
 #endif
 
+/* The safe and the checked instantiation of a kernel's loop body each live in
+ * their OWN non-inlined function. Inlined side by side into one function they
+ * share a stack frame, which grows enough that the loops around the MAC spill
+ * and every far frame access costs two instructions; separate frames keep the
+ * safe path's register allocation identical to the unguarded kernel. */
+#if defined(__GNUC__) || defined(__clang__)
+#define SYM_ACCUM_NOINLINE static __attribute__((noinline))
+#else
+#define SYM_ACCUM_NOINLINE static
+#endif
+
 typedef struct symAccumSite {
     const char *op; /* names the op in the abort banner */
     size_t nMax;    /* max terms one accumulator receives */

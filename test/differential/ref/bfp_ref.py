@@ -13,7 +13,7 @@ What the doc fixes exactly, and this leg therefore computes exactly:
   arithmetic (``fractions.Fraction`` of the float32 absmax) -- the doc states
   the rule in reals and names ``frexpf`` only as the mechanism;
 - the D6 clamp of the stored exponent (section 2) and the zero state;
-- the two's-complement mantissa grid and the ``+-qMax`` clamp (section 1);
+- the two's-complement mantissa grid and its clamp ``[-2^(m-1), qMax]`` (section 1);
 - the fold contract of section 5.3 (int32 same-exponent partials, exact
   ``ldexpf`` fold, float32 accumulation, bias seeded first per section 5.4
   Decision 2), sections 7 and 8 included: for a reduction that is ONE
@@ -44,18 +44,29 @@ INT32_MAX = 2**31 - 1
 INT32_MIN = -(2**31)
 F32_U = 2.0**-24
 
+# What the fixed arithmetic-bfp.md now states, with its section. Leg A cites
+# these instead of assuming them; they are not gaps.
+DOC_COVERED: dict[str, str] = {
+    "grid": "arithmetic-bfp section 1: the shipped grid is the full two's-complement one, "
+    "mantissas clamp to [-2^(m-1), qMax] with qMax = 2^(m-1) - 1; -2^(m-1) is reachable (HALF_AWAY: "
+    "only when D6's exponent cap pins the scale, section 2; SR_HALF_AWAY: also when the dither "
+    "rounds -qMax - 0.5 away from zero). Section 2 states the saturation grid as the same "
+    "[-2^(m-1), qMax].",
+    "rounding": "arithmetic-sym 'Rounding modes, the SYM_INT32 grid, encode and requant' (referenced "
+    "from arithmetic-bfp section 5.3): HALF_AWAY = C round() (an exact .5 goes away from zero); "
+    "SR_HALF_AWAY = roundHalfAway(x + u - 0.5f), u = top-24-bits / 2^24.",
+    "headroom": "arithmetic-bfp section 5.3 'Headroom, exact form': bfpSegmentLimit(ma, mb) = "
+    "INT32_MAX >> (ma + mb - 2) (shift >= 31 clamps to 1; equal widths 2^(33-2m) - 1: 131071 at "
+    "m=8, 511 at m=12, 1 at m=16), checked over min(runA, runB, reductionLen) with run = groupSize "
+    "or the reduction length per-tensor; the bias operand is exempt. The sum twin "
+    "INT32_MAX >> (m - 1) is section 5.6.",
+    "zero_state": "arithmetic-bfp section 3 (absMax == 0 stores E = 0, storedExponent = bias, scale 1.0), "
+    "section 5.5 / 5.6 (a freshly allocated wire and an empty tensor start in the zero state).",
+}
+
+# Genuinely open: the fixed doc is still silent. Each is an assumption Leg A
+# had to make.
 DOC_GAPS: list[str] = [
-    # Each entry: what Leg A needed, where the doc is silent, what was assumed.
-    "Lower mantissa clamp: arithmetic-bfp section 1 says 'every BFP quantize path clamps "
-    "mantissas to +-qMax' and section 2 'mantissas saturate to +-qMax'; section 5.6 says "
-    "'the negative floor is -2^(m-1) as shipped, not spec D6's +-qMax -- an open decision in "
-    "#420'. The doc contradicts itself. Leg A implements +-qMax (sections 1/2, stated as the "
-    "rule); a C code of -2^(m-1) where Leg A has -qMax and the pre-rounding value is below "
-    "-(qMax + 0.5) is reported as the class `clamp_floor` (a documented inconsistency, not an "
-    "implementation bug), never silently accepted.",
-    "Rounding function: 'rounded by the op's arithmetic.roundingMode' (section 5.4) and "
-    "'roundByMode' (section 5.6) name the mode; HALF_AWAY is never written out. Assumed "
-    "sign(v) * floor(|v| + 0.5), as in sym_ref (its DOC_GAPS[8]).",
     "Which float the pack divides: section 3 states E from absMax in reals and the mantissa "
     "as 'x / 2^E rounded'; Leg A takes the division as exact (a power-of-two division of a "
     "float32 value is exact unless it leaves the normal range), so codes carry NO float32 "
@@ -78,13 +89,6 @@ DOC_GAPS: list[str] = [
     "kernel tap outer, channel inner; conv weightGrad -- '(batch, outputPosition) as the "
     "reduction' and biasGrad 'b-outer/outPos-inner' (section 5.6, documented). The result is "
     "reported (bit-exact or not) and never gates: the walk-order-free bound is the acceptance.",
-    "Zero-state of an all-zero GROUP inside a grouped tensor: section 3 states the zero state "
-    "for absMax == 0 ('stores E = 0, i.e. storedExponent = bias'); assumed to apply per group.",
-    "Headroom guard wording: section 5.3 gives bfpSegmentLimit(ma, mb) = INT32_MAX >> (ma+mb-2) "
-    "and section 5.6 the sum twin INT32_MAX >> (m-1), both evaluated over min(runA, runB, N) "
-    "with run = groupSize or the reduction length for a per-tensor operand. Leg A reproduces "
-    "the guard to predict ABORT; a fixture inside the guard whose C run aborts is a MISMATCH "
-    "(class `abort`), a fixture outside it whose C run completes is a MISMATCH (class `guard`).",
     "(float)partial rounding mode (section 7): the doc says the int32 -> float conversion "
     "'rounds' above 2^24 without naming the mode. Assumed IEEE round-to-nearest-even (C's "
     "default conversion), reproduced by numpy's int64 -> float32 cast.",
@@ -106,9 +110,9 @@ def qmax(mantissa_bits: int) -> int:
 
 
 def code_floor_twos_complement(mantissa_bits: int) -> int:
-    """The representable-but-unreached two's-complement code -2^(m-1)
-    (arithmetic-bfp section 1: 'inert'; section 5.6: 'the negative floor is
-    -2^(m-1) as shipped' -- DOC_GAPS[0])."""
+    """The lower end of the mantissa grid, -2^(m-1) (arithmetic-bfp section
+    1: 'clamps mantissas to [-2^(m-1), qMax]'; section 2 states the
+    saturation grid the same way)."""
     return -(1 << (mantissa_bits - 1))
 
 
@@ -126,7 +130,7 @@ def stored_exponent_cap(exponent_bits: int) -> int:
 
 
 def round_half_away(v: np.ndarray) -> np.ndarray:
-    """Half away from zero (DOC_GAPS[1]); float64 -> int64."""
+    """Half away from zero (arithmetic-sym 'Rounding modes, the SYM_INT32 grid...': C round()); float64 -> int64."""
     v = np.asarray(v, dtype=np.float64)
     return np.where(v >= 0.0, np.floor(v + 0.5), np.ceil(v - 0.5)).astype(np.int64)
 
@@ -225,14 +229,14 @@ class Packed:
     stored: np.ndarray  # int64 [numGroups]
     pre: np.ndarray  # float64 x / 2^E (exact), flat -- before rounding and clamp
     groups: list[GroupExponent]
-    n_clamped: int  # elements whose |pre| > qMax + 0.5 (saturation regime only)
+    n_clamped: int  # elements whose rounded value leaves [-2^(m-1), qMax] (D6 saturation only)
 
 
 def pack_bfp(values: np.ndarray, mantissa_bits: int, exponent_bits: int, group_size: int) -> Packed:
     """FLOAT32 -> BFP, the documented rule per group: E by ``exponent_of`` on
     the group's absmax (section 3 + D6), mantissa = round(x / 2^E) clamped to
-    +-qMax (section 1; DOC_GAPS[0] on the lower bound). The division is exact
-    (DOC_GAPS[2]) so ``pre`` is the real pre-rounding value. ``values`` are
+    [-2^(m-1), qMax] (section 1). The division is exact
+    (DOC_GAPS[0]) so ``pre`` is the real pre-rounding value. ``values`` are
     float32 (any shape; flat storage order is the group order)."""
     x = np.asarray(values, dtype=np.float32).ravel().astype(np.float64)
     if not np.all(np.isfinite(x)):
@@ -242,6 +246,7 @@ def pack_bfp(values: np.ndarray, mantissa_bits: int, exponent_bits: int, group_s
     n_g = num_groups(n, group_size) if n else 1
     bias = exponent_bias(exponent_bits)
     q = qmax(mantissa_bits)
+    floor = code_floor_twos_complement(mantissa_bits)
     codes = np.zeros(n, dtype=np.int64)
     pre = np.zeros(n, dtype=np.float64)
     stored = np.zeros(n_g, dtype=np.int64)
@@ -257,8 +262,8 @@ def pack_bfp(values: np.ndarray, mantissa_bits: int, exponent_bits: int, group_s
         p = xs / (2.0 ** (ge.stored - bias))
         pre[sel] = p
         c = round_half_away(p)
-        n_clamped += int((np.abs(c) > q).sum())
-        codes[sel] = np.clip(c, -q, q)
+        n_clamped += int(((c > q) | (c < floor)).sum())
+        codes[sel] = np.clip(c, floor, q)
     return Packed(codes, stored, pre, groups, n_clamped)
 
 
@@ -274,10 +279,11 @@ def repack_under(
     g_of = group_ids(n, group_size)
     bias = exponent_bias(exponent_bits)
     q = qmax(mantissa_bits)
+    floor = code_floor_twos_complement(mantissa_bits)
     stored = np.asarray(stored, dtype=np.int64)
     pre = x / (2.0 ** (stored[g_of] - bias))
     c = round_half_away(pre)
-    return Packed(np.clip(c, -q, q), stored.copy(), pre, [], int((np.abs(c) > q).sum()))
+    return Packed(np.clip(c, floor, q), stored.copy(), pre, [], int(((c > q) | (c < floor)).sum()))
 
 
 def dequant(codes: np.ndarray, stored: np.ndarray, exponent_bits: int, group_size: int) -> np.ndarray:
@@ -320,7 +326,7 @@ def max_segment(run_a: int, run_b: int | None, reduction: int) -> int:
 
 def headroom_ok(run_a: int, run_b: int, reduction: int, ma: int, mb: int) -> bool:
     """bfpValidateBlockHeadroom (section 5.3): the largest same-exponent
-    segment must not exceed segment_limit(ma, mb) (DOC_GAPS[6])."""
+    segment must not exceed segment_limit(ma, mb) (arithmetic-bfp section 5.3)."""
     return max_segment(run_a, run_b, reduction) <= segment_limit(ma, mb)
 
 
@@ -348,7 +354,7 @@ def fold_single_segment(partial: np.ndarray, shift: int, bias_values: np.ndarray
     acc = (float)bias (exact, section 5.4 Decision 2) ; acc += ldexpf((float)
     partial, Ea + Eb - biasA - biasB). Two float32 roundings at most -- the
     int->float conversion of the partial (exact below 2^24, section 7 above
-    it, DOC_GAPS[7]) and the single addition -- so the result is predicted to
+    it, DOC_GAPS[3]) and the single addition -- so the result is predicted to
     the bit, whatever the walk order (integer addition commutes). ``shift`` =
     Ea + Eb - biasA - biasB. Section 8 (ldexpf overflow to inf) is reproduced
     by numpy's float32 ldexp."""
@@ -400,7 +406,7 @@ def fold_walk(
     ib: list[np.ndarray] | None,
     bias_values: np.ndarray | None,
 ) -> WalkFold:
-    """The section 5.3 / 5.6 algorithm along a given walk (DOC_GAPS[4]):
+    """The section 5.3 / 5.6 algorithm along a given walk (DOC_GAPS[2]):
     ``ia[o]`` (and ``ib[o]``) are the flat storage indices of the terms of
     output element ``o`` in walk order. Per element: acc = bias seed (float32,
     section 5.4 Decision 2; 0 without bias); partial = 0; for every term, if
@@ -487,7 +493,7 @@ def fold_walk(
 
 
 # --------------------------------------------------------------------------- #
-# Walk orders of the GEMM family (DOC_GAPS[4]): flat storage indices per      #
+# Walk orders of the GEMM family (DOC_GAPS[2]): flat storage indices per      #
 # output element, in the order the fold is evaluated                           #
 # --------------------------------------------------------------------------- #
 
@@ -503,7 +509,7 @@ class Walk:
 
 def linear_walk(batch: int, in_f: int, out_f: int, direction: str, with_bias: bool) -> Walk:
     """Linear y = x @ W^T + b with x [B, inF], W [outF, inF] (the PyTorch
-    layout, sym_ref DOC_GAPS[9]); forward reduces over inF, dx = L @ W over
+    layout, data-shape 'Weight layouts, orientation and padding'); forward reduces over inF, dx = L @ W over
     outF, weightGrad = L^T @ x over the batch, biasGrad = batch sum of L
     (section 5.6: 'per-feature and the inner loop walks the batch')."""
     ia: list[np.ndarray] = []
@@ -539,7 +545,7 @@ def linear_walk(batch: int, in_f: int, out_f: int, direction: str, with_bias: bo
 
 @dataclass(frozen=True)
 class ConvGeom:
-    """Conv1d / ConvT1d geometry (PyTorch semantics, sym_ref DOC_GAPS[4-6]):
+    """Conv1d / ConvT1d geometry (PyTorch semantics, data-shape 'Weight layouts, orientation and padding'):
     stride, dilation, conv groups, explicit left/right zero padding (Conv1d)
     or outputPadding (ConvT1d, VALID)."""
 
@@ -568,7 +574,7 @@ def conv1d_walk(
     (ic outer, k inner); weightGrad '(batch, outputPosition) as the reduction'
     and biasGrad 'per-output-channel over (batch, outputPosition)' (section
     5.6, documented); dx = the gather adjoint (section 6; kernel tap outer,
-    channel inner, DOC_GAPS[4]). Padded taps are never visited."""
+    channel inner, DOC_GAPS[2]). Padded taps are never visited."""
     cin_g = c_in // g.groups
     cout_g = c_out // g.groups
     l_out = g.conv_out_len(length)
@@ -652,7 +658,7 @@ def convt1d_walk(
     """Conv1dTransposed, VALID: y[b, oc, t] = sum_{ic in group(oc), k, i: i*s +
     k*d == t} x[b, ic, i] * W[ic, oc', k], W [Cin, Cout/g, K], Lout = (L-1)*s +
     d*(K-1) + outputPadding + 1 (PyTorch). The forward is gather-formulated
-    (section 6): per output element, taps outer, channel inner (DOC_GAPS[4]);
+    (section 6): per output element, taps outer, channel inner (DOC_GAPS[2]);
     outputPadding tail positions have no contributors and stay at the bias
     seed. weightGrad / biasGrad walk (batch, outputPosition) (section 5.6);
     dx is a Conv1d of the loss with W (section 5.6: 'Conv1dTransposed's dx is

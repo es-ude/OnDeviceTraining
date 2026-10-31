@@ -65,10 +65,16 @@ bridge already uses (`docs/conventions/tensor.md`, #227).
 not an approximation. Both encodings represent the same real value at the same
 mantissa width up to the asymmetric range (`[-2^(m-1), 2^(m-1)-1]` for two's
 complement vs. `[-(2^(m-1)-1), 2^(m-1)-1]` for sign-magnitude, ignoring
-sign-magnitude's redundant `-0`); the quantizer never emits the extra
-negative code anyway — every BFP quantize path clamps mantissas to `±qMax`
-with `qMax = 2^(mantissaBits-1) - 1`, so the representable-but-unreached
-`-2^(m-1)` code is inert. The reason to deviate is infrastructure reuse, not a
+sign-magnitude's redundant `-0`). The shipped grid is the full two's-complement
+one: every value-domain BFP quantize path clamps mantissas to
+`[-2^(m-1), qMax]` with `qMax = 2^(mantissaBits-1) - 1` — positive cap `qMax`,
+negative floor `-2^(m-1)` (a float-domain `clamp` followed by `clampInt32` in
+`packFloatBufferAsBfp`, `quantizeFloatBufferToBfpCodes`, `packStreamAsBfp` and
+the rescale walker). The `-2^(m-1)` code is therefore **reachable**, not inert:
+the derived exponent keeps `|v / scale| <= qMax` (§3), so under `HALF_AWAY` it
+is emitted only when D6's exponent cap pins the scale below what the data needs
+(§2), and under `SR_HALF_AWAY` also when the dither rounds `-qMax - 0.5` away
+from zero. The reason to deviate is infrastructure reuse, not a
 numerical one: two's complement lets BFP share `byteConversionAppend` /
 `unpackSignExtend` verbatim with `SYM`'s pack/unpack path instead of adding a
 second signed-payload codec (a sign-bit-plus-magnitude packer/unpacker) purely
@@ -87,7 +93,7 @@ float magnitudes, `deriveBfpStoredExponent` in `src/tensor/TensorConversion.c`)
 deviates from that discipline by design (D6): when the derived exponent
 would fall outside `[0, 2^exponentBits - 1]`, it **clamps** instead of
 aborting — high side clamps the stored exponent to its max, so the block's
-mantissas saturate to `±qMax`; low side clamps the stored exponent to `0`, so
+mantissas saturate to the grid `[-2^(m-1), qMax]` (§1); low side clamps the stored exponent to `0`, so
 small-magnitude quotients round toward zero (flush-to-zero). Both regimes are
 implemented as a plain clamp on the `stored` value inside
 `deriveBfpStoredExponent`, immediately before the biased byte is written.
@@ -288,7 +294,9 @@ Every `ARITH_BFP` kernel (`matmulBfpTensors`, `conv1dKernelBfp`,
   multiply is exact (D7) — the only rounding this step introduces is
   ordinary float32 addition across blocks, plus the two exceptions in §§7–8.
 - **Kernels are rounding-free** (Decision 7). Every `roundByMode` call in
-  the BFP path lives at exactly two seams: staging (quantizing a FLOAT32
+  the BFP path (`HALF_AWAY` and `SR_HALF_AWAY` are defined once, in
+  [arithmetic-sym.md](arithmetic-sym.md) "Rounding modes, the SYM_INT32 grid,
+  encode and requant") lives at exactly two seams: staging (quantizing a FLOAT32
   operand into scratch) and the `OUT_WRITE` epilogue (packing the raw FLOAT32
   kernel output back into a BFP target). Nothing inside a kernel's reduction
   loop rounds.
@@ -628,15 +636,15 @@ silent wrong arithmetic, not a crash.
   abort-preserving wide form — the `FixedGrid` engine), because the regime
   needs no `inf` at all: at a narrow `exponentBits` the derived exponent
   saturates, so `v / scale` leaves `int32` range for entirely FINITE inputs.
-  The saturation BOUNDS are each site's own, unchanged: the negative floor is
-  `−2^(m−1)` as shipped, not D6's `±qMax` — an open decision in #420,
-  and after the unification a one-site change.
+  The saturation grid is the full two's-complement one at every value-domain
+  site: positive cap `qMax`, negative floor `−2^(m−1)` (§1). The `FixedGrid`
+  engine's wider pre-clamp is the one deliberate exception (above).
 - **A non-finite INPUT VALUE fails fast at the three value-domain pack
   entries** (`packFloatBufferAsBfp`, `quantizeFloatBufferToBfpCodes`,
   `packStreamAsBfp`) — `#421`, ruling R9, the value-side twin of the
   accumulate engines' R6 increment guard, with the same rationale: BFP has no
   NaN/inf code, so mapping the value to `0` drops the caller's data and
-  saturating it to `±qMax` invents data, while the FLOAT32 wire keeps
+  saturating it onto the grid invents data, while the FLOAT32 wire keeps
   propagating a NaN loudly because FLOAT32 can represent it. This is not a
   theoretical corner: a diverged training step's NaN loss reaches
   `quantizeFloatBufferToBfpCodes` through the funnel's FLOAT32-operand
@@ -1703,7 +1711,7 @@ in the repository are listed.
 | D3 | First-class BFP: a new `qtype_t BFP` and a new `ARITH_BFP` (both appended), built on the group-quant group machinery; a constrained-SYM shortcut was rejected (4-byte float scales, no exponent-width axis). | `Quantization.h`, `ArithmeticType.h`, §5 |
 | D4 | Native `ARITH_BFP` everywhere, Softmax and norms included — except by decision: Dropout is non-native (float bridge), Flatten is a passthrough, losses are fake-quant (native CE/MSE an optional stretch). | §5.7–§5.9; `Dropout.c`, `MSE.c`, `CrossEntropy.c` |
 | D5 | Wires are fully blocked; the wire-block size is independent of the weight-block size; per-tensor (`numGroups = 1`) is the degenerate sweep point. | §5.5, wire allocators |
-| D6 | Exponent saturation, not abort: the shared exponent clamps to its representable range; at the top mantissas saturate to ±qMax, at the bottom they flush toward zero. Deliberate deviation from the `#227` abort discipline — saturation is what the `exponentBits` sweep axis measures. | §2; `deriveBfpStoredExponent`, BFP cells of `TensorConversion.c` |
+| D6 | Exponent saturation, not abort: the shared exponent clamps to its representable range; at the top mantissas saturate to the grid `[-2^(m-1), qMax]`, at the bottom they flush toward zero. Deliberate deviation from the `#227` abort discipline — saturation is what the `exponentBits` sweep axis measures. Doc aligned to the shipped clamp 2026-10-31 (positive cap `qMax`, negative floor `-2^(m-1)`; clamp code unchanged). | §1, §2; `deriveBfpStoredExponent`, BFP cells of `TensorConversion.c` |
 | D7 | The raw intermediate under `ARITH_BFP` is FLOAT32: kernels MAC mantissa products in `int32` within a block, fold each block partial with an exact `·2^(Ea+Eb)` float multiply, and accumulate in float32 across blocks. No `int64`. | §5.3; every BFP kernel, `ExecuteOp.c`'s BFP arms |
 | D8 | Op-local blocking: compute blocking belongs to the op, storage blocking to the tensor. Amended 2026-09-02 (PR3): an already BFP-stored operand is never re-blocked — op-local blocking realizes as the exact fold-segmentation contract (fold whenever either operand's group changes); fresh blocking happens only on the FLOAT32-staging path. | §5.3, §9; GEMM kernels, pools, Relu/Dropout |
 | D9 | Every ConvT1d op under `ARITH_BFP` is gather-formulated (output-centric: each output is a dot product over its contributors), restoring the int32 block-partial contract; the SYM scatter core stays SYM-only. | §6; `convTranspose1dKernelBfpGather`, `convTranspose1dTapsAt` |

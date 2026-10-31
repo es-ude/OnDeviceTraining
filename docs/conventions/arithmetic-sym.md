@@ -25,6 +25,52 @@ SYM_INT32 (never a float master — the optimizer is single-dtype); a wide
 raw-integer bias (qMaxBits=32, scale=1) would need a structurally different
 scheme and is out of scope.
 
+## Rounding modes, the SYM_INT32 grid, encode and requant
+
+**Rounding modes** (`src/arithmetic/Rounding.c`, `roundByMode`; the BFP doc
+uses the same two). `HALF_AWAY` is `roundHalfAway` = C `round()` on the float:
+nearest integer, an exact `.5` goes away from zero (`round(-2.5) = -3`), result
+converted to `int32_t`. `SR_HALF_AWAY` is `roundHalfAway(input + u - 0.5f)`,
+evaluated in float32 left to right, with `u = rngNextUnitFloat(rs)` drawn from
+the op's stream: `u = (top 24 bits of a U32) / 2^24`, so `u` is in
+`[0, 1 - 2^-24]` (never 1, `0` possible). `SR_HALF_AWAY` without a stream
+aborts.
+
+**Grid.** A SYM_INT32 tensor of width `b = qMaxBits` holds int32 codes on the
+full two's-complement grid `[qMin, qMax] = [-2^(b-1), 2^(b-1) - 1]` (2047 and
+-2048 at int12), `value ≈ code · scale`. Every SYM_INT32 requant clamps to that
+grid (`clampInt32(..., qMin, qMax)`).
+
+- *Dynamic absmax encode* (`convertFloatTensorToSymInt32Tensor`, and the
+  dynamic requant `requantSymInt32Tensor` behind
+  `conversionMatrix[SYM_INT32][SYM_INT32]`): `scale = absMax / qMax` (float32),
+  `code = clampInt32(roundByMode(x / scale), qMin, qMax)`; requant evaluates
+  `(float)code · (inScale / scale)` instead of `x / scale`. An all-zero tensor
+  (`absMax == 0`) gets `scale = 1.0` and all-zero codes. Because `|x / scale|`
+  is at most `qMax` (up to a float32 ulp), `HALF_AWAY` never produces `qMin`;
+  under `SR_HALF_AWAY` a `-absMax` element reaches `qMin` when `u == 0`
+  (`round(-qMax - 0.5) = qMin`), which the clamp keeps in range.
+- *Fixed-scale requant* (`requantSymInt32TensorToScale`, #192 D1 "requant into
+  a preset target scale"): the output scale must already be set and `> 0`
+  (else `exit(1)`); each element is `roundByMode(clamp((float)code · inScale /
+  targetScale, qMin, qMax))`, so out-of-grid values **saturate** to the
+  two's-complement grid, and this is how `qMin` becomes reachable under
+  `HALF_AWAY`. The clamp is in the float domain *before* the rounding and is not
+  repeated afterwards, so under `SR_HALF_AWAY` a value saturated at `qMin` can
+  round one step past it (`u == 0`: `round(qMin - 0.5) = qMin - 1`). The
+  primitive is called directly; it is not a `conversionMatrix` cell.
+- The `OUT_ACC_FIXED_SCALE` epilogue (`rescaleIntoAccumulatorScale`) does not
+  clamp at all (see "Quantized gradient accumulation").
+
+**Staging a FLOAT32 operand under `ARITH_SYM_INT32`** (`executeOp` prologue,
+`src/arithmetic/ExecuteOp.c`). An operand whose storage is not SYM_INT32 is
+converted into stack scratch with the dynamic absmax encode above, at
+`ODT_SYM_OPERAND_QMAXBITS` (the `initSymInt32QConfig` default, 12), **per
+tensor** (one scale for the whole operand, not per sample or row), rounded by
+the op's `arithmetic.roundingMode`. A SYM_INT32-stored operand is used as is,
+at its own width. Grouped SYM/ASYM weights take the unpack path instead (see
+the guard section below); a BFP-stored operand is denied.
+
 ## Conv1d / Conv1dTransposed SYM_INT32 (#45)
 
 Two integer sliding-window cores live in `src/arithmetic/`, siblings of the
@@ -177,9 +223,18 @@ only the quantization configs change; the int32 accumulator (no int64) is kept.
   sums, pool/reduce sums), which keep their own `N < 2^(32−q)` guards; a
   `symValidateSumHeadroom` sibling of the BFP `bfpValidateSumHeadroom` would close
   the remaining unguarded ones. BFP kernels have their own headroom guards.
-- Note: the conv weightGrad product mixes an int12 input with an int16 grad
-  operand under the #218 grad-accumulator scheme — its budget is governed by
-  #218/#45, not closed by this operand flip.
+- Note: a weightGrad product's two operands are the forward input and the
+  lossGrad (dx) wire, each at its own tensor's `qMaxBits` (the weight-grad
+  guard reads exactly those two widths). By default both are int12: a FLOAT32
+  wire is staged at `ODT_SYM_OPERAND_QMAXBITS`, and a SYM_INT32 wire carries
+  the width its `outputQ`/`propLossQ` declares, int12 unless the caller asks
+  for more (the `Conv1d.c` bias-grad comment "int12-range" describes this
+  default; `Linear.c`'s cites the looser `qMaxBits <= 16` contract). int16
+  appears only as the width of the grad *accumulator* target
+  (`ODT_SYM_GRAD_QMAXBITS`, above) or when a caller declares a 16-bit wire;
+  then the static bound above shrinks (int12 x int16 proves only `N <= 31`) and
+  an unprovable reduction runs checked. The accumulation scheme of the weight
+  grad itself is governed by #218/#45.
 - The unit-test gold suite validates the **default** int12/int16 contract
   (`ODT_SYM_OPERAND_QMAXBITS=12`, `ODT_SYM_GRAD_QMAXBITS=16`); building with a
   knob override (e.g. `-DODT_SYM_OPERAND_QMAXBITS=8`) diverges from those gold
@@ -432,7 +487,12 @@ quantized training know this is a known, expected limitation rather than a bug.
 The two schemes are now the named funnel epilogue modes chosen per call in layer
 code: `OUT_ACC_DYNAMIC_RESCALE` (Strategy A) and `OUT_ACC_FIXED_SCALE` (Linear
 SYM bias). On FLOAT32 targets, both collapse to the exact float add (no
-quantization).
+quantization). A SYM_INT32 raw increment is dequantized as
+`out[i] += (float)raw[i] * s_raw` (`dequantChunkToFloat`, via
+`accumulateTensorIntoFloat32Inplace`), with `s_raw` the scale the kernel stored
+on the raw intermediate (`s_in·s_w` / `s_loss·s_in` as one float32 product,
+`s_loss` for a bias grad): the int-to-float cast rounds only above `2^24`, the
+multiply rounds once, and the add into a zeroed grad is exact.
 
   **Attribution note:** this fixed-scale integer bias-GRADIENT accumulation is
   ODT's own construction and is NOT prescribed by Deutel et al.

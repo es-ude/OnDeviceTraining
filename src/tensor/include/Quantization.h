@@ -13,11 +13,14 @@ typedef struct symInt32QConfig {
     uint8_t qMaxBits;
 } symInt32QConfig_t;
 
-/* SYM_INT32 operand bit-width contract (#227). Operands feeding product
- * accumulators are int12 so int12*int12 products stay within an int32
- * accumulator (no int64). Provably sound for reductions N <= 511 (512*2^22 >
- * INT32_MAX); longer reductions run an overflow-checked loop that aborts on the
- * first real wrap (SymAccumGuard.h) -- narrow the knob for wider layers.
+/* DEFAULT SYM_INT32 operand staging width (#227), used by initSymInt32QConfig
+ * and the FLOAT32 absmax encode. It is a default, not a rejection: operands
+ * of any declared width are accepted, and the accumulator guard
+ * (SymAccumGuard.h) decides per op. int12*int12 products are provably safe for
+ * reductions N <= 511 (512*2^22 > INT32_MAX); longer or wider reductions run an
+ * overflow-checked loop that aborts on the first real wrap -- narrow this knob
+ * for wider layers. LayerNorm/GroupNorm/Reduce still cap operand width for
+ * their own value-sum and affine-product arguments.
  * Override with -DODT_SYM_OPERAND_QMAXBITS=N. */
 #ifndef ODT_SYM_OPERAND_QMAXBITS
 #define ODT_SYM_OPERAND_QMAXBITS 12

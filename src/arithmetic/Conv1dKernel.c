@@ -224,18 +224,12 @@ void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_
 }
 
 /* Group-quant PR2 (Task 4): entry guards mirror matmulValidateWeightGroups
- * (Matmul.c) exactly -- non-NULL, qBits within the operand contract, and the
- * per-tensor sentinel {numGroups=1, groupSize=0} rejected (its groupSize=0
- * would divide-by-zero below; per-tensor weights take conv1dKernelSymInt32). */
+ * (Matmul.c) exactly -- non-NULL and the per-tensor sentinel
+ * {numGroups=1, groupSize=0} rejected (its groupSize=0 would divide-by-zero
+ * below; per-tensor weights take conv1dKernelSymInt32). */
 static void conv1dValidateWeightGroups(const symQConfig_t *weightGroups, size_t weightElemCount) {
     if (weightGroups == NULL) {
         PRINT_ERROR("conv1dKernelSymInt32Grouped: weightGroups must not be NULL");
-        exit(1);
-    }
-    if (weightGroups->qBits > ODT_SYM_OPERAND_QMAXBITS) {
-        PRINT_ERROR("conv1dKernelSymInt32Grouped: weightGroups qBits (%u) exceeds operand "
-                    "contract (%u) — int32 product accumulation would overflow (#227)",
-                    (unsigned)weightGroups->qBits, (unsigned)ODT_SYM_OPERAND_QMAXBITS);
         exit(1);
     }
     if (weightGroups->numGroups <= 1) {

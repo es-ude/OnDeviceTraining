@@ -165,17 +165,22 @@ TFLite. The **grad accumulators stay int16** (wider accumulator, free since SYM
 stores int32 regardless of qMaxBits). The **kernels are bit-width-agnostic** —
 only the quantization configs change; the int32 accumulator (no int64) is kept.
 
-**Realized framework-wide int12 contract (PR-A, #227):**
+**Realized framework-wide int12 default (PR-A, #227):**
 
 - The SYM_INT32 **operand** default is int12 via the compile-time knob
   `ODT_SYM_OPERAND_QMAXBITS` (=12), set in `initSymInt32QConfig`
   (`src/tensor/include/Quantization.h`). Override per-build with
   `-DODT_SYM_OPERAND_QMAXBITS=N` (e.g. =8 for layers wider than 511).
 - `matmulIntCore` (Linear forward / propLoss / weightGrad) and the LayerNorm
-  **affine product** now run on int12 operands, enforced by op-entry guards
-  (`matmulValidateSymOperand` at both Matmul SYM entries;
-  `layerNormValidateSymTensor` lowered to the knob). LayerNorm's per-group
-  mantissa-sum is a value-sum and stays sound at any qMaxBits ≤ 16.
+  **affine product** run on int12 operands by default. The product kernels
+  (Matmul, Conv1d, ConvTranspose1d, both grouped twins) do **not** reject wider
+  operands: they accept any declared width and the accumulator guard below
+  decides per op (proven safe, exact on the checked path, or abort).
+  `matmulValidateSymOperand` only checks the dtype. LayerNorm / GroupNorm
+  (`layerNormValidateSymTensor`, `groupNormValidateSymTensor`) still reject
+  `qMaxBits > ODT_SYM_OPERAND_QMAXBITS`: their affine product `q·gamma_q` has no
+  guarded accumulator, so the cap is its overflow argument. The Reduce / pool
+  value-sum caps (`qMaxBits ≤ 16`) are untouched.
 - **Grad accumulators stay int16** via `ODT_SYM_GRAD_QMAXBITS` (=16), pinned
   in `gradInitSymInt32` (`getQLike` preserves the source width). biasGrad is a
   value-sum; weightGrad is a sum of products (int32 accumulate → requantize).
@@ -205,8 +210,7 @@ only the quantization configs change; the int32 accumulator (no int64) is kept.
   it to the mantissa image `code - zp[g]`, which spans `±(2^qBits − 1)`. The three
   grouped kernels therefore use `qBits + 1` for the weight in the static bound
   (conservative by one bit for true grouped SYM), and the abort banner reports
-  that bound width. The view's `qBits` is not widened, so the operand-contract
-  check (`qBits ≤ ODT_SYM_OPERAND_QMAXBITS`) still admits 12-bit ASYM weights.
+  that bound width. The view's `qBits` itself is not widened.
   Assumption: stored codes obey their declared width (`qMaxBits`/`qBits` is
   metadata and is not re-checked per code); every funnel-produced operand is
   clamped to it, so only a hand-built tensor whose codes exceed its own width can

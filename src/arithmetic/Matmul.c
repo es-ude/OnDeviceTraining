@@ -289,13 +289,8 @@ static void matmulValidateSymOperand(tensor_t *t, const char *what) {
         PRINT_ERROR("matmul SYM_INT32: %s must be SYM_INT32", what);
         exit(1);
     }
-    symInt32QConfig_t *qc = t->quantization->qConfig;
-    if (qc->qMaxBits > ODT_SYM_OPERAND_QMAXBITS) {
-        PRINT_ERROR("matmul SYM_INT32: %s qMaxBits (%u) exceeds operand contract (%u) — int32 "
-                    "product accumulation would overflow (#227)",
-                    what, (unsigned)qc->qMaxBits, (unsigned)ODT_SYM_OPERAND_QMAXBITS);
-        exit(1);
-    }
+    /* No width cap: the accumulator guard (SymAccumGuard.h) is exact at any
+     * declared qMaxBits, so a wider operand runs the checked loop instead. */
 }
 
 void matmulSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor) {
@@ -519,12 +514,6 @@ static void matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor_t 
 static void matmulValidateWeightGroups(const symQConfig_t *weightGroups) {
     if (weightGroups == NULL) {
         PRINT_ERROR("matmul SYM_INT32 grouped: weightGroups must not be NULL");
-        exit(1);
-    }
-    if (weightGroups->qBits > ODT_SYM_OPERAND_QMAXBITS) {
-        PRINT_ERROR("matmul SYM_INT32 grouped: weightGroups qBits (%u) exceeds operand contract "
-                    "(%u) — int32 product accumulation would overflow (#227)",
-                    (unsigned)weightGroups->qBits, (unsigned)ODT_SYM_OPERAND_QMAXBITS);
         exit(1);
     }
     if (weightGroups->numGroups <= 1) {

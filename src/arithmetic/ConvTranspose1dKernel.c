@@ -327,9 +327,10 @@ static void convT1dValidateWeightGroups(const symQConfig_t *weightGroups, size_t
 }
 
 /* Grouped twin of convTSymScatter: each product is rescaled into sAcc (factor
- * <= 1, so |rescaled| <= |product|) before it joins the output element, hence
- * the same N * 2^(qa-1) * 2^(qb-1) bound covers the int32 += (and, on the
- * checked path, the product itself for wide widths). */
+ * <= 1, so |rescaled| <= |product| up to the float32 evaluation slack) before it
+ * joins the output element, hence the N * 2^(qa-1) * 2^(qb-1) bound with that
+ * slack (symAccumTermLimitRescaled) covers the int32 += (and, on the checked
+ * path, the product itself for wide widths). */
 SYM_ACCUM_ALWAYS_INLINE void convTSymGroupedScatter(const convTSymView_t *v,
                                                     const symQConfig_t *weightGroups, float inScale,
                                                     float sAcc, roundingMode_t roundingMode,
@@ -477,8 +478,8 @@ void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const 
      * Conservative by one bit for true grouped SYM. The abort banner reports
      * this bound width (declared + 1), not the declared one. */
     uint8_t wBits = (uint8_t)(weightGroups->qBits + 1);
-    symAccumSite_t site = symAccumSiteInit("convTranspose1dKernelSymInt32Grouped",
-                                           inChPerGroup * kernelSize, xBits, wBits, 0);
+    symAccumSite_t site = symAccumSiteInitRescaled("convTranspose1dKernelSymInt32Grouped",
+                                                   inChPerGroup * kernelSize, xBits, wBits, 0);
     if (symAccumProvenSafe(&site)) {
         convTSymGroupedScatterSafe(&view, weightGroups, inScale, sAcc, wQC->roundingMode, rs,
                                    &site);

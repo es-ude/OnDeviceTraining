@@ -485,8 +485,9 @@ static void matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor_t 
      * min(groupSize, N) products (a group never contributes more elements than
      * it holds; a revisit after a strided hop starts a fresh partial). The
      * running acc = seed + the rescaled partials: each rescale factor is
-     * scales[g]/max(scales) <= 1, so |rescaled partial| <= |partial| and the
-     * sum is bounded by N products plus the seed. Proving the acc bound proves
+     * scales[g]/max(scales) <= 1, so |rescaled partial| <= |partial| up to the
+     * float32 evaluation slack (symAccumTermLimitRescaled) and the sum is
+     * bounded by N slacked products plus the seed. Proving the acc bound proves
      * the partial bound too (fewer terms, no seed), so one flag drives both. */
     uint8_t aBits = ((symInt32QConfig_t *)aTensor->quantization->qConfig)->qMaxBits;
     /* Count the grouped weight ONE BIT wider than declared: a grouped ASYM
@@ -499,8 +500,8 @@ static void matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor_t 
     symAccumSite_t partialSite = symAccumSiteInit("matmul SYM_INT32 grouped (raw group partial)",
                                                   partialTerms, aBits, bBits, 0);
     symAccumSite_t accSite =
-        symAccumSiteInit("matmul SYM_INT32 grouped (rescaled accumulator)", aColumns, aBits, bBits,
-                         symAccumMaxAbsSeed(biasSeed, bColumns));
+        symAccumSiteInitRescaled("matmul SYM_INT32 grouped (rescaled accumulator)", aColumns, aBits,
+                                 bBits, symAccumMaxAbsSeed(biasSeed, bColumns));
     if (symAccumProvenSafe(&accSite)) {
         matmulGroupedLoopsSafe(aTensor, bTensor, outputTensor, biasSeed, weightGroups, aScale, sAcc,
                                roundingMode, rs, aRows, aColumns, bColumns, &partialSite, &accSite);

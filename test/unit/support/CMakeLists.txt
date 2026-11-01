@@ -27,6 +27,11 @@ target_include_directories(odt_test_assert INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}
 add_library(odt_test_keyed_draw INTERFACE)
 target_include_directories(odt_test_keyed_draw INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+# Pinned-draw helper (RngPinnedDraw.h): the xorshift32 inverse that pins an SR
+# uniform exactly. Header-only; a consumer also links RNG.
+add_library(odt_test_rng_pin INTERFACE)
+target_include_directories(odt_test_rng_pin INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
 # Self-test of DeathTest.h. Explicit add_executable (not add_elastic_ai_unit_test):
 # odt_test_death does not follow the UnitTest<Lib> naming rule. Common supplies
 # the real PRINT_ERROR banner the output-matching macro must see. TIMEOUT turns

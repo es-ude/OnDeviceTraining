@@ -13,8 +13,17 @@ int32_t roundHalfAway(float input) {
     return roundf(input);
 }
 
+/* Stochastic rounding: floor(x + u), u uniform in [0, 1), rounds up with probability equal to
+ * the fractional part (Connolly, Higham & Mary 2021). The sum x + u is never formed in float:
+ * its rounded value crosses the next integer for u > 1 - ulp(x)/2 (2^-14 at 2047, 1/2 on
+ * [2^23, 2^24)), an upward bias that grows with |x|. Splitting x into trunc + exact fraction
+ * keeps the same draw-to-outcome mapping as floor(x + u) in real arithmetic, exact for every
+ * finite x in int32 range (1 - u is exact on the 2^-24 grid of u). An integer x stays put. */
 static int32_t roundSRHalfAway(const float input, rngStream_t *rs) {
-    return roundHalfAway(input + rngNextUnitFloat(rs) - 0.5f);
+    const float u = rngNextUnitFloat(rs); /* exactly one draw, whatever x is */
+    const int32_t t = (int32_t)input;     /* truncates toward zero */
+    const float f = input - (float)t;     /* exact */
+    return f < 0.0f ? t - (u < -f) : t + ((1.0f - u) <= f);
 }
 
 int32_t roundByMode(const float input, const roundingMode_t roundingMode, rngStream_t *rs) {

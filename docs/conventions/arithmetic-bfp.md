@@ -73,8 +73,8 @@ negative floor `-2^(m-1)` (a float-domain `clamp` followed by `clampInt32` in
 the rescale walker). The `-2^(m-1)` code is therefore **reachable**, not inert:
 the derived exponent keeps `|v / scale| <= qMax` (§3), so under `HALF_AWAY` it
 is emitted only when D6's exponent cap pins the scale below what the data needs
-(§2), and under `SR_HALF_AWAY` also when the dither rounds `-qMax - 0.5` away
-from zero. The reason to deviate is infrastructure reuse, not a
+(§2). Under `SR_HALF_AWAY` (exact `floor(x + u)`, `u` in `[0, 1)`) a value in
+`[-qMax, qMax]` cannot round below `-qMax`, so it adds no route to it. The reason to deviate is infrastructure reuse, not a
 numerical one: two's complement lets BFP share `byteConversionAppend` /
 `unpackSignExtend` verbatim with `SYM`'s pack/unpack path instead of adding a
 second signed-payload codec (a sign-bit-plus-magnitude packer/unpacker) purely
@@ -540,13 +540,10 @@ silent wrong arithmetic, not a crash.
     deliberately WIDER than the legal code band — two codes on each side,
     enough that `(int32_t)round(...)` is always defined but never enough to
     pull an overflowing value back onto the grid, so the abort still fires.
-    Two codes rather than one is conservative headroom, not a requirement:
-    `SR_HALF_AWAY` dithers by `[-0.5, 0.5)` before rounding, but C's `round()`
-    is half-AWAY, so a value clamped to `qMax+1` dithers into
-    `[qMax+0.5, qMax+1.5)` and rounds to `qMax+1` at worst — it can never land
-    back on `qMax`, and a `±1` band would already preserve the abort. The
-    extra code buys margin against any future rounding mode with a wider
-    dither.
+    Under exact `SR_HALF_AWAY` (`floor(x + u)` without a rounded sum) a value
+    clamped exactly onto `qMin-1` or `qMax+1` has no fraction and stays put, so
+    a one-code band would already preserve the abort; the second code is
+    headroom, and it keeps the `(int32_t)` cast defined.
   - `OUT_ACC_DYNAMIC_RESCALE` (`bfpRescaleWalk`): re-derives a FRESH
     per-group grid on every call from `|mant·oldScale·factor + inc|`'s absmax
     (value-domain, so D6 CLAMPS rather than aborts at the exponent range's
@@ -1086,8 +1083,9 @@ mirroring `docs/conventions/arithmetic-sym.md` §"Grouped backward").**
    grid: |err| ≤ `0.5·s_out` per element under HALF_AWAY, where
    `s_out = 2^{E_g}` is the scale of the element's group in the DERIVED
    wire grid (`E_g` the unbiased exponent `deriveBfpStoredExponent` snaps
-   to from the raw's per-group absmax). `SR_HALF_AWAY` dithers within the
-   same band — unbiased in expectation, per-draw error < `1·s_out`.
+   to from the raw's per-group absmax). `SR_HALF_AWAY` (exact `floor(x + u)`) rounds to
+   one of the two neighbouring grid points — unbiased in expectation, per-draw
+   error < `1·s_out`.
    Because `s_out ≈ absmax_g/qMax`, the bound is RELATIVE ≈ `2^{−(m−1)}`
    of the group's largest magnitude — the mantissa-width sweep axis,
    directly.
@@ -1377,7 +1375,7 @@ backward check sits after the `propLoss == NULL` return, R-S4's ordering).
    group's derived grid: `|err| <= 0.5·2^{E_g}` under HALF_AWAY, where
    `2^{E_g} ≈ absmax_g/qMax` — relative ≈`2^-(m-1)` of the group's largest
    PROBABILITY, i.e. §5.8 part 2 verbatim, the same mantissa-width sweep axis.
-   `SR_HALF_AWAY` dithers within the band. This is the ONE BFP-specific
+   `SR_HALF_AWAY` rounds to one of the two neighbouring grid points. This is the ONE BFP-specific
    rounding of the whole path (backward: of `dx`).
 6. *Float32 dust.* `(float)qe_i` rounds above `2^24` (`qe` reaches
    ≈`7.49e8`) — §7's documented `int32→float` conversion class at a different

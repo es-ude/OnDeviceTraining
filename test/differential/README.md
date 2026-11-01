@@ -227,11 +227,10 @@ is wrong before the C is.
   requant saturates to the two's-complement grid [-2^(b-1), 2^(b-1)-1]
   (negative overflow lands on -2048, i.e. qMin is reachable through it --
   arithmetic-sym, "Rounding modes, the SYM_INT32 grid, encode and requant":
-  the clamp is in the float domain before the rounding and there is no
-  integer clamp after it; under SR_HALF_AWAY a value saturated at qMin could
-  round to qMin - 1, but every cell here is HALF_AWAY, where the clamp bounds
-  are integers and the rounded value cannot leave the grid, so the harness
-  cannot hit that case).
+  the clamp is in the float domain before the rounding, and an integer
+  clamp follows the rounding (#511; defensive under exact SR, which never moves an
+  exactly representable qMax/qMin); every
+  cell here is HALF_AWAY, where the float clamp bounds are integers).
 
 Fixture kinds: `float_values` and `torch_randn` encode floats with the
 documented absmax rule (Leg A's own encoder) so the gold fixtures are

@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "BfpKernelSupport.h"
+#include "CheckedSize.h"
 #include "Common.h"
 #include "Conv1dKernel.h"
 #include "ConvTranspose1dKernel.h"
@@ -791,6 +792,38 @@ void conv1dTransposedCalcWeightGradsBfp(conv1dTransposedConfig_t *cfg, tensor_t 
         cfg->weights->grad);
 }
 
+/* Per-channel sum of loss codes over batch * outputLength terms. The loop body
+ * is instantiated twice (SymAccumGuard.h): unchanged when the loss wire's
+ * declared width proves the sum fits int32, overflow-checked otherwise. */
+SYM_ACCUM_ALWAYS_INLINE void biasGradSumLoopsSym(const int32_t *gyArr, int32_t *rawArr,
+                                                 size_t batch, size_t outChannels,
+                                                 size_t outputLength, const bool checked,
+                                                 const symAccumSite_t *site) {
+    for (size_t oc = 0; oc < outChannels; oc++) {
+        int32_t sum = 0;
+        for (size_t b = 0; b < batch; b++) {
+            for (size_t outPos = 0; outPos < outputLength; outPos++) {
+                sum = symAdd(sum, gyArr[(b * outChannels + oc) * outputLength + outPos], checked,
+                             site);
+            }
+        }
+        rawArr[oc] = sum;
+    }
+}
+
+SYM_ACCUM_NOINLINE void biasGradSumLoopsSymSafe(const int32_t *gyArr, int32_t *rawArr, size_t batch,
+                                                size_t outChannels, size_t outputLength,
+                                                const symAccumSite_t *site) {
+    biasGradSumLoopsSym(gyArr, rawArr, batch, outChannels, outputLength, false, site);
+}
+
+SYM_ACCUM_NOINLINE void biasGradSumLoopsSymChecked(const int32_t *gyArr, int32_t *rawArr,
+                                                   size_t batch, size_t outChannels,
+                                                   size_t outputLength,
+                                                   const symAccumSite_t *site) {
+    biasGradSumLoopsSym(gyArr, rawArr, batch, outChannels, outputLength, true, site);
+}
+
 static void biasGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                               const void *ctx, rngStream_t *rs) {
     (void)n;
@@ -814,17 +847,22 @@ static void biasGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
     int32_t *rawArr = (int32_t *)rawOut->data;
     float lossScale = ((symInt32QConfig_t *)lossGrad->quantization->qConfig)->scale;
 
-    for (size_t oc = 0; oc < outChannels; oc++) {
-        /* int32 accumulator (NO int64): loss mantissas are int12-range per the
-         * qMaxBits=12 operand contract, so the batch*outputLength sum stays
-         * well within int32. */
-        int32_t sum = 0;
-        for (size_t b = 0; b < batch; b++) {
-            for (size_t outPos = 0; outPos < outputLength; outPos++) {
-                sum += gyArr[(b * outChannels + oc) * outputLength + outPos];
-            }
-        }
-        rawArr[oc] = sum;
+    /* int32 accumulator (NO int64). The loss wire's declared qMaxBits bounds each
+     * code, so N * 2^(q-1) <= INT32_MAX proves the sum safe (16-bit wire:
+     * N <= 65535); otherwise the checked twin aborts on the first real overflow.
+     * checkedMulSize: a wrapped count must not select the unchecked loop. */
+    size_t terms;
+    if (!checkedMulSize(batch, outputLength, &terms)) {
+        PRINT_ERROR("Conv1dTransposed biasGrad: batch %zu * outputLength %zu overflows size_t",
+                    batch, outputLength);
+        exit(1);
+    }
+    uint8_t lossBits = ((symInt32QConfig_t *)lossGrad->quantization->qConfig)->qMaxBits;
+    symAccumSite_t site = symAccumSiteInitSum("Conv1dTransposed biasGrad", terms, lossBits);
+    if (symAccumProvenSafe(&site)) {
+        biasGradSumLoopsSymSafe(gyArr, rawArr, batch, outChannels, outputLength, &site);
+    } else {
+        biasGradSumLoopsSymChecked(gyArr, rawArr, batch, outChannels, outputLength, &site);
     }
     ((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale = lossScale;
 }

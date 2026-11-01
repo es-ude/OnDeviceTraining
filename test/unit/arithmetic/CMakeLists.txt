@@ -231,6 +231,7 @@ add_elastic_ai_unit_test(
         Tensor
         RNG
         odt_test_death
+        odt_test_rng_pin
 )
 
 add_elastic_ai_unit_test(

@@ -24,7 +24,8 @@ import numpy as np
 DOC_COVERED: dict[str, str] = {
     "grid": "arithmetic-sym 'Rounding modes, the SYM_INT32 grid, encode and requant', Grid: "
     "[qMin, qMax] = [-2^(b-1), 2^(b-1) - 1] (2047 and -2048 at int12); every SYM_INT32 requant "
-    "clamps to it; HALF_AWAY never produces qMin from an absmax scale, SR_HALF_AWAY can (u == 0).",
+    "clamps to it; neither rounding mode produces qMin from an absmax scale (SR_HALF_AWAY: floor(x + u) >= -qMax "
+    "for x >= -qMax), barring a float32-ulp overshoot of x / scale.",
     "zero_absmax": "same section, dynamic absmax encode: an all-zero tensor gets scale = 1.0 and "
     "all-zero codes.",
     "half_away": "same section, Rounding modes: HALF_AWAY = C round() (an exact .5 goes away from "
@@ -32,9 +33,8 @@ DOC_COVERED: dict[str, str] = {
     "staging": "same document, 'Staging a FLOAT32 operand under ARITH_SYM_INT32': the dynamic absmax "
     "encode at ODT_SYM_OPERAND_QMAXBITS (12), per TENSOR, rounded by the op's mode.",
     "fixed_requant": "same section, fixed-scale requant: clamp(code * inScale / targetScale, qMin, "
-    "qMax) in the float domain, THEN round; no integer clamp after the rounding (under "
-    "SR_HALF_AWAY a value saturated at qMin can land on qMin - 1; the cells here are HALF_AWAY, "
-    "where the clamp bounds are integers and the rounding cannot leave the grid).",
+    "qMax) in the float domain, THEN round, THEN an integer clamp to [qMin, qMax] (#511; "
+    "a no-op under HALF_AWAY, where the float clamp bounds are integers).",
     "layouts": "data-shape 'Weight layouts, orientation and padding': Linear weight [outF, inF], "
     "y = x W^T + b, dx = dL W, weightGrad = dL^T x, biasGrad = sum of dL over the batch; Conv1d "
     "weight [Cout, Cin/groups, K], cross-correlation, tap k reads outPos*stride - padLeft + "
@@ -128,7 +128,8 @@ def encode_sym(x: np.ndarray, q_max_bits: int) -> Encoded:
     onto qMax, so it never saturates'; arithmetic-sym 'Rounding modes, the
     SYM_INT32 grid, encode and requant' gives scale = absmax / qMax and
     code = clampInt32(roundByMode(x / scale), qMin, qMax). The clamp is a
-    no-op under HALF_AWAY (qMin is only produced by SR_HALF_AWAY at u == 0).
+    no-op under HALF_AWAY and, for x / scale within [-qMax, qMax], under SR_HALF_AWAY
+    at either end of the grid (exact SR never moves an exactly representable qMax/qMin).
     absmax == 0 -> scale 1.0 and all-zero codes (same section).
     """
     x = np.asarray(x, dtype=np.float64)
@@ -554,12 +555,10 @@ def requant_fixed(codes: np.ndarray, s_in: float, s_target: float, q_max_bits: i
     arithmetic-sym decision register '#192 D1': 'a fixed-scale one (requant
     into a preset target scale)'; arithmetic-sym 'Rounding modes, the
     SYM_INT32 grid, encode and requant' writes it as roundByMode(clamp(code *
-    inScale / targetScale, qMin, qMax)): the clamp is in the float domain
-    BEFORE the rounding and there is no integer clamp after it. Under
-    HALF_AWAY (every cell here) the clamp bounds are integers, so the rounded
-    value stays on the grid; under SR_HALF_AWAY a value saturated at qMin
-    could round to qMin - 1 (not exercised: no SR cell). The scale is the
-    given target, unchanged.
+    inScale / targetScale, qMin, qMax)) followed by an integer clamp to
+    [qMin, qMax] (#511). Under HALF_AWAY (every cell here) the float clamp
+    bounds are integers, so the integer clamp is a no-op and is not modelled;
+    an SR cell would need it. The scale is the given target, unchanged.
     """
     values = np.asarray(codes, dtype=np.float64) * float(s_in)
     pre = values / float(s_target)

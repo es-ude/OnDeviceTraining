@@ -225,9 +225,10 @@ static void dropoutMaskScaleBfp(dropoutConfig_t *cfg, tensor_t *src, tensor_t *d
      * clamp is the identity, and outside it roundByMode is monotone, so both
      * orders land on the same boundary code.
      *
-     * The clampInt32 behind it stays load-bearing, not decoration: SR_HALF_AWAY
-     * dithers by [-0.5, 0.5) BEFORE rounding, so a value already clamped to
-     * qMin can still round one step past it (round(-32768.5) = -32769).
+     * The clampInt32 behind it is defensive: SR_HALF_AWAY is exact, so a float
+     * clamp onto an exactly representable qMax/qMin has no fraction and never
+     * moves. It stays for grids whose float bound is not exact (wide SYM grids,
+     * q >= 25) and covers both bounds.
      *
      * NaN never reaches the clamp, so its comparison-based form is safe: the
      * decoded mantissa is a finite int, factor is finite (initDropoutConfig

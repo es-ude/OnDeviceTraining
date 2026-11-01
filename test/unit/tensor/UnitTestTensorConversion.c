@@ -3,6 +3,7 @@
 #include "Quantization.h"
 #include "QuantizationApi.h"
 #include "RNG.h"
+#include "RngPinnedDraw.h"
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
@@ -121,6 +122,47 @@ void testConversionIntSymInt32() {
     convertTensor(&intTensor, &symInt32Tensor, NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(intTensor.data, symInt32Tensor.data, numValues);
+}
+
+/* Runs the public INT32 -> SYM_INT32 cell on one code into a 12-bit destination. */
+static void convertOneInt32CodeToSym12(int32_t code) {
+    size_t dims[] = {1};
+    size_t orderOfDims[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
+    int32_t intData[] = {code};
+    quantization_t intQ;
+    initInt32Quantization(&intQ);
+    tensor_t intTensor;
+    setTensorValues(&intTensor, (uint8_t *)intData, &shape, &intQ, NULL);
+
+    symInt32QConfig_t symInt32QConfig;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &symInt32QConfig, 12);
+    quantization_t symInt32Q;
+    initSymInt32Quantization(&symInt32QConfig, &symInt32Q);
+    int32_t symInt32Data[1] = {0};
+    tensor_t symInt32Tensor;
+    setTensorValues(&symInt32Tensor, (uint8_t *)symInt32Data, &shape, &symInt32Q, NULL);
+
+    convertTensor(&intTensor, &symInt32Tensor, NULL);
+    TEST_ASSERT_EQUAL_INT32(code, symInt32Data[0]);
+    TEST_ASSERT_EQUAL_FLOAT(1.f, symInt32QConfig.scale);
+}
+
+/* The declared width is what the accumulator guard trusts; a code beyond it
+ * would let the guard prove "safe" wrongly, so the cell aborts instead. */
+void testConversionInt32ToSymInt32AboveGridAborts(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "value 2048 does not fit 12-bit", convertOneInt32CodeToSym12(2048));
+}
+
+void testConversionInt32ToSymInt32BelowGridAborts(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "value -2049 does not fit 12-bit",
+                             convertOneInt32CodeToSym12(-2049));
+}
+
+/* -2^(q-1) is IN the grid. */
+void testConversionInt32ToSymInt32GridEdgesPassUnchanged(void) {
+    convertOneInt32CodeToSym12(-2048);
+    convertOneInt32CodeToSym12(2047);
 }
 
 void testConversionIntAsym() {
@@ -1265,6 +1307,49 @@ void testRequantToScaleSaturatesAtQMinQMax() {
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected_requant_f6ToScaleSat, outData,
                                   expected_requant_f6ToScaleSat_len);
     TEST_ASSERT_EQUAL_FLOAT(targetScale_requant_f6ToScaleSat, outQc.scale);
+}
+
+/* One-element fixed-scale requant at int12, scale 1 -> 1, under SR_HALF_AWAY with the
+ * stream's next draw pinned to `draw`. */
+static int32_t requantOneSrWithDraw(int32_t in, uint32_t draw) {
+    size_t dims[] = {1};
+    size_t orderOfDims[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
+
+    symInt32QConfig_t inQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &inQc, 12);
+    inQc.scale = 1.f;
+    quantization_t inQ;
+    initSymInt32Quantization(&inQc, &inQ);
+    int32_t inData[1] = {in};
+    tensor_t inTensor;
+    setTensorValues(&inTensor, (uint8_t *)inData, &shape, &inQ, NULL);
+
+    symInt32QConfig_t outQc;
+    initSymInt32QConfigWithQMaxBits(SR_HALF_AWAY, &outQc, 12);
+    outQc.scale = 1.f;
+    quantization_t outQ;
+    initSymInt32Quantization(&outQc, &outQ);
+    int32_t outData[1];
+    tensor_t outTensor;
+    setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    rngStream_t rs = rngStreamWithNextDraw(draw);
+    requantSymInt32TensorToScale(&inTensor, &outTensor, &rs);
+    return outData[0];
+}
+
+void testRequantToScaleSrNeverEmitsBelowQMin() {
+    // Pins that SR at qMin stays qMin. Under exact floor(x + u) the bottom of the grid cannot
+    // undershoot (u >= 0), so no clamp is exercised here (the clamp is defensive under exact SR).
+    TEST_ASSERT_EQUAL_INT32(-2048, requantOneSrWithDraw(-5000, 0x00000001u)); // u == 0
+}
+
+void testRequantToScaleSrNeverEmitsAboveQMax() {
+    // #511: saturated to qMax = 2047, then u = 1 - 2^-24: saturated SR stays on the grid.
+    // Under exact SR the integer clamp is defensive (an exactly representable qMax never
+    // moves), so this is a behavioural pin and no longer distinguishes clamp presence.
+    TEST_ASSERT_EQUAL_INT32(2047, requantOneSrWithDraw(5000, 0xFFFFFFFFu));
 }
 
 void testRequantToScaleSharedBufferAliasMatchesGold() {
@@ -7927,6 +8012,9 @@ int main(void) {
     RUN_TEST(testZeroTensorDataSymSubByteZeroesOnlyPackedBytes);
     RUN_TEST(testConversionIntFloat);
     RUN_TEST(testConversionIntSymInt32);
+    RUN_TEST(testConversionInt32ToSymInt32AboveGridAborts);
+    RUN_TEST(testConversionInt32ToSymInt32BelowGridAborts);
+    RUN_TEST(testConversionInt32ToSymInt32GridEdgesPassUnchanged);
     RUN_TEST(testConversionIntAsym);
 
     RUN_TEST(testConversionFloatInt);
@@ -7954,6 +8042,8 @@ int main(void) {
     RUN_TEST(testConvertTensorSymInt32SameTypeKeepsCopySemantics);
     RUN_TEST(testRequantToScaleNonSaturatingMatchesGold);
     RUN_TEST(testRequantToScaleSaturatesAtQMinQMax);
+    RUN_TEST(testRequantToScaleSrNeverEmitsBelowQMin);
+    RUN_TEST(testRequantToScaleSrNeverEmitsAboveQMax);
     RUN_TEST(testRequantToScaleSharedBufferAliasMatchesGold);
     RUN_TEST(testConversionBoolBoolCopiesOnlyPackedBytes);
     RUN_TEST(testConversionSymInt32SameTypeCopyPropagatesScale);

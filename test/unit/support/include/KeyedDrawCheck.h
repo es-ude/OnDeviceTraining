@@ -10,6 +10,7 @@
 #include "LayerExec.h"
 #include "QuantizationApi.h"
 #include "RNG.h"
+#include "RngPinnedDraw.h"
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
@@ -28,6 +29,77 @@
 static inline uint32_t keyedOpOutState(uint64_t seed, uint32_t phaseTag, uint32_t opIndex) {
     rngKey_t phase = rngFold(rngKeyFromSeed(seed), phaseTag, 0u);
     return rngOpen(rngFold(rngFold(phase, RNG_TAG_OP, opIndex), RNG_TAG_OUT, 0u)).state;
+}
+
+/* The state of the stream the funnel opens for the KERNEL of op opIndex in
+ * phase phaseTag of the layer keyed rngKeyFromSeed(seed). */
+static inline uint32_t keyedOpKernelState(uint64_t seed, uint32_t phaseTag, uint32_t opIndex) {
+    rngKey_t phase = rngFold(rngKeyFromSeed(seed), phaseTag, 0u);
+    return rngOpen(rngFold(rngFold(phase, RNG_TAG_OP, opIndex), RNG_TAG_KERNEL, 0u)).state;
+}
+
+/* ---- a seed whose stream opens on a near-1 uniform ---- */
+
+/* The layer key is a hash chain, so a test cannot set a stream's state; it
+ * searches for a seed instead. A draw >= KEYED_NEAR_ONE_DRAW has u >= 1 - 2^-16:
+ * the draw a saturated element at 2^11 - 1 would have lifted to 2^11 under a
+ * float32 add x + u (threshold u >= 1 - 2^-14). Exact SR no longer lifts, so
+ * it is now a regression draw: saturated SR must stay on the grid. */
+#define KEYED_NEAR_ONE_DRAW 0xFFFF0000u
+
+typedef uint32_t (*keyedStateOfSeed_t)(uint64_t seed);
+
+/* The first seed (from 1) whose stream, opened at the state stateOf gives, draws
+ * >= minDraw first. Fails the test if none is found within 2^22 seeds. */
+static inline uint64_t keyedFindSeedWithFirstDraw(keyedStateOfSeed_t stateOf, uint32_t minDraw) {
+    for (uint64_t seed = 1u; seed <= (1u << 22); seed++) {
+        rngStream_t probe = rngOpen((rngKey_t){{stateOf(seed), 0u}});
+        if (rngNextU32(&probe) >= minDraw) {
+            return seed;
+        }
+    }
+    TEST_FAIL_MESSAGE("no seed within 2^22 opens its stream on a near-1 draw");
+    return 0u;
+}
+
+/* ---- the raw input of one conversionMatrix cell ---- */
+
+#define KEYED_RAW_MAX 64
+
+typedef struct {
+    size_t n;
+    int32_t codes[KEYED_RAW_MAX];
+    qtype_t from;
+    qtype_t to;
+    conversionFunction_t saved;
+} keyedRawCapture_t;
+
+static inline keyedRawCapture_t *keyedRawCapture(void) {
+    static keyedRawCapture_t capture;
+    return &capture;
+}
+
+/* Copies the codes of a SYM_INT32 input of its first call, then runs the real cell. */
+static inline void keyedRawCapturingCell(tensor_t *in, tensor_t *out, rngStream_t *rs) {
+    keyedRawCapture_t *c = keyedRawCapture();
+    if (c->n == 0) {
+        size_t n = calcNumberOfElementsByTensor(in);
+        TEST_ASSERT_TRUE(n <= KEYED_RAW_MAX);
+        memcpy(c->codes, in->data, n * sizeof(int32_t));
+        c->n = n;
+    }
+    c->saved(in, out, rs);
+}
+
+static inline void keyedRawCaptureInstall(qtype_t from, qtype_t to) {
+    keyedRawCapture_t *c = keyedRawCapture();
+    *c = (keyedRawCapture_t){.from = from, .to = to, .saved = conversionMatrix[from][to]};
+    conversionMatrix[from][to] = keyedRawCapturingCell;
+}
+
+static inline void keyedRawCaptureRestore(void) {
+    keyedRawCapture_t *c = keyedRawCapture();
+    conversionMatrix[c->from][c->to] = c->saved;
 }
 
 /* The stream of a draw site outside the funnel (purposeTag) in phase phaseTag

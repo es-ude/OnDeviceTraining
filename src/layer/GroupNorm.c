@@ -433,8 +433,11 @@ static void groupNormForwardSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, te
                     size_t off = base + j;
                     float n = mulFloat32s(
                         subFloat32s(mulFloat32s((float)in[off], inScale), mean[k]), invSigma[k]);
-                    out[off] = roundByMode(clamp(mulFloat32s(n, stretch), qMin, qMax),
-                                           outQC->roundingMode, rs);
+                    /* defensive integer clamp: exact SR never moves an exactly representable
+                     * qMax/qMin; kept for inexact float grid bounds (#511) */
+                    out[off] = clampInt32(roundByMode(clamp(mulFloat32s(n, stretch), qMin, qMax),
+                                                      outQC->roundingMode, rs),
+                                          (int32_t)qMin, (int32_t)qMax);
                 }
             }
         }
@@ -893,8 +896,11 @@ static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardI
                                            mulFloat32s((float)gammaQ[c], gammaScale));
                     float dxv = mulFloat32s(invSigma[k], subFloat32s(subFloat32s(dn, meanDn),
                                                                      mulFloat32s(nval, meanDnN)));
-                    dxq[off] = roundByMode(clamp(divFloat32s(dxv, dxScale), qMin, qMax),
-                                           plQC->roundingMode, dxStream);
+                    /* defensive integer clamp: exact SR never moves an exactly representable
+                     * qMax/qMin; kept for inexact float grid bounds */
+                    dxq[off] = clampInt32(roundByMode(clamp(divFloat32s(dxv, dxScale), qMin, qMax),
+                                                      plQC->roundingMode, dxStream),
+                                          (int32_t)qMin, (int32_t)qMax);
                 }
             }
         }

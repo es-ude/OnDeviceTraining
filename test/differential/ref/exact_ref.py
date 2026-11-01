@@ -40,6 +40,13 @@ def conv1d_exact(
 ) -> np.ndarray:
     """float64 F.conv1d on dequantized operands with explicit (possibly
     asymmetric) zero padding; returns [B, Cout, Lout] float64."""
+    x = np.asarray(x)
+    w = np.asarray(w)
+    padded = x.shape[2] + pad_left + pad_right
+    if padded < dilation * (w.shape[2] - 1) + 1:
+        # a zero-length output (the kernel's receptive field exceeds the padded
+        # input): F.conv1d raises, the answer is an empty result
+        return np.zeros((x.shape[0], w.shape[0], 0), dtype=np.float64)
     xt = torch.from_numpy(np.ascontiguousarray(x, dtype=np.float64))
     wt = torch.from_numpy(np.ascontiguousarray(w, dtype=np.float64))
     bt = None if b is None else torch.from_numpy(np.ascontiguousarray(b, dtype=np.float64))

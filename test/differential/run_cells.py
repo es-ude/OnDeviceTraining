@@ -228,13 +228,6 @@ def build_conv_fixture(cell: dict) -> Fixture:
     for name, op in fx.ops.items():
         if is_power_of_two(op.scale):
             fx.notes.append(f"{name} scale {op.scale!r} is a power of two")
-    geom = ConvGeometry.from_spec(cell["geometry"])
-    c_in = fx.codes("input").shape[1]
-    reduction = (c_in // geom.groups) * geom.kernel_size
-    if reduction > 511:
-        raise ValueError(
-            f"{cell['name']}: reduction length {reduction} > 511 (int12 soundness bound)"
-        )
     return fx
 
 
@@ -424,6 +417,8 @@ def write_inputs(in_dir: Path, fx: Fixture, cell: dict, tier: str) -> Path:
     }
     if "geometry" in cell:
         spec["geometry"] = cell["geometry"]
+    if "gradStorage" in cell:
+        spec["gradStorage"] = cell["gradStorage"]  # the driver rejects what it does not implement
     spec_path = in_dir / "spec.json"
     spec_path.write_text(json.dumps(spec, indent=1))
     return spec_path
@@ -762,7 +757,7 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 # widths and max|seed|): "<op>: SYM int32 accumulator overflow -- N=.. terms,
 # operand widths (a, b), max|seed|=..; narrow ODT_SYM_OPERAND_QMAXBITS ...".
 SYM_GUARD_RE = re.compile(
-    r"(?P<op>[A-Za-z0-9_ ]+): SYM int32 accumulator overflow -- N=(?P<n>\d+) terms, "
+    r"(?P<op>[A-Za-z0-9_ ()*]+): SYM int32 accumulator overflow -- N=(?P<n>\d+) terms, "
     r"operand widths \((?P<wa>\d+), (?P<wb>\d+)\), max\|seed\|=(?P<seed>\d+)"
 )
 
@@ -924,17 +919,42 @@ def gemm_leg_b(exact, tier, c_codes, c_scale, inp: LegAInputs, out_bits: int, k:
 def run_conv_row(cell: dict, tier: str, fx: Fixture, drv: DriverResult, k: int, gold_header) -> dict:
     geom = ConvGeometry.from_spec(cell["geometry"])
     out_bits = int(cell.get("outputBits", 12))
+    inp = conv_leg_a_inputs(fx, geom, k)
+    # The accumulator guard's prediction for the declared widths replaces a
+    # fixed reduction-length limit: a reduction the guard would abort is a
+    # cell that expects ABORT (and is classified like the Linear overflow rows),
+    # not one the harness refuses to build.
+    n_red = (fx.codes("input").shape[1] // geom.groups) * geom.kernel_size
+    bits_in, bits_w = fx.ops["input"].bits, fx.ops["weight"].bits
+    ov = sym_ref.overflow_report(inp.raw.raw, n_red, bits_in, bits_w, inp.seed_abs_max)
+    if not ov.fits:
+        guard_ctx = {"op": "conv1dKernelSymInt32", "n": n_red, "bits": (bits_in, bits_w), "seed_range": inp.seed_abs_range}
+        if tier == "kernel":
+            restore = lambda r: r  # noqa: E731
+        else:
+            restore = lambda r: sym_ref.restore_sym(r, inp.raw.s_raw, out_bits).codes  # noqa: E731
+        cls = classify_overflow(drv, "output", inp.raw.raw, restore, guard_ctx)
+        return {
+            "output": "output",
+            "int32": ov.to_json(),
+            "overflow": cls,
+            "legA": {"taxonomy": cls["kind"], "census": None, "mismatch_class": "-", "seed": None,
+                     "scale": {"c": None, "ref": inp.raw.s_raw, "rel": 0.0, "ok": True}, "ref_scale": inp.raw.s_raw},
+            "legB": {"taxonomy": "n/a", "err_max": float("nan"), "bound": float("nan"), "ratio": float("nan")},
+            "gold": None,
+            "c_scale": None,
+            "n_elements": int(inp.raw.raw.size),
+        }
     if drv.exit != 0:
         raise RuntimeError(f"driver exit {drv.exit}\n{drv.stderr}")
     o = drv.out("output")
-    inp = conv_leg_a_inputs(fx, geom, k)
     if tier == "kernel":
         a = resolve_leg_a_kernel(o["codes"], o["scale"], inp, k)
     else:
         a = resolve_leg_a_layer(o["codes"], o["scale"], inp, out_bits, k, SCALE_TOL_LAYER)
     b = conv_leg_b(fx, geom, tier, o["codes"], o["scale"], inp, out_bits, k)
     gold = gold_check(gold_header, cell.get("gold"), o["codes"], o["scale"]) if tier == "layer" else None
-    return {"output": "output", "legA": a, "legB": b, "gold": gold, "c_scale": o["scale"], "n_elements": int(o["codes"].size)}
+    return {"output": "output", "int32": ov.to_json(), "legA": a, "legB": b, "gold": gold, "c_scale": o["scale"], "n_elements": int(o["codes"].size)}
 
 
 # --------------------------------------------------------------------------- #
@@ -1263,6 +1283,9 @@ def build_fixture(cell: dict, k: int) -> Fixture:
 
 def verdict_of(row: dict, expect: dict) -> str:
     a, b = row["legA"], row["legB"]
+    gold = row.get("gold")
+    if gold is not None and gold.get("status") != "match":
+        return "FAIL"  # the cell names a gold and the calibration check did not confirm it
     want_path = expect.get("guardPath")
     if want_path is not None and row.get("int32", {}).get("path") != want_path:
         return "FAIL"  # the cell was built to hit this guard path and no longer does

@@ -261,9 +261,13 @@ def pack_bfp(values: np.ndarray, mantissa_bits: int, exponent_bits: int, group_s
         stored[g] = ge.stored
         p = xs / (2.0 ** (ge.stored - bias))
         pre[sel] = p
-        c = round_half_away(p)
-        n_clamped += int(((c > q) | (c < floor)).sum())
-        codes[sel] = np.clip(c, floor, q)
+        # Clamp in float64 BEFORE the integer cast (section 1: the grid clamp
+        # is part of the pack; a huge finite value must not reach the int64
+        # cast). Integer bounds make clamp-then-round equal round-then-clamp;
+        # the clamp count reads the pre-clamp value (round half away leaves
+        # the grid exactly at q + 0.5 / floor - 0.5).
+        n_clamped += int(((p >= q + 0.5) | (p <= floor - 0.5)).sum())
+        codes[sel] = round_half_away(np.clip(p, floor, q))
     return Packed(codes, stored, pre, groups, n_clamped)
 
 
@@ -282,8 +286,8 @@ def repack_under(
     floor = code_floor_twos_complement(mantissa_bits)
     stored = np.asarray(stored, dtype=np.int64)
     pre = x / (2.0 ** (stored[g_of] - bias))
-    c = round_half_away(pre)
-    return Packed(np.clip(c, floor, q), stored.copy(), pre, [], int(((c > q) | (c < floor)).sum()))
+    n_clamped = int(((pre >= q + 0.5) | (pre <= floor - 0.5)).sum())  # see pack_bfp
+    return Packed(round_half_away(np.clip(pre, floor, q)), stored.copy(), pre, [], n_clamped)
 
 
 def dequant(codes: np.ndarray, stored: np.ndarray, exponent_bits: int, group_size: int) -> np.ndarray:

@@ -32,7 +32,12 @@ accumulate), and `convert` runs one conversion primitive in isolation
 (encode, dynamic requant, fixed-scale requant, BFP pack). Ops: `linear`,
 `conv1d`, `convt1d` (BFP only), `convert`.
 
-Not a ctest. Outputs under `out/` are gitignored.
+Not a ctest. Outputs under `out/` are gitignored. The harness's own judgement
+code (row verdict on a failed gold check, guard-banner pattern, zero-length conv
+reference, int32 fit range, BFP reference clamp) has a C-free self-test:
+`uv run test/differential/selftest.py`. A Conv1d cell whose reduction the
+accumulator guard would abort is built and expected to ABORT (classified like
+the Linear overflow rows); there is no fixed reduction-length refusal.
 
 ## Build and run
 

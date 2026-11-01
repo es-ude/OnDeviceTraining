@@ -1180,8 +1180,35 @@ void testConvTranspose1dKernelSymGroupedGuardWideWeightRunsExactWhenItFitsAndAbo
                              ctRun(32, 1, 1, 12, 16, NULL, 2));
 }
 
+/* See the Matmul twin: each rescaled product is 1024 * 32767 here, so the
+ * #189 reserve is not the issue; the scatter accumulates 80 of them (group 2
+ * negated, one zero). The sum fits; all-positive wraps. */
+static void wideGroupedFill(bool secondGroupNegative) {
+    ctFill(80, 1024, 32767, false);
+    if (secondGroupNegative) {
+        for (size_t i = 40; i < 80; i++) {
+            gCtW[i] = -32767;
+        }
+        gCtW[79] = 0;
+    }
+}
+
+void testConvTranspose1dKernelSymGroupedWideScatterRunsExactWhenSumFits(void) {
+    wideGroupedFill(true);
+    ctRun(80, 1, 1, 12, 16, NULL, 2);
+    TEST_ASSERT_EQUAL_INT32(1024 * 32767, gCtY[0]);
+}
+
+void testConvTranspose1dKernelSymGroupedWideScatterThatWrapsHitsTheF9Guard(void) {
+    wideGroupedFill(false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "convTranspose1dKernelSymInt32Grouped",
+                             ctRun(80, 1, 1, 12, 16, NULL, 2));
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testConvTranspose1dKernelSymGroupedWideScatterRunsExactWhenSumFits);
+    RUN_TEST(testConvTranspose1dKernelSymGroupedWideScatterThatWrapsHitsTheF9Guard);
     RUN_TEST(
         testConvTranspose1dKernelSymGroupedGuardWideWeightRunsExactWhenItFitsAndAbortsWhenItWraps);
     RUN_TEST(testConvTranspose1dKernelSymGroupedGuardCountsTheAsymMantissaBitWider);

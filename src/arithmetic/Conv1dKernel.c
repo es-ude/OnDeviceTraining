@@ -290,7 +290,7 @@ conv1dSymGroupedLoops(const convSymView_t *v, const symQConfig_t *weightGroups, 
                                      * accumulator scale (one rounding here,
                                      * honoring the op's rounding mode). */
                                     acc = symAdd(acc,
-                                                 rescaleIntoAccumulatorScale(
+                                                 rescalePartialIntoAccumulatorScale(
                                                      partial,
                                                      inScale * weightGroups->scales[currentGroup],
                                                      sAcc, roundingMode, rs),
@@ -313,7 +313,7 @@ conv1dSymGroupedLoops(const convSymView_t *v, const symQConfig_t *weightGroups, 
                      * combine. */
                     if (currentGroup != SIZE_MAX) {
                         acc = symAdd(acc,
-                                     rescaleIntoAccumulatorScale(
+                                     rescalePartialIntoAccumulatorScale(
                                          partial, inScale * weightGroups->scales[currentGroup],
                                          sAcc, roundingMode, rs),
                                      checked, accSite);

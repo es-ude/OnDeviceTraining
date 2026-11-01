@@ -30,6 +30,17 @@ int32_t roundByMode(float input, roundingMode_t roundingMode, rngStream_t *rs);
 int32_t rescaleIntoAccumulatorScale(int32_t paramQ, float paramScale, float accumulatorScale,
                                     roundingMode_t roundingMode, rngStream_t *rs);
 
+/*! @brief Rescale a raw int32 PARTIAL (a finished group's sum, or one product)
+ * into an accumulator's scale, for the grouped kernels' combine step.
+ *
+ * Unlike rescaleIntoAccumulatorScale this reserves no headroom: the partial is
+ * not a bias seed, so a value close to INT32_MAX is legitimate and the
+ * following overflow-checked add (SymAccumGuard.h) decides whether the SUM
+ * fits. It keeps only the float->int32 cast safe: in every build it fails fast
+ * when the rescaled float is NaN or leaves [-2^31, 2^31). */
+int32_t rescalePartialIntoAccumulatorScale(int32_t paramQ, float paramScale, float accumulatorScale,
+                                           roundingMode_t roundingMode, rngStream_t *rs);
+
 int32_t clampInt32(int32_t input, int32_t min, int32_t max);
 
 float clamp(float input, float min, float max);

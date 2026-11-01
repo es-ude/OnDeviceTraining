@@ -378,7 +378,7 @@ SYM_ACCUM_ALWAYS_INLINE void convTSymGroupedScatter(const convTSymView_t *v,
                             size_t yIdx = (b * outChannels + oc) * outputLength + (size_t)outIdx;
                             yArr[yIdx] =
                                 symAdd(yArr[yIdx],
-                                       rescaleIntoAccumulatorScale(
+                                       rescalePartialIntoAccumulatorScale(
                                            product, inScale * weightGroups->scales[elemGroup], sAcc,
                                            roundingMode, rs),
                                        checked, site);

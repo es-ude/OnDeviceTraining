@@ -91,6 +91,10 @@ void convertInt32TensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputT
 
     symInt32QConfig_t *outputSymInt32QConfig = outputTensor->quantization->qConfig;
     outputSymInt32QConfig->scale = 1;
+    /* Raw int32 codes are copied unclamped, so the staged operand spans the
+     * full two's-complement range [-2^31, 2^31 - 1]: 32 bits. The SYM
+     * accumulator guard sizes its static proof from this declared width. */
+    outputSymInt32QConfig->qMaxBits = 32;
 
     memcpy(outputTensor->data, inputTensor->data, numberOfElements * sizeof(int32_t));
 }
@@ -723,6 +727,10 @@ void convertAsymTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTe
         }
     }
     outQC->scale = inQC->scales[0]; /* scale copy unchanged */
+    /* code - zp spans [-(2^qBits - 1), 2^qBits - 1]: one signed bit wider than
+     * the stored qBits. The accumulator guard sizes its static proof from this
+     * declared width. */
+    outQC->qMaxBits = (uint8_t)(inQC->qBits + 1);
 }
 
 void unpackSignExtend(const uint8_t *src, size_t srcBits, size_t srcStartBit, int32_t *dst,

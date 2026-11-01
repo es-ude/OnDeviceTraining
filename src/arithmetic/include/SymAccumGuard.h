@@ -30,9 +30,10 @@
  * The bound arithmetic is 64-bit; the accumulator never is.
  *
  * ASSUMPTION: stored codes obey their declared qMaxBits/qBits. The width is
- * metadata and is not re-checked per code; funnel-produced operands are
- * clamped to it by the requant/convert cells, so only a hand-built tensor
- * whose codes exceed its own declared width can defeat the proof.
+ * metadata and is not re-checked per code. Every funnel staging route
+ * declares the true width of the codes it writes and the requant cells clamp
+ * to it, so only a hand-built tensor whose codes exceed its own declared
+ * width can defeat the proof.
  *
  * Kernels use the pattern
  *     symAccumSite_t site = symAccumSiteInit(op, nMax, qa, qb, maxAbsSeed);
@@ -41,7 +42,8 @@
  * with `loops` a static inline always_inline function whose `checked`
  * argument is a compile-time constant at both call sites, and the step
  * `acc = symMac(acc, a, b, checked, &site)`. Out of scope: value-sum
- * accumulators (bias grads, norm sums) have their own N < 2^(32-q) guards.
+ * accumulators; Reduce and the pools check N < 2^(32-q) themselves, the
+ * Linear / Conv bias-grad sums have no run-time guard yet (follow-up).
  * Header-only static inline, like BfpKernelSupport.h. */
 
 #if defined(__GNUC__) || defined(__clang__)

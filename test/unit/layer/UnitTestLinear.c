@@ -3865,6 +3865,18 @@ void testLinearForwardInt32InputThatFitsIsExact(void) {
     TEST_ASSERT_FLOAT_WITHIN(16.f, -104601700.f, y);
 }
 
+/* INT32 operands wider than the 12-bit default grid go through the funnel's
+ * own staging (32-bit scratch), not the public cell that rejects them:
+ * 100 * 4095 * 2047 = 838246500 fits int32, so the checked path is exact. */
+void testLinearForwardInt32InputWiderThanDefaultGridIsExact(void) {
+    tensor_t *x = initTensor(shape2(1, 100), quantizationInitInt32(), NULL);
+    for (size_t i = 0; i < 100; i++) {
+        ((int32_t *)x->data)[i] = 4095;
+    }
+    float y = linearForwardDot(symInt32RowOf(100, 2047), x);
+    TEST_ASSERT_FLOAT_WITHIN(64.f, 838246500.f, y);
+}
+
 /* The public INT32 -> SYM_INT32 conversion cell must leave a user tensor that
  * getTensorLike (getQLike -> initSymInt32QConfigWithQMaxBits, which rejects
  * widths > 31) can still clone. The 32-bit width is declared on the funnel's
@@ -3893,6 +3905,7 @@ int main(void) {
     RUN_TEST(testLinearForwardPerTensorAsymWidthsThatFitAreExact);
     RUN_TEST(testLinearForwardInt32InputWrapsAborts);
     RUN_TEST(testLinearForwardInt32InputThatFitsIsExact);
+    RUN_TEST(testLinearForwardInt32InputWiderThanDefaultGridIsExact);
     RUN_TEST(testLinearForwardGroupedAsymWideMantissaAbortsInsteadOfWrapping);
     RUN_TEST(testLinearForwardFloat);
     RUN_TEST(testLinearForwardFloatRank1BiasRank2Output);

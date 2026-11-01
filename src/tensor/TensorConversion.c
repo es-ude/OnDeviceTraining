@@ -85,13 +85,44 @@ void convertInt32TensorToFloatTensor(tensor_t *inputTensor, tensor_t *outputTens
     }
 }
 
+/* Fail-fast on any code outside the destination's declared grid: the declared
+ * qMaxBits is what downstream SYM consumers (the accumulator guard) trust, and
+ * this cell does not change it. Bounds stay in the integer domain; q is checked
+ * before the shift. The executeOp funnel stages raw INT32 operands on its own
+ * 32-bit scratch and does not come through here. */
 void convertInt32TensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTensor,
                                         rngStream_t *rs) {
     size_t numberOfElements = calcNumberOfElementsByTensor(inputTensor);
 
     symInt32QConfig_t *outputSymInt32QConfig = outputTensor->quantization->qConfig;
-    outputSymInt32QConfig->scale = 1;
+    const size_t q = outputSymInt32QConfig->qMaxBits;
+    if (q == 0 || q > 31) {
+        PRINT_ERROR("convertInt32TensorToSymInt32Tensor: destination qMaxBits (%u) must be in "
+                    "[1, 31]",
+                    (unsigned)q);
+        exit(1);
+    }
+    const int32_t hi = ((int32_t)1 << (q - 1)) - 1;
+    const int32_t lo = -((int32_t)1 << (q - 1));
 
+    int32_t inBuf[ODT_CONVERSION_CHUNK_ELEMS];
+    for (size_t off = 0; off < numberOfElements; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        size_t count = numberOfElements - off < ODT_CONVERSION_CHUNK_ELEMS
+                           ? numberOfElements - off
+                           : ODT_CONVERSION_CHUNK_ELEMS;
+        /* alignment-safe staging, like convertInt32TensorToFloatTensor */
+        memcpy(inBuf, (const int32_t *)inputTensor->data + off, count * sizeof(int32_t));
+        for (size_t i = 0; i < count; i++) {
+            if (inBuf[i] < lo || inBuf[i] > hi) {
+                PRINT_ERROR("convertInt32TensorToSymInt32Tensor: value %d does not fit %u-bit "
+                            "SYM_INT32 range [%d, %d] at element %zu",
+                            inBuf[i], (unsigned)q, lo, hi, off + i);
+                exit(1);
+            }
+        }
+    }
+
+    outputSymInt32QConfig->scale = 1;
     memcpy(outputTensor->data, inputTensor->data, numberOfElements * sizeof(int32_t));
 }
 

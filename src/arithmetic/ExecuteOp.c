@@ -28,6 +28,19 @@ void executeOpIdentityKernel(tensor_t **operands, size_t nOperands, tensor_t *ra
     }
 }
 
+/* Raw int32 codes are copied unclamped: the scratch spans [-2^31, 2^31 - 1],
+ * 32 bits. The width is declared here, on the op-local scratch only (set
+ * first), because the public INT32 -> SYM_INT32 cell validates the
+ * destination against [1, 31] and a user tensor must never carry a width > 31
+ * (getQLike / the requantizers reject or mis-cast it). The accumulator guard
+ * sizes its proof from this width. */
+static void stageInt32Raw(const tensor_t *src, tensor_t *scratch, symInt32QConfig_t *scratchQC) {
+    scratchQC->qMaxBits = 32;
+    scratchQC->scale = 1.0f;
+    memcpy(scratch->data, src->data,
+           calcNumberOfElementsByTensor((tensor_t *)src) * sizeof(int32_t));
+}
+
 /* One phase's stream: NULL without an op key, otherwise the stream of
  * rngFold(*key, tag, index), opened into the caller's storage. */
 static rngStream_t *openPhaseStream(const rngKey_t *key, uint32_t tag, uint32_t index,
@@ -429,17 +442,10 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
                  * group-aware kernel MUST read per-group scales via its own
                  * ctx (e.g. Matmul's weightGroups), never this field. */
                 scratchQC[i].scale = 1.0f;
+            } else if (inputs[i]->quantization->type == INT32) {
+                stageInt32Raw(inputs[i], &scratchTensors[i], &scratchQC[i]);
             } else {
                 convertTensor(inputs[i], &scratchTensors[i], stageStream);
-                if (inputs[i]->quantization->type == INT32) {
-                    /* Raw int32 codes are copied unclamped: the scratch spans
-                     * [-2^31, 2^31 - 1], 32 bits. Declared here, on the
-                     * op-local scratch only -- the public conversion cell
-                     * must not write a width > 31 into a user tensor
-                     * (getQLike / the requantizers reject or mis-cast it). The
-                     * accumulator guard sizes its proof from this width. */
-                    scratchQC[i].qMaxBits = 32;
-                }
             }
             break;
         }

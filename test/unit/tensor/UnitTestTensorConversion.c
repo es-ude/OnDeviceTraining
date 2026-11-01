@@ -123,6 +123,47 @@ void testConversionIntSymInt32() {
     TEST_ASSERT_EQUAL_INT32_ARRAY(intTensor.data, symInt32Tensor.data, numValues);
 }
 
+/* Runs the public INT32 -> SYM_INT32 cell on one code into a 12-bit destination. */
+static void convertOneInt32CodeToSym12(int32_t code) {
+    size_t dims[] = {1};
+    size_t orderOfDims[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
+    int32_t intData[] = {code};
+    quantization_t intQ;
+    initInt32Quantization(&intQ);
+    tensor_t intTensor;
+    setTensorValues(&intTensor, (uint8_t *)intData, &shape, &intQ, NULL);
+
+    symInt32QConfig_t symInt32QConfig;
+    initSymInt32QConfig(HALF_AWAY, &symInt32QConfig);
+    quantization_t symInt32Q;
+    initSymInt32Quantization(&symInt32QConfig, &symInt32Q);
+    int32_t symInt32Data[1] = {0};
+    tensor_t symInt32Tensor;
+    setTensorValues(&symInt32Tensor, (uint8_t *)symInt32Data, &shape, &symInt32Q, NULL);
+
+    convertTensor(&intTensor, &symInt32Tensor, NULL);
+    TEST_ASSERT_EQUAL_INT32(code, symInt32Data[0]);
+    TEST_ASSERT_EQUAL_FLOAT(1.f, symInt32QConfig.scale);
+}
+
+/* The declared width is what the accumulator guard trusts; a code beyond it
+ * would let the guard prove "safe" wrongly, so the cell aborts instead. */
+void testConversionInt32ToSymInt32AboveGridAborts(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "value 2048 does not fit 12-bit", convertOneInt32CodeToSym12(2048));
+}
+
+void testConversionInt32ToSymInt32BelowGridAborts(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "value -2049 does not fit 12-bit",
+                             convertOneInt32CodeToSym12(-2049));
+}
+
+/* -2^(q-1) is IN the grid. */
+void testConversionInt32ToSymInt32GridEdgesPassUnchanged(void) {
+    convertOneInt32CodeToSym12(-2048);
+    convertOneInt32CodeToSym12(2047);
+}
+
 void testConversionIntAsym() {
     size_t numValues = 6;
     size_t dims[] = {numValues};
@@ -7983,6 +8024,9 @@ int main(void) {
     RUN_TEST(testZeroTensorDataSymSubByteZeroesOnlyPackedBytes);
     RUN_TEST(testConversionIntFloat);
     RUN_TEST(testConversionIntSymInt32);
+    RUN_TEST(testConversionInt32ToSymInt32AboveGridAborts);
+    RUN_TEST(testConversionInt32ToSymInt32BelowGridAborts);
+    RUN_TEST(testConversionInt32ToSymInt32GridEdgesPassUnchanged);
     RUN_TEST(testConversionIntAsym);
 
     RUN_TEST(testConversionFloatInt);

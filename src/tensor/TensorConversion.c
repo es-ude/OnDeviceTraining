@@ -623,7 +623,8 @@ void requantSymInt32TensorToScale(tensor_t *inputTensor, tensor_t *outputTensor,
 
     /* single same-index read-then-write pass — shared-buffer in-place safe;
      * clamp saturates at qMin/qMax BY DESIGN (Deutel Eq. 4 analog); the integer
-     * clamp after the rounding keeps an SR draw on the grid (#511) */
+     * clamp after the rounding is defensive: exact SR never moves an exactly
+     * representable qMax/qMin, it covers inexact float grid bounds (#511) */
     for (size_t i = 0; i < numberOfElements; i++) {
         outputInt32[i] = clampInt32(
             roundByMode(clamp(((float)inputInt32[i] * inScale) / targetScale, qMin, qMax),
@@ -1140,9 +1141,9 @@ static void packFloatBufferAsBfp(const float *values, size_t n, bfpQConfig_t *ou
      * and (int32_t)round(...) is undefined there (C17 6.3.1.4). Identical to
      * clamping after the round wherever the round is defined -- in range the
      * float clamp is the identity, outside it roundByMode is monotone -- and
-     * the clampInt32 behind it stays load-bearing for SR_HALF_AWAY: for a
-     * value clamped near qMax the float32 add x + u inside floor(x + u) can
-     * round up to qMax + 1. */
+     * the clampInt32 behind it is defensive: exact SR never moves an exactly
+     * representable qMax/qMin; it stays for grids whose float bound is not
+     * exact (wide SYM grids, q >= 25). */
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
@@ -2078,14 +2079,11 @@ static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *i
      * exponent cap can drive the quotient past int32 range, or to +-inf, for
      * entirely finite increments, and (int32_t)round(...) is undefined there
      * -- C17 6.3.1.4) while leaving every overflowing value out of range for
-     * packChunkGuarded, which still aborts. The two-code band is load-bearing,
-     * not headroom: SR_HALF_AWAY is floorf(x + u) with u in [0, 1), and the
-     * float32 add can lift a value that sits exactly on an integer onto the
-     * next one (floorf(-129.0f + (1 - 2^-24)) == -128 at m = 8). A value
-     * clamped to qMin-1 would land back on qMin and silence the abort; one
-     * clamped to qMin-2 lands on qMin-2 or qMin-1, both off the grid. The
-     * upper edge is the same band for symmetry (qMax+1 plus any u already
-     * stays off the grid). */
+     * packChunkGuarded, which still aborts. Under exact SR (floor(x + u)
+     * without a rounded sum) a value clamped exactly onto qMin-1 or qMax+1 has
+     * no fraction and stays put, so a one-code band would already preserve the
+     * abort; the second code is headroom on each side, and keeps the (int32_t)
+     * cast defined. */
     const float qMax = powf(2, (float)qc->mantissaBits - 1) - 1;
     const float qMin = -powf(2, (float)qc->mantissaBits - 1);
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
@@ -2310,10 +2308,10 @@ static void bfpRescaleWalk(tensor_t *target, const incSrc_t *inc, float factor, 
          * (C17 6.3.1.4). Behaviour-identical to clamping after the round for
          * every DEFINED case -- in range the float clamp is the identity, and
          * outside it roundByMode is monotone, so both orders land on the same
-         * boundary code. The clampInt32 stays behind it and is load-bearing,
-         * not decoration: SR_HALF_AWAY is floorf(x + u), and for a value
-         * clamped near qMax the float32 add x + u can round up to qMax + 1
-         * (u close to 1; qMax + u rounds to qMax + 1 once u > 1 - ulp/2).
+         * boundary code. The clampInt32 stays behind it as a defensive
+         * guard: exact SR never moves an exactly representable qMax/qMin, so it
+         * only matters where the float grid bound is inexact (wide SYM grids,
+         * q >= 25).
          * NaN never reaches this clamp -- which matters because a
          * comparison-based clamp cannot map it. Every input is finite by
          * construction: the factor is checked at scaleBfpTensorInPlace's

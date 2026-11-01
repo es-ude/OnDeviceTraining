@@ -2823,10 +2823,12 @@ static uint32_t groupNormNormDxStateOfSeed(uint64_t seed) {
 
 /* One group of 2 channels x 8 steps, x = +-1 at scale 1 (mean 0, variance 1,
  * eps 0): every normalized value is +-1 and absmax 1, so the stretch is qMax
- * and element 0 sits exactly on qMax = 2047. Its draw u >= 1 - 2^-16 makes
- * 2047 + u round to 2048 in the float32 add; only the integer clamp after the
- * round keeps the code on the grid. The kernel's raw output is q * gammaCode
- * (beta 0), read off the SYM->SYM epilogue cell. */
+ * and element 0 sits exactly on qMax = 2047, drawn with a near-1 u. Saturated
+ * SR stays on the grid. Under exact SR the integer clamp after the round is
+ * defensive (an exactly representable qMax has no fraction and never moves),
+ * so this is a behavioural pin and no longer distinguishes clamp presence. The
+ * kernel's raw output is q * gammaCode (beta 0), read off the SYM->SYM
+ * epilogue cell. */
 void testGroupNormSymForwardSrKeepsSaturatedCodeOnTheGrid(void) {
     size_t dims[] = {1, 2, 8};
     tensor_t *x = buildSymCodes(3, dims, kNormDxX, 1.0f, HALF_AWAY, 12);
@@ -2863,7 +2865,8 @@ void testGroupNormSymForwardSrKeepsSaturatedCodeOnTheGrid(void) {
 
 /* x = +-1, gamma = 1 and dy in +-pairs, so dx = dy exactly; dy[0] = 2047 at
  * scale 1 gives the dx scale 1 and dx[0] exactly qMax. Its NORM_DX draw is
- * near 1: 2047 + u rounds to 2048 without the clamp. */
+ * near 1. Saturated SR stays on qMax; the integer clamp is defensive under exact
+ * SR, so this is a behavioural pin and no longer distinguishes clamp presence. */
 static const int32_t kNormDxDySat[NORM_DX_N] = {2047, -2047, 77, -77, 13,  -13,  201, -201,
                                                 55,   -55,   3,  -3,  149, -149, 99,  -99};
 

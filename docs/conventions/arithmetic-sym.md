@@ -30,16 +30,21 @@ scheme and is out of scope.
 **Rounding modes** (`src/arithmetic/Rounding.c`, `roundByMode`; the BFP doc
 uses the same two). `HALF_AWAY` is `roundHalfAway` = C `round()` on the float:
 nearest integer, an exact `.5` goes away from zero (`round(-2.5) = -3`), result
-converted to `int32_t`. `SR_HALF_AWAY` is `floorf(input + u)`, the standard
+converted to `int32_t`. `SR_HALF_AWAY` is the exact `floor(input + u)`, the standard
 stochastic rounding (round up with probability equal to the fractional part;
-Connolly, Higham & Mary, SIAM J. Sci. Comput. 43(1), 2021), evaluated in
-float32, with `u = rngNextUnitFloat(rs)` drawn from the op's stream:
-`u = (top 24 bits of a U32) / 2^24`, so `u` is in `[0, 1 - 2^-24]` (never 1,
-`0` possible). An `input` that is already an integer `k` rounds to `k` when
-`u == 0`, for `k` of either sign (#510). Because the sum is a float32 add, a
-large-magnitude `input` plus a `u` close to 1 can round up to the next integer
-inside the add; that is why the integer clamps after SR emit sites stay
-load-bearing at the top of the grid. `SR_HALF_AWAY` without a stream aborts.
+Connolly, Higham & Mary, SIAM J. Sci. Comput. 43(1), 2021), computed WITHOUT
+rounding the sum: `t = (int32_t)input` (truncation), `f = input - t` (exact),
+then `f < 0 ? t - (u < -f) : t + ((1 - u) <= f)`, float32 only. A float32 add
+`input + u` would round up across the next integer for `u > 1 - ulp/2`
+(`2^-14` at 2047, `1/2` on `[2^23, 2^24)`), a magnitude-growing upward bias.
+`u = rngNextUnitFloat(rs)` is drawn from the op's stream, exactly one draw per
+call: `u = (top 24 bits of a U32) / 2^24`, so `u` is in `[0, 1 - 2^-24]` (never
+1, `0` possible; `1 - u` is exact). An `input` that is already an integer `k`
+rounds to `k` for every `u`, for `k` of either sign (#510). Consequently an
+exactly representable saturated value (`qMax` or `qMin` after the float clamp)
+never moves under SR; the integer clamps after SR emit sites are defensive
+there and remain needed where the float grid bound is inexact (wide SYM grids,
+`q >= 25`). `SR_HALF_AWAY` without a stream aborts.
 
 **Grid.** A SYM_INT32 tensor of width `b = qMaxBits` holds int32 codes on the
 full two's-complement grid `[qMin, qMax] = [-2^(b-1), 2^(b-1) - 1]` (2047 and
@@ -56,8 +61,9 @@ grid (`clampInt32(..., qMin, qMax)`).
   `|x / scale|` is at most `qMax` (up to a float32 ulp), `HALF_AWAY` never
   produces `qMin`; under `SR_HALF_AWAY`, `floor(x + u) >= floor(x)`, so `qMin`
   appears only if `x / scale` overshoots `-qMax` by that float32 ulp and
-  `u` is smaller than the overshoot. The top of the grid is the side that needs the clamp: for `x`
-  near `qMax`, `x + u` can round up to `qMax + 1` in float32.
+  `u` is smaller than the overshoot. Likewise an `x / scale` that overshoots
+  `qMax` by an ulp can round up to `qMax + 1`; that real overshoot (not an
+  artifact of the add) is what the integer clamp covers on the top side.
 - *Fixed-scale requant* (`requantSymInt32TensorToScale`, #192 D1 "requant into
   a preset target scale"): the output scale must already be set and `> 0`
   (else `exit(1)`); each element is `clampInt32(roundByMode(clamp((float)code ·
@@ -65,8 +71,9 @@ grid (`clampInt32(..., qMin, qMax)`).
   **saturate** to the two's-complement grid, and this is how `qMin` becomes
   reachable under `HALF_AWAY`. The float-domain clamp bounds the value fed to
   the rounding; the integer clamp after it (as at every other SYM_INT32 emit
-  site) keeps an SR draw from leaving the grid (#511: without it,
-  `u == 0` at `qMin` gave `qMin - 1`). The primitive is called directly; it is not a `conversionMatrix` cell.
+  site) is defensive under exact SR, which never moves an exactly representable
+  `qMin`/`qMax` (#511: the old `round(x + u - 0.5)` formula gave `qMin - 1` at
+  `u == 0`). The primitive is called directly; it is not a `conversionMatrix` cell.
 - The `OUT_ACC_FIXED_SCALE` epilogue (`rescaleIntoAccumulatorScale`) does not
   clamp at all (see "Quantized gradient accumulation").
 

@@ -4,9 +4,10 @@
 
 /*! @brief Describes rounding
  * HALF_AWAY = round half away from zero (C roundf(), C17 7.12.9.6)
- * SR_HALF_AWAY = stochastic rounding: floor(x + u) with u uniform in [0, 1),
+ * SR_HALF_AWAY = stochastic rounding: exactly floor(x + u) with u uniform in [0, 1),
  *                i.e. round up with probability equal to the fractional part;
- *                an exact integer stays put (u == 0 included)
+ *                the sum is not rounded in float (no lift across an integer for u
+ *                near 1), and an exact integer stays put for every u
  */
 typedef enum roundingMode { HALF_AWAY, SR_HALF_AWAY } roundingMode_t;
 

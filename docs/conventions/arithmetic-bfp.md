@@ -73,7 +73,7 @@ negative floor `-2^(m-1)` (a float-domain `clamp` followed by `clampInt32` in
 the rescale walker). The `-2^(m-1)` code is therefore **reachable**, not inert:
 the derived exponent keeps `|v / scale| <= qMax` (§3), so under `HALF_AWAY` it
 is emitted only when D6's exponent cap pins the scale below what the data needs
-(§2). Under `SR_HALF_AWAY` (`floor(x + u)`, `u` in `[0, 1)`) a value in
+(§2). Under `SR_HALF_AWAY` (exact `floor(x + u)`, `u` in `[0, 1)`) a value in
 `[-qMax, qMax]` cannot round below `-qMax`, so it adds no route to it. The reason to deviate is infrastructure reuse, not a
 numerical one: two's complement lets BFP share `byteConversionAppend` /
 `unpackSignExtend` verbatim with `SYM`'s pack/unpack path instead of adding a
@@ -540,14 +540,10 @@ silent wrong arithmetic, not a crash.
     deliberately WIDER than the legal code band — two codes on each side,
     enough that `(int32_t)round(...)` is always defined but never enough to
     pull an overflowing value back onto the grid, so the abort still fires.
-    The two-code band is load-bearing, not headroom: `SR_HALF_AWAY` is
-    `floorf(x + u)` with `u` in `[0, 1)`, and the float32 add can lift a value
-    that sits exactly on an integer onto the next one
-    (`floorf(-129.0f + (1 - 2^-24)) == -128` at m = 8). A value clamped to
-    `qMin-1` would land back on `qMin` and silence the abort; one clamped to
-    `qMin-2` lands on `qMin-2` or `qMin-1`, both off the grid. The upper edge
-    uses the same band for symmetry (`qMax+1` plus any `u` already stays off
-    the grid).
+    Under exact `SR_HALF_AWAY` (`floor(x + u)` without a rounded sum) a value
+    clamped exactly onto `qMin-1` or `qMax+1` has no fraction and stays put, so
+    a one-code band would already preserve the abort; the second code is
+    headroom, and it keeps the `(int32_t)` cast defined.
   - `OUT_ACC_DYNAMIC_RESCALE` (`bfpRescaleWalk`): re-derives a FRESH
     per-group grid on every call from `|mant·oldScale·factor + inc|`'s absmax
     (value-domain, so D6 CLAMPS rather than aborts at the exponent range's
@@ -1087,7 +1083,7 @@ mirroring `docs/conventions/arithmetic-sym.md` §"Grouped backward").**
    grid: |err| ≤ `0.5·s_out` per element under HALF_AWAY, where
    `s_out = 2^{E_g}` is the scale of the element's group in the DERIVED
    wire grid (`E_g` the unbiased exponent `deriveBfpStoredExponent` snaps
-   to from the raw's per-group absmax). `SR_HALF_AWAY` (`floor(x + u)`) rounds to
+   to from the raw's per-group absmax). `SR_HALF_AWAY` (exact `floor(x + u)`) rounds to
    one of the two neighbouring grid points — unbiased in expectation, per-draw
    error < `1·s_out`.
    Because `s_out ≈ absmax_g/qMax`, the bound is RELATIVE ≈ `2^{−(m−1)}`

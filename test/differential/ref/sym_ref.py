@@ -129,7 +129,7 @@ def encode_sym(x: np.ndarray, q_max_bits: int) -> Encoded:
     SYM_INT32 grid, encode and requant' gives scale = absmax / qMax and
     code = clampInt32(roundByMode(x / scale), qMin, qMax). The clamp is a
     no-op under HALF_AWAY and, for x / scale within [-qMax, qMax], under SR_HALF_AWAY
-    at the bottom of the grid (floor(x + u) >= x there); the top can still round up.
+    at either end of the grid (exact SR never moves an exactly representable qMax/qMin).
     absmax == 0 -> scale 1.0 and all-zero codes (same section).
     """
     x = np.asarray(x, dtype=np.float64)

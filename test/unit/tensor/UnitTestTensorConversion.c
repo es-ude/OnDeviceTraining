@@ -1340,15 +1340,15 @@ static int32_t requantOneSrWithDraw(int32_t in, uint32_t draw) {
 }
 
 void testRequantToScaleSrNeverEmitsBelowQMin() {
-    // Pins that SR at qMin stays qMin. Under floorf(x + u) the bottom of the grid cannot
-    // undershoot (u >= 0), so no clamp is exercised here; the integer clamp is exercised by
-    // testRequantToScaleSrNeverEmitsAboveQMax.
+    // Pins that SR at qMin stays qMin. Under exact floor(x + u) the bottom of the grid cannot
+    // undershoot (u >= 0), so no clamp is exercised here (the clamp is defensive under exact SR).
     TEST_ASSERT_EQUAL_INT32(-2048, requantOneSrWithDraw(-5000, 0x00000001u)); // u == 0
 }
 
 void testRequantToScaleSrNeverEmitsAboveQMax() {
-    // #511: saturated to qMax = 2047, then u = 1 - 2^-24: the float32 add 2047 + u rounds to
-    // 2048, so only the integer clamp keeps the code on the grid (under either SR formula).
+    // #511: saturated to qMax = 2047, then u = 1 - 2^-24: saturated SR stays on the grid.
+    // Under exact SR the integer clamp is defensive (an exactly representable qMax never
+    // moves), so this is a behavioural pin and no longer distinguishes clamp presence.
     TEST_ASSERT_EQUAL_INT32(2047, requantOneSrWithDraw(5000, 0xFFFFFFFFu));
 }
 

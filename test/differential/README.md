@@ -228,7 +228,8 @@ is wrong before the C is.
   (negative overflow lands on -2048, i.e. qMin is reachable through it --
   arithmetic-sym, "Rounding modes, the SYM_INT32 grid, encode and requant":
   the clamp is in the float domain before the rounding, and an integer
-  clamp follows the rounding (#511), so no SR draw can leave the grid; every
+  clamp follows the rounding (#511; defensive under exact SR, which never moves an
+  exactly representable qMax/qMin); every
   cell here is HALF_AWAY, where the float clamp bounds are integers).
 
 Fixture kinds: `float_values` and `torch_randn` encode floats with the

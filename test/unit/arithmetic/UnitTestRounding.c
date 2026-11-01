@@ -120,6 +120,52 @@ void testRoundByModeSrSumOnIntegerTakesTheInteger() {
     TEST_ASSERT_EQUAL_INT32(0, roundByMode(-0.25f, SR_HALF_AWAY, &rs));
 }
 
+/* Exact SR: floor(x + u) must not be computed as a float add, whose rounded sum
+ * crosses the next integer for u > 1 - ulp(x)/2 (a magnitude-growing upward bias). */
+static int32_t srWithDraw(float x, uint32_t draw) {
+    rngStream_t rs = rngStreamWithNextDraw(draw);
+    return roundByMode(x, SR_HALF_AWAY, &rs);
+}
+
+/* 2047 + (1 - 2^-24) rounds up to 2048 in float32; the real sum is below 2048. */
+void testRoundByModeSrLargestDrawDoesNotLiftAcrossTheInteger() {
+    TEST_ASSERT_EQUAL_INT32(2047, srWithDraw(2047.f, 0xFFFFFFFFu));
+}
+
+/* -2^24 + 0.75 rounds to -2^24 + 1 in float32; the real sum floors to -2^24. */
+void testRoundByModeSrNegativeBinadeEdgeStaysOnTheInteger() {
+    TEST_ASSERT_EQUAL_INT32(-16777216, srWithDraw(-16777216.f, 0xC0000000u));
+    TEST_ASSERT_EQUAL_INT32(8388609, srWithDraw(8388609.f, 0xC0000000u));
+}
+
+/* Spacing is 0.5 on [2^22, 2^23): 2^22 + 0.5 + 0.25 ties to even (2^22 + 1) in
+ * float32; the real sum floors to 2^22. u = 0.5 reaches the integer exactly. */
+void testRoundByModeSrHalfIntegerInLargeBinadeFollowsTheFraction() {
+    TEST_ASSERT_EQUAL_INT32(4194304, srWithDraw(4194304.5f, 0x40000000u));
+    TEST_ASSERT_EQUAL_INT32(4194305, srWithDraw(4194304.5f, 0x80000000u));
+}
+
+/* 3 * 2^-25 + (1 - 2^-23) < 1 exactly; the float sum ties to even at 1.0. */
+void testRoundByModeSrTinyPositiveWithNearOneDrawStaysZero() {
+    TEST_ASSERT_EQUAL_INT32(0, srWithDraw(ldexpf(3.f, -25), 0xFFFFFE00u));
+}
+
+/* floor(-2^-30 + u) = -1 only for u == 0; the smallest nonzero u (2^-24) is enough. */
+void testRoundByModeSrTinyNegativeRoundsDownOnlyForZeroDraw() {
+    TEST_ASSERT_EQUAL_INT32(-1, srWithDraw(ldexpf(-1.f, -30), 0x00000001u));
+    TEST_ASSERT_EQUAL_INT32(0, srWithDraw(ldexpf(-1.f, -30), 0x00000100u));
+}
+
+/* Pins the draw-to-outcome mapping of floor(x + u): up iff u >= 1 - f (not u < f). */
+void testRoundByModeSrMappingIsFloorOfXPlusU() {
+    TEST_ASSERT_EQUAL_INT32(2, srWithDraw(2.25f, 0x1999999Au)); /* u ~ 0.1 */
+    TEST_ASSERT_EQUAL_INT32(3, srWithDraw(2.25f, 0xE6666666u)); /* u ~ 0.9 */
+    TEST_ASSERT_EQUAL_INT32(-3, srWithDraw(-2.25f, 0x1999999Au));
+    TEST_ASSERT_EQUAL_INT32(-2, srWithDraw(-2.25f, 0xE6666666u));
+    TEST_ASSERT_EQUAL_INT32(3, srWithDraw(2.25f, 0xC0000000u)); /* u = 0.75: boundary, up */
+    TEST_ASSERT_EQUAL_INT32(2, srWithDraw(2.25f, 0xBFFFFF00u)); /* just below 0.75 */
+}
+
 static void roundSrWithoutAStream(void) {
     (void)roundByMode(352.5f, SR_HALF_AWAY, NULL);
 }
@@ -164,6 +210,12 @@ int main(void) {
     RUN_TEST(testRoundByModeSrWithoutAStreamExits);
     RUN_TEST(testRoundByModeSrWithZeroDrawKeepsExactIntegers);
     RUN_TEST(testRoundByModeSrSumOnIntegerTakesTheInteger);
+    RUN_TEST(testRoundByModeSrLargestDrawDoesNotLiftAcrossTheInteger);
+    RUN_TEST(testRoundByModeSrNegativeBinadeEdgeStaysOnTheInteger);
+    RUN_TEST(testRoundByModeSrHalfIntegerInLargeBinadeFollowsTheFraction);
+    RUN_TEST(testRoundByModeSrTinyPositiveWithNearOneDrawStaysZero);
+    RUN_TEST(testRoundByModeSrTinyNegativeRoundsDownOnlyForZeroDraw);
+    RUN_TEST(testRoundByModeSrMappingIsFloorOfXPlusU);
 
     return UNITY_END();
 }

@@ -2513,6 +2513,9 @@ static void convertTensorsWithSameType(tensor_t *inputTensor, tensor_t *outputTe
         symInt32QConfig_t *inputSymIntQC = inputTensor->quantization->qConfig;
         symInt32QConfig_t *outputSymIntQC = outputTensor->quantization->qConfig;
         outputSymIntQC->scale = inputSymIntQC->scale;
+        /* the codes were copied verbatim: declare their width, not the
+         * destination's old one (the accumulator guard trusts it) */
+        outputSymIntQC->qMaxBits = inputSymIntQC->qMaxBits;
         break;
     }
     case SYM: {

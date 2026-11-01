@@ -822,6 +822,34 @@ void testConversionSymInt32SameTypeCopyPropagatesScale() {
     TEST_ASSERT_EQUAL_FLOAT(0.03125f, outQC.scale);
 }
 
+void testConversionSymInt32SameTypeCopyCarriesQMaxBits() {
+    /* The copy's codes are the source's, so the copy must declare the source's
+     * width: a destination keeping a narrower declared width would let the
+     * SYM accumulator guard prove a reduction safe that its codes can wrap. */
+    size_t dims[] = {2};
+    size_t orderOfDims[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
+    symInt32QConfig_t inQC = {0};
+    inQC.scale = 1.f;
+    inQC.qMaxBits = 16;
+    quantization_t inQ;
+    initSymInt32Quantization(&inQC, &inQ);
+    int32_t inData[] = {32767, -32768};
+    tensor_t inTensor;
+    setTensorValues(&inTensor, (uint8_t *)inData, &shape, &inQ, NULL);
+    symInt32QConfig_t outQC = {0};
+    outQC.qMaxBits = 12;
+    quantization_t outQ;
+    initSymInt32Quantization(&outQC, &outQ);
+    int32_t outData[2] = {0, 0};
+    tensor_t outTensor;
+    setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    convertTensor(&inTensor, &outTensor, NULL);
+
+    TEST_ASSERT_EQUAL_UINT8(16, outQC.qMaxBits);
+}
+
 void testConversionSymSameTypeCopyPropagatesScale() {
     /* SYM -> SYM same width is a verbatim packed copy; the output's stale default
      * scale (1.f) must be replaced by the input's, or every later dequant is wrong.
@@ -7929,6 +7957,7 @@ int main(void) {
     RUN_TEST(testRequantToScaleSharedBufferAliasMatchesGold);
     RUN_TEST(testConversionBoolBoolCopiesOnlyPackedBytes);
     RUN_TEST(testConversionSymInt32SameTypeCopyPropagatesScale);
+    RUN_TEST(testConversionSymInt32SameTypeCopyCarriesQMaxBits);
     RUN_TEST(testConversionSymSameTypeCopyPropagatesScale);
     RUN_TEST(testConversionSymSameTypeWidthMismatchDies);
     RUN_TEST(testConversionAsymSameTypeWidthMismatchDies);

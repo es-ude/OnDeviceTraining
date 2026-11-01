@@ -112,8 +112,46 @@ void testProductCheckedAbortsOnlyWhenWideAndOverflowing(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "widemul", (void)symProduct(65536, 65536, true, &wide));
 }
 
+/* A rescaled partial (grouped kernels) is (p * s_g) / sAcc in float32: two
+ * roundings can land one ulp (2^-23 relative) above |p|, and a stochastic round
+ * can add up to 1 more. Per term the bound is mp * (1 + 2^-22) + 1, i.e.
+ * N * (mp + 1) + N * mp / 2^22 <= room. For int12 x int12, mp = 2^22, so
+ * N * (2^22 + 2) must fit: exactly room == 511 * (2^22 + 2) admits 511. */
+void testRescaledTermLimitBoundaryIsTheSlackedBound(void) {
+    uint64_t room511 = 511ull * ((1ull << 22) + 2ull);
+    uint64_t seed = (uint64_t)INT32_MAX - room511;
+    TEST_ASSERT_EQUAL_size_t(511, symAccumTermLimitRescaled(12, 12, seed));
+    TEST_ASSERT_EQUAL_size_t(510, symAccumTermLimitRescaled(12, 12, seed + 1));
+    /* the unslacked bound still admits 511 there: the slack is what tightens it */
+    TEST_ASSERT_EQUAL_size_t(511, symAccumTermLimit(12, 12, seed + 1));
+}
+
+void testRescaledTermLimitIsNeverLooserThanTheExactLimit(void) {
+    for (uint8_t a = 1; a <= 20; a++) {
+        for (uint8_t b = 1; b <= 20; b++) {
+            TEST_ASSERT_TRUE(symAccumTermLimitRescaled(a, b, 0) <= symAccumTermLimit(a, b, 0));
+        }
+    }
+    TEST_ASSERT_EQUAL_size_t(0, symAccumTermLimitRescaled(16, 17, 0));
+    TEST_ASSERT_EQUAL_size_t(0, symAccumTermLimitRescaled(12, 12, 2147483648ull));
+    TEST_ASSERT_EQUAL_size_t(0, symAccumTermLimitRescaled(32, 32, 0));
+}
+
+void testRescaledSiteUsesTheSlackedLimit(void) {
+    uint64_t seed = (uint64_t)INT32_MAX - 511ull * ((1ull << 22) + 2ull) + 1ull;
+    symAccumSite_t plain = symAccumSiteInit("t", 511, 12, 12, seed);
+    symAccumSite_t rescaled = symAccumSiteInitRescaled("t", 511, 12, 12, seed);
+    TEST_ASSERT_TRUE(symAccumProvenSafe(&plain));
+    TEST_ASSERT_FALSE(symAccumProvenSafe(&rescaled));
+    symAccumSite_t zero = symAccumSiteInitRescaled("t", 0, 32, 32, 2147483648ull);
+    TEST_ASSERT_TRUE(symAccumProvenSafe(&zero));
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testRescaledTermLimitBoundaryIsTheSlackedBound);
+    RUN_TEST(testRescaledTermLimitIsNeverLooserThanTheExactLimit);
+    RUN_TEST(testRescaledSiteUsesTheSlackedLimit);
     RUN_TEST(testTermLimitInt12Seed0Is511);
     RUN_TEST(testProvenSafeBoundaryAt511And512);
     RUN_TEST(testSeedThatTipsTheBoundShrinksTheLimit);

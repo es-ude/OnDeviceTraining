@@ -68,6 +68,7 @@ typedef struct symAccumSite {
     uint8_t bBits;
     uint64_t maxAbsSeed; /* max |seed|, up to 2^31 for INT32_MIN */
     bool wideProduct;    /* either width > 16: |a*b| may leave int32 */
+    bool rescaled;       /* terms are float-rescaled partials: use the slacked bound */
 } symAccumSite_t;
 
 /* max |seed[i]| as an unsigned magnitude (INT32_MIN -> 2^31). NULL / n == 0 -> 0. */
@@ -97,6 +98,26 @@ static inline size_t symAccumTermLimit(uint8_t aBits, uint8_t bBits, uint64_t ma
     return (size_t)(((uint64_t)INT32_MAX - maxAbsSeed) / maxProduct);
 }
 
+/* Same as symAccumTermLimit for accumulators that receive RESCALED terms
+ * (grouped kernels: round((p * s_g) / sAcc), scale ratio <= 1). In exact
+ * arithmetic |term| <= |p|, but the float32 evaluation can land one ulp
+ * (2^-23 relative) above |p| and a stochastic round adds up to 1 more, so each
+ * term is bounded by maxProduct * (1 + 2^-22) + 1 (twice the ulp slack, kept
+ * as the margin). With room = INT32_MAX - maxAbsSeed this is
+ *     N * (mp + 1) + N * mp / 2^22 <= room
+ *  <=> N <= room * 2^22 / ((mp + 1) * 2^22 + mp),
+ * evaluated in 64-bit (room * 2^22 and the denominator are < 2^54). */
+static inline size_t symAccumTermLimitRescaled(uint8_t aBits, uint8_t bBits, uint64_t maxAbsSeed) {
+    unsigned qa = aBits < 1 ? 1u : (aBits > 32 ? 32u : aBits);
+    unsigned qb = bBits < 1 ? 1u : (bBits > 32 ? 32u : bBits);
+    uint64_t maxProduct = (uint64_t)1 << (qa + qb - 2u);
+    if (maxAbsSeed > (uint64_t)INT32_MAX || maxProduct > (uint64_t)INT32_MAX) {
+        return 0;
+    }
+    uint64_t room = (uint64_t)INT32_MAX - maxAbsSeed;
+    return (size_t)((room << 22) / (((maxProduct + 1u) << 22) + maxProduct));
+}
+
 static inline symAccumSite_t symAccumSiteInit(const char *op, size_t nMax, uint8_t aBits,
                                               uint8_t bBits, uint64_t maxAbsSeed) {
     symAccumSite_t s = {.op = op,
@@ -104,13 +125,27 @@ static inline symAccumSite_t symAccumSiteInit(const char *op, size_t nMax, uint8
                         .aBits = aBits,
                         .bBits = bBits,
                         .maxAbsSeed = maxAbsSeed,
-                        .wideProduct = aBits > 16 || bBits > 16};
+                        .wideProduct = aBits > 16 || bBits > 16,
+                        .rescaled = false};
+    return s;
+}
+
+/* Site for an accumulator of float-rescaled terms (see symAccumTermLimitRescaled). */
+static inline symAccumSite_t symAccumSiteInitRescaled(const char *op, size_t nMax, uint8_t aBits,
+                                                      uint8_t bBits, uint64_t maxAbsSeed) {
+    symAccumSite_t s = symAccumSiteInit(op, nMax, aBits, bBits, maxAbsSeed);
+    s.rescaled = true;
     return s;
 }
 
 /* Zero terms never accumulate, so N == 0 is safe whatever the widths. */
 static inline bool symAccumProvenSafe(const symAccumSite_t *s) {
-    return s->nMax == 0 || s->nMax <= symAccumTermLimit(s->aBits, s->bBits, s->maxAbsSeed);
+    if (s->nMax == 0) {
+        return true;
+    }
+    size_t limit = s->rescaled ? symAccumTermLimitRescaled(s->aBits, s->bBits, s->maxAbsSeed)
+                               : symAccumTermLimit(s->aBits, s->bBits, s->maxAbsSeed);
+    return s->nMax <= limit;
 }
 
 /* Unconditional (all builds): the exit(1) stays even where PRINT_ERROR compiles out. */

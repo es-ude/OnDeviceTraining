@@ -211,6 +211,14 @@ only the quantization configs change; the int32 accumulator (no int64) is kept.
   grouped kernels therefore use `qBits + 1` for the weight in the static bound
   (conservative by one bit for true grouped SYM), and the abort banner reports
   that bound width. The view's `qBits` itself is not widened.
+  *Rescaled accumulators carry float slack.* The grouped kernels add
+  `round((p · s_g) / s_acc)` terms. The scale ratio is ≤ 1, but the float32
+  evaluation (two roundings) can land one ulp (2^-23 relative) above `|p|`, and a
+  stochastic round adds up to 1. Those accumulators (grouped Matmul / Conv1d
+  rescaled accumulator, grouped ConvT scatter) therefore use the slacked bound
+  `N · (mp + 1) + N · mp / 2^22 + max|seed| ≤ INT32_MAX` (`mp = 2^(qa−1) ·
+  2^(qb−1)`, `symAccumTermLimitRescaled`); the raw group partials stay on the
+  exact bound.
   Assumption: stored codes obey their declared width (`qMaxBits`/`qBits` is
   metadata and is not re-checked per code); every funnel-produced operand is
   clamped to it, so only a hand-built tensor whose codes exceed its own width can

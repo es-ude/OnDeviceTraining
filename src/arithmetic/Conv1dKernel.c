@@ -426,8 +426,9 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                           .yArr = yArr,
                           .seed = seed};
     /* Raw partial: at most min(groupSize, N) products; acc: the rescaled
-     * partials (each factor <= 1) plus the seed, so N products plus seed bound
-     * it. Proving the acc proves the partial (fewer terms, no seed). */
+     * partials (each factor <= 1, plus the float32 slack of
+     * symAccumTermLimitRescaled) plus the seed, so N slacked products plus
+     * seed bound it. Proving the acc proves the partial (fewer terms, no seed). */
     size_t nTerms = inChPerGroup * kernelSize;
     uint8_t xBits = ((symInt32QConfig_t *)input->quantization->qConfig)->qMaxBits;
     /* Count the grouped weight ONE BIT wider than declared: a grouped ASYM
@@ -440,8 +441,8 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
     symAccumSite_t partialSite = symAccumSiteInit("conv1dKernelSymInt32Grouped (raw group partial)",
                                                   partialTerms, xBits, wBits, 0);
     symAccumSite_t accSite =
-        symAccumSiteInit("conv1dKernelSymInt32Grouped (rescaled accumulator)", nTerms, xBits, wBits,
-                         symAccumMaxAbsSeed(seed, outChannels));
+        symAccumSiteInitRescaled("conv1dKernelSymInt32Grouped (rescaled accumulator)", nTerms,
+                                 xBits, wBits, symAccumMaxAbsSeed(seed, outChannels));
     if (symAccumProvenSafe(&accSite)) {
         conv1dSymGroupedLoopsSafe(&view, weightGroups, inScale, sAcc, wQC->roundingMode, rs,
                                   &partialSite, &accSite);

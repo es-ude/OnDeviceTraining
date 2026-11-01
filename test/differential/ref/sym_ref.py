@@ -533,7 +533,7 @@ def overflow_report(raw: np.ndarray, reduction: int, bits_a: int, bits_b: int, s
     product = qmax(bits_a) * qmax(bits_b)
     n_wrap = (INT32_MAX - int(seed_abs_max)) // product + 1
     return OverflowReport(
-        fits=bool(max_abs <= INT32_MAX),
+        fits=bool(r.size == 0 or (int(r.min()) >= INT32_MIN and int(r.max()) <= INT32_MAX)),
         max_abs_raw=max_abs,
         n_wrap_full_scale=n_wrap,
         reduction=reduction,

@@ -2589,6 +2589,9 @@ static float wgRun(size_t batch, size_t len, float xCode, float gyCode, bool gyA
         gWgX[i] = xCode;
         gWgGy[i] = (gyAlternates && (i % 2 == 1)) ? -gyCode : gyCode;
     }
+#ifdef ODT_MEM_PROFILE
+    size_t liveBefore = memProfileMark();
+#endif
     size_t weightDims[] = {1, 1, 1};
     size_t inputDims[] = {batch, 1, len};
     size_t lossDims[] = {batch, 1, len};
@@ -2602,7 +2605,16 @@ static float wgRun(size_t batch, size_t len, float xCode, float gyCode, bool gyA
     initConv1dTransposedConfigWithWeightsAndBias(&cfg, &kernel, weights, NULL, 1, 0, sq, sq, sq,
                                                  sq);
     conv1dTransposedCalcWeightGradsSymInt32(&cfg, input, lossGrad, NULL);
-    return (float)((int32_t *)weights->grad->data)[0] * symScaleOf(weights->grad);
+    float result = (float)((int32_t *)weights->grad->data)[0] * symScaleOf(weights->grad);
+    freeQuantization(sq);
+    freeTensor(lossGrad);
+    freeTensor(input);
+    freeParameter(weights);
+#ifdef ODT_MEM_PROFILE
+    /* CI runs detect_leaks=0, so only the live-byte counter catches a dropped free. */
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(liveBefore, memProfileMark(), "wgRun leaked");
+#endif
+    return result;
 }
 
 void testConv1dTransposedWgGuardProvenSafeN511RunsExact(void) {

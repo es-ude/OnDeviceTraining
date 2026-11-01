@@ -1109,8 +1109,9 @@ static void packFloatBufferAsBfp(const float *values, size_t n, bfpQConfig_t *ou
      * and (int32_t)round(...) is undefined there (C17 6.3.1.4). Identical to
      * clamping after the round wherever the round is defined -- in range the
      * float clamp is the identity, outside it roundByMode is monotone -- and
-     * the clampInt32 behind it stays load-bearing for SR_HALF_AWAY, whose
-     * pre-round dither can still push a clamped qMin one step past it. */
+     * the clampInt32 behind it stays load-bearing for SR_HALF_AWAY: for a
+     * value clamped near qMax the float32 add x + u inside floor(x + u) can
+     * round up to qMax + 1. */
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
@@ -2047,11 +2048,10 @@ static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *i
      * entirely finite increments, and (int32_t)round(...) is undefined there
      * -- C17 6.3.1.4) while leaving every overflowing value out of range for
      * packChunkGuarded, which still aborts. Two codes rather than one is
-     * conservative headroom, not a requirement: SR_HALF_AWAY dithers by
-     * [-0.5, 0.5) before rounding, but C's round() is half-AWAY, so a value
-     * clamped to qMax+1 dithers into [qMax+0.5, qMax+1.5) and rounds to
-     * qMax+1 at worst -- it can never land back on qMax, and a +-1 band would
-     * already preserve the abort. The extra code buys margin against any
+     * conservative headroom, not a requirement: SR_HALF_AWAY is floorf(x + u)
+     * with u in [0, 1), so a value clamped to qMax+1 lands on qMax+1 (or
+     * qMax+2 when the float32 add rounds up) -- it can never land back on
+     * qMax, and a +-1 band would already preserve the abort. The extra code buys margin against any
      * future rounding mode with a wider dither. */
     const float qMax = powf(2, (float)qc->mantissaBits - 1) - 1;
     const float qMin = -powf(2, (float)qc->mantissaBits - 1);
@@ -2278,9 +2278,9 @@ static void bfpRescaleWalk(tensor_t *target, const incSrc_t *inc, float factor, 
          * every DEFINED case -- in range the float clamp is the identity, and
          * outside it roundByMode is monotone, so both orders land on the same
          * boundary code. The clampInt32 stays behind it and is load-bearing,
-         * not decoration: SR_HALF_AWAY dithers by [-0.5, 0.5) BEFORE rounding,
-         * so a value already clamped to qMin can still round one step past it
-         * (round(-128.5) = -129, half away from zero).
+         * not decoration: SR_HALF_AWAY is floorf(x + u), and for a value
+         * clamped near qMax the float32 add x + u can round up to qMax + 1
+         * (u close to 1; qMax + u rounds to qMax + 1 once u > 1 - ulp/2).
          * NaN never reaches this clamp -- which matters because a
          * comparison-based clamp cannot map it. Every input is finite by
          * construction: the factor is checked at scaleBfpTensorInPlace's

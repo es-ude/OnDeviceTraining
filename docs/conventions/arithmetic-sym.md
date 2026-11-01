@@ -30,11 +30,16 @@ scheme and is out of scope.
 **Rounding modes** (`src/arithmetic/Rounding.c`, `roundByMode`; the BFP doc
 uses the same two). `HALF_AWAY` is `roundHalfAway` = C `round()` on the float:
 nearest integer, an exact `.5` goes away from zero (`round(-2.5) = -3`), result
-converted to `int32_t`. `SR_HALF_AWAY` is `roundHalfAway(input + u - 0.5f)`,
-evaluated in float32 left to right, with `u = rngNextUnitFloat(rs)` drawn from
-the op's stream: `u = (top 24 bits of a U32) / 2^24`, so `u` is in
-`[0, 1 - 2^-24]` (never 1, `0` possible). `SR_HALF_AWAY` without a stream
-aborts.
+converted to `int32_t`. `SR_HALF_AWAY` is `floorf(input + u)`, the standard
+stochastic rounding (round up with probability equal to the fractional part;
+Connolly, Higham & Mary, SIAM J. Sci. Comput. 43(1), 2021), evaluated in
+float32, with `u = rngNextUnitFloat(rs)` drawn from the op's stream:
+`u = (top 24 bits of a U32) / 2^24`, so `u` is in `[0, 1 - 2^-24]` (never 1,
+`0` possible). An `input` that is already an integer `k` rounds to `k` when
+`u == 0`, for `k` of either sign (#510). Because the sum is a float32 add, a
+large-magnitude `input` plus a `u` close to 1 can round up to the next integer
+inside the add; that is why the integer clamps after SR emit sites stay
+load-bearing at the top of the grid. `SR_HALF_AWAY` without a stream aborts.
 
 **Grid.** A SYM_INT32 tensor of width `b = qMaxBits` holds int32 codes on the
 full two's-complement grid `[qMin, qMax] = [-2^(b-1), 2^(b-1) - 1]` (2047 and
@@ -47,11 +52,12 @@ grid (`clampInt32(..., qMin, qMax)`).
   `code = clampInt32(roundByMode(x / scale), qMin, qMax)`; requant evaluates
   `(float)code · (inScale / scale)` instead of `x / scale`. An all-zero tensor
   (`absMax == 0`) gets `scale = 1.0`; under `HALF_AWAY` its codes are all zero.
-  Under `SR_HALF_AWAY` a draw of `u == 0` rounds `0 + 0 − 0.5` to `−1`, so an
-  all-zero tensor can come out with `−1` codes. Because `|x / scale|`
-  is at most `qMax` (up to a float32 ulp), `HALF_AWAY` never produces `qMin`;
-  under `SR_HALF_AWAY` a `-absMax` element reaches `qMin` when `u == 0`
-  (`round(-qMax - 0.5) = qMin`), which the clamp keeps in range.
+  Under `SR_HALF_AWAY` it is zero too (`floor(0 + u) = 0`). Because
+  `|x / scale|` is at most `qMax` (up to a float32 ulp), `HALF_AWAY` never
+  produces `qMin`; under `SR_HALF_AWAY`, `floor(x + u) >= floor(x)`, so `qMin`
+  appears only if `x / scale` overshoots `-qMax` by that float32 ulp and
+  `u == 0`. The top of the grid is the side that needs the clamp: for `x`
+  near `qMax`, `x + u` can round up to `qMax + 1` in float32.
 - *Fixed-scale requant* (`requantSymInt32TensorToScale`, #192 D1 "requant into
   a preset target scale"): the output scale must already be set and `> 0`
   (else `exit(1)`); each element is `clampInt32(roundByMode(clamp((float)code ·

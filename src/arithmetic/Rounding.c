@@ -13,8 +13,12 @@ int32_t roundHalfAway(float input) {
     return roundf(input);
 }
 
+/* Stochastic rounding: floor(x + u), u uniform in [0, 1), rounds up with probability equal to
+ * the fractional part (Connolly, Higham & Mary 2021). An exact integer x + u (u == 0 on an
+ * integer x) stays put on both sides of zero. floorf, not floor: soft-float MCUs stay off the
+ * double path. */
 static int32_t roundSRHalfAway(const float input, rngStream_t *rs) {
-    return roundHalfAway(input + rngNextUnitFloat(rs) - 0.5f);
+    return (int32_t)floorf(input + rngNextUnitFloat(rs));
 }
 
 int32_t roundByMode(const float input, const roundingMode_t roundingMode, rngStream_t *rs) {

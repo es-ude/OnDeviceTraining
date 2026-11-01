@@ -56,7 +56,7 @@ grid (`clampInt32(..., qMin, qMax)`).
   `|x / scale|` is at most `qMax` (up to a float32 ulp), `HALF_AWAY` never
   produces `qMin`; under `SR_HALF_AWAY`, `floor(x + u) >= floor(x)`, so `qMin`
   appears only if `x / scale` overshoots `-qMax` by that float32 ulp and
-  `u == 0`. The top of the grid is the side that needs the clamp: for `x`
+  `u` is smaller than the overshoot. The top of the grid is the side that needs the clamp: for `x`
   near `qMax`, `x + u` can round up to `qMax + 1` in float32.
 - *Fixed-scale requant* (`requantSymInt32TensorToScale`, #192 D1 "requant into
   a preset target scale"): the output scale must already be set and `> 0`
@@ -267,8 +267,7 @@ only the quantization configs change; the int32 accumulator (no int64) is kept.
   guard reads exactly those two widths). By default both are int12: a FLOAT32
   wire is staged at `ODT_SYM_OPERAND_QMAXBITS`, and a SYM_INT32 wire carries
   the width its `outputQ`/`propLossQ` declares, int12 unless the caller asks
-  for more (the `Conv1d.c` bias-grad comment "int12-range" describes this
-  default; `Linear.c`'s cites the looser `qMaxBits <= 16` contract). int16
+  for more). int16
   appears only as the width of the grad *accumulator* target
   (`ODT_SYM_GRAD_QMAXBITS`, above) or when a caller declares a 16-bit wire;
   then the static bound above shrinks (int12 x int16 proves only `N <= 31`) and

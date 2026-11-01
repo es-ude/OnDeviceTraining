@@ -2078,12 +2078,14 @@ static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *i
      * exponent cap can drive the quotient past int32 range, or to +-inf, for
      * entirely finite increments, and (int32_t)round(...) is undefined there
      * -- C17 6.3.1.4) while leaving every overflowing value out of range for
-     * packChunkGuarded, which still aborts. Two codes rather than one is
-     * conservative headroom, not a requirement: SR_HALF_AWAY is floorf(x + u)
-     * with u in [0, 1), so a value clamped to qMax+1 lands on qMax+1 (or
-     * qMax+2 when the float32 add rounds up) -- it can never land back on
-     * qMax, and a +-1 band would already preserve the abort. The extra code buys margin against any
-     * future rounding mode with a wider dither. */
+     * packChunkGuarded, which still aborts. The two-code band is load-bearing,
+     * not headroom: SR_HALF_AWAY is floorf(x + u) with u in [0, 1), and the
+     * float32 add can lift a value that sits exactly on an integer onto the
+     * next one (floorf(-129.0f + (1 - 2^-24)) == -128 at m = 8). A value
+     * clamped to qMin-1 would land back on qMin and silence the abort; one
+     * clamped to qMin-2 lands on qMin-2 or qMin-1, both off the grid. The
+     * upper edge is the same band for symmetry (qMax+1 plus any u already
+     * stays off the grid). */
     const float qMax = powf(2, (float)qc->mantissaBits - 1) - 1;
     const float qMin = -powf(2, (float)qc->mantissaBits - 1);
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {

@@ -540,13 +540,14 @@ silent wrong arithmetic, not a crash.
     deliberately WIDER than the legal code band — two codes on each side,
     enough that `(int32_t)round(...)` is always defined but never enough to
     pull an overflowing value back onto the grid, so the abort still fires.
-    Two codes rather than one is conservative headroom, not a requirement:
-    `SR_HALF_AWAY` is `floorf(x + u)` with `u` in `[0, 1)`, so a value
-    clamped to `qMax+1` lands on `qMax+1` or (if the float32 add rounds up)
-    `qMax+2`, and a value clamped to `qMin-1` can only stay put or rise by one
-    — neither can land back on the grid, and a `±1` band would already
-    preserve the abort. The extra code buys margin against any future rounding
-    mode with a wider dither.
+    The two-code band is load-bearing, not headroom: `SR_HALF_AWAY` is
+    `floorf(x + u)` with `u` in `[0, 1)`, and the float32 add can lift a value
+    that sits exactly on an integer onto the next one
+    (`floorf(-129.0f + (1 - 2^-24)) == -128` at m = 8). A value clamped to
+    `qMin-1` would land back on `qMin` and silence the abort; one clamped to
+    `qMin-2` lands on `qMin-2` or `qMin-1`, both off the grid. The upper edge
+    uses the same band for symmetry (`qMax+1` plus any `u` already stays off
+    the grid).
   - `OUT_ACC_DYNAMIC_RESCALE` (`bfpRescaleWalk`): re-derives a FRESH
     per-group grid on every call from `|mant·oldScale·factor + inc|`'s absmax
     (value-domain, so D6 CLAMPS rather than aborts at the exponent range's

@@ -8,9 +8,11 @@ Imports allowed: numpy, stdlib.
 """
 
 DOC_GAPS: list[str] = [
-    "SR_HALF_AWAY: docs/conventions names the mode and its purpose (#279 dead-zone "
-    "escape) but not the dither distribution, its precision domain, or unbiasedness "
-    "as a contract.",
+    "SR_HALF_AWAY: docs/conventions/arithmetic-sym.md names the formula floorf(x + u) "
+    "and the dither (u = top 24 bits of a U32 / 2^24, in [0, 1 - 2^-24]) and calls the "
+    "mode unbiased in exact arithmetic, but states no unbiasedness bound for the float32 "
+    "add (a large |x| plus a u near 1 rounds up inside the add), so the statistical "
+    "tolerance of the planned mean check is not a documented contract.",
 ]
 
 

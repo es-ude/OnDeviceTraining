@@ -1289,8 +1289,8 @@ void testAuxOutIsKernelWrittenVerbatimAndNeverFunnelConverted(void) {
  *   HALF_AWAY:   round(352.5)  = 353 ;  round(-352.5) = -353  (the OLD bare-
  *                roundf behavior this test would still show if the epilogue
  *                ignored the target's roundingMode - anti-vacuity)
- *   SR_HALF_AWAY: round(352.5 + j0 - 0.5) = round(352.08...) = 352
- *                 round(-352.5 + j1 - 0.5) = round(-352.21...) = -352
+ *   SR_HALF_AWAY: floor(352.5 + j0) = floor(352.58...) = 352
+ *                 floor(-352.5 + j1) = floor(-351.70...) = -352
  * Target scale must stay EXACTLY 0.02 (never re-derived), matching
  * testAccFixedSymIntoSymRescalesIntoExistingScale's HALF_AWAY pin (PR1b.2 D4's
  * "bit-identical for HALF_AWAY" case). */
@@ -1444,8 +1444,8 @@ void testExecuteOpNeverAliasesSymTarget(void) {
  *   open_stream as o, next_unit_float as u); s = o(fold(kfs(31), 10, 0)); s, j0 = u(s); print(
  *   j0, u(s)[1])"
  * prints j0 = 0.0749632..., j1 = 0.2810223... :
- *   SR_HALF_AWAY: round(352.5 + j0 - 0.5) = round(352.07...) = 352
- *                 round(-2047.0 + j1 - 0.5) = round(-2047.21...) = -2047
+ *   SR_HALF_AWAY: floor(352.5 + j0) = floor(352.57...) = 352
+ *                 floor(-2047.0 + j1) = floor(-2046.71...) = -2047
  *   HALF_AWAY:    round(352.5) = 353 (what the target's config would give —
  *                 anti-vacuity: the two modes provably diverge on element 0) */
 void testOutWriteEpilogueRoundsByArithmeticNotTargetQConfig(void) {

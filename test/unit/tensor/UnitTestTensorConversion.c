@@ -136,7 +136,7 @@ static void convertOneInt32CodeToSym12(int32_t code) {
     setTensorValues(&intTensor, (uint8_t *)intData, &shape, &intQ, NULL);
 
     symInt32QConfig_t symInt32QConfig;
-    initSymInt32QConfig(HALF_AWAY, &symInt32QConfig);
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &symInt32QConfig, 12);
     quantization_t symInt32Q;
     initSymInt32Quantization(&symInt32QConfig, &symInt32Q);
     int32_t symInt32Data[1] = {0};
@@ -1340,8 +1340,9 @@ static int32_t requantOneSrWithDraw(int32_t in, uint32_t draw) {
 }
 
 void testRequantToScaleSrNeverEmitsBelowQMin() {
-    // #511: a value far below the grid saturates to qMin in the float domain; SR with
-    // u == 0 must not push the code to qMin - 1.
+    // Pins that SR at qMin stays qMin. Under floorf(x + u) the bottom of the grid cannot
+    // undershoot (u >= 0), so no clamp is exercised here; the integer clamp is exercised by
+    // testRequantToScaleSrNeverEmitsAboveQMax.
     TEST_ASSERT_EQUAL_INT32(-2048, requantOneSrWithDraw(-5000, 0x00000001u)); // u == 0
 }
 

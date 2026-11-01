@@ -980,8 +980,20 @@ void testConv1dKernelSymGroupedGuardCountsTheAsymMantissaBitWider(void) {
                              (void)cgRun(511, 1, 1, 12, 12, NULL, 7));
 }
 
+/* A grouped weight wider than int12 used to exit at the validator; now it takes
+ * the checked path (17 bits counted). 30 terms of -2048 x -32768 = 2013265920
+ * fit int32 through two groups; 32 terms (2^31) wrap. */
+void testConv1dKernelSymGroupedGuardWideWeightRunsExactWhenItFitsAndAbortsWhenItWraps(void) {
+    cgFill(30, -2048, -32768, false);
+    TEST_ASSERT_EQUAL_INT32(30 * 67108864, cgRun(30, 1, 1, 12, 16, NULL, 2));
+    cgFill(32, -2048, -32768, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "conv1dKernelSymInt32Grouped",
+                             (void)cgRun(32, 1, 1, 12, 16, NULL, 2));
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testConv1dKernelSymGroupedGuardWideWeightRunsExactWhenItFitsAndAbortsWhenItWraps);
     RUN_TEST(testConv1dKernelSymGroupedGuardCountsTheAsymMantissaBitWider);
     RUN_TEST(testConv1dKernelSymGuardProvenSafeN511RunsExact);
     RUN_TEST(testConv1dKernelSymGuardDiesAtFirstWrappingNChannels);

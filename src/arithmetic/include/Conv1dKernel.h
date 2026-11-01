@@ -48,10 +48,10 @@ void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_
  *  qConfig->roundingMode carries the OP's rounding mode, exactly like
  *  matmulSymInt32TensorsGroupedWeight's `bQC`). `weightGroups` is the
  *  ORIGINAL symQConfig_t of the stored weight tensor (validated: non-NULL,
- *  qBits <= ODT_SYM_OPERAND_QMAXBITS, numGroups > 1 -- the per-tensor
- *  sentinel {1,0} is rejected, shape matches weight's element count via
- *  validateSymQConfigShape). `bias` is NULL-able, SYM_INT32 like the scalar
- *  entry's bias.
+ *  numGroups > 1 -- the per-tensor sentinel {1,0} is rejected, shape matches
+ *  weight's element count via validateSymQConfigShape; any qBits is accepted,
+ *  the accumulator guard in SymAccumGuard.h handles the width). `bias` is NULL-able, SYM_INT32 like
+ * the scalar entry's bias.
  *
  *  Reduction order (per (batch, outChannel, outPos)): the weight's flat
  *  storage index for (oc, icOffset, kernelIdx) is

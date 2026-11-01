@@ -147,6 +147,30 @@ void testRescaledSiteUsesTheSlackedLimit(void) {
     TEST_ASSERT_TRUE(symAccumProvenSafe(&zero));
 }
 
+/* A value sum is a product site with b = 1 bit (|term| <= 2^(q-1)): the proof
+ * boundary of a 16-bit wire is N = 65535, of a 24-bit wire N = 255. */
+void testSumSiteProofBoundaryFollowsWireWidth(void) {
+    symAccumSite_t s16 = symAccumSiteInitSum("sumop", 65535, 16);
+    TEST_ASSERT_TRUE(symAccumProvenSafe(&s16));
+    s16.nMax = 65536;
+    TEST_ASSERT_FALSE(symAccumProvenSafe(&s16));
+    symAccumSite_t s24 = symAccumSiteInitSum("sumop", 255, 24);
+    TEST_ASSERT_TRUE(symAccumProvenSafe(&s24));
+    s24.nMax = 256;
+    TEST_ASSERT_FALSE(symAccumProvenSafe(&s24));
+}
+
+/* The sum banner names the wire width and its own remedies, never the operand
+ * clamp knob that does not govern a stored wire. */
+void testSumSiteBannerNamesWireWidthNotOperandKnob(void) {
+    symAccumSite_t s = symAccumSiteInitSum("sumop", 3, 31);
+    ASSERT_EXITS_WITH_OUTPUT(1, "sumop: SYM int32 accumulator overflow -- N=3 terms",
+                             (void)symAccumAddChecked(INT32_MAX, 1, &s));
+    ASSERT_EXITS_WITH_OUTPUT(1, "value sum of 31-bit codes",
+                             (void)symAccumAddChecked(INT32_MAX, 1, &s));
+    ASSERT_EXITS_WITH_OUTPUT(1, "ARITH_FLOAT32", (void)symAccumAddChecked(INT32_MAX, 1, &s));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testRescaledTermLimitBoundaryIsTheSlackedBound);
@@ -167,5 +191,7 @@ int main(void) {
     RUN_TEST(testBannerNamesNWidthsSeedAndRemedies);
     RUN_TEST(testMacCheckedExactResultAndWideProductAbort);
     RUN_TEST(testProductCheckedAbortsOnlyWhenWideAndOverflowing);
+    RUN_TEST(testSumSiteProofBoundaryFollowsWireWidth);
+    RUN_TEST(testSumSiteBannerNamesWireWidthNotOperandKnob);
     return UNITY_END();
 }

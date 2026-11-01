@@ -2783,6 +2783,52 @@ void testConv1dTransposedWgGuardCheckedPathStaysExactWhenValuesFit(void) {
     TEST_ASSERT_FLOAT_WITHIN(4.f, 4190209.f, wgRun(1, 601, 2047.f, 2047.f, true));
 }
 
+/* SYM bias-grad value sum (F9 follow-up): lossGrad [batch, 1, length] of one code at
+ * declared width `bits`, scale 1, through the public bias-grad entry. The epilogue
+ * rescales the raw sum by 1/4 into a zero grad of scale 4 (float-exact for the sums used
+ * below: every one has <= 24 significant bits), so the stored grad is sum / 4. */
+static int32_t runConv1dTransposedSymBiasGradSum(size_t batch, size_t length, int32_t code,
+                                                 uint8_t bits) {
+    size_t weightDims[] = {1, 1, 2};
+    size_t biasDims[] = {1};
+    size_t lossDims[] = {batch, 1, length};
+    parameter_t *weights = buildSymParam(3, weightDims, NULL);
+    parameter_t *bias = buildSymParam(1, biasDims, NULL);
+    tensor_t *lossGrad = buildSymTensor(3, lossDims, NULL);
+    for (size_t i = 0; i < batch * length; i++) {
+        ((int32_t *)lossGrad->data)[i] = code;
+    }
+    ((symInt32QConfig_t *)lossGrad->quantization->qConfig)->qMaxBits = bits;
+    ((symInt32QConfig_t *)bias->grad->quantization->qConfig)->scale = 4.f;
+
+    kernel_t kernel;
+    initKernel(&kernel, 2, VALID, 1, 1);
+    quantization_t *sq = quantizationInitSymInt32(HALF_AWAY);
+    conv1dTransposedConfig_t cfg;
+    initConv1dTransposedConfigWithWeightsAndBias(&cfg, &kernel, weights, bias, 1, 0, sq, sq, sq,
+                                                 sq);
+    conv1dTransposedCalcBiasGradsSymInt32(&cfg, lossGrad, NULL);
+    return ((int32_t *)bias->grad->data)[0];
+}
+
+/* 16-bit loss wire: N = batch * length = 65535 is proven (N * 2^15 <= INT32_MAX), 65536
+ * takes the checked path; 65536 codes of -32768 sum to exactly INT32_MIN, so the checked
+ * path must not false-abort. batch > 1 so the count really is a product. */
+void testConv1dTransposedBiasGradSymSumProofBoundary16Bit(void) {
+    TEST_ASSERT_EQUAL_INT32(-32768 * 65535 / 4,
+                            runConv1dTransposedSymBiasGradSum(3, 21845, -32768, 16));
+    TEST_ASSERT_EQUAL_INT32(-(1 << 29), runConv1dTransposedSymBiasGradSum(4, 16384, -32768, 16));
+}
+
+/* 31-bit raw-int wire: two codes of 2^30 - 64 sum to 2^31 - 128 (float-exact, unlike
+ * 2^31 - 2, which the rescale epilogue could not return exactly); three codes of
+ * 2^30 - 1 wrap. */
+void testConv1dTransposedBiasGradSymSumWideWireExactThenAborts(void) {
+    TEST_ASSERT_EQUAL_INT32(536870880, runConv1dTransposedSymBiasGradSum(2, 1, (1 << 30) - 64, 31));
+    ASSERT_EXITS_WITH_OUTPUT(1, "value sum of 31-bit",
+                             (void)runConv1dTransposedSymBiasGradSum(3, 1, (1 << 30) - 1, 31));
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testConv1dTransposedWgGuardProvenSafeN511RunsExact);
@@ -2855,5 +2901,7 @@ int main() {
     RUN_TEST(testConv1dTransposedBackwardFloatRejectsWrongPropLossShape);
     RUN_TEST(testConv1dTransposedBackwardBfpRejectsWrongPropLossShape);
     RUN_TEST(testConv1dTransposedBackwardFloatRejectsWrongLossShape);
+    RUN_TEST(testConv1dTransposedBiasGradSymSumProofBoundary16Bit);
+    RUN_TEST(testConv1dTransposedBiasGradSymSumWideWireExactThenAborts);
     return UNITY_END();
 }

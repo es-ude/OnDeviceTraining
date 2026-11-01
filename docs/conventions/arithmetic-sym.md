@@ -246,15 +246,22 @@ only the quantization configs change; the int32 accumulator (no int64) is kept.
   and its grouped twin (`N = inChPerGroup·K`, both accumulators),
   `convTranspose1dKernelSymInt32` and its grouped twin (`N = inChPerGroup·K`
   contributors per output element; the post-scatter bias add is always checked),
-  and the Conv1d / Conv1dTransposed SYM weight-grad scatters (`N = batch ·
-  outputLength` / `batch · inputLength` contributors per weight-grad element).
-  **Not covered — follow-up:** the value-sum accumulators. Reduce
-  (`reduceValidateSymOperand`, which the norm layers' sums go through) and the
-  pools (`poolValidateSymValueSum`) check `N < 2^(32−q)` at run time; the
-  Linear / Conv1d / Conv1dTransposed SYM bias-grad sums do **not** — they rely
-  on code comments about int12/int16-range loss wires and have no run-time
-  check. A `symValidateSumHeadroom` sibling of the BFP `bfpValidateSumHeadroom`
-  would close them. BFP kernels have their own headroom guards.
+  the Conv1d / Conv1dTransposed SYM weight-grad scatters (`N = batch ·
+  outputLength` / `batch · inputLength` contributors per weight-grad element),
+  and the three SYM **bias-grad value sums** (`symAccumSiteInitSum`: the same
+  site with a one-bit second factor, so the proof is `N · 2^(q−1) ≤ INT32_MAX`
+  over the LOSS wire's declared `qMaxBits`; Linear `N = batch`, Conv1d /
+  Conv1dTransposed `N = batch · outputLength` via `checkedMulSize`). A 16-bit
+  loss wire proves `N ≤ 65535`; beyond that the checked twin runs and returns
+  the exact sum or aborts on the first real overflow. The checked path aborts
+  on an **intermediate** overflow even when the final sum would have fit
+  (`a, a, a, -a, -a` on a 31-bit wire): it checks every partial, it does not
+  reason about the order. The value-sum banner names the wire width (`value
+  sum of q-bit codes`) and does not advise `ODT_SYM_OPERAND_QMAXBITS`, which
+  clamps operands, not a stored wire. **Not covered:** the other value-sum
+  accumulators. Reduce (`reduceValidateSymOperand`, which the norm layers' sums
+  go through) and the pools (`poolValidateSymValueSum`) still check `N <
+  2^(32−q)` themselves. BFP kernels have their own headroom guards.
 - Note: a weightGrad product's two operands are the forward input and the
   lossGrad (dx) wire, each at its own tensor's `qMaxBits` (the weight-grad
   guard reads exactly those two widths). By default both are int12: a FLOAT32

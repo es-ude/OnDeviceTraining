@@ -17,6 +17,7 @@
 #include "Linear.h"
 #include "Matmul.h"
 #include "Rounding.h"
+#include "SymAccumGuard.h"
 #include "TensorConversion.h"
 
 void linearInitConfig(linearConfig_t *linearConfig, parameter_t *weights, parameter_t *bias,
@@ -286,24 +287,58 @@ void linearCalcWeightGradsSymInt32(tensor_t *loss, tensor_t *forwardInput, tenso
     transposeTensor(loss, 1, 0);
 }
 
+/* Per-feature batch sum of loss codes. The loop body is instantiated twice
+ * (SymAccumGuard.h): unchanged when the loss wire's declared width proves the
+ * sum fits int32, overflow-checked otherwise. */
+SYM_ACCUM_ALWAYS_INLINE void linearBiasGradSumLoops(const int32_t *l, int32_t *bg,
+                                                    size_t numFeatures, size_t batch,
+                                                    const bool checked,
+                                                    const symAccumSite_t *site) {
+    for (size_t f = 0; f < numFeatures; f++) {
+        int32_t sum = 0;
+        for (size_t n = 0; n < batch; n++) {
+            sum = symAdd(sum, l[n * numFeatures + f], checked, site);
+        }
+        bg[f] = sum;
+    }
+}
+
+SYM_ACCUM_NOINLINE void linearBiasGradSumLoopsSafe(const int32_t *l, int32_t *bg,
+                                                   size_t numFeatures, size_t batch,
+                                                   const symAccumSite_t *site) {
+    linearBiasGradSumLoops(l, bg, numFeatures, batch, false, site);
+}
+
+SYM_ACCUM_NOINLINE void linearBiasGradSumLoopsChecked(const int32_t *l, int32_t *bg,
+                                                      size_t numFeatures, size_t batch,
+                                                      const symAccumSite_t *site) {
+    linearBiasGradSumLoops(l, bg, numFeatures, batch, true, site);
+}
+
 void linearCalcBiasGradsSymInt32(tensor_t *biasGrads, tensor_t *loss) {
     /* Raw emit: per-feature batch sums of loss mantissas, at the LOSS scale.
      * The executeOp OUT_ACC_FIXED_SCALE epilogue rescales into the persistent
      * grad's existing scale and integer-adds (Deutel-adjacent ODT scheme). */
     size_t numFeatures = calcNumberOfElementsByTensor(biasGrads);
     size_t numLoss = calcNumberOfElementsByTensor(loss);
-    size_t batch = (numFeatures == 0) ? 0 : numLoss / numFeatures;
+    if (numFeatures == 0 || numLoss % numFeatures != 0) {
+        PRINT_ERROR("linearCalcBiasGradsSymInt32: loss elements %zu not divisible by features %zu",
+                    numLoss, numFeatures);
+        exit(1);
+    }
+    size_t batch = numLoss / numFeatures;
     int32_t *bg = (int32_t *)biasGrads->data;
     int32_t *l = (int32_t *)loss->data;
-    for (size_t f = 0; f < numFeatures; f++) {
-        /* int32 accumulator (NO int64 in SYM paths): loss mantissas are
-         * int16-range per the qMaxBits<=16 contract, so the batch sum stays
-         * within int32 for any batch <= 65536 - far beyond any real batch. */
-        int32_t sum = 0;
-        for (size_t n = 0; n < batch; n++) {
-            sum += l[n * numFeatures + f];
-        }
-        bg[f] = sum;
+    /* int32 accumulator (NO int64 in SYM paths). The loss wire's declared
+     * qMaxBits bounds each code, so N * 2^(q-1) <= INT32_MAX proves the batch
+     * sum safe (16-bit wire: batch <= 65535); a wider wire or longer batch runs
+     * the checked twin, which aborts on the first real overflow. */
+    uint8_t lossBits = ((symInt32QConfig_t *)loss->quantization->qConfig)->qMaxBits;
+    symAccumSite_t site = symAccumSiteInitSum("linearCalcBiasGradsSymInt32", batch, lossBits);
+    if (symAccumProvenSafe(&site)) {
+        linearBiasGradSumLoopsSafe(l, bg, numFeatures, batch, &site);
+    } else {
+        linearBiasGradSumLoopsChecked(l, bg, numFeatures, batch, &site);
     }
     ((symInt32QConfig_t *)biasGrads->quantization->qConfig)->scale =
         ((symInt32QConfig_t *)loss->quantization->qConfig)->scale;

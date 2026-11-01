@@ -41,9 +41,15 @@
  *     else                           { loops(true,  &site); }
  * with `loops` a static inline always_inline function whose `checked`
  * argument is a compile-time constant at both call sites, and the step
- * `acc = symMac(acc, a, b, checked, &site)`. Out of scope: value-sum
- * accumulators; Reduce and the pools check N < 2^(32-q) themselves, the
- * Linear / Conv bias-grad sums have no run-time guard yet (follow-up).
+ * `acc = symMac(acc, a, b, checked, &site)`.
+ *
+ * VALUE SUMS (acc += code, no product): symAccumSiteInitSum is the same site
+ * with b = 1 bit, so the proof reads N * 2^(q-1) <= INT32_MAX, and the loop
+ * step is `acc = symAdd(acc, code, checked, &site)`. Used by the Linear /
+ * Conv1d / Conv1dTransposed bias-grad sums. The checked loop aborts on the
+ * first INTERMEDIATE overflow even when the final sum would have fit (a
+ * mixed-sign run can leave int32 and come back); the proven loop never
+ * overflows. Reduce and the pools still check N < 2^(32-q) themselves.
  * Header-only static inline, like BfpKernelSupport.h. */
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -71,6 +77,7 @@ typedef struct symAccumSite {
     uint64_t maxAbsSeed; /* max |seed|, up to 2^31 for INT32_MIN */
     bool wideProduct;    /* either width > 16: |a*b| may leave int32 */
     bool rescaled;       /* terms are float-rescaled partials: use the slacked bound */
+    bool valueSum;       /* plain sum of stored codes (banner names the wire, not the knob) */
 } symAccumSite_t;
 
 /* max |seed[i]| as an unsigned magnitude (INT32_MIN -> 2^31). NULL / n == 0 -> 0. */
@@ -128,7 +135,16 @@ static inline symAccumSite_t symAccumSiteInit(const char *op, size_t nMax, uint8
                         .bBits = bBits,
                         .maxAbsSeed = maxAbsSeed,
                         .wideProduct = aBits > 16 || bBits > 16,
-                        .rescaled = false};
+                        .rescaled = false,
+                        .valueSum = false};
+    return s;
+}
+
+/* Site for a plain sum of N stored codes of declared width `bits` (no product,
+ * no seed): the product bound with a one-bit second factor. */
+static inline symAccumSite_t symAccumSiteInitSum(const char *op, size_t nMax, uint8_t bits) {
+    symAccumSite_t s = symAccumSiteInit(op, nMax, bits, 1, 0);
+    s.valueSum = true;
     return s;
 }
 
@@ -152,6 +168,14 @@ static inline bool symAccumProvenSafe(const symAccumSite_t *s) {
 
 /* Unconditional (all builds): the exit(1) stays even where PRINT_ERROR compiles out. */
 static inline void symAccumAbort(const symAccumSite_t *s) {
+    if (s->valueSum) {
+        /* The summed wire is stored, so ODT_SYM_OPERAND_QMAXBITS (an operand clamp) is no lever. */
+        PRINT_ERROR("%s: SYM int32 accumulator overflow -- N=%zu terms, value sum of %u-bit "
+                    "codes; narrow the producing wire's qMaxBits or run this op under "
+                    "ARITH_FLOAT32",
+                    s->op, s->nMax, (unsigned)s->aBits);
+        exit(1);
+    }
     PRINT_ERROR("%s: SYM int32 accumulator overflow -- N=%zu terms, operand widths (%u, %u), "
                 "max|seed|=%zu; narrow ODT_SYM_OPERAND_QMAXBITS (one lever) or run this op "
                 "under ARITH_FLOAT32",

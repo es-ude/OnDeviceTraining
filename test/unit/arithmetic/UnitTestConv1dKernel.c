@@ -991,8 +991,33 @@ void testConv1dKernelSymGroupedGuardWideWeightRunsExactWhenItFitsAndAbortsWhenIt
                              (void)cgRun(32, 1, 1, 12, 16, NULL, 2));
 }
 
+/* See the Matmul twin: two groups of 40 terms, raw partials 1342136320 (above
+ * the #189 reserve, inside int32). */
+static void wideGroupedFill(bool secondGroupNegative) {
+    cgFill(80, 1024, 32767, false);
+    if (secondGroupNegative) {
+        for (size_t i = 40; i < 80; i++) {
+            gCgW[i] = -32767;
+        }
+        gCgW[79] = 0;
+    }
+}
+
+void testConv1dKernelSymGroupedWidePartialAboveSeedGuardRunsExactWhenSumFits(void) {
+    wideGroupedFill(true);
+    TEST_ASSERT_EQUAL_INT32(1024 * 32767, cgRun(80, 1, 1, 12, 16, NULL, 2));
+}
+
+void testConv1dKernelSymGroupedWidePartialSumThatWrapsHitsTheF9Guard(void) {
+    wideGroupedFill(false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "conv1dKernelSymInt32Grouped (rescaled accumulator)",
+                             (void)cgRun(80, 1, 1, 12, 16, NULL, 2));
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testConv1dKernelSymGroupedWidePartialAboveSeedGuardRunsExactWhenSumFits);
+    RUN_TEST(testConv1dKernelSymGroupedWidePartialSumThatWrapsHitsTheF9Guard);
     RUN_TEST(testConv1dKernelSymGroupedGuardWideWeightRunsExactWhenItFitsAndAbortsWhenItWraps);
     RUN_TEST(testConv1dKernelSymGroupedGuardCountsTheAsymMantissaBitWider);
     RUN_TEST(testConv1dKernelSymGuardProvenSafeN511RunsExact);

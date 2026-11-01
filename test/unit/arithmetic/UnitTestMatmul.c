@@ -1858,9 +1858,36 @@ void testMatmulGroupedGuardWideWeightRunsExactWhenItFitsAndAbortsWhenItWraps(voi
                              (void)guardGroupedDotBits(128, 2, 16));
 }
 
+/* Two groups of 40 terms of 1024 x 32767: each raw partial is 1342136320, above
+ * the #189 seed guard's 1.07e9 reserve but inside int32. Group 2 negated with one
+ * zero term: the sum fits (1024 * 32767) and every value survives the float
+ * rescale exactly. Both positive: the running accumulator wraps. */
+static void wideGroupedFill(bool secondGroupNegative) {
+    guardFill(80, 1024, 32767, false);
+    if (secondGroupNegative) {
+        for (size_t i = 40; i < 80; i++) {
+            gGuardB[i] = -32767;
+        }
+        gGuardB[79] = 0;
+    }
+}
+
+void testMatmulGroupedWidePartialAboveSeedGuardRunsExactWhenSumFits(void) {
+    wideGroupedFill(true);
+    TEST_ASSERT_EQUAL_INT32(1024 * 32767, guardGroupedDotBits(80, 2, 16));
+}
+
+void testMatmulGroupedWidePartialSumThatWrapsHitsTheF9Guard(void) {
+    wideGroupedFill(false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "matmul SYM_INT32 grouped (rescaled accumulator)",
+                             (void)guardGroupedDotBits(80, 2, 16));
+}
+
 int main(void) {
 
     UNITY_BEGIN();
+    RUN_TEST(testMatmulGroupedWidePartialAboveSeedGuardRunsExactWhenSumFits);
+    RUN_TEST(testMatmulGroupedWidePartialSumThatWrapsHitsTheF9Guard);
     RUN_TEST(testMatmulSymGuardWiderOperandRunsExactWhenItFitsAndAbortsWhenItWraps);
     RUN_TEST(testMatmulGroupedGuardWideWeightRunsExactWhenItFitsAndAbortsWhenItWraps);
     RUN_TEST(testMatmulGroupedGuardCountsTheAsymMantissaBitWider);

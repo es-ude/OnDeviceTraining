@@ -394,7 +394,7 @@ matmulGroupedLoops(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,
                          * (one rounding here, honoring the caller's rounding
                          * mode — never hardcoded). */
                         acc = symAdd(acc,
-                                     rescaleIntoAccumulatorScale(
+                                     rescalePartialIntoAccumulatorScale(
                                          partial, aScale * weightGroups->scales[currentGroup], sAcc,
                                          roundingMode, rs),
                                      checked, accSite);
@@ -423,7 +423,7 @@ matmulGroupedLoops(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,
              * their ONLY combine. */
             if (currentGroup != SIZE_MAX) {
                 acc = symAdd(acc,
-                             rescaleIntoAccumulatorScale(
+                             rescalePartialIntoAccumulatorScale(
                                  partial, aScale * weightGroups->scales[currentGroup], sAcc,
                                  roundingMode, rs),
                              checked, accSite);

@@ -75,7 +75,7 @@ from):
 | FLOAT32 | dynamic absmax encode above, **per tensor** (one scale for the whole operand, not per sample or row), rounded by the op's `arithmetic.roundingMode` | `absMax / qMax` | `ODT_SYM_OPERAND_QMAXBITS` (the `initSymInt32QConfig` default, 12) |
 | SYM, per-tensor | sign-extend the packed codes (`convertSymTensorToSymInt32Tensor`) | copied | `qBits` |
 | ASYM, per-tensor | `code − zp` (`convertAsymTensorToSymInt32Tensor`) | copied | `qBits + 1` (the difference spans `±(2^qBits − 1)`) |
-| INT32 | raw copy, unclamped (`convertInt32TensorToSymInt32Tensor`) | 1 | 32 (full two's-complement range) |
+| INT32 | raw copy, unclamped (`convertInt32TensorToSymInt32Tensor`) | 1 | 32 (full two's-complement range), declared by the funnel on its op-local scratch only; the public conversion cell leaves the destination's width untouched (a width > 31 would break `getQLike` and the requantizers' int32 clamp casts), so a user tensor produced by it understates its codes — follow-up |
 | SYM_INT32 | used in place | its own | its own |
 | SYM / ASYM, grouped | unpacked in the prologue (ASYM: `code − zp[g]`); consumed by the group-aware kernels, per-group scales via their own ctx | poisoned to 1 | `qBits`, counted **one bit wider** in the kernels' bound |
 

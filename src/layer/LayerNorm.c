@@ -382,7 +382,10 @@ static void layerNormForwardSymInt32(layerNormConfig_t *cfg, tensor_t *gamma, te
                 size_t inOff = layerNormPhysOffset(input, cfg->numNormDims, g, j);
                 float n = ((float)in[inOff] * inScale - mean[g]) * invSigma[g];
                 size_t outOff = layerNormPhysOffset(output, cfg->numNormDims, g, j);
-                out[outOff] = roundByMode(clamp(n * K, qMin, qMax), outQC->roundingMode, rs);
+                /* the integer clamp after the round keeps an SR draw on the grid (#511) */
+                out[outOff] =
+                    clampInt32(roundByMode(clamp(n * K, qMin, qMax), outQC->roundingMode, rs),
+                               (int32_t)qMin, (int32_t)qMax);
             }
         }
     }
@@ -821,8 +824,9 @@ static void layerNormBackwardSymInt32(layerNormConfig_t *cfg, tensor_t *forwardI
                 float dn = ((float)dyq[dyoff] * dyScale) * ((float)gammaQ[j] * gammaScale);
                 float dxv = invSigma[g] * (dn - meanDn - nval * meanDnN);
                 size_t dxoff = layerNormPhysOffset(propLoss, cfg->numNormDims, g, j);
-                dxq[dxoff] =
-                    roundByMode(clamp(dxv / dxScale, qMin, qMax), plQC->roundingMode, dxStream);
+                dxq[dxoff] = clampInt32(
+                    roundByMode(clamp(dxv / dxScale, qMin, qMax), plQC->roundingMode, dxStream),
+                    (int32_t)qMin, (int32_t)qMax);
             }
         }
         plQC->scale = dxScale;

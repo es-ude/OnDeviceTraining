@@ -30,6 +30,7 @@ add_elastic_ai_unit_test(
         StorageApi
         RNG
         odt_test_death
+        odt_test_rng_pin
 )
 set(GEN_REQUANT_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_requant.h)
 add_custom_command(

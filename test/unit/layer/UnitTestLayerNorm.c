@@ -3746,8 +3746,117 @@ void testLayerNormSymDxRoundsWithItsNormDxStream(void) {
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, NORM_DX_N);
 }
 
+/* ---- SR code stays on the grid (#511 follow-up) ---- */
+
+/* The seed under which op 0 of FORWARD opens its kernel stream on a near-1 draw
+ * (or the NORM_DX stream of BACKWARD does): searched, since the key is a hash chain. */
+static uint32_t layerNormKernelStateOfSeed(uint64_t seed) {
+    return keyedOpKernelState(seed, RNG_TAG_FORWARD, 0u);
+}
+static uint32_t layerNormNormDxStateOfSeed(uint64_t seed) {
+    return keyedPurposeStream(seed, RNG_TAG_BACKWARD, RNG_TAG_NORM_DX).state;
+}
+
+/* x = +-1 at scale 1 over one group of 16 (mean 0, variance 1, eps 0): every
+ * normalized value is +-1 and absmax 1, so K = qMax and element 0 sits exactly
+ * on qMax = 2047. Its draw u >= 1 - 2^-16 makes 2047 + u round to 2048 in the
+ * float32 add; only the integer clamp after the round keeps the code on the
+ * grid. The kernel's raw output is q * gammaCode (beta 0), read off the
+ * SYM->SYM epilogue cell, so a code of 2048 shows as 2048 * gammaCode. */
+void testLayerNormSymForwardSrKeepsSaturatedCodeOnTheGrid(void) {
+    size_t dims[] = {1, NORM_DX_N};
+    size_t ns[] = {NORM_DX_N};
+    float ones[NORM_DX_N];
+    for (size_t j = 0; j < NORM_DX_N; j++) {
+        ones[j] = 1.0f;
+    }
+    tensor_t *x = buildSymCodes(2, dims, kNormDxX, 1.0f, HALF_AWAY, 12);
+    tensor_t *out = buildSymCodes(2, dims, NULL, 1.0f, HALF_AWAY, 12);
+    parameter_t *gamma = buildSymParam(1, ns, ones);
+    parameter_t *beta = buildSymParam(1, ns, NULL);
+    size_t *normShape = reserveMemory(sizeof(size_t));
+    normShape[0] = NORM_DX_N;
+    quantization_t *fq = quantizationInitSymInt32(SR_HALF_AWAY);
+    quantization_t *bq = quantizationInitSymInt32(HALF_AWAY);
+    layerNormConfig_t cfg;
+    initLayerNormConfig(&cfg, gamma, beta, normShape, 1, 0.0f, fq, bq);
+    layerConfig_t lcfg;
+    layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
+    const uint64_t seed =
+        keyedFindSeedWithFirstDraw(layerNormKernelStateOfSeed, KEYED_NEAR_ONE_DRAW);
+    const layerExec_t exec = {.key = rngKeyFromSeed(seed)};
+    const int32_t gammaCode = ((int32_t *)gamma->param->data)[0];
+
+    keyedRawCaptureInstall(SYM_INT32, SYM_INT32);
+    layerFunctions[LAYERNORM].forward(&layer, x, out, &exec);
+    keyedRawCaptureRestore();
+    const int32_t raw0 = keyedRawCapture()->codes[0];
+    const size_t rawN = keyedRawCapture()->n;
+
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeReservedMemory(normShape);
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(out);
+    freeTensor(x);
+
+    TEST_ASSERT_EQUAL_size_t(NORM_DX_N, rawN);
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(2047 * gammaCode, raw0, "element 0 stays on qMax");
+}
+
+/* x = +-1, gamma = 1 and dy in +-pairs, so dx = dy exactly; dy[0] = 2047 at
+ * scale 1 gives the dx scale 1 and dx[0] exactly qMax. Its NORM_DX draw is
+ * near 1: 2047 + u rounds to 2048 without the clamp. */
+static const int32_t kNormDxDySat[NORM_DX_N] = {2047, -2047, 77, -77, 13,  -13,  201, -201,
+                                                55,   -55,   3,  -3,  149, -149, 99,  -99};
+
+void testLayerNormSymDxSrKeepsSaturatedCodeOnTheGrid(void) {
+    size_t dims[] = {1, NORM_DX_N};
+    size_t ns[] = {NORM_DX_N};
+    tensor_t *x = buildSymCodes(2, dims, kNormDxX, 1.0f, HALF_AWAY, 12);
+    tensor_t *dy = buildSymCodes(2, dims, kNormDxDySat, 1.0f, HALF_AWAY, 12);
+    tensor_t *dx = buildSymCodes(2, dims, NULL, 1.0f, SR_HALF_AWAY, 12);
+    parameter_t *gamma = buildSymParam(1, ns, NULL);
+    parameter_t *beta = buildSymParam(1, ns, NULL);
+    for (size_t j = 0; j < NORM_DX_N; j++) {
+        ((int32_t *)gamma->param->data)[j] = 1;
+    }
+    ((symInt32QConfig_t *)gamma->param->quantization->qConfig)->scale = 1.0f;
+    size_t *normShape = reserveMemory(sizeof(size_t));
+    normShape[0] = NORM_DX_N;
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *bq = quantizationInitSymInt32(HALF_AWAY);
+    layerNormConfig_t cfg;
+    initLayerNormConfig(&cfg, gamma, beta, normShape, 1, 0.0f, fq, bq);
+    cfg.frozen = true;
+    layerConfig_t lcfg;
+    layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
+    const uint64_t seed =
+        keyedFindSeedWithFirstDraw(layerNormNormDxStateOfSeed, KEYED_NEAR_ONE_DRAW);
+    const layerExec_t exec = {.key = rngKeyFromSeed(seed)};
+
+    layerFunctions[LAYERNORM].backward(&layer, x, dy, dx, &exec);
+
+    const int32_t dx0 = ((int32_t *)dx->data)[0];
+    const float dxScale = symScaleOf(dx);
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeReservedMemory(normShape);
+    freeParameter(beta);
+    freeParameter(gamma);
+    freeTensor(dx);
+    freeTensor(dy);
+    freeTensor(x);
+
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, dxScale);
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(2047, dx0, "dx[0] stays on qMax");
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testLayerNormSymForwardSrKeepsSaturatedCodeOnTheGrid);
+    RUN_TEST(testLayerNormSymDxSrKeepsSaturatedCodeOnTheGrid);
     RUN_TEST(testConfigStructIsPopulated);
     RUN_TEST(testCalcOutputShapeIsIdentity);
     RUN_TEST(testForwardFloatSingleGroup);

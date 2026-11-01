@@ -5,6 +5,7 @@
 
 #include "DeathTest.h"
 #include "RNG.h"
+#include "RngPinnedDraw.h"
 #include "Rounding.h"
 #include "unity.h"
 
@@ -101,30 +102,13 @@ void testRoundByModeSrDrawsOneUnitFloatFromItsStream() {
     TEST_ASSERT_EQUAL_HEX32(oneStepOn.state, rs.state);
 }
 
-/* Inverse of one rngNextU32 step (xorshift32 13/17/5): the state whose NEXT draw is `draw`.
- * Pins the SR uniform exactly. srStreamWithDraw verifies the inversion on every use. */
-static uint32_t stateWhoseNextDrawIs(uint32_t draw) {
-    uint32_t b = draw ^ (draw << 5) ^ (draw << 10) ^ (draw << 15) ^ (draw << 20) ^ (draw << 25) ^
-                 (draw << 30);
-    uint32_t a = b ^ (b >> 17);
-    return a ^ (a << 13) ^ (a << 26);
-}
-
-static rngStream_t srStreamWithDraw(uint32_t draw) {
-    const uint32_t state = stateWhoseNextDrawIs(draw);
-    TEST_ASSERT_NOT_EQUAL_UINT32(0u, state);
-    rngStream_t probe = rngOpen((rngKey_t){{state, 0u}});
-    TEST_ASSERT_EQUAL_UINT32(draw, rngNextU32(&probe));
-    return rngOpen((rngKey_t){{state, 0u}});
-}
-
 /* #510: with u == 0 the SR sum x + u is x itself, so an exactly representable
  * code must come back unchanged on both sides of zero (the old
  * round(x + u - 0.5) formula sent every k <= 0 to k - 1). */
 void testRoundByModeSrWithZeroDrawKeepsExactIntegers() {
     const float values[] = {0.f, -3.f, -2048.f, 3.f, -2047.f, 2047.f};
     for (size_t i = 0; i < sizeof values / sizeof values[0]; i++) {
-        rngStream_t rs = srStreamWithDraw(0x00000001u); /* top 24 bits 0: u == 0 */
+        rngStream_t rs = rngStreamWithNextDraw(0x00000001u); /* top 24 bits 0: u == 0 */
         TEST_ASSERT_EQUAL_INT32((int32_t)values[i], roundByMode(values[i], SR_HALF_AWAY, &rs));
     }
 }
@@ -132,7 +116,7 @@ void testRoundByModeSrWithZeroDrawKeepsExactIntegers() {
 /* x + u = -0.25 + 0.25 = 0 exactly: a non-integer input whose dithered sum
  * lands on an integer takes that integer. */
 void testRoundByModeSrSumOnIntegerTakesTheInteger() {
-    rngStream_t rs = srStreamWithDraw(0x40000000u); /* top 24 bits 0x400000: u == 0.25 */
+    rngStream_t rs = rngStreamWithNextDraw(0x40000000u); /* top 24 bits 0x400000: u == 0.25 */
     TEST_ASSERT_EQUAL_INT32(0, roundByMode(-0.25f, SR_HALF_AWAY, &rs));
 }
 

@@ -3,6 +3,7 @@
 #include "Quantization.h"
 #include "QuantizationApi.h"
 #include "RNG.h"
+#include "RngPinnedDraw.h"
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
@@ -1308,23 +1309,9 @@ void testRequantToScaleSaturatesAtQMinQMax() {
     TEST_ASSERT_EQUAL_FLOAT(targetScale_requant_f6ToScaleSat, outQc.scale);
 }
 
-/* Inverse of one rngNextU32 step (xorshift32 13/17/5): the state whose NEXT draw is `draw`.
- * Lets a test pin the SR uniform exactly; verified by the caller before use. */
-static uint32_t stateWhoseNextDrawIs(uint32_t draw) {
-    uint32_t b = draw ^ (draw << 5) ^ (draw << 10) ^ (draw << 15) ^ (draw << 20) ^ (draw << 25) ^
-                 (draw << 30);
-    uint32_t a = b ^ (b >> 17);
-    return a ^ (a << 13) ^ (a << 26);
-}
-
 /* One-element fixed-scale requant at int12, scale 1 -> 1, under SR_HALF_AWAY with the
  * stream's next draw pinned to `draw`. */
 static int32_t requantOneSrWithDraw(int32_t in, uint32_t draw) {
-    const uint32_t state = stateWhoseNextDrawIs(draw);
-    TEST_ASSERT_NOT_EQUAL_UINT32(0u, state);
-    rngStream_t probe = rngOpen((rngKey_t){{state, 0u}});
-    TEST_ASSERT_EQUAL_UINT32(draw, rngNextU32(&probe)); // helper cannot be silently wrong
-
     size_t dims[] = {1};
     size_t orderOfDims[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
@@ -1347,7 +1334,7 @@ static int32_t requantOneSrWithDraw(int32_t in, uint32_t draw) {
     tensor_t outTensor;
     setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
 
-    rngStream_t rs = rngOpen((rngKey_t){{state, 0u}});
+    rngStream_t rs = rngStreamWithNextDraw(draw);
     requantSymInt32TensorToScale(&inTensor, &outTensor, &rs);
     return outData[0];
 }

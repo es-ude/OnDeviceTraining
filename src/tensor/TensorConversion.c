@@ -591,11 +591,13 @@ void requantSymInt32TensorToScale(tensor_t *inputTensor, tensor_t *outputTensor,
     int32_t *outputInt32 = (int32_t *)outputTensor->data;
 
     /* single same-index read-then-write pass — shared-buffer in-place safe;
-     * clamp saturates at qMin/qMax BY DESIGN (Deutel Eq. 4 analog) */
+     * clamp saturates at qMin/qMax BY DESIGN (Deutel Eq. 4 analog); the integer
+     * clamp after the rounding keeps an SR draw on the grid (#511) */
     for (size_t i = 0; i < numberOfElements; i++) {
-        outputInt32[i] =
+        outputInt32[i] = clampInt32(
             roundByMode(clamp(((float)inputInt32[i] * inScale) / targetScale, qMin, qMax),
-                        outputSymInt32QC->roundingMode, rs);
+                        outputSymInt32QC->roundingMode, rs),
+            (int32_t)qMin, (int32_t)qMax);
     }
 }
 

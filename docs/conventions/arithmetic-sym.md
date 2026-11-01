@@ -54,13 +54,13 @@ grid (`clampInt32(..., qMin, qMax)`).
   (`round(-qMax - 0.5) = qMin`), which the clamp keeps in range.
 - *Fixed-scale requant* (`requantSymInt32TensorToScale`, #192 D1 "requant into
   a preset target scale"): the output scale must already be set and `> 0`
-  (else `exit(1)`); each element is `roundByMode(clamp((float)code · inScale /
-  targetScale, qMin, qMax))`, so out-of-grid values **saturate** to the
-  two's-complement grid, and this is how `qMin` becomes reachable under
-  `HALF_AWAY`. The clamp is in the float domain *before* the rounding and is not
-  repeated afterwards, so under `SR_HALF_AWAY` a value saturated at `qMin` can
-  round one step past it (`u == 0`: `round(qMin - 0.5) = qMin - 1`). The
-  primitive is called directly; it is not a `conversionMatrix` cell.
+  (else `exit(1)`); each element is `clampInt32(roundByMode(clamp((float)code ·
+  inScale / targetScale, qMin, qMax)), qMin, qMax)`, so out-of-grid values
+  **saturate** to the two's-complement grid, and this is how `qMin` becomes
+  reachable under `HALF_AWAY`. The float-domain clamp bounds the value fed to
+  the rounding; the integer clamp after it (as at every other SYM_INT32 emit
+  site) keeps an SR draw from leaving the grid (#511: without it,
+  `u == 0` at `qMin` gave `qMin - 1`). The primitive is called directly; it is not a `conversionMatrix` cell.
 - The `OUT_ACC_FIXED_SCALE` epilogue (`rescaleIntoAccumulatorScale`) does not
   clamp at all (see "Quantized gradient accumulation").
 

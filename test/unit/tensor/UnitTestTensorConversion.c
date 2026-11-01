@@ -1267,6 +1267,62 @@ void testRequantToScaleSaturatesAtQMinQMax() {
     TEST_ASSERT_EQUAL_FLOAT(targetScale_requant_f6ToScaleSat, outQc.scale);
 }
 
+/* Inverse of one rngNextU32 step (xorshift32 13/17/5): the state whose NEXT draw is `draw`.
+ * Lets a test pin the SR uniform exactly; verified by the caller before use. */
+static uint32_t stateWhoseNextDrawIs(uint32_t draw) {
+    uint32_t b = draw ^ (draw << 5) ^ (draw << 10) ^ (draw << 15) ^ (draw << 20) ^ (draw << 25) ^
+                 (draw << 30);
+    uint32_t a = b ^ (b >> 17);
+    return a ^ (a << 13) ^ (a << 26);
+}
+
+/* One-element fixed-scale requant at int12, scale 1 -> 1, under SR_HALF_AWAY with the
+ * stream's next draw pinned to `draw`. */
+static int32_t requantOneSrWithDraw(int32_t in, uint32_t draw) {
+    const uint32_t state = stateWhoseNextDrawIs(draw);
+    TEST_ASSERT_NOT_EQUAL_UINT32(0u, state);
+    rngStream_t probe = rngOpen((rngKey_t){{state, 0u}});
+    TEST_ASSERT_EQUAL_UINT32(draw, rngNextU32(&probe)); // helper cannot be silently wrong
+
+    size_t dims[] = {1};
+    size_t orderOfDims[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
+
+    symInt32QConfig_t inQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &inQc, 12);
+    inQc.scale = 1.f;
+    quantization_t inQ;
+    initSymInt32Quantization(&inQc, &inQ);
+    int32_t inData[1] = {in};
+    tensor_t inTensor;
+    setTensorValues(&inTensor, (uint8_t *)inData, &shape, &inQ, NULL);
+
+    symInt32QConfig_t outQc;
+    initSymInt32QConfigWithQMaxBits(SR_HALF_AWAY, &outQc, 12);
+    outQc.scale = 1.f;
+    quantization_t outQ;
+    initSymInt32Quantization(&outQc, &outQ);
+    int32_t outData[1];
+    tensor_t outTensor;
+    setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    rngStream_t rs = rngOpen((rngKey_t){{state, 0u}});
+    requantSymInt32TensorToScale(&inTensor, &outTensor, &rs);
+    return outData[0];
+}
+
+void testRequantToScaleSrNeverEmitsBelowQMin() {
+    // #511: a value far below the grid saturates to qMin in the float domain; SR with
+    // u == 0 must not push the code to qMin - 1.
+    TEST_ASSERT_EQUAL_INT32(-2048, requantOneSrWithDraw(-5000, 0x00000001u)); // u == 0
+}
+
+void testRequantToScaleSrNeverEmitsAboveQMax() {
+    // #511: saturated to qMax = 2047, then u = 1 - 2^-24: the float32 add 2047 + u rounds to
+    // 2048, so only the integer clamp keeps the code on the grid (under either SR formula).
+    TEST_ASSERT_EQUAL_INT32(2047, requantOneSrWithDraw(5000, 0xFFFFFFFFu));
+}
+
 void testRequantToScaleSharedBufferAliasMatchesGold() {
     // In-place for the fixed-scale variant = SHARED DATA BUFFER with two
     // tensor_t views, each with its OWN qConfig (input scale vs pre-set
@@ -7954,6 +8010,8 @@ int main(void) {
     RUN_TEST(testConvertTensorSymInt32SameTypeKeepsCopySemantics);
     RUN_TEST(testRequantToScaleNonSaturatingMatchesGold);
     RUN_TEST(testRequantToScaleSaturatesAtQMinQMax);
+    RUN_TEST(testRequantToScaleSrNeverEmitsBelowQMin);
+    RUN_TEST(testRequantToScaleSrNeverEmitsAboveQMax);
     RUN_TEST(testRequantToScaleSharedBufferAliasMatchesGold);
     RUN_TEST(testConversionBoolBoolCopiesOnlyPackedBytes);
     RUN_TEST(testConversionSymInt32SameTypeCopyPropagatesScale);

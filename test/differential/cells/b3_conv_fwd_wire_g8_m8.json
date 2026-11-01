@@ -1,0 +1,61 @@
+{
+  "name": "b3_conv_fwd_wire_g8_m8",
+  "description": "B3 Conv1d forward onto a grouped BFP wire (m8 e8 gs 8), per-tensor operands (single-segment raw): per-group exponent derivation on a conv wire.",
+  "family": "bfp_gemm",
+  "op": "conv1d",
+  "direction": "forward",
+  "tiers": [
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "geometry": {
+    "kernelSize": 3,
+    "padding": "VALID"
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3206,
+    "batch": 2,
+    "cin": 4,
+    "length": 12,
+    "cout": 4,
+    "kernelSize": 3,
+    "input": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 2.0,
+      "expSpread": 0
+    },
+    "weight": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.25,
+      "expSpread": 0
+    },
+    "bias": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.1,
+      "expSpread": 0
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED"
+  },
+  "output": {
+    "dtype": "BFP",
+    "m": 8,
+    "e": 8,
+    "groupSize": 8
+  }
+}

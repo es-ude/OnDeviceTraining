@@ -1,0 +1,48 @@
+{
+  "name": "s1y_fwd_int12_seed_n511_b2",
+  "description": "F9 checked path via the SEED term: B=2 inF=511 outF=4 (511*2^22 alone is provable) with a large bias seed (|seed| ~ 1e7..1e8 from a coarse bias scale), so N*2^22 + max|seed| > INT32_MAX and the checked loop runs; random signs keep the values inside int32: EXACT.",
+  "op": "linear",
+  "direction": "forward",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "SYM_INT32",
+    "rounding": "HALF_AWAY"
+  },
+  "outputBits": 12,
+  "fixture": {
+    "type": "linear_grid",
+    "inputStorage": "FLOAT32",
+    "weightStorage": "SYM_INT32",
+    "weightBits": 12,
+    "bias": true,
+    "seed": 702,
+    "batch": 2,
+    "inF": 511,
+    "outF": 4,
+    "absmaxRanges": {
+      "input": [
+        1.0,
+        1.0
+      ],
+      "weight": [
+        1.0,
+        1.0
+      ],
+      "bias": [
+        10.0,
+        12.0
+      ]
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED",
+    "guardPath": "checked"
+  }
+}

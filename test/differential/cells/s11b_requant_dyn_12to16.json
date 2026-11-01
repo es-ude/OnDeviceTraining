@@ -1,0 +1,29 @@
+{
+  "name": "s11b_requant_dyn_12to16",
+  "description": "S11 dynamic requant SYM_INT32@12 -> @16: absmax code 1208 makes m*qMax_out/1208 an EXACT .5 boundary for m = 4 (mod 8) (16 such codes) and a k/8 fraction elsewhere; fresh scale = absmax/qMax_out.",
+  "op": "convert",
+  "direction": "requant_dynamic",
+  "tiers": [
+    "convert"
+  ],
+  "arith": {
+    "type": "SYM_INT32",
+    "rounding": "HALF_AWAY"
+  },
+  "outputBits": 16,
+  "fixture": {
+    "type": "convert",
+    "seed": 628,
+    "n": 64,
+    "inputBits": 12,
+    "absmaxCode": 1208,
+    "ties": 16
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED"
+  }
+}

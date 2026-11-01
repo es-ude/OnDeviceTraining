@@ -1,0 +1,18 @@
+{
+  "name": "cell0a_gold_explicitPadding",
+  "description": "Cell 0 (a): the gold fixture of testConv1dForwardSymExplicitPadding (fixture_explicit_padding: torch.manual_seed(7), randn x[1,2,10], w[3,2,7], b[3]). K=7 stride=2 EXPLICIT pad=3 (not VALID), bias.",
+  "op": "conv1d",
+  "direction": "forward",
+  "tiers": ["kernel", "layer"],
+  "arith": {"type": "SYM_INT32", "rounding": "HALF_AWAY"},
+  "geometry": {"kernelSize": 7, "stride": 2, "dilation": 1, "padding": "EXPLICIT", "paddingAmount": 3, "groups": 1},
+  "operandBits": 12,
+  "outputBits": 12,
+  "fixture": {
+    "type": "torch_randn",
+    "seed": 7,
+    "draws": [["input", [1, 2, 10]], ["weight", [3, 2, 7]], ["bias", [3]]]
+  },
+  "gold": "explicitPadding",
+  "expect": {"legA": ["EXACT", "TIE_ONLY"], "legB": "BOUNDED"}
+}

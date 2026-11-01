@@ -1,3 +1,4 @@
+#include <stdbool.h>
 #include <string.h>
 
 #include "Arithmetic.h"
@@ -423,7 +424,10 @@ void testMatmulSymInt32TensorsWithBiasRescalesBias() {
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, actual.data, 4);
 }
 
-void testMatmulSymInt32RejectsOperandWiderThanInt12() {
+/* The int12 operand contract is no longer a rejection: the accumulator guard
+ * (SymAccumGuard.h) is exact for any declared width. The wide operand's
+ * wrapping and fitting cases are pinned with the guard tests below. */
+void testMatmulSymInt32WiderOperandRunsExact() {
     tensor_t a, b, out;
     int32_t aData[] = {1, 2, 3, 4, 5, 6};
     int32_t bData[] = {1, 4, 2, 5, 3, 6};
@@ -435,8 +439,8 @@ void testMatmulSymInt32RejectsOperandWiderThanInt12() {
     setShape(&oS, oDims, 2, order);
 
     symInt32QConfig_t aQC, bQC, oQC;
-    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &aQC, 13); /* violates int12 contract */
-    initSymInt32QConfig(HALF_AWAY, &bQC);                 /* default int12 */
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &aQC, 13); /* wider than the int12 default */
+    initSymInt32QConfig(HALF_AWAY, &bQC);
     initSymInt32QConfig(HALF_AWAY, &oQC);
     quantization_t aQ, bQ, oQ;
     initSymInt32Quantization(&aQC, &aQ);
@@ -446,7 +450,10 @@ void testMatmulSymInt32RejectsOperandWiderThanInt12() {
     setTensorValues(&b, (uint8_t *)bData, &bS, &bQ, NULL);
     setTensorValues(&out, (uint8_t *)outData, &oS, &oQ, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(matmulSymInt32Tensors(&a, &b, &out));
+    matmulSymInt32Tensors(&a, &b, &out);
+
+    int32_t expected[] = {14, 32, 32, 77};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, outData, 4);
 }
 
 void testMatmulSymInt32TensorsWithBiasRejectsNonSymInt32Bias() {
@@ -1666,9 +1673,234 @@ void testMatmulBfpDxPowerOfTwoBitIdenticalToGroupedSym(void) {
 void setUp() {}
 void tearDown() {}
 
+/* ---- SYM int32 accumulator guard (SymAccumGuard.h) ---------------------- */
+
+#define GUARD_MAXN 1024
+static int32_t gGuardA[GUARD_MAXN];
+static int32_t gGuardB[GUARD_MAXN];
+
+static void guardFill(size_t n, int32_t aCode, int32_t bCode, bool bAlternates) {
+    for (size_t i = 0; i < n; i++) {
+        gGuardA[i] = aCode;
+        gGuardB[i] = (bAlternates && (i % 2 == 1)) ? -bCode : bCode;
+    }
+}
+
+/* a:[1,n] . b:[n,1] -> one SYM_INT32 output, all operands int12 (qMaxBits 12),
+ * scales 1; biasCode != NULL adds a SYM_INT32 bias of that code (scale 1). */
+static int32_t guardDotBits(size_t n, uint8_t aBits, uint8_t bBits, const int32_t *biasCode) {
+    shape_t aS, bS, oS, biasS;
+    size_t aDims[] = {1, n}, bDims[] = {n, 1}, oDims[] = {1, 1}, biasDims[] = {1};
+    size_t order[] = {0, 1};
+    setShape(&aS, aDims, 2, order);
+    setShape(&bS, bDims, 2, order);
+    setShape(&oS, oDims, 2, order);
+    setShape(&biasS, biasDims, 1, order);
+    symInt32QConfig_t aQC, bQC, oQC, biasQC;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &aQC, aBits);
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &bQC, bBits);
+    initSymInt32QConfig(HALF_AWAY, &oQC);
+    initSymInt32QConfig(HALF_AWAY, &biasQC);
+    quantization_t aQ, bQ, oQ, biasQ;
+    initSymInt32Quantization(&aQC, &aQ);
+    initSymInt32Quantization(&bQC, &bQ);
+    initSymInt32Quantization(&oQC, &oQ);
+    initSymInt32Quantization(&biasQC, &biasQ);
+    int32_t out = 0;
+    int32_t biasData = biasCode ? *biasCode : 0;
+    tensor_t a, b, o, bias;
+    setTensorValues(&a, (uint8_t *)gGuardA, &aS, &aQ, NULL);
+    setTensorValues(&b, (uint8_t *)gGuardB, &bS, &bQ, NULL);
+    setTensorValues(&o, (uint8_t *)&out, &oS, &oQ, NULL);
+    setTensorValues(&bias, (uint8_t *)&biasData, &biasS, &biasQ, NULL);
+    if (biasCode) {
+        matmulSymInt32TensorsWithBias(&a, &b, &o, &bias, NULL);
+    } else {
+        matmulSymInt32Tensors(&a, &b, &o);
+    }
+    return out;
+}
+
+static int32_t guardDot(size_t n, const int32_t *biasCode) {
+    return guardDotBits(n, 12, 12, biasCode);
+}
+
+static int32_t guardExpected(size_t n) {
+    int64_t sum = 0;
+    for (size_t i = 0; i < n; i++) {
+        sum += (int64_t)gGuardA[i] * gGuardB[i];
+    }
+    return (int32_t)sum;
+}
+
+void testMatmulSymGuardProvenSafeBoundaryN511RunsExact(void) {
+    /* -2048 x -2048 is reachable (fixed-scale requant saturation); 511 * 2^22 fits */
+    guardFill(511, -2048, -2048, false);
+    TEST_ASSERT_EQUAL_INT32(511 * 4194304, guardDot(511, NULL));
+}
+
+void testMatmulSymGuardDiesAtFirstWrappingNFullScaleNegativeCodes(void) {
+    guardFill(512, -2048, -2048, false); /* 512 * 2^22 = 2^31: first wrapping N */
+    ASSERT_EXITS_WITH_OUTPUT(1, "matmul SYM_INT32", (void)guardDot(512, NULL));
+}
+
+void testMatmulSymGuardDiesAtN513FullScalePositiveCodes(void) {
+    guardFill(513, 2047, 2047, false); /* the original sign-flip: absmax-encoded +-2047 */
+    ASSERT_EXITS_WITH_OUTPUT(1, "N=513", (void)guardDot(513, NULL));
+}
+
+void testMatmulSymGuardDiesOnNegativeOverflow(void) {
+    guardFill(513, 2047, -2048, false); /* 513 * -4192256 < INT32_MIN */
+    ASSERT_EXITS_WITH_OUTPUT(1, "matmul SYM_INT32", (void)guardDot(513, NULL));
+}
+
+void testMatmulSymGuardCheckedPathStaysExactWhenValuesFit(void) {
+    /* N = 601 > 511: the bound cannot prove it, so the checked loop runs; the
+     * alternating b keeps every partial sum tiny, so no false positive. */
+    guardFill(601, 2047, 2047, true);
+    TEST_ASSERT_EQUAL_INT32(guardExpected(601), guardDot(601, NULL));
+    TEST_ASSERT_EQUAL_INT32(2047 * 2047, guardDot(601, NULL));
+}
+
+void testMatmulSymGuardBiasSeedThatTipsTheBoundIsCounted(void) {
+    int32_t seed = 4194304; /* 2^22: 511 products + this seed = 2^31 */
+    guardFill(511, -2048, -2048, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "max|seed|=4194304", (void)guardDot(511, &seed));
+    int32_t small = 4194303; /* one short of the tip: exact */
+    TEST_ASSERT_EQUAL_INT32(511 * 4194304 + 4194303, guardDot(511, &small));
+}
+
+/* a:[1,n] . grouped b (storage [1,n], numGroups x groupSize), scales all 1. */
+static int32_t guardGroupedDotBits(size_t n, size_t numGroups, uint8_t weightQBits) {
+    shape_t aS, bS, oS;
+    size_t aDims[] = {1, n}, bDims[] = {1, n}, oDims[] = {1, 1};
+    size_t aOrder[] = {0, 1}, bOrder[] = {1, 0};
+    setShape(&aS, aDims, 2, aOrder);
+    setShape(&bS, bDims, 2, bOrder);
+    setShape(&oS, oDims, 2, aOrder);
+    symInt32QConfig_t aQC, bQC, oQC;
+    initSymInt32QConfig(HALF_AWAY, &aQC);
+    initSymInt32QConfig(HALF_AWAY, &bQC);
+    initSymInt32QConfig(HALF_AWAY, &oQC);
+    quantization_t aQ, bQ, oQ;
+    initSymInt32Quantization(&aQC, &aQ);
+    initSymInt32Quantization(&bQC, &bQ);
+    initSymInt32Quantization(&oQC, &oQ);
+    int32_t out = 0;
+    tensor_t a, b, o;
+    setTensorValues(&a, (uint8_t *)gGuardA, &aS, &aQ, NULL);
+    setTensorValues(&b, (uint8_t *)gGuardB, &bS, &bQ, NULL);
+    setTensorValues(&o, (uint8_t *)&out, &oS, &oQ, NULL);
+    float scales[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    symQConfig_t groups = {.scales = scales,
+                           .numGroups = numGroups,
+                           .groupSize = n / numGroups,
+                           .qBits = weightQBits,
+                           .roundingMode = HALF_AWAY};
+    matmulSymInt32TensorsGroupedWeight(&a, &b, NULL, &o, &groups, NULL);
+    return out;
+}
+
+static int32_t guardGroupedDot(size_t n, size_t numGroups) {
+    return guardGroupedDotBits(n, numGroups, 12);
+}
+
+void testMatmulGroupedGuardDiesOnRawGroupPartialOverflow(void) {
+    guardFill(1024, -2048, -2048, false); /* 2 groups x 512 terms: 512 * 2^22 = 2^31 per group */
+    ASSERT_EXITS_WITH_OUTPUT(1, "matmul SYM_INT32 grouped", (void)guardGroupedDot(1024, 2));
+}
+
+void testMatmulGroupedGuardDiesOnRescaledAccumulatorOverflow(void) {
+    guardFill(1024, -2048, -2048,
+              false); /* 4 x 256 terms: each partial 2^30 fits, two sum to 2^31 */
+    ASSERT_EXITS_WITH_OUTPUT(1, "matmul SYM_INT32 grouped", (void)guardGroupedDot(1024, 4));
+}
+
+void testMatmulGroupedGuardCheckedPathStaysExactWhenValuesFit(void) {
+    guardFill(600, 2047, 2047, true); /* 3 groups x 200: unprovable, values tiny */
+    TEST_ASSERT_EQUAL_INT32(guardExpected(600), guardGroupedDot(600, 3));
+}
+
+void testMatmulGroupedGuardFullScaleN511RunsExact(void) {
+    guardFill(511, -2048, -2048,
+              false); /* 7 x 73 = 511 terms: the +1 weight bit makes the bound unprovable, so this
+                         runs the checked loop and must stay exact */
+    TEST_ASSERT_EQUAL_INT32(511 * 4194304, guardGroupedDot(511, 7));
+}
+
+void testMatmulGroupedGuardCountsTheAsymMantissaBitWider(void) {
+    /* A grouped ASYM weight unpacks to code - zp, up to 2^qBits - 1 = 4095 at a
+     * declared qBits of 12. 511 terms of 2047 x 4095 exceed INT32_MAX although the
+     * declared-width bound (511 int12 terms) would have called them safe. */
+    guardFill(511, 2047, 4095, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "matmul SYM_INT32 grouped", (void)guardGroupedDot(511, 7));
+}
+
+/* Operands wider than the int12 default are not rejected; the guard is exact
+ * for them: 256 terms of 4095 x 2047 = 2145911040 still fit int32, the 257th
+ * term does not. */
+void testMatmulSymGuardWiderOperandRunsExactWhenItFitsAndAbortsWhenItWraps(void) {
+    guardFill(256, 4095, 2047, false);
+    TEST_ASSERT_EQUAL_INT32(256 * 4095 * 2047, guardDotBits(256, 13, 12, NULL));
+    guardFill(257, 4095, 2047, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "widths (13, 12)", (void)guardDotBits(257, 13, 12, NULL));
+}
+
+/* A grouped weight wider than int12 used to exit at the validator; now it takes
+ * the checked path (17 bits counted: 16 + the ASYM mantissa bit). Small codes
+ * stay exact (the rescale goes through float, so keep the partials under 2^24);
+ * 2 x 64 terms of 2047 x 32767 wrap the raw group partial. */
+void testMatmulGroupedGuardWideWeightRunsExactWhenItFitsAndAbortsWhenItWraps(void) {
+    guardFill(32, 3, 32767, false);
+    TEST_ASSERT_EQUAL_INT32(32 * 3 * 32767, guardGroupedDotBits(32, 2, 16));
+    guardFill(128, 2047, 32767, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "matmul SYM_INT32 grouped (raw group partial)",
+                             (void)guardGroupedDotBits(128, 2, 16));
+}
+
+/* Two groups of 40 terms of 1024 x 32767: each raw partial is 1342136320, above
+ * the #189 seed guard's 1.07e9 reserve but inside int32. Group 2 negated with one
+ * zero term: the sum fits (1024 * 32767) and every value survives the float
+ * rescale exactly. Both positive: the running accumulator wraps. */
+static void wideGroupedFill(bool secondGroupNegative) {
+    guardFill(80, 1024, 32767, false);
+    if (secondGroupNegative) {
+        for (size_t i = 40; i < 80; i++) {
+            gGuardB[i] = -32767;
+        }
+        gGuardB[79] = 0;
+    }
+}
+
+void testMatmulGroupedWidePartialAboveSeedGuardRunsExactWhenSumFits(void) {
+    wideGroupedFill(true);
+    TEST_ASSERT_EQUAL_INT32(1024 * 32767, guardGroupedDotBits(80, 2, 16));
+}
+
+void testMatmulGroupedWidePartialSumThatWrapsHitsTheF9Guard(void) {
+    wideGroupedFill(false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "matmul SYM_INT32 grouped (rescaled accumulator)",
+                             (void)guardGroupedDotBits(80, 2, 16));
+}
+
 int main(void) {
 
     UNITY_BEGIN();
+    RUN_TEST(testMatmulGroupedWidePartialAboveSeedGuardRunsExactWhenSumFits);
+    RUN_TEST(testMatmulGroupedWidePartialSumThatWrapsHitsTheF9Guard);
+    RUN_TEST(testMatmulSymGuardWiderOperandRunsExactWhenItFitsAndAbortsWhenItWraps);
+    RUN_TEST(testMatmulGroupedGuardWideWeightRunsExactWhenItFitsAndAbortsWhenItWraps);
+    RUN_TEST(testMatmulGroupedGuardCountsTheAsymMantissaBitWider);
+    RUN_TEST(testMatmulSymGuardProvenSafeBoundaryN511RunsExact);
+    RUN_TEST(testMatmulSymGuardDiesAtFirstWrappingNFullScaleNegativeCodes);
+    RUN_TEST(testMatmulSymGuardDiesAtN513FullScalePositiveCodes);
+    RUN_TEST(testMatmulSymGuardDiesOnNegativeOverflow);
+    RUN_TEST(testMatmulSymGuardCheckedPathStaysExactWhenValuesFit);
+    RUN_TEST(testMatmulSymGuardBiasSeedThatTipsTheBoundIsCounted);
+    RUN_TEST(testMatmulGroupedGuardDiesOnRawGroupPartialOverflow);
+    RUN_TEST(testMatmulGroupedGuardDiesOnRescaledAccumulatorOverflow);
+    RUN_TEST(testMatmulGroupedGuardCheckedPathStaysExactWhenValuesFit);
+    RUN_TEST(testMatmulGroupedGuardFullScaleN511RunsExact);
     RUN_TEST(testMatmulInt32);
     RUN_TEST(testMatmulInt32WithVector);
     RUN_TEST(testMatmulFloatVectors);
@@ -1676,7 +1908,7 @@ int main(void) {
     RUN_TEST(testMatmulFloat32TensorsWithBiasBroadcastsOverRows);
     RUN_TEST(testMatmulFloat32TensorsWithBiasNullEqualsPlain);
     RUN_TEST(testMatmulSymInt32TensorsWithBiasRescalesBias);
-    RUN_TEST(testMatmulSymInt32RejectsOperandWiderThanInt12);
+    RUN_TEST(testMatmulSymInt32WiderOperandRunsExact);
     RUN_TEST(testMatmulSymInt32TensorsWithBiasRejectsNonSymInt32Bias);
     RUN_TEST(testMatmulGroupedWeightPerChannelMatchesGold);
     RUN_TEST(testMatmulGroupedWeightGeneralGroupsMatchesGold);

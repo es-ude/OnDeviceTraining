@@ -14,6 +14,8 @@ set(DEBUG_LEVEL "0" CACHE STRING "Debug verbosity: 0=off, 1=error, 2=warn, 3=inf
 option(HOST "Build for host machine" ON)
 option(BUILD_EXAMPLES "Build the C-side training programs under examples/" OFF)
 option(ODT_BUILD_TESTS "Build unit tests (Unity + ctest registration)" ON)
+option(ODT_BUILD_DIFFERENTIAL
+        "Build the differential numerics driver under test/differential (not a ctest)" OFF)
 if(NOT HOST)
     add_compile_definitions(BUILDING_FOR_REMOTE)
 endif()
@@ -51,5 +53,14 @@ if(ODT_TOP_LEVEL_PROJECT)
     endif()
     if(BUILD_EXAMPLES)
         add_subdirectory(examples)
+    endif()
+    # test/differential: the op-level differential numerics harness (its C
+    # driver links the same static libs the unit tests do and reuses the
+    # examples/_shared npy writer). Opt-in only, never part of a normal preset.
+    if(ODT_BUILD_DIFFERENTIAL)
+        if(NOT TARGET examples_shared)
+            add_subdirectory(examples/_shared)
+        endif()
+        add_subdirectory(test/differential)
     endif()
 endif()

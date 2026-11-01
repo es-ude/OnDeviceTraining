@@ -1,0 +1,19 @@
+{
+  "name": "cell0a_gold_singleChannelWithBias",
+  "description": "Cell 0 (a): the gold fixture of testConv1dForwardSymSingleChannelWithBias. As singleChannelSingleBatch plus a scalar bias (seed refold 2047^2/16).",
+  "op": "conv1d",
+  "direction": "forward",
+  "tiers": ["kernel", "layer"],
+  "arith": {"type": "SYM_INT32", "rounding": "HALF_AWAY"},
+  "geometry": {"kernelSize": 2, "stride": 1, "dilation": 1, "padding": "VALID", "groups": 1},
+  "operandBits": 12,
+  "outputBits": 12,
+  "fixture": {
+    "type": "float_values",
+    "input": [[[1.0, 2.0, 3.0, 4.0]]],
+    "weight": [[[2.0, 4.0]]],
+    "bias": [1.0]
+  },
+  "gold": "singleChannelWithBias",
+  "expect": {"legA": ["EXACT", "TIE_ONLY"], "legB": "BOUNDED"}
+}

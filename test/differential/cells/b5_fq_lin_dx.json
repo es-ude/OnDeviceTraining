@@ -1,0 +1,56 @@
+{
+  "name": "b5_fq_lin_dx",
+  "description": "B5 fq twin: Linear dx under ARITH_FLOAT32 (m12 grids: the float32 kernel rounds) over BFP weights (grouped) and a BFP loss wire vs the FLOAT32 run on dequantized operands.",
+  "family": "bfp_fq",
+  "op": "linear",
+  "direction": "dx",
+  "tiers": [
+    "layer"
+  ],
+  "arith": {
+    "type": "FLOAT32",
+    "rounding": "HALF_AWAY"
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3302,
+    "batch": 2,
+    "inF": 16,
+    "outF": 64,
+    "input": {
+      "m": 12,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 2.0,
+      "expSpread": 0,
+      "storage": "FLOAT32"
+    },
+    "weight": {
+      "m": 12,
+      "e": 8,
+      "groupSize": 8,
+      "absmax": 0.25,
+      "expSpread": 1
+    },
+    "bias": {
+      "m": 12,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.1,
+      "expSpread": 0
+    },
+    "loss": {
+      "m": 12,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 1.0,
+      "expSpread": 0
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "name": "s3x_dw_overflow_int12_b513",
+  "description": "S3 F9 probe: weightGrad reduces over the batch: B=513, every loss code and every (grid-exact FLOAT32, staged to int12) input code +2047, inF=2 outF=2, FLOAT32 grad storage. The exact raw N*2047^2 leaves int32 from N=513: the guard in the weight-grad matmul must ABORT with its banner (op, N, widths) on both tiers; a completed run FAILs.",
+  "op": "linear",
+  "direction": "weightGrad",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "SYM_INT32",
+    "rounding": "HALF_AWAY"
+  },
+  "outputBits": 12,
+  "gradStorage": "FLOAT32",
+  "fixture": {
+    "type": "full_scale",
+    "seed": 3,
+    "batch": 513,
+    "inF": 2,
+    "outF": 2,
+    "inputStorage": "FLOAT32",
+    "weightStorage": "SYM_INT32",
+    "weightBits": 12,
+    "bias": false
+  },
+  "expect": {
+    "overflow": [
+      "ABORT"
+    ],
+    "guardPath": "abort"
+  }
+}

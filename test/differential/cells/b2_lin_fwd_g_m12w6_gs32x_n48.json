@@ -1,0 +1,50 @@
+{
+  "name": "b2_lin_fwd_g_m12w6_gs32x_n48",
+  "description": "B2 Linear forward, input gs 32 NOT dividing inF=48 (groups cross sample rows), weight gs 12, mixed m12 x m6, grouped bias (gs 2).",
+  "family": "bfp_gemm",
+  "op": "linear",
+  "direction": "forward",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3105,
+    "batch": 2,
+    "inF": 48,
+    "outF": 4,
+    "input": {
+      "m": 12,
+      "e": 8,
+      "groupSize": 32,
+      "absmax": 2.0,
+      "expSpread": 1
+    },
+    "weight": {
+      "m": 6,
+      "e": 8,
+      "groupSize": 12,
+      "absmax": 0.25,
+      "expSpread": 1
+    },
+    "bias": {
+      "m": 6,
+      "e": 8,
+      "groupSize": 2,
+      "absmax": 0.1,
+      "expSpread": 1
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED"
+  }
+}

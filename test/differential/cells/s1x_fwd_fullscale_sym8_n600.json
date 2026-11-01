@@ -1,0 +1,32 @@
+{
+  "name": "s1x_fwd_fullscale_sym8_n600",
+  "description": "S1 F9 control: full-scale codes at the production widths (int12 input x SYM@8 weights), N=600: Leg A shows the accumulator fits (first wrap at N=8261), so the hazard needs int12 weights.",
+  "op": "linear",
+  "direction": "forward",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "SYM_INT32",
+    "rounding": "HALF_AWAY"
+  },
+  "outputBits": 12,
+  "fixture": {
+    "type": "full_scale",
+    "seed": 1,
+    "batch": 1,
+    "inF": 600,
+    "outF": 2,
+    "inputStorage": "FLOAT32",
+    "weightStorage": "SYM",
+    "weightBits": 8,
+    "bias": false
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED"
+  }
+}

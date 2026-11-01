@@ -1,0 +1,33 @@
+{
+  "name": "s1x_fwd_overflow_int12_n512",
+  "description": "S1 F9 probe: every input and weight code +2047 (int12 x int12), N=512, B=1 outF=2, no bias: exact accumulator N*2047^2 vs INT32_MAX. Leg A predicts the first wrap at N=513; the doc says 511 is the last sound N. N=512 fits (512*2047^2 < INT32_MAX) but the static proof (512*2^22 >= 2^31) fails: the CHECKED path must return the exact result.",
+  "op": "linear",
+  "direction": "forward",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "SYM_INT32",
+    "rounding": "HALF_AWAY"
+  },
+  "outputBits": 12,
+  "fixture": {
+    "type": "full_scale",
+    "seed": 1,
+    "batch": 1,
+    "inF": 512,
+    "outF": 2,
+    "inputStorage": "SYM_INT32",
+    "weightStorage": "SYM_INT32",
+    "weightBits": 12,
+    "bias": false
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED",
+    "guardPath": "checked"
+  }
+}

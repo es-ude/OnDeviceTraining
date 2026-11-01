@@ -1,3 +1,4 @@
+#include <stdbool.h>
 #include <string.h>
 
 #include "Conv1dKernel.h"
@@ -812,8 +813,228 @@ void testConv1dKernelBfpConvGroups2MatchesGold(void) {
 void setUp() {}
 void tearDown() {}
 
+/* ---- SYM int32 accumulator guard (SymAccumGuard.h) ---------------------- */
+
+#define CG_MAXN 1100
+static int32_t gCgX[CG_MAXN];
+static int32_t gCgW[CG_MAXN];
+
+static void cgFill(size_t n, int32_t xCode, int32_t wCode, bool wAlternates) {
+    for (size_t i = 0; i < n; i++) {
+        gCgX[i] = xCode;
+        gCgW[i] = (wAlternates && (i % 2 == 1)) ? -wCode : wCode;
+    }
+}
+
+static int32_t cgExpected(size_t n) {
+    int64_t sum = 0;
+    for (size_t i = 0; i < n; i++) {
+        sum += (int64_t)gCgX[i] * gCgW[i];
+    }
+    return (int32_t)sum;
+}
+
+/* One output element: x [1, inCh, len], w [1, inCh, K] (flat reduction order
+ * ic-major, tap-minor), VALID stride 1, so N = inCh * K terms when len == K.
+ * numGroups == 0 -> per-tensor weight (conv1dKernelSymInt32); else the grouped
+ * kernel with equal scales. biasCode != NULL adds a scale-1 bias. */
+static int32_t cgRun(size_t inCh, size_t len, size_t k, uint8_t xBits, uint8_t wBits,
+                     const int32_t *biasCode, size_t numGroups) {
+    size_t outLen = len - k + 1;
+    size_t xDims[] = {1, inCh, len}, wDims[] = {1, inCh, k}, yDims[] = {1, 1, outLen};
+    size_t order[] = {0, 1, 2}, biasDims[] = {1};
+    shape_t xS, wS, yS, biasS;
+    setShape(&xS, xDims, 3, order);
+    setShape(&wS, wDims, 3, order);
+    setShape(&yS, yDims, 3, order);
+    setShape(&biasS, biasDims, 1, order);
+    symInt32QConfig_t xQC, wQC, yQC, biasQC;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &xQC, xBits);
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &wQC, wBits);
+    initSymInt32QConfig(HALF_AWAY, &yQC);
+    initSymInt32QConfig(HALF_AWAY, &biasQC);
+    quantization_t xQ, wQ, yQ, biasQ;
+    initSymInt32Quantization(&xQC, &xQ);
+    initSymInt32Quantization(&wQC, &wQ);
+    initSymInt32Quantization(&yQC, &yQ);
+    initSymInt32Quantization(&biasQC, &biasQ);
+    int32_t y[CG_MAXN];
+    int32_t biasData = biasCode ? *biasCode : 0;
+    tensor_t x, w, yT, bias;
+    setTensorValues(&x, (uint8_t *)gCgX, &xS, &xQ, NULL);
+    setTensorValues(&w, (uint8_t *)gCgW, &wS, &wQ, NULL);
+    setTensorValues(&yT, (uint8_t *)y, &yS, &yQ, NULL);
+    setTensorValues(&bias, (uint8_t *)&biasData, &biasS, &biasQ, NULL);
+    kernel_t kernel;
+    initKernel(&kernel, k, VALID, 1, 1);
+    if (numGroups == 0) {
+        conv1dKernelSymInt32(&x, &w, biasCode ? &bias : NULL, &kernel, 1, &yT, NULL);
+    } else {
+        float scales[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+        symQConfig_t groups = {.scales = scales,
+                               .numGroups = numGroups,
+                               .groupSize = inCh * k / numGroups,
+                               .qBits = wBits,
+                               .roundingMode = HALF_AWAY};
+        conv1dKernelSymInt32Grouped(&x, &w, biasCode ? &bias : NULL, &kernel, 1, &yT, &groups,
+                                    NULL);
+    }
+    return y[0];
+}
+
+void testConv1dKernelSymGuardProvenSafeN511RunsExact(void) {
+    cgFill(511, -2048, -2048, false);
+    TEST_ASSERT_EQUAL_INT32(511 * 4194304, cgRun(511, 1, 1, 12, 12, NULL, 0));
+}
+
+void testConv1dKernelSymGuardDiesAtFirstWrappingNChannels(void) {
+    cgFill(512, -2048, -2048, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "conv1dKernelSymInt32", (void)cgRun(512, 1, 1, 12, 12, NULL, 0));
+}
+
+void testConv1dKernelSymGuardDiesAtN513PositiveCodes(void) {
+    cgFill(513, 2047, 2047, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "N=513", (void)cgRun(513, 1, 1, 12, 12, NULL, 0));
+}
+
+void testConv1dKernelSymGuardCountsKernelTapsInN(void) {
+    cgFill(512, -2048, -2048, false); /* inCh = 1, K = 512 taps drive the reduction */
+    ASSERT_EXITS_WITH_OUTPUT(1, "N=512", (void)cgRun(1, 512, 512, 12, 12, NULL, 0));
+}
+
+void testConv1dKernelSymGuardCheckedPathStaysExactWhenValuesFit(void) {
+    cgFill(601, 2047, 2047, true);
+    TEST_ASSERT_EQUAL_INT32(cgExpected(601), cgRun(601, 1, 1, 12, 12, NULL, 0));
+}
+
+void testConv1dKernelSymGuardBiasSeedThatTipsTheBoundIsCounted(void) {
+    int32_t seed = 4194304;
+    cgFill(511, -2048, -2048, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "max|seed|=4194304", (void)cgRun(511, 1, 1, 12, 12, &seed, 0));
+    int32_t small = 4194303;
+    TEST_ASSERT_EQUAL_INT32(511 * 4194304 + 4194303, cgRun(511, 1, 1, 12, 12, &small, 0));
+}
+
+void testConv1dKernelSymGuardWidthsFollowTheOperandsNotTheDefault(void) {
+    /* int12 x int16: product <= 2^26, so 32 terms of -2048 x -32768 hit 2^31 */
+    cgFill(31, -2048, -32768, false);
+    TEST_ASSERT_EQUAL_INT32(31 * 67108864, cgRun(31, 1, 1, 12, 16, NULL, 0));
+    cgFill(32, -2048, -32768, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "widths (12, 16)", (void)cgRun(32, 1, 1, 12, 16, NULL, 0));
+}
+
+void testConv1dKernelSymGuardWideProductOverflowAborts(void) {
+    /* 20-bit codes: one product (2^19)^2 = 2^38 already leaves int32 */
+    cgFill(1, 524288, 524288, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "conv1dKernelSymInt32", (void)cgRun(1, 1, 1, 20, 20, NULL, 0));
+    cgFill(2, 100, 200, false); /* wide but fitting: checked path returns the exact sum */
+    TEST_ASSERT_EQUAL_INT32(2 * 20000, cgRun(2, 1, 1, 20, 20, NULL, 0));
+}
+
+void testConv1dKernelSymGroupedGuardDiesOnRawGroupPartialOverflow(void) {
+    cgFill(1024, -2048, -2048, false); /* 2 groups x 512 */
+    ASSERT_EXITS_WITH_OUTPUT(1, "conv1dKernelSymInt32Grouped",
+                             (void)cgRun(1024, 1, 1, 12, 12, NULL, 2));
+}
+
+void testConv1dKernelSymGroupedGuardDiesOnRescaledAccumulatorOverflow(void) {
+    cgFill(1024, -2048, -2048, false); /* 4 x 256: partials 2^30 fit, their sum does not */
+    ASSERT_EXITS_WITH_OUTPUT(1, "conv1dKernelSymInt32Grouped",
+                             (void)cgRun(1024, 1, 1, 12, 12, NULL, 4));
+}
+
+void testConv1dKernelSymGroupedGuardCheckedPathStaysExactWhenValuesFit(void) {
+    cgFill(600, 2047, 2047, true);
+    TEST_ASSERT_EQUAL_INT32(cgExpected(600), cgRun(600, 1, 1, 12, 12, NULL, 3));
+}
+
+/* 511 full-scale terms: the weight counts one bit wider (ASYM mantissa image), so the
+ * bound no longer proves this and the checked loop runs; it must stay exact. */
+void testConv1dKernelSymGroupedGuardFullScaleN511RunsExact(void) {
+    cgFill(511, -2048, -2048, false);
+    TEST_ASSERT_EQUAL_INT32(511 * 4194304, cgRun(511, 1, 1, 12, 12, NULL, 7));
+}
+
+void testConv1dKernelSymGroupedGuardWidthsFollowTheInputWidth(void) {
+    cgFill(30, -32768, -2048, false);
+    TEST_ASSERT_EQUAL_INT32(30 * 67108864, cgRun(30, 1, 1, 16, 12, NULL, 2));
+    cgFill(32, -32768, -2048, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "widths (16, 13)", (void)cgRun(32, 1, 1, 16, 12, NULL, 2));
+}
+
+void testConv1dKernelSymGroupedGuardWideInputProductOverflowAborts(void) {
+    cgFill(2, -16777216, -2048, false); /* 25-bit input x int12 weight: one product is 2^35 */
+    ASSERT_EXITS_WITH_OUTPUT(1, "conv1dKernelSymInt32Grouped",
+                             (void)cgRun(2, 1, 1, 25, 12, NULL, 2));
+}
+
+void testConv1dKernelSymGroupedGuardCountsKernelTapsInN(void) {
+    cgFill(512, -2048, -2048, false); /* inCh = 1, K = 512 taps in 2 groups */
+    ASSERT_EXITS_WITH_OUTPUT(1, "N=512", (void)cgRun(1, 512, 512, 12, 12, NULL, 2));
+}
+
+void testConv1dKernelSymGroupedGuardCountsTheAsymMantissaBitWider(void) {
+    /* grouped ASYM weights unpack to code - zp (up to 2^qBits - 1 = 4095 at qBits 12) */
+    cgFill(511, 2047, 4095, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "conv1dKernelSymInt32Grouped",
+                             (void)cgRun(511, 1, 1, 12, 12, NULL, 7));
+}
+
+/* A grouped weight wider than int12 used to exit at the validator; now it takes
+ * the checked path (17 bits counted). 30 terms of -2048 x -32768 = 2013265920
+ * fit int32 through two groups; 32 terms (2^31) wrap. */
+void testConv1dKernelSymGroupedGuardWideWeightRunsExactWhenItFitsAndAbortsWhenItWraps(void) {
+    cgFill(30, -2048, -32768, false);
+    TEST_ASSERT_EQUAL_INT32(30 * 67108864, cgRun(30, 1, 1, 12, 16, NULL, 2));
+    cgFill(32, -2048, -32768, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "conv1dKernelSymInt32Grouped",
+                             (void)cgRun(32, 1, 1, 12, 16, NULL, 2));
+}
+
+/* See the Matmul twin: two groups of 40 terms, raw partials 1342136320 (above
+ * the #189 reserve, inside int32). */
+static void wideGroupedFill(bool secondGroupNegative) {
+    cgFill(80, 1024, 32767, false);
+    if (secondGroupNegative) {
+        for (size_t i = 40; i < 80; i++) {
+            gCgW[i] = -32767;
+        }
+        gCgW[79] = 0;
+    }
+}
+
+void testConv1dKernelSymGroupedWidePartialAboveSeedGuardRunsExactWhenSumFits(void) {
+    wideGroupedFill(true);
+    TEST_ASSERT_EQUAL_INT32(1024 * 32767, cgRun(80, 1, 1, 12, 16, NULL, 2));
+}
+
+void testConv1dKernelSymGroupedWidePartialSumThatWrapsHitsTheF9Guard(void) {
+    wideGroupedFill(false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "conv1dKernelSymInt32Grouped (rescaled accumulator)",
+                             (void)cgRun(80, 1, 1, 12, 16, NULL, 2));
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testConv1dKernelSymGroupedWidePartialAboveSeedGuardRunsExactWhenSumFits);
+    RUN_TEST(testConv1dKernelSymGroupedWidePartialSumThatWrapsHitsTheF9Guard);
+    RUN_TEST(testConv1dKernelSymGroupedGuardWideWeightRunsExactWhenItFitsAndAbortsWhenItWraps);
+    RUN_TEST(testConv1dKernelSymGroupedGuardCountsTheAsymMantissaBitWider);
+    RUN_TEST(testConv1dKernelSymGuardProvenSafeN511RunsExact);
+    RUN_TEST(testConv1dKernelSymGuardDiesAtFirstWrappingNChannels);
+    RUN_TEST(testConv1dKernelSymGuardDiesAtN513PositiveCodes);
+    RUN_TEST(testConv1dKernelSymGuardCountsKernelTapsInN);
+    RUN_TEST(testConv1dKernelSymGuardCheckedPathStaysExactWhenValuesFit);
+    RUN_TEST(testConv1dKernelSymGuardBiasSeedThatTipsTheBoundIsCounted);
+    RUN_TEST(testConv1dKernelSymGuardWidthsFollowTheOperandsNotTheDefault);
+    RUN_TEST(testConv1dKernelSymGuardWideProductOverflowAborts);
+    RUN_TEST(testConv1dKernelSymGroupedGuardDiesOnRawGroupPartialOverflow);
+    RUN_TEST(testConv1dKernelSymGroupedGuardDiesOnRescaledAccumulatorOverflow);
+    RUN_TEST(testConv1dKernelSymGroupedGuardCheckedPathStaysExactWhenValuesFit);
+    RUN_TEST(testConv1dKernelSymGroupedGuardFullScaleN511RunsExact);
+    RUN_TEST(testConv1dKernelSymGroupedGuardWidthsFollowTheInputWidth);
+    RUN_TEST(testConv1dKernelSymGroupedGuardWideInputProductOverflowAborts);
+    RUN_TEST(testConv1dKernelSymGroupedGuardCountsKernelTapsInN);
     RUN_TEST(testConv1dKernelSingleChannelSingleBatch);
     RUN_TEST(testConv1dKernelMultiChannelWithBias);
     RUN_TEST(testConv1dKernelMultiBatch);

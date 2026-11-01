@@ -1,0 +1,52 @@
+{
+  "name": "b1x_census_m8_e8_g16",
+  "description": "B1 F2 boundary census, m=8 e=8, 18 groups of 16: absmax = qMax*2^k nudged by j ulp32 for j in -4..4 (twice, random k). The exact rule vs the float32 frexpf(absMax/qMax) quotient: an E off by one inside the window is TIE_ONLY (class E_boundary), any other E difference or code difference MISMATCH.",
+  "family": "bfp_pack",
+  "op": "convert",
+  "direction": "pack_bfp",
+  "tiers": [
+    "convert"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "output": {
+    "dtype": "BFP",
+    "m": 8,
+    "e": 8,
+    "groupSize": 16
+  },
+  "fixture": {
+    "type": "bfp_pack",
+    "seed": 3038,
+    "n": 288,
+    "groups": [
+      "boundary:-4",
+      "boundary:-3",
+      "boundary:-2",
+      "boundary:-1",
+      "boundary:0",
+      "boundary:1",
+      "boundary:2",
+      "boundary:3",
+      "boundary:4",
+      "boundary:-4",
+      "boundary:-3",
+      "boundary:-2",
+      "boundary:-1",
+      "boundary:0",
+      "boundary:1",
+      "boundary:2",
+      "boundary:3",
+      "boundary:4"
+    ]
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED"
+  }
+}

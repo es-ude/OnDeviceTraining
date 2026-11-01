@@ -1,3 +1,4 @@
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -2573,8 +2574,81 @@ void testConv1dTransposedSrForwardIsAPureFunctionOfItsForwardOpKey(void) {
     freeConv1dTransposedLayer(layer);
 }
 
+/* ---- SYM int32 accumulator guard on the weight-grad scatter ------------- */
+
+#define WG_MAXN 1100
+static float gWgX[WG_MAXN];
+static float gWgGy[WG_MAXN];
+
+/* B batches of length len, Cin = Cout = 1, K = 1, VALID: every (batch, position)
+ * pair feeds the single weight-grad element, so N = batch * len. Codes are the
+ * absmax-encoded +-2047 (scale 1); gyAlternates flips every second gy. Returns
+ * the dequantized weight grad. */
+static float wgRun(size_t batch, size_t len, float xCode, float gyCode, bool gyAlternates) {
+    for (size_t i = 0; i < batch * len; i++) {
+        gWgX[i] = xCode;
+        gWgGy[i] = (gyAlternates && (i % 2 == 1)) ? -gyCode : gyCode;
+    }
+#ifdef ODT_MEM_PROFILE
+    size_t liveBefore = memProfileMark();
+#endif
+    size_t weightDims[] = {1, 1, 1};
+    size_t inputDims[] = {batch, 1, len};
+    size_t lossDims[] = {batch, 1, len};
+    parameter_t *weights = buildSymParam(3, weightDims, NULL);
+    tensor_t *input = buildSymTensor(3, inputDims, gWgX);
+    tensor_t *lossGrad = buildSymTensor(3, lossDims, gWgGy);
+    kernel_t kernel;
+    initKernel(&kernel, 1, VALID, 1, 1);
+    conv1dTransposedConfig_t cfg;
+    quantization_t *sq = quantizationInitSymInt32(HALF_AWAY);
+    initConv1dTransposedConfigWithWeightsAndBias(&cfg, &kernel, weights, NULL, 1, 0, sq, sq, sq,
+                                                 sq);
+    conv1dTransposedCalcWeightGradsSymInt32(&cfg, input, lossGrad, NULL);
+    float result = (float)((int32_t *)weights->grad->data)[0] * symScaleOf(weights->grad);
+    freeQuantization(sq);
+    freeTensor(lossGrad);
+    freeTensor(input);
+    freeParameter(weights);
+#ifdef ODT_MEM_PROFILE
+    /* CI runs detect_leaks=0, so only the live-byte counter catches a dropped free. */
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(liveBefore, memProfileMark(), "wgRun leaked");
+#endif
+    return result;
+}
+
+void testConv1dTransposedWgGuardProvenSafeN511RunsExact(void) {
+    TEST_ASSERT_FLOAT_WITHIN(1024.f, 511.f * 4190209.f, wgRun(1, 511, 2047.f, 2047.f, false));
+}
+
+void testConv1dTransposedWgGuardDiesAtFirstWrappingNFullScaleCodes(void) {
+    /* 513 * 2047^2 > INT32_MAX: absmax-encoded codes top out at +-2047 */
+    ASSERT_EXITS_WITH_OUTPUT(1, "N=513", (void)wgRun(1, 513, 2047.f, 2047.f, false));
+}
+
+void testConv1dTransposedWgGuardDiesOnNegativeOverflow(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "conv1dTransposedCalcWeightGradsSymInt32",
+                             (void)wgRun(1, 513, 2047.f, -2047.f, false));
+}
+
+void testConv1dTransposedWgGuardCountsTheBatchInN(void) {
+    /* 2 batches x 257 = 514 contributors per weight-grad element */
+    ASSERT_EXITS_WITH_OUTPUT(1, "N=514", (void)wgRun(2, 257, 2047.f, 2047.f, false));
+}
+
+void testConv1dTransposedWgGuardCheckedPathStaysExactWhenValuesFit(void) {
+    /* N = 601 > 511: unprovable, so the checked scatter runs; alternating gy keeps
+     * every partial sum tiny, the net is one product (2047 * 2047). */
+    TEST_ASSERT_FLOAT_WITHIN(4.f, 4190209.f, wgRun(1, 601, 2047.f, 2047.f, true));
+}
+
 int main() {
     UNITY_BEGIN();
+    RUN_TEST(testConv1dTransposedWgGuardProvenSafeN511RunsExact);
+    RUN_TEST(testConv1dTransposedWgGuardDiesAtFirstWrappingNFullScaleCodes);
+    RUN_TEST(testConv1dTransposedWgGuardDiesOnNegativeOverflow);
+    RUN_TEST(testConv1dTransposedWgGuardCountsTheBatchInN);
+    RUN_TEST(testConv1dTransposedWgGuardCheckedPathStaysExactWhenValuesFit);
     RUN_TEST(testConv1dTransposedForwardSingleChannelSingleBatch);
     RUN_TEST(testConv1dTransposedForwardMultiChannelWithBias);
     RUN_TEST(testConv1dTransposedCalcOutputShape);

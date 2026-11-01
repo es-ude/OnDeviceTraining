@@ -1,0 +1,40 @@
+{
+  "name": "b2x_lin_fwd_abort_m16w16_n2",
+  "description": "B2 headroom probe: per-tensor m16 x m16, N=2 > limit 1 -> ABORT predicted.",
+  "family": "bfp_gemm",
+  "op": "linear",
+  "direction": "forward",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3110,
+    "batch": 1,
+    "inF": 2,
+    "outF": 2,
+    "input": {
+      "m": 16,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 2.0,
+      "expSpread": 0
+    },
+    "weight": {
+      "m": 16,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.25,
+      "expSpread": 0
+    },
+    "bias": null
+  },
+  "expect": {
+    "abort": true
+  }
+}

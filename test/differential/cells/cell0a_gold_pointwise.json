@@ -1,0 +1,18 @@
+{
+  "name": "cell0a_gold_pointwise",
+  "description": "Cell 0 (a): the gold fixture of testConv1dForwardSymPointwise (generate_expected_conv1d.py fixture_pointwise: torch.manual_seed(5), randn x[2,3,5], w[4,3,1], b[4]). B=2, K=1, VALID, bias.",
+  "op": "conv1d",
+  "direction": "forward",
+  "tiers": ["kernel", "layer"],
+  "arith": {"type": "SYM_INT32", "rounding": "HALF_AWAY"},
+  "geometry": {"kernelSize": 1, "stride": 1, "dilation": 1, "padding": "VALID", "groups": 1},
+  "operandBits": 12,
+  "outputBits": 12,
+  "fixture": {
+    "type": "torch_randn",
+    "seed": 5,
+    "draws": [["input", [2, 3, 5]], ["weight", [4, 3, 1]], ["bias", [4]]]
+  },
+  "gold": "pointwise",
+  "expect": {"legA": ["EXACT", "TIE_ONLY"], "legB": "BOUNDED"}
+}

@@ -1,0 +1,55 @@
+{
+  "name": "b3_lin_fwd_wire_g16_m6",
+  "description": "B3 Linear forward onto a GROUPED BFP wire (m6 e8, gs 16 over the [2, 32] output): per-group exponent derivation on the wire; single-segment raw.",
+  "family": "bfp_gemm",
+  "op": "linear",
+  "direction": "forward",
+  "tiers": [
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3113,
+    "batch": 2,
+    "inF": 64,
+    "outF": 32,
+    "input": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 2.0,
+      "expSpread": 0
+    },
+    "weight": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.25,
+      "expSpread": 0
+    },
+    "bias": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.1,
+      "expSpread": 0
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED"
+  },
+  "output": {
+    "dtype": "BFP",
+    "m": 6,
+    "e": 8,
+    "groupSize": 16
+  }
+}

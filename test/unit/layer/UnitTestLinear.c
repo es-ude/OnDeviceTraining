@@ -3479,8 +3479,191 @@ void testInferenceOneLinearModelRejectsRank1Sample(void) {
     freeLinearLayer(layer);
 }
 
+/* Grouped ASYM weight whose zero point puts code - zp at -(2^qBits - 1): the
+ * funnel unpacks it to 13-bit mantissas under a declared qBits of 12. 511
+ * products of 4095 x 2047 exceed INT32_MAX though the declared-width bound
+ * (511 int12 terms) would have run them unchecked. */
+void testLinearForwardGroupedAsymWideMantissaAbortsInsteadOfWrapping(void) {
+    enum { IN = 511, GROUPS = 7, GROUP_SIZE = 73 };
+    size_t *weightDims = reserveMemory(2 * sizeof(size_t));
+    weightDims[0] = 1;
+    weightDims[1] = IN;
+    size_t *weightOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, weightOrder);
+    shape_t *weightShape = reserveMemory(sizeof(shape_t));
+    setShape(weightShape, weightDims, 2, weightOrder);
+    tensor_t *weightsParam = initTensor(
+        weightShape, quantizationInitAsymGrouped(12, HALF_AWAY, GROUPS, GROUP_SIZE), NULL);
+    memset(weightsParam->data, 0, (IN * 12 + 7) / 8); /* all codes 0 */
+    asymQConfig_t *weightQC = weightsParam->quantization->qConfig;
+    for (size_t g = 0; g < GROUPS; g++) {
+        weightQC->scales[g] = 1.f;
+        weightQC->zeroPoints[g] = 4095; /* mantissa = 0 - 4095 */
+    }
+    parameter_t *weights = parameterInit(weightsParam, NULL);
+
+    size_t *inputDims = reserveMemory(2 * sizeof(size_t));
+    inputDims[0] = 1;
+    inputDims[1] = IN;
+    size_t *inputOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, inputOrder);
+    shape_t *inputShape = reserveMemory(sizeof(shape_t));
+    setShape(inputShape, inputDims, 2, inputOrder);
+    tensor_t *input = initTensor(inputShape, quantizationInitSymInt32(HALF_AWAY), NULL);
+    for (size_t i = 0; i < IN; i++) {
+        ((int32_t *)input->data)[i] = -2047;
+    }
+    ((symInt32QConfig_t *)input->quantization->qConfig)->scale = 1.f;
+
+    quantization_t *q = quantizationInitSymInt32(HALF_AWAY);
+    layer_t *linearLayer = buildBorrowedLinearLayer(weights, NULL, q);
+    size_t *outDims = reserveMemory(2 * sizeof(size_t));
+    outDims[0] = 1;
+    outDims[1] = 1;
+    size_t *outOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, outOrder);
+    shape_t *outShape = reserveMemory(sizeof(shape_t));
+    setShape(outShape, outDims, 2, outOrder);
+    tensor_t *output = initTensor(outShape, quantizationInitFloat(), NULL);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "matmul SYM_INT32 grouped",
+                             linearForward(linearLayer, input, output, NULL));
+}
+
+/* ---- Staging routes must declare the true operand width (F-A / F-B) ----
+ * The SYM accumulator guard proves a reduction safe from the declared widths of
+ * the staged SYM_INT32 operands, so every funnel conversion into SYM_INT32 has
+ * to declare the width of the codes it actually writes. */
+static shape_t *shape2(size_t d0, size_t d1) {
+    size_t *dims = reserveMemory(2 * sizeof(size_t));
+    dims[0] = d0;
+    dims[1] = d1;
+    size_t *order = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 2, order);
+    return shape;
+}
+
+static tensor_t *symInt32RowOf(size_t n, int32_t code) {
+    tensor_t *t = initTensor(shape2(1, n), quantizationInitSymInt32(HALF_AWAY), NULL);
+    for (size_t i = 0; i < n; i++) {
+        ((int32_t *)t->data)[i] = code;
+    }
+    ((symInt32QConfig_t *)t->quantization->qConfig)->scale = 1.f;
+    return t;
+}
+
+/* Per-tensor ASYM [1, n] row, every code 0, zero point zp: each mantissa is -zp. */
+static tensor_t *asymRowOfZeroCodes(size_t n, uint8_t qBits, uint16_t zp) {
+    tensor_t *t = initTensor(shape2(1, n), quantizationInitAsym(qBits, HALF_AWAY), NULL);
+    memset(t->data, 0, (n * qBits + 7) / 8);
+    asymQConfig_t *qc = t->quantization->qConfig;
+    qc->scales[0] = 1.f;
+    qc->zeroPoints[0] = zp;
+    return t;
+}
+
+/* y = weights[1, n] . input[1, n] through the public linearForward under
+ * ARITH_SYM_INT32; takes ownership of both operands and frees everything. */
+static float linearForwardDot(tensor_t *weightsTensor, tensor_t *input) {
+    parameter_t *weights = parameterInit(weightsTensor, NULL);
+    quantization_t *q = quantizationInitSymInt32(HALF_AWAY);
+    layer_t *layer = buildBorrowedLinearLayer(weights, NULL, q);
+    tensor_t *output = initTensor(shape2(1, 1), quantizationInitFloat(), NULL);
+    linearForward(layer, input, output, NULL);
+    float y = ((float *)output->data)[0];
+    freeTensor(output);
+    freeLinearLayerShellOnly(layer);
+    freeQuantization(q);
+    freeParameter(weights);
+    freeTensor(input);
+    return y;
+}
+
+/* qBits 12, zp 4095 -> mantissa -4095 (13 signed bits). 511 terms of
+ * 4095 x 2047 wrap int32; the declared-int12 bound would have admitted N = 511. */
+void testLinearForwardPerTensorAsym12WeightWrapsAborts(void) {
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "accumulator overflow",
+        linearForwardDot(asymRowOfZeroCodes(511, 12, 4095), symInt32RowOf(511, 2047)));
+}
+
+/* qBits 16, zp 65535 -> mantissa -65535 (17 bits); the product alone is wide. */
+void testLinearForwardPerTensorAsym16WeightWrapsAborts(void) {
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "accumulator overflow",
+        linearForwardDot(asymRowOfZeroCodes(17, 16, 65535), symInt32RowOf(17, 2047)));
+}
+
+/* Same gap on the input side of the product. */
+void testLinearForwardPerTensorAsym12InputWrapsAborts(void) {
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "accumulator overflow",
+        linearForwardDot(symInt32RowOf(511, 2047), asymRowOfZeroCodes(511, 12, 4095)));
+}
+
+/* Controls: the staged width is exact where it fits. qBits 8 (9-bit mantissa)
+ * at N = 511 is proven safe; qBits 12 at N = 256 is beyond the proof but
+ * 256 * 4095 * 2047 = 2145911040 still fits int32, so the checked path
+ * returns it exactly. */
+void testLinearForwardPerTensorAsymWidthsThatFitAreExact(void) {
+    float y8 = linearForwardDot(asymRowOfZeroCodes(511, 8, 255), symInt32RowOf(511, 2047));
+    TEST_ASSERT_FLOAT_WITHIN(32.f, -266734335.f, y8);
+    float y12 = linearForwardDot(asymRowOfZeroCodes(256, 12, 4095), symInt32RowOf(256, 2047));
+    TEST_ASSERT_FLOAT_WITHIN(256.f, -2145911040.f, y12);
+}
+
+/* A raw INT32-stored operand has no width bound below 32 bits. */
+void testLinearForwardInt32InputWrapsAborts(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "accumulator overflow", ({
+                                 tensor_t *x =
+                                     initTensor(shape2(1, 511), quantizationInitInt32(), NULL);
+                                 for (size_t i = 0; i < 511; i++) {
+                                     ((int32_t *)x->data)[i] = -4095;
+                                 }
+                                 linearForwardDot(symInt32RowOf(511, 2047), x);
+                             }));
+}
+
+void testLinearForwardInt32InputThatFitsIsExact(void) {
+    tensor_t *x = initTensor(shape2(1, 511), quantizationInitInt32(), NULL);
+    for (size_t i = 0; i < 511; i++) {
+        ((int32_t *)x->data)[i] = -100;
+    }
+    float y = linearForwardDot(symInt32RowOf(511, 2047), x);
+    TEST_ASSERT_FLOAT_WITHIN(16.f, -104601700.f, y);
+}
+
+/* The public INT32 -> SYM_INT32 conversion cell must leave a user tensor that
+ * getTensorLike (getQLike -> initSymInt32QConfigWithQMaxBits, which rejects
+ * widths > 31) can still clone. The 32-bit width is declared on the funnel's
+ * op-local scratch only. */
+void testConvertInt32ToSymInt32UserTensorStaysCloneable(void) {
+    tensor_t *src = initTensor(shape2(1, 4), quantizationInitInt32(), NULL);
+    for (size_t i = 0; i < 4; i++) {
+        ((int32_t *)src->data)[i] = (int32_t)i - 2;
+    }
+    tensor_t *dst = initTensor(shape2(1, 4), quantizationInitSymInt32(HALF_AWAY), NULL);
+    convertTensor(src, dst, NULL);
+    tensor_t *clone = getTensorLike(dst);
+    TEST_ASSERT_NOT_NULL(clone);
+    TEST_ASSERT_TRUE(((symInt32QConfig_t *)dst->quantization->qConfig)->qMaxBits <= 31);
+    freeTensor(clone);
+    freeTensor(dst);
+    freeTensor(src);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testConvertInt32ToSymInt32UserTensorStaysCloneable);
+    RUN_TEST(testLinearForwardPerTensorAsym12WeightWrapsAborts);
+    RUN_TEST(testLinearForwardPerTensorAsym16WeightWrapsAborts);
+    RUN_TEST(testLinearForwardPerTensorAsym12InputWrapsAborts);
+    RUN_TEST(testLinearForwardPerTensorAsymWidthsThatFitAreExact);
+    RUN_TEST(testLinearForwardInt32InputWrapsAborts);
+    RUN_TEST(testLinearForwardInt32InputThatFitsIsExact);
+    RUN_TEST(testLinearForwardGroupedAsymWideMantissaAbortsInsteadOfWrapping);
     RUN_TEST(testLinearForwardFloat);
     RUN_TEST(testLinearForwardFloatRank1BiasRank2Output);
     RUN_TEST(testLinearBackwardFloat);

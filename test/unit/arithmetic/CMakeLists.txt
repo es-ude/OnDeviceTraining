@@ -361,3 +361,11 @@ add_elastic_ai_unit_test(
 )
 add_dependencies(UnitTestPointwiseFused generate_expected_pointwise_fused)
 target_include_directories(UnitTestPointwiseFused PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
+        SymAccumGuard
+        MORE_LIBS
+        Common
+        odt_test_death
+)

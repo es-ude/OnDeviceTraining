@@ -29,10 +29,10 @@ void matmulSymInt32TensorsWithBias(tensor_t *aTensor, tensor_t *bTensor, tensor_
  *  same scratch shape the executeOp prologue's grouped-operand branch
  *  produces: SYM_INT32 dtype, scale poisoned to 1.0f — never read here).
  *  `weightGroups` is the ORIGINAL symQConfig_t carrying the real per-group
- *  scales/qBits/groupSize (validated: non-NULL, qBits <=
- *  ODT_SYM_OPERAND_QMAXBITS, shape matches `b`'s element count via
- *  validateSymQConfigShape). `bias` is NULL-able, SYM_INT32 like the scalar
- *  entries' bias.
+ *  scales/qBits/groupSize (validated: non-NULL, numGroups > 1,
+ *  shape matches `b`'s element count via validateSymQConfigShape; any qBits is
+ *  accepted -- the accumulator guard, SymAccumGuard.h, handles the width). `bias` is NULL-able,
+ * SYM_INT32 like the scalar entries' bias.
  *
  *  Accumulator-scale rule (GGUF rescale-combine pattern): s_acc = s_in *
  *  max_g(weightGroups->scales[g]) — NEVER scales[0] or any other single

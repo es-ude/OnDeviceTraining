@@ -723,6 +723,10 @@ void convertAsymTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTe
         }
     }
     outQC->scale = inQC->scales[0]; /* scale copy unchanged */
+    /* code - zp spans [-(2^qBits - 1), 2^qBits - 1]: one signed bit wider than
+     * the stored qBits. The accumulator guard sizes its static proof from this
+     * declared width. */
+    outQC->qMaxBits = (uint8_t)(inQC->qBits + 1);
 }
 
 void unpackSignExtend(const uint8_t *src, size_t srcBits, size_t srcStartBit, int32_t *dst,
@@ -2509,6 +2513,9 @@ static void convertTensorsWithSameType(tensor_t *inputTensor, tensor_t *outputTe
         symInt32QConfig_t *inputSymIntQC = inputTensor->quantization->qConfig;
         symInt32QConfig_t *outputSymIntQC = outputTensor->quantization->qConfig;
         outputSymIntQC->scale = inputSymIntQC->scale;
+        /* the codes were copied verbatim: declare their width, not the
+         * destination's old one (the accumulator guard trusts it) */
+        outputSymIntQC->qMaxBits = inputSymIntQC->qMaxBits;
         break;
     }
     case SYM: {

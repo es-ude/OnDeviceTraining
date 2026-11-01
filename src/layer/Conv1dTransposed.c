@@ -15,6 +15,7 @@
 #include "Mul.h"
 #include "Quantization.h"
 #include "SlidingWindow1d.h"
+#include "SymAccumGuard.h"
 #include "Tensor.h"
 
 void initConv1dTransposedConfigWithWeightsAndBias(
@@ -433,6 +434,65 @@ static void conv1dTransposedCalcBiasGradsFloat32(conv1dTransposedConfig_t *cfg, 
         cfg->bias->grad);
 }
 
+/* Weight-grad scatter, instantiated twice by weightGradKernelSym with `checked`
+ * a compile-time constant: false is the historical `+= mulInt32s`, true routes
+ * every accumulate through the SYM accumulator guard (SymAccumGuard.h). */
+SYM_ACCUM_ALWAYS_INLINE void conv1dTransposedWeightGradSymScatter(
+    size_t batch, size_t groups, size_t inChPerGroup, size_t outChPerGroup, size_t inChannels,
+    size_t outChannels, size_t inputLength, size_t outputLength, size_t kernelSize,
+    const kernel_t *kernel, const int32_t *xArr, const int32_t *gyArr, int32_t *interData,
+    const bool checked, const symAccumSite_t *site) {
+    long long outputLengthSigned = (long long)outputLength;
+    long long dilation = (long long)kernel->dilation;
+    size_t stride = kernel->stride;
+
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t g = 0; g < groups; g++) {
+            size_t inLo = g * inChPerGroup;
+            size_t outLo = g * outChPerGroup;
+
+            for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
+                size_t ic = inLo + icOffset;
+                for (size_t inPos = 0; inPos < inputLength; inPos++) {
+                    int32_t xv = xArr[(b * inChannels + ic) * inputLength + inPos];
+                    long long outBase = (long long)(inPos * stride); // VALID -> padLeft=0
+
+                    for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
+                        size_t oc = outLo + ocOffset;
+                        for (size_t k = 0; k < kernelSize; k++) {
+                            long long outIdx = outBase + (long long)k * dilation;
+                            if (outIdx < 0 || outIdx >= outputLengthSigned) {
+                                continue;
+                            }
+                            int32_t gy =
+                                gyArr[(b * outChannels + oc) * outputLength + (size_t)outIdx];
+                            size_t gwIdx = (ic * outChPerGroup + ocOffset) * kernelSize + k;
+                            interData[gwIdx] = symMac(interData[gwIdx], xv, gy, checked, site);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#define CONVT_WG_PARAMS                                                                            \
+    size_t batch, size_t groups, size_t inChPerGroup, size_t outChPerGroup, size_t inChannels,     \
+        size_t outChannels, size_t inputLength, size_t outputLength, size_t kernelSize,            \
+        const kernel_t *kernel, const int32_t *xArr, const int32_t *gyArr, int32_t *interData,     \
+        const symAccumSite_t *site
+#define CONVT_WG_ARGS(checked)                                                                     \
+    batch, groups, inChPerGroup, outChPerGroup, inChannels, outChannels, inputLength,              \
+        outputLength, kernelSize, kernel, xArr, gyArr, interData, checked, site
+
+SYM_ACCUM_NOINLINE void conv1dTransposedWeightGradSymScatterSafe(CONVT_WG_PARAMS) {
+    conv1dTransposedWeightGradSymScatter(CONVT_WG_ARGS(false));
+}
+
+SYM_ACCUM_NOINLINE void conv1dTransposedWeightGradSymScatterChecked(CONVT_WG_PARAMS) {
+    conv1dTransposedWeightGradSymScatter(CONVT_WG_ARGS(true));
+}
+
 static void weightGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                                 const void *ctx, rngStream_t *rs) {
     (void)n;
@@ -498,37 +558,21 @@ static void weightGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tens
     int32_t const *xArr = (int32_t const *)forwardInput->data;
     int32_t const *gyArr = (int32_t const *)lossGrad->data;
 
-    long long outputLengthSigned = (long long)outputLength;
-    long long dilation = (long long)cfg->kernel->dilation;
-    size_t stride = cfg->kernel->stride;
-
-    for (size_t b = 0; b < batch; b++) {
-        for (size_t g = 0; g < groups; g++) {
-            size_t inLo = g * inChPerGroup;
-            size_t outLo = g * outChPerGroup;
-
-            for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
-                size_t ic = inLo + icOffset;
-                for (size_t inPos = 0; inPos < inputLength; inPos++) {
-                    int32_t xv = xArr[(b * inChannels + ic) * inputLength + inPos];
-                    long long outBase = (long long)(inPos * stride); // VALID -> padLeft=0
-
-                    for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
-                        size_t oc = outLo + ocOffset;
-                        for (size_t k = 0; k < kernelSize; k++) {
-                            long long outIdx = outBase + (long long)k * dilation;
-                            if (outIdx < 0 || outIdx >= outputLengthSigned) {
-                                continue;
-                            }
-                            int32_t gy =
-                                gyArr[(b * outChannels + oc) * outputLength + (size_t)outIdx];
-                            interData[(ic * outChPerGroup + ocOffset) * kernelSize + k] +=
-                                mulInt32s(xv, gy);
-                        }
-                    }
-                }
-            }
-        }
+    /* A fixed tap k reaches a weight-grad element from each (batch, inPos) at
+     * most once, so N = batch * inputLength; no seed (interData starts zeroed). */
+    uint8_t xBits = ((symInt32QConfig_t *)forwardInput->quantization->qConfig)->qMaxBits;
+    uint8_t gyBits = ((symInt32QConfig_t *)lossGrad->quantization->qConfig)->qMaxBits;
+    symAccumSite_t site =
+        symAccumSiteInit("conv1dTransposedCalcWeightGradsSymInt32 (batch*inputLength)",
+                         batch * inputLength, xBits, gyBits, 0);
+    if (symAccumProvenSafe(&site)) {
+        conv1dTransposedWeightGradSymScatterSafe(
+            batch, groups, inChPerGroup, outChPerGroup, inChannels, outChannels, inputLength,
+            outputLength, kernelSize, cfg->kernel, xArr, gyArr, interData, &site);
+    } else {
+        conv1dTransposedWeightGradSymScatterChecked(
+            batch, groups, inChPerGroup, outChPerGroup, inChannels, outChannels, inputLength,
+            outputLength, kernelSize, cfg->kernel, xArr, gyArr, interData, &site);
     }
 }
 

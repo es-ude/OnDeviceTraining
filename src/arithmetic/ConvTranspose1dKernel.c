@@ -9,6 +9,7 @@
 #include "Mul.h"
 #include "Rounding.h"
 #include "SlidingWindow1d.h"
+#include "SymAccumGuard.h"
 
 /* Shared VALID / adjoint-SAME(/EXPLICIT) geometry resolution for every ConvT
  * core (the scatter kernels AND the BFP gather): in VALID mode the output
@@ -140,6 +141,97 @@ void convTranspose1dKernelFloat32(tensor_t const *input, tensor_t const *weight,
     }
 }
 
+/* Shape and operand views shared by the SYM scatter loop nests below. */
+typedef struct convTSymView {
+    size_t batch, inChannels, inputLength, outChannels, outputLength, kernelSize;
+    size_t groups, inChPerGroup, outChPerGroup, padLeft;
+    const kernel_t *kernel;
+    const int32_t *xArr;
+    const int32_t *wArr;
+    int32_t *yArr;
+} convTSymView_t;
+
+#define CONVT_SYM_VIEW_LOCALS(v)                                                                   \
+    const size_t batch = (v)->batch, groups = (v)->groups, inChPerGroup = (v)->inChPerGroup;       \
+    const size_t outChPerGroup = (v)->outChPerGroup, outChannels = (v)->outChannels;               \
+    const size_t outputLength = (v)->outputLength, inChannels = (v)->inChannels;                   \
+    const size_t inputLength = (v)->inputLength, kernelSize = (v)->kernelSize;                     \
+    const size_t padLeft = (v)->padLeft;                                                           \
+    kernel_t const *kernel = (v)->kernel;                                                          \
+    const int32_t *xArr = (v)->xArr, *wArr = (v)->wArr;                                            \
+    int32_t *yArr = (v)->yArr
+
+/* Post-scatter bias seed pass, shared by both SYM scatter kernels. ALWAYS
+ * checked: it is O(outputs), off the hot loop, and the scatter bound proves
+ * only the products -- the seed can still tip a proven-safe scatter over, so
+ * each add reports the seed it was adding. */
+static void convTAddBiasSeedsChecked(const convTSymView_t *v, tensor_t const *bias, float scale,
+                                     rngStream_t *rs, const symAccumSite_t *scatterSite) {
+    int32_t const *bArr = (int32_t const *)bias->data;
+    symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
+    for (size_t oc = 0; oc < v->outChannels; oc++) {
+        int32_t seed =
+            rescaleIntoAccumulatorScale(bArr[oc], biasQC->scale, scale, biasQC->roundingMode, rs);
+        symAccumSite_t biasSite = *scatterSite;
+        biasSite.maxAbsSeed = symAccumMaxAbsSeed(&seed, 1);
+        for (size_t b = 0; b < v->batch; b++) {
+            for (size_t l = 0; l < v->outputLength; l++) {
+                size_t yIdx = (b * v->outChannels + oc) * v->outputLength + l;
+                v->yArr[yIdx] = symAccumAddChecked(v->yArr[yIdx], seed, &biasSite);
+            }
+        }
+    }
+}
+
+/* Instantiated twice by convTranspose1dKernelSymInt32 with `checked` a
+ * compile-time constant: false is the historical scatter (+= mulInt32s), true
+ * routes every accumulate through the SYM accumulator guard (SymAccumGuard.h). */
+SYM_ACCUM_ALWAYS_INLINE void convTSymScatter(const convTSymView_t *v, const bool checked,
+                                             const symAccumSite_t *site) {
+    CONVT_SYM_VIEW_LOCALS(v);
+
+    long long padLeftSigned = (long long)padLeft;
+    long long outputLengthSigned = (long long)outputLength;
+    long long dilation = (long long)kernel->dilation;
+
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t g = 0; g < groups; g++) {
+            size_t inLo = g * inChPerGroup;
+            size_t outLo = g * outChPerGroup;
+
+            for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
+                size_t ic = inLo + icOffset;
+                for (size_t inPos = 0; inPos < inputLength; inPos++) {
+                    int32_t xv = xArr[(b * inChannels + ic) * inputLength + inPos];
+                    long long outBase = (long long)(inPos * kernel->stride) - padLeftSigned;
+
+                    for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
+                        size_t oc = outLo + ocOffset;
+                        for (size_t k = 0; k < kernelSize; k++) {
+                            long long outIdx = outBase + (long long)k * dilation;
+                            if (outIdx < 0 || outIdx >= outputLengthSigned) {
+                                continue;
+                            }
+                            int32_t wv = wArr[(ic * outChPerGroup + ocOffset) * kernelSize + k];
+                            size_t yIdx = (b * outChannels + oc) * outputLength + (size_t)outIdx;
+                            yArr[yIdx] = symMac(yArr[yIdx], xv, wv, checked, site);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+SYM_ACCUM_NOINLINE void convTSymScatterSafe(const convTSymView_t *v, const symAccumSite_t *site) {
+    convTSymScatter(v, false, site);
+}
+
+SYM_ACCUM_NOINLINE void convTSymScatterChecked(const convTSymView_t *v,
+                                               const symAccumSite_t *site) {
+    convTSymScatter(v, true, site);
+}
+
 void convTranspose1dKernelSymInt32(tensor_t const *input, tensor_t const *weight,
                                    tensor_t const *bias, kernel_t const *kernel, size_t groups,
                                    size_t outputPadding, tensor_t *output, rngStream_t *rs) {
@@ -176,6 +268,76 @@ void convTranspose1dKernelSymInt32(tensor_t const *input, tensor_t const *weight
         yArr[i] = 0;
     }
 
+    convTSymView_t view = {.batch = batch,
+                           .inChannels = inChannels,
+                           .inputLength = inputLength,
+                           .outChannels = outChannels,
+                           .outputLength = outputLength,
+                           .kernelSize = kernelSize,
+                           .groups = groups,
+                           .inChPerGroup = inChPerGroup,
+                           .outChPerGroup = outChPerGroup,
+                           .padLeft = padLeft,
+                           .kernel = kernel,
+                           .xArr = xArr,
+                           .wArr = wArr,
+                           .yArr = yArr};
+    /* Scatter: at most inChPerGroup * kernelSize products reach one output
+     * element. The bias seed lands afterwards (checked pass below). */
+    uint8_t xBits = ((symInt32QConfig_t *)input->quantization->qConfig)->qMaxBits;
+    uint8_t wBits = ((symInt32QConfig_t *)weight->quantization->qConfig)->qMaxBits;
+    symAccumSite_t site = symAccumSiteInit("convTranspose1dKernelSymInt32",
+                                           inChPerGroup * kernelSize, xBits, wBits, 0);
+    if (symAccumProvenSafe(&site)) {
+        convTSymScatterSafe(&view, &site);
+    } else {
+        convTSymScatterChecked(&view, &site);
+    }
+
+    /* Bias seed pass (refold), separate from the pure-+= scatter. NULL for Conv1d dx;
+     * exercised by Conv1dTransposed forward in PR3. */
+    if (bias != NULL) {
+        convTAddBiasSeedsChecked(&view, bias, outputScale, rs, &site);
+    }
+
+    if (output->quantization->qConfig == NULL) {
+        PRINT_ERROR("convTranspose1dKernelSymInt32: output qConfig is NULL but SYM_INT32 "
+                    "expected (#187)");
+        exit(1);
+    }
+    ((symInt32QConfig_t *)output->quantization->qConfig)->scale = outputScale;
+}
+
+/* Group-quant PR3 (Task 2): entry guards mirror conv1dValidateWeightGroups
+ * (Conv1dKernel.c) exactly -- non-NULL and the per-tensor sentinel
+ * {numGroups=1, groupSize=0} rejected (its groupSize=0 would divide-by-zero
+ * below; per-tensor weights take
+ * convTranspose1dKernelSymInt32). */
+static void convT1dValidateWeightGroups(const symQConfig_t *weightGroups, size_t weightElemCount) {
+    if (weightGroups == NULL) {
+        PRINT_ERROR("convTranspose1dKernelSymInt32Grouped: weightGroups must not be NULL");
+        exit(1);
+    }
+    if (weightGroups->numGroups <= 1) {
+        PRINT_ERROR("convTranspose1dKernelSymInt32Grouped: weightGroups must be grouped "
+                    "(numGroups>1); per-tensor weights take convTranspose1dKernelSymInt32");
+        exit(1);
+    }
+    validateSymQConfigShape(weightGroups, weightElemCount);
+}
+
+/* Grouped twin of convTSymScatter: each product is rescaled into sAcc (factor
+ * <= 1, so |rescaled| <= |product| up to the float32 evaluation slack) before it
+ * joins the output element, hence the N * 2^(qa-1) * 2^(qb-1) bound with that
+ * slack (symAccumTermLimitRescaled) covers the int32 += (and, on the checked
+ * path, the product itself for wide widths). */
+SYM_ACCUM_ALWAYS_INLINE void convTSymGroupedScatter(const convTSymView_t *v,
+                                                    const symQConfig_t *weightGroups, float inScale,
+                                                    float sAcc, roundingMode_t roundingMode,
+                                                    rngStream_t *rs, const bool checked,
+                                                    const symAccumSite_t *site) {
+    CONVT_SYM_VIEW_LOCALS(v);
+
     long long padLeftSigned = (long long)padLeft;
     long long outputLengthSigned = (long long)outputLength;
     long long dilation = (long long)kernel->dilation;
@@ -198,62 +360,47 @@ void convTranspose1dKernelSymInt32(tensor_t const *input, tensor_t const *weight
                             if (outIdx < 0 || outIdx >= outputLengthSigned) {
                                 continue;
                             }
-                            int32_t wv = wArr[(ic * outChPerGroup + ocOffset) * kernelSize + k];
-                            yArr[(b * outChannels + oc) * outputLength + (size_t)outIdx] +=
-                                mulInt32s(xv, wv);
+                            size_t wStorageIdx = (ic * outChPerGroup + ocOffset) * kernelSize + k;
+                            /* Per-PRODUCT rescale into sAcc -- NOT the gather
+                             * cores' running group-partial: consecutive
+                             * products here land in DIFFERENT output elements
+                             * (outIdx moves with k), so there is no
+                             * per-(target, group) run across which a raw int32
+                             * partial could be carried without a second
+                             * accumulator buffer. Cost: one rounding per
+                             * product, |err| <= 0.5*C*sAcc per output element
+                             * (C = contributing products). Per-element group
+                             * division (gap-robust): padding clips k taps, so
+                             * visited wStorageIdx values can have gaps -- a
+                             * precomputed run length would overshoot. */
+                            size_t elemGroup = wStorageIdx / weightGroups->groupSize;
+                            int32_t product = symProduct(xv, wArr[wStorageIdx], checked, site);
+                            size_t yIdx = (b * outChannels + oc) * outputLength + (size_t)outIdx;
+                            yArr[yIdx] =
+                                symAdd(yArr[yIdx],
+                                       rescalePartialIntoAccumulatorScale(
+                                           product, inScale * weightGroups->scales[elemGroup], sAcc,
+                                           roundingMode, rs),
+                                       checked, site);
                         }
                     }
                 }
             }
         }
     }
-
-    /* Bias seed pass (refold), separate from the pure-+= scatter. NULL for Conv1d dx;
-     * exercised by Conv1dTransposed forward in PR3. */
-    if (bias != NULL) {
-        int32_t const *bArr = (int32_t const *)bias->data;
-        symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
-        for (size_t oc = 0; oc < outChannels; oc++) {
-            int32_t seed = rescaleIntoAccumulatorScale(bArr[oc], biasQC->scale, outputScale,
-                                                       biasQC->roundingMode, rs);
-            for (size_t b = 0; b < batch; b++) {
-                for (size_t l = 0; l < outputLength; l++) {
-                    yArr[(b * outChannels + oc) * outputLength + l] += seed;
-                }
-            }
-        }
-    }
-
-    if (output->quantization->qConfig == NULL) {
-        PRINT_ERROR("convTranspose1dKernelSymInt32: output qConfig is NULL but SYM_INT32 "
-                    "expected (#187)");
-        exit(1);
-    }
-    ((symInt32QConfig_t *)output->quantization->qConfig)->scale = outputScale;
 }
 
-/* Group-quant PR3 (Task 2): entry guards mirror conv1dValidateWeightGroups
- * (Conv1dKernel.c) exactly -- non-NULL, qBits within the operand contract,
- * and the per-tensor sentinel {numGroups=1, groupSize=0} rejected (its
- * groupSize=0 would divide-by-zero below; per-tensor weights take
- * convTranspose1dKernelSymInt32). */
-static void convT1dValidateWeightGroups(const symQConfig_t *weightGroups, size_t weightElemCount) {
-    if (weightGroups == NULL) {
-        PRINT_ERROR("convTranspose1dKernelSymInt32Grouped: weightGroups must not be NULL");
-        exit(1);
-    }
-    if (weightGroups->qBits > ODT_SYM_OPERAND_QMAXBITS) {
-        PRINT_ERROR("convTranspose1dKernelSymInt32Grouped: weightGroups qBits (%u) exceeds "
-                    "operand contract (%u) — int32 product accumulation would overflow (#227)",
-                    (unsigned)weightGroups->qBits, (unsigned)ODT_SYM_OPERAND_QMAXBITS);
-        exit(1);
-    }
-    if (weightGroups->numGroups <= 1) {
-        PRINT_ERROR("convTranspose1dKernelSymInt32Grouped: weightGroups must be grouped "
-                    "(numGroups>1); per-tensor weights take convTranspose1dKernelSymInt32");
-        exit(1);
-    }
-    validateSymQConfigShape(weightGroups, weightElemCount);
+#define CONVT_GROUPED_PARAMS                                                                       \
+    const convTSymView_t *v, const symQConfig_t *weightGroups, float inScale, float sAcc,          \
+        roundingMode_t roundingMode, rngStream_t *rs, const symAccumSite_t *site
+#define CONVT_GROUPED_ARGS(checked) v, weightGroups, inScale, sAcc, roundingMode, rs, checked, site
+
+SYM_ACCUM_NOINLINE void convTSymGroupedScatterSafe(CONVT_GROUPED_PARAMS) {
+    convTSymGroupedScatter(CONVT_GROUPED_ARGS(false));
+}
+
+SYM_ACCUM_NOINLINE void convTSymGroupedScatterChecked(CONVT_GROUPED_PARAMS) {
+    convTSymGroupedScatter(CONVT_GROUPED_ARGS(true));
 }
 
 void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
@@ -310,69 +457,42 @@ void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const 
         yArr[i] = 0;
     }
 
-    long long padLeftSigned = (long long)padLeft;
-    long long outputLengthSigned = (long long)outputLength;
-    long long dilation = (long long)kernel->dilation;
-
-    for (size_t b = 0; b < batch; b++) {
-        for (size_t g = 0; g < groups; g++) {
-            size_t inLo = g * inChPerGroup;
-            size_t outLo = g * outChPerGroup;
-
-            for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
-                size_t ic = inLo + icOffset;
-                for (size_t inPos = 0; inPos < inputLength; inPos++) {
-                    int32_t xv = xArr[(b * inChannels + ic) * inputLength + inPos];
-                    long long outBase = (long long)(inPos * kernel->stride) - padLeftSigned;
-
-                    for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
-                        size_t oc = outLo + ocOffset;
-                        for (size_t k = 0; k < kernelSize; k++) {
-                            long long outIdx = outBase + (long long)k * dilation;
-                            if (outIdx < 0 || outIdx >= outputLengthSigned) {
-                                continue;
-                            }
-                            size_t wStorageIdx = (ic * outChPerGroup + ocOffset) * kernelSize + k;
-                            /* Per-PRODUCT rescale into sAcc -- NOT the gather
-                             * cores' running group-partial: consecutive
-                             * products here land in DIFFERENT output elements
-                             * (outIdx moves with k), so there is no
-                             * per-(target, group) run across which a raw int32
-                             * partial could be carried without a second
-                             * accumulator buffer. Cost: one rounding per
-                             * product, |err| <= 0.5*C*sAcc per output element
-                             * (C = contributing products). Per-element group
-                             * division (gap-robust): padding clips k taps, so
-                             * visited wStorageIdx values can have gaps -- a
-                             * precomputed run length would overshoot. */
-                            size_t elemGroup = wStorageIdx / weightGroups->groupSize;
-                            int32_t product = mulInt32s(xv, wArr[wStorageIdx]);
-                            yArr[(b * outChannels + oc) * outputLength + (size_t)outIdx] +=
-                                rescaleIntoAccumulatorScale(
-                                    product, inScale * weightGroups->scales[elemGroup], sAcc,
-                                    wQC->roundingMode, rs);
-                        }
-                    }
-                }
-            }
-        }
+    convTSymView_t view = {.batch = batch,
+                           .inChannels = inChannels,
+                           .inputLength = inputLength,
+                           .outChannels = outChannels,
+                           .outputLength = outputLength,
+                           .kernelSize = kernelSize,
+                           .groups = groups,
+                           .inChPerGroup = inChPerGroup,
+                           .outChPerGroup = outChPerGroup,
+                           .padLeft = padLeft,
+                           .kernel = kernel,
+                           .xArr = xArr,
+                           .wArr = wArr,
+                           .yArr = yArr};
+    uint8_t xBits = ((symInt32QConfig_t *)input->quantization->qConfig)->qMaxBits;
+    /* Count the grouped weight ONE BIT wider than declared: a grouped ASYM
+     * weight reaches the kernel as a SYM view with its ASYM qBits, but the
+     * funnel unpacks it to mantissa = code - zp[g], which spans +-(2^qBits - 1).
+     * Conservative by one bit for true grouped SYM. The abort banner reports
+     * this bound width (declared + 1), not the declared one. */
+    uint8_t wBits = (uint8_t)(weightGroups->qBits + 1);
+    symAccumSite_t site = symAccumSiteInitRescaled("convTranspose1dKernelSymInt32Grouped",
+                                                   inChPerGroup * kernelSize, xBits, wBits, 0);
+    if (symAccumProvenSafe(&site)) {
+        convTSymGroupedScatterSafe(&view, weightGroups, inScale, sAcc, wQC->roundingMode, rs,
+                                   &site);
+    } else {
+        convTSymGroupedScatterChecked(&view, weightGroups, inScale, sAcc, wQC->roundingMode, rs,
+                                      &site);
     }
 
     /* Bias seed pass (refold into sAcc), separate from the pure-+= scatter --
      * same pass order and primitive as convTranspose1dKernelSymInt32, only
      * the target scale differs (sAcc instead of inScale*wScale). */
     if (bias != NULL) {
-        int32_t const *bArr = (int32_t const *)bias->data;
-        symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
-        for (size_t oc = 0; oc < outChannels; oc++) {
-            int32_t seed = rescaleIntoAccumulatorScale(bArr[oc], biasQC->scale, sAcc,
-                                                       biasQC->roundingMode, rs);
-            for (size_t b = 0; b < batch; b++) {
-                for (size_t l = 0; l < outputLength; l++) {
-                    yArr[(b * outChannels + oc) * outputLength + l] += seed;
-                }
-            }
-        }
+        convTAddBiasSeedsChecked(&view, bias, sAcc, rs, &site);
     }
 
     if (output->quantization->qConfig == NULL) {

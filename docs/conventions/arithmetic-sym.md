@@ -25,6 +25,62 @@ SYM_INT32 (never a float master — the optimizer is single-dtype); a wide
 raw-integer bias (qMaxBits=32, scale=1) would need a structurally different
 scheme and is out of scope.
 
+## Rounding modes, the SYM_INT32 grid, encode and requant
+
+**Rounding modes** (`src/arithmetic/Rounding.c`, `roundByMode`; the BFP doc
+uses the same two). `HALF_AWAY` is `roundHalfAway` = C `round()` on the float:
+nearest integer, an exact `.5` goes away from zero (`round(-2.5) = -3`), result
+converted to `int32_t`. `SR_HALF_AWAY` is `roundHalfAway(input + u - 0.5f)`,
+evaluated in float32 left to right, with `u = rngNextUnitFloat(rs)` drawn from
+the op's stream: `u = (top 24 bits of a U32) / 2^24`, so `u` is in
+`[0, 1 - 2^-24]` (never 1, `0` possible). `SR_HALF_AWAY` without a stream
+aborts.
+
+**Grid.** A SYM_INT32 tensor of width `b = qMaxBits` holds int32 codes on the
+full two's-complement grid `[qMin, qMax] = [-2^(b-1), 2^(b-1) - 1]` (2047 and
+-2048 at int12), `value ≈ code · scale`. Every SYM_INT32 requant clamps to that
+grid (`clampInt32(..., qMin, qMax)`).
+
+- *Dynamic absmax encode* (`convertFloatTensorToSymInt32Tensor`, and the
+  dynamic requant `requantSymInt32Tensor` behind
+  `conversionMatrix[SYM_INT32][SYM_INT32]`): `scale = absMax / qMax` (float32),
+  `code = clampInt32(roundByMode(x / scale), qMin, qMax)`; requant evaluates
+  `(float)code · (inScale / scale)` instead of `x / scale`. An all-zero tensor
+  (`absMax == 0`) gets `scale = 1.0`; under `HALF_AWAY` its codes are all zero.
+  Under `SR_HALF_AWAY` a draw of `u == 0` rounds `0 + 0 − 0.5` to `−1`, so an
+  all-zero tensor can come out with `−1` codes. Because `|x / scale|`
+  is at most `qMax` (up to a float32 ulp), `HALF_AWAY` never produces `qMin`;
+  under `SR_HALF_AWAY` a `-absMax` element reaches `qMin` when `u == 0`
+  (`round(-qMax - 0.5) = qMin`), which the clamp keeps in range.
+- *Fixed-scale requant* (`requantSymInt32TensorToScale`, #192 D1 "requant into
+  a preset target scale"): the output scale must already be set and `> 0`
+  (else `exit(1)`); each element is `roundByMode(clamp((float)code · inScale /
+  targetScale, qMin, qMax))`, so out-of-grid values **saturate** to the
+  two's-complement grid, and this is how `qMin` becomes reachable under
+  `HALF_AWAY`. The clamp is in the float domain *before* the rounding and is not
+  repeated afterwards, so under `SR_HALF_AWAY` a value saturated at `qMin` can
+  round one step past it (`u == 0`: `round(qMin - 0.5) = qMin - 1`). The
+  primitive is called directly; it is not a `conversionMatrix` cell.
+- The `OUT_ACC_FIXED_SCALE` epilogue (`rescaleIntoAccumulatorScale`) does not
+  clamp at all (see "Quantized gradient accumulation").
+
+**Staging a FLOAT32 operand under `ARITH_SYM_INT32`** (`executeOp` prologue,
+`src/arithmetic/ExecuteOp.c`). Each storage type has its own route into stack
+scratch, and every route declares the width of the codes it actually writes
+(that declared `qMaxBits` is what the accumulator guard below sizes its proof
+from):
+
+| Stored as | Route | Scratch scale | Declared `qMaxBits` |
+|---|---|---|---|
+| FLOAT32 | dynamic absmax encode above, **per tensor** (one scale for the whole operand, not per sample or row), rounded by the op's `arithmetic.roundingMode` | `absMax / qMax` | `ODT_SYM_OPERAND_QMAXBITS` (the `initSymInt32QConfig` default, 12) |
+| SYM, per-tensor | sign-extend the packed codes (`convertSymTensorToSymInt32Tensor`) | copied | `qBits` |
+| ASYM, per-tensor | `code − zp` (`convertAsymTensorToSymInt32Tensor`) | copied | `qBits + 1` (the difference spans `±(2^qBits − 1)`) |
+| INT32 | raw copy, unclamped (`convertInt32TensorToSymInt32Tensor`) | 1 | 32 (full two's-complement range), declared by the funnel on its op-local scratch only; the public conversion cell leaves the destination's width untouched (a width > 31 would break `getQLike` and the requantizers' int32 clamp casts), so a user tensor produced by it understates its codes — follow-up |
+| SYM_INT32 | used in place | its own | its own |
+| SYM / ASYM, grouped | unpacked in the prologue (ASYM: `code − zp[g]`); consumed by the group-aware kernels, per-group scales via their own ctx | poisoned to 1 | `qBits`, counted **one bit wider** in the kernels' bound |
+
+A BFP-stored operand is denied under `ARITH_SYM_INT32`.
+
 ## Conv1d / Conv1dTransposed SYM_INT32 (#45)
 
 Two integer sliding-window cores live in `src/arithmetic/`, siblings of the
@@ -94,15 +150,20 @@ int64 — hard rule). For symmetric `b`-bit operands each product is ≤ 2^(2b�
 so an int32 accumulator (~2^31) holds only ~2^(33−2b) worst-case product terms
 before signed overflow (UB):
 
-| operand width | max product | int32 term at which overflow first occurs |
+| operand width | max product | int32 term at which overflow first occurs (two's-complement worst case) |
 |---|---|---|
 | int16 (qMaxBits=16) | 2^30 | 2 |
 | int12 (qMaxBits=12) | 2^22 | 512 |
 | int8  (qMaxBits=8)  | 2^14 | 131072 |
 
 The number of worst-case terms that still **fit** is one less: int16 survives 1,
-int12 survives **511**, int8 survives 131071 — i.e. int12 is sound for reductions
-of length **N ≤ 511** (`512·2^22 = 2^31 > INT32_MAX`).
+int12 survives **511**, int8 survives 131071 — i.e. int12 is provably sound for
+reductions of length **N ≤ 511** (`512·2^22 = 2^31 > INT32_MAX`). The table uses
+the full two's-complement magnitude `2^(b−1)`: the code `−2^(b−1)` IS reachable
+(fixed-scale requant saturation clamps to `qMin`). When **both** operands are
+absmax-encoded (`|code| ≤ 2^(b−1)−1`, e.g. every operand the funnel's absmax
+requant produces) the budget is **512** int12 terms (`512·2047² < INT32_MAX`,
+513 wraps).
 
 int16×int16→int32 is **unsound for product-accumulation** (forward, dx,
 weightGrad) — it overflows after ~2 full-scale terms; it is sound only for
@@ -114,27 +175,92 @@ TFLite. The **grad accumulators stay int16** (wider accumulator, free since SYM
 stores int32 regardless of qMaxBits). The **kernels are bit-width-agnostic** —
 only the quantization configs change; the int32 accumulator (no int64) is kept.
 
-**Realized framework-wide int12 contract (PR-A, #227):**
+**Realized framework-wide int12 default (PR-A, #227):**
 
 - The SYM_INT32 **operand** default is int12 via the compile-time knob
   `ODT_SYM_OPERAND_QMAXBITS` (=12), set in `initSymInt32QConfig`
   (`src/tensor/include/Quantization.h`). Override per-build with
   `-DODT_SYM_OPERAND_QMAXBITS=N` (e.g. =8 for layers wider than 511).
 - `matmulIntCore` (Linear forward / propLoss / weightGrad) and the LayerNorm
-  **affine product** now run on int12 operands, enforced by op-entry guards
-  (`matmulValidateSymOperand` at both Matmul SYM entries;
-  `layerNormValidateSymTensor` lowered to the knob). LayerNorm's per-group
-  mantissa-sum is a value-sum and stays sound at any qMaxBits ≤ 16.
+  **affine product** run on int12 operands by default. The product kernels
+  (Matmul, Conv1d, ConvTranspose1d, both grouped twins) do **not** reject wider
+  operands: they accept any declared width and the accumulator guard below
+  decides per op (proven safe, exact on the checked path, or abort).
+  `matmulValidateSymOperand` only checks the dtype. LayerNorm / GroupNorm
+  (`layerNormValidateSymTensor`, `groupNormValidateSymTensor`) still reject
+  `qMaxBits > ODT_SYM_OPERAND_QMAXBITS`: their affine product `q·gamma_q` has no
+  guarded accumulator, so the cap is its overflow argument. The Reduce / pool
+  value-sum caps (`qMaxBits ≤ 16`) are untouched.
 - **Grad accumulators stay int16** via `ODT_SYM_GRAD_QMAXBITS` (=16), pinned
   in `gradInitSymInt32` (`getQLike` preserves the source width). biasGrad is a
   value-sum; weightGrad is a sum of products (int32 accumulate → requantize).
   Whether grads should be stored SYM_INT32 at all is under redesign — #261.
-- int12 is sound only for reductions **N ≤ 511**; the runtime N-vs-budget check
-  is a deferred follow-up. The #189 policy (release runs free, CI UBSan #204)
-  backstops residual overflow.
-- Note: the conv weightGrad product mixes an int12 input with an int16 grad
-  operand under the #218 grad-accumulator scheme — its budget is governed by
-  #218/#45, not closed by this operand flip.
+- **SYM int32 accumulator guard (shipped).** int12 is provably sound only for
+  reductions **N ≤ 511**, and every SYM int32 *product* accumulator now enforces
+  it at run time (`src/arithmetic/include/SymAccumGuard.h`), in every build:
+  1. *Static proof, per op:* safe iff `N_max · 2^(qa−1) · 2^(qb−1) + max|seed|
+     ≤ INT32_MAX`, with `qa`/`qb` the operands' actual widths (input
+     `qMaxBits`, weight `qMaxBits` or `weightGroups->qBits`) and `max|seed|` the
+     op's actual bias-seed array (`INT32_MIN` counts as 2^31). The bound is
+     evaluated in 64-bit with a division, so neither it nor a huge `N` wraps; a
+     bound that cannot admit even one term (widths summing past 31 bits) proves
+     only `N == 0`. If the proof holds the kernel runs its original loop,
+     instruction for instruction.
+  2. *Otherwise the same loop body runs checked:* each accumulate is a
+     `__builtin_add_overflow`, and the product also goes through
+     `__builtin_mul_overflow` when either width exceeds 16 (the only case where
+     a single product can leave int32). A reduction the proof cannot cover but
+     whose values fit (small or mixed-sign codes) returns the exact result; the
+     first real overflow aborts.
+  3. *Abort:* `exit(1)` with a banner naming the op, N, both operand widths,
+     `max|seed|` and the remedies "narrow `ODT_SYM_OPERAND_QMAXBITS` (one lever)
+     or run this op under `ARITH_FLOAT32`".
+  *Grouped weights count one bit wider.* A grouped ASYM weight reaches the
+  grouped kernels as a SYM view carrying its ASYM `qBits`, but the funnel unpacks
+  it to the mantissa image `code - zp[g]`, which spans `±(2^qBits − 1)`. The three
+  grouped kernels therefore use `qBits + 1` for the weight in the static bound
+  (conservative by one bit for true grouped SYM), and the abort banner reports
+  that bound width. The view's `qBits` itself is not widened.
+  *Rescaled accumulators carry float slack.* The grouped kernels add
+  `round((p · s_g) / s_acc)` terms. The scale ratio is ≤ 1, but the float32
+  evaluation (two roundings) can land one ulp (2^-23 relative) above `|p|`, and a
+  stochastic round adds up to 1. Those accumulators (grouped Matmul / Conv1d
+  rescaled accumulator, grouped ConvT scatter) therefore use the slacked bound
+  `N · (mp + 1) + N · mp / 2^22 + max|seed| ≤ INT32_MAX` (`mp = 2^(qa−1) ·
+  2^(qb−1)`, `symAccumTermLimitRescaled`); the raw group partials stay on the
+  exact bound.
+  Assumption: stored codes obey their declared width (`qMaxBits`/`qBits` is
+  metadata and is not re-checked per code). Every funnel staging route declares
+  the true width of the codes it writes (table above) and the requant cells clamp
+  to it, so only a hand-built tensor whose codes exceed its own declared width
+  can defeat the proof.
+  Sites: `matmulIntCore` (`N = aColumns`) and `matmulIntCoreGrouped` (raw group
+  partial, bounded by `min(groupSize, N)` terms, **and** the int32 accumulator of
+  rescaled partials, bounded by `N` terms plus the seed), `conv1dKernelSymInt32`
+  and its grouped twin (`N = inChPerGroup·K`, both accumulators),
+  `convTranspose1dKernelSymInt32` and its grouped twin (`N = inChPerGroup·K`
+  contributors per output element; the post-scatter bias add is always checked),
+  and the Conv1d / Conv1dTransposed SYM weight-grad scatters (`N = batch ·
+  outputLength` / `batch · inputLength` contributors per weight-grad element).
+  **Not covered — follow-up:** the value-sum accumulators. Reduce
+  (`reduceValidateSymOperand`, which the norm layers' sums go through) and the
+  pools (`poolValidateSymValueSum`) check `N < 2^(32−q)` at run time; the
+  Linear / Conv1d / Conv1dTransposed SYM bias-grad sums do **not** — they rely
+  on code comments about int12/int16-range loss wires and have no run-time
+  check. A `symValidateSumHeadroom` sibling of the BFP `bfpValidateSumHeadroom`
+  would close them. BFP kernels have their own headroom guards.
+- Note: a weightGrad product's two operands are the forward input and the
+  lossGrad (dx) wire, each at its own tensor's `qMaxBits` (the weight-grad
+  guard reads exactly those two widths). By default both are int12: a FLOAT32
+  wire is staged at `ODT_SYM_OPERAND_QMAXBITS`, and a SYM_INT32 wire carries
+  the width its `outputQ`/`propLossQ` declares, int12 unless the caller asks
+  for more (the `Conv1d.c` bias-grad comment "int12-range" describes this
+  default; `Linear.c`'s cites the looser `qMaxBits <= 16` contract). int16
+  appears only as the width of the grad *accumulator* target
+  (`ODT_SYM_GRAD_QMAXBITS`, above) or when a caller declares a 16-bit wire;
+  then the static bound above shrinks (int12 x int16 proves only `N <= 31`) and
+  an unprovable reduction runs checked. The accumulation scheme of the weight
+  grad itself is governed by #218/#45.
 - The unit-test gold suite validates the **default** int12/int16 contract
   (`ODT_SYM_OPERAND_QMAXBITS=12`, `ODT_SYM_GRAD_QMAXBITS=16`); building with a
   knob override (e.g. `-DODT_SYM_OPERAND_QMAXBITS=8`) diverges from those gold
@@ -387,7 +513,12 @@ quantized training know this is a known, expected limitation rather than a bug.
 The two schemes are now the named funnel epilogue modes chosen per call in layer
 code: `OUT_ACC_DYNAMIC_RESCALE` (Strategy A) and `OUT_ACC_FIXED_SCALE` (Linear
 SYM bias). On FLOAT32 targets, both collapse to the exact float add (no
-quantization).
+quantization). A SYM_INT32 raw increment is dequantized as
+`out[i] += (float)raw[i] * s_raw` (`dequantChunkToFloat`, via
+`accumulateTensorIntoFloat32Inplace`), with `s_raw` the scale the kernel stored
+on the raw intermediate (`s_in·s_w` / `s_loss·s_in` as one float32 product,
+`s_loss` for a bias grad): the int-to-float cast rounds only above `2^24`, the
+multiply rounds once, and the add into a zeroed grad is exact.
 
   **Attribution note:** this fixed-scale integer bias-GRADIENT accumulation is
   ODT's own construction and is NOT prescribed by Deutel et al.

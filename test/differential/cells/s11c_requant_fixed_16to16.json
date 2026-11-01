@@ -1,0 +1,31 @@
+{
+  "name": "s11c_requant_fixed_16to16",
+  "description": "S11 fixed-scale requant SYM_INT32@16 -> @16 into a preset target scale, s_in/s_t ~ 5/4: interior .5 ties, codes around the +-(qMax+0.5) clamp edge, and values far outside the target grid (clamp assumed, DOC_GAPS[13]).",
+  "op": "convert",
+  "direction": "requant_fixed",
+  "tiers": [
+    "convert"
+  ],
+  "arith": {
+    "type": "SYM_INT32",
+    "rounding": "HALF_AWAY"
+  },
+  "outputBits": 16,
+  "fixture": {
+    "type": "convert",
+    "seed": 732,
+    "n": 64,
+    "inputBits": 16,
+    "ratio": [
+      5,
+      4
+    ]
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED"
+  }
+}

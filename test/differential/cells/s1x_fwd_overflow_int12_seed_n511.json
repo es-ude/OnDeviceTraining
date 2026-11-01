@@ -1,0 +1,50 @@
+{
+  "name": "s1x_fwd_overflow_int12_seed_n511",
+  "description": "S1 F9 probe through the SEED: every input and weight code +2047 (int12 x int12), N=511 (511*2047^2 fits with ~6.4e6 to spare, and 511*2^22 is provable on its own) plus a large positive bias seed (|seed| up to ~1e8 from a coarse bias scale): the exact accumulator of a positive-bias channel leaves int32. The guard's static bound includes max|seed|, so it must ABORT and its banner's max|seed| must lie in the range the seed policy allows; a guard that ignored the seed would wrap silently.",
+  "op": "linear",
+  "direction": "forward",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "SYM_INT32",
+    "rounding": "HALF_AWAY"
+  },
+  "outputBits": 12,
+  "fixture": {
+    "type": "full_scale",
+    "seed": 1717,
+    "batch": 1,
+    "inF": 511,
+    "outF": 4,
+    "inputStorage": "SYM_INT32",
+    "weightStorage": "SYM_INT32",
+    "weightBits": 12,
+    "bias": true,
+    "absmaxRanges": {
+      "input": [
+        1.0,
+        1.0
+      ],
+      "weight": [
+        1.0,
+        1.0
+      ],
+      "bias": [
+        20.0,
+        24.0
+      ]
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED",
+    "overflow": [
+      "ABORT"
+    ],
+    "guardPath": "abort"
+  }
+}

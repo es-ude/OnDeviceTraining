@@ -431,6 +431,15 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
                 scratchQC[i].scale = 1.0f;
             } else {
                 convertTensor(inputs[i], &scratchTensors[i], stageStream);
+                if (inputs[i]->quantization->type == INT32) {
+                    /* Raw int32 codes are copied unclamped: the scratch spans
+                     * [-2^31, 2^31 - 1], 32 bits. Declared here, on the
+                     * op-local scratch only -- the public conversion cell
+                     * must not write a width > 31 into a user tensor
+                     * (getQLike / the requantizers reject or mis-cast it). The
+                     * accumulator guard sizes its proof from this width. */
+                    scratchQC[i].qMaxBits = 32;
+                }
             }
             break;
         }

@@ -1,4 +1,5 @@
 #include <stddef.h>
+#include <stdint.h>
 
 #include "DeathTest.h"
 #include "RNG.h"
@@ -81,8 +82,29 @@ void testRoundByModeSrWithoutAStreamExits() {
 void setUp() {}
 void tearDown() {}
 
+/* A partial near INT32_MAX is legitimate (no seed headroom reserved), but the
+ * float->int32 cast must still be refused outside [-2^31, 2^31) and for NaN. */
+void testRescalePartialKeepsOnlyCastSafety(void) {
+    TEST_ASSERT_EQUAL_INT32(
+        2147483520, rescalePartialIntoAccumulatorScale(2147483520, 1.0f, 1.0f, HALF_AWAY, NULL));
+    TEST_ASSERT_EQUAL_INT32(
+        INT32_MIN, rescalePartialIntoAccumulatorScale(INT32_MIN, 1.0f, 1.0f, HALF_AWAY, NULL));
+    TEST_ASSERT_EQUAL_INT32(100,
+                            rescalePartialIntoAccumulatorScale(100, 1.0f, 1.0f, HALF_AWAY, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "outside int32",
+        (void)rescalePartialIntoAccumulatorScale(INT32_MAX, 1.0f, 1.0f, HALF_AWAY, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "outside int32",
+        (void)rescalePartialIntoAccumulatorScale(1 << 20, 4096.0f, 1.0f, HALF_AWAY, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "outside int32",
+        (void)rescalePartialIntoAccumulatorScale(0, 1.0f, 0.0f, HALF_AWAY, NULL));
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testRescalePartialKeepsOnlyCastSafety);
     RUN_TEST(testRoundHalfAway);
     RUN_TEST(testRescaleIntoAccumulatorScale);
     RUN_TEST(testRoundByModeSrDrawsOneUnitFloatFromItsStream);

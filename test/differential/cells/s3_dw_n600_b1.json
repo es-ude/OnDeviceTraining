@@ -1,0 +1,41 @@
+{
+  "name": "s3_dw_n600_b1",
+  "description": "S3 Linear weightGrad (+ biasGrad): B=1 (the reduction) inF=600 outF=6, int12 loss, FLOAT32 input staged to int12 (grid-exact), FLOAT32 grad storage; kernel tier = raw int32 exact, layer tier = the float32 grad within its roundings.",
+  "op": "linear",
+  "direction": "weightGrad",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "SYM_INT32",
+    "rounding": "HALF_AWAY"
+  },
+  "outputBits": 12,
+  "gradStorage": "FLOAT32",
+  "fixture": {
+    "type": "linear_grid",
+    "seed": 405,
+    "batch": 1,
+    "inF": 600,
+    "outF": 6,
+    "inputStorage": "FLOAT32",
+    "weightStorage": "SYM",
+    "weightBits": 8,
+    "bias": true
+  },
+  "expect": {
+    "legA": [
+      "EXACT",
+      "TIE_ONLY"
+    ],
+    "legB": "BOUNDED",
+    "biasGrad": {
+      "legA": [
+        "EXACT",
+        "TIE_ONLY"
+      ],
+      "legB": "BOUNDED"
+    }
+  }
+}

@@ -3865,8 +3865,28 @@ void testLinearForwardInt32InputThatFitsIsExact(void) {
     TEST_ASSERT_FLOAT_WITHIN(16.f, -104601700.f, y);
 }
 
+/* The public INT32 -> SYM_INT32 conversion cell must leave a user tensor that
+ * getTensorLike (getQLike -> initSymInt32QConfigWithQMaxBits, which rejects
+ * widths > 31) can still clone. The 32-bit width is declared on the funnel's
+ * op-local scratch only. */
+void testConvertInt32ToSymInt32UserTensorStaysCloneable(void) {
+    tensor_t *src = initTensor(shape2(1, 4), quantizationInitInt32(), NULL);
+    for (size_t i = 0; i < 4; i++) {
+        ((int32_t *)src->data)[i] = (int32_t)i - 2;
+    }
+    tensor_t *dst = initTensor(shape2(1, 4), quantizationInitSymInt32(HALF_AWAY), NULL);
+    convertTensor(src, dst, NULL);
+    tensor_t *clone = getTensorLike(dst);
+    TEST_ASSERT_NOT_NULL(clone);
+    TEST_ASSERT_TRUE(((symInt32QConfig_t *)dst->quantization->qConfig)->qMaxBits <= 31);
+    freeTensor(clone);
+    freeTensor(dst);
+    freeTensor(src);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testConvertInt32ToSymInt32UserTensorStaysCloneable);
     RUN_TEST(testLinearForwardPerTensorAsym12WeightWrapsAborts);
     RUN_TEST(testLinearForwardPerTensorAsym16WeightWrapsAborts);
     RUN_TEST(testLinearForwardPerTensorAsym12InputWrapsAborts);

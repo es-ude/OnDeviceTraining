@@ -24,7 +24,7 @@ import numpy as np
 DOC_COVERED: dict[str, str] = {
     "grid": "arithmetic-sym 'Rounding modes, the SYM_INT32 grid, encode and requant', Grid: "
     "[qMin, qMax] = [-2^(b-1), 2^(b-1) - 1] (2047 and -2048 at int12); every SYM_INT32 requant "
-    "clamps to it; neither rounding mode produces qMin from an absmax scale (SR_HALF_AWAY: floor(x + u) >= -qMax "
+    "clamps to it; neither rounding mode produces qMin from an absmax scale (SR_HALF_AWAY: lift iff u < frac stays >= -qMax "
     "for x >= -qMax), barring a float32-ulp overshoot of x / scale.",
     "zero_absmax": "same section, dynamic absmax encode: an all-zero tensor gets scale = 1.0 and "
     "all-zero codes.",

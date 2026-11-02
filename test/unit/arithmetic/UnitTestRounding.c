@@ -93,18 +93,17 @@ void testRoundHalfAwayMatchesDoubleRoundOverFloatSweep() {
  * first draw of rngOpen(rngKeyFromSeed(31)):
  *   uv run python -c "from examples._shared.keyed_rng import (key_from_seed as kfs,
  *   open_stream as o, next_unit_float as u); print(u(o(kfs(31)))[1])"
- * prints 0.1786224..., so floor(352.5 + j) = 352 (HALF_AWAY: 353). */
+ * prints 0.1786224... < 0.5 = frac(352.5), so SR lifts to 353 (law: Rounding.h). */
 void testRoundByModeSrDrawsOneUnitFloatFromItsStream() {
     rngStream_t rs = rngOpen(rngKeyFromSeed(31u));
     rngStream_t oneStepOn = rngOpen(rngKeyFromSeed(31u));
     (void)rngNextU32(&oneStepOn);
-    TEST_ASSERT_EQUAL_INT32(352, roundByMode(352.5f, SR_HALF_AWAY, &rs));
+    TEST_ASSERT_EQUAL_INT32(353, roundByMode(352.5f, SR_HALF_AWAY, &rs));
     TEST_ASSERT_EQUAL_HEX32(oneStepOn.state, rs.state);
 }
 
-/* #510: with u == 0 the SR sum x + u is x itself, so an exactly representable
- * code must come back unchanged on both sides of zero (the old
- * round(x + u - 0.5) formula sent every k <= 0 to k - 1). */
+/* #510: an exactly representable code (frac == 0) must come back unchanged on both
+ * sides of zero (the old round(x + u - 0.5) formula sent every k <= 0 to k - 1). */
 void testRoundByModeSrWithZeroDrawKeepsExactIntegers() {
     const float values[] = {0.f, -3.f, -2048.f, 3.f, -2047.f, 2047.f};
     for (size_t i = 0; i < sizeof values / sizeof values[0]; i++) {
@@ -113,57 +112,71 @@ void testRoundByModeSrWithZeroDrawKeepsExactIntegers() {
     }
 }
 
-/* x + u = -0.25 + 0.25 = 0 exactly: a non-integer input whose dithered sum
- * lands on an integer takes that integer. */
+/* x = -0.25, u = 0.25 == |frac|: not below it, so no lowering; the result is 0. */
 void testRoundByModeSrSumOnIntegerTakesTheInteger() {
     rngStream_t rs = rngStreamWithNextDraw(0x40000000u); /* top 24 bits 0x400000: u == 0.25 */
     TEST_ASSERT_EQUAL_INT32(0, roundByMode(-0.25f, SR_HALF_AWAY, &rs));
 }
 
-/* Exact SR: floor(x + u) must not be computed as a float add, whose rounded sum
- * crosses the next integer for u > 1 - ulp(x)/2 (a magnitude-growing upward bias). */
+/* SR must never form the float sum x + u, whose rounded value crosses the next integer
+ * for u > 1 - ulp(x)/2 (a magnitude-growing upward bias). */
 static int32_t srWithDraw(float x, uint32_t draw) {
     rngStream_t rs = rngStreamWithNextDraw(draw);
     return roundByMode(x, SR_HALF_AWAY, &rs);
 }
 
-/* 2047 + (1 - 2^-24) rounds up to 2048 in float32; the real sum is below 2048. */
+/* 2047 + (1 - 2^-24) would round up to 2048 in float32; an exact integer never lifts. */
 void testRoundByModeSrLargestDrawDoesNotLiftAcrossTheInteger() {
     TEST_ASSERT_EQUAL_INT32(2047, srWithDraw(2047.f, 0xFFFFFFFFu));
 }
 
-/* -2^24 + 0.75 rounds to -2^24 + 1 in float32; the real sum floors to -2^24. */
+/* -2^24 + 0.75 would round to -2^24 + 1 in float32; an exact integer never moves. */
 void testRoundByModeSrNegativeBinadeEdgeStaysOnTheInteger() {
     TEST_ASSERT_EQUAL_INT32(-16777216, srWithDraw(-16777216.f, 0xC0000000u));
     TEST_ASSERT_EQUAL_INT32(8388609, srWithDraw(8388609.f, 0xC0000000u));
 }
 
-/* Spacing is 0.5 on [2^22, 2^23): 2^22 + 0.5 + 0.25 ties to even (2^22 + 1) in
- * float32; the real sum floors to 2^22. u = 0.5 reaches the integer exactly. */
+/* Spacing is 0.5 on [2^22, 2^23): frac = 0.5. Lift iff u < 0.5: u = 0.25 lifts,
+ * u = 0.5 does not. */
 void testRoundByModeSrHalfIntegerInLargeBinadeFollowsTheFraction() {
-    TEST_ASSERT_EQUAL_INT32(4194304, srWithDraw(4194304.5f, 0x40000000u));
-    TEST_ASSERT_EQUAL_INT32(4194305, srWithDraw(4194304.5f, 0x80000000u));
+    TEST_ASSERT_EQUAL_INT32(4194305, srWithDraw(4194304.5f, 0x40000000u));
+    TEST_ASSERT_EQUAL_INT32(4194304, srWithDraw(4194304.5f, 0x80000000u));
 }
 
-/* 3 * 2^-25 + (1 - 2^-23) < 1 exactly; the float sum ties to even at 1.0. */
+/* frac = 3 * 2^-25 is far below a near-one draw: no lift. */
 void testRoundByModeSrTinyPositiveWithNearOneDrawStaysZero() {
     TEST_ASSERT_EQUAL_INT32(0, srWithDraw(ldexpf(3.f, -25), 0xFFFFFE00u));
 }
 
-/* floor(-2^-30 + u) = -1 only for u == 0; the smallest nonzero u (2^-24) is enough. */
+/* x = -2^-30: lower iff u < 2^-30, i.e. only u == 0; the smallest nonzero u (2^-24) is enough. */
 void testRoundByModeSrTinyNegativeRoundsDownOnlyForZeroDraw() {
     TEST_ASSERT_EQUAL_INT32(-1, srWithDraw(ldexpf(-1.f, -30), 0x00000001u));
     TEST_ASSERT_EQUAL_INT32(0, srWithDraw(ldexpf(-1.f, -30), 0x00000100u));
 }
 
-/* Pins the draw-to-outcome mapping of floor(x + u): up iff u >= 1 - f (not u < f). */
-void testRoundByModeSrMappingIsFloorOfXPlusU() {
-    TEST_ASSERT_EQUAL_INT32(2, srWithDraw(2.25f, 0x1999999Au)); /* u ~ 0.1 */
-    TEST_ASSERT_EQUAL_INT32(3, srWithDraw(2.25f, 0xE6666666u)); /* u ~ 0.9 */
-    TEST_ASSERT_EQUAL_INT32(-3, srWithDraw(-2.25f, 0x1999999Au));
+/* Pins the law: lift iff u < frac(x) (negative x: lower iff u < -frac), u = (draw >> 8) / 2^24. */
+void testRoundByModeSrLiftsIffDrawBelowFraction() {
+    TEST_ASSERT_EQUAL_INT32(3, srWithDraw(2.25f, 0x1999999Au));   /* u ~ 0.1 < 0.25: lift */
+    TEST_ASSERT_EQUAL_INT32(2, srWithDraw(2.25f, 0xE6666666u));   /* u ~ 0.9: stay */
+    TEST_ASSERT_EQUAL_INT32(-3, srWithDraw(-2.25f, 0x1999999Au)); /* u ~ 0.1 < 0.25: lower */
     TEST_ASSERT_EQUAL_INT32(-2, srWithDraw(-2.25f, 0xE6666666u));
-    TEST_ASSERT_EQUAL_INT32(3, srWithDraw(2.25f, 0xC0000000u)); /* u = 0.75: boundary, up */
-    TEST_ASSERT_EQUAL_INT32(2, srWithDraw(2.25f, 0xBFFFFF00u)); /* just below 0.75 */
+    TEST_ASSERT_EQUAL_INT32(2, srWithDraw(2.25f, 0xC0000000u));   /* u = 0.75: stay */
+    TEST_ASSERT_EQUAL_INT32(2, srWithDraw(2.25f, 0x40000000u));   /* u = 0.25 == frac: stay */
+    TEST_ASSERT_EQUAL_INT32(3, srWithDraw(2.25f, 0x3FFFFF00u));   /* u = 0.25 - 2^-24: lift */
+    TEST_ASSERT_EQUAL_INT32(-2, srWithDraw(-2.25f, 0x40000000u)); /* u = 0.25 == |frac|: stay */
+    TEST_ASSERT_EQUAL_INT32(-3, srWithDraw(-2.25f, 0x3FFFFF00u));
+}
+
+/* Odd per draw: SR(-x) == -SR(x) for the same u. */
+void testRoundByModeSrIsOddPerDraw() {
+    const float xs[] = {0.1f, 0.5f, 2.25f, 2.75f, 352.5f, 4194304.5f, 1000.999f};
+    const uint32_t draws[] = {0x00000001u, 0x1999999Au, 0x40000000u,
+                              0x80000000u, 0xE6666666u, 0xFFFFFFFFu};
+    for (size_t i = 0; i < sizeof xs / sizeof xs[0]; i++) {
+        for (size_t j = 0; j < sizeof draws / sizeof draws[0]; j++) {
+            TEST_ASSERT_EQUAL_INT32(-srWithDraw(xs[i], draws[j]), srWithDraw(-xs[i], draws[j]));
+        }
+    }
 }
 
 static void roundSrWithoutAStream(void) {
@@ -215,7 +228,8 @@ int main(void) {
     RUN_TEST(testRoundByModeSrHalfIntegerInLargeBinadeFollowsTheFraction);
     RUN_TEST(testRoundByModeSrTinyPositiveWithNearOneDrawStaysZero);
     RUN_TEST(testRoundByModeSrTinyNegativeRoundsDownOnlyForZeroDraw);
-    RUN_TEST(testRoundByModeSrMappingIsFloorOfXPlusU);
+    RUN_TEST(testRoundByModeSrLiftsIffDrawBelowFraction);
+    RUN_TEST(testRoundByModeSrIsOddPerDraw);
 
     return UNITY_END();
 }

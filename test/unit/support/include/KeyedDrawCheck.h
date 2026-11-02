@@ -43,7 +43,7 @@ static inline uint32_t keyedOpKernelState(uint64_t seed, uint32_t phaseTag, uint
 /* The layer key is a hash chain, so a test cannot set a stream's state; it
  * searches for a seed instead. A draw >= KEYED_NEAR_ONE_DRAW has u >= 1 - 2^-16:
  * the draw a saturated element at 2^11 - 1 would have lifted to 2^11 under a
- * float32 add x + u (threshold u >= 1 - 2^-14). Exact SR no longer lifts, so
+ * float32 add x + u (threshold u >= 1 - 2^-14). SR (lift iff u < frac) does not lift an integer, so
  * it is now a regression draw: saturated SR must stay on the grid. */
 #define KEYED_NEAR_ONE_DRAW 0xFFFF0000u
 

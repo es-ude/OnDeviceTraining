@@ -1340,8 +1340,8 @@ static int32_t requantOneSrWithDraw(int32_t in, uint32_t draw) {
 }
 
 void testRequantToScaleSrNeverEmitsBelowQMin() {
-    // Pins that SR at qMin stays qMin. Under exact floor(x + u) the bottom of the grid cannot
-    // undershoot (u >= 0), so no clamp is exercised here (the clamp is defensive under exact SR).
+    // Pins that SR at qMin stays qMin. Under SR (lift iff u < frac) the bottom of the grid cannot
+    // undershoot (an integer never moves), so no clamp is exercised here (the clamp is defensive).
     TEST_ASSERT_EQUAL_INT32(-2048, requantOneSrWithDraw(-5000, 0x00000001u)); // u == 0
 }
 

@@ -2079,8 +2079,8 @@ static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *i
      * exponent cap can drive the quotient past int32 range, or to +-inf, for
      * entirely finite increments, and (int32_t)round(...) is undefined there
      * -- C17 6.3.1.4) while leaving every overflowing value out of range for
-     * packChunkGuarded, which still aborts. Under exact SR (floor(x + u)
-     * without a rounded sum) a value clamped exactly onto qMin-1 or qMax+1 has
+     * packChunkGuarded, which still aborts. Under SR (lift iff u < frac;
+     * no sum is formed) a value clamped exactly onto qMin-1 or qMax+1 has
      * no fraction and stays put, so a one-code band would already preserve the
      * abort; the second code is headroom on each side, and keeps the (int32_t)
      * cast defined. */

@@ -50,11 +50,11 @@ DOC_COVERED: dict[str, str] = {
     "grid": "arithmetic-bfp section 1: the shipped grid is the full two's-complement one, "
     "mantissas clamp to [-2^(m-1), qMax] with qMax = 2^(m-1) - 1; -2^(m-1) is reachable (HALF_AWAY: "
     "only when D6's exponent cap pins the scale, section 2; SR_HALF_AWAY: no extra route, "
-    "floor(x + u) with x >= -qMax cannot go below -qMax). Section 2 states the saturation grid as the same "
+    "lift iff u < frac with x >= -qMax cannot go below -qMax). Section 2 states the saturation grid as the same "
     "[-2^(m-1), qMax].",
     "rounding": "arithmetic-sym 'Rounding modes, the SYM_INT32 grid, encode and requant' (referenced "
     "from arithmetic-bfp section 5.3): HALF_AWAY = C round() (an exact .5 goes away from zero); "
-    "SR_HALF_AWAY = exact floor(x + u) (the sum is not rounded in float32), u = top-24-bits / 2^24.",
+    "SR_HALF_AWAY = lift iff u < frac (no sum x + u is formed), u = top-24-bits / 2^24.",
     "headroom": "arithmetic-bfp section 5.3 'Headroom, exact form': bfpSegmentLimit(ma, mb) = "
     "INT32_MAX >> (ma + mb - 2) (shift >= 31 clamps to 1; equal widths 2^(33-2m) - 1: 131071 at "
     "m=8, 511 at m=12, 1 at m=16), checked over min(runA, runB, reductionLen) with run = groupSize "

@@ -164,16 +164,23 @@ typedef struct convTSymView {
 /* Post-scatter bias seed pass, shared by both SYM scatter kernels. ALWAYS
  * checked: it is O(outputs), off the hot loop, and the scatter bound proves
  * only the products -- the seed can still tip a proven-safe scatter over, so
- * each add reports the seed it was adding. */
-static void convTAddBiasSeedsChecked(const convTSymView_t *v, tensor_t const *bias, float scale,
-                                     rngStream_t *rs, const symAccumSite_t *scatterSite) {
+ * each add reports the seed it was adding. Returns max |seed| over the
+ * channels for the output-width stamp: the seeds it added are the only
+ * correct ones (a second rescale under a stochastic rounding mode would draw
+ * fresh randoms and could land on different values). */
+static uint64_t convTAddBiasSeedsChecked(const convTSymView_t *v, tensor_t const *bias, float scale,
+                                         rngStream_t *rs, const symAccumSite_t *scatterSite) {
     int32_t const *bArr = (int32_t const *)bias->data;
     symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
+    uint64_t maxAbsSeed = 0;
     for (size_t oc = 0; oc < v->outChannels; oc++) {
         int32_t seed =
             rescaleIntoAccumulatorScale(bArr[oc], biasQC->scale, scale, biasQC->roundingMode, rs);
         symAccumSite_t biasSite = *scatterSite;
         biasSite.maxAbsSeed = symAccumMaxAbsSeed(&seed, 1);
+        if (biasSite.maxAbsSeed > maxAbsSeed) {
+            maxAbsSeed = biasSite.maxAbsSeed;
+        }
         for (size_t b = 0; b < v->batch; b++) {
             for (size_t l = 0; l < v->outputLength; l++) {
                 size_t yIdx = (b * v->outChannels + oc) * v->outputLength + l;
@@ -181,6 +188,18 @@ static void convTAddBiasSeedsChecked(const convTSymView_t *v, tensor_t const *bi
             }
         }
     }
+    return maxAbsSeed;
+}
+
+/* The output carries raw accumulator codes that can exceed the operands'
+ * width, so it declares the width the guard proved (#516): a consumer that
+ * reads this wire as a SYM operand sizes its own proof from it. The scatter
+ * site has no seed; the bias pass lands afterwards, so its max |seed| joins
+ * the bound here. */
+static uint8_t convTResultBits(const symAccumSite_t *scatterSite, uint64_t maxAbsBiasSeed) {
+    symAccumSite_t resultSite = *scatterSite;
+    resultSite.maxAbsSeed = maxAbsBiasSeed;
+    return symAccumResultBits(&resultSite);
 }
 
 /* Instantiated twice by convTranspose1dKernelSymInt32 with `checked` a
@@ -296,8 +315,9 @@ void convTranspose1dKernelSymInt32(tensor_t const *input, tensor_t const *weight
 
     /* Bias seed pass (refold), separate from the pure-+= scatter. NULL for Conv1d dx;
      * exercised by Conv1dTransposed forward in PR3. */
+    uint64_t maxAbsBiasSeed = 0;
     if (bias != NULL) {
-        convTAddBiasSeedsChecked(&view, bias, outputScale, rs, &site);
+        maxAbsBiasSeed = convTAddBiasSeedsChecked(&view, bias, outputScale, rs, &site);
     }
 
     if (output->quantization->qConfig == NULL) {
@@ -305,7 +325,9 @@ void convTranspose1dKernelSymInt32(tensor_t const *input, tensor_t const *weight
                     "expected (#187)");
         exit(1);
     }
-    ((symInt32QConfig_t *)output->quantization->qConfig)->scale = outputScale;
+    symInt32QConfig_t *outputQC = (symInt32QConfig_t *)output->quantization->qConfig;
+    outputQC->scale = outputScale;
+    outputQC->qMaxBits = convTResultBits(&site, maxAbsBiasSeed);
 }
 
 /* Group-quant PR3 (Task 2): entry guards mirror conv1dValidateWeightGroups
@@ -491,8 +513,9 @@ void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const 
     /* Bias seed pass (refold into sAcc), separate from the pure-+= scatter --
      * same pass order and primitive as convTranspose1dKernelSymInt32, only
      * the target scale differs (sAcc instead of inScale*wScale). */
+    uint64_t maxAbsBiasSeed = 0;
     if (bias != NULL) {
-        convTAddBiasSeedsChecked(&view, bias, sAcc, rs, &site);
+        maxAbsBiasSeed = convTAddBiasSeedsChecked(&view, bias, sAcc, rs, &site);
     }
 
     if (output->quantization->qConfig == NULL) {
@@ -500,7 +523,9 @@ void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const 
                     "SYM_INT32 expected (#187)");
         exit(1);
     }
-    ((symInt32QConfig_t *)output->quantization->qConfig)->scale = sAcc;
+    symInt32QConfig_t *outputQC = (symInt32QConfig_t *)output->quantization->qConfig;
+    outputQC->scale = sAcc;
+    outputQC->qMaxBits = convTResultBits(&site, maxAbsBiasSeed); /* rescaled site + seed (#516) */
 }
 
 /* BFP epic PR2 (Task 5, D9): the ConvT1d forward under ARITH_BFP is GATHER-

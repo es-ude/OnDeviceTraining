@@ -3,8 +3,10 @@
 
 #include "Conv1dKernel.h"
 #include "DeathTest.h"
+#include "Matmul.h"
 #include "QuantizationApi.h"
 #include "StorageApi.h"
+#include "SymAccumGuard.h"
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "expected_bfp_conv1d.h"
@@ -818,6 +820,16 @@ void tearDown() {}
 #define CG_MAXN 1100
 static int32_t gCgX[CG_MAXN];
 static int32_t gCgW[CG_MAXN];
+/* The output wire outlives cgRun so a chain test can feed it on as an operand
+ * with the quantization the kernel stamped. */
+static int32_t gCgY[CG_MAXN];
+static symInt32QConfig_t gCgYQC;
+static quantization_t gCgYQ;
+static uint8_t gCgOutBits; /* output qMaxBits after the kernel returned */
+
+/* Output wires start at a width no stamp test expects, so a missing stamp can
+ * never pass as the right one (the kernels never read the output width). */
+#define UNSTAMPED_WIDTH 5
 
 static void cgFill(size_t n, int32_t xCode, int32_t wCode, bool wAlternates) {
     for (size_t i = 0; i < n; i++) {
@@ -848,22 +860,22 @@ static int32_t cgRun(size_t inCh, size_t len, size_t k, uint8_t xBits, uint8_t w
     setShape(&wS, wDims, 3, order);
     setShape(&yS, yDims, 3, order);
     setShape(&biasS, biasDims, 1, order);
-    symInt32QConfig_t xQC, wQC, yQC, biasQC;
+    symInt32QConfig_t xQC, wQC, biasQC;
     initSymInt32QConfigWithQMaxBits(HALF_AWAY, &xQC, xBits);
     initSymInt32QConfigWithQMaxBits(HALF_AWAY, &wQC, wBits);
-    initSymInt32QConfig(HALF_AWAY, &yQC);
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &gCgYQC, UNSTAMPED_WIDTH);
     initSymInt32QConfig(HALF_AWAY, &biasQC);
-    quantization_t xQ, wQ, yQ, biasQ;
+    quantization_t xQ, wQ, biasQ;
     initSymInt32Quantization(&xQC, &xQ);
     initSymInt32Quantization(&wQC, &wQ);
-    initSymInt32Quantization(&yQC, &yQ);
+    initSymInt32Quantization(&gCgYQC, &gCgYQ);
     initSymInt32Quantization(&biasQC, &biasQ);
-    int32_t y[CG_MAXN];
+    int32_t *y = gCgY;
     int32_t biasData = biasCode ? *biasCode : 0;
     tensor_t x, w, yT, bias;
     setTensorValues(&x, (uint8_t *)gCgX, &xS, &xQ, NULL);
     setTensorValues(&w, (uint8_t *)gCgW, &wS, &wQ, NULL);
-    setTensorValues(&yT, (uint8_t *)y, &yS, &yQ, NULL);
+    setTensorValues(&yT, (uint8_t *)y, &yS, &gCgYQ, NULL);
     setTensorValues(&bias, (uint8_t *)&biasData, &biasS, &biasQ, NULL);
     kernel_t kernel;
     initKernel(&kernel, k, VALID, 1, 1);
@@ -879,6 +891,7 @@ static int32_t cgRun(size_t inCh, size_t len, size_t k, uint8_t xBits, uint8_t w
         conv1dKernelSymInt32Grouped(&x, &w, biasCode ? &bias : NULL, &kernel, 1, &yT, &groups,
                                     NULL);
     }
+    gCgOutBits = gCgYQC.qMaxBits;
     return y[0];
 }
 
@@ -1014,8 +1027,77 @@ void testConv1dKernelSymGroupedWidePartialSumThatWrapsHitsTheF9Guard(void) {
                              (void)cgRun(80, 1, 1, 12, 16, NULL, 2));
 }
 
+/* ---- #516: the output declares the accumulator's static width ------------ */
+
+/* int4 x int4 over inCh * K = 3 terms of code 1: the stamp is the static bound
+ * B = 3 * 2^3 * 2^3 = 192 -> 9 (strict: 192 < 2^8), never the data (3). With a
+ * bias of 1000 at the accumulator scale B = 1192 -> 12. */
+void testConv1dKernelSymStampsResultWidthIncludesSeed(void) {
+    cgFill(3, 1, 1, false);
+    TEST_ASSERT_EQUAL_INT32(3, cgRun(3, 1, 1, 4, 4, NULL, 0));
+    symAccumSite_t site = symAccumSiteInit("t", 3, 4, 4, 0);
+    TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&site), gCgOutBits);
+    TEST_ASSERT_EQUAL_UINT8(9, gCgOutBits);
+    int32_t bias = 1000;
+    TEST_ASSERT_EQUAL_INT32(1003, cgRun(3, 1, 1, 4, 4, &bias, 0));
+    symAccumSite_t seeded = symAccumSiteInit("t", 3, 4, 4, 1000);
+    TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&seeded), gCgOutBits);
+    TEST_ASSERT_EQUAL_UINT8(12, gCgOutBits);
+}
+
+/* int4 x grouped int4 (2 groups x 4, counted 5 bits for the ASYM-mantissa
+ * image, Conv1dKernel.c) over 8 terms plus a bias of 1023 at the accumulator
+ * scale. The output is the RESCALED accumulator, so its width is the rescaled
+ * site's: 8 * (2^7 + 1) + ceil(8 * 2^7 / 2^22) + 1023 = 2056 -> 13. The exact
+ * bound would say 12 (2047), the raw group partial 11 (4 * 2^7 = 512). */
+void testConv1dKernelSymGroupedStampsRescaledWidth(void) {
+    cgFill(8, 1, 1, false);
+    int32_t bias = 1023;
+    TEST_ASSERT_EQUAL_INT32(1023 + 8, cgRun(8, 1, 1, 4, 4, &bias, 2));
+    symAccumSite_t rescaled = symAccumSiteInitRescaled("t", 8, 4, 4 + 1, 1023);
+    TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&rescaled), gCgOutBits);
+    TEST_ASSERT_EQUAL_UINT8(13, gCgOutBits);
+}
+
+/* The #516 repro on a conv output: the raw 1x1x1 product -2048 * -2048 = 2^22
+ * re-enters a SYM matmul through a 2-D view that shares the quantization the
+ * kernel stamped. Declared 24 bits the (24, 12) site is unprovable and the
+ * checked product aborts naming the stamped width; at the pre-stamp width the
+ * guard proved one term safe and the product -2^33 wrapped silently. */
+static void cgChainIntoMatmul(void) {
+    cgFill(1, -2048, -2048, false);
+    (void)cgRun(1, 1, 1, 12, 12, NULL, 0);
+    size_t dims[] = {1, 1}, order[] = {0, 1};
+    shape_t vS, cS, oS;
+    setShape(&vS, dims, 2, order);
+    setShape(&cS, dims, 2, order);
+    setShape(&oS, dims, 2, order);
+    symInt32QConfig_t cQC, oQC;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &cQC, 12);
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &oQC, UNSTAMPED_WIDTH);
+    quantization_t cQ, oQ;
+    initSymInt32Quantization(&cQC, &cQ);
+    initSymInt32Quantization(&oQC, &oQ);
+    int32_t cCode = -2048, outCode = 0;
+    tensor_t v, c, out;
+    setTensorValues(&v, (uint8_t *)gCgY, &vS, &gCgYQ, NULL);
+    setTensorValues(&c, (uint8_t *)&cCode, &cS, &cQ, NULL);
+    setTensorValues(&out, (uint8_t *)&outCode, &oS, &oQ, NULL);
+    matmulSymInt32Tensors(&v, &c, &out);
+}
+
+void testConv1dKernelSymChainedRawOutputOverflowAborts(void) {
+    cgFill(1, -2048, -2048, false);
+    TEST_ASSERT_EQUAL_INT32(4194304, cgRun(1, 1, 1, 12, 12, NULL, 0));
+    TEST_ASSERT_EQUAL_UINT8(24, gCgOutBits); /* B = 2^11 * 2^11 = 2^22 -> 24 */
+    ASSERT_EXITS_WITH_OUTPUT(1, "widths (24, 12)", cgChainIntoMatmul());
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testConv1dKernelSymStampsResultWidthIncludesSeed);
+    RUN_TEST(testConv1dKernelSymGroupedStampsRescaledWidth);
+    RUN_TEST(testConv1dKernelSymChainedRawOutputOverflowAborts);
     RUN_TEST(testConv1dKernelSymGroupedWidePartialAboveSeedGuardRunsExactWhenSumFits);
     RUN_TEST(testConv1dKernelSymGroupedWidePartialSumThatWrapsHitsTheF9Guard);
     RUN_TEST(testConv1dKernelSymGroupedGuardWideWeightRunsExactWhenItFitsAndAbortsWhenItWraps);

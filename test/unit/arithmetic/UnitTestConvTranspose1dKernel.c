@@ -5,6 +5,7 @@
 #include "DeathTest.h"
 #include "QuantizationApi.h"
 #include "StorageApi.h"
+#include "SymAccumGuard.h"
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "expected_bfp_convT1d.h"
@@ -986,6 +987,11 @@ void tearDown() {}
 static int32_t gCtX[CT_MAXN];
 static int32_t gCtW[CT_MAXN];
 static int32_t gCtY[CT_MAXN * 2];
+static uint8_t gCtOutBits; /* output qMaxBits after the kernel returned */
+
+/* Output wires start at a width no stamp test expects, so a missing stamp can
+ * never pass as the right one (the kernels never read the output width). */
+#define UNSTAMPED_WIDTH 5
 
 static void ctFill(size_t n, int32_t xCode, int32_t wCode, bool wAlternates) {
     for (size_t i = 0; i < n; i++) {
@@ -1010,7 +1016,7 @@ static void ctRun(size_t inCh, size_t len, size_t k, uint8_t xBits, uint8_t wBit
     symInt32QConfig_t xQC, wQC, yQC, biasQC;
     initSymInt32QConfigWithQMaxBits(HALF_AWAY, &xQC, xBits);
     initSymInt32QConfigWithQMaxBits(HALF_AWAY, &wQC, wBits);
-    initSymInt32QConfig(HALF_AWAY, &yQC);
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &yQC, UNSTAMPED_WIDTH);
     initSymInt32QConfig(HALF_AWAY, &biasQC);
     quantization_t xQ, wQ, yQ, biasQ;
     initSymInt32Quantization(&xQC, &xQ);
@@ -1037,6 +1043,7 @@ static void ctRun(size_t inCh, size_t len, size_t k, uint8_t xBits, uint8_t wBit
         convTranspose1dKernelSymInt32Grouped(&x, &w, biasCode ? &bias : NULL, &kernel, 1, 0, &yT,
                                              &groups, NULL);
     }
+    gCtOutBits = yQC.qMaxBits;
 }
 
 /* y[o] = bias + sum over (ic, inPos, tap) with inPos + tap == o of x * w, in int64 */
@@ -1205,8 +1212,53 @@ void testConvTranspose1dKernelSymGroupedWideScatterThatWrapsHitsTheF9Guard(void)
                              ctRun(80, 1, 1, 12, 16, NULL, 2));
 }
 
+/* ---- #516: the output declares the accumulator's static width ------------ */
+
+/* int4 x int4, 3 input channels scattering into one output element: the stamp
+ * is the static bound B = 3 * 2^3 * 2^3 = 192 -> 9 (strict: 192 < 2^8), never
+ * the data (3). The bias lands in a separate pass AFTER the scatter, so the
+ * scatter site alone would still say 9; the stamp must count the seed the
+ * bias pass added: B = 192 + 1000 = 1192 -> 12. */
+void testConvTranspose1dKernelSymStampsResultWidthIncludesBiasSeed(void) {
+    ctFill(3, 1, 1, false);
+    ctRun(3, 1, 1, 4, 4, NULL, 0);
+    TEST_ASSERT_EQUAL_INT32(3, gCtY[0]);
+    symAccumSite_t site = symAccumSiteInit("t", 3, 4, 4, 0);
+    TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&site), gCtOutBits);
+    TEST_ASSERT_EQUAL_UINT8(9, gCtOutBits);
+    int32_t bias = 1000;
+    ctRun(3, 1, 1, 4, 4, &bias, 0);
+    TEST_ASSERT_EQUAL_INT32(1003, gCtY[0]);
+    symAccumSite_t seeded = symAccumSiteInit("t", 3, 4, 4, 1000);
+    TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&seeded), gCtOutBits);
+    TEST_ASSERT_EQUAL_UINT8(12, gCtOutBits);
+}
+
+/* int4 x grouped int4 (2 groups x 4, counted 5 bits for the ASYM-mantissa
+ * image, ConvTranspose1dKernel.c) over 8 scattered products: the rescaled site
+ * says 8 * (2^7 + 1) + ceil(8 * 2^7 / 2^22) = 1033 -> 12. The post-scatter bias
+ * of 1023 at the accumulator scale lifts it to 2056 -> 13, where the exact
+ * bound (2047) would still say 12 -- so the stamp has to be the rescaled site
+ * WITH the bias pass's seed. */
+void testConvTranspose1dKernelSymGroupedStampsRescaledWidthIncludesBiasSeed(void) {
+    ctFill(8, 1, 1, false);
+    ctRun(8, 1, 1, 4, 4, NULL, 2);
+    TEST_ASSERT_EQUAL_INT32(8, gCtY[0]);
+    symAccumSite_t rescaled = symAccumSiteInitRescaled("t", 8, 4, 4 + 1, 0);
+    TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&rescaled), gCtOutBits);
+    TEST_ASSERT_EQUAL_UINT8(12, gCtOutBits);
+    int32_t bias = 1023;
+    ctRun(8, 1, 1, 4, 4, &bias, 2);
+    TEST_ASSERT_EQUAL_INT32(1023 + 8, gCtY[0]);
+    symAccumSite_t seeded = symAccumSiteInitRescaled("t", 8, 4, 4 + 1, 1023);
+    TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&seeded), gCtOutBits);
+    TEST_ASSERT_EQUAL_UINT8(13, gCtOutBits);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testConvTranspose1dKernelSymStampsResultWidthIncludesBiasSeed);
+    RUN_TEST(testConvTranspose1dKernelSymGroupedStampsRescaledWidthIncludesBiasSeed);
     RUN_TEST(testConvTranspose1dKernelSymGroupedWideScatterRunsExactWhenSumFits);
     RUN_TEST(testConvTranspose1dKernelSymGroupedWideScatterThatWrapsHitsTheF9Guard);
     RUN_TEST(

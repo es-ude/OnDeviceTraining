@@ -220,7 +220,12 @@ void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_
         PRINT_ERROR("conv1dKernelSymInt32: output qConfig is NULL but SYM_INT32 expected (#187)");
         exit(1);
     }
-    ((symInt32QConfig_t *)output->quantization->qConfig)->scale = outputScale;
+    symInt32QConfig_t *outputQC = (symInt32QConfig_t *)output->quantization->qConfig;
+    outputQC->scale = outputScale;
+    /* The output carries raw accumulator codes that can exceed the operands'
+     * width, so it declares the width the guard proved (#516): a consumer that
+     * reads this wire as a SYM operand sizes its own proof from it. */
+    outputQC->qMaxBits = symAccumResultBits(&site);
 }
 
 /* Group-quant PR2 (Task 4): entry guards mirror matmulValidateWeightGroups
@@ -456,7 +461,9 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
             "conv1dKernelSymInt32Grouped: output qConfig is NULL but SYM_INT32 expected (#187)");
         exit(1);
     }
-    ((symInt32QConfig_t *)output->quantization->qConfig)->scale = sAcc;
+    symInt32QConfig_t *outputQC = (symInt32QConfig_t *)output->quantization->qConfig;
+    outputQC->scale = sAcc;
+    outputQC->qMaxBits = symAccumResultBits(&accSite); /* the rescaled accumulator's width (#516) */
 }
 
 /* BFP epic PR2 (Task 4): conv1dKernelSymInt32Grouped's BFP twin (see

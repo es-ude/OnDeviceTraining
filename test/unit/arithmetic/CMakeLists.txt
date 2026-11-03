@@ -282,6 +282,8 @@ add_elastic_ai_unit_test(
         MORE_LIBS
         SlidingWindow1d
         Kernel
+        Matmul
+        SymAccumGuard
         Tensor
         TensorApi
         Quantization
@@ -311,6 +313,7 @@ add_elastic_ai_unit_test(
         ConvTranspose1dKernel
         MORE_LIBS
         Kernel
+        SymAccumGuard
         Tensor
         TensorApi
         Quantization

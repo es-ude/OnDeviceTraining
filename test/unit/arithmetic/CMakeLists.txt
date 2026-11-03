@@ -181,6 +181,7 @@ add_elastic_ai_unit_test(
         Matmul
         MORE_LIBS
         Arithmetic
+        SymAccumGuard
         Tensor
         Quantization
         RNG

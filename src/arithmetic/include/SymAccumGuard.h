@@ -33,7 +33,9 @@
  * metadata and is not re-checked per code. Every funnel staging route
  * declares the true width of the codes it writes and the requant cells clamp
  * to it, so only a hand-built tensor whose codes exceed its own declared
- * width can defeat the proof.
+ * width can defeat the proof. Raw kernel outputs declare the static result
+ * width of the accumulator they were written under (symAccumResultBits),
+ * 32 meaning the full raw int32 range (#516).
  *
  * Kernels use the pattern
  *     symAccumSite_t site = symAccumSiteInit(op, nMax, qa, qb, maxAbsSeed);
@@ -93,13 +95,18 @@ static inline uint64_t symAccumMaxAbsSeed(const int32_t *seed, size_t n) {
     return m;
 }
 
+/* A declared width as the bound arithmetic reads it: a zero width is read as
+ * 1 (degenerate) and widths clamp at 32 (an int32 code is at most 2^31). */
+static inline unsigned symAccumClampedWidth(uint8_t bits) {
+    return bits < 1 ? 1u : (bits > 32 ? 32u : bits);
+}
+
 /* Largest N for which N * 2^(qa-1) * 2^(qb-1) + maxAbsSeed <= INT32_MAX; 0 when
  * even one term is not provable. The comparison is a division so neither the
- * bound nor a caller's N (up to SIZE_MAX) can wrap. A zero width is read as 1
- * (degenerate) and widths clamp at 32 (an int32 code is at most 2^31). */
+ * bound nor a caller's N (up to SIZE_MAX) can wrap. */
 static inline size_t symAccumTermLimit(uint8_t aBits, uint8_t bBits, uint64_t maxAbsSeed) {
-    unsigned qa = aBits < 1 ? 1u : (aBits > 32 ? 32u : aBits);
-    unsigned qb = bBits < 1 ? 1u : (bBits > 32 ? 32u : bBits);
+    unsigned qa = symAccumClampedWidth(aBits);
+    unsigned qb = symAccumClampedWidth(bBits);
     uint64_t maxProduct = (uint64_t)1 << (qa + qb - 2u);
     if (maxAbsSeed > (uint64_t)INT32_MAX || maxProduct > (uint64_t)INT32_MAX) {
         return 0;
@@ -117,8 +124,8 @@ static inline size_t symAccumTermLimit(uint8_t aBits, uint8_t bBits, uint64_t ma
  *  <=> N <= room * 2^22 / ((mp + 1) * 2^22 + mp),
  * evaluated in 64-bit (room * 2^22 and the denominator are < 2^54). */
 static inline size_t symAccumTermLimitRescaled(uint8_t aBits, uint8_t bBits, uint64_t maxAbsSeed) {
-    unsigned qa = aBits < 1 ? 1u : (aBits > 32 ? 32u : aBits);
-    unsigned qb = bBits < 1 ? 1u : (bBits > 32 ? 32u : bBits);
+    unsigned qa = symAccumClampedWidth(aBits);
+    unsigned qb = symAccumClampedWidth(bBits);
     uint64_t maxProduct = (uint64_t)1 << (qa + qb - 2u);
     if (maxAbsSeed > (uint64_t)INT32_MAX || maxProduct > (uint64_t)INT32_MAX) {
         return 0;
@@ -164,6 +171,42 @@ static inline bool symAccumProvenSafe(const symAccumSite_t *s) {
     size_t limit = s->rescaled ? symAccumTermLimitRescaled(s->aBits, s->bBits, s->maxAbsSeed)
                                : symAccumTermLimit(s->aBits, s->bBits, s->maxAbsSeed);
     return s->nMax <= limit;
+}
+
+/* Smallest signed width w in [1, 32] with magnitude < 2^(w-1); 32 when
+ * magnitude >= 2^31. Strict (<) so the width holds +magnitude in two's
+ * complement AND satisfies the guard's |code| <= 2^(w-1): a consumer that
+ * reads the stamped wire as an operand proves its own budget from it. */
+static inline uint8_t symAccumWidthForMagnitude(uint64_t magnitude) {
+    uint8_t w = 1;
+    while (w < 32 && magnitude >= ((uint64_t)1 << (w - 1u))) {
+        w++;
+    }
+    return w;
+}
+
+/* Declared width of an accumulator a kernel wrote under this site (#516):
+ * 32 when !symAccumProvenSafe(s) (the bound exceeds int32, the checked loop
+ * ran, the codes span the raw int32 range); otherwise
+ * symAccumWidthForMagnitude(B) with mp = 2^(qa-1) * 2^(qb-1) and
+ *     B = nMax * mp + maxAbsSeed                                  (exact site)
+ *     B = nMax * (mp + 1) + ceil(nMax * mp / 2^22) + maxAbsSeed   (rescaled site)
+ * -- the same per-term bounds the two term limits prove, so provenSafe
+ * guarantees B <= INT32_MAX and nothing wraps in the 64-bit evaluation.
+ * nMax == 0 -> the width of maxAbsSeed. */
+static inline uint8_t symAccumResultBits(const symAccumSite_t *s) {
+    if (!symAccumProvenSafe(s)) {
+        return 32;
+    }
+    unsigned qa = symAccumClampedWidth(s->aBits);
+    unsigned qb = symAccumClampedWidth(s->bBits);
+    uint64_t maxProduct = (uint64_t)1 << (qa + qb - 2u);
+    uint64_t products = (uint64_t)s->nMax * maxProduct;
+    uint64_t bound = products + s->maxAbsSeed;
+    if (s->rescaled) {
+        bound += (uint64_t)s->nMax + ((products + (((uint64_t)1 << 22) - 1u)) >> 22);
+    }
+    return symAccumWidthForMagnitude(bound);
 }
 
 /* Unconditional (all builds): the exit(1) stays even where PRINT_ERROR compiles out. */

@@ -23,6 +23,7 @@
 #include "Reduce.h"
 #include "Rounding.h"
 #include "Sub.h"
+#include "SymGridBounds.h"
 #include "Tensor.h"
 
 void initGroupNormConfig(groupNormConfig_t *cfg, parameter_t *gamma, parameter_t *beta,
@@ -418,6 +419,7 @@ static void groupNormForwardSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, te
             out[i] = 0;
         }
     } else {
+        (void)symGridBoundsForDerivedScaleOrExit(outQC->qMaxBits, "groupNormForwardSymInt32");
         float stretch = divFloat32s(qMax, absMax);
         sNorm = divFloat32s(1.0f, stretch);
 
@@ -862,6 +864,7 @@ static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardI
             return;
         }
 
+        (void)symGridBoundsForDerivedScaleOrExit(plQC->qMaxBits, "groupNormBackwardSymInt32");
         float dxScale = divFloat32s(absMax, qMax);
         /* Pass B: recompute dx from the stored stats and quantize. The dx
          * expression is IDENTICAL to pass A's absmax expression (all

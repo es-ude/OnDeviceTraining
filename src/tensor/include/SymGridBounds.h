@@ -40,4 +40,29 @@ static inline symGridBounds_t symGridBoundsOrExit(uint32_t q, const char *what) 
     return g;
 }
 
+/* As symGridBoundsOrExit, for a site that DERIVES the scale from data
+ * (scale = absMax / hi). A width-1 grid is {-1, 0}: hi == 0 leaves no positive
+ * code to map absMax onto, so the quotient is infinite. Width 1 stays legal
+ * where the scale is fixed and for a declared kernel output (a zero-term
+ * result is honestly width 1); call this only where absMax != 0 is divided. */
+static inline symGridBounds_t symGridBoundsForDerivedScaleOrExit(uint32_t q, const char *what) {
+    const symGridBounds_t g = symGridBoundsOrExit(q, what);
+    if (g.hi == 0) {
+        PRINT_ERROR("%s: SYM width (%u) has no positive code; a scale derived from data over it "
+                    "is infinite (use width >= 2, or a fixed scale)",
+                    what, (unsigned)q);
+        exit(1);
+    }
+    return g;
+}
+
+/* Bounds for a site that divides by hi only when absMax != 0: an all-zero
+ * input takes the neutral scale 1 and never divides, so it keeps the plain
+ * check; any other input needs the derived-scale check. One validation. */
+static inline symGridBounds_t symGridBoundsForAbsMaxOrExit(uint32_t q, const char *what,
+                                                           float absMax) {
+    return (absMax == 0.f) ? symGridBoundsOrExit(q, what)
+                           : symGridBoundsForDerivedScaleOrExit(q, what);
+}
+
 #endif /* ODT_SYM_GRID_BOUNDS_H */

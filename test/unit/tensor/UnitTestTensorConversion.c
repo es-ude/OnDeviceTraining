@@ -8305,6 +8305,133 @@ void testRequantSymInt32FromWidth32SourceRestoresTheTargetWidth(void) {
     TEST_ASSERT_EQUAL_UINT8(32, inQc.qMaxBits);
 }
 
+/* A width-1 grid is {-1, 0}: it has no positive code to map absMax onto, so a
+ * scale DERIVED from data (absMax / hi) would be infinite. Width 1 stays legal
+ * where the scale is fixed (see the pin below) and for declared kernel outputs. */
+void testSymGridBoundsForDerivedScaleRejectsQ1(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "t: SYM width (1) has no positive code",
+                             (void)symGridBoundsForDerivedScaleOrExit(1, "t"));
+}
+
+void testSymGridBoundsForDerivedScaleMatchesPlainFromQ2(void) {
+    symGridBounds_t d = symGridBoundsForDerivedScaleOrExit(2, "t");
+    TEST_ASSERT_EQUAL_INT32(-2, d.lo);
+    TEST_ASSERT_EQUAL_INT32(1, d.hi);
+    ASSERT_EXITS_WITH_OUTPUT(1, "t: SYM width (0) outside [1, 31]",
+                             (void)symGridBoundsForDerivedScaleOrExit(0, "t"));
+}
+
+static void makeWidth1SymInt32Target(symInt32QConfig_t *qc, quantization_t *q, int32_t *data,
+                                     shape_t *shape, tensor_t *t) {
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, qc, 1);
+    initSymInt32Quantization(qc, q);
+    setTensorValues(t, (uint8_t *)data, shape, q, NULL);
+}
+
+void testEncodeFloatToWidth1SymInt32Exits(void) {
+    size_t dims[] = {2};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    float fData[] = {1.f, -2.f};
+    tensor_t in;
+    setTensorValues(&in, (uint8_t *)fData, &shape, &floatQ, NULL);
+    symInt32QConfig_t qc;
+    quantization_t q;
+    int32_t data[2] = {0, 0};
+    tensor_t out;
+    makeWidth1SymInt32Target(&qc, &q, data, &shape, &out);
+    ASSERT_EXITS_WITH_OUTPUT(1, "convertFloatTensorToSymInt32Tensor: SYM width (1)",
+                             convertTensor(&in, &out, NULL));
+}
+
+void testDynamicRequantToWidth1SymInt32Exits(void) {
+    size_t dims[] = {2};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    symInt32QConfig_t inQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &inQc, 12);
+    quantization_t inQ;
+    initSymInt32Quantization(&inQc, &inQ);
+    int32_t inData[] = {1000, -2048};
+    tensor_t in;
+    setTensorValues(&in, (uint8_t *)inData, &shape, &inQ, NULL);
+    symInt32QConfig_t qc;
+    quantization_t q;
+    int32_t data[2] = {0, 0};
+    tensor_t out;
+    makeWidth1SymInt32Target(&qc, &q, data, &shape, &out);
+    ASSERT_EXITS_WITH_OUTPUT(1, "requantSymInt32Tensor: SYM width (1)",
+                             requantSymInt32Tensor(&in, &out, NULL));
+}
+
+void testAccumulateSymInt32RescaleIntoWidth1Exits(void) {
+    size_t dims[] = {2};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    symInt32QConfig_t incQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &incQc, 12);
+    quantization_t incQ;
+    initSymInt32Quantization(&incQc, &incQ);
+    int32_t incData[] = {100, -50};
+    tensor_t inc;
+    setTensorValues(&inc, (uint8_t *)incData, &shape, &incQ, NULL);
+    symInt32QConfig_t qc;
+    quantization_t q;
+    int32_t data[2] = {0, 0};
+    tensor_t tgt;
+    makeWidth1SymInt32Target(&qc, &q, data, &shape, &tgt);
+    ASSERT_EXITS_WITH_OUTPUT(1, "accumulateSymInt32IntoSymInt32Rescale: SYM width (1)",
+                             accumulateSymInt32IntoSymInt32Rescale(&tgt, &inc, NULL));
+}
+
+/* Pins: width 1 stays legal where no scale is derived. */
+void testFixedScaleRequantToWidth1StillWorks(void) {
+    size_t dims[] = {3};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    symInt32QConfig_t inQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &inQc, 12);
+    quantization_t inQ;
+    initSymInt32Quantization(&inQc, &inQ);
+    int32_t inData[] = {5, -5, 0};
+    tensor_t in;
+    setTensorValues(&in, (uint8_t *)inData, &shape, &inQ, NULL);
+    symInt32QConfig_t qc;
+    quantization_t q;
+    int32_t data[3] = {7, 7, 7};
+    tensor_t out;
+    makeWidth1SymInt32Target(&qc, &q, data, &shape, &out);
+    qc.scale = 4.f;
+    requantSymInt32TensorToScale(&in, &out, NULL);
+    TEST_ASSERT_EQUAL_FLOAT(4.f, qc.scale);
+    TEST_ASSERT_EQUAL_INT32(0, data[0]); /* +1.25 steps: above the grid, clamps to hi = 0 */
+    TEST_ASSERT_EQUAL_INT32(-1, data[1]);
+    TEST_ASSERT_EQUAL_INT32(0, data[2]);
+}
+
+/* All-zero input never divides, so a width-1 target takes it. */
+void testAllZeroInputToWidth1SymInt32DoesNotExit(void) {
+    size_t dims[] = {2};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    float fData[] = {0.f, 0.f};
+    tensor_t in;
+    setTensorValues(&in, (uint8_t *)fData, &shape, &floatQ, NULL);
+    symInt32QConfig_t qc;
+    quantization_t q;
+    int32_t data[2] = {7, 7};
+    tensor_t out;
+    makeWidth1SymInt32Target(&qc, &q, data, &shape, &out);
+    convertTensor(&in, &out, NULL);
+    TEST_ASSERT_EQUAL_FLOAT(1.f, qc.scale);
+    TEST_ASSERT_EQUAL_INT32(0, data[0]);
+    TEST_ASSERT_EQUAL_INT32(0, data[1]);
+}
+
 int main(void) {
     UNITY_BEGIN();
 
@@ -8529,6 +8656,13 @@ int main(void) {
     RUN_TEST(testSymGridBoundsRejectsQ32);
     RUN_TEST(testRequantSymInt32IntoWidth32TargetExits);
     RUN_TEST(testRequantSymInt32FromWidth32SourceRestoresTheTargetWidth);
+    RUN_TEST(testSymGridBoundsForDerivedScaleRejectsQ1);
+    RUN_TEST(testSymGridBoundsForDerivedScaleMatchesPlainFromQ2);
+    RUN_TEST(testEncodeFloatToWidth1SymInt32Exits);
+    RUN_TEST(testDynamicRequantToWidth1SymInt32Exits);
+    RUN_TEST(testAccumulateSymInt32RescaleIntoWidth1Exits);
+    RUN_TEST(testFixedScaleRequantToWidth1StillWorks);
+    RUN_TEST(testAllZeroInputToWidth1SymInt32DoesNotExit);
 
     return UNITY_END();
 }

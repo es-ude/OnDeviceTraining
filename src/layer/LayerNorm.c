@@ -21,6 +21,7 @@
 #include "Reduce.h"
 #include "Rounding.h"
 #include "Sub.h"
+#include "SymGridBounds.h"
 #include "Tensor.h"
 #include "TensorConversion.h"
 
@@ -373,6 +374,7 @@ static void layerNormForwardSymInt32(layerNormConfig_t *cfg, tensor_t *gamma, te
             }
         }
     } else {
+        (void)symGridBoundsForDerivedScaleOrExit(outQC->qMaxBits, "layerNormForwardSymInt32");
         float K = qMax / absMax;
         sNorm = 1.0f / K;
 
@@ -797,6 +799,7 @@ static void layerNormBackwardSymInt32(layerNormConfig_t *cfg, tensor_t *forwardI
             return;
         }
 
+        (void)symGridBoundsForDerivedScaleOrExit(plQC->qMaxBits, "layerNormBackwardSymInt32");
         float dxScale = absMax / qMax;
         /* Pass B: recompute dx from the stored stats and quantize. The dx
          * expression is textually IDENTICAL to pass A's absmax expression so

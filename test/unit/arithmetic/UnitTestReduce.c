@@ -351,6 +351,16 @@ void testRsqrtSymInt32RejectsWideOutput(void) {
     freeTensor(symIn);
 }
 
+/* Width 1 has no positive code, so the dynamic scale absMax / hi is infinite. */
+void testRsqrtSymInt32IntoWidth1OutputExits(void) {
+    size_t dims[] = {3};
+    tensor_t *symIn = buildSymInt32TensorND(1, dims, (float[]){1.25f, 4.0f, 0.25f});
+    tensor_t *out = buildSymInt32TensorNDBits(1, dims, NULL, 1);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "rsqrtSymInt32: SYM width (1) has no positive code",
+                             rsqrtSymInt32(symIn, 1e-5f, out, NULL));
+}
+
 void testMeanWholeTensorKEqualsRank(void) {
     // k == rank -> K = 1 (whole-tensor reduction). mean over all six elements
     // {1..6} of a [2,3] tensor = 21/6 = 3.5.
@@ -717,6 +727,7 @@ int main(void) {
     RUN_TEST(testVarianceSymInt32MatchesFloatTwin);
     RUN_TEST(testRsqrtSymInt32MatchesFloatTwin);
     RUN_TEST(testRsqrtSymInt32RejectsWideOutput);
+    RUN_TEST(testRsqrtSymInt32IntoWidth1OutputExits);
     RUN_TEST(testMeanSymInt32RejectsWideOperand);
     RUN_TEST(testMeanSymInt32RejectsOverlongAxis);
     RUN_TEST(testMeanSymInt32RejectsZeroWidthOperand);

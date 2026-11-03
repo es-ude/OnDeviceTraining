@@ -480,16 +480,14 @@ void convertFloatTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputT
     float absMax = findAbsMaxFloat(inputTensor->data, numberOfElements);
 
     symInt32QConfig_t *symInt32QC = outputTensor->quantization->qConfig;
-    const symGridBounds_t g =
-        symGridBoundsOrExit(symInt32QC->qMaxBits, "convertFloatTensorToSymInt32Tensor");
-
-    const float qMax = (float)g.hi;
+    const symGridBounds_t g = symGridBoundsForAbsMaxOrExit(
+        symInt32QC->qMaxBits, "convertFloatTensorToSymInt32Tensor", absMax);
 
     float scale;
     if (absMax == 0.f) {
         scale = 1.f;
     } else {
-        scale = absMax / qMax;
+        scale = absMax / (float)g.hi;
     }
 
     symInt32QConfig_t *outputSymInt32QC = outputTensor->quantization->qConfig;
@@ -568,10 +566,6 @@ void requantSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStr
      * (inputTensor == outputTensor) both pointers alias the same config */
     float inScale = inputSymInt32QC->scale;
 
-    const symGridBounds_t g =
-        symGridBoundsOrExit(outputSymInt32QC->qMaxBits, "requantSymInt32Tensor");
-    const float qMax = (float)g.hi;
-
     int32_t *inputInt32 = (int32_t *)inputTensor->data;
     int32_t *outputInt32 = (int32_t *)outputTensor->data;
 
@@ -584,11 +578,14 @@ void requantSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStr
         }
     }
 
+    const symGridBounds_t g =
+        symGridBoundsForAbsMaxOrExit(outputSymInt32QC->qMaxBits, "requantSymInt32Tensor", absMax);
+
     float scale;
     if (absMax == 0.f) {
         scale = 1.f;
     } else {
-        scale = absMax / qMax;
+        scale = absMax / (float)g.hi;
     }
     outputSymInt32QC->scale = scale;
 
@@ -1445,9 +1442,8 @@ void convertBfpTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTen
         }
     }
     const symGridBounds_t g =
-        symGridBoundsOrExit(outQC->qMaxBits, "convertBfpTensorToSymInt32Tensor");
-    const float qMax = (float)g.hi;
-    float scale = (absMax == 0.f) ? 1.f : absMax / qMax;
+        symGridBoundsForAbsMaxOrExit(outQC->qMaxBits, "convertBfpTensorToSymInt32Tensor", absMax);
+    float scale = (absMax == 0.f) ? 1.f : absMax / (float)g.hi;
     outQC->scale = scale;
     /* pass 2: chunked emit -- one roundByMode per element (TARGET config's
      * roundingMode), element order */
@@ -2443,10 +2439,9 @@ void accumulateSymInt32IntoSymInt32Rescale(tensor_t *target, const tensor_t *inc
             absMax = v;
         }
     }
-    const symGridBounds_t g =
-        symGridBoundsOrExit(tQC->qMaxBits, "accumulateSymInt32IntoSymInt32Rescale");
-    const float qMax = (float)g.hi;
-    float scale = (absMax == 0.f) ? 1.f : absMax / qMax;
+    const symGridBounds_t g = symGridBoundsForAbsMaxOrExit(
+        tQC->qMaxBits, "accumulateSymInt32IntoSymInt32Rescale", absMax);
+    float scale = (absMax == 0.f) ? 1.f : absMax / (float)g.hi;
     tQC->scale = scale;
     /* pass 2: same-index read-then-write, one round per element in order */
     for (size_t i = 0; i < n; i++) {

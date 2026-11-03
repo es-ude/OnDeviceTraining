@@ -13,6 +13,7 @@
 #include "Rounding.h"
 #include "Square.h"
 #include "Sub.h"
+#include "SymGridBounds.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -304,6 +305,7 @@ void rsqrtSymInt32(tensor_t *in, float eps, tensor_t *out, rngStream_t *rs) {
 
     /* Requant into out via the convertFloatTensorToSymInt32Tensor idiom
      * (scale = absMax/qMax, round-clamp), refreshing out's scale on every call. */
+    (void)symGridBoundsForDerivedScaleOrExit(outQC->qMaxBits, "rsqrtSymInt32");
     float scale = divFloat32s(absMax, qMax);
     outQC->scale = scale;
     for (size_t i = 0; i < n; i++) {

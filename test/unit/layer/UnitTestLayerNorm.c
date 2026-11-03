@@ -1399,6 +1399,31 @@ void testGoldBackwardFullRank(void) {
                     gamma_layerNorm_fullRank_len);
 }
 
+/* Width 1 has no positive code. The output requant stage catches it before the
+ * normalization stage divides (the stage guard is defensive). */
+void testSymForwardIntoWidth1OutputExits(void) {
+    size_t dims[] = {2, 3};
+    tensor_t *in = buildSymInt32TensorND(2, dims, (float[]){1.f, 2.f, 4.f, 3.f, 1.f, 5.f});
+    tensor_t *out = buildSymInt32TensorND(2, dims, NULL);
+    ((symInt32QConfig_t *)out->quantization->qConfig)->qMaxBits = 1;
+
+    size_t ns[] = {3};
+    parameter_t *gamma = buildSymParam(1, ns, (float[]){1.f, 1.f, 1.f});
+    parameter_t *beta = buildSymParam(1, ns, (float[]){0.f, 0.f, 0.f});
+    size_t *normShape = reserveMemory(sizeof(size_t));
+    normShape[0] = 3;
+
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *bq = quantizationInitFloat();
+    layerNormConfig_t cfg;
+    initLayerNormConfig(&cfg, gamma, beta, normShape, 1, 1e-5f, fq, bq);
+    layerConfig_t lcfg;
+    layer_t layer = makeLayerNormLayer(&cfg, &lcfg);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "SYM width (1) has no positive code",
+                             layerNormForward(&layer, in, out, NULL));
+}
+
 /* Constant input -> yhat == 0 exactly in every group (identical mantissas), so
  * the GLOBAL absmax is 0. Guard: all-zero mantissas, normalization-stage scale
  * 1.0 (convertFloatTensorToSymInt32Tensor absMax==0 idiom). */
@@ -3883,6 +3908,7 @@ int main(void) {
     RUN_TEST(testGoldForwardFullRank);
     RUN_TEST(testGoldBackwardFullRank);
     RUN_TEST(testSymForwardDequantInvariantsMultiGroup);
+    RUN_TEST(testSymForwardIntoWidth1OutputExits);
     RUN_TEST(testSymForwardConstantInputEmitsZeros);
     RUN_TEST(testSymForwardMantissaInvariantsViaOnesGamma);
     RUN_TEST(testSymForwardConstantInputAppliesBeta);

@@ -3970,13 +3970,14 @@ static uint8_t linearSymBiasGradWidth(size_t batch, int32_t code, uint8_t bits) 
     return width;
 }
 
-/* A value sum of 12-bit codes is bounded by batch * 2^11, which is never below
- * 2^11, so the stamp can never equal the 12-bit init width: batch 1 -> 2048 ->
- * 13 (strict), batch 3 -> 6144 -> 14. */
+/* A value sum of batch 12-bit codes spans [-batch * 2^11, batch * (2^11 - 1)]:
+ * batch 1 is the wire's own range (12: the sum of one code adds no bit),
+ * batch 2 -> [-4096, 4094] -> 13, batch 3 -> [-6144, 6141] -> 14. */
 void testLinearBiasGradSymStampsTheSumWidth(void) {
     symAccumSite_t one = symAccumSiteInitSum("t", 1, 12);
     TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&one), linearSymBiasGradWidth(1, 7, 12));
-    TEST_ASSERT_EQUAL_UINT8(13, linearSymBiasGradWidth(1, 7, 12));
+    TEST_ASSERT_EQUAL_UINT8(12, linearSymBiasGradWidth(1, 7, 12));
+    TEST_ASSERT_EQUAL_UINT8(13, linearSymBiasGradWidth(2, 7, 12));
     symAccumSite_t three = symAccumSiteInitSum("t", 3, 12);
     TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&three), linearSymBiasGradWidth(3, 7, 12));
     TEST_ASSERT_EQUAL_UINT8(14, linearSymBiasGradWidth(3, 7, 12));

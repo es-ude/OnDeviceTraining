@@ -37,14 +37,16 @@
  * Conv1d / ConvT kernels, mul, equal-scale add, linearCalcBiasGradsSymInt32;
  * the Linear weight grad and dx through the matmul) declares the static
  * result width of the accumulator it was written under
- * (symAccumResultBits), 32 meaning the full raw int32 range (#516). The
+ * (symAccumResultBits): the smallest two's-complement width holding the
+ * accumulator's exact range, 32 meaning the full raw int32 range (#516). The
  * Conv1d / ConvT weight-grad scatter and bias-grad sum are file-static
  * funnel kernels: only the ACC epilogue sees their raw wire, and it reads
  * the scale and the target width, never the raw width, so they keep the
  * scratch width.
  *
  * Kernels use the pattern
- *     symAccumSite_t site = symAccumSiteInit(op, nMax, qa, qb, maxAbsSeed);
+ *     symAccumSite_t site = symAccumSiteInit(op, nMax, qa, qb, 0);
+ *     symAccumSiteSetSeeds(&site, seed, nSeeds);   (a seeded kernel)
  *     if (symAccumProvenSafe(&site)) { loops(false, &site); }
  *     else                           { loops(true,  &site); }
  * with `loops` a static inline always_inline function whose `checked`
@@ -82,23 +84,51 @@ typedef struct symAccumSite {
     size_t nMax;    /* max terms one accumulator receives */
     uint8_t aBits;  /* operand widths as declared (banner) */
     uint8_t bBits;
-    uint64_t maxAbsSeed; /* max |seed|, up to 2^31 for INT32_MIN */
+    uint64_t maxAbsSeed; /* max |seed|, up to 2^31 for INT32_MIN: the proof's seed room (banner) */
+    int32_t seedMax;     /* signed extremes of the per-accumulator seeds: the result width's */
+    int32_t seedMin;     /* two sides (no seed: [0, 0], the value a seedless kernel starts from) */
     bool wideProduct;    /* either width > 16: |a*b| may leave int32 */
     bool rescaled;       /* terms are float-rescaled partials: use the slacked bound */
     bool valueSum;       /* plain sum of stored codes (banner names the wire, not the knob) */
 } symAccumSite_t;
 
+/* |v| as an unsigned magnitude (INT32_MIN -> 2^31). */
+static inline uint64_t symAccumMagnitude(int32_t v) {
+    int64_t w = v;
+    return (uint64_t)(w < 0 ? -w : w);
+}
+
 /* max |seed[i]| as an unsigned magnitude (INT32_MIN -> 2^31). NULL / n == 0 -> 0. */
 static inline uint64_t symAccumMaxAbsSeed(const int32_t *seed, size_t n) {
     uint64_t m = 0;
     for (size_t i = 0; seed != NULL && i < n; i++) {
-        int64_t v = seed[i];
-        uint64_t mag = (uint64_t)(v < 0 ? -v : v);
+        uint64_t mag = symAccumMagnitude(seed[i]);
         if (mag > m) {
             m = mag;
         }
     }
     return m;
+}
+
+/* The seeds a site's accumulators start from, as the signed range
+ * [seedMin, seedMax]: the proof reads their max magnitude, the result width
+ * each side's extreme. */
+static inline void symAccumSiteSetSeedRange(symAccumSite_t *s, int32_t seedMin, int32_t seedMax) {
+    uint64_t minMag = symAccumMagnitude(seedMin);
+    uint64_t maxMag = symAccumMagnitude(seedMax);
+    s->seedMin = seedMin;
+    s->seedMax = seedMax;
+    s->maxAbsSeed = minMag > maxMag ? minMag : maxMag;
+}
+
+/* ... from the per-accumulator seed array; NULL / n == 0 -> [0, 0]. */
+static inline void symAccumSiteSetSeeds(symAccumSite_t *s, const int32_t *seed, size_t n) {
+    int32_t lo = 0, hi = 0;
+    for (size_t i = 0; seed != NULL && i < n; i++) {
+        lo = (i == 0 || seed[i] < lo) ? seed[i] : lo;
+        hi = (i == 0 || seed[i] > hi) ? seed[i] : hi;
+    }
+    symAccumSiteSetSeedRange(s, lo, hi);
 }
 
 /* A declared width as the bound arithmetic reads it: a zero width is read as
@@ -140,16 +170,22 @@ static inline size_t symAccumTermLimitRescaled(uint8_t aBits, uint8_t bBits, uin
     return (size_t)((room << 22) / (((maxProduct + 1u) << 22) + maxProduct));
 }
 
+/* Only the seed's magnitude is known here, so the seed range is read as
+ * [-M, +M] within int32 (a +2^31 seed does not exist; INT32_MIN does); a
+ * kernel that knows its seed array narrows it with symAccumSiteSetSeeds. */
 static inline symAccumSite_t symAccumSiteInit(const char *op, size_t nMax, uint8_t aBits,
                                               uint8_t bBits, uint64_t maxAbsSeed) {
-    symAccumSite_t s = {.op = op,
-                        .nMax = nMax,
-                        .aBits = aBits,
-                        .bBits = bBits,
-                        .maxAbsSeed = maxAbsSeed,
-                        .wideProduct = aBits > 16 || bBits > 16,
-                        .rescaled = false,
-                        .valueSum = false};
+    symAccumSite_t s = {
+        .op = op,
+        .nMax = nMax,
+        .aBits = aBits,
+        .bBits = bBits,
+        .maxAbsSeed = maxAbsSeed,
+        .seedMax = maxAbsSeed > (uint64_t)INT32_MAX ? INT32_MAX : (int32_t)maxAbsSeed,
+        .seedMin = maxAbsSeed >= ((uint64_t)1 << 31) ? INT32_MIN : -(int32_t)maxAbsSeed,
+        .wideProduct = aBits > 16 || bBits > 16,
+        .rescaled = false,
+        .valueSum = false};
     return s;
 }
 
@@ -179,40 +215,85 @@ static inline bool symAccumProvenSafe(const symAccumSite_t *s) {
     return s->nMax <= limit;
 }
 
-/* Smallest signed width w in [1, 32] with magnitude < 2^(w-1); 32 when
- * magnitude >= 2^31. Strict (<) so the width holds +magnitude in two's
- * complement AND satisfies the guard's |code| <= 2^(w-1): a consumer that
- * reads the stamped wire as an operand proves its own budget from it. */
-static inline uint8_t symAccumWidthForMagnitude(uint64_t magnitude) {
+/* Smallest two's-complement width w in [1, 32] holding the range
+ * [-maxNegMag, maxPos]: maxPos <= 2^(w-1) - 1 and maxNegMag <= 2^(w-1) (the
+ * negative side holds one more magnitude); 32 when the range leaves 31 bits
+ * -- the raw int32 range, which the guard already reads as unprovable. The
+ * guard's |code| <= 2^(w-1) reading of a declared width stays sound. */
+static inline uint8_t symAccumWidthForRange(uint64_t maxPos, uint64_t maxNegMag) {
     uint8_t w = 1;
-    while (w < 32 && magnitude >= ((uint64_t)1 << (w - 1u))) {
+    while (w < 32 &&
+           (maxPos > ((uint64_t)1 << (w - 1u)) - 1u || maxNegMag > ((uint64_t)1 << (w - 1u)))) {
         w++;
     }
     return w;
 }
 
+/* Range of one product of declared widths (qa, qb), codes in
+ * [-2^(q-1), 2^(q-1) - 1]: the positive corner (-2^(qa-1)) * (-2^(qb-1)) =
+ * 2^(qa-1) * 2^(qb-1), the negative one -2^(qa-1) * (2^(qb-1) - 1) or its
+ * mirror, whichever is larger -- one short of the positive corner by the
+ * narrower operand's half range. */
+static inline void symAccumProductRange(uint8_t aBits, uint8_t bBits, uint64_t *maxPos,
+                                        uint64_t *maxNegMag) {
+    uint64_t halfA = (uint64_t)1 << (symAccumClampedWidth(aBits) - 1u);
+    uint64_t halfB = (uint64_t)1 << (symAccumClampedWidth(bBits) - 1u);
+    *maxPos = halfA * halfB;
+    *maxNegMag = halfA * halfB - (halfA < halfB ? halfA : halfB);
+}
+
+/* Range of one term the site's accumulator receives: a product (above) or,
+ * for a value sum, the stored code itself (2^(q-1) - 1 and 2^(q-1); NOT a
+ * product with a one-bit code, which would mirror the sides). */
+static inline void symAccumTermRange(const symAccumSite_t *s, uint64_t *maxPos,
+                                     uint64_t *maxNegMag) {
+    if (s->valueSum) {
+        uint64_t half = (uint64_t)1 << (symAccumClampedWidth(s->aBits) - 1u);
+        *maxPos = half - 1u;
+        *maxNegMag = half;
+        return;
+    }
+    symAccumProductRange(s->aBits, s->bBits, maxPos, maxNegMag);
+}
+
+/* One side of a proven site's range: nMax terms of per-term bound `term`, the
+ * rescaled site's slack on top (nMax * term * (1 + 2^-22) + nMax, the ceil
+ * taken once -- the same per-term bound symAccumTermLimitRescaled proves),
+ * then shifted by the seed's extreme on this side (`seedShift`, the signed
+ * seed that widens it: seedMax on the positive side, -seedMin on the negative)
+ * and floored at 0: a side the seed pushes past zero costs no bits. */
+static inline uint64_t symAccumSideBound(const symAccumSite_t *s, uint64_t term,
+                                         int64_t seedShift) {
+    uint64_t terms = (uint64_t)s->nMax * term;
+    uint64_t bound = terms;
+    if (s->rescaled) {
+        bound += (uint64_t)s->nMax + ((terms + (((uint64_t)1 << 22) - 1u)) >> 22);
+    }
+    if (seedShift >= 0) {
+        return bound + (uint64_t)seedShift;
+    }
+    uint64_t back = (uint64_t)(-seedShift);
+    return bound > back ? bound - back : 0;
+}
+
 /* Declared width of an accumulator a kernel wrote under this site (#516):
  * 32 when !symAccumProvenSafe(s) (the bound exceeds int32, the checked loop
- * ran, the codes span the raw int32 range); otherwise
- * symAccumWidthForMagnitude(B) with mp = 2^(qa-1) * 2^(qb-1) and
- *     B = nMax * mp + maxAbsSeed                                  (exact site)
- *     B = nMax * (mp + 1) + ceil(nMax * mp / 2^22) + maxAbsSeed   (rescaled site)
- * -- the same per-term bounds the two term limits prove, so provenSafe
- * guarantees B <= INT32_MAX and nothing wraps in the 64-bit evaluation.
- * nMax == 0 -> the width of maxAbsSeed. */
+ * ran, the codes span the raw int32 range); otherwise the smallest
+ * two's-complement width holding the accumulator's exact range
+ *     [-(nMax * termNeg) + seedMin, nMax * termPos + seedMax]
+ * (each side slacked on a rescaled site). Both sides stay within the one-sided
+ * bound the term limits prove (termNeg <= termPos, |seed| <= maxAbsSeed), so
+ * provenSafe guarantees they fit INT32_MAX and nothing wraps in the 64-bit
+ * evaluation. nMax == 0 -> the width of the seed range alone. */
 static inline uint8_t symAccumResultBits(const symAccumSite_t *s) {
     if (!symAccumProvenSafe(s)) {
         return 32;
     }
-    unsigned qa = symAccumClampedWidth(s->aBits);
-    unsigned qb = symAccumClampedWidth(s->bBits);
-    uint64_t maxProduct = (uint64_t)1 << (qa + qb - 2u);
-    uint64_t products = (uint64_t)s->nMax * maxProduct;
-    uint64_t bound = products + s->maxAbsSeed;
-    if (s->rescaled) {
-        bound += (uint64_t)s->nMax + ((products + (((uint64_t)1 << 22) - 1u)) >> 22);
-    }
-    return symAccumWidthForMagnitude(bound);
+    uint64_t termPos, termNeg;
+    symAccumTermRange(s, &termPos, &termNeg);
+    uint64_t maxPos = symAccumSideBound(s, termPos, s->seedMax);
+    uint64_t maxNegMag = symAccumSideBound(s, termNeg, -(int64_t)s->seedMin);
+    return symAccumWidthForRange(maxPos, maxNegMag);
 }
 
 /* Unconditional (all builds): the exit(1) stays even where PRINT_ERROR compiles out. */

@@ -1029,9 +1029,10 @@ void testConv1dKernelSymGroupedWidePartialSumThatWrapsHitsTheF9Guard(void) {
 
 /* ---- #516: the output declares the accumulator's static width ------------ */
 
-/* int4 x int4 over inCh * K = 3 terms of code 1: the stamp is the static bound
- * B = 3 * 2^3 * 2^3 = 192 -> 9 (strict: 192 < 2^8), never the data (3). With a
- * bias of 1000 at the accumulator scale B = 1192 -> 12. */
+/* int4 x int4 over inCh * K = 3 terms of code 1: the stamp is the static range
+ * [-168, 192] -> 9, never the data (3). With a bias of 1000 at the accumulator
+ * scale [-168 + 1000, 1192] -> 12; with a bias of -1870 [-2038, -1678] -> 12,
+ * where max|seed| on both sides (2062) would say 13. */
 void testConv1dKernelSymStampsResultWidthIncludesSeed(void) {
     cgFill(3, 1, 1, false);
     TEST_ASSERT_EQUAL_INT32(3, cgRun(3, 1, 1, 4, 4, NULL, 0));
@@ -1043,13 +1044,18 @@ void testConv1dKernelSymStampsResultWidthIncludesSeed(void) {
     symAccumSite_t seeded = symAccumSiteInit("t", 3, 4, 4, 1000);
     TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&seeded), gCgOutBits);
     TEST_ASSERT_EQUAL_UINT8(12, gCgOutBits);
+    bias = -1870;
+    TEST_ASSERT_EQUAL_INT32(3 - 1870, cgRun(3, 1, 1, 4, 4, &bias, 0));
+    TEST_ASSERT_EQUAL_UINT8(12, gCgOutBits);
 }
 
 /* int4 x grouped int4 (2 groups x 4, counted 5 bits for the ASYM-mantissa
  * image, Conv1dKernel.c) over 8 terms plus a bias of 1023 at the accumulator
  * scale. The output is the RESCALED accumulator, so its width is the rescaled
  * site's: 8 * (2^7 + 1) + ceil(8 * 2^7 / 2^22) + 1023 = 2056 -> 13. The exact
- * bound would say 12 (2047), the raw group partial 11 (4 * 2^7 = 512). */
+ * bound would say 12 (2047), the raw group partial 11 (4 * 2^7 = 512). A bias
+ * of -1023 widens the slacked negative side instead: 8 * 120 + 9 + 1023 =
+ * 1992 -> 12. */
 void testConv1dKernelSymGroupedStampsRescaledWidth(void) {
     cgFill(8, 1, 1, false);
     int32_t bias = 1023;
@@ -1057,6 +1063,9 @@ void testConv1dKernelSymGroupedStampsRescaledWidth(void) {
     symAccumSite_t rescaled = symAccumSiteInitRescaled("t", 8, 4, 4 + 1, 1023);
     TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&rescaled), gCgOutBits);
     TEST_ASSERT_EQUAL_UINT8(13, gCgOutBits);
+    bias = -1023;
+    TEST_ASSERT_EQUAL_INT32(8 - 1023, cgRun(8, 1, 1, 4, 4, &bias, 2));
+    TEST_ASSERT_EQUAL_UINT8(12, gCgOutBits);
 }
 
 /* The #516 repro on a conv output: the raw 1x1x1 product -2048 * -2048 = 2^22

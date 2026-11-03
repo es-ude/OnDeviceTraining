@@ -171,8 +171,134 @@ void testSumSiteBannerNamesWireWidthNotOperandKnob(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "ARITH_FLOAT32", (void)symAccumAddChecked(INT32_MAX, 1, &s));
 }
 
+/* ---- The declared result width is the exact two's-complement range -------- */
+
+/* Smallest w with maxPos <= 2^(w-1) - 1 and maxNegMag <= 2^(w-1): the
+ * negative side holds one more magnitude than the positive one; 32 caps. */
+void testWidthForRangeIsTheSmallestTwosComplementWidth(void) {
+    TEST_ASSERT_EQUAL_UINT8(1, symAccumWidthForRange(0, 0));
+    TEST_ASSERT_EQUAL_UINT8(1, symAccumWidthForRange(0, 1));
+    TEST_ASSERT_EQUAL_UINT8(2, symAccumWidthForRange(1, 0));
+    TEST_ASSERT_EQUAL_UINT8(2, symAccumWidthForRange(1, 2));
+    TEST_ASSERT_EQUAL_UINT8(3, symAccumWidthForRange(2, 0));
+    TEST_ASSERT_EQUAL_UINT8(3, symAccumWidthForRange(0, 3));
+    TEST_ASSERT_EQUAL_UINT8(12, symAccumWidthForRange(2047, 2048));
+    TEST_ASSERT_EQUAL_UINT8(13, symAccumWidthForRange(2048, 0));
+    TEST_ASSERT_EQUAL_UINT8(13, symAccumWidthForRange(0, 2049));
+    TEST_ASSERT_EQUAL_UINT8(31, symAccumWidthForRange((1ull << 30) - 1, 1ull << 30));
+    TEST_ASSERT_EQUAL_UINT8(32, symAccumWidthForRange(1ull << 30, 0));
+    TEST_ASSERT_EQUAL_UINT8(32, symAccumWidthForRange(0, (1ull << 30) + 1));
+    TEST_ASSERT_EQUAL_UINT8(32, symAccumWidthForRange(UINT64_MAX, UINT64_MAX));
+}
+
+/* A value sum adds the codes themselves: N * (2^(q-1) - 1) on the positive
+ * side, N * 2^(q-1) on the negative -- not a product with a one-bit code in
+ * {-1, 0}, which mirrors the sides and costs a bit. int12: N=1 -> 12 (one code
+ * adds no bit), N=2 -> 13, N=3 -> 14; an unprovable sum -> 32. */
+void testResultBitsOfAValueSumIsTheCodeRange(void) {
+    symAccumSite_t one = symAccumSiteInitSum("t", 1, 12);
+    symAccumSite_t two = symAccumSiteInitSum("t", 2, 12);
+    symAccumSite_t three = symAccumSiteInitSum("t", 3, 12);
+    symAccumSite_t unprovable = symAccumSiteInitSum("t", 2, 31);
+    TEST_ASSERT_EQUAL_UINT8(12, symAccumResultBits(&one));
+    TEST_ASSERT_EQUAL_UINT8(13, symAccumResultBits(&two));
+    TEST_ASSERT_EQUAL_UINT8(14, symAccumResultBits(&three));
+    TEST_ASSERT_EQUAL_UINT8(32, symAccumResultBits(&unprovable));
+}
+
+/* A product's positive corner (-2^(qa-1)) * (-2^(qb-1)) = 2^(qa+qb-2) is one
+ * past what the negative side -2^(qa-1) * (2^(qb-1) - 1) reaches, so a product
+ * site keeps the corner's bit: int12 x int12 -> 24, int4 x int4 -> 8. Zero
+ * terms and no seed -> 1; an unprovable site -> 32. */
+void testResultBitsOfAProductKeepsThePositiveCorner(void) {
+    symAccumSite_t int12 = symAccumSiteInit("t", 1, 12, 12, 0);
+    symAccumSite_t int4 = symAccumSiteInit("t", 1, 4, 4, 0);
+    symAccumSite_t none = symAccumSiteInit("t", 0, 12, 12, 0);
+    symAccumSite_t unprovable = symAccumSiteInit("t", 512, 12, 12, 0);
+    TEST_ASSERT_EQUAL_UINT8(24, symAccumResultBits(&int12));
+    TEST_ASSERT_EQUAL_UINT8(8, symAccumResultBits(&int4));
+    TEST_ASSERT_EQUAL_UINT8(1, symAccumResultBits(&none));
+    TEST_ASSERT_EQUAL_UINT8(32, symAccumResultBits(&unprovable));
+}
+
+/* The seed shifts the range, so its SIGN picks the side it widens. One
+ * int4 x int4 term spans [-56, 64]: seed +8 -> [-48, 72] -> 8 bits, seed -8 ->
+ * [-64, 56] -> 7. Four terms with seed -1: [-225, 255] -> 9, where the
+ * seedless site (256) and a magnitude-only seed say 10. Three terms with seed
+ * -1870: [-2038, -1678] -> 12, where max|seed| on both sides (2062) says 13. */
+void testResultBitsSeedSignPicksTheSideItWidens(void) {
+    int32_t plus8 = 8, minus8 = -8, minus1 = -1, minus1870 = -1870;
+    symAccumSite_t one = symAccumSiteInit("t", 1, 4, 4, 0);
+    symAccumSiteSetSeeds(&one, &plus8, 1);
+    TEST_ASSERT_EQUAL_UINT8(8, symAccumResultBits(&one));
+    symAccumSiteSetSeeds(&one, &minus8, 1);
+    TEST_ASSERT_EQUAL_UINT8(7, symAccumResultBits(&one));
+    symAccumSite_t four = symAccumSiteInit("t", 4, 4, 4, 0);
+    TEST_ASSERT_EQUAL_UINT8(10, symAccumResultBits(&four));
+    symAccumSiteSetSeeds(&four, &minus1, 1);
+    TEST_ASSERT_EQUAL_UINT8(9, symAccumResultBits(&four));
+    symAccumSite_t three = symAccumSiteInit("t", 3, 4, 4, 1870);
+    TEST_ASSERT_EQUAL_UINT8(13, symAccumResultBits(&three));
+    symAccumSiteSetSeeds(&three, &minus1870, 1);
+    TEST_ASSERT_EQUAL_UINT8(12, symAccumResultBits(&three));
+}
+
+/* The seed fields: the array's signed extremes AND their max magnitude (the
+ * proof's seed room, INT32_MIN -> 2^31); NULL / no seeds -> [0, 0], the value
+ * a seedless kernel starts from. A magnitude-only site reads its seed as
+ * [-M, +M] within int32. */
+void testSetSeedsFillsTheSignedRangeAndTheProofMagnitude(void) {
+    int32_t seeds[] = {5, -7, INT32_MIN, 3};
+    symAccumSite_t s = symAccumSiteInit("t", 1, 4, 4, 0);
+    symAccumSiteSetSeeds(&s, seeds, 4);
+    TEST_ASSERT_EQUAL_INT32(5, s.seedMax);
+    TEST_ASSERT_EQUAL_INT32(INT32_MIN, s.seedMin);
+    TEST_ASSERT_EQUAL_UINT64(2147483648ull, s.maxAbsSeed);
+    symAccumSiteSetSeeds(&s, NULL, 0);
+    TEST_ASSERT_EQUAL_INT32(0, s.seedMax);
+    TEST_ASSERT_EQUAL_INT32(0, s.seedMin);
+    TEST_ASSERT_EQUAL_UINT64(0ull, s.maxAbsSeed);
+    int32_t positive[] = {5, 3};
+    symAccumSiteSetSeeds(&s, positive, 2);
+    TEST_ASSERT_EQUAL_INT32(5, s.seedMax);
+    TEST_ASSERT_EQUAL_INT32(3, s.seedMin);
+    TEST_ASSERT_EQUAL_UINT64(5ull, s.maxAbsSeed);
+    symAccumSite_t magnitude = symAccumSiteInit("t", 1, 4, 4, 1000);
+    TEST_ASSERT_EQUAL_INT32(1000, magnitude.seedMax);
+    TEST_ASSERT_EQUAL_INT32(-1000, magnitude.seedMin);
+    TEST_ASSERT_EQUAL_UINT64(1000ull, magnitude.maxAbsSeed);
+    symAccumSite_t int32Min = symAccumSiteInit("t", 0, 32, 32, 2147483648ull);
+    TEST_ASSERT_EQUAL_INT32(INT32_MAX, int32Min.seedMax);
+    TEST_ASSERT_EQUAL_INT32(INT32_MIN, int32Min.seedMin);
+}
+
+/* The rescaled slack (nMax + ceil(nMax * t / 2^22)) applies on each side.
+ * (4, 5) bits, 8 terms: the positive side 8 * 128 = 1024 slacks to 1033, the
+ * negative 8 * 120 = 960 to 969. Seed +1023: 2056 vs 2047 exact (13 vs 12);
+ * seed -1080: the negative side 2049 vs 2040 exact (13 vs 12), the positive
+ * side gone. */
+void testResultBitsRescaledSlackAppliesOnBothSides(void) {
+    int32_t minus1080 = -1080;
+    symAccumSite_t exactPos = symAccumSiteInit("t", 8, 4, 5, 1023);
+    symAccumSite_t rescaledPos = symAccumSiteInitRescaled("t", 8, 4, 5, 1023);
+    TEST_ASSERT_EQUAL_UINT8(12, symAccumResultBits(&exactPos));
+    TEST_ASSERT_EQUAL_UINT8(13, symAccumResultBits(&rescaledPos));
+    symAccumSite_t exactNeg = symAccumSiteInit("t", 8, 4, 5, 0);
+    symAccumSite_t rescaledNeg = symAccumSiteInitRescaled("t", 8, 4, 5, 0);
+    symAccumSiteSetSeeds(&exactNeg, &minus1080, 1);
+    symAccumSiteSetSeeds(&rescaledNeg, &minus1080, 1);
+    TEST_ASSERT_EQUAL_UINT8(12, symAccumResultBits(&exactNeg));
+    TEST_ASSERT_EQUAL_UINT8(13, symAccumResultBits(&rescaledNeg));
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testWidthForRangeIsTheSmallestTwosComplementWidth);
+    RUN_TEST(testResultBitsOfAValueSumIsTheCodeRange);
+    RUN_TEST(testResultBitsOfAProductKeepsThePositiveCorner);
+    RUN_TEST(testResultBitsSeedSignPicksTheSideItWidens);
+    RUN_TEST(testSetSeedsFillsTheSignedRangeAndTheProofMagnitude);
+    RUN_TEST(testResultBitsRescaledSlackAppliesOnBothSides);
     RUN_TEST(testRescaledTermLimitBoundaryIsTheSlackedBound);
     RUN_TEST(testRescaledTermLimitIsNeverLooserThanTheExactLimit);
     RUN_TEST(testRescaledSiteUsesTheSlackedLimit);

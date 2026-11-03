@@ -327,10 +327,9 @@ static void symWireInit(symWire_t *w, int32_t *codes, size_t n, uint8_t qMaxBits
  * never pass as the right one. */
 #define UNSTAMPED_WIDTH 5
 
-/* Equal scales add the raw codes, so the output declares the static bound
- * 2^(qa-1) + 2^(qb-1) under the strict rule (#516): int12 + int12 -> 2^11 +
- * 2^11 = 2^12 = 4096, and 4096 is not < 2^12, so 14 (one bit above the
- * reachable positive maximum 4094 -- the rule is strict by design). */
+/* Equal scales add the raw codes, so the output declares the exact range of
+ * the sum (#516): int12 + int12 spans [-2^12, 2^12 - 2], which is 13 bits --
+ * the reachable corners, not a bit above them. */
 void testAddSymInt32TensorsEqualScaleStampsSumWidth(void) {
     int32_t aCodes[2] = {-2048, 3}, bCodes[2] = {-2048, 5}, outCodes[2] = {0, 0};
     symWire_t a, b, out;
@@ -341,12 +340,13 @@ void testAddSymInt32TensorsEqualScaleStampsSumWidth(void) {
     TEST_ASSERT_EQUAL_INT32(-4096, outCodes[0]);
     TEST_ASSERT_EQUAL_INT32(8, outCodes[1]);
     TEST_ASSERT_EQUAL_FLOAT(0.5f, out.qc.scale);
-    TEST_ASSERT_EQUAL_UINT8(14, out.qc.qMaxBits);
+    TEST_ASSERT_EQUAL_UINT8(13, out.qc.qMaxBits);
     TEST_ASSERT_EQUAL_UINT8(12, a.qc.qMaxBits);
     TEST_ASSERT_EQUAL_UINT8(12, b.qc.qMaxBits);
 }
 
-/* Mixed widths: int12 + int4 -> 2^11 + 2^3 = 2056 < 2^12 -> 13. */
+/* Mixed widths: int12 + int4 spans [-(2^11 + 2^3), (2^11 - 1) + (2^3 - 1)] =
+ * [-2056, 2054] -> 13. */
 void testAddSymInt32TensorsEqualScaleStampIsStaticInTheWidths(void) {
     int32_t aCode = 1, bCode = 1, outCode = 0;
     symWire_t a, b, out;

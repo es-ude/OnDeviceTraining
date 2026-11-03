@@ -1227,10 +1227,11 @@ void testConvTranspose1dKernelSymGroupedWideScatterThatWrapsHitsTheF9Guard(void)
 /* ---- #516: the output declares the accumulator's static width ------------ */
 
 /* int4 x int4, 3 input channels scattering into one output element: the stamp
- * is the static bound B = 3 * 2^3 * 2^3 = 192 -> 9 (strict: 192 < 2^8), never
- * the data (3). The bias lands in a separate pass AFTER the scatter, so the
- * scatter site alone would still say 9; the stamp must count the seed the
- * bias pass added: B = 192 + 1000 = 1192 -> 12. */
+ * is the static range [-168, 192] -> 9, never the data (3). The bias lands in
+ * a separate pass AFTER the scatter, so the scatter site alone would still say
+ * 9; the stamp must count the seed the bias pass added, on the side its sign
+ * picks: +1000 -> [832, 1192] -> 12, -1870 -> [-2038, -1678] -> 12 (max|seed|
+ * on both sides, 2062, would say 13). */
 void testConvTranspose1dKernelSymStampsResultWidthIncludesBiasSeed(void) {
     ctFill(3, 1, 1, false);
     ctRun(3, 1, 1, 4, 4, NULL, 0);
@@ -1244,6 +1245,10 @@ void testConvTranspose1dKernelSymStampsResultWidthIncludesBiasSeed(void) {
     symAccumSite_t seeded = symAccumSiteInit("t", 3, 4, 4, 1000);
     TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&seeded), gCtOutBits);
     TEST_ASSERT_EQUAL_UINT8(12, gCtOutBits);
+    bias = -1870;
+    ctRun(3, 1, 1, 4, 4, &bias, 0);
+    TEST_ASSERT_EQUAL_INT32(3 - 1870, gCtY[0]);
+    TEST_ASSERT_EQUAL_UINT8(12, gCtOutBits);
 }
 
 /* int4 x grouped int4 (2 groups x 4, counted 5 bits for the ASYM-mantissa
@@ -1251,7 +1256,8 @@ void testConvTranspose1dKernelSymStampsResultWidthIncludesBiasSeed(void) {
  * says 8 * (2^7 + 1) + ceil(8 * 2^7 / 2^22) = 1033 -> 12. The post-scatter bias
  * of 1023 at the accumulator scale lifts it to 2056 -> 13, where the exact
  * bound (2047) would still say 12 -- so the stamp has to be the rescaled site
- * WITH the bias pass's seed. */
+ * WITH the bias pass's seed. A bias of -1023 widens the slacked negative side
+ * instead: 8 * 120 + 9 + 1023 = 1992 -> 12. */
 void testConvTranspose1dKernelSymGroupedStampsRescaledWidthIncludesBiasSeed(void) {
     ctFill(8, 1, 1, false);
     ctRun(8, 1, 1, 4, 4, NULL, 2);
@@ -1265,6 +1271,10 @@ void testConvTranspose1dKernelSymGroupedStampsRescaledWidthIncludesBiasSeed(void
     symAccumSite_t seeded = symAccumSiteInitRescaled("t", 8, 4, 4 + 1, 1023);
     TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&seeded), gCtOutBits);
     TEST_ASSERT_EQUAL_UINT8(13, gCtOutBits);
+    bias = -1023;
+    ctRun(8, 1, 1, 4, 4, &bias, 2);
+    TEST_ASSERT_EQUAL_INT32(8 - 1023, gCtY[0]);
+    TEST_ASSERT_EQUAL_UINT8(12, gCtOutBits);
 }
 
 /* The bias pass seeds one channel at a time, so the stamp must carry the
@@ -1285,6 +1295,14 @@ void testConvTranspose1dKernelSymStampCountsTheLargestBiasSeedOverChannels(void)
     ctRunOutCh(3, 1, 1, 4, 4, 2, largeOnLast, 0);
     TEST_ASSERT_EQUAL_INT32(4, gCtY[0]);
     TEST_ASSERT_EQUAL_INT32(1003, gCtY[1]);
+    TEST_ASSERT_EQUAL_UINT8(12, gCtOutBits);
+    /* each side takes its own extreme over the channels: seeds 1000 / -1870
+     * span [-168 - 1870, 192 + 1000] = [-2038, 1192] -> 12, where the largest
+     * magnitude on both sides (2062) would say 13 */
+    int32_t mixedSigns[] = {1000, -1870};
+    ctRunOutCh(3, 1, 1, 4, 4, 2, mixedSigns, 0);
+    TEST_ASSERT_EQUAL_INT32(1003, gCtY[0]);
+    TEST_ASSERT_EQUAL_INT32(3 - 1870, gCtY[1]);
     TEST_ASSERT_EQUAL_UINT8(12, gCtOutBits);
 }
 

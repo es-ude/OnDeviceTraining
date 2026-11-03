@@ -124,8 +124,8 @@ static uint8_t matmulIntCore(tensor_t *aTensor, tensor_t *bTensor, tensor_t *out
         exit(1);
     }
 
-    symAccumSite_t site = symAccumSiteInit("matmul SYM_INT32", aColumns, aBits, bBits,
-                                           symAccumMaxAbsSeed(biasSeed, bColumns));
+    symAccumSite_t site = symAccumSiteInit("matmul SYM_INT32", aColumns, aBits, bBits, 0);
+    symAccumSiteSetSeeds(&site, biasSeed, bColumns);
     if (!symGuard || symAccumProvenSafe(&site)) {
         matmulIntLoopsSafe(aTensor, bTensor, outputTensor, biasSeed, aRows, aColumns, bColumns,
                            &site);
@@ -512,9 +512,9 @@ static uint8_t matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor
     size_t partialTerms = weightGroups->groupSize < aColumns ? weightGroups->groupSize : aColumns;
     symAccumSite_t partialSite = symAccumSiteInit("matmul SYM_INT32 grouped (raw group partial)",
                                                   partialTerms, aBits, bBits, 0);
-    symAccumSite_t accSite =
-        symAccumSiteInitRescaled("matmul SYM_INT32 grouped (rescaled accumulator)", aColumns, aBits,
-                                 bBits, symAccumMaxAbsSeed(biasSeed, bColumns));
+    symAccumSite_t accSite = symAccumSiteInitRescaled(
+        "matmul SYM_INT32 grouped (rescaled accumulator)", aColumns, aBits, bBits, 0);
+    symAccumSiteSetSeeds(&accSite, biasSeed, bColumns);
     if (symAccumProvenSafe(&accSite)) {
         matmulGroupedLoopsSafe(aTensor, bTensor, outputTensor, biasSeed, weightGroups, aScale, sAcc,
                                roundingMode, rs, aRows, aColumns, bColumns, &partialSite, &accSite);

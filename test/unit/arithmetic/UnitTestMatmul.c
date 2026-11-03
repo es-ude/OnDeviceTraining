@@ -1886,21 +1886,8 @@ void testMatmulGroupedWidePartialSumThatWrapsHitsTheF9Guard(void) {
 
 /* ---- #516: raw SYM outputs declare their accumulator width ------------- */
 
-void testSymAccumWidthForMagnitude(void) {
-    /* Strict: the width must hold +magnitude, so 2^(w-1) itself needs w + 1 bits. */
-    TEST_ASSERT_EQUAL_UINT8(1, symAccumWidthForMagnitude(0));
-    TEST_ASSERT_EQUAL_UINT8(2, symAccumWidthForMagnitude(1));
-    TEST_ASSERT_EQUAL_UINT8(23, symAccumWidthForMagnitude((1ull << 22) - 1));
-    TEST_ASSERT_EQUAL_UINT8(24, symAccumWidthForMagnitude(1ull << 22));
-    TEST_ASSERT_EQUAL_UINT8(31, symAccumWidthForMagnitude((1ull << 30) - 1));
-    TEST_ASSERT_EQUAL_UINT8(32, symAccumWidthForMagnitude(1ull << 30));
-    TEST_ASSERT_EQUAL_UINT8(32, symAccumWidthForMagnitude((uint64_t)INT32_MAX));
-    TEST_ASSERT_EQUAL_UINT8(32, symAccumWidthForMagnitude(1ull << 31));
-    TEST_ASSERT_EQUAL_UINT8(32, symAccumWidthForMagnitude(UINT64_MAX));
-}
-
 void testSymAccumResultBitsFollowsTheSiteBound(void) {
-    /* exact site, int12 x int12: B = N * 2^22 + seed */
+    /* exact site, int12 x int12: the positive corner N * 2^22 + seed decides */
     symAccumSite_t n255 = symAccumSiteInit("t", 255, 12, 12, 0);
     symAccumSite_t n256 = symAccumSiteInit("t", 256, 12, 12, 0);
     symAccumSite_t n512 = symAccumSiteInit("t", 512, 12, 12, 0); /* unprovable */
@@ -1996,6 +1983,31 @@ void testMatmulSymWithBiasStampIncludesSeed(void) {
     TEST_ASSERT_EQUAL_UINT8(12, out.qc.qMaxBits); /* B = 64 + 1000 = 1064 -> 12 */
 }
 
+/* The bias seed's sign picks the side it widens: 3 int4 x int4 terms span
+ * [-168, 192]; a bias of -1870 at the accumulator scale shifts that to
+ * [-2038, -1678] -> 12, where max|seed| on both sides (2062) would say 13.
+ * Four terms of codes 7 with bias -1: [-225, 255] -> 9 (seedless: 256 -> 10). */
+void testMatmulSymWithBiasStampFollowsTheSeedSign(void) {
+    guardFill(3, 1, 1, false);
+    int32_t biasCode = -1870, outCode = 0;
+    symWire_t a, b, bias, out;
+    symWireInit(&a, gGuardA, 1, 3, 4);
+    symWireInit(&b, gGuardB, 3, 1, 4);
+    symWireInit(&bias, &biasCode, 1, 1, 12);
+    symWireInit(&out, &outCode, 1, 1, UNSTAMPED_WIDTH);
+    matmulSymInt32TensorsWithBias(&a.t, &b.t, &out.t, &bias.t, NULL);
+    TEST_ASSERT_EQUAL_INT32(3 - 1870, outCode);
+    TEST_ASSERT_EQUAL_UINT8(12, out.qc.qMaxBits);
+    guardFill(4, 7, 7, false);
+    biasCode = -1;
+    symWireInit(&a, gGuardA, 1, 4, 4);
+    symWireInit(&b, gGuardB, 4, 1, 4);
+    symWireInit(&out, &outCode, 1, 1, UNSTAMPED_WIDTH);
+    matmulSymInt32TensorsWithBias(&a.t, &b.t, &out.t, &bias.t, NULL);
+    TEST_ASSERT_EQUAL_INT32(195, outCode);
+    TEST_ASSERT_EQUAL_UINT8(9, out.qc.qMaxBits);
+}
+
 void testMatmulSymGroupedStampsRescaledWidth(void) {
     /* a:[1,8] int4 . grouped b (storage [1,8] as 2 groups x 4, qBits 4) + bias
      * 1023 at the accumulator scale. The output is the RESCALED accumulator, so
@@ -2026,6 +2038,12 @@ void testMatmulSymGroupedStampsRescaledWidth(void) {
     symAccumSite_t rescaled = symAccumSiteInitRescaled("t", 8, 4, 4 + 1, 1023);
     TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&rescaled), out.qc.qMaxBits);
     TEST_ASSERT_EQUAL_UINT8(13, out.qc.qMaxBits);
+    /* bias -1023: the slacked negative side 8 * 120 + 9 + 1023 = 1992 -> 12 */
+    biasCode = -1023;
+    symWireInit(&out, &outCode, 1, 1, UNSTAMPED_WIDTH);
+    matmulSymInt32TensorsGroupedWeight(&a.t, &b, &bias.t, &out.t, &groups, NULL);
+    TEST_ASSERT_EQUAL_INT32(8 - 1023, outCode);
+    TEST_ASSERT_EQUAL_UINT8(12, out.qc.qMaxBits);
 }
 
 /* The #516 repro: the raw 1x1 product -2048 * -2048 = 2^22 re-enters a SYM
@@ -2050,9 +2068,10 @@ void testMatmulSymChainedRawOutputOverflowAborts(void) {
 }
 
 void testMatmulSymNarrowChainStaysExact(void) {
-    /* a:[1,4] . b:[4,1] of int4 codes 7 -> 196 under B = 4 * 2^3 * 2^3 = 256 ->
-     * 10 (strict: 256 is not < 2^8). Chained with an int4 code 7 the 1-term
-     * (10, 4) site is still provable and the product 1372 exact. */
+    /* a:[1,4] . b:[4,1] of int4 codes 7 -> 196 under the range [-224, 256] ->
+     * 10 (the positive corner 256 needs the tenth bit). Chained with an int4
+     * code 7 the 1-term (10, 4) site is still provable and the product 1372
+     * exact. */
     guardFill(4, 7, 7, false);
     int32_t cCode = 7, out1Code = 0, out2Code = 0;
     symWire_t a, b, c, out1, out2;
@@ -2063,7 +2082,7 @@ void testMatmulSymNarrowChainStaysExact(void) {
     symWireInit(&out2, &out2Code, 1, 1, UNSTAMPED_WIDTH);
     matmulSymInt32Tensors(&a.t, &b.t, &out1.t);
     TEST_ASSERT_EQUAL_INT32(196, out1Code);
-    TEST_ASSERT_EQUAL_UINT8(symAccumWidthForMagnitude(256), out1.qc.qMaxBits);
+    TEST_ASSERT_EQUAL_UINT8(symAccumWidthForRange(256, 224), out1.qc.qMaxBits);
     TEST_ASSERT_EQUAL_UINT8(10, out1.qc.qMaxBits);
     matmulSymInt32Tensors(&out1.t, &c.t, &out2.t);
     TEST_ASSERT_EQUAL_INT32(1372, out2Code);
@@ -2073,11 +2092,11 @@ void testMatmulSymNarrowChainStaysExact(void) {
 int main(void) {
 
     UNITY_BEGIN();
-    RUN_TEST(testSymAccumWidthForMagnitude);
     RUN_TEST(testSymAccumResultBitsFollowsTheSiteBound);
     RUN_TEST(testMatmulSymStampsResultWidthInt12K1);
     RUN_TEST(testMatmulSymStampsResultWidthBoundaries);
     RUN_TEST(testMatmulSymWithBiasStampIncludesSeed);
+    RUN_TEST(testMatmulSymWithBiasStampFollowsTheSeedSign);
     RUN_TEST(testMatmulSymGroupedStampsRescaledWidth);
     RUN_TEST(testMatmulSymChainedRawOutputOverflowAborts);
     RUN_TEST(testMatmulSymNarrowChainStaysExact);

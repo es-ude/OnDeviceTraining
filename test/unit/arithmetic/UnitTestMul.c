@@ -121,7 +121,7 @@ static void symWireInit(symWire_t *w, int32_t *codes, size_t n, uint8_t qMaxBits
 #define UNSTAMPED_WIDTH 5
 
 /* The raw product of two int12 grid corners is 2^22: the output declares the
- * static bound 2^11 * 2^11 = 2^22 -> strict -> 24 (#516), whatever the data. */
+ * static range [-2^11 * (2^11 - 1), 2^22] -> 24 (#516), whatever the data. */
 void testMulSymInt32TensorsStampsProductWidth(void) {
     int32_t aCodes[2] = {-2048, 3}, bCodes[2] = {-2048, 5}, outCodes[2] = {0, 0};
     symWire_t a, b, out;
@@ -153,9 +153,10 @@ void testMulSymInt32TensorsInplaceStampsProductWidth(void) {
     TEST_ASSERT_EQUAL_UINT8(12, b.qc.qMaxBits);
 }
 
-/* The stamp is static in the operand widths: int4 x int4 -> 2^3 * 2^3 = 64
- * -> 8; int16 x int16 -> 2^30 -> 32 (the raw int32 range; 2^30 is not < 2^30,
- * so 31 would understate the corner product -2^15 * -2^15). The codes are 1. */
+/* The stamp is static in the operand widths: int4 x int4 -> the corner 2^3 *
+ * 2^3 = 64 -> 8; int16 x int16 -> 2^30 -> 32 (the raw int32 range: 31 bits
+ * end at 2^30 - 1 and would understate the corner product -2^15 * -2^15).
+ * The codes are 1. */
 static uint8_t mulStampForWidths(uint8_t qa, uint8_t qb) {
     int32_t aCode = 1, bCode = 1, outCode = 0;
     symWire_t a, b, out;

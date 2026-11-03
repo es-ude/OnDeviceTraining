@@ -82,16 +82,17 @@ void mulFloat32ElementWithFloat32TensorInplace(tensor_t *a, float b) {
     floatElementWithTensorArithmeticInplace(a, b, mul);
 }
 
-/* Width a raw elementwise SYM product declares (#516): |a * b| is at most
- * 2^(qa-1) * 2^(qb-1), which can exceed the operands' width, so the output
- * carries that static bound under the strict rule (32 = the raw int32 range)
- * and a consumer that reads it as an operand proves its own budget from it.
- * The int32 product itself is not checked: with qa + qb > 32 it is
+/* Width a raw elementwise SYM product declares (#516): a * b reaches the
+ * corner 2^(qa-1) * 2^(qb-1) (both operands at their negative extreme), which
+ * can exceed the operands' width, so the output carries the exact width of the
+ * product's range (symAccumProductRange; 32 = the raw int32 range) and a
+ * consumer that reads it as an operand proves its own budget from it. The
+ * int32 product itself is not checked: with qa + qb > 32 it is
  * signed-overflow undefined behaviour, documented rather than guarded. */
 static uint8_t symProductWidth(uint8_t aBits, uint8_t bBits) {
-    unsigned qa = symAccumClampedWidth(aBits);
-    unsigned qb = symAccumClampedWidth(bBits);
-    return symAccumWidthForMagnitude((uint64_t)1 << (qa + qb - 2u));
+    uint64_t maxPos, maxNegMag;
+    symAccumProductRange(aBits, bBits, &maxPos, &maxNegMag);
+    return symAccumWidthForRange(maxPos, maxNegMag);
 }
 
 void mulSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor) {

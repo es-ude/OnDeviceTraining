@@ -208,8 +208,9 @@ void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_
      * only shrinks it), on top of the bias seed. */
     uint8_t xBits = ((symInt32QConfig_t *)input->quantization->qConfig)->qMaxBits;
     uint8_t wBits = ((symInt32QConfig_t *)weight->quantization->qConfig)->qMaxBits;
-    symAccumSite_t site = symAccumSiteInit("conv1dKernelSymInt32", inChPerGroup * kernelSize, xBits,
-                                           wBits, symAccumMaxAbsSeed(seed, outChannels));
+    symAccumSite_t site =
+        symAccumSiteInit("conv1dKernelSymInt32", inChPerGroup * kernelSize, xBits, wBits, 0);
+    symAccumSiteSetSeeds(&site, seed, outChannels);
     if (symAccumProvenSafe(&site)) {
         conv1dSymLoopsSafe(&view, &site);
     } else {
@@ -445,9 +446,9 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
     size_t partialTerms = weightGroups->groupSize < nTerms ? weightGroups->groupSize : nTerms;
     symAccumSite_t partialSite = symAccumSiteInit("conv1dKernelSymInt32Grouped (raw group partial)",
                                                   partialTerms, xBits, wBits, 0);
-    symAccumSite_t accSite =
-        symAccumSiteInitRescaled("conv1dKernelSymInt32Grouped (rescaled accumulator)", nTerms,
-                                 xBits, wBits, symAccumMaxAbsSeed(seed, outChannels));
+    symAccumSite_t accSite = symAccumSiteInitRescaled(
+        "conv1dKernelSymInt32Grouped (rescaled accumulator)", nTerms, xBits, wBits, 0);
+    symAccumSiteSetSeeds(&accSite, seed, outChannels);
     if (symAccumProvenSafe(&accSite)) {
         conv1dSymGroupedLoopsSafe(&view, weightGroups, inScale, sAcc, wQC->roundingMode, rs,
                                   &partialSite, &accSite);

@@ -105,20 +105,38 @@ A BFP-stored operand is denied under `ARITH_SYM_INT32`.
 
 **Raw outputs declare their width (#516).** The public SYM_INT32 producers of
 raw accumulator or product codes overwrite the output's `qMaxBits` with the
-*static* bound of those codes: the smallest `w` with `B < 2^(w-1)` (**strict**
-`<`, so `B = 2^k` declares `k + 2` bits and the guard's `|code| <= 2^(w-1)`
-reading of the stamp holds), 32 when `B >= 2^31` — the raw int32 range, which
-the guard already treats as unprovable. `B` is the bound the guard proves:
-`N·2^(qa−1)·2^(qb−1) + max|seed|` for the matmul family and the Conv1d / ConvT
-kernels (the slacked bound for the grouped twins, the bias-pass seed for ConvT;
-`symAccumResultBits`), `N·2^(q−1)` over the loss wire for the public Linear
-bias-grad sum `linearCalcBiasGradsSymInt32` (its value-sum site; the Linear
-weight grad and dx are stamped by the matmul they call), `2^(qa−1)·2^(qb−1)`
-for `mulSymInt32Tensors` (+ in place) and `2^(qa−1) + 2^(qb−1)` for the
-equal-scale branch of `addSymInt32Tensors` (`symAccumWidthForMagnitude`; these
-two have no accumulator and run unguarded — the stamp is a declaration, and an
-elementwise product with `qa + qb > 32` is signed-overflow undefined behaviour,
-documented rather than guarded). A consumer that reads the raw wire as an
+*static* range of those codes, declared **exactly**: the smallest
+two's-complement `w` holding `[−maxNegMag, maxPos]`, i.e. `maxPos <= 2^(w−1) − 1`
+and `maxNegMag <= 2^(w−1)` (`symAccumWidthForRange`; no wasted bit — the memory
+planner sizes wires from it), 32 when the range leaves 31 bits — the raw int32
+range, which the guard already treats as unprovable. The two sides differ
+because the codes of a declared width `q` span `[−2^(q−1), 2^(q−1) − 1]`:
+
+- a product's positive corner `(−2^(qa−1))·(−2^(qb−1)) = 2^(qa−1)·2^(qb−1)` is
+  reachable (fixed-scale requant saturation clamps to `qMin`) and one past the
+  negative corner `−2^(qa−1)·(2^(qb−1) − 1)`, so a product site keeps the
+  corner's bit (int12 × int12, one term → 24);
+- a **value sum** adds the codes themselves — `N·(2^(q−1) − 1)` positive,
+  `N·2^(q−1)` negative — not a product with a one-bit code, so the sum of one
+  int12 code declares 12, of two 13;
+- `N` terms multiply each side; a rescaled (grouped) site applies the slack of
+  `symAccumTermLimitRescaled` on each side; the **seed's sign** picks the side it
+  widens (`seedMax` on the positive, `seedMin` on the negative: a bias that only
+  subtracts costs no bit on the positive side), from the kernel's actual seed
+  array (`symAccumSiteSetSeeds`); the magnitude-only `symAccumSiteInit` reads
+  the seed as `[−M, +M]`.
+
+Both sides stay within the one-sided bound the guard proves, so a provable site
+never declares more than 32. The sites: the matmul family and the Conv1d /
+ConvT kernels (the rescaled site for the grouped twins, the bias-pass seeds for
+ConvT; `symAccumResultBits`), the loss wire's value sum for the public Linear
+bias-grad sum `linearCalcBiasGradsSymInt32` (the Linear weight grad and dx are
+stamped by the matmul they call), one product for `mulSymInt32Tensors` (+ in
+place, `symAccumProductRange`) and `[−(2^(qa−1) + 2^(qb−1)), (2^(qa−1) − 1) +
+(2^(qb−1) − 1)]` for the equal-scale branch of `addSymInt32Tensors` (int12 +
+int12 → 13; these two have no accumulator and run unguarded — the stamp is a
+declaration, and an elementwise product with `qa + qb > 32` is signed-overflow
+undefined behaviour, documented rather than guarded). A consumer that reads the raw wire as an
 operand therefore proves its own budget from the real width, not from the
 operand default — the silent-wrap chain of #516. The Conv1d / ConvT
 weight-grad scatter and bias-grad sum are file-static funnel kernels: their
@@ -286,7 +304,8 @@ only the quantization configs change; the int32 accumulator (no int64) is kept.
   metadata and is not re-checked per code). Every funnel staging route declares
   the true width of the codes it writes (table above), every public raw
   producer declares the static width of the accumulator it was written under
-  (strict rule, 32 = raw int32 range — "Raw outputs declare their width" above;
+  (the exact two's-complement width of its range, 32 = raw int32 range — "Raw
+  outputs declare their width" above;
   the file-static Conv1d / ConvT grad kernels keep the scratch width, which no
   proof reads), and the requant cells clamp to the target width, so only a
   hand-built tensor whose codes exceed its own declared width can defeat the

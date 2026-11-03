@@ -4,6 +4,7 @@
 #include <stdlib.h>
 
 #include "Kernel.h"
+#include "SymGroupedWeight.h"
 #include "Tensor.h"
 
 /* Pointer-only use: the identical typedef lives in RNG.h (C11 allows the
@@ -46,14 +47,16 @@ void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_
  *  `weight` holds the grouped weight's UNPACKED mantissas as raw int32 (the
  *  same scratch shape executeOp's grouped-operand prologue branch produces:
  *  SYM_INT32 dtype, scale poisoned to 1.0f -- never read here, the real
- *  per-group scales live in the separate `weightGroups` argument, and its
+ *  per-group scales live in the separate `groupedWeight` argument, and its
  *  qConfig->roundingMode carries the OP's rounding mode, exactly like
- *  matmulSymInt32TensorsGroupedWeight's `bQC`). `weightGroups` is the
- *  ORIGINAL symQConfig_t of the stored weight tensor (validated: non-NULL,
- *  numGroups > 1 -- the per-tensor sentinel {1,0} is rejected, shape matches
- *  weight's element count via validateSymQConfigShape; any qBits is accepted,
- *  the accumulator guard in SymAccumGuard.h handles the width). `bias` is NULL-able, SYM_INT32 like
- * the scalar entry's bias.
+ *  matmulSymInt32TensorsGroupedWeight's `bQC`). `groupedWeight`
+ *  (SymGroupedWeight.h) carries the ORIGINAL symQConfig_t of the stored
+ *  weight tensor (validated: non-NULL, numGroups > 1 -- the per-tensor
+ *  sentinel {1,0} is rejected, shape matches weight's element count via
+ *  validateSymQConfigShape; any qBits is accepted) and the weight's code
+ *  domain, which fixes the operand range the accumulator guard proves and
+ *  the output width declares (SymAccumGuard.h). `bias` is NULL-able,
+ *  SYM_INT32 like the scalar entry's bias.
  *
  *  Reduction order (per (batch, outChannel, outPos)): the weight's flat
  *  storage index for (oc, icOffset, kernelIdx) is
@@ -77,13 +80,14 @@ void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_
  *  @param bias   [out_channels] or NULL, SYM_INT32
  *  @param kernel kernel_t with size/stride/dilation/paddingType
  *  @param groups must divide in_channels and out_channels (CONV groups --
- *                independent of the QUANTIZATION groups in weightGroups)
+ *                independent of the QUANTIZATION groups in groupedWeight)
  *  @param output [batch, out_channels, output_length], SYM_INT32, pre-allocated
- *  @param weightGroups the stored weight's OWN symQConfig_t (group shape/scales)
+ *  @param groupedWeight the stored weight's OWN symQConfig_t (group
+ *                shape/scales) plus its code domain
  */
 void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                                  tensor_t const *bias, kernel_t const *kernel, size_t groups,
-                                 tensor_t *output, const symQConfig_t *weightGroups,
+                                 tensor_t *output, const symGroupedWeight_t *groupedWeight,
                                  rngStream_t *rs);
 
 /*! BFP epic PR2 (Task 4): block-floating-point Conv1d forward. Same operand

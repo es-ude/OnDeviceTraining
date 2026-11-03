@@ -4,6 +4,7 @@
 #include <stdlib.h>
 
 #include "Kernel.h"
+#include "SymGroupedWeight.h"
 #include "Tensor.h"
 
 /* Pointer-only use: the identical typedef lives in RNG.h (C11 allows the
@@ -94,13 +95,16 @@ void convTranspose1dKernelSymInt32(tensor_t const *input, tensor_t const *weight
  *  @param outputPadding trailing zeros at output end (VALID only); 0 for SAME
  *  @param output        [batch, out_channels, output_length], SYM_INT32,
  *                       pre-allocated
- *  @param weightGroups  the stored weight's OWN symQConfig_t (group shape/
- *                       scales; must be grouped, numGroups > 1)
+ *  @param groupedWeight the stored weight's OWN symQConfig_t (group shape/
+ *                       scales; must be grouped, numGroups > 1) plus its code
+ *                       domain, which fixes the operand range the accumulator
+ *                       guard proves and the output width declares
+ *                       (SymGroupedWeight.h, SymAccumGuard.h)
  */
 void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                                           tensor_t const *bias, kernel_t const *kernel,
                                           size_t groups, size_t outputPadding, tensor_t *output,
-                                          const symQConfig_t *weightGroups, rngStream_t *rs);
+                                          const symGroupedWeight_t *groupedWeight, rngStream_t *rs);
 
 /*! BFP epic PR2 (Task 5, D9): output-centric (gather) ConvT1d forward under
  *  ARITH_BFP -- every output element is a dot product over its contributors

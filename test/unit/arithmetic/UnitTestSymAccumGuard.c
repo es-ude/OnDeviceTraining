@@ -291,8 +291,96 @@ void testResultBitsRescaledSlackAppliesOnBothSides(void) {
     TEST_ASSERT_EQUAL_UINT8(13, symAccumResultBits(&rescaledNeg));
 }
 
+/* ---- Per-operand code ranges (the grouped kernels' weight, SymGroupedWeight.h) ---- */
+
+/* A site built from explicit signed operand ranges: one term's range is the
+ * product's four corners, and the proof reads the larger side's magnitude.
+ * int12 [-2048, 2047] against a stored ASYM weight's image [-4095, 4095] is
+ * +-(2048 * 4095) = +-8386560 per term: 256 terms (2146959360) are proven and
+ * 257 are not, where the image's holding width 13 ([-4096, 4095], 2^23 per
+ * term) proves only 255 -- the rescaled site too. The width-based inits are
+ * the two's-complement ranges. */
+void testRangeSiteProofReadsTheOperandRanges(void) {
+    symAccumSite_t n256 = symAccumSiteInitRanges("t", 256, -2048, 2047, -4095, 4095, 0);
+    symAccumSite_t n257 = symAccumSiteInitRanges("t", 257, -2048, 2047, -4095, 4095, 0);
+    TEST_ASSERT_TRUE(symAccumProvenSafe(&n256));
+    TEST_ASSERT_FALSE(symAccumProvenSafe(&n257));
+    TEST_ASSERT_EQUAL_size_t(256, symAccumSiteTermLimit(&n256));
+    symAccumSite_t width13 = symAccumSiteInit("t", 256, 12, 13, 0);
+    TEST_ASSERT_FALSE(symAccumProvenSafe(&width13));
+    TEST_ASSERT_EQUAL_size_t(255, symAccumSiteTermLimit(&width13));
+    symAccumSite_t rescaled256 =
+        symAccumSiteInitRangesRescaled("t", 256, -2048, 2047, -4095, 4095, 0);
+    symAccumSite_t rescaled257 =
+        symAccumSiteInitRangesRescaled("t", 257, -2048, 2047, -4095, 4095, 0);
+    TEST_ASSERT_TRUE(symAccumProvenSafe(&rescaled256));
+    TEST_ASSERT_FALSE(symAccumProvenSafe(&rescaled257));
+    symAccumSite_t byWidth = symAccumSiteInit("t", 511, 12, 12, 0);
+    symAccumSite_t byRange = symAccumSiteInitRanges("t", 511, -2048, 2047, -2048, 2047, 0);
+    TEST_ASSERT_EQUAL_INT32(-2048, byWidth.aMin);
+    TEST_ASSERT_EQUAL_INT32(2047, byWidth.bMax);
+    TEST_ASSERT_TRUE(symAccumProvenSafe(&byWidth));
+    TEST_ASSERT_TRUE(symAccumProvenSafe(&byRange));
+    byWidth.nMax = byRange.nMax = 512;
+    TEST_ASSERT_FALSE(symAccumProvenSafe(&byWidth));
+    TEST_ASSERT_FALSE(symAccumProvenSafe(&byRange));
+}
+
+/* The declared width follows the corners too. int4 [-8, 7] against the image
+ * [-15, 15] is +-120 per term (one term -> 8 bits); 8 rescaled terms are 969
+ * per side (slack 9). Seed +54 -> 1023 -> 11, where the image's holding width
+ * 5 ([-16, 15], 128 per term, 1033 + 54) says 12; seed +500 -> 1469 -> 12,
+ * where the true SYM int4 weight (64 per term, 521 + 500) says 11; seed -500
+ * lands on the negative side, 1469 -> 12 as well. */
+void testRangeSiteResultBitsFollowTheCorners(void) {
+    int32_t minus500 = -500;
+    symAccumSite_t one = symAccumSiteInitRanges("t", 1, -8, 7, -15, 15, 0);
+    TEST_ASSERT_EQUAL_UINT8(8, symAccumResultBits(&one));
+    symAccumSite_t image54 = symAccumSiteInitRangesRescaled("t", 8, -8, 7, -15, 15, 54);
+    symAccumSite_t width54 = symAccumSiteInitRescaled("t", 8, 4, 5, 54);
+    TEST_ASSERT_EQUAL_UINT8(11, symAccumResultBits(&image54));
+    TEST_ASSERT_EQUAL_UINT8(12, symAccumResultBits(&width54));
+    symAccumSite_t image500 = symAccumSiteInitRangesRescaled("t", 8, -8, 7, -15, 15, 500);
+    symAccumSite_t sym500 = symAccumSiteInitRescaled("t", 8, 4, 4, 500);
+    TEST_ASSERT_EQUAL_UINT8(12, symAccumResultBits(&image500));
+    TEST_ASSERT_EQUAL_UINT8(11, symAccumResultBits(&sym500));
+    symAccumSite_t imageNeg = symAccumSiteInitRangesRescaled("t", 8, -8, 7, -15, 15, 0);
+    symAccumSiteSetSeeds(&imageNeg, &minus500, 1);
+    TEST_ASSERT_EQUAL_UINT8(12, symAccumResultBits(&imageNeg));
+}
+
+/* The banner names each range by its holding width: the image +-4095 is 13
+ * bits, +-65535 is 17 (which also turns on the wide-product check). */
+void testRangeSiteHoldingWidthsNameTheBanner(void) {
+    symAccumSite_t image = symAccumSiteInitRanges("t", 1, -2048, 2047, -4095, 4095, 0);
+    TEST_ASSERT_EQUAL_UINT8(12, image.aBits);
+    TEST_ASSERT_EQUAL_UINT8(13, image.bBits);
+    TEST_ASSERT_FALSE(image.wideProduct);
+    symAccumSite_t wide = symAccumSiteInitRanges("bannerop", 600, -2048, 2047, -65535, 65535, 0);
+    TEST_ASSERT_EQUAL_UINT8(17, wide.bBits);
+    TEST_ASSERT_TRUE(wide.wideProduct);
+    ASSERT_EXITS_WITH_OUTPUT(1, "widths (12, 17)", (void)symAccumAddChecked(INT32_MAX, 1, &wide));
+}
+
+/* A value sum is the code range against the constant 1, never a mirrored
+ * one-bit code; the banner keeps the one-bit second width. */
+void testSumSiteIsTheCodeRangeAgainstOne(void) {
+    symAccumSite_t s = symAccumSiteInitSum("t", 3, 12);
+    TEST_ASSERT_EQUAL_INT32(-2048, s.aMin);
+    TEST_ASSERT_EQUAL_INT32(2047, s.aMax);
+    TEST_ASSERT_EQUAL_INT32(1, s.bMin);
+    TEST_ASSERT_EQUAL_INT32(1, s.bMax);
+    TEST_ASSERT_EQUAL_UINT8(12, s.aBits);
+    TEST_ASSERT_EQUAL_UINT8(1, s.bBits);
+    TEST_ASSERT_TRUE(s.valueSum);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testRangeSiteProofReadsTheOperandRanges);
+    RUN_TEST(testRangeSiteResultBitsFollowTheCorners);
+    RUN_TEST(testRangeSiteHoldingWidthsNameTheBanner);
+    RUN_TEST(testSumSiteIsTheCodeRangeAgainstOne);
     RUN_TEST(testWidthForRangeIsTheSmallestTwosComplementWidth);
     RUN_TEST(testResultBitsOfAValueSumIsTheCodeRange);
     RUN_TEST(testResultBitsOfAProductKeepsThePositiveCorner);

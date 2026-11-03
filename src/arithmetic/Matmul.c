@@ -22,6 +22,7 @@
 #include "Mul.h"
 #include "Rounding.h"
 #include "SymAccumGuard.h"
+#include "SymGroupedWeight.h"
 #include "Tensor.h"
 
 size_t matmulInstructionCounter = 0;
@@ -467,9 +468,10 @@ SYM_ACCUM_NOINLINE void matmulGroupedLoopsChecked(MATMUL_GROUPED_PARAMS) {
 /* Returns the static width of the RESCALED accumulator it wrote (the output
  * wire), not of the raw group partial. */
 static uint8_t matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,
-                                    const int32_t *biasSeed, const symQConfig_t *weightGroups,
-                                    float aScale, float sAcc, roundingMode_t roundingMode,
-                                    rngStream_t *rs) {
+                                    const int32_t *biasSeed,
+                                    const symGroupedWeight_t *groupedWeight, float aScale,
+                                    float sAcc, roundingMode_t roundingMode, rngStream_t *rs) {
+    const symQConfig_t *weightGroups = groupedWeight->groups;
     if (aTensor->shape->numberOfDimensions > 2 || bTensor->shape->numberOfDimensions != 2) {
         PRINT_ERROR("matmulIntCoreGrouped: grouped weight operand (b) must be 2D; a must be <=2D");
         exit(1);
@@ -502,18 +504,20 @@ static uint8_t matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor
      * float32 evaluation slack (symAccumTermLimitRescaled) and the sum is
      * bounded by N slacked products plus the seed. Proving the acc bound proves
      * the partial bound too (fewer terms, no seed), so one flag drives both. */
-    uint8_t aBits = ((symInt32QConfig_t *)aTensor->quantization->qConfig)->qMaxBits;
-    /* Count the grouped weight ONE BIT wider than declared: a grouped ASYM
-     * weight reaches the kernel as a SYM view with its ASYM qBits, but the
-     * funnel unpacks it to mantissa = code - zp[g], which spans +-(2^qBits - 1).
-     * Conservative by one bit for true grouped SYM. The abort banner reports
-     * this bound width (declared + 1), not the declared one. */
-    uint8_t bBits = (uint8_t)(weightGroups->qBits + 1);
+    /* The weight's operand range is its code domain's (SymGroupedWeight.h): a
+     * stored SYM weight's two's-complement qBits range, a stored ASYM weight's
+     * zp-shifted image +-(2^qBits - 1) -- the scratch's declared qMaxBits is
+     * not read. The abort banner reports each range's holding width (the
+     * image's is qBits + 1). */
+    int32_t aMin, aMax, bMin, bMax;
+    symAccumWidthRange(((symInt32QConfig_t *)aTensor->quantization->qConfig)->qMaxBits, &aMin,
+                       &aMax);
+    symGroupedWeightRange(groupedWeight, &bMin, &bMax);
     size_t partialTerms = weightGroups->groupSize < aColumns ? weightGroups->groupSize : aColumns;
-    symAccumSite_t partialSite = symAccumSiteInit("matmul SYM_INT32 grouped (raw group partial)",
-                                                  partialTerms, aBits, bBits, 0);
-    symAccumSite_t accSite = symAccumSiteInitRescaled(
-        "matmul SYM_INT32 grouped (rescaled accumulator)", aColumns, aBits, bBits, 0);
+    symAccumSite_t partialSite = symAccumSiteInitRanges(
+        "matmul SYM_INT32 grouped (raw group partial)", partialTerms, aMin, aMax, bMin, bMax, 0);
+    symAccumSite_t accSite = symAccumSiteInitRangesRescaled(
+        "matmul SYM_INT32 grouped (rescaled accumulator)", aColumns, aMin, aMax, bMin, bMax, 0);
     symAccumSiteSetSeeds(&accSite, biasSeed, bColumns);
     if (symAccumProvenSafe(&accSite)) {
         matmulGroupedLoopsSafe(aTensor, bTensor, outputTensor, biasSeed, weightGroups, aScale, sAcc,
@@ -526,11 +530,12 @@ static uint8_t matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor
     return symAccumResultBits(&accSite);
 }
 
-static void matmulValidateWeightGroups(const symQConfig_t *weightGroups) {
-    if (weightGroups == NULL) {
+static void matmulValidateWeightGroups(const symGroupedWeight_t *groupedWeight) {
+    if (groupedWeight == NULL || groupedWeight->groups == NULL) {
         PRINT_ERROR("matmul SYM_INT32 grouped: weightGroups must not be NULL");
         exit(1);
     }
+    const symQConfig_t *weightGroups = groupedWeight->groups;
     if (weightGroups->numGroups <= 1) {
         PRINT_ERROR("matmulSymInt32TensorsGroupedWeight: weightGroups must be grouped "
                     "(numGroups>1); per-tensor weights take the scalar matmul entries");
@@ -539,10 +544,11 @@ static void matmulValidateWeightGroups(const symQConfig_t *weightGroups) {
 }
 
 void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
-                                        tensor_t *outputTensor, const symQConfig_t *weightGroups,
-                                        rngStream_t *rs) {
+                                        tensor_t *outputTensor,
+                                        const symGroupedWeight_t *groupedWeight, rngStream_t *rs) {
     matmulValidateSymOperand(aTensor, "aTensor");
-    matmulValidateWeightGroups(weightGroups);
+    matmulValidateWeightGroups(groupedWeight);
+    const symQConfig_t *weightGroups = groupedWeight->groups;
     validateSymQConfigShape(weightGroups, calcNumberOfElementsByTensor(bTensor));
 
     /* s_acc = aScale * max_g(scales[g]) (GGUF pattern, #189): a single linear
@@ -587,8 +593,8 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
         seedPtr = seedBuf;
     }
 
-    uint8_t resultBits = matmulIntCoreGrouped(aTensor, bTensor, outputTensor, seedPtr, weightGroups,
-                                              aScale, sAcc, bQC->roundingMode, rs);
+    uint8_t resultBits = matmulIntCoreGrouped(aTensor, bTensor, outputTensor, seedPtr,
+                                              groupedWeight, aScale, sAcc, bQC->roundingMode, rs);
 
     symInt32QConfig_t *outputQC = outputTensor->quantization->qConfig;
     outputQC->scale = sAcc;

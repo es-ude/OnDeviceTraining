@@ -99,7 +99,7 @@ from):
 | ASYM, per-tensor | `code − zp` (`convertAsymTensorToSymInt32Tensor`) | copied | `qBits + 1` (the difference spans `±(2^qBits − 1)`) |
 | INT32 | raw copy, unclamped (the funnel's file-static `stageInt32Raw`, not the public cell) | 1 | 32 (full two's-complement range) — the same declaration a raw SYM kernel output carries when its static bound exceeds int32 (next paragraph); 32 is an operand / requant-source width, never a target's. The public cell `convertInt32TensorToSymInt32Tensor` instead keeps the destination's declared width (validated in [1, 31]) and aborts on any code outside `[-2^(q-1), 2^(q-1)-1]`, so a user tensor never understates its codes |
 | SYM_INT32 | used in place | its own | its own |
-| SYM / ASYM, grouped | unpacked in the prologue (ASYM: `code − zp[g]`); consumed by the group-aware kernels, per-group scales via their own ctx | poisoned to 1 | `qBits`, counted **one bit wider** in the kernels' bound |
+| SYM / ASYM, grouped | unpacked in the prologue (ASYM: `code − zp[g]`); consumed by the group-aware kernels, per-group scales via their own ctx | poisoned to 1 | `qBits` (poisoned alongside the scale: the kernels take the weight's range from the ctx's code domain instead — SYM `[-2^(qBits-1), 2^(qBits-1) − 1]`, the ASYM image `±(2^qBits − 1)`; `SymGroupedWeight.h`) |
 
 A BFP-stored operand is denied under `ARITH_SYM_INT32`.
 
@@ -286,12 +286,18 @@ only the quantization configs change; the int32 accumulator (no int64) is kept.
   3. *Abort:* `exit(1)` with a banner naming the op, N, both operand widths,
      `max|seed|` and the remedies "narrow `ODT_SYM_OPERAND_QMAXBITS` (one lever)
      or run this op under `ARITH_FLOAT32`".
-  *Grouped weights count one bit wider.* A grouped ASYM weight reaches the
-  grouped kernels as a SYM view carrying its ASYM `qBits`, but the funnel unpacks
-  it to the mantissa image `code - zp[g]`, which spans `±(2^qBits − 1)`. The three
-  grouped kernels therefore use `qBits + 1` for the weight in the static bound
-  (conservative by one bit for true grouped SYM), and the abort banner reports
-  that bound width. The view's `qBits` itself is not widened.
+  *Grouped weights carry their exact code range.* The three grouped kernels take
+  the weight as a `symGroupedWeight_t` ctx (`SymGroupedWeight.h`): the group
+  config plus the weight's code domain. A stored grouped SYM weight unpacks to
+  two's-complement `qBits` codes, `[-2^(qBits−1), 2^(qBits−1) − 1]`; a stored
+  grouped ASYM weight unpacks to the image `code − zp[g]`, `±(2^qBits − 1)` — one
+  code wider on each side. The guard's proof and the declared output width both
+  use that exact range (`symAccumSiteInitRanges`: a product's term range is the
+  larger of its four corners, the proof reads the larger side's magnitude), so a
+  true SYM weight never pays a bit it cannot use and the ASYM image is covered
+  exactly; the abort banner reports each range's holding width (the image's is
+  `qBits + 1`). The domain is a tag, not a per-group zero point: a declared
+  width never drifts with the data a requant writes.
   *Rescaled accumulators carry float slack.* The grouped kernels add
   `round((p · s_g) / s_acc)` terms. The scale ratio is ≤ 1, but the float32
   evaluation (two roundings) can land one ulp (2^-23 relative) above `|p|`, and a

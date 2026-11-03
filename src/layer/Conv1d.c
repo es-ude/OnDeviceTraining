@@ -19,6 +19,7 @@
 #include "Quantization.h"
 #include "SlidingWindow1d.h"
 #include "SymAccumGuard.h"
+#include "SymGroupedWeight.h"
 #include "Tensor.h"
 
 void initConv1dConfigWithWeightsAndBias(conv1dConfig_t *conv1dConfig, kernel_t *kernel,
@@ -60,23 +61,25 @@ void initConv1dConfigWithWeightsAndBias(conv1dConfig_t *conv1dConfig, kernel_t *
 
 /* Group-quant PR2 (Task 4): forward's ctx must carry BOTH the layer's
  * kernel_t/groups geometry (conv1dConfig_t, needed by every adapter below)
- * AND -- only when the stored weight is grouped SYM -- the ORIGINAL
- * symQConfig_t carrying the real per-group scales. executeOp's prologue
+ * AND -- only when the stored weight is grouped SYM or ASYM -- the
+ * symGroupedWeight_t carrying the ORIGINAL symQConfig_t with the real
+ * per-group scales plus the weight's code domain. executeOp's prologue
  * hands the kernel only the UNPACKED, poisoned-scale scratch (ops[1]), never
  * the source tensor (ExecuteOp.c), so the group shape must travel via ctx,
  * exactly like Linear's linearForwardKernelSym (which gets away with ctx ==
- * weightGroups alone because matmul infers geometry from the tensors
- * themselves; Conv1d's kernel additionally needs kernel_t/groups, hence this
- * wrapper). Set together with groupedSymOperandPos (conv1dForward, below)
- * -- both or neither, same invariant as Linear.c. PR3 (Task 3): the dx
- * (propLoss) adapters carry the SAME wrapper -- dx consumes the weight AS
- * STORED through the adjoint scatter, whose group binding is to flat
- * storage, so the identical {cfg, weightGroups} pair serves both
- * directions. */
+ * the symGroupedWeight_t alone because matmul infers geometry from the
+ * tensors themselves; Conv1d's kernel additionally needs kernel_t/groups,
+ * hence this wrapper). Set together with groupedSymOperandPos
+ * (conv1dForward, below) -- both or neither, same invariant as Linear.c.
+ * PR3 (Task 3): the dx (propLoss) adapters carry the SAME wrapper -- dx
+ * consumes the weight AS STORED through the adjoint scatter, whose group
+ * binding is to flat storage, so the identical {cfg, groupedWeight} pair
+ * serves both directions. */
 typedef struct conv1dForwardCtx {
     const conv1dConfig_t *cfg;
-    const symQConfig_t *weightGroups; /* NULL unless the weight is grouped SYM or ASYM (then a STACK
-                                         VIEW, see groupedWeightViewOrNull) */
+    const symGroupedWeight_t *groupedWeight; /* NULL unless the weight is grouped SYM or ASYM
+                                                (then STACK storage of the frame, see
+                                                symGroupedWeightOrNull) */
 } conv1dForwardCtx_t;
 
 /* executeOp forward kernel adapters — operands are {input, weights} or
@@ -96,9 +99,9 @@ static void forwardKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_
     const conv1dForwardCtx_t *fctx = ctx;
     const conv1dConfig_t *cfg = fctx->cfg;
     tensor_t *bias = (n > 2) ? ops[2] : NULL;
-    if (fctx->weightGroups != NULL) {
+    if (fctx->groupedWeight != NULL) {
         conv1dKernelSymInt32Grouped(ops[0], ops[1], bias, cfg->kernel, cfg->groups, rawOut,
-                                    fctx->weightGroups, rs);
+                                    fctx->groupedWeight, rs);
     } else {
         conv1dKernelSymInt32(ops[0], ops[1], bias, cfg->kernel, cfg->groups, rawOut, rs);
     }
@@ -106,8 +109,8 @@ static void forwardKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_
 /* BFP epic PR2 (Task 7): operands arrive in the funnel's unpacked-BFP
  * scratch form; the BFP kernel reads all quant info from the operands
  * themselves, so only the kernel_t/groups geometry is taken from ctx —
- * ctx->weightGroups stays NULL (BFP weights never take the SYM carrier
- * path, groupedWeightViewOrNull returns NULL for the BFP dtype). */
+ * ctx->groupedWeight stays NULL (BFP weights never take the SYM carrier
+ * path, symGroupedWeightOrNull returns NULL for the BFP dtype). */
 static void forwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                              const void *ctx, rngStream_t *rs) {
     (void)auxOut;
@@ -115,32 +118,6 @@ static void forwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_
     const conv1dConfig_t *cfg = fctx->cfg;
     tensor_t *bias = (n > 2) ? ops[2] : NULL;
     conv1dKernelBfp(ops[0], ops[1], bias, cfg->kernel, cfg->groups, rawOut);
-}
-
-/* Group-quant PR4 (Task 3): grouped-weight detection across BOTH grouped
- * carrier dtypes — duplicated verbatim from Linear.c (the canonical copy;
- * full view-lifetime/BORROWED-scales doc lives there). Grouped ASYM fills
- * *asymView (the CALLER's stack storage) as a symQConfig-shaped VIEW, valid
- * only for the frame's executeOp call, never stored, never freed. */
-static const symQConfig_t *groupedWeightViewOrNull(const tensor_t *weights,
-                                                   symQConfig_t *asymView) {
-    if (weights->quantization->type == SYM) {
-        const symQConfig_t *qc = weights->quantization->qConfig;
-        return qc->numGroups > 1 ? qc : NULL;
-    }
-    if (weights->quantization->type == ASYM) {
-        const asymQConfig_t *qc = weights->quantization->qConfig;
-        if (qc->numGroups <= 1) {
-            return NULL;
-        }
-        *asymView = (symQConfig_t){.scales = qc->scales, /* BORROWED (see Linear.c) */
-                                   .numGroups = qc->numGroups,
-                                   .groupSize = qc->groupSize,
-                                   .roundingMode = qc->roundingMode,
-                                   .qBits = qc->qBits};
-        return asymView;
-    }
-    return NULL;
 }
 
 /* OP(k) of each funnel op of this layer, for layerExecOpKey. Part of the
@@ -160,7 +137,7 @@ void conv1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const laye
 
     /* Group-quant PR2 (+PR4: grouped ASYM via the symQConfig-shaped view):
      * a stored grouped weight routes the SYM kernel adapter to the grouped
-     * gather-core entry (weightGroups carried via ctx) AND opts the funnel's
+     * gather-core entry (groupedWeight carried via ctx) AND opts the funnel's
      * prologue into unpacking the grouped operand (groupedSymOperandPos),
      * always together -- mirrors linearForward's identical wiring (Linear.c)
      * exactly. Per-tensor SYM/ASYM (numGroups==1) and SYM_INT32 weights are
@@ -170,10 +147,12 @@ void conv1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const laye
      * group-aware convertTensor cell -- gated on this field exactly like the SYM arm's unpack, not
      * a different mechanism) -- omitting it here would make Conv1d's FLOAT32-math grouped forward
      * regress once the funnel's FLOAT32 arm gate lands. */
-    symQConfig_t asymWeightView; /* lifetime: this frame (Linear.c view doc) */
-    const symQConfig_t *weightGroups = groupedWeightViewOrNull(weightTensor, &asymWeightView);
-    bool grouped = weightGroups != NULL;
-    conv1dForwardCtx_t fctx = {.cfg = cfg, .weightGroups = weightGroups};
+    symQConfig_t asymWeightView; /* lifetime: this frame (SymGroupedWeight.h view doc) */
+    symGroupedWeight_t groupedWeightCtx;
+    const symGroupedWeight_t *groupedWeight =
+        symGroupedWeightOrNull(weightTensor, &asymWeightView, &groupedWeightCtx);
+    bool grouped = groupedWeight != NULL;
+    conv1dForwardCtx_t fctx = {.cfg = cfg, .groupedWeight = groupedWeight};
 
     size_t outDims[3];
     size_t outOrder[3];
@@ -949,7 +928,7 @@ void conv1dCalcBiasGradsBfp(conv1dConfig_t *cfg, tensor_t *lossGrad, const rngKe
  * ((ic*outChPerGroup + ocOffset)*K + k, ConvTranspose1dKernel.c) computes
  * exactly the Conv1d weight's flat storage index in this adjoint role, so a
  * grouped weight's storage-bound quantization groups apply unchanged: route
- * to the grouped SCATTER entry with the stored weight's own symQConfig_t. */
+ * to the grouped SCATTER entry with the stored weight's symGroupedWeight_t. */
 static void propLossKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                                 const void *ctx, rngStream_t *rs) {
     (void)n;
@@ -965,9 +944,9 @@ static void propLossKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
     (void)auxOut;
     const conv1dForwardCtx_t *fctx = ctx;
     const conv1dConfig_t *cfg = fctx->cfg;
-    if (fctx->weightGroups != NULL) {
+    if (fctx->groupedWeight != NULL) {
         convTranspose1dKernelSymInt32Grouped(ops[0], ops[1], NULL, cfg->kernel, cfg->groups, 0u,
-                                             rawOut, fctx->weightGroups, rs);
+                                             rawOut, fctx->groupedWeight, rs);
     } else {
         convTranspose1dKernelSymInt32(ops[0], ops[1], NULL, cfg->kernel, cfg->groups, 0u, rawOut,
                                       rs);
@@ -975,9 +954,9 @@ static void propLossKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
 }
 
 /* BFP epic PR3 (Task 3): dx via the BFP D9 GATHER adjoint (output-centric fold
- * contract; the SYM scatter cores stay SYM-only) -- same {cfg, weightGroups}
- * ctx wrapper as the other dx adapters, weightGroups always NULL for BFP
- * (groupedWeightViewOrNull returns NULL for the BFP dtype). */
+ * contract; the SYM scatter cores stay SYM-only) -- same {cfg, groupedWeight}
+ * ctx wrapper as the other dx adapters, groupedWeight always NULL for BFP
+ * (symGroupedWeightOrNull returns NULL for the BFP dtype). */
 static void propLossKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                               const void *ctx, rngStream_t *rs) {
     (void)n;
@@ -1104,10 +1083,12 @@ void conv1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad, 
          * unpacking (SYM arm) / group-aware dequant (FLOAT32 arm) of the
          * weight at inputs[1] (position 2), declared on BOTH math arms (the same
          * arm-parity rule as conv1dForward). */
-        symQConfig_t asymWeightView; /* lifetime: this frame (Linear.c view doc) */
-        const symQConfig_t *weightGroups = groupedWeightViewOrNull(weightTensor, &asymWeightView);
-        bool grouped = weightGroups != NULL;
-        conv1dForwardCtx_t fctx = {.cfg = cfg, .weightGroups = weightGroups};
+        symQConfig_t asymWeightView; /* lifetime: this frame (SymGroupedWeight.h view doc) */
+        symGroupedWeight_t groupedWeightCtx;
+        const symGroupedWeight_t *groupedWeight =
+            symGroupedWeightOrNull(weightTensor, &asymWeightView, &groupedWeightCtx);
+        bool grouped = groupedWeight != NULL;
+        conv1dForwardCtx_t fctx = {.cfg = cfg, .groupedWeight = groupedWeight};
 
         switch (cfg->propLossMath.type) {
         case ARITH_FLOAT32:

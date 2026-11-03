@@ -183,6 +183,7 @@ add_elastic_ai_unit_test(
         MORE_LIBS
         Arithmetic
         SymAccumGuard
+        SymGroupedWeight
         Tensor
         Quantization
         RNG
@@ -286,6 +287,7 @@ add_elastic_ai_unit_test(
         Kernel
         Matmul
         SymAccumGuard
+        SymGroupedWeight
         Tensor
         TensorApi
         Quantization
@@ -316,6 +318,7 @@ add_elastic_ai_unit_test(
         MORE_LIBS
         Kernel
         SymAccumGuard
+        SymGroupedWeight
         Tensor
         TensorApi
         Quantization
@@ -372,6 +375,14 @@ target_include_directories(UnitTestPointwiseFused PRIVATE ${CMAKE_CURRENT_BINARY
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         SymAccumGuard
+        MORE_LIBS
+        Common
+        odt_test_death
+)
+
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
+        SymGroupedWeight
         MORE_LIBS
         Common
         odt_test_death

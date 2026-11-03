@@ -2,6 +2,7 @@ add_library(Conv1d Conv1d.c)
 target_include_directories(Conv1d PUBLIC include)
 target_link_libraries(Conv1d PRIVATE
         SymAccumGuard
+        SymGroupedWeight
         LayerExec
         RNG
         DTypes
@@ -22,6 +23,7 @@ add_library(Conv1dTransposed Conv1dTransposed.c)
 target_include_directories(Conv1dTransposed PUBLIC include)
 target_link_libraries(Conv1dTransposed PRIVATE
         SymAccumGuard
+        SymGroupedWeight
         LayerExec
         RNG
         DTypes
@@ -208,6 +210,7 @@ add_library(Linear Linear.c)
 target_include_directories(Linear PUBLIC include)
 target_link_libraries(Linear PRIVATE
         SymAccumGuard
+        SymGroupedWeight
         LayerExec
         RNG
         DTypes

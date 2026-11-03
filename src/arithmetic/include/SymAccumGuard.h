@@ -14,10 +14,13 @@
  * codes wraps silently -- signed overflow, UB. The guard is a hybrid:
  *
  *  1. A STATIC bound per op proves the accumulator safe from the operands'
- *     declared widths and the op's actual seed: N_max * 2^(qa-1) * 2^(qb-1) +
- *     max|seed| <= INT32_MAX. The full two's-complement magnitude 2^(q-1) is
- *     used because -2^(q-1) IS a reachable code (fixed-scale requant
- *     saturation clamps to qMin). When the bound holds the kernel runs its
+ *     signed code ranges and the op's actual seed: N_max * max|term| +
+ *     max|seed| <= INT32_MAX, |term| over the product's four corners. A
+ *     declared width q reads as the full two's-complement range
+ *     [-2^(q-1), 2^(q-1) - 1] because -2^(q-1) IS a reachable code
+ *     (fixed-scale requant saturation clamps to qMin), so an int12 x int12
+ *     term is 2^22; a grouped weight's range comes from its code domain
+ *     instead (SymGroupedWeight.h). When the bound holds the kernel runs its
  *     loop body unchanged -- same instructions, same TRACK_INSTRUCTIONS
  *     counters, same gold output.
  *  2. Otherwise the SAME loop body is instantiated with `checked == true`:
@@ -33,16 +36,20 @@
  * metadata and is not re-checked per code. Every funnel staging route
  * declares the true width of the codes it writes and the requant cells clamp
  * to it, so only a hand-built tensor whose codes exceed its own declared
- * width can defeat the proof. Every public raw producer (matmul family,
- * Conv1d / ConvT kernels, mul, equal-scale add, linearCalcBiasGradsSymInt32;
- * the Linear weight grad and dx through the matmul) declares the static
- * result width of the accumulator it was written under
- * (symAccumResultBits): the smallest two's-complement width holding the
- * accumulator's exact range, 32 meaning the full raw int32 range (#516). The
- * Conv1d / ConvT weight-grad scatter and bias-grad sum are file-static
- * funnel kernels: only the ACC epilogue sees their raw wire, and it reads
- * the scale and the target width, never the raw width, so they keep the
- * scratch width.
+ * width can defeat the proof. One carve-out: the funnel's grouped scratch
+ * declares the STORED qBits (poisoned alongside the scale, ExecuteOp.h)
+ * although a grouped ASYM weight unpacks to code - zp[g], one code wider on
+ * each side; the grouped kernels take that operand's range from their
+ * symGroupedWeight_t ctx (SymGroupedWeight.h), never from the scratch
+ * declaration. Every public raw producer (matmul family, Conv1d / ConvT
+ * kernels, mul, equal-scale add, linearCalcBiasGradsSymInt32; the Linear
+ * weight grad and dx through the matmul) declares the static result width of
+ * the accumulator it was written under (symAccumResultBits): the smallest
+ * two's-complement width holding the accumulator's exact range, 32 meaning
+ * the full raw int32 range (#516). The Conv1d / ConvT weight-grad scatter and
+ * bias-grad sum are file-static funnel kernels: only the ACC epilogue sees
+ * their raw wire, and it reads the scale and the target width, never the raw
+ * width, so they keep the scratch width.
  *
  * Kernels use the pattern
  *     symAccumSite_t site = symAccumSiteInit(op, nMax, qa, qb, 0);
@@ -51,14 +58,17 @@
  *     else                           { loops(true,  &site); }
  * with `loops` a static inline always_inline function whose `checked`
  * argument is a compile-time constant at both call sites, and the step
- * `acc = symMac(acc, a, b, checked, &site)`.
+ * `acc = symMac(acc, a, b, checked, &site)`. An operand whose range is not a
+ * declared width (the grouped kernels' weight) builds the site from explicit
+ * signed ranges instead: symAccumSiteInitRanges(op, nMax, aMin, aMax, bMin,
+ * bMax, 0); the width-based inits are that with the two's-complement ranges.
  *
  * VALUE SUMS (acc += code, no product): symAccumSiteInitSum is the same site
- * with b = 1 bit, so the proof reads N * 2^(q-1) <= INT32_MAX, and the loop
- * step is `acc = symAdd(acc, code, checked, &site)`. Used by the Linear /
- * Conv1d / Conv1dTransposed bias-grad sums. The checked loop aborts on the
- * first INTERMEDIATE overflow even when the final sum would have fit (a
- * mixed-sign run can leave int32 and come back); the proven loop never
+ * with b = the constant 1, so the proof reads N * 2^(q-1) <= INT32_MAX, and
+ * the loop step is `acc = symAdd(acc, code, checked, &site)`. Used by the
+ * Linear / Conv1d / Conv1dTransposed bias-grad sums. The checked loop aborts
+ * on the first INTERMEDIATE overflow even when the final sum would have fit
+ * (a mixed-sign run can leave int32 and come back); the proven loop never
  * overflows. Reduce and the pools still check N < 2^(32-q) themselves.
  * Header-only static inline, like BfpKernelSupport.h. */
 
@@ -82,7 +92,11 @@
 typedef struct symAccumSite {
     const char *op; /* names the op in the abort banner */
     size_t nMax;    /* max terms one accumulator receives */
-    uint8_t aBits;  /* operand widths as declared (banner) */
+    int32_t aMin;   /* signed code range of each operand: the proof's and the */
+    int32_t aMax;   /* result width's input */
+    int32_t bMin;
+    int32_t bMax;
+    uint8_t aBits; /* the holding width of each range (banner, wide-product check) */
     uint8_t bBits;
     uint64_t maxAbsSeed; /* max |seed|, up to 2^31 for INT32_MIN: the proof's seed room (banner) */
     int32_t seedMax;     /* signed extremes of the per-accumulator seeds: the result width's */
@@ -137,84 +151,6 @@ static inline unsigned symAccumClampedWidth(uint8_t bits) {
     return bits < 1 ? 1u : (bits > 32 ? 32u : bits);
 }
 
-/* Largest N for which N * 2^(qa-1) * 2^(qb-1) + maxAbsSeed <= INT32_MAX; 0 when
- * even one term is not provable. The comparison is a division so neither the
- * bound nor a caller's N (up to SIZE_MAX) can wrap. */
-static inline size_t symAccumTermLimit(uint8_t aBits, uint8_t bBits, uint64_t maxAbsSeed) {
-    unsigned qa = symAccumClampedWidth(aBits);
-    unsigned qb = symAccumClampedWidth(bBits);
-    uint64_t maxProduct = (uint64_t)1 << (qa + qb - 2u);
-    if (maxAbsSeed > (uint64_t)INT32_MAX || maxProduct > (uint64_t)INT32_MAX) {
-        return 0;
-    }
-    return (size_t)(((uint64_t)INT32_MAX - maxAbsSeed) / maxProduct);
-}
-
-/* Same as symAccumTermLimit for accumulators that receive RESCALED terms
- * (grouped kernels: round((p * s_g) / sAcc), scale ratio <= 1). In exact
- * arithmetic |term| <= |p|, but the float32 evaluation can land one ulp
- * (2^-23 relative) above |p| and a stochastic round adds up to 1 more, so each
- * term is bounded by maxProduct * (1 + 2^-22) + 1 (twice the ulp slack, kept
- * as the margin). With room = INT32_MAX - maxAbsSeed this is
- *     N * (mp + 1) + N * mp / 2^22 <= room
- *  <=> N <= room * 2^22 / ((mp + 1) * 2^22 + mp),
- * evaluated in 64-bit (room * 2^22 and the denominator are < 2^54). */
-static inline size_t symAccumTermLimitRescaled(uint8_t aBits, uint8_t bBits, uint64_t maxAbsSeed) {
-    unsigned qa = symAccumClampedWidth(aBits);
-    unsigned qb = symAccumClampedWidth(bBits);
-    uint64_t maxProduct = (uint64_t)1 << (qa + qb - 2u);
-    if (maxAbsSeed > (uint64_t)INT32_MAX || maxProduct > (uint64_t)INT32_MAX) {
-        return 0;
-    }
-    uint64_t room = (uint64_t)INT32_MAX - maxAbsSeed;
-    return (size_t)((room << 22) / (((maxProduct + 1u) << 22) + maxProduct));
-}
-
-/* Only the seed's magnitude is known here, so the seed range is read as
- * [-M, +M] within int32 (a +2^31 seed does not exist; INT32_MIN does); a
- * kernel that knows its seed array narrows it with symAccumSiteSetSeeds. */
-static inline symAccumSite_t symAccumSiteInit(const char *op, size_t nMax, uint8_t aBits,
-                                              uint8_t bBits, uint64_t maxAbsSeed) {
-    symAccumSite_t s = {
-        .op = op,
-        .nMax = nMax,
-        .aBits = aBits,
-        .bBits = bBits,
-        .maxAbsSeed = maxAbsSeed,
-        .seedMax = maxAbsSeed > (uint64_t)INT32_MAX ? INT32_MAX : (int32_t)maxAbsSeed,
-        .seedMin = maxAbsSeed >= ((uint64_t)1 << 31) ? INT32_MIN : -(int32_t)maxAbsSeed,
-        .wideProduct = aBits > 16 || bBits > 16,
-        .rescaled = false,
-        .valueSum = false};
-    return s;
-}
-
-/* Site for a plain sum of N stored codes of declared width `bits` (no product,
- * no seed): the product bound with a one-bit second factor. */
-static inline symAccumSite_t symAccumSiteInitSum(const char *op, size_t nMax, uint8_t bits) {
-    symAccumSite_t s = symAccumSiteInit(op, nMax, bits, 1, 0);
-    s.valueSum = true;
-    return s;
-}
-
-/* Site for an accumulator of float-rescaled terms (see symAccumTermLimitRescaled). */
-static inline symAccumSite_t symAccumSiteInitRescaled(const char *op, size_t nMax, uint8_t aBits,
-                                                      uint8_t bBits, uint64_t maxAbsSeed) {
-    symAccumSite_t s = symAccumSiteInit(op, nMax, aBits, bBits, maxAbsSeed);
-    s.rescaled = true;
-    return s;
-}
-
-/* Zero terms never accumulate, so N == 0 is safe whatever the widths. */
-static inline bool symAccumProvenSafe(const symAccumSite_t *s) {
-    if (s->nMax == 0) {
-        return true;
-    }
-    size_t limit = s->rescaled ? symAccumTermLimitRescaled(s->aBits, s->bBits, s->maxAbsSeed)
-                               : symAccumTermLimit(s->aBits, s->bBits, s->maxAbsSeed);
-    return s->nMax <= limit;
-}
-
 /* Smallest two's-complement width w in [1, 32] holding the range
  * [-maxNegMag, maxPos]: maxPos <= 2^(w-1) - 1 and maxNegMag <= 2^(w-1) (the
  * negative side holds one more magnitude); 32 when the range leaves 31 bits
@@ -229,36 +165,174 @@ static inline uint8_t symAccumWidthForRange(uint64_t maxPos, uint64_t maxNegMag)
     return w;
 }
 
-/* Range of one product of declared widths (qa, qb), codes in
- * [-2^(q-1), 2^(q-1) - 1]: the positive corner (-2^(qa-1)) * (-2^(qb-1)) =
- * 2^(qa-1) * 2^(qb-1), the negative one -2^(qa-1) * (2^(qb-1) - 1) or its
- * mirror, whichever is larger -- one short of the positive corner by the
- * narrower operand's half range. */
-static inline void symAccumProductRange(uint8_t aBits, uint8_t bBits, uint64_t *maxPos,
-                                        uint64_t *maxNegMag) {
-    uint64_t halfA = (uint64_t)1 << (symAccumClampedWidth(aBits) - 1u);
-    uint64_t halfB = (uint64_t)1 << (symAccumClampedWidth(bBits) - 1u);
-    *maxPos = halfA * halfB;
-    *maxNegMag = halfA * halfB - (halfA < halfB ? halfA : halfB);
+/* The two's-complement range a declared width reads as, [-2^(q-1), 2^(q-1) - 1]
+ * (q clamped as above, so 32 is the full int32 range). */
+static inline void symAccumWidthRange(uint8_t bits, int32_t *min, int32_t *max) {
+    uint64_t half = (uint64_t)1 << (symAccumClampedWidth(bits) - 1u);
+    *min = (int32_t)-(int64_t)half;
+    *max = (int32_t)(half - 1u);
 }
 
-/* Range of one term the site's accumulator receives: a product (above) or,
- * for a value sum, the stored code itself (2^(q-1) - 1 and 2^(q-1); NOT a
- * product with a one-bit code, which would mirror the sides). */
+/* The holding width of a signed code range (its two's-complement width). */
+static inline uint8_t symAccumRangeWidth(int32_t min, int32_t max) {
+    return symAccumWidthForRange(max > 0 ? (uint64_t)max : 0,
+                                 min < 0 ? (uint64_t)(-(int64_t)min) : 0);
+}
+
+/* Range of one product over two signed operand ranges: a product is monotone
+ * in each factor, so its extremes are the largest and the smallest of the four
+ * corners; the positive side and the negative magnitude each floor at 0. */
+static inline void symAccumCornerRange(int32_t aMin, int32_t aMax, int32_t bMin, int32_t bMax,
+                                       uint64_t *maxPos, uint64_t *maxNegMag) {
+    int64_t corner[4] = {(int64_t)aMin * bMin, (int64_t)aMin * bMax, (int64_t)aMax * bMin,
+                         (int64_t)aMax * bMax};
+    int64_t hi = corner[0], lo = corner[0];
+    for (size_t i = 1; i < 4; i++) {
+        hi = corner[i] > hi ? corner[i] : hi;
+        lo = corner[i] < lo ? corner[i] : lo;
+    }
+    *maxPos = hi > 0 ? (uint64_t)hi : 0;
+    *maxNegMag = lo < 0 ? (uint64_t)(-lo) : 0;
+}
+
+/* Range of one product of declared widths (qa, qb): the positive corner
+ * (-2^(qa-1)) * (-2^(qb-1)) = 2^(qa-1) * 2^(qb-1), the negative one
+ * -2^(qa-1) * (2^(qb-1) - 1) or its mirror, whichever is larger -- one short
+ * of the positive corner by the narrower operand's half range. */
+static inline void symAccumProductRange(uint8_t aBits, uint8_t bBits, uint64_t *maxPos,
+                                        uint64_t *maxNegMag) {
+    int32_t aMin, aMax, bMin, bMax;
+    symAccumWidthRange(aBits, &aMin, &aMax);
+    symAccumWidthRange(bBits, &bMin, &bMax);
+    symAccumCornerRange(aMin, aMax, bMin, bMax, maxPos, maxNegMag);
+}
+
+/* Site over explicit signed operand ranges (each a range the operand's codes
+ * actually obey). Only the seed's magnitude is known here, so the seed range
+ * is read as [-M, +M] within int32 (a +2^31 seed does not exist; INT32_MIN
+ * does); a kernel that knows its seed array narrows it with
+ * symAccumSiteSetSeeds. */
+static inline symAccumSite_t symAccumSiteInitRanges(const char *op, size_t nMax, int32_t aMin,
+                                                    int32_t aMax, int32_t bMin, int32_t bMax,
+                                                    uint64_t maxAbsSeed) {
+    uint8_t aBits = symAccumRangeWidth(aMin, aMax);
+    uint8_t bBits = symAccumRangeWidth(bMin, bMax);
+    symAccumSite_t s = {
+        .op = op,
+        .nMax = nMax,
+        .aMin = aMin,
+        .aMax = aMax,
+        .bMin = bMin,
+        .bMax = bMax,
+        .aBits = aBits,
+        .bBits = bBits,
+        .maxAbsSeed = maxAbsSeed,
+        .seedMax = maxAbsSeed > (uint64_t)INT32_MAX ? INT32_MAX : (int32_t)maxAbsSeed,
+        .seedMin = maxAbsSeed >= ((uint64_t)1 << 31) ? INT32_MIN : -(int32_t)maxAbsSeed,
+        .wideProduct = aBits > 16 || bBits > 16,
+        .rescaled = false,
+        .valueSum = false};
+    return s;
+}
+
+/* Site over explicit ranges for an accumulator of float-rescaled terms (see
+ * symAccumSiteTermLimit). */
+static inline symAccumSite_t symAccumSiteInitRangesRescaled(const char *op, size_t nMax,
+                                                            int32_t aMin, int32_t aMax,
+                                                            int32_t bMin, int32_t bMax,
+                                                            uint64_t maxAbsSeed) {
+    symAccumSite_t s = symAccumSiteInitRanges(op, nMax, aMin, aMax, bMin, bMax, maxAbsSeed);
+    s.rescaled = true;
+    return s;
+}
+
+/* Site over declared widths: each operand's two's-complement range. */
+static inline symAccumSite_t symAccumSiteInit(const char *op, size_t nMax, uint8_t aBits,
+                                              uint8_t bBits, uint64_t maxAbsSeed) {
+    int32_t aMin, aMax, bMin, bMax;
+    symAccumWidthRange(aBits, &aMin, &aMax);
+    symAccumWidthRange(bBits, &bMin, &bMax);
+    return symAccumSiteInitRanges(op, nMax, aMin, aMax, bMin, bMax, maxAbsSeed);
+}
+
+/* Site for a plain sum of N stored codes of declared width `bits` (no product,
+ * no seed): the code range against the constant 1 -- never a mirrored one-bit
+ * code, which would cost a bit (the banner still names a one-bit second width). */
+static inline symAccumSite_t symAccumSiteInitSum(const char *op, size_t nMax, uint8_t bits) {
+    int32_t min, max;
+    symAccumWidthRange(bits, &min, &max);
+    symAccumSite_t s = symAccumSiteInitRanges(op, nMax, min, max, 1, 1, 0);
+    s.bBits = 1;
+    s.valueSum = true;
+    return s;
+}
+
+/* Site over declared widths for an accumulator of float-rescaled terms (see
+ * symAccumSiteTermLimit). */
+static inline symAccumSite_t symAccumSiteInitRescaled(const char *op, size_t nMax, uint8_t aBits,
+                                                      uint8_t bBits, uint64_t maxAbsSeed) {
+    symAccumSite_t s = symAccumSiteInit(op, nMax, aBits, bBits, maxAbsSeed);
+    s.rescaled = true;
+    return s;
+}
+
+/* Range of one term the site's accumulator receives: the product's corners
+ * over the operand ranges (a value sum's second range is [1, 1], so this is
+ * the stored code's range). */
 static inline void symAccumTermRange(const symAccumSite_t *s, uint64_t *maxPos,
                                      uint64_t *maxNegMag) {
-    if (s->valueSum) {
-        uint64_t half = (uint64_t)1 << (symAccumClampedWidth(s->aBits) - 1u);
-        *maxPos = half - 1u;
-        *maxNegMag = half;
-        return;
+    symAccumCornerRange(s->aMin, s->aMax, s->bMin, s->bMax, maxPos, maxNegMag);
+}
+
+/* Largest N for which N * max|term| + maxAbsSeed <= INT32_MAX, max|term| the
+ * larger side of symAccumTermRange; 0 when even one term is not provable. The
+ * comparison is a division so neither the bound nor a caller's N (up to
+ * SIZE_MAX) can wrap.
+ *
+ * A RESCALED site's accumulator receives round((p * s_g) / sAcc) terms
+ * (grouped kernels, scale ratio <= 1). In exact arithmetic |term| <= |p|, but
+ * the float32 evaluation can land one ulp (2^-23 relative) above |p| and a
+ * stochastic round adds up to 1 more, so each term is bounded by
+ * mp * (1 + 2^-22) + 1 (twice the ulp slack, kept as the margin). With
+ * room = INT32_MAX - maxAbsSeed this is
+ *     N * (mp + 1) + N * mp / 2^22 <= room
+ *  <=> N <= room * 2^22 / ((mp + 1) * 2^22 + mp),
+ * evaluated in 64-bit (room * 2^22 and the denominator are < 2^54). */
+static inline size_t symAccumSiteTermLimit(const symAccumSite_t *s) {
+    uint64_t termPos, termNeg;
+    symAccumTermRange(s, &termPos, &termNeg);
+    uint64_t term = termPos > termNeg ? termPos : termNeg;
+    if (s->maxAbsSeed > (uint64_t)INT32_MAX || term > (uint64_t)INT32_MAX) {
+        return 0;
     }
-    symAccumProductRange(s->aBits, s->bBits, maxPos, maxNegMag);
+    uint64_t room = (uint64_t)INT32_MAX - s->maxAbsSeed;
+    if (s->rescaled) {
+        return (size_t)((room << 22) / (((term + 1u) << 22) + term));
+    }
+    return term == 0 ? SIZE_MAX : (size_t)(room / term);
+}
+
+/* The term limit of declared widths (qa, qb): N * 2^(qa-1) * 2^(qb-1) +
+ * maxAbsSeed <= INT32_MAX. */
+static inline size_t symAccumTermLimit(uint8_t aBits, uint8_t bBits, uint64_t maxAbsSeed) {
+    symAccumSite_t s = symAccumSiteInit("", 0, aBits, bBits, maxAbsSeed);
+    return symAccumSiteTermLimit(&s);
+}
+
+/* ... and of a rescaled site over declared widths (the slacked bound above). */
+static inline size_t symAccumTermLimitRescaled(uint8_t aBits, uint8_t bBits, uint64_t maxAbsSeed) {
+    symAccumSite_t s = symAccumSiteInitRescaled("", 0, aBits, bBits, maxAbsSeed);
+    return symAccumSiteTermLimit(&s);
+}
+
+/* Zero terms never accumulate, so N == 0 is safe whatever the ranges. */
+static inline bool symAccumProvenSafe(const symAccumSite_t *s) {
+    return s->nMax == 0 || s->nMax <= symAccumSiteTermLimit(s);
 }
 
 /* One side of a proven site's range: nMax terms of per-term bound `term`, the
  * rescaled site's slack on top (nMax * term * (1 + 2^-22) + nMax, the ceil
- * taken once -- the same per-term bound symAccumTermLimitRescaled proves),
+ * taken once -- the same per-term bound symAccumSiteTermLimit proves),
  * then shifted by the seed's extreme on this side (`seedShift`, the signed
  * seed that widens it: seedMax on the positive side, -seedMin on the negative)
  * and floored at 0: a side the seed pushes past zero costs no bits. */
@@ -281,10 +355,10 @@ static inline uint64_t symAccumSideBound(const symAccumSite_t *s, uint64_t term,
  * ran, the codes span the raw int32 range); otherwise the smallest
  * two's-complement width holding the accumulator's exact range
  *     [-(nMax * termNeg) + seedMin, nMax * termPos + seedMax]
- * (each side slacked on a rescaled site). Both sides stay within the one-sided
- * bound the term limits prove (termNeg <= termPos, |seed| <= maxAbsSeed), so
- * provenSafe guarantees they fit INT32_MAX and nothing wraps in the 64-bit
- * evaluation. nMax == 0 -> the width of the seed range alone. */
+ * (each side slacked on a rescaled site). Both sides stay within the
+ * magnitude bound the term limit proves (max(termPos, termNeg), |seed| <=
+ * maxAbsSeed), so provenSafe guarantees they fit INT32_MAX and nothing wraps
+ * in the 64-bit evaluation. nMax == 0 -> the width of the seed range alone. */
 static inline uint8_t symAccumResultBits(const symAccumSite_t *s) {
     if (!symAccumProvenSafe(s)) {
         return 32;

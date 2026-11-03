@@ -10,6 +10,7 @@
 #include "Rounding.h"
 #include "SlidingWindow1d.h"
 #include "SymAccumGuard.h"
+#include "SymGroupedWeight.h"
 
 void conv1dKernelFloat32(tensor_t const *input, tensor_t const *weight, tensor_t const *bias,
                          kernel_t const *kernel, size_t groups, tensor_t *output) {
@@ -256,11 +257,13 @@ void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_
  * (Matmul.c) exactly -- non-NULL and the per-tensor sentinel
  * {numGroups=1, groupSize=0} rejected (its groupSize=0 would divide-by-zero
  * below; per-tensor weights take conv1dKernelSymInt32). */
-static void conv1dValidateWeightGroups(const symQConfig_t *weightGroups, size_t weightElemCount) {
-    if (weightGroups == NULL) {
+static void conv1dValidateWeightGroups(const symGroupedWeight_t *groupedWeight,
+                                       size_t weightElemCount) {
+    if (groupedWeight == NULL || groupedWeight->groups == NULL) {
         PRINT_ERROR("conv1dKernelSymInt32Grouped: weightGroups must not be NULL");
         exit(1);
     }
+    const symQConfig_t *weightGroups = groupedWeight->groups;
     if (weightGroups->numGroups <= 1) {
         PRINT_ERROR("conv1dKernelSymInt32Grouped: weightGroups must be grouped (numGroups>1); "
                     "per-tensor weights take conv1dKernelSymInt32");
@@ -372,7 +375,7 @@ SYM_ACCUM_NOINLINE void conv1dSymGroupedLoopsChecked(CONV1D_GROUPED_PARAMS) {
 
 void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                                  tensor_t const *bias, kernel_t const *kernel, size_t groups,
-                                 tensor_t *output, const symQConfig_t *weightGroups,
+                                 tensor_t *output, const symGroupedWeight_t *groupedWeight,
                                  rngStream_t *rs) {
     conv1dValidateSymOperands(input, weight, bias, output, "conv1dKernelSymInt32Grouped");
     size_t batch = input->shape->dimensions[0];
@@ -392,7 +395,8 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
     size_t inChPerGroup = inChannels / groups;
     size_t outChPerGroup = outChannels / groups;
 
-    conv1dValidateWeightGroups(weightGroups, outChannels * inChPerGroup * kernelSize);
+    conv1dValidateWeightGroups(groupedWeight, outChannels * inChPerGroup * kernelSize);
+    const symQConfig_t *weightGroups = groupedWeight->groups;
 
     windowGeometry1d_t geom = windowGeometry1dCalc(inputLength, kernel);
     if (geom.outputLength != outputLength) {
@@ -460,18 +464,19 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
      * symAccumTermLimitRescaled) plus the seed, so N slacked products plus
      * seed bound it. Proving the acc proves the partial (fewer terms, no seed). */
     size_t nTerms = inChPerGroup * kernelSize;
-    uint8_t xBits = ((symInt32QConfig_t *)input->quantization->qConfig)->qMaxBits;
-    /* Count the grouped weight ONE BIT wider than declared: a grouped ASYM
-     * weight reaches the kernel as a SYM view with its ASYM qBits, but the
-     * funnel unpacks it to mantissa = code - zp[g], which spans +-(2^qBits - 1).
-     * Conservative by one bit for true grouped SYM. The abort banner reports
-     * this bound width (declared + 1), not the declared one. */
-    uint8_t wBits = (uint8_t)(weightGroups->qBits + 1);
+    /* The weight's operand range is its code domain's (SymGroupedWeight.h): a
+     * stored SYM weight's two's-complement qBits range, a stored ASYM weight's
+     * zp-shifted image +-(2^qBits - 1) -- the scratch's declared qMaxBits is
+     * not read. The abort banner reports each range's holding width (the
+     * image's is qBits + 1). */
+    int32_t xMin, xMax, wMin, wMax;
+    symAccumWidthRange(((symInt32QConfig_t *)input->quantization->qConfig)->qMaxBits, &xMin, &xMax);
+    symGroupedWeightRange(groupedWeight, &wMin, &wMax);
     size_t partialTerms = weightGroups->groupSize < nTerms ? weightGroups->groupSize : nTerms;
-    symAccumSite_t partialSite = symAccumSiteInit("conv1dKernelSymInt32Grouped (raw group partial)",
-                                                  partialTerms, xBits, wBits, 0);
-    symAccumSite_t accSite = symAccumSiteInitRescaled(
-        "conv1dKernelSymInt32Grouped (rescaled accumulator)", nTerms, xBits, wBits, 0);
+    symAccumSite_t partialSite = symAccumSiteInitRanges(
+        "conv1dKernelSymInt32Grouped (raw group partial)", partialTerms, xMin, xMax, wMin, wMax, 0);
+    symAccumSite_t accSite = symAccumSiteInitRangesRescaled(
+        "conv1dKernelSymInt32Grouped (rescaled accumulator)", nTerms, xMin, xMax, wMin, wMax, 0);
     symAccumSiteSetSeeds(&accSite, seed, outChannels);
     if (symAccumProvenSafe(&accSite)) {
         conv1dSymGroupedLoopsSafe(&view, weightGroups, inScale, sAcc, wQC->roundingMode, rs,

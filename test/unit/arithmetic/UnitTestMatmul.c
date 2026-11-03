@@ -7,6 +7,7 @@
 #include "Matmul.h"
 #include "RNG.h"
 #include "SymAccumGuard.h"
+#include "SymGroupedWeight.h"
 #include "Tensor.h"
 #include "unity.h"
 
@@ -15,6 +16,15 @@
 
 #include "expected_bfp_matmul.h"
 #include "expected_group_matmul.h"
+
+/* Grouped-weight ctx fixtures: the stored dtype's code domain fixes the
+ * weight's operand range (SymGroupedWeight.h). */
+static symGroupedWeight_t symGroupedWeightSym(const symQConfig_t *groups) {
+    return (symGroupedWeight_t){.groups = groups, .domain = SYM_CODES_TWOS_COMPLEMENT};
+}
+static symGroupedWeight_t symGroupedWeightAsymImage(const symQConfig_t *groups) {
+    return (symGroupedWeight_t){.groups = groups, .domain = SYM_CODES_ASYM_IMAGE};
+}
 
 void testMatmulInt32() {
     size_t numberOfElements = 6;
@@ -564,8 +574,9 @@ void testMatmulGroupedWeightPerChannelMatchesGold(void) {
     initSymInt32Quantization(&outputQC, &outputQ);
     setTensorValues(&outputTensor, (uint8_t *)outputData, &outputShape, &outputQ, NULL);
 
+    symGroupedWeight_t groupedWeight = symGroupedWeightSym(&weightGroups);
     matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, &biasTensor, &outputTensor,
-                                       &weightGroups, NULL);
+                                       &groupedWeight, NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(kPerChannelOutMantissas, outputData, 6);
     TEST_ASSERT_FLOAT_WITHIN(1e-9f, kPerChannelOutScale, outputQC.scale);
@@ -629,8 +640,9 @@ void testMatmulGroupedWeightGeneralGroupsMatchesGold(void) {
     initSymInt32Quantization(&outputQC, &outputQ);
     setTensorValues(&outputTensor, (uint8_t *)outputData, &outputShape, &outputQ, NULL);
 
+    symGroupedWeight_t groupedWeight = symGroupedWeightSym(&weightGroups);
     matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, &biasTensor, &outputTensor,
-                                       &weightGroups, NULL);
+                                       &groupedWeight, NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(kGeneralOutMantissas, outputData, 6);
     TEST_ASSERT_FLOAT_WITHIN(1e-9f, kGeneralOutScale, outputQC.scale);
@@ -696,7 +708,8 @@ void testMatmulGroupedEqualScalesBitIdenticalToScalar(void) {
     initSymInt32Quantization(&outGroupedQC, &outGroupedQ);
     setTensorValues(&outGrouped, (uint8_t *)outGroupedData, &outShape, &outGroupedQ, NULL);
 
-    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensorGrouped, NULL, &outGrouped, &weightGroups,
+    symGroupedWeight_t groupedWeight = symGroupedWeightSym(&weightGroups);
+    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensorGrouped, NULL, &outGrouped, &groupedWeight,
                                        NULL);
 
     tensor_t bTensorScalar;
@@ -788,8 +801,9 @@ void testMatmulGroupedHonorsOpRoundingMode(void) {
 
     rngStream_t rs1 = rngOpen(rngKeyFromSeed(1u));
     rngStream_t rs2 = rngOpen(rngKeyFromSeed(2u));
-    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &out1, &weightGroups, &rs1);
-    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &out2, &weightGroups, &rs2);
+    symGroupedWeight_t groupedWeight = symGroupedWeightSym(&weightGroups);
+    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &out1, &groupedWeight, &rs1);
+    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &out2, &groupedWeight, &rs2);
 
     bool anyDiffer = false;
     for (size_t i = 0; i < 6; i++) {
@@ -859,7 +873,8 @@ void testMatmulGroupedWeightStridedReductionMatchesGold(void) {
     initSymInt32Quantization(&outputQC, &outputQ);
     setTensorValues(&outputTensor, (uint8_t *)outputData, &outputShape, &outputQ, NULL);
 
-    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &outputTensor, &weightGroups,
+    symGroupedWeight_t groupedWeight = symGroupedWeightSym(&weightGroups);
+    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &outputTensor, &groupedWeight,
                                        NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(kDxPerChannelOutMantissas, outputData, 12);
@@ -912,7 +927,8 @@ void testMatmulGroupedWeightStridedGeneralGroupsMatchesGold(void) {
     initSymInt32Quantization(&outputQC, &outputQ);
     setTensorValues(&outputTensor, (uint8_t *)outputData, &outputShape, &outputQ, NULL);
 
-    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &outputTensor, &weightGroups,
+    symGroupedWeight_t groupedWeight = symGroupedWeightSym(&weightGroups);
+    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensor, NULL, &outputTensor, &groupedWeight,
                                        NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(kDxGeneralOutMantissas, outputData, 12);
@@ -973,7 +989,8 @@ void testMatmulGroupedDxEqualScalesBitIdenticalToScalar(void) {
     initSymInt32Quantization(&outGroupedQC, &outGroupedQ);
     setTensorValues(&outGrouped, (uint8_t *)outGroupedData, &outShape, &outGroupedQ, NULL);
 
-    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensorGrouped, NULL, &outGrouped, &weightGroups,
+    symGroupedWeight_t groupedWeight = symGroupedWeightSym(&weightGroups);
+    matmulSymInt32TensorsGroupedWeight(&aTensor, &bTensorGrouped, NULL, &outGrouped, &groupedWeight,
                                        NULL);
 
     tensor_t bTensorScalar;
@@ -1048,8 +1065,9 @@ void testMatmulGroupedWeightRejectsPerTensorSentinel(void) {
     initSymInt32Quantization(&outputQC, &outputQ);
     setTensorValues(&outputTensor, (uint8_t *)outputData, &outShape, &outputQ, NULL);
 
+    symGroupedWeight_t groupedWeight = symGroupedWeightSym(&weightGroups);
     ASSERT_EXITS_WITH_FAILURE(matmulSymInt32TensorsGroupedWeight(
-        &aTensor, &bTensor, NULL, &outputTensor, &weightGroups, NULL));
+        &aTensor, &bTensor, NULL, &outputTensor, &groupedWeight, NULL));
 }
 
 /* ---- BFP epic PR2 (Task 3): matmulBfpTensors ----------------------------
@@ -1342,8 +1360,9 @@ void testMatmulBfpPowerOfTwoBitIdenticalToGroupedSym(void) {
     initSymInt32Quantization(&outSymQC, &outSymQ);
     setTensorValues(&outSymTensor, (uint8_t *)outSymData, &outShape, &outSymQ, NULL);
 
-    matmulSymInt32TensorsGroupedWeight(&aSymTensor, &bSymTensor, NULL, &outSymTensor, &weightGroups,
-                                       NULL);
+    symGroupedWeight_t groupedWeight = symGroupedWeightSym(&weightGroups);
+    matmulSymInt32TensorsGroupedWeight(&aSymTensor, &bSymTensor, NULL, &outSymTensor,
+                                       &groupedWeight, NULL);
 
     for (size_t i = 0; i < 6; i++) {
         float symDequant = (float)outSymData[i] * outSymQC.scale;
@@ -1662,8 +1681,9 @@ void testMatmulBfpDxPowerOfTwoBitIdenticalToGroupedSym(void) {
     initSymInt32Quantization(&outSymQC, &outSymQ);
     setTensorValues(&outSymTensor, (uint8_t *)outSymData, &outShape, &outSymQ, NULL);
 
-    matmulSymInt32TensorsGroupedWeight(&aSymTensor, &bSymTensor, NULL, &outSymTensor, &weightGroups,
-                                       NULL);
+    symGroupedWeight_t groupedWeight = symGroupedWeightSym(&weightGroups);
+    matmulSymInt32TensorsGroupedWeight(&aSymTensor, &bSymTensor, NULL, &outSymTensor,
+                                       &groupedWeight, NULL);
 
     for (size_t i = 0; i < 12; i++) {
         float symDequant = (float)outSymData[i] * outSymQC.scale;
@@ -1771,8 +1791,10 @@ void testMatmulSymGuardBiasSeedThatTipsTheBoundIsCounted(void) {
     TEST_ASSERT_EQUAL_INT32(511 * 4194304 + 4194303, guardDot(511, &small));
 }
 
-/* a:[1,n] . grouped b (storage [1,n], numGroups x groupSize), scales all 1. */
-static int32_t guardGroupedDotBits(size_t n, size_t numGroups, uint8_t weightQBits) {
+/* a:[1,n] . grouped b (storage [1,n], numGroups x groupSize), scales all 1;
+ * `domain` names the weight's code domain (a stored SYM or ASYM weight). */
+static int32_t guardGroupedDotIn(size_t n, size_t numGroups, uint8_t weightQBits,
+                                 symCodeDomain_t domain) {
     shape_t aS, bS, oS;
     size_t aDims[] = {1, n}, bDims[] = {1, n}, oDims[] = {1, 1};
     size_t aOrder[] = {0, 1}, bOrder[] = {1, 0};
@@ -1798,8 +1820,13 @@ static int32_t guardGroupedDotBits(size_t n, size_t numGroups, uint8_t weightQBi
                            .groupSize = n / numGroups,
                            .qBits = weightQBits,
                            .roundingMode = HALF_AWAY};
-    matmulSymInt32TensorsGroupedWeight(&a, &b, NULL, &o, &groups, NULL);
+    symGroupedWeight_t groupedWeight = {.groups = &groups, .domain = domain};
+    matmulSymInt32TensorsGroupedWeight(&a, &b, NULL, &o, &groupedWeight, NULL);
     return out;
+}
+
+static int32_t guardGroupedDotBits(size_t n, size_t numGroups, uint8_t weightQBits) {
+    return guardGroupedDotIn(n, numGroups, weightQBits, SYM_CODES_TWOS_COMPLEMENT);
 }
 
 static int32_t guardGroupedDot(size_t n, size_t numGroups) {
@@ -1822,19 +1849,39 @@ void testMatmulGroupedGuardCheckedPathStaysExactWhenValuesFit(void) {
     TEST_ASSERT_EQUAL_INT32(guardExpected(600), guardGroupedDot(600, 3));
 }
 
+/* 7 x 73 = 511 full-scale int12 terms: a stored SYM weight's exact range proves
+ * them (511 * 2^22 fits), so the safe loop runs; the same codes under a stored
+ * ASYM weight's image (+-4095 reachable) are unprovable, so the checked loop
+ * runs -- both must stay exact. */
 void testMatmulGroupedGuardFullScaleN511RunsExact(void) {
-    guardFill(511, -2048, -2048,
-              false); /* 7 x 73 = 511 terms: the +1 weight bit makes the bound unprovable, so this
-                         runs the checked loop and must stay exact */
+    guardFill(511, -2048, -2048, false);
     TEST_ASSERT_EQUAL_INT32(511 * 4194304, guardGroupedDot(511, 7));
+    TEST_ASSERT_EQUAL_INT32(511 * 4194304, guardGroupedDotIn(511, 7, 12, SYM_CODES_ASYM_IMAGE));
 }
 
-void testMatmulGroupedGuardCountsTheAsymMantissaBitWider(void) {
-    /* A grouped ASYM weight unpacks to code - zp, up to 2^qBits - 1 = 4095 at a
-     * declared qBits of 12. 511 terms of 2047 x 4095 exceed INT32_MAX although the
-     * declared-width bound (511 int12 terms) would have called them safe. */
+/* A ctx whose .domain was never set (zero) names no code domain: the kernel
+ * must abort naming the tag before any accumulation, never run the SYM range
+ * over what may be an ASYM image -- 511 terms of 2047 x 4095 would be proven
+ * safe under the SYM range and wrap. */
+void testMatmulGroupedZeroedCodeDomainAbortsBeforeTheLoop(void) {
     guardFill(511, 2047, 4095, false);
-    ASSERT_EXITS_WITH_OUTPUT(1, "matmul SYM_INT32 grouped", (void)guardGroupedDot(511, 7));
+    ASSERT_EXITS_WITH_OUTPUT(1, "symGroupedWeightRange: unknown code domain tag 0",
+                             (void)guardGroupedDotIn(511, 7, 12, (symCodeDomain_t)0));
+}
+
+/* A stored grouped ASYM weight unpacks to code - zp[g], which reaches
+ * +-(2^qBits - 1) = +-4095 at qBits 12 -- one code past the two's-complement
+ * range a SYM weight of that width can hold. The kernel takes the range from
+ * the ctx's code domain: 511 terms of 2047 x 4095 exceed INT32_MAX and abort
+ * (the SYM range, 511 int12 terms, would have run them unchecked and wrapped);
+ * 256 terms (2145911040) are proven at the exact image range and run exact
+ * (the image's holding width 13 proves only 255). */
+void testMatmulGroupedGuardAsymImageWeightKeepsItsFullRange(void) {
+    guardFill(511, 2047, 4095, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "matmul SYM_INT32 grouped",
+                             (void)guardGroupedDotIn(511, 7, 12, SYM_CODES_ASYM_IMAGE));
+    guardFill(256, 2047, 4095, false);
+    TEST_ASSERT_EQUAL_INT32(256 * 2047 * 4095, guardGroupedDotIn(256, 2, 12, SYM_CODES_ASYM_IMAGE));
 }
 
 /* Operands wider than the int12 default are not rejected; the guard is exact
@@ -1848,9 +1895,9 @@ void testMatmulSymGuardWiderOperandRunsExactWhenItFitsAndAbortsWhenItWraps(void)
 }
 
 /* A grouped weight wider than int12 used to exit at the validator; now it takes
- * the checked path (17 bits counted: 16 + the ASYM mantissa bit). Small codes
- * stay exact (the rescale goes through float, so keep the partials under 2^24);
- * 2 x 64 terms of 2047 x 32767 wrap the raw group partial. */
+ * the checked path (int12 x int16 products over 2 x 64 terms are unprovable).
+ * Small codes stay exact (the rescale goes through float, so keep the partials
+ * under 2^24); 2 x 64 terms of 2047 x 32767 wrap the raw group partial. */
 void testMatmulGroupedGuardWideWeightRunsExactWhenItFitsAndAbortsWhenItWraps(void) {
     guardFill(32, 3, 32767, false);
     TEST_ASSERT_EQUAL_INT32(32 * 3 * 32767, guardGroupedDotBits(32, 2, 16));
@@ -2008,19 +2055,22 @@ void testMatmulSymWithBiasStampFollowsTheSeedSign(void) {
     TEST_ASSERT_EQUAL_UINT8(9, out.qc.qMaxBits);
 }
 
-void testMatmulSymGroupedStampsRescaledWidth(void) {
-    /* a:[1,8] int4 . grouped b (storage [1,8] as 2 groups x 4, qBits 4) + bias
-     * 1023 at the accumulator scale. The output is the RESCALED accumulator, so
-     * its width is the rescaled site's, counted with the weight's +1 ASYM-
-     * mantissa bit (Matmul.c): 8 * (2^7 + 1) + ceil(8 * 2^7 / 2^22) + 1023 =
-     * 2056 -> 13. The exact bound would say 12 (2047), the raw group partial
-     * 11 (4 * 2^7 = 512). */
+/* a:[1,8] int4 . grouped b (storage [1,8] as 2 groups x 4, qBits 4) + a bias
+ * at the accumulator scale. The output is the RESCALED accumulator, so its
+ * width is the rescaled site's over the weight's EXACT code range (Matmul.c,
+ * SymGroupedWeight.h). A stored SYM int4 weight is [-8, 7]: one term spans
+ * [-56, 64], 8 slacked terms [-457, 521] (slack 8 + ceil(512 / 2^22) = 9 per
+ * side); bias 1023 -> 1544 -> 12, bias 500 -> 1021 -> 11, bias -1023 ->
+ * 1480 on the negative side -> 12. A stored ASYM weight's image is [-15, 15]:
+ * +-120 per term, 969 per side; bias 54 -> 1023 -> 11 and bias 500 -> 1469
+ * -> 12. Counting the image one bit wide ([-16, 15], 1033 per side) would
+ * say 13 for the SYM bias 1023 and 12 for the image bias 54. */
+static uint8_t groupedInt4StampBits(symCodeDomain_t domain, int32_t biasCode, int32_t *outCode) {
     guardFill(8, 1, 1, false);
-    int32_t biasCode = 1023, outCode = 0;
     symWire_t a, bias, out;
     symWireInit(&a, gGuardA, 1, 8, 4);
     symWireInit(&bias, &biasCode, 1, 1, 12);
-    symWireInit(&out, &outCode, 1, 1, UNSTAMPED_WIDTH);
+    symWireInit(&out, outCode, 1, 1, UNSTAMPED_WIDTH);
     shape_t bS;
     size_t bDims[] = {1, 8}, bOrder[] = {1, 0}; /* storage [1,8] viewed as [8,1] */
     setShape(&bS, bDims, 2, bOrder);
@@ -2033,17 +2083,29 @@ void testMatmulSymGroupedStampsRescaledWidth(void) {
     float scales[2] = {1.f, 1.f};
     symQConfig_t groups = {
         .scales = scales, .numGroups = 2, .groupSize = 4, .qBits = 4, .roundingMode = HALF_AWAY};
-    matmulSymInt32TensorsGroupedWeight(&a.t, &b, &bias.t, &out.t, &groups, NULL);
+    symGroupedWeight_t groupedWeight = {.groups = &groups, .domain = domain};
+    matmulSymInt32TensorsGroupedWeight(&a.t, &b, &bias.t, &out.t, &groupedWeight, NULL);
+    return out.qc.qMaxBits;
+}
+
+void testMatmulSymGroupedStampsRescaledWidth(void) {
+    int32_t outCode = 0;
+    TEST_ASSERT_EQUAL_UINT8(12, groupedInt4StampBits(SYM_CODES_TWOS_COMPLEMENT, 1023, &outCode));
     TEST_ASSERT_EQUAL_INT32(1023 + 8, outCode);
-    symAccumSite_t rescaled = symAccumSiteInitRescaled("t", 8, 4, 4 + 1, 1023);
-    TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&rescaled), out.qc.qMaxBits);
-    TEST_ASSERT_EQUAL_UINT8(13, out.qc.qMaxBits);
-    /* bias -1023: the slacked negative side 8 * 120 + 9 + 1023 = 1992 -> 12 */
-    biasCode = -1023;
-    symWireInit(&out, &outCode, 1, 1, UNSTAMPED_WIDTH);
-    matmulSymInt32TensorsGroupedWeight(&a.t, &b, &bias.t, &out.t, &groups, NULL);
+    symAccumSite_t rescaled = symAccumSiteInitRescaled("t", 8, 4, 4, 1023);
+    TEST_ASSERT_EQUAL_UINT8(12, symAccumResultBits(&rescaled));
+    TEST_ASSERT_EQUAL_UINT8(11, groupedInt4StampBits(SYM_CODES_TWOS_COMPLEMENT, 500, &outCode));
+    TEST_ASSERT_EQUAL_INT32(500 + 8, outCode);
+    TEST_ASSERT_EQUAL_UINT8(12, groupedInt4StampBits(SYM_CODES_TWOS_COMPLEMENT, -1023, &outCode));
     TEST_ASSERT_EQUAL_INT32(8 - 1023, outCode);
-    TEST_ASSERT_EQUAL_UINT8(12, out.qc.qMaxBits);
+}
+
+void testMatmulSymGroupedAsymImageStampsItsFullRange(void) {
+    int32_t outCode = 0;
+    TEST_ASSERT_EQUAL_UINT8(11, groupedInt4StampBits(SYM_CODES_ASYM_IMAGE, 54, &outCode));
+    TEST_ASSERT_EQUAL_INT32(54 + 8, outCode);
+    TEST_ASSERT_EQUAL_UINT8(12, groupedInt4StampBits(SYM_CODES_ASYM_IMAGE, 500, &outCode));
+    TEST_ASSERT_EQUAL_INT32(500 + 8, outCode);
 }
 
 /* The #516 repro: the raw 1x1 product -2048 * -2048 = 2^22 re-enters a SYM
@@ -2098,13 +2160,15 @@ int main(void) {
     RUN_TEST(testMatmulSymWithBiasStampIncludesSeed);
     RUN_TEST(testMatmulSymWithBiasStampFollowsTheSeedSign);
     RUN_TEST(testMatmulSymGroupedStampsRescaledWidth);
+    RUN_TEST(testMatmulSymGroupedAsymImageStampsItsFullRange);
     RUN_TEST(testMatmulSymChainedRawOutputOverflowAborts);
     RUN_TEST(testMatmulSymNarrowChainStaysExact);
     RUN_TEST(testMatmulGroupedWidePartialAboveSeedGuardRunsExactWhenSumFits);
     RUN_TEST(testMatmulGroupedWidePartialSumThatWrapsHitsTheF9Guard);
     RUN_TEST(testMatmulSymGuardWiderOperandRunsExactWhenItFitsAndAbortsWhenItWraps);
     RUN_TEST(testMatmulGroupedGuardWideWeightRunsExactWhenItFitsAndAbortsWhenItWraps);
-    RUN_TEST(testMatmulGroupedGuardCountsTheAsymMantissaBitWider);
+    RUN_TEST(testMatmulGroupedGuardAsymImageWeightKeepsItsFullRange);
+    RUN_TEST(testMatmulGroupedZeroedCodeDomainAbortsBeforeTheLoop);
     RUN_TEST(testMatmulSymGuardProvenSafeBoundaryN511RunsExact);
     RUN_TEST(testMatmulSymGuardDiesAtFirstWrappingNFullScaleNegativeCodes);
     RUN_TEST(testMatmulSymGuardDiesAtN513FullScalePositiveCodes);

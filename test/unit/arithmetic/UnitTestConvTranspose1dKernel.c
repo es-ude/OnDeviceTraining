@@ -6,11 +6,19 @@
 #include "QuantizationApi.h"
 #include "StorageApi.h"
 #include "SymAccumGuard.h"
+#include "SymGroupedWeight.h"
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "expected_bfp_convT1d.h"
 #include "expected_conv_transpose_1d_kernel.h"
 #include "unity.h"
+
+/* Grouped-weight ctx fixture: the stored dtype's code domain fixes the
+ * weight's operand range (SymGroupedWeight.h); the guard runner below picks
+ * the domain through gCtWeightDomain. */
+static symGroupedWeight_t symGroupedWeightSym(const symQConfig_t *groups) {
+    return (symGroupedWeight_t){.groups = groups, .domain = SYM_CODES_TWOS_COMPLEMENT};
+}
 
 static tensor_t *makeFloatTensor(size_t const *dims, size_t numDims, float const *data) {
     size_t *ownedDims = reserveMemory(numDims * sizeof(size_t));
@@ -640,9 +648,10 @@ void testConvTranspose1dKernelBfpGatherPowerOfTwoBitIdenticalToGroupedSym(void) 
     initSymInt32Quantization(&outSymQC, &outSymQ);
     setTensorValues(&outSymTensor, (uint8_t *)outSymData, &outShape, &outSymQ, NULL);
 
+    symGroupedWeight_t groupedWeight = symGroupedWeightSym(&weightGroups);
     convTranspose1dKernelSymInt32Grouped(&inSymTensor, &wSymTensor, NULL, &kernel, 1,
                                          (size_t)kBfpConvTOutputPadding, &outSymTensor,
-                                         &weightGroups, NULL);
+                                         &groupedWeight, NULL);
 
     for (size_t i = 0; i < 24; i++) {
         float symDequant = (float)outSymData[i] * outSymQC.scale;
@@ -993,6 +1002,10 @@ static uint8_t gCtOutBits; /* output qMaxBits after the kernel returned */
 typedef enum { CT_POISON_NONE, CT_POISON_X, CT_POISON_W, CT_POISON_BIAS, CT_POISON_Y } ctPoison_t;
 static ctPoison_t gCtPoison = CT_POISON_NONE;
 
+/* Code domain of the grouped weight ctRunOutCh hands the grouped kernel (a
+ * stored SYM weight unless a test says ASYM image). */
+static symCodeDomain_t gCtWeightDomain = SYM_CODES_TWOS_COMPLEMENT;
+
 /* Output wires start at a width no stamp test expects, so a missing stamp can
  * never pass as the right one (the kernels never read the output width). */
 #define UNSTAMPED_WIDTH 5
@@ -1062,8 +1075,9 @@ static void ctRunOutCh(size_t inCh, size_t len, size_t k, uint8_t xBits, uint8_t
                                .groupSize = inCh * outCh * k / numGroups,
                                .qBits = wBits,
                                .roundingMode = HALF_AWAY};
+        symGroupedWeight_t groupedWeight = {.groups = &groups, .domain = gCtWeightDomain};
         convTranspose1dKernelSymInt32Grouped(&x, &w, biasCodes ? &bias : NULL, &kernel, 1, 0, &yT,
-                                             &groups, NULL);
+                                             &groupedWeight, NULL);
     }
     gCtOutBits = yQC.qMaxBits;
 }
@@ -1072,6 +1086,14 @@ static void ctRunOutCh(size_t inCh, size_t len, size_t k, uint8_t xBits, uint8_t
 static void ctRun(size_t inCh, size_t len, size_t k, uint8_t xBits, uint8_t wBits,
                   const int32_t *biasCode, size_t numGroups) {
     ctRunOutCh(inCh, len, k, xBits, wBits, 1, biasCode, numGroups);
+}
+
+/* ctRun with the grouped weight read as a stored ASYM weight's image. */
+static void ctRunAsymImage(size_t inCh, size_t len, size_t k, uint8_t xBits, uint8_t wBits,
+                           const int32_t *biasCode, size_t numGroups) {
+    gCtWeightDomain = SYM_CODES_ASYM_IMAGE;
+    ctRun(inCh, len, k, xBits, wBits, biasCode, numGroups);
+    gCtWeightDomain = SYM_CODES_TWOS_COMPLEMENT;
 }
 
 /* y[o] = bias + sum over (ic, inPos, tap) with inPos + tap == o of x * w, in int64 */
@@ -1155,12 +1177,12 @@ void testConvTranspose1dKernelSymGroupedGuardDiesAtFirstWrappingN(void) {
 
 void testConvTranspose1dKernelSymGroupedGuardWidthsFollowTheInputWidth(void) {
     /* the input width follows its own declaration: int16 x int12 products are <= 2^26, so 31 terms
-     * fit and 32 do not */
+     * fit and 32 do not; the banner names a stored SYM int12 weight's exact range as 12 bits */
     ctFill(30, -32768, -2048, false);
     ctRun(30, 1, 1, 16, 12, NULL, 2);
     TEST_ASSERT_EQUAL_INT32(30 * 67108864, gCtY[0]);
     ctFill(32, -32768, -2048, false);
-    ASSERT_EXITS_WITH_OUTPUT(1, "widths (16, 13)", ctRun(32, 1, 1, 16, 12, NULL, 2));
+    ASSERT_EXITS_WITH_OUTPUT(1, "widths (16, 12)", ctRun(32, 1, 1, 16, 12, NULL, 2));
 }
 
 void testConvTranspose1dKernelSymGroupedGuardWideInputProductOverflowAborts(void) {
@@ -1181,11 +1203,15 @@ void testConvTranspose1dKernelSymGroupedGuardCheckedPathStaysExactWhenValuesFit(
     ctAssertExact(600, 1, 1, 0);
 }
 
-/* 511 full-scale terms: the weight counts one bit wider (ASYM mantissa image), so the
- * bound no longer proves this and the checked loop runs; it must stay exact. */
+/* 511 full-scale int12 terms (7 groups): a stored SYM weight's exact range
+ * proves them (511 * 2^22 fits) and the safe scatter runs; a stored ASYM
+ * weight's image (+-4095 reachable) is unprovable and the checked scatter runs
+ * -- both exact. */
 void testConvTranspose1dKernelSymGroupedGuardFullScaleN511RunsExact(void) {
     ctFill(511, -2048, -2048, false);
     ctRun(511, 1, 1, 12, 12, NULL, 7);
+    TEST_ASSERT_EQUAL_INT32(511 * 4194304, gCtY[0]);
+    ctRunAsymImage(511, 1, 1, 12, 12, NULL, 7);
     TEST_ASSERT_EQUAL_INT32(511 * 4194304, gCtY[0]);
 }
 
@@ -1195,16 +1221,24 @@ void testConvTranspose1dKernelSymGroupedGuardPostScatterBiasIsCounted(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "max|seed|=4194304", ctRun(511, 1, 1, 12, 12, &seed, 7));
 }
 
-void testConvTranspose1dKernelSymGroupedGuardCountsTheAsymMantissaBitWider(void) {
-    /* grouped ASYM weights unpack to code - zp (up to 2^qBits - 1 = 4095 at qBits 12) */
+/* A stored grouped ASYM weight unpacks to code - zp[g], reaching +-(2^qBits - 1)
+ * = +-4095 at qBits 12; the kernel takes that range from the ctx's code domain:
+ * 511 terms of 2047 x 4095 abort (the SYM range would have run them unchecked
+ * and wrapped), 256 terms (2145911040) are proven at the exact image range and
+ * run exact (the image's holding width 13 proves only 255). */
+void testConvTranspose1dKernelSymGroupedGuardAsymImageWeightKeepsItsFullRange(void) {
     ctFill(511, 2047, 4095, false);
     ASSERT_EXITS_WITH_OUTPUT(1, "convTranspose1dKernelSymInt32Grouped",
-                             ctRun(511, 1, 1, 12, 12, NULL, 7));
+                             ctRunAsymImage(511, 1, 1, 12, 12, NULL, 7));
+    ctFill(256, 2047, 4095, false);
+    ctRunAsymImage(256, 1, 1, 12, 12, NULL, 2);
+    TEST_ASSERT_EQUAL_INT32(256 * 2047 * 4095, gCtY[0]);
 }
 
 /* A grouped weight wider than int12 used to exit at the validator; now it takes
- * the checked path (17 bits counted). 30 terms of -2048 x -32768 fit int32
- * through two groups; 32 terms (2^31) wrap. */
+ * the checked path (int12 x int16 products over 2 x 16 terms are unprovable).
+ * 30 terms of -2048 x -32768 fit int32 through two groups; 32 terms (2^31)
+ * wrap. */
 void testConvTranspose1dKernelSymGroupedGuardWideWeightRunsExactWhenItFitsAndAbortsWhenItWraps(
     void) {
     ctFill(30, -2048, -32768, false);
@@ -1267,29 +1301,45 @@ void testConvTranspose1dKernelSymStampsResultWidthIncludesBiasSeed(void) {
     TEST_ASSERT_EQUAL_UINT8(12, gCtOutBits);
 }
 
-/* int4 x grouped int4 (2 groups x 4, counted 5 bits for the ASYM-mantissa
- * image, ConvTranspose1dKernel.c) over 8 scattered products: the rescaled site
- * says 8 * (2^7 + 1) + ceil(8 * 2^7 / 2^22) = 1033 -> 12. The post-scatter bias
- * of 1023 at the accumulator scale lifts it to 2056 -> 13, where the exact
- * bound (2047) would still say 12 -- so the stamp has to be the rescaled site
- * WITH the bias pass's seed. A bias of -1023 widens the slacked negative side
- * instead: 8 * 120 + 9 + 1023 = 1992 -> 12. */
+/* int4 x grouped int4 (2 groups x 4) over 8 scattered products: the rescaled
+ * site over the weight's EXACT code range (ConvTranspose1dKernel.c,
+ * SymGroupedWeight.h). A stored SYM int4 weight is [-8, 7]: one product spans
+ * [-56, 64], 8 slacked products [-457, 521] (slack 9 per side) -> 11. The
+ * post-scatter bias of 1023 at the accumulator scale lifts it to 1544 -> 12
+ * -- so the stamp has to be the rescaled site WITH the bias pass's seed (the
+ * weight counted one bit wide, [-16, 15], would say 12 seedless and 13 with
+ * the bias). A bias of -1023 widens the slacked negative side instead: 457 +
+ * 1023 = 1480 -> 12. */
 void testConvTranspose1dKernelSymGroupedStampsRescaledWidthIncludesBiasSeed(void) {
     ctFill(8, 1, 1, false);
     ctRun(8, 1, 1, 4, 4, NULL, 2);
     TEST_ASSERT_EQUAL_INT32(8, gCtY[0]);
-    symAccumSite_t rescaled = symAccumSiteInitRescaled("t", 8, 4, 4 + 1, 0);
+    symAccumSite_t rescaled = symAccumSiteInitRescaled("t", 8, 4, 4, 0);
     TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&rescaled), gCtOutBits);
-    TEST_ASSERT_EQUAL_UINT8(12, gCtOutBits);
+    TEST_ASSERT_EQUAL_UINT8(11, gCtOutBits);
     int32_t bias = 1023;
     ctRun(8, 1, 1, 4, 4, &bias, 2);
     TEST_ASSERT_EQUAL_INT32(1023 + 8, gCtY[0]);
-    symAccumSite_t seeded = symAccumSiteInitRescaled("t", 8, 4, 4 + 1, 1023);
+    symAccumSite_t seeded = symAccumSiteInitRescaled("t", 8, 4, 4, 1023);
     TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&seeded), gCtOutBits);
-    TEST_ASSERT_EQUAL_UINT8(13, gCtOutBits);
+    TEST_ASSERT_EQUAL_UINT8(12, gCtOutBits);
     bias = -1023;
     ctRun(8, 1, 1, 4, 4, &bias, 2);
     TEST_ASSERT_EQUAL_INT32(8 - 1023, gCtY[0]);
+    TEST_ASSERT_EQUAL_UINT8(12, gCtOutBits);
+}
+
+/* The same scatter over a stored ASYM int4 weight's image [-15, 15]: +-120 per
+ * product, 969 per side -> 11 seedless (the image counted one bit wide says
+ * 12); bias 500 -> 1469 -> 12 (the SYM range, 521 + 500 = 1021, says 11). */
+void testConvTranspose1dKernelSymGroupedAsymImageStampsItsFullRange(void) {
+    ctFill(8, 1, 1, false);
+    ctRunAsymImage(8, 1, 1, 4, 4, NULL, 2);
+    TEST_ASSERT_EQUAL_INT32(8, gCtY[0]);
+    TEST_ASSERT_EQUAL_UINT8(11, gCtOutBits);
+    int32_t bias = 500;
+    ctRunAsymImage(8, 1, 1, 4, 4, &bias, 2);
+    TEST_ASSERT_EQUAL_INT32(500 + 8, gCtY[0]);
     TEST_ASSERT_EQUAL_UINT8(12, gCtOutBits);
 }
 
@@ -1362,12 +1412,13 @@ int main(void) {
     RUN_TEST(testConvT1dKernelSymGroupedRejectsFloatOutput);
     RUN_TEST(testConvTranspose1dKernelSymStampsResultWidthIncludesBiasSeed);
     RUN_TEST(testConvTranspose1dKernelSymGroupedStampsRescaledWidthIncludesBiasSeed);
+    RUN_TEST(testConvTranspose1dKernelSymGroupedAsymImageStampsItsFullRange);
     RUN_TEST(testConvTranspose1dKernelSymStampCountsTheLargestBiasSeedOverChannels);
     RUN_TEST(testConvTranspose1dKernelSymGroupedWideScatterRunsExactWhenSumFits);
     RUN_TEST(testConvTranspose1dKernelSymGroupedWideScatterThatWrapsHitsTheF9Guard);
     RUN_TEST(
         testConvTranspose1dKernelSymGroupedGuardWideWeightRunsExactWhenItFitsAndAbortsWhenItWraps);
-    RUN_TEST(testConvTranspose1dKernelSymGroupedGuardCountsTheAsymMantissaBitWider);
+    RUN_TEST(testConvTranspose1dKernelSymGroupedGuardAsymImageWeightKeepsItsFullRange);
     RUN_TEST(testConvTranspose1dKernelSymGuardProvenSafeN511RunsExact);
     RUN_TEST(testConvTranspose1dKernelSymGuardDiesAtFirstWrappingNChannels);
     RUN_TEST(testConvTranspose1dKernelSymGuardDiesAtN513PositiveCodes);

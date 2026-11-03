@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 
+#include "SymGroupedWeight.h"
 #include "Tensor.h"
 
 /* Pointer-only use: the identical typedef lives in RNG.h (C11 allows the
@@ -35,11 +36,13 @@ void matmulSymInt32TensorsWithBias(tensor_t *aTensor, tensor_t *bTensor, tensor_
  *  above. `b` holds the grouped weight's UNPACKED mantissas as raw int32 (the
  *  same scratch shape the executeOp prologue's grouped-operand branch
  *  produces: SYM_INT32 dtype, scale poisoned to 1.0f — never read here).
- *  `weightGroups` is the ORIGINAL symQConfig_t carrying the real per-group
- *  scales/qBits/groupSize (validated: non-NULL, numGroups > 1,
- *  shape matches `b`'s element count via validateSymQConfigShape; any qBits is
- *  accepted -- the accumulator guard, SymAccumGuard.h, handles the width). `bias` is NULL-able,
- * SYM_INT32 like the scalar entries' bias.
+ *  `groupedWeight` (SymGroupedWeight.h) carries the ORIGINAL symQConfig_t
+ *  with the real per-group scales/qBits/groupSize (validated: non-NULL,
+ *  numGroups > 1, shape matches `b`'s element count via
+ *  validateSymQConfigShape; any qBits is accepted) and the weight's code
+ *  domain, which fixes the operand range the accumulator guard proves and
+ *  the output width declares (SymAccumGuard.h). `bias` is NULL-able,
+ *  SYM_INT32 like the scalar entries' bias.
  *
  *  Accumulator-scale rule (GGUF rescale-combine pattern): s_acc = s_in *
  *  max_g(weightGroups->scales[g]) — NEVER scales[0] or any other single
@@ -59,8 +62,8 @@ void matmulSymInt32TensorsWithBias(tensor_t *aTensor, tensor_t *bTensor, tensor_
  *  logical dim 0) hops groups on every reduction step and folds one combine
  *  per visited-group change. */
 void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
-                                        tensor_t *outputTensor, const symQConfig_t *weightGroups,
-                                        rngStream_t *rs);
+                                        tensor_t *outputTensor,
+                                        const symGroupedWeight_t *groupedWeight, rngStream_t *rs);
 
 /*! BFP epic PR2 (Task 3): block-floating-point GEMM forward. Operands are in
  *  the executeOp funnel's UNPACKED-BFP scratch form: ->data holds int32

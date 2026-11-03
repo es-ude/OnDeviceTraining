@@ -108,10 +108,13 @@ typedef struct opSpec {
      * symInt32QConfig_t's scale to 1.0f and qMaxBits to the source's qBits: a
      * grouped operand has no single scalar scale, so any kernel reading
      * scratch->quantization->scale here is a bug — group-aware kernels MUST
-     * take per-group scales from their own ctx (e.g. Matmul's weightGroups;
-     * for ASYM weights the layer passes a symQConfig-shaped VIEW of the asym
-     * config), never this field. Set together with a ctx that actually
-     * carries the group shape (Linear.c: both or neither).
+     * take per-group scales from their own ctx (the layer's
+     * symGroupedWeight_t, SymGroupedWeight.h: the group config, for ASYM
+     * weights a symQConfig-shaped VIEW of the asym config, plus the weight's
+     * code domain -- the ASYM image spans +-(2^qBits - 1), one code wider
+     * than that qMaxBits reads, so the kernels take the weight's operand
+     * range from the ctx as well), never this field. Set together with a
+     * ctx that actually carries the group shape (Linear.c: both or neither).
      *
      * ARITH_FLOAT32: no poisoning/unpack mechanics — the declared operand
      * proceeds through the EXISTING group-aware convertTensor dequant

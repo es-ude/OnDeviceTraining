@@ -111,6 +111,7 @@ add_library(Matmul Matmul.c)
 target_include_directories(Matmul PUBLIC include)
 target_link_libraries(Matmul PRIVATE
         SymAccumGuard
+        SymGroupedWeight
         Common
         Tensor
         DTypes
@@ -203,6 +204,7 @@ add_library(Conv1dKernel Conv1dKernel.c)
 target_include_directories(Conv1dKernel PUBLIC include)
 target_link_libraries(Conv1dKernel PRIVATE
         SymAccumGuard
+        SymGroupedWeight
         Tensor
         Kernel
         SlidingWindow1d
@@ -217,6 +219,7 @@ add_library(ConvTranspose1dKernel ConvTranspose1dKernel.c)
 target_include_directories(ConvTranspose1dKernel PUBLIC include)
 target_link_libraries(ConvTranspose1dKernel PRIVATE
         SymAccumGuard
+        SymGroupedWeight
         Tensor
         Kernel
         SlidingWindow1d
@@ -263,3 +266,9 @@ target_compile_definitions(PointwiseFused PUBLIC
 add_library(SymAccumGuard INTERFACE)
 target_include_directories(SymAccumGuard INTERFACE include)
 target_link_libraries(SymAccumGuard INTERFACE Mul Tensor DTypes Common)
+
+# Header-only grouped-weight ctx of the SYM GEMM-family kernels (group config +
+# code domain, the layers' builder and the kernels' operand range).
+add_library(SymGroupedWeight INTERFACE)
+target_include_directories(SymGroupedWeight INTERFACE include)
+target_link_libraries(SymGroupedWeight INTERFACE SymAccumGuard Tensor Quantization Common)

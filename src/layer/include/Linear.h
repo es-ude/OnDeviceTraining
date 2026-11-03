@@ -4,6 +4,7 @@
 
 #include "ArithmeticType.h"
 #include "ExecuteOp.h"
+#include "SymGroupedWeight.h"
 #include "Tensor.h"
 
 typedef struct layer layer_t;
@@ -40,12 +41,13 @@ void linearForwardFloat(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *out
 // IMPORTANT: Assumes all tensors have SYM_INT32 quantization
 void linearForwardSymInt32(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output,
                            rngStream_t *rs);
-/* Group-quant PR2 (Task 3): `w` is the executeOp prologue's unpacked grouped-
- * SYM scratch (SYM_INT32 dtype, poisoned scale); `weightGroups` carries the
- * real per-group scales/qBits/groupSize. Routed to by linearForwardKernelSym
- * when the stored weight is grouped SYM — not a direct public entry point. */
+/* Group-quant PR2 (Task 3): `w` is the executeOp prologue's unpacked grouped
+ * scratch (SYM_INT32 dtype, poisoned scale); `groupedWeight` carries the real
+ * per-group scales/qBits/groupSize and the weight's code domain
+ * (SymGroupedWeight.h). Routed to by linearForwardKernelSym when the stored
+ * weight is grouped SYM or ASYM — not a direct public entry point. */
 void linearForwardSymInt32Grouped(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output,
-                                  const symQConfig_t *weightGroups, rngStream_t *rs);
+                                  const symGroupedWeight_t *groupedWeight, rngStream_t *rs);
 /* BFP epic PR2 (Task 7): the BFP twin of linearForwardSymInt32Grouped's role.
  * All operands are the executeOp prologue's unpacked-BFP scratch (int32
  * mantissa codes under a live bfpQConfig_t; `b` NULL-able) — same transpose
@@ -73,13 +75,14 @@ void linearCalcWeightGradsSymInt32(tensor_t *loss, tensor_t *forwardInput, tenso
 void linearCalcBiasGradsSymInt32(tensor_t *biasGrads, tensor_t *loss);
 void linearCalcPropLossSymInt32(tensor_t *weights, tensor_t *loss, tensor_t *propLoss);
 /* Group-quant PR3 (Task 1): dx sibling of linearForwardSymInt32Grouped —
- * `weights` is the executeOp prologue's unpacked grouped-SYM scratch,
- * `weightGroups` the real per-group scales/qBits/groupSize. NO transpose:
- * dx reduces over weight dim-0 (outFeatures), storage-strided by inFeatures;
- * the unified matmul core binds groups per visited storage element. Routed
- * to by propLossKernelSym when the stored weight is grouped SYM. */
+ * `weights` is the executeOp prologue's unpacked grouped scratch,
+ * `groupedWeight` the real per-group scales/qBits/groupSize plus the code
+ * domain. NO transpose: dx reduces over weight dim-0 (outFeatures),
+ * storage-strided by inFeatures; the unified matmul core binds groups per
+ * visited storage element. Routed to by propLossKernelSym when the stored
+ * weight is grouped SYM or ASYM. */
 void linearCalcPropLossSymInt32Grouped(tensor_t *weights, tensor_t *loss, tensor_t *propLoss,
-                                       const symQConfig_t *weightGroups, rngStream_t *rs);
+                                       const symGroupedWeight_t *groupedWeight, rngStream_t *rs);
 
 /* BFP epic PR3: backward raw-emit cores on the PR2 fold contract. All BFP
  * operands are the executeOp prologue's unpacked-BFP scratch (int32 mantissa

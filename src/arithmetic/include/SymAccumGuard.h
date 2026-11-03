@@ -33,9 +33,14 @@
  * metadata and is not re-checked per code. Every funnel staging route
  * declares the true width of the codes it writes and the requant cells clamp
  * to it, so only a hand-built tensor whose codes exceed its own declared
- * width can defeat the proof. Raw kernel outputs declare the static result
+ * width can defeat the proof. The public raw kernel outputs (matmul family,
+ * Conv1d / ConvT kernels, mul, equal-scale add) declare the static result
  * width of the accumulator they were written under (symAccumResultBits),
- * 32 meaning the full raw int32 range (#516).
+ * 32 meaning the full raw int32 range (#516); the grad producers that src/
+ * reaches only through the funnel's static kernels (Linear bias-grad sum,
+ * Conv1d / ConvT weight-grad scatter and bias-grad sum) write the funnel's
+ * raw scratch, whose width the ACC epilogue never reads, so they keep the
+ * scratch width.
  *
  * Kernels use the pattern
  *     symAccumSite_t site = symAccumSiteInit(op, nMax, qa, qb, maxAbsSeed);

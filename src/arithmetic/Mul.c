@@ -86,7 +86,8 @@ void mulFloat32ElementWithFloat32TensorInplace(tensor_t *a, float b) {
  * 2^(qa-1) * 2^(qb-1), which can exceed the operands' width, so the output
  * carries that static bound under the strict rule (32 = the raw int32 range)
  * and a consumer that reads it as an operand proves its own budget from it.
- * The int32 product itself is not checked: with qa + qb > 32 it can wrap. */
+ * The int32 product itself is not checked: with qa + qb > 32 it is
+ * signed-overflow undefined behaviour, documented rather than guarded. */
 static uint8_t symProductWidth(uint8_t aBits, uint8_t bBits) {
     unsigned qa = symAccumClampedWidth(aBits);
     unsigned qb = symAccumClampedWidth(bBits);

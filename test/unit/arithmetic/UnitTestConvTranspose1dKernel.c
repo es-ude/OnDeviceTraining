@@ -1000,14 +1000,17 @@ static void ctFill(size_t n, int32_t xCode, int32_t wCode, bool wAlternates) {
     }
 }
 
-/* x [1, inCh, len], w [inCh, 1, K], VALID stride 1 -> y [1, 1, len + K - 1];
- * result in gCtY. numGroups == 0 -> per-tensor weight kernel, else the grouped
- * kernel with equal scales. */
-static void ctRun(size_t inCh, size_t len, size_t k, uint8_t xBits, uint8_t wBits,
-                  const int32_t *biasCode, size_t numGroups) {
+#define CT_MAX_OUT_CH 2
+
+/* x [1, inCh, len], w [inCh, outCh, K], VALID stride 1 -> y [1, outCh, len + K - 1];
+ * result in gCtY. biasCodes: NULL or one code per output channel. numGroups
+ * == 0 -> per-tensor weight kernel, else the grouped kernel with equal scales. */
+static void ctRunOutCh(size_t inCh, size_t len, size_t k, uint8_t xBits, uint8_t wBits,
+                       size_t outCh, const int32_t *biasCodes, size_t numGroups) {
+    TEST_ASSERT_TRUE(outCh <= CT_MAX_OUT_CH);
     size_t outLen = len + k - 1;
-    size_t xDims[] = {1, inCh, len}, wDims[] = {inCh, 1, k}, yDims[] = {1, 1, outLen};
-    size_t order[] = {0, 1, 2}, biasDims[] = {1};
+    size_t xDims[] = {1, inCh, len}, wDims[] = {inCh, outCh, k}, yDims[] = {1, outCh, outLen};
+    size_t order[] = {0, 1, 2}, biasDims[] = {outCh};
     shape_t xS, wS, yS, biasS;
     setShape(&xS, xDims, 3, order);
     setShape(&wS, wDims, 3, order);
@@ -1023,27 +1026,36 @@ static void ctRun(size_t inCh, size_t len, size_t k, uint8_t xBits, uint8_t wBit
     initSymInt32Quantization(&wQC, &wQ);
     initSymInt32Quantization(&yQC, &yQ);
     initSymInt32Quantization(&biasQC, &biasQ);
-    int32_t biasData = biasCode ? *biasCode : 0;
+    int32_t biasData[CT_MAX_OUT_CH] = {0};
+    for (size_t oc = 0; biasCodes != NULL && oc < outCh; oc++) {
+        biasData[oc] = biasCodes[oc];
+    }
     tensor_t x, w, yT, bias;
     setTensorValues(&x, (uint8_t *)gCtX, &xS, &xQ, NULL);
     setTensorValues(&w, (uint8_t *)gCtW, &wS, &wQ, NULL);
     setTensorValues(&yT, (uint8_t *)gCtY, &yS, &yQ, NULL);
-    setTensorValues(&bias, (uint8_t *)&biasData, &biasS, &biasQ, NULL);
+    setTensorValues(&bias, (uint8_t *)biasData, &biasS, &biasQ, NULL);
     kernel_t kernel;
     initKernel(&kernel, k, VALID, 1, 1);
     if (numGroups == 0) {
-        convTranspose1dKernelSymInt32(&x, &w, biasCode ? &bias : NULL, &kernel, 1, 0, &yT, NULL);
+        convTranspose1dKernelSymInt32(&x, &w, biasCodes ? &bias : NULL, &kernel, 1, 0, &yT, NULL);
     } else {
         float scales[8] = {1, 1, 1, 1, 1, 1, 1, 1};
         symQConfig_t groups = {.scales = scales,
                                .numGroups = numGroups,
-                               .groupSize = inCh * k / numGroups,
+                               .groupSize = inCh * outCh * k / numGroups,
                                .qBits = wBits,
                                .roundingMode = HALF_AWAY};
-        convTranspose1dKernelSymInt32Grouped(&x, &w, biasCode ? &bias : NULL, &kernel, 1, 0, &yT,
+        convTranspose1dKernelSymInt32Grouped(&x, &w, biasCodes ? &bias : NULL, &kernel, 1, 0, &yT,
                                              &groups, NULL);
     }
     gCtOutBits = yQC.qMaxBits;
+}
+
+/* One output channel and one bias code: the shape every guard test uses. */
+static void ctRun(size_t inCh, size_t len, size_t k, uint8_t xBits, uint8_t wBits,
+                  const int32_t *biasCode, size_t numGroups) {
+    ctRunOutCh(inCh, len, k, xBits, wBits, 1, biasCode, numGroups);
 }
 
 /* y[o] = bias + sum over (ic, inPos, tap) with inPos + tap == o of x * w, in int64 */
@@ -1255,10 +1267,32 @@ void testConvTranspose1dKernelSymGroupedStampsRescaledWidthIncludesBiasSeed(void
     TEST_ASSERT_EQUAL_UINT8(13, gCtOutBits);
 }
 
+/* The bias pass seeds one channel at a time, so the stamp must carry the
+ * largest seed whichever channel holds it: 2 output channels x 3 int4 x int4
+ * products (192 -> 9 alone) seeded 1000 / 1 stamp 1192 -> 12 in both channel
+ * orders, where a stamp kept from the last (or the first) channel would read
+ * 193 -> 9 in one of them. */
+void testConvTranspose1dKernelSymStampCountsTheLargestBiasSeedOverChannels(void) {
+    int32_t largeOnFirst[] = {1000, 1};
+    ctFill(6, 1, 1, false);
+    ctRunOutCh(3, 1, 1, 4, 4, 2, largeOnFirst, 0);
+    TEST_ASSERT_EQUAL_INT32(1003, gCtY[0]);
+    TEST_ASSERT_EQUAL_INT32(4, gCtY[1]);
+    symAccumSite_t seeded = symAccumSiteInit("t", 3, 4, 4, 1000);
+    TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&seeded), gCtOutBits);
+    TEST_ASSERT_EQUAL_UINT8(12, gCtOutBits);
+    int32_t largeOnLast[] = {1, 1000};
+    ctRunOutCh(3, 1, 1, 4, 4, 2, largeOnLast, 0);
+    TEST_ASSERT_EQUAL_INT32(4, gCtY[0]);
+    TEST_ASSERT_EQUAL_INT32(1003, gCtY[1]);
+    TEST_ASSERT_EQUAL_UINT8(12, gCtOutBits);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConvTranspose1dKernelSymStampsResultWidthIncludesBiasSeed);
     RUN_TEST(testConvTranspose1dKernelSymGroupedStampsRescaledWidthIncludesBiasSeed);
+    RUN_TEST(testConvTranspose1dKernelSymStampCountsTheLargestBiasSeedOverChannels);
     RUN_TEST(testConvTranspose1dKernelSymGroupedWideScatterRunsExactWhenSumFits);
     RUN_TEST(testConvTranspose1dKernelSymGroupedWideScatterThatWrapsHitsTheF9Guard);
     RUN_TEST(

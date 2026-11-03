@@ -537,8 +537,9 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
         initFloat32Quantization(&rawQ);
         break;
     case ARITH_SYM_INT32:
-        /* The kernel overwrites rawQC's scale and qMaxBits (its static result
-         * width, up to 32); the epilogue reads only the target's width. */
+        /* The kernel overwrites rawQC's scale; the public raw kernels also its
+         * qMaxBits (static result width, up to 32), the ACC-only grad producers
+         * do not. The epilogue reads only the target's width. */
         initSymInt32QConfig(arithmetic.roundingMode, &rawQC);
         initSymInt32Quantization(&rawQC, &rawQ);
         break;

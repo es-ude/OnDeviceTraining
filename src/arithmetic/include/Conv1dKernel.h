@@ -25,7 +25,9 @@ void conv1dKernelFloat32(tensor_t const *input, tensor_t const *weight, tensor_t
 /*! 1D convolution forward (SYM_INT32). Integer correlation: int32 accumulator,
  *  mulInt32s per MAC, per-output-channel bias seed refolded into the product
  *  scale via rescaleIntoAccumulatorScale. Output mantissas are raw accumulator
- *  range at scale s_in*s_w (a downstream Quantization layer restores int16).
+ *  range at scale s_in*s_w, and the output's qMaxBits is overwritten with the
+ *  static accumulator width, up to 32 (#516; Matmul.h has the requant-before-
+ *  clone rule). The funnel epilogue restores the declared operand width.
  *
  *  @param input  [batch, in_channels, input_length], SYM_INT32
  *  @param weight [out_channels, in_channels/groups, kernel_size], SYM_INT32

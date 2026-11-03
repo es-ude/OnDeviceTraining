@@ -1088,7 +1088,8 @@ static size_t elemCount3(size_t a, size_t b, size_t c) {
 }
 
 /* A raw SYM_INT32 wire for a kernel-tier output: the kernel overwrites the
- * scale; width/rounding are carried for the record only. */
+ * scale and the width (its static accumulator bound, #516); the rounding mode
+ * is carried for the record only. */
 static tensor_t *makeRawWire(size_t ndim, const size_t *dims, roundingMode_t rm) {
     return makeTensor(ndim, dims, quantizationInitSymInt32WithBits(rm, ODT_SYM_OPERAND_QMAXBITS));
 }

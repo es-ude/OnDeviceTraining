@@ -15,6 +15,12 @@ void matmulInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTe
 
 void matmulFloat32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor);
 
+/* SYM_INT32 entries (this one, WithBias, GroupedWeight): the output's
+ * symInt32QConfig_t is overwritten -- `scale` with the product scale and
+ * `qMaxBits` with the static accumulator width of the raw codes (#516:
+ * symAccumResultBits, strict rule, up to 32 = the raw int32 range). A 32-wide
+ * output is an operand or a requant source only: requantize it into a <= 31-bit
+ * tensor before cloning it (getQLike) or requantizing into it. */
 void matmulSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor);
 
 void matmulFloat32TensorsWithBias(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,

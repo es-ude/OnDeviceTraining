@@ -119,6 +119,11 @@ void addFloat32TensorToSymInt32TensorInplace(tensor_t *symInt32Tensor, tensor_t 
 /*!
  * Calculates the sum of two symInt32 tensors.
  *
+ * Equal scales add the raw codes: the output's config is overwritten with
+ * scale = aScale and qMaxBits = the static sum width of 2^(qa-1) + 2^(qb-1)
+ * under the strict rule, up to 32 (#516; Matmul.h has the requant-before-clone
+ * rule). Unequal scales add in float and requantize into the output's own grid.
+ *
  * \param aTensor: First tensor
  * \param bTensor: Second tensor
  * \param outputTensor: Tensor for results

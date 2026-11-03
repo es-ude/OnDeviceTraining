@@ -31,6 +31,11 @@ void mulFloat32TensorsInplace(tensor_t *a, tensor_t *b);
 void mulFloat32ElementWithFloat32Tensor(tensor_t *a, float b, tensor_t *outputTensor);
 void mulFloat32ElementWithFloat32TensorInplace(tensor_t *a, float b);
 
+/* SYM_INT32 elementwise product: the output's (in place: aTensor's own) config
+ * is overwritten -- scale = sa * sb, qMaxBits = the static product width of
+ * 2^(qa-1) * 2^(qb-1) under the strict rule, up to 32 (#516; Matmul.h has the
+ * requant-before-clone rule). The int32 product is unchecked: qa + qb > 32
+ * can wrap. */
 void mulSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor);
 void mulSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor);
 

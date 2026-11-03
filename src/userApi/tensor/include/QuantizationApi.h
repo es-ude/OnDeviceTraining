@@ -26,7 +26,9 @@ quantization_t *quantizationInitSymInt32(roundingMode_t roundingMode);
 
 /*! SymInt32 with explicit qMaxBits. Plain quantizationInitSymInt32(rm) uses the
  *  int12 operand default (ODT_SYM_OPERAND_QMAXBITS). Widths >16 need scale=1
- *  (raw-int, unvalidated); 32 is not cast-safe in the converters (#202). */
+ *  (raw-int, unvalidated); 32 is rejected (#202): it marks a raw kernel output,
+ *  which is requantized into a <= 31-bit tensor before it is cloned or used as
+ *  a target (#516). */
 quantization_t *quantizationInitSymInt32WithBits(roundingMode_t roundingMode, uint8_t qMaxBits);
 
 /*! Sub-byte symmetric quantization with explicit bit width and rounding. */

@@ -1,6 +1,7 @@
 add_library(Add Add.c)
 target_include_directories(Add PUBLIC include)
 target_link_libraries(Add PRIVATE
+        SymAccumGuard
         Tensor
         DTypes
         Arithmetic
@@ -122,6 +123,7 @@ target_link_libraries(Matmul PRIVATE
 add_library(Mul Mul.c)
 target_include_directories(Mul PUBLIC include)
 target_link_libraries(Mul PRIVATE
+        SymAccumGuard
         Tensor
         DTypes
         Arithmetic

@@ -8232,6 +8232,79 @@ void testSymGridBoundsRejectsQ32(void) {
                              (void)symGridBoundsOrExit(32, "t"));
 }
 
+/* A raw SYM kernel output declares width 32 (#516): the full int32 range, an
+ * operand / requant-SOURCE declaration. As a requant TARGET it has no grid
+ * (2^31 does not exist in int32), so both routes into a SYM_INT32 target fail
+ * fast at the #515 helper -- a pin of that helper at the target sites, not a
+ * new guard. The config is field-assigned because the width init already
+ * rejects 32. */
+void testRequantSymInt32IntoWidth32TargetExits(void) {
+    size_t dims[] = {2};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    symInt32QConfig_t inQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &inQc, 12);
+    quantization_t inQ;
+    initSymInt32Quantization(&inQc, &inQ);
+    int32_t inData[] = {1000, -2048};
+    tensor_t in;
+    setTensorValues(&in, (uint8_t *)inData, &shape, &inQ, NULL);
+
+    symInt32QConfig_t outQc = {.roundingMode = HALF_AWAY, .scale = 1.f, .qMaxBits = 32};
+    quantization_t outQ;
+    initSymInt32Quantization(&outQc, &outQ);
+    int32_t outData[2] = {0, 0};
+    tensor_t out;
+    setTensorValues(&out, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "requantSymInt32Tensor: SYM width (32) outside [1, 31]",
+                             requantSymInt32Tensor(&in, &out, NULL));
+
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    float floatData[] = {1.f, -2.f};
+    tensor_t floatIn;
+    setTensorValues(&floatIn, (uint8_t *)floatData, &shape, &floatQ, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "convertFloatTensorToSymInt32Tensor: SYM width (32) outside [1, 31]",
+                             convertTensor(&floatIn, &out, NULL));
+}
+
+/* The complement: 32 IS a valid SOURCE width. A raw int12 x int12 product wire
+ * (codes up to 2^22, declared 32, scale 0.125) requantizes into an int12
+ * target; the requant reads the source's scale and the target's width only,
+ * so the raw declaration trips no grid check and the target keeps its width. */
+void testRequantSymInt32FromWidth32SourceRestoresTheTargetWidth(void) {
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    symInt32QConfig_t inQc = {.roundingMode = HALF_AWAY, .scale = 0.125f, .qMaxBits = 32};
+    quantization_t inQ;
+    initSymInt32Quantization(&inQc, &inQ);
+    int32_t inData[] = {4194304, -4194304, 15, 0};
+    tensor_t in;
+    setTensorValues(&in, (uint8_t *)inData, &shape, &inQ, NULL);
+
+    symInt32QConfig_t outQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &outQc, 12);
+    quantization_t outQ;
+    initSymInt32Quantization(&outQc, &outQ);
+    int32_t outData[4] = {0, 0, 0, 0};
+    tensor_t out;
+    setTensorValues(&out, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    requantSymInt32Tensor(&in, &out, NULL);
+
+    /* absMax = 2^22 * 0.125 = 2^19 -> scale 2^19 / 2047; 15 * 0.125 lands on code 0 */
+    int32_t expected[] = {2047, -2047, 0, 0};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, outData, 4);
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, 524288.f / 2047.f, outQc.scale);
+    TEST_ASSERT_EQUAL_UINT8(12, outQc.qMaxBits);
+    TEST_ASSERT_EQUAL_UINT8(32, inQc.qMaxBits);
+}
+
 int main(void) {
     UNITY_BEGIN();
 
@@ -8454,6 +8527,8 @@ int main(void) {
     RUN_TEST(testSymGridBoundsAtQ31);
     RUN_TEST(testSymGridBoundsRejectsQ0);
     RUN_TEST(testSymGridBoundsRejectsQ32);
+    RUN_TEST(testRequantSymInt32IntoWidth32TargetExits);
+    RUN_TEST(testRequantSymInt32FromWidth32SourceRestoresTheTargetWidth);
 
     return UNITY_END();
 }

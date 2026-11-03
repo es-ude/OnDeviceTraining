@@ -12,6 +12,7 @@
 #include "Arithmetic.h"
 #include "Common.h"
 #include "DTypes.h"
+#include "SymAccumGuard.h"
 #include "Tensor.h"
 #include "TensorConversion.h"
 
@@ -128,6 +129,17 @@ void addFloat32TensorToSymInt32TensorInplace(tensor_t *symInt32Tensor, tensor_t 
     writeInt32ArrayToByteArray(symInt32NumberOfValues, outputValues, symInt32Tensor->data);
 }
 
+/* Width the equal-scale SYM add declares (#516): the raw sum of two codes is
+ * at most 2^(qa-1) + 2^(qb-1), one bit past the wider operand, so the output
+ * carries that static bound under the strict rule (32 = the raw int32 range).
+ * The unequal-scale branch requantizes INTO the output instead and keeps the
+ * width the caller declared. */
+static uint8_t symSumWidth(uint8_t aBits, uint8_t bBits) {
+    unsigned qa = symAccumClampedWidth(aBits);
+    unsigned qb = symAccumClampedWidth(bBits);
+    return symAccumWidthForMagnitude(((uint64_t)1 << (qa - 1u)) + ((uint64_t)1 << (qb - 1u)));
+}
+
 void addSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,
                         rngStream_t *rs) {
     size_t aNumberOfValues = calcNumberOfElementsByTensor(aTensor);
@@ -146,7 +158,10 @@ void addSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTe
     float bScale = bSymInt32QConfig->scale;
 
     if (aScale == bScale) {
+        /* read both widths before any config write: the output may alias an operand */
+        uint8_t width = symSumWidth(aSymInt32QConfig->qMaxBits, bSymInt32QConfig->qMaxBits);
         outputSymInt32QConfig->scale = aScale;
+        outputSymInt32QConfig->qMaxBits = width;
 
         int32_t aValues[aNumberOfValues];
         readBytesAsInt32Array(aNumberOfValues, aTensor->data, aValues);

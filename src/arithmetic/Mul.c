@@ -14,6 +14,7 @@
 #include "Arithmetic.h"
 #include "DTypes.h"
 #include "Mul.h"
+#include "SymAccumGuard.h"
 
 #include <Common.h>
 
@@ -81,6 +82,17 @@ void mulFloat32ElementWithFloat32TensorInplace(tensor_t *a, float b) {
     floatElementWithTensorArithmeticInplace(a, b, mul);
 }
 
+/* Width a raw elementwise SYM product declares (#516): |a * b| is at most
+ * 2^(qa-1) * 2^(qb-1), which can exceed the operands' width, so the output
+ * carries that static bound under the strict rule (32 = the raw int32 range)
+ * and a consumer that reads it as an operand proves its own budget from it.
+ * The int32 product itself is not checked: with qa + qb > 32 it can wrap. */
+static uint8_t symProductWidth(uint8_t aBits, uint8_t bBits) {
+    unsigned qa = symAccumClampedWidth(aBits);
+    unsigned qb = symAccumClampedWidth(bBits);
+    return symAccumWidthForMagnitude((uint64_t)1 << (qa + qb - 2u));
+}
+
 void mulSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor) {
     size_t aNumberOfValues = calcNumberOfElementsByTensor(aTensor);
     size_t bNumberOfValues = calcNumberOfElementsByTensor(bTensor);
@@ -102,10 +114,13 @@ void mulSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTe
 
     symInt32QConfig_t *aConfig = aTensor->quantization->qConfig;
     symInt32QConfig_t *bConfig = bTensor->quantization->qConfig;
+    /* read both widths before any config write: the output may alias an operand */
+    uint8_t width = symProductWidth(aConfig->qMaxBits, bConfig->qMaxBits);
 
     writeInt32ArrayToByteArray(aNumberOfValues, output, outputTensor->data);
     symInt32QConfig_t *outputConfig = outputTensor->quantization->qConfig;
     outputConfig->scale = MUL_FUNC_FLOAT(aConfig->scale, bConfig->scale);
+    outputConfig->qMaxBits = width;
 }
 
 void mulSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor) {
@@ -132,7 +147,10 @@ void mulSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor) {
     symInt32QConfig_t *aConfig = aTensor->quantization->qConfig;
     symInt32QConfig_t *bConfig = bTensor->quantization->qConfig;
 
+    /* a's config is the output: read both widths before writing it */
+    uint8_t width = symProductWidth(aConfig->qMaxBits, bConfig->qMaxBits);
     aConfig->scale = MUL_FUNC_FLOAT(aConfig->scale, bConfig->scale);
+    aConfig->qMaxBits = width;
 }
 
 size_t getMulInstructionCounter() {

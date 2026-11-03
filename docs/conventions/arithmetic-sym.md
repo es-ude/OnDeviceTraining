@@ -97,11 +97,33 @@ from):
 | FLOAT32 | dynamic absmax encode above, **per tensor** (one scale for the whole operand, not per sample or row), rounded by the op's `arithmetic.roundingMode` | `absMax / qMax` | `ODT_SYM_OPERAND_QMAXBITS` (the `initSymInt32QConfig` default, 12) |
 | SYM, per-tensor | sign-extend the packed codes (`convertSymTensorToSymInt32Tensor`) | copied | `qBits` |
 | ASYM, per-tensor | `code − zp` (`convertAsymTensorToSymInt32Tensor`) | copied | `qBits + 1` (the difference spans `±(2^qBits − 1)`) |
-| INT32 | raw copy, unclamped (the funnel's file-static `stageInt32Raw`, not the public cell) | 1 | 32 (full two's-complement range), declared on the op-local scratch only. The public cell `convertInt32TensorToSymInt32Tensor` instead keeps the destination's declared width (validated in [1, 31]) and aborts on any code outside `[-2^(q-1), 2^(q-1)-1]`, so a user tensor never understates its codes |
+| INT32 | raw copy, unclamped (the funnel's file-static `stageInt32Raw`, not the public cell) | 1 | 32 (full two's-complement range) — the same declaration a raw SYM kernel output carries when its static bound exceeds int32 (next paragraph); 32 is an operand / requant-source width, never a target's. The public cell `convertInt32TensorToSymInt32Tensor` instead keeps the destination's declared width (validated in [1, 31]) and aborts on any code outside `[-2^(q-1), 2^(q-1)-1]`, so a user tensor never understates its codes |
 | SYM_INT32 | used in place | its own | its own |
 | SYM / ASYM, grouped | unpacked in the prologue (ASYM: `code − zp[g]`); consumed by the group-aware kernels, per-group scales via their own ctx | poisoned to 1 | `qBits`, counted **one bit wider** in the kernels' bound |
 
 A BFP-stored operand is denied under `ARITH_SYM_INT32`.
+
+**Raw outputs declare their width (#516).** Every SYM_INT32 kernel that emits
+raw accumulator or product codes overwrites the output's `qMaxBits` with the
+*static* bound of those codes: the smallest `w` with `B < 2^(w-1)` (**strict**
+`<`, so `B = 2^k` declares `k + 2` bits and the guard's `|code| <= 2^(w-1)`
+reading of the stamp holds), 32 when `B >= 2^31` — the raw int32 range, which
+the guard already treats as unprovable. `B` is the bound the guard proves:
+`N·2^(qa−1)·2^(qb−1) + max|seed|` for the matmul family and the Conv1d / ConvT
+kernels (the slacked bound for the grouped twins, the bias-pass seed for ConvT;
+`symAccumResultBits`), `2^(qa−1)·2^(qb−1)` for `mulSymInt32Tensors` (+ in
+place) and `2^(qa−1) + 2^(qb−1)` for the equal-scale branch of
+`addSymInt32Tensors` (`symAccumWidthForMagnitude`; these two have no
+accumulator and run unguarded — the stamp is a declaration, and an elementwise
+product with `qa + qb > 32` can still wrap int32). A consumer that reads the
+raw wire as an operand therefore proves its own budget from the real width,
+not from the operand default — the silent-wrap chain of #516. The `<= 31`
+ceiling is a requant-**target** / clone rule, not a wire rule:
+`symGridBoundsOrExit` enforces it at every `TensorConversion.c` SYM target
+site and `initSymInt32QConfigWithQMaxBits` (under `getQLike`) at the clone,
+while a 32-wide raw wire is a valid operand and requant *source* (a requant
+reads only the source's scale and the target's width). Requantize a raw output
+into a `<= 31`-bit tensor before cloning it or requantizing into it.
 
 ## Conv1d / Conv1dTransposed SYM_INT32 (#45)
 
@@ -114,7 +136,9 @@ FLOAT kernels with identical loop nest + `SlidingWindow1d` geometry:
   Conv1dTransposed's forward in PR3.
 
 Both emit **raw accumulator-range int32 mantissas** at output scale `s_in·s_w`
-(NOT range-restored) — that's the *kernel's* contract. The `executeOp` epilogue
+(NOT range-restored) and declare the static accumulator width in `qMaxBits`
+("Raw outputs declare their width" above) — that's the *kernel's* contract. The
+`executeOp` epilogue
 restores operand width at the **producer**, on every migrated path (forward
 AND backward: Linear/Conv1d/Conv1dTransposed/LayerNorm forward; the dx wire;
 the Quantization layer itself — `OUT_WRITE` routes SYM→SYM through the
@@ -253,9 +277,11 @@ only the quantization configs change; the int32 accumulator (no int64) is kept.
   exact bound.
   Assumption: stored codes obey their declared width (`qMaxBits`/`qBits` is
   metadata and is not re-checked per code). Every funnel staging route declares
-  the true width of the codes it writes (table above) and the requant cells clamp
-  to it, so only a hand-built tensor whose codes exceed its own declared width
-  can defeat the proof.
+  the true width of the codes it writes (table above), every raw kernel output
+  declares the static width of the accumulator it was written under (strict
+  rule, 32 = raw int32 range — "Raw outputs declare their width" above), and
+  the requant cells clamp to the target width, so only a hand-built tensor whose
+  codes exceed its own declared width can defeat the proof.
   Sites: `matmulIntCore` (`N = aColumns`) and `matmulIntCoreGrouped` (raw group
   partial, bounded by `min(groupSize, N)` terms, **and** the int32 accumulator of
   rescaled partials, bounded by `N` terms plus the seed), `conv1dKernelSymInt32`

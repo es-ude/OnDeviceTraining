@@ -301,6 +301,63 @@ void testAddFloat32TensorToSymInt32TensorInplace() {
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, aData, numberOfValues);
 }
 
+/* A 1-D SYM_INT32 wire over caller-owned codes. The struct owns the shape and
+ * qConfig storage that setShape / setTensorValues keep raw pointers to, so it
+ * is initialised in place and never copied. */
+typedef struct symWire {
+    tensor_t t;
+    shape_t shape;
+    size_t dims[1];
+    size_t order[1];
+    symInt32QConfig_t qc;
+    quantization_t q;
+} symWire_t;
+
+static void symWireInit(symWire_t *w, int32_t *codes, size_t n, uint8_t qMaxBits, float scale) {
+    w->dims[0] = n;
+    w->order[0] = 0;
+    setShape(&w->shape, w->dims, 1, w->order);
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &w->qc, qMaxBits);
+    w->qc.scale = scale;
+    initSymInt32Quantization(&w->qc, &w->q);
+    setTensorValues(&w->t, (uint8_t *)codes, &w->shape, &w->q, NULL);
+}
+
+/* Output wires start at a width no stamp test expects, so a missing stamp can
+ * never pass as the right one. */
+#define UNSTAMPED_WIDTH 5
+
+/* Equal scales add the raw codes, so the output declares the static bound
+ * 2^(qa-1) + 2^(qb-1) under the strict rule (#516): int12 + int12 -> 2^11 +
+ * 2^11 = 2^12 = 4096, and 4096 is not < 2^12, so 14 (one bit above the
+ * reachable positive maximum 4094 -- the rule is strict by design). */
+void testAddSymInt32TensorsEqualScaleStampsSumWidth(void) {
+    int32_t aCodes[2] = {-2048, 3}, bCodes[2] = {-2048, 5}, outCodes[2] = {0, 0};
+    symWire_t a, b, out;
+    symWireInit(&a, aCodes, 2, 12, 0.5f);
+    symWireInit(&b, bCodes, 2, 12, 0.5f);
+    symWireInit(&out, outCodes, 2, UNSTAMPED_WIDTH, 1.f);
+    addSymInt32Tensors(&a.t, &b.t, &out.t, NULL);
+    TEST_ASSERT_EQUAL_INT32(-4096, outCodes[0]);
+    TEST_ASSERT_EQUAL_INT32(8, outCodes[1]);
+    TEST_ASSERT_EQUAL_FLOAT(0.5f, out.qc.scale);
+    TEST_ASSERT_EQUAL_UINT8(14, out.qc.qMaxBits);
+    TEST_ASSERT_EQUAL_UINT8(12, a.qc.qMaxBits);
+    TEST_ASSERT_EQUAL_UINT8(12, b.qc.qMaxBits);
+}
+
+/* Mixed widths: int12 + int4 -> 2^11 + 2^3 = 2056 < 2^12 -> 13. */
+void testAddSymInt32TensorsEqualScaleStampIsStaticInTheWidths(void) {
+    int32_t aCode = 1, bCode = 1, outCode = 0;
+    symWire_t a, b, out;
+    symWireInit(&a, &aCode, 1, 12, 1.f);
+    symWireInit(&b, &bCode, 1, 4, 1.f);
+    symWireInit(&out, &outCode, 1, UNSTAMPED_WIDTH, 1.f);
+    addSymInt32Tensors(&a.t, &b.t, &out.t, NULL);
+    TEST_ASSERT_EQUAL_INT32(2, outCode);
+    TEST_ASSERT_EQUAL_UINT8(13, out.qc.qMaxBits);
+}
+
 int main(void) {
     UNITY_BEGIN();
 
@@ -313,6 +370,8 @@ int main(void) {
     RUN_TEST(testAddSymInt32TensorsInplaceExitsOnCountMismatch);
     RUN_TEST(testAddInt32TensorWithSymInt32TensorInplace);
     RUN_TEST(testAddFloat32TensorToSymInt32TensorInplace);
+    RUN_TEST(testAddSymInt32TensorsEqualScaleStampsSumWidth);
+    RUN_TEST(testAddSymInt32TensorsEqualScaleStampIsStaticInTheWidths);
 
     return UNITY_END();
 }

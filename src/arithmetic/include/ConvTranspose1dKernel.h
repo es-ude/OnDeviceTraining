@@ -44,7 +44,9 @@ void convTranspose1dKernelFloat32(tensor_t const *input, tensor_t const *weight,
 /*! Transposed 1D convolution forward (SYM_INT32). Integer scatter sibling of
  *  convTranspose1dKernelFloat32: int32 accumulator, mulInt32s, per-output-channel
  *  bias seed (refold) added in a separate pass. Output mantissas are raw
- *  accumulator range at scale s_in*s_w. Same VALID/SAME/EXPLICIT geometry; used
+ *  accumulator range at scale s_in*s_w; the output's qMaxBits is overwritten
+ *  with the static accumulator width including the bias-pass seed, up to 32
+ *  (#516; Matmul.h has the requant-before-clone rule). Same VALID/SAME/EXPLICIT geometry; used
  *  as Conv1d's dx adjoint with bias==NULL (SAME/EXPLICIT branch), and as
  *  Conv1dTransposed's forward in PR3.
  *

@@ -24,7 +24,9 @@ void initSymInt32QConfigWithQMaxBits(roundingMode_t roundingMode,
      * scale=1 regime, #227). This init is the single chokepoint every SYM_INT32
      * qConfig passes through, so a wider width never reaches a converter. */
     if (qMaxBits > 31) {
-        PRINT_ERROR("qMaxBits (%u) exceeds the cast-safe SYM_INT32 ceiling of 31 (#202)",
+        PRINT_ERROR("qMaxBits (%u) exceeds the cast-safe SYM_INT32 ceiling of 31 (#202); 32 marks "
+                    "a raw kernel output -- requantize it into a <= 31-bit tensor before cloning "
+                    "it (getQLike) or requantizing into it",
                     (unsigned)qMaxBits);
         exit(1);
     }

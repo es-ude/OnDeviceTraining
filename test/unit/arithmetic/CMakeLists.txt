@@ -56,6 +56,7 @@ add_elastic_ai_unit_test(
         MORE_LIBS
         Tensor
         TensorApi
+        Quantization
         QuantizationApi
         Arithmetic
         StorageApi
@@ -197,6 +198,7 @@ add_elastic_ai_unit_test(
         MORE_LIBS
         Arithmetic
         Tensor
+        Quantization
 )
 
 add_elastic_ai_unit_test(

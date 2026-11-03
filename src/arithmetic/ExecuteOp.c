@@ -29,11 +29,13 @@ void executeOpIdentityKernel(tensor_t **operands, size_t nOperands, tensor_t *ra
 }
 
 /* Raw int32 codes are copied unclamped: the scratch spans [-2^31, 2^31 - 1],
- * 32 bits. The width is declared here, on the op-local scratch only (set
- * first), because the public INT32 -> SYM_INT32 cell validates the
- * destination against [1, 31] and a user tensor must never carry a width > 31
- * (getQLike / the requantizers reject or mis-cast it). The accumulator guard
- * sizes its proof from this width. */
+ * 32 bits, and declares that width (set first) -- the same declaration a raw
+ * SYM kernel output carries when its static bound exceeds int32 (#516). A
+ * 32-wide tensor is an operand or a requant SOURCE only: a requant-target /
+ * clone grid never exceeds 31 (symGridBoundsOrExit at every SYM target site,
+ * initSymInt32QConfigWithQMaxBits under getQLike), and the public INT32 ->
+ * SYM_INT32 cell validates its destination against [1, 31]. The accumulator
+ * guard sizes its proof from this width. */
 static void stageInt32Raw(const tensor_t *src, tensor_t *scratch, symInt32QConfig_t *scratchQC) {
     scratchQC->qMaxBits = 32;
     scratchQC->scale = 1.0f;
@@ -535,6 +537,8 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
         initFloat32Quantization(&rawQ);
         break;
     case ARITH_SYM_INT32:
+        /* The kernel overwrites rawQC's scale and qMaxBits (its static result
+         * width, up to 32); the epilogue reads only the target's width. */
         initSymInt32QConfig(arithmetic.roundingMode, &rawQC);
         initSymInt32Quantization(&rawQC, &rawQ);
         break;

@@ -2231,6 +2231,122 @@ void testAccumulateSymFixedGridOverflowAborts(void) {
     ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoSymTensorFixedGrid(&target, inc, n, NULL));
 }
 
+/* #519 fixture: the first float in [1, 2) whose fresh-grid round trip
+ * a / (a / 127.f) lands one ulp ABOVE 127 (29 ulps above 1.0 on IEEE single
+ * precision). The same two divisions the engine performs, from the loop
+ * variable so nothing constant-folds. 0.f when no such float exists, so a
+ * caller can fail on vacuity instead of testing nothing. */
+static float firstFloatWhoseFreshQ8QuotientOvershoots(void) {
+    for (float a = 1.0f; a < 2.0f; a = nextafterf(a, 2.0f)) {
+        float s = a / 127.f;
+        if (a / s > 127.f) {
+            return a;
+        }
+    }
+    return 0.f;
+}
+
+/* Fresh (all-zero) SYM@8 accumulator of n elements under SR with the stream's
+ * first draw pinned to 1 (u = 0: draw 0 is xorshift32's fixed point and the
+ * pin helper rejects it). Decodes the codes into `codes`; returns the scale. */
+static float accumulateFreshQ8UnderSrFirstDrawOne(const float *inc, size_t n, int32_t *codes) {
+    size_t dims[] = {n};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    float qcScale[1] = {1.f};
+    symQConfig_t qc = {.scales = qcScale,
+                       .numGroups = 1,
+                       .groupSize = 0,
+                       .qBits = 8,
+                       .roundingMode = SR_HALF_AWAY};
+    quantization_t q;
+    initSymQuantization(&qc, &q);
+    uint8_t data[calcNumberOfBytesForData(&q, n)];
+    memset(data, 0, sizeof(data));
+    tensor_t target;
+    setTensorValues(&target, data, &shape, &q, NULL);
+
+    rngStream_t rs = rngStreamWithNextDraw(1u);
+    accumulateFloatIntoSymTensorFixedGrid(&target, inc, n, &rs);
+
+    symTestUnpackSignExtend(data, 8, codes, n);
+    return qc.scales[0];
+}
+
+void testFixedGridFreshPeakOneUlpAboveQMaxDoesNotAbortUnderSr(void) {
+    /* #519: a FRESH grid's scale is this increment's absMax / 127, so the
+     * peak's quotient absMax / scale is 127 up to one float ulp -- and the
+     * division can land one ulp above it (127 + 2^-17). Under SR (lift iff
+     * u < frac) any draw below 2^-17 then lifted it to 128, which
+     * packChunkGuarded rejected as a #227 overflow although nothing
+     * overflowed: the overshoot is a rounding artefact of the grid's own
+     * derivation. The fresh branch now clamps the rounded code to the grid.
+     * The engine consumes one draw per element: element 0 sees u = 0 and
+     * must come out 127 (RED without the clamp: abort); element 1 sees the
+     * NEXT draw, xorshift32(1) = 270369 -> u = 1056 * 2^-24 ~= 6.3e-5 >
+     * 2^-17, which does not lift -(127 + 2^-17) to -128. The -127 is a draw
+     * fact, not a clamp fact (that quotient sits strictly inside [-128, 127]);
+     * the law's negative branch is pinned by the single-element test below.
+     * Mutation guard: drop the fresh clamp -> abort. */
+    const float a = firstFloatWhoseFreshQ8QuotientOvershoots();
+    TEST_ASSERT_TRUE_MESSAGE(a != 0.f, "no float in [1, 2) overshoots 127 on this platform");
+
+    float inc[] = {a, -a};
+    int32_t codes[2];
+    float scale = accumulateFreshQ8UnderSrFirstDrawOne(inc, 2, codes);
+
+    TEST_ASSERT_EQUAL_FLOAT(a / 127.f, scale);
+    int32_t expected[] = {127, -127};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, codes, 2);
+}
+
+void testFixedGridFreshNegativePeakSrLiftsToGridMin(void) {
+    /* Same overshoot on the negative side, alone so it receives the pinned
+     * u = 0: quotient -(127 + 2^-17), law t - (u < -f) = -127 - 1 = -128.
+     * That is a legitimate SR outcome on a grid code that exists, so the
+     * fresh clamp must leave it alone: its lower bound is g.lo = -128, not
+     * -g.hi. Mutation guard: a symmetric [-127, 127] clamp -> -127. */
+    const float a = firstFloatWhoseFreshQ8QuotientOvershoots();
+    TEST_ASSERT_TRUE_MESSAGE(a != 0.f, "no float in [1, 2) overshoots 127 on this platform");
+
+    float inc[] = {-a};
+    int32_t codes[1];
+    (void)accumulateFreshQ8UnderSrFirstDrawOne(inc, 1, codes);
+
+    TEST_ASSERT_EQUAL_INT32(-128, codes[0]);
+}
+
+void testFixedGridFreshQ26PeakSaturatesAtGridMax(void) {
+    /* #519 x #515: from q = 26 the float image of g.hi is 2^(q-1), one past
+     * the grid, so a fresh grid's scale is absMax / 2^25 and the peak's
+     * quotient is exactly 2^25 = 33554432 -- on the grid's float image and
+     * one past its integer grid, under plain HALF_AWAY with no SR draw at
+     * all. Pins that the fresh clamp acts on the rounded CODE (a float clamp
+     * to (float)g.hi before rounding could not bring this back). Mutation
+     * guard: drop the fresh clamp -> abort. */
+    size_t dims[] = {2};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    float qcScale[1] = {1.f};
+    symQConfig_t qc = {
+        .scales = qcScale, .numGroups = 1, .groupSize = 0, .qBits = 26, .roundingMode = HALF_AWAY};
+    quantization_t q;
+    initSymQuantization(&qc, &q);
+    uint8_t data[calcNumberOfBytesForData(&q, 2)];
+    memset(data, 0, sizeof(data));
+    tensor_t target;
+    setTensorValues(&target, data, &shape, &q, NULL);
+
+    float inc[] = {33554432.f, -33554432.f};
+    accumulateFloatIntoSymTensorFixedGrid(&target, inc, 2, NULL);
+
+    TEST_ASSERT_EQUAL_FLOAT(1.f, qc.scales[0]);
+    int32_t codes[2];
+    symTestUnpackSignExtend(data, 26, codes, 2);
+    int32_t expected[] = {33554431, -33554432};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, codes, 2);
+}
+
 void testAccumulateSymRescaleRederivesGridEachCall(void) {
     /* DYNAMIC semantics: after a second accumulate with larger values, scale
      * reflects the NEW absmax (fresh grid every store), not the carried one.
@@ -8181,6 +8297,9 @@ int main(void) {
     RUN_TEST(testAccumulateSymFixedGridFirstStoreDerivesGridThenCarries);
     RUN_TEST(testAccumulateSymFixedGridZeroIncrementIsBitExact);
     RUN_TEST(testAccumulateSymFixedGridOverflowAborts);
+    RUN_TEST(testFixedGridFreshPeakOneUlpAboveQMaxDoesNotAbortUnderSr);
+    RUN_TEST(testFixedGridFreshNegativePeakSrLiftsToGridMin);
+    RUN_TEST(testFixedGridFreshQ26PeakSaturatesAtGridMax);
     RUN_TEST(testAccumulateSymRescaleRederivesGridEachCall);
     RUN_TEST(testAccumulateAsymRescaleMatchesFloatReference);
     RUN_TEST(testAccumulateAsymValueZeroAfterConfigReset);

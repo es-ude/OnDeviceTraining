@@ -159,8 +159,11 @@ attach-time validator).
 `accumulateFloatIntoSymTensorRescale` / `accumulateFloatIntoAsymTensorRescale`
 (`src/tensor/TensorConversion.c`) are the packed-grad accumulate primitives that back
 the executeOp epilogue's `SYM`/`ASYM` accumulate arms: FixedGrid carries the target's
-scale (fit-preserving; first store after a zero-fill derives the grid from the
-increment) and **aborts** on grid overflow (#227 discipline — never clamps); Rescale
+scale (fit-preserving) and **aborts** on grid overflow (#227 discipline — a carried grid
+is never clamped); the first store after a zero-fill derives the grid from the increment
+and clamps that store's rounded codes to the grid (#519: the derived scale puts every
+quotient within one float ulp of the grid's float image, so a peak that rounds or
+SR-lifts past it is a derivation artefact, not an overflow); Rescale
 re-derives a fresh grid every store (absmax for SYM, affine min/max for ASYM). Both are
 direct-call only, not `conversionMatrix` cells (there is no dtype-pair to key a matrix
 cell on — the second operand is a raw float increment, not a tensor).

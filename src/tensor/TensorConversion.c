@@ -1792,7 +1792,8 @@ static void accumulateIntoSymFixedGridEngine(tensor_t *target, const incSrc_t *i
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
 
     /* phase A: all-zero scan of the packed accumulator (reads only) */
-    if (packedPayloadIsAllZero(target->data, qc->qBits, n)) {
+    const bool fresh = packedPayloadIsAllZero(target->data, qc->qBits, n);
+    if (fresh) {
         /* Fresh accumulator (post-initTensor zero-fill or post-optimizerZeroGrad
          * memset): derive the grid from the increment (absmax/qMax; absmax
          * 0 -> scale 1.f, packFloatBufferAsSym convention). */
@@ -1821,6 +1822,15 @@ static void accumulateIntoSymFixedGridEngine(tensor_t *target, const incSrc_t *i
      * element order (SR stream identical to the old whole-tensor pass);
      * in-place safe: chunk k is fully read before chunk k is rewritten and
      * the code width is unchanged, so offsets never shift. */
+    /* A carried grid is never clamped: growing past it is an overflow and
+     * packChunkGuarded aborts (packed-grad D2, #227 discipline). A fresh grid
+     * may clamp (#519): its scale is this increment's absMax / (float)g.hi,
+     * so every quotient sits within one float ulp of the grid's float image
+     * (from q = 26 that image is itself one past the integer grid); a peak
+     * that rounds or SR-lifts off the top is an artefact of the grid's own
+     * derivation, never an overflow. The integer clamp after rounding is the
+     * whole fix: a float clamp before rounding would yield the same code
+     * from the same draw at every width. */
     float scale = qc->scales[0];
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
@@ -1829,8 +1839,10 @@ static void accumulateIntoSymFixedGridEngine(tensor_t *target, const incSrc_t *i
         for (size_t i = 0; i < count; i++) {
             codes[i] =
                 roundByMode(((float)mant[i] * scale + incBuf[i]) / scale, qc->roundingMode, rs);
+            if (fresh) {
+                codes[i] = clampInt32(codes[i], g.lo, g.hi);
+            }
         }
-        /* No clamp: packChunkGuarded aborts on overflow (packed-grad D2, #227 discipline). */
         packChunkGuarded(codes, count, target->data, qc->qBits, off,
                          "accumulateFloatIntoSymTensorFixedGrid");
     }

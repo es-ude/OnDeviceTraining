@@ -137,9 +137,32 @@ SYM_ACCUM_NOINLINE void conv1dSymLoopsChecked(const convSymView_t *v, const symA
     conv1dSymLoops(v, true, site);
 }
 
+/* Every operand is read through symInt32QConfig_t / as int32 codes, so a
+ * different storage dtype must abort here instead of being reinterpreted. The
+ * grouped entries pass the weight as a SYM_INT32 view too (its per-group
+ * qConfig rides in weightGroups), so the same check holds for them. */
+static void conv1dValidateSymOperand(const tensor_t *t, const char *kernelName, const char *what) {
+    if (t->quantization->type != SYM_INT32) {
+        PRINT_ERROR("%s: %s must be SYM_INT32", kernelName, what);
+        exit(1);
+    }
+}
+
+static void conv1dValidateSymOperands(const tensor_t *input, const tensor_t *weight,
+                                      const tensor_t *bias, const tensor_t *output,
+                                      const char *kernelName) {
+    conv1dValidateSymOperand(input, kernelName, "input");
+    conv1dValidateSymOperand(weight, kernelName, "weight");
+    if (bias != NULL) {
+        conv1dValidateSymOperand(bias, kernelName, "bias");
+    }
+    conv1dValidateSymOperand(output, kernelName, "output");
+}
+
 void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_t const *bias,
                           kernel_t const *kernel, size_t groups, tensor_t *output,
                           rngStream_t *rs) {
+    conv1dValidateSymOperands(input, weight, bias, output, "conv1dKernelSymInt32");
     size_t batch = input->shape->dimensions[0];
     size_t inChannels = input->shape->dimensions[1];
     size_t inputLength = input->shape->dimensions[2];
@@ -351,6 +374,7 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                                  tensor_t const *bias, kernel_t const *kernel, size_t groups,
                                  tensor_t *output, const symQConfig_t *weightGroups,
                                  rngStream_t *rs) {
+    conv1dValidateSymOperands(input, weight, bias, output, "conv1dKernelSymInt32Grouped");
     size_t batch = input->shape->dimensions[0];
     size_t inChannels = input->shape->dimensions[1];
     size_t inputLength = input->shape->dimensions[2];

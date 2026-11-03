@@ -989,6 +989,10 @@ static int32_t gCtW[CT_MAXN];
 static int32_t gCtY[CT_MAXN * 2];
 static uint8_t gCtOutBits; /* output qMaxBits after the kernel returned */
 
+/* Operand whose storage dtype ctRunOutCh swaps to FLOAT32 (dtype-validation tests). */
+typedef enum { CT_POISON_NONE, CT_POISON_X, CT_POISON_W, CT_POISON_BIAS, CT_POISON_Y } ctPoison_t;
+static ctPoison_t gCtPoison = CT_POISON_NONE;
+
 /* Output wires start at a width no stamp test expects, so a missing stamp can
  * never pass as the right one (the kernels never read the output width). */
 #define UNSTAMPED_WIDTH 5
@@ -1026,6 +1030,18 @@ static void ctRunOutCh(size_t inCh, size_t len, size_t k, uint8_t xBits, uint8_t
     initSymInt32Quantization(&wQC, &wQ);
     initSymInt32Quantization(&yQC, &yQ);
     initSymInt32Quantization(&biasQC, &biasQ);
+    if (gCtPoison == CT_POISON_X) {
+        initFloat32Quantization(&xQ);
+    }
+    if (gCtPoison == CT_POISON_W) {
+        initFloat32Quantization(&wQ);
+    }
+    if (gCtPoison == CT_POISON_BIAS) {
+        initFloat32Quantization(&biasQ);
+    }
+    if (gCtPoison == CT_POISON_Y) {
+        initFloat32Quantization(&yQ);
+    }
     int32_t biasData[CT_MAX_OUT_CH] = {0};
     for (size_t oc = 0; biasCodes != NULL && oc < outCh; oc++) {
         biasData[oc] = biasCodes[oc];
@@ -1306,8 +1322,44 @@ void testConvTranspose1dKernelSymStampCountsTheLargestBiasSeedOverChannels(void)
     TEST_ASSERT_EQUAL_UINT8(12, gCtOutBits);
 }
 
+/* Operand dtype validation: a non-SYM_INT32 operand would be read through the
+ * wrong qConfig struct, so each kernel must abort naming itself and the operand. */
+static const int32_t kCtBias = 0;
+#define CT_DTYPE_DEATH(name, poison, numGroups, bias, banner)                                      \
+    void name(void) {                                                                              \
+        ctFill(2, 3, 3, false);                                                                    \
+        gCtPoison = poison;                                                                        \
+        ASSERT_EXITS_WITH_OUTPUT(1, banner, ctRun(2, 1, 1, 12, 12, bias, numGroups));              \
+        gCtPoison = CT_POISON_NONE;                                                                \
+    }
+
+CT_DTYPE_DEATH(testConvT1dKernelSymRejectsFloatInput, CT_POISON_X, 0, NULL,
+               "convTranspose1dKernelSymInt32: input must be SYM_INT32")
+CT_DTYPE_DEATH(testConvT1dKernelSymRejectsFloatWeight, CT_POISON_W, 0, NULL,
+               "convTranspose1dKernelSymInt32: weight must be SYM_INT32")
+CT_DTYPE_DEATH(testConvT1dKernelSymRejectsFloatBias, CT_POISON_BIAS, 0, &kCtBias,
+               "convTranspose1dKernelSymInt32: bias must be SYM_INT32")
+CT_DTYPE_DEATH(testConvT1dKernelSymRejectsFloatOutput, CT_POISON_Y, 0, NULL,
+               "convTranspose1dKernelSymInt32: output must be SYM_INT32")
+CT_DTYPE_DEATH(testConvT1dKernelSymGroupedRejectsFloatInput, CT_POISON_X, 2, NULL,
+               "convTranspose1dKernelSymInt32Grouped: input must be SYM_INT32")
+CT_DTYPE_DEATH(testConvT1dKernelSymGroupedRejectsFloatWeight, CT_POISON_W, 2, NULL,
+               "convTranspose1dKernelSymInt32Grouped: weight must be SYM_INT32")
+CT_DTYPE_DEATH(testConvT1dKernelSymGroupedRejectsFloatBias, CT_POISON_BIAS, 2, &kCtBias,
+               "convTranspose1dKernelSymInt32Grouped: bias must be SYM_INT32")
+CT_DTYPE_DEATH(testConvT1dKernelSymGroupedRejectsFloatOutput, CT_POISON_Y, 2, NULL,
+               "convTranspose1dKernelSymInt32Grouped: output must be SYM_INT32")
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testConvT1dKernelSymRejectsFloatInput);
+    RUN_TEST(testConvT1dKernelSymRejectsFloatWeight);
+    RUN_TEST(testConvT1dKernelSymRejectsFloatBias);
+    RUN_TEST(testConvT1dKernelSymRejectsFloatOutput);
+    RUN_TEST(testConvT1dKernelSymGroupedRejectsFloatInput);
+    RUN_TEST(testConvT1dKernelSymGroupedRejectsFloatWeight);
+    RUN_TEST(testConvT1dKernelSymGroupedRejectsFloatBias);
+    RUN_TEST(testConvT1dKernelSymGroupedRejectsFloatOutput);
     RUN_TEST(testConvTranspose1dKernelSymStampsResultWidthIncludesBiasSeed);
     RUN_TEST(testConvTranspose1dKernelSymGroupedStampsRescaledWidthIncludesBiasSeed);
     RUN_TEST(testConvTranspose1dKernelSymStampCountsTheLargestBiasSeedOverChannels);

@@ -827,6 +827,10 @@ static symInt32QConfig_t gCgYQC;
 static quantization_t gCgYQ;
 static uint8_t gCgOutBits; /* output qMaxBits after the kernel returned */
 
+/* Operand whose storage dtype cgRun swaps to FLOAT32 (dtype-validation tests). */
+typedef enum { CG_POISON_NONE, CG_POISON_X, CG_POISON_W, CG_POISON_BIAS, CG_POISON_Y } cgPoison_t;
+static cgPoison_t gCgPoison = CG_POISON_NONE;
+
 /* Output wires start at a width no stamp test expects, so a missing stamp can
  * never pass as the right one (the kernels never read the output width). */
 #define UNSTAMPED_WIDTH 5
@@ -870,6 +874,18 @@ static int32_t cgRun(size_t inCh, size_t len, size_t k, uint8_t xBits, uint8_t w
     initSymInt32Quantization(&wQC, &wQ);
     initSymInt32Quantization(&gCgYQC, &gCgYQ);
     initSymInt32Quantization(&biasQC, &biasQ);
+    if (gCgPoison == CG_POISON_X) {
+        initFloat32Quantization(&xQ);
+    }
+    if (gCgPoison == CG_POISON_W) {
+        initFloat32Quantization(&wQ);
+    }
+    if (gCgPoison == CG_POISON_BIAS) {
+        initFloat32Quantization(&biasQ);
+    }
+    if (gCgPoison == CG_POISON_Y) {
+        initFloat32Quantization(&gCgYQ);
+    }
     int32_t *y = gCgY;
     int32_t biasData = biasCode ? *biasCode : 0;
     tensor_t x, w, yT, bias;
@@ -1102,8 +1118,44 @@ void testConv1dKernelSymChainedRawOutputOverflowAborts(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "widths (24, 12)", cgChainIntoMatmul());
 }
 
+/* Operand dtype validation: a non-SYM_INT32 operand would be read through the
+ * wrong qConfig struct, so each kernel must abort naming itself and the operand. */
+static const int32_t kBias = 0;
+#define CG_DTYPE_DEATH(name, poison, numGroups, bias, banner)                                      \
+    void name(void) {                                                                              \
+        cgFill(2, 3, 3, false);                                                                    \
+        gCgPoison = poison;                                                                        \
+        ASSERT_EXITS_WITH_OUTPUT(1, banner, (void)cgRun(2, 1, 1, 12, 12, bias, numGroups));        \
+        gCgPoison = CG_POISON_NONE;                                                                \
+    }
+
+CG_DTYPE_DEATH(testConv1dKernelSymRejectsFloatInput, CG_POISON_X, 0, NULL,
+               "conv1dKernelSymInt32: input must be SYM_INT32")
+CG_DTYPE_DEATH(testConv1dKernelSymRejectsFloatWeight, CG_POISON_W, 0, NULL,
+               "conv1dKernelSymInt32: weight must be SYM_INT32")
+CG_DTYPE_DEATH(testConv1dKernelSymRejectsFloatBias, CG_POISON_BIAS, 0, &kBias,
+               "conv1dKernelSymInt32: bias must be SYM_INT32")
+CG_DTYPE_DEATH(testConv1dKernelSymRejectsFloatOutput, CG_POISON_Y, 0, NULL,
+               "conv1dKernelSymInt32: output must be SYM_INT32")
+CG_DTYPE_DEATH(testConv1dKernelSymGroupedRejectsFloatInput, CG_POISON_X, 2, NULL,
+               "conv1dKernelSymInt32Grouped: input must be SYM_INT32")
+CG_DTYPE_DEATH(testConv1dKernelSymGroupedRejectsFloatWeight, CG_POISON_W, 2, NULL,
+               "conv1dKernelSymInt32Grouped: weight must be SYM_INT32")
+CG_DTYPE_DEATH(testConv1dKernelSymGroupedRejectsFloatBias, CG_POISON_BIAS, 2, &kBias,
+               "conv1dKernelSymInt32Grouped: bias must be SYM_INT32")
+CG_DTYPE_DEATH(testConv1dKernelSymGroupedRejectsFloatOutput, CG_POISON_Y, 2, NULL,
+               "conv1dKernelSymInt32Grouped: output must be SYM_INT32")
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testConv1dKernelSymRejectsFloatInput);
+    RUN_TEST(testConv1dKernelSymRejectsFloatWeight);
+    RUN_TEST(testConv1dKernelSymRejectsFloatBias);
+    RUN_TEST(testConv1dKernelSymRejectsFloatOutput);
+    RUN_TEST(testConv1dKernelSymGroupedRejectsFloatInput);
+    RUN_TEST(testConv1dKernelSymGroupedRejectsFloatWeight);
+    RUN_TEST(testConv1dKernelSymGroupedRejectsFloatBias);
+    RUN_TEST(testConv1dKernelSymGroupedRejectsFloatOutput);
     RUN_TEST(testConv1dKernelSymStampsResultWidthIncludesSeed);
     RUN_TEST(testConv1dKernelSymGroupedStampsRescaledWidth);
     RUN_TEST(testConv1dKernelSymChainedRawOutputOverflowAborts);

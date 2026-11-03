@@ -243,9 +243,32 @@ SYM_ACCUM_NOINLINE void convTSymScatterChecked(const convTSymView_t *v,
     convTSymScatter(v, true, site);
 }
 
+/* Every operand is read through symInt32QConfig_t / as int32 codes, so a
+ * different storage dtype must abort here instead of being reinterpreted. The
+ * grouped entries pass the weight as a SYM_INT32 view too (its per-group
+ * qConfig rides in weightGroups), so the same check holds for them. */
+static void convT1dValidateSymOperand(const tensor_t *t, const char *kernelName, const char *what) {
+    if (t->quantization->type != SYM_INT32) {
+        PRINT_ERROR("%s: %s must be SYM_INT32", kernelName, what);
+        exit(1);
+    }
+}
+
+static void convT1dValidateSymOperands(const tensor_t *input, const tensor_t *weight,
+                                       const tensor_t *bias, const tensor_t *output,
+                                       const char *kernelName) {
+    convT1dValidateSymOperand(input, kernelName, "input");
+    convT1dValidateSymOperand(weight, kernelName, "weight");
+    if (bias != NULL) {
+        convT1dValidateSymOperand(bias, kernelName, "bias");
+    }
+    convT1dValidateSymOperand(output, kernelName, "output");
+}
+
 void convTranspose1dKernelSymInt32(tensor_t const *input, tensor_t const *weight,
                                    tensor_t const *bias, kernel_t const *kernel, size_t groups,
                                    size_t outputPadding, tensor_t *output, rngStream_t *rs) {
+    convT1dValidateSymOperands(input, weight, bias, output, "convTranspose1dKernelSymInt32");
     size_t batch = input->shape->dimensions[0];
     size_t inChannels = input->shape->dimensions[1];
     size_t inputLength = input->shape->dimensions[2];
@@ -421,6 +444,7 @@ void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const 
                                           tensor_t const *bias, kernel_t const *kernel,
                                           size_t groups, size_t outputPadding, tensor_t *output,
                                           const symQConfig_t *weightGroups, rngStream_t *rs) {
+    convT1dValidateSymOperands(input, weight, bias, output, "convTranspose1dKernelSymInt32Grouped");
     size_t batch = input->shape->dimensions[0];
     size_t inChannels = input->shape->dimensions[1];
     size_t inputLength = input->shape->dimensions[2];

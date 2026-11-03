@@ -180,6 +180,7 @@ add_elastic_ai_unit_test(
         SgdApi
         Sgd
         Optimizer
+        SymAccumGuard
         odt_test_death
         odt_test_layer_builders
 )

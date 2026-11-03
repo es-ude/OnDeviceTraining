@@ -60,7 +60,11 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
                     tensor_t *propLossTensor, const layerExec_t *exec);
 
 /* Raw-emit kernels: each writes into the passed tensor without accumulating;
- * accumulation and width restoration are handled by the executeOp epilogue. */
+ * accumulation and width restoration are handled by the executeOp epilogue.
+ * The SYM_INT32 ones overwrite the output's scale AND qMaxBits with the static
+ * width of the codes they emit, up to 32 (#516; Matmul.h has the
+ * requant-before-clone rule) -- the bias-grad sum from its value-sum site,
+ * the weight grad and dx through the stamped SYM matmul. */
 void linearCalcWeightGradsFloat32(tensor_t *forwardInput, tensor_t *loss, tensor_t *weightGrads);
 void linearCalcBiasGradsFloat32(tensor_t *loss, tensor_t *biasGrad);
 void linearCalcPropLossFloat32(tensor_t *loss, tensor_t *weights, tensor_t *propLoss);

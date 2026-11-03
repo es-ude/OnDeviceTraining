@@ -340,8 +340,12 @@ void linearCalcBiasGradsSymInt32(tensor_t *biasGrads, tensor_t *loss) {
     } else {
         linearBiasGradSumLoopsChecked(l, bg, numFeatures, batch, &site);
     }
-    ((symInt32QConfig_t *)biasGrads->quantization->qConfig)->scale =
-        ((symInt32QConfig_t *)loss->quantization->qConfig)->scale;
+    /* Raw output: the loss scale and the static width of the sum (#516). On a
+     * user tensor (not the funnel scratch) this output can re-enter a SYM op
+     * as an operand, whose guard sizes its proof from the declared width. */
+    symInt32QConfig_t *bgQC = biasGrads->quantization->qConfig;
+    bgQC->scale = ((symInt32QConfig_t *)loss->quantization->qConfig)->scale;
+    bgQC->qMaxBits = symAccumResultBits(&site);
 }
 
 void linearCalcPropLossSymInt32(tensor_t *weights, tensor_t *loss, tensor_t *propLoss) {

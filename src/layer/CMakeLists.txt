@@ -207,6 +207,7 @@ target_link_libraries(Layer PRIVATE
 add_library(Linear Linear.c)
 target_include_directories(Linear PUBLIC include)
 target_link_libraries(Linear PRIVATE
+        SymAccumGuard
         LayerExec
         RNG
         DTypes

@@ -21,6 +21,7 @@
 #include "Rounding.h"
 #include "SgdApi.h"
 #include "StorageApi.h"
+#include "SymAccumGuard.h"
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
@@ -3955,6 +3956,56 @@ void testLinearBiasGradSymRejectsIndivisibleLoss(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "not divisible", linearCalcBiasGradsSymInt32(bg, loss));
 }
 
+/* ---- Raw grad outputs declare their width (#516) ----
+ * linearCalcBiasGradsSymInt32 is a public raw producer: called on a user tensor
+ * (not the funnel scratch) its output can re-enter a SYM op as an operand, so
+ * it must carry the static width of the sum, not the 12-bit init default. */
+static uint8_t linearSymBiasGradWidth(size_t batch, int32_t code, uint8_t bits) {
+    tensor_t *loss = symSumLoss(batch, code, bits);
+    tensor_t *bg = initTensor(shape2(1, 1), quantizationInitSymInt32(HALF_AWAY), NULL);
+    linearCalcBiasGradsSymInt32(bg, loss);
+    uint8_t width = ((symInt32QConfig_t *)bg->quantization->qConfig)->qMaxBits;
+    freeTensor(bg);
+    freeTensor(loss);
+    return width;
+}
+
+/* A value sum of 12-bit codes is bounded by batch * 2^11, which is never below
+ * 2^11, so the stamp can never equal the 12-bit init width: batch 1 -> 2048 ->
+ * 13 (strict), batch 3 -> 6144 -> 14. */
+void testLinearBiasGradSymStampsTheSumWidth(void) {
+    symAccumSite_t one = symAccumSiteInitSum("t", 1, 12);
+    TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&one), linearSymBiasGradWidth(1, 7, 12));
+    TEST_ASSERT_EQUAL_UINT8(13, linearSymBiasGradWidth(1, 7, 12));
+    symAccumSite_t three = symAccumSiteInitSum("t", 3, 12);
+    TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&three), linearSymBiasGradWidth(3, 7, 12));
+    TEST_ASSERT_EQUAL_UINT8(14, linearSymBiasGradWidth(3, 7, 12));
+}
+
+/* Two 31-bit codes are beyond the proof (term limit 1) but their sum fits, so
+ * the checked twin returns; the output declares the raw int32 range. */
+void testLinearBiasGradSymStampIs32WhenTheSumIsUnprovable(void) {
+    TEST_ASSERT_EQUAL_UINT8(32, linearSymBiasGradWidth(2, (1 << 30) - 1, 31));
+}
+
+/* linearCalcWeightGradsSymInt32 emits through the stamped SYM matmul, so its
+ * output already carries the product width (12 x 12 codes, K = batch = 1:
+ * 2^22 -> 24) -- pinned so the layer never grows a second stamp. */
+void testLinearWeightGradSymIsStampedByTheMatmul(void) {
+    tensor_t *loss = symSumLoss(1, 3, 12);
+    tensor_t *input = symSumLoss(1, 5, 12);
+    tensor_t *wg = initTensor(shape2(1, 1), quantizationInitSymInt32WithBits(HALF_AWAY, 5), NULL);
+    linearCalcWeightGradsSymInt32(loss, input, wg);
+    TEST_ASSERT_EQUAL_INT32(15, ((int32_t *)wg->data)[0]);
+    symAccumSite_t site = symAccumSiteInit("t", 1, 12, 12, 0);
+    uint8_t width = ((symInt32QConfig_t *)wg->quantization->qConfig)->qMaxBits;
+    TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&site), width);
+    TEST_ASSERT_EQUAL_UINT8(24, width);
+    freeTensor(wg);
+    freeTensor(input);
+    freeTensor(loss);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConvertInt32ToSymInt32UserTensorStaysCloneable);
@@ -4050,5 +4101,8 @@ int main(void) {
     RUN_TEST(testLinearBiasGradSymSumBannerNamesWireWidth);
     RUN_TEST(testLinearBiasGradSymSumIntermediateOverflowAborts);
     RUN_TEST(testLinearBiasGradSymRejectsIndivisibleLoss);
+    RUN_TEST(testLinearBiasGradSymStampsTheSumWidth);
+    RUN_TEST(testLinearBiasGradSymStampIs32WhenTheSumIsUnprovable);
+    RUN_TEST(testLinearWeightGradSymIsStampedByTheMatmul);
     return UNITY_END();
 }

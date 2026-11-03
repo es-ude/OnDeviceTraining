@@ -103,32 +103,34 @@ from):
 
 A BFP-stored operand is denied under `ARITH_SYM_INT32`.
 
-**Raw outputs declare their width (#516).** The public SYM_INT32 kernels that
-emit raw accumulator or product codes overwrite the output's `qMaxBits` with the
+**Raw outputs declare their width (#516).** The public SYM_INT32 producers of
+raw accumulator or product codes overwrite the output's `qMaxBits` with the
 *static* bound of those codes: the smallest `w` with `B < 2^(w-1)` (**strict**
 `<`, so `B = 2^k` declares `k + 2` bits and the guard's `|code| <= 2^(w-1)`
 reading of the stamp holds), 32 when `B >= 2^31` — the raw int32 range, which
 the guard already treats as unprovable. `B` is the bound the guard proves:
 `N·2^(qa−1)·2^(qb−1) + max|seed|` for the matmul family and the Conv1d / ConvT
 kernels (the slacked bound for the grouped twins, the bias-pass seed for ConvT;
-`symAccumResultBits`), `2^(qa−1)·2^(qb−1)` for `mulSymInt32Tensors` (+ in
-place) and `2^(qa−1) + 2^(qb−1)` for the equal-scale branch of
-`addSymInt32Tensors` (`symAccumWidthForMagnitude`; these two have no
-accumulator and run unguarded — the stamp is a declaration, and an elementwise
-product with `qa + qb > 32` is signed-overflow undefined behaviour, documented
-rather than guarded). A consumer that reads the raw wire as an operand
-therefore proves its own budget from the real width, not from the operand
-default — the silent-wrap chain of #516. The grad producers that `src/`
-reaches only through the funnel's static kernels — the Linear bias-grad sum,
-the Conv1d / ConvT weight-grad scatter and bias-grad sum — write the funnel's
-raw scratch, whose width the ACC epilogue never reads (it rescales by the two
-scales and the target's width), so they set `scale` only and the scratch keeps
-its init width. The `<= 31` ceiling is a requant-**target** / clone rule, not
-a wire rule: `symGridBoundsOrExit` enforces it at every `TensorConversion.c`
-SYM target site and `initSymInt32QConfigWithQMaxBits` (under `getQLike`) at
-the clone, while a 32-wide raw wire is a valid operand and requant *source* (a
-requant reads only the source's scale and the target's width). Requantize a
-raw output into a `<= 31`-bit tensor before cloning it or requantizing into it.
+`symAccumResultBits`), `N·2^(q−1)` over the loss wire for the public Linear
+bias-grad sum `linearCalcBiasGradsSymInt32` (its value-sum site; the Linear
+weight grad and dx are stamped by the matmul they call), `2^(qa−1)·2^(qb−1)`
+for `mulSymInt32Tensors` (+ in place) and `2^(qa−1) + 2^(qb−1)` for the
+equal-scale branch of `addSymInt32Tensors` (`symAccumWidthForMagnitude`; these
+two have no accumulator and run unguarded — the stamp is a declaration, and an
+elementwise product with `qa + qb > 32` is signed-overflow undefined behaviour,
+documented rather than guarded). A consumer that reads the raw wire as an
+operand therefore proves its own budget from the real width, not from the
+operand default — the silent-wrap chain of #516. The Conv1d / ConvT
+weight-grad scatter and bias-grad sum are file-static funnel kernels: their
+raw wire is seen only by the ACC epilogue, which reads the intermediate's
+scale and the target's width and never the raw width, so they set `scale`
+only and the scratch keeps its init width. The `<= 31` ceiling is a
+requant-**target** / clone rule, not a wire rule: `symGridBoundsOrExit`
+enforces it at every `TensorConversion.c` SYM target site and
+`initSymInt32QConfigWithQMaxBits` (under `getQLike`) at the clone, while a
+32-wide raw wire is a valid operand and requant *source* (a requant reads only
+the source's scale and the target's width). Requantize a raw output into a
+`<= 31`-bit tensor before cloning it or requantizing into it.
 
 ## Conv1d / Conv1dTransposed SYM_INT32 (#45)
 
@@ -282,10 +284,10 @@ only the quantization configs change; the int32 accumulator (no int64) is kept.
   exact bound.
   Assumption: stored codes obey their declared width (`qMaxBits`/`qBits` is
   metadata and is not re-checked per code). Every funnel staging route declares
-  the true width of the codes it writes (table above), every public raw kernel
-  output declares the static width of the accumulator it was written under
+  the true width of the codes it writes (table above), every public raw
+  producer declares the static width of the accumulator it was written under
   (strict rule, 32 = raw int32 range — "Raw outputs declare their width" above;
-  the funnel-only grad producers named there keep the scratch width, which no
+  the file-static Conv1d / ConvT grad kernels keep the scratch width, which no
   proof reads), and the requant cells clamp to the target width, so only a
   hand-built tensor whose codes exceed its own declared width can defeat the
   proof.

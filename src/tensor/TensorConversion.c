@@ -8,6 +8,7 @@
 #include "Common.h"
 #include "DTypes.h"
 #include "MinMax.h"
+#include "SymGridBounds.h"
 #include "Tensor.h"
 #include "TensorConversion.h"
 #include "math.h"
@@ -479,10 +480,10 @@ void convertFloatTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputT
     float absMax = findAbsMaxFloat(inputTensor->data, numberOfElements);
 
     symInt32QConfig_t *symInt32QC = outputTensor->quantization->qConfig;
-    uint8_t qMaxBits = symInt32QC->qMaxBits;
+    const symGridBounds_t g =
+        symGridBoundsOrExit(symInt32QC->qMaxBits, "convertFloatTensorToSymInt32Tensor");
 
-    const float qMax = powf(2, (float)qMaxBits - 1) - 1;
-    const float qMin = -powf(2, (float)qMaxBits - 1);
+    const float qMax = (float)g.hi;
 
     float scale;
     if (absMax == 0.f) {
@@ -498,9 +499,8 @@ void convertFloatTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputT
     float *inputFloat = (float *)inputTensor->data;
 
     for (size_t i = 0; i < numberOfElements; i++) {
-        outputInt32[i] =
-            clampInt32(roundByMode(inputFloat[i] / scale, outputSymInt32QC->roundingMode, rs),
-                       (int32_t)qMin, (int32_t)qMax);
+        outputInt32[i] = clampInt32(
+            roundByMode(inputFloat[i] / scale, outputSymInt32QC->roundingMode, rs), g.lo, g.hi);
     }
 }
 
@@ -568,8 +568,9 @@ void requantSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStr
      * (inputTensor == outputTensor) both pointers alias the same config */
     float inScale = inputSymInt32QC->scale;
 
-    const float qMax = powf(2, (float)outputSymInt32QC->qMaxBits - 1) - 1;
-    const float qMin = -powf(2, (float)outputSymInt32QC->qMaxBits - 1);
+    const symGridBounds_t g =
+        symGridBoundsOrExit(outputSymInt32QC->qMaxBits, "requantSymInt32Tensor");
+    const float qMax = (float)g.hi;
 
     int32_t *inputInt32 = (int32_t *)inputTensor->data;
     int32_t *outputInt32 = (int32_t *)outputTensor->data;
@@ -595,7 +596,7 @@ void requantSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStr
     for (size_t i = 0; i < numberOfElements; i++) {
         outputInt32[i] = clampInt32(roundByMode((float)inputInt32[i] * (inScale / scale),
                                                 outputSymInt32QC->roundingMode, rs),
-                                    (int32_t)qMin, (int32_t)qMax);
+                                    g.lo, g.hi);
     }
 }
 
@@ -615,21 +616,24 @@ void requantSymInt32TensorToScale(tensor_t *inputTensor, tensor_t *outputTensor,
         exit(1);
     }
 
-    const float qMax = powf(2, (float)outputSymInt32QC->qMaxBits - 1) - 1;
-    const float qMin = -powf(2, (float)outputSymInt32QC->qMaxBits - 1);
+    const symGridBounds_t g =
+        symGridBoundsOrExit(outputSymInt32QC->qMaxBits, "requantSymInt32TensorToScale");
+    const float qMax = (float)g.hi;
+    const float qMin = (float)g.lo;
 
     int32_t *inputInt32 = (int32_t *)inputTensor->data;
     int32_t *outputInt32 = (int32_t *)outputTensor->data;
 
     /* single same-index read-then-write pass — shared-buffer in-place safe;
-     * clamp saturates at qMin/qMax BY DESIGN (Deutel Eq. 4 analog); the integer
-     * clamp after the rounding is defensive: exact SR never moves an exactly
-     * representable qMax/qMin, it covers inexact float grid bounds (#511) */
+     * clamp saturates at qMin/qMax BY DESIGN (Deutel Eq. 4 analog). The float
+     * pre-clamp keeps the cast after rounding defined; the integer clamp is the
+     * grid itself: from q = 26 on the float image of the grid maximum sits one
+     * code past it (#515), and exact SR never moves an exact bound (#511) */
     for (size_t i = 0; i < numberOfElements; i++) {
         outputInt32[i] = clampInt32(
             roundByMode(clamp(((float)inputInt32[i] * inScale) / targetScale, qMin, qMax),
                         outputSymInt32QC->roundingMode, rs),
-            (int32_t)qMin, (int32_t)qMax);
+            g.lo, g.hi);
     }
 }
 
@@ -935,8 +939,8 @@ void convertAsymTensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTensor,
             }
         }
     }
-    const float qMax = powf(2, (float)outQC->qBits - 1) - 1;
-    const float qMin = -powf(2, (float)outQC->qBits - 1);
+    const symGridBounds_t g = symGridBoundsOrExit(outQC->qBits, "convertAsymTensorToSymTensor");
+    const float qMax = (float)g.hi;
     float outScale = (absMax == 0.f) ? 1.f : absMax / qMax;
     outQC->scales[0] = outScale;
     /* pass 2: chunked unpack + emit -- one roundByMode per element, element order */
@@ -945,8 +949,7 @@ void convertAsymTensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTensor,
         unpackZeroExtendChunk(inputTensor->data, inBits, off, count, codes);
         for (size_t i = 0; i < count; i++) {
             float v = (float)(codes[i] - inZp) * inScale;
-            codes[i] = clampInt32(roundByMode(v / outScale, outQC->roundingMode, rs), (int32_t)qMin,
-                                  (int32_t)qMax);
+            codes[i] = clampInt32(roundByMode(v / outScale, outQC->roundingMode, rs), g.lo, g.hi);
         }
         packChunkGuarded(codes, count, outputTensor->data, outQC->qBits, off,
                          "convertAsymTensorToSymTensor");
@@ -985,8 +988,9 @@ void unsupportedConversionTypes(tensor_t *inputTensor, tensor_t *outputTensor, r
 
 static void packFloatBufferAsSym(const float *values, size_t n, symQConfig_t *outQC, uint8_t *dst,
                                  const char *what, rngStream_t *rs) {
-    const float qMax = powf(2, (float)outQC->qBits - 1) - 1;
-    const float qMin = -powf(2, (float)outQC->qBits - 1);
+    /* `grid`, not `g`: the grouped path below names its group index g */
+    const symGridBounds_t grid = symGridBoundsOrExit(outQC->qBits, what);
+    const float qMax = (float)grid.hi;
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
 
     if (outQC->numGroups == 1) {
@@ -1000,7 +1004,7 @@ static void packFloatBufferAsSym(const float *values, size_t n, symQConfig_t *ou
                 n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
             for (size_t i = 0; i < count; i++) {
                 codes[i] = clampInt32(roundByMode(values[off + i] / scale, outQC->roundingMode, rs),
-                                      (int32_t)qMin, (int32_t)qMax);
+                                      grid.lo, grid.hi);
             }
             packChunkGuarded(codes, count, dst, outQC->qBits, off, what);
         }
@@ -1035,7 +1039,7 @@ static void packFloatBufferAsSym(const float *values, size_t n, symQConfig_t *ou
             for (size_t i = 0; i < runLen; i++) {
                 codes[idx - off + i] =
                     clampInt32(roundByMode(values[idx + i] / scale, outQC->roundingMode, rs),
-                               (int32_t)qMin, (int32_t)qMax);
+                               grid.lo, grid.hi);
             }
             idx = runEnd;
         }
@@ -1440,8 +1444,9 @@ void convertBfpTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTen
             }
         }
     }
-    const float qMax = powf(2, (float)outQC->qMaxBits - 1) - 1;
-    const float qMin = -powf(2, (float)outQC->qMaxBits - 1);
+    const symGridBounds_t g =
+        symGridBoundsOrExit(outQC->qMaxBits, "convertBfpTensorToSymInt32Tensor");
+    const float qMax = (float)g.hi;
     float scale = (absMax == 0.f) ? 1.f : absMax / qMax;
     outQC->scale = scale;
     /* pass 2: chunked emit -- one roundByMode per element (TARGET config's
@@ -1450,8 +1455,8 @@ void convertBfpTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTen
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         dequantChunkToFloat(inputTensor, off, count, buf);
         for (size_t i = 0; i < count; i++) {
-            out[off + i] = clampInt32(roundByMode(buf[i] / scale, outQC->roundingMode, rs),
-                                      (int32_t)qMin, (int32_t)qMax);
+            out[off + i] =
+                clampInt32(roundByMode(buf[i] / scale, outQC->roundingMode, rs), g.lo, g.hi);
         }
     }
 }
@@ -1517,8 +1522,8 @@ void convertBfpTensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTensor, 
             }
         }
     }
-    const float qMax = powf(2, (float)outQC->qBits - 1) - 1;
-    const float qMin = -powf(2, (float)outQC->qBits - 1);
+    const symGridBounds_t g = symGridBoundsOrExit(outQC->qBits, "convertBfpTensorToSymTensor");
+    const float qMax = (float)g.hi;
     float outScale = (absMax == 0.f) ? 1.f : absMax / qMax;
     outQC->scales[0] = outScale;
     /* pass 2: chunked emit -- one roundByMode per element (TARGET config's
@@ -1528,8 +1533,8 @@ void convertBfpTensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTensor, 
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         dequantChunkToFloat(inputTensor, off, count, buf);
         for (size_t i = 0; i < count; i++) {
-            codes[i] = clampInt32(roundByMode(buf[i] / outScale, outQC->roundingMode, rs),
-                                  (int32_t)qMin, (int32_t)qMax);
+            codes[i] =
+                clampInt32(roundByMode(buf[i] / outScale, outQC->roundingMode, rs), g.lo, g.hi);
         }
         packChunkGuarded(codes, count, outputTensor->data, outQC->qBits, off,
                          "convertBfpTensorToSymTensor");
@@ -1626,8 +1631,8 @@ void convertSymInt32TensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTen
             absMax = v;
         }
     }
-    const float qMax = powf(2, (float)outQC->qBits - 1) - 1;
-    const float qMin = -powf(2, (float)outQC->qBits - 1);
+    const symGridBounds_t g = symGridBoundsOrExit(outQC->qBits, "convertSymInt32TensorToSymTensor");
+    const float qMax = (float)g.hi;
     float outScale = (absMax == 0.f) ? 1.f : absMax / qMax;
     outQC->scales[0] = outScale;
     /* pass 2: chunked emit -- one roundByMode per element, element order */
@@ -1636,8 +1641,7 @@ void convertSymInt32TensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTen
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         for (size_t i = 0; i < count; i++) {
             float v = (float)in[off + i] * inScale;
-            codes[i] = clampInt32(roundByMode(v / outScale, outQC->roundingMode, rs), (int32_t)qMin,
-                                  (int32_t)qMax);
+            codes[i] = clampInt32(roundByMode(v / outScale, outQC->roundingMode, rs), g.lo, g.hi);
         }
         packChunkGuarded(codes, count, outputTensor->data, outQC->qBits, off,
                          "convertSymInt32TensorToSymTensor");
@@ -1781,6 +1785,8 @@ static bool packedPayloadIsAllZero(const uint8_t *data, size_t bits, size_t n) {
 static void accumulateIntoSymFixedGridEngine(tensor_t *target, const incSrc_t *inc, size_t n,
                                              rngStream_t *rs) {
     symQConfig_t *qc = target->quantization->qConfig;
+    const symGridBounds_t g =
+        symGridBoundsOrExit(qc->qBits, "accumulateFloatIntoSymTensorFixedGrid");
     int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
     float incBuf[ODT_CONVERSION_CHUNK_ELEMS];
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
@@ -1806,7 +1812,7 @@ static void accumulateIntoSymFixedGridEngine(tensor_t *target, const incSrc_t *i
                 }
             }
         }
-        const float qMax = powf(2, (float)qc->qBits - 1) - 1;
+        const float qMax = (float)g.hi;
         qc->scales[0] = (absMax == 0.f) ? 1.f : absMax / qMax;
     }
     /* else: carry the grid verbatim -- no re-derivation, no renorm (packed-grad D1/D2). */
@@ -1875,8 +1881,8 @@ static void accumulateIntoSymRescaleEngine(tensor_t *target, const incSrc_t *inc
             }
         }
     }
-    const float qMax = powf(2, (float)qc->qBits - 1) - 1;
-    const float qMin = -powf(2, (float)qc->qBits - 1);
+    const symGridBounds_t g = symGridBoundsOrExit(qc->qBits, "accumulateFloatIntoSymTensorRescale");
+    const float qMax = (float)g.hi;
     float scale = (absMax == 0.f) ? 1.f : absMax / qMax;
     qc->scales[0] = scale;
 
@@ -1890,8 +1896,7 @@ static void accumulateIntoSymRescaleEngine(tensor_t *target, const incSrc_t *inc
         incSrcChunk(inc, off, count, incBuf);
         for (size_t i = 0; i < count; i++) {
             float v = (float)mant[i] * oldScale + incBuf[i];
-            codes[i] = clampInt32(roundByMode(v / scale, qc->roundingMode, rs), (int32_t)qMin,
-                                  (int32_t)qMax);
+            codes[i] = clampInt32(roundByMode(v / scale, qc->roundingMode, rs), g.lo, g.hi);
         }
         packChunkGuarded(codes, count, target->data, qc->qBits, off,
                          "accumulateFloatIntoSymTensorRescale");
@@ -2426,15 +2431,15 @@ void accumulateSymInt32IntoSymInt32Rescale(tensor_t *target, const tensor_t *inc
             absMax = v;
         }
     }
-    const float qMax = powf(2, (float)tQC->qMaxBits - 1) - 1;
-    const float qMin = -powf(2, (float)tQC->qMaxBits - 1);
+    const symGridBounds_t g =
+        symGridBoundsOrExit(tQC->qMaxBits, "accumulateSymInt32IntoSymInt32Rescale");
+    const float qMax = (float)g.hi;
     float scale = (absMax == 0.f) ? 1.f : absMax / qMax;
     tQC->scale = scale;
     /* pass 2: same-index read-then-write, one round per element in order */
     for (size_t i = 0; i < n; i++) {
         float v = (float)tg[i] * tScale + (float)in[i] * iScale;
-        tg[i] =
-            clampInt32(roundByMode(v / scale, tQC->roundingMode, rs), (int32_t)qMin, (int32_t)qMax);
+        tg[i] = clampInt32(roundByMode(v / scale, tQC->roundingMode, rs), g.lo, g.hi);
     }
 }
 

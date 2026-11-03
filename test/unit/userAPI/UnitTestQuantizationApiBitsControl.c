@@ -21,15 +21,18 @@ void testQuantizationInitSymInt32WithBitsSetsBitsAndRoundingMode(void) {
 }
 
 void testQuantizationInitSymInt32WithBitsRejectsMaxBits32(void) {
-    /* #202: qMaxBits=32 makes the float32 clamp bound powf(2, 31) - 1 round up to
-     * 2^31 > INT32_MAX, an out-of-range (int32_t) cast (UB) in the converter.
-     * Reject it at the init chokepoint before any such config can be built. */
+    /* #202: at qMaxBits=32 the half-range 2^31 no longer fits int32 -- neither the
+     * shift that forms the grid bounds nor the cast back from the float pre-clamp
+     * bound is defined. Reject it at the init chokepoint before any such config
+     * can be built. */
     ASSERT_EXITS_WITH_FAILURE(quantizationInitSymInt32WithBits(HALF_AWAY, 32));
 }
 
 void testQuantizationInitSymInt32WithBitsAcceptsMaxBits31(void) {
-    /* 31 is the largest cast-safe width (powf(2, 30) - 1 is exactly representable);
-     * the #227 raw-int/scale=1 regime (widths 17-31) must stay valid. */
+    /* 31 is the largest width whose half-range 2^30 fits int32, so its integer grid
+     * bounds [-2^30, 2^30 - 1] can be formed (the float image of 2^30 - 1 is NOT
+     * exact -- it rounds up to 2^30 -- which is why the bounds live in the integer
+     * domain, #515); the #227 raw-int/scale=1 regime (widths 17-31) must stay valid. */
     quantization_t *q = quantizationInitSymInt32WithBits(HALF_AWAY, 31);
 
     symInt32QConfig_t *cfg = (symInt32QConfig_t *)q->qConfig;

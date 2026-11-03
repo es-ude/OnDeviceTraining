@@ -76,9 +76,13 @@ grid (`clampInt32(..., qMin, qMax)`).
   **saturate** to the two's-complement grid, and this is how `qMin` becomes
   reachable under `HALF_AWAY`. The float-domain clamp bounds the value fed to
   the rounding; the integer clamp after it (as at every other SYM_INT32 emit
-  site) is defensive under exact SR, which never moves an exactly representable
-  `qMin`/`qMax` (#511: the old `round(x + u - 0.5)` formula gave `qMin - 1` at
-  `u == 0`). The primitive is called directly; it is not a `conversionMatrix` cell.
+  site) is the grid itself. Its bounds come from `symGridBoundsOrExit`
+  (`SymGridBounds.h`, int32 domain, #515): from `qMaxBits = 26` on the float
+  image of `2^(q-1) - 1` rounds up to `2^(q-1)`, one code past the grid, so the
+  float clamp alone would let that code through. Under exact SR the integer
+  clamp never moves an exactly representable `qMin`/`qMax` (#511: the old
+  `round(x + u - 0.5)` formula gave `qMin - 1` at `u == 0`). The primitive is
+  called directly; it is not a `conversionMatrix` cell.
 - The `OUT_ACC_FIXED_SCALE` epilogue (`rescaleIntoAccumulatorScale`) does not
   clamp at all (see "Quantized gradient accumulation").
 

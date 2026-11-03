@@ -29,6 +29,7 @@ add_elastic_ai_unit_test(
         QuantizationApi
         StorageApi
         RNG
+        Common
         odt_test_death
         odt_test_rng_pin
 )

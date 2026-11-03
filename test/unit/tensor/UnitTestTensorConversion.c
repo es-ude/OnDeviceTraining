@@ -5,6 +5,7 @@
 #include "RNG.h"
 #include "RngPinnedDraw.h"
 #include "StorageApi.h"
+#include "SymGridBounds.h"
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
@@ -8006,6 +8007,115 @@ void testConversionIntoFloat32NeedsNoStream(void) {
     TEST_ASSERT_EQUAL_FLOAT(-1.5f, outData[1]);
 }
 
+/* #515: from q = 26 on, 2^(q-1) - 1 has more than 24 significant bits, so the
+ * float32 image of the grid maximum rounds UP to 2^(q-1) -- one code past the
+ * grid. The three emit paths below must still saturate at the integer grid
+ * maximum 2^25 - 1 = 33554431. A peak of exactly 2^25 derives scale 1 either
+ * way, so the scale is not what distinguishes the fixed from the broken code. */
+void testEncodeFloatToSymInt32Q26SaturatesAtGridMax(void) {
+    float inData[] = {33554432.f, -33554432.f, 1.f};
+    int32_t outData[3];
+    size_t dims[] = {3};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    quantization_t inQ;
+    initFloat32Quantization(&inQ);
+    symInt32QConfig_t outQC;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &outQC, 26);
+    quantization_t outQ;
+    initSymInt32Quantization(&outQC, &outQ);
+    tensor_t in;
+    tensor_t out;
+    setTensorValues(&in, (uint8_t *)inData, &shape, &inQ, NULL);
+    setTensorValues(&out, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    convertTensor(&in, &out, NULL);
+
+    int32_t expected[] = {33554431, -33554432, 1};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, outData, 3);
+    TEST_ASSERT_EQUAL_FLOAT(1.f, outQC.scale);
+}
+
+void testRequantSymInt32ToScaleQ26SaturatesAtGridMax(void) {
+    /* source declared one bit wider so its codes sit inside their own grid;
+     * the fixed target scale 1 makes both quotients overshoot the 26-bit grid */
+    int32_t inData[] = {40000000, -40000000};
+    int32_t outData[2];
+    size_t dims[] = {2};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    symInt32QConfig_t inQC;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &inQC, 27);
+    quantization_t inQ;
+    initSymInt32Quantization(&inQC, &inQ);
+    symInt32QConfig_t outQC;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &outQC, 26);
+    outQC.scale = 1.f;
+    quantization_t outQ;
+    initSymInt32Quantization(&outQC, &outQ);
+    tensor_t in;
+    tensor_t out;
+    setTensorValues(&in, (uint8_t *)inData, &shape, &inQ, NULL);
+    setTensorValues(&out, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    requantSymInt32TensorToScale(&in, &out, NULL);
+
+    int32_t expected[] = {33554431, -33554432};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, outData, 2);
+    TEST_ASSERT_EQUAL_FLOAT(1.f, outQC.scale);
+}
+
+void testPackFloatToSymQ26SaturatesAtGridMax(void) {
+    float inData[] = {33554432.f, -33554432.f};
+    size_t dims[] = {2};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    quantization_t inQ;
+    initFloat32Quantization(&inQ);
+    float outScale[1] = {1.f};
+    symQConfig_t outQC = {
+        .scales = outScale, .numGroups = 1, .groupSize = 0, .roundingMode = HALF_AWAY, .qBits = 26};
+    quantization_t outQ;
+    initSymQuantization(&outQC, &outQ);
+    uint8_t outData[calcNumberOfBytesForData(&outQ, 2)];
+    tensor_t in;
+    tensor_t out;
+    setTensorValues(&in, (uint8_t *)inData, &shape, &inQ, NULL);
+    setTensorValues(&out, outData, &shape, &outQ, NULL);
+
+    convertTensor(&in, &out, NULL);
+
+    int32_t codes[2];
+    symTestUnpackSignExtend(out.data, 26, codes, 2);
+    int32_t expected[] = {33554431, -33554432};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, codes, 2);
+    TEST_ASSERT_EQUAL_FLOAT(1.f, outQC.scales[0]);
+}
+
+void testSymGridBoundsAtQ31(void) {
+    /* 31 is the ceiling: 2^30 is the widest half-range int32 holds; 2 and 26
+     * pin the narrow end and the first width whose float image is inexact */
+    symGridBounds_t g31 = symGridBoundsOrExit(31, "t");
+    TEST_ASSERT_EQUAL_INT32(-1073741824, g31.lo);
+    TEST_ASSERT_EQUAL_INT32(1073741823, g31.hi);
+    symGridBounds_t g2 = symGridBoundsOrExit(2, "t");
+    TEST_ASSERT_EQUAL_INT32(-2, g2.lo);
+    TEST_ASSERT_EQUAL_INT32(1, g2.hi);
+    symGridBounds_t g26 = symGridBoundsOrExit(26, "t");
+    TEST_ASSERT_EQUAL_INT32(-33554432, g26.lo);
+    TEST_ASSERT_EQUAL_INT32(33554431, g26.hi);
+}
+
+void testSymGridBoundsRejectsQ0(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "t: SYM width (0) outside [1, 31]",
+                             (void)symGridBoundsOrExit(0, "t"));
+}
+
+void testSymGridBoundsRejectsQ32(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "t: SYM width (32) outside [1, 31]",
+                             (void)symGridBoundsOrExit(32, "t"));
+}
+
 int main(void) {
     UNITY_BEGIN();
 
@@ -8219,6 +8329,12 @@ int main(void) {
     RUN_TEST(testConvertTensorHandsTheStreamToTheMatrixCell);
     RUN_TEST(testSameTypeConversionNeedsNoStream);
     RUN_TEST(testConversionIntoFloat32NeedsNoStream);
+    RUN_TEST(testEncodeFloatToSymInt32Q26SaturatesAtGridMax);
+    RUN_TEST(testRequantSymInt32ToScaleQ26SaturatesAtGridMax);
+    RUN_TEST(testPackFloatToSymQ26SaturatesAtGridMax);
+    RUN_TEST(testSymGridBoundsAtQ31);
+    RUN_TEST(testSymGridBoundsRejectsQ0);
+    RUN_TEST(testSymGridBoundsRejectsQ32);
 
     return UNITY_END();
 }

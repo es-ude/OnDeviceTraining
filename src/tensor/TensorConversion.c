@@ -771,6 +771,32 @@ void unpackSignExtend(const uint8_t *src, size_t srcBits, size_t srcStartBit, in
         PRINT_ERROR("unpackSignExtend: srcBits must be > 0");
         exit(1);
     }
+    if (n == 0) {
+        /* N=0 tensor data may be NULL (#160): no pointer arithmetic on src. */
+        return;
+    }
+    if (srcStartBit % 8 == 0 && (srcBits == 8 || srcBits == 16)) {
+        /* Byte-aligned 8/16-bit codes (the BFP m=8/16 and sym8/sym16 wires):
+         * the packed stream is LSB-first, so a code is one byte, or two bytes
+         * low-then-high, whatever the host endianness. Read them as bytes --
+         * never as a halfword: a DeltaSym-style srcStartBit == 8 lands on an
+         * odd address, which faults on Cortex-M0+. The narrowing casts are
+         * the two's-complement wrap GCC and Clang document for out-of-range
+         * conversions (C17 6.3.1.3), i.e. the same value as the
+         * (v ^ signBit) - signBit idiom below; written as casts because GCC
+         * folds them to ldrsb / sxth and leaves the idiom as three ALU ops. */
+        const uint8_t *p = src + srcStartBit / 8;
+        if (srcBits == 8) {
+            for (size_t i = 0; i < n; i++) {
+                dst[i] = (int8_t)p[i];
+            }
+        } else {
+            for (size_t i = 0; i < n; i++) {
+                dst[i] = (int16_t)(p[2 * i] | (p[2 * i + 1] << 8));
+            }
+        }
+        return;
+    }
     /* clear-then-set writeByte actively zero-fills the high bits on widen,
      * so no memset of dst is needed. */
     byteConversionAppend((uint8_t *)src, srcBits, (uint8_t *)dst, 32, n, 0, srcStartBit);

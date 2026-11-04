@@ -3,6 +3,7 @@
 #include "Quantization.h"
 #include "QuantizationApi.h"
 #include "RNG.h"
+#include "ReferenceByteConversion.h"
 #include "RngPinnedDraw.h"
 #include "StorageApi.h"
 #include "SymGridBounds.h"
@@ -18,6 +19,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -3381,6 +3383,141 @@ void testPackUnpackSignExtendRoundTripsNegativeSym4AndSym8(void) {
     byteConversion((uint8_t *)codes8, 32, buf8, 8, 6);
     unpackSignExtend(buf8, 8, 0, got8, 6);
     TEST_ASSERT_EQUAL_INT32_ARRAY(codes8, got8, 6);
+}
+
+/* Reference for the 8/16-bit unpack fast path: the frozen pre-#505 bit
+ * walker (ReferenceByteConversion.h) widened to int32, then the sign-extend
+ * idiom -- independent of both the streaming engine and the byte loads under
+ * test. */
+static void refUnpackSignExtend(const uint8_t *src, size_t srcBits, size_t srcStartBit,
+                                int32_t *dst, size_t n) {
+    memset(dst, 0, n * sizeof(int32_t));
+    refByteConversionAppend((uint8_t *)src, srcBits, (uint8_t *)dst, 32, n, 0, srcStartBit);
+    const int32_t signBit = (int32_t)1 << (srcBits - 1);
+    const int32_t mask = (int32_t)(((uint32_t)1 << srcBits) - 1u);
+    for (size_t i = 0; i < n; i++) {
+        int32_t v = dst[i] & mask;
+        dst[i] = (v ^ signBit) - signBit;
+    }
+}
+
+/* Payload: every sign-relevant byte pattern up front (so the 16-bit view sees
+ * 0x7FFF, 0x8000, 0xFFFF, 0x0080, 0x8000 at both byte parities), then an LCG
+ * fill. Big enough for the widest start bit below plus 2 * 269 code bytes. */
+#define UNPACK_FAST_PAYLOAD_BYTES 600
+static void fillUnpackFastPayload(uint8_t *buf) {
+    static const uint8_t edges[] = {0x7F, 0x80, 0xFF, 0xFF, 0x00, 0x80, 0x80, 0x00,
+                                    0x01, 0x00, 0x00, 0x01, 0xFF, 0x7F, 0x00, 0x00};
+    memcpy(buf, edges, sizeof(edges));
+    uint32_t s = 0x9E3779B9u;
+    for (size_t i = sizeof(edges); i < UNPACK_FAST_PAYLOAD_BYTES; i++) {
+        s = s * 1664525u + 1013904223u;
+        buf[i] = (uint8_t)(s >> 24);
+    }
+}
+
+static void assertUnpackMatchesReference(size_t srcBits, size_t srcStartBit, size_t n) {
+    uint8_t payload[UNPACK_FAST_PAYLOAD_BYTES];
+    fillUnpackFastPayload(payload);
+    /* n * srcBits + srcStartBit must fit the payload; 269 * 16 + 40 < 600 * 8. */
+    TEST_ASSERT_TRUE(srcStartBit + n * srcBits <= UNPACK_FAST_PAYLOAD_BYTES * 8);
+    int32_t expected[269];
+    int32_t got[269];
+    refUnpackSignExtend(payload, srcBits, srcStartBit, expected, n);
+    memset(got, 0x5A, sizeof(got));
+    unpackSignExtend(payload, srcBits, srcStartBit, got, n);
+    char msg[80];
+    snprintf(msg, sizeof(msg), "srcBits=%zu srcStartBit=%zu n=%zu", srcBits, srcStartBit, n);
+    TEST_ASSERT_EQUAL_INT32_ARRAY_MESSAGE(expected, got, n, msg);
+}
+
+/* Byte-aligned 8-bit codes: every start byte offset, counts below / at / past
+ * the chunk size and odd, all pinned to the bit walker. */
+void testUnpackSignExtend8BitMatchesBitWalkerAtByteOffsets(void) {
+    static const size_t startBits[] = {0, 8, 16, 24, 40};
+    static const size_t counts[] = {1, 7, 8, 255, 256, 269};
+    for (size_t s = 0; s < sizeof(startBits) / sizeof(startBits[0]); s++) {
+        for (size_t c = 0; c < sizeof(counts) / sizeof(counts[0]); c++) {
+            assertUnpackMatchesReference(8, startBits[s], counts[c]);
+        }
+    }
+}
+
+/* Byte-aligned 16-bit codes, including srcStartBit == 8 (odd start address:
+ * a halfword load would fault on Cortex-M0+, so the code must be read as two
+ * bytes). */
+void testUnpackSignExtend16BitMatchesBitWalkerAtByteOffsets(void) {
+    static const size_t startBits[] = {0, 8, 16, 24, 40};
+    static const size_t counts[] = {1, 7, 8, 255, 256, 269};
+    for (size_t s = 0; s < sizeof(startBits) / sizeof(startBits[0]); s++) {
+        for (size_t c = 0; c < sizeof(counts) / sizeof(counts[0]); c++) {
+            assertUnpackMatchesReference(16, startBits[s], counts[c]);
+        }
+    }
+}
+
+/* A mid-byte start keeps the bit walker for 8- and 16-bit codes. */
+void testUnpackSignExtend8And16BitMidByteOffsetMatchesBitWalker(void) {
+    static const size_t startBits[] = {3, 5, 13};
+    static const size_t counts[] = {1, 8, 269};
+    for (size_t s = 0; s < sizeof(startBits) / sizeof(startBits[0]); s++) {
+        for (size_t c = 0; c < sizeof(counts) / sizeof(counts[0]); c++) {
+            assertUnpackMatchesReference(8, startBits[s], counts[c]);
+            assertUnpackMatchesReference(16, startBits[s], counts[c]);
+        }
+    }
+}
+
+/* The stored layout spelled out: 8-bit codes are one byte each; 16-bit codes
+ * are low byte first, high byte second (LSB-first bit stream), whatever the
+ * host endianness. A byte-order swap or a dropped sign extension fails here. */
+void testUnpackSignExtend8And16BitEdgeCodesAreLittleEndianSigned(void) {
+    uint8_t src8[5] = {0x7F, 0x80, 0xFF, 0x00, 0x01};
+    int32_t got8[5];
+    unpackSignExtend(src8, 8, 0, got8, 5);
+    int32_t expected8[5] = {127, -128, -1, 0, 1};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected8, got8, 5);
+
+    uint8_t src16[12] = {0xFF, 0x7F, 0x00, 0x80, 0xFF, 0xFF, 0x80, 0x00, 0x00, 0x01, 0x01, 0x00};
+    int32_t got16[6];
+    unpackSignExtend(src16, 16, 0, got16, 6);
+    int32_t expected16[6] = {32767, -32768, -1, 128, 256, 1};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected16, got16, 6);
+}
+
+/* Exhaustive over the code domain: every 8-bit and every 16-bit code against
+ * the arithmetic two's-complement value, independent of the bit walker and
+ * of whatever the fast path compiles to. */
+void testUnpackSignExtend8And16BitExhaustiveCodeDomain(void) {
+    uint8_t src8[256];
+    int32_t expected8[256];
+    int32_t got8[256];
+    for (size_t v = 0; v < 256; v++) {
+        src8[v] = (uint8_t)v;
+        expected8[v] = v < 128 ? (int32_t)v : (int32_t)v - 256;
+    }
+    unpackSignExtend(src8, 8, 0, got8, 256);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected8, got8, 256);
+
+    static uint8_t src16[2 * 65536];
+    static int32_t expected16[65536];
+    static int32_t got16[65536];
+    for (size_t v = 0; v < 65536; v++) {
+        src16[2 * v] = (uint8_t)(v & 0xFF);
+        src16[2 * v + 1] = (uint8_t)(v >> 8);
+        expected16[v] = v < 32768 ? (int32_t)v : (int32_t)v - 65536;
+    }
+    unpackSignExtend(src16, 16, 0, got16, 65536);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected16, got16, 65536);
+}
+
+/* n == 0 touches neither src nor dst on the fast path either. */
+void testUnpackSignExtend8And16BitZeroCountWritesNothing(void) {
+    int32_t got[2] = {12345, 67890};
+    unpackSignExtend(NULL, 8, 0, got, 0);
+    unpackSignExtend(NULL, 16, 0, got, 0);
+    TEST_ASSERT_EQUAL_INT32(12345, got[0]);
+    TEST_ASSERT_EQUAL_INT32(67890, got[1]);
 }
 
 void testQuantizeFloatToAsymNoOpOnEmptyTensor(void) {
@@ -8524,6 +8661,12 @@ int main(void) {
     RUN_TEST(testUnpackSignExtendReadsSignedCodeAtBitOffset);
     RUN_TEST(testUnpackSignExtendOffsetZeroCoversFullSignedRange);
     RUN_TEST(testPackUnpackSignExtendRoundTripsNegativeSym4AndSym8);
+    RUN_TEST(testUnpackSignExtend8BitMatchesBitWalkerAtByteOffsets);
+    RUN_TEST(testUnpackSignExtend16BitMatchesBitWalkerAtByteOffsets);
+    RUN_TEST(testUnpackSignExtend8And16BitMidByteOffsetMatchesBitWalker);
+    RUN_TEST(testUnpackSignExtend8And16BitEdgeCodesAreLittleEndianSigned);
+    RUN_TEST(testUnpackSignExtend8And16BitExhaustiveCodeDomain);
+    RUN_TEST(testUnpackSignExtend8And16BitZeroCountWritesNothing);
     RUN_TEST(testQuantizeFloatToAsymNoOpOnEmptyTensor);
     RUN_TEST(testAccumulateTensorIntoSymRescaleRejectsSelfAliasedIncrement);
 

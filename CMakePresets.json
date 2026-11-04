@@ -112,6 +112,17 @@
         "ODT_BUILD_TESTS": "OFF",
         "CMAKE_C_FLAGS": "-Werror"
       }
+    },
+    {
+      "name": "arm_cross_m0plus",
+      "displayName": "Cortex-M0+ cross-compile (compile-only, -O2, for the BFP float census)",
+      "inherits": "gen_ninja",
+      "toolchainFile": "${sourceDir}/cmake/arm-none-eabi-m0plus.cmake",
+      "cacheVariables": {
+        "HOST": "OFF",
+        "ODT_BUILD_TESTS": "OFF",
+        "CMAKE_C_FLAGS": "-mcpu=cortex-m0plus -mthumb -O2 -ffp-contract=off"
+      }
     }
   ],
   "buildPresets": [
@@ -195,6 +206,11 @@
         "CalculateGradsSequential",
         "RematPlan", "RematScheduler", "RematCheck"
       ]
+    },
+    {
+      "name": "arm_cross_m0plus",
+      "inherits": "arm_cross",
+      "configurePreset": "arm_cross_m0plus"
     }
   ],
   "testPresets": [

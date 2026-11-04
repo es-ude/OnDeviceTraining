@@ -82,6 +82,105 @@ static inline void bfpValidateBlockHeadroom(const bfpQConfig_t *aQC, const bfpQC
     }
 }
 
+/* ---- Integer fold (integer-only forward, arithmetic-bfp.md §13) ----------
+ * A forward kernel keeps ONE int32 accumulator per output in units of
+ * 2^E_acc (E_acc per raw target group) and enters every same-exponent
+ * partial as partial * 2^-k, k = E_acc - E_segment. The helpers below are
+ * the whole arithmetic of that step: no float, no division, no int64. */
+
+/*! v * 2^-k rounded half away from zero, k >= 0. Magnitude form, overflow-
+ * safe for every int32 (|INT32_MIN| = 2^31 is a legal uint32 magnitude):
+ * t = mag >> (k-1) keeps the half bit as bit 0, so (t >> 1) + (t & 1) is
+ * floor(mag / 2^k) plus one when the dropped fraction is >= 1/2. k >= 32
+ * drops everything below 1/2 (a partial can never reach 2^31; the one
+ * exact -1/2, INT32_MIN at k == 32, still rounds away). */
+static inline int32_t bfpShrHalfAway(int32_t v, unsigned k) {
+    if (k == 0u) {
+        return v;
+    }
+    if (k >= 32u) {
+        return (k == 32u && v == INT32_MIN) ? -1 : 0;
+    }
+    uint32_t mag = v < 0 ? 0u - (uint32_t)v : (uint32_t)v;
+    uint32_t t = mag >> (k - 1u);
+    uint32_t r = (t >> 1) + (t & 1u);
+    return v < 0 ? -(int32_t)r : (int32_t)r;
+}
+
+/*! The fold alignment: k >= 0 is bfpShrHalfAway, k < 0 an EXACT left shift
+ * (no rounding, no overflow -- the headroom proof of bfpFoldGuardBits
+ * guarantees |v| * 2^-k fits int32 for every segment and bias the kernel
+ * can produce; -k <= 30 by the same proof). */
+static inline int32_t bfpAlignPartial(int32_t v, int k) {
+    if (k < 0) {
+        return (int32_t)((uint32_t)v << (unsigned)(-k));
+    }
+    return bfpShrHalfAway(v, (unsigned)k);
+}
+
+/*! The static headroom proof of the integer fold, as the guard g that the
+ * kernel adds to the largest segment exponent: E_acc = E_top + g, where
+ * E_top bounds EVERY product-segment exponent AND the bias exponent (the
+ * kernel max'es the bias exponent in). In units of 2^E_acc:
+ *   - a product segment s of count_s products (|code| <= 2^(m-1), so
+ *     |product| <= 2^(ma+mb-2)) contributes |partial_s| 2^(E_s - E_acc) <=
+ *     count_s 2^(ma+mb-2) 2^-g; run splitting only partitions the N
+ *     products, so sum count_s <= N over all segments and together they
+ *     contribute <= N 2^(ma+mb-2) 2^-g. Each UNALIGNED partial separately
+ *     obeys count_s <= bfpSegmentLimit, i.e. |partial_s| <= INT32_MAX;
+ *   - the bias segment contributes |b| 2^(E_b - E_acc) <= 2^(mBias-1) 2^-g
+ *     (E_b <= E_top by construction; when the bias exponent exceeds every
+ *     product's, E_top = E_b and the products are shifted further right --
+ *     they only shrink -- while the bias term is the one at 2^-g);
+ *   - every HALF_AWAY right shift adds at most one half; a left shift is
+ *     exact. At most N product segments exist (a split never makes an empty
+ *     one) plus the bias, so the rounding slack is <= (N + 1) / 2; one whole
+ *     unit per fold, N + 1, is reserved.
+ * Summing these ABSOLUTE bounds bounds every intermediate accumulator value,
+ * whatever the signs or the fold order, not only the final sum:
+ *     (N 2^(ma+mb-2) + 2^(mBias-1)) 2^-g + (N + 1) <= INT32_MAX.
+ * g is the smallest integer in [-30, 31] satisfying it. It is NEGATIVE
+ * whenever the reduction is below the int32 limit (m = 8: g = -10 at N = 80),
+ * so the max-exponent partials are left-shifted exactly (|v| 2^-g stays
+ * within the bound, no overflow) and only segments more than -g binades
+ * below E_top are rounded; it is >= 2 for m = 16 reductions beyond a few
+ * products (m16 x m16: 2 at N = 4, 6 at N = 80; m16 x m8: 3 at N = 2400).
+ * 64-bit arithmetic is fine here (setup, once per call), never in the fold;
+ * every shift count below is in [0, 31]. mBias = 0 means no bias segment.
+ * Fail-fast when no g <= 31 exists (every fold would flush to 0). */
+static inline int bfpFoldGuardBits(size_t reductionLen, uint8_t ma, uint8_t mb, uint8_t mBias,
+                                   const char *what) {
+    unsigned productShift = (unsigned)ma + (unsigned)mb - 2u;
+    if (reductionLen >= ((size_t)INT32_MAX >> 1) || reductionLen > (UINT64_MAX >> productShift)) {
+        PRINT_ERROR("%s: reduction length %zu is beyond any int32 fold", what, reductionLen);
+        exit(1);
+    }
+    uint64_t total =
+        ((uint64_t)reductionLen << productShift) + (mBias > 0 ? (uint64_t)1 << (mBias - 1u) : 0u);
+    uint64_t room = (uint64_t)INT32_MAX - ((uint64_t)reductionLen + 1u);
+    int g = 0;
+    if (total > room) {
+        /* Right shifts needed: the smallest g in [1, 31] with total <= room 2^g
+         * (room < 2^31, so room << 31 fits uint64). */
+        while (total > (room << (unsigned)g)) {
+            g++;
+            if (g > 31) {
+                PRINT_ERROR("%s: reduction length %zu at mantissa widths (%u, %u) needs more "
+                            "than 31 guard bits -- no int32 fold can hold it",
+                            what, reductionLen, (unsigned)ma, (unsigned)mb);
+                exit(1);
+            }
+        }
+    } else {
+        /* Left shifts allowed: the most negative g in [-30, 0] with
+         * total 2^-g <= room (total <= room < 2^31; shift counts 1..30). */
+        while (g > -30 && (total << (unsigned)(1 - g)) <= room) {
+            g--;
+        }
+    }
+    return g;
+}
+
 /*! Max codes one int32 SUM partial may accumulate (PR3, biasGrad-family
  * reductions): a pure mantissa sum of g codes is bounded by g * 2^(m-1)
  * (codes in [-2^(m-1), 2^(m-1)-1]), so an int32 segment partial is sound for

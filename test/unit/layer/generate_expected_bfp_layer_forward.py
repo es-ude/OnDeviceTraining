@@ -65,11 +65,12 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 
-from sym_gold import (assert_rounding_canary, bfp_quantize_grouped, check_exact_roundtrip,
-                      conv1d_bfp_ref, conv1d_bfp_dx_ref, conv1d_bfp_weight_grad_ref,
-                      conv_bfp_bias_grad_ref, convT1d_bfp_gather_ref, convT1d_bfp_dx_ref,
-                      convT1d_bfp_weight_grad_ref, emit_float_array, emit_int32_array,
-                      emit_int32_scalar, emit_uint8_array, matmul_bfp_ref)
+from sym_gold import (assert_rounding_canary, bfp_quantize_grouped, bfp_raw_dequant_f32,
+                      check_exact_roundtrip, conv1d_bfp_raw_ref, conv1d_bfp_dx_ref,
+                      conv1d_bfp_weight_grad_ref, conv_bfp_bias_grad_ref,
+                      convT1d_bfp_gather_ref, convT1d_bfp_dx_ref, convT1d_bfp_weight_grad_ref,
+                      emit_float_array, emit_int32_array, emit_int32_scalar, emit_uint8_array,
+                      matmul_bfp_ref)
 
 # Weights' widths (PR2-Decision 1: the funnel stages FLOAT32 operands at these).
 # m=6 deliberately != 8 so the hardcode-m=8 mutation is observable.
@@ -371,22 +372,23 @@ def main() -> int:
                                                 CONV_W_GROUP_SIZE)
     cx_codes, cx_exps, cx_qc = stage_per_tensor(CONV_X_VALUES, W_MANTISSA_BITS)
 
-    conv_expected = conv1d_bfp_ref(cx_codes, cx_exps, cx_qc, cw_codes, cw_exps, cw_qc,
-                                   None, None, None, CONV_BATCH, CONV_IN_CHANNELS,
-                                   CONV_OUT_CHANNELS, CONV_KERNEL_SIZE, CONV_INPUT_LENGTH,
-                                   stride=CONV_STRIDE, self_check=False)
+    # Integer-only forward (arithmetic-bfp section 13): the layer's FLOAT32
+    # wire is the loss-facing dequant of the per-tensor BFP_RAW the funnel
+    # builds for a FLOAT32 target ({1,0}: one E_acc over the whole output).
+    def conv_forward_wire(x_codes, x_exps, x_qc, w_exps, w_qc):
+        raw = conv1d_bfp_raw_ref(x_codes, x_exps, x_qc, cw_codes, w_exps, w_qc,
+                                 None, None, None, CONV_BATCH, CONV_IN_CHANNELS,
+                                 CONV_OUT_CHANNELS, CONV_KERNEL_SIZE, CONV_INPUT_LENGTH,
+                                 stride=CONV_STRIDE, raw_group_size=0)
+        return bfp_raw_dequant_f32(raw["mant"], raw["exps"], 0)
+
+    conv_expected = conv_forward_wire(cx_codes, cx_exps, cx_qc, cw_exps, cw_qc)
     assert len(conv_expected) == CONV_BATCH * CONV_OUT_CHANNELS * CONV_OUT_LEN
 
     cx8_codes, cx8_exps, cx8_qc = stage_per_tensor(CONV_X_VALUES, 8)
-    conv_m8 = conv1d_bfp_ref(cx8_codes, cx8_exps, cx8_qc, cw_codes, cw_exps, cw_qc,
-                             None, None, None, CONV_BATCH, CONV_IN_CHANNELS,
-                             CONV_OUT_CHANNELS, CONV_KERNEL_SIZE, CONV_INPUT_LENGTH,
-                             stride=CONV_STRIDE, self_check=False)
-    conv_collapsed = conv1d_bfp_ref(cx_codes, cx_exps, cx_qc, cw_codes, [cw_exps[0]],
-                                    {**cw_qc, "group_size": 0}, None, None, None,
-                                    CONV_BATCH, CONV_IN_CHANNELS, CONV_OUT_CHANNELS,
-                                    CONV_KERNEL_SIZE, CONV_INPUT_LENGTH,
-                                    stride=CONV_STRIDE, self_check=False)
+    conv_m8 = conv_forward_wire(cx8_codes, cx8_exps, cx8_qc, cw_exps, cw_qc)
+    conv_collapsed = conv_forward_wire(cx_codes, cx_exps, cx_qc, [cw_exps[0]],
+                                       {**cw_qc, "group_size": 0})
     check_fixture_strength("conv1d", conv_expected, conv_m8, conv_collapsed, cw_exps)
 
     # ---- Conv1d backward (PR3 Task 3) -------------------------------------

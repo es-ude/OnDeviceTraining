@@ -302,7 +302,10 @@ Every `ARITH_BFP` kernel (`matmulBfpTensors`, `conv1dKernelBfp`,
   encode and requant") lives at exactly two seams: staging (quantizing a FLOAT32
   operand into scratch) and the `OUT_WRITE` epilogue (packing the raw FLOAT32
   kernel output back into a BFP target). Nothing inside a kernel's reduction
-  loop rounds.
+  loop rounds. Exception, forward only (§13 "The integer fold"): an
+  integer-raw kernel aligns each finished segment to the accumulation
+  exponent with a HALF_AWAY right shift (never SR, never the op's mode) —
+  the re-block still owns the op's rounding mode.
 - **Headroom, exact form.** A same-exponent `int32` partial is sound only up
   to `bfpSegmentLimit(ma, mb) = INT32_MAX >> (ma+mb−2)`
   (`src/arithmetic/include/BfpKernelSupport.h`; `shift >= 31` clamps to `1` —
@@ -1806,6 +1809,78 @@ MUST write every group's exponent.
    construction: the walker emits a code's low 8/16 bits LSB-first, which is
    the int32 word's first one or two bytes in memory order.
 
+**The integer fold** (Conv1d forward, `conv1dKernelBfpRaw`, `Conv1dKernel.c`;
+the helpers in `BfpKernelSupport.h`). The kernel keeps conv1dKernelBfp's walk
+unchanged — loop skeleton, loop order, MAC count, `windowSlice1dAt`, index
+math, the per-tap group tracking of BOTH operands — and replaces only the
+float fold:
+
+1. ONE `int32` accumulator per output element, in units of `2^E_acc`, with
+   `E_acc` shared by every element of a raw TARGET group (the output wire's
+   blocking; `{1,0}` for a FLOAT32 target).
+2. `E_acc = E_top + g`. `E_top` of a target group is the max over the output
+   rows `(b, oc)` it covers (a group may straddle channels and batches) of
+   `max_ic(rowmax E_in) + rowmax E_w`, max'ed with the channel's unbiased
+   bias exponent — the row maxima are per input row `(b, ic)` of the conv
+   group and per weight row `oc`, computed once per call over the groups the
+   rows intersect (O(groups), cursors, no division). This is a cheap
+   over-approximation of the max segment exponent (a row, not a window).
+3. `g` is the static headroom proof (`bfpFoldGuardBits`), the
+   **product-bound rule**: with `N = inChannels/groups · kernelSize`, in
+   units of `2^E_acc` every term of the accumulator is bounded in absolute
+   value, so every intermediate sum is, whatever the signs or the fold
+   order:
+   - product segments: `|partial_s| · 2^(E_s − E_acc) <= count_s · 2^(ma+mb−2)
+     · 2^−g` (every `|code| <= 2^(m−1)`, `E_s <= E_top`); run splitting only
+     partitions the `N` products (`Σ count_s <= N`), so all product segments
+     together contribute `<= P · 2^−g`, `P = N · 2^(ma+mb−2)`. Each UNALIGNED
+     partial separately stays within int32 because a segment holds at most
+     `bfpSegmentLimit(ma, mb)` products;
+   - the bias segment: `|b| · 2^(E_b − E_acc) <= Bb · 2^−g`, `Bb = 2^(mBias−1)`
+     (0 without bias), because `E_top` max'es the bias exponent in; when the
+     bias exponent exceeds every product's, `E_top = E_b` and the products are
+     shifted further right (they only shrink) while the bias is the term at
+     `2^−g`;
+   - rounding: a HALF_AWAY right shift adds at most one half, a left shift
+     nothing; at most `N` product segments (a split never makes an empty one)
+     plus the bias, so `<= (N + 1)/2`; the rule reserves one unit per fold,
+     `N + 1`.
+   `g` is the smallest integer in `[−30, 31]` with
+   `(P + Bb) · 2^−g + (N + 1) <= INT32_MAX`. It is NEGATIVE whenever the
+   reduction sits below the int32 limit (m = 8, N = 80: `g = −10`): the
+   max-exponent partials are then shifted LEFT exactly (their `2^−g` images
+   stay within the bound, so no overflow) and only segments more than `−g`
+   binades below `E_top` are rounded; it is `>= 2` for m = 16 reductions
+   beyond a few products (m16 × m16: 2 at N = 4, 6 at N = 80; m16 × m8: 3 at
+   N = 2400). The design's `g = 1 + ceil(log2 S)` is the same proof with the
+   int32 bound on a partial in place of the product bound; the product bound
+   is tighter at every width (ruling 2026-11-04: kept, with negative `g`).
+   A kernel that rescales or rounds partials BEFORE folding must add that
+   error and its changed magnitude bound to this proof.
+4. Alignment (`bfpAlignPartial`): a finished segment enters as
+   `partial · 2^−k`, `k = E_acc − (E_in + E_w)`. `k < 0` is an exact left
+   shift (no overflow, by 3.); `k > 0` is HALF_AWAY in the overflow-safe
+   magnitude form `t = mag >> (k−1); r = (t >> 1) + (t & 1)`; `k >= 32`
+   drops the partial (it is below one half). Never SR: the re-block owns the
+   op's rounding mode, the fold rounds HALF_AWAY whatever the mode. This is
+   the forward's exception to "kernels are rounding-free" (§5.3).
+5. A segment closes on EITHER operand's group change (as before) AND when it
+   holds `bfpSegmentLimit(ma, mb)` products: over-long same-exponent runs
+   are SPLIT at the int32 limit, not rejected — the forward has no
+   `bfpValidateBlockHeadroom` (m = 16 × 16 runs with one product per
+   segment). The backward keeps the fail-fast.
+6. The bias is one more segment: `bfpAlignPartial(code, E_acc − E_bias)`
+   seeds the accumulator, hoisted per channel and target group.
+7. Absolute fold error per output: `<= ½ (S + 1) · 2^E_acc`, `S` = segments
+   folded (bias included). Relative to the output it is `2^−24`-class only
+   near the static bound; a target group whose values sit far below the
+   bound sees more — the price of one static exponent per group.
+
+A FLOAT32 target gets ONE `E_acc` over the whole output (the `{1,0}` raw):
+outputs more than `~31 + g` binades below the global row max lose mantissa
+bits, and `(float)mant` rounds above `2^24`. The BFP-wire path (the proof
+config) is per group and unaffected.
+
 **Relation to the float authority.** On data where the float path is exact
 (`|mant| < 2^24`, a power-of-two scale, `k <= 24`) the integer rule
 reproduces `deriveBfpStoredExponent`'s stored exponents and the float
@@ -1826,7 +1901,9 @@ integer-only forward (allow-listed in the census).
 division helpers for the re-block; its one `mem` hit is `byteConversion`'s
 `memset` on the non-8/16 width branch.
 
-**Status.** Shipped with no producer: no kernel emits `BFP_RAW` yet, every
-op keeps the FLOAT32 raw and the identity oracle stays bit-identical. The
-integer kernels (Conv1d fold, pools, Linear, Softmax) land next and set the
-flag in their forward arms.
+**Status.** The Conv1d forward emits `BFP_RAW` (`conv1dKernelBfpRaw`, the
+fold above); `conv1dKernelBfp` (FLOAT32 raw) remains for the ConvT1d dx
+adjoint. Every other op keeps the FLOAT32 raw; the pools, Linear and Softmax
+forwards land next and set the flag in their forward arms. Numbers of native
+BFP configs changed with the Conv1d fold by design; fake-quant and FLOAT32
+paths are untouched.

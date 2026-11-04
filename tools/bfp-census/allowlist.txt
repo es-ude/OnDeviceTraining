@@ -8,3 +8,8 @@ packFloatBufferAsBfp
 # Loss-facing dequant: BFP logits leave the integer domain here.
 convertBfpTensorToFloat32Tensor
 convertBfpRawTensorToFloat32Tensor
+# Same-algorithm rule: the window geometry (per call) and the window slice
+# (one division per OUTPUT element, never per MAC) are shared with the FLOAT32
+# conv kernels and stay as they are.
+windowGeometry1dCalc
+windowSlice1dAt

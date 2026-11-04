@@ -3,9 +3,9 @@
 # unique definition in another object). Static helpers split by the compiler
 # (.constprop/.isra/.part) are matched by base name.
 Matmul.c        matmulBfpTensors
-Conv1dKernel.c  conv1dKernelBfp
+Conv1dKernel.c  conv1dKernelBfpRaw
 ConvTranspose1dKernel.c  convTranspose1dKernelBfpGather
-Conv1d.c        forwardKernelBfp
+Conv1d.c        forwardKernelBfpRaw
 Conv1dTransposed.c  forwardKernelBfp
 Linear.c        linearForwardKernelBfp
 Linear.c        linearForwardBfp

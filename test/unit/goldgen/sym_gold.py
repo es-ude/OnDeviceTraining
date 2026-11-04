@@ -13,6 +13,7 @@ Generators import via a sys.path bootstrap relative to the script:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 """
 import math
+from fractions import Fraction
 
 import numpy as np
 import torch
@@ -66,6 +67,30 @@ def emit_uint8_array(name: str, values) -> str:
     body = ", ".join(str(v) for v in vals)
     return (
         f"static const uint8_t {name}[] = {{ {body} }};\n"
+        f"static const size_t {name}_len = {len(vals)};\n"
+    )
+
+
+def emit_int16_array(name: str, values) -> str:
+    vals = [int(v) for v in values]
+    assert all(-32768 <= v <= 32767 for v in vals), f"{name}: value outside int16 range"
+    body = ", ".join(str(v) for v in vals)
+    return (
+        f"static const int16_t {name}[] = {{ {body} }};\n"
+        f"static const size_t {name}_len = {len(vals)};\n"
+    )
+
+
+def emit_double_array(name: str, values) -> str:
+    """float64 literals (repr round-trips exactly); for exact references
+    that a test compares against within a stated bound."""
+    vals = [float(v) for v in values]
+    for v in vals:
+        if v != v or v in (float("inf"), float("-inf")):
+            raise ValueError(f"{name}: non-finite gold value {v!r}")
+    body = ", ".join(repr(v) for v in vals)
+    return (
+        f"static const double {name}[] = {{ {body} }};\n"
         f"static const size_t {name}_len = {len(vals)};\n"
     )
 
@@ -1216,6 +1241,200 @@ def conv1d_bfp_ref(x_codes, x_exp, x_qc, w_codes, w_exp, w_qc, bias_codes, bias_
             "conv1d_bfp_ref: per-tensor collapse is indistinguishable from the "
             "grouped run -- fixture is vacuous against group-structure bugs")
     return out
+
+
+# ---- Integer-only BFP forward: conv1dKernelBfpRaw's kernel emulation
+# (docs/conventions/arithmetic-bfp.md section 13, "The integer fold"). The
+# SAME walk as conv1d_bfp_ref; only the arithmetic of the fold changes: one
+# int32 accumulator per output in units of 2^E_acc, E_acc per TARGET group of
+# the raw (the output wire's blocking), partials aligned by a two-sided shift
+# (left = exact, right = HALF_AWAY), bias as one more aligned segment,
+# same-exponent runs split at bfpSegmentLimit. ----
+
+_INT32_MIN = -(2 ** 31)
+
+
+def bfp_segment_limit(ma, mb):
+    """bfpSegmentLimit(ma, mb) = INT32_MAX >> (ma+mb-2); 1 when the shift
+    reaches 31 (two 2^30 products already overflow int32)."""
+    shift = ma + mb - 2
+    return 1 if shift >= 31 else (_INT32_MAX >> shift)
+
+
+def bfp_fold_guard_bits(n_terms, ma, mb, m_bias):
+    """The fold guard from its definition (arithmetic-bfp section 13 item 3),
+    not from the C search: the smallest integer g in [-30, 31] with
+    (N * 2^(ma+mb-2) + 2^(m_bias-1)) * 2^(-g) + (N + 1) <= INT32_MAX, each
+    candidate evaluated exactly in rationals. m_bias == 0: no bias segment."""
+    total = n_terms * 2 ** (ma + mb - 2) + (2 ** (m_bias - 1) if m_bias else 0)
+    for g in range(-30, 32):
+        if Fraction(total) * Fraction(2) ** (-g) + (n_terms + 1) <= _INT32_MAX:
+            return g
+    raise AssertionError("bfp_fold_guard_bits: reduction too long for an int32 fold")
+
+
+def bfp_shr_half_away(v, k):
+    """v * 2^-k rounded half away from zero, k >= 0, as integer division of
+    the magnitude plus a remainder test (dropped fraction >= 1/2 iff
+    2 * rem >= 2^k) -- the definition, not the C bit form. Any k: a value
+    below one half rounds to zero, the exact half rounds away."""
+    assert k >= 0
+    if k == 0:
+        return v
+    q, rem = divmod(abs(v), 2 ** k)
+    if 2 * rem >= 2 ** k:
+        q += 1
+    return -q if v < 0 else q
+
+
+def bfp_align_partial(v, k):
+    """Mirror bfpAlignPartial: k < 0 is an exact left shift (the headroom
+    proof guarantees it fits int32), k >= 0 is bfp_shr_half_away."""
+    if k < 0:
+        r = v << (-k)
+        assert _INT32_MIN <= r <= _INT32_MAX, "bfp_align_partial: left shift left int32"
+        return r
+    return bfp_shr_half_away(v, k)
+
+
+def _bfp_row_group_max(exps, bias, group_size, start, count):
+    """Max unbiased exponent over the groups a flat row [start, start+count)
+    intersects (group_size 0 = the per-tensor sentinel, group 0 only)."""
+    if group_size == 0:
+        return exps[0] - bias
+    g_lo = start // group_size
+    g_hi = (start + count - 1) // group_size
+    return max(exps[g] - bias for g in range(g_lo, g_hi + 1))
+
+
+def conv1d_bfp_raw_ref(x_codes, x_exp, x_qc, w_codes, w_exp, w_qc, bias_codes, bias_exp,
+                       bias_qc, batch, in_channels, out_channels, kernel_size, input_length,
+                       stride=1, dilation=1, padding_type="VALID", padding=0, conv_groups=1,
+                       raw_group_size=0):
+    """conv1dKernelBfpRaw's emulation. Returns a dict with the int32
+    mantissas (`mant`, row-major [batch*out_channels*out_len]), the UNBIASED
+    raw exponent per target group (`exps`, numGroups = n / raw_group_size, or
+    1 for the per-tensor sentinel 0), the exact float64 values (`exact`), the
+    fold guard `g`, and per output the absolute fold-error bound
+    1/2 * (S + 1) * 2^E_acc (`bound`, S = segments folded incl. the bias).
+
+    Rule (section 13): E_top(row (b, oc)) = max over the conv group's input
+    rows of their group-max exponent + the weight row's group-max exponent,
+    max'ed with the bias exponent of oc; E_acc(target group) = max E_top over
+    the output rows the group covers + g, with g from bfp_fold_guard_bits
+    (N = in_channels/conv_groups * kernel_size). Per output: acc = align(bias
+    code, E_acc - E_bias); the walk of conv1d_bfp_ref with one int partial
+    per same-exponent segment, folded on EITHER operand's group change AND
+    when the segment holds bfp_segment_limit products: acc += align(partial,
+    E_acc - (E_x + E_w)); tail fold. Rounding is HALF_AWAY at every right
+    shift, never SR (SR belongs to the re-block)."""
+    assert in_channels % conv_groups == 0 and out_channels % conv_groups == 0
+    in_ch_per_group = in_channels // conv_groups
+    out_ch_per_group = out_channels // conv_groups
+    geom = window_geometry_1d(input_length, kernel_size, stride, dilation, padding_type, padding)
+    out_len = geom["out_len"]
+    x_bias = 2 ** (x_qc["exponent_bits"] - 1) - 1
+    w_bias = 2 ** (w_qc["exponent_bits"] - 1) - 1
+    n_terms = in_ch_per_group * kernel_size
+    limit = bfp_segment_limit(x_qc["mantissa_bits"], w_qc["mantissa_bits"])
+    g = bfp_fold_guard_bits(n_terms, x_qc["mantissa_bits"], w_qc["mantissa_bits"],
+                            bias_qc["mantissa_bits"] if bias_codes is not None else 0)
+
+    # Pre-pass: row-wise exponent maxima (O(groups)).
+    in_row_max = [[_bfp_row_group_max(x_exp, x_bias, x_qc["group_size"],
+                                      (b * in_channels + ic) * input_length, input_length)
+                   for ic in range(in_channels)] for b in range(batch)]
+    w_row_max = [_bfp_row_group_max(w_exp, w_bias, w_qc["group_size"], oc * n_terms, n_terms)
+                 for oc in range(out_channels)]
+    bias_e = None
+    if bias_codes is not None:
+        bb = 2 ** (bias_qc["exponent_bits"] - 1) - 1
+        bias_e = [bias_exp[_bfp_group_of(oc, bias_qc["group_size"])] - bb
+                  for oc in range(out_channels)]
+
+    def row_top(row):
+        b, oc = divmod(row, out_channels)
+        cg = oc // out_ch_per_group
+        e = max(in_row_max[b][cg * in_ch_per_group + i] for i in range(in_ch_per_group))
+        e += w_row_max[oc]
+        if bias_e is not None and bias_e[oc] > e:
+            e = bias_e[oc]
+        return e
+
+    n_out = batch * out_channels * out_len
+    gsz = n_out if raw_group_size == 0 else raw_group_size
+    if n_out == 0:
+        return dict(mant=[], exps=[0], exact=[], g=g, bound=[])
+    assert n_out % gsz == 0, "conv1d_bfp_raw_ref: raw_group_size must divide the output"
+    num_groups = n_out // gsz
+    exps = []
+    for t in range(num_groups):
+        rows = range((t * gsz) // out_len, ((t + 1) * gsz - 1) // out_len + 1)
+        exps.append(max(row_top(r) for r in rows) + g)
+
+    mant, exact, bound = [], [], []
+    for b in range(batch):
+        for oc in range(out_channels):
+            conv_g = oc // out_ch_per_group
+            in_lo = conv_g * in_ch_per_group
+            w_base = oc * in_ch_per_group * kernel_size
+            for out_pos in range(out_len):
+                out_idx = (b * out_channels + oc) * out_len + out_pos
+                e_acc = exps[out_idx // gsz]
+                first_valid_idx, first_valid_k, valid_count = window_slice_1d_full(geom, out_pos)
+                acc = 0
+                ex = 0.0
+                segments = 0
+                if bias_codes is not None:
+                    acc = bfp_align_partial(bias_codes[oc], e_acc - bias_e[oc])
+                    ex = bias_codes[oc] * (2.0 ** bias_e[oc])
+                    segments = 1
+                partial = 0
+                seg_count = 0
+                cur_gx, cur_gw = None, None
+                for ic_offset in range(in_ch_per_group):
+                    ic = in_lo + ic_offset
+                    for i in range(valid_count):
+                        kernel_idx = first_valid_k + i
+                        w_idx = w_base + ic_offset * kernel_size + kernel_idx
+                        input_idx = first_valid_idx + i * dilation
+                        x_idx = (b * in_channels + ic) * input_length + input_idx
+                        gx = _bfp_group_of(x_idx, x_qc["group_size"])
+                        gw = _bfp_group_of(w_idx, w_qc["group_size"])
+                        if cur_gw is None:
+                            cur_gx, cur_gw = gx, gw
+                        elif gx != cur_gx or gw != cur_gw or seg_count == limit:
+                            e_seg = (x_exp[cur_gx] - x_bias) + (w_exp[cur_gw] - w_bias)
+                            acc += bfp_align_partial(partial, e_acc - e_seg)
+                            segments += 1
+                            partial = 0
+                            seg_count = 0
+                            cur_gx, cur_gw = gx, gw
+                        prod = x_codes[x_idx] * w_codes[w_idx]
+                        partial += prod
+                        seg_count += 1
+                        assert abs(partial) <= _INT32_MAX, "conv1d_bfp_raw_ref: partial left int32"
+                        ex += prod * (2.0 ** ((x_exp[gx] - x_bias) + (w_exp[gw] - w_bias)))
+                if cur_gw is not None:
+                    e_seg = (x_exp[cur_gx] - x_bias) + (w_exp[cur_gw] - w_bias)
+                    acc += bfp_align_partial(partial, e_acc - e_seg)
+                    segments += 1
+                assert _INT32_MIN <= acc <= _INT32_MAX, "conv1d_bfp_raw_ref: acc left int32"
+                mant.append(acc)
+                exact.append(ex)
+                bound.append(0.5 * (segments + 1) * (2.0 ** e_acc))
+    for v, e_acc, ex, bd in zip(mant, (exps[i // gsz] for i in range(n_out)), exact, bound):
+        assert abs(v * (2.0 ** e_acc) - ex) <= bd, "conv1d_bfp_raw_ref: fold error above its bound"
+    return dict(mant=mant, exps=exps, exact=exact, g=g, bound=bound)
+
+
+def bfp_raw_dequant_f32(mant, exps, raw_group_size):
+    """Mirror convertBfpRawTensorToFloat32Tensor: ldexpf((float)mant, E) per
+    element -- (float)mant rounds to nearest-even above 2^24, the power-of-two
+    scaling is exact. Returns Python floats of the float32 results."""
+    n = len(mant)
+    gsz = n if raw_group_size == 0 else raw_group_size
+    return [float(np.ldexp(np.float32(v), np.int32(exps[i // gsz]))) for i, v in enumerate(mant)]
 
 
 # ---- BFP epic PR2 Task 5: gather-formulated ConvT1d BFP reference (D9),

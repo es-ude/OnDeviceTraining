@@ -39,7 +39,10 @@
  *                            / linearCalcWeightGradsBfp (+ linearCalcBiasGradsBfp)
  *                            on the funnel's UNPACKED-BFP scratch form (int32
  *                            codes under a live bfpQConfig_t); raw FLOAT32 out
- *   conv1d  kernel/forward   conv1dKernelBfp, same form
+ *   conv1d  kernel/forward   conv1dKernelBfpRaw, same operand form; the output
+ *                            is the integer BFP_RAW (spec.output.groupSize =
+ *                            the raw target geometry), written as mantissas
+ *                            + unbiased exponents (arithmetic-bfp section 13)
  *   convt1d kernel/forward   convTranspose1dKernelBfpGather (D9), same form
  *   linear/conv1d/convt1d layer/forward  layerFunctions[].forward with BFP-stored
  *                            (packed) or FLOAT32 operands; output = spec.output
@@ -768,6 +771,8 @@ static const char *dtypeName(qtype_t t) {
         return "BOOL";
     case BFP:
         return "BFP";
+    case BFP_RAW:
+        return "BFP_RAW";
     }
     return "?";
 }
@@ -833,6 +838,11 @@ static void writeOneOutput(FILE *json, const char *outDir, const outputEntry_t *
         freeTensor(codes);
         break;
     }
+    case BFP_RAW:
+        /* The integer forward raw: int32 mantissas as they are; the UNBIASED
+         * per-group exponents go into result.json below. */
+        rc = npyWriteInt32(full, (const int32_t *)t->data, dims, ndim);
+        break;
     default:
         failf("output %s: dtype %s cannot be written yet (codes-only sinks for SYM/ASYM are "
               "later steps)",
@@ -868,6 +878,20 @@ static void writeOneOutput(FILE *json, const char *outDir, const outputEntry_t *
         }
         fprintf(json, "],\n");
         fprintf(json, "      \"rounding\": \"%s\"", roundingName(qc->roundingMode));
+    } else if (t->quantization->type == BFP_RAW) {
+        bfpRawQConfig_t *qc = t->quantization->qConfig;
+        fprintf(json, ",\n      \"numGroups\": %zu,\n", qc->numGroups);
+        fprintf(json, "      \"groupSize\": %zu,\n", qc->groupSize);
+        fprintf(json, "      \"rawExponents\": [");
+        for (size_t g = 0; g < qc->numGroups; g++) {
+            fprintf(json, "%s%d", g ? ", " : "", (int)qc->exponents[g]);
+        }
+        fprintf(json, "]");
+        /* freeQuantization knows no BFP_RAW exponent block (the raw is a
+         * funnel-stack transient in the library): release it here, before
+         * writeOutputs frees the tensor. */
+        freeReservedMemory(qc->exponents);
+        qc->exponents = NULL;
     }
     fprintf(json, "\n    }%s\n", last ? "" : ",");
 }
@@ -1094,9 +1118,43 @@ static tensor_t *makeRawWire(size_t ndim, const size_t *dims, roundingMode_t rm)
     return makeTensor(ndim, dims, quantizationInitSymInt32WithBits(rm, ODT_SYM_OPERAND_QMAXBITS));
 }
 
-/* A raw FLOAT32 wire: what every ARITH_BFP kernel emits (D7). */
+/* A raw FLOAT32 wire: what the ARITH_BFP kernels without an integer raw
+ * emit (D7; Linear / ConvT1d forward, every backward kernel). */
 static tensor_t *makeFloatWire(size_t ndim, const size_t *dims) {
     return makeTensor(ndim, dims, quantizationInitFloat());
+}
+
+/* A BFP_RAW wire for an integer forward raw (arithmetic-bfp section 13):
+ * spec.output = {"dtype": "BFP_RAW", "groupSize": 0 | g} -- the raw target
+ * geometry the kernel folds per (0 = one exponent over the whole output). */
+static tensor_t *makeBfpRawWire(size_t ndim, const size_t *dims, const jsonNode_t *spec) {
+    const jsonNode_t *o = jsonRequireObject(spec, "output", "spec");
+    const char *dtype = jsonRequireString(o, "dtype", "spec.output");
+    if (strcmp(dtype, "BFP_RAW") != 0) {
+        failf("spec.output.dtype must be BFP_RAW for a kernel-tier integer forward (got %s)",
+              dtype);
+    }
+    size_t n = 1;
+    for (size_t i = 0; i < ndim; i++) {
+        n *= dims[i];
+    }
+    size_t groupSize = jsonSizeOr(o, "groupSize", 0, "spec.output");
+    size_t numGroups = 1;
+    if (groupSize > 0 && groupSize < n) {
+        if (n % groupSize != 0) {
+            failf("spec.output.groupSize %zu does not divide the output (%zu)", groupSize, n);
+        }
+        numGroups = n / groupSize;
+    } else {
+        groupSize = 0;
+    }
+    bfpRawQConfig_t *qc = reserveMemory(sizeof(bfpRawQConfig_t));
+    qc->exponents = reserveMemory(numGroups * sizeof(int16_t));
+    qc->numGroups = numGroups;
+    qc->groupSize = groupSize;
+    quantization_t *q = reserveMemory(sizeof(quantization_t));
+    initBfpRawQuantization(qc, q);
+    return makeTensor(ndim, dims, q);
 }
 
 static void requireKernelArith(arithmetic_t arith, const char *what) {
@@ -1123,8 +1181,9 @@ static void checkOutputShape(const shape_t *got, size_t ndim, const size_t *want
 /* ------------------------------------------------------------------------- */
 
 /* conv1d / kernel / forward: conv1dKernelSymInt32 on SYM_INT32 codes (raw
- * accumulator-range int32 at s_in * s_w) or conv1dKernelBfp on unpacked-BFP
- * scratch (raw FLOAT32, D7). */
+ * accumulator-range int32 at s_in * s_w) or conv1dKernelBfpRaw on unpacked-BFP
+ * scratch (the integer BFP_RAW of arithmetic-bfp section 13, onto the raw
+ * geometry spec.output names). */
 static void runConv1dKernelForward(const runCtx_t *ctx) {
     arithmetic_t arith = parseArithmetic(ctx->spec);
     requireKernelArith(arith, "conv1d/kernel/forward");
@@ -1138,8 +1197,8 @@ static void runConv1dKernelForward(const runCtx_t *ctx) {
                          geom.outputLength};
     tensor_t *out;
     if (arith.type == ARITH_BFP) {
-        out = makeFloatWire(3, outDims);
-        conv1dKernelBfp(ops.input, ops.weight, ops.bias, &kernel, groups, out);
+        out = makeBfpRawWire(3, outDims, ctx->spec);
+        conv1dKernelBfpRaw(ops.input, ops.weight, ops.bias, &kernel, groups, out);
     } else {
         out = makeRawWire(3, outDims, arith.roundingMode);
         conv1dKernelSymInt32(ops.input, ops.weight, ops.bias, &kernel, groups, out, NULL);

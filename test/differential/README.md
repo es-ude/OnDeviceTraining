@@ -143,7 +143,7 @@ Linear (`[B, outF, 1]`; dx `[B, inF, 1]`; weightGrad `[1, outF, inF]`).
 `cells/*.json`, one op configuration each (op, direction, tiers, arithmetic,
 geometry, operand/output widths, fixture, expectation, optional gold name).
 
-The matrix at a glance (147 cells; a cell name's prefix is its family):
+The matrix at a glance (148 cells; a cell name's prefix is its family):
 
 | prefix | what | cells | tiers | operand widths |
 |---|---|---|---|---|
@@ -154,7 +154,7 @@ The matrix at a glance (147 cells; a cell name's prefix is its family):
 | `s3`, `s3x`, `s3y` | Linear weightGrad (+ biasGrad), FLOAT32 grad storage, reduction over the batch | 9 | kernel, layer | loss int12, input int12 |
 | `s11a/b/c` | encode / dynamic requant / fixed-scale requant | 9 | convert | int12, int16 |
 | `b1`, `b1x` | FLOAT32 -> BFP pack | 40 | convert | m 2..16, e 2/4/8, per-tensor and grouped |
-| `b2`, `b2s`, `b2x` | BFP forward (Linear, Conv1d, ConvT1d) | 16 | kernel, layer | m 4..16 mixed, per-tensor and grouped |
+| `b2`, `b2s`, `b2x` | BFP forward (Linear, Conv1d, ConvT1d) | 17 | kernel, layer | m 4..16 mixed, per-tensor and grouped |
 | `b3` | BFP forward / dx onto a BFP wire | 5 | kernel, layer | m 8 / 12 |
 | `b4`, `b4x` | BFP native backward (Linear, Conv1d, ConvT1d) | 14 | kernel (Linear), layer | m 6..16 |
 | `b5` | fake-quant twin: ARITH_FLOAT32 over BFP storage | 9 | layer | m 12, grouped |
@@ -263,9 +263,25 @@ directly (Conv1d); `linear_grid` / `full_scale` (Linear, above); `convert`
   aligned doc, the C was not.
 - `b2_lin_fwd_*`, `b2_conv_fwd_*`, `b2_convt_fwd_*` -- B2, the GEMM-family
   forward under `ARITH_BFP`, kernel tier (`linearForwardBfp`,
-  `conv1dKernelBfp`, `convTranspose1dKernelBfpGather` on the funnel's
+  `conv1dKernelBfpRaw`, `convTranspose1dKernelBfpGather` on the funnel's
   unpacked scratch form) and layer tier (packed BFP operands borrowed by the
-  funnel, FLOAT32 `outputQ` = the raw). Per-tensor fixtures (one segment per
+  funnel, FLOAT32 `outputQ` = the raw, or its dequant for the integer-raw
+  ops). **Conv1d forward is the integer fold** (arithmetic-bfp section 13,
+  `bfp_ref.conv1d_int_fold`): the kernel tier emits the `BFP_RAW` (int32
+  mantissas + one unbiased exponent per raw target group, `raw.groupSize`
+  in the cell, 0 = per-tensor) and Leg A compares mantissas AND exponents
+  bit for bit; the layer tier's FLOAT32 wire is the section-13 dequant of
+  the predicted raw, bit for bit; a B3 wire is the section-13 re-block of
+  the predicted raw, codes and stored exponents exactly. Every conv forward
+  row therefore expects `EXACT` (no fold-order gap: the integer fold is
+  deterministic along the documented walk, and no headroom abort is
+  predicted -- over-long runs split). `b2_conv_fwd_spread_m8w6` spreads the
+  input groups' exponents by +-14 binades so the fold's HALF_AWAY right
+  shifts are exercised (the other conv cells only left-shift exactly: their
+  spreads stay inside the negative fold guard); `b2_conv_fwd_g2_same_m8w6`
+  and the spread cell use kernel-tier raw groups (8 / 16) that straddle
+  output rows. The Linear / ConvT1d forwards keep the float fold below until
+  their integer kernels land. Per-tensor fixtures (one segment per
   output: the fold is predicted to the bit, `expect EXACT`), grouped on both
   operands with group sizes that do and do not divide the row length, mixed
   widths (m12 x m8, m12 x m6, m12 x m4, m8 x m6), e = 4 and 8, conv groups,
@@ -282,7 +298,9 @@ directly (Conv1d); `linear_grid` / `full_scale` (Linear, above); `convert`
   (`outputQ` / `propLossQ` BFP, per-tensor and grouped): the OUT_WRITE pack
   of the raw. Leg A packs the PREDICTED raw (bit-exact for the
   single-segment fixtures; for the one multi-segment fixture the fold bound,
-  in code units, is the tie window); Leg B = fold bound + half a code.
+  in code units, is the tie window); Leg B = fold bound + half a code. The
+  Conv1d wire cell is the integer re-block of the integer raw instead
+  (section 13; `bfp_ref.reblock_raw`, exact codes and exponents).
 - `b4_*` -- B4, native backward: Linear dx / weightGrad / biasGrad on both
   tiers (`linearCalcPropLossBfp`, `linearCalcWeightGradsBfp`,
   `linearCalcBiasGradsBfp` raw; the layer's ONE backward into a FLOAT32 dx
@@ -300,9 +318,12 @@ directly (Conv1d); `linear_grid` / `full_scale` (Linear, above); `convert`
   float64 within the float32 kernel's (2N+1) roundings. Softmax fq is not
   covered: only the GEMM family has twins.
 
-Observed in step 3 (all 119 rows PASS, none TIE_ONLY): every raw float32 output of every BFP GEMM-family op, forward
+Observed in step 3 (all 121 rows PASS, none TIE_ONLY): every raw float32 output of every BFP GEMM-family op, forward
 and backward, kernel and layer tier, is BIT-EXACT against the documented fold
-evaluated along the assumed walk -- including the section-7 lossy rows, where
+evaluated along the assumed walk (the Conv1d forward rows against the
+section-13 integer fold: raw mantissas and exponents, the FLOAT32 dequant and
+the B3 re-block all exact; the spread cell's float64 ratio against the fold
+bound is 0.44) -- including the section-7 lossy rows, where
 the `(float)partial` cast is reproduced by the int64 -> float32 cast. The
 assumed walk orders of `bfp_ref.DOC_GAPS[2]` (Linear: reduction index
 ascending; Conv1d forward: input channel outer, tap inner; gather: tap outer,
@@ -369,6 +390,13 @@ reported alongside (`ratio_rigorous`) and never needed.
   nothing about whether E is the documented one. The fq twin uses the float32
   kernel's `(2N + 1 + bias) * u * S` (`bound_float32_kernel`), reported
   elementwise (`err_max`, `bound` and `ratio` are the same element's).
+- Integer fold (Conv1d forward, `bfp_ref.conv1d_int_fold`, elementwise):
+  arithmetic-bfp section 13 item 7, `1/2 (S + 1) 2^E_acc` with `S` the
+  segments the element folded (bias included) and `E_acc` the raw target
+  group's exponent -- an absolute bound, stated by the doc, evaluated by the
+  mirror per element. The layer tier adds `u |value|` for the `(float)mant`
+  cast of the dequant; a BFP wire adds half a code at the C's exponent (as
+  above; clamped elements excluded).
 
 ## Adding ops / tiers
 
@@ -501,6 +529,12 @@ reported alongside (`ratio_rigorous`) and never needed.
     saturating negative values (`b1_pack_m{2,4,6,8,12,16}_e{2,4}_g8`)
     MISMATCH class `code`; they were `TIE_ONLY` (`clamp_floor`) before the
     aligned doc and are `EXACT` now.
+    Integer fold (Conv1d forward): `bfpShrHalfAway`'s half bit dropped
+    (truncation instead of HALF_AWAY, `BfpKernelSupport.h`) -> both tiers of
+    `b2_conv_fwd_spread_m8w6` MISMATCH (kernel class `mant`, layer class
+    `dequant`); every other conv forward cell stays EXACT, as it must: their
+    folds never right-shift (`rounded=0` in the row summary), which is why
+    the spread cell exists.
 
 ## Documentation gaps
 

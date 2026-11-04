@@ -1530,6 +1530,116 @@ void testBfpGroupAtMatchesBfpGroupOfOnStridedWalk(void) {
     }
 }
 
+/* Integer fold helpers (arithmetic-bfp §13 "The integer fold"): a partial
+ * enters the int32 accumulator as partial * 2^-k. k > 0 rounds HALF_AWAY in
+ * the overflow-safe magnitude form, k == 0 is the identity, k < 0 is an
+ * exact left shift the headroom proof licenses. */
+void testBfpShrHalfAwayRoundsHalfAwayFromZero(void) {
+    TEST_ASSERT_EQUAL_INT32(4, bfpShrHalfAway(7, 1));   /* 3.5 -> 4 */
+    TEST_ASSERT_EQUAL_INT32(-4, bfpShrHalfAway(-7, 1)); /* -3.5 -> -4 */
+    TEST_ASSERT_EQUAL_INT32(3, bfpShrHalfAway(5, 1));   /* 2.5 -> 3 */
+    TEST_ASSERT_EQUAL_INT32(-3, bfpShrHalfAway(-5, 1));
+    TEST_ASSERT_EQUAL_INT32(2, bfpShrHalfAway(6, 2));  /* 1.5 -> 2 */
+    TEST_ASSERT_EQUAL_INT32(2, bfpShrHalfAway(9, 2));  /* 2.25 -> 2 */
+    TEST_ASSERT_EQUAL_INT32(3, bfpShrHalfAway(11, 2)); /* 2.75 -> 3 */
+    TEST_ASSERT_EQUAL_INT32(-3, bfpShrHalfAway(-11, 2));
+    TEST_ASSERT_EQUAL_INT32(1, bfpShrHalfAway(1, 1)); /* 0.5 -> 1 */
+    TEST_ASSERT_EQUAL_INT32(-1, bfpShrHalfAway(-1, 1));
+    TEST_ASSERT_EQUAL_INT32(0, bfpShrHalfAway(1, 2)); /* 0.25 -> 0 */
+    TEST_ASSERT_EQUAL_INT32(0, bfpShrHalfAway(0, 5));
+    TEST_ASSERT_EQUAL_INT32(12, bfpShrHalfAway(12, 0));
+    TEST_ASSERT_EQUAL_INT32(INT32_MIN, bfpShrHalfAway(INT32_MIN, 0));
+    TEST_ASSERT_EQUAL_INT32(INT32_MAX, bfpShrHalfAway(INT32_MAX, 0));
+}
+
+void testBfpShrHalfAwayInt32Extremes(void) {
+    TEST_ASSERT_EQUAL_INT32(1 << 30, bfpShrHalfAway(INT32_MAX, 1)); /* 2^30 - 0.5 -> 2^30 */
+    TEST_ASSERT_EQUAL_INT32(-(1 << 30), bfpShrHalfAway(INT32_MIN, 1));
+    TEST_ASSERT_EQUAL_INT32(2, bfpShrHalfAway(INT32_MAX, 30)); /* 1.99.. -> 2 */
+    TEST_ASSERT_EQUAL_INT32(1, bfpShrHalfAway(INT32_MAX, 31)); /* 0.99.. -> 1 */
+    TEST_ASSERT_EQUAL_INT32(-1, bfpShrHalfAway(INT32_MIN, 31));
+    TEST_ASSERT_EQUAL_INT32(0, bfpShrHalfAway(INT32_MAX, 32));  /* < 0.5 */
+    TEST_ASSERT_EQUAL_INT32(-1, bfpShrHalfAway(INT32_MIN, 32)); /* exactly -0.5 */
+    TEST_ASSERT_EQUAL_INT32(0, bfpShrHalfAway(INT32_MAX, 40));
+    TEST_ASSERT_EQUAL_INT32(0, bfpShrHalfAway(INT32_MIN, 40));
+}
+
+void testBfpAlignPartialLeftShiftIsExactAndRightShiftRounds(void) {
+    TEST_ASSERT_EQUAL_INT32(40, bfpAlignPartial(5, -3));
+    TEST_ASSERT_EQUAL_INT32(-40, bfpAlignPartial(-5, -3));
+    TEST_ASSERT_EQUAL_INT32(3 << 29, bfpAlignPartial(3, -29));
+    TEST_ASSERT_EQUAL_INT32(-(1 << 30), bfpAlignPartial(-1, -30));
+    TEST_ASSERT_EQUAL_INT32(5, bfpAlignPartial(5, 0));
+    TEST_ASSERT_EQUAL_INT32(4, bfpAlignPartial(7, 1));
+    TEST_ASSERT_EQUAL_INT32(-4, bfpAlignPartial(-7, 1));
+    TEST_ASSERT_EQUAL_INT32(0, bfpAlignPartial(INT32_MAX, 40));
+}
+
+/* The static headroom proof in units of 2^E_acc: (N 2^(ma+mb-2) + 2^(mb-1))
+ * 2^-g + (N + 1) <= INT32_MAX, g the smallest integer (negative allowed) that
+ * satisfies it -- the product bound, not the int32 bound on a partial. */
+void testBfpFoldGuardBitsFromTheProductBound(void) {
+    TEST_ASSERT_EQUAL_INT(-10, bfpFoldGuardBits(80, 8, 8, 8, "t")); /* HAR conv2/3 widths */
+    TEST_ASSERT_EQUAL_INT(-20, bfpFoldGuardBits(6, 6, 4, 8, "t"));  /* the conv gold fixture */
+    TEST_ASSERT_EQUAL_INT(-21, bfpFoldGuardBits(2, 6, 4, 0, "t"));
+    TEST_ASSERT_EQUAL_INT(-28,
+                          bfpFoldGuardBits(1, 2, 2, 0, "t")); /* T = 4: the floor is never hit */
+    TEST_ASSERT_EQUAL_INT(1, bfpFoldGuardBits(2, 16, 16, 0, "t")); /* 2 * 2^30 = 2^31 > INT32_MAX */
+    TEST_ASSERT_EQUAL_INT(1, bfpFoldGuardBits(600, 16, 8, 0, "t"));
+    TEST_ASSERT_EQUAL_INT(0, bfpFoldGuardBits(1, 16, 16, 0, "t")); /* 2^30 + 2 fits exactly once */
+    TEST_ASSERT_EQUAL_INT(0, bfpFoldGuardBits(511, 16, 8, 0, "t"));
+    TEST_ASSERT_EQUAL_INT(-30, bfpFoldGuardBits(0, 8, 8, 0, "t")); /* empty: only the floor */
+    /* g >= 2: the right-shift search must keep going past 1 (a search that
+     * walked back from g = 1 with an out-of-range shift returned 1 here). */
+    TEST_ASSERT_EQUAL_INT(2, bfpFoldGuardBits(4, 16, 16, 0, "t"));   /* 4 * 2^30 = 2^32 */
+    TEST_ASSERT_EQUAL_INT(6, bfpFoldGuardBits(80, 16, 16, 0, "t"));  /* 80 * 2^30 ~ 2^36.3 */
+    TEST_ASSERT_EQUAL_INT(3, bfpFoldGuardBits(2400, 16, 8, 0, "t")); /* 2400 * 2^22 ~ 2^33.2 */
+    TEST_ASSERT_EQUAL_INT(2, bfpFoldGuardBits(4, 16, 16, 16, "t"));  /* + a m16 bias segment */
+    TEST_ASSERT_EQUAL_INT(-15, bfpFoldGuardBits(2, 4, 4, 16, "t"));  /* bias-dominated */
+}
+
+/* The proof's inequality checked directly on the returned g over a sweep of
+ * (N, ma, mb, mBias): g satisfies it and g - 1 does not (minimality), both
+ * sides in exact 64-bit arithmetic with shift counts always in range. */
+static bool foldGuardHolds(uint64_t total, uint64_t room, int g) {
+    if (g >= 0) {
+        return g <= 31 && total <= (room << (unsigned)g);
+    }
+    return -g <= 30 && (total << (unsigned)(-g)) <= room;
+}
+
+void testBfpFoldGuardBitsIsTheSmallestGThatHolds(void) {
+    static const uint8_t widths[] = {2, 4, 8, 12, 16};
+    static const uint8_t biases[] = {0, 8, 16};
+    static const size_t lengths[] = {1, 2, 3, 4, 7, 8, 63, 80, 511, 512, 600, 2400, 100000};
+    for (size_t wa = 0; wa < 5; wa++) {
+        for (size_t wb = 0; wb < 5; wb++) {
+            for (size_t li = 0; li < 13; li++) {
+                for (size_t bi = 0; bi < 3; bi++) {
+                    size_t n = lengths[li];
+                    uint64_t total = ((uint64_t)n << (widths[wa] + widths[wb] - 2u)) +
+                                     (biases[bi] ? (uint64_t)1 << (biases[bi] - 1u) : 0u);
+                    uint64_t room = (uint64_t)INT32_MAX - (n + 1u);
+                    if (total > (room << 31)) {
+                        continue; /* the fail-fast regime, covered by the death test */
+                    }
+                    int g = bfpFoldGuardBits(n, widths[wa], widths[wb], biases[bi], "sweep");
+                    TEST_ASSERT_TRUE(foldGuardHolds(total, room, g));
+                    TEST_ASSERT_TRUE(g == -30 || !foldGuardHolds(total, room, g - 1));
+                }
+            }
+        }
+    }
+}
+
+static void bfpFoldGuardBitsOverlongReductionBody(void) {
+    (void)bfpFoldGuardBits((size_t)1 << 33, 16, 16, 0, "t"); /* g would be 33: every fold flushes */
+}
+
+void testBfpFoldGuardBitsRejectsAReductionNoShiftCanHold(void) {
+    ASSERT_EXITS_WITH_FAILURE(bfpFoldGuardBitsOverlongReductionBody());
+}
+
 /* Group-shape fail-fast: bfpGroupOf divides by groupSize
  * with no relation to numGroups, so a mismatched config ({numGroups=2,
  * groupSize=4} on 12 elements: 2*4 == 8 != 12) would silently read
@@ -2304,6 +2414,12 @@ int main(void) {
     RUN_TEST(testBfpGroupAtLastGroupEndsAtElementCount);
     RUN_TEST(testBfpGroupAtPerTensorNeverRecomputes);
     RUN_TEST(testBfpGroupAtMatchesBfpGroupOfOnStridedWalk);
+    RUN_TEST(testBfpShrHalfAwayRoundsHalfAwayFromZero);
+    RUN_TEST(testBfpShrHalfAwayInt32Extremes);
+    RUN_TEST(testBfpAlignPartialLeftShiftIsExactAndRightShiftRounds);
+    RUN_TEST(testBfpFoldGuardBitsFromTheProductBound);
+    RUN_TEST(testBfpFoldGuardBitsIsTheSmallestGThatHolds);
+    RUN_TEST(testBfpFoldGuardBitsRejectsAReductionNoShiftCanHold);
     RUN_TEST(testMatmulBfpRejectsMismatchedGroupShape);
     RUN_TEST(testMatmulBfpDxStridedWeightWalkMatchesGold);
     RUN_TEST(testMatmulBfpWeightGradTransposedLossViewMatchesGold);

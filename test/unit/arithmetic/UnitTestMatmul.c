@@ -1436,6 +1436,100 @@ void testBfpSumSegmentLimitTableValues(void) {
     TEST_ASSERT_EQUAL_size_t((size_t)(INT32_MAX >> 1), bfpSumSegmentLimit(2));
 }
 
+/* bfpGroupAt: the per-MAC group lookup divides only when the index leaves the
+ * cached [start, end) of the current group. The cache is a public struct, so
+ * the tests pre-load a WRONG group id to prove which path ran: an in-range
+ * index must return the cached id untouched, an out-of-range index must
+ * recompute (and overwrite it). */
+static const bfpQConfig_t groupAtQc = {
+    .exponents = NULL, .numGroups = 3, .groupSize = 4, .mantissaBits = 8, .exponentBits = 8};
+
+void testBfpGroupAtInRangeTrustsCache(void) {
+    bfpGroupRange_t r = {.group = 7, .start = 0, .end = 4};
+    TEST_ASSERT_EQUAL_size_t(7, bfpGroupAt(&r, &groupAtQc, 2));
+    TEST_ASSERT_EQUAL_size_t(7, bfpGroupAt(&r, &groupAtQc, 0));
+    TEST_ASSERT_EQUAL_size_t(7, bfpGroupAt(&r, &groupAtQc, 3));
+    TEST_ASSERT_EQUAL_size_t(0, r.start);
+    TEST_ASSERT_EQUAL_size_t(4, r.end);
+}
+
+void testBfpGroupAtForwardJumpRecomputes(void) {
+    bfpGroupRange_t r = {.group = 7, .start = 0, .end = 4};
+    /* end is exclusive: index 4 is the first element of group 1 */
+    TEST_ASSERT_EQUAL_size_t(1, bfpGroupAt(&r, &groupAtQc, 4));
+    TEST_ASSERT_EQUAL_size_t(4, r.start);
+    TEST_ASSERT_EQUAL_size_t(8, r.end);
+    /* a jump that skips a whole group lands on the right one */
+    TEST_ASSERT_EQUAL_size_t(2, bfpGroupAt(&r, &groupAtQc, 9));
+    TEST_ASSERT_EQUAL_size_t(8, r.start);
+    TEST_ASSERT_EQUAL_size_t(12, r.end);
+}
+
+void testBfpGroupAtBackwardJumpRecomputes(void) {
+    bfpGroupRange_t r = {.group = 2, .start = 8, .end = 12};
+    TEST_ASSERT_EQUAL_size_t(0, bfpGroupAt(&r, &groupAtQc, 1));
+    TEST_ASSERT_EQUAL_size_t(0, r.start);
+    TEST_ASSERT_EQUAL_size_t(4, r.end);
+    /* start is inclusive: stepping back exactly onto start stays cached */
+    r.group = 7;
+    TEST_ASSERT_EQUAL_size_t(7, bfpGroupAt(&r, &groupAtQc, 0));
+}
+
+/* A zero-initialised range is EMPTY ([0, 0)), so the very first lookup --
+ * index 0 included -- recomputes instead of trusting the zeroed group id. */
+void testBfpGroupAtZeroInitIsEmptyRange(void) {
+    bfpGroupRange_t r = {0};
+    r.group = 7;
+    TEST_ASSERT_EQUAL_size_t(0, bfpGroupAt(&r, &groupAtQc, 0));
+    TEST_ASSERT_EQUAL_size_t(0, r.start);
+    TEST_ASSERT_EQUAL_size_t(4, r.end);
+}
+
+/* The last group's range ends exactly at the element count (a partial last
+ * group cannot exist: validateBfpQConfigShape enforces numGroups * groupSize
+ * == N), so the final storage index resolves to numGroups - 1. */
+void testBfpGroupAtLastGroupEndsAtElementCount(void) {
+    bfpGroupRange_t r = {0};
+    TEST_ASSERT_EQUAL_size_t(2, bfpGroupAt(&r, &groupAtQc, 11));
+    TEST_ASSERT_EQUAL_size_t(8, r.start);
+    TEST_ASSERT_EQUAL_size_t(12, r.end);
+}
+
+/* Per-tensor {numGroups=1, groupSize=0}: everything is group 0 and the first
+ * lookup installs a range covering every index, so no later lookup ever
+ * recomputes -- a poisoned group id after the first call proves it. */
+void testBfpGroupAtPerTensorNeverRecomputes(void) {
+    bfpQConfig_t perTensor = groupAtQc;
+    perTensor.numGroups = 1;
+    perTensor.groupSize = 0;
+    bfpGroupRange_t r = {0};
+    TEST_ASSERT_EQUAL_size_t(0, bfpGroupAt(&r, &perTensor, 5));
+    TEST_ASSERT_EQUAL_size_t(0, r.start);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.end);
+    r.group = 9;
+    TEST_ASSERT_EQUAL_size_t(9, bfpGroupAt(&r, &perTensor, 1000000));
+    TEST_ASSERT_EQUAL_size_t(9, bfpGroupAt(&r, &perTensor, 0));
+}
+
+/* Bit-identity with bfpGroupOf over a strided walk that jumps forward and
+ * backward across groups (the backward GEMM's transposed-view access pattern),
+ * grouped and per-tensor. */
+void testBfpGroupAtMatchesBfpGroupOfOnStridedWalk(void) {
+    bfpQConfig_t grouped = groupAtQc;
+    grouped.numGroups = 6;
+    grouped.groupSize = 4;
+    bfpQConfig_t perTensor = groupAtQc;
+    perTensor.numGroups = 1;
+    perTensor.groupSize = 0;
+    bfpGroupRange_t rg = {0};
+    bfpGroupRange_t rp = {0};
+    for (size_t i = 0; i < 96; i++) {
+        size_t idx = (i * 7) % 24;
+        TEST_ASSERT_EQUAL_size_t(bfpGroupOf(&grouped, idx), bfpGroupAt(&rg, &grouped, idx));
+        TEST_ASSERT_EQUAL_size_t(bfpGroupOf(&perTensor, idx), bfpGroupAt(&rp, &perTensor, idx));
+    }
+}
+
 /* Group-shape fail-fast: bfpGroupOf divides by groupSize
  * with no relation to numGroups, so a mismatched config ({numGroups=2,
  * groupSize=4} on 12 elements: 2*4 == 8 != 12) would silently read
@@ -2203,6 +2297,13 @@ int main(void) {
     RUN_TEST(testMatmulBfpHeadroomGuardDies);
     RUN_TEST(testBfpSegmentLimitTableValues);
     RUN_TEST(testBfpSumSegmentLimitTableValues);
+    RUN_TEST(testBfpGroupAtInRangeTrustsCache);
+    RUN_TEST(testBfpGroupAtForwardJumpRecomputes);
+    RUN_TEST(testBfpGroupAtBackwardJumpRecomputes);
+    RUN_TEST(testBfpGroupAtZeroInitIsEmptyRange);
+    RUN_TEST(testBfpGroupAtLastGroupEndsAtElementCount);
+    RUN_TEST(testBfpGroupAtPerTensorNeverRecomputes);
+    RUN_TEST(testBfpGroupAtMatchesBfpGroupOfOnStridedWalk);
     RUN_TEST(testMatmulBfpRejectsMismatchedGroupShape);
     RUN_TEST(testMatmulBfpDxStridedWeightWalkMatchesGold);
     RUN_TEST(testMatmulBfpWeightGradTransposedLossViewMatchesGold);

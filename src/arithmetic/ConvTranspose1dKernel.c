@@ -622,6 +622,8 @@ void convTranspose1dKernelBfpGather(tensor_t const *input, tensor_t const *weigh
 
     int32_t inExpBias = bfpExponentBias(inQC);
     int32_t wExpBias = bfpExponentBias(wQC);
+    bfpGroupRange_t inRange = {0};
+    bfpGroupRange_t wRange = {0};
 
     /* Per-output-channel bias seed, dequantized to float BEFORE the reduction
      * (value-seed, headroom-exempt -- it never touches the int32 partial).
@@ -667,15 +669,17 @@ void convTranspose1dKernelBfpGather(tensor_t const *input, tensor_t const *weigh
                      * order the gold emulation mirrors). Per-element group
                      * lookup on BOTH operands: tap hops make both index
                      * sequences non-contiguous, so no run length could be
-                     * precomputed (the SYM grouped kernels' gap rationale). */
+                     * precomputed (the SYM grouped kernels' gap rationale);
+                     * bfpGroupAt divides only when an index leaves the current
+                     * group's range. */
                     for (size_t t = 0; t < tapCount; t++) {
                         for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
                             size_t ic = inLo + icOffset;
                             size_t inIdx = (b * inChannels + ic) * inputLength + taps[t].inPos;
                             size_t wIdx =
                                 (ic * outChPerGroup + ocOffset) * kernelSize + taps[t].kernelIdx;
-                            size_t inGroup = bfpGroupOf(inQC, inIdx);
-                            size_t wGroup = bfpGroupOf(wQC, wIdx);
+                            size_t inGroup = bfpGroupAt(&inRange, inQC, inIdx);
+                            size_t wGroup = bfpGroupAt(&wRange, wQC, wIdx);
 
                             if (currentWGroup == SIZE_MAX) {
                                 currentInGroup = inGroup;

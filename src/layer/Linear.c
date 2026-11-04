@@ -363,6 +363,7 @@ void linearCalcBiasGradsBfp(tensor_t *loss, tensor_t *biasGrad) {
     validateBfpQConfigShape(qC, numLoss);
     bfpValidateSumHeadroom(qC, batch, "linearCalcBiasGradsBfp");
     int32_t expBias = bfpExponentBias(qC);
+    bfpGroupRange_t qRange = {0};
     const int32_t *codes = (const int32_t *)loss->data;
     float *out = (float *)biasGrad->data;
     for (size_t f = 0; f < numFeatures; f++) {
@@ -371,7 +372,7 @@ void linearCalcBiasGradsBfp(tensor_t *loss, tensor_t *biasGrad) {
         size_t currentGroup = 0;
         for (size_t n = 0; n < batch; n++) {
             size_t idx = n * numFeatures + f;
-            size_t g = bfpGroupOf(qC, idx);
+            size_t g = bfpGroupAt(&qRange, qC, idx);
             if (n == 0) {
                 currentGroup = g;
             } else if (g != currentGroup) {

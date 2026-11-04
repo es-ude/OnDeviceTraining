@@ -237,6 +237,7 @@ static void maxPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut
     const bfpQConfig_t *qC = input->quantization->qConfig;
     validateBfpQConfigShape(qC, calcNumberOfElementsByTensor(input));
     const int32_t expBias = bfpExponentBias(qC);
+    bfpGroupRange_t qRange = {0};
 
     int32_t const *xArr = (int32_t const *)input->data;
     float *yArr = (float *)rawOut->data;
@@ -252,7 +253,7 @@ static void maxPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut
                 for (size_t i = 0; i < slice.validCount; i++) {
                     size_t inputIdx = slice.firstValidInputIdx + i * geom.dilation;
                     size_t storageIdx = (b * channels + c) * inputLength + inputIdx;
-                    size_t g = bfpGroupOf(qC, storageIdx);
+                    size_t g = bfpGroupAt(&qRange, qC, storageIdx);
                     float v = ldexpf((float)xArr[storageIdx], (int)qC->exponents[g] - expBias);
                     if (v > bestVal) {
                         bestVal = v;
@@ -613,6 +614,7 @@ static void maxPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOu
     const bfpQConfig_t *qC = lossGrad->quantization->qConfig;
     validateBfpQConfigShape(qC, calcNumberOfElementsByTensor(lossGrad));
     const int32_t expBias = bfpExponentBias(qC);
+    bfpGroupRange_t qRange = {0};
 
     int32_t const *gyArr = (int32_t const *)lossGrad->data;
     int32_t const *argmaxArr = (int32_t const *)cfg->argmaxIndices->data;
@@ -629,7 +631,7 @@ static void maxPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOu
                                             "MaxPool1d backward BFP")) {
                     continue;
                 }
-                size_t g = bfpGroupOf(qC, outIdx);
+                size_t g = bfpGroupAt(&qRange, qC, outIdx);
                 gxArr[(b * channels + c) * inputLength + (size_t)inputIdx] +=
                     ldexpf((float)gyArr[outIdx], (int)qC->exponents[g] - expBias);
             }

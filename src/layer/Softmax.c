@@ -129,6 +129,7 @@ static void softmaxValuesBfp(const tensor_t *input, bfpShiftRounding_t mode, flo
     /* n == 0 handled by caller. */
     const bfpQConfig_t *qC = input->quantization->qConfig;
     const int32_t bias = bfpExponentBias(qC);
+    bfpGroupRange_t qRange = {0};
     const int32_t *m = (const int32_t *)input->data;
     /* calcNumberOfElementsByTensor takes a non-const tensor_t* but only
      * reads; the cast keeps this helper's const-view contract for Task 5's
@@ -138,10 +139,10 @@ static void softmaxValuesBfp(const tensor_t *input, bfpShiftRounding_t mode, flo
     /* (1) Max (P6-4): ldexpf compare, strict > keeps the FIRST max; remember
      * the winner's mantissa and UNBIASED exponent. */
     int32_t mMax = m[0];
-    int32_t eMax = (int32_t)qC->exponents[bfpGroupOf(qC, 0)] - bias;
+    int32_t eMax = (int32_t)qC->exponents[bfpGroupAt(&qRange, qC, 0)] - bias;
     float xMax = ldexpf((float)m[0], (int)eMax);
     for (size_t i = 1; i < n; i++) {
-        const int32_t ei = (int32_t)qC->exponents[bfpGroupOf(qC, i)] - bias;
+        const int32_t ei = (int32_t)qC->exponents[bfpGroupAt(&qRange, qC, i)] - bias;
         const float xi = ldexpf((float)m[i], (int)ei);
         if (xi > xMax) {
             xMax = xi;
@@ -163,7 +164,7 @@ static void softmaxValuesBfp(const tensor_t *input, bfpShiftRounding_t mode, flo
     const int32_t mMaxW = bfpShiftRightRounded(mMax, down, mode, shift);
     float sum = 0.f;
     for (size_t i = 0; i < n; i++) {
-        const int32_t ei = (int32_t)qC->exponents[bfpGroupOf(qC, i)] - bias;
+        const int32_t ei = (int32_t)qC->exponents[bfpGroupAt(&qRange, qC, i)] - bias;
         const int32_t si = (eMax - ei) + (int32_t)down;
         int32_t aligned;
         if (si >= 0) {
@@ -487,15 +488,18 @@ static void softmaxBackwardKernelBfp(tensor_t **ops, size_t nOps, tensor_t *rawO
     softmaxValuesBfp(x, cfg->bfpExpShiftRounding, s, kctx->shift); /* P6-6: R-N4 recompute */
 
     const int32_t lBias = bfpExponentBias(lQC);
+    bfpGroupRange_t lRange = {0};
     int32_t const *lArr = (int32_t const *)dLdsT->data;
     float *out = (float *)rawOut->data;
     float dot = 0.0f;
     for (size_t i = 0; i < n; i++) {
-        float dLds = ldexpf((float)lArr[i], (int)lQC->exponents[bfpGroupOf(lQC, i)] - lBias);
+        float dLds =
+            ldexpf((float)lArr[i], (int)lQC->exponents[bfpGroupAt(&lRange, lQC, i)] - lBias);
         dot += s[i] * dLds;
     }
     for (size_t i = 0; i < n; i++) {
-        float dLds = ldexpf((float)lArr[i], (int)lQC->exponents[bfpGroupOf(lQC, i)] - lBias);
+        float dLds =
+            ldexpf((float)lArr[i], (int)lQC->exponents[bfpGroupAt(&lRange, lQC, i)] - lBias);
         out[i] = s[i] * (dLds - dot);
     }
 }

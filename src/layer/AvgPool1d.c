@@ -146,23 +146,25 @@ static void avgPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *r
         (float)cfg->kernel->size; // count_include_pad=true: divisor = K always
 }
 
-/* BFP epic PR4 (R-P4), ARITH_BFP arm: operands arrive as the funnel's
- * unpacked-BFP scratch — int32 mantissa codes under a live bfpQConfig_t, with
- * exponents BORROWED zero-copy for a BFP-stored input and funnel-staged for a
- * FLOAT32 one. The window sum rides the PR2 fold contract: one int32 partial
- * per same-group visited segment, a lossless ldexpf fold on every group change
- * and at the tail (BFP D8 — the operand is NEVER re-blocked; segments just fold
- * more often). Group lookup is PER ELEMENT, not a run precompute: dilation and
- * stride skip storage indices. The SYM arm's exact s/K fold has NO BFP analog
- * (a BFP scale is 2^E; K is not a power of two in general), so the divide
- * happens in the FLOAT32 raw intermediate (BFP D7), which costs nothing extra.
- * count_include_pad=true still falls out free: padded positions are simply not
- * visited and the divisor stays K. Guarded by bfpValidateSumHeadroom — the
- * SUM limit (INT32_MAX >> (m-1)), not the product limit. */
-static void avgPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                      const void *ctx, rngStream_t *rs) {
+/* Integer-only forward (arithmetic-bfp.md section 13), ARITH_BFP arm:
+ * operands arrive as the funnel's unpacked-BFP scratch (exponents BORROWED
+ * for a BFP-stored input, funnel-staged for a FLOAT32 one). The walk is the
+ * FLOAT32 arm's; the window sum keeps one int32 partial per same-group
+ * visited segment (per-ELEMENT group lookup: dilation and stride skip
+ * storage indices) and folds it into ONE int32 accumulator per output in
+ * units of 2^E_acc, E_acc shared by a raw target group: the max input-row
+ * exponent over the rows its outputs read, plus the sum guard
+ * (bfpSumFoldGuardBits, K terms). Alignment is bfpAlignPartial (left exact,
+ * right HALF_AWAY, never SR -- the re-block owns the op's rounding). The
+ * mean: a power-of-two K folds -log2 K into the raw exponent (exact; HAR's
+ * K = 32), any other K is ONE roundedDivHalfAwayInt32 per output.
+ * count_include_pad=true falls out free: padded positions are not visited
+ * and the divisor stays K. bfpValidateSumHeadroom bounds each partial. */
+void avgPool1dForwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
+                                  const void *ctx, struct rngStream *rs) {
     (void)n;
     (void)auxOut;
+    (void)rs;
     const avgPool1dConfig_t *cfg = ctx;
     tensor_t *input = ops[0];
 
@@ -170,6 +172,12 @@ static void avgPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut
         PRINT_ERROR("AvgPool1d forward BFP: input must be rank-3 [batch, channels, length], got "
                     "rank %zu",
                     input->shape->numberOfDimensions);
+        exit(1);
+    }
+    if (input->quantization->type != BFP || rawOut->quantization->type != BFP_RAW) {
+        PRINT_ERROR("AvgPool1d forward BFP: needs a BFP (unpacked scratch) input and a BFP_RAW "
+                    "output (opSpec_t.bfpRawOut), got dtypes %d -> %d",
+                    (int)input->quantization->type, (int)rawOut->quantization->type);
         exit(1);
     }
     size_t batch = input->shape->dimensions[0];
@@ -189,18 +197,73 @@ static void avgPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut
     validateBfpQConfigShape(qC, calcNumberOfElementsByTensor(input));
     bfpValidateSumHeadroom(qC, cfg->kernel->size, "AvgPool1d forward BFP");
     const int32_t expBias = bfpExponentBias(qC);
-    bfpGroupRange_t qRange = {0};
+
+    size_t outElems = batch * channels * outputLength;
+    bfpRawQConfig_t *rawQC = rawOut->quantization->qConfig;
+    size_t gsz = bfpRawRequireOutput(rawQC, outElems, "AvgPool1d forward BFP");
+    int16_t *rawE = rawQC->exponents;
+    if (outElems == 0) {
+        return;
+    }
+
+    const size_t kSize = cfg->kernel->size;
+    int guard = bfpSumFoldGuardBits(kSize, qC->mantissaBits, "AvgPool1d forward BFP");
+    int log2K = 0;
+    bool kIsPow2 = (kSize & (kSize - 1)) == 0;
+    if (kIsPow2) {
+        while (((size_t)1 << log2K) < kSize) {
+            log2K++;
+        }
+    }
+
+    /* Pre-pass (O(groups), cursors, no division): per raw group the max
+     * exponent over the input rows its outputs read (row r of the output
+     * reads input row r), plus g; the raw exponent also carries -log2 K. */
+    {
+        bfpRowCursor_t cursor = {.group = 0, .groupEnd = qC->groupSize};
+        size_t row = 0;
+        size_t rowEnd = outputLength;
+        int rowTop = bfpRowMaxExponent(&cursor, qC, expBias, 0, inputLength);
+        for (size_t t = 0; t < rawQC->numGroups; t++) {
+            size_t tStart = t * gsz;
+            size_t tEnd = tStart + gsz;
+            while (tStart >= rowEnd) {
+                row++;
+                rowEnd += outputLength;
+                rowTop = bfpRowMaxExponent(&cursor, qC, expBias, row * inputLength, inputLength);
+            }
+            int eTop = rowTop;
+            while (tEnd > rowEnd) {
+                row++;
+                rowEnd += outputLength;
+                rowTop = bfpRowMaxExponent(&cursor, qC, expBias, row * inputLength, inputLength);
+                if (rowTop > eTop) {
+                    eTop = rowTop;
+                }
+            }
+            rawE[t] = (int16_t)(eTop + guard - log2K);
+        }
+    }
 
     int32_t const *xArr = (int32_t const *)input->data;
-    float *yArr = (float *)rawOut->data;
-    const float divisor = (float)cfg->kernel->size;
+    int32_t *mant = (int32_t *)rawOut->data;
+    bfpGroupRange_t qRange = {0};
+    size_t targetGroup = 0;
+    size_t targetEnd = gsz;
+    int eAcc = rawE[0] + log2K;
 
     for (size_t b = 0; b < batch; b++) {
         for (size_t c = 0; c < channels; c++) {
             for (size_t outPos = 0; outPos < outputLength; outPos++) {
                 windowSlice1d_t slice = windowSlice1dAt(&geom, outPos);
+                size_t outIdx = (b * channels + c) * outputLength + outPos;
+                if (outIdx >= targetEnd) {
+                    targetGroup++;
+                    targetEnd += gsz;
+                    eAcc = rawE[targetGroup] + log2K;
+                }
 
-                float acc = 0.f;
+                int32_t acc = 0;
                 int32_t partial = 0;
                 size_t currentGroup = 0;
                 for (size_t i = 0; i < slice.validCount; i++) {
@@ -210,17 +273,19 @@ static void avgPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut
                     if (i == 0) {
                         currentGroup = g;
                     } else if (g != currentGroup) {
-                        acc += ldexpf((float)partial, (int)qC->exponents[currentGroup] - expBias);
+                        acc += bfpAlignPartial(partial,
+                                               eAcc - ((int)qC->exponents[currentGroup] - expBias));
                         partial = 0;
                         currentGroup = g;
                     }
                     partial += xArr[storageIdx];
                 }
                 if (slice.validCount > 0) {
-                    acc += ldexpf((float)partial, (int)qC->exponents[currentGroup] - expBias);
+                    acc += bfpAlignPartial(partial,
+                                           eAcc - ((int)qC->exponents[currentGroup] - expBias));
                 }
 
-                yArr[(b * channels + c) * outputLength + outPos] = acc / divisor;
+                mant[outIdx] = kIsPow2 ? acc : roundedDivHalfAwayInt32(acc, (int32_t)kSize);
             }
         }
     }
@@ -250,7 +315,7 @@ void avgPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const l
                               .exponentBits = anchor->exponentBits};
         executeOp(
             &(opSpec_t){
-                .kernel = avgPool1dForwardKernelBfp,
+                .kernel = avgPool1dForwardKernelBfpRaw,
                 .ctx = cfg,
                 .inputs = (tensor_t *[]){input},
                 .nInputs = 1,
@@ -258,6 +323,7 @@ void avgPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const l
                 .key = layerExecOpKey(exec, RNG_TAG_FORWARD, AVGPOOL1D_OP_FORWARD, &opKey),
                 .mode = OUT_WRITE,
                 .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL, NULL, NULL},
+                .bfpRawOut = true, /* the integer forward raw; the backward keeps FLOAT32 */
             },
             output);
         return;

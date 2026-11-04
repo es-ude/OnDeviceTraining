@@ -289,3 +289,14 @@ void initBfpRawQuantization(bfpRawQConfig_t *bfpRawQConfig, quantization_t *quan
     quantization->type = BFP_RAW;
     quantization->qConfig = bfpRawQConfig;
 }
+
+void validateBfpRawQConfigShape(const bfpRawQConfig_t *qC, size_t n, const char *what) {
+    bool perTensor = qC->numGroups == 1 && qC->groupSize == 0;
+    bool grouped = qC->numGroups > 1 && qC->groupSize > 0 && qC->numGroups * qC->groupSize == n;
+    if (!perTensor && !grouped) {
+        PRINT_ERROR("%s: invalid BFP_RAW group shape numGroups=%zu groupSize=%zu for %zu elements "
+                    "(valid: {1,0} or {>1,>0} with numGroups*groupSize == n)",
+                    what, qC->numGroups, qC->groupSize, n);
+        exit(1);
+    }
+}

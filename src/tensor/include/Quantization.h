@@ -300,5 +300,11 @@ void initSymQuantization(symQConfig_t *symQConfig, quantization_t *quantization)
 void initAsymQuantization(asymQConfig_t *asymQConfig, quantization_t *quantization);
 void initBfpQuantization(bfpQConfig_t *bfpQConfig, quantization_t *quantization);
 void initBfpRawQuantization(bfpRawQConfig_t *bfpRawQConfig, quantization_t *quantization);
+/*! The BFP_RAW geometry check every raw producer and consumer runs before
+ * indexing exponents[]: fail-fast (banner prefixed by `what`) unless
+ * {numGroups=1, groupSize=0} or {numGroups>1, groupSize>0,
+ * numGroups*groupSize == numberOfElements}. */
+void validateBfpRawQConfigShape(const bfpRawQConfig_t *qC, size_t numberOfElements,
+                                const char *what);
 
 #endif // ENV5_RUNTIME_QUANTIZATION_H

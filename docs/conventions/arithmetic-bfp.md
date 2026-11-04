@@ -706,17 +706,17 @@ per-tensor `{1,0}`; only the anchor's `mantissaBits`/`exponentBits` are read.
 A BFP-STORED operand is borrowed zero-copy as everywhere (D8) and never
 re-blocked.
 
-**Pool numerics (R-P4).** MaxPool compares DEQUANTIZED values
-(`ldexpf(mantissa, E − bias)`, exact) — raw mantissas are not comparable
-across groups; argmax/auxOut semantics and the −1 empty-window sentinel are
-unchanged. AvgPool sums int32 partials within same-group segments, folds on
-every group crossing plus the tail, and divides by K in the FLOAT32 raw: the
-SYM `s/K` scale fold has NO BFP analog, because a BFP scale is `2^E` and K is
-not a power of two in general. AdaptiveAvgPool does the same with each
-window's own count (the SYM arm's rounded integer division has no role — the
-BFP raw is float). Forward window sums carry `bfpValidateSumHeadroom`; the
-backwards do NOT, because contributions accumulate directly in the FLOAT32 raw
-with no int32 partials.
+**Pool numerics (R-P4).** Raw mantissas are not comparable across groups,
+so MaxPool compares exact `(code, E)` values; argmax/auxOut semantics and the
+−1 empty-window sentinel are unchanged. AvgPool sums int32 partials within
+same-group segments and folds on every group crossing plus the tail. Both
+FORWARDS are integer-only (`BFP_RAW`, §13 "The pool forwards"): the fold is
+an integer shift and the `/K` is an exponent shift for a power-of-two K, else
+one integer division per output. AdaptiveAvgPool still folds in float and
+divides by each window's own count in the FLOAT32 raw (the SYM `s/K` scale
+fold has no BFP analog: a BFP scale is `2^E`). Forward window sums carry
+`bfpValidateSumHeadroom`; the backwards do NOT, because contributions
+accumulate directly in the FLOAT32 raw with no int32 partials.
 
 **Packed-domain transparency (R-P2, R-P5).** Relu and Flatten carry the
 per-group exponents VERBATIM and stay outside the funnel: routing them through
@@ -1901,9 +1901,62 @@ integer-only forward (allow-listed in the census).
 division helpers for the re-block; its one `mem` hit is `byteConversion`'s
 `memset` on the non-8/16 width branch.
 
+**The pool forwards** (`maxPool1dForwardKernelBfpRaw`, `MaxPool1d.c`;
+`avgPool1dForwardKernelBfpRaw`, `AvgPool1d.c`). Both keep the FLOAT32 arm's
+walk (windows, order, `windowSlice1dAt`, the per-element `bfpGroupAt`) and
+emit `BFP_RAW` on the target's geometry.
+
+1. MaxPool compare (`bfpValueGreater`, `BfpKernelSupport.h`): exact, no
+   float. Same exponent: code compare. Gap `d = Ea − Eb` in `[1, 15]`: the
+   code under the larger exponent is shifted left by `d` in uint32
+   (`|code| · 2^15 <= 2^30`, needs `m <= 16`, checked). `d >= 16`: the
+   shifted side's magnitude is `>= 2^16 > |other|` unless it is zero, so its
+   sign decides, and a zero there beats only a negative other. First strict
+   greater wins, ties across groups included, so the argmax is the FLOAT32
+   arm's on the dequantized input, bit for bit (the old `ldexpf` compare was
+   exact too).
+2. MaxPool winners: `E_acc` of a raw target group = (max exponent over the
+   group's NONZERO winners) `− 15`, unbiased; a group without one gets 0
+   (all its mantissas are 0). A zero winner never sets `E_acc`: it aligns
+   losslessly at any exponent and would only push the others down. Each
+   winner enters as `bfpAlignPartial(code, E_acc − E_w)`: a left shift by at
+   most 15 (exact, `<= 2^30`), or — for a winner more than 15 binades below
+   its group's top — a HALF_AWAY right shift. That is the one lossy step:
+   MaxPool is no longer a pure select when a raw group spans more than 15
+   binades of winners. The re-block then rounds by the op's mode (SR
+   included). The target group's absmax is at least `2^E_top`, so its last
+   code bit is at least `2^(E_top − m_out + 1)` and the alignment rounding
+   (at `2^(E_top − 15)`) sits `>= 16 − m_out` binades below it: 8 at
+   `m_out = 8`, but 0 at `m_out = 16`, where the two roundings can stack
+   (bounded by one unit of `2^E_acc`). With a FLOAT32 target the raw
+   is per tensor (`{1,0}`), so the 15-binade window spans the whole output.
+   Pass 1 (the select) collects the per-group max in the raw exponent array;
+   pass 2 re-reads each winner's exponent through its argmax — O(outputs),
+   no output-sized table.
+3. AvgPool fold: the Conv1d fold with codes in place of products. `E_acc` of
+   a raw target group = the max group exponent over the input ROWS its
+   outputs read (row `r` of the output reads input row `r`; cursors, no
+   division) `+ g`, `g = bfpSumFoldGuardBits(K, m)` — item 3's proof with
+   the second factor bounded by 1: the smallest `g` with
+   `K · 2^(m−1) · 2^−g + (K + 1) <= INT32_MAX` (HAR m = 8, K = 32: `g = −18`).
+   One int32 partial per same-group segment (`bfpValidateSumHeadroom` bounds
+   each), aligned by `bfpAlignPartial` (left exact, right HALF_AWAY, never SR).
+4. AvgPool mean: a power-of-two K moves `−log2 K` into the raw exponent
+   (exact, no division; HAR's K = 32). Any other K is ONE
+   `roundedDivHalfAwayInt32(acc, K)` per output (`BfpKernelSupport.h`; uint32
+   magnitude and the tie test `rem >= K − rem`, so it is exact over the whole
+   int32 range — the AdaptiveAvgPool SYM arm shares it). Error per output
+   `<= (S/(2K) + 1/2) · 2^E_acc`, `S` = segments folded (the `1/2` only for a
+   non-power-of-two K). `count_include_pad` stays true: the divisor is K.
+   The census counts that division per output (allow-listed); the remaining
+   division sites of both roots are `bfpGroupAt`'s per-group-change
+   recomputes.
+
 **Status.** The Conv1d forward emits `BFP_RAW` (`conv1dKernelBfpRaw`, the
 fold above); `conv1dKernelBfp` (FLOAT32 raw) remains for the ConvT1d dx
-adjoint. Every other op keeps the FLOAT32 raw; the pools, Linear and Softmax
-forwards land next and set the flag in their forward arms. Numbers of native
+adjoint. The MaxPool and AvgPool forwards emit `BFP_RAW` too (their
+backwards keep the FLOAT32 raw; MaxPool's argmax meaning is unchanged).
+Every other op keeps the FLOAT32 raw; the Linear and Softmax forwards land
+next and set the flag in their forward arms. Numbers of native
 BFP configs changed with the Conv1d fold by design; fake-quant and FLOAT32
 paths are untouched.

@@ -13,3 +13,7 @@ convertBfpRawTensorToFloat32Tensor
 # conv kernels and stay as they are.
 windowGeometry1dCalc
 windowSlice1dAt
+# AvgPool mean for a NON-power-of-two K: one roundedDivHalfAwayInt32 per
+# OUTPUT element, never per MAC (a power-of-two K -- HAR's 32 -- folds into
+# the raw exponent and skips it). Both sign branches call the helper.
+avgPool1dForwardKernelBfpRaw __aeabi_uidivmod

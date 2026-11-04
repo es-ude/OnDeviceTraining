@@ -294,6 +294,7 @@ add_elastic_ai_unit_test(
         QuantizationApi
         StorageApi
         odt_test_death
+        odt_test_bfp_raw_fixture
 )
 add_dependencies(UnitTestConv1dKernel generate_expected_conv1d_kernel
         generate_expected_bfp_conv1d)

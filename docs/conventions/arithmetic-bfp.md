@@ -293,6 +293,8 @@ Every `ARITH_BFP` kernel (`matmulBfpTensors`, `conv1dKernelBfp`,
   `acc += ldexpf((float)partial, Ea + Eb − biasA − biasB)`. The power-of-two
   multiply is exact (D7) — the only rounding this step introduces is
   ordinary float32 addition across blocks, plus the two exceptions in §§7–8.
+  Kernels write the fold as `bfpLdexpInt32(partial, e)` (BfpKernelSupport.h):
+  bit-identical to that ldexpf, a plain multiply by an exact 2^e on the hot path.
   Amended for the forward by §13: an op that opts into the integer raw
   (`opSpec_t.bfpRawOut`) emits `BFP_RAW` and the epilogue re-blocks in
   integers; without the opt-in (every backward op) this bullet stands.

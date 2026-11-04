@@ -681,9 +681,9 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
                                  * raw int32 partial enters the float
                                  * accumulator via a pure exponent shift --
                                  * rounding-free by contract. */
-                                acc += ldexpf((float)partial,
-                                              (int)xQC->exponents[currentXGroup] - xExpBias +
-                                                  (int)gyQC->exponents[currentGyGroup] - gyExpBias);
+                                acc += bfpLdexpInt32(
+                                    partial, (int)xQC->exponents[currentXGroup] - xExpBias +
+                                                 (int)gyQC->exponents[currentGyGroup] - gyExpBias);
                                 partial = 0;
                                 currentXGroup = xGroup;
                                 currentGyGroup = gyGroup;
@@ -696,9 +696,9 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
                      * whose windows are all clipped away (extreme padding)
                      * never seeds a segment and its grad is 0. */
                     if (currentGyGroup != SIZE_MAX) {
-                        acc += ldexpf((float)partial,
-                                      (int)xQC->exponents[currentXGroup] - xExpBias +
-                                          (int)gyQC->exponents[currentGyGroup] - gyExpBias);
+                        acc += bfpLdexpInt32(partial,
+                                             (int)xQC->exponents[currentXGroup] - xExpBias +
+                                                 (int)gyQC->exponents[currentGyGroup] - gyExpBias);
                     }
 
                     gwArr[(oc * inChPerGroup + icOffset) * kernelSize + k] = acc;
@@ -838,7 +838,7 @@ void conv1dCalcBiasGradsSymInt32(conv1dConfig_t *cfg, tensor_t *lossGrad, const 
 }
 
 /* BFP epic PR3 (Task 3): per-oc batch*outputLength sum of BFP loss mantissas
- * -- int32 partial per same-group visited segment, lossless ldexpf fold on
+ * -- int32 partial per same-group visited segment, lossless power-of-two fold on
  * group change + tail (linearCalcBiasGradsBfp's core on the conv walk,
  * indices (b*outChannels + oc)*outputLength + outPos, b outer / outPos
  * inner). Sum headroom via bfpValidateSumHeadroom (the product bound does
@@ -882,7 +882,7 @@ static void biasGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
                 if (b == 0 && outPos == 0) {
                     currentGroup = g;
                 } else if (g != currentGroup) {
-                    acc += ldexpf((float)partial, (int)gyQC->exponents[currentGroup] - expBias);
+                    acc += bfpLdexpInt32(partial, (int)gyQC->exponents[currentGroup] - expBias);
                     partial = 0;
                     currentGroup = g;
                 }
@@ -890,7 +890,7 @@ static void biasGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
             }
         }
         if (batch > 0 && outputLength > 0) {
-            acc += ldexpf((float)partial, (int)gyQC->exponents[currentGroup] - expBias);
+            acc += bfpLdexpInt32(partial, (int)gyQC->exponents[currentGroup] - expBias);
         }
         out[oc] = acc;
     }

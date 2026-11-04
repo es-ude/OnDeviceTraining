@@ -699,7 +699,7 @@ static void maxPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOu
                 }
                 size_t g = bfpGroupAt(&qRange, qC, outIdx);
                 gxArr[(b * channels + c) * inputLength + (size_t)inputIdx] +=
-                    ldexpf((float)gyArr[outIdx], (int)qC->exponents[g] - expBias);
+                    bfpLdexpInt32(gyArr[outIdx], (int)qC->exponents[g] - expBias);
             }
         }
     }

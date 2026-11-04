@@ -348,7 +348,7 @@ void linearCalcPropLossBfp(tensor_t *loss, tensor_t *weights, tensor_t *propLoss
 
 /* Per-feature batch sum of BFP loss mantissas: int32 partial per same-group
  * visited segment (the walk strides by numFeatures, so groups may change every
- * step), lossless ldexpf fold on group change + tail. Sum headroom via
+ * step), lossless power-of-two fold on group change + tail. Sum headroom via
  * bfpValidateSumHeadroom (the product bound does not apply to sums). */
 void linearCalcBiasGradsBfp(tensor_t *loss, tensor_t *biasGrad) {
     if (loss->quantization->type != BFP) {
@@ -380,14 +380,14 @@ void linearCalcBiasGradsBfp(tensor_t *loss, tensor_t *biasGrad) {
             if (n == 0) {
                 currentGroup = g;
             } else if (g != currentGroup) {
-                acc += ldexpf((float)partial, (int)qC->exponents[currentGroup] - expBias);
+                acc += bfpLdexpInt32(partial, (int)qC->exponents[currentGroup] - expBias);
                 partial = 0;
                 currentGroup = g;
             }
             partial += codes[idx];
         }
         if (batch > 0) {
-            acc += ldexpf((float)partial, (int)qC->exponents[currentGroup] - expBias);
+            acc += bfpLdexpInt32(partial, (int)qC->exponents[currentGroup] - expBias);
         }
         out[f] = acc;
     }

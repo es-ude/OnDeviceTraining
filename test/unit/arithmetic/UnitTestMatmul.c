@@ -1,5 +1,7 @@
+#include <limits.h>
 #include <math.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "Arithmetic.h"
@@ -1576,6 +1578,80 @@ void testBfpTapsBelowMatchesTapByTapCount(void) {
     }
 }
 
+/* bfpLdexpInt32 replaces ldexpf((float)m, e) in the BFP float-accumulator
+ * folds, so it must equal it BIT FOR BIT for every int32 m and every int e --
+ * the multiply fast path, the subnormal / underflow / overflow fallback and
+ * the boundaries between them. */
+static uint32_t floatBits(float f) {
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    return u;
+}
+
+static void assertLdexpInt32MatchesLdexpf(int32_t m, int e) {
+    uint32_t want = floatBits(ldexpf((float)m, e));
+    uint32_t got = floatBits(bfpLdexpInt32(m, e));
+    if (want != got) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "m=%ld e=%d", (long)m, e);
+        TEST_ASSERT_EQUAL_HEX32_MESSAGE(want, got, msg);
+    }
+}
+
+void testBfpLdexpInt32MatchesLdexpfBitForBit(void) {
+    int32_t corpus[200];
+    size_t n = 0;
+    corpus[n++] = 0;
+    corpus[n++] = INT32_MAX;
+    corpus[n++] = INT32_MIN;
+    corpus[n++] = INT32_MIN + 1;
+    for (int k = 0; k <= 30; k++) {
+        int32_t p = (int32_t)1 << k;
+        corpus[n++] = p;
+        corpus[n++] = -p;
+        corpus[n++] = p + 1; /* k >= 24: the int -> float cast rounds */
+        corpus[n++] = -(p + 1);
+        if (k > 0) {
+            corpus[n++] = p - 1;
+        }
+    }
+    uint32_t lcg = 12345u;
+    while (n < sizeof(corpus) / sizeof(corpus[0])) {
+        lcg = lcg * 1664525u + 1013904223u;
+        corpus[n++] = (int32_t)lcg;
+    }
+    /* Reachable fold exponents lie in [-254, 256] (two operands, 8 exponent
+     * bits); the sweep covers them with margin plus the int extremes. */
+    int const extremes[] = {INT_MIN, INT_MIN + 1, -100000, 100000, INT_MAX - 1, INT_MAX};
+    for (size_t i = 0; i < n; i++) {
+        for (int e = -400; e <= 600; e++) {
+            assertLdexpInt32MatchesLdexpf(corpus[i], e);
+        }
+        for (size_t j = 0; j < sizeof(extremes) / sizeof(extremes[0]); j++) {
+            assertLdexpInt32MatchesLdexpf(corpus[i], extremes[j]);
+        }
+    }
+}
+
+void testBfpLdexpInt32Boundaries(void) {
+    /* Smallest normal power vs the first subnormal one. */
+    TEST_ASSERT_EQUAL_HEX32(0x00800000u, floatBits(bfpLdexpInt32(1, -126)));
+    TEST_ASSERT_EQUAL_HEX32(0x00400000u, floatBits(bfpLdexpInt32(1, -127)));
+    /* Subnormal results round once, ties to even: 3 * 2^-150 = 1.5 ulp -> 2,
+     * 1 * 2^-150 = 0.5 ulp -> 0. */
+    TEST_ASSERT_EQUAL_HEX32(0x00000002u, floatBits(bfpLdexpInt32(3, -150)));
+    TEST_ASSERT_EQUAL_HEX32(0x00000000u, floatBits(bfpLdexpInt32(1, -150)));
+    TEST_ASSERT_EQUAL_HEX32(0x80000001u, floatBits(bfpLdexpInt32(-1, -149)));
+    /* Largest finite reach of an int32 partial vs overflow to infinity. */
+    TEST_ASSERT_EQUAL_HEX32(0xFF000000u, floatBits(bfpLdexpInt32(INT32_MIN, 96)));
+    TEST_ASSERT_EQUAL_HEX32(0xFF800000u, floatBits(bfpLdexpInt32(INT32_MIN, 97)));
+    TEST_ASSERT_EQUAL_HEX32(0x7F800000u, floatBits(bfpLdexpInt32(1, 128)));
+    /* Zero stays +0 at every exponent (never 0 * inf = NaN, never -0). */
+    TEST_ASSERT_EQUAL_HEX32(0x00000000u, floatBits(bfpLdexpInt32(0, 128)));
+    TEST_ASSERT_EQUAL_HEX32(0x00000000u, floatBits(bfpLdexpInt32(0, -127)));
+    TEST_ASSERT_EQUAL_HEX32(0x00000000u, floatBits(bfpLdexpInt32(0, INT_MAX)));
+}
+
 /* Integer fold helpers (arithmetic-bfp §13 "The integer fold"): a partial
  * enters the int32 accumulator as partial * 2^-k. k > 0 rounds HALF_AWAY in
  * the overflow-safe magnitude form, k == 0 is the identity, k < 0 is an
@@ -2994,6 +3070,8 @@ int main(void) {
     RUN_TEST(testBfpTapsBelowDilatedStride);
     RUN_TEST(testBfpTapsBelowPerTensorSentinelReturnsCap);
     RUN_TEST(testBfpTapsBelowMatchesTapByTapCount);
+    RUN_TEST(testBfpLdexpInt32MatchesLdexpfBitForBit);
+    RUN_TEST(testBfpLdexpInt32Boundaries);
     RUN_TEST(testBfpShrHalfAwayRoundsHalfAwayFromZero);
     RUN_TEST(testBfpShrHalfAwayInt32Extremes);
     RUN_TEST(testBfpAlignPartialLeftShiftIsExactAndRightShiftRounds);

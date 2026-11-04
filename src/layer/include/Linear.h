@@ -91,7 +91,7 @@ void linearCalcPropLossSymInt32Grouped(tensor_t *weights, tensor_t *loss, tensor
  * by the funnel adapters -- not direct public entry points.
  * weightGrad = loss^T @ x (zero-copy transpose view), propLoss = loss @ W
  * with W in RAW [outF, inF] storage, biasGrad = per-feature batch sum of the
- * loss mantissas (int32 partials, ldexpf folds; sum headroom fail-fast). */
+ * loss mantissas (int32 partials, exact power-of-two folds; sum headroom fail-fast). */
 void linearCalcWeightGradsBfp(tensor_t *loss, tensor_t *forwardInput, tensor_t *weightGrads);
 void linearCalcBiasGradsBfp(tensor_t *loss, tensor_t *biasGrad);
 void linearCalcPropLossBfp(tensor_t *loss, tensor_t *weights, tensor_t *propLoss);
